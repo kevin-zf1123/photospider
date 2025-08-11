@@ -36,7 +36,7 @@
 using namespace ps;
 using namespace ftxui;
 
-// --- MODIFIED: Moved CliConfig definition to the top ---
+
 struct CliConfig {
     std::string loaded_config_path;
     std::string cache_root_dir = "cache";
@@ -60,86 +60,125 @@ static void save_config_interactive(CliConfig& config);
 static std::string ask(const std::string& q, const std::string& def = "");
 // --- Interactive Config Editor ---
 class ConfigEditor : public TuiEditor {
+private:
+    // Helper struct to define each editable line in the UI
+    struct EditableLine {
+        std::string label;
+        std::string* value_ptr; // Points to the string being edited
+        bool is_radio = false;
+        std::vector<std::string>* radio_options = nullptr;
+        int* radio_selected_idx = nullptr;
+        std::function<void()> add_fn = nullptr;
+        std::function<void()> del_fn = nullptr;
+    };
+
 public:
     ConfigEditor(ScreenInteractive& screen, CliConfig& config)
-        : TuiEditor(screen), original_config_(config), temp_config_(config) {
-            // Initialize selection indices based on current config
-            auto find_idx = [](const auto& vec, const auto& val) {
-                auto it = std::find(vec.begin(), vec.end(), val);
-                return it == vec.end() ? 0 : std::distance(vec.begin(), it);
-            };
-            selected_print_mode_ = find_idx(print_mode_entries_, temp_config_.default_print_mode);
-            selected_ops_list_mode_ = find_idx(ops_list_mode_entries_, temp_config_.default_ops_list_mode);
-            selected_path_mode_ = find_idx(path_mode_entries_, temp_config_.ops_plugin_path_mode);
-        }
+        : TuiEditor(screen), original_config_(config), temp_config_(config) 
+    {
+        // Set up the single, shared input component for text editing
+        InputOption opt;
+        opt.on_enter = [this] { CommitEdit(); };
+        editor_input_ = Input(&edit_buffer_, "...", opt);
+        
+        // Initial sync from the config object to the editor's internal state
+        SyncModelToStrings();
+        RebuildLineView();
+    }
 
     void Run() override {
-        auto cache_dir_input = Input(&temp_config_.cache_root_dir, "e.g., .cache");
-        auto exit_save_path_input = Input(&temp_config_.default_exit_save_path, "e.g., session.yaml");
-        auto timer_log_path_input = Input(&temp_config_.default_timer_log_path, "e.g., out/timing.log");
-        
-        auto print_mode_radio = Radiobox(&print_mode_entries_, &selected_print_mode_);
-        auto ops_list_mode_radio = Radiobox(&ops_list_mode_entries_, &selected_ops_list_mode_);
-        auto path_mode_radio = Radiobox(&path_mode_entries_, &selected_path_mode_);
-
-        auto plugin_dir_container = Container::Vertical({});
-        for (auto& dir : temp_config_.plugin_dirs) {
-            plugin_dir_container->Add(Input(&dir, "path"));
-        }
-
-        auto add_button = Button(" [+] Add Path ", [&] { 
-            temp_config_.plugin_dirs.push_back(""); 
-            screen_.Post(Event::Custom); // A simple way to trigger a re-render
-        }, ButtonOption::Border());
-
-        auto del_button = Button(" [-] Delete Last ", [&] {
-            if (!temp_config_.plugin_dirs.empty()) {
-                temp_config_.plugin_dirs.pop_back();
-                screen_.Post(Event::Custom);
-            }
-        }, ButtonOption::Border());
-        
-        auto main_container = Container::Vertical({
-            cache_dir_input, exit_save_path_input, timer_log_path_input,
-            print_mode_radio, ops_list_mode_radio, path_mode_radio,
-            plugin_dir_container,
-            Container::Horizontal({add_button, del_button})
-        });
+        // The main container is now just a component that holds our renderer
+        auto main_container = Container::Vertical({});
 
         auto component = Renderer(main_container, [&] {
+            Elements line_elements;
+            for(size_t i = 0; i < editable_lines_.size(); ++i) {
+                auto& line = editable_lines_[i];
+                Element display_element;
+
+                if (mode_ == Mode::Edit && selected_ == i) {
+                    if (line.is_radio) {
+                        // In edit mode, render the Radiobox for radio button lines
+                        auto radio = Radiobox(line.radio_options, line.radio_selected_idx);
+                        display_element = radio->Render();
+                    } else {
+                        // Render the shared text input for normal lines
+                        display_element = editor_input_->Render();
+                    }
+                } else {
+                     if (line.is_radio) {
+                        // In navigate mode, just show the selected text for radio buttons
+                        display_element = text((*line.radio_options)[*line.radio_selected_idx]);
+                     } else if (line.value_ptr) {
+                        // Show the current string value for normal lines
+                        display_element = text(*line.value_ptr);
+                     } else {
+                        // Placeholder for lines that are just for actions (like 'add')
+                        display_element = text("...") | dim;
+                     }
+                }
+
+                auto content = hbox({
+                    text(line.label) | size(WIDTH, EQUAL, 25),
+                    display_element | flex,
+                });
+
+                if (selected_ == i) content |= inverted;
+                line_elements.push_back(content);
+            }
+            
             return vbox({
                 text("Interactive Configuration Editor") | bold | hcenter,
                 separator(),
-                RenderStatusBar(),
+                vbox(std::move(line_elements)) | vscroll_indicator | frame | flex,
                 separator(),
-                hbox({text(" cache_root_dir         : ") | dim, cache_dir_input->Render()}),
-                hbox({text(" default_exit_save_path : ") | dim, exit_save_path_input->Render()}),
-                hbox({text(" default_timer_log_path : ") | dim, timer_log_path_input->Render()}),
-                separator(),
-                hbox({text(" default_print_mode     : ") | dim, print_mode_radio->Render()}),
-                hbox({text(" default_ops_list_mode  : ") | dim, ops_list_mode_radio->Render()}),
-                hbox({text(" ops_plugin_path_mode   : ") | dim, path_mode_radio->Render()}),
-                separator(),
-                text(" plugin_dirs:"),
-                plugin_dir_container->Render() | vscroll_indicator | frame | size(HEIGHT, LESS_THAN, 6),
-                hbox(add_button->Render(), del_button->Render())
-            }) | border;
+                RenderStatusBar()
+            });
         });
 
         component |= CatchEvent([&](Event event) {
+            // --- Command Mode Logic ---
+            if (mode_ == Mode::Command) {
+                 if (event == Event::Return) { ExecuteCommand(); return true; }
+                 if (event == Event::Escape) { mode_ = Mode::Navigate; command_buffer_.clear(); return true; }
+                 if (event.is_character()) { command_buffer_ += event.character(); return true; }
+                 if (event == Event::Backspace && !command_buffer_.empty()) { command_buffer_.pop_back(); return true; }
+                 return false;
+            }
+            
+            // --- Edit Mode Logic ---
+            if (mode_ == Mode::Edit) {
+                if (event == Event::Escape) { mode_ = Mode::Navigate; return true; }
+                // For radio buttons, handle navigation and selection
+                if (editable_lines_[selected_].is_radio) {
+                    if (event == Event::ArrowLeft) { *editable_lines_[selected_].radio_selected_idx = std::max(0, *editable_lines_[selected_].radio_selected_idx - 1); return true; }
+                    if (event == Event::ArrowRight) { *editable_lines_[selected_].radio_selected_idx = std::min((int)editable_lines_[selected_].radio_options->size() - 1, *editable_lines_[selected_].radio_selected_idx + 1); return true; }
+                    if (event == Event::Return) { CommitEdit(); return true; }
+                }
+                // For text fields, delegate to the shared input component
+                return editor_input_->OnEvent(event);
+            }
+            
+            // --- Navigate Mode Logic ---
+            if (event == Event::ArrowUp) { selected_ = std::max(0, selected_ - 1); return true; }
+            if (event == Event::ArrowDown) { selected_ = std::min(int(editable_lines_.size() - 1), selected_ + 1); return true; }
+            if (event == Event::Character('e')) { EnterEditMode(); return true; }
+            if (event == Event::Character('a')) {
+                if(selected_ < editable_lines_.size() && editable_lines_[selected_].add_fn) editable_lines_[selected_].add_fn();
+                return true;
+            }
+            if (event == Event::Character('d')) {
+                if(selected_ < editable_lines_.size() && editable_lines_[selected_].del_fn) editable_lines_[selected_].del_fn();
+                return true;
+            }
+            if (event == Event::Character(':')) {
+                mode_ = Mode::Command;
+                command_buffer_.clear();
+                return true;
+            }
+            // Pressing 'q' in navigate mode is a shortcut for the :q command
             if (event == Event::Character('q')) {
                 screen_.Exit();
-                return true;
-            }
-            if (event == Event::Character('a')) {
-                ApplyChanges();
-                status_message_ = "Changes applied to current session.";
-                return true;
-            }
-            if (event == Event::Character('w')) {
-                ApplyChanges();
-                save_config_interactive(original_config_);
-                status_message_ = "Changes applied and saved.";
                 return true;
             }
             return false;
@@ -149,33 +188,161 @@ public:
     }
 
 private:
-    void ApplyChanges() {
-        temp_config_.default_print_mode = print_mode_entries_[selected_print_mode_];
-        temp_config_.default_ops_list_mode = ops_list_mode_entries_[selected_ops_list_mode_];
-        temp_config_.ops_plugin_path_mode = path_mode_entries_[selected_path_mode_];
-        original_config_ = temp_config_;
+    void SyncModelToStrings() {
+        // Find the index for each radio button setting
+        auto find_idx = [](const auto& vec, const auto& val) {
+            auto it = std::find(vec.begin(), vec.end(), val);
+            return it == vec.end() ? 0 : std::distance(vec.begin(), it);
+        };
+        selected_print_mode_idx_ = find_idx(print_mode_entries_, temp_config_.default_print_mode);
+        selected_ops_list_mode_idx_ = find_idx(ops_list_mode_entries_, temp_config_.default_ops_list_mode);
+        selected_path_mode_idx_ = find_idx(path_mode_entries_, temp_config_.ops_plugin_path_mode);
+        
+        // Copy vector data
+        plugin_dirs_str_ = temp_config_.plugin_dirs;
+    }
+
+    void SyncStringsToModel() {
+        // Apply the selected radio button text back to the config object
+        temp_config_.default_print_mode = print_mode_entries_[selected_print_mode_idx_];
+        temp_config_.default_ops_list_mode = ops_list_mode_entries_[selected_ops_list_mode_idx_];
+        temp_config_.ops_plugin_path_mode = path_mode_entries_[selected_path_mode_idx_];
+        
+        // Apply vector data back
+        temp_config_.plugin_dirs = plugin_dirs_str_;
+    }
+
+    void RebuildLineView() {
+        editable_lines_.clear();
+        
+        // Helper to add a standard text line
+        auto add_text_line = [&](std::string label, std::string* value_ptr) {
+            editable_lines_.push_back({std::move(label), value_ptr});
+        };
+        
+        // Helper to add a radio button line
+        auto add_radio_line = [&](std::string label, std::vector<std::string>* opts, int* selected_idx) {
+            editable_lines_.push_back({std::move(label), nullptr, true, opts, selected_idx});
+        };
+        
+        add_text_line("cache_root_dir", &temp_config_.cache_root_dir);
+        add_text_line("default_exit_save_path", &temp_config_.default_exit_save_path);
+        add_text_line("default_timer_log_path", &temp_config_.default_timer_log_path);
+        
+        add_radio_line("default_print_mode", &print_mode_entries_, &selected_print_mode_idx_);
+        add_radio_line("default_ops_list_mode", &ops_list_mode_entries_, &selected_ops_list_mode_idx_);
+        add_radio_line("ops_plugin_path_mode", &path_mode_entries_, &selected_path_mode_idx_);
+
+        // Add a line for each plugin directory path
+        for (size_t i = 0; i < plugin_dirs_str_.size(); ++i) {
+            auto del_fn = [this, i] {
+                plugin_dirs_str_.erase(plugin_dirs_str_.begin() + i);
+                RebuildLineView();
+                // Ensure selection is not out of bounds
+                selected_ = std::min((int)editable_lines_.size() - 1, selected_);
+            };
+            editable_lines_.push_back({"plugin_dirs[" + std::to_string(i) + "]", &plugin_dirs_str_[i], false, nullptr, nullptr, nullptr, del_fn});
+        }
+        
+        // Add a final line with an "add" action
+        auto add_fn = [this] {
+            plugin_dirs_str_.push_back("<new_path>");
+            RebuildLineView();
+            selected_ = editable_lines_.size() - 2; // Select the newly added line
+            EnterEditMode();
+        };
+        editable_lines_.push_back({"(Plugin Dirs)", nullptr, false, nullptr, nullptr, add_fn, nullptr});
+    }
+    
+    void EnterEditMode() {
+        if (selected_ >= editable_lines_.size()) return;
+        const auto& line = editable_lines_[selected_];
+
+        // Do nothing if the line is not editable (e.g., the 'add' line)
+        if (!line.is_radio && !line.value_ptr) return;
+
+        mode_ = Mode::Edit;
+        // For text fields, copy the current value to the shared buffer and focus the input
+        if (!line.is_radio) {
+            edit_buffer_ = *line.value_ptr;
+            editor_input_->TakeFocus();
+        }
+    }
+    
+    void CommitEdit() {
+        if (selected_ >= editable_lines_.size()) return;
+        const auto& line = editable_lines_[selected_];
+        
+        if (!line.is_radio && line.value_ptr) {
+            *line.value_ptr = edit_buffer_;
+        }
+        // For radio buttons, the change is already applied via the index pointer,
+        // so we just need to switch modes.
+        mode_ = Mode::Navigate;
     }
 
     Element RenderStatusBar() {
-         return hbox({
-            text(" [q]uit | [a]pply | [w]rite & save ") | dim,
-            filler(),
-            text(status_message_) | bold
-        });
+        std::string help;
+        if (mode_ == Mode::Navigate) {
+            help = "↑/↓:Move | e:Edit | q:Quit | ::Command";
+            if (selected_ < editable_lines_.size()) {
+                if (editable_lines_[selected_].add_fn) help += " | a:Add";
+                if (editable_lines_[selected_].del_fn) help += " | d:Delete";
+            }
+        }
+        else if (mode_ == Mode::Edit) help = "Enter:Accept | Esc:Cancel | ←/→:Change";
+        else if (mode_ == Mode::Command) return hbox({ text(":" + command_buffer_), text(" ") | blink }) | inverted;
+        
+        return hbox({ text(help) | dim, filler(), text(status_message_) | bold });
     }
 
-    CliConfig& original_config_;
-    CliConfig temp_config_;
-    std::string status_message_ = "Ready. Navigate with Arrow Keys/Tab.";
+    void ExecuteCommand() {
+        std::string cmd = command_buffer_;
+        mode_ = Mode::Navigate;
+        command_buffer_.clear();
 
-    int selected_print_mode_ = 0;
-    int selected_ops_list_mode_ = 0;
-    int selected_path_mode_ = 0;
+        if (cmd == "a" || cmd == "apply") {
+            SyncStringsToModel();
+            status_message_ = "Changes applied to current session.";
+        } else if (cmd == "w" || cmd == "write") {
+            SyncStringsToModel();
+            original_config_ = temp_config_;
+            save_config_interactive(original_config_);
+            status_message_ = "Changes applied and saved.";
+        } else if (cmd == "q" || cmd == "quit") {
+            screen_.Exit();
+        } else {
+            status_message_ = "Error: Unknown command '" + cmd + "'";
+        }
+    }
 
+    CliConfig& original_config_; // The real config object
+    CliConfig temp_config_;      // The copy we are editing
+    std::string status_message_ = "Ready";
+
+    // --- Editor State ---
+    enum class Mode { Navigate, Edit, Command };
+    Mode mode_ = Mode::Navigate;
+    int selected_ = 0;
+    std::vector<EditableLine> editable_lines_;
+    std::string command_buffer_;
+    
+    // --- Buffer for text editing ---
+    std::string edit_buffer_;
+    Component editor_input_;
+
+    // --- Buffers for radio buttons and vectors ---
+    int selected_print_mode_idx_ = 0;
+    int selected_ops_list_mode_idx_ = 0;
+    int selected_path_mode_idx_ = 0;
+    std::vector<std::string> plugin_dirs_str_;
+    
+    // --- Constant options for radio buttons ---
     std::vector<std::string> print_mode_entries_ = {"detailed", "simplified"};
     std::vector<std::string> ops_list_mode_entries_ = {"all", "builtin", "plugins"};
     std::vector<std::string> path_mode_entries_ = {"name_only", "relative_path", "absolute_path"};
 };
+
 
 // --- Interactive Node Editor (REFACTORED) ---
 class NodeEditor : public TuiEditor {
@@ -467,7 +634,7 @@ private:
     std::string command_buffer_;
 };
 
-// ... (The rest of the file remains unchanged) ...
+
 static bool write_config_to_file(const CliConfig& config, const std::string& path) {
     YAML::Node root;
     root["_comment1"] = "Photospider CLI configuration.";
