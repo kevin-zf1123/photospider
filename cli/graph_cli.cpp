@@ -131,6 +131,7 @@ static void print_repl_help() {
               << "  source <file>              Execute commands from a script file.\n"
               << "  print [mode]               Show the dependency tree.\n"
               << "                             Modes: detailed(d), simplified(s)\n"
+              << "  node <id>                  Show the YAML definition of a single node.\n"
               << "  traversal [flags]          Show evaluation order with cache status and tree flags.\n"
               << "                             Tree Flags: detailed(d), simplified(s), no_tree(n)\n"
               << "                             Cache Flags: m(memory), d(disk), c(check), cr(check&remove)\n"
@@ -288,6 +289,28 @@ static bool process_command(const std::string& line, NodeGraph& graph, bool& mod
                 graph.print_dependency_tree(std::cout, false);
             } else {
                 std::cout << "Error: Invalid mode for 'print'. Use: detailed(d) or simplified(s)." << std::endl;
+            }
+        } else if (cmd == "node") {
+            std::string id_str;
+            iss >> id_str;
+            if (id_str.empty()) {
+                std::cout << "Usage: node <id>" << std::endl;
+                return true;
+            }
+
+            try {
+                int node_id = std::stoi(id_str);
+                if (graph.has_node(node_id)) {
+                    // The Node class already has a to_yaml() method, so we just call it.
+                    const auto& node_to_print = graph.nodes.at(node_id);
+                    std::cout << node_to_print.to_yaml() << std::endl;
+                } else {
+                    std::cout << "Error: Node with ID " << node_id << " not found in the current graph." << std::endl;
+                }
+            } catch (const std::invalid_argument&) {
+                std::cout << "Error: Invalid node ID. Please provide an integer." << std::endl;
+            } catch (const std::out_of_range&) {
+                std::cout << "Error: Node ID is out of range for an integer." << std::endl;
             }
         } else if (cmd == "ops") {
             std::string mode_arg;
