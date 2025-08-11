@@ -24,7 +24,7 @@ struct CliConfig {
     std::string loaded_config_path;
     std::string cache_root_dir = "cache";
     std::string plugin_dir = "plugins";
-    std::string default_print_mode = "detailed"; // "detailed", "simplified"
+    std::string default_print_mode = "detailed";
     std::string default_traversal_arg = "n";
     std::string default_cache_clear_arg = "md";
     std::string default_exit_save_path = "graph_out.yaml";
@@ -32,6 +32,8 @@ struct CliConfig {
     std::string config_save_behavior = "current";
     std::string default_timer_log_path = "out/timer.yaml";
     std::string default_ops_list_mode = "all";
+    // --- NEW: Configuration for plugin path display ---
+    std::string ops_plugin_path_mode = "name_only"; // "absolute_path", "relative_path", "name_only"
 };
 
 static bool write_config_to_file(const CliConfig& config, const std::string& path) {
@@ -47,6 +49,7 @@ static bool write_config_to_file(const CliConfig& config, const std::string& pat
     root["config_save_behavior"] = config.config_save_behavior;
     root["default_timer_log_path"] = config.default_timer_log_path;
     root["default_ops_list_mode"] = config.default_ops_list_mode;
+    root["ops_plugin_path_mode"] = config.ops_plugin_path_mode; // --- NEW ---
 
     try {
         std::ofstream fout(path);
@@ -74,6 +77,7 @@ static void load_or_create_config(const std::string& config_path, CliConfig& con
             if (root["config_save_behavior"]) config.config_save_behavior = root["config_save_behavior"].as<std::string>();
             if (root["default_timer_log_path"]) config.default_timer_log_path = root["default_timer_log_path"].as<std::string>();
             if (root["default_ops_list_mode"]) config.default_ops_list_mode = root["default_ops_list_mode"].as<std::string>();
+            if (root["ops_plugin_path_mode"]) config.ops_plugin_path_mode = root["ops_plugin_path_mode"].as<std::string>(); // --- NEW ---
             std::cout << "Loaded configuration from '" << config_path << "'." << std::endl;
         } catch (const std::exception& e) {
             std::cerr << "Warning: Could not parse config file '" << config_path << "'. Using default settings. Error: " << e.what() << std::endl;
@@ -82,10 +86,11 @@ static void load_or_create_config(const std::string& config_path, CliConfig& con
         std::cout << "Configuration file 'config.yaml' not found. Creating a default one." << std::endl;
         config.plugin_dir = "build/plugins";
         config.default_print_mode = "detailed";
-        config.default_traversal_arg = "n"; // Default traversal to not print the tree
+        config.default_traversal_arg = "n";
         config.config_save_behavior = "current";
         config.default_timer_log_path = "out/timer.yaml";
         config.default_ops_list_mode = "all";
+        config.ops_plugin_path_mode = "name_only"; // --- NEW ---
         if (write_config_to_file(config, "config.yaml")) {
             config.loaded_config_path = fs::absolute("config.yaml").string();
         }
@@ -132,6 +137,7 @@ static void print_repl_help() {
               << "  exit                       Quit the shell.\n";
 }
 
+// ... (ask, ask_yesno, do_traversal are unchanged) ...
 static std::string ask(const std::string& q, const std::string& def = "") {
     std::cout << q; if (!def.empty()) std::cout << " [" << def << "]";
     std::cout << ": "; std::string s; std::getline(std::cin, s);
@@ -147,7 +153,6 @@ static bool ask_yesno(const std::string& q, bool def = true) {
     }
 }
 
-// --- MODIFIED: Removed the print call. This function now ONLY shows the post-order list.
 static void do_traversal(const NodeGraph& graph, bool show_mem, bool show_disk) {
     auto ends = graph.ending_nodes();
     if (ends.empty()) { std::cout << "(no ending nodes or graph is cyclic)\n"; return; }
@@ -188,12 +193,12 @@ static void do_traversal(const NodeGraph& graph, bool show_mem, bool show_disk) 
         }
     }
 }
-
 static void print_config(const CliConfig& config) {
     std::cout << "Current CLI Configuration:\n"
               << "  - loaded_config_path:      " << (config.loaded_config_path.empty() ? "(none)" : config.loaded_config_path) << "\n"
               << "  - cache_root_dir:          " << config.cache_root_dir << "\n"
               << "  - plugin_dir:              " << config.plugin_dir << "\n" 
+              << "  - ops_plugin_path_mode:    " << config.ops_plugin_path_mode << "\n" // --- NEW ---
               << "  - default_print_mode:      " << config.default_print_mode << "\n"
               << "  - default_ops_list_mode:   " << config.default_ops_list_mode << "\n"
               << "  - default_traversal_arg:   " << config.default_traversal_arg << "\n"
@@ -269,12 +274,85 @@ static bool process_command(const std::string& line, NodeGraph& graph, bool& mod
             } else {
                 std::cout << "Error: Invalid mode for 'print'. Use: detailed(d) or simplified(s)." << std::endl;
             }
+        } else if (cmd == "ops") {
+            std::string mode_arg;
+            iss >> mode_arg;
+            if (mode_arg.empty()) {
+                mode_arg = config.default_ops_list_mode;
+            }
+
+            std::string display_mode;
+            std::string display_title;
+
+            if (mode_arg == "all" || mode_arg == "a") {
+                display_mode = "all";
+                display_title = "all";
+            } else if (mode_arg == "builtin" || mode_arg == "b") {
+                display_mode = "builtin";
+                display_title = "built-in";
+            } else if (mode_arg == "plugins" || mode_arg == "custom" || mode_arg == "p" || mode_arg == "c") {
+                display_mode = "plugins";
+                display_title = "plugins";
+            } else {
+                std::cout << "Error: Invalid mode for 'ops'. Use: all (a), builtin (b), or plugins (p/c)." << std::endl;
+                return true;
+            }
+
+            std::map<std::string, std::vector<std::pair<std::string, std::string>>> grouped_ops;
+            int op_count = 0;
+
+            for (const auto& pair : op_sources) {
+                const std::string& key = pair.first;
+                const std::string& source = pair.second;
+                bool is_builtin = (source == "built-in");
+
+                if ((display_mode == "builtin" && !is_builtin) || (display_mode == "plugins" && is_builtin)) {
+                    continue;
+                }
+
+                size_t colon_pos = key.find(':');
+                if (colon_pos != std::string::npos) {
+                    std::string type = key.substr(0, colon_pos);
+                    std::string subtype = key.substr(colon_pos + 1);
+                    grouped_ops[type].push_back({subtype, source});
+                    op_count++;
+                }
+            }
+            
+            if (op_count == 0) {
+                if (display_mode == "plugins") std::cout << "No plugin operations are registered." << std::endl;
+                else std::cout << "No operations are registered." << std::endl;
+                return true;
+            }
+
+            std::cout << "Available Operations (" << display_title << "):" << std::endl;
+            for (auto& pair : grouped_ops) {
+                std::sort(pair.second.begin(), pair.second.end());
+                std::cout << "\n  Type: " << pair.first << std::endl;
+                for (const auto& op_info : pair.second) {
+                    std::cout << "    - " << op_info.first;
+                    // --- MODIFIED: The new display logic ---
+                    if (op_info.second != "built-in") {
+                        std::string plugin_path_str = op_info.second;
+                        std::string display_path;
+                        if (config.ops_plugin_path_mode == "absolute_path") {
+                            display_path = plugin_path_str;
+                        } else if (config.ops_plugin_path_mode == "relative_path") {
+                            display_path = fs::relative(plugin_path_str).string();
+                        } else { // Default to name_only
+                            display_path = fs::path(plugin_path_str).filename().string();
+                        }
+                        std::cout << "  [plugin: " << display_path << "]";
+                    }
+                    std::cout << std::endl;
+                }
+            }
+
         } else if (cmd == "traversal") {
             std::string arg;
             std::string print_tree_mode = "none";
             bool show_mem = false, show_disk = false, do_check = false, do_check_remove = false;
             
-            // If no arguments, use the configured default
             if (iss.rdbuf()->in_avail() == 0) {
                  std::istringstream default_iss(config.default_traversal_arg);
                  while(default_iss >> arg) {
@@ -286,7 +364,7 @@ static bool process_command(const std::string& line, NodeGraph& graph, bool& mod
                     else if (arg == "cr") do_check_remove = true;
                     else if (arg == "c") do_check = true;
                  }
-            } else { // Otherwise, parse arguments from the command line
+            } else {
                 while (iss >> arg) {
                     if (arg == "d" || arg == "detailed") print_tree_mode = "detailed";
                     else if (arg == "s" || arg == "simplified") print_tree_mode = "simplified";
@@ -317,7 +395,12 @@ static bool process_command(const std::string& line, NodeGraph& graph, bool& mod
             }
             std::getline(iss >> std::ws, value);
             bool changed = false;
-            if (key == "default_print_mode") {
+            if (key == "ops_plugin_path_mode") { // --- NEW ---
+                if (value == "absolute_path" || value == "relative_path" || value == "name_only") {
+                    config.ops_plugin_path_mode = value;
+                    changed = true;
+                } else { std::cout << "Invalid value. Use 'absolute_path', 'relative_path', or 'name_only'." << std::endl; }
+            } else if (key == "default_print_mode") {
                 if (value == "detailed" || value == "simplified") {
                     config.default_print_mode = value; changed = true;
                 } else { std::cout << "Invalid value. Use 'detailed' or 'simplified'." << std::endl;}
@@ -355,75 +438,7 @@ static bool process_command(const std::string& line, NodeGraph& graph, bool& mod
                 save_config_interactive(config);
             }
         }
-        // ... (all other commands are unchanged)
-        else if (cmd == "ops") {
-            std::string mode_arg;
-            iss >> mode_arg;
-            if (mode_arg.empty()) {
-                mode_arg = config.default_ops_list_mode;
-            }
-
-            std::string display_mode;
-            std::string display_title;
-
-            
-            if (mode_arg == "all" || mode_arg == "a") {
-                display_mode = "all";
-                display_title = "all";
-            } else if (mode_arg == "builtin" || mode_arg == "b") {
-                display_mode = "builtin";
-                display_title = "built-in";
-            } else if (mode_arg == "plugins" || mode_arg == "custom" || mode_arg == "p" || mode_arg == "c") {
-                display_mode = "plugins";
-                display_title = "plugins";
-            } else {
-                std::cout << "Error: Invalid mode for 'ops'. Use: all (a), builtin (b), or plugins (p/c)." << std::endl;
-                return true;
-            }
-
-            std::map<std::string, std::vector<std::pair<std::string, std::string>>> grouped_ops;
-            int op_count = 0;
-
-            for (const auto& pair : op_sources) {
-                const std::string& key = pair.first;
-                const std::string& source = pair.second;
-                bool is_builtin = (source == "built-in");
-
-                
-                if ((display_mode == "builtin" && !is_builtin) || (display_mode == "plugins" && is_builtin)) {
-                    continue;
-                }
-
-                size_t colon_pos = key.find(':');
-                if (colon_pos != std::string::npos) {
-                    std::string type = key.substr(0, colon_pos);
-                    std::string subtype = key.substr(colon_pos + 1);
-                    grouped_ops[type].push_back({subtype, source});
-                    op_count++;
-                }
-            }
-            
-            if (op_count == 0) {
-                if (display_mode == "plugins") std::cout << "No plugin operations are registered." << std::endl;
-                else std::cout << "No operations are registered." << std::endl;
-                return true;
-            }
-
-            
-            std::cout << "Available Operations (" << display_title << "):" << std::endl;
-            for (auto& pair : grouped_ops) {
-                std::sort(pair.second.begin(), pair.second.end());
-                std::cout << "\n  Type: " << pair.first << std::endl;
-                for (const auto& op_info : pair.second) {
-                    std::cout << "    - " << op_info.first;
-                    if (op_info.second != "built-in") {
-                        std::cout << "  [plugin: " << op_info.second << "]";
-                    }
-                    std::cout << std::endl;
-                }
-            }
-
-        }
+        // ... (all other commands are unchanged) ...
         else if (cmd == "read") {
             std::string path; iss >> path; if (path.empty()) std::cout << "Usage: read <filepath>\n";
             else { graph.load_yaml(path); modified = false; std::cout << "Loaded graph from " << path << "\n"; }
@@ -613,7 +628,7 @@ static void run_repl(NodeGraph& graph, CliConfig& config, const std::map<std::st
     }
 }
 
-// ... (load_plugins is unchanged)
+// --- MODIFIED: Store the absolute path of the plugin ---
 static void load_plugins(const std::string& plugin_dir_path, std::map<std::string, std::string>& op_sources) {
     if (!fs::exists(plugin_dir_path) || !fs::is_directory(plugin_dir_path)) {
         return;
@@ -675,7 +690,8 @@ static void load_plugins(const std::string& plugin_dir_path, std::map<std::strin
                                 std::back_inserter(new_keys));
 
             for (const auto& key : new_keys) {
-                op_sources[key] = path.filename().string();
+                // --- MODIFIED: Store the full absolute path ---
+                op_sources[key] = fs::absolute(path).string();
             }
             
             std::cout << "    Success: Plugin loaded and " << new_keys.size() << " operation(s) registered." << std::endl;
@@ -760,8 +776,6 @@ int main(int argc, char** argv) {
                 did_any_action = true; 
                 break;
             case 't': 
-                // This is a one-shot traversal; it will use the default from config
-                // For more specific flags, use the REPL.
                 {
                     std::string print_tree_mode = "none";
                     bool show_mem = false, show_disk = false;
