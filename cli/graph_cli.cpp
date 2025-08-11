@@ -1,4 +1,5 @@
 // FILE: cli/graph_cli.cpp
+#include <optional>
 #include <getopt.h>
 #include <limits>
 #include <regex>
@@ -451,338 +452,338 @@ private:
 
 
 // --- AdvancedNodeEditor: The new, feature-rich TUI for editing nodes ---
-class AdvancedNodeEditor : public TuiEditor {
-public:
-    AdvancedNodeEditor(ScreenInteractive& screen, int node_id, NodeGraph& graph, CliConfig& config)
-    : TuiEditor(screen), graph_(graph), focused_node_id_(node_id), temp_node_(graph.nodes.at(node_id)), config_(config)
-{
-    // 1. Set the default action for the input options.
-    editor_input_option_.on_enter = [this] { CommitEdit(); };
-    // 2. Create the input component using the options struct. A placeholder is required.
-    editor_input_ = Input(&edit_buffer_, "placeholder", editor_input_option_);
+// class AdvancedNodeEditor : public TuiEditor {
+// public:
+//     AdvancedNodeEditor(ScreenInteractive& screen, int node_id, NodeGraph& graph, CliConfig& config)
+//     : TuiEditor(screen), graph_(graph), focused_node_id_(node_id), temp_node_(graph.nodes.at(node_id)), config_(config)
+// {
+//     // 1. Set the default action for the input options.
+//     editor_input_option_.on_enter = [this] { CommitEdit(); };
+//     // 2. Create the input component using the options struct. A placeholder is required.
+//     editor_input_ = Input(&edit_buffer_, "placeholder", editor_input_option_);
 
-    // Setup the tree view components
-    auto on_tree_select = [&](int /*line_number*/) { screen_.Post(Event::Custom); };
-    auto on_tree_activate = [&](int new_node_id) { SwitchToNode(new_node_id); };
-    top_tree_view_ = std::make_shared<TreeView>(on_tree_select, on_tree_activate);
-    bottom_tree_view_ = std::make_shared<TreeView>(on_tree_select, on_tree_activate);
+//     // Setup the tree view components
+//     auto on_tree_select = [&](int /*line_number*/) { screen_.Post(Event::Custom); };
+//     auto on_tree_activate = [&](int new_node_id) { SwitchToNode(new_node_id); };
+//     top_tree_view_ = std::make_shared<TreeView>(on_tree_select, on_tree_activate);
+//     bottom_tree_view_ = std::make_shared<TreeView>(on_tree_select, on_tree_activate);
 
-    // Setup the editable menu for the left panel
-    RebuildLeftMenu(); // This creates left_menu_
+//     // Setup the editable menu for the left panel
+//     RebuildLeftMenu(); // This creates left_menu_
 
-    // Container for the right-side panel
-    auto right_panel_container = Container::Vertical({
-        top_tree_view_,
-        bottom_tree_view_,
-    });
+//     // Container for the right-side panel
+//     auto right_panel_container = Container::Vertical({
+//         top_tree_view_,
+//         bottom_tree_view_,
+//     });
 
-    // Main container for the whole editor layout
-    main_container_ = Container::Horizontal({
-        left_menu_,
-        right_panel_container,
-    });
+//     // Main container for the whole editor layout
+//     main_container_ = Container::Horizontal({
+//         left_menu_,
+//         right_panel_container,
+//     });
     
-    // Initial population of all UI elements
-    SwitchToNode(focused_node_id_);
-}
+//     // Initial population of all UI elements
+//     SwitchToNode(focused_node_id_);
+// }
     
-    void Run() override {
-    // A renderer for the modal dialog's content
-        auto modal_renderer = Renderer([&] {
-            return vbox({
-                    text(modal_title_) | bold,
-                    separator(),
-                    editor_input_->Render(),
-                }) |
-                size(WIDTH, LESS_THAN, 60) | border;
-        });
+//     void Run() override {
+//     // A renderer for the modal dialog's content
+//         auto modal_renderer = Renderer([&] {
+//             return vbox({
+//                     text(modal_title_) | bold,
+//                     separator(),
+//                     editor_input_->Render(),
+//                 }) |
+//                 size(WIDTH, LESS_THAN, 60) | border;
+//         });
 
-        // The main layout component that will be in the background.
-        auto main_layout = Renderer(main_container_, [&] {
-        // main_container_ holds the left menu and the right panel's container.
-        // We render them side-by-side here.
-        return vbox({
-            hbox({
-                // Left Panel
-                vbox({
-                    text("Node " + std::to_string(focused_node_id_) + " Properties") | bold | hcenter,
-                    separator(),
-                    left_menu_->Render() | flex,
-                }) | frame | size(WIDTH, LESS_THAN, 60),
+//         // The main layout component that will be in the background.
+//         auto main_layout = Renderer(main_container_, [&] {
+//         // main_container_ holds the left menu and the right panel's container.
+//         // We render them side-by-side here.
+//         return vbox({
+//             hbox({
+//                 // Left Panel
+//                 vbox({
+//                     text("Node " + std::to_string(focused_node_id_) + " Properties") | bold | hcenter,
+//                     separator(),
+//                     left_menu_->Render() | flex,
+//                 }) | frame | size(WIDTH, LESS_THAN, 60),
 
-                // Right Panel
-                vbox({
-                    vbox({
-                        text(show_ancestor_tree_ ? "Ancestors Tree" : "Containing Trees") | bold | hcenter,
-                        separator(),
-                        top_tree_view_->Render() | flex,
-                    }) | frame | flex,
-                    vbox({
-                        text("Full Graph Tree") | bold | hcenter,
-                        separator(),
-                        bottom_tree_view_->Render() | flex,
-                    }) | frame | flex,
-                }) | flex,
-            }) | flex,
-            RenderStatusBar(),
-        });
-        });
+//                 // Right Panel
+//                 vbox({
+//                     vbox({
+//                         text(show_ancestor_tree_ ? "Ancestors Tree" : "Containing Trees") | bold | hcenter,
+//                         separator(),
+//                         top_tree_view_->Render() | flex,
+//                     }) | frame | flex,
+//                     vbox({
+//                         text("Full Graph Tree") | bold | hcenter,
+//                         separator(),
+//                         bottom_tree_view_->Render() | flex,
+//                     }) | frame | flex,
+//                 }) | flex,
+//             }) | flex,
+//             RenderStatusBar(),
+//         });
+//         });
 
-        // The final component for the main loop.
-        // It shows the main_layout, with the modal appearing on top when the show_modal_ bool is true.
-        auto final_component = Modal(main_layout, modal_renderer, &show_modal_);
+//         // The final component for the main loop.
+//         // It shows the main_layout, with the modal appearing on top when the show_modal_ bool is true.
+//         auto final_component = Modal(main_layout, modal_renderer, &show_modal_);
 
-        // Add a global event handler for keyboard shortcuts.
-        final_component |= CatchEvent([&](Event event) {
-            if (show_modal_)
-                return false;
+//         // Add a global event handler for keyboard shortcuts.
+//         final_component |= CatchEvent([&](Event event) {
+//             if (show_modal_)
+//                 return false;
 
-            if (event == Event::Character('t')) {
-                show_ancestor_tree_ = !show_ancestor_tree_;
-                RefreshTopTree();
-                return true;
-            }
-            if (event == Event::Character('d')) {
-                detailed_trees_ = !detailed_trees_;
-                RefreshAllTrees();
-                return true;
-            }
-            if (event == Event::Character(':')) {
-                modal_title_ = "Command Mode";
-                edit_buffer_ = ":";
-                editor_input_option_.on_enter = [this] { ExecuteCommand(); show_modal_ = false; };
-                show_modal_ = true;
-                return true;
-            }
-            if (event == Event::Character('q')) {
-                screen_.Exit();
-                return true;
-            }
+//             if (event == Event::Character('t')) {
+//                 show_ancestor_tree_ = !show_ancestor_tree_;
+//                 RefreshTopTree();
+//                 return true;
+//             }
+//             if (event == Event::Character('d')) {
+//                 detailed_trees_ = !detailed_trees_;
+//                 RefreshAllTrees();
+//                 return true;
+//             }
+//             if (event == Event::Character(':')) {
+//                 modal_title_ = "Command Mode";
+//                 edit_buffer_ = ":";
+//                 editor_input_option_.on_enter = [this] { ExecuteCommand(); show_modal_ = false; };
+//                 show_modal_ = true;
+//                 return true;
+//             }
+//             if (event == Event::Character('q')) {
+//                 screen_.Exit();
+//                 return true;
+//             }
 
-            return false;
-        });
+//             return false;
+//         });
         
-        screen_.Loop(final_component);
-    }
+//         screen_.Loop(final_component);
+//     }
 
-private:
-    void RebuildLeftMenu() {
-        left_menu_entries_.clear();
-        left_menu_entries_.push_back("Name: " + temp_node_.name);
-        left_menu_entries_.push_back("Type: " + temp_node_.type);
-        left_menu_entries_.push_back("Subtype: " + temp_node_.subtype);
+// private:
+//     void RebuildLeftMenu() {
+//         left_menu_entries_.clear();
+//         left_menu_entries_.push_back("Name: " + temp_node_.name);
+//         left_menu_entries_.push_back("Type: " + temp_node_.type);
+//         left_menu_entries_.push_back("Subtype: " + temp_node_.subtype);
 
-        YAML::Emitter emitter;
-        emitter << temp_node_.parameters;
-        left_menu_entries_.push_back("Params: " + std::string(emitter.c_str()));
+//         YAML::Emitter emitter;
+//         emitter << temp_node_.parameters;
+//         left_menu_entries_.push_back("Params: " + std::string(emitter.c_str()));
         
-        // Keep track of where dynamic inputs start
-        image_inputs_start_idx_ = left_menu_entries_.size();
-        for (size_t i = 0; i < temp_node_.image_inputs.size(); ++i) {
-            const auto& input = temp_node_.image_inputs[i];
-            left_menu_entries_.push_back("Img Input " + std::to_string(i) + ": " + std::to_string(input.from_node_id) + ":" + input.from_output_name);
-        }
-        left_menu_entries_.push_back("[+] Add Image Input");
+//         // Keep track of where dynamic inputs start
+//         image_inputs_start_idx_ = left_menu_entries_.size();
+//         for (size_t i = 0; i < temp_node_.image_inputs.size(); ++i) {
+//             const auto& input = temp_node_.image_inputs[i];
+//             left_menu_entries_.push_back("Img Input " + std::to_string(i) + ": " + std::to_string(input.from_node_id) + ":" + input.from_output_name);
+//         }
+//         left_menu_entries_.push_back("[+] Add Image Input");
         
-        MenuOption option;
-        option.on_enter = [this] { EnterEditMode(); };
-        left_menu_ = Menu(&left_menu_entries_, &left_menu_selected_, option);
-    }
+//         MenuOption option;
+//         option.on_enter = [this] { EnterEditMode(); };
+//         left_menu_ = Menu(&left_menu_entries_, &left_menu_selected_, option);
+//     }
 
-    void SwitchToNode(int new_id) {
-        if (!graph_.has_node(new_id)) return;
-        focused_node_id_ = new_id;
-        temp_node_ = graph_.nodes.at(new_id);
-        RebuildLeftMenu();
-        RefreshAllTrees();
-    }
+//     void SwitchToNode(int new_id) {
+//         if (!graph_.has_node(new_id)) return;
+//         focused_node_id_ = new_id;
+//         temp_node_ = graph_.nodes.at(new_id);
+//         RebuildLeftMenu();
+//         RefreshAllTrees();
+//     }
     
-    void EnterEditMode() {
-        show_modal_ = true;
-        editor_input_option_.on_enter = [this] { CommitEdit(); };
+//     void EnterEditMode() {
+//         show_modal_ = true;
+//         editor_input_option_.on_enter = [this] { CommitEdit(); };
         
-        // Configure the modal based on which menu item is selected
-        if (left_menu_selected_ == 0) {
-            modal_title_ = "Edit Name";
-            edit_buffer_ = temp_node_.name;
-        } else if (left_menu_selected_ == 1) {
-            modal_title_ = "Edit Type";
-            edit_buffer_ = temp_node_.type;
-        } else if (left_menu_selected_ == 2) {
-            modal_title_ = "Edit Subtype";
-            edit_buffer_ = temp_node_.subtype;
-        } else if (left_menu_selected_ == 3) {
-            modal_title_ = "Edit Static Params (YAML format)";
-            YAML::Emitter emitter;
-            emitter << temp_node_.parameters;
-            edit_buffer_ = emitter.c_str();
-        } else if (left_menu_selected_ >= image_inputs_start_idx_) {
-            int input_idx = left_menu_selected_ - image_inputs_start_idx_;
-            // Case: Add new input
-            if (input_idx >= (int)temp_node_.image_inputs.size()) {
-                temp_node_.image_inputs.push_back({-1, "image"});
-                RebuildLeftMenu();
-                show_modal_ = false; // Just add, don't show modal
-                return;
-            }
-            // Case: Edit existing input
-            modal_title_ = "Edit Image Input " + std::to_string(input_idx) + " (format: <node_id>:<output_name>)";
-            edit_buffer_ = std::to_string(temp_node_.image_inputs[input_idx].from_node_id) + ":" + temp_node_.image_inputs[input_idx].from_output_name;
-        } else {
-            show_modal_ = false; // Should not happen
-        }
-    }
+//         // Configure the modal based on which menu item is selected
+//         if (left_menu_selected_ == 0) {
+//             modal_title_ = "Edit Name";
+//             edit_buffer_ = temp_node_.name;
+//         } else if (left_menu_selected_ == 1) {
+//             modal_title_ = "Edit Type";
+//             edit_buffer_ = temp_node_.type;
+//         } else if (left_menu_selected_ == 2) {
+//             modal_title_ = "Edit Subtype";
+//             edit_buffer_ = temp_node_.subtype;
+//         } else if (left_menu_selected_ == 3) {
+//             modal_title_ = "Edit Static Params (YAML format)";
+//             YAML::Emitter emitter;
+//             emitter << temp_node_.parameters;
+//             edit_buffer_ = emitter.c_str();
+//         } else if (left_menu_selected_ >= image_inputs_start_idx_) {
+//             int input_idx = left_menu_selected_ - image_inputs_start_idx_;
+//             // Case: Add new input
+//             if (input_idx >= (int)temp_node_.image_inputs.size()) {
+//                 temp_node_.image_inputs.push_back({-1, "image"});
+//                 RebuildLeftMenu();
+//                 show_modal_ = false; // Just add, don't show modal
+//                 return;
+//             }
+//             // Case: Edit existing input
+//             modal_title_ = "Edit Image Input " + std::to_string(input_idx) + " (format: <node_id>:<output_name>)";
+//             edit_buffer_ = std::to_string(temp_node_.image_inputs[input_idx].from_node_id) + ":" + temp_node_.image_inputs[input_idx].from_output_name;
+//         } else {
+//             show_modal_ = false; // Should not happen
+//         }
+//     }
     
-    void CommitEdit() {
-        show_modal_ = false;
+//     void CommitEdit() {
+//         show_modal_ = false;
         
-        if (left_menu_selected_ == 0) {
-            temp_node_.name = edit_buffer_;
-        } else if (left_menu_selected_ == 1) {
-            temp_node_.type = edit_buffer_;
-        } else if (left_menu_selected_ == 2) {
-            temp_node_.subtype = edit_buffer_;
-        } else if (left_menu_selected_ == 3) {
-            try {
-                temp_node_.parameters = YAML::Load(edit_buffer_);
-            } catch (const std::exception& e) {
-                status_message_ = "YAML Parse Error!";
-            }
-        } else if (left_menu_selected_ >= image_inputs_start_idx_) {
-            int input_idx = left_menu_selected_ - image_inputs_start_idx_;
-            if (input_idx < (int)temp_node_.image_inputs.size()) {
-                 std::string s = edit_buffer_;
-                 size_t colon_pos = s.find(':');
-                 try {
-                    if (colon_pos != std::string::npos) {
-                        temp_node_.image_inputs[input_idx].from_node_id = std::stoi(s.substr(0, colon_pos));
-                        temp_node_.image_inputs[input_idx].from_output_name = s.substr(colon_pos + 1);
-                    } else {
-                        temp_node_.image_inputs[input_idx].from_node_id = std::stoi(s);
-                        temp_node_.image_inputs[input_idx].from_output_name = "image";
-                    }
-                 } catch (const std::exception&) {
-                    status_message_ = "Invalid input format!";
-                 }
-            }
-        }
+//         if (left_menu_selected_ == 0) {
+//             temp_node_.name = edit_buffer_;
+//         } else if (left_menu_selected_ == 1) {
+//             temp_node_.type = edit_buffer_;
+//         } else if (left_menu_selected_ == 2) {
+//             temp_node_.subtype = edit_buffer_;
+//         } else if (left_menu_selected_ == 3) {
+//             try {
+//                 temp_node_.parameters = YAML::Load(edit_buffer_);
+//             } catch (const std::exception& e) {
+//                 status_message_ = "YAML Parse Error!";
+//             }
+//         } else if (left_menu_selected_ >= image_inputs_start_idx_) {
+//             int input_idx = left_menu_selected_ - image_inputs_start_idx_;
+//             if (input_idx < (int)temp_node_.image_inputs.size()) {
+//                  std::string s = edit_buffer_;
+//                  size_t colon_pos = s.find(':');
+//                  try {
+//                     if (colon_pos != std::string::npos) {
+//                         temp_node_.image_inputs[input_idx].from_node_id = std::stoi(s.substr(0, colon_pos));
+//                         temp_node_.image_inputs[input_idx].from_output_name = s.substr(colon_pos + 1);
+//                     } else {
+//                         temp_node_.image_inputs[input_idx].from_node_id = std::stoi(s);
+//                         temp_node_.image_inputs[input_idx].from_output_name = "image";
+//                     }
+//                  } catch (const std::exception&) {
+//                     status_message_ = "Invalid input format!";
+//                  }
+//             }
+//         }
         
-        RebuildLeftMenu();
-    }
+//         RebuildLeftMenu();
+//     }
 
-    void RefreshTopTree() {
-        std::stringstream ss;
-        if (show_ancestor_tree_) {
-            graph_.print_dependency_tree(ss, focused_node_id_, detailed_trees_);
-        } else {
-            auto containing_trees = graph_.get_trees_containing_node(focused_node_id_);
-            if (containing_trees.empty()) {
-                ss << "(Node " << focused_node_id_ << " is not part of any final output tree)";
-            } else {
-                 ss << "Node " << focused_node_id_ << " is part of " << containing_trees.size() << " tree(s):\n";
-                for (int end_node_id : containing_trees) {
-                    graph_.print_dependency_tree(ss, end_node_id, detailed_trees_);
-                }
-            }
-        }
-        top_tree_view_->SetContent(ss.str());
-    }
+//     void RefreshTopTree() {
+//         std::stringstream ss;
+//         if (show_ancestor_tree_) {
+//             graph_.print_dependency_tree(ss, focused_node_id_, detailed_trees_);
+//         } else {
+//             auto containing_trees = graph_.get_trees_containing_node(focused_node_id_);
+//             if (containing_trees.empty()) {
+//                 ss << "(Node " << focused_node_id_ << " is not part of any final output tree)";
+//             } else {
+//                  ss << "Node " << focused_node_id_ << " is part of " << containing_trees.size() << " tree(s):\n";
+//                 for (int end_node_id : containing_trees) {
+//                     graph_.print_dependency_tree(ss, end_node_id, detailed_trees_);
+//                 }
+//             }
+//         }
+//         top_tree_view_->SetContent(ss.str());
+//     }
 
-    void RefreshBottomTree() {
-        std::stringstream ss;
-        graph_.print_dependency_tree(ss, detailed_trees_);
-        bottom_tree_view_->SetContent(ss.str());
-    }
+//     void RefreshBottomTree() {
+//         std::stringstream ss;
+//         graph_.print_dependency_tree(ss, detailed_trees_);
+//         bottom_tree_view_->SetContent(ss.str());
+//     }
 
-    void RefreshAllTrees() {
-        RefreshTopTree();
-        RefreshBottomTree();
-    }
+//     void RefreshAllTrees() {
+//         RefreshTopTree();
+//         RefreshBottomTree();
+//     }
     
-    Element RenderStatusBar() {
-        std::string help = "←/→/Tab: Panes | ↑/↓: Navigate | Enter: Edit | t: Toggle Top Tree | d: Toggle Details | ::Command | q: Quit";
-        return hbox({ text(help) | dim, filler(), text(status_message_) | bold });
-    }
+//     Element RenderStatusBar() {
+//         std::string help = "←/→/Tab: Panes | ↑/↓: Navigate | Enter: Edit | t: Toggle Top Tree | d: Toggle Details | ::Command | q: Quit";
+//         return hbox({ text(help) | dim, filler(), text(status_message_) | bold });
+//     }
 
-    void ExecuteCommand() {
-        std::string cmd = edit_buffer_;
-        if (cmd.rfind(":", 0) == 0) { // check if it starts with :
-            cmd = cmd.substr(1);
-        }
+//     void ExecuteCommand() {
+//         std::string cmd = edit_buffer_;
+//         if (cmd.rfind(":", 0) == 0) { // check if it starts with :
+//             cmd = cmd.substr(1);
+//         }
 
-        if (cmd == "a" || cmd == "apply") HandleApply();
-        else if (cmd == "w" || cmd == "write") {
-            if (HandleApply()) {
-                std::string path = ask("Output file", config_.default_exit_save_path);
-                if (!path.empty()) { graph_.save_yaml(path); status_message_ = "Graph saved to " + path; }
-            }
-        } else if (cmd == "q" || cmd == "quit") {
-            screen_.Exit();
-        } else {
-            status_message_ = "Error: Unknown command '" + cmd + "'";
-        }
-    }
+//         if (cmd == "a" || cmd == "apply") HandleApply();
+//         else if (cmd == "w" || cmd == "write") {
+//             if (HandleApply()) {
+//                 std::string path = ask("Output file", config_.default_exit_save_path);
+//                 if (!path.empty()) { graph_.save_yaml(path); status_message_ = "Graph saved to " + path; }
+//             }
+//         } else if (cmd == "q" || cmd == "quit") {
+//             screen_.Exit();
+//         } else {
+//             status_message_ = "Error: Unknown command '" + cmd + "'";
+//         }
+//     }
 
-    bool HandleApply() {
-        NodeGraph temp_graph = graph_;
-        temp_graph.nodes.at(focused_node_id_) = temp_node_;
+//     bool HandleApply() {
+//         NodeGraph temp_graph = graph_;
+//         temp_graph.nodes.at(focused_node_id_) = temp_node_;
         
-        // Basic cycle detection by trying to generate a traversal order
-        bool cycle_found = false;
-        try {
-            // Check all trees this node is part of for cycles.
-            auto containing_trees = temp_graph.get_trees_containing_node(focused_node_id_);
-             if (containing_trees.empty()) { // If it's a leaf or isolated, check from itself
-                temp_graph.topo_postorder_from(focused_node_id_);
-             } else {
-                for(int end_node : containing_trees) {
-                    temp_graph.topo_postorder_from(end_node);
-                }
-             }
-        } catch (const GraphError& e) {
-            cycle_found = true;
-            status_message_ = "Error: Cycle detected! Changes aborted.";
-        }
+//         // Basic cycle detection by trying to generate a traversal order
+//         bool cycle_found = false;
+//         try {
+//             // Check all trees this node is part of for cycles.
+//             auto containing_trees = temp_graph.get_trees_containing_node(focused_node_id_);
+//              if (containing_trees.empty()) { // If it's a leaf or isolated, check from itself
+//                 temp_graph.topo_postorder_from(focused_node_id_);
+//              } else {
+//                 for(int end_node : containing_trees) {
+//                     temp_graph.topo_postorder_from(end_node);
+//                 }
+//              }
+//         } catch (const GraphError& e) {
+//             cycle_found = true;
+//             status_message_ = "Error: Cycle detected! Changes aborted.";
+//         }
 
-        if (!cycle_found) {
-            graph_.nodes.at(focused_node_id_) = temp_node_;
-            status_message_ = "Changes applied successfully.";
-            RefreshAllTrees();
-            return true;
-        }
-        return false;
-    }
+//         if (!cycle_found) {
+//             graph_.nodes.at(focused_node_id_) = temp_node_;
+//             status_message_ = "Changes applied successfully.";
+//             RefreshAllTrees();
+//             return true;
+//         }
+//         return false;
+//     }
 
-    NodeGraph& graph_;
-    int focused_node_id_;
-    ps::Node temp_node_;
-    CliConfig& config_;
+//     NodeGraph& graph_;
+//     int focused_node_id_;
+//     ps::Node temp_node_;
+//     CliConfig& config_;
     
-    // UI State
-    std::string status_message_ = "Ready";
-    bool show_ancestor_tree_ = true;
-    bool detailed_trees_ = true;
+//     // UI State
+//     std::string status_message_ = "Ready";
+//     bool show_ancestor_tree_ = true;
+//     bool detailed_trees_ = true;
 
-    // Left Pane (Menu) State
-    Component left_menu_;
-    std::vector<std::string> left_menu_entries_;
-    int left_menu_selected_ = 0;
-    int image_inputs_start_idx_ = 0;
+//     // Left Pane (Menu) State
+//     Component left_menu_;
+//     std::vector<std::string> left_menu_entries_;
+//     int left_menu_selected_ = 0;
+//     int image_inputs_start_idx_ = 0;
     
-    // Modal Editing State
-    bool show_modal_ = false;
-    std::string modal_title_;
-    std::string command_buffer_;
-    std::string edit_buffer_;
-    InputOption editor_input_option_;
-    Component editor_input_;
+//     // Modal Editing State
+//     bool show_modal_ = false;
+//     std::string modal_title_;
+//     std::string command_buffer_;
+//     std::string edit_buffer_;
+//     InputOption editor_input_option_;
+//     Component editor_input_;
     
-    // Right Pane (Trees) State
-    std::shared_ptr<TreeView> top_tree_view_;
-    std::shared_ptr<TreeView> bottom_tree_view_;
+//     // Right Pane (Trees) State
+//     std::shared_ptr<TreeView> top_tree_view_;
+//     std::shared_ptr<TreeView> bottom_tree_view_;
 
-    Component main_container_;
-};
+//     Component main_container_;
+// };
 
 
 static bool write_config_to_file(const CliConfig& config, const std::string& path) {
@@ -1018,11 +1019,11 @@ void run_config_editor(CliConfig& config) {
     ConfigEditor editor(screen, config);
     editor.Run();
 }
-void run_node_editor(int node_id, NodeGraph& graph, CliConfig& config) {
-     auto screen = ScreenInteractive::Fullscreen();
-     AdvancedNodeEditor editor(screen, node_id, graph, config);
-     editor.Run();
-}
+// void run_node_editor(int node_id, NodeGraph& graph, CliConfig& config) {
+//      auto screen = ScreenInteractive::Fullscreen();
+//      AdvancedNodeEditor editor(screen, node_id, graph, config);
+//      editor.Run();
+// }
 
 static bool process_command(const std::string& line, NodeGraph& graph, bool& modified, CliConfig& config, const std::map<std::string, std::string>& op_sources) {
     std::istringstream iss(line);
@@ -1068,64 +1069,20 @@ static bool process_command(const std::string& line, NodeGraph& graph, bool& mod
                 }
             }
         } else if (cmd == "node") {
-            std::string id_str;
-            iss >> id_str;
+            // Accept: "node" or "node <id>"
+            std::optional<int> maybe_id;
 
-            if (graph.nodes.empty()) {
-                std::cout << "Graph is empty. Load a graph first with 'read <file>'." << std::endl;
-                return true;
+            // If your parser gives you the raw line (e.g. `line`), reuse it:
+            // Example assumes you already split out `cmd` but still have the full `line`.
+            // If you don't have `line`, you can read from std::cin tokens in your own style.
+            std::istringstream iss(line);
+            std::string word;            // will read the "node"
+            iss >> word;
+            if (iss >> word) {           // optional <id>
+                try { maybe_id = std::stoi(word); } catch (...) { maybe_id.reset(); }
             }
 
-            if (id_str.empty()) {
-                // NEW: Show a selection menu if no ID is provided
-                std::vector<std::string> entries;
-                std::vector<int> node_ids;
-                for(auto const& [id, node] : graph.nodes) {
-                    node_ids.push_back(id);
-                }
-                std::sort(node_ids.begin(), node_ids.end());
-                for(int id : node_ids) {
-                    entries.push_back("ID: " + std::to_string(id) + " (" + graph.nodes.at(id).name + ")");
-                }
-
-                int selected = -1;
-                auto menu = Menu(&entries, &selected);
-                
-                // --- CHANGE: Added CatchEvent to handle Escape correctly ---
-                auto menu_component = menu | CatchEvent([&](Event event) {
-                    if (event == Event::Escape) {
-                        selected = -1;
-                        screen.Exit();
-                        return true;
-                    }
-                    return false;
-                });
-                
-                auto renderer = Renderer(menu_component, [&] {
-                    return menu->Render() | vscroll_indicator | frame | size(HEIGHT, LESS_THAN, 20);
-                });
-
-                auto screen = ScreenInteractive::FitComponent();
-                screen.Loop(renderer);
-
-                if (selected != -1) {
-                    run_node_editor(node_ids[selected], graph, config);
-                    modified = true;
-                }
-                return true;
-            }
-            
-            try {
-                int node_id = std::stoi(id_str);
-                if (graph.has_node(node_id)) {
-                    run_node_editor(node_id, graph, config);
-                    modified = true; // Assume the user modified it
-                } else {
-                    std::cout << "Error: Node with ID " << node_id << " not found." << std::endl;
-                }
-            } catch (const std::exception&) {
-                std::cout << "Error: Invalid node ID. Please provide an integer." << std::endl;
-            }
+            ps::run_node_editor(graph, maybe_id);
         }  else if (cmd == "ops") {
             std::string mode_arg;
             iss >> mode_arg;
