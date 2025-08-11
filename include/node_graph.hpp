@@ -43,7 +43,7 @@ public:
     const NodeOutput& compute(int node_id, bool force_recache = false, bool enable_timing = false);    
     void clear_timing_results();
     std::vector<int> ending_nodes() const;
-    void print_dependency_tree(std::ostream& os) const;
+    void print_dependency_tree(std::ostream& os, bool show_parameters = true) const;
     std::vector<int> topo_postorder_from(int end_node_id) const;
 
 private:

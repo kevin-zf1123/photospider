@@ -202,7 +202,7 @@ std::vector<int> NodeGraph::ending_nodes() const {
     return ends;
 }
 
-static void print_dep_tree_recursive(const NodeGraph& g, std::ostream& os, int node_id, int level, std::unordered_set<int>& path) {
+static void print_dep_tree_recursive(const NodeGraph& g, std::ostream& os, int node_id, int level, std::unordered_set<int>& path, bool show_parameters) {
     auto indent = [&](int l) { for (int i = 0; i < l; ++i) os << "  "; };
 
     if (path.count(node_id)) {
@@ -216,11 +216,10 @@ static void print_dep_tree_recursive(const NodeGraph& g, std::ostream& os, int n
     const auto& node = g.nodes.at(node_id);
     os << "- Node " << node.id << " (" << node.name << " | " << node.type << ":" << node.subtype << ")\n";
 
-    if (node.parameters && node.parameters.IsMap() && node.parameters.size() > 0) {
+    // --- MODIFIED: This block is now conditional ---
+    if (show_parameters && node.parameters && node.parameters.IsMap() && node.parameters.size() > 0) {
         YAML::Emitter emitter;
         emitter << YAML::Flow << node.parameters;
-        // --- THIS IS THE FIX ---
-        // Indent the parameters one level deeper than the node itself.
         indent(level + 1);
         os << "static_params: " << emitter.c_str() << "\n";
     }
@@ -229,20 +228,20 @@ static void print_dep_tree_recursive(const NodeGraph& g, std::ostream& os, int n
         if (input.from_node_id != -1 && g.has_node(input.from_node_id)) {
              indent(level + 1);
              os << "(image from " << input.from_node_id << ":" << input.from_output_name << ")\n";
-            print_dep_tree_recursive(g, os, input.from_node_id, level + 2, path);
+            print_dep_tree_recursive(g, os, input.from_node_id, level + 2, path, show_parameters);
         }
     }
     for (const auto& input : node.parameter_inputs) {
         if (input.from_node_id != -1 && g.has_node(input.from_node_id)) {
             indent(level + 1);
             os << "(param '" << input.to_parameter_name << "' from " << input.from_node_id << ":" << input.from_output_name << ")\n";
-            print_dep_tree_recursive(g, os, input.from_node_id, level + 2, path);
+            print_dep_tree_recursive(g, os, input.from_node_id, level + 2, path, show_parameters);
         }
     }
     path.erase(node_id);
 }
 
-void NodeGraph::print_dependency_tree(std::ostream& os) const {
+void NodeGraph::print_dependency_tree(std::ostream& os, bool show_parameters) const {
     os << "Dependency Tree (reversed from ending nodes):\n";
     auto ends = ending_nodes();
     if (ends.empty() && !nodes.empty()) os << "(Graph has cycles or is fully connected)\n";
@@ -250,7 +249,7 @@ void NodeGraph::print_dependency_tree(std::ostream& os) const {
 
     for (int end_node_id : ends) {
         std::unordered_set<int> path;
-        print_dep_tree_recursive(*this, os, end_node_id, 0, path);
+        print_dep_tree_recursive(*this, os, end_node_id, 0, path, show_parameters);
     }
 }
 

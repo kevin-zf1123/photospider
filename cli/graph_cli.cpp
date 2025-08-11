@@ -20,19 +20,18 @@
 
 using namespace ps;
 
-// --- MODIFIED: Removed LoadedPlugin and PluginOperation structs ---
-
 struct CliConfig {
     std::string loaded_config_path;
     std::string cache_root_dir = "cache";
     std::string plugin_dir = "plugins";
-    std::string default_traversal_arg = "";
+    std::string default_print_mode = "detailed"; // "detailed", "simplified"
+    std::string default_traversal_arg = "n";
     std::string default_cache_clear_arg = "md";
     std::string default_exit_save_path = "graph_out.yaml";
     bool exit_prompt_sync = true;
     std::string config_save_behavior = "current";
     std::string default_timer_log_path = "out/timer.yaml";
-    std::string default_ops_list_mode = "all"; // "all", "builtin", "plugins"
+    std::string default_ops_list_mode = "all";
 };
 
 static bool write_config_to_file(const CliConfig& config, const std::string& path) {
@@ -40,6 +39,7 @@ static bool write_config_to_file(const CliConfig& config, const std::string& pat
     root["_comment1"] = "Photospider CLI configuration.";
     root["cache_root_dir"] = config.cache_root_dir;
     root["plugin_dir"] = config.plugin_dir;
+    root["default_print_mode"] = config.default_print_mode;
     root["default_traversal_arg"] = config.default_traversal_arg;
     root["default_cache_clear_arg"] = config.default_cache_clear_arg;
     root["default_exit_save_path"] = config.default_exit_save_path;
@@ -66,6 +66,7 @@ static void load_or_create_config(const std::string& config_path, CliConfig& con
             YAML::Node root = YAML::LoadFile(config_path);
             if (root["cache_root_dir"]) config.cache_root_dir = root["cache_root_dir"].as<std::string>();
             if (root["plugin_dir"]) config.plugin_dir = root["plugin_dir"].as<std::string>();
+            if (root["default_print_mode"]) config.default_print_mode = root["default_print_mode"].as<std::string>();
             if (root["default_traversal_arg"]) config.default_traversal_arg = root["default_traversal_arg"].as<std::string>();
             if (root["default_cache_clear_arg"]) config.default_cache_clear_arg = root["default_cache_clear_arg"].as<std::string>();
             if (root["default_exit_save_path"]) config.default_exit_save_path = root["default_exit_save_path"].as<std::string>();
@@ -80,7 +81,8 @@ static void load_or_create_config(const std::string& config_path, CliConfig& con
     } else if (config_path == "config.yaml") {
         std::cout << "Configuration file 'config.yaml' not found. Creating a default one." << std::endl;
         config.plugin_dir = "build/plugins";
-        config.default_traversal_arg = "cr";
+        config.default_print_mode = "detailed";
+        config.default_traversal_arg = "n"; // Default traversal to not print the tree
         config.config_save_behavior = "current";
         config.default_timer_log_path = "out/timer.yaml";
         config.default_ops_list_mode = "all";
@@ -107,14 +109,17 @@ static void print_cli_help() {
 static void print_repl_help() {
     std::cout << "Available REPL (interactive shell) commands:\n"
               << "  help                       Show this help message.\n"
-              << "  clear                      Clear the terminal screen.\n" 
+              << "  clear                      Clear the terminal screen.\n"
               << "  config [key] [value]       View or update a configuration setting.\n"
               << "  ops [mode]                 List all registered operations.\n"
               << "                             Modes: all(a), builtin(b), plugins(p)\n"
               << "  read <file>                Load a YAML graph from a file.\n"
               << "  source <file>              Execute commands from a script file.\n"
-              << "  print                      Show the detailed dependency tree of the current graph.\n"
-              << "  traversal [m|d|c|cr]       Show evaluation order with cache status flags.\n"
+              << "  print [mode]               Show the dependency tree.\n"
+              << "                             Modes: detailed(d), simplified(s)\n"
+              << "  traversal [flags]          Show evaluation order with cache status and tree flags.\n"
+              << "                             Tree Flags: detailed(d), simplified(s), no_tree(n)\n"
+              << "                             Cache Flags: m(memory), d(disk), c(check), cr(check&remove)\n"
               << "  output <file>              Save the current graph to a YAML file.\n"
               << "  clear-graph                Clear the current in-memory graph.\n"
               << "  cc, clear-cache [d|m|md]   Clear on-disk, in-memory, or both caches.\n"
@@ -127,7 +132,6 @@ static void print_repl_help() {
               << "  exit                       Quit the shell.\n";
 }
 
-// ... (ask, ask_yesno, do_traversal, print_config, save_config_interactive are unchanged)
 static std::string ask(const std::string& q, const std::string& def = "") {
     std::cout << q; if (!def.empty()) std::cout << " [" << def << "]";
     std::cout << ": "; std::string s; std::getline(std::cin, s);
@@ -143,11 +147,10 @@ static bool ask_yesno(const std::string& q, bool def = true) {
     }
 }
 
+// --- MODIFIED: Removed the print call. This function now ONLY shows the post-order list.
 static void do_traversal(const NodeGraph& graph, bool show_mem, bool show_disk) {
     auto ends = graph.ending_nodes();
     if (ends.empty()) { std::cout << "(no ending nodes or graph is cyclic)\n"; return; }
-    
-    graph.print_dependency_tree(std::cout);
 
     for (int end : ends) {
         try {
@@ -186,12 +189,12 @@ static void do_traversal(const NodeGraph& graph, bool show_mem, bool show_disk) 
     }
 }
 
-
 static void print_config(const CliConfig& config) {
     std::cout << "Current CLI Configuration:\n"
               << "  - loaded_config_path:      " << (config.loaded_config_path.empty() ? "(none)" : config.loaded_config_path) << "\n"
               << "  - cache_root_dir:          " << config.cache_root_dir << "\n"
               << "  - plugin_dir:              " << config.plugin_dir << "\n" 
+              << "  - default_print_mode:      " << config.default_print_mode << "\n"
               << "  - default_ops_list_mode:   " << config.default_ops_list_mode << "\n"
               << "  - default_traversal_arg:   " << config.default_traversal_arg << "\n"
               << "  - default_cache_clear_arg: " << config.default_cache_clear_arg << "\n"
@@ -200,6 +203,7 @@ static void print_config(const CliConfig& config) {
               << "  - config_save_behavior:    " << config.config_save_behavior << " (default action for the 'config' command)\n";
 }
 
+// ... (save_config_interactive is unchanged)
 static void save_config_interactive(CliConfig& config) {
     std::string def_char;
     std::string prompt = "Save updated configuration? [";
@@ -240,8 +244,6 @@ static void save_config_interactive(CliConfig& config) {
         }
     }
 }
-
-// --- MODIFIED: process_command now takes the op_sources map ---
 static bool process_command(const std::string& line, NodeGraph& graph, bool& modified, CliConfig& config, const std::map<std::string, std::string>& op_sources) {
     std::istringstream iss(line);
     std::string cmd;
@@ -251,77 +253,61 @@ static bool process_command(const std::string& line, NodeGraph& graph, bool& mod
     try {
         if (cmd == "help") {
             print_repl_help();
-        }  else if (cmd == "clear" || cmd == "cls") { // --- NEW ---
-            // Use ANSI escape codes to clear the screen and move cursor to top-left
-            // This works on macOS, Linux, and modern Windows terminals.
+        } else if (cmd == "clear" || cmd == "cls") {
             std::cout << "\033[2J\033[1;1H";
-        } else if (cmd == "ops") {
+        } else if (cmd == "print") {
             std::string mode_arg;
             iss >> mode_arg;
             if (mode_arg.empty()) {
-                mode_arg = config.default_ops_list_mode;
+                mode_arg = config.default_print_mode;
             }
 
-            std::string display_mode;
-            std::string display_title;
-
-            // --- MODIFIED: New argument parsing logic ---
-            if (mode_arg == "all" || mode_arg == "a") {
-                display_mode = "all";
-                display_title = "all";
-            } else if (mode_arg == "builtin" || mode_arg == "b") {
-                display_mode = "builtin";
-                display_title = "built-in";
-            } else if (mode_arg == "plugins" || mode_arg == "custom" || mode_arg == "p" || mode_arg == "c") {
-                display_mode = "plugins";
-                display_title = "plugins";
+            if (mode_arg == "detailed" || mode_arg == "d") {
+                graph.print_dependency_tree(std::cout, true);
+            } else if (mode_arg == "simplified" || mode_arg == "s") {
+                graph.print_dependency_tree(std::cout, false);
             } else {
-                std::cout << "Error: Invalid mode for 'ops'. Use: all (a), builtin (b), or plugins (p/c)." << std::endl;
-                return true;
+                std::cout << "Error: Invalid mode for 'print'. Use: detailed(d) or simplified(s)." << std::endl;
+            }
+        } else if (cmd == "traversal") {
+            std::string arg;
+            std::string print_tree_mode = "none";
+            bool show_mem = false, show_disk = false, do_check = false, do_check_remove = false;
+            
+            // If no arguments, use the configured default
+            if (iss.rdbuf()->in_avail() == 0) {
+                 std::istringstream default_iss(config.default_traversal_arg);
+                 while(default_iss >> arg) {
+                    if (arg == "d" || arg == "detailed") print_tree_mode = "detailed";
+                    else if (arg == "s" || arg == "simplified") print_tree_mode = "simplified";
+                    else if (arg == "n" || arg == "no_tree") print_tree_mode = "none";
+                    else if (arg.find('m') != std::string::npos) show_mem = true;
+                    else if (arg.find('d') != std::string::npos && arg != "detailed") show_disk = true;
+                    else if (arg == "cr") do_check_remove = true;
+                    else if (arg == "c") do_check = true;
+                 }
+            } else { // Otherwise, parse arguments from the command line
+                while (iss >> arg) {
+                    if (arg == "d" || arg == "detailed") print_tree_mode = "detailed";
+                    else if (arg == "s" || arg == "simplified") print_tree_mode = "simplified";
+                    else if (arg == "n" || arg == "no_tree") print_tree_mode = "none";
+                    else if (arg.find('m') != std::string::npos) show_mem = true;
+                    else if (arg.find('d') != std::string::npos && arg != "detailed") show_disk = true;
+                    else if (arg == "cr") do_check_remove = true;
+                    else if (arg == "c") do_check = true;
+                }
             }
 
-            std::map<std::string, std::vector<std::pair<std::string, std::string>>> grouped_ops;
-            int op_count = 0;
+            if (do_check_remove) graph.synchronize_disk_cache();
+            else if (do_check) graph.cache_all_nodes();
 
-            for (const auto& pair : op_sources) {
-                const std::string& key = pair.first;
-                const std::string& source = pair.second;
-                bool is_builtin = (source == "built-in");
-
-                // --- MODIFIED: Filter based on the new display_mode variable ---
-                if ((display_mode == "builtin" && !is_builtin) || (display_mode == "plugins" && is_builtin)) {
-                    continue;
-                }
-
-                size_t colon_pos = key.find(':');
-                if (colon_pos != std::string::npos) {
-                    std::string type = key.substr(0, colon_pos);
-                    std::string subtype = key.substr(colon_pos + 1);
-                    grouped_ops[type].push_back({subtype, source});
-                    op_count++;
-                }
+            if (print_tree_mode == "detailed") {
+                graph.print_dependency_tree(std::cout, true);
+            } else if (print_tree_mode == "simplified") {
+                graph.print_dependency_tree(std::cout, false);
             }
             
-            if (op_count == 0) {
-                if (display_mode == "plugins") std::cout << "No plugin operations are registered." << std::endl;
-                else std::cout << "No operations are registered." << std::endl;
-                return true;
-            }
-
-            // --- MODIFIED: Print header using the new display_title variable ---
-            std::cout << "Available Operations (" << display_title << "):" << std::endl;
-            for (auto& pair : grouped_ops) {
-                std::sort(pair.second.begin(), pair.second.end());
-                std::cout << "\n  Type: " << pair.first << std::endl;
-                for (const auto& op_info : pair.second) {
-                    std::cout << "    - " << op_info.first;
-                    if (op_info.second != "built-in") {
-                        std::cout << "  [plugin: " << op_info.second << "]";
-                    }
-                    std::cout << std::endl;
-                }
-            }
-
+            do_traversal(graph, show_mem, show_disk);
         } else if (cmd == "config") {
             std::string key, value;
             iss >> key;
@@ -331,7 +317,11 @@ static bool process_command(const std::string& line, NodeGraph& graph, bool& mod
             }
             std::getline(iss >> std::ws, value);
             bool changed = false;
-            if (key == "cache_root_dir") {
+            if (key == "default_print_mode") {
+                if (value == "detailed" || value == "simplified") {
+                    config.default_print_mode = value; changed = true;
+                } else { std::cout << "Invalid value. Use 'detailed' or 'simplified'." << std::endl;}
+            } else if (key == "cache_root_dir") {
                 std::cout << "Note: 'cache_root_dir' will only take effect on next launch." << std::endl;
                 config.cache_root_dir = value; changed = true;
             } else if (key == "plugin_dir") { 
@@ -364,8 +354,76 @@ static bool process_command(const std::string& line, NodeGraph& graph, bool& mod
                 std::cout << "Configuration '" << key << "' updated for this session." << std::endl;
                 save_config_interactive(config);
             }
-        } 
-        // ... (all other commands are unchanged) ...
+        }
+        // ... (all other commands are unchanged)
+        else if (cmd == "ops") {
+            std::string mode_arg;
+            iss >> mode_arg;
+            if (mode_arg.empty()) {
+                mode_arg = config.default_ops_list_mode;
+            }
+
+            std::string display_mode;
+            std::string display_title;
+
+            
+            if (mode_arg == "all" || mode_arg == "a") {
+                display_mode = "all";
+                display_title = "all";
+            } else if (mode_arg == "builtin" || mode_arg == "b") {
+                display_mode = "builtin";
+                display_title = "built-in";
+            } else if (mode_arg == "plugins" || mode_arg == "custom" || mode_arg == "p" || mode_arg == "c") {
+                display_mode = "plugins";
+                display_title = "plugins";
+            } else {
+                std::cout << "Error: Invalid mode for 'ops'. Use: all (a), builtin (b), or plugins (p/c)." << std::endl;
+                return true;
+            }
+
+            std::map<std::string, std::vector<std::pair<std::string, std::string>>> grouped_ops;
+            int op_count = 0;
+
+            for (const auto& pair : op_sources) {
+                const std::string& key = pair.first;
+                const std::string& source = pair.second;
+                bool is_builtin = (source == "built-in");
+
+                
+                if ((display_mode == "builtin" && !is_builtin) || (display_mode == "plugins" && is_builtin)) {
+                    continue;
+                }
+
+                size_t colon_pos = key.find(':');
+                if (colon_pos != std::string::npos) {
+                    std::string type = key.substr(0, colon_pos);
+                    std::string subtype = key.substr(colon_pos + 1);
+                    grouped_ops[type].push_back({subtype, source});
+                    op_count++;
+                }
+            }
+            
+            if (op_count == 0) {
+                if (display_mode == "plugins") std::cout << "No plugin operations are registered." << std::endl;
+                else std::cout << "No operations are registered." << std::endl;
+                return true;
+            }
+
+            
+            std::cout << "Available Operations (" << display_title << "):" << std::endl;
+            for (auto& pair : grouped_ops) {
+                std::sort(pair.second.begin(), pair.second.end());
+                std::cout << "\n  Type: " << pair.first << std::endl;
+                for (const auto& op_info : pair.second) {
+                    std::cout << "    - " << op_info.first;
+                    if (op_info.second != "built-in") {
+                        std::cout << "  [plugin: " << op_info.second << "]";
+                    }
+                    std::cout << std::endl;
+                }
+            }
+
+        }
         else if (cmd == "read") {
             std::string path; iss >> path; if (path.empty()) std::cout << "Usage: read <filepath>\n";
             else { graph.load_yaml(path); modified = false; std::cout << "Loaded graph from " << path << "\n"; }
@@ -381,24 +439,7 @@ static bool process_command(const std::string& line, NodeGraph& graph, bool& mod
                 if (!process_command(script_line, graph, modified, config, op_sources)) return false;
             }
         } 
-        
-        else if (cmd == "print") {
-            graph.print_dependency_tree(std::cout);
-        } else if (cmd == "traversal") {
-            std::string arg;
-            iss >> arg;
-            if (arg.empty()) {
-                arg = config.default_traversal_arg;
-            }
-            bool show_mem = false, show_disk = false, do_check = false, do_check_remove = false;
-            if (arg.find('m') != std::string::npos) show_mem = true;
-            if (arg.find('d') != std::string::npos) show_disk = true;
-            if (arg.find("cr") != std::string::npos) do_check_remove = true;
-            else if (arg.find('c') != std::string::npos) do_check = true;
-            if (do_check_remove) graph.synchronize_disk_cache();
-            else if (do_check) graph.cache_all_nodes();
-            do_traversal(graph, show_mem, show_disk);
-        } else if (cmd == "output") {
+        else if (cmd == "output") {
             std::string path; iss >> path; if (path.empty()) std::cout << "Usage: output <filepath>\n";
             else { graph.save_yaml(path); modified = false; std::cout << "Saved to " << path << "\n"; }
         } else if (cmd == "clear-graph") {
@@ -572,7 +613,7 @@ static void run_repl(NodeGraph& graph, CliConfig& config, const std::map<std::st
     }
 }
 
-// --- MODIFIED: load_plugins now just populates the op_sources map ---
+// ... (load_plugins is unchanged)
 static void load_plugins(const std::string& plugin_dir_path, std::map<std::string, std::string>& op_sources) {
     if (!fs::exists(plugin_dir_path) || !fs::is_directory(plugin_dir_path)) {
         return;
@@ -649,12 +690,13 @@ static void load_plugins(const std::string& plugin_dir_path, std::map<std::strin
     }
 }
 
+// ... (main function is unchanged)
 int main(int argc, char** argv) {
-    // --- MODIFIED: The main logic for tracking op sources ---
+    
     std::map<std::string, std::string> op_sources;
     auto& registry = ps::OpRegistry::instance();
 
-    // 1. Register built-ins and identify them
+    
     auto keys_before_builtin = registry.get_keys();
     ops::register_builtin();
     auto keys_after_builtin = registry.get_keys();
@@ -691,7 +733,7 @@ int main(int argc, char** argv) {
     std::string config_to_load = custom_config_path.empty() ? "config.yaml" : custom_config_path;
     load_or_create_config(config_to_load, config);
 
-    // 2. Load plugins and identify them
+    
     load_plugins(config.plugin_dir, op_sources);
 
     NodeGraph graph{config.cache_root_dir};
@@ -718,7 +760,24 @@ int main(int argc, char** argv) {
                 did_any_action = true; 
                 break;
             case 't': 
-                do_traversal(graph, true, true); 
+                // This is a one-shot traversal; it will use the default from config
+                // For more specific flags, use the REPL.
+                {
+                    std::string print_tree_mode = "none";
+                    bool show_mem = false, show_disk = false;
+                    std::istringstream iss(config.default_traversal_arg);
+                    std::string arg;
+                     while(iss >> arg) {
+                        if (arg == "d" || arg == "detailed") print_tree_mode = "detailed";
+                        else if (arg == "s" || arg == "simplified") print_tree_mode = "simplified";
+                        else if (arg == "n" || arg == "no_tree") print_tree_mode = "none";
+                        else if (arg.find('m') != std::string::npos) show_mem = true;
+                        else if (arg.find('d') != std::string::npos && arg != "detailed") show_disk = true;
+                     }
+                    if (print_tree_mode == "detailed") graph.print_dependency_tree(std::cout, true);
+                    else if (print_tree_mode == "simplified") graph.print_dependency_tree(std::cout, false);
+                    do_traversal(graph, show_mem, show_disk);
+                }
                 did_any_action = true; 
                 break;
             case 1001: 
