@@ -291,7 +291,17 @@ private:
             }
         }
         else if (mode_ == Mode::Edit) help = "Enter:Accept | Esc:Cancel | ←/→:Change";
-        else if (mode_ == Mode::Command) return hbox({ text(":" + command_buffer_), text(" ") | blink }) | inverted;
+        else if (mode_ == Mode::Command) {
+            // --- MODIFIED PART ---
+            // Display command tips when in command mode.
+            return hbox({
+                       text(":" + command_buffer_),
+                       text(" ") | blink,
+                       filler(),
+                       text("[a]pply | [w]rite | [q]uit | Esc:Cancel") | dim,
+                   }) |
+                   inverted;
+        }
         
         return hbox({ text(help) | dim, filler(), text(status_message_) | bold });
     }
@@ -554,7 +564,17 @@ private:
             }
         }
         else if (mode_ == Mode::Edit) help = "Enter:Accept | Esc:Cancel";
-        else if (mode_ == Mode::Command) return hbox({ text(":" + command_buffer_), text(" ") | blink }) | inverted;
+        else if (mode_ == Mode::Command) {
+            // --- MODIFIED PART ---
+            // Display command tips when in command mode.
+            return hbox({
+                       text(":" + command_buffer_),
+                       text(" ") | blink,
+                       filler(),
+                       text("[a]pply | [w]rite | [q]uit | Esc:Cancel") | dim,
+                   }) |
+                   inverted;
+        }
         
         return hbox({ text(help) | dim, filler(), text(status_message_) | bold });
     }
