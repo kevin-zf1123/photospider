@@ -107,6 +107,7 @@ static void print_cli_help() {
 static void print_repl_help() {
     std::cout << "Available REPL (interactive shell) commands:\n"
               << "  help                       Show this help message.\n"
+              << "  clear                      Clear the terminal screen.\n" 
               << "  config [key] [value]       View or update a configuration setting.\n"
               << "  ops [flag]                 List all registered operations.\n"
               << "                             Flags: --all, --builtin, --plugins\n"
@@ -250,6 +251,10 @@ static bool process_command(const std::string& line, NodeGraph& graph, bool& mod
     try {
         if (cmd == "help") {
             print_repl_help();
+        }  else if (cmd == "clear" || cmd == "cls") { // --- NEW ---
+            // Use ANSI escape codes to clear the screen and move cursor to top-left
+            // This works on macOS, Linux, and modern Windows terminals.
+            std::cout << "\033[2J\033[1;1H";
         } else if (cmd == "ops") {
             std::string flag;
             iss >> flag;
