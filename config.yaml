@@ -1,7 +1,0 @@
-_comment1: Default configuration for the Photospider CLI.
-_comment2: These values provide the default arguments for REPL commands.
-cache_root_dir: cache
-default_traversal_arg: cr
-default_cache_clear_arg: md
-default_exit_save_path: graph_out.yaml
-exit_prompt_sync: true
