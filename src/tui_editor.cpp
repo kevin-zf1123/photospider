@@ -1,3 +1,4 @@
+// FILE: src/tui_editor.cpp
 // tui_editor.cpp - Fully updated to handle dirty flag correctly, full-node YAML editing,
 // XY scrolling, and external editor integration using ScreenInteractive::WithRestoredIO.
 
@@ -129,7 +130,7 @@ struct TreePaneState {
   int scroll_x = 0;   // left column index in view
 };
 
-static size_t LineCount(const std::string &s) { return std::count(s.begin(), s.end(), ' ') + 1; }
+static size_t LineCount(const std::string &s) { return std::count(s.begin(), s.end(), '\n') + 1; }
 
 static Element DrawTreePane(const TreePaneState &pane, const std::string &title) {
   std::stringstream ss(pane.text);
@@ -227,14 +228,21 @@ class NodeEditorUI {
     node_entries_.clear();
     for (int id : ids_) node_entries_.push_back(NodeTitle(graph_.nodes.at(id)));
 
-    node_list_ = Menu(&node_entries_, &node_list_index_);
-    node_list_ = CatchEvent(node_list_, [&](Event e){
-      // Arrow navigation keeps default; when selection changed and editor clean, load
-      if ((e == Event::ArrowUp || e == Event::ArrowDown || e == Event::ArrowLeft || e == Event::ArrowRight) && !dirty_) {
-        OnNodeListChanged();
-      }
-      return false;
-    });
+    // --- MODIFICATION START ---
+    // Use MenuOption to handle selection changes from mouse or keyboard.
+    MenuOption menu_option;
+    menu_option.entries = &node_entries_;
+    menu_option.selected = &node_list_index_;
+    // This callback is triggered on any selection change.
+    menu_option.on_change = [this] {
+        // If the editor is not dirty, immediately load the new node.
+        if (!dirty_) {
+            OnNodeListChanged();
+        }
+    };
+    node_list_ = Menu(menu_option);
+    // --- MODIFICATION END ---
+
 
     // Editor: Input + external editor for comfortable multi-line YAML editing
     input_opt_.on_change = [&]{ dirty_ = (editor_text_ != last_applied_text_); };
@@ -324,9 +332,9 @@ class NodeEditorUI {
       std::stringstream ss;
       auto trees = graph_.get_trees_containing_node(active_node_id_);
       for (size_t i=0;i<trees.size();++i) {
-        ss << "[Tree #" << (i+1) << "] ending at node " << trees[i] << "";
+        ss << "[Tree #" << (i+1) << "] ending at node " << trees[i] << "\n";
         graph_.print_dependency_tree(ss, trees[i], detailed);
-        ss << "";
+        ss << "\n";
       }
       tree_context_.text = ss.str();
     }
