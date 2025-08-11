@@ -170,69 +170,136 @@ private:
 
 // --- Interactive Node Editor ---
 class NodeEditor : public TuiEditor {
+private:
+    // This helper struct "flattens" the node data into a list of editable lines.
+    struct EditableLine {
+        std::string label;
+        std::string* value;
+        Component input_component;
+        std::function<void()> add_fn = nullptr;
+        std::function<void()> del_fn = nullptr;
+    };
+
 public:
     NodeEditor(ScreenInteractive& screen, int node_id, NodeGraph& graph, CliConfig& config)
         : TuiEditor(screen), graph_(graph), node_id_(node_id), temp_node_(graph.nodes.at(node_id)), config_(config) {
-            RefreshTree();
-        }
+        RefreshTree();
+        FlattenNode();
+    }
     
     void Run() override {
-        auto name_input = Input(&temp_node_.name, "name");
-        auto type_input = Input(&temp_node_.type, "type");
-        auto subtype_input = Input(&temp_node_.subtype, "subtype");
+        auto main_container = Container::Vertical({});
+        for(auto& line : editable_lines_) {
+            main_container->Add(line.input_component);
+        }
 
-        auto left_pane = Container::Vertical({name_input, type_input, subtype_input});
-        
-        auto main_component = Renderer(left_pane, [&] {
-            auto node_view = vbox({
-                text("Node " + std::to_string(node_id_) + " Editor") | bold,
-                separator(),
-                hbox(text(" Name:    "), name_input->Render()),
-                hbox(text(" Type:    "), type_input->Render()),
-                hbox(text(" Subtype: "), subtype_input->Render()),
-                filler()
-            }) | border;
-
-            auto tree_view = vbox(tree_lines_) | vscroll_indicator | frame | border;
+        auto component = Renderer(main_container, [&] {
+            Elements left_elements;
+            for(size_t i = 0; i < editable_lines_.size(); ++i) {
+                auto& line = editable_lines_[i];
+                auto content = hbox({
+                    text(line.label) | size(WIDTH, EQUAL, 25),
+                    (selected_ == i && mode_ == Mode::Edit)
+                        ? line.input_component->Render() | flex
+                        : text(*line.value) | flex,
+                });
+                if (selected_ == i) content |= inverted;
+                left_elements.push_back(content);
+            }
+            auto node_view = vbox(std::move(left_elements)) | vscroll_indicator | frame | flex;
+            auto tree_view = vbox(tree_lines_) | vscroll_indicator | frame | flex;
             
             return vbox({
-                hbox(node_view | flex, separator(), tree_view | flex),
+                hbox(node_view, separator(), tree_view),
                 separator(),
                 RenderStatusBar()
             });
         });
 
-        main_component |= CatchEvent([&](Event event) {
-            if (in_command_mode_) {
-                if (event == Event::Return) {
-                    ExecuteCommand();
-                } else if (event.is_character()) {
-                    command_buffer_ += event.character();
-                } else if (event == Event::Backspace && !command_buffer_.empty()) {
-                    command_buffer_.pop_back();
-                } else if (event == Event::Escape) {
-                    in_command_mode_ = false;
-                    command_buffer_.clear();
-                }
-                return true;
-            }
-            
-            if (event == Event::Character(':')) {
-                in_command_mode_ = true;
-                return true;
-            }
-            if (event == Event::Character('q') && !in_command_mode_) {
-                 screen_.Exit();
+        component |= CatchEvent([&](Event event) {
+            // --- Command Mode Logic ---
+            if (mode_ == Mode::Command) {
+                 if (event == Event::Return) ExecuteCommand();
+                 else if (event == Event::Escape) { mode_ = Mode::Navigate; command_buffer_.clear(); }
+                 else if (event.is_character()) command_buffer_ += event.character();
+                 else if (event == Event::Backspace && !command_buffer_.empty()) command_buffer_.pop_back();
                  return true;
             }
-            
+            // --- Edit Mode Logic ---
+            if (mode_ == Mode::Edit) {
+                if (event == Event::Escape) { mode_ = Mode::Navigate; return true; }
+                return editable_lines_[selected_].input_component->OnEvent(event);
+            }
+            // --- Navigate Mode Logic ---
+            if (event == Event::ArrowUp) selected_ = std::max(0, selected_ - 1);
+            if (event == Event::ArrowDown) selected_ = std::min(int(editable_lines_.size() - 1), selected_ + 1);
+            if (event == Event::Character('e')) EnterEditMode();
+            if (event == Event::Character('a')) {
+                if(editable_lines_[selected_].add_fn) editable_lines_[selected_].add_fn();
+            }
+            if (event == Event::Character('d')) {
+                if(editable_lines_[selected_].del_fn) editable_lines_[selected_].del_fn();
+            }
+            if (event == Event::Character(':')) {
+                mode_ = Mode::Command;
+                command_buffer_.clear();
+            }
+            if (event == Event::Character('q')) {
+                // TODO: Add check for unsaved changes
+                screen_.Exit();
+            }
             return false;
         });
         
-        screen_.Loop(main_component);
+        screen_.Loop(component);
     }
 
 private:
+    // Flattens the complex Node object into a simple list for editing
+    void FlattenNode() {
+        editable_lines_.clear();
+        auto add_line = [&](std::string label, std::string* value, std::function<void()> add = nullptr, std::function<void()> del = nullptr) {
+            InputOption opt;
+            opt.on_enter = [&]{ mode_ = Mode::Navigate; };
+            editable_lines_.push_back({label, value, Input(value, "...", opt), add, del});
+        };
+        
+        add_line("Name", &temp_node_.name);
+        add_line("Type", &temp_node_.type);
+        add_line("Subtype", &temp_node_.subtype);
+        
+        // Static Parameters are complex, so we'll just edit the raw YAML string for now
+        static std::string params_str;
+        YAML::Emitter emitter; emitter << temp_node_.parameters; params_str = emitter.c_str();
+        add_line("Static Params (YAML)", &params_str);
+        
+        // Image Inputs
+        for (size_t i = 0; i < temp_node_.image_inputs.size(); ++i) {
+            static std::vector<std::string> from_node_ids, from_output_names;
+            from_node_ids.resize(i + 1); from_output_names.resize(i + 1);
+            from_node_ids[i] = std::to_string(temp_node_.image_inputs[i].from_node_id);
+            from_output_names[i] = temp_node_.image_inputs[i].from_output_name;
+
+            auto add_fn = [&, i] {
+                temp_node_.image_inputs.insert(temp_node_.image_inputs.begin() + i + 1, {});
+                FlattenNode();
+            };
+            auto del_fn = [&, i] {
+                temp_node_.image_inputs.erase(temp_node_.image_inputs.begin() + i);
+                FlattenNode();
+            };
+            add_line("Img Input " + std::to_string(i) + " Node ID", &from_node_ids[i], add_fn, del_fn);
+            add_line("Img Input " + std::to_string(i) + " Output", &from_output_names[i]);
+        }
+        
+        // Parameter Inputs & Caches would be added here in a similar fashion...
+    }
+    
+    void EnterEditMode() {
+        mode_ = Mode::Edit;
+        editable_lines_[selected_].input_component->TakeFocus();
+    }
+    
     void RefreshTree() {
         tree_lines_.clear();
         std::stringstream ss;
@@ -244,44 +311,43 @@ private:
     }
 
     Element RenderStatusBar() {
-        if (in_command_mode_) {
-            return hbox({ text(":" + command_buffer_), text(" ") | blink }) | inverted;
+        std::string help;
+        if (mode_ == Mode::Navigate) {
+            help = "↑/↓:Move | e:Edit | q:Quit | ::Command";
+            if (editable_lines_[selected_].add_fn) help += " | a:Add";
+            if (editable_lines_[selected_].del_fn) help += " | d:Delete";
         }
-        return hbox({
-            text(" Press ':' for commands (a:apply, w:write, q:quit) ") | dim,
-            filler(),
-            text(status_message_) | bold
-        });
+        else if (mode_ == Mode::Edit) help = "Enter:Accept | Esc:Cancel";
+        else if (mode_ == Mode::Command) return hbox({ text(":" + command_buffer_), text(" ") | blink }) | inverted;
+        
+        return hbox({ text(help) | dim, filler(), text(status_message_) | bold });
     }
 
     void ExecuteCommand() {
-        if (command_buffer_ == "a") {
-            HandleApply();
-        } else if (command_buffer_ == "w") {
+        if (command_buffer_ == "a") HandleApply();
+        else if (command_buffer_ == "w") {
             HandleApply(); 
             if (status_message_.find("Error") == std::string::npos) {
-                screen_.ExitLoopClosure()();
                 std::string path = ask("Output file", config_.default_exit_save_path);
-                if (!path.empty()) {
-                    graph_.save_yaml(path);
-                    status_message_ = "Graph saved to " + path;
-                }
-                screen_.Post(Event::Custom);
+                if (!path.empty()) { graph_.save_yaml(path); status_message_ = "Graph saved to " + path; }
             }
-        } else if (command_buffer_ == "q") {
-            screen_.Exit();
-        } else {
-            status_message_ = "Error: Unknown command '" + command_buffer_ + "'";
-        }
+        } else if (command_buffer_ == "q") screen_.Exit();
+        else status_message_ = "Error: Unknown command '" + command_buffer_ + "'";
+        
         in_command_mode_ = false;
         command_buffer_.clear();
     }
 
     void HandleApply() {
+        // First, "un-flatten" the edited string values back into the temp_node_
+        // This is complex and requires careful parsing, especially for YAML strings and numbers
+        // For simplicity in this example, we'll just show the concept.
+        
         NodeGraph temp_graph = graph_;
         temp_graph.nodes.at(node_id_) = temp_node_;
         bool cycle_found = false;
         try {
+            // A more robust check would traverse from all ending nodes
             temp_graph.topo_postorder_from(node_id_);
         } catch (const GraphError&) {
             cycle_found = true;
@@ -300,8 +366,13 @@ private:
     ps::Node temp_node_;
     CliConfig& config_;
     
+    std::vector<EditableLine> editable_lines_;
     Elements tree_lines_;
     std::string status_message_ = "Ready";
+    int selected_ = 0;
+
+    enum class Mode { Navigate, Edit, Command };
+    Mode mode_ = Mode::Navigate;
     bool in_command_mode_ = false;
     std::string command_buffer_;
 };
@@ -326,10 +397,10 @@ static bool write_config_to_file(const CliConfig& config, const std::string& pat
     try {
         std::ofstream fout(path);
         fout << root;
-        std::cout << "Successfully saved configuration to '" << path << "'." << std::endl;
+        // std::cout << "Successfully saved configuration to '" << path << "'." << std::endl;
         return true;
     } catch (const std::exception& e) {
-        std::cerr << "Error: Could not write to config file '" << path << "'. Error: " << e.what() << std::endl;
+        // std::cerr << "Error: Could not write to config file '" << path << "'. Error: " << e.what() << std::endl;
         return false;
     }
 }
@@ -391,7 +462,7 @@ static void print_cli_help() {
               << std::endl;
 }
 
-// --- MODIFIED: Updated help text for the 'print' command ---
+
 static void print_repl_help() {
     std::cout << "Available REPL (interactive shell) commands:\n"
               << "  help                       Show this help message.\n"
@@ -762,11 +833,12 @@ static bool process_command(const std::string& line, NodeGraph& graph, bool& mod
             std::string id_str;
             iss >> id_str;
             if (id_str.empty()) { std::cout << "Usage: node <id>" << std::endl; return true; }
-
             try {
                 int node_id = std::stoi(id_str);
                 if (graph.has_node(node_id)) {
-                    run_node_editor(node_id, graph, config);
+                    auto screen = ScreenInteractive::Fullscreen();
+                    NodeEditor editor(screen, node_id, graph, config);
+                    editor.Run();
                 } else {
                     std::cout << "Error: Node with ID " << node_id << " not found." << std::endl;
                 }
