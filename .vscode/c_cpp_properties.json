@@ -6,7 +6,8 @@
             "includePath": [
                 "${workspaceFolder}/**",
                 "/opt/homebrew/opt/yaml-cpp/include",
-                "/opt/homebrew/opt/opencv/include/opencv4"
+                "/opt/homebrew/opt/opencv/include/opencv4",
+                "${workspaceFolder}/extern/ftxui/include"
 
             ],
             "defines": [],

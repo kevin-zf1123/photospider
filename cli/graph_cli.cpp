@@ -17,6 +17,7 @@
 #include "ftxui/component/screen_interactive.hpp"
 #include "ftxui/dom/elements.hpp"
 #include "tui_editor.hpp"
+#include "ftxui/dom/node.hpp"
 #ifdef _WIN32
 #include <windows.h>
 #else
@@ -433,7 +434,26 @@ static bool ask_yesno(const std::string& q, bool def = true) {
         std::cout << "Please answer Y or n.\n";
     }
 }
-
+// --- Helper function for interactive saving logic ---
+void handle_interactive_save(CliConfig& config) {
+    if (config.editor_save_behavior == "ask") {
+        if (ask_yesno("Save configuration changes?", true)) {
+            if (config.loaded_config_path.empty()) {
+                std::string path = ask("Enter path to save new config file", "config.yaml");
+                if (!path.empty()) write_config_to_file(config, path);
+            } else {
+                write_config_to_file(config, config.loaded_config_path);
+            }
+        }
+    } else if (config.editor_save_behavior == "auto_save_on_apply") {
+         if (config.loaded_config_path.empty()) {
+            std::cout << "Warning: auto_save is on, but no config file was loaded. Cannot save." << std::endl;
+         } else {
+            write_config_to_file(config, config.loaded_config_path);
+         }
+    }
+    // "manual" does nothing, user must use the old 'config' command to save.
+}
 static void do_traversal(const NodeGraph& graph, bool show_mem, bool show_disk) {
     auto ends = graph.ending_nodes();
     if (ends.empty()) { std::cout << "(no ending nodes or graph is cyclic)\n"; return; }
@@ -474,27 +494,27 @@ static void do_traversal(const NodeGraph& graph, bool show_mem, bool show_disk) 
         }
     }
 }
-static void print_config(const CliConfig& config) {
-    std::cout << "Current CLI Configuration:\n"
-              << "  - loaded_config_path:      " << (config.loaded_config_path.empty() ? "(none)" : config.loaded_config_path) << "\n"
-              << "  - cache_root_dir:          " << config.cache_root_dir << "\n"
-              << "  - plugin_dirs:             \n";
-    if (config.plugin_dirs.empty()) {
-        std::cout << "    (none)\n";
-    } else {
-        for (const auto& dir : config.plugin_dirs) {
-            std::cout << "    - " << dir << "\n";
-        }
-    }
-    std::cout << "  - ops_plugin_path_mode:    " << config.ops_plugin_path_mode << "\n"
-              << "  - default_print_mode:      " << config.default_print_mode << "\n"
-              << "  - default_ops_list_mode:   " << config.default_ops_list_mode << "\n"
-              << "  - default_traversal_arg:   " << config.default_traversal_arg << "\n"
-              << "  - default_cache_clear_arg: " << config.default_cache_clear_arg << "\n"
-              << "  - default_exit_save_path:  " << config.default_exit_save_path << "\n"
-              << "  - exit_prompt_sync:        " << (config.exit_prompt_sync ? "true" : "false") << "\n"
-              << "  - config_save_behavior:    " << config.config_save_behavior << " (default action for the 'config' command)\n";
-}
+// static void print_config(const CliConfig& config) {
+//     std::cout << "Current CLI Configuration:\n"
+//               << "  - loaded_config_path:      " << (config.loaded_config_path.empty() ? "(none)" : config.loaded_config_path) << "\n"
+//               << "  - cache_root_dir:          " << config.cache_root_dir << "\n"
+//               << "  - plugin_dirs:             \n";
+//     if (config.plugin_dirs.empty()) {
+//         std::cout << "    (none)\n";
+//     } else {
+//         for (const auto& dir : config.plugin_dirs) {
+//             std::cout << "    - " << dir << "\n";
+//         }
+//     }
+//     std::cout << "  - ops_plugin_path_mode:    " << config.ops_plugin_path_mode << "\n"
+//               << "  - default_print_mode:      " << config.default_print_mode << "\n"
+//               << "  - default_ops_list_mode:   " << config.default_ops_list_mode << "\n"
+//               << "  - default_traversal_arg:   " << config.default_traversal_arg << "\n"
+//               << "  - default_cache_clear_arg: " << config.default_cache_clear_arg << "\n"
+//               << "  - default_exit_save_path:  " << config.default_exit_save_path << "\n"
+//               << "  - exit_prompt_sync:        " << (config.exit_prompt_sync ? "true" : "false") << "\n"
+//               << "  - config_save_behavior:    " << config.config_save_behavior << " (default action for the 'config' command)\n";
+// }
 
 static void save_config_interactive(CliConfig& config) {
     std::string def_char;
@@ -537,13 +557,162 @@ static void save_config_interactive(CliConfig& config) {
     }
 }
 void run_config_editor(CliConfig& config) {
-    // TBD: Full implementation in next section
-    std::cout << "Interactive config editor not yet implemented." << std::endl;
-    print_config(config);
+    auto screen = ScreenInteractive::Fullscreen();
+    CliConfig temp_config = config; // Work on a copy
+    
+    std::vector<std::string*> string_fields = {
+        &temp_config.cache_root_dir, &temp_config.default_print_mode,
+        &temp_config.default_traversal_arg, &temp_config.default_cache_clear_arg,
+        &temp_config.default_exit_save_path, &temp_config.config_save_behavior,
+        &temp_config.editor_save_behavior, &temp_config.default_timer_log_path,
+        &temp_config.default_ops_list_mode, &temp_config.ops_plugin_path_mode
+    };
+    std::vector<std::string> field_labels = {
+        "cache_root_dir", "default_print_mode", "default_traversal_arg",
+        "default_cache_clear_arg", "default_exit_save_path", "config_save_behavior",
+        "editor_save_behavior", "default_timer_log_path", "default_ops_list_mode",
+        "ops_plugin_path_mode"
+    };
+
+    int selected = 0;
+    std::string command_buffer;
+    enum class Mode { Navigate, Edit, Command };
+    Mode mode = Mode::Navigate;
+
+    InputOption input_option;
+    input_option.on_enter = [&] {
+        mode = Mode::Navigate;
+    };
+    Component input = Input(&command_buffer, "...", input_option);
+
+    auto main_container = Container::Vertical({}); // We will build this dynamically
+
+    auto renderer = Renderer([&] {
+        main_container->DetachAllChildren();
+        
+        // Render string fields
+        for (size_t i = 0; i < string_fields.size(); ++i) {
+            auto content = hbox({
+                text(field_labels[i] + ": ") | size(WIDTH, EQUAL, 30),
+                (selected == i && mode == Mode::Edit)
+                    ? input->Render() | flex
+                    : text(*string_fields[i]) | flex,
+            });
+            if (selected == i) content |= inverted;
+            main_container->Add(Renderer([content]{ return content; }));
+        }
+        
+        // Render plugin_dirs list
+        main_container->Add(Renderer([]{ return separator(); }));
+        main_container->Add(Renderer([]{ return text("plugin_dirs:") | bold; }));
+        for (size_t i = 0; i < temp_config.plugin_dirs.size(); ++i) {
+            int line_index = string_fields.size() + i;
+            auto content = hbox({
+                text("  - "),
+                (selected == line_index && mode == Mode::Edit)
+                    ? input->Render()
+                    : text(temp_config.plugin_dirs[i]),
+            });
+             if (selected == line_index) content |= inverted;
+            main_container->Add(Renderer([content]{ return content; }));
+        }
+
+        // Help footer
+        std::string help_text;
+        if (mode == Mode::Navigate) help_text = "↑/↓:Move | e:Edit | a:Add Path | d:Del Path | ::Command";
+        else if (mode == Mode::Edit) help_text = "Enter:Accept | Esc:Cancel";
+        else if (mode == Mode::Command) help_text = "Enter command > :" + command_buffer;
+
+        return vbox({
+            main_container->Render() | flex,
+            separator(),
+            text(help_text)
+        }) | border;
+    });
+
+    auto component = CatchEvent(renderer, [&](Event event) {
+        if (mode == Mode::Edit) {
+            if (event == Event::Escape) {
+                mode = Mode::Navigate;
+                return true;
+            }
+            return input->OnEvent(event);
+        }
+
+        if (mode == Mode::Command) {
+             if (event == Event::Return) {
+                if (command_buffer == "a" || command_buffer == "apply") {
+                    config = temp_config; // Apply changes
+                    handle_interactive_save(config);
+                } else if (command_buffer == "w" || command_buffer == "write") {
+                    handle_interactive_save(temp_config);
+                } else if (command_buffer == "q" || command_buffer == "quit") {
+                    screen.Exit();
+                }
+                command_buffer.clear();
+                mode = Mode::Navigate;
+             } else if (event.is_character()) {
+                command_buffer += event.character();
+             } else if (event == Event::Backspace && !command_buffer.empty()) {
+                command_buffer.pop_back();
+             } else if (event == Event::Escape) {
+                command_buffer.clear();
+                mode = Mode::Navigate;
+             }
+             return true;
+        }
+
+        // Navigate mode
+        if (event == Event::ArrowUp) selected = std::max(0, selected - 1);
+        if (event == Event::ArrowDown) selected = std::min(int(string_fields.size() + temp_config.plugin_dirs.size() - 1), selected + 1);
+        if (event == Event::Character(':')) {
+            mode = Mode::Command;
+            command_buffer.clear();
+        }
+        if (event == Event::Character('e')) {
+            mode = Mode::Edit;
+            if (selected < string_fields.size()) {
+                command_buffer = *string_fields[selected];
+            } else {
+                command_buffer = temp_config.plugin_dirs[selected - string_fields.size()];
+            }
+            input->TakeFocus();
+        }
+        if (event == Event::Character('a')) {
+            if (selected >= string_fields.size()) {
+                 temp_config.plugin_dirs.insert(temp_config.plugin_dirs.begin() + (selected - string_fields.size() + 1), "<new path>");
+            }
+        }
+        if (event == Event::Character('d')) {
+            if (selected >= string_fields.size() && !temp_config.plugin_dirs.empty()) {
+                temp_config.plugin_dirs.erase(temp_config.plugin_dirs.begin() + (selected - string_fields.size()));
+                selected = std::max(0, selected - 1);
+            }
+        }
+        if (event == Event::Return && mode == Mode::Edit) {
+            if (selected < string_fields.size()) {
+                *string_fields[selected] = command_buffer;
+            } else {
+                temp_config.plugin_dirs[selected - string_fields.size()] = command_buffer;
+            }
+            mode = Mode::Navigate;
+        }
+        
+        return false;
+    });
+
+    screen.Loop(component);
 }
 void run_node_editor(int node_id, NodeGraph& graph, CliConfig& config) {
-    // TBD: Full implementation in next section
-    std::cout << "Interactive node editor for node " << node_id << " not yet implemented." << std::endl;
+     auto screen = ScreenInteractive::Fullscreen();
+     // ... a more complex version of the config editor's state management
+     std::cout << "Node editor is a work in progress. Press 'q' to exit." << std::endl;
+     auto component = Renderer([]{ return text("Node Editor TBD"); });
+     component |= CatchEvent([&](Event event){
+        if (event == Event::Character('q')) screen.Exit();
+        return false;
+     });
+     screen.Loop(component);
 }
 
 static bool process_command(const std::string& line, NodeGraph& graph, bool& modified, CliConfig& config, const std::map<std::string, std::string>& op_sources) {
@@ -597,8 +766,7 @@ static bool process_command(const std::string& line, NodeGraph& graph, bool& mod
             try {
                 int node_id = std::stoi(id_str);
                 if (graph.has_node(node_id)) {
-                    NodeEditor editor(screen, node_id, graph, config);
-                    editor.Run();
+                    run_node_editor(node_id, graph, config);
                 } else {
                     std::cout << "Error: Node with ID " << node_id << " not found." << std::endl;
                 }
@@ -717,8 +885,7 @@ static bool process_command(const std::string& line, NodeGraph& graph, bool& mod
             
             do_traversal(graph, show_mem, show_disk);
         } else if (cmd == "config") {
-            ConfigEditor editor(screen, config);
-            editor.Run();
+            run_config_editor(config);
         } 
         else if (cmd == "read") {
             std::string path; iss >> path; if (path.empty()) std::cout << "Usage: read <filepath>\n";
