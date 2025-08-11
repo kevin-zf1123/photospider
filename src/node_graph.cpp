@@ -252,6 +252,16 @@ void NodeGraph::print_dependency_tree(std::ostream& os, bool show_parameters) co
         print_dep_tree_recursive(*this, os, end_node_id, 0, path, show_parameters);
     }
 }
+void NodeGraph::print_dependency_tree(std::ostream& os, int start_node_id, bool show_parameters) const {
+    os << "Dependency Tree (starting from Node " << start_node_id << "):\n";
+    if (!has_node(start_node_id)) {
+        os << "(Node " << start_node_id << " not found in graph)\n";
+        return;
+    }
+    
+    std::unordered_set<int> path;
+    print_dep_tree_recursive(*this, os, start_node_id, 0, path, show_parameters);
+}
 
 static void topo_postorder_util(const NodeGraph& g, int node_id, std::vector<int>& order, std::unordered_map<int, bool>& visited, std::unordered_map<int, bool>& recursion_stack) {
     visited[node_id] = true;

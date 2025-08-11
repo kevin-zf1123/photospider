@@ -103,7 +103,6 @@ static void load_or_create_config(const std::string& config_path, CliConfig& con
         }
     }
 }
-
 static void print_cli_help() {
     std::cout << "Usage: graph_cli [options]\n\n"
               << "Options:\n"
@@ -118,7 +117,7 @@ static void print_cli_help() {
               << std::endl;
 }
 
-// --- MODIFIED: Updated help text for config command ---
+// --- MODIFIED: Updated help text for the 'print' command ---
 static void print_repl_help() {
     std::cout << "Available REPL (interactive shell) commands:\n"
               << "  help                       Show this help message.\n"
@@ -129,7 +128,7 @@ static void print_repl_help() {
               << "                             Modes: all(a), builtin(b), plugins(p)\n"
               << "  read <file>                Load a YAML graph from a file.\n"
               << "  source <file>              Execute commands from a script file.\n"
-              << "  print [mode]               Show the dependency tree.\n"
+              << "  print [<id>|all] [mode]    Show the dependency tree. (Default: all)\n"
               << "                             Modes: detailed(d), simplified(s)\n"
               << "  node <id>                  Show the YAML definition of a single node.\n"
               << "  traversal [flags]          Show evaluation order with cache status and tree flags.\n"
@@ -147,7 +146,7 @@ static void print_repl_help() {
               << "  exit                       Quit the shell.\n";
 }
 
-// ... (ask, ask_yesno, do_traversal are unchanged) ...
+// ... (ask, ask_yesno, do_traversal, print_config, save_config_interactive are unchanged) ...
 static std::string ask(const std::string& q, const std::string& def = "") {
     std::cout << q; if (!def.empty()) std::cout << " [" << def << "]";
     std::cout << ": "; std::string s; std::getline(std::cin, s);
@@ -265,6 +264,7 @@ static void save_config_interactive(CliConfig& config) {
         }
     }
 }
+// --- MODIFIED: The main command processing function ---
 static bool process_command(const std::string& line, NodeGraph& graph, bool& modified, CliConfig& config, const std::map<std::string, std::string>& op_sources) {
     std::istringstream iss(line);
     std::string cmd;
@@ -277,18 +277,36 @@ static bool process_command(const std::string& line, NodeGraph& graph, bool& mod
         } else if (cmd == "clear" || cmd == "cls") {
             std::cout << "\033[2J\033[1;1H";
         } else if (cmd == "print") {
-            std::string mode_arg;
-            iss >> mode_arg;
-            if (mode_arg.empty()) {
-                mode_arg = config.default_print_mode;
+            // --- NEW: Robust argument parsing for 'print' ---
+            std::string target_str = "all";
+            std::string mode_str = config.default_print_mode;
+            bool target_is_set = false;
+
+            std::string arg;
+            while(iss >> arg) {
+                // Check if the argument is a mode flag
+                if (arg == "d" || arg == "detailed" || arg == "s" || arg == "simplified") {
+                    mode_str = arg;
+                } else { // Otherwise, assume it's a target
+                    if (target_is_set) {
+                         std::cout << "Warning: Multiple targets specified for print; using last one ('" << arg << "').\n";
+                    }
+                    target_str = arg;
+                    target_is_set = true;
+                }
             }
 
-            if (mode_arg == "detailed" || mode_arg == "d") {
-                graph.print_dependency_tree(std::cout, true);
-            } else if (mode_arg == "simplified" || mode_arg == "s") {
-                graph.print_dependency_tree(std::cout, false);
+            bool show_params = (mode_str == "d" || mode_str == "detailed");
+
+            if (target_str == "all") {
+                graph.print_dependency_tree(std::cout, show_params);
             } else {
-                std::cout << "Error: Invalid mode for 'print'. Use: detailed(d) or simplified(s)." << std::endl;
+                try {
+                    int node_id = std::stoi(target_str);
+                    graph.print_dependency_tree(std::cout, node_id, show_params);
+                } catch (const std::exception&) {
+                    std::cout << "Error: Invalid target '" << target_str << "'. Must be an integer ID or 'all'." << std::endl;
+                }
             }
         } else if (cmd == "node") {
             std::string id_str;
@@ -297,20 +315,16 @@ static bool process_command(const std::string& line, NodeGraph& graph, bool& mod
                 std::cout << "Usage: node <id>" << std::endl;
                 return true;
             }
-
             try {
                 int node_id = std::stoi(id_str);
                 if (graph.has_node(node_id)) {
-                    // The Node class already has a to_yaml() method, so we just call it.
                     const auto& node_to_print = graph.nodes.at(node_id);
                     std::cout << node_to_print.to_yaml() << std::endl;
                 } else {
                     std::cout << "Error: Node with ID " << node_id << " not found in the current graph." << std::endl;
                 }
-            } catch (const std::invalid_argument&) {
+            } catch (const std::exception&) {
                 std::cout << "Error: Invalid node ID. Please provide an integer." << std::endl;
-            } catch (const std::out_of_range&) {
-                std::cout << "Error: Node ID is out of range for an integer." << std::endl;
             }
         } else if (cmd == "ops") {
             std::string mode_arg;
@@ -322,7 +336,6 @@ static bool process_command(const std::string& line, NodeGraph& graph, bool& mod
             std::string display_mode;
             std::string display_title;
 
-            
             if (mode_arg == "all" || mode_arg == "a") {
                 display_mode = "all";
                 display_title = "all";
@@ -345,7 +358,6 @@ static bool process_command(const std::string& line, NodeGraph& graph, bool& mod
                 const std::string& source = pair.second;
                 bool is_builtin = (source == "built-in");
 
-                
                 if ((display_mode == "builtin" && !is_builtin) || (display_mode == "plugins" && is_builtin)) {
                     continue;
                 }
@@ -365,14 +377,12 @@ static bool process_command(const std::string& line, NodeGraph& graph, bool& mod
                 return true;
             }
 
-            
             std::cout << "Available Operations (" << display_title << "):" << std::endl;
             for (auto& pair : grouped_ops) {
                 std::sort(pair.second.begin(), pair.second.end());
                 std::cout << "\n  Type: " << pair.first << std::endl;
                 for (const auto& op_info : pair.second) {
                     std::cout << "    - " << op_info.first;
-                    
                     if (op_info.second != "built-in") {
                         std::string plugin_path_str = op_info.second;
                         std::string display_path;
@@ -470,7 +480,6 @@ static bool process_command(const std::string& line, NodeGraph& graph, bool& mod
                         }
                     }
                 } else {
-                    // This handles the original 'replace' functionality
                     std::string full_value = sub_command + " " + path;
                     std::istringstream val_ss(full_value);
                     std::string single_path;
@@ -704,6 +713,7 @@ static bool process_command(const std::string& line, NodeGraph& graph, bool& mod
     return true;
 }
 
+// ... (run_repl, load_plugins, main are unchanged)
 static void run_repl(NodeGraph& graph, CliConfig& config, const std::map<std::string, std::string>& op_sources) {
     bool modified = false;
     std::string line;

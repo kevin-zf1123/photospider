@@ -44,6 +44,7 @@ public:
     void clear_timing_results();
     std::vector<int> ending_nodes() const;
     void print_dependency_tree(std::ostream& os, bool show_parameters = true) const;
+    void print_dependency_tree(std::ostream& os, int start_node_id, bool show_parameters = true) const;
     std::vector<int> topo_postorder_from(int end_node_id) const;
 
 private:
