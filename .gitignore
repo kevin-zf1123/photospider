@@ -42,7 +42,7 @@
 # that have no place in a shared repository.
 
 # macOS Finder data
-.DS_Store
+*.DS_Store
 
 # macOS resource forks
 ._*
