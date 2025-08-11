@@ -1,14 +1,4 @@
 // FILE: cli/graph_cli.cpp
-//
-// --- MODIFICATIONS ---
-//
-// 1.  The `NodeEditor` class has been significantly refactored to fix the editing bug.
-// 2.  It no longer uses `static` variables inside the `FlattenNode` method.
-// 3.  It now uses a single, shared input component (`editor_input_`) for all fields,
-//     mirroring the robust pattern used in working UI editors.
-// 4.  The concept of "flattening" the node data into string member variables and
-//     then "un-flattening" them upon applying changes has been properly implemented.
-//
 #include <getopt.h>
 #include <limits>
 #include <regex>
@@ -354,105 +344,227 @@ private:
 };
 
 
-// --- Interactive Node Editor (REFACTORED) ---
-class NodeEditor : public TuiEditor {
+// --- TreeView: A custom component for displaying and selecting from a tree ---
+// This is a new helper class to manage the complex interactive tree panels.
+class TreeView : public ftxui::ComponentBase {
+public:
+    TreeView(std::function<void(int)> on_select, std::function<void(int)> on_activate)
+        : on_select_(on_select), on_activate_(on_activate) {}
+
+    // Update the content of the tree view.
+    void SetContent(const std::string& content) {
+        lines_.clear();
+        std::stringstream ss(content);
+        std::string line;
+        std::regex node_regex(R"(- Node (\d+))");
+        while (std::getline(ss, line)) {
+            std::smatch match;
+            std::optional<int> node_id;
+            if (std::regex_search(line, match, node_regex) && match.size() > 1) {
+                node_id = std::stoi(match[1]);
+            }
+            lines_.push_back({line, node_id});
+        }
+        selected_ = std::max(0, std::min(selected_, (int)lines_.size() - 1));
+    }
+
+    Element Render() {
+        Elements elements;
+        for (size_t i = 0; i < lines_.size(); ++i) {
+            Element e = text(lines_[i].text);
+            if (lines_[i].node_id.has_value()) {
+                 e |= bold;
+            }
+            if ((int)i == selected_ && Focused()) {
+                e = e | inverted | focus;
+            }
+            elements.push_back(e);
+        }
+        return vbox(std::move(elements)) | vscroll_indicator | yframe;
+    }
+
+    bool OnEvent(Event event) override {
+        if (!Focused()) return false;
+
+        int old_selected = selected_;
+        if (event == Event::ArrowUp) selected_ = std::max(0, selected_ - 1);
+        if (event == Event::ArrowDown) selected_ = std::min((int)lines_.size() - 1, selected_);
+        if (event == Event::PageUp) selected_ = std::max(0, selected_ - 10);
+        if (event == Event::PageDown) selected_ = std::min((int)lines_.size() - 1, selected_ + 10);
+        if (event == Event::Home) selected_ = 0;
+        if (event == Event::End) selected_ = (int)lines_.size() - 1;
+
+        if (selected_ != old_selected) {
+            on_select_(selected_);
+            return true;
+        }
+
+        if (event == Event::Return) {
+            if (selected_ < (int)lines_.size() && lines_[selected_].node_id.has_value()) {
+                on_activate_(*lines_[selected_].node_id);
+            }
+            return true;
+        }
+        
+        if (event.is_mouse()) {
+            if (event.mouse().button == Mouse::Left && event.mouse().motion == Mouse::Pressed) {
+                if (Box().Contain(event.mouse().x, event.mouse().y)) {
+                    TakeFocus();
+                    selected_ = event.mouse().y - Box().y_min;
+                    selected_ = std::max(0, std::min((int)lines_.size() - 1, selected_));
+                    if (selected_ < (int)lines_.size() && lines_[selected_].node_id.has_value()) {
+                        on_activate_(*lines_[selected_].node_id);
+                    }
+                    return true;
+                }
+            }
+        }
+
+        return false;
+    }
+
 private:
-    // This helper struct defines the structure of each line in the editor UI.
-    // It no longer contains a UI component.
+    struct Line {
+        std::string text;
+        std::optional<int> node_id;
+    };
+    std::vector<Line> lines_;
+    int selected_ = 0;
+    std::function<void(int)> on_select_;
+    std::function<void(int)> on_activate_;
+};
+
+
+// --- AdvancedNodeEditor: The new, feature-rich TUI for editing nodes ---
+class AdvancedNodeEditor : public TuiEditor {
+private:
     struct EditableLine {
         std::string label;
-        std::string* value_ptr; // Pointer to the string representation in the editor's state
+        std::string* value_ptr;
         std::function<void()> add_fn = nullptr;
         std::function<void()> del_fn = nullptr;
     };
 
 public:
-    NodeEditor(ScreenInteractive& screen, int node_id, NodeGraph& graph, CliConfig& config)
-        : TuiEditor(screen), graph_(graph), node_id_(node_id), temp_node_(graph.nodes.at(node_id)), config_(config) 
+    AdvancedNodeEditor(ScreenInteractive& screen, int node_id, NodeGraph& graph, CliConfig& config)
+        : TuiEditor(screen), graph_(graph), focused_node_id_(node_id), temp_node_(graph.nodes.at(node_id)), config_(config) 
     {
-        // Configure the single, shared input component.
         InputOption opt;
-        opt.on_enter = [this] {
-            // On pressing enter, commit the buffer's content back to the string it was editing.
-            if (selected_ < editable_lines_.size()) {
-                *editable_lines_[selected_].value_ptr = edit_buffer_;
-            }
-            mode_ = Mode::Navigate;
-        };
+        opt.on_enter = [this] { CommitEdit(); };
         editor_input_ = Input(&edit_buffer_, "...", opt);
 
-        // Initial data synchronization
-        SyncModelToStrings();
-        RebuildLineView();
-        RefreshTree();
+        auto on_tree_select = [&](int /*line_number*/) { screen_.Post(Event::Custom); };
+        auto on_tree_activate = [&](int new_node_id) { SwitchToNode(new_node_id); };
+        
+        top_tree_view_ = std::make_shared<TreeView>(on_tree_select, on_tree_activate);
+        bottom_tree_view_ = std::make_shared<TreeView>(on_tree_select, on_tree_activate);
+
+        main_container_ = Container::Horizontal({
+            Container::Vertical({
+                // Left Panel Placeholder
+            }),
+            Container::Vertical({
+                top_tree_view_,
+                bottom_tree_view_,
+            })
+        });
+
+        SwitchToNode(focused_node_id_);
     }
     
     void Run() override {
-        // The container is now just a placeholder for the renderer to fill.
-        auto main_container = Container::Vertical({});
-
-        auto component = Renderer(main_container, [&] {
-            Elements left_elements;
+        auto left_panel = Renderer([&] {
+            Elements line_elements;
             for(size_t i = 0; i < editable_lines_.size(); ++i) {
                 auto& line = editable_lines_[i];
+                Element display_element;
+                if (line.value_ptr) {
+                    display_element = text(*line.value_ptr);
+                } else {
+                    display_element = text("...") | dim; // BUG FIX: Don't dereference nullptr
+                }
+
                 auto content = hbox({
                     text(line.label) | size(WIDTH, EQUAL, 25),
-                    // Display the shared input component only on the selected line in edit mode
-                    (selected_ == i && mode_ == Mode::Edit)
+                    (selected_editor_line_ == (int)i && editor_mode_ == EditorMode::Edit)
                         ? editor_input_->Render() | flex
-                        : text(*line.value_ptr) | flex,
+                        : display_element | flex,
                 });
-                if (selected_ == i) content |= inverted;
-                left_elements.push_back(content);
+                if (selected_editor_line_ == (int)i && focused_pane_ == Pane::Editor) content |= inverted;
+                line_elements.push_back(content);
             }
-            auto node_view = vbox(std::move(left_elements)) | vscroll_indicator | frame | flex;
-            auto tree_view = vbox(tree_lines_) | vscroll_indicator | frame | flex;
-            
+            return vbox(std::move(line_elements)) | vscroll_indicator | frame | flex;
+        });
+
+        auto right_panel = Container::Vertical({
+            Renderer(top_tree_view_, [&] { 
+                return vbox({
+                    text(show_ancestor_tree_ ? "Ancestors Tree" : "Containing Trees") | bold | hcenter,
+                    separator(),
+                    top_tree_view_->Render() | flex
+                }) | frame;
+            }),
+            Renderer(bottom_tree_view_, [&] {
+                 return vbox({
+                    text("Full Graph Tree") | bold | hcenter,
+                    separator(),
+                    bottom_tree_view_->Render() | flex
+                }) | frame;
+            })
+        });
+
+        auto main_layout = Container::Horizontal({ left_panel, right_panel });
+        
+        auto component = Renderer(main_layout, [&] {
             return vbox({
-                hbox(node_view, separator(), tree_view),
+                hbox(left_panel->Render() | flex, separator(), right_panel->Render() | flex),
                 separator(),
                 RenderStatusBar()
             });
         });
 
         component |= CatchEvent([&](Event event) {
-            if (mode_ == Mode::Command) {
+            if (editor_mode_ == EditorMode::Command) {
                  if (event == Event::Return) { ExecuteCommand(); return true; }
-                 if (event == Event::Escape) { mode_ = Mode::Navigate; command_buffer_.clear(); return true; }
+                 if (event == Event::Escape) { editor_mode_ = EditorMode::Navigate; command_buffer_.clear(); return true; }
                  if (event.is_character()) { command_buffer_ += event.character(); return true; }
                  if (event == Event::Backspace && !command_buffer_.empty()) { command_buffer_.pop_back(); return true; }
                  return false;
             }
             
-            if (mode_ == Mode::Edit) {
-                // If Esc is pressed, cancel the edit without saving from the buffer.
-                if (event == Event::Escape) { mode_ = Mode::Navigate; return true; }
-                // All other events go to the single shared input component.
+            if (editor_mode_ == EditorMode::Edit) {
+                if (event == Event::Escape) { editor_mode_ = EditorMode::Navigate; return true; }
                 return editor_input_->OnEvent(event);
             }
-            
+
             // --- Navigation Mode Logic ---
-            if (event == Event::ArrowUp) { selected_ = std::max(0, selected_ - 1); return true; }
-            if (event == Event::ArrowDown) { selected_ = std::min(int(editable_lines_.size() - 1), selected_ + 1); return true; }
-            if (event == Event::Character('e')) { EnterEditMode(); return true; }
-            if (event == Event::Character('a')) {
-                if(editable_lines_[selected_].add_fn) editable_lines_[selected_].add_fn();
+            if (event == Event::ArrowLeft) { focused_pane_ = Pane::Editor; return true; }
+            if (event == Event::ArrowRight) { focused_pane_ = Pane::TopTree; top_tree_view_->TakeFocus(); return true; }
+            
+            if (event == Event::Tab) {
+                if (focused_pane_ == Pane::Editor) { focused_pane_ = Pane::TopTree; top_tree_view_->TakeFocus(); }
+                else if (focused_pane_ == Pane::TopTree) { focused_pane_ = Pane::BottomTree; bottom_tree_view_->TakeFocus(); }
+                else { focused_pane_ = Pane::Editor; }
                 return true;
             }
-            if (event == Event::Character('d')) {
-                if(editable_lines_[selected_].del_fn) editable_lines_[selected_].del_fn();
-                return true;
+            
+            if (focused_pane_ == Pane::Editor) {
+                if (event == Event::ArrowUp) { selected_editor_line_ = std::max(0, selected_editor_line_ - 1); return true; }
+                if (event == Event::ArrowDown) { selected_editor_line_ = std::min(int(editable_lines_.size() - 1), selected_editor_line_ + 1); return true; }
+                if (event == Event::Character('e') || event == Event::Return) { EnterEditMode(); return true; }
+                if (event == Event::Character('a')) { if(editable_lines_[selected_editor_line_].add_fn) editable_lines_[selected_editor_line_].add_fn(); return true; }
+                if (event == Event::Character('d')) { if(editable_lines_[selected_editor_line_].del_fn) editable_lines_[selected_editor_line_].del_fn(); return true; }
+            } else if (focused_pane_ == Pane::TopTree) {
+                return top_tree_view_->OnEvent(event);
+            } else if (focused_pane_ == Pane::BottomTree) {
+                return bottom_tree_view_->OnEvent(event);
             }
-            if (event == Event::Character(':')) {
-                mode_ = Mode::Command;
-                command_buffer_.clear();
-                return true;
-            }
-            if (event == Event::Character('q')) {
-                // TODO: Add check for unsaved changes
-                screen_.Exit();
-                return true;
-            }
+
+            if (event == Event::Character('t')) { show_ancestor_tree_ = !show_ancestor_tree_; RefreshTopTree(); return true; }
+            if (event == Event::Character('d')) { detailed_trees_ = !detailed_trees_; RefreshAllTrees(); return true; }
+
+            if (event == Event::Character(':')) { editor_mode_ = EditorMode::Command; command_buffer_.clear(); return true; }
+            if (event == Event::Character('q')) { screen_.Exit(); return true; }
             return false;
         });
         
@@ -460,7 +572,15 @@ public:
     }
 
 private:
-    // Syncs the data from the `temp_node_` object into the editor's string member variables.
+    void SwitchToNode(int new_id) {
+        if (!graph_.has_node(new_id)) return;
+        focused_node_id_ = new_id;
+        temp_node_ = graph_.nodes.at(new_id);
+        SyncModelToStrings();
+        RebuildLineView();
+        RefreshAllTrees();
+    }
+
     void SyncModelToStrings() {
         name_str_ = temp_node_.name;
         type_str_ = temp_node_.type;
@@ -476,17 +596,13 @@ private:
         }
     }
 
-    // Syncs the data from the editor's string member variables back to the `temp_node_`.
-    // This is where validation and parsing happens.
     void SyncStringsToModel() {
         temp_node_.name = name_str_;
         temp_node_.type = type_str_;
         temp_node_.subtype = subtype_str_;
 
-        // It's critical to wrap parsing in a try-catch block
         try {
             temp_node_.parameters = YAML::Load(params_yaml_str_);
-
             temp_node_.image_inputs.clear();
             for (const auto& str_pair : image_inputs_str_) {
                 ImageInput i;
@@ -496,13 +612,10 @@ private:
             }
         } catch (const std::exception& e) {
             status_message_ = std::string("Parse Error: ") + e.what();
-            // Revert the string that caused the error to its previous valid state.
-            // A more robust implementation would be needed for a real application.
-            throw; // Re-throw to abort the apply operation
+            throw; 
         }
     }
 
-    // Rebuilds the `editable_lines_` vector to reflect the current state of the string members.
     void RebuildLineView() {
         editable_lines_.clear();
         
@@ -527,7 +640,6 @@ private:
             add_line("Img Input " + std::to_string(i) + " Node ID", &image_inputs_str_[i].first, add_fn, del_fn);
             add_line("Img Input " + std::to_string(i) + " Output", &image_inputs_str_[i].second, nullptr, nullptr);
         }
-        // If there are no image inputs, provide a way to add the first one.
         if (image_inputs_str_.empty()) {
              add_line("(Image Inputs)", nullptr, [this]{
                 image_inputs_str_.emplace_back("-1", "image");
@@ -537,36 +649,55 @@ private:
     }
     
     void EnterEditMode() {
-        if (selected_ >= editable_lines_.size() || !editable_lines_[selected_].value_ptr) return;
-        mode_ = Mode::Edit;
-        // Copy the current value into the shared edit buffer before editing starts.
-        edit_buffer_ = *editable_lines_[selected_].value_ptr;
+        if (selected_editor_line_ >= (int)editable_lines_.size() || !editable_lines_[selected_editor_line_].value_ptr) return;
+        editor_mode_ = EditorMode::Edit;
+        edit_buffer_ = *editable_lines_[selected_editor_line_].value_ptr;
         editor_input_->TakeFocus();
     }
     
-    void RefreshTree() {
-        tree_lines_.clear();
-        std::stringstream ss;
-        graph_.print_dependency_tree(ss, node_id_, true);
-        std::string line;
-        while(std::getline(ss, line)) {
-            tree_lines_.push_back(text(line));
+    void CommitEdit() {
+        if (selected_editor_line_ < (int)editable_lines_.size() && editable_lines_[selected_editor_line_].value_ptr) {
+            *editable_lines_[selected_editor_line_].value_ptr = edit_buffer_;
         }
+        editor_mode_ = EditorMode::Navigate;
+    }
+
+    void RefreshTopTree() {
+        std::stringstream ss;
+        if (show_ancestor_tree_) {
+            graph_.print_dependency_tree(ss, focused_node_id_, detailed_trees_);
+        } else {
+            auto containing_trees = graph_.get_trees_containing_node(focused_node_id_);
+            if (containing_trees.empty()) {
+                ss << "(Node " << focused_node_id_ << " is not part of any final output tree)";
+            } else {
+                 ss << "Node " << focused_node_id_ << " is part of " << containing_trees.size() << " tree(s):\n";
+                for (int end_node_id : containing_trees) {
+                    graph_.print_dependency_tree(ss, end_node_id, detailed_trees_);
+                }
+            }
+        }
+        top_tree_view_->SetContent(ss.str());
+    }
+
+    void RefreshBottomTree() {
+        std::stringstream ss;
+        graph_.print_dependency_tree(ss, detailed_trees_);
+        bottom_tree_view_->SetContent(ss.str());
+    }
+
+    void RefreshAllTrees() {
+        RefreshTopTree();
+        RefreshBottomTree();
     }
 
     Element RenderStatusBar() {
         std::string help;
-        if (mode_ == Mode::Navigate) {
-            help = "↑/↓:Move | e:Edit | q:Quit | ::Command";
-            if (selected_ < editable_lines_.size()) {
-                if (editable_lines_[selected_].add_fn) help += " | a:Add";
-                if (editable_lines_[selected_].del_fn) help += " | d:Delete";
-            }
+        if (editor_mode_ == EditorMode::Navigate) {
+            help = "←/→:Panes | Tab:Focus | e/⏎:Edit | q:Quit | t:Toggle Top Tree | d:Toggle Details | ::Command";
         }
-        else if (mode_ == Mode::Edit) help = "Enter:Accept | Esc:Cancel";
-        else if (mode_ == Mode::Command) {
-            // --- MODIFIED PART ---
-            // Display command tips when in command mode.
+        else if (editor_mode_ == EditorMode::Edit) help = "Enter:Accept | Esc:Cancel";
+        else if (editor_mode_ == EditorMode::Command) {
             return hbox({
                        text(":" + command_buffer_),
                        text(" ") | blink,
@@ -581,7 +712,7 @@ private:
 
     void ExecuteCommand() {
         std::string cmd = command_buffer_;
-        mode_ = Mode::Navigate;
+        editor_mode_ = EditorMode::Navigate;
         command_buffer_.clear();
 
         if (cmd == "a" || cmd == "apply") HandleApply();
@@ -599,59 +730,63 @@ private:
 
     bool HandleApply() {
         try {
-            // "Un-flatten" the strings back into the temporary node object.
             SyncStringsToModel();
         } catch (const std::exception&) {
-            // status_message_ is already set by SyncStringsToModel on error
             return false;
         }
         
-        // Create a temporary graph to perform a cycle check before committing.
         NodeGraph temp_graph = graph_;
-        temp_graph.nodes.at(node_id_) = temp_node_;
+        temp_graph.nodes.at(focused_node_id_) = temp_node_;
         bool cycle_found = false;
         try {
-            temp_graph.topo_postorder_from(node_id_);
+            temp_graph.topo_postorder_from(focused_node_id_);
         } catch (const GraphError&) {
             cycle_found = true;
             status_message_ = "Error: Cycle detected! Changes aborted.";
         }
 
         if (!cycle_found) {
-            // If validation passes, commit the changes to the real graph.
-            graph_.nodes.at(node_id_) = temp_node_;
+            graph_.nodes.at(focused_node_id_) = temp_node_;
             status_message_ = "Changes applied successfully.";
-            RefreshTree();
+            RefreshAllTrees();
             return true;
         }
         return false;
     }
 
     NodeGraph& graph_;
-    int node_id_;
+    int focused_node_id_;
     ps::Node temp_node_;
     CliConfig& config_;
     
-    // --- State for the editor UI ---
-    std::vector<EditableLine> editable_lines_;
-    Elements tree_lines_;
-    std::string status_message_ = "Ready";
-    int selected_ = 0;
+    // UI State
+    enum class Pane { Editor, TopTree, BottomTree };
+    Pane focused_pane_ = Pane::Editor;
 
-    // --- State for string representations of node properties ---
+    enum class EditorMode { Navigate, Edit, Command };
+    EditorMode editor_mode_ = EditorMode::Navigate;
+
+    std::string status_message_ = "Ready";
+    bool show_ancestor_tree_ = true;
+    bool detailed_trees_ = true;
+    std::string command_buffer_;
+
+    // Editor Panel State
+    std::vector<EditableLine> editable_lines_;
+    int selected_editor_line_ = 0;
+    std::string edit_buffer_;
+    Component editor_input_;
+    
     std::string name_str_;
     std::string type_str_;
     std::string subtype_str_;
     std::string params_yaml_str_;
     std::vector<std::pair<std::string, std::string>> image_inputs_str_;
 
-    // --- Single shared component for editing ---
-    std::string edit_buffer_;
-    Component editor_input_;
-
-    enum class Mode { Navigate, Edit, Command };
-    Mode mode_ = Mode::Navigate;
-    std::string command_buffer_;
+    // Tree Panel State
+    std::shared_ptr<TreeView> top_tree_view_;
+    std::shared_ptr<TreeView> bottom_tree_view_;
+    Component main_container_;
 };
 
 
@@ -751,7 +886,8 @@ static void print_repl_help() {
               << "  source <file>              Execute commands from a script file.\n"
               << "  print [<id>|all] [mode]    Show the dependency tree. (Default: all)\n"
               << "                             Modes: detailed(d), simplified(s)\n"
-              << "  node <id>                  Open the interactive editor for a single node.\n"
+              << "  node [<id>]                Open the interactive editor for a node.\n"
+              << "                             If <id> is omitted, a selection menu is shown.\n"
               << "  traversal [flags]          Show evaluation order with cache status and tree flags.\n"
               << "                             Tree Flags: detailed(d), simplified(s), no_tree(n)\n"
               << "                             Cache Flags: m(memory), d(disk), c(check), cr(check&remove)\n"
@@ -774,7 +910,7 @@ static std::string ask(const std::string& q, const std::string& def) {
     if (s.empty()) return def; return s;
 }
 
-static bool ask_yesno(const std::string& q, bool def = true) {
+static bool ask_yesno(const std::string& q, bool def) {
     std::string d = def ? "Y" : "n";
     while (true) {
         std::string s = ask(q + " [Y/n]", d); if (s.empty()) return def;
@@ -842,28 +978,6 @@ static void do_traversal(const NodeGraph& graph, bool show_mem, bool show_disk) 
         }
     }
 }
-// static void print_config(const CliConfig& config) {
-//     std::cout << "Current CLI Configuration:\n"
-//               << "  - loaded_config_path:      " << (config.loaded_config_path.empty() ? "(none)" : config.loaded_config_path) << "\n"
-//               << "  - cache_root_dir:          " << config.cache_root_dir << "\n"
-//               << "  - plugin_dirs:             \n";
-//     if (config.plugin_dirs.empty()) {
-//         std::cout << "    (none)\n";
-//     } else {
-//         for (const auto& dir : config.plugin_dirs) {
-//             std::cout << "    - " << dir << "\n";
-//         }
-//     }
-//     std::cout << "  - ops_plugin_path_mode:    " << config.ops_plugin_path_mode << "\n"
-//               << "  - default_print_mode:      " << config.default_print_mode << "\n"
-//               << "  - default_ops_list_mode:   " << config.default_ops_list_mode << "\n"
-//               << "  - default_traversal_arg:   " << config.default_traversal_arg << "\n"
-//               << "  - default_cache_clear_arg: " << config.default_cache_clear_arg << "\n"
-//               << "  - default_exit_save_path:  " << config.default_exit_save_path << "\n"
-//               << "  - exit_prompt_sync:        " << (config.exit_prompt_sync ? "true" : "false") << "\n"
-//               << "  - config_save_behavior:    " << config.config_save_behavior << " (default action for the 'config' command)\n";
-// }
-
 static void save_config_interactive(CliConfig& config) {
     std::string def_char;
     std::string prompt = "Save updated configuration? [";
@@ -911,7 +1025,7 @@ void run_config_editor(CliConfig& config) {
 }
 void run_node_editor(int node_id, NodeGraph& graph, CliConfig& config) {
      auto screen = ScreenInteractive::Fullscreen();
-     NodeEditor editor(screen, node_id, graph, config);
+     AdvancedNodeEditor editor(screen, node_id, graph, config);
      editor.Run();
 }
 
@@ -961,7 +1075,39 @@ static bool process_command(const std::string& line, NodeGraph& graph, bool& mod
         } else if (cmd == "node") {
             std::string id_str;
             iss >> id_str;
-            if (id_str.empty()) { std::cout << "Usage: node <id>" << std::endl; return true; }
+
+            if (graph.nodes.empty()) {
+                std::cout << "Graph is empty. Load a graph first with 'read <file>'." << std::endl;
+                return true;
+            }
+
+            if (id_str.empty()) {
+                // NEW: Show a selection menu if no ID is provided
+                std::vector<std::string> entries;
+                std::vector<int> node_ids;
+                for(auto const& [id, node] : graph.nodes) {
+                    node_ids.push_back(id);
+                }
+                std::sort(node_ids.begin(), node_ids.end());
+                for(int id : node_ids) {
+                    entries.push_back("ID: " + std::to_string(id) + " (" + graph.nodes.at(id).name + ")");
+                }
+
+                int selected = -1;
+                auto menu = Menu(&entries, &selected);
+                auto menu_component = Renderer(menu, [&] {
+                    return menu->Render() | vscroll_indicator | frame | size(HEIGHT, LESS_THAN, 20);
+                });
+                auto screen = ScreenInteractive::FitComponent();
+                screen.Loop(menu_component);
+
+                if (selected != -1) {
+                    run_node_editor(node_ids[selected], graph, config);
+                    modified = true;
+                }
+                return true;
+            }
+            
             try {
                 int node_id = std::stoi(id_str);
                 if (graph.has_node(node_id)) {

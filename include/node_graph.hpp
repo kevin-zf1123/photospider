@@ -1,3 +1,4 @@
+// FILE: include/node_graph.hpp
 #pragma once
 #include "ps_types.hpp"
 #include "node.hpp"
@@ -46,6 +47,7 @@ public:
     void print_dependency_tree(std::ostream& os, bool show_parameters = true) const;
     void print_dependency_tree(std::ostream& os, int start_node_id, bool show_parameters = true) const;
     std::vector<int> topo_postorder_from(int end_node_id) const;
+    std::vector<int> get_trees_containing_node(int node_id) const;
 
 private:
     const NodeOutput& compute_internal(int node_id, std::unordered_map<int, bool>& visiting, bool force_recache, bool enable_timing);

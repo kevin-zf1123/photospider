@@ -216,7 +216,6 @@ static void print_dep_tree_recursive(const NodeGraph& g, std::ostream& os, int n
     const auto& node = g.nodes.at(node_id);
     os << "- Node " << node.id << " (" << node.name << " | " << node.type << ":" << node.subtype << ")\n";
 
-    // --- MODIFIED: This block is now conditional ---
     if (show_parameters && node.parameters && node.parameters.IsMap() && node.parameters.size() > 0) {
         YAML::Emitter emitter;
         emitter << YAML::Flow << node.parameters;
@@ -311,7 +310,6 @@ bool NodeGraph::is_ancestor(int potential_ancestor_id, int node_id, std::unorder
     return false;
 }
 
-// --- THIS IS THE RESTORED FUNCTION DEFINITION ---
 fs::path NodeGraph::node_cache_dir(int node_id) const {
     return cache_root / std::to_string(node_id);
 }
@@ -437,6 +435,24 @@ void NodeGraph::synchronize_disk_cache() {
         std::cout << "Removed " << removed_dirs << " empty cache director(y/ies)." << std::endl;
     }
     std::cout << "Disk cache synchronization complete." << std::endl;
+}
+
+// --- NEW FUNCTION ---
+std::vector<int> NodeGraph::get_trees_containing_node(int node_id) const {
+    std::vector<int> result_trees;
+    auto all_ends = ending_nodes();
+    for (int end_node : all_ends) {
+        try {
+            auto order = topo_postorder_from(end_node);
+            if (std::find(order.begin(), order.end(), node_id) != order.end()) {
+                result_trees.push_back(end_node);
+            }
+        } catch (const GraphError&) {
+            // Ignore trees that might have cycles during this specific check
+            continue;
+        }
+    }
+    return result_trees;
 }
 
 } // namespace ps
