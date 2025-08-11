@@ -555,7 +555,7 @@ static void load_plugins(const std::string& plugin_dir_path) {
 
 int main(int argc, char** argv) {
     ops::register_builtin();
-    load_plugins("build/plugins"); // Scans the 'plugins' subdirectory in the current working directory
+    
     CliConfig config;
     std::string custom_config_path;
 
@@ -570,33 +570,56 @@ int main(int argc, char** argv) {
         {nullptr, 0, nullptr, 0}
     };
     
+    // First pass to find a custom config path before we load anything
     int opt;
-    // First pass to find a custom config path
     while ((opt = getopt_long(argc, argv, short_opts, long_opts, nullptr)) != -1) {
-        if (opt == 'h') { print_cli_help(); return 0; }
-        if (opt == 2001) custom_config_path = optarg;
+        if (opt == 2001) {
+            custom_config_path = optarg;
+        }
     }
+    optind = 1; // Reset getopt for the main pass
 
     std::string config_to_load = custom_config_path.empty() ? "config.yaml" : custom_config_path;
     load_or_create_config(config_to_load, config);
-    load_plugins(config.plugin_dir); // Load plugins after config is loaded
+
+    load_plugins(config.plugin_dir);
+
     NodeGraph graph{config.cache_root_dir};
     
-    bool did_any = false;
-    bool start_repl = false;
+    bool did_any_action = false;
+    bool start_repl_after_actions = false;
 
-    // Second pass to execute one-shot commands
+    // Second, main pass to execute one-shot commands
     while ((opt = getopt_long(argc, argv, short_opts, long_opts, nullptr)) != -1) {
         try {
             switch (opt) {
-            case 'h': /* Already handled */ break;
-            case 'r': graph.load_yaml(optarg); std::cout << "Loaded graph from " << optarg << "\n"; did_any = true; break;
-            case 'o': graph.save_yaml(optarg); std::cout << "Saved graph to " << optarg << "\n"; did_any = true; break;
-            case 'p': graph.print_dependency_tree(std::cout); did_any = true; break;
-            case 't': do_traversal(graph, true, true); did_any = true; break;
-            case 1001: graph.clear_cache(); did_any = true; break;
-            case 'R': start_repl = true; break;
-            case 2001: /* Already handled */ break;
+            case 'h': print_cli_help(); return 0;
+            case 'r': 
+                graph.load_yaml(optarg); 
+                std::cout << "Loaded graph from " << optarg << "\n"; 
+                did_any_action = true; 
+                break;
+            case 'o': 
+                graph.save_yaml(optarg); 
+                std::cout << "Saved graph to " << optarg << "\n"; 
+                did_any_action = true; 
+                break;
+            case 'p': 
+                graph.print_dependency_tree(std::cout); 
+                did_any_action = true; 
+                break;
+            case 't': 
+                do_traversal(graph, true, true); 
+                did_any_action = true; 
+                break;
+            case 1001: 
+                graph.clear_cache(); 
+                did_any_action = true; 
+                break;
+            case 'R': 
+                start_repl_after_actions = true; 
+                break;
+            case 2001: /* Already handled in first pass */ break;
             default: print_cli_help(); return 1;
             }
         } catch (const std::exception& e) {
@@ -604,8 +627,19 @@ int main(int argc, char** argv) {
         }
     }
 
-    if (!did_any || start_repl) {
+    // --- MODIFIED: New, clearer logic for entering the REPL ---
+    
+    // We enter the REPL if either:
+    //  1. The --repl flag was explicitly provided.
+    //  2. No other actions were specified on the command line (making REPL the default).
+    if (start_repl_after_actions || !did_any_action) {
+        if (did_any_action) {
+            std::cout << "\n--- Command-line actions complete. Entering interactive shell. ---\n";
+        }
         run_repl(graph, config);
+    } else {
+         std::cout << "\n--- Command-line actions complete. Exiting. ---\n";
     }
+    
     return 0;
 }

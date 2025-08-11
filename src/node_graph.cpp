@@ -395,21 +395,36 @@ void NodeGraph::synchronize_disk_cache() {
     std::cout << "Synchronizing disk cache with current memory state..." << std::endl;
     this->cache_all_nodes();
     std::cout << "Checking for orphaned cache files to remove..." << std::endl;
-    int removed_count = 0;
+    int removed_files = 0;
+    int removed_dirs = 0;
     for (const auto& pair : nodes) {
         const Node& node = pair.second;
         if (!node.cached_output.has_value() && !node.caches.empty()) {
+            fs::path dir_path = node_cache_dir(node.id);
+            if (!fs::exists(dir_path)) {
+                continue;
+            }
             for (const auto& cache_entry : node.caches) {
                  if (!cache_entry.location.empty()) {
                     fs::path cache_file = node_cache_dir(node.id) / cache_entry.location;
                     fs::path meta_file = cache_file; meta_file.replace_extension(".yml");
-                    if (fs::exists(cache_file)) { fs::remove(cache_file); removed_count++; }
-                    if (fs::exists(meta_file)) { fs::remove(meta_file); removed_count++; }
+                    if (fs::exists(cache_file)) { fs::remove(cache_file); removed_files++; }
+                    if (fs::exists(meta_file)) { fs::remove(meta_file); removed_files++; }
                  }
+            }
+            if (fs::is_empty(dir_path)) {
+                std::cout << "  - Removing empty cache directory: " << fs::relative(dir_path).string() << std::endl;
+                fs::remove(dir_path);
+                removed_dirs++;
             }
         }
     }
-    if (removed_count > 0) std::cout << "Removed " << removed_count << " orphaned cache file(s)." << std::endl;
+    if (removed_files > 0) {
+        std::cout << "Removed " << removed_files << " orphaned cache file(s)." << std::endl;
+    }
+    if (removed_dirs > 0) {
+        std::cout << "Removed " << removed_dirs << " empty cache director(y/ies)." << std::endl;
+    }
     std::cout << "Disk cache synchronization complete." << std::endl;
 }
 
