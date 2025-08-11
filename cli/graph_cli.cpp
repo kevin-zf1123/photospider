@@ -410,13 +410,28 @@ public:
             if (event.mouse().button == Mouse::Left && event.mouse().motion == Mouse::Pressed) {
                 if (Box().Contain(event.mouse().x, event.mouse().y)) {
                     TakeFocus();
-                    selected_ = event.mouse().y - Box().y_min;
-                    selected_ = std::max(0, std::min((int)lines_.size() - 1, selected_));
-                    if (selected_ < (int)lines_.size() && lines_[selected_].node_id.has_value()) {
-                        on_activate_(*lines_[selected_].node_id);
+                    // This logic is tricky. Recalculate based on box position.
+                    int new_selected = event.mouse().y - Box().y_min;
+                    if (new_selected >= 0 && new_selected < (int)lines_.size()) {
+                        selected_ = new_selected;
+                         on_select_(selected_);
+                        if (lines_[selected_].node_id.has_value()) {
+                            on_activate_(*lines_[selected_].node_id);
+                        }
                     }
                     return true;
                 }
+            }
+             // Allow mouse wheel scrolling
+            if (event.mouse().button == Mouse::WheelUp) {
+                selected_ = std::max(0, selected_ - 1);
+                on_select_(selected_);
+                return true;
+            }
+            if (event.mouse().button == Mouse::WheelDown) {
+                selected_ = std::min((int)lines_.size() - 1, selected_ + 1);
+                on_select_(selected_);
+                return true;
             }
         }
 
@@ -437,229 +452,222 @@ private:
 
 // --- AdvancedNodeEditor: The new, feature-rich TUI for editing nodes ---
 class AdvancedNodeEditor : public TuiEditor {
-private:
-    struct EditableLine {
-        std::string label;
-        std::string* value_ptr;
-        std::function<void()> add_fn = nullptr;
-        std::function<void()> del_fn = nullptr;
-    };
-
 public:
     AdvancedNodeEditor(ScreenInteractive& screen, int node_id, NodeGraph& graph, CliConfig& config)
-        : TuiEditor(screen), graph_(graph), focused_node_id_(node_id), temp_node_(graph.nodes.at(node_id)), config_(config) 
-    {
-        InputOption opt;
-        opt.on_enter = [this] { CommitEdit(); };
-        editor_input_ = Input(&edit_buffer_, "...", opt);
+    : TuiEditor(screen), graph_(graph), focused_node_id_(node_id), temp_node_(graph.nodes.at(node_id)), config_(config)
+{
+    // 1. Set the default action for the input options.
+    editor_input_option_.on_enter = [this] { CommitEdit(); };
+    // 2. Create the input component using the options struct. A placeholder is required.
+    editor_input_ = Input(&edit_buffer_, "placeholder", editor_input_option_);
 
-        auto on_tree_select = [&](int /*line_number*/) { screen_.Post(Event::Custom); };
-        auto on_tree_activate = [&](int new_node_id) { SwitchToNode(new_node_id); };
-        
-        top_tree_view_ = std::make_shared<TreeView>(on_tree_select, on_tree_activate);
-        bottom_tree_view_ = std::make_shared<TreeView>(on_tree_select, on_tree_activate);
+    // Setup the tree view components
+    auto on_tree_select = [&](int /*line_number*/) { screen_.Post(Event::Custom); };
+    auto on_tree_activate = [&](int new_node_id) { SwitchToNode(new_node_id); };
+    top_tree_view_ = std::make_shared<TreeView>(on_tree_select, on_tree_activate);
+    bottom_tree_view_ = std::make_shared<TreeView>(on_tree_select, on_tree_activate);
 
-        main_container_ = Container::Horizontal({
-            Container::Vertical({
-                // Left Panel Placeholder
-            }),
-            Container::Vertical({
-                top_tree_view_,
-                bottom_tree_view_,
-            })
-        });
+    // Setup the editable menu for the left panel
+    RebuildLeftMenu(); // This creates left_menu_
 
-        SwitchToNode(focused_node_id_);
-    }
+    // Container for the right-side panel
+    auto right_panel_container = Container::Vertical({
+        top_tree_view_,
+        bottom_tree_view_,
+    });
+
+    // Main container for the whole editor layout
+    main_container_ = Container::Horizontal({
+        left_menu_,
+        right_panel_container,
+    });
+    
+    // Initial population of all UI elements
+    SwitchToNode(focused_node_id_);
+}
     
     void Run() override {
-        auto left_panel = Renderer([&] {
-            Elements line_elements;
-            for(size_t i = 0; i < editable_lines_.size(); ++i) {
-                auto& line = editable_lines_[i];
-                Element display_element;
-                if (line.value_ptr) {
-                    display_element = text(*line.value_ptr);
-                } else {
-                    display_element = text("...") | dim; // BUG FIX: Don't dereference nullptr
-                }
-
-                auto content = hbox({
-                    text(line.label) | size(WIDTH, EQUAL, 25),
-                    (selected_editor_line_ == (int)i && editor_mode_ == EditorMode::Edit)
-                        ? editor_input_->Render() | flex
-                        : display_element | flex,
-                });
-                if (selected_editor_line_ == (int)i && focused_pane_ == Pane::Editor) content |= inverted;
-                line_elements.push_back(content);
-            }
-            return vbox(std::move(line_elements)) | vscroll_indicator | frame | flex;
-        });
-
-        auto right_panel = Container::Vertical({
-            Renderer(top_tree_view_, [&] { 
-                return vbox({
-                    text(show_ancestor_tree_ ? "Ancestors Tree" : "Containing Trees") | bold | hcenter,
-                    separator(),
-                    top_tree_view_->Render() | flex
-                }) | frame;
-            }),
-            Renderer(bottom_tree_view_, [&] {
-                 return vbox({
-                    text("Full Graph Tree") | bold | hcenter,
-                    separator(),
-                    bottom_tree_view_->Render() | flex
-                }) | frame;
-            })
-        });
-
-        auto main_layout = Container::Horizontal({ left_panel, right_panel });
-        
-        auto component = Renderer(main_layout, [&] {
+    // A renderer for the modal dialog's content
+        auto modal_renderer = Renderer([&] {
             return vbox({
-                hbox(left_panel->Render() | flex, separator(), right_panel->Render() | flex),
-                separator(),
-                RenderStatusBar()
-            });
+                    text(modal_title_) | bold,
+                    separator(),
+                    editor_input_->Render(),
+                }) |
+                size(WIDTH, LESS_THAN, 60) | border;
         });
 
-        component |= CatchEvent([&](Event event) {
-            if (editor_mode_ == EditorMode::Command) {
-                 if (event == Event::Return) { ExecuteCommand(); return true; }
-                 if (event == Event::Escape) { editor_mode_ = EditorMode::Navigate; command_buffer_.clear(); return true; }
-                 if (event.is_character()) { command_buffer_ += event.character(); return true; }
-                 if (event == Event::Backspace && !command_buffer_.empty()) { command_buffer_.pop_back(); return true; }
-                 return false;
-            }
-            
-            if (editor_mode_ == EditorMode::Edit) {
-                if (event == Event::Escape) { editor_mode_ = EditorMode::Navigate; return true; }
-                return editor_input_->OnEvent(event);
-            }
+        // The main layout component that will be in the background.
+        auto main_layout = Renderer(main_container_, [&] {
+        // main_container_ holds the left menu and the right panel's container.
+        // We render them side-by-side here.
+        return vbox({
+            hbox({
+                // Left Panel
+                vbox({
+                    text("Node " + std::to_string(focused_node_id_) + " Properties") | bold | hcenter,
+                    separator(),
+                    left_menu_->Render() | flex,
+                }) | frame | size(WIDTH, LESS_THAN, 60),
 
-            // --- Navigation Mode Logic ---
-            if (event == Event::ArrowLeft) { focused_pane_ = Pane::Editor; return true; }
-            if (event == Event::ArrowRight) { focused_pane_ = Pane::TopTree; top_tree_view_->TakeFocus(); return true; }
-            
-            if (event == Event::Tab) {
-                if (focused_pane_ == Pane::Editor) { focused_pane_ = Pane::TopTree; top_tree_view_->TakeFocus(); }
-                else if (focused_pane_ == Pane::TopTree) { focused_pane_ = Pane::BottomTree; bottom_tree_view_->TakeFocus(); }
-                else { focused_pane_ = Pane::Editor; }
+                // Right Panel
+                vbox({
+                    vbox({
+                        text(show_ancestor_tree_ ? "Ancestors Tree" : "Containing Trees") | bold | hcenter,
+                        separator(),
+                        top_tree_view_->Render() | flex,
+                    }) | frame | flex,
+                    vbox({
+                        text("Full Graph Tree") | bold | hcenter,
+                        separator(),
+                        bottom_tree_view_->Render() | flex,
+                    }) | frame | flex,
+                }) | flex,
+            }) | flex,
+            RenderStatusBar(),
+        });
+        });
+
+        // The final component for the main loop.
+        // It shows the main_layout, with the modal appearing on top when the show_modal_ bool is true.
+        auto final_component = Modal(main_layout, modal_renderer, &show_modal_);
+
+        // Add a global event handler for keyboard shortcuts.
+        final_component |= CatchEvent([&](Event event) {
+            if (show_modal_)
+                return false;
+
+            if (event == Event::Character('t')) {
+                show_ancestor_tree_ = !show_ancestor_tree_;
+                RefreshTopTree();
                 return true;
             }
-            
-            if (focused_pane_ == Pane::Editor) {
-                if (event == Event::ArrowUp) { selected_editor_line_ = std::max(0, selected_editor_line_ - 1); return true; }
-                if (event == Event::ArrowDown) { selected_editor_line_ = std::min(int(editable_lines_.size() - 1), selected_editor_line_ + 1); return true; }
-                if (event == Event::Character('e') || event == Event::Return) { EnterEditMode(); return true; }
-                if (event == Event::Character('a')) { if(editable_lines_[selected_editor_line_].add_fn) editable_lines_[selected_editor_line_].add_fn(); return true; }
-                if (event == Event::Character('d')) { if(editable_lines_[selected_editor_line_].del_fn) editable_lines_[selected_editor_line_].del_fn(); return true; }
-            } else if (focused_pane_ == Pane::TopTree) {
-                return top_tree_view_->OnEvent(event);
-            } else if (focused_pane_ == Pane::BottomTree) {
-                return bottom_tree_view_->OnEvent(event);
+            if (event == Event::Character('d')) {
+                detailed_trees_ = !detailed_trees_;
+                RefreshAllTrees();
+                return true;
+            }
+            if (event == Event::Character(':')) {
+                modal_title_ = "Command Mode";
+                edit_buffer_ = ":";
+                editor_input_option_.on_enter = [this] { ExecuteCommand(); show_modal_ = false; };
+                show_modal_ = true;
+                return true;
+            }
+            if (event == Event::Character('q')) {
+                screen_.Exit();
+                return true;
             }
 
-            if (event == Event::Character('t')) { show_ancestor_tree_ = !show_ancestor_tree_; RefreshTopTree(); return true; }
-            if (event == Event::Character('d')) { detailed_trees_ = !detailed_trees_; RefreshAllTrees(); return true; }
-
-            if (event == Event::Character(':')) { editor_mode_ = EditorMode::Command; command_buffer_.clear(); return true; }
-            if (event == Event::Character('q')) { screen_.Exit(); return true; }
             return false;
         });
         
-        screen_.Loop(component);
+        screen_.Loop(final_component);
     }
 
 private:
+    void RebuildLeftMenu() {
+        left_menu_entries_.clear();
+        left_menu_entries_.push_back("Name: " + temp_node_.name);
+        left_menu_entries_.push_back("Type: " + temp_node_.type);
+        left_menu_entries_.push_back("Subtype: " + temp_node_.subtype);
+
+        YAML::Emitter emitter;
+        emitter << temp_node_.parameters;
+        left_menu_entries_.push_back("Params: " + std::string(emitter.c_str()));
+        
+        // Keep track of where dynamic inputs start
+        image_inputs_start_idx_ = left_menu_entries_.size();
+        for (size_t i = 0; i < temp_node_.image_inputs.size(); ++i) {
+            const auto& input = temp_node_.image_inputs[i];
+            left_menu_entries_.push_back("Img Input " + std::to_string(i) + ": " + std::to_string(input.from_node_id) + ":" + input.from_output_name);
+        }
+        left_menu_entries_.push_back("[+] Add Image Input");
+        
+        MenuOption option;
+        option.on_enter = [this] { EnterEditMode(); };
+        left_menu_ = Menu(&left_menu_entries_, &left_menu_selected_, option);
+    }
+
     void SwitchToNode(int new_id) {
         if (!graph_.has_node(new_id)) return;
         focused_node_id_ = new_id;
         temp_node_ = graph_.nodes.at(new_id);
-        SyncModelToStrings();
-        RebuildLineView();
+        RebuildLeftMenu();
         RefreshAllTrees();
-    }
-
-    void SyncModelToStrings() {
-        name_str_ = temp_node_.name;
-        type_str_ = temp_node_.type;
-        subtype_str_ = temp_node_.subtype;
-
-        YAML::Emitter emitter;
-        emitter << temp_node_.parameters;
-        params_yaml_str_ = emitter.c_str();
-
-        image_inputs_str_.clear();
-        for (const auto& input : temp_node_.image_inputs) {
-            image_inputs_str_.emplace_back(std::to_string(input.from_node_id), input.from_output_name);
-        }
-    }
-
-    void SyncStringsToModel() {
-        temp_node_.name = name_str_;
-        temp_node_.type = type_str_;
-        temp_node_.subtype = subtype_str_;
-
-        try {
-            temp_node_.parameters = YAML::Load(params_yaml_str_);
-            temp_node_.image_inputs.clear();
-            for (const auto& str_pair : image_inputs_str_) {
-                ImageInput i;
-                i.from_node_id = std::stoi(str_pair.first);
-                i.from_output_name = str_pair.second;
-                temp_node_.image_inputs.push_back(i);
-            }
-        } catch (const std::exception& e) {
-            status_message_ = std::string("Parse Error: ") + e.what();
-            throw; 
-        }
-    }
-
-    void RebuildLineView() {
-        editable_lines_.clear();
-        
-        auto add_line = [&](std::string label, std::string* value_ptr, std::function<void()> add_fn, std::function<void()> del_fn) {
-            editable_lines_.push_back({std::move(label), value_ptr, std::move(add_fn), std::move(del_fn)});
-        };
-        
-        add_line("Name", &name_str_, nullptr, nullptr);
-        add_line("Type", &type_str_, nullptr, nullptr);
-        add_line("Subtype", &subtype_str_, nullptr, nullptr);
-        add_line("Static Params (YAML)", &params_yaml_str_, nullptr, nullptr);
-        
-        for (size_t i = 0; i < image_inputs_str_.size(); ++i) {
-            auto add_fn = [this, i] {
-                image_inputs_str_.insert(image_inputs_str_.begin() + i + 1, {"-1", "image"});
-                RebuildLineView();
-            };
-            auto del_fn = [this, i] {
-                image_inputs_str_.erase(image_inputs_str_.begin() + i);
-                RebuildLineView();
-            };
-            add_line("Img Input " + std::to_string(i) + " Node ID", &image_inputs_str_[i].first, add_fn, del_fn);
-            add_line("Img Input " + std::to_string(i) + " Output", &image_inputs_str_[i].second, nullptr, nullptr);
-        }
-        if (image_inputs_str_.empty()) {
-             add_line("(Image Inputs)", nullptr, [this]{
-                image_inputs_str_.emplace_back("-1", "image");
-                RebuildLineView();
-             }, nullptr);
-        }
     }
     
     void EnterEditMode() {
-        if (selected_editor_line_ >= (int)editable_lines_.size() || !editable_lines_[selected_editor_line_].value_ptr) return;
-        editor_mode_ = EditorMode::Edit;
-        edit_buffer_ = *editable_lines_[selected_editor_line_].value_ptr;
-        editor_input_->TakeFocus();
+        show_modal_ = true;
+        editor_input_option_.on_enter = [this] { CommitEdit(); };
+        
+        // Configure the modal based on which menu item is selected
+        if (left_menu_selected_ == 0) {
+            modal_title_ = "Edit Name";
+            edit_buffer_ = temp_node_.name;
+        } else if (left_menu_selected_ == 1) {
+            modal_title_ = "Edit Type";
+            edit_buffer_ = temp_node_.type;
+        } else if (left_menu_selected_ == 2) {
+            modal_title_ = "Edit Subtype";
+            edit_buffer_ = temp_node_.subtype;
+        } else if (left_menu_selected_ == 3) {
+            modal_title_ = "Edit Static Params (YAML format)";
+            YAML::Emitter emitter;
+            emitter << temp_node_.parameters;
+            edit_buffer_ = emitter.c_str();
+        } else if (left_menu_selected_ >= image_inputs_start_idx_) {
+            int input_idx = left_menu_selected_ - image_inputs_start_idx_;
+            // Case: Add new input
+            if (input_idx >= (int)temp_node_.image_inputs.size()) {
+                temp_node_.image_inputs.push_back({-1, "image"});
+                RebuildLeftMenu();
+                show_modal_ = false; // Just add, don't show modal
+                return;
+            }
+            // Case: Edit existing input
+            modal_title_ = "Edit Image Input " + std::to_string(input_idx) + " (format: <node_id>:<output_name>)";
+            edit_buffer_ = std::to_string(temp_node_.image_inputs[input_idx].from_node_id) + ":" + temp_node_.image_inputs[input_idx].from_output_name;
+        } else {
+            show_modal_ = false; // Should not happen
+        }
     }
     
     void CommitEdit() {
-        if (selected_editor_line_ < (int)editable_lines_.size() && editable_lines_[selected_editor_line_].value_ptr) {
-            *editable_lines_[selected_editor_line_].value_ptr = edit_buffer_;
+        show_modal_ = false;
+        
+        if (left_menu_selected_ == 0) {
+            temp_node_.name = edit_buffer_;
+        } else if (left_menu_selected_ == 1) {
+            temp_node_.type = edit_buffer_;
+        } else if (left_menu_selected_ == 2) {
+            temp_node_.subtype = edit_buffer_;
+        } else if (left_menu_selected_ == 3) {
+            try {
+                temp_node_.parameters = YAML::Load(edit_buffer_);
+            } catch (const std::exception& e) {
+                status_message_ = "YAML Parse Error!";
+            }
+        } else if (left_menu_selected_ >= image_inputs_start_idx_) {
+            int input_idx = left_menu_selected_ - image_inputs_start_idx_;
+            if (input_idx < (int)temp_node_.image_inputs.size()) {
+                 std::string s = edit_buffer_;
+                 size_t colon_pos = s.find(':');
+                 try {
+                    if (colon_pos != std::string::npos) {
+                        temp_node_.image_inputs[input_idx].from_node_id = std::stoi(s.substr(0, colon_pos));
+                        temp_node_.image_inputs[input_idx].from_output_name = s.substr(colon_pos + 1);
+                    } else {
+                        temp_node_.image_inputs[input_idx].from_node_id = std::stoi(s);
+                        temp_node_.image_inputs[input_idx].from_output_name = "image";
+                    }
+                 } catch (const std::exception&) {
+                    status_message_ = "Invalid input format!";
+                 }
+            }
         }
-        editor_mode_ = EditorMode::Navigate;
+        
+        RebuildLeftMenu();
     }
 
     void RefreshTopTree() {
@@ -690,30 +698,17 @@ private:
         RefreshTopTree();
         RefreshBottomTree();
     }
-
+    
     Element RenderStatusBar() {
-        std::string help;
-        if (editor_mode_ == EditorMode::Navigate) {
-            help = "←/→:Panes | Tab:Focus | e/⏎:Edit | q:Quit | t:Toggle Top Tree | d:Toggle Details | ::Command";
-        }
-        else if (editor_mode_ == EditorMode::Edit) help = "Enter:Accept | Esc:Cancel";
-        else if (editor_mode_ == EditorMode::Command) {
-            return hbox({
-                       text(":" + command_buffer_),
-                       text(" ") | blink,
-                       filler(),
-                       text("[a]pply | [w]rite | [q]uit | Esc:Cancel") | dim,
-                   }) |
-                   inverted;
-        }
-        
+        std::string help = "←/→/Tab: Panes | ↑/↓: Navigate | Enter: Edit | t: Toggle Top Tree | d: Toggle Details | ::Command | q: Quit";
         return hbox({ text(help) | dim, filler(), text(status_message_) | bold });
     }
 
     void ExecuteCommand() {
-        std::string cmd = command_buffer_;
-        editor_mode_ = EditorMode::Navigate;
-        command_buffer_.clear();
+        std::string cmd = edit_buffer_;
+        if (cmd.rfind(":", 0) == 0) { // check if it starts with :
+            cmd = cmd.substr(1);
+        }
 
         if (cmd == "a" || cmd == "apply") HandleApply();
         else if (cmd == "w" || cmd == "write") {
@@ -729,18 +724,22 @@ private:
     }
 
     bool HandleApply() {
-        try {
-            SyncStringsToModel();
-        } catch (const std::exception&) {
-            return false;
-        }
-        
         NodeGraph temp_graph = graph_;
         temp_graph.nodes.at(focused_node_id_) = temp_node_;
+        
+        // Basic cycle detection by trying to generate a traversal order
         bool cycle_found = false;
         try {
-            temp_graph.topo_postorder_from(focused_node_id_);
-        } catch (const GraphError&) {
+            // Check all trees this node is part of for cycles.
+            auto containing_trees = temp_graph.get_trees_containing_node(focused_node_id_);
+             if (containing_trees.empty()) { // If it's a leaf or isolated, check from itself
+                temp_graph.topo_postorder_from(focused_node_id_);
+             } else {
+                for(int end_node : containing_trees) {
+                    temp_graph.topo_postorder_from(end_node);
+                }
+             }
+        } catch (const GraphError& e) {
             cycle_found = true;
             status_message_ = "Error: Cycle detected! Changes aborted.";
         }
@@ -760,32 +759,28 @@ private:
     CliConfig& config_;
     
     // UI State
-    enum class Pane { Editor, TopTree, BottomTree };
-    Pane focused_pane_ = Pane::Editor;
-
-    enum class EditorMode { Navigate, Edit, Command };
-    EditorMode editor_mode_ = EditorMode::Navigate;
-
     std::string status_message_ = "Ready";
     bool show_ancestor_tree_ = true;
     bool detailed_trees_ = true;
-    std::string command_buffer_;
 
-    // Editor Panel State
-    std::vector<EditableLine> editable_lines_;
-    int selected_editor_line_ = 0;
+    // Left Pane (Menu) State
+    Component left_menu_;
+    std::vector<std::string> left_menu_entries_;
+    int left_menu_selected_ = 0;
+    int image_inputs_start_idx_ = 0;
+    
+    // Modal Editing State
+    bool show_modal_ = false;
+    std::string modal_title_;
+    std::string command_buffer_;
     std::string edit_buffer_;
+    InputOption editor_input_option_;
     Component editor_input_;
     
-    std::string name_str_;
-    std::string type_str_;
-    std::string subtype_str_;
-    std::string params_yaml_str_;
-    std::vector<std::pair<std::string, std::string>> image_inputs_str_;
-
-    // Tree Panel State
+    // Right Pane (Trees) State
     std::shared_ptr<TreeView> top_tree_view_;
     std::shared_ptr<TreeView> bottom_tree_view_;
+
     Component main_container_;
 };
 
@@ -1095,11 +1090,23 @@ static bool process_command(const std::string& line, NodeGraph& graph, bool& mod
 
                 int selected = -1;
                 auto menu = Menu(&entries, &selected);
-                auto menu_component = Renderer(menu, [&] {
+                
+                // --- CHANGE: Added CatchEvent to handle Escape correctly ---
+                auto menu_component = menu | CatchEvent([&](Event event) {
+                    if (event == Event::Escape) {
+                        selected = -1;
+                        screen.Exit();
+                        return true;
+                    }
+                    return false;
+                });
+                
+                auto renderer = Renderer(menu_component, [&] {
                     return menu->Render() | vscroll_indicator | frame | size(HEIGHT, LESS_THAN, 20);
                 });
+
                 auto screen = ScreenInteractive::FitComponent();
-                screen.Loop(menu_component);
+                screen.Loop(renderer);
 
                 if (selected != -1) {
                     run_node_editor(node_ids[selected], graph, config);
