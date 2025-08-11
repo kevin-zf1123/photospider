@@ -166,7 +166,7 @@ const NodeOutput& NodeGraph::compute_internal(int node_id, std::unordered_map<in
             throw GraphError("No operation registered for type=" + node.type + ", subtype=" + node.subtype);
         }
         
-        node.cached_output = std::move((*op_func_opt)(node, input_images));
+        node.cached_output = (*op_func_opt)(node, input_images);
         result_source = "computed";
         save_cache_if_configured(node);
         visiting[node_id] = false;

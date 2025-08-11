@@ -1,3 +1,7 @@
+
+
+---
+
 # Photospider: A Dynamic Image Processing Graph Engine
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
@@ -21,19 +25,20 @@ This allows you to create graphs where, for example, a `resize` node can dynamic
 
 * **Dynamic Graph Execution**: Go beyond static pipelines with parameters that are computed at runtime.
 * **YAML-Based Definitions**: Define complex graphs in a clean, human-readable format.
-* **Extensible Operation System**: Easily add new C++ functions as nodes in the graph.
+* **Extensible Plugin System**: Easily add new C++ functions as nodes by dropping shared libraries (`.so`/`.dll`) into a `plugins` folder, with no need to recompile the main application.
 * **Intelligent Caching**: In-memory and on-disk caching for both images and metadata reduces re-computation.
 * **Interactive REPL**: An interactive shell (`ps>`) to load, inspect, modify, and run graphs on the fly.
 * **Cycle Detection**: Protects against invalid graph structures.
+* **Performance Profiling**: Built-in tools to time node execution and cache performance.
 
 ## Prerequisites
 
-To build Photospider, you will need:
+To build Photospider, you will need a C++17 compliant compiler and the following development libraries:
 
-* A C++17 compliant compiler (e.g., GCC, Clang, MSVC)
-* **CMake** (version 3.10 or higher)
+* A C++ Compiler (e.g., `g++`, `clang++`)
+* `pkg-config`
 * **OpenCV** (version 4.x recommended)
-* **yaml-cpp** library
+* **yaml-cpp**
 
 ### Dependency Installation
 
@@ -41,13 +46,13 @@ To build Photospider, you will need:
 
 ```bash
 sudo apt-get update
-sudo apt-get install build-essential cmake libopencv-dev libyaml-cpp-dev
+sudo apt-get install build-essential pkg-config libopencv-dev libyaml-cpp-dev
 ```
 
 **On macOS (using Homebrew):**
 
 ```bash
-brew install cmake opencv yaml-cpp
+brew install pkg-config opencv yaml-cpp
 ```
 
 ## How to Build
@@ -55,27 +60,16 @@ brew install cmake opencv yaml-cpp
 1. **Clone the repository:**
 
    ```bash
-   git clone <your-repo-url>
+   git clone https://github.com/kevin-zf1123/photospider.git
    cd photospider
    ```
-2. **Create a build directory:**
-
-   ```bash
-   mkdir build
-   cd build
-   ```
-3. **Run CMake to configure the project:**
-
-   ```bash
-   cmake ..
-   ```
-4. **Compile the project:**
+2. **Compile the project using the Makefile:**
 
    ```bash
    make
    ```
 
-   The main executable `graph_cli` will be located in the `build/cli/` directory.
+The main executable `graph_cli` will be created at `build/graph_cli`.
 
 ## How to Use
 
@@ -84,31 +78,31 @@ Photospider can be controlled via command-line arguments or through its interact
 ### Command-Line Arguments
 
 ```bash
-# Load a graph, compute all ending nodes, and then exit
-./build/cli/graph_cli --read my_graph.yaml --compute all
+# Load a graph, compute the final nodes, and exit
+./build/graph_cli --read my_graph.yaml
 
-# Load a graph and save the result of node 5 to a file
-./build/cli/graph_cli --read my_graph.yaml --save 5 result.png
+# Load a graph and save the result of node 4 to a file
+./build/graph_cli --read my_graph.yaml --save 4 result.png
 ```
 
 ### Interactive Shell (REPL)
 
-For more interactive work, start the REPL:
+For more interactive work, start the REPL. This is the default action if no other flags are provided.
 
 ```bash
-./build/cli/graph_cli --repl
+./build/graph_cli
 ```
 
-This will give you a `ps>` prompt. Type `help` to see the full list of commands.
+This will give you a `ps>` prompt. Type `help` to see the full list of commands. A more detailed guide is available in `manual.md`.
 
 **Common REPL Commands:**
 
 * `read <file>`: Load a graph from a YAML file.
 * `print`: Display the detailed dependency tree of the current graph.
 * `traversal`: Show the evaluation order of the graph.
-* `compute <id|all>`: Execute a specific node or all terminal nodes.
+* `compute <id|all> [force] [t] [tl]`: Execute a specific node or all terminal nodes with optional flags.
 * `save <id> <file>`: Compute a node and save its image output.
-* `clear-cache [d|m]`: Clear the on-disk, in-memory, or both caches.
+* `clear-cache [d|m|md]`: Clear the on-disk, in-memory, or both caches.
 * `exit`: Quit the shell.
 
 ## The YAML Graph Format
@@ -122,7 +116,7 @@ A Photospider graph is a YAML sequence of nodes. Each node is a map with several
   name: <string>                     # A human-readable name.
   type: <string>                     # The general category of the operation (e.g., 'image_process').
   subtype: <string>                  # The specific operation (e.g., 'gaussian_blur').
-  
+
   image_inputs:                      # List of nodes providing image inputs.
     - from_node_id: <integer>
       from_output_name: <string>     # Optional. The named output to connect to (defaults to 'image').
@@ -151,10 +145,9 @@ This example loads an image, gets its width, calculates a blur radius based on t
   type: image_source
   subtype: path
   parameters:
-    path: assets/my_image.jpg
+    path: assets/a.jpg
   caches:
-    - cache_type: image
-      location: source.png
+    - { cache_type: image, location: "source.png" }
 
 # 2. Analyze the image to get its dimensions.
 # This node outputs no image, but produces data named 'width' and 'height'.
@@ -172,9 +165,7 @@ This example loads an image, gets its width, calculates a blur radius based on t
   type: math
   subtype: divide
   parameter_inputs:
-    - from_node_id: 2
-      from_output_name: width
-      to_parameter_name: operand1
+    - { from_node_id: 2, from_output_name: width, to_parameter_name: operand1 }
   parameters:
     operand2: 30.0 # Static parameter
 
@@ -190,28 +181,29 @@ This example loads an image, gets its width, calculates a blur radius based on t
       from_output_name: result
       to_parameter_name: ksize # The 'result' is wired to the 'ksize' parameter
   caches:
-    - cache_type: image
-      location: final_blur.png
+    - { cache_type: image, location: "final_blur.png" }
 ```
 
 ## Available Built-in Operations
 
-| Type                    | Subtype            | Description                                             | Key Parameters                                     |
-| ----------------------- | ------------------ | ------------------------------------------------------- | -------------------------------------------------- |
-| **image_source**  | `path`           | Loads an image from a file path.                        | `path`, `resize`                               |
-| **image_process** | `gaussian_blur`  | Applies a Gaussian blur filter.                         | `ksize`, `sigmaX`                              |
-|                         | `resize`         | Resizes an image to a specific width and height.        | `width`, `height`, `interpolation`           |
-| **image_mixing**  | `add_weighted`   | Blends two images together linearly.                    | `alpha`, `beta`, `gamma`, `merge_strategy` |
-|                         | `diff`           | Computes the absolute difference between two images.    | `merge_strategy`                                 |
-| **analyzer**      | `get_dimensions` | Outputs the width and height of an input image as data. | (None)                                             |
-| **math**          | `divide`         | Divides two numbers from its parameters.                | `operand1`, `operand2`                         |
+| Type                     | Subtype             | Description                                                    | Key Parameters                                     |
+| :----------------------- | :------------------ | :------------------------------------------------------------- | :------------------------------------------------- |
+| **image\_source**  | `path`            | Loads an image from a file path.                               | `path`                                           |
+| **image\_process** | `gaussian_blur`   | Applies a Gaussian blur filter.                                | `ksize`, `sigmaX`                              |
+|                          | `resize`          | Resizes an image to a specific width and height.               | `width`, `height`, `interpolation`           |
+|                          | `crop`            | Extracts a rectangular region from an image.                   | `mode`, `x`, `y`, `width`, `height`      |
+|                          | `extract_channel` | Isolates a single channel (B,G,R,A) as a grayscale image.      | `channel`                                        |
+| **image\_mixing**  | `add_weighted`    | Blends two images linearly. Supports advanced channel mapping. | `alpha`, `beta`, `gamma`, `merge_strategy` |
+|                          | `diff`            | Computes the absolute difference between two images.           | `merge_strategy`                                 |
+| **analyzer**       | `get_dimensions`  | Outputs the width and height of an input image as data.        | (None)                                             |
+| **math**           | `divide`          | Divides two numbers from its parameters.                       | `operand1`, `operand2`                         |
 
 ## Roadmap
 
-* Add a wider variety of image processing operations (e.g., Canny edge detection, thresholding, color space conversions).
-* Implement a plugin system to allow users to load custom operations from shared libraries without recompiling.
-* Develop a GUI for visual graph construction.
+* Develop a wider variety of built-in image processing operations (e.g., Canny edge detection, thresholding, color space conversions).
+* Implement a GUI for visual graph construction and inspection.
+* Enhance the plugin API with more capabilities.
 
 ## License
 
-This project is licensed under the MIT License. See the `LICENSE` file for details.
+This project is licensed under the MIT License.

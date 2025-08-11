@@ -9,8 +9,12 @@
 #include <chrono>
 #include "node_graph.hpp"
 #include "../src/ops.hpp"
-
-
+#include <filesystem>
+#ifdef _WIN32
+#include <windows.h>
+#else
+#include <dlfcn.h>
+#endif
 
 using namespace ps;
 
@@ -469,10 +473,81 @@ static void run_repl(NodeGraph& graph, CliConfig& config) {
         if (!process_command(line, graph, modified, config)) break;
     }
 }
+static void load_plugins(const std::string& plugin_dir_path) {
+    if (!fs::exists(plugin_dir_path) || !fs::is_directory(plugin_dir_path)) {
+        // This is not an error, the directory just might not exist.
+        return;
+    }
+
+    std::cout << "Scanning for plugins in '" << plugin_dir_path << "'..." << std::endl;
+
+    for (const auto& entry : fs::directory_iterator(plugin_dir_path)) {
+        const auto& path = entry.path();
+        
+#ifdef _WIN32
+        const std::string extension = ".dll";
+        if (path.extension() != extension) continue;
+#else
+        const std::string extension = ".so";
+        if (path.extension() != extension) continue;
+#endif
+
+        std::cout << "  - Attempting to load plugin: " << path.filename().string() << std::endl;
+        
+#ifdef _WIN32
+        HMODULE handle = LoadLibrary(path.string().c_str());
+        if (!handle) {
+            std::cerr << "    Error: Failed to load plugin. Code: " << GetLastError() << std::endl;
+            continue;
+        }
+        
+        // Find the registration function
+        using RegisterFunc = void(*)();
+        RegisterFunc register_func = (RegisterFunc)GetProcAddress(handle, "register_photospider_ops");
+        
+        if (!register_func) {
+            std::cerr << "    Error: Cannot find 'register_photospider_ops' export in plugin." << std::endl;
+            FreeLibrary(handle); // Unload the library
+            continue;
+        }
+#else // Linux, macOS
+        void* handle = dlopen(path.c_str(), RTLD_LAZY);
+        if (!handle) {
+            std::cerr << "    Error: Failed to load plugin: " << dlerror() << std::endl;
+            continue;
+        }
+
+        // Find the registration function
+        void (*register_func)();
+        *(void**)(&register_func) = dlsym(handle, "register_photospider_ops");
+
+        const char* dlsym_error = dlerror();
+        if (dlsym_error) {
+            std::cerr << "    Error: Cannot find 'register_photospider_ops' export in plugin: " << dlsym_error << std::endl;
+            dlclose(handle); // Unload the library
+            continue;
+        }
+#endif
+        
+        // If we found the function, call it to register the ops.
+        try {
+            register_func();
+            std::cout << "    Success: Plugin loaded and operations registered." << std::endl;
+        } catch (const std::exception& e) {
+            std::cerr << "    Error: An exception occurred during plugin registration: " << e.what() << std::endl;
+#ifdef _WIN32
+            FreeLibrary(handle);
+#else
+            dlclose(handle);
+#endif
+        }
+        // Note: We deliberately "leak" the handle. The plugins should remain loaded for the application's lifetime.
+    }
+}
 
 int main(int argc, char** argv) {
     ops::register_builtin();
-    
+    load_plugins("build/plugins"); // Scans the 'plugins' subdirectory in the current working directory
     CliConfig config;
     std::string custom_config_path;
 
