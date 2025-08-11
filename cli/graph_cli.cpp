@@ -1,4 +1,5 @@
 // FILE: cli/graph_cli.cpp
+// FILE: cli/graph_cli.cpp
 #include <getopt.h>
 #include <limits>
 #include <regex>
@@ -12,6 +13,10 @@
 #include "node_graph.hpp"
 #include "../src/ops.hpp"
 #include <filesystem>
+#include "ftxui/component/component.hpp"
+#include "ftxui/component/screen_interactive.hpp"
+#include "ftxui/dom/elements.hpp"
+#include "tui_editor.hpp"
 #ifdef _WIN32
 #include <windows.h>
 #else
@@ -19,7 +24,9 @@
 #endif
 
 using namespace ps;
+using namespace ftxui;
 
+// --- MODIFIED: Moved CliConfig definition to the top ---
 struct CliConfig {
     std::string loaded_config_path;
     std::string cache_root_dir = "cache";
@@ -30,9 +37,272 @@ struct CliConfig {
     std::string default_exit_save_path = "graph_out.yaml";
     bool exit_prompt_sync = true;
     std::string config_save_behavior = "current";
+    std::string editor_save_behavior = "ask";
     std::string default_timer_log_path = "out/timer.yaml";
     std::string default_ops_list_mode = "all";
     std::string ops_plugin_path_mode = "name_only";
+};
+
+
+// Forward declarations
+static bool write_config_to_file(const CliConfig& config, const std::string& path);
+static void save_config_interactive(CliConfig& config);
+static std::string ask(const std::string& q, const std::string& def = "");
+// --- Interactive Config Editor ---
+class ConfigEditor : public TuiEditor {
+public:
+    ConfigEditor(ScreenInteractive& screen, CliConfig& config)
+        : TuiEditor(screen), original_config_(config), temp_config_(config) {
+            // Initialize selection indices based on current config
+            auto find_idx = [](const auto& vec, const auto& val) {
+                auto it = std::find(vec.begin(), vec.end(), val);
+                return it == vec.end() ? 0 : std::distance(vec.begin(), it);
+            };
+            selected_print_mode_ = find_idx(print_mode_entries_, temp_config_.default_print_mode);
+            selected_ops_list_mode_ = find_idx(ops_list_mode_entries_, temp_config_.default_ops_list_mode);
+            selected_path_mode_ = find_idx(path_mode_entries_, temp_config_.ops_plugin_path_mode);
+        }
+
+    void Run() override {
+        auto cache_dir_input = Input(&temp_config_.cache_root_dir, "e.g., .cache");
+        auto exit_save_path_input = Input(&temp_config_.default_exit_save_path, "e.g., session.yaml");
+        auto timer_log_path_input = Input(&temp_config_.default_timer_log_path, "e.g., out/timing.log");
+        
+        auto print_mode_radio = Radiobox(&print_mode_entries_, &selected_print_mode_);
+        auto ops_list_mode_radio = Radiobox(&ops_list_mode_entries_, &selected_ops_list_mode_);
+        auto path_mode_radio = Radiobox(&path_mode_entries_, &selected_path_mode_);
+
+        auto plugin_dir_container = Container::Vertical({});
+        for (auto& dir : temp_config_.plugin_dirs) {
+            plugin_dir_container->Add(Input(&dir, "path"));
+        }
+
+        auto add_button = Button(" [+] Add Path ", [&] { 
+            temp_config_.plugin_dirs.push_back(""); 
+            screen_.Post(Event::Custom); // A simple way to trigger a re-render
+        }, ButtonOption::Border());
+
+        auto del_button = Button(" [-] Delete Last ", [&] {
+            if (!temp_config_.plugin_dirs.empty()) {
+                temp_config_.plugin_dirs.pop_back();
+                screen_.Post(Event::Custom);
+            }
+        }, ButtonOption::Border());
+        
+        auto main_container = Container::Vertical({
+            cache_dir_input, exit_save_path_input, timer_log_path_input,
+            print_mode_radio, ops_list_mode_radio, path_mode_radio,
+            plugin_dir_container,
+            Container::Horizontal({add_button, del_button})
+        });
+
+        auto component = Renderer(main_container, [&] {
+            return vbox({
+                text("Interactive Configuration Editor") | bold | hcenter,
+                separator(),
+                RenderStatusBar(),
+                separator(),
+                hbox({text(" cache_root_dir         : ") | dim, cache_dir_input->Render()}),
+                hbox({text(" default_exit_save_path : ") | dim, exit_save_path_input->Render()}),
+                hbox({text(" default_timer_log_path : ") | dim, timer_log_path_input->Render()}),
+                separator(),
+                hbox({text(" default_print_mode     : ") | dim, print_mode_radio->Render()}),
+                hbox({text(" default_ops_list_mode  : ") | dim, ops_list_mode_radio->Render()}),
+                hbox({text(" ops_plugin_path_mode   : ") | dim, path_mode_radio->Render()}),
+                separator(),
+                text(" plugin_dirs:"),
+                plugin_dir_container->Render() | vscroll_indicator | frame | size(HEIGHT, LESS_THAN, 6),
+                hbox(add_button->Render(), del_button->Render())
+            }) | border;
+        });
+
+        component |= CatchEvent([&](Event event) {
+            if (event == Event::Character('q')) {
+                screen_.Exit();
+                return true;
+            }
+            if (event == Event::Character('a')) {
+                ApplyChanges();
+                status_message_ = "Changes applied to current session.";
+                return true;
+            }
+            if (event == Event::Character('w')) {
+                ApplyChanges();
+                save_config_interactive(original_config_);
+                status_message_ = "Changes applied and saved.";
+                return true;
+            }
+            return false;
+        });
+
+        screen_.Loop(component);
+    }
+
+private:
+    void ApplyChanges() {
+        temp_config_.default_print_mode = print_mode_entries_[selected_print_mode_];
+        temp_config_.default_ops_list_mode = ops_list_mode_entries_[selected_ops_list_mode_];
+        temp_config_.ops_plugin_path_mode = path_mode_entries_[selected_path_mode_];
+        original_config_ = temp_config_;
+    }
+
+    Element RenderStatusBar() {
+         return hbox({
+            text(" [q]uit | [a]pply | [w]rite & save ") | dim,
+            filler(),
+            text(status_message_) | bold
+        });
+    }
+
+    CliConfig& original_config_;
+    CliConfig temp_config_;
+    std::string status_message_ = "Ready. Navigate with Arrow Keys/Tab.";
+
+    int selected_print_mode_ = 0;
+    int selected_ops_list_mode_ = 0;
+    int selected_path_mode_ = 0;
+
+    std::vector<std::string> print_mode_entries_ = {"detailed", "simplified"};
+    std::vector<std::string> ops_list_mode_entries_ = {"all", "builtin", "plugins"};
+    std::vector<std::string> path_mode_entries_ = {"name_only", "relative_path", "absolute_path"};
+};
+
+// --- Interactive Node Editor ---
+class NodeEditor : public TuiEditor {
+public:
+    NodeEditor(ScreenInteractive& screen, int node_id, NodeGraph& graph, CliConfig& config)
+        : TuiEditor(screen), graph_(graph), node_id_(node_id), temp_node_(graph.nodes.at(node_id)), config_(config) {
+            RefreshTree();
+        }
+    
+    void Run() override {
+        auto name_input = Input(&temp_node_.name, "name");
+        auto type_input = Input(&temp_node_.type, "type");
+        auto subtype_input = Input(&temp_node_.subtype, "subtype");
+
+        auto left_pane = Container::Vertical({name_input, type_input, subtype_input});
+        
+        auto main_component = Renderer(left_pane, [&] {
+            auto node_view = vbox({
+                text("Node " + std::to_string(node_id_) + " Editor") | bold,
+                separator(),
+                hbox(text(" Name:    "), name_input->Render()),
+                hbox(text(" Type:    "), type_input->Render()),
+                hbox(text(" Subtype: "), subtype_input->Render()),
+                filler()
+            }) | border;
+
+            auto tree_view = vbox(tree_lines_) | vscroll_indicator | frame | border;
+            
+            return vbox({
+                hbox(node_view | flex, separator(), tree_view | flex),
+                separator(),
+                RenderStatusBar()
+            });
+        });
+
+        main_component |= CatchEvent([&](Event event) {
+            if (in_command_mode_) {
+                if (event == Event::Return) {
+                    ExecuteCommand();
+                } else if (event.is_character()) {
+                    command_buffer_ += event.character();
+                } else if (event == Event::Backspace && !command_buffer_.empty()) {
+                    command_buffer_.pop_back();
+                } else if (event == Event::Escape) {
+                    in_command_mode_ = false;
+                    command_buffer_.clear();
+                }
+                return true;
+            }
+            
+            if (event == Event::Character(':')) {
+                in_command_mode_ = true;
+                return true;
+            }
+            if (event == Event::Character('q') && !in_command_mode_) {
+                 screen_.Exit();
+                 return true;
+            }
+            
+            return false;
+        });
+        
+        screen_.Loop(main_component);
+    }
+
+private:
+    void RefreshTree() {
+        tree_lines_.clear();
+        std::stringstream ss;
+        graph_.print_dependency_tree(ss, node_id_, true);
+        std::string line;
+        while(std::getline(ss, line)) {
+            tree_lines_.push_back(text(line));
+        }
+    }
+
+    Element RenderStatusBar() {
+        if (in_command_mode_) {
+            return hbox({ text(":" + command_buffer_), text(" ") | blink }) | inverted;
+        }
+        return hbox({
+            text(" Press ':' for commands (a:apply, w:write, q:quit) ") | dim,
+            filler(),
+            text(status_message_) | bold
+        });
+    }
+
+    void ExecuteCommand() {
+        if (command_buffer_ == "a") {
+            HandleApply();
+        } else if (command_buffer_ == "w") {
+            HandleApply(); 
+            if (status_message_.find("Error") == std::string::npos) {
+                screen_.ExitLoopClosure()();
+                std::string path = ask("Output file", config_.default_exit_save_path);
+                if (!path.empty()) {
+                    graph_.save_yaml(path);
+                    status_message_ = "Graph saved to " + path;
+                }
+                screen_.Post(Event::Custom);
+            }
+        } else if (command_buffer_ == "q") {
+            screen_.Exit();
+        } else {
+            status_message_ = "Error: Unknown command '" + command_buffer_ + "'";
+        }
+        in_command_mode_ = false;
+        command_buffer_.clear();
+    }
+
+    void HandleApply() {
+        NodeGraph temp_graph = graph_;
+        temp_graph.nodes.at(node_id_) = temp_node_;
+        bool cycle_found = false;
+        try {
+            temp_graph.topo_postorder_from(node_id_);
+        } catch (const GraphError&) {
+            cycle_found = true;
+            status_message_ = "Error: Cycle detected! Changes aborted.";
+        }
+
+        if (!cycle_found) {
+            graph_.nodes.at(node_id_) = temp_node_;
+            status_message_ = "Changes applied successfully.";
+            RefreshTree();
+        }
+    }
+
+    NodeGraph& graph_;
+    int node_id_;
+    ps::Node temp_node_;
+    CliConfig& config_;
+    
+    Elements tree_lines_;
+    std::string status_message_ = "Ready";
+    bool in_command_mode_ = false;
+    std::string command_buffer_;
 };
 
 // ... (write_config_to_file and load_or_create_config are unchanged) ...
@@ -47,6 +317,7 @@ static bool write_config_to_file(const CliConfig& config, const std::string& pat
     root["default_exit_save_path"] = config.default_exit_save_path;
     root["exit_prompt_sync"] = config.exit_prompt_sync;
     root["config_save_behavior"] = config.config_save_behavior;
+    root["editor_save_behavior"] = config.editor_save_behavior;
     root["default_timer_log_path"] = config.default_timer_log_path;
     root["default_ops_list_mode"] = config.default_ops_list_mode;
     root["ops_plugin_path_mode"] = config.ops_plugin_path_mode;
@@ -82,6 +353,7 @@ static void load_or_create_config(const std::string& config_path, CliConfig& con
             if (root["default_exit_save_path"]) config.default_exit_save_path = root["default_exit_save_path"].as<std::string>();
             if (root["exit_prompt_sync"]) config.exit_prompt_sync = root["exit_prompt_sync"].as<bool>();
             if (root["config_save_behavior"]) config.config_save_behavior = root["config_save_behavior"].as<std::string>();
+            if (root["editor_save_behavior"]) config.editor_save_behavior = root["editor_save_behavior"].as<std::string>();
             if (root["default_timer_log_path"]) config.default_timer_log_path = root["default_timer_log_path"].as<std::string>();
             if (root["default_ops_list_mode"]) config.default_ops_list_mode = root["default_ops_list_mode"].as<std::string>();
             if (root["ops_plugin_path_mode"]) config.ops_plugin_path_mode = root["ops_plugin_path_mode"].as<std::string>();
@@ -92,6 +364,7 @@ static void load_or_create_config(const std::string& config_path, CliConfig& con
     } else if (config_path == "config.yaml") {
         std::cout << "Configuration file 'config.yaml' not found. Creating a default one." << std::endl;
         config.plugin_dirs = {"build/plugins"};
+        config.editor_save_behavior = "ask";
         config.default_print_mode = "detailed";
         config.default_traversal_arg = "n";
         config.config_save_behavior = "current";
@@ -122,15 +395,14 @@ static void print_repl_help() {
     std::cout << "Available REPL (interactive shell) commands:\n"
               << "  help                       Show this help message.\n"
               << "  clear                      Clear the terminal screen.\n"
-              << "  config [key] [value]       View or update a configuration setting.\n"
-              << "                             - For 'plugin_dirs', use 'add' or 'del' sub-commands.\n"
+              << "  config                     Open the interactive configuration editor.\n"
               << "  ops [mode]                 List all registered operations.\n"
               << "                             Modes: all(a), builtin(b), plugins(p)\n"
               << "  read <file>                Load a YAML graph from a file.\n"
               << "  source <file>              Execute commands from a script file.\n"
               << "  print [<id>|all] [mode]    Show the dependency tree. (Default: all)\n"
               << "                             Modes: detailed(d), simplified(s)\n"
-              << "  node <id>                  Show the YAML definition of a single node.\n"
+              << "  node <id>                  Open the interactive editor for a single node.\n"
               << "  traversal [flags]          Show evaluation order with cache status and tree flags.\n"
               << "                             Tree Flags: detailed(d), simplified(s), no_tree(n)\n"
               << "                             Cache Flags: m(memory), d(disk), c(check), cr(check&remove)\n"
@@ -147,7 +419,7 @@ static void print_repl_help() {
 }
 
 // ... (ask, ask_yesno, do_traversal, print_config, save_config_interactive are unchanged) ...
-static std::string ask(const std::string& q, const std::string& def = "") {
+static std::string ask(const std::string& q, const std::string& def) {
     std::cout << q; if (!def.empty()) std::cout << " [" << def << "]";
     std::cout << ": "; std::string s; std::getline(std::cin, s);
     if (s.empty()) return def; return s;
@@ -264,13 +536,22 @@ static void save_config_interactive(CliConfig& config) {
         }
     }
 }
-// --- MODIFIED: The main command processing function ---
+void run_config_editor(CliConfig& config) {
+    // TBD: Full implementation in next section
+    std::cout << "Interactive config editor not yet implemented." << std::endl;
+    print_config(config);
+}
+void run_node_editor(int node_id, NodeGraph& graph, CliConfig& config) {
+    // TBD: Full implementation in next section
+    std::cout << "Interactive node editor for node " << node_id << " not yet implemented." << std::endl;
+}
+
 static bool process_command(const std::string& line, NodeGraph& graph, bool& modified, CliConfig& config, const std::map<std::string, std::string>& op_sources) {
     std::istringstream iss(line);
     std::string cmd;
     iss >> cmd;
     if (cmd.empty()) return true;
-    
+    auto screen = ScreenInteractive::FitComponent();
     try {
         if (cmd == "help") {
             print_repl_help();
@@ -311,22 +592,20 @@ static bool process_command(const std::string& line, NodeGraph& graph, bool& mod
         } else if (cmd == "node") {
             std::string id_str;
             iss >> id_str;
-            if (id_str.empty()) {
-                std::cout << "Usage: node <id>" << std::endl;
-                return true;
-            }
+            if (id_str.empty()) { std::cout << "Usage: node <id>" << std::endl; return true; }
+
             try {
                 int node_id = std::stoi(id_str);
                 if (graph.has_node(node_id)) {
-                    const auto& node_to_print = graph.nodes.at(node_id);
-                    std::cout << node_to_print.to_yaml() << std::endl;
+                    NodeEditor editor(screen, node_id, graph, config);
+                    editor.Run();
                 } else {
-                    std::cout << "Error: Node with ID " << node_id << " not found in the current graph." << std::endl;
+                    std::cout << "Error: Node with ID " << node_id << " not found." << std::endl;
                 }
             } catch (const std::exception&) {
                 std::cout << "Error: Invalid node ID. Please provide an integer." << std::endl;
             }
-        } else if (cmd == "ops") {
+        }  else if (cmd == "ops") {
             std::string mode_arg;
             iss >> mode_arg;
             if (mode_arg.empty()) {
@@ -438,103 +717,9 @@ static bool process_command(const std::string& line, NodeGraph& graph, bool& mod
             
             do_traversal(graph, show_mem, show_disk);
         } else if (cmd == "config") {
-            std::string key;
-            iss >> key;
-            if (key.empty()) {
-                print_config(config);
-                return true;
-            }
-            
-            bool changed = false;
-            if (key == "plugin_dirs") {
-                std::string sub_command;
-                iss >> sub_command;
-
-                std::string path;
-                std::getline(iss >> std::ws, path);
-
-                if (sub_command == "add") {
-                    if (path.empty()) {
-                        std::cout << "Usage: config plugin_dirs add <path>" << std::endl;
-                    } else if (std::find(config.plugin_dirs.begin(), config.plugin_dirs.end(), path) != config.plugin_dirs.end()) {
-                        std::cout << "Path '" << path << "' already exists in plugin_dirs." << std::endl;
-                    } else {
-                        config.plugin_dirs.push_back(path);
-                        changed = true;
-                        std::cout << "Added '" << path << "' to plugin_dirs for next launch." << std::endl;
-                    }
-                } else if (sub_command == "del" || sub_command == "remove") {
-                    if (path.empty()) {
-                        std::cout << "Usage: config plugin_dirs del <path>" << std::endl;
-                    } else {
-                        auto original_size = config.plugin_dirs.size();
-                        config.plugin_dirs.erase(
-                            std::remove(config.plugin_dirs.begin(), config.plugin_dirs.end(), path),
-                            config.plugin_dirs.end()
-                        );
-                        if (config.plugin_dirs.size() < original_size) {
-                            changed = true;
-                            std::cout << "Removed '" << path << "' from plugin_dirs for next launch." << std::endl;
-                        } else {
-                            std::cout << "Path '" << path << "' not found in plugin_dirs." << std::endl;
-                        }
-                    }
-                } else {
-                    std::string full_value = sub_command + " " + path;
-                    std::istringstream val_ss(full_value);
-                    std::string single_path;
-                    std::vector<std::string> new_paths;
-                    while (val_ss >> single_path) {
-                        new_paths.push_back(single_path);
-                    }
-                    config.plugin_dirs = new_paths;
-                    changed = true;
-                    std::cout << "Set plugin_dirs to new list for next launch." << std::endl;
-                }
-            } else {
-                std::string value;
-                std::getline(iss >> std::ws, value);
-                if (key == "ops_plugin_path_mode") { 
-                    if (value == "absolute_path" || value == "relative_path" || value == "name_only") {
-                        config.ops_plugin_path_mode = value;
-                        changed = true;
-                    } else { std::cout << "Invalid value. Use 'absolute_path', 'relative_path', or 'name_only'." << std::endl; }
-                } else if (key == "default_print_mode") {
-                    if (value == "detailed" || value == "simplified") {
-                        config.default_print_mode = value; changed = true;
-                    } else { std::cout << "Invalid value. Use 'detailed' or 'simplified'." << std::endl;}
-                } else if (key == "cache_root_dir") {
-                    std::cout << "Note: 'cache_root_dir' will only take effect on next launch." << std::endl;
-                    config.cache_root_dir = value; changed = true;
-                } else if (key == "default_ops_list_mode") {
-                    if (value == "all" || value == "builtin" || value == "plugins") {
-                        config.default_ops_list_mode = value; changed = true;
-                    } else { std::cout << "Invalid value. Use 'all', 'builtin', or 'plugins'." << std::endl;}
-                } else if (key == "default_traversal_arg") {
-                    config.default_traversal_arg = value; changed = true;
-                } else if (key == "default_cache_clear_arg") {
-                    config.default_cache_clear_arg = value; changed = true;
-                } else if (key == "default_exit_save_path") {
-                    config.default_exit_save_path = value; changed = true;
-                } else if (key == "exit_prompt_sync") {
-                    if (value == "true" || value == "1") { config.exit_prompt_sync = true; changed = true; }
-                    else if (value == "false" || value == "0") { config.exit_prompt_sync = false; changed = true; }
-                    else { std::cout << "Invalid boolean value. Use 'true' or 'false'." << std::endl; }
-                } else if (key == "config_save_behavior") {
-                    if (value == "current" || value == "default" || value == "ask" || value == "none") {
-                        config.config_save_behavior = value; changed = true;
-                    } else { std::cout << "Invalid value. Use 'current', 'default', 'ask', or 'none'." << std::endl;}
-                } else if (key == "default_timer_log_path") {
-                    config.default_timer_log_path = value; changed = true;
-                } else {
-                    std::cout << "Unknown configuration key: '" << key << "'." << std::endl;
-                }
-            }
-            if (changed) {
-                std::cout << "Configuration updated for this session." << std::endl;
-                save_config_interactive(config);
-            }
-        }
+            ConfigEditor editor(screen, config);
+            editor.Run();
+        } 
         else if (cmd == "read") {
             std::string path; iss >> path; if (path.empty()) std::cout << "Usage: read <filepath>\n";
             else { graph.load_yaml(path); modified = false; std::cout << "Loaded graph from " << path << "\n"; }

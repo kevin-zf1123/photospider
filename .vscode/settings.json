@@ -62,6 +62,7 @@
         "mutex": "cpp",
         "print": "cpp",
         "set": "cpp",
-        "valarray": "cpp"
+        "valarray": "cpp",
+        "filesystem": "cpp"
     }
 }
