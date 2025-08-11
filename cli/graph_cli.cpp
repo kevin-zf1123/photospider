@@ -109,8 +109,8 @@ static void print_repl_help() {
               << "  help                       Show this help message.\n"
               << "  clear                      Clear the terminal screen.\n" 
               << "  config [key] [value]       View or update a configuration setting.\n"
-              << "  ops [flag]                 List all registered operations.\n"
-              << "                             Flags: --all, --builtin, --plugins\n"
+              << "  ops [mode]                 List all registered operations.\n"
+              << "                             Modes: all(a), builtin(b), plugins(p)\n"
               << "  read <file>                Load a YAML graph from a file.\n"
               << "  source <file>              Execute commands from a script file.\n"
               << "  print                      Show the detailed dependency tree of the current graph.\n"
@@ -256,14 +256,27 @@ static bool process_command(const std::string& line, NodeGraph& graph, bool& mod
             // This works on macOS, Linux, and modern Windows terminals.
             std::cout << "\033[2J\033[1;1H";
         } else if (cmd == "ops") {
-            std::string flag;
-            iss >> flag;
-            if (flag.empty()) {
-                flag = "--" + config.default_ops_list_mode;
+            std::string mode_arg;
+            iss >> mode_arg;
+            if (mode_arg.empty()) {
+                mode_arg = config.default_ops_list_mode;
             }
 
-            if (flag != "--all" && flag != "--builtin" && flag != "--plugins") {
-                std::cout << "Error: Invalid flag for 'ops'. Use --all, --builtin, or --plugins." << std::endl;
+            std::string display_mode;
+            std::string display_title;
+
+            // --- MODIFIED: New argument parsing logic ---
+            if (mode_arg == "all" || mode_arg == "a") {
+                display_mode = "all";
+                display_title = "all";
+            } else if (mode_arg == "builtin" || mode_arg == "b") {
+                display_mode = "builtin";
+                display_title = "built-in";
+            } else if (mode_arg == "plugins" || mode_arg == "custom" || mode_arg == "p" || mode_arg == "c") {
+                display_mode = "plugins";
+                display_title = "plugins";
+            } else {
+                std::cout << "Error: Invalid mode for 'ops'. Use: all (a), builtin (b), or plugins (p/c)." << std::endl;
                 return true;
             }
 
@@ -275,7 +288,8 @@ static bool process_command(const std::string& line, NodeGraph& graph, bool& mod
                 const std::string& source = pair.second;
                 bool is_builtin = (source == "built-in");
 
-                if ((flag == "--builtin" && !is_builtin) || (flag == "--plugins" && is_builtin)) {
+                // --- MODIFIED: Filter based on the new display_mode variable ---
+                if ((display_mode == "builtin" && !is_builtin) || (display_mode == "plugins" && is_builtin)) {
                     continue;
                 }
 
@@ -289,12 +303,13 @@ static bool process_command(const std::string& line, NodeGraph& graph, bool& mod
             }
             
             if (op_count == 0) {
-                if (flag == "--plugins") std::cout << "No plugin operations are registered." << std::endl;
+                if (display_mode == "plugins") std::cout << "No plugin operations are registered." << std::endl;
                 else std::cout << "No operations are registered." << std::endl;
                 return true;
             }
 
-            std::cout << "Available Operations (" << flag.substr(2) << "):" << std::endl;
+            // --- MODIFIED: Print header using the new display_title variable ---
+            std::cout << "Available Operations (" << display_title << "):" << std::endl;
             for (auto& pair : grouped_ops) {
                 std::sort(pair.second.begin(), pair.second.end());
                 std::cout << "\n  Type: " << pair.first << std::endl;
