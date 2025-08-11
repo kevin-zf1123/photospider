@@ -219,6 +219,8 @@ static void print_dep_tree_recursive(const NodeGraph& g, std::ostream& os, int n
     if (node.parameters && node.parameters.IsMap() && node.parameters.size() > 0) {
         YAML::Emitter emitter;
         emitter << YAML::Flow << node.parameters;
+        // --- THIS IS THE FIX ---
+        // Indent the parameters one level deeper than the node itself.
         indent(level + 1);
         os << "static_params: " << emitter.c_str() << "\n";
     }
