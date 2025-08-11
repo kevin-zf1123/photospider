@@ -28,6 +28,7 @@ struct CliConfig {
     bool exit_prompt_sync = true;
     std::string config_save_behavior = "current"; // "current", "default", "ask", "none"
     std::string default_timer_log_path = "out/timer.yaml";
+    std::string plugin_dir = "plugins";
 };
 
 // --- Helper to write config struct to a YAML file ---
@@ -35,6 +36,7 @@ static bool write_config_to_file(const CliConfig& config, const std::string& pat
     YAML::Node root;
     root["_comment1"] = "Photospider CLI configuration.";
     root["cache_root_dir"] = config.cache_root_dir;
+    root["plugin_dir"] = config.plugin_dir;
     root["default_traversal_arg"] = config.default_traversal_arg;
     root["default_cache_clear_arg"] = config.default_cache_clear_arg;
     root["default_exit_save_path"] = config.default_exit_save_path;
@@ -60,6 +62,7 @@ static void load_or_create_config(const std::string& config_path, CliConfig& con
         try {
             YAML::Node root = YAML::LoadFile(config_path);
             if (root["cache_root_dir"]) config.cache_root_dir = root["cache_root_dir"].as<std::string>();
+            if (root["plugin_dir"]) config.plugin_dir = root["plugin_dir"].as<std::string>(); 
             if (root["default_traversal_arg"]) config.default_traversal_arg = root["default_traversal_arg"].as<std::string>();
             if (root["default_cache_clear_arg"]) config.default_cache_clear_arg = root["default_cache_clear_arg"].as<std::string>();
             if (root["default_exit_save_path"]) config.default_exit_save_path = root["default_exit_save_path"].as<std::string>();
@@ -72,6 +75,7 @@ static void load_or_create_config(const std::string& config_path, CliConfig& con
         }
     } else if (config_path == "config.yaml") {
         std::cout << "Configuration file 'config.yaml' not found. Creating a default one." << std::endl;
+        config.plugin_dir = "build/plugins"; // --- NEW: Set default plugin directory ---
         config.default_traversal_arg = "cr"; 
         config.config_save_behavior = "current";
         config.default_timer_log_path = "out/timer.yaml";
@@ -176,6 +180,7 @@ static void print_config(const CliConfig& config) {
     std::cout << "Current CLI Configuration:\n"
               << "  - loaded_config_path:      " << (config.loaded_config_path.empty() ? "(none)" : config.loaded_config_path) << "\n"
               << "  - cache_root_dir:          " << config.cache_root_dir << "\n"
+              << "  - plugin_dir:              " << config.plugin_dir << "\n" 
               << "  - default_traversal_arg:   " << config.default_traversal_arg << "\n"
               << "  - default_cache_clear_arg: " << config.default_cache_clear_arg << "\n"
               << "  - default_exit_save_path:  " << config.default_exit_save_path << "\n"
@@ -293,6 +298,9 @@ static bool process_command(const std::string& line, NodeGraph& graph, bool& mod
             if (key == "cache_root_dir") {
                 std::cout << "Note: 'cache_root_dir' will only take effect on next launch." << std::endl;
                 config.cache_root_dir = value; changed = true;
+            } else if (key == "plugin_dir") { 
+                std::cout << "Note: 'plugin_dir' will only take effect on next launch." << std::endl;
+                config.plugin_dir = value; changed = true;
             } else if (key == "default_traversal_arg") {
                 config.default_traversal_arg = value; changed = true;
             } else if (key == "default_cache_clear_arg") {
@@ -571,10 +579,9 @@ int main(int argc, char** argv) {
 
     std::string config_to_load = custom_config_path.empty() ? "config.yaml" : custom_config_path;
     load_or_create_config(config_to_load, config);
-
+    load_plugins(config.plugin_dir); // Load plugins after config is loaded
     NodeGraph graph{config.cache_root_dir};
     
-    optind = 1; 
     bool did_any = false;
     bool start_repl = false;
 
