@@ -16,5 +16,14 @@ std::optional<OpFunc> OpRegistry::find(const std::string& type, const std::strin
     if (it == table_.end()) return std::nullopt;
     return it->second;
 }
-
+std::vector<std::string> OpRegistry::get_keys() const {
+    std::vector<std::string> keys;
+    keys.reserve(table_.size());
+    for (const auto& pair : table_) {
+        keys.push_back(pair.first);
+    }
+    // Sorting makes the "diff" logic later more reliable and readable
+    std::sort(keys.begin(), keys.end());
+    return keys;
+}
 } // namespace ps

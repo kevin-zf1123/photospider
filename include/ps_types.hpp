@@ -78,6 +78,7 @@ public:
     static OpRegistry& instance();
     void register_op(const std::string& type, const std::string& subtype, OpFunc fn);
     std::optional<OpFunc> find(const std::string& type, const std::string& subtype) const;
+    std::vector<std::string> get_keys() const;
 private:
     std::unordered_map<std::string, OpFunc> table_;
 };

@@ -18,7 +18,15 @@
 
 using namespace ps;
 
-// --- FIXED: The CliConfig struct now correctly includes all members ---
+struct PluginOperation {
+    std::string type;
+    std::string subtype;
+};
+
+struct LoadedPlugin {
+    std::string filename;
+    std::vector<PluginOperation> operations;
+};
 struct CliConfig {
     std::string loaded_config_path; // Path it was loaded from. Empty if none.
     std::string cache_root_dir = "cache";
@@ -102,6 +110,7 @@ static void print_repl_help() {
     std::cout << "Available REPL (interactive shell) commands:\n"
               << "  help                       Show this help message.\n"
               << "  config [key] [value]       View or update a configuration setting.\n"
+              << "  plugins                    List all loaded plugins and their operations.\n" // --- NEW ---
               << "  read <file>                Load a YAML graph from a file.\n"
               << "  source <file>              Execute commands from a script file.\n"
               << "  print                      Show the detailed dependency tree of the current graph.\n"
@@ -230,7 +239,7 @@ static void save_config_interactive(CliConfig& config) {
 }
 
 // --- FIXED: Signature now takes a mutable CliConfig& to allow modification ---
-static bool process_command(const std::string& line, NodeGraph& graph, bool& modified, CliConfig& config) {
+static bool process_command(const std::string& line, NodeGraph& graph, bool& modified, CliConfig& config, const std::vector<LoadedPlugin>& plugins) {
     std::istringstream iss(line);
     std::string cmd;
     iss >> cmd;
@@ -238,8 +247,26 @@ static bool process_command(const std::string& line, NodeGraph& graph, bool& mod
     
     try {
         if (cmd == "help") {
-            print_repl_help(); // <-- CORRECTED: Calls the new REPL-specific help
-        } else if (cmd == "read") {
+            print_repl_help();
+        } else if (cmd == "plugins") { // --- NEW: The new command logic ---
+            if (plugins.empty()) {
+                std::cout << "No external plugins loaded." << std::endl;
+            } else {
+                std::cout << "Loaded External Plugins:" << std::endl;
+                for (const auto& plugin : plugins) {
+                    std::cout << "  - File: " << plugin.filename << std::endl;
+                    if (plugin.operations.empty()) {
+                        std::cout << "    (No operations registered)" << std::endl;
+                    } else {
+                        std::cout << "    Operations:" << std::endl;
+                        for (const auto& op : plugin.operations) {
+                            std::cout << "      - " << op.type << ":" << op.subtype << std::endl;
+                        }
+                    }
+                }
+            }
+        }
+        else if (cmd == "read") {
             std::string path; iss >> path; if (path.empty()) std::cout << "Usage: read <filepath>\n";
             else { graph.load_yaml(path); modified = false; std::cout << "Loaded graph from " << path << "\n"; }
         } else if (cmd == "source") {
@@ -251,12 +278,9 @@ static bool process_command(const std::string& line, NodeGraph& graph, bool& mod
             while (std::getline(script_file, script_line)) {
                 if (script_line.empty() || script_line.find_first_not_of(" \t") == std::string::npos || script_line[0] == '#') continue;
                 std::cout << "ps> " << script_line << std::endl;
-                if (!process_command(script_line, graph, modified, config)) return false;
+                if (!process_command(script_line, graph, modified, config, plugins)) return false;
             }
-        } 
-        // ... (The rest of the `process_command` function has no changes)
-        // ... `print`, `traversal`, `config`, `exit`, etc. are all the same
-        else if (cmd == "print") {
+        } else if (cmd == "print") {
             graph.print_dependency_tree(std::cout);
         } else if (cmd == "traversal") {
             std::string arg;
@@ -315,7 +339,7 @@ static bool process_command(const std::string& line, NodeGraph& graph, bool& mod
                 if (value == "current" || value == "default" || value == "ask" || value == "none") {
                     config.config_save_behavior = value; changed = true;
                 } else { std::cout << "Invalid value. Use 'current', 'default', 'ask', or 'none'." << std::endl;}
-            } else if (key == "default_timer_log_path") { // NEW
+            } else if (key == "default_timer_log_path") {
                 config.default_timer_log_path = value; changed = true;
             } else {
                 std::cout << "Unknown configuration key: '" << key << "'." << std::endl;
@@ -471,36 +495,38 @@ static bool process_command(const std::string& line, NodeGraph& graph, bool& mod
     return true;
 }
 
-static void run_repl(NodeGraph& graph, CliConfig& config) {
+static void run_repl(NodeGraph& graph, CliConfig& config, const std::vector<LoadedPlugin>& plugins) {
     bool modified = false;
     std::string line;
     std::cout << "Photospider dynamic graph shell. Type 'help' for commands.\n";
     while (true) {
         std::cout << "ps> ";
         if (!std::getline(std::cin, line)) break;
-        if (!process_command(line, graph, modified, config)) break;
+        if (!process_command(line, graph, modified, config, plugins)) break;
     }
 }
-static void load_plugins(const std::string& plugin_dir_path) {
+static void load_plugins(const std::string& plugin_dir_path, std::vector<LoadedPlugin>& loaded_plugins_list) {
     if (!fs::exists(plugin_dir_path) || !fs::is_directory(plugin_dir_path)) {
-        // This is not an error, the directory just might not exist.
         return;
     }
 
     std::cout << "Scanning for plugins in '" << plugin_dir_path << "'..." << std::endl;
+    auto& registry = ps::OpRegistry::instance();
 
     for (const auto& entry : fs::directory_iterator(plugin_dir_path)) {
         const auto& path = entry.path();
         
 #ifdef _WIN32
         const std::string extension = ".dll";
-        if (path.extension() != extension) continue;
 #else
         const std::string extension = ".so";
-        if (path.extension() != extension) continue;
 #endif
+        if (path.extension() != extension) continue;
 
         std::cout << "  - Attempting to load plugin: " << path.filename().string() << std::endl;
+        
+        // "Spy" on the registry to see what operations this plugin adds
+        auto keys_before = registry.get_keys();
         
 #ifdef _WIN32
         HMODULE handle = LoadLibrary(path.string().c_str());
@@ -508,14 +534,11 @@ static void load_plugins(const std::string& plugin_dir_path) {
             std::cerr << "    Error: Failed to load plugin. Code: " << GetLastError() << std::endl;
             continue;
         }
-        
-        // Find the registration function
         using RegisterFunc = void(*)();
         RegisterFunc register_func = (RegisterFunc)GetProcAddress(handle, "register_photospider_ops");
-        
         if (!register_func) {
             std::cerr << "    Error: Cannot find 'register_photospider_ops' export in plugin." << std::endl;
-            FreeLibrary(handle); // Unload the library
+            FreeLibrary(handle);
             continue;
         }
 #else // Linux, macOS
@@ -524,23 +547,38 @@ static void load_plugins(const std::string& plugin_dir_path) {
             std::cerr << "    Error: Failed to load plugin: " << dlerror() << std::endl;
             continue;
         }
-
-        // Find the registration function
         void (*register_func)();
         *(void**)(&register_func) = dlsym(handle, "register_photospider_ops");
-
         const char* dlsym_error = dlerror();
         if (dlsym_error) {
             std::cerr << "    Error: Cannot find 'register_photospider_ops' export in plugin: " << dlsym_error << std::endl;
-            dlclose(handle); // Unload the library
+            dlclose(handle);
             continue;
         }
 #endif
         
-        // If we found the function, call it to register the ops.
         try {
             register_func();
-            std::cout << "    Success: Plugin loaded and operations registered." << std::endl;
+            auto keys_after = registry.get_keys();
+            std::vector<std::string> new_keys;
+
+            // Find the difference between the two key lists
+            std::set_difference(keys_after.begin(), keys_after.end(),
+                                keys_before.begin(), keys_before.end(),
+                                std::back_inserter(new_keys));
+
+            LoadedPlugin plugin_info;
+            plugin_info.filename = path.filename().string();
+            
+            for (const auto& key : new_keys) {
+                size_t colon_pos = key.find(':');
+                if (colon_pos != std::string::npos) {
+                    plugin_info.operations.push_back({key.substr(0, colon_pos), key.substr(colon_pos + 1)});
+                }
+            }
+            
+            loaded_plugins_list.push_back(plugin_info);
+            std::cout << "    Success: Plugin loaded and " << new_keys.size() << " operation(s) registered." << std::endl;
         } catch (const std::exception& e) {
             std::cerr << "    Error: An exception occurred during plugin registration: " << e.what() << std::endl;
 #ifdef _WIN32
@@ -549,7 +587,6 @@ static void load_plugins(const std::string& plugin_dir_path) {
             dlclose(handle);
 #endif
         }
-        // Note: We deliberately "leak" the handle. The plugins should remain loaded for the application's lifetime.
     }
 }
 
@@ -582,7 +619,8 @@ int main(int argc, char** argv) {
     std::string config_to_load = custom_config_path.empty() ? "config.yaml" : custom_config_path;
     load_or_create_config(config_to_load, config);
 
-    load_plugins(config.plugin_dir);
+    std::vector<LoadedPlugin> loaded_plugins;
+    load_plugins(config.plugin_dir, loaded_plugins);
 
     NodeGraph graph{config.cache_root_dir};
     
@@ -636,7 +674,7 @@ int main(int argc, char** argv) {
         if (did_any_action) {
             std::cout << "\n--- Command-line actions complete. Entering interactive shell. ---\n";
         }
-        run_repl(graph, config);
+        run_repl(graph, config, loaded_plugins);
     } else {
          std::cout << "\n--- Command-line actions complete. Exiting. ---\n";
     }
