@@ -1,0 +1,1812 @@
+// FILE: include/node_graph.hpp
+#pragma once
+#include "ps_types.hpp"
+#include "node.hpp"
+#include <unordered_set>
+
+namespace ps {
+struct NodeTiming {
+    int id = -1;
+    std::string name;
+    double elapsed_ms = 0.0;
+    std::string source; // "memory_cache", "disk_cache", or "computed"
+};
+struct TimingCollector {
+    std::vector<NodeTiming> node_timings;
+    double total_ms = 0.0;
+};
+class NodeGraph {
+public:
+    TimingCollector timing_results;
+    std::unordered_map<int, Node> nodes;
+    fs::path cache_root;
+
+    explicit NodeGraph(fs::path cache_root_dir = "cache") : cache_root(std::move(cache_root_dir)) {
+        if (!cache_root.empty()) {
+            fs::create_directories(cache_root);
+        }
+    }
+
+    void clear();
+    void add_node(const Node& node);
+    bool has_node(int id) const;
+
+    void load_yaml(const fs::path& yaml_path);
+    void save_yaml(const fs::path& yaml_path) const;
+    void clear_drive_cache();
+    void clear_memory_cache();
+    void clear_cache();
+    void cache_all_nodes();
+    void free_transient_memory();
+    void synchronize_disk_cache();
+    fs::path node_cache_dir(int node_id) const;
+
+    const NodeOutput& compute(int node_id, bool force_recache = false, bool enable_timing = false);    
+    void clear_timing_results();
+    std::vector<int> ending_nodes() const;
+    void print_dependency_tree(std::ostream& os) const;
+    std::vector<int> topo_postorder_from(int end_node_id) const;
+
+private:
+    const NodeOutput& compute_internal(int node_id, std::unordered_map<int, bool>& visiting, bool force_recache, bool enable_timing);
+    bool is_ancestor(int potential_ancestor_id, int node_id, std::unordered_set<int>& visited) const; 
+    std::vector<int> parents_of(int node_id) const;
+
+    void save_cache_if_configured(const Node& node) const;
+};
+
+} // namespace ps
+// FILE: include/node.hpp
+#pragma once
+#include "ps_types.hpp"
+
+namespace ps {
+
+class Node {
+public:
+    int id = -1;
+    std::string name;
+    std::string type;
+    std::string subtype;
+
+    // --- MODIFIED: Inputs are now split into two categories for clarity and function ---
+    std::vector<ImageInput> image_inputs;
+    std::vector<ParameterInput> parameter_inputs;
+    
+    // --- DEPRECATED: Old unified input model ---
+    // std::vector<InputPort> inputs; 
+
+    // Static parameters defined in the YAML file.
+    YAML::Node parameters;
+    
+    // --- NEW: Parameters populated at runtime from upstream nodes ---
+    // This is a combination of static `parameters` and dynamic `parameter_inputs`.
+    YAML::Node runtime_parameters;
+
+    std::vector<OutputPort> outputs;
+    std::vector<CacheEntry> caches;
+
+    // --- MODIFIED: The in-memory cache now holds the entire NodeOutput ---
+    std::optional<NodeOutput> cached_output;
+
+    // --- DEPRECATED: Old image-only cache ---
+    // cv::Mat image_matrix;
+
+    static Node from_yaml(const YAML::Node& n);
+    YAML::Node to_yaml() const;
+};
+
+} // namespace ps
+// FILE: include/ps_types.hpp
+#pragma once
+#include <string>
+#include <vector>
+#include <unordered_map>
+#include <functional>
+#include <memory>
+#include <stdexcept>
+#include <filesystem>
+#include <optional>
+#include <sstream>
+#include <iostream>
+#include <opencv2/opencv.hpp>
+#include <yaml-cpp/yaml.h>
+
+namespace ps {
+namespace fs = std::filesystem;
+
+// The standard output for any data-producing entity (e.g., a file or a parameter).
+// YAML::Node is used for its flexibility in holding strings, numbers, bools, etc.
+using OutputValue = YAML::Node;
+
+// Defines a connection for an image input.
+struct ImageInput {
+    int from_node_id = -1;
+    // The named output from the source node to connect to. Defaults to "image".
+    std::string from_output_name = "image";
+};
+
+// Defines a connection for a parameter input, linking a source node's output
+// to one of this node's runtime parameters.
+struct ParameterInput {
+    int from_node_id = -1;
+    // The named output from the source node (e.g., "width", "result").
+    std::string from_output_name;
+    // The name of the parameter to set on the target node (e.g., "ksize").
+    std::string to_parameter_name;
+};
+
+
+// Deprecated: Old input port structure. Replaced by ImageInput and ParameterInput.
+struct InputPort {
+    int input_id = -1;
+    std::string input_type;
+    YAML::Node input_parameters;
+};
+
+struct OutputPort {
+    int output_id = -1;
+    std::string output_type;
+    YAML::Node output_parameters;
+};
+
+struct CacheEntry {
+    std::string cache_type;
+    std::string location;
+};
+
+// The complete result of a node's computation. It can include a primary image
+// as well as any number of named data outputs.
+struct NodeOutput {
+    cv::Mat image_matrix; // The primary image output
+    std::unordered_map<std::string, OutputValue> data; // Other named data outputs
+};
+
+struct GraphError : public std::runtime_error {
+    using std::runtime_error::runtime_error;
+};
+
+class Node;
+class NodeGraph;
+
+// --- MODIFIED: The OpFunc signature now returns the comprehensive NodeOutput struct ---
+// It still receives the full node to access runtime_parameters and a vector of input images.
+using OpFunc = std::function<NodeOutput(const Node&, const std::vector<cv::Mat>&)>;
+
+class OpRegistry {
+public:
+    static OpRegistry& instance();
+    void register_op(const std::string& type, const std::string& subtype, OpFunc fn);
+    std::optional<OpFunc> find(const std::string& type, const std::string& subtype) const;
+private:
+    std::unordered_map<std::string, OpFunc> table_;
+};
+
+inline std::string make_key(const std::string& type, const std::string& subtype) {
+    return type + ":" + subtype;
+}
+
+} // namespace ps
+// FILE: src/node_graph.cpp
+#include "node_graph.hpp"
+#include "ops.hpp"
+#include <fstream>
+#include <vector>
+#include <stack>
+#include <algorithm>
+#include <unordered_set>
+#include <yaml-cpp/emitter.h>
+#include <chrono>
+
+namespace ps {
+
+void NodeGraph::clear() {
+    nodes.clear();
+}
+
+void NodeGraph::add_node(const Node& node) {
+    if (has_node(node.id)) {
+        throw GraphError("Node with id " + std::to_string(node.id) + " already exists.");
+    }
+    // Simple cycle detection based on declared inputs. A full check happens during compute.
+    std::unordered_set<int> potential_inputs;
+    for (const auto& input : node.image_inputs) potential_inputs.insert(input.from_node_id);
+    for (const auto& input : node.parameter_inputs) potential_inputs.insert(input.from_node_id);
+
+    for (int input_id : potential_inputs) {
+        if (input_id != -1) {
+            std::unordered_set<int> visited;
+            if (is_ancestor(node.id, input_id, visited)) {
+                throw GraphError("Adding node " + std::to_string(node.id) + " creates a cycle.");
+            }
+        }
+    }
+    nodes[node.id] = node;
+}
+
+bool NodeGraph::has_node(int id) const {
+    return nodes.count(id) > 0;
+}
+
+void NodeGraph::load_yaml(const fs::path& yaml_path) {
+    YAML::Node config;
+    try {
+        config = YAML::LoadFile(yaml_path.string());
+    } catch (const std::exception& e) {
+        throw GraphError("Failed to load YAML file " + yaml_path.string() + ": " + e.what());
+    }
+    if (!config.IsSequence()) throw GraphError("YAML root is not a sequence of nodes.");
+    
+    clear();
+    for (const auto& n : config) {
+        Node node = Node::from_yaml(n);
+        add_node(node);
+    }
+}
+
+void NodeGraph::save_yaml(const fs::path& yaml_path) const {
+    YAML::Node n(YAML::NodeType::Sequence);
+    std::vector<int> sorted_ids;
+    for(const auto& pair : nodes) sorted_ids.push_back(pair.first);
+    std::sort(sorted_ids.begin(), sorted_ids.end());
+
+    for (int id : sorted_ids) {
+        n.push_back(nodes.at(id).to_yaml());
+    }
+
+    std::ofstream fout(yaml_path);
+    if (!fout) throw GraphError("Failed to open file for writing: " + yaml_path.string());
+    fout << n;
+}
+
+const NodeOutput& NodeGraph::compute(int node_id, bool force_recache, bool enable_timing) {
+    if (!has_node(node_id)) {
+        throw GraphError("Cannot compute: node " + std::to_string(node_id) + " not found.");
+    }
+    std::unordered_map<int, bool> visiting;
+    return compute_internal(node_id, visiting, force_recache, enable_timing);
+}
+
+const NodeOutput& NodeGraph::compute_internal(int node_id, std::unordered_map<int, bool>& visiting, bool force_recache, bool enable_timing) {
+    auto& node = nodes.at(node_id);
+    std::string result_source = "unknown";
+    
+    // Timer starts at the very beginning of the process for this node.
+    auto start_time = std::chrono::high_resolution_clock::now();
+
+    // We use a do-while(false) loop with `break` statements as a structured
+    // alternative to `goto` for jumping to the common logging logic at the end.
+    do {
+        // 1. Check for in-memory cache
+        if (!force_recache && node.cached_output.has_value()) {
+            result_source = "memory_cache";
+            break; // Result is ready, break to the end for logging.
+        }
+
+        // 2. Check for on-disk cache
+        fs::path metadata_file;
+        if (!force_recache && !cache_root.empty() && !node.caches.empty()) {
+            for (const auto& cache_entry : node.caches) {
+                if (cache_entry.cache_type == "image" && !cache_entry.location.empty()) {
+                    fs::path cache_file = node_cache_dir(node_id) / cache_entry.location;
+                    metadata_file = cache_file;
+                    metadata_file.replace_extension(".yml");
+
+                    if (fs::exists(cache_file) || fs::exists(metadata_file)) {
+                         std::cout << "Loading cache for Node " << node.id << " from: " << fs::relative(node_cache_dir(node_id)).string() << std::endl;
+                         NodeOutput loaded_output;
+                         if (fs::exists(cache_file)) {
+                            loaded_output.image_matrix = cv::imread(cache_file.string(), cv::IMREAD_UNCHANGED);
+                         }
+                         if (fs::exists(metadata_file)) {
+                            YAML::Node meta = YAML::LoadFile(metadata_file.string());
+                            for(auto it = meta.begin(); it != meta.end(); ++it) {
+                                loaded_output.data[it->first.as<std::string>()] = it->second;
+                            }
+                         }
+                         node.cached_output = std::move(loaded_output);
+                         result_source = "disk_cache";
+                         break; // Found on disk, break to the end.
+                    }
+                }
+            }
+            if (result_source == "disk_cache") break; // Exit the do-while loop if disk cache was loaded
+        }
+        
+        // 3. If no cache hit, proceed with computation
+        if (visiting[node_id]) {
+            throw GraphError("Cycle detected in graph involving node " + std::to_string(node_id));
+        }
+        visiting[node_id] = true;
+
+        std::cout << "Computing node " << node.id << " (" << node.name << ")..." << std::endl;
+        node.runtime_parameters = node.parameters ? node.parameters : YAML::Node(YAML::NodeType::Map);
+
+        // Compute dependencies recursively...
+        for (const auto& p_input : node.parameter_inputs) {
+            if (p_input.from_node_id == -1) continue;
+            if (!has_node(p_input.from_node_id)) {
+                throw GraphError("Node " + std::to_string(node.id) + " has missing parameter dependency: " + std::to_string(p_input.from_node_id));
+            }
+            const auto& upstream_output = compute_internal(p_input.from_node_id, visiting, force_recache, enable_timing);
+            auto it = upstream_output.data.find(p_input.from_output_name);
+            if (it == upstream_output.data.end()) {
+                throw GraphError("Node " + std::to_string(p_input.from_node_id) + " did not produce required output '" + p_input.from_output_name + "' for node " + std::to_string(node_id));
+            }
+            node.runtime_parameters[p_input.to_parameter_name] = it->second;
+            std::cout << "  - Injected param '" << p_input.to_parameter_name << "' from " << p_input.from_node_id << ":" << p_input.from_output_name << std::endl;
+        }
+
+        std::vector<cv::Mat> input_images;
+        for (const auto& i_input : node.image_inputs) {
+            if (i_input.from_node_id == -1) continue;
+            if (!has_node(i_input.from_node_id)) {
+                throw GraphError("Node " + std::to_string(node.id) + " has missing image dependency: " + std::to_string(i_input.from_node_id));
+            }
+            const auto& upstream_output = compute_internal(i_input.from_node_id, visiting, force_recache, enable_timing);
+            if (upstream_output.image_matrix.empty()){
+                std::cerr << "Warning: Input image from node " << i_input.from_node_id << " is empty for node " << node.id << std::endl;
+            }
+            input_images.push_back(upstream_output.image_matrix);
+        }
+        
+        // Find and execute the operation function
+        auto op_func_opt = OpRegistry::instance().find(node.type, node.subtype);
+        if (!op_func_opt) {
+            throw GraphError("No operation registered for type=" + node.type + ", subtype=" + node.subtype);
+        }
+        
+        node.cached_output = std::move((*op_func_opt)(node, input_images));
+        result_source = "computed";
+        save_cache_if_configured(node);
+        visiting[node_id] = false;
+
+    } while (false);
+
+    // This is the common exit point for logging.
+    if (enable_timing) {
+        auto end_time = std::chrono::high_resolution_clock::now();
+        std::chrono::duration<double, std::milli> elapsed = end_time - start_time;
+        this->timing_results.node_timings.push_back({node.id, node.name, elapsed.count(), result_source});
+    }
+
+    return *node.cached_output;
+}
+
+void NodeGraph::clear_timing_results() {
+    timing_results.node_timings.clear();
+    timing_results.total_ms = 0.0;
+}
+std::vector<int> NodeGraph::ending_nodes() const {
+    std::unordered_set<int> is_input_to_something;
+    for (const auto& pair : nodes) {
+        for (const auto& input : pair.second.image_inputs) is_input_to_something.insert(input.from_node_id);
+        for (const auto& input : pair.second.parameter_inputs) is_input_to_something.insert(input.from_node_id);
+    }
+    std::vector<int> ends;
+    for (const auto& pair : nodes) {
+        if (is_input_to_something.find(pair.first) == is_input_to_something.end()) {
+            ends.push_back(pair.first);
+        }
+    }
+    return ends;
+}
+
+static void print_dep_tree_recursive(const NodeGraph& g, std::ostream& os, int node_id, int level, std::unordered_set<int>& path) {
+    auto indent = [&](int l) { for (int i = 0; i < l; ++i) os << "  "; };
+
+    if (path.count(node_id)) {
+        indent(level);
+        os << "- ... (Cycle detected on Node " << node_id << ") ...\n";
+        return;
+    }
+    path.insert(node_id);
+
+    indent(level);
+    const auto& node = g.nodes.at(node_id);
+    os << "- Node " << node.id << " (" << node.name << " | " << node.type << ":" << node.subtype << ")\n";
+
+    if (node.parameters && node.parameters.IsMap() && node.parameters.size() > 0) {
+        YAML::Emitter emitter;
+        emitter << YAML::Flow << node.parameters;
+        indent(level + 1);
+        os << "static_params: " << emitter.c_str() << "\n";
+    }
+
+    for (const auto& input : node.image_inputs) {
+        if (input.from_node_id != -1 && g.has_node(input.from_node_id)) {
+             indent(level + 1);
+             os << "(image from " << input.from_node_id << ":" << input.from_output_name << ")\n";
+            print_dep_tree_recursive(g, os, input.from_node_id, level + 2, path);
+        }
+    }
+    for (const auto& input : node.parameter_inputs) {
+        if (input.from_node_id != -1 && g.has_node(input.from_node_id)) {
+            indent(level + 1);
+            os << "(param '" << input.to_parameter_name << "' from " << input.from_node_id << ":" << input.from_output_name << ")\n";
+            print_dep_tree_recursive(g, os, input.from_node_id, level + 2, path);
+        }
+    }
+    path.erase(node_id);
+}
+
+void NodeGraph::print_dependency_tree(std::ostream& os) const {
+    os << "Dependency Tree (reversed from ending nodes):\n";
+    auto ends = ending_nodes();
+    if (ends.empty() && !nodes.empty()) os << "(Graph has cycles or is fully connected)\n";
+    else if(nodes.empty()) os << "(Graph is empty)\n";
+
+    for (int end_node_id : ends) {
+        std::unordered_set<int> path;
+        print_dep_tree_recursive(*this, os, end_node_id, 0, path);
+    }
+}
+
+static void topo_postorder_util(const NodeGraph& g, int node_id, std::vector<int>& order, std::unordered_map<int, bool>& visited, std::unordered_map<int, bool>& recursion_stack) {
+    visited[node_id] = true;
+    recursion_stack[node_id] = true;
+    const auto& node = g.nodes.at(node_id);
+
+    auto process_dependencies = [&](int dep_id){
+        if (dep_id == -1 || !g.has_node(dep_id)) return;
+        if (!visited[dep_id]) {
+            topo_postorder_util(g, dep_id, order, visited, recursion_stack);
+        } else if (recursion_stack[dep_id]) {
+            throw GraphError("Cycle detected in graph during traversal involving " + std::to_string(dep_id));
+        }
+    };
+
+    for (const auto& input : node.image_inputs) process_dependencies(input.from_node_id);
+    for (const auto& input : node.parameter_inputs) process_dependencies(input.from_node_id);
+    
+    order.push_back(node_id);
+    recursion_stack[node_id] = false;
+}
+
+std::vector<int> NodeGraph::topo_postorder_from(int end_node_id) const {
+    if (!has_node(end_node_id)) {
+        throw GraphError("Node " + std::to_string(end_node_id) + " not in graph.");
+    }
+    std::vector<int> order;
+    std::unordered_map<int, bool> visited;
+    std::unordered_map<int, bool> recursion_stack;
+    topo_postorder_util(*this, end_node_id, order, visited, recursion_stack);
+    return order;
+}
+
+bool NodeGraph::is_ancestor(int potential_ancestor_id, int node_id, std::unordered_set<int>& visited) const {
+    if (potential_ancestor_id == node_id) return true;
+    if (visited.count(node_id)) return false;
+    visited.insert(node_id);
+    if (!has_node(node_id)) return false;
+
+    const auto& node = nodes.at(node_id);
+    for (const auto& input : node.image_inputs) {
+        if (input.from_node_id != -1 && is_ancestor(potential_ancestor_id, input.from_node_id, visited)) return true;
+    }
+    for (const auto& input : node.parameter_inputs) {
+        if (input.from_node_id != -1 && is_ancestor(potential_ancestor_id, input.from_node_id, visited)) return true;
+    }
+    return false;
+}
+
+// --- THIS IS THE RESTORED FUNCTION DEFINITION ---
+fs::path NodeGraph::node_cache_dir(int node_id) const {
+    return cache_root / std::to_string(node_id);
+}
+
+void NodeGraph::save_cache_if_configured(const Node& node) const {
+    if (cache_root.empty() || node.caches.empty() || !node.cached_output.has_value()) {
+        return;
+    }
+
+    const auto& output = *node.cached_output;
+
+    for (const auto& cache_entry : node.caches) {
+        if (cache_entry.cache_type == "image" && !cache_entry.location.empty()) {
+            fs::path dir = node_cache_dir(node.id);
+            fs::create_directories(dir);
+            fs::path final_path = dir / cache_entry.location;
+
+            if (!output.image_matrix.empty()) {
+                std::cout << "Saving cache image for Node " << node.id << " to: " << fs::relative(final_path).string() << std::endl;
+                cv::imwrite(final_path.string(), output.image_matrix);
+            }
+
+            if (!output.data.empty()) {
+                fs::path meta_path = final_path;
+                meta_path.replace_extension(".yml");
+                
+                YAML::Node meta_node;
+                for(const auto& pair : output.data) {
+                    meta_node[pair.first] = pair.second;
+                }
+                std::ofstream fout(meta_path);
+                fout << meta_node;
+                std::cout << "Saving cache metadata for Node " << node.id << " to: " << fs::relative(meta_path).string() << std::endl;
+            }
+        }
+    }
+}
+
+void NodeGraph::clear_drive_cache() {
+    if (!cache_root.empty() && fs::exists(cache_root)) {
+        uintmax_t n = fs::remove_all(cache_root);
+        std::cout << "Successfully cleared on-disk cache '" << cache_root.string() << "'. Removed " << n << " files/directories.\n";
+        fs::create_directories(cache_root);
+    }
+}
+
+void NodeGraph::clear_memory_cache() {
+    for (auto& pair : nodes) {
+        if (pair.second.cached_output.has_value()) {
+            pair.second.cached_output.reset();
+        }
+    }
+    std::cout << "In-memory node caches have been cleared.\n";
+}
+
+void NodeGraph::clear_cache() {
+    clear_drive_cache();
+    clear_memory_cache();
+}
+
+void NodeGraph::cache_all_nodes() {
+    std::cout << "Saving all in-memory node results to configured caches..." << std::endl;
+    int saved_count = 0;
+    for (const auto& pair : nodes) {
+        if (pair.second.cached_output.has_value()) {
+            save_cache_if_configured(pair.second);
+            saved_count++;
+        }
+    }
+    if (saved_count == 0) std::cout << "No nodes were found in memory to save." << std::endl;
+}
+
+void NodeGraph::free_transient_memory() {
+    std::cout << "Freeing memory from transient intermediate nodes..." << std::endl;
+    auto end_nodes_vec = this->ending_nodes();
+    std::unordered_set<int> ending_node_ids(end_nodes_vec.begin(), end_nodes_vec.end());
+    int freed_count = 0;
+    for (auto& pair : nodes) {
+        Node& node = pair.second;
+        bool is_in_memory = node.cached_output.has_value();
+        bool is_ending_node = ending_node_ids.count(node.id);
+        if (is_in_memory && !is_ending_node) {
+            node.cached_output.reset();
+            freed_count++;
+            std::cout << "  - Freed memory for intermediate Node " << node.id << " (" << node.name << ")" << std::endl;
+        }
+    }
+    if (freed_count == 0) std::cout << "No transient nodes were found in memory to free." << std::endl;
+}
+
+void NodeGraph::synchronize_disk_cache() {
+    std::cout << "Synchronizing disk cache with current memory state..." << std::endl;
+    this->cache_all_nodes();
+    std::cout << "Checking for orphaned cache files to remove..." << std::endl;
+    int removed_count = 0;
+    for (const auto& pair : nodes) {
+        const Node& node = pair.second;
+        if (!node.cached_output.has_value() && !node.caches.empty()) {
+            for (const auto& cache_entry : node.caches) {
+                 if (!cache_entry.location.empty()) {
+                    fs::path cache_file = node_cache_dir(node.id) / cache_entry.location;
+                    fs::path meta_file = cache_file; meta_file.replace_extension(".yml");
+                    if (fs::exists(cache_file)) { fs::remove(cache_file); removed_count++; }
+                    if (fs::exists(meta_file)) { fs::remove(meta_file); removed_count++; }
+                 }
+            }
+        }
+    }
+    if (removed_count > 0) std::cout << "Removed " << removed_count << " orphaned cache file(s)." << std::endl;
+    std::cout << "Disk cache synchronization complete." << std::endl;
+}
+
+} // namespace ps
+// FILE: src/node.cpp
+#include "node.hpp"
+
+namespace ps {
+
+// --- NEW: Helper to serialize new input/output structures to YAML ---
+
+static YAML::Node image_inputs_to_yaml(const std::vector<ImageInput>& inputs) {
+    YAML::Node arr(YAML::NodeType::Sequence);
+    for (const auto& p : inputs) {
+        YAML::Node n;
+        n["from_node_id"] = p.from_node_id;
+        if (p.from_output_name != "image") { // Only write if not default
+            n["from_output_name"] = p.from_output_name;
+        }
+        arr.push_back(n);
+    }
+    return arr;
+}
+
+static YAML::Node parameter_inputs_to_yaml(const std::vector<ParameterInput>& inputs) {
+    YAML::Node arr(YAML::NodeType::Sequence);
+    for (const auto& p : inputs) {
+        YAML::Node n;
+        n["from_node_id"] = p.from_node_id;
+        n["from_output_name"] = p.from_output_name;
+        n["to_parameter_name"] = p.to_parameter_name;
+        arr.push_back(n);
+    }
+    return arr;
+}
+
+static YAML::Node ports_to_yaml(const std::vector<OutputPort>& outs) {
+    YAML::Node arr(YAML::NodeType::Sequence);
+    for (const auto& p : outs) {
+        YAML::Node n;
+        n["output_id"] = p.output_id;
+        n["output_type"] = p.output_type;
+        if (p.output_parameters) n["output_parameters"] = p.output_parameters;
+        arr.push_back(n);
+    }
+    return arr;
+}
+
+static YAML::Node caches_to_yaml(const std::vector<CacheEntry>& caches) {
+    YAML::Node arr(YAML::NodeType::Sequence);
+    for (const auto& c : caches) {
+        YAML::Node n;
+        n["cache_type"] = c.cache_type;
+        n["location"] = c.location;
+        arr.push_back(n);
+    }
+    return arr;
+}
+
+// --- MODIFIED: from_yaml now parses the new dynamic input format ---
+Node Node::from_yaml(const YAML::Node& n) {
+    Node node;
+    node.id = n["id"].as<int>();
+    node.name = n["name"].as<std::string>("");
+    node.type = n["type"].as<std::string>("");
+    node.subtype = n["subtype"].as<std::string>("");
+
+    if (n["image_inputs"]) {
+        for (const auto& it : n["image_inputs"]) {
+            ImageInput p;
+            p.from_node_id = it["from_node_id"].as<int>(-1);
+            p.from_output_name = it["from_output_name"].as<std::string>("image");
+            node.image_inputs.push_back(std::move(p));
+        }
+    }
+
+    if (n["parameter_inputs"]) {
+        for (const auto& it : n["parameter_inputs"]) {
+            ParameterInput p;
+            p.from_node_id = it["from_node_id"].as<int>(-1);
+            p.from_output_name = it["from_output_name"].as<std::string>();
+            p.to_parameter_name = it["to_parameter_name"].as<std::string>();
+            if (p.from_output_name.empty() || p.to_parameter_name.empty()) {
+                throw GraphError("Parameter input for node " + std::to_string(node.id) + " is missing required fields.");
+            }
+            node.parameter_inputs.push_back(std::move(p));
+        }
+    }
+
+    if (n["parameters"]) node.parameters = n["parameters"];
+
+    if (n["outputs"]) {
+        for (const auto& ot : n["outputs"]) {
+            OutputPort p;
+            p.output_id = ot["output_id"].as<int>(-1);
+            p.output_type = ot["output_type"].as<std::string>("");
+            if (ot["output_parameters"]) p.output_parameters = ot["output_parameters"];
+            node.outputs.push_back(std::move(p));
+        }
+    }
+
+    if (n["caches"]) {
+        for (const auto& ct : n["caches"]) {
+            CacheEntry c;
+            c.cache_type = ct["cache_type"].as<std::string>("");
+            c.location = ct["location"].as<std::string>("");
+            node.caches.push_back(std::move(c));
+        }
+    }
+
+    return node;
+}
+
+// --- MODIFIED: to_yaml now writes the new dynamic input format ---
+YAML::Node Node::to_yaml() const {
+    YAML::Node n;
+    n["id"] = id;
+    n["name"] = name;
+    n["type"] = type;
+    n["subtype"] = subtype;
+
+    if (!image_inputs.empty()) n["image_inputs"] = image_inputs_to_yaml(image_inputs);
+    if (!parameter_inputs.empty()) n["parameter_inputs"] = parameter_inputs_to_yaml(parameter_inputs);
+    
+    if (parameters && parameters.IsMap() && parameters.size() > 0) {
+         n["parameters"] = parameters;
+    } else {
+        // Ensure parameters is always a map, even if empty, for consistency.
+        n["parameters"] = YAML::Node(YAML::NodeType::Map);
+    }
+    
+    if (!outputs.empty()) n["outputs"] = ports_to_yaml(outputs);
+    if (!caches.empty()) n["caches"] = caches_to_yaml(caches);
+    
+    return n;
+}
+
+} // namespace ps
+// FILE: src/ops.cpp
+// FILE: src/ops.cpp
+//
+// This file implements the core image processing and data generation functions (Operations, or "Ops").
+// Each operation is a standalone C++ function that conforms to the `OpFunc` signature.
+// An OpFunc takes a constant reference to a `Node` and a vector of input `cv::Mat` images,
+// and it returns a `NodeOutput` struct, which contains the resulting image and any data outputs.
+//
+// To add a new operation:
+// 1. Write a static function with the signature:
+//    `static NodeOutput my_op_function(const Node& node, const std::vector<cv::Mat>& inputs)`
+// 2. Inside the function, access parameters via `node.runtime_parameters`. This YAML::Node contains
+//    both static parameters from the file and dynamic parameters from upstream nodes.
+// 3. Access input images from the `inputs` vector. The order is determined by the `image_inputs`
+//    list in the node's YAML definition.
+// 4. Perform the operation and populate a `NodeOutput` struct.
+// 5. Register the new function in `register_builtin()` at the bottom of this file, associating it
+//    with a `type` and `subtype` string.
+//
+
+#include "ops.hpp"
+#include <opencv2/imgcodecs.hpp>
+#include <opencv2/imgproc.hpp>
+#include <string>
+#include <vector>
+
+namespace ps { namespace ops {
+
+// --- Helper Functions ---
+// These static helpers provide robust, boilerplate-free access to YAML parameters.
+
+// Safely gets a double from a YAML node, returning a default value on failure or if missing.
+static double as_double_flexible(const YAML::Node& n, const std::string& key, double defv) {
+    if (!n || !n[key]) return defv;
+    try { if (n[key].IsScalar()) return n[key].as<double>(); return defv; } catch (...) { return defv; }
+}
+
+// Safely gets an integer from a YAML node, returning a default value on failure or if missing.
+static int as_int_flexible(const YAML::Node& n, const std::string& key, int defv) {
+    if (!n || !n[key]) return defv;
+    try { return n[key].as<int>(); } catch (...) { return defv; }
+}
+
+// Safely gets a string from a YAML node, returning a default value on failure or if missing.
+static std::string as_str(const YAML::Node& n, const std::string& key, const std::string& defv = {}) {
+    if (!n || !n[key]) return defv;
+    try { return n[key].as<std::string>(); } catch (...) { return defv; }
+}
+
+// Prepares two images for a mixing operation by promoting their channel counts to match.
+// For example, a 1-channel grayscale image will be converted to 4-channel BGRA if the other is BGRA.
+static void normalize_channels_for_mixing(cv::Mat& img1, cv::Mat& img2) {
+    int c1 = img1.channels();
+    int c2 = img2.channels();
+    if (c1 == c2) return;
+
+    if (c1 == 1 && c2 == 3) cv::cvtColor(img1, img1, cv::COLOR_GRAY2BGR);
+    else if (c1 == 1 && c2 == 4) cv::cvtColor(img1, img1, cv::COLOR_GRAY2BGRA);
+    else if (c2 == 1 && c1 == 3) cv::cvtColor(img2, img2, cv::COLOR_GRAY2BGR);
+    else if (c2 == 1 && c1 == 4) cv::cvtColor(img2, img2, cv::COLOR_GRAY2BGRA);
+    else if (c1 == 3 && c2 == 4) cv::cvtColor(img1, img1, cv::COLOR_BGR2BGRA);
+    else if (c2 == 3 && c1 == 4) cv::cvtColor(img2, img2, cv::COLOR_BGR2BGRA);
+}
+
+
+// --- Operation Implementations ---
+
+/**
+ * @brief (image_source:path) Loads an image from a file.
+ */
+static NodeOutput op_image_source_path(const Node& node, const std::vector<cv::Mat>&) {
+    const auto& P = node.parameters;
+    std::string path = as_str(P, "path");
+    if (path.empty()) throw GraphError("image_source:path requires parameters.path");
+    
+    cv::Mat img = cv::imread(path, cv::IMREAD_UNCHANGED);
+    if (img.empty()) throw GraphError("Failed to read image: " + path);
+
+    if (P["resize"]) {
+        int w = as_int_flexible(P, "width", 0);
+        int h = as_int_flexible(P, "height", 0);
+        if (w > 0 && h > 0) cv::resize(img, img, cv::Size(w, h));
+    }
+    
+    NodeOutput result;
+    result.image_matrix = img;
+    return result;
+}
+
+/**
+ * @brief (image_process:crop) Extracts a rectangular region of an image.
+ */
+static NodeOutput op_crop(const Node& node, const std::vector<cv::Mat>& inputs) {
+    if (inputs.empty() || inputs[0].empty()) {
+        throw GraphError("crop requires one valid input image");
+    }
+    const cv::Mat& src_image = inputs[0];
+    const auto& P = node.runtime_parameters;
+
+    std::string mode = as_str(P, "mode", "value");
+    int final_x, final_y, final_width, final_height;
+
+    if (mode == "ratio") {
+        double rx = as_double_flexible(P, "x", -1.0);
+        double ry = as_double_flexible(P, "y", -1.0);
+        double rw = as_double_flexible(P, "width", -1.0);
+        double rh = as_double_flexible(P, "height", -1.0);
+        if (rx < 0.0 || ry < 0.0 || rw <= 0.0 || rh <= 0.0) {
+             throw GraphError("crop in 'ratio' mode requires non-negative values for 'x', 'y', and positive values for 'width', 'height'.");
+        }
+        final_x = static_cast<int>(rx * src_image.cols);
+        final_y = static_cast<int>(ry * src_image.rows);
+        final_width = static_cast<int>(rw * src_image.cols);
+        final_height = static_cast<int>(rh * src_image.rows);
+    } else if (mode == "value") {
+        final_x = as_int_flexible(P, "x", -1);
+        final_y = as_int_flexible(P, "y", -1);
+        final_width = as_int_flexible(P, "width", -1);
+        final_height = as_int_flexible(P, "height", -1);
+        if (final_width <= 0 || final_height <= 0) {
+            throw GraphError("crop 'width' and 'height' must be positive.");
+        }
+    } else {
+        throw GraphError("crop 'mode' parameter must be either 'value' or 'ratio'.");
+    }
+
+    cv::Mat canvas = cv::Mat::zeros(final_height, final_width, src_image.type());
+    cv::Rect source_rect(0, 0, src_image.cols, src_image.rows);
+    cv::Rect crop_rect(final_x, final_y, final_width, final_height);
+    cv::Rect intersection = source_rect & crop_rect;
+    cv::Rect destination_roi(intersection.x - final_x, intersection.y - final_y, intersection.width, intersection.height);
+
+    if (intersection.width > 0 && intersection.height > 0) {
+        src_image(intersection).copyTo(canvas(destination_roi));
+    }
+
+    NodeOutput result;
+    result.image_matrix = canvas;
+    return result;
+}
+
+/**
+ * @brief (image_process:gaussian_blur) Applies a Gaussian blur filter.
+ */
+static NodeOutput op_gaussian_blur(const Node& node, const std::vector<cv::Mat>& inputs) {
+    if (inputs.empty() || inputs[0].empty()) throw GraphError("gaussian_blur requires one valid input image");
+    const auto& P = node.runtime_parameters;
+    int k = as_int_flexible(P, "ksize", 3);
+    if (k % 2 == 0) k += 1;
+    double sigmaX = as_double_flexible(P, "sigmaX", 0.0);
+    cv::Mat out_mat;
+    cv::GaussianBlur(inputs[0], out_mat, cv::Size(k, k), sigmaX);
+    NodeOutput result;
+    result.image_matrix = out_mat;
+    return result;
+}
+
+/**
+ * @brief (image_process:resize) Changes the dimensions of an image.
+ */
+static NodeOutput op_resize(const Node& node, const std::vector<cv::Mat>& inputs) {
+    if (inputs.empty() || inputs[0].empty()) throw GraphError("resize requires one valid input image");
+    const auto& P = node.runtime_parameters;
+    int width = as_int_flexible(P, "width", 0);
+    int height = as_int_flexible(P, "height", 0);
+    if (width <= 0 || height <= 0) throw GraphError("resize requires 'width' and 'height' parameters > 0.");
+    std::string interp_str = as_str(P, "interpolation", "linear");
+    int interpolation_flag = cv::INTER_LINEAR;
+    if (interp_str == "cubic") interpolation_flag = cv::INTER_CUBIC;
+    else if (interp_str == "nearest") interpolation_flag = cv::INTER_NEAREST;
+    else if (interp_str == "area") interpolation_flag = cv::INTER_AREA;
+    cv::Mat out_mat;
+    cv::resize(inputs[0], out_mat, cv::Size(width, height), 0, 0, interpolation_flag);
+    NodeOutput result;
+    result.image_matrix = out_mat;
+    return result;
+}
+
+/**
+ * @brief (image_mixing:add_weighted) Blends two images using weighted sum. Supports simple
+ *        and advanced channel re-wiring modes.
+ */
+static NodeOutput op_add_weighted(const Node& node, const std::vector<cv::Mat>& inputs) {
+    if (inputs.size() < 2 || inputs[0].empty() || inputs[1].empty()) throw GraphError("add_weighted requires two input images");
+    const auto& P = node.runtime_parameters;
+    const auto& map_param = P["channel_mapping"];
+
+    double alpha = as_double_flexible(P, "alpha", 0.5);
+    double beta  = as_double_flexible(P, "beta", 0.5);
+    double gamma = as_double_flexible(P, "gamma", 0.0);
+    std::string strategy = as_str(P, "merge_strategy", "resize");
+
+    cv::Mat a_prep = inputs[0].clone();
+    cv::Mat b_prep = inputs[1].clone();
+    
+    // Advanced path for channel re-wiring
+    if (map_param) {
+        std::vector<std::unordered_map<int, std::vector<int>>> mappings(2);
+        
+        auto parse_mapping = [&](const YAML::Node& mapping_node, int input_idx) {
+            if (!mapping_node) return;
+            for (const auto& it : mapping_node) {
+                int src_idx = it.first.as<int>();
+                if (it.second.IsScalar()) {
+                    mappings[input_idx][src_idx].push_back(it.second.as<int>());
+                } else if (it.second.IsSequence()) {
+                    for (const auto& dest_node : it.second) {
+                        mappings[input_idx][src_idx].push_back(dest_node.as<int>());
+                    }
+                }
+            }
+        };
+        parse_mapping(map_param["input0"], 0);
+        parse_mapping(map_param["input1"], 1);
+        
+        int out_channels = std::max({4, a_prep.channels(), b_prep.channels()});
+        cv::Mat out_mat;
+        
+        std::vector<cv::Mat> a_ch, b_ch;
+        cv::split(a_prep, a_ch);
+        cv::split(b_prep, b_ch);
+
+        // Logic split for crop vs resize
+        if (strategy == "crop") {
+            out_mat = cv::Mat::zeros(a_prep.size(), CV_MAKETYPE(a_prep.depth(), out_channels));
+            cv::Rect roi_a(0, 0, a_prep.cols, a_prep.rows);
+            cv::Rect roi_b(0, 0, b_prep.cols, b_prep.rows);
+            cv::Rect intersection = roi_a & roi_b;
+
+            if (intersection.width > 0 && intersection.height > 0) {
+                std::vector<cv::Mat> intersection_channels;
+                for (int i = 0; i < out_channels; ++i) {
+                    intersection_channels.push_back(cv::Mat::zeros(intersection.size(), a_prep.depth()));
+                }
+
+                auto process_input_roi = [&](const std::vector<cv::Mat>& src_ch, const std::unordered_map<int, std::vector<int>>& mapping, double weight) {
+                    for(const auto& pair : mapping) {
+                        int src_idx = pair.first;
+                        const auto& dest_indices = pair.second;
+                        for (int dst_idx : dest_indices) {
+                            if (src_idx >= src_ch.size() || dst_idx < 0 || dst_idx >= out_channels) continue;
+                            cv::Mat weighted_src;
+                            src_ch[src_idx](intersection).convertTo(weighted_src, intersection_channels[dst_idx].type(), weight);
+                            intersection_channels[dst_idx] += weighted_src;
+                        }
+                    }
+                };
+                process_input_roi(a_ch, mappings[0], alpha);
+                process_input_roi(b_ch, mappings[1], beta);
+
+                if (gamma != 0.0) {
+                    for (auto& chan : intersection_channels) chan += gamma;
+                }
+                
+                bool alpha_mapped = false;
+                if (out_channels == 4) {
+                    auto is_alpha_targeted = [&](const YAML::Node& mapping_node) {
+                        if (!mapping_node) return false;
+                        for (const auto& it : mapping_node) {
+                            if (it.second.IsScalar() && it.second.as<int>() == 3) return true;
+                            if (it.second.IsSequence()) {
+                                for (const auto& dest_node : it.second) { if (dest_node.as<int>() == 3) return true; }
+                            }
+                        }
+                        return false;
+                    };
+                    if (is_alpha_targeted(map_param["input0"]) || is_alpha_targeted(map_param["input1"])) alpha_mapped = true;
+                }
+                if (out_channels == 4 && !alpha_mapped) {
+                    cv::Mat alpha1 = (a_prep.channels() == 4) ? a_ch[3](intersection) : cv::Mat(intersection.size(), a_prep.depth(), cv::Scalar(255));
+                    cv::Mat alpha2 = (b_prep.channels() == 4) ? b_ch[3](intersection) : cv::Mat(intersection.size(), b_prep.depth(), cv::Scalar(255));
+                    cv::max(alpha1, alpha2, intersection_channels[3]);
+                }
+
+                cv::Mat blended_roi;
+                cv::merge(intersection_channels, blended_roi);
+                blended_roi.copyTo(out_mat(intersection));
+            }
+
+        } else { // "resize" strategy
+            if (a_prep.size() != b_prep.size()) cv::resize(b_prep, b_prep, a_prep.size());
+            std::vector<cv::Mat> final_channels;
+            for (int i = 0; i < out_channels; ++i) final_channels.push_back(cv::Mat::zeros(a_prep.size(), a_prep.depth()));
+
+            auto process_input = [&](const std::vector<cv::Mat>& src_ch, const std::unordered_map<int, std::vector<int>>& mapping, double weight) {
+                for(const auto& pair : mapping) {
+                    int src_idx = pair.first;
+                    const auto& dest_indices = pair.second;
+                    for (int dst_idx : dest_indices) {
+                        if (src_idx >= src_ch.size() || dst_idx < 0 || dst_idx >= out_channels) continue;
+                        cv::Mat weighted_src;
+                        src_ch[src_idx].convertTo(weighted_src, final_channels[dst_idx].type(), weight);
+                        final_channels[dst_idx] += weighted_src;
+                    }
+                }
+            };
+            process_input(a_ch, mappings[0], alpha);
+            process_input(b_ch, mappings[1], beta);
+            if (gamma != 0.0) { for (auto& chan : final_channels) chan += gamma; }
+            
+            bool alpha_mapped = false;
+            if (out_channels == 4) {
+                auto is_alpha_targeted = [&](const YAML::Node& mapping_node) {
+                    if (!mapping_node) return false;
+                    for (const auto& it : mapping_node) {
+                        if (it.second.IsScalar() && it.second.as<int>() == 3) return true;
+                        if (it.second.IsSequence()) {
+                            for (const auto& dest_node : it.second) { if (dest_node.as<int>() == 3) return true; }
+                        }
+                    }
+                    return false;
+                };
+                if (is_alpha_targeted(map_param["input0"]) || is_alpha_targeted(map_param["input1"])) alpha_mapped = true;
+            }
+            if (out_channels == 4 && !alpha_mapped) {
+                cv::Mat alpha1 = (a_prep.channels() == 4) ? a_ch[3] : cv::Mat(a_prep.size(), a_prep.depth(), cv::Scalar(255));
+                cv::Mat alpha2 = (b_prep.channels() == 4) ? b_ch[3] : cv::Mat(b_prep.size(), b_prep.depth(), cv::Scalar(255));
+                cv::max(alpha1, alpha2, final_channels[3]);
+            }
+            cv::merge(final_channels, out_mat);
+        }
+        
+        NodeOutput result;
+        result.image_matrix = out_mat;
+        return result;
+    }
+
+    // Fallback to simple logic if no channel mapping is specified
+    normalize_channels_for_mixing(a_prep, b_prep);
+    cv::Mat out_mat;
+    if (strategy == "crop") {
+        out_mat = cv::Mat::zeros(a_prep.size(), a_prep.type());
+        cv::Rect roi = cv::Rect(0, 0, std::min(a_prep.cols, b_prep.cols), std::min(a_prep.rows, b_prep.rows));
+        
+        cv::Mat merged_roi;
+        if (a_prep.channels() == 4) {
+            std::vector<cv::Mat> a_ch, b_ch, out_ch(4);
+            cv::split(a_prep(roi), a_ch);
+            cv::split(b_prep(roi), b_ch);
+            cv::addWeighted(a_ch[0], alpha, b_ch[0], beta, gamma, out_ch[0]);
+            cv::addWeighted(a_ch[1], alpha, b_ch[1], beta, gamma, out_ch[1]);
+            cv::addWeighted(a_ch[2], alpha, b_ch[2], beta, gamma, out_ch[2]);
+            cv::max(a_ch[3], b_ch[3], out_ch[3]);
+            cv::merge(out_ch, merged_roi);
+        } else {
+            cv::addWeighted(a_prep(roi), alpha, b_prep(roi), beta, gamma, merged_roi);
+        }
+        merged_roi.copyTo(out_mat(roi));
+    } else { // resize
+        if (a_prep.size() != b_prep.size()) cv::resize(b_prep, b_prep, a_prep.size());
+        
+        if (a_prep.channels() == 4) {
+            std::vector<cv::Mat> a_ch, b_ch, out_ch(4);
+            cv::split(a_prep, a_ch);
+            cv::split(b_prep, b_ch);
+            cv::addWeighted(a_ch[0], alpha, b_ch[0], beta, gamma, out_ch[0]);
+            cv::addWeighted(a_ch[1], alpha, b_ch[1], beta, gamma, out_ch[1]);
+            cv::addWeighted(a_ch[2], alpha, b_ch[2], beta, gamma, out_ch[2]);
+            cv::max(a_ch[3], b_ch[3], out_ch[3]);
+            cv::merge(out_ch, out_mat);
+        } else {
+            cv::addWeighted(a_prep, alpha, b_prep, beta, gamma, out_mat);
+        }
+    }
+    
+    NodeOutput result;
+    result.image_matrix = out_mat;
+    return result;
+}
+
+/**
+ * @brief (image_mixing:diff) Computes the absolute difference between two images.
+ */
+static NodeOutput op_abs_diff(const Node& node, const std::vector<cv::Mat>& inputs) {
+    if (inputs.size() < 2 || inputs[0].empty() || inputs[1].empty()) throw GraphError("diff requires two input images");
+    std::string strategy = as_str(node.runtime_parameters, "merge_strategy", "resize");
+
+    cv::Mat a_prep = inputs[0].clone();
+    cv::Mat b_prep = inputs[1].clone();
+    normalize_channels_for_mixing(a_prep, b_prep);
+    cv::Mat out_mat;
+
+    if (strategy == "crop") {
+        out_mat = cv::Mat::zeros(a_prep.size(), a_prep.type());
+        cv::Rect roi = cv::Rect(0, 0, std::min(a_prep.cols, b_prep.cols), std::min(a_prep.rows, b_prep.rows));
+        
+        cv::Mat diff_roi;
+        if (a_prep.channels() == 4) {
+            std::vector<cv::Mat> a_channels, b_channels;
+            cv::split(a_prep(roi), a_channels);
+            cv::split(b_prep(roi), b_channels);
+            cv::Mat diff_b, diff_g, diff_r;
+            cv::absdiff(a_channels[0], b_channels[0], diff_b);
+            cv::absdiff(a_channels[1], b_channels[1], diff_g);
+            cv::absdiff(a_channels[2], b_channels[2], diff_r);
+            cv::Mat out_alpha;
+            cv::max(a_channels[3], b_channels[3], out_alpha);
+            std::vector<cv::Mat> out_channels = {diff_b, diff_g, diff_r, out_alpha};
+            cv::merge(out_channels, diff_roi);
+        } else {
+            cv::absdiff(a_prep(roi), b_prep(roi), diff_roi);
+        }
+        diff_roi.copyTo(out_mat(roi));
+    } else {
+        if (a_prep.size() != b_prep.size()) cv::resize(b_prep, b_prep, a_prep.size());
+        
+        if (a_prep.channels() == 4) {
+            std::vector<cv::Mat> a_channels, b_channels;
+            cv::split(a_prep, a_channels);
+            cv::split(b_prep, b_channels);
+            cv::Mat diff_b, diff_g, diff_r;
+            cv::absdiff(a_channels[0], b_channels[0], diff_b);
+            cv::absdiff(a_channels[1], b_channels[1], diff_g);
+            cv::absdiff(a_channels[2], b_channels[2], diff_r);
+            cv::Mat out_alpha;
+            cv::max(a_channels[3], b_channels[3], out_alpha);
+            std::vector<cv::Mat> out_channels = {diff_b, diff_g, diff_r, out_alpha};
+            cv::merge(out_channels, out_mat);
+        } else {
+            cv::absdiff(a_prep, b_prep, out_mat);
+        }
+    }
+    NodeOutput result;
+    result.image_matrix = out_mat;
+    return result;
+}
+
+/**
+ * @brief (analyzer:get_dimensions) Extracts the width and height of an image as data.
+ */
+static NodeOutput op_get_width(const Node&, const std::vector<cv::Mat>& inputs) {
+    if (inputs.empty() || inputs[0].empty()) throw GraphError("analyzer:get_width requires one image input.");
+    NodeOutput out;
+    out.data["width"] = inputs[0].cols;
+    out.data["height"] = inputs[0].rows;
+    return out;
+}
+
+/**
+ * @brief (math:divide) Divides two numbers. Does not use image inputs.
+ */
+static NodeOutput op_divide(const Node& node, const std::vector<cv::Mat>&) {
+    const auto& P = node.runtime_parameters;
+    if (!P["operand1"] || !P["operand2"]) throw GraphError("math:divide requires 'operand1' and 'operand2'.");
+    double op1 = P["operand1"].as<double>();
+    double op2 = P["operand2"].as<double>();
+    if (op2 == 0) throw GraphError("math:divide attempted to divide by zero.");
+    NodeOutput out;
+    out.data["result"] = op1 / op2;
+    return out;
+}
+
+/**
+ * @brief (image_process:extract_channel) Isolates a single channel from an image.
+ */
+static NodeOutput op_extract_channel(const Node& node, const std::vector<cv::Mat>& inputs) {
+    if (inputs.empty() || inputs[0].empty()) {
+        throw GraphError("extract_channel requires one valid input image");
+    }
+    const auto& P = node.runtime_parameters;
+    std::string channel_str = as_str(P, "channel", "a");
+    int channel_idx = -1;
+
+    if (channel_str == "b" || channel_str == "0") channel_idx = 0;
+    else if (channel_str == "g" || channel_str == "1") channel_idx = 1;
+    else if (channel_str == "r" || channel_str == "2") channel_idx = 2;
+    else if (channel_str == "a" || channel_str == "3") channel_idx = 3;
+    else throw GraphError("extract_channel: invalid 'channel' parameter. Use b,g,r,a or 0,1,2,3.");
+
+    if (inputs[0].channels() <= channel_idx) {
+        std::ostringstream err;
+        err << "extract_channel: image has only " << inputs[0].channels() << " channel(s), cannot extract index " << channel_idx;
+        throw GraphError(err.str());
+    }
+
+    std::vector<cv::Mat> channels;
+    cv::split(inputs[0], channels);
+
+    NodeOutput result;
+    result.image_matrix = channels[channel_idx];
+    result.data["channel"] = channel_idx;
+    return result;
+}
+
+
+/**
+ * @brief Registers all the built-in operations with the OpRegistry singleton.
+ *        This function is called once at application startup.
+ */
+void register_builtin() {
+    auto& R = OpRegistry::instance();
+    
+    // Image Loading
+    R.register_op("image_source", "path", op_image_source_path);
+    
+    // Image Processing
+    R.register_op("image_process", "gaussian_blur", op_gaussian_blur);
+    R.register_op("image_process", "resize", op_resize);
+    R.register_op("image_process", "crop", op_crop);
+    R.register_op("image_process", "extract_channel", op_extract_channel);
+    
+    // Image Mixing
+    R.register_op("image_mixing", "add_weighted", op_add_weighted);
+    R.register_op("image_mixing", "diff", op_abs_diff);
+    
+    // Data / Utility
+    R.register_op("analyzer", "get_dimensions", op_get_width);
+    R.register_op("math", "divide", op_divide);
+}
+
+}} // namespace ps::ops
+// FILE: src/ops.hpp
+#pragma once
+#include "ps_types.hpp"
+#include "node.hpp"
+
+namespace ps { namespace ops {
+
+void register_builtin();
+
+}} // namespace ps::ops
+// FILE: src/ps_types.cpp
+#include "ps_types.hpp"
+
+namespace ps {
+
+OpRegistry& OpRegistry::instance() {
+    static OpRegistry inst;
+    return inst;
+}
+
+void OpRegistry::register_op(const std::string& type, const std::string& subtype, OpFunc fn) {
+    table_[make_key(type, subtype)] = std::move(fn);
+}
+
+std::optional<OpFunc> OpRegistry::find(const std::string& type, const std::string& subtype) const {
+    auto it = table_.find(make_key(type, subtype));
+    if (it == table_.end()) return std::nullopt;
+    return it->second;
+}
+
+} // namespace ps
+// FILE: cli/graph_cli.cpp
+// FILE: cli/graph_cli.cpp
+#include <getopt.h>
+#include <limits>
+#include <regex>
+#include <sstream>
+#include <iostream>
+#include <fstream>
+#include <unordered_set>
+#include <chrono>
+#include "node_graph.hpp"
+#include "../src/ops.hpp"
+
+
+
+using namespace ps;
+
+// --- FIXED: The CliConfig struct now correctly includes all members ---
+struct CliConfig {
+    std::string loaded_config_path; // Path it was loaded from. Empty if none.
+    std::string cache_root_dir = "cache";
+    std::string default_traversal_arg = "";
+    std::string default_cache_clear_arg = "md";
+    std::string default_exit_save_path = "graph_out.yaml";
+    bool exit_prompt_sync = true;
+    std::string config_save_behavior = "current"; // "current", "default", "ask", "none"
+    std::string default_timer_log_path = "out/timer.yaml";
+};
+
+// --- Helper to write config struct to a YAML file ---
+static bool write_config_to_file(const CliConfig& config, const std::string& path) {
+    YAML::Node root;
+    root["_comment1"] = "Photospider CLI configuration.";
+    root["cache_root_dir"] = config.cache_root_dir;
+    root["default_traversal_arg"] = config.default_traversal_arg;
+    root["default_cache_clear_arg"] = config.default_cache_clear_arg;
+    root["default_exit_save_path"] = config.default_exit_save_path;
+    root["exit_prompt_sync"] = config.exit_prompt_sync;
+    root["config_save_behavior"] = config.config_save_behavior;
+    root["default_timer_log_path"] = config.default_timer_log_path;
+
+    try {
+        std::ofstream fout(path);
+        fout << root;
+        std::cout << "Successfully saved configuration to '" << path << "'." << std::endl;
+        return true;
+    } catch (const std::exception& e) {
+        std::cerr << "Error: Could not write to config file '" << path << "'. Error: " << e.what() << std::endl;
+        return false;
+    }
+}
+
+// --- Stores the loaded path in the config struct ---
+static void load_or_create_config(const std::string& config_path, CliConfig& config) {
+    if (fs::exists(config_path)) {
+        config.loaded_config_path = fs::absolute(config_path).string();
+        try {
+            YAML::Node root = YAML::LoadFile(config_path);
+            if (root["cache_root_dir"]) config.cache_root_dir = root["cache_root_dir"].as<std::string>();
+            if (root["default_traversal_arg"]) config.default_traversal_arg = root["default_traversal_arg"].as<std::string>();
+            if (root["default_cache_clear_arg"]) config.default_cache_clear_arg = root["default_cache_clear_arg"].as<std::string>();
+            if (root["default_exit_save_path"]) config.default_exit_save_path = root["default_exit_save_path"].as<std::string>();
+            if (root["exit_prompt_sync"]) config.exit_prompt_sync = root["exit_prompt_sync"].as<bool>();
+            if (root["config_save_behavior"]) config.config_save_behavior = root["config_save_behavior"].as<std::string>();
+            if (root["default_timer_log_path"]) config.default_timer_log_path = root["default_timer_log_path"].as<std::string>();
+            std::cout << "Loaded configuration from '" << config_path << "'." << std::endl;
+        } catch (const std::exception& e) {
+            std::cerr << "Warning: Could not parse config file '" << config_path << "'. Using default settings. Error: " << e.what() << std::endl;
+        }
+    } else if (config_path == "config.yaml") {
+        std::cout << "Configuration file 'config.yaml' not found. Creating a default one." << std::endl;
+        config.default_traversal_arg = "cr"; 
+        config.config_save_behavior = "current";
+        config.default_timer_log_path = "out/timer.yaml";
+        if (write_config_to_file(config, "config.yaml")) {
+            config.loaded_config_path = fs::absolute("config.yaml").string();
+        }
+    }
+}
+
+static void print_cli_help() {
+    std::cout << "Usage: graph_cli [options]\n\n"
+              << "Options:\n"
+              << "  -h, --help                 Show this help message\n"
+              << "  -r, --read <file>          Read YAML and create graph\n"
+              << "  -o, --output <file>        Save current graph to YAML\n"
+              << "  -p, --print                Print dependency tree\n"
+              << "  -t, --traversal            Show evaluation order\n"
+              << "      --config <file>        Use a specific configuration file\n"
+              << "      --clear-cache          Delete the contents of the cache directory\n"
+              << "      --repl                 Start interactive shell (REPL)\n"
+              << std::endl;
+}
+static void print_repl_help() {
+    std::cout << "Available REPL (interactive shell) commands:\n"
+              << "  help                       Show this help message.\n"
+              << "  config [key] [value]       View or update a configuration setting.\n"
+              << "  read <file>                Load a YAML graph from a file.\n"
+              << "  source <file>              Execute commands from a script file.\n"
+              << "  print                      Show the detailed dependency tree of the current graph.\n"
+              << "  traversal [m|d|c|cr]       Show evaluation order with cache status flags.\n"
+              << "  output <file>              Save the current graph to a YAML file.\n"
+              << "  clear-graph                Clear the current in-memory graph.\n"
+              << "  cc, clear-cache [d|m|md]   Clear on-disk, in-memory, or both caches.\n"
+              << "  compute <id|all> [flags]   Compute node(s) with optional flags:\n"
+              << "                             force: Re-compute even if cached.\n"
+              << "                             t:     Print a simple timer summary to the console.\n"
+              << "                             tl [path]: Log detailed timings to a YAML file.\n"
+              << "  save <id> <file>           Compute a node and save its image output to a file.\n"
+              << "  free                       Free memory used by non-essential intermediate nodes.\n"
+              << "  exit                       Quit the shell.\n";
+}
+
+static std::string ask(const std::string& q, const std::string& def = "") {
+    std::cout << q; if (!def.empty()) std::cout << " [" << def << "]";
+    std::cout << ": "; std::string s; std::getline(std::cin, s);
+    if (s.empty()) return def; return s;
+}
+
+static bool ask_yesno(const std::string& q, bool def = true) {
+    std::string d = def ? "Y" : "n";
+    while (true) {
+        std::string s = ask(q + " [Y/n]", d); if (s.empty()) return def;
+        if (s == "Y" || s == "y") return true; if (s == "N" || s == "n") return false;
+        std::cout << "Please answer Y or n.\n";
+    }
+}
+
+static void do_traversal(const NodeGraph& graph, bool show_mem, bool show_disk) {
+    auto ends = graph.ending_nodes();
+    if (ends.empty()) { std::cout << "(no ending nodes or graph is cyclic)\n"; return; }
+    
+    graph.print_dependency_tree(std::cout);
+
+    for (int end : ends) {
+        try {
+            auto order = graph.topo_postorder_from(end);
+            std::cout << "\nPost-order (eval order) for end node " << end << ":\n";
+            for (size_t i = 0; i < order.size(); ++i) {
+                const auto& node = graph.nodes.at(order[i]);
+                std::cout << (i + 1) << ". " << node.id << " (" << node.name << ")";
+                
+                std::vector<std::string> statuses;
+                if (show_mem && node.cached_output.has_value()) {
+                    statuses.push_back("in memory");
+                }
+                if (show_disk && !node.caches.empty()) {
+                    bool on_disk = false;
+                    for (const auto& cache : node.caches) {
+                        fs::path cache_file = graph.node_cache_dir(node.id) / cache.location;
+                        fs::path meta_file = cache_file; meta_file.replace_extension(".yml");
+                        if (fs::exists(cache_file) || fs::exists(meta_file)) {
+                            on_disk = true;
+                            break;
+                        }
+                    }
+                    if(on_disk) statuses.push_back("on disk");
+                }
+                if (!statuses.empty()) {
+                    std::cout << " (";
+                    for(size_t j=0; j<statuses.size(); ++j) std::cout << statuses[j] << (j < statuses.size() - 1 ? ", " : "");
+                    std::cout << ")";
+                }
+                std::cout << "\n";
+            }
+        } catch (const std::exception& e) {
+            std::cout << "Traversal error on end node " << end << ": " << e.what() << "\n";
+        }
+    }
+}
+
+static void print_config(const CliConfig& config) {
+    std::cout << "Current CLI Configuration:\n"
+              << "  - loaded_config_path:      " << (config.loaded_config_path.empty() ? "(none)" : config.loaded_config_path) << "\n"
+              << "  - cache_root_dir:          " << config.cache_root_dir << "\n"
+              << "  - default_traversal_arg:   " << config.default_traversal_arg << "\n"
+              << "  - default_cache_clear_arg: " << config.default_cache_clear_arg << "\n"
+              << "  - default_exit_save_path:  " << config.default_exit_save_path << "\n"
+              << "  - exit_prompt_sync:        " << (config.exit_prompt_sync ? "true" : "false") << "\n"
+              << "  - config_save_behavior:    " << config.config_save_behavior << " (default action for the 'config' command)\n";
+}
+
+static void save_config_interactive(CliConfig& config) {
+    std::string def_char;
+    std::string prompt = "Save updated configuration? [";
+    
+    if (config.config_save_behavior == "current" && !config.loaded_config_path.empty()) {
+        prompt += "C]urrent/[d]efault/[a]sk/[n]one"; def_char = "c";
+    } else if (config.config_save_behavior == "default") {
+        prompt += "c]urrent/[D]efault/[a]sk/[n]one"; def_char = "d";
+    } else if (config.config_save_behavior == "ask") {
+        prompt += "c]urrent/[d]efault/[A]sk/[n]one"; def_char = "a";
+    } else {
+        prompt += "c]urrent/[d]efault/[a]sk/[N]one"; def_char = "n";
+    }
+    
+    if (config.loaded_config_path.empty()) {
+        prompt.replace(prompt.find("c]urrent"), 8, "(no current)");
+        if (def_char == "c") def_char = "d";
+    }
+    prompt += "]";
+
+    while(true) {
+        std::string choice = ask(prompt, def_char);
+        if (choice == "c" && !config.loaded_config_path.empty()) {
+            write_config_to_file(config, config.loaded_config_path);
+            break;
+        } else if (choice == "d") {
+            write_config_to_file(config, "config.yaml");
+            break;
+        } else if (choice == "a") {
+            std::string path = ask("Enter path to save new config file");
+            if (!path.empty()) write_config_to_file(config, path);
+            break;
+        } else if (choice == "n") {
+            std::cout << "Configuration changes will not be saved." << std::endl;
+            break;
+        } else {
+            std::cout << "Invalid choice." << std::endl;
+        }
+    }
+}
+
+// --- FIXED: Signature now takes a mutable CliConfig& to allow modification ---
+static bool process_command(const std::string& line, NodeGraph& graph, bool& modified, CliConfig& config) {
+    std::istringstream iss(line);
+    std::string cmd;
+    iss >> cmd;
+    if (cmd.empty()) return true;
+    
+    try {
+        if (cmd == "help") {
+            print_repl_help(); // <-- CORRECTED: Calls the new REPL-specific help
+        } else if (cmd == "read") {
+            std::string path; iss >> path; if (path.empty()) std::cout << "Usage: read <filepath>\n";
+            else { graph.load_yaml(path); modified = false; std::cout << "Loaded graph from " << path << "\n"; }
+        } else if (cmd == "source") {
+            std::string filename; iss >> filename;
+            if (filename.empty()) { std::cout << "Usage: source <filename>\n"; return true; }
+            std::ifstream script_file(filename);
+            if (!script_file) { std::cout << "Error: Cannot open script file: " << filename << "\n"; return true; }
+            std::string script_line;
+            while (std::getline(script_file, script_line)) {
+                if (script_line.empty() || script_line.find_first_not_of(" \t") == std::string::npos || script_line[0] == '#') continue;
+                std::cout << "ps> " << script_line << std::endl;
+                if (!process_command(script_line, graph, modified, config)) return false;
+            }
+        } 
+        // ... (The rest of the `process_command` function has no changes)
+        // ... `print`, `traversal`, `config`, `exit`, etc. are all the same
+        else if (cmd == "print") {
+            graph.print_dependency_tree(std::cout);
+        } else if (cmd == "traversal") {
+            std::string arg;
+            iss >> arg;
+            if (arg.empty()) {
+                arg = config.default_traversal_arg;
+            }
+            bool show_mem = false, show_disk = false, do_check = false, do_check_remove = false;
+            if (arg.find('m') != std::string::npos) show_mem = true;
+            if (arg.find('d') != std::string::npos) show_disk = true;
+            if (arg.find("cr") != std::string::npos) do_check_remove = true;
+            else if (arg.find('c') != std::string::npos) do_check = true;
+            if (do_check_remove) graph.synchronize_disk_cache();
+            else if (do_check) graph.cache_all_nodes();
+            do_traversal(graph, show_mem, show_disk);
+        } else if (cmd == "output") {
+            std::string path; iss >> path; if (path.empty()) std::cout << "Usage: output <filepath>\n";
+            else { graph.save_yaml(path); modified = false; std::cout << "Saved to " << path << "\n"; }
+        } else if (cmd == "clear-graph") {
+            graph.clear(); modified = true; std::cout << "Graph cleared.\n";
+        } else if (cmd == "clear-cache" || cmd == "cc") {
+            std::string arg;
+            iss >> arg;
+            if (arg.empty()) {
+                arg = config.default_cache_clear_arg;
+            }
+            if (arg == "both" || arg == "md" || arg == "dm") graph.clear_cache();
+            else if (arg == "drive" || arg == "d") graph.clear_drive_cache();
+            else if (arg == "memory" || arg == "m") graph.clear_memory_cache();
+        } else if (cmd == "config") {
+            std::string key, value;
+            iss >> key;
+            if (key.empty()) {
+                print_config(config);
+                return true;
+            }
+            std::getline(iss >> std::ws, value);
+            bool changed = false;
+            if (key == "cache_root_dir") {
+                std::cout << "Note: 'cache_root_dir' will only take effect on next launch." << std::endl;
+                config.cache_root_dir = value; changed = true;
+            } else if (key == "default_traversal_arg") {
+                config.default_traversal_arg = value; changed = true;
+            } else if (key == "default_cache_clear_arg") {
+                config.default_cache_clear_arg = value; changed = true;
+            } else if (key == "default_exit_save_path") {
+                config.default_exit_save_path = value; changed = true;
+            } else if (key == "exit_prompt_sync") {
+                if (value == "true" || value == "1") { config.exit_prompt_sync = true; changed = true; }
+                else if (value == "false" || value == "0") { config.exit_prompt_sync = false; changed = true; }
+                else { std::cout << "Invalid boolean value. Use 'true' or 'false'." << std::endl; }
+            } else if (key == "config_save_behavior") {
+                if (value == "current" || value == "default" || value == "ask" || value == "none") {
+                    config.config_save_behavior = value; changed = true;
+                } else { std::cout << "Invalid value. Use 'current', 'default', 'ask', or 'none'." << std::endl;}
+            } else if (key == "default_timer_log_path") { // NEW
+                config.default_timer_log_path = value; changed = true;
+            } else {
+                std::cout << "Unknown configuration key: '" << key << "'." << std::endl;
+            }
+            if (changed) {
+                std::cout << "Configuration '" << key << "' updated for this session." << std::endl;
+                save_config_interactive(config);
+            }
+        } else if (cmd == "compute") {
+            std::string target_id_str;
+            iss >> target_id_str;
+            if (target_id_str.empty()) {
+                std::cout << "Usage: compute <id|all> [flags]\n";
+                return true;
+            }
+
+            // Parse all flags and arguments
+            bool force = false;
+            bool timer_console = false; // 't' flag
+            bool timer_log_file = false;  // 'tl' flag
+            std::string timer_log_path = "";
+
+            std::string arg;
+            while (iss >> arg) {
+                if (arg == "force") {
+                    force = true;
+                } else if (arg == "t" || arg == "timer") {
+                    timer_console = true;
+                } else if (arg == "tl") {
+                    timer_log_file = true;
+                    // Peek at the next argument. If it's not a flag, assume it's the path.
+                    if (iss.peek() != EOF && iss.peek() != ' ') {
+                        std::string next_arg;
+                        iss >> next_arg;
+                        if (next_arg != "force" && next_arg != "t" && next_arg != "timer") {
+                            timer_log_path = next_arg;
+                        } else {
+                            // It was a flag, so put it back in the stream
+                            iss.seekg(-(next_arg.length()), std::ios_base::cur);
+                        }
+                    }
+                }
+            }
+
+            bool enable_timing = timer_console || timer_log_file;
+            if (enable_timing) {
+                graph.clear_timing_results();
+            }
+            
+            // Start total timer if logging to file
+            std::chrono::time_point<std::chrono::high_resolution_clock> total_start;
+            if (timer_log_file) {
+                total_start = std::chrono::high_resolution_clock::now();
+            }
+
+            auto print_output = [](int id, const NodeOutput& out) {
+                std::cout << "-> Node " << id << " computed.\n";
+                if (!out.image_matrix.empty()) { std::cout << "   Image Output: " << out.image_matrix.cols << "x" << out.image_matrix.rows << " (" << out.image_matrix.channels() << " ch)\n"; }
+                if (!out.data.empty()) { 
+                    std::cout << "   Data Outputs:\n";
+                    YAML::Emitter yml;
+                    yml << YAML::Flow << YAML::BeginMap;
+                    for(const auto& pair : out.data) {
+                        yml << YAML::Key << pair.first << YAML::Value << pair.second;
+                    }
+                    yml << YAML::EndMap;
+                    std::cout << "     " << yml.c_str() << "\n"; 
+                    }
+            };
+
+            // Execute computation
+            if (target_id_str == "all") {
+                for (int id : graph.ending_nodes()) {
+                    print_output(id, graph.compute(id, force, enable_timing));
+                }
+            } else {
+                int id = std::stoi(target_id_str);
+                print_output(id, graph.compute(id, force, enable_timing));
+            }
+
+            // --- Post-computation actions based on flags ---
+
+            // 1. Print simple summary to console if 't' was used
+            if (timer_console) {
+                std::cout << "--- Computation Timers (Console) ---\n";
+                for (const auto& timing : graph.timing_results.node_timings) {
+                    printf("  - Node %-3d (%-20s): %10.4f ms [%s]\n", 
+                           timing.id, timing.name.c_str(), timing.elapsed_ms, timing.source.c_str());
+                }
+            }
+            
+            // 2. Write detailed log to file if 'tl' was used
+            if (timer_log_file) {
+                auto total_end = std::chrono::high_resolution_clock::now();
+                std::chrono::duration<double, std::milli> total_elapsed = total_end - total_start;
+                graph.timing_results.total_ms = total_elapsed.count();
+
+                if (timer_log_path.empty()) {
+                    timer_log_path = config.default_timer_log_path;
+                }
+
+                fs::path out_path(timer_log_path);
+                if (out_path.has_parent_path()) {
+                    fs::create_directories(out_path.parent_path());
+                }
+
+                YAML::Node root;
+                YAML::Node steps_node(YAML::NodeType::Sequence);
+                for (const auto& timing : graph.timing_results.node_timings) {
+                    YAML::Node step;
+                    step["id"] = timing.id;
+                    step["name"] = timing.name;
+                    step["time_ms"] = timing.elapsed_ms;
+                    step["source"] = timing.source; 
+                    steps_node.push_back(step);
+                }
+
+                root["steps"] = steps_node;
+                root["total_time_ms"] = graph.timing_results.total_ms;
+                
+                std::ofstream fout(timer_log_path);
+                fout << root;
+                std::cout << "Timer log successfully written to '" << timer_log_path << "'." << std::endl;
+            }
+
+        } else if (cmd == "save") {
+            std::string id_str, path; iss >> id_str >> path;
+            if (id_str.empty() || path.empty()) { std::cout << "Usage: save <node_id> <filepath>\n"; }
+            else {
+                int id = std::stoi(id_str);
+                const auto& result = graph.compute(id);
+                if (result.image_matrix.empty()) { std::cout << "Error: Computed node " << id << " has no image output to save.\n"; }
+                else if (cv::imwrite(path, result.image_matrix)) { std::cout << "Successfully saved node " << id << " image to " << path << "\n"; }
+                else { std::cout << "Error: Failed to save image to " << path << "\n"; }
+            }
+        } else if (cmd == "free") {
+            graph.free_transient_memory();
+        } else if (cmd == "exit") {
+            if (modified && ask_yesno("You have unsaved changes. Save graph to file?", true)) {
+                std::string path = ask("output file", config.default_exit_save_path);
+                graph.save_yaml(path); std::cout << "Saved to " << path << "\n";
+            }
+            if (ask_yesno("Synchronize disk cache with memory state before exiting?", config.exit_prompt_sync)) {
+                graph.synchronize_disk_cache();
+            }
+            return false;
+        } else {
+            std::cout << "Unknown command: " << cmd << ". Type 'help' for a list of commands.\n";
+        }
+    } catch (const std::exception& e) {
+        std::cout << "Error: " << e.what() << "\n";
+    }
+    return true;
+}
+
+static void run_repl(NodeGraph& graph, CliConfig& config) {
+    bool modified = false;
+    std::string line;
+    std::cout << "Photospider dynamic graph shell. Type 'help' for commands.\n";
+    while (true) {
+        std::cout << "ps> ";
+        if (!std::getline(std::cin, line)) break;
+        if (!process_command(line, graph, modified, config)) break;
+    }
+}
+
+int main(int argc, char** argv) {
+    ops::register_builtin();
+    
+    CliConfig config;
+    std::string custom_config_path;
+
+    const char* const short_opts = "hr:o:pt:R";
+    const option long_opts[] = {
+        {"help", no_argument, nullptr, 'h'}, {"read", required_argument, nullptr, 'r'},
+        {"output", required_argument, nullptr, 'o'},
+        {"print", no_argument, nullptr, 'p'}, {"traversal", no_argument, nullptr, 't'},
+        {"clear-cache", no_argument, nullptr, 1001},
+        {"repl", no_argument, nullptr, 'R'}, 
+        {"config", required_argument, nullptr, 2001},
+        {nullptr, 0, nullptr, 0}
+    };
+    
+    int opt;
+    // First pass to find a custom config path
+    while ((opt = getopt_long(argc, argv, short_opts, long_opts, nullptr)) != -1) {
+        if (opt == 'h') { print_cli_help(); return 0; }
+        if (opt == 2001) custom_config_path = optarg;
+    }
+
+    std::string config_to_load = custom_config_path.empty() ? "config.yaml" : custom_config_path;
+    load_or_create_config(config_to_load, config);
+
+    NodeGraph graph{config.cache_root_dir};
+    
+    optind = 1; 
+    bool did_any = false;
+    bool start_repl = false;
+
+    // Second pass to execute one-shot commands
+    while ((opt = getopt_long(argc, argv, short_opts, long_opts, nullptr)) != -1) {
+        try {
+            switch (opt) {
+            case 'h': /* Already handled */ break;
+            case 'r': graph.load_yaml(optarg); std::cout << "Loaded graph from " << optarg << "\n"; did_any = true; break;
+            case 'o': graph.save_yaml(optarg); std::cout << "Saved graph to " << optarg << "\n"; did_any = true; break;
+            case 'p': graph.print_dependency_tree(std::cout); did_any = true; break;
+            case 't': do_traversal(graph, true, true); did_any = true; break;
+            case 1001: graph.clear_cache(); did_any = true; break;
+            case 'R': start_repl = true; break;
+            case 2001: /* Already handled */ break;
+            default: print_cli_help(); return 1;
+            }
+        } catch (const std::exception& e) {
+            std::cerr << "Error: " << e.what() << "\n"; return 2;
+        }
+    }
+
+    if (!did_any || start_repl) {
+        run_repl(graph, config);
+    }
+    return 0;
+}

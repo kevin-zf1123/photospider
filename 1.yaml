@@ -1,0 +1,154 @@
+# --- CONVERTED TO NEW DYNAMIC GRAPH FORMAT ---
+# The 'inputs' key has been replaced with 'image_inputs'.
+# Each input now specifies 'from_node_id' to define the connection.
+# The 'outputs' key is now purely descriptive and does not affect the graph's execution.
+
+- id: 1
+  name: srcA
+  type: image_source
+  subtype: path
+  image_inputs: [] # No image inputs for a source node
+  parameter_inputs: [] # No parameter inputs for a source node
+  parameters:
+    path: assets/オリジナル イチョウ - アシマ  Ashima的插画.png
+  outputs:
+    - output_id: 3
+      output_type: processed_image
+  caches:
+    - cache_type: image
+      location: inputA.png
+
+- id: 2
+  name: srcB
+  type: image_source
+  subtype: path
+  image_inputs: []
+  parameter_inputs: []
+  parameters:
+    path: assets/b.jpg
+  outputs:
+    - output_id: 4
+      output_type: processed_image
+  caches:
+    - cache_type: image
+      location: inputB.png
+
+- id: 3
+  name: blurA
+  type: image_process
+  subtype: gaussian_blur
+  image_inputs:
+    - from_node_id: 1 # This node takes its image from node 1
+  parameter_inputs: []
+  parameters:
+    ksize: 11
+    sigmaX: 5
+  outputs:
+    - output_id: 4
+      output_type: processed_image
+  caches:
+    - cache_type: image
+      location: blurredA.png
+
+- id: 4
+  name: mix
+  type: image_mixing
+  subtype: add_weighted
+  image_inputs:
+    # This node takes two images, from node 2 and node 3 respectively.
+    # The order of this list matters for the operation.
+    - from_node_id: 2
+    - from_node_id: 3
+  parameter_inputs: []
+  parameters:
+    alpha: 0.7
+    beta: 0.3
+    gamma: 0.0
+    merge_strategy: "crop"
+  outputs: []
+  caches:
+    - cache_type: image
+      location: final.png
+
+- id: 5
+  name: diff_blurred_with_original
+  type: image_mixing
+  subtype: diff
+  image_inputs:
+    # This node takes its inputs from the original source and the blurred version.
+    - from_node_id: 1
+    - from_node_id: 3
+  parameter_inputs: []
+  parameters: 
+    # NOTE: Corrected parameters to be a map, not a sequence.
+    merge_strategy: "crop"
+  caches:
+    - cache_type: image
+      location: diff.png
+
+# FILE: complex_wiring.yaml
+#
+# Demonstrates advanced one-to-many and many-to-one channel wiring.
+#
+# To run:
+# 1. Place 'color.png' in the executable directory.
+# 2. Run: ./graph_cli --read complex_wiring.yaml --repl
+# 3. Inside REPL, run: compute 60
+#
+# This creates 'cache/60/complex_blend.png'.
+# The output image's channels are constructed as follows:
+# - BLUE (0)  = 50% of input1's RED channel
+# - GREEN (1) = 50% of input1's GREEN channel + 50% of input2's BLUE channel
+# - RED (2)   = 50% of input1's RED channel
+# - ALPHA (3) = MAX(alpha of input1, alpha of input2)
+
+- id: 10
+  name: "Load Image 1 (color.png)"
+  type: "image_source"
+  subtype: "path"
+  parameters:
+    path: "/Users/zhufeng/document/code/photospider3/assets/オリジナル イチョウ - アシマ  Ashima的插画.png"
+
+- id: 12
+  name: "Load Image 2 (using color.png again)"
+  type: "image_source"
+  subtype: "path"
+  parameters:
+    path: "assets/a.jpg" # Using the same image for simplicity
+
+- id: 60
+  name: "Complex Channel Wiring Blend"
+  type: "image_mixing"
+  subtype: "add_weighted"
+  image_inputs:
+    - { from_node_id: 10 } # input0
+    - { from_node_id: 12 } # input1
+  parameters:
+    alpha: 0.5 # Weight for input0
+    beta: 0.5  # Weight for input1
+    gamma: 0.0
+    merge_strategy: "crop"
+    channel_mapping:
+      input0:
+        # source_channel: [destination_channels]
+        1: [1]          # Many-to-one: Map GREEN(1) -> GREEN(1)
+        2: [0, 2]       # One-to-many: Map RED(2) -> BLUE(0) and RED(2)
+
+      input1:
+        # source_channel: destination_channel (single mapping is still valid)
+        0: [1, 3]            # Many-to-one: Map BLUE(0) -> GREEN(1)
+
+  caches:
+    - { cache_type: "image", location: "complex_blend.png" }
+  outputs:
+    - { output_id: 70, output_type: "processed_image" }
+- id: 70
+  name : "Channel verification"
+  type : "image_process"
+  subtype : "extract_channel"
+  image_inputs:
+    - { from_node_id: 60 } # Input is the result of the complex blend
+  parameters: 
+    channel: 3
+  caches:
+    - { cache_type: "image", location: "channel_verification.png" }

@@ -1,0 +1,49 @@
+# 1. An image source node. This provides the input.
+- id: 1
+  name: source-image
+  type: image_source
+  subtype: path
+  parameters:
+    path: assets/a.jpg # Make sure this path is valid
+
+# 2. The analyzer node that we want to cache.
+# It produces NO image, only data.
+- id: 2
+  name: get-image-dimensions
+  type: analyzer
+  subtype: get_dimensions
+  image_inputs:
+    - from_node_id: 1
+  caches:
+    # CRITICAL: We still define a cache entry of type 'image'.
+    # Even though there is no image to save, this tells the engine
+    # to cache the node's output and provides the base name for
+    # the metadata file (dimensions.yml).
+    - cache_type: image
+      location: dimensions.png  # This .png will NOT be created.
+
+# 3. A node that consumes the cached data (for demonstration).
+# This node resizes a different image using the width from the analyzer.
+- id: 10
+  name: another-source
+  type: image_source
+  subtype: path
+  parameters:
+    path: assets/オリジナル イチョウ - アシマ  Ashima的插画.png
+
+- id: 11
+  name: dynamic-resize
+  type: image_process
+  subtype: resize
+  image_inputs:
+    - from_node_id: 10
+  parameter_inputs:
+    - from_node_id: 2          # Get parameters from our cached node
+      from_output_name: width  # Use its 'width' output
+      to_parameter_name: width # To set our 'width' parameter
+    - from_node_id: 2
+      from_output_name: height # Use its 'height' output
+      to_parameter_name: height # To set our 'height' parameter
+  caches:
+    - cache_type: image
+      location: resized_output.png
