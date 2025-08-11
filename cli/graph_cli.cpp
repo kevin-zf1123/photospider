@@ -8,7 +8,7 @@
 #include <unordered_set>
 #include <chrono>
 #include <algorithm>
-#include <map> // --- NEW: Needed for grouping operations ---
+#include <map>
 #include "node_graph.hpp"
 #include "../src/ops.hpp"
 #include <filesystem>
@@ -20,17 +20,7 @@
 
 using namespace ps;
 
-// --- Data structures to hold plugin info ---
-struct PluginOperation {
-    std::string type;
-    std::string subtype;
-};
-
-struct LoadedPlugin {
-    std::string filename;
-    std::vector<PluginOperation> operations;
-};
-
+// --- MODIFIED: Removed LoadedPlugin and PluginOperation structs ---
 
 struct CliConfig {
     std::string loaded_config_path;
@@ -42,20 +32,21 @@ struct CliConfig {
     bool exit_prompt_sync = true;
     std::string config_save_behavior = "current";
     std::string default_timer_log_path = "out/timer.yaml";
+    std::string default_ops_list_mode = "all"; // "all", "builtin", "plugins"
 };
 
-// ... (functions like write_config_to_file, load_or_create_config are unchanged) ...
 static bool write_config_to_file(const CliConfig& config, const std::string& path) {
     YAML::Node root;
     root["_comment1"] = "Photospider CLI configuration.";
     root["cache_root_dir"] = config.cache_root_dir;
-    root["plugin_dir"] = config.plugin_dir; // --- NEW ---
+    root["plugin_dir"] = config.plugin_dir;
     root["default_traversal_arg"] = config.default_traversal_arg;
     root["default_cache_clear_arg"] = config.default_cache_clear_arg;
     root["default_exit_save_path"] = config.default_exit_save_path;
     root["exit_prompt_sync"] = config.exit_prompt_sync;
     root["config_save_behavior"] = config.config_save_behavior;
     root["default_timer_log_path"] = config.default_timer_log_path;
+    root["default_ops_list_mode"] = config.default_ops_list_mode;
 
     try {
         std::ofstream fout(path);
@@ -74,24 +65,25 @@ static void load_or_create_config(const std::string& config_path, CliConfig& con
         try {
             YAML::Node root = YAML::LoadFile(config_path);
             if (root["cache_root_dir"]) config.cache_root_dir = root["cache_root_dir"].as<std::string>();
-            if (root["plugin_dir"]) config.plugin_dir = root["plugin_dir"].as<std::string>(); // --- NEW ---
+            if (root["plugin_dir"]) config.plugin_dir = root["plugin_dir"].as<std::string>();
             if (root["default_traversal_arg"]) config.default_traversal_arg = root["default_traversal_arg"].as<std::string>();
             if (root["default_cache_clear_arg"]) config.default_cache_clear_arg = root["default_cache_clear_arg"].as<std::string>();
             if (root["default_exit_save_path"]) config.default_exit_save_path = root["default_exit_save_path"].as<std::string>();
             if (root["exit_prompt_sync"]) config.exit_prompt_sync = root["exit_prompt_sync"].as<bool>();
             if (root["config_save_behavior"]) config.config_save_behavior = root["config_save_behavior"].as<std::string>();
             if (root["default_timer_log_path"]) config.default_timer_log_path = root["default_timer_log_path"].as<std::string>();
+            if (root["default_ops_list_mode"]) config.default_ops_list_mode = root["default_ops_list_mode"].as<std::string>();
             std::cout << "Loaded configuration from '" << config_path << "'." << std::endl;
         } catch (const std::exception& e) {
             std::cerr << "Warning: Could not parse config file '" << config_path << "'. Using default settings. Error: " << e.what() << std::endl;
         }
     } else if (config_path == "config.yaml") {
         std::cout << "Configuration file 'config.yaml' not found. Creating a default one." << std::endl;
-        // --- MODIFIED: Set a better default for plugins ---
         config.plugin_dir = "build/plugins";
         config.default_traversal_arg = "cr";
         config.config_save_behavior = "current";
         config.default_timer_log_path = "out/timer.yaml";
+        config.default_ops_list_mode = "all";
         if (write_config_to_file(config, "config.yaml")) {
             config.loaded_config_path = fs::absolute("config.yaml").string();
         }
@@ -112,13 +104,12 @@ static void print_cli_help() {
               << std::endl;
 }
 
-// --- MODIFIED: Added 'ops' to the help text ---
 static void print_repl_help() {
     std::cout << "Available REPL (interactive shell) commands:\n"
               << "  help                       Show this help message.\n"
               << "  config [key] [value]       View or update a configuration setting.\n"
-              << "  plugins                    List all loaded plugins and their operations.\n"
-              << "  ops                        List all registered operations (built-in and plugins).\n" // --- NEW ---
+              << "  ops [flag]                 List all registered operations.\n"
+              << "                             Flags: --all, --builtin, --plugins\n"
               << "  read <file>                Load a YAML graph from a file.\n"
               << "  source <file>              Execute commands from a script file.\n"
               << "  print                      Show the detailed dependency tree of the current graph.\n"
@@ -135,7 +126,7 @@ static void print_repl_help() {
               << "  exit                       Quit the shell.\n";
 }
 
-// ... (other static helpers are unchanged) ...
+// ... (ask, ask_yesno, do_traversal, print_config, save_config_interactive are unchanged)
 static std::string ask(const std::string& q, const std::string& def = "") {
     std::cout << q; if (!def.empty()) std::cout << " [" << def << "]";
     std::cout << ": "; std::string s; std::getline(std::cin, s);
@@ -200,6 +191,7 @@ static void print_config(const CliConfig& config) {
               << "  - loaded_config_path:      " << (config.loaded_config_path.empty() ? "(none)" : config.loaded_config_path) << "\n"
               << "  - cache_root_dir:          " << config.cache_root_dir << "\n"
               << "  - plugin_dir:              " << config.plugin_dir << "\n" 
+              << "  - default_ops_list_mode:   " << config.default_ops_list_mode << "\n"
               << "  - default_traversal_arg:   " << config.default_traversal_arg << "\n"
               << "  - default_cache_clear_arg: " << config.default_cache_clear_arg << "\n"
               << "  - default_exit_save_path:  " << config.default_exit_save_path << "\n"
@@ -247,7 +239,9 @@ static void save_config_interactive(CliConfig& config) {
         }
     }
 }
-static bool process_command(const std::string& line, NodeGraph& graph, bool& modified, CliConfig& config, const std::vector<LoadedPlugin>& plugins) {
+
+// --- MODIFIED: process_command now takes the op_sources map ---
+static bool process_command(const std::string& line, NodeGraph& graph, bool& modified, CliConfig& config, const std::map<std::string, std::string>& op_sources) {
     std::istringstream iss(line);
     std::string cmd;
     iss >> cmd;
@@ -256,54 +250,102 @@ static bool process_command(const std::string& line, NodeGraph& graph, bool& mod
     try {
         if (cmd == "help") {
             print_repl_help();
-        } else if (cmd == "plugins") {
-            if (plugins.empty()) {
-                std::cout << "No external plugins loaded." << std::endl;
-            } else {
-                std::cout << "Loaded External Plugins:" << std::endl;
-                for (const auto& plugin : plugins) {
-                    std::cout << "  - File: " << plugin.filename << std::endl;
-                    if (plugin.operations.empty()) {
-                        std::cout << "    (No operations registered)" << std::endl;
-                    } else {
-                        std::cout << "    Operations:" << std::endl;
-                        for (const auto& op : plugin.operations) {
-                            std::cout << "      - " << op.type << ":" << op.subtype << std::endl;
-                        }
-                    }
-                }
+        } else if (cmd == "ops") {
+            std::string flag;
+            iss >> flag;
+            if (flag.empty()) {
+                flag = "--" + config.default_ops_list_mode;
             }
-        } else if (cmd == "ops") { // --- NEW: The `ops` command logic ---
-            auto& registry = ps::OpRegistry::instance();
-            auto all_keys = registry.get_keys();
 
-            if (all_keys.empty()) {
-                std::cout << "No operations are registered." << std::endl;
+            if (flag != "--all" && flag != "--builtin" && flag != "--plugins") {
+                std::cout << "Error: Invalid flag for 'ops'. Use --all, --builtin, or --plugins." << std::endl;
                 return true;
             }
 
-            // Group operations by type for nice printing
-            std::map<std::string, std::vector<std::string>> grouped_ops;
-            for (const auto& key : all_keys) {
+            std::map<std::string, std::vector<std::pair<std::string, std::string>>> grouped_ops;
+            int op_count = 0;
+
+            for (const auto& pair : op_sources) {
+                const std::string& key = pair.first;
+                const std::string& source = pair.second;
+                bool is_builtin = (source == "built-in");
+
+                if ((flag == "--builtin" && !is_builtin) || (flag == "--plugins" && is_builtin)) {
+                    continue;
+                }
+
                 size_t colon_pos = key.find(':');
                 if (colon_pos != std::string::npos) {
                     std::string type = key.substr(0, colon_pos);
                     std::string subtype = key.substr(colon_pos + 1);
-                    grouped_ops[type].push_back(subtype);
+                    grouped_ops[type].push_back({subtype, source});
+                    op_count++;
                 }
             }
+            
+            if (op_count == 0) {
+                if (flag == "--plugins") std::cout << "No plugin operations are registered." << std::endl;
+                else std::cout << "No operations are registered." << std::endl;
+                return true;
+            }
 
-            std::cout << "Available Operations (Built-in & Plugins):" << std::endl;
+            std::cout << "Available Operations (" << flag.substr(2) << "):" << std::endl;
             for (auto& pair : grouped_ops) {
-                // Sort subtypes alphabetically for consistent output
                 std::sort(pair.second.begin(), pair.second.end());
                 std::cout << "\n  Type: " << pair.first << std::endl;
-                for (const auto& subtype : pair.second) {
-                    std::cout << "    - " << subtype << std::endl;
+                for (const auto& op_info : pair.second) {
+                    std::cout << "    - " << op_info.first;
+                    if (op_info.second != "built-in") {
+                        std::cout << "  [plugin: " << op_info.second << "]";
+                    }
+                    std::cout << std::endl;
                 }
             }
 
-        }
+        } else if (cmd == "config") {
+            std::string key, value;
+            iss >> key;
+            if (key.empty()) {
+                print_config(config);
+                return true;
+            }
+            std::getline(iss >> std::ws, value);
+            bool changed = false;
+            if (key == "cache_root_dir") {
+                std::cout << "Note: 'cache_root_dir' will only take effect on next launch." << std::endl;
+                config.cache_root_dir = value; changed = true;
+            } else if (key == "plugin_dir") { 
+                std::cout << "Note: 'plugin_dir' will only take effect on next launch." << std::endl;
+                config.plugin_dir = value; changed = true;
+            } else if (key == "default_ops_list_mode") {
+                if (value == "all" || value == "builtin" || value == "plugins") {
+                    config.default_ops_list_mode = value; changed = true;
+                } else { std::cout << "Invalid value. Use 'all', 'builtin', or 'plugins'." << std::endl;}
+            } else if (key == "default_traversal_arg") {
+                config.default_traversal_arg = value; changed = true;
+            } else if (key == "default_cache_clear_arg") {
+                config.default_cache_clear_arg = value; changed = true;
+            } else if (key == "default_exit_save_path") {
+                config.default_exit_save_path = value; changed = true;
+            } else if (key == "exit_prompt_sync") {
+                if (value == "true" || value == "1") { config.exit_prompt_sync = true; changed = true; }
+                else if (value == "false" || value == "0") { config.exit_prompt_sync = false; changed = true; }
+                else { std::cout << "Invalid boolean value. Use 'true' or 'false'." << std::endl; }
+            } else if (key == "config_save_behavior") {
+                if (value == "current" || value == "default" || value == "ask" || value == "none") {
+                    config.config_save_behavior = value; changed = true;
+                } else { std::cout << "Invalid value. Use 'current', 'default', 'ask', or 'none'." << std::endl;}
+            } else if (key == "default_timer_log_path") {
+                config.default_timer_log_path = value; changed = true;
+            } else {
+                std::cout << "Unknown configuration key: '" << key << "'." << std::endl;
+            }
+            if (changed) {
+                std::cout << "Configuration '" << key << "' updated for this session." << std::endl;
+                save_config_interactive(config);
+            }
+        } 
+        // ... (all other commands are unchanged) ...
         else if (cmd == "read") {
             std::string path; iss >> path; if (path.empty()) std::cout << "Usage: read <filepath>\n";
             else { graph.load_yaml(path); modified = false; std::cout << "Loaded graph from " << path << "\n"; }
@@ -316,7 +358,7 @@ static bool process_command(const std::string& line, NodeGraph& graph, bool& mod
             while (std::getline(script_file, script_line)) {
                 if (script_line.empty() || script_line.find_first_not_of(" \t") == std::string::npos || script_line[0] == '#') continue;
                 std::cout << "ps> " << script_line << std::endl;
-                if (!process_command(script_line, graph, modified, config, plugins)) return false;
+                if (!process_command(script_line, graph, modified, config, op_sources)) return false;
             }
         } 
         
@@ -351,45 +393,7 @@ static bool process_command(const std::string& line, NodeGraph& graph, bool& mod
             else if (arg == "drive" || arg == "d") graph.clear_drive_cache();
             else if (arg == "memory" || arg == "m") graph.clear_memory_cache();
         } 
-        else if (cmd == "config") {
-            std::string key, value;
-            iss >> key;
-            if (key.empty()) {
-                print_config(config);
-                return true;
-            }
-            std::getline(iss >> std::ws, value);
-            bool changed = false;
-            if (key == "cache_root_dir") {
-                std::cout << "Note: 'cache_root_dir' will only take effect on next launch." << std::endl;
-                config.cache_root_dir = value; changed = true;
-            } else if (key == "plugin_dir") { 
-                std::cout << "Note: 'plugin_dir' will only take effect on next launch." << std::endl;
-                config.plugin_dir = value; changed = true;
-            } else if (key == "default_traversal_arg") {
-                config.default_traversal_arg = value; changed = true;
-            } else if (key == "default_cache_clear_arg") {
-                config.default_cache_clear_arg = value; changed = true;
-            } else if (key == "default_exit_save_path") {
-                config.default_exit_save_path = value; changed = true;
-            } else if (key == "exit_prompt_sync") {
-                if (value == "true" || value == "1") { config.exit_prompt_sync = true; changed = true; }
-                else if (value == "false" || value == "0") { config.exit_prompt_sync = false; changed = true; }
-                else { std::cout << "Invalid boolean value. Use 'true' or 'false'." << std::endl; }
-            } else if (key == "config_save_behavior") {
-                if (value == "current" || value == "default" || value == "ask" || value == "none") {
-                    config.config_save_behavior = value; changed = true;
-                } else { std::cout << "Invalid value. Use 'current', 'default', 'ask', or 'none'." << std::endl;}
-            } else if (key == "default_timer_log_path") {
-                config.default_timer_log_path = value; changed = true;
-            } else {
-                std::cout << "Unknown configuration key: '" << key << "'." << std::endl;
-            }
-            if (changed) {
-                std::cout << "Configuration '" << key << "' updated for this session." << std::endl;
-                save_config_interactive(config);
-            }
-        } 
+        
         else if (cmd == "compute") {
             std::string target_id_str;
             iss >> target_id_str;
@@ -537,20 +541,19 @@ static bool process_command(const std::string& line, NodeGraph& graph, bool& mod
     return true;
 }
 
-
-static void run_repl(NodeGraph& graph, CliConfig& config, const std::vector<LoadedPlugin>& plugins) {
+static void run_repl(NodeGraph& graph, CliConfig& config, const std::map<std::string, std::string>& op_sources) {
     bool modified = false;
     std::string line;
     std::cout << "Photospider dynamic graph shell. Type 'help' for commands.\n";
     while (true) {
         std::cout << "ps> ";
         if (!std::getline(std::cin, line)) break;
-        if (!process_command(line, graph, modified, config, plugins)) break;
+        if (!process_command(line, graph, modified, config, op_sources)) break;
     }
 }
 
-
-static void load_plugins(const std::string& plugin_dir_path, std::vector<LoadedPlugin>& loaded_plugins_list) {
+// --- MODIFIED: load_plugins now just populates the op_sources map ---
+static void load_plugins(const std::string& plugin_dir_path, std::map<std::string, std::string>& op_sources) {
     if (!fs::exists(plugin_dir_path) || !fs::is_directory(plugin_dir_path)) {
         return;
     }
@@ -610,17 +613,10 @@ static void load_plugins(const std::string& plugin_dir_path, std::vector<LoadedP
                                 keys_before.begin(), keys_before.end(),
                                 std::back_inserter(new_keys));
 
-            LoadedPlugin plugin_info;
-            plugin_info.filename = path.filename().string();
-            
             for (const auto& key : new_keys) {
-                size_t colon_pos = key.find(':');
-                if (colon_pos != std::string::npos) {
-                    plugin_info.operations.push_back({key.substr(0, colon_pos), key.substr(colon_pos + 1)});
-                }
+                op_sources[key] = path.filename().string();
             }
             
-            loaded_plugins_list.push_back(plugin_info);
             std::cout << "    Success: Plugin loaded and " << new_keys.size() << " operation(s) registered." << std::endl;
         } catch (const std::exception& e) {
             std::cerr << "    Error: An exception occurred during plugin registration: " << e.what() << std::endl;
@@ -634,8 +630,22 @@ static void load_plugins(const std::string& plugin_dir_path, std::vector<LoadedP
 }
 
 int main(int argc, char** argv) {
+    // --- MODIFIED: The main logic for tracking op sources ---
+    std::map<std::string, std::string> op_sources;
+    auto& registry = ps::OpRegistry::instance();
+
+    // 1. Register built-ins and identify them
+    auto keys_before_builtin = registry.get_keys();
     ops::register_builtin();
-    
+    auto keys_after_builtin = registry.get_keys();
+    std::vector<std::string> builtin_keys;
+    std::set_difference(keys_after_builtin.begin(), keys_after_builtin.end(),
+                        keys_before_builtin.begin(), keys_before_builtin.end(),
+                        std::back_inserter(builtin_keys));
+    for (const auto& key : builtin_keys) {
+        op_sources[key] = "built-in";
+    }
+
     CliConfig config;
     std::string custom_config_path;
 
@@ -661,8 +671,8 @@ int main(int argc, char** argv) {
     std::string config_to_load = custom_config_path.empty() ? "config.yaml" : custom_config_path;
     load_or_create_config(config_to_load, config);
 
-    std::vector<LoadedPlugin> loaded_plugins;
-    load_plugins(config.plugin_dir, loaded_plugins);
+    // 2. Load plugins and identify them
+    load_plugins(config.plugin_dir, op_sources);
 
     NodeGraph graph{config.cache_root_dir};
     
@@ -710,7 +720,7 @@ int main(int argc, char** argv) {
         if (did_any_action) {
             std::cout << "\n--- Command-line actions complete. Entering interactive shell. ---\n";
         }
-        run_repl(graph, config, loaded_plugins);
+        run_repl(graph, config, op_sources);
     } else {
          std::cout << "\n--- Command-line actions complete. Exiting. ---\n";
     }
