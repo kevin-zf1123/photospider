@@ -1,5 +1,14 @@
 // FILE: cli/graph_cli.cpp
-// FILE: cli/graph_cli.cpp
+//
+// --- MODIFICATIONS ---
+//
+// 1.  The `NodeEditor` class has been significantly refactored to fix the editing bug.
+// 2.  It no longer uses `static` variables inside the `FlattenNode` method.
+// 3.  It now uses a single, shared input component (`editor_input_`) for all fields,
+//     mirroring the robust pattern used in working UI editors.
+// 4.  The concept of "flattening" the node data into string member variables and
+//     then "un-flattening" them upon applying changes has been properly implemented.
+//
 #include <getopt.h>
 #include <limits>
 #include <regex>
@@ -168,30 +177,42 @@ private:
     std::vector<std::string> path_mode_entries_ = {"name_only", "relative_path", "absolute_path"};
 };
 
-// --- Interactive Node Editor ---
+// --- Interactive Node Editor (REFACTORED) ---
 class NodeEditor : public TuiEditor {
 private:
-    // This helper struct "flattens" the node data into a list of editable lines.
+    // This helper struct defines the structure of each line in the editor UI.
+    // It no longer contains a UI component.
     struct EditableLine {
         std::string label;
-        std::string* value;
-        Component input_component;
+        std::string* value_ptr; // Pointer to the string representation in the editor's state
         std::function<void()> add_fn = nullptr;
         std::function<void()> del_fn = nullptr;
     };
 
 public:
     NodeEditor(ScreenInteractive& screen, int node_id, NodeGraph& graph, CliConfig& config)
-        : TuiEditor(screen), graph_(graph), node_id_(node_id), temp_node_(graph.nodes.at(node_id)), config_(config) {
+        : TuiEditor(screen), graph_(graph), node_id_(node_id), temp_node_(graph.nodes.at(node_id)), config_(config) 
+    {
+        // Configure the single, shared input component.
+        InputOption opt;
+        opt.on_enter = [this] {
+            // On pressing enter, commit the buffer's content back to the string it was editing.
+            if (selected_ < editable_lines_.size()) {
+                *editable_lines_[selected_].value_ptr = edit_buffer_;
+            }
+            mode_ = Mode::Navigate;
+        };
+        editor_input_ = Input(&edit_buffer_, "...", opt);
+
+        // Initial data synchronization
+        SyncModelToStrings();
+        RebuildLineView();
         RefreshTree();
-        FlattenNode();
     }
     
     void Run() override {
+        // The container is now just a placeholder for the renderer to fill.
         auto main_container = Container::Vertical({});
-        for(auto& line : editable_lines_) {
-            main_container->Add(line.input_component);
-        }
 
         auto component = Renderer(main_container, [&] {
             Elements left_elements;
@@ -199,9 +220,10 @@ public:
                 auto& line = editable_lines_[i];
                 auto content = hbox({
                     text(line.label) | size(WIDTH, EQUAL, 25),
+                    // Display the shared input component only on the selected line in edit mode
                     (selected_ == i && mode_ == Mode::Edit)
-                        ? line.input_component->Render() | flex
-                        : text(*line.value) | flex,
+                        ? editor_input_->Render() | flex
+                        : text(*line.value_ptr) | flex,
                 });
                 if (selected_ == i) content |= inverted;
                 left_elements.push_back(content);
@@ -217,36 +239,42 @@ public:
         });
 
         component |= CatchEvent([&](Event event) {
-            // --- Command Mode Logic ---
             if (mode_ == Mode::Command) {
-                 if (event == Event::Return) ExecuteCommand();
-                 else if (event == Event::Escape) { mode_ = Mode::Navigate; command_buffer_.clear(); }
-                 else if (event.is_character()) command_buffer_ += event.character();
-                 else if (event == Event::Backspace && !command_buffer_.empty()) command_buffer_.pop_back();
-                 return true;
+                 if (event == Event::Return) { ExecuteCommand(); return true; }
+                 if (event == Event::Escape) { mode_ = Mode::Navigate; command_buffer_.clear(); return true; }
+                 if (event.is_character()) { command_buffer_ += event.character(); return true; }
+                 if (event == Event::Backspace && !command_buffer_.empty()) { command_buffer_.pop_back(); return true; }
+                 return false;
             }
-            // --- Edit Mode Logic ---
+            
             if (mode_ == Mode::Edit) {
+                // If Esc is pressed, cancel the edit without saving from the buffer.
                 if (event == Event::Escape) { mode_ = Mode::Navigate; return true; }
-                return editable_lines_[selected_].input_component->OnEvent(event);
+                // All other events go to the single shared input component.
+                return editor_input_->OnEvent(event);
             }
-            // --- Navigate Mode Logic ---
-            if (event == Event::ArrowUp) selected_ = std::max(0, selected_ - 1);
-            if (event == Event::ArrowDown) selected_ = std::min(int(editable_lines_.size() - 1), selected_ + 1);
-            if (event == Event::Character('e')) EnterEditMode();
+            
+            // --- Navigation Mode Logic ---
+            if (event == Event::ArrowUp) { selected_ = std::max(0, selected_ - 1); return true; }
+            if (event == Event::ArrowDown) { selected_ = std::min(int(editable_lines_.size() - 1), selected_ + 1); return true; }
+            if (event == Event::Character('e')) { EnterEditMode(); return true; }
             if (event == Event::Character('a')) {
                 if(editable_lines_[selected_].add_fn) editable_lines_[selected_].add_fn();
+                return true;
             }
             if (event == Event::Character('d')) {
                 if(editable_lines_[selected_].del_fn) editable_lines_[selected_].del_fn();
+                return true;
             }
             if (event == Event::Character(':')) {
                 mode_ = Mode::Command;
                 command_buffer_.clear();
+                return true;
             }
             if (event == Event::Character('q')) {
                 // TODO: Add check for unsaved changes
                 screen_.Exit();
+                return true;
             }
             return false;
         });
@@ -255,49 +283,88 @@ public:
     }
 
 private:
-    // Flattens the complex Node object into a simple list for editing
-    void FlattenNode() {
+    // Syncs the data from the `temp_node_` object into the editor's string member variables.
+    void SyncModelToStrings() {
+        name_str_ = temp_node_.name;
+        type_str_ = temp_node_.type;
+        subtype_str_ = temp_node_.subtype;
+
+        YAML::Emitter emitter;
+        emitter << temp_node_.parameters;
+        params_yaml_str_ = emitter.c_str();
+
+        image_inputs_str_.clear();
+        for (const auto& input : temp_node_.image_inputs) {
+            image_inputs_str_.emplace_back(std::to_string(input.from_node_id), input.from_output_name);
+        }
+    }
+
+    // Syncs the data from the editor's string member variables back to the `temp_node_`.
+    // This is where validation and parsing happens.
+    void SyncStringsToModel() {
+        temp_node_.name = name_str_;
+        temp_node_.type = type_str_;
+        temp_node_.subtype = subtype_str_;
+
+        // It's critical to wrap parsing in a try-catch block
+        try {
+            temp_node_.parameters = YAML::Load(params_yaml_str_);
+
+            temp_node_.image_inputs.clear();
+            for (const auto& str_pair : image_inputs_str_) {
+                ImageInput i;
+                i.from_node_id = std::stoi(str_pair.first);
+                i.from_output_name = str_pair.second;
+                temp_node_.image_inputs.push_back(i);
+            }
+        } catch (const std::exception& e) {
+            status_message_ = std::string("Parse Error: ") + e.what();
+            // Revert the string that caused the error to its previous valid state.
+            // A more robust implementation would be needed for a real application.
+            throw; // Re-throw to abort the apply operation
+        }
+    }
+
+    // Rebuilds the `editable_lines_` vector to reflect the current state of the string members.
+    void RebuildLineView() {
         editable_lines_.clear();
-        auto add_line = [&](std::string label, std::string* value, std::function<void()> add = nullptr, std::function<void()> del = nullptr) {
-            InputOption opt;
-            opt.on_enter = [&]{ mode_ = Mode::Navigate; };
-            editable_lines_.push_back({label, value, Input(value, "...", opt), add, del});
+        
+        auto add_line = [&](std::string label, std::string* value_ptr, std::function<void()> add_fn, std::function<void()> del_fn) {
+            editable_lines_.push_back({std::move(label), value_ptr, std::move(add_fn), std::move(del_fn)});
         };
         
-        add_line("Name", &temp_node_.name);
-        add_line("Type", &temp_node_.type);
-        add_line("Subtype", &temp_node_.subtype);
+        add_line("Name", &name_str_, nullptr, nullptr);
+        add_line("Type", &type_str_, nullptr, nullptr);
+        add_line("Subtype", &subtype_str_, nullptr, nullptr);
+        add_line("Static Params (YAML)", &params_yaml_str_, nullptr, nullptr);
         
-        // Static Parameters are complex, so we'll just edit the raw YAML string for now
-        static std::string params_str;
-        YAML::Emitter emitter; emitter << temp_node_.parameters; params_str = emitter.c_str();
-        add_line("Static Params (YAML)", &params_str);
-        
-        // Image Inputs
-        for (size_t i = 0; i < temp_node_.image_inputs.size(); ++i) {
-            static std::vector<std::string> from_node_ids, from_output_names;
-            from_node_ids.resize(i + 1); from_output_names.resize(i + 1);
-            from_node_ids[i] = std::to_string(temp_node_.image_inputs[i].from_node_id);
-            from_output_names[i] = temp_node_.image_inputs[i].from_output_name;
-
-            auto add_fn = [&, i] {
-                temp_node_.image_inputs.insert(temp_node_.image_inputs.begin() + i + 1, {});
-                FlattenNode();
+        for (size_t i = 0; i < image_inputs_str_.size(); ++i) {
+            auto add_fn = [this, i] {
+                image_inputs_str_.insert(image_inputs_str_.begin() + i + 1, {"-1", "image"});
+                RebuildLineView();
             };
-            auto del_fn = [&, i] {
-                temp_node_.image_inputs.erase(temp_node_.image_inputs.begin() + i);
-                FlattenNode();
+            auto del_fn = [this, i] {
+                image_inputs_str_.erase(image_inputs_str_.begin() + i);
+                RebuildLineView();
             };
-            add_line("Img Input " + std::to_string(i) + " Node ID", &from_node_ids[i], add_fn, del_fn);
-            add_line("Img Input " + std::to_string(i) + " Output", &from_output_names[i]);
+            add_line("Img Input " + std::to_string(i) + " Node ID", &image_inputs_str_[i].first, add_fn, del_fn);
+            add_line("Img Input " + std::to_string(i) + " Output", &image_inputs_str_[i].second, nullptr, nullptr);
         }
-        
-        // Parameter Inputs & Caches would be added here in a similar fashion...
+        // If there are no image inputs, provide a way to add the first one.
+        if (image_inputs_str_.empty()) {
+             add_line("(Image Inputs)", nullptr, [this]{
+                image_inputs_str_.emplace_back("-1", "image");
+                RebuildLineView();
+             }, nullptr);
+        }
     }
     
     void EnterEditMode() {
+        if (selected_ >= editable_lines_.size() || !editable_lines_[selected_].value_ptr) return;
         mode_ = Mode::Edit;
-        editable_lines_[selected_].input_component->TakeFocus();
+        // Copy the current value into the shared edit buffer before editing starts.
+        edit_buffer_ = *editable_lines_[selected_].value_ptr;
+        editor_input_->TakeFocus();
     }
     
     void RefreshTree() {
@@ -314,8 +381,10 @@ private:
         std::string help;
         if (mode_ == Mode::Navigate) {
             help = "↑/↓:Move | e:Edit | q:Quit | ::Command";
-            if (editable_lines_[selected_].add_fn) help += " | a:Add";
-            if (editable_lines_[selected_].del_fn) help += " | d:Delete";
+            if (selected_ < editable_lines_.size()) {
+                if (editable_lines_[selected_].add_fn) help += " | a:Add";
+                if (editable_lines_[selected_].del_fn) help += " | d:Delete";
+            }
         }
         else if (mode_ == Mode::Edit) help = "Enter:Accept | Esc:Cancel";
         else if (mode_ == Mode::Command) return hbox({ text(":" + command_buffer_), text(" ") | blink }) | inverted;
@@ -324,30 +393,37 @@ private:
     }
 
     void ExecuteCommand() {
-        if (command_buffer_ == "a") HandleApply();
-        else if (command_buffer_ == "w") {
-            HandleApply(); 
-            if (status_message_.find("Error") == std::string::npos) {
+        std::string cmd = command_buffer_;
+        mode_ = Mode::Navigate;
+        command_buffer_.clear();
+
+        if (cmd == "a" || cmd == "apply") HandleApply();
+        else if (cmd == "w" || cmd == "write") {
+            if (HandleApply()) {
                 std::string path = ask("Output file", config_.default_exit_save_path);
                 if (!path.empty()) { graph_.save_yaml(path); status_message_ = "Graph saved to " + path; }
             }
-        } else if (command_buffer_ == "q") screen_.Exit();
-        else status_message_ = "Error: Unknown command '" + command_buffer_ + "'";
-        
-        in_command_mode_ = false;
-        command_buffer_.clear();
+        } else if (cmd == "q" || cmd == "quit") {
+            screen_.Exit();
+        } else {
+            status_message_ = "Error: Unknown command '" + cmd + "'";
+        }
     }
 
-    void HandleApply() {
-        // First, "un-flatten" the edited string values back into the temp_node_
-        // This is complex and requires careful parsing, especially for YAML strings and numbers
-        // For simplicity in this example, we'll just show the concept.
+    bool HandleApply() {
+        try {
+            // "Un-flatten" the strings back into the temporary node object.
+            SyncStringsToModel();
+        } catch (const std::exception&) {
+            // status_message_ is already set by SyncStringsToModel on error
+            return false;
+        }
         
+        // Create a temporary graph to perform a cycle check before committing.
         NodeGraph temp_graph = graph_;
         temp_graph.nodes.at(node_id_) = temp_node_;
         bool cycle_found = false;
         try {
-            // A more robust check would traverse from all ending nodes
             temp_graph.topo_postorder_from(node_id_);
         } catch (const GraphError&) {
             cycle_found = true;
@@ -355,10 +431,13 @@ private:
         }
 
         if (!cycle_found) {
+            // If validation passes, commit the changes to the real graph.
             graph_.nodes.at(node_id_) = temp_node_;
             status_message_ = "Changes applied successfully.";
             RefreshTree();
+            return true;
         }
+        return false;
     }
 
     NodeGraph& graph_;
@@ -366,18 +445,29 @@ private:
     ps::Node temp_node_;
     CliConfig& config_;
     
+    // --- State for the editor UI ---
     std::vector<EditableLine> editable_lines_;
     Elements tree_lines_;
     std::string status_message_ = "Ready";
     int selected_ = 0;
 
+    // --- State for string representations of node properties ---
+    std::string name_str_;
+    std::string type_str_;
+    std::string subtype_str_;
+    std::string params_yaml_str_;
+    std::vector<std::pair<std::string, std::string>> image_inputs_str_;
+
+    // --- Single shared component for editing ---
+    std::string edit_buffer_;
+    Component editor_input_;
+
     enum class Mode { Navigate, Edit, Command };
     Mode mode_ = Mode::Navigate;
-    bool in_command_mode_ = false;
     std::string command_buffer_;
 };
 
-// ... (write_config_to_file and load_or_create_config are unchanged) ...
+// ... (The rest of the file remains unchanged) ...
 static bool write_config_to_file(const CliConfig& config, const std::string& path) {
     YAML::Node root;
     root["_comment1"] = "Photospider CLI configuration.";
@@ -629,161 +719,13 @@ static void save_config_interactive(CliConfig& config) {
 }
 void run_config_editor(CliConfig& config) {
     auto screen = ScreenInteractive::Fullscreen();
-    CliConfig temp_config = config; // Work on a copy
-    
-    std::vector<std::string*> string_fields = {
-        &temp_config.cache_root_dir, &temp_config.default_print_mode,
-        &temp_config.default_traversal_arg, &temp_config.default_cache_clear_arg,
-        &temp_config.default_exit_save_path, &temp_config.config_save_behavior,
-        &temp_config.editor_save_behavior, &temp_config.default_timer_log_path,
-        &temp_config.default_ops_list_mode, &temp_config.ops_plugin_path_mode
-    };
-    std::vector<std::string> field_labels = {
-        "cache_root_dir", "default_print_mode", "default_traversal_arg",
-        "default_cache_clear_arg", "default_exit_save_path", "config_save_behavior",
-        "editor_save_behavior", "default_timer_log_path", "default_ops_list_mode",
-        "ops_plugin_path_mode"
-    };
-
-    int selected = 0;
-    std::string command_buffer;
-    enum class Mode { Navigate, Edit, Command };
-    Mode mode = Mode::Navigate;
-
-    InputOption input_option;
-    input_option.on_enter = [&] {
-        mode = Mode::Navigate;
-    };
-    Component input = Input(&command_buffer, "...", input_option);
-
-    auto main_container = Container::Vertical({}); // We will build this dynamically
-
-    auto renderer = Renderer([&] {
-        main_container->DetachAllChildren();
-        
-        // Render string fields
-        for (size_t i = 0; i < string_fields.size(); ++i) {
-            auto content = hbox({
-                text(field_labels[i] + ": ") | size(WIDTH, EQUAL, 30),
-                (selected == i && mode == Mode::Edit)
-                    ? input->Render() | flex
-                    : text(*string_fields[i]) | flex,
-            });
-            if (selected == i) content |= inverted;
-            main_container->Add(Renderer([content]{ return content; }));
-        }
-        
-        // Render plugin_dirs list
-        main_container->Add(Renderer([]{ return separator(); }));
-        main_container->Add(Renderer([]{ return text("plugin_dirs:") | bold; }));
-        for (size_t i = 0; i < temp_config.plugin_dirs.size(); ++i) {
-            int line_index = string_fields.size() + i;
-            auto content = hbox({
-                text("  - "),
-                (selected == line_index && mode == Mode::Edit)
-                    ? input->Render()
-                    : text(temp_config.plugin_dirs[i]),
-            });
-             if (selected == line_index) content |= inverted;
-            main_container->Add(Renderer([content]{ return content; }));
-        }
-
-        // Help footer
-        std::string help_text;
-        if (mode == Mode::Navigate) help_text = "↑/↓:Move | e:Edit | a:Add Path | d:Del Path | ::Command";
-        else if (mode == Mode::Edit) help_text = "Enter:Accept | Esc:Cancel";
-        else if (mode == Mode::Command) help_text = "Enter command > :" + command_buffer;
-
-        return vbox({
-            main_container->Render() | flex,
-            separator(),
-            text(help_text)
-        }) | border;
-    });
-
-    auto component = CatchEvent(renderer, [&](Event event) {
-        if (mode == Mode::Edit) {
-            if (event == Event::Escape) {
-                mode = Mode::Navigate;
-                return true;
-            }
-            return input->OnEvent(event);
-        }
-
-        if (mode == Mode::Command) {
-             if (event == Event::Return) {
-                if (command_buffer == "a" || command_buffer == "apply") {
-                    config = temp_config; // Apply changes
-                    handle_interactive_save(config);
-                } else if (command_buffer == "w" || command_buffer == "write") {
-                    handle_interactive_save(temp_config);
-                } else if (command_buffer == "q" || command_buffer == "quit") {
-                    screen.Exit();
-                }
-                command_buffer.clear();
-                mode = Mode::Navigate;
-             } else if (event.is_character()) {
-                command_buffer += event.character();
-             } else if (event == Event::Backspace && !command_buffer.empty()) {
-                command_buffer.pop_back();
-             } else if (event == Event::Escape) {
-                command_buffer.clear();
-                mode = Mode::Navigate;
-             }
-             return true;
-        }
-
-        // Navigate mode
-        if (event == Event::ArrowUp) selected = std::max(0, selected - 1);
-        if (event == Event::ArrowDown) selected = std::min(int(string_fields.size() + temp_config.plugin_dirs.size() - 1), selected + 1);
-        if (event == Event::Character(':')) {
-            mode = Mode::Command;
-            command_buffer.clear();
-        }
-        if (event == Event::Character('e')) {
-            mode = Mode::Edit;
-            if (selected < string_fields.size()) {
-                command_buffer = *string_fields[selected];
-            } else {
-                command_buffer = temp_config.plugin_dirs[selected - string_fields.size()];
-            }
-            input->TakeFocus();
-        }
-        if (event == Event::Character('a')) {
-            if (selected >= string_fields.size()) {
-                 temp_config.plugin_dirs.insert(temp_config.plugin_dirs.begin() + (selected - string_fields.size() + 1), "<new path>");
-            }
-        }
-        if (event == Event::Character('d')) {
-            if (selected >= string_fields.size() && !temp_config.plugin_dirs.empty()) {
-                temp_config.plugin_dirs.erase(temp_config.plugin_dirs.begin() + (selected - string_fields.size()));
-                selected = std::max(0, selected - 1);
-            }
-        }
-        if (event == Event::Return && mode == Mode::Edit) {
-            if (selected < string_fields.size()) {
-                *string_fields[selected] = command_buffer;
-            } else {
-                temp_config.plugin_dirs[selected - string_fields.size()] = command_buffer;
-            }
-            mode = Mode::Navigate;
-        }
-        
-        return false;
-    });
-
-    screen.Loop(component);
+    ConfigEditor editor(screen, config);
+    editor.Run();
 }
 void run_node_editor(int node_id, NodeGraph& graph, CliConfig& config) {
      auto screen = ScreenInteractive::Fullscreen();
-     // ... a more complex version of the config editor's state management
-     std::cout << "Node editor is a work in progress. Press 'q' to exit." << std::endl;
-     auto component = Renderer([]{ return text("Node Editor TBD"); });
-     component |= CatchEvent([&](Event event){
-        if (event == Event::Character('q')) screen.Exit();
-        return false;
-     });
-     screen.Loop(component);
+     NodeEditor editor(screen, node_id, graph, config);
+     editor.Run();
 }
 
 static bool process_command(const std::string& line, NodeGraph& graph, bool& modified, CliConfig& config, const std::map<std::string, std::string>& op_sources) {
@@ -836,9 +778,8 @@ static bool process_command(const std::string& line, NodeGraph& graph, bool& mod
             try {
                 int node_id = std::stoi(id_str);
                 if (graph.has_node(node_id)) {
-                    auto screen = ScreenInteractive::Fullscreen();
-                    NodeEditor editor(screen, node_id, graph, config);
-                    editor.Run();
+                    run_node_editor(node_id, graph, config);
+                    modified = true; // Assume the user modified it
                 } else {
                     std::cout << "Error: Node with ID " << node_id << " not found." << std::endl;
                 }
