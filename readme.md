@@ -1,7 +1,3 @@
-
-
----
-
 # Photospider: A Dynamic Image Processing Graph Engine
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
@@ -10,26 +6,27 @@ Photospider is a powerful, C++-based command-line tool for creating, managing, a
 
 This means the output of one node (e.g., a computed number, a string, or a dimension) can be used as an **input parameter** for another node. This enables the creation of intelligent, self-configuring graphs where processing steps can adapt based on the data flowing through the system.
 
-## Core Concepts
-
-The fundamental principle of Photospider is the **Node Graph**. A graph is a collection of nodes, where each node represents a specific operation (e.g., loading an image, applying a blur, mixing two images).
-
-The power of Photospider comes from its dynamic connections:
-
-* **Image Connections**: The standard flow of image data from one node to another.
-* **Parameter Connections**: A node can output data (like an image's width). Another node can then consume this data to configure its own parameters (like the kernel size for a blur), all at runtime.
-
-This allows you to create graphs where, for example, a `resize` node can dynamically get its target width from an `analyzer` node that measures another image, or a `blur` filter's intensity can be calculated based on the difference between two other nodes.
-
 ## Key Features
 
 * **Dynamic Graph Execution**: Go beyond static pipelines with parameters that are computed at runtime.
+* **Interactive TUI Editor**: A terminal-based UI to visually inspect and edit your entire node graph, with live dependency trees and YAML editing.
+* **Advanced REPL/CLI**: An interactive shell (`ps>`) to load, inspect, modify, and run graphs on the fly, with powerful commands and scripting support.
 * **YAML-Based Definitions**: Define complex graphs in a clean, human-readable format.
 * **Extensible Plugin System**: Easily add new C++ functions as nodes by dropping shared libraries (`.so`/`.dll`) into a `plugins` folder, with no need to recompile the main application.
 * **Intelligent Caching**: In-memory and on-disk caching for both images and metadata reduces re-computation.
-* **Interactive REPL**: An interactive shell (`ps>`) to load, inspect, modify, and run graphs on the fly.
 * **Cycle Detection**: Protects against invalid graph structures.
 * **Performance Profiling**: Built-in tools to time node execution and cache performance.
+
+## Interactive TUI Editor
+
+Photospider now includes a powerful interactive TUI for editing and inspecting graphs directly in your terminal. Launch it from the REPL using the `node` command.
+
+This interface allows you to:
+
+* Navigate the list of all nodes in your graph.
+* View and edit the full YAML definition for any node.
+* Instantly see the dependency tree for the entire graph and for the selected node.
+* Apply, discard, or open the node's configuration in an external editor (`$EDITOR`).
 
 ## Prerequisites
 
@@ -57,10 +54,10 @@ brew install pkg-config opencv yaml-cpp
 
 ## How to Build
 
-1. **Clone the repository:**
+1. **Clone the repository and its submodules:**
 
    ```bash
-   git clone https://github.com/kevin-zf1123/photospider.git
+   git clone --recurse-submodules https://github.com/kevin-zf1123/photospider.git
    cd photospider
    ```
 2. **Compile the project using the Makefile:**
@@ -69,7 +66,7 @@ brew install pkg-config opencv yaml-cpp
    make
    ```
 
-The main executable `graph_cli` will be created at `build/graph_cli`.
+The main executable `graph_cli` will be created at `build/graph_cli`, and a `build/plugins` directory will be ready for your custom operations.
 
 ## How to Use
 
@@ -98,11 +95,12 @@ This will give you a `ps>` prompt. Type `help` to see the full list of commands.
 **Common REPL Commands:**
 
 * `read <file>`: Load a graph from a YAML file.
+* `node <id>`: Open the interactive TUI editor for a specific node.
 * `print`: Display the detailed dependency tree of the current graph.
-* `traversal`: Show the evaluation order of the graph.
-* `compute <id|all> [force] [t] [tl]`: Execute a specific node or all terminal nodes with optional flags.
+* `ops`: List all available operations, including from plugins.
+* `compute <id|all> [force] [t]`: Execute a node or all terminal nodes with optional flags.
 * `save <id> <file>`: Compute a node and save its image output.
-* `clear-cache [d|m|md]`: Clear the on-disk, in-memory, or both caches.
+* `config`: Open the interactive configuration editor.
 * `exit`: Quit the shell.
 
 ## The YAML Graph Format
@@ -200,10 +198,11 @@ This example loads an image, gets its width, calculates a blur radius based on t
 
 ## Roadmap
 
+* Enhance the TUI editor with more interactive features (e.g., visual node connection).
 * Develop a wider variety of built-in image processing operations (e.g., Canny edge detection, thresholding, color space conversions).
-* Implement a GUI for visual graph construction and inspection.
-* Enhance the plugin API with more capabilities.
+* Expand the plugin API with more capabilities and helper functions.
 
 ## License
 
 This project is licensed under the MIT License.
+-----------------------------------------------

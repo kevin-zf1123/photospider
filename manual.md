@@ -1,6 +1,4 @@
 
----
-
 # Photospider User Manual & Documentation
 
 ## 1. Introduction
@@ -10,10 +8,11 @@ Photospider is a powerful, node-based command-line tool for orchestrating comple
 Its key features include:
 
 * **Dynamic Graph Execution**: Nodes can pass not only images but also data (like width, height, or computed values) to downstream nodes, allowing for highly adaptive pipelines.
-* **Extensible Operations**: A registry system allows for new C++ operations to be easily added.
+* **Interactive TUI Editor**: A terminal-based UI to visually inspect and edit your entire node graph, with live dependency trees and YAML editing.
+* **Extensible Operations**: A plugin system allows for new C++ operations to be easily added by dropping shared libraries into a folder.
 * **Intelligent Caching**: Results from nodes can be cached to both memory and disk, dramatically speeding up repeated computations.
-* **Interactive Shell (REPL)**: A powerful interactive mode for loading, inspecting, computing, and configuring graphs on the fly.
-* **Advanced Profiling**: Built-in timing tools to measure the performance of each step, including cache lookups and computations.
+* **Advanced REPL/CLI**: A powerful interactive mode for loading, inspecting, computing, and configuring graphs on the fly.
+* **Performance Profiling**: Built-in timing tools to measure the performance of each step, including cache lookups and computations.
 
 ---
 
@@ -38,13 +37,13 @@ The application can be run in two primary modes: as a one-shot command-line tool
 
 ```bash
 # Load a graph, compute it, and save the final node's output image
-./graph_cli --read my_graph.yaml --compute 4 --save 4 final_image.png
+./build/graph_cli --read my_graph.yaml --compute 4 --save 4 final_image.png
 ```
 
 **Example: Starting the REPL with a custom config**
 
 ```bash
-./graph_cli --config alternate_settings.yaml --repl
+./build/graph_cli --config alternate_settings.yaml --repl
 ```
 
 ---
@@ -71,20 +70,50 @@ Executes a series of REPL commands from a script file. Each line in the file is 
 
 * **Example**: `source my_script.txt`
 
-#### `print`
+#### `node [<id>]`
 
-Displays a detailed, hierarchical dependency tree of the currently loaded graph, starting from the final output nodes.
+Opens the interactive **TUI Node Editor**.
+
+* If `<id>` is provided, the editor opens focused on that specific node.
+* If `<id>` is omitted, a selection menu appears, allowing you to choose which node to open.
+* See the "TUI Node Editor" section for a full guide.
+* **Example**: `node 4` or `node`
+
+#### `print [<id>|all] [mode]`
+
+Displays a hierarchical dependency tree.
+
+* **Target**:
+  * `<id>`: Shows the dependency tree required to compute the specified node.
+  * `all`: Shows the trees for all "ending" nodes in the graph (default).
+* **Mode**:
+  * `d` or `detailed`: Shows static parameters for each node (default, configured in `config.yaml`).
+  * `s` or `simplified`: Hides the static parameters for a cleaner view.
+* **Example**: `print 4 s`
 
 #### `traversal [flags]`
 
-Shows the topological post-order (the actual evaluation order) for each branch of the graph. It can be combined with flags to show cache status.
+Shows the topological post-order (the actual evaluation order) for each branch of the graph. It can be combined with flags to show cache status and control tree display.
 
-* **Flags**:
+* **Tree Flags**:
+  * `d` or `detailed`: Show the full dependency tree first.
+  * `s` or `simplified`: Show the simplified dependency tree first.
+  * `n` or `no_tree`: Do not show a dependency tree (default, configured in `config.yaml`).
+* **Cache Flags**:
   * `m`: Show "in memory" status.
   * `d`: Show "on disk" status.
-  * `c`: Check and save any in-memory results to the disk cache.
-  * `cr`: Same as `c`, but also removes any "orphaned" cache files on disk that are no longer in memory.
-* **Example**: `traversal cr` (The default is configured in `config.yaml`)
+  * `c`: Synchronize in-memory results to the disk cache.
+  * `cr`: Synchronize cache and remove any "orphaned" files on disk.
+* **Example**: `traversal cr s` (Show simplified tree, then sync cache and show status)
+
+#### `ops [mode]`
+
+Lists all registered operations available for use in graphs.
+
+* **Mode**:
+  * `a` or `all`: Show all operations (default, configured in `config.yaml`).
+  * `b` or `builtin`: Show only the operations compiled into the application.
+  * `p` or `plugins`: Show only the operations loaded from external plugin libraries.
 
 #### `output <filepath>`
 
@@ -115,25 +144,21 @@ The core command to execute nodes.
   * `<id>`: Computes the node with the specified integer ID and all its dependencies.
 * **Flags**:
   * `force`: Forces re-computation of a node and its dependencies, even if they are already cached.
-  * `t`: Enables a simple console timer. After computation, it prints a summary of how long each step took and where the result was sourced from (memory, disk, or computation).
-  * `tl [path]`: Enables detailed timer logging. It performs the same timing as `t` but saves the results to a structured YAML file. If `[path]` is omitted, it uses the default from `config.yaml`.
+  * `t`: Enables a simple console timer. After computation, it prints a summary of how long each step took.
+  * `tl [path]`: Enables detailed timer logging to a structured YAML file. If `[path]` is omitted, it uses the default from `config.yaml`.
 * **Examples**:
   * `compute 4`
   * `compute all t`
   * `compute 4 tl`
   * `compute all force tl logs/run1.yaml`
 
-#### `config [key] [value]`
+#### `config`
 
-Views or updates the CLI configuration for the current session, with an option to save the changes.
-
-* **`config`**: Prints all current configuration settings.
-* **`config <key> <value>`**: Sets the configuration `key` to a new `value`. This takes effect immediately and prompts you to save the change permanently.
-* **Example**: `config default_traversal_arg cr`
+Opens the interactive **TUI Configuration Editor**, allowing you to view and modify application settings for the current session and save them permanently. See the "TUI Config Editor" section for details.
 
 #### `save <id> <filepath>`
 
-A convenient shortcut that computes a node and saves its output image to a file. Equivalent to `compute <id>` followed by saving the image.
+A convenient shortcut that computes a node and saves its output image to a file.
 
 * **Example**: `save 4 final_output.png`
 
@@ -147,23 +172,93 @@ Quits the interactive shell. It will prompt you to save any unsaved graph change
 
 ---
 
-## 4. Configuration (`config.yaml`)
+## 4. The TUI Node Editor
 
-When you first run the REPL, a `config.yaml` file is automatically created. This file controls the default behavior of the interactive commands.
+The TUI Node Editor is a powerful terminal interface for inspecting and editing your graph. Launch it with the `node [<id>]` command.
 
-| Key                         | Description                                                                                       | Example Value        |
-| :-------------------------- | :------------------------------------------------------------------------------------------------ | :------------------- |
-| `cache_root_dir`          | The directory for storing cache files. (Requires restart)                                         | `_cache`           |
-| `default_traversal_arg`   | Default flags for the `traversal` command.                                                      | `cr`               |
-| `default_cache_clear_arg` | Default flags for the `cc` or `clear-cache` command.                                          | `d`                |
-| `default_exit_save_path`  | Default filename when saving a graph on exit.                                                     | `session_out.yml`  |
-| `exit_prompt_sync`        | Default answer for syncing cache on exit (`true`/`false`).                                    | `false`            |
-| `config_save_behavior`    | Default save action after using `config` command (`current`, `default`, `ask`, `none`). | `ask`              |
-| `default_timer_log_path`  | Default file path for the `compute tl` command.                                                 | `logs/timing.yaml` |
+### Layout
+
+The editor is split into two main columns:
+
+* **Left Column**:
+
+  * **Nodes Pane**: A list of all nodes in the graph. Use `↑`/`↓` to select a node, which updates all other panes.
+  * **Editor Pane**: A text editor showing the full YAML definition of the selected node. You can edit the node directly here.
+* **Right Column**:
+
+  * **Whole Graph Pane**: Shows the dependency tree for all final nodes.
+  * **Context Pane**: Shows a dependency tree relevant to the selected node.
+
+### Keybindings
+
+* **Global**:
+  * `<Tab>`: Cycle focus between the four main panes (Nodes, Editor, Whole Graph, Context). The active pane has a heavy border.
+  * `<Esc>` or `<Ctrl-C>`: Exit the editor.
+* **Editor Pane**:
+  * `<Ctrl-S>`: **Apply** the changes from the YAML editor to the in-memory node.
+  * `<Ctrl-D>`: **Discard** any changes and reload the node's original YAML.
+  * `<Ctrl-E>`: **External Edit**. Opens the node's YAML in your system's default `$EDITOR`. Changes are loaded back when you close the editor.
+* **Tree Panes**:
+  * `↑`/`↓`: Scroll the view up and down.
+  * `←`/`→`: Scroll the view left and right for long lines.
+
+### Toggles
+
+Above the tree panes are two toggles:
+
+* **Context Toggle**: Switches the Context Pane between:
+  * `From node`: Shows the dependency tree required to compute the selected node.
+  * `Trees containing`: Shows all final output trees that depend on the selected node.
+* **View Toggle**: Switches both tree panes between:
+  * `Detailed`: Shows static parameters for each node.
+  * `Simplified`: Hides parameters for a cleaner view.
 
 ---
 
-## 5. The Graph YAML Format
+## 5. The TUI Config Editor
+
+The `config` command opens a TUI for managing settings.
+
+### Keybindings
+
+* **Navigate Mode** (Default):
+  * `↑`/`↓`: Move selection.
+  * `e`: Enter Edit Mode on the selected line.
+  * `a`: Add a new item (e.g., for plugin directories).
+  * `d`: Delete the selected item (e.g., a plugin directory).
+  * `: `: Enter Command Mode.
+  * `q`: Quit the editor.
+* **Edit Mode**:
+  * `<Enter>`: Accept the change and return to Navigate Mode.
+  * `<Esc>`: Cancel the change and return.
+* **Command Mode**:
+  * Enter a command and press `<Enter>`.
+  * **Commands**: `w` (write/save), `a` (apply to session), `q` (quit).
+
+---
+
+## 6. Configuration (`config.yaml`)
+
+When you first run the REPL, a `config.yaml` file is automatically created. This file controls the default behavior of the interactive commands.
+
+| Key                         | Description                                                                                              | Example Value       |
+| :-------------------------- | :------------------------------------------------------------------------------------------------------- | :------------------ |
+| `cache_root_dir`          | The directory for storing cache files. (Requires restart)                                                | `cache`           |
+| `plugin_dirs`             | A list of directories to scan for plugin (`.so`/`.dll`) files.                                       | `[build/plugins]` |
+| `default_traversal_arg`   | Default flags for the `traversal` command.                                                             | `n`               |
+| `default_print_mode`      | Default mode for the `print` command (`detailed` or `simplified`).                                 | `detailed`        |
+| `default_cache_clear_arg` | Default flags for the `cc` or `clear-cache` command.                                                 | `md`              |
+| `default_exit_save_path`  | Default filename when saving a graph on exit.                                                            | `graph_out.yaml`  |
+| `exit_prompt_sync`        | Default answer for syncing cache on exit (`true`/`false`).                                           | `true`            |
+| `config_save_behavior`    | Default save action after using the TUI `config` editor (`current`, `default`, `ask`, `none`). | `ask`             |
+| `editor_save_behavior`    | Behavior for saving changes from the `node` editor (`ask`, `auto_save_on_apply`, `manual`).      | `ask`             |
+| `default_timer_log_path`  | Default file path for the `compute tl` command.                                                        | `out/timer.yaml`  |
+| `default_ops_list_mode`   | Default mode for the `ops` command (`all`, `builtin`, `plugins`).                                | `all`             |
+| `ops_plugin_path_mode`    | How to display plugin paths in `ops` (`name_only`, `relative_path`, `absolute_path`).            | `name_only`       |
+
+---
+
+## 7. The Graph YAML Format
 
 A graph is a sequence of nodes defined in a YAML file. Each node is a map with the following keys:
 
@@ -181,9 +276,9 @@ A graph is a sequence of nodes defined in a YAML file. Each node is a map with t
 
 ---
 
-## 6. Built-in Operations (Nodes)
+## 8. Built-in Operations (Nodes)
 
-### 6.1. Image Source
+### 8.1. Image Source
 
 #### `image_source:path`
 
@@ -205,7 +300,7 @@ Loads an image from a local file path.
       - { cache_type: image, location: "source.png" }
   ```
 
-### 6.2. Image Processing
+### 8.2. Image Processing
 
 #### `image_process:gaussian_blur`
 
@@ -296,7 +391,7 @@ Isolates a single channel (B, G, R, or A) from an image.
       channel: "a" # or 3
   ```
 
-### 6.3. Image Mixing
+### 8.3. Image Mixing
 
 #### `image_mixing:add_weighted`
 
@@ -351,7 +446,7 @@ Computes the absolute difference between two images.
       - { from_node_id: 2 } # Compare original with blurred
   ```
 
-### 6.4. Data & Utility
+### 8.4. Data & Utility
 
 #### `analyzer:get_dimensions`
 
@@ -392,7 +487,7 @@ Divides two numbers. Does not use images.
 
 ---
 
-## 7. Advanced Example: Dynamic Cropping
+## 9. Advanced Example: Dynamic Cropping
 
 This example demonstrates the power of dynamic graphs by cropping an image to its center, using a width that is dynamically calculated to match a 16:9 aspect ratio.
 
@@ -439,5 +534,35 @@ This example demonstrates the power of dynamic graphs by cropping an image to it
     x: 0
     y: 0
   caches:
-    - { cache_type: image, location: "dynamic_crop_output.png" }```
+    - { cache_type: image, location: "dynamic_crop_output.png" }
+```e
+      from_output_name: result
+      to_parameter_name: ksize # The 'result' is wired to the 'ksize' parameter
+  caches:
+    - { cache_type: image, location: "final_blur.png" }
 ```
+
+## Available Built-in Operations
+
+| Type                     | Subtype             | Description                                                    | Key Parameters                                     |
+| :----------------------- | :------------------ | :------------------------------------------------------------- | :------------------------------------------------- |
+| **image\_source**  | `path`            | Loads an image from a file path.                               | `path`                                           |
+| **image\_process** | `gaussian_blur`   | Applies a Gaussian blur filter.                                | `ksize`, `sigmaX`                              |
+|                          | `resize`          | Resizes an image to a specific width and height.               | `width`, `height`, `interpolation`           |
+|                          | `crop`            | Extracts a rectangular region from an image.                   | `mode`, `x`, `y`, `width`, `height`      |
+|                          | `extract_channel` | Isolates a single channel (B,G,R,A) as a grayscale image.      | `channel`                                        |
+| **image\_mixing**  | `add_weighted`    | Blends two images linearly. Supports advanced channel mapping. | `alpha`, `beta`, `gamma`, `merge_strategy` |
+|                          | `diff`            | Computes the absolute difference between two images.           | `merge_strategy`                                 |
+| **analyzer**       | `get_dimensions`  | Outputs the width and height of an input image as data.        | (None)                                             |
+| **math**           | `divide`          | Divides two numbers from its parameters.                       | `operand1`, `operand2`                         |
+
+## Roadmap
+
+* Develop a wider variety of built-in image processing operations (e.g., Canny edge detection, thresholding, color space conversions).
+* Implement a GUI for visual graph construction and inspection.
+* Enhance the plugin API with more capabilities.
+
+## License
+
+This project is licensed under the MIT License.
+-----------------------------------------------
