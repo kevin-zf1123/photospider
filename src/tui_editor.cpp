@@ -1,4 +1,3 @@
-// FILE: src/tui_editor.cpp
 // tui_editor.cpp - Fully updated to handle dirty flag correctly, full-node YAML editing,
 // XY scrolling, and external editor integration using ScreenInteractive::WithRestoredIO.
 
@@ -132,17 +131,19 @@ struct TreePaneState {
 
 static size_t LineCount(const std::string &s) { return std::count(s.begin(), s.end(), '\n') + 1; }
 
-static Element DrawTreePane(const TreePaneState &pane, const std::string &title) {
+// --- MODIFICATION: The hardcoded height limit is removed.
+static Element DrawTreePaneContent(const TreePaneState &pane) {
   std::stringstream ss(pane.text);
   std::string line;
   std::vector<std::string> lines;
   while (std::getline(ss, line)) lines.push_back(line);
 
-  const int view_rows = 20; // fixed viewport height (could be made dynamic)
-  const int view_cols = 80; // fixed viewport width  (could be made dynamic)
+  const int view_cols = 80;
 
   int start_row = std::clamp(pane.scroll_y, 0, std::max(0, (int)lines.size() - 1));
-  int end_row   = std::min((int)lines.size(), start_row + view_rows);
+  // The loop now renders all lines from the current scroll position to the end.
+  // The parent `frame` component will handle clipping and scrolling.
+  int end_row   = lines.size();
 
   Elements rows;
   for (int i = start_row; i < end_row; ++i) {
@@ -153,7 +154,7 @@ static Element DrawTreePane(const TreePaneState &pane, const std::string &title)
     rows.push_back(row);
   }
 
-  return window(text(title) | bold, vbox(std::move(rows)));
+  return vbox(std::move(rows));
 }
 
 // -----------------------------------------------------------------------------
@@ -224,69 +225,95 @@ class NodeEditorUI {
   enum FocusPane { NODE_LIST=0, NODE_PARAM=1, TREE_FULL=2, TREE_CONTEXT=3 };
 
   void BuildComponents() {
+    auto focus_catcher = [this](FocusPane target_pane) {
+        return [this, target_pane](Event event) {
+            if (event.is_mouse() && event.mouse().button == Mouse::Left
+                && event.mouse().motion == Mouse::Pressed) {
+            focus_ = target_pane; // focus the pane only
+            return true;          // consume click
+            }
+            return false;
+        };
+    };
     // Node list entries
     node_entries_.clear();
     for (int id : ids_) node_entries_.push_back(NodeTitle(graph_.nodes.at(id)));
 
-    // --- MODIFICATION START ---
-    // Use MenuOption to handle selection changes from mouse or keyboard.
     MenuOption menu_option;
     menu_option.entries = &node_entries_;
     menu_option.selected = &node_list_index_;
-    // This callback is triggered on any selection change.
-    menu_option.on_change = [this] {
-        // If the editor is not dirty, immediately load the new node.
-        if (!dirty_) {
-            OnNodeListChanged();
-        }
-    };
+    menu_option.on_change = [this] { if (!dirty_) OnNodeListChanged(); };
     node_list_ = Menu(menu_option);
-    // --- MODIFICATION END ---
+    // The panel itself will catch the event, not the component inside.
 
-
-    // Editor: Input + external editor for comfortable multi-line YAML editing
+    // Editor
     input_opt_.on_change = [&]{ dirty_ = (editor_text_ != last_applied_text_); };
-    input_opt_.multiline = true; // ignored on older FTXUI, harmless
+    input_opt_.multiline = true;
     editor_input_ = Input(&editor_text_, input_opt_);
 
     btn_apply_   = Button("Apply (Ctrl+S)",   [&]{ ApplyEditor(); });
     btn_discard_ = Button("Discard (Ctrl+D)", [&]{ DiscardEditor(); });
     btn_extedit_ = Button("Open in $EDITOR (Ctrl+E)", [&]{ EditExternal(); });
 
-    // Right: toggles and panes
+    // Right side toggles and tree panes
     toggle_tree_mode_ = Toggle(&tree_context_modes_, &tree_context_mode_index_);
     toggle_detail_    = Toggle(&detail_modes_, &detail_mode_index_);
 
-    tree_full_component_    = Renderer([&]{ return DrawTreePane(tree_full_, "Whole Graph"); });
-    tree_context_component_ = Renderer([&]{ return DrawTreePane(tree_context_, ContextTreeHeader()); });
-
-    // Left column
+    tree_full_component_    = Renderer([&]{ return DrawTreePaneContent(tree_full_); });
+    tree_context_component_ = Renderer([&]{ return DrawTreePaneContent(tree_context_); });
+    
     left_column_ = Renderer(Container::Vertical({
-      node_list_,
-      editor_input_,
+      node_list_, editor_input_,
       Container::Horizontal({ btn_apply_, btn_discard_, btn_extedit_ })
     }), [&]{
-      auto title = text("Nodes — ↑↓ select, <tab> switch focus") | bold;
-      auto list_el = node_list_->Render() | frame | size(HEIGHT, EQUAL, 12);
-      auto editor_el = vbox({ text("Editor (full node YAML) — use Ctrl+E for external editor"), editor_input_->Render() | frame | size(HEIGHT, GREATER_THAN, 8) });
-      auto actions = hbox({ btn_apply_->Render(), separator(), btn_discard_->Render(), separator(), btn_extedit_->Render() });
-      auto tips = text("Global: <tab>=focus, <esc>/<Ctrl-C>=exit, Ctrl+S=apply, Ctrl+D=discard, Ctrl+E=external editor") | dim;
-      return vbox({ title, list_el, separator(), editor_el, separator(), actions, separator(), tips }) | border;
+      Component list_pane_c = Renderer([&]{
+        return vbox({
+            text("Nodes — ↑↓ select, click to focus") | bold,
+            node_list_->Render() | frame | size(HEIGHT, EQUAL, 12)
+        }) | (focus_ == NODE_LIST ? borderHeavy : border);
+      });
+      list_pane_c = list_pane_c | CatchEvent(focus_catcher(NODE_LIST));
+
+      Component editor_pane_c = Renderer([&]{
+        return vbox({
+            text("Editor (full node YAML) — click to focus") | bold,
+            editor_input_->Render() | frame | size(HEIGHT, GREATER_THAN, 8),
+            separator(),
+            hbox({ btn_apply_->Render(), separator(), btn_discard_->Render(), separator(), btn_extedit_->Render() })
+        }) | (focus_ == NODE_PARAM ? borderHeavy : border);
+      });
+      editor_pane_c = editor_pane_c | CatchEvent(focus_catcher(NODE_PARAM));
+
+      auto tips = text("Global: <tab>=focus, <esc>/<Ctrl-C>=exit, Ctrl+S/D/E=actions") | dim;
+      return vbox({list_pane_c->Render(), separator(), editor_pane_c->Render(), separator(), tips});
     });
 
-    // Right column
     right_column_ = Renderer(Container::Vertical({
       Container::Horizontal({ toggle_tree_mode_, toggle_detail_ }),
       Container::Horizontal({ tree_full_component_, tree_context_component_ })
     }), [&]{
       auto toggles = hbox({ text("Context: "), toggle_tree_mode_->Render(), separator(), text("View: "), toggle_detail_->Render() });
-      auto panes   = hbox({ tree_full_component_->Render() | flex, separator(), tree_context_component_->Render() | flex });
-      return vbox({ toggles, separator(), panes }) | border;
+
+      Component full_pane_c = Renderer([&]{
+        auto full_content = tree_full_component_->Render();
+        return window(text("Whole Graph") | bold, full_content,
+                      focus_ == TREE_FULL ? HEAVY : ROUNDED);
+      });
+      full_pane_c = full_pane_c | CatchEvent(focus_catcher(TREE_FULL));
+
+      Component context_pane_c = Renderer([&]{
+        auto context_content = tree_context_component_->Render();
+        return window(text(ContextTreeHeader()) | bold, context_content,
+                      focus_ == TREE_CONTEXT ? HEAVY : ROUNDED);
+      });
+      context_pane_c = context_pane_c | CatchEvent(focus_catcher(TREE_CONTEXT));
+
+      auto panes = hbox({ full_pane_c->Render() | flex, separator(), context_pane_c->Render() | flex });
+      return vbox({ toggles, separator(), panes | flex});
     });
 
     main_container_ = Container::Horizontal({ left_column_, right_column_ });
-
-    // Root with global keybindings
+    
     root_ = CatchEvent(Renderer(main_container_, [&]{
       return hbox({ left_column_->Render() | flex, separator(), right_column_->Render() | flex });
     }), [&](Event e){
@@ -296,7 +323,6 @@ class NodeEditorUI {
       if (e == Event::Special({"C-d"})) { DiscardEditor(); return true; }
       if (e == Event::Special({"C-e"})) { EditExternal(); return true; }
 
-      // Arrow keys & mouse scroll in tree panes
       if (focus_ == TREE_FULL || focus_ == TREE_CONTEXT) {
         TreePaneState &pane = (focus_ == TREE_FULL) ? tree_full_ : tree_context_;
         if (e == Event::ArrowUp)    { pane.cursor_row = std::max(0, pane.cursor_row-1); pane.scroll_y = std::max(0, pane.scroll_y-1); return true; }
@@ -307,7 +333,6 @@ class NodeEditorUI {
         if (e.is_mouse() && e.mouse().button == Mouse::WheelDown) { pane.scroll_y += 1; return true; }
       }
 
-      // After any event, if toggles changed, refresh trees — independent of dirty
       if (tree_context_mode_index_ != prev_tree_context_mode_index_ || detail_mode_index_ != prev_detail_mode_index_) {
         RefreshTrees();
         prev_tree_context_mode_index_ = tree_context_mode_index_;
