@@ -72,7 +72,7 @@ public:
         InputOption opt;
         opt.on_enter = [this] { CommitEdit(); };
         editor_input_ = Input(&edit_buffer_, "...", opt);
-        
+        radio_editor_ = Radiobox(&dummy_radio_options_, &dummy_radio_selected_idx_);
         // Initial sync from the config object to the editor's internal state
         SyncModelToUiState();
         RebuildLineView();
@@ -91,8 +91,7 @@ public:
                 if (mode_ == Mode::Edit && selected_ == (int)i) {
                     if (line.is_radio) {
                         // In edit mode, render the Radiobox for radio button lines
-                        auto radio = Radiobox(line.radio_options, line.radio_selected_idx);
-                        display_element = radio->Render();
+                        display_element = radio_editor_->Render();
                     } else {
                         // Render the shared text input for normal lines
                         display_element = editor_input_->Render();
@@ -140,15 +139,23 @@ public:
             
             // --- Edit Mode Logic ---
             if (mode_ == Mode::Edit) {
-                if (event == Event::Escape) { mode_ = Mode::Navigate; return true; }
-                // For radio buttons, handle navigation and selection
-                if (editable_lines_[selected_].is_radio) {
-                    if (event == Event::ArrowLeft) { *editable_lines_[selected_].radio_selected_idx = std::max(0, *editable_lines_[selected_].radio_selected_idx - 1); return true; }
-                    if (event == Event::ArrowRight) { *editable_lines_[selected_].radio_selected_idx = std::min((int)editable_lines_[selected_].radio_options->size() - 1, *editable_lines_[selected_].radio_selected_idx + 1); return true; }
-                    if (event == Event::Return) { CommitEdit(); return true; }
+                // Global cancel for edit mode
+                if (event == Event::Escape) {
+                    mode_ = Mode::Navigate;
+                    return true;
                 }
-                // For text fields, delegate to the shared input component
-                return editor_input_->OnEvent(event);
+                // Global accept for edit mode
+                if (event == Event::Return) {
+                    CommitEdit();
+                    return true;
+                }
+
+                // Delegate all other events to the currently active editor component
+                if (editable_lines_[selected_].is_radio) {
+                    return radio_editor_->OnEvent(event);
+                } else {
+                    return editor_input_->OnEvent(event);
+                }
             }
             
             // --- Navigate Mode Logic ---
@@ -263,12 +270,18 @@ private:
         if (selected_ >= (int)editable_lines_.size()) return;
         const auto& line = editable_lines_[selected_];
 
-        // Do nothing if the line is not editable (e.g., the 'add' line)
         if (!line.is_radio && !line.value_ptr) return;
 
         mode_ = Mode::Edit;
-        // For text fields, copy the current value to the shared buffer and focus the input
-        if (!line.is_radio) {
+        if (line.is_radio) {
+            // --- FIX: Recreate the component with the correct data and take focus ---
+            RadioboxOption opt;
+            opt.entries = line.radio_options;
+            opt.selected = line.radio_selected_idx;
+            opt.focused_entry = line.radio_selected_idx;
+            radio_editor_ = Radiobox(opt);
+            radio_editor_->TakeFocus();
+        } else {
             edit_buffer_ = *line.value_ptr;
             editor_input_->TakeFocus();
         }
@@ -348,6 +361,9 @@ private:
     // --- Buffer for text editing ---
     std::string edit_buffer_;
     Component editor_input_;
+    Component radio_editor_;
+    std::vector<std::string> dummy_radio_options_;
+    int dummy_radio_selected_idx_ = 0;
 
     // --- UI state for radio buttons and vectors ---
     int selected_print_mode_idx_ = 0;
@@ -603,27 +619,35 @@ void run_config_editor(CliConfig& config) {
     ConfigEditor editor(screen, config);
     editor.Run();
 }
+// void run_node_editor(int node_id, NodeGraph& graph, CliConfig& config) {
+//      auto screen = ScreenInteractive::Fullscreen();
+//      AdvancedNodeEditor editor(screen, node_id, graph, config);
+//      editor.Run();
+// }
 
 static bool process_command(const std::string& line, NodeGraph& graph, bool& modified, CliConfig& config, const std::map<std::string, std::string>& op_sources) {
     std::istringstream iss(line);
     std::string cmd;
     iss >> cmd;
     if (cmd.empty()) return true;
+    auto screen = ScreenInteractive::FitComponent();
     try {
         if (cmd == "help") {
             print_repl_help();
         } else if (cmd == "clear" || cmd == "cls") {
             std::cout << "\033[2J\033[1;1H";
         } else if (cmd == "print") {
+            // --- NEW: Robust argument parsing for 'print' ---
             std::string target_str = "all";
             std::string mode_str = config.default_print_mode;
             bool target_is_set = false;
 
             std::string arg;
             while(iss >> arg) {
+                // Check if the argument is a mode flag
                 if (arg == "d" || arg == "detailed" || arg == "s" || arg == "simplified") {
                     mode_str = arg;
-                } else { 
+                } else { // Otherwise, assume it's a target
                     if (target_is_set) {
                          std::cout << "Warning: Multiple targets specified for print; using last one ('" << arg << "').\n";
                     }
@@ -645,11 +669,19 @@ static bool process_command(const std::string& line, NodeGraph& graph, bool& mod
                 }
             }
         } else if (cmd == "node") {
+            // Accept: "node" or "node <id>"
             std::optional<int> maybe_id;
-            std::string word;
-            if (iss >> word) {
+
+            // If your parser gives you the raw line (e.g. `line`), reuse it:
+            // Example assumes you already split out `cmd` but still have the full `line`.
+            // If you don't have `line`, you can read from std::cin tokens in your own style.
+            std::istringstream iss(line);
+            std::string word;            // will read the "node"
+            iss >> word;
+            if (iss >> word) {           // optional <id>
                 try { maybe_id = std::stoi(word); } catch (...) { maybe_id.reset(); }
             }
+
             ps::run_node_editor(graph, maybe_id);
         }  else if (cmd == "ops") {
             std::string mode_arg;
@@ -804,9 +836,10 @@ static bool process_command(const std::string& line, NodeGraph& graph, bool& mod
                 return true;
             }
 
+            // Parse all flags and arguments
             bool force = false;
-            bool timer_console = false; 
-            bool timer_log_file = false; 
+            bool timer_console = false; // 't' flag
+            bool timer_log_file = false;  // 'tl' flag
             std::string timer_log_path = "";
 
             std::string arg;
@@ -817,12 +850,14 @@ static bool process_command(const std::string& line, NodeGraph& graph, bool& mod
                     timer_console = true;
                 } else if (arg == "tl") {
                     timer_log_file = true;
+                    // Peek at the next argument. If it's not a flag, assume it's the path.
                     if (iss.peek() != EOF && iss.peek() != ' ') {
                         std::string next_arg;
                         iss >> next_arg;
                         if (next_arg != "force" && next_arg != "t" && next_arg != "timer") {
                             timer_log_path = next_arg;
                         } else {
+                            // It was a flag, so put it back in the stream
                             iss.seekg(-(next_arg.length()), std::ios_base::cur);
                         }
                     }
@@ -834,6 +869,7 @@ static bool process_command(const std::string& line, NodeGraph& graph, bool& mod
                 graph.clear_timing_results();
             }
             
+            // Start total timer if logging to file
             std::chrono::time_point<std::chrono::high_resolution_clock> total_start;
             if (timer_log_file) {
                 total_start = std::chrono::high_resolution_clock::now();
@@ -854,6 +890,7 @@ static bool process_command(const std::string& line, NodeGraph& graph, bool& mod
                     }
             };
 
+            // Execute computation
             if (target_id_str == "all") {
                 for (int id : graph.ending_nodes()) {
                     print_output(id, graph.compute(id, force, enable_timing));
@@ -863,6 +900,9 @@ static bool process_command(const std::string& line, NodeGraph& graph, bool& mod
                 print_output(id, graph.compute(id, force, enable_timing));
             }
 
+            // --- Post-computation actions based on flags ---
+
+            // 1. Print simple summary to console if 't' was used
             if (timer_console) {
                 std::cout << "--- Computation Timers (Console) ---\n";
                 for (const auto& timing : graph.timing_results.node_timings) {
@@ -871,6 +911,7 @@ static bool process_command(const std::string& line, NodeGraph& graph, bool& mod
                 }
             }
             
+            // 2. Write detailed log to file if 'tl' was used
             if (timer_log_file) {
                 auto total_end = std::chrono::high_resolution_clock::now();
                 std::chrono::duration<double, std::milli> total_elapsed = total_end - total_start;
@@ -934,6 +975,7 @@ static bool process_command(const std::string& line, NodeGraph& graph, bool& mod
     return true;
 }
 
+// ... (run_repl, load_plugins, main are unchanged)
 static void run_repl(NodeGraph& graph, CliConfig& config, const std::map<std::string, std::string>& op_sources) {
     bool modified = false;
     std::string line;
