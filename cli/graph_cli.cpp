@@ -49,7 +49,8 @@ struct CliConfig {
 static bool write_config_to_file(const CliConfig& config, const std::string& path);
 static void save_config_interactive(CliConfig& config);
 static std::string ask(const std::string& q, const std::string& def = "");
-// --- Interactive Config Editor ---
+
+// --- NEW: A complete, interactive TUI configuration editor ---
 class ConfigEditor : public TuiEditor {
 private:
     // Helper struct to define each editable line in the UI
@@ -73,7 +74,7 @@ public:
         editor_input_ = Input(&edit_buffer_, "...", opt);
         
         // Initial sync from the config object to the editor's internal state
-        SyncModelToStrings();
+        SyncModelToUiState();
         RebuildLineView();
     }
 
@@ -87,7 +88,7 @@ public:
                 auto& line = editable_lines_[i];
                 Element display_element;
 
-                if (mode_ == Mode::Edit && selected_ == i) {
+                if (mode_ == Mode::Edit && selected_ == (int)i) {
                     if (line.is_radio) {
                         // In edit mode, render the Radiobox for radio button lines
                         auto radio = Radiobox(line.radio_options, line.radio_selected_idx);
@@ -110,11 +111,11 @@ public:
                 }
 
                 auto content = hbox({
-                    text(line.label) | size(WIDTH, EQUAL, 25),
+                    text(line.label) | size(WIDTH, EQUAL, 28),
                     display_element | flex,
                 });
 
-                if (selected_ == i) content |= inverted;
+                if (selected_ == (int)i) content |= inverted;
                 line_elements.push_back(content);
             }
             
@@ -155,11 +156,11 @@ public:
             if (event == Event::ArrowDown) { selected_ = std::min(int(editable_lines_.size() - 1), selected_ + 1); return true; }
             if (event == Event::Character('e')) { EnterEditMode(); return true; }
             if (event == Event::Character('a')) {
-                if(selected_ < editable_lines_.size() && editable_lines_[selected_].add_fn) editable_lines_[selected_].add_fn();
+                if(selected_ < (int)editable_lines_.size() && editable_lines_[selected_].add_fn) editable_lines_[selected_].add_fn();
                 return true;
             }
             if (event == Event::Character('d')) {
-                if(selected_ < editable_lines_.size() && editable_lines_[selected_].del_fn) editable_lines_[selected_].del_fn();
+                if(selected_ < (int)editable_lines_.size() && editable_lines_[selected_].del_fn) editable_lines_[selected_].del_fn();
                 return true;
             }
             if (event == Event::Character(':')) {
@@ -179,7 +180,7 @@ public:
     }
 
 private:
-    void SyncModelToStrings() {
+    void SyncModelToUiState() {
         // Find the index for each radio button setting
         auto find_idx = [](const auto& vec, const auto& val) {
             auto it = std::find(vec.begin(), vec.end(), val);
@@ -188,16 +189,24 @@ private:
         selected_print_mode_idx_ = find_idx(print_mode_entries_, temp_config_.default_print_mode);
         selected_ops_list_mode_idx_ = find_idx(ops_list_mode_entries_, temp_config_.default_ops_list_mode);
         selected_path_mode_idx_ = find_idx(path_mode_entries_, temp_config_.ops_plugin_path_mode);
+        selected_cache_clear_idx_ = find_idx(cache_clear_entries_, temp_config_.default_cache_clear_arg);
+        selected_exit_sync_idx_ = temp_config_.exit_prompt_sync ? 0 : 1;
+        selected_config_save_idx_ = find_idx(config_save_entries_, temp_config_.config_save_behavior);
+        selected_editor_save_idx_ = find_idx(editor_save_entries_, temp_config_.editor_save_behavior);
         
         // Copy vector data
         plugin_dirs_str_ = temp_config_.plugin_dirs;
     }
 
-    void SyncStringsToModel() {
+    void SyncUiStateToModel() {
         // Apply the selected radio button text back to the config object
         temp_config_.default_print_mode = print_mode_entries_[selected_print_mode_idx_];
         temp_config_.default_ops_list_mode = ops_list_mode_entries_[selected_ops_list_mode_idx_];
         temp_config_.ops_plugin_path_mode = path_mode_entries_[selected_path_mode_idx_];
+        temp_config_.default_cache_clear_arg = cache_clear_entries_[selected_cache_clear_idx_];
+        temp_config_.exit_prompt_sync = (selected_exit_sync_idx_ == 0);
+        temp_config_.config_save_behavior = config_save_entries_[selected_config_save_idx_];
+        temp_config_.editor_save_behavior = editor_save_entries_[selected_editor_save_idx_];
         
         // Apply vector data back
         temp_config_.plugin_dirs = plugin_dirs_str_;
@@ -219,10 +228,15 @@ private:
         add_text_line("cache_root_dir", &temp_config_.cache_root_dir);
         add_text_line("default_exit_save_path", &temp_config_.default_exit_save_path);
         add_text_line("default_timer_log_path", &temp_config_.default_timer_log_path);
+        add_text_line("default_traversal_arg", &temp_config_.default_traversal_arg);
         
         add_radio_line("default_print_mode", &print_mode_entries_, &selected_print_mode_idx_);
         add_radio_line("default_ops_list_mode", &ops_list_mode_entries_, &selected_ops_list_mode_idx_);
         add_radio_line("ops_plugin_path_mode", &path_mode_entries_, &selected_path_mode_idx_);
+        add_radio_line("default_cache_clear_arg", &cache_clear_entries_, &selected_cache_clear_idx_);
+        add_radio_line("exit_prompt_sync", &exit_sync_entries_, &selected_exit_sync_idx_);
+        add_radio_line("config_save_behavior", &config_save_entries_, &selected_config_save_idx_);
+        add_radio_line("editor_save_behavior", &editor_save_entries_, &selected_editor_save_idx_);
 
         // Add a line for each plugin directory path
         for (size_t i = 0; i < plugin_dirs_str_.size(); ++i) {
@@ -246,7 +260,7 @@ private:
     }
     
     void EnterEditMode() {
-        if (selected_ >= editable_lines_.size()) return;
+        if (selected_ >= (int)editable_lines_.size()) return;
         const auto& line = editable_lines_[selected_];
 
         // Do nothing if the line is not editable (e.g., the 'add' line)
@@ -261,7 +275,7 @@ private:
     }
     
     void CommitEdit() {
-        if (selected_ >= editable_lines_.size()) return;
+        if (selected_ >= (int)editable_lines_.size()) return;
         const auto& line = editable_lines_[selected_];
         
         if (!line.is_radio && line.value_ptr) {
@@ -276,15 +290,13 @@ private:
         std::string help;
         if (mode_ == Mode::Navigate) {
             help = "↑/↓:Move | e:Edit | q:Quit | ::Command";
-            if (selected_ < editable_lines_.size()) {
+            if (selected_ < (int)editable_lines_.size()) {
                 if (editable_lines_[selected_].add_fn) help += " | a:Add";
                 if (editable_lines_[selected_].del_fn) help += " | d:Delete";
             }
         }
         else if (mode_ == Mode::Edit) help = "Enter:Accept | Esc:Cancel | ←/→:Change";
         else if (mode_ == Mode::Command) {
-            // --- MODIFIED PART ---
-            // Display command tips when in command mode.
             return hbox({
                        text(":" + command_buffer_),
                        text(" ") | blink,
@@ -303,13 +315,18 @@ private:
         command_buffer_.clear();
 
         if (cmd == "a" || cmd == "apply") {
-            SyncStringsToModel();
+            SyncUiStateToModel();
+            original_config_ = temp_config_;
             status_message_ = "Changes applied to current session.";
         } else if (cmd == "w" || cmd == "write") {
-            SyncStringsToModel();
+            SyncUiStateToModel();
             original_config_ = temp_config_;
-            save_config_interactive(original_config_);
-            status_message_ = "Changes applied and saved.";
+            if(!original_config_.loaded_config_path.empty()){
+                write_config_to_file(original_config_, original_config_.loaded_config_path);
+                status_message_ = "Changes applied and saved.";
+            } else {
+                status_message_ = "Error: No config file loaded. Cannot save.";
+            }
         } else if (cmd == "q" || cmd == "quit") {
             screen_.Exit();
         } else {
@@ -332,459 +349,26 @@ private:
     std::string edit_buffer_;
     Component editor_input_;
 
-    // --- Buffers for radio buttons and vectors ---
+    // --- UI state for radio buttons and vectors ---
     int selected_print_mode_idx_ = 0;
     int selected_ops_list_mode_idx_ = 0;
     int selected_path_mode_idx_ = 0;
+    int selected_cache_clear_idx_ = 0;
+    int selected_exit_sync_idx_ = 0;
+    int selected_config_save_idx_ = 0;
+    int selected_editor_save_idx_ = 0;
+
     std::vector<std::string> plugin_dirs_str_;
     
     // --- Constant options for radio buttons ---
     std::vector<std::string> print_mode_entries_ = {"detailed", "simplified"};
     std::vector<std::string> ops_list_mode_entries_ = {"all", "builtin", "plugins"};
     std::vector<std::string> path_mode_entries_ = {"name_only", "relative_path", "absolute_path"};
+    std::vector<std::string> cache_clear_entries_ = {"md", "d", "m"};
+    std::vector<std::string> exit_sync_entries_ = {"true", "false"};
+    std::vector<std::string> config_save_entries_ = {"current", "default", "ask", "none"};
+    std::vector<std::string> editor_save_entries_ = {"ask", "auto_save_on_apply", "manual"};
 };
-
-
-// --- TreeView: A custom component for displaying and selecting from a tree ---
-// This is a new helper class to manage the complex interactive tree panels.
-class TreeView : public ftxui::ComponentBase {
-public:
-    TreeView(std::function<void(int)> on_select, std::function<void(int)> on_activate)
-        : on_select_(on_select), on_activate_(on_activate) {}
-
-    // Update the content of the tree view.
-    void SetContent(const std::string& content) {
-        lines_.clear();
-        std::stringstream ss(content);
-        std::string line;
-        std::regex node_regex(R"(- Node (\d+))");
-        while (std::getline(ss, line)) {
-            std::smatch match;
-            std::optional<int> node_id;
-            if (std::regex_search(line, match, node_regex) && match.size() > 1) {
-                node_id = std::stoi(match[1]);
-            }
-            lines_.push_back({line, node_id});
-        }
-        selected_ = std::max(0, std::min(selected_, (int)lines_.size() - 1));
-    }
-
-    Element Render() {
-        Elements elements;
-        for (size_t i = 0; i < lines_.size(); ++i) {
-            Element e = text(lines_[i].text);
-            if (lines_[i].node_id.has_value()) {
-                 e |= bold;
-            }
-            if ((int)i == selected_ && Focused()) {
-                e = e | inverted | focus;
-            }
-            elements.push_back(e);
-        }
-        return vbox(std::move(elements)) | vscroll_indicator | yframe;
-    }
-
-    bool OnEvent(Event event) override {
-        if (!Focused()) return false;
-
-        int old_selected = selected_;
-        if (event == Event::ArrowUp) selected_ = std::max(0, selected_ - 1);
-        if (event == Event::ArrowDown) selected_ = std::min((int)lines_.size() - 1, selected_);
-        if (event == Event::PageUp) selected_ = std::max(0, selected_ - 10);
-        if (event == Event::PageDown) selected_ = std::min((int)lines_.size() - 1, selected_ + 10);
-        if (event == Event::Home) selected_ = 0;
-        if (event == Event::End) selected_ = (int)lines_.size() - 1;
-
-        if (selected_ != old_selected) {
-            on_select_(selected_);
-            return true;
-        }
-
-        if (event == Event::Return) {
-            if (selected_ < (int)lines_.size() && lines_[selected_].node_id.has_value()) {
-                on_activate_(*lines_[selected_].node_id);
-            }
-            return true;
-        }
-        
-        if (event.is_mouse()) {
-            if (event.mouse().button == Mouse::Left && event.mouse().motion == Mouse::Pressed) {
-                if (Box().Contain(event.mouse().x, event.mouse().y)) {
-                    TakeFocus();
-                    // This logic is tricky. Recalculate based on box position.
-                    int new_selected = event.mouse().y - Box().y_min;
-                    if (new_selected >= 0 && new_selected < (int)lines_.size()) {
-                        selected_ = new_selected;
-                         on_select_(selected_);
-                        if (lines_[selected_].node_id.has_value()) {
-                            on_activate_(*lines_[selected_].node_id);
-                        }
-                    }
-                    return true;
-                }
-            }
-             // Allow mouse wheel scrolling
-            if (event.mouse().button == Mouse::WheelUp) {
-                selected_ = std::max(0, selected_ - 1);
-                on_select_(selected_);
-                return true;
-            }
-            if (event.mouse().button == Mouse::WheelDown) {
-                selected_ = std::min((int)lines_.size() - 1, selected_ + 1);
-                on_select_(selected_);
-                return true;
-            }
-        }
-
-        return false;
-    }
-
-private:
-    struct Line {
-        std::string text;
-        std::optional<int> node_id;
-    };
-    std::vector<Line> lines_;
-    int selected_ = 0;
-    std::function<void(int)> on_select_;
-    std::function<void(int)> on_activate_;
-};
-
-
-// --- AdvancedNodeEditor: The new, feature-rich TUI for editing nodes ---
-// class AdvancedNodeEditor : public TuiEditor {
-// public:
-//     AdvancedNodeEditor(ScreenInteractive& screen, int node_id, NodeGraph& graph, CliConfig& config)
-//     : TuiEditor(screen), graph_(graph), focused_node_id_(node_id), temp_node_(graph.nodes.at(node_id)), config_(config)
-// {
-//     // 1. Set the default action for the input options.
-//     editor_input_option_.on_enter = [this] { CommitEdit(); };
-//     // 2. Create the input component using the options struct. A placeholder is required.
-//     editor_input_ = Input(&edit_buffer_, "placeholder", editor_input_option_);
-
-//     // Setup the tree view components
-//     auto on_tree_select = [&](int /*line_number*/) { screen_.Post(Event::Custom); };
-//     auto on_tree_activate = [&](int new_node_id) { SwitchToNode(new_node_id); };
-//     top_tree_view_ = std::make_shared<TreeView>(on_tree_select, on_tree_activate);
-//     bottom_tree_view_ = std::make_shared<TreeView>(on_tree_select, on_tree_activate);
-
-//     // Setup the editable menu for the left panel
-//     RebuildLeftMenu(); // This creates left_menu_
-
-//     // Container for the right-side panel
-//     auto right_panel_container = Container::Vertical({
-//         top_tree_view_,
-//         bottom_tree_view_,
-//     });
-
-//     // Main container for the whole editor layout
-//     main_container_ = Container::Horizontal({
-//         left_menu_,
-//         right_panel_container,
-//     });
-    
-//     // Initial population of all UI elements
-//     SwitchToNode(focused_node_id_);
-// }
-    
-//     void Run() override {
-//     // A renderer for the modal dialog's content
-//         auto modal_renderer = Renderer([&] {
-//             return vbox({
-//                     text(modal_title_) | bold,
-//                     separator(),
-//                     editor_input_->Render(),
-//                 }) |
-//                 size(WIDTH, LESS_THAN, 60) | border;
-//         });
-
-//         // The main layout component that will be in the background.
-//         auto main_layout = Renderer(main_container_, [&] {
-//         // main_container_ holds the left menu and the right panel's container.
-//         // We render them side-by-side here.
-//         return vbox({
-//             hbox({
-//                 // Left Panel
-//                 vbox({
-//                     text("Node " + std::to_string(focused_node_id_) + " Properties") | bold | hcenter,
-//                     separator(),
-//                     left_menu_->Render() | flex,
-//                 }) | frame | size(WIDTH, LESS_THAN, 60),
-
-//                 // Right Panel
-//                 vbox({
-//                     vbox({
-//                         text(show_ancestor_tree_ ? "Ancestors Tree" : "Containing Trees") | bold | hcenter,
-//                         separator(),
-//                         top_tree_view_->Render() | flex,
-//                     }) | frame | flex,
-//                     vbox({
-//                         text("Full Graph Tree") | bold | hcenter,
-//                         separator(),
-//                         bottom_tree_view_->Render() | flex,
-//                     }) | frame | flex,
-//                 }) | flex,
-//             }) | flex,
-//             RenderStatusBar(),
-//         });
-//         });
-
-//         // The final component for the main loop.
-//         // It shows the main_layout, with the modal appearing on top when the show_modal_ bool is true.
-//         auto final_component = Modal(main_layout, modal_renderer, &show_modal_);
-
-//         // Add a global event handler for keyboard shortcuts.
-//         final_component |= CatchEvent([&](Event event) {
-//             if (show_modal_)
-//                 return false;
-
-//             if (event == Event::Character('t')) {
-//                 show_ancestor_tree_ = !show_ancestor_tree_;
-//                 RefreshTopTree();
-//                 return true;
-//             }
-//             if (event == Event::Character('d')) {
-//                 detailed_trees_ = !detailed_trees_;
-//                 RefreshAllTrees();
-//                 return true;
-//             }
-//             if (event == Event::Character(':')) {
-//                 modal_title_ = "Command Mode";
-//                 edit_buffer_ = ":";
-//                 editor_input_option_.on_enter = [this] { ExecuteCommand(); show_modal_ = false; };
-//                 show_modal_ = true;
-//                 return true;
-//             }
-//             if (event == Event::Character('q')) {
-//                 screen_.Exit();
-//                 return true;
-//             }
-
-//             return false;
-//         });
-        
-//         screen_.Loop(final_component);
-//     }
-
-// private:
-//     void RebuildLeftMenu() {
-//         left_menu_entries_.clear();
-//         left_menu_entries_.push_back("Name: " + temp_node_.name);
-//         left_menu_entries_.push_back("Type: " + temp_node_.type);
-//         left_menu_entries_.push_back("Subtype: " + temp_node_.subtype);
-
-//         YAML::Emitter emitter;
-//         emitter << temp_node_.parameters;
-//         left_menu_entries_.push_back("Params: " + std::string(emitter.c_str()));
-        
-//         // Keep track of where dynamic inputs start
-//         image_inputs_start_idx_ = left_menu_entries_.size();
-//         for (size_t i = 0; i < temp_node_.image_inputs.size(); ++i) {
-//             const auto& input = temp_node_.image_inputs[i];
-//             left_menu_entries_.push_back("Img Input " + std::to_string(i) + ": " + std::to_string(input.from_node_id) + ":" + input.from_output_name);
-//         }
-//         left_menu_entries_.push_back("[+] Add Image Input");
-        
-//         MenuOption option;
-//         option.on_enter = [this] { EnterEditMode(); };
-//         left_menu_ = Menu(&left_menu_entries_, &left_menu_selected_, option);
-//     }
-
-//     void SwitchToNode(int new_id) {
-//         if (!graph_.has_node(new_id)) return;
-//         focused_node_id_ = new_id;
-//         temp_node_ = graph_.nodes.at(new_id);
-//         RebuildLeftMenu();
-//         RefreshAllTrees();
-//     }
-    
-//     void EnterEditMode() {
-//         show_modal_ = true;
-//         editor_input_option_.on_enter = [this] { CommitEdit(); };
-        
-//         // Configure the modal based on which menu item is selected
-//         if (left_menu_selected_ == 0) {
-//             modal_title_ = "Edit Name";
-//             edit_buffer_ = temp_node_.name;
-//         } else if (left_menu_selected_ == 1) {
-//             modal_title_ = "Edit Type";
-//             edit_buffer_ = temp_node_.type;
-//         } else if (left_menu_selected_ == 2) {
-//             modal_title_ = "Edit Subtype";
-//             edit_buffer_ = temp_node_.subtype;
-//         } else if (left_menu_selected_ == 3) {
-//             modal_title_ = "Edit Static Params (YAML format)";
-//             YAML::Emitter emitter;
-//             emitter << temp_node_.parameters;
-//             edit_buffer_ = emitter.c_str();
-//         } else if (left_menu_selected_ >= image_inputs_start_idx_) {
-//             int input_idx = left_menu_selected_ - image_inputs_start_idx_;
-//             // Case: Add new input
-//             if (input_idx >= (int)temp_node_.image_inputs.size()) {
-//                 temp_node_.image_inputs.push_back({-1, "image"});
-//                 RebuildLeftMenu();
-//                 show_modal_ = false; // Just add, don't show modal
-//                 return;
-//             }
-//             // Case: Edit existing input
-//             modal_title_ = "Edit Image Input " + std::to_string(input_idx) + " (format: <node_id>:<output_name>)";
-//             edit_buffer_ = std::to_string(temp_node_.image_inputs[input_idx].from_node_id) + ":" + temp_node_.image_inputs[input_idx].from_output_name;
-//         } else {
-//             show_modal_ = false; // Should not happen
-//         }
-//     }
-    
-//     void CommitEdit() {
-//         show_modal_ = false;
-        
-//         if (left_menu_selected_ == 0) {
-//             temp_node_.name = edit_buffer_;
-//         } else if (left_menu_selected_ == 1) {
-//             temp_node_.type = edit_buffer_;
-//         } else if (left_menu_selected_ == 2) {
-//             temp_node_.subtype = edit_buffer_;
-//         } else if (left_menu_selected_ == 3) {
-//             try {
-//                 temp_node_.parameters = YAML::Load(edit_buffer_);
-//             } catch (const std::exception& e) {
-//                 status_message_ = "YAML Parse Error!";
-//             }
-//         } else if (left_menu_selected_ >= image_inputs_start_idx_) {
-//             int input_idx = left_menu_selected_ - image_inputs_start_idx_;
-//             if (input_idx < (int)temp_node_.image_inputs.size()) {
-//                  std::string s = edit_buffer_;
-//                  size_t colon_pos = s.find(':');
-//                  try {
-//                     if (colon_pos != std::string::npos) {
-//                         temp_node_.image_inputs[input_idx].from_node_id = std::stoi(s.substr(0, colon_pos));
-//                         temp_node_.image_inputs[input_idx].from_output_name = s.substr(colon_pos + 1);
-//                     } else {
-//                         temp_node_.image_inputs[input_idx].from_node_id = std::stoi(s);
-//                         temp_node_.image_inputs[input_idx].from_output_name = "image";
-//                     }
-//                  } catch (const std::exception&) {
-//                     status_message_ = "Invalid input format!";
-//                  }
-//             }
-//         }
-        
-//         RebuildLeftMenu();
-//     }
-
-//     void RefreshTopTree() {
-//         std::stringstream ss;
-//         if (show_ancestor_tree_) {
-//             graph_.print_dependency_tree(ss, focused_node_id_, detailed_trees_);
-//         } else {
-//             auto containing_trees = graph_.get_trees_containing_node(focused_node_id_);
-//             if (containing_trees.empty()) {
-//                 ss << "(Node " << focused_node_id_ << " is not part of any final output tree)";
-//             } else {
-//                  ss << "Node " << focused_node_id_ << " is part of " << containing_trees.size() << " tree(s):\n";
-//                 for (int end_node_id : containing_trees) {
-//                     graph_.print_dependency_tree(ss, end_node_id, detailed_trees_);
-//                 }
-//             }
-//         }
-//         top_tree_view_->SetContent(ss.str());
-//     }
-
-//     void RefreshBottomTree() {
-//         std::stringstream ss;
-//         graph_.print_dependency_tree(ss, detailed_trees_);
-//         bottom_tree_view_->SetContent(ss.str());
-//     }
-
-//     void RefreshAllTrees() {
-//         RefreshTopTree();
-//         RefreshBottomTree();
-//     }
-    
-//     Element RenderStatusBar() {
-//         std::string help = "←/→/Tab: Panes | ↑/↓: Navigate | Enter: Edit | t: Toggle Top Tree | d: Toggle Details | ::Command | q: Quit";
-//         return hbox({ text(help) | dim, filler(), text(status_message_) | bold });
-//     }
-
-//     void ExecuteCommand() {
-//         std::string cmd = edit_buffer_;
-//         if (cmd.rfind(":", 0) == 0) { // check if it starts with :
-//             cmd = cmd.substr(1);
-//         }
-
-//         if (cmd == "a" || cmd == "apply") HandleApply();
-//         else if (cmd == "w" || cmd == "write") {
-//             if (HandleApply()) {
-//                 std::string path = ask("Output file", config_.default_exit_save_path);
-//                 if (!path.empty()) { graph_.save_yaml(path); status_message_ = "Graph saved to " + path; }
-//             }
-//         } else if (cmd == "q" || cmd == "quit") {
-//             screen_.Exit();
-//         } else {
-//             status_message_ = "Error: Unknown command '" + cmd + "'";
-//         }
-//     }
-
-//     bool HandleApply() {
-//         NodeGraph temp_graph = graph_;
-//         temp_graph.nodes.at(focused_node_id_) = temp_node_;
-        
-//         // Basic cycle detection by trying to generate a traversal order
-//         bool cycle_found = false;
-//         try {
-//             // Check all trees this node is part of for cycles.
-//             auto containing_trees = temp_graph.get_trees_containing_node(focused_node_id_);
-//              if (containing_trees.empty()) { // If it's a leaf or isolated, check from itself
-//                 temp_graph.topo_postorder_from(focused_node_id_);
-//              } else {
-//                 for(int end_node : containing_trees) {
-//                     temp_graph.topo_postorder_from(end_node);
-//                 }
-//              }
-//         } catch (const GraphError& e) {
-//             cycle_found = true;
-//             status_message_ = "Error: Cycle detected! Changes aborted.";
-//         }
-
-//         if (!cycle_found) {
-//             graph_.nodes.at(focused_node_id_) = temp_node_;
-//             status_message_ = "Changes applied successfully.";
-//             RefreshAllTrees();
-//             return true;
-//         }
-//         return false;
-//     }
-
-//     NodeGraph& graph_;
-//     int focused_node_id_;
-//     ps::Node temp_node_;
-//     CliConfig& config_;
-    
-//     // UI State
-//     std::string status_message_ = "Ready";
-//     bool show_ancestor_tree_ = true;
-//     bool detailed_trees_ = true;
-
-//     // Left Pane (Menu) State
-//     Component left_menu_;
-//     std::vector<std::string> left_menu_entries_;
-//     int left_menu_selected_ = 0;
-//     int image_inputs_start_idx_ = 0;
-    
-//     // Modal Editing State
-//     bool show_modal_ = false;
-//     std::string modal_title_;
-//     std::string command_buffer_;
-//     std::string edit_buffer_;
-//     InputOption editor_input_option_;
-//     Component editor_input_;
-    
-//     // Right Pane (Trees) State
-//     std::shared_ptr<TreeView> top_tree_view_;
-//     std::shared_ptr<TreeView> bottom_tree_view_;
-
-//     Component main_container_;
-// };
-
 
 static bool write_config_to_file(const CliConfig& config, const std::string& path) {
     YAML::Node root;
@@ -1019,35 +603,27 @@ void run_config_editor(CliConfig& config) {
     ConfigEditor editor(screen, config);
     editor.Run();
 }
-// void run_node_editor(int node_id, NodeGraph& graph, CliConfig& config) {
-//      auto screen = ScreenInteractive::Fullscreen();
-//      AdvancedNodeEditor editor(screen, node_id, graph, config);
-//      editor.Run();
-// }
 
 static bool process_command(const std::string& line, NodeGraph& graph, bool& modified, CliConfig& config, const std::map<std::string, std::string>& op_sources) {
     std::istringstream iss(line);
     std::string cmd;
     iss >> cmd;
     if (cmd.empty()) return true;
-    auto screen = ScreenInteractive::FitComponent();
     try {
         if (cmd == "help") {
             print_repl_help();
         } else if (cmd == "clear" || cmd == "cls") {
             std::cout << "\033[2J\033[1;1H";
         } else if (cmd == "print") {
-            // --- NEW: Robust argument parsing for 'print' ---
             std::string target_str = "all";
             std::string mode_str = config.default_print_mode;
             bool target_is_set = false;
 
             std::string arg;
             while(iss >> arg) {
-                // Check if the argument is a mode flag
                 if (arg == "d" || arg == "detailed" || arg == "s" || arg == "simplified") {
                     mode_str = arg;
-                } else { // Otherwise, assume it's a target
+                } else { 
                     if (target_is_set) {
                          std::cout << "Warning: Multiple targets specified for print; using last one ('" << arg << "').\n";
                     }
@@ -1069,19 +645,11 @@ static bool process_command(const std::string& line, NodeGraph& graph, bool& mod
                 }
             }
         } else if (cmd == "node") {
-            // Accept: "node" or "node <id>"
             std::optional<int> maybe_id;
-
-            // If your parser gives you the raw line (e.g. `line`), reuse it:
-            // Example assumes you already split out `cmd` but still have the full `line`.
-            // If you don't have `line`, you can read from std::cin tokens in your own style.
-            std::istringstream iss(line);
-            std::string word;            // will read the "node"
-            iss >> word;
-            if (iss >> word) {           // optional <id>
+            std::string word;
+            if (iss >> word) {
                 try { maybe_id = std::stoi(word); } catch (...) { maybe_id.reset(); }
             }
-
             ps::run_node_editor(graph, maybe_id);
         }  else if (cmd == "ops") {
             std::string mode_arg;
@@ -1236,10 +804,9 @@ static bool process_command(const std::string& line, NodeGraph& graph, bool& mod
                 return true;
             }
 
-            // Parse all flags and arguments
             bool force = false;
-            bool timer_console = false; // 't' flag
-            bool timer_log_file = false;  // 'tl' flag
+            bool timer_console = false; 
+            bool timer_log_file = false; 
             std::string timer_log_path = "";
 
             std::string arg;
@@ -1250,14 +817,12 @@ static bool process_command(const std::string& line, NodeGraph& graph, bool& mod
                     timer_console = true;
                 } else if (arg == "tl") {
                     timer_log_file = true;
-                    // Peek at the next argument. If it's not a flag, assume it's the path.
                     if (iss.peek() != EOF && iss.peek() != ' ') {
                         std::string next_arg;
                         iss >> next_arg;
                         if (next_arg != "force" && next_arg != "t" && next_arg != "timer") {
                             timer_log_path = next_arg;
                         } else {
-                            // It was a flag, so put it back in the stream
                             iss.seekg(-(next_arg.length()), std::ios_base::cur);
                         }
                     }
@@ -1269,7 +834,6 @@ static bool process_command(const std::string& line, NodeGraph& graph, bool& mod
                 graph.clear_timing_results();
             }
             
-            // Start total timer if logging to file
             std::chrono::time_point<std::chrono::high_resolution_clock> total_start;
             if (timer_log_file) {
                 total_start = std::chrono::high_resolution_clock::now();
@@ -1290,7 +854,6 @@ static bool process_command(const std::string& line, NodeGraph& graph, bool& mod
                     }
             };
 
-            // Execute computation
             if (target_id_str == "all") {
                 for (int id : graph.ending_nodes()) {
                     print_output(id, graph.compute(id, force, enable_timing));
@@ -1300,9 +863,6 @@ static bool process_command(const std::string& line, NodeGraph& graph, bool& mod
                 print_output(id, graph.compute(id, force, enable_timing));
             }
 
-            // --- Post-computation actions based on flags ---
-
-            // 1. Print simple summary to console if 't' was used
             if (timer_console) {
                 std::cout << "--- Computation Timers (Console) ---\n";
                 for (const auto& timing : graph.timing_results.node_timings) {
@@ -1311,7 +871,6 @@ static bool process_command(const std::string& line, NodeGraph& graph, bool& mod
                 }
             }
             
-            // 2. Write detailed log to file if 'tl' was used
             if (timer_log_file) {
                 auto total_end = std::chrono::high_resolution_clock::now();
                 std::chrono::duration<double, std::milli> total_elapsed = total_end - total_start;
@@ -1375,7 +934,6 @@ static bool process_command(const std::string& line, NodeGraph& graph, bool& mod
     return true;
 }
 
-// ... (run_repl, load_plugins, main are unchanged)
 static void run_repl(NodeGraph& graph, CliConfig& config, const std::map<std::string, std::string>& op_sources) {
     bool modified = false;
     std::string line;
