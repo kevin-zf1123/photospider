@@ -47,6 +47,7 @@ struct CliConfig {
 
 // Forward declarations
 static bool write_config_to_file(const CliConfig& config, const std::string& path);
+static void load_or_create_config(const std::string& config_path, CliConfig& config);
 static void save_config_interactive(CliConfig& config);
 static std::string ask(const std::string& q, const std::string& def = "");
 
@@ -65,6 +66,8 @@ private:
     };
 
 public:
+    bool changes_applied = false;
+
     ConfigEditor(ScreenInteractive& screen, CliConfig& config)
         : TuiEditor(screen), original_config_(config), temp_config_(config) 
     {
@@ -193,6 +196,7 @@ private:
             auto it = std::find(vec.begin(), vec.end(), val);
             return it == vec.end() ? 0 : std::distance(vec.begin(), it);
         };
+        active_config_path_buffer_ = temp_config_.loaded_config_path;
         selected_print_mode_idx_ = find_idx(print_mode_entries_, temp_config_.default_print_mode);
         selected_ops_list_mode_idx_ = find_idx(ops_list_mode_entries_, temp_config_.default_ops_list_mode);
         selected_path_mode_idx_ = find_idx(path_mode_entries_, temp_config_.ops_plugin_path_mode);
@@ -207,6 +211,7 @@ private:
 
     void SyncUiStateToModel() {
         // Apply the selected radio button text back to the config object
+        temp_config_.loaded_config_path = active_config_path_buffer_;
         temp_config_.default_print_mode = print_mode_entries_[selected_print_mode_idx_];
         temp_config_.default_ops_list_mode = ops_list_mode_entries_[selected_ops_list_mode_idx_];
         temp_config_.ops_plugin_path_mode = path_mode_entries_[selected_path_mode_idx_];
@@ -232,6 +237,7 @@ private:
             editable_lines_.push_back({std::move(label), nullptr, true, opts, selected_idx});
         };
         
+        add_text_line("active_config_file", &active_config_path_buffer_);
         add_text_line("cache_root_dir", &temp_config_.cache_root_dir);
         add_text_line("default_exit_save_path", &temp_config_.default_exit_save_path);
         add_text_line("default_timer_log_path", &temp_config_.default_timer_log_path);
@@ -324,21 +330,55 @@ private:
 
     void ExecuteCommand() {
         std::string cmd = command_buffer_;
-        mode_ = Mode::Navigate;
         command_buffer_.clear();
+        mode_ = Mode::Navigate;
 
         if (cmd == "a" || cmd == "apply") {
-            SyncUiStateToModel();
-            original_config_ = temp_config_;
-            status_message_ = "Changes applied to current session.";
+            std::string new_path = active_config_path_buffer_;
+            std::string old_path = original_config_.loaded_config_path;
+
+            if (new_path != old_path) {
+                if (fs::exists(new_path)) {
+                    // Path changed to an existing file: load it, discarding other UI edits.
+                    load_or_create_config(new_path, original_config_);
+                    temp_config_ = original_config_;
+                    SyncModelToUiState();
+                    RebuildLineView();
+                    status_message_ = "Loaded config from: " + new_path;
+                } else {
+                    // Path changed to a new file: create it with the current UI settings.
+                    SyncUiStateToModel(); // Capture all UI edits into temp_config_
+                    temp_config_.loaded_config_path = fs::absolute(new_path).string();
+                    original_config_ = temp_config_;
+                    if (write_config_to_file(original_config_, new_path)) {
+                        status_message_ = "Created and applied new config: " + new_path;
+                    } else {
+                        status_message_ = "Error creating file: " + new_path;
+                        original_config_.loaded_config_path = old_path; // Revert path on failure
+                    }
+                    temp_config_ = original_config_; // Sync back after potential failure
+                    SyncModelToUiState();
+                    RebuildLineView();
+                }
+            } else {
+                // Path did not change, just apply settings to the current session.
+                SyncUiStateToModel();
+                original_config_ = temp_config_;
+                status_message_ = "Settings applied to current session.";
+            }
+            changes_applied = true;
         } else if (cmd == "w" || cmd == "write") {
             SyncUiStateToModel();
             original_config_ = temp_config_;
             if(!original_config_.loaded_config_path.empty()){
-                write_config_to_file(original_config_, original_config_.loaded_config_path);
-                status_message_ = "Changes applied and saved.";
+                if (write_config_to_file(original_config_, original_config_.loaded_config_path)) {
+                    status_message_ = "Changes applied and saved.";
+                    changes_applied = true;
+                } else {
+                    status_message_ = "Error: failed to write file.";
+                }
             } else {
-                status_message_ = "Error: No config file loaded. Cannot save.";
+                status_message_ = "Error: No config file loaded. Use 'apply' with a new path first.";
             }
         } else if (cmd == "q" || cmd == "quit") {
             screen_.Exit();
@@ -366,6 +406,7 @@ private:
     int dummy_radio_selected_idx_ = 0;
 
     // --- UI state for radio buttons and vectors ---
+    std::string active_config_path_buffer_;
     int selected_print_mode_idx_ = 0;
     int selected_ops_list_mode_idx_ = 0;
     int selected_path_mode_idx_ = 0;
@@ -618,6 +659,46 @@ void run_config_editor(CliConfig& config) {
     auto screen = ScreenInteractive::Fullscreen();
     ConfigEditor editor(screen, config);
     editor.Run();
+
+    // After the editor returns, check if changes were applied and handle saving.
+    if (!editor.changes_applied) {
+        return;
+    }
+
+    if (config.config_save_behavior == "ask") {
+        if (ask_yesno("Save configuration changes to a file?", true)) {
+            std::string default_path = config.loaded_config_path.empty() 
+                                       ? "config.yaml" 
+                                       : config.loaded_config_path;
+            std::string path = ask("Enter path to save config file", default_path);
+            if (!path.empty()) {
+                if(write_config_to_file(config, path)) {
+                    config.loaded_config_path = fs::absolute(path).string();
+                    std::cout << "Configuration saved to " << path << std::endl;
+                } else {
+                    std::cout << "Error: Failed to save configuration to " << path << std::endl;
+                }
+            }
+        }
+    } else if (config.config_save_behavior == "current") {
+        if (config.loaded_config_path.empty()) {
+            std::cout << "Config save behavior is 'current', but no config file was loaded. Saving to default 'config.yaml'." << std::endl;
+            if (write_config_to_file(config, "config.yaml")) {
+                config.loaded_config_path = fs::absolute("config.yaml").string();
+                std::cout << "Configuration saved to " << config.loaded_config_path << std::endl;
+            }
+        } else {
+            if (write_config_to_file(config, config.loaded_config_path)) {
+                std::cout << "Configuration saved to " << config.loaded_config_path << std::endl;
+            }
+        }
+    } else if (config.config_save_behavior == "default") {
+        if (write_config_to_file(config, "config.yaml")) {
+            config.loaded_config_path = fs::absolute("config.yaml").string();
+            std::cout << "Configuration saved to default 'config.yaml'." << std::endl;
+        }
+    }
+    // If config.config_save_behavior is "none", do nothing.
 }
 // void run_node_editor(int node_id, NodeGraph& graph, CliConfig& config) {
 //      auto screen = ScreenInteractive::Fullscreen();
