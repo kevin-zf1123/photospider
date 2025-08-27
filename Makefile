@@ -22,12 +22,16 @@ FTXUI_LIB := $(BUILD_DIR)/libftxui.a
 # --- Compiler and Flags ---
 ifeq ($(shell uname), Darwin)
 	CXX ?= clang++
+	# NEW: Explicitly set the architecture for Apple Silicon Macs
+	ARCH_FLAGS := -arch arm64
 else
 	CXX ?= g++
+	ARCH_FLAGS :=
 endif
 
 # Add FTXUI's own src dir to includes for its internal headers
-CXXFLAGS := -std=c++17 -O2 -Wall \
+# MODIFIED: Added ARCH_FLAGS
+CXXFLAGS := -std=c++17 -O2 -Wall $(ARCH_FLAGS)\
             -I$(INC_DIR) \
             -I$(PROJECT_ROOT)/extern/ftxui/include \
             -I$(FTXUI_SRC_ROOT) \
@@ -40,7 +44,9 @@ ifneq ($(YAML_PREFIX),)
 endif
 
 # Link against OpenCV, yaml-cpp, and our own compiled FTXUI library
-LDFLAGS += $(shell pkg-config --libs opencv4 2>/dev/null || pkg-config --libs opencv 2>/dev/null) \
+# MODIFIED: Added ARCH_FLAGS
+LDFLAGS += $(ARCH_FLAGS) \
+           $(shell pkg-config --libs opencv4 2>/dev/null || pkg-config --libs opencv 2>/dev/null) \
            -lyaml-cpp \
            -L$(BUILD_DIR) -lftxui
 

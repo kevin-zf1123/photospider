@@ -22,6 +22,9 @@
 #include <opencv2/imgproc.hpp>
 #include <string>
 #include <vector>
+#include <random>
+#include <cmath>
+#include <numeric>
 
 namespace ps { namespace ops {
 
@@ -482,6 +485,262 @@ static NodeOutput op_extract_channel(const Node& node, const std::vector<cv::Mat
 }
 
 
+// --- NEW BUILT-IN NODES ---
+
+/**
+ * @brief (image_generator:perlin_noise) Generates a Perlin noise image.
+ * 
+ * Based on the improved Perlin noise algorithm.
+ */
+static NodeOutput op_perlin_noise(const Node& node, const std::vector<cv::Mat>&) {
+    const auto& P = node.runtime_parameters;
+    int width = as_int_flexible(P, "width", 256);
+    int height = as_int_flexible(P, "height", 256);
+    double scale = as_double_flexible(P, "grid_size", 1.0);
+    if (width <= 0 || height <= 0) throw GraphError("perlin_noise requires positive width and height");
+    if (scale <= 0) throw GraphError("perlin_noise requires positive grid_size");
+
+    // --- Perlin Noise Implementation ---
+    std::vector<int> p(512);
+    std::iota(p.begin(), p.begin() + 256, 0);
+    std::shuffle(p.begin(), p.begin() + 256, std::mt19937{std::random_device{}()});
+    std::copy(p.begin(), p.begin() + 256, p.begin() + 256);
+
+    auto fade = [](double t) { return t * t * t * (t * (t * 6 - 15) + 10); };
+    auto lerp = [](double t, double a, double b) { return a + t * (b - a); };
+    auto grad = [](int hash, double x, double y) {
+        switch (hash & 7) {
+            case 0: return x + y;
+            case 1: return -x + y;
+            case 2: return x - y;
+            case 3: return -x - y;
+            case 4: return x;
+            case 5: return -x;
+            case 6: return y;
+            case 7: return -y;
+            default: return 0.0;
+        }
+    };
+
+    auto noise = [&](double x, double y) {
+        int X = static_cast<int>(floor(x)) & 255;
+        int Y = static_cast<int>(floor(y)) & 255;
+        x -= floor(x);
+        y -= floor(y);
+        double u = fade(x);
+        double v = fade(y);
+        int aa = p[p[X] + Y];
+        int ab = p[p[X] + Y + 1];
+        int ba = p[p[X + 1] + Y];
+        int bb = p[p[X + 1] + Y + 1];
+        
+        double res = lerp(v, lerp(u, grad(aa, x, y), grad(ba, x - 1, y)),
+                             lerp(u, grad(ab, x, y - 1), grad(bb, x - 1, y - 1)));
+        return (res + 1.0) / 2.0; // To range [0, 1]
+    };
+    // --- End of Implementation ---
+
+    cv::Mat noise_image(height, width, CV_8UC1);
+    for (int i = 0; i < height; ++i) {
+        for (int j = 0; j < width; ++j) {
+            double nx = static_cast<double>(j) / width * scale;
+            double ny = static_cast<double>(i) / height * scale;
+            noise_image.at<uchar>(i, j) = static_cast<uchar>(noise(nx, ny) * 255);
+        }
+    }
+    
+    NodeOutput result;
+    result.image_matrix = noise_image;
+    return result;
+}
+
+
+/**
+ * @brief (image_process:convolve) Applies a convolution with a kernel image.
+ */
+static NodeOutput op_convolve(const Node& node, const std::vector<cv::Mat>& inputs) {
+    if (inputs.size() < 2 || inputs[0].empty() || inputs[1].empty()) {
+        throw GraphError("convolve requires two input images: a source and a kernel.");
+    }
+
+    const cv::Mat& src = inputs[0];
+    const cv::Mat& kernel_img = inputs[1];
+
+    if (kernel_img.channels() != 1) {
+        throw GraphError("The kernel for convolve must be a single-channel image.");
+    }
+    cv::Mat kernel_float;
+    kernel_img.convertTo(kernel_float, CV_32F);
+
+    const auto& P = node.runtime_parameters;
+    std::string padding_mode = as_str(P, "padding", "replicate");
+    bool take_absolute = as_int_flexible(P, "absolute", 1) != 0;
+    bool h_and_v = as_int_flexible(P, "horizontal_and_vertical", 0) != 0;
+
+    int border_type = cv::BORDER_REPLICATE;
+    cv::Scalar border_value;
+
+    if (padding_mode == "zero") border_type = cv::BORDER_CONSTANT;
+    else if (padding_mode == "replicate") border_type = cv::BORDER_REPLICATE;
+    else if (padding_mode == "reflect") border_type = cv::BORDER_REFLECT;
+    else if (padding_mode == "wrap") border_type = cv::BORDER_WRAP;
+    else if (padding_mode == "reflect_101") border_type = cv::BORDER_REFLECT101;
+    else if (padding_mode == "constant") {
+        border_type = cv::BORDER_CONSTANT;
+        int val = as_int_flexible(P, "constant", 0);
+        border_value = cv::Scalar(val, val, val, val);
+    } else {
+        throw GraphError("convolve: invalid padding mode specified.");
+    }
+    
+    cv::Mat out_mat_float;
+
+    if (h_and_v) {
+        // --- Gradient Magnitude Path ---
+        // 1. Calculate Gx (horizontal gradient)
+        cv::Mat gx;
+        cv::filter2D(src, gx, CV_32F, kernel_float, cv::Point(-1,-1), 0, border_type);
+
+        // 2. Create the vertical kernel by transposing the horizontal one
+        cv::Mat kernel_vertical;
+        cv::transpose(kernel_float, kernel_vertical);
+
+        // 3. Calculate Gy (vertical gradient)
+        cv::Mat gy;
+        cv::filter2D(src, gy, CV_32F, kernel_vertical, cv::Point(-1,-1), 0, border_type);
+
+        // 4. Calculate the magnitude: sqrt(Gx^2 + Gy^2)
+        cv::magnitude(gx, gy, out_mat_float);
+
+    } else {
+        // --- Single Convolution Path ---
+        // Convolve into a floating-point matrix to preserve potential negative values.
+        cv::filter2D(src, out_mat_float, CV_32F, kernel_float, cv::Point(-1,-1), 0, border_type);
+
+        // Take the absolute value of the result if the parameter is true.
+        if (take_absolute) {
+            out_mat_float = cv::abs(out_mat_float);
+        }
+    }
+    
+    // Convert the final floating-point result back to the standard 8-bit integer format for output.
+    cv::Mat out_mat;
+    // Note: convertTo automatically handles clipping values outside the [0, 255] range.
+    out_mat_float.convertTo(out_mat, CV_8U);
+
+    NodeOutput result;
+    result.image_matrix = out_mat;
+    return result;
+}
+/**
+ * @brief (image_process:curve_transform) Applies a custom curve to each pixel.
+ * Formula: y = 255 / (1 + k * (x/255))
+ */
+static NodeOutput op_curve_transform(const Node& node, const std::vector<cv::Mat>& inputs) {
+    if (inputs.empty() || inputs[0].empty()) {
+        throw GraphError("curve_transform requires one input image.");
+    }
+
+    const auto& P = node.runtime_parameters;
+    double k = as_double_flexible(P, "k", 1.0);
+
+    // Create a Look-Up Table (LUT)
+    cv::Mat lut(1, 256, CV_8U);
+    uchar* p = lut.ptr();
+    for(int i = 0; i < 256; ++i) {
+        double x_norm = static_cast<double>(i) / 255.0;
+        double y_norm = 1.0 / (1.0 + k * x_norm);
+        p[i] = cv::saturate_cast<uchar>(y_norm * 255.0);
+    }
+
+    cv::Mat out_mat;
+    cv::LUT(inputs[0], lut, out_mat);
+    
+    NodeOutput result;
+    result.image_matrix = out_mat;
+    return result;
+}
+/**
+ * @brief (image_generator:constant) Generates an image of a certain size filled with a constant integer value.
+ */
+static NodeOutput op_constant_image(const Node& node, const std::vector<cv::Mat>&) {
+    const auto& P = node.runtime_parameters;
+    int width = as_int_flexible(P, "width", 0);
+    int height = as_int_flexible(P, "height", 0);
+    int value = as_int_flexible(P, "value", 0);
+    int channels = as_int_flexible(P, "channels", 1);
+
+    if (width <= 0 || height <= 0) {
+        throw GraphError("image_generator:constant requires positive 'width' and 'height'.");
+    }
+    if (value < 0 || value > 255) {
+        throw GraphError("image_generator:constant 'value' must be between 0 and 255.");
+    }
+    if (channels != 1 && channels != 3 && channels != 4) {
+        throw GraphError("image_generator:constant 'channels' must be 1, 3, or 4.");
+    }
+
+    // Create a scalar where all elements are the same specified value.
+    // This works for both single-channel and multi-channel images.
+    cv::Scalar fill_value(value, value, value, value);
+
+    // Create the matrix with the specified dimensions, type, and fill value.
+    cv::Mat out_mat(height, width, CV_MAKETYPE(CV_8U, channels), fill_value);
+    
+    NodeOutput result;
+    result.image_matrix = out_mat;
+    return result;
+}
+/**
+ * @brief (image_mixing:multiply) Multiplies two images element-wise, a common blend mode.
+ * The formula is: output = scale * (image1 / 255.0) * (image2 / 255.0) * 255.0
+ */
+static NodeOutput op_multiply(const Node& node, const std::vector<cv::Mat>& inputs) {
+    if (inputs.size() < 2 || inputs[0].empty() || inputs[1].empty()) {
+        throw GraphError("image_mixing:multiply requires two input images.");
+    }
+
+    const auto& P = node.runtime_parameters;
+    double scale = as_double_flexible(P, "scale", 1.0);
+    std::string strategy = as_str(P, "merge_strategy", "resize");
+
+    cv::Mat a_prep = inputs[0].clone();
+    cv::Mat b_prep = inputs[1].clone();
+
+    // Ensure images have the same number of channels for predictable blending.
+    normalize_channels_for_mixing(a_prep, b_prep);
+
+    // Convert images to floating-point and normalize to the [0, 1] range.
+    // This is crucial for multiplication to work as expected without data loss from clipping.
+    cv::Mat a_float, b_float;
+    a_prep.convertTo(a_float, CV_32F, 1.0 / 255.0);
+    b_prep.convertTo(b_float, CV_32F, 1.0 / 255.0);
+
+    cv::Mat out_mat_float;
+
+    // Handle different image sizes based on the chosen strategy.
+    if (strategy == "crop") {
+        out_mat_float = cv::Mat::zeros(a_float.size(), a_float.type());
+        cv::Rect roi(0, 0, std::min(a_float.cols, b_float.cols), std::min(a_float.rows, b_float.rows));
+        
+        cv::Mat result_roi;
+        cv::multiply(a_float(roi), b_float(roi), result_roi, scale);
+        result_roi.copyTo(out_mat_float(roi));
+    } else { // "resize" is the default strategy
+        if (a_float.size() != b_float.size()) {
+            cv::resize(b_float, b_float, a_float.size());
+        }
+        cv::multiply(a_float, b_float, out_mat_float, scale);
+    }
+
+    // Convert the result back to the standard 8-bit integer format [0, 255].
+    cv::Mat out_mat;
+    out_mat_float.convertTo(out_mat, CV_8U, 255.0);
+
+    NodeOutput result;
+    result.image_matrix = out_mat;
+    return result;
+}
 /**
  * @brief Registers all the built-in operations with the OpRegistry singleton.
  *        This function is called once at application startup.
@@ -489,19 +748,23 @@ static NodeOutput op_extract_channel(const Node& node, const std::vector<cv::Mat
 void register_builtin() {
     auto& R = OpRegistry::instance();
     
-    // Image Loading
+    // Image Loading & Generation
     R.register_op("image_source", "path", op_image_source_path);
+    R.register_op("image_generator", "perlin_noise", op_perlin_noise);
+    R.register_op("image_generator", "constant", op_constant_image);
     
     // Image Processing
     R.register_op("image_process", "gaussian_blur", op_gaussian_blur);
     R.register_op("image_process", "resize", op_resize);
     R.register_op("image_process", "crop", op_crop);
     R.register_op("image_process", "extract_channel", op_extract_channel);
+    R.register_op("image_process", "convolve", op_convolve);
+    R.register_op("image_process", "curve_transform", op_curve_transform);
     
     // Image Mixing
     R.register_op("image_mixing", "add_weighted", op_add_weighted);
     R.register_op("image_mixing", "diff", op_abs_diff);
-    
+    R.register_op("image_mixing", "multiply", op_multiply);
     // Data / Utility
     R.register_op("analyzer", "get_dimensions", op_get_width);
     R.register_op("math", "divide", op_divide);
