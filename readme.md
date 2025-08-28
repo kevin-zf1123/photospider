@@ -129,8 +129,7 @@ A Photospider graph is a YAML sequence of nodes. Each node is a map with several
 
   caches:                            # Optional. Defines how to cache the output.
     - cache_type: image
-      location: relative/path/to/cache.png
-```
+      location: relative/path/to/cache.png```
 
 ### Example: A Dynamic Graph
 
@@ -205,4 +204,3 @@ This example loads an image, gets its width, calculates a blur radius based on t
 ## License
 
 This project is licensed under the MIT License.
------------------------------------------------
