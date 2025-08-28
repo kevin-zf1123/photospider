@@ -1,3 +1,4 @@
+// FILE: src/node_graph.cpp
 #include "node_graph.hpp"
 #include "ops.hpp"
 #include <fstream>
@@ -69,15 +70,15 @@ void NodeGraph::save_yaml(const fs::path& yaml_path) const {
     fout << n;
 }
 
-const NodeOutput& NodeGraph::compute(int node_id, bool force_recache, bool enable_timing) {
+const NodeOutput& NodeGraph::compute(int node_id, const std::string& cache_precision, bool force_recache, bool enable_timing) {
     if (!has_node(node_id)) {
         throw GraphError("Cannot compute: node " + std::to_string(node_id) + " not found.");
     }
     std::unordered_map<int, bool> visiting;
-    return compute_internal(node_id, visiting, force_recache, enable_timing);
+    return compute_internal(node_id, cache_precision, visiting, force_recache, enable_timing);
 }
 
-const NodeOutput& NodeGraph::compute_internal(int node_id, std::unordered_map<int, bool>& visiting, bool force_recache, bool enable_timing) {
+const NodeOutput& NodeGraph::compute_internal(int node_id, const std::string& cache_precision, std::unordered_map<int, bool>& visiting, bool force_recache, bool enable_timing) {
     auto& node = nodes.at(node_id);
     std::string result_source = "unknown";
     
@@ -106,7 +107,13 @@ const NodeOutput& NodeGraph::compute_internal(int node_id, std::unordered_map<in
                          std::cout << "Loading cache for Node " << node.id << " from: " << fs::relative(node_cache_dir(node_id)).string() << std::endl;
                          NodeOutput loaded_output;
                          if (fs::exists(cache_file)) {
-                            loaded_output.image_matrix = cv::imread(cache_file.string(), cv::IMREAD_UNCHANGED);
+                            cv::Mat loaded_mat = cv::imread(cache_file.string(), cv::IMREAD_UNCHANGED);
+                            if (!loaded_mat.empty()) {
+                                double scale = 1.0;
+                                if (loaded_mat.depth() == CV_8U) scale = 1.0 / 255.0;
+                                else if (loaded_mat.depth() == CV_16U) scale = 1.0 / 65535.0;
+                                loaded_mat.convertTo(loaded_output.image_matrix, CV_32F, scale);
+                            }
                          }
                          if (fs::exists(metadata_file)) {
                             YAML::Node meta = YAML::LoadFile(metadata_file.string());
@@ -138,7 +145,7 @@ const NodeOutput& NodeGraph::compute_internal(int node_id, std::unordered_map<in
             if (!has_node(p_input.from_node_id)) {
                 throw GraphError("Node " + std::to_string(node.id) + " has missing parameter dependency: " + std::to_string(p_input.from_node_id));
             }
-            const auto& upstream_output = compute_internal(p_input.from_node_id, visiting, force_recache, enable_timing);
+            const auto& upstream_output = compute_internal(p_input.from_node_id, cache_precision, visiting, force_recache, enable_timing);
             auto it = upstream_output.data.find(p_input.from_output_name);
             if (it == upstream_output.data.end()) {
                 throw GraphError("Node " + std::to_string(p_input.from_node_id) + " did not produce required output '" + p_input.from_output_name + "' for node " + std::to_string(node_id));
@@ -153,7 +160,7 @@ const NodeOutput& NodeGraph::compute_internal(int node_id, std::unordered_map<in
             if (!has_node(i_input.from_node_id)) {
                 throw GraphError("Node " + std::to_string(node.id) + " has missing image dependency: " + std::to_string(i_input.from_node_id));
             }
-            const auto& upstream_output = compute_internal(i_input.from_node_id, visiting, force_recache, enable_timing);
+            const auto& upstream_output = compute_internal(i_input.from_node_id, cache_precision, visiting, force_recache, enable_timing);
             if (upstream_output.image_matrix.empty()){
                 std::cerr << "Warning: Input image from node " << i_input.from_node_id << " is empty for node " << node.id << std::endl;
             }
@@ -168,7 +175,7 @@ const NodeOutput& NodeGraph::compute_internal(int node_id, std::unordered_map<in
         
         node.cached_output = (*op_func_opt)(node, input_images);
         result_source = "computed";
-        save_cache_if_configured(node);
+        save_cache_if_configured(node, cache_precision);
         visiting[node_id] = false;
 
     } while (false);
@@ -314,7 +321,7 @@ fs::path NodeGraph::node_cache_dir(int node_id) const {
     return cache_root / std::to_string(node_id);
 }
 
-void NodeGraph::save_cache_if_configured(const Node& node) const {
+void NodeGraph::save_cache_if_configured(const Node& node, const std::string& cache_precision) const {
     if (cache_root.empty() || node.caches.empty() || !node.cached_output.has_value()) {
         return;
     }
@@ -328,8 +335,14 @@ void NodeGraph::save_cache_if_configured(const Node& node) const {
             fs::path final_path = dir / cache_entry.location;
 
             if (!output.image_matrix.empty()) {
+                cv::Mat out_mat;
+                if (cache_precision == "int16") {
+                    output.image_matrix.convertTo(out_mat, CV_16U, 65535.0);
+                } else { // "int8"
+                    output.image_matrix.convertTo(out_mat, CV_8U, 255.0);
+                }
                 std::cout << "Saving cache image for Node " << node.id << " to: " << fs::relative(final_path).string() << std::endl;
-                cv::imwrite(final_path.string(), output.image_matrix);
+                cv::imwrite(final_path.string(), out_mat);
             }
 
             if (!output.data.empty()) {
@@ -370,12 +383,12 @@ void NodeGraph::clear_cache() {
     clear_memory_cache();
 }
 
-void NodeGraph::cache_all_nodes() {
+void NodeGraph::cache_all_nodes(const std::string& cache_precision) {
     std::cout << "Saving all in-memory node results to configured caches..." << std::endl;
     int saved_count = 0;
     for (const auto& pair : nodes) {
         if (pair.second.cached_output.has_value()) {
-            save_cache_if_configured(pair.second);
+            save_cache_if_configured(pair.second, cache_precision);
             saved_count++;
         }
     }
@@ -400,9 +413,9 @@ void NodeGraph::free_transient_memory() {
     if (freed_count == 0) std::cout << "No transient nodes were found in memory to free." << std::endl;
 }
 
-void NodeGraph::synchronize_disk_cache() {
+void NodeGraph::synchronize_disk_cache(const std::string& cache_precision) {
     std::cout << "Synchronizing disk cache with current memory state..." << std::endl;
-    this->cache_all_nodes();
+    this->cache_all_nodes(cache_precision);
     std::cout << "Checking for orphaned cache files to remove..." << std::endl;
     int removed_files = 0;
     int removed_dirs = 0;

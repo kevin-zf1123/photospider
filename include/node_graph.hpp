@@ -1,4 +1,3 @@
-// FILE: include/node_graph.hpp
 #pragma once
 #include "ps_types.hpp"
 #include "node.hpp"
@@ -36,12 +35,12 @@ public:
     void clear_drive_cache();
     void clear_memory_cache();
     void clear_cache();
-    void cache_all_nodes();
+    void cache_all_nodes(const std::string& cache_precision);
     void free_transient_memory();
-    void synchronize_disk_cache();
+    void synchronize_disk_cache(const std::string& cache_precision);
     fs::path node_cache_dir(int node_id) const;
 
-    const NodeOutput& compute(int node_id, bool force_recache = false, bool enable_timing = false);    
+    const NodeOutput& compute(int node_id, const std::string& cache_precision, bool force_recache = false, bool enable_timing = false);    
     void clear_timing_results();
     std::vector<int> ending_nodes() const;
     void print_dependency_tree(std::ostream& os, bool show_parameters = true) const;
@@ -50,11 +49,11 @@ public:
     std::vector<int> get_trees_containing_node(int node_id) const;
 
 private:
-    const NodeOutput& compute_internal(int node_id, std::unordered_map<int, bool>& visiting, bool force_recache, bool enable_timing);
+    const NodeOutput& compute_internal(int node_id, const std::string& cache_precision, std::unordered_map<int, bool>& visiting, bool force_recache, bool enable_timing);
     bool is_ancestor(int potential_ancestor_id, int node_id, std::unordered_set<int>& visited) const; 
     std::vector<int> parents_of(int node_id) const;
 
-    void save_cache_if_configured(const Node& node) const;
+    void save_cache_if_configured(const Node& node, const std::string& cache_precision) const;
 };
 
 } // namespace ps

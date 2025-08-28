@@ -32,6 +32,7 @@ struct CliConfig {
     std::string loaded_config_path;
     std::string cache_root_dir = "cache";
     std::vector<std::string> plugin_dirs = {"build/plugins"};
+    std::string cache_precision = "int8"; // New: "int8" or "int16"
     std::string default_print_mode = "detailed";
     std::string default_traversal_arg = "n";
     std::string default_cache_clear_arg = "md";
@@ -197,6 +198,7 @@ private:
             return it == vec.end() ? 0 : std::distance(vec.begin(), it);
         };
         active_config_path_buffer_ = temp_config_.loaded_config_path;
+        selected_cache_precision_idx_ = find_idx(cache_precision_entries_, temp_config_.cache_precision);
         selected_print_mode_idx_ = find_idx(print_mode_entries_, temp_config_.default_print_mode);
         selected_ops_list_mode_idx_ = find_idx(ops_list_mode_entries_, temp_config_.default_ops_list_mode);
         selected_path_mode_idx_ = find_idx(path_mode_entries_, temp_config_.ops_plugin_path_mode);
@@ -212,6 +214,7 @@ private:
     void SyncUiStateToModel() {
         // Apply the selected radio button text back to the config object
         temp_config_.loaded_config_path = active_config_path_buffer_;
+        temp_config_.cache_precision = cache_precision_entries_[selected_cache_precision_idx_];
         temp_config_.default_print_mode = print_mode_entries_[selected_print_mode_idx_];
         temp_config_.default_ops_list_mode = ops_list_mode_entries_[selected_ops_list_mode_idx_];
         temp_config_.ops_plugin_path_mode = path_mode_entries_[selected_path_mode_idx_];
@@ -239,6 +242,7 @@ private:
         
         add_text_line("active_config_file", &active_config_path_buffer_);
         add_text_line("cache_root_dir", &temp_config_.cache_root_dir);
+        add_radio_line("cache_precision", &cache_precision_entries_, &selected_cache_precision_idx_);
         add_text_line("default_exit_save_path", &temp_config_.default_exit_save_path);
         add_text_line("default_timer_log_path", &temp_config_.default_timer_log_path);
         add_text_line("default_traversal_arg", &temp_config_.default_traversal_arg);
@@ -407,6 +411,7 @@ private:
 
     // --- UI state for radio buttons and vectors ---
     std::string active_config_path_buffer_;
+    int selected_cache_precision_idx_ = 0;
     int selected_print_mode_idx_ = 0;
     int selected_ops_list_mode_idx_ = 0;
     int selected_path_mode_idx_ = 0;
@@ -418,6 +423,7 @@ private:
     std::vector<std::string> plugin_dirs_str_;
     
     // --- Constant options for radio buttons ---
+    std::vector<std::string> cache_precision_entries_ = {"int8", "int16"};
     std::vector<std::string> print_mode_entries_ = {"detailed", "simplified"};
     std::vector<std::string> ops_list_mode_entries_ = {"all", "builtin", "plugins"};
     std::vector<std::string> path_mode_entries_ = {"name_only", "relative_path", "absolute_path"};
@@ -431,6 +437,7 @@ static bool write_config_to_file(const CliConfig& config, const std::string& pat
     YAML::Node root;
     root["_comment1"] = "Photospider CLI configuration.";
     root["cache_root_dir"] = config.cache_root_dir;
+    root["cache_precision"] = config.cache_precision;
     root["plugin_dirs"] = config.plugin_dirs;
     root["default_print_mode"] = config.default_print_mode;
     root["default_traversal_arg"] = config.default_traversal_arg;
@@ -460,6 +467,7 @@ static void load_or_create_config(const std::string& config_path, CliConfig& con
         try {
             YAML::Node root = YAML::LoadFile(config_path);
             if (root["cache_root_dir"]) config.cache_root_dir = root["cache_root_dir"].as<std::string>();
+            if (root["cache_precision"]) config.cache_precision = root["cache_precision"].as<std::string>();
             
             if (root["plugin_dirs"] && root["plugin_dirs"].IsSequence()) {
                 config.plugin_dirs = root["plugin_dirs"].as<std::vector<std::string>>();
@@ -485,6 +493,7 @@ static void load_or_create_config(const std::string& config_path, CliConfig& con
     } else if (config_path == "config.yaml") {
         std::cout << "Configuration file 'config.yaml' not found. Creating a default one." << std::endl;
         config.plugin_dirs = {"build/plugins"};
+        config.cache_precision = "int8";
         config.editor_save_behavior = "ask";
         config.default_print_mode = "detailed";
         config.default_traversal_arg = "n";
@@ -705,6 +714,23 @@ void run_config_editor(CliConfig& config) {
 //      AdvancedNodeEditor editor(screen, node_id, graph, config);
 //      editor.Run();
 // }
+// Helper to save a fp32 (0-1 range) matrix to a file with appropriate conversion
+static bool save_fp32_image(const cv::Mat& mat, const std::string& path, const CliConfig& config) {
+    if (mat.empty()) {
+        std::cout << "Error: Cannot save an empty image.\n";
+        return false;
+    }
+    cv::Mat out_mat;
+    // For saving, we'll default to 8-bit for max compatibility unless 16-bit is standard for the project.
+    // Let's use cache_precision to decide save depth as well for consistency.
+    if (config.cache_precision == "int16") {
+        mat.convertTo(out_mat, CV_16U, 65535.0);
+    } else { // "int8"
+        mat.convertTo(out_mat, CV_8U, 255.0);
+    }
+    return cv::imwrite(path, out_mat);
+}
+
 
 static bool process_command(const std::string& line, NodeGraph& graph, bool& modified, CliConfig& config, const std::map<std::string, std::string>& op_sources) {
     std::istringstream iss(line);
@@ -865,8 +891,8 @@ static bool process_command(const std::string& line, NodeGraph& graph, bool& mod
                 }
             }
 
-            if (do_check_remove) graph.synchronize_disk_cache();
-            else if (do_check) graph.cache_all_nodes();
+            if (do_check_remove) graph.synchronize_disk_cache(config.cache_precision);
+            else if (do_check) graph.cache_all_nodes(config.cache_precision);
 
             if (print_tree_mode == "detailed") {
                 graph.print_dependency_tree(std::cout, true);
@@ -877,6 +903,8 @@ static bool process_command(const std::string& line, NodeGraph& graph, bool& mod
             do_traversal(graph, show_mem, show_disk);
         } else if (cmd == "config") {
             run_config_editor(config);
+            // After returning, re-initialize graph with potentially new cache dir
+            graph.cache_root = config.cache_root_dir;
         } 
         else if (cmd == "read") {
             std::string path; iss >> path; if (path.empty()) std::cout << "Usage: read <filepath>\n";
@@ -974,11 +1002,11 @@ static bool process_command(const std::string& line, NodeGraph& graph, bool& mod
             // Execute computation
             if (target_id_str == "all") {
                 for (int id : graph.ending_nodes()) {
-                    print_output(id, graph.compute(id, force, enable_timing));
+                    print_output(id, graph.compute(id, config.cache_precision, force, enable_timing));
                 }
             } else {
                 int id = std::stoi(target_id_str);
-                print_output(id, graph.compute(id, force, enable_timing));
+                print_output(id, graph.compute(id, config.cache_precision, force, enable_timing));
             }
 
             // --- Post-computation actions based on flags ---
@@ -1031,10 +1059,12 @@ static bool process_command(const std::string& line, NodeGraph& graph, bool& mod
             if (id_str.empty() || path.empty()) { std::cout << "Usage: save <node_id> <filepath>\n"; }
             else {
                 int id = std::stoi(id_str);
-                const auto& result = graph.compute(id);
-                if (result.image_matrix.empty()) { std::cout << "Error: Computed node " << id << " has no image output to save.\n"; }
-                else if (cv::imwrite(path, result.image_matrix)) { std::cout << "Successfully saved node " << id << " image to " << path << "\n"; }
-                else { std::cout << "Error: Failed to save image to " << path << "\n"; }
+                const auto& result = graph.compute(id, config.cache_precision);
+                if (save_fp32_image(result.image_matrix, path, config)) {
+                    std::cout << "Successfully saved node " << id << " image to " << path << "\n";
+                } else {
+                    std::cout << "Error: Failed to save image to " << path << "\n";
+                }
             }
         } else if (cmd == "free") {
             graph.free_transient_memory();
@@ -1044,7 +1074,7 @@ static bool process_command(const std::string& line, NodeGraph& graph, bool& mod
                 graph.save_yaml(path); std::cout << "Saved to " << path << "\n";
             }
             if (ask_yesno("Synchronize disk cache with memory state before exiting?", config.exit_prompt_sync)) {
-                graph.synchronize_disk_cache();
+                graph.synchronize_disk_cache(config.cache_precision);
             }
             return false;
         } else {

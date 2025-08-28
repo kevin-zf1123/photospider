@@ -84,8 +84,18 @@ static NodeOutput op_image_source_path(const Node& node, const std::vector<cv::M
         if (w > 0 && h > 0) cv::resize(img, img, cv::Size(w, h));
     }
     
+    cv::Mat float_img;
+    if (img.depth() == CV_32F) {
+        float_img = img;
+    } else {
+        double scale = 1.0;
+        if (img.depth() == CV_8U) scale = 1.0 / 255.0;
+        else if (img.depth() == CV_16U) scale = 1.0 / 65535.0;
+        img.convertTo(float_img, CV_32F, scale);
+    }
+
     NodeOutput result;
-    result.image_matrix = img;
+    result.image_matrix = float_img;
     return result;
 }
 
@@ -224,7 +234,7 @@ static NodeOutput op_add_weighted(const Node& node, const std::vector<cv::Mat>& 
 
         // Logic split for crop vs resize
         if (strategy == "crop") {
-            out_mat = cv::Mat::zeros(a_prep.size(), CV_MAKETYPE(a_prep.depth(), out_channels));
+            out_mat = cv::Mat::zeros(a_prep.size(), CV_MAKETYPE(CV_32F, out_channels));
             cv::Rect roi_a(0, 0, a_prep.cols, a_prep.rows);
             cv::Rect roi_b(0, 0, b_prep.cols, b_prep.rows);
             cv::Rect intersection = roi_a & roi_b;
@@ -232,7 +242,7 @@ static NodeOutput op_add_weighted(const Node& node, const std::vector<cv::Mat>& 
             if (intersection.width > 0 && intersection.height > 0) {
                 std::vector<cv::Mat> intersection_channels;
                 for (int i = 0; i < out_channels; ++i) {
-                    intersection_channels.push_back(cv::Mat::zeros(intersection.size(), a_prep.depth()));
+                    intersection_channels.push_back(cv::Mat::zeros(intersection.size(), CV_32F));
                 }
 
                 auto process_input_roi = [&](const std::vector<cv::Mat>& src_ch, const std::unordered_map<int, std::vector<int>>& mapping, double weight) {
@@ -269,8 +279,8 @@ static NodeOutput op_add_weighted(const Node& node, const std::vector<cv::Mat>& 
                     if (is_alpha_targeted(map_param["input0"]) || is_alpha_targeted(map_param["input1"])) alpha_mapped = true;
                 }
                 if (out_channels == 4 && !alpha_mapped) {
-                    cv::Mat alpha1 = (a_prep.channels() == 4) ? a_ch[3](intersection) : cv::Mat(intersection.size(), a_prep.depth(), cv::Scalar(255));
-                    cv::Mat alpha2 = (b_prep.channels() == 4) ? b_ch[3](intersection) : cv::Mat(intersection.size(), b_prep.depth(), cv::Scalar(255));
+                    cv::Mat alpha1 = (a_prep.channels() == 4) ? a_ch[3](intersection) : cv::Mat(intersection.size(), CV_32F, cv::Scalar(1.0));
+                    cv::Mat alpha2 = (b_prep.channels() == 4) ? b_ch[3](intersection) : cv::Mat(intersection.size(), CV_32F, cv::Scalar(1.0));
                     cv::max(alpha1, alpha2, intersection_channels[3]);
                 }
 
@@ -282,7 +292,7 @@ static NodeOutput op_add_weighted(const Node& node, const std::vector<cv::Mat>& 
         } else { // "resize" strategy
             if (a_prep.size() != b_prep.size()) cv::resize(b_prep, b_prep, a_prep.size());
             std::vector<cv::Mat> final_channels;
-            for (int i = 0; i < out_channels; ++i) final_channels.push_back(cv::Mat::zeros(a_prep.size(), a_prep.depth()));
+            for (int i = 0; i < out_channels; ++i) final_channels.push_back(cv::Mat::zeros(a_prep.size(), CV_32F));
 
             auto process_input = [&](const std::vector<cv::Mat>& src_ch, const std::unordered_map<int, std::vector<int>>& mapping, double weight) {
                 for(const auto& pair : mapping) {
@@ -315,8 +325,8 @@ static NodeOutput op_add_weighted(const Node& node, const std::vector<cv::Mat>& 
                 if (is_alpha_targeted(map_param["input0"]) || is_alpha_targeted(map_param["input1"])) alpha_mapped = true;
             }
             if (out_channels == 4 && !alpha_mapped) {
-                cv::Mat alpha1 = (a_prep.channels() == 4) ? a_ch[3] : cv::Mat(a_prep.size(), a_prep.depth(), cv::Scalar(255));
-                cv::Mat alpha2 = (b_prep.channels() == 4) ? b_ch[3] : cv::Mat(b_prep.size(), b_prep.depth(), cv::Scalar(255));
+                cv::Mat alpha1 = (a_prep.channels() == 4) ? a_ch[3] : cv::Mat(a_prep.size(), CV_32F, cv::Scalar(1.0));
+                cv::Mat alpha2 = (b_prep.channels() == 4) ? b_ch[3] : cv::Mat(b_prep.size(), CV_32F, cv::Scalar(1.0));
                 cv::max(alpha1, alpha2, final_channels[3]);
             }
             cv::merge(final_channels, out_mat);
@@ -540,12 +550,12 @@ static NodeOutput op_perlin_noise(const Node& node, const std::vector<cv::Mat>&)
     };
     // --- End of Implementation ---
 
-    cv::Mat noise_image(height, width, CV_8UC1);
+    cv::Mat noise_image(height, width, CV_32FC1);
     for (int i = 0; i < height; ++i) {
         for (int j = 0; j < width; ++j) {
             double nx = static_cast<double>(j) / width * scale;
             double ny = static_cast<double>(i) / height * scale;
-            noise_image.at<uchar>(i, j) = static_cast<uchar>(noise(nx, ny) * 255);
+            noise_image.at<float>(i, j) = static_cast<float>(noise(nx, ny));
         }
     }
     
@@ -569,9 +579,7 @@ static NodeOutput op_convolve(const Node& node, const std::vector<cv::Mat>& inpu
     if (kernel_img.channels() != 1) {
         throw GraphError("The kernel for convolve must be a single-channel image.");
     }
-    cv::Mat kernel_float;
-    kernel_img.convertTo(kernel_float, CV_32F);
-
+    
     const auto& P = node.runtime_parameters;
     std::string padding_mode = as_str(P, "padding", "replicate");
     bool take_absolute = as_int_flexible(P, "absolute", 1) != 0;
@@ -597,44 +605,32 @@ static NodeOutput op_convolve(const Node& node, const std::vector<cv::Mat>& inpu
 
     if (h_and_v) {
         // --- Gradient Magnitude Path ---
-        // 1. Calculate Gx (horizontal gradient)
         cv::Mat gx;
-        cv::filter2D(src, gx, CV_32F, kernel_float, cv::Point(-1,-1), 0, border_type);
+        cv::filter2D(src, gx, CV_32F, kernel_img, cv::Point(-1,-1), 0, border_type);
 
-        // 2. Create the vertical kernel by transposing the horizontal one
         cv::Mat kernel_vertical;
-        cv::transpose(kernel_float, kernel_vertical);
+        cv::transpose(kernel_img, kernel_vertical);
 
-        // 3. Calculate Gy (vertical gradient)
         cv::Mat gy;
         cv::filter2D(src, gy, CV_32F, kernel_vertical, cv::Point(-1,-1), 0, border_type);
 
-        // 4. Calculate the magnitude: sqrt(Gx^2 + Gy^2)
         cv::magnitude(gx, gy, out_mat_float);
 
     } else {
         // --- Single Convolution Path ---
-        // Convolve into a floating-point matrix to preserve potential negative values.
-        cv::filter2D(src, out_mat_float, CV_32F, kernel_float, cv::Point(-1,-1), 0, border_type);
-
-        // Take the absolute value of the result if the parameter is true.
+        cv::filter2D(src, out_mat_float, CV_32F, kernel_img, cv::Point(-1,-1), 0, border_type);
         if (take_absolute) {
             out_mat_float = cv::abs(out_mat_float);
         }
     }
     
-    // Convert the final floating-point result back to the standard 8-bit integer format for output.
-    cv::Mat out_mat;
-    // Note: convertTo automatically handles clipping values outside the [0, 255] range.
-    out_mat_float.convertTo(out_mat, CV_8U);
-
     NodeOutput result;
-    result.image_matrix = out_mat;
+    result.image_matrix = out_mat_float;
     return result;
 }
 /**
  * @brief (image_process:curve_transform) Applies a custom curve to each pixel.
- * Formula: y = 255 / (1 + k * (x/255))
+ * Formula: y = 1.0 / (1.0 + k * x)
  */
 static NodeOutput op_curve_transform(const Node& node, const std::vector<cv::Mat>& inputs) {
     if (inputs.empty() || inputs[0].empty()) {
@@ -644,17 +640,11 @@ static NodeOutput op_curve_transform(const Node& node, const std::vector<cv::Mat
     const auto& P = node.runtime_parameters;
     double k = as_double_flexible(P, "k", 1.0);
 
-    // Create a Look-Up Table (LUT)
-    cv::Mat lut(1, 256, CV_8U);
-    uchar* p = lut.ptr();
-    for(int i = 0; i < 256; ++i) {
-        double x_norm = static_cast<double>(i) / 255.0;
-        double y_norm = 1.0 / (1.0 + k * x_norm);
-        p[i] = cv::saturate_cast<uchar>(y_norm * 255.0);
-    }
+    cv::Mat temp;
+    cv::add(1.0, inputs[0] * k, temp);
 
     cv::Mat out_mat;
-    cv::LUT(inputs[0], lut, out_mat);
+    cv::divide(1.0, temp, out_mat);
     
     NodeOutput result;
     result.image_matrix = out_mat;
@@ -667,25 +657,23 @@ static NodeOutput op_constant_image(const Node& node, const std::vector<cv::Mat>
     const auto& P = node.runtime_parameters;
     int width = as_int_flexible(P, "width", 0);
     int height = as_int_flexible(P, "height", 0);
-    int value = as_int_flexible(P, "value", 0);
+    int value_int = as_int_flexible(P, "value", 0);
     int channels = as_int_flexible(P, "channels", 1);
 
     if (width <= 0 || height <= 0) {
         throw GraphError("image_generator:constant requires positive 'width' and 'height'.");
     }
-    if (value < 0 || value > 255) {
+    if (value_int < 0 || value_int > 255) {
         throw GraphError("image_generator:constant 'value' must be between 0 and 255.");
     }
     if (channels != 1 && channels != 3 && channels != 4) {
         throw GraphError("image_generator:constant 'channels' must be 1, 3, or 4.");
     }
+    
+    float value_float = static_cast<float>(value_int) / 255.0f;
+    cv::Scalar fill_value(value_float, value_float, value_float, value_float);
 
-    // Create a scalar where all elements are the same specified value.
-    // This works for both single-channel and multi-channel images.
-    cv::Scalar fill_value(value, value, value, value);
-
-    // Create the matrix with the specified dimensions, type, and fill value.
-    cv::Mat out_mat(height, width, CV_MAKETYPE(CV_8U, channels), fill_value);
+    cv::Mat out_mat(height, width, CV_MAKETYPE(CV_32F, channels), fill_value);
     
     NodeOutput result;
     result.image_matrix = out_mat;
@@ -693,7 +681,7 @@ static NodeOutput op_constant_image(const Node& node, const std::vector<cv::Mat>
 }
 /**
  * @brief (image_mixing:multiply) Multiplies two images element-wise, a common blend mode.
- * The formula is: output = scale * (image1 / 255.0) * (image2 / 255.0) * 255.0
+ * The formula is: output = scale * image1 * image2
  */
 static NodeOutput op_multiply(const Node& node, const std::vector<cv::Mat>& inputs) {
     if (inputs.size() < 2 || inputs[0].empty() || inputs[1].empty()) {
@@ -706,39 +694,25 @@ static NodeOutput op_multiply(const Node& node, const std::vector<cv::Mat>& inpu
 
     cv::Mat a_prep = inputs[0].clone();
     cv::Mat b_prep = inputs[1].clone();
-
-    // Ensure images have the same number of channels for predictable blending.
     normalize_channels_for_mixing(a_prep, b_prep);
-
-    // Convert images to floating-point and normalize to the [0, 1] range.
-    // This is crucial for multiplication to work as expected without data loss from clipping.
-    cv::Mat a_float, b_float;
-    a_prep.convertTo(a_float, CV_32F, 1.0 / 255.0);
-    b_prep.convertTo(b_float, CV_32F, 1.0 / 255.0);
-
     cv::Mat out_mat_float;
 
-    // Handle different image sizes based on the chosen strategy.
     if (strategy == "crop") {
-        out_mat_float = cv::Mat::zeros(a_float.size(), a_float.type());
-        cv::Rect roi(0, 0, std::min(a_float.cols, b_float.cols), std::min(a_float.rows, b_float.rows));
+        out_mat_float = cv::Mat::zeros(a_prep.size(), a_prep.type());
+        cv::Rect roi(0, 0, std::min(a_prep.cols, b_prep.cols), std::min(a_prep.rows, b_prep.rows));
         
         cv::Mat result_roi;
-        cv::multiply(a_float(roi), b_float(roi), result_roi, scale);
+        cv::multiply(a_prep(roi), b_prep(roi), result_roi, scale);
         result_roi.copyTo(out_mat_float(roi));
     } else { // "resize" is the default strategy
-        if (a_float.size() != b_float.size()) {
-            cv::resize(b_float, b_float, a_float.size());
+        if (a_prep.size() != b_prep.size()) {
+            cv::resize(b_prep, b_prep, a_prep.size());
         }
-        cv::multiply(a_float, b_float, out_mat_float, scale);
+        cv::multiply(a_prep, b_prep, out_mat_float, scale);
     }
 
-    // Convert the result back to the standard 8-bit integer format [0, 255].
-    cv::Mat out_mat;
-    out_mat_float.convertTo(out_mat, CV_8U, 255.0);
-
     NodeOutput result;
-    result.image_matrix = out_mat;
+    result.image_matrix = out_mat_float;
     return result;
 }
 /**
