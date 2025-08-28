@@ -74,11 +74,25 @@ const NodeOutput& NodeGraph::compute(int node_id, const std::string& cache_preci
     if (!has_node(node_id)) {
         throw GraphError("Cannot compute: node " + std::to_string(node_id) + " not found.");
     }
+    if (force_recache) {
+        try {
+            auto deps = topo_postorder_from(node_id);
+            for (int id : deps) {
+                if (nodes.count(id)) {
+                    nodes.at(id).cached_output.reset();
+                }
+            }
+        } catch (const GraphError&) {
+            // It's possible for a cycle to exist, ignore it for cache clearing.
+        }
+    }
+
     std::unordered_map<int, bool> visiting;
-    return compute_internal(node_id, cache_precision, visiting, force_recache, enable_timing);
+    // Call the internal function WITHOUT the force_recache flag.
+    return compute_internal(node_id, cache_precision, visiting, enable_timing);
 }
 
-const NodeOutput& NodeGraph::compute_internal(int node_id, const std::string& cache_precision, std::unordered_map<int, bool>& visiting, bool force_recache, bool enable_timing) {
+const NodeOutput& NodeGraph::compute_internal(int node_id, const std::string& cache_precision, std::unordered_map<int, bool>& visiting, bool enable_timing){
     auto& node = nodes.at(node_id);
     std::string result_source = "unknown";
     
@@ -89,14 +103,14 @@ const NodeOutput& NodeGraph::compute_internal(int node_id, const std::string& ca
     // alternative to `goto` for jumping to the common logging logic at the end.
     do {
         // 1. Check for in-memory cache
-        if (!force_recache && node.cached_output.has_value()) {
+        if (node.cached_output.has_value()) {
             result_source = "memory_cache";
             break; // Result is ready, break to the end for logging.
         }
 
         // 2. Check for on-disk cache
         fs::path metadata_file;
-        if (!force_recache && !cache_root.empty() && !node.caches.empty()) {
+        if (!cache_root.empty() && !node.caches.empty()) {
             for (const auto& cache_entry : node.caches) {
                 if (cache_entry.cache_type == "image" && !cache_entry.location.empty()) {
                     fs::path cache_file = node_cache_dir(node_id) / cache_entry.location;
@@ -145,7 +159,7 @@ const NodeOutput& NodeGraph::compute_internal(int node_id, const std::string& ca
             if (!has_node(p_input.from_node_id)) {
                 throw GraphError("Node " + std::to_string(node.id) + " has missing parameter dependency: " + std::to_string(p_input.from_node_id));
             }
-            const auto& upstream_output = compute_internal(p_input.from_node_id, cache_precision, visiting, force_recache, enable_timing);
+            const auto& upstream_output = compute_internal(p_input.from_node_id, cache_precision, visiting, enable_timing);
             auto it = upstream_output.data.find(p_input.from_output_name);
             if (it == upstream_output.data.end()) {
                 throw GraphError("Node " + std::to_string(p_input.from_node_id) + " did not produce required output '" + p_input.from_output_name + "' for node " + std::to_string(node_id));
@@ -160,7 +174,7 @@ const NodeOutput& NodeGraph::compute_internal(int node_id, const std::string& ca
             if (!has_node(i_input.from_node_id)) {
                 throw GraphError("Node " + std::to_string(node.id) + " has missing image dependency: " + std::to_string(i_input.from_node_id));
             }
-            const auto& upstream_output = compute_internal(i_input.from_node_id, cache_precision, visiting, force_recache, enable_timing);
+            const auto& upstream_output = compute_internal(i_input.from_node_id, cache_precision, visiting, enable_timing);
             if (upstream_output.image_matrix.empty()){
                 std::cerr << "Warning: Input image from node " << i_input.from_node_id << " is empty for node " << node.id << std::endl;
             }

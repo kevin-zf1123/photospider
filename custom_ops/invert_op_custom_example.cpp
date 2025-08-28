@@ -1,49 +1,25 @@
-// Include the plugin API and any other necessary headers from the core project.
-#include "../include/plugin_api.hpp"
-#include <opencv2/imgproc.hpp>
+// FILE: custom_ops/invert_op_custom_example.cpp (FIXED)
 
-// Use the same namespace for consistency, though not strictly required.
-namespace ps { namespace ops {
+#include "plugin_api.hpp"
+#include <opencv2/core.hpp>
 
-/**
- * @brief (image_process:invert) Inverts the colors of an image.
- * This is a custom operation defined in a separate shared library.
- */
-static NodeOutput op_invert_colors(const Node&, const std::vector<cv::Mat>& inputs) {
+using namespace ps;
+
+static NodeOutput invert_op(const Node&, const std::vector<cv::Mat>& inputs) {
     if (inputs.empty() || inputs[0].empty()) {
-        throw GraphError("invert_colors requires one valid input image");
+        throw GraphError("Invert operation requires one input image.");
     }
 
-    cv::Mat source_image = inputs[0];
-    cv::Mat inverted_image;
-
-    // Invert needs a 3-channel BGR image, not BGRA.
-    if (source_image.channels() == 4) {
-        cv::cvtColor(source_image, source_image, cv::COLOR_BGRA2BGR);
-    }
-    
-    // The bitwise_not operator is a simple and fast way to invert colors.
-    cv::bitwise_not(source_image, inverted_image);
+    cv::UMat u_input = inputs[0].getUMat(cv::ACCESS_READ);
+    cv::UMat u_output;
+    cv::subtract(cv::Scalar::all(1.0), u_input, u_output);
 
     NodeOutput result;
-    result.image_matrix = inverted_image;
+    // MODIFIED: 添加 .clone() 进行深拷贝
+    result.image_matrix = u_output.getMat(cv::ACCESS_READ).clone();
     return result;
 }
 
-
-}} // namespace ps::ops
-
-
-/**
- * @brief The required registration function that the main application will call.
- */
 extern "C" PLUGIN_API void register_photospider_ops() {
-    // Get the singleton instance of the registry
-    auto& registry = ps::OpRegistry::instance();
-
-    // Register our custom operation(s)
-    registry.register_op("image_process", "invert", ps::ops::op_invert_colors);
-    
-    // You could register more ops from this plugin here
-    // registry.register_op("my_type", "my_subtype", my_other_op_func);
+    OpRegistry::instance().register_op("image_process", "invert_example", invert_op);
 }

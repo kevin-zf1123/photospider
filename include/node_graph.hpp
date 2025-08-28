@@ -49,7 +49,7 @@ public:
     std::vector<int> get_trees_containing_node(int node_id) const;
 
 private:
-    const NodeOutput& compute_internal(int node_id, const std::string& cache_precision, std::unordered_map<int, bool>& visiting, bool force_recache, bool enable_timing);
+    const NodeOutput& compute_internal(int node_id, const std::string& cache_precision, std::unordered_map<int, bool>& visiting, bool enable_timing);
     bool is_ancestor(int potential_ancestor_id, int node_id, std::unordered_set<int>& visited) const; 
     std::vector<int> parents_of(int node_id) const;
 
