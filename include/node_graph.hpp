@@ -40,7 +40,7 @@ public:
     void synchronize_disk_cache(const std::string& cache_precision);
     fs::path node_cache_dir(int node_id) const;
 
-    const NodeOutput& compute(int node_id, const std::string& cache_precision, bool force_recache = false, bool enable_timing = false);    
+    NodeOutput& compute(int node_id, const std::string& cache_precision, bool force_recache = false, bool enable_timing = false);    
     void clear_timing_results();
     std::vector<int> ending_nodes() const;
     void print_dependency_tree(std::ostream& os, bool show_parameters = true) const;
@@ -49,7 +49,7 @@ public:
     std::vector<int> get_trees_containing_node(int node_id) const;
 
 private:
-    const NodeOutput& compute_internal(int node_id, const std::string& cache_precision, std::unordered_map<int, bool>& visiting, bool enable_timing);
+    NodeOutput& compute_internal(int node_id, const std::string& cache_precision, std::unordered_map<int, bool>& visiting, bool enable_timing);
     bool is_ancestor(int potential_ancestor_id, int node_id, std::unordered_set<int>& visited) const; 
     std::vector<int> parents_of(int node_id) const;
 

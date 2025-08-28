@@ -549,7 +549,6 @@ static void print_repl_help() {
               << "  exit                       Quit the shell.\n";
 }
 
-// ... (ask, ask_yesno, do_traversal, print_config, save_config_interactive are unchanged) ...
 static std::string ask(const std::string& q, const std::string& def) {
     std::cout << q; if (!def.empty()) std::cout << " [" << def << "]";
     std::cout << ": "; std::string s; std::getline(std::cin, s);
@@ -564,7 +563,6 @@ static bool ask_yesno(const std::string& q, bool def) {
         std::cout << "Please answer Y or n.\n";
     }
 }
-// --- Helper function for interactive saving logic ---
 void handle_interactive_save(CliConfig& config) {
     if (config.editor_save_behavior == "ask") {
         if (ask_yesno("Save configuration changes?", true)) {
@@ -582,7 +580,6 @@ void handle_interactive_save(CliConfig& config) {
             write_config_to_file(config, config.loaded_config_path);
          }
     }
-    // "manual" does nothing, user must use the old 'config' command to save.
 }
 static void do_traversal(const NodeGraph& graph, bool show_mem, bool show_disk) {
     auto ends = graph.ending_nodes();
@@ -709,20 +706,12 @@ void run_config_editor(CliConfig& config) {
     }
     // If config.config_save_behavior is "none", do nothing.
 }
-// void run_node_editor(int node_id, NodeGraph& graph, CliConfig& config) {
-//      auto screen = ScreenInteractive::Fullscreen();
-//      AdvancedNodeEditor editor(screen, node_id, graph, config);
-//      editor.Run();
-// }
-// Helper to save a fp32 (0-1 range) matrix to a file with appropriate conversion
 static bool save_fp32_image(const cv::Mat& mat, const std::string& path, const CliConfig& config) {
     if (mat.empty()) {
         std::cout << "Error: Cannot save an empty image.\n";
         return false;
     }
     cv::Mat out_mat;
-    // For saving, we'll default to 8-bit for max compatibility unless 16-bit is standard for the project.
-    // Let's use cache_precision to decide save depth as well for consistency.
     if (config.cache_precision == "int16") {
         mat.convertTo(out_mat, CV_16U, 65535.0);
     } else { // "int8"
@@ -744,17 +733,15 @@ static bool process_command(const std::string& line, NodeGraph& graph, bool& mod
         } else if (cmd == "clear" || cmd == "cls") {
             std::cout << "\033[2J\033[1;1H";
         } else if (cmd == "print") {
-            // --- NEW: Robust argument parsing for 'print' ---
             std::string target_str = "all";
             std::string mode_str = config.default_print_mode;
             bool target_is_set = false;
 
             std::string arg;
             while(iss >> arg) {
-                // Check if the argument is a mode flag
                 if (arg == "d" || arg == "detailed" || arg == "s" || arg == "simplified") {
                     mode_str = arg;
-                } else { // Otherwise, assume it's a target
+                } else { 
                     if (target_is_set) {
                          std::cout << "Warning: Multiple targets specified for print; using last one ('" << arg << "').\n";
                     }
@@ -776,19 +763,11 @@ static bool process_command(const std::string& line, NodeGraph& graph, bool& mod
                 }
             }
         } else if (cmd == "node") {
-            // Accept: "node" or "node <id>"
             std::optional<int> maybe_id;
-
-            // If your parser gives you the raw line (e.g. `line`), reuse it:
-            // Example assumes you already split out `cmd` but still have the full `line`.
-            // If you don't have `line`, you can read from std::cin tokens in your own style.
-            std::istringstream iss(line);
-            std::string word;            // will read the "node"
-            iss >> word;
-            if (iss >> word) {           // optional <id>
+            std::string word;
+            if (iss >> word) {
                 try { maybe_id = std::stoi(word); } catch (...) { maybe_id.reset(); }
             }
-
             ps::run_node_editor(graph, maybe_id);
         }  else if (cmd == "ops") {
             std::string mode_arg;
@@ -903,7 +882,6 @@ static bool process_command(const std::string& line, NodeGraph& graph, bool& mod
             do_traversal(graph, show_mem, show_disk);
         } else if (cmd == "config") {
             run_config_editor(config);
-            // After returning, re-initialize graph with potentially new cache dir
             graph.cache_root = config.cache_root_dir;
         } 
         else if (cmd == "read") {
@@ -945,10 +923,9 @@ static bool process_command(const std::string& line, NodeGraph& graph, bool& mod
                 return true;
             }
 
-            // Parse all flags and arguments
             bool force = false;
-            bool timer_console = false; // 't' flag
-            bool timer_log_file = false;  // 'tl' flag
+            bool timer_console = false;
+            bool timer_log_file = false;
             std::string timer_log_path = "";
 
             std::string arg;
@@ -959,14 +936,12 @@ static bool process_command(const std::string& line, NodeGraph& graph, bool& mod
                     timer_console = true;
                 } else if (arg == "tl") {
                     timer_log_file = true;
-                    // Peek at the next argument. If it's not a flag, assume it's the path.
                     if (iss.peek() != EOF && iss.peek() != ' ') {
                         std::string next_arg;
                         iss >> next_arg;
                         if (next_arg != "force" && next_arg != "t" && next_arg != "timer") {
                             timer_log_path = next_arg;
                         } else {
-                            // It was a flag, so put it back in the stream
                             iss.seekg(-(next_arg.length()), std::ios_base::cur);
                         }
                     }
@@ -978,7 +953,6 @@ static bool process_command(const std::string& line, NodeGraph& graph, bool& mod
                 graph.clear_timing_results();
             }
             
-            // Start total timer if logging to file
             std::chrono::time_point<std::chrono::high_resolution_clock> total_start;
             if (timer_log_file) {
                 total_start = std::chrono::high_resolution_clock::now();
@@ -986,7 +960,12 @@ static bool process_command(const std::string& line, NodeGraph& graph, bool& mod
 
             auto print_output = [](int id, const NodeOutput& out) {
                 std::cout << "-> Node " << id << " computed.\n";
-                if (!out.image_matrix.empty()) { std::cout << "   Image Output: " << out.image_matrix.cols << "x" << out.image_matrix.rows << " (" << out.image_matrix.channels() << " ch)\n"; }
+                if (!out.image_matrix.empty() || !out.image_umatrix.empty()) {
+                    int cols = out.image_umatrix.empty() ? out.image_matrix.cols : out.image_umatrix.cols;
+                    int rows = out.image_umatrix.empty() ? out.image_matrix.rows : out.image_umatrix.rows;
+                    int channels = out.image_umatrix.empty() ? out.image_matrix.channels() : out.image_umatrix.channels();
+                    std::cout << "   Image Output: " << cols << "x" << rows << " (" << channels << " ch)\n";
+                }
                 if (!out.data.empty()) { 
                     std::cout << "   Data Outputs:\n";
                     YAML::Emitter yml;
@@ -996,10 +975,9 @@ static bool process_command(const std::string& line, NodeGraph& graph, bool& mod
                     }
                     yml << YAML::EndMap;
                     std::cout << "     " << yml.c_str() << "\n"; 
-                    }
+                }
             };
 
-            // Execute computation
             if (target_id_str == "all") {
                 for (int id : graph.ending_nodes()) {
                     print_output(id, graph.compute(id, config.cache_precision, force, enable_timing));
@@ -1009,9 +987,6 @@ static bool process_command(const std::string& line, NodeGraph& graph, bool& mod
                 print_output(id, graph.compute(id, config.cache_precision, force, enable_timing));
             }
 
-            // --- Post-computation actions based on flags ---
-
-            // 1. Print simple summary to console if 't' was used
             if (timer_console) {
                 std::cout << "--- Computation Timers (Console) ---\n";
                 for (const auto& timing : graph.timing_results.node_timings) {
@@ -1020,7 +995,6 @@ static bool process_command(const std::string& line, NodeGraph& graph, bool& mod
                 }
             }
             
-            // 2. Write detailed log to file if 'tl' was used
             if (timer_log_file) {
                 auto total_end = std::chrono::high_resolution_clock::now();
                 std::chrono::duration<double, std::milli> total_elapsed = total_end - total_start;
@@ -1059,7 +1033,12 @@ static bool process_command(const std::string& line, NodeGraph& graph, bool& mod
             if (id_str.empty() || path.empty()) { std::cout << "Usage: save <node_id> <filepath>\n"; }
             else {
                 int id = std::stoi(id_str);
-                const auto& result = graph.compute(id, config.cache_precision);
+                NodeOutput& result = graph.compute(id, config.cache_precision);
+                
+                if (result.image_matrix.empty() && !result.image_umatrix.empty()) {
+                    result.image_matrix = result.image_umatrix.getMat(cv::ACCESS_READ).clone();
+                }
+
                 if (save_fp32_image(result.image_matrix, path, config)) {
                     std::cout << "Successfully saved node " << id << " image to " << path << "\n";
                 } else {
@@ -1086,7 +1065,6 @@ static bool process_command(const std::string& line, NodeGraph& graph, bool& mod
     return true;
 }
 
-// ... (run_repl, load_plugins, main are unchanged)
 static void run_repl(NodeGraph& graph, CliConfig& config, const std::map<std::string, std::string>& op_sources) {
     bool modified = false;
     std::string line;

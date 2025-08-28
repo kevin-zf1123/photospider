@@ -59,6 +59,7 @@ struct CacheEntry {
 // as well as any number of named data outputs.
 struct NodeOutput {
     cv::Mat image_matrix; // The primary image output
+    cv::UMat image_umatrix; // NEW: The primary image output on the GPU
     std::unordered_map<std::string, OutputValue> data; // Other named data outputs
 };
 
@@ -69,9 +70,9 @@ struct GraphError : public std::runtime_error {
 class Node;
 class NodeGraph;
 
-// --- MODIFIED: The OpFunc signature now returns the comprehensive NodeOutput struct ---
-// It still receives the full node to access runtime_parameters and a vector of input images.
-using OpFunc = std::function<NodeOutput(const Node&, const std::vector<cv::Mat>&)>;
+// --- MODIFIED: The OpFunc signature now receives a vector of const NodeOutput pointers ---
+// This allows access to upstream UMat objects without copying the whole struct.
+using OpFunc = std::function<NodeOutput(const Node&, const std::vector<const NodeOutput*>&)>;
 
 class OpRegistry {
 public:

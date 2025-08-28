@@ -70,7 +70,7 @@ void NodeGraph::save_yaml(const fs::path& yaml_path) const {
     fout << n;
 }
 
-const NodeOutput& NodeGraph::compute(int node_id, const std::string& cache_precision, bool force_recache, bool enable_timing) {
+NodeOutput& NodeGraph::compute(int node_id, const std::string& cache_precision, bool force_recache, bool enable_timing) {
     if (!has_node(node_id)) {
         throw GraphError("Cannot compute: node " + std::to_string(node_id) + " not found.");
     }
@@ -92,7 +92,7 @@ const NodeOutput& NodeGraph::compute(int node_id, const std::string& cache_preci
     return compute_internal(node_id, cache_precision, visiting, enable_timing);
 }
 
-const NodeOutput& NodeGraph::compute_internal(int node_id, const std::string& cache_precision, std::unordered_map<int, bool>& visiting, bool enable_timing){
+NodeOutput& NodeGraph::compute_internal(int node_id, const std::string& cache_precision, std::unordered_map<int, bool>& visiting, bool enable_timing){
     auto& node = nodes.at(node_id);
     std::string result_source = "unknown";
     
@@ -127,6 +127,7 @@ const NodeOutput& NodeGraph::compute_internal(int node_id, const std::string& ca
                                 if (loaded_mat.depth() == CV_8U) scale = 1.0 / 255.0;
                                 else if (loaded_mat.depth() == CV_16U) scale = 1.0 / 65535.0;
                                 loaded_mat.convertTo(loaded_output.image_matrix, CV_32F, scale);
+                                loaded_output.image_umatrix = loaded_output.image_matrix.getUMat(cv::ACCESS_READ);
                             }
                          }
                          if (fs::exists(metadata_file)) {
@@ -168,17 +169,17 @@ const NodeOutput& NodeGraph::compute_internal(int node_id, const std::string& ca
             std::cout << "  - Injected param '" << p_input.to_parameter_name << "' from " << p_input.from_node_id << ":" << p_input.from_output_name << std::endl;
         }
 
-        std::vector<cv::Mat> input_images;
+        std::vector<const NodeOutput*> input_node_outputs;
         for (const auto& i_input : node.image_inputs) {
             if (i_input.from_node_id == -1) continue;
             if (!has_node(i_input.from_node_id)) {
                 throw GraphError("Node " + std::to_string(node.id) + " has missing image dependency: " + std::to_string(i_input.from_node_id));
             }
             const auto& upstream_output = compute_internal(i_input.from_node_id, cache_precision, visiting, enable_timing);
-            if (upstream_output.image_matrix.empty()){
+            if (upstream_output.image_matrix.empty() && upstream_output.image_umatrix.empty()){
                 std::cerr << "Warning: Input image from node " << i_input.from_node_id << " is empty for node " << node.id << std::endl;
             }
-            input_images.push_back(upstream_output.image_matrix);
+            input_node_outputs.push_back(&upstream_output);
         }
         
         // Find and execute the operation function
@@ -187,7 +188,7 @@ const NodeOutput& NodeGraph::compute_internal(int node_id, const std::string& ca
             throw GraphError("No operation registered for type=" + node.type + ", subtype=" + node.subtype);
         }
         
-        node.cached_output = (*op_func_opt)(node, input_images);
+        node.cached_output = (*op_func_opt)(node, input_node_outputs);
         result_source = "computed";
         save_cache_if_configured(node, cache_precision);
         visiting[node_id] = false;
@@ -348,12 +349,19 @@ void NodeGraph::save_cache_if_configured(const Node& node, const std::string& ca
             fs::create_directories(dir);
             fs::path final_path = dir / cache_entry.location;
 
-            if (!output.image_matrix.empty()) {
+            cv::Mat mat_to_save;
+            if (!output.image_umatrix.empty()) {
+                mat_to_save = output.image_umatrix.getMat(cv::ACCESS_READ);
+            } else if (!output.image_matrix.empty()) {
+                mat_to_save = output.image_matrix;
+            }
+
+            if (!mat_to_save.empty()) {
                 cv::Mat out_mat;
                 if (cache_precision == "int16") {
-                    output.image_matrix.convertTo(out_mat, CV_16U, 65535.0);
+                    mat_to_save.convertTo(out_mat, CV_16U, 65535.0);
                 } else { // "int8"
-                    output.image_matrix.convertTo(out_mat, CV_8U, 255.0);
+                    mat_to_save.convertTo(out_mat, CV_8U, 255.0);
                 }
                 std::cout << "Saving cache image for Node " << node.id << " to: " << fs::relative(final_path).string() << std::endl;
                 cv::imwrite(final_path.string(), out_mat);

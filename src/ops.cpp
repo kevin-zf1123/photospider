@@ -46,9 +46,7 @@ static void normalize_channels_for_mixing_umat(cv::UMat& img1, cv::UMat& img2) {
 
 // --- Operation Implementations ---
 
-// op_image_source_path: 无需修改。它作为数据源，后续节点会负责将数据转为 UMat。
-
-static NodeOutput op_image_source_path(const Node& node, const std::vector<cv::Mat>&) {
+static NodeOutput op_image_source_path(const Node& node, const std::vector<const NodeOutput*>&) {
     const auto& P = node.parameters;
     std::string path = as_str(P, "path");
     if (path.empty()) throw GraphError("image_source:path requires parameters.path");
@@ -74,15 +72,15 @@ static NodeOutput op_image_source_path(const Node& node, const std::vector<cv::M
 
     NodeOutput result;
     result.image_matrix = float_img;
+    result.image_umatrix = float_img.getUMat(cv::ACCESS_READ);
     return result;
 }
 
-static NodeOutput op_crop(const Node& node, const std::vector<cv::Mat>& inputs) {
-    if (inputs.empty() || inputs[0].empty()) {
+static NodeOutput op_crop(const Node& node, const std::vector<const NodeOutput*>& inputs) {
+    if (inputs.empty() || inputs[0]->image_umatrix.empty()) {
         throw GraphError("crop requires one valid input image");
     }
-    // MODIFIED: 将输入Mat上传到UMat
-    cv::UMat u_src_image = inputs[0].getUMat(cv::ACCESS_READ);
+    cv::UMat u_src_image = inputs[0]->image_umatrix;
     const auto& P = node.runtime_parameters;
 
     std::string mode = as_str(P, "mode", "value");
@@ -110,7 +108,6 @@ static NodeOutput op_crop(const Node& node, const std::vector<cv::Mat>& inputs) 
         }
     }
 
-    // MODIFIED: 使用 UMat 进行操作
     cv::UMat u_canvas = cv::UMat::zeros(final_height, final_width, u_src_image.type());
     cv::Rect source_rect(0, 0, u_src_image.cols, u_src_image.rows);
     cv::Rect crop_rect(final_x, final_y, final_width, final_height);
@@ -122,35 +119,33 @@ static NodeOutput op_crop(const Node& node, const std::vector<cv::Mat>& inputs) 
     }
 
     NodeOutput result;
-    // MODIFIED: 将结果UMat下载回Mat
-    result.image_matrix = u_canvas.getMat(cv::ACCESS_READ).clone();
+    result.image_umatrix = u_canvas;
     return result;
 }
 
-static NodeOutput op_gaussian_blur(const Node& node, const std::vector<cv::Mat>& inputs) {
-    if (inputs.empty() || inputs[0].empty()) throw GraphError("gaussian_blur requires one valid input image");
+static NodeOutput op_gaussian_blur(const Node& node, const std::vector<const NodeOutput*>& inputs) {
+    if (inputs.empty() || inputs[0]->image_umatrix.empty()) throw GraphError("gaussian_blur requires one valid input image");
     
-    // MODIFIED: 使用 UMat
-    cv::UMat u_input = inputs[0].getUMat(cv::ACCESS_READ);
+    cv::UMat u_input = inputs[0]->image_umatrix;
     cv::UMat u_output;
 
     const auto& P = node.runtime_parameters;
     int k = as_int_flexible(P, "ksize", 3);
-    if (k % 2 == 0) k += 1;
+    if (k > 0 && k % 2 == 0) k += 1;
+    if (k <=0) k = 1;
     double sigmaX = as_double_flexible(P, "sigmaX", 0.0);
 
     cv::GaussianBlur(u_input, u_output, cv::Size(k, k), sigmaX);
     
     NodeOutput result;
-    result.image_matrix = u_output.getMat(cv::ACCESS_READ).clone();
+    result.image_umatrix = u_output;
     return result;
 }
 
-static NodeOutput op_resize(const Node& node, const std::vector<cv::Mat>& inputs) {
-    if (inputs.empty() || inputs[0].empty()) throw GraphError("resize requires one valid input image");
+static NodeOutput op_resize(const Node& node, const std::vector<const NodeOutput*>& inputs) {
+    if (inputs.empty() || inputs[0]->image_umatrix.empty()) throw GraphError("resize requires one valid input image");
     
-    // MODIFIED: 使用 UMat
-    cv::UMat u_input = inputs[0].getUMat(cv::ACCESS_READ);
+    cv::UMat u_input = inputs[0]->image_umatrix;
     cv::UMat u_output;
 
     const auto& P = node.runtime_parameters;
@@ -166,18 +161,17 @@ static NodeOutput op_resize(const Node& node, const std::vector<cv::Mat>& inputs
     cv::resize(u_input, u_output, cv::Size(width, height), 0, 0, interpolation_flag);
     
     NodeOutput result;
-    result.image_matrix = u_output.getMat(cv::ACCESS_READ).clone();
+    result.image_umatrix = u_output;
     return result;
 }
 
-// op_add_weighted and op_abs_diff have been heavily modified to use UMat for all operations
-static NodeOutput op_add_weighted(const Node& node, const std::vector<cv::Mat>& inputs) {
-    if (inputs.size() < 2 || inputs[0].empty() || inputs[1].empty()) {
+static NodeOutput op_add_weighted(const Node& node, const std::vector<const NodeOutput*>& inputs) {
+    if (inputs.size() < 2 || inputs[0]->image_umatrix.empty() || inputs[1]->image_umatrix.empty()) {
         throw GraphError("add_weighted requires two input images");
     }
 
-    cv::UMat u_a_prep = inputs[0].getUMat(cv::ACCESS_READ);
-    cv::UMat u_b_prep = inputs[1].getUMat(cv::ACCESS_READ);
+    cv::UMat u_a_prep = inputs[0]->image_umatrix;
+    cv::UMat u_b_prep = inputs[1]->image_umatrix;
     cv::UMat u_out_mat;
 
     const auto& P = node.runtime_parameters;
@@ -188,9 +182,7 @@ static NodeOutput op_add_weighted(const Node& node, const std::vector<cv::Mat>& 
     double gamma = as_double_flexible(P, "gamma", 0.0);
     std::string strategy = as_str(P, "merge_strategy", "resize");
 
-    // NEW: 正确实现 channel_mapping 的 UMat 路径
     if (map_param) {
-        // 1. 调整输入图像尺寸
         if (strategy == "resize") {
             if (u_a_prep.size() != u_b_prep.size()) {
                 cv::resize(u_b_prep, u_b_prep, u_a_prep.size());
@@ -201,29 +193,24 @@ static NodeOutput op_add_weighted(const Node& node, const std::vector<cv::Mat>& 
             : u_a_prep.size();
 
         if (out_size.width == 0 || out_size.height == 0) {
-            NodeOutput result;
-            result.image_matrix = cv::Mat(); // 返回空Mat
-            return result;
+            return NodeOutput{};
         }
 
-        // 2. 准备输入通道
         std::vector<cv::UMat> a_ch, b_ch;
         cv::split(u_a_prep, a_ch);
         cv::split(u_b_prep, b_ch);
 
-        // 3. 准备输出通道 (最多4个通道 BGRA)
         int out_channels = std::max({4, u_a_prep.channels(), u_b_prep.channels()});
         std::vector<cv::UMat> out_ch;
         for (int i = 0; i < out_channels; ++i) {
             out_ch.push_back(cv::UMat(out_size, CV_32F, cv::Scalar(0)));
         }
 
-        // 4. 解析映射规则
         auto process_mapping = [&](const YAML::Node& mapping_node, const std::vector<cv::UMat>& src_ch, double weight) {
             if (!mapping_node) return;
             for (const auto& it : mapping_node) {
                 int src_idx = it.first.as<int>();
-                if (src_idx >= src_ch.size()) continue;
+                if (src_idx >= (int)src_ch.size()) continue;
 
                 cv::UMat weighted_src;
                 cv::multiply(src_ch[src_idx](cv::Rect(0,0,out_size.width, out_size.height)), cv::Scalar::all(weight), weighted_src);
@@ -231,7 +218,7 @@ static NodeOutput op_add_weighted(const Node& node, const std::vector<cv::Mat>& 
                 if (it.second.IsSequence()) {
                     for (const auto& dest_node : it.second) {
                         int dst_idx = dest_node.as<int>();
-                        if (dst_idx >= out_ch.size()) continue;
+                        if (dst_idx >= (int)out_ch.size()) continue;
                         cv::add(out_ch[dst_idx], weighted_src, out_ch[dst_idx]);
                     }
                 }
@@ -241,14 +228,12 @@ static NodeOutput op_add_weighted(const Node& node, const std::vector<cv::Mat>& 
         process_mapping(map_param["input0"], a_ch, alpha);
         process_mapping(map_param["input1"], b_ch, beta);
 
-        // 5. 应用 Gamma
         if (gamma != 0.0) {
             for (auto& chan : out_ch) {
                 cv::add(chan, cv::Scalar::all(gamma), chan);
             }
         }
 
-        // 6. 处理 Alpha 通道 (如果未被映射)
         bool alpha_mapped = false;
         if (out_channels == 4 && map_param) {
             auto is_alpha_targeted = [&](const YAML::Node& n) {
@@ -273,11 +258,9 @@ static NodeOutput op_add_weighted(const Node& node, const std::vector<cv::Mat>& 
                     out_ch[3]);
         }
         
-        // 7. 合并通道
         cv::UMat blended_result;
         cv::merge(out_ch, blended_result);
         
-        // 如果是 crop 模式，需要将结果放到正确尺寸的画布上
         if (strategy == "crop") {
             u_out_mat = cv::UMat(u_a_prep.size(), blended_result.type(), cv::Scalar::all(0));
             blended_result.copyTo(u_out_mat(cv::Rect(0,0,out_size.width, out_size.height)));
@@ -285,7 +268,7 @@ static NodeOutput op_add_weighted(const Node& node, const std::vector<cv::Mat>& 
             u_out_mat = blended_result;
         }
 
-    } else { // 简单的 add_weighted 路径 (无 channel_mapping)
+    } else {
         normalize_channels_for_mixing_umat(u_a_prep, u_b_prep);
         if (strategy == "crop") {
             u_out_mat = cv::UMat::zeros(u_a_prep.size(), u_a_prep.type());
@@ -303,17 +286,16 @@ static NodeOutput op_add_weighted(const Node& node, const std::vector<cv::Mat>& 
     }
     
     NodeOutput result;
-    result.image_matrix = u_out_mat.getMat(cv::ACCESS_READ).clone();
+    result.image_umatrix = u_out_mat;
     return result;
 }
 
 
-static NodeOutput op_abs_diff(const Node& node, const std::vector<cv::Mat>& inputs) {
-    if (inputs.size() < 2 || inputs[0].empty() || inputs[1].empty()) throw GraphError("diff requires two input images");
+static NodeOutput op_abs_diff(const Node& node, const std::vector<const NodeOutput*>& inputs) {
+    if (inputs.size() < 2 || inputs[0]->image_umatrix.empty() || inputs[1]->image_umatrix.empty()) throw GraphError("diff requires two input images");
     
-    // MODIFIED: Use UMat
-    cv::UMat u_a_prep = inputs[0].getUMat(cv::ACCESS_READ);
-    cv::UMat u_b_prep = inputs[1].getUMat(cv::ACCESS_READ);
+    cv::UMat u_a_prep = inputs[0]->image_umatrix;
+    cv::UMat u_b_prep = inputs[1]->image_umatrix;
     cv::UMat u_out_mat;
 
     std::string strategy = as_str(node.runtime_parameters, "merge_strategy", "resize");
@@ -332,19 +314,30 @@ static NodeOutput op_abs_diff(const Node& node, const std::vector<cv::Mat>& inpu
         cv::absdiff(u_a_prep, u_b_prep, u_out_mat);
     }
     NodeOutput result;
-    result.image_matrix = u_out_mat.getMat(cv::ACCESS_READ).clone();
+    result.image_umatrix = u_out_mat;
     return result;
 }
 
-// op_get_width, op_divide: No image processing, no changes needed.
-static NodeOutput op_get_width(const Node&, const std::vector<cv::Mat>& inputs) {
-    if (inputs.empty() || inputs[0].empty()) throw GraphError("analyzer:get_width requires one image input.");
+static NodeOutput op_get_dimensions(const Node&, const std::vector<const NodeOutput*>& inputs) {
+    if (inputs.empty()) {
+        throw GraphError("analyzer:get_dimensions requires one image input.");
+    }
+    const auto* input = inputs[0];
+    if (input->image_umatrix.empty() && input->image_matrix.empty()) {
+        throw GraphError("analyzer:get_dimensions input image is empty.");
+    }
+
     NodeOutput out;
-    out.data["width"] = inputs[0].cols;
-    out.data["height"] = inputs[0].rows;
+    if (!input->image_umatrix.empty()) {
+        out.data["width"] = input->image_umatrix.cols;
+        out.data["height"] = input->image_umatrix.rows;
+    } else {
+        out.data["width"] = input->image_matrix.cols;
+        out.data["height"] = input->image_matrix.rows;
+    }
     return out;
 }
-static NodeOutput op_divide(const Node& node, const std::vector<cv::Mat>&) {
+static NodeOutput op_divide(const Node& node, const std::vector<const NodeOutput*>&) {
     const auto& P = node.runtime_parameters;
     if (!P["operand1"] || !P["operand2"]) throw GraphError("math:divide requires 'operand1' and 'operand2'.");
     double op1 = P["operand1"].as<double>();
@@ -355,12 +348,11 @@ static NodeOutput op_divide(const Node& node, const std::vector<cv::Mat>&) {
     return out;
 }
 
-static NodeOutput op_extract_channel(const Node& node, const std::vector<cv::Mat>& inputs) {
-    if (inputs.empty() || inputs[0].empty()) {
+static NodeOutput op_extract_channel(const Node& node, const std::vector<const NodeOutput*>& inputs) {
+    if (inputs.empty() || inputs[0]->image_umatrix.empty()) {
         throw GraphError("extract_channel requires one valid input image");
     }
-    // MODIFIED: Use UMat
-    cv::UMat u_input = inputs[0].getUMat(cv::ACCESS_READ);
+    cv::UMat u_input = inputs[0]->image_umatrix;
 
     const auto& P = node.runtime_parameters;
     std::string channel_str = as_str(P, "channel", "a");
@@ -382,14 +374,12 @@ static NodeOutput op_extract_channel(const Node& node, const std::vector<cv::Mat
     cv::split(u_input, channels);
 
     NodeOutput result;
-    result.image_matrix = channels[channel_idx].getMat(cv::ACCESS_READ).clone();
+    result.image_umatrix = channels[channel_idx];
     result.data["channel"] = channel_idx;
     return result;
 }
 
-// op_perlin_noise, op_constant_image: Generators, no benefit from UMat. No changes needed.
-// [ ... op_perlin_noise and op_constant_image code remains unchanged ... ]
-static NodeOutput op_perlin_noise(const Node& node, const std::vector<cv::Mat>&) {
+static NodeOutput op_perlin_noise(const Node& node, const std::vector<const NodeOutput*>&) {
     const auto& P = node.runtime_parameters;
     int width = as_int_flexible(P, "width", 256);
     int height = as_int_flexible(P, "height", 256);
@@ -397,25 +387,21 @@ static NodeOutput op_perlin_noise(const Node& node, const std::vector<cv::Mat>&)
     if (width <= 0 || height <= 0) throw GraphError("perlin_noise requires positive width and height");
     if (scale <= 0) throw GraphError("perlin_noise requires positive grid_size");
 
-    // --- Perlin Noise Implementation ---
     std::vector<int> p(512);
     std::iota(p.begin(), p.begin() + 256, 0);
-    // 使用固定的种子以保证可复现性，如果需要每次不同，可以使用 std::random_device
     std::shuffle(p.begin(), p.begin() + 256, std::mt19937{1});
     std::copy(p.begin(), p.begin() + 256, p.begin() + 256);
 
     auto fade = [](double t) { return t * t * t * (t * (t * 6 - 15) + 10); };
     auto lerp = [](double t, double a, double b) { return a + t * (b - a); };
     
-    // MODIFIED: 修正梯度函数为标准的2D点积计算
-    // 它根据哈希值从4个梯度向量中选择一个，并与输入的(x, y)向量进行点积
     auto grad = [](int hash, double x, double y) {
         switch(hash & 3) {
-            case 0: return  x + y; // ( 1,  1) dot (x, y)
-            case 1: return -x + y; // (-1,  1) dot (x, y)
-            case 2: return  x - y; // ( 1, -1) dot (x, y)
-            case 3: return -x - y; // (-1, -1) dot (x, y)
-            default: return 0.0;     // Should not happen
+            case 0: return  x + y;
+            case 1: return -x + y;
+            case 2: return  x - y;
+            case 3: return -x - y;
+            default: return 0.0;
         }
     };
 
@@ -431,13 +417,11 @@ static NodeOutput op_perlin_noise(const Node& node, const std::vector<cv::Mat>&)
         int ba = p[p[X + 1] + Y];
         int bb = p[p[X + 1] + Y + 1];
         
-        // MODIFIED: 现在对 grad 的调用是正确的，它计算了梯度和距离向量的点积
         double res = lerp(v, lerp(u, grad(aa, x, y), grad(ba, x - 1, y)),
                              lerp(u, grad(ab, x, y - 1), grad(bb, x - 1, y - 1)));
         
-        return (res + 1.0) / 2.0; // 归一化到 [0, 1] 区间
+        return (res + 1.0) / 2.0;
     };
-    // --- End of Implementation ---
 
     cv::Mat noise_image(height, width, CV_32FC1);
     for (int i = 0; i < height; ++i) {
@@ -450,11 +434,10 @@ static NodeOutput op_perlin_noise(const Node& node, const std::vector<cv::Mat>&)
     
     NodeOutput result;
     result.image_matrix = noise_image;
+    result.image_umatrix = noise_image.getUMat(cv::ACCESS_READ);
     return result;
 }
-static NodeOutput op_constant_image(const Node& node, const std::vector<cv::Mat>&) {
-    // This is just memory allocation and setting, UMat provides no benefit.
-    // ... function implementation ...
+static NodeOutput op_constant_image(const Node& node, const std::vector<const NodeOutput*>&) {
     const auto& P = node.runtime_parameters;
     int width = as_int_flexible(P, "width", 0);
     int height = as_int_flexible(P, "height", 0);
@@ -466,15 +449,16 @@ static NodeOutput op_constant_image(const Node& node, const std::vector<cv::Mat>
     cv::Mat out_mat(height, width, CV_MAKETYPE(CV_32F, channels), fill_value);
     NodeOutput result;
     result.image_matrix = out_mat;
+    result.image_umatrix = out_mat.getUMat(cv::ACCESS_READ);
     return result;
 }
 
-static NodeOutput op_convolve(const Node& node, const std::vector<cv::Mat>& inputs) {
-    if (inputs.size() < 2 || inputs[0].empty() || inputs[1].empty()) {
+static NodeOutput op_convolve(const Node& node, const std::vector<const NodeOutput*>& inputs) {
+    if (inputs.size() < 2 || inputs[0]->image_umatrix.empty() || inputs[1]->image_umatrix.empty()) {
         throw GraphError("convolve requires two input images: a source and a kernel.");
     }
-    cv::UMat u_src = inputs[0].getUMat(cv::ACCESS_READ);
-    cv::UMat u_kernel_img = inputs[1].getUMat(cv::ACCESS_READ);
+    cv::UMat u_src = inputs[0]->image_umatrix;
+    cv::UMat u_kernel_img = inputs[1]->image_umatrix;
 
     if (u_kernel_img.channels() != 1) {
         throw GraphError("The kernel for convolve must be a single-channel image.");
@@ -485,9 +469,7 @@ static NodeOutput op_convolve(const Node& node, const std::vector<cv::Mat>& inpu
     bool take_absolute = as_int_flexible(P, "absolute", 1) != 0;
     bool h_and_v = as_int_flexible(P, "horizontal_and_vertical", 0) != 0;
     int border_type = cv::BORDER_REPLICATE;
-    // ... (padding logic is fine)
     if (padding_mode == "zero") border_type = cv::BORDER_CONSTANT;
-
 
     cv::UMat u_out_mat_float;
 
@@ -501,48 +483,41 @@ static NodeOutput op_convolve(const Node& node, const std::vector<cv::Mat>& inpu
     } else {
         cv::filter2D(u_src, u_out_mat_float, CV_32F, u_kernel_img, cv::Point(-1,-1), 0, border_type);
         if (take_absolute) {
-            // MODIFIED: Use cv::absdiff with 0 to get the absolute value for a UMat.
             cv::absdiff(u_out_mat_float, cv::Scalar::all(0), u_out_mat_float);
         }
     }
     
     NodeOutput result;
-    result.image_matrix = u_out_mat_float.getMat(cv::ACCESS_READ).clone();
+    result.image_umatrix = u_out_mat_float;
     return result;
 }
 
-static NodeOutput op_curve_transform(const Node& node, const std::vector<cv::Mat>& inputs) {
-    if (inputs.empty() || inputs[0].empty()) {
+static NodeOutput op_curve_transform(const Node& node, const std::vector<const NodeOutput*>& inputs) {
+    if (inputs.empty() || inputs[0]->image_umatrix.empty()) {
         throw GraphError("curve_transform requires one input image.");
     }
 
-    cv::UMat u_input = inputs[0].getUMat(cv::ACCESS_READ);
-    // MODIFIED: Create intermediate UMat objects for each step
+    cv::UMat u_input = inputs[0]->image_umatrix;
     cv::UMat u_multiplied, u_added, u_out_mat;
 
     const auto& P = node.runtime_parameters;
     double k = as_double_flexible(P, "k", 1.0);
 
-    // MODIFIED: Break the expression into explicit function calls.
-    // Step 1: u_multiplied = u_input * k
     cv::multiply(u_input, cv::Scalar::all(k), u_multiplied);
-    // Step 2: u_added = 1.0 + u_multiplied
     cv::add(cv::Scalar::all(1.0), u_multiplied, u_added);
-    // Step 3: u_out_mat = 1.0 / u_added
     cv::divide(1.0, u_added, u_out_mat);
     
     NodeOutput result;
-    result.image_matrix = u_out_mat.getMat(cv::ACCESS_READ).clone();
+    result.image_umatrix = u_out_mat;
     return result;
 }
 
-static NodeOutput op_multiply(const Node& node, const std::vector<cv::Mat>& inputs) {
-    if (inputs.size() < 2 || inputs[0].empty() || inputs[1].empty()) {
+static NodeOutput op_multiply(const Node& node, const std::vector<const NodeOutput*>& inputs) {
+    if (inputs.size() < 2 || inputs[0]->image_umatrix.empty() || inputs[1]->image_umatrix.empty()) {
         throw GraphError("image_mixing:multiply requires two input images.");
     }
-    // MODIFIED: Use UMat
-    cv::UMat u_a_prep = inputs[0].getUMat(cv::ACCESS_READ);
-    cv::UMat u_b_prep = inputs[1].getUMat(cv::ACCESS_READ);
+    cv::UMat u_a_prep = inputs[0]->image_umatrix;
+    cv::UMat u_b_prep = inputs[1]->image_umatrix;
     cv::UMat u_out_mat_float;
 
     const auto& P = node.runtime_parameters;
@@ -566,12 +541,11 @@ static NodeOutput op_multiply(const Node& node, const std::vector<cv::Mat>& inpu
     }
 
     NodeOutput result;
-    result.image_matrix = u_out_mat_float.getMat(cv::ACCESS_READ).clone();
+    result.image_umatrix = u_out_mat_float;
     return result;
 }
 
 void register_builtin() {
-    // [ ... registration calls remain unchanged ... ]
     auto& R = OpRegistry::instance();
     R.register_op("image_source", "path", op_image_source_path);
     R.register_op("image_generator", "perlin_noise", op_perlin_noise);
@@ -585,7 +559,7 @@ void register_builtin() {
     R.register_op("image_mixing", "add_weighted", op_add_weighted);
     R.register_op("image_mixing", "diff", op_abs_diff);
     R.register_op("image_mixing", "multiply", op_multiply);
-    R.register_op("analyzer", "get_dimensions", op_get_width);
+    R.register_op("analyzer", "get_dimensions", op_get_dimensions);
     R.register_op("math", "divide", op_divide);
 }
 
