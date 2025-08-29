@@ -86,6 +86,9 @@ struct MetalState {
         
         ci_context = [CIContext contextWithMTLDevice:device];
         if (!ci_context) throw std::runtime_error("Failed to create CIContext from MTLDevice.");
+        // Under MRR, contextWithMTLDevice returns an autoreleased object.
+        // Retain to keep it alive across calls/threads; released in destructor.
+        [ci_context retain];
 
         NSError* error = nil;
         NSString* sourceString = [NSString stringWithUTF8String:perlin_shader_source];
@@ -126,6 +129,7 @@ static MetalState& GetMetalState() {
 
 // --- START: MODIFIED FUNCTION ---
 NodeOutput op_perlin_noise_metal(const Node& node, const std::vector<const NodeOutput*>&) {
+    @autoreleasepool {
     // FIX: 关闭 OpenCV 的 OpenCL（只需做一次；放在这里最省事）
     static std::once_flag ocl_once;
     std::call_once(ocl_once, []{
@@ -259,6 +263,7 @@ NodeOutput op_perlin_noise_metal(const Node& node, const std::vector<const NodeO
     CVPixelBufferRelease(pixelBuffer);
 
     return result;
+    }
 }
 // --- END: MODIFIED FUNCTION ---
 
