@@ -121,7 +121,7 @@ int TerminalInput::GetChar() {
         return UNKNOWN;
     } else if (c == 127 || c == 8) { // Backspace on Mac/Linux
         return BACKSPACE;
-    } else if (c == '\n') {
+    } else if (c == '\n' || c == '\r') {
         return ENTER;
     } else if (c == '\t') {
         return TAB;

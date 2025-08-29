@@ -22,6 +22,9 @@ public:
 
     void SetMaxSize(size_t size);
 
+    // Expose the resolved history file path for UI/diagnostics.
+    const std::filesystem::path& Path() const { return history_file_path_; }
+
 private:
     std::filesystem::path GetHistoryFilePath() const;
     void Trim();
@@ -29,6 +32,7 @@ private:
     std::vector<std::string> history_;
     int nav_index_ = -1;
     size_t max_size_ = 1000;
+    std::filesystem::path history_file_path_;
 };
 
 } // namespace ps

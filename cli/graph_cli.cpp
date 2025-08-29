@@ -23,6 +23,9 @@
 #include "terminal_input.hpp"
 #include "cli_history.hpp"
 #include "cli_autocompleter.hpp"
+#include "path_complete.hpp"
+#include "input_match_state.hpp"
+#include "path_complete.hpp"
 
 #ifdef _WIN32
 #include <windows.h>
@@ -137,7 +140,28 @@ public:
                 if (event == Event::Escape) { mode_ = Mode::Navigate; return true; }
                 if (event == Event::Return) { CommitEdit(); return true; }
                 if (editable_lines_[selected_].is_radio) { return radio_editor_->OnEvent(event); } 
-                else { return editor_input_->OnEvent(event); }
+                else {
+                    // Add basic path completion on Tab for path-like fields.
+                    auto is_path_like = [&](){
+                        if (selected_ >= (int)editable_lines_.size()) return false;
+                        const auto& lbl = editable_lines_[selected_].label;
+                        if (lbl == "active_config_file" || lbl == "cache_root_dir" ||
+                            lbl == "default_exit_save_path" || lbl == "default_timer_log_path") return true;
+                        if (lbl.rfind("plugin_dirs[", 0) == 0) return true;
+                        return false;
+                    };
+                    if (event == Event::Tab && is_path_like()) {
+                        auto options = PathCompleteOptions(edit_buffer_);
+                        if (!options.empty()) {
+                            auto lcp = LongestCommonPrefix(options);
+                            if (!lcp.empty()) {
+                                edit_buffer_ = lcp;
+                                return true;
+                            }
+                        }
+                    }
+                    return editor_input_->OnEvent(event);
+                }
             }
             
             if (event == Event::ArrowUp) { selected_ = std::max(0, selected_ - 1); return true; }
@@ -953,6 +977,7 @@ static void run_repl(NodeGraph& graph, CliConfig& config, const std::map<std::st
 
     std::string line_buffer;
     int cursor_pos = 0;
+    InputMatchState history_match_state;
     
     // This lambda is now more complex to handle highlighting for cyclical completion.
     std::function<void(const std::vector<std::string>&)> redraw_line_impl;
@@ -998,6 +1023,7 @@ static void run_repl(NodeGraph& graph, CliConfig& config, const std::map<std::st
 
     // FIX: Print the welcome message *before* putting the terminal in raw mode.
     std::cout << "Photospider dynamic graph shell. Type 'help' for commands.\n";
+    std::cout << "History file: " << history.Path() << "\n";
     TerminalInput term_input;
     redraw_line();
 
@@ -1009,6 +1035,9 @@ static void run_repl(NodeGraph& graph, CliConfig& config, const std::map<std::st
             completion_state.Reset();
         }
 
+        // Reset sticky history matching on edits or cursor moves
+        auto reset_history_match = [&](){ history_match_state.Reset(); };
+
         switch (key) {
             case ENTER: {
                 std::cout << "\n";
@@ -1016,21 +1045,27 @@ static void run_repl(NodeGraph& graph, CliConfig& config, const std::map<std::st
                     history.Add(line_buffer);
                     history.Save();
                 }
-                
-                // FIX: This is the critical fix for command execution.
-                // Restore the terminal to its normal, cooked mode before
-                // running the command so that std::cout works as expected.
+
+                // FIX: This is the critical change.
+                // 1. Restore the terminal to its normal, "cooked" mode so that
+                //    std::cout works as expected inside process_command.
                 term_input.Restore();
+
+                // 2. Now, execute the command.
                 bool continue_repl = process_command(line_buffer, graph, modified, config, op_sources);
-                term_input.SetRaw(); // Re-enter raw mode after command finishes.
-                
+
+                // 3. Re-enter raw mode to capture individual keystrokes for the next prompt.
+                term_input.SetRaw();
+
                 if (!continue_repl) {
-                    return; // exit command was issued
+                    return; // The 'exit' command was issued.
                 }
 
+                // Reset for the next line of input.
                 line_buffer.clear();
                 cursor_pos = 0;
                 history.ResetNavigation();
+                history_match_state.Reset();
                 redraw_line();
                 break;
             }
@@ -1047,6 +1082,7 @@ static void run_repl(NodeGraph& graph, CliConfig& config, const std::map<std::st
                 line_buffer.clear();
                 cursor_pos = 0;
                 history.ResetNavigation();
+                history_match_state.Reset();
                 redraw_line();
                 break;
             }
@@ -1054,6 +1090,7 @@ static void run_repl(NodeGraph& graph, CliConfig& config, const std::map<std::st
                 if (cursor_pos > 0) {
                     line_buffer.erase(cursor_pos - 1, 1);
                     cursor_pos--;
+                    history_match_state.Reset();
                     redraw_line();
                 }
                 break;
@@ -1061,20 +1098,27 @@ static void run_repl(NodeGraph& graph, CliConfig& config, const std::map<std::st
             case DEL: {
                  if (cursor_pos < (int)line_buffer.length()) {
                     line_buffer.erase(cursor_pos, 1);
+                    history_match_state.Reset();
                     redraw_line();
                 }
                 break;
             }
             case UP: {
-                std::string prefix = line_buffer.substr(0, cursor_pos);
-                line_buffer = history.GetPrevious(prefix);
+                if (!history_match_state.active) {
+                    history_match_state.Begin(line_buffer.substr(0, cursor_pos), cursor_pos);
+                }
+                const std::string& sticky = history_match_state.original_prefix;
+                line_buffer = history.GetPrevious(sticky);
                 cursor_pos = line_buffer.length();
                 redraw_line();
                 break;
             }
             case DOWN: {
-                std::string prefix = line_buffer.substr(0, cursor_pos);
-                line_buffer = history.GetNext(prefix);
+                if (!history_match_state.active) {
+                    history_match_state.Begin(line_buffer.substr(0, cursor_pos), cursor_pos);
+                }
+                const std::string& sticky = history_match_state.original_prefix;
+                line_buffer = history.GetNext(sticky);
                 cursor_pos = line_buffer.length();
                 redraw_line();
                 break;
@@ -1082,6 +1126,7 @@ static void run_repl(NodeGraph& graph, CliConfig& config, const std::map<std::st
             case LEFT: {
                 if (cursor_pos > 0) {
                     cursor_pos--;
+                    history_match_state.Reset();
                     redraw_line();
                 }
                 break;
@@ -1089,6 +1134,7 @@ static void run_repl(NodeGraph& graph, CliConfig& config, const std::map<std::st
             case RIGHT: {
                 if (cursor_pos < (int)line_buffer.length()) {
                     cursor_pos++;
+                    history_match_state.Reset();
                     redraw_line();
                 }
                 break;
@@ -1140,6 +1186,7 @@ static void run_repl(NodeGraph& graph, CliConfig& config, const std::map<std::st
                     line_buffer.insert(cursor_pos, 1, static_cast<char>(key));
                     cursor_pos++;
                     history.ResetNavigation();
+                    history_match_state.Reset();
                     redraw_line();
                 }
                 break;

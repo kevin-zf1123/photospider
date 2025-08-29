@@ -2,6 +2,7 @@
 #include <sstream>
 #include <algorithm>
 #include <iostream>
+#include "path_complete.hpp"
 
 namespace ps {
 
@@ -49,32 +50,8 @@ void CliAutocompleter::CompleteCommand(const std::string& prefix, std::vector<st
 }
 
 void CliAutocompleter::CompletePath(const std::string& prefix, std::vector<std::string>& options) const {
-    std::string dirname_str = ".";
-    std::string basename_prefix = prefix;
-    
-    auto last_slash = prefix.find_last_of('/');
-    if (last_slash != std::string::npos) {
-        dirname_str = prefix.substr(0, last_slash + 1);
-        basename_prefix = prefix.substr(last_slash + 1);
-    }
-
-    try {
-        fs::path dir(dirname_str);
-        if (!fs::exists(dir) || !fs::is_directory(dir)) return;
-
-        for (const auto& entry : fs::directory_iterator(dir)) {
-            std::string filename = entry.path().filename().string();
-            if (filename.rfind(basename_prefix, 0) == 0) {
-                std::string completion = dirname_str + filename;
-                if (fs::is_directory(entry.path())) {
-                    completion += "/";
-                }
-                options.push_back(completion);
-            }
-        }
-    } catch (const fs::filesystem_error&) {
-        // Ignore errors from invalid paths
-    }
+    auto opts = PathCompleteOptions(prefix);
+    options.insert(options.end(), opts.begin(), opts.end());
 }
 
 void CliAutocompleter::CompleteNodeId(const std::string& prefix, std::vector<std::string>& options) const {

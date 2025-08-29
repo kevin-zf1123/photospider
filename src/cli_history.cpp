@@ -12,6 +12,7 @@
 namespace ps {
 
 CliHistory::CliHistory() {
+    history_file_path_ = GetHistoryFilePath();
     Load();
 }
 
@@ -42,7 +43,7 @@ std::filesystem::path CliHistory::GetHistoryFilePath() const {
 
 
 void CliHistory::Load() {
-    std::ifstream file(GetHistoryFilePath());
+    std::ifstream file(history_file_path_);
     if (!file) return;
 
     std::string line;
@@ -55,9 +56,9 @@ void CliHistory::Load() {
 }
 
 void CliHistory::Save() const {
-    std::ofstream file(GetHistoryFilePath());
+    std::ofstream file(history_file_path_);
     if (!file) {
-        std::cerr << "Warning: Could not save command history to " << GetHistoryFilePath() << std::endl;
+        std::cerr << "Warning: Could not save command history to " << history_file_path_ << std::endl;
         return;
     }
     for (const auto& line : history_) {
@@ -128,4 +129,3 @@ void CliHistory::SetMaxSize(size_t size) {
 
 
 } // namespace ps
-
