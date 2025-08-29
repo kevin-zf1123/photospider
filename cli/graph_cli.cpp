@@ -809,29 +809,27 @@ static bool process_command(const std::string& line, NodeGraph& graph, bool& mod
             std::string print_tree_mode = "none";
             bool show_mem = false, show_disk = false, do_check = false, do_check_remove = false;
             
-            if (iss.rdbuf()->in_avail() == 0) {
-                 std::istringstream default_iss(config.default_traversal_arg);
-                 while(default_iss >> arg) {
-                    if (arg == "f" || arg == "full") print_tree_mode = "full";
-                    else if (arg == "s" || arg == "simplified") print_tree_mode = "simplified";
-                    else if (arg == "n" || arg == "no_tree") print_tree_mode = "none";
-                    else if (arg == "md") { show_mem = true; show_disk = true; }
-                    else if (arg == "m") show_mem = true;
-                    else if (arg == "d") show_disk = true;
-                    else if (arg == "cr") do_check_remove = true;
-                    else if (arg == "c") do_check = true;
-                 }
-            } else {
-                while (iss >> arg) {
-                    if (arg == "f" || arg == "full") print_tree_mode = "full";
-                    else if (arg == "s" || arg == "simplified") print_tree_mode = "simplified";
-                    else if (arg == "n" || arg == "no_tree") print_tree_mode = "none";
-                    else if (arg == "md") { show_mem = true; show_disk = true; }
-                    else if (arg == "m") show_mem = true;
-                    else if (arg == "d") show_disk = true;
-                    else if (arg == "cr") do_check_remove = true;
-                    else if (arg == "c") do_check = true;
+            // Collect real args (ignores trailing spaces). If none, fall back to config defaults.
+            std::vector<std::string> args;
+            while (iss >> arg) args.push_back(arg);
+            const auto parse_tokens = [&](const std::vector<std::string>& toks){
+                for (const auto& a : toks) {
+                    if (a == "f" || a == "full") print_tree_mode = "full";
+                    else if (a == "s" || a == "simplified") print_tree_mode = "simplified";
+                    else if (a == "n" || a == "no_tree") print_tree_mode = "none";
+                    else if (a == "md") { show_mem = true; show_disk = true; }
+                    else if (a == "m") show_mem = true;
+                    else if (a == "d") show_disk = true;
+                    else if (a == "cr") do_check_remove = true;
+                    else if (a == "c") do_check = true;
                 }
+            };
+            if (args.empty()) {
+                std::istringstream default_iss(config.default_traversal_arg);
+                std::vector<std::string> def_args; while (default_iss >> arg) def_args.push_back(arg);
+                parse_tokens(def_args);
+            } else {
+                parse_tokens(args);
             }
 
             if (do_check_remove) graph.synchronize_disk_cache(config.cache_precision);
