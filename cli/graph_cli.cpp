@@ -44,6 +44,8 @@ private:
         int* radio_selected_idx = nullptr;
         std::function<void()> add_fn = nullptr;
         std::function<void()> del_fn = nullptr;
+        bool is_toggle = false;
+        bool* toggle_ptr = nullptr;
     };
 
 public:
@@ -71,12 +73,16 @@ public:
                 if (mode_ == Mode::Edit && selected_ == (int)i) {
                     if (line.is_radio) {
                         display_element = radio_editor_->Render();
+                    } else if (line.is_toggle && line.toggle_ptr) {
+                        display_element = text((*line.toggle_ptr) ? "[x]" : "[ ]");
                     } else {
                         display_element = editor_input_->Render();
                     }
                 } else {
                      if (line.is_radio) {
                         display_element = text((*line.radio_options)[*line.radio_selected_idx]);
+                     } else if (line.is_toggle && line.toggle_ptr) {
+                        display_element = text((*line.toggle_ptr) ? "[x]" : "[ ]");
                      } else if (line.value_ptr) {
                         display_element = text(*line.value_ptr);
                      } else {
@@ -174,6 +180,39 @@ private:
         selected_config_save_idx_ = find_idx(config_save_entries_, temp_config_.config_save_behavior);
         selected_editor_save_idx_ = find_idx(editor_save_entries_, temp_config_.editor_save_behavior);
         plugin_dirs_str_ = temp_config_.plugin_dirs;
+
+        // Parse traversal defaults into UI state
+        selected_traversal_tree_idx_ = 2; // no_tree by default
+        selected_traversal_check_idx_ = 0; // none
+        traversal_show_mem_ = traversal_show_disk_ = false;
+        {
+            std::istringstream iss(temp_config_.default_traversal_arg);
+            std::string tok;
+            while (iss >> tok) {
+                if (tok == "d" || tok == "detailed") selected_traversal_tree_idx_ = 0;
+                else if (tok == "s" || tok == "simplified") selected_traversal_tree_idx_ = 1;
+                else if (tok == "n" || tok == "no_tree" || tok == "none") selected_traversal_tree_idx_ = 2;
+                else if (tok.find('m') != std::string::npos && tok != "md") traversal_show_mem_ = true;
+                else if (tok.find('d') != std::string::npos && tok != "detailed") traversal_show_disk_ = true;
+                else if (tok == "md") { traversal_show_mem_ = true; traversal_show_disk_ = true; }
+                else if (tok == "c") selected_traversal_check_idx_ = 1;
+                else if (tok == "cr") selected_traversal_check_idx_ = 2;
+            }
+        }
+
+        // Parse compute defaults into UI state
+        compute_force_ = compute_parallel_ = compute_timer_console_ = compute_timer_log_ = compute_mute_ = false;
+        {
+            std::istringstream iss(temp_config_.default_compute_args);
+            std::string tok;
+            while (iss >> tok) {
+                if (tok == "force") compute_force_ = true;
+                else if (tok == "parallel") compute_parallel_ = true;
+                else if (tok == "t" || tok == "-t" || tok == "timer") compute_timer_console_ = true;
+                else if (tok == "tl" || tok == "-tl") compute_timer_log_ = true;
+                else if (tok == "m" || tok == "-m" || tok == "mute") compute_mute_ = true;
+            }
+        }
     }
 
     void SyncUiStateToModel() {
@@ -188,6 +227,34 @@ private:
         temp_config_.config_save_behavior = config_save_entries_[selected_config_save_idx_];
         temp_config_.editor_save_behavior = editor_save_entries_[selected_editor_save_idx_];
         temp_config_.plugin_dirs = plugin_dirs_str_;
+
+        // Compose traversal defaults from UI state
+        {
+            std::vector<std::string> parts;
+            if (selected_traversal_tree_idx_ == 0) parts.push_back("detailed");
+            else if (selected_traversal_tree_idx_ == 1) parts.push_back("simplified");
+            else parts.push_back("n");
+            if (traversal_show_mem_) parts.push_back("m");
+            if (traversal_show_disk_) parts.push_back("d");
+            if (selected_traversal_check_idx_ == 1) parts.push_back("c");
+            else if (selected_traversal_check_idx_ == 2) parts.push_back("cr");
+            std::ostringstream oss; bool first = true;
+            for (auto& p : parts) { if (!first) oss << ' '; first = false; oss << p; }
+            temp_config_.default_traversal_arg = oss.str();
+        }
+
+        // Compose compute defaults from UI state
+        {
+            std::vector<std::string> parts;
+            if (compute_force_) parts.push_back("force");
+            if (compute_parallel_) parts.push_back("parallel");
+            if (compute_timer_console_) parts.push_back("t");
+            if (compute_timer_log_) parts.push_back("tl");
+            if (compute_mute_) parts.push_back("m");
+            std::ostringstream oss; bool first = true;
+            for (auto& p : parts) { if (!first) oss << ' '; first = false; oss << p; }
+            temp_config_.default_compute_args = oss.str();
+        }
     }
 
     void RebuildLineView() {
@@ -198,6 +265,9 @@ private:
         auto add_radio_line = [&](std::string label, std::vector<std::string>* opts, int* selected_idx) {
             editable_lines_.push_back({std::move(label), nullptr, true, opts, selected_idx});
         };
+        auto add_toggle_line = [&](std::string label, bool* value_ptr) {
+            editable_lines_.push_back({std::move(label), nullptr, false, nullptr, nullptr, nullptr, nullptr, true, value_ptr});
+        };
         
         add_text_line("active_config_file", &active_config_path_buffer_);
         add_text_line("cache_root_dir", &temp_config_.cache_root_dir);
@@ -205,7 +275,19 @@ private:
         add_radio_line("cache_precision", &cache_precision_entries_, &selected_cache_precision_idx_);
         add_text_line("default_exit_save_path", &temp_config_.default_exit_save_path);
         add_text_line("default_timer_log_path", &temp_config_.default_timer_log_path);
+        // Traversal defaults (multi-select UI) + raw string
+        add_radio_line("traversal_tree_mode", &traversal_tree_entries_, &selected_traversal_tree_idx_);
+        add_toggle_line("traversal_show_memory(m)", &traversal_show_mem_);
+        add_toggle_line("traversal_show_disk(d)", &traversal_show_disk_);
+        add_radio_line("traversal_check", &traversal_check_entries_, &selected_traversal_check_idx_);
         add_text_line("default_traversal_arg", &temp_config_.default_traversal_arg);
+        // Compute defaults (multi-select UI) + raw string
+        add_toggle_line("compute_force", &compute_force_);
+        add_toggle_line("compute_parallel", &compute_parallel_);
+        add_toggle_line("compute_timer_console(-t)", &compute_timer_console_);
+        add_toggle_line("compute_timer_log(-tl)", &compute_timer_log_);
+        add_toggle_line("compute_mute(-m)", &compute_mute_);
+        add_text_line("default_compute_args", &temp_config_.default_compute_args);
         
         add_radio_line("default_print_mode", &print_mode_entries_, &selected_print_mode_idx_);
         add_radio_line("default_ops_list_mode", &ops_list_mode_entries_, &selected_ops_list_mode_idx_);
@@ -236,7 +318,7 @@ private:
     void EnterEditMode() {
         if (selected_ >= (int)editable_lines_.size()) return;
         const auto& line = editable_lines_[selected_];
-        if (!line.is_radio && !line.value_ptr) return;
+        if (!line.is_radio && !line.value_ptr && !line.is_toggle) return;
 
         mode_ = Mode::Edit;
         if (line.is_radio) {
@@ -246,6 +328,11 @@ private:
             opt.focused_entry = line.radio_selected_idx;
             radio_editor_ = Radiobox(opt);
             radio_editor_->TakeFocus();
+        } else if (line.is_toggle && line.toggle_ptr) {
+            // Toggle immediately; no dedicated edit widget.
+            *line.toggle_ptr = !*line.toggle_ptr;
+            mode_ = Mode::Navigate;
+            return;
         } else {
             edit_buffer_ = *line.value_ptr;
             editor_input_->TakeFocus();
@@ -307,6 +394,9 @@ private:
                 SyncUiStateToModel();
                 original_config_ = temp_config_;
                 status_message_ = "Settings applied to current session.";
+                // Keep UI in sync with any composed fields.
+                SyncModelToUiState();
+                RebuildLineView();
             }
             changes_applied = true;
         } else if (cmd == "w" || cmd == "write") {
@@ -362,6 +452,20 @@ private:
     std::vector<std::string> exit_sync_entries_ = {"true", "false"};
     std::vector<std::string> config_save_entries_ = {"current", "default", "ask", "none"};
     std::vector<std::string> editor_save_entries_ = {"ask", "auto_save_on_apply", "manual"};
+    // Traversal multi-select UI state
+    std::vector<std::string> traversal_tree_entries_ = {"detailed", "simplified", "no_tree"};
+    int selected_traversal_tree_idx_ = 2; // default no_tree
+    std::vector<std::string> traversal_check_entries_ = {"none", "c", "cr"};
+    int selected_traversal_check_idx_ = 0;
+    bool traversal_show_mem_ = false;
+    bool traversal_show_disk_ = false;
+
+    // Compute multi-select UI state
+    bool compute_force_ = false;
+    bool compute_parallel_ = false;
+    bool compute_timer_console_ = false;
+    bool compute_timer_log_ = false;
+    bool compute_mute_ = false;
 };
 
 // YAML read/write helpers moved to src/cli_config.cpp and declared in include/cli_config.hpp
@@ -379,33 +483,70 @@ static void print_cli_help() {
               << std::endl;
 }
 
-static void print_repl_help() {
-    std::cout << "Available REPL (interactive shell) commands:\n"
-              << "  help                       Show this help message.\n"
-              << "  clear                      Clear the terminal screen.\n"
-              << "  config                     Open the interactive configuration editor.\n"
-              << "  ops [mode]                 List all registered operations.\n"
-              << "                             Modes: all(a), builtin(b), plugins(p)\n"
-              << "  read <file>                Load a YAML graph from a file.\n"
-              << "  source <file>              Execute commands from a script file.\n"
-              << "  print [<id>|all] [mode]    Show the dependency tree. (Default: all)\n"
-              << "                             Modes: detailed(d), simplified(s)\n"
-              << "  node [<id>]                Open the interactive editor for a node.\n"
-              << "                             If <id> is omitted, a selection menu is shown.\n"
-              << "  traversal [flags]          Show evaluation order with cache status and tree flags.\n"
-              << "                             Tree Flags: detailed(d), simplified(s), no_tree(n)\n"
-              << "                             Cache Flags: m(memory), d(disk), c(check), cr(check&remove)\n"
-              << "  output <file>              Save the current graph to a YAML file.\n"
-              << "  clear-graph                Clear the current in-memory graph.\n"
-              << "  cc, clear-cache [d|m|md]   Clear on-disk, in-memory, or both caches.\n"
-              << "  compute <id|all> [flags]   Compute node(s) with optional flags:\n"
-              << "                             force: Re-compute even if cached.\n"
-              << "                             parallel: Use multiple threads to compute.\n"
-              << "                             t:     Print a simple timer summary to the console.\n"
-              << "                             tl [path]: Log detailed timings to a YAML file.\n"
-              << "  save <id> <file>           Compute a node and save its image output to a file.\n"
-              << "  free                       Free memory used by non-essential intermediate nodes.\n"
-              << "  exit                       Quit the shell.\n";
+static void print_repl_help(const CliConfig& config) {
+    std::cout << "Available REPL (interactive shell) commands:\n\n"
+              << "  help\n"
+              << "    Show this help message.\n\n"
+
+              << "  clear\n"
+              << "    Clear the terminal screen.\n\n"
+
+              << "  config\n"
+              << "    Open the interactive configuration editor.\n\n"
+
+              << "  ops [mode]\n"
+              << "    List all registered operations.\n"
+              << "    Modes: all(a), builtin(b), plugins(p)\n"
+              << "    Default: " << config.default_ops_list_mode << "\n\n"
+
+              << "  read <file>\n"
+              << "    Load a YAML graph from a file.\n\n"
+
+              << "  source <file>\n"
+              << "    Execute commands from a script file.\n\n"
+
+              << "  print [<id>|all] [mode]\n"
+              << "    Show the dependency tree.\n"
+              << "    Modes: detailed(d), simplified(s)\n"
+              << "    Default mode: " << config.default_print_mode << "\n\n"
+
+              << "  node [<id>]\n"
+              << "    Open the interactive editor for a node.\n"
+              << "    If <id> is omitted, a selection menu is shown.\n\n"
+
+              << "  traversal [flags]\n"
+              << "    Show evaluation order with cache status and tree flags.\n"
+              << "    Tree Flags: detailed(d), simplified(s), no_tree(n)\n"
+              << "    Cache Flags: m(memory), d(disk), c(check), cr(check&remove)\n"
+              << "    Default flags: '" << config.default_traversal_arg << "'\n\n"
+
+              << "  output <file>\n"
+              << "    Save the current graph to a YAML file.\n\n"
+
+              << "  clear-graph\n"
+              << "    Clear the current in-memory graph.\n\n"
+
+              << "  cc, clear-cache [d|m|md]\n"
+              << "    Clear on-disk, in-memory, or both caches.\n"
+              << "    Default: " << config.default_cache_clear_arg << "\n\n"
+
+              << "  compute <id|all> [flags]\n"
+              << "    Compute node(s) with optional flags:\n"
+              << "      force:     Re-compute even if cached.\n"
+              << "      parallel:  Use multiple threads to compute.\n"
+              << "      t:         Print a simple timer summary to the console.\n"
+              << "      tl [path]: Log detailed timings to a YAML file.\n"
+              << "      m | -m:    Mute node result output (timers still print when enabled).\n"
+              << "    Defaults: flags='" << config.default_compute_args << "', log_path='" << config.default_timer_log_path << "'\n\n"
+
+              << "  save <id> <file>\n"
+              << "    Compute a node and save its image output to a file.\n\n"
+
+              << "  free\n"
+              << "    Free memory used by non-essential intermediate nodes.\n\n"
+
+              << "  exit\n"
+              << "    Quit the shell.\n";
 }
 
 static std::string ask(const std::string& q, const std::string& def) {
@@ -576,7 +717,7 @@ static bool process_command(const std::string& line, NodeGraph& graph, bool& mod
     auto screen = ScreenInteractive::FitComponent();
     try {
         if (cmd == "help") {
-            print_repl_help();
+            print_repl_help(config);
         } else if (cmd == "clear" || cmd == "cls") {
             std::cout << "\033[2J\033[1;1H";
         } else if (cmd == "print") {
@@ -732,22 +873,28 @@ static bool process_command(const std::string& line, NodeGraph& graph, bool& mod
             std::string target_id_str; iss >> target_id_str;
             if (target_id_str.empty()) { std::cout << "Usage: compute <id|all> [flags]\n"; return true; }
 
-            bool force = false, timer_console = false, timer_log_file = false, parallel = false;
+            bool force = false, timer_console = false, timer_log_file = false, parallel = false, mute = false;
             std::string timer_log_path = "";
-            std::string arg;
-
-            while (iss >> arg) {
-                if (arg == "force") force = true;
-                else if (arg == "t" || arg == "timer") timer_console = true;
-                else if (arg == "parallel") parallel = true;
-                else if (arg == "tl") {
+            // Collect tokens either from user input or from defaults when none provided.
+            std::vector<std::string> tokens;
+            if (iss.rdbuf()->in_avail() == 0) {
+                std::istringstream def_iss(config.default_compute_args);
+                std::string tok; while (def_iss >> tok) tokens.push_back(tok);
+            } else {
+                std::string tok; while (iss >> tok) tokens.push_back(tok);
+            }
+            auto is_flag = [](const std::string& s){
+                return s == "force" || s == "t" || s == "-t" || s == "timer" || s == "parallel" || s == "tl" || s == "-tl" || s == "m" || s == "-m" || s == "mute";
+            };
+            for (size_t i = 0; i < tokens.size(); ++i) {
+                const std::string& a = tokens[i];
+                if (a == "force") force = true;
+                else if (a == "t" || a == "-t" || a == "timer") timer_console = true;
+                else if (a == "parallel") parallel = true;
+                else if (a == "m" || a == "-m" || a == "mute") mute = true;
+                else if (a == "tl" || a == "-tl") {
                     timer_log_file = true;
-                    if (iss.peek() != EOF && iss.peek() != ' ') {
-                        std::string next_arg;
-                        iss >> next_arg;
-                        if (next_arg != "force" && next_arg != "t" && next_arg != "timer" && next_arg != "parallel") { timer_log_path = next_arg; } 
-                        else { iss.seekg(-(next_arg.length()), std::ios_base::cur); }
-                    }
+                    if (i + 1 < tokens.size() && !is_flag(tokens[i+1])) { timer_log_path = tokens[++i]; }
                 }
             }
 
@@ -783,8 +930,16 @@ static bool process_command(const std::string& line, NodeGraph& graph, bool& mod
                 return graph.compute(id, config.cache_precision, force, enable_timing);
             };
 
-            if (target_id_str == "all") { for (int id : graph.ending_nodes()) { print_output(id, compute_func(id)); } } 
-            else { int id = std::stoi(target_id_str); print_output(id, compute_func(id)); }
+            if (target_id_str == "all") {
+                for (int id : graph.ending_nodes()) {
+                    NodeOutput& out = compute_func(id);
+                    if (!mute) print_output(id, out);
+                }
+            } else {
+                int id = std::stoi(target_id_str);
+                NodeOutput& out = compute_func(id);
+                if (!mute) print_output(id, out);
+            }
 
             if (timer_console) {
                 std::cout << "--- Computation Timers (Console) ---\n";

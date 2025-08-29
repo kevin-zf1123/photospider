@@ -21,6 +21,8 @@ struct CliConfig {
     std::string default_timer_log_path = "out/timer.yaml";
     std::string default_ops_list_mode = "all";
     std::string ops_plugin_path_mode = "name_only";
+    // Space-separated default flags for the REPL `compute` command (e.g. "t parallel").
+    std::string default_compute_args = "";
     int history_size = 1000;
 };
 
@@ -31,4 +33,3 @@ bool write_config_to_file(const CliConfig& config, const std::string& path);
 // Load an existing config from `config_path` if it exists.
 // If `config_path` is the default "config.yaml" and does not exist, create it with defaults.
 void load_or_create_config(const std::string& config_path, CliConfig& config);
-
