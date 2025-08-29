@@ -1,3 +1,5 @@
+# FILE: CMakeLists.txt (Complete and Corrected)
+
 # Minimum CMake version required
 cmake_minimum_required(VERSION 3.16)
 
@@ -8,103 +10,152 @@ set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_CXX_EXTENSIONS OFF)
 
 # --- Find Dependencies ---
-# Find OpenCV
-find_package(OpenCV REQUIRED)
-if (NOT OpenCV_FOUND)
-    message(FATAL_ERROR "OpenCV not found!")
-endif()
-
-# Find yaml-cpp
+# Add videoio component for the CVPixelBuffer wrapper function on macOS
+find_package(OpenCV REQUIRED COMPONENTS core imgproc imgcodecs videoio)
 find_package(yaml-cpp REQUIRED)
-if (NOT yaml-cpp_FOUND)
-    message(FATAL_ERROR "yaml-cpp not found! Please ensure it is installed and findable by CMake.")
-endif()
 
-# --- Build FTXUI as a Static Library (mirroring Makefile logic) ---
-# Gather FTXUI source files, excluding tests and fuzzers
-file(GLOB_RECURSE FTXUI_SOURCES
-    "${PROJECT_SOURCE_DIR}/extern/ftxui/src/*.cpp"
+# --- Build FTXUI as Modular Static Libraries (Corrected Version) ---
+
+# Define the base include directory for all FTXUI modules
+set(FTXUI_INCLUDE_DIR "${PROJECT_SOURCE_DIR}/extern/ftxui/include")
+set(FTXUI_SRC_DIR "${PROJECT_SOURCE_DIR}/extern/ftxui/src")
+
+# Helper function to filter out test/fuzzer/benchmark files
+function(filter_ftxui_sources out_var)
+    list(FILTER ${out_var} EXCLUDE REGEX ".*_test\\.cpp$")
+    list(FILTER ${out_var} EXCLUDE REGEX ".*_fuzzer\\.cpp$")
+    list(FILTER ${out_var} EXCLUDE REGEX ".*_benchmark\\.cpp$")
+    set(${out_var} ${${out_var}} PARENT_SCOPE)
+endfunction()
+
+# 1. Build the `screen` module (no dependencies)
+file(GLOB_RECURSE FTXUI_SCREEN_SOURCES "${FTXUI_SRC_DIR}/ftxui/screen/*.cpp")
+filter_ftxui_sources(FTXUI_SCREEN_SOURCES)
+add_library(ftxui-screen STATIC ${FTXUI_SCREEN_SOURCES})
+target_include_directories(ftxui-screen
+    PUBLIC ${FTXUI_INCLUDE_DIR}
+    PRIVATE ${FTXUI_SRC_DIR}
 )
-list(FILTER FTXUI_SOURCES EXCLUDE REGEX ".*_test\\.cpp$")
-list(FILTER FTXUI_SOURCES EXCLUDE REGEX ".*_fuzzer\\.cpp$")
-list(FILTER FTXUI_SOURCES EXCLUDE REGEX ".*_benchmark\\.cpp$")
 
-# Create the static library target for FTXUI
-add_library(ftxui_static STATIC ${FTXUI_SOURCES})
-
-# Specify that targets linking to ftxui_static need its include directories
-target_include_directories(ftxui_static PUBLIC
-    "${PROJECT_SOURCE_DIR}/extern/ftxui/include"
-    "${PROJECT_SOURCE_DIR}/extern/ftxui/src" # For internal FTXUI headers
+# 2. Build the `dom` module (depends on `screen`)
+file(GLOB_RECURSE FTXUI_DOM_SOURCES "${FTXUI_SRC_DIR}/ftxui/dom/*.cpp")
+filter_ftxui_sources(FTXUI_DOM_SOURCES)
+add_library(ftxui-dom STATIC ${FTXUI_DOM_SOURCES})
+target_include_directories(ftxui-dom
+    PUBLIC ${FTXUI_INCLUDE_DIR}
+    PRIVATE ${FTXUI_SRC_DIR}
 )
+target_link_libraries(ftxui-dom PUBLIC ftxui-screen)
+
+# 3. Build the `component` module (depends on `dom`)
+file(GLOB_RECURSE FTXUI_COMPONENT_SOURCES "${FTXUI_SRC_DIR}/ftxui/component/*.cpp")
+filter_ftxui_sources(FTXUI_COMPONENT_SOURCES)
+add_library(ftxui-component STATIC ${FTXUI_COMPONENT_SOURCES})
+target_include_directories(ftxui-component
+    PUBLIC ${FTXUI_INCLUDE_DIR}
+    PRIVATE ${FTXUI_SRC_DIR}
+)
+target_link_libraries(ftxui-component PUBLIC ftxui-dom)
 
 
 # --- Configure Main Executable ---
-# Gather all source files for the main application
-file(GLOB APP_SOURCES
-    "src/*.cpp"
-    "cli/*.cpp"
-)
-
-# Add the main executable target
+file(GLOB APP_SOURCES "src/*.cpp" "cli/*.cpp")
 add_executable(graph_cli ${APP_SOURCES})
-
-# Specify include directories for the main executable
-target_include_directories(graph_cli PRIVATE
-    "${PROJECT_SOURCE_DIR}/include"
-)
-
-# Link libraries to the main executable.
-# Linking to ftxui_static will also add its PUBLIC include directories.
+target_include_directories(graph_cli PRIVATE "${PROJECT_SOURCE_DIR}/include" "${PROJECT_SOURCE_DIR}/src")
+find_library(FW_METAL Metal)
+find_library(FW_COREVIDEO CoreVideo)
+find_library(FW_COREIMAGE CoreImage)
+find_library(FW_QUARTZCORE QuartzCore)
 target_link_libraries(graph_cli PRIVATE
-    ftxui_static
+    ftxui-component
     ${OpenCV_LIBS}
-    yaml-cpp::yaml-cpp # Use the modern imported target for yaml-cpp
+    yaml-cpp::yaml-cpp
+    ${FW_METAL}
+    ${FW_COREVIDEO}
+    ${FW_COREIMAGE}
+    ${FW_QUARTZCORE}
 )
-
 
 # --- Configure Plugins ---
-# Define the output directory for plugins
 set(PLUGIN_OUTPUT_DIR ${CMAKE_BINARY_DIR}/plugins)
 file(MAKE_DIRECTORY ${PLUGIN_OUTPUT_DIR})
-
-# Gather all source files for the custom operations
 file(GLOB PLUGIN_SOURCES "custom_ops/*.cpp")
 
-# Loop over each plugin source and create a shared library for it
+# Exclude platform-specific plugins from the generic list
+if(APPLE)
+    list(REMOVE_ITEM PLUGIN_SOURCES "${CMAKE_CURRENT_SOURCE_DIR}/custom_ops/metal_ops_loader.cpp")
+endif()
+
 foreach(PLUGIN_SOURCE ${PLUGIN_SOURCES})
     get_filename_component(PLUGIN_NAME ${PLUGIN_SOURCE} NAME_WE)
-
     add_library(${PLUGIN_NAME} SHARED ${PLUGIN_SOURCE})
-
-    # *** FIX: Set properties for the shared library, including the SUFFIX ***
     set_target_properties(${PLUGIN_NAME} PROPERTIES
         LIBRARY_OUTPUT_DIRECTORY "${PLUGIN_OUTPUT_DIR}"
         RUNTIME_OUTPUT_DIRECTORY "${PLUGIN_OUTPUT_DIR}"
-        SUFFIX ".so"  # <--- THIS IS THE FIX
     )
+    target_include_directories(${PLUGIN_NAME} PRIVATE "${PROJECT_SOURCE_DIR}/include" "${PROJECT_SOURCE_DIR}/src")
 
-    # Add the necessary include directories for the plugins
-    target_include_directories(${PLUGIN_NAME} PRIVATE
-        "${PROJECT_SOURCE_DIR}/include"
-    )
-
-    # Link the same dependencies to the plugin
     target_link_libraries(${PLUGIN_NAME} PRIVATE
-        ftxui_static
+        ftxui-component
         ${OpenCV_LIBS}
         yaml-cpp::yaml-cpp
     )
 endforeach()
 
-
 # --- Platform-Specific Adjustments ---
 if(APPLE)
-    # This handles the "-undefined dynamic_lookup" flag needed for plugins on macOS
+    set(METAL_PLUGIN_OUTPUT_DIR ${CMAKE_BINARY_DIR}/high_performance/metal)
+    file(MAKE_DIRECTORY ${METAL_PLUGIN_OUTPUT_DIR})
+
+    enable_language(OBJCXX)
+
+    # Use CMake's standard way to find and link Apple frameworks
+    find_library(METAL_FRAMEWORK Metal REQUIRED)
+    find_library(FOUNDATION_FRAMEWORK Foundation REQUIRED)
+    find_library(COREIMAGE_FRAMEWORK CoreImage REQUIRED)
+    find_library(COREVIDEO_FRAMEWORK CoreVideo REQUIRED)
+
+    # Main Metal implementation library
+    add_library(perlin_noise_metal SHARED src/metal/perlin_noise_metal.mm)
+    set_target_properties(perlin_noise_metal PROPERTIES
+        LIBRARY_OUTPUT_DIRECTORY "${METAL_PLUGIN_OUTPUT_DIR}"
+        RUNTIME_OUTPUT_DIRECTORY "${METAL_PLUGIN_OUTPUT_DIR}"
+    )
+    target_link_libraries(perlin_noise_metal PRIVATE
+        ${METAL_FRAMEWORK}
+        ${FOUNDATION_FRAMEWORK}
+        ${COREIMAGE_FRAMEWORK}
+        ${COREVIDEO_FRAMEWORK}
+        ${OpenCV_LIBS}
+        yaml-cpp::yaml-cpp
+    )
+    target_include_directories(perlin_noise_metal PRIVATE "${PROJECT_SOURCE_DIR}/include")
+
+    # Loader plugin that registers the Metal op
+    add_library(metal_ops_loader SHARED custom_ops/metal_ops_loader.cpp)
+    set_target_properties(metal_ops_loader PROPERTIES
+        LIBRARY_OUTPUT_DIRECTORY "${METAL_PLUGIN_OUTPUT_DIR}"
+        RUNTIME_OUTPUT_DIRECTORY "${METAL_PLUGIN_OUTPUT_DIR}"
+    )
+    
+    target_include_directories(metal_ops_loader PRIVATE
+        "${PROJECT_SOURCE_DIR}/include"
+        "${PROJECT_SOURCE_DIR}/src"
+    )
+    
+    target_link_libraries(metal_ops_loader PRIVATE
+        perlin_noise_metal
+        ${OpenCV_LIBS}
+        yaml-cpp::yaml-cpp
+        ftxui-component
+    )
+
     set(CMAKE_SHARED_LINKER_FLAGS "${CMAKE_SHARED_LINKER_FLAGS} -undefined dynamic_lookup")
 endif()
-
 
 # --- Final Output ---
 message(STATUS "Main executable will be built in: ${CMAKE_BINARY_DIR}")
 message(STATUS "Plugins will be built in: ${PLUGIN_OUTPUT_DIR}")
+if(APPLE)
+    message(STATUS "Metal plugins will be built in: ${CMAKE_BINARY_DIR}/high_performance/metal")
+endif()

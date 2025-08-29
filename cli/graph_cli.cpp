@@ -18,6 +18,7 @@
 #include "ftxui/dom/elements.hpp"
 #include "tui_editor.hpp"
 #include "ftxui/dom/node.hpp"
+#include <opencv2/core/ocl.hpp>
 #ifdef _WIN32
 #include <windows.h>
 #else
@@ -1088,13 +1089,19 @@ static void load_plugins(const std::vector<std::string>& plugin_dir_paths, std::
 
         for (const auto& entry : fs::directory_iterator(plugin_dir_path)) {
             const auto& path = entry.path();
-            
-    #ifdef _WIN32
-            const std::string extension = ".dll";
-    #else
-            const std::string extension = ".so";
-    #endif
-            if (path.extension() != extension) continue;
+
+            // --- FIX: Define the correct shared library extension for each platform ---
+            #if defined(_WIN32)
+                const std::string extension = ".dll";
+            #elif defined(__APPLE__)
+                const std::string extension = ".dylib";
+            #else
+                const std::string extension = ".so";
+            #endif
+
+            if (path.extension() != extension) {
+                continue;
+            }
 
             std::cout << "  - Attempting to load plugin: " << path.filename().string() << std::endl;
             
@@ -1156,6 +1163,7 @@ static void load_plugins(const std::vector<std::string>& plugin_dir_paths, std::
 }
 
 int main(int argc, char** argv) {
+    cv::ocl::setUseOpenCL(false);
     std::map<std::string, std::string> op_sources;
     auto& registry = ps::OpRegistry::instance();
 

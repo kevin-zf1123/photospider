@@ -60,3 +60,4 @@ kernel.py
 /extern/ftxui/cmake/
 *.jpg
 *.png
+*.patch
