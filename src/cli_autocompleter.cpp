@@ -70,7 +70,7 @@ void CliAutocompleter::CompletePrintArgs(const std::string& prefix, std::vector<
     if (!only_mode_args) {
         CompleteNodeId(prefix, options);
     }
-    const std::vector<std::string> mode_args = {"detailed", "simplified", "d", "s"};
+    const std::vector<std::string> mode_args = {"full", "simplified", "f", "s"};
     for(const auto& arg : mode_args) {
         if(arg.rfind(prefix, 0) == 0) options.push_back(arg);
     }
@@ -85,7 +85,7 @@ void CliAutocompleter::CompleteComputeArgs(const std::string& prefix, std::vecto
 
 void CliAutocompleter::CompleteTraversalArgs(const std::string& prefix, std::vector<std::string>& options) const {
     // Support print-style tree mode args for traversal as well
-    const std::vector<std::string> tree_args = {"detailed", "simplified", "no_tree", "d", "s", "n"};
+    const std::vector<std::string> tree_args = {"full", "simplified", "no_tree", "f", "s", "n"};
     for(const auto& arg : tree_args) {
         if(arg.rfind(prefix, 0) == 0) options.push_back(arg);
     }

@@ -348,7 +348,7 @@ class NodeEditorUI {
   void CycleFocus() { focus_ = static_cast<FocusPane>((static_cast<int>(focus_) + 1) % 4); }
 
   void RefreshTrees() {
-    const bool detailed = (detail_mode_index_ == 0); // 0=Detailed, 1=Simplified
+    const bool detailed = (detail_mode_index_ == 0); // 0=Full, 1=Simplified
     tree_full_.text = [&]{ std::stringstream ss; graph_.print_dependency_tree(ss, detailed); return ss.str(); }();
 
     if (tree_context_mode_index_ == 0) {
@@ -432,7 +432,7 @@ class NodeEditorUI {
   TreePaneState tree_context_{};
   std::vector<std::string> tree_context_modes_{"From node", "Trees containing"};
   int tree_context_mode_index_ = 0;
-  std::vector<std::string> detail_modes_{"Detailed", "Simplified"};
+  std::vector<std::string> detail_modes_{"Full", "Simplified"};
   int detail_mode_index_ = 0;
   int prev_tree_context_mode_index_ = -1;
   int prev_detail_mode_index_ = -1;

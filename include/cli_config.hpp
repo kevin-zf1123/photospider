@@ -11,7 +11,7 @@ struct CliConfig {
     std::string cache_root_dir = "cache";
     std::vector<std::string> plugin_dirs = {"build/plugins"};
     std::string cache_precision = "int8";
-    std::string default_print_mode = "detailed";
+    std::string default_print_mode = "full";
     std::string default_traversal_arg = "n";
     std::string default_cache_clear_arg = "md";
     std::string default_exit_save_path = "graph_out.yaml";

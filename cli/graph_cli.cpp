@@ -172,6 +172,9 @@ private:
         active_config_path_buffer_ = temp_config_.loaded_config_path;
         history_size_buffer_ = std::to_string(temp_config_.history_size);
         selected_cache_precision_idx_ = find_idx(cache_precision_entries_, temp_config_.cache_precision);
+        // Back-compat mapping: detailed/d -> full; s -> simplified
+        if (temp_config_.default_print_mode == "detailed" || temp_config_.default_print_mode == "d") temp_config_.default_print_mode = "full";
+        if (temp_config_.default_print_mode == "s") temp_config_.default_print_mode = "simplified";
         selected_print_mode_idx_ = find_idx(print_mode_entries_, temp_config_.default_print_mode);
         selected_ops_list_mode_idx_ = find_idx(ops_list_mode_entries_, temp_config_.default_ops_list_mode);
         selected_path_mode_idx_ = find_idx(path_mode_entries_, temp_config_.ops_plugin_path_mode);
@@ -189,12 +192,12 @@ private:
             std::istringstream iss(temp_config_.default_traversal_arg);
             std::string tok;
             while (iss >> tok) {
-                if (tok == "d" || tok == "detailed") selected_traversal_tree_idx_ = 0;
+                if (tok == "f" || tok == "full" || tok == "d" || tok == "detailed") selected_traversal_tree_idx_ = 0; // legacy d/detailed => full
                 else if (tok == "s" || tok == "simplified") selected_traversal_tree_idx_ = 1;
                 else if (tok == "n" || tok == "no_tree" || tok == "none") selected_traversal_tree_idx_ = 2;
-                else if (tok.find('m') != std::string::npos && tok != "md") traversal_show_mem_ = true;
-                else if (tok.find('d') != std::string::npos && tok != "detailed") traversal_show_disk_ = true;
                 else if (tok == "md") { traversal_show_mem_ = true; traversal_show_disk_ = true; }
+                else if (tok == "m") traversal_show_mem_ = true;
+                else if (tok == "d") traversal_show_disk_ = true;
                 else if (tok == "c") selected_traversal_check_idx_ = 1;
                 else if (tok == "cr") selected_traversal_check_idx_ = 2;
             }
@@ -231,7 +234,7 @@ private:
         // Compose traversal defaults from UI state
         {
             std::vector<std::string> parts;
-            if (selected_traversal_tree_idx_ == 0) parts.push_back("detailed");
+            if (selected_traversal_tree_idx_ == 0) parts.push_back("full");
             else if (selected_traversal_tree_idx_ == 1) parts.push_back("simplified");
             else parts.push_back("n");
             if (traversal_show_mem_) parts.push_back("m");
@@ -443,7 +446,7 @@ private:
     std::vector<std::string> plugin_dirs_str_;
     
     std::vector<std::string> cache_precision_entries_ = {"int8", "int16"};
-    std::vector<std::string> print_mode_entries_ = {"detailed", "simplified"};
+    std::vector<std::string> print_mode_entries_ = {"full", "simplified"};
     std::vector<std::string> ops_list_mode_entries_ = {"all", "builtin", "plugins"};
     std::vector<std::string> path_mode_entries_ = {"name_only", "relative_path", "absolute_path"};
     std::vector<std::string> cache_clear_entries_ = {"md", "d", "m"};
@@ -451,7 +454,7 @@ private:
     std::vector<std::string> config_save_entries_ = {"current", "default", "ask", "none"};
     std::vector<std::string> editor_save_entries_ = {"ask", "auto_save_on_apply", "manual"};
     // Traversal multi-select UI state
-    std::vector<std::string> traversal_tree_entries_ = {"detailed", "simplified", "no_tree"};
+    std::vector<std::string> traversal_tree_entries_ = {"full", "simplified", "no_tree"};
     int selected_traversal_tree_idx_ = 2; // default no_tree
     std::vector<std::string> traversal_check_entries_ = {"none", "c", "cr"};
     int selected_traversal_check_idx_ = 0;
@@ -505,7 +508,7 @@ static void print_repl_help(const CliConfig& config) {
 
               << "  print [<id>|all] [mode]\n"
               << "    Show the dependency tree.\n"
-              << "    Modes: detailed(d), simplified(s)\n"
+              << "    Modes: full(f), simplified(s)\n"
               << "    Default mode: " << config.default_print_mode << "\n\n"
 
               << "  node [<id>]\n"
@@ -514,7 +517,7 @@ static void print_repl_help(const CliConfig& config) {
 
               << "  traversal [flags]\n"
               << "    Show evaluation order with cache status and tree flags.\n"
-              << "    Tree Flags: detailed(d), simplified(s), no_tree(n)\n"
+              << "    Tree Flags: full(f), simplified(s), no_tree(n)\n"
               << "    Cache Flags: m(memory), d(disk), c(check), cr(check&remove)\n"
               << "    Default flags: '" << config.default_traversal_arg << "'\n\n"
 
@@ -725,7 +728,7 @@ static bool process_command(const std::string& line, NodeGraph& graph, bool& mod
 
             std::string arg;
             while(iss >> arg) {
-                if (arg == "d" || arg == "detailed" || arg == "s" || arg == "simplified") { mode_str = arg; } 
+                if (arg == "f" || arg == "full" || arg == "s" || arg == "simplified") { mode_str = arg; } 
                 else { 
                     if (target_is_set) { std::cout << "Warning: Multiple targets specified for print; using last one ('" << arg << "').\n"; }
                     target_str = arg;
@@ -733,7 +736,7 @@ static bool process_command(const std::string& line, NodeGraph& graph, bool& mod
                 }
             }
 
-            bool show_params = (mode_str == "d" || mode_str == "detailed");
+            bool show_params = (mode_str == "f" || mode_str == "full");
             if (target_str == "all") { graph.print_dependency_tree(std::cout, show_params); } 
             else {
                 try {
@@ -810,21 +813,21 @@ static bool process_command(const std::string& line, NodeGraph& graph, bool& mod
             if (iss.rdbuf()->in_avail() == 0) {
                  std::istringstream default_iss(config.default_traversal_arg);
                  while(default_iss >> arg) {
-                    if (arg == "d" || arg == "detailed") print_tree_mode = "detailed";
+                    if (arg == "f" || arg == "full") print_tree_mode = "full";
                     else if (arg == "s" || arg == "simplified") print_tree_mode = "simplified";
                     else if (arg == "n" || arg == "no_tree") print_tree_mode = "none";
-                    else if (arg.find('m') != std::string::npos) show_mem = true;
-                    else if (arg.find('d') != std::string::npos && arg != "detailed") show_disk = true;
+                    else if (arg == "m") show_mem = true;
+                    else if (arg == "d") show_disk = true;
                     else if (arg == "cr") do_check_remove = true;
                     else if (arg == "c") do_check = true;
                  }
             } else {
                 while (iss >> arg) {
-                    if (arg == "d" || arg == "detailed") print_tree_mode = "detailed";
+                    if (arg == "f" || arg == "full") print_tree_mode = "full";
                     else if (arg == "s" || arg == "simplified") print_tree_mode = "simplified";
                     else if (arg == "n" || arg == "no_tree") print_tree_mode = "none";
-                    else if (arg.find('m') != std::string::npos) show_mem = true;
-                    else if (arg.find('d') != std::string::npos && arg != "detailed") show_disk = true;
+                    else if (arg == "m") show_mem = true;
+                    else if (arg == "d") show_disk = true;
                     else if (arg == "cr") do_check_remove = true;
                     else if (arg == "c") do_check = true;
                 }
@@ -833,7 +836,7 @@ static bool process_command(const std::string& line, NodeGraph& graph, bool& mod
             if (do_check_remove) graph.synchronize_disk_cache(config.cache_precision);
             else if (do_check) graph.cache_all_nodes(config.cache_precision);
 
-            if (print_tree_mode == "detailed") graph.print_dependency_tree(std::cout, true);
+            if (print_tree_mode == "full") graph.print_dependency_tree(std::cout, true);
             else if (print_tree_mode == "simplified") graph.print_dependency_tree(std::cout, false);
             do_traversal(graph, show_mem, show_disk);
         } else if (cmd == "config") {
@@ -1304,13 +1307,13 @@ int main(int argc, char** argv) {
                 std::istringstream iss(config.default_traversal_arg);
                 std::string arg;
                  while(iss >> arg) {
-                    if (arg == "d" || arg == "detailed") print_tree_mode = "detailed";
+                    if (arg == "f" || arg == "full") print_tree_mode = "full";
                     else if (arg == "s" || arg == "simplified") print_tree_mode = "simplified";
                     else if (arg == "n" || arg == "no_tree") print_tree_mode = "none";
-                    else if (arg.find('m') != std::string::npos) show_mem = true;
-                    else if (arg.find('d') != std::string::npos && arg != "detailed") show_disk = true;
+                    else if (arg == "m") show_mem = true;
+                    else if (arg == "d") show_disk = true;
                  }
-                if (print_tree_mode == "detailed") graph.print_dependency_tree(std::cout, true);
+                if (print_tree_mode == "full") graph.print_dependency_tree(std::cout, true);
                 else if (print_tree_mode == "simplified") graph.print_dependency_tree(std::cout, false);
                 do_traversal(graph, show_mem, show_disk);
                 did_any_action = true; break;
