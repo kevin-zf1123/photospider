@@ -423,6 +423,9 @@ std::vector<int> NodeGraph::ending_nodes() const {
 static void print_dep_tree_recursive(const NodeGraph& g, std::ostream& os, int node_id, int level, std::unordered_set<int>& path, bool show_parameters) {
     auto indent = [&](int l) { for (int i = 0; i < l; ++i) os << "  "; };
 
+    // Print a blank line before each node/cycle for readability between siblings and levels.
+    os << "\n";
+
     if (path.count(node_id)) {
         indent(level);
         os << "- ... (Cycle detected on Node " << node_id << ") ...\n";
@@ -435,21 +438,74 @@ static void print_dep_tree_recursive(const NodeGraph& g, std::ostream& os, int n
     os << "- Node " << node.id << " (" << node.name << " | " << node.type << ":" << node.subtype << ")\n";
 
     if (show_parameters && node.parameters && node.parameters.IsMap() && node.parameters.size() > 0) {
-        YAML::Emitter emitter;
-        emitter << YAML::Flow << node.parameters;
+        // Print parameters with proper indentation. For map values, print as nested blocks.
         indent(level + 1);
-        os << "static_params: " << emitter.c_str() << "\n";
+        os << "static_params:\n";
+
+        // Recursive dump for YAML maps with indentation.
+        std::function<void(const YAML::Node&, int)> dump_map = [&](const YAML::Node& m, int lvl) {
+            for (auto it = m.begin(); it != m.end(); ++it) {
+                indent(lvl);
+                std::string key;
+                try { key = it->first.as<std::string>(); }
+                catch(...) {
+                    YAML::Emitter ke;
+                    ke << it->first;
+                    key = ke.c_str();
+                }
+                const YAML::Node& val = it->second;
+                if (val.IsMap()) {
+                    os << key << ":\n";
+                    dump_map(val, lvl + 1);
+                } else {
+                    os << key << ": ";
+                    YAML::Emitter ve;
+                    // For scalars and sequences, keep compact flow style.
+                    ve << YAML::Flow << val;
+                    os << ve.c_str() << "\n";
+                }
+            }
+        };
+
+        // Print top-level parameters.
+        for (auto it = node.parameters.begin(); it != node.parameters.end(); ++it) {
+            const auto& key_node = it->first;
+            const auto& val_node = it->second;
+            std::string key;
+            try { key = key_node.as<std::string>(); }
+            catch(...) {
+                YAML::Emitter ke;
+                ke << key_node;
+                key = ke.c_str();
+            }
+
+            if (val_node.IsMap()) {
+                indent(level + 2);
+                os << key << ":\n";
+                dump_map(val_node, level + 3);
+            } else {
+                indent(level + 2);
+                os << key << ": ";
+                YAML::Emitter ve;
+                ve << YAML::Flow << val_node;
+                os << ve.c_str() << "\n";
+            }
+        }
     }
 
     for (const auto& input : node.image_inputs) {
         if (input.from_node_id != -1 && g.has_node(input.from_node_id)) {
-             indent(level + 1);
-             os << "(image from " << input.from_node_id << ":" << input.from_output_name << ")\n";
+            // Add a blank line before printing the input edge for readability.
+            os << "\n";
+            indent(level + 1);
+            os << "(image from " << input.from_node_id << ":" << input.from_output_name << ")\n";
             print_dep_tree_recursive(g, os, input.from_node_id, level + 2, path, show_parameters);
         }
     }
     for (const auto& input : node.parameter_inputs) {
         if (input.from_node_id != -1 && g.has_node(input.from_node_id)) {
+            // Add a blank line before printing the parameter edge for readability.
+            os << "\n";
             indent(level + 1);
             os << "(param '" << input.to_parameter_name << "' from " << input.from_node_id << ":" << input.from_output_name << ")\n";
             print_dep_tree_recursive(g, os, input.from_node_id, level + 2, path, show_parameters);
