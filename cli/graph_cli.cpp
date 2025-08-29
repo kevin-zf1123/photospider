@@ -1040,21 +1040,18 @@ static void run_repl(NodeGraph& graph, CliConfig& config, const std::map<std::st
 
         switch (key) {
             case ENTER: {
-                std::cout << "\n";
+                // Restore cooked mode first so newlines behave normally,
+                // and ensure we start at column 0 on the next line.
+                term_input.Restore();
+                std::cout << "\r\n";
                 if (!line_buffer.empty()) {
                     history.Add(line_buffer);
                     history.Save();
                 }
-
-                // FIX: This is the critical change.
-                // 1. Restore the terminal to its normal, "cooked" mode so that
-                //    std::cout works as expected inside process_command.
-                term_input.Restore();
-
-                // 2. Now, execute the command.
+                // Now, execute the command.
                 bool continue_repl = process_command(line_buffer, graph, modified, config, op_sources);
 
-                // 3. Re-enter raw mode to capture individual keystrokes for the next prompt.
+                // Re-enter raw mode to capture individual keystrokes for the next prompt.
                 term_input.SetRaw();
 
                 if (!continue_repl) {
@@ -1071,11 +1068,12 @@ static void run_repl(NodeGraph& graph, CliConfig& config, const std::map<std::st
             }
             case CTRL_C: {
                 if (line_buffer.empty()) {
-                    std::cout << "\n(To exit, type 'exit' or press Ctrl+C again on an empty line)\n";
+                    // Print starting at column 0 even in raw mode.
+                    std::cout << "\r\n(To exit, type 'exit' or press Ctrl+C again on an empty line)\r\n";
                     redraw_line();
                     key = term_input.GetChar();
                     if(key == CTRL_C) {
-                        std::cout << "\nExiting." << std::endl;
+                        std::cout << "\r\nExiting." << std::endl;
                         return;
                     }
                 }
