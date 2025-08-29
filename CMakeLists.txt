@@ -112,8 +112,11 @@ endforeach()
 
 # --- Platform-Specific Adjustments ---
 if(APPLE)
-    set(METAL_PLUGIN_OUTPUT_DIR ${CMAKE_BINARY_DIR}/high_performance/metal)
-    file(MAKE_DIRECTORY ${METAL_PLUGIN_OUTPUT_DIR})
+    # Output layout for Metal components
+    set(METAL_ROOT_DIR ${CMAKE_BINARY_DIR}/high_performance/metal)
+    set(METAL_OPS_DIR  ${METAL_ROOT_DIR}/ops)
+    file(MAKE_DIRECTORY ${METAL_ROOT_DIR})
+    file(MAKE_DIRECTORY ${METAL_OPS_DIR})
 
     enable_language(OBJCXX)
 
@@ -123,11 +126,12 @@ if(APPLE)
     find_library(COREIMAGE_FRAMEWORK CoreImage REQUIRED)
     find_library(COREVIDEO_FRAMEWORK CoreVideo REQUIRED)
 
-    # Main Metal implementation library
+    # Main Metal implementation library (goes under ops/)
     add_library(perlin_noise_metal SHARED src/metal/perlin_noise_metal.mm)
     set_target_properties(perlin_noise_metal PROPERTIES
-        LIBRARY_OUTPUT_DIRECTORY "${METAL_PLUGIN_OUTPUT_DIR}"
-        RUNTIME_OUTPUT_DIRECTORY "${METAL_PLUGIN_OUTPUT_DIR}"
+        LIBRARY_OUTPUT_DIRECTORY "${METAL_OPS_DIR}"
+        RUNTIME_OUTPUT_DIRECTORY "${METAL_OPS_DIR}"
+        MACOSX_RPATH ON
     )
     target_link_libraries(perlin_noise_metal PRIVATE
         ${METAL_FRAMEWORK}
@@ -139,11 +143,15 @@ if(APPLE)
     )
     target_include_directories(perlin_noise_metal PRIVATE "${PROJECT_SOURCE_DIR}/include")
 
-    # Loader plugin that registers the Metal op
+    # Loader plugin that registers the Metal op (stays at metal/ root)
     add_library(metal_ops_loader SHARED custom_ops/metal_ops_loader.cpp)
     set_target_properties(metal_ops_loader PROPERTIES
-        LIBRARY_OUTPUT_DIRECTORY "${METAL_PLUGIN_OUTPUT_DIR}"
-        RUNTIME_OUTPUT_DIRECTORY "${METAL_PLUGIN_OUTPUT_DIR}"
+        LIBRARY_OUTPUT_DIRECTORY "${METAL_ROOT_DIR}"
+        RUNTIME_OUTPUT_DIRECTORY "${METAL_ROOT_DIR}"
+        # Ensure dependent Metal ops under ops/ are found at runtime
+        BUILD_RPATH "@loader_path/ops"
+        INSTALL_RPATH "@loader_path/ops"
+        MACOSX_RPATH ON
     )
     
     target_include_directories(metal_ops_loader PRIVATE
@@ -165,5 +173,6 @@ endif()
 message(STATUS "Main executable will be built in: ${CMAKE_BINARY_DIR}")
 message(STATUS "Plugins will be built in: ${PLUGIN_OUTPUT_DIR}")
 if(APPLE)
-    message(STATUS "Metal plugins will be built in: ${CMAKE_BINARY_DIR}/high_performance/metal")
+    message(STATUS "Metal plugins will be built in: ${METAL_ROOT_DIR}")
+    message(STATUS "Metal ops will be built in: ${METAL_OPS_DIR}")
 endif()

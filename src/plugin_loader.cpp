@@ -20,12 +20,12 @@ using namespace ps; // for OpRegistry and fs
 void load_plugins(const std::vector<std::string>& plugin_dir_paths,
                   std::map<std::string, std::string>& op_sources) {
     auto& registry = OpRegistry::instance();
-    for (const auto& plugin_dir_path : plugin_dir_paths) {
-        if (!fs::exists(plugin_dir_path) || !fs::is_directory(plugin_dir_path)) continue;
-        std::cout << "Scanning for plugins in '" << plugin_dir_path << "'..." << std::endl;
 
-        for (const auto& entry : fs::directory_iterator(plugin_dir_path)) {
-            const auto& path = entry.path();
+    auto iter_and_load = [&](const fs::path& base_dir, bool recursive) {
+        if (!fs::exists(base_dir) || !fs::is_directory(base_dir)) return;
+        std::cout << "Scanning for plugins in '" << base_dir.string() << (recursive ? "' (recursive)..." : "'...") << std::endl;
+
+        auto process_path = [&](const fs::path& path) {
             #if defined(_WIN32)
                 const std::string extension = ".dll";
             #elif defined(__APPLE__)
@@ -33,24 +33,24 @@ void load_plugins(const std::vector<std::string>& plugin_dir_paths,
             #else
                 const std::string extension = ".so";
             #endif
-            if (path.extension() != extension) continue;
+            if (path.extension() != extension) return; // skip non-shared libraries
 
             std::cout << "  - Attempting to load plugin: " << path.filename().string() << std::endl;
             auto keys_before = registry.get_keys();
 
             #ifdef _WIN32
             HMODULE handle = LoadLibrary(path.string().c_str());
-            if (!handle) { std::cerr << "    Error: Failed to load plugin. Code: " << GetLastError() << std::endl; continue; }
+            if (!handle) { std::cerr << "    Error: Failed to load plugin. Code: " << GetLastError() << std::endl; return; }
             using RegisterFunc = void(*)();
             RegisterFunc register_func = (RegisterFunc)GetProcAddress(handle, "register_photospider_ops");
-            if (!register_func) { std::cerr << "    Error: Cannot find 'register_photospider_ops' export in plugin." << std::endl; FreeLibrary(handle); continue; }
+            if (!register_func) { std::cerr << "    Error: Cannot find 'register_photospider_ops' export in plugin." << std::endl; FreeLibrary(handle); return; }
             #else
             void* handle = dlopen(path.c_str(), RTLD_LAZY);
-            if (!handle) { std::cerr << "    Error: Failed to load plugin: " << dlerror() << std::endl; continue; }
+            if (!handle) { std::cerr << "    Error: Failed to load plugin: " << dlerror() << std::endl; return; }
             void (*register_func)();
             *(void**)(&register_func) = dlsym(handle, "register_photospider_ops");
             const char* dlsym_error = dlerror();
-            if (dlsym_error) { std::cerr << "    Error: Cannot find 'register_photospider_ops' export in plugin: " << dlsym_error << std::endl; dlclose(handle); continue; }
+            if (dlsym_error) { std::cerr << "    Error: Cannot find 'register_photospider_ops' export in plugin: " << dlsym_error << std::endl; dlclose(handle); return; }
             #endif
 
             try {
@@ -68,7 +68,34 @@ void load_plugins(const std::vector<std::string>& plugin_dir_paths,
                 dlclose(handle);
                 #endif
             }
+        };
+
+        if (recursive) {
+            for (const auto& entry : fs::recursive_directory_iterator(base_dir)) {
+                if (entry.is_regular_file()) process_path(entry.path());
+            }
+        } else {
+            for (const auto& entry : fs::directory_iterator(base_dir)) {
+                if (entry.is_regular_file()) process_path(entry.path());
+            }
         }
+    };
+
+    for (const auto& raw_path : plugin_dir_paths) {
+        if (raw_path.empty()) continue;
+        // Interpret simple wildcard suffixes:
+        //   path/**  => recursive
+        //   path/*   => shallow (explicit)
+        //   path     => shallow
+        bool recursive = false;
+        std::string path_str = raw_path;
+        if (path_str.size() >= 3 && path_str.substr(path_str.size() - 3) == "/**") {
+            recursive = true;
+            path_str = path_str.substr(0, path_str.size() - 3);
+        } else if (path_str.size() >= 2 && path_str.substr(path_str.size() - 2) == "/*") {
+            recursive = false;
+            path_str = path_str.substr(0, path_str.size() - 2);
+        }
+        iter_and_load(path_str, recursive);
     }
 }
-
