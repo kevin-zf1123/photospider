@@ -543,6 +543,7 @@ static void print_repl_help() {
               << "  cc, clear-cache [d|m|md]   Clear on-disk, in-memory, or both caches.\n"
               << "  compute <id|all> [flags]   Compute node(s) with optional flags:\n"
               << "                             force: Re-compute even if cached.\n"
+              << "                             parallel: Use multiple threads to compute.\n"
               << "                             t:     Print a simple timer summary to the console.\n"
               << "                             tl [path]: Log detailed timings to a YAML file.\n"
               << "  save <id> <file>           Compute a node and save its image output to a file.\n"
@@ -928,6 +929,7 @@ static bool process_command(const std::string& line, NodeGraph& graph, bool& mod
             bool timer_console = false;
             bool timer_log_file = false;
             std::string timer_log_path = "";
+            bool parallel = false;
 
             std::string arg;
             while (iss >> arg) {
@@ -935,12 +937,14 @@ static bool process_command(const std::string& line, NodeGraph& graph, bool& mod
                     force = true;
                 } else if (arg == "t" || arg == "timer") {
                     timer_console = true;
+                } else if (arg == "parallel") {
+                    parallel = true;
                 } else if (arg == "tl") {
                     timer_log_file = true;
                     if (iss.peek() != EOF && iss.peek() != ' ') {
                         std::string next_arg;
                         iss >> next_arg;
-                        if (next_arg != "force" && next_arg != "t" && next_arg != "timer") {
+                        if (next_arg != "force" && next_arg != "t" && next_arg != "timer" && next_arg != "parallel") {
                             timer_log_path = next_arg;
                         } else {
                             iss.seekg(-(next_arg.length()), std::ios_base::cur);
@@ -979,13 +983,22 @@ static bool process_command(const std::string& line, NodeGraph& graph, bool& mod
                 }
             };
 
+            auto compute_func = [&](int id) -> NodeOutput& {
+                if (parallel) {
+                    std::cout << "--- Starting parallel computation ---" << std::endl;
+                    return graph.compute_parallel(id, config.cache_precision, force, enable_timing);
+                } else {
+                    return graph.compute(id, config.cache_precision, force, enable_timing);
+                }
+            };
+
             if (target_id_str == "all") {
                 for (int id : graph.ending_nodes()) {
-                    print_output(id, graph.compute(id, config.cache_precision, force, enable_timing));
+                    print_output(id, compute_func(id));
                 }
             } else {
                 int id = std::stoi(target_id_str);
-                print_output(id, graph.compute(id, config.cache_precision, force, enable_timing));
+                print_output(id, compute_func(id));
             }
 
             if (timer_console) {

@@ -8,8 +8,104 @@
 #include <unordered_set>
 #include <yaml-cpp/emitter.h>
 #include <chrono>
+#include <set>
+#include <thread>
+#include <atomic>
+#include <condition_variable>
+#include <queue>
+
 
 namespace ps {
+
+// --- Private Helper to load from disk cache ---
+bool NodeGraph::try_load_from_disk_cache(Node& node) {
+    if (node.cached_output.has_value() || cache_root.empty() || node.caches.empty()) {
+        return node.cached_output.has_value();
+    }
+    
+    for (const auto& cache_entry : node.caches) {
+        if (cache_entry.cache_type == "image" && !cache_entry.location.empty()) {
+            fs::path cache_file = node_cache_dir(node.id) / cache_entry.location;
+            fs::path metadata_file = cache_file;
+            metadata_file.replace_extension(".yml");
+
+            if (fs::exists(cache_file) || fs::exists(metadata_file)) {
+                 std::cout << "Loading cache for Node " << node.id << " from: " << fs::relative(node_cache_dir(node.id)).string() << std::endl;
+                 NodeOutput loaded_output;
+                 if (fs::exists(cache_file)) {
+                    cv::Mat loaded_mat = cv::imread(cache_file.string(), cv::IMREAD_UNCHANGED);
+                    if (!loaded_mat.empty()) {
+                        double scale = 1.0;
+                        if (loaded_mat.depth() == CV_8U) scale = 1.0 / 255.0;
+                        else if (loaded_mat.depth() == CV_16U) scale = 1.0 / 65535.0;
+                        loaded_mat.convertTo(loaded_output.image_matrix, CV_32F, scale);
+                        loaded_output.image_umatrix = loaded_output.image_matrix.getUMat(cv::ACCESS_READ);
+                    }
+                 }
+                 if (fs::exists(metadata_file)) {
+                    YAML::Node meta = YAML::LoadFile(metadata_file.string());
+                    for(auto it = meta.begin(); it != meta.end(); ++it) {
+                        loaded_output.data[it->first.as<std::string>()] = it->second;
+                    }
+                 }
+                 node.cached_output = std::move(loaded_output);
+                 return true;
+            }
+        }
+    }
+    return false;
+}
+
+void NodeGraph::execute_op_for_node(int node_id, const std::string& cache_precision, bool enable_timing) {
+    auto& node = nodes.at(node_id);
+    std::string result_source = "unknown";
+    auto start_time = std::chrono::high_resolution_clock::now();
+
+    std::cout << "Computing node " << node.id << " (" << node.name << ") on thread " << std::this_thread::get_id() << "..." << std::endl;
+    node.runtime_parameters = node.parameters ? node.parameters : YAML::Node(YAML::NodeType::Map);
+
+    for (const auto& p_input : node.parameter_inputs) {
+        if (p_input.from_node_id == -1) continue;
+        const auto& upstream_output = nodes.at(p_input.from_node_id).cached_output;
+        if (!upstream_output) {
+             throw GraphError("Internal parallel error: dependency " + std::to_string(p_input.from_node_id) + " not computed for node " + std::to_string(node_id));
+        }
+        auto it = upstream_output->data.find(p_input.from_output_name);
+        if (it == upstream_output->data.end()) {
+            throw GraphError("Node " + std::to_string(p_input.from_node_id) + " did not produce required output '" + p_input.from_output_name + "' for node " + std::to_string(node_id));
+        }
+        node.runtime_parameters[p_input.to_parameter_name] = it->second;
+    }
+
+    std::vector<const NodeOutput*> input_node_outputs;
+    for (const auto& i_input : node.image_inputs) {
+        if (i_input.from_node_id == -1) continue;
+        const auto& upstream_output = nodes.at(i_input.from_node_id).cached_output;
+        if (!upstream_output) {
+             throw GraphError("Internal parallel error: dependency " + std::to_string(i_input.from_node_id) + " not computed for node " + std::to_string(node_id));
+        }
+        if (upstream_output->image_matrix.empty() && upstream_output->image_umatrix.empty()){
+            std::cerr << "Warning: Input image from node " << i_input.from_node_id << " is empty for node " << node.id << std::endl;
+        }
+        input_node_outputs.push_back(&*upstream_output);
+    }
+
+    auto op_func_opt = OpRegistry::instance().find(node.type, node.subtype);
+    if (!op_func_opt) {
+        throw GraphError("No operation registered for type=" + node.type + ", subtype=" + node.subtype);
+    }
+
+    node.cached_output = (*op_func_opt)(node, input_node_outputs);
+    result_source = "computed";
+    save_cache_if_configured(node, cache_precision);
+
+    if (enable_timing) {
+        auto end_time = std::chrono::high_resolution_clock::now();
+        std::chrono::duration<double, std::milli> elapsed = end_time - start_time;
+        this->timing_results.node_timings.push_back({node.id, node.name, elapsed.count(), result_source});
+    }
+}
+
 
 void NodeGraph::clear() {
     nodes.clear();
@@ -96,56 +192,19 @@ NodeOutput& NodeGraph::compute_internal(int node_id, const std::string& cache_pr
     auto& node = nodes.at(node_id);
     std::string result_source = "unknown";
     
-    // Timer starts at the very beginning of the process for this node.
     auto start_time = std::chrono::high_resolution_clock::now();
 
-    // We use a do-while(false) loop with `break` statements as a structured
-    // alternative to `goto` for jumping to the common logging logic at the end.
     do {
-        // 1. Check for in-memory cache
         if (node.cached_output.has_value()) {
             result_source = "memory_cache";
-            break; // Result is ready, break to the end for logging.
+            break; 
         }
 
-        // 2. Check for on-disk cache
-        fs::path metadata_file;
-        if (!cache_root.empty() && !node.caches.empty()) {
-            for (const auto& cache_entry : node.caches) {
-                if (cache_entry.cache_type == "image" && !cache_entry.location.empty()) {
-                    fs::path cache_file = node_cache_dir(node_id) / cache_entry.location;
-                    metadata_file = cache_file;
-                    metadata_file.replace_extension(".yml");
-
-                    if (fs::exists(cache_file) || fs::exists(metadata_file)) {
-                         std::cout << "Loading cache for Node " << node.id << " from: " << fs::relative(node_cache_dir(node_id)).string() << std::endl;
-                         NodeOutput loaded_output;
-                         if (fs::exists(cache_file)) {
-                            cv::Mat loaded_mat = cv::imread(cache_file.string(), cv::IMREAD_UNCHANGED);
-                            if (!loaded_mat.empty()) {
-                                double scale = 1.0;
-                                if (loaded_mat.depth() == CV_8U) scale = 1.0 / 255.0;
-                                else if (loaded_mat.depth() == CV_16U) scale = 1.0 / 65535.0;
-                                loaded_mat.convertTo(loaded_output.image_matrix, CV_32F, scale);
-                                loaded_output.image_umatrix = loaded_output.image_matrix.getUMat(cv::ACCESS_READ);
-                            }
-                         }
-                         if (fs::exists(metadata_file)) {
-                            YAML::Node meta = YAML::LoadFile(metadata_file.string());
-                            for(auto it = meta.begin(); it != meta.end(); ++it) {
-                                loaded_output.data[it->first.as<std::string>()] = it->second;
-                            }
-                         }
-                         node.cached_output = std::move(loaded_output);
-                         result_source = "disk_cache";
-                         break; // Found on disk, break to the end.
-                    }
-                }
-            }
-            if (result_source == "disk_cache") break; // Exit the do-while loop if disk cache was loaded
+        if (try_load_from_disk_cache(node)) {
+            result_source = "disk_cache";
+            break;
         }
         
-        // 3. If no cache hit, proceed with computation
         if (visiting[node_id]) {
             throw GraphError("Cycle detected in graph involving node " + std::to_string(node_id));
         }
@@ -154,7 +213,6 @@ NodeOutput& NodeGraph::compute_internal(int node_id, const std::string& cache_pr
         std::cout << "Computing node " << node.id << " (" << node.name << ")..." << std::endl;
         node.runtime_parameters = node.parameters ? node.parameters : YAML::Node(YAML::NodeType::Map);
 
-        // Compute dependencies recursively...
         for (const auto& p_input : node.parameter_inputs) {
             if (p_input.from_node_id == -1) continue;
             if (!has_node(p_input.from_node_id)) {
@@ -182,7 +240,6 @@ NodeOutput& NodeGraph::compute_internal(int node_id, const std::string& cache_pr
             input_node_outputs.push_back(&upstream_output);
         }
         
-        // Find and execute the operation function
         auto op_func_opt = OpRegistry::instance().find(node.type, node.subtype);
         if (!op_func_opt) {
             throw GraphError("No operation registered for type=" + node.type + ", subtype=" + node.subtype);
@@ -195,7 +252,6 @@ NodeOutput& NodeGraph::compute_internal(int node_id, const std::string& cache_pr
 
     } while (false);
 
-    // This is the common exit point for logging.
     if (enable_timing) {
         auto end_time = std::chrono::high_resolution_clock::now();
         std::chrono::duration<double, std::milli> elapsed = end_time - start_time;
@@ -204,6 +260,146 @@ NodeOutput& NodeGraph::compute_internal(int node_id, const std::string& cache_pr
 
     return *node.cached_output;
 }
+
+NodeOutput& NodeGraph::compute_parallel(int node_id, const std::string& cache_precision, bool force_recache, bool enable_timing) {
+    if (!has_node(node_id)) {
+        throw GraphError("Cannot compute: node " + std::to_string(node_id) + " not found.");
+    }
+
+    if (force_recache) {
+        std::scoped_lock lock(graph_mutex_);
+        try {
+            auto deps = topo_postorder_from(node_id);
+            for (int id : deps) {
+                if (nodes.count(id)) {
+                    nodes.at(id).cached_output.reset();
+                }
+            }
+        } catch (const GraphError&) {}
+    }
+
+    {
+        std::scoped_lock lock(graph_mutex_);
+        if (nodes.at(node_id).cached_output) {
+            return *nodes.at(node_id).cached_output;
+        }
+    }
+
+    std::set<int> subgraph_nodes_set;
+    try {
+        auto order = topo_postorder_from(node_id);
+        subgraph_nodes_set.insert(order.begin(), order.end());
+    } catch (const GraphError& e) {
+        std::cerr << "Cannot parallelize graph with cycle, falling back to sequential execution. Error: " << e.what() << std::endl;
+        return compute(node_id, cache_precision, false, enable_timing);
+    }
+
+    std::unordered_map<int, std::vector<int>> successors;
+    std::unordered_map<int, std::atomic<int>> dependency_count;
+    std::queue<int> ready_queue;
+    std::mutex queue_mutex;
+    std::condition_variable cv_queue;
+
+    {
+        std::scoped_lock lock(graph_mutex_);
+        for (int current_id : subgraph_nodes_set) {
+            auto& node = nodes.at(current_id);
+            int deps = 0;
+            auto process_input = [&](int from_id) {
+                if (from_id != -1 && subgraph_nodes_set.count(from_id)) {
+                    successors[from_id].push_back(current_id);
+                    deps++;
+                }
+            };
+            for (const auto& input : node.image_inputs) process_input(input.from_node_id);
+            for (const auto& input : node.parameter_inputs) process_input(input.from_node_id);
+            dependency_count[current_id] = deps;
+        }
+    }
+
+    for (int current_id : subgraph_nodes_set) {
+        bool is_pre_computed = false;
+        if (!force_recache) {
+            std::scoped_lock lock(graph_mutex_);
+            is_pre_computed = try_load_from_disk_cache(nodes.at(current_id));
+        }
+        
+        if (is_pre_computed) {
+            if (successors.count(current_id)) {
+                for (int successor_id : successors[current_id]) {
+                    if (--dependency_count[successor_id] == 0) {
+                        std::scoped_lock q_lock(queue_mutex);
+                        ready_queue.push(successor_id);
+                        cv_queue.notify_one();
+                    }
+                }
+            }
+        } else if (dependency_count[current_id] == 0) {
+            std::scoped_lock q_lock(queue_mutex);
+            ready_queue.push(current_id);
+            cv_queue.notify_one();
+        }
+    }
+
+    unsigned int num_threads = std::max(1u, std::thread::hardware_concurrency());
+    std::vector<std::thread> workers;
+    std::atomic<bool> done = false;
+
+    std::mutex final_node_mutex;
+    std::condition_variable final_node_cv;
+    bool final_node_done = false;
+
+    for (unsigned int i = 0; i < num_threads; ++i) {
+        workers.emplace_back([&] {
+            while (true) {
+                int current_id;
+                {
+                    std::unique_lock<std::mutex> lock(queue_mutex);
+                    cv_queue.wait(lock, [&] { return !ready_queue.empty() || done; });
+                    if (done && ready_queue.empty()) return;
+                    current_id = ready_queue.front();
+                    ready_queue.pop();
+                }
+
+                {
+                    std::scoped_lock lock(graph_mutex_);
+                    if (nodes.at(current_id).cached_output) continue;
+                    execute_op_for_node(current_id, cache_precision, enable_timing);
+                }
+
+                if (successors.count(current_id)) {
+                    for (int successor_id : successors[current_id]) {
+                        if (--dependency_count[successor_id] == 0) {
+                            std::scoped_lock q_lock(queue_mutex);
+                            ready_queue.push(successor_id);
+                            cv_queue.notify_one();
+                        }
+                    }
+                }
+
+                if (current_id == node_id) {
+                    std::scoped_lock lock(final_node_mutex);
+                    final_node_done = true;
+                    final_node_cv.notify_one();
+                }
+            }
+        });
+    }
+
+    {
+        std::unique_lock<std::mutex> lock(final_node_mutex);
+        final_node_cv.wait(lock, [&]{ return final_node_done || nodes.at(node_id).cached_output.has_value(); });
+    }
+
+    done = true;
+    cv_queue.notify_all();
+    for (auto& worker : workers) {
+        worker.join();
+    }
+    
+    return *nodes.at(node_id).cached_output;
+}
+
 
 void NodeGraph::clear_timing_results() {
     timing_results.node_timings.clear();

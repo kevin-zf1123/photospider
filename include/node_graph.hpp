@@ -1,7 +1,13 @@
+// FILE: include/node_graph.hpp
 #pragma once
 #include "ps_types.hpp"
 #include "node.hpp"
 #include <unordered_set>
+#include <thread>
+#include <mutex>
+#include <condition_variable>
+#include <atomic>
+#include <queue>
 
 namespace ps {
 struct NodeTiming {
@@ -41,6 +47,7 @@ public:
     fs::path node_cache_dir(int node_id) const;
 
     NodeOutput& compute(int node_id, const std::string& cache_precision, bool force_recache = false, bool enable_timing = false);    
+    NodeOutput& compute_parallel(int node_id, const std::string& cache_precision, bool force_recache = false, bool enable_timing = false);
     void clear_timing_results();
     std::vector<int> ending_nodes() const;
     void print_dependency_tree(std::ostream& os, bool show_parameters = true) const;
@@ -54,6 +61,10 @@ private:
     std::vector<int> parents_of(int node_id) const;
 
     void save_cache_if_configured(const Node& node, const std::string& cache_precision) const;
+    bool try_load_from_disk_cache(Node& node);
+    void execute_op_for_node(int node_id, const std::string& cache_precision, bool enable_timing);
+
+    std::mutex graph_mutex_;
 };
 
 } // namespace ps
