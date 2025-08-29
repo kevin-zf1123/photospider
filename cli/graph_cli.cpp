@@ -187,7 +187,7 @@ private:
         // Parse traversal defaults into UI state
         selected_traversal_tree_idx_ = 2; // no_tree by default
         selected_traversal_check_idx_ = 0; // none
-        traversal_show_mem_ = traversal_show_disk_ = false;
+        int cache_m = 0, cache_d = 0; // count m/d presence
         {
             std::istringstream iss(temp_config_.default_traversal_arg);
             std::string tok;
@@ -195,13 +195,14 @@ private:
                 if (tok == "f" || tok == "full" || tok == "d" || tok == "detailed") selected_traversal_tree_idx_ = 0; // legacy d/detailed => full
                 else if (tok == "s" || tok == "simplified") selected_traversal_tree_idx_ = 1;
                 else if (tok == "n" || tok == "no_tree" || tok == "none") selected_traversal_tree_idx_ = 2;
-                else if (tok == "md") { traversal_show_mem_ = true; traversal_show_disk_ = true; }
-                else if (tok == "m") traversal_show_mem_ = true;
-                else if (tok == "d") traversal_show_disk_ = true;
+                else if (tok == "md") { cache_m = 1; cache_d = 1; }
+                else if (tok == "m") cache_m = 1;
+                else if (tok == "d") cache_d = 1;
                 else if (tok == "c") selected_traversal_check_idx_ = 1;
                 else if (tok == "cr") selected_traversal_check_idx_ = 2;
             }
         }
+        selected_traversal_cache_idx_ = (cache_m && cache_d) ? 1 : (cache_m ? 0 : (cache_d ? 2 : 1));
 
         // Parse compute defaults into UI state
         compute_force_ = compute_parallel_ = compute_timer_console_ = compute_timer_log_ = compute_mute_ = false;
@@ -237,8 +238,7 @@ private:
             if (selected_traversal_tree_idx_ == 0) parts.push_back("full");
             else if (selected_traversal_tree_idx_ == 1) parts.push_back("simplified");
             else parts.push_back("n");
-            if (traversal_show_mem_) parts.push_back("m");
-            if (traversal_show_disk_) parts.push_back("d");
+            parts.push_back(traversal_cache_entries_[selected_traversal_cache_idx_]); // m/md/d
             if (selected_traversal_check_idx_ == 1) parts.push_back("c");
             else if (selected_traversal_check_idx_ == 2) parts.push_back("cr");
             std::ostringstream oss; bool first = true;
@@ -278,10 +278,9 @@ private:
         add_radio_line("cache_precision", &cache_precision_entries_, &selected_cache_precision_idx_);
         add_text_line("default_exit_save_path", &temp_config_.default_exit_save_path);
         add_text_line("default_timer_log_path", &temp_config_.default_timer_log_path);
-        // Traversal defaults (multi-select UI) + raw string
+        // Traversal defaults (tree mode + cache status flags via single-choice)
         add_radio_line("traversal_tree_mode", &traversal_tree_entries_, &selected_traversal_tree_idx_);
-        add_toggle_line("traversal_show_memory(m)", &traversal_show_mem_);
-        add_toggle_line("traversal_show_disk(d)", &traversal_show_disk_);
+        add_radio_line("traversal_cache_flags", &traversal_cache_entries_, &selected_traversal_cache_idx_); // m / md / d
         add_radio_line("traversal_check", &traversal_check_entries_, &selected_traversal_check_idx_);
         // Compute defaults (multi-select UI)
         add_toggle_line("compute_force", &compute_force_);
@@ -456,10 +455,10 @@ private:
     // Traversal multi-select UI state
     std::vector<std::string> traversal_tree_entries_ = {"full", "simplified", "no_tree"};
     int selected_traversal_tree_idx_ = 2; // default no_tree
+    std::vector<std::string> traversal_cache_entries_ = {"m", "md", "d"};
+    int selected_traversal_cache_idx_ = 1; // default md
     std::vector<std::string> traversal_check_entries_ = {"none", "c", "cr"};
     int selected_traversal_check_idx_ = 0;
-    bool traversal_show_mem_ = false;
-    bool traversal_show_disk_ = false;
 
     // Compute multi-select UI state
     bool compute_force_ = false;
@@ -816,6 +815,7 @@ static bool process_command(const std::string& line, NodeGraph& graph, bool& mod
                     if (arg == "f" || arg == "full") print_tree_mode = "full";
                     else if (arg == "s" || arg == "simplified") print_tree_mode = "simplified";
                     else if (arg == "n" || arg == "no_tree") print_tree_mode = "none";
+                    else if (arg == "md") { show_mem = true; show_disk = true; }
                     else if (arg == "m") show_mem = true;
                     else if (arg == "d") show_disk = true;
                     else if (arg == "cr") do_check_remove = true;
@@ -826,6 +826,7 @@ static bool process_command(const std::string& line, NodeGraph& graph, bool& mod
                     if (arg == "f" || arg == "full") print_tree_mode = "full";
                     else if (arg == "s" || arg == "simplified") print_tree_mode = "simplified";
                     else if (arg == "n" || arg == "no_tree") print_tree_mode = "none";
+                    else if (arg == "md") { show_mem = true; show_disk = true; }
                     else if (arg == "m") show_mem = true;
                     else if (arg == "d") show_disk = true;
                     else if (arg == "cr") do_check_remove = true;
