@@ -27,6 +27,7 @@ private:
     void CompletePath(const std::string& prefix, std::vector<std::string>& options) const;
     void CompleteNodeId(const std::string& prefix, std::vector<std::string>& options) const;
     void CompletePrintArgs(const std::string& prefix, std::vector<std::string>& options, bool only_mode_args) const;
+    void CompleteTraversalArgs(const std::string& prefix, std::vector<std::string>& options) const;
     void CompleteComputeArgs(const std::string& prefix, std::vector<std::string>& options) const;
 
     const NodeGraph& graph_;

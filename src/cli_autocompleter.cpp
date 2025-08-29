@@ -83,6 +83,19 @@ void CliAutocompleter::CompleteComputeArgs(const std::string& prefix, std::vecto
     }
 }
 
+void CliAutocompleter::CompleteTraversalArgs(const std::string& prefix, std::vector<std::string>& options) const {
+    // Support print-style tree mode args for traversal as well
+    const std::vector<std::string> tree_args = {"detailed", "simplified", "no_tree", "d", "s", "n"};
+    for(const auto& arg : tree_args) {
+        if(arg.rfind(prefix, 0) == 0) options.push_back(arg);
+    }
+    // And common traversal cache/check flags (optional but helpful)
+    const std::vector<std::string> trav_flags = {"m", "d", "c", "cr"};
+    for(const auto& arg : trav_flags) {
+        if(arg.rfind(prefix, 0) == 0) options.push_back(arg);
+    }
+}
+
 
 CompletionResult CliAutocompleter::Complete(const std::string& line, int cursor_pos) {
     CompletionResult result;
@@ -114,6 +127,8 @@ CompletionResult CliAutocompleter::Complete(const std::string& line, int cursor_
             CompletePrintArgs(prefix, result.options, !completing_first_arg);
         } else if (cmd == "compute") {
             CompleteComputeArgs(prefix, result.options);
+        } else if (cmd == "traversal") {
+            CompleteTraversalArgs(prefix, result.options);
         }
         // ... add more context-aware completions for other commands ...
     }
