@@ -26,9 +26,9 @@ const char* perlin_shader_source = R"(
     float lerp(float t, float a, float b) { return a + t * (b - a); }
     float grad(int hash, float x, float y) {
         int h = hash & 3;
-        float u = h < 2 ? x : y;
-        float v = h < 2 ? y : x;
-        return ((h & 1) == 0 ? u : -u) + ((h & 2) == 0 ? v : -v);
+        float u = (h & 1) == 0 ? x : -x;
+        float v = (h & 2) == 0 ? y : -y;
+        return u + v;
     }
     kernel void perlin_noise_kernel(
         texture2d<float, access::write> outTexture [[texture(0)]],
@@ -163,7 +163,7 @@ NodeOutput op_perlin_noise_metal(const Node& node, const std::vector<const NodeO
     // Perlin permutation/参数缓冲
     std::vector<int> p_vec(512);
     std::iota(p_vec.begin(), p_vec.begin() + 256, 0);
-    std::mt19937 g(std::random_device{}());
+    /*std::mt19937 g(std::random_device{}());*/std::mt19937 g(1);
     std::shuffle(p_vec.begin(), p_vec.begin() + 256, g);
     std::copy(p_vec.begin(), p_vec.begin() + 256, p_vec.begin() + 256);
 
