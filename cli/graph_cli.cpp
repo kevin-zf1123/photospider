@@ -871,7 +871,7 @@ static bool process_command(const std::string& line, NodeGraph& graph, bool& mod
         } 
         else if (cmd == "compute") {
             std::string target_id_str; iss >> target_id_str;
-            if (target_id_str.empty()) { std::cout << "Usage: compute <id|all> [flags]\n"; return true; }
+            if (target_id_str.empty()) { target_id_str = "all"; }
 
             bool force = false, timer_console = false, timer_log_file = false, parallel = false, mute = false;
             std::string timer_log_path = "";
@@ -924,12 +924,15 @@ static bool process_command(const std::string& line, NodeGraph& graph, bool& mod
 
             auto compute_func = [&](int id) -> NodeOutput& {
                 if (parallel) {
-                    std::cout << "--- Starting parallel computation ---" << std::endl;
+                    if (!mute) std::cout << "--- Starting parallel computation ---" << std::endl;
                     return graph.compute_parallel(id, config.cache_precision, force, enable_timing);
                 }
                 return graph.compute(id, config.cache_precision, force, enable_timing);
             };
 
+            // Temporarily set graph quiet mode based on mute
+            bool prev_quiet = graph.is_quiet();
+            graph.set_quiet(mute);
             if (target_id_str == "all") {
                 for (int id : graph.ending_nodes()) {
                     NodeOutput& out = compute_func(id);
@@ -940,6 +943,7 @@ static bool process_command(const std::string& line, NodeGraph& graph, bool& mod
                 NodeOutput& out = compute_func(id);
                 if (!mute) print_output(id, out);
             }
+            graph.set_quiet(prev_quiet);
 
             if (timer_console) {
                 std::cout << "--- Computation Timers (Console) ---\n";

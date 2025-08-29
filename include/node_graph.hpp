@@ -32,6 +32,10 @@ public:
         }
     }
 
+    // Control stdout verbosity for compute/save messages.
+    void set_quiet(bool q) { quiet_ = q; }
+    bool is_quiet() const { return quiet_; }
+
     void clear();
     void add_node(const Node& node);
     bool has_node(int id) const;
@@ -65,6 +69,7 @@ private:
     void execute_op_for_node(int node_id, const std::string& cache_precision, bool enable_timing);
 
     std::mutex graph_mutex_;
+    bool quiet_ = false;
 };
 
 } // namespace ps

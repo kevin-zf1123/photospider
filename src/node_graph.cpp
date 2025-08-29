@@ -30,7 +30,7 @@ bool NodeGraph::try_load_from_disk_cache(Node& node) {
             metadata_file.replace_extension(".yml");
 
             if (fs::exists(cache_file) || fs::exists(metadata_file)) {
-                 std::cout << "Loading cache for Node " << node.id << " from: " << fs::relative(node_cache_dir(node.id)).string() << std::endl;
+                 if (!quiet_) std::cout << "Loading cache for Node " << node.id << " from: " << fs::relative(node_cache_dir(node.id)).string() << std::endl;
                  NodeOutput loaded_output;
                  if (fs::exists(cache_file)) {
                     cv::Mat loaded_mat = cv::imread(cache_file.string(), cv::IMREAD_UNCHANGED);
@@ -61,7 +61,7 @@ void NodeGraph::execute_op_for_node(int node_id, const std::string& cache_precis
     std::string result_source = "unknown";
     auto start_time = std::chrono::high_resolution_clock::now();
 
-    std::cout << "Computing node " << node.id << " (" << node.name << ") on thread " << std::this_thread::get_id() << "..." << std::endl;
+    if (!quiet_) std::cout << "Computing node " << node.id << " (" << node.name << ") on thread " << std::this_thread::get_id() << "..." << std::endl;
     node.runtime_parameters = node.parameters ? node.parameters : YAML::Node(YAML::NodeType::Map);
 
     for (const auto& p_input : node.parameter_inputs) {
@@ -210,7 +210,7 @@ NodeOutput& NodeGraph::compute_internal(int node_id, const std::string& cache_pr
         }
         visiting[node_id] = true;
 
-        std::cout << "Computing node " << node.id << " (" << node.name << ")..." << std::endl;
+        if (!quiet_) std::cout << "Computing node " << node.id << " (" << node.name << ")..." << std::endl;
         node.runtime_parameters = node.parameters ? node.parameters : YAML::Node(YAML::NodeType::Map);
 
         for (const auto& p_input : node.parameter_inputs) {
@@ -224,7 +224,7 @@ NodeOutput& NodeGraph::compute_internal(int node_id, const std::string& cache_pr
                 throw GraphError("Node " + std::to_string(p_input.from_node_id) + " did not produce required output '" + p_input.from_output_name + "' for node " + std::to_string(node_id));
             }
             node.runtime_parameters[p_input.to_parameter_name] = it->second;
-            std::cout << "  - Injected param '" << p_input.to_parameter_name << "' from " << p_input.from_node_id << ":" << p_input.from_output_name << std::endl;
+            if (!quiet_) std::cout << "  - Injected param '" << p_input.to_parameter_name << "' from " << p_input.from_node_id << ":" << p_input.from_output_name << std::endl;
         }
 
         std::vector<const NodeOutput*> input_node_outputs;
@@ -615,7 +615,7 @@ void NodeGraph::save_cache_if_configured(const Node& node, const std::string& ca
                 } else { // "int8"
                     mat_to_save.convertTo(out_mat, CV_8U, 255.0);
                 }
-                std::cout << "Saving cache image for Node " << node.id << " to: " << fs::relative(final_path).string() << std::endl;
+                if (!quiet_) std::cout << "Saving cache image for Node " << node.id << " to: " << fs::relative(final_path).string() << std::endl;
                 cv::imwrite(final_path.string(), out_mat);
             }
 
@@ -629,7 +629,7 @@ void NodeGraph::save_cache_if_configured(const Node& node, const std::string& ca
                 }
                 std::ofstream fout(meta_path);
                 fout << meta_node;
-                std::cout << "Saving cache metadata for Node " << node.id << " to: " << fs::relative(meta_path).string() << std::endl;
+                if (!quiet_) std::cout << "Saving cache metadata for Node " << node.id << " to: " << fs::relative(meta_path).string() << std::endl;
             }
         }
     }

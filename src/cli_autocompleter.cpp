@@ -66,8 +66,10 @@ void CliAutocompleter::CompleteNodeId(const std::string& prefix, std::vector<std
     }
 }
 
-void CliAutocompleter::CompletePrintArgs(const std::string& prefix, std::vector<std::string>& options) const {
-    CompleteNodeId(prefix, options);
+void CliAutocompleter::CompletePrintArgs(const std::string& prefix, std::vector<std::string>& options, bool only_mode_args) const {
+    if (!only_mode_args) {
+        CompleteNodeId(prefix, options);
+    }
     const std::vector<std::string> mode_args = {"detailed", "simplified", "d", "s"};
     for(const auto& arg : mode_args) {
         if(arg.rfind(prefix, 0) == 0) options.push_back(arg);
@@ -107,7 +109,9 @@ CompletionResult CliAutocompleter::Complete(const std::string& line, int cursor_
         } else if (cmd == "node" || cmd == "save") {
             CompleteNodeId(prefix, result.options);
         } else if (cmd == "print") {
-            CompletePrintArgs(prefix, result.options);
+            // If first arg is already provided (or cursor is after it), only suggest mode args.
+            bool completing_first_arg = (tokens.size() == 1) || (tokens.size() == 2 && line.back() != ' ');
+            CompletePrintArgs(prefix, result.options, !completing_first_arg);
         } else if (cmd == "compute") {
             CompleteComputeArgs(prefix, result.options);
         }
