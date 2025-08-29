@@ -19,6 +19,11 @@
 #include "tui_editor.hpp"
 #include "ftxui/dom/node.hpp"
 #include <opencv2/core/ocl.hpp>
+
+#include "terminal_input.hpp"
+#include "cli_history.hpp"
+#include "cli_autocompleter.hpp"
+
 #ifdef _WIN32
 #include <windows.h>
 #else
@@ -27,13 +32,17 @@
 
 using namespace ps;
 using namespace ftxui;
+struct CliConfig;
+static bool write_config_to_file(const CliConfig& config, const std::string& path);
+static void load_or_create_config(const std::string& config_path, CliConfig& config);
 
-
+// --- CliConfig struct and ConfigEditor class (Unchanged) ---
+// ... (The code for CliConfig and the TUI ConfigEditor is correct and remains here)
 struct CliConfig {
     std::string loaded_config_path;
     std::string cache_root_dir = "cache";
     std::vector<std::string> plugin_dirs = {"build/plugins"};
-    std::string cache_precision = "int8"; // New: "int8" or "int16"
+    std::string cache_precision = "int8";
     std::string default_print_mode = "detailed";
     std::string default_traversal_arg = "n";
     std::string default_cache_clear_arg = "md";
@@ -44,22 +53,14 @@ struct CliConfig {
     std::string default_timer_log_path = "out/timer.yaml";
     std::string default_ops_list_mode = "all";
     std::string ops_plugin_path_mode = "name_only";
+    int history_size = 1000;
 };
 
-
-// Forward declarations
-static bool write_config_to_file(const CliConfig& config, const std::string& path);
-static void load_or_create_config(const std::string& config_path, CliConfig& config);
-static void save_config_interactive(CliConfig& config);
-static std::string ask(const std::string& q, const std::string& def = "");
-
-// --- NEW: A complete, interactive TUI configuration editor ---
 class ConfigEditor : public TuiEditor {
 private:
-    // Helper struct to define each editable line in the UI
     struct EditableLine {
         std::string label;
-        std::string* value_ptr; // Points to the string being edited
+        std::string* value_ptr; 
         bool is_radio = false;
         std::vector<std::string>* radio_options = nullptr;
         int* radio_selected_idx = nullptr;
@@ -73,20 +74,16 @@ public:
     ConfigEditor(ScreenInteractive& screen, CliConfig& config)
         : TuiEditor(screen), original_config_(config), temp_config_(config) 
     {
-        // Set up the single, shared input component for text editing
         InputOption opt;
         opt.on_enter = [this] { CommitEdit(); };
         editor_input_ = Input(&edit_buffer_, "...", opt);
         radio_editor_ = Radiobox(&dummy_radio_options_, &dummy_radio_selected_idx_);
-        // Initial sync from the config object to the editor's internal state
         SyncModelToUiState();
         RebuildLineView();
     }
 
     void Run() override {
-        // The main container is now just a component that holds our renderer
         auto main_container = Container::Vertical({});
-
         auto component = Renderer(main_container, [&] {
             Elements line_elements;
             for(size_t i = 0; i < editable_lines_.size(); ++i) {
@@ -95,21 +92,16 @@ public:
 
                 if (mode_ == Mode::Edit && selected_ == (int)i) {
                     if (line.is_radio) {
-                        // In edit mode, render the Radiobox for radio button lines
                         display_element = radio_editor_->Render();
                     } else {
-                        // Render the shared text input for normal lines
                         display_element = editor_input_->Render();
                     }
                 } else {
                      if (line.is_radio) {
-                        // In navigate mode, just show the selected text for radio buttons
                         display_element = text((*line.radio_options)[*line.radio_selected_idx]);
                      } else if (line.value_ptr) {
-                        // Show the current string value for normal lines
                         display_element = text(*line.value_ptr);
                      } else {
-                        // Placeholder for lines that are just for actions (like 'add')
                         display_element = text("...") | dim;
                      }
                 }
@@ -133,7 +125,6 @@ public:
         });
 
         component |= CatchEvent([&](Event event) {
-            // --- Command Mode Logic ---
             if (mode_ == Mode::Command) {
                  if (event == Event::Return) { ExecuteCommand(); return true; }
                  if (event == Event::Escape) { mode_ = Mode::Navigate; command_buffer_.clear(); return true; }
@@ -142,28 +133,13 @@ public:
                  return false;
             }
             
-            // --- Edit Mode Logic ---
             if (mode_ == Mode::Edit) {
-                // Global cancel for edit mode
-                if (event == Event::Escape) {
-                    mode_ = Mode::Navigate;
-                    return true;
-                }
-                // Global accept for edit mode
-                if (event == Event::Return) {
-                    CommitEdit();
-                    return true;
-                }
-
-                // Delegate all other events to the currently active editor component
-                if (editable_lines_[selected_].is_radio) {
-                    return radio_editor_->OnEvent(event);
-                } else {
-                    return editor_input_->OnEvent(event);
-                }
+                if (event == Event::Escape) { mode_ = Mode::Navigate; return true; }
+                if (event == Event::Return) { CommitEdit(); return true; }
+                if (editable_lines_[selected_].is_radio) { return radio_editor_->OnEvent(event); } 
+                else { return editor_input_->OnEvent(event); }
             }
             
-            // --- Navigate Mode Logic ---
             if (event == Event::ArrowUp) { selected_ = std::max(0, selected_ - 1); return true; }
             if (event == Event::ArrowDown) { selected_ = std::min(int(editable_lines_.size() - 1), selected_ + 1); return true; }
             if (event == Event::Character('e')) { EnterEditMode(); return true; }
@@ -175,30 +151,21 @@ public:
                 if(selected_ < (int)editable_lines_.size() && editable_lines_[selected_].del_fn) editable_lines_[selected_].del_fn();
                 return true;
             }
-            if (event == Event::Character(':')) {
-                mode_ = Mode::Command;
-                command_buffer_.clear();
-                return true;
-            }
-            // Pressing 'q' in navigate mode is a shortcut for the :q command
-            if (event == Event::Character('q')) {
-                screen_.Exit();
-                return true;
-            }
+            if (event == Event::Character(':')) { mode_ = Mode::Command; command_buffer_.clear(); return true; }
+            if (event == Event::Character('q')) { screen_.Exit(); return true; }
             return false;
         });
-
         screen_.Loop(component);
     }
 
 private:
     void SyncModelToUiState() {
-        // Find the index for each radio button setting
         auto find_idx = [](const auto& vec, const auto& val) {
             auto it = std::find(vec.begin(), vec.end(), val);
             return it == vec.end() ? 0 : std::distance(vec.begin(), it);
         };
         active_config_path_buffer_ = temp_config_.loaded_config_path;
+        history_size_buffer_ = std::to_string(temp_config_.history_size);
         selected_cache_precision_idx_ = find_idx(cache_precision_entries_, temp_config_.cache_precision);
         selected_print_mode_idx_ = find_idx(print_mode_entries_, temp_config_.default_print_mode);
         selected_ops_list_mode_idx_ = find_idx(ops_list_mode_entries_, temp_config_.default_ops_list_mode);
@@ -207,14 +174,12 @@ private:
         selected_exit_sync_idx_ = temp_config_.exit_prompt_sync ? 0 : 1;
         selected_config_save_idx_ = find_idx(config_save_entries_, temp_config_.config_save_behavior);
         selected_editor_save_idx_ = find_idx(editor_save_entries_, temp_config_.editor_save_behavior);
-        
-        // Copy vector data
         plugin_dirs_str_ = temp_config_.plugin_dirs;
     }
 
     void SyncUiStateToModel() {
-        // Apply the selected radio button text back to the config object
         temp_config_.loaded_config_path = active_config_path_buffer_;
+        try { temp_config_.history_size = std::stoi(history_size_buffer_); } catch(...) { temp_config_.history_size = 1000; }
         temp_config_.cache_precision = cache_precision_entries_[selected_cache_precision_idx_];
         temp_config_.default_print_mode = print_mode_entries_[selected_print_mode_idx_];
         temp_config_.default_ops_list_mode = ops_list_mode_entries_[selected_ops_list_mode_idx_];
@@ -223,26 +188,21 @@ private:
         temp_config_.exit_prompt_sync = (selected_exit_sync_idx_ == 0);
         temp_config_.config_save_behavior = config_save_entries_[selected_config_save_idx_];
         temp_config_.editor_save_behavior = editor_save_entries_[selected_editor_save_idx_];
-        
-        // Apply vector data back
         temp_config_.plugin_dirs = plugin_dirs_str_;
     }
 
     void RebuildLineView() {
         editable_lines_.clear();
-        
-        // Helper to add a standard text line
         auto add_text_line = [&](std::string label, std::string* value_ptr) {
             editable_lines_.push_back({std::move(label), value_ptr});
         };
-        
-        // Helper to add a radio button line
         auto add_radio_line = [&](std::string label, std::vector<std::string>* opts, int* selected_idx) {
             editable_lines_.push_back({std::move(label), nullptr, true, opts, selected_idx});
         };
         
         add_text_line("active_config_file", &active_config_path_buffer_);
         add_text_line("cache_root_dir", &temp_config_.cache_root_dir);
+        add_text_line("history_size", &history_size_buffer_);
         add_radio_line("cache_precision", &cache_precision_entries_, &selected_cache_precision_idx_);
         add_text_line("default_exit_save_path", &temp_config_.default_exit_save_path);
         add_text_line("default_timer_log_path", &temp_config_.default_timer_log_path);
@@ -256,22 +216,19 @@ private:
         add_radio_line("config_save_behavior", &config_save_entries_, &selected_config_save_idx_);
         add_radio_line("editor_save_behavior", &editor_save_entries_, &selected_editor_save_idx_);
 
-        // Add a line for each plugin directory path
         for (size_t i = 0; i < plugin_dirs_str_.size(); ++i) {
             auto del_fn = [this, i] {
                 plugin_dirs_str_.erase(plugin_dirs_str_.begin() + i);
                 RebuildLineView();
-                // Ensure selection is not out of bounds
                 selected_ = std::min((int)editable_lines_.size() - 1, selected_);
             };
             editable_lines_.push_back({"plugin_dirs[" + std::to_string(i) + "]", &plugin_dirs_str_[i], false, nullptr, nullptr, nullptr, del_fn});
         }
         
-        // Add a final line with an "add" action
         auto add_fn = [this] {
             plugin_dirs_str_.push_back("<new_path>");
             RebuildLineView();
-            selected_ = editable_lines_.size() - 2; // Select the newly added line
+            selected_ = editable_lines_.size() - 2;
             EnterEditMode();
         };
         editable_lines_.push_back({"(Plugin Dirs)", nullptr, false, nullptr, nullptr, add_fn, nullptr});
@@ -280,12 +237,10 @@ private:
     void EnterEditMode() {
         if (selected_ >= (int)editable_lines_.size()) return;
         const auto& line = editable_lines_[selected_];
-
         if (!line.is_radio && !line.value_ptr) return;
 
         mode_ = Mode::Edit;
         if (line.is_radio) {
-            // --- FIX: Recreate the component with the correct data and take focus ---
             RadioboxOption opt;
             opt.entries = line.radio_options;
             opt.selected = line.radio_selected_idx;
@@ -301,12 +256,9 @@ private:
     void CommitEdit() {
         if (selected_ >= (int)editable_lines_.size()) return;
         const auto& line = editable_lines_[selected_];
-        
         if (!line.is_radio && line.value_ptr) {
             *line.value_ptr = edit_buffer_;
         }
-        // For radio buttons, the change is already applied via the index pointer,
-        // so we just need to switch modes.
         mode_ = Mode::Navigate;
     }
 
@@ -321,15 +273,8 @@ private:
         }
         else if (mode_ == Mode::Edit) help = "Enter:Accept | Esc:Cancel | ←/→:Change";
         else if (mode_ == Mode::Command) {
-            return hbox({
-                       text(":" + command_buffer_),
-                       text(" ") | blink,
-                       filler(),
-                       text("[a]pply | [w]rite | [q]uit | Esc:Cancel") | dim,
-                   }) |
-                   inverted;
+            return hbox({ text(":" + command_buffer_), text(" ") | blink, filler(), text("[a]pply | [w]rite | [q]uit | Esc:Cancel") | dim, }) | inverted;
         }
-        
         return hbox({ text(help) | dim, filler(), text(status_message_) | bold });
     }
 
@@ -344,29 +289,22 @@ private:
 
             if (new_path != old_path) {
                 if (fs::exists(new_path)) {
-                    // Path changed to an existing file: load it, discarding other UI edits.
                     load_or_create_config(new_path, original_config_);
                     temp_config_ = original_config_;
                     SyncModelToUiState();
                     RebuildLineView();
                     status_message_ = "Loaded config from: " + new_path;
                 } else {
-                    // Path changed to a new file: create it with the current UI settings.
-                    SyncUiStateToModel(); // Capture all UI edits into temp_config_
+                    SyncUiStateToModel();
                     temp_config_.loaded_config_path = fs::absolute(new_path).string();
                     original_config_ = temp_config_;
-                    if (write_config_to_file(original_config_, new_path)) {
-                        status_message_ = "Created and applied new config: " + new_path;
-                    } else {
-                        status_message_ = "Error creating file: " + new_path;
-                        original_config_.loaded_config_path = old_path; // Revert path on failure
-                    }
-                    temp_config_ = original_config_; // Sync back after potential failure
+                    if (write_config_to_file(original_config_, new_path)) { status_message_ = "Created and applied new config: " + new_path; } 
+                    else { status_message_ = "Error creating file: " + new_path; original_config_.loaded_config_path = old_path; }
+                    temp_config_ = original_config_;
                     SyncModelToUiState();
                     RebuildLineView();
                 }
             } else {
-                // Path did not change, just apply settings to the current session.
                 SyncUiStateToModel();
                 original_config_ = temp_config_;
                 status_message_ = "Settings applied to current session.";
@@ -376,12 +314,8 @@ private:
             SyncUiStateToModel();
             original_config_ = temp_config_;
             if(!original_config_.loaded_config_path.empty()){
-                if (write_config_to_file(original_config_, original_config_.loaded_config_path)) {
-                    status_message_ = "Changes applied and saved.";
-                    changes_applied = true;
-                } else {
-                    status_message_ = "Error: failed to write file.";
-                }
+                if (write_config_to_file(original_config_, original_config_.loaded_config_path)) { status_message_ = "Changes applied and saved."; changes_applied = true; } 
+                else { status_message_ = "Error: failed to write file.";}
             } else {
                 status_message_ = "Error: No config file loaded. Use 'apply' with a new path first.";
             }
@@ -392,26 +326,24 @@ private:
         }
     }
 
-    CliConfig& original_config_; // The real config object
-    CliConfig temp_config_;      // The copy we are editing
+    CliConfig& original_config_;
+    CliConfig temp_config_;
     std::string status_message_ = "Ready";
 
-    // --- Editor State ---
     enum class Mode { Navigate, Edit, Command };
     Mode mode_ = Mode::Navigate;
     int selected_ = 0;
     std::vector<EditableLine> editable_lines_;
     std::string command_buffer_;
     
-    // --- Buffer for text editing ---
     std::string edit_buffer_;
     Component editor_input_;
     Component radio_editor_;
     std::vector<std::string> dummy_radio_options_;
     int dummy_radio_selected_idx_ = 0;
 
-    // --- UI state for radio buttons and vectors ---
     std::string active_config_path_buffer_;
+    std::string history_size_buffer_;
     int selected_cache_precision_idx_ = 0;
     int selected_print_mode_idx_ = 0;
     int selected_ops_list_mode_idx_ = 0;
@@ -423,7 +355,6 @@ private:
 
     std::vector<std::string> plugin_dirs_str_;
     
-    // --- Constant options for radio buttons ---
     std::vector<std::string> cache_precision_entries_ = {"int8", "int16"};
     std::vector<std::string> print_mode_entries_ = {"detailed", "simplified"};
     std::vector<std::string> ops_list_mode_entries_ = {"all", "builtin", "plugins"};
@@ -434,12 +365,14 @@ private:
     std::vector<std::string> editor_save_entries_ = {"ask", "auto_save_on_apply", "manual"};
 };
 
+// ... (Rest of helper functions like write_config_to_file, load_or_create_config, etc. are unchanged and remain here)
 static bool write_config_to_file(const CliConfig& config, const std::string& path) {
     YAML::Node root;
     root["_comment1"] = "Photospider CLI configuration.";
     root["cache_root_dir"] = config.cache_root_dir;
     root["cache_precision"] = config.cache_precision;
     root["plugin_dirs"] = config.plugin_dirs;
+    root["history_size"] = config.history_size;
     root["default_print_mode"] = config.default_print_mode;
     root["default_traversal_arg"] = config.default_traversal_arg;
     root["default_cache_clear_arg"] = config.default_cache_clear_arg;
@@ -454,10 +387,8 @@ static bool write_config_to_file(const CliConfig& config, const std::string& pat
     try {
         std::ofstream fout(path);
         fout << root;
-        // std::cout << "Successfully saved configuration to '" << path << "'." << std::endl;
         return true;
     } catch (const std::exception& e) {
-        // std::cerr << "Error: Could not write to config file '" << path << "'. Error: " << e.what() << std::endl;
         return false;
     }
 }
@@ -469,6 +400,7 @@ static void load_or_create_config(const std::string& config_path, CliConfig& con
             YAML::Node root = YAML::LoadFile(config_path);
             if (root["cache_root_dir"]) config.cache_root_dir = root["cache_root_dir"].as<std::string>();
             if (root["cache_precision"]) config.cache_precision = root["cache_precision"].as<std::string>();
+            if (root["history_size"]) config.history_size = root["history_size"].as<int>();
             
             if (root["plugin_dirs"] && root["plugin_dirs"].IsSequence()) {
                 config.plugin_dirs = root["plugin_dirs"].as<std::vector<std::string>>();
@@ -495,6 +427,7 @@ static void load_or_create_config(const std::string& config_path, CliConfig& con
         std::cout << "Configuration file 'config.yaml' not found. Creating a default one." << std::endl;
         config.plugin_dirs = {"build/plugins"};
         config.cache_precision = "int8";
+        config.history_size = 1000;
         config.editor_save_behavior = "ask";
         config.default_print_mode = "detailed";
         config.default_traversal_arg = "n";
@@ -520,7 +453,6 @@ static void print_cli_help() {
               << "      --repl                 Start interactive shell (REPL)\n"
               << std::endl;
 }
-
 
 static void print_repl_help() {
     std::cout << "Available REPL (interactive shell) commands:\n"
@@ -596,18 +528,13 @@ static void do_traversal(const NodeGraph& graph, bool show_mem, bool show_disk) 
                 std::cout << (i + 1) << ". " << node.id << " (" << node.name << ")";
                 
                 std::vector<std::string> statuses;
-                if (show_mem && node.cached_output.has_value()) {
-                    statuses.push_back("in memory");
-                }
+                if (show_mem && node.cached_output.has_value()) { statuses.push_back("in memory"); }
                 if (show_disk && !node.caches.empty()) {
                     bool on_disk = false;
                     for (const auto& cache : node.caches) {
                         fs::path cache_file = graph.node_cache_dir(node.id) / cache.location;
                         fs::path meta_file = cache_file; meta_file.replace_extension(".yml");
-                        if (fs::exists(cache_file) || fs::exists(meta_file)) {
-                            on_disk = true;
-                            break;
-                        }
+                        if (fs::exists(cache_file) || fs::exists(meta_file)) { on_disk = true; break; }
                     }
                     if(on_disk) statuses.push_back("on disk");
                 }
@@ -623,46 +550,46 @@ static void do_traversal(const NodeGraph& graph, bool show_mem, bool show_disk) 
         }
     }
 }
-static void save_config_interactive(CliConfig& config) {
-    std::string def_char;
-    std::string prompt = "Save updated configuration? [";
+// static void save_config_interactive(CliConfig& config) {
+//     std::string def_char;
+//     std::string prompt = "Save updated configuration? [";
     
-    if (config.config_save_behavior == "current" && !config.loaded_config_path.empty()) {
-        prompt += "C]urrent/[d]efault/[a]sk/[n]one"; def_char = "c";
-    } else if (config.config_save_behavior == "default") {
-        prompt += "c]urrent/[D]efault/[a]sk/[n]one"; def_char = "d";
-    } else if (config.config_save_behavior == "ask") {
-        prompt += "c]urrent/[d]efault/[A]sk/[n]one"; def_char = "a";
-    } else {
-        prompt += "c]urrent/[d]efault/[a]sk/[N]one"; def_char = "n";
-    }
+//     if (config.config_save_behavior == "current" && !config.loaded_config_path.empty()) {
+//         prompt += "C]urrent/[d]efault/[a]sk/[n]one"; def_char = "c";
+//     } else if (config.config_save_behavior == "default") {
+//         prompt += "c]urrent/[D]efault/[a]sk/[n]one"; def_char = "d";
+//     } else if (config.config_save_behavior == "ask") {
+//         prompt += "c]urrent/[d]efault/[A]sk/[n]one"; def_char = "a";
+//     } else {
+//         prompt += "c]urrent/[d]efault/[a]sk/[N]one"; def_char = "n";
+//     }
     
-    if (config.loaded_config_path.empty()) {
-        prompt.replace(prompt.find("c]urrent"), 8, "(no current)");
-        if (def_char == "c") def_char = "d";
-    }
-    prompt += "]";
+//     if (config.loaded_config_path.empty()) {
+//         prompt.replace(prompt.find("c]urrent"), 8, "(no current)");
+//         if (def_char == "c") def_char = "d";
+//     }
+//     prompt += "]";
 
-    while(true) {
-        std::string choice = ask(prompt, def_char);
-        if (choice == "c" && !config.loaded_config_path.empty()) {
-            write_config_to_file(config, config.loaded_config_path);
-            break;
-        } else if (choice == "d") {
-            write_config_to_file(config, "config.yaml");
-            break;
-        } else if (choice == "a") {
-            std::string path = ask("Enter path to save new config file");
-            if (!path.empty()) write_config_to_file(config, path);
-            break;
-        } else if (choice == "n") {
-            std::cout << "Configuration changes will not be saved." << std::endl;
-            break;
-        } else {
-            std::cout << "Invalid choice." << std::endl;
-        }
-    }
-}
+//     while(true) {
+//         std::string choice = ask(prompt, def_char);
+//         if (choice == "c" && !config.loaded_config_path.empty()) {
+//             write_config_to_file(config, config.loaded_config_path);
+//             break;
+//         } else if (choice == "d") {
+//             write_config_to_file(config, "config.yaml");
+//             break;
+//         } else if (choice == "a") {
+//             std::string path = ask("Enter path to save new config file");
+//             if (!path.empty()) write_config_to_file(config, path);
+//             break;
+//         } else if (choice == "n") {
+//             std::cout << "Configuration changes will not be saved." << std::endl;
+//             break;
+//         } else {
+//             std::cout << "Invalid choice." << std::endl;
+//         }
+//     }
+// }
 void run_config_editor(CliConfig& config) {
     auto screen = ScreenInteractive::Fullscreen();
     ConfigEditor editor(screen, config);
@@ -709,19 +636,12 @@ void run_config_editor(CliConfig& config) {
     // If config.config_save_behavior is "none", do nothing.
 }
 static bool save_fp32_image(const cv::Mat& mat, const std::string& path, const CliConfig& config) {
-    if (mat.empty()) {
-        std::cout << "Error: Cannot save an empty image.\n";
-        return false;
-    }
+    if (mat.empty()) { std::cout << "Error: Cannot save an empty image.\n"; return false; }
     cv::Mat out_mat;
-    if (config.cache_precision == "int16") {
-        mat.convertTo(out_mat, CV_16U, 65535.0);
-    } else { // "int8"
-        mat.convertTo(out_mat, CV_8U, 255.0);
-    }
+    if (config.cache_precision == "int16") { mat.convertTo(out_mat, CV_16U, 65535.0); } 
+    else { mat.convertTo(out_mat, CV_8U, 255.0); }
     return cv::imwrite(path, out_mat);
 }
-
 
 static bool process_command(const std::string& line, NodeGraph& graph, bool& modified, CliConfig& config, const std::map<std::string, std::string>& op_sources) {
     std::istringstream iss(line);
@@ -741,22 +661,17 @@ static bool process_command(const std::string& line, NodeGraph& graph, bool& mod
 
             std::string arg;
             while(iss >> arg) {
-                if (arg == "d" || arg == "detailed" || arg == "s" || arg == "simplified") {
-                    mode_str = arg;
-                } else { 
-                    if (target_is_set) {
-                         std::cout << "Warning: Multiple targets specified for print; using last one ('" << arg << "').\n";
-                    }
+                if (arg == "d" || arg == "detailed" || arg == "s" || arg == "simplified") { mode_str = arg; } 
+                else { 
+                    if (target_is_set) { std::cout << "Warning: Multiple targets specified for print; using last one ('" << arg << "').\n"; }
                     target_str = arg;
                     target_is_set = true;
                 }
             }
 
             bool show_params = (mode_str == "d" || mode_str == "detailed");
-
-            if (target_str == "all") {
-                graph.print_dependency_tree(std::cout, show_params);
-            } else {
+            if (target_str == "all") { graph.print_dependency_tree(std::cout, show_params); } 
+            else {
                 try {
                     int node_id = std::stoi(target_str);
                     graph.print_dependency_tree(std::cout, node_id, show_params);
@@ -767,33 +682,18 @@ static bool process_command(const std::string& line, NodeGraph& graph, bool& mod
         } else if (cmd == "node") {
             std::optional<int> maybe_id;
             std::string word;
-            if (iss >> word) {
-                try { maybe_id = std::stoi(word); } catch (...) { maybe_id.reset(); }
-            }
+            if (iss >> word) { try { maybe_id = std::stoi(word); } catch (...) { maybe_id.reset(); } }
             ps::run_node_editor(graph, maybe_id);
         }  else if (cmd == "ops") {
-            std::string mode_arg;
-            iss >> mode_arg;
-            if (mode_arg.empty()) {
-                mode_arg = config.default_ops_list_mode;
-            }
+            std::string mode_arg; iss >> mode_arg;
+            if (mode_arg.empty()) { mode_arg = config.default_ops_list_mode; }
 
-            std::string display_mode;
-            std::string display_title;
+            std::string display_mode, display_title;
 
-            if (mode_arg == "all" || mode_arg == "a") {
-                display_mode = "all";
-                display_title = "all";
-            } else if (mode_arg == "builtin" || mode_arg == "b") {
-                display_mode = "builtin";
-                display_title = "built-in";
-            } else if (mode_arg == "plugins" || mode_arg == "custom" || mode_arg == "p" || mode_arg == "c") {
-                display_mode = "plugins";
-                display_title = "plugins";
-            } else {
-                std::cout << "Error: Invalid mode for 'ops'. Use: all (a), builtin (b), or plugins (p/c)." << std::endl;
-                return true;
-            }
+            if (mode_arg == "all" || mode_arg == "a") { display_mode = "all"; display_title = "all"; } 
+            else if (mode_arg == "builtin" || mode_arg == "b") { display_mode = "builtin"; display_title = "built-in"; } 
+            else if (mode_arg == "plugins" || mode_arg == "custom" || mode_arg == "p" || mode_arg == "c") { display_mode = "plugins"; display_title = "plugins"; } 
+            else { std::cout << "Error: Invalid mode for 'ops'. Use: all (a), builtin (b), or plugins (p/c)." << std::endl; return true; }
 
             std::map<std::string, std::vector<std::pair<std::string, std::string>>> grouped_ops;
             int op_count = 0;
@@ -803,9 +703,7 @@ static bool process_command(const std::string& line, NodeGraph& graph, bool& mod
                 const std::string& source = pair.second;
                 bool is_builtin = (source == "built-in");
 
-                if ((display_mode == "builtin" && !is_builtin) || (display_mode == "plugins" && is_builtin)) {
-                    continue;
-                }
+                if ((display_mode == "builtin" && !is_builtin) || (display_mode == "plugins" && is_builtin)) continue;
 
                 size_t colon_pos = key.find(':');
                 if (colon_pos != std::string::npos) {
@@ -831,13 +729,9 @@ static bool process_command(const std::string& line, NodeGraph& graph, bool& mod
                     if (op_info.second != "built-in") {
                         std::string plugin_path_str = op_info.second;
                         std::string display_path;
-                        if (config.ops_plugin_path_mode == "absolute_path") {
-                            display_path = plugin_path_str;
-                        } else if (config.ops_plugin_path_mode == "relative_path") {
-                            display_path = fs::relative(plugin_path_str).string();
-                        } else { 
-                            display_path = fs::path(plugin_path_str).filename().string();
-                        }
+                        if (config.ops_plugin_path_mode == "absolute_path") { display_path = plugin_path_str; } 
+                        else if (config.ops_plugin_path_mode == "relative_path") { display_path = fs::relative(plugin_path_str).string(); } 
+                        else { display_path = fs::path(plugin_path_str).filename().string(); }
                         std::cout << "  [plugin: " << display_path << "]";
                     }
                     std::cout << std::endl;
@@ -875,12 +769,8 @@ static bool process_command(const std::string& line, NodeGraph& graph, bool& mod
             if (do_check_remove) graph.synchronize_disk_cache(config.cache_precision);
             else if (do_check) graph.cache_all_nodes(config.cache_precision);
 
-            if (print_tree_mode == "detailed") {
-                graph.print_dependency_tree(std::cout, true);
-            } else if (print_tree_mode == "simplified") {
-                graph.print_dependency_tree(std::cout, false);
-            }
-            
+            if (print_tree_mode == "detailed") graph.print_dependency_tree(std::cout, true);
+            else if (print_tree_mode == "simplified") graph.print_dependency_tree(std::cout, false);
             do_traversal(graph, show_mem, show_disk);
         } else if (cmd == "config") {
             run_config_editor(config);
@@ -907,61 +797,40 @@ static bool process_command(const std::string& line, NodeGraph& graph, bool& mod
         } else if (cmd == "clear-graph") {
             graph.clear(); modified = true; std::cout << "Graph cleared.\n";
         } else if (cmd == "clear-cache" || cmd == "cc") {
-            std::string arg;
-            iss >> arg;
-            if (arg.empty()) {
-                arg = config.default_cache_clear_arg;
-            }
+            std::string arg; iss >> arg;
+            if (arg.empty()) { arg = config.default_cache_clear_arg; }
             if (arg == "both" || arg == "md" || arg == "dm") graph.clear_cache();
             else if (arg == "drive" || arg == "d") graph.clear_drive_cache();
             else if (arg == "memory" || arg == "m") graph.clear_memory_cache();
         } 
-        
         else if (cmd == "compute") {
-            std::string target_id_str;
-            iss >> target_id_str;
-            if (target_id_str.empty()) {
-                std::cout << "Usage: compute <id|all> [flags]\n";
-                return true;
-            }
+            std::string target_id_str; iss >> target_id_str;
+            if (target_id_str.empty()) { std::cout << "Usage: compute <id|all> [flags]\n"; return true; }
 
-            bool force = false;
-            bool timer_console = false;
-            bool timer_log_file = false;
+            bool force = false, timer_console = false, timer_log_file = false, parallel = false;
             std::string timer_log_path = "";
-            bool parallel = false;
-
             std::string arg;
+
             while (iss >> arg) {
-                if (arg == "force") {
-                    force = true;
-                } else if (arg == "t" || arg == "timer") {
-                    timer_console = true;
-                } else if (arg == "parallel") {
-                    parallel = true;
-                } else if (arg == "tl") {
+                if (arg == "force") force = true;
+                else if (arg == "t" || arg == "timer") timer_console = true;
+                else if (arg == "parallel") parallel = true;
+                else if (arg == "tl") {
                     timer_log_file = true;
                     if (iss.peek() != EOF && iss.peek() != ' ') {
                         std::string next_arg;
                         iss >> next_arg;
-                        if (next_arg != "force" && next_arg != "t" && next_arg != "timer" && next_arg != "parallel") {
-                            timer_log_path = next_arg;
-                        } else {
-                            iss.seekg(-(next_arg.length()), std::ios_base::cur);
-                        }
+                        if (next_arg != "force" && next_arg != "t" && next_arg != "timer" && next_arg != "parallel") { timer_log_path = next_arg; } 
+                        else { iss.seekg(-(next_arg.length()), std::ios_base::cur); }
                     }
                 }
             }
 
             bool enable_timing = timer_console || timer_log_file;
-            if (enable_timing) {
-                graph.clear_timing_results();
-            }
+            if (enable_timing) { graph.clear_timing_results(); }
             
             std::chrono::time_point<std::chrono::high_resolution_clock> total_start;
-            if (timer_log_file) {
-                total_start = std::chrono::high_resolution_clock::now();
-            }
+            if (timer_log_file) { total_start = std::chrono::high_resolution_clock::now(); }
 
             auto print_output = [](int id, const NodeOutput& out) {
                 std::cout << "-> Node " << id << " computed.\n";
@@ -975,9 +844,7 @@ static bool process_command(const std::string& line, NodeGraph& graph, bool& mod
                     std::cout << "   Data Outputs:\n";
                     YAML::Emitter yml;
                     yml << YAML::Flow << YAML::BeginMap;
-                    for(const auto& pair : out.data) {
-                        yml << YAML::Key << pair.first << YAML::Value << pair.second;
-                    }
+                    for(const auto& pair : out.data) { yml << YAML::Key << pair.first << YAML::Value << pair.second; }
                     yml << YAML::EndMap;
                     std::cout << "     " << yml.c_str() << "\n"; 
                 }
@@ -987,25 +854,17 @@ static bool process_command(const std::string& line, NodeGraph& graph, bool& mod
                 if (parallel) {
                     std::cout << "--- Starting parallel computation ---" << std::endl;
                     return graph.compute_parallel(id, config.cache_precision, force, enable_timing);
-                } else {
-                    return graph.compute(id, config.cache_precision, force, enable_timing);
                 }
+                return graph.compute(id, config.cache_precision, force, enable_timing);
             };
 
-            if (target_id_str == "all") {
-                for (int id : graph.ending_nodes()) {
-                    print_output(id, compute_func(id));
-                }
-            } else {
-                int id = std::stoi(target_id_str);
-                print_output(id, compute_func(id));
-            }
+            if (target_id_str == "all") { for (int id : graph.ending_nodes()) { print_output(id, compute_func(id)); } } 
+            else { int id = std::stoi(target_id_str); print_output(id, compute_func(id)); }
 
             if (timer_console) {
                 std::cout << "--- Computation Timers (Console) ---\n";
                 for (const auto& timing : graph.timing_results.node_timings) {
-                    printf("  - Node %-3d (%-20s): %10.4f ms [%s]\n", 
-                           timing.id, timing.name.c_str(), timing.elapsed_ms, timing.source.c_str());
+                    printf("  - Node %-3d (%-20s): %10.4f ms [%s]\n", timing.id, timing.name.c_str(), timing.elapsed_ms, timing.source.c_str());
                 }
             }
             
@@ -1014,26 +873,19 @@ static bool process_command(const std::string& line, NodeGraph& graph, bool& mod
                 std::chrono::duration<double, std::milli> total_elapsed = total_end - total_start;
                 graph.timing_results.total_ms = total_elapsed.count();
 
-                if (timer_log_path.empty()) {
-                    timer_log_path = config.default_timer_log_path;
-                }
+                if (timer_log_path.empty()) { timer_log_path = config.default_timer_log_path; }
 
                 fs::path out_path(timer_log_path);
-                if (out_path.has_parent_path()) {
-                    fs::create_directories(out_path.parent_path());
-                }
+                if (out_path.has_parent_path()) { fs::create_directories(out_path.parent_path()); }
 
                 YAML::Node root;
                 YAML::Node steps_node(YAML::NodeType::Sequence);
                 for (const auto& timing : graph.timing_results.node_timings) {
                     YAML::Node step;
-                    step["id"] = timing.id;
-                    step["name"] = timing.name;
-                    step["time_ms"] = timing.elapsed_ms;
-                    step["source"] = timing.source; 
+                    step["id"] = timing.id; step["name"] = timing.name;
+                    step["time_ms"] = timing.elapsed_ms; step["source"] = timing.source; 
                     steps_node.push_back(step);
                 }
-
                 root["steps"] = steps_node;
                 root["total_time_ms"] = graph.timing_results.total_ms;
                 
@@ -1053,15 +905,13 @@ static bool process_command(const std::string& line, NodeGraph& graph, bool& mod
                     result.image_matrix = result.image_umatrix.getMat(cv::ACCESS_READ).clone();
                 }
 
-                if (save_fp32_image(result.image_matrix, path, config)) {
-                    std::cout << "Successfully saved node " << id << " image to " << path << "\n";
-                } else {
-                    std::cout << "Error: Failed to save image to " << path << "\n";
-                }
+                if (save_fp32_image(result.image_matrix, path, config)) { std::cout << "Successfully saved node " << id << " image to " << path << "\n"; } 
+                else { std::cout << "Error: Failed to save image to " << path << "\n"; }
             }
         } else if (cmd == "free") {
             graph.free_transient_memory();
         } else if (cmd == "exit") {
+            std::cout << std::endl;
             if (modified && ask_yesno("You have unsaved changes. Save graph to file?", true)) {
                 std::string path = ask("output file", config.default_exit_save_path);
                 graph.save_yaml(path); std::cout << "Saved to " << path << "\n";
@@ -1079,31 +929,234 @@ static bool process_command(const std::string& line, NodeGraph& graph, bool& mod
     return true;
 }
 
+// --- START OF CORRECTED REPL ---
 static void run_repl(NodeGraph& graph, CliConfig& config, const std::map<std::string, std::string>& op_sources) {
     bool modified = false;
-    std::string line;
+    
+    CliHistory history;
+    history.SetMaxSize(config.history_size);
+    CliAutocompleter completer(graph, op_sources);
+
+    // --- State for the new cyclical autocompletion feature ---
+    struct CompletionState {
+        std::vector<std::string> options;
+        int current_index = -1;
+        size_t original_cursor_pos = 0;
+        std::string original_prefix;
+
+        void Reset() {
+            options.clear();
+            current_index = -1;
+        }
+        bool IsActive() const { return current_index != -1; }
+    } completion_state;
+
+    std::string line_buffer;
+    int cursor_pos = 0;
+    
+    // This lambda is now more complex to handle highlighting for cyclical completion.
+    std::function<void(const std::vector<std::string>&)> redraw_line_impl;
+    auto redraw_line = [&](const std::vector<std::string>& options_to_display = {}) {
+        redraw_line_impl(options_to_display);
+    };
+
+    redraw_line_impl = [&](const std::vector<std::string>& options_to_display) {
+        // Erase the current line and move cursor to the beginning.
+        std::cout << "\r\x1B[K" << "ps> ";
+
+        if (completion_state.IsActive()) {
+            // Highlight the active completion
+            size_t prefix_len = completion_state.original_prefix.length();
+            size_t highlight_len = line_buffer.length() - prefix_len;
+            std::cout << line_buffer.substr(0, prefix_len)
+                      << "\x1B[7m" // Invert colors
+                      << line_buffer.substr(prefix_len, highlight_len)
+                      << "\x1B[0m" // Reset colors
+                      << std::flush;
+        } else {
+            std::cout << line_buffer << std::flush;
+        }
+
+        // Move cursor back to its logical position.
+        std::cout << "\r\x1B[" << (4 + cursor_pos) << "C" << std::flush;
+
+        // Display the list of options below the prompt, if any.
+        if (!options_to_display.empty()) {
+            std::cout << "\n\r"; // Go to the beginning of the next line
+            for(size_t i = 0; i < options_to_display.size(); ++i) {
+                std::string opt = options_to_display[i];
+                if (opt.length() > 20) opt = opt.substr(0, 17) + "...";
+                std::cout << opt << (i % 5 == 4 || i == options_to_display.size() - 1 ? "" : "\t");
+                if (i % 5 == 4 || i == options_to_display.size() - 1) {
+                    std::cout << "\n\r";
+                }
+            }
+            // Redraw the prompt line after displaying options.
+            redraw_line();
+        }
+    };
+
+    // FIX: Print the welcome message *before* putting the terminal in raw mode.
     std::cout << "Photospider dynamic graph shell. Type 'help' for commands.\n";
+    TerminalInput term_input;
+    redraw_line();
+
     while (true) {
-        std::cout << "ps> ";
-        if (!std::getline(std::cin, line)) break;
-        if (!process_command(line, graph, modified, config, op_sources)) break;
+        int key = term_input.GetChar();
+
+        // Any keypress other than Tab breaks the completion cycle.
+        if (key != TAB) {
+            completion_state.Reset();
+        }
+
+        switch (key) {
+            case ENTER: {
+                std::cout << "\n";
+                if (!line_buffer.empty()) {
+                    history.Add(line_buffer);
+                    history.Save();
+                }
+                
+                // FIX: This is the critical fix for command execution.
+                // Restore the terminal to its normal, cooked mode before
+                // running the command so that std::cout works as expected.
+                term_input.Restore();
+                bool continue_repl = process_command(line_buffer, graph, modified, config, op_sources);
+                term_input.SetRaw(); // Re-enter raw mode after command finishes.
+                
+                if (!continue_repl) {
+                    return; // exit command was issued
+                }
+
+                line_buffer.clear();
+                cursor_pos = 0;
+                history.ResetNavigation();
+                redraw_line();
+                break;
+            }
+            case CTRL_C: {
+                if (line_buffer.empty()) {
+                    std::cout << "\n(To exit, type 'exit' or press Ctrl+C again on an empty line)\n";
+                    redraw_line();
+                    key = term_input.GetChar();
+                    if(key == CTRL_C) {
+                        std::cout << "\nExiting." << std::endl;
+                        return;
+                    }
+                }
+                line_buffer.clear();
+                cursor_pos = 0;
+                history.ResetNavigation();
+                redraw_line();
+                break;
+            }
+            case BACKSPACE: {
+                if (cursor_pos > 0) {
+                    line_buffer.erase(cursor_pos - 1, 1);
+                    cursor_pos--;
+                    redraw_line();
+                }
+                break;
+            }
+            case DEL: {
+                 if (cursor_pos < (int)line_buffer.length()) {
+                    line_buffer.erase(cursor_pos, 1);
+                    redraw_line();
+                }
+                break;
+            }
+            case UP: {
+                std::string prefix = line_buffer.substr(0, cursor_pos);
+                line_buffer = history.GetPrevious(prefix);
+                cursor_pos = line_buffer.length();
+                redraw_line();
+                break;
+            }
+            case DOWN: {
+                std::string prefix = line_buffer.substr(0, cursor_pos);
+                line_buffer = history.GetNext(prefix);
+                cursor_pos = line_buffer.length();
+                redraw_line();
+                break;
+            }
+            case LEFT: {
+                if (cursor_pos > 0) {
+                    cursor_pos--;
+                    redraw_line();
+                }
+                break;
+            }
+            case RIGHT: {
+                if (cursor_pos < (int)line_buffer.length()) {
+                    cursor_pos++;
+                    redraw_line();
+                }
+                break;
+            }
+            case TAB: {
+                if (completion_state.IsActive()) {
+                    // --- We are already in a cycle ---
+                    completion_state.current_index = (completion_state.current_index + 1) % completion_state.options.size();
+                    
+                    line_buffer.erase(completion_state.original_cursor_pos - completion_state.original_prefix.length(),
+                                      line_buffer.length() - (completion_state.original_cursor_pos - completion_state.original_prefix.length()));
+                    
+                    line_buffer.insert(completion_state.original_cursor_pos - completion_state.original_prefix.length(), 
+                                       completion_state.options[completion_state.current_index]);
+
+                    cursor_pos = line_buffer.length();
+                    redraw_line();
+                } else {
+                    // --- This is a new completion attempt ---
+                    auto result = completer.Complete(line_buffer, cursor_pos);
+                    if (result.options.empty()) break; // No completions found
+
+                    if (result.options.size() == 1) {
+                        // Single option: complete and add space.
+                        line_buffer = result.new_line;
+                        cursor_pos = result.new_cursor_pos;
+                        redraw_line();
+                    } else {
+                        // Multiple options: start the cycle.
+                        completion_state.options = result.options;
+                        completion_state.current_index = 0;
+                        completion_state.original_cursor_pos = cursor_pos;
+                        completion_state.original_prefix = line_buffer.substr(
+                            line_buffer.find_last_of(" \t", cursor_pos - 1) + 1,
+                            cursor_pos - (line_buffer.find_last_of(" \t", cursor_pos - 1) + 1)
+                        );
+                        
+                        line_buffer = result.new_line; // Apply the first option
+                        cursor_pos = result.new_cursor_pos;
+                        redraw_line(completion_state.options);
+                    }
+                }
+                break;
+            }
+            case UNKNOWN:
+                break;
+            default: {
+                if(key >= 32 && key <= 126) {
+                    line_buffer.insert(cursor_pos, 1, static_cast<char>(key));
+                    cursor_pos++;
+                    history.ResetNavigation();
+                    redraw_line();
+                }
+                break;
+            }
+        }
     }
 }
 
+// ... (load_plugins and main function remain unchanged)
 static void load_plugins(const std::vector<std::string>& plugin_dir_paths, std::map<std::string, std::string>& op_sources) {
     auto& registry = ps::OpRegistry::instance();
-
     for (const auto& plugin_dir_path : plugin_dir_paths) {
-        if (!fs::exists(plugin_dir_path) || !fs::is_directory(plugin_dir_path)) {
-            continue;
-        }
-
+        if (!fs::exists(plugin_dir_path) || !fs::is_directory(plugin_dir_path)) continue;
         std::cout << "Scanning for plugins in '" << plugin_dir_path << "'..." << std::endl;
 
         for (const auto& entry : fs::directory_iterator(plugin_dir_path)) {
             const auto& path = entry.path();
-
-            // --- FIX: Define the correct shared library extension for each platform ---
             #if defined(_WIN32)
                 const std::string extension = ".dll";
             #elif defined(__APPLE__)
@@ -1111,65 +1164,40 @@ static void load_plugins(const std::vector<std::string>& plugin_dir_paths, std::
             #else
                 const std::string extension = ".so";
             #endif
-
-            if (path.extension() != extension) {
-                continue;
-            }
+            if (path.extension() != extension) continue;
 
             std::cout << "  - Attempting to load plugin: " << path.filename().string() << std::endl;
-            
             auto keys_before = registry.get_keys();
             
-    #ifdef _WIN32
+            #ifdef _WIN32
             HMODULE handle = LoadLibrary(path.string().c_str());
-            if (!handle) {
-                std::cerr << "    Error: Failed to load plugin. Code: " << GetLastError() << std::endl;
-                continue;
-            }
+            if (!handle) { std::cerr << "    Error: Failed to load plugin. Code: " << GetLastError() << std::endl; continue; }
             using RegisterFunc = void(*)();
             RegisterFunc register_func = (RegisterFunc)GetProcAddress(handle, "register_photospider_ops");
-            if (!register_func) {
-                std::cerr << "    Error: Cannot find 'register_photospider_ops' export in plugin." << std::endl;
-                FreeLibrary(handle);
-                continue;
-            }
-    #else 
+            if (!register_func) { std::cerr << "    Error: Cannot find 'register_photospider_ops' export in plugin." << std::endl; FreeLibrary(handle); continue; }
+            #else 
             void* handle = dlopen(path.c_str(), RTLD_LAZY);
-            if (!handle) {
-                std::cerr << "    Error: Failed to load plugin: " << dlerror() << std::endl;
-                continue;
-            }
+            if (!handle) { std::cerr << "    Error: Failed to load plugin: " << dlerror() << std::endl; continue; }
             void (*register_func)();
             *(void**)(&register_func) = dlsym(handle, "register_photospider_ops");
             const char* dlsym_error = dlerror();
-            if (dlsym_error) {
-                std::cerr << "    Error: Cannot find 'register_photospider_ops' export in plugin: " << dlsym_error << std::endl;
-                dlclose(handle);
-                continue;
-            }
-    #endif
+            if (dlsym_error) { std::cerr << "    Error: Cannot find 'register_photospider_ops' export in plugin: " << dlsym_error << std::endl; dlclose(handle); continue; }
+            #endif
             
             try {
                 register_func();
                 auto keys_after = registry.get_keys();
                 std::vector<std::string> new_keys;
-
-                std::set_difference(keys_after.begin(), keys_after.end(),
-                                    keys_before.begin(), keys_before.end(),
-                                    std::back_inserter(new_keys));
-
-                for (const auto& key : new_keys) {
-                    op_sources[key] = fs::absolute(path).string();
-                }
-                
+                std::set_difference(keys_after.begin(), keys_after.end(), keys_before.begin(), keys_before.end(), std::back_inserter(new_keys));
+                for (const auto& key : new_keys) { op_sources[key] = fs::absolute(path).string(); }
                 std::cout << "    Success: Plugin loaded and " << new_keys.size() << " operation(s) registered." << std::endl;
             } catch (const std::exception& e) {
                 std::cerr << "    Error: An exception occurred during plugin registration: " << e.what() << std::endl;
-    #ifdef _WIN32
+                #ifdef _WIN32
                 FreeLibrary(handle);
-    #else
+                #else
                 dlclose(handle);
-    #endif
+                #endif
             }
         }
     }
@@ -1184,12 +1212,8 @@ int main(int argc, char** argv) {
     ops::register_builtin();
     auto keys_after_builtin = registry.get_keys();
     std::vector<std::string> builtin_keys;
-    std::set_difference(keys_after_builtin.begin(), keys_after_builtin.end(),
-                        keys_before_builtin.begin(), keys_before_builtin.end(),
-                        std::back_inserter(builtin_keys));
-    for (const auto& key : builtin_keys) {
-        op_sources[key] = "built-in";
-    }
+    std::set_difference(keys_after_builtin.begin(), keys_after_builtin.end(), keys_before_builtin.begin(), keys_before_builtin.end(), std::back_inserter(builtin_keys));
+    for (const auto& key : builtin_keys) { op_sources[key] = "built-in"; }
 
     CliConfig config;
     std::string custom_config_path;
@@ -1197,27 +1221,21 @@ int main(int argc, char** argv) {
     const char* const short_opts = "hr:o:pt:R";
     const option long_opts[] = {
         {"help", no_argument, nullptr, 'h'}, {"read", required_argument, nullptr, 'r'},
-        {"output", required_argument, nullptr, 'o'},
-        {"print", no_argument, nullptr, 'p'}, {"traversal", no_argument, nullptr, 't'},
-        {"clear-cache", no_argument, nullptr, 1001},
-        {"repl", no_argument, nullptr, 'R'}, 
-        {"config", required_argument, nullptr, 2001},
+        {"output", required_argument, nullptr, 'o'}, {"print", no_argument, nullptr, 'p'}, 
+        {"traversal", no_argument, nullptr, 't'}, {"clear-cache", no_argument, nullptr, 1001},
+        {"repl", no_argument, nullptr, 'R'}, {"config", required_argument, nullptr, 2001},
         {nullptr, 0, nullptr, 0}
     };
     
     int opt;
     while ((opt = getopt_long(argc, argv, short_opts, long_opts, nullptr)) != -1) {
-        if (opt == 2001) {
-            custom_config_path = optarg;
-        }
+        if (opt == 2001) { custom_config_path = optarg; }
     }
     optind = 1;
 
     std::string config_to_load = custom_config_path.empty() ? "config.yaml" : custom_config_path;
     load_or_create_config(config_to_load, config);
-
     load_plugins(config.plugin_dirs, op_sources);
-
     NodeGraph graph{config.cache_root_dir};
     
     bool did_any_action = false;
@@ -1227,47 +1245,29 @@ int main(int argc, char** argv) {
         try {
             switch (opt) {
             case 'h': print_cli_help(); return 0;
-            case 'r': 
-                graph.load_yaml(optarg); 
-                std::cout << "Loaded graph from " << optarg << "\n"; 
-                did_any_action = true; 
-                break;
-            case 'o': 
-                graph.save_yaml(optarg); 
-                std::cout << "Saved graph to " << optarg << "\n"; 
-                did_any_action = true; 
-                break;
-            case 'p': 
-                graph.print_dependency_tree(std::cout); 
-                did_any_action = true; 
-                break;
-            case 't': 
-                {
-                    std::string print_tree_mode = "none";
-                    bool show_mem = false, show_disk = false;
-                    std::istringstream iss(config.default_traversal_arg);
-                    std::string arg;
-                     while(iss >> arg) {
-                        if (arg == "d" || arg == "detailed") print_tree_mode = "detailed";
-                        else if (arg == "s" || arg == "simplified") print_tree_mode = "simplified";
-                        else if (arg == "n" || arg == "no_tree") print_tree_mode = "none";
-                        else if (arg.find('m') != std::string::npos) show_mem = true;
-                        else if (arg.find('d') != std::string::npos && arg != "detailed") show_disk = true;
-                     }
-                    if (print_tree_mode == "detailed") graph.print_dependency_tree(std::cout, true);
-                    else if (print_tree_mode == "simplified") graph.print_dependency_tree(std::cout, false);
-                    do_traversal(graph, show_mem, show_disk);
-                }
-                did_any_action = true; 
-                break;
-            case 1001: 
-                graph.clear_cache(); 
-                did_any_action = true; 
-                break;
-            case 'R': 
-                start_repl_after_actions = true; 
-                break;
-            case 2001: /* Already handled */ break;
+            case 'r': graph.load_yaml(optarg); std::cout << "Loaded graph from " << optarg << "\n"; did_any_action = true; break;
+            case 'o': graph.save_yaml(optarg); std::cout << "Saved graph to " << optarg << "\n"; did_any_action = true; break;
+            case 'p': graph.print_dependency_tree(std::cout); did_any_action = true; break;
+            case 't': {
+                std::string print_tree_mode = "none";
+                bool show_mem = false, show_disk = false;
+                std::istringstream iss(config.default_traversal_arg);
+                std::string arg;
+                 while(iss >> arg) {
+                    if (arg == "d" || arg == "detailed") print_tree_mode = "detailed";
+                    else if (arg == "s" || arg == "simplified") print_tree_mode = "simplified";
+                    else if (arg == "n" || arg == "no_tree") print_tree_mode = "none";
+                    else if (arg.find('m') != std::string::npos) show_mem = true;
+                    else if (arg.find('d') != std::string::npos && arg != "detailed") show_disk = true;
+                 }
+                if (print_tree_mode == "detailed") graph.print_dependency_tree(std::cout, true);
+                else if (print_tree_mode == "simplified") graph.print_dependency_tree(std::cout, false);
+                do_traversal(graph, show_mem, show_disk);
+                did_any_action = true; break;
+            }
+            case 1001: graph.clear_cache(); did_any_action = true; break;
+            case 'R': start_repl_after_actions = true; break;
+            case 2001: break;
             default: print_cli_help(); return 1;
             }
         } catch (const std::exception& e) {

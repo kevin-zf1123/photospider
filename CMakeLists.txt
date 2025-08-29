@@ -59,7 +59,11 @@ target_link_libraries(ftxui-component PUBLIC ftxui-dom)
 
 
 # --- Configure Main Executable ---
-file(GLOB APP_SOURCES "src/*.cpp" "cli/*.cpp")
+file(GLOB APP_SOURCES 
+    "src/*.cpp" 
+    "src/*.hpp"
+    "cli/*.cpp"
+)
 add_executable(graph_cli ${APP_SOURCES})
 target_include_directories(graph_cli PRIVATE "${PROJECT_SOURCE_DIR}/include" "${PROJECT_SOURCE_DIR}/src")
 find_library(FW_METAL Metal)
@@ -75,6 +79,10 @@ target_link_libraries(graph_cli PRIVATE
     ${FW_COREIMAGE}
     ${FW_QUARTZCORE}
 )
+if (UNIX AND NOT APPLE)
+    target_link_libraries(graph_cli PRIVATE anl)
+endif()
+
 
 # --- Configure Plugins ---
 set(PLUGIN_OUTPUT_DIR ${CMAKE_BINARY_DIR}/plugins)
