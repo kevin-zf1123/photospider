@@ -280,14 +280,12 @@ private:
         add_toggle_line("traversal_show_memory(m)", &traversal_show_mem_);
         add_toggle_line("traversal_show_disk(d)", &traversal_show_disk_);
         add_radio_line("traversal_check", &traversal_check_entries_, &selected_traversal_check_idx_);
-        add_text_line("default_traversal_arg", &temp_config_.default_traversal_arg);
-        // Compute defaults (multi-select UI) + raw string
+        // Compute defaults (multi-select UI)
         add_toggle_line("compute_force", &compute_force_);
         add_toggle_line("compute_parallel", &compute_parallel_);
         add_toggle_line("compute_timer_console(-t)", &compute_timer_console_);
         add_toggle_line("compute_timer_log(-tl)", &compute_timer_log_);
         add_toggle_line("compute_mute(-m)", &compute_mute_);
-        add_text_line("default_compute_args", &temp_config_.default_compute_args);
         
         add_radio_line("default_print_mode", &print_mode_entries_, &selected_print_mode_idx_);
         add_radio_line("default_ops_list_mode", &ops_list_mode_entries_, &selected_ops_list_mode_idx_);
