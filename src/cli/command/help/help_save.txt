@@ -1,0 +1,4 @@
+save <id> <file>
+
+Compute node <id> and save its floating point image output to <file>.
+

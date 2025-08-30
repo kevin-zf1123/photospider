@@ -1,0 +1,4 @@
+graphs
+
+Lists loaded graphs and marks the current selection.
+

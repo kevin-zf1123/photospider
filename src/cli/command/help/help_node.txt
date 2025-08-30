@@ -1,0 +1,5 @@
+node [<id>]
+
+Open the FTXUI node editor for the current graph.
+Optionally focus on a specific node id.
+

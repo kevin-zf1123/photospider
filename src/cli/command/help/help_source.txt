@@ -1,0 +1,5 @@
+source <file>
+
+Execute commands from a script file, line by line.
+Lines starting with '#' and blank lines are ignored.
+

@@ -1,0 +1,5 @@
+switch <name> [c]
+
+Switch current graph session to <name>.
+With 'c', copy current session's YAML/config into <name> and switch.
+

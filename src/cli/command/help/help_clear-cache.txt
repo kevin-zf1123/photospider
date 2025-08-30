@@ -1,0 +1,8 @@
+clear-cache [m|d|md]
+cc [m|d|md]
+
+Clear caches for the current graph.
+- m: memory cache
+- d: disk cache
+- md/both: both memory and disk caches
+

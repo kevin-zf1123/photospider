@@ -1,0 +1,10 @@
+compute <id> [flags]
+
+Compute node(s) with optional flags:
+- force: clear in-memory caches before compute
+- force-deep: clear disk+memory caches before compute
+- parallel: compute using multiple threads
+- t | -t | timer: print simple timing to console
+- tl | -tl <path>: write detailed timings to a file
+- m | -m | mute: mute node result output
+

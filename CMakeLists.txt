@@ -94,6 +94,27 @@ list(APPEND APP_SOURCES
     src/cli/handle_interactive_save.cpp
     src/cli/do_traversal.cpp
     src/cli/save_fp32_image.cpp
+    src/cli/command/help_utils.cpp
+    src/cli/command/command_help.cpp
+    src/cli/command/command_clear.cpp
+    src/cli/command/command_graphs.cpp
+    src/cli/command/command_load.cpp
+    src/cli/command/command_switch.cpp
+    src/cli/command/command_close.cpp
+    src/cli/command/command_print.cpp
+    src/cli/command/command_node.cpp
+    src/cli/command/command_ops.cpp
+    src/cli/command/command_traversal.cpp
+    src/cli/command/command_config.cpp
+    src/cli/command/command_read.cpp
+    src/cli/command/command_source.cpp
+    src/cli/command/command_output.cpp
+    src/cli/command/command_clear_graph.cpp
+    src/cli/command/command_clear_cache.cpp
+    src/cli/command/command_free.cpp
+    src/cli/command/command_compute.cpp
+    src/cli/command/command_save.cpp
+    src/cli/command/command_exit.cpp
     src/cli/process_command.cpp
     src/cli/run_repl.cpp
 )

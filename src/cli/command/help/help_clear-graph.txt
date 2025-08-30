@@ -1,0 +1,4 @@
+clear-graph
+
+Clear the current graph's nodes and edges.
+

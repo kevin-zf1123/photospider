@@ -1,0 +1,6 @@
+load <name> [yaml]
+  Load a graph into session <name>. If yaml omitted, loads sessions/<name>/content.yaml.
+
+load <yaml>
+  Load YAML into current session; if none, into [default].
+

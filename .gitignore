@@ -63,3 +63,4 @@ kernel.py
 *.patch
 /sessions/
 .vscode/
+!**/help*.txt

@@ -1,0 +1,6 @@
+print [all|<id>] [full|simplified]
+
+Print the dependency tree of the current graph.
+- Target: 'all' (default) or a node id.
+- Mode: 'full' prints parameters; 'simplified' hides parameters.
+

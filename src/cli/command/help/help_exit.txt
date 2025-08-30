@@ -1,0 +1,4 @@
+exit | quit | q
+
+Exit the REPL. Prompts to synchronize disk cache with memory by default.
+

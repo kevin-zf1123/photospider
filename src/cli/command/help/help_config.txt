@@ -1,0 +1,4 @@
+config
+
+Open the interactive configuration editor.
+

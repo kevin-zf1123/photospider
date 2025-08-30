@@ -1,0 +1,7 @@
+traversal [f|s|n] [m|d|md] [c|cr]
+
+Show evaluation order (post-order) for end nodes.
+- f/s/n: full/simplified/no dependency tree print.
+- m/d/md: show memory/disk/both cache status in listing.
+- c: cache check+save; cr: synchronize disk cache with memory state.
+
