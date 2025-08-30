@@ -44,9 +44,56 @@ bool process_command(const std::string& line,
                 std::cout << std::endl;
             }
         } else if (cmd == "load") {
-            std::string name, yaml; iss >> name >> yaml;
-            if (name.empty()) { std::cout << "Usage: load <name> [yaml]\n"; return true; }
-            if (yaml.empty()) {
+            // Merged behavior: support
+            //   - load <name> [yaml]  (session-based load, as before)
+            //   - load <yaml>        (load into current session if set; else into [default])
+            std::vector<std::string> args; { std::string a; while (iss >> a) args.push_back(a); }
+            auto is_yaml_path = [](const std::string& s){
+                auto ends_with = [&](const char* ext){ return s.size() >= strlen(ext) && s.rfind(ext) == s.size() - strlen(ext); };
+                return ends_with(".yaml") || ends_with(".yml");
+            };
+            if (args.empty()) { std::cout << "Usage: load <name> [yaml]  OR  load <yaml>\n"; return true; }
+
+            if (args.size() == 1 && (is_yaml_path(args[0]) || fs::exists(args[0]))) {
+                // Variant: load <yaml>
+                const std::string yaml_path = args[0];
+                if (!current_graph.empty()) {
+                    // Overwrite current session's content by reloading YAML
+                    if (config.session_warning) {
+                        if (!ask_yesno("This will overwrite current session '" + current_graph + "' contents from '" + yaml_path + "'. Continue?", true)) {
+                            std::cout << "Aborted." << std::endl; return true;
+                        }
+                    }
+                    if (svc.cmd_reload_yaml(current_graph, yaml_path)) {
+                        modified = false;
+                        std::cout << "Loaded graph from " << yaml_path << " into session '" << current_graph << "'\n";
+                    } else {
+                        std::cout << "Failed to load from '" << yaml_path << "'." << std::endl;
+                    }
+                } else {
+                    // No current session: load into [default]
+                    const std::string def = "default";
+                    fs::path def_dir = fs::path("sessions")/def;
+                    fs::path def_yaml = def_dir/"content.yaml";
+                    bool will_overwrite = fs::exists(def_yaml);
+                    if (config.session_warning && will_overwrite) {
+                        if (!ask_yesno("Session 'default' already exists and will be overwritten. Continue?", true)) {
+                            std::cout << "Aborted." << std::endl; return true;
+                        }
+                    }
+                    auto ok = svc.cmd_load_graph(def, "sessions", yaml_path, config.loaded_config_path);
+                    if (!ok) { std::cout << "Error: failed to load session 'default' from '" << yaml_path << "'.\n"; return true; }
+                    if (config.switch_after_load) current_graph = *ok;
+                    config.loaded_config_path = (ps::fs::absolute(ps::fs::path("sessions")/def/"config.yaml")).string();
+                    std::cout << "Loaded graph into session 'default' (yaml: " << yaml_path << ").\n";
+                }
+                return true;
+            }
+
+            // Variant: load <name> [yaml]
+            const std::string name = args[0];
+            if (args.size() == 1) {
+                // load <name>  (from sessions/<name>/content.yaml)
                 auto session_yaml = ps::fs::path("sessions")/name/"content.yaml";
                 if (!ps::fs::exists(session_yaml)) {
                     std::cout << "Error: session YAML not found: " << session_yaml << "\n";
@@ -61,6 +108,15 @@ bool process_command(const std::string& line,
                 }
                 std::cout << "Loaded graph '" << name << "' from session (content.yaml).\n";
             } else {
+                const std::string yaml = args[1];
+                // Warn if overwriting existing session content
+                auto session_dir = fs::path("sessions")/name;
+                auto session_yaml = session_dir/"content.yaml";
+                if (config.session_warning && fs::exists(session_yaml)) {
+                    if (!ask_yesno("Session '" + name + "' already exists and will be overwritten. Continue?", true)) {
+                        std::cout << "Aborted." << std::endl; return true;
+                    }
+                }
                 auto ok = svc.cmd_load_graph(name, "sessions", yaml, config.loaded_config_path);
                 if (!ok) { std::cout << "Error: failed to load graph '" << name << "' from '" << yaml << "'.\n"; return true; }
                 if (config.switch_after_load) {
@@ -70,10 +126,53 @@ bool process_command(const std::string& line,
                 std::cout << "Loaded graph '" << name << "' (yaml: " << yaml << ").\n";
             }
         } else if (cmd == "switch") {
-            std::string name; iss >> name; if (name.empty()) { std::cout << "Usage: switch <name>\n"; return true; }
-            auto names = svc.cmd_list_graphs();
-            if (std::find(names.begin(), names.end(), name) == names.end()) { std::cout << "Graph not found: " << name << "\n"; return true; }
-            current_graph = name; std::cout << "Switched to '" << name << "'.\n";
+            // Extended: optional 'c' arg to copy current session to target session then switch
+            std::string name; iss >> name; if (name.empty()) { std::cout << "Usage: switch <name> [c]\n"; return true; }
+            std::string arg; iss >> arg;
+            if (arg == "c") {
+                if (current_graph.empty()) { std::cout << "No current graph to copy. Use load first.\n"; return true; }
+                if (name == current_graph) { std::cout << "Target session equals current; nothing to copy.\n"; return true; }
+
+                // Ensure current session YAML is saved before copying
+                fs::path src_yaml = fs::path("sessions")/current_graph/"content.yaml";
+                (void)svc.cmd_save_yaml(current_graph, src_yaml.string());
+                fs::path src_cfg = fs::path("sessions")/current_graph/"config.yaml";
+
+                fs::path dst_dir = fs::path("sessions")/name;
+                fs::path dst_yaml = dst_dir/"content.yaml";
+                fs::path dst_cfg = dst_dir/"config.yaml";
+
+                bool will_overwrite = fs::exists(dst_yaml) || fs::exists(dst_cfg);
+                if (config.session_warning && will_overwrite) {
+                    if (!ask_yesno("Session '" + name + "' already exists and will be overwritten by copy. Continue?", true)) {
+                        std::cout << "Aborted." << std::endl; return true;
+                    }
+                }
+
+                try {
+                    fs::create_directories(dst_dir);
+                    if (fs::exists(src_yaml)) fs::copy_file(src_yaml, dst_yaml, fs::copy_options::overwrite_existing);
+                    if (fs::exists(src_cfg)) fs::copy_file(src_cfg, dst_cfg, fs::copy_options::overwrite_existing);
+                } catch (const std::exception& e) {
+                    std::cout << "Error: failed to copy session files: " << e.what() << "\n"; return true;
+                }
+
+                // If target graph already loaded, reload its YAML; else load it.
+                auto loaded = svc.cmd_list_graphs();
+                if (std::find(loaded.begin(), loaded.end(), name) != loaded.end()) {
+                    if (!svc.cmd_reload_yaml(name, dst_yaml.string())) { std::cout << "Error: failed to reload target session.\n"; return true; }
+                } else {
+                    auto ok = svc.cmd_load_graph(name, "sessions", "", config.loaded_config_path);
+                    if (!ok) { std::cout << "Error: failed to load copied session '" << name << "'.\n"; return true; }
+                }
+                current_graph = name;
+                config.loaded_config_path = (ps::fs::absolute(ps::fs::path("sessions")/name/"config.yaml")).string();
+                std::cout << "Copied current session to '" << name << "' and switched.\n";
+            } else {
+                auto names = svc.cmd_list_graphs();
+                if (std::find(names.begin(), names.end(), name) == names.end()) { std::cout << "Graph not found: " << name << "\n"; return true; }
+                current_graph = name; std::cout << "Switched to '" << name << "'.\n";
+            }
         } else if (cmd == "close") {
             std::string name; iss >> name; if (name.empty()) { std::cout << "Usage: close <name>\n"; return true; }
             if (!svc.cmd_close_graph(name)) { std::cout << "Error: failed to close '" << name << "'.\n"; return true; }

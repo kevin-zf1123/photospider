@@ -171,7 +171,18 @@ CompletionResult CliAutocompleter::Complete(const std::string& line, int cursor_
             }
         } else if (cmd == "traversal") {
             CompleteTraversalArgs(prefix, result.options);
-        } else if (cmd == "switch" || cmd == "close") {
+        } else if (cmd == "switch") {
+            // switch <name> [c]
+            bool completing_first_arg = (tokens.size() == 1) || (tokens.size() == 2 && line.back() != ' ');
+            if (completing_first_arg) {
+                // Complete session directory names like `load`
+                CompleteSessionName(prefix, result.options);
+            } else {
+                // Second arg: offer copy mode flag
+                const std::string copy_flag = "c";
+                if (copy_flag.rfind(prefix, 0) == 0) result.options.push_back(copy_flag);
+            }
+        } else if (cmd == "close") {
             CompleteGraphName(prefix, result.options);
         } else if (cmd == "ops") {
             CompleteOpsMode(prefix, result.options);

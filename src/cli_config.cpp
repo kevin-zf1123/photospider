@@ -27,6 +27,7 @@ bool write_config_to_file(const CliConfig& config, const std::string& path) {
     root["ops_plugin_path_mode"] = config.ops_plugin_path_mode;
     root["default_compute_args"] = config.default_compute_args;
     root["switch_after_load"] = config.switch_after_load;
+    root["session_warning"] = config.session_warning;
 
     try {
         std::ofstream fout(path);
@@ -82,6 +83,7 @@ void load_or_create_config(const std::string& config_path, CliConfig& config) {
             if (root["ops_plugin_path_mode"]) config.ops_plugin_path_mode = root["ops_plugin_path_mode"].as<std::string>();
             if (root["default_compute_args"]) config.default_compute_args = root["default_compute_args"].as<std::string>();
             if (root["switch_after_load"]) config.switch_after_load = root["switch_after_load"].as<bool>();
+            if (root["session_warning"]) config.session_warning = root["session_warning"].as<bool>();
             std::cout << "Loaded configuration from '" << config_path << "'." << std::endl;
         } catch (const std::exception& e) {
             std::cerr << "Warning: Could not parse config file '" << config_path
@@ -101,6 +103,7 @@ void load_or_create_config(const std::string& config_path, CliConfig& config) {
         config.ops_plugin_path_mode = "name_only";
         config.default_compute_args = "";
         config.switch_after_load = true;
+        config.session_warning = true;
         if (write_config_to_file(config, "config.yaml")) {
             config.loaded_config_path = fs::absolute("config.yaml").string();
         }

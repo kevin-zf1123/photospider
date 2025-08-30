@@ -17,10 +17,12 @@ void print_repl_help(const CliConfig& config) {
               << "    List loaded graphs and current selection.\n\n"
 
               << "  load <name> [yaml]\n"
-              << "    Load a graph (from sessions/<name>/content.yaml if no yaml provided).\n\n"
+              << "    Load a graph (from sessions/<name>/content.yaml if no yaml provided).\n"
+              << "  load <yaml>\n"
+              << "    Load YAML into the current session; if none, into [default].\n\n"
 
-              << "  switch <name>\n"
-              << "    Switch current graph.\n\n"
+              << "  switch <name> [c]\n"
+              << "    Switch current graph. With 'c', copy current session to <name> and switch.\n\n"
 
               << "  close <name>\n"
               << "    Close a loaded graph.\n\n"
@@ -38,7 +40,7 @@ void print_repl_help(const CliConfig& config) {
               << "    Show eval order; optionally cache-check or sync.\n\n"
 
               << "  read <file>\n"
-              << "    Load YAML into current graph.\n\n"
+              << "    Load YAML into current graph (alias: 'load <yaml>').\n\n"
 
               << "  source <file>\n"
               << "    Execute commands from a script file.\n\n"
@@ -76,4 +78,3 @@ void print_repl_help(const CliConfig& config) {
               << "    Sync prompt default (exit_prompt_sync): "
               << (config.exit_prompt_sync ? "true" : "false") << "\n";
 }
-

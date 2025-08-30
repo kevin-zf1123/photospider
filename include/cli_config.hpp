@@ -26,6 +26,8 @@ struct CliConfig {
     int history_size = 1000;
     // Behavior: after a successful `load`, set current graph to the loaded one.
     bool switch_after_load = true;
+    // Whether to show a warning when loading/copying over an existing session's content.
+    bool session_warning = true;
 };
 
 // Persist the configuration to a YAML file at `path`.

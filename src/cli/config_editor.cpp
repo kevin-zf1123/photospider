@@ -217,6 +217,7 @@ private:
         add_line("default_timer_log_path", &original_config_.default_timer_log_path);
         add_toggle_line("exit_prompt_sync", &original_config_.exit_prompt_sync);
         add_toggle_line("switch_after_load", &original_config_.switch_after_load);
+        add_toggle_line("session_warning", &original_config_.session_warning);
         // Compute defaults: checkboxes
         add_toggle_line("compute_force", &compute_force_);
         add_toggle_line("compute_force_deep", &compute_force_deep_);
