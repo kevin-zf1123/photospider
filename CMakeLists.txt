@@ -67,12 +67,35 @@ file(GLOB APP_SOURCES
 # Add newly separated modules explicitly (non-recursive glob above won't catch subdirs)
 list(APPEND APP_SOURCES
     src/kernel/plugin_manager.cpp
+    src/kernel/plugin_manage_module/plugin_loader.cpp
+    src/kernel/node_module/node_graph_io.cpp
+    src/kernel/node_module/node_graph_compute.cpp
+    src/kernel/node_module/node_graph_parallel.cpp
+    src/kernel/node_module/node_graph_cache.cpp
+    src/kernel/node_module/node_graph_traversal.cpp
+    src/kernel/node_module/node_yaml.cpp
+    src/kernel/node_module/node_graph_events.cpp
     src/kernel/graph_runtime.cpp
     src/kernel/kernel.cpp
     src/kernel/interaction.cpp
+    src/cli/cli_autocompleter.cpp
+    src/cli/cli_history.cpp
+    src/cli/terminal_input.cpp
+    src/cli/path_complete.cpp
+    src/cli/tui_editor.cpp
     src/cli/config_editor.cpp
     src/cli/node_editor.cpp
     src/cli/node_editor_full.cpp
+    src/cli/node_graph_print.cpp
+    src/cli/print_cli_help.cpp
+    src/cli/print_repl_help.cpp
+    src/cli/ask.cpp
+    src/cli/ask_yesno.cpp
+    src/cli/handle_interactive_save.cpp
+    src/cli/do_traversal.cpp
+    src/cli/save_fp32_image.cpp
+    src/cli/process_command.cpp
+    src/cli/run_repl.cpp
 )
 add_executable(graph_cli ${APP_SOURCES})
 target_include_directories(graph_cli PRIVATE "${PROJECT_SOURCE_DIR}/include" "${PROJECT_SOURCE_DIR}/src")

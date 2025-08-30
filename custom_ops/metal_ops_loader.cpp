@@ -1,5 +1,4 @@
 #include "plugin_api.hpp"
-#include "ops.hpp"
 // --- FIX: The path is now relative to the 'src' directory ---
 #include "metal/perlin_noise_metal.hpp"
 

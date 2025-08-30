@@ -1,3 +1,4 @@
+// moved to include/cli/tui_editor.hpp
 #pragma once
 #include "ftxui/component/screen_interactive.hpp"
 

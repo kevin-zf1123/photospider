@@ -7,6 +7,7 @@
 #include <vector>
 
 #include "kernel/kernel.hpp"
+#include "kernel/plugin_result.hpp"
 
 namespace ps {
 
@@ -34,6 +35,7 @@ public:
 
     // Plugins
     void cmd_plugins_load(const std::vector<std::string>& dirs) { kernel_.plugins().load_from_dirs(dirs); }
+    PluginLoadResult cmd_plugins_load_report(const std::vector<std::string>& dirs) { return kernel_.plugins().load_from_dirs_report(dirs); }
     int cmd_plugins_unload_all() { return kernel_.plugins().unload_all_plugins(); }
     void cmd_seed_builtin_ops() { kernel_.plugins().seed_builtins_from_registry(); }
 
@@ -47,6 +49,13 @@ public:
     bool cmd_clear_memory_cache(const std::string& graph) { return kernel_.clear_memory_cache(graph); }
     bool cmd_clear_cache(const std::string& graph) { return kernel_.clear_cache(graph); }
     bool cmd_cache_all_nodes(const std::string& graph, const std::string& precision) { return kernel_.cache_all_nodes(graph, precision); }
+    // Structured stats APIs
+    std::optional<NodeGraph::DriveClearResult> cmd_clear_drive_cache_stats(const std::string& graph) { return kernel_.clear_drive_cache_stats(graph); }
+    std::optional<NodeGraph::MemoryClearResult> cmd_clear_memory_cache_stats(const std::string& graph) { return kernel_.clear_memory_cache_stats(graph); }
+    std::optional<NodeGraph::CacheSaveResult> cmd_cache_all_nodes_stats(const std::string& graph, const std::string& precision) { return kernel_.cache_all_nodes_stats(graph, precision); }
+    std::optional<NodeGraph::MemoryClearResult> cmd_free_transient_memory_stats(const std::string& graph) { return kernel_.free_transient_memory_stats(graph); }
+    std::optional<NodeGraph::DiskSyncResult> cmd_synchronize_disk_cache_stats(const std::string& graph, const std::string& precision) { return kernel_.synchronize_disk_cache_stats(graph, precision); }
+    // Structured stats wrappers can be added when needed.
     bool cmd_free_transient_memory(const std::string& graph) { return kernel_.free_transient_memory(graph); }
     bool cmd_synchronize_disk_cache(const std::string& graph, const std::string& precision) { return kernel_.synchronize_disk_cache(graph, precision); }
     bool cmd_clear_graph(const std::string& graph) { return kernel_.clear_graph(graph); }
@@ -54,8 +63,17 @@ public:
     std::optional<std::string> cmd_dump_tree(const std::string& graph, std::optional<int> node_id, bool show_parameters) {
         return kernel_.dump_dependency_tree(graph, node_id, show_parameters);
     }
+    std::optional<Kernel::LastError> cmd_last_error(const std::string& graph) const {
+        return kernel_.last_error(graph);
+    }
     std::optional<std::map<int, std::vector<int>>> cmd_traversal_orders(const std::string& graph) {
         return kernel_.traversal_orders(graph);
+    }
+    std::optional<std::map<int, std::vector<Kernel::TraversalNodeInfo>>> cmd_traversal_details(const std::string& graph) {
+        return kernel_.traversal_details(graph);
+    }
+    std::optional<std::vector<NodeGraph::ComputeEvent>> cmd_drain_compute_events(const std::string& graph) {
+        return kernel_.drain_compute_events(graph);
     }
     std::optional<cv::Mat> cmd_compute_and_get_image(const std::string& graph, int node_id, const std::string& precision,
                                                      bool force, bool timing, bool parallel) {

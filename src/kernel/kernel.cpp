@@ -3,6 +3,7 @@
 
 #include <filesystem>
 #include <iostream>
+#include <sstream>
 
 namespace ps {
 
@@ -67,7 +68,8 @@ bool Kernel::compute(const std::string& name, int node_id, const std::string& ca
                      bool force_recache, bool enable_timing, bool parallel, bool quiet) {
     auto it = graphs_.find(name);
     if (it == graphs_.end()) return false;
-    it->second->post([=](NodeGraph& g){
+    try {
+        auto fut = it->second->post([=](NodeGraph& g){
         g.clear_timing_results();
         bool prev_quiet = g.is_quiet();
         g.set_quiet(quiet);
@@ -75,8 +77,21 @@ bool Kernel::compute(const std::string& name, int node_id, const std::string& ca
         else g.compute(node_id, cache_precision, force_recache, enable_timing);
         g.set_quiet(prev_quiet);
         return 0;
-    });
-    return true;
+        });
+        fut.get();
+        // success clears last error
+        last_error_.erase(name);
+        return true;
+    } catch (const GraphError& ge) {
+        last_error_[name] = { ge.code(), ge.what() };
+        return false;
+    } catch (const std::exception& e) {
+        last_error_[name] = { GraphErrc::Unknown, e.what() };
+        return false;
+    } catch (...) {
+        last_error_[name] = { GraphErrc::Unknown, std::string("unknown error") };
+        return false;
+    }
 }
 
 std::optional<TimingCollector> Kernel::get_timing(const std::string& name) {
@@ -160,6 +175,12 @@ std::optional<std::string> Kernel::dump_dependency_tree(const std::string& name,
     } catch (...) { return std::nullopt; }
 }
 
+std::optional<Kernel::LastError> Kernel::last_error(const std::string& name) const {
+    auto it = last_error_.find(name);
+    if (it == last_error_.end()) return std::nullopt;
+    return it->second;
+}
+
 std::optional<std::vector<int>> Kernel::ending_nodes(const std::string& name) {
     auto it = graphs_.find(name);
     if (it == graphs_.end()) return std::nullopt;
@@ -184,6 +205,42 @@ std::optional<std::map<int, std::vector<int>>> Kernel::traversal_orders(const st
         out[end] = *order;
     }
     return out;
+}
+
+std::optional<std::map<int, std::vector<Kernel::TraversalNodeInfo>>> Kernel::traversal_details(const std::string& name) {
+    auto it = graphs_.find(name);
+    if (it == graphs_.end()) return std::nullopt;
+    try {
+        return it->second->post([=](NodeGraph& g){
+            std::map<int, std::vector<Kernel::TraversalNodeInfo>> result;
+            auto ends = g.ending_nodes();
+            for (int end : ends) {
+                try {
+                    auto order = g.topo_postorder_from(end);
+                    std::vector<Kernel::TraversalNodeInfo> vec; vec.reserve(order.size());
+                    for (int nid : order) {
+                        const auto& node = g.nodes.at(nid);
+                        bool mem = node.cached_output.has_value();
+                        bool on_disk = false;
+                        if (!node.caches.empty()) {
+                            for (const auto& cache : node.caches) {
+                                std::filesystem::path cache_file = g.node_cache_dir(node.id) / cache.location;
+                                std::filesystem::path meta_file = cache_file; meta_file.replace_extension(".yml");
+                                if (std::filesystem::exists(cache_file) || std::filesystem::exists(meta_file)) { on_disk = true; break; }
+                            }
+                        }
+                        vec.push_back(Kernel::TraversalNodeInfo{ node.id, node.name, mem, on_disk });
+                    }
+                    result[end] = std::move(vec);
+                } catch (...) {
+                    // Skip this end if traversal fails (cycle or missing node)
+                }
+            }
+            return result;
+        }).get();
+    } catch (...) {
+        return std::nullopt;
+    }
 }
 
 std::optional<cv::Mat> Kernel::compute_and_get_image(const std::string& name, int node_id, const std::string& cache_precision,
@@ -250,6 +307,47 @@ bool Kernel::set_node_yaml(const std::string& name, int node_id, const std::stri
             return true;
         }).get();
     } catch (...) { return false; }
+}
+
+} // namespace ps
+
+
+// Structured cache/tidy stats wrappers
+namespace ps {
+std::optional<NodeGraph::DriveClearResult> Kernel::clear_drive_cache_stats(const std::string& name) {
+    auto it = graphs_.find(name); if (it == graphs_.end()) return std::nullopt;
+    try { return it->second->post([](NodeGraph& g){ return g.clear_drive_cache(); }).get(); } catch (...) { return std::nullopt; }
+}
+
+std::optional<NodeGraph::MemoryClearResult> Kernel::clear_memory_cache_stats(const std::string& name) {
+    auto it = graphs_.find(name); if (it == graphs_.end()) return std::nullopt;
+    try { return it->second->post([](NodeGraph& g){ return g.clear_memory_cache(); }).get(); } catch (...) { return std::nullopt; }
+}
+
+std::optional<NodeGraph::CacheSaveResult> Kernel::cache_all_nodes_stats(const std::string& name, const std::string& cache_precision) {
+    auto it = graphs_.find(name); if (it == graphs_.end()) return std::nullopt;
+    try { return it->second->post([=](NodeGraph& g){ return g.cache_all_nodes(cache_precision); }).get(); } catch (...) { return std::nullopt; }
+}
+
+std::optional<NodeGraph::MemoryClearResult> Kernel::free_transient_memory_stats(const std::string& name) {
+    auto it = graphs_.find(name); if (it == graphs_.end()) return std::nullopt;
+    try { return it->second->post([](NodeGraph& g){ return g.free_transient_memory(); }).get(); } catch (...) { return std::nullopt; }
+}
+
+std::optional<NodeGraph::DiskSyncResult> Kernel::synchronize_disk_cache_stats(const std::string& name, const std::string& cache_precision) {
+    auto it = graphs_.find(name); if (it == graphs_.end()) return std::nullopt;
+    try { return it->second->post([=](NodeGraph& g){ return g.synchronize_disk_cache(cache_precision); }).get(); } catch (...) { return std::nullopt; }
+}
+
+} // namespace ps
+
+namespace ps {
+std::optional<std::vector<NodeGraph::ComputeEvent>> Kernel::drain_compute_events(const std::string& name) {
+    auto it = graphs_.find(name);
+    if (it == graphs_.end()) return std::nullopt;
+    try {
+        return it->second->post([](NodeGraph& g){ return g.drain_compute_events(); }).get();
+    } catch (...) { return std::nullopt; }
 }
 
 } // namespace ps

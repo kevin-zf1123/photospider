@@ -1,3 +1,4 @@
+// moved to include/cli/path_complete.hpp
 #pragma once
 
 #include <string>
@@ -15,4 +16,3 @@ std::vector<std::string> PathCompleteOptions(const std::string& prefix);
 std::string LongestCommonPrefix(const std::vector<std::string>& options);
 
 } // namespace ps
-

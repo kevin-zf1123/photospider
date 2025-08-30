@@ -1,4 +1,4 @@
-#include "terminal_input.hpp"
+#include "cli/terminal_input.hpp"
 #include <iostream>
 
 #ifdef _WIN32

@@ -1,7 +1,7 @@
 // tui_editor.cpp - Fully updated to handle dirty flag correctly, full-node YAML editing,
 // XY scrolling, and external editor integration using ScreenInteractive::WithRestoredIO.
 
-#include "tui_editor.hpp"
+#include "cli/tui_editor.hpp"
 
 #include <algorithm>
 #include <filesystem>

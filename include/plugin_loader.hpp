@@ -11,5 +11,12 @@
 //     - "path" or "path/*"  => shallow scan (only the directory itself)
 //     - "path/**"            => recursive scan of all subdirectories
 // - op_sources: map updated with op key -> plugin path (or "built-in").
-void load_plugins(const std::vector<std::string>& plugin_dir_paths,
-                  std::map<std::string, std::string>& op_sources);
+#include "kernel/plugin_result.hpp"
+
+namespace ps {
+
+// Load plugins and report result (no console I/O in kernel).
+PluginLoadResult load_plugins(const std::vector<std::string>& plugin_dir_paths,
+                              std::map<std::string, std::string>& op_sources);
+
+} // namespace ps

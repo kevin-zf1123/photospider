@@ -2,7 +2,7 @@
 
 // MODIFIED: 包含 UMat 所需的头文件
 #include <opencv2/core.hpp>
-#include "ops.hpp"
+#include "kernel/ops.hpp"
 #include <opencv2/imgcodecs.hpp>
 #include <opencv2/imgproc.hpp>
 #include <string>
@@ -49,10 +49,10 @@ static void normalize_channels_for_mixing_umat(cv::UMat& img1, cv::UMat& img2) {
 static NodeOutput op_image_source_path(const Node& node, const std::vector<const NodeOutput*>&) {
     const auto& P = node.parameters;
     std::string path = as_str(P, "path");
-    if (path.empty()) throw GraphError("image_source:path requires parameters.path");
+    if (path.empty()) throw GraphError(GraphErrc::InvalidParameter, "image_source:path requires parameters.path");
     
     cv::Mat img = cv::imread(path, cv::IMREAD_UNCHANGED);
-    if (img.empty()) throw GraphError("Failed to read image: " + path);
+    if (img.empty()) throw GraphError(GraphErrc::Io, "Failed to read image: " + path);
 
     if (P["resize"]) {
         int w = as_int_flexible(P, "width", 0);
@@ -78,7 +78,7 @@ static NodeOutput op_image_source_path(const Node& node, const std::vector<const
 
 static NodeOutput op_crop(const Node& node, const std::vector<const NodeOutput*>& inputs) {
     if (inputs.empty() || inputs[0]->image_umatrix.empty()) {
-        throw GraphError("crop requires one valid input image");
+        throw GraphError(GraphErrc::MissingDependency, "crop requires one valid input image");
     }
     cv::UMat u_src_image = inputs[0]->image_umatrix;
     const auto& P = node.runtime_parameters;
@@ -92,7 +92,7 @@ static NodeOutput op_crop(const Node& node, const std::vector<const NodeOutput*>
         double rw = as_double_flexible(P, "width", -1.0);
         double rh = as_double_flexible(P, "height", -1.0);
         if (rx < 0.0 || ry < 0.0 || rw <= 0.0 || rh <= 0.0) {
-             throw GraphError("crop in 'ratio' mode requires non-negative values for 'x', 'y', and positive values for 'width', 'height'.");
+             throw GraphError(GraphErrc::InvalidParameter, "crop in 'ratio' mode requires non-negative values for 'x', 'y', and positive values for 'width', 'height'.");
         }
         final_x = static_cast<int>(rx * u_src_image.cols);
         final_y = static_cast<int>(ry * u_src_image.rows);
@@ -104,7 +104,7 @@ static NodeOutput op_crop(const Node& node, const std::vector<const NodeOutput*>
         final_width = as_int_flexible(P, "width", -1);
         final_height = as_int_flexible(P, "height", -1);
         if (final_width <= 0 || final_height <= 0) {
-            throw GraphError("crop 'width' and 'height' must be positive.");
+            throw GraphError(GraphErrc::InvalidParameter, "crop 'width' and 'height' must be positive.");
         }
     }
 
@@ -124,10 +124,13 @@ static NodeOutput op_crop(const Node& node, const std::vector<const NodeOutput*>
 }
 
 static NodeOutput op_gaussian_blur(const Node& node, const std::vector<const NodeOutput*>& inputs) {
-    if (inputs.empty() || inputs[0]->image_umatrix.empty()) throw GraphError("gaussian_blur requires one valid input image");
-    
-    cv::UMat u_input = inputs[0]->image_umatrix;
-    cv::UMat u_output;
+    if (inputs.empty() || (inputs[0]->image_umatrix.empty() && inputs[0]->image_matrix.empty()))
+        throw GraphError(GraphErrc::MissingDependency, "gaussian_blur requires one valid input image");
+
+    // Prefer Mat path to avoid potential UMat/OpenCL stalls on some platforms.
+    cv::Mat in_mat;
+    if (!inputs[0]->image_matrix.empty()) in_mat = inputs[0]->image_matrix;
+    else in_mat = inputs[0]->image_umatrix.getMat(cv::ACCESS_READ);
 
     const auto& P = node.runtime_parameters;
     int k = as_int_flexible(P, "ksize", 3);
@@ -135,15 +138,17 @@ static NodeOutput op_gaussian_blur(const Node& node, const std::vector<const Nod
     if (k <=0) k = 1;
     double sigmaX = as_double_flexible(P, "sigmaX", 0.0);
 
-    cv::GaussianBlur(u_input, u_output, cv::Size(k, k), sigmaX);
-    
+    cv::Mat out_mat;
+    cv::GaussianBlur(in_mat, out_mat, cv::Size(k, k), sigmaX);
+
     NodeOutput result;
-    result.image_umatrix = u_output;
+    result.image_matrix = out_mat;
+    result.image_umatrix = out_mat.getUMat(cv::ACCESS_READ);
     return result;
 }
 
 static NodeOutput op_resize(const Node& node, const std::vector<const NodeOutput*>& inputs) {
-    if (inputs.empty() || inputs[0]->image_umatrix.empty()) throw GraphError("resize requires one valid input image");
+    if (inputs.empty() || inputs[0]->image_umatrix.empty()) throw GraphError(GraphErrc::MissingDependency, "resize requires one valid input image");
     
     cv::UMat u_input = inputs[0]->image_umatrix;
     cv::UMat u_output;
@@ -151,7 +156,7 @@ static NodeOutput op_resize(const Node& node, const std::vector<const NodeOutput
     const auto& P = node.runtime_parameters;
     int width = as_int_flexible(P, "width", 0);
     int height = as_int_flexible(P, "height", 0);
-    if (width <= 0 || height <= 0) throw GraphError("resize requires 'width' and 'height' parameters > 0.");
+    if (width <= 0 || height <= 0) throw GraphError(GraphErrc::InvalidParameter, "resize requires 'width' and 'height' parameters > 0.");
     std::string interp_str = as_str(P, "interpolation", "linear");
     int interpolation_flag = cv::INTER_LINEAR;
     if (interp_str == "cubic") interpolation_flag = cv::INTER_CUBIC;
@@ -167,7 +172,7 @@ static NodeOutput op_resize(const Node& node, const std::vector<const NodeOutput
 
 static NodeOutput op_add_weighted(const Node& node, const std::vector<const NodeOutput*>& inputs) {
     if (inputs.size() < 2 || inputs[0]->image_umatrix.empty() || inputs[1]->image_umatrix.empty()) {
-        throw GraphError("add_weighted requires two input images");
+        throw GraphError(GraphErrc::MissingDependency, "add_weighted requires two input images");
     }
 
     cv::UMat u_a_prep = inputs[0]->image_umatrix;
@@ -292,7 +297,7 @@ static NodeOutput op_add_weighted(const Node& node, const std::vector<const Node
 
 
 static NodeOutput op_abs_diff(const Node& node, const std::vector<const NodeOutput*>& inputs) {
-    if (inputs.size() < 2 || inputs[0]->image_umatrix.empty() || inputs[1]->image_umatrix.empty()) throw GraphError("diff requires two input images");
+    if (inputs.size() < 2 || inputs[0]->image_umatrix.empty() || inputs[1]->image_umatrix.empty()) throw GraphError(GraphErrc::MissingDependency, "diff requires two input images");
     
     cv::UMat u_a_prep = inputs[0]->image_umatrix;
     cv::UMat u_b_prep = inputs[1]->image_umatrix;
@@ -320,11 +325,11 @@ static NodeOutput op_abs_diff(const Node& node, const std::vector<const NodeOutp
 
 static NodeOutput op_get_dimensions(const Node&, const std::vector<const NodeOutput*>& inputs) {
     if (inputs.empty()) {
-        throw GraphError("analyzer:get_dimensions requires one image input.");
+        throw GraphError(GraphErrc::MissingDependency, "analyzer:get_dimensions requires one image input.");
     }
     const auto* input = inputs[0];
     if (input->image_umatrix.empty() && input->image_matrix.empty()) {
-        throw GraphError("analyzer:get_dimensions input image is empty.");
+        throw GraphError(GraphErrc::MissingDependency, "analyzer:get_dimensions input image is empty.");
     }
 
     NodeOutput out;
@@ -339,10 +344,10 @@ static NodeOutput op_get_dimensions(const Node&, const std::vector<const NodeOut
 }
 static NodeOutput op_divide(const Node& node, const std::vector<const NodeOutput*>&) {
     const auto& P = node.runtime_parameters;
-    if (!P["operand1"] || !P["operand2"]) throw GraphError("math:divide requires 'operand1' and 'operand2'.");
+    if (!P["operand1"] || !P["operand2"]) throw GraphError(GraphErrc::InvalidParameter, "math:divide requires 'operand1' and 'operand2'.");
     double op1 = P["operand1"].as<double>();
     double op2 = P["operand2"].as<double>();
-    if (op2 == 0) throw GraphError("math:divide attempted to divide by zero.");
+    if (op2 == 0) throw GraphError(GraphErrc::InvalidParameter, "math:divide attempted to divide by zero.");
     NodeOutput out;
     out.data["result"] = op1 / op2;
     return out;
@@ -350,7 +355,7 @@ static NodeOutput op_divide(const Node& node, const std::vector<const NodeOutput
 
 static NodeOutput op_extract_channel(const Node& node, const std::vector<const NodeOutput*>& inputs) {
     if (inputs.empty() || inputs[0]->image_umatrix.empty()) {
-        throw GraphError("extract_channel requires one valid input image");
+        throw GraphError(GraphErrc::MissingDependency, "extract_channel requires one valid input image");
     }
     cv::UMat u_input = inputs[0]->image_umatrix;
 
@@ -362,12 +367,12 @@ static NodeOutput op_extract_channel(const Node& node, const std::vector<const N
     else if (channel_str == "g" || channel_str == "1") channel_idx = 1;
     else if (channel_str == "r" || channel_str == "2") channel_idx = 2;
     else if (channel_str == "a" || channel_str == "3") channel_idx = 3;
-    else throw GraphError("extract_channel: invalid 'channel' parameter. Use b,g,r,a or 0,1,2,3.");
+    else throw GraphError(GraphErrc::InvalidParameter, "extract_channel: invalid 'channel' parameter. Use b,g,r,a or 0,1,2,3.");
 
     if (u_input.channels() <= channel_idx) {
         std::ostringstream err;
         err << "extract_channel: image has only " << u_input.channels() << " channel(s), cannot extract index " << channel_idx;
-        throw GraphError(err.str());
+        throw GraphError(GraphErrc::InvalidParameter, err.str());
     }
 
     std::vector<cv::UMat> channels;
@@ -384,8 +389,8 @@ static NodeOutput op_perlin_noise(const Node& node, const std::vector<const Node
     int width = as_int_flexible(P, "width", 256);
     int height = as_int_flexible(P, "height", 256);
     double scale = as_double_flexible(P, "grid_size", 1.0);
-    if (width <= 0 || height <= 0) throw GraphError("perlin_noise requires positive width and height");
-    if (scale <= 0) throw GraphError("perlin_noise requires positive grid_size");
+    if (width <= 0 || height <= 0) throw GraphError(GraphErrc::InvalidParameter, "perlin_noise requires positive width and height");
+    if (scale <= 0) throw GraphError(GraphErrc::InvalidParameter, "perlin_noise requires positive grid_size");
 
     std::vector<int> p(512);
     std::iota(p.begin(), p.begin() + 256, 0);
@@ -443,7 +448,7 @@ static NodeOutput op_constant_image(const Node& node, const std::vector<const No
     int height = as_int_flexible(P, "height", 0);
     int value_int = as_int_flexible(P, "value", 0);
     int channels = as_int_flexible(P, "channels", 1);
-    if (width <= 0 || height <= 0) throw GraphError("image_generator:constant requires positive 'width' and 'height'.");
+    if (width <= 0 || height <= 0) throw GraphError(GraphErrc::InvalidParameter, "image_generator:constant requires positive 'width' and 'height'.");
     float value_float = static_cast<float>(value_int) / 255.0f;
     cv::Scalar fill_value(value_float, value_float, value_float, value_float);
     cv::Mat out_mat(height, width, CV_MAKETYPE(CV_32F, channels), fill_value);
@@ -455,13 +460,13 @@ static NodeOutput op_constant_image(const Node& node, const std::vector<const No
 
 static NodeOutput op_convolve(const Node& node, const std::vector<const NodeOutput*>& inputs) {
     if (inputs.size() < 2 || inputs[0]->image_umatrix.empty() || inputs[1]->image_umatrix.empty()) {
-        throw GraphError("convolve requires two input images: a source and a kernel.");
+        throw GraphError(GraphErrc::MissingDependency, "convolve requires two input images: a source and a kernel.");
     }
     cv::UMat u_src = inputs[0]->image_umatrix;
     cv::UMat u_kernel_img = inputs[1]->image_umatrix;
 
     if (u_kernel_img.channels() != 1) {
-        throw GraphError("The kernel for convolve must be a single-channel image.");
+        throw GraphError(GraphErrc::InvalidParameter, "The kernel for convolve must be a single-channel image.");
     }
     
     const auto& P = node.runtime_parameters;
@@ -494,7 +499,7 @@ static NodeOutput op_convolve(const Node& node, const std::vector<const NodeOutp
 
 static NodeOutput op_curve_transform(const Node& node, const std::vector<const NodeOutput*>& inputs) {
     if (inputs.empty() || inputs[0]->image_umatrix.empty()) {
-        throw GraphError("curve_transform requires one input image.");
+        throw GraphError(GraphErrc::MissingDependency, "curve_transform requires one input image.");
     }
 
     cv::UMat u_input = inputs[0]->image_umatrix;
@@ -514,7 +519,7 @@ static NodeOutput op_curve_transform(const Node& node, const std::vector<const N
 
 static NodeOutput op_multiply(const Node& node, const std::vector<const NodeOutput*>& inputs) {
     if (inputs.size() < 2 || inputs[0]->image_umatrix.empty() || inputs[1]->image_umatrix.empty()) {
-        throw GraphError("image_mixing:multiply requires two input images.");
+        throw GraphError(GraphErrc::MissingDependency, "image_mixing:multiply requires two input images.");
     }
     cv::UMat u_a_prep = inputs[0]->image_umatrix;
     cv::UMat u_b_prep = inputs[1]->image_umatrix;

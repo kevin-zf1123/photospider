@@ -1,5 +1,4 @@
 #include "plugin_api.hpp"
-#include "ops.hpp"
 
 namespace ps { namespace ops {
 

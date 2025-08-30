@@ -42,9 +42,15 @@ void GraphRuntime::run_loop() {
             queue_.pop();
         }
         if (!running_) break;
-        job();
+        try {
+            job();
+        } catch (const std::exception&) {
+            // Swallow exceptions to prevent worker thread from terminating the process.
+            // Exceptions are propagated to futures via packaged_task when callers use get().
+        } catch (...) {
+            // Unknown exception type; swallow to keep runtime alive.
+        }
     }
 }
 
 } // namespace ps
-

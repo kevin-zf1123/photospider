@@ -8,8 +8,8 @@
 #include <vector>
 
 #include "cli_config.hpp"
-#include "path_complete.hpp"
-#include "tui_editor.hpp"
+#include "cli/path_complete.hpp"
+#include "cli/tui_editor.hpp"
 #include "ftxui/component/screen_interactive.hpp"
 #include "ftxui/component/component.hpp"
 #include "ftxui/dom/elements.hpp"
@@ -123,9 +123,10 @@ private:
         selected_config_save_idx_ = find_index(config_save_entries_, original_config_.config_save_behavior);
         selected_editor_save_idx_ = find_index(editor_save_entries_, original_config_.editor_save_behavior);
 
-        // Parse traversal defaults into UI state: tree radio + cache checkboxes
+        // Parse traversal defaults into UI state: tree radio + cache checkboxes + check action
         selected_traversal_tree_idx_ = 2; // no_tree by default
         traversal_cache_m_ = false; traversal_cache_d_ = false;
+        selected_traversal_check_idx_ = 0; // none
         {
             std::istringstream iss(original_config_.default_traversal_arg);
             std::string tok;
@@ -136,6 +137,8 @@ private:
                 else if (tok == "m") traversal_cache_m_ = true;
                 else if (tok == "d") traversal_cache_d_ = true;
                 else if (tok == "md") { traversal_cache_m_ = true; traversal_cache_d_ = true; }
+                else if (tok == "c") selected_traversal_check_idx_ = 1;
+                else if (tok == "cr") selected_traversal_check_idx_ = 2;
             }
         }
 
@@ -176,6 +179,8 @@ private:
             else oss << "n";
             if (traversal_cache_m_) oss << " m";
             if (traversal_cache_d_) oss << " d";
+            if (selected_traversal_check_idx_ == 1) oss << " c";
+            else if (selected_traversal_check_idx_ == 2) oss << " cr";
             original_config_.default_traversal_arg = oss.str();
         }
 
@@ -203,10 +208,11 @@ private:
         add_line("cache_root_dir", &original_config_.cache_root_dir);
         add_line("history_size", &history_size_buffer_);
         add_radio_line("cache_precision", &cache_precision_entries_, &selected_cache_precision_idx_);
-        // Traversal defaults: two checkboxes + one radio (tree)
+        // Traversal defaults: tree mode + cache flags + check action
         add_radio_line("traversal_tree_mode", &traversal_tree_entries_, &selected_traversal_tree_idx_);
         add_toggle_line("traversal_cache_memory(m)", &traversal_cache_m_);
         add_toggle_line("traversal_cache_disk(d)", &traversal_cache_d_);
+        add_radio_line("traversal_check", &traversal_check_entries_, &selected_traversal_check_idx_);
         add_line("default_exit_save_path", &original_config_.default_exit_save_path);
         add_line("default_timer_log_path", &original_config_.default_timer_log_path);
         add_toggle_line("exit_prompt_sync", &original_config_.exit_prompt_sync);
@@ -325,6 +331,8 @@ private:
     bool traversal_cache_m_ = false;
     bool traversal_cache_d_ = false;
     std::vector<std::string> traversal_tree_entries_ = {"full", "simplified", "no_tree"};
+    std::vector<std::string> traversal_check_entries_ = {"none", "c", "cr"};
+    int selected_traversal_check_idx_ = 0;
 
     // Compute defaults UI state
     bool compute_force_ = false;

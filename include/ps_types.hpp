@@ -63,8 +63,26 @@ struct NodeOutput {
     std::unordered_map<std::string, OutputValue> data; // Other named data outputs
 };
 
+enum class GraphErrc {
+    Unknown = 1,
+    NotFound,
+    Cycle,
+    Io,
+    InvalidYaml,
+    MissingDependency,
+    NoOperation,
+    InvalidParameter,
+    ComputeError,
+};
+
 struct GraphError : public std::runtime_error {
-    using std::runtime_error::runtime_error;
+    explicit GraphError(const std::string& what)
+        : std::runtime_error(what), code_(GraphErrc::Unknown) {}
+    GraphError(GraphErrc code, const std::string& what)
+        : std::runtime_error(what), code_(code) {}
+    GraphErrc code() const noexcept { return code_; }
+private:
+    GraphErrc code_;
 };
 
 class Node;

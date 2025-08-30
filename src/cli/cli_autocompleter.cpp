@@ -1,8 +1,8 @@
-#include "cli_autocompleter.hpp"
+#include "cli/cli_autocompleter.hpp"
 #include <sstream>
 #include <algorithm>
 #include <iostream>
-#include "path_complete.hpp"
+#include "cli/path_complete.hpp"
 #include "kernel/interaction.hpp"
 #include <filesystem>
 

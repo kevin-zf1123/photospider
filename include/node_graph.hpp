@@ -42,12 +42,17 @@ public:
 
     void load_yaml(const fs::path& yaml_path);
     void save_yaml(const fs::path& yaml_path) const;
-    void clear_drive_cache();
-    void clear_memory_cache();
+    struct DriveClearResult { uintmax_t removed_entries = 0; };
+    struct MemoryClearResult { int cleared_nodes = 0; };
+    struct CacheSaveResult { int saved_nodes = 0; };
+    struct DiskSyncResult { int saved_nodes = 0; int removed_files = 0; int removed_dirs = 0; };
+
+    DriveClearResult clear_drive_cache();
+    MemoryClearResult clear_memory_cache();
     void clear_cache();
-    void cache_all_nodes(const std::string& cache_precision);
-    void free_transient_memory();
-    void synchronize_disk_cache(const std::string& cache_precision);
+    CacheSaveResult cache_all_nodes(const std::string& cache_precision);
+    MemoryClearResult free_transient_memory();
+    DiskSyncResult synchronize_disk_cache(const std::string& cache_precision);
     fs::path node_cache_dir(int node_id) const;
 
     NodeOutput& compute(int node_id, const std::string& cache_precision, bool force_recache = false, bool enable_timing = false);    
@@ -58,6 +63,9 @@ public:
     void print_dependency_tree(std::ostream& os, int start_node_id, bool show_parameters = true) const;
     std::vector<int> topo_postorder_from(int end_node_id) const;
     std::vector<int> get_trees_containing_node(int node_id) const;
+    // Streaming compute events (separate from timers)
+    struct ComputeEvent { int id; std::string name; std::string source; double elapsed_ms; };
+    std::vector<ComputeEvent> drain_compute_events();
 
 private:
     NodeOutput& compute_internal(int node_id, const std::string& cache_precision, std::unordered_map<int, bool>& visiting, bool enable_timing);
@@ -69,7 +77,11 @@ private:
     void execute_op_for_node(int node_id, const std::string& cache_precision, bool enable_timing);
 
     std::mutex graph_mutex_;
-    bool quiet_ = false;
+    bool quiet_ = true;
+    // event buffer for streaming compute messages
+    std::mutex event_mutex_;
+    std::vector<ComputeEvent> event_buffer_;
+    void push_compute_event(int id, const std::string& name, const std::string& source, double ms);
 };
 
 } // namespace ps

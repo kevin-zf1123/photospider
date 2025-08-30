@@ -1,4 +1,4 @@
-#include "path_complete.hpp"
+#include "cli/path_complete.hpp"
 #include <filesystem>
 
 namespace ps {
@@ -58,4 +58,3 @@ std::string LongestCommonPrefix(const std::vector<std::string>& options) {
 }
 
 } // namespace ps
-

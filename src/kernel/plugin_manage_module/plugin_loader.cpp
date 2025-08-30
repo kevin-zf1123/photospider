@@ -17,13 +17,16 @@
 
 using namespace ps; // for OpRegistry and fs
 
-void load_plugins(const std::vector<std::string>& plugin_dir_paths,
-                  std::map<std::string, std::string>& op_sources) {
+namespace ps {
+
+PluginLoadResult load_plugins(const std::vector<std::string>& plugin_dir_paths,
+                              std::map<std::string, std::string>& op_sources) {
     auto& registry = OpRegistry::instance();
+    PluginLoadResult result;
 
     auto iter_and_load = [&](const fs::path& base_dir, bool recursive) {
         if (!fs::exists(base_dir) || !fs::is_directory(base_dir)) return;
-        std::cout << "Scanning for plugins in '" << base_dir.string() << (recursive ? "' (recursive)..." : "'...") << std::endl;
+        // Kernel layer: avoid terminal output; frontends can report scanning if needed.
 
         auto process_path = [&](const fs::path& path) {
             #if defined(_WIN32)
@@ -35,22 +38,22 @@ void load_plugins(const std::vector<std::string>& plugin_dir_paths,
             #endif
             if (path.extension() != extension) return; // skip non-shared libraries
 
-            std::cout << "  - Attempting to load plugin: " << path.filename().string() << std::endl;
+            // silent in kernel
             auto keys_before = registry.get_keys();
 
             #ifdef _WIN32
             HMODULE handle = LoadLibrary(path.string().c_str());
-            if (!handle) { std::cerr << "    Error: Failed to load plugin. Code: " << GetLastError() << std::endl; return; }
+            if (!handle) { result.errors.push_back({fs::absolute(path).string(), GraphErrc::Io, "LoadLibrary failed"}); return; }
             using RegisterFunc = void(*)();
             RegisterFunc register_func = (RegisterFunc)GetProcAddress(handle, "register_photospider_ops");
-            if (!register_func) { std::cerr << "    Error: Cannot find 'register_photospider_ops' export in plugin." << std::endl; FreeLibrary(handle); return; }
+            if (!register_func) { result.errors.push_back({fs::absolute(path).string(), GraphErrc::InvalidParameter, "Missing register_photospider_ops"}); FreeLibrary(handle); return; }
             #else
             void* handle = dlopen(path.c_str(), RTLD_LAZY);
-            if (!handle) { std::cerr << "    Error: Failed to load plugin: " << dlerror() << std::endl; return; }
+            if (!handle) { const char* e = dlerror(); result.errors.push_back({fs::absolute(path).string(), GraphErrc::Io, e?e:"dlopen failed"}); return; }
             void (*register_func)();
             *(void**)(&register_func) = dlsym(handle, "register_photospider_ops");
             const char* dlsym_error = dlerror();
-            if (dlsym_error) { std::cerr << "    Error: Cannot find 'register_photospider_ops' export in plugin: " << dlsym_error << std::endl; dlclose(handle); return; }
+            if (dlsym_error) { result.errors.push_back({fs::absolute(path).string(), GraphErrc::InvalidParameter, dlsym_error}); dlclose(handle); return; }
             #endif
 
             try {
@@ -59,9 +62,9 @@ void load_plugins(const std::vector<std::string>& plugin_dir_paths,
                 std::vector<std::string> new_keys;
                 std::set_difference(keys_after.begin(), keys_after.end(), keys_before.begin(), keys_before.end(), std::back_inserter(new_keys));
                 for (const auto& key : new_keys) { op_sources[key] = fs::absolute(path).string(); }
-                std::cout << "    Success: Plugin loaded and " << new_keys.size() << " operation(s) registered." << std::endl;
+                // silent in kernel
             } catch (const std::exception& e) {
-                std::cerr << "    Error: An exception occurred during plugin registration: " << e.what() << std::endl;
+                result.errors.push_back({fs::absolute(path).string(), GraphErrc::Unknown, e.what()});
                 #ifdef _WIN32
                 FreeLibrary(handle);
                 #else
@@ -98,4 +101,7 @@ void load_plugins(const std::vector<std::string>& plugin_dir_paths,
         }
         iter_and_load(path_str, recursive);
     }
+    return result;
 }
+
+} // namespace ps

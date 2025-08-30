@@ -5,6 +5,7 @@
 #include <set>
 #include <string>
 #include <vector>
+#include "kernel/plugin_result.hpp"
 
 namespace ps {
 
@@ -18,6 +19,7 @@ class PluginManager {
 public:
     // Load plugins from the given directory patterns and record op->source mapping.
     void load_from_dirs(const std::vector<std::string>& dir_patterns);
+    PluginLoadResult load_from_dirs_report(const std::vector<std::string>& dir_patterns);
     // Seed built-in ops from current OpRegistry into source map as "built-in".
     void seed_builtins_from_registry();
 

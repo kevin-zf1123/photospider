@@ -6,6 +6,7 @@
 #include <vector>
 
 #include "plugin_loader.hpp" // load_plugins(dir_patterns, op_sources)
+#include "kernel/ops.hpp"    // register_builtin()
 #include "ps_types.hpp"      // OpRegistry
 
 namespace ps {
@@ -21,11 +22,16 @@ namespace { struct RegistryEditor {
 }; }
 
 void PluginManager::load_from_dirs(const std::vector<std::string>& dir_patterns) {
-    // Delegate scanning + loading to existing utility which updates op_sources_ in-place
-    load_plugins(dir_patterns, op_sources_);
+    (void)load_from_dirs_report(dir_patterns);
+}
+
+PluginLoadResult PluginManager::load_from_dirs_report(const std::vector<std::string>& dir_patterns) {
+    return load_plugins(dir_patterns, op_sources_);
 }
 
 void PluginManager::seed_builtins_from_registry() {
+    // Ensure built-ins are registered in the global registry before seeding.
+    try { ops::register_builtin(); } catch (...) { /* ignore */ }
     auto& reg = OpRegistry::instance();
     for (const auto& key : reg.get_keys()) {
         if (!op_sources_.count(key)) op_sources_[key] = "built-in";
