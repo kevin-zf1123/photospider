@@ -3,16 +3,20 @@
 #include <algorithm>
 #include <iostream>
 #include "path_complete.hpp"
+#include "kernel/interaction.hpp"
+#include <filesystem>
 
 namespace ps {
 
-CliAutocompleter::CliAutocompleter(const NodeGraph& graph, const std::map<std::string, std::string>&)
-    : graph_(graph) {
+CliAutocompleter::CliAutocompleter(ps::InteractionService& svc)
+    : svc_(svc) {
     // This list should be kept in sync with commands in `process_command`
     commands_ = {
         "help", "clear", "config", "ops", "read", "source", "print", "node",
         "traversal", "output", "clear-graph", "cc", "clear-cache", "compute",
-        "save", "free", "exit"
+        "save", "free", "exit",
+        // keep in sync with process_command in cli/graph_cli.cpp
+        "graphs", "load", "switch", "close"
     };
     std::sort(commands_.begin(), commands_.end());
 }
@@ -54,14 +58,31 @@ void CliAutocompleter::CompletePath(const std::string& prefix, std::vector<std::
     options.insert(options.end(), opts.begin(), opts.end());
 }
 
+void CliAutocompleter::CompleteYamlPath(const std::string& prefix, std::vector<std::string>& options) const {
+    // Use generic path options, then filter to YAML files, but keep directories to allow traversal.
+    auto opts = PathCompleteOptions(prefix);
+    for (const auto& o : opts) {
+        if (!o.empty() && o.back() == '/') {
+            options.push_back(o); // allow continuing into subdirectories
+        } else {
+            // Match .yaml or .yml (case-sensitive as typical on *nix)
+            if (o.size() >= 5 && o.rfind(".yaml") == o.size() - 5) options.push_back(o);
+            else if (o.size() >= 4 && o.rfind(".yml") == o.size() - 4) options.push_back(o);
+        }
+    }
+}
+
 void CliAutocompleter::CompleteNodeId(const std::string& prefix, std::vector<std::string>& options) const {
     if (std::string("all").rfind(prefix, 0) == 0) {
         options.push_back("all");
     }
-    for (const auto& pair : graph_.nodes) {
-        std::string id_str = std::to_string(pair.first);
-        if (id_str.rfind(prefix, 0) == 0) {
-            options.push_back(id_str);
+    if (!current_graph_.empty()) {
+        auto ids = svc_.cmd_list_node_ids(current_graph_);
+        if (ids) {
+            for (int id : *ids) {
+                std::string id_str = std::to_string(id);
+                if (id_str.rfind(prefix, 0) == 0) options.push_back(id_str);
+            }
         }
     }
 }
@@ -112,13 +133,21 @@ CompletionResult CliAutocompleter::Complete(const std::string& line, int cursor_
     std::vector<std::string> tokens = Tokenize(line.substr(0, cursor_pos));
 
     // Determine completion type
-    if (tokens.empty() || (tokens.size() == 1 && line.back() != ' ')) {
+    if (tokens.empty() || (tokens.size() == 1 && !line.empty() && line.back() != ' ')) {
         // First word is always a command
         CompleteCommand(prefix, result.options);
     } else {
         const std::string& cmd = tokens[0];
         if ((cmd == "read" || cmd == "source" || cmd == "output" || cmd == "save") && (tokens.size() > 1)) {
             CompletePath(prefix, result.options);
+        } else if (cmd == "load") {
+            // load <name> <yaml>
+            bool completing_first_arg = (tokens.size() == 1) || (tokens.size() == 2 && line.back() != ' ');
+            if (completing_first_arg) {
+                CompleteSessionName(prefix, result.options);
+            } else {
+                CompleteYamlPath(prefix, result.options);
+            }
         } else if (cmd == "node" || cmd == "save") {
             CompleteNodeId(prefix, result.options);
         } else if (cmd == "print") {
@@ -156,6 +185,21 @@ CompletionResult CliAutocompleter::Complete(const std::string& line, int cursor_
     }
 
     return result;
+}
+
+void CliAutocompleter::CompleteSessionName(const std::string& prefix, std::vector<std::string>& options) const {
+    namespace fs = std::filesystem;
+    try {
+        fs::path sessions_dir("sessions");
+        if (!fs::exists(sessions_dir) || !fs::is_directory(sessions_dir)) return;
+        for (const auto& entry : fs::directory_iterator(sessions_dir)) {
+            if (!fs::is_directory(entry.status())) continue;
+            auto name = entry.path().filename().string();
+            if (name.rfind(prefix, 0) == 0) options.push_back(name);
+        }
+    } catch (...) {
+        // ignore filesystem errors
+    }
 }
 
 } // namespace ps

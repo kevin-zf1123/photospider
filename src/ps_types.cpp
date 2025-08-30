@@ -26,4 +26,15 @@ std::vector<std::string> OpRegistry::get_keys() const {
     std::sort(keys.begin(), keys.end());
     return keys;
 }
+
+bool OpRegistry::unregister_op(const std::string& type, const std::string& subtype) {
+    return unregister_key(make_key(type, subtype));
+}
+
+bool OpRegistry::unregister_key(const std::string& key) {
+    auto it = table_.find(key);
+    if (it == table_.end()) return false;
+    table_.erase(it);
+    return true;
+}
 } // namespace ps

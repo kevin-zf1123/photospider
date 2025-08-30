@@ -80,6 +80,10 @@ public:
     void register_op(const std::string& type, const std::string& subtype, OpFunc fn);
     std::optional<OpFunc> find(const std::string& type, const std::string& subtype) const;
     std::vector<std::string> get_keys() const;
+    // New: unregister a single op by type/subtype. Returns true if removed.
+    bool unregister_op(const std::string& type, const std::string& subtype);
+    // New: unregister by full key (type:subtype). Returns true if removed.
+    bool unregister_key(const std::string& key);
 private:
     std::unordered_map<std::string, OpFunc> table_;
 };

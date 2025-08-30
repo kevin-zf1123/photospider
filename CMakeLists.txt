@@ -64,6 +64,16 @@ file(GLOB APP_SOURCES
     "src/*.hpp"
     "cli/*.cpp"
 )
+# Add newly separated modules explicitly (non-recursive glob above won't catch subdirs)
+list(APPEND APP_SOURCES
+    src/kernel/plugin_manager.cpp
+    src/kernel/graph_runtime.cpp
+    src/kernel/kernel.cpp
+    src/kernel/interaction.cpp
+    src/cli/config_editor.cpp
+    src/cli/node_editor.cpp
+    src/cli/node_editor_full.cpp
+)
 add_executable(graph_cli ${APP_SOURCES})
 target_include_directories(graph_cli PRIVATE "${PROJECT_SOURCE_DIR}/include" "${PROJECT_SOURCE_DIR}/src")
 find_library(FW_METAL Metal)

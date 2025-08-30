@@ -24,6 +24,8 @@ struct CliConfig {
     // Space-separated default flags for the REPL `compute` command (e.g. "t parallel").
     std::string default_compute_args = "";
     int history_size = 1000;
+    // Behavior: after a successful `load`, set current graph to the loaded one.
+    bool switch_after_load = true;
 };
 
 // Persist the configuration to a YAML file at `path`.

@@ -2,7 +2,8 @@
 #include <string>
 #include <vector>
 #include <map>
-#include "node_graph.hpp"
+
+namespace ps { class InteractionService; }
 
 namespace ps {
 
@@ -14,7 +15,12 @@ struct CompletionResult {
 
 class CliAutocompleter {
 public:
-    CliAutocompleter(const NodeGraph& graph, const std::map<std::string, std::string>& op_sources);
+    // Build a completer bound to the backend interaction layer.
+    // op_sources is optional and may be empty; it's only used for `ops` listing, not for completion.
+    explicit CliAutocompleter(ps::InteractionService& svc);
+
+    // Set or update the current graph name so dynamic completions (node ids) can be provided.
+    void SetCurrentGraph(const std::string& graph_name) { current_graph_ = graph_name; }
 
     CompletionResult Complete(const std::string& line, int cursor_pos);
 
@@ -25,12 +31,17 @@ private:
     // Completion providers
     void CompleteCommand(const std::string& prefix, std::vector<std::string>& options) const;
     void CompletePath(const std::string& prefix, std::vector<std::string>& options) const;
+    // Complete only YAML files (and allow directories to continue traversal).
+    void CompleteYamlPath(const std::string& prefix, std::vector<std::string>& options) const;
     void CompleteNodeId(const std::string& prefix, std::vector<std::string>& options) const;
     void CompletePrintArgs(const std::string& prefix, std::vector<std::string>& options, bool only_mode_args) const;
     void CompleteTraversalArgs(const std::string& prefix, std::vector<std::string>& options) const;
     void CompleteComputeArgs(const std::string& prefix, std::vector<std::string>& options) const;
+    // Complete session/graph names by scanning the `sessions` directory for subdirectories.
+    void CompleteSessionName(const std::string& prefix, std::vector<std::string>& options) const;
 
-    const NodeGraph& graph_;
+    ps::InteractionService& svc_;
+    std::string current_graph_;
     std::vector<std::string> commands_;
 };
 

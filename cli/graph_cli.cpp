@@ -28,13 +28,22 @@
 #include "path_complete.hpp"
 #include "cli_config.hpp"
 #include "plugin_loader.hpp"
+#include "kernel/kernel.hpp"
+#include "kernel/interaction.hpp"
+#include "cli/node_editor.hpp"
+#include "cli/node_editor_full.hpp"
 
 using namespace ps;
 using namespace ftxui;
 
-// --- ConfigEditor class (unchanged, struct moved to header) ---
+// Front-end config editor extracted
+#include "cli/config_editor.hpp"
+// Kernel interaction layer
+#include "kernel/kernel.hpp"
+#include "kernel/interaction.hpp"
 
-class ConfigEditor : public TuiEditor {
+// --- removed inline ConfigEditor implementation (moved to src/cli/config_editor.cpp) ---
+/* class ConfigEditor : public TuiEditor {
 private:
     struct EditableLine {
         std::string label;
@@ -470,7 +479,7 @@ private:
     bool compute_timer_console_ = false;
     bool compute_timer_log_ = false;
     bool compute_mute_ = false;
-};
+}; */
 
 // YAML read/write helpers moved to src/cli_config.cpp and declared in include/cli_config.hpp
 static void print_cli_help() {
@@ -498,13 +507,26 @@ static void print_repl_help(const CliConfig& config) {
               << "  config\n"
               << "    Open the interactive configuration editor.\n\n"
 
+              << "  graphs\n"
+              << "    List loaded graphs and current selection.\n\n"
+
+              << "  load <name> [yaml]\n"
+              << "    Load a graph with a name. If [yaml] is omitted, it loads from sessions/<name>/content.yaml when available.\n"
+              << "    Switch after load: " << (config.switch_after_load ? "true" : "false") << "\n\n"
+
+              << "  switch <name>\n"
+              << "    Switch current graph.\n\n"
+
+              << "  close <name>\n"
+              << "    Close a loaded graph.\n\n"
+
               << "  ops [mode]\n"
               << "    List all registered operations.\n"
               << "    Modes: all(a), builtin(b), plugins(p)\n"
               << "    Default: " << config.default_ops_list_mode << "\n\n"
 
               << "  read <file>\n"
-              << "    Load a YAML graph from a file.\n\n"
+              << "    Reload YAML into current graph.\n\n"
 
               << "  source <file>\n"
               << "    Execute commands from a script file.\n\n"
@@ -663,51 +685,7 @@ static void do_traversal(const NodeGraph& graph, bool show_mem, bool show_disk) 
 //         }
 //     }
 // }
-void run_config_editor(CliConfig& config) {
-    auto screen = ScreenInteractive::Fullscreen();
-    ConfigEditor editor(screen, config);
-    editor.Run();
-
-    // After the editor returns, check if changes were applied and handle saving.
-    if (!editor.changes_applied) {
-        return;
-    }
-
-    if (config.config_save_behavior == "ask") {
-        if (ask_yesno("Save configuration changes to a file?", true)) {
-            std::string default_path = config.loaded_config_path.empty() 
-                                       ? "config.yaml" 
-                                       : config.loaded_config_path;
-            std::string path = ask("Enter path to save config file", default_path);
-            if (!path.empty()) {
-                if(write_config_to_file(config, path)) {
-                    config.loaded_config_path = fs::absolute(path).string();
-                    std::cout << "Configuration saved to " << path << std::endl;
-                } else {
-                    std::cout << "Error: Failed to save configuration to " << path << std::endl;
-                }
-            }
-        }
-    } else if (config.config_save_behavior == "current") {
-        if (config.loaded_config_path.empty()) {
-            std::cout << "Config save behavior is 'current', but no config file was loaded. Saving to default 'config.yaml'." << std::endl;
-            if (write_config_to_file(config, "config.yaml")) {
-                config.loaded_config_path = fs::absolute("config.yaml").string();
-                std::cout << "Configuration saved to " << config.loaded_config_path << std::endl;
-            }
-        } else {
-            if (write_config_to_file(config, config.loaded_config_path)) {
-                std::cout << "Configuration saved to " << config.loaded_config_path << std::endl;
-            }
-        }
-    } else if (config.config_save_behavior == "default") {
-        if (write_config_to_file(config, "config.yaml")) {
-            config.loaded_config_path = fs::absolute("config.yaml").string();
-            std::cout << "Configuration saved to default 'config.yaml'." << std::endl;
-        }
-    }
-    // If config.config_save_behavior is "none", do nothing.
-}
+// run_config_editor is provided by src/cli/config_editor.cpp
 static bool save_fp32_image(const cv::Mat& mat, const std::string& path, const CliConfig& config) {
     if (mat.empty()) { std::cout << "Error: Cannot save an empty image.\n"; return false; }
     cv::Mat out_mat;
@@ -716,18 +694,62 @@ static bool save_fp32_image(const cv::Mat& mat, const std::string& path, const C
     return cv::imwrite(path, out_mat);
 }
 
-static bool process_command(const std::string& line, NodeGraph& graph, bool& modified, CliConfig& config, const std::map<std::string, std::string>& op_sources) {
+static bool process_command(const std::string& line, ps::InteractionService& svc, std::string& current_graph, bool& modified, CliConfig& config) {
     std::istringstream iss(line);
     std::string cmd;
     iss >> cmd;
     if (cmd.empty()) return true;
-    auto screen = ScreenInteractive::FitComponent();
+    // Avoid creating FTXUI screens here to prevent terminal mode conflicts with raw REPL
     try {
         if (cmd == "help") {
             print_repl_help(config);
         } else if (cmd == "clear" || cmd == "cls") {
             std::cout << "\033[2J\033[1;1H";
+        } else if (cmd == "graphs") {
+            auto names = svc.cmd_list_graphs();
+            if (names.empty()) { std::cout << "(no graphs loaded)\n"; return true; }
+            std::cout << "Loaded graphs:" << std::endl;
+            for (auto& n : names) {
+                std::cout << "  - " << n; if (n == current_graph) std::cout << "  [current]"; std::cout << std::endl;
+            }
+        } else if (cmd == "load") {
+            std::string name, yaml; iss >> name >> yaml;
+            if (name.empty()) { std::cout << "Usage: load <name> [yaml]\n"; return true; }
+            if (yaml.empty()) {
+                auto session_yaml = ps::fs::path("sessions")/name/"content.yaml";
+                if (!ps::fs::exists(session_yaml)) {
+                    std::cout << "Error: session YAML not found: " << session_yaml << "\n";
+                    std::cout << "Hint: provide an explicit YAML path: load <name> <yaml>\n";
+                    return true;
+                }
+                auto ok = svc.cmd_load_graph(name, "sessions", "", config.loaded_config_path);
+                if (!ok) { std::cout << "Error: failed to load session graph '" << name << "' from disk.\n"; return true; }
+                if (config.switch_after_load) {
+                    current_graph = *ok;
+                    config.loaded_config_path = (ps::fs::absolute(ps::fs::path("sessions")/name/"config.yaml")).string();
+                }
+                std::cout << "Loaded graph '" << name << "' from session (content.yaml).\n";
+            } else {
+                auto ok = svc.cmd_load_graph(name, "sessions", yaml, config.loaded_config_path);
+                if (!ok) { std::cout << "Error: failed to load graph '" << name << "' from '" << yaml << "'.\n"; return true; }
+                if (config.switch_after_load) {
+                    current_graph = *ok;
+                    config.loaded_config_path = (ps::fs::absolute(ps::fs::path("sessions")/name/"config.yaml")).string();
+                }
+                std::cout << "Loaded graph '" << name << "' (yaml: " << yaml << ").\n";
+            }
+        } else if (cmd == "switch") {
+            std::string name; iss >> name; if (name.empty()) { std::cout << "Usage: switch <name>\n"; return true; }
+            auto names = svc.cmd_list_graphs();
+            if (std::find(names.begin(), names.end(), name) == names.end()) { std::cout << "Graph not found: " << name << "\n"; return true; }
+            current_graph = name; std::cout << "Switched to '" << name << "'.\n";
+        } else if (cmd == "close") {
+            std::string name; iss >> name; if (name.empty()) { std::cout << "Usage: close <name>\n"; return true; }
+            if (!svc.cmd_close_graph(name)) { std::cout << "Error: failed to close '" << name << "'.\n"; return true; }
+            if (current_graph == name) current_graph.clear();
+            std::cout << "Closed graph '" << name << "'.\n";
         } else if (cmd == "print") {
+            if (current_graph.empty()) { std::cout << "No current graph. Use load/switch.\n"; return true; }
             std::string target_str = "all";
             std::string mode_str = config.default_print_mode;
             bool target_is_set = false;
@@ -743,20 +765,26 @@ static bool process_command(const std::string& line, NodeGraph& graph, bool& mod
             }
 
             bool show_params = (mode_str == "f" || mode_str == "full");
-            if (target_str == "all") { graph.print_dependency_tree(std::cout, show_params); } 
-            else {
+            if (target_str == "all") {
+                auto dump = svc.cmd_dump_tree(current_graph, std::nullopt, show_params);
+                if (dump) std::cout << *dump; else std::cout << "(failed to dump tree)\n";
+            } else {
                 try {
                     int node_id = std::stoi(target_str);
-                    graph.print_dependency_tree(std::cout, node_id, show_params);
+                    auto dump = svc.cmd_dump_tree(current_graph, node_id, show_params);
+                    if (dump) std::cout << *dump; else std::cout << "(failed to dump tree)\n";
                 } catch (const std::exception&) {
                     std::cout << "Error: Invalid target '" << target_str << "'. Must be an integer ID or 'all'." << std::endl;
                 }
             }
         } else if (cmd == "node") {
+            if (current_graph.empty()) { std::cout << "No current graph. Use load/switch.\n"; return true; }
             std::optional<int> maybe_id;
             std::string word;
             if (iss >> word) { try { maybe_id = std::stoi(word); } catch (...) { maybe_id.reset(); } }
-            ps::run_node_editor(graph, maybe_id);
+            run_node_editor_full(svc, current_graph, maybe_id);
+            // After leaving the FTXUI node editor, clear screen to refresh REPL view
+            std::cout << "\033[2J\033[1;1H";
         }  else if (cmd == "ops") {
             std::string mode_arg; iss >> mode_arg;
             if (mode_arg.empty()) { mode_arg = config.default_ops_list_mode; }
@@ -771,6 +799,7 @@ static bool process_command(const std::string& line, NodeGraph& graph, bool& mod
             std::map<std::string, std::vector<std::pair<std::string, std::string>>> grouped_ops;
             int op_count = 0;
 
+            auto op_sources = svc.cmd_ops_sources();
             for (const auto& pair : op_sources) {
                 const std::string& key = pair.first;
                 const std::string& source = pair.second;
@@ -812,6 +841,7 @@ static bool process_command(const std::string& line, NodeGraph& graph, bool& mod
             }
 
         } else if (cmd == "traversal") {
+            if (current_graph.empty()) { std::cout << "No current graph. Use load/switch.\n"; return true; }
             std::string arg;
             std::string print_tree_mode = "none";
             bool show_mem = false, show_disk = false, do_check = false, do_check_remove = false;
@@ -839,19 +869,28 @@ static bool process_command(const std::string& line, NodeGraph& graph, bool& mod
                 parse_tokens(args);
             }
 
-            if (do_check_remove) graph.synchronize_disk_cache(config.cache_precision);
-            else if (do_check) graph.cache_all_nodes(config.cache_precision);
+            if (do_check_remove) svc.cmd_synchronize_disk_cache(current_graph, config.cache_precision);
+            else if (do_check) svc.cmd_cache_all_nodes(current_graph, config.cache_precision);
 
-            if (print_tree_mode == "full") graph.print_dependency_tree(std::cout, true);
-            else if (print_tree_mode == "simplified") graph.print_dependency_tree(std::cout, false);
-            do_traversal(graph, show_mem, show_disk);
+            if (print_tree_mode == "full") { auto s = svc.cmd_dump_tree(current_graph, std::nullopt, true); if (s) std::cout << *s; }
+            else if (print_tree_mode == "simplified") { auto s = svc.cmd_dump_tree(current_graph, std::nullopt, false); if (s) std::cout << *s; }
+
+            auto orders = svc.cmd_traversal_orders(current_graph);
+            if (!orders || orders->empty()) { std::cout << "(no ending nodes or graph is cyclic)\n"; return true; }
+            for (const auto& kv : *orders) {
+                std::cout << "\nPost-order (eval order) for end node " << kv.first << ":\n";
+                bool first = true;
+                for (int id : kv.second) { if (!first) std::cout << " -> "; std::cout << id; first = false; }
+                std::cout << "\n";
+            }
         } else if (cmd == "config") {
             run_config_editor(config);
-            graph.cache_root = config.cache_root_dir;
+            // base dir used on subsequent `load`
         } 
         else if (cmd == "read") {
+            if (current_graph.empty()) { std::cout << "No current graph. Use load/switch.\n"; return true; }
             std::string path; iss >> path; if (path.empty()) std::cout << "Usage: read <filepath>\n";
-            else { graph.load_yaml(path); modified = false; std::cout << "Loaded graph from " << path << "\n"; }
+            else { if (svc.cmd_reload_yaml(current_graph, path)) { modified = false; std::cout << "Loaded graph from " << path << "\n"; } else { std::cout << "Failed to load." << std::endl; } }
         } else if (cmd == "source") {
             std::string filename; iss >> filename;
             if (filename.empty()) { std::cout << "Usage: source <filename>\n"; return true; }
@@ -861,22 +900,26 @@ static bool process_command(const std::string& line, NodeGraph& graph, bool& mod
             while (std::getline(script_file, script_line)) {
                 if (script_line.empty() || script_line.find_first_not_of(" \t") == std::string::npos || script_line[0] == '#') continue;
                 std::cout << "ps> " << script_line << std::endl;
-                if (!process_command(script_line, graph, modified, config, op_sources)) return false;
+                if (!process_command(script_line, svc, current_graph, modified, config)) return false;
             }
         } 
         else if (cmd == "output") {
+            if (current_graph.empty()) { std::cout << "No current graph. Use load/switch.\n"; return true; }
             std::string path; iss >> path; if (path.empty()) std::cout << "Usage: output <filepath>\n";
-            else { graph.save_yaml(path); modified = false; std::cout << "Saved to " << path << "\n"; }
+            else { if (svc.cmd_save_yaml(current_graph, path)) { modified = false; std::cout << "Saved to " << path << "\n"; } else { std::cout << "Failed to save." << std::endl; } }
         } else if (cmd == "clear-graph") {
-            graph.clear(); modified = true; std::cout << "Graph cleared.\n";
+            if (current_graph.empty()) { std::cout << "No current graph. Use load/switch.\n"; return true; }
+            svc.cmd_clear_graph(current_graph); modified = true; std::cout << "Graph cleared.\n";
         } else if (cmd == "clear-cache" || cmd == "cc") {
+            if (current_graph.empty()) { std::cout << "No current graph. Use load/switch.\n"; return true; }
             std::string arg; iss >> arg;
             if (arg.empty()) { arg = config.default_cache_clear_arg; }
-            if (arg == "both" || arg == "md" || arg == "dm") graph.clear_cache();
-            else if (arg == "drive" || arg == "d") graph.clear_drive_cache();
-            else if (arg == "memory" || arg == "m") graph.clear_memory_cache();
+            if (arg == "both" || arg == "md" || arg == "dm") svc.cmd_clear_cache(current_graph);
+            else if (arg == "drive" || arg == "d") svc.cmd_clear_drive_cache(current_graph);
+            else if (arg == "memory" || arg == "m") svc.cmd_clear_memory_cache(current_graph);
         } 
         else if (cmd == "compute") {
+            if (current_graph.empty()) { std::cout << "No current graph. Use load/switch.\n"; return true; }
             std::string target_id_str; iss >> target_id_str;
             if (target_id_str.empty()) { target_id_str = "all"; }
 
@@ -907,120 +950,51 @@ static bool process_command(const std::string& line, NodeGraph& graph, bool& mod
             }
 
             bool enable_timing = timer_console || timer_log_file;
-            if (enable_timing) { graph.clear_timing_results(); }
-            
-            std::chrono::time_point<std::chrono::high_resolution_clock> total_start;
-            if (timer_log_file) { total_start = std::chrono::high_resolution_clock::now(); }
-
-            auto print_output = [](int id, const NodeOutput& out) {
-                std::cout << "-> Node " << id << " computed.\n";
-                if (!out.image_matrix.empty() || !out.image_umatrix.empty()) {
-                    int cols = out.image_umatrix.empty() ? out.image_matrix.cols : out.image_umatrix.cols;
-                    int rows = out.image_umatrix.empty() ? out.image_matrix.rows : out.image_umatrix.rows;
-                    int channels = out.image_umatrix.empty() ? out.image_matrix.channels() : out.image_umatrix.channels();
-                    std::cout << "   Image Output: " << cols << "x" << rows << " (" << channels << " ch)\n";
-                }
-                if (!out.data.empty()) { 
-                    std::cout << "   Data Outputs:\n";
-                    YAML::Emitter yml;
-                    yml << YAML::Flow << YAML::BeginMap;
-                    for(const auto& pair : out.data) { yml << YAML::Key << pair.first << YAML::Value << pair.second; }
-                    yml << YAML::EndMap;
-                    std::cout << "     " << yml.c_str() << "\n"; 
-                }
-            };
-
-            // Apply force semantics prior to compute so disk cache is respected unless force-deep.
-            if (force_deep) {
-                graph.clear_cache(); // disk + memory
-            } else if (force) {
-                graph.clear_memory_cache(); // memory only
-            }
-
-            auto compute_func = [&](int id) -> NodeOutput& {
-                if (parallel) {
-                    if (!mute) std::cout << "--- Starting parallel computation ---" << std::endl;
-                    return graph.compute_parallel(id, config.cache_precision, /*force_recache=*/false, enable_timing);
-                }
-                return graph.compute(id, config.cache_precision, /*force_recache=*/false, enable_timing);
-            };
-
-            // Temporarily set graph quiet mode based on mute
-            bool prev_quiet = graph.is_quiet();
-            graph.set_quiet(mute);
+            if (force_deep) svc.cmd_clear_cache(current_graph); else if (force) svc.cmd_clear_memory_cache(current_graph);
+            auto total_start = std::chrono::high_resolution_clock::now();
             if (target_id_str == "all") {
-                for (int id : graph.ending_nodes()) {
-                    NodeOutput& out = compute_func(id);
-                    if (!mute) print_output(id, out);
-                }
-            } else {
-                int id = std::stoi(target_id_str);
-                NodeOutput& out = compute_func(id);
-                if (!mute) print_output(id, out);
-            }
-            graph.set_quiet(prev_quiet);
-
-            if (timer_console) {
+                auto orders = svc.cmd_traversal_orders(current_graph);
+                if (!orders || orders->empty()) { std::cout << "(no ending nodes or graph is cyclic)\n"; return true; }
+                for (const auto& kv : *orders) { svc.cmd_compute(current_graph, kv.first, config.cache_precision, false, enable_timing, parallel); if (!mute) std::cout << "-> End node " << kv.first << " computed.\n"; }
+            } else { int id = std::stoi(target_id_str); svc.cmd_compute(current_graph, id, config.cache_precision, false, enable_timing, parallel); if (!mute) std::cout << "-> Node " << id << " computed.\n"; }
+            auto timing = svc.cmd_timing(current_graph);
+            if (timer_console && !mute) {
                 std::cout << "--- Computation Timers (Console) ---\n";
-                for (const auto& timing : graph.timing_results.node_timings) {
-                    printf("  - Node %-3d (%-20s): %10.4f ms [%s]\n", timing.id, timing.name.c_str(), timing.elapsed_ms, timing.source.c_str());
-                }
+                if (timing) { for (const auto& t : timing->node_timings) printf("  - Node %-3d (%-20s): %10.4f ms [%s]\n", t.id, t.name.c_str(), t.elapsed_ms, t.source.c_str()); }
+                else std::cout << "(no timing data)\n";
             }
-            
             if (timer_log_file) {
                 auto total_end = std::chrono::high_resolution_clock::now();
                 std::chrono::duration<double, std::milli> total_elapsed = total_end - total_start;
-                graph.timing_results.total_ms = total_elapsed.count();
-
-                if (timer_log_path.empty()) { timer_log_path = config.default_timer_log_path; }
-
-                fs::path out_path(timer_log_path);
-                if (out_path.has_parent_path()) { fs::create_directories(out_path.parent_path()); }
-
-                YAML::Node root;
-                YAML::Node steps_node(YAML::NodeType::Sequence);
-                for (const auto& timing : graph.timing_results.node_timings) {
-                    YAML::Node step;
-                    step["id"] = timing.id; step["name"] = timing.name;
-                    step["time_ms"] = timing.elapsed_ms; step["source"] = timing.source; 
-                    steps_node.push_back(step);
-                }
-                root["steps"] = steps_node;
-                root["total_time_ms"] = graph.timing_results.total_ms;
-                
-                std::ofstream fout(timer_log_path);
-                fout << root;
-                std::cout << "Timer log successfully written to '" << timer_log_path << "'." << std::endl;
+                if (timer_log_path.empty()) timer_log_path = config.default_timer_log_path;
+                fs::path out_path(timer_log_path); if (out_path.has_parent_path()) fs::create_directories(out_path.parent_path());
+                YAML::Node root; YAML::Node steps(YAML::NodeType::Sequence);
+                if (timing) { for (const auto& t : timing->node_timings) { YAML::Node n; n["id"]=t.id; n["name"]=t.name; n["time_ms"]=t.elapsed_ms; n["source"]=t.source; steps.push_back(n);} }
+                root["steps"]=steps; root["total_time_ms"]= timing ? timing->total_ms : total_elapsed.count(); std::ofstream fout(timer_log_path); fout << root; if (!mute) std::cout << "Timer log successfully written to '" << timer_log_path << "'." << std::endl;
             }
 
         } else if (cmd == "save") {
-            std::string id_str, path; iss >> id_str >> path;
-            if (id_str.empty() || path.empty()) { std::cout << "Usage: save <node_id> <filepath>\n"; }
-            else {
-                int id = std::stoi(id_str);
-                NodeOutput& result = graph.compute(id, config.cache_precision);
-                
-                if (result.image_matrix.empty() && !result.image_umatrix.empty()) {
-                    result.image_matrix = result.image_umatrix.getMat(cv::ACCESS_READ).clone();
-                }
-
-                if (save_fp32_image(result.image_matrix, path, config)) { std::cout << "Successfully saved node " << id << " image to " << path << "\n"; } 
-                else { std::cout << "Error: Failed to save image to " << path << "\n"; }
-            }
+            if (current_graph.empty()) { std::cout << "No current graph. Use load/switch.\n"; return true; }
+            std::string id_str, path; iss >> id_str >> path; if (id_str.empty() || path.empty()) { std::cout << "Usage: save <node_id> <filepath>\n"; }
+            else { int id = std::stoi(id_str); auto mat = svc.cmd_compute_and_get_image(current_graph, id, config.cache_precision, false, false, false); if (!mat || mat->empty()) { std::cout << "Compute returned empty image.\n"; } else if (save_fp32_image(*mat, path, config)) { std::cout << "Successfully saved node " << id << " image to " << path << "\n"; } else { std::cout << "Error: Failed to save image to " << path << "\n"; } }
         } else if (cmd == "free") {
-            graph.free_transient_memory();
+            if (current_graph.empty()) { std::cout << "No current graph. Use load/switch.\n"; return true; }
+            svc.cmd_free_transient_memory(current_graph);
         } else if (cmd == "exit") {
             std::cout << std::endl;
             if (modified && ask_yesno("You have unsaved changes. Save graph to file?", true)) {
-                std::string path = ask("output file", config.default_exit_save_path);
-                graph.save_yaml(path); std::cout << "Saved to " << path << "\n";
+                if (current_graph.empty()) { std::cout << "No current graph to save.\n"; }
+                else {
+                    std::string path = ask("output file", config.default_exit_save_path);
+                    if (svc.cmd_save_yaml(current_graph, path)) std::cout << "Saved to " << path << "\n";
+                }
             }
             // 说明：此处实现了 config 中的 `exit_prompt_sync` 行为。
             // 含义：退出 REPL 前是否将内存中的缓存状态同步到磁盘。
             // - 提示默认值由 `config.exit_prompt_sync` 决定（true=默认 Yes，false=默认 No）。
             // - 若用户确认，则调用 `synchronize_disk_cache` 将内存缓存刷写到磁盘缓存。
-            if (ask_yesno("Synchronize disk cache with memory state before exiting?", config.exit_prompt_sync)) {
-                graph.synchronize_disk_cache(config.cache_precision);
+            if (!current_graph.empty() && ask_yesno("Synchronize disk cache with memory state before exiting?", config.exit_prompt_sync)) {
+                svc.cmd_synchronize_disk_cache(current_graph, config.cache_precision);
             }
             return false;
         } else {
@@ -1032,13 +1006,15 @@ static bool process_command(const std::string& line, NodeGraph& graph, bool& mod
     return true;
 }
 
-// --- START OF CORRECTED REPL ---
-static void run_repl(NodeGraph& graph, CliConfig& config, const std::map<std::string, std::string>& op_sources) {
+// --- Decoupled REPL using InteractionService ---
+static void run_repl(ps::InteractionService& svc, CliConfig& config, const std::string& initial_graph) {
     bool modified = false;
+    std::string current_graph = initial_graph;
     
     CliHistory history;
     history.SetMaxSize(config.history_size);
-    CliAutocompleter completer(graph, op_sources);
+    CliAutocompleter completer(svc);
+    if (!current_graph.empty()) completer.SetCurrentGraph(current_graph);
 
     // --- State for the new cyclical autocompletion feature ---
     struct CompletionState {
@@ -1069,13 +1045,19 @@ static void run_repl(NodeGraph& graph, CliConfig& config, const std::map<std::st
         std::cout << "\r\x1B[K" << "ps> ";
 
         if (completion_state.IsActive()) {
-            // Highlight the active completion
-            size_t prefix_len = completion_state.original_prefix.length();
-            size_t highlight_len = line_buffer.length() - prefix_len;
-            std::cout << line_buffer.substr(0, prefix_len)
-                      << "\x1B[7m" // Invert colors
-                      << line_buffer.substr(prefix_len, highlight_len)
-                      << "\x1B[0m" // Reset colors
+            // Highlight the active completion (invert only the completed token)
+            size_t start_idx = 0;
+            if (completion_state.original_cursor_pos >= completion_state.original_prefix.length())
+                start_idx = completion_state.original_cursor_pos - completion_state.original_prefix.length();
+            size_t left_len = std::min(start_idx, line_buffer.size());
+            size_t mid_len  = (cursor_pos > (int)start_idx && (size_t)cursor_pos <= line_buffer.size())
+                              ? (size_t)cursor_pos - start_idx
+                              : (line_buffer.size() > start_idx ? line_buffer.size() - start_idx : 0);
+            std::cout << line_buffer.substr(0, left_len)
+                      << "\x1B[7m"
+                      << line_buffer.substr(left_len, mid_len)
+                      << "\x1B[0m"
+                      << line_buffer.substr(left_len + mid_len)
                       << std::flush;
         } else {
             std::cout << line_buffer << std::flush;
@@ -1084,24 +1066,11 @@ static void run_repl(NodeGraph& graph, CliConfig& config, const std::map<std::st
         // Move cursor back to its logical position.
         std::cout << "\r\x1B[" << (4 + cursor_pos) << "C" << std::flush;
 
-        // Display the list of options below the prompt, if any.
-        if (!options_to_display.empty()) {
-            std::cout << "\n\r"; // Go to the beginning of the next line
-            for(size_t i = 0; i < options_to_display.size(); ++i) {
-                std::string opt = options_to_display[i];
-                if (opt.length() > 20) opt = opt.substr(0, 17) + "...";
-                std::cout << opt << (i % 5 == 4 || i == options_to_display.size() - 1 ? "" : "\t");
-                if (i % 5 == 4 || i == options_to_display.size() - 1) {
-                    std::cout << "\n\r";
-                }
-            }
-            // Redraw the prompt line after displaying options.
-            redraw_line();
-        }
+        // No multi-line candidates display; keep everything on a single line per requirement.
     };
 
     // FIX: Print the welcome message *before* putting the terminal in raw mode.
-    std::cout << "Photospider dynamic graph shell. Type 'help' for commands.\n";
+    std::cout << "Photospider dynamic graph shell (decoupled). Type 'help' for commands.\n";
     std::cout << "History file: " << history.Path() << "\n";
     TerminalInput term_input;
     redraw_line();
@@ -1128,7 +1097,9 @@ static void run_repl(NodeGraph& graph, CliConfig& config, const std::map<std::st
                     history.Save();
                 }
                 // Now, execute the command.
-                bool continue_repl = process_command(line_buffer, graph, modified, config, op_sources);
+                bool continue_repl = process_command(line_buffer, svc, current_graph, modified, config);
+                // Keep autocompleter in sync with current graph changes
+                completer.SetCurrentGraph(current_graph);
 
                 // Re-enter raw mode to capture individual keystrokes for the next prompt.
                 term_input.SetRaw();
@@ -1217,45 +1188,40 @@ static void run_repl(NodeGraph& graph, CliConfig& config, const std::map<std::st
                 break;
             }
             case TAB: {
+                // Unified completer using InteractionService
+                completer.SetCurrentGraph(current_graph);
                 if (completion_state.IsActive()) {
-                    // --- We are already in a cycle ---
                     completion_state.current_index = (completion_state.current_index + 1) % completion_state.options.size();
-                    
-                    line_buffer.erase(completion_state.original_cursor_pos - completion_state.original_prefix.length(),
-                                      line_buffer.length() - (completion_state.original_cursor_pos - completion_state.original_prefix.length()));
-                    
-                    line_buffer.insert(completion_state.original_cursor_pos - completion_state.original_prefix.length(), 
-                                       completion_state.options[completion_state.current_index]);
-
-                    cursor_pos = line_buffer.length();
-                    redraw_line();
+                    size_t token_start = completion_state.original_cursor_pos - completion_state.original_prefix.length();
+                    line_buffer.erase(token_start, line_buffer.size() - token_start);
+                    const std::string& opt = completion_state.options[completion_state.current_index];
+                    line_buffer.insert(token_start, opt);
+                    cursor_pos = (int)(token_start + opt.size());
+                    redraw_line(completion_state.options);
                 } else {
-                    // --- This is a new completion attempt ---
                     auto result = completer.Complete(line_buffer, cursor_pos);
-                    if (result.options.empty()) break; // No completions found
-
-                    if (result.options.size() == 1) {
-                        // Single option: complete and add space.
+                    if (result.options.empty()) break;
+                    if (result.options.size() == 1 && result.new_line != line_buffer) {
                         line_buffer = result.new_line;
                         cursor_pos = result.new_cursor_pos;
+                        // add a space when not listing options
+                        if (!line_buffer.empty() && line_buffer[cursor_pos-1] != '/') { line_buffer.insert(cursor_pos, 1, ' '); cursor_pos++; }
                         redraw_line();
                     } else {
-                        // Multiple options: start the cycle.
+                        // enter cycling mode
                         completion_state.options = result.options;
                         completion_state.current_index = 0;
+                        // compute prefix and cursor pos
+                        size_t start = line_buffer.find_last_of(" \t", cursor_pos ? cursor_pos-1 : 0);
+                        start = (start==std::string::npos)?0:start+1;
+                        completion_state.original_prefix = line_buffer.substr(start, cursor_pos - (int)start);
                         completion_state.original_cursor_pos = cursor_pos;
-                        completion_state.original_prefix = line_buffer.substr(
-                            line_buffer.find_last_of(" \t", cursor_pos - 1) + 1,
-                            cursor_pos - (line_buffer.find_last_of(" \t", cursor_pos - 1) + 1)
-                        );
-                        
-                        line_buffer = result.new_line; // Apply the first option
+                        line_buffer = result.new_line;
                         cursor_pos = result.new_cursor_pos;
                         redraw_line(completion_state.options);
                     }
                 }
-                break;
-            }
+                break; }
             case UNKNOWN:
                 break;
             default: {
@@ -1276,15 +1242,10 @@ static void run_repl(NodeGraph& graph, CliConfig& config, const std::map<std::st
 
 int main(int argc, char** argv) {
     cv::ocl::setUseOpenCL(false);
-    std::map<std::string, std::string> op_sources;
-    auto& registry = ps::OpRegistry::instance();
-
-    auto keys_before_builtin = registry.get_keys();
     ops::register_builtin();
-    auto keys_after_builtin = registry.get_keys();
-    std::vector<std::string> builtin_keys;
-    std::set_difference(keys_after_builtin.begin(), keys_after_builtin.end(), keys_before_builtin.begin(), keys_before_builtin.end(), std::back_inserter(builtin_keys));
-    for (const auto& key : builtin_keys) { op_sources[key] = "built-in"; }
+    ps::Kernel kernel;
+    ps::InteractionService svc(kernel);
+    svc.cmd_seed_builtin_ops();
 
     CliConfig config;
     std::string custom_config_path;
@@ -1306,8 +1267,8 @@ int main(int argc, char** argv) {
 
     std::string config_to_load = custom_config_path.empty() ? "config.yaml" : custom_config_path;
     load_or_create_config(config_to_load, config);
-    load_plugins(config.plugin_dirs, op_sources);
-    NodeGraph graph{config.cache_root_dir};
+    svc.cmd_plugins_load(config.plugin_dirs);
+    std::string current_graph;
     
     bool did_any_action = false;
     bool start_repl_after_actions = false;
@@ -1316,27 +1277,41 @@ int main(int argc, char** argv) {
         try {
             switch (opt) {
             case 'h': print_cli_help(); return 0;
-            case 'r': graph.load_yaml(optarg); std::cout << "Loaded graph from " << optarg << "\n"; did_any_action = true; break;
-            case 'o': graph.save_yaml(optarg); std::cout << "Saved graph to " << optarg << "\n"; did_any_action = true; break;
-            case 'p': graph.print_dependency_tree(std::cout); did_any_action = true; break;
+            case 'r': {
+                auto ok = svc.cmd_load_graph("default", "sessions", optarg, config.loaded_config_path);
+                if (ok) {
+                    if (config.switch_after_load) current_graph = *ok;
+                    config.loaded_config_path = (ps::fs::absolute(ps::fs::path("sessions")/"default"/"config.yaml")).string();
+                    std::cout << "Loaded graph from " << optarg << "\n"; did_any_action = true;
+                }
+                else { std::cerr << "Failed to load graph from '" << optarg << "'.\n"; }
+                break; }
+            case 'o': {
+                if (current_graph.empty()) { std::cerr << "No graph loaded; use -r first.\n"; break; }
+                if (svc.cmd_save_yaml(current_graph, optarg)) { std::cout << "Saved graph to " << optarg << "\n"; did_any_action = true; }
+                else { std::cerr << "Failed to save graph.\n"; }
+                break; }
+            case 'p': {
+                if (current_graph.empty()) { std::cerr << "No graph loaded; use -r first.\n"; break; }
+                auto dump = svc.cmd_dump_tree(current_graph, std::nullopt, /*show_params*/true);
+                if (dump) { std::cout << *dump; did_any_action = true; }
+                else std::cerr << "Failed to print tree.\n";
+                break; }
             case 't': {
-                std::string print_tree_mode = "none";
-                bool show_mem = false, show_disk = false;
-                std::istringstream iss(config.default_traversal_arg);
-                std::string arg;
-                 while(iss >> arg) {
-                    if (arg == "f" || arg == "full") print_tree_mode = "full";
-                    else if (arg == "s" || arg == "simplified") print_tree_mode = "simplified";
-                    else if (arg == "n" || arg == "no_tree") print_tree_mode = "none";
-                    else if (arg == "m") show_mem = true;
-                    else if (arg == "d") show_disk = true;
-                 }
-                if (print_tree_mode == "full") graph.print_dependency_tree(std::cout, true);
-                else if (print_tree_mode == "simplified") graph.print_dependency_tree(std::cout, false);
-                do_traversal(graph, show_mem, show_disk);
-                did_any_action = true; break;
-            }
-            case 1001: graph.clear_cache(); did_any_action = true; break;
+                if (current_graph.empty()) { std::cerr << "No graph loaded; use -r first.\n"; break; }
+                auto dump = svc.cmd_dump_tree(current_graph, std::nullopt, /*show_params*/true);
+                if (dump) std::cout << *dump;
+                auto orders = svc.cmd_traversal_orders(current_graph);
+                if (orders) {
+                    for (const auto& kv : *orders) {
+                        std::cout << "\nPost-order (eval order) for end node " << kv.first << ":\n";
+                        bool first = true; for (int id : kv.second) { if (!first) std::cout << " -> "; std::cout << id; first = false; }
+                        std::cout << "\n";
+                    }
+                }
+                did_any_action = true; break; }
+            
+            case 1001: if (!current_graph.empty()) { svc.cmd_clear_cache(current_graph); did_any_action = true; } break;
             case 'R': start_repl_after_actions = true; break;
             case 2001: break;
             default: print_cli_help(); return 1;
@@ -1350,7 +1325,7 @@ int main(int argc, char** argv) {
         if (did_any_action) {
             std::cout << "\n--- Command-line actions complete. Entering interactive shell. ---\n";
         }
-        run_repl(graph, config, op_sources);
+        run_repl(svc, config, current_graph);
     } else {
          std::cout << "\n--- Command-line actions complete. Exiting. ---\n";
     }
