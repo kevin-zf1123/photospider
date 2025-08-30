@@ -141,7 +141,10 @@ CompletionResult CliAutocompleter::Complete(const std::string& line, int cursor_
         CompleteCommand(prefix, result.options);
     } else {
         const std::string& cmd = tokens[0];
-        if ((cmd == "read" || cmd == "source" || cmd == "output" || cmd == "save") && (tokens.size() > 1)) {
+        if (cmd == "help") {
+            // help <command> — suggest available commands/topics
+            CompleteCommand(prefix, result.options);
+        } else if ((cmd == "read" || cmd == "source" || cmd == "output" || cmd == "save") && (tokens.size() > 1)) {
             CompletePath(prefix, result.options);
         } else if (cmd == "load") {
             // load <name> <yaml>
