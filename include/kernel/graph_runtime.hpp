@@ -53,6 +53,14 @@ public:
         return fut;
     }
 
+    // Non-posting helper to drain compute events from any thread safely.
+    // Rationale: If we posted a "drain" job on the same worker queue used by compute,
+    // the drain would be blocked behind the long-running compute. Exposing this method
+    // lets the Kernel/CLI read events directly, while NodeGraph guards its own buffers.
+    std::vector<NodeGraph::ComputeEvent> drain_compute_events_now() {
+        return graph_.drain_compute_events();
+    }
+
     // Access immutable info
     const Info& info() const { return info_; }
 
@@ -69,4 +77,3 @@ private:
 };
 
 } // namespace ps
-

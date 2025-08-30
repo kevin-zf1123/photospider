@@ -1,4 +1,8 @@
 // NodeGraph compute event streaming
+//
+// Frontends (CLI) poll for compute events while a compute is running. Events are pushed from
+// both sequential and parallel paths. This file provides a small, thread-safe, swap-based
+// queue: push under a mutex; drain swaps into a local vector and releases the lock quickly.
 #include "node_graph.hpp"
 #include <utility>
 
@@ -17,4 +21,3 @@ std::vector<NodeGraph::ComputeEvent> NodeGraph::drain_compute_events() {
 }
 
 } // namespace ps
-

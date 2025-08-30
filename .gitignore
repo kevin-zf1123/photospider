@@ -62,3 +62,4 @@ kernel.py
 *.png
 *.patch
 /sessions/
+.vscode/

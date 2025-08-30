@@ -5,7 +5,9 @@
 
 namespace ps {
 
-NodeOutput& NodeGraph::compute(int node_id, const std::string& cache_precision, bool force_recache, bool enable_timing) {
+NodeOutput& NodeGraph::compute(int node_id, const std::string& cache_precision,
+                               bool force_recache, bool enable_timing,
+                               bool disable_disk_cache) {
     if (!has_node(node_id)) {
         throw GraphError(GraphErrc::NotFound, "Cannot compute: node " + std::to_string(node_id) + " not found.");
     }
@@ -18,17 +20,19 @@ NodeOutput& NodeGraph::compute(int node_id, const std::string& cache_precision, 
         } catch (const GraphError&) {}
     }
     std::unordered_map<int, bool> visiting;
-    return compute_internal(node_id, cache_precision, visiting, enable_timing);
+    // When force_recache is requested, skip loading from disk cache to ensure true recomputation.
+    return compute_internal(node_id, cache_precision, visiting, enable_timing,
+                            /*allow_disk_cache=*/!disable_disk_cache);
 }
 
-NodeOutput& NodeGraph::compute_internal(int node_id, const std::string& cache_precision, std::unordered_map<int, bool>& visiting, bool enable_timing){
+NodeOutput& NodeGraph::compute_internal(int node_id, const std::string& cache_precision, std::unordered_map<int, bool>& visiting, bool enable_timing, bool allow_disk_cache){
     auto& node = nodes.at(node_id);
     std::string result_source = "unknown";
     auto start_time = std::chrono::high_resolution_clock::now();
 
     do {
         if (node.cached_output.has_value()) { result_source = "memory_cache"; break; }
-        if (try_load_from_disk_cache(node)) { result_source = "disk_cache"; break; }
+        if (allow_disk_cache && try_load_from_disk_cache(node)) { result_source = "disk_cache"; break; }
         if (visiting[node_id]) { throw GraphError(GraphErrc::Cycle, "Cycle detected in graph involving node " + std::to_string(node_id)); }
         visiting[node_id] = true;
 
@@ -38,7 +42,7 @@ NodeOutput& NodeGraph::compute_internal(int node_id, const std::string& cache_pr
             if (!has_node(p_input.from_node_id)) {
                 throw GraphError(GraphErrc::MissingDependency, "Node " + std::to_string(node.id) + " has missing parameter dependency: " + std::to_string(p_input.from_node_id));
             }
-            const auto& upstream_output = compute_internal(p_input.from_node_id, cache_precision, visiting, enable_timing);
+            const auto& upstream_output = compute_internal(p_input.from_node_id, cache_precision, visiting, enable_timing, allow_disk_cache);
             auto it = upstream_output.data.find(p_input.from_output_name);
             if (it == upstream_output.data.end()) {
                 throw GraphError(GraphErrc::MissingDependency, "Node " + std::to_string(p_input.from_node_id) + " did not produce required output '" + p_input.from_output_name + "' for node " + std::to_string(node_id));
@@ -52,7 +56,7 @@ NodeOutput& NodeGraph::compute_internal(int node_id, const std::string& cache_pr
             if (!has_node(i_input.from_node_id)) {
                 throw GraphError(GraphErrc::MissingDependency, "Node " + std::to_string(node.id) + " has missing image dependency: " + std::to_string(i_input.from_node_id));
             }
-            const auto& upstream_output = compute_internal(i_input.from_node_id, cache_precision, visiting, enable_timing);
+            const auto& upstream_output = compute_internal(i_input.from_node_id, cache_precision, visiting, enable_timing, allow_disk_cache);
             input_node_outputs.push_back(&upstream_output);
         }
 
@@ -64,11 +68,16 @@ NodeOutput& NodeGraph::compute_internal(int node_id, const std::string& cache_pr
         visiting[node_id] = false;
     } while(false);
 
+    // Record timing and emit an event. timing_results is shared with parallel path,
+    // so guard writes with timing_mutex_ to keep the collector consistent.
     if (enable_timing) {
         auto end_time = std::chrono::high_resolution_clock::now();
         std::chrono::duration<double, std::milli> elapsed = end_time - start_time;
-        this->timing_results.node_timings.push_back({node.id, node.name, elapsed.count(), result_source});
-        this->timing_results.total_ms += elapsed.count();
+        {
+            std::lock_guard<std::mutex> lk(timing_mutex_);
+            this->timing_results.node_timings.push_back({node.id, node.name, elapsed.count(), result_source});
+            this->timing_results.total_ms += elapsed.count();
+        }
         push_compute_event(node.id, node.name, result_source, elapsed.count());
     } else {
         push_compute_event(node.id, node.name, result_source, 0.0);

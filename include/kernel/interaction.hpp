@@ -5,6 +5,7 @@
 #include <optional>
 #include <string>
 #include <vector>
+#include <future>
 
 #include "kernel/kernel.hpp"
 #include "kernel/plugin_result.hpp"
@@ -28,8 +29,9 @@ public:
 
     // Compute
     bool cmd_compute(const std::string& graph, int node_id, const std::string& cache_precision,
-                     bool force, bool timing, bool parallel, bool quiet = false) {
-        return kernel_.compute(graph, node_id, cache_precision, force, timing, parallel, quiet);
+                     bool force, bool timing, bool parallel, bool quiet = false,
+                     bool disable_disk_cache = false) {
+        return kernel_.compute(graph, node_id, cache_precision, force, timing, parallel, quiet, disable_disk_cache);
     }
     std::optional<TimingCollector> cmd_timing(const std::string& graph) { return kernel_.get_timing(graph); }
 
@@ -76,8 +78,9 @@ public:
         return kernel_.drain_compute_events(graph);
     }
     std::optional<cv::Mat> cmd_compute_and_get_image(const std::string& graph, int node_id, const std::string& precision,
-                                                     bool force, bool timing, bool parallel) {
-        return kernel_.compute_and_get_image(graph, node_id, precision, force, timing, parallel);
+                                                     bool force, bool timing, bool parallel,
+                                                     bool disable_disk_cache = false) {
+        return kernel_.compute_and_get_image(graph, node_id, precision, force, timing, parallel, disable_disk_cache);
     }
     std::optional<std::vector<int>> cmd_trees_containing_node(const std::string& graph, int node_id) {
         return kernel_.trees_containing_node(graph, node_id);
@@ -87,7 +90,11 @@ public:
     std::optional<std::vector<int>> cmd_list_node_ids(const std::string& graph) { return kernel_.list_node_ids(graph); }
     std::optional<std::string> cmd_get_node_yaml(const std::string& graph, int node_id) { return kernel_.get_node_yaml(graph, node_id); }
     bool cmd_set_node_yaml(const std::string& graph, int node_id, const std::string& yaml_text) { return kernel_.set_node_yaml(graph, node_id, yaml_text); }
-
+    std::optional<std::future<bool>> cmd_compute_async(const std::string& graph, int node_id, const std::string& cache_precision,
+                                                      bool force, bool timing, bool parallel, bool quiet = false,
+                                                      bool disable_disk_cache = false) {
+        return kernel_.compute_async(graph, node_id, cache_precision, force, timing, parallel, quiet, disable_disk_cache);
+    }
 private:
     Kernel& kernel_;
 };

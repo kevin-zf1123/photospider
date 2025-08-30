@@ -264,7 +264,16 @@ private:
         return hbox({ text(help) | dim, filler(), text(status_message_) | bold });
     }
     void ExecuteCommand() {
-        std::string cmd = command_buffer_; command_buffer_.clear(); mode_ = Mode::Navigate;
+        std::string cmd = command_buffer_;
+        // Trim and lowercase to accept variants like ': a' or ':A'
+        auto do_trim = [](std::string& s){
+            size_t i = 0; while (i < s.size() && std::isspace(static_cast<unsigned char>(s[i]))) ++i; s.erase(0, i);
+            size_t j = s.size(); while (j > 0 && std::isspace(static_cast<unsigned char>(s[j-1]))) --j; s.erase(j);
+        };
+        do_trim(cmd);
+        for (auto& c : cmd) c = (char)std::tolower((unsigned char)c);
+        command_buffer_.clear();
+        mode_ = Mode::Navigate;
         if (cmd == "a" || cmd == "apply") {
             std::string new_path = active_config_path_buffer_;
             std::string old_path = original_config_.loaded_config_path;

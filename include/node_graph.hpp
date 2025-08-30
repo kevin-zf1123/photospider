@@ -20,6 +20,14 @@ struct TimingCollector {
     std::vector<NodeTiming> node_timings;
     double total_ms = 0.0;
 };
+// Concurrency model (high level):
+// - Each loaded graph is owned by a GraphRuntime that serializes API calls via a worker thread.
+// - compute() runs on that worker thread and may recurse; it is single-threaded.
+// - compute_parallel() temporarily spawns a per-invocation worker pool to evaluate the subgraph in parallel,
+//   then joins all threads before returning. It uses its own internal queue + mutex/CV (separate from graph_mutex_).
+// - timing_results is mutated from both sequential and parallel paths; protect with timing_mutex_.
+// - event_buffer_ is a cross-thread stream used by the CLI; protect with event_mutex_.
+// - graph_mutex_ guards occasional coarse operations over the whole graph (e.g., mass cache resets for force_recache).
 class NodeGraph {
 public:
     TimingCollector timing_results;
@@ -55,8 +63,13 @@ public:
     DiskSyncResult synchronize_disk_cache(const std::string& cache_precision);
     fs::path node_cache_dir(int node_id) const;
 
-    NodeOutput& compute(int node_id, const std::string& cache_precision, bool force_recache = false, bool enable_timing = false);    
-    NodeOutput& compute_parallel(int node_id, const std::string& cache_precision, bool force_recache = false, bool enable_timing = false);
+    // disable_disk_cache: when true, do not load from disk caches during this compute.
+    NodeOutput& compute(int node_id, const std::string& cache_precision,
+                        bool force_recache = false, bool enable_timing = false,
+                        bool disable_disk_cache = false);
+    NodeOutput& compute_parallel(int node_id, const std::string& cache_precision,
+                                 bool force_recache = false, bool enable_timing = false,
+                                 bool disable_disk_cache = false);
     void clear_timing_results();
     std::vector<int> ending_nodes() const;
     void print_dependency_tree(std::ostream& os, bool show_parameters = true) const;
@@ -68,7 +81,8 @@ public:
     std::vector<ComputeEvent> drain_compute_events();
 
 private:
-    NodeOutput& compute_internal(int node_id, const std::string& cache_precision, std::unordered_map<int, bool>& visiting, bool enable_timing);
+    // Internal DFS compute helper; allow_disk_cache controls whether disk caches may be used.
+    NodeOutput& compute_internal(int node_id, const std::string& cache_precision, std::unordered_map<int, bool>& visiting, bool enable_timing, bool allow_disk_cache);
     bool is_ancestor(int potential_ancestor_id, int node_id, std::unordered_set<int>& visited) const; 
     std::vector<int> parents_of(int node_id) const;
 
@@ -76,12 +90,15 @@ private:
     bool try_load_from_disk_cache(Node& node);
     void execute_op_for_node(int node_id, const std::string& cache_precision, bool enable_timing);
 
+    // Guards coarse graph-wide mutations (e.g., bulk cache reset when force_recache is true).
     std::mutex graph_mutex_;
     bool quiet_ = true;
-    // event buffer for streaming compute messages
+    // Streaming of compute events to frontends; drained concurrently with computations.
     std::mutex event_mutex_;
     std::vector<ComputeEvent> event_buffer_;
     void push_compute_event(int id, const std::string& name, const std::string& source, double ms);
+    // timing_results is updated from multiple threads during compute_parallel().
+    std::mutex timing_mutex_;
 };
 
 } // namespace ps

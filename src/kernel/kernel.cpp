@@ -4,6 +4,7 @@
 #include <filesystem>
 #include <iostream>
 #include <sstream>
+#include <future>
 
 namespace ps {
 
@@ -65,7 +66,8 @@ std::vector<std::string> Kernel::list_graphs() const {
 }
 
 bool Kernel::compute(const std::string& name, int node_id, const std::string& cache_precision,
-                     bool force_recache, bool enable_timing, bool parallel, bool quiet) {
+                     bool force_recache, bool enable_timing, bool parallel, bool quiet,
+                     bool disable_disk_cache) {
     auto it = graphs_.find(name);
     if (it == graphs_.end()) return false;
     try {
@@ -73,8 +75,8 @@ bool Kernel::compute(const std::string& name, int node_id, const std::string& ca
         g.clear_timing_results();
         bool prev_quiet = g.is_quiet();
         g.set_quiet(quiet);
-        if (parallel) g.compute_parallel(node_id, cache_precision, force_recache, enable_timing);
-        else g.compute(node_id, cache_precision, force_recache, enable_timing);
+        if (parallel) g.compute_parallel(node_id, cache_precision, force_recache, enable_timing, disable_disk_cache);
+        else g.compute(node_id, cache_precision, force_recache, enable_timing, disable_disk_cache);
         g.set_quiet(prev_quiet);
         return 0;
         });
@@ -244,14 +246,15 @@ std::optional<std::map<int, std::vector<Kernel::TraversalNodeInfo>>> Kernel::tra
 }
 
 std::optional<cv::Mat> Kernel::compute_and_get_image(const std::string& name, int node_id, const std::string& cache_precision,
-                                                     bool force_recache, bool enable_timing, bool parallel) {
+                                                     bool force_recache, bool enable_timing, bool parallel,
+                                                     bool disable_disk_cache) {
     auto it = graphs_.find(name);
     if (it == graphs_.end()) return std::nullopt;
     try {
         return it->second->post([=](NodeGraph& g){
             g.clear_timing_results();
-            const auto& out = parallel ? g.compute_parallel(node_id, cache_precision, force_recache, enable_timing)
-                                       : g.compute(node_id, cache_precision, force_recache, enable_timing);
+            const auto& out = parallel ? g.compute_parallel(node_id, cache_precision, force_recache, enable_timing, disable_disk_cache)
+                                       : g.compute(node_id, cache_precision, force_recache, enable_timing, disable_disk_cache);
             // Prefer UMat if available, else Mat
             if (!out.image_umatrix.empty()) return out.image_umatrix.getMat(cv::ACCESS_READ).clone();
             return out.image_matrix.clone();
@@ -338,7 +341,34 @@ std::optional<NodeGraph::DiskSyncResult> Kernel::synchronize_disk_cache_stats(co
     auto it = graphs_.find(name); if (it == graphs_.end()) return std::nullopt;
     try { return it->second->post([=](NodeGraph& g){ return g.synchronize_disk_cache(cache_precision); }).get(); } catch (...) { return std::nullopt; }
 }
+std::optional<std::future<bool>> Kernel::compute_async(const std::string& name, int node_id, const std::string& cache_precision,
+                                                      bool force_recache, bool enable_timing, bool parallel, bool quiet,
+                                                      bool disable_disk_cache) {
+    auto it = graphs_.find(name);
+    if (it == graphs_.end()) {
+        return std::nullopt;
+    }
 
+    // 这个 post 调用本身就返回一个 future，我们直接将其返回
+    return it->second->post([=](NodeGraph& g) {
+        try {
+            g.clear_timing_results();
+            bool prev_quiet = g.is_quiet();
+            g.set_quiet(quiet);
+            if (parallel) g.compute_parallel(node_id, cache_precision, force_recache, enable_timing, disable_disk_cache);
+            else g.compute(node_id, cache_precision, force_recache, enable_timing, disable_disk_cache);
+            g.set_quiet(prev_quiet);
+            last_error_.erase(name); // 成功完成，清除错误
+            return true;
+        } catch (const GraphError& ge) {
+            last_error_[name] = { ge.code(), ge.what() };
+            return false;
+        } catch (const std::exception& e) {
+            last_error_[name] = { GraphErrc::Unknown, e.what() };
+            return false;
+        }
+    });
+}
 } // namespace ps
 
 namespace ps {
@@ -346,8 +376,12 @@ std::optional<std::vector<NodeGraph::ComputeEvent>> Kernel::drain_compute_events
     auto it = graphs_.find(name);
     if (it == graphs_.end()) return std::nullopt;
     try {
-        return it->second->post([](NodeGraph& g){ return g.drain_compute_events(); }).get();
-    } catch (...) { return std::nullopt; }
+        // Drain directly without posting to avoid starvation behind an in-flight compute.
+        // NodeGraph::drain_compute_events() is internally synchronized.
+        return it->second->drain_compute_events_now();
+    } catch (...) {
+        return std::nullopt;
+    }
 }
 
 } // namespace ps

@@ -34,8 +34,12 @@ public:
     // Submit a compute to a specific graph runtime.
     // Returns true if scheduled.
     bool compute(const std::string& name, int node_id, const std::string& cache_precision,
-                 bool force_recache, bool enable_timing, bool parallel, bool quiet);
-
+                 bool force_recache, bool enable_timing, bool parallel, bool quiet,
+                 bool disable_disk_cache);
+    // Asynchronously compute and return a future for completion.
+    std::optional<std::future<bool>> compute_async(const std::string& name, int node_id, const std::string& cache_precision,
+                                                   bool force_recache, bool enable_timing, bool parallel, bool quiet,
+                                                   bool disable_disk_cache);
     // Access last timing results snapshot (thread-safe by posting fetch task).
     std::optional<TimingCollector> get_timing(const std::string& name);
 
@@ -72,7 +76,8 @@ public:
     std::optional<std::map<int, std::vector<TraversalNodeInfo>>> traversal_details(const std::string& name);
     std::optional<std::vector<NodeGraph::ComputeEvent>> drain_compute_events(const std::string& name);
     std::optional<cv::Mat> compute_and_get_image(const std::string& name, int node_id, const std::string& cache_precision,
-                                                 bool force_recache, bool enable_timing, bool parallel);
+                                                 bool force_recache, bool enable_timing, bool parallel,
+                                                 bool disable_disk_cache);
 
     // Nodes inspection/editing for frontends
     std::optional<std::vector<int>> list_node_ids(const std::string& name);
