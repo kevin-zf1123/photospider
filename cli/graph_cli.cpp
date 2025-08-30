@@ -551,7 +551,9 @@ static void print_repl_help(const CliConfig& config) {
               << "    Free memory used by non-essential intermediate nodes.\n\n"
 
               << "  exit\n"
-              << "    Quit the shell.\n";
+              << "    Quit the shell.\n"
+              << "    Sync prompt default (exit_prompt_sync): "
+              << (config.exit_prompt_sync ? "true" : "false") << "\n";
 }
 
 static std::string ask(const std::string& q, const std::string& def) {
@@ -1013,6 +1015,10 @@ static bool process_command(const std::string& line, NodeGraph& graph, bool& mod
                 std::string path = ask("output file", config.default_exit_save_path);
                 graph.save_yaml(path); std::cout << "Saved to " << path << "\n";
             }
+            // 说明：此处实现了 config 中的 `exit_prompt_sync` 行为。
+            // 含义：退出 REPL 前是否将内存中的缓存状态同步到磁盘。
+            // - 提示默认值由 `config.exit_prompt_sync` 决定（true=默认 Yes，false=默认 No）。
+            // - 若用户确认，则调用 `synchronize_disk_cache` 将内存缓存刷写到磁盘缓存。
             if (ask_yesno("Synchronize disk cache with memory state before exiting?", config.exit_prompt_sync)) {
                 graph.synchronize_disk_cache(config.cache_precision);
             }
