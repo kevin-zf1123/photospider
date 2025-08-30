@@ -27,8 +27,8 @@ public:
 
     // Compute
     bool cmd_compute(const std::string& graph, int node_id, const std::string& cache_precision,
-                     bool force, bool timing, bool parallel) {
-        return kernel_.compute(graph, node_id, cache_precision, force, timing, parallel);
+                     bool force, bool timing, bool parallel, bool quiet = false) {
+        return kernel_.compute(graph, node_id, cache_precision, force, timing, parallel, quiet);
     }
     std::optional<TimingCollector> cmd_timing(const std::string& graph) { return kernel_.get_timing(graph); }
 

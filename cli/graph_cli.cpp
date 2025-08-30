@@ -955,10 +955,17 @@ static bool process_command(const std::string& line, ps::InteractionService& svc
             if (target_id_str == "all") {
                 auto orders = svc.cmd_traversal_orders(current_graph);
                 if (!orders || orders->empty()) { std::cout << "(no ending nodes or graph is cyclic)\n"; return true; }
-                for (const auto& kv : *orders) { svc.cmd_compute(current_graph, kv.first, config.cache_precision, false, enable_timing, parallel); if (!mute) std::cout << "-> End node " << kv.first << " computed.\n"; }
-            } else { int id = std::stoi(target_id_str); svc.cmd_compute(current_graph, id, config.cache_precision, false, enable_timing, parallel); if (!mute) std::cout << "-> Node " << id << " computed.\n"; }
+                for (const auto& kv : *orders) {
+                    svc.cmd_compute(current_graph, kv.first, config.cache_precision, false, enable_timing, parallel, /*quiet=*/mute);
+                    if (!mute) std::cout << "-> End node " << kv.first << " computed.\n";
+                }
+            } else {
+                int id = std::stoi(target_id_str);
+                svc.cmd_compute(current_graph, id, config.cache_precision, false, enable_timing, parallel, /*quiet=*/mute);
+                if (!mute) std::cout << "-> Node " << id << " computed.\n";
+            }
             auto timing = svc.cmd_timing(current_graph);
-            if (timer_console && !mute) {
+            if (timer_console) {
                 std::cout << "--- Computation Timers (Console) ---\n";
                 if (timing) { for (const auto& t : timing->node_timings) printf("  - Node %-3d (%-20s): %10.4f ms [%s]\n", t.id, t.name.c_str(), t.elapsed_ms, t.source.c_str()); }
                 else std::cout << "(no timing data)\n";
@@ -970,7 +977,7 @@ static bool process_command(const std::string& line, ps::InteractionService& svc
                 fs::path out_path(timer_log_path); if (out_path.has_parent_path()) fs::create_directories(out_path.parent_path());
                 YAML::Node root; YAML::Node steps(YAML::NodeType::Sequence);
                 if (timing) { for (const auto& t : timing->node_timings) { YAML::Node n; n["id"]=t.id; n["name"]=t.name; n["time_ms"]=t.elapsed_ms; n["source"]=t.source; steps.push_back(n);} }
-                root["steps"]=steps; root["total_time_ms"]= timing ? timing->total_ms : total_elapsed.count(); std::ofstream fout(timer_log_path); fout << root; if (!mute) std::cout << "Timer log successfully written to '" << timer_log_path << "'." << std::endl;
+                root["steps"]=steps; root["total_time_ms"]= timing ? timing->total_ms : total_elapsed.count(); std::ofstream fout(timer_log_path); fout << root; std::cout << "Timer log successfully written to '" << timer_log_path << "'." << std::endl;
             }
 
         } else if (cmd == "save") {
@@ -1201,25 +1208,18 @@ static void run_repl(ps::InteractionService& svc, CliConfig& config, const std::
                 } else {
                     auto result = completer.Complete(line_buffer, cursor_pos);
                     if (result.options.empty()) break;
-                    if (result.options.size() == 1 && result.new_line != line_buffer) {
-                        line_buffer = result.new_line;
-                        cursor_pos = result.new_cursor_pos;
-                        // add a space when not listing options
-                        if (!line_buffer.empty() && line_buffer[cursor_pos-1] != '/') { line_buffer.insert(cursor_pos, 1, ' '); cursor_pos++; }
-                        redraw_line();
-                    } else {
-                        // enter cycling mode
-                        completion_state.options = result.options;
-                        completion_state.current_index = 0;
-                        // compute prefix and cursor pos
-                        size_t start = line_buffer.find_last_of(" \t", cursor_pos ? cursor_pos-1 : 0);
-                        start = (start==std::string::npos)?0:start+1;
-                        completion_state.original_prefix = line_buffer.substr(start, cursor_pos - (int)start);
-                        completion_state.original_cursor_pos = cursor_pos;
-                        line_buffer = result.new_line;
-                        cursor_pos = result.new_cursor_pos;
-                        redraw_line(completion_state.options);
-                    }
+                    // Always enter cycling mode, even for a single option, to avoid duplicate appends
+                    completion_state.options = result.options;
+                    completion_state.current_index = 0;
+                    // compute prefix and cursor pos based on the original buffer/cursor
+                    size_t start = line_buffer.find_last_of(" \t", cursor_pos ? cursor_pos-1 : 0);
+                    start = (start==std::string::npos)?0:start+1;
+                    completion_state.original_prefix = line_buffer.substr(start, cursor_pos - (int)start);
+                    completion_state.original_cursor_pos = cursor_pos;
+                    // apply the completion result (may include trailing space from completer for exact match)
+                    line_buffer = result.new_line;
+                    cursor_pos = result.new_cursor_pos;
+                    redraw_line(completion_state.options);
                 }
                 break; }
             case UNKNOWN:

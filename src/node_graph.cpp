@@ -103,6 +103,7 @@ void NodeGraph::execute_op_for_node(int node_id, const std::string& cache_precis
         auto end_time = std::chrono::high_resolution_clock::now();
         std::chrono::duration<double, std::milli> elapsed = end_time - start_time;
         this->timing_results.node_timings.push_back({node.id, node.name, elapsed.count(), result_source});
+        this->timing_results.total_ms += elapsed.count();
     }
 }
 
@@ -256,6 +257,7 @@ NodeOutput& NodeGraph::compute_internal(int node_id, const std::string& cache_pr
         auto end_time = std::chrono::high_resolution_clock::now();
         std::chrono::duration<double, std::milli> elapsed = end_time - start_time;
         this->timing_results.node_timings.push_back({node.id, node.name, elapsed.count(), result_source});
+        this->timing_results.total_ms += elapsed.count();
     }
 
     return *node.cached_output;
@@ -339,6 +341,7 @@ NodeOutput& NodeGraph::compute_parallel(int node_id, const std::string& cache_pr
                             std::chrono::duration<double, std::milli> elapsed = end_time - start_time;
                             const auto& node = nodes.at(current_id);
                             timing_results.node_timings.push_back({node.id, node.name, elapsed.count(), std::string("memory_cache")});
+                            timing_results.total_ms += elapsed.count();
                         }
                     } else if (!force_recache && try_load_from_disk_cache(nodes.at(current_id))) {
                         satisfied = true;
@@ -347,6 +350,7 @@ NodeOutput& NodeGraph::compute_parallel(int node_id, const std::string& cache_pr
                             std::chrono::duration<double, std::milli> elapsed = end_time - start_time;
                             const auto& node = nodes.at(current_id);
                             timing_results.node_timings.push_back({node.id, node.name, elapsed.count(), std::string("disk_cache")});
+                            timing_results.total_ms += elapsed.count();
                         }
                     } else {
                         // Not satisfied, gather direct inputs.

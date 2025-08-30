@@ -33,7 +33,7 @@ public:
     // Submit a compute to a specific graph runtime.
     // Returns true if scheduled.
     bool compute(const std::string& name, int node_id, const std::string& cache_precision,
-                 bool force_recache, bool enable_timing, bool parallel);
+                 bool force_recache, bool enable_timing, bool parallel, bool quiet);
 
     // Access last timing results snapshot (thread-safe by posting fetch task).
     std::optional<TimingCollector> get_timing(const std::string& name);

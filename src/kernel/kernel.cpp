@@ -64,13 +64,16 @@ std::vector<std::string> Kernel::list_graphs() const {
 }
 
 bool Kernel::compute(const std::string& name, int node_id, const std::string& cache_precision,
-                     bool force_recache, bool enable_timing, bool parallel) {
+                     bool force_recache, bool enable_timing, bool parallel, bool quiet) {
     auto it = graphs_.find(name);
     if (it == graphs_.end()) return false;
     it->second->post([=](NodeGraph& g){
         g.clear_timing_results();
+        bool prev_quiet = g.is_quiet();
+        g.set_quiet(quiet);
         if (parallel) g.compute_parallel(node_id, cache_precision, force_recache, enable_timing);
         else g.compute(node_id, cache_precision, force_recache, enable_timing);
+        g.set_quiet(prev_quiet);
         return 0;
     });
     return true;

@@ -37,6 +37,8 @@ private:
     void CompletePrintArgs(const std::string& prefix, std::vector<std::string>& options, bool only_mode_args) const;
     void CompleteTraversalArgs(const std::string& prefix, std::vector<std::string>& options) const;
     void CompleteComputeArgs(const std::string& prefix, std::vector<std::string>& options) const;
+    void CompleteGraphName(const std::string& prefix, std::vector<std::string>& options) const;
+    void CompleteOpsMode(const std::string& prefix, std::vector<std::string>& options) const;
     // Complete session/graph names by scanning the `sessions` directory for subdirectories.
     void CompleteSessionName(const std::string& prefix, std::vector<std::string>& options) const;
 

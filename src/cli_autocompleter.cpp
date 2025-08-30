@@ -88,8 +88,11 @@ void CliAutocompleter::CompleteNodeId(const std::string& prefix, std::vector<std
 }
 
 void CliAutocompleter::CompletePrintArgs(const std::string& prefix, std::vector<std::string>& options, bool only_mode_args) const {
+    // When completing the first argument, only suggest id/all.
+    // From the second argument onward, only suggest print mode args.
     if (!only_mode_args) {
         CompleteNodeId(prefix, options);
+        return;
     }
     const std::vector<std::string> mode_args = {"full", "simplified", "f", "s"};
     for(const auto& arg : mode_args) {
@@ -97,8 +100,8 @@ void CliAutocompleter::CompletePrintArgs(const std::string& prefix, std::vector<
     }
 }
 void CliAutocompleter::CompleteComputeArgs(const std::string& prefix, std::vector<std::string>& options) const {
-    CompleteNodeId(prefix, options);
-    const std::vector<std::string> mode_args = {"force", "force-deep", "parallel", "t", "tl"};
+    // Only compute flags here. Node id/all is handled as the first arg in Complete().
+    const std::vector<std::string> mode_args = {"force", "force-deep", "parallel", "t", "-t", "timer", "tl", "-tl", "m", "-m", "mute"};
     for(const auto& arg : mode_args) {
         if(arg.rfind(prefix, 0) == 0) options.push_back(arg);
     }
@@ -151,13 +154,27 @@ CompletionResult CliAutocompleter::Complete(const std::string& line, int cursor_
         } else if (cmd == "node" || cmd == "save") {
             CompleteNodeId(prefix, result.options);
         } else if (cmd == "print") {
-            // If first arg is already provided (or cursor is after it), only suggest mode args.
+            // print <id|all> <mode>
             bool completing_first_arg = (tokens.size() == 1) || (tokens.size() == 2 && line.back() != ' ');
-            CompletePrintArgs(prefix, result.options, !completing_first_arg);
+            if (completing_first_arg) {
+                CompletePrintArgs(prefix, result.options, /*only_mode_args=*/false);
+            } else {
+                CompletePrintArgs(prefix, result.options, /*only_mode_args=*/true);
+            }
         } else if (cmd == "compute") {
-            CompleteComputeArgs(prefix, result.options);
+            // compute <id|all> [flags]
+            bool completing_first_arg = (tokens.size() == 1) || (tokens.size() == 2 && line.back() != ' ');
+            if (completing_first_arg) {
+                CompleteNodeId(prefix, result.options);
+            } else {
+                CompleteComputeArgs(prefix, result.options);
+            }
         } else if (cmd == "traversal") {
             CompleteTraversalArgs(prefix, result.options);
+        } else if (cmd == "switch" || cmd == "close") {
+            CompleteGraphName(prefix, result.options);
+        } else if (cmd == "ops") {
+            CompleteOpsMode(prefix, result.options);
         }
         // ... add more context-aware completions for other commands ...
     }
@@ -199,6 +216,20 @@ void CliAutocompleter::CompleteSessionName(const std::string& prefix, std::vecto
         }
     } catch (...) {
         // ignore filesystem errors
+    }
+}
+
+void CliAutocompleter::CompleteGraphName(const std::string& prefix, std::vector<std::string>& options) const {
+    auto names = svc_.cmd_list_graphs();
+    for (const auto& n : names) {
+        if (n.rfind(prefix, 0) == 0) options.push_back(n);
+    }
+}
+
+void CliAutocompleter::CompleteOpsMode(const std::string& prefix, std::vector<std::string>& options) const {
+    const std::vector<std::string> args = {"all", "a", "builtin", "b", "plugins", "p", "custom", "c"};
+    for (const auto& a : args) {
+        if (a.rfind(prefix, 0) == 0) options.push_back(a);
     }
 }
 
