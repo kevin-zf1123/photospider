@@ -278,12 +278,8 @@ NodeOutput& NodeGraph::compute_parallel(int node_id, const std::string& cache_pr
         } catch (const GraphError&) {}
     }
 
-    {
-        std::scoped_lock lock(graph_mutex_);
-        if (nodes.at(node_id).cached_output) {
-            return *nodes.at(node_id).cached_output;
-        }
-    }
+    // Do not early-return here; we want to record timing for cached results
+    // and prune the work graph before deciding whether to spawn threads.
 
     std::set<int> subgraph_nodes_set;
     try {
@@ -294,52 +290,19 @@ NodeOutput& NodeGraph::compute_parallel(int node_id, const std::string& cache_pr
         return compute(node_id, cache_precision, false, enable_timing);
     }
 
-    std::unordered_map<int, std::vector<int>> successors;
+    // Demand-driven scheduler: only traverse needed branches from the target.
     std::unordered_map<int, std::atomic<int>> dependency_count;
+    std::unordered_map<int, std::vector<int>> waiters;
+    std::unordered_set<int> scheduled;
+    std::unordered_set<int> cache_timed;
     std::queue<int> ready_queue;
     std::mutex queue_mutex;
     std::condition_variable cv_queue;
-
     {
-        std::scoped_lock lock(graph_mutex_);
-        for (int current_id : subgraph_nodes_set) {
-            auto& node = nodes.at(current_id);
-            int deps = 0;
-            auto process_input = [&](int from_id) {
-                if (from_id != -1 && subgraph_nodes_set.count(from_id)) {
-                    successors[from_id].push_back(current_id);
-                    deps++;
-                }
-            };
-            for (const auto& input : node.image_inputs) process_input(input.from_node_id);
-            for (const auto& input : node.parameter_inputs) process_input(input.from_node_id);
-            dependency_count[current_id] = deps;
-        }
+        std::scoped_lock lock(queue_mutex);
+        ready_queue.push(node_id);
     }
-
-    for (int current_id : subgraph_nodes_set) {
-        bool is_pre_computed = false;
-        if (!force_recache) {
-            std::scoped_lock lock(graph_mutex_);
-            is_pre_computed = try_load_from_disk_cache(nodes.at(current_id));
-        }
-        
-        if (is_pre_computed) {
-            if (successors.count(current_id)) {
-                for (int successor_id : successors[current_id]) {
-                    if (--dependency_count[successor_id] == 0) {
-                        std::scoped_lock q_lock(queue_mutex);
-                        ready_queue.push(successor_id);
-                        cv_queue.notify_one();
-                    }
-                }
-            }
-        } else if (dependency_count[current_id] == 0) {
-            std::scoped_lock q_lock(queue_mutex);
-            ready_queue.push(current_id);
-            cv_queue.notify_one();
-        }
-    }
+    scheduled.insert(node_id);
 
     unsigned int num_threads = std::max(1u, std::thread::hardware_concurrency());
     std::vector<std::thread> workers;
@@ -361,19 +324,110 @@ NodeOutput& NodeGraph::compute_parallel(int node_id, const std::string& cache_pr
                     ready_queue.pop();
                 }
 
+                // Try satisfy from cache first; otherwise expand inputs; compute when inputs ready.
+                bool satisfied = false;
+                bool should_compute = false;
+                std::vector<int> inputs;
+                auto start_time = std::chrono::high_resolution_clock::now();
                 {
                     std::scoped_lock lock(graph_mutex_);
-                    if (nodes.at(current_id).cached_output) continue;
-                    execute_op_for_node(current_id, cache_precision, enable_timing);
+                    if (nodes.at(current_id).cached_output) {
+                        satisfied = true;
+                        if (enable_timing && !cache_timed.count(current_id)) {
+                            cache_timed.insert(current_id);
+                            auto end_time = std::chrono::high_resolution_clock::now();
+                            std::chrono::duration<double, std::milli> elapsed = end_time - start_time;
+                            const auto& node = nodes.at(current_id);
+                            timing_results.node_timings.push_back({node.id, node.name, elapsed.count(), std::string("memory_cache")});
+                        }
+                    } else if (!force_recache && try_load_from_disk_cache(nodes.at(current_id))) {
+                        satisfied = true;
+                        if (enable_timing) {
+                            auto end_time = std::chrono::high_resolution_clock::now();
+                            std::chrono::duration<double, std::milli> elapsed = end_time - start_time;
+                            const auto& node = nodes.at(current_id);
+                            timing_results.node_timings.push_back({node.id, node.name, elapsed.count(), std::string("disk_cache")});
+                        }
+                    } else {
+                        // Not satisfied, gather direct inputs.
+                        const auto& node = nodes.at(current_id);
+                        auto consider = [&](int from_id){ if (from_id != -1 && subgraph_nodes_set.count(from_id)) inputs.push_back(from_id); };
+                        for (const auto& i : node.image_inputs) consider(i.from_node_id);
+                        for (const auto& p : node.parameter_inputs) consider(p.from_node_id);
+
+                        int pending = 0;
+                        for (int child : inputs) {
+                            if (nodes.at(child).cached_output) continue;
+                            pending++;
+                            waiters[child].push_back(current_id);
+                        }
+                        if (!dependency_count.count(current_id)) dependency_count[current_id] = 0;
+                        dependency_count[current_id] = pending;
+                        should_compute = (pending == 0);
+                    }
                 }
 
-                if (successors.count(current_id)) {
-                    for (int successor_id : successors[current_id]) {
-                        if (--dependency_count[successor_id] == 0) {
+                if (satisfied) {
+                    std::vector<int> to_notify;
+                    {
+                        std::scoped_lock lock(graph_mutex_);
+                        if (waiters.count(current_id)) to_notify = waiters[current_id];
+                    }
+                    for (int dep : to_notify) {
+                        if (--dependency_count[dep] == 0) {
                             std::scoped_lock q_lock(queue_mutex);
-                            ready_queue.push(successor_id);
+                            ready_queue.push(dep);
                             cv_queue.notify_one();
                         }
+                    }
+
+                    if (current_id == node_id) {
+                        std::scoped_lock lock(final_node_mutex);
+                        final_node_done = true;
+                        final_node_cv.notify_one();
+                    }
+                    continue;
+                }
+
+                if (!should_compute) {
+                    // Enqueue inputs for processing.
+                    {
+                        std::scoped_lock q_lock(queue_mutex);
+                        for (int child : inputs) {
+                            if (scheduled.insert(child).second) {
+                                ready_queue.push(child);
+                            }
+                        }
+                        cv_queue.notify_all();
+                    }
+                    continue;
+                }
+
+                // Compute current node now.
+                {
+                    std::scoped_lock lock(graph_mutex_);
+                    if (!nodes.at(current_id).cached_output) {
+                        // Will compute below while holding lock per existing pattern
+                    }
+                }
+                {
+                    std::scoped_lock lock(graph_mutex_);
+                    if (!nodes.at(current_id).cached_output) {
+                        execute_op_for_node(current_id, cache_precision, enable_timing);
+                    }
+                }
+
+                // Notify dependents.
+                std::vector<int> to_notify;
+                {
+                    std::scoped_lock lock(graph_mutex_);
+                    if (waiters.count(current_id)) to_notify = waiters[current_id];
+                }
+                for (int dep : to_notify) {
+                    if (--dependency_count[dep] == 0) {
+                        std::scoped_lock q_lock(queue_mutex);
+                        ready_queue.push(dep);
+                        cv_queue.notify_one();
                     }
                 }
 

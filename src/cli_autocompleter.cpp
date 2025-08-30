@@ -77,7 +77,7 @@ void CliAutocompleter::CompletePrintArgs(const std::string& prefix, std::vector<
 }
 void CliAutocompleter::CompleteComputeArgs(const std::string& prefix, std::vector<std::string>& options) const {
     CompleteNodeId(prefix, options);
-    const std::vector<std::string> mode_args = {"force", "parallel", "t", "tl"};
+    const std::vector<std::string> mode_args = {"force", "force-deep", "parallel", "t", "tl"};
     for(const auto& arg : mode_args) {
         if(arg.rfind(prefix, 0) == 0) options.push_back(arg);
     }

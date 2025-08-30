@@ -205,12 +205,13 @@ private:
         selected_traversal_cache_idx_ = (cache_m && cache_d) ? 1 : (cache_m ? 0 : (cache_d ? 2 : 1));
 
         // Parse compute defaults into UI state
-        compute_force_ = compute_parallel_ = compute_timer_console_ = compute_timer_log_ = compute_mute_ = false;
+        compute_force_ = compute_force_deep_ = compute_parallel_ = compute_timer_console_ = compute_timer_log_ = compute_mute_ = false;
         {
             std::istringstream iss(temp_config_.default_compute_args);
             std::string tok;
             while (iss >> tok) {
                 if (tok == "force") compute_force_ = true;
+                else if (tok == "force-deep") compute_force_deep_ = true;
                 else if (tok == "parallel") compute_parallel_ = true;
                 else if (tok == "t" || tok == "-t" || tok == "timer") compute_timer_console_ = true;
                 else if (tok == "tl" || tok == "-tl") compute_timer_log_ = true;
@@ -250,6 +251,7 @@ private:
         {
             std::vector<std::string> parts;
             if (compute_force_) parts.push_back("force");
+            if (compute_force_deep_) parts.push_back("force-deep");
             if (compute_parallel_) parts.push_back("parallel");
             if (compute_timer_console_) parts.push_back("t");
             if (compute_timer_log_) parts.push_back("tl");
@@ -284,6 +286,7 @@ private:
         add_radio_line("traversal_check", &traversal_check_entries_, &selected_traversal_check_idx_);
         // Compute defaults (multi-select UI)
         add_toggle_line("compute_force", &compute_force_);
+        add_toggle_line("compute_force_deep", &compute_force_deep_);
         add_toggle_line("compute_parallel", &compute_parallel_);
         add_toggle_line("compute_timer_console(-t)", &compute_timer_console_);
         add_toggle_line("compute_timer_log(-tl)", &compute_timer_log_);
@@ -462,6 +465,7 @@ private:
 
     // Compute multi-select UI state
     bool compute_force_ = false;
+    bool compute_force_deep_ = false;
     bool compute_parallel_ = false;
     bool compute_timer_console_ = false;
     bool compute_timer_log_ = false;
@@ -532,7 +536,8 @@ static void print_repl_help(const CliConfig& config) {
 
               << "  compute <id|all> [flags]\n"
               << "    Compute node(s) with optional flags:\n"
-              << "      force:     Re-compute even if cached.\n"
+              << "      force:     Clear in-memory caches before compute.\n"
+              << "      force-deep: Clear disk+memory caches before compute.\n"
               << "      parallel:  Use multiple threads to compute.\n"
               << "      t:         Print a simple timer summary to the console.\n"
               << "      tl [path]: Log detailed timings to a YAML file.\n"
@@ -873,7 +878,7 @@ static bool process_command(const std::string& line, NodeGraph& graph, bool& mod
             std::string target_id_str; iss >> target_id_str;
             if (target_id_str.empty()) { target_id_str = "all"; }
 
-            bool force = false, timer_console = false, timer_log_file = false, parallel = false, mute = false;
+            bool force = false, force_deep = false, timer_console = false, timer_log_file = false, parallel = false, mute = false;
             std::string timer_log_path = "";
             // Collect tokens either from user input or from defaults when none provided.
             std::vector<std::string> tokens;
@@ -884,11 +889,12 @@ static bool process_command(const std::string& line, NodeGraph& graph, bool& mod
                 std::string tok; while (iss >> tok) tokens.push_back(tok);
             }
             auto is_flag = [](const std::string& s){
-                return s == "force" || s == "t" || s == "-t" || s == "timer" || s == "parallel" || s == "tl" || s == "-tl" || s == "m" || s == "-m" || s == "mute";
+                return s == "force" || s == "force-deep" || s == "t" || s == "-t" || s == "timer" || s == "parallel" || s == "tl" || s == "-tl" || s == "m" || s == "-m" || s == "mute";
             };
             for (size_t i = 0; i < tokens.size(); ++i) {
                 const std::string& a = tokens[i];
                 if (a == "force") force = true;
+                else if (a == "force-deep") force_deep = true;
                 else if (a == "t" || a == "-t" || a == "timer") timer_console = true;
                 else if (a == "parallel") parallel = true;
                 else if (a == "m" || a == "-m" || a == "mute") mute = true;
@@ -922,12 +928,19 @@ static bool process_command(const std::string& line, NodeGraph& graph, bool& mod
                 }
             };
 
+            // Apply force semantics prior to compute so disk cache is respected unless force-deep.
+            if (force_deep) {
+                graph.clear_cache(); // disk + memory
+            } else if (force) {
+                graph.clear_memory_cache(); // memory only
+            }
+
             auto compute_func = [&](int id) -> NodeOutput& {
                 if (parallel) {
                     if (!mute) std::cout << "--- Starting parallel computation ---" << std::endl;
-                    return graph.compute_parallel(id, config.cache_precision, force, enable_timing);
+                    return graph.compute_parallel(id, config.cache_precision, /*force_recache=*/false, enable_timing);
                 }
-                return graph.compute(id, config.cache_precision, force, enable_timing);
+                return graph.compute(id, config.cache_precision, /*force_recache=*/false, enable_timing);
             };
 
             // Temporarily set graph quiet mode based on mute
