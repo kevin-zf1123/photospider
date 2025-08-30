@@ -117,6 +117,21 @@ list(APPEND APP_SOURCES
     src/cli/command/command_exit.cpp
     src/cli/process_command.cpp
     src/cli/run_repl.cpp
+
+    # --- FIX START: Add missing autocomplete source files ---
+    src/cli/autocomplete/CompleteCommand.cpp
+    src/cli/autocomplete/CompleteComputeArgs.cpp
+    src/cli/autocomplete/CompleteGraphName.cpp
+    src/cli/autocomplete/CompleteNodeId.cpp
+    src/cli/autocomplete/CompleteOpsMode.cpp
+    src/cli/autocomplete/CompletePath.cpp
+    src/cli/autocomplete/CompletePrintArgs.cpp
+    src/cli/autocomplete/CompleteSessionName.cpp
+    src/cli/autocomplete/CompleteTraversalArgs.cpp
+    src/cli/autocomplete/CompleteYamlPath.cpp
+    src/cli/autocomplete/FindLongestCommonPrefix.cpp
+    src/cli/autocomplete/Tokenize.cpp
+    # --- FIX END ---
 )
 add_executable(graph_cli ${APP_SOURCES})
 target_include_directories(graph_cli PRIVATE "${PROJECT_SOURCE_DIR}/include" "${PROJECT_SOURCE_DIR}/src")
