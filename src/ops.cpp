@@ -1,4 +1,4 @@
-// in: src/ops.cpp (OVERWRITE - Final version for Stage 3)
+// in: src/ops.cpp (REPLACE WITH THIS FINAL VERSION)
 #include "kernel/ops.hpp"
 #include "adapter/buffer_adapter_opencv.hpp"
 #include <opencv2/imgcodecs.hpp>
@@ -8,10 +8,17 @@
 #include <random>
 #include <cmath>
 #include <numeric>
+#include <mutex>
 
 namespace ps { namespace ops {
 
-// --- 辅助函数 (保持不变) ---
+// =============================================================================
+// ==                         全局资源与辅助函数                           ==
+// =============================================================================
+
+// 全局互斥锁，用于保护所有并发的OpenCV GPU/CPU操作，防止底层库的资源竞争
+static std::mutex g_opencv_op_mutex;
+
 static double as_double_flexible(const YAML::Node& n, const std::string& key, double defv) {
     if (!n || !n[key]) return defv;
     try { if (n[key].IsScalar()) return n[key].as<double>(); return defv; } catch (...) { return defv; }
@@ -67,12 +74,21 @@ static NodeOutput op_perlin_noise(const Node& node, const std::vector<const Node
     int width = as_int_flexible(P, "width", 256);
     int height = as_int_flexible(P, "height", 256);
     double scale = as_double_flexible(P, "grid_size", 1.0);
+    int seed = as_int_flexible(P, "seed", -1);
+
     if (width <= 0 || height <= 0) throw GraphError(GraphErrc::InvalidParameter, "perlin_noise requires positive width and height");
     if (scale <= 0) throw GraphError(GraphErrc::InvalidParameter, "perlin_noise requires positive grid_size");
 
     std::vector<int> p(512);
     std::iota(p.begin(), p.begin() + 256, 0);
-    std::shuffle(p.begin(), p.begin() + 256, std::mt19937{1});
+    
+    std::mt19937 g;
+    if (seed == -1) {
+        g.seed(std::random_device{}());
+    } else {
+        g.seed(seed);
+    }
+    std::shuffle(p.begin(), p.begin() + 256, g);
     std::copy(p.begin(), p.begin() + 256, p.begin() + 256);
 
     auto fade = [](double t) { return t * t * t * (t * (t * 6 - 15) + 10); };
@@ -107,13 +123,13 @@ static NodeOutput op_perlin_noise(const Node& node, const std::vector<const Node
     return result;
 }
 
-// ✅ **添加回来的 op_convolve 函数 (Monolithic 版本)**
 static NodeOutput op_convolve(const Node& node, const std::vector<const NodeOutput*>& inputs) {
     if (inputs.size() < 2 || inputs[0]->image_buffer.width == 0 || inputs[1]->image_buffer.width == 0) {
         throw GraphError(GraphErrc::MissingDependency, "Convolve requires two input images: a source and a kernel.");
     }
     
-    // 使用适配器获取 UMat
+    std::lock_guard<std::mutex> lock(g_opencv_op_mutex);
+    
     cv::UMat u_src = toCvUMat(inputs[0]->image_buffer);
     cv::UMat u_kernel_img = toCvUMat(inputs[1]->image_buffer);
 
@@ -151,7 +167,10 @@ static NodeOutput op_convolve(const Node& node, const std::vector<const NodeOutp
 
 static NodeOutput op_resize(const Node& node, const std::vector<const NodeOutput*>& inputs) {
     if (inputs.empty()||inputs[0]->image_buffer.width==0) throw GraphError(GraphErrc::MissingDependency, "Resize requires an input image.");
+    
+    std::lock_guard<std::mutex> lock(g_opencv_op_mutex);
     cv::UMat u_input = toCvUMat(inputs[0]->image_buffer);
+
     const auto& P = node.runtime_parameters;
     int width = as_int_flexible(P, "width", 0), height = as_int_flexible(P, "height", 0);
     if(width<=0||height<=0) throw GraphError(GraphErrc::InvalidParameter, "Resize requires positive width and height.");
@@ -164,7 +183,10 @@ static NodeOutput op_resize(const Node& node, const std::vector<const NodeOutput
 
 static NodeOutput op_crop(const Node& node, const std::vector<const NodeOutput*>& inputs) {
     if (inputs.empty()||inputs[0]->image_buffer.width==0) throw GraphError(GraphErrc::MissingDependency, "Crop requires an input image.");
+
+    std::lock_guard<std::mutex> lock(g_opencv_op_mutex);
     cv::UMat u_src = toCvUMat(inputs[0]->image_buffer);
+
     const auto& P = node.runtime_parameters;
     int x,y,w,h;
     if(as_str(P,"mode","value")=="ratio"){
@@ -185,7 +207,10 @@ static NodeOutput op_crop(const Node& node, const std::vector<const NodeOutput*>
 
 static NodeOutput op_extract_channel(const Node& node, const std::vector<const NodeOutput*>& inputs) {
     if (inputs.empty()||inputs[0]->image_buffer.width==0) throw GraphError(GraphErrc::MissingDependency, "Extract channel requires an input image.");
+
+    std::lock_guard<std::mutex> lock(g_opencv_op_mutex);
     cv::UMat u_input = toCvUMat(inputs[0]->image_buffer);
+
     std::string ch_str=as_str(node.runtime_parameters, "channel", "a");
     int ch_idx=-1;
     if(ch_str=="b"||ch_str=="0")ch_idx=0; else if(ch_str=="g"||ch_str=="1")ch_idx=1; else if(ch_str=="r"||ch_str=="2")ch_idx=2; else if(ch_str=="a"||ch_str=="3")ch_idx=3;
@@ -223,6 +248,9 @@ static NodeOutput op_divide(const Node& node, const std::vector<const NodeOutput
 // ==                       类型二: TILED (分块计算) 操作                         ==
 // =============================================================================
 static void op_curve_transform_tiled(const Node& node, const Tile& output_tile, const std::vector<Tile>& input_tiles) {
+    // 修正: 加锁保护所有OpenCV操作
+    std::lock_guard<std::mutex> lock(g_opencv_op_mutex);
+
     if (input_tiles.empty()) throw GraphError(GraphErrc::MissingDependency, "curve_transform requires one input tile.");
 
     cv::Mat input_mat = toCvMat(input_tiles[0]);
@@ -238,6 +266,9 @@ static void op_curve_transform_tiled(const Node& node, const Tile& output_tile, 
 }
 
 static void op_gaussian_blur_tiled(const Node& node, const Tile& output_tile, const std::vector<Tile>& input_tiles) {
+    // 修正: 加锁保护所有OpenCV操作
+    std::lock_guard<std::mutex> lock(g_opencv_op_mutex);
+
     if (input_tiles.empty()) throw GraphError(GraphErrc::MissingDependency, "gaussian_blur requires one input tile with halo.");
 
     const Tile& input_tile_with_halo = input_tiles[0];
@@ -262,6 +293,9 @@ static void op_gaussian_blur_tiled(const Node& node, const Tile& output_tile, co
 }
 
 static void op_add_weighted_tiled(const Node& node, const Tile& output_tile, const std::vector<Tile>& input_tiles) {
+    // 修正: 加锁保护所有OpenCV操作
+    std::lock_guard<std::mutex> lock(g_opencv_op_mutex);
+
     if (input_tiles.size() < 2) throw GraphError(GraphErrc::MissingDependency, "add_weighted requires two input tiles.");
     
     cv::Mat input_a = toCvMat(input_tiles[0]);
@@ -277,6 +311,9 @@ static void op_add_weighted_tiled(const Node& node, const Tile& output_tile, con
 }
 
 static void op_abs_diff_tiled(const Node& node, const Tile& output_tile, const std::vector<Tile>& input_tiles) {
+    // 修正: 加锁保护所有OpenCV操作
+    std::lock_guard<std::mutex> lock(g_opencv_op_mutex);
+
     if (input_tiles.size() < 2) throw GraphError(GraphErrc::MissingDependency, "diff requires two input tiles.");
     
     cv::Mat input_a = toCvMat(input_tiles[0]);
@@ -286,6 +323,9 @@ static void op_abs_diff_tiled(const Node& node, const Tile& output_tile, const s
 }
 
 static void op_multiply_tiled(const Node& node, const Tile& output_tile, const std::vector<Tile>& input_tiles) {
+    // 修正: 加锁保护所有OpenCV操作
+    std::lock_guard<std::mutex> lock(g_opencv_op_mutex);
+
     if (input_tiles.size() < 2) throw GraphError(GraphErrc::MissingDependency, "multiply requires two input tiles.");
 
     cv::Mat input_a = toCvMat(input_tiles[0]);
