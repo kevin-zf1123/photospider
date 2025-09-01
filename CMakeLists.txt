@@ -59,80 +59,80 @@ target_link_libraries(ftxui-component PUBLIC ftxui-dom)
 
 
 # --- Configure Main Executable ---
-file(GLOB APP_SOURCES 
+file(GLOB_RECURSE APP_SOURCES 
     "src/*.cpp" 
     "src/*.hpp"
     "cli/*.cpp"
 )
 # Add newly separated modules explicitly (non-recursive glob above won't catch subdirs)
-list(APPEND APP_SOURCES
-    src/kernel/plugin_manager.cpp
-    src/kernel/plugin_manage_module/plugin_loader.cpp
-    src/kernel/node_module/node_graph_io.cpp
-    src/kernel/node_module/node_graph_compute.cpp
-    src/kernel/node_module/node_graph_parallel.cpp
-    src/kernel/node_module/node_graph_cache.cpp
-    src/kernel/node_module/node_graph_traversal.cpp
-    src/kernel/node_module/node_yaml.cpp
-    src/kernel/node_module/node_graph_events.cpp
-    src/kernel/graph_runtime.cpp
-    src/kernel/kernel.cpp
-    src/kernel/interaction.cpp
-    src/cli/cli_autocompleter.cpp
-    src/cli/cli_history.cpp
-    src/cli/terminal_input.cpp
-    src/cli/path_complete.cpp
-    src/cli/tui_editor.cpp
-    src/cli/config_editor.cpp
-    src/cli/node_editor.cpp
-    src/cli/node_editor_full.cpp
-    src/cli/node_graph_print.cpp
-    src/cli/print_cli_help.cpp
-    src/cli/print_repl_help.cpp
-    src/cli/ask.cpp
-    src/cli/ask_yesno.cpp
-    src/cli/handle_interactive_save.cpp
-    src/cli/do_traversal.cpp
-    src/cli/save_fp32_image.cpp
-    src/cli/command/help_utils.cpp
-    src/cli/command/command_help.cpp
-    src/cli/command/command_clear.cpp
-    src/cli/command/command_graphs.cpp
-    src/cli/command/command_load.cpp
-    src/cli/command/command_switch.cpp
-    src/cli/command/command_close.cpp
-    src/cli/command/command_print.cpp
-    src/cli/command/command_node.cpp
-    src/cli/command/command_ops.cpp
-    src/cli/command/command_traversal.cpp
-    src/cli/command/command_config.cpp
-    src/cli/command/command_read.cpp
-    src/cli/command/command_source.cpp
-    src/cli/command/command_output.cpp
-    src/cli/command/command_clear_graph.cpp
-    src/cli/command/command_clear_cache.cpp
-    src/cli/command/command_free.cpp
-    src/cli/command/command_compute.cpp
-    src/cli/command/command_save.cpp
-    src/cli/command/command_exit.cpp
-    src/cli/process_command.cpp
-    src/cli/run_repl.cpp
+# list(APPEND APP_SOURCES
+#     src/kernel/plugin_manager.cpp
+#     src/kernel/plugin_manage_module/plugin_loader.cpp
+#     src/kernel/node_module/node_graph_io.cpp
+#     src/kernel/node_module/node_graph_compute.cpp
+#     src/kernel/node_module/node_graph_parallel.cpp
+#     src/kernel/node_module/node_graph_cache.cpp
+#     src/kernel/node_module/node_graph_traversal.cpp
+#     src/kernel/node_module/node_yaml.cpp
+#     src/kernel/node_module/node_graph_events.cpp
+#     src/kernel/graph_runtime.cpp
+#     src/kernel/kernel.cpp
+#     src/kernel/interaction.cpp
+#     src/cli/cli_autocompleter.cpp
+#     src/cli/cli_history.cpp
+#     src/cli/terminal_input.cpp
+#     src/cli/path_complete.cpp
+#     src/cli/tui_editor.cpp
+#     src/cli/config_editor.cpp
+#     src/cli/node_editor.cpp
+#     src/cli/node_editor_full.cpp
+#     src/cli/node_graph_print.cpp
+#     src/cli/print_cli_help.cpp
+#     src/cli/print_repl_help.cpp
+#     src/cli/ask.cpp
+#     src/cli/ask_yesno.cpp
+#     src/cli/handle_interactive_save.cpp
+#     src/cli/do_traversal.cpp
+#     src/cli/save_fp32_image.cpp
+#     src/cli/command/help_utils.cpp
+#     src/cli/command/command_help.cpp
+#     src/cli/command/command_clear.cpp
+#     src/cli/command/command_graphs.cpp
+#     src/cli/command/command_load.cpp
+#     src/cli/command/command_switch.cpp
+#     src/cli/command/command_close.cpp
+#     src/cli/command/command_print.cpp
+#     src/cli/command/command_node.cpp
+#     src/cli/command/command_ops.cpp
+#     src/cli/command/command_traversal.cpp
+#     src/cli/command/command_config.cpp
+#     src/cli/command/command_read.cpp
+#     src/cli/command/command_source.cpp
+#     src/cli/command/command_output.cpp
+#     src/cli/command/command_clear_graph.cpp
+#     src/cli/command/command_clear_cache.cpp
+#     src/cli/command/command_free.cpp
+#     src/cli/command/command_compute.cpp
+#     src/cli/command/command_save.cpp
+#     src/cli/command/command_exit.cpp
+#     src/cli/process_command.cpp
+#     src/cli/run_repl.cpp
 
-    src/cli/autocomplete/CompleteCommand.cpp
-    src/cli/autocomplete/CompleteComputeArgs.cpp
-    src/cli/autocomplete/CompleteGraphName.cpp
-    src/cli/autocomplete/CompleteNodeId.cpp
-    src/cli/autocomplete/CompleteOpsMode.cpp
-    src/cli/autocomplete/CompletePath.cpp
-    src/cli/autocomplete/CompletePrintArgs.cpp
-    src/cli/autocomplete/CompleteSessionName.cpp
-    src/cli/autocomplete/CompleteTraversalArgs.cpp
-    src/cli/autocomplete/CompleteYamlPath.cpp
-    src/cli/autocomplete/FindLongestCommonPrefix.cpp
-    src/cli/autocomplete/Tokenize.cpp
+#     src/cli/autocomplete/CompleteCommand.cpp
+#     src/cli/autocomplete/CompleteComputeArgs.cpp
+#     src/cli/autocomplete/CompleteGraphName.cpp
+#     src/cli/autocomplete/CompleteNodeId.cpp
+#     src/cli/autocomplete/CompleteOpsMode.cpp
+#     src/cli/autocomplete/CompletePath.cpp
+#     src/cli/autocomplete/CompletePrintArgs.cpp
+#     src/cli/autocomplete/CompleteSessionName.cpp
+#     src/cli/autocomplete/CompleteTraversalArgs.cpp
+#     src/cli/autocomplete/CompleteYamlPath.cpp
+#     src/cli/autocomplete/FindLongestCommonPrefix.cpp
+#     src/cli/autocomplete/Tokenize.cpp
 
-    src/adapter/buffer_adapter_opencv.cpp
-)
+#     src/adapter/buffer_adapter_opencv.cpp
+# )
 add_executable(graph_cli ${APP_SOURCES})
 target_include_directories(graph_cli PRIVATE "${PROJECT_SOURCE_DIR}/include" "${PROJECT_SOURCE_DIR}/src")
 find_library(FW_METAL Metal)

@@ -86,25 +86,31 @@ cv::UMat toCvUMat(const Tile& tile) {
 
 
 // 从 cv::Mat 创建 ImageBuffer
-ImageBuffer fromCvMat(const cv::Mat& mat) {
-    ImageBuffer buffer;
+ps::ImageBuffer fromCvMat(const cv::Mat& mat) {
+    ps::ImageBuffer buffer;
     buffer.width = mat.cols;
     buffer.height = mat.rows;
     buffer.channels = mat.channels();
     buffer.type = fromCvType(mat.type());
-    buffer.device = ps::Device::CPU;
+    buffer.device = ps::Device::CPU; // 暂时都标记为 CPU
     buffer.step = mat.step;
 
-    // 共享 cv::Mat 的内存和引用计数
+    // 关键：这个 lambda 捕获了 mat 的一个副本 (mat_ref)。
+    // 只要 buffer.data 这个 shared_ptr 存在，mat_ref 就会存在，
+    // 从而保证了原始 mat 的引用计数不会降为 0，内存也就不会被释放。
+    // 这对于 Mat 和 UMat 都有效。
     buffer.data = std::shared_ptr<void>(mat.data, [mat_ref = mat](void*){ 
-        // 捕获 mat_ref 以保持 cv::Mat 的引用计数
+        // 删除器什么都不做，mat_ref 的析构会自动处理引用计数
     });
 
-    // 如果这个 Mat 背后有一个 UMat，我们也可以把它的句柄存起来
-    if (mat.u) {
-        buffer.context = std::make_shared<cv::UMat>(*mat.u);
+    // 关于 context：它的目的是携带 API 特定的句柄。
+    // 对于 UMat，如果你想保留 UMat 对象本身，可以这样做：
+    if (mat.u != nullptr) {
+        // 创建一个 shared_ptr 来管理一个 cv::UMat 对象的副本。
+        // 这个副本和原始 mat 共享底层的图像数据。
+        buffer.context = std::make_shared<cv::UMat>(mat.getUMat(cv::ACCESS_READ));
     }
-
+    
     return buffer;
 }
 

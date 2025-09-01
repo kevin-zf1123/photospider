@@ -3,11 +3,12 @@
 #include <memory>
 #include <vector>
 #include <opencv2/core.hpp> // 用于 cv::Rect
-#include "node.hpp"
+
 
 
 namespace ps {
 
+class Node;
 // 描述像素数据类型，实现与具体库解耦
 enum class DataType {
     UINT8, INT8, UINT16, INT16, FLOAT32, FLOAT64
