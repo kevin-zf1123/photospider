@@ -1,4 +1,3 @@
-// in: src/ps_types.cpp (OVERWRITE)
 #include "ps_types.hpp"
 #include <algorithm> // for std::sort
 

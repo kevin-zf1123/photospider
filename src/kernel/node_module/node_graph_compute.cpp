@@ -1,6 +1,7 @@
 // in: src/kernel/node_module/node_graph_compute.cpp (REPLACE WITH THIS CORRECTED VERSION)
 #include "node_graph.hpp"
 #include "adapter/buffer_adapter_opencv.hpp" // 引入适配器
+#include "kernel/param_utils.hpp"
 #include <chrono>
 #include <unordered_map>
 #include <variant>
@@ -45,26 +46,17 @@ NodeOutput& NodeGraph::compute_internal(int node_id, const std::string& cache_pr
     auto& target_node = nodes.at(node_id);
     std::string result_source = "unknown";
     
-    // 计时器在函数开始时启动，用于测量缓存命中时的查找时间。
     auto start_time = std::chrono::high_resolution_clock::now();
 
-    do {
-        // 1. 缓存检查
-        if (target_node.cached_output.has_value()) {
-            result_source = "memory_cache";
-            break;
-        }
-        if (allow_disk_cache && try_load_from_disk_cache(target_node)) {
-            result_source = "disk_cache";
-            break;
-        }
+    do { // 使用 do-while(false) 结构来方便地 break
+        // 1. 缓存检查 (逻辑不变)
+        if (target_node.cached_output.has_value()) { result_source = "memory_cache"; break; }
+        if (allow_disk_cache && try_load_from_disk_cache(target_node)) { result_source = "disk_cache"; break; }
 
-        // 2. 依赖计算与参数解析
-        if (visiting[node_id]) {
-            throw GraphError(GraphErrc::Cycle, "Cycle detected involving node " + std::to_string(node_id));
-        }
+        // 2. 依赖计算与参数解析 (逻辑不变)
+        if (visiting[node_id]) throw GraphError(GraphErrc::Cycle, "Cycle detected: " + std::to_string(node_id));
         visiting[node_id] = true;
-
+        
         target_node.runtime_parameters = target_node.parameters ? target_node.parameters : YAML::Node(YAML::NodeType::Map);
         for (const auto& p_input : target_node.parameter_inputs) {
             if (p_input.from_node_id == -1) continue;
@@ -80,35 +72,36 @@ NodeOutput& NodeGraph::compute_internal(int node_id, const std::string& cache_pr
                 monolithic_inputs.push_back(&compute_internal(i_input.from_node_id, cache_precision, visiting, enable_timing, allow_disk_cache));
             }
         }
-
+        
         // 3. 获取操作函数
         auto op_variant_opt = OpRegistry::instance().find(target_node.type, target_node.subtype);
-        if (!op_variant_opt) {
-            throw GraphError(GraphErrc::NoOperation, "No operation for " + target_node.type + ":" + target_node.subtype);
-        }
+        if (!op_variant_opt) throw GraphError(GraphErrc::NoOperation, "No op for " + target_node.type + ":" + target_node.subtype);
 
-        // =========================================================================
-        // === 修正: 重置计时器! ===
-        // 此时所有依赖项都已计算完毕，现在开始计时本节点真正的计算耗时。
+        // 重置计时器，准备开始真正的计算
         start_time = std::chrono::high_resolution_clock::now();
-        // =========================================================================
 
-        // 4. 核心调度逻辑：使用 std::visit 分派任务
+        // 4. *** 核心调度逻辑：使用 std::visit 分派任务 ***
         std::visit([&](auto&& op_func) {
             using T = std::decay_t<decltype(op_func)>;
             
+            // --- 路径 A: Monolithic (整体计算) ---
             if constexpr (std::is_same_v<T, MonolithicOpFunc>) {
+                // 直接调用整体操作函数，它会返回完整的 NodeOutput
                 target_node.cached_output = op_func(target_node, monolithic_inputs);
-            } else if constexpr (std::is_same_v<T, TileOpFunc>) {
-                if (monolithic_inputs.empty()) {
-                    throw GraphError(GraphErrc::MissingDependency, "Tiled node '" + target_node.name + "' requires at least one image input to infer output size.");
+            } 
+            // --- 路径 B: Tiled (分块计算) ---
+            else if constexpr (std::is_same_v<T, TileOpFunc>) {
+                if (monolithic_inputs.empty() && target_node.type != "image_generator") {
+                     throw GraphError(GraphErrc::MissingDependency, "Tiled node '" + target_node.name + "' requires at least one image input to infer output size.");
                 }
-                const auto& first_input_buffer = monolithic_inputs[0]->image_buffer;
-                int out_width = first_input_buffer.width;
-                int out_height = first_input_buffer.height;
-                int out_channels = first_input_buffer.channels;
-                ps::DataType out_type = first_input_buffer.type;
+                
+                // 推断输出尺寸 (暂时简化为与第一个输入相同)
+                int out_width = monolithic_inputs.empty() ? as_int_flexible(target_node.runtime_parameters, "width", 256) : monolithic_inputs[0]->image_buffer.width;
+                int out_height = monolithic_inputs.empty() ? as_int_flexible(target_node.runtime_parameters, "height", 256) : monolithic_inputs[0]->image_buffer.height;
+                int out_channels = monolithic_inputs.empty() ? 1 : monolithic_inputs[0]->image_buffer.channels;
+                ps::DataType out_type = monolithic_inputs.empty() ? ps::DataType::FLOAT32 : monolithic_inputs[0]->image_buffer.type;
 
+                // 准备输出缓冲区
                 target_node.cached_output = NodeOutput();
                 auto& output_buffer = target_node.cached_output->image_buffer;
                 output_buffer.width = out_width;
@@ -116,18 +109,18 @@ NodeOutput& NodeGraph::compute_internal(int node_id, const std::string& cache_pr
                 output_buffer.channels = out_channels;
                 output_buffer.type = out_type;
                 
-                size_t pixel_size = sizeof(float); 
+                size_t pixel_size = sizeof(float); // 假设
                 output_buffer.step = out_width * out_channels * pixel_size;
                 output_buffer.data.reset(new char[output_buffer.step * output_buffer.height], std::default_delete<char[]>());
 
+                // 单线程分块循环 (与你之前的实现相同)
                 const int TILE_SIZE = 256;
-                const int HALO_SIZE = 16; 
+                const int HALO_SIZE = 16; // 暂时硬编码
 
                 for (int y = 0; y < output_buffer.height; y += TILE_SIZE) {
                     for (int x = 0; x < output_buffer.width; x += TILE_SIZE) {
                         ps::TileTask task;
                         task.node = &target_node;
-
                         task.output_tile.buffer = &output_buffer;
                         task.output_tile.roi = cv::Rect(x, y, 
                                                         std::min(TILE_SIZE, output_buffer.width - x),
@@ -153,15 +146,13 @@ NodeOutput& NodeGraph::compute_internal(int node_id, const std::string& cache_pr
 
     } while(false);
 
-    // 5. 计时和事件记录
+    // 5. 计时和事件记录 (逻辑不变)
     if (enable_timing) {
         auto end_time = std::chrono::high_resolution_clock::now();
         std::chrono::duration<double, std::milli> elapsed = end_time - start_time;
         {
             std::lock_guard<std::mutex> lk(timing_mutex_);
             this->timing_results.node_timings.push_back({target_node.id, target_node.name, elapsed.count(), result_source});
-            // 修正: 总时间现在由外部调用者累加，这里不再累加
-            // this->timing_results.total_ms += elapsed.count();
         }
         push_compute_event(target_node.id, target_node.name, result_source, elapsed.count());
     } else {

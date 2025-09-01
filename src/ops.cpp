@@ -1,5 +1,6 @@
 // in: src/ops.cpp (REPLACE WITH THIS FINAL VERSION)
 #include "kernel/ops.hpp"
+#include "kernel/param_utils.hpp"
 #include "adapter/buffer_adapter_opencv.hpp"
 #include <opencv2/imgcodecs.hpp>
 #include <opencv2/imgproc.hpp>
@@ -18,7 +19,7 @@ namespace ps { namespace ops {
 
 // 全局互斥锁，用于保护所有并发的OpenCV GPU/CPU操作，防止底层库的资源竞争
 static std::mutex g_opencv_op_mutex;
-
+/*
 static double as_double_flexible(const YAML::Node& n, const std::string& key, double defv) {
     if (!n || !n[key]) return defv;
     try { if (n[key].IsScalar()) return n[key].as<double>(); return defv; } catch (...) { return defv; }
@@ -31,7 +32,7 @@ static std::string as_str(const YAML::Node& n, const std::string& key, const std
     if (!n || !n[key]) return defv;
     try { return n[key].as<std::string>(); } catch (...) { return defv; }
 }
-
+*/
 // =============================================================================
 // ==                   类型一: MONOLITHIC (整体计算) 操作                      ==
 // =============================================================================

@@ -14,6 +14,7 @@
 #include <opencv2/opencv.hpp>
 #include <yaml-cpp/yaml.h>
 #include "image_buffer.hpp"
+#include <variant>
 
 namespace ps {
 namespace fs = std::filesystem;
@@ -40,6 +41,12 @@ struct OutputPort {
 struct CacheEntry {
     std::string cache_type;
     std::string location;
+};
+
+enum class ExecutionPolicy {
+    MONOLITHIC,       // 必须作为一个整体、不可分割的任务来计算
+    TILED_PARALLEL,   // 可以安全地分解为并行的分块任务
+    // TILED_SEQUENTIAL // (未来可以添加)
 };
 
 struct NodeOutput {

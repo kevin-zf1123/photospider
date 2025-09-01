@@ -3,6 +3,7 @@
 #include "perlin_noise_metal.hpp"
 #include "node.hpp"
 #include "adapter/buffer_adapter_opencv.hpp"
+#include "kernel/param_utils.hpp"
 
 #import <Metal/Metal.h>
 #import <CoreImage/CoreImage.h>
@@ -61,14 +62,14 @@ const char* perlin_shader_source = R"(
 
 namespace ps { namespace ops {
 
-static int as_int_flexible_metal(const YAML::Node& n, const std::string& key, int defv) {
-    if (!n || !n[key]) return defv;
-    try { return n[key].as<int>(); } catch (...) { return defv; }
-}
-static double as_double_flexible_metal(const YAML::Node& n, const std::string& key, double defv) {
-    if (!n || !n[key]) return defv;
-    try { if (n[key].IsScalar()) return n[key].as<double>(); return defv; } catch (...) { return defv; }
-}
+// static int as_int_flexible_metal(const YAML::Node& n, const std::string& key, int defv) {
+//     if (!n || !n[key]) return defv;
+//     try { return n[key].as<int>(); } catch (...) { return defv; }
+// }
+// static double as_double_flexible_metal(const YAML::Node& n, const std::string& key, double defv) {
+//     if (!n || !n[key]) return defv;
+//     try { if (n[key].IsScalar()) return n[key].as<double>(); return defv; } catch (...) { return defv; }
+// }
 
 // --- Metal & CoreImage State Management (Unchanged) ---
 struct MetalState {
@@ -138,10 +139,10 @@ NodeOutput op_perlin_noise_metal(const Node& node, const std::vector<const NodeO
     });
 
     const auto& P = node.runtime_parameters;
-    int width  = as_int_flexible_metal(P, "width", 256);
-    int height = as_int_flexible_metal(P, "height", 256);
-    float scale = as_double_flexible_metal(P, "grid_size", 1.0);
-    int seed = as_int_flexible_metal(P, "seed", -1);
+    int width  = as_int_flexible(P, "width", 256);
+    int height = as_int_flexible(P, "height", 256);
+    float scale = as_double_flexible(P, "grid_size", 1.0);
+    int seed = as_int_flexible(P, "seed", -1);
 
     MetalState& metal = GetMetalState();
     id<MTLDevice> device = metal.device;
