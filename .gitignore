@@ -64,3 +64,4 @@ kernel.py
 /sessions/
 .vscode/
 !**/help*.txt
+/util/

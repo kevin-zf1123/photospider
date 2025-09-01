@@ -11,6 +11,7 @@
 #include <iostream>
 #include <opencv2/opencv.hpp>
 #include <yaml-cpp/yaml.h>
+#include "image_buffer.hpp"
 
 namespace ps {
 namespace fs = std::filesystem;
@@ -58,8 +59,9 @@ struct CacheEntry {
 // The complete result of a node's computation. It can include a primary image
 // as well as any number of named data outputs.
 struct NodeOutput {
-    cv::Mat image_matrix; // The primary image output
-    cv::UMat image_umatrix; // NEW: The primary image output on the GPU
+    // cv::Mat image_matrix; // The primary image output
+    // cv::UMat image_umatrix; // NEW: The primary image output on the GPU
+    ps::ImageBuffer image_buffer;
     std::unordered_map<std::string, OutputValue> data; // Other named data outputs
 };
 
