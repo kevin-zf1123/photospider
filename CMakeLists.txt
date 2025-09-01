@@ -118,7 +118,6 @@ list(APPEND APP_SOURCES
     src/cli/process_command.cpp
     src/cli/run_repl.cpp
 
-    # --- FIX START: Add missing autocomplete source files ---
     src/cli/autocomplete/CompleteCommand.cpp
     src/cli/autocomplete/CompleteComputeArgs.cpp
     src/cli/autocomplete/CompleteGraphName.cpp
@@ -131,7 +130,8 @@ list(APPEND APP_SOURCES
     src/cli/autocomplete/CompleteYamlPath.cpp
     src/cli/autocomplete/FindLongestCommonPrefix.cpp
     src/cli/autocomplete/Tokenize.cpp
-    # --- FIX END ---
+
+    src/adapter/buffer_adapter_opencv.cpp
 )
 add_executable(graph_cli ${APP_SOURCES})
 target_include_directories(graph_cli PRIVATE "${PROJECT_SOURCE_DIR}/include" "${PROJECT_SOURCE_DIR}/src")

@@ -3,7 +3,7 @@
 
 namespace ps {
 
-// 内部辅助函数：将我们的 DataType 转换为 OpenCV 的类型标识符
+// --- 内部辅助函数 (不变) ---
 static int toCvType(ps::DataType type, int channels) {
     switch (type) {
         case ps::DataType::UINT8:   return CV_8UC(channels);
@@ -16,7 +16,6 @@ static int toCvType(ps::DataType type, int channels) {
     throw std::runtime_error("Unsupported data type for OpenCV conversion");
 }
 
-// 内部辅助函数：从 OpenCV 类型标识符转换回我们的 DataType
 static ps::DataType fromCvType(int cv_type) {
     switch (CV_MAT_DEPTH(cv_type)) {
         case CV_8U:  return ps::DataType::UINT8;
@@ -29,32 +28,64 @@ static ps::DataType fromCvType(int cv_type) {
     }
 }
 
-// 实现：将 ImageBuffer 转换为 cv::Mat 视图
+// --- 实现：智能转换函数 ---
+
+// 将 ImageBuffer 转换为 cv::Mat
 cv::Mat toCvMat(const ImageBuffer& buffer) {
-    if (buffer.device != ps::Device::CPU || !buffer.data) {
-        // 当前版本只支持在CPU内存上的 buffer
-        // 如果 data 为空，也无法创建视图
-        throw std::runtime_error("toCvMat: Buffer is not on CPU or has no data.");
+    // 优先路径：如果已有 CPU 数据，直接创建视图 (零拷贝)
+    if (buffer.data) {
+        int type = toCvType(buffer.type, buffer.channels);
+        return cv::Mat(buffer.height, buffer.width, type, buffer.data.get(), buffer.step);
     }
-    int type = toCvType(buffer.type, buffer.channels);
     
-    // 使用 cv::Mat 的高级构造函数，它接受一个外部数据指针。
-    // 这个构造函数创建的 cv::Mat 不会管理内存的生命周期，它仅仅是一个“视图”。
-    return cv::Mat(buffer.height, buffer.width, type, buffer.data.get(), buffer.step);
+    // 回退路径：如果只有 GPU 数据 (UMat in context)，从 GPU 下载 (涉及拷贝)
+    if (buffer.context) {
+        auto umat_ptr = std::static_pointer_cast<cv::UMat>(buffer.context);
+        return umat_ptr->getMat(cv::ACCESS_READ);
+    }
+
+    throw std::runtime_error("toCvMat: Buffer has no data on CPU or GPU.");
 }
 
-// 实现：将 Tile 转换为 cv::Mat 视图
 cv::Mat toCvMat(const Tile& tile) {
     if (!tile.buffer) {
         throw std::runtime_error("toCvMat: Tile has no associated buffer.");
     }
-    // 1. 先获取整个 buffer 的 Mat 视图
+    // 先获取整个 buffer 的 Mat (可能会触发下载)
     cv::Mat full_mat = toCvMat(*tile.buffer);
-    // 2. 然后返回该视图的一个 ROI (Region of Interest)，这同样是零拷贝的。
+    // 返回 ROI 视图 (零拷贝)
     return full_mat(tile.roi);
 }
 
-// 实现：将 cv::Mat 包装为 ImageBuffer
+// 将 ImageBuffer 转换为 cv::UMat
+cv::UMat toCvUMat(const ImageBuffer& buffer) {
+    // 优先路径：如果已有 UMat，直接返回 (零拷贝)
+    if (buffer.context) {
+        return *std::static_pointer_cast<cv::UMat>(buffer.context);
+    }
+
+    // 回退路径：如果只有 CPU 数据，上传到 GPU (涉及拷贝)
+    if (buffer.data) {
+        int type = toCvType(buffer.type, buffer.channels);
+        cv::Mat temp_mat_view(buffer.height, buffer.width, type, buffer.data.get(), buffer.step);
+        return temp_mat_view.getUMat(cv::ACCESS_READ);
+    }
+
+    throw std::runtime_error("toCvUMat: Buffer has no data on CPU or GPU.");
+}
+
+cv::UMat toCvUMat(const Tile& tile) {
+    if (!tile.buffer) {
+        throw std::runtime_error("toCvUMat: Tile has no associated buffer.");
+    }
+    // 先获取整个 buffer 的 UMat (可能会触发上传)
+    cv::UMat full_umat = toCvUMat(*tile.buffer);
+    // 返回 ROI 视图 (零拷贝)
+    return full_umat(tile.roi);
+}
+
+
+// 从 cv::Mat 创建 ImageBuffer
 ImageBuffer fromCvMat(const cv::Mat& mat) {
     ImageBuffer buffer;
     buffer.width = mat.cols;
@@ -64,29 +95,40 @@ ImageBuffer fromCvMat(const cv::Mat& mat) {
     buffer.device = ps::Device::CPU;
     buffer.step = mat.step;
 
-    // 关键部分：内存所有权共享
-    // 我们创建一个 std::shared_ptr，它指向 cv::Mat 的数据区。
-    // 同时，我们提供一个自定义的删除器 (deleter lambda)。
-    //
-    // 这个删除器的绝妙之处在于：
-    // 1. 它捕获了原始的 cv::Mat 对象 (mat_ref)。这会增加 cv::Mat 的内部引用计数。
-    // 2. 当删除器被调用时（即我们的 shared_ptr 引用计数归零时），它什么都不做。
-    // 3. 当删除器本身被销毁时，它捕获的 mat_ref 也会被销毁，从而正确地减少 OpenCV 的引用计数。
-    //
-    // 最终效果是：只要我们的 ImageBuffer 还存在，原始 cv::Mat 的数据就不会被释放。
+    // 共享 cv::Mat 的内存和引用计数
     buffer.data = std::shared_ptr<void>(mat.data, [mat_ref = mat](void*){ 
-        // The captured mat_ref keeps the underlying cv::Mat data alive.
-        // When this lambda is destroyed (because the shared_ptr's ref count is zero),
-        // mat_ref is also destroyed, properly decrementing OpenCV's ref count.
+        // 捕获 mat_ref 以保持 cv::Mat 的引用计数
     });
 
-    // 如果 cv::Mat 是一个 UMat 的代理，我们也可以把 UMat 的句柄存入 context
+    // 如果这个 Mat 背后有一个 UMat，我们也可以把它的句柄存起来
     if (mat.u) {
-        // 注意：这里需要更复杂的生命周期管理，但基本思路是相似的
-        // 暂时简化处理
+        buffer.context = std::make_shared<cv::UMat>(*mat.u);
     }
 
     return buffer;
 }
+
+// 从 cv::UMat 创建 ImageBuffer
+ImageBuffer fromCvUMat(const cv::UMat& umat) {
+    ImageBuffer buffer;
+    buffer.width = umat.cols;
+    buffer.height = umat.rows;
+    buffer.channels = umat.channels();
+    buffer.type = fromCvType(umat.type());
+    buffer.device = ps::Device::CPU; // UMat 是一个抽象，后端可能是 OpenCL，但从我们的角度看它仍由 CPU 调度
+    buffer.step = umat.step;
+    
+    // CPU 数据指针初始为空，因为数据主要在 GPU 上
+    buffer.data = nullptr;
+
+    // 关键：在 context 中存储一个指向 UMat 的共享指针。
+    // 我们在堆上创建一个 UMat 的拷贝（这个拷贝很轻量，只复制句柄和元数据），
+    // 然后用 shared_ptr 管理它的生命周期。
+    // 当 shared_ptr 被销毁时，这个 UMat 对象也被销毁，从而正确减少 GPU 资源的引用计数。
+    buffer.context = std::make_shared<cv::UMat>(umat);
+
+    return buffer;
+}
+
 
 } // namespace ps
