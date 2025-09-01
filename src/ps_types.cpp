@@ -1,4 +1,6 @@
+// in: src/ps_types.cpp (OVERWRITE)
 #include "ps_types.hpp"
+#include <algorithm> // for std::sort
 
 namespace ps {
 
@@ -7,22 +9,27 @@ OpRegistry& OpRegistry::instance() {
     return inst;
 }
 
-void OpRegistry::register_op(const std::string& type, const std::string& subtype, OpFunc fn) {
+// NEW: 重载 register_op 以处理不同函数类型
+void OpRegistry::register_op(const std::string& type, const std::string& subtype, MonolithicOpFunc fn) {
     table_[make_key(type, subtype)] = std::move(fn);
 }
 
-std::optional<OpFunc> OpRegistry::find(const std::string& type, const std::string& subtype) const {
+void OpRegistry::register_op(const std::string& type, const std::string& subtype, TileOpFunc fn) {
+    table_[make_key(type, subtype)] = std::move(fn);
+}
+
+std::optional<OpRegistry::OpVariant> OpRegistry::find(const std::string& type, const std::string& subtype) const {
     auto it = table_.find(make_key(type, subtype));
     if (it == table_.end()) return std::nullopt;
     return it->second;
 }
+
 std::vector<std::string> OpRegistry::get_keys() const {
     std::vector<std::string> keys;
     keys.reserve(table_.size());
     for (const auto& pair : table_) {
         keys.push_back(pair.first);
     }
-    // Sorting makes the "diff" logic later more reliable and readable
     std::sort(keys.begin(), keys.end());
     return keys;
 }
@@ -37,4 +44,5 @@ bool OpRegistry::unregister_key(const std::string& key) {
     table_.erase(it);
     return true;
 }
+
 } // namespace ps

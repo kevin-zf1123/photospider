@@ -1,5 +1,6 @@
 // NodeGraph cache and filesystem persistence
 #include "node_graph.hpp"
+#include "adapter/buffer_adapter_opencv.hpp" // 引入适配器
 #include <yaml-cpp/yaml.h>
 #include <fstream>
 
@@ -14,9 +15,10 @@ void NodeGraph::save_cache_if_configured(const Node& node, const std::string& ca
         if (cache_entry.cache_type == "image" && !cache_entry.location.empty()) {
             fs::path dir = node_cache_dir(node.id); fs::create_directories(dir);
             fs::path final_path = dir / cache_entry.location;
-            cv::Mat mat_to_save;
-            if (!output.image_umatrix.empty()) mat_to_save = output.image_umatrix.getMat(cv::ACCESS_READ);
-            else if (!output.image_matrix.empty()) mat_to_save = output.image_matrix;
+
+            // 使用适配器将 ImageBuffer 转为 Mat
+            cv::Mat mat_to_save = toCvMat(output.image_buffer);
+
             if (!mat_to_save.empty()) {
                 cv::Mat out_mat;
                 if (cache_precision == "int16") mat_to_save.convertTo(out_mat, CV_16U, 65535.0);
@@ -43,9 +45,11 @@ bool NodeGraph::try_load_from_disk_cache(Node& node) {
                 if (fs::exists(cache_file)) {
                     cv::Mat loaded_mat = cv::imread(cache_file.string(), cv::IMREAD_UNCHANGED);
                     if (!loaded_mat.empty()) {
+                        cv::Mat float_mat;
                         double scale = (loaded_mat.depth() == CV_8U) ? 1.0/255.0 : (loaded_mat.depth()==CV_16U ? 1.0/65535.0 : 1.0);
-                        loaded_mat.convertTo(loaded_output.image_matrix, CV_32F, scale);
-                        loaded_output.image_umatrix = loaded_output.image_matrix.getUMat(cv::ACCESS_READ);
+                        loaded_mat.convertTo(float_mat, CV_32F, scale);
+                        // 从 Mat 创建 ImageBuffer
+                        loaded_output.image_buffer = fromCvMat(float_mat);
                     }
                 }
                 if (fs::exists(metadata_file)) {

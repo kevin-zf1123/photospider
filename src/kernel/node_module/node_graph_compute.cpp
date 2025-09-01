@@ -2,7 +2,7 @@
 #include "node_graph.hpp"
 #include <chrono>
 #include <unordered_map>
-
+#include <variant>
 namespace ps {
 
 NodeOutput& NodeGraph::compute(int node_id, const std::string& cache_precision,
@@ -36,9 +36,11 @@ NodeOutput& NodeGraph::compute_internal(int node_id, const std::string& cache_pr
         if (visiting[node_id]) { throw GraphError(GraphErrc::Cycle, "Cycle detected in graph involving node " + std::to_string(node_id)); }
         visiting[node_id] = true;
 
+        // --- 依赖计算部分保持不变 ---
         node.runtime_parameters = node.parameters ? node.parameters : YAML::Node(YAML::NodeType::Map);
         for (const auto& p_input : node.parameter_inputs) {
-            if (p_input.from_node_id == -1) continue;
+            // ... (parameter input logic) ...
+             if (p_input.from_node_id == -1) continue;
             if (!has_node(p_input.from_node_id)) {
                 throw GraphError(GraphErrc::MissingDependency, "Node " + std::to_string(node.id) + " has missing parameter dependency: " + std::to_string(p_input.from_node_id));
             }
@@ -60,17 +62,30 @@ NodeOutput& NodeGraph::compute_internal(int node_id, const std::string& cache_pr
             input_node_outputs.push_back(&upstream_output);
         }
 
+        // --- 核心修改：使用 std::visit 处理 OpVariant ---
         auto op_func_opt = OpRegistry::instance().find(node.type, node.subtype);
-        if (!op_func_opt) { throw GraphError(GraphErrc::NoOperation, "No operation registered for type=" + node.type + ", subtype=" + node.subtype); }
-        node.cached_output = (*op_func_opt)(node, input_node_outputs);
+        if (!op_func_opt) { throw GraphError(GraphErrc::NoOperation, "No op for " + node.type + ":" + node.subtype); }
+
+        std::visit([&](auto&& op_func) {
+            using T = std::decay_t<decltype(op_func)>;
+            if constexpr (std::is_same_v<T, MonolithicOpFunc>) {
+                // 如果是整体计算函数，直接调用
+                node.cached_output = op_func(node, input_node_outputs);
+            } else if constexpr (std::is_same_v<T, TileOpFunc>) {
+                // 如果是分块计算函数，抛出错误，因为当前 compute_internal 还不支持分块调度
+                // 这部分将在阶段四完成
+                throw GraphError(GraphErrc::ComputeError, "Tiled operation found in non-tiled compute engine. Stage 4 required.");
+            }
+        }, *op_func_opt);
+
         result_source = "computed";
         save_cache_if_configured(node, cache_precision);
         visiting[node_id] = false;
     } while(false);
 
-    // Record timing and emit an event. timing_results is shared with parallel path,
-    // so guard writes with timing_mutex_ to keep the collector consistent.
+    // --- 计时和事件部分保持不变 ---
     if (enable_timing) {
+        // ... (timing logic) ...
         auto end_time = std::chrono::high_resolution_clock::now();
         std::chrono::duration<double, std::milli> elapsed = end_time - start_time;
         {

@@ -1,31 +1,25 @@
 #include "plugin_api.hpp"
-#include <opencv2/opencv.hpp>
+#include "adapter/buffer_adapter_opencv.hpp" // 引入适配器
 
-using namespace ps;
-
-// A simple example of an image processing operation that inverts the image.
-// (Calculates 1.0 - pixel_value for each channel).
-
-// --- MODIFIED: The function signature now matches the new OpFunc definition ---
-static NodeOutput invert_op(const Node&, const std::vector<const NodeOutput*>& inputs) {
-    if (inputs.empty() || inputs[0]->image_umatrix.empty()) {
-        throw GraphError("Invert operation requires one valid image input.");
+// 这是一个 Monolithic 操作，因为它处理整个图像
+ps::NodeOutput op_invert(const ps::Node&, const std::vector<const ps::NodeOutput*>& inputs) {
+    if (inputs.empty() || inputs[0]->image_buffer.width == 0) {
+        throw ps::GraphError(ps::GraphErrc::MissingDependency, "Invert op requires one valid input image.");
     }
 
-    // --- MODIFIED: Access the input UMat directly from the NodeOutput pointer ---
-    const cv::UMat& u_input = inputs[0]->image_umatrix;
-    cv::UMat u_output;
+    // 1. 使用适配器从 ImageBuffer 获取 UMat
+    const cv::UMat& u_input = ps::toCvUMat(inputs[0]->image_buffer);
 
-    // Perform the inversion operation on the UMat
+    cv::UMat u_output;
+    // 2. 执行核心操作
     cv::subtract(cv::Scalar::all(1.0), u_input, u_output);
 
-    NodeOutput result;
-    // --- MODIFIED: Store the resulting UMat in the output ---
-    result.image_umatrix = u_output;
+    ps::NodeOutput result;
+    // 3. 使用适配器将结果 UMat 包装回 ImageBuffer
+    result.image_buffer = ps::fromCvUMat(u_output);
     return result;
 }
 
-// The registration function that Photospider will look for.
 extern "C" PLUGIN_API void register_photospider_ops() {
-    OpRegistry::instance().register_op("image_process", "invert_example", invert_op);
+    ps::OpRegistry::instance().register_op("image_process", "invert", op_invert);
 }

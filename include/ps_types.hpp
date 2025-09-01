@@ -1,3 +1,4 @@
+// in: include/ps_types.hpp (OVERWRITE)
 #pragma once
 #include <string>
 #include <vector>
@@ -9,6 +10,7 @@
 #include <optional>
 #include <sstream>
 #include <iostream>
+#include <variant> // ADD: 用于支持多种函数签名
 #include <opencv2/opencv.hpp>
 #include <yaml-cpp/yaml.h>
 #include "image_buffer.hpp"
@@ -16,33 +18,17 @@
 namespace ps {
 namespace fs = std::filesystem;
 
-// The standard output for any data-producing entity (e.g., a file or a parameter).
-// YAML::Node is used for its flexibility in holding strings, numbers, bools, etc.
 using OutputValue = YAML::Node;
 
-// Defines a connection for an image input.
 struct ImageInput {
     int from_node_id = -1;
-    // The named output from the source node to connect to. Defaults to "image".
     std::string from_output_name = "image";
 };
 
-// Defines a connection for a parameter input, linking a source node's output
-// to one of this node's runtime parameters.
 struct ParameterInput {
     int from_node_id = -1;
-    // The named output from the source node (e.g., "width", "result").
     std::string from_output_name;
-    // The name of the parameter to set on the target node (e.g., "ksize").
     std::string to_parameter_name;
-};
-
-
-// Deprecated: Old input port structure. Replaced by ImageInput and ParameterInput.
-struct InputPort {
-    int input_id = -1;
-    std::string input_type;
-    YAML::Node input_parameters;
 };
 
 struct OutputPort {
@@ -56,25 +42,14 @@ struct CacheEntry {
     std::string location;
 };
 
-// The complete result of a node's computation. It can include a primary image
-// as well as any number of named data outputs.
 struct NodeOutput {
-    // cv::Mat image_matrix; // The primary image output
-    // cv::UMat image_umatrix; // NEW: The primary image output on the GPU
     ps::ImageBuffer image_buffer;
-    std::unordered_map<std::string, OutputValue> data; // Other named data outputs
+    std::unordered_map<std::string, OutputValue> data;
 };
 
 enum class GraphErrc {
-    Unknown = 1,
-    NotFound,
-    Cycle,
-    Io,
-    InvalidYaml,
-    MissingDependency,
-    NoOperation,
-    InvalidParameter,
-    ComputeError,
+    Unknown = 1, NotFound, Cycle, Io, InvalidYaml,
+    MissingDependency, NoOperation, InvalidParameter, ComputeError,
 };
 
 struct GraphError : public std::runtime_error {
@@ -90,22 +65,29 @@ private:
 class Node;
 class NodeGraph;
 
-// --- MODIFIED: The OpFunc signature now receives a vector of const NodeOutput pointers ---
-// This allows access to upstream UMat objects without copying the whole struct.
-using OpFunc = std::function<NodeOutput(const Node&, const std::vector<const NodeOutput*>&)>;
+// --- NEW: 定义两种操作函数签名 ---
+// 用于需要一次性处理完整图像的节点 (例如：加载、全局分析)
+using MonolithicOpFunc = std::function<NodeOutput(const Node&, const std::vector<const NodeOutput*>&)>;
+// 用于可以分块计算的节点 (例如：滤镜、逐像素操作)
+using TileOpFunc = std::function<void(const Node&, const Tile&, const std::vector<Tile>&)>;
 
 class OpRegistry {
 public:
     static OpRegistry& instance();
-    void register_op(const std::string& type, const std::string& subtype, OpFunc fn);
-    std::optional<OpFunc> find(const std::string& type, const std::string& subtype) const;
+    
+    // NEW: 使用 std::variant 存储不同类型的函数
+    using OpVariant = std::variant<MonolithicOpFunc, TileOpFunc>;
+
+    void register_op(const std::string& type, const std::string& subtype, MonolithicOpFunc fn);
+    void register_op(const std::string& type, const std::string& subtype, TileOpFunc fn);
+
+    std::optional<OpVariant> find(const std::string& type, const std::string& subtype) const;
+    
     std::vector<std::string> get_keys() const;
-    // New: unregister a single op by type/subtype. Returns true if removed.
     bool unregister_op(const std::string& type, const std::string& subtype);
-    // New: unregister by full key (type:subtype). Returns true if removed.
     bool unregister_key(const std::string& key);
 private:
-    std::unordered_map<std::string, OpFunc> table_;
+    std::unordered_map<std::string, OpVariant> table_;
 };
 
 inline std::string make_key(const std::string& type, const std::string& subtype) {

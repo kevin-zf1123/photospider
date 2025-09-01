@@ -2,6 +2,7 @@
 
 #include "perlin_noise_metal.hpp"
 #include "node.hpp"
+#include "adapter/buffer_adapter_opencv.hpp"
 
 #import <Metal/Metal.h>
 #import <CoreImage/CoreImage.h>
@@ -254,17 +255,19 @@ NodeOutput op_perlin_noise_metal(const Node& node, const std::vector<const NodeO
     // ✅ 关键：**总是 clone** 成为自有内存（与 PixelBuffer 脱钩）
     cv::Mat mat_copy = mat_view.clone();
 
-    // ✅ 现在把数据拷到 UMat（立即拷贝，避免延迟引用）
-    NodeOutput result;
-    mat_copy.copyTo(result.image_umatrix);
+    // 🔴 REMOVE: mat_copy.copyTo(result.image_umatrix);
 
-    // 现在再解锁并释放 PixelBuffer，UMat 已有自己的一份数据
+    // ✅ ADD: 将最终的 Mat 包装到 ImageBuffer 中
+    NodeOutput result;
+    result.image_buffer = fromCvMat(mat_copy);
+
+    // 现在再解锁并释放 PixelBuffer
     CVPixelBufferUnlockBaseAddress(pixelBuffer, kCVPixelBufferLock_ReadOnly);
     CVPixelBufferRelease(pixelBuffer);
 
     return result;
     }
 }
-// --- END: MODIFIED FUNCTION ---
+
 
 }} // namespace ps::ops

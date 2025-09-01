@@ -16,6 +16,7 @@
 #include <thread>
 #include <mutex>
 #include <condition_variable>
+#include <variant>
 
 namespace ps {
 
@@ -154,7 +155,21 @@ NodeOutput& NodeGraph::compute_parallel(int node_id, const std::string& cache_pr
                     if (!op_func_opt) {
                         throw GraphError(GraphErrc::NoOperation, "No operation registered for type=" + node.type + ", subtype=" + node.subtype);
                     }
-                    node.cached_output = (*op_func_opt)(node, input_node_outputs);
+
+                    // 🔴 REMOVE: node.cached_output = (*op_func_opt)(node, input_node_outputs);
+
+                    // ✅ ADD: 使用 std::visit 来处理 variant
+                    std::visit([&](auto&& op_func) {
+                        using T = std::decay_t<decltype(op_func)>;
+                        if constexpr (std::is_same_v<T, MonolithicOpFunc>) {
+                            node.cached_output = op_func(node, input_node_outputs);
+                        } else if constexpr (std::is_same_v<T, TileOpFunc>) {
+                            // 并行引擎目前也不支持分块调度，这将在阶段四完成
+                            throw GraphError(GraphErrc::ComputeError, "Tiled operation found in parallel non-tiled compute engine. Stage 4 required.");
+                        }
+                    }, *op_func_opt);
+
+
                     save_cache_if_configured(node, cache_precision);
                     if (enable_timing) {
                         auto end = std::chrono::high_resolution_clock::now();
