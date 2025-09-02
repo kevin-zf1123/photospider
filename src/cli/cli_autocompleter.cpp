@@ -12,11 +12,27 @@ CliAutocompleter::CliAutocompleter(ps::InteractionService& svc)
     : svc_(svc) {
     // This list should be kept in sync with commands in `process_command`
     commands_ = {
-        "help", "clear", "config", "ops", "read", "source", "print", "node",
-        "traversal", "output", "clear-graph", "cc", "clear-cache", "compute",
-        "save", "free", "exit",
-        // keep in sync with process_command in cli/graph_cli.cpp
-        "graphs", "load", "switch", "close"
+        "bench",
+        "clear", "cls", // 如果您想补全别名，也在这里添加
+        "clear-cache", "cc",
+        "clear-graph",
+        "close",
+        "compute",
+        "config",
+        "exit", "quit", "q",
+        "free",
+        "graphs",
+        "help",
+        "load",
+        "node",
+        "ops",
+        "output",
+        "print",
+        "read",
+        "save",
+        "source",
+        "switch",
+        "traversal"
     };
     std::sort(commands_.begin(), commands_.end());
 }
@@ -45,6 +61,8 @@ CompletionResult CliAutocompleter::Complete(const std::string& line, int cursor_
             // help <command> — suggest available commands/topics
             CompleteCommand(prefix, result.options);
         } else if ((cmd == "read" || cmd == "source" || cmd == "output" || cmd == "save") && (tokens.size() > 1)) {
+            CompletePath(prefix, result.options);
+        } else if (cmd == "bench") {
             CompletePath(prefix, result.options);
         } else if (cmd == "load") {
             // load <name> <yaml>

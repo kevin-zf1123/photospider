@@ -65,3 +65,4 @@ kernel.py
 .vscode/
 !**/help*.txt
 /util/
+/benchmarks/
