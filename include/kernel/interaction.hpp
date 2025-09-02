@@ -97,6 +97,9 @@ public:
                                                       std::vector<BenchmarkEvent>* benchmark_events = nullptr) {
         return kernel_.compute_async(graph, node_id, cache_precision, force, timing, parallel, quiet, disable_disk_cache, benchmark_events);
     }
+    std::optional<double> cmd_get_last_io_time(const std::string& graph) {
+        return kernel_.get_last_io_time(graph);
+    }
 private:
     Kernel& kernel_;
 };

@@ -3,6 +3,7 @@
 #include "adapter/buffer_adapter_opencv.hpp" // 引入适配器
 #include <yaml-cpp/yaml.h>
 #include <fstream>
+#include <chrono> // 为计时引入头文件
 
 namespace ps {
 
@@ -46,15 +47,12 @@ void NodeGraph::save_cache_if_configured(const Node& node, const std::string& ca
             fs::path dir = node_cache_dir(node.id);
             fs::create_directories(dir);
             fs::path final_path = dir / cache_entry.location;
+            
             auto start_io = std::chrono::high_resolution_clock::now();
-            // --- 核心修复逻辑 ---
-            // 在尝试保存图像之前，必须检查 image_buffer 是否有效。
-            // 一个分析节点（如 get_dimensions）可能有一个 "image" 类型的缓存条目
-            // （用于保存其分析结果的元数据），但它本身不输出图像。
+            
             if (output.image_buffer.width > 0 && output.image_buffer.height > 0) {
                 cv::Mat mat_to_save = toCvMat(output.image_buffer);
 
-                // 这个检查现在变得有些冗余，但保留也无妨
                 if (!mat_to_save.empty()) {
                     cv::Mat out_mat;
                     if (cache_precision == "int16") {
@@ -65,9 +63,7 @@ void NodeGraph::save_cache_if_configured(const Node& node, const std::string& ca
                     cv::imwrite(final_path.string(), out_mat);
                 }
             }
-            // --- 修复结束 ---
-
-            // 元数据（data部分）的保存逻辑应该独立于图像保存
+            
             if (!output.data.empty()) {
                 fs::path meta_path = final_path;
                 meta_path.replace_extension(".yml");
@@ -78,27 +74,35 @@ void NodeGraph::save_cache_if_configured(const Node& node, const std::string& ca
                 std::ofstream fout(meta_path);
                 fout << meta_node;
             }
-                auto end_io = std::chrono::high_resolution_clock::now();
-                // Atomic addition for std::atomic<double> requires a compare-exchange loop.
-                double duration_to_add = std::chrono::duration<double, std::milli>(end_io - start_io).count();
-                auto& atomic_io_time = const_cast<NodeGraph*>(this)->total_io_time_ms;
 
-                double current_io_time = atomic_io_time.load();
-                while (!atomic_io_time.compare_exchange_weak(current_io_time, current_io_time + duration_to_add)) {
-                    // 循环直到成功为止。如果失败，compare_exchange_weak 会自动将 current_io_time 更新为最新的值。
-                }
+            auto end_io = std::chrono::high_resolution_clock::now();
+            double duration_to_add = std::chrono::duration<double, std::milli>(end_io - start_io).count();
+            auto& atomic_io_time = const_cast<NodeGraph*>(this)->total_io_time_ms;
+            
+            // [修复] 使用 compare_exchange_weak 循环代替 fetch_add
+            double current_io_time = atomic_io_time.load();
+            while (!atomic_io_time.compare_exchange_weak(current_io_time, current_io_time + duration_to_add)) {
+                // 如果失败，compare_exchange_weak 会自动用最新的值更新 current_io_time，我们只需重试即可
+            }
         }
     }
 }
 
+
 bool NodeGraph::try_load_from_disk_cache(Node& node) {
-    if (node.cached_output.has_value() || cache_root.empty() || node.caches.empty()) return node.cached_output.has_value();
+    if (node.cached_output.has_value() || cache_root.empty() || node.caches.empty()) {
+        return node.cached_output.has_value();
+    }
+
     auto start_io = std::chrono::high_resolution_clock::now();
     bool loaded = false;
+
     for (const auto& cache_entry : node.caches) {
         if (cache_entry.cache_type == "image" && !cache_entry.location.empty()) {
             fs::path cache_file = node_cache_dir(node.id) / cache_entry.location;
-            fs::path metadata_file = cache_file; metadata_file.replace_extension(".yml");
+            fs::path metadata_file = cache_file; 
+            metadata_file.replace_extension(".yml");
+
             if (fs::exists(cache_file) || fs::exists(metadata_file)) {
                 NodeOutput loaded_output;
                 if (fs::exists(cache_file)) {
@@ -107,30 +111,36 @@ bool NodeGraph::try_load_from_disk_cache(Node& node) {
                         cv::Mat float_mat;
                         double scale = (loaded_mat.depth() == CV_8U) ? 1.0/255.0 : (loaded_mat.depth()==CV_16U ? 1.0/65535.0 : 1.0);
                         loaded_mat.convertTo(float_mat, CV_32F, scale);
-                        // 从 Mat 创建 ImageBuffer
                         loaded_output.image_buffer = fromCvMat(float_mat);
                     }
                 }
                 if (fs::exists(metadata_file)) {
                     YAML::Node meta = YAML::LoadFile(metadata_file.string());
-                    for(auto it = meta.begin(); it != meta.end(); ++it) loaded_output.data[it->first.as<std::string>()] = it->second;
+                    for(auto it = meta.begin(); it != meta.end(); ++it) {
+                        loaded_output.data[it->first.as<std::string>()] = it->second;
+                    }
                 }
                 node.cached_output = std::move(loaded_output);
-                return true;
+                loaded = true;
+                break; 
             }
         }
     }
+
     auto end_io = std::chrono::high_resolution_clock::now();
     if (loaded) {
-        // Atomic addition for std::atomic<double> requires a compare-exchange loop.
         double duration_to_add = std::chrono::duration<double, std::milli>(end_io - start_io).count();
-
+        
+        // [修复] 使用 compare_exchange_weak 循环代替 fetch_add
         double current_io_time = total_io_time_ms.load();
         while (!total_io_time_ms.compare_exchange_weak(current_io_time, current_io_time + duration_to_add)) {
-            // 循环直到成功为止。
+            // 循环直到成功
         }
     }
+    
+    return loaded;
 }
+
 
 NodeGraph::DriveClearResult NodeGraph::clear_drive_cache() {
     DriveClearResult r; if (!cache_root.empty() && fs::exists(cache_root)) { r.removed_entries = fs::remove_all(cache_root); fs::create_directories(cache_root); }

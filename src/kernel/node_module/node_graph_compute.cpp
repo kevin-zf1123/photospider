@@ -333,10 +333,6 @@ NodeOutput& NodeGraph::compute_internal(int node_id,
             target_node.name,
             result_source,
             tot.count());
-        // After the run, if we have a benchmark_events vector, we can find the
-        // top-level result and assign the IO time. This is a bit tricky.
-        // A simpler way is to modify BenchmarkService::Run to fetch it.
-        // Let's modify the service instead.
     } else {
         push_compute_event(
             target_node.id,
@@ -408,6 +404,7 @@ NodeOutput& NodeGraph::compute(int node_id, const std::string& cache_precision,
     // 在顶层调用开始前清空计时结果
     if (enable_timing) {
         clear_timing_results();
+        // [修改] 在每次计算开始时重置IO计时器
         total_io_time_ms = 0.0;
     }
 
@@ -417,13 +414,10 @@ NodeOutput& NodeGraph::compute(int node_id, const std::string& cache_precision,
             auto deps = topo_postorder_from(node_id);
             for (int id : deps) {
                 if (nodes.count(id)) {
-                    // --- 核心逻辑修改 ---
                     auto& node_to_clear = nodes.at(id);
-                    // 只有当节点不是 preserved，或者它本身就是计算目标时，才清除缓存
                     if (!node_to_clear.preserved || id == node_id) {
                         node_to_clear.cached_output.reset();
                     }
-                    // --- 结束修改 ---
                 }
             }
         } catch (const GraphError&) {}
@@ -431,9 +425,7 @@ NodeOutput& NodeGraph::compute(int node_id, const std::string& cache_precision,
 
     std::unordered_map<int, bool> visiting;
     auto& result = compute_internal(node_id, cache_precision, visiting, enable_timing, !disable_disk_cache, benchmark_events);
-    // if (enable_timing && benchmark_run_data) {
-    //     benchmark_run_data->io_duration_ms = total_io_time_ms;
-    // }
+    
     // 在所有计算结束后，累加总时间
     if (enable_timing) {
         double total = 0.0;

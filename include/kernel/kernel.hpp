@@ -92,7 +92,7 @@ public:
 
     // Plugin management
     PluginManager& plugins() { return plugin_mgr_; }
-
+    std::optional<double> get_last_io_time(const std::string& name);
 private:
     std::map<std::string, std::unique_ptr<GraphRuntime>> graphs_; // name -> runtime
     PluginManager plugin_mgr_;

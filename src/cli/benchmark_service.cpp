@@ -1,18 +1,17 @@
-// FILE: src/cli/benchmark_service.cpp (已更新)
-
+// in: src/cli/benchmark_service.cpp (OVERWRITE)
 #include "cli/benchmark_service.hpp"
 #include "cli/benchmark_yaml_generator.hpp"
 #include <numeric>
 #include <algorithm>
 #include <fstream>
 #include <filesystem>
-#include "kernel/kernel.hpp"
+#include "kernel/kernel.hpp" // 包含 Kernel 头文件以访问 InteractionService
 
 namespace fs = std::filesystem;
 
 namespace ps {
 
-// 新增：清理函数，用于删除上次运行生成的临时文件
+// [新增] 清理函数，用于删除上次运行生成的临时文件
 static void cleanup_generated_files(const std::string& benchmark_dir) {
     fs::path dir(benchmark_dir);
     if (!fs::exists(dir) || !fs::is_directory(dir)) {
@@ -47,7 +46,7 @@ static void cleanup_generated_files(const std::string& benchmark_dir) {
 
 BenchmarkService::BenchmarkService(ps::InteractionService& svc) : svc_(svc) {}
 
-// 修复：更新函数签名以接收 benchmark_dir
+// [修复] 更新函数签名以接收 benchmark_dir
 BenchmarkResult BenchmarkService::Run(const std::string& benchmark_dir, const BenchmarkSessionConfig& config, int runs) {
     std::vector<BenchmarkResult> all_runs;
     all_runs.reserve(runs);
@@ -71,6 +70,7 @@ BenchmarkResult BenchmarkService::Run(const std::string& benchmark_dir, const Be
     for (int i = 0; i < runs; ++i) {
         const std::string session_name = "__benchmark_temp";
         
+        // 注意：这里 root_dir 我们直接使用 benchmark_dir，以确保 session 文件在 benchmark 目录下创建
         auto loaded_name = svc_.cmd_load_graph(session_name, benchmark_dir, graph_yaml_path);
         if (!loaded_name) {
             throw std::runtime_error("Failed to load temporary benchmark graph into session root: " + benchmark_dir);
@@ -78,7 +78,9 @@ BenchmarkResult BenchmarkService::Run(const std::string& benchmark_dir, const Be
 
         BenchmarkResult single_run_result;
         single_run_result.benchmark_name = config.name;
+        // [修改] 设置线程数
         single_run_result.num_threads = config.execution.threads > 0 ? config.execution.threads : std::thread::hardware_concurrency();
+        
         auto start_total = std::chrono::high_resolution_clock::now();
         
         bool success = svc_.cmd_compute(session_name, target_node_id, "int8", 
@@ -86,23 +88,16 @@ BenchmarkResult BenchmarkService::Run(const std::string& benchmark_dir, const Be
                                         true,  // timing
                                         true,  // parallel
                                         true,  // quiet
-                                        true,  // <--- FIX: disable_disk_cache
+                                        true,  // [修复] disable_disk_cache = true, 确保测量纯计算性能
                                         &single_run_result.events);
-        // We need a way to get the IO time from the service. Let's add an API for that.
-
-        // Let's imagine this new API exists in InteractionService:
-        // std::optional<double> cmd_get_last_io_time(const std::string& graph);
-        // which calls kernel, which calls graph->total_io_time_ms.
-
-
 
         auto end_total = std::chrono::high_resolution_clock::now();
         single_run_result.total_duration_ms = std::chrono::duration<double, std::milli>(end_total - start_total).count();
-        // auto last_io_time = svc_.cmd_get_last_io_time(session_name);
-        // if (last_io_time) {
-        //     single_run_result.io_duration_ms = *last_io_time;
-        // }
-
+        
+        auto last_io_time = svc_.cmd_get_last_io_time(session_name);
+        if (last_io_time) {
+            single_run_result.io_duration_ms = *last_io_time;
+        }
         // --- 核心修复逻辑 ---
         if (!success) {
             svc_.cmd_close_graph(session_name); // 在抛出异常前，先清理session
@@ -121,6 +116,7 @@ BenchmarkResult BenchmarkService::Run(const std::string& benchmark_dir, const Be
     final_result.op_name = config.auto_generate ? config.generator_config.main_op_type : "custom";
     final_result.width = config.auto_generate ? config.generator_config.width : 0;
     final_result.height = config.auto_generate ? config.generator_config.height : 0;
+    // [修改] 设置最终报告的线程数
     final_result.num_threads = config.execution.threads > 0 ? config.execution.threads : std::thread::hardware_concurrency();
     
     analyze_results(final_result, all_runs);
@@ -144,21 +140,22 @@ BenchmarkResult BenchmarkService::Run(const std::string& benchmark_dir, const Be
  */
 void BenchmarkService::analyze_results(BenchmarkResult& final_result, const std::vector<BenchmarkResult>& all_runs) {
     if (all_runs.empty()) return;
-    // 1. Aggregate Total Time (Average)
+
+    // 1. 聚合总时间 (平均值)
     double total_duration_sum = 0.0;
     for (const auto& run : all_runs) {
         total_duration_sum += run.total_duration_ms;
     }
     final_result.total_duration_ms = total_duration_sum / all_runs.size();
-    // 2. Aggregate Typical Execution Time (already implemented)
+
+    // 2. 聚合典型执行时间 (去除离群值)
     std::vector<double> execution_times;
     const std::string& target_op_name = final_result.op_name;
 
     for (const auto& run : all_runs) {
         double total_exec_time_for_target_op = 0.0;
         for (const auto& event : run.events) {
-            // 只累加与目标操作名称匹配的事件
-            if (event.op_name == target_op_name) {
+            if (event.op_name == target_op_name && event.source == "computed") {
                 total_exec_time_for_target_op += event.execution_duration_ms;
             }
         }
@@ -167,7 +164,7 @@ void BenchmarkService::analyze_results(BenchmarkResult& final_result, const std:
 
     std::sort(execution_times.begin(), execution_times.end());
     
-    size_t outliers_count = execution_times.size() / 5;
+    size_t outliers_count = execution_times.size() / 5; // 去掉前后20%
     size_t start_index = outliers_count;
     size_t count = execution_times.size() - 2 * outliers_count;
 
@@ -175,36 +172,28 @@ void BenchmarkService::analyze_results(BenchmarkResult& final_result, const std:
         double sum = std::accumulate(execution_times.begin() + start_index, execution_times.begin() + start_index + count, 0.0);
         final_result.typical_execution_time_ms = sum / count;
     } else if (!execution_times.empty()) {
-        final_result.typical_execution_time_ms = execution_times[0];
+        final_result.typical_execution_time_ms = execution_times[0]; // 如果数据太少，则取第一个
     }
-    // 3. Aggregate IO Time (Average)
+
+    // 3. [修改] 聚合IO时间 (平均值)
     double total_io_sum = 0.0;
     for (const auto& run : all_runs) {
-        // We need to extract the IO time from the NodeGraph after each run.
-        // Let's assume the compute call returns it or we can fetch it.
-        // For now, let's add a placeholder in BenchmarkResult from the run.
-        // Let's modify the compute call to populate this.
-        
-        // Let's assume BenchmarkResult now has io_duration_ms for a single run
         total_io_sum += run.io_duration_ms;
     }
     final_result.io_duration_ms = total_io_sum / all_runs.size();
-    // 4. Calculate Scheduler Overhead (Placeholder for now)
-    // In the future, with a real parallel scheduler:
-    // double total_node_execution_sum = 0.0;
-    // for (const auto& event : final_result.events) {
-    //     total_node_execution_sum += event.execution_duration_ms;
-    // }
-    // final_result.scheduler_overhead_ms = final_result.total_duration_ms - total_node_execution_sum - final_result.io_duration_ms;
-    final_result.scheduler_overhead_ms = 0.0; // Placeholder until parallel scheduler is implemented
     
+    // 4. 计算调度器开销 (占位符)
+    final_result.scheduler_overhead_ms = 0.0; 
+    
+    // 5. 填充环境信息 (占位符)
     final_result.cpu_info = "Unknown CPU";
     final_result.os_info = "Unknown OS";
     final_result.compiler_info = "Unknown Compiler";
 }
 
+
 std::vector<BenchmarkResult> BenchmarkService::RunAll(const std::string& benchmark_dir) {
-    // 修复：在所有测试开始前，执行清理操作
+    // [修复] 在所有测试开始前，执行清理操作
     std::cout << "Cleaning up previous benchmark artifacts in '" << benchmark_dir << "'..." << std::endl;
     cleanup_generated_files(benchmark_dir);
 
@@ -214,8 +203,8 @@ std::vector<BenchmarkResult> BenchmarkService::RunAll(const std::string& benchma
         if (config.enabled) {
             std::cout << "Running benchmark: " << config.name << "..." << std::endl;
             try {
-                // 修复：将 benchmark_dir 传递给 Run 函数
-                results.push_back(Run(benchmark_dir, config));
+                // [修复] 将 benchmark_dir 和 runs 次数传递给 Run 函数
+                results.push_back(Run(benchmark_dir, config, config.execution.runs));
             } catch (const std::exception& e) {
                 std::cerr << "Error running benchmark '" << config.name << "': " << e.what() << std::endl;
             }
@@ -223,6 +212,7 @@ std::vector<BenchmarkResult> BenchmarkService::RunAll(const std::string& benchma
     }
     return results;
 }
+
 
 std::vector<BenchmarkSessionConfig> BenchmarkService::load_configs(const std::string& benchmark_dir) {
     fs::path config_path = fs::path(benchmark_dir) / "benchmark_config.yaml";

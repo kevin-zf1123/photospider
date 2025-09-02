@@ -1,4 +1,3 @@
-// FILE: include/node_graph.hpp
 #pragma once
 #include "ps_types.hpp"
 #include "node.hpp"
@@ -147,6 +146,7 @@ public:
     // Streaming compute events (separate from timers)
     struct ComputeEvent { int id; std::string name; std::string source; double elapsed_ms; };
     std::vector<ComputeEvent> drain_compute_events();
+    // [新增] 用于累加IO时间的原子变量
     std::atomic<double> total_io_time_ms{0.0};
 private:
     // Internal DFS compute helper; allow_disk_cache controls whether disk caches may be used.

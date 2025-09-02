@@ -387,3 +387,19 @@ std::optional<std::vector<NodeGraph::ComputeEvent>> Kernel::drain_compute_events
 }
 
 } // namespace ps
+namespace ps {
+std::optional<double> Kernel::get_last_io_time(const std::string& name) {
+    auto it = graphs_.find(name);
+    if (it == graphs_.end()) {
+        return std::nullopt;
+    }
+    try {
+        // Post a task to the graph's dedicated thread to safely read the value
+        return it->second->post([](NodeGraph& g) {
+            return g.total_io_time_ms.load();
+        }).get();
+    } catch (...) {
+        return std::nullopt;
+    }
+}
+} // namespace ps
