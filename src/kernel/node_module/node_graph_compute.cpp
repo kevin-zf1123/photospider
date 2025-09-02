@@ -133,144 +133,228 @@ cv::Rect calculate_halo(const cv::Rect& roi, int halo_size, const cv::Size& boun
  *   - 对于 Tiled 计算模式，若节点非 "image_generator" 且缺少图像输入，将抛出异常。
  *   - 详细的计算耗时（依赖解析和核心执行）仅在 benchmark_events 不为 nullptr 时记录。
  */
-NodeOutput& NodeGraph::compute_internal(int node_id, const std::string& cache_precision, std::unordered_map<int, bool>& visiting, bool enable_timing, bool allow_disk_cache,
-                                        std::vector<BenchmarkEvent>* benchmark_events) {
+NodeOutput& NodeGraph::compute_internal(int node_id,
+    const std::string& cache_precision,
+    std::unordered_map<int, bool>& visiting,
+    bool enable_timing,
+    bool allow_disk_cache,
+    std::vector<BenchmarkEvent>* benchmark_events)
+{
     auto& target_node = nodes.at(node_id);
     std::string result_source = "unknown";
 
     // 将计时器移到更早的位置，以捕获依赖解析时间
     auto start_time_total = std::chrono::high_resolution_clock::now();
-    
-    // 创建一个 BenchmarkEvent 来记录本次调用的数据
+
+    // 创建并初始化 BenchmarkEvent
     BenchmarkEvent current_event;
     current_event.node_id = node_id;
+    current_event.op_name = make_key(target_node.type, target_node.subtype);
     current_event.dependency_start_time = start_time_total;
 
     do {
-        // 1. 缓存检查
-        if (target_node.cached_output.has_value()) { result_source = "memory_cache"; break; }
-        if (allow_disk_cache && try_load_from_disk_cache(target_node)) { result_source = "disk_cache"; break; }
+        // 1. 内存／磁盘缓存检测
+        if (target_node.cached_output.has_value()) {
+            result_source = "memory_cache";
+            break;
+        }
+        if (allow_disk_cache && try_load_from_disk_cache(target_node)) {
+            result_source = "disk_cache";
+            break;
+        }
 
-        // 2. 依赖计算与参数解析
-        if (visiting[node_id]) throw GraphError(GraphErrc::Cycle, "Cycle detected: " + std::to_string(node_id));
+        // 2. 循环依赖检测
+        if (visiting[node_id]) {
+            throw GraphError(GraphErrc::Cycle,
+                "Cycle detected: " + std::to_string(node_id));
+        }
         visiting[node_id] = true;
-        
-        target_node.runtime_parameters = target_node.parameters ? target_node.parameters : YAML::Node(YAML::NodeType::Map);
-        for (const auto& p_input : target_node.parameter_inputs) {
-            if (p_input.from_node_id == -1) continue;
-            // 递归调用时传递 benchmark_events
-            const auto& upstream_output = compute_internal(p_input.from_node_id, cache_precision, visiting, enable_timing, allow_disk_cache, benchmark_events);
-            auto it = upstream_output.data.find(p_input.from_output_name);
-            if (it == upstream_output.data.end()) throw GraphError(GraphErrc::MissingDependency, "Node " + std::to_string(p_input.from_node_id) + " did not produce output '" + p_input.from_output_name + "'");
-            target_node.runtime_parameters[p_input.to_parameter_name] = it->second;
-        }
 
-        std::vector<const NodeOutput*> monolithic_inputs;
-        for (const auto& i_input : target_node.image_inputs) {
-            if (i_input.from_node_id != -1) {
-                // 递归调用时传递 benchmark_events
-                monolithic_inputs.push_back(&compute_internal(i_input.from_node_id, cache_precision, visiting, enable_timing, allow_disk_cache, benchmark_events));
+        // 3. 参数依赖解析
+        target_node.runtime_parameters =
+            target_node.parameters
+            ? target_node.parameters
+            : YAML::Node(YAML::NodeType::Map);
+
+        for (auto const& p_input : target_node.parameter_inputs) {
+            if (p_input.from_node_id < 0) continue;
+            auto const& up_out = compute_internal(
+                p_input.from_node_id,
+                cache_precision,
+                visiting,
+                enable_timing,
+                allow_disk_cache,
+                benchmark_events);
+            auto it = up_out.data.find(p_input.from_output_name);
+            if (it == up_out.data.end()) {
+                throw GraphError(GraphErrc::MissingDependency,
+                    "Node " + std::to_string(p_input.from_node_id) +
+                    " did not produce output '" +
+                    p_input.from_output_name + "'");
             }
+            target_node.runtime_parameters[
+                p_input.to_parameter_name] = it->second;
         }
-        
-        // 3. 获取操作函数
-        auto op_variant_opt = OpRegistry::instance().find(target_node.type, target_node.subtype);
-        if (!op_variant_opt) throw GraphError(GraphErrc::NoOperation, "No op for " + target_node.type + ":" + target_node.subtype);
 
-        // 在纯计算开始前记录时间戳
-        current_event.execution_start_time = std::chrono::high_resolution_clock::now();
+        // 4. 图像依赖解析
+        std::vector<const NodeOutput*> monolithic_inputs;
+        for (auto const& i_input : target_node.image_inputs) {
+            if (i_input.from_node_id < 0) continue;
+            monolithic_inputs.push_back(
+                &compute_internal(
+                    i_input.from_node_id,
+                    cache_precision,
+                    visiting,
+                    enable_timing,
+                    allow_disk_cache,
+                    benchmark_events));
+        }
 
-        // 4. 核心调度逻辑
+        // 5. 查找并派发 Op
+        auto op_opt = OpRegistry::instance().find(
+            target_node.type, target_node.subtype);
+        if (!op_opt) {
+            throw GraphError(GraphErrc::NoOperation,
+                "No op for " + target_node.type +
+                ":" + target_node.subtype);
+        }
+
+        // 6. 执行计时开始
+        current_event.execution_start_time =
+            std::chrono::high_resolution_clock::now();
+
         std::visit([&](auto&& op_func) {
             using T = std::decay_t<decltype(op_func)>;
-            
-            // --- 路径 A: Monolithic (整体计算) ---
+
+            // Monolithic
             if constexpr (std::is_same_v<T, MonolithicOpFunc>) {
-                target_node.cached_output = op_func(target_node, monolithic_inputs);
-            } 
-            // --- 路径 B: Tiled (分块计算) ---
+                target_node.cached_output =
+                    op_func(target_node, monolithic_inputs);
+            }
+            // Tiled
             else if constexpr (std::is_same_v<T, TileOpFunc>) {
-                if (monolithic_inputs.empty() && target_node.type != "image_generator") {
-                    throw GraphError(GraphErrc::MissingDependency, "Tiled node '" + target_node.name + "' requires at least one image input to infer output size.");
+                if (monolithic_inputs.empty() &&
+                    target_node.type != "image_generator")
+                {
+                    throw GraphError(GraphErrc::MissingDependency,
+                        "Tiled node '" + target_node.name +
+                        "' requires at least one image input");
                 }
-                
-                int out_width = monolithic_inputs.empty() ? as_int_flexible(target_node.runtime_parameters, "width", 256) : monolithic_inputs[0]->image_buffer.width;
-                int out_height = monolithic_inputs.empty() ? as_int_flexible(target_node.runtime_parameters, "height", 256) : monolithic_inputs[0]->image_buffer.height;
-                int out_channels = monolithic_inputs.empty() ? 1 : monolithic_inputs[0]->image_buffer.channels;
-                ps::DataType out_type = monolithic_inputs.empty() ? ps::DataType::FLOAT32 : monolithic_inputs[0]->image_buffer.type;
 
+                // 推断输出尺寸
+                int out_w = monolithic_inputs.empty()
+                    ? as_int_flexible(target_node.runtime_parameters,
+                        "width", 256)
+                    : monolithic_inputs[0]->image_buffer.width;
+                int out_h = monolithic_inputs.empty()
+                    ? as_int_flexible(target_node.runtime_parameters,
+                        "height", 256)
+                    : monolithic_inputs[0]->image_buffer.height;
+                int out_c = monolithic_inputs.empty()
+                    ? 1
+                    : monolithic_inputs[0]->image_buffer.channels;
+                auto out_t = monolithic_inputs.empty()
+                    ? ps::DataType::FLOAT32
+                    : monolithic_inputs[0]->image_buffer.type;
+
+                // 分配输出缓冲
                 target_node.cached_output = NodeOutput();
-                auto& output_buffer = target_node.cached_output->image_buffer;
-                output_buffer.width = out_width;
-                output_buffer.height = out_height;
-                output_buffer.channels = out_channels;
-                output_buffer.type = out_type;
-                
-                size_t pixel_size = sizeof(float); // 假设
-                output_buffer.step = out_width * out_channels * pixel_size;
-                output_buffer.data.reset(new char[output_buffer.step * output_buffer.height], std::default_delete<char[]>());
+                auto& ob = target_node.cached_output->image_buffer;
+                ob.width = out_w; ob.height = out_h;
+                ob.channels = out_c; ob.type = out_t;
+                size_t pix_sz = sizeof(float);
+                ob.step = out_w * out_c * pix_sz;
+                ob.data.reset(
+                    new char[ob.step * ob.height],
+                    std::default_delete<char[]>());
 
-                const int TILE_SIZE = 256;
-                const int HALO_SIZE = 16; // 暂时硬编码
-
-                for (int y = 0; y < output_buffer.height; y += TILE_SIZE) {
-                    for (int x = 0; x < output_buffer.width; x += TILE_SIZE) {
+                const int TILE_SIZE = 256, HALO_SIZE = 16;
+                for (int y = 0; y < ob.height; y += TILE_SIZE) {
+                    for (int x = 0; x < ob.width; x += TILE_SIZE) {
                         ps::TileTask task;
                         task.node = &target_node;
-                        task.output_tile.buffer = &output_buffer;
-                        task.output_tile.roi = cv::Rect(x, y, 
-                                                        std::min(TILE_SIZE, output_buffer.width - x),
-                                                        std::min(TILE_SIZE, output_buffer.height - y));
+                        task.output_tile.buffer = &ob;
+                        task.output_tile.roi = cv::Rect(
+                            x, y,
+                            std::min(TILE_SIZE, ob.width - x),
+                            std::min(TILE_SIZE, ob.height - y));
 
-                        for (const auto* input_node_output : monolithic_inputs) {
-                            const auto& input_buffer = input_node_output->image_buffer;
-                            ps::Tile input_tile;
-                            input_tile.buffer = const_cast<ps::ImageBuffer*>(&input_buffer);
-                            input_tile.roi = calculate_halo(task.output_tile.roi, HALO_SIZE, cv::Size(input_buffer.width, input_buffer.height));
-                            task.input_tiles.push_back(input_tile);
+                        for (auto const* in_out : monolithic_inputs) {
+                            ps::Tile in_tile;
+                            in_tile.buffer =
+                                const_cast<ps::ImageBuffer*>(
+                                    &in_out->image_buffer);
+                            in_tile.roi = calculate_halo(
+                                task.output_tile.roi,
+                                HALO_SIZE,
+                                {in_out->image_buffer.width,
+                                    in_out->image_buffer.height});
+                            task.input_tiles.push_back(in_tile);
                         }
-                        
                         execute_tile_task(task, op_func);
                     }
                 }
             }
-        }, *op_variant_opt);
+        }, *op_opt);
 
         result_source = "computed";
         save_cache_if_configured(target_node, cache_precision);
         visiting[node_id] = false;
 
-    } while(false);
-    
-    // 记录结束时间戳
+    } while (false);
+
+    // 7. 结束计时
     auto end_time_total = std::chrono::high_resolution_clock::now();
     if (result_source == "computed") {
         current_event.execution_end_time = end_time_total;
     } else {
+        // 缓存命中时，执行时长设为 0
         current_event.execution_start_time = start_time_total;
         current_event.execution_end_time = start_time_total;
     }
-    
-    // 计时和事件记录
+
     current_event.source = result_source;
+
+    // 8. 全局与本地计时记录
     if (enable_timing) {
-        std::chrono::duration<double, std::milli> elapsed_total = end_time_total - start_time_total;
+        auto tot = std::chrono::duration<double,
+            std::milli>(end_time_total - start_time_total);
         {
-            std::lock_guard<std::mutex> lk(timing_mutex_);
-            this->timing_results.node_timings.push_back({target_node.id, target_node.name, elapsed_total.count(), result_source});
+            std::lock_guard lk(timing_mutex_);
+            timing_results.node_timings.push_back({
+                target_node.id,
+                target_node.name,
+                tot.count(),
+                result_source});
         }
-        push_compute_event(target_node.id, target_node.name, result_source, elapsed_total.count());
+        push_compute_event(
+            target_node.id,
+            target_node.name,
+            result_source,
+            tot.count());
     } else {
-        push_compute_event(target_node.id, target_node.name, result_source, 0.0);
+        push_compute_event(
+            target_node.id,
+            target_node.name,
+            result_source,
+            0.0);
     }
-    
-    // 如果启用了 benchmark，计算并记录详细耗时
+
+    // 9. 细节 Benchmark 记录
     if (benchmark_events) {
-        current_event.execution_duration_ms = std::chrono::duration<double, std::milli>(current_event.execution_end_time - current_event.execution_start_time).count();
-        current_event.dependency_duration_ms = std::chrono::duration<double, std::milli>(current_event.execution_start_time - current_event.dependency_start_time).count();
+        current_event.execution_duration_ms =
+            std::chrono::duration<double,
+                std::milli>(current_event.execution_end_time -
+                                 current_event.execution_start_time)
+                .count();
+        current_event.dependency_duration_ms =
+            std::chrono::duration<double,
+                std::milli>(current_event.execution_start_time -
+                                 current_event.dependency_start_time)
+                .count();
         benchmark_events->push_back(current_event);
     }
-    
+
     return *target_node.cached_output;
 }
 

@@ -15,6 +15,7 @@ namespace ps {
  */
 struct BenchmarkEvent {
     int node_id;
+    std::string op_name; // e.g., "image_process:gaussian_blur"
     int thread_id = 0; // 线程ID，在当前顺序实现中默认为0
 
     // 时间点记录
@@ -38,7 +39,7 @@ struct BenchmarkEvent {
 struct BenchmarkResult {
     // --- 配置信息 ---
     std::string benchmark_name; // 测试会话名称, e.g., "small_square_blur"
-    std::string op_name;        // 核心测试的操作, e.g., "image_process:gaussian_blur"
+    std::string op_name;        // 核心测试的操作, e.g., "image_process:gaussian_blur"    
     int width = 0, height = 0;
     int num_threads = 1;        // 本次运行的线程数
 

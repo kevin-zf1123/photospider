@@ -90,6 +90,13 @@ bool handle_bench(std::istringstream& iss,
                   CliConfig& config);
 void print_help_bench(const CliConfig& config);
 
+bool handle_benchmark(std::istringstream& iss,
+                      ps::InteractionService& svc,
+                      std::string& current_graph,
+                      bool& modified,
+                      CliConfig& config);
+void print_help_benchmark(const CliConfig& config);
+
 // traversal
 bool handle_traversal(std::istringstream& iss,
                       ps::InteractionService& svc,

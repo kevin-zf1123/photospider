@@ -62,6 +62,8 @@ bool process_command(const std::string& line,
             return handle_exit(iss, svc, current_graph, modified, config);
         } else if (cmd == "bench") {
             return handle_bench(iss, svc, current_graph, modified, config);
+        } else if (cmd == "benchmark") {
+            return handle_benchmark(iss, svc, current_graph, modified, config);
         } else {
             std::cout << "Unknown command: " << cmd << ". Type 'help' for a list of commands.\n";
         }

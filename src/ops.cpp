@@ -267,10 +267,11 @@ static void op_curve_transform_tiled(const Node& node, const Tile& output_tile, 
 }
 
 static void op_gaussian_blur_tiled(const Node& node, const Tile& output_tile, const std::vector<Tile>& input_tiles) {
-    // 修正: 加锁保护所有OpenCV操作
     std::lock_guard<std::mutex> lock(g_opencv_op_mutex);
 
-    if (input_tiles.empty()) throw GraphError(GraphErrc::MissingDependency, "gaussian_blur requires one input tile with halo.");
+    if (input_tiles.empty()) {
+        throw GraphError(GraphErrc::MissingDependency, "gaussian_blur requires one input tile with halo.");
+    }
 
     const Tile& input_tile_with_halo = input_tiles[0];
     cv::Mat input_mat = toCvMat(input_tile_with_halo);
@@ -283,14 +284,31 @@ static void op_gaussian_blur_tiled(const Node& node, const Tile& output_tile, co
     double sigmaX = as_double_flexible(P, "sigmaX", 0.0);
     
     cv::Mat blurred_large_tile;
+    // 使用 BORDER_REPLICATE 模式处理边缘，这对于小图像尤其重要
     cv::GaussianBlur(input_mat, blurred_large_tile, cv::Size(k, k), sigmaX, 0, cv::BORDER_REPLICATE);
 
-    int halo_size = k / 2;
-    cv::Rect valid_roi(halo_size, halo_size, output_mat.cols, output_mat.rows);
-    if (valid_roi.x + valid_roi.width > blurred_large_tile.cols || valid_roi.y + valid_roi.height > blurred_large_tile.rows) {
-        throw std::runtime_error("Tiled Gaussian Blur: Halo logic error, valid ROI exceeds blurred tile bounds.");
+    // --- 核心修复逻辑 ---
+    // 旧的、错误的 valid_roi 计算方式:
+    // int halo_size = k / 2;
+    // cv::Rect valid_roi(halo_size, halo_size, output_mat.cols, output_mat.rows);
+
+    // 新的、健壮的 valid_roi 计算方式：
+    // 计算输出ROI在带光环的输入ROI中的相对偏移
+    int offset_x = output_tile.roi.x - input_tile_with_halo.roi.x;
+    int offset_y = output_tile.roi.y - input_tile_with_halo.roi.y;
+
+    // 创建正确的 valid_roi
+    cv::Rect valid_roi(offset_x, offset_y, output_mat.cols, output_mat.rows);
+
+    // 安全检查，确保 valid_roi 不会超出模糊后图块的边界
+    if (valid_roi.x < 0 || valid_roi.y < 0 ||
+        valid_roi.x + valid_roi.width > blurred_large_tile.cols ||
+        valid_roi.y + valid_roi.height > blurred_large_tile.rows) {
+        throw std::runtime_error("Tiled Gaussian Blur: Catastrophic logic error, calculated valid ROI is still out of bounds.");
     }
+    
     blurred_large_tile(valid_roi).copyTo(output_mat);
+    // --- 修复结束 ---
 }
 
 static void op_add_weighted_tiled(const Node& node, const Tile& output_tile, const std::vector<Tile>& input_tiles) {

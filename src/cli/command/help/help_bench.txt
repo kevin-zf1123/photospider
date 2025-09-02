@@ -1,11 +1,12 @@
 bench <benchmark_dir> <output_dir>
 
 Run a suite of benchmarks defined in <benchmark_dir>/benchmark_config.yaml.
-The command will execute all enabled test sessions specified in the config file.
+This command executes all sessions marked as 'enabled' in the config file.
 
-- <benchmark_dir>: Directory containing benchmark_config.yaml and any manually
-                   specified graph YAML files.
-- <output_dir>:    Directory where the results (summary.md, raw_data.csv) will be saved.
+- <benchmark_dir>: Directory containing benchmark_config.yaml.
+- <output_dir>:    Directory to save the results (summary.md, raw_data.csv).
 
 Example:
   bench benchmarks/milestone2 out/milestone2_results
+
+See also: `benchmark` (to configure the test suite).

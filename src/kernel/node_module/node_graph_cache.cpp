@@ -8,27 +8,75 @@ namespace ps {
 
 fs::path NodeGraph::node_cache_dir(int node_id) const { return cache_root / std::to_string(node_id); }
 
+/**
+ * @brief 根据配置保存节点的缓存数据。
+ *
+ * 当满足以下条件时，此函数将节点的缓存数据保存为图像及相应的元数据：
+ *   - cache_root 不为空；
+ *   - 节点的缓存列表 caches 非空；
+ *   - 节点的 cached_output 有有效的值。
+ *
+ * 对于每个缓存条目，如果缓存类型为 "image" 且缓存位置不为空，将进行以下操作：
+ *   1. 根据节点的 id 生成缓存目录，并确保目录已创建。
+ *   2. 拼接目录和缓存条目的 location 得到最终保存路径。
+ *
+ * 核心修复逻辑：
+ *   - 在保存图像之前，首先检查输出图像缓冲区 image_buffer 的宽度和高度是否均大于 0，
+ *     因为某些分析节点可能会包含 "image" 类型的缓存条目但不输出实际图像。
+ *   - 如果 image_buffer 有效，则转换为 OpenCV 的 cv::Mat 对象。
+ *   - 如果转换后的图像不为空，根据 cache_precision 参数的值进行图像数据转换：
+ *       - 如果 cache_precision 为 "int16"，则将图像转换为 CV_16U 类型，并按适当比例缩放；
+ *       - 否则，默认转换为 CV_8U 类型，并按另一适当比例缩放。
+ *   - 将转换后的图像保存至最终文件路径。
+ *
+ * 除图像保存外，如果输出中包含非空的元数据（data 部分），
+ * 则将该元数据保存到与图像文件同名但扩展名为 ".yml" 的文件中。
+ *
+ * @param node  节点对象，包含图像输出、缓存配置及相关元数据。
+ * @param cache_precision 指定图像缓存精度，如 "int16" 表示 16 位整数精度，否则默认使用 8 位精度。
+ */
 void NodeGraph::save_cache_if_configured(const Node& node, const std::string& cache_precision) const {
-    if (cache_root.empty() || node.caches.empty() || !node.cached_output.has_value()) return;
+    if (cache_root.empty() || node.caches.empty() || !node.cached_output.has_value()) {
+        return;
+    }
+
     const auto& output = *node.cached_output;
     for (const auto& cache_entry : node.caches) {
         if (cache_entry.cache_type == "image" && !cache_entry.location.empty()) {
-            fs::path dir = node_cache_dir(node.id); fs::create_directories(dir);
+            fs::path dir = node_cache_dir(node.id);
+            fs::create_directories(dir);
             fs::path final_path = dir / cache_entry.location;
 
-            // 使用适配器将 ImageBuffer 转为 Mat
-            cv::Mat mat_to_save = toCvMat(output.image_buffer);
+            // --- 核心修复逻辑 ---
+            // 在尝试保存图像之前，必须检查 image_buffer 是否有效。
+            // 一个分析节点（如 get_dimensions）可能有一个 "image" 类型的缓存条目
+            // （用于保存其分析结果的元数据），但它本身不输出图像。
+            if (output.image_buffer.width > 0 && output.image_buffer.height > 0) {
+                cv::Mat mat_to_save = toCvMat(output.image_buffer);
 
-            if (!mat_to_save.empty()) {
-                cv::Mat out_mat;
-                if (cache_precision == "int16") mat_to_save.convertTo(out_mat, CV_16U, 65535.0);
-                else mat_to_save.convertTo(out_mat, CV_8U, 255.0);
-                cv::imwrite(final_path.string(), out_mat);
+                // 这个检查现在变得有些冗余，但保留也无妨
+                if (!mat_to_save.empty()) {
+                    cv::Mat out_mat;
+                    if (cache_precision == "int16") {
+                        mat_to_save.convertTo(out_mat, CV_16U, 65535.0);
+                    } else {
+                        mat_to_save.convertTo(out_mat, CV_8U, 255.0);
+                    }
+                    cv::imwrite(final_path.string(), out_mat);
+                }
             }
+            // --- 修复结束 ---
+
+            // 元数据（data部分）的保存逻辑应该独立于图像保存
             if (!output.data.empty()) {
-                fs::path meta_path = final_path; meta_path.replace_extension(".yml");
-                YAML::Node meta_node; for(const auto& pair : output.data) meta_node[pair.first] = pair.second;
-                std::ofstream fout(meta_path); fout << meta_node;
+                fs::path meta_path = final_path;
+                meta_path.replace_extension(".yml");
+                YAML::Node meta_node;
+                for(const auto& pair : output.data) {
+                    meta_node[pair.first] = pair.second;
+                }
+                std::ofstream fout(meta_path);
+                fout << meta_node;
             }
         }
     }

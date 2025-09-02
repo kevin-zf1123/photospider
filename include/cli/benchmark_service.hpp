@@ -15,11 +15,13 @@ public:
 
     /**
      * @brief 运行单个基准测试配置。
+     * @param benchmark_dir 包含 benchmark_config.yaml 的目录路径。
      * @param config 测试会话的配置。
      * @param runs 重复运行的次数，用于统计分析。
      * @return 聚合和分析后的 BenchmarkResult。
      */
-    BenchmarkResult Run(const BenchmarkSessionConfig& config, int runs = 10);
+    // 修复：添加 benchmark_dir 参数
+    BenchmarkResult Run(const std::string& benchmark_dir, const BenchmarkSessionConfig& config, int runs = 10);
 
     /**
      * @brief 运行一个目录下的所有已启用的基准测试。
@@ -38,7 +40,6 @@ private:
      */
     void analyze_results(BenchmarkResult& final_result, const std::vector<BenchmarkResult>& all_runs);
 
-    // [新增] 辅助函数，用于加载配置文件
     std::vector<BenchmarkSessionConfig> load_configs(const std::string& benchmark_dir);
 };
 

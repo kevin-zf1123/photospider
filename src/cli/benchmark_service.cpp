@@ -1,46 +1,79 @@
-// FILE: src/cli/benchmark_service.cpp (新建文件)
+// FILE: src/cli/benchmark_service.cpp (已更新)
+
 #include "cli/benchmark_service.hpp"
 #include "cli/benchmark_yaml_generator.hpp"
-#include <numeric>   // for std::accumulate
-#include <algorithm> // for std::sort
+#include <numeric>
+#include <algorithm>
 #include <fstream>
 #include <filesystem>
-#include "kernel/kernel.hpp" // For GraphError
+#include "kernel/kernel.hpp"
+
+namespace fs = std::filesystem;
 
 namespace ps {
 
+// 新增：清理函数，用于删除上次运行生成的临时文件
+static void cleanup_generated_files(const std::string& benchmark_dir) {
+    fs::path dir(benchmark_dir);
+    if (!fs::exists(dir) || !fs::is_directory(dir)) {
+        return;
+    }
+
+    // 1. 清理临时 session 目录
+    fs::path temp_session_dir = dir / "__benchmark_temp";
+    if (fs::exists(temp_session_dir)) {
+        try {
+            fs::remove_all(temp_session_dir);
+        } catch (const fs::filesystem_error& e) {
+            std::cerr << "Warning: Could not remove temporary session directory: " << e.what() << std::endl;
+        }
+    }
+
+    // 2. 清理自动生成的 YAML 文件 (以 "__generated_" 开头)
+    for (const auto& entry : fs::directory_iterator(dir)) {
+        if (entry.is_regular_file()) {
+            std::string filename = entry.path().filename().string();
+            if (filename.rfind("__generated_", 0) == 0) {
+                try {
+                    fs::remove(entry.path());
+                } catch (const fs::filesystem_error& e) {
+                    std::cerr << "Warning: Could not remove generated YAML file: " << e.what() << std::endl;
+                }
+            }
+        }
+    }
+}
+
+
 BenchmarkService::BenchmarkService(ps::InteractionService& svc) : svc_(svc) {}
 
-BenchmarkResult BenchmarkService::Run(const BenchmarkSessionConfig& config, int runs) {
+// 修复：更新函数签名以接收 benchmark_dir
+BenchmarkResult BenchmarkService::Run(const std::string& benchmark_dir, const BenchmarkSessionConfig& config, int runs) {
     std::vector<BenchmarkResult> all_runs;
     all_runs.reserve(runs);
 
-    // 1. 生成或定位 YAML
-    std::string temp_yaml_path = (fs::temp_directory_path() / (config.name + ".yaml")).string();
+    std::string graph_yaml_path;
     if (config.auto_generate) {
+        graph_yaml_path = (fs::path(benchmark_dir) / ("__generated_" + config.name + ".yaml")).string();
         YAML::Node graph_yaml = YamlGenerator::Generate(config.generator_config);
-        std::ofstream fout(temp_yaml_path);
+        std::ofstream fout(graph_yaml_path);
         fout << graph_yaml;
     } else {
-        // 如果是手动指定的yaml，我们直接使用它
-        temp_yaml_path = config.yaml_path;
+        graph_yaml_path = config.yaml_path;
     }
     
-    // 寻找图中的最后一个节点作为计算目标
-    YAML::Node root = YAML::LoadFile(temp_yaml_path);
+    YAML::Node root = YAML::LoadFile(graph_yaml_path);
     if (!root.IsSequence() || root.size() == 0) {
         throw std::runtime_error("Benchmark YAML is not a valid sequence or is empty.");
     }
     int target_node_id = root[root.size()-1]["id"].as<int>();
 
-
     for (int i = 0; i < runs; ++i) {
         const std::string session_name = "__benchmark_temp";
         
-        // 2. 加载图会话
-        auto loaded_name = svc_.cmd_load_graph(session_name, "sessions", temp_yaml_path);
+        auto loaded_name = svc_.cmd_load_graph(session_name, benchmark_dir, graph_yaml_path);
         if (!loaded_name) {
-            throw std::runtime_error("Failed to load temporary benchmark graph.");
+            throw std::runtime_error("Failed to load temporary benchmark graph into session root: " + benchmark_dir);
         }
 
         BenchmarkResult single_run_result;
@@ -48,24 +81,24 @@ BenchmarkResult BenchmarkService::Run(const BenchmarkSessionConfig& config, int 
         
         auto start_total = std::chrono::high_resolution_clock::now();
         
-        // 3. 运行计算并收集事件
-        // 注意：这里的 compute_parallel 最终会调用到我们修改过的 compute_internal
         bool success = svc_.cmd_compute(session_name, target_node_id, "int8", true, true, true, true, false, &single_run_result.events);
 
         auto end_total = std::chrono::high_resolution_clock::now();
         single_run_result.total_duration_ms = std::chrono::duration<double, std::milli>(end_total - start_total).count();
 
+        // --- 核心修复逻辑 ---
         if (!success) {
-            std::cerr << "Warning: Benchmark run " << i << " for '" << config.name << "' failed." << std::endl;
+            svc_.cmd_close_graph(session_name); // 在抛出异常前，先清理session
+            auto last_err = svc_.cmd_last_error(session_name);
+            std::string reason = last_err ? last_err->message : "Unknown error during compute.";
+            throw std::runtime_error("Benchmark run " + std::to_string(i) + " for '" + config.name + "' failed. Reason: " + reason);
         }
+        // --- 修复结束 ---
 
-        // 4. 清理
         svc_.cmd_close_graph(session_name);
-
         all_runs.push_back(single_run_result);
     }
     
-    // 5. 分析并返回聚合结果
     BenchmarkResult final_result;
     final_result.benchmark_name = config.name;
     final_result.op_name = config.auto_generate ? config.generator_config.main_op_type : "custom";
@@ -74,28 +107,26 @@ BenchmarkResult BenchmarkService::Run(const BenchmarkSessionConfig& config, int 
     
     analyze_results(final_result, all_runs);
 
-    if (!config.auto_generate) {
-        // 不需要保留临时文件
-         fs::remove(temp_yaml_path);
-    }
-
     return final_result;
 }
 
+
 void BenchmarkService::analyze_results(BenchmarkResult& final_result, const std::vector<BenchmarkResult>& all_runs) {
     if (all_runs.empty()) return;
-
-    // 1. 计算总时间 (取第一次运行的总时间)
     final_result.total_duration_ms = all_runs[0].total_duration_ms;
 
-    // 2. 计算典型计算时间 (去除最高和最低的20%)
     std::vector<double> execution_times;
+    const std::string& target_op_name = final_result.op_name;
+
     for (const auto& run : all_runs) {
-        double total_exec_time = 0.0;
+        double total_exec_time_for_target_op = 0.0;
         for (const auto& event : run.events) {
-            total_exec_time += event.execution_duration_ms;
+            // 只累加与目标操作名称匹配的事件
+            if (event.op_name == target_op_name) {
+                total_exec_time_for_target_op += event.execution_duration_ms;
+            }
         }
-        execution_times.push_back(total_exec_time);
+        execution_times.push_back(total_exec_time_for_target_op);
     }
 
     std::sort(execution_times.begin(), execution_times.end());
@@ -108,25 +139,27 @@ void BenchmarkService::analyze_results(BenchmarkResult& final_result, const std:
         double sum = std::accumulate(execution_times.begin() + start_index, execution_times.begin() + start_index + count, 0.0);
         final_result.typical_execution_time_ms = sum / count;
     } else if (!execution_times.empty()) {
-        final_result.typical_execution_time_ms = execution_times[0]; // 如果数据太少，就取第一个
+        final_result.typical_execution_time_ms = execution_times[0];
     }
     
-    // 填充环境信息 (占位)
     final_result.cpu_info = "Unknown CPU";
     final_result.os_info = "Unknown OS";
     final_result.compiler_info = "Unknown Compiler";
 }
 
-
-// [新增] 实现 RunAll 和 load_configs
 std::vector<BenchmarkResult> BenchmarkService::RunAll(const std::string& benchmark_dir) {
+    // 修复：在所有测试开始前，执行清理操作
+    std::cout << "Cleaning up previous benchmark artifacts in '" << benchmark_dir << "'..." << std::endl;
+    cleanup_generated_files(benchmark_dir);
+
     auto configs = load_configs(benchmark_dir);
     std::vector<BenchmarkResult> results;
     for (const auto& config : configs) {
         if (config.enabled) {
             std::cout << "Running benchmark: " << config.name << "..." << std::endl;
             try {
-                results.push_back(Run(config));
+                // 修复：将 benchmark_dir 传递给 Run 函数
+                results.push_back(Run(benchmark_dir, config));
             } catch (const std::exception& e) {
                 std::cerr << "Error running benchmark '" << config.name << "': " << e.what() << std::endl;
             }
@@ -136,8 +169,6 @@ std::vector<BenchmarkResult> BenchmarkService::RunAll(const std::string& benchma
 }
 
 std::vector<BenchmarkSessionConfig> BenchmarkService::load_configs(const std::string& benchmark_dir) {
-    // 这个函数将在里程碑3中被TUI使用，现在我们先为`RunAll`提供一个基础实现。
-    // 它会读取 `benchmark_config.yaml`。
     fs::path config_path = fs::path(benchmark_dir) / "benchmark_config.yaml";
     if (!fs::exists(config_path)) {
         throw std::runtime_error("benchmark_config.yaml not found in: " + benchmark_dir);
@@ -159,12 +190,15 @@ std::vector<BenchmarkSessionConfig> BenchmarkService::load_configs(const std::st
             cfg.generator_config.chain_length = gen_cfg["chain_length"].as<int>(1);
             cfg.generator_config.num_outputs = gen_cfg["num_outputs"].as<int>(1);
         } else {
+            // 对于手动指定的YAML，我们假定它是相对于 benchmark_dir 的路径
             cfg.yaml_path = (fs::path(benchmark_dir) / session_node["yaml_path"].as<std::string>()).string();
+        }
+        if (session_node["statistics"] && session_node["statistics"].IsSequence()) {
+            cfg.statistics = session_node["statistics"].as<std::vector<std::string>>();
         }
         configs.push_back(cfg);
     }
     return configs;
 }
-
 
 } // namespace ps
