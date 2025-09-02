@@ -1,7 +1,7 @@
 #pragma once
 
 #include "kernel/interaction.hpp"
-#include "kernel/benchmark_types.hpp"
+#include "benchmark/benchmark_types.hpp"
 
 namespace ps {
 

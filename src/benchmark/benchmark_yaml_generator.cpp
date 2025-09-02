@@ -1,4 +1,4 @@
-#include "cli/benchmark_yaml_generator.hpp"
+#include "benchmark/benchmark_yaml_generator.hpp"
 
 namespace ps {
 

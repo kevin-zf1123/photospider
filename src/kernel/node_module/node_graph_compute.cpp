@@ -38,7 +38,7 @@
 #include <chrono>
 #include <unordered_map>
 #include <variant>
-#include "kernel/benchmark_types.hpp"
+#include "benchmark/benchmark_types.hpp"
 
 namespace ps {
 

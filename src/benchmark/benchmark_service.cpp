@@ -1,6 +1,5 @@
-// in: src/cli/benchmark_service.cpp (OVERWRITE)
-#include "cli/benchmark_service.hpp"
-#include "cli/benchmark_yaml_generator.hpp"
+#include "benchmark/benchmark_service.hpp"
+#include "benchmark/benchmark_yaml_generator.hpp"
 #include <numeric>
 #include <algorithm>
 #include <fstream>

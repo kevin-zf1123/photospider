@@ -1,7 +1,7 @@
 // in: src/cli/command/command_bench.cpp (OVERWRITE)
 #include "cli/command/commands.hpp"
 #include "cli/command/help_utils.hpp"
-#include "cli/benchmark_service.hpp"
+#include "benchmark/benchmark_service.hpp"
 #include <iostream>
 #include <fstream>
 #include <filesystem>

@@ -12,6 +12,7 @@
 #include "kernel/plugin_manager.hpp"
 #include <opencv2/opencv.hpp>
 
+
 namespace ps {
 
 class Kernel {

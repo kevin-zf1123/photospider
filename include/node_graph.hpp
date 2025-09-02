@@ -7,7 +7,7 @@
 #include <condition_variable>
 #include <atomic>
 #include <queue>
-#include "kernel/benchmark_types.hpp"
+#include "benchmark/benchmark_types.hpp"
 
 namespace ps {
 struct NodeTiming {

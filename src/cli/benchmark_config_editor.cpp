@@ -1,7 +1,7 @@
 // FILE: src/cli/benchmark_config_editor.cpp (已修正并增强)
 
 #include "cli/benchmark_config_editor.hpp"
-#include "kernel/benchmark_types.hpp"
+#include "benchmark/benchmark_types.hpp"
 #include "kernel/interaction.hpp"
 #include "ftxui/component/component.hpp"
 #include "ftxui/component/screen_interactive.hpp"
