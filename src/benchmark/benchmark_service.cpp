@@ -193,14 +193,14 @@ void BenchmarkService::analyze_results(BenchmarkResult& final_result, const std:
 
 std::vector<BenchmarkResult> BenchmarkService::RunAll(const std::string& benchmark_dir) {
     // [修复] 在所有测试开始前，执行清理操作
-    std::cout << "Cleaning up previous benchmark artifacts in '" << benchmark_dir << "'..." << std::endl;
+    // std::cout << "Cleaning up previous benchmark artifacts in '" << benchmark_dir << "'..." << std::endl;
     cleanup_generated_files(benchmark_dir);
 
     auto configs = load_configs(benchmark_dir);
     std::vector<BenchmarkResult> results;
     for (const auto& config : configs) {
         if (config.enabled) {
-            std::cout << "Running benchmark: " << config.name << "..." << std::endl;
+            // std::cout << "Running benchmark: " << config.name << "..." << std::endl;
             try {
                 // [修复] 将 benchmark_dir 和 runs 次数传递给 Run 函数
                 results.push_back(Run(benchmark_dir, config, config.execution.runs));

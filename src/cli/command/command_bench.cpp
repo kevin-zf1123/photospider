@@ -59,7 +59,17 @@ bool handle_bench(std::istringstream& iss,
     }
 
     try {
+        // 在这里添加UI反馈
+        std::cout << "Cleaning up previous benchmark artifacts in '" << benchmark_dir << "'..." << std::endl;
+        
         ps::BenchmarkService benchmark_svc(svc);
+        
+        // 注意：这里我们不能直接从 service 获取 configs 列表来打印，
+        // 但可以在 service 的 RunAll 内部处理。
+        // 为了简单起见，我们只在外部打印一个总的开始信息。
+        // 如果需要逐个打印，可以给 RunAll 增加一个进度回调函数。
+        std::cout << "Running all enabled benchmarks in '" << benchmark_dir << "'..." << std::endl;
+
         auto results = benchmark_svc.RunAll(benchmark_dir);
         save_benchmark_results(output_dir, results);
         std::cout << "Benchmark finished. Results saved to '" << output_dir << "'." << std::endl;
