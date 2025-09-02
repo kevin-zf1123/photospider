@@ -78,13 +78,30 @@ BenchmarkResult BenchmarkService::Run(const std::string& benchmark_dir, const Be
 
         BenchmarkResult single_run_result;
         single_run_result.benchmark_name = config.name;
-        
+        single_run_result.num_threads = config.execution.threads > 0 ? config.execution.threads : std::thread::hardware_concurrency();
         auto start_total = std::chrono::high_resolution_clock::now();
         
-        bool success = svc_.cmd_compute(session_name, target_node_id, "int8", true, true, true, true, false, &single_run_result.events);
+        bool success = svc_.cmd_compute(session_name, target_node_id, "int8", 
+                                        true,  // force (clears memory cache)
+                                        true,  // timing
+                                        true,  // parallel
+                                        true,  // quiet
+                                        true,  // <--- FIX: disable_disk_cache
+                                        &single_run_result.events);
+        // We need a way to get the IO time from the service. Let's add an API for that.
+
+        // Let's imagine this new API exists in InteractionService:
+        // std::optional<double> cmd_get_last_io_time(const std::string& graph);
+        // which calls kernel, which calls graph->total_io_time_ms.
+
+
 
         auto end_total = std::chrono::high_resolution_clock::now();
         single_run_result.total_duration_ms = std::chrono::duration<double, std::milli>(end_total - start_total).count();
+        // auto last_io_time = svc_.cmd_get_last_io_time(session_name);
+        // if (last_io_time) {
+        //     single_run_result.io_duration_ms = *last_io_time;
+        // }
 
         // --- 核心修复逻辑 ---
         if (!success) {
@@ -104,6 +121,7 @@ BenchmarkResult BenchmarkService::Run(const std::string& benchmark_dir, const Be
     final_result.op_name = config.auto_generate ? config.generator_config.main_op_type : "custom";
     final_result.width = config.auto_generate ? config.generator_config.width : 0;
     final_result.height = config.auto_generate ? config.generator_config.height : 0;
+    final_result.num_threads = config.execution.threads > 0 ? config.execution.threads : std::thread::hardware_concurrency();
     
     analyze_results(final_result, all_runs);
 
@@ -111,10 +129,28 @@ BenchmarkResult BenchmarkService::Run(const std::string& benchmark_dir, const Be
 }
 
 
+/**
+ * @brief 分析多次基准测试运行结果并汇总到 final_result 中
+ *
+ * 对提供的多次运行结果执行以下统计：
+ *   1. 计算所有运行的平均总耗时（total_duration_ms）
+ *   2. 提取与 final_result.op_name 匹配的事件执行时间，排序后去掉前后 20% 离群值，计算典型执行时间（typical_execution_time_ms）
+ *   3. 计算所有运行的平均 IO 耗时（io_duration_ms）
+ *   4. 占位计算调度器开销（scheduler_overhead_ms，目前暂为 0）
+ *   5. 填充 CPU、操作系统和编译器信息字段（cpu_info、os_info、compiler_info）
+ *
+ * @param[out] final_result 用于存放汇总后的基准测试结果
+ * @param[in]  all_runs     包含多次运行详细结果的向量，每个元素包含总耗时、事件列表和 IO 耗时等信息
+ */
 void BenchmarkService::analyze_results(BenchmarkResult& final_result, const std::vector<BenchmarkResult>& all_runs) {
     if (all_runs.empty()) return;
-    final_result.total_duration_ms = all_runs[0].total_duration_ms;
-
+    // 1. Aggregate Total Time (Average)
+    double total_duration_sum = 0.0;
+    for (const auto& run : all_runs) {
+        total_duration_sum += run.total_duration_ms;
+    }
+    final_result.total_duration_ms = total_duration_sum / all_runs.size();
+    // 2. Aggregate Typical Execution Time (already implemented)
     std::vector<double> execution_times;
     const std::string& target_op_name = final_result.op_name;
 
@@ -141,6 +177,26 @@ void BenchmarkService::analyze_results(BenchmarkResult& final_result, const std:
     } else if (!execution_times.empty()) {
         final_result.typical_execution_time_ms = execution_times[0];
     }
+    // 3. Aggregate IO Time (Average)
+    double total_io_sum = 0.0;
+    for (const auto& run : all_runs) {
+        // We need to extract the IO time from the NodeGraph after each run.
+        // Let's assume the compute call returns it or we can fetch it.
+        // For now, let's add a placeholder in BenchmarkResult from the run.
+        // Let's modify the compute call to populate this.
+        
+        // Let's assume BenchmarkResult now has io_duration_ms for a single run
+        total_io_sum += run.io_duration_ms;
+    }
+    final_result.io_duration_ms = total_io_sum / all_runs.size();
+    // 4. Calculate Scheduler Overhead (Placeholder for now)
+    // In the future, with a real parallel scheduler:
+    // double total_node_execution_sum = 0.0;
+    // for (const auto& event : final_result.events) {
+    //     total_node_execution_sum += event.execution_duration_ms;
+    // }
+    // final_result.scheduler_overhead_ms = final_result.total_duration_ms - total_node_execution_sum - final_result.io_duration_ms;
+    final_result.scheduler_overhead_ms = 0.0; // Placeholder until parallel scheduler is implemented
     
     final_result.cpu_info = "Unknown CPU";
     final_result.os_info = "Unknown OS";
@@ -195,6 +251,10 @@ std::vector<BenchmarkSessionConfig> BenchmarkService::load_configs(const std::st
         }
         if (session_node["statistics"] && session_node["statistics"].IsSequence()) {
             cfg.statistics = session_node["statistics"].as<std::vector<std::string>>();
+        }
+        if (session_node["execution"]) {
+            cfg.execution.runs = session_node["execution"]["runs"].as<int>(10);
+            cfg.execution.threads = session_node["execution"]["threads"].as<int>(0);
         }
         configs.push_back(cfg);
     }

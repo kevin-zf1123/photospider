@@ -63,23 +63,64 @@ struct BenchmarkResult {
 namespace ps {
 
 /**
- * @struct BenchmarkSessionConfig
- * @brief 描述一个独立的基准测试会话。
- *
- * 这个结构体对应于未来 benchmark_config.yaml 中的一个 session 条目。
+ * @brief 基准测试会话配置结构体
+ * @details
+ * 用于描述一次基准测试的整体参数，包括名称、启用状态、自动生成或加载现有配置、
+ * 执行策略以及需要收集的统计指标等。
  */
 struct BenchmarkSessionConfig {
+    /**
+     * @brief 会话名称
+     * @default "small_square_blur"
+     */
     std::string name;       // "small_square_blur"
+    /**
+     * @brief 是否启用该基准测试
+     * @default true
+     */
     bool enabled = true;
+    /**
+     * @brief 是否自动生成图结构配置
+     * @details
+     * 如果为 true，则使用 generator_config 所指定的参数动态生成图；
+     * 否则使用 yaml_path 指定的现有 YAML 文件。
+     * @default true
+     */
     bool auto_generate = true;
     
-    // 如果 auto_generate 为 true, 使用此配置
+    /**
+     * @brief 自动生成模式下的图生成配置
+     */
+
     GraphGenConfig generator_config; 
 
-    // 如果 auto_generate 为 false, 使用此现有 yaml 文件
+
+    /**
+     * @brief 非自动生成模式下的 YAML 文件路径
+     */
     std::string yaml_path; 
 
-    // 需要统计和报告的指标
+    /**
+     * @brief 执行配置
+     */
+    struct ExecutionConfig {
+        /**
+         * @brief 执行次数
+         * @default 10
+         */
+        int runs = 10;
+        /**
+         * @brief 使用的线程数
+         * @details
+         * 如果设置为 0，则自动使用 std::hardware_concurrency() 的值。
+         * @default 0
+         */
+        int threads = 0; // 0 means use hardware_concurrency
+    } execution;
+    /**
+     * @brief 要收集和报告的统计指标列表
+     */
+
     std::vector<std::string> statistics;
 };
 

@@ -297,6 +297,7 @@ NodeOutput& NodeGraph::compute_internal(int node_id,
             }
         }, *op_opt);
 
+        current_event.execution_end_time = std::chrono::high_resolution_clock::now();
         result_source = "computed";
         save_cache_if_configured(target_node, cache_precision);
         visiting[node_id] = false;
@@ -309,8 +310,8 @@ NodeOutput& NodeGraph::compute_internal(int node_id,
         current_event.execution_end_time = end_time_total;
     } else {
         // 缓存命中时，执行时长设为 0
-        current_event.execution_start_time = start_time_total;
-        current_event.execution_end_time = start_time_total;
+        current_event.execution_start_time = end_time_total;
+        current_event.execution_end_time = end_time_total;
     }
 
     current_event.source = result_source;
@@ -332,6 +333,10 @@ NodeOutput& NodeGraph::compute_internal(int node_id,
             target_node.name,
             result_source,
             tot.count());
+        // After the run, if we have a benchmark_events vector, we can find the
+        // top-level result and assign the IO time. This is a bit tricky.
+        // A simpler way is to modify BenchmarkService::Run to fetch it.
+        // Let's modify the service instead.
     } else {
         push_compute_event(
             target_node.id,
@@ -403,6 +408,7 @@ NodeOutput& NodeGraph::compute(int node_id, const std::string& cache_precision,
     // 在顶层调用开始前清空计时结果
     if (enable_timing) {
         clear_timing_results();
+        total_io_time_ms = 0.0;
     }
 
     if (force_recache) {
@@ -425,7 +431,9 @@ NodeOutput& NodeGraph::compute(int node_id, const std::string& cache_precision,
 
     std::unordered_map<int, bool> visiting;
     auto& result = compute_internal(node_id, cache_precision, visiting, enable_timing, !disable_disk_cache, benchmark_events);
-
+    // if (enable_timing && benchmark_run_data) {
+    //     benchmark_run_data->io_duration_ms = total_io_time_ms;
+    // }
     // 在所有计算结束后，累加总时间
     if (enable_timing) {
         double total = 0.0;
