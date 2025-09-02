@@ -60,6 +60,8 @@ bool process_command(const std::string& line,
             return handle_save(iss, svc, current_graph, modified, config);
         } else if (cmd == "exit" || cmd == "quit" || cmd == "q") {
             return handle_exit(iss, svc, current_graph, modified, config);
+        } else if (cmd == "bench") {
+            return handle_bench(iss, svc, current_graph, modified, config);
         } else {
             std::cout << "Unknown command: " << cmd << ". Type 'help' for a list of commands.\n";
         }

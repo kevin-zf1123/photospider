@@ -38,6 +38,7 @@
 #include <chrono>
 #include <unordered_map>
 #include <variant>
+#include "kernel/benchmark_types.hpp"
 
 namespace ps {
 
@@ -87,58 +88,78 @@ cv::Rect calculate_halo(const cv::Rect& roi, int halo_size, const cv::Size& boun
 // --- 阶段四核心：重构后的 compute_internal 函数 ---
 
 /**
- * @brief 内部计算函数，用于递归计算图中指定节点的输出结果。
+ * @brief 计算节点输出（内部递归调用）
  *
- * 该函数执行下面几个主要步骤：
- * 1. 缓存检查：
- *    - 如果节点已有内存缓存，则直接返回该输出；
- *    - 如果允许使用磁盘缓存，则尝试从磁盘中加载缓存数据。
+ * 本函数用于计算指定节点的输出结果，具体流程如下：
+ *   1. 缓存检测：首先检查内存缓存，如果命中直接返回；
+ *      若允许使用磁盘缓存，则尝试从磁盘加载缓存数据。
  *
- * 2. 依赖计算与参数解析：
- *    - 检测并避免依赖循环，一旦检测到循环则抛出异常；
- *    - 为节点设置运行时参数，并递归计算所有参数输入对应的上游节点的输出；
- *    - 收集所有图像输入，为后续计算准备。
+ *   2. 依赖节点计算与参数解析：若缓存均未命中，
+ *      则遍历当前节点所有依赖的输入（包括参数和图像输入）并递归计算其输出，
+ *      同时将各依赖节点的结果写入当前节点的运行时参数中。
+ *      注意：函数内会标记节点访问状态，防止循环依赖，
+ *      若检测到循环依赖则抛出异常。
  *
- * 3. 操作函数调度：
- *    - 根据节点类型和子类型查询对应的操作函数（可能为整体计算或分块计算）；
- *    - 使用 std::visit 分派任务：
- *      - 对于整体（Monolithic）操作，直接调用对应函数生成完整输出；
- *      - 对于分块（Tiled）操作，根据输入推断输出尺寸，分配输出缓冲区，
- *        并以单线程方式对图像进行分块计算，每个分块调用操作函数处理。
+ *   3. 操作函数获取与执行：
+ *      根据当前节点的类型和子类型，获取对应的操作函数，
+ *      对操作函数的选择分为两种情况：
+ *        - Monolithic 模式：整体计算，直接将依赖节点结果作为输入执行操作函数。
+ *        - Tiled 模式：分块计算，对于图像计算需要根据输入图像推导输出图像的尺寸、通道数及数据类型，
+ *          同时为输出图像分配缓冲区，并按 TILE_SIZE 划分区域逐块执行计算，
+ *          每次计算时还会根据 HALO_SIZE 计算有效区域。
  *
- * 4. 计时与事件记录：
- *    - 若启用计时，则统计计算耗时；
- *    - 将计算结果（包括节点ID、名称、耗时、数据来源）记录入 timing_results 及事件队列。
+ *   4. 计时与事件记录：
+ *      在依赖解析和核心计算前后分别记录时间戳，
+ *      并将各阶段计算耗时（依赖解析时长与核心执行时长）封装到 BenchmarkEvent 中，
+ *      同时根据 enable_timing 标志更新全局计时结果。
  *
- * @param node_id          待计算节点的 ID。
- * @param cache_precision  缓存精度标识，用于磁盘缓存逻辑。
- * @param visiting         用于记录当前访问状态的映射，防止依赖循环。
- * @param enable_timing    是否启用计时统计。
- * @param allow_disk_cache 是否允许从磁盘加载缓存。
+ *   5. 缓存保存与结果返回：
+ *      如果节点经过计算获得输出，则保存至内存缓存（及可能的磁盘缓存），
+ *      并返回计算后的节点输出。
  *
- * @return 返回计算后生成的节点输出 (NodeOutput)。
+ * @param node_id           当前需要计算的节点 ID。
+ * @param cache_precision   缓存精度配置，用以控制缓存读取与保存的策略。
+ * @param visiting          用于检测循环依赖的标志映射，若同一节点在递归过程中重复访问则抛出异常。
+ * @param enable_timing     标志是否启用计时，启用后将记录并保存详细的节点计算时长。
+ * @param allow_disk_cache  是否允许从磁盘读取节点输出缓存，若允许且内存缓存未命中则尝试从磁盘加载。
+ * @param benchmark_events  指向用于记录各阶段详细耗时数据的 BenchmarkEvent 向量的指针（可为 nullptr）。
  *
- * @throw GraphError 当检测到依赖循环、缺失依赖输出或未能找到适配的操作函数时，会抛出异常。
+ * @return NodeOutput& 返回计算或加载到缓存的节点输出数据。
+ *
+ * @throws GraphError 当检测到循环依赖、缺失依赖输出或找不到对应的操作函数时，会抛出此异常。
+ *
+ * @note
+ *   - 本函数内部采用递归调用，对每个依赖节点均进行相同流程的计算。
+ *   - 对于 Tiled 计算模式，若节点非 "image_generator" 且缺少图像输入，将抛出异常。
+ *   - 详细的计算耗时（依赖解析和核心执行）仅在 benchmark_events 不为 nullptr 时记录。
  */
-NodeOutput& NodeGraph::compute_internal(int node_id, const std::string& cache_precision, std::unordered_map<int, bool>& visiting, bool enable_timing, bool allow_disk_cache) {
+NodeOutput& NodeGraph::compute_internal(int node_id, const std::string& cache_precision, std::unordered_map<int, bool>& visiting, bool enable_timing, bool allow_disk_cache,
+                                        std::vector<BenchmarkEvent>* benchmark_events) {
     auto& target_node = nodes.at(node_id);
     std::string result_source = "unknown";
-    
-    auto start_time = std::chrono::high_resolution_clock::now();
 
-    do { // 使用 do-while(false) 结构来方便地 break
-        // 1. 缓存检查 (逻辑不变)
+    // 将计时器移到更早的位置，以捕获依赖解析时间
+    auto start_time_total = std::chrono::high_resolution_clock::now();
+    
+    // 创建一个 BenchmarkEvent 来记录本次调用的数据
+    BenchmarkEvent current_event;
+    current_event.node_id = node_id;
+    current_event.dependency_start_time = start_time_total;
+
+    do {
+        // 1. 缓存检查
         if (target_node.cached_output.has_value()) { result_source = "memory_cache"; break; }
         if (allow_disk_cache && try_load_from_disk_cache(target_node)) { result_source = "disk_cache"; break; }
 
-        // 2. 依赖计算与参数解析 (逻辑不变)
+        // 2. 依赖计算与参数解析
         if (visiting[node_id]) throw GraphError(GraphErrc::Cycle, "Cycle detected: " + std::to_string(node_id));
         visiting[node_id] = true;
         
         target_node.runtime_parameters = target_node.parameters ? target_node.parameters : YAML::Node(YAML::NodeType::Map);
         for (const auto& p_input : target_node.parameter_inputs) {
             if (p_input.from_node_id == -1) continue;
-            const auto& upstream_output = compute_internal(p_input.from_node_id, cache_precision, visiting, enable_timing, allow_disk_cache);
+            // 递归调用时传递 benchmark_events
+            const auto& upstream_output = compute_internal(p_input.from_node_id, cache_precision, visiting, enable_timing, allow_disk_cache, benchmark_events);
             auto it = upstream_output.data.find(p_input.from_output_name);
             if (it == upstream_output.data.end()) throw GraphError(GraphErrc::MissingDependency, "Node " + std::to_string(p_input.from_node_id) + " did not produce output '" + p_input.from_output_name + "'");
             target_node.runtime_parameters[p_input.to_parameter_name] = it->second;
@@ -147,7 +168,8 @@ NodeOutput& NodeGraph::compute_internal(int node_id, const std::string& cache_pr
         std::vector<const NodeOutput*> monolithic_inputs;
         for (const auto& i_input : target_node.image_inputs) {
             if (i_input.from_node_id != -1) {
-                monolithic_inputs.push_back(&compute_internal(i_input.from_node_id, cache_precision, visiting, enable_timing, allow_disk_cache));
+                // 递归调用时传递 benchmark_events
+                monolithic_inputs.push_back(&compute_internal(i_input.from_node_id, cache_precision, visiting, enable_timing, allow_disk_cache, benchmark_events));
             }
         }
         
@@ -155,31 +177,28 @@ NodeOutput& NodeGraph::compute_internal(int node_id, const std::string& cache_pr
         auto op_variant_opt = OpRegistry::instance().find(target_node.type, target_node.subtype);
         if (!op_variant_opt) throw GraphError(GraphErrc::NoOperation, "No op for " + target_node.type + ":" + target_node.subtype);
 
-        // 重置计时器，准备开始真正的计算
-        start_time = std::chrono::high_resolution_clock::now();
+        // 在纯计算开始前记录时间戳
+        current_event.execution_start_time = std::chrono::high_resolution_clock::now();
 
-        // 4. *** 核心调度逻辑：使用 std::visit 分派任务 ***
+        // 4. 核心调度逻辑
         std::visit([&](auto&& op_func) {
             using T = std::decay_t<decltype(op_func)>;
             
             // --- 路径 A: Monolithic (整体计算) ---
             if constexpr (std::is_same_v<T, MonolithicOpFunc>) {
-                // 直接调用整体操作函数，它会返回完整的 NodeOutput
                 target_node.cached_output = op_func(target_node, monolithic_inputs);
             } 
             // --- 路径 B: Tiled (分块计算) ---
             else if constexpr (std::is_same_v<T, TileOpFunc>) {
                 if (monolithic_inputs.empty() && target_node.type != "image_generator") {
-                     throw GraphError(GraphErrc::MissingDependency, "Tiled node '" + target_node.name + "' requires at least one image input to infer output size.");
+                    throw GraphError(GraphErrc::MissingDependency, "Tiled node '" + target_node.name + "' requires at least one image input to infer output size.");
                 }
                 
-                // 推断输出尺寸 (暂时简化为与第一个输入相同)
                 int out_width = monolithic_inputs.empty() ? as_int_flexible(target_node.runtime_parameters, "width", 256) : monolithic_inputs[0]->image_buffer.width;
                 int out_height = monolithic_inputs.empty() ? as_int_flexible(target_node.runtime_parameters, "height", 256) : monolithic_inputs[0]->image_buffer.height;
                 int out_channels = monolithic_inputs.empty() ? 1 : monolithic_inputs[0]->image_buffer.channels;
                 ps::DataType out_type = monolithic_inputs.empty() ? ps::DataType::FLOAT32 : monolithic_inputs[0]->image_buffer.type;
 
-                // 准备输出缓冲区
                 target_node.cached_output = NodeOutput();
                 auto& output_buffer = target_node.cached_output->image_buffer;
                 output_buffer.width = out_width;
@@ -191,7 +210,6 @@ NodeOutput& NodeGraph::compute_internal(int node_id, const std::string& cache_pr
                 output_buffer.step = out_width * out_channels * pixel_size;
                 output_buffer.data.reset(new char[output_buffer.step * output_buffer.height], std::default_delete<char[]>());
 
-                // 单线程分块循环 (与你之前的实现相同)
                 const int TILE_SIZE = 256;
                 const int HALO_SIZE = 16; // 暂时硬编码
 
@@ -223,18 +241,34 @@ NodeOutput& NodeGraph::compute_internal(int node_id, const std::string& cache_pr
         visiting[node_id] = false;
 
     } while(false);
-
-    // 5. 计时和事件记录 (逻辑不变)
+    
+    // 记录结束时间戳
+    auto end_time_total = std::chrono::high_resolution_clock::now();
+    if (result_source == "computed") {
+        current_event.execution_end_time = end_time_total;
+    } else {
+        current_event.execution_start_time = start_time_total;
+        current_event.execution_end_time = start_time_total;
+    }
+    
+    // 计时和事件记录
+    current_event.source = result_source;
     if (enable_timing) {
-        auto end_time = std::chrono::high_resolution_clock::now();
-        std::chrono::duration<double, std::milli> elapsed = end_time - start_time;
+        std::chrono::duration<double, std::milli> elapsed_total = end_time_total - start_time_total;
         {
             std::lock_guard<std::mutex> lk(timing_mutex_);
-            this->timing_results.node_timings.push_back({target_node.id, target_node.name, elapsed.count(), result_source});
+            this->timing_results.node_timings.push_back({target_node.id, target_node.name, elapsed_total.count(), result_source});
         }
-        push_compute_event(target_node.id, target_node.name, result_source, elapsed.count());
+        push_compute_event(target_node.id, target_node.name, result_source, elapsed_total.count());
     } else {
         push_compute_event(target_node.id, target_node.name, result_source, 0.0);
+    }
+    
+    // 如果启用了 benchmark，计算并记录详细耗时
+    if (benchmark_events) {
+        current_event.execution_duration_ms = std::chrono::duration<double, std::milli>(current_event.execution_end_time - current_event.execution_start_time).count();
+        current_event.dependency_duration_ms = std::chrono::duration<double, std::milli>(current_event.execution_start_time - current_event.dependency_start_time).count();
+        benchmark_events->push_back(current_event);
     }
     
     return *target_node.cached_output;
@@ -244,43 +278,40 @@ NodeOutput& NodeGraph::compute_internal(int node_id, const std::string& cache_pr
 /**
  * @brief 计算指定节点的输出结果。
  *
- * 该函数根据传入的节点ID计算出节点的输出，同时支持缓存刷新、计时、以及磁盘缓存控制。
- * 详细功能说明如下：
+ * 该函数实现了节点图的顶层计算逻辑，主要流程如下：
  *
- * 1. 节点检查：
- *    - 首先检查传入的 node_id 是否在图中存在。
- *    - 如果指定的节点不存在，则抛出 GraphError 异常，并提示未找到该节点。
+ * 1. 节点存在性验证：
+ *    - 检查传入的 node_id 是否存在于节点图中，若不存在则抛出 GraphError 异常。
  *
- * 2. 计时功能：
- *    - 如果 enable_timing 参数为 true，在开始计算之前会调用 clear_timing_results() 清空之前的计时记录。
+ * 2. 计时设置：
+ *    - 如果启用计时（enable_timing 为 true），在计算前先调用 clear_timing_results() 清除之前的计时数据。
  *
  * 3. 强制刷新缓存（force_recache）：
- *    - 当 force_recache 为 true 时，将对计算节点及其所有依赖节点进行遍历，执行以下操作：
- *      a. 使用 std::scoped_lock 对图的互斥锁进行加锁，保证线程安全。
- *      b. 通过拓扑排序（后序遍历 topo_postorder_from）获取所有依赖节点。
- *      c. 对于每个依赖节点：
- *         - 如果该节点存在且当前节点不为 preserved（或为当前计算节点本身），则清除其缓存输出（cached_output）。
+ *    - 当 force_recache 为 true 时，通过拓扑后序遍历（topo_postorder_from）获取所有依赖节点，
+ *      并在持有互斥锁的情况下，对于非 preserved 节点（或当前计算节点自身）清除其缓存输出。
  *
  * 4. 实际计算：
- *    - 利用 unordered_map 来记录访问状态，防止重复计算或死循环依赖。
- *    - 调用 compute_internal 执行节点的实际计算，其中参数包括节点ID、缓存精度、计时开关和磁盘缓存控制。
+ *    - 使用 unordered_map 记录节点访问状态，以防止循环依赖。
+ *    - 调用 compute_internal 函数进行递归计算，并传递缓存精度、计时和磁盘缓存控制等参数。
  *
- * 5. 计时结果累加：
- *    - 计算完成后，如果启用了计时功能，则遍历所有节点计时信息，并累加计算得到总耗时（total_ms）。
+ * 5. 累计计时结果：
+ *    - 若启用了计时功能，则遍历所有节点的计时信息，并将各节点耗时累加得到总执行时长。
  *
- * @param node_id           要计算的节点ID。
- * @param cache_precision   缓存输出的精度描述，通常为字符串形式。
- * @param force_recache     是否强制刷新缓存（若为 true，则所有相关节点的缓存将被清除）。
- * @param enable_timing     是否启用计时功能，用于计算函数执行耗时。
- * @param disable_disk_cache 是否禁用磁盘缓存功能，若为 true，将不使用磁盘缓存。
+ * @param node_id            要计算的节点ID。
+ * @param cache_precision    缓存精度说明（通常为字符串形式），用于控制缓存读取与保存策略。
+ * @param force_recache      是否强制刷新缓存。如果为 true，则清除所有相关节点的缓存输出（除 preserved 节点外）。
+ * @param enable_timing      是否启用计时功能，用以记录并统计函数调用耗时。
+ * @param disable_disk_cache 是否禁用磁盘缓存，若为 true，则在计算过程中不尝试读取磁盘缓存。
+ * @param benchmark_events   指向用于记录每个节点详细计时数据的 BenchmarkEvent 向量的指针（可为 nullptr）。
  *
- * @return NodeOutput& 返回指定节点计算后的输出结果引用。
+ * @return NodeOutput& 返回指定节点计算后的输出数据引用。
  *
- * @throws GraphError 当指定的节点不存在，或在计算过程中发生错误时会抛出该异常。
+ * @throws GraphError 当指定的节点不存在，或者在计算过程中遇到错误（如循环依赖、缺失依赖或无效操作）时抛出异常。
  */
 NodeOutput& NodeGraph::compute(int node_id, const std::string& cache_precision,
                                bool force_recache, bool enable_timing,
-                               bool disable_disk_cache) {
+                               bool disable_disk_cache,
+                               std::vector<BenchmarkEvent>* benchmark_events) {
     if (!has_node(node_id)) {
         throw GraphError(GraphErrc::NotFound, "Cannot compute: node " + std::to_string(node_id) + " not found.");
     }
@@ -309,7 +340,7 @@ NodeOutput& NodeGraph::compute(int node_id, const std::string& cache_precision,
     }
 
     std::unordered_map<int, bool> visiting;
-    auto& result = compute_internal(node_id, cache_precision, visiting, enable_timing, !disable_disk_cache);
+    auto& result = compute_internal(node_id, cache_precision, visiting, enable_timing, !disable_disk_cache, benchmark_events);
 
     // 在所有计算结束后，累加总时间
     if (enable_timing) {

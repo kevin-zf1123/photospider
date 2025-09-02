@@ -67,21 +67,21 @@ std::vector<std::string> Kernel::list_graphs() const {
 
 bool Kernel::compute(const std::string& name, int node_id, const std::string& cache_precision,
                      bool force_recache, bool enable_timing, bool parallel, bool quiet,
-                     bool disable_disk_cache) {
+                     bool disable_disk_cache,
+                     std::vector<BenchmarkEvent>* benchmark_events) {
     auto it = graphs_.find(name);
     if (it == graphs_.end()) return false;
     try {
         auto fut = it->second->post([=](NodeGraph& g){
-        g.clear_timing_results();
-        bool prev_quiet = g.is_quiet();
-        g.set_quiet(quiet);
-        if (parallel) g.compute_parallel(node_id, cache_precision, force_recache, enable_timing, disable_disk_cache);
-        else g.compute(node_id, cache_precision, force_recache, enable_timing, disable_disk_cache);
-        g.set_quiet(prev_quiet);
-        return 0;
+            g.clear_timing_results();
+            bool prev_quiet = g.is_quiet();
+            g.set_quiet(quiet);
+            if (parallel) g.compute_parallel(node_id, cache_precision, force_recache, enable_timing, disable_disk_cache, benchmark_events);
+            else g.compute(node_id, cache_precision, force_recache, enable_timing, disable_disk_cache, benchmark_events);
+            g.set_quiet(prev_quiet);
+            return 0;
         });
         fut.get();
-        // success clears last error
         last_error_.erase(name);
         return true;
     } catch (const GraphError& ge) {
@@ -247,25 +247,20 @@ std::optional<std::map<int, std::vector<Kernel::TraversalNodeInfo>>> Kernel::tra
 
 std::optional<cv::Mat> Kernel::compute_and_get_image(const std::string& name, int node_id, const std::string& cache_precision,
                                                      bool force_recache, bool enable_timing, bool parallel,
-                                                     bool disable_disk_cache) {
+                                                     bool disable_disk_cache,
+                                                     std::vector<BenchmarkEvent>* benchmark_events) {
     auto it = graphs_.find(name);
     if (it == graphs_.end()) return std::nullopt;
     try {
-        // 1. Post a task that returns a future to the NodeOutput
         std::future<NodeOutput> fut = it->second->post([=](NodeGraph& g) -> NodeOutput {
             g.clear_timing_results();
-            const auto& out_ref = parallel ? g.compute_parallel(node_id, cache_precision, force_recache, enable_timing, disable_disk_cache)
-                                           : g.compute(node_id, cache_precision, force_recache, enable_timing, disable_disk_cache);
-            return out_ref; // 返回 NodeOutput 的一个拷贝
+            const auto& out_ref = parallel ? g.compute_parallel(node_id, cache_precision, force_recache, enable_timing, disable_disk_cache, benchmark_events)
+                                           : g.compute(node_id, cache_precision, force_recache, enable_timing, disable_disk_cache, benchmark_events);
+            return out_ref;
         });
-
-        // 2. Wait for the future and get the NodeOutput
         NodeOutput output = fut.get();
-
-        // 3. Convert the ImageBuffer to a cv::Mat and return
         if (output.image_buffer.width == 0) return std::nullopt;
         return toCvMat(output.image_buffer).clone();
-
     } catch (...) { return std::nullopt; }
 }
 
@@ -350,22 +345,22 @@ std::optional<NodeGraph::DiskSyncResult> Kernel::synchronize_disk_cache_stats(co
 }
 std::optional<std::future<bool>> Kernel::compute_async(const std::string& name, int node_id, const std::string& cache_precision,
                                                       bool force_recache, bool enable_timing, bool parallel, bool quiet,
-                                                      bool disable_disk_cache) {
+                                                      bool disable_disk_cache,
+                                                      std::vector<BenchmarkEvent>* benchmark_events) {
     auto it = graphs_.find(name);
     if (it == graphs_.end()) {
         return std::nullopt;
     }
 
-    // 这个 post 调用本身就返回一个 future，我们直接将其返回
     return it->second->post([=](NodeGraph& g) {
         try {
             g.clear_timing_results();
             bool prev_quiet = g.is_quiet();
             g.set_quiet(quiet);
-            if (parallel) g.compute_parallel(node_id, cache_precision, force_recache, enable_timing, disable_disk_cache);
-            else g.compute(node_id, cache_precision, force_recache, enable_timing, disable_disk_cache);
+            if (parallel) g.compute_parallel(node_id, cache_precision, force_recache, enable_timing, disable_disk_cache, benchmark_events);
+            else g.compute(node_id, cache_precision, force_recache, enable_timing, disable_disk_cache, benchmark_events);
             g.set_quiet(prev_quiet);
-            last_error_.erase(name); // 成功完成，清除错误
+            last_error_.erase(name);
             return true;
         } catch (const GraphError& ge) {
             last_error_[name] = { ge.code(), ge.what() };

@@ -248,15 +248,14 @@ namespace ps {
  */
 NodeOutput& NodeGraph::compute_parallel(int node_id, const std::string& cache_precision,
                                         bool force_recache, bool enable_timing,
-                                        bool disable_disk_cache) {
-    
-    // 当前，我们简单地调用顺序版本的 compute 函数。
-    // 它内部已经包含了正确的、支持 Monolithic 和 Tiled 两种操作的调度逻辑。
-    // 这确保了无论用户是否使用 'parallel' 标志，程序的行为都是正确且一致的。
+                                        bool disable_disk_cache,
+                                        // [新增] 接收 benchmark 参数
+                                        std::vector<BenchmarkEvent>* benchmark_events) { 
     if (!quiet_) {
         std::cout << "Note: Parallel execution is forwarding to sequential tiled engine for correctness." << std::endl;
     }
-    return this->compute(node_id, cache_precision, force_recache, enable_timing, disable_disk_cache);
+    // [修改] 将 benchmark 参数向下传递
+    return this->compute(node_id, cache_precision, force_recache, enable_timing, disable_disk_cache, benchmark_events);
 }
 
 } // namespace ps
