@@ -100,6 +100,11 @@ public:
     std::optional<double> cmd_get_last_io_time(const std::string& graph) {
         return kernel_.get_last_io_time(graph);
     }
+
+    // [新增] GPU 上下文访问器
+    id cmd_get_metal_device(const std::string& graph) {
+        return kernel_.get_metal_device(graph);
+    }
 private:
     Kernel& kernel_;
 };

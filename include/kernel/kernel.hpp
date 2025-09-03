@@ -27,7 +27,6 @@ public:
     bool close_graph(const std::string& name);
     std::vector<std::string> list_graphs() const;
 
-    // [修复] 新增 post 方法
     template<typename Fn>
     auto post(const std::string& name, Fn&& fn) -> std::future<decltype(fn(std::declval<NodeGraph&>()))> {
         auto it = graphs_.find(name);
@@ -89,6 +88,10 @@ public:
 
     PluginManager& plugins() { return plugin_mgr_; }
     std::optional<double> get_last_io_time(const std::string& name);
+
+    // [新增] 暴露 Metal 设备访问器
+    id get_metal_device(const std::string& name);
+
 private:
     std::map<std::string, std::unique_ptr<GraphRuntime>> graphs_;
     PluginManager plugin_mgr_;

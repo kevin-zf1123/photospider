@@ -2,6 +2,8 @@
 #include <cassert>
 #include <optional>
 #include "ps_types.hpp"
+#include "kernel/interaction.hpp" // For InteractionService
+#include "kernel/kernel.hpp"      // For Kernel
 
 // Dummy op function, does nothing.
 ps::NodeOutput dummy_cpu_op(const ps::Node&, const std::vector<const ps::NodeOutput*>&) {
@@ -18,20 +20,14 @@ void test_device_preference_metadata() {
 
     auto& registry = ps::OpRegistry::instance();
 
-    // 1. 注册一个默认的 CPU op
     registry.register_op("test", "cpu_default", dummy_cpu_op);
-
-    // 2. 注册一个显式声明的 CPU op
     ps::OpMetadata cpu_meta;
     cpu_meta.device_preference = ps::Device::CPU;
     registry.register_op("test", "cpu_explicit", dummy_cpu_op, cpu_meta);
-
-    // 3. 注册一个显式声明的 GPU op
     ps::OpMetadata gpu_meta;
     gpu_meta.device_preference = ps::Device::GPU_METAL;
     registry.register_op("test", "gpu_explicit", dummy_gpu_op, gpu_meta);
 
-    // 4. 验证元数据
     std::cout << "  Verifying 'test:cpu_default'..." << std::endl;
     auto meta1 = registry.get_metadata("test", "cpu_default");
     assert(meta1.has_value() && "Metadata for cpu_default should exist.");
@@ -58,9 +54,38 @@ void test_device_preference_metadata() {
     std::cout << "--- Test Passed ---" << std::endl;
 }
 
+void test_gpu_context_initialization() {
+    std::cout << "--- Running Test: GPU Context Initialization ---" << std::endl;
+
+    ps::Kernel kernel;
+    ps::InteractionService svc(kernel);
+
+    std::string graph_name = "test_gpu_graph";
+    auto loaded_name = svc.cmd_load_graph(graph_name, "sessions", "");
+    assert(loaded_name.has_value() && "Graph should be loadable.");
+    assert(*loaded_name == graph_name && "Graph name should match.");
+    std::cout << "  Graph session created." << std::endl;
+
+#ifdef __APPLE__
+    std::cout << "  Platform is Apple, checking for Metal device..." << std::endl;
+    id metal_device = svc.cmd_get_metal_device(graph_name);
+    assert(metal_device != nullptr && "On Apple platform, Metal device should be initialized and not null.");
+    std::cout << "  Metal device successfully retrieved. OK." << std::endl;
+#else
+    std::cout << "  Platform is not Apple, skipping Metal device check." << std::endl;
+    id metal_device = svc.cmd_get_metal_device(graph_name);
+    assert(metal_device == nullptr && "On non-Apple platform, Metal device should be null.");
+    std::cout << "  Metal device is correctly null. OK." << std::endl;
+#endif
+    
+    svc.cmd_close_graph(graph_name);
+    std::cout << "--- Test Passed ---" << std::endl;
+}
+
 int main() {
     try {
         test_device_preference_metadata();
+        test_gpu_context_initialization();
     } catch (const std::exception& e) {
         std::cerr << "Test failed with exception: " << e.what() << std::endl;
         return 1;

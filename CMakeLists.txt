@@ -47,7 +47,15 @@ file(GLOB_RECURSE CORE_LIB_SOURCES
     "src/*.cpp"
     "src/*.hpp"
 )
+# [修改] 从 glob 中排除 .mm 文件，以避免被 CXX 编译器处理
+list(FILTER CORE_LIB_SOURCES EXCLUDE REGEX ".*\\.mm$")
 add_library(photospider_lib STATIC ${CORE_LIB_SOURCES})
+
+# [修改] 在 Apple 平台上，将 .mm 文件显式添加到库的源文件中
+if(APPLE)
+    target_sources(photospider_lib PRIVATE src/kernel/graph_runtime.mm)
+endif()
+
 target_include_directories(photospider_lib PUBLIC 
     "${PROJECT_SOURCE_DIR}/include"
     "${PROJECT_SOURCE_DIR}/src"
@@ -125,6 +133,12 @@ if(APPLE)
     find_library(FOUNDATION_FRAMEWORK Foundation REQUIRED)
     find_library(COREIMAGE_FRAMEWORK CoreImage REQUIRED)
     find_library(COREVIDEO_FRAMEWORK CoreVideo REQUIRED)
+    
+    # [修改] 核心库现在也需要链接 Metal 框架
+    target_link_libraries(photospider_lib PRIVATE
+        ${METAL_FRAMEWORK}
+        ${FOUNDATION_FRAMEWORK}
+    )
 
     # Main Metal implementation library (goes under ops/)
     add_library(perlin_noise_metal SHARED src/metal/perlin_noise_metal.mm)

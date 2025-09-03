@@ -8,6 +8,16 @@
 
 namespace ps {
 
+// [新增] 实现 Metal 设备访问器
+id Kernel::get_metal_device(const std::string& name) {
+    auto it = graphs_.find(name);
+    if (it == graphs_.end()) {
+        return nullptr;
+    }
+    return it->second->get_metal_device();
+}
+
+
 std::optional<std::string> Kernel::load_graph(const std::string& name,
                                               const std::string& root_dir,
                                               const std::string& yaml_path,
@@ -29,7 +39,6 @@ std::optional<std::string> Kernel::load_graph(const std::string& name,
     } catch (...) {}
     rt->start();
     
-    // [核心修复] 优雅地处理空 yaml_path
     if (!yaml_path.empty()) {
         try {
             rt->post([yaml = info.root / "content.yaml", fallback = info.yaml](NodeGraph& g){
@@ -42,7 +51,6 @@ std::optional<std::string> Kernel::load_graph(const std::string& name,
             return std::nullopt;
         }
     }
-    // 如果 yaml_path 为空，我们只是创建了一个空的 GraphRuntime，这是测试所期望的。
 
     graphs_[name] = std::move(rt);
     return name;

@@ -17,6 +17,16 @@
 
 #include "node_graph.hpp"
 
+// [修改] 使用预处理器宏和前向声明来隔离平台特定的 Metal API
+#ifdef __OBJC__
+@protocol MTLDevice;
+@protocol MTLCommandQueue;
+#else
+// 对于纯 C++ 文件，使用 void* 作为不透明指针
+typedef void* id;
+#endif
+
+
 namespace ps {
 
 using Task = std::function<void()>;
@@ -73,6 +83,10 @@ public:
     void execute_task_graph_and_wait(std::shared_ptr<TaskGraph> task_graph);
     void notify_task_complete();
     void set_exception(std::exception_ptr e);
+    
+    // [新增] 获取 GPU 上下文的接口
+    id get_metal_device();
+    id get_metal_command_queue();
 
 private:
     void run_loop(int thread_id);
@@ -84,7 +98,6 @@ private:
     std::atomic<bool> running_{false};
 
     std::vector<std::deque<Task>> local_task_queues_;
-    // [修复] 使用 unique_ptr 包装 mutex，使其可移动
     std::vector<std::unique_ptr<std::mutex>> local_queue_mutexes_;
     
     std::queue<Task> global_task_queue_;
@@ -97,6 +110,10 @@ private:
     
     std::mutex exception_mutex_;
     std::exception_ptr first_exception_{nullptr};
+
+    // [新增] 使用 pImpl 模式隐藏 GPU 上下文细节
+    struct GpuContext;
+    std::unique_ptr<GpuContext> gpu_context_;
 };
 
 } // namespace ps

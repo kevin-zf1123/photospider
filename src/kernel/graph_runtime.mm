@@ -1,20 +1,62 @@
-// Photospider kernel: GraphRuntime implementation
+// Photospider kernel: GraphRuntime implementation (Objective-C++)
 #include "kernel/graph_runtime.hpp"
 
 #include <filesystem>
 #include <random>
 
+// [新增] 仅在此 .mm 文件中导入 Metal 头文件
+#ifdef __APPLE__
+#import <Metal/Metal.h>
+#endif
+
 namespace ps {
+
+// [新增] 在 .mm 文件中完整定义 GpuContext 结构体
+struct GraphRuntime::GpuContext {
+#ifdef __APPLE__
+    id<MTLDevice> device;
+    id<MTLCommandQueue> commandQueue;
+#endif
+};
 
 GraphRuntime::GraphRuntime(const Info& info)
     : info_(info), graph_(info.root / "cache") {
     std::filesystem::create_directories(info_.root);
     std::filesystem::create_directories(info_.root / "cache");
+
+#ifdef __APPLE__
+    // [新增] 初始化 GPU 上下文
+    gpu_context_ = std::make_unique<GpuContext>();
+    gpu_context_->device = MTLCreateSystemDefaultDevice();
+    if (gpu_context_->device) {
+        gpu_context_->commandQueue = [gpu_context_->device newCommandQueue];
+    } else {
+        // TODO: Log a warning that Metal device is not available.
+    }
+#endif
 }
 
 GraphRuntime::~GraphRuntime() { 
     stop(); 
 }
+
+// [新增] 实现 GPU 上下文访问器
+id GraphRuntime::get_metal_device() {
+#ifdef __APPLE__
+    return gpu_context_ ? gpu_context_->device : nil;
+#else
+    return nullptr;
+#endif
+}
+
+id GraphRuntime::get_metal_command_queue() {
+#ifdef __APPLE__
+    return gpu_context_ ? gpu_context_->commandQueue : nil;
+#else
+    return nullptr;
+#endif
+}
+
 
 void GraphRuntime::start() {
     if (running_) return;
@@ -22,7 +64,6 @@ void GraphRuntime::start() {
 
     unsigned int num_threads = std::max(1u, std::thread::hardware_concurrency());
     local_task_queues_.resize(num_threads);
-    // [修复] 初始化 unique_ptr<mutex> 的 vector
     local_queue_mutexes_.reserve(num_threads);
     for (unsigned int i = 0; i < num_threads; ++i) {
         local_queue_mutexes_.push_back(std::make_unique<std::mutex>());
@@ -61,7 +102,6 @@ void GraphRuntime::run_loop(int thread_id) {
         }
 
         {
-            // [修复] 解引用 unique_ptr 来使用 mutex
             std::lock_guard<std::mutex> lock(*local_queue_mutexes_[thread_id]);
             if (!local_task_queues_[thread_id].empty()) {
                 task = std::move(local_task_queues_[thread_id].front());
@@ -78,7 +118,6 @@ void GraphRuntime::run_loop(int thread_id) {
                 int victim_offset = dist(rng) + 1;
                 int victim_thread = (thread_id + victim_offset) % num_threads;
             
-                // [修复] 解引用 unique_ptr 来使用 mutex
                 std::lock_guard<std::mutex> lock(*local_queue_mutexes_[victim_thread]);
                 if (!local_task_queues_[victim_thread].empty()) {
                     task = std::move(local_task_queues_[victim_thread].back());
@@ -111,7 +150,6 @@ void GraphRuntime::run_loop(int thread_id) {
 
 void GraphRuntime::push_ready_task(Task&& task, int thread_id) {
     {
-        // [修复] 解引用 unique_ptr 来使用 mutex
         std::lock_guard<std::mutex> lock(*local_queue_mutexes_[thread_id]);
         local_task_queues_[thread_id].push_front(std::move(task));
     }
