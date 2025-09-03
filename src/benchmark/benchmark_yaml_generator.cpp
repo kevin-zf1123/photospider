@@ -1,4 +1,5 @@
 #include "benchmark/benchmark_yaml_generator.hpp"
+#include "benchmark/benchmark_types.hpp"
 
 namespace ps {
 
@@ -49,8 +50,12 @@ YAML::Node YamlGenerator::Generate(const GraphGenConfig& config) {
         YAML::Node output_node;
         output_node["id"] = current_node_id;
         output_node["name"] = "GeneratedOutput_" + std::to_string(i);
-        output_node["type"] = "analyzer"; // 使用一个轻量级操作作为终点
-        output_node["subtype"] = "get_dimensions";
+
+        // <--- 修改：使用可配置的 output_op_type
+        size_t out_colon_pos = config.output_op_type.find(':');
+        output_node["type"] = config.output_op_type.substr(0, out_colon_pos);
+        output_node["subtype"] = config.output_op_type.substr(out_colon_pos + 1);
+
 
         YAML::Node image_inputs(YAML::NodeType::Sequence);
         YAML::Node input_ref;

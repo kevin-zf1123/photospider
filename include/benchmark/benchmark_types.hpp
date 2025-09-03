@@ -3,8 +3,23 @@
 #include <string>
 #include <vector>
 #include <chrono>
-#include "benchmark/benchmark_yaml_generator.hpp"
+#include <yaml-cpp/yaml.h>
+
 namespace ps {
+
+/**
+ * @struct GraphGenConfig
+ * @brief 配置参数，用于动态生成计算图的YAML定义。
+ */
+struct GraphGenConfig {
+    std::string input_op_type = "image_generator:constant";
+    std::string main_op_type = "image_process:gaussian_blur";
+    std::string output_op_type = "analyzer:get_dimensions"; 
+    int width = 256;
+    int height = 256;
+    int chain_length = 1; // 图中主要操作节点的串联数量
+    int num_outputs = 1;  // 从最后一个操作节点引出的输出节点数量 (用于测试扇出)
+};
 
 /**
  * @struct BenchmarkEvent

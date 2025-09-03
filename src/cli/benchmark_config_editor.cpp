@@ -1,4 +1,4 @@
-// FILE: src/cli/benchmark_config_editor.cpp (已修正并增强)
+// FILE: src/cli/benchmark_config_editor.cpp (修改后)
 
 #include "cli/benchmark_config_editor.hpp"
 #include "benchmark/benchmark_types.hpp"
@@ -14,11 +14,42 @@
 #include <iostream>
 #include <algorithm>
 #include <map>
+#include <regex>
 
 namespace fs = std::filesystem;
 using namespace ftxui;
 
 namespace ps {
+
+// 辅助函数，用于简化操作名称以用于文件名/会话名
+static std::string SanitizeOpName(const std::string& op_name) {
+    if (op_name.empty()) return "none";
+    std::string simple_name = op_name.substr(op_name.find(':') + 1);
+    // 使用更简单的缩写
+    if (simple_name == "gaussian_blur") return "gblur";
+    if (simple_name == "constant") return "const";
+    if (simple_name == "perlin_noise") return "perlin";
+    if (simple_name == "curve_transform") return "curve";
+    if (simple_name == "get_dimensions") return "dims";
+    return simple_name;
+}
+
+// <--- 新增：统一的名称生成函数
+static std::string GenerateSessionName(const BenchmarkSessionConfig& cfg, const std::string& benchmark_dir_name) {
+    if (!cfg.auto_generate) {
+        return cfg.name; // 对于手动配置，保持原名
+    }
+    const auto& gen_cfg = cfg.generator_config;
+    std::string input_op_sanitized = SanitizeOpName(gen_cfg.input_op_type);
+    std::string main_op_sanitized = SanitizeOpName(gen_cfg.main_op_type);
+    std::string output_op_sanitized = SanitizeOpName(gen_cfg.output_op_type);
+    std::string resolution = std::to_string(gen_cfg.width) + "x" + std::to_string(gen_cfg.height);
+    std::string chain = "L" + std::to_string(gen_cfg.chain_length);
+
+    return benchmark_dir_name + "-" + input_op_sanitized + "-" + main_op_sanitized +
+           "-" + output_op_sanitized + "-" + resolution + "-" + chain;
+}
+
 
 // 布局辅助函数
 static Element form(std::vector<std::pair<Element, Element>> pairs) {
@@ -51,6 +82,7 @@ static std::vector<BenchmarkSessionConfig> load_benchmark_configs_from_file(cons
                 const auto& gen_cfg = session_node["config"];
                 cfg.generator_config.input_op_type = gen_cfg["input_op_type"].as<std::string>("");
                 cfg.generator_config.main_op_type = gen_cfg["main_op_type"].as<std::string>("");
+                cfg.generator_config.output_op_type = gen_cfg["output_op_type"].as<std::string>("analyzer:get_dimensions");
                 cfg.generator_config.width = gen_cfg["width"].as<int>(0);
                 cfg.generator_config.height = gen_cfg["height"].as<int>(0);
                 cfg.generator_config.chain_length = gen_cfg["chain_length"].as<int>(1);
@@ -81,6 +113,7 @@ static void save_benchmark_configs_to_file(const fs::path& path, const std::vect
             YAML::Node gen_cfg;
             gen_cfg["input_op_type"] = cfg.generator_config.input_op_type;
             gen_cfg["main_op_type"] = cfg.generator_config.main_op_type;
+            gen_cfg["output_op_type"] = cfg.generator_config.output_op_type;
             gen_cfg["width"] = cfg.generator_config.width;
             gen_cfg["height"] = cfg.generator_config.height;
             gen_cfg["chain_length"] = cfg.generator_config.chain_length;
@@ -217,19 +250,17 @@ private:
 
         auto& current_cfg = configs_[selected_session_];
         
-        auto name_input = Input(&current_cfg.name, "Name");
+        // <--- 修改：不再需要 name_input 组件
+        // auto name_input = Input(&current_cfg.name, "Name");
         
         static std::vector<std::string> auto_gen_options = {"Auto-generated", "Manual YAML"};
-        // 修复 #1: 将 auto_gen_selected_ 提升为成员变量
         auto_gen_selected_ = current_cfg.auto_generate ? 0 : 1;
         
         RadioboxOption radio_opt;
         radio_opt.entries = &auto_gen_options;
         radio_opt.selected = &auto_gen_selected_;
-        // 修复 #2: 使用 [this] 捕获并安全地访问成员变量
         radio_opt.on_change = [this] { 
             configs_[selected_session_].auto_generate = (auto_gen_selected_ == 0);
-            // 模式改变时需要强制重绘整个详情面板
             RebuildDetailsPane();
         };
         auto auto_gen_radio = Radiobox(radio_opt);
@@ -240,6 +271,9 @@ private:
         auto it_main = std::find(available_ops_.begin(), available_ops_.end(), current_cfg.generator_config.main_op_type);
         main_op_selected_ = (it_main == available_ops_.end()) ? 0 : std::distance(available_ops_.begin(), it_main);
         
+        auto it_output = std::find(available_ops_.begin(), available_ops_.end(), current_cfg.generator_config.output_op_type);
+        output_op_selected_ = (it_output == available_ops_.end()) ? 0 : std::distance(available_ops_.begin(), it_output);
+
         DropdownOption input_dd_opt;
         input_dd_opt.radiobox.entries = &available_ops_;
         input_dd_opt.radiobox.selected = &input_op_selected_;
@@ -251,6 +285,13 @@ private:
         main_dd_opt.radiobox.selected = &main_op_selected_;
         main_dd_opt.radiobox.on_change = [this]{ if (!available_ops_.empty()) configs_[selected_session_].generator_config.main_op_type = available_ops_[main_op_selected_]; };
         auto main_op_dropdown = Dropdown(main_dd_opt);
+
+        DropdownOption output_dd_opt;
+        output_dd_opt.radiobox.entries = &available_ops_;
+        output_dd_opt.radiobox.selected = &output_op_selected_;
+        output_dd_opt.radiobox.on_change = [this]{ if (!available_ops_.empty()) configs_[selected_session_].generator_config.output_op_type = available_ops_[output_op_selected_]; };
+        auto output_op_dropdown = Dropdown(output_dd_opt);
+
 
         width_input_str_ = std::to_string(current_cfg.generator_config.width);
         InputOption width_opt;
@@ -294,12 +335,12 @@ private:
         }
         auto statistics_container = Container::Vertical(statistics_checkboxes);
 
-        // 将所有可交互组件放入一个容器中
         auto details_container = Container::Vertical({
-            name_input,
+            // <--- 修改：移除 name_input
             auto_gen_radio,
             input_op_dropdown,
             main_op_dropdown,
+            output_op_dropdown,
             width_input,
             height_input,
             chain_input,
@@ -308,10 +349,10 @@ private:
             statistics_container,
         });
 
-        // Renderer 只负责根据当前状态决定显示哪些组件
-        details_pane_ = Renderer(details_container, [=] {
+        details_pane_ = Renderer(details_container, [=, &current_cfg] { // <--- 捕获 current_cfg 的引用
             auto details_form = form({
-                {text("Name: "), name_input->Render()},
+                // <--- 修改：将 Input 替换为 text
+                {text("Name: "), text(current_cfg.name)},
                 {text("Mode: "), auto_gen_radio->Render()},
             });
 
@@ -320,6 +361,7 @@ private:
                 pane = form({
                     {text("  Input Op: "), input_op_dropdown->Render()},
                     {text("  Main Op:  "), main_op_dropdown->Render()},
+                    {text("  Output Op:"), output_op_dropdown->Render()},
                     {text("  Width:    "), width_input->Render()},
                     {text("  Height:   "), height_input->Render()},
                     {text("  Chain Len:"), chain_input->Render()},
@@ -344,11 +386,19 @@ private:
 
     void AddNewSession() {
         BenchmarkSessionConfig new_cfg;
-        new_cfg.name = "NewSession_" + std::to_string(configs_.size() + 1);
+        // 设置合理的默认值
+        new_cfg.generator_config.width = 256;
+        new_cfg.generator_config.height = 256;
+
         if (!available_ops_.empty()) {
             new_cfg.generator_config.input_op_type = available_ops_[0];
             new_cfg.generator_config.main_op_type = available_ops_[0];
+            new_cfg.generator_config.output_op_type = available_ops_[0];
         }
+        
+        // <--- 修改：使用新的辅助函数生成名称
+        new_cfg.name = GenerateSessionName(new_cfg, fs::path(benchmark_dir_).filename().string());
+
         configs_.push_back(new_cfg);
         selected_session_ = (int)configs_.size() - 1;
         RebuildSessionList();
@@ -364,7 +414,18 @@ private:
     }
 
     void SaveConfig() {
+        // <--- 修改：在保存前更新所有自动生成会话的名称
+        for (auto& cfg : configs_) {
+            if (cfg.auto_generate) {
+                cfg.name = GenerateSessionName(cfg, fs::path(benchmark_dir_).filename().string());
+            }
+        }
+        
         save_benchmark_configs_to_file(config_path_, configs_);
+
+        // <--- 修改：刷新UI以显示更新后的名称
+        RebuildSessionList();
+        RebuildDetailsPane();
         status_message_ = "Configuration saved to " + config_path_.string();
     }
 
@@ -390,12 +451,12 @@ private:
     std::vector<std::string> available_ops_;
     int input_op_selected_ = 0;
     int main_op_selected_ = 0;
+    int output_op_selected_ = 0;
     std::string width_input_str_;
     std::string height_input_str_;
     std::string chain_input_str_;
     std::string outputs_input_str_;
 
-    // 修复 #1: 将 Radiobox 的状态变量提升为成员变量
     int auto_gen_selected_ = 0;
 
     const std::vector<std::string> statistics_options_ = {
