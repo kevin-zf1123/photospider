@@ -373,11 +373,12 @@ void register_builtin() {
     R.register_op("image_process", "extract_channel", MonolithicOpFunc(op_extract_channel)); 
 
     // 注册 Tiled 操作
-    R.register_op("image_process", "gaussian_blur", TileOpFunc(op_gaussian_blur_tiled));
-    R.register_op("image_process", "curve_transform", TileOpFunc(op_curve_transform_tiled));
-    R.register_op("image_mixing", "add_weighted", TileOpFunc(op_add_weighted_tiled));
-    R.register_op("image_mixing", "diff", TileOpFunc(op_abs_diff_tiled));
-    R.register_op("image_mixing", "multiply", TileOpFunc(op_multiply_tiled));
+    R.register_op("image_process", "gaussian_blur", TileOpFunc(op_gaussian_blur_tiled), {TileSizePreference::MACRO});
+    R.register_op("image_process", "curve_transform", TileOpFunc(op_curve_transform_tiled), {TileSizePreference::MACRO});
+    R.register_op("image_mixing", "add_weighted", TileOpFunc(op_add_weighted_tiled), {TileSizePreference::MACRO});
+    R.register_op("image_mixing", "diff", TileOpFunc(op_abs_diff_tiled), {TileSizePreference::MACRO});
+    R.register_op("image_mixing", "multiply", TileOpFunc(op_multiply_tiled), {TileSizePreference::MACRO});
+
 }
 
 }} // namespace ps::ops

@@ -1,4 +1,3 @@
-// in: include/ps_types.hpp (OVERWRITE)
 #pragma once
 #include <string>
 #include <vector>
@@ -10,11 +9,10 @@
 #include <optional>
 #include <sstream>
 #include <iostream>
-#include <variant> // ADD: 用于支持多种函数签名
+#include <variant>
 #include <opencv2/opencv.hpp>
 #include <yaml-cpp/yaml.h>
 #include "image_buffer.hpp"
-#include <variant>
 
 namespace ps {
 namespace fs = std::filesystem;
@@ -43,12 +41,6 @@ struct CacheEntry {
     std::string location;
 };
 
-enum class ExecutionPolicy {
-    MONOLITHIC,       // 必须作为一个整体、不可分割的任务来计算
-    TILED_PARALLEL,   // 可以安全地分解为并行的分块任务
-    // TILED_SEQUENTIAL // (未来可以添加)
-};
-
 struct NodeOutput {
     ps::ImageBuffer image_buffer;
     std::unordered_map<std::string, OutputValue> data;
@@ -72,29 +64,45 @@ private:
 class Node;
 class NodeGraph;
 
-// --- NEW: 定义两种操作函数签名 ---
-// 用于需要一次性处理完整图像的节点 (例如：加载、全局分析)
+// --- 新增: 定义操作元数据 ---
+// 用于描述一个操作对分块大小的偏好
+enum class TileSizePreference {
+    UNDEFINED, // 未定义或不适用 (例如 Monolithic 操作)
+    MICRO,     // 偏好小分块 (例如 16x16)，适用于交互式、低延迟任务
+    MACRO      // 偏好大分块 (例如 256x256)，适用于吞吐量优先的批处理任务
+};
+
+struct OpMetadata {
+    TileSizePreference tile_preference = TileSizePreference::UNDEFINED;
+    // 未来可扩展: DevicePreference device_preference = DevicePreference::CPU;
+};
+
+
 using MonolithicOpFunc = std::function<NodeOutput(const Node&, const std::vector<const NodeOutput*>&)>;
-// 用于可以分块计算的节点 (例如：滤镜、逐像素操作)
 using TileOpFunc = std::function<void(const Node&, const Tile&, const std::vector<Tile>&)>;
 
 class OpRegistry {
 public:
     static OpRegistry& instance();
     
-    // NEW: 使用 std::variant 存储不同类型的函数
     using OpVariant = std::variant<MonolithicOpFunc, TileOpFunc>;
 
-    void register_op(const std::string& type, const std::string& subtype, MonolithicOpFunc fn);
-    void register_op(const std::string& type, const std::string& subtype, TileOpFunc fn);
+    // --- 修改: 重载 register_op 以接收元数据 ---
+    void register_op(const std::string& type, const std::string& subtype, MonolithicOpFunc fn, OpMetadata meta = {});
+    void register_op(const std::string& type, const std::string& subtype, TileOpFunc fn, OpMetadata meta); // Tiled 操作必须提供元数据
 
     std::optional<OpVariant> find(const std::string& type, const std::string& subtype) const;
     
+    // --- 新增: 获取元数据 ---
+    std::optional<OpMetadata> get_metadata(const std::string& type, const std::string& subtype) const;
+
     std::vector<std::string> get_keys() const;
     bool unregister_op(const std::string& type, const std::string& subtype);
     bool unregister_key(const std::string& key);
 private:
     std::unordered_map<std::string, OpVariant> table_;
+    // --- 新增: 元数据表 ---
+    std::unordered_map<std::string, OpMetadata> metadata_table_;
 };
 
 inline std::string make_key(const std::string& type, const std::string& subtype) {
