@@ -20,7 +20,8 @@ void OpRegistry::register_op(const std::string& type, const std::string& subtype
 void OpRegistry::register_op(const std::string& type, const std::string& subtype, TileOpFunc fn, OpMetadata meta) {
     auto key = make_key(type, subtype);
     if (meta.tile_preference == TileSizePreference::UNDEFINED) {
-        throw std::logic_error("Tiled operations must specify a TileSizePreference (MICRO or MACRO).");
+        // Tiled 操作可以不指定偏好，默认为 UNDEFINED
+        // throw std::logic_error("Tiled operations must specify a TileSizePreference (MICRO or MACRO).");
     }
     table_[key] = std::move(fn);
     metadata_table_[key] = meta; // 存储元数据

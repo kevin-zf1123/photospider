@@ -10,6 +10,7 @@
 
 namespace ps {
 
+// 在 .mm 文件中定义 GpuContext 结构体，以隐藏 Metal 细节
 struct GraphRuntime::GpuContext {
 #ifdef __APPLE__
     id<MTLDevice> device;
@@ -27,7 +28,13 @@ GraphRuntime::GraphRuntime(const Info& info)
     gpu_context_->device = MTLCreateSystemDefaultDevice();
     if (gpu_context_->device) {
         gpu_context_->commandQueue = [gpu_context_->device newCommandQueue];
+    } else {
+        // 在无法获取设备时打印警告，避免静默失败
+        // TODO: 使用更正式的日志系统
+        fprintf(stderr, "Warning: Could not create default Metal device.\n");
     }
+#else
+    // 在非 Apple 平台上，gpu_context_ 保持为空
 #endif
 }
 
@@ -123,8 +130,7 @@ void GraphRuntime::run_loop(int thread_id) {
 
         if (!found_task) {
             std::unique_lock<std::mutex> lock(global_queue_mutex_);
-            // [性能修复] 将等待超时从 10ms 缩短到 1ms
-            cv_task_available_.wait_for(lock, std::chrono::milliseconds(1), [&]{ 
+            cv_task_available_.wait_for(lock, std::chrono::milliseconds(10), [&]{ 
                 return !global_task_queue_.empty() || !running_; 
             });
             

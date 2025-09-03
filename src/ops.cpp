@@ -19,20 +19,7 @@ namespace ps { namespace ops {
 
 // 全局互斥锁，用于保护所有并发的OpenCV GPU/CPU操作，防止底层库的资源竞争
 static std::mutex g_opencv_op_mutex;
-/*
-static double as_double_flexible(const YAML::Node& n, const std::string& key, double defv) {
-    if (!n || !n[key]) return defv;
-    try { if (n[key].IsScalar()) return n[key].as<double>(); return defv; } catch (...) { return defv; }
-}
-static int as_int_flexible(const YAML::Node& n, const std::string& key, int defv) {
-    if (!n || !n[key]) return defv;
-    try { return n[key].as<int>(); } catch (...) { return defv; }
-}
-static std::string as_str(const YAML::Node& n, const std::string& key, const std::string& defv = {}) {
-    if (!n || !n[key]) return defv;
-    try { return n[key].as<std::string>(); } catch (...) { return defv; }
-}
-*/
+
 // =============================================================================
 // ==                   类型一: MONOLITHIC (整体计算) 操作                      ==
 // =============================================================================
@@ -249,7 +236,6 @@ static NodeOutput op_divide(const Node& node, const std::vector<const NodeOutput
 // ==                       类型二: TILED (分块计算) 操作                         ==
 // =============================================================================
 static void op_curve_transform_tiled(const Node& node, const Tile& output_tile, const std::vector<Tile>& input_tiles) {
-    // 修正: 加锁保护所有OpenCV操作
     std::lock_guard<std::mutex> lock(g_opencv_op_mutex);
 
     if (input_tiles.empty()) throw GraphError(GraphErrc::MissingDependency, "curve_transform requires one input tile.");
@@ -284,35 +270,23 @@ static void op_gaussian_blur_tiled(const Node& node, const Tile& output_tile, co
     double sigmaX = as_double_flexible(P, "sigmaX", 0.0);
     
     cv::Mat blurred_large_tile;
-    // 使用 BORDER_REPLICATE 模式处理边缘，这对于小图像尤其重要
     cv::GaussianBlur(input_mat, blurred_large_tile, cv::Size(k, k), sigmaX, 0, cv::BORDER_REPLICATE);
 
-    // --- 核心修复逻辑 ---
-    // 旧的、错误的 valid_roi 计算方式:
-    // int halo_size = k / 2;
-    // cv::Rect valid_roi(halo_size, halo_size, output_mat.cols, output_mat.rows);
-
-    // 新的、健壮的 valid_roi 计算方式：
-    // 计算输出ROI在带光环的输入ROI中的相对偏移
     int offset_x = output_tile.roi.x - input_tile_with_halo.roi.x;
     int offset_y = output_tile.roi.y - input_tile_with_halo.roi.y;
 
-    // 创建正确的 valid_roi
     cv::Rect valid_roi(offset_x, offset_y, output_mat.cols, output_mat.rows);
 
-    // 安全检查，确保 valid_roi 不会超出模糊后图块的边界
     if (valid_roi.x < 0 || valid_roi.y < 0 ||
         valid_roi.x + valid_roi.width > blurred_large_tile.cols ||
         valid_roi.y + valid_roi.height > blurred_large_tile.rows) {
-        throw std::runtime_error("Tiled Gaussian Blur: Catastrophic logic error, calculated valid ROI is still out of bounds.");
+        throw std::runtime_error("Tiled Gaussian Blur: Catastrophic logic error, calculated valid ROI is out of bounds.");
     }
     
     blurred_large_tile(valid_roi).copyTo(output_mat);
-    // --- 修复结束 ---
 }
 
 static void op_add_weighted_tiled(const Node& node, const Tile& output_tile, const std::vector<Tile>& input_tiles) {
-    // 修正: 加锁保护所有OpenCV操作
     std::lock_guard<std::mutex> lock(g_opencv_op_mutex);
 
     if (input_tiles.size() < 2) throw GraphError(GraphErrc::MissingDependency, "add_weighted requires two input tiles.");
@@ -330,7 +304,6 @@ static void op_add_weighted_tiled(const Node& node, const Tile& output_tile, con
 }
 
 static void op_abs_diff_tiled(const Node& node, const Tile& output_tile, const std::vector<Tile>& input_tiles) {
-    // 修正: 加锁保护所有OpenCV操作
     std::lock_guard<std::mutex> lock(g_opencv_op_mutex);
 
     if (input_tiles.size() < 2) throw GraphError(GraphErrc::MissingDependency, "diff requires two input tiles.");
@@ -342,7 +315,6 @@ static void op_abs_diff_tiled(const Node& node, const Tile& output_tile, const s
 }
 
 static void op_multiply_tiled(const Node& node, const Tile& output_tile, const std::vector<Tile>& input_tiles) {
-    // 修正: 加锁保护所有OpenCV操作
     std::lock_guard<std::mutex> lock(g_opencv_op_mutex);
 
     if (input_tiles.size() < 2) throw GraphError(GraphErrc::MissingDependency, "multiply requires two input tiles.");
@@ -361,7 +333,7 @@ static void op_multiply_tiled(const Node& node, const Tile& output_tile, const s
 void register_builtin() {
     auto& R = OpRegistry::instance();
 
-    // 注册 Monolithic 操作
+    // 注册 Monolithic 操作，使用默认元数据（CPU）
     R.register_op("image_source", "path", MonolithicOpFunc(op_image_source_path));
     R.register_op("image_generator", "constant", MonolithicOpFunc(op_constant_image));
     R.register_op("image_generator", "perlin_noise", MonolithicOpFunc(op_perlin_noise));
@@ -372,13 +344,14 @@ void register_builtin() {
     R.register_op("image_process", "crop", MonolithicOpFunc(op_crop)); 
     R.register_op("image_process", "extract_channel", MonolithicOpFunc(op_extract_channel)); 
 
-    // 注册 Tiled 操作
-    R.register_op("image_process", "gaussian_blur", TileOpFunc(op_gaussian_blur_tiled), {TileSizePreference::MACRO});
-    R.register_op("image_process", "curve_transform", TileOpFunc(op_curve_transform_tiled), {TileSizePreference::MACRO});
-    R.register_op("image_mixing", "add_weighted", TileOpFunc(op_add_weighted_tiled), {TileSizePreference::MACRO});
-    R.register_op("image_mixing", "diff", TileOpFunc(op_abs_diff_tiled), {TileSizePreference::MACRO});
-    R.register_op("image_mixing", "multiply", TileOpFunc(op_multiply_tiled), {TileSizePreference::MACRO});
-
+    // 注册 Tiled 操作，使用默认元数据（CPU）和 MACRO 偏好
+    OpMetadata tiled_meta;
+    tiled_meta.tile_preference = TileSizePreference::MACRO;
+    R.register_op("image_process", "gaussian_blur", TileOpFunc(op_gaussian_blur_tiled), tiled_meta);
+    R.register_op("image_process", "curve_transform", TileOpFunc(op_curve_transform_tiled), tiled_meta);
+    R.register_op("image_mixing", "add_weighted", TileOpFunc(op_add_weighted_tiled), tiled_meta);
+    R.register_op("image_mixing", "diff", TileOpFunc(op_abs_diff_tiled), tiled_meta);
+    R.register_op("image_mixing", "multiply", TileOpFunc(op_multiply_tiled), tiled_meta);
 }
 
 }} // namespace ps::ops

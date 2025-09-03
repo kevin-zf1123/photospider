@@ -41,63 +41,59 @@ add_library(ftxui-component STATIC ${FTXUI_COMPONENT_SOURCES})
 target_include_directories(ftxui-component PUBLIC ${FTXUI_INCLUDE_DIR} PRIVATE ${FTXUI_SRC_DIR})
 target_link_libraries(ftxui-component PUBLIC ftxui-dom)
 
-# --- [REFACTOR] Create a Static Library for Core Logic ---
-# This library will contain all sources EXCEPT the main() entry point.
+# --- [核心修复] 将核心逻辑库从 STATIC 改为 SHARED ---
 file(GLOB_RECURSE CORE_LIB_SOURCES 
     "src/*.cpp"
     "src/*.hpp"
 )
-# [修改] 从 glob 中排除 .mm 文件，以避免被 CXX 编译器处理
 list(FILTER CORE_LIB_SOURCES EXCLUDE REGEX ".*\\.mm$")
-add_library(photospider_lib STATIC ${CORE_LIB_SOURCES})
+add_library(photospider_lib SHARED ${CORE_LIB_SOURCES})
 
-# [修改] 在 Apple 平台上，将 .mm 文件显式添加到库的源文件中
 if(APPLE)
     target_sources(photospider_lib PRIVATE src/kernel/graph_runtime.mm)
+endif()
+
+# [*** 本次修复的核心点 ***]
+# 明确设置符号可见性策略，以确保符号被正确导出。
+set_target_properties(photospider_lib PROPERTIES
+    CXX_VISIBILITY_PRESET default  # 默认导出所有符号
+    DEFINE_SYMBOL "PHOTOSPIDER_LIBRARY" # 可选，用于控制 dllexport/import
+)
+if(WIN32)
+    # 在 Windows 上，这个属性会自动处理 __declspec(dllexport)
+    set_target_properties(photospider_lib PROPERTIES WINDOWS_EXPORT_ALL_SYMBOLS ON)
 endif()
 
 target_include_directories(photospider_lib PUBLIC 
     "${PROJECT_SOURCE_DIR}/include"
     "${PROJECT_SOURCE_DIR}/src"
 )
-# The library itself needs to link to its dependencies.
-target_link_libraries(photospider_lib PRIVATE
+target_link_libraries(photospider_lib PUBLIC
     ftxui-component
     ${OpenCV_LIBS}
     yaml-cpp::yaml-cpp
 )
 
 # --- Configure Main Executable ---
-# The executable now only contains its own main() and links to the core library.
 add_executable(graph_cli cli/graph_cli.cpp)
 target_include_directories(graph_cli PRIVATE 
     "${PROJECT_SOURCE_DIR}/include"
     "${PROJECT_SOURCE_DIR}/src"
 )
-find_library(FW_METAL Metal)
-find_library(FW_COREVIDEO CoreVideo)
-find_library(FW_COREIMAGE CoreImage)
-find_library(FW_QUARTZCORE QuartzCore)
-target_link_libraries(graph_cli PRIVATE
-    photospider_lib # <-- Link to our core library
-    ftxui-component
-    ${OpenCV_LIBS}
-    yaml-cpp::yaml-cpp
-    ${FW_METAL}
-    ${FW_COREVIDEO}
-    ${FW_COREIMAGE}
-    ${FW_QUARTZCORE}
-)
+target_link_libraries(graph_cli PRIVATE photospider_lib)
 if (UNIX AND NOT APPLE)
     target_link_libraries(graph_cli PRIVATE anl)
 endif()
+set_target_properties(graph_cli PROPERTIES
+    BUILD_RPATH "${CMAKE_BINARY_DIR}"
+    INSTALL_RPATH "$ORIGIN/../lib"
+)
 
 # --- Configure Plugins ---
 set(PLUGIN_OUTPUT_DIR ${CMAKE_BINARY_DIR}/plugins)
 file(MAKE_DIRECTORY ${PLUGIN_OUTPUT_DIR})
 file(GLOB PLUGIN_SOURCES "custom_ops/*.cpp")
 
-# Exclude platform-specific plugins from the generic list
 if(APPLE)
     list(REMOVE_ITEM PLUGIN_SOURCES "${CMAKE_CURRENT_SOURCE_DIR}/custom_ops/metal_ops_loader.cpp")
 endif()
@@ -108,19 +104,15 @@ foreach(PLUGIN_SOURCE ${PLUGIN_SOURCES})
     set_target_properties(${PLUGIN_NAME} PROPERTIES
         LIBRARY_OUTPUT_DIRECTORY "${PLUGIN_OUTPUT_DIR}"
         RUNTIME_OUTPUT_DIRECTORY "${PLUGIN_OUTPUT_DIR}"
+        BUILD_RPATH "${CMAKE_BINARY_DIR}"
+        INSTALL_RPATH "$ORIGIN/../lib"
     )
     target_include_directories(${PLUGIN_NAME} PRIVATE "${PROJECT_SOURCE_DIR}/include" "${PROJECT_SOURCE_DIR}/src")
-    target_link_libraries(${PLUGIN_NAME} PRIVATE
-        photospider_lib # <-- Plugins also depend on core types/functions
-        ftxui-component
-        ${OpenCV_LIBS}
-        yaml-cpp::yaml-cpp
-    )
+    target_link_libraries(${PLUGIN_NAME} PRIVATE photospider_lib)
 endforeach()
 
 # --- Platform-Specific Adjustments ---
 if(APPLE)
-    # Output layout for Metal components
     set(METAL_ROOT_DIR ${CMAKE_BINARY_DIR}/high_performance/metal)
     set(METAL_OPS_DIR  ${METAL_ROOT_DIR}/ops)
     file(MAKE_DIRECTORY ${METAL_ROOT_DIR})
@@ -128,19 +120,16 @@ if(APPLE)
 
     enable_language(OBJCXX)
 
-    # Use CMake's standard way to find and link Apple frameworks
     find_library(METAL_FRAMEWORK Metal REQUIRED)
     find_library(FOUNDATION_FRAMEWORK Foundation REQUIRED)
     find_library(COREIMAGE_FRAMEWORK CoreImage REQUIRED)
     find_library(COREVIDEO_FRAMEWORK CoreVideo REQUIRED)
     
-    # [修改] 核心库现在也需要链接 Metal 框架
     target_link_libraries(photospider_lib PRIVATE
         ${METAL_FRAMEWORK}
         ${FOUNDATION_FRAMEWORK}
     )
 
-    # Main Metal implementation library (goes under ops/)
     add_library(perlin_noise_metal SHARED src/metal/perlin_noise_metal.mm)
     set_target_properties(perlin_noise_metal PROPERTIES
         LIBRARY_OUTPUT_DIRECTORY "${METAL_OPS_DIR}"
@@ -157,14 +146,12 @@ if(APPLE)
     )
     target_include_directories(perlin_noise_metal PRIVATE "${PROJECT_SOURCE_DIR}/include")
 
-    # Loader plugin that registers the Metal op (stays at metal/ root)
     add_library(metal_ops_loader SHARED custom_ops/metal_ops_loader.cpp)
     set_target_properties(metal_ops_loader PROPERTIES
         LIBRARY_OUTPUT_DIRECTORY "${METAL_ROOT_DIR}"
         RUNTIME_OUTPUT_DIRECTORY "${METAL_ROOT_DIR}"
-        # Ensure dependent Metal ops under ops/ are found at runtime
-        BUILD_RPATH "@loader_path/ops"
-        INSTALL_RPATH "@loader_path/ops"
+        BUILD_RPATH "@loader_path/ops;${CMAKE_BINARY_DIR}"
+        INSTALL_RPATH "@loader_path/ops;$ORIGIN/../lib"
         MACOSX_RPATH ON
     )
     
@@ -174,10 +161,7 @@ if(APPLE)
     )
     target_link_libraries(metal_ops_loader PRIVATE
         perlin_noise_metal
-        photospider_lib # <-- Metal plugin loader also needs core logic
-        ${OpenCV_LIBS}
-        yaml-cpp::yaml-cpp
-        ftxui-component
+        photospider_lib
     )
 
     set(CMAKE_SHARED_LINKER_FLAGS "${CMAKE_SHARED_LINKER_FLAGS} -undefined dynamic_lookup")
@@ -188,44 +172,33 @@ enable_testing()
 set(TEST_OUTPUT_DIR ${CMAKE_BINARY_DIR}/tests)
 file(MAKE_DIRECTORY ${TEST_OUTPUT_DIR})
 
-# *** FIX: The test executable now only compiles its own source file. ***
 add_executable(test_milestone2 tests/test_milestone2.cpp)
 set_target_properties(test_milestone2 PROPERTIES
     RUNTIME_OUTPUT_DIRECTORY "${TEST_OUTPUT_DIR}"
+    BUILD_RPATH "${CMAKE_BINARY_DIR}"
 )
 target_include_directories(test_milestone2 PRIVATE 
     "${PROJECT_SOURCE_DIR}/include"
     "${PROJECT_SOURCE_DIR}/src"
 )
-# *** FIX: Link the test executable against the core static library. ***
-target_link_libraries(test_milestone2 PRIVATE
-    photospider_lib
-    ftxui-component
-    ${OpenCV_LIBS}
-    yaml-cpp::yaml-cpp
-)
+target_link_libraries(test_milestone2 PRIVATE photospider_lib)
 add_test(NAME Milestone2Tests COMMAND test_milestone2)
 
-# [新增] 为里程碑3添加新的测试目标
 add_executable(test_milestone3 tests/test_milestone3.cpp)
 set_target_properties(test_milestone3 PROPERTIES
     RUNTIME_OUTPUT_DIRECTORY "${TEST_OUTPUT_DIR}"
+    BUILD_RPATH "${CMAKE_BINARY_DIR}"
 )
 target_include_directories(test_milestone3 PRIVATE 
     "${PROJECT_SOURCE_DIR}/include"
     "${PROJECT_SOURCE_DIR}/src"
 )
-target_link_libraries(test_milestone3 PRIVATE
-    photospider_lib
-    ftxui-component
-    ${OpenCV_LIBS}
-    yaml-cpp::yaml-cpp
-)
+target_link_libraries(test_milestone3 PRIVATE photospider_lib)
 add_test(NAME Milestone3Tests COMMAND test_milestone3)
-
 
 # --- Final Output ---
 message(STATUS "Main executable will be built in: ${CMAKE_BINARY_DIR}")
+message(STATUS "Core shared library will be built in: ${CMAKE_BINARY_DIR}")
 message(STATUS "Plugins will be built in: ${PLUGIN_OUTPUT_DIR}")
 if(APPLE)
     message(STATUS "Metal plugins will be built in: ${METAL_ROOT_DIR}")
