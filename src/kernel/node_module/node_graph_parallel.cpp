@@ -61,7 +61,6 @@ NodeOutput& NodeGraph::compute_parallel(int node_id, const std::string& cache_pr
     }
     
     // 依赖管理
-    // [修正] 将 std::atomic<int> 改为 int，并用 mutex 保护
     std::map<int, int> dependency_count;
     std::map<int, std::vector<int>> dependents;
     std::queue<int> ready_queue;
@@ -98,7 +97,7 @@ NodeOutput& NodeGraph::compute_parallel(int node_id, const std::string& cache_pr
     unsigned int num_threads = std::max(1u, std::thread::hardware_concurrency());
     std::vector<std::thread> workers;
     std::atomic<bool> done = false;
-    // [新增] 异常安全处理机制
+    // 异常安全处理机制
     std::atomic<bool> error_occurred = false;
     std::exception_ptr first_exception;
     std::mutex error_mutex;
@@ -120,37 +119,41 @@ NodeOutput& NodeGraph::compute_parallel(int node_id, const std::string& cache_pr
                 if (error_occurred) continue;
 
                 try {
-                    // [修正] 每个任务的 compute_internal 调用都有自己的 visiting map
+                    // 每个任务的 compute_internal 调用都有自己的 visiting map
                     std::unordered_map<int, bool> visiting;
                     compute_internal(current_id, cache_precision, visiting, enable_timing, !disable_disk_cache, benchmark_events);
                     
-                    completed_node_count++;
-                    
-                    // 完成通知 (现在受 mutex 保护)
-                    if (dependents.count(current_id)) {
+                    // *** FIX: 将完成通知逻辑完全置于互斥锁保护下 ***
+                    {
                         std::lock_guard<std::mutex> lock(queue_mutex);
-                        for (int dependent_id : dependents.at(current_id)) {
-                            if (--dependency_count.at(dependent_id) == 0) {
-                                ready_queue.push(dependent_id);
-                                cv_queue.notify_one();
+                        completed_node_count++;
+
+                        if (dependents.count(current_id)) {
+                            for (int dependent_id : dependents.at(current_id)) {
+                                if (--dependency_count.at(dependent_id) == 0) {
+                                    ready_queue.push(dependent_id);
+                                    cv_queue.notify_one();
+                                }
                             }
                         }
-                    }
-                    
-                    // [修正] 检查是否所有节点都已完成
-                    if (completed_node_count == execution_order.size()) {
-                        done = true;
-                        cv_queue.notify_all();
+                        
+                        // 检查是否所有节点都已完成
+                        if (completed_node_count == execution_order.size()) {
+                            done = true;
+                            cv_queue.notify_all();
+                        }
                     }
 
                 } catch (...) {
-                    // [新增] 捕获第一个发生的异常
+                    // 捕获第一个发生的异常
                     std::lock_guard<std::mutex> lock(error_mutex);
                     if (!error_occurred) {
                         first_exception = std::current_exception();
                         error_occurred = true;
                         done = true;
-                        cv_queue.notify_all(); // 唤醒所有线程，让它们退出
+                        // 唤醒所有线程，让它们检查 done 标志并退出
+                        std::lock_guard<std::mutex> queue_lock(queue_mutex);
+                        cv_queue.notify_all();
                     }
                 }
             }
@@ -170,7 +173,7 @@ NodeOutput& NodeGraph::compute_parallel(int node_id, const std::string& cache_pr
         }
     }
 
-    // [新增] 如果有异常发生，在主线程中重新抛出
+    // 如果有异常发生，在主线程中重新抛出
     if (error_occurred && first_exception) {
         std::rethrow_exception(first_exception);
     }

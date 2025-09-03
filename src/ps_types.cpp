@@ -2,6 +2,7 @@
 
 #include "ps_types.hpp"
 #include <algorithm>
+#include <stdexcept>
 
 namespace ps {
 

@@ -10,17 +10,13 @@ set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_CXX_EXTENSIONS OFF)
 
 # --- Find Dependencies ---
-# Add videoio component for the CVPixelBuffer wrapper function on macOS
 find_package(OpenCV REQUIRED COMPONENTS core imgproc imgcodecs videoio)
 find_package(yaml-cpp REQUIRED)
 
-# --- Build FTXUI as Modular Static Libraries (Corrected Version) ---
-
-# Define the base include directory for all FTXUI modules
+# --- Build FTXUI as Modular Static Libraries ---
 set(FTXUI_INCLUDE_DIR "${PROJECT_SOURCE_DIR}/extern/ftxui/include")
 set(FTXUI_SRC_DIR "${PROJECT_SOURCE_DIR}/extern/ftxui/src")
 
-# Helper function to filter out test/fuzzer/benchmark files
 function(filter_ftxui_sources out_var)
     list(FILTER ${out_var} EXCLUDE REGEX ".*_test\\.cpp$")
     list(FILTER ${out_var} EXCLUDE REGEX ".*_fuzzer\\.cpp$")
@@ -28,118 +24,54 @@ function(filter_ftxui_sources out_var)
     set(${out_var} ${${out_var}} PARENT_SCOPE)
 endfunction()
 
-# 1. Build the `screen` module (no dependencies)
 file(GLOB_RECURSE FTXUI_SCREEN_SOURCES "${FTXUI_SRC_DIR}/ftxui/screen/*.cpp")
 filter_ftxui_sources(FTXUI_SCREEN_SOURCES)
 add_library(ftxui-screen STATIC ${FTXUI_SCREEN_SOURCES})
-target_include_directories(ftxui-screen
-    PUBLIC ${FTXUI_INCLUDE_DIR}
-    PRIVATE ${FTXUI_SRC_DIR}
-)
+target_include_directories(ftxui-screen PUBLIC ${FTXUI_INCLUDE_DIR} PRIVATE ${FTXUI_SRC_DIR})
 
-# 2. Build the `dom` module (depends on `screen`)
 file(GLOB_RECURSE FTXUI_DOM_SOURCES "${FTXUI_SRC_DIR}/ftxui/dom/*.cpp")
 filter_ftxui_sources(FTXUI_DOM_SOURCES)
 add_library(ftxui-dom STATIC ${FTXUI_DOM_SOURCES})
-target_include_directories(ftxui-dom
-    PUBLIC ${FTXUI_INCLUDE_DIR}
-    PRIVATE ${FTXUI_SRC_DIR}
-)
+target_include_directories(ftxui-dom PUBLIC ${FTXUI_INCLUDE_DIR} PRIVATE ${FTXUI_SRC_DIR})
 target_link_libraries(ftxui-dom PUBLIC ftxui-screen)
 
-# 3. Build the `component` module (depends on `dom`)
 file(GLOB_RECURSE FTXUI_COMPONENT_SOURCES "${FTXUI_SRC_DIR}/ftxui/component/*.cpp")
 filter_ftxui_sources(FTXUI_COMPONENT_SOURCES)
 add_library(ftxui-component STATIC ${FTXUI_COMPONENT_SOURCES})
-target_include_directories(ftxui-component
-    PUBLIC ${FTXUI_INCLUDE_DIR}
-    PRIVATE ${FTXUI_SRC_DIR}
-)
+target_include_directories(ftxui-component PUBLIC ${FTXUI_INCLUDE_DIR} PRIVATE ${FTXUI_SRC_DIR})
 target_link_libraries(ftxui-component PUBLIC ftxui-dom)
 
+# --- [REFACTOR] Create a Static Library for Core Logic ---
+# This library will contain all sources EXCEPT the main() entry point.
+file(GLOB_RECURSE CORE_LIB_SOURCES 
+    "src/*.cpp"
+    "src/*.hpp"
+)
+add_library(photospider_lib STATIC ${CORE_LIB_SOURCES})
+target_include_directories(photospider_lib PUBLIC 
+    "${PROJECT_SOURCE_DIR}/include"
+    "${PROJECT_SOURCE_DIR}/src"
+)
+# The library itself needs to link to its dependencies.
+target_link_libraries(photospider_lib PRIVATE
+    ftxui-component
+    ${OpenCV_LIBS}
+    yaml-cpp::yaml-cpp
+)
 
 # --- Configure Main Executable ---
-file(GLOB_RECURSE APP_SOURCES 
-    "src/*.cpp" 
-    "src/*.hpp"
-    "cli/*.cpp"
+# The executable now only contains its own main() and links to the core library.
+add_executable(graph_cli cli/graph_cli.cpp)
+target_include_directories(graph_cli PRIVATE 
+    "${PROJECT_SOURCE_DIR}/include"
+    "${PROJECT_SOURCE_DIR}/src"
 )
-# Add newly separated modules explicitly (non-recursive glob above won't catch subdirs)
-# list(APPEND APP_SOURCES
-#     src/kernel/plugin_manager.cpp
-#     src/kernel/plugin_manage_module/plugin_loader.cpp
-#     src/kernel/node_module/node_graph_io.cpp
-#     src/kernel/node_module/node_graph_compute.cpp
-#     src/kernel/node_module/node_graph_parallel.cpp
-#     src/kernel/node_module/node_graph_cache.cpp
-#     src/kernel/node_module/node_graph_traversal.cpp
-#     src/kernel/node_module/node_yaml.cpp
-#     src/kernel/node_module/node_graph_events.cpp
-#     src/kernel/graph_runtime.cpp
-#     src/kernel/kernel.cpp
-#     src/kernel/interaction.cpp
-#     src/cli/cli_autocompleter.cpp
-#     src/cli/cli_history.cpp
-#     src/cli/terminal_input.cpp
-#     src/cli/path_complete.cpp
-#     src/cli/tui_editor.cpp
-#     src/cli/config_editor.cpp
-#     src/cli/node_editor.cpp
-#     src/cli/node_editor_full.cpp
-#     src/cli/node_graph_print.cpp
-#     src/cli/print_cli_help.cpp
-#     src/cli/print_repl_help.cpp
-#     src/cli/ask.cpp
-#     src/cli/ask_yesno.cpp
-#     src/cli/handle_interactive_save.cpp
-#     src/cli/do_traversal.cpp
-#     src/cli/save_fp32_image.cpp
-#     src/cli/command/help_utils.cpp
-#     src/cli/command/command_help.cpp
-#     src/cli/command/command_clear.cpp
-#     src/cli/command/command_graphs.cpp
-#     src/cli/command/command_load.cpp
-#     src/cli/command/command_switch.cpp
-#     src/cli/command/command_close.cpp
-#     src/cli/command/command_print.cpp
-#     src/cli/command/command_node.cpp
-#     src/cli/command/command_ops.cpp
-#     src/cli/command/command_traversal.cpp
-#     src/cli/command/command_config.cpp
-#     src/cli/command/command_read.cpp
-#     src/cli/command/command_source.cpp
-#     src/cli/command/command_output.cpp
-#     src/cli/command/command_clear_graph.cpp
-#     src/cli/command/command_clear_cache.cpp
-#     src/cli/command/command_free.cpp
-#     src/cli/command/command_compute.cpp
-#     src/cli/command/command_save.cpp
-#     src/cli/command/command_exit.cpp
-#     src/cli/process_command.cpp
-#     src/cli/run_repl.cpp
-
-#     src/cli/autocomplete/CompleteCommand.cpp
-#     src/cli/autocomplete/CompleteComputeArgs.cpp
-#     src/cli/autocomplete/CompleteGraphName.cpp
-#     src/cli/autocomplete/CompleteNodeId.cpp
-#     src/cli/autocomplete/CompleteOpsMode.cpp
-#     src/cli/autocomplete/CompletePath.cpp
-#     src/cli/autocomplete/CompletePrintArgs.cpp
-#     src/cli/autocomplete/CompleteSessionName.cpp
-#     src/cli/autocomplete/CompleteTraversalArgs.cpp
-#     src/cli/autocomplete/CompleteYamlPath.cpp
-#     src/cli/autocomplete/FindLongestCommonPrefix.cpp
-#     src/cli/autocomplete/Tokenize.cpp
-
-#     src/adapter/buffer_adapter_opencv.cpp
-# )
-add_executable(graph_cli ${APP_SOURCES})
-target_include_directories(graph_cli PRIVATE "${PROJECT_SOURCE_DIR}/include" "${PROJECT_SOURCE_DIR}/src")
 find_library(FW_METAL Metal)
 find_library(FW_COREVIDEO CoreVideo)
 find_library(FW_COREIMAGE CoreImage)
 find_library(FW_QUARTZCORE QuartzCore)
 target_link_libraries(graph_cli PRIVATE
+    photospider_lib # <-- Link to our core library
     ftxui-component
     ${OpenCV_LIBS}
     yaml-cpp::yaml-cpp
@@ -151,7 +83,6 @@ target_link_libraries(graph_cli PRIVATE
 if (UNIX AND NOT APPLE)
     target_link_libraries(graph_cli PRIVATE anl)
 endif()
-
 
 # --- Configure Plugins ---
 set(PLUGIN_OUTPUT_DIR ${CMAKE_BINARY_DIR}/plugins)
@@ -171,8 +102,8 @@ foreach(PLUGIN_SOURCE ${PLUGIN_SOURCES})
         RUNTIME_OUTPUT_DIRECTORY "${PLUGIN_OUTPUT_DIR}"
     )
     target_include_directories(${PLUGIN_NAME} PRIVATE "${PROJECT_SOURCE_DIR}/include" "${PROJECT_SOURCE_DIR}/src")
-
     target_link_libraries(${PLUGIN_NAME} PRIVATE
+        photospider_lib # <-- Plugins also depend on core types/functions
         ftxui-component
         ${OpenCV_LIBS}
         yaml-cpp::yaml-cpp
@@ -227,9 +158,9 @@ if(APPLE)
         "${PROJECT_SOURCE_DIR}/include"
         "${PROJECT_SOURCE_DIR}/src"
     )
-    
     target_link_libraries(metal_ops_loader PRIVATE
         perlin_noise_metal
+        photospider_lib # <-- Metal plugin loader also needs core logic
         ${OpenCV_LIBS}
         yaml-cpp::yaml-cpp
         ftxui-component
@@ -238,6 +169,30 @@ if(APPLE)
     set(CMAKE_SHARED_LINKER_FLAGS "${CMAKE_SHARED_LINKER_FLAGS} -undefined dynamic_lookup")
 endif()
 
+# --- Testing Target ---
+enable_testing()
+set(TEST_OUTPUT_DIR ${CMAKE_BINARY_DIR}/tests)
+file(MAKE_DIRECTORY ${TEST_OUTPUT_DIR})
+
+# *** FIX: The test executable now only compiles its own source file. ***
+add_executable(test_milestone2 tests/test_milestone2.cpp)
+set_target_properties(test_milestone2 PROPERTIES
+    RUNTIME_OUTPUT_DIRECTORY "${TEST_OUTPUT_DIR}"
+)
+target_include_directories(test_milestone2 PRIVATE 
+    "${PROJECT_SOURCE_DIR}/include"
+    "${PROJECT_SOURCE_DIR}/src"
+)
+# *** FIX: Link the test executable against the core static library. ***
+target_link_libraries(test_milestone2 PRIVATE
+    photospider_lib
+    ftxui-component
+    ${OpenCV_LIBS}
+    yaml-cpp::yaml-cpp
+)
+
+add_test(NAME Milestone2Tests COMMAND test_milestone2)
+
 # --- Final Output ---
 message(STATUS "Main executable will be built in: ${CMAKE_BINARY_DIR}")
 message(STATUS "Plugins will be built in: ${PLUGIN_OUTPUT_DIR}")
@@ -245,3 +200,4 @@ if(APPLE)
     message(STATUS "Metal plugins will be built in: ${METAL_ROOT_DIR}")
     message(STATUS "Metal ops will be built in: ${METAL_OPS_DIR}")
 endif()
+message(STATUS "Test executables will be built in: ${TEST_OUTPUT_DIR}")
