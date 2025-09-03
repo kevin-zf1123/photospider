@@ -4,14 +4,12 @@
 #include <filesystem>
 #include <random>
 
-// [新增] 仅在此 .mm 文件中导入 Metal 头文件
 #ifdef __APPLE__
 #import <Metal/Metal.h>
 #endif
 
 namespace ps {
 
-// [新增] 在 .mm 文件中完整定义 GpuContext 结构体
 struct GraphRuntime::GpuContext {
 #ifdef __APPLE__
     id<MTLDevice> device;
@@ -25,13 +23,10 @@ GraphRuntime::GraphRuntime(const Info& info)
     std::filesystem::create_directories(info_.root / "cache");
 
 #ifdef __APPLE__
-    // [新增] 初始化 GPU 上下文
     gpu_context_ = std::make_unique<GpuContext>();
     gpu_context_->device = MTLCreateSystemDefaultDevice();
     if (gpu_context_->device) {
         gpu_context_->commandQueue = [gpu_context_->device newCommandQueue];
-    } else {
-        // TODO: Log a warning that Metal device is not available.
     }
 #endif
 }
@@ -40,7 +35,6 @@ GraphRuntime::~GraphRuntime() {
     stop(); 
 }
 
-// [新增] 实现 GPU 上下文访问器
 id GraphRuntime::get_metal_device() {
 #ifdef __APPLE__
     return gpu_context_ ? gpu_context_->device : nil;
@@ -129,7 +123,8 @@ void GraphRuntime::run_loop(int thread_id) {
 
         if (!found_task) {
             std::unique_lock<std::mutex> lock(global_queue_mutex_);
-            cv_task_available_.wait_for(lock, std::chrono::milliseconds(10), [&]{ 
+            // [性能修复] 将等待超时从 10ms 缩短到 1ms
+            cv_task_available_.wait_for(lock, std::chrono::milliseconds(1), [&]{ 
                 return !global_task_queue_.empty() || !running_; 
             });
             

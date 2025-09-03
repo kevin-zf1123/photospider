@@ -8,7 +8,6 @@
 
 namespace ps {
 
-// [新增] 实现 Metal 设备访问器
 id Kernel::get_metal_device(const std::string& name) {
     auto it = graphs_.find(name);
     if (it == graphs_.end()) {
@@ -23,15 +22,29 @@ std::optional<std::string> Kernel::load_graph(const std::string& name,
                                               const std::string& yaml_path,
                                               const std::string& config_path) {
     if (graphs_.count(name)) return std::nullopt;
+
+    // [功能修复] 当 yaml_path 为空时，推断默认的 session 文件路径
+    std::string effective_yaml_path = yaml_path;
+    if (effective_yaml_path.empty()) {
+        effective_yaml_path = (std::filesystem::path(root_dir) / name / "content.yaml").string();
+    }
+
+
     GraphRuntime::Info info{ name, std::filesystem::path(root_dir) / name,
-                             yaml_path, config_path };
+                             effective_yaml_path, config_path };
     auto rt = std::make_unique<GraphRuntime>(info);
     try {
         std::filesystem::create_directories(info.root);
         auto yaml_target = info.root / "content.yaml";
+        
+        // [功能修复] 确保即使 yaml_path 最初为空，我们仍使用 effective_yaml_path
         if (!info.yaml.empty() && std::filesystem::exists(info.yaml)) {
-            std::filesystem::copy_file(info.yaml, yaml_target, std::filesystem::copy_options::overwrite_existing);
+            // 如果提供了 yaml_path（非空），则总是拷贝
+            if (!yaml_path.empty()) {
+                 std::filesystem::copy_file(info.yaml, yaml_target, std::filesystem::copy_options::overwrite_existing);
+            }
         }
+
         if (!config_path.empty() && std::filesystem::exists(config_path)) {
             auto cfg_target = info.root / "config.yaml";
             std::filesystem::copy_file(config_path, cfg_target, std::filesystem::copy_options::overwrite_existing);
@@ -39,18 +52,24 @@ std::optional<std::string> Kernel::load_graph(const std::string& name,
     } catch (...) {}
     rt->start();
     
-    if (!yaml_path.empty()) {
+    // [功能修复] 使用推断出的 yaml_target 进行加载
+    auto final_yaml_to_load = info.root / "content.yaml";
+
+    if (std::filesystem::exists(final_yaml_to_load)) {
         try {
-            rt->post([yaml = info.root / "content.yaml", fallback = info.yaml](NodeGraph& g){
-                if (std::filesystem::exists(yaml)) g.load_yaml(yaml);
-                else if (!fallback.empty() && std::filesystem::exists(fallback)) g.load_yaml(fallback);
+            rt->post([yaml = final_yaml_to_load](NodeGraph& g){
+                g.load_yaml(yaml);
                 return 0;
             }).get();
         } catch (const std::exception& e) {
             std::cerr << "Failed to load YAML for graph '" << name << "': " << e.what() << std::endl;
             return std::nullopt;
         }
+    } else if (!yaml_path.empty()) {
+        // 如果提供了原始yaml_path但目标不存在，说明拷贝失败或源文件不存在
+        std::cerr << "Warning: source YAML file not found for graph '" << name << "': " << yaml_path << std::endl;
     }
+
 
     graphs_[name] = std::move(rt);
     return name;
