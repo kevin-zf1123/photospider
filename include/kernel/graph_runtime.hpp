@@ -3,6 +3,7 @@
 
 #include <atomic>
 #include <condition_variable>
+#include <deque>
 #include <filesystem>
 #include <functional>
 #include <future>
@@ -10,34 +11,42 @@
 #include <mutex>
 #include <queue>
 #include <string>
+#include <vector>
+#include <map>
+#include <exception>
 
 #include "node_graph.hpp"
 
 namespace ps {
 
-// Encapsulates a single loaded graph with its own resources and worker thread.
+using Task = std::function<void()>;
+
+struct TaskGraph {
+    std::map<int, Task> tasks;
+    std::map<int, std::atomic<int>> dependency_counters;
+    std::map<int, std::vector<int>> dependents_map;
+    std::vector<int> initial_ready_nodes;
+};
+
 class GraphRuntime {
 public:
     struct Info {
-        std::string name;            // logical name or id
-        std::filesystem::path root;  // per-graph root folder
-        std::filesystem::path yaml;  // YAML path for this graph (copied/symlinked under root)
-        std::filesystem::path config;// optional config path for this graph (not edited by kernel)
+        std::string name;
+        std::filesystem::path root;
+        std::filesystem::path yaml;
+        std::filesystem::path config;
     };
 
     explicit GraphRuntime(const Info& info);
     ~GraphRuntime();
 
-    // Non-copyable
     GraphRuntime(const GraphRuntime&) = delete;
     GraphRuntime& operator=(const GraphRuntime&) = delete;
 
-    // Control
     void start();
     void stop();
     bool running() const { return running_; }
 
-    // Schedule a task on the graph thread and get a future result.
     template<typename Fn>
     auto post(Fn&& fn) -> std::future<decltype(fn(std::declval<NodeGraph&>()))> {
         using Ret = decltype(fn(std::declval<NodeGraph&>()));
@@ -46,34 +55,48 @@ public:
         );
         std::future<Ret> fut = task->get_future();
         {
-            std::lock_guard<std::mutex> lk(mtx_);
-            queue_.push([task]{ (*task)(); });
+            std::lock_guard<std::mutex> lk(global_queue_mutex_);
+            global_task_queue_.push([task]{ (*task)(); });
         }
-        cv_.notify_one();
+        cv_task_available_.notify_one();
         return fut;
     }
-
-    // Non-posting helper to drain compute events from any thread safely.
-    // Rationale: If we posted a "drain" job on the same worker queue used by compute,
-    // the drain would be blocked behind the long-running compute. Exposing this method
-    // lets the Kernel/CLI read events directly, while NodeGraph guards its own buffers.
+    
     std::vector<NodeGraph::ComputeEvent> drain_compute_events_now() {
         return graph_.drain_compute_events();
     }
 
-    // Access immutable info
     const Info& info() const { return info_; }
+    NodeGraph& get_nodegraph() { return graph_; }
+
+    void push_ready_task(Task&& task, int thread_id);
+    void execute_task_graph_and_wait(std::shared_ptr<TaskGraph> task_graph);
+    void notify_task_complete();
+    void set_exception(std::exception_ptr e);
 
 private:
-    void run_loop();
+    void run_loop(int thread_id);
 
     Info info_;
     NodeGraph graph_;
-    std::thread worker_;
+    
+    std::vector<std::thread> workers_;
     std::atomic<bool> running_{false};
-    std::mutex mtx_;
-    std::condition_variable cv_;
-    std::queue<std::function<void()>> queue_;
+
+    std::vector<std::deque<Task>> local_task_queues_;
+    // [修复] 使用 unique_ptr 包装 mutex，使其可移动
+    std::vector<std::unique_ptr<std::mutex>> local_queue_mutexes_;
+    
+    std::queue<Task> global_task_queue_;
+    std::mutex global_queue_mutex_;
+    std::condition_variable cv_task_available_;
+
+    std::mutex completion_mutex_;
+    std::condition_variable cv_completion_;
+    std::atomic<int> tasks_remaining_{0};
+    
+    std::mutex exception_mutex_;
+    std::exception_ptr first_exception_{nullptr};
 };
 
 } // namespace ps

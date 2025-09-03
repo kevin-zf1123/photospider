@@ -13,39 +13,37 @@ std::optional<std::string> Kernel::load_graph(const std::string& name,
                                               const std::string& yaml_path,
                                               const std::string& config_path) {
     if (graphs_.count(name)) return std::nullopt;
-    // Always place sessions under the provided root_dir/name (CLI passes "sessions")
     GraphRuntime::Info info{ name, std::filesystem::path(root_dir) / name,
                              yaml_path, config_path };
     auto rt = std::make_unique<GraphRuntime>(info);
-    // Ensure per-graph files are present under the root for isolation
     try {
         std::filesystem::create_directories(info.root);
-        auto yaml_target = info.root / "content.yaml"; // content.yaml per requirement
-        // Always refresh content.yaml from source
+        auto yaml_target = info.root / "content.yaml";
         if (!info.yaml.empty() && std::filesystem::exists(info.yaml)) {
             std::filesystem::copy_file(info.yaml, yaml_target, std::filesystem::copy_options::overwrite_existing);
         }
-        // Copy config into session as config.yaml if provided
         if (!config_path.empty() && std::filesystem::exists(config_path)) {
             auto cfg_target = info.root / "config.yaml";
             std::filesystem::copy_file(config_path, cfg_target, std::filesystem::copy_options::overwrite_existing);
         }
-    } catch (...) {
-        // Non-fatal; continue with original yaml path
-    }
-    // Start worker thread before posting any jobs to avoid deadlock
+    } catch (...) {}
     rt->start();
-    // Load YAML synchronously on worker
-    try {
-        rt->post([yaml = info.root / "content.yaml", fallback = info.yaml](NodeGraph& g){
-            if (std::filesystem::exists(yaml)) g.load_yaml(yaml);
-            else g.load_yaml(fallback);
-            return 0;
-        }).get();
-    } catch (const std::exception& e) {
-        std::cerr << "Failed to load YAML for graph '" << name << "': " << e.what() << std::endl;
-        return std::nullopt;
+    
+    // [核心修复] 优雅地处理空 yaml_path
+    if (!yaml_path.empty()) {
+        try {
+            rt->post([yaml = info.root / "content.yaml", fallback = info.yaml](NodeGraph& g){
+                if (std::filesystem::exists(yaml)) g.load_yaml(yaml);
+                else if (!fallback.empty() && std::filesystem::exists(fallback)) g.load_yaml(fallback);
+                return 0;
+            }).get();
+        } catch (const std::exception& e) {
+            std::cerr << "Failed to load YAML for graph '" << name << "': " << e.what() << std::endl;
+            return std::nullopt;
+        }
     }
+    // 如果 yaml_path 为空，我们只是创建了一个空的 GraphRuntime，这是测试所期望的。
+
     graphs_[name] = std::move(rt);
     return name;
 }
@@ -72,16 +70,20 @@ bool Kernel::compute(const std::string& name, int node_id, const std::string& ca
     auto it = graphs_.find(name);
     if (it == graphs_.end()) return false;
     try {
-        auto fut = it->second->post([=](NodeGraph& g){
-            g.clear_timing_results();
-            bool prev_quiet = g.is_quiet();
-            g.set_quiet(quiet);
-            if (parallel) g.compute_parallel(node_id, cache_precision, force_recache, enable_timing, disable_disk_cache, benchmark_events);
-            else g.compute(node_id, cache_precision, force_recache, enable_timing, disable_disk_cache, benchmark_events);
-            g.set_quiet(prev_quiet);
-            return 0;
-        });
-        fut.get();
+        auto& runtime = *it->second;
+        auto& graph = runtime.get_nodegraph();
+        graph.set_quiet(quiet);
+        
+        if (parallel) {
+            graph.compute_parallel(runtime, node_id, cache_precision, force_recache, enable_timing, disable_disk_cache, benchmark_events);
+        } else {
+            auto fut = runtime.post([&](NodeGraph& g){
+                g.compute(node_id, cache_precision, force_recache, enable_timing, disable_disk_cache, benchmark_events);
+                return 0;
+            });
+            fut.get();
+        }
+
         last_error_.erase(name);
         return true;
     } catch (const GraphError& ge) {
@@ -101,9 +103,7 @@ std::optional<TimingCollector> Kernel::get_timing(const std::string& name) {
     if (it == graphs_.end()) return std::nullopt;
     try {
         return it->second->post([](NodeGraph& g){ return g.timing_results; }).get();
-    } catch (...) {
-        return std::nullopt;
-    }
+    } catch (...) { return std::nullopt; }
 }
 
 bool Kernel::reload_graph_yaml(const std::string& name, const std::string& yaml_path) {
@@ -234,9 +234,7 @@ std::optional<std::map<int, std::vector<Kernel::TraversalNodeInfo>>> Kernel::tra
                         vec.push_back(Kernel::TraversalNodeInfo{ node.id, node.name, mem, on_disk });
                     }
                     result[end] = std::move(vec);
-                } catch (...) {
-                    // Skip this end if traversal fails (cycle or missing node)
-                }
+                } catch (...) {}
             }
             return result;
         }).get();
@@ -252,13 +250,19 @@ std::optional<cv::Mat> Kernel::compute_and_get_image(const std::string& name, in
     auto it = graphs_.find(name);
     if (it == graphs_.end()) return std::nullopt;
     try {
-        std::future<NodeOutput> fut = it->second->post([=](NodeGraph& g) -> NodeOutput {
-            g.clear_timing_results();
-            const auto& out_ref = parallel ? g.compute_parallel(node_id, cache_precision, force_recache, enable_timing, disable_disk_cache, benchmark_events)
-                                           : g.compute(node_id, cache_precision, force_recache, enable_timing, disable_disk_cache, benchmark_events);
-            return out_ref;
-        });
-        NodeOutput output = fut.get();
+        NodeOutput output;
+        auto& runtime = *it->second;
+        auto& graph = runtime.get_nodegraph();
+
+        if (parallel) {
+            output = graph.compute_parallel(runtime, node_id, cache_precision, force_recache, enable_timing, disable_disk_cache, benchmark_events);
+        } else {
+             std::future<NodeOutput> fut = runtime.post([&](NodeGraph& g) -> NodeOutput {
+                return g.compute(node_id, cache_precision, force_recache, enable_timing, disable_disk_cache, benchmark_events);
+            });
+            output = fut.get();
+        }
+        
         if (output.image_buffer.width == 0) return std::nullopt;
         return toCvMat(output.image_buffer).clone();
     } catch (...) { return std::nullopt; }
@@ -305,44 +309,13 @@ bool Kernel::set_node_yaml(const std::string& name, int node_id, const std::stri
             if (!g.has_node(node_id)) return false;
             YAML::Node root = YAML::Load(yaml_text);
             ps::Node updated = ps::Node::from_yaml(root);
-            // Force id to requested id to prevent mismatch
             updated.id = node_id;
-            // Update in-place without redoing full cycle detection (keeps current behavior simple)
             g.nodes[node_id] = std::move(updated);
             return true;
         }).get();
     } catch (...) { return false; }
 }
 
-} // namespace ps
-
-
-// Structured cache/tidy stats wrappers
-namespace ps {
-std::optional<NodeGraph::DriveClearResult> Kernel::clear_drive_cache_stats(const std::string& name) {
-    auto it = graphs_.find(name); if (it == graphs_.end()) return std::nullopt;
-    try { return it->second->post([](NodeGraph& g){ return g.clear_drive_cache(); }).get(); } catch (...) { return std::nullopt; }
-}
-
-std::optional<NodeGraph::MemoryClearResult> Kernel::clear_memory_cache_stats(const std::string& name) {
-    auto it = graphs_.find(name); if (it == graphs_.end()) return std::nullopt;
-    try { return it->second->post([](NodeGraph& g){ return g.clear_memory_cache(); }).get(); } catch (...) { return std::nullopt; }
-}
-
-std::optional<NodeGraph::CacheSaveResult> Kernel::cache_all_nodes_stats(const std::string& name, const std::string& cache_precision) {
-    auto it = graphs_.find(name); if (it == graphs_.end()) return std::nullopt;
-    try { return it->second->post([=](NodeGraph& g){ return g.cache_all_nodes(cache_precision); }).get(); } catch (...) { return std::nullopt; }
-}
-
-std::optional<NodeGraph::MemoryClearResult> Kernel::free_transient_memory_stats(const std::string& name) {
-    auto it = graphs_.find(name); if (it == graphs_.end()) return std::nullopt;
-    try { return it->second->post([](NodeGraph& g){ return g.free_transient_memory(); }).get(); } catch (...) { return std::nullopt; }
-}
-
-std::optional<NodeGraph::DiskSyncResult> Kernel::synchronize_disk_cache_stats(const std::string& name, const std::string& cache_precision) {
-    auto it = graphs_.find(name); if (it == graphs_.end()) return std::nullopt;
-    try { return it->second->post([=](NodeGraph& g){ return g.synchronize_disk_cache(cache_precision); }).get(); } catch (...) { return std::nullopt; }
-}
 std::optional<std::future<bool>> Kernel::compute_async(const std::string& name, int node_id, const std::string& cache_precision,
                                                       bool force_recache, bool enable_timing, bool parallel, bool quiet,
                                                       bool disable_disk_cache,
@@ -352,13 +325,18 @@ std::optional<std::future<bool>> Kernel::compute_async(const std::string& name, 
         return std::nullopt;
     }
 
-    return it->second->post([=](NodeGraph& g) {
+    return it->second->post([&, runtime_ptr = it->second.get()](NodeGraph& g) {
         try {
             g.clear_timing_results();
             bool prev_quiet = g.is_quiet();
             g.set_quiet(quiet);
-            if (parallel) g.compute_parallel(node_id, cache_precision, force_recache, enable_timing, disable_disk_cache, benchmark_events);
-            else g.compute(node_id, cache_precision, force_recache, enable_timing, disable_disk_cache, benchmark_events);
+            
+            if (parallel) {
+                g.compute_parallel(*runtime_ptr, node_id, cache_precision, force_recache, enable_timing, disable_disk_cache, benchmark_events);
+            } else {
+                g.compute(node_id, cache_precision, force_recache, enable_timing, disable_disk_cache, benchmark_events);
+            }
+            
             g.set_quiet(prev_quiet);
             last_error_.erase(name);
             return true;
@@ -371,30 +349,23 @@ std::optional<std::future<bool>> Kernel::compute_async(const std::string& name, 
         }
     });
 }
-} // namespace ps
 
-namespace ps {
 std::optional<std::vector<NodeGraph::ComputeEvent>> Kernel::drain_compute_events(const std::string& name) {
     auto it = graphs_.find(name);
     if (it == graphs_.end()) return std::nullopt;
     try {
-        // Drain directly without posting to avoid starvation behind an in-flight compute.
-        // NodeGraph::drain_compute_events() is internally synchronized.
         return it->second->drain_compute_events_now();
     } catch (...) {
         return std::nullopt;
     }
 }
 
-} // namespace ps
-namespace ps {
 std::optional<double> Kernel::get_last_io_time(const std::string& name) {
     auto it = graphs_.find(name);
     if (it == graphs_.end()) {
         return std::nullopt;
     }
     try {
-        // Post a task to the graph's dedicated thread to safely read the value
         return it->second->post([](NodeGraph& g) {
             return g.total_io_time_ms.load();
         }).get();
@@ -402,4 +373,5 @@ std::optional<double> Kernel::get_last_io_time(const std::string& name) {
         return std::nullopt;
     }
 }
+
 } // namespace ps

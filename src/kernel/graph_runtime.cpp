@@ -2,54 +2,161 @@
 #include "kernel/graph_runtime.hpp"
 
 #include <filesystem>
+#include <random>
 
 namespace ps {
 
 GraphRuntime::GraphRuntime(const Info& info)
     : info_(info), graph_(info.root / "cache") {
-    // Ensure folder layout exists
     std::filesystem::create_directories(info_.root);
     std::filesystem::create_directories(info_.root / "cache");
 }
 
-GraphRuntime::~GraphRuntime() { stop(); }
+GraphRuntime::~GraphRuntime() { 
+    stop(); 
+}
 
 void GraphRuntime::start() {
     if (running_) return;
     running_ = true;
-    worker_ = std::thread(&GraphRuntime::run_loop, this);
+
+    unsigned int num_threads = std::max(1u, std::thread::hardware_concurrency());
+    local_task_queues_.resize(num_threads);
+    // [修复] 初始化 unique_ptr<mutex> 的 vector
+    local_queue_mutexes_.reserve(num_threads);
+    for (unsigned int i = 0; i < num_threads; ++i) {
+        local_queue_mutexes_.push_back(std::make_unique<std::mutex>());
+    }
+
+    for (unsigned int i = 0; i < num_threads; ++i) {
+        workers_.emplace_back(&GraphRuntime::run_loop, this, i);
+    }
 }
 
 void GraphRuntime::stop() {
     if (!running_) return;
-    {
-        std::lock_guard<std::mutex> lk(mtx_);
-        running_ = false;
-        // push a no-op to wake thread
-        queue_.push([]{});
+    
+    running_ = false;
+    cv_task_available_.notify_all();
+    
+    for (auto& worker : workers_) {
+        if (worker.joinable()) {
+            worker.join();
+        }
     }
-    cv_.notify_all();
-    if (worker_.joinable()) worker_.join();
+    workers_.clear();
 }
 
-void GraphRuntime::run_loop() {
-    while (true) {
-        std::function<void()> job;
+void GraphRuntime::run_loop(int thread_id) {
+    while (running_) {
+        Task task;
+        bool found_task = false;
+
         {
-            std::unique_lock<std::mutex> lk(mtx_);
-            cv_.wait(lk, [&]{ return !queue_.empty(); });
-            job = std::move(queue_.front());
-            queue_.pop();
+            std::lock_guard<std::mutex> lock(exception_mutex_);
+            if (first_exception_) {
+                std::this_thread::sleep_for(std::chrono::milliseconds(1));
+                continue;
+            }
         }
-        if (!running_) break;
-        try {
-            job();
-        } catch (const std::exception&) {
-            // Swallow exceptions to prevent worker thread from terminating the process.
-            // Exceptions are propagated to futures via packaged_task when callers use get().
-        } catch (...) {
-            // Unknown exception type; swallow to keep runtime alive.
+
+        {
+            // [修复] 解引用 unique_ptr 来使用 mutex
+            std::lock_guard<std::mutex> lock(*local_queue_mutexes_[thread_id]);
+            if (!local_task_queues_[thread_id].empty()) {
+                task = std::move(local_task_queues_[thread_id].front());
+                local_task_queues_[thread_id].pop_front();
+                found_task = true;
+            }
         }
+
+        if (!found_task) {
+            int num_threads = workers_.size();
+            if (num_threads > 1) {
+                std::mt19937 rng(std::random_device{}());
+                std::uniform_int_distribution<int> dist(0, num_threads - 2);
+                int victim_offset = dist(rng) + 1;
+                int victim_thread = (thread_id + victim_offset) % num_threads;
+            
+                // [修复] 解引用 unique_ptr 来使用 mutex
+                std::lock_guard<std::mutex> lock(*local_queue_mutexes_[victim_thread]);
+                if (!local_task_queues_[victim_thread].empty()) {
+                    task = std::move(local_task_queues_[victim_thread].back());
+                    local_task_queues_[victim_thread].pop_back();
+                    found_task = true;
+                }
+            }
+        }
+
+        if (!found_task) {
+            std::unique_lock<std::mutex> lock(global_queue_mutex_);
+            cv_task_available_.wait_for(lock, std::chrono::milliseconds(10), [&]{ 
+                return !global_task_queue_.empty() || !running_; 
+            });
+            
+            if (!running_) return;
+
+            if (!global_task_queue_.empty()) {
+                task = std::move(global_task_queue_.front());
+                global_task_queue_.pop();
+                found_task = true;
+            }
+        }
+        
+        if (found_task && task) {
+            task();
+        }
+    }
+}
+
+void GraphRuntime::push_ready_task(Task&& task, int thread_id) {
+    {
+        // [修复] 解引用 unique_ptr 来使用 mutex
+        std::lock_guard<std::mutex> lock(*local_queue_mutexes_[thread_id]);
+        local_task_queues_[thread_id].push_front(std::move(task));
+    }
+    cv_task_available_.notify_one();
+}
+
+void GraphRuntime::notify_task_complete() {
+    if (--tasks_remaining_ == 0) {
+        std::lock_guard<std::mutex> lock(completion_mutex_);
+        cv_completion_.notify_one();
+    }
+}
+
+void GraphRuntime::set_exception(std::exception_ptr e) {
+    std::lock_guard<std::mutex> lock(exception_mutex_);
+    if (!first_exception_) {
+        first_exception_ = e;
+        std::lock_guard<std::mutex> cv_lock(completion_mutex_);
+        cv_completion_.notify_one();
+    }
+}
+
+void GraphRuntime::execute_task_graph_and_wait(std::shared_ptr<TaskGraph> task_graph) {
+    if (task_graph->tasks.empty()) return;
+    
+    first_exception_ = nullptr;
+    tasks_remaining_ = task_graph->tasks.size();
+    
+    {
+        std::lock_guard<std::mutex> lock(global_queue_mutex_);
+        for (int node_id : task_graph->initial_ready_nodes) {
+            global_task_queue_.push(std::move(task_graph->tasks.at(node_id)));
+        }
+    }
+    cv_task_available_.notify_all();
+
+    {
+        std::unique_lock<std::mutex> lock(completion_mutex_);
+        cv_completion_.wait(lock, [&]{ 
+            return tasks_remaining_.load() == 0 || first_exception_ != nullptr;
+        });
+    }
+
+    if (first_exception_) {
+        std::rethrow_exception(first_exception_);
     }
 }
 
