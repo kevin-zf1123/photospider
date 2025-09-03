@@ -190,8 +190,25 @@ target_link_libraries(test_milestone2 PRIVATE
     ${OpenCV_LIBS}
     yaml-cpp::yaml-cpp
 )
-
 add_test(NAME Milestone2Tests COMMAND test_milestone2)
+
+# [新增] 为里程碑3添加新的测试目标
+add_executable(test_milestone3 tests/test_milestone3.cpp)
+set_target_properties(test_milestone3 PROPERTIES
+    RUNTIME_OUTPUT_DIRECTORY "${TEST_OUTPUT_DIR}"
+)
+target_include_directories(test_milestone3 PRIVATE 
+    "${PROJECT_SOURCE_DIR}/include"
+    "${PROJECT_SOURCE_DIR}/src"
+)
+target_link_libraries(test_milestone3 PRIVATE
+    photospider_lib
+    ftxui-component
+    ${OpenCV_LIBS}
+    yaml-cpp::yaml-cpp
+)
+add_test(NAME Milestone3Tests COMMAND test_milestone3)
+
 
 # --- Final Output ---
 message(STATUS "Main executable will be built in: ${CMAKE_BINARY_DIR}")

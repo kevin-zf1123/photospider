@@ -1,5 +1,3 @@
-// FILE: src/ps_types.cpp (修改后)
-
 #include "ps_types.hpp"
 #include <algorithm>
 #include <stdexcept>

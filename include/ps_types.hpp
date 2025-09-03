@@ -72,9 +72,13 @@ enum class TileSizePreference {
     MACRO      // 偏好大分块 (例如 256x256)，适用于吞吐量优先的批处理任务
 };
 
+// [核心修复] 移除此处的 Device 枚举定义，因为它已在 image_buffer.hpp 中定义
+
+
 struct OpMetadata {
     TileSizePreference tile_preference = TileSizePreference::UNDEFINED;
-    // 未来可扩展: DevicePreference device_preference = DevicePreference::CPU;
+    // [新增] 新增 device_preference 字段，默认为 CPU
+    Device device_preference = Device::CPU; 
 };
 
 
@@ -87,13 +91,13 @@ public:
     
     using OpVariant = std::variant<MonolithicOpFunc, TileOpFunc>;
 
-    // --- 修改: 重载 register_op 以接收元数据 ---
+    // [修改] 重载 register_op 以接收元数据
     void register_op(const std::string& type, const std::string& subtype, MonolithicOpFunc fn, OpMetadata meta = {});
     void register_op(const std::string& type, const std::string& subtype, TileOpFunc fn, OpMetadata meta); // Tiled 操作必须提供元数据
 
     std::optional<OpVariant> find(const std::string& type, const std::string& subtype) const;
     
-    // --- 新增: 获取元数据 ---
+    // [新增] 获取元数据
     std::optional<OpMetadata> get_metadata(const std::string& type, const std::string& subtype) const;
 
     std::vector<std::string> get_keys() const;
@@ -101,7 +105,7 @@ public:
     bool unregister_key(const std::string& key);
 private:
     std::unordered_map<std::string, OpVariant> table_;
-    // --- 新增: 元数据表 ---
+    // [修改] 元数据表现在可以存储包含设备偏好的完整 OpMetadata
     std::unordered_map<std::string, OpMetadata> metadata_table_;
 };
 
