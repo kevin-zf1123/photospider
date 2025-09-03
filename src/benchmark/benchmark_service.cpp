@@ -85,7 +85,7 @@ BenchmarkResult BenchmarkService::Run(const std::string& benchmark_dir, const Be
         bool success = svc_.cmd_compute(session_name, target_node_id, "int8", 
                                         true,  // force (clears memory cache)
                                         true,  // timing
-                                        true,  // parallel
+                                        config.execution.parallel,  // parallel
                                         true,  // quiet
                                         true,  // [修复] disable_disk_cache = true, 确保测量纯计算性能
                                         &single_run_result.events);
@@ -244,6 +244,7 @@ std::vector<BenchmarkSessionConfig> BenchmarkService::load_configs(const std::st
         if (session_node["execution"]) {
             cfg.execution.runs = session_node["execution"]["runs"].as<int>(10);
             cfg.execution.threads = session_node["execution"]["threads"].as<int>(0);
+            cfg.execution.parallel = session_node["execution"]["parallel"].as<bool>(true);
         }
         configs.push_back(cfg);
     }

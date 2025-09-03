@@ -131,6 +131,7 @@ struct BenchmarkSessionConfig {
          * @default 0
          */
         int threads = 0; // 0 means use hardware_concurrency
+        bool parallel = true; // 是否启用并行计算
     } execution;
     /**
      * @brief 要收集和报告的统计指标列表

@@ -13,6 +13,7 @@ CliAutocompleter::CliAutocompleter(ps::InteractionService& svc)
     // This list should be kept in sync with commands in `process_command`
     commands_ = {
         "bench",
+        "benchmark",
         "clear", "cls", // 如果您想补全别名，也在这里添加
         "clear-cache", "cc",
         "clear-graph",
@@ -62,7 +63,7 @@ CompletionResult CliAutocompleter::Complete(const std::string& line, int cursor_
             CompleteCommand(prefix, result.options);
         } else if ((cmd == "read" || cmd == "source" || cmd == "output" || cmd == "save") && (tokens.size() > 1)) {
             CompletePath(prefix, result.options);
-        } else if (cmd == "bench") {
+        } else if (cmd == "bench" || cmd == "benchmark") {
             CompletePath(prefix, result.options);
         } else if (cmd == "load") {
             // load <name> <yaml>

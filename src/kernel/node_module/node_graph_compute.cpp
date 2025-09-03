@@ -315,7 +315,7 @@ NodeOutput& NodeGraph::compute_internal(int node_id,
     }
 
     current_event.source = result_source;
-
+    double execution_duration_ms = std::chrono::duration<double, std::milli>(current_event.execution_end_time - current_event.execution_start_time).count();
     // 8. 全局与本地计时记录
     if (enable_timing) {
         auto tot = std::chrono::duration<double,
@@ -325,14 +325,15 @@ NodeOutput& NodeGraph::compute_internal(int node_id,
             timing_results.node_timings.push_back({
                 target_node.id,
                 target_node.name,
-                tot.count(),
-                result_source});
+                execution_duration_ms, 
+                result_source
+            });
         }
         push_compute_event(
             target_node.id,
             target_node.name,
             result_source,
-            tot.count());
+            execution_duration_ms);
     } else {
         push_compute_event(
             target_node.id,
