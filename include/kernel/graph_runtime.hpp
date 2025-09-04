@@ -79,7 +79,7 @@ public:
     const Info& info() const { return info_; }
     NodeGraph& get_nodegraph() { return graph_; }
 
-    void push_ready_task(Task&& task, int thread_id);
+    void push_ready_task(Task&& task);
     void execute_task_graph_and_wait(std::shared_ptr<TaskGraph> task_graph);
     void notify_task_complete();
     void set_exception(std::exception_ptr e);

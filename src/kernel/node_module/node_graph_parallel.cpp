@@ -92,7 +92,7 @@ NodeOutput& NodeGraph::compute_parallel(
                 if (task_graph_ptr->dependents_map.count(id)) {
                     for (int dependent_id : task_graph_ptr->dependents_map.at(id)) {
                         if (--task_graph_ptr->dependency_counters.at(dependent_id) == 0) {
-                            runtime.push_ready_task(std::move(task_graph_ptr->tasks.at(dependent_id)), thread_id);
+                            runtime.push_ready_task(std::move(task_graph_ptr->tasks.at(dependent_id)));
                         }
                     }
                 }

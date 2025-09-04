@@ -130,12 +130,14 @@ void GraphRuntime::run_loop(int thread_id) {
 
         if (!found_task) {
             std::unique_lock<std::mutex> lock(global_queue_mutex_);
-            cv_task_available_.wait_for(lock, std::chrono::milliseconds(10), [&]{ 
+            // 使用无条件的 wait，线程会一直休眠直到被唤醒
+            cv_task_available_.wait(lock, [&]{ 
                 return !global_task_queue_.empty() || !running_; 
             });
             
             if (!running_) return;
 
+            // 此时可以确信队列非空（或程序正在退出）
             if (!global_task_queue_.empty()) {
                 task = std::move(global_task_queue_.front());
                 global_task_queue_.pop();
@@ -149,11 +151,12 @@ void GraphRuntime::run_loop(int thread_id) {
     }
 }
 
-void GraphRuntime::push_ready_task(Task&& task, int thread_id) {
+void GraphRuntime::push_ready_task(Task&& task) {
     {
-        std::lock_guard<std::mutex> lock(*local_queue_mutexes_[thread_id]);
-        local_task_queues_[thread_id].push_front(std::move(task));
+        std::lock_guard<std::mutex> lock(global_queue_mutex_);
+        global_task_queue_.push(std::move(task));
     }
+    // 唤醒一个等待全局队列的线程
     cv_task_available_.notify_one();
 }
 
