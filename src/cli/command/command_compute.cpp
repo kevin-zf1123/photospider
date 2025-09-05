@@ -6,6 +6,7 @@
 #include <chrono>
 #include <fstream>
 #include <numeric>
+#include <unordered_set>
 #include "cli/command/commands.hpp"
 #include "cli/command/help_utils.hpp"
 
@@ -129,13 +130,30 @@ bool handle_compute(std::istringstream& iss,
     }
     bool force = false, force_deep = false, parallel = false, timer_console = false, timer_log = false, mute = false;
     std::string timer_log_path = config.default_timer_log_path;
+    // Known compute flags to avoid mis-parsing as a tl path
+    static const std::unordered_set<std::string> kKnownFlags = {
+        "force", "force-deep", "parallel",
+        "t", "-t", "timer",
+        "tl", "-tl",
+        "m", "-m", "mute"
+    };
     for (size_t i = 0; i < flags.size(); ++i) {
         const auto& f = flags[i];
         if (f == "force") force = true;
         else if (f == "force-deep") force_deep = true;
         else if (f == "parallel") parallel = true;
         else if (f == "t" || f == "-t" || f == "timer") timer_console = true;
-        else if (f == "tl" || f == "-tl") { timer_log = true; if (i + 1 < flags.size()) { timer_log_path = flags[i + 1]; ++i; } }
+        else if (f == "tl" || f == "-tl") {
+            // Enable timer log; only consume next token as a path if it is NOT a known flag.
+            timer_log = true;
+            if (i + 1 < flags.size()) {
+                const std::string& maybe_path = flags[i + 1];
+                if (kKnownFlags.find(maybe_path) == kKnownFlags.end()) {
+                    timer_log_path = maybe_path;
+                    ++i; // consume the path token
+                }
+            }
+        }
         else if (f == "m" || f == "-m" || f == "mute") mute = true;
     }
 

@@ -60,7 +60,30 @@ bool handle_switch(std::istringstream& iss,
     } else {
         auto names = svc.cmd_list_graphs();
         if (std::find(names.begin(), names.end(), name) == names.end()) { std::cout << "Graph not found: " << name << "\n"; return true; }
-        current_graph = name; std::cout << "Switched to '" << name << "'.\n";
+        current_graph = name;
+
+        // Ensure session has its own config.yaml and activate it for the editor.
+        fs::path dst_dir = fs::path("sessions")/name;
+        fs::path dst_cfg = dst_dir/"config.yaml";
+        try {
+            fs::create_directories(dst_dir);
+            // If we have a current config file path, prefer copying it into the session.
+            if (!config.loaded_config_path.empty() && fs::exists(config.loaded_config_path)) {
+                bool will_overwrite = fs::exists(dst_cfg);
+                if (!will_overwrite || !config.session_warning || ask_yesno("Overwrite session config with current settings?", true)) {
+                    fs::copy_file(config.loaded_config_path, dst_cfg, fs::copy_options::overwrite_existing);
+                }
+            }
+            // If still no config present in the session, write the in-memory config snapshot.
+            if (!fs::exists(dst_cfg)) {
+                write_config_to_file(config, dst_cfg.string());
+            }
+        } catch (const std::exception& e) {
+            std::cout << "Warning: could not prepare session config: " << e.what() << "\n";
+        }
+        // Point editor and subsequent saves to the session's config.yaml
+        config.loaded_config_path = (ps::fs::absolute(ps::fs::path("sessions")/name/"config.yaml")).string();
+        std::cout << "Switched to '" << name << "' (config: " << config.loaded_config_path << ").\n";
     }
     return true;
 }
@@ -68,4 +91,3 @@ bool handle_switch(std::istringstream& iss,
 void print_help_switch(const CliConfig& /*config*/) {
     print_help_from_file("help_switch.txt");
 }
-

@@ -59,19 +59,12 @@ void load_or_create_config(const std::string& config_path, CliConfig& config) {
             if (config.default_print_mode == "detailed" || config.default_print_mode == "d") config.default_print_mode = "full";
             if (config.default_print_mode == "s") config.default_print_mode = "simplified";
             if (root["default_traversal_arg"]) config.default_traversal_arg = root["default_traversal_arg"].as<std::string>();
-            // Backward-compat: replace legacy 'detailed' and lone ' d ' with 'full'
+            // Backward-compat: replace legacy 'detailed' (tree mode) with 'full'.
+            // Do NOT rewrite token 'd' here because 'd' is a valid cache flag (disk).
             {
-                // crude but safe normalization for common cases
                 std::string& s = config.default_traversal_arg;
-                // replace "detailed" -> "full"
                 size_t pos;
                 while ((pos = s.find("detailed")) != std::string::npos) s.replace(pos, 8, "full");
-                // replace token " d " -> " f " (and start/end variants)
-                if (s == "d") s = "f";
-                if (s.rfind("d ", 0) == 0) s.replace(0, 1, "f");
-                if (!s.empty() && s.size() >= 2 && s.substr(s.size()-2) == " d") s.replace(s.size()-1, 1, "f");
-                // middle occurrences
-                while ((pos = s.find(" d ")) != std::string::npos) s.replace(pos+1, 1, "f");
             }
             if (root["default_cache_clear_arg"]) config.default_cache_clear_arg = root["default_cache_clear_arg"].as<std::string>();
             if (root["default_exit_save_path"]) config.default_exit_save_path = root["default_exit_save_path"].as<std::string>();

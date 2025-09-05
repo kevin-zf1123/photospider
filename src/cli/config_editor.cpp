@@ -131,7 +131,7 @@ private:
             std::istringstream iss(original_config_.default_traversal_arg);
             std::string tok;
             while (iss >> tok) {
-                if (tok == "f" || tok == "full" || tok == "detailed" || tok == "d") selected_traversal_tree_idx_ = 0;
+                if (tok == "f" || tok == "full" || tok == "detailed") selected_traversal_tree_idx_ = 0;
                 else if (tok == "s" || tok == "simplified") selected_traversal_tree_idx_ = 1;
                 else if (tok == "n" || tok == "no_tree" || tok == "none") selected_traversal_tree_idx_ = 2;
                 else if (tok == "m") traversal_cache_m_ = true;
@@ -276,29 +276,47 @@ private:
         command_buffer_.clear();
         mode_ = Mode::Navigate;
         if (cmd == "a" || cmd == "apply") {
+            // Apply current UI state to the in-memory config, and optionally
+            // switch the active config path or load an existing one if chosen.
             std::string new_path = active_config_path_buffer_;
             std::string old_path = original_config_.loaded_config_path;
             if (new_path != old_path) {
                 if (fs::exists(new_path)) {
+                    // Treat apply with an existing path as a request to load that config.
                     load_or_create_config(new_path, original_config_);
-                    temp_config_ = original_config_;
-                    SyncModelToUiState(); RebuildLineView(); status_message_ = "Loaded config from: " + new_path;
+                    SyncModelToUiState();
+                    RebuildLineView();
+                    status_message_ = "Loaded config from: " + new_path;
                 } else {
-                    SyncUiStateToModel(); temp_config_.loaded_config_path = fs::absolute(new_path).string(); original_config_ = temp_config_;
-                    if (write_config_to_file(original_config_, new_path)) { status_message_ = "Created and applied new config: " + new_path; }
-                    else { status_message_ = "Error creating file: " + new_path; original_config_.loaded_config_path = old_path; }
-                    temp_config_ = original_config_; SyncModelToUiState(); RebuildLineView();
+                    // No file yet: apply UI changes to the model and move the active path.
+                    SyncUiStateToModel();
+                    original_config_.loaded_config_path = fs::absolute(new_path).string();
+                    // Do not write here; writing belongs to ':w'.
+                    SyncModelToUiState();
+                    RebuildLineView();
+                    status_message_ = "Applied changes and set active config to: " + new_path;
                 }
             } else {
-                SyncUiStateToModel(); original_config_ = temp_config_; status_message_ = "Settings applied to current session."; SyncModelToUiState(); RebuildLineView();
+                // Same path: just apply UI changes.
+                SyncUiStateToModel();
+                status_message_ = "Settings applied to current session.";
+                SyncModelToUiState();
+                RebuildLineView();
             }
             changes_applied = true;
         } else if (cmd == "w" || cmd == "write") {
-            SyncUiStateToModel(); original_config_ = temp_config_;
+            // Apply and persist to file.
+            SyncUiStateToModel();
             if(!original_config_.loaded_config_path.empty()){
-                if (write_config_to_file(original_config_, original_config_.loaded_config_path)) { status_message_ = "Changes applied and saved."; changes_applied = true; }
-                else { status_message_ = "Error: failed to write file."; }
-            } else { status_message_ = "Error: No config file loaded. Use 'apply' with a new path first."; }
+                if (write_config_to_file(original_config_, original_config_.loaded_config_path)) {
+                    status_message_ = "Changes applied and saved.";
+                    changes_applied = true;
+                } else {
+                    status_message_ = "Error: failed to write file.";
+                }
+            } else {
+                status_message_ = "Error: No config file loaded. Use 'apply' to set a path first.";
+            }
         } else if (cmd == "q" || cmd == "quit") { screen_.Exit(); }
         else { status_message_ = "Error: Unknown command '" + cmd + "'"; }
     }
