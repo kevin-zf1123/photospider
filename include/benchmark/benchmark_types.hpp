@@ -67,6 +67,10 @@ struct BenchmarkResult {
     double io_duration_ms = 0.0;        // (未来填充) 磁盘IO总耗时
     double scheduler_overhead_ms = 0.0; // (未来填充) 调度器开销
 
+    // 用于导出：每次运行匹配主操作(op_name)的总执行时间列表（毫秒）。
+    // 这是一维分布，供分析 typical_execution_time_ms 时参考。
+    std::vector<double> exec_times_main_op_ms;
+
     // --- 环境快照 ---
     std::string cpu_info;
     std::string os_info;

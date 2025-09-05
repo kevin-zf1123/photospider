@@ -300,6 +300,29 @@ static void op_gaussian_blur_tiled(const Node& node, const Tile& output_tile, co
     blurred_large_tile(valid_roi).copyTo(output_mat);
 }
 
+// New: Monolithic Gaussian Blur (restores milestone-1 performance for full-image blur)
+static NodeOutput op_gaussian_blur_monolithic(const Node& node, const std::vector<const NodeOutput*>& inputs) {
+    std::lock_guard<std::mutex> lock(g_opencv_op_mutex);
+    if (inputs.empty()) {
+        throw GraphError(GraphErrc::MissingDependency, "gaussian_blur requires one input image.");
+    }
+    const auto& in_buf = inputs[0]->image_buffer;
+    cv::Mat input_mat = toCvMat(in_buf);
+
+    const auto& P = node.runtime_parameters;
+    int k = as_int_flexible(P, "ksize", 3);
+    if (k > 0 && k % 2 == 0) k++;
+    if (k <= 0) k = 1;
+    double sigmaX = as_double_flexible(P, "sigmaX", 0.0);
+
+    cv::Mat output_mat;
+    cv::GaussianBlur(input_mat, output_mat, cv::Size(k, k), sigmaX, 0, cv::BORDER_REPLICATE);
+
+    NodeOutput result;
+    result.image_buffer = fromCvMat(output_mat);
+    return result;
+}
+
 static void op_add_weighted_tiled(const Node& node, const Tile& output_tile, const std::vector<Tile>& input_tiles) {
     std::lock_guard<std::mutex> lock(g_opencv_op_mutex);
 
@@ -535,7 +558,10 @@ void register_builtin() {
     // 注册 Tiled 操作，使用默认元数据（CPU）和 MACRO 偏好
     OpMetadata tiled_meta;
     tiled_meta.tile_preference = TileSizePreference::MACRO;
-    R.register_op("image_process", "gaussian_blur", TileOpFunc(op_gaussian_blur_tiled), tiled_meta);
+    // Prefer fast monolithic blur for default subtype
+    R.register_op("image_process", "gaussian_blur", MonolithicOpFunc(op_gaussian_blur_monolithic));
+    // Keep tiled variant available explicitly if needed
+    R.register_op("image_process", "gaussian_blur_tiled", TileOpFunc(op_gaussian_blur_tiled), tiled_meta);
     R.register_op("image_process", "curve_transform", TileOpFunc(op_curve_transform_tiled), tiled_meta);
     R.register_op("image_mixing", "add_weighted", TileOpFunc(op_add_weighted_tiled), tiled_meta);
     R.register_op("image_mixing", "diff", TileOpFunc(op_abs_diff_tiled), tiled_meta);

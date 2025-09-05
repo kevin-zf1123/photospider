@@ -16,13 +16,14 @@ static bool execute_and_wait(
     const std::string& current_graph, 
     int node_id, 
     const CliConfig& config,
-    bool force, bool force_deep, bool parallel, bool timer_console, bool timer_log, bool mute, const std::string& timer_log_path
+    bool force, bool force_deep, bool parallel, bool timer_console, bool timer_log, bool mute, const std::string& timer_log_path,
+    bool nosave
 ) {
     (void)svc.cmd_drain_compute_events(current_graph);
 
     auto future_opt = svc.cmd_compute_async(current_graph, node_id, config.cache_precision,
                                             (force || force_deep), (timer_console || timer_log),
-                                            parallel, mute, force_deep);
+                                            parallel, mute, force_deep, nosave);
 
     if (!future_opt) {
         std::cout << "Error: failed to schedule compute task for node " << node_id << ".\n";
@@ -128,14 +129,15 @@ bool handle_compute(std::istringstream& iss,
         std::istringstream def_iss(config.default_compute_args);
         while (def_iss >> flag) flags.push_back(flag);
     }
-    bool force = false, force_deep = false, parallel = false, timer_console = false, timer_log = false, mute = false;
+    bool force = false, force_deep = false, parallel = false, timer_console = false, timer_log = false, mute = false, nosave = false;
     std::string timer_log_path = config.default_timer_log_path;
     // Known compute flags to avoid mis-parsing as a tl path
     static const std::unordered_set<std::string> kKnownFlags = {
         "force", "force-deep", "parallel",
         "t", "-t", "timer",
         "tl", "-tl",
-        "m", "-m", "mute"
+        "m", "-m", "mute",
+        "nosave", "ns"
     };
     for (size_t i = 0; i < flags.size(); ++i) {
         const auto& f = flags[i];
@@ -155,6 +157,7 @@ bool handle_compute(std::istringstream& iss,
             }
         }
         else if (f == "m" || f == "-m" || f == "mute") mute = true;
+        else if (f == "nosave" || f == "ns") nosave = true;
     }
 
     // [核心修复] 循环执行计算，并聚合每次 compute 的计时
@@ -164,7 +167,7 @@ bool handle_compute(std::istringstream& iss,
     aggregated_timings.reserve(128);
     
     for (int node_id : nodes_to_compute) {
-        if (!execute_and_wait(svc, current_graph, node_id, config, force, force_deep, parallel, timer_console, timer_log, mute, timer_log_path)) {
+        if (!execute_and_wait(svc, current_graph, node_id, config, force, force_deep, parallel, timer_console, timer_log, mute, timer_log_path, nosave)) {
             all_ok = false;
             break; // 一个失败就停止
         }
@@ -184,10 +187,15 @@ bool handle_compute(std::istringstream& iss,
         // 构造聚合后的 TimingCollector
         ps::TimingCollector agg;
         agg.node_timings = std::move(aggregated_timings);
-        agg.total_ms = std::chrono::duration<double, std::milli>(overall_end_time - overall_start_time).count();
+        // 使用节点耗时之和作为 "total"，避免包含 REPL 轮询等待等开销
+        double total_node_ms = 0.0;
+        for (const auto& nt : agg.node_timings) total_node_ms += nt.elapsed_ms;
+        agg.total_ms = total_node_ms;
+
+        const double wall_ms = std::chrono::duration<double, std::milli>(overall_end_time - overall_start_time).count();
 
         std::stringstream log_buffer;
-        log_buffer << "Timing Report (total " << agg.total_ms << " ms):" << std::endl;
+        log_buffer << "Timing Report (total " << agg.total_ms << " ms, wall " << wall_ms << " ms):" << std::endl;
         for (const auto& nt : agg.node_timings) {
             log_buffer << "  - Node " << nt.id << " (" << nt.name << ") completed in "
                        << nt.elapsed_ms << " ms [" << nt.source << "]" << std::endl;

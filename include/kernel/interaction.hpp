@@ -35,9 +35,9 @@ public:
     // Compute
     bool cmd_compute(const std::string& graph, int node_id, const std::string& cache_precision,
                      bool force, bool timing, bool parallel, bool quiet = false,
-                     bool disable_disk_cache = false,
+                     bool disable_disk_cache = false, bool nosave = false,
                      std::vector<BenchmarkEvent>* benchmark_events = nullptr) {
-        return kernel_.compute(graph, node_id, cache_precision, force, timing, parallel, quiet, disable_disk_cache, benchmark_events);
+        return kernel_.compute(graph, node_id, cache_precision, force, timing, parallel, quiet, disable_disk_cache, nosave, benchmark_events);
     }
     std::optional<TimingCollector> cmd_timing(const std::string& graph) { return kernel_.get_timing(graph); }
 
@@ -98,9 +98,9 @@ public:
     bool cmd_set_node_yaml(const std::string& graph, int node_id, const std::string& yaml_text) { return kernel_.set_node_yaml(graph, node_id, yaml_text); }
     std::optional<std::future<bool>> cmd_compute_async(const std::string& graph, int node_id, const std::string& cache_precision,
                                                       bool force, bool timing, bool parallel, bool quiet = false,
-                                                      bool disable_disk_cache = false,
+                                                      bool disable_disk_cache = false, bool nosave = false,
                                                       std::vector<BenchmarkEvent>* benchmark_events = nullptr) {
-        return kernel_.compute_async(graph, node_id, cache_precision, force, timing, parallel, quiet, disable_disk_cache, benchmark_events);
+        return kernel_.compute_async(graph, node_id, cache_precision, force, timing, parallel, quiet, disable_disk_cache, nosave, benchmark_events);
     }
     std::optional<double> cmd_get_last_io_time(const std::string& graph) {
         return kernel_.get_last_io_time(graph);

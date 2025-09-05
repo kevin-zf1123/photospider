@@ -38,11 +38,11 @@ public:
 
     bool compute(const std::string& name, int node_id, const std::string& cache_precision,
                  bool force_recache, bool enable_timing, bool parallel, bool quiet,
-                 bool disable_disk_cache,
+                 bool disable_disk_cache, bool nosave,
                  std::vector<BenchmarkEvent>* benchmark_events = nullptr);
     std::optional<std::future<bool>> compute_async(const std::string& name, int node_id, const std::string& cache_precision,
                                                    bool force_recache, bool enable_timing, bool parallel, bool quiet,
-                                                   bool disable_disk_cache,
+                                                   bool disable_disk_cache, bool nosave,
                                                    std::vector<BenchmarkEvent>* benchmark_events = nullptr);
     std::optional<TimingCollector> get_timing(const std::string& name);
 

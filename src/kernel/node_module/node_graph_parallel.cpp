@@ -321,6 +321,23 @@ NodeOutput& NodeGraph::compute_parallel(
                         NodeOutput from_disk;
                         if (try_load_from_disk_cache_into(target_node, from_disk)) {
                             temp_results[current_node_idx] = std::move(from_disk);
+                            if (enable_timing) {
+                                // Log a zero-cost event indicating disk cache hit (IO time tracked separately)
+                                BenchmarkEvent ev;
+                                ev.node_id = current_node_id;
+                                ev.op_name = make_key(target_node.type, target_node.subtype);
+                                ev.dependency_start_time = std::chrono::high_resolution_clock::now();
+                                ev.execution_start_time = ev.dependency_start_time;
+                                ev.execution_end_time = ev.execution_start_time;
+                                ev.execution_duration_ms = 0.0;
+                                ev.source = "disk_cache";
+                                if (benchmark_events) benchmark_events->push_back(ev);
+                                {
+                                    std::lock_guard lk(timing_mutex_);
+                                    timing_results.node_timings.push_back({ target_node.id, target_node.name, 0.0, "disk_cache" });
+                                }
+                                push_compute_event(target_node.id, target_node.name, "disk_cache", 0.0);
+                            }
                         }
                     }
 
@@ -363,12 +380,16 @@ NodeOutput& NodeGraph::compute_parallel(
                         current_event.dependency_start_time = std::chrono::high_resolution_clock::now();
                         current_event.execution_start_time = current_event.dependency_start_time;
 
+                        // Build execution node with resolved runtime parameters
+                        Node node_for_exec = target_node;
+                        node_for_exec.runtime_parameters = runtime_params;
+
                         NodeOutput result;
                         try {
                             std::visit([&](auto&& op_func) {
                                 using T = std::decay_t<decltype(op_func)>;
                                 if constexpr (std::is_same_v<T, MonolithicOpFunc>) {
-                                    result = op_func(target_node, inputs_ready);
+                                    result = op_func(node_for_exec, inputs_ready);
                                 } else if constexpr (std::is_same_v<T, TileOpFunc>) {
                                     std::vector<NodeOutput> normalized_storage;
                                     std::vector<const NodeOutput*> inputs_for_tiling = inputs_ready;
@@ -381,7 +402,7 @@ NodeOutput& NodeGraph::compute_parallel(
                                         const int base_w = base_buffer.width;
                                         const int base_h = base_buffer.height;
                                         const int base_c = base_buffer.channels;
-                                        const std::string strategy = as_str(runtime_params, "merge_strategy", "resize");
+                                        const std::string strategy = as_str(node_for_exec.runtime_parameters, "merge_strategy", "resize");
                                         normalized_storage.reserve(inputs_ready.size() - 1);
                                         for (size_t i = 1; i < inputs_ready.size(); ++i) {
                                             const auto& current_buffer = inputs_ready[i]->image_buffer;
@@ -421,8 +442,8 @@ NodeOutput& NodeGraph::compute_parallel(
                                         }
                                     }
 
-                                    int out_w = inputs_for_tiling.empty() ? as_int_flexible(runtime_params, "width", 256) : inputs_for_tiling[0]->image_buffer.width;
-                                    int out_h = inputs_for_tiling.empty() ? as_int_flexible(runtime_params, "height", 256) : inputs_for_tiling[0]->image_buffer.height;
+                                    int out_w = inputs_for_tiling.empty() ? as_int_flexible(node_for_exec.runtime_parameters, "width", 256) : inputs_for_tiling[0]->image_buffer.width;
+                                    int out_h = inputs_for_tiling.empty() ? as_int_flexible(node_for_exec.runtime_parameters, "height", 256) : inputs_for_tiling[0]->image_buffer.height;
                                     int out_c = inputs_for_tiling.empty() ? 1 : inputs_for_tiling[0]->image_buffer.channels;
                                     auto out_t = inputs_for_tiling.empty() ? ps::DataType::FLOAT32 : inputs_for_tiling[0]->image_buffer.type;
 
@@ -437,7 +458,7 @@ NodeOutput& NodeGraph::compute_parallel(
                                     for (int y = 0; y < ob.height; y += TILE_SIZE) {
                                         for (int x = 0; x < ob.width; x += TILE_SIZE) {
                                             ps::TileTask task;
-                                            task.node = &target_node;
+                                            task.node = &node_for_exec;
                                             task.output_tile.buffer = &ob;
                                             task.output_tile.roi = cv::Rect(x, y, std::min(TILE_SIZE, ob.width - x), std::min(TILE_SIZE, ob.height - y));
                                             const bool needs_halo = (target_node.type == "image_process" && target_node.subtype == "gaussian_blur");
@@ -463,6 +484,11 @@ NodeOutput& NodeGraph::compute_parallel(
                         if (enable_timing) {
                             current_event.execution_end_time = std::chrono::high_resolution_clock::now();
                             double ms = std::chrono::duration<double, std::milli>(current_event.execution_end_time - current_event.execution_start_time).count();
+                            current_event.source = "computed";
+                            current_event.execution_duration_ms = ms;
+                            if (benchmark_events) {
+                                benchmark_events->push_back(current_event);
+                            }
                             {
                                 std::lock_guard lk(timing_mutex_);
                                 timing_results.node_timings.push_back({ target_node.id, target_node.name, ms, "computed" });
