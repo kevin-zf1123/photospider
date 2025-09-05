@@ -149,6 +149,54 @@ bool NodeGraph::try_load_from_disk_cache(Node& node) {
     return loaded;
 }
 
+bool NodeGraph::try_load_from_disk_cache_into(const Node& node, NodeOutput& out) const {
+    if (cache_root.empty() || node.caches.empty()) {
+        return false;
+    }
+
+    auto start_io = std::chrono::high_resolution_clock::now();
+    bool loaded = false;
+    try {
+        for (const auto& cache_entry : node.caches) {
+            if (cache_entry.cache_type == "image" && !cache_entry.location.empty()) {
+                fs::path cache_file = node_cache_dir(node.id) / cache_entry.location;
+                fs::path metadata_file = cache_file; metadata_file.replace_extension(".yml");
+                if (fs::exists(cache_file) || fs::exists(metadata_file)) {
+                    NodeOutput tmp;
+                    if (fs::exists(cache_file)) {
+                        cv::Mat loaded_mat = cv::imread(cache_file.string(), cv::IMREAD_UNCHANGED);
+                        if (!loaded_mat.empty()) {
+                            cv::Mat float_mat;
+                            double scale = (loaded_mat.depth() == CV_8U) ? 1.0/255.0 : (loaded_mat.depth()==CV_16U ? 1.0/65535.0 : 1.0);
+                            loaded_mat.convertTo(float_mat, CV_32F, scale);
+                            tmp.image_buffer = fromCvMat(float_mat);
+                        }
+                    }
+                    if (fs::exists(metadata_file)) {
+                        YAML::Node meta = YAML::LoadFile(metadata_file.string());
+                        for(auto it = meta.begin(); it != meta.end(); ++it) {
+                            tmp.data[it->first.as<std::string>()] = it->second;
+                        }
+                    }
+                    out = std::move(tmp);
+                    loaded = true;
+                    break;
+                }
+            }
+        }
+    } catch (...) {
+        loaded = false;
+    }
+    if (loaded) {
+        auto end_io = std::chrono::high_resolution_clock::now();
+        double duration_to_add = std::chrono::duration<double, std::milli>(end_io - start_io).count();
+        auto& atomic_io_time = const_cast<NodeGraph*>(this)->total_io_time_ms;
+        double current_io_time = atomic_io_time.load();
+        while (!atomic_io_time.compare_exchange_weak(current_io_time, current_io_time + duration_to_add)) {}
+    }
+    return loaded;
+}
+
 
 NodeGraph::DriveClearResult NodeGraph::clear_drive_cache() {
     DriveClearResult r; if (!cache_root.empty() && fs::exists(cache_root)) { r.removed_entries = fs::remove_all(cache_root); fs::create_directories(cache_root); }

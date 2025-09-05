@@ -133,6 +133,8 @@ private:
 
     void save_cache_if_configured(const Node& node, const std::string& cache_precision) const;
     bool try_load_from_disk_cache(Node& node);
+    // Pure load helper for parallel scheme B: load disk cache into an output without mutating the node.
+    bool try_load_from_disk_cache_into(const Node& node, NodeOutput& out) const;
     
     std::mutex graph_mutex_;
     bool quiet_ = true;

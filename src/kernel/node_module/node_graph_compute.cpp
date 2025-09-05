@@ -171,9 +171,11 @@ NodeOutput& NodeGraph::compute_internal(int node_id,
         visiting[node_id] = true;
 
         // 3. 参数依赖解析
+        // Deep clone parameters to ensure this node's runtime view is independent and
+        // avoids yaml-cpp memory_holder merging across threads.
         target_node.runtime_parameters =
             target_node.parameters
-            ? target_node.parameters
+            ? YAML::Clone(target_node.parameters)
             : YAML::Node(YAML::NodeType::Map);
 
         for (auto const& p_input : target_node.parameter_inputs) {
