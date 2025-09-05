@@ -105,6 +105,10 @@ public:
                                  bool force_recache = false, bool enable_timing = false,
                                  bool disable_disk_cache = false,
                                  std::vector<BenchmarkEvent>* benchmark_events = nullptr);
+    // Used by parallel scheduler: compute a single node assuming its dependencies are ready.
+    NodeOutput& compute_node_no_recurse(int node_id, const std::string& cache_precision,
+                                        bool enable_timing, bool allow_disk_cache,
+                                        std::vector<BenchmarkEvent>* benchmark_events = nullptr);
     void clear_timing_results();
     std::vector<int> ending_nodes() const;
     void print_dependency_tree(std::ostream& os, bool show_parameters = true) const;

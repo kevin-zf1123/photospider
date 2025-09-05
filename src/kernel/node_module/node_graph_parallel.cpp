@@ -2,6 +2,8 @@
 
 #include "node_graph.hpp"
 #include "kernel/graph_runtime.hpp"
+#include "adapter/buffer_adapter_opencv.hpp"
+#include "kernel/param_utils.hpp"
 #include <algorithm>
 #include <vector>
 #include <map>
@@ -12,6 +14,202 @@
 #include <unordered_map>
 
 namespace ps {
+
+// Forward declarations from compute module (same namespace)
+void execute_tile_task(const ps::TileTask& task, const TileOpFunc& tiled_op);
+cv::Rect calculate_halo(const cv::Rect& roi, int halo_size, const cv::Size& bounds);
+
+// New: non-recursive compute used by the parallel scheduler. Assumes dependencies are ready.
+NodeOutput& NodeGraph::compute_node_no_recurse(int node_id,
+                                               const std::string& cache_precision,
+                                               bool enable_timing,
+                                               bool allow_disk_cache,
+                                               std::vector<BenchmarkEvent>* benchmark_events) {
+    auto& target_node = nodes.at(node_id);
+    // Fast path: already computed
+    if (target_node.cached_output.has_value()) return *target_node.cached_output;
+
+    // Optionally load from disk cache for this node itself
+    if (allow_disk_cache) {
+        (void)try_load_from_disk_cache(target_node);
+        if (target_node.cached_output.has_value()) return *target_node.cached_output;
+    }
+
+    // Ensure visibility of upstream writes before reading their cached outputs
+    std::atomic_thread_fence(std::memory_order_acquire);
+
+    // Build runtime parameters starting from static parameters
+    target_node.runtime_parameters =
+        target_node.parameters ? target_node.parameters : YAML::Node(YAML::NodeType::Map);
+
+    // Read parameter inputs from already computed parents
+    for (const auto& p_input : target_node.parameter_inputs) {
+        if (p_input.from_node_id < 0) continue;
+        const auto itn = nodes.find(p_input.from_node_id);
+        if (itn == nodes.end() || !itn->second.cached_output.has_value()) {
+            throw GraphError(GraphErrc::MissingDependency,
+                             "Parallel scheduler bug: parameter input not ready for node " + std::to_string(node_id));
+        }
+        const auto& up_out = *itn->second.cached_output;
+        auto it = up_out.data.find(p_input.from_output_name);
+        if (it == up_out.data.end()) {
+            throw GraphError(GraphErrc::MissingDependency,
+                "Node " + std::to_string(p_input.from_node_id) +
+                " did not produce output '" + p_input.from_output_name + "'");
+        }
+        target_node.runtime_parameters[p_input.to_parameter_name] = it->second;
+    }
+
+    // Gather image inputs from parents (must be ready)
+    std::vector<const NodeOutput*> inputs_ready;
+    inputs_ready.reserve(target_node.image_inputs.size());
+    for (const auto& i_input : target_node.image_inputs) {
+        if (i_input.from_node_id < 0) continue;
+        const auto itn = nodes.find(i_input.from_node_id);
+        if (itn == nodes.end() || !itn->second.cached_output.has_value()) {
+            throw GraphError(GraphErrc::MissingDependency,
+                             "Parallel scheduler bug: image input not ready for node " + std::to_string(node_id));
+        }
+        inputs_ready.push_back(&*itn->second.cached_output);
+    }
+
+    auto op_opt = OpRegistry::instance().find(target_node.type, target_node.subtype);
+    if (!op_opt) {
+        throw GraphError(GraphErrc::NoOperation,
+                         "No op for " + target_node.type + ":" + target_node.subtype);
+    }
+
+    // Timing event for benchmarking
+    BenchmarkEvent current_event;
+    current_event.node_id = node_id;
+    current_event.op_name = make_key(target_node.type, target_node.subtype);
+    current_event.dependency_start_time = std::chrono::high_resolution_clock::now();
+    current_event.execution_start_time = current_event.dependency_start_time;
+
+    try {
+        std::visit([&](auto&& op_func) {
+            using T = std::decay_t<decltype(op_func)>;
+            if constexpr (std::is_same_v<T, MonolithicOpFunc>) {
+                target_node.cached_output = op_func(target_node, inputs_ready);
+            } else if constexpr (std::is_same_v<T, TileOpFunc>) {
+                // Prepare normalized inputs similar to compute_internal
+                std::vector<NodeOutput> normalized_storage;
+                std::vector<const NodeOutput*> inputs_for_tiling = inputs_ready;
+
+                bool is_mixing = (target_node.type == "image_mixing");
+                if (is_mixing && inputs_ready.size() >= 2) {
+                    const auto& base_buffer = inputs_ready[0]->image_buffer;
+                    if (base_buffer.width == 0 || base_buffer.height == 0) {
+                        throw GraphError(GraphErrc::InvalidParameter, "Base image for image_mixing is empty.");
+                    }
+                    const int base_w = base_buffer.width;
+                    const int base_h = base_buffer.height;
+                    const int base_c = base_buffer.channels;
+                    const std::string strategy = as_str(target_node.runtime_parameters, "merge_strategy", "resize");
+
+                    normalized_storage.reserve(inputs_ready.size() - 1);
+                    for (size_t i = 1; i < inputs_ready.size(); ++i) {
+                        const auto& current_buffer = inputs_ready[i]->image_buffer;
+                        if (current_buffer.width == 0 || current_buffer.height == 0) {
+                            throw GraphError(GraphErrc::InvalidParameter, "Secondary image for image_mixing is empty.");
+                        }
+                        cv::Mat current_mat = toCvMat(current_buffer);
+                        if (current_mat.cols != base_w || current_mat.rows != base_h) {
+                            if (strategy == "resize") {
+                                cv::resize(current_mat, current_mat, cv::Size(base_w, base_h), 0, 0, cv::INTER_LINEAR);
+                            } else if (strategy == "crop") {
+                                cv::Rect crop_roi(0, 0, std::min(current_mat.cols, base_w), std::min(current_mat.rows, base_h));
+                                cv::Mat cropped = cv::Mat::zeros(base_h, base_w, current_mat.type());
+                                current_mat(crop_roi).copyTo(cropped(crop_roi));
+                                current_mat = cropped;
+                            } else {
+                                throw GraphError(GraphErrc::InvalidParameter, "Unsupported merge_strategy for tiled mixing.");
+                            }
+                        }
+                        if (current_mat.channels() != base_c) {
+                            if (current_mat.channels() == 1 && (base_c == 3 || base_c == 4)) {
+                                std::vector<cv::Mat> planes(base_c, current_mat);
+                                cv::merge(planes, current_mat);
+                            } else if ((current_mat.channels() == 3 || current_mat.channels() == 4) && base_c == 1) {
+                                cv::cvtColor(current_mat, current_mat, cv::COLOR_BGR2GRAY);
+                            } else if (current_mat.channels() == 4 && base_c == 3) {
+                                cv::cvtColor(current_mat, current_mat, cv::COLOR_BGRA2BGR);
+                            } else if (current_mat.channels() == 3 && base_c == 4) {
+                                cv::cvtColor(current_mat, current_mat, cv::COLOR_BGR2BGRA);
+                            } else {
+                                throw GraphError(GraphErrc::InvalidParameter, "Unsupported channel conversion in tiled mixing.");
+                            }
+                        }
+                        NodeOutput tmp; tmp.image_buffer = fromCvMat(current_mat);
+                        normalized_storage.push_back(std::move(tmp));
+                        inputs_for_tiling[i] = &normalized_storage.back();
+                    }
+                }
+
+                // Infer output shape
+                int out_w = inputs_for_tiling.empty() ? as_int_flexible(target_node.runtime_parameters, "width", 256) : inputs_for_tiling[0]->image_buffer.width;
+                int out_h = inputs_for_tiling.empty() ? as_int_flexible(target_node.runtime_parameters, "height", 256) : inputs_for_tiling[0]->image_buffer.height;
+                int out_c = inputs_for_tiling.empty() ? 1 : inputs_for_tiling[0]->image_buffer.channels;
+                auto out_t = inputs_for_tiling.empty() ? ps::DataType::FLOAT32 : inputs_for_tiling[0]->image_buffer.type;
+
+                target_node.cached_output = NodeOutput();
+                auto& ob = target_node.cached_output->image_buffer;
+                ob.width = out_w; ob.height = out_h; ob.channels = out_c; ob.type = out_t;
+                size_t pix_sz = sizeof(float);
+                ob.step = out_w * out_c * pix_sz;
+                ob.data.reset(new char[ob.step * ob.height], std::default_delete<char[]>());
+
+                const int TILE_SIZE = 256, HALO_SIZE = 16;
+                for (int y = 0; y < ob.height; y += TILE_SIZE) {
+                    for (int x = 0; x < ob.width; x += TILE_SIZE) {
+                        ps::TileTask task;
+                        task.node = &target_node;
+                        task.output_tile.buffer = &ob;
+                        task.output_tile.roi = cv::Rect(x, y, std::min(TILE_SIZE, ob.width - x), std::min(TILE_SIZE, ob.height - y));
+
+                        const bool needs_halo = (target_node.type == "image_process" && target_node.subtype == "gaussian_blur");
+                        for (auto const* in_out : inputs_for_tiling) {
+                            ps::Tile in_tile;
+                            in_tile.buffer = const_cast<ps::ImageBuffer*>(&in_out->image_buffer);
+                            if (needs_halo) {
+                                in_tile.roi = calculate_halo(task.output_tile.roi, HALO_SIZE, {in_out->image_buffer.width, in_out->image_buffer.height});
+                            } else {
+                                in_tile.roi = task.output_tile.roi;
+                            }
+                            task.input_tiles.push_back(in_tile);
+                        }
+                        execute_tile_task(task, op_func);
+                    }
+                }
+            }
+        }, *op_opt);
+    } catch (const cv::Exception& e) {
+        throw GraphError(GraphErrc::ComputeError,
+                         "Node " + std::to_string(target_node.id) + " (" + target_node.name + ") failed: " + std::string(e.what()));
+    } catch (const std::exception& e) {
+        throw GraphError(GraphErrc::ComputeError,
+                         "Node " + std::to_string(target_node.id) + " (" + target_node.name + ") failed: " + std::string(e.what()));
+    }
+
+    // Save disk cache if configured
+    save_cache_if_configured(target_node, cache_precision);
+
+    // Timing & events
+    if (enable_timing) {
+        current_event.execution_end_time = std::chrono::high_resolution_clock::now();
+        current_event.source = "computed";
+        current_event.execution_duration_ms = std::chrono::duration<double, std::milli>(current_event.execution_end_time - current_event.execution_start_time).count();
+        if (benchmark_events) benchmark_events->push_back(current_event);
+        {
+            std::lock_guard lk(timing_mutex_);
+            timing_results.node_timings.push_back({ target_node.id, target_node.name, current_event.execution_duration_ms, "computed" });
+        }
+        push_compute_event(target_node.id, target_node.name, "computed", current_event.execution_duration_ms);
+    } else {
+        push_compute_event(target_node.id, target_node.name, "computed", 0.0);
+    }
+    return *target_node.cached_output;
+}
 
 NodeOutput& NodeGraph::compute_parallel(
     GraphRuntime& runtime,
@@ -90,9 +288,8 @@ NodeOutput& NodeGraph::compute_parallel(
                                cache_precision, enable_timing, disable_disk_cache, benchmark_events, force_recache] () {
                 // 1) 执行核心计算（捕获并精确标注阶段）
                 try {
-                    std::unordered_map<int, bool> visiting;
                     bool allow_disk_cache = (!disable_disk_cache) && (!force_recache);
-                    compute_internal(current_node_id, cache_precision, visiting, enable_timing, allow_disk_cache, benchmark_events);
+                    compute_node_no_recurse(current_node_id, cache_precision, enable_timing, allow_disk_cache, benchmark_events);
                 } catch (const cv::Exception& e) {
                     runtime.set_exception(std::make_exception_ptr(
                         GraphError(GraphErrc::ComputeError, "Compute stage at node " + std::to_string(current_node_id) + " (" + nodes.at(current_node_id).name + ") failed: " + std::string(e.what()))
@@ -117,6 +314,8 @@ NodeOutput& NodeGraph::compute_parallel(
 
                 // 2) 触发后续依赖任务（捕获并精确标注阶段）
                 try {
+                    // Ensure all writes to node outputs are visible before scheduling dependents
+                    std::atomic_thread_fence(std::memory_order_release);
                     for (int dependent_idx : dependents_map[current_node_idx]) {
                         if (--dependency_counters[dependent_idx] == 0) {
                             runtime.submit_ready_task_any_thread(std::move(all_tasks[dependent_idx]));

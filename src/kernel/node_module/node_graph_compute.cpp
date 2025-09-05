@@ -349,16 +349,21 @@ NodeOutput& NodeGraph::compute_internal(int node_id,
                             std::min(TILE_SIZE, ob.width - x),
                             std::min(TILE_SIZE, ob.height - y));
 
+                        // Decide halo usage based on op; only gaussian_blur needs halo
+                        const bool needs_halo = (target_node.type == "image_process" && target_node.subtype == "gaussian_blur");
                         for (auto const* in_out : inputs_for_tiling) {
                             ps::Tile in_tile;
-                            in_tile.buffer =
-                                const_cast<ps::ImageBuffer*>(
-                                    &in_out->image_buffer);
-                            in_tile.roi = calculate_halo(
-                                task.output_tile.roi,
-                                HALO_SIZE,
-                                {in_out->image_buffer.width,
-                                    in_out->image_buffer.height});
+                            in_tile.buffer = const_cast<ps::ImageBuffer*>(&in_out->image_buffer);
+                            if (needs_halo) {
+                                in_tile.roi = calculate_halo(
+                                    task.output_tile.roi,
+                                    HALO_SIZE,
+                                    {in_out->image_buffer.width,
+                                     in_out->image_buffer.height});
+                            } else {
+                                // For non-convolution ops, use exact output ROI to avoid size mismatch/striping
+                                in_tile.roi = task.output_tile.roi;
+                            }
                             task.input_tiles.push_back(in_tile);
                         }
                         execute_tile_task(task, op_func);

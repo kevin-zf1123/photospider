@@ -113,44 +113,57 @@ static NodeOutput op_perlin_noise(const Node& node, const std::vector<const Node
 }
 
 static NodeOutput op_convolve(const Node& node, const std::vector<const NodeOutput*>& inputs) {
-    if (inputs.size() < 2 || inputs[0]->image_buffer.width == 0 || inputs[1]->image_buffer.width == 0) {
-        throw GraphError(GraphErrc::MissingDependency, "Convolve requires two input images: a source and a kernel.");
+    // Defensive checks against cold-start/invalid inputs
+    if (inputs.size() < 2 ||
+        inputs[0]->image_buffer.width == 0 || inputs[0]->image_buffer.height == 0 ||
+        inputs[1]->image_buffer.width == 0 || inputs[1]->image_buffer.height == 0) {
+        throw GraphError(GraphErrc::MissingDependency, "Convolve requires two non-empty input images (src and kernel).");
     }
-    
-    std::lock_guard<std::mutex> lock(g_opencv_op_mutex);
-    
-    cv::UMat u_src = toCvUMat(inputs[0]->image_buffer);
-    cv::UMat u_kernel_img = toCvUMat(inputs[1]->image_buffer);
 
-    if (u_kernel_img.channels() != 1) {
-        throw GraphError(GraphErrc::InvalidParameter, "The kernel for convolve must be a single-channel image.");
+    std::lock_guard<std::mutex> lock(g_opencv_op_mutex);
+
+    // Use Mat-only pipeline to avoid UMat/OpenCL first-use quirks under parallel cold-start
+    cv::Mat src = toCvMat(inputs[0]->image_buffer);
+    cv::Mat kernel = toCvMat(inputs[1]->image_buffer);
+
+    if (src.empty())  throw GraphError(GraphErrc::MissingDependency, "Convolve source image is empty.");
+    if (kernel.empty()) throw GraphError(GraphErrc::MissingDependency, "Convolve kernel image is empty.");
+
+    // Normalize types: grayscale kernel, float32 compute
+    if (kernel.channels() != 1) {
+        throw GraphError(GraphErrc::InvalidParameter, "The kernel for convolve must be single-channel.");
     }
-    
+    if (src.depth() != CV_32F)    src.convertTo(src, CV_32F);
+    if (kernel.depth() != CV_32F) kernel.convertTo(kernel, CV_32F);
+
+    // Optional border/taking absolute and dual-direction gradient
     const auto& P = node.runtime_parameters;
     std::string padding_mode = as_str(P, "padding", "replicate");
     bool take_absolute = as_int_flexible(P, "absolute", 1) != 0;
     bool h_and_v = as_int_flexible(P, "horizontal_and_vertical", 0) != 0;
-    
+
     int border_type = cv::BORDER_REPLICATE;
     if (padding_mode == "zero") border_type = cv::BORDER_CONSTANT;
 
-    cv::UMat u_out_mat_float;
-
-    if (h_and_v) {
-        cv::UMat u_gx, u_gy, u_kernel_vertical;
-        cv::filter2D(u_src, u_gx, CV_32F, u_kernel_img, cv::Point(-1,-1), 0, border_type);
-        cv::transpose(u_kernel_img, u_kernel_vertical);
-        cv::filter2D(u_src, u_gy, CV_32F, u_kernel_vertical, cv::Point(-1,-1), 0, border_type);
-        cv::magnitude(u_gx, u_gy, u_out_mat_float);
-    } else {
-        cv::filter2D(u_src, u_out_mat_float, CV_32F, u_kernel_img, cv::Point(-1,-1), 0, border_type);
-        if (take_absolute) {
-            cv::absdiff(u_out_mat_float, cv::Scalar::all(0), u_out_mat_float);
+    cv::Mat out_f32;
+    try {
+        if (h_and_v) {
+            cv::Mat gx, gy, kT;
+            cv::filter2D(src, gx, CV_32F, kernel, cv::Point(-1,-1), 0, border_type);
+            cv::transpose(kernel, kT);
+            cv::filter2D(src, gy, CV_32F, kT, cv::Point(-1,-1), 0, border_type);
+            cv::magnitude(gx, gy, out_f32);
+            if (take_absolute) cv::absdiff(out_f32, cv::Scalar::all(0), out_f32);
+        } else {
+            cv::filter2D(src, out_f32, CV_32F, kernel, cv::Point(-1,-1), 0, border_type);
+            if (take_absolute) cv::absdiff(out_f32, cv::Scalar::all(0), out_f32);
         }
+    } catch (const cv::Exception& e) {
+        throw GraphError(GraphErrc::ComputeError, std::string("Convolve failed: ") + e.what());
     }
-    
+
     NodeOutput result;
-    result.image_buffer = fromCvUMat(u_out_mat_float);
+    result.image_buffer = fromCvMat(out_f32);
     return result;
 }
 
@@ -306,7 +319,120 @@ static void op_add_weighted_tiled(const Node& node, const Tile& output_tile, con
     double beta  = as_double_flexible(P, "beta", 0.5);
     double gamma = as_double_flexible(P, "gamma", 0.0);
 
-    cv::addWeighted(input_a, alpha, input_b, beta, gamma, output);
+    // Optional per-channel mapping: parameters.channel_mapping.input0 / input1: { src_channel: [dst_channels] }
+    YAML::Node chmap = P["channel_mapping"];
+    bool has_mapping = chmap && (chmap.IsMap());
+
+    if (!has_mapping) {
+        // Default: weighted blend per channel
+        cv::addWeighted(input_a, alpha, input_b, beta, gamma, output);
+        return;
+    }
+
+    // Prepare output planes
+    int in_ch = input_a.channels();
+    int out_ch = in_ch;
+
+    auto infer_max_dest = [&](const YAML::Node& n)->int {
+        int m = -1;
+        if (!n || !n.IsMap()) return -1;
+        for (auto it = n.begin(); it != n.end(); ++it) {
+            int src = -1;
+            try { src = it->first.as<int>(); } catch (...) {}
+            (void)src;
+            const YAML::Node& dsts = it->second;
+            if (dsts && dsts.IsSequence()) {
+                for (size_t i = 0; i < dsts.size(); ++i) {
+                    try { m = std::max(m, dsts[i].as<int>()); } catch (...) {}
+                }
+            }
+        }
+        return m;
+    };
+    int max0 = infer_max_dest(chmap["input0"]);
+    int max1 = infer_max_dest(chmap["input1"]);
+    int maxd = std::max({max0, max1, in_ch - 1});
+    out_ch = std::max(out_ch, maxd + 1);
+
+    // Split inputs into planes
+    std::vector<cv::Mat> A, B;
+    cv::split(input_a, A);
+    cv::split(input_b, B);
+    // Ensure plane count
+    if ((int)A.size() < out_ch) A.resize(out_ch, cv::Mat::zeros(input_a.rows, input_a.cols, CV_32FC1));
+    if ((int)B.size() < out_ch) B.resize(out_ch, cv::Mat::zeros(input_b.rows, input_b.cols, CV_32FC1));
+
+    // Init out planes: default weighted result; mapped destinations will be overridden later
+    std::vector<cv::Mat> O(out_ch);
+    for (int c = 0; c < out_ch; ++c) {
+        O[c] = cv::Mat::zeros(input_a.rows, input_a.cols, CV_32FC1);
+        if (c < in_ch) {
+            cv::addWeighted(A[c], alpha, B[c], beta, gamma, O[c]);
+        } else {
+            if (gamma != 0.0) O[c] = cv::Mat(input_a.rows, input_a.cols, CV_32FC1, cv::Scalar(gamma));
+        }
+    }
+
+    // Build covered destination set; override defaults for covered channels
+    std::vector<char> covered(out_ch, 0);
+    auto mark_covered = [&](const YAML::Node& n){
+        if (!n || !n.IsMap()) return;
+        for (auto it = n.begin(); it != n.end(); ++it) {
+            const YAML::Node& dsts = it->second;
+            if (!dsts || !dsts.IsSequence()) continue;
+            for (size_t i = 0; i < dsts.size(); ++i) {
+                int d=-1; try { d = dsts[i].as<int>(); } catch (...) { continue; }
+                if (d>=0 && d<out_ch) covered[d] = 1;
+            }
+        }
+    };
+    mark_covered(chmap["input0"]);
+    mark_covered(chmap["input1"]);
+    for (int d = 0; d < out_ch; ++d) {
+        if (covered[d]) {
+            if (gamma != 0.0) O[d] = cv::Mat(input_a.rows, input_a.cols, CV_32FC1, cv::Scalar(gamma));
+            else O[d] = cv::Mat::zeros(input_a.rows, input_a.cols, CV_32FC1);
+        }
+    }
+
+    auto apply_map = [&](const YAML::Node& n, const std::vector<cv::Mat>& src_planes, double w) {
+        if (!n || !n.IsMap()) return;
+        for (auto it = n.begin(); it != n.end(); ++it) {
+            int src = -1;
+            try { src = it->first.as<int>(); } catch (...) { continue; }
+            const YAML::Node& dsts = it->second;
+            if (!dsts || !dsts.IsSequence()) continue;
+            for (size_t i = 0; i < dsts.size(); ++i) {
+                int d = -1; try { d = dsts[i].as<int>(); } catch (...) { continue; }
+                if (src < 0 || src >= (int)src_planes.size()) continue;
+                if (d < 0 || d >= (int)O.size()) continue;
+                // O[d] := O[d] + w*src
+                cv::add(O[d], src_planes[src] * w, O[d]);
+            }
+        }
+    };
+
+    apply_map(chmap["input0"], A, alpha);
+    apply_map(chmap["input1"], B, beta);
+
+    // Optional alpha_strategy for dest alpha channel
+    std::string alpha_strategy = as_str(P, "alpha_strategy", "weighted");
+    if ((alpha_strategy != "weighted") && out_ch >= 4) {
+        int aidx = 3;
+        if (alpha_strategy == "max") {
+            O[aidx] = cv::max(A.size()>3?A[3]:O[aidx], B.size()>3?B[3]:O[aidx]);
+        } else if (alpha_strategy == "copy0") {
+            if ((int)A.size()>3) O[aidx] = A[3].clone();
+        } else if (alpha_strategy == "copy1") {
+            if ((int)B.size()>3) O[aidx] = B[3].clone();
+        } else if (alpha_strategy == "set1") {
+            O[aidx] = cv::Mat(input_a.rows, input_a.cols, CV_32FC1, cv::Scalar(1.0));
+        } else if (alpha_strategy == "set0") {
+            O[aidx] = cv::Mat::zeros(input_a.rows, input_a.cols, CV_32FC1);
+        }
+    }
+
+    cv::merge(O, output);
 }
 
 static void op_abs_diff_tiled(const Node& node, const Tile& output_tile, const std::vector<Tile>& input_tiles) {
@@ -323,7 +449,46 @@ static void op_abs_diff_tiled(const Node& node, const Tile& output_tile, const s
         throw GraphError(GraphErrc::InvalidParameter, "diff tiled inputs must have same dimensions after merge strategy.");
     }
 
-    cv::absdiff(input_a, input_b, output);
+    // Handle alpha separately to avoid transparent result when subtracting alpha
+    const auto& P = node.runtime_parameters;
+    std::string alpha_strategy = as_str(P, "alpha_strategy", "copy0"); // copy0|copy1|max|min|diff|set1|set0
+
+    int ch = input_a.channels();
+    if (ch < 2) {
+        cv::absdiff(input_a, input_b, output);
+        return;
+    }
+
+    std::vector<cv::Mat> Aa, Bb, Oo;
+    cv::split(input_a, Aa);
+    cv::split(input_b, Bb);
+    Oo.resize(ch);
+
+    int color_channels = (ch == 4) ? 3 : ch;
+    for (int c = 0; c < color_channels; ++c) {
+        cv::absdiff(Aa[c], Bb[c], Oo[c]);
+    }
+    if (ch == 4) {
+        if (alpha_strategy == "copy0") {
+            Oo[3] = Aa[3].clone();
+        } else if (alpha_strategy == "copy1") {
+            Oo[3] = Bb[3].clone();
+        } else if (alpha_strategy == "max") {
+            Oo[3] = cv::max(Aa[3], Bb[3]);
+        } else if (alpha_strategy == "min") {
+            Oo[3] = cv::min(Aa[3], Bb[3]);
+        } else if (alpha_strategy == "diff") {
+            cv::absdiff(Aa[3], Bb[3], Oo[3]);
+        } else if (alpha_strategy == "set1") {
+            Oo[3] = cv::Mat(input_a.rows, input_a.cols, CV_32FC1, cv::Scalar(1.0));
+        } else if (alpha_strategy == "set0") {
+            Oo[3] = cv::Mat::zeros(input_a.rows, input_a.cols, CV_32FC1);
+        } else {
+            // default copy0
+            Oo[3] = Aa[3].clone();
+        }
+    }
+    cv::merge(Oo, output);
 }
 
 static void op_multiply_tiled(const Node& node, const Tile& output_tile, const std::vector<Tile>& input_tiles) {
@@ -348,9 +513,11 @@ static void op_multiply_tiled(const Node& node, const Tile& output_tile, const s
 
 // --- 注册所有操作 ---
 void register_builtin() {
-    static std::once_flag ocl_once;
-    std::call_once(ocl_once, []{
+    static std::once_flag init_once;
+    std::call_once(init_once, []{
         cv::ocl::setUseOpenCL(false);
+        // Avoid OpenCV spinning its own threads conflicting with our scheduler on first use
+        cv::setNumThreads(1);
     });
     auto& R = OpRegistry::instance();
 

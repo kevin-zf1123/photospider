@@ -139,14 +139,22 @@ bool handle_compute(std::istringstream& iss,
         else if (f == "m" || f == "-m" || f == "mute") mute = true;
     }
 
-    // [核心修复] 循环执行计算
+    // [核心修复] 循环执行计算，并聚合每次 compute 的计时
     bool all_ok = true;
     auto overall_start_time = std::chrono::high_resolution_clock::now();
+    std::vector<ps::NodeTiming> aggregated_timings;
+    aggregated_timings.reserve(128);
     
     for (int node_id : nodes_to_compute) {
         if (!execute_and_wait(svc, current_graph, node_id, config, force, force_deep, parallel, timer_console, timer_log, mute, timer_log_path)) {
             all_ok = false;
             break; // 一个失败就停止
+        }
+        // 在下一次 compute 重置计时之前，抓取本次的节点计时并聚合
+        if (timer_console || timer_log) {
+            if (auto timers_opt_local = svc.cmd_timing(current_graph)) {
+                for (const auto& nt : timers_opt_local->node_timings) aggregated_timings.push_back(nt);
+            }
         }
     }
     
@@ -155,33 +163,26 @@ bool handle_compute(std::istringstream& iss,
     std::cout << (all_ok ? "Computation finished." : "Computation failed.") << std::endl;
 
     if (timer_console || timer_log) {
-        auto timers_opt = svc.cmd_timing(current_graph);
-        if (timers_opt) {
-            auto& timers = *timers_opt;
-            
-            // 如果是 'all' 模式，计算一个总时间
-            if (target_str == "all") {
-                timers.total_ms = std::chrono::duration<double, std::milli>(overall_end_time - overall_start_time).count();
-            }
+        // 构造聚合后的 TimingCollector
+        ps::TimingCollector agg;
+        agg.node_timings = std::move(aggregated_timings);
+        agg.total_ms = std::chrono::duration<double, std::milli>(overall_end_time - overall_start_time).count();
 
-            std::stringstream log_buffer;
-            log_buffer << "Timing Report (total " << timers.total_ms << " ms):" << std::endl;
-            for (const auto& nt : timers.node_timings) {
-                log_buffer << "  - Node " << nt.id << " (" << nt.name << ") completed in "
-                           << nt.elapsed_ms << " ms [" << nt.source << "]" << std::endl;
+        std::stringstream log_buffer;
+        log_buffer << "Timing Report (total " << agg.total_ms << " ms):" << std::endl;
+        for (const auto& nt : agg.node_timings) {
+            log_buffer << "  - Node " << nt.id << " (" << nt.name << ") completed in "
+                       << nt.elapsed_ms << " ms [" << nt.source << "]" << std::endl;
+        }
+        if (timer_console) std::cout << log_buffer.str();
+        if (timer_log) {
+            std::ofstream log_file(timer_log_path, std::ios::app); // 追加模式
+            if (log_file) {
+                log_file << log_buffer.str() << "\n";
+                std::cout << "Timing report appended to " << timer_log_path << std::endl;
+            } else {
+                std::cout << "Error: Could not open log file " << timer_log_path << std::endl;
             }
-            if (timer_console) std::cout << log_buffer.str();
-            if (timer_log) {
-                std::ofstream log_file(timer_log_path, std::ios::app); // 追加模式
-                if (log_file) {
-                    log_file << log_buffer.str() << "\n";
-                    std::cout << "Timing report appended to " << timer_log_path << std::endl;
-                } else {
-                    std::cout << "Error: Could not open log file " << timer_log_path << std::endl;
-                }
-            }
-        } else {
-             std::cout << "Could not retrieve timing information." << std::endl;
         }
     }
 

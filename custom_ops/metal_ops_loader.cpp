@@ -16,4 +16,7 @@ extern "C" PLUGIN_API void register_photospider_ops() {
     R.register_op("image_generator", "perlin_noise_metal", 
                   ps::ops::op_perlin_noise_metal, 
                   metal_meta);
+
+    // 预热 Metal 状态，避免首次并行初始化竞争
+    perlin_noise_metal_eager_init();
 }
