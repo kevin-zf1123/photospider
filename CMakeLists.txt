@@ -5,6 +5,18 @@ cmake_minimum_required(VERSION 3.16)
 
 # Define the project and specify C++17
 project(Photospider LANGUAGES CXX)
+option(USE_ASAN "Enable AddressSanitizer" OFF)
+option(USE_TSAN "Enable ThreadSanitizer" OFF)
+
+if(CMAKE_CXX_COMPILER_ID MATCHES "Clang|GNU")
+    if(USE_ASAN)
+        add_compile_options(-fsanitize=address -g)
+        add_link_options(-fsanitize=address)
+    elseif(USE_TSAN)
+        add_compile_options(-fsanitize=thread -g)
+        add_link_options(-fsanitize=thread)
+    endif()
+endif()
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_CXX_EXTENSIONS OFF)

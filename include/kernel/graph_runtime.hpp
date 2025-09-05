@@ -123,6 +123,7 @@ private:
     NodeGraph graph_;
     
     std::vector<std::thread> workers_;
+    unsigned int num_workers_{0};
     std::atomic<bool> running_{false};
 
     std::vector<std::deque<Task>> local_task_queues_;

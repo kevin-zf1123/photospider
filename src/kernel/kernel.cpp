@@ -375,27 +375,42 @@ std::optional<std::future<bool>> Kernel::compute_async(const std::string& name, 
     const std::string name_copy = name;
     GraphRuntime* const runtime_ptr = it->second.get();
 
+    if (par) {
+        // Important: Run the high-level parallel graph orchestration outside the runtime's worker threads
+        // to avoid nested scheduling and potential TLS/worker reentrancy hazards during first-run.
+        return std::optional<std::future<bool>>(std::async(std::launch::async, [this, runtime_ptr, id, precision, frc, timing, q, disable_dc, name_copy, benchmark_events]() {
+            try {
+                NodeGraph& g = runtime_ptr->get_nodegraph();
+                if (timing) {
+                    g.clear_timing_results();
+                }
+                bool prev_quiet = g.is_quiet();
+                g.set_quiet(q);
+                g.compute_parallel(*runtime_ptr, id, precision, frc, timing, disable_dc, benchmark_events);
+                g.set_quiet(prev_quiet);
+                last_error_.erase(name_copy);
+                return true;
+            } catch (const GraphError& ge) {
+                last_error_[name_copy] = { ge.code(), ge.what() };
+                return false;
+            } catch (const std::exception& e) {
+                std::stringstream ss;
+                ss << "std::exception: " << e.what() << " (while computing node " << id << ")";
+                last_error_[name_copy] = { GraphErrc::Unknown, ss.str() };
+                return false;
+            }
+        }));
+    }
+
+    // Sequential mode: use the runtime's job queue to serialize access with other graph operations.
     return it->second->post([=](NodeGraph& g) {
         try {
-            // Clearing timing data is only necessary when timing is explicitly enabled.
-            // The previous implementation cleared the timing collector unconditionally,
-            // which could race with consumers expecting the data from the last run when
-            // `compute_async` was invoked without timing. This manifested as a sporadic
-            // segmentation fault during the first computation with flags like
-            // `parallel t tl m` where timing is requested. Guard the reset so that the
-            // timing buffer is untouched when timing is disabled.
             if (timing) {
                 g.clear_timing_results();
             }
             bool prev_quiet = g.is_quiet();
             g.set_quiet(q);
-            
-            if (par) {
-                g.compute_parallel(*runtime_ptr, id, precision, frc, timing, disable_dc, benchmark_events);
-            } else {
-                g.compute(id, precision, frc, timing, disable_dc, benchmark_events);
-            }
-            
+            g.compute(id, precision, frc, timing, disable_dc, benchmark_events);
             g.set_quiet(prev_quiet);
             last_error_.erase(name_copy);
             return true;

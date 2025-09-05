@@ -68,17 +68,21 @@ void GraphRuntime::start() {
     
     has_exception_.store(false, std::memory_order_relaxed);
     first_exception_ = nullptr;
+    // Reset scheduler counters to a known baseline in case of prior stop/start cycles
+    ready_task_count_.store(0, std::memory_order_relaxed);
+    sleeping_thread_count_.store(0, std::memory_order_relaxed);
+    tasks_to_complete_.store(0, std::memory_order_relaxed);
     running_ = true;
 
-    unsigned int num_threads = std::max(1u, std::thread::hardware_concurrency());
-    local_task_queues_.resize(num_threads);
-    local_queue_mutexes_.reserve(num_threads);
-    for (unsigned int i = 0; i < num_threads; ++i) {
+    num_workers_ = std::max(1u, std::thread::hardware_concurrency());
+    local_task_queues_.resize(num_workers_);
+    local_queue_mutexes_.reserve(num_workers_);
+    for (unsigned int i = 0; i < num_workers_; ++i) {
         local_queue_mutexes_.push_back(std::make_unique<std::mutex>());
     }
 
-    workers_.reserve(num_threads);
-    for (unsigned int i = 0; i < num_threads; ++i) {
+    workers_.reserve(num_workers_);
+    for (unsigned int i = 0; i < num_workers_; ++i) {
         workers_.emplace_back(&GraphRuntime::run_loop, this, i);
     }
 }
@@ -98,10 +102,15 @@ void GraphRuntime::stop() {
     workers_.clear();
     local_task_queues_.clear();
     local_queue_mutexes_.clear();
+    // Drain any pending global tasks to avoid dangling function targets after shutdown
+    {
+        std::lock_guard<std::mutex> lock(global_queue_mutex_);
+        while (!global_task_queue_.empty()) global_task_queue_.pop();
+    }
 }
 
 std::optional<Task> GraphRuntime::steal_task(int stealer_id) {
-    int n = workers_.size();
+    int n = static_cast<int>(num_workers_);
     if (n <= 1) return std::nullopt;
 
     static thread_local std::mt19937 rng(std::random_device{}() + stealer_id);
@@ -208,7 +217,7 @@ void GraphRuntime::submit_initial_tasks(std::vector<Task>&& tasks, int total_tas
         return;
     }
 
-    int num_threads = workers_.size();
+    int num_threads = static_cast<int>(num_workers_);
     if (num_threads == 0 || tasks.empty()) {
         return;
     }

@@ -55,6 +55,17 @@ namespace fs = std::filesystem;
 
 int main(int argc, char** argv) {
     cv::ocl::setUseOpenCL(false);
+
+    // Fast path: if only asking for help, avoid initializing plugins/Metal to prevent
+    // destructor-order issues on early exit.
+    for (int i = 1; i < argc; ++i) {
+        std::string arg = argv[i];
+        if (arg == "-h" || arg == "--help") {
+            print_cli_help();
+            return 0;
+        }
+    }
+
     ps::Kernel kernel;
     ps::InteractionService svc(kernel);
     svc.cmd_seed_builtin_ops();
