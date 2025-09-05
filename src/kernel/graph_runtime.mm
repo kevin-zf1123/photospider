@@ -3,6 +3,7 @@
 
 #include <filesystem>
 #include <random>
+#include <numeric>
 
 #ifdef __APPLE__
 #import <Metal/Metal.h>
@@ -10,7 +11,8 @@
 
 namespace ps {
 
-// 在 .mm 文件中定义 GpuContext 结构体，以隐藏 Metal 细节
+thread_local int GraphRuntime::tls_worker_id_ = -1;
+
 struct GraphRuntime::GpuContext {
 #ifdef __APPLE__
     id<MTLDevice> device;
@@ -29,17 +31,19 @@ GraphRuntime::GraphRuntime(const Info& info)
     if (gpu_context_->device) {
         gpu_context_->commandQueue = [gpu_context_->device newCommandQueue];
     } else {
-        // 在无法获取设备时打印警告，避免静默失败
-        // TODO: 使用更正式的日志系统
         fprintf(stderr, "Warning: Could not create default Metal device.\n");
     }
 #else
-    // 在非 Apple 平台上，gpu_context_ 保持为空
+    // On non-Apple platforms, gpu_context_ remains null
 #endif
 }
 
 GraphRuntime::~GraphRuntime() { 
     stop(); 
+}
+
+int GraphRuntime::this_worker_id() {
+    return tls_worker_id_;
 }
 
 id GraphRuntime::get_metal_device() {
@@ -61,6 +65,9 @@ id GraphRuntime::get_metal_command_queue() {
 
 void GraphRuntime::start() {
     if (running_) return;
+    
+    has_exception_.store(false, std::memory_order_relaxed);
+    first_exception_ = nullptr;
     running_ = true;
 
     unsigned int num_threads = std::max(1u, std::thread::hardware_concurrency());
@@ -70,6 +77,7 @@ void GraphRuntime::start() {
         local_queue_mutexes_.push_back(std::make_unique<std::mutex>());
     }
 
+    workers_.reserve(num_threads);
     for (unsigned int i = 0; i < num_threads; ++i) {
         workers_.emplace_back(&GraphRuntime::run_loop, this, i);
     }
@@ -80,6 +88,7 @@ void GraphRuntime::stop() {
     
     running_ = false;
     cv_task_available_.notify_all();
+    cv_completion_.notify_all();
     
     for (auto& worker : workers_) {
         if (worker.joinable()) {
@@ -87,57 +96,61 @@ void GraphRuntime::stop() {
         }
     }
     workers_.clear();
+    local_task_queues_.clear();
+    local_queue_mutexes_.clear();
+}
+
+std::optional<Task> GraphRuntime::steal_task(int stealer_id) {
+    int n = workers_.size();
+    if (n <= 1) return std::nullopt;
+
+    static thread_local std::mt19937 rng(std::random_device{}() + stealer_id);
+    int start = std::uniform_int_distribution<int>(0, n - 2)(rng);
+
+    for (int i = 0; i < n - 1; ++i) {
+        int victim_id = (start + i) % (n - 1);
+        if (victim_id >= stealer_id) victim_id++; 
+
+        std::lock_guard<std::mutex> lock(*local_queue_mutexes_[victim_id]);
+        if (!local_task_queues_[victim_id].empty()) {
+            Task stolen_task = std::move(local_task_queues_[victim_id].front());
+            local_task_queues_[victim_id].pop_front();
+            return stolen_task;
+        }
+    }
+    return std::nullopt;
 }
 
 void GraphRuntime::run_loop(int thread_id) {
+    tls_worker_id_ = thread_id;
+
     while (running_) {
+        if (has_exception_.load(std::memory_order_acquire)) {
+            return;
+        }
+
         Task task;
         bool found_task = false;
 
         {
-            std::lock_guard<std::mutex> lock(exception_mutex_);
-            if (first_exception_) {
-                std::this_thread::sleep_for(std::chrono::milliseconds(1));
-                continue;
-            }
-        }
-
-        {
             std::lock_guard<std::mutex> lock(*local_queue_mutexes_[thread_id]);
             if (!local_task_queues_[thread_id].empty()) {
-                task = std::move(local_task_queues_[thread_id].front());
-                local_task_queues_[thread_id].pop_front();
+                task = std::move(local_task_queues_[thread_id].back());
+                local_task_queues_[thread_id].pop_back();
                 found_task = true;
             }
         }
 
         if (!found_task) {
-            int num_threads = workers_.size();
-            if (num_threads > 1) {
-                std::mt19937 rng(std::random_device{}());
-                std::uniform_int_distribution<int> dist(0, num_threads - 2);
-                int victim_offset = dist(rng) + 1;
-                int victim_thread = (thread_id + victim_offset) % num_threads;
-            
-                std::lock_guard<std::mutex> lock(*local_queue_mutexes_[victim_thread]);
-                if (!local_task_queues_[victim_thread].empty()) {
-                    task = std::move(local_task_queues_[victim_thread].back());
-                    local_task_queues_[victim_thread].pop_back();
-                    found_task = true;
-                }
+            auto stolen_task = steal_task(thread_id);
+            if (stolen_task) {
+                task = std::move(*stolen_task);
+                found_task = true;
             }
         }
 
         if (!found_task) {
-            std::unique_lock<std::mutex> lock(global_queue_mutex_);
-            // 使用无条件的 wait，线程会一直休眠直到被唤醒
-            cv_task_available_.wait(lock, [&]{ 
-                return !global_task_queue_.empty() || !running_; 
-            });
-            
-            if (!running_) return;
-
-            // 此时可以确信队列非空（或程序正在退出）
+            std::lock_guard<std::mutex> lock(global_queue_mutex_);
             if (!global_task_queue_.empty()) {
                 task = std::move(global_task_queue_.front());
                 global_task_queue_.pop();
@@ -145,60 +158,116 @@ void GraphRuntime::run_loop(int thread_id) {
             }
         }
         
-        if (found_task && task) {
-            task();
+        if (found_task) {
+            ready_task_count_.fetch_sub(1, std::memory_order_release);
+            task(); 
+        } else {
+            sleeping_thread_count_.fetch_add(1, std::memory_order_release);
+            
+            std::unique_lock<std::mutex> lock(global_queue_mutex_);
+
+            if (ready_task_count_.load(std::memory_order_acquire) > 0) {
+                sleeping_thread_count_.fetch_sub(1, std::memory_order_relaxed);
+                continue; 
+            }
+            
+            cv_task_available_.wait(lock, [&]{ 
+                return ready_task_count_.load(std::memory_order_acquire) > 0 || !running_; 
+            });
+
+            sleeping_thread_count_.fetch_sub(1, std::memory_order_relaxed);
         }
     }
 }
 
-void GraphRuntime::push_ready_task(Task&& task) {
+
+void GraphRuntime::submit_initial_tasks(std::vector<Task>&& tasks, int total_task_count) {
+    has_exception_.store(false, std::memory_order_relaxed);
+    first_exception_ = nullptr;
+    tasks_to_complete_.store(total_task_count, std::memory_order_relaxed);
+    
+    if (tasks_to_complete_.load() == 0) {
+        std::lock_guard<std::mutex> lk(completion_mutex_);
+        cv_completion_.notify_one();
+        return;
+    }
+
+    int num_threads = workers_.size();
+    if (num_threads == 0 || tasks.empty()) {
+        return;
+    }
+
+    static thread_local std::mt19937 rng(std::random_device{}());
+    for (size_t i = 0; i < tasks.size(); ++i) {
+        int target_thread = std::uniform_int_distribution<int>(0, num_threads - 1)(rng);
+        std::lock_guard<std::mutex> lock(*local_queue_mutexes_[target_thread]);
+        local_task_queues_[target_thread].push_back(std::move(tasks[i]));
+    }
+    
+    {
+        std::lock_guard<std::mutex> lock(global_queue_mutex_);
+        ready_task_count_.fetch_add(tasks.size(), std::memory_order_release);
+    }
+    cv_task_available_.notify_all();
+}
+
+void GraphRuntime::submit_ready_task_any_thread(Task&& task) {
     {
         std::lock_guard<std::mutex> lock(global_queue_mutex_);
         global_task_queue_.push(std::move(task));
+        ready_task_count_.fetch_add(1, std::memory_order_relaxed);
     }
-    // 唤醒一个等待全局队列的线程
     cv_task_available_.notify_one();
 }
 
-void GraphRuntime::notify_task_complete() {
-    if (--tasks_remaining_ == 0) {
-        std::lock_guard<std::mutex> lock(completion_mutex_);
+void GraphRuntime::submit_ready_task_from_worker(Task&& task) {
+    int worker_id = this_worker_id();  // -1 表示当前不是 worker 线程
+    if (worker_id < 0 || worker_id >= static_cast<int>(local_task_queues_.size())) {
+        // 兜底：不是 worker，就走任意线程安全投递
+        submit_ready_task_any_thread(std::move(task));
+        return;
+    }
+    {
+        std::lock_guard<std::mutex> lock(*local_queue_mutexes_[worker_id]);
+        local_task_queues_[worker_id].push_back(std::move(task));
+        ready_task_count_.fetch_add(1, std::memory_order_relaxed);
+    }
+    cv_task_available_.notify_one();
+}
+
+void GraphRuntime::dec_graph_tasks_to_complete() {
+    if (tasks_to_complete_.fetch_sub(1, std::memory_order_acq_rel) == 1) {
+        std::lock_guard<std::mutex> lk(completion_mutex_);
         cv_completion_.notify_one();
+    }
+}
+
+void GraphRuntime::wait_for_completion() {
+    {
+        std::unique_lock<std::mutex> lock(completion_mutex_);
+        cv_completion_.wait(lock, [&]{ 
+            return tasks_to_complete_.load(std::memory_order_acquire) == 0 || has_exception_.load(std::memory_order_acquire) || !running_;
+        });
+    }
+
+    if (has_exception_.load(std::memory_order_relaxed)) {
+        stop();
+        start(); 
+        std::lock_guard<std::mutex> lock(exception_mutex_);
+        std::rethrow_exception(first_exception_);
     }
 }
 
 void GraphRuntime::set_exception(std::exception_ptr e) {
-    std::lock_guard<std::mutex> lock(exception_mutex_);
-    if (!first_exception_) {
+    if (!has_exception_.exchange(true, std::memory_order_acq_rel)) {
+        std::lock_guard<std::mutex> lock(exception_mutex_);
         first_exception_ = e;
-        std::lock_guard<std::mutex> cv_lock(completion_mutex_);
-        cv_completion_.notify_one();
-    }
-}
-
-void GraphRuntime::execute_task_graph_and_wait(std::shared_ptr<TaskGraph> task_graph) {
-    if (task_graph->tasks.empty()) return;
-    
-    first_exception_ = nullptr;
-    tasks_remaining_ = task_graph->tasks.size();
-    
-    {
-        std::lock_guard<std::mutex> lock(global_queue_mutex_);
-        for (int node_id : task_graph->initial_ready_nodes) {
-            global_task_queue_.push(std::move(task_graph->tasks.at(node_id)));
+        running_ = false; 
+        cv_task_available_.notify_all();
+        {
+            std::lock_guard<std::mutex> lk_comp(completion_mutex_);
+            cv_completion_.notify_all();
         }
-    }
-    cv_task_available_.notify_all();
-
-    {
-        std::unique_lock<std::mutex> lock(completion_mutex_);
-        cv_completion_.wait(lock, [&]{ 
-            return tasks_remaining_.load() == 0 || first_exception_ != nullptr;
-        });
-    }
-
-    if (first_exception_) {
-        std::rethrow_exception(first_exception_);
     }
 }
 

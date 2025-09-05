@@ -117,7 +117,10 @@ bool Kernel::compute(const std::string& name, int node_id, const std::string& ca
         last_error_[name] = { ge.code(), ge.what() };
         return false;
     } catch (const std::exception& e) {
-        last_error_[name] = { GraphErrc::Unknown, e.what() };
+        std::stringstream ss;
+        ss << "std::exception during compute: " << e.what()
+        << " (while computing node " << node_id << ")";
+        last_error_[name] = { GraphErrc::Unknown, ss.str() };
         return false;
     } catch (...) {
         last_error_[name] = { GraphErrc::Unknown, std::string("unknown error") };

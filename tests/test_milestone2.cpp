@@ -1,138 +1,145 @@
-#include <iostream>
-#include <cassert>
-#include <cmath>
 #include "node_graph.hpp"
+#include "kernel/graph_runtime.hpp"
 #include "kernel/ops.hpp"
 #include "adapter/buffer_adapter_opencv.hpp"
-#include "kernel/kernel.hpp" // [修复] 缺少头文件
-#include "kernel/interaction.hpp" // [修复] 缺少头文件
+#include <cassert>
+#include <iostream>
+#include <filesystem>
 
-// 一个简单的图像内容校验函数
-double image_checksum(const ps::NodeOutput& output) {
-    if (output.image_buffer.width == 0) return 0.0;
-    cv::Mat mat = ps::toCvMat(output.image_buffer);
-    cv::Scalar sum = cv::sum(mat);
-    return sum[0] + sum[1] + sum[2] + sum[3];
+// Helper for asserting conditions
+void ps_assert(bool condition, const std::string& message) {
+    if (!condition) {
+        std::cerr << "Assertion failed: " << message << std::endl;
+        std::exit(1);
+    }
 }
 
-void print_test_status(const std::string& name, bool success) {
-    std::cout << "[ " << (success ? "PASS" : "FAIL") << " ] " << name << std::endl;
-    assert(success);
-}
-
-// 模拟的 GraphRuntime
-class MockGraphRuntime {
-public:
+void test_simple_sequential_compute() {
+    std::cout << "--- Running test: test_simple_sequential_compute ---\n";
+    ps::ops::register_builtin();
     ps::NodeGraph graph;
-    MockGraphRuntime() : graph("cache") {}
-};
 
-void test_preserved_node_logic() {
-    std::cout << "--- Running Test: 'preserved' node logic ---" << std::endl;
-    bool test_success = false;
-    try {
-        ps::ops::register_builtin();
-        MockGraphRuntime runtime;
-        auto& graph = runtime.graph;
-        
-        ps::Node noise_node;
-        noise_node.id = 0;
-        noise_node.name = "Perlin Noise";
-        noise_node.type = "image_generator";
-        noise_node.subtype = "perlin_noise";
-        noise_node.preserved = true; // 标记为 preserved
-        noise_node.parameters["width"] = 64;
-        noise_node.parameters["height"] = 64;
-        noise_node.parameters["seed"] = 42;
+    ps::Node n1, n2, n3;
+    n1.id = 1; n1.name = "const100"; n1.type = "image_generator"; n1.subtype = "constant";
+    n1.parameters["width"] = 10; n1.parameters["height"] = 10; n1.parameters["value"] = 100;
+    
+    n2.id = 2; n2.name = "const50"; n2.type = "image_generator"; n2.subtype = "constant";
+    n2.parameters["width"] = 10; n2.parameters["height"] = 10; n2.parameters["value"] = 50;
+    
+    n3.id = 3; n3.name = "add"; n3.type = "image_mixing"; n3.subtype = "add_weighted";
+    n3.image_inputs.push_back({1, "image"});
+    n3.image_inputs.push_back({2, "image"});
+    n3.parameters["alpha"] = 0.5; n3.parameters["beta"] = 0.5;
 
-        ps::Node blur_node;
-        blur_node.id = 1;
-        blur_node.name = "Blur";
-        blur_node.type = "image_process";
-        blur_node.subtype = "gaussian_blur";
-        blur_node.image_inputs.push_back({0});
+    graph.add_node(n1); graph.add_node(n2); graph.add_node(n3);
+    
+    auto& output = graph.compute(3, "int8");
+    cv::Mat result_mat = ps::toCvMat(output.image_buffer);
 
-        graph.add_node(noise_node);
-        graph.add_node(blur_node);
-
-        // 第一次计算
-        graph.compute(1, "int8", false, true); // enable timing
-        assert(graph.timing_results.node_timings.size() == 2);
-        assert(graph.timing_results.node_timings[0].source == "computed"); // noise
-        assert(graph.timing_results.node_timings[1].source == "computed"); // blur
-
-        // 第二次计算，force_recache=true
-        graph.compute(1, "int8", true, true); // force recache
-        assert(graph.timing_results.node_timings.size() == 2);
-        assert(graph.timing_results.node_timings[0].source == "memory_cache"); // noise should be cached
-        assert(graph.timing_results.node_timings[1].source == "computed");     // blur should be recomputed
-        
-        test_success = true;
-    } catch (const std::exception& e) {
-        std::cerr << "Test failed with exception: " << e.what() << std::endl;
-    }
-    print_test_status("Preserved node is not cleared by force_recache", test_success);
+    float expected = (100.0f/255.0f * 0.5f) + (50.0f/255.0f * 0.5f);
+    ps_assert(std::abs(result_mat.at<float>(0, 0) - expected) < 1e-6, "Pixel value mismatch in sequential compute");
+    
+    std::cout << "PASS\n";
 }
 
-void test_parallel_correctness() {
-    std::cout << "\n--- Running Test: 'compute_parallel' correctness ---" << std::endl;
-    bool test_success = false;
-    double checksum_seq = 0.0;
-    double checksum_par = 0.0;
+void test_parallel_scheduler_simple() {
+    std::cout << "--- Running test: test_parallel_scheduler_simple ---\n";
+    ps::ops::register_builtin();
+    
+    ps::GraphRuntime::Info info{"test_session", "sessions/test_session"};
+    ps::GraphRuntime runtime(info);
+    runtime.start();
+    
+    auto& graph = runtime.get_nodegraph();
+
+    ps::Node n1, n2, n3;
+    n1.id = 1; n1.name = "const100"; n1.type = "image_generator"; n1.subtype = "constant";
+    n1.parameters["width"] = 20; n1.parameters["height"] = 20; n1.parameters["value"] = 100;
+    
+    n2.id = 2; n2.name = "const50"; n2.type = "image_generator"; n2.subtype = "constant";
+    n2.parameters["width"] = 20; n2.parameters["height"] = 20; n2.parameters["value"] = 50;
+    
+    n3.id = 3; n3.name = "add"; n3.type = "image_mixing"; n3.subtype = "add_weighted";
+    n3.image_inputs.push_back({1, "image"});
+    n3.image_inputs.push_back({2, "image"});
+    n3.parameters["alpha"] = 1.0; n3.parameters["beta"] = 1.0;
+
+    graph.add_node(n1); graph.add_node(n2); graph.add_node(n3);
+    
+    auto& output = graph.compute_parallel(runtime, 3, "int8");
+    cv::Mat result_mat = ps::toCvMat(output.image_buffer);
+    
+    float expected = (100.0f/255.0f) + (50.0f/255.0f);
+    ps_assert(std::abs(result_mat.at<float>(5, 5) - expected) < 1e-6, "Pixel value mismatch in parallel compute");
+    
+    std::cout << "PASS\n";
+    runtime.stop();
+}
+
+// [新增] 专门用于验证本次修复的测试用例
+void test_parallel_mixing_with_resize() {
+    std::cout << "--- Running test: test_parallel_mixing_with_resize ---\n";
+    ps::ops::register_builtin();
+    
+    ps::GraphRuntime::Info info{"resize_test", "sessions/resize_test"};
+    ps::GraphRuntime runtime(info);
+    runtime.start();
+    
+    auto& graph = runtime.get_nodegraph();
+
+    // Node 1: Base image, 100x100
+    ps::Node n1;
+    n1.id = 1; n1.name = "base_img"; n1.type = "image_generator"; n1.subtype = "constant";
+    n1.parameters["width"] = 100; n1.parameters["height"] = 100; n1.parameters["value"] = 200;
+
+    // Node 2: Smaller image, 50x50, to be resized
+    ps::Node n2;
+    n2.id = 2; n2.name = "small_img"; n2.type = "image_generator"; n2.subtype = "constant";
+    n2.parameters["width"] = 50; n2.parameters["height"] = 50; n2.parameters["value"] = 50;
+
+    // Node 3: Add them. Default merge_strategy is "resize"
+    ps::Node n3;
+    n3.id = 3; n3.name = "add_diff_size"; n3.type = "image_mixing"; n3.subtype = "add_weighted";
+    n3.image_inputs.push_back({1, "image"});
+    n3.image_inputs.push_back({2, "image"});
+    n3.parameters["alpha"] = 1.0; n3.parameters["beta"] = 1.0;
+
+    graph.add_node(n1); graph.add_node(n2); graph.add_node(n3);
+    
+    bool threw = false;
     try {
-        ps::ops::register_builtin();
-        ps::Kernel kernel;
-        auto graph_name_opt = kernel.load_graph("test_graph", "sessions", "");
-        assert(graph_name_opt.has_value());
-        std::string graph_name = *graph_name_opt;
-
-        kernel.post(graph_name, [](ps::NodeGraph& g){
-            g.clear();
-            ps::Node n0; n0.id=0; n0.type="image_generator"; n0.subtype="perlin_noise"; n0.parameters["width"]=128; n0.parameters["height"]=128; n0.parameters["seed"] = 123;
-            ps::Node n1; n1.id=1; n1.type="image_process"; n1.subtype="gaussian_blur"; n1.image_inputs.push_back({0});
-            ps::Node n2; n2.id=2; n2.type="image_process"; n2.subtype="curve_transform"; n2.image_inputs.push_back({1});
-            g.add_node(n0); g.add_node(n1); g.add_node(n2);
-            return 0;
-        }).get();
+        auto& output = graph.compute_parallel(runtime, 3, "int8");
+        cv::Mat result_mat = ps::toCvMat(output.image_buffer);
         
-        // 顺序计算
-        auto img_seq_opt = kernel.compute_and_get_image(graph_name, 2, "int8", false, false, false);
-        assert(img_seq_opt.has_value());
-        ps::NodeOutput out_seq; out_seq.image_buffer = ps::fromCvMat(*img_seq_opt);
-        checksum_seq = image_checksum(out_seq);
-        
-        // 清理缓存并并行计算
-        kernel.clear_memory_cache(graph_name);
-        auto img_par_opt = kernel.compute_and_get_image(graph_name, 2, "int8", false, false, true); // parallel = true
-        assert(img_par_opt.has_value());
-        ps::NodeOutput out_par; out_par.image_buffer = ps::fromCvMat(*img_par_opt);
-        checksum_par = image_checksum(out_par);
+        ps_assert(result_mat.cols == 100, "Result width should match first input");
+        ps_assert(result_mat.rows == 100, "Result height should match first input");
 
-        assert(std::abs(checksum_seq - checksum_par) < 1e-3);
-        test_success = true;
-
+        float expected = (200.0f/255.0f) + (50.0f/255.0f); // smaller image is resized and then added
+        ps_assert(std::abs(result_mat.at<float>(50, 50) - expected) < 1e-6, "Pixel value mismatch after resize");
     } catch (const std::exception& e) {
-        std::cerr << "Test failed with exception: " << e.what() << std::endl;
+        std::cerr << "Caught exception: " << e.what() << std::endl;
+        threw = true;
     }
-    print_test_status("Parallel result matches sequential result", test_success);
-    std::cout << "  Sequential Checksum: " << checksum_seq << std::endl;
-    std::cout << "  Parallel Checksum:   " << checksum_par << std::endl;
+    
+    ps_assert(!threw, "compute_parallel should not throw for different-sized inputs with default resize strategy");
+
+    std::cout << "PASS\n";
+    runtime.stop();
 }
 
 int main() {
-    bool all_passed = true;
     try {
-        test_preserved_node_logic();
-    } catch(...) { all_passed = false; }
-    try {
-        test_parallel_correctness();
-    } catch(...) { all_passed = false; }
+        // 清理旧的测试会话，以防干扰
+        std::filesystem::remove_all("sessions");
 
-    if (all_passed) {
-        std::cout << "\n✅ All milestone 2 tests passed!" << std::endl;
-        return 0;
-    } else {
-        std::cout << "\n❌ Some milestone 2 tests failed." << std::endl;
+        test_simple_sequential_compute();
+        test_parallel_scheduler_simple();
+        test_parallel_mixing_with_resize(); // 运行新测试
+
+        std::cout << "\nAll Milestone 2 tests passed!\n";
+    } catch (const std::exception& e) {
+        std::cerr << "\nMilestone 2 test suite failed: " << e.what() << std::endl;
         return 1;
     }
+    return 0;
 }

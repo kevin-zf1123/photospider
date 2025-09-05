@@ -231,10 +231,75 @@ NodeOutput& NodeGraph::compute_internal(int node_id,
                 target_node.cached_output =
                     op_func(target_node, monolithic_inputs);
             }
-            // Tiled
+
             else if constexpr (std::is_same_v<T, TileOpFunc>) {
-                if (monolithic_inputs.empty() &&
-                    target_node.type != "image_generator")
+                
+                // [核心修复] 为 image_mixing 实现 merge_strategy
+                std::vector<NodeOutput> normalized_storage;
+                std::vector<const NodeOutput*> inputs_for_tiling = monolithic_inputs;
+                
+                bool is_mixing = (target_node.type == "image_mixing");
+                if (is_mixing && monolithic_inputs.size() >= 2) {
+                    if (monolithic_inputs[0]->image_buffer.width == 0 || monolithic_inputs[0]->image_buffer.height == 0) {
+                        throw GraphError(GraphErrc::InvalidParameter, "Base image for image_mixing node " + std::to_string(target_node.id) + " is empty.");
+                    }
+
+                    const auto& base_buffer = monolithic_inputs[0]->image_buffer;
+                    const int base_w = base_buffer.width;
+                    const int base_h = base_buffer.height;
+                    const int base_c = base_buffer.channels;
+
+                    const std::string strategy = as_str(target_node.runtime_parameters, "merge_strategy", "resize");
+                    
+                    normalized_storage.reserve(monolithic_inputs.size() - 1);
+
+                    for (size_t i = 1; i < monolithic_inputs.size(); ++i) {
+                        const auto& current_buffer = monolithic_inputs[i]->image_buffer;
+                        
+                        if (current_buffer.width == 0 || current_buffer.height == 0) {
+                             throw GraphError(GraphErrc::InvalidParameter, "Secondary image for image_mixing node " + std::to_string(target_node.id) + " is empty.");
+                        }
+
+                        if (current_buffer.width == base_w && current_buffer.height == base_h && current_buffer.channels == base_c) {
+                            continue; // Already matches, no normalization needed
+                        }
+                        
+                        cv::Mat current_mat = toCvMat(current_buffer);
+                        
+                        // [*** 核心修复 ***] Handle both resize and crop
+                        if (current_mat.cols != base_w || current_mat.rows != base_h) {
+                            if (strategy == "resize") {
+                                cv::resize(current_mat, current_mat, cv::Size(base_w, base_h), 0, 0, cv::INTER_LINEAR);
+                            } else if (strategy == "crop") {
+                                cv::Rect crop_roi(0, 0, std::min(current_mat.cols, base_w), std::min(current_mat.rows, base_h));
+                                cv::Mat cropped = cv::Mat::zeros(base_h, base_w, current_mat.type());
+                                current_mat(crop_roi).copyTo(cropped(crop_roi));
+                                current_mat = cropped;
+                            } else {
+                                throw GraphError(GraphErrc::InvalidParameter, "Unsupported merge_strategy '" + strategy + "' for tiled image_mixing.");
+                            }
+                        }
+
+                        if (current_mat.channels() != base_c) {
+                             if (current_mat.channels() == 1 && (base_c == 3 || base_c == 4)) {
+                                std::vector<cv::Mat> planes(base_c, current_mat);
+                                cv::merge(planes, current_mat);
+                            } else if ((current_mat.channels() == 3 || current_mat.channels() == 4) && base_c == 1) {
+                                cv::cvtColor(current_mat, current_mat, cv::COLOR_BGR2GRAY);
+                            } else if (current_mat.channels() != base_c) {
+                                throw GraphError(GraphErrc::InvalidParameter, "Unsupported channel conversion for image_mixing: " + std::to_string(current_mat.channels()) + " -> " + std::to_string(base_c));
+                            }
+                        }
+
+                        NodeOutput temp_output;
+                        temp_output.image_buffer = fromCvMat(current_mat);
+                        normalized_storage.push_back(std::move(temp_output));
+                        inputs_for_tiling[i] = &normalized_storage.back();
+                    }
+                }
+
+
+                if (inputs_for_tiling.empty() && target_node.type != "image_generator")
                 {
                     throw GraphError(GraphErrc::MissingDependency,
                         "Tiled node '" + target_node.name +
@@ -242,20 +307,20 @@ NodeOutput& NodeGraph::compute_internal(int node_id,
                 }
 
                 // 推断输出尺寸
-                int out_w = monolithic_inputs.empty()
+                int out_w = inputs_for_tiling.empty()
                     ? as_int_flexible(target_node.runtime_parameters,
                         "width", 256)
-                    : monolithic_inputs[0]->image_buffer.width;
-                int out_h = monolithic_inputs.empty()
+                    : inputs_for_tiling[0]->image_buffer.width;
+                int out_h = inputs_for_tiling.empty()
                     ? as_int_flexible(target_node.runtime_parameters,
                         "height", 256)
-                    : monolithic_inputs[0]->image_buffer.height;
-                int out_c = monolithic_inputs.empty()
+                    : inputs_for_tiling[0]->image_buffer.height;
+                int out_c = inputs_for_tiling.empty()
                     ? 1
-                    : monolithic_inputs[0]->image_buffer.channels;
-                auto out_t = monolithic_inputs.empty()
+                    : inputs_for_tiling[0]->image_buffer.channels;
+                auto out_t = inputs_for_tiling.empty()
                     ? ps::DataType::FLOAT32
-                    : monolithic_inputs[0]->image_buffer.type;
+                    : inputs_for_tiling[0]->image_buffer.type;
 
                 // 分配输出缓冲
                 target_node.cached_output = NodeOutput();
@@ -279,7 +344,7 @@ NodeOutput& NodeGraph::compute_internal(int node_id,
                             std::min(TILE_SIZE, ob.width - x),
                             std::min(TILE_SIZE, ob.height - y));
 
-                        for (auto const* in_out : monolithic_inputs) {
+                        for (auto const* in_out : inputs_for_tiling) {
                             ps::Tile in_tile;
                             in_tile.buffer =
                                 const_cast<ps::ImageBuffer*>(
@@ -316,6 +381,7 @@ NodeOutput& NodeGraph::compute_internal(int node_id,
 
     current_event.source = result_source;
     double execution_duration_ms = std::chrono::duration<double, std::milli>(current_event.execution_end_time - current_event.execution_start_time).count();
+    if (execution_duration_ms < 0) execution_duration_ms = 0.0; // 保险
     // 8. 全局与本地计时记录
     if (enable_timing) {
         auto tot = std::chrono::duration<double,

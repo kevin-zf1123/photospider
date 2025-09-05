@@ -27,6 +27,11 @@ public:
     bool cmd_close_graph(const std::string& name) { return kernel_.close_graph(name); }
     std::vector<std::string> cmd_list_graphs() const { return kernel_.list_graphs(); }
 
+    // [API修复] 新增方法以从 CLI 安全地获取末端节点
+    std::optional<std::vector<int>> cmd_ending_nodes(const std::string& graph) {
+        return kernel_.ending_nodes(graph);
+    }
+
     // Compute
     bool cmd_compute(const std::string& graph, int node_id, const std::string& cache_precision,
                      bool force, bool timing, bool parallel, bool quiet = false,

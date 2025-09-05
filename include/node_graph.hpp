@@ -25,13 +25,11 @@ struct TimingCollector {
     double total_ms = 0.0;
 };
 // Concurrency model (high level):
-// - Each loaded graph is owned by a GraphRuntime that serializes API calls via a worker thread.
-// - compute() runs on that worker thread and may recurse; it is single-threaded.
-// - compute_parallel() temporarily spawns a per-invocation worker pool to evaluate the subgraph in parallel,
-//   then joins all threads before returning. It uses its own internal queue + mutex/CV (separate from graph_mutex_).
-// - timing_results is mutated from both sequential and parallel paths; protect with timing_mutex_.
-// - event_buffer_ is a cross-thread stream used by the CLI; protect with event_mutex_.
-// - graph_mutex_ guards occasional coarse operations over the whole graph (e.g., mass cache resets for force_recache).
+// - 每个加载的图由一个GraphRuntime拥有，该Runtime维护一个工作线程池。
+// - `compute()` 在调用线程上以单线程、深度优先的方式执行，用于简单的或调试性的计算。
+// - `compute_parallel()` 将计算子图分解为微观任务，并提交给GraphRuntime的**工作窃取调度器**。
+// - 工作线程从各自的本地队列（LIFO）获取任务，或从其他线程的队列（FIFO）窃取任务，以实现高性能并行计算。
+// - `timing_results` 和 `event_buffer_` 由互斥锁保护，以支持跨线程的安全访问。
 
 /**
  * @brief NodeGraph 管理计算图中的节点，处理节点的依赖、缓存、并行计算、时序收集和事件推送。
@@ -48,7 +46,7 @@ struct TimingCollector {
  *   - 查找包含指定节点的子图(get_trees_containing_node)。
  * - 计算执行：
  *   - compute：单线程模式，支持强制刷新(force_recache)、计时(enable_timing)、禁用磁盘缓存(disable_disk_cache)。
- *   - compute_parallel：基于 GraphRuntime 的多线程模式，对子图任务进行并行调度。
+ *   - compute_parallel：利用 `GraphRuntime` 的多线程工作窃取调度器，对子图任务进行高性能并行计算。
  *   - clear_timing_results：重置已收集的节点计时信息。
  * - 性能与事件：
  *   - timing_results：全局时序(TimingCollector)；total_io_time_ms：原子累计 I/O 时间。
@@ -139,7 +137,7 @@ private:
     std::vector<ComputeEvent> event_buffer_;
     void push_compute_event(int id, const std::string& name, const std::string& source, double ms);
     
-    std::mutex timing_mutex_;
+    mutable std::mutex timing_mutex_;
 };
 
 } // namespace ps

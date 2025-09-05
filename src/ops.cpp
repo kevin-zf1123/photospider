@@ -10,6 +10,7 @@
 #include <cmath>
 #include <numeric>
 #include <mutex>
+#include <opencv2/core/ocl.hpp>
 
 namespace ps { namespace ops {
 
@@ -295,6 +296,11 @@ static void op_add_weighted_tiled(const Node& node, const Tile& output_tile, con
     cv::Mat input_b = toCvMat(input_tiles[1]);
     cv::Mat output = toCvMat(output_tile);
 
+    // [健壮性修复] 添加断言
+    if (input_a.size() != input_b.size() || input_a.channels() != input_b.channels()) {
+        throw GraphError(GraphErrc::InvalidParameter, "add_weighted tiled inputs must have same dimensions after merge strategy.");
+    }
+
     const auto& P = node.runtime_parameters;
     double alpha = as_double_flexible(P, "alpha", 0.5);
     double beta  = as_double_flexible(P, "beta", 0.5);
@@ -311,6 +317,12 @@ static void op_abs_diff_tiled(const Node& node, const Tile& output_tile, const s
     cv::Mat input_a = toCvMat(input_tiles[0]);
     cv::Mat input_b = toCvMat(input_tiles[1]);
     cv::Mat output = toCvMat(output_tile);
+    
+    // [健壮性修复] 添加断言
+    if (input_a.size() != input_b.size() || input_a.channels() != input_b.channels()) {
+        throw GraphError(GraphErrc::InvalidParameter, "diff tiled inputs must have same dimensions after merge strategy.");
+    }
+
     cv::absdiff(input_a, input_b, output);
 }
 
@@ -323,6 +335,11 @@ static void op_multiply_tiled(const Node& node, const Tile& output_tile, const s
     cv::Mat input_b = toCvMat(input_tiles[1]);
     cv::Mat output = toCvMat(output_tile);
     
+    // [健壮性修复] 添加断言
+    if (input_a.size() != input_b.size() || input_a.channels() != input_b.channels()) {
+        throw GraphError(GraphErrc::InvalidParameter, "multiply tiled inputs must have same dimensions after merge strategy.");
+    }
+
     const auto& P = node.runtime_parameters;
     double scale = as_double_flexible(P, "scale", 1.0);
     
@@ -331,6 +348,10 @@ static void op_multiply_tiled(const Node& node, const Tile& output_tile, const s
 
 // --- 注册所有操作 ---
 void register_builtin() {
+    static std::once_flag ocl_once;
+    std::call_once(ocl_once, []{
+        cv::ocl::setUseOpenCL(false);
+    });
     auto& R = OpRegistry::instance();
 
     // 注册 Monolithic 操作，使用默认元数据（CPU）

@@ -5,8 +5,62 @@
 #include <future>
 #include <chrono>
 #include <fstream>
+#include <numeric>
 #include "cli/command/commands.hpp"
 #include "cli/command/help_utils.hpp"
+
+// [核心修复] 将异步执行和结果处理逻辑提取到一个辅助函数中
+static bool execute_and_wait(
+    ps::InteractionService& svc, 
+    const std::string& current_graph, 
+    int node_id, 
+    const CliConfig& config,
+    bool force, bool force_deep, bool parallel, bool timer_console, bool timer_log, bool mute, const std::string& timer_log_path
+) {
+    (void)svc.cmd_drain_compute_events(current_graph);
+
+    auto future_opt = svc.cmd_compute_async(current_graph, node_id, config.cache_precision,
+                                            (force || force_deep), (timer_console || timer_log),
+                                            parallel, mute, force_deep);
+
+    if (!future_opt) {
+        std::cout << "Error: failed to schedule compute task for node " << node_id << ".\n";
+        return false;
+    }
+
+    auto& future = *future_opt;
+    if (!mute) {
+        std::cout << "Computing node " << node_id << "..." << std::endl;
+    }
+
+    while (future.wait_for(std::chrono::milliseconds(50)) == std::future_status::timeout) {
+        if (!mute) {
+            if (auto events = svc.cmd_drain_compute_events(current_graph)) {
+                for (const auto& event : *events) {
+                    std::cout << "  - Node " << event.id << " (" << event.name << ") completed [" << event.source << "]" << std::endl;
+                }
+            }
+        }
+    }
+
+    if (!mute) {
+        if (auto tail_events = svc.cmd_drain_compute_events(current_graph)) {
+            for (const auto& event : *tail_events) {
+                std::cout << "  - Node " << event.id << " (" << event.name << ") completed [" << event.source << "]" << std::endl;
+            }
+        }
+    }
+    
+    bool ok = future.get();
+    if (!ok) {
+        std::cout << "Error: Compute task failed for node " << node_id << ".\n";
+        if (auto err = svc.cmd_last_error(current_graph)) {
+            std::cout << "  Reason: " << err->message << std::endl;
+        }
+    }
+    return ok;
+}
+
 
 bool handle_compute(std::istringstream& iss,
                     ps::InteractionService& svc,
@@ -17,138 +71,124 @@ bool handle_compute(std::istringstream& iss,
         std::cout << "No current graph. Use load/switch.\n";
         return true;
     }
-    int node_id = -1;
-    iss >> node_id;
-    if (node_id < 0) {
-        std::cout << "Usage: compute <id> [flags...]\n";
+
+    std::string target_str;
+    iss >> target_str;
+    if (target_str.empty()) {
+        std::cout << "Usage: compute <id|all> [flags...]\n";
         return true;
     }
 
-    // 参数解析
+    // [核心修复] 参数解析与验证
+    std::vector<int> nodes_to_compute;
+    auto all_node_ids_opt = svc.cmd_list_node_ids(current_graph);
+    if (!all_node_ids_opt) {
+        std::cout << "Error: Could not retrieve node list for current graph.\n";
+        return true;
+    }
+    auto& all_node_ids = *all_node_ids_opt;
+
+    if (target_str == "all") {
+        // [核心修复] 使用正确的 svc.cmd_ending_nodes
+        auto ending_nodes_opt = svc.cmd_ending_nodes(current_graph);
+        if (ending_nodes_opt) {
+            nodes_to_compute = *ending_nodes_opt;
+        }
+        if (nodes_to_compute.empty()) {
+            std::cout << "No ending nodes to compute in the graph.\n";
+            return true;
+        }
+    } else {
+        try {
+            int node_id = std::stoi(target_str);
+            bool exists = false;
+            for(int id : all_node_ids) {
+                if (id == node_id) {
+                    exists = true;
+                    break;
+                }
+            }
+            if (!exists) {
+                std::cout << "Error: Node with ID " << node_id << " does not exist in the current graph.\n";
+                return true;
+            }
+            nodes_to_compute.push_back(node_id);
+        } catch (const std::invalid_argument&) {
+            std::cout << "Error: Invalid target '" << target_str << "'. Must be an integer ID or 'all'.\n";
+            return true;
+        }
+    }
+    
+    // 解析 flags
     std::vector<std::string> flags;
     std::string flag;
     while (iss >> flag) flags.push_back(flag);
-    // If no flags provided inline, fall back to defaults from config
     if (flags.empty() && !config.default_compute_args.empty()) {
         std::istringstream def_iss(config.default_compute_args);
         while (def_iss >> flag) flags.push_back(flag);
     }
     bool force = false, force_deep = false, parallel = false, timer_console = false, timer_log = false, mute = false;
     std::string timer_log_path = config.default_timer_log_path;
-
     for (size_t i = 0; i < flags.size(); ++i) {
         const auto& f = flags[i];
         if (f == "force") force = true;
-        else if (f == "force-deep") force_deep = true; // 注意: force_deep 在后端尚未完全实现，此处仅为示例
+        else if (f == "force-deep") force_deep = true;
         else if (f == "parallel") parallel = true;
         else if (f == "t" || f == "-t" || f == "timer") timer_console = true;
         else if (f == "tl" || f == "-tl") { timer_log = true; if (i + 1 < flags.size()) { timer_log_path = flags[i + 1]; ++i; } }
         else if (f == "m" || f == "-m" || f == "mute") mute = true;
     }
 
-    // 在开始之前清空可能残留的事件
-    (void)svc.cmd_drain_compute_events(current_graph);
-
-    // 异步执行与轮询
-    auto future_opt = svc.cmd_compute_async(current_graph, node_id, config.cache_precision,
-                                            /*force_recache*/ (force || force_deep),
-                                            /*timing*/ (timer_console || timer_log),
-                                            /*parallel*/ parallel,
-                                            /*quiet*/ mute,
-                                            /*disable_disk_cache*/ force_deep);
-
-    if (!future_opt) {
-        std::cout << "Error: failed to schedule compute task.\n";
-        return true;
-    }
-    auto& future = *future_opt;
-
-    std::cout << "Computing..." << std::endl;
-
-    while (future.wait_for(std::chrono::milliseconds(50)) == std::future_status::timeout) {
-        auto events = svc.cmd_drain_compute_events(current_graph);
-        if (!events) continue;
-        
-        if (!mute) {
-            for (const auto& event : *events) {
-                std::cout << "  - Node " << event.id << " (" << event.name << ") completed [" << event.source << "]" << std::endl;
-            }
+    // [核心修复] 循环执行计算
+    bool all_ok = true;
+    auto overall_start_time = std::chrono::high_resolution_clock::now();
+    
+    for (int node_id : nodes_to_compute) {
+        if (!execute_and_wait(svc, current_graph, node_id, config, force, force_deep, parallel, timer_console, timer_log, mute, timer_log_path)) {
+            all_ok = false;
+            break; // 一个失败就停止
         }
     }
+    
+    auto overall_end_time = std::chrono::high_resolution_clock::now();
 
-    // 计算已结束，做一次最终事件回收
-    if (auto tail_events = svc.cmd_drain_compute_events(current_graph)) {
-        if (!mute) {
-            for (const auto& event : *tail_events) {
-                std::cout << "  - Node " << event.id << " (" << event.name << ") completed [" << event.source << "]" << std::endl;
-            }
-        }
-    }
-
-    bool ok = future.get();
-    if (!ok) {
-        std::cout << "Error: Compute task failed.\n";
-        if (auto err = svc.cmd_last_error(current_graph)) {
-            std::cout << "  Reason: " << err->message << std::endl;
-        }
-        if (timer_console || timer_log) {
-            if (auto timers = svc.cmd_timing(current_graph)) {
-                std::stringstream log_buffer;
-                log_buffer << "Timing Report (partial, total " << timers->total_ms << " ms):" << std::endl;
-                for (const auto& nt : timers->node_timings) {
-                    log_buffer << "  - Node " << nt.id << " (" << nt.name << ") completed in "
-                               << nt.elapsed_ms << " ms [" << nt.source << "]" << std::endl;
-                }
-                if (timer_console) std::cout << log_buffer.str();
-                if (timer_log) {
-                    std::ofstream log_file(timer_log_path);
-                    if (log_file) {
-                        log_file << log_buffer.str();
-                        std::cout << "Timing report saved to " << timer_log_path << std::endl;
-                    } else {
-                        std::cout << "Error: Could not open log file " << timer_log_path << std::endl;
-                    }
-                }
-            }
-        }
-        return true;
-    }
-
-    std::cout << "Computation finished." << std::endl;
+    std::cout << (all_ok ? "Computation finished." : "Computation failed.") << std::endl;
 
     if (timer_console || timer_log) {
-        auto timers = svc.cmd_timing(current_graph);
-        if (!timers) {
-            std::cout << "Could not retrieve timing information." << std::endl;
-            return true;
-        }
-
-        std::stringstream log_buffer;
-        log_buffer << "Timing Report (total " << timers->total_ms << " ms):" << std::endl;
-
-        for (const auto& nt : timers->node_timings) {
-            log_buffer << "  - Node " << nt.id << " (" << nt.name << ") completed in "
-                       << nt.elapsed_ms << " ms [" << nt.source << "]" << std::endl;
-        }
-
-        if (timer_console) {
-            std::cout << log_buffer.str();
-        }
-
-        if (timer_log) {
-            std::ofstream log_file(timer_log_path);
-            if (log_file) {
-                log_file << log_buffer.str();
-                std::cout << "Timing report saved to " << timer_log_path << std::endl;
-            } else {
-                std::cout << "Error: Could not open log file " << timer_log_path << std::endl;
+        auto timers_opt = svc.cmd_timing(current_graph);
+        if (timers_opt) {
+            auto& timers = *timers_opt;
+            
+            // 如果是 'all' 模式，计算一个总时间
+            if (target_str == "all") {
+                timers.total_ms = std::chrono::duration<double, std::milli>(overall_end_time - overall_start_time).count();
             }
+
+            std::stringstream log_buffer;
+            log_buffer << "Timing Report (total " << timers.total_ms << " ms):" << std::endl;
+            for (const auto& nt : timers.node_timings) {
+                log_buffer << "  - Node " << nt.id << " (" << nt.name << ") completed in "
+                           << nt.elapsed_ms << " ms [" << nt.source << "]" << std::endl;
+            }
+            if (timer_console) std::cout << log_buffer.str();
+            if (timer_log) {
+                std::ofstream log_file(timer_log_path, std::ios::app); // 追加模式
+                if (log_file) {
+                    log_file << log_buffer.str() << "\n";
+                    std::cout << "Timing report appended to " << timer_log_path << std::endl;
+                } else {
+                    std::cout << "Error: Could not open log file " << timer_log_path << std::endl;
+                }
+            }
+        } else {
+             std::cout << "Could not retrieve timing information." << std::endl;
         }
     }
+
     return true;
 }
+
 
 void print_help_compute(const CliConfig& /*config*/) {
     print_help_from_file("help_compute.txt");
 }
-

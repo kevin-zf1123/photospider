@@ -48,7 +48,7 @@ file(GLOB_RECURSE CORE_LIB_SOURCES
 )
 list(FILTER CORE_LIB_SOURCES EXCLUDE REGEX ".*\\.mm$")
 add_library(photospider_lib SHARED ${CORE_LIB_SOURCES})
-
+target_compile_definitions(photospider_lib PRIVATE PHOTOSPIDER_LIB_BUILD)
 if(APPLE)
     target_sources(photospider_lib PRIVATE src/kernel/graph_runtime.mm)
 endif()
