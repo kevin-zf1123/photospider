@@ -161,6 +161,8 @@ void BenchmarkService::analyze_results(BenchmarkResult& final_result, const std:
         execution_times.push_back(total_exec_time_for_target_op);
     }
 
+    // 将每次运行的匹配主操作的总执行时间保存到结果，便于导出原始分布
+    final_result.exec_times_main_op_ms = execution_times;
     std::sort(execution_times.begin(), execution_times.end());
     
     size_t outliers_count = execution_times.size() / 5; // 去掉前后20%

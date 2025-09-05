@@ -30,8 +30,21 @@ void save_benchmark_results(const std::string& output_dir, const std::vector<ps:
     summary_file.close();
     
     // 2. 保存 CSV 原始数据
+    auto serialize_vec = [](const std::vector<double>& v) {
+        std::ostringstream oss;
+        oss.setf(std::ios::fixed);
+        oss.precision(3);
+        oss << "[";
+        for (size_t i = 0; i < v.size(); ++i) {
+            if (i) oss << ";";
+            oss << v[i];
+        }
+        oss << "]";
+        return oss.str();
+    };
+
     std::ofstream csv_file(fs::path(output_dir) / "raw_data.csv");
-    csv_file << "benchmark_name,op_name,width,height,num_threads,total_duration_ms,typical_execution_time_ms,io_duration_ms\n";
+    csv_file << "benchmark_name,op_name,width,height,num_threads,total_duration_ms,typical_execution_time_ms,io_duration_ms,exec_times_main_op_ms\n";
     for (const auto& res : results) {
         csv_file << res.benchmark_name << ","
                  << res.op_name << ","
@@ -39,7 +52,8 @@ void save_benchmark_results(const std::string& output_dir, const std::vector<ps:
                  << res.num_threads << ","
                  << res.total_duration_ms << ","
                  << res.typical_execution_time_ms << ","
-                 << res.io_duration_ms << "\n";
+                 << res.io_duration_ms << ","
+                 << '"' << serialize_vec(res.exec_times_main_op_ms) << '"' << "\n";
     }
     csv_file.close();
 }

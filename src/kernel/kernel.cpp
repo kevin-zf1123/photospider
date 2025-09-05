@@ -92,13 +92,15 @@ std::vector<std::string> Kernel::list_graphs() const {
 
 bool Kernel::compute(const std::string& name, int node_id, const std::string& cache_precision,
                      bool force_recache, bool enable_timing, bool parallel, bool quiet,
-                     bool disable_disk_cache,
+                     bool disable_disk_cache, bool nosave,
                      std::vector<BenchmarkEvent>* benchmark_events) {
     auto it = graphs_.find(name);
     if (it == graphs_.end()) return false;
     try {
         auto& runtime = *it->second;
         auto& graph = runtime.get_nodegraph();
+        // set skip-save flag for this compute
+        runtime.post([&](NodeGraph& g){ g.set_skip_save_cache(nosave); return 0; }).get();
         graph.set_quiet(quiet);
         
         if (parallel) {
@@ -121,6 +123,7 @@ bool Kernel::compute(const std::string& name, int node_id, const std::string& ca
         }
 
         last_error_.erase(name);
+        runtime.post([&](NodeGraph& g){ g.set_skip_save_cache(false); return 0; }).get();
         return true;
     } catch (const GraphError& ge) {
         last_error_[name] = { ge.code(), ge.what() };
@@ -356,9 +359,9 @@ bool Kernel::set_node_yaml(const std::string& name, int node_id, const std::stri
 }
 
 std::optional<std::future<bool>> Kernel::compute_async(const std::string& name, int node_id, const std::string& cache_precision,
-                                                      bool force_recache, bool enable_timing, bool parallel, bool quiet,
-                                                      bool disable_disk_cache,
-                                                      std::vector<BenchmarkEvent>* benchmark_events) {
+                                                   bool force_recache, bool enable_timing, bool parallel, bool quiet,
+                                                   bool disable_disk_cache, bool nosave,
+                                                   std::vector<BenchmarkEvent>* benchmark_events) {
     auto it = graphs_.find(name);
     if (it == graphs_.end()) {
         return std::nullopt;
@@ -378,7 +381,7 @@ std::optional<std::future<bool>> Kernel::compute_async(const std::string& name, 
     if (par) {
         // Important: Run the high-level parallel graph orchestration outside the runtime's worker threads
         // to avoid nested scheduling and potential TLS/worker reentrancy hazards during first-run.
-        return std::optional<std::future<bool>>(std::async(std::launch::async, [this, runtime_ptr, id, precision, frc, timing, q, disable_dc, name_copy, benchmark_events]() {
+        return std::optional<std::future<bool>>(std::async(std::launch::async, [this, runtime_ptr, id, precision, frc, timing, q, disable_dc, nosave, name_copy, benchmark_events]() {
             try {
                 NodeGraph& g = runtime_ptr->get_nodegraph();
                 if (timing) {
@@ -386,7 +389,9 @@ std::optional<std::future<bool>> Kernel::compute_async(const std::string& name, 
                 }
                 bool prev_quiet = g.is_quiet();
                 g.set_quiet(q);
+                g.set_skip_save_cache(nosave);
                 g.compute_parallel(*runtime_ptr, id, precision, frc, timing, disable_dc, benchmark_events);
+                g.set_skip_save_cache(false);
                 g.set_quiet(prev_quiet);
                 last_error_.erase(name_copy);
                 return true;
@@ -410,7 +415,9 @@ std::optional<std::future<bool>> Kernel::compute_async(const std::string& name, 
             }
             bool prev_quiet = g.is_quiet();
             g.set_quiet(q);
+            g.set_skip_save_cache(nosave);
             g.compute(id, precision, frc, timing, disable_dc, benchmark_events);
+            g.set_skip_save_cache(false);
             g.set_quiet(prev_quiet);
             last_error_.erase(name_copy);
             return true;

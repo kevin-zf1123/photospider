@@ -54,6 +54,9 @@ namespace fs = std::filesystem;
 
 
 int main(int argc, char** argv) {
+    // Hard-disable OpenCL runtime at process start to avoid spurious driver errors
+    setenv("OPENCV_OPENCL_DEVICE", "disabled", 1);
+    setenv("OPENCV_OPENCL_RUNTIME", "disabled", 1);
     cv::ocl::setUseOpenCL(false);
 
     // Fast path: if only asking for help, avoid initializing plugins/Metal to prevent

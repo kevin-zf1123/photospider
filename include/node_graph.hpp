@@ -121,6 +121,9 @@ public:
     
     std::atomic<double> total_io_time_ms{0.0};
 
+    // 控制本次计算是否跳过磁盘保存（由上层临时设置）
+    void set_skip_save_cache(bool v) { skip_save_cache_.store(v, std::memory_order_relaxed); }
+
 public: 
     // ** INTERNAL USE ONLY ** - Public for lambda access in parallel scheduler
     NodeOutput& compute_internal(int node_id, const std::string& cache_precision, 
@@ -144,6 +147,8 @@ private:
     void push_compute_event(int id, const std::string& name, const std::string& source, double ms);
     
     mutable std::mutex timing_mutex_;
+
+    std::atomic<bool> skip_save_cache_{false};
 };
 
 } // namespace ps

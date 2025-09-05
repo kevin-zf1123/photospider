@@ -37,6 +37,9 @@ fs::path NodeGraph::node_cache_dir(int node_id) const { return cache_root / std:
  * @param cache_precision 指定图像缓存精度，如 "int16" 表示 16 位整数精度，否则默认使用 8 位精度。
  */
 void NodeGraph::save_cache_if_configured(const Node& node, const std::string& cache_precision) const {
+    if (skip_save_cache_.load(std::memory_order_relaxed)) {
+        return; // 本次计算临时跳过保存
+    }
     if (cache_root.empty() || node.caches.empty() || !node.cached_output.has_value()) {
         return;
     }
