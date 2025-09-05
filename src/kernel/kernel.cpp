@@ -377,7 +377,16 @@ std::optional<std::future<bool>> Kernel::compute_async(const std::string& name, 
 
     return it->second->post([=](NodeGraph& g) {
         try {
-            g.clear_timing_results();
+            // Clearing timing data is only necessary when timing is explicitly enabled.
+            // The previous implementation cleared the timing collector unconditionally,
+            // which could race with consumers expecting the data from the last run when
+            // `compute_async` was invoked without timing. This manifested as a sporadic
+            // segmentation fault during the first computation with flags like
+            // `parallel t tl m` where timing is requested. Guard the reset so that the
+            // timing buffer is untouched when timing is disabled.
+            if (timing) {
+                g.clear_timing_results();
+            }
             bool prev_quiet = g.is_quiet();
             g.set_quiet(q);
             
