@@ -40,10 +40,7 @@ NodeOutput& NodeGraph::compute_parallel(
             std::scoped_lock lock(graph_mutex_);
             for (int id : execution_order) {
                 if (nodes.count(id)) {
-                    auto& node_to_clear = nodes.at(id);
-                    if (!node_to_clear.preserved || id == node_id) {
-                        node_to_clear.cached_output.reset();
-                    }
+                    nodes.at(id).cached_output.reset();
                 }
             }
         }
@@ -90,29 +87,52 @@ NodeOutput& NodeGraph::compute_parallel(
 
             auto inner_task = [this, &runtime, &dependency_counters, &dependents_map, &execution_order, &all_tasks,
                                current_node_id, current_node_idx,
-                               cache_precision, enable_timing, disable_disk_cache, benchmark_events] () {
+                               cache_precision, enable_timing, disable_disk_cache, benchmark_events, force_recache] () {
+                // 1) 执行核心计算（捕获并精确标注阶段）
                 try {
-                    // 1. 执行核心计算
                     std::unordered_map<int, bool> visiting;
-                    compute_internal(current_node_id, cache_precision, visiting, enable_timing, !disable_disk_cache, benchmark_events);
+                    bool allow_disk_cache = (!disable_disk_cache) && (!force_recache);
+                    compute_internal(current_node_id, cache_precision, visiting, enable_timing, allow_disk_cache, benchmark_events);
+                } catch (const cv::Exception& e) {
+                    runtime.set_exception(std::make_exception_ptr(
+                        GraphError(GraphErrc::ComputeError, "Compute stage at node " + std::to_string(current_node_id) + " (" + nodes.at(current_node_id).name + ") failed: " + std::string(e.what()))
+                    ));
+                    return;
+                } catch (const std::out_of_range& e) {
+                    runtime.set_exception(std::make_exception_ptr(
+                        GraphError(GraphErrc::ComputeError, "Compute stage at node " + std::to_string(current_node_id) + " (" + nodes.at(current_node_id).name + ") failed: out_of_range: " + std::string(e.what()))
+                    ));
+                    return;
+                } catch (const std::exception& e) {
+                    runtime.set_exception(std::make_exception_ptr(
+                        GraphError(GraphErrc::ComputeError, "Compute stage at node " + std::to_string(current_node_id) + " (" + nodes.at(current_node_id).name + ") failed: " + e.what())
+                    ));
+                    return;
+                } catch (...) {
+                    runtime.set_exception(std::make_exception_ptr(
+                        GraphError(GraphErrc::ComputeError, "Compute stage at node " + std::to_string(current_node_id) + " (" + nodes.at(current_node_id).name + ") failed: unknown exception")
+                    ));
+                    return;
+                }
 
-                    // 2. 触发后续依赖任务
+                // 2) 触发后续依赖任务（捕获并精确标注阶段）
+                try {
                     for (int dependent_idx : dependents_map[current_node_idx]) {
                         if (--dependency_counters[dependent_idx] == 0) {
                             runtime.submit_ready_task_any_thread(std::move(all_tasks[dependent_idx]));
                         }
                     }
-                } catch (const cv::Exception& e) {
+                } catch (const std::out_of_range& e) {
                     runtime.set_exception(std::make_exception_ptr(
-                        GraphError(GraphErrc::ComputeError, "Node " + std::to_string(current_node_id) + " (" + nodes.at(current_node_id).name + ") failed: " + std::string(e.what()))
+                        GraphError(GraphErrc::ComputeError, "Scheduling stage after node " + std::to_string(current_node_id) + " (" + nodes.at(current_node_id).name + ") failed: out_of_range: " + std::string(e.what()))
                     ));
                 } catch (const std::exception& e) {
                     runtime.set_exception(std::make_exception_ptr(
-                        GraphError(GraphErrc::ComputeError, "Node " + std::to_string(current_node_id) + " (" + nodes.at(current_node_id).name + ") failed: " + e.what())
+                        GraphError(GraphErrc::ComputeError, "Scheduling stage after node " + std::to_string(current_node_id) + " (" + nodes.at(current_node_id).name + ") failed: " + e.what())
                     ));
                 } catch (...) {
-                     runtime.set_exception(std::make_exception_ptr(
-                        GraphError(GraphErrc::ComputeError, "Node " + std::to_string(current_node_id) + " (" + nodes.at(current_node_id).name + ") failed: unknown exception")
+                    runtime.set_exception(std::make_exception_ptr(
+                        GraphError(GraphErrc::ComputeError, "Scheduling stage after node " + std::to_string(current_node_id) + " (" + nodes.at(current_node_id).name + ") failed: unknown exception")
                     ));
                 }
             };

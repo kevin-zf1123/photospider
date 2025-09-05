@@ -132,6 +132,8 @@ static MetalState& GetMetalState() {
 // --- START: MODIFIED FUNCTION ---
 NodeOutput op_perlin_noise_metal(const Node& node, const std::vector<const NodeOutput*>&) {
     @autoreleasepool {
+    const char* dbg_stage = "start";
+    try {
     // FIX: 关闭 OpenCV 的 OpenCL（只需做一次；放在这里最省事）
     static std::once_flag ocl_once;
     std::call_once(ocl_once, []{
@@ -144,6 +146,7 @@ NodeOutput op_perlin_noise_metal(const Node& node, const std::vector<const NodeO
     float scale = as_double_flexible(P, "grid_size", 1.0);
     int seed = as_int_flexible(P, "seed", -1);
 
+    dbg_stage = "metal_state";
     MetalState& metal = GetMetalState();
     id<MTLDevice> device = metal.device;
     id<MTLCommandQueue> commandQueue = metal.commandQueue;
@@ -156,6 +159,7 @@ NodeOutput op_perlin_noise_metal(const Node& node, const std::vector<const NodeO
     // }
 
     // 输出纹理：单通道 32F（与 CV/CI 链路一致）
+    dbg_stage = "create_texture";
     MTLTextureDescriptor* texDesc =
         [MTLTextureDescriptor texture2DDescriptorWithPixelFormat:MTLPixelFormatR32Float
                                                            width:width
@@ -168,6 +172,7 @@ NodeOutput op_perlin_noise_metal(const Node& node, const std::vector<const NodeO
     }
 
     // Perlin permutation/参数缓冲
+    dbg_stage = "alloc_permutation";
     std::vector<int> p_vec(512);
     std::iota(p_vec.begin(), p_vec.begin() + 256, 0);
     /*std::mt19937 g(std::random_device{}());*/std::mt19937 g;
@@ -179,6 +184,7 @@ NodeOutput op_perlin_noise_metal(const Node& node, const std::vector<const NodeO
     std::shuffle(p_vec.begin(), p_vec.begin() + 256, g);
     std::copy(p_vec.begin(), p_vec.begin() + 256, p_vec.begin() + 256);
 
+    dbg_stage = "create_buffers";
     id<MTLBuffer> p_buffer     = [device newBufferWithBytes:p_vec.data()
                                                      length:512 * sizeof(int)
                                                     options:MTLResourceStorageModeShared];
@@ -190,6 +196,7 @@ NodeOutput op_perlin_noise_metal(const Node& node, const std::vector<const NodeO
     }
 
     // 编码与调度
+    dbg_stage = "encode";
     id<MTLCommandBuffer> commandBuffer = [commandQueue commandBuffer];
     if (!commandBuffer) {
         throw std::runtime_error("Failed to create command buffer.");
@@ -215,17 +222,20 @@ NodeOutput op_perlin_noise_metal(const Node& node, const std::vector<const NodeO
     [encoder endEncoding];
 
     // FIX: 提交并等待 GPU 完成，防止 CPU 过早读取
+    dbg_stage = "submit_wait";
     [commandBuffer commit];
     [commandBuffer waitUntilCompleted];
 
     // ---- Zero-copy 路径：MTLTexture -> CIImage -> CVPixelBuffer -> cv::Mat ----
     // 1) 从 MTLTexture 创建 CIImage
+    dbg_stage = "create_ciimage";
     CIImage* ciImage = [CIImage imageWithMTLTexture:outTexture options:nil];
     if (!ciImage) {
         throw std::runtime_error("Failed to create CIImage from MTLTexture.");
     }
 
     // 2) 创建匹配格式的 CVPixelBuffer（单通道 32F），开启 Metal 兼容 & IOSurface
+    dbg_stage = "create_pixelbuffer";
     CVPixelBufferRef pixelBuffer = nullptr;
     NSDictionary* pbOptions = @{
         (id)kCVPixelBufferMetalCompatibilityKey: @YES,            // FIX: Metal 兼容
@@ -242,9 +252,11 @@ NodeOutput op_perlin_noise_metal(const Node& node, const std::vector<const NodeO
     }
 
     // 3) 用 CIContext 渲染到 PixelBuffer（与 metal.ci_context 同设备）
+    dbg_stage = "ci_render";
     [metal.ci_context render:ciImage toCVPixelBuffer:pixelBuffer];
 
     // 4) 将 CVPixelBuffer 安全地包装为 cv::Mat —— 关键：使用 bytesPerRow
+    dbg_stage = "lock_pb";
     CVPixelBufferLockBaseAddress(pixelBuffer, kCVPixelBufferLock_ReadOnly);
 
     void*   baseAddress  = CVPixelBufferGetBaseAddress(pixelBuffer);
@@ -257,6 +269,7 @@ NodeOutput op_perlin_noise_metal(const Node& node, const std::vector<const NodeO
     if (pbWidth != (size_t)width || pbHeight != (size_t)height) { /* ... 原来的报错处理 ... */ }
 
     // ✅ 用带 step 的构造函数拿到一个“视图”
+    dbg_stage = "mat_clone";
     cv::Mat mat_view((int)pbHeight, (int)pbWidth, CV_32FC1, baseAddress, bytesPerRow);
 
     // ✅ 关键：**总是 clone** 成为自有内存（与 PixelBuffer 脱钩）
@@ -265,6 +278,7 @@ NodeOutput op_perlin_noise_metal(const Node& node, const std::vector<const NodeO
     // 🔴 REMOVE: mat_copy.copyTo(result.image_umatrix);
 
     // ✅ ADD: 将最终的 Mat 包装到 ImageBuffer 中
+    dbg_stage = "wrap_result";
     NodeOutput result;
     result.image_buffer = fromCvMat(mat_copy);
 
@@ -273,6 +287,11 @@ NodeOutput op_perlin_noise_metal(const Node& node, const std::vector<const NodeO
     CVPixelBufferRelease(pixelBuffer);
 
     return result;
+    } catch (const std::exception& e) {
+        throw std::runtime_error(std::string("perlin_noise_metal[") + dbg_stage + "]: " + e.what());
+    } catch (...) {
+        throw std::runtime_error(std::string("perlin_noise_metal[") + dbg_stage + "]: unknown exception");
+    }
     }
 }
 

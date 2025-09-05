@@ -223,6 +223,7 @@ NodeOutput& NodeGraph::compute_internal(int node_id,
         current_event.execution_start_time =
             std::chrono::high_resolution_clock::now();
 
+        try {
         std::visit([&](auto&& op_func) {
             using T = std::decay_t<decltype(op_func)>;
 
@@ -281,11 +282,15 @@ NodeOutput& NodeGraph::compute_internal(int node_id,
                         }
 
                         if (current_mat.channels() != base_c) {
-                             if (current_mat.channels() == 1 && (base_c == 3 || base_c == 4)) {
+                            if (current_mat.channels() == 1 && (base_c == 3 || base_c == 4)) {
                                 std::vector<cv::Mat> planes(base_c, current_mat);
                                 cv::merge(planes, current_mat);
                             } else if ((current_mat.channels() == 3 || current_mat.channels() == 4) && base_c == 1) {
                                 cv::cvtColor(current_mat, current_mat, cv::COLOR_BGR2GRAY);
+                            } else if (current_mat.channels() == 4 && base_c == 3) {
+                                cv::cvtColor(current_mat, current_mat, cv::COLOR_BGRA2BGR);
+                            } else if (current_mat.channels() == 3 && base_c == 4) {
+                                cv::cvtColor(current_mat, current_mat, cv::COLOR_BGR2BGRA);
                             } else if (current_mat.channels() != base_c) {
                                 throw GraphError(GraphErrc::InvalidParameter, "Unsupported channel conversion for image_mixing: " + std::to_string(current_mat.channels()) + " -> " + std::to_string(base_c));
                             }
@@ -361,6 +366,16 @@ NodeOutput& NodeGraph::compute_internal(int node_id,
                 }
             }
         }, *op_opt);
+        } catch (const cv::Exception& e) {
+            throw GraphError(GraphErrc::ComputeError,
+                             "Node " + std::to_string(target_node.id) + " (" + target_node.name + ") failed: " + std::string(e.what()));
+        } catch (const std::exception& e) {
+            throw GraphError(GraphErrc::ComputeError,
+                             "Node " + std::to_string(target_node.id) + " (" + target_node.name + ") failed: " + std::string(e.what()));
+        } catch (...) {
+            throw GraphError(GraphErrc::ComputeError,
+                             "Node " + std::to_string(target_node.id) + " (" + target_node.name + ") failed: unknown exception");
+        }
 
         current_event.execution_end_time = std::chrono::high_resolution_clock::now();
         result_source = "computed";
@@ -481,17 +496,30 @@ NodeOutput& NodeGraph::compute(int node_id, const std::string& cache_precision,
             auto deps = topo_postorder_from(node_id);
             for (int id : deps) {
                 if (nodes.count(id)) {
-                    auto& node_to_clear = nodes.at(id);
-                    if (!node_to_clear.preserved || id == node_id) {
-                        node_to_clear.cached_output.reset();
-                    }
+                    nodes.at(id).cached_output.reset();
                 }
             }
         } catch (const GraphError&) {}
     }
 
     std::unordered_map<int, bool> visiting;
-    auto& result = compute_internal(node_id, cache_precision, visiting, enable_timing, !disable_disk_cache, benchmark_events);
+    // Do not use disk cache when force_recache is requested to avoid stale/corrupt reads
+    bool allow_disk_cache = (!disable_disk_cache) && (!force_recache);
+    NodeOutput* result_ptr = nullptr;
+    try {
+        result_ptr = &compute_internal(node_id, cache_precision, visiting, enable_timing, allow_disk_cache, benchmark_events);
+    } catch (const GraphError&) {
+        throw;
+    } catch (const cv::Exception& e) {
+        const auto& n = nodes.at(node_id);
+        throw GraphError(GraphErrc::ComputeError, "Node " + std::to_string(n.id) + " (" + n.name + ") failed: " + std::string(e.what()));
+    } catch (const std::exception& e) {
+        const auto& n = nodes.at(node_id);
+        throw GraphError(GraphErrc::ComputeError, "Node " + std::to_string(n.id) + " (" + n.name + ") failed: " + std::string(e.what()));
+    } catch (...) {
+        const auto& n = nodes.at(node_id);
+        throw GraphError(GraphErrc::ComputeError, "Node " + std::to_string(n.id) + " (" + n.name + ") failed: unknown exception");
+    }
     
     // 在所有计算结束后，累加总时间
     if (enable_timing) {
@@ -502,7 +530,7 @@ NodeOutput& NodeGraph::compute(int node_id, const std::string& cache_precision,
         timing_results.total_ms = total;
     }
 
-    return result;
+    return *result_ptr;
 }
 
 /**

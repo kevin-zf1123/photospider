@@ -109,7 +109,12 @@ std::optional<Task> GraphRuntime::steal_task(int stealer_id) {
 
     for (int i = 0; i < n - 1; ++i) {
         int victim_id = (start + i) % (n - 1);
-        if (victim_id >= stealer_id) victim_id++; 
+        if (victim_id >= stealer_id) victim_id++;
+
+        if (victim_id < 0 || victim_id >= static_cast<int>(local_queue_mutexes_.size()) ||
+            victim_id >= static_cast<int>(local_task_queues_.size())) {
+            continue;
+        }
 
         std::lock_guard<std::mutex> lock(*local_queue_mutexes_[victim_id]);
         if (!local_task_queues_[victim_id].empty()) {
@@ -133,11 +138,13 @@ void GraphRuntime::run_loop(int thread_id) {
         bool found_task = false;
 
         {
-            std::lock_guard<std::mutex> lock(*local_queue_mutexes_[thread_id]);
-            if (!local_task_queues_[thread_id].empty()) {
-                task = std::move(local_task_queues_[thread_id].back());
-                local_task_queues_[thread_id].pop_back();
-                found_task = true;
+            if (thread_id >= 0 && thread_id < static_cast<int>(local_queue_mutexes_.size())) {
+                std::lock_guard<std::mutex> lock(*local_queue_mutexes_[thread_id]);
+                if (thread_id < static_cast<int>(local_task_queues_.size()) && !local_task_queues_[thread_id].empty()) {
+                    task = std::move(local_task_queues_[thread_id].back());
+                    local_task_queues_[thread_id].pop_back();
+                    found_task = true;
+                }
             }
         }
 
@@ -160,7 +167,16 @@ void GraphRuntime::run_loop(int thread_id) {
         
         if (found_task) {
             ready_task_count_.fetch_sub(1, std::memory_order_release);
-            task(); 
+            try {
+                if (task) {
+                    task();
+                } else {
+                    // Unexpected empty task – surface as exception so the scheduler unwinds safely
+                    set_exception(std::make_exception_ptr(std::runtime_error("GraphRuntime: empty task invoked")));
+                }
+            } catch (...) {
+                set_exception(std::current_exception());
+            }
         } else {
             sleeping_thread_count_.fetch_add(1, std::memory_order_release);
             
@@ -212,6 +228,10 @@ void GraphRuntime::submit_initial_tasks(std::vector<Task>&& tasks, int total_tas
 }
 
 void GraphRuntime::submit_ready_task_any_thread(Task&& task) {
+    if (!task) {
+        // Do not enqueue empty tasks; let producer decide completion semantics
+        return;
+    }
     {
         std::lock_guard<std::mutex> lock(global_queue_mutex_);
         global_task_queue_.push(std::move(task));
@@ -227,6 +247,7 @@ void GraphRuntime::submit_ready_task_from_worker(Task&& task) {
         submit_ready_task_any_thread(std::move(task));
         return;
     }
+    if (!task) return;
     {
         std::lock_guard<std::mutex> lock(*local_queue_mutexes_[worker_id]);
         local_task_queues_[worker_id].push_back(std::move(task));

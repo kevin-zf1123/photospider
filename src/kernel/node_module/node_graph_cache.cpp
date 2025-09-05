@@ -97,34 +97,42 @@ bool NodeGraph::try_load_from_disk_cache(Node& node) {
     auto start_io = std::chrono::high_resolution_clock::now();
     bool loaded = false;
 
-    for (const auto& cache_entry : node.caches) {
-        if (cache_entry.cache_type == "image" && !cache_entry.location.empty()) {
-            fs::path cache_file = node_cache_dir(node.id) / cache_entry.location;
-            fs::path metadata_file = cache_file; 
-            metadata_file.replace_extension(".yml");
+    try {
+        for (const auto& cache_entry : node.caches) {
+            if (cache_entry.cache_type == "image" && !cache_entry.location.empty()) {
+                fs::path cache_file = node_cache_dir(node.id) / cache_entry.location;
+                fs::path metadata_file = cache_file; 
+                metadata_file.replace_extension(".yml");
 
-            if (fs::exists(cache_file) || fs::exists(metadata_file)) {
-                NodeOutput loaded_output;
-                if (fs::exists(cache_file)) {
-                    cv::Mat loaded_mat = cv::imread(cache_file.string(), cv::IMREAD_UNCHANGED);
-                    if (!loaded_mat.empty()) {
-                        cv::Mat float_mat;
-                        double scale = (loaded_mat.depth() == CV_8U) ? 1.0/255.0 : (loaded_mat.depth()==CV_16U ? 1.0/65535.0 : 1.0);
-                        loaded_mat.convertTo(float_mat, CV_32F, scale);
-                        loaded_output.image_buffer = fromCvMat(float_mat);
+                if (fs::exists(cache_file) || fs::exists(metadata_file)) {
+                    NodeOutput loaded_output;
+                    if (fs::exists(cache_file)) {
+                        cv::Mat loaded_mat = cv::imread(cache_file.string(), cv::IMREAD_UNCHANGED);
+                        if (!loaded_mat.empty()) {
+                            cv::Mat float_mat;
+                            double scale = (loaded_mat.depth() == CV_8U) ? 1.0/255.0 : (loaded_mat.depth()==CV_16U ? 1.0/65535.0 : 1.0);
+                            loaded_mat.convertTo(float_mat, CV_32F, scale);
+                            loaded_output.image_buffer = fromCvMat(float_mat);
+                        }
                     }
-                }
-                if (fs::exists(metadata_file)) {
-                    YAML::Node meta = YAML::LoadFile(metadata_file.string());
-                    for(auto it = meta.begin(); it != meta.end(); ++it) {
-                        loaded_output.data[it->first.as<std::string>()] = it->second;
+                    if (fs::exists(metadata_file)) {
+                        YAML::Node meta = YAML::LoadFile(metadata_file.string());
+                        for(auto it = meta.begin(); it != meta.end(); ++it) {
+                            loaded_output.data[it->first.as<std::string>()] = it->second;
+                        }
                     }
+                    node.cached_output = std::move(loaded_output);
+                    loaded = true;
+                    break; 
                 }
-                node.cached_output = std::move(loaded_output);
-                loaded = true;
-                break; 
             }
         }
+    } catch (const cv::Exception& e) {
+        // Gracefully ignore malformed cache image; fall back to compute
+        loaded = false;
+    } catch (const std::exception& e) {
+        // Gracefully ignore malformed cache metadata; fall back to compute
+        loaded = false;
     }
 
     auto end_io = std::chrono::high_resolution_clock::now();

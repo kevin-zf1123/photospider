@@ -104,11 +104,20 @@ bool Kernel::compute(const std::string& name, int node_id, const std::string& ca
         if (parallel) {
             graph.compute_parallel(runtime, node_id, cache_precision, force_recache, enable_timing, disable_disk_cache, benchmark_events);
         } else {
-            auto fut = runtime.post([&](NodeGraph& g){
-                g.compute(node_id, cache_precision, force_recache, enable_timing, disable_disk_cache, benchmark_events);
+            const int id = node_id;
+            const std::string precision = cache_precision;
+            const bool frc = force_recache;
+            const bool timing = enable_timing;
+            const bool disable_dc = disable_disk_cache;
+            auto fut = runtime.post([=](NodeGraph& g){
+                g.compute(id, precision, frc, timing, disable_dc, benchmark_events);
                 return 0;
             });
+            // Await the posted sequential compute job
             fut.get();
+            // If the posted job raised and was captured by GraphRuntime::post, surface it here
+            // by leveraging the scheduler's exception channel.
+            runtime.wait_for_completion();
         }
 
         last_error_.erase(name);
@@ -119,7 +128,7 @@ bool Kernel::compute(const std::string& name, int node_id, const std::string& ca
     } catch (const std::exception& e) {
         std::stringstream ss;
         ss << "std::exception during compute: " << e.what()
-        << " (while computing node " << node_id << ")";
+           << " (while computing node " << node_id << ")";
         last_error_[name] = { GraphErrc::Unknown, ss.str() };
         return false;
     } catch (...) {
@@ -355,26 +364,39 @@ std::optional<std::future<bool>> Kernel::compute_async(const std::string& name, 
         return std::nullopt;
     }
 
-    return it->second->post([&, runtime_ptr = it->second.get()](NodeGraph& g) {
+    // Capture all invocation arguments by value to avoid dangling references when executed asynchronously.
+    const int id = node_id;
+    const std::string precision = cache_precision;
+    const bool frc = force_recache;
+    const bool timing = enable_timing;
+    const bool par = parallel;
+    const bool q = quiet;
+    const bool disable_dc = disable_disk_cache;
+    const std::string name_copy = name;
+    GraphRuntime* const runtime_ptr = it->second.get();
+
+    return it->second->post([=](NodeGraph& g) {
         try {
             g.clear_timing_results();
             bool prev_quiet = g.is_quiet();
-            g.set_quiet(quiet);
+            g.set_quiet(q);
             
-            if (parallel) {
-                g.compute_parallel(*runtime_ptr, node_id, cache_precision, force_recache, enable_timing, disable_disk_cache, benchmark_events);
+            if (par) {
+                g.compute_parallel(*runtime_ptr, id, precision, frc, timing, disable_dc, benchmark_events);
             } else {
-                g.compute(node_id, cache_precision, force_recache, enable_timing, disable_disk_cache, benchmark_events);
+                g.compute(id, precision, frc, timing, disable_dc, benchmark_events);
             }
             
             g.set_quiet(prev_quiet);
-            last_error_.erase(name);
+            last_error_.erase(name_copy);
             return true;
         } catch (const GraphError& ge) {
-            last_error_[name] = { ge.code(), ge.what() };
+            last_error_[name_copy] = { ge.code(), ge.what() };
             return false;
         } catch (const std::exception& e) {
-            last_error_[name] = { GraphErrc::Unknown, e.what() };
+            std::stringstream ss;
+            ss << "std::exception: " << e.what() << " (while computing node " << id << ")";
+            last_error_[name_copy] = { GraphErrc::Unknown, ss.str() };
             return false;
         }
     });
