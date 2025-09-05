@@ -83,11 +83,12 @@ BenchmarkResult BenchmarkService::Run(const std::string& benchmark_dir, const Be
         auto start_total = std::chrono::high_resolution_clock::now();
         
         bool success = svc_.cmd_compute(session_name, target_node_id, "int8", 
-                                        true,  // force (clears memory cache)
-                                        true,  // timing
+                                        true,   // force (clears memory cache)
+                                        true,   // timing
                                         config.execution.parallel,  // parallel
-                                        true,  // quiet
-                                        true,  // [修复] disable_disk_cache = true, 确保测量纯计算性能
+                                        true,   // quiet
+                                        true,   // disable_disk_cache (read)
+                                        false,  // nosave: keep as false here to measure IO if desired; set true to exclude write IO
                                         &single_run_result.events);
 
         auto end_total = std::chrono::high_resolution_clock::now();
