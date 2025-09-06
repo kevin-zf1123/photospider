@@ -272,6 +272,12 @@ void GraphRuntime::dec_graph_tasks_to_complete() {
     }
 }
 
+void GraphRuntime::inc_graph_tasks_to_complete(int delta) {
+    if (delta <= 0) return;
+    // Relaxed is fine; wait_for_completion observes acquire load and CV guards completion.
+    tasks_to_complete_.fetch_add(delta, std::memory_order_relaxed);
+}
+
 void GraphRuntime::wait_for_completion() {
     {
         std::unique_lock<std::mutex> lock(completion_mutex_);

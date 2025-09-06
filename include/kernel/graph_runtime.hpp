@@ -107,6 +107,8 @@ public:
     void set_exception(std::exception_ptr e);
     
     void dec_graph_tasks_to_complete();
+    // Increment outstanding tasks in-flight; used when a node "kickoff" spawns micro-tasks lazily.
+    void inc_graph_tasks_to_complete(int delta);
 
     static int this_worker_id();
 
