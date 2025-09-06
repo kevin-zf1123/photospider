@@ -107,7 +107,6 @@ NodeOutput& NodeGraph::compute_node_no_recurse(int node_id,
                     const int base_h = base_buffer.height;
                     const int base_c = base_buffer.channels;
                     const std::string strategy = as_str(target_node.runtime_parameters, "merge_strategy", "resize");
-
                     normalized_storage.reserve(inputs_ready.size() - 1);
                     for (size_t i = 1; i < inputs_ready.size(); ++i) {
                         const auto& current_buffer = inputs_ready[i]->image_buffer;
@@ -148,8 +147,10 @@ NodeOutput& NodeGraph::compute_node_no_recurse(int node_id,
                 }
 
                 // Infer output shape
-                int out_w = inputs_for_tiling.empty() ? as_int_flexible(target_node.runtime_parameters, "width", 256) : inputs_for_tiling[0]->image_buffer.width;
-                int out_h = inputs_for_tiling.empty() ? as_int_flexible(target_node.runtime_parameters, "height", 256) : inputs_for_tiling[0]->image_buffer.height;
+                int out_w = inputs_for_tiling.empty() ? as_int_flexible(target_node.runtime_parameters, "width", 256)
+                                                      : inputs_for_tiling[0]->image_buffer.width;
+                int out_h = inputs_for_tiling.empty() ? as_int_flexible(target_node.runtime_parameters, "height", 256)
+                                                      : inputs_for_tiling[0]->image_buffer.height;
                 int out_c = inputs_for_tiling.empty() ? 1 : inputs_for_tiling[0]->image_buffer.channels;
                 auto out_t = inputs_for_tiling.empty() ? ps::DataType::FLOAT32 : inputs_for_tiling[0]->image_buffer.type;
 
@@ -167,7 +168,6 @@ NodeOutput& NodeGraph::compute_node_no_recurse(int node_id,
                         task.node = &target_node;
                         task.output_tile.buffer = &ob;
                         task.output_tile.roi = cv::Rect(x, y, std::min(TILE_SIZE, ob.width - x), std::min(TILE_SIZE, ob.height - y));
-
                         const bool needs_halo = (target_node.type == "image_process" && target_node.subtype == "gaussian_blur");
                         for (auto const* in_out : inputs_for_tiling) {
                             ps::Tile in_tile;
@@ -262,9 +262,11 @@ NodeOutput& NodeGraph::compute_parallel(
         std::vector<std::optional<NodeOutput>> temp_results(num_nodes);
         // Pre-resolve ops on main thread to avoid concurrent registry access
         std::vector<std::optional<OpRegistry::OpVariant>> resolved_ops(num_nodes);
+        std::vector<std::optional<OpMetadata>> resolved_meta(num_nodes);
         for (size_t i = 0; i < num_nodes; ++i) {
             const auto& n = nodes.at(execution_order[i]);
             resolved_ops[i] = OpRegistry::instance().find(n.type, n.subtype);
+            resolved_meta[i] = OpRegistry::instance().get_metadata(n.type, n.subtype);
         }
         
         for (size_t i = 0; i < num_nodes; ++i) {
@@ -293,7 +295,7 @@ NodeOutput& NodeGraph::compute_parallel(
             int current_node_idx = i;
 
             auto inner_task = [this, &runtime, &dependency_counters, &dependents_map, &execution_order, &all_tasks,
-                               &id_to_idx, &temp_results, &resolved_ops, current_node_id, current_node_idx,
+                               &id_to_idx, &temp_results, &resolved_ops, &resolved_meta, current_node_id, current_node_idx,
                                cache_precision, enable_timing, disable_disk_cache, benchmark_events, force_recache] () {
                 // 1) Pure compute into temp_results without mutating NodeGraph
                 try {
@@ -331,7 +333,10 @@ NodeOutput& NodeGraph::compute_parallel(
                                 ev.execution_end_time = ev.execution_start_time;
                                 ev.execution_duration_ms = 0.0;
                                 ev.source = "disk_cache";
-                                if (benchmark_events) benchmark_events->push_back(ev);
+                                if (benchmark_events) {
+                                    std::lock_guard lk(timing_mutex_);
+                                    benchmark_events->push_back(ev);
+                                }
                                 {
                                     std::lock_guard lk(timing_mutex_);
                                     timing_results.node_timings.push_back({ target_node.id, target_node.name, 0.0, "disk_cache" });
@@ -385,13 +390,15 @@ NodeOutput& NodeGraph::compute_parallel(
                         node_for_exec.runtime_parameters = runtime_params;
 
                         NodeOutput result;
+                        bool tiled_dispatched = false;
                         try {
                             std::visit([&](auto&& op_func) {
                                 using T = std::decay_t<decltype(op_func)>;
                                 if constexpr (std::is_same_v<T, MonolithicOpFunc>) {
                                     result = op_func(node_for_exec, inputs_ready);
                                 } else if constexpr (std::is_same_v<T, TileOpFunc>) {
-                                    std::vector<NodeOutput> normalized_storage;
+                                    // Build normalized inputs that must outlive tile micro-tasks
+                                    std::vector<NodeOutput> normalized_storage_local;
                                     std::vector<const NodeOutput*> inputs_for_tiling = inputs_ready;
                                     bool is_mixing = (target_node.type == "image_mixing");
                                     if (is_mixing && inputs_ready.size() >= 2) {
@@ -403,7 +410,7 @@ NodeOutput& NodeGraph::compute_parallel(
                                         const int base_h = base_buffer.height;
                                         const int base_c = base_buffer.channels;
                                         const std::string strategy = as_str(node_for_exec.runtime_parameters, "merge_strategy", "resize");
-                                        normalized_storage.reserve(inputs_ready.size() - 1);
+                                        normalized_storage_local.reserve(inputs_ready.size() - 1);
                                         for (size_t i = 1; i < inputs_ready.size(); ++i) {
                                             const auto& current_buffer = inputs_ready[i]->image_buffer;
                                             if (current_buffer.width == 0 || current_buffer.height == 0) {
@@ -437,48 +444,126 @@ NodeOutput& NodeGraph::compute_parallel(
                                                 }
                                             }
                                             NodeOutput tmp; tmp.image_buffer = fromCvMat(current_mat);
-                                            normalized_storage.push_back(std::move(tmp));
-                                            inputs_for_tiling[i] = &normalized_storage.back();
+                                            normalized_storage_local.push_back(std::move(tmp));
+                                            inputs_for_tiling[i] = &normalized_storage_local.back();
                                         }
                                     }
 
-                                    int out_w = inputs_for_tiling.empty() ? as_int_flexible(node_for_exec.runtime_parameters, "width", 256) : inputs_for_tiling[0]->image_buffer.width;
-                                    int out_h = inputs_for_tiling.empty() ? as_int_flexible(node_for_exec.runtime_parameters, "height", 256) : inputs_for_tiling[0]->image_buffer.height;
-                                    int out_c = inputs_for_tiling.empty() ? 1 : inputs_for_tiling[0]->image_buffer.channels;
-                                    auto out_t = inputs_for_tiling.empty() ? ps::DataType::FLOAT32 : inputs_for_tiling[0]->image_buffer.type;
+                                    // Prepare shared store for normalized inputs to extend lifetime
+                                    auto norm_store_sp = std::make_shared<std::vector<NodeOutput>>(std::move(normalized_storage_local));
+                                    // Build input_ptrs that reference shared store for secondary images
+                                    std::vector<const NodeOutput*> input_ptrs = inputs_ready;
+                                    if (is_mixing && inputs_ready.size() >= 2) {
+                                        for (size_t i = 1, k = 0; i < inputs_ready.size(); ++i, ++k) {
+                                            if (k < norm_store_sp->size()) input_ptrs[i] = &(*norm_store_sp)[k];
+                                        }
+                                    }
 
-                                    result = NodeOutput();
-                                    auto& ob = result.image_buffer;
+                                    // Infer output shape
+                                    int out_w = input_ptrs.empty() ? as_int_flexible(node_for_exec.runtime_parameters, "width", 256)
+                                                                   : input_ptrs[0]->image_buffer.width;
+                                    int out_h = input_ptrs.empty() ? as_int_flexible(node_for_exec.runtime_parameters, "height", 256)
+                                                                   : input_ptrs[0]->image_buffer.height;
+                                    int out_c = input_ptrs.empty() ? 1 : input_ptrs[0]->image_buffer.channels;
+                                    auto out_t = input_ptrs.empty() ? ps::DataType::FLOAT32 : input_ptrs[0]->image_buffer.type;
+
+                                    // Allocate output buffer in temp_results (visible for tiles)
+                                    temp_results[current_node_idx] = NodeOutput{};
+                                    auto& ob = temp_results[current_node_idx]->image_buffer;
                                     ob.width = out_w; ob.height = out_h; ob.channels = out_c; ob.type = out_t;
-                                    size_t pix_sz = sizeof(float);
-                                    ob.step = out_w * out_c * pix_sz;
+                                    ob.step = static_cast<size_t>(out_w) * out_c * sizeof(float);
                                     ob.data.reset(new char[ob.step * ob.height], std::default_delete<char[]>());
 
-                                    const int TILE_SIZE = 256, HALO_SIZE = 16;
-                                    for (int y = 0; y < ob.height; y += TILE_SIZE) {
-                                        for (int x = 0; x < ob.width; x += TILE_SIZE) {
-                                            ps::TileTask task;
-                                            task.node = &node_for_exec;
-                                            task.output_tile.buffer = &ob;
-                                            task.output_tile.roi = cv::Rect(x, y, std::min(TILE_SIZE, ob.width - x), std::min(TILE_SIZE, ob.height - y));
-                                            const bool needs_halo = (target_node.type == "image_process" && target_node.subtype == "gaussian_blur");
-                                            for (auto const* in_out : inputs_for_tiling) {
-                                                ps::Tile in_tile;
-                                                in_tile.buffer = const_cast<ps::ImageBuffer*>(&in_out->image_buffer);
-                                                in_tile.roi = needs_halo
-                                                    ? calculate_halo(task.output_tile.roi, HALO_SIZE, {in_out->image_buffer.width, in_out->image_buffer.height})
-                                                    : task.output_tile.roi;
-                                                task.input_tiles.push_back(in_tile);
-                                            }
-                                            execute_tile_task(task, op_func);
+                                    // Tile size from metadata preference
+                                    int tile_size = 128;
+                                    if (resolved_meta[current_node_idx].has_value()) {
+                                        auto pref = resolved_meta[current_node_idx]->tile_preference;
+                                        if (pref == TileSizePreference::MICRO) tile_size = 16;
+                                        else if (pref == TileSizePreference::MACRO) tile_size = 256;
+                                    }
+                                    const bool needs_halo = (node_for_exec.type == "image_process" && node_for_exec.subtype.find("gaussian_blur") != std::string::npos);
+                                    const int HALO_SIZE = 16;
+
+                                    // Plan tiles and spawn micro tasks
+                                    int tiles_x = (out_w + tile_size - 1) / tile_size;
+                                    int tiles_y = (out_h + tile_size - 1) / tile_size;
+                                    int total_tiles = tiles_x * tiles_y;
+                                    runtime.inc_graph_tasks_to_complete(total_tiles);
+                                    auto remaining = std::make_shared<std::atomic<int>>(total_tiles);
+                                    auto start_tp = std::make_shared<std::chrono::high_resolution_clock::time_point>(std::chrono::high_resolution_clock::now());
+
+                                    for (int ty = 0; ty < tiles_y; ++ty) {
+                                        for (int tx = 0; tx < tiles_x; ++tx) {
+                                            int x = tx * tile_size;
+                                            int y = ty * tile_size;
+                                            int w = std::min(tile_size, out_w - x);
+                                            int h = std::min(tile_size, out_h - y);
+                                            Task tile_task = [this, &runtime, &dependents_map, &dependency_counters, &all_tasks, &temp_results,
+                                                              x, y, w, h, needs_halo, HALO_SIZE, input_ptrs, norm_store_sp, remaining, start_tp,
+                                                              current_node_idx, current_node_id, node_for_exec, op_func, benchmark_events, enable_timing]() {
+                                                try {
+                                                    TileTask tt;
+                                                    tt.node = &node_for_exec;
+                                                    tt.output_tile.buffer = &temp_results[current_node_idx]->image_buffer;
+                                                    tt.output_tile.roi = cv::Rect(x, y, w, h);
+                                                    for (auto const* in_out : input_ptrs) {
+                                                        Tile in_tile;
+                                                        in_tile.buffer = const_cast<ImageBuffer*>(&in_out->image_buffer);
+                                                        in_tile.roi = needs_halo ? calculate_halo(tt.output_tile.roi, HALO_SIZE, {in_out->image_buffer.width, in_out->image_buffer.height})
+                                                                                 : tt.output_tile.roi;
+                                                        tt.input_tiles.push_back(std::move(in_tile));
+                                                    }
+                                                    execute_tile_task(tt, op_func);
+                                                    if (remaining->fetch_sub(1, std::memory_order_acq_rel) == 1) {
+                                                        std::atomic_thread_fence(std::memory_order_release);
+                                                        if (enable_timing) {
+                                                            auto end_tp = std::chrono::high_resolution_clock::now();
+                                                            double exec_ms = std::chrono::duration<double, std::milli>(end_tp - *start_tp).count();
+                                                            BenchmarkEvent ev; ev.node_id = current_node_id; ev.op_name = make_key(node_for_exec.type, node_for_exec.subtype);
+                                                            ev.execution_start_time = *start_tp; ev.dependency_start_time = *start_tp; ev.execution_end_time = end_tp; ev.execution_duration_ms = exec_ms; ev.source = "computed";
+                                                            if (benchmark_events) {
+                                                                std::lock_guard lk(timing_mutex_);
+                                                                benchmark_events->push_back(ev);
+                                                            }
+                                                            {
+                                                                std::lock_guard lk(timing_mutex_);
+                                                                timing_results.node_timings.push_back({ current_node_id, nodes.at(current_node_id).name, exec_ms, std::string("computed") });
+                                                            }
+                                                            push_compute_event(current_node_id, nodes.at(current_node_id).name, "computed", exec_ms);
+                                                        } else {
+                                                            push_compute_event(current_node_id, nodes.at(current_node_id).name, "computed", 0.0);
+                                                        }
+                                                        for (int dependent_idx : dependents_map[current_node_idx]) {
+                                                            if (--dependency_counters[dependent_idx] == 0) {
+                                                                runtime.submit_ready_task_from_worker(std::move(all_tasks[dependent_idx]));
+                                                            }
+                                                        }
+                                                    }
+                                                } catch (const std::exception& e) {
+                                                    runtime.set_exception(std::make_exception_ptr(
+                                                        GraphError(GraphErrc::ComputeError, std::string("Tile stage at node ") + std::to_string(current_node_id) + " (" + nodes.at(current_node_id).name + ") failed: " + e.what())
+                                                    ));
+                                                } catch (...) {
+                                                    runtime.set_exception(std::make_exception_ptr(
+                                                        GraphError(GraphErrc::ComputeError, std::string("Tile stage at node ") + std::to_string(current_node_id) + " (" + nodes.at(current_node_id).name + ") failed: unknown exception")
+                                                    ));
+                                                }
+                                                runtime.dec_graph_tasks_to_complete();
+                                            };
+                                            runtime.submit_ready_task_from_worker(std::move(tile_task));
                                         }
                                     }
+                                    tiled_dispatched = true;
                                 }
                             }, *op_opt);
                         } catch (const std::exception& e) {
                             throw;
                         }
 
+                        if (tiled_dispatched) {
+                            // Tiled micro-tasks handle timing and dependent scheduling; skip monolithic finalization.
+                            return;
+                        }
                         temp_results[current_node_idx] = std::move(result);
 
                         if (enable_timing) {
@@ -487,6 +572,7 @@ NodeOutput& NodeGraph::compute_parallel(
                             current_event.source = "computed";
                             current_event.execution_duration_ms = ms;
                             if (benchmark_events) {
+                                std::lock_guard lk(timing_mutex_);
                                 benchmark_events->push_back(current_event);
                             }
                             {
@@ -521,7 +607,7 @@ NodeOutput& NodeGraph::compute_parallel(
                     std::atomic_thread_fence(std::memory_order_release);
                     for (int dependent_idx : dependents_map[current_node_idx]) {
                         if (--dependency_counters[dependent_idx] == 0) {
-                            runtime.submit_ready_task_any_thread(std::move(all_tasks[dependent_idx]));
+                            runtime.submit_ready_task_from_worker(std::move(all_tasks[dependent_idx]));
                         }
                     }
                 } catch (const std::out_of_range& e) {
