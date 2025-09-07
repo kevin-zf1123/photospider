@@ -1,4 +1,4 @@
-compute <id> [flags]
+compute <id|all> [flags]
 
 Compute node(s) with optional flags:
 - force: clear in-memory caches before compute
@@ -7,4 +7,8 @@ Compute node(s) with optional flags:
 - t | -t | timer: print simple timing to console
 - tl | -tl <path>: write detailed timings to a file
 - m | -m | mute: mute node result output
+- nosave | ns: skip saving caches for this compute
 
+Examples:
+- compute 7 parallel t
+- compute all force tl out/timer.yaml

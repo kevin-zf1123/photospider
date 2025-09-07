@@ -33,9 +33,11 @@ static void print_dep_tree_recursive(const NodeGraph& g, std::ostream& os, int n
             for (auto it = m.begin(); it != m.end(); ++it) {
                 indent(lvl);
                 std::string key;
-                try { key = it->first.as<std::string>(); }
+                // Avoid binding references to YAML temporaries returned by iterator proxy
+                YAML::Node key_node = it->first;
+                try { key = key_node.as<std::string>(); }
                 catch(...) { YAML::Emitter ke; ke << it->first; key = ke.c_str(); }
-                const YAML::Node& val = it->second;
+                YAML::Node val = it->second;
                 if (val.IsMap()) {
                     os << key << ":\n";
                     dump_map(val, lvl + 1);
@@ -48,8 +50,9 @@ static void print_dep_tree_recursive(const NodeGraph& g, std::ostream& os, int n
         };
 
         for (auto it = node.parameters.begin(); it != node.parameters.end(); ++it) {
-            const auto& key_node = it->first;
-            const auto& val_node = it->second;
+            // Avoid taking references to potential proxy temporaries from yaml-cpp iterator
+            YAML::Node key_node = it->first;
+            YAML::Node val_node = it->second;
             std::string key;
             try { key = key_node.as<std::string>(); }
             catch(...) { YAML::Emitter ke; ke << key_node; key = ke.c_str(); }
@@ -98,4 +101,3 @@ void NodeGraph::print_dependency_tree(std::ostream& os, int start_node_id, bool 
     std::unordered_set<int> path;
     print_dep_tree_recursive(*this, os, start_node_id, 0, path, show_parameters);
 }
-

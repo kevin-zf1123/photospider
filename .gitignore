@@ -64,5 +64,9 @@ kernel.py
 /sessions/
 .vscode/
 !**/help*.txt
-/util/
+/util/*.py
+/util/*.md
+!/util/*.yaml
+!/util/testcases/**/*.yaml
+!/util/testcases/**/*.txt
 /benchmarks/

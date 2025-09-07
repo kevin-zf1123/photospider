@@ -98,6 +98,7 @@ bool Kernel::compute(const std::string& name, int node_id, const std::string& ca
     if (it == graphs_.end()) return false;
     try {
         auto& runtime = *it->second;
+        if (!runtime.running()) runtime.start();
         auto& graph = runtime.get_nodegraph();
         // set skip-save flag for this compute
         runtime.post([&](NodeGraph& g){ g.set_skip_save_cache(nosave); return 0; }).get();
@@ -294,6 +295,7 @@ std::optional<cv::Mat> Kernel::compute_and_get_image(const std::string& name, in
     try {
         NodeOutput output;
         auto& runtime = *it->second;
+        if (!runtime.running()) runtime.start();
         auto& graph = runtime.get_nodegraph();
 
         if (parallel) {
@@ -383,6 +385,7 @@ std::optional<std::future<bool>> Kernel::compute_async(const std::string& name, 
         // to avoid nested scheduling and potential TLS/worker reentrancy hazards during first-run.
         return std::optional<std::future<bool>>(std::async(std::launch::async, [this, runtime_ptr, id, precision, frc, timing, q, disable_dc, nosave, name_copy, benchmark_events]() {
             try {
+                if (!runtime_ptr->running()) runtime_ptr->start();
                 NodeGraph& g = runtime_ptr->get_nodegraph();
                 if (timing) {
                     g.clear_timing_results();
@@ -408,6 +411,7 @@ std::optional<std::future<bool>> Kernel::compute_async(const std::string& name, 
     }
 
     // Sequential mode: use the runtime's job queue to serialize access with other graph operations.
+    if (!it->second->running()) it->second->start();
     return it->second->post([=](NodeGraph& g) {
         try {
             if (timing) {

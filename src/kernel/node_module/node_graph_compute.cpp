@@ -213,8 +213,8 @@ NodeOutput& NodeGraph::compute_internal(int node_id,
         }
 
         // 5. 查找并派发 Op
-        auto op_opt = OpRegistry::instance().find(
-            target_node.type, target_node.subtype);
+        auto op_opt = OpRegistry::instance().resolve_for_intent(
+            target_node.type, target_node.subtype, ComputeIntent::GlobalHighPrecision);
         if (!op_opt) {
             throw GraphError(GraphErrc::NoOperation,
                 "No op for " + target_node.type +
@@ -386,6 +386,13 @@ NodeOutput& NodeGraph::compute_internal(int node_id,
 
         current_event.execution_end_time = std::chrono::high_resolution_clock::now();
         result_source = "computed";
+        // Phase 1: Mirror legacy cache to HP cache and bump version for old path
+        try {
+            target_node.cached_output_high_precision = *target_node.cached_output;
+            target_node.hp_version++;
+        } catch (...) {
+            // Best-effort; do not fail compute due to mirror issues
+        }
         save_cache_if_configured(target_node, cache_precision);
         visiting[node_id] = false;
 
@@ -538,6 +545,23 @@ NodeOutput& NodeGraph::compute(int node_id, const std::string& cache_precision,
     }
 
     return *result_ptr;
+}
+
+// Phase 1 overload: intent-based entry to sequential compute
+NodeOutput& NodeGraph::compute(ComputeIntent intent,
+                               int node_id, const std::string& cache_precision,
+                               bool force_recache, bool enable_timing,
+                               bool disable_disk_cache,
+                               std::vector<BenchmarkEvent>* benchmark_events,
+                               std::optional<cv::Rect> /*dirty_roi*/) {
+    switch (intent) {
+        case ComputeIntent::GlobalHighPrecision:
+            return compute(node_id, cache_precision, force_recache, enable_timing, disable_disk_cache, benchmark_events);
+        case ComputeIntent::RealTimeUpdate:
+        default:
+            // Phase 1: RT path not yet implemented; fallback to HP path to keep behavior unchanged
+            return compute(node_id, cache_precision, force_recache, enable_timing, disable_disk_cache, benchmark_events);
+    }
 }
 
 /**

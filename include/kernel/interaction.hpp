@@ -49,6 +49,32 @@ public:
 
     // Ops overview (type:subtype -> source path or "built-in")
     std::map<std::string, std::string> cmd_ops_sources() const { return kernel_.plugins().op_sources(); }
+    // Combined ops: collapse monolithic/tiled HP/RT under a single op key; frontends should use this
+    std::vector<std::string> cmd_ops_combined_keys() const {
+        return ps::OpRegistry::instance().get_combined_keys();
+    }
+    std::map<std::string, std::string> cmd_ops_combined_sources() const {
+        std::map<std::string, std::string> out;
+        auto keys = ps::OpRegistry::instance().get_combined_keys();
+        const auto& sources = kernel_.plugins().op_sources();
+        for (const auto& k : keys) {
+            auto it = sources.find(k);
+            if (it != sources.end()) {
+                out[k] = it->second;
+                continue;
+            }
+            // Fallback: if an alias "*_tiled" exists in sources, use its source
+            auto pos = k.rfind(':');
+            if (pos != std::string::npos) {
+                std::string base = k.substr(0, pos + 1);
+                std::string tiled = base + (k.substr(pos + 1) + std::string("_tiled"));
+                auto it2 = sources.find(tiled);
+                if (it2 != sources.end()) { out[k] = it2->second; continue; }
+            }
+            out[k] = "built-in"; // default when unknown
+        }
+        return out;
+    }
 
     // IO / cache / traversal / printing
     bool cmd_reload_yaml(const std::string& graph, const std::string& yaml_path) { return kernel_.reload_graph_yaml(graph, yaml_path); }

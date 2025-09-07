@@ -100,11 +100,25 @@ public:
                         bool force_recache = false, bool enable_timing = false,
                         bool disable_disk_cache = false,
                         std::vector<BenchmarkEvent>* benchmark_events = nullptr);
+    // Phase 1: Intent-driven overload (keeps old API intact)
+    NodeOutput& compute(ComputeIntent intent,
+                        int node_id, const std::string& cache_precision,
+                        bool force_recache = false, bool enable_timing = false,
+                        bool disable_disk_cache = false,
+                        std::vector<BenchmarkEvent>* benchmark_events = nullptr,
+                        std::optional<cv::Rect> dirty_roi = std::nullopt);
 
     NodeOutput& compute_parallel(GraphRuntime& runtime, int node_id, const std::string& cache_precision,
                                  bool force_recache = false, bool enable_timing = false,
                                  bool disable_disk_cache = false,
                                  std::vector<BenchmarkEvent>* benchmark_events = nullptr);
+    // Phase 1: Intent-driven overload (keeps old API intact)
+    NodeOutput& compute_parallel(GraphRuntime& runtime, ComputeIntent intent,
+                                 int node_id, const std::string& cache_precision,
+                                 bool force_recache = false, bool enable_timing = false,
+                                 bool disable_disk_cache = false,
+                                 std::vector<BenchmarkEvent>* benchmark_events = nullptr,
+                                 std::optional<cv::Rect> dirty_roi = std::nullopt);
     // Used by parallel scheduler: compute a single node assuming its dependencies are ready.
     NodeOutput& compute_node_no_recurse(int node_id, const std::string& cache_precision,
                                         bool enable_timing, bool allow_disk_cache,

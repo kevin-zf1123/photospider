@@ -32,6 +32,8 @@ namespace ps {
 
 using Task = std::function<void()>;
 
+enum class TaskPriority { Normal, High };
+
 class GraphRuntime; // 前向声明
 
 struct TaskGraph {
@@ -66,24 +68,18 @@ public:
         using Ret = decltype(fn(std::declval<NodeGraph&>()));
         auto task = std::make_shared<std::packaged_task<Ret()>>(
             [this, f = std::forward<Fn>(fn)](){ 
-                try {
-                    if constexpr (!std::is_void_v<Ret>) {
-                        return f(graph_); 
-                    } else {
-                        f(graph_);
-                    }
-                } catch(...) {
-                    set_exception(std::current_exception());
-                }
                 if constexpr (!std::is_void_v<Ret>) {
-                    return Ret{};
+                    return f(graph_);
+                } else {
+                    f(graph_);
                 }
             }
         );
         std::future<Ret> fut = task->get_future();
         {
-            std::lock_guard<std::mutex> lk(global_queue_mutex_);
-            global_task_queue_.push([task]{ (*task)(); });
+            std::lock_guard<std::mutex> lk(global_queues_mutex_);
+            normal_priority_queue_.push([task]{ (*task)(); });
+            normal_enqueued_.fetch_add(1, std::memory_order_relaxed);
             ready_task_count_.fetch_add(1, std::memory_order_release);
         }
         if (sleeping_thread_count_.load(std::memory_order_acquire) > 0) {
@@ -100,9 +96,9 @@ public:
     NodeGraph& get_nodegraph() { return graph_; }
     
     // [核心修改] 任务提交与执行接口
-    void submit_initial_tasks(std::vector<Task>&& tasks, int total_task_count);
-    void submit_ready_task_from_worker(Task&& task);
-    void submit_ready_task_any_thread(Task&& task);
+    void submit_initial_tasks(std::vector<Task>&& tasks, int total_task_count, TaskPriority priority = TaskPriority::Normal);
+    void submit_ready_task_from_worker(Task&& task, TaskPriority priority = TaskPriority::Normal);
+    void submit_ready_task_any_thread(Task&& task, TaskPriority priority = TaskPriority::Normal);
     void wait_for_completion();
     void set_exception(std::exception_ptr e);
     
@@ -128,11 +124,13 @@ private:
     unsigned int num_workers_{0};
     std::atomic<bool> running_{false};
 
-    std::vector<std::deque<Task>> local_task_queues_;
+    std::vector<std::deque<Task>> local_task_queues_; // normal priority local queues
     std::vector<std::unique_ptr<std::mutex>> local_queue_mutexes_;
     
-    std::queue<Task> global_task_queue_;
-    std::mutex global_queue_mutex_;
+    // Phase 1: dual-priority global queues
+    std::queue<Task> high_priority_queue_;
+    std::queue<Task> normal_priority_queue_;
+    std::mutex global_queues_mutex_;
     std::condition_variable cv_task_available_;
 
     std::atomic<int> ready_task_count_{0};
@@ -150,6 +148,12 @@ private:
 
     struct GpuContext;
     std::unique_ptr<GpuContext> gpu_context_;
+
+    // Minimal metrics for priority effectiveness (Phase 1 observability)
+    std::atomic<uint64_t> high_enqueued_{0};
+    std::atomic<uint64_t> normal_enqueued_{0};
+    std::atomic<uint64_t> high_executed_{0};
+    std::atomic<uint64_t> normal_executed_{0};
 };
 
 } // namespace ps

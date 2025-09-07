@@ -1,0 +1,5 @@
+close bench_metal_cpu
+load bench_metal_cpu util/bench_metal_cpu.yaml
+cc
+
+compute all t tl parallel nosave m

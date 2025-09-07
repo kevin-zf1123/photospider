@@ -1,0 +1,420 @@
+# FILE: 4.yaml
+- id: 0
+  name: "src_kernel"
+  type: "image_source"
+  subtype: "path"
+  parameters:
+    path: "assets/differential_kernel.tif"
+- id: 1
+  name: perlin_1
+  type: "image_generator"
+  subtype: "perlin_noise"
+  parameters:
+    grid_size: 1
+    width: 512
+    height: 512
+  caches:
+    - { cache_type: "image", location: "perlin_1.png" }
+- id: 2 
+  name: perlin_2
+  type: "image_generator"
+  subtype: "perlin_noise"
+  parameters:
+    grid_size: 2
+    width: 512
+    height: 512
+  caches:
+    - { cache_type: "image", location: "perlin_2.png" }
+- id: 3
+  name: perlin_3
+  type: "image_generator"
+  subtype: "perlin_noise"
+  parameters:
+    grid_size: 4
+    width: 512
+    height: 512
+  caches: 
+    - { cache_type: "image", location: "perlin_3.png" }
+- id: 4
+  name: perlin_4
+  type: "image_generator"
+  subtype: "perlin_noise"
+  parameters:
+    grid_size: 8
+    width: 512
+    height: 512
+  caches: 
+    - { cache_type: "image", location: "perlin_4.png" }
+- id: 5
+  name: perlin_5
+  type: "image_generator"
+  subtype: "perlin_noise"
+  parameters:
+    grid_size: 16
+    width: 512
+    height: 512
+  caches: 
+    - { cache_type: "image", location: "perlin_5.png" }
+- id: 6
+  name: perlin_6
+  type: "image_generator"
+  subtype: "perlin_noise"
+  parameters:
+    grid_size: 32
+    width: 512
+    height: 512
+  caches: 
+    - { cache_type: "image", location: "perlin_6.png" }
+
+# --- Block 1: Initial Processing (Grid Size 1) ---
+- id: 11
+  name: grad_1
+  type: "image_process"
+  subtype: "convolve"
+  parameters:
+    absolute: true
+    horizontal_and_vertical: true
+  image_inputs:
+  - { from_node_id: 1 }
+  - { from_node_id: 0 }
+  caches:
+  - { cache_type: "image", location: "grad_1.png" }
+- id: 12
+  name: curve_1
+  type: "image_process"
+  subtype: "curve_transform"
+  image_inputs:
+  - { from_node_id: 11 }
+  parameters:
+    k: 5
+  caches:
+  - { cache_type: "image", location: "curve_1.png" }
+- id: 13
+  name: multiply_1
+  type: "image_mixing"
+  subtype: "multiply"
+  image_inputs:
+  - { from_node_id: 1 }
+  - { from_node_id: 12 }
+  caches:
+  - { cache_type: "image", location: "weighted_1.png" }
+
+# --- Block 2: Processing (Grid Size 2) ---
+- id: 14
+  name: grad_of_multiply_1
+  type: "image_process"
+  subtype: "convolve"
+  parameters: { absolute: true, horizontal_and_vertical: true }
+  image_inputs:
+  - { from_node_id: 13 }
+  - { from_node_id: 0 }
+  caches:
+  - { cache_type: "image", location: "grad_of_multiply_1.png" }
+- id: 15
+  name: grad_of_perlin_2
+  type: "image_process"
+  subtype: "convolve"
+  parameters: { absolute: true, horizontal_and_vertical: true }
+  image_inputs:
+  - { from_node_id: 2 }
+  - { from_node_id: 0 }
+  caches:
+  - { cache_type: "image", location: "grad_of_perlin_2.png" }
+- id: 16
+  name: added_gradients_1
+  type: "image_mixing"
+  subtype: "add_weighted"
+  image_inputs:
+  - { from_node_id: 14 }
+  - { from_node_id: 15 }
+  parameters: { alpha: 1, beta: 0.5, gamma: 0 } # MODIFIED: Compensate Perlin gradient
+  caches:
+  - { cache_type: "image", location: "added_gradients_1.png" }
+- id: 23
+  name: curve_2
+  type: "image_process"
+  subtype: "curve_transform"
+  image_inputs:
+  - { from_node_id: 16 }
+  parameters:
+    k: 5
+  caches:
+  - { cache_type: "image", location: "curve_2.png" }
+- id: 24
+  name: multiply_2
+  type: "image_mixing"
+  subtype: "multiply"
+  image_inputs:
+  - { from_node_id: 2 }
+  - { from_node_id: 23 }
+  caches:
+  - { cache_type: "image", location: "weighted_2.png" }
+- id: 25
+  name: add_2
+  type: "image_mixing"
+  subtype: "add_weighted"
+  image_inputs:
+  - { from_node_id: 24 }
+  - { from_node_id: 13 }
+  parameters:
+    alpha: 0.25
+    beta: 0.5
+    gamma: 0
+  caches:
+  - { cache_type: "image", location: "merged_2.png" }
+
+# --- Block 3: Processing (Grid Size 4) ---
+- id: 26
+  name: grad_of_add_2
+  type: "image_process"
+  subtype: "convolve"
+  parameters: { absolute: true, horizontal_and_vertical: true }
+  image_inputs:
+  - { from_node_id: 25 }
+  - { from_node_id: 0 }
+  caches:
+  - { cache_type: "image", location: "grad_of_add_2.png" }
+- id: 27
+  name: grad_of_perlin_3
+  type: "image_process"
+  subtype: "convolve"
+  parameters: { absolute: true, horizontal_and_vertical: true }
+  image_inputs:
+  - { from_node_id: 3 }
+  - { from_node_id: 0 }
+  caches:
+  - { cache_type: "image", location: "grad_of_perlin_3.png" }
+- id: 28
+  name: added_gradients_2
+  type: "image_mixing"
+  subtype: "add_weighted"
+  image_inputs:
+  - { from_node_id: 26 }
+  - { from_node_id: 27 }
+  parameters: { alpha: 1, beta: 0.25, gamma: 0 } # MODIFIED: Compensate Perlin gradient
+  caches:
+  - { cache_type: "image", location: "added_gradients_2.png" }
+- id: 33
+  name: curve_3
+  type: "image_process"
+  subtype: "curve_transform"
+  image_inputs:
+  - { from_node_id: 28 }
+  parameters:
+    k: 5
+  caches:
+  - { cache_type: "image", location: "curve_3.png" }
+- id: 34
+  name: multiply_3
+  type: "image_mixing"
+  subtype: "multiply"
+  image_inputs:
+  - { from_node_id: 3 }
+  - { from_node_id: 33 }
+  caches:
+  - { cache_type: "image", location: "weighted_3.png" }
+- id: 35
+  name: add_3
+  type: "image_mixing"
+  subtype: "add_weighted"
+  image_inputs:
+  - { from_node_id: 34 }
+  - { from_node_id: 25 }
+  parameters:
+    alpha: 0.125
+    beta: 1
+    gamma: 0
+  caches:
+  - { cache_type: "image", location: "merged_3.png" }
+
+# --- Block 4: Processing (Grid Size 8) ---
+- id: 41
+  name: grad_of_add_3
+  type: "image_process"
+  subtype: "convolve"
+  parameters: { absolute: true, horizontal_and_vertical: true }
+  image_inputs:
+  - { from_node_id: 35 }
+  - { from_node_id: 0 }
+  caches:
+  - { cache_type: "image", location: "grad_of_add_3.png" }
+- id: 42
+  name: grad_of_perlin_4
+  type: "image_process"
+  subtype: "convolve"
+  parameters: { absolute: true, horizontal_and_vertical: true }
+  image_inputs:
+  - { from_node_id: 4 }
+  - { from_node_id: 0 }
+  caches:
+  - { cache_type: "image", location: "grad_of_perlin_4.png" }
+- id: 43
+  name: added_gradients_3
+  type: "image_mixing"
+  subtype: "add_weighted"
+  image_inputs:
+  - { from_node_id: 41 }
+  - { from_node_id: 42 }
+  parameters: { alpha: 1, beta: 0.125, gamma: 0 } # MODIFIED: Compensate Perlin gradient
+  caches:
+  - { cache_type: "image", location: "added_gradients_3.png" }
+- id: 44
+  name: curve_4
+  type: "image_process"
+  subtype: "curve_transform"
+  image_inputs:
+  - { from_node_id: 43 }
+  parameters:
+    k: 5
+  caches:
+  - { cache_type: "image", location: "curve_4.png" }
+- id: 45
+  name: multiply_4
+  type: "image_mixing"
+  subtype: "multiply"
+  image_inputs:
+  - { from_node_id: 4 }
+  - { from_node_id: 44 }
+  caches:
+  - { cache_type: "image", location: "weighted_4.png" }
+- id: 46
+  name: add_4
+  type: "image_mixing"
+  subtype: "add_weighted"
+  image_inputs:
+  - { from_node_id: 45 }
+  - { from_node_id: 35 }
+  parameters:
+    alpha: 0.0625
+    beta: 1
+    gamma: 0
+  caches:
+  - { cache_type: "image", location: "merged_4.png" }
+
+# --- Block 5: Processing (Grid Size 16) ---
+- id: 51
+  name: grad_of_add_4
+  type: "image_process"
+  subtype: "convolve"
+  parameters: { absolute: true, horizontal_and_vertical: true }
+  image_inputs:
+  - { from_node_id: 46 }
+  - { from_node_id: 0 }
+  caches:
+  - { cache_type: "image", location: "grad_of_add_4.png" }
+- id: 52
+  name: grad_of_perlin_5
+  type: "image_process"
+  subtype: "convolve"
+  parameters: { absolute: true, horizontal_and_vertical: true }
+  image_inputs:
+  - { from_node_id: 5 }
+  - { from_node_id: 0 }
+  caches:
+  - { cache_type: "image", location: "grad_of_perlin_5.png" }
+- id: 53
+  name: added_gradients_4
+  type: "image_mixing"
+  subtype: "add_weighted"
+  image_inputs:
+  - { from_node_id: 51 }
+  - { from_node_id: 52 }
+  parameters: { alpha: 1, beta: 0.0625, gamma: 0 } # MODIFIED: Compensate Perlin gradient
+  caches:
+  - { cache_type: "image", location: "added_gradients_4.png" }
+- id: 54
+  name: curve_5
+  type: "image_process"
+  subtype: "curve_transform"
+  image_inputs:
+  - { from_node_id: 53 }
+  parameters:
+    k: 5
+  caches:
+  - { cache_type: "image", location: "curve_5.png" }
+- id: 55
+  name: multiply_5
+  type: "image_mixing"
+  subtype: "multiply"
+  image_inputs:
+  - { from_node_id: 5 }
+  - { from_node_id: 54 }
+  caches:
+  - { cache_type: "image", location: "weighted_5.png" }
+- id: 56
+  name: add_5
+  type: "image_mixing"
+  subtype: "add_weighted"
+  image_inputs:
+  - { from_node_id: 55 }
+  - { from_node_id: 46 }
+  parameters:
+    alpha: 0.03125
+    beta: 1
+    gamma: 0
+  caches:
+  - { cache_type: "image", location: "merged_5.png" }
+
+# --- Block 6: Final Processing (Grid Size 32) ---
+- id: 61
+  name: grad_of_add_5
+  type: "image_process"
+  subtype: "convolve"
+  parameters: { absolute: true, horizontal_and_vertical: true }
+  image_inputs:
+  - { from_node_id: 56 }
+  - { from_node_id: 0 }
+  caches:
+  - { cache_type: "image", location: "grad_of_add_5.png" }
+- id: 62
+  name: grad_of_perlin_6
+  type: "image_process"
+  subtype: "convolve"
+  parameters: { absolute: true, horizontal_and_vertical: true }
+  image_inputs:
+  - { from_node_id: 6 }
+  - { from_node_id: 0 }
+  caches:
+  - { cache_type: "image", location: "grad_of_perlin_6.png" }
+- id: 63
+  name: added_gradients_5
+  type: "image_mixing"
+  subtype: "add_weighted"
+  image_inputs:
+  - { from_node_id: 61 }
+  - { from_node_id: 62 }
+  parameters: { alpha: 1, beta: 0.03125, gamma: 0 } # MODIFIED: Compensate Perlin gradient
+  caches:
+  - { cache_type: "image", location: "added_gradients_5.png" }
+- id: 64
+  name: curve_6
+  type: "image_process"
+  subtype: "curve_transform"
+  image_inputs:
+  - { from_node_id: 63 }
+  parameters:
+    k: 5
+  caches:
+  - { cache_type: "image", location: "curve_6.png" }
+- id: 65
+  name: multiply_6
+  type: "image_mixing"
+  subtype: "multiply"
+  image_inputs:
+  - { from_node_id: 6 }
+  - { from_node_id: 64 }
+  caches:
+  - { cache_type: "image", location: "weighted_6.png" }
+- id: 66
+  name: add_6
+  type: "image_mixing"
+  subtype: "add_weighted"
+  image_inputs:
+  - { from_node_id: 65 }
+  - { from_node_id: 56 }
+  parameters:
+    alpha: 0.015625
+    beta: 1
+    gamma: 0
+  caches:
+  - { cache_type: "image", location: "final_output.png" }

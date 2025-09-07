@@ -1,0 +1,40 @@
+clear
+
+# List graphs and ops before loading
+graphs
+ops all
+
+# Load test graph and prepare caches
+close cli_full
+load cli_full util/testcases/full_ops.yaml
+graphs
+print all full
+traversal f md
+cc
+
+# Successful computes (valid cases)
+compute 7 t tl parallel nosave m
+compute 5 t tl parallel nosave m
+compute 11 t tl parallel nosave m
+compute 16 t tl parallel nosave m
+compute 14 t tl parallel nosave m
+
+# Error cases (should print errors but continue)
+compute 4 t m        # add_weighted with only one input
+compute 6 t m        # gaussian_blur without input
+compute 8 t m        # resize with negative width
+compute 9 t m        # resize with zero width
+compute 10 t m       # convolve missing kernel
+compute 12 t m       # extract_channel invalid channel on 1ch image
+compute 17 t m       # crop with negative width
+
+# Save and export
+save 7 util/testcases/full_out_blur.png
+output util/testcases/full_ops_out.yaml
+
+# Test sourcing another script
+source util/testcases/full_cli_part.txt
+
+# Cleanup
+close cli_full
+

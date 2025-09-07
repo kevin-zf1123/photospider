@@ -1,0 +1,89 @@
+# FILE: benchmark_noise.yaml
+#
+# A script to benchmark CPU vs. Metal Perlin noise generation at various resolutions.
+# To run: ./build/graph_cli --read benchmark_noise.yaml --repl
+# In REPL: compute all force tl benchmark_results.yaml
+
+# --- 256x256 ---
+- id: 10
+  name: "perlin_cpu_256"
+  type: "image_generator"
+  subtype: "perlin_noise" # The original CPU version
+  parameters: { width: 256, height: 256, grid_size: 8 }
+  caches: [ { cache_type: "image", location: "perlin_cpu_256.png" } ]
+- id: 11
+  name: "perlin_metal_256"
+  type: "image_generator"
+  subtype: "perlin_noise_metal" # The new Metal version
+  parameters: { width: 256, height: 256, grid_size: 8 }
+  caches: [ { cache_type: "image", location: "perlin_metal_256.png" } ]
+
+# --- 512x512 ---
+- id: 20
+  name: "perlin_cpu_512"
+  type: "image_generator"
+  subtype: "perlin_noise"
+  parameters: { width: 512, height: 512, grid_size: 8 }
+  caches: [ { cache_type: "image", location: "perlin_cpu_512.png" } ]
+- id: 21
+  name: "perlin_metal_512"
+  type: "image_generator"
+  subtype: "perlin_noise_metal"
+  parameters: { width: 512, height: 512, grid_size: 8 }
+  caches: [ { cache_type: "image", location: "perlin_metal_512.png" } ]
+
+# --- 1024x1024 ---
+- id: 30
+  name: "perlin_cpu_1024"
+  type: "image_generator"
+  subtype: "perlin_noise"
+  parameters: { width: 1024, height: 1024, grid_size: 8 }
+  caches: [ { cache_type: "image", location: "perlin_cpu_1024.png" } ]
+- id: 31
+  name: "perlin_metal_1024"
+  type: "image_generator"
+  subtype: "perlin_noise_metal"
+  parameters: { width: 1024, height: 1024, grid_size: 8 }
+  caches: [ { cache_type: "image", location: "perlin_metal_1024.png" } ]
+
+# --- 2048x2048 ---
+- id: 40
+  name: "perlin_cpu_2048"
+  type: "image_generator"
+  subtype: "perlin_noise"
+  parameters: { width: 2048, height: 2048, grid_size: 8 }
+  caches: [ { cache_type: "image", location: "perlin_cpu_2048.png" } ]
+- id: 41
+  name: "perlin_metal_2048"
+  type: "image_generator"
+  subtype: "perlin_noise_metal"
+  parameters: { width: 2048, height: 2048, grid_size: 8 }
+  caches: [ { cache_type: "image", location: "perlin_metal_2048.png" } ]
+
+# --- 4096x4096 ---
+- id: 50
+  name: "perlin_cpu_4096"
+  type: "image_generator"
+  subtype: "perlin_noise"
+  parameters: { width: 4096, height: 4096, grid_size: 8 }
+  caches: [ { cache_type: "image", location: "perlin_cpu_4096.png" } ]
+- id: 51
+  name: "perlin_metal_4096"
+  type: "image_generator"
+  subtype: "perlin_noise_metal"
+  parameters: { width: 4096, height: 4096, grid_size: 8 }
+  caches: [ { cache_type: "image", location: "perlin_metal_4096.png" } ]
+
+#  --- 8192x8192 ---
+- id: 60
+  name: "perlin_cpu_8192"
+  type: "image_generator"
+  subtype: "perlin_noise"
+  parameters: { width: 8192, height: 8192, grid_size: 8 }
+  caches: [ { cache_type: "image", location: "perlin_cpu_8192.png" } ]
+- id: 61
+  name: "perlin_metal_8192"
+  type: "image_generator"
+  subtype: "perlin_noise_metal"
+  parameters: { width: 8192, height: 8192, grid_size: 8 }
+  caches: [ { cache_type: "image", location: "perlin_metal_8192.png" } ]

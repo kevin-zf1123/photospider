@@ -1,0 +1,15 @@
+clear
+
+close 4
+load 4 util/4.yaml
+cc
+
+compute all t tl parallel nosave m
+
+close 5
+load 5 util/5.yaml
+cc
+
+compute all t tl parallel nosave m
+
+

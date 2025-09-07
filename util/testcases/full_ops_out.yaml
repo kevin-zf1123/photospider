@@ -1,0 +1,128 @@
+- id: 1
+  name: gen_gray_64x64_1ch
+  type: image_generator
+  subtype: constant
+  parameters: {width: 64, height: 64, value: 128, channels: 1}
+  caches:
+    - cache_type: image
+      location: gen_gray_64x64_1ch.png
+- id: 2
+  name: gen_gray_32x32_3ch
+  type: image_generator
+  subtype: constant
+  parameters: {width: 32, height: 32, value: 64, channels: 3}
+  caches:
+    - cache_type: image
+      location: gen_gray_32x32_3ch.png
+- id: 3
+  name: perlin_64x64
+  type: image_generator
+  subtype: perlin_noise
+  parameters: {width: 64, height: 64, grid_size: 8}
+  caches:
+    - cache_type: image
+      location: perlin_64x64.png
+- id: 4
+  name: add_weighted_one_input_only
+  type: image_mixing
+  subtype: add_weighted
+  image_inputs:
+    - from_node_id: 1
+  parameters: {alpha: 0.7, beta: 0.3, gamma: 0.0, merge_strategy: crop}
+- id: 5
+  name: add_weighted_mixed_sizes_channels
+  type: image_mixing
+  subtype: add_weighted
+  image_inputs:
+    - from_node_id: 1
+    - from_node_id: 2
+  parameters:
+    alpha: 0.5
+    beta: 0.5
+    gamma: 0.0
+    merge_strategy: crop
+  caches:
+    - cache_type: image
+      location: add_weighted_out.png
+- id: 6
+  name: gaussian_blur_no_input
+  type: image_process
+  subtype: gaussian_blur
+  parameters: {ksize: 7, sigmaX: 2}
+- id: 7
+  name: gaussian_blur_ok
+  type: image_process
+  subtype: gaussian_blur
+  image_inputs:
+    - from_node_id: 3
+  parameters: {ksize: 9, sigmaX: 1.5}
+  caches:
+    - cache_type: image
+      location: blur_ok.png
+- id: 8
+  name: resize_negative_width
+  type: image_process
+  subtype: resize
+  image_inputs:
+    - from_node_id: 1
+  parameters: {width: -1, height: 32, interpolation: linear}
+- id: 9
+  name: resize_zero_dimensions
+  type: image_process
+  subtype: resize
+  image_inputs:
+    - from_node_id: 1
+  parameters: {width: 0, height: 0, interpolation: nearest}
+- id: 10
+  name: convolve_missing_kernel
+  type: image_process
+  subtype: convolve
+  image_inputs:
+    - from_node_id: 3
+  parameters: {padding: replicate}
+- id: 11
+  name: convolve_ok
+  type: image_process
+  subtype: convolve
+  image_inputs:
+    - from_node_id: 3
+    - from_node_id: 2
+  parameters: {padding: replicate}
+  caches:
+    - cache_type: image
+      location: convolve_ok.png
+- id: 12
+  name: extract_channel_invalid_on_1ch
+  type: image_process
+  subtype: extract_channel
+  image_inputs:
+    - from_node_id: 1
+  parameters: {channel: 3}
+- id: 14
+  name: gen_with_input_spurious
+  type: image_generator
+  subtype: constant
+  image_inputs:
+    - from_node_id: 1
+  parameters: {width: 16, height: 16, value: 200, channels: 4}
+  caches:
+    - cache_type: image
+      location: gen_with_input_spurious.png
+- id: 16
+  name: get_dimensions
+  type: analyzer
+  subtype: get_dimensions
+  image_inputs:
+    - from_node_id: 2
+  parameters:
+    {}
+  caches:
+    - cache_type: image
+      location: dims.png
+- id: 17
+  name: crop_negative
+  type: image_process
+  subtype: crop
+  image_inputs:
+    - from_node_id: 1
+  parameters: {x: 0, y: 0, width: -10, height: 20}

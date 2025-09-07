@@ -1,0 +1,14 @@
+clear
+
+close test_cpu_512
+load test_cpu_512 util/testcases/metal_cpu_perlin/512/perlin_cpu_512.yaml
+cc
+
+
+compute all t tl parallel nosave m
+
+close test_metal_512
+load test_metal_512 util/testcases/metal_cpu_perlin/512/perlin_metal_512.yaml
+cc
+
+compute all t tl parallel nosave m

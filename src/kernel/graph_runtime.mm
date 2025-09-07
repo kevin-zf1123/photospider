@@ -72,6 +72,10 @@ void GraphRuntime::start() {
     ready_task_count_.store(0, std::memory_order_relaxed);
     sleeping_thread_count_.store(0, std::memory_order_relaxed);
     tasks_to_complete_.store(0, std::memory_order_relaxed);
+    high_enqueued_.store(0, std::memory_order_relaxed);
+    normal_enqueued_.store(0, std::memory_order_relaxed);
+    high_executed_.store(0, std::memory_order_relaxed);
+    normal_executed_.store(0, std::memory_order_relaxed);
     running_ = true;
 
     num_workers_ = std::max(1u, std::thread::hardware_concurrency());
@@ -104,8 +108,9 @@ void GraphRuntime::stop() {
     local_queue_mutexes_.clear();
     // Drain any pending global tasks to avoid dangling function targets after shutdown
     {
-        std::lock_guard<std::mutex> lock(global_queue_mutex_);
-        while (!global_task_queue_.empty()) global_task_queue_.pop();
+        std::lock_guard<std::mutex> lock(global_queues_mutex_);
+        while (!high_priority_queue_.empty()) high_priority_queue_.pop();
+        while (!normal_priority_queue_.empty()) normal_priority_queue_.pop();
     }
 }
 
@@ -139,38 +144,63 @@ void GraphRuntime::run_loop(int thread_id) {
     tls_worker_id_ = thread_id;
 
     while (running_) {
+        // If an exception was raised by a submitted batch, park the worker until
+        // the exception state is cleared (e.g., by wait_for_completion or a fresh
+        // submission resetting has_exception_ in submit_initial_tasks), or until
+        // the runtime is stopped.
         if (has_exception_.load(std::memory_order_acquire)) {
-            return;
+            std::unique_lock<std::mutex> lock(global_queues_mutex_);
+            cv_task_available_.wait(lock, [&]{
+                return !has_exception_.load(std::memory_order_acquire) || !running_;
+            });
+            continue;
         }
 
         Task task;
         bool found_task = false;
 
+        // 1) Try high priority global queue first (preemptive)
         {
+            std::lock_guard<std::mutex> lock(global_queues_mutex_);
+            if (!high_priority_queue_.empty()) {
+                task = std::move(high_priority_queue_.front());
+                high_priority_queue_.pop();
+                found_task = true;
+                high_executed_.fetch_add(1, std::memory_order_relaxed);
+            }
+        }
+
+        // 2) Then try local normal queue (LIFO)
+        if (!found_task) {
             if (thread_id >= 0 && thread_id < static_cast<int>(local_queue_mutexes_.size())) {
                 std::lock_guard<std::mutex> lock(*local_queue_mutexes_[thread_id]);
                 if (thread_id < static_cast<int>(local_task_queues_.size()) && !local_task_queues_[thread_id].empty()) {
                     task = std::move(local_task_queues_[thread_id].back());
                     local_task_queues_[thread_id].pop_back();
                     found_task = true;
+                    normal_executed_.fetch_add(1, std::memory_order_relaxed);
                 }
             }
         }
 
+        // 3) Then try global normal queue (FIFO)
+        if (!found_task) {
+            std::lock_guard<std::mutex> lock(global_queues_mutex_);
+            if (!normal_priority_queue_.empty()) {
+                task = std::move(normal_priority_queue_.front());
+                normal_priority_queue_.pop();
+                found_task = true;
+                normal_executed_.fetch_add(1, std::memory_order_relaxed);
+            }
+        }
+
+        // 4) Finally, attempt to steal from other workers
         if (!found_task) {
             auto stolen_task = steal_task(thread_id);
             if (stolen_task) {
                 task = std::move(*stolen_task);
                 found_task = true;
-            }
-        }
-
-        if (!found_task) {
-            std::lock_guard<std::mutex> lock(global_queue_mutex_);
-            if (!global_task_queue_.empty()) {
-                task = std::move(global_task_queue_.front());
-                global_task_queue_.pop();
-                found_task = true;
+                normal_executed_.fetch_add(1, std::memory_order_relaxed);
             }
         }
         
@@ -189,7 +219,7 @@ void GraphRuntime::run_loop(int thread_id) {
         } else {
             sleeping_thread_count_.fetch_add(1, std::memory_order_release);
             
-            std::unique_lock<std::mutex> lock(global_queue_mutex_);
+            std::unique_lock<std::mutex> lock(global_queues_mutex_);
 
             if (ready_task_count_.load(std::memory_order_acquire) > 0) {
                 sleeping_thread_count_.fetch_sub(1, std::memory_order_relaxed);
@@ -197,7 +227,7 @@ void GraphRuntime::run_loop(int thread_id) {
             }
             
             cv_task_available_.wait(lock, [&]{ 
-                return ready_task_count_.load(std::memory_order_acquire) > 0 || !running_; 
+                return ready_task_count_.load(std::memory_order_acquire) > 0 || !running_ || has_exception_.load(std::memory_order_acquire);
             });
 
             sleeping_thread_count_.fetch_sub(1, std::memory_order_relaxed);
@@ -206,7 +236,7 @@ void GraphRuntime::run_loop(int thread_id) {
 }
 
 
-void GraphRuntime::submit_initial_tasks(std::vector<Task>&& tasks, int total_task_count) {
+void GraphRuntime::submit_initial_tasks(std::vector<Task>&& tasks, int total_task_count, TaskPriority priority) {
     has_exception_.store(false, std::memory_order_relaxed);
     first_exception_ = nullptr;
     tasks_to_complete_.store(total_task_count, std::memory_order_relaxed);
@@ -219,50 +249,80 @@ void GraphRuntime::submit_initial_tasks(std::vector<Task>&& tasks, int total_tas
 
     int num_threads = static_cast<int>(num_workers_);
     if (num_threads == 0 || tasks.empty()) {
+        // Safety: avoid deadlock if no initial tasks were provided while a positive
+        // total_task_count was set by caller. Unblock waiters and surface error upstream.
+        if (tasks_to_complete_.load(std::memory_order_relaxed) != 0) {
+            tasks_to_complete_.store(0, std::memory_order_relaxed);
+            std::lock_guard<std::mutex> lk(completion_mutex_);
+            cv_completion_.notify_one();
+        }
         return;
     }
 
-    static thread_local std::mt19937 rng(std::random_device{}());
-    for (size_t i = 0; i < tasks.size(); ++i) {
-        int target_thread = std::uniform_int_distribution<int>(0, num_threads - 1)(rng);
-        std::lock_guard<std::mutex> lock(*local_queue_mutexes_[target_thread]);
-        local_task_queues_[target_thread].push_back(std::move(tasks[i]));
-    }
-    
-    {
-        std::lock_guard<std::mutex> lock(global_queue_mutex_);
+    if (priority == TaskPriority::High) {
+        // Put initial tasks in high-priority global queue to be consumed promptly
+        std::lock_guard<std::mutex> lock(global_queues_mutex_);
+        for (auto& t : tasks) {
+            high_priority_queue_.push(std::move(t));
+            high_enqueued_.fetch_add(1, std::memory_order_relaxed);
+        }
         ready_task_count_.fetch_add(tasks.size(), std::memory_order_release);
+        cv_task_available_.notify_all();
+    } else {
+        static thread_local std::mt19937 rng(std::random_device{}());
+        for (size_t i = 0; i < tasks.size(); ++i) {
+            int target_thread = std::uniform_int_distribution<int>(0, num_threads - 1)(rng);
+            std::lock_guard<std::mutex> lock(*local_queue_mutexes_[target_thread]);
+            local_task_queues_[target_thread].push_back(std::move(tasks[i]));
+            normal_enqueued_.fetch_add(1, std::memory_order_relaxed);
+        }
+        {
+            std::lock_guard<std::mutex> lock(global_queues_mutex_);
+            ready_task_count_.fetch_add(tasks.size(), std::memory_order_release);
+        }
+        cv_task_available_.notify_all();
     }
-    cv_task_available_.notify_all();
 }
 
-void GraphRuntime::submit_ready_task_any_thread(Task&& task) {
+void GraphRuntime::submit_ready_task_any_thread(Task&& task, TaskPriority priority) {
     if (!task) {
         // Do not enqueue empty tasks; let producer decide completion semantics
         return;
     }
     {
-        std::lock_guard<std::mutex> lock(global_queue_mutex_);
-        global_task_queue_.push(std::move(task));
+        std::lock_guard<std::mutex> lock(global_queues_mutex_);
+        if (priority == TaskPriority::High) {
+            high_priority_queue_.push(std::move(task));
+            high_enqueued_.fetch_add(1, std::memory_order_relaxed);
+        } else {
+            normal_priority_queue_.push(std::move(task));
+            normal_enqueued_.fetch_add(1, std::memory_order_relaxed);
+        }
         ready_task_count_.fetch_add(1, std::memory_order_relaxed);
     }
     cv_task_available_.notify_one();
 }
 
-void GraphRuntime::submit_ready_task_from_worker(Task&& task) {
+void GraphRuntime::submit_ready_task_from_worker(Task&& task, TaskPriority priority) {
     int worker_id = this_worker_id();  // -1 表示当前不是 worker 线程
     if (worker_id < 0 || worker_id >= static_cast<int>(local_task_queues_.size())) {
         // 兜底：不是 worker，就走任意线程安全投递
-        submit_ready_task_any_thread(std::move(task));
+        submit_ready_task_any_thread(std::move(task), priority);
         return;
     }
     if (!task) return;
-    {
-        std::lock_guard<std::mutex> lock(*local_queue_mutexes_[worker_id]);
-        local_task_queues_[worker_id].push_back(std::move(task));
-        ready_task_count_.fetch_add(1, std::memory_order_relaxed);
+    if (priority == TaskPriority::High) {
+        // Put into high-priority global to ensure prompt execution by any worker
+        submit_ready_task_any_thread(std::move(task), TaskPriority::High);
+    } else {
+        {
+            std::lock_guard<std::mutex> lock(*local_queue_mutexes_[worker_id]);
+            local_task_queues_[worker_id].push_back(std::move(task));
+            normal_enqueued_.fetch_add(1, std::memory_order_relaxed);
+            ready_task_count_.fetch_add(1, std::memory_order_relaxed);
+        }
+        cv_task_available_.notify_one();
     }
-    cv_task_available_.notify_one();
 }
 
 void GraphRuntime::dec_graph_tasks_to_complete() {
@@ -287,10 +347,17 @@ void GraphRuntime::wait_for_completion() {
     }
 
     if (has_exception_.load(std::memory_order_relaxed)) {
-        stop();
-        start(); 
-        std::lock_guard<std::mutex> lock(exception_mutex_);
-        std::rethrow_exception(first_exception_);
+        // Capture and clear the exception so the runtime can continue serving future tasks.
+        std::exception_ptr e;
+        {
+            std::lock_guard<std::mutex> lock(exception_mutex_);
+            e = first_exception_;
+            first_exception_ = nullptr;
+            has_exception_.store(false, std::memory_order_release);
+        }
+        // Wake workers which might be parked on the exception state.
+        cv_task_available_.notify_all();
+        std::rethrow_exception(e);
     }
 }
 
@@ -298,7 +365,22 @@ void GraphRuntime::set_exception(std::exception_ptr e) {
     if (!has_exception_.exchange(true, std::memory_order_acq_rel)) {
         std::lock_guard<std::mutex> lock(exception_mutex_);
         first_exception_ = e;
-        running_ = false; 
+        // Drop any remaining enqueued tasks from the aborted batch to avoid
+        // executing stale work when workers resume.
+        {
+            std::lock_guard<std::mutex> ql(global_queues_mutex_);
+            while (!high_priority_queue_.empty()) high_priority_queue_.pop();
+            while (!normal_priority_queue_.empty()) normal_priority_queue_.pop();
+            ready_task_count_.store(0, std::memory_order_relaxed);
+        }
+        // Also clear local per-worker queues.
+        for (size_t i = 0; i < local_task_queues_.size(); ++i) {
+            if (i < local_queue_mutexes_.size() && local_queue_mutexes_[i]) {
+                std::lock_guard<std::mutex> lk(*local_queue_mutexes_[i]);
+                local_task_queues_[i].clear();
+            }
+        }
+        // Wake up all workers and any waiters so they can observe the exception.
         cv_task_available_.notify_all();
         {
             std::lock_guard<std::mutex> lk_comp(completion_mutex_);
