@@ -360,10 +360,8 @@ static void op_add_weighted_tiled(const Node& node, const Tile& output_tile, con
         int m = -1;
         if (!n || !n.IsMap()) return -1;
         for (auto it = n.begin(); it != n.end(); ++it) {
-            int src = -1;
-            try { src = it->first.as<int>(); } catch (...) {}
-            (void)src;
-            const YAML::Node& dsts = it->second;
+            // Use value copies of YAML::Node to avoid lifetime issues with temporaries
+            YAML::Node dsts = it->second;
             if (dsts && dsts.IsSequence()) {
                 for (size_t i = 0; i < dsts.size(); ++i) {
                     try { m = std::max(m, dsts[i].as<int>()); } catch (...) {}
@@ -372,8 +370,13 @@ static void op_add_weighted_tiled(const Node& node, const Tile& output_tile, con
         }
         return m;
     };
-    int max0 = infer_max_dest(chmap["input0"]);
-    int max1 = infer_max_dest(chmap["input1"]);
+    // Avoid passing temporaries into lambdas that iterate; store as lvalues first to prevent any
+    // stack lifetime ambiguity observed under ASan with yaml-cpp temporaries.
+    YAML::Node ch_input0 = chmap["input0"];
+    YAML::Node ch_input1 = chmap["input1"];
+
+    int max0 = infer_max_dest(ch_input0);
+    int max1 = infer_max_dest(ch_input1);
     int maxd = std::max({max0, max1, in_ch - 1});
     out_ch = std::max(out_ch, maxd + 1);
 
@@ -401,7 +404,7 @@ static void op_add_weighted_tiled(const Node& node, const Tile& output_tile, con
     auto mark_covered = [&](const YAML::Node& n){
         if (!n || !n.IsMap()) return;
         for (auto it = n.begin(); it != n.end(); ++it) {
-            const YAML::Node& dsts = it->second;
+            YAML::Node dsts = it->second;
             if (!dsts || !dsts.IsSequence()) continue;
             for (size_t i = 0; i < dsts.size(); ++i) {
                 int d=-1; try { d = dsts[i].as<int>(); } catch (...) { continue; }
@@ -409,8 +412,8 @@ static void op_add_weighted_tiled(const Node& node, const Tile& output_tile, con
             }
         }
     };
-    mark_covered(chmap["input0"]);
-    mark_covered(chmap["input1"]);
+    mark_covered(ch_input0);
+    mark_covered(ch_input1);
     for (int d = 0; d < out_ch; ++d) {
         if (covered[d]) {
             if (gamma != 0.0) O[d] = cv::Mat(input_a.rows, input_a.cols, CV_32FC1, cv::Scalar(gamma));
@@ -423,7 +426,7 @@ static void op_add_weighted_tiled(const Node& node, const Tile& output_tile, con
         for (auto it = n.begin(); it != n.end(); ++it) {
             int src = -1;
             try { src = it->first.as<int>(); } catch (...) { continue; }
-            const YAML::Node& dsts = it->second;
+            YAML::Node dsts = it->second;
             if (!dsts || !dsts.IsSequence()) continue;
             for (size_t i = 0; i < dsts.size(); ++i) {
                 int d = -1; try { d = dsts[i].as<int>(); } catch (...) { continue; }
@@ -435,8 +438,8 @@ static void op_add_weighted_tiled(const Node& node, const Tile& output_tile, con
         }
     };
 
-    apply_map(chmap["input0"], A, alpha);
-    apply_map(chmap["input1"], B, beta);
+    apply_map(ch_input0, A, alpha);
+    apply_map(ch_input1, B, beta);
 
     // Optional alpha_strategy for dest alpha channel
     std::string alpha_strategy = as_str(P, "alpha_strategy", "weighted");
@@ -534,6 +537,155 @@ static void op_multiply_tiled(const Node& node, const Tile& output_tile, const s
     cv::multiply(input_a, input_b, output, scale);
 }
 
+// -------------------- Monolithic image_mixing implementations --------------------
+
+static void normalize_to_base(cv::Mat& current_mat, const cv::Mat& base_mat, const std::string& strategy) {
+    // Resize or crop/pad current_mat to match base_mat's size
+    if (current_mat.size() != base_mat.size()) {
+        if (strategy == "resize") {
+            cv::resize(current_mat, current_mat, base_mat.size(), 0, 0, cv::INTER_LINEAR);
+        } else if (strategy == "crop") {
+            cv::Rect roi(0, 0, std::min(current_mat.cols, base_mat.cols), std::min(current_mat.rows, base_mat.rows));
+            cv::Mat canvas = cv::Mat::zeros(base_mat.rows, base_mat.cols, current_mat.type());
+            current_mat(roi).copyTo(canvas(roi));
+            current_mat = canvas;
+        } else {
+            throw GraphError(GraphErrc::InvalidParameter, "Unsupported merge_strategy '" + strategy + "' for monolithic image_mixing.");
+        }
+    }
+    // Match channel count to base
+    if (current_mat.channels() != base_mat.channels()) {
+        int bc = base_mat.channels();
+        if (current_mat.channels() == 1 && (bc == 3 || bc == 4)) {
+            std::vector<cv::Mat> planes(bc, current_mat);
+            cv::merge(planes, current_mat);
+        } else if ((current_mat.channels() == 3 || current_mat.channels() == 4) && bc == 1) {
+            cv::cvtColor(current_mat, current_mat, cv::COLOR_BGR2GRAY);
+        } else if (current_mat.channels() == 4 && bc == 3) {
+            cv::cvtColor(current_mat, current_mat, cv::COLOR_BGRA2BGR);
+        } else if (current_mat.channels() == 3 && bc == 4) {
+            cv::cvtColor(current_mat, current_mat, cv::COLOR_BGR2BGRA);
+        } else {
+            throw GraphError(GraphErrc::InvalidParameter, "Unsupported channel conversion for monolithic image_mixing: " + std::to_string(current_mat.channels()) + " -> " + std::to_string(bc));
+        }
+    }
+}
+
+static NodeOutput op_add_weighted_monolithic(const Node& node, const std::vector<const NodeOutput*>& inputs) {
+    std::lock_guard<std::mutex> lock(g_opencv_op_mutex);
+    if (inputs.size() < 2) throw GraphError(GraphErrc::MissingDependency, "add_weighted requires two input images.");
+
+    cv::Mat input_a = toCvMat(inputs[0]->image_buffer);
+    cv::Mat input_b = toCvMat(inputs[1]->image_buffer);
+    if (input_a.empty() || input_b.empty()) throw GraphError(GraphErrc::MissingDependency, "add_weighted inputs must be non-empty.");
+
+    const auto& P = node.runtime_parameters;
+    double alpha = as_double_flexible(P, "alpha", 0.5);
+    double beta  = as_double_flexible(P, "beta", 0.5);
+    double gamma = as_double_flexible(P, "gamma", 0.0);
+    std::string strategy = as_str(P, "merge_strategy", "resize");
+
+    normalize_to_base(input_b, input_a, strategy);
+
+    // Optional per-channel mapping
+    YAML::Node chmap = P["channel_mapping"];
+    bool has_mapping = chmap && chmap.IsMap();
+
+    cv::Mat output(input_a.rows, input_a.cols, CV_MAKETYPE(CV_32F, input_a.channels()));
+    if (!has_mapping) {
+        cv::addWeighted(input_a, alpha, input_b, beta, gamma, output);
+    } else {
+        int in_ch = input_a.channels();
+        int out_ch = in_ch;
+    auto infer_max_dest = [&](const YAML::Node& n)->int {
+        int m = -1; if (!n || !n.IsMap()) return -1; for (auto it = n.begin(); it != n.end(); ++it) {
+            YAML::Node dsts = it->second; if (!dsts || !dsts.IsSequence()) continue; for (size_t i = 0; i < dsts.size(); ++i) { try { m = std::max(m, dsts[i].as<int>()); } catch (...) {} }
+        } return m; };
+        YAML::Node ch_input0 = chmap["input0"], ch_input1 = chmap["input1"];
+        int max0 = infer_max_dest(ch_input0);
+        int max1 = infer_max_dest(ch_input1);
+        int maxd = std::max({max0, max1, in_ch - 1});
+        out_ch = std::max(out_ch, maxd + 1);
+
+        std::vector<cv::Mat> A, B; cv::split(input_a, A); cv::split(input_b, B);
+        if ((int)A.size() < out_ch) A.resize(out_ch, cv::Mat::zeros(input_a.rows, input_a.cols, CV_32FC1));
+        if ((int)B.size() < out_ch) B.resize(out_ch, cv::Mat::zeros(input_b.rows, input_b.cols, CV_32FC1));
+        std::vector<cv::Mat> O(out_ch);
+        for (int c = 0; c < out_ch; ++c) {
+            O[c] = cv::Mat::zeros(input_a.rows, input_a.cols, CV_32FC1);
+            if (c < in_ch) cv::addWeighted(A[c], alpha, B[c], beta, gamma, O[c]);
+            else if (gamma != 0.0) O[c] = cv::Mat(input_a.rows, input_a.cols, CV_32FC1, cv::Scalar(gamma));
+        }
+        std::vector<char> covered(out_ch, 0);
+        auto mark_covered = [&](const YAML::Node& n){ if (!n || !n.IsMap()) return; for (auto it = n.begin(); it != n.end(); ++it) { YAML::Node dsts = it->second; if (!dsts || !dsts.IsSequence()) continue; for (size_t i = 0; i < dsts.size(); ++i) { int d=-1; try { d = dsts[i].as<int>(); } catch (...) { continue; } if (d>=0 && d<out_ch) covered[d]=1; } } };
+        mark_covered(ch_input0); mark_covered(ch_input1);
+        for (int d = 0; d < out_ch; ++d) if (covered[d]) O[d] = (gamma != 0.0) ? cv::Mat(input_a.rows, input_a.cols, CV_32FC1, cv::Scalar(gamma)) : cv::Mat::zeros(input_a.rows, input_a.cols, CV_32FC1);
+        auto apply_map = [&](const YAML::Node& n, const std::vector<cv::Mat>& src_planes, double w) {
+            if (!n || !n.IsMap()) return; for (auto it = n.begin(); it != n.end(); ++it) { int src=-1; try { src = it->first.as<int>(); } catch (...) { continue; } YAML::Node dsts = it->second; if (!dsts || !dsts.IsSequence()) continue; for (size_t i = 0; i < dsts.size(); ++i) { int d=-1; try { d = dsts[i].as<int>(); } catch (...) { continue; } if (src<0 || src>=(int)src_planes.size()) continue; if (d<0 || d>=(int)O.size()) continue; cv::add(O[d], src_planes[src]*w, O[d]); } }
+        };
+        apply_map(ch_input0, A, alpha);
+        apply_map(ch_input1, B, beta);
+        std::string alpha_strategy = as_str(P, "alpha_strategy", "weighted");
+        if ((alpha_strategy != "weighted") && out_ch >= 4) {
+            int aidx = 3;
+            if (alpha_strategy == "max")       O[aidx] = cv::max(A.size()>3?A[3]:O[aidx], B.size()>3?B[3]:O[aidx]);
+            else if (alpha_strategy == "copy0") { if ((int)A.size()>3) O[aidx] = A[3].clone(); }
+            else if (alpha_strategy == "copy1") { if ((int)B.size()>3) O[aidx] = B[3].clone(); }
+            else if (alpha_strategy == "set1") O[aidx] = cv::Mat(input_a.rows, input_a.cols, CV_32FC1, cv::Scalar(1.0));
+            else if (alpha_strategy == "set0") O[aidx] = cv::Mat::zeros(input_a.rows, input_a.cols, CV_32FC1);
+        }
+        cv::merge(O, output);
+    }
+
+    NodeOutput out; out.image_buffer = fromCvMat(output); return out;
+}
+
+static NodeOutput op_abs_diff_monolithic(const Node& node, const std::vector<const NodeOutput*>& inputs) {
+    std::lock_guard<std::mutex> lock(g_opencv_op_mutex);
+    if (inputs.size() < 2) throw GraphError(GraphErrc::MissingDependency, "diff requires two input images.");
+    cv::Mat input_a = toCvMat(inputs[0]->image_buffer);
+    cv::Mat input_b = toCvMat(inputs[1]->image_buffer);
+    if (input_a.empty() || input_b.empty()) throw GraphError(GraphErrc::MissingDependency, "diff inputs must be non-empty.");
+    std::string strategy = as_str(node.runtime_parameters, "merge_strategy", "crop");
+    normalize_to_base(input_b, input_a, strategy);
+
+    std::string alpha_strategy = as_str(node.runtime_parameters, "alpha_strategy", "copy0");
+    int ch = input_a.channels();
+    cv::Mat output(input_a.rows, input_a.cols, CV_MAKETYPE(CV_32F, ch));
+    if (ch < 2) {
+        cv::absdiff(input_a, input_b, output);
+    } else {
+        std::vector<cv::Mat> Aa, Bb, Oo; cv::split(input_a, Aa); cv::split(input_b, Bb); Oo.resize(ch);
+        int color_channels = (ch == 4) ? 3 : ch;
+        for (int c = 0; c < color_channels; ++c) cv::absdiff(Aa[c], Bb[c], Oo[c]);
+        if (ch == 4) {
+            if (alpha_strategy == "copy0")      Oo[3] = Aa[3].clone();
+            else if (alpha_strategy == "copy1") Oo[3] = Bb[3].clone();
+            else if (alpha_strategy == "max")   Oo[3] = cv::max(Aa[3], Bb[3]);
+            else if (alpha_strategy == "min")   Oo[3] = cv::min(Aa[3], Bb[3]);
+            else if (alpha_strategy == "diff")  cv::absdiff(Aa[3], Bb[3], Oo[3]);
+            else if (alpha_strategy == "set1")  Oo[3] = cv::Mat(input_a.rows, input_a.cols, CV_32FC1, cv::Scalar(1.0));
+            else if (alpha_strategy == "set0")  Oo[3] = cv::Mat::zeros(input_a.rows, input_a.cols, CV_32FC1);
+            else                                 Oo[3] = Aa[3].clone();
+        }
+        cv::merge(Oo, output);
+    }
+    NodeOutput out; out.image_buffer = fromCvMat(output); return out;
+}
+
+static NodeOutput op_multiply_monolithic(const Node& node, const std::vector<const NodeOutput*>& inputs) {
+    std::lock_guard<std::mutex> lock(g_opencv_op_mutex);
+    if (inputs.size() < 2) throw GraphError(GraphErrc::MissingDependency, "multiply requires two input images.");
+    cv::Mat input_a = toCvMat(inputs[0]->image_buffer);
+    cv::Mat input_b = toCvMat(inputs[1]->image_buffer);
+    if (input_a.empty() || input_b.empty()) throw GraphError(GraphErrc::MissingDependency, "multiply inputs must be non-empty.");
+    std::string strategy = as_str(node.runtime_parameters, "merge_strategy", "resize");
+    normalize_to_base(input_b, input_a, strategy);
+    const auto& P = node.runtime_parameters; double scale = as_double_flexible(P, "scale", 1.0);
+    cv::Mat output; cv::multiply(input_a, input_b, output, scale);
+    NodeOutput out; out.image_buffer = fromCvMat(output); return out;
+}
+
 // --- 注册所有操作 ---
 void register_builtin() {
     static std::once_flag init_once;
@@ -544,28 +696,39 @@ void register_builtin() {
     });
     auto& R = OpRegistry::instance();
 
-    // 注册 Monolithic 操作，使用默认元数据（CPU）
-    R.register_op("image_source", "path", MonolithicOpFunc(op_image_source_path));
-    R.register_op("image_generator", "constant", MonolithicOpFunc(op_constant_image));
-    R.register_op("image_generator", "perlin_noise", MonolithicOpFunc(op_perlin_noise));
-    R.register_op("analyzer", "get_dimensions", MonolithicOpFunc(op_get_dimensions));
-    R.register_op("math", "divide", MonolithicOpFunc(op_divide));
-    R.register_op("image_process", "convolve", MonolithicOpFunc(op_convolve));
-    R.register_op("image_process", "resize", MonolithicOpFunc(op_resize)); 
-    R.register_op("image_process", "crop", MonolithicOpFunc(op_crop)); 
-    R.register_op("image_process", "extract_channel", MonolithicOpFunc(op_extract_channel)); 
+    // Register with new OpImplementations API (Phase 1)
+    // Monolithic HP implementations
+    R.register_op_hp_monolithic("image_source", "path", MonolithicOpFunc(op_image_source_path));
+    R.register_op_hp_monolithic("image_generator", "constant", MonolithicOpFunc(op_constant_image));
+    R.register_op_hp_monolithic("image_generator", "perlin_noise", MonolithicOpFunc(op_perlin_noise));
+    R.register_op_hp_monolithic("analyzer", "get_dimensions", MonolithicOpFunc(op_get_dimensions));
+    R.register_op_hp_monolithic("math", "divide", MonolithicOpFunc(op_divide));
+    R.register_op_hp_monolithic("image_process", "convolve", MonolithicOpFunc(op_convolve));
+    R.register_op_hp_monolithic("image_process", "resize", MonolithicOpFunc(op_resize));
+    R.register_op_hp_monolithic("image_process", "crop", MonolithicOpFunc(op_crop));
+    R.register_op_hp_monolithic("image_process", "extract_channel", MonolithicOpFunc(op_extract_channel));
+    R.register_op_hp_monolithic("image_mixing", "add_weighted", MonolithicOpFunc(op_add_weighted_monolithic));
+    R.register_op_hp_monolithic("image_mixing", "diff", MonolithicOpFunc(op_abs_diff_monolithic));
+    R.register_op_hp_monolithic("image_mixing", "multiply", MonolithicOpFunc(op_multiply_monolithic));
 
-    // 注册 Tiled 操作，使用默认元数据（CPU）和 MACRO 偏好
+    // Tiled HP implementations (default MACRO preference)
     OpMetadata tiled_meta;
     tiled_meta.tile_preference = TileSizePreference::MACRO;
-    // Prefer fast monolithic blur for default subtype
-    R.register_op("image_process", "gaussian_blur", MonolithicOpFunc(op_gaussian_blur_monolithic));
-    // Keep tiled variant available explicitly if needed
-    R.register_op("image_process", "gaussian_blur_tiled", TileOpFunc(op_gaussian_blur_tiled), tiled_meta);
-    R.register_op("image_process", "curve_transform", TileOpFunc(op_curve_transform_tiled), tiled_meta);
-    R.register_op("image_mixing", "add_weighted", TileOpFunc(op_add_weighted_tiled), tiled_meta);
-    R.register_op("image_mixing", "diff", TileOpFunc(op_abs_diff_tiled), tiled_meta);
-    R.register_op("image_mixing", "multiply", TileOpFunc(op_multiply_tiled), tiled_meta);
+
+    // Gaussian blur: register both monolithic HP and tiled HP under the same key
+    R.register_op_hp_monolithic("image_process", "gaussian_blur", MonolithicOpFunc(op_gaussian_blur_monolithic));
+    R.register_op_hp_tiled("image_process", "gaussian_blur", TileOpFunc(op_gaussian_blur_tiled), tiled_meta);
+    // Optional alias for backward compatibility if any graph uses "gaussian_blur_tiled"
+    R.register_op_hp_tiled("image_process", "gaussian_blur_tiled", TileOpFunc(op_gaussian_blur_tiled), tiled_meta);
+
+    R.register_op_hp_tiled("image_process", "curve_transform", TileOpFunc(op_curve_transform_tiled), tiled_meta);
+    // Image mixing: provide both monolithic and tiled implementations; global HP prefers monolithic
+    R.register_op_hp_monolithic("image_mixing", "add_weighted", MonolithicOpFunc(op_add_weighted_monolithic));
+    R.register_op_hp_tiled("image_mixing", "add_weighted", TileOpFunc(op_add_weighted_tiled), tiled_meta);
+    R.register_op_hp_monolithic("image_mixing", "diff", MonolithicOpFunc(op_abs_diff_monolithic));
+    R.register_op_hp_tiled("image_mixing", "diff", TileOpFunc(op_abs_diff_tiled), tiled_meta);
+    R.register_op_hp_monolithic("image_mixing", "multiply", MonolithicOpFunc(op_multiply_monolithic));
+    R.register_op_hp_tiled("image_mixing", "multiply", TileOpFunc(op_multiply_tiled), tiled_meta);
 }
 
 }} // namespace ps::ops

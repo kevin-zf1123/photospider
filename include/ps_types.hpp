@@ -108,6 +108,14 @@ struct OpMetadata {
 using MonolithicOpFunc = std::function<NodeOutput(const Node&, const std::vector<const NodeOutput*>&)>;
 using TileOpFunc = std::function<void(const Node&, const Tile&, const std::vector<Tile>&)>;
 
+// -----------------------------------------------------------------------------
+// Compute intent for planner/scheduler (Phase 1: API foundation)
+// -----------------------------------------------------------------------------
+enum class ComputeIntent {
+    GlobalHighPrecision,
+    RealTimeUpdate,
+};
+
 class OpRegistry {
 public:
     static OpRegistry& instance();
@@ -124,12 +132,30 @@ public:
     std::optional<OpMetadata> get_metadata(const std::string& type, const std::string& subtype) const;
 
     std::vector<std::string> get_keys() const;
+    // Combined keys: collapse multiple implementations into a single op key (type:subtype)
+    std::vector<std::string> get_combined_keys() const;
     bool unregister_op(const std::string& type, const std::string& subtype);
     bool unregister_key(const std::string& key);
+
+    // Phase 1 scaffolding: multi-implementation registry (not wired yet in executor)
+    struct OpImplementations {
+        std::optional<MonolithicOpFunc> monolithic_hp; // optional
+        std::optional<TileOpFunc> tiled_hp;            // preferred available
+        std::optional<TileOpFunc> tiled_rt;            // optional
+        std::optional<OpMetadata> meta_hp;
+        std::optional<OpMetadata> meta_rt;
+    };
+
+    void register_op_hp_monolithic(const std::string& type, const std::string& subtype, MonolithicOpFunc fn, OpMetadata meta = {});
+    void register_op_hp_tiled(const std::string& type, const std::string& subtype, TileOpFunc fn, OpMetadata meta);
+    void register_op_rt_tiled(const std::string& type, const std::string& subtype, TileOpFunc fn, OpMetadata meta);
+    std::optional<OpVariant> resolve_for_intent(const std::string& type, const std::string& subtype, ComputeIntent intent) const;
 private:
     std::unordered_map<std::string, OpVariant> table_;
     // [修改] 元数据表现在可以存储包含设备偏好的完整 OpMetadata
     std::unordered_map<std::string, OpMetadata> metadata_table_;
+    // New: consolidate multiple implementations under a single op key
+    std::unordered_map<std::string, OpImplementations> impl_table_;
 };
 
 inline std::string make_key(const std::string& type, const std::string& subtype) {

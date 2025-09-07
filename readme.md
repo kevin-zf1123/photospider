@@ -133,3 +133,9 @@ This will give you a `ps>` prompt. Type `help` to see the full list of commands.
 ## License
 
 This project is licensed under the MIT License.
+
+## Kernel Architecture Docs
+
+- Architecture Overview: `docs/kernel-architecture/Overview.md`
+- Development Roadmap: `docs/kernel-architecture/Roadmap.md`
+- Dirty Region Propagation Spec: `docs/kernel-architecture/Dirty-Region-Propagation.md`

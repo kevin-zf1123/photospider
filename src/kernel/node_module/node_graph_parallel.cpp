@@ -74,7 +74,7 @@ NodeOutput& NodeGraph::compute_node_no_recurse(int node_id,
         inputs_ready.push_back(&*itn->second.cached_output);
     }
 
-    auto op_opt = OpRegistry::instance().find(target_node.type, target_node.subtype);
+    auto op_opt = OpRegistry::instance().resolve_for_intent(target_node.type, target_node.subtype, ComputeIntent::GlobalHighPrecision);
     if (!op_opt) {
         throw GraphError(GraphErrc::NoOperation,
                          "No op for " + target_node.type + ":" + target_node.subtype);
@@ -92,6 +92,8 @@ NodeOutput& NodeGraph::compute_node_no_recurse(int node_id,
             using T = std::decay_t<decltype(op_func)>;
             if constexpr (std::is_same_v<T, MonolithicOpFunc>) {
                 target_node.cached_output = op_func(target_node, inputs_ready);
+                target_node.cached_output_high_precision = *target_node.cached_output;
+                target_node.hp_version++;
             } else if constexpr (std::is_same_v<T, TileOpFunc>) {
                 // Prepare normalized inputs similar to compute_internal
                 std::vector<NodeOutput> normalized_storage;
@@ -182,6 +184,9 @@ NodeOutput& NodeGraph::compute_node_no_recurse(int node_id,
                         execute_tile_task(task, op_func);
                     }
                 }
+                // Mirror to HP cache and bump version after tiling finishes
+                target_node.cached_output_high_precision = *target_node.cached_output;
+                target_node.hp_version++;
             }
         }, *op_opt);
     } catch (const cv::Exception& e) {
@@ -265,7 +270,7 @@ NodeOutput& NodeGraph::compute_parallel(
         std::vector<std::optional<OpMetadata>> resolved_meta(num_nodes);
         for (size_t i = 0; i < num_nodes; ++i) {
             const auto& n = nodes.at(execution_order[i]);
-            resolved_ops[i] = OpRegistry::instance().find(n.type, n.subtype);
+            resolved_ops[i] = OpRegistry::instance().resolve_for_intent(n.type, n.subtype, ComputeIntent::GlobalHighPrecision);
             resolved_meta[i] = OpRegistry::instance().get_metadata(n.type, n.subtype);
         }
         
@@ -671,6 +676,12 @@ NodeOutput& NodeGraph::compute_parallel(
                 if (temp_results[i].has_value()) {
                     int nid = execution_order[i];
                     nodes.at(nid).cached_output = std::move(*temp_results[i]);
+                    try {
+                        nodes.at(nid).cached_output_high_precision = *nodes.at(nid).cached_output;
+                        nodes.at(nid).hp_version++;
+                    } catch (...) {
+                        // Non-fatal; maintain backward compatibility
+                    }
                     save_cache_if_configured(nodes.at(nid), cache_precision);
                 }
             }
@@ -689,6 +700,29 @@ NodeOutput& NodeGraph::compute_parallel(
         // wait_for_completion 内部会重新抛出异常，这里我们只需确保函数有返回值
         // 在实际情况下，由于 rethrow，代码不会执行到这里
         throw GraphError(GraphErrc::Unknown, "Caught pre-flight exception during parallel compute setup.");
+    }
+}
+
+// Phase 1 overload: intent-based entry to parallel compute
+NodeOutput& NodeGraph::compute_parallel(
+    GraphRuntime& runtime,
+    ComputeIntent intent,
+    int node_id,
+    const std::string& cache_precision,
+    bool force_recache,
+    bool enable_timing,
+    bool disable_disk_cache,
+    std::vector<BenchmarkEvent>* benchmark_events,
+    std::optional<cv::Rect> /*dirty_roi*/)
+{
+    switch (intent) {
+        case ComputeIntent::GlobalHighPrecision:
+            // Use existing Global HP path (monolithic preferred; else MACRO tiled)
+            return compute_parallel(runtime, node_id, cache_precision, force_recache, enable_timing, disable_disk_cache, benchmark_events);
+        case ComputeIntent::RealTimeUpdate:
+        default:
+            // Phase 1: RT path not yet implemented; fallback to HP path to keep behavior unchanged
+            return compute_parallel(runtime, node_id, cache_precision, force_recache, enable_timing, disable_disk_cache, benchmark_events);
     }
 }
 

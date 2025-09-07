@@ -57,7 +57,7 @@ void print_repl_help(const CliConfig& config) {
               << "  free\n"
               << "    Free memory used by non-essential intermediate nodes.\n\n"
 
-              << "  compute <id> [force] [force-deep] [parallel] [t] [tl [path]] [m]\n"
+              << "  compute <id|all> [force] [force-deep] [parallel] [t] [tl [path]] [m] [nosave]\n"
               << "    Compute node(s) with optional flags:\n"
               << "      force:     Clear in-memory caches before compute.\n"
               << "      force-deep: Clear disk+memory caches before compute.\n"
@@ -65,6 +65,7 @@ void print_repl_help(const CliConfig& config) {
               << "      t:         Print a simple timer summary to the console.\n"
               << "      tl [path]: Log detailed timings to a YAML file.\n"
               << "      m | -m:    Mute node result output (timers still print when enabled).\n"
+              << "      nosave:    Skip saving caches for this compute.\n"
               << "    Defaults: flags='" << config.default_compute_args << "', log_path='" << config.default_timer_log_path << "'\n\n"
 
               << "  save <id> <file>\n"

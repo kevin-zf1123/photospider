@@ -62,7 +62,16 @@ public:
     bool preserved = false;
 
     // --- MODIFIED: The in-memory cache now holds the entire NodeOutput ---
+    // Legacy unified cache (kept for backward compatibility with existing code paths)
     std::optional<NodeOutput> cached_output;
+
+    // Phase 1: Dual-cache state for RT/HP separation (not yet fully used by planner)
+    std::optional<NodeOutput> cached_output_real_time;      // RT cache for interactive preview
+    std::optional<NodeOutput> cached_output_high_precision; // HP cache for final quality
+    int rt_version = 0;
+    int hp_version = 0;
+    std::optional<cv::Rect> rt_roi; // Most recent RT dirty/updated ROI
+    std::optional<cv::Rect> hp_roi; // Most recent HP dirty/updated ROI
 
     // --- DEPRECATED: Old image-only cache ---
     // cv::Mat image_matrix;
