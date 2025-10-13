@@ -714,17 +714,24 @@ void register_builtin() {
     // Tiled HP implementations (default MACRO preference)
     OpMetadata tiled_meta;
     tiled_meta.tile_preference = TileSizePreference::MACRO;
+    // RT implementations default to Micro tiles to match proxy pipeline
+    OpMetadata rt_meta;
+    rt_meta.tile_preference = TileSizePreference::MICRO;
 
     // Gaussian blur: register both monolithic HP and tiled HP under the same key
     R.register_op_hp_monolithic("image_process", "gaussian_blur", MonolithicOpFunc(op_gaussian_blur_monolithic));
     R.register_op_hp_tiled("image_process", "gaussian_blur", TileOpFunc(op_gaussian_blur_tiled), tiled_meta);
     // Optional alias for backward compatibility if any graph uses "gaussian_blur_tiled"
     R.register_op_hp_tiled("image_process", "gaussian_blur_tiled", TileOpFunc(op_gaussian_blur_tiled), tiled_meta);
+    // RT path currently reuses HP kernels until lighter variants land
+    R.register_op_rt_tiled("image_process", "gaussian_blur", TileOpFunc(op_gaussian_blur_tiled), rt_meta);
+    R.register_op_rt_tiled("image_process", "gaussian_blur_tiled", TileOpFunc(op_gaussian_blur_tiled), rt_meta);
 
     R.register_op_hp_tiled("image_process", "curve_transform", TileOpFunc(op_curve_transform_tiled), tiled_meta);
     // Image mixing: provide both monolithic and tiled implementations; global HP prefers monolithic
     R.register_op_hp_monolithic("image_mixing", "add_weighted", MonolithicOpFunc(op_add_weighted_monolithic));
     R.register_op_hp_tiled("image_mixing", "add_weighted", TileOpFunc(op_add_weighted_tiled), tiled_meta);
+    R.register_op_rt_tiled("image_mixing", "add_weighted", TileOpFunc(op_add_weighted_tiled), rt_meta);
     R.register_op_hp_monolithic("image_mixing", "diff", MonolithicOpFunc(op_abs_diff_monolithic));
     R.register_op_hp_tiled("image_mixing", "diff", TileOpFunc(op_abs_diff_tiled), tiled_meta);
     R.register_op_hp_monolithic("image_mixing", "multiply", MonolithicOpFunc(op_multiply_monolithic));
