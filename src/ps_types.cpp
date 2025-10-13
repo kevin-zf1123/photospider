@@ -165,4 +165,13 @@ DirtyRoiPropFunc OpRegistry::get_dirty_propagator(const std::string& type, const
     return kIdentity;
 }
 
+const OpRegistry::OpImplementations* OpRegistry::get_implementations(const std::string& type, const std::string& subtype) const {
+    auto key = make_key(type, subtype);
+    auto it = impl_table_.find(key);
+    if (it == impl_table_.end()) {
+        return nullptr;
+    }
+    return &it->second;
+}
+
 } // namespace ps
