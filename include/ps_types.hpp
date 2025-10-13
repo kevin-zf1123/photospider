@@ -154,6 +154,7 @@ public:
     void register_dirty_propagator(const std::string& type, const std::string& subtype, DirtyRoiPropFunc fn);
     std::optional<OpVariant> resolve_for_intent(const std::string& type, const std::string& subtype, ComputeIntent intent) const;
     DirtyRoiPropFunc get_dirty_propagator(const std::string& type, const std::string& subtype) const;
+    const OpImplementations* get_implementations(const std::string& type, const std::string& subtype) const;
 private:
     std::unordered_map<std::string, OpVariant> table_;
     // [修改] 元数据表现在可以存储包含设备偏好的完整 OpMetadata

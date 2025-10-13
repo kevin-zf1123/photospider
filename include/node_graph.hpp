@@ -146,6 +146,14 @@ public:
                                  bool allow_disk_cache,
                                  std::vector<BenchmarkEvent>* benchmark_events);
 private:
+    NodeOutput& compute_high_precision_update(GraphRuntime* runtime,
+                                              int node_id,
+                                              const std::string& cache_precision,
+                                              bool force_recache,
+                                              bool enable_timing,
+                                              bool disable_disk_cache,
+                                              std::vector<BenchmarkEvent>* benchmark_events,
+                                              const cv::Rect& dirty_roi);
     NodeOutput& compute_real_time_update(GraphRuntime* runtime,
                                          int node_id,
                                          const std::string& cache_precision,
