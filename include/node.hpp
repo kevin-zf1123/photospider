@@ -73,6 +73,9 @@ public:
     std::optional<cv::Rect> rt_roi; // Most recent RT dirty/updated ROI
     std::optional<cv::Rect> hp_roi; // Most recent HP dirty/updated ROI
 
+    // Metadata: last known full-resolution input extent for ROI propagation
+    std::optional<cv::Size> last_input_size_hp;
+
     // --- DEPRECATED: Old image-only cache ---
     // cv::Mat image_matrix;
 

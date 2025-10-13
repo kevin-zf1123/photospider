@@ -212,6 +212,17 @@ NodeOutput& NodeGraph::compute_internal(int node_id,
                     benchmark_events));
         }
 
+        if (!monolithic_inputs.empty()) {
+            const auto& first_buf = monolithic_inputs.front()->image_buffer;
+            if (first_buf.width > 0 && first_buf.height > 0) {
+                target_node.last_input_size_hp = cv::Size(first_buf.width, first_buf.height);
+            } else {
+                target_node.last_input_size_hp.reset();
+            }
+        } else {
+            target_node.last_input_size_hp.reset();
+        }
+
         // 5. 查找并派发 Op
         auto op_opt = OpRegistry::instance().resolve_for_intent(
             target_node.type, target_node.subtype, ComputeIntent::GlobalHighPrecision);
