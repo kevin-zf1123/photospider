@@ -553,13 +553,20 @@ NodeOutput& NodeGraph::compute(ComputeIntent intent,
                                bool force_recache, bool enable_timing,
                                bool disable_disk_cache,
                                std::vector<BenchmarkEvent>* benchmark_events,
-                               std::optional<cv::Rect> /*dirty_roi*/) {
+                               std::optional<cv::Rect> dirty_roi) {
     switch (intent) {
         case ComputeIntent::GlobalHighPrecision:
             return compute(node_id, cache_precision, force_recache, enable_timing, disable_disk_cache, benchmark_events);
         case ComputeIntent::RealTimeUpdate:
+            if (!dirty_roi.has_value()) {
+                throw GraphError(GraphErrc::InvalidParameter,
+                                 "RealTimeUpdate intent requires a dirty ROI region.");
+            }
+            return compute_real_time_update(nullptr, node_id, cache_precision,
+                                            force_recache, enable_timing,
+                                            disable_disk_cache, benchmark_events,
+                                            *dirty_roi);
         default:
-            // Phase 1: RT path not yet implemented; fallback to HP path to keep behavior unchanged
             return compute(node_id, cache_precision, force_recache, enable_timing, disable_disk_cache, benchmark_events);
     }
 }
