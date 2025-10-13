@@ -162,6 +162,17 @@ NodeOutput& NodeGraph::compute_node_no_recurse(int node_id,
         inputs_ready.push_back(&*itn->second.cached_output);
     }
 
+    if (!inputs_ready.empty()) {
+        const auto& first_buf = inputs_ready.front()->image_buffer;
+        if (first_buf.width > 0 && first_buf.height > 0) {
+            target_node.last_input_size_hp = cv::Size(first_buf.width, first_buf.height);
+        } else {
+            target_node.last_input_size_hp.reset();
+        }
+    } else {
+        target_node.last_input_size_hp.reset();
+    }
+
     auto op_opt = OpRegistry::instance().resolve_for_intent(target_node.type, target_node.subtype, ComputeIntent::GlobalHighPrecision);
     if (!op_opt) {
         throw GraphError(GraphErrc::NoOperation,

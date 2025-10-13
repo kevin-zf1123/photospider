@@ -53,6 +53,24 @@ static std::optional<int> node_param_int(const Node& node, const std::string& ke
     return std::nullopt;
 }
 
+static std::optional<double> node_param_double(const Node& node, const std::string& key) {
+    if (node.runtime_parameters && node.runtime_parameters[key]) {
+        try {
+            return node.runtime_parameters[key].as<double>();
+        } catch (...) {
+            return std::nullopt;
+        }
+    }
+    if (node.parameters && node.parameters[key]) {
+        try {
+            return node.parameters[key].as<double>();
+        } catch (...) {
+            return std::nullopt;
+        }
+    }
+    return std::nullopt;
+}
+
 static int infer_radius_from_params(const Node& node,
                                     std::initializer_list<const char*> radius_keys,
                                     std::initializer_list<const char*> size_keys,
@@ -86,6 +104,154 @@ static cv::Rect convolve_dirty_roi(const Node& node, const cv::Rect& downstream_
     int radius = infer_radius_from_params(node, {"kernel_radius", "radius"}, {"ksize", "kernel_size"});
     if (radius <= 0) radius = 1;
     return expand_roi(downstream_roi, radius);
+}
+
+static cv::Rect resize_dirty_roi(const Node& node, const cv::Rect& downstream_roi) {
+    if (downstream_roi.width <= 0 || downstream_roi.height <= 0) {
+        return cv::Rect();
+    }
+
+    if (!node.last_input_size_hp || node.last_input_size_hp->width <= 0 || node.last_input_size_hp->height <= 0) {
+        return downstream_roi;
+    }
+
+    const cv::Size input_size = *node.last_input_size_hp;
+
+    auto maybe_out_w = node_param_int(node, "width");
+    auto maybe_out_h = node_param_int(node, "height");
+    int out_w = maybe_out_w.value_or(0);
+    int out_h = maybe_out_h.value_or(0);
+
+    auto infer_output_size_from_cache = [&]() -> cv::Size {
+        cv::Size size{0, 0};
+        auto take_from = [&](const std::optional<NodeOutput>& opt) {
+            if (!opt.has_value()) return false;
+            const auto& buf = opt->image_buffer;
+            if (buf.width <= 0 || buf.height <= 0) return false;
+            size = cv::Size(buf.width, buf.height);
+            return true;
+        };
+        if (take_from(node.cached_output_high_precision)) return size;
+        if (take_from(node.cached_output)) return size;
+        return size;
+    };
+
+    if (out_w <= 0 || out_h <= 0) {
+        cv::Size cached = infer_output_size_from_cache();
+        if (cached.width > 0 && cached.height > 0) {
+            out_w = cached.width;
+            out_h = cached.height;
+        }
+    }
+
+    if (out_w <= 0 || out_h <= 0) {
+        return cv::Rect(0, 0, input_size.width, input_size.height);
+    }
+
+    const double scale_x = static_cast<double>(input_size.width) / static_cast<double>(out_w);
+    const double scale_y = static_cast<double>(input_size.height) / static_cast<double>(out_h);
+    if (!std::isfinite(scale_x) || !std::isfinite(scale_y) || scale_x <= 0.0 || scale_y <= 0.0) {
+        return cv::Rect(0, 0, input_size.width, input_size.height);
+    }
+
+    const double left = static_cast<double>(downstream_roi.x) * scale_x;
+    const double top = static_cast<double>(downstream_roi.y) * scale_y;
+    const double right = static_cast<double>(downstream_roi.x + downstream_roi.width) * scale_x;
+    const double bottom = static_cast<double>(downstream_roi.y + downstream_roi.height) * scale_y;
+
+    int upstream_x = static_cast<int>(std::floor(left));
+    int upstream_y = static_cast<int>(std::floor(top));
+    int upstream_w = static_cast<int>(std::ceil(right) - upstream_x);
+    int upstream_h = static_cast<int>(std::ceil(bottom) - upstream_y);
+    upstream_w = std::max(upstream_w, 0);
+    upstream_h = std::max(upstream_h, 0);
+
+    cv::Rect upstream_roi(upstream_x, upstream_y, upstream_w, upstream_h);
+    upstream_roi = expand_roi(upstream_roi, 2);
+
+    cv::Rect input_bounds(0, 0, input_size.width, input_size.height);
+    upstream_roi = upstream_roi & input_bounds;
+    if (upstream_roi.width <= 0 || upstream_roi.height <= 0) {
+        return cv::Rect();
+    }
+    return upstream_roi;
+}
+
+static cv::Rect crop_dirty_roi(const Node& node, const cv::Rect& downstream_roi) {
+    if (downstream_roi.width <= 0 || downstream_roi.height <= 0) {
+        return cv::Rect();
+    }
+
+    const bool have_input_size = node.last_input_size_hp &&
+                                 node.last_input_size_hp->width > 0 &&
+                                 node.last_input_size_hp->height > 0;
+    const cv::Size input_size = have_input_size ? *node.last_input_size_hp : cv::Size();
+    const cv::Rect input_bounds = have_input_size ? cv::Rect(0, 0, input_size.width, input_size.height) : cv::Rect();
+
+    std::string mode = as_str(node.runtime_parameters, "mode", "");
+    if (mode.empty()) mode = as_str(node.parameters, "mode", "value");
+    if (mode.empty()) mode = "value";
+
+    cv::Rect crop_rect;
+    if (mode == "ratio") {
+        if (!have_input_size) {
+            return downstream_roi;
+        }
+        auto rx_opt = node_param_double(node, "x");
+        auto ry_opt = node_param_double(node, "y");
+        auto rw_opt = node_param_double(node, "width");
+        auto rh_opt = node_param_double(node, "height");
+        if (!rx_opt || !ry_opt || !rw_opt || !rh_opt) {
+            return downstream_roi;
+        }
+        double rx = *rx_opt;
+        double ry = *ry_opt;
+        double rw = *rw_opt;
+        double rh = *rh_opt;
+        if (rx < 0.0 || ry < 0.0 || rw <= 0.0 || rh <= 0.0) {
+            return cv::Rect();
+        }
+        int x = static_cast<int>(rx * input_size.width);
+        int y = static_cast<int>(ry * input_size.height);
+        int w = static_cast<int>(rw * input_size.width);
+        int h = static_cast<int>(rh * input_size.height);
+        if (w <= 0 || h <= 0) {
+            return cv::Rect();
+        }
+        crop_rect = cv::Rect(x, y, w, h) & input_bounds;
+        if (crop_rect.width <= 0 || crop_rect.height <= 0) {
+            return cv::Rect();
+        }
+    } else {
+        auto w_opt = node_param_int(node, "width");
+        auto h_opt = node_param_int(node, "height");
+        if (!w_opt || !h_opt || *w_opt <= 0 || *h_opt <= 0) {
+            return cv::Rect();
+        }
+        int x = node_param_int(node, "x").value_or(0);
+        int y = node_param_int(node, "y").value_or(0);
+        crop_rect = cv::Rect(x, y, *w_opt, *h_opt);
+        if (have_input_size) {
+            crop_rect = crop_rect & input_bounds;
+            if (crop_rect.width <= 0 || crop_rect.height <= 0) {
+                return cv::Rect();
+            }
+        }
+    }
+
+    cv::Rect output_bounds(0, 0, crop_rect.width, crop_rect.height);
+    cv::Rect valid_downstream_roi = downstream_roi & output_bounds;
+    if (valid_downstream_roi.width <= 0 || valid_downstream_roi.height <= 0) {
+        return cv::Rect();
+    }
+
+    cv::Rect upstream_roi(
+        crop_rect.x + valid_downstream_roi.x,
+        crop_rect.y + valid_downstream_roi.y,
+        valid_downstream_roi.width,
+        valid_downstream_roi.height
+    );
+    return upstream_roi;
 }
 
 // =============================================================================
@@ -794,8 +960,8 @@ void register_builtin() {
     R.register_dirty_propagator("image_generator", "perlin_noise", identity_roi);
     R.register_dirty_propagator("analyzer", "get_dimensions", identity_roi);
     R.register_dirty_propagator("math", "divide", identity_roi);
-    R.register_dirty_propagator("image_process", "resize", identity_roi);
-    R.register_dirty_propagator("image_process", "crop", identity_roi);
+    R.register_dirty_propagator("image_process", "resize", DirtyRoiPropFunc(resize_dirty_roi));
+    R.register_dirty_propagator("image_process", "crop", DirtyRoiPropFunc(crop_dirty_roi));
     R.register_dirty_propagator("image_process", "extract_channel", identity_roi);
     R.register_dirty_propagator("image_process", "curve_transform", identity_roi);
     R.register_dirty_propagator("image_mixing", "add_weighted", identity_roi);
