@@ -10,6 +10,8 @@
 #include <cmath>
 #include <numeric>
 #include <mutex>
+#include <optional>
+#include <initializer_list>
 #include <opencv2/core/ocl.hpp>
 
 namespace ps { namespace ops {
@@ -20,6 +22,71 @@ namespace ps { namespace ops {
 
 // 全局互斥锁，用于保护所有并发的OpenCV GPU/CPU操作，防止底层库的资源竞争
 static std::mutex g_opencv_op_mutex;
+
+static cv::Rect expand_roi(const cv::Rect& roi, int padding) {
+    if (padding <= 0 || roi.width <= 0 || roi.height <= 0) {
+        return roi;
+    }
+    return cv::Rect(
+        roi.x - padding,
+        roi.y - padding,
+        roi.width + padding * 2,
+        roi.height + padding * 2
+    );
+}
+
+static std::optional<int> node_param_int(const Node& node, const std::string& key) {
+    if (node.runtime_parameters && node.runtime_parameters[key]) {
+        try {
+            return node.runtime_parameters[key].as<int>();
+        } catch (...) {
+            return std::nullopt;
+        }
+    }
+    if (node.parameters && node.parameters[key]) {
+        try {
+            return node.parameters[key].as<int>();
+        } catch (...) {
+            return std::nullopt;
+        }
+    }
+    return std::nullopt;
+}
+
+static int infer_radius_from_params(const Node& node,
+                                    std::initializer_list<const char*> radius_keys,
+                                    std::initializer_list<const char*> size_keys,
+                                    int fallback = 0) {
+    int radius = std::max(0, fallback);
+    auto try_update = [&](std::optional<int> candidate) {
+        if (candidate.has_value()) {
+            radius = std::max(radius, std::max(0, *candidate));
+        }
+    };
+    for (const char* key : radius_keys) {
+        try_update(node_param_int(node, key));
+    }
+    for (const char* key : size_keys) {
+        auto val = node_param_int(node, key);
+        if (val.has_value()) {
+            int computed = std::max(0, (*val - 1) / 2);
+            radius = std::max(radius, computed);
+        }
+    }
+    return radius;
+}
+
+static cv::Rect gaussian_blur_dirty_roi(const Node& node, const cv::Rect& downstream_roi) {
+    int radius = infer_radius_from_params(node, {"radius", "kernel_radius"}, {"ksize"});
+    if (radius <= 0) radius = 1;
+    return expand_roi(downstream_roi, radius);
+}
+
+static cv::Rect convolve_dirty_roi(const Node& node, const cv::Rect& downstream_roi) {
+    int radius = infer_radius_from_params(node, {"kernel_radius", "radius"}, {"ksize", "kernel_size"});
+    if (radius <= 0) radius = 1;
+    return expand_roi(downstream_roi, radius);
+}
 
 // =============================================================================
 // ==                   类型一: MONOLITHIC (整体计算) 操作                      ==
@@ -718,6 +785,25 @@ void register_builtin() {
     OpMetadata rt_meta;
     rt_meta.tile_preference = TileSizePreference::MICRO;
 
+    DirtyRoiPropFunc identity_roi = [](const Node&, const cv::Rect& roi) {
+        return roi;
+    };
+
+    R.register_dirty_propagator("image_source", "path", identity_roi);
+    R.register_dirty_propagator("image_generator", "constant", identity_roi);
+    R.register_dirty_propagator("image_generator", "perlin_noise", identity_roi);
+    R.register_dirty_propagator("analyzer", "get_dimensions", identity_roi);
+    R.register_dirty_propagator("math", "divide", identity_roi);
+    R.register_dirty_propagator("image_process", "resize", identity_roi);
+    R.register_dirty_propagator("image_process", "crop", identity_roi);
+    R.register_dirty_propagator("image_process", "extract_channel", identity_roi);
+    R.register_dirty_propagator("image_process", "curve_transform", identity_roi);
+    R.register_dirty_propagator("image_mixing", "add_weighted", identity_roi);
+    R.register_dirty_propagator("image_mixing", "diff", identity_roi);
+    R.register_dirty_propagator("image_mixing", "multiply", identity_roi);
+
+    R.register_dirty_propagator("image_process", "convolve", DirtyRoiPropFunc(convolve_dirty_roi));
+
     // Gaussian blur: register both monolithic HP and tiled HP under the same key
     R.register_op_hp_monolithic("image_process", "gaussian_blur", MonolithicOpFunc(op_gaussian_blur_monolithic));
     R.register_op_hp_tiled("image_process", "gaussian_blur", TileOpFunc(op_gaussian_blur_tiled), tiled_meta);
@@ -726,6 +812,8 @@ void register_builtin() {
     // RT path currently reuses HP kernels until lighter variants land
     R.register_op_rt_tiled("image_process", "gaussian_blur", TileOpFunc(op_gaussian_blur_tiled), rt_meta);
     R.register_op_rt_tiled("image_process", "gaussian_blur_tiled", TileOpFunc(op_gaussian_blur_tiled), rt_meta);
+    R.register_dirty_propagator("image_process", "gaussian_blur", DirtyRoiPropFunc(gaussian_blur_dirty_roi));
+    R.register_dirty_propagator("image_process", "gaussian_blur_tiled", DirtyRoiPropFunc(gaussian_blur_dirty_roi));
 
     R.register_op_hp_tiled("image_process", "curve_transform", TileOpFunc(op_curve_transform_tiled), tiled_meta);
     // Image mixing: provide both monolithic and tiled implementations; global HP prefers monolithic

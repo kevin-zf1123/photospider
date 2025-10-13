@@ -123,6 +123,11 @@ void OpRegistry::register_op_rt_tiled(const std::string& type, const std::string
     impl_table_[key].meta_rt = meta;
 }
 
+void OpRegistry::register_dirty_propagator(const std::string& type, const std::string& subtype, DirtyRoiPropFunc fn) {
+    auto key = make_key(type, subtype);
+    impl_table_[key].dirty_propagator = std::move(fn);
+}
+
 std::optional<OpRegistry::OpVariant> OpRegistry::resolve_for_intent(const std::string& type, const std::string& subtype, ComputeIntent intent) const {
     auto key = make_key(type, subtype);
     auto it = impl_table_.find(key);
@@ -144,6 +149,20 @@ std::optional<OpRegistry::OpVariant> OpRegistry::resolve_for_intent(const std::s
             break;
     }
     return find(type, subtype);
+}
+
+DirtyRoiPropFunc OpRegistry::get_dirty_propagator(const std::string& type, const std::string& subtype) const {
+    auto key = make_key(type, subtype);
+    auto it = impl_table_.find(key);
+    if (it != impl_table_.end()) {
+        if (it->second.dirty_propagator) {
+            return *(it->second.dirty_propagator);
+        }
+    }
+    static const DirtyRoiPropFunc kIdentity = [](const Node&, const cv::Rect& roi) {
+        return roi;
+    };
+    return kIdentity;
 }
 
 } // namespace ps
