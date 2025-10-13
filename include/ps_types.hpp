@@ -85,7 +85,7 @@ private:
 // };
 
 class Node;
-class NodeGraph;
+class GraphModel;
 
 // --- 新增: 定义操作元数据 ---
 // 用于描述一个操作对分块大小的偏好

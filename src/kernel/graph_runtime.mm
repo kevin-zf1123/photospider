@@ -21,7 +21,7 @@ struct GraphRuntime::GpuContext {
 };
 
 GraphRuntime::GraphRuntime(const Info& info)
-    : info_(info), graph_(info.root / "cache") {
+    : info_(info), model_(info.root / "cache") {
     std::filesystem::create_directories(info_.root);
     std::filesystem::create_directories(info_.root / "cache");
 
@@ -334,7 +334,6 @@ void GraphRuntime::dec_graph_tasks_to_complete() {
 
 void GraphRuntime::inc_graph_tasks_to_complete(int delta) {
     if (delta <= 0) return;
-    // Relaxed is fine; wait_for_completion observes acquire load and CV guards completion.
     tasks_to_complete_.fetch_add(delta, std::memory_order_relaxed);
 }
 

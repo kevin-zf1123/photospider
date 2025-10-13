@@ -14,7 +14,7 @@
 
 #include "ps_types.hpp"
 #include "node.hpp"
-#include "node_graph.hpp"
+#include "graph_model.hpp"
 
 // A base class for our interactive editors to share the screen instance.
 class TuiEditor {
@@ -30,6 +30,6 @@ namespace ps {
 
 // Launch the node editor UI. If initial_id has value, open directly on that node.
 // If not, open the node picker window first.
-void run_node_editor(NodeGraph &graph, std::optional<int> initial_id);
+void run_node_editor(GraphModel &graph, std::optional<int> initial_id);
 
 } // namespace ps

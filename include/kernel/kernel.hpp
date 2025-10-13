@@ -9,6 +9,10 @@
 #include <map>
 
 #include "kernel/graph_runtime.hpp"
+#include "kernel/services/graph_cache_service.hpp"
+#include "kernel/services/graph_io_service.hpp"
+#include "kernel/services/graph_traversal_service.hpp"
+#include "kernel/services/compute_service.hpp"
 #include "kernel/plugin_manager.hpp"
 #include <opencv2/opencv.hpp>
 
@@ -28,7 +32,7 @@ public:
     std::vector<std::string> list_graphs() const;
 
     template<typename Fn>
-    auto post(const std::string& name, Fn&& fn) -> std::future<decltype(fn(std::declval<NodeGraph&>()))> {
+    auto post(const std::string& name, Fn&& fn) -> std::future<decltype(fn(std::declval<GraphModel&>()))> {
         auto it = graphs_.find(name);
         if (it == graphs_.end()) {
             throw std::runtime_error("Graph not found: " + name);
@@ -56,11 +60,11 @@ public:
     bool synchronize_disk_cache(const std::string& name, const std::string& cache_precision);
     bool clear_graph(const std::string& name);
 
-    std::optional<NodeGraph::DriveClearResult> clear_drive_cache_stats(const std::string& name);
-    std::optional<NodeGraph::MemoryClearResult> clear_memory_cache_stats(const std::string& name);
-    std::optional<NodeGraph::CacheSaveResult> cache_all_nodes_stats(const std::string& name, const std::string& cache_precision);
-    std::optional<NodeGraph::MemoryClearResult> free_transient_memory_stats(const std::string& name);
-    std::optional<NodeGraph::DiskSyncResult> synchronize_disk_cache_stats(const std::string& name, const std::string& cache_precision);
+    std::optional<GraphModel::DriveClearResult> clear_drive_cache_stats(const std::string& name);
+    std::optional<GraphModel::MemoryClearResult> clear_memory_cache_stats(const std::string& name);
+    std::optional<GraphModel::CacheSaveResult> cache_all_nodes_stats(const std::string& name, const std::string& cache_precision);
+    std::optional<GraphModel::MemoryClearResult> free_transient_memory_stats(const std::string& name);
+    std::optional<GraphModel::DiskSyncResult> synchronize_disk_cache_stats(const std::string& name, const std::string& cache_precision);
 
     std::optional<std::string> dump_dependency_tree(const std::string& name, std::optional<int> node_id, bool show_parameters);
     std::optional<LastError> last_error(const std::string& name) const;
@@ -74,7 +78,7 @@ public:
         bool has_disk_cache;
     };
     std::optional<std::map<int, std::vector<TraversalNodeInfo>>> traversal_details(const std::string& name);
-    std::optional<std::vector<NodeGraph::ComputeEvent>> drain_compute_events(const std::string& name);
+    std::optional<std::vector<GraphEventService::ComputeEvent>> drain_compute_events(const std::string& name);
     std::optional<cv::Mat> compute_and_get_image(const std::string& name, int node_id, const std::string& cache_precision,
                                                  bool force_recache, bool enable_timing, bool parallel,
                                                  bool disable_disk_cache = false,
@@ -96,6 +100,9 @@ private:
     std::map<std::string, std::unique_ptr<GraphRuntime>> graphs_;
     PluginManager plugin_mgr_;
     std::map<std::string, LastError> last_error_;
+    GraphTraversalService traversal_service_;
+    GraphCacheService cache_service_;
+    GraphIOService io_service_;
 };
 
 } // namespace ps
