@@ -1,6 +1,7 @@
 #pragma once
 #include "ps_types.hpp"
 #include "node.hpp"
+#include <opencv2/core.hpp>
 #include <unordered_set>
 #include <thread>
 #include <mutex>
@@ -145,6 +146,15 @@ public:
                                  bool allow_disk_cache,
                                  std::vector<BenchmarkEvent>* benchmark_events);
 private:
+    NodeOutput& compute_real_time_update(GraphRuntime* runtime,
+                                         int node_id,
+                                         const std::string& cache_precision,
+                                         bool force_recache,
+                                         bool enable_timing,
+                                         bool disable_disk_cache,
+                                         std::vector<BenchmarkEvent>* benchmark_events,
+                                         const cv::Rect& dirty_roi);
+
     bool is_ancestor(int potential_ancestor_id, int node_id, std::unordered_set<int>& visited) const; 
     std::vector<int> parents_of(int node_id) const;
 

@@ -12,6 +12,94 @@
 #include <random>
 #include <unordered_set>
 #include <unordered_map>
+#include <cstring>
+#include <functional>
+#include <optional>
+
+namespace {
+
+constexpr int kRtDownscaleFactor = 4;
+constexpr int kRtTileSize = 16;
+constexpr int kHpAlignment = kRtDownscaleFactor * kRtTileSize; // 64px alignment on full-res
+
+inline bool is_rect_empty(const cv::Rect& rect) {
+    return rect.width <= 0 || rect.height <= 0;
+}
+
+inline cv::Rect clip_rect(const cv::Rect& rect, const cv::Size& bounds) {
+    if (bounds.width <= 0 || bounds.height <= 0) return cv::Rect();
+    int x0 = std::clamp(rect.x, 0, bounds.width);
+    int y0 = std::clamp(rect.y, 0, bounds.height);
+    int x1 = std::clamp(rect.x + rect.width, 0, bounds.width);
+    int y1 = std::clamp(rect.y + rect.height, 0, bounds.height);
+    if (x1 <= x0 || y1 <= y0) return cv::Rect();
+    return cv::Rect(x0, y0, x1 - x0, y1 - y0);
+}
+
+inline cv::Rect expand_rect(const cv::Rect& rect, int padding) {
+    if (padding <= 0 || is_rect_empty(rect)) return rect;
+    int x0 = rect.x - padding;
+    int y0 = rect.y - padding;
+    int x1 = rect.x + rect.width + padding;
+    int y1 = rect.y + rect.height + padding;
+    return cv::Rect(x0, y0, x1 - x0, y1 - y0);
+}
+
+inline cv::Rect align_rect(const cv::Rect& rect, int alignment) {
+    if (is_rect_empty(rect) || alignment <= 1) return rect;
+    int x0 = (rect.x / alignment) * alignment;
+    int y0 = (rect.y / alignment) * alignment;
+    int x1 = ((rect.x + rect.width + alignment - 1) / alignment) * alignment;
+    int y1 = ((rect.y + rect.height + alignment - 1) / alignment) * alignment;
+    return cv::Rect(x0, y0, x1 - x0, y1 - y0);
+}
+
+inline cv::Rect merge_rect(const cv::Rect& a, const cv::Rect& b) {
+    if (is_rect_empty(a)) return b;
+    if (is_rect_empty(b)) return a;
+    int x0 = std::min(a.x, b.x);
+    int y0 = std::min(a.y, b.y);
+    int x1 = std::max(a.x + a.width, b.x + b.width);
+    int y1 = std::max(a.y + a.height, b.y + b.height);
+    return cv::Rect(x0, y0, x1 - x0, y1 - y0);
+}
+
+inline cv::Size scale_down_size(const cv::Size& size, int factor) {
+    if (size.width <= 0 || size.height <= 0) return cv::Size();
+    return cv::Size(
+        (size.width + factor - 1) / factor,
+        (size.height + factor - 1) / factor
+    );
+}
+
+inline cv::Rect scale_down_rect(const cv::Rect& rect, int factor) {
+    if (is_rect_empty(rect)) return cv::Rect();
+    int x0 = rect.x / factor;
+    int y0 = rect.y / factor;
+    int x1 = (rect.x + rect.width + factor - 1) / factor;
+    int y1 = (rect.y + rect.height + factor - 1) / factor;
+    return cv::Rect(x0, y0, std::max(0, x1 - x0), std::max(0, y1 - y0));
+}
+
+inline cv::Rect scale_up_rect(const cv::Rect& rect, int factor) {
+    if (is_rect_empty(rect)) return cv::Rect();
+    int x0 = rect.x * factor;
+    int y0 = rect.y * factor;
+    int x1 = (rect.x + rect.width) * factor;
+    int y1 = (rect.y + rect.height) * factor;
+    return cv::Rect(x0, y0, x1 - x0, y1 - y0);
+}
+
+struct RtPlanEntry {
+    cv::Rect roi_hp;
+    cv::Rect roi_rt;
+    cv::Size hp_size;
+    cv::Size rt_size;
+    int halo_hp = 0;
+    int halo_rt = 0;
+};
+
+} // anonymous namespace
 
 namespace ps {
 
@@ -215,6 +303,401 @@ NodeOutput& NodeGraph::compute_node_no_recurse(int node_id,
         push_compute_event(target_node.id, target_node.name, "computed", 0.0);
     }
     return *target_node.cached_output;
+}
+
+NodeOutput& NodeGraph::compute_real_time_update(GraphRuntime* runtime,
+                                                int node_id,
+                                                const std::string& cache_precision,
+                                                bool force_recache,
+                                                bool enable_timing,
+                                                bool disable_disk_cache,
+                                                std::vector<BenchmarkEvent>* benchmark_events,
+                                                const cv::Rect& dirty_roi)
+{
+    (void)runtime;
+    (void)cache_precision;
+    (void)disable_disk_cache;
+    (void)benchmark_events;
+    (void)enable_timing;
+
+    if (!has_node(node_id)) {
+        throw GraphError(GraphErrc::NotFound, "Cannot compute RT update: node " + std::to_string(node_id) + " not found.");
+    }
+
+    if (dirty_roi.width <= 0 || dirty_roi.height <= 0) {
+        throw GraphError(GraphErrc::InvalidParameter, "Cannot compute RT update: dirty ROI is empty.");
+    }
+
+    auto execution_order = topo_postorder_from(node_id);
+    if (execution_order.empty()) {
+        execution_order.push_back(node_id);
+    }
+
+    std::unordered_map<int, cv::Size> hp_size_cache;
+    std::function<cv::Size(int)> infer_hp_size = [&](int nid) -> cv::Size {
+        auto cached = hp_size_cache.find(nid);
+        if (cached != hp_size_cache.end()) return cached->second;
+
+        cv::Size size{0, 0};
+        const Node& node = nodes.at(nid);
+
+        auto take_from_output = [&](const std::optional<NodeOutput>& opt) -> bool {
+            if (!opt.has_value()) return false;
+            const auto& img = opt->image_buffer;
+            if (img.width <= 0 || img.height <= 0) return false;
+            size = cv::Size(img.width, img.height);
+            return true;
+        };
+
+        if (take_from_output(node.cached_output_high_precision)) {
+            hp_size_cache[nid] = size;
+            return size;
+        }
+        if (take_from_output(node.cached_output)) {
+            hp_size_cache[nid] = size;
+            return size;
+        }
+        if (node.cached_output_real_time) {
+            const auto& img = node.cached_output_real_time->image_buffer;
+            if (img.width > 0 && img.height > 0) {
+                size = cv::Size(img.width * kRtDownscaleFactor, img.height * kRtDownscaleFactor);
+                hp_size_cache[nid] = size;
+                return size;
+            }
+        }
+
+        for (const auto& input : node.image_inputs) {
+            if (input.from_node_id < 0) continue;
+            cv::Size parent_size = infer_hp_size(input.from_node_id);
+            if (parent_size.width > 0 && parent_size.height > 0) {
+                size = parent_size;
+                break;
+            }
+        }
+
+        if (size.width <= 0 || size.height <= 0) {
+            int width = as_int_flexible(node.parameters, "width", 0);
+            int height = as_int_flexible(node.parameters, "height", 0);
+            if (width > 0 && height > 0) {
+                size = cv::Size(width, height);
+            }
+        }
+
+        hp_size_cache[nid] = size;
+        return size;
+    };
+
+    auto infer_halo_hp = [&](const Node& node) -> int {
+        if (node.type == "image_process" && node.subtype == "gaussian_blur") {
+            int k = as_int_flexible(node.parameters, "ksize", 3);
+            if (k <= 0) k = 1;
+            if (k % 2 == 0) k += 1;
+            return std::max(0, k / 2);
+        }
+        return 0;
+    };
+
+    std::unordered_map<int, RtPlanEntry> plan;
+    auto ensure_entry = [&](int nid) -> RtPlanEntry& {
+        auto [it, inserted] = plan.emplace(nid, RtPlanEntry{});
+        if (inserted) {
+            it->second.hp_size = infer_hp_size(nid);
+            it->second.rt_size = scale_down_size(it->second.hp_size, kRtDownscaleFactor);
+            it->second.halo_hp = infer_halo_hp(nodes.at(nid));
+            it->second.halo_rt = (it->second.halo_hp + kRtDownscaleFactor - 1) / kRtDownscaleFactor;
+        } else {
+            if (it->second.hp_size.width <= 0 || it->second.hp_size.height <= 0) {
+                it->second.hp_size = infer_hp_size(nid);
+                it->second.rt_size = scale_down_size(it->second.hp_size, kRtDownscaleFactor);
+            }
+            if (it->second.halo_hp == 0) {
+                it->second.halo_hp = infer_halo_hp(nodes.at(nid));
+                it->second.halo_rt = (it->second.halo_hp + kRtDownscaleFactor - 1) / kRtDownscaleFactor;
+            }
+        }
+        return it->second;
+    };
+
+    RtPlanEntry& target_entry = ensure_entry(node_id);
+    target_entry.roi_hp = clip_rect(align_rect(dirty_roi, kHpAlignment), target_entry.hp_size);
+    if (is_rect_empty(target_entry.roi_hp)) {
+        throw GraphError(GraphErrc::InvalidParameter, "Dirty ROI does not intersect node output.");
+    }
+    target_entry.roi_rt = clip_rect(
+        align_rect(scale_down_rect(target_entry.roi_hp, kRtDownscaleFactor), kRtTileSize),
+        target_entry.rt_size
+    );
+    if (is_rect_empty(target_entry.roi_rt)) {
+        throw GraphError(GraphErrc::InvalidParameter, "Dirty ROI collapses after RT scaling.");
+    }
+
+    for (auto it = execution_order.rbegin(); it != execution_order.rend(); ++it) {
+        int current_id = *it;
+        auto plan_it = plan.find(current_id);
+        if (plan_it == plan.end()) continue;
+
+        RtPlanEntry& current_entry = plan_it->second;
+        if (is_rect_empty(current_entry.roi_hp)) continue;
+
+        const Node& current_node = nodes.at(current_id);
+        current_entry.halo_hp = std::max(current_entry.halo_hp, infer_halo_hp(current_node));
+        current_entry.halo_rt = (current_entry.halo_hp + kRtDownscaleFactor - 1) / kRtDownscaleFactor;
+
+        cv::Rect upstream_roi_hp = current_entry.roi_hp;
+        if (current_entry.halo_hp > 0) {
+            upstream_roi_hp = expand_rect(upstream_roi_hp, current_entry.halo_hp);
+        }
+
+        for (const auto& img_input : current_node.image_inputs) {
+            if (img_input.from_node_id < 0) continue;
+            int parent_id = img_input.from_node_id;
+            RtPlanEntry& parent_entry = ensure_entry(parent_id);
+            cv::Rect parent_roi = clip_rect(align_rect(upstream_roi_hp, kHpAlignment), parent_entry.hp_size);
+            if (is_rect_empty(parent_roi)) continue;
+            parent_entry.roi_hp = is_rect_empty(parent_entry.roi_hp)
+                                   ? parent_roi
+                                   : clip_rect(merge_rect(parent_entry.roi_hp, parent_roi), parent_entry.hp_size);
+        }
+    }
+
+    std::vector<int> erase_ids;
+    erase_ids.reserve(plan.size());
+    for (auto& kv : plan) {
+        auto& entry = kv.second;
+        if (entry.hp_size.width <= 0 || entry.hp_size.height <= 0) {
+            erase_ids.push_back(kv.first);
+            continue;
+        }
+        entry.roi_hp = clip_rect(align_rect(entry.roi_hp, kHpAlignment), entry.hp_size);
+        if (is_rect_empty(entry.roi_hp)) {
+            erase_ids.push_back(kv.first);
+            continue;
+        }
+        entry.rt_size = scale_down_size(entry.hp_size, kRtDownscaleFactor);
+        entry.roi_rt = clip_rect(
+            align_rect(scale_down_rect(entry.roi_hp, kRtDownscaleFactor), kRtTileSize),
+            entry.rt_size
+        );
+        if (is_rect_empty(entry.roi_rt)) {
+            erase_ids.push_back(kv.first);
+            continue;
+        }
+        if (entry.halo_hp == 0) {
+            entry.halo_hp = infer_halo_hp(nodes.at(kv.first));
+            entry.halo_rt = (entry.halo_hp + kRtDownscaleFactor - 1) / kRtDownscaleFactor;
+        }
+    }
+    for (int nid : erase_ids) {
+        plan.erase(nid);
+    }
+
+    if (plan.empty()) {
+        throw GraphError(GraphErrc::InvalidParameter, "RT planner produced empty execution set.");
+    }
+
+    if (force_recache) {
+        for (const auto& kv : plan) {
+            Node& node = nodes.at(kv.first);
+            node.cached_output_real_time.reset();
+            node.rt_roi.reset();
+            node.rt_version = 0;
+        }
+    }
+
+    auto compute_node_rt = [&](int nid, RtPlanEntry& entry) {
+        Node& node = nodes.at(nid);
+        if (is_rect_empty(entry.roi_rt)) return;
+
+        YAML::Node runtime_params = node.parameters ? YAML::Clone(node.parameters)
+                                                    : YAML::Node(YAML::NodeType::Map);
+        for (const auto& p_input : node.parameter_inputs) {
+            if (p_input.from_node_id < 0) continue;
+            const Node& parent_node = nodes.at(p_input.from_node_id);
+            const NodeOutput* parent_out = nullptr;
+            if (parent_node.cached_output_real_time) {
+                parent_out = &*parent_node.cached_output_real_time;
+            } else if (parent_node.cached_output_high_precision) {
+                parent_out = &*parent_node.cached_output_high_precision;
+            } else if (parent_node.cached_output) {
+                parent_out = &*parent_node.cached_output;
+            }
+            if (!parent_out) {
+                throw GraphError(GraphErrc::MissingDependency,
+                                 "RT parameter input not ready for node " + std::to_string(nid));
+            }
+            auto it_val = parent_out->data.find(p_input.from_output_name);
+            if (it_val == parent_out->data.end()) {
+                throw GraphError(GraphErrc::MissingDependency,
+                                 "RT parameter '" + p_input.from_output_name + "' missing for node " + std::to_string(nid));
+            }
+            runtime_params[p_input.to_parameter_name] = it_val->second;
+        }
+        node.runtime_parameters = runtime_params;
+
+        std::vector<const NodeOutput*> image_inputs_ready;
+        image_inputs_ready.reserve(node.image_inputs.size());
+        for (const auto& img_input : node.image_inputs) {
+            if (img_input.from_node_id < 0) continue;
+            Node& parent_node = nodes.at(img_input.from_node_id);
+            const NodeOutput* parent_out = nullptr;
+            if (parent_node.cached_output_real_time) {
+                parent_out = &*parent_node.cached_output_real_time;
+            } else if (parent_node.cached_output_high_precision) {
+                parent_out = &*parent_node.cached_output_high_precision;
+            } else if (parent_node.cached_output) {
+                parent_out = &*parent_node.cached_output;
+            }
+            if (!parent_out) {
+                throw GraphError(GraphErrc::MissingDependency,
+                                 "RT image input not ready for node " + std::to_string(nid));
+            }
+            image_inputs_ready.push_back(parent_out);
+        }
+
+        auto op_variant = OpRegistry::instance().resolve_for_intent(
+            node.type, node.subtype, ComputeIntent::RealTimeUpdate);
+        if (!op_variant) {
+            op_variant = OpRegistry::instance().resolve_for_intent(
+                node.type, node.subtype, ComputeIntent::GlobalHighPrecision);
+        }
+        if (!op_variant) {
+            throw GraphError(GraphErrc::NoOperation,
+                             "No operator registered for node " + node.type + ":" + node.subtype);
+        }
+
+        auto infer_output_spec = [&]() -> std::pair<int, DataType> {
+            if (node.cached_output_real_time) {
+                const auto& buf = node.cached_output_real_time->image_buffer;
+                if (buf.width > 0 && buf.height > 0 && buf.channels > 0) {
+                    return {buf.channels, buf.type};
+                }
+            }
+            for (const auto* input_out : image_inputs_ready) {
+                const auto& buf = input_out->image_buffer;
+                if (buf.width > 0 && buf.height > 0 && buf.channels > 0) {
+                    return {buf.channels, buf.type};
+                }
+            }
+            if (node.cached_output_high_precision) {
+                const auto& buf = node.cached_output_high_precision->image_buffer;
+                if (buf.width > 0 && buf.height > 0 && buf.channels > 0) {
+                    return {buf.channels, buf.type};
+                }
+            }
+            return {1, DataType::FLOAT32};
+        };
+
+        auto [channels, dtype] = infer_output_spec();
+        if (!node.cached_output_real_time) {
+            node.cached_output_real_time = NodeOutput{};
+        }
+        ImageBuffer& rt_buffer = node.cached_output_real_time->image_buffer;
+        bool needs_alloc = (rt_buffer.width != entry.rt_size.width) ||
+                           (rt_buffer.height != entry.rt_size.height) ||
+                           (rt_buffer.channels != channels) ||
+                           (rt_buffer.type != dtype) ||
+                           (!rt_buffer.data);
+        if (needs_alloc) {
+            rt_buffer.width = entry.rt_size.width;
+            rt_buffer.height = entry.rt_size.height;
+            rt_buffer.channels = channels;
+            rt_buffer.type = dtype;
+            rt_buffer.device = Device::CPU;
+            size_t pixel_size = sizeof(float);
+            size_t row_bytes = static_cast<size_t>(rt_buffer.width) * channels * pixel_size;
+            rt_buffer.step = row_bytes;
+            rt_buffer.data.reset(new char[row_bytes * rt_buffer.height], std::default_delete<char[]>());
+            std::memset(rt_buffer.data.get(), 0, row_bytes * rt_buffer.height);
+        }
+
+        try {
+            std::visit([&](auto&& fn) {
+                using T = std::decay_t<decltype(fn)>;
+                if constexpr (std::is_same_v<T, MonolithicOpFunc>) {
+                    NodeOutput result = fn(node, image_inputs_ready);
+                    if (result.image_buffer.width > 0 && result.image_buffer.height > 0) {
+                        cv::Mat result_mat = toCvMat(result.image_buffer);
+                        if (result_mat.cols != entry.rt_size.width || result_mat.rows != entry.rt_size.height) {
+                            cv::resize(result_mat, result_mat,
+                                       cv::Size(entry.rt_size.width, entry.rt_size.height),
+                                       0, 0, cv::INTER_LINEAR);
+                        }
+                        cv::Mat dest = toCvMat(rt_buffer);
+                        result_mat(entry.roi_rt).copyTo(dest(entry.roi_rt));
+                    }
+                    node.cached_output_real_time->data = result.data;
+                } else if constexpr (std::is_same_v<T, TileOpFunc>) {
+                    if (image_inputs_ready.empty()) {
+                        throw GraphError(GraphErrc::MissingDependency,
+                                         "RT tiled op requires image inputs for node " + std::to_string(nid));
+                    }
+                    TileTask task;
+                    task.node = &node;
+                    task.output_tile.buffer = &rt_buffer;
+                    const cv::Size out_bounds(rt_buffer.width, rt_buffer.height);
+                    const int halo_rt = entry.halo_rt;
+                    for (int y = entry.roi_rt.y; y < entry.roi_rt.y + entry.roi_rt.height; y += kRtTileSize) {
+                        for (int x = entry.roi_rt.x; x < entry.roi_rt.x + entry.roi_rt.width; x += kRtTileSize) {
+                            int tile_w = std::min(kRtTileSize, entry.roi_rt.x + entry.roi_rt.width - x);
+                            int tile_h = std::min(kRtTileSize, entry.roi_rt.y + entry.roi_rt.height - y);
+                            cv::Rect tile_roi(x, y, tile_w, tile_h);
+                            tile_roi = clip_rect(tile_roi, out_bounds);
+                            if (is_rect_empty(tile_roi)) continue;
+                            task.output_tile.roi = tile_roi;
+                            task.input_tiles.clear();
+                            for (const NodeOutput* input_out : image_inputs_ready) {
+                                Tile input_tile;
+                                input_tile.buffer = const_cast<ImageBuffer*>(&input_out->image_buffer);
+                                cv::Rect input_roi = tile_roi;
+                                if (halo_rt > 0) {
+                                    input_roi = expand_rect(input_roi, halo_rt);
+                                }
+                                input_roi = clip_rect(input_roi,
+                                                      cv::Size(input_out->image_buffer.width,
+                                                               input_out->image_buffer.height));
+                                if (is_rect_empty(input_roi)) {
+                                    input_roi = clip_rect(tile_roi,
+                                                          cv::Size(input_out->image_buffer.width,
+                                                                   input_out->image_buffer.height));
+                                }
+                                input_tile.roi = input_roi;
+                                task.input_tiles.push_back(input_tile);
+                            }
+                            execute_tile_task(task, fn);
+                        }
+                    }
+                }
+            }, *op_variant);
+        } catch (const cv::Exception& e) {
+            throw GraphError(GraphErrc::ComputeError,
+                             "RT compute failed at node " + std::to_string(nid) + ": " + std::string(e.what()));
+        } catch (const GraphError&) {
+            throw;
+        } catch (const std::exception& e) {
+            throw GraphError(GraphErrc::ComputeError,
+                             "RT compute failed at node " + std::to_string(nid) + ": " + std::string(e.what()));
+        }
+
+        if (node.rt_roi.has_value()) {
+            node.rt_roi = clip_rect(merge_rect(*node.rt_roi, entry.roi_hp), entry.hp_size);
+        } else {
+            node.rt_roi = entry.roi_hp;
+        }
+        node.rt_version++;
+        push_compute_event(node.id, node.name, "rt_update", 0.0);
+    };
+
+    for (int nid : execution_order) {
+        auto it = plan.find(nid);
+        if (it == plan.end()) continue;
+        compute_node_rt(nid, it->second);
+    }
+
+    Node& target = nodes.at(node_id);
+    if (!target.cached_output_real_time) {
+        throw GraphError(GraphErrc::ComputeError, "RT compute finished without target output.");
+    }
+    return *target.cached_output_real_time;
 }
 
 NodeOutput& NodeGraph::compute_parallel(
@@ -713,15 +1196,22 @@ NodeOutput& NodeGraph::compute_parallel(
     bool enable_timing,
     bool disable_disk_cache,
     std::vector<BenchmarkEvent>* benchmark_events,
-    std::optional<cv::Rect> /*dirty_roi*/)
+    std::optional<cv::Rect> dirty_roi)
 {
     switch (intent) {
         case ComputeIntent::GlobalHighPrecision:
             // Use existing Global HP path (monolithic preferred; else MACRO tiled)
             return compute_parallel(runtime, node_id, cache_precision, force_recache, enable_timing, disable_disk_cache, benchmark_events);
         case ComputeIntent::RealTimeUpdate:
+            if (!dirty_roi.has_value()) {
+                throw GraphError(GraphErrc::InvalidParameter,
+                                 "RealTimeUpdate intent requires a dirty ROI region.");
+            }
+            return compute_real_time_update(&runtime, node_id, cache_precision,
+                                            force_recache, enable_timing,
+                                            disable_disk_cache, benchmark_events,
+                                            *dirty_roi);
         default:
-            // Phase 1: RT path not yet implemented; fallback to HP path to keep behavior unchanged
             return compute_parallel(runtime, node_id, cache_precision, force_recache, enable_timing, disable_disk_cache, benchmark_events);
     }
 }
