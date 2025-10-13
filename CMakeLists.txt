@@ -108,6 +108,7 @@ set(PHOTOSPIDER_COMPUTE_SOURCES
     src/kernel/services/graph_event_service.cpp
     src/kernel/kernel.cpp
     src/kernel/interaction.cpp
+    src/kernel/interaction_benchmark.cpp
 )
 if(APPLE)
     list(APPEND PHOTOSPIDER_COMPUTE_SOURCES src/kernel/graph_runtime.mm)

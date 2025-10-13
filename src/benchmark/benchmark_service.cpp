@@ -199,7 +199,7 @@ std::vector<BenchmarkResult> BenchmarkService::RunAll(const std::string& benchma
     // std::cout << "Cleaning up previous benchmark artifacts in '" << benchmark_dir << "'..." << std::endl;
     cleanup_generated_files(benchmark_dir);
 
-    auto configs = load_configs(benchmark_dir);
+    auto configs = load_configs_internal(benchmark_dir);
     std::vector<BenchmarkResult> results;
     for (const auto& config : configs) {
         if (config.enabled) {
@@ -216,7 +216,7 @@ std::vector<BenchmarkResult> BenchmarkService::RunAll(const std::string& benchma
 }
 
 
-std::vector<BenchmarkSessionConfig> BenchmarkService::load_configs(const std::string& benchmark_dir) {
+std::vector<BenchmarkSessionConfig> BenchmarkService::load_configs_internal(const std::string& benchmark_dir) {
     fs::path config_path = fs::path(benchmark_dir) / "benchmark_config.yaml";
     if (!fs::exists(config_path)) {
         throw std::runtime_error("benchmark_config.yaml not found in: " + benchmark_dir);
@@ -252,6 +252,14 @@ std::vector<BenchmarkSessionConfig> BenchmarkService::load_configs(const std::st
         configs.push_back(cfg);
     }
     return configs;
+}
+
+std::vector<BenchmarkSessionConfig> BenchmarkService::LoadConfigs(const std::string& benchmark_dir) {
+    return load_configs_internal(benchmark_dir);
+}
+
+void BenchmarkService::CleanupArtifacts(const std::string& benchmark_dir) {
+    cleanup_generated_files(benchmark_dir);
 }
 
 } // namespace ps
