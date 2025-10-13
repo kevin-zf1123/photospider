@@ -53,34 +53,102 @@ add_library(ftxui-component STATIC ${FTXUI_COMPONENT_SOURCES})
 target_include_directories(ftxui-component PUBLIC ${FTXUI_INCLUDE_DIR} PRIVATE ${FTXUI_SRC_DIR})
 target_link_libraries(ftxui-component PUBLIC ftxui-dom)
 
-# --- [核心修复] 将核心逻辑库从 STATIC 改为 SHARED ---
-file(GLOB_RECURSE CORE_LIB_SOURCES 
-    "src/*.cpp"
-    "src/*.hpp"
-)
-list(FILTER CORE_LIB_SOURCES EXCLUDE REGEX ".*\\.mm$")
-add_library(photospider_lib SHARED ${CORE_LIB_SOURCES})
-target_compile_definitions(photospider_lib PRIVATE PHOTOSPIDER_LIB_BUILD)
 if(APPLE)
-    target_sources(photospider_lib PRIVATE src/kernel/graph_runtime.mm)
+    enable_language(OBJCXX)
 endif()
 
-# [*** 本次修复的核心点 ***]
-# 明确设置符号可见性策略，以确保符号被正确导出。
-set_target_properties(photospider_lib PROPERTIES
-    CXX_VISIBILITY_PRESET default  # 默认导出所有符号
-    DEFINE_SYMBOL "PHOTOSPIDER_LIBRARY" # 可选，用于控制 dllexport/import
+# --- Modular Photospider Libraries ---
+set(PHOTOSPIDER_CORE_TYPES_SOURCES
+    src/ps_types.cpp
+    src/adapter/buffer_adapter_opencv.cpp
+    src/ops.cpp
+    src/kernel/node_module/node_yaml.cpp
 )
-if(WIN32)
-    # 在 Windows 上，这个属性会自动处理 __declspec(dllexport)
-    set_target_properties(photospider_lib PROPERTIES WINDOWS_EXPORT_ALL_SYMBOLS ON)
-endif()
 
-target_include_directories(photospider_lib PUBLIC 
+add_library(photospider_core_types STATIC ${PHOTOSPIDER_CORE_TYPES_SOURCES})
+target_include_directories(photospider_core_types PUBLIC
+    "${PROJECT_SOURCE_DIR}/include"
+    "${PROJECT_SOURCE_DIR}/src"
+    ${OpenCV_INCLUDE_DIRS}
+)
+target_link_libraries(photospider_core_types PUBLIC yaml-cpp::yaml-cpp)
+set_target_properties(photospider_core_types PROPERTIES POSITION_INDEPENDENT_CODE ON)
+
+set(PHOTOSPIDER_GRAPH_SOURCES
+    src/kernel/graph_model.cpp
+    src/kernel/services/graph_traversal_service.cpp
+    src/kernel/services/graph_io_service.cpp
+    src/kernel/services/graph_cache_service.cpp
+)
+
+add_library(photospider_graph STATIC ${PHOTOSPIDER_GRAPH_SOURCES})
+target_include_directories(photospider_graph PUBLIC
+    "${PROJECT_SOURCE_DIR}/include"
+    "${PROJECT_SOURCE_DIR}/src"
+    ${OpenCV_INCLUDE_DIRS}
+)
+target_link_libraries(photospider_graph PUBLIC photospider_core_types)
+set_target_properties(photospider_graph PROPERTIES POSITION_INDEPENDENT_CODE ON)
+
+set(PHOTOSPIDER_PLUGIN_SOURCES
+    src/kernel/plugin_manager.cpp
+    src/kernel/plugin_manage_module/plugin_loader.cpp
+)
+
+add_library(photospider_plugin STATIC ${PHOTOSPIDER_PLUGIN_SOURCES})
+target_include_directories(photospider_plugin PUBLIC
     "${PROJECT_SOURCE_DIR}/include"
     "${PROJECT_SOURCE_DIR}/src"
 )
+target_link_libraries(photospider_plugin PUBLIC photospider_core_types)
+set_target_properties(photospider_plugin PROPERTIES POSITION_INDEPENDENT_CODE ON)
+
+set(PHOTOSPIDER_COMPUTE_SOURCES
+    src/kernel/services/compute_service.cpp
+    src/kernel/services/graph_event_service.cpp
+    src/kernel/kernel.cpp
+    src/kernel/interaction.cpp
+)
+if(APPLE)
+    list(APPEND PHOTOSPIDER_COMPUTE_SOURCES src/kernel/graph_runtime.mm)
+endif()
+
+add_library(photospider_compute STATIC ${PHOTOSPIDER_COMPUTE_SOURCES})
+target_include_directories(photospider_compute PUBLIC
+    "${PROJECT_SOURCE_DIR}/include"
+    "${PROJECT_SOURCE_DIR}/src"
+    ${OpenCV_INCLUDE_DIRS}
+)
+target_link_libraries(photospider_compute PUBLIC photospider_graph photospider_plugin)
+set_target_properties(photospider_compute PROPERTIES POSITION_INDEPENDENT_CODE ON)
+
+file(GLOB_RECURSE PHOTOSPIDER_CLI_SOURCES
+    "src/cli/*.cpp"
+    "src/benchmark/*.cpp"
+    "src/cli_config.cpp"
+)
+
+add_library(photospider_lib SHARED ${PHOTOSPIDER_CLI_SOURCES})
+target_compile_definitions(photospider_lib PRIVATE PHOTOSPIDER_LIB_BUILD)
+
+set_target_properties(photospider_lib PROPERTIES
+    CXX_VISIBILITY_PRESET default
+    DEFINE_SYMBOL "PHOTOSPIDER_LIBRARY"
+)
+if(WIN32)
+    set_target_properties(photospider_lib PROPERTIES WINDOWS_EXPORT_ALL_SYMBOLS ON)
+endif()
+
+target_include_directories(photospider_lib PUBLIC
+    "${PROJECT_SOURCE_DIR}/include"
+    "${PROJECT_SOURCE_DIR}/src"
+)
+
 target_link_libraries(photospider_lib PUBLIC
+    photospider_core_types
+    photospider_graph
+    photospider_compute
+    photospider_plugin
     ftxui-component
     ${OpenCV_LIBS}
     yaml-cpp::yaml-cpp
@@ -129,8 +197,6 @@ if(APPLE)
     set(METAL_OPS_DIR  ${METAL_ROOT_DIR}/ops)
     file(MAKE_DIRECTORY ${METAL_ROOT_DIR})
     file(MAKE_DIRECTORY ${METAL_OPS_DIR})
-
-    enable_language(OBJCXX)
 
     find_library(METAL_FRAMEWORK Metal REQUIRED)
     find_library(FOUNDATION_FRAMEWORK Foundation REQUIRED)

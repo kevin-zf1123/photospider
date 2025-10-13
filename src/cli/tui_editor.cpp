@@ -3,6 +3,8 @@
 
 #include "cli/tui_editor.hpp"
 
+#include "kernel/services/graph_traversal_service.hpp"
+
 #include <algorithm>
 #include <filesystem>
 #include <fstream>
@@ -25,10 +27,12 @@ namespace ps {
 // -----------------------------------------------------------------------------
 // Helpers to gather node ids and pretty titles
 // -----------------------------------------------------------------------------
-static std::vector<int> SortedNodeIds(const NodeGraph &g) {
+static std::vector<int> SortedNodeIds(const GraphModel &g) {
+  GraphTraversalService traversal;
   std::set<int> s;
-  for (int end_id : g.ending_nodes()) {
-    auto order = g.topo_postorder_from(end_id);
+  auto ends = traversal.ending_nodes(g);
+  for (int end_id : ends) {
+    auto order = traversal.topo_postorder_from(g, end_id);
     s.insert(order.begin(), order.end());
     s.insert(end_id);
   }
@@ -162,7 +166,7 @@ static Element DrawTreePaneContent(const TreePaneState &pane) {
 // -----------------------------------------------------------------------------
 class NodePicker {
  public:
-  explicit NodePicker(NodeGraph &graph) : graph_(graph) {
+  explicit NodePicker(GraphModel &graph) : graph_(graph) {
     ids_ = SortedNodeIds(graph_);
     entries_.reserve(ids_.size());
     for (int id : ids_) entries_.push_back(std::to_string(id));
@@ -190,7 +194,7 @@ class NodePicker {
   }
 
  private:
-  NodeGraph &graph_;
+  GraphModel &graph_;
   std::vector<int> ids_;
   std::vector<std::string> entries_;
   int selected_index_ = 0;
@@ -205,7 +209,7 @@ class NodePicker {
 // -----------------------------------------------------------------------------
 class NodeEditorUI {
  public:
-  NodeEditorUI(NodeGraph &graph, int node_id)
+  NodeEditorUI(GraphModel &graph, int node_id)
       : graph_(graph), active_node_id_(node_id) {
     ids_ = SortedNodeIds(graph_);
     auto it = std::find(ids_.begin(), ids_.end(), node_id);
@@ -349,16 +353,17 @@ class NodeEditorUI {
 
   void RefreshTrees() {
     const bool detailed = (detail_mode_index_ == 0); // 0=Full, 1=Simplified
-    tree_full_.text = [&]{ std::stringstream ss; graph_.print_dependency_tree(ss, detailed); return ss.str(); }();
+    GraphTraversalService traversal;
+    tree_full_.text = [&]{ std::stringstream ss; traversal.print_dependency_tree(graph_, ss, detailed); return ss.str(); }();
 
     if (tree_context_mode_index_ == 0) {
-      std::stringstream ss; graph_.print_dependency_tree(ss, active_node_id_, detailed); tree_context_.text = ss.str();
+      std::stringstream ss; traversal.print_dependency_tree(graph_, ss, active_node_id_, detailed); tree_context_.text = ss.str();
     } else {
       std::stringstream ss;
-      auto trees = graph_.get_trees_containing_node(active_node_id_);
+      auto trees = traversal.get_trees_containing_node(graph_, active_node_id_);
       for (size_t i=0;i<trees.size();++i) {
         ss << "[Tree #" << (i+1) << "] ending at node " << trees[i] << "\n";
-        graph_.print_dependency_tree(ss, trees[i], detailed);
+        traversal.print_dependency_tree(graph_, ss, trees[i], detailed);
         ss << "\n";
       }
       tree_context_.text = ss.str();
@@ -407,7 +412,7 @@ class NodeEditorUI {
   void ShowToast(const std::string &msg) { status_ = msg; /* could be extended to timed banner */ }
 
  private:
-  NodeGraph &graph_;
+  GraphModel &graph_;
   ScreenInteractive *screen_ = nullptr;
 
   // IDs
@@ -456,7 +461,7 @@ class NodeEditorUI {
 // -----------------------------------------------------------------------------
 // Entry point
 // -----------------------------------------------------------------------------
-void run_node_editor(NodeGraph &graph, std::optional<int> initial_id) {
+void run_node_editor(GraphModel &graph, std::optional<int> initial_id) {
   ScreenInteractive screen = ScreenInteractive::Fullscreen();
   int start_id = -1;
   if (!initial_id.has_value()) {

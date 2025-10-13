@@ -57,8 +57,8 @@ std::optional<std::string> Kernel::load_graph(const std::string& name,
 
     if (std::filesystem::exists(final_yaml_to_load)) {
         try {
-            rt->post([yaml = final_yaml_to_load](NodeGraph& g){
-                g.load_yaml(yaml);
+            rt->post([this, yaml = final_yaml_to_load](GraphModel& g){
+                io_service_.load(g, yaml);
                 return 0;
             }).get();
         } catch (const std::exception& e) {
@@ -99,32 +99,37 @@ bool Kernel::compute(const std::string& name, int node_id, const std::string& ca
     try {
         auto& runtime = *it->second;
         if (!runtime.running()) runtime.start();
-        auto& graph = runtime.get_nodegraph();
-        // set skip-save flag for this compute
-        runtime.post([&](NodeGraph& g){ g.set_skip_save_cache(nosave); return 0; }).get();
-        graph.set_quiet(quiet);
-        
+        auto& model = runtime.model();
+        runtime.post([nosave](GraphModel& g){ g.set_skip_save_cache(nosave); return 0; }).get();
+        model.set_quiet(quiet);
+
         if (parallel) {
-            graph.compute_parallel(runtime, node_id, cache_precision, force_recache, enable_timing, disable_disk_cache, benchmark_events);
+            ComputeService compute_service(traversal_service_, cache_service_, runtime.event_service());
+            compute_service.compute_parallel(model,
+                                             runtime,
+                                             node_id,
+                                             cache_precision,
+                                             force_recache,
+                                             enable_timing,
+                                             disable_disk_cache,
+                                             benchmark_events);
         } else {
             const int id = node_id;
             const std::string precision = cache_precision;
             const bool frc = force_recache;
             const bool timing = enable_timing;
             const bool disable_dc = disable_disk_cache;
-            auto fut = runtime.post([=](NodeGraph& g){
-                g.compute(id, precision, frc, timing, disable_dc, benchmark_events);
+            auto fut = runtime.post([this, &runtime, id, precision, frc, timing, disable_dc, benchmark_events](GraphModel& g){
+                ComputeService compute_service(traversal_service_, cache_service_, runtime.event_service());
+                compute_service.compute(g, id, precision, frc, timing, disable_dc, benchmark_events);
                 return 0;
             });
-            // Await the posted sequential compute job
             fut.get();
-            // If the posted job raised and was captured by GraphRuntime::post, surface it here
-            // by leveraging the scheduler's exception channel.
             runtime.wait_for_completion();
         }
 
         last_error_.erase(name);
-        runtime.post([&](NodeGraph& g){ g.set_skip_save_cache(false); return 0; }).get();
+        runtime.post([](GraphModel& g){ g.set_skip_save_cache(false); return 0; }).get();
         return true;
     } catch (const GraphError& ge) {
         last_error_[name] = { ge.code(), ge.what() };
@@ -145,70 +150,134 @@ std::optional<TimingCollector> Kernel::get_timing(const std::string& name) {
     auto it = graphs_.find(name);
     if (it == graphs_.end()) return std::nullopt;
     try {
-        return it->second->post([](NodeGraph& g){ return g.timing_results; }).get();
+        return it->second->post([](GraphModel& g){ return g.timing_results; }).get();
     } catch (...) { return std::nullopt; }
 }
 
 bool Kernel::reload_graph_yaml(const std::string& name, const std::string& yaml_path) {
     auto it = graphs_.find(name);
     if (it == graphs_.end()) return false;
-    try { it->second->post([=](NodeGraph& g){ g.load_yaml(yaml_path); return 0; }).get(); return true; }
+    try {
+        std::filesystem::path path = yaml_path;
+        it->second->post([this, path](GraphModel& g){ io_service_.load(g, path); return 0; }).get();
+        return true;
+    }
     catch (...) { return false; }
 }
 
 bool Kernel::save_graph_yaml(const std::string& name, const std::string& yaml_path) {
     auto it = graphs_.find(name);
     if (it == graphs_.end()) return false;
-    try { it->second->post([=](NodeGraph& g){ g.save_yaml(yaml_path); return 0; }).get(); return true; }
+    try {
+        std::filesystem::path path = yaml_path;
+        it->second->post([this, path](GraphModel& g){ io_service_.save(g, path); return 0; }).get();
+        return true;
+    }
     catch (...) { return false; }
 }
 
 bool Kernel::clear_drive_cache(const std::string& name) {
     auto it = graphs_.find(name);
     if (it == graphs_.end()) return false;
-    try { it->second->post([](NodeGraph& g){ g.clear_drive_cache(); return 0; }).get(); return true; }
+    try { it->second->post([this](GraphModel& g){ cache_service_.clear_drive_cache(g); return 0; }).get(); return true; }
     catch (...) { return false; }
 }
 
 bool Kernel::clear_memory_cache(const std::string& name) {
     auto it = graphs_.find(name);
     if (it == graphs_.end()) return false;
-    try { it->second->post([](NodeGraph& g){ g.clear_memory_cache(); return 0; }).get(); return true; }
+    try { it->second->post([this](GraphModel& g){ cache_service_.clear_memory_cache(g); return 0; }).get(); return true; }
     catch (...) { return false; }
 }
 
 bool Kernel::clear_cache(const std::string& name) {
     auto it = graphs_.find(name);
     if (it == graphs_.end()) return false;
-    try { it->second->post([](NodeGraph& g){ g.clear_cache(); return 0; }).get(); return true; }
+    try { it->second->post([this](GraphModel& g){ cache_service_.clear_cache(g); return 0; }).get(); return true; }
     catch (...) { return false; }
 }
 
 bool Kernel::cache_all_nodes(const std::string& name, const std::string& cache_precision) {
     auto it = graphs_.find(name);
     if (it == graphs_.end()) return false;
-    try { it->second->post([=](NodeGraph& g){ g.cache_all_nodes(cache_precision); return 0; }).get(); return true; }
+    try {
+        it->second->post([this, cache_precision](GraphModel& g){ cache_service_.cache_all_nodes(g, cache_precision); return 0; }).get();
+        return true;
+    }
     catch (...) { return false; }
 }
 
 bool Kernel::free_transient_memory(const std::string& name) {
     auto it = graphs_.find(name);
     if (it == graphs_.end()) return false;
-    try { it->second->post([](NodeGraph& g){ g.free_transient_memory(); return 0; }).get(); return true; }
+    try { it->second->post([this](GraphModel& g){ cache_service_.free_transient_memory(g); return 0; }).get(); return true; }
     catch (...) { return false; }
+}
+
+std::optional<GraphModel::DriveClearResult> Kernel::clear_drive_cache_stats(const std::string& name) {
+    auto it = graphs_.find(name);
+    if (it == graphs_.end()) return std::nullopt;
+    try {
+        return it->second->post([this](GraphModel& g){ return cache_service_.clear_drive_cache(g); }).get();
+    } catch (...) {
+        return std::nullopt;
+    }
+}
+
+std::optional<GraphModel::MemoryClearResult> Kernel::clear_memory_cache_stats(const std::string& name) {
+    auto it = graphs_.find(name);
+    if (it == graphs_.end()) return std::nullopt;
+    try {
+        return it->second->post([this](GraphModel& g){ return cache_service_.clear_memory_cache(g); }).get();
+    } catch (...) {
+        return std::nullopt;
+    }
+}
+
+std::optional<GraphModel::CacheSaveResult> Kernel::cache_all_nodes_stats(const std::string& name, const std::string& cache_precision) {
+    auto it = graphs_.find(name);
+    if (it == graphs_.end()) return std::nullopt;
+    try {
+        return it->second->post([this, cache_precision](GraphModel& g){ return cache_service_.cache_all_nodes(g, cache_precision); }).get();
+    } catch (...) {
+        return std::nullopt;
+    }
+}
+
+std::optional<GraphModel::MemoryClearResult> Kernel::free_transient_memory_stats(const std::string& name) {
+    auto it = graphs_.find(name);
+    if (it == graphs_.end()) return std::nullopt;
+    try {
+        return it->second->post([this](GraphModel& g){ return cache_service_.free_transient_memory(g); }).get();
+    } catch (...) {
+        return std::nullopt;
+    }
+}
+
+std::optional<GraphModel::DiskSyncResult> Kernel::synchronize_disk_cache_stats(const std::string& name, const std::string& cache_precision) {
+    auto it = graphs_.find(name);
+    if (it == graphs_.end()) return std::nullopt;
+    try {
+        return it->second->post([this, cache_precision](GraphModel& g){ return cache_service_.synchronize_disk_cache(g, cache_precision); }).get();
+    } catch (...) {
+        return std::nullopt;
+    }
 }
 
 bool Kernel::synchronize_disk_cache(const std::string& name, const std::string& cache_precision) {
     auto it = graphs_.find(name);
     if (it == graphs_.end()) return false;
-    try { it->second->post([=](NodeGraph& g){ g.synchronize_disk_cache(cache_precision); return 0; }).get(); return true; }
+    try {
+        it->second->post([this, cache_precision](GraphModel& g){ cache_service_.synchronize_disk_cache(g, cache_precision); return 0; }).get();
+        return true;
+    }
     catch (...) { return false; }
 }
 
 bool Kernel::clear_graph(const std::string& name) {
     auto it = graphs_.find(name);
     if (it == graphs_.end()) return false;
-    try { it->second->post([](NodeGraph& g){ g.clear(); return 0; }).get(); return true; }
+    try { it->second->post([](GraphModel& g){ g.clear(); return 0; }).get(); return true; }
     catch (...) { return false; }
 }
 
@@ -216,7 +285,15 @@ std::optional<std::string> Kernel::dump_dependency_tree(const std::string& name,
     auto it = graphs_.find(name);
     if (it == graphs_.end()) return std::nullopt;
     try {
-        return it->second->post([=](NodeGraph& g){ std::stringstream ss; if (node_id) g.print_dependency_tree(ss, *node_id, show_parameters); else g.print_dependency_tree(ss, show_parameters); return ss.str(); }).get();
+        return it->second->post([this, node_id, show_parameters](GraphModel& g){
+            std::stringstream ss;
+            if (node_id) {
+                traversal_service_.print_dependency_tree(g, ss, *node_id, show_parameters);
+            } else {
+                traversal_service_.print_dependency_tree(g, ss, show_parameters);
+            }
+            return ss.str();
+        }).get();
     } catch (...) { return std::nullopt; }
 }
 
@@ -229,14 +306,14 @@ std::optional<Kernel::LastError> Kernel::last_error(const std::string& name) con
 std::optional<std::vector<int>> Kernel::ending_nodes(const std::string& name) {
     auto it = graphs_.find(name);
     if (it == graphs_.end()) return std::nullopt;
-    try { return it->second->post([](NodeGraph& g){ return g.ending_nodes(); }).get(); }
+    try { return it->second->post([this](GraphModel& g){ return traversal_service_.ending_nodes(g); }).get(); }
     catch (...) { return std::nullopt; }
 }
 
 std::optional<std::vector<int>> Kernel::topo_postorder_from(const std::string& name, int end_node_id) {
     auto it = graphs_.find(name);
     if (it == graphs_.end()) return std::nullopt;
-    try { return it->second->post([=](NodeGraph& g){ return g.topo_postorder_from(end_node_id); }).get(); }
+    try { return it->second->post([this, end_node_id](GraphModel& g){ return traversal_service_.topo_postorder_from(g, end_node_id); }).get(); }
     catch (...) { return std::nullopt; }
 }
 
@@ -256,12 +333,12 @@ std::optional<std::map<int, std::vector<Kernel::TraversalNodeInfo>>> Kernel::tra
     auto it = graphs_.find(name);
     if (it == graphs_.end()) return std::nullopt;
     try {
-        return it->second->post([=](NodeGraph& g){
+        return it->second->post([this](GraphModel& g){
             std::map<int, std::vector<Kernel::TraversalNodeInfo>> result;
-            auto ends = g.ending_nodes();
+            auto ends = traversal_service_.ending_nodes(g);
             for (int end : ends) {
                 try {
-                    auto order = g.topo_postorder_from(end);
+                    auto order = traversal_service_.topo_postorder_from(g, end);
                     std::vector<Kernel::TraversalNodeInfo> vec; vec.reserve(order.size());
                     for (int nid : order) {
                         const auto& node = g.nodes.at(nid);
@@ -269,7 +346,7 @@ std::optional<std::map<int, std::vector<Kernel::TraversalNodeInfo>>> Kernel::tra
                         bool on_disk = false;
                         if (!node.caches.empty()) {
                             for (const auto& cache : node.caches) {
-                                std::filesystem::path cache_file = g.node_cache_dir(node.id) / cache.location;
+                                std::filesystem::path cache_file = cache_service_.node_cache_dir(g, node.id) / cache.location;
                                 std::filesystem::path meta_file = cache_file; meta_file.replace_extension(".yml");
                                 if (std::filesystem::exists(cache_file) || std::filesystem::exists(meta_file)) { on_disk = true; break; }
                             }
@@ -296,15 +373,32 @@ std::optional<cv::Mat> Kernel::compute_and_get_image(const std::string& name, in
         NodeOutput output;
         auto& runtime = *it->second;
         if (!runtime.running()) runtime.start();
-        auto& graph = runtime.get_nodegraph();
+        auto& model = runtime.model();
 
         if (parallel) {
-            output = graph.compute_parallel(runtime, node_id, cache_precision, force_recache, enable_timing, disable_disk_cache, benchmark_events);
+            ComputeService compute_service(traversal_service_, cache_service_, runtime.event_service());
+            output = compute_service.compute_parallel(model,
+                                                      runtime,
+                                                      node_id,
+                                                      cache_precision,
+                                                      force_recache,
+                                                      enable_timing,
+                                                      disable_disk_cache,
+                                                      benchmark_events);
         } else {
-             std::future<NodeOutput> fut = runtime.post([&](NodeGraph& g) -> NodeOutput {
-                return g.compute(node_id, cache_precision, force_recache, enable_timing, disable_disk_cache, benchmark_events);
+            std::future<NodeOutput> fut = runtime.post([this, &runtime, node_id, cache_precision, force_recache, enable_timing, disable_disk_cache, benchmark_events](GraphModel& g) -> NodeOutput {
+                ComputeService compute_service(traversal_service_, cache_service_, runtime.event_service());
+                NodeOutput& ref = compute_service.compute(g,
+                                                          node_id,
+                                                          cache_precision,
+                                                          force_recache,
+                                                          enable_timing,
+                                                          disable_disk_cache,
+                                                          benchmark_events);
+                return ref;
             });
             output = fut.get();
+            runtime.wait_for_completion();
         }
         
         if (output.image_buffer.width == 0) return std::nullopt;
@@ -316,7 +410,7 @@ std::optional<std::vector<int>> Kernel::trees_containing_node(const std::string&
     auto it = graphs_.find(name);
     if (it == graphs_.end()) return std::nullopt;
     try {
-        return it->second->post([=](NodeGraph& g){ return g.get_trees_containing_node(node_id); }).get();
+        return it->second->post([this, node_id](GraphModel& g){ return traversal_service_.get_trees_containing_node(g, node_id); }).get();
     } catch (...) { return std::nullopt; }
 }
 
@@ -324,7 +418,7 @@ std::optional<std::vector<int>> Kernel::list_node_ids(const std::string& name) {
     auto it = graphs_.find(name);
     if (it == graphs_.end()) return std::nullopt;
     try {
-        return it->second->post([](NodeGraph& g){
+        return it->second->post([](GraphModel& g){
             std::vector<int> ids; ids.reserve(g.nodes.size());
             for (auto& kv : g.nodes) ids.push_back(kv.first);
             std::sort(ids.begin(), ids.end());
@@ -337,7 +431,7 @@ std::optional<std::string> Kernel::get_node_yaml(const std::string& name, int no
     auto it = graphs_.find(name);
     if (it == graphs_.end()) return std::nullopt;
     try {
-        return it->second->post([=](NodeGraph& g){
+        return it->second->post([=](GraphModel& g){
             if (!g.has_node(node_id)) throw std::runtime_error("node not found");
             auto n = g.nodes.at(node_id).to_yaml();
             std::stringstream ss; ss << n; return ss.str();
@@ -349,7 +443,7 @@ bool Kernel::set_node_yaml(const std::string& name, int node_id, const std::stri
     auto it = graphs_.find(name);
     if (it == graphs_.end()) return false;
     try {
-        return it->second->post([=](NodeGraph& g){
+        return it->second->post([=](GraphModel& g){
             if (!g.has_node(node_id)) return false;
             YAML::Node root = YAML::Load(yaml_text);
             ps::Node updated = ps::Node::from_yaml(root);
@@ -381,21 +475,27 @@ std::optional<std::future<bool>> Kernel::compute_async(const std::string& name, 
     GraphRuntime* const runtime_ptr = it->second.get();
 
     if (par) {
-        // Important: Run the high-level parallel graph orchestration outside the runtime's worker threads
-        // to avoid nested scheduling and potential TLS/worker reentrancy hazards during first-run.
         return std::optional<std::future<bool>>(std::async(std::launch::async, [this, runtime_ptr, id, precision, frc, timing, q, disable_dc, nosave, name_copy, benchmark_events]() {
             try {
                 if (!runtime_ptr->running()) runtime_ptr->start();
-                NodeGraph& g = runtime_ptr->get_nodegraph();
+                GraphModel& model = runtime_ptr->model();
+                ComputeService compute_service(traversal_service_, cache_service_, runtime_ptr->event_service());
                 if (timing) {
-                    g.clear_timing_results();
+                    compute_service.clear_timing_results(model);
                 }
-                bool prev_quiet = g.is_quiet();
-                g.set_quiet(q);
-                g.set_skip_save_cache(nosave);
-                g.compute_parallel(*runtime_ptr, id, precision, frc, timing, disable_dc, benchmark_events);
-                g.set_skip_save_cache(false);
-                g.set_quiet(prev_quiet);
+                bool prev_quiet = model.is_quiet();
+                model.set_quiet(q);
+                model.set_skip_save_cache(nosave);
+                compute_service.compute_parallel(model,
+                                                  *runtime_ptr,
+                                                  id,
+                                                  precision,
+                                                  frc,
+                                                  timing,
+                                                  disable_dc,
+                                                  benchmark_events);
+                model.set_skip_save_cache(false);
+                model.set_quiet(prev_quiet);
                 last_error_.erase(name_copy);
                 return true;
             } catch (const GraphError& ge) {
@@ -410,17 +510,24 @@ std::optional<std::future<bool>> Kernel::compute_async(const std::string& name, 
         }));
     }
 
-    // Sequential mode: use the runtime's job queue to serialize access with other graph operations.
     if (!it->second->running()) it->second->start();
-    return it->second->post([=](NodeGraph& g) {
+    GraphRuntime* runtime_capture = it->second.get();
+    return it->second->post([=](GraphModel& g) {
         try {
+            ComputeService compute_service(traversal_service_, cache_service_, runtime_capture->event_service());
             if (timing) {
-                g.clear_timing_results();
+                compute_service.clear_timing_results(g);
             }
             bool prev_quiet = g.is_quiet();
             g.set_quiet(q);
             g.set_skip_save_cache(nosave);
-            g.compute(id, precision, frc, timing, disable_dc, benchmark_events);
+            compute_service.compute(g,
+                                    id,
+                                    precision,
+                                    frc,
+                                    timing,
+                                    disable_dc,
+                                    benchmark_events);
             g.set_skip_save_cache(false);
             g.set_quiet(prev_quiet);
             last_error_.erase(name_copy);
@@ -437,7 +544,7 @@ std::optional<std::future<bool>> Kernel::compute_async(const std::string& name, 
     });
 }
 
-std::optional<std::vector<NodeGraph::ComputeEvent>> Kernel::drain_compute_events(const std::string& name) {
+std::optional<std::vector<GraphEventService::ComputeEvent>> Kernel::drain_compute_events(const std::string& name) {
     auto it = graphs_.find(name);
     if (it == graphs_.end()) return std::nullopt;
     try {
@@ -453,7 +560,7 @@ std::optional<double> Kernel::get_last_io_time(const std::string& name) {
         return std::nullopt;
     }
     try {
-        return it->second->post([](NodeGraph& g) {
+        return it->second->post([](GraphModel& g) {
             return g.total_io_time_ms.load();
         }).get();
     } catch (...) {

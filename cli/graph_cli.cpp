@@ -10,7 +10,7 @@
 #include <chrono>
 #include <algorithm>
 #include <map>
-#include "node_graph.hpp"
+#include "graph_model.hpp"
 #include <filesystem>
 #include "ftxui/component/component.hpp"
 #include "ftxui/component/screen_interactive.hpp"

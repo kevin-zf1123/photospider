@@ -1,6 +1,10 @@
-#include "node_graph.hpp"
+#include "graph_model.hpp"
 #include "kernel/graph_runtime.hpp"
 #include "kernel/ops.hpp"
+#include "kernel/services/compute_service.hpp"
+#include "kernel/services/graph_cache_service.hpp"
+#include "kernel/services/graph_event_service.hpp"
+#include "kernel/services/graph_traversal_service.hpp"
 #include "adapter/buffer_adapter_opencv.hpp"
 #include <cassert>
 #include <iostream>
@@ -17,7 +21,11 @@ void ps_assert(bool condition, const std::string& message) {
 void test_simple_sequential_compute() {
     std::cout << "--- Running test: test_simple_sequential_compute ---\n";
     ps::ops::register_builtin();
-    ps::NodeGraph graph;
+    ps::GraphModel graph;
+    ps::GraphTraversalService traversal;
+    ps::GraphCacheService cache;
+    ps::GraphEventService events;
+    ps::ComputeService compute(traversal, cache, events);
 
     ps::Node n1, n2, n3;
     n1.id = 1; n1.name = "const100"; n1.type = "image_generator"; n1.subtype = "constant";
@@ -32,8 +40,8 @@ void test_simple_sequential_compute() {
     n3.parameters["alpha"] = 0.5; n3.parameters["beta"] = 0.5;
 
     graph.add_node(n1); graph.add_node(n2); graph.add_node(n3);
-    
-    auto& output = graph.compute(3, "int8");
+
+    auto& output = compute.compute(graph, 3, "int8", false, false, false, nullptr);
     cv::Mat result_mat = ps::toCvMat(output.image_buffer);
 
     float expected = (100.0f/255.0f * 0.5f) + (50.0f/255.0f * 0.5f);
@@ -50,7 +58,9 @@ void test_parallel_scheduler_simple() {
     ps::GraphRuntime runtime(info);
     runtime.start();
     
-    auto& graph = runtime.get_nodegraph();
+    auto& graph = runtime.model();
+    ps::GraphTraversalService traversal;
+    ps::GraphCacheService cache;
 
     ps::Node n1, n2, n3;
     n1.id = 1; n1.name = "const100"; n1.type = "image_generator"; n1.subtype = "constant";
@@ -65,8 +75,9 @@ void test_parallel_scheduler_simple() {
     n3.parameters["alpha"] = 1.0; n3.parameters["beta"] = 1.0;
 
     graph.add_node(n1); graph.add_node(n2); graph.add_node(n3);
-    
-    auto& output = graph.compute_parallel(runtime, 3, "int8");
+
+    ps::ComputeService compute(traversal, cache, runtime.event_service());
+    auto& output = compute.compute_parallel(graph, runtime, 3, "int8", false, false, false, nullptr);
     cv::Mat result_mat = ps::toCvMat(output.image_buffer);
     
     float expected = (100.0f/255.0f) + (50.0f/255.0f);
@@ -85,7 +96,9 @@ void test_parallel_mixing_with_resize() {
     ps::GraphRuntime runtime(info);
     runtime.start();
     
-    auto& graph = runtime.get_nodegraph();
+    auto& graph = runtime.model();
+    ps::GraphTraversalService traversal;
+    ps::GraphCacheService cache;
 
     // Node 1: Base image, 100x100
     ps::Node n1;
@@ -105,10 +118,11 @@ void test_parallel_mixing_with_resize() {
     n3.parameters["alpha"] = 1.0; n3.parameters["beta"] = 1.0;
 
     graph.add_node(n1); graph.add_node(n2); graph.add_node(n3);
-    
+
     bool threw = false;
     try {
-        auto& output = graph.compute_parallel(runtime, 3, "int8");
+        ps::ComputeService compute(traversal, cache, runtime.event_service());
+        auto& output = compute.compute_parallel(graph, runtime, 3, "int8", false, false, false, nullptr);
         cv::Mat result_mat = ps::toCvMat(output.image_buffer);
         
         ps_assert(result_mat.cols == 100, "Result width should match first input");

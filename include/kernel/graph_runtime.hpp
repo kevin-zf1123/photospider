@@ -16,7 +16,8 @@
 #include <exception>
 #include <optional>
 
-#include "node_graph.hpp"
+#include "graph_model.hpp"
+#include "kernel/services/graph_event_service.hpp"
 
 // [修改] 使用预处理器宏和前向声明来隔离平台特定的 Metal API
 #ifdef __OBJC__
@@ -64,14 +65,14 @@ public:
     bool running() const { return running_; }
 
     template<typename Fn>
-    auto post(Fn&& fn) -> std::future<decltype(fn(std::declval<NodeGraph&>()))> {
-        using Ret = decltype(fn(std::declval<NodeGraph&>()));
+    auto post(Fn&& fn) -> std::future<decltype(fn(std::declval<GraphModel&>()))> {
+        using Ret = decltype(fn(std::declval<GraphModel&>()));
         auto task = std::make_shared<std::packaged_task<Ret()>>(
             [this, f = std::forward<Fn>(fn)](){ 
                 if constexpr (!std::is_void_v<Ret>) {
-                    return f(graph_);
+                    return f(model_);
                 } else {
-                    f(graph_);
+                    f(model_);
                 }
             }
         );
@@ -88,12 +89,13 @@ public:
         return fut;
     }
     
-    std::vector<NodeGraph::ComputeEvent> drain_compute_events_now() {
-        return graph_.drain_compute_events();
+    std::vector<GraphEventService::ComputeEvent> drain_compute_events_now() {
+        return event_service_.drain();
     }
 
     const Info& info() const { return info_; }
-    NodeGraph& get_nodegraph() { return graph_; }
+    GraphModel& model() { return model_; }
+    GraphEventService& event_service() { return event_service_; }
     
     // [核心修改] 任务提交与执行接口
     void submit_initial_tasks(std::vector<Task>&& tasks, int total_task_count, TaskPriority priority = TaskPriority::Normal);
@@ -112,13 +114,12 @@ public:
     id get_metal_command_queue();
 
 private:
-    friend class NodeGraph; // 允许NodeGraph访问私有成员以提交任务(临时方案)
-
     void run_loop(int thread_id);
     std::optional<Task> steal_task(int stealer_id);
 
     Info info_;
-    NodeGraph graph_;
+    GraphModel model_;
+    GraphEventService event_service_;
     
     std::vector<std::thread> workers_;
     unsigned int num_workers_{0};
