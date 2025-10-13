@@ -107,6 +107,7 @@ struct OpMetadata {
 
 using MonolithicOpFunc = std::function<NodeOutput(const Node&, const std::vector<const NodeOutput*>&)>;
 using TileOpFunc = std::function<void(const Node&, const Tile&, const std::vector<Tile>&)>;
+using DirtyRoiPropFunc = std::function<cv::Rect(const Node&, const cv::Rect&)>;
 
 // -----------------------------------------------------------------------------
 // Compute intent for planner/scheduler (Phase 1: API foundation)
@@ -144,12 +145,15 @@ public:
         std::optional<TileOpFunc> tiled_rt;            // optional
         std::optional<OpMetadata> meta_hp;
         std::optional<OpMetadata> meta_rt;
+        std::optional<DirtyRoiPropFunc> dirty_propagator;
     };
 
     void register_op_hp_monolithic(const std::string& type, const std::string& subtype, MonolithicOpFunc fn, OpMetadata meta = {});
     void register_op_hp_tiled(const std::string& type, const std::string& subtype, TileOpFunc fn, OpMetadata meta);
     void register_op_rt_tiled(const std::string& type, const std::string& subtype, TileOpFunc fn, OpMetadata meta);
+    void register_dirty_propagator(const std::string& type, const std::string& subtype, DirtyRoiPropFunc fn);
     std::optional<OpVariant> resolve_for_intent(const std::string& type, const std::string& subtype, ComputeIntent intent) const;
+    DirtyRoiPropFunc get_dirty_propagator(const std::string& type, const std::string& subtype) const;
 private:
     std::unordered_map<std::string, OpVariant> table_;
     // [修改] 元数据表现在可以存储包含设备偏好的完整 OpMetadata

@@ -388,11 +388,30 @@ NodeOutput& NodeGraph::compute_real_time_update(GraphRuntime* runtime,
     };
 
     auto infer_halo_hp = [&](const Node& node) -> int {
-        if (node.type == "image_process" && node.subtype == "gaussian_blur") {
-            int k = as_int_flexible(node.parameters, "ksize", 3);
-            if (k <= 0) k = 1;
-            if (k % 2 == 0) k += 1;
+        if (node.type != "image_process") return 0;
+        if (node.subtype == "gaussian_blur" || node.subtype == "gaussian_blur_tiled") {
+            int k = as_int_flexible(node.runtime_parameters, "ksize",
+                    as_int_flexible(node.parameters, "ksize", 0));
+            if (k <= 0) k = 3;
+            if (k % 2 == 0) ++k;
             return std::max(0, k / 2);
+        }
+        if (node.subtype == "convolve") {
+            int radius = as_int_flexible(node.runtime_parameters, "kernel_radius",
+                           as_int_flexible(node.parameters, "kernel_radius", 0));
+            radius = std::max(radius, as_int_flexible(node.runtime_parameters, "radius", radius));
+            radius = std::max(radius, as_int_flexible(node.parameters, "radius", radius));
+            int ksize = as_int_flexible(node.runtime_parameters, "kernel_size",
+                          as_int_flexible(node.parameters, "kernel_size", 0));
+            if (ksize <= 0) {
+                ksize = as_int_flexible(node.runtime_parameters, "ksize",
+                          as_int_flexible(node.parameters, "ksize", 0));
+            }
+            if (ksize > 0) {
+                radius = std::max(radius, std::max(0, (ksize - 1) / 2));
+            }
+            if (radius <= 0) radius = 1;
+            return radius;
         }
         return 0;
     };
@@ -443,9 +462,11 @@ NodeOutput& NodeGraph::compute_real_time_update(GraphRuntime* runtime,
         current_entry.halo_hp = std::max(current_entry.halo_hp, infer_halo_hp(current_node));
         current_entry.halo_rt = (current_entry.halo_hp + kRtDownscaleFactor - 1) / kRtDownscaleFactor;
 
-        cv::Rect upstream_roi_hp = current_entry.roi_hp;
-        if (current_entry.halo_hp > 0) {
-            upstream_roi_hp = expand_rect(upstream_roi_hp, current_entry.halo_hp);
+        auto propagate_fn = OpRegistry::instance().get_dirty_propagator(current_node.type, current_node.subtype);
+        cv::Rect upstream_roi_hp = propagate_fn(current_node, current_entry.roi_hp);
+        upstream_roi_hp = clip_rect(upstream_roi_hp, current_entry.hp_size);
+        if (is_rect_empty(upstream_roi_hp)) {
+            continue;
         }
 
         for (const auto& img_input : current_node.image_inputs) {
