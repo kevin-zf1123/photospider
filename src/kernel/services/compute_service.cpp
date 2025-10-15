@@ -811,7 +811,7 @@ NodeOutput& ComputeService::compute_high_precision_update(GraphModel& graph, Gra
 {
     auto& nodes = graph.nodes;
 
-    (void)runtime;
+    (void)runtime; // Unused for now, can be used for micro-task scheduling later
     (void)cache_precision;
     (void)disable_disk_cache;
     (void)benchmark_events;
@@ -824,15 +824,16 @@ NodeOutput& ComputeService::compute_high_precision_update(GraphModel& graph, Gra
         throw GraphError(GraphErrc::InvalidParameter, "Cannot compute HP update: dirty ROI is empty.");
     }
 
+    // --- 1. Planning: Propagate dirty ROI backwards to build an execution plan ---
     auto execution_order = traversal_.topo_postorder_from(graph, node_id);
     if (execution_order.empty()) {
-        execution_order.push_back(node_id);
+        execution_order.push_back(node_id); // Handle single-node graph
     }
 
+    // Helper to infer full-resolution (HP) size for any node
     std::unordered_map<int, cv::Size> hp_size_cache;
     std::function<cv::Size(int)> infer_hp_size = [&](int nid) -> cv::Size {
-        auto cached = hp_size_cache.find(nid);
-        if (cached != hp_size_cache.end()) return cached->second;
+        if (hp_size_cache.count(nid)) return hp_size_cache.at(nid);
 
         cv::Size size{0, 0};
         const Node& node = nodes.at(nid);
@@ -844,15 +845,8 @@ NodeOutput& ComputeService::compute_high_precision_update(GraphModel& graph, Gra
             size = cv::Size(img.width, img.height);
             return true;
         };
-
-        if (take_from_output(node.cached_output_high_precision)) {
-            hp_size_cache[nid] = size;
-            return size;
-        }
-        if (take_from_output(node.cached_output)) {
-            hp_size_cache[nid] = size;
-            return size;
-        }
+        if (take_from_output(node.cached_output_high_precision)) { hp_size_cache[nid] = size; return size; }
+        if (take_from_output(node.cached_output)) { hp_size_cache[nid] = size; return size; }
         if (node.cached_output_real_time) {
             const auto& buf = node.cached_output_real_time->image_buffer;
             if (buf.width > 0 && buf.height > 0) {
@@ -861,51 +855,34 @@ NodeOutput& ComputeService::compute_high_precision_update(GraphModel& graph, Gra
                 return size;
             }
         }
-
         for (const auto& input : node.image_inputs) {
             if (input.from_node_id < 0) continue;
             cv::Size parent_size = infer_hp_size(input.from_node_id);
-            if (parent_size.width > 0 && parent_size.height > 0) {
-                size = parent_size;
-                break;
-            }
+            if (parent_size.width > 0 && parent_size.height > 0) { size = parent_size; break; }
         }
-
         if (size.width <= 0 || size.height <= 0) {
             int width = as_int_flexible(node.parameters, "width", 0);
             int height = as_int_flexible(node.parameters, "height", 0);
-            if (width > 0 && height > 0) {
-                size = cv::Size(width, height);
-            }
+            if (width > 0 && height > 0) { size = cv::Size(width, height); }
         }
-
         hp_size_cache[nid] = size;
         return size;
     };
 
     auto infer_halo_hp = [&](const Node& node) -> int {
+        // TODO: This should query operator metadata in the future
         if (node.type != "image_process") return 0;
         if (node.subtype == "gaussian_blur" || node.subtype == "gaussian_blur_tiled") {
-            int k = as_int_flexible(node.runtime_parameters, "ksize",
-                                    as_int_flexible(node.parameters, "ksize", 0));
-            if (k <= 0) k = 3;
-            if (k % 2 == 0) ++k;
-            return std::max(0, k / 2);
+            int k = as_int_flexible(node.runtime_parameters, "ksize", as_int_flexible(node.parameters, "ksize", 0));
+            if (k <= 0) k = 3; if (k % 2 == 0) ++k; return std::max(0, k / 2);
         }
         if (node.subtype == "convolve") {
-            int radius = as_int_flexible(node.runtime_parameters, "kernel_radius",
-                                         as_int_flexible(node.parameters, "kernel_radius", 0));
+            int radius = as_int_flexible(node.runtime_parameters, "kernel_radius", as_int_flexible(node.parameters, "kernel_radius", 0));
             radius = std::max(radius, as_int_flexible(node.runtime_parameters, "radius", radius));
             radius = std::max(radius, as_int_flexible(node.parameters, "radius", radius));
-            int ksize = as_int_flexible(node.runtime_parameters, "kernel_size",
-                                        as_int_flexible(node.parameters, "kernel_size", 0));
-            if (ksize <= 0) {
-                ksize = as_int_flexible(node.runtime_parameters, "ksize",
-                                        as_int_flexible(node.parameters, "ksize", 0));
-            }
-            if (ksize > 0) {
-                radius = std::max(radius, std::max(0, (ksize - 1) / 2));
-            }
+            int ksize = as_int_flexible(node.runtime_parameters, "kernel_size", as_int_flexible(node.parameters, "kernel_size", 0));
+            if (ksize <= 0) ksize = as_int_flexible(node.runtime_parameters, "ksize", as_int_flexible(node.parameters, "ksize", 0));
+            if (ksize > 0) radius = std::max(radius, std::max(0, (ksize - 1) / 2));
             if (radius <= 0) radius = 1;
             return radius;
         }
@@ -919,12 +896,8 @@ NodeOutput& ComputeService::compute_high_precision_update(GraphModel& graph, Gra
             it->second.hp_size = infer_hp_size(nid);
             it->second.halo_hp = infer_halo_hp(nodes.at(nid));
         } else {
-            if (it->second.hp_size.width <= 0 || it->second.hp_size.height <= 0) {
-                it->second.hp_size = infer_hp_size(nid);
-            }
-            if (it->second.halo_hp == 0) {
-                it->second.halo_hp = infer_halo_hp(nodes.at(nid));
-            }
+            if (it->second.hp_size.width <= 0 || it->second.hp_size.height <= 0) it->second.hp_size = infer_hp_size(nid);
+            if (it->second.halo_hp == 0) it->second.halo_hp = infer_halo_hp(nodes.at(nid));
         }
         return it->second;
     };
@@ -937,10 +910,8 @@ NodeOutput& ComputeService::compute_high_precision_update(GraphModel& graph, Gra
 
     for (auto it = execution_order.rbegin(); it != execution_order.rend(); ++it) {
         int current_id = *it;
-        auto plan_it = plan.find(current_id);
-        if (plan_it == plan.end()) continue;
-
-        HpPlanEntry& current_entry = plan_it->second;
+        if (!plan.count(current_id)) continue;
+        HpPlanEntry& current_entry = plan.at(current_id);
         if (is_rect_empty(current_entry.roi_hp)) continue;
 
         const Node& current_node = nodes.at(current_id);
@@ -962,271 +933,130 @@ NodeOutput& ComputeService::compute_high_precision_update(GraphModel& graph, Gra
         }
     }
 
+    // Filter and finalize plan entries
     std::vector<int> erase_ids;
-    erase_ids.reserve(plan.size());
-    for (auto& kv : plan) {
-        auto& entry = kv.second;
-        if (entry.hp_size.width <= 0 || entry.hp_size.height <= 0) {
-            erase_ids.push_back(kv.first);
-            continue;
-        }
+    for (auto& [nid, entry] : plan) {
+        if (entry.hp_size.width <= 0 || entry.hp_size.height <= 0) { erase_ids.push_back(nid); continue; }
         entry.roi_hp = clip_rect(align_rect(entry.roi_hp, kHpMicroTileSize), entry.hp_size);
-        if (is_rect_empty(entry.roi_hp)) {
-            erase_ids.push_back(kv.first);
-            continue;
-        }
-        if (entry.halo_hp == 0) {
-            entry.halo_hp = infer_halo_hp(nodes.at(kv.first));
-        }
+        if (is_rect_empty(entry.roi_hp)) { erase_ids.push_back(nid); continue; }
+        if (entry.halo_hp == 0) entry.halo_hp = infer_halo_hp(nodes.at(nid));
     }
-    for (int nid : erase_ids) {
-        plan.erase(nid);
-    }
+    for (int nid : erase_ids) plan.erase(nid);
 
-    if (plan.empty()) {
-        throw GraphError(GraphErrc::InvalidParameter, "HP planner produced empty execution set.");
-    }
-
+    if (plan.empty()) throw GraphError(GraphErrc::InvalidParameter, "HP planner produced empty execution set.");
     if (force_recache) {
-        for (const auto& kv : plan) {
-            Node& node = nodes.at(kv.first);
-            node.cached_output_high_precision.reset();
-            node.hp_roi.reset();
-            node.hp_version = 0;
+        for (const auto& [nid, _] : plan) {
+            nodes.at(nid).cached_output_high_precision.reset();
+            nodes.at(nid).hp_roi.reset();
+            nodes.at(nid).hp_version = 0;
         }
     }
 
+    // --- 2. Execution: Iterate forward and compute dirty tiles for each node in plan ---
     auto compute_node_hp = [&](int nid, HpPlanEntry& entry) {
         if (is_rect_empty(entry.roi_hp)) return;
         Node& node = nodes.at(nid);
 
-        YAML::Node runtime_params = node.parameters ? YAML::Clone(node.parameters)
-                                                    : YAML::Node(YAML::NodeType::Map);
+        // Resolve runtime params
+        node.runtime_parameters = node.parameters ? YAML::Clone(node.parameters) : YAML::Node(YAML::NodeType::Map);
         for (const auto& p_input : node.parameter_inputs) {
             if (p_input.from_node_id < 0) continue;
-            const Node& parent_node = nodes.at(p_input.from_node_id);
-            const NodeOutput* parent_out = nullptr;
-            if (parent_node.cached_output_high_precision) {
-                parent_out = &*parent_node.cached_output_high_precision;
-            } else if (parent_node.cached_output) {
-                parent_out = &*parent_node.cached_output;
-            }
-            if (!parent_out) {
-                throw GraphError(GraphErrc::MissingDependency,
-                                 "HP parameter input not ready for node " + std::to_string(nid));
-            }
+            const auto* parent_out = nodes.at(p_input.from_node_id).cached_output_high_precision.has_value() ? &*nodes.at(p_input.from_node_id).cached_output_high_precision : (nodes.at(p_input.from_node_id).cached_output.has_value() ? &*nodes.at(p_input.from_node_id).cached_output : nullptr);
+            if (!parent_out) throw GraphError(GraphErrc::MissingDependency, "HP parameter input not ready for node " + std::to_string(nid));
             auto it_val = parent_out->data.find(p_input.from_output_name);
-            if (it_val == parent_out->data.end()) {
-                throw GraphError(GraphErrc::MissingDependency,
-                                 "HP parameter '" + p_input.from_output_name + "' missing for node " + std::to_string(nid));
-            }
-            runtime_params[p_input.to_parameter_name] = it_val->second;
+            if (it_val == parent_out->data.end()) throw GraphError(GraphErrc::MissingDependency, "HP parameter '" + p_input.from_output_name + "' missing for node " + std::to_string(nid));
+            node.runtime_parameters[p_input.to_parameter_name] = it_val->second;
         }
-        node.runtime_parameters = runtime_params;
 
+        // Gather input image pointers
         std::vector<const NodeOutput*> image_inputs_ready;
-        image_inputs_ready.reserve(node.image_inputs.size());
         for (const auto& img_input : node.image_inputs) {
             if (img_input.from_node_id < 0) continue;
-            Node& parent_node = nodes.at(img_input.from_node_id);
-            const NodeOutput* parent_out = nullptr;
-            if (parent_node.cached_output_high_precision) {
-                parent_out = &*parent_node.cached_output_high_precision;
-            } else if (parent_node.cached_output) {
-                parent_out = &*parent_node.cached_output;
-            } else if (parent_node.cached_output_real_time) {
-                parent_out = &*parent_node.cached_output_real_time;
-            }
-            if (!parent_out) {
-                throw GraphError(GraphErrc::MissingDependency,
-                                 "HP image input not ready for node " + std::to_string(nid));
-            }
+            const auto* parent_out = nodes.at(img_input.from_node_id).cached_output_high_precision.has_value() ? &*nodes.at(img_input.from_node_id).cached_output_high_precision : (nodes.at(img_input.from_node_id).cached_output.has_value() ? &*nodes.at(img_input.from_node_id).cached_output : (nodes.at(img_input.from_node_id).cached_output_real_time.has_value() ? &*nodes.at(img_input.from_node_id).cached_output_real_time : nullptr));
+            if (!parent_out) throw GraphError(GraphErrc::MissingDependency, "HP image input not ready for node " + std::to_string(nid));
             image_inputs_ready.push_back(parent_out);
         }
 
-        auto infer_output_spec = [&]() -> std::pair<int, DataType> {
-            if (node.cached_output_high_precision) {
-                const auto& buf = node.cached_output_high_precision->image_buffer;
-                if (buf.width > 0 && buf.height > 0 && buf.channels > 0) {
-                    return {buf.channels, buf.type};
-                }
-            }
-            for (const auto* input_out : image_inputs_ready) {
-                const auto& buf = input_out->image_buffer;
-                if (buf.width > 0 && buf.height > 0 && buf.channels > 0) {
-                    return {buf.channels, buf.type};
-                }
-            }
-            if (node.cached_output) {
-                const auto& buf = node.cached_output->image_buffer;
-                if (buf.width > 0 && buf.height > 0 && buf.channels > 0) {
-                    return {buf.channels, buf.type};
-                }
-            }
+        // Ensure output HP buffer exists and is correctly sized
+        auto [channels, dtype] = [&]() -> std::pair<int, DataType> {
+            if(node.cached_output_high_precision) { const auto& b = node.cached_output_high_precision->image_buffer; if(b.width > 0) return {b.channels, b.type}; }
+            for(const auto* in : image_inputs_ready) { const auto& b = in->image_buffer; if(b.width > 0) return {b.channels, b.type}; }
             return {1, DataType::FLOAT32};
-        };
-
-        auto [channels, dtype] = infer_output_spec();
-        if (!node.cached_output_high_precision) {
-            node.cached_output_high_precision = NodeOutput{};
-        }
+        }();
+        if (!node.cached_output_high_precision) node.cached_output_high_precision = NodeOutput{};
         ImageBuffer& hp_buffer = node.cached_output_high_precision->image_buffer;
-        bool needs_alloc = (hp_buffer.width != entry.hp_size.width) ||
-                           (hp_buffer.height != entry.hp_size.height) ||
-                           (hp_buffer.channels != channels) ||
-                           (hp_buffer.type != dtype) ||
-                           (!hp_buffer.data);
-        if (needs_alloc) {
-            hp_buffer.width = entry.hp_size.width;
-            hp_buffer.height = entry.hp_size.height;
-            hp_buffer.channels = channels;
-            hp_buffer.type = dtype;
-            hp_buffer.device = Device::CPU;
-            size_t pixel_size = sizeof(float);
-            size_t row_bytes = static_cast<size_t>(hp_buffer.width) * channels * pixel_size;
+        if (hp_buffer.width != entry.hp_size.width || hp_buffer.height != entry.hp_size.height || hp_buffer.channels != channels || hp_buffer.type != dtype || !hp_buffer.data) {
+            hp_buffer.width = entry.hp_size.width; hp_buffer.height = entry.hp_size.height; hp_buffer.channels = channels; hp_buffer.type = dtype; hp_buffer.device = Device::CPU;
+            size_t row_bytes = static_cast<size_t>(hp_buffer.width) * channels * sizeof(float);
             hp_buffer.step = row_bytes;
             hp_buffer.data.reset(new char[row_bytes * hp_buffer.height], std::default_delete<char[]>());
             std::memset(hp_buffer.data.get(), 0, row_bytes * hp_buffer.height);
         }
 
+        // Get tiled operator
         const auto* impls = OpRegistry::instance().get_implementations(node.type, node.subtype);
-        const TileOpFunc* hp_tile_fn = nullptr;
-        const MonolithicOpFunc* hp_mono_fn = nullptr;
-        if (impls) {
-            if (impls->tiled_hp) hp_tile_fn = &*impls->tiled_hp;
-            if (impls->monolithic_hp) hp_mono_fn = &*impls->monolithic_hp;
-        }
-        auto fallback_variant = OpRegistry::instance().resolve_for_intent(
-            node.type, node.subtype, ComputeIntent::GlobalHighPrecision);
+        const TileOpFunc* hp_tile_fn = (impls && impls->tiled_hp) ? &*impls->tiled_hp : nullptr;
+        if (!hp_tile_fn) throw GraphError(GraphErrc::NoOperation, "No tiled HP operator for " + node.type + ":" + node.subtype);
 
-        auto run_monolithic = [&](const MonolithicOpFunc& fn) {
-            NodeOutput result = fn(node, image_inputs_ready);
-            if (result.image_buffer.width > 0 && result.image_buffer.height > 0) {
-                cv::Mat result_mat = toCvMat(result.image_buffer);
-                cv::Mat dest = toCvMat(hp_buffer);
-                cv::Rect copy_roi = clip_rect(entry.roi_hp, cv::Size(result_mat.cols, result_mat.rows));
-                if (!is_rect_empty(copy_roi)) {
-                    result_mat(copy_roi).copyTo(dest(copy_roi));
-                } else {
-                    dest = result_mat;
+        // Execute tiling logic
+        TileTask task; task.node = &node; task.output_tile.buffer = &hp_buffer;
+        const cv::Size out_bounds(hp_buffer.width, hp_buffer.height);
+
+        // Prioritize Macro tiles
+        cv::Rect macro_cover = align_rect(entry.roi_hp, kHpMacroTileSize);
+        macro_cover = clip_rect(macro_cover, out_bounds);
+        for (int y = macro_cover.y; y < macro_cover.y + macro_cover.height; y += kHpMacroTileSize) {
+            for (int x = macro_cover.x; x < macro_cover.x + macro_cover.width; x += kHpMacroTileSize) {
+                cv::Rect macro_tile(x, y, std::min(kHpMacroTileSize, macro_cover.x + macro_cover.width - x), std::min(kHpMacroTileSize, macro_cover.y + macro_cover.height - y));
+                macro_tile = clip_rect(macro_tile, out_bounds);
+                if (is_rect_empty(macro_tile)) continue;
+                cv::Rect touched = macro_tile & entry.roi_hp;
+                if (is_rect_empty(touched)) continue;
+
+                // If ROI covers the entire macro tile, process it as one big tile
+                if (touched == macro_tile && macro_tile.width >= kHpMacroTileSize && macro_tile.height >= kHpMacroTileSize) {
+                    task.output_tile.roi = macro_tile;
+                    task.input_tiles.clear();
+                    for(const auto* in_out : image_inputs_ready) {
+                        Tile in_tile; in_tile.buffer = const_cast<ImageBuffer*>(&in_out->image_buffer);
+                        in_tile.roi = clip_rect(expand_rect(macro_tile, entry.halo_hp), cv::Size(in_out->image_buffer.width, in_out->image_buffer.height));
+                        task.input_tiles.push_back(in_tile);
+                    }
+                    execute_tile_task(task, *hp_tile_fn);
+                    continue;
                 }
-            }
-            node.cached_output_high_precision->data = result.data;
-        };
-
-        auto run_tiled = [&](const TileOpFunc& fn) {
-            if (image_inputs_ready.empty()) {
-                throw GraphError(GraphErrc::MissingDependency,
-                                 "HP tiled op requires image inputs for node " + std::to_string(nid));
-            }
-            TileTask task;
-            task.node = &node;
-            task.output_tile.buffer = &hp_buffer;
-            const cv::Size out_bounds(hp_buffer.width, hp_buffer.height);
-            const int halo_hp = entry.halo_hp;
-
-            auto emit_tile = [&](const cv::Rect& tile_roi) {
-                cv::Rect clipped_roi = clip_rect(tile_roi, out_bounds);
-                if (is_rect_empty(clipped_roi)) return;
-                task.output_tile.roi = clipped_roi;
-                task.input_tiles.clear();
-                for (const NodeOutput* input_out : image_inputs_ready) {
-                    Tile input_tile;
-                    input_tile.buffer = const_cast<ImageBuffer*>(&input_out->image_buffer);
-                    cv::Rect input_roi = clipped_roi;
-                    if (halo_hp > 0) {
-                        input_roi = expand_rect(input_roi, halo_hp);
-                    }
-                    input_roi = clip_rect(input_roi,
-                                          cv::Size(input_out->image_buffer.width,
-                                                   input_out->image_buffer.height));
-                    if (is_rect_empty(input_roi)) {
-                        input_roi = clip_rect(clipped_roi,
-                                              cv::Size(input_out->image_buffer.width,
-                                                       input_out->image_buffer.height));
-                    }
-                    input_tile.roi = input_roi;
-                    task.input_tiles.push_back(input_tile);
-                }
-                execute_tile_task(task, fn);
-            };
-
-            cv::Rect macro_cover = align_rect(entry.roi_hp, kHpMacroTileSize);
-            macro_cover = clip_rect(macro_cover, out_bounds);
-            for (int y = macro_cover.y; y < macro_cover.y + macro_cover.height; y += kHpMacroTileSize) {
-                for (int x = macro_cover.x; x < macro_cover.x + macro_cover.width; x += kHpMacroTileSize) {
-                    int tile_w = std::min(kHpMacroTileSize, macro_cover.x + macro_cover.width - x);
-                    int tile_h = std::min(kHpMacroTileSize, macro_cover.y + macro_cover.height - y);
-                    cv::Rect macro_tile(x, y, tile_w, tile_h);
-                    macro_tile = clip_rect(macro_tile, out_bounds);
-                    if (is_rect_empty(macro_tile)) continue;
-                    cv::Rect touched = macro_tile & entry.roi_hp;
-                    if (is_rect_empty(touched)) continue;
-                    bool roi_covers_macro = (touched == macro_tile);
-                    if (roi_covers_macro && macro_tile.width == kHpMacroTileSize && macro_tile.height == kHpMacroTileSize) {
-                        emit_tile(macro_tile);
-                        continue;
-                    }
-                    cv::Rect micro_cover = align_rect(touched, kHpMicroTileSize);
-                    micro_cover = clip_rect(micro_cover, out_bounds);
-                    micro_cover &= macro_tile;
-                    for (int my = micro_cover.y; my < micro_cover.y + micro_cover.height; my += kHpMicroTileSize) {
-                        for (int mx = micro_cover.x; mx < micro_cover.x + micro_cover.width; mx += kHpMicroTileSize) {
-                            int micro_w = std::min(kHpMicroTileSize, micro_cover.x + micro_cover.width - mx);
-                            int micro_h = std::min(kHpMicroTileSize, micro_cover.y + micro_cover.height - my);
-                            cv::Rect micro_tile(mx, my, micro_w, micro_h);
-                            micro_tile = clip_rect(micro_tile, out_bounds);
-                            if (is_rect_empty(micro_tile)) continue;
-                            emit_tile(micro_tile);
+                
+                // Otherwise, fall back to micro tiles for the intersected region
+                cv::Rect micro_cover = align_rect(touched, kHpMicroTileSize);
+                micro_cover = clip_rect(micro_cover, out_bounds) & macro_tile;
+                for (int my = micro_cover.y; my < micro_cover.y + micro_cover.height; my += kHpMicroTileSize) {
+                    for (int mx = micro_cover.x; mx < micro_cover.x + micro_cover.width; mx += kHpMicroTileSize) {
+                        cv::Rect micro_tile(mx, my, std::min(kHpMicroTileSize, micro_cover.x + micro_cover.width - mx), std::min(kHpMicroTileSize, micro_cover.y + micro_cover.height - my));
+                        micro_tile = clip_rect(micro_tile, out_bounds);
+                        if (is_rect_empty(micro_tile)) continue;
+                        task.output_tile.roi = micro_tile;
+                        task.input_tiles.clear();
+                        for(const auto* in_out : image_inputs_ready) {
+                             Tile in_tile; in_tile.buffer = const_cast<ImageBuffer*>(&in_out->image_buffer);
+                             in_tile.roi = clip_rect(expand_rect(micro_tile, entry.halo_hp), cv::Size(in_out->image_buffer.width, in_out->image_buffer.height));
+                             task.input_tiles.push_back(in_tile);
                         }
+                        execute_tile_task(task, *hp_tile_fn);
                     }
                 }
             }
-        };
-
-        bool full_frame =
-            entry.roi_hp.x == 0 && entry.roi_hp.y == 0 &&
-            entry.roi_hp.width == hp_buffer.width &&
-            entry.roi_hp.height == hp_buffer.height;
-
-        bool executed = false;
-        if (hp_tile_fn && (!full_frame || !hp_mono_fn)) {
-            run_tiled(*hp_tile_fn);
-            executed = true;
-        } else if (hp_mono_fn) {
-            run_monolithic(*hp_mono_fn);
-            executed = true;
-        } else if (hp_tile_fn) {
-            run_tiled(*hp_tile_fn);
-            executed = true;
-        } else if (fallback_variant) {
-            if (std::holds_alternative<MonolithicOpFunc>(*fallback_variant)) {
-                run_monolithic(std::get<MonolithicOpFunc>(*fallback_variant));
-                executed = true;
-            } else if (std::holds_alternative<TileOpFunc>(*fallback_variant)) {
-                run_tiled(std::get<TileOpFunc>(*fallback_variant));
-                executed = true;
-            }
         }
 
-        if (!executed) {
-            throw GraphError(GraphErrc::NoOperation,
-                             "No operator available for HP update on node " + node.type + ":" + node.subtype);
-        }
-
-        if (node.hp_roi.has_value()) {
-            node.hp_roi = clip_rect(merge_rect(*node.hp_roi, entry.roi_hp), entry.hp_size);
-        } else {
-            node.hp_roi = entry.roi_hp;
-        }
+        // Update node state
+        node.hp_roi = node.hp_roi.has_value() ? clip_rect(merge_rect(*node.hp_roi, entry.roi_hp), entry.hp_size) : entry.roi_hp;
         node.hp_version++;
         events_.push(node.id, node.name, "hp_update", 0.0);
     };
 
     for (int nid : execution_order) {
-        auto it = plan.find(nid);
-        if (it == plan.end()) continue;
-        compute_node_hp(nid, it->second);
+        if (plan.count(nid)) {
+            compute_node_hp(nid, plan.at(nid));
+        }
     }
 
     Node& target = nodes.at(node_id);
@@ -2162,21 +1992,20 @@ NodeOutput& ComputeService::compute_parallel(GraphModel& graph,
     switch (intent) {
         case ComputeIntent::GlobalHighPrecision:
             if (dirty_roi.has_value()) {
-                return compute_high_precision_update(graph, &runtime, node_id, cache_precision,
-                                                     force_recache, enable_timing, disable_disk_cache, benchmark_events,
-                                                     *dirty_roi);
+                // TODO: For now, a dirty ROI on a global compute triggers a full recompute.
+                // In the future, this could be an optimized partial update.
+                return compute_parallel(graph, runtime, node_id, cache_precision, true, enable_timing, disable_disk_cache, benchmark_events);
             }
-            // Fallback: full-frame compute
             return compute_parallel(graph, runtime, node_id, cache_precision, force_recache, enable_timing, disable_disk_cache, benchmark_events);
         case ComputeIntent::RealTimeUpdate:
             if (!dirty_roi.has_value()) {
-                throw GraphError(GraphErrc::InvalidParameter,
-                                 "RealTimeUpdate intent requires a dirty ROI region.");
+                throw GraphError(GraphErrc::InvalidParameter, "RealTimeUpdate intent requires a dirty ROI region.");
             }
-            return compute_real_time_update(graph, &runtime, node_id, cache_precision,
-                                            force_recache, enable_timing,
-                                            disable_disk_cache, benchmark_events,
-                                            *dirty_roi);
+            // 启动后台 HP 更新（目前是串行执行，但逻辑上是独立的）
+            compute_high_precision_update(graph, &runtime, node_id, cache_precision, force_recache, enable_timing, disable_disk_cache, benchmark_events, *dirty_roi);
+            
+            // 接着执行并返回 RT 更新的结果
+            return compute_real_time_update(graph, &runtime, node_id, cache_precision, force_recache, enable_timing, disable_disk_cache, benchmark_events, *dirty_roi);
         default:
             return compute_parallel(graph, runtime, node_id, cache_precision, force_recache, enable_timing, disable_disk_cache, benchmark_events);
     }
@@ -2230,6 +2059,10 @@ NodeOutput& ComputeService::compute_sequential_impl(GraphModel& graph,
 
     if (benchmark_events) {
         benchmark_events->clear();
+    }
+
+    if (enable_timing) {
+        clear_timing_results(graph);
     }
 
     std::vector<int> execution_order;
