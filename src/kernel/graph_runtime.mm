@@ -12,6 +12,7 @@
 namespace ps {
 
 thread_local int GraphRuntime::tls_worker_id_ = -1;
+thread_local uint64_t GraphRuntime::tls_active_epoch_ = 0;
 
 struct GraphRuntime::GpuContext {
 #ifdef __APPLE__
@@ -114,7 +115,69 @@ void GraphRuntime::stop() {
     }
 }
 
-std::optional<Task> GraphRuntime::steal_task(int stealer_id) {
+uint64_t GraphRuntime::this_task_epoch() {
+    return tls_active_epoch_;
+}
+
+uint64_t GraphRuntime::active_epoch() const {
+    return active_epoch_.load(std::memory_order_acquire);
+}
+
+uint64_t GraphRuntime::begin_new_epoch() {
+    uint64_t next = epoch_counter_.fetch_add(1, std::memory_order_acq_rel) + 1;
+    active_epoch_.store(next, std::memory_order_release);
+    cancel_stale_enqueued_tasks(next);
+    return next;
+}
+
+bool GraphRuntime::should_cancel_epoch(uint64_t epoch) const {
+    if (epoch == 0) return false;
+    return epoch < active_epoch();
+}
+
+void GraphRuntime::cancel_stale_enqueued_tasks(uint64_t min_epoch) {
+    if (min_epoch == 0) return;
+    size_t removed = 0;
+    {
+        std::lock_guard<std::mutex> lock(global_queues_mutex_);
+        auto purge_queue = [&](auto& q) {
+            std::queue<ScheduledTask> kept;
+            while (!q.empty()) {
+                auto task = std::move(q.front());
+                q.pop();
+                if (task.epoch != 0 && task.epoch < min_epoch) {
+                    ++removed;
+                    continue;
+                }
+                kept.push(std::move(task));
+            }
+            q.swap(kept);
+        };
+        purge_queue(high_priority_queue_);
+        purge_queue(normal_priority_queue_);
+    }
+
+    for (size_t i = 0; i < local_task_queues_.size(); ++i) {
+        if (i >= local_queue_mutexes_.size() || !local_queue_mutexes_[i]) continue;
+        std::lock_guard<std::mutex> lock(*local_queue_mutexes_[i]);
+        auto& dq = local_task_queues_[i];
+        auto it = dq.begin();
+        while (it != dq.end()) {
+            if (it->epoch != 0 && it->epoch < min_epoch) {
+                it = dq.erase(it);
+                ++removed;
+            } else {
+                ++it;
+            }
+        }
+    }
+
+    if (removed > 0) {
+        ready_task_count_.fetch_sub(static_cast<int>(removed), std::memory_order_acq_rel);
+    }
+}
+
+std::optional<ScheduledTask> GraphRuntime::steal_task(int stealer_id) {
     int n = static_cast<int>(num_workers_);
     if (n <= 1) return std::nullopt;
 
@@ -132,7 +195,7 @@ std::optional<Task> GraphRuntime::steal_task(int stealer_id) {
 
         std::lock_guard<std::mutex> lock(*local_queue_mutexes_[victim_id]);
         if (!local_task_queues_[victim_id].empty()) {
-            Task stolen_task = std::move(local_task_queues_[victim_id].front());
+            ScheduledTask stolen_task = std::move(local_task_queues_[victim_id].front());
             local_task_queues_[victim_id].pop_front();
             return stolen_task;
         }
@@ -156,14 +219,14 @@ void GraphRuntime::run_loop(int thread_id) {
             continue;
         }
 
-        Task task;
+        ScheduledTask scheduled;
         bool found_task = false;
 
         // 1) Try high priority global queue first (preemptive)
         {
             std::lock_guard<std::mutex> lock(global_queues_mutex_);
             if (!high_priority_queue_.empty()) {
-                task = std::move(high_priority_queue_.front());
+                scheduled = std::move(high_priority_queue_.front());
                 high_priority_queue_.pop();
                 found_task = true;
                 high_executed_.fetch_add(1, std::memory_order_relaxed);
@@ -175,7 +238,7 @@ void GraphRuntime::run_loop(int thread_id) {
             if (thread_id >= 0 && thread_id < static_cast<int>(local_queue_mutexes_.size())) {
                 std::lock_guard<std::mutex> lock(*local_queue_mutexes_[thread_id]);
                 if (thread_id < static_cast<int>(local_task_queues_.size()) && !local_task_queues_[thread_id].empty()) {
-                    task = std::move(local_task_queues_[thread_id].back());
+                    scheduled = std::move(local_task_queues_[thread_id].back());
                     local_task_queues_[thread_id].pop_back();
                     found_task = true;
                     normal_executed_.fetch_add(1, std::memory_order_relaxed);
@@ -187,7 +250,7 @@ void GraphRuntime::run_loop(int thread_id) {
         if (!found_task) {
             std::lock_guard<std::mutex> lock(global_queues_mutex_);
             if (!normal_priority_queue_.empty()) {
-                task = std::move(normal_priority_queue_.front());
+                scheduled = std::move(normal_priority_queue_.front());
                 normal_priority_queue_.pop();
                 found_task = true;
                 normal_executed_.fetch_add(1, std::memory_order_relaxed);
@@ -198,17 +261,26 @@ void GraphRuntime::run_loop(int thread_id) {
         if (!found_task) {
             auto stolen_task = steal_task(thread_id);
             if (stolen_task) {
-                task = std::move(*stolen_task);
+                scheduled = std::move(*stolen_task);
                 found_task = true;
                 normal_executed_.fetch_add(1, std::memory_order_relaxed);
             }
         }
-        
+
         if (found_task) {
             ready_task_count_.fetch_sub(1, std::memory_order_release);
+            if (should_cancel_epoch(scheduled.epoch)) {
+                continue;
+            }
             try {
-                if (task) {
-                    task();
+                if (scheduled) {
+                    struct EpochScope {
+                        uint64_t* slot;
+                        uint64_t prev;
+                        EpochScope(uint64_t* s, uint64_t value) : slot(s), prev(*s) { *slot = value; }
+                        ~EpochScope() { *slot = prev; }
+                    } epoch_scope(&tls_active_epoch_, scheduled.epoch);
+                    scheduled.task();
                 } else {
                     // Unexpected empty task – surface as exception so the scheduler unwinds safely
                     set_exception(std::make_exception_ptr(std::runtime_error("GraphRuntime: empty task invoked")));
@@ -239,8 +311,10 @@ void GraphRuntime::run_loop(int thread_id) {
 void GraphRuntime::submit_initial_tasks(std::vector<Task>&& tasks, int total_task_count, TaskPriority priority) {
     has_exception_.store(false, std::memory_order_relaxed);
     first_exception_ = nullptr;
+
+    uint64_t epoch = begin_new_epoch();
     tasks_to_complete_.store(total_task_count, std::memory_order_relaxed);
-    
+
     if (tasks_to_complete_.load() == 0) {
         std::lock_guard<std::mutex> lk(completion_mutex_);
         cv_completion_.notify_one();
@@ -259,43 +333,50 @@ void GraphRuntime::submit_initial_tasks(std::vector<Task>&& tasks, int total_tas
         return;
     }
 
+    auto wrap_task = [&](Task&& task) -> ScheduledTask {
+        return ScheduledTask(epoch, std::move(task));
+    };
+
+    size_t task_count = tasks.size();
     if (priority == TaskPriority::High) {
         // Put initial tasks in high-priority global queue to be consumed promptly
         std::lock_guard<std::mutex> lock(global_queues_mutex_);
         for (auto& t : tasks) {
-            high_priority_queue_.push(std::move(t));
+            high_priority_queue_.push(wrap_task(std::move(t)));
             high_enqueued_.fetch_add(1, std::memory_order_relaxed);
         }
-        ready_task_count_.fetch_add(tasks.size(), std::memory_order_release);
+        ready_task_count_.fetch_add(static_cast<int>(task_count), std::memory_order_release);
         cv_task_available_.notify_all();
     } else {
         static thread_local std::mt19937 rng(std::random_device{}());
         for (size_t i = 0; i < tasks.size(); ++i) {
             int target_thread = std::uniform_int_distribution<int>(0, num_threads - 1)(rng);
             std::lock_guard<std::mutex> lock(*local_queue_mutexes_[target_thread]);
-            local_task_queues_[target_thread].push_back(std::move(tasks[i]));
+            local_task_queues_[target_thread].push_back(wrap_task(std::move(tasks[i])));
             normal_enqueued_.fetch_add(1, std::memory_order_relaxed);
         }
-        {
-            std::lock_guard<std::mutex> lock(global_queues_mutex_);
-            ready_task_count_.fetch_add(tasks.size(), std::memory_order_release);
-        }
+        ready_task_count_.fetch_add(static_cast<int>(task_count), std::memory_order_release);
         cv_task_available_.notify_all();
     }
 }
 
-void GraphRuntime::submit_ready_task_any_thread(Task&& task, TaskPriority priority) {
+void GraphRuntime::submit_ready_task_any_thread(Task&& task, TaskPriority priority, std::optional<uint64_t> epoch) {
     if (!task) {
         // Do not enqueue empty tasks; let producer decide completion semantics
         return;
     }
+    uint64_t resolved_epoch = epoch.has_value() ? *epoch : active_epoch();
+    if (should_cancel_epoch(resolved_epoch)) {
+        return;
+    }
+    ScheduledTask scheduled(resolved_epoch, std::move(task));
     {
         std::lock_guard<std::mutex> lock(global_queues_mutex_);
         if (priority == TaskPriority::High) {
-            high_priority_queue_.push(std::move(task));
+            high_priority_queue_.push(std::move(scheduled));
             high_enqueued_.fetch_add(1, std::memory_order_relaxed);
         } else {
-            normal_priority_queue_.push(std::move(task));
+            normal_priority_queue_.push(std::move(scheduled));
             normal_enqueued_.fetch_add(1, std::memory_order_relaxed);
         }
         ready_task_count_.fetch_add(1, std::memory_order_relaxed);
@@ -307,17 +388,25 @@ void GraphRuntime::submit_ready_task_from_worker(Task&& task, TaskPriority prior
     int worker_id = this_worker_id();  // -1 表示当前不是 worker 线程
     if (worker_id < 0 || worker_id >= static_cast<int>(local_task_queues_.size())) {
         // 兜底：不是 worker，就走任意线程安全投递
-        submit_ready_task_any_thread(std::move(task), priority);
+        submit_ready_task_any_thread(std::move(task), priority, std::nullopt);
         return;
     }
     if (!task) return;
+    uint64_t epoch = tls_active_epoch_;
+    if (epoch == 0) {
+        epoch = active_epoch();
+    }
+    if (should_cancel_epoch(epoch)) {
+        return;
+    }
+    ScheduledTask scheduled(epoch, std::move(task));
     if (priority == TaskPriority::High) {
         // Put into high-priority global to ensure prompt execution by any worker
-        submit_ready_task_any_thread(std::move(task), TaskPriority::High);
+        submit_ready_task_any_thread(std::move(scheduled.task), TaskPriority::High, epoch);
     } else {
         {
             std::lock_guard<std::mutex> lock(*local_queue_mutexes_[worker_id]);
-            local_task_queues_[worker_id].push_back(std::move(task));
+            local_task_queues_[worker_id].push_back(std::move(scheduled));
             normal_enqueued_.fetch_add(1, std::memory_order_relaxed);
             ready_task_count_.fetch_add(1, std::memory_order_relaxed);
         }
@@ -326,6 +415,10 @@ void GraphRuntime::submit_ready_task_from_worker(Task&& task, TaskPriority prior
 }
 
 void GraphRuntime::dec_graph_tasks_to_complete() {
+    uint64_t epoch = tls_active_epoch_;
+    if (epoch != 0 && should_cancel_epoch(epoch)) {
+        return;
+    }
     if (tasks_to_complete_.fetch_sub(1, std::memory_order_acq_rel) == 1) {
         std::lock_guard<std::mutex> lk(completion_mutex_);
         cv_completion_.notify_one();
@@ -334,6 +427,10 @@ void GraphRuntime::dec_graph_tasks_to_complete() {
 
 void GraphRuntime::inc_graph_tasks_to_complete(int delta) {
     if (delta <= 0) return;
+    uint64_t epoch = tls_active_epoch_;
+    if (epoch != 0 && should_cancel_epoch(epoch)) {
+        return;
+    }
     tasks_to_complete_.fetch_add(delta, std::memory_order_relaxed);
 }
 
