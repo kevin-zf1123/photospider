@@ -3,6 +3,7 @@
 
 #include <atomic>
 #include <condition_variable>
+#include <cstdint>
 #include <deque>
 #include <filesystem>
 #include <functional>
@@ -32,6 +33,17 @@ typedef void* id;
 namespace ps {
 
 using Task = std::function<void()>;
+
+struct ScheduledTask {
+    uint64_t epoch{0};
+    Task task;
+
+    ScheduledTask() = default;
+    ScheduledTask(uint64_t e, Task&& t)
+        : epoch(e), task(std::move(t)) {}
+
+    explicit operator bool() const { return static_cast<bool>(task); }
+};
 
 enum class TaskPriority { Normal, High };
 
@@ -68,7 +80,7 @@ public:
     auto post(Fn&& fn) -> std::future<decltype(fn(std::declval<GraphModel&>()))> {
         using Ret = decltype(fn(std::declval<GraphModel&>()));
         auto task = std::make_shared<std::packaged_task<Ret()>>(
-            [this, f = std::forward<Fn>(fn)](){ 
+            [this, f = std::forward<Fn>(fn)](){
                 if constexpr (!std::is_void_v<Ret>) {
                     return f(model_);
                 } else {
@@ -77,15 +89,7 @@ public:
             }
         );
         std::future<Ret> fut = task->get_future();
-        {
-            std::lock_guard<std::mutex> lk(global_queues_mutex_);
-            normal_priority_queue_.push([task]{ (*task)(); });
-            normal_enqueued_.fetch_add(1, std::memory_order_relaxed);
-            ready_task_count_.fetch_add(1, std::memory_order_release);
-        }
-        if (sleeping_thread_count_.load(std::memory_order_acquire) > 0) {
-            cv_task_available_.notify_one();
-        }
+        submit_ready_task_any_thread([task]{ (*task)(); }, TaskPriority::Normal, std::optional<uint64_t>{0});
         return fut;
     }
     
@@ -100,7 +104,9 @@ public:
     // [核心修改] 任务提交与执行接口
     void submit_initial_tasks(std::vector<Task>&& tasks, int total_task_count, TaskPriority priority = TaskPriority::Normal);
     void submit_ready_task_from_worker(Task&& task, TaskPriority priority = TaskPriority::Normal);
-    void submit_ready_task_any_thread(Task&& task, TaskPriority priority = TaskPriority::Normal);
+    void submit_ready_task_any_thread(Task&& task,
+                                      TaskPriority priority = TaskPriority::Normal,
+                                      std::optional<uint64_t> epoch = std::nullopt);
     void wait_for_completion();
     void set_exception(std::exception_ptr e);
     
@@ -109,13 +115,18 @@ public:
     void inc_graph_tasks_to_complete(int delta);
 
     static int this_worker_id();
+    static uint64_t this_task_epoch();
+    uint64_t active_epoch() const;
+    uint64_t begin_new_epoch();
+    bool should_cancel_epoch(uint64_t epoch) const;
+    void cancel_stale_enqueued_tasks(uint64_t min_epoch);
 
     id get_metal_device();
     id get_metal_command_queue();
 
 private:
     void run_loop(int thread_id);
-    std::optional<Task> steal_task(int stealer_id);
+    std::optional<ScheduledTask> steal_task(int stealer_id);
 
     Info info_;
     GraphModel model_;
@@ -125,12 +136,12 @@ private:
     unsigned int num_workers_{0};
     std::atomic<bool> running_{false};
 
-    std::vector<std::deque<Task>> local_task_queues_; // normal priority local queues
+    std::vector<std::deque<ScheduledTask>> local_task_queues_; // normal priority local queues
     std::vector<std::unique_ptr<std::mutex>> local_queue_mutexes_;
-    
+
     // Phase 1: dual-priority global queues
-    std::queue<Task> high_priority_queue_;
-    std::queue<Task> normal_priority_queue_;
+    std::queue<ScheduledTask> high_priority_queue_;
+    std::queue<ScheduledTask> normal_priority_queue_;
     std::mutex global_queues_mutex_;
     std::condition_variable cv_task_available_;
 
@@ -146,6 +157,10 @@ private:
     std::atomic<bool> has_exception_{false};
 
     static thread_local int tls_worker_id_;
+    static thread_local uint64_t tls_active_epoch_;
+
+    std::atomic<uint64_t> epoch_counter_{0};
+    std::atomic<uint64_t> active_epoch_{0};
 
     struct GpuContext;
     std::unique_ptr<GpuContext> gpu_context_;
