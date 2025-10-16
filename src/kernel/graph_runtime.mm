@@ -1,10 +1,17 @@
 // Photospider kernel: GraphRuntime implementation (Objective-C++)
 #include "kernel/graph_runtime.hpp"
 
+#include <algorithm>
 #include <chrono>
+#include <cstdio>
 #include <filesystem>
+#include <memory>
 #include <numeric>
+#include <queue>
 #include <random>
+#include <thread>
+#include <utility>
+#include <vector>
 
 #ifdef __APPLE__
 #import <Metal/Metal.h>
@@ -534,8 +541,7 @@ void GraphRuntime::log_event(SchedulerEvent::Action action, int node_id) {
                             std::chrono::high_resolution_clock::now()});
 }
 
-std::vector<GraphRuntime::SchedulerEvent> GraphRuntime::get_scheduler_log()
-    const {
+std::vector<GraphRuntime::SchedulerEvent> GraphRuntime::get_scheduler_log() const {
   std::lock_guard<std::mutex> lock(log_mutex_);
   return scheduler_log_;
 }

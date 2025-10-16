@@ -51,8 +51,10 @@
 #include <mutex>
 #include <optional>
 #include <random>
+#include <string>
 #include <unordered_map>
 #include <unordered_set>
+#include <utility>
 #include <variant>
 #include <vector>
 
@@ -373,12 +375,10 @@ NodeOutput& ComputeService::compute_internal(
             using T = std::decay_t<decltype(op_func)>;
 
             // Monolithic
-            if constexpr (std::is_same_v<T, MonolithicOpFunc>) {
-              target_node.cached_output =
-                  op_func(target_node, monolithic_inputs);
-            }
-
-            else if constexpr (std::is_same_v<T, TileOpFunc>) {
+              if constexpr (std::is_same_v<T, MonolithicOpFunc>) {
+                target_node.cached_output =
+                    op_func(target_node, monolithic_inputs);
+              } else if constexpr (std::is_same_v<T, TileOpFunc>) {
               // [核心修复] 为 image_mixing 实现 merge_strategy
               std::vector<NodeOutput> normalized_storage;
               std::vector<const NodeOutput*> inputs_for_tiling =
@@ -578,7 +578,6 @@ NodeOutput& ComputeService::compute_internal(
     }
     cache_.save_cache_if_configured(graph, target_node, cache_precision);
     visiting[node_id] = false;
-
   } while (false);
 
   // 7. 结束计时
@@ -2591,14 +2590,12 @@ NodeOutput& ComputeService::compute_parallel(
         }
       }
     }
-
     if (!nodes.at(node_id).cached_output) {
       throw GraphError(GraphErrc::ComputeError,
                        "Parallel computation finished but target node has no "
                        "output. An upstream error likely occurred.");
     }
     return *nodes.at(node_id).cached_output;
-
   } catch (...) {
     // 捕获在本函数内（任务提交前）抛出的异常，并传递给运行时
     runtime.set_exception(std::current_exception());
