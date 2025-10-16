@@ -1,7 +1,8 @@
-# FILE: CMakeLists.txt (Complete and Corrected)
+# FILE: CMakeLists.txt (Corrected with proper platform-specific isolation)
 
 # Minimum CMake version required
 cmake_minimum_required(VERSION 3.16)
+cmake_policy(SET CMP0135 NEW) # Set policy for FetchContent robustness
 
 # Define the project and specify C++17
 project(Photospider LANGUAGES CXX)
@@ -25,25 +26,14 @@ set(CMAKE_CXX_EXTENSIONS OFF)
 find_package(OpenCV REQUIRED COMPONENTS core imgproc imgcodecs videoio)
 find_package(yaml-cpp REQUIRED)
 
+# --- FIX: Unset potential problematic variables from OpenCV on non-Apple platforms ---
+# This is a robust safeguard. Even with proper if(APPLE) guards, if the OpenCV
+# package itself sets these cache variables unconditionally, this will clean them up.
 if(NOT APPLE)
-    # Some OpenCV builds (notably those generated on macOS) inject placeholder
-    # variables such as `${FW_COREIMAGE}` into `OpenCV_LIBS` so that consumers
-    # can link the corresponding Apple frameworks.  When the project is built on
-    # Linux these placeholders resolve to values that end with `-NOTFOUND`,
-    # which causes CMake configuration to fail.  Strip those entries so that the
-    # rest of the libraries can still be linked successfully on non-Apple
-    # platforms.
-    if(OpenCV_LIBS)
-        set(_OpenCV_LIBS_CLEAN "")
-        foreach(_opencv_lib IN LISTS OpenCV_LIBS)
-            if(_opencv_lib MATCHES "^FW_[A-Z0-9_]+(-NOTFOUND)?$")
-                message(STATUS "Skipping unavailable Apple framework placeholder '${_opencv_lib}' from OpenCV_LIBS")
-            else()
-                list(APPEND _OpenCV_LIBS_CLEAN "${_opencv_lib}")
-            endif()
-        endforeach()
-        set(OpenCV_LIBS ${_OpenCV_LIBS_CLEAN})
-    endif()
+    message(STATUS "Unsetting any residual Apple-specific framework variables for non-Apple build.")
+    foreach(fw_var FW_COREIMAGE FW_COREVIDEO FW_METAL FW_QUARTZCORE FW_FOUNDATION)
+        unset(${fw_var} CACHE)
+    endforeach()
 endif()
 
 include(FetchContent)
@@ -87,10 +77,6 @@ filter_ftxui_sources(FTXUI_COMPONENT_SOURCES)
 add_library(ftxui-component STATIC ${FTXUI_COMPONENT_SOURCES})
 target_include_directories(ftxui-component PUBLIC ${FTXUI_INCLUDE_DIR} PRIVATE ${FTXUI_SRC_DIR})
 target_link_libraries(ftxui-component PUBLIC ftxui-dom)
-
-if(APPLE)
-    enable_language(OBJCXX)
-endif()
 
 # --- Modular Photospider Libraries ---
 set(PHOTOSPIDER_CORE_TYPES_SOURCES
@@ -145,7 +131,10 @@ set(PHOTOSPIDER_COMPUTE_SOURCES
     src/kernel/interaction.cpp
     src/kernel/interaction_benchmark.cpp
 )
+
+# --- Add Apple-specific sources ONLY on Apple platforms ---
 if(APPLE)
+    enable_language(OBJCXX)
     list(APPEND PHOTOSPIDER_COMPUTE_SOURCES src/kernel/graph_runtime.mm)
 endif()
 
@@ -181,8 +170,6 @@ target_include_directories(photospider_lib PUBLIC
 )
 
 target_link_libraries(photospider_lib PUBLIC
-    photospider_core_types
-    photospider_graph
     photospider_compute
     photospider_plugin
     ftxui-component
@@ -192,7 +179,7 @@ target_link_libraries(photospider_lib PUBLIC
 
 # --- Configure Main Executable ---
 add_executable(graph_cli cli/graph_cli.cpp)
-target_include_directories(graph_cli PRIVATE 
+target_include_directories(graph_cli PRIVATE
     "${PROJECT_SOURCE_DIR}/include"
     "${PROJECT_SOURCE_DIR}/src"
 )
@@ -210,9 +197,6 @@ set(PLUGIN_OUTPUT_DIR ${CMAKE_BINARY_DIR}/plugins)
 file(MAKE_DIRECTORY ${PLUGIN_OUTPUT_DIR})
 file(GLOB PLUGIN_SOURCES "custom_ops/*.cpp")
 
-# Always remove the Metal loader from the generic plugin list.  It is added
-# explicitly in the Apple-specific block so that we can attach the required
-# framework dependencies, while non-Apple builds simply skip it.
 list(REMOVE_ITEM PLUGIN_SOURCES "${CMAKE_CURRENT_SOURCE_DIR}/custom_ops/metal_ops_loader.cpp")
 
 foreach(PLUGIN_SOURCE ${PLUGIN_SOURCES})
@@ -235,11 +219,12 @@ if(APPLE)
     file(MAKE_DIRECTORY ${METAL_ROOT_DIR})
     file(MAKE_DIRECTORY ${METAL_OPS_DIR})
 
+    # --- FIX: All framework finding and linking is now strictly inside if(APPLE) ---
     find_library(METAL_FRAMEWORK Metal REQUIRED)
     find_library(FOUNDATION_FRAMEWORK Foundation REQUIRED)
     find_library(COREIMAGE_FRAMEWORK CoreImage REQUIRED)
     find_library(COREVIDEO_FRAMEWORK CoreVideo REQUIRED)
-    
+
     target_link_libraries(photospider_lib PRIVATE
         ${METAL_FRAMEWORK}
         ${FOUNDATION_FRAMEWORK}
@@ -256,6 +241,8 @@ if(APPLE)
         ${FOUNDATION_FRAMEWORK}
         ${COREIMAGE_FRAMEWORK}
         ${COREVIDEO_FRAMEWORK}
+        # OpenCV_LIBS might still contain Apple framework placeholders on macOS,
+        # but here they will resolve correctly.
         ${OpenCV_LIBS}
         yaml-cpp::yaml-cpp
     )
@@ -269,7 +256,7 @@ if(APPLE)
         INSTALL_RPATH "@loader_path/ops;$ORIGIN/../lib"
         MACOSX_RPATH ON
     )
-    
+
     target_include_directories(metal_ops_loader PRIVATE
         "${PROJECT_SOURCE_DIR}/include"
         "${PROJECT_SOURCE_DIR}/src"
@@ -307,7 +294,7 @@ set_target_properties(test_milestone2 PROPERTIES
     RUNTIME_OUTPUT_DIRECTORY "${TEST_OUTPUT_DIR}"
     BUILD_RPATH "${CMAKE_BINARY_DIR}"
 )
-target_include_directories(test_milestone2 PRIVATE 
+target_include_directories(test_milestone2 PRIVATE
     "${PROJECT_SOURCE_DIR}/include"
     "${PROJECT_SOURCE_DIR}/src"
 )
@@ -319,7 +306,7 @@ set_target_properties(test_milestone3 PROPERTIES
     RUNTIME_OUTPUT_DIRECTORY "${TEST_OUTPUT_DIR}"
     BUILD_RPATH "${CMAKE_BINARY_DIR}"
 )
-target_include_directories(test_milestone3 PRIVATE 
+target_include_directories(test_milestone3 PRIVATE
     "${PROJECT_SOURCE_DIR}/include"
     "${PROJECT_SOURCE_DIR}/src"
 )

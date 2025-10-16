@@ -4,7 +4,7 @@
 #include "kernel/interaction.hpp"
 #include "kernel/kernel.hpp"
 #include "kernel/services/compute_service.hpp"
-#include "kernel/graph_model.hpp"
+#include "graph_model.hpp"
 
 #include <chrono>
 #include <fstream>
