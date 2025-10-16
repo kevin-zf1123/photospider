@@ -1,10 +1,8 @@
-# FILE: CMakeLists.txt (Corrected for local build issues)
+# FILE: CMakeLists.txt (Final Corrected Version)
 
 # Minimum CMake version required
 cmake_minimum_required(VERSION 3.16)
-
-# --- FIX: Set CMake policy to handle FetchContent timestamps correctly ---
-cmake_policy(SET CMP0135 NEW)
+cmake_policy(SET CMP0135 NEW) # Add this for FetchContent robustness
 
 # Define the project and specify C++17
 project(Photospider LANGUAGES CXX)
@@ -28,15 +26,19 @@ set(CMAKE_CXX_EXTENSIONS OFF)
 find_package(OpenCV REQUIRED COMPONENTS core imgproc imgcodecs videoio)
 find_package(yaml-cpp REQUIRED)
 
-# Filter out Apple-specific frameworks when building on non-Apple platforms
+# --- FIX START: Replace the filtering logic with a more robust solution ---
 if(NOT APPLE)
-    foreach(_opencv_var OpenCV_LIBS OpenCV_LIBRARIES)
-        if(DEFINED ${_opencv_var})
-            message(STATUS "Filtering Apple frameworks from ${_opencv_var} on non-Apple platform.")
-            list(FILTER ${_opencv_var} EXCLUDE REGEX "^FW_")
-        endif()
+    # The OpenCV configuration may define cache variables for Apple frameworks
+    # that resolve to *-NOTFOUND on other platforms. This causes a CMake error.
+    # The most robust fix is to undefine these variables completely for non-Apple builds.
+    message(STATUS "Unsetting Apple-specific framework variables for non-Apple build.")
+    foreach(fw_var FW_COREIMAGE FW_COREVIDEO FW_METAL FW_QUARTZCORE FW_FOUNDATION)
+        # Unset the variable from the cache so it disappears entirely from the configuration.
+        unset(${fw_var} CACHE)
     endforeach()
 endif()
+# --- FIX END ---
+
 
 include(FetchContent)
 
@@ -172,9 +174,6 @@ target_include_directories(photospider_lib PUBLIC
     "${PROJECT_SOURCE_DIR}/src"
 )
 
-# --- FIX: Simplify linking to avoid duplicate library warnings ---
-# Link only to the top-level internal libraries. Transitive dependencies
-# will be handled automatically by CMake.
 target_link_libraries(photospider_lib PUBLIC
     photospider_compute
     photospider_plugin
@@ -203,9 +202,6 @@ set(PLUGIN_OUTPUT_DIR ${CMAKE_BINARY_DIR}/plugins)
 file(MAKE_DIRECTORY ${PLUGIN_OUTPUT_DIR})
 file(GLOB PLUGIN_SOURCES "custom_ops/*.cpp")
 
-# Always remove the Metal loader from the generic plugin list.  It is added
-# explicitly in the Apple-specific block so that we can attach the required
-# framework dependencies, while non-Apple builds simply skip it.
 list(REMOVE_ITEM PLUGIN_SOURCES "${CMAKE_CURRENT_SOURCE_DIR}/custom_ops/metal_ops_loader.cpp")
 
 foreach(PLUGIN_SOURCE ${PLUGIN_SOURCES})
