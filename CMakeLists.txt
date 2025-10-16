@@ -32,7 +32,7 @@ set(CMAKE_CXX_EXTENSIONS OFF)
 find_package(OpenCV REQUIRED COMPONENTS core imgproc imgcodecs videoio)
 find_package(yaml-cpp REQUIRED)
 find_package(CURL REQUIRED)
-find_package(Openssl REQUIRED)
+find_package(OpenSSL REQUIRED)
 
 message(STATUS "Found OpenSSL version: ${OPENSSL_VERSION}")
 message(STATUS "OpenSSL Libraries: ${OPENSSL_LIBRARIES}")
