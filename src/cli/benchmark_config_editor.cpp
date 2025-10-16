@@ -524,33 +524,9 @@ class BenchmarkConfigEditor {
         (it_output == available_ops_.end())
             ? 0
             : std::distance(available_ops_.begin(), it_output);
-    DropdownOption input_dd_opt;
-    input_dd_opt.radiobox.entries = &available_ops_;
-    input_dd_opt.radiobox.selected = &input_op_selected_;
-    input_dd_opt.radiobox.on_change = [this] {
-      if (!available_ops_.empty())
-        configs_[selected_session_].generator_config.input_op_type =
-            available_ops_[input_op_selected_];
-    };
-    auto input_op_dropdown = Dropdown(input_dd_opt);
-    DropdownOption main_dd_opt;
-    main_dd_opt.radiobox.entries = &available_ops_;
-    main_dd_opt.radiobox.selected = &main_op_selected_;
-    main_dd_opt.radiobox.on_change = [this] {
-      if (!available_ops_.empty())
-        configs_[selected_session_].generator_config.main_op_type =
-            available_ops_[main_op_selected_];
-    };
-    auto main_op_dropdown = Dropdown(main_dd_opt);
-    DropdownOption output_dd_opt;
-    output_dd_opt.radiobox.entries = &available_ops_;
-    output_dd_opt.radiobox.selected = &output_op_selected_;
-    output_dd_opt.radiobox.on_change = [this] {
-      if (!available_ops_.empty())
-        configs_[selected_session_].generator_config.output_op_type =
-            available_ops_[output_op_selected_];
-    };
-    auto output_op_dropdown = Dropdown(output_dd_opt);
+    auto input_op_dropdown = Dropdown(&available_ops_, &input_op_selected_);
+    auto main_op_dropdown = Dropdown(&available_ops_, &main_op_selected_);
+    auto output_op_dropdown = Dropdown(&available_ops_, &output_op_selected_);
     width_input_str_ = std::to_string(current_cfg.generator_config.width);
     InputOption width_opt;
     width_opt.content = &width_input_str_;
@@ -626,9 +602,10 @@ class BenchmarkConfigEditor {
 
     CheckboxOption parallel_opt;
     static std::string parallel_label = "Parallel Execution";
-    parallel_opt.label = &parallel_label;
+    parallel_opt.label = parallel_label;
     parallel_opt.checked = &current_cfg.execution.parallel;
-    auto parallel_checkbox = Checkbox(parallel_opt);
+    auto parallel_checkbox =
+        Checkbox(parallel_label, &current_cfg.execution.parallel, parallel_opt);
     // --- 新增结束 ---
 
     statistics_checked_map_.clear();
@@ -640,15 +617,15 @@ class BenchmarkConfigEditor {
     Components statistics_checkboxes;
     for (const auto& opt_name : statistics_options_) {
       CheckboxOption cb_opt;
-      cb_opt.label = &opt_name;
+      cb_opt.label = opt_name;
       cb_opt.checked = &statistics_checked_map_.at(opt_name);
       cb_opt.on_change = [this] { SyncStatisticsModel(); };
-      statistics_checkboxes.push_back(Checkbox(cb_opt));
+      statistics_checkboxes.push_back(
+          Checkbox(opt_name, &statistics_checked_map_.at(opt_name), cb_opt));
     }
     auto statistics_container = Container::Vertical(statistics_checkboxes);
 
-    // [修改] 将新组件添加到容器中进行事件管理
-    auto details_container = Container::Vertical({
+    Components details_children = {
         auto_gen_radio,
         input_op_dropdown,
         main_op_dropdown,
@@ -660,12 +637,27 @@ class BenchmarkConfigEditor {
         manual_yaml_input,
         runs_input,
         threads_input,
-        parallel_checkbox,  // <-- 新增
+        parallel_checkbox,
         statistics_container,
-    });
+    };
+    auto details_container = Container::Vertical(details_children);
 
     // [修改] 更新渲染逻辑以包含新的 execution 配置区域
     details_pane_ = Renderer(details_container, [=, &current_cfg] {
+      if (!available_ops_.empty()) {
+        auto clamp_index = [&](int& idx) {
+          idx = std::clamp(idx, 0,
+                           static_cast<int>(available_ops_.size()) - 1);
+          return idx;
+        };
+        configs_[selected_session_].generator_config.input_op_type =
+            available_ops_[static_cast<size_t>(clamp_index(input_op_selected_))];
+        configs_[selected_session_].generator_config.main_op_type =
+            available_ops_[static_cast<size_t>(clamp_index(main_op_selected_))];
+        configs_[selected_session_].generator_config.output_op_type =
+            available_ops_[static_cast<size_t>(clamp_index(output_op_selected_))];
+      }
+
       auto details_form = form({
           {text("Name: "), text(current_cfg.name)},
           {text("Mode: "), auto_gen_radio->Render()},

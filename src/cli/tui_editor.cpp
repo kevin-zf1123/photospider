@@ -374,15 +374,17 @@ class NodeEditorUI {
 
           Component full_pane_c = Renderer([&] {
             auto full_content = tree_full_component_->Render();
-            return window(text("Whole Graph") | bold, full_content,
-                          focus_ == TREE_FULL ? HEAVY : ROUNDED);
+            BorderStyle style = focus_ == TREE_FULL ? HEAVY : ROUNDED;
+            return window(text("Whole Graph") | bold, full_content) |
+                   borderStyled(style);
           });
           full_pane_c = full_pane_c | CatchEvent(focus_catcher(TREE_FULL));
 
           Component context_pane_c = Renderer([&] {
             auto context_content = tree_context_component_->Render();
-            return window(text(ContextTreeHeader()) | bold, context_content,
-                          focus_ == TREE_CONTEXT ? HEAVY : ROUNDED);
+            BorderStyle style = focus_ == TREE_CONTEXT ? HEAVY : ROUNDED;
+            return window(text(ContextTreeHeader()) | bold, context_content) |
+                   borderStyled(style);
           });
           context_pane_c =
               context_pane_c | CatchEvent(focus_catcher(TREE_CONTEXT));
