@@ -20,7 +20,7 @@
 namespace ps {
 
 class Kernel {
- public:
+public:
   struct LastError {
     GraphErrc code = GraphErrc::Unknown;
     std::string message;
@@ -127,7 +127,7 @@ class Kernel {
     return *it->second;
   }
 
- private:
+private:
   std::map<std::string, std::unique_ptr<GraphRuntime>> graphs_;
   PluginManager plugin_mgr_;
   std::map<std::string, LastError> last_error_;

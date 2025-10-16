@@ -375,10 +375,10 @@ NodeOutput& ComputeService::compute_internal(
             using T = std::decay_t<decltype(op_func)>;
 
             // Monolithic
-              if constexpr (std::is_same_v<T, MonolithicOpFunc>) {
-                target_node.cached_output =
-                    op_func(target_node, monolithic_inputs);
-              } else if constexpr (std::is_same_v<T, TileOpFunc>) {
+            if constexpr (std::is_same_v<T, MonolithicOpFunc>) {
+              target_node.cached_output =
+                  op_func(target_node, monolithic_inputs);
+            } else if constexpr (std::is_same_v<T, TileOpFunc>) {
               // [核心修复] 为 image_mixing 实现 merge_strategy
               std::vector<NodeOutput> normalized_storage;
               std::vector<const NodeOutput*> inputs_for_tiling =
