@@ -56,6 +56,7 @@
 #include <unordered_set>
 #include <memory>
 #include <cstring>
+#include <cstdint>
 
 namespace ps {
 
@@ -890,6 +891,13 @@ NodeOutput& ComputeService::compute_high_precision_update(GraphModel& graph, Gra
     };
 
     std::unordered_map<int, HpPlanEntry> plan;
+    struct DownsampleRequest {
+        int node_id = -1;
+        cv::Rect roi_hp;
+        int hp_version = 0;
+    };
+    std::vector<DownsampleRequest> downsample_requests;
+    GraphRuntime* runtime_ptr = runtime;
     auto ensure_entry = [&](int nid) -> HpPlanEntry& {
         auto [it, inserted] = plan.emplace(nid, HpPlanEntry{});
         if (inserted) {
@@ -1051,11 +1059,131 @@ NodeOutput& ComputeService::compute_high_precision_update(GraphModel& graph, Gra
         node.hp_roi = node.hp_roi.has_value() ? clip_rect(merge_rect(*node.hp_roi, entry.roi_hp), entry.hp_size) : entry.roi_hp;
         node.hp_version++;
         events_.push(node.id, node.name, "hp_update", 0.0);
+
+        if (runtime_ptr) {
+            downsample_requests.push_back({ node.id, entry.roi_hp, node.hp_version });
+        }
     };
 
     for (int nid : execution_order) {
         if (plan.count(nid)) {
             compute_node_hp(nid, plan.at(nid));
+        }
+    }
+
+    if (!downsample_requests.empty()) {
+        auto make_downsample_task = [this, &graph](DownsampleRequest request) -> Task {
+            return [this, &graph, request]() {
+                auto dtype_bytes = [](DataType dt) -> size_t {
+                    switch (dt) {
+                        case DataType::UINT8: return sizeof(uint8_t);
+                        case DataType::INT8: return sizeof(int8_t);
+                        case DataType::UINT16: return sizeof(uint16_t);
+                        case DataType::INT16: return sizeof(int16_t);
+                        case DataType::FLOAT64: return sizeof(double);
+                        case DataType::FLOAT32:
+                        default:
+                            return sizeof(float);
+                    }
+                };
+
+                std::unique_lock<std::mutex> lock(graph.graph_mutex_);
+                auto node_it = graph.nodes.find(request.node_id);
+                if (node_it == graph.nodes.end()) {
+                    return;
+                }
+                Node& node = node_it->second;
+                if (!node.cached_output_high_precision) {
+                    return;
+                }
+                if (node.hp_version < request.hp_version) {
+                    return;
+                }
+                if (node.rt_version > request.hp_version) {
+                    return;
+                }
+
+                const NodeOutput& hp_output = *node.cached_output_high_precision;
+                const ImageBuffer& hp_buffer = hp_output.image_buffer;
+                cv::Size hp_size(std::max(hp_buffer.width, 0), std::max(hp_buffer.height, 0));
+                cv::Rect roi_hp = clip_rect(request.roi_hp, hp_size);
+                if (is_rect_empty(roi_hp) && hp_size.width > 0 && hp_size.height > 0) {
+                    roi_hp = cv::Rect(0, 0, hp_size.width, hp_size.height);
+                }
+
+                if (!node.cached_output_real_time) {
+                    node.cached_output_real_time = NodeOutput{};
+                }
+                node.cached_output_real_time->data = hp_output.data;
+
+                if (hp_buffer.width <= 0 || hp_buffer.height <= 0 || !hp_buffer.data) {
+                    node.cached_output_real_time = node.cached_output_high_precision;
+                    if (!is_rect_empty(roi_hp)) {
+                        node.rt_roi = node.rt_roi.has_value() ? clip_rect(merge_rect(*node.rt_roi, roi_hp), hp_size) : roi_hp;
+                    }
+                    node.rt_version = request.hp_version;
+                    events_.push(node.id, node.name, "downsample_passthrough", 0.0);
+                    return;
+                }
+
+                cv::Size rt_size = scale_down_size(hp_size, kRtDownscaleFactor);
+                if (rt_size.width <= 0 || rt_size.height <= 0) {
+                    node.cached_output_real_time = node.cached_output_high_precision;
+                    if (!is_rect_empty(roi_hp)) {
+                        node.rt_roi = node.rt_roi.has_value() ? clip_rect(merge_rect(*node.rt_roi, roi_hp), hp_size) : roi_hp;
+                    }
+                    node.rt_version = request.hp_version;
+                    events_.push(node.id, node.name, "downsample_passthrough", 0.0);
+                    return;
+                }
+
+                ImageBuffer& rt_buffer = node.cached_output_real_time->image_buffer;
+                bool needs_alloc = (rt_buffer.width != rt_size.width) ||
+                                   (rt_buffer.height != rt_size.height) ||
+                                   (rt_buffer.channels != hp_buffer.channels) ||
+                                   (rt_buffer.type != hp_buffer.type) ||
+                                   (!rt_buffer.data);
+                if (needs_alloc) {
+                    size_t pixel_size = dtype_bytes(hp_buffer.type);
+                    if (pixel_size == 0) {
+                        pixel_size = sizeof(float);
+                    }
+                    rt_buffer.width = rt_size.width;
+                    rt_buffer.height = rt_size.height;
+                    rt_buffer.channels = hp_buffer.channels;
+                    rt_buffer.type = hp_buffer.type;
+                    rt_buffer.device = Device::CPU;
+                    rt_buffer.context.reset();
+                    rt_buffer.step = static_cast<size_t>(rt_buffer.width) * rt_buffer.channels * pixel_size;
+                    rt_buffer.data.reset(new char[rt_buffer.step * rt_buffer.height], std::default_delete<char[]>());
+                    std::memset(rt_buffer.data.get(), 0, rt_buffer.step * rt_buffer.height);
+                }
+
+                cv::Rect roi_rt = clip_rect(scale_down_rect(roi_hp, kRtDownscaleFactor), rt_size);
+                if (is_rect_empty(roi_rt)) {
+                    roi_rt = cv::Rect(0, 0, rt_size.width, rt_size.height);
+                }
+
+                cv::Mat hp_mat = toCvMat(hp_buffer);
+                cv::Mat rt_mat = toCvMat(rt_buffer);
+                cv::Mat hp_patch = hp_mat(roi_hp);
+                cv::Mat downsampled;
+                cv::resize(hp_patch, downsampled, cv::Size(roi_rt.width, roi_rt.height), 0, 0, cv::INTER_LINEAR);
+                downsampled.copyTo(rt_mat(roi_rt));
+
+                node.rt_roi = node.rt_roi.has_value() ? clip_rect(merge_rect(*node.rt_roi, roi_hp), hp_size) : roi_hp;
+                node.rt_version = request.hp_version;
+                events_.push(node.id, node.name, "downsample", 0.0);
+            };
+        };
+
+        for (const auto& request : downsample_requests) {
+            Task task = make_downsample_task(request);
+            if (runtime_ptr) {
+                runtime_ptr->submit_ready_task_any_thread(std::move(task), TaskPriority::High);
+            } else {
+                task();
+            }
         }
     }
 
@@ -1075,6 +1203,7 @@ NodeOutput& ComputeService::compute_real_time_update(GraphModel& graph, GraphRun
                                                 std::vector<BenchmarkEvent>* benchmark_events,
                                                 const cv::Rect& dirty_roi)
 {
+    [[maybe_unused]] std::unique_lock<std::mutex> graph_lock(graph.graph_mutex_);
     auto& nodes = graph.nodes;
 
     (void)runtime;
