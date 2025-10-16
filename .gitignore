@@ -28,6 +28,8 @@
 # All YAML configuration or data files
 *.yaml
 *.yml
+!/.github/workflows/*.yml
+!/.github/workflows/*.yaml
 
 # All plain text files
 *.txt
@@ -64,3 +66,9 @@ kernel.py
 /sessions/
 .vscode/
 !**/help*.txt
+/util/*.py
+/util/*.md
+!/util/*.yaml
+!/util/testcases/**/*.yaml
+!/util/testcases/**/*.txt
+/benchmarks/

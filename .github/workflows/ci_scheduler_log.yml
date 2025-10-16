@@ -1,0 +1,57 @@
+name: CI Scheduler Log
+
+on:
+  push:
+    branches: ["main", "develop"]
+  pull_request:
+    branches: ["main", "develop"]
+  issue_comment:
+    types: [created]
+  workflow_dispatch:
+
+jobs:
+  build_test:
+    if: github.event_name != 'issue_comment' || (github.event.issue.pull_request && contains(github.event.comment.body, '/run-scheduler-ci'))
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - name: Install dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y build-essential pkg-config libopencv-dev libyaml-cpp-dev cppcheck
+          python3 -m pip install --upgrade pip
+          python3 -m pip install cpplint
+
+      - name: Configure
+        run: cmake -S . -B build -DUSE_TSAN=OFF -DUSE_ASAN=OFF -DCMAKE_EXPORT_COMPILE_COMMANDS=ON
+
+      - name: Run cpplint
+        run: |
+          set -e
+          files=$(git ls-files include/kernel/graph_runtime.hpp src/kernel/graph_runtime.mm src/kernel/services/compute_service.cpp tests/test_scheduler.cpp include/kernel/kernel.hpp)
+          if [ -n "$files" ]; then
+            python3 -m cpplint --extensions=mm,cpp,cxx,cc,h,hpp --quiet $files
+          fi
+
+      - name: Run cppcheck
+        run: |
+          cppcheck --enable=warning,performance,style --project=build/compile_commands.json --suppress=missingIncludeSystem
+
+      - name: Build
+        run: cmake --build build --config Release -j 2
+
+      - name: Run ctest
+        working-directory: build
+        run: ctest --output-on-failure
+
+      - name: Upload scheduler log
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: scheduler-log
+          path: build/tests/scheduler_log.json
+          if-no-files-found: warn
