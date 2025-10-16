@@ -487,9 +487,14 @@ void GraphRuntime::set_exception(std::exception_ptr e) {
 }
 
 void GraphRuntime::log_event(SchedulerEvent::Action action, int node_id) {
+    uint64_t epoch = this_task_epoch();
+    if (epoch == 0) {
+        epoch = active_epoch();
+    }
+
     std::lock_guard<std::mutex> lock(log_mutex_);
     scheduler_log_.push_back({
-        active_epoch(),
+        epoch,
         node_id,
         this_worker_id(),
         action,
