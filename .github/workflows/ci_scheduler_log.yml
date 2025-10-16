@@ -35,22 +35,27 @@ jobs:
           key: ${{ runner.os }}-pip-cpplint
           restore-keys: ${{ runner.os }}-pip-
 
-      # C/C++ 编译缓存（强烈推荐）
-      - name: Cache ccache
-        uses: actions/cache@v4
-        with:
-          path: ~/.ccache
-          key: ${{ runner.os }}-ccache-${{ hashFiles('CMakeLists.txt') }}
-          restore-keys: ${{ runner.os }}-ccache-
+      # # C/C++ 编译缓存（强烈推荐）
+      # - name: Cache ccache
+      #   uses: actions/cache@v4
+      #   with:
+      #     path: ~/.ccache
+      #     key: ${{ runner.os }}-ccache-${{ hashFiles('CMakeLists.txt') }}
+      #     restore-keys: ${{ runner.os }}-ccache-
 
       - name: Configure
+        # run: |
+        #   ccache --zero-stats || true
+        #   cmake -S . -B build \
+        #     -DUSE_TSAN=OFF -DUSE_ASAN=OFF \
+        #     -DCMAKE_EXPORT_COMPILE_COMMANDS=ON \
+        #     -DCMAKE_C_COMPILER_LAUNCHER=ccache \
+        #     -DCMAKE_CXX_COMPILER_LAUNCHER=ccache
         run: |
-          ccache --zero-stats || true
+          rm -rf build
           cmake -S . -B build \
             -DUSE_TSAN=OFF -DUSE_ASAN=OFF \
             -DCMAKE_EXPORT_COMPILE_COMMANDS=ON \
-            -DCMAKE_C_COMPILER_LAUNCHER=ccache \
-            -DCMAKE_CXX_COMPILER_LAUNCHER=ccache
 
       - name: Run cpplint
         run: |
