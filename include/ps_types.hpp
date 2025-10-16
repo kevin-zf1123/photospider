@@ -80,7 +80,7 @@ struct PHOTOSPIDER_API GraphError : public std::runtime_error {
       : std::runtime_error(what), code_(code) {}
   GraphErrc code() const noexcept { return code_; }
 
-private:
+ private:
   GraphErrc code_;
 };
 
@@ -128,7 +128,7 @@ enum class ComputeIntent {
 };
 
 class OpRegistry {
-public:
+ public:
   static OpRegistry& instance();
 
   using OpVariant = std::variant<MonolithicOpFunc, TileOpFunc>;
@@ -182,7 +182,7 @@ public:
   const OpImplementations* get_implementations(
       const std::string& type, const std::string& subtype) const;
 
-private:
+ private:
   std::unordered_map<std::string, OpVariant> table_;
   // [修改] 元数据表现在可以存储包含设备偏好的完整 OpMetadata
   std::unordered_map<std::string, OpMetadata> metadata_table_;

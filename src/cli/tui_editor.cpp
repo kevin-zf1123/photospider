@@ -196,7 +196,7 @@ static Element DrawTreePaneContent(const TreePaneState& pane) {
 // Node picker (opened when `node` command has no id)
 // -----------------------------------------------------------------------------
 class NodePicker {
-public:
+ public:
   explicit NodePicker(GraphModel& graph) : graph_(graph) {
     ids_ = SortedNodeIds(graph_);
     entries_.reserve(ids_.size());
@@ -238,7 +238,7 @@ public:
     return ids_[selected_index_];
   }
 
-private:
+ private:
   GraphModel& graph_;
   std::vector<int> ids_;
   std::vector<std::string> entries_;
@@ -253,7 +253,7 @@ private:
 // Main editor UI
 // -----------------------------------------------------------------------------
 class NodeEditorUI {
-public:
+ public:
   NodeEditorUI(GraphModel& graph, int node_id)
       : graph_(graph), active_node_id_(node_id) {
     ids_ = SortedNodeIds(graph_);
@@ -274,7 +274,7 @@ public:
     screen.Loop(root_);
   }
 
-private:
+ private:
   enum FocusPane {
     NODE_LIST = 0,
     NODE_PARAM = 1,
@@ -560,7 +560,7 @@ private:
     status_ = msg; /* could be extended to timed banner */
   }
 
-private:
+ private:
   GraphModel& graph_;
   ScreenInteractive* screen_ = nullptr;
 

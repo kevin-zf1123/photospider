@@ -15,7 +15,7 @@ namespace ps {
  * @brief 根据配置动态生成图的YAML定义。
  */
 class YamlGenerator {
-public:
+ public:
   static YAML::Node Generate(const GraphGenConfig& config);
 };
 

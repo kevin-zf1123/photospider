@@ -338,7 +338,7 @@ static void save_benchmark_configs_to_file(
  *  - Component session_list_、details_pane_        UI 渲染组件
  */
 class BenchmarkConfigEditor {
-public:
+ public:
   BenchmarkConfigEditor(ScreenInteractive& screen, ps::InteractionService& svc,
                         const std::string& benchmark_dir)
       : screen_(screen), svc_(svc), benchmark_dir_(benchmark_dir) {
@@ -393,7 +393,7 @@ public:
     screen_.Loop(main_container);
   }
 
-private:
+ private:
   // ... (RebuildSessionList, SyncStatisticsModel, AddNewSession,
   // DeleteSelectedSession, SaveConfig, RenderStatusBar 等函数无需修改) ...
   void RebuildSessionList() {

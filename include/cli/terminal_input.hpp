@@ -28,7 +28,7 @@ enum Key {
 };
 
 class TerminalInput {
-public:
+ public:
   TerminalInput();
   ~TerminalInput();
   int GetChar();
@@ -37,7 +37,7 @@ public:
   void Restore();
   void SetRaw();
 
-private:
+ private:
 #ifdef _WIN32
   HANDLE h_in_;
   DWORD original_mode_;

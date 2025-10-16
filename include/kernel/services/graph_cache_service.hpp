@@ -8,7 +8,7 @@
 namespace ps {
 
 class GraphCacheService {
-public:
+ public:
   std::filesystem::path node_cache_dir(const GraphModel& graph,
                                        int node_id) const;
 

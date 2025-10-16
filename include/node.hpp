@@ -37,7 +37,7 @@ namespace ps {
  * - to_yaml：将 Node 对象序列化为 YAML 格式的数据。
  */
 class Node {
-public:
+ public:
   int id = -1;
   std::string name;
   std::string type;

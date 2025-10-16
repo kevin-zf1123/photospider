@@ -14,7 +14,7 @@ class GraphEventService;
 struct BenchmarkEvent;
 
 class ComputeService {
-public:
+ public:
   ComputeService(GraphTraversalService& traversal, GraphCacheService& cache,
                  GraphEventService& events);
 
@@ -68,7 +68,7 @@ public:
 
   void clear_timing_results(GraphModel& graph);
 
-private:
+ private:
   NodeOutput& compute_sequential_impl(
       GraphModel& graph, int node_id, const std::string& cache_precision,
       bool force_recache, bool enable_timing, bool disable_disk_cache,
