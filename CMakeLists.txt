@@ -25,6 +25,20 @@ set(CMAKE_CXX_EXTENSIONS OFF)
 find_package(OpenCV REQUIRED COMPONENTS core imgproc imgcodecs videoio)
 find_package(yaml-cpp REQUIRED)
 
+include(FetchContent)
+
+FetchContent_Declare(
+  googletest
+  URL https://github.com/google/googletest/archive/refs/tags/v1.15.2.zip
+)
+FetchContent_MakeAvailable(googletest)
+
+FetchContent_Declare(
+  nlohmann_json
+  URL https://github.com/nlohmann/json/releases/download/v3.11.3/json.tar.xz
+)
+FetchContent_MakeAvailable(nlohmann_json)
+
 # --- Build FTXUI as Modular Static Libraries ---
 set(FTXUI_INCLUDE_DIR "${PROJECT_SOURCE_DIR}/extern/ftxui/include")
 set(FTXUI_SRC_DIR "${PROJECT_SOURCE_DIR}/extern/ftxui/src")
@@ -251,6 +265,21 @@ enable_testing()
 set(TEST_OUTPUT_DIR ${CMAKE_BINARY_DIR}/tests)
 file(MAKE_DIRECTORY ${TEST_OUTPUT_DIR})
 
+add_executable(test_scheduler tests/test_scheduler.cpp)
+set_target_properties(test_scheduler PROPERTIES
+    RUNTIME_OUTPUT_DIRECTORY "${TEST_OUTPUT_DIR}"
+    BUILD_RPATH "${CMAKE_BINARY_DIR}"
+)
+target_include_directories(test_scheduler PRIVATE
+    "${PROJECT_SOURCE_DIR}/include"
+    "${PROJECT_SOURCE_DIR}/src"
+)
+target_link_libraries(test_scheduler PRIVATE
+    photospider_lib
+    GTest::gtest_main
+    nlohmann_json::nlohmann_json
+)
+
 add_executable(test_milestone2 tests/test_milestone2.cpp)
 set_target_properties(test_milestone2 PROPERTIES
     RUNTIME_OUTPUT_DIRECTORY "${TEST_OUTPUT_DIR}"
@@ -274,6 +303,9 @@ target_include_directories(test_milestone3 PRIVATE
 )
 target_link_libraries(test_milestone3 PRIVATE photospider_lib)
 add_test(NAME Milestone3Tests COMMAND test_milestone3)
+
+include(GoogleTest)
+gtest_discover_tests(test_scheduler)
 
 # --- Final Output ---
 message(STATUS "Main executable will be built in: ${CMAKE_BINARY_DIR}")

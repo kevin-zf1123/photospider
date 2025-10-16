@@ -3,6 +3,7 @@
 
 #include <atomic>
 #include <condition_variable>
+#include <chrono>
 #include <cstdint>
 #include <deque>
 #include <filesystem>
@@ -66,6 +67,15 @@ public:
         std::filesystem::path config;
     };
 
+    struct SchedulerEvent {
+        enum Action { ASSIGN_INITIAL, EXECUTE };
+        uint64_t epoch;
+        int node_id;
+        int worker_id;
+        Action action;
+        std::chrono::time_point<std::chrono::high_resolution_clock> timestamp;
+    };
+
     explicit GraphRuntime(const Info& info);
     ~GraphRuntime();
 
@@ -109,6 +119,10 @@ public:
                                       std::optional<uint64_t> epoch = std::nullopt);
     void wait_for_completion();
     void set_exception(std::exception_ptr e);
+
+    void log_event(SchedulerEvent::Action action, int node_id);
+    std::vector<SchedulerEvent> get_scheduler_log() const;
+    void clear_scheduler_log();
     
     void dec_graph_tasks_to_complete();
     // Increment outstanding tasks in-flight; used when a node "kickoff" spawns micro-tasks lazily.
@@ -170,6 +184,9 @@ private:
     std::atomic<uint64_t> normal_enqueued_{0};
     std::atomic<uint64_t> high_executed_{0};
     std::atomic<uint64_t> normal_executed_{0};
+
+    mutable std::mutex log_mutex_;
+    std::vector<SchedulerEvent> scheduler_log_;
 };
 
 } // namespace ps

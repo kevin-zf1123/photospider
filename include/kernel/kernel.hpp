@@ -7,6 +7,7 @@
 #include <string>
 #include <vector>
 #include <map>
+#include <stdexcept>
 
 #include "kernel/graph_runtime.hpp"
 #include "kernel/services/graph_cache_service.hpp"
@@ -95,6 +96,14 @@ public:
 
     // [新增] 暴露 Metal 设备访问器
     id get_metal_device(const std::string& name);
+
+    GraphRuntime& runtime(const std::string& name) {
+        auto it = graphs_.find(name);
+        if (it == graphs_.end()) {
+            throw std::runtime_error("Graph not found: " + name);
+        }
+        return *it->second;
+    }
 
 private:
     std::map<std::string, std::unique_ptr<GraphRuntime>> graphs_;

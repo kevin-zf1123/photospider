@@ -2,6 +2,7 @@
 #include "kernel/graph_runtime.hpp"
 
 #include <filesystem>
+#include <chrono>
 #include <random>
 #include <numeric>
 
@@ -483,6 +484,27 @@ void GraphRuntime::set_exception(std::exception_ptr e) {
             cv_completion_.notify_all();
         }
     }
+}
+
+void GraphRuntime::log_event(SchedulerEvent::Action action, int node_id) {
+    std::lock_guard<std::mutex> lock(log_mutex_);
+    scheduler_log_.push_back({
+        active_epoch(),
+        node_id,
+        this_worker_id(),
+        action,
+        std::chrono::high_resolution_clock::now()
+    });
+}
+
+std::vector<GraphRuntime::SchedulerEvent> GraphRuntime::get_scheduler_log() const {
+    std::lock_guard<std::mutex> lock(log_mutex_);
+    return scheduler_log_;
+}
+
+void GraphRuntime::clear_scheduler_log() {
+    std::lock_guard<std::mutex> lock(log_mutex_);
+    scheduler_log_.clear();
 }
 
 } // namespace ps
