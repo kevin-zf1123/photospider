@@ -7,20 +7,21 @@
 namespace ps {
 
 class GraphEventService {
-public:
-    struct ComputeEvent {
-        int id;
-        std::string name;
-        std::string source;
-        double elapsed_ms;
-    };
+ public:
+  struct ComputeEvent {
+    int id;
+    std::string name;
+    std::string source;
+    double elapsed_ms;
+  };
 
-    void push(int id, const std::string& name, const std::string& source, double ms);
-    std::vector<ComputeEvent> drain();
+  void push(int id, const std::string& name, const std::string& source,
+            double ms);
+  std::vector<ComputeEvent> drain();
 
-private:
-    std::mutex mutex_;
-    std::vector<ComputeEvent> buffer_;
+ private:
+  std::mutex mutex_;
+  std::vector<ComputeEvent> buffer_;
 };
 
-} // namespace ps
+}  // namespace ps

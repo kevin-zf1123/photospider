@@ -8,13 +8,15 @@
 
 namespace ps {
 
-// Upload CPU ImageBuffer into a new GPU (Metal) ImageBuffer with an owned MTLTexture.
+// Upload CPU ImageBuffer into a new GPU (Metal) ImageBuffer with an owned
+// MTLTexture.
 // - Supports FLOAT32 with 1 or 4 channels.
 // - Throws on unsupported formats or platforms.
 ImageBuffer upload_to_metal(const ImageBuffer& cpu_buffer, void* device);
 
 // Download a GPU (Metal) ImageBuffer back to a new CPU ImageBuffer.
-// - Expects the input buffer.device == Device::GPU_METAL and context holding an MTLTexture.
+// - Expects the input buffer.device == Device::GPU_METAL and context holding an
+// MTLTexture.
 ImageBuffer download_from_metal(const ImageBuffer& gpu_buffer);
 
-}
+}  // namespace ps
