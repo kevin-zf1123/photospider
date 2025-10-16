@@ -32,7 +32,13 @@ set(CMAKE_CXX_EXTENSIONS OFF)
 find_package(OpenCV REQUIRED COMPONENTS core imgproc imgcodecs videoio)
 find_package(yaml-cpp REQUIRED)
 find_package(CURL REQUIRED)
+find_package(Openssl REQUIRED)
 
+message(STATUS "Found OpenSSL version: ${OPENSSL_VERSION}")
+message(STATUS "OpenSSL Libraries: ${OPENSSL_LIBRARIES}")
+message(STATUS "OpenSSL Include Dirs: ${OPENSSL_INCLUDE_DIRS}")
+message(STATUS "Found CURL Libraries: ${CURL_LIBRARIES}")
+message(STATUS "Found CURL Include Dirs: ${CURL_INCLUDE_DIR}")
 # --- FIX: Unset potential problematic variables from OpenCV on non-Apple platforms ---
 # This is a robust safeguard. Even with proper if(APPLE) guards, if the OpenCV
 # package itself sets these cache variables unconditionally, this will clean them up.
@@ -212,6 +218,8 @@ target_link_libraries(photospider_lib PUBLIC
     ${OpenCV_LIBS}
     yaml-cpp::yaml-cpp
     CURL::libcurl
+    OpenSSL::SSL
+    OpenSSL::Crypto
 )
 
 # --- Configure Main Executable ---
@@ -324,6 +332,7 @@ target_include_directories(test_scheduler PRIVATE
 target_link_libraries(test_scheduler PRIVATE
     photospider_lib
     ${FTXUI_COMPONENT_TARGET}
+    GTest::gtest
     GTest::gtest_main
     nlohmann_json::nlohmann_json
 )
