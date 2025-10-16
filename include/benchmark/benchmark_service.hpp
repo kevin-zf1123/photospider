@@ -10,7 +10,7 @@ namespace ps {
  * @brief 封装了运行和分析基准测试的逻辑。
  */
 class BenchmarkService {
-public:
+ public:
   explicit BenchmarkService(ps::InteractionService& svc);
 
   /**
@@ -45,7 +45,7 @@ public:
    */
   void CleanupArtifacts(const std::string& benchmark_dir);
 
-private:
+ private:
   ps::InteractionService& svc_;
 
   /**

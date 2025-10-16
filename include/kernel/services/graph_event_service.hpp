@@ -7,7 +7,7 @@
 namespace ps {
 
 class GraphEventService {
-public:
+ public:
   struct ComputeEvent {
     int id;
     std::string name;
@@ -19,7 +19,7 @@ public:
             double ms);
   std::vector<ComputeEvent> drain();
 
-private:
+ private:
   std::mutex mutex_;
   std::vector<ComputeEvent> buffer_;
 };

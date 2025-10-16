@@ -7,6 +7,7 @@
 #include <optional>
 #include <stdexcept>
 #include <string>
+#include <utility>
 #include <vector>
 
 #include "kernel/graph_runtime.hpp"
@@ -19,7 +20,7 @@
 namespace ps {
 
 class Kernel {
-public:
+ public:
   struct LastError {
     GraphErrc code = GraphErrc::Unknown;
     std::string message;
@@ -126,7 +127,7 @@ public:
     return *it->second;
   }
 
-private:
+ private:
   std::map<std::string, std::unique_ptr<GraphRuntime>> graphs_;
   PluginManager plugin_mgr_;
   std::map<std::string, LastError> last_error_;

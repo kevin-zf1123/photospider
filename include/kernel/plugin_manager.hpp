@@ -17,7 +17,7 @@ class OpRegistry;
 // - Loads shared libraries using existing load_plugins() implementation.
 // - Tracks which ops came from which plugin path for safe unload.
 class PluginManager {
-public:
+ public:
   // Load plugins from the given directory patterns and record op->source
   // mapping.
   void load_from_dirs(const std::vector<std::string>& dir_patterns);
@@ -40,7 +40,7 @@ public:
     return op_sources_;
   }
 
-private:
+ private:
   // Map: op key (type:subtype) -> source ("built-in" or plugin absolute path)
   std::map<std::string, std::string> op_sources_;
 };
