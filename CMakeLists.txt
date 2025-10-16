@@ -31,6 +31,7 @@ set(CMAKE_CXX_EXTENSIONS OFF)
 # --- Find Dependencies ---
 find_package(OpenCV REQUIRED COMPONENTS core imgproc imgcodecs videoio)
 find_package(yaml-cpp REQUIRED)
+find_package(CURL REQUIRED)
 
 # --- FIX: Unset potential problematic variables from OpenCV on non-Apple platforms ---
 # This is a robust safeguard. Even with proper if(APPLE) guards, if the OpenCV
@@ -210,6 +211,7 @@ target_link_libraries(photospider_lib PUBLIC
     ${FTXUI_COMPONENT_TARGET}
     ${OpenCV_LIBS}
     yaml-cpp::yaml-cpp
+    CURL::libcurl
 )
 
 # --- Configure Main Executable ---
