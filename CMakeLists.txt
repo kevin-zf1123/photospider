@@ -25,6 +25,27 @@ set(CMAKE_CXX_EXTENSIONS OFF)
 find_package(OpenCV REQUIRED COMPONENTS core imgproc imgcodecs videoio)
 find_package(yaml-cpp REQUIRED)
 
+if(NOT APPLE)
+    # Some OpenCV builds (notably those generated on macOS) inject placeholder
+    # variables such as `${FW_COREIMAGE}` into `OpenCV_LIBS` so that consumers
+    # can link the corresponding Apple frameworks.  When the project is built on
+    # Linux these placeholders resolve to values that end with `-NOTFOUND`,
+    # which causes CMake configuration to fail.  Strip those entries so that the
+    # rest of the libraries can still be linked successfully on non-Apple
+    # platforms.
+    if(OpenCV_LIBS)
+        set(_OpenCV_LIBS_CLEAN "")
+        foreach(_opencv_lib IN LISTS OpenCV_LIBS)
+            if(_opencv_lib MATCHES "^FW_[A-Z0-9_]+(-NOTFOUND)?$")
+                message(STATUS "Skipping unavailable Apple framework placeholder '${_opencv_lib}' from OpenCV_LIBS")
+            else()
+                list(APPEND _OpenCV_LIBS_CLEAN "${_opencv_lib}")
+            endif()
+        endforeach()
+        set(OpenCV_LIBS ${_OpenCV_LIBS_CLEAN})
+    endif()
+endif()
+
 include(FetchContent)
 
 FetchContent_Declare(
@@ -189,9 +210,10 @@ set(PLUGIN_OUTPUT_DIR ${CMAKE_BINARY_DIR}/plugins)
 file(MAKE_DIRECTORY ${PLUGIN_OUTPUT_DIR})
 file(GLOB PLUGIN_SOURCES "custom_ops/*.cpp")
 
-if(APPLE)
-    list(REMOVE_ITEM PLUGIN_SOURCES "${CMAKE_CURRENT_SOURCE_DIR}/custom_ops/metal_ops_loader.cpp")
-endif()
+# Always remove the Metal loader from the generic plugin list.  It is added
+# explicitly in the Apple-specific block so that we can attach the required
+# framework dependencies, while non-Apple builds simply skip it.
+list(REMOVE_ITEM PLUGIN_SOURCES "${CMAKE_CURRENT_SOURCE_DIR}/custom_ops/metal_ops_loader.cpp")
 
 foreach(PLUGIN_SOURCE ${PLUGIN_SOURCES})
     get_filename_component(PLUGIN_NAME ${PLUGIN_SOURCE} NAME_WE)
