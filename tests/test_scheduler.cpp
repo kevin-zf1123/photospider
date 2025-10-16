@@ -4,8 +4,9 @@
 #include <fstream>
 #include <iomanip>
 #include <nlohmann/json.hpp>
+#include <string>
 
-#include "graph_model.hpp"
+#include "graph_model.hpp"  // NOLINT(build/include_subdir)
 #include "kernel/interaction.hpp"
 #include "kernel/kernel.hpp"
 #include "kernel/services/compute_service.hpp"

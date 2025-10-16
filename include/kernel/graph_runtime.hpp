@@ -16,9 +16,11 @@
 #include <optional>
 #include <queue>
 #include <string>
+#include <thread>
+#include <utility>
 #include <vector>
 
-#include "graph_model.hpp"
+#include "graph_model.hpp"  // NOLINT(build/include_subdir)
 #include "kernel/services/graph_event_service.hpp"
 
 // [修改] 使用预处理器宏和前向声明来隔离平台特定的 Metal API
@@ -57,7 +59,7 @@ struct TaskGraph {
 };
 
 class GraphRuntime {
-public:
+ public:
   struct Info {
     std::string name;
     std::filesystem::path root;
@@ -139,7 +141,7 @@ public:
   id get_metal_device();
   id get_metal_command_queue();
 
-private:
+ private:
   void run_loop(int thread_id);
   std::optional<ScheduledTask> steal_task(int stealer_id);
 
