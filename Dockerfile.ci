@@ -6,11 +6,13 @@ RUN apt-get update && DEBIAN_FRONTEND=noninteractive apt-get install -y \
     libopencv-dev libyaml-cpp-dev \
     cppcheck python3 python3-venv git ca-certificates && \
     # 2) 建立一个虚拟环境
-    python3 -m venv /opt/venv && \
+ENV VENV=/opt/venv
+RUN python3 -m venv $VENV
+ENV PATH="$VENV/bin:$PATH"
     # 3) 在 venv 里升级 pip 并安装 cpplint
-    /opt/venv/bin/pip install --upgrade pip && \
-    /opt/venv/bin/pip install cpplint && \
+RUN pip install --upgrade pip && \
+    pip install cpplint && \
     # 4) 暴露 cpplint 到 PATH（脚本里直接可调用）
-    ln -s /opt/venv/bin/cpplint /usr/local/bin/cpplint && \
+    ln -s $VENV/bin/cpplint /usr/local/bin/cpplint && \
     # 5) 清理 apt 列表
     rm -rf /var/lib/apt/lists/*
