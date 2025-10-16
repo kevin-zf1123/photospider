@@ -2034,12 +2034,13 @@ NodeOutput& ComputeService::compute_parallel(GraphModel& graph,
             };
             
             // --- 包装任务以处理异常和完成计数 ---
-            all_tasks[i] = [inner_task = std::move(inner_task), &runtime]() {
+            all_tasks[i] = [inner_task = std::move(inner_task), &runtime, current_node_id]() {
+                runtime.log_event(GraphRuntime::SchedulerEvent::EXECUTE, current_node_id);
                 inner_task();
                 runtime.dec_graph_tasks_to_complete();
             };
         }
-        
+
         // --- 提交初始就绪任务 ---
         std::vector<Task> initial_tasks;
         for (size_t i = 0; i < num_nodes; ++i) {
@@ -2049,13 +2050,19 @@ NodeOutput& ComputeService::compute_parallel(GraphModel& graph,
         }
 
         if (execution_order.empty() && graph.has_node(node_id)) {
-             // 处理图中只有一个节点的情况
-            if(!nodes.at(node_id).cached_output.has_value()){
-                 std::unordered_map<int, bool> visiting;
-                 compute_internal(graph, node_id, cache_precision, visiting, enable_timing, !disable_disk_cache, benchmark_events);
+            // 处理图中只有一个节点的情况
+            if (!nodes.at(node_id).cached_output.has_value()) {
+                std::unordered_map<int, bool> visiting;
+                compute_internal(graph, node_id, cache_precision, visiting, enable_timing,
+                                 !disable_disk_cache, benchmark_events);
             }
         } else {
             runtime.submit_initial_tasks(std::move(initial_tasks), execution_order.size());
+            for (size_t i = 0; i < num_nodes; ++i) {
+                if (dependency_counters[i] == 0) {
+                    runtime.log_event(GraphRuntime::SchedulerEvent::ASSIGN_INITIAL, execution_order[i]);
+                }
+            }
             runtime.wait_for_completion();
         }
 
