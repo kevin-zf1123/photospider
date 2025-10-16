@@ -6,7 +6,7 @@ IndentWidth: 2               # 缩进 2 空格（Google 规范）
 TabWidth: 2
 UseTab: Never                # 不使用 tab
 ColumnLimit: 80              # 每行不超过 80 列
-AccessModifierOffset: -2     # 类访问修饰符缩进
+AccessModifierOffset: -1     # 类访问修饰符缩进（-1 => public: 缩进 1 空格，配合 IndentWidth: 2）
 
 # 括号与空格
 SpaceBeforeParens: ControlStatements
