@@ -7,7 +7,7 @@
 namespace ps {
 
 class CliHistory {
-public:
+ public:
   CliHistory();
 
   void Load();
@@ -26,7 +26,7 @@ public:
   // Expose the resolved history file path for UI/diagnostics.
   const std::filesystem::path& Path() const { return history_file_path_; }
 
-private:
+ private:
   std::filesystem::path GetHistoryFilePath() const;
   void Trim();
 

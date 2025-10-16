@@ -7,7 +7,7 @@
 namespace ps {
 
 class GraphIOService {
-public:
+ public:
   void load(GraphModel& graph, const std::filesystem::path& yaml_path) const;
   void save(const GraphModel& graph,
             const std::filesystem::path& yaml_path) const;
