@@ -1,0 +1,121 @@
+# FILE: scheduler_test_parallel.yaml
+
+# 1. 起点：一个所有分支都依赖的单一数据源
+- id: 1
+  name: The_Source
+  type: image_generator
+  subtype: constant
+  parameters:
+    width: 512
+    height: 512
+    value: 128
+    channels: 3
+
+# 2. 扇出 (Fan-out)：创建4个并行的模糊处理分支，它们都依赖于节点1
+#    一旦节点1完成，这4个节点应被不同线程并行执行。
+- id: 10
+  name: Branch_A_Blur
+  type: image_process
+  subtype: gaussian_blur
+  image_inputs:
+    - from_node_id: 1
+  parameters:
+    ksize: 5
+
+- id: 20
+  name: Branch_B_Blur
+  type: image_process
+  subtype: gaussian_blur
+  image_inputs:
+    - from_node_id: 1
+  parameters:
+    ksize: 15
+
+- id: 30
+  name: Branch_C_Blur
+  type: image_process
+  subtype: gaussian_blur
+  image_inputs:
+    - from_node_id: 1
+  parameters:
+    ksize: 25
+
+- id: 40
+  name: Branch_D_Blur
+  type: image_process
+  subtype: gaussian_blur
+  image_inputs:
+    - from_node_id: 1
+  parameters:
+    ksize: 35
+
+# 3. 短链：在每个并行分支后再加一个节点，增加一点深度
+- id: 11
+  name: Branch_A_Curve
+  type: image_process
+  subtype: curve_transform
+  image_inputs:
+    - from_node_id: 10
+  parameters:
+    k: 0.5
+
+- id: 21
+  name: Branch_B_Curve
+  type: image_process
+  subtype: curve_transform
+  image_inputs:
+    - from_node_id: 20
+  parameters:
+    k: 1.5
+
+- id: 31
+  name: Branch_C_Curve
+  type: image_process
+  subtype: curve_transform
+  image_inputs:
+    - from_node_id: 30
+  parameters:
+    k: 2.5
+
+- id: 41
+  name: Branch_D_Curve
+  type: image_process
+  subtype: curve_transform
+  image_inputs:
+    - from_node_id: 40
+  parameters:
+    k: 3.5
+
+# 4. 扇入 (Fan-in)：将并行的结果两两合并，测试依赖同步
+#    节点100 必须等待 11 和 21 都完成
+- id: 100
+  name: Merge_AB
+  type: image_mixing
+  subtype: add_weighted
+  image_inputs:
+    - from_node_id: 11
+    - from_node_id: 21
+  parameters:
+    alpha: 0.5
+    beta: 0.5
+
+#    节点101 必须等待 31 和 41 都完成
+- id: 101
+  name: Merge_CD
+  type: image_mixing
+  subtype: add_weighted
+  image_inputs:
+    - from_node_id: 31
+    - from_node_id: 41
+  parameters:
+    alpha: 0.7
+    beta: 0.3
+
+# 5. 最终合并：计算最终节点，作为整个图的终点
+- id: 200
+  name: Final_Merge
+  type: image_mixing
+  subtype: multiply
+  image_inputs:
+    - from_node_id: 100
+    - from_node_id: 101

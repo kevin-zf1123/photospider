@@ -20,7 +20,7 @@ TEST(SchedulerTest, ParallelLogToJson) {
 
   svc.cmd_seed_builtin_ops();
   const std::string graph_name = "scheduler_ci_graph";
-  const std::string graph_path = "util/testcases/full_ops.yaml";
+  const std::string graph_path = "util/testcases/scheduler_test_parallel.yaml";
   auto loaded = svc.cmd_load_graph(graph_name, "sessions", graph_path);
   ASSERT_TRUE(loaded.has_value());
 
