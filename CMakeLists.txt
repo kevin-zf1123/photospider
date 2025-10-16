@@ -31,7 +31,14 @@ set(CMAKE_CXX_EXTENSIONS OFF)
 # --- Find Dependencies ---
 find_package(OpenCV REQUIRED COMPONENTS core imgproc imgcodecs videoio)
 find_package(yaml-cpp REQUIRED)
+find_package(CURL REQUIRED)
+find_package(OpenSSL REQUIRED)
 
+message(STATUS "Found OpenSSL version: ${OPENSSL_VERSION}")
+message(STATUS "OpenSSL Libraries: ${OPENSSL_LIBRARIES}")
+message(STATUS "OpenSSL Include Dirs: ${OPENSSL_INCLUDE_DIRS}")
+message(STATUS "Found CURL Libraries: ${CURL_LIBRARIES}")
+message(STATUS "Found CURL Include Dirs: ${CURL_INCLUDE_DIR}")
 # --- FIX: Unset potential problematic variables from OpenCV on non-Apple platforms ---
 # This is a robust safeguard. Even with proper if(APPLE) guards, if the OpenCV
 # package itself sets these cache variables unconditionally, this will clean them up.
@@ -59,30 +66,51 @@ FetchContent_MakeAvailable(nlohmann_json)
 # --- Build FTXUI as Modular Static Libraries ---
 set(FTXUI_INCLUDE_DIR "${PROJECT_SOURCE_DIR}/extern/ftxui/include")
 set(FTXUI_SRC_DIR "${PROJECT_SOURCE_DIR}/extern/ftxui/src")
+set(FTXUI_COMPONENT_TARGET "")
 
-function(filter_ftxui_sources out_var)
-    list(FILTER ${out_var} EXCLUDE REGEX ".*_test\\.cpp$")
-    list(FILTER ${out_var} EXCLUDE REGEX ".*_fuzzer\\.cpp$")
-    list(FILTER ${out_var} EXCLUDE REGEX ".*_benchmark\\.cpp$")
-    set(${out_var} ${${out_var}} PARENT_SCOPE)
-endfunction()
+if(EXISTS "${FTXUI_SRC_DIR}" AND IS_DIRECTORY "${FTXUI_SRC_DIR}" AND
+   EXISTS "${FTXUI_INCLUDE_DIR}" AND IS_DIRECTORY "${FTXUI_INCLUDE_DIR}")
+    file(GLOB_RECURSE FTXUI_SCREEN_SOURCES "${FTXUI_SRC_DIR}/ftxui/screen/*.cpp")
+    file(GLOB_RECURSE FTXUI_DOM_SOURCES "${FTXUI_SRC_DIR}/ftxui/dom/*.cpp")
+    file(GLOB_RECURSE FTXUI_COMPONENT_SOURCES "${FTXUI_SRC_DIR}/ftxui/component/*.cpp")
 
-file(GLOB_RECURSE FTXUI_SCREEN_SOURCES "${FTXUI_SRC_DIR}/ftxui/screen/*.cpp")
-filter_ftxui_sources(FTXUI_SCREEN_SOURCES)
-add_library(ftxui-screen STATIC ${FTXUI_SCREEN_SOURCES})
-target_include_directories(ftxui-screen PUBLIC ${FTXUI_INCLUDE_DIR} PRIVATE ${FTXUI_SRC_DIR})
+    function(filter_ftxui_sources out_var)
+        list(FILTER ${out_var} EXCLUDE REGEX ".*_test\\.cpp$")
+        list(FILTER ${out_var} EXCLUDE REGEX ".*_fuzzer\\.cpp$")
+        list(FILTER ${out_var} EXCLUDE REGEX ".*_benchmark\\.cpp$")
+        set(${out_var} ${${out_var}} PARENT_SCOPE)
+    endfunction()
 
-file(GLOB_RECURSE FTXUI_DOM_SOURCES "${FTXUI_SRC_DIR}/ftxui/dom/*.cpp")
-filter_ftxui_sources(FTXUI_DOM_SOURCES)
-add_library(ftxui-dom STATIC ${FTXUI_DOM_SOURCES})
-target_include_directories(ftxui-dom PUBLIC ${FTXUI_INCLUDE_DIR} PRIVATE ${FTXUI_SRC_DIR})
-target_link_libraries(ftxui-dom PUBLIC ftxui-screen)
+    filter_ftxui_sources(FTXUI_SCREEN_SOURCES)
+    filter_ftxui_sources(FTXUI_DOM_SOURCES)
+    filter_ftxui_sources(FTXUI_COMPONENT_SOURCES)
 
-file(GLOB_RECURSE FTXUI_COMPONENT_SOURCES "${FTXUI_SRC_DIR}/ftxui/component/*.cpp")
-filter_ftxui_sources(FTXUI_COMPONENT_SOURCES)
-add_library(ftxui-component STATIC ${FTXUI_COMPONENT_SOURCES})
-target_include_directories(ftxui-component PUBLIC ${FTXUI_INCLUDE_DIR} PRIVATE ${FTXUI_SRC_DIR})
-target_link_libraries(ftxui-component PUBLIC ftxui-dom)
+    if(FTXUI_SCREEN_SOURCES AND FTXUI_DOM_SOURCES AND FTXUI_COMPONENT_SOURCES)
+        add_library(ftxui-screen STATIC ${FTXUI_SCREEN_SOURCES})
+        target_include_directories(ftxui-screen PUBLIC ${FTXUI_INCLUDE_DIR} PRIVATE ${FTXUI_SRC_DIR})
+
+        add_library(ftxui-dom STATIC ${FTXUI_DOM_SOURCES})
+        target_include_directories(ftxui-dom PUBLIC ${FTXUI_INCLUDE_DIR} PRIVATE ${FTXUI_SRC_DIR})
+        target_link_libraries(ftxui-dom PUBLIC ftxui-screen)
+
+        add_library(ftxui-component STATIC ${FTXUI_COMPONENT_SOURCES})
+        target_include_directories(ftxui-component PUBLIC ${FTXUI_INCLUDE_DIR} PRIVATE ${FTXUI_SRC_DIR})
+        target_link_libraries(ftxui-component PUBLIC ftxui-dom)
+
+        set(FTXUI_COMPONENT_TARGET ftxui-component)
+    endif()
+endif()
+
+if(NOT FTXUI_COMPONENT_TARGET)
+    message(STATUS "FTXUI sources not found locally; fetching release archive")
+    FetchContent_Declare(
+        ftxui
+        GIT_REPOSITORY https://github.com/ArthurSonzogni/FTXUI.git
+        GIT_TAG v5.0.0
+    )
+    FetchContent_MakeAvailable(ftxui)
+    set(FTXUI_COMPONENT_TARGET ftxui::component)
+endif()
 
 # --- Modular Photospider Libraries ---
 set(PHOTOSPIDER_CORE_TYPES_SOURCES
@@ -136,12 +164,20 @@ set(PHOTOSPIDER_COMPUTE_SOURCES
     src/kernel/kernel.cpp
     src/kernel/interaction.cpp
     src/kernel/interaction_benchmark.cpp
+    src/kernel/graph_runtime.mm
 )
 
-# --- Add Apple-specific sources ONLY on Apple platforms ---
 if(APPLE)
     enable_language(OBJCXX)
-    list(APPEND PHOTOSPIDER_COMPUTE_SOURCES src/kernel/graph_runtime.mm)
+else()
+    # The graph runtime implementation is written in standard C++ with
+    # Objective-C++ extensions guarded behind __APPLE__ checks. In order for
+    # GNU-compatible compilers to build it on Linux we explicitly tell CMake to
+    # treat the .mm file as a regular C++ translation unit.
+    set_source_files_properties(src/kernel/graph_runtime.mm PROPERTIES
+        LANGUAGE CXX
+        COMPILE_FLAGS "-x c++"
+    )
 endif()
 
 add_library(photospider_compute STATIC ${PHOTOSPIDER_COMPUTE_SOURCES})
@@ -178,9 +214,12 @@ target_include_directories(photospider_lib PUBLIC
 target_link_libraries(photospider_lib PUBLIC
     photospider_compute
     photospider_plugin
-    ftxui-component
+    ${FTXUI_COMPONENT_TARGET}
     ${OpenCV_LIBS}
     yaml-cpp::yaml-cpp
+    CURL::libcurl
+    OpenSSL::SSL
+    OpenSSL::Crypto
 )
 
 # --- Configure Main Executable ---
@@ -190,6 +229,7 @@ target_include_directories(graph_cli PRIVATE
     "${PROJECT_SOURCE_DIR}/src"
 )
 target_link_libraries(graph_cli PRIVATE photospider_lib)
+target_link_libraries(graph_cli PRIVATE ${FTXUI_COMPONENT_TARGET})
 if (UNIX AND NOT APPLE)
     target_link_libraries(graph_cli PRIVATE anl)
 endif()
@@ -291,6 +331,8 @@ target_include_directories(test_scheduler PRIVATE
 )
 target_link_libraries(test_scheduler PRIVATE
     photospider_lib
+    ${FTXUI_COMPONENT_TARGET}
+    GTest::gtest
     GTest::gtest_main
     nlohmann_json::nlohmann_json
 )
@@ -304,7 +346,7 @@ target_include_directories(test_milestone2 PRIVATE
     "${PROJECT_SOURCE_DIR}/include"
     "${PROJECT_SOURCE_DIR}/src"
 )
-target_link_libraries(test_milestone2 PRIVATE photospider_lib)
+target_link_libraries(test_milestone2 PRIVATE photospider_lib ${FTXUI_COMPONENT_TARGET})
 add_test(NAME Milestone2Tests COMMAND test_milestone2)
 
 add_executable(test_milestone3 tests/test_milestone3.cpp)
@@ -316,11 +358,11 @@ target_include_directories(test_milestone3 PRIVATE
     "${PROJECT_SOURCE_DIR}/include"
     "${PROJECT_SOURCE_DIR}/src"
 )
-target_link_libraries(test_milestone3 PRIVATE photospider_lib)
+target_link_libraries(test_milestone3 PRIVATE photospider_lib ${FTXUI_COMPONENT_TARGET})
 add_test(NAME Milestone3Tests COMMAND test_milestone3)
 
 include(GoogleTest)
-gtest_discover_tests(test_scheduler)
+gtest_discover_tests(test_scheduler WORKING_DIRECTORY ${PROJECT_SOURCE_DIR})
 
 # --- Final Output ---
 message(STATUS "Main executable will be built in: ${CMAKE_BINARY_DIR}")
