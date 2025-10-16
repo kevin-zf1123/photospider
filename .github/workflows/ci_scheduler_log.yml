@@ -89,6 +89,12 @@ jobs:
           submodules: recursive
 
       # Homebrew 安装依赖（opencv / yaml-cpp / cppcheck / python 工具）
+      - name: Clean Homebrew Cache
+        run: |
+          rm -rf /Users/runner/Library/Caches/Homebrew/downloads/*
+          brew cleanup -s
+      - name: Update Homebrew
+        run: brew update  
       - name: Install deps (brew)
         run: |
           brew update
