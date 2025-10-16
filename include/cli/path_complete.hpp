@@ -15,4 +15,4 @@ std::vector<std::string> PathCompleteOptions(const std::string& prefix);
 // Utility: longest common prefix of a non-empty vector of strings.
 std::string LongestCommonPrefix(const std::vector<std::string>& options);
 
-} // namespace ps
+}  // namespace ps
