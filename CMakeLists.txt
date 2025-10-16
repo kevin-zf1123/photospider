@@ -27,23 +27,25 @@ find_package(yaml-cpp REQUIRED)
 
 if(NOT APPLE)
     # Some OpenCV builds (notably those generated on macOS) inject placeholder
-    # variables such as `${FW_COREIMAGE}` into `OpenCV_LIBS` so that consumers
-    # can link the corresponding Apple frameworks.  When the project is built on
-    # Linux these placeholders resolve to values that end with `-NOTFOUND`,
-    # which causes CMake configuration to fail.  Strip those entries so that the
-    # rest of the libraries can still be linked successfully on non-Apple
-    # platforms.
-    if(OpenCV_LIBS)
-        set(_OpenCV_LIBS_CLEAN "")
-        foreach(_opencv_lib IN LISTS OpenCV_LIBS)
-            if(_opencv_lib MATCHES "^FW_[A-Z0-9_]+(-NOTFOUND)?$")
-                message(STATUS "Skipping unavailable Apple framework placeholder '${_opencv_lib}' from OpenCV_LIBS")
-            else()
-                list(APPEND _OpenCV_LIBS_CLEAN "${_opencv_lib}")
-            endif()
-        endforeach()
-        set(OpenCV_LIBS ${_OpenCV_LIBS_CLEAN})
-    endif()
+    # variables such as `${FW_COREIMAGE}` into their exported library lists so
+    # that consumers can link the corresponding Apple frameworks.  When the
+    # project is built on Linux these placeholders evaluate to `*-NOTFOUND`,
+    # which causes CMake configuration to abort even though the actual OpenCV
+    # libraries are present.  Strip those entries so the remaining libraries can
+    # still be linked successfully on non-Apple platforms.
+    foreach(_opencv_var OpenCV_LIBS OpenCV_LIBRARIES)
+        if(DEFINED ${_opencv_var})
+            set(_opencv_filtered)
+            foreach(_opencv_lib IN LISTS ${_opencv_var})
+                if(_opencv_lib MATCHES "^FW_[A-Z0-9_]+(-NOTFOUND)?$")
+                    message(STATUS "Skipping unavailable Apple framework placeholder '${_opencv_lib}' from ${_opencv_var}")
+                else()
+                    list(APPEND _opencv_filtered "${_opencv_lib}")
+                endif()
+            endforeach()
+            set(${_opencv_var} ${_opencv_filtered})
+        endif()
+    endforeach()
 endif()
 
 include(FetchContent)
