@@ -89,7 +89,7 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: scheduler-log
-          path: build/tests/scheduler_log.json
+          path: scheduler_log.json
           if-no-files-found: warn
   # build_macos:
   #   runs-on: macos-latest  # 或 macos-latest
