@@ -52,6 +52,7 @@ jobs:
         #     -DCMAKE_C_COMPILER_LAUNCHER=ccache \
         #     -DCMAKE_CXX_COMPILER_LAUNCHER=ccache
         run: |
+          rm -rf build
           cmake -S . -B build \
             -DUSE_TSAN=OFF -DUSE_ASAN=OFF \
             -DCMAKE_EXPORT_COMPILE_COMMANDS=ON \
