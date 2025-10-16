@@ -82,7 +82,7 @@ jobs:
           path: build/tests/scheduler_log.json
           if-no-files-found: warn
   build_macos:
-    runs-on: macos-13  # 或 macos-latest
+    runs-on: macos-latest  # 或 macos-latest
     steps:
       - uses: actions/checkout@v4
         with:
