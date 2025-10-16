@@ -537,8 +537,9 @@ void GraphRuntime::log_event(SchedulerEvent::Action action, int node_id) {
   }
 
   std::lock_guard<std::mutex> lock(log_mutex_);
-  scheduler_log_.push_back({epoch, node_id, this_worker_id(), action,
-                            std::chrono::high_resolution_clock::now()});
+  scheduler_log_.push_back(
+      {epoch, node_id, this_worker_id(), action,
+       std::chrono::high_resolution_clock::now()});
 }
 
 std::vector<GraphRuntime::SchedulerEvent> GraphRuntime::get_scheduler_log() const {
