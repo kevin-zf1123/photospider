@@ -122,8 +122,8 @@ namespace {
 
 constexpr int kRtDownscaleFactor = 4;
 constexpr int kRtTileSize = 16;
-constexpr int kHpAlignment =
-    kRtDownscaleFactor * kRtTileSize;  // 64px alignment on full-res
+constexpr int kHpAlignment = kRtDownscaleFactor * kRtTileSize;
+// 64px alignment on full-res
 constexpr int kHpMacroTileSize = 256;
 constexpr int kHpMicroTileSize = 64;
 
