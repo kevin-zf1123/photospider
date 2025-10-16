@@ -1,8 +1,8 @@
-# FILE: CMakeLists.txt (Final Corrected Version)
+# FILE: CMakeLists.txt (Corrected with proper platform-specific isolation)
 
 # Minimum CMake version required
 cmake_minimum_required(VERSION 3.16)
-cmake_policy(SET CMP0135 NEW) # Add this for FetchContent robustness
+cmake_policy(SET CMP0135 NEW) # Set policy for FetchContent robustness
 
 # Define the project and specify C++17
 project(Photospider LANGUAGES CXX)
@@ -26,19 +26,15 @@ set(CMAKE_CXX_EXTENSIONS OFF)
 find_package(OpenCV REQUIRED COMPONENTS core imgproc imgcodecs videoio)
 find_package(yaml-cpp REQUIRED)
 
-# --- FIX START: Replace the filtering logic with a more robust solution ---
+# --- FIX: Unset potential problematic variables from OpenCV on non-Apple platforms ---
+# This is a robust safeguard. Even with proper if(APPLE) guards, if the OpenCV
+# package itself sets these cache variables unconditionally, this will clean them up.
 if(NOT APPLE)
-    # The OpenCV configuration may define cache variables for Apple frameworks
-    # that resolve to *-NOTFOUND on other platforms. This causes a CMake error.
-    # The most robust fix is to undefine these variables completely for non-Apple builds.
-    message(STATUS "Unsetting Apple-specific framework variables for non-Apple build.")
+    message(STATUS "Unsetting any residual Apple-specific framework variables for non-Apple build.")
     foreach(fw_var FW_COREIMAGE FW_COREVIDEO FW_METAL FW_QUARTZCORE FW_FOUNDATION)
-        # Unset the variable from the cache so it disappears entirely from the configuration.
         unset(${fw_var} CACHE)
     endforeach()
 endif()
-# --- FIX END ---
-
 
 include(FetchContent)
 
@@ -81,10 +77,6 @@ filter_ftxui_sources(FTXUI_COMPONENT_SOURCES)
 add_library(ftxui-component STATIC ${FTXUI_COMPONENT_SOURCES})
 target_include_directories(ftxui-component PUBLIC ${FTXUI_INCLUDE_DIR} PRIVATE ${FTXUI_SRC_DIR})
 target_link_libraries(ftxui-component PUBLIC ftxui-dom)
-
-if(APPLE)
-    enable_language(OBJCXX)
-endif()
 
 # --- Modular Photospider Libraries ---
 set(PHOTOSPIDER_CORE_TYPES_SOURCES
@@ -139,7 +131,10 @@ set(PHOTOSPIDER_COMPUTE_SOURCES
     src/kernel/interaction.cpp
     src/kernel/interaction_benchmark.cpp
 )
+
+# --- Add Apple-specific sources ONLY on Apple platforms ---
 if(APPLE)
+    enable_language(OBJCXX)
     list(APPEND PHOTOSPIDER_COMPUTE_SOURCES src/kernel/graph_runtime.mm)
 endif()
 
@@ -184,7 +179,7 @@ target_link_libraries(photospider_lib PUBLIC
 
 # --- Configure Main Executable ---
 add_executable(graph_cli cli/graph_cli.cpp)
-target_include_directories(graph_cli PRIVATE 
+target_include_directories(graph_cli PRIVATE
     "${PROJECT_SOURCE_DIR}/include"
     "${PROJECT_SOURCE_DIR}/src"
 )
@@ -224,11 +219,12 @@ if(APPLE)
     file(MAKE_DIRECTORY ${METAL_ROOT_DIR})
     file(MAKE_DIRECTORY ${METAL_OPS_DIR})
 
+    # --- FIX: All framework finding and linking is now strictly inside if(APPLE) ---
     find_library(METAL_FRAMEWORK Metal REQUIRED)
     find_library(FOUNDATION_FRAMEWORK Foundation REQUIRED)
     find_library(COREIMAGE_FRAMEWORK CoreImage REQUIRED)
     find_library(COREVIDEO_FRAMEWORK CoreVideo REQUIRED)
-    
+
     target_link_libraries(photospider_lib PRIVATE
         ${METAL_FRAMEWORK}
         ${FOUNDATION_FRAMEWORK}
@@ -245,6 +241,8 @@ if(APPLE)
         ${FOUNDATION_FRAMEWORK}
         ${COREIMAGE_FRAMEWORK}
         ${COREVIDEO_FRAMEWORK}
+        # OpenCV_LIBS might still contain Apple framework placeholders on macOS,
+        # but here they will resolve correctly.
         ${OpenCV_LIBS}
         yaml-cpp::yaml-cpp
     )
@@ -258,7 +256,7 @@ if(APPLE)
         INSTALL_RPATH "@loader_path/ops;$ORIGIN/../lib"
         MACOSX_RPATH ON
     )
-    
+
     target_include_directories(metal_ops_loader PRIVATE
         "${PROJECT_SOURCE_DIR}/include"
         "${PROJECT_SOURCE_DIR}/src"
@@ -296,7 +294,7 @@ set_target_properties(test_milestone2 PROPERTIES
     RUNTIME_OUTPUT_DIRECTORY "${TEST_OUTPUT_DIR}"
     BUILD_RPATH "${CMAKE_BINARY_DIR}"
 )
-target_include_directories(test_milestone2 PRIVATE 
+target_include_directories(test_milestone2 PRIVATE
     "${PROJECT_SOURCE_DIR}/include"
     "${PROJECT_SOURCE_DIR}/src"
 )
@@ -308,7 +306,7 @@ set_target_properties(test_milestone3 PROPERTIES
     RUNTIME_OUTPUT_DIRECTORY "${TEST_OUTPUT_DIR}"
     BUILD_RPATH "${CMAKE_BINARY_DIR}"
 )
-target_include_directories(test_milestone3 PRIVATE 
+target_include_directories(test_milestone3 PRIVATE
     "${PROJECT_SOURCE_DIR}/include"
     "${PROJECT_SOURCE_DIR}/src"
 )
