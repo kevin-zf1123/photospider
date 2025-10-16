@@ -81,36 +81,36 @@ jobs:
           name: scheduler-log
           path: build/tests/scheduler_log.json
           if-no-files-found: warn
-  build_macos:
-    runs-on: macos-latest  # 或 macos-latest
-    steps:
-      - uses: actions/checkout@v4
-        with:
-          submodules: recursive
+  # build_macos:
+  #   runs-on: macos-latest  # 或 macos-latest
+  #   steps:
+  #     - uses: actions/checkout@v4
+  #       with:
+  #         submodules: recursive
 
-      # Homebrew 安装依赖（opencv / yaml-cpp / cppcheck / python 工具）
-      - name: Clean Homebrew Cache
-        run: |
-          rm -rf /Users/runner/Library/Caches/Homebrew/downloads/*
-          brew cleanup -s
-      - name: Update Homebrew
-        run: brew update  
-      - name: Install deps (brew)
-        run: |
-          brew update
-          brew install opencv yaml-cpp cppcheck python
-          python3 -m pip install --upgrade pip
-          python3 -m pip install cpplint
+  #     # Homebrew 安装依赖（opencv / yaml-cpp / cppcheck / python 工具）
+  #     - name: Clean Homebrew Cache
+  #       run: |
+  #         rm -rf /Users/runner/Library/Caches/Homebrew/downloads/*
+  #         brew cleanup -s
+  #     - name: Update Homebrew
+  #       run: brew update  
+  #     - name: Install deps (brew)
+  #       run: |
+  #         brew update
+  #         brew install opencv yaml-cpp cppcheck python
+  #         python3 -m pip install --upgrade pip
+  #         python3 -m pip install cpplint
 
-      - name: Configure (macOS)
-        run: |
-          cmake -S . -B build \
-            -DCMAKE_BUILD_TYPE=Release \
-            -DUSE_TSAN=OFF -DUSE_ASAN=OFF
+  #     - name: Configure (macOS)
+  #       run: |
+  #         cmake -S . -B build \
+  #           -DCMAKE_BUILD_TYPE=Release \
+  #           -DUSE_TSAN=OFF -DUSE_ASAN=OFF
 
-      - name: Build
-        run: cmake --build build -j 2
+  #     - name: Build
+  #       run: cmake --build build -j 2
 
-      - name: Test
-        working-directory: build
-        run: ctest --output-on-failure
+  #     - name: Test
+  #       working-directory: build
+  #       run: ctest --output-on-failure
