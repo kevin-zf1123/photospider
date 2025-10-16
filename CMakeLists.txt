@@ -9,6 +9,12 @@ project(Photospider LANGUAGES CXX)
 option(USE_ASAN "Enable AddressSanitizer" OFF)
 option(USE_TSAN "Enable ThreadSanitizer" OFF)
 
+# Ensure all targets, including third-party static libraries, are built with
+# position independent code so they can be linked into shared libraries. This
+# avoids linker errors such as "recompile with -fPIC" that were reported on
+# both Linux and macOS build environments when creating libphotospider_lib.so.
+set(CMAKE_POSITION_INDEPENDENT_CODE ON)
+
 if(CMAKE_CXX_COMPILER_ID MATCHES "Clang|GNU")
     if(USE_ASAN)
         add_compile_options(-fsanitize=address -g)
