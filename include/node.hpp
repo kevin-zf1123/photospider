@@ -5,7 +5,8 @@ namespace ps {
 
 /**
  * @class Node
- * @brief 表示图中的一个节点，包含节点的基本属性、输入输出端口、参数配置以及缓存数据。
+ * @brief
+ * 表示图中的一个节点，包含节点的基本属性、输入输出端口、参数配置以及缓存数据。
  *
  * 该类主要包含以下成员：
  * - id：节点的唯一标识符，初始值为 -1。
@@ -37,50 +38,57 @@ namespace ps {
  */
 class Node {
 public:
-    int id = -1;
-    std::string name;
-    std::string type;
-    std::string subtype;
+  int id = -1;
+  std::string name;
+  std::string type;
+  std::string subtype;
 
-    // --- MODIFIED: Inputs are now split into two categories for clarity and function ---
-    std::vector<ImageInput> image_inputs;
-    std::vector<ParameterInput> parameter_inputs;
-    
-    // --- DEPRECATED: Old unified input model ---
-    // std::vector<InputPort> inputs; 
+  // --- MODIFIED: Inputs are now split into two categories for clarity and
+  // function ---
+  std::vector<ImageInput> image_inputs;
+  std::vector<ParameterInput> parameter_inputs;
 
-    // Static parameters defined in the YAML file.
-    YAML::Node parameters;
-    
-    // --- NEW: Parameters populated at runtime from upstream nodes ---
-    // This is a combination of static `parameters` and dynamic `parameter_inputs`.
-    YAML::Node runtime_parameters;
+  // --- DEPRECATED: Old unified input model ---
+  // std::vector<InputPort> inputs;
 
-    std::vector<OutputPort> outputs;
-    std::vector<CacheEntry> caches;
-    // this is an indicator on whether the node should be prevented from force computing
-    bool preserved = false;
+  // Static parameters defined in the YAML file.
+  YAML::Node parameters;
 
-    // --- MODIFIED: The in-memory cache now holds the entire NodeOutput ---
-    // Legacy unified cache (kept for backward compatibility with existing code paths)
-    std::optional<NodeOutput> cached_output;
+  // --- NEW: Parameters populated at runtime from upstream nodes ---
+  // This is a combination of static `parameters` and dynamic
+  // `parameter_inputs`.
+  YAML::Node runtime_parameters;
 
-    // Phase 1: Dual-cache state for RT/HP separation (not yet fully used by planner)
-    std::optional<NodeOutput> cached_output_real_time;      // RT cache for interactive preview
-    std::optional<NodeOutput> cached_output_high_precision; // HP cache for final quality
-    int rt_version = 0;
-    int hp_version = 0;
-    std::optional<cv::Rect> rt_roi; // Most recent RT dirty/updated ROI
-    std::optional<cv::Rect> hp_roi; // Most recent HP dirty/updated ROI
+  std::vector<OutputPort> outputs;
+  std::vector<CacheEntry> caches;
+  // this is an indicator on whether the node should be prevented from force
+  // computing
+  bool preserved = false;
 
-    // Metadata: last known full-resolution input extent for ROI propagation
-    std::optional<cv::Size> last_input_size_hp;
+  // --- MODIFIED: The in-memory cache now holds the entire NodeOutput ---
+  // Legacy unified cache (kept for backward compatibility with existing code
+  // paths)
+  std::optional<NodeOutput> cached_output;
 
-    // --- DEPRECATED: Old image-only cache ---
-    // cv::Mat image_matrix;
+  // Phase 1: Dual-cache state for RT/HP separation (not yet fully used by
+  // planner)
+  std::optional<NodeOutput>
+      cached_output_real_time;  // RT cache for interactive preview
+  std::optional<NodeOutput>
+      cached_output_high_precision;  // HP cache for final quality
+  int rt_version = 0;
+  int hp_version = 0;
+  std::optional<cv::Rect> rt_roi;  // Most recent RT dirty/updated ROI
+  std::optional<cv::Rect> hp_roi;  // Most recent HP dirty/updated ROI
 
-    static Node from_yaml(const YAML::Node& n);
-    YAML::Node to_yaml() const;
+  // Metadata: last known full-resolution input extent for ROI propagation
+  std::optional<cv::Size> last_input_size_hp;
+
+  // --- DEPRECATED: Old image-only cache ---
+  // cv::Mat image_matrix;
+
+  static Node from_yaml(const YAML::Node& n);
+  YAML::Node to_yaml() const;
 };
 
-} // namespace ps
+}  // namespace ps

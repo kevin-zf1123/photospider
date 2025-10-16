@@ -2,4 +2,3 @@
 #pragma once
 
 void print_cli_help();
-

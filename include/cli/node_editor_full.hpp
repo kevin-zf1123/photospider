@@ -4,7 +4,10 @@
 #include <optional>
 #include <string>
 
-namespace ps { class InteractionService; }
+namespace ps {
+class InteractionService;
+}
 
-void run_node_editor_full(ps::InteractionService& svc, const std::string& graph_name, std::optional<int> initial_id);
-
+void run_node_editor_full(ps::InteractionService& svc,
+                          const std::string& graph_name,
+                          std::optional<int> initial_id);

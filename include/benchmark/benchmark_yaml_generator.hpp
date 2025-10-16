@@ -1,8 +1,10 @@
 #pragma once
 
-#include <string>
 #include <yaml-cpp/yaml.h>
-#include "benchmark/benchmark_types.hpp" // <--- 关键修改：包含定义而不是重新定义
+
+#include <string>
+
+#include "benchmark/benchmark_types.hpp"  // <--- 关键修改：包含定义而不是重新定义
 
 namespace ps {
 
@@ -14,7 +16,7 @@ namespace ps {
  */
 class YamlGenerator {
 public:
-    static YAML::Node Generate(const GraphGenConfig& config);
+  static YAML::Node Generate(const GraphGenConfig& config);
 };
 
-} // namespace ps
+}  // namespace ps

@@ -1,0 +1,52 @@
+# 基础风格：Google
+BasedOnStyle: Google
+
+# 通用设置
+IndentWidth: 2               # 缩进 2 空格（Google 规范）
+TabWidth: 2
+UseTab: Never                # 不使用 tab
+ColumnLimit: 80              # 每行不超过 80 列
+AccessModifierOffset: -2     # 类访问修饰符缩进
+
+# 括号与空格
+SpaceBeforeParens: ControlStatements
+SpacesInParentheses: false
+SpacesInAngles: false
+SpacesInSquareBrackets: false
+SpacesInCStyleCastParentheses: false
+SpaceAfterCStyleCast: false
+SpaceBeforeAssignmentOperators: true
+SpaceAfterTemplateKeyword: true
+
+# 换行控制
+AllowAllParametersOfDeclarationOnNextLine: false
+AllowShortFunctionsOnASingleLine: Inline
+AllowShortIfStatementsOnASingleLine: Never
+AllowShortLoopsOnASingleLine: false
+BreakBeforeBraces: Attach
+AlwaysBreakTemplateDeclarations: Yes
+
+# 指针与引用
+PointerAlignment: Left       # int* ptr; 而不是 int *ptr;
+ReferenceAlignment: Left
+
+# 函数参数与调用格式
+BinPackParameters: true
+BinPackArguments: true
+AlignAfterOpenBracket: Align
+AlignOperands: true
+
+# Include 排序
+SortIncludes: true
+IncludeBlocks: Regroup
+
+# 命名空间格式
+NamespaceIndentation: None
+FixNamespaceComments: true   # 自动补充命名空间结尾注释
+
+# 其他
+Cpp11BracedListStyle: true
+DerivePointerAlignment: false
+ReflowComments: true
+KeepEmptyLinesAtTheStartOfBlocks: false
+AllowAllArgumentsOnNextLine: false

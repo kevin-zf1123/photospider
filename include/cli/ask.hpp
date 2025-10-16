@@ -3,4 +3,3 @@
 #include <string>
 
 std::string ask(const std::string& q, const std::string& def = "");
-
