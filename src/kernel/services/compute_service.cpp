@@ -1203,8 +1203,8 @@ NodeOutput& ComputeService::compute_real_time_update(GraphModel& graph, GraphRun
                                                 std::vector<BenchmarkEvent>* benchmark_events,
                                                 const cv::Rect& dirty_roi)
 {
+    [[maybe_unused]] std::unique_lock<std::mutex> graph_lock(graph.graph_mutex_);
     auto& nodes = graph.nodes;
-    auto& graph_mutex = graph.graph_mutex_;
 
     (void)runtime;
     (void)cache_precision;
@@ -1409,7 +1409,6 @@ NodeOutput& ComputeService::compute_real_time_update(GraphModel& graph, GraphRun
     }
 
     if (force_recache) {
-        std::lock_guard<std::mutex> lock(graph_mutex);
         for (const auto& kv : plan) {
             Node& node = nodes.at(kv.first);
             node.cached_output_real_time.reset();
@@ -1419,7 +1418,6 @@ NodeOutput& ComputeService::compute_real_time_update(GraphModel& graph, GraphRun
     }
 
     auto compute_node_rt = [&](int nid, RtPlanEntry& entry) {
-        std::unique_lock<std::mutex> lock(graph_mutex);
         Node& node = nodes.at(nid);
         if (is_rect_empty(entry.roi_rt)) return;
 
