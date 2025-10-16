@@ -11,23 +11,46 @@ on:
 
 jobs:
   build_test:
+    # 你的触发条件保持不变
     if: github.event_name != 'issue_comment' || (github.event.issue.pull_request && contains(github.event.comment.body, '/run-scheduler-ci'))
     runs-on: ubuntu-latest
+
+    # 关键：使用我们刚推的镜像
+    permissions:
+      contents: read
+      packages: read   # 私有镜像需要；公共镜像可省略
+    container:
+      image: ghcr.io/${{ github.repository }}/ci-scheduler:latest
+
     steps:
-      - name: Checkout
-        uses: actions/checkout@v4
+      - uses: actions/checkout@v4
         with:
           submodules: recursive
 
-      - name: Install dependencies
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y build-essential pkg-config libopencv-dev libyaml-cpp-dev cppcheck
-          python3 -m pip install --upgrade pip
-          python3 -m pip install cpplint
+      # 可选：pip 缓存（镜像里已装 cpplint，可不需要）
+      - name: Cache pip
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/pip
+          key: ${{ runner.os }}-pip-cpplint
+          restore-keys: ${{ runner.os }}-pip-
+
+      # C/C++ 编译缓存（强烈推荐）
+      - name: Cache ccache
+        uses: actions/cache@v4
+        with:
+          path: ~/.ccache
+          key: ${{ runner.os }}-ccache-${{ hashFiles('CMakeLists.txt') }}
+          restore-keys: ${{ runner.os }}-ccache-
 
       - name: Configure
-        run: cmake -S . -B build -DUSE_TSAN=OFF -DUSE_ASAN=OFF -DCMAKE_EXPORT_COMPILE_COMMANDS=ON
+        run: |
+          ccache --zero-stats || true
+          cmake -S . -B build \
+            -DUSE_TSAN=OFF -DUSE_ASAN=OFF \
+            -DCMAKE_EXPORT_COMPILE_COMMANDS=ON \
+            -DCMAKE_C_COMPILER_LAUNCHER=ccache \
+            -DCMAKE_CXX_COMPILER_LAUNCHER=ccache
 
       - name: Run cpplint
         run: |
@@ -48,6 +71,9 @@ jobs:
         working-directory: build
         run: ctest --output-on-failure
 
+      - name: ccache stats
+        run: ccache --show-stats || true
+
       - name: Upload scheduler log
         if: always()
         uses: actions/upload-artifact@v4
@@ -55,3 +81,36 @@ jobs:
           name: scheduler-log
           path: build/tests/scheduler_log.json
           if-no-files-found: warn
+  # build_macos:
+  #   runs-on: macos-latest  # 或 macos-latest
+  #   steps:
+  #     - uses: actions/checkout@v4
+  #       with:
+  #         submodules: recursive
+
+  #     # Homebrew 安装依赖（opencv / yaml-cpp / cppcheck / python 工具）
+  #     - name: Clean Homebrew Cache
+  #       run: |
+  #         rm -rf /Users/runner/Library/Caches/Homebrew/downloads/*
+  #         brew cleanup -s
+  #     - name: Update Homebrew
+  #       run: brew update  
+  #     - name: Install deps (brew)
+  #       run: |
+  #         brew update
+  #         brew install opencv yaml-cpp cppcheck python
+  #         python3 -m pip install --upgrade pip
+  #         python3 -m pip install cpplint
+
+  #     - name: Configure (macOS)
+  #       run: |
+  #         cmake -S . -B build \
+  #           -DCMAKE_BUILD_TYPE=Release \
+  #           -DUSE_TSAN=OFF -DUSE_ASAN=OFF
+
+  #     - name: Build
+  #       run: cmake --build build -j 2
+
+  #     - name: Test
+  #       working-directory: build
+  #       run: ctest --output-on-failure
