@@ -1,7 +1,8 @@
 #pragma once
 
-#include "image_buffer.hpp"
 #include <opencv2/core.hpp>
+
+#include "image_buffer.hpp"
 
 namespace ps {
 
@@ -10,8 +11,10 @@ namespace ps {
 /**
  * @brief 将 ImageBuffer 或 Tile 转换为 cv::Mat 视图。
  * @note 行为：
- *       1. 如果 Buffer 内有 CPU 数据 (data 非空)，则返回一个零拷贝的 cv::Mat 视图。
- *       2. 如果 Buffer 内只有 UMat (context 非空)，则会从 GPU 下载数据到新的 cv::Mat 并返回 (涉及拷贝)。
+ *       1. 如果 Buffer 内有 CPU 数据 (data 非空)，则返回一个零拷贝的 cv::Mat
+ * 视图。
+ *       2. 如果 Buffer 内只有 UMat (context 非空)，则会从 GPU 下载数据到新的
+ * cv::Mat 并返回 (涉及拷贝)。
  * @return 一个 cv::Mat 对象。
  */
 cv::Mat toCvMat(const Tile& tile);
@@ -21,12 +24,12 @@ cv::Mat toCvMat(const ImageBuffer& buffer);
  * @brief 将 ImageBuffer 或 Tile 转换为 cv::UMat。
  * @note 行为：
  *       1. 如果 Buffer 内已有 UMat (context 非空)，则直接返回该 UMat (零拷贝)。
- *       2. 如果 Buffer 内只有 CPU 数据 (data 非空)，则会将数据上传到 GPU 创建新的 UMat 并返回 (涉及拷贝)。
+ *       2. 如果 Buffer 内只有 CPU 数据 (data 非空)，则会将数据上传到 GPU
+ * 创建新的 UMat 并返回 (涉及拷贝)。
  * @return 一个 cv::UMat 对象。
  */
 cv::UMat toCvUMat(const Tile& tile);
 cv::UMat toCvUMat(const ImageBuffer& buffer);
-
 
 // --- 从 OpenCV 类型转换 ---
 
@@ -48,4 +51,4 @@ ImageBuffer fromCvMat(const cv::Mat& mat);
  */
 ImageBuffer fromCvUMat(const cv::UMat& umat);
 
-} // namespace ps
+}  // namespace ps

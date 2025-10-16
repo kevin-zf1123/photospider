@@ -1,0 +1,126 @@
+name: CI Scheduler Log
+
+on:
+  push:
+    branches: ["main", "develop"]
+  pull_request:
+    branches: ["main", "develop"]
+  issue_comment:
+    types: [created]
+  workflow_dispatch:
+
+jobs:
+  build_test:
+    # 你的触发条件保持不变
+    if: github.event_name != 'issue_comment' || (github.event.issue.pull_request && contains(github.event.comment.body, '/run-scheduler-ci'))
+    runs-on: ubuntu-latest
+
+    # 关键：使用我们刚推的镜像
+    permissions:
+      contents: read
+      packages: read   # 私有镜像需要；公共镜像可省略
+    container:
+      image: ghcr.io/${{ github.repository }}/ci-scheduler:latest
+
+    steps:
+      - name: Checkout PR branch on comment trigger
+        uses: actions/checkout@v4
+        with:
+          # 如果事件是 issue_comment，则检出 PR 的源分支 (head ref)
+          # 否则 (push, pull_request, etc.)，使用默认行为
+          ref: ${{ github.event_name == 'issue_comment' && github.event.issue.pull_request && format('refs/pull/{0}/head', github.event.issue.number) || '' }}
+          submodules: recursive
+      - name: Mark repository as safe
+        run: git config --global --add safe.directory "$GITHUB_WORKSPACE"
+      # 可选：pip 缓存（镜像里已装 cpplint，可不需要）
+      - name: Cache pip
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/pip
+          key: ${{ runner.os }}-pip-cpplint
+          restore-keys: ${{ runner.os }}-pip-
+
+      # # C/C++ 编译缓存（强烈推荐）
+      # - name: Cache ccache
+      #   uses: actions/cache@v4
+      #   with:
+      #     path: ~/.ccache
+      #     key: ${{ runner.os }}-ccache-${{ hashFiles('CMakeLists.txt') }}
+      #     restore-keys: ${{ runner.os }}-ccache-
+
+      - name: Configure
+        # run: |
+        #   ccache --zero-stats || true
+        #   cmake -S . -B build \
+        #     -DUSE_TSAN=OFF -DUSE_ASAN=OFF \
+        #     -DCMAKE_EXPORT_COMPILE_COMMANDS=ON \
+        #     -DCMAKE_C_COMPILER_LAUNCHER=ccache \
+        #     -DCMAKE_CXX_COMPILER_LAUNCHER=ccache
+        run: |
+          rm -rf build
+          cmake -S . -B build \
+            -DUSE_TSAN=OFF -DUSE_ASAN=OFF \
+            -DCMAKE_EXPORT_COMPILE_COMMANDS=ON \
+
+      - name: Run cpplint
+        run: |
+          set -e
+          files=$(git ls-files include/kernel/graph_runtime.hpp src/kernel/graph_runtime.mm src/kernel/services/compute_service.cpp tests/test_scheduler.cpp include/kernel/kernel.hpp)
+          if [ -n "$files" ]; then
+            python3 -m cpplint --extensions=mm,cpp,cxx,cc,h,hpp --quiet $files
+          fi
+
+      - name: Run cppcheck
+        run: |
+          cppcheck --enable=warning,performance,style --project=build/compile_commands.json --suppress=missingIncludeSystem
+
+      - name: Build
+        run: cmake --build build --config Release -j 2
+
+      - name: Run ctest
+        working-directory: build
+        run: ctest --output-on-failure
+
+      - name: ccache stats
+        run: ccache --show-stats || true
+
+      - name: Upload scheduler log
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: scheduler-log
+          path: build/tests/scheduler_log.json
+          if-no-files-found: warn
+  # build_macos:
+  #   runs-on: macos-latest  # 或 macos-latest
+  #   steps:
+  #     - uses: actions/checkout@v4
+  #       with:
+  #         submodules: recursive
+
+  #     # Homebrew 安装依赖（opencv / yaml-cpp / cppcheck / python 工具）
+  #     - name: Clean Homebrew Cache
+  #       run: |
+  #         rm -rf /Users/runner/Library/Caches/Homebrew/downloads/*
+  #         brew cleanup -s
+  #     - name: Update Homebrew
+  #       run: brew update  
+  #     - name: Install deps (brew)
+  #       run: |
+  #         brew update
+  #         brew install opencv yaml-cpp cppcheck python
+  #         python3 -m pip install --upgrade pip
+  #         python3 -m pip install cpplint
+
+  #     - name: Configure (macOS)
+  #       run: |
+  #         cmake -S . -B build \
+  #           -DCMAKE_BUILD_TYPE=Release \
+  #           -DUSE_TSAN=OFF -DUSE_ASAN=OFF
+
+  #     - name: Build
+  #       run: cmake --build build -j 2
+
+  #     - name: Test
+  #       working-directory: build
+  #       run: ctest --output-on-failure
