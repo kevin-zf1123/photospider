@@ -1,7 +1,10 @@
-# FILE: CMakeLists.txt (Complete and Corrected)
+# FILE: CMakeLists.txt (Corrected for local build issues)
 
 # Minimum CMake version required
 cmake_minimum_required(VERSION 3.16)
+
+# --- FIX: Set CMake policy to handle FetchContent timestamps correctly ---
+cmake_policy(SET CMP0135 NEW)
 
 # Define the project and specify C++17
 project(Photospider LANGUAGES CXX)
@@ -25,25 +28,12 @@ set(CMAKE_CXX_EXTENSIONS OFF)
 find_package(OpenCV REQUIRED COMPONENTS core imgproc imgcodecs videoio)
 find_package(yaml-cpp REQUIRED)
 
+# Filter out Apple-specific frameworks when building on non-Apple platforms
 if(NOT APPLE)
-    # Some OpenCV builds (notably those generated on macOS) inject placeholder
-    # variables such as `${FW_COREIMAGE}` into their exported library lists so
-    # that consumers can link the corresponding Apple frameworks.  When the
-    # project is built on Linux these placeholders evaluate to `*-NOTFOUND`,
-    # which causes CMake configuration to abort even though the actual OpenCV
-    # libraries are present.  Strip those entries so the remaining libraries can
-    # still be linked successfully on non-Apple platforms.
     foreach(_opencv_var OpenCV_LIBS OpenCV_LIBRARIES)
         if(DEFINED ${_opencv_var})
-            set(_opencv_filtered)
-            foreach(_opencv_lib IN LISTS ${_opencv_var})
-                if(_opencv_lib MATCHES "^FW_[A-Z0-9_]+(-NOTFOUND)?$")
-                    message(STATUS "Skipping unavailable Apple framework placeholder '${_opencv_lib}' from ${_opencv_var}")
-                else()
-                    list(APPEND _opencv_filtered "${_opencv_lib}")
-                endif()
-            endforeach()
-            set(${_opencv_var} ${_opencv_filtered})
+            message(STATUS "Filtering Apple frameworks from ${_opencv_var} on non-Apple platform.")
+            list(FILTER ${_opencv_var} EXCLUDE REGEX "^FW_")
         endif()
     endforeach()
 endif()
@@ -182,9 +172,10 @@ target_include_directories(photospider_lib PUBLIC
     "${PROJECT_SOURCE_DIR}/src"
 )
 
+# --- FIX: Simplify linking to avoid duplicate library warnings ---
+# Link only to the top-level internal libraries. Transitive dependencies
+# will be handled automatically by CMake.
 target_link_libraries(photospider_lib PUBLIC
-    photospider_core_types
-    photospider_graph
     photospider_compute
     photospider_plugin
     ftxui-component
