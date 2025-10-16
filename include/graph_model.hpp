@@ -28,7 +28,7 @@ struct TimingCollector {
 };
 
 class GraphModel {
-public:
+ public:
   TimingCollector timing_results;
   std::unordered_map<int, Node> nodes;
   fs::path cache_root;
@@ -62,7 +62,7 @@ public:
 
   std::atomic<double> total_io_time_ms{0.0};
 
-private:
+ private:
   friend class GraphCacheService;
   friend class GraphIOService;
   friend class GraphTraversalService;

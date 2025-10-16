@@ -15,7 +15,7 @@ namespace ps {
 
 // Minimal interaction facade to decouple frontends from Kernel internals.
 class InteractionService {
-public:
+ public:
   explicit InteractionService(Kernel& kernel) : kernel_(kernel) {}
 
   // Graph lifecycle
@@ -225,7 +225,7 @@ public:
     return kernel_.get_metal_device(graph);
   }
 
-private:
+ private:
   Kernel& kernel_;
 };
 

@@ -9,7 +9,7 @@
 namespace ps {
 
 class GraphTraversalService {
-public:
+ public:
   std::vector<int> topo_postorder_from(const GraphModel& graph,
                                        int end_node_id) const;
   std::vector<int> ending_nodes(const GraphModel& graph) const;

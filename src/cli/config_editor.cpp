@@ -32,7 +32,7 @@ class ConfigEditor : public TuiEditor {
     bool* toggle_ptr = nullptr;
   };
 
-public:
+ public:
   bool changes_applied = false;
   ConfigEditor(ScreenInteractive& screen, CliConfig& config)
       : TuiEditor(screen), original_config_(config), temp_config_(config) {
@@ -175,7 +175,7 @@ public:
     screen_.Loop(component);
   }
 
-private:
+ private:
   void SyncModelToUiState() {
     plugin_dirs_str_ = original_config_.plugin_dirs;
     active_config_path_buffer_ = original_config_.loaded_config_path;

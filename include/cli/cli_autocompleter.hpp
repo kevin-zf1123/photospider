@@ -17,7 +17,7 @@ struct CompletionResult {
 };
 
 class CliAutocompleter {
-public:
+ public:
   // Build a completer bound to the backend interaction layer.
   // op_sources is optional and may be empty; it's only used for `ops` listing,
   // not for completion.
@@ -31,7 +31,7 @@ public:
 
   CompletionResult Complete(const std::string& line, int cursor_pos);
 
-private:
+ private:
   std::vector<std::string> Tokenize(const std::string& line) const;
   std::string FindLongestCommonPrefix(
       const std::vector<std::string>& options) const;
