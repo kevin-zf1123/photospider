@@ -626,18 +626,10 @@ class BenchmarkConfigEditor {
     auto statistics_container = Container::Vertical(statistics_checkboxes);
 
     Components details_children = {
-        auto_gen_radio,
-        input_op_dropdown,
-        main_op_dropdown,
-        output_op_dropdown,
-        width_input,
-        height_input,
-        chain_input,
-        outputs_input,
-        manual_yaml_input,
-        runs_input,
-        threads_input,
-        parallel_checkbox,
+        auto_gen_radio,       input_op_dropdown, main_op_dropdown,
+        output_op_dropdown,   width_input,       height_input,
+        chain_input,          outputs_input,     manual_yaml_input,
+        runs_input,           threads_input,     parallel_checkbox,
         statistics_container,
     };
     auto details_container = Container::Vertical(details_children);
@@ -646,16 +638,17 @@ class BenchmarkConfigEditor {
     details_pane_ = Renderer(details_container, [=, &current_cfg] {
       if (!available_ops_.empty()) {
         auto clamp_index = [&](int& idx) {
-          idx = std::clamp(idx, 0,
-                           static_cast<int>(available_ops_.size()) - 1);
+          idx = std::clamp(idx, 0, static_cast<int>(available_ops_.size()) - 1);
           return idx;
         };
         configs_[selected_session_].generator_config.input_op_type =
-            available_ops_[static_cast<size_t>(clamp_index(input_op_selected_))];
+            available_ops_[static_cast<size_t>(
+                clamp_index(input_op_selected_))];
         configs_[selected_session_].generator_config.main_op_type =
             available_ops_[static_cast<size_t>(clamp_index(main_op_selected_))];
         configs_[selected_session_].generator_config.output_op_type =
-            available_ops_[static_cast<size_t>(clamp_index(output_op_selected_))];
+            available_ops_[static_cast<size_t>(
+                clamp_index(output_op_selected_))];
       }
 
       auto details_form = form({
