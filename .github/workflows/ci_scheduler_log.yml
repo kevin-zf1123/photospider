@@ -30,7 +30,8 @@ jobs:
           # 否则 (push, pull_request, etc.)，使用默认行为
           ref: ${{ github.event_name == 'issue_comment' && github.event.issue.pull_request && format('refs/pull/{0}/head', github.event.issue.number) || '' }}
           submodules: recursive
-
+      - name: Mark repository as safe
+        run: git config --global --add safe.directory "$GITHUB_WORKSPACE"
       # 可选：pip 缓存（镜像里已装 cpplint，可不需要）
       - name: Cache pip
         uses: actions/cache@v4
