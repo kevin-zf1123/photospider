@@ -1295,18 +1295,8 @@ NodeOutput& ComputeService::compute_high_precision_update(
         }
       }
     } else if (hp_mono_fn) {
-      bool needs_compute = true;
-      if (node.cached_output_high_precision) {
-        const auto& existing = node.cached_output_high_precision->image_buffer;
-        needs_compute = (existing.width != entry.hp_size.width ||
-                         existing.height != entry.hp_size.height ||
-                         !existing.data);
-      }
-
-      if (needs_compute) {
-        node.cached_output_high_precision =
-            (*hp_mono_fn)(node, image_inputs_ready);
-      }
+      node.cached_output_high_precision =
+          (*hp_mono_fn)(node, image_inputs_ready);
 
       if (!node.cached_output_high_precision) {
         throw GraphError(GraphErrc::ComputeError,
