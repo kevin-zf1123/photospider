@@ -1131,6 +1131,10 @@ NodeOutput& ComputeService::compute_high_precision_update(
       return;
     Node& node = nodes.at(nid);
 
+    if (runtime_ptr) {
+      runtime_ptr->log_event(GraphRuntime::SchedulerEvent::EXECUTE, nid);
+    }
+
     // Resolve runtime params
     node.runtime_parameters = node.parameters ? YAML::Clone(node.parameters)
                                               : YAML::Node(YAML::NodeType::Map);
@@ -1259,6 +1263,10 @@ NodeOutput& ComputeService::compute_high_precision_update(
                                                in_out->image_buffer.height));
               task.input_tiles.push_back(in_tile);
             }
+            if (runtime_ptr) {
+              runtime_ptr->log_event(GraphRuntime::SchedulerEvent::EXECUTE_TILE,
+                                     nid);
+            }
             execute_tile_task(task, *hp_tile_fn);
             continue;
           }
@@ -1288,6 +1296,10 @@ NodeOutput& ComputeService::compute_high_precision_update(
                                         cv::Size(in_out->image_buffer.width,
                                                  in_out->image_buffer.height));
                 task.input_tiles.push_back(in_tile);
+              }
+              if (runtime_ptr) {
+                runtime_ptr->log_event(
+                    GraphRuntime::SchedulerEvent::EXECUTE_TILE, nid);
               }
               execute_tile_task(task, *hp_tile_fn);
             }
@@ -1329,9 +1341,10 @@ NodeOutput& ComputeService::compute_high_precision_update(
   }
 
   if (!downsample_requests.empty()) {
-    auto make_downsample_task = [this,
-                                 &graph](DownsampleRequest request) -> Task {
-      return [this, &graph, request]() {
+    auto make_downsample_task =
+        [runtime_ptr, &graph,
+         event_service = std::ref(events_)](DownsampleRequest request) -> Task {
+      return [runtime_ptr, &graph, event_service, request]() {
         auto dtype_bytes = [](DataType dt) -> size_t {
           switch (dt) {
             case DataType::UINT8:
@@ -1389,7 +1402,8 @@ NodeOutput& ComputeService::compute_high_precision_update(
                     : roi_hp;
           }
           node.rt_version = request.hp_version;
-          events_.push(node.id, node.name, "downsample_passthrough", 0.0);
+          event_service.get().push(node.id, node.name, "downsample_passthrough",
+                                   0.0);
           return;
         }
 
@@ -1403,7 +1417,8 @@ NodeOutput& ComputeService::compute_high_precision_update(
                     : roi_hp;
           }
           node.rt_version = request.hp_version;
-          events_.push(node.id, node.name, "downsample_passthrough", 0.0);
+          event_service.get().push(node.id, node.name,
+                                   "downsample_passthrough", 0.0);
           return;
         }
 
@@ -1450,7 +1465,12 @@ NodeOutput& ComputeService::compute_high_precision_update(
                           ? clip_rect(merge_rect(*node.rt_roi, roi_hp), hp_size)
                           : roi_hp;
         node.rt_version = request.hp_version;
-        events_.push(node.id, node.name, "downsample", 0.0);
+        event_service.get().push(node.id, node.name, "downsample", 0.0);
+
+        if (runtime_ptr) {
+          runtime_ptr->log_event(GraphRuntime::SchedulerEvent::EXECUTE_TILE,
+                                 node.id);
+        }
       };
     };
 

@@ -11,7 +11,7 @@
 - id: 2
   name: Heavy_Blur
   type: image_process
-  subtype: gaussian_blur_tiled # 这个操作有 tiled_op 实现
+  subtype: micro_blur_for_test 
   image_inputs:
     - from_node_id: 1
   parameters:
