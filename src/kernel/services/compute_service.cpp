@@ -2034,7 +2034,7 @@ NodeOutput& ComputeService::compute_parallel(
                          &graph_mutex, &total_io_time_ms, current_node_id,
                          current_node_idx, cache_precision, enable_timing,
                          disable_disk_cache, benchmark_events,
-                         force_recache]() {
+                         force_recache]() -> bool {
         // 1) Pure compute into temp_results without mutating GraphModel
         try {
           const Node& target_node = nodes.at(current_node_id);
@@ -2313,7 +2313,13 @@ NodeOutput& ComputeService::compute_parallel(
                       int tiles_x = (out_w + tile_size - 1) / tile_size;
                       int tiles_y = (out_h + tile_size - 1) / tile_size;
                       int total_tiles = tiles_x * tiles_y;
-                      runtime.inc_graph_tasks_to_complete(total_tiles);
+                      // Parent node task already counted in runtime; only
+                      // account for the additional micro-tasks so completion
+                      // is deferred until the final tile finishes.
+                      int extra_tiles = total_tiles - 1;
+                      if (extra_tiles > 0) {
+                        runtime.inc_graph_tasks_to_complete(extra_tiles);
+                      }
                       auto remaining =
                           std::make_shared<std::atomic<int>>(total_tiles);
                       auto start_tp = std::make_shared<
@@ -2429,7 +2435,9 @@ NodeOutput& ComputeService::compute_parallel(
                               std::move(tile_task));
                         }
                       }
-                      tiled_dispatched = true;
+                      if (total_tiles > 0) {
+                        tiled_dispatched = true;
+                      }
                     }
                   },
                   *op_opt);
@@ -2440,7 +2448,7 @@ NodeOutput& ComputeService::compute_parallel(
             if (tiled_dispatched) {
               // Tiled micro-tasks handle timing and dependent scheduling; skip
               // monolithic finalization.
-              return;
+              return true;
             }
             temp_results[current_node_idx] = std::move(result);
 
@@ -2473,21 +2481,21 @@ NodeOutput& ComputeService::compute_parallel(
               "Compute stage at node " + std::to_string(current_node_id) +
                   " (" + nodes.at(current_node_id).name +
                   ") failed: " + std::string(e.what()))));
-          return;
+          return false;
         } catch (const std::exception& e) {
           runtime.set_exception(std::make_exception_ptr(GraphError(
               GraphErrc::ComputeError,
               "Compute stage at node " + std::to_string(current_node_id) +
                   " (" + nodes.at(current_node_id).name +
                   ") failed: " + e.what())));
-          return;
+          return false;
         } catch (...) {
           runtime.set_exception(std::make_exception_ptr(GraphError(
               GraphErrc::ComputeError,
               "Compute stage at node " + std::to_string(current_node_id) +
                   " (" + nodes.at(current_node_id).name +
                   ") failed: unknown exception")));
-          return;
+          return false;
         }
 
         // 2) 触发后续依赖任务（捕获并精确标注阶段）
@@ -2520,6 +2528,7 @@ NodeOutput& ComputeService::compute_parallel(
                   " (" + nodes.at(current_node_id).name +
                   ") failed: unknown exception")));
         }
+        return false;
       };
 
       // --- 包装任务以处理异常和完成计数 ---
@@ -2527,8 +2536,10 @@ NodeOutput& ComputeService::compute_parallel(
                       current_node_id]() {
         runtime.log_event(GraphRuntime::SchedulerEvent::EXECUTE,
                           current_node_id);
-        inner_task();
-        runtime.dec_graph_tasks_to_complete();
+        bool deferred = inner_task();
+        if (!deferred) {
+          runtime.dec_graph_tasks_to_complete();
+        }
       };
     }
 
