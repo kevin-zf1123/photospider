@@ -2,6 +2,8 @@
 
 #include "perlin_noise_metal.hpp"
 #include "node.hpp"
+#include "adapter/buffer_adapter_opencv.hpp"
+#include "kernel/param_utils.hpp"
 
 #import <Metal/Metal.h>
 #import <CoreImage/CoreImage.h>
@@ -60,21 +62,20 @@ const char* perlin_shader_source = R"(
 
 namespace ps { namespace ops {
 
-static int as_int_flexible_metal(const YAML::Node& n, const std::string& key, int defv) {
-    if (!n || !n[key]) return defv;
-    try { return n[key].as<int>(); } catch (...) { return defv; }
-}
-static double as_double_flexible_metal(const YAML::Node& n, const std::string& key, double defv) {
-    if (!n || !n[key]) return defv;
-    try { if (n[key].IsScalar()) return n[key].as<double>(); return defv; } catch (...) { return defv; }
-}
+// static int as_int_flexible_metal(const YAML::Node& n, const std::string& key, int defv) {
+//     if (!n || !n[key]) return defv;
+//     try { return n[key].as<int>(); } catch (...) { return defv; }
+// }
+// static double as_double_flexible_metal(const YAML::Node& n, const std::string& key, double defv) {
+//     if (!n || !n[key]) return defv;
+//     try { if (n[key].IsScalar()) return n[key].as<double>(); return defv; } catch (...) { return defv; }
+// }
 
 // --- Metal & CoreImage State Management (Unchanged) ---
 struct MetalState {
     id<MTLDevice> device;
     id<MTLCommandQueue> commandQueue;
     id<MTLComputePipelineState> pipelineState;
-    CIContext* ci_context; 
 
     MetalState() {
         NSLog(@"Initializing MetalState...");
@@ -83,12 +84,6 @@ struct MetalState {
         
         commandQueue = [device newCommandQueue];
         if (!commandQueue) throw std::runtime_error("Failed to create Metal command queue.");
-        
-        ci_context = [CIContext contextWithMTLDevice:device];
-        if (!ci_context) throw std::runtime_error("Failed to create CIContext from MTLDevice.");
-        // Under MRR, contextWithMTLDevice returns an autoreleased object.
-        // Retain to keep it alive across calls/threads; released in destructor.
-        [ci_context retain];
 
         NSError* error = nil;
         NSString* sourceString = [NSString stringWithUTF8String:perlin_shader_source];
@@ -112,12 +107,6 @@ struct MetalState {
         }
         NSLog(@"MetalState initialized successfully.");
     }
-
-    ~MetalState() {
-        if (ci_context) {
-            [ci_context release];
-        }
-    }
 };
 
 static std::unique_ptr<MetalState> g_metal_state;
@@ -127,9 +116,20 @@ static MetalState& GetMetalState() {
     return *g_metal_state;
 }
 
+// Eager init API (for optional prewarm by plugin loader)
+extern "C" void perlin_noise_metal_eager_init() {
+    (void)GetMetalState();
+}
+
 // --- START: MODIFIED FUNCTION ---
+// Serialize Metal Perlin executions to avoid driver/CIContext concurrency crashes
+static std::mutex g_metal_perlin_mutex;
+
 NodeOutput op_perlin_noise_metal(const Node& node, const std::vector<const NodeOutput*>&) {
     @autoreleasepool {
+    const char* dbg_stage = "start";
+    std::lock_guard<std::mutex> metal_lock(g_metal_perlin_mutex);
+    try {
     // FIX: 关闭 OpenCV 的 OpenCL（只需做一次；放在这里最省事）
     static std::once_flag ocl_once;
     std::call_once(ocl_once, []{
@@ -137,10 +137,12 @@ NodeOutput op_perlin_noise_metal(const Node& node, const std::vector<const NodeO
     });
 
     const auto& P = node.runtime_parameters;
-    int width  = as_int_flexible_metal(P, "width", 256);
-    int height = as_int_flexible_metal(P, "height", 256);
-    float scale = as_double_flexible_metal(P, "grid_size", 1.0);
+    int width  = as_int_flexible(P, "width", 256);
+    int height = as_int_flexible(P, "height", 256);
+    float scale = as_double_flexible(P, "grid_size", 1.0);
+    int seed = as_int_flexible(P, "seed", -1);
 
+    dbg_stage = "metal_state";
     MetalState& metal = GetMetalState();
     id<MTLDevice> device = metal.device;
     id<MTLCommandQueue> commandQueue = metal.commandQueue;
@@ -153,6 +155,7 @@ NodeOutput op_perlin_noise_metal(const Node& node, const std::vector<const NodeO
     // }
 
     // 输出纹理：单通道 32F（与 CV/CI 链路一致）
+    dbg_stage = "create_texture";
     MTLTextureDescriptor* texDesc =
         [MTLTextureDescriptor texture2DDescriptorWithPixelFormat:MTLPixelFormatR32Float
                                                            width:width
@@ -165,12 +168,19 @@ NodeOutput op_perlin_noise_metal(const Node& node, const std::vector<const NodeO
     }
 
     // Perlin permutation/参数缓冲
+    dbg_stage = "alloc_permutation";
     std::vector<int> p_vec(512);
     std::iota(p_vec.begin(), p_vec.begin() + 256, 0);
-    /*std::mt19937 g(std::random_device{}());*/std::mt19937 g(1);
+    /*std::mt19937 g(std::random_device{}());*/std::mt19937 g;
+    if (seed == -1) {
+        g.seed(std::random_device{}());
+    } else {
+        g.seed(seed);
+    }
     std::shuffle(p_vec.begin(), p_vec.begin() + 256, g);
     std::copy(p_vec.begin(), p_vec.begin() + 256, p_vec.begin() + 256);
 
+    dbg_stage = "create_buffers";
     id<MTLBuffer> p_buffer     = [device newBufferWithBytes:p_vec.data()
                                                      length:512 * sizeof(int)
                                                     options:MTLResourceStorageModeShared];
@@ -182,6 +192,7 @@ NodeOutput op_perlin_noise_metal(const Node& node, const std::vector<const NodeO
     }
 
     // 编码与调度
+    dbg_stage = "encode";
     id<MTLCommandBuffer> commandBuffer = [commandQueue commandBuffer];
     if (!commandBuffer) {
         throw std::runtime_error("Failed to create command buffer.");
@@ -207,64 +218,31 @@ NodeOutput op_perlin_noise_metal(const Node& node, const std::vector<const NodeO
     [encoder endEncoding];
 
     // FIX: 提交并等待 GPU 完成，防止 CPU 过早读取
+    dbg_stage = "submit_wait";
     [commandBuffer commit];
     [commandBuffer waitUntilCompleted];
 
-    // ---- Zero-copy 路径：MTLTexture -> CIImage -> CVPixelBuffer -> cv::Mat ----
-    // 1) 从 MTLTexture 创建 CIImage
-    CIImage* ciImage = [CIImage imageWithMTLTexture:outTexture options:nil];
-    if (!ciImage) {
-        throw std::runtime_error("Failed to create CIImage from MTLTexture.");
-    }
+    // 直接拷贝纹理数据回 CPU：避免 CoreImage/CVPixelBuffer 并发不稳定
+    dbg_stage = "readback_texture";
+    MTLRegion region = MTLRegionMake2D(0, 0, width, height);
+    const size_t bytesPerRow = sizeof(float) * static_cast<size_t>(width);
+    std::vector<float> host_buffer(static_cast<size_t>(width) * static_cast<size_t>(height));
+    [outTexture getBytes:host_buffer.data() bytesPerRow:bytesPerRow fromRegion:region mipmapLevel:0];
 
-    // 2) 创建匹配格式的 CVPixelBuffer（单通道 32F），开启 Metal 兼容 & IOSurface
-    CVPixelBufferRef pixelBuffer = nullptr;
-    NSDictionary* pbOptions = @{
-        (id)kCVPixelBufferMetalCompatibilityKey: @YES,            // FIX: Metal 兼容
-        (id)kCVPixelBufferIOSurfacePropertiesKey: @{}             // FIX: 必须有一个空字典以启用 IOSurface
-    };
-    CVReturn status = CVPixelBufferCreate(kCFAllocatorDefault,
-                                          width,
-                                          height,
-                                          kCVPixelFormatType_OneComponent32Float,
-                                          (__bridge CFDictionaryRef)pbOptions,
-                                          &pixelBuffer);
-    if (status != kCVReturnSuccess || !pixelBuffer) {
-        throw std::runtime_error("Failed to create CVPixelBuffer.");
-    }
-
-    // 3) 用 CIContext 渲染到 PixelBuffer（与 metal.ci_context 同设备）
-    [metal.ci_context render:ciImage toCVPixelBuffer:pixelBuffer];
-
-    // 4) 将 CVPixelBuffer 安全地包装为 cv::Mat —— 关键：使用 bytesPerRow
-    CVPixelBufferLockBaseAddress(pixelBuffer, kCVPixelBufferLock_ReadOnly);
-
-    void*   baseAddress  = CVPixelBufferGetBaseAddress(pixelBuffer);
-    size_t  bytesPerRow  = CVPixelBufferGetBytesPerRow(pixelBuffer);
-    size_t  pbWidth      = CVPixelBufferGetWidth(pixelBuffer);
-    size_t  pbHeight     = CVPixelBufferGetHeight(pixelBuffer);
-
-    if (!baseAddress) { /* ... 原来的报错处理 ... */ }
-    if (CVPixelBufferIsPlanar(pixelBuffer)) { /* ... 原来的报错处理 ... */ }
-    if (pbWidth != (size_t)width || pbHeight != (size_t)height) { /* ... 原来的报错处理 ... */ }
-
-    // ✅ 用带 step 的构造函数拿到一个“视图”
-    cv::Mat mat_view((int)pbHeight, (int)pbWidth, CV_32FC1, baseAddress, bytesPerRow);
-
-    // ✅ 关键：**总是 clone** 成为自有内存（与 PixelBuffer 脱钩）
+    cv::Mat mat_view(height, width, CV_32FC1, host_buffer.data(), bytesPerRow);
     cv::Mat mat_copy = mat_view.clone();
 
-    // ✅ 现在把数据拷到 UMat（立即拷贝，避免延迟引用）
+    dbg_stage = "wrap_result";
     NodeOutput result;
-    mat_copy.copyTo(result.image_umatrix);
-
-    // 现在再解锁并释放 PixelBuffer，UMat 已有自己的一份数据
-    CVPixelBufferUnlockBaseAddress(pixelBuffer, kCVPixelBufferLock_ReadOnly);
-    CVPixelBufferRelease(pixelBuffer);
-
+    result.image_buffer = fromCvMat(mat_copy);
     return result;
+    } catch (const std::exception& e) {
+        throw std::runtime_error(std::string("perlin_noise_metal[") + dbg_stage + "]: " + e.what());
+    } catch (...) {
+        throw std::runtime_error(std::string("perlin_noise_metal[") + dbg_stage + "]: unknown exception");
+    }
     }
 }
-// --- END: MODIFIED FUNCTION ---
+
 
 }} // namespace ps::ops

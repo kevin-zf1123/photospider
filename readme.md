@@ -9,6 +9,7 @@ This means the output of one node (e.g., a computed number, a string, or a dimen
 ## Key Features
 
 *   **Dynamic Graph Execution**: Go beyond static pipelines with parameters that are computed at runtime.
+*   **Multi-threaded Compute Engine**: A parallel scheduler to accelerate computations on multi-core CPUs.
 *   **Interactive TUI Editor**: A terminal-based UI to visually inspect and edit your entire node graph, with live dependency trees and YAML editing.
 *   **Advanced REPL/CLI**: An interactive shell (`ps>`) to load, inspect, modify, and run graphs on the fly, with powerful commands and scripting support.
 *   **YAML-Based Definitions**: Define complex graphs in a clean, human-readable format.
@@ -51,26 +52,31 @@ brew install pkg-config opencv yaml-cpp
 ## How to Build
 
 1.  **Clone the repository and its submodules:**
-    ```bash
-    git clone --recurse-submodules https://github.com/kevin-zf1123/photospider.git
-    cd photospider
-    ```
+```bash
+git clone --recurse-submodules https://github.com/kevin-zf1123/photospider.git
+cd photospider
+```
 
 2.  **Configure the project with CMake:**
     This command tells CMake to look for the source (`-S .`) in the current directory and prepare the build files in the `build` directory (`-B build`).
-    ```bash
-    cmake -S . -B build
-    ```
+```bash
+cmake -S . -B build
+```
 
 3.  **Compile the project:**
     This command invokes the compiler to build the project from the generated files in the `build` directory.
-    ```bash
-    cmake --build build
-    ```
+```bash
+cmake --build build
+```
 4. **Build specific target:**
     This command builds the target part of the program from the generated files in the `build` directory.
-    ```bash
-    cmake --build build --target <your target>
+    
+    
+    
+```bash
+cmake --build build --target <your target>
+```
+
 The main executable `graph_cli` will be created at `build/graph_cli`, and the `build/plugins` directory will be ready for your custom operations.
 
 ## How to Use
@@ -100,7 +106,7 @@ This will give you a `ps>` prompt. Type `help` to see the full list of commands.
 *   `node <id>`: Open the interactive TUI editor for a specific node.
 *   `print`: Display the detailed dependency tree of the current graph.
 *   `ops`: List all available operations, including from plugins.
-*   `compute <id|all> [force] [t]`: Execute a node or all terminal nodes with optional flags.
+*   `compute <id|all> [force] [parallel] [t]`: Execute a node or all terminal nodes with optional flags.
 *   `save <id> <file>`: Compute a node and save its image output.
 *   `config`: Open the interactive configuration editor.
 *   `exit`: Quit the shell.
@@ -127,3 +133,9 @@ This will give you a `ps>` prompt. Type `help` to see the full list of commands.
 ## License
 
 This project is licensed under the MIT License.
+
+## Kernel Architecture Docs
+
+- Architecture Overview: `docs/kernel-architecture/Overview.md`
+- Development Roadmap: `docs/kernel-architecture/Roadmap.md`
+- Dirty Region Propagation Spec: `docs/kernel-architecture/Dirty-Region-Propagation.md`

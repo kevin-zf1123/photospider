@@ -1,0 +1,8 @@
+benchmark <benchmark_dir>
+
+Open the interactive TUI editor for the benchmark suite in <benchmark_dir>.
+This allows you to create, enable/disable, and configure test sessions
+which are saved to <benchmark_dir>/benchmark_config.yaml.
+
+Example:
+  benchmark benchmarks/milestone2
