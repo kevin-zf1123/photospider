@@ -1,0 +1,34 @@
+# FILE: graph_with_plugin.yaml
+- id: 10
+  name: "Input Image"
+  type: "image_source"
+  subtype: "path"
+  parameters:
+    path: "assets/a.jpg"
+  caches:
+    - cache_type: "image"
+      location: "source.png"
+
+- id: 20
+  name: "Invert Colors (from plugin)"
+  type: "image_process"
+  subtype: "invert" # This matches what you registered!
+  image_inputs:
+    - from_node_id: 10
+  caches:
+    - cache_type: "image"
+      location: "inverted.png"
+
+
+- id: 30
+  name: "Apply Threshold"
+  type: "image_process"
+  subtype: "threshold" # This matches our new plugin op
+  image_inputs:
+    - from_node_id: 10
+  parameters:
+    thresh: 100.0
+    maxval: 255.0
+    type: "binary" # Can also be "binary_inv"
+  caches:
+    - { cache_type: image, location: "threshold_binary.png" }

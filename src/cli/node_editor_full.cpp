@@ -2,11 +2,12 @@
 // Currently delegates to the decoupled/simple editor implementation.
 
 #include "cli/node_editor_full.hpp"
-#include "cli/node_editor.hpp"
-#include "kernel/interaction.hpp"
 
 #include <optional>
 #include <string>
+
+#include "cli/node_editor.hpp"
+#include "kernel/interaction.hpp"
 
 void run_node_editor_full(ps::InteractionService& svc,
                           const std::string& graph_name,

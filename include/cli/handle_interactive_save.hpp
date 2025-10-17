@@ -3,4 +3,3 @@
 #include "cli_config.hpp"
 
 void handle_interactive_save(CliConfig& config);
-

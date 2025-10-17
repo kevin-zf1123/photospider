@@ -1,0 +1,27 @@
+- id: 1
+  name: Canvas_Source
+  type: image_generator
+  subtype: constant
+  parameters:
+    width: 1024
+    height: 1024
+    value: 128
+    channels: 1
+
+- id: 2
+  name: Heavy_Blur
+  type: image_process
+  subtype: micro_blur_for_test 
+  image_inputs:
+    - from_node_id: 1
+  parameters:
+    ksize: 25 # 一个较大的核，确保计算有负载
+
+- id: 3
+  name: Final_Output
+  type: image_process
+  subtype: curve_transform # 另一个简单的操作
+  image_inputs:
+    - from_node_id: 2
+  parameters:
+    k: 1.5

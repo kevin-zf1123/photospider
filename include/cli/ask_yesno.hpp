@@ -3,4 +3,3 @@
 #include <string>
 
 bool ask_yesno(const std::string& q, bool def);
-

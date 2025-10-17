@@ -1,9 +1,11 @@
 #pragma once
-#include "ps_types.hpp"
 #include "node.hpp"
+#include "ps_types.hpp"
 
-namespace ps { namespace ops {
+namespace ps {
+namespace ops {
 
 void register_builtin();
 
-}} // namespace ps::ops
+}
+}  // namespace ps

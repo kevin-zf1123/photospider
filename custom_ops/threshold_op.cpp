@@ -1,47 +1,43 @@
 #include "plugin_api.hpp"
-#include <opencv2/opencv.hpp>
+#include "adapter/buffer_adapter_opencv.hpp" // 引入适配器
 
-using namespace ps;
-
-// A thresholding operation.
-// Pixels below the threshold are set to 0, and pixels above are set to a max value.
-
+// 辅助函数
 static double as_double_flexible(const YAML::Node& n, const std::string& key, double defv) {
     if (!n || !n[key]) return defv;
     try { if (n[key].IsScalar()) return n[key].as<double>(); return defv; } catch (...) { return defv; }
 }
 
-// --- MODIFIED: The function signature now matches the new OpFunc definition ---
-static NodeOutput threshold_op(const Node& node, const std::vector<const NodeOutput*>& inputs) {
-    if (inputs.empty() || inputs[0]->image_umatrix.empty()) {
-        throw GraphError("Threshold operation requires one valid image input.");
+static std::string as_str(const YAML::Node& n, const std::string& key, const std::string& defv) {
+    if (!n || !n[key]) return defv;
+    try { return n[key].as<std::string>(); } catch (...) { return defv; }
+}
+
+ps::NodeOutput op_threshold(const ps::Node& node, const std::vector<const ps::NodeOutput*>& inputs) {
+    if (inputs.empty() || inputs[0]->image_buffer.width == 0) {
+        throw ps::GraphError(ps::GraphErrc::MissingDependency, "Threshold op requires one valid input image.");
     }
 
-    // --- MODIFIED: Access the input UMat directly from the NodeOutput pointer ---
-    const cv::UMat& u_input = inputs[0]->image_umatrix;
-    cv::UMat u_output;
+    // 1. 从 ImageBuffer 获取 UMat
+    const cv::UMat& u_input = ps::toCvUMat(inputs[0]->image_buffer);
 
     const auto& P = node.runtime_parameters;
-    double threshold = as_double_flexible(P, "threshold", 0.5);
-    double max_value = as_double_flexible(P, "max_value", 1.0);
+    double thresh = as_double_flexible(P, "thresh", 0.5);
+    double maxval = as_double_flexible(P, "maxval", 1.0);
+    std::string type_str = as_str(P, "type", "binary");
 
-    // Note: cv::threshold works best on single-channel images.
-    // For simplicity, this example doesn't handle multi-channel inputs specifically,
-    // but a real implementation might convert to grayscale first or apply per-channel.
     int threshold_type = cv::THRESH_BINARY;
-    if (P["inverse"] && P["inverse"].as<bool>(false)) {
-        threshold_type = cv::THRESH_BINARY_INV;
-    }
+    if (type_str == "binary_inv") threshold_type = cv::THRESH_BINARY_INV;
+    // ... 其他类型
 
-    cv::threshold(u_input, u_output, threshold, max_value, threshold_type);
+    cv::UMat u_output;
+    cv::threshold(u_input, u_output, thresh, maxval, threshold_type);
 
-    NodeOutput result;
-    // --- MODIFIED: Store the resulting UMat in the output ---
-    result.image_umatrix = u_output;
+    ps::NodeOutput result;
+    // 2. 将结果包装回 ImageBuffer
+    result.image_buffer = ps::fromCvUMat(u_output);
     return result;
 }
 
-// The registration function that Photospider will look for.
 extern "C" PLUGIN_API void register_photospider_ops() {
-    OpRegistry::instance().register_op("image_process", "threshold", threshold_op);
+    ps::OpRegistry::instance().register_op("image_process", "threshold", op_threshold);
 }

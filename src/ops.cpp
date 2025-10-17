@@ -1,571 +1,1346 @@
-// FILE: src/ops.cpp
-
-// MODIFIED: 包含 UMat 所需的头文件
-#include <opencv2/core.hpp>
+// in: src/ops.cpp (REPLACE WITH THIS FINAL VERSION)
 #include "kernel/ops.hpp"
+
+#include <cmath>
+#include <initializer_list>
+#include <mutex>
+#include <numeric>
+#include <opencv2/core/ocl.hpp>
 #include <opencv2/imgcodecs.hpp>
 #include <opencv2/imgproc.hpp>
+#include <optional>
+#include <random>
 #include <string>
 #include <vector>
-#include <random>
-#include <cmath>
-#include <numeric>
 
-namespace ps { namespace ops {
+#include "adapter/buffer_adapter_opencv.hpp"
+#include "kernel/param_utils.hpp"
 
-// --- Helper Functions ---
-// [ ... as_double_flexible, as_int_flexible, as_str 保持不变 ... ]
-static double as_double_flexible(const YAML::Node& n, const std::string& key, double defv) {
-    if (!n || !n[key]) return defv;
-    try { if (n[key].IsScalar()) return n[key].as<double>(); return defv; } catch (...) { return defv; }
-}
-static int as_int_flexible(const YAML::Node& n, const std::string& key, int defv) {
-    if (!n || !n[key]) return defv;
-    try { return n[key].as<int>(); } catch (...) { return defv; }
-}
-static std::string as_str(const YAML::Node& n, const std::string& key, const std::string& defv = {}) {
-    if (!n || !n[key]) return defv;
-    try { return n[key].as<std::string>(); } catch (...) { return defv; }
-}
+namespace ps {
+namespace ops {
 
+// =============================================================================
+// ==                         全局资源与辅助函数                           ==
+// =============================================================================
 
-// NEW: UMat 版本的 channel normalizer
-static void normalize_channels_for_mixing_umat(cv::UMat& img1, cv::UMat& img2) {
-    int c1 = img1.channels();
-    int c2 = img2.channels();
-    if (c1 == c2) return;
+// 全局互斥锁，用于保护所有并发的OpenCV GPU/CPU操作，防止底层库的资源竞争
+static std::mutex g_opencv_op_mutex;
 
-    if (c1 == 1 && c2 == 3) cv::cvtColor(img1, img1, cv::COLOR_GRAY2BGR);
-    else if (c1 == 1 && c2 == 4) cv::cvtColor(img1, img1, cv::COLOR_GRAY2BGRA);
-    else if (c2 == 1 && c1 == 3) cv::cvtColor(img2, img2, cv::COLOR_GRAY2BGR);
-    else if (c2 == 1 && c1 == 4) cv::cvtColor(img2, img2, cv::COLOR_GRAY2BGRA);
-    else if (c1 == 3 && c2 == 4) cv::cvtColor(img1, img1, cv::COLOR_BGR2BGRA);
-    else if (c2 == 3 && c1 == 4) cv::cvtColor(img2, img2, cv::COLOR_BGR2BGRA);
+static cv::Rect expand_roi(const cv::Rect& roi, int padding) {
+  if (padding <= 0 || roi.width <= 0 || roi.height <= 0) {
+    return roi;
+  }
+  return cv::Rect(roi.x - padding, roi.y - padding, roi.width + padding * 2,
+                  roi.height + padding * 2);
 }
 
-
-// --- Operation Implementations ---
-
-static NodeOutput op_image_source_path(const Node& node, const std::vector<const NodeOutput*>&) {
-    const auto& P = node.parameters;
-    std::string path = as_str(P, "path");
-    if (path.empty()) throw GraphError(GraphErrc::InvalidParameter, "image_source:path requires parameters.path");
-    
-    cv::Mat img = cv::imread(path, cv::IMREAD_UNCHANGED);
-    if (img.empty()) throw GraphError(GraphErrc::Io, "Failed to read image: " + path);
-
-    if (P["resize"]) {
-        int w = as_int_flexible(P, "width", 0);
-        int h = as_int_flexible(P, "height", 0);
-        if (w > 0 && h > 0) cv::resize(img, img, cv::Size(w, h));
+static std::optional<int> node_param_int(const Node& node,
+                                         const std::string& key) {
+  if (node.runtime_parameters && node.runtime_parameters[key]) {
+    try {
+      return node.runtime_parameters[key].as<int>();
+    } catch (...) {
+      return std::nullopt;
     }
-    
-    cv::Mat float_img;
-    if (img.depth() == CV_32F) {
-        float_img = img;
-    } else {
-        double scale = 1.0;
-        if (img.depth() == CV_8U) scale = 1.0 / 255.0;
-        else if (img.depth() == CV_16U) scale = 1.0 / 65535.0;
-        img.convertTo(float_img, CV_32F, scale);
+  }
+  if (node.parameters && node.parameters[key]) {
+    try {
+      return node.parameters[key].as<int>();
+    } catch (...) {
+      return std::nullopt;
     }
-
-    NodeOutput result;
-    result.image_matrix = float_img;
-    result.image_umatrix = float_img.getUMat(cv::ACCESS_READ);
-    return result;
+  }
+  return std::nullopt;
 }
 
-static NodeOutput op_crop(const Node& node, const std::vector<const NodeOutput*>& inputs) {
-    if (inputs.empty() || inputs[0]->image_umatrix.empty()) {
-        throw GraphError(GraphErrc::MissingDependency, "crop requires one valid input image");
+static std::optional<double> node_param_double(const Node& node,
+                                               const std::string& key) {
+  if (node.runtime_parameters && node.runtime_parameters[key]) {
+    try {
+      return node.runtime_parameters[key].as<double>();
+    } catch (...) {
+      return std::nullopt;
     }
-    cv::UMat u_src_image = inputs[0]->image_umatrix;
-    const auto& P = node.runtime_parameters;
-
-    std::string mode = as_str(P, "mode", "value");
-    int final_x, final_y, final_width, final_height;
-
-    if (mode == "ratio") {
-        double rx = as_double_flexible(P, "x", -1.0);
-        double ry = as_double_flexible(P, "y", -1.0);
-        double rw = as_double_flexible(P, "width", -1.0);
-        double rh = as_double_flexible(P, "height", -1.0);
-        if (rx < 0.0 || ry < 0.0 || rw <= 0.0 || rh <= 0.0) {
-             throw GraphError(GraphErrc::InvalidParameter, "crop in 'ratio' mode requires non-negative values for 'x', 'y', and positive values for 'width', 'height'.");
-        }
-        final_x = static_cast<int>(rx * u_src_image.cols);
-        final_y = static_cast<int>(ry * u_src_image.rows);
-        final_width = static_cast<int>(rw * u_src_image.cols);
-        final_height = static_cast<int>(rh * u_src_image.rows);
-    } else { // "value" mode
-        final_x = as_int_flexible(P, "x", -1);
-        final_y = as_int_flexible(P, "y", -1);
-        final_width = as_int_flexible(P, "width", -1);
-        final_height = as_int_flexible(P, "height", -1);
-        if (final_width <= 0 || final_height <= 0) {
-            throw GraphError(GraphErrc::InvalidParameter, "crop 'width' and 'height' must be positive.");
-        }
+  }
+  if (node.parameters && node.parameters[key]) {
+    try {
+      return node.parameters[key].as<double>();
+    } catch (...) {
+      return std::nullopt;
     }
-
-    cv::UMat u_canvas = cv::UMat::zeros(final_height, final_width, u_src_image.type());
-    cv::Rect source_rect(0, 0, u_src_image.cols, u_src_image.rows);
-    cv::Rect crop_rect(final_x, final_y, final_width, final_height);
-    cv::Rect intersection = source_rect & crop_rect;
-    cv::Rect destination_roi(intersection.x - final_x, intersection.y - final_y, intersection.width, intersection.height);
-
-    if (intersection.width > 0 && intersection.height > 0) {
-        u_src_image(intersection).copyTo(u_canvas(destination_roi));
-    }
-
-    NodeOutput result;
-    result.image_umatrix = u_canvas;
-    return result;
+  }
+  return std::nullopt;
 }
 
-static NodeOutput op_gaussian_blur(const Node& node, const std::vector<const NodeOutput*>& inputs) {
-    if (inputs.empty() || (inputs[0]->image_umatrix.empty() && inputs[0]->image_matrix.empty()))
-        throw GraphError(GraphErrc::MissingDependency, "gaussian_blur requires one valid input image");
-
-    // Prefer Mat path to avoid potential UMat/OpenCL stalls on some platforms.
-    cv::Mat in_mat;
-    if (!inputs[0]->image_matrix.empty()) in_mat = inputs[0]->image_matrix;
-    else in_mat = inputs[0]->image_umatrix.getMat(cv::ACCESS_READ);
-
-    const auto& P = node.runtime_parameters;
-    int k = as_int_flexible(P, "ksize", 3);
-    if (k > 0 && k % 2 == 0) k += 1;
-    if (k <=0) k = 1;
-    double sigmaX = as_double_flexible(P, "sigmaX", 0.0);
-
-    cv::Mat out_mat;
-    cv::GaussianBlur(in_mat, out_mat, cv::Size(k, k), sigmaX);
-
-    NodeOutput result;
-    result.image_matrix = out_mat;
-    result.image_umatrix = out_mat.getUMat(cv::ACCESS_READ);
-    return result;
+static int infer_radius_from_params(
+    const Node& node, std::initializer_list<const char*> radius_keys,
+    std::initializer_list<const char*> size_keys, int fallback = 0) {
+  int radius = std::max(0, fallback);
+  auto try_update = [&](std::optional<int> candidate) {
+    if (candidate.has_value()) {
+      radius = std::max(radius, std::max(0, *candidate));
+    }
+  };
+  for (const char* key : radius_keys) {
+    try_update(node_param_int(node, key));
+  }
+  for (const char* key : size_keys) {
+    auto val = node_param_int(node, key);
+    if (val.has_value()) {
+      int computed = std::max(0, (*val - 1) / 2);
+      radius = std::max(radius, computed);
+    }
+  }
+  return radius;
 }
 
-static NodeOutput op_resize(const Node& node, const std::vector<const NodeOutput*>& inputs) {
-    if (inputs.empty() || inputs[0]->image_umatrix.empty()) throw GraphError(GraphErrc::MissingDependency, "resize requires one valid input image");
-    
-    cv::UMat u_input = inputs[0]->image_umatrix;
-    cv::UMat u_output;
-
-    const auto& P = node.runtime_parameters;
-    int width = as_int_flexible(P, "width", 0);
-    int height = as_int_flexible(P, "height", 0);
-    if (width <= 0 || height <= 0) throw GraphError(GraphErrc::InvalidParameter, "resize requires 'width' and 'height' parameters > 0.");
-    std::string interp_str = as_str(P, "interpolation", "linear");
-    int interpolation_flag = cv::INTER_LINEAR;
-    if (interp_str == "cubic") interpolation_flag = cv::INTER_CUBIC;
-    else if (interp_str == "nearest") interpolation_flag = cv::INTER_NEAREST;
-    else if (interp_str == "area") interpolation_flag = cv::INTER_AREA;
-
-    cv::resize(u_input, u_output, cv::Size(width, height), 0, 0, interpolation_flag);
-    
-    NodeOutput result;
-    result.image_umatrix = u_output;
-    return result;
+static cv::Rect gaussian_blur_dirty_roi(const Node& node,
+                                        const cv::Rect& downstream_roi) {
+  int radius =
+      infer_radius_from_params(node, {"radius", "kernel_radius"}, {"ksize"});
+  if (radius <= 0)
+    radius = 1;
+  return expand_roi(downstream_roi, radius);
 }
 
-static NodeOutput op_add_weighted(const Node& node, const std::vector<const NodeOutput*>& inputs) {
-    if (inputs.size() < 2 || inputs[0]->image_umatrix.empty() || inputs[1]->image_umatrix.empty()) {
-        throw GraphError(GraphErrc::MissingDependency, "add_weighted requires two input images");
-    }
-
-    cv::UMat u_a_prep = inputs[0]->image_umatrix;
-    cv::UMat u_b_prep = inputs[1]->image_umatrix;
-    cv::UMat u_out_mat;
-
-    const auto& P = node.runtime_parameters;
-    const auto& map_param = P["channel_mapping"];
-
-    double alpha = as_double_flexible(P, "alpha", 0.5);
-    double beta  = as_double_flexible(P, "beta", 0.5);
-    double gamma = as_double_flexible(P, "gamma", 0.0);
-    std::string strategy = as_str(P, "merge_strategy", "resize");
-
-    if (map_param) {
-        if (strategy == "resize") {
-            if (u_a_prep.size() != u_b_prep.size()) {
-                cv::resize(u_b_prep, u_b_prep, u_a_prep.size());
-            }
-        }
-        cv::Size out_size = (strategy == "crop") 
-            ? cv::Size(std::min(u_a_prep.cols, u_b_prep.cols), std::min(u_a_prep.rows, u_b_prep.rows))
-            : u_a_prep.size();
-
-        if (out_size.width == 0 || out_size.height == 0) {
-            return NodeOutput{};
-        }
-
-        std::vector<cv::UMat> a_ch, b_ch;
-        cv::split(u_a_prep, a_ch);
-        cv::split(u_b_prep, b_ch);
-
-        int out_channels = std::max({4, u_a_prep.channels(), u_b_prep.channels()});
-        std::vector<cv::UMat> out_ch;
-        for (int i = 0; i < out_channels; ++i) {
-            out_ch.push_back(cv::UMat(out_size, CV_32F, cv::Scalar(0)));
-        }
-
-        auto process_mapping = [&](const YAML::Node& mapping_node, const std::vector<cv::UMat>& src_ch, double weight) {
-            if (!mapping_node) return;
-            for (const auto& it : mapping_node) {
-                int src_idx = it.first.as<int>();
-                if (src_idx >= (int)src_ch.size()) continue;
-
-                cv::UMat weighted_src;
-                cv::multiply(src_ch[src_idx](cv::Rect(0,0,out_size.width, out_size.height)), cv::Scalar::all(weight), weighted_src);
-
-                if (it.second.IsSequence()) {
-                    for (const auto& dest_node : it.second) {
-                        int dst_idx = dest_node.as<int>();
-                        if (dst_idx >= (int)out_ch.size()) continue;
-                        cv::add(out_ch[dst_idx], weighted_src, out_ch[dst_idx]);
-                    }
-                }
-            }
-        };
-
-        process_mapping(map_param["input0"], a_ch, alpha);
-        process_mapping(map_param["input1"], b_ch, beta);
-
-        if (gamma != 0.0) {
-            for (auto& chan : out_ch) {
-                cv::add(chan, cv::Scalar::all(gamma), chan);
-            }
-        }
-
-        bool alpha_mapped = false;
-        if (out_channels == 4 && map_param) {
-            auto is_alpha_targeted = [&](const YAML::Node& n) {
-                if (!n) return false;
-                for (const auto& it : n) {
-                    if (it.second.IsSequence()) {
-                        for (const auto& dest : it.second) if (dest.as<int>() == 3) return true;
-                    }
-                }
-                return false;
-            };
-            if (is_alpha_targeted(map_param["input0"]) || is_alpha_targeted(map_param["input1"])) {
-                alpha_mapped = true;
-            }
-        }
-
-        if (out_channels == 4 && !alpha_mapped) {
-            cv::UMat alpha1 = (u_a_prep.channels() == 4) ? a_ch[3] : cv::UMat(u_a_prep.size(), CV_32F, cv::Scalar(1.0));
-            cv::UMat alpha2 = (u_b_prep.channels() == 4) ? b_ch[3] : cv::UMat(u_b_prep.size(), CV_32F, cv::Scalar(1.0));
-            cv::max(alpha1(cv::Rect(0,0,out_size.width, out_size.height)), 
-                    alpha2(cv::Rect(0,0,out_size.width, out_size.height)), 
-                    out_ch[3]);
-        }
-        
-        cv::UMat blended_result;
-        cv::merge(out_ch, blended_result);
-        
-        if (strategy == "crop") {
-            u_out_mat = cv::UMat(u_a_prep.size(), blended_result.type(), cv::Scalar::all(0));
-            blended_result.copyTo(u_out_mat(cv::Rect(0,0,out_size.width, out_size.height)));
-        } else {
-            u_out_mat = blended_result;
-        }
-
-    } else {
-        normalize_channels_for_mixing_umat(u_a_prep, u_b_prep);
-        if (strategy == "crop") {
-            u_out_mat = cv::UMat::zeros(u_a_prep.size(), u_a_prep.type());
-            cv::Rect roi = cv::Rect(0, 0, std::min(u_a_prep.cols, u_b_prep.cols), std::min(u_a_prep.rows, u_b_prep.rows));
-            
-            cv::UMat merged_roi;
-            cv::addWeighted(u_a_prep(roi), alpha, u_b_prep(roi), beta, gamma, merged_roi);
-            merged_roi.copyTo(u_out_mat(roi));
-        } else { // resize
-            if (u_a_prep.size() != u_b_prep.size()) {
-                cv::resize(u_b_prep, u_b_prep, u_a_prep.size());
-            }
-            cv::addWeighted(u_a_prep, alpha, u_b_prep, beta, gamma, u_out_mat);
-        }
-    }
-    
-    NodeOutput result;
-    result.image_umatrix = u_out_mat;
-    return result;
+static cv::Rect convolve_dirty_roi(const Node& node,
+                                   const cv::Rect& downstream_roi) {
+  int radius = infer_radius_from_params(node, {"kernel_radius", "radius"},
+                                        {"ksize", "kernel_size"});
+  if (radius <= 0)
+    radius = 1;
+  return expand_roi(downstream_roi, radius);
 }
 
+static cv::Rect resize_dirty_roi(const Node& node,
+                                 const cv::Rect& downstream_roi) {
+  if (downstream_roi.width <= 0 || downstream_roi.height <= 0) {
+    return cv::Rect();
+  }
 
-static NodeOutput op_abs_diff(const Node& node, const std::vector<const NodeOutput*>& inputs) {
-    if (inputs.size() < 2 || inputs[0]->image_umatrix.empty() || inputs[1]->image_umatrix.empty()) throw GraphError(GraphErrc::MissingDependency, "diff requires two input images");
-    
-    cv::UMat u_a_prep = inputs[0]->image_umatrix;
-    cv::UMat u_b_prep = inputs[1]->image_umatrix;
-    cv::UMat u_out_mat;
+  if (!node.last_input_size_hp || node.last_input_size_hp->width <= 0 ||
+      node.last_input_size_hp->height <= 0) {
+    return downstream_roi;
+  }
 
-    std::string strategy = as_str(node.runtime_parameters, "merge_strategy", "resize");
+  const cv::Size input_size = *node.last_input_size_hp;
 
-    normalize_channels_for_mixing_umat(u_a_prep, u_b_prep);
+  auto maybe_out_w = node_param_int(node, "width");
+  auto maybe_out_h = node_param_int(node, "height");
+  int out_w = maybe_out_w.value_or(0);
+  int out_h = maybe_out_h.value_or(0);
 
-    if (strategy == "crop") {
-        u_out_mat = cv::UMat::zeros(u_a_prep.size(), u_a_prep.type());
-        cv::Rect roi = cv::Rect(0, 0, std::min(u_a_prep.cols, u_b_prep.cols), std::min(u_a_prep.rows, u_b_prep.rows));
-        
-        cv::UMat diff_roi;
-        cv::absdiff(u_a_prep(roi), u_b_prep(roi), diff_roi);
-        diff_roi.copyTo(u_out_mat(roi));
-    } else { // resize
-        if (u_a_prep.size() != u_b_prep.size()) cv::resize(u_b_prep, u_b_prep, u_a_prep.size());
-        cv::absdiff(u_a_prep, u_b_prep, u_out_mat);
-    }
-    NodeOutput result;
-    result.image_umatrix = u_out_mat;
-    return result;
-}
-
-static NodeOutput op_get_dimensions(const Node&, const std::vector<const NodeOutput*>& inputs) {
-    if (inputs.empty()) {
-        throw GraphError(GraphErrc::MissingDependency, "analyzer:get_dimensions requires one image input.");
-    }
-    const auto* input = inputs[0];
-    if (input->image_umatrix.empty() && input->image_matrix.empty()) {
-        throw GraphError(GraphErrc::MissingDependency, "analyzer:get_dimensions input image is empty.");
-    }
-
-    NodeOutput out;
-    if (!input->image_umatrix.empty()) {
-        out.data["width"] = input->image_umatrix.cols;
-        out.data["height"] = input->image_umatrix.rows;
-    } else {
-        out.data["width"] = input->image_matrix.cols;
-        out.data["height"] = input->image_matrix.rows;
-    }
-    return out;
-}
-static NodeOutput op_divide(const Node& node, const std::vector<const NodeOutput*>&) {
-    const auto& P = node.runtime_parameters;
-    if (!P["operand1"] || !P["operand2"]) throw GraphError(GraphErrc::InvalidParameter, "math:divide requires 'operand1' and 'operand2'.");
-    double op1 = P["operand1"].as<double>();
-    double op2 = P["operand2"].as<double>();
-    if (op2 == 0) throw GraphError(GraphErrc::InvalidParameter, "math:divide attempted to divide by zero.");
-    NodeOutput out;
-    out.data["result"] = op1 / op2;
-    return out;
-}
-
-static NodeOutput op_extract_channel(const Node& node, const std::vector<const NodeOutput*>& inputs) {
-    if (inputs.empty() || inputs[0]->image_umatrix.empty()) {
-        throw GraphError(GraphErrc::MissingDependency, "extract_channel requires one valid input image");
-    }
-    cv::UMat u_input = inputs[0]->image_umatrix;
-
-    const auto& P = node.runtime_parameters;
-    std::string channel_str = as_str(P, "channel", "a");
-    int channel_idx = -1;
-
-    if (channel_str == "b" || channel_str == "0") channel_idx = 0;
-    else if (channel_str == "g" || channel_str == "1") channel_idx = 1;
-    else if (channel_str == "r" || channel_str == "2") channel_idx = 2;
-    else if (channel_str == "a" || channel_str == "3") channel_idx = 3;
-    else throw GraphError(GraphErrc::InvalidParameter, "extract_channel: invalid 'channel' parameter. Use b,g,r,a or 0,1,2,3.");
-
-    if (u_input.channels() <= channel_idx) {
-        std::ostringstream err;
-        err << "extract_channel: image has only " << u_input.channels() << " channel(s), cannot extract index " << channel_idx;
-        throw GraphError(GraphErrc::InvalidParameter, err.str());
-    }
-
-    std::vector<cv::UMat> channels;
-    cv::split(u_input, channels);
-
-    NodeOutput result;
-    result.image_umatrix = channels[channel_idx];
-    result.data["channel"] = channel_idx;
-    return result;
-}
-
-static NodeOutput op_perlin_noise(const Node& node, const std::vector<const NodeOutput*>&) {
-    const auto& P = node.runtime_parameters;
-    int width = as_int_flexible(P, "width", 256);
-    int height = as_int_flexible(P, "height", 256);
-    double scale = as_double_flexible(P, "grid_size", 1.0);
-    if (width <= 0 || height <= 0) throw GraphError(GraphErrc::InvalidParameter, "perlin_noise requires positive width and height");
-    if (scale <= 0) throw GraphError(GraphErrc::InvalidParameter, "perlin_noise requires positive grid_size");
-
-    std::vector<int> p(512);
-    std::iota(p.begin(), p.begin() + 256, 0);
-    std::shuffle(p.begin(), p.begin() + 256, std::mt19937{1});
-    std::copy(p.begin(), p.begin() + 256, p.begin() + 256);
-
-    auto fade = [](double t) { return t * t * t * (t * (t * 6 - 15) + 10); };
-    auto lerp = [](double t, double a, double b) { return a + t * (b - a); };
-    
-    auto grad = [](int hash, double x, double y) {
-        switch(hash & 3) {
-            case 0: return  x + y;
-            case 1: return -x + y;
-            case 2: return  x - y;
-            case 3: return -x - y;
-            default: return 0.0;
-        }
+  auto infer_output_size_from_cache = [&]() -> cv::Size {
+    cv::Size size{0, 0};
+    auto take_from = [&](const std::optional<NodeOutput>& opt) {
+      if (!opt.has_value())
+        return false;
+      const auto& buf = opt->image_buffer;
+      if (buf.width <= 0 || buf.height <= 0)
+        return false;
+      size = cv::Size(buf.width, buf.height);
+      return true;
     };
+    if (take_from(node.cached_output_high_precision))
+      return size;
+    if (take_from(node.cached_output))
+      return size;
+    return size;
+  };
 
-    auto noise = [&](double x, double y) {
-        int X = static_cast<int>(floor(x)) & 255;
-        int Y = static_cast<int>(floor(y)) & 255;
-        x -= floor(x);
-        y -= floor(y);
-        double u = fade(x);
-        double v = fade(y);
-        int aa = p[p[X] + Y];
-        int ab = p[p[X] + Y + 1];
-        int ba = p[p[X + 1] + Y];
-        int bb = p[p[X + 1] + Y + 1];
-        
-        double res = lerp(v, lerp(u, grad(aa, x, y), grad(ba, x - 1, y)),
-                             lerp(u, grad(ab, x, y - 1), grad(bb, x - 1, y - 1)));
-        
-        return (res + 1.0) / 2.0;
-    };
-
-    cv::Mat noise_image(height, width, CV_32FC1);
-    for (int i = 0; i < height; ++i) {
-        for (int j = 0; j < width; ++j) {
-            double nx = static_cast<double>(j) / static_cast<double>(width) * scale;
-            double ny = static_cast<double>(i) / static_cast<double>(height) * scale;
-            noise_image.at<float>(i, j) = static_cast<float>(noise(nx, ny));
-        }
+  if (out_w <= 0 || out_h <= 0) {
+    cv::Size cached = infer_output_size_from_cache();
+    if (cached.width > 0 && cached.height > 0) {
+      out_w = cached.width;
+      out_h = cached.height;
     }
-    
-    NodeOutput result;
-    result.image_matrix = noise_image;
-    result.image_umatrix = noise_image.getUMat(cv::ACCESS_READ);
-    return result;
+  }
+
+  if (out_w <= 0 || out_h <= 0) {
+    return cv::Rect(0, 0, input_size.width, input_size.height);
+  }
+
+  const double scale_x =
+      static_cast<double>(input_size.width) / static_cast<double>(out_w);
+  const double scale_y =
+      static_cast<double>(input_size.height) / static_cast<double>(out_h);
+  if (!std::isfinite(scale_x) || !std::isfinite(scale_y) || scale_x <= 0.0 ||
+      scale_y <= 0.0) {
+    return cv::Rect(0, 0, input_size.width, input_size.height);
+  }
+
+  const double left = static_cast<double>(downstream_roi.x) * scale_x;
+  const double top = static_cast<double>(downstream_roi.y) * scale_y;
+  const double right =
+      static_cast<double>(downstream_roi.x + downstream_roi.width) * scale_x;
+  const double bottom =
+      static_cast<double>(downstream_roi.y + downstream_roi.height) * scale_y;
+
+  int upstream_x = static_cast<int>(std::floor(left));
+  int upstream_y = static_cast<int>(std::floor(top));
+  int upstream_w = static_cast<int>(std::ceil(right) - upstream_x);
+  int upstream_h = static_cast<int>(std::ceil(bottom) - upstream_y);
+  upstream_w = std::max(upstream_w, 0);
+  upstream_h = std::max(upstream_h, 0);
+
+  cv::Rect upstream_roi(upstream_x, upstream_y, upstream_w, upstream_h);
+  upstream_roi = expand_roi(upstream_roi, 2);
+
+  cv::Rect input_bounds(0, 0, input_size.width, input_size.height);
+  upstream_roi = upstream_roi & input_bounds;
+  if (upstream_roi.width <= 0 || upstream_roi.height <= 0) {
+    return cv::Rect();
+  }
+  return upstream_roi;
 }
-static NodeOutput op_constant_image(const Node& node, const std::vector<const NodeOutput*>&) {
-    const auto& P = node.runtime_parameters;
-    int width = as_int_flexible(P, "width", 0);
-    int height = as_int_flexible(P, "height", 0);
-    int value_int = as_int_flexible(P, "value", 0);
-    int channels = as_int_flexible(P, "channels", 1);
-    if (width <= 0 || height <= 0) throw GraphError(GraphErrc::InvalidParameter, "image_generator:constant requires positive 'width' and 'height'.");
-    float value_float = static_cast<float>(value_int) / 255.0f;
-    cv::Scalar fill_value(value_float, value_float, value_float, value_float);
-    cv::Mat out_mat(height, width, CV_MAKETYPE(CV_32F, channels), fill_value);
-    NodeOutput result;
-    result.image_matrix = out_mat;
-    result.image_umatrix = out_mat.getUMat(cv::ACCESS_READ);
-    return result;
+
+static cv::Rect crop_dirty_roi(const Node& node,
+                               const cv::Rect& downstream_roi) {
+  if (downstream_roi.width <= 0 || downstream_roi.height <= 0) {
+    return cv::Rect();
+  }
+
+  const bool have_input_size = node.last_input_size_hp &&
+                               node.last_input_size_hp->width > 0 &&
+                               node.last_input_size_hp->height > 0;
+  const cv::Size input_size =
+      have_input_size ? *node.last_input_size_hp : cv::Size();
+  const cv::Rect input_bounds =
+      have_input_size ? cv::Rect(0, 0, input_size.width, input_size.height)
+                      : cv::Rect();
+
+  std::string mode = as_str(node.runtime_parameters, "mode", "");
+  if (mode.empty())
+    mode = as_str(node.parameters, "mode", "value");
+  if (mode.empty())
+    mode = "value";
+
+  cv::Rect crop_rect;
+  if (mode == "ratio") {
+    if (!have_input_size) {
+      return downstream_roi;
+    }
+    auto rx_opt = node_param_double(node, "x");
+    auto ry_opt = node_param_double(node, "y");
+    auto rw_opt = node_param_double(node, "width");
+    auto rh_opt = node_param_double(node, "height");
+    if (!rx_opt || !ry_opt || !rw_opt || !rh_opt) {
+      return downstream_roi;
+    }
+    double rx = *rx_opt;
+    double ry = *ry_opt;
+    double rw = *rw_opt;
+    double rh = *rh_opt;
+    if (rx < 0.0 || ry < 0.0 || rw <= 0.0 || rh <= 0.0) {
+      return cv::Rect();
+    }
+    int x = static_cast<int>(rx * input_size.width);
+    int y = static_cast<int>(ry * input_size.height);
+    int w = static_cast<int>(rw * input_size.width);
+    int h = static_cast<int>(rh * input_size.height);
+    if (w <= 0 || h <= 0) {
+      return cv::Rect();
+    }
+    crop_rect = cv::Rect(x, y, w, h) & input_bounds;
+    if (crop_rect.width <= 0 || crop_rect.height <= 0) {
+      return cv::Rect();
+    }
+  } else {
+    auto w_opt = node_param_int(node, "width");
+    auto h_opt = node_param_int(node, "height");
+    if (!w_opt || !h_opt || *w_opt <= 0 || *h_opt <= 0) {
+      return cv::Rect();
+    }
+    int x = node_param_int(node, "x").value_or(0);
+    int y = node_param_int(node, "y").value_or(0);
+    crop_rect = cv::Rect(x, y, *w_opt, *h_opt);
+    if (have_input_size) {
+      crop_rect = crop_rect & input_bounds;
+      if (crop_rect.width <= 0 || crop_rect.height <= 0) {
+        return cv::Rect();
+      }
+    }
+  }
+
+  cv::Rect output_bounds(0, 0, crop_rect.width, crop_rect.height);
+  cv::Rect valid_downstream_roi = downstream_roi & output_bounds;
+  if (valid_downstream_roi.width <= 0 || valid_downstream_roi.height <= 0) {
+    return cv::Rect();
+  }
+
+  cv::Rect upstream_roi(crop_rect.x + valid_downstream_roi.x,
+                        crop_rect.y + valid_downstream_roi.y,
+                        valid_downstream_roi.width,
+                        valid_downstream_roi.height);
+  return upstream_roi;
 }
 
-static NodeOutput op_convolve(const Node& node, const std::vector<const NodeOutput*>& inputs) {
-    if (inputs.size() < 2 || inputs[0]->image_umatrix.empty() || inputs[1]->image_umatrix.empty()) {
-        throw GraphError(GraphErrc::MissingDependency, "convolve requires two input images: a source and a kernel.");
+// =============================================================================
+// ==                   类型一: MONOLITHIC (整体计算) 操作 ==
+// =============================================================================
+
+static NodeOutput op_image_source_path(const Node& node,
+                                       const std::vector<const NodeOutput*>&) {
+  const auto& P = node.parameters;
+  std::string path = as_str(P, "path");
+  if (path.empty())
+    throw GraphError(GraphErrc::InvalidParameter,
+                     "image_source:path requires parameters.path");
+
+  cv::Mat img = cv::imread(path, cv::IMREAD_UNCHANGED);
+  if (img.empty())
+    throw GraphError(GraphErrc::Io, "Failed to read image: " + path);
+
+  cv::Mat float_img;
+  double scale = (img.depth() == CV_8U)
+                     ? 1.0 / 255.0
+                     : ((img.depth() == CV_16U) ? 1.0 / 65535.0 : 1.0);
+  img.convertTo(float_img, CV_32F, scale);
+
+  NodeOutput result;
+  result.image_buffer = fromCvMat(float_img);
+  return result;
+}
+
+static NodeOutput op_constant_image(const Node& node,
+                                    const std::vector<const NodeOutput*>&) {
+  const auto& P = node.runtime_parameters;
+  int width = as_int_flexible(P, "width", 256);
+  int height = as_int_flexible(P, "height", 256);
+  int value_int = as_int_flexible(P, "value", 0);
+  int channels = as_int_flexible(P, "channels", 1);
+
+  float value_float = static_cast<float>(value_int) / 255.0f;
+  cv::Scalar fill_value(value_float, value_float, value_float, value_float);
+  cv::Mat out_mat(height, width, CV_MAKETYPE(CV_32F, channels), fill_value);
+
+  NodeOutput result;
+  result.image_buffer = fromCvMat(out_mat);
+  return result;
+}
+
+static NodeOutput op_perlin_noise(const Node& node,
+                                  const std::vector<const NodeOutput*>&) {
+  const auto& P = node.runtime_parameters;
+  int width = as_int_flexible(P, "width", 256);
+  int height = as_int_flexible(P, "height", 256);
+  double scale = as_double_flexible(P, "grid_size", 1.0);
+  int seed = as_int_flexible(P, "seed", -1);
+
+  if (width <= 0 || height <= 0)
+    throw GraphError(GraphErrc::InvalidParameter,
+                     "perlin_noise requires positive width and height");
+  if (scale <= 0)
+    throw GraphError(GraphErrc::InvalidParameter,
+                     "perlin_noise requires positive grid_size");
+
+  std::vector<int> p(512);
+  std::iota(p.begin(), p.begin() + 256, 0);
+
+  std::mt19937 g;
+  if (seed == -1) {
+    g.seed(std::random_device{}());
+  } else {
+    g.seed(seed);
+  }
+  std::shuffle(p.begin(), p.begin() + 256, g);
+  std::copy(p.begin(), p.begin() + 256, p.begin() + 256);
+
+  auto fade = [](double t) { return t * t * t * (t * (t * 6 - 15) + 10); };
+  auto lerp = [](double t, double a, double b) { return a + t * (b - a); };
+  auto grad = [](int hash, double x, double y) {
+    switch (hash & 3) {
+      case 0:
+        return x + y;
+      case 1:
+        return -x + y;
+      case 2:
+        return x - y;
+      case 3:
+        return -x - y;
+      default:
+        return 0.0;
     }
-    cv::UMat u_src = inputs[0]->image_umatrix;
-    cv::UMat u_kernel_img = inputs[1]->image_umatrix;
+  };
+  auto noise = [&](double x, double y) {
+    int X = static_cast<int>(floor(x)) & 255,
+        Y = static_cast<int>(floor(y)) & 255;
+    x -= floor(x);
+    y -= floor(y);
+    double u = fade(x), v = fade(y);
+    int aa = p[p[X] + Y], ab = p[p[X] + Y + 1], ba = p[p[X + 1] + Y],
+        bb = p[p[X + 1] + Y + 1];
+    double res = lerp(v, lerp(u, grad(aa, x, y), grad(ba, x - 1, y)),
+                      lerp(u, grad(ab, x, y - 1), grad(bb, x - 1, y - 1)));
+    return (res + 1.0) / 2.0;
+  };
 
-    if (u_kernel_img.channels() != 1) {
-        throw GraphError(GraphErrc::InvalidParameter, "The kernel for convolve must be a single-channel image.");
+  cv::Mat noise_image(height, width, CV_32FC1);
+  for (int i = 0; i < height; ++i) {
+    for (int j = 0; j < width; ++j) {
+      double nx = static_cast<double>(j) / width * scale;
+      double ny = static_cast<double>(i) / height * scale;
+      noise_image.at<float>(i, j) = static_cast<float>(noise(nx, ny));
     }
-    
-    const auto& P = node.runtime_parameters;
-    std::string padding_mode = as_str(P, "padding", "replicate");
-    bool take_absolute = as_int_flexible(P, "absolute", 1) != 0;
-    bool h_and_v = as_int_flexible(P, "horizontal_and_vertical", 0) != 0;
-    int border_type = cv::BORDER_REPLICATE;
-    if (padding_mode == "zero") border_type = cv::BORDER_CONSTANT;
+  }
 
-    cv::UMat u_out_mat_float;
+  NodeOutput result;
+  result.image_buffer = fromCvMat(noise_image);
+  return result;
+}
 
+static NodeOutput op_convolve(const Node& node,
+                              const std::vector<const NodeOutput*>& inputs) {
+  // Defensive checks against cold-start/invalid inputs
+  if (inputs.size() < 2 || inputs[0]->image_buffer.width == 0 ||
+      inputs[0]->image_buffer.height == 0 ||
+      inputs[1]->image_buffer.width == 0 ||
+      inputs[1]->image_buffer.height == 0) {
+    throw GraphError(
+        GraphErrc::MissingDependency,
+        "Convolve requires two non-empty input images (src and kernel).");
+  }
+
+  std::lock_guard<std::mutex> lock(g_opencv_op_mutex);
+
+  // Use Mat-only pipeline to avoid UMat/OpenCL first-use quirks under parallel
+  // cold-start
+  cv::Mat src = toCvMat(inputs[0]->image_buffer);
+  cv::Mat kernel = toCvMat(inputs[1]->image_buffer);
+
+  if (src.empty())
+    throw GraphError(GraphErrc::MissingDependency,
+                     "Convolve source image is empty.");
+  if (kernel.empty())
+    throw GraphError(GraphErrc::MissingDependency,
+                     "Convolve kernel image is empty.");
+
+  // Normalize types: grayscale kernel, float32 compute
+  if (kernel.channels() != 1) {
+    throw GraphError(GraphErrc::InvalidParameter,
+                     "The kernel for convolve must be single-channel.");
+  }
+  if (src.depth() != CV_32F)
+    src.convertTo(src, CV_32F);
+  if (kernel.depth() != CV_32F)
+    kernel.convertTo(kernel, CV_32F);
+
+  // Optional border/taking absolute and dual-direction gradient
+  const auto& P = node.runtime_parameters;
+  std::string padding_mode = as_str(P, "padding", "replicate");
+  bool take_absolute = as_int_flexible(P, "absolute", 1) != 0;
+  bool h_and_v = as_int_flexible(P, "horizontal_and_vertical", 0) != 0;
+
+  int border_type = cv::BORDER_REPLICATE;
+  if (padding_mode == "zero")
+    border_type = cv::BORDER_CONSTANT;
+
+  cv::Mat out_f32;
+  try {
     if (h_and_v) {
-        cv::UMat u_gx, u_gy, u_kernel_vertical;
-        cv::filter2D(u_src, u_gx, CV_32F, u_kernel_img, cv::Point(-1,-1), 0, border_type);
-        cv::transpose(u_kernel_img, u_kernel_vertical);
-        cv::filter2D(u_src, u_gy, CV_32F, u_kernel_vertical, cv::Point(-1,-1), 0, border_type);
-        cv::magnitude(u_gx, u_gy, u_out_mat_float);
-
+      cv::Mat gx, gy, kT;
+      cv::filter2D(src, gx, CV_32F, kernel, cv::Point(-1, -1), 0, border_type);
+      cv::transpose(kernel, kT);
+      cv::filter2D(src, gy, CV_32F, kT, cv::Point(-1, -1), 0, border_type);
+      cv::magnitude(gx, gy, out_f32);
+      if (take_absolute)
+        cv::absdiff(out_f32, cv::Scalar::all(0), out_f32);
     } else {
-        cv::filter2D(u_src, u_out_mat_float, CV_32F, u_kernel_img, cv::Point(-1,-1), 0, border_type);
-        if (take_absolute) {
-            cv::absdiff(u_out_mat_float, cv::Scalar::all(0), u_out_mat_float);
+      cv::filter2D(src, out_f32, CV_32F, kernel, cv::Point(-1, -1), 0,
+                   border_type);
+      if (take_absolute)
+        cv::absdiff(out_f32, cv::Scalar::all(0), out_f32);
+    }
+  } catch (const cv::Exception& e) {
+    throw GraphError(GraphErrc::ComputeError,
+                     std::string("Convolve failed: ") + e.what());
+  }
+
+  NodeOutput result;
+  result.image_buffer = fromCvMat(out_f32);
+  return result;
+}
+
+static NodeOutput op_resize(const Node& node,
+                            const std::vector<const NodeOutput*>& inputs) {
+  if (inputs.empty() || inputs[0]->image_buffer.width == 0)
+    throw GraphError(GraphErrc::MissingDependency,
+                     "Resize requires an input image.");
+
+  std::lock_guard<std::mutex> lock(g_opencv_op_mutex);
+  cv::UMat u_input = toCvUMat(inputs[0]->image_buffer);
+
+  const auto& P = node.runtime_parameters;
+  int width = as_int_flexible(P, "width", 0),
+      height = as_int_flexible(P, "height", 0);
+  if (width <= 0 || height <= 0)
+    throw GraphError(GraphErrc::InvalidParameter,
+                     "Resize requires positive width and height.");
+  std::string interp_str = as_str(P, "interpolation", "linear");
+  int flag = (interp_str == "cubic")     ? cv::INTER_CUBIC
+             : (interp_str == "nearest") ? cv::INTER_NEAREST
+             : (interp_str == "area")    ? cv::INTER_AREA
+                                         : cv::INTER_LINEAR;
+  cv::UMat u_output;
+  cv::resize(u_input, u_output, cv::Size(width, height), 0, 0, flag);
+  NodeOutput result;
+  result.image_buffer = fromCvUMat(u_output);
+  return result;
+}
+
+static NodeOutput op_crop(const Node& node,
+                          const std::vector<const NodeOutput*>& inputs) {
+  if (inputs.empty() || inputs[0]->image_buffer.width == 0)
+    throw GraphError(GraphErrc::MissingDependency,
+                     "Crop requires an input image.");
+
+  std::lock_guard<std::mutex> lock(g_opencv_op_mutex);
+  cv::UMat u_src = toCvUMat(inputs[0]->image_buffer);
+
+  const auto& P = node.runtime_parameters;
+  int x, y, w, h;
+  if (as_str(P, "mode", "value") == "ratio") {
+    double rx = as_double_flexible(P, "x", -1),
+           ry = as_double_flexible(P, "y", -1),
+           rw = as_double_flexible(P, "width", -1),
+           rh = as_double_flexible(P, "height", -1);
+    if (rx < 0 || ry < 0 || rw <= 0 || rh <= 0)
+      throw GraphError(GraphErrc::InvalidParameter,
+                       "Crop ratio mode requires non-negative x,y and positive "
+                       "width,height.");
+    x = rx * u_src.cols;
+    y = ry * u_src.rows;
+    w = rw * u_src.cols;
+    h = rh * u_src.rows;
+  } else {
+    x = as_int_flexible(P, "x", -1);
+    y = as_int_flexible(P, "y", -1);
+    w = as_int_flexible(P, "width", -1);
+    h = as_int_flexible(P, "height", -1);
+    if (w <= 0 || h <= 0)
+      throw GraphError(GraphErrc::InvalidParameter,
+                       "Crop value mode requires positive width and height.");
+  }
+  cv::UMat u_canvas = cv::UMat::zeros(h, w, u_src.type());
+  cv::Rect src_rect(0, 0, u_src.cols, u_src.rows), crop_rect(x, y, w, h);
+  cv::Rect intersect = src_rect & crop_rect;
+  cv::Rect dst_roi(intersect.x - x, intersect.y - y, intersect.width,
+                   intersect.height);
+  if (intersect.width > 0 && intersect.height > 0)
+    u_src(intersect).copyTo(u_canvas(dst_roi));
+  NodeOutput result;
+  result.image_buffer = fromCvUMat(u_canvas);
+  return result;
+}
+
+static NodeOutput op_extract_channel(
+    const Node& node, const std::vector<const NodeOutput*>& inputs) {
+  if (inputs.empty() || inputs[0]->image_buffer.width == 0)
+    throw GraphError(GraphErrc::MissingDependency,
+                     "Extract channel requires an input image.");
+
+  std::lock_guard<std::mutex> lock(g_opencv_op_mutex);
+  cv::UMat u_input = toCvUMat(inputs[0]->image_buffer);
+
+  std::string ch_str = as_str(node.runtime_parameters, "channel", "a");
+  int ch_idx = -1;
+  if (ch_str == "b" || ch_str == "0")
+    ch_idx = 0;
+  else if (ch_str == "g" || ch_str == "1")
+    ch_idx = 1;
+  else if (ch_str == "r" || ch_str == "2")
+    ch_idx = 2;
+  else if (ch_str == "a" || ch_str == "3")
+    ch_idx = 3;
+  if (ch_idx < 0 || u_input.channels() <= ch_idx)
+    throw GraphError(GraphErrc::InvalidParameter,
+                     "Invalid or unavailable channel for extraction.");
+  std::vector<cv::UMat> channels;
+  cv::split(u_input, channels);
+  NodeOutput result;
+  result.image_buffer = fromCvUMat(channels[ch_idx]);
+  return result;
+}
+
+static NodeOutput op_get_dimensions(
+    const Node&, const std::vector<const NodeOutput*>& inputs) {
+  if (inputs.empty())
+    throw GraphError(GraphErrc::MissingDependency,
+                     "analyzer:get_dimensions requires an image input.");
+  const auto& input_buffer = inputs[0]->image_buffer;
+  if (input_buffer.width == 0 || input_buffer.height == 0)
+    throw GraphError(GraphErrc::MissingDependency,
+                     "analyzer:get_dimensions input image is empty.");
+
+  NodeOutput out;
+  out.data["width"] = input_buffer.width;
+  out.data["height"] = input_buffer.height;
+  return out;
+}
+
+static NodeOutput op_divide(const Node& node,
+                            const std::vector<const NodeOutput*>&) {
+  const auto& P = node.runtime_parameters;
+  if (!P["operand1"] || !P["operand2"])
+    throw GraphError(GraphErrc::InvalidParameter,
+                     "math:divide requires 'operand1' and 'operand2'.");
+  double op1 = P["operand1"].as<double>();
+  double op2 = P["operand2"].as<double>();
+  if (op2 == 0)
+    throw GraphError(GraphErrc::InvalidParameter,
+                     "math:divide attempted to divide by zero.");
+
+  NodeOutput out;
+  out.data["result"] = op1 / op2;
+  return out;
+}
+
+// =============================================================================
+// ==                       类型二: TILED (分块计算) 操作 ==
+// =============================================================================
+static void op_curve_transform_tiled(const Node& node, const Tile& output_tile,
+                                     const std::vector<Tile>& input_tiles) {
+  std::lock_guard<std::mutex> lock(g_opencv_op_mutex);
+
+  if (input_tiles.empty())
+    throw GraphError(GraphErrc::MissingDependency,
+                     "curve_transform requires one input tile.");
+
+  cv::Mat input_mat = toCvMat(input_tiles[0]);
+  cv::Mat output_mat = toCvMat(output_tile);
+
+  const auto& P = node.runtime_parameters;
+  double k = as_double_flexible(P, "k", 1.0);
+
+  cv::Mat temp;
+  cv::multiply(input_mat, cv::Scalar::all(k), temp);
+  cv::add(cv::Scalar::all(1.0), temp, temp);
+  cv::divide(1.0, temp, output_mat);
+}
+
+static void op_gaussian_blur_tiled(const Node& node, const Tile& output_tile,
+                                   const std::vector<Tile>& input_tiles) {
+  std::lock_guard<std::mutex> lock(g_opencv_op_mutex);
+
+  if (input_tiles.empty()) {
+    throw GraphError(GraphErrc::MissingDependency,
+                     "gaussian_blur requires one input tile with halo.");
+  }
+
+  const Tile& input_tile_with_halo = input_tiles[0];
+  cv::Mat input_mat = toCvMat(input_tile_with_halo);
+  cv::Mat output_mat = toCvMat(output_tile);
+
+  const auto& P = node.runtime_parameters;
+  int k = as_int_flexible(P, "ksize", 3);
+  if (k > 0 && k % 2 == 0)
+    k++;
+  if (k <= 0)
+    k = 1;
+  double sigmaX = as_double_flexible(P, "sigmaX", 0.0);
+
+  cv::Mat blurred_large_tile;
+  cv::GaussianBlur(input_mat, blurred_large_tile, cv::Size(k, k), sigmaX, 0,
+                   cv::BORDER_REPLICATE);
+
+  int offset_x = output_tile.roi.x - input_tile_with_halo.roi.x;
+  int offset_y = output_tile.roi.y - input_tile_with_halo.roi.y;
+
+  cv::Rect valid_roi(offset_x, offset_y, output_mat.cols, output_mat.rows);
+
+  if (valid_roi.x < 0 || valid_roi.y < 0 ||
+      valid_roi.x + valid_roi.width > blurred_large_tile.cols ||
+      valid_roi.y + valid_roi.height > blurred_large_tile.rows) {
+    throw std::runtime_error(
+        "Tiled Gaussian Blur: Catastrophic logic error, calculated valid ROI "
+        "is out of bounds.");
+  }
+
+  blurred_large_tile(valid_roi).copyTo(output_mat);
+}
+
+// New: Monolithic Gaussian Blur (restores milestone-1 performance for
+// full-image blur)
+static NodeOutput op_gaussian_blur_monolithic(
+    const Node& node, const std::vector<const NodeOutput*>& inputs) {
+  std::lock_guard<std::mutex> lock(g_opencv_op_mutex);
+  if (inputs.empty()) {
+    throw GraphError(GraphErrc::MissingDependency,
+                     "gaussian_blur requires one input image.");
+  }
+  const auto& in_buf = inputs[0]->image_buffer;
+  cv::Mat input_mat = toCvMat(in_buf);
+
+  const auto& P = node.runtime_parameters;
+  int k = as_int_flexible(P, "ksize", 3);
+  if (k > 0 && k % 2 == 0)
+    k++;
+  if (k <= 0)
+    k = 1;
+  double sigmaX = as_double_flexible(P, "sigmaX", 0.0);
+
+  cv::Mat output_mat;
+  cv::GaussianBlur(input_mat, output_mat, cv::Size(k, k), sigmaX, 0,
+                   cv::BORDER_REPLICATE);
+
+  NodeOutput result;
+  result.image_buffer = fromCvMat(output_mat);
+  return result;
+}
+
+static void op_add_weighted_tiled(const Node& node, const Tile& output_tile,
+                                  const std::vector<Tile>& input_tiles) {
+  std::lock_guard<std::mutex> lock(g_opencv_op_mutex);
+
+  if (input_tiles.size() < 2)
+    throw GraphError(GraphErrc::MissingDependency,
+                     "add_weighted requires two input tiles.");
+
+  cv::Mat input_a = toCvMat(input_tiles[0]);
+  cv::Mat input_b = toCvMat(input_tiles[1]);
+  cv::Mat output = toCvMat(output_tile);
+
+  // [健壮性修复] 添加断言
+  if (input_a.size() != input_b.size() ||
+      input_a.channels() != input_b.channels()) {
+    throw GraphError(GraphErrc::InvalidParameter,
+                     "add_weighted tiled inputs must have same dimensions "
+                     "after merge strategy.");
+  }
+
+  const auto& P = node.runtime_parameters;
+  double alpha = as_double_flexible(P, "alpha", 0.5);
+  double beta = as_double_flexible(P, "beta", 0.5);
+  double gamma = as_double_flexible(P, "gamma", 0.0);
+
+  // Optional per-channel mapping: parameters.channel_mapping.input0 / input1: {
+  // src_channel: [dst_channels] }
+  YAML::Node chmap = P["channel_mapping"];
+  bool has_mapping = chmap && (chmap.IsMap());
+
+  if (!has_mapping) {
+    // Default: weighted blend per channel
+    cv::addWeighted(input_a, alpha, input_b, beta, gamma, output);
+    return;
+  }
+
+  // Prepare output planes
+  int in_ch = input_a.channels();
+  int out_ch = in_ch;
+
+  auto infer_max_dest = [&](const YAML::Node& n) -> int {
+    int m = -1;
+    if (!n || !n.IsMap())
+      return -1;
+    for (auto it = n.begin(); it != n.end(); ++it) {
+      // Use value copies of YAML::Node to avoid lifetime issues with
+      // temporaries
+      YAML::Node dsts = it->second;
+      if (dsts && dsts.IsSequence()) {
+        for (size_t i = 0; i < dsts.size(); ++i) {
+          try {
+            m = std::max(m, dsts[i].as<int>());
+          } catch (...) {
+          }
         }
+      }
     }
-    
-    NodeOutput result;
-    result.image_umatrix = u_out_mat_float;
-    return result;
-}
+    return m;
+  };
+  // Avoid passing temporaries into lambdas that iterate; store as lvalues first
+  // to prevent any stack lifetime ambiguity observed under ASan with yaml-cpp
+  // temporaries.
+  YAML::Node ch_input0 = chmap["input0"];
+  YAML::Node ch_input1 = chmap["input1"];
 
-static NodeOutput op_curve_transform(const Node& node, const std::vector<const NodeOutput*>& inputs) {
-    if (inputs.empty() || inputs[0]->image_umatrix.empty()) {
-        throw GraphError(GraphErrc::MissingDependency, "curve_transform requires one input image.");
+  int max0 = infer_max_dest(ch_input0);
+  int max1 = infer_max_dest(ch_input1);
+  int maxd = std::max({max0, max1, in_ch - 1});
+  out_ch = std::max(out_ch, maxd + 1);
+
+  // Split inputs into planes
+  std::vector<cv::Mat> A, B;
+  cv::split(input_a, A);
+  cv::split(input_b, B);
+  // Ensure plane count
+  if ((int)A.size() < out_ch)
+    A.resize(out_ch, cv::Mat::zeros(input_a.rows, input_a.cols, CV_32FC1));
+  if ((int)B.size() < out_ch)
+    B.resize(out_ch, cv::Mat::zeros(input_b.rows, input_b.cols, CV_32FC1));
+
+  // Init out planes: default weighted result; mapped destinations will be
+  // overridden later
+  std::vector<cv::Mat> O(out_ch);
+  for (int c = 0; c < out_ch; ++c) {
+    O[c] = cv::Mat::zeros(input_a.rows, input_a.cols, CV_32FC1);
+    if (c < in_ch) {
+      cv::addWeighted(A[c], alpha, B[c], beta, gamma, O[c]);
+    } else {
+      if (gamma != 0.0)
+        O[c] = cv::Mat(input_a.rows, input_a.cols, CV_32FC1, cv::Scalar(gamma));
     }
+  }
 
-    cv::UMat u_input = inputs[0]->image_umatrix;
-    cv::UMat u_multiplied, u_added, u_out_mat;
-
-    const auto& P = node.runtime_parameters;
-    double k = as_double_flexible(P, "k", 1.0);
-
-    cv::multiply(u_input, cv::Scalar::all(k), u_multiplied);
-    cv::add(cv::Scalar::all(1.0), u_multiplied, u_added);
-    cv::divide(1.0, u_added, u_out_mat);
-    
-    NodeOutput result;
-    result.image_umatrix = u_out_mat;
-    return result;
-}
-
-static NodeOutput op_multiply(const Node& node, const std::vector<const NodeOutput*>& inputs) {
-    if (inputs.size() < 2 || inputs[0]->image_umatrix.empty() || inputs[1]->image_umatrix.empty()) {
-        throw GraphError(GraphErrc::MissingDependency, "image_mixing:multiply requires two input images.");
-    }
-    cv::UMat u_a_prep = inputs[0]->image_umatrix;
-    cv::UMat u_b_prep = inputs[1]->image_umatrix;
-    cv::UMat u_out_mat_float;
-
-    const auto& P = node.runtime_parameters;
-    double scale = as_double_flexible(P, "scale", 1.0);
-    std::string strategy = as_str(P, "merge_strategy", "resize");
-
-    normalize_channels_for_mixing_umat(u_a_prep, u_b_prep);
-
-    if (strategy == "crop") {
-        u_out_mat_float = cv::UMat::zeros(u_a_prep.size(), u_a_prep.type());
-        cv::Rect roi(0, 0, std::min(u_a_prep.cols, u_b_prep.cols), std::min(u_a_prep.rows, u_b_prep.rows));
-        
-        cv::UMat result_roi;
-        cv::multiply(u_a_prep(roi), u_b_prep(roi), result_roi, scale);
-        result_roi.copyTo(u_out_mat_float(roi));
-    } else { // "resize"
-        if (u_a_prep.size() != u_b_prep.size()) {
-            cv::resize(u_b_prep, u_b_prep, u_a_prep.size());
+  // Build covered destination set; override defaults for covered channels
+  std::vector<char> covered(out_ch, 0);
+  auto mark_covered = [&](const YAML::Node& n) {
+    if (!n || !n.IsMap())
+      return;
+    for (auto it = n.begin(); it != n.end(); ++it) {
+      YAML::Node dsts = it->second;
+      if (!dsts || !dsts.IsSequence())
+        continue;
+      for (size_t i = 0; i < dsts.size(); ++i) {
+        int d = -1;
+        try {
+          d = dsts[i].as<int>();
+        } catch (...) {
+          continue;
         }
-        cv::multiply(u_a_prep, u_b_prep, u_out_mat_float, scale);
+        if (d >= 0 && d < out_ch)
+          covered[d] = 1;
+      }
     }
+  };
+  mark_covered(ch_input0);
+  mark_covered(ch_input1);
+  for (int d = 0; d < out_ch; ++d) {
+    if (covered[d]) {
+      if (gamma != 0.0)
+        O[d] = cv::Mat(input_a.rows, input_a.cols, CV_32FC1, cv::Scalar(gamma));
+      else
+        O[d] = cv::Mat::zeros(input_a.rows, input_a.cols, CV_32FC1);
+    }
+  }
 
-    NodeOutput result;
-    result.image_umatrix = u_out_mat_float;
-    return result;
+  auto apply_map = [&](const YAML::Node& n,
+                       const std::vector<cv::Mat>& src_planes, double w) {
+    if (!n || !n.IsMap())
+      return;
+    for (auto it = n.begin(); it != n.end(); ++it) {
+      int src = -1;
+      try {
+        src = it->first.as<int>();
+      } catch (...) {
+        continue;
+      }
+      YAML::Node dsts = it->second;
+      if (!dsts || !dsts.IsSequence())
+        continue;
+      for (size_t i = 0; i < dsts.size(); ++i) {
+        int d = -1;
+        try {
+          d = dsts[i].as<int>();
+        } catch (...) {
+          continue;
+        }
+        if (src < 0 || src >= (int)src_planes.size())
+          continue;
+        if (d < 0 || d >= (int)O.size())
+          continue;
+        // O[d] := O[d] + w*src
+        cv::add(O[d], src_planes[src] * w, O[d]);
+      }
+    }
+  };
+
+  apply_map(ch_input0, A, alpha);
+  apply_map(ch_input1, B, beta);
+
+  // Optional alpha_strategy for dest alpha channel
+  std::string alpha_strategy = as_str(P, "alpha_strategy", "weighted");
+  if ((alpha_strategy != "weighted") && out_ch >= 4) {
+    int aidx = 3;
+    if (alpha_strategy == "max") {
+      O[aidx] =
+          cv::max(A.size() > 3 ? A[3] : O[aidx], B.size() > 3 ? B[3] : O[aidx]);
+    } else if (alpha_strategy == "copy0") {
+      if ((int)A.size() > 3)
+        O[aidx] = A[3].clone();
+    } else if (alpha_strategy == "copy1") {
+      if ((int)B.size() > 3)
+        O[aidx] = B[3].clone();
+    } else if (alpha_strategy == "set1") {
+      O[aidx] = cv::Mat(input_a.rows, input_a.cols, CV_32FC1, cv::Scalar(1.0));
+    } else if (alpha_strategy == "set0") {
+      O[aidx] = cv::Mat::zeros(input_a.rows, input_a.cols, CV_32FC1);
+    }
+  }
+
+  cv::merge(O, output);
 }
 
+static void op_abs_diff_tiled(const Node& node, const Tile& output_tile,
+                              const std::vector<Tile>& input_tiles) {
+  std::lock_guard<std::mutex> lock(g_opencv_op_mutex);
+
+  if (input_tiles.size() < 2)
+    throw GraphError(GraphErrc::MissingDependency,
+                     "diff requires two input tiles.");
+
+  cv::Mat input_a = toCvMat(input_tiles[0]);
+  cv::Mat input_b = toCvMat(input_tiles[1]);
+  cv::Mat output = toCvMat(output_tile);
+
+  // [健壮性修复] 添加断言
+  if (input_a.size() != input_b.size() ||
+      input_a.channels() != input_b.channels()) {
+    throw GraphError(
+        GraphErrc::InvalidParameter,
+        "diff tiled inputs must have same dimensions after merge strategy.");
+  }
+
+  // Handle alpha separately to avoid transparent result when subtracting alpha
+  const auto& P = node.runtime_parameters;
+  std::string alpha_strategy = as_str(
+      P, "alpha_strategy", "copy0");  // copy0|copy1|max|min|diff|set1|set0
+
+  int ch = input_a.channels();
+  if (ch < 2) {
+    cv::absdiff(input_a, input_b, output);
+    return;
+  }
+
+  std::vector<cv::Mat> Aa, Bb, Oo;
+  cv::split(input_a, Aa);
+  cv::split(input_b, Bb);
+  Oo.resize(ch);
+
+  int color_channels = (ch == 4) ? 3 : ch;
+  for (int c = 0; c < color_channels; ++c) {
+    cv::absdiff(Aa[c], Bb[c], Oo[c]);
+  }
+  if (ch == 4) {
+    if (alpha_strategy == "copy0") {
+      Oo[3] = Aa[3].clone();
+    } else if (alpha_strategy == "copy1") {
+      Oo[3] = Bb[3].clone();
+    } else if (alpha_strategy == "max") {
+      Oo[3] = cv::max(Aa[3], Bb[3]);
+    } else if (alpha_strategy == "min") {
+      Oo[3] = cv::min(Aa[3], Bb[3]);
+    } else if (alpha_strategy == "diff") {
+      cv::absdiff(Aa[3], Bb[3], Oo[3]);
+    } else if (alpha_strategy == "set1") {
+      Oo[3] = cv::Mat(input_a.rows, input_a.cols, CV_32FC1, cv::Scalar(1.0));
+    } else if (alpha_strategy == "set0") {
+      Oo[3] = cv::Mat::zeros(input_a.rows, input_a.cols, CV_32FC1);
+    } else {
+      // default copy0
+      Oo[3] = Aa[3].clone();
+    }
+  }
+  cv::merge(Oo, output);
+}
+
+static void op_multiply_tiled(const Node& node, const Tile& output_tile,
+                              const std::vector<Tile>& input_tiles) {
+  std::lock_guard<std::mutex> lock(g_opencv_op_mutex);
+
+  if (input_tiles.size() < 2)
+    throw GraphError(GraphErrc::MissingDependency,
+                     "multiply requires two input tiles.");
+
+  cv::Mat input_a = toCvMat(input_tiles[0]);
+  cv::Mat input_b = toCvMat(input_tiles[1]);
+  cv::Mat output = toCvMat(output_tile);
+
+  // [健壮性修复] 添加断言
+  if (input_a.size() != input_b.size() ||
+      input_a.channels() != input_b.channels()) {
+    throw GraphError(GraphErrc::InvalidParameter,
+                     "multiply tiled inputs must have same dimensions after "
+                     "merge strategy.");
+  }
+
+  const auto& P = node.runtime_parameters;
+  double scale = as_double_flexible(P, "scale", 1.0);
+
+  cv::multiply(input_a, input_b, output, scale);
+}
+
+// -------------------- Monolithic image_mixing implementations
+// --------------------
+
+static void normalize_to_base(cv::Mat& current_mat, const cv::Mat& base_mat,
+                              const std::string& strategy) {
+  // Resize or crop/pad current_mat to match base_mat's size
+  if (current_mat.size() != base_mat.size()) {
+    if (strategy == "resize") {
+      cv::resize(current_mat, current_mat, base_mat.size(), 0, 0,
+                 cv::INTER_LINEAR);
+    } else if (strategy == "crop") {
+      cv::Rect roi(0, 0, std::min(current_mat.cols, base_mat.cols),
+                   std::min(current_mat.rows, base_mat.rows));
+      cv::Mat canvas =
+          cv::Mat::zeros(base_mat.rows, base_mat.cols, current_mat.type());
+      current_mat(roi).copyTo(canvas(roi));
+      current_mat = canvas;
+    } else {
+      throw GraphError(GraphErrc::InvalidParameter,
+                       "Unsupported merge_strategy '" + strategy +
+                           "' for monolithic image_mixing.");
+    }
+  }
+  // Match channel count to base
+  if (current_mat.channels() != base_mat.channels()) {
+    int bc = base_mat.channels();
+    if (current_mat.channels() == 1 && (bc == 3 || bc == 4)) {
+      std::vector<cv::Mat> planes(bc, current_mat);
+      cv::merge(planes, current_mat);
+    } else if ((current_mat.channels() == 3 || current_mat.channels() == 4) &&
+               bc == 1) {
+      cv::cvtColor(current_mat, current_mat, cv::COLOR_BGR2GRAY);
+    } else if (current_mat.channels() == 4 && bc == 3) {
+      cv::cvtColor(current_mat, current_mat, cv::COLOR_BGRA2BGR);
+    } else if (current_mat.channels() == 3 && bc == 4) {
+      cv::cvtColor(current_mat, current_mat, cv::COLOR_BGR2BGRA);
+    } else {
+      throw GraphError(
+          GraphErrc::InvalidParameter,
+          "Unsupported channel conversion for monolithic image_mixing: " +
+              std::to_string(current_mat.channels()) + " -> " +
+              std::to_string(bc));
+    }
+  }
+}
+
+static NodeOutput op_add_weighted_monolithic(
+    const Node& node, const std::vector<const NodeOutput*>& inputs) {
+  std::lock_guard<std::mutex> lock(g_opencv_op_mutex);
+  if (inputs.size() < 2)
+    throw GraphError(GraphErrc::MissingDependency,
+                     "add_weighted requires two input images.");
+
+  cv::Mat input_a = toCvMat(inputs[0]->image_buffer);
+  cv::Mat input_b = toCvMat(inputs[1]->image_buffer);
+  if (input_a.empty() || input_b.empty())
+    throw GraphError(GraphErrc::MissingDependency,
+                     "add_weighted inputs must be non-empty.");
+
+  const auto& P = node.runtime_parameters;
+  double alpha = as_double_flexible(P, "alpha", 0.5);
+  double beta = as_double_flexible(P, "beta", 0.5);
+  double gamma = as_double_flexible(P, "gamma", 0.0);
+  std::string strategy = as_str(P, "merge_strategy", "resize");
+
+  normalize_to_base(input_b, input_a, strategy);
+
+  // Optional per-channel mapping
+  YAML::Node chmap = P["channel_mapping"];
+  bool has_mapping = chmap && chmap.IsMap();
+
+  cv::Mat output(input_a.rows, input_a.cols,
+                 CV_MAKETYPE(CV_32F, input_a.channels()));
+  if (!has_mapping) {
+    cv::addWeighted(input_a, alpha, input_b, beta, gamma, output);
+  } else {
+    int in_ch = input_a.channels();
+    int out_ch = in_ch;
+    auto infer_max_dest = [&](const YAML::Node& n) -> int {
+      int m = -1;
+      if (!n || !n.IsMap())
+        return -1;
+      for (auto it = n.begin(); it != n.end(); ++it) {
+        YAML::Node dsts = it->second;
+        if (!dsts || !dsts.IsSequence())
+          continue;
+        for (size_t i = 0; i < dsts.size(); ++i) {
+          try {
+            m = std::max(m, dsts[i].as<int>());
+          } catch (...) {
+          }
+        }
+      }
+      return m;
+    };
+    YAML::Node ch_input0 = chmap["input0"], ch_input1 = chmap["input1"];
+    int max0 = infer_max_dest(ch_input0);
+    int max1 = infer_max_dest(ch_input1);
+    int maxd = std::max({max0, max1, in_ch - 1});
+    out_ch = std::max(out_ch, maxd + 1);
+
+    std::vector<cv::Mat> A, B;
+    cv::split(input_a, A);
+    cv::split(input_b, B);
+    if ((int)A.size() < out_ch)
+      A.resize(out_ch, cv::Mat::zeros(input_a.rows, input_a.cols, CV_32FC1));
+    if ((int)B.size() < out_ch)
+      B.resize(out_ch, cv::Mat::zeros(input_b.rows, input_b.cols, CV_32FC1));
+    std::vector<cv::Mat> O(out_ch);
+    for (int c = 0; c < out_ch; ++c) {
+      O[c] = cv::Mat::zeros(input_a.rows, input_a.cols, CV_32FC1);
+      if (c < in_ch)
+        cv::addWeighted(A[c], alpha, B[c], beta, gamma, O[c]);
+      else if (gamma != 0.0)
+        O[c] = cv::Mat(input_a.rows, input_a.cols, CV_32FC1, cv::Scalar(gamma));
+    }
+    std::vector<char> covered(out_ch, 0);
+    auto mark_covered = [&](const YAML::Node& n) {
+      if (!n || !n.IsMap())
+        return;
+      for (auto it = n.begin(); it != n.end(); ++it) {
+        YAML::Node dsts = it->second;
+        if (!dsts || !dsts.IsSequence())
+          continue;
+        for (size_t i = 0; i < dsts.size(); ++i) {
+          int d = -1;
+          try {
+            d = dsts[i].as<int>();
+          } catch (...) {
+            continue;
+          }
+          if (d >= 0 && d < out_ch)
+            covered[d] = 1;
+        }
+      }
+    };
+    mark_covered(ch_input0);
+    mark_covered(ch_input1);
+    for (int d = 0; d < out_ch; ++d)
+      if (covered[d])
+        O[d] = (gamma != 0.0)
+                   ? cv::Mat(input_a.rows, input_a.cols, CV_32FC1,
+                             cv::Scalar(gamma))
+                   : cv::Mat::zeros(input_a.rows, input_a.cols, CV_32FC1);
+    auto apply_map = [&](const YAML::Node& n,
+                         const std::vector<cv::Mat>& src_planes, double w) {
+      if (!n || !n.IsMap())
+        return;
+      for (auto it = n.begin(); it != n.end(); ++it) {
+        int src = -1;
+        try {
+          src = it->first.as<int>();
+        } catch (...) {
+          continue;
+        }
+        YAML::Node dsts = it->second;
+        if (!dsts || !dsts.IsSequence())
+          continue;
+        for (size_t i = 0; i < dsts.size(); ++i) {
+          int d = -1;
+          try {
+            d = dsts[i].as<int>();
+          } catch (...) {
+            continue;
+          }
+          if (src < 0 || src >= (int)src_planes.size())
+            continue;
+          if (d < 0 || d >= (int)O.size())
+            continue;
+          cv::add(O[d], src_planes[src] * w, O[d]);
+        }
+      }
+    };
+    apply_map(ch_input0, A, alpha);
+    apply_map(ch_input1, B, beta);
+    std::string alpha_strategy = as_str(P, "alpha_strategy", "weighted");
+    if ((alpha_strategy != "weighted") && out_ch >= 4) {
+      int aidx = 3;
+      if (alpha_strategy == "max")
+        O[aidx] = cv::max(A.size() > 3 ? A[3] : O[aidx],
+                          B.size() > 3 ? B[3] : O[aidx]);
+      else if (alpha_strategy == "copy0") {
+        if ((int)A.size() > 3)
+          O[aidx] = A[3].clone();
+      } else if (alpha_strategy == "copy1") {
+        if ((int)B.size() > 3)
+          O[aidx] = B[3].clone();
+      } else if (alpha_strategy == "set1")
+        O[aidx] =
+            cv::Mat(input_a.rows, input_a.cols, CV_32FC1, cv::Scalar(1.0));
+      else if (alpha_strategy == "set0")
+        O[aidx] = cv::Mat::zeros(input_a.rows, input_a.cols, CV_32FC1);
+    }
+    cv::merge(O, output);
+  }
+
+  NodeOutput out;
+  out.image_buffer = fromCvMat(output);
+  return out;
+}
+
+static NodeOutput op_abs_diff_monolithic(
+    const Node& node, const std::vector<const NodeOutput*>& inputs) {
+  std::lock_guard<std::mutex> lock(g_opencv_op_mutex);
+  if (inputs.size() < 2)
+    throw GraphError(GraphErrc::MissingDependency,
+                     "diff requires two input images.");
+  cv::Mat input_a = toCvMat(inputs[0]->image_buffer);
+  cv::Mat input_b = toCvMat(inputs[1]->image_buffer);
+  if (input_a.empty() || input_b.empty())
+    throw GraphError(GraphErrc::MissingDependency,
+                     "diff inputs must be non-empty.");
+  std::string strategy =
+      as_str(node.runtime_parameters, "merge_strategy", "crop");
+  normalize_to_base(input_b, input_a, strategy);
+
+  std::string alpha_strategy =
+      as_str(node.runtime_parameters, "alpha_strategy", "copy0");
+  int ch = input_a.channels();
+  cv::Mat output(input_a.rows, input_a.cols, CV_MAKETYPE(CV_32F, ch));
+  if (ch < 2) {
+    cv::absdiff(input_a, input_b, output);
+  } else {
+    std::vector<cv::Mat> Aa, Bb, Oo;
+    cv::split(input_a, Aa);
+    cv::split(input_b, Bb);
+    Oo.resize(ch);
+    int color_channels = (ch == 4) ? 3 : ch;
+    for (int c = 0; c < color_channels; ++c)
+      cv::absdiff(Aa[c], Bb[c], Oo[c]);
+    if (ch == 4) {
+      if (alpha_strategy == "copy0")
+        Oo[3] = Aa[3].clone();
+      else if (alpha_strategy == "copy1")
+        Oo[3] = Bb[3].clone();
+      else if (alpha_strategy == "max")
+        Oo[3] = cv::max(Aa[3], Bb[3]);
+      else if (alpha_strategy == "min")
+        Oo[3] = cv::min(Aa[3], Bb[3]);
+      else if (alpha_strategy == "diff")
+        cv::absdiff(Aa[3], Bb[3], Oo[3]);
+      else if (alpha_strategy == "set1")
+        Oo[3] = cv::Mat(input_a.rows, input_a.cols, CV_32FC1, cv::Scalar(1.0));
+      else if (alpha_strategy == "set0")
+        Oo[3] = cv::Mat::zeros(input_a.rows, input_a.cols, CV_32FC1);
+      else
+        Oo[3] = Aa[3].clone();
+    }
+    cv::merge(Oo, output);
+  }
+  NodeOutput out;
+  out.image_buffer = fromCvMat(output);
+  return out;
+}
+
+static NodeOutput op_multiply_monolithic(
+    const Node& node, const std::vector<const NodeOutput*>& inputs) {
+  std::lock_guard<std::mutex> lock(g_opencv_op_mutex);
+  if (inputs.size() < 2)
+    throw GraphError(GraphErrc::MissingDependency,
+                     "multiply requires two input images.");
+  cv::Mat input_a = toCvMat(inputs[0]->image_buffer);
+  cv::Mat input_b = toCvMat(inputs[1]->image_buffer);
+  if (input_a.empty() || input_b.empty())
+    throw GraphError(GraphErrc::MissingDependency,
+                     "multiply inputs must be non-empty.");
+  std::string strategy =
+      as_str(node.runtime_parameters, "merge_strategy", "resize");
+  normalize_to_base(input_b, input_a, strategy);
+  const auto& P = node.runtime_parameters;
+  double scale = as_double_flexible(P, "scale", 1.0);
+  cv::Mat output;
+  cv::multiply(input_a, input_b, output, scale);
+  NodeOutput out;
+  out.image_buffer = fromCvMat(output);
+  return out;
+}
+
+// --- 注册所有操作 ---
 void register_builtin() {
-    auto& R = OpRegistry::instance();
-    R.register_op("image_source", "path", op_image_source_path);
-    R.register_op("image_generator", "perlin_noise", op_perlin_noise);
-    R.register_op("image_generator", "constant", op_constant_image);
-    R.register_op("image_process", "gaussian_blur", op_gaussian_blur);
-    R.register_op("image_process", "resize", op_resize);
-    R.register_op("image_process", "crop", op_crop);
-    R.register_op("image_process", "extract_channel", op_extract_channel);
-    R.register_op("image_process", "convolve", op_convolve);
-    R.register_op("image_process", "curve_transform", op_curve_transform);
-    R.register_op("image_mixing", "add_weighted", op_add_weighted);
-    R.register_op("image_mixing", "diff", op_abs_diff);
-    R.register_op("image_mixing", "multiply", op_multiply);
-    R.register_op("analyzer", "get_dimensions", op_get_dimensions);
-    R.register_op("math", "divide", op_divide);
+  static std::once_flag init_once;
+  std::call_once(init_once, [] {
+    cv::ocl::setUseOpenCL(false);
+    // Avoid OpenCV spinning its own threads conflicting with our scheduler on
+    // first use
+    cv::setNumThreads(1);
+  });
+  auto& R = OpRegistry::instance();
+
+  // Register with new OpImplementations API (Phase 1)
+  // Monolithic HP implementations
+  R.register_op_hp_monolithic("image_source", "path",
+                              MonolithicOpFunc(op_image_source_path));
+  R.register_op_hp_monolithic("image_generator", "constant",
+                              MonolithicOpFunc(op_constant_image));
+  R.register_op_hp_monolithic("image_generator", "perlin_noise",
+                              MonolithicOpFunc(op_perlin_noise));
+  R.register_op_hp_monolithic("analyzer", "get_dimensions",
+                              MonolithicOpFunc(op_get_dimensions));
+  R.register_op_hp_monolithic("math", "divide", MonolithicOpFunc(op_divide));
+  R.register_op_hp_monolithic("image_process", "convolve",
+                              MonolithicOpFunc(op_convolve));
+  R.register_op_hp_monolithic("image_process", "resize",
+                              MonolithicOpFunc(op_resize));
+  R.register_op_hp_monolithic("image_process", "crop",
+                              MonolithicOpFunc(op_crop));
+  R.register_op_hp_monolithic("image_process", "extract_channel",
+                              MonolithicOpFunc(op_extract_channel));
+  R.register_op_hp_monolithic("image_mixing", "add_weighted",
+                              MonolithicOpFunc(op_add_weighted_monolithic));
+  R.register_op_hp_monolithic("image_mixing", "diff",
+                              MonolithicOpFunc(op_abs_diff_monolithic));
+  R.register_op_hp_monolithic("image_mixing", "multiply",
+                              MonolithicOpFunc(op_multiply_monolithic));
+
+  // Tiled HP implementations (default MACRO preference)
+  OpMetadata tiled_meta;
+  tiled_meta.tile_preference = TileSizePreference::MACRO;
+  // RT implementations default to Micro tiles to match proxy pipeline
+  OpMetadata rt_meta;
+  rt_meta.tile_preference = TileSizePreference::MICRO;
+
+  DirtyRoiPropFunc identity_roi = [](const Node&, const cv::Rect& roi) {
+    return roi;
+  };
+
+  R.register_dirty_propagator("image_source", "path", identity_roi);
+  R.register_dirty_propagator("image_generator", "constant", identity_roi);
+  R.register_dirty_propagator("image_generator", "perlin_noise", identity_roi);
+  R.register_dirty_propagator("analyzer", "get_dimensions", identity_roi);
+  R.register_dirty_propagator("math", "divide", identity_roi);
+  R.register_dirty_propagator("image_process", "resize",
+                              DirtyRoiPropFunc(resize_dirty_roi));
+  R.register_dirty_propagator("image_process", "crop",
+                              DirtyRoiPropFunc(crop_dirty_roi));
+  R.register_dirty_propagator("image_process", "extract_channel", identity_roi);
+  R.register_dirty_propagator("image_process", "curve_transform", identity_roi);
+  R.register_dirty_propagator("image_mixing", "add_weighted", identity_roi);
+  R.register_dirty_propagator("image_mixing", "diff", identity_roi);
+  R.register_dirty_propagator("image_mixing", "multiply", identity_roi);
+
+  R.register_dirty_propagator("image_process", "convolve",
+                              DirtyRoiPropFunc(convolve_dirty_roi));
+
+  // Gaussian blur: register both monolithic HP and tiled HP under the same key
+  R.register_op_hp_monolithic("image_process", "gaussian_blur",
+                              MonolithicOpFunc(op_gaussian_blur_monolithic));
+  R.register_op_hp_tiled("image_process", "gaussian_blur",
+                         TileOpFunc(op_gaussian_blur_tiled), tiled_meta);
+  // Optional alias for backward compatibility if any graph uses
+  // "gaussian_blur_tiled"
+  R.register_op_hp_tiled("image_process", "gaussian_blur_tiled",
+                         TileOpFunc(op_gaussian_blur_tiled), tiled_meta);
+  // RT path currently reuses HP kernels until lighter variants land
+  R.register_op_rt_tiled("image_process", "gaussian_blur",
+                         TileOpFunc(op_gaussian_blur_tiled), rt_meta);
+  R.register_op_rt_tiled("image_process", "gaussian_blur_tiled",
+                         TileOpFunc(op_gaussian_blur_tiled), rt_meta);
+  R.register_dirty_propagator("image_process", "gaussian_blur",
+                              DirtyRoiPropFunc(gaussian_blur_dirty_roi));
+  R.register_dirty_propagator("image_process", "gaussian_blur_tiled",
+                              DirtyRoiPropFunc(gaussian_blur_dirty_roi));
+
+  R.register_op_hp_tiled("image_process", "curve_transform",
+                         TileOpFunc(op_curve_transform_tiled), tiled_meta);
+  // Image mixing: provide both monolithic and tiled implementations; global HP
+  // prefers monolithic
+  R.register_op_hp_monolithic("image_mixing", "add_weighted",
+                              MonolithicOpFunc(op_add_weighted_monolithic));
+  R.register_op_hp_tiled("image_mixing", "add_weighted",
+                         TileOpFunc(op_add_weighted_tiled), tiled_meta);
+  R.register_op_rt_tiled("image_mixing", "add_weighted",
+                         TileOpFunc(op_add_weighted_tiled), rt_meta);
+  R.register_op_hp_monolithic("image_mixing", "diff",
+                              MonolithicOpFunc(op_abs_diff_monolithic));
+  R.register_op_hp_tiled("image_mixing", "diff", TileOpFunc(op_abs_diff_tiled),
+                         tiled_meta);
+  R.register_op_hp_monolithic("image_mixing", "multiply",
+                              MonolithicOpFunc(op_multiply_monolithic));
+  R.register_op_hp_tiled("image_mixing", "multiply",
+                         TileOpFunc(op_multiply_tiled), tiled_meta);
 }
 
-}} // namespace ps::ops
+}  // namespace ops
+}  // namespace ps
