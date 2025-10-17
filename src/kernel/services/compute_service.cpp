@@ -1242,7 +1242,8 @@ NodeOutput& ComputeService::compute_high_precision_update(
           cv::Rect macro_tile(
               x, y,
               std::min(kHpMacroTileSize, macro_cover.x + macro_cover.width - x),
-              std::min(kHpMacroTileSize, macro_cover.y + macro_cover.height - y));
+              std::min(kHpMacroTileSize,
+                       macro_cover.y + macro_cover.height - y));
           macro_tile = clip_rect(macro_tile, out_bounds);
           if (is_rect_empty(macro_tile))
             continue;
@@ -1291,7 +1292,8 @@ NodeOutput& ComputeService::compute_high_precision_update(
               task.input_tiles.clear();
               for (const auto* in_out : image_inputs_ready) {
                 Tile in_tile;
-                in_tile.buffer = const_cast<ImageBuffer*>(&in_out->image_buffer);
+                in_tile.buffer =
+                    const_cast<ImageBuffer*>(&in_out->image_buffer);
                 in_tile.roi = clip_rect(expand_rect(micro_tile, entry.halo_hp),
                                         cv::Size(in_out->image_buffer.width,
                                                  in_out->image_buffer.height));
@@ -1417,8 +1419,8 @@ NodeOutput& ComputeService::compute_high_precision_update(
                     : roi_hp;
           }
           node.rt_version = request.hp_version;
-          event_service.get().push(node.id, node.name,
-                                   "downsample_passthrough", 0.0);
+          event_service.get().push(node.id, node.name, "downsample_passthrough",
+                                   0.0);
           return;
         }
 
