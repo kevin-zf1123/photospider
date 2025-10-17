@@ -202,6 +202,24 @@ inline cv::Rect scale_up_rect(const cv::Rect& rect, int factor) {
   return cv::Rect(x0, y0, x1 - x0, y1 - y0);
 }
 
+inline size_t bytes_per_channel(ps::DataType dt) {
+  switch (dt) {
+    case ps::DataType::UINT8:
+      return sizeof(uint8_t);
+    case ps::DataType::INT8:
+      return sizeof(int8_t);
+    case ps::DataType::UINT16:
+      return sizeof(uint16_t);
+    case ps::DataType::INT16:
+      return sizeof(int16_t);
+    case ps::DataType::FLOAT64:
+      return sizeof(double);
+    case ps::DataType::FLOAT32:
+    default:
+      return sizeof(float);
+  }
+}
+
 struct RtPlanEntry {
   cv::Rect roi_hp;
   cv::Rect roi_rt;
@@ -508,7 +526,7 @@ NodeOutput& ComputeService::compute_internal(
               ob.height = out_h;
               ob.channels = out_c;
               ob.type = out_t;
-              size_t pix_sz = sizeof(float);
+              size_t pix_sz = bytes_per_channel(out_t);
               ob.step = out_w * out_c * pix_sz;
               ob.data.reset(new char[ob.step * ob.height],
                             std::default_delete<char[]>());
@@ -1347,24 +1365,6 @@ NodeOutput& ComputeService::compute_high_precision_update(
         [runtime_ptr, &graph,
          event_service = std::ref(events_)](DownsampleRequest request) -> Task {
       return [runtime_ptr, &graph, event_service, request]() {
-        auto dtype_bytes = [](DataType dt) -> size_t {
-          switch (dt) {
-            case DataType::UINT8:
-              return sizeof(uint8_t);
-            case DataType::INT8:
-              return sizeof(int8_t);
-            case DataType::UINT16:
-              return sizeof(uint16_t);
-            case DataType::INT16:
-              return sizeof(int16_t);
-            case DataType::FLOAT64:
-              return sizeof(double);
-            case DataType::FLOAT32:
-            default:
-              return sizeof(float);
-          }
-        };
-
         std::unique_lock<std::mutex> lock(graph.graph_mutex_);
         auto node_it = graph.nodes.find(request.node_id);
         if (node_it == graph.nodes.end()) {
@@ -1431,7 +1431,7 @@ NodeOutput& ComputeService::compute_high_precision_update(
                            (rt_buffer.type != hp_buffer.type) ||
                            (!rt_buffer.data);
         if (needs_alloc) {
-          size_t pixel_size = dtype_bytes(hp_buffer.type);
+          size_t pixel_size = bytes_per_channel(hp_buffer.type);
           if (pixel_size == 0) {
             pixel_size = sizeof(float);
           }
