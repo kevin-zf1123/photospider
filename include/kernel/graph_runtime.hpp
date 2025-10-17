@@ -68,7 +68,7 @@ class GraphRuntime {
   };
 
   struct SchedulerEvent {
-    enum Action { ASSIGN_INITIAL, EXECUTE };
+    enum Action { ASSIGN_INITIAL, EXECUTE, EXECUTE_TILE };
     uint64_t epoch;
     int node_id;
     int worker_id;
