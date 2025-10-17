@@ -81,7 +81,17 @@ TEST(Scheduler, DirtyRegionTiledComputation) {
   ps::Kernel kernel;
   ps::InteractionService svc(kernel);
   svc.cmd_seed_builtin_ops();
+  {
+    auto& registry = ps::OpRegistry::instance();
+    const auto* base_impl = registry.get_implementations("image_process", "gaussian_blur_tiled");
+    ASSERT_TRUE(base_impl && base_impl->tiled_hp);
 
+    ps::OpMetadata micro_meta;
+    micro_meta.tile_preference = ps::TileSizePreference::MICRO; // 强制 MICRO 粒度
+
+    // 注册一个新别名，使用相同的函数但用新的元数据
+    registry.register_op_hp_tiled("image_process", "micro_blur_for_test", *base_impl->tiled_hp, micro_meta);
+  }
   const std::string graph_name = "dirty_region_test";
   const std::string yaml_path = "util/testcases/dirty_region_test.yaml";
   const int final_node_id = 3;
@@ -196,7 +206,7 @@ TEST(Scheduler, DirtyRegionTiledComputation) {
   // ========================================================================
   // 步骤 4: 断言和验证
   // ========================================================================
-  ASSERT_LT(incremental_tile_task_count, full_compute_tile_count / 2);
+  ASSERT_LT(incremental_tile_task_count, full_compute_tile_count / 10);
   if (std::thread::hardware_concurrency() > 1) {
     ASSERT_GT(workers_used.size(),
               0);  // 在任务很少时，可能只用到1个worker，所以改为>0
