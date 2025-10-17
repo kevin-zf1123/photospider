@@ -3,6 +3,7 @@
 #include <chrono>
 #include <fstream>
 #include <iomanip>
+#include <iostream>
 #include <nlohmann/json.hpp>
 #include <set>
 #include <string>
@@ -12,7 +13,6 @@
 #include "kernel/interaction.hpp"
 #include "kernel/kernel.hpp"
 #include "kernel/services/compute_service.hpp"  // <--- 修正点: 添加缺失的头文件
-#include "kernel/services/compute_service.hpp"
 #include "kernel/services/graph_cache_service.hpp"  // <--- 修正点: 添加缺失的头文件
 #include "kernel/services/graph_traversal_service.hpp"  // <--- 修正点: 添加缺失的头文件
 
@@ -60,13 +60,14 @@ TEST(SchedulerTest, ParallelLogToJson) {
         break;
     }
 
-    j.push_back({{"epoch", e.epoch},
-                 {"node_id", e.node_id},
-                 {"worker_id", e.worker_id},
-                 {"action", action_str},
-                 {"ts_us", std::chrono::duration_cast<std::chrono::microseconds>(
-                               e.timestamp.time_since_epoch())
-                               .count()}});
+    j.push_back(
+        {{"epoch", e.epoch},
+         {"node_id", e.node_id},
+         {"worker_id", e.worker_id},
+         {"action", action_str},
+         {"ts_us", std::chrono::duration_cast<std::chrono::microseconds>(
+                       e.timestamp.time_since_epoch())
+                       .count()}});
   }
 
   std::ofstream ofs("scheduler_log.json");
@@ -83,14 +84,17 @@ TEST(Scheduler, DirtyRegionTiledComputation) {
   svc.cmd_seed_builtin_ops();
   {
     auto& registry = ps::OpRegistry::instance();
-    const auto* base_impl = registry.get_implementations("image_process", "gaussian_blur_tiled");
+    const auto* base_impl =
+        registry.get_implementations("image_process", "gaussian_blur_tiled");
     ASSERT_TRUE(base_impl && base_impl->tiled_hp);
 
     ps::OpMetadata micro_meta;
-    micro_meta.tile_preference = ps::TileSizePreference::MICRO; // 强制 MICRO 粒度
+    micro_meta.tile_preference =
+        ps::TileSizePreference::MICRO;  // 强制 MICRO 粒度
 
     // 注册一个新别名，使用相同的函数但用新的元数据
-    registry.register_op_hp_tiled("image_process", "micro_blur_for_test", *base_impl->tiled_hp, micro_meta);
+    registry.register_op_hp_tiled("image_process", "micro_blur_for_test",
+                                  *base_impl->tiled_hp, micro_meta);
   }
   const std::string graph_name = "dirty_region_test";
   const std::string yaml_path = "util/testcases/dirty_region_test.yaml";
