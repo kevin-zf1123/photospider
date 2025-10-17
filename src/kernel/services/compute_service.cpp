@@ -2337,6 +2337,9 @@ NodeOutput& ComputeService::compute_parallel(
                                             node_for_exec, op_func,
                                             benchmark_events, enable_timing]() {
                             try {
+                              runtime.log_event(
+                                  GraphRuntime::SchedulerEvent::EXECUTE_TILE,
+                                  current_node_id);
                               TileTask tt;
                               tt.node = &node_for_exec;
                               tt.output_tile.buffer =
