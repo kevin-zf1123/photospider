@@ -47,16 +47,26 @@ TEST(SchedulerTest, ParallelLogToJson) {
 
   nlohmann::json j = nlohmann::json::array();
   for (const auto& e : events) {
-    j.push_back(
-        {{"epoch", e.epoch},
-         {"node_id", e.node_id},
-         {"worker_id", e.worker_id},
-         {"action", e.action == ps::GraphRuntime::SchedulerEvent::ASSIGN_INITIAL
-                        ? "ASSIGN_INITIAL"
-                        : "EXECUTE"},
-         {"ts_us", std::chrono::duration_cast<std::chrono::microseconds>(
-                       e.timestamp.time_since_epoch())
-                       .count()}});
+    const char* action_str = "UNKNOWN";
+    switch (e.action) {
+      case ps::GraphRuntime::SchedulerEvent::ASSIGN_INITIAL:
+        action_str = "ASSIGN_INITIAL";
+        break;
+      case ps::GraphRuntime::SchedulerEvent::EXECUTE:
+        action_str = "EXECUTE";
+        break;
+      case ps::GraphRuntime::SchedulerEvent::EXECUTE_TILE:
+        action_str = "EXECUTE_TILE";
+        break;
+    }
+
+    j.push_back({{"epoch", e.epoch},
+                 {"node_id", e.node_id},
+                 {"worker_id", e.worker_id},
+                 {"action", action_str},
+                 {"ts_us", std::chrono::duration_cast<std::chrono::microseconds>(
+                               e.timestamp.time_since_epoch())
+                               .count()}});
   }
 
   std::ofstream ofs("scheduler_log.json");
@@ -99,14 +109,18 @@ TEST(Scheduler, DirtyRegionTiledComputation) {
   ASSERT_FALSE(log_full_compute.empty());
 
   size_t full_compute_task_count = 0;
+  size_t full_compute_tile_count = 0;
   for (const auto& event : log_full_compute) {
     if (event.action == ps::GraphRuntime::SchedulerEvent::EXECUTE) {
       full_compute_task_count++;
+    } else if (event.action == ps::GraphRuntime::SchedulerEvent::EXECUTE_TILE) {
+      full_compute_tile_count++;
     }
   }
-  std::cout << "Full compute executed " << full_compute_task_count << " tasks."
+  std::cout << "Full compute executed " << full_compute_task_count
+            << " node tasks and " << full_compute_tile_count << " tile tasks."
             << std::endl;
-  ASSERT_GT(full_compute_task_count, 10);
+  ASSERT_GT(full_compute_tile_count, 10);
 
   // ========================================================================
   // 步骤 2: 模拟一个局部修改 (脏区)
@@ -160,22 +174,29 @@ TEST(Scheduler, DirtyRegionTiledComputation) {
   ASSERT_FALSE(log_incremental_compute.empty());
 
   size_t incremental_compute_task_count = 0;
+  size_t incremental_tile_task_count = 0;
   std::set<int> workers_used;
   for (const auto& event : log_incremental_compute) {
     if (event.action == ps::GraphRuntime::SchedulerEvent::EXECUTE) {
       incremental_compute_task_count++;
-      if (event.worker_id != -1) {
-        workers_used.insert(event.worker_id);
-      }
+    } else if (event.action == ps::GraphRuntime::SchedulerEvent::EXECUTE_TILE) {
+      incremental_tile_task_count++;
+    }
+    if ((event.action == ps::GraphRuntime::SchedulerEvent::EXECUTE ||
+         event.action == ps::GraphRuntime::SchedulerEvent::EXECUTE_TILE) &&
+        event.worker_id != -1) {
+      workers_used.insert(event.worker_id);
     }
   }
   std::cout << "Incremental compute executed " << incremental_compute_task_count
-            << " tasks on " << workers_used.size() << " workers." << std::endl;
+            << " node tasks and " << incremental_tile_task_count
+            << " tile tasks on " << workers_used.size() << " workers."
+            << std::endl;
 
   // ========================================================================
   // 步骤 4: 断言和验证
   // ========================================================================
-  ASSERT_LT(incremental_compute_task_count, full_compute_task_count / 2);
+  ASSERT_LT(incremental_tile_task_count, full_compute_tile_count / 2);
   if (std::thread::hardware_concurrency() > 1) {
     ASSERT_GT(workers_used.size(),
               0);  // 在任务很少时，可能只用到1个worker，所以改为>0
