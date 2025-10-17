@@ -1131,6 +1131,10 @@ NodeOutput& ComputeService::compute_high_precision_update(
       return;
     Node& node = nodes.at(nid);
 
+    if (runtime_ptr) {
+      runtime_ptr->log_event(GraphRuntime::SchedulerEvent::EXECUTE, nid);
+    }
+
     // Resolve runtime params
     node.runtime_parameters = node.parameters ? YAML::Clone(node.parameters)
                                               : YAML::Node(YAML::NodeType::Map);
@@ -1179,121 +1183,142 @@ NodeOutput& ComputeService::compute_high_precision_update(
       image_inputs_ready.push_back(parent_out);
     }
 
-    // Ensure output HP buffer exists and is correctly sized
-    auto [channels, dtype] = [&]() -> std::pair<int, DataType> {
-      if (node.cached_output_high_precision) {
-        const auto& b = node.cached_output_high_precision->image_buffer;
-        if (b.width > 0)
-          return {b.channels, b.type};
-      }
-      for (const auto* in : image_inputs_ready) {
-        const auto& b = in->image_buffer;
-        if (b.width > 0)
-          return {b.channels, b.type};
-      }
-      return {1, DataType::FLOAT32};
-    }();
-    if (!node.cached_output_high_precision)
-      node.cached_output_high_precision = NodeOutput{};
-    ImageBuffer& hp_buffer = node.cached_output_high_precision->image_buffer;
-    if (hp_buffer.width != entry.hp_size.width ||
-        hp_buffer.height != entry.hp_size.height ||
-        hp_buffer.channels != channels || hp_buffer.type != dtype ||
-        !hp_buffer.data) {
-      hp_buffer.width = entry.hp_size.width;
-      hp_buffer.height = entry.hp_size.height;
-      hp_buffer.channels = channels;
-      hp_buffer.type = dtype;
-      hp_buffer.device = Device::CPU;
-      size_t row_bytes =
-          static_cast<size_t>(hp_buffer.width) * channels * sizeof(float);
-      hp_buffer.step = row_bytes;
-      hp_buffer.data.reset(new char[row_bytes * hp_buffer.height],
-                           std::default_delete<char[]>());
-      std::memset(hp_buffer.data.get(), 0, row_bytes * hp_buffer.height);
-    }
-
-    // Get tiled operator
     const auto* impls =
         OpRegistry::instance().get_implementations(node.type, node.subtype);
     const TileOpFunc* hp_tile_fn =
         (impls && impls->tiled_hp) ? &*impls->tiled_hp : nullptr;
-    if (!hp_tile_fn)
-      throw GraphError(
-          GraphErrc::NoOperation,
-          "No tiled HP operator for " + node.type + ":" + node.subtype);
+    const MonolithicOpFunc* hp_mono_fn =
+        (impls && impls->monolithic_hp) ? &*impls->monolithic_hp : nullptr;
 
-    // Execute tiling logic
-    TileTask task;
-    task.node = &node;
-    task.output_tile.buffer = &hp_buffer;
-    const cv::Size out_bounds(hp_buffer.width, hp_buffer.height);
-
-    // Prioritize Macro tiles
-    cv::Rect macro_cover = align_rect(entry.roi_hp, kHpMacroTileSize);
-    macro_cover = clip_rect(macro_cover, out_bounds);
-    for (int y = macro_cover.y; y < macro_cover.y + macro_cover.height;
-         y += kHpMacroTileSize) {
-      for (int x = macro_cover.x; x < macro_cover.x + macro_cover.width;
-           x += kHpMacroTileSize) {
-        cv::Rect macro_tile(
-            x, y,
-            std::min(kHpMacroTileSize, macro_cover.x + macro_cover.width - x),
-            std::min(kHpMacroTileSize, macro_cover.y + macro_cover.height - y));
-        macro_tile = clip_rect(macro_tile, out_bounds);
-        if (is_rect_empty(macro_tile))
-          continue;
-        cv::Rect touched = macro_tile & entry.roi_hp;
-        if (is_rect_empty(touched))
-          continue;
-
-        // If ROI covers the entire macro tile, process it as one big tile
-        if (touched == macro_tile && macro_tile.width >= kHpMacroTileSize &&
-            macro_tile.height >= kHpMacroTileSize) {
-          task.output_tile.roi = macro_tile;
-          task.input_tiles.clear();
-          for (const auto* in_out : image_inputs_ready) {
-            Tile in_tile;
-            in_tile.buffer = const_cast<ImageBuffer*>(&in_out->image_buffer);
-            in_tile.roi = clip_rect(expand_rect(macro_tile, entry.halo_hp),
-                                    cv::Size(in_out->image_buffer.width,
-                                             in_out->image_buffer.height));
-            task.input_tiles.push_back(in_tile);
-          }
-          execute_tile_task(task, *hp_tile_fn);
-          continue;
+    if (hp_tile_fn) {
+      // Ensure output HP buffer exists and is correctly sized
+      auto [channels, dtype] = [&]() -> std::pair<int, DataType> {
+        if (node.cached_output_high_precision) {
+          const auto& b = node.cached_output_high_precision->image_buffer;
+          if (b.width > 0)
+            return {b.channels, b.type};
         }
+        for (const auto* in : image_inputs_ready) {
+          const auto& b = in->image_buffer;
+          if (b.width > 0)
+            return {b.channels, b.type};
+        }
+        return {1, DataType::FLOAT32};
+      }();
 
-        // Otherwise, fall back to micro tiles for the intersected region
-        cv::Rect micro_cover = align_rect(touched, kHpMicroTileSize);
-        micro_cover = clip_rect(micro_cover, out_bounds) & macro_tile;
-        for (int my = micro_cover.y; my < micro_cover.y + micro_cover.height;
-             my += kHpMicroTileSize) {
-          for (int mx = micro_cover.x; mx < micro_cover.x + micro_cover.width;
-               mx += kHpMicroTileSize) {
-            cv::Rect micro_tile(
-                mx, my,
-                std::min(kHpMicroTileSize,
-                         micro_cover.x + micro_cover.width - mx),
-                std::min(kHpMicroTileSize,
-                         micro_cover.y + micro_cover.height - my));
-            micro_tile = clip_rect(micro_tile, out_bounds);
-            if (is_rect_empty(micro_tile))
-              continue;
-            task.output_tile.roi = micro_tile;
+      if (!node.cached_output_high_precision)
+        node.cached_output_high_precision = NodeOutput{};
+      ImageBuffer& hp_buffer = node.cached_output_high_precision->image_buffer;
+      if (hp_buffer.width != entry.hp_size.width ||
+          hp_buffer.height != entry.hp_size.height ||
+          hp_buffer.channels != channels || hp_buffer.type != dtype ||
+          !hp_buffer.data) {
+        hp_buffer.width = entry.hp_size.width;
+        hp_buffer.height = entry.hp_size.height;
+        hp_buffer.channels = channels;
+        hp_buffer.type = dtype;
+        hp_buffer.device = Device::CPU;
+        size_t row_bytes =
+            static_cast<size_t>(hp_buffer.width) * channels * sizeof(float);
+        hp_buffer.step = row_bytes;
+        hp_buffer.data.reset(new char[row_bytes * hp_buffer.height],
+                             std::default_delete<char[]>());
+        std::memset(hp_buffer.data.get(), 0, row_bytes * hp_buffer.height);
+      }
+
+      // Execute tiling logic
+      TileTask task;
+      task.node = &node;
+      task.output_tile.buffer = &hp_buffer;
+      const cv::Size out_bounds(hp_buffer.width, hp_buffer.height);
+
+      // Prioritize Macro tiles
+      cv::Rect macro_cover = align_rect(entry.roi_hp, kHpMacroTileSize);
+      macro_cover = clip_rect(macro_cover, out_bounds);
+      for (int y = macro_cover.y; y < macro_cover.y + macro_cover.height;
+           y += kHpMacroTileSize) {
+        for (int x = macro_cover.x; x < macro_cover.x + macro_cover.width;
+             x += kHpMacroTileSize) {
+          cv::Rect macro_tile(
+              x, y,
+              std::min(kHpMacroTileSize, macro_cover.x + macro_cover.width - x),
+              std::min(kHpMacroTileSize, macro_cover.y + macro_cover.height - y));
+          macro_tile = clip_rect(macro_tile, out_bounds);
+          if (is_rect_empty(macro_tile))
+            continue;
+          cv::Rect touched = macro_tile & entry.roi_hp;
+          if (is_rect_empty(touched))
+            continue;
+
+          // If ROI covers the entire macro tile, process it as one big tile
+          if (touched == macro_tile && macro_tile.width >= kHpMacroTileSize &&
+              macro_tile.height >= kHpMacroTileSize) {
+            task.output_tile.roi = macro_tile;
             task.input_tiles.clear();
             for (const auto* in_out : image_inputs_ready) {
               Tile in_tile;
               in_tile.buffer = const_cast<ImageBuffer*>(&in_out->image_buffer);
-              in_tile.roi = clip_rect(expand_rect(micro_tile, entry.halo_hp),
+              in_tile.roi = clip_rect(expand_rect(macro_tile, entry.halo_hp),
                                       cv::Size(in_out->image_buffer.width,
                                                in_out->image_buffer.height));
               task.input_tiles.push_back(in_tile);
             }
+            if (runtime_ptr) {
+              runtime_ptr->log_event(GraphRuntime::SchedulerEvent::EXECUTE_TILE,
+                                     nid);
+            }
             execute_tile_task(task, *hp_tile_fn);
+            continue;
+          }
+
+          // Otherwise, fall back to micro tiles for the intersected region
+          cv::Rect micro_cover = align_rect(touched, kHpMicroTileSize);
+          micro_cover = clip_rect(micro_cover, out_bounds) & macro_tile;
+          for (int my = micro_cover.y; my < micro_cover.y + micro_cover.height;
+               my += kHpMicroTileSize) {
+            for (int mx = micro_cover.x; mx < micro_cover.x + micro_cover.width;
+                 mx += kHpMicroTileSize) {
+              cv::Rect micro_tile(
+                  mx, my,
+                  std::min(kHpMicroTileSize,
+                           micro_cover.x + micro_cover.width - mx),
+                  std::min(kHpMicroTileSize,
+                           micro_cover.y + micro_cover.height - my));
+              micro_tile = clip_rect(micro_tile, out_bounds);
+              if (is_rect_empty(micro_tile))
+                continue;
+              task.output_tile.roi = micro_tile;
+              task.input_tiles.clear();
+              for (const auto* in_out : image_inputs_ready) {
+                Tile in_tile;
+                in_tile.buffer = const_cast<ImageBuffer*>(&in_out->image_buffer);
+                in_tile.roi = clip_rect(expand_rect(micro_tile, entry.halo_hp),
+                                        cv::Size(in_out->image_buffer.width,
+                                                 in_out->image_buffer.height));
+                task.input_tiles.push_back(in_tile);
+              }
+              if (runtime_ptr) {
+                runtime_ptr->log_event(
+                    GraphRuntime::SchedulerEvent::EXECUTE_TILE, nid);
+              }
+              execute_tile_task(task, *hp_tile_fn);
+            }
           }
         }
       }
+    } else if (hp_mono_fn) {
+      node.cached_output_high_precision =
+          (*hp_mono_fn)(node, image_inputs_ready);
+
+      if (!node.cached_output_high_precision) {
+        throw GraphError(GraphErrc::ComputeError,
+                         "Monolithic HP operator produced no output for " +
+                             node.type + ":" + node.subtype);
+      }
+    } else {
+      throw GraphError(GraphErrc::NoOperation,
+                       "No suitable HP operator (tiled or monolithic) for " +
+                           node.type + ":" + node.subtype);
     }
 
     // Update node state
@@ -1316,9 +1341,10 @@ NodeOutput& ComputeService::compute_high_precision_update(
   }
 
   if (!downsample_requests.empty()) {
-    auto make_downsample_task = [this,
-                                 &graph](DownsampleRequest request) -> Task {
-      return [this, &graph, request]() {
+    auto make_downsample_task =
+        [runtime_ptr, &graph,
+         event_service = std::ref(events_)](DownsampleRequest request) -> Task {
+      return [runtime_ptr, &graph, event_service, request]() {
         auto dtype_bytes = [](DataType dt) -> size_t {
           switch (dt) {
             case DataType::UINT8:
@@ -1376,7 +1402,8 @@ NodeOutput& ComputeService::compute_high_precision_update(
                     : roi_hp;
           }
           node.rt_version = request.hp_version;
-          events_.push(node.id, node.name, "downsample_passthrough", 0.0);
+          event_service.get().push(node.id, node.name, "downsample_passthrough",
+                                   0.0);
           return;
         }
 
@@ -1390,7 +1417,8 @@ NodeOutput& ComputeService::compute_high_precision_update(
                     : roi_hp;
           }
           node.rt_version = request.hp_version;
-          events_.push(node.id, node.name, "downsample_passthrough", 0.0);
+          event_service.get().push(node.id, node.name,
+                                   "downsample_passthrough", 0.0);
           return;
         }
 
@@ -1437,7 +1465,12 @@ NodeOutput& ComputeService::compute_high_precision_update(
                           ? clip_rect(merge_rect(*node.rt_roi, roi_hp), hp_size)
                           : roi_hp;
         node.rt_version = request.hp_version;
-        events_.push(node.id, node.name, "downsample", 0.0);
+        event_service.get().push(node.id, node.name, "downsample", 0.0);
+
+        if (runtime_ptr) {
+          runtime_ptr->log_event(GraphRuntime::SchedulerEvent::EXECUTE_TILE,
+                                 node.id);
+        }
       };
     };
 
