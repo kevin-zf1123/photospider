@@ -29,6 +29,12 @@ set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_CXX_EXTENSIONS OFF)
 
 # --- Find Dependencies ---
+# Prioritize Homebrew packages over Anaconda to avoid ABI conflicts
+if(APPLE)
+    list(APPEND CMAKE_PREFIX_PATH "/opt/homebrew")
+endif()
+
+find_package(Threads REQUIRED)
 find_package(OpenCV REQUIRED COMPONENTS core imgproc imgcodecs videoio)
 find_package(yaml-cpp REQUIRED)
 find_package(CURL REQUIRED)
@@ -49,19 +55,9 @@ if(NOT APPLE)
     endforeach()
 endif()
 
-include(FetchContent)
-
-FetchContent_Declare(
-  googletest
-  URL https://github.com/google/googletest/archive/refs/tags/v1.15.2.zip
-)
-FetchContent_MakeAvailable(googletest)
-
-FetchContent_Declare(
-  nlohmann_json
-  URL https://github.com/nlohmann/json/releases/download/v3.11.3/json.tar.xz
-)
-FetchContent_MakeAvailable(nlohmann_json)
+# --- Find Google Test and nlohmann_json ---
+find_package(GTest REQUIRED)
+find_package(nlohmann_json REQUIRED)
 
 # --- Build FTXUI as Modular Static Libraries ---
 set(FTXUI_INCLUDE_DIR "${PROJECT_SOURCE_DIR}/extern/ftxui/include")
@@ -102,13 +98,8 @@ if(EXISTS "${FTXUI_SRC_DIR}" AND IS_DIRECTORY "${FTXUI_SRC_DIR}" AND
 endif()
 
 if(NOT FTXUI_COMPONENT_TARGET)
-    message(STATUS "FTXUI sources not found locally; fetching release archive")
-    FetchContent_Declare(
-        ftxui
-        GIT_REPOSITORY https://github.com/ArthurSonzogni/FTXUI.git
-        GIT_TAG v5.0.0
-    )
-    FetchContent_MakeAvailable(ftxui)
+    message(STATUS "FTXUI sources not found locally; trying to find installed package")
+    find_package(ftxui REQUIRED)
     set(FTXUI_COMPONENT_TARGET ftxui::component)
 endif()
 
@@ -335,6 +326,7 @@ target_link_libraries(test_scheduler PRIVATE
     GTest::gtest
     GTest::gtest_main
     nlohmann_json::nlohmann_json
+    ${CMAKE_THREAD_LIBS_INIT}
 )
 
 add_executable(test_milestone2 tests/test_milestone2.cpp)
