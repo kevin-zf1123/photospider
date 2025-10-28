@@ -992,6 +992,17 @@ NodeOutput& ComputeService::compute_high_precision_update(
         return size;
       }
     }
+
+    int width = as_int_flexible(node.runtime_parameters, "width",
+                                as_int_flexible(node.parameters, "width", 0));
+    int height = as_int_flexible(node.runtime_parameters, "height",
+                                 as_int_flexible(node.parameters, "height", 0));
+    if (width > 0 && height > 0) {
+      size = cv::Size(width, height);
+      hp_size_cache[nid] = size;
+      return size;
+    }
+
     for (const auto& input : node.image_inputs) {
       if (input.from_node_id < 0)
         continue;
@@ -999,13 +1010,6 @@ NodeOutput& ComputeService::compute_high_precision_update(
       if (parent_size.width > 0 && parent_size.height > 0) {
         size = parent_size;
         break;
-      }
-    }
-    if (size.width <= 0 || size.height <= 0) {
-      int width = as_int_flexible(node.parameters, "width", 0);
-      int height = as_int_flexible(node.parameters, "height", 0);
-      if (width > 0 && height > 0) {
-        size = cv::Size(width, height);
       }
     }
     hp_size_cache[nid] = size;
@@ -1562,6 +1566,16 @@ NodeOutput& ComputeService::compute_real_time_update(
       }
     }
 
+    int width = as_int_flexible(node.runtime_parameters, "width",
+                                as_int_flexible(node.parameters, "width", 0));
+    int height = as_int_flexible(node.runtime_parameters, "height",
+                                 as_int_flexible(node.parameters, "height", 0));
+    if (width > 0 && height > 0) {
+      size = cv::Size(width, height);
+      hp_size_cache[nid] = size;
+      return size;
+    }
+
     for (const auto& input : node.image_inputs) {
       if (input.from_node_id < 0)
         continue;
@@ -1569,14 +1583,6 @@ NodeOutput& ComputeService::compute_real_time_update(
       if (parent_size.width > 0 && parent_size.height > 0) {
         size = parent_size;
         break;
-      }
-    }
-
-    if (size.width <= 0 || size.height <= 0) {
-      int width = as_int_flexible(node.parameters, "width", 0);
-      int height = as_int_flexible(node.parameters, "height", 0);
-      if (width > 0 && height > 0) {
-        size = cv::Size(width, height);
       }
     }
 
@@ -1973,6 +1979,8 @@ NodeOutput& ComputeService::compute_real_time_update(
   }
   return *target.cached_output_real_time;
 }
+
+
 
 NodeOutput& ComputeService::compute_parallel(
     GraphModel& graph, GraphRuntime& runtime, int node_id,

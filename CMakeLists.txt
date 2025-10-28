@@ -353,6 +353,20 @@ target_include_directories(test_milestone3 PRIVATE
 target_link_libraries(test_milestone3 PRIVATE photospider_lib ${FTXUI_COMPONENT_TARGET})
 add_test(NAME Milestone3Tests COMMAND test_milestone3)
 
+add_executable(test_propagation tests/test_propagation.cpp)
+set_target_properties(test_propagation PROPERTIES
+    RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/tests"
+    BUILD_RPATH "${CMAKE_BINARY_DIR}"
+)
+target_include_directories(test_propagation PRIVATE
+    "${PROJECT_SOURCE_DIR}/include"
+    "${PROJECT_SOURCE_DIR}/src"
+)
+target_link_libraries(test_propagation PRIVATE
+    photospider_lib
+    ${FTXUI_COMPONENT_TARGET} # 虽然没用TUI，但photospider_lib可能需要它
+)
+
 include(GoogleTest)
 gtest_discover_tests(test_scheduler WORKING_DIRECTORY ${PROJECT_SOURCE_DIR})
 

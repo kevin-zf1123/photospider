@@ -783,5 +783,111 @@ std::optional<double> Kernel::get_last_io_time(const std::string& name) {
     return std::nullopt;
   }
 }
+std::optional<std::future<bool>> Kernel::compute_async(
+    const std::string& name, int node_id, const std::string& cache_precision,
+    bool force_recache, bool enable_timing, bool parallel, bool quiet,
+    bool disable_disk_cache, bool nosave,
+    std::vector<BenchmarkEvent>* benchmark_events,
+    ComputeIntent intent, // 新增
+    std::optional<cv::Rect> dirty_roi // 新增
+) {
+    auto it = graphs_.find(name);
+    if (it == graphs_.end()) {
+        return std::nullopt;
+    }
+
+    GraphRuntime* const runtime_ptr = it->second.get();
+    if (!runtime_ptr->running()) runtime_ptr->start();
+
+    // 捕获所有参数
+    return std::optional<std::future<bool>>(std::async(
+        std::launch::async,
+        [this, runtime_ptr, node_id, cache_precision, force_recache, enable_timing, quiet,
+        disable_disk_cache, nosave, benchmark_events, intent, dirty_roi, name]() {
+            try {
+                GraphModel& model = runtime_ptr->model();
+                ComputeService compute_service(traversal_service_, cache_service_, runtime_ptr->event_service());
+                
+                model.set_quiet(quiet);
+                model.set_skip_save_cache(nosave);
+
+                compute_service.compute_parallel(
+                    model, *runtime_ptr, intent, node_id, cache_precision,
+                    force_recache, enable_timing, disable_disk_cache,
+                    benchmark_events, dirty_roi);
+
+                model.set_skip_save_cache(false);
+                last_error_.erase(name);
+                return true;
+            } catch (const GraphError& ge) {
+                last_error_[name] = {ge.code(), ge.what()};
+                return false;
+            } catch (const std::exception& e) {
+                last_error_[name] = {GraphErrc::Unknown, std::string("Async compute failed: ") + e.what()};
+                return false;
+            }
+        }));
+}
+
+std::optional<cv::Rect> Kernel::project_roi_forward(
+    const std::string& name, int start_node_id, const cv::Rect& start_roi,
+    int target_node_id) {
+  auto it = graphs_.find(name);
+  if (it == graphs_.end())
+    return std::nullopt;
+
+  GraphRuntime* runtime_ptr = it->second.get();
+  if (!runtime_ptr->running())
+    runtime_ptr->start();
+
+  try {
+    auto future = runtime_ptr->post(
+        [&, start_node_id, start_roi, target_node_id](GraphModel& g) {
+          return traversal_service_.project_roi_forward(g, start_node_id,
+                                                        start_roi, target_node_id);
+        });
+    auto result = future.get();
+    last_error_.erase(name);
+    return result;
+  } catch (const GraphError& ge) {
+    last_error_[name] = {ge.code(), ge.what()};
+    return std::nullopt;
+  } catch (const std::exception& e) {
+    last_error_[name] = {GraphErrc::Unknown,
+                         std::string("ROI projection failed: ") + e.what()};
+    return std::nullopt;
+  }
+}
+
+std::optional<cv::Rect> Kernel::project_roi_backward(
+    const std::string& name, int target_node_id, const cv::Rect& target_roi,
+    int source_node_id) {
+  auto it = graphs_.find(name);
+  if (it == graphs_.end())
+    return std::nullopt;
+
+  GraphRuntime* runtime_ptr = it->second.get();
+  if (!runtime_ptr->running())
+    runtime_ptr->start();
+
+  try {
+    auto future = runtime_ptr->post(
+        [&, target_node_id, target_roi, source_node_id](GraphModel& g) {
+          return traversal_service_.project_roi_backward(
+              g, target_node_id, target_roi, source_node_id);
+        });
+    auto result = future.get();
+    last_error_.erase(name);
+    return result;
+  } catch (const GraphError& ge) {
+    last_error_[name] = {ge.code(), ge.what()};
+    return std::nullopt;
+  } catch (const std::exception& e) {
+    last_error_[name] = {
+        GraphErrc::Unknown,
+        std::string("ROI back-projection failed: ") + e.what()};
+    return std::nullopt;
+  }
+}
 
 }  // namespace ps

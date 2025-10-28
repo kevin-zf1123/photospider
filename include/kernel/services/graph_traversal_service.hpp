@@ -1,8 +1,11 @@
 #pragma once
 
 #include <ostream>
+#include <optional>
 #include <unordered_set>
 #include <vector>
+
+#include <opencv2/core.hpp>
 
 #include "graph_model.hpp"
 
@@ -24,6 +27,16 @@ class GraphTraversalService {
   void print_dependency_tree(const GraphModel& graph, std::ostream& os,
                              int start_node_id,
                              bool show_parameters = true) const;
+
+  std::optional<cv::Rect> project_roi_forward(const GraphModel& graph,
+                                              int start_node_id,
+                                              const cv::Rect& start_roi,
+                                              int target_node_id) const;
+
+  std::optional<cv::Rect> project_roi_backward(const GraphModel& graph,
+                                               int target_node_id,
+                                               const cv::Rect& target_roi,
+                                               int source_node_id) const;
 };
 
 }  // namespace ps

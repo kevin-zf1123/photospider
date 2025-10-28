@@ -55,7 +55,22 @@ class Kernel {
       bool disable_disk_cache, bool nosave,
       std::vector<BenchmarkEvent>* benchmark_events = nullptr);
   std::optional<TimingCollector> get_timing(const std::string& name);
-
+  std::optional<std::future<bool>> compute_async(
+    const std::string& name, int node_id, const std::string& cache_precision,
+    bool force_recache, bool enable_timing, bool parallel, bool quiet,
+    bool disable_disk_cache, bool nosave,
+    std::vector<BenchmarkEvent>* benchmark_events,
+    ComputeIntent intent, // 新增
+    std::optional<cv::Rect> dirty_roi // 新增
+);
+  std::optional<cv::Rect> project_roi_forward(const std::string& name,
+                                              int start_node_id,
+                                              const cv::Rect& start_roi,
+                                              int target_node_id);
+  std::optional<cv::Rect> project_roi_backward(const std::string& name,
+                                               int target_node_id,
+                                               const cv::Rect& target_roi,
+                                               int source_node_id);
   bool reload_graph_yaml(const std::string& name, const std::string& yaml_path);
   bool save_graph_yaml(const std::string& name, const std::string& yaml_path);
   bool clear_drive_cache(const std::string& name);
