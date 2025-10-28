@@ -17,7 +17,7 @@ namespace ps {
 class InteractionService {
  public:
   explicit InteractionService(Kernel& kernel) : kernel_(kernel) {}
-
+  Kernel& kernel() { return kernel_; }
   // Graph lifecycle
   std::optional<std::string> cmd_load_graph(
       const std::string& name, const std::string& root_dir,
@@ -205,6 +205,20 @@ class InteractionService {
     return kernel_.compute_async(graph, node_id, cache_precision, force, timing,
                                  parallel, quiet, disable_disk_cache, nosave,
                                  benchmark_events);
+  }
+  std::optional<cv::Rect> cmd_project_roi(const std::string& graph,
+                                          int start_node_id,
+                                          const cv::Rect& start_roi,
+                                          int target_node_id) {
+    return kernel_.project_roi_forward(graph, start_node_id, start_roi,
+                                       target_node_id);
+  }
+  std::optional<cv::Rect> cmd_project_roi_backward(const std::string& graph,
+                                                   int target_node_id,
+                                                   const cv::Rect& target_roi,
+                                                   int source_node_id) {
+    return kernel_.project_roi_backward(graph, target_node_id, target_roi,
+                                        source_node_id);
   }
   std::optional<double> cmd_get_last_io_time(const std::string& graph) {
     return kernel_.get_last_io_time(graph);

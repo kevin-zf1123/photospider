@@ -1,0 +1,38 @@
+# 1. 起点
+- id: 1
+  name: SourceImage
+  type: image_generator
+  subtype: constant
+  parameters:
+    width: 1024
+    height: 1024
+    value: 128
+
+# 2. 模糊
+- id: 2
+  name: GaussianBlur_Base
+  type: image_process
+  subtype: gaussian_blur
+  image_inputs:
+    - from_node_id: 1
+  parameters:
+    ksize: 21
+
+# 3. 缩放分支 (现在是主干路)
+- id: 20
+  name: Resize_Half
+  type: image_process
+  subtype: resize
+  image_inputs:
+    - from_node_id: 2
+  parameters:
+    width: 512
+    height: 512
+
+# 4. 最终输出 (直接依赖于缩放分支)
+- id: 200
+  name: FinalOutput
+  type: image_process
+  subtype: curve_transform
+  image_inputs:
+    - from_node_id: 20
