@@ -34,6 +34,8 @@ bool process_command(const std::string& line, ps::InteractionService& svc,
       return handle_close(iss, svc, current_graph, modified, config);
     } else if (cmd == "print") {
       return handle_print(iss, svc, current_graph, modified, config);
+    } else if (cmd == "inspect") {
+      return handle_inspect(iss, svc, current_graph, modified, config);
     } else if (cmd == "node") {
       return handle_node(iss, svc, current_graph, modified, config);
     } else if (cmd == "ops") {

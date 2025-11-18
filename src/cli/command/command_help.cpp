@@ -79,6 +79,9 @@ static bool dispatch_print(const std::string& name, const CliConfig& config) {
   } else if (cmd == "save") {
     print_help_save(config);
     return true;
+  } else if (cmd == "inspect") {
+    print_help_inspect(config);
+    return true;
   } else if (cmd == "exit") {
     print_help_exit(config);
     return true;

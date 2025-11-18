@@ -16,9 +16,9 @@ CliAutocompleter::CliAutocompleter(ps::InteractionService& svc) : svc_(svc) {
       "bench",       "benchmark", "clear",       "cls",  // 如果您想补全别名，也在这里添加
       "clear-cache", "cc",        "clear-graph", "close", "compute",
       "config",      "exit",      "quit",        "q",     "free",
-      "graphs",      "help",      "load",        "node",  "ops",
-      "output",      "print",     "read",        "save",  "source",
-      "switch",      "traversal"};
+      "graphs",      "help",      "inspect",     "load",  "node",
+      "ops",         "output",    "print",       "read",  "save",
+      "source",      "switch",    "traversal"};
   std::sort(commands_.begin(), commands_.end());
 }
 
@@ -63,6 +63,8 @@ CompletionResult CliAutocompleter::Complete(const std::string& line,
         CompleteYamlPath(prefix, result.options);
       }
     } else if (cmd == "node" || cmd == "save") {
+      CompleteNodeId(prefix, result.options);
+    } else if (cmd == "inspect") {
       CompleteNodeId(prefix, result.options);
     } else if (cmd == "print") {
       // print <id|all> <mode>
