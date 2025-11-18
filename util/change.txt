@@ -1,0 +1,664 @@
+diff --git a/include/cli/command/commands.hpp b/include/cli/command/commands.hpp
+index a2ba79c..be6dc23 100644
+--- a/include/cli/command/commands.hpp
++++ b/include/cli/command/commands.hpp
+@@ -52,6 +52,12 @@ bool handle_print(std::istringstream& iss, ps::InteractionService& svc,
+                   CliConfig& config);
+ void print_help_print(const CliConfig& config);
+ 
++// inspect
++bool handle_inspect(std::istringstream& iss, ps::InteractionService& svc,
++                    std::string& current_graph, bool& modified,
++                    CliConfig& config);
++void print_help_inspect(const CliConfig& config);
++
+ // node
+ bool handle_node(std::istringstream& iss, ps::InteractionService& svc,
+                  std::string& current_graph, bool& modified, CliConfig& config);
+diff --git a/include/kernel/interaction.hpp b/include/kernel/interaction.hpp
+index b762ac8..ea0d1d3 100644
+--- a/include/kernel/interaction.hpp
++++ b/include/kernel/interaction.hpp
+@@ -158,6 +158,10 @@ class InteractionService {
+                                            bool show_parameters) {
+     return kernel_.dump_dependency_tree(graph, node_id, show_parameters);
+   }
++  std::optional<std::string> cmd_inspect_node(const std::string& graph,
++                                              int node_id) {
++    return kernel_.inspect_node(graph, node_id);
++  }
+   std::optional<Kernel::LastError> cmd_last_error(
+       const std::string& graph) const {
+     return kernel_.last_error(graph);
+diff --git a/include/kernel/kernel.hpp b/include/kernel/kernel.hpp
+index ab66c7a..f123887 100644
+--- a/include/kernel/kernel.hpp
++++ b/include/kernel/kernel.hpp
+@@ -97,6 +97,8 @@ class Kernel {
+   std::optional<std::string> dump_dependency_tree(const std::string& name,
+                                                   std::optional<int> node_id,
+                                                   bool show_parameters);
++  std::optional<std::string> inspect_node(const std::string& name,
++                                          int node_id);
+   std::optional<LastError> last_error(const std::string& name) const;
+   std::optional<std::vector<int>> ending_nodes(const std::string& name);
+   std::optional<std::vector<int>> topo_postorder_from(const std::string& name,
+diff --git a/include/ps_types.hpp b/include/ps_types.hpp
+index bb0c297..43d56f7 100644
+--- a/include/ps_types.hpp
++++ b/include/ps_types.hpp
+@@ -1,6 +1,8 @@
+ #pragma once
+ #include <yaml-cpp/yaml.h>
+ 
++#include <array>
++#include <cstdint>
+ #include <filesystem>
+ #include <functional>
+ #include <iostream>
+@@ -43,9 +45,29 @@ struct CacheEntry {
+   std::string location;
+ };
+ 
++struct SpatialContext {
++  std::array<double, 9> transform_matrix{1, 0, 0, 0, 1, 0, 0, 0, 1};
++  std::array<double, 9> inverse_matrix{1, 0, 0, 0, 1, 0, 0, 0, 1};
++  cv::Rect absolute_roi{0, 0, 0, 0};
++  double global_scale_x{1.0};
++  double global_scale_y{1.0};
++};
++
++struct DebugMeta {
++  int computed_by_worker_id{-1};
++  uint64_t timestamp_us{0};
++  uint64_t execution_time_ms{0};
++  double min_val{0.0};
++  double max_val{0.0};
++  bool has_nan{false};
++  std::string compute_device{"UNKNOWN"};
++};
++
+ struct NodeOutput {
+   ps::ImageBuffer image_buffer;
+   std::unordered_map<std::string, OutputValue> data;
++  SpatialContext space;
++  DebugMeta debug;
+ };
+ 
+ #if defined(_WIN32)
+diff --git a/src/cli/command/command_inspect.cpp b/src/cli/command/command_inspect.cpp
+new file mode 100644
+index 0000000..6c66374
+--- /dev/null
++++ b/src/cli/command/command_inspect.cpp
+@@ -0,0 +1,39 @@
++// FILE: src/cli/command/command_inspect.cpp
++#include <iostream>
++
++#include "cli/command/commands.hpp"
++#include "cli/command/help_utils.hpp"
++
++bool handle_inspect(std::istringstream& iss, ps::InteractionService& svc,
++                    std::string& current_graph, bool& /*modified*/,
++                    CliConfig& /*config*/) {
++  if (current_graph.empty()) {
++    std::cout << "No current graph. Use load/switch.\n";
++    return true;
++  }
++  std::string node_str;
++  if (!(iss >> node_str)) {
++    std::cout << "Usage: inspect <node_id>\n";
++    return true;
++  }
++  int node_id = -1;
++  try {
++    node_id = std::stoi(node_str);
++  } catch (const std::exception&) {
++    std::cout << "Invalid node id '" << node_str << "'.\n";
++    return true;
++  }
++  auto report = svc.cmd_inspect_node(current_graph, node_id);
++  if (!report) {
++    std::cout << "Unable to inspect node " << node_id << ".\n";
++    return true;
++  }
++  std::cout << *report;
++  if (!report->empty() && report->back() != '\n')
++    std::cout << '\n';
++  return true;
++}
++
++void print_help_inspect(const CliConfig& /*config*/) {
++  print_help_from_file("help_inspect.txt");
++}
+diff --git a/src/cli/command/help/help_inspect.txt b/src/cli/command/help/help_inspect.txt
+new file mode 100644
+index 0000000..8142663
+--- /dev/null
++++ b/src/cli/command/help/help_inspect.txt
+@@ -0,0 +1,5 @@
++inspect <node_id>
++    Display cached output metadata for the specified node.
++    Shows scheduler/debug timing stats as well as spatial context matrices.
++    Useful after compute commands to understand who produced the data and how
++    it was transformed (scale, ROI, transforms).
+diff --git a/src/cli/print_repl_help.cpp b/src/cli/print_repl_help.cpp
+index 28a7b88..5b6cad9 100644
+--- a/src/cli/print_repl_help.cpp
++++ b/src/cli/print_repl_help.cpp
+@@ -34,6 +34,9 @@ void print_repl_help(const CliConfig& config) {
+       << "  print [all|<id>] [full|simplified]\n"
+       << "    Print dependency tree.\n\n"
+ 
++      << "  inspect <id>\n"
++      << "    Show cached output metadata for a node (spatial + debug).\n\n"
++
+       << "  node [<id>]\n"
+       << "    Open the FTXUI node editor (optionally for a specific id).\n\n"
+ 
+diff --git a/src/cli/process_command.cpp b/src/cli/process_command.cpp
+index 385c7e3..348ba24 100644
+--- a/src/cli/process_command.cpp
++++ b/src/cli/process_command.cpp
+@@ -34,6 +34,8 @@ bool process_command(const std::string& line, ps::InteractionService& svc,
+       return handle_close(iss, svc, current_graph, modified, config);
+     } else if (cmd == "print") {
+       return handle_print(iss, svc, current_graph, modified, config);
++    } else if (cmd == "inspect") {
++      return handle_inspect(iss, svc, current_graph, modified, config);
+     } else if (cmd == "node") {
+       return handle_node(iss, svc, current_graph, modified, config);
+     } else if (cmd == "ops") {
+diff --git a/src/kernel/kernel.cpp b/src/kernel/kernel.cpp
+index 045f1bc..ee9c424 100644
+--- a/src/kernel/kernel.cpp
++++ b/src/kernel/kernel.cpp
+@@ -442,6 +442,70 @@ std::optional<std::string> Kernel::dump_dependency_tree(
+   }
+ }
+ 
++std::optional<std::string> Kernel::inspect_node(const std::string& name,
++                                                int node_id) {
++  auto it = graphs_.find(name);
++  if (it == graphs_.end())
++    return std::nullopt;
++  try {
++    return it->second
++        ->post([node_id](GraphModel& g) -> std::optional<std::string> {
++          auto itn = g.nodes.find(node_id);
++          if (itn == g.nodes.end())
++            return std::nullopt;
++          const Node& node = itn->second;
++          std::ostringstream ss;
++          ss << "Node " << node.id << " (" << node.name << " | " << node.type
++             << ":" << node.subtype << ")\n";
++          const NodeOutput* cached = nullptr;
++          if (node.cached_output) {
++            cached = &node.cached_output.value();
++          } else if (node.cached_output_high_precision) {
++            cached = &node.cached_output_high_precision.value();
++          } else if (node.cached_output_real_time) {
++            cached = &node.cached_output_real_time.value();
++          }
++          if (!cached) {
++            ss << "No cached output available.\n";
++            return ss.str();
++          }
++          const auto& meta = cached->debug;
++          const auto& space = cached->space;
++          ss << "[Debug]\n";
++          ss << "  Worker ID: " << meta.computed_by_worker_id << "\n";
++          ss << "  Device:    " << meta.compute_device << "\n";
++          ss << "  Timestamp: " << meta.timestamp_us << " us\n";
++          ss << "  Exec(ms):  " << meta.execution_time_ms << "\n";
++          ss << "  Range:     [" << meta.min_val << ", " << meta.max_val << "]";
++          if (meta.has_nan)
++            ss << " (NaN detected)";
++          ss << "\n";
++          ss << "[Spatial]\n";
++          ss << "  Scale:     " << space.global_scale_x << " x "
++             << space.global_scale_y << "\n";
++          ss << "  ROI:       (" << space.absolute_roi.x << ", "
++             << space.absolute_roi.y << ", " << space.absolute_roi.width << "x"
++             << space.absolute_roi.height << ")\n";
++          auto print_matrix = [&ss](const char* label,
++                                    const std::array<double, 9>& mat) {
++            ss << "  " << label << ":\n";
++            ss << "    [" << mat[0] << ", " << mat[1] << ", " << mat[2]
++               << "]\n";
++            ss << "    [" << mat[3] << ", " << mat[4] << ", " << mat[5]
++               << "]\n";
++            ss << "    [" << mat[6] << ", " << mat[7] << ", " << mat[8]
++               << "]\n";
++          };
++          print_matrix("Transform", space.transform_matrix);
++          print_matrix("Inverse", space.inverse_matrix);
++          return ss.str();
++        })
++        .get();
++  } catch (...) {
++    return std::nullopt;
++  }
++}
++
+ std::optional<Kernel::LastError> Kernel::last_error(
+     const std::string& name) const {
+   auto it = last_error_.find(name);
+diff --git a/src/kernel/services/compute_service.cpp b/src/kernel/services/compute_service.cpp
+index 3b3fa8e..ebc16ff 100644
+--- a/src/kernel/services/compute_service.cpp
++++ b/src/kernel/services/compute_service.cpp
+@@ -43,6 +43,7 @@
+ #include <algorithm>
+ #include <atomic>
+ #include <chrono>
++#include <cmath>
+ #include <cstdint>
+ #include <cstring>
+ #include <functional>
+@@ -235,6 +236,93 @@ struct HpPlanEntry {
+   int halo_hp = 0;
+ };
+ 
++bool approx_equal(double a, double b, double eps = 1e-9) {
++  return std::abs(a - b) <= eps;
++}
++
++bool is_identity_matrix(const std::array<double, 9>& mat) {
++  static constexpr std::array<double, 9> kIdentity{1.0, 0.0, 0.0, 0.0, 1.0,
++                                                   0.0, 0.0, 0.0, 1.0};
++  for (size_t i = 0; i < mat.size(); ++i) {
++    if (!approx_equal(mat[i], kIdentity[i]))
++      return false;
++  }
++  return true;
++}
++
++bool is_default_space(const SpatialContext& ctx) {
++  return (ctx.absolute_roi.width <= 0 || ctx.absolute_roi.height <= 0) &&
++         approx_equal(ctx.global_scale_x, 1.0) &&
++         approx_equal(ctx.global_scale_y, 1.0) &&
++         is_identity_matrix(ctx.transform_matrix) &&
++         is_identity_matrix(ctx.inverse_matrix);
++}
++
++void ensure_absolute_roi(SpatialContext& ctx, const ImageBuffer& buffer) {
++  if ((ctx.absolute_roi.width <= 0 || ctx.absolute_roi.height <= 0) &&
++      buffer.width > 0 && buffer.height > 0) {
++    ctx.absolute_roi = cv::Rect(0, 0, buffer.width, buffer.height);
++  }
++}
++
++void inherit_spatial_context(NodeOutput& output,
++                             const std::vector<const NodeOutput*>& inputs) {
++  if (!inputs.empty() && is_default_space(output.space)) {
++    output.space = inputs.front()->space;
++  }
++  ensure_absolute_roi(output.space, output.image_buffer);
++}
++
++std::string device_to_string(Device device) {
++  switch (device) {
++    case Device::CPU:
++      return "CPU";
++    case Device::GPU_METAL:
++      return "GPU_METAL";
++    default:
++      return "UNKNOWN";
++  }
++}
++
++void populate_debug_statistics(NodeOutput& output) {
++  if (!output.image_buffer.data && !output.image_buffer.context)
++    return;
++  if (output.image_buffer.width <= 0 || output.image_buffer.height <= 0)
++    return;
++  cv::Mat mat = toCvMat(output.image_buffer);
++  if (mat.empty())
++    return;
++  if (!mat.isContinuous())
++    mat = mat.clone();
++  if (mat.channels() > 1)
++    mat = mat.reshape(1);
++  double min_val = 0.0, max_val = 0.0;
++  cv::minMaxIdx(mat, &min_val, &max_val);
++  output.debug.min_val = min_val;
++  output.debug.max_val = max_val;
++  output.debug.has_nan = !cv::checkRange(mat, true, nullptr);
++}
++
++void finalize_output_metadata(NodeOutput& output,
++                              const std::vector<const NodeOutput*>& inputs,
++                              bool enable_timing, double execution_ms) {
++  inherit_spatial_context(output, inputs);
++  auto now = std::chrono::high_resolution_clock::now();
++  output.debug.timestamp_us =
++      static_cast<uint64_t>(std::chrono::duration_cast<std::chrono::microseconds>(
++                                now.time_since_epoch())
++                                .count());
++  output.debug.computed_by_worker_id = GraphRuntime::this_worker_id();
++  if (execution_ms < 0.0)
++    execution_ms = 0.0;
++  output.debug.execution_time_ms =
++      static_cast<uint64_t>(std::llround(execution_ms));
++  output.debug.compute_device = device_to_string(output.image_buffer.device);
++  if (enable_timing) {
++    populate_debug_statistics(output);
++  }
++}
++
+ }  // anonymous namespace
+ // --- 阶段四核心：重构后的 compute_internal 函数 ---
+ 
+@@ -310,6 +398,7 @@ NodeOutput& ComputeService::compute_internal(
+   current_event.op_name = make_key(target_node.type, target_node.subtype);
+   current_event.dependency_start_time = start_time_total;
+ 
++  std::vector<const NodeOutput*> monolithic_inputs;
+   do {
+     // 1. 内存／磁盘缓存检测
+     if (target_node.cached_output.has_value()) {
+@@ -353,7 +442,7 @@ NodeOutput& ComputeService::compute_internal(
+     }
+ 
+     // 4. 图像依赖解析
+-    std::vector<const NodeOutput*> monolithic_inputs;
++    monolithic_inputs.clear();
+     for (auto const& i_input : target_node.image_inputs) {
+       if (i_input.from_node_id < 0)
+         continue;
+@@ -615,6 +704,12 @@ NodeOutput& ComputeService::compute_internal(
+           .count();
+   if (execution_duration_ms < 0)
+     execution_duration_ms = 0.0;  // 保险
++
++  if (result_source == "computed" && target_node.cached_output) {
++    finalize_output_metadata(*target_node.cached_output, monolithic_inputs,
++                             enable_timing, execution_duration_ms);
++  }
++
+   // 8. 全局与本地计时记录
+   if (enable_timing) {
+     auto tot = std::chrono::duration<double, std::milli>(end_time_total -
+@@ -902,6 +997,7 @@ NodeOutput& ComputeService::compute_node_no_recurse(
+   cache_.save_cache_if_configured(graph, target_node, cache_precision);
+ 
+   // Timing & events
++  double exec_ms_for_meta = 0.0;
+   if (enable_timing) {
+     current_event.execution_end_time =
+         std::chrono::high_resolution_clock::now();
+@@ -911,6 +1007,7 @@ NodeOutput& ComputeService::compute_node_no_recurse(
+             current_event.execution_end_time -
+             current_event.execution_start_time)
+             .count();
++    exec_ms_for_meta = current_event.execution_duration_ms;
+     if (benchmark_events)
+       benchmark_events->push_back(current_event);
+     {
+@@ -924,6 +1021,10 @@ NodeOutput& ComputeService::compute_node_no_recurse(
+   } else {
+     events_.push(target_node.id, target_node.name, "computed", 0.0);
+   }
++  if (target_node.cached_output) {
++    finalize_output_metadata(*target_node.cached_output, inputs_ready,
++                             enable_timing, exec_ms_for_meta);
++  }
+   return *target_node.cached_output;
+ }
+ 
+@@ -2406,6 +2507,7 @@ NodeOutput& ComputeService::compute_parallel(
+                                       1, std::memory_order_acq_rel) == 1) {
+                                 std::atomic_thread_fence(
+                                     std::memory_order_release);
++                                double exec_ms_for_meta = 0.0;
+                                 if (enable_timing) {
+                                   auto end_tp =
+                                       std::chrono::high_resolution_clock::now();
+@@ -2413,6 +2515,7 @@ NodeOutput& ComputeService::compute_parallel(
+                                       std::chrono::duration<double, std::milli>(
+                                           end_tp - *start_tp)
+                                           .count();
++                                  exec_ms_for_meta = exec_ms;
+                                   BenchmarkEvent ev;
+                                   ev.node_id = current_node_id;
+                                   ev.op_name = make_key(node_for_exec.type,
+@@ -2441,6 +2544,9 @@ NodeOutput& ComputeService::compute_parallel(
+                                                nodes.at(current_node_id).name,
+                                                "computed", 0.0);
+                                 }
++                                finalize_output_metadata(
++                                    *temp_results[current_node_idx], input_ptrs,
++                                    enable_timing, exec_ms_for_meta);
+                                 for (int dependent_idx :
+                                      dependents_map[current_node_idx]) {
+                                   if (--dependency_counters[dependent_idx] ==
+@@ -2488,8 +2594,7 @@ NodeOutput& ComputeService::compute_parallel(
+               // monolithic finalization.
+               return;
+             }
+-            temp_results[current_node_idx] = std::move(result);
+-
++            double exec_ms_for_meta = 0.0;
+             if (enable_timing) {
+               current_event.execution_end_time =
+                   std::chrono::high_resolution_clock::now();
+@@ -2497,6 +2602,7 @@ NodeOutput& ComputeService::compute_parallel(
+                               current_event.execution_end_time -
+                               current_event.execution_start_time)
+                               .count();
++              exec_ms_for_meta = ms;
+               current_event.source = "computed";
+               current_event.execution_duration_ms = ms;
+               if (benchmark_events) {
+@@ -2512,6 +2618,9 @@ NodeOutput& ComputeService::compute_parallel(
+             } else {
+               events_.push(target_node.id, target_node.name, "computed", 0.0);
+             }
++            finalize_output_metadata(result, inputs_ready, enable_timing,
++                                     exec_ms_for_meta);
++            temp_results[current_node_idx] = std::move(result);
+           }
+         } catch (const cv::Exception& e) {
+           runtime.set_exception(std::make_exception_ptr(GraphError(
+diff --git a/src/kernel/services/graph_traversal_service.cpp b/src/kernel/services/graph_traversal_service.cpp
+index cc7bf1c..e9bc498 100644
+--- a/src/kernel/services/graph_traversal_service.cpp
++++ b/src/kernel/services/graph_traversal_service.cpp
+@@ -3,6 +3,7 @@
+ #include <yaml-cpp/emitter.h>
+ 
+ #include <algorithm>
++#include <array>
+ #include <cmath>
+ #include <functional>
+ #include <optional>
+@@ -53,6 +54,55 @@ cv::Rect clamp_rect_to_bounds(const cv::Rect& rect, const cv::Size& bounds) {
+   return cv::Rect(x0, y0, x1 - x0, y1 - y0);
+ }
+ 
++cv::Point2d apply_matrix(const std::array<double, 9>& mat, double x,
++                         double y) {
++  double w = mat[6] * x + mat[7] * y + mat[8];
++  if (std::abs(w) < 1e-9)
++    w = 1.0;
++  double inv_w = 1.0 / w;
++  double tx = (mat[0] * x + mat[1] * y + mat[2]) * inv_w;
++  double ty = (mat[3] * x + mat[4] * y + mat[5]) * inv_w;
++  return {tx, ty};
++}
++
++cv::Rect transform_rect_with_matrix(const cv::Rect& rect,
++                                    const std::array<double, 9>& mat) {
++  if (is_rect_empty(rect))
++    return cv::Rect();
++  std::array<cv::Point2d, 4> pts{
++      apply_matrix(mat, rect.x, rect.y),
++      apply_matrix(mat, rect.x + rect.width, rect.y),
++      apply_matrix(mat, rect.x, rect.y + rect.height),
++      apply_matrix(mat, rect.x + rect.width, rect.y + rect.height)};
++  double min_x = pts[0].x;
++  double max_x = pts[0].x;
++  double min_y = pts[0].y;
++  double max_y = pts[0].y;
++  for (size_t i = 1; i < pts.size(); ++i) {
++    min_x = std::min(min_x, pts[i].x);
++    max_x = std::max(max_x, pts[i].x);
++    min_y = std::min(min_y, pts[i].y);
++    max_y = std::max(max_y, pts[i].y);
++  }
++  int x0 = static_cast<int>(std::floor(min_x));
++  int y0 = static_cast<int>(std::floor(min_y));
++  int x1 = static_cast<int>(std::ceil(max_x));
++  int y1 = static_cast<int>(std::ceil(max_y));
++  if (x1 <= x0 || y1 <= y0)
++    return cv::Rect();
++  return cv::Rect(x0, y0, x1 - x0, y1 - y0);
++}
++
++const NodeOutput* pick_cached_output(const Node& node) {
++  if (node.cached_output)
++    return &node.cached_output.value();
++  if (node.cached_output_high_precision)
++    return &node.cached_output_high_precision.value();
++  if (node.cached_output_real_time)
++    return &node.cached_output_real_time.value();
++  return nullptr;
++}
++
+ void topo_postorder_util(const GraphModel& graph, int node_id,
+                          std::vector<int>& order,
+                          std::unordered_map<int, bool>& visited,
+@@ -648,9 +698,23 @@ std::optional<cv::Rect> GraphTraversalService::project_roi_backward(
+       return clamp_rect_to_bounds(current_roi, get_size(source_node_id));
+ 
+     const Node& node = graph.nodes.at(current);
+-    auto propagate_fn = OpRegistry::instance().get_dirty_propagator(
+-        node.type, node.subtype);
+-    cv::Rect upstream_roi = propagate_fn(node, current_roi);
++    cv::Rect upstream_roi;
++    bool used_spatial = false;
++    if (node.image_inputs.size() == 1) {
++      if (const NodeOutput* cached = pick_cached_output(node)) {
++        upstream_roi =
++            transform_rect_with_matrix(current_roi,
++                                       cached->space.inverse_matrix);
++        if (!is_rect_empty(upstream_roi)) {
++          used_spatial = true;
++        }
++      }
++    }
++    if (!used_spatial) {
++      auto propagate_fn = OpRegistry::instance().get_dirty_propagator(
++          node.type, node.subtype);
++      upstream_roi = propagate_fn(node, current_roi);
++    }
+ 
+     for (const auto& input : node.image_inputs) {
+       int parent_id = input.from_node_id;
+diff --git a/src/ops.cpp b/src/ops.cpp
+index 054cb3c..c157482 100644
+--- a/src/ops.cpp
++++ b/src/ops.cpp
+@@ -1,6 +1,7 @@
+ // in: src/ops.cpp (REPLACE WITH THIS FINAL VERSION)
+ #include "kernel/ops.hpp"
+ 
++#include <array>
+ #include <cmath>
+ #include <initializer_list>
+ #include <mutex>
+@@ -34,6 +35,30 @@ static cv::Rect expand_roi(const cv::Rect& roi, int padding) {
+                   roi.height + padding * 2);
+ }
+ 
++static std::array<double, 9> multiply_matrix(
++    const std::array<double, 9>& lhs, const std::array<double, 9>& rhs) {
++  std::array<double, 9> out{};
++  auto idx = [](int row, int col) { return row * 3 + col; };
++  for (int r = 0; r < 3; ++r) {
++    for (int c = 0; c < 3; ++c) {
++      double sum = 0.0;
++      for (int k = 0; k < 3; ++k) {
++        sum += lhs[idx(r, k)] * rhs[idx(k, c)];
++      }
++      out[idx(r, c)] = sum;
++    }
++  }
++  return out;
++}
++
++static std::array<double, 9> make_scale_matrix(double sx, double sy) {
++  return {sx, 0.0, 0.0, 0.0, sy, 0.0, 0.0, 0.0, 1.0};
++}
++
++static std::array<double, 9> make_translation_matrix(double tx, double ty) {
++  return {1.0, 0.0, tx, 0.0, 1.0, ty, 0.0, 0.0, 1.0};
++}
++
+ static std::optional<int> node_param_int(const Node& node,
+                                          const std::string& key) {
+   if (node.runtime_parameters && node.runtime_parameters[key]) {
+@@ -472,6 +497,31 @@ static NodeOutput op_resize(const Node& node,
+   cv::resize(u_input, u_output, cv::Size(width, height), 0, 0, flag);
+   NodeOutput result;
+   result.image_buffer = fromCvUMat(u_output);
++  const auto& in_space = inputs[0]->space;
++  result.space = in_space;
++  const int in_w = inputs[0]->image_buffer.width;
++  const int in_h = inputs[0]->image_buffer.height;
++  double scale_x =
++      (in_w > 0) ? static_cast<double>(width) / static_cast<double>(in_w) : 1.0;
++  double scale_y = (in_h > 0)
++                       ? static_cast<double>(height) / static_cast<double>(in_h)
++                       : 1.0;
++  if (scale_x <= 0.0)
++    scale_x = 1.0;
++  if (scale_y <= 0.0)
++    scale_y = 1.0;
++  result.space.global_scale_x = in_space.global_scale_x * scale_x;
++  result.space.global_scale_y = in_space.global_scale_y * scale_y;
++  auto scale_mat = make_scale_matrix(scale_x, scale_y);
++  auto inv_scale_mat =
++      make_scale_matrix(1.0 / scale_x, 1.0 / scale_y);
++  result.space.transform_matrix =
++      multiply_matrix(scale_mat, in_space.transform_matrix);
++  result.space.inverse_matrix =
++      multiply_matrix(in_space.inverse_matrix, inv_scale_mat);
++  if (in_space.absolute_roi.width > 0 && in_space.absolute_roi.height > 0) {
++    result.space.absolute_roi = in_space.absolute_roi;
++  }
+   return result;
+ }
+ 
+@@ -517,6 +567,30 @@ static NodeOutput op_crop(const Node& node,
+     u_src(intersect).copyTo(u_canvas(dst_roi));
+   NodeOutput result;
+   result.image_buffer = fromCvUMat(u_canvas);
++  const auto& in_space = inputs[0]->space;
++  result.space = in_space;
++  auto translation = make_translation_matrix(-static_cast<double>(x),
++                                             -static_cast<double>(y));
++  auto inv_translation = make_translation_matrix(static_cast<double>(x),
++                                                 static_cast<double>(y));
++  result.space.transform_matrix =
++      multiply_matrix(translation, in_space.transform_matrix);
++  result.space.inverse_matrix =
++      multiply_matrix(in_space.inverse_matrix, inv_translation);
++  result.space.global_scale_x = in_space.global_scale_x;
++  result.space.global_scale_y = in_space.global_scale_y;
++  if (in_space.absolute_roi.width > 0 && in_space.absolute_roi.height > 0) {
++    cv::Rect parent_world = in_space.absolute_roi;
++    cv::Rect world_request(parent_world.x + x, parent_world.y + y, w, h);
++    cv::Rect clipped = world_request & parent_world;
++    if (clipped.width > 0 && clipped.height > 0) {
++      result.space.absolute_roi = clipped;
++    } else {
++      result.space.absolute_roi = world_request;
++    }
++  } else {
++    result.space.absolute_roi = cv::Rect(x, y, w, h);
++  }
+   return result;
+ }
+ 

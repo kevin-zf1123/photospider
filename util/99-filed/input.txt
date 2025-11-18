@@ -1,0 +1,10 @@
+
+compute 4 t
+
+traversal m
+
+save 4 final_output.png
+
+free
+
+traversal m

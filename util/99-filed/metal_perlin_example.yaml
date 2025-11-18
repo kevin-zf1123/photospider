@@ -1,0 +1,30 @@
+- id: 1
+  name: "Generate Metal Perlin Noise"
+  type: "image_generator"
+  subtype: "perlin_noise_metal"
+  parameters:
+    width: 512
+    height: 512
+    grid_size: 2
+  caches:
+  - { cache_type: "image", location: "perlin.png" }
+
+
+# - id: 2
+#   name: "Save Metal Perlin Noise"
+#   type: "image_process"
+#   subtype: "save_image"
+#   image_inputs:
+#     - { from_node_id: 1 }
+#   parameters:
+#     path: "metal_perlin_noise_output.png"
+- id: 2
+  name: "Generate perlin Noise"
+  type: "image_generator"
+  subtype: "perlin_noise"
+  parameters:
+    width: 512
+    height: 512
+    grid_size: 2
+  caches:
+  - { cache_type: "image", location: "perlin.png" }
