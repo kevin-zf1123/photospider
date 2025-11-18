@@ -1,6 +1,7 @@
 // in: src/ops.cpp (REPLACE WITH THIS FINAL VERSION)
 #include "kernel/ops.hpp"
 
+#include <array>
 #include <cmath>
 #include <initializer_list>
 #include <mutex>
@@ -32,6 +33,30 @@ static cv::Rect expand_roi(const cv::Rect& roi, int padding) {
   }
   return cv::Rect(roi.x - padding, roi.y - padding, roi.width + padding * 2,
                   roi.height + padding * 2);
+}
+
+static std::array<double, 9> multiply_matrix(
+    const std::array<double, 9>& lhs, const std::array<double, 9>& rhs) {
+  std::array<double, 9> out{};
+  auto idx = [](int row, int col) { return row * 3 + col; };
+  for (int r = 0; r < 3; ++r) {
+    for (int c = 0; c < 3; ++c) {
+      double sum = 0.0;
+      for (int k = 0; k < 3; ++k) {
+        sum += lhs[idx(r, k)] * rhs[idx(k, c)];
+      }
+      out[idx(r, c)] = sum;
+    }
+  }
+  return out;
+}
+
+static std::array<double, 9> make_scale_matrix(double sx, double sy) {
+  return {sx, 0.0, 0.0, 0.0, sy, 0.0, 0.0, 0.0, 1.0};
+}
+
+static std::array<double, 9> make_translation_matrix(double tx, double ty) {
+  return {1.0, 0.0, tx, 0.0, 1.0, ty, 0.0, 0.0, 1.0};
 }
 
 static std::optional<int> node_param_int(const Node& node,
@@ -472,6 +497,31 @@ static NodeOutput op_resize(const Node& node,
   cv::resize(u_input, u_output, cv::Size(width, height), 0, 0, flag);
   NodeOutput result;
   result.image_buffer = fromCvUMat(u_output);
+  const auto& in_space = inputs[0]->space;
+  result.space = in_space;
+  const int in_w = inputs[0]->image_buffer.width;
+  const int in_h = inputs[0]->image_buffer.height;
+  double scale_x =
+      (in_w > 0) ? static_cast<double>(width) / static_cast<double>(in_w) : 1.0;
+  double scale_y = (in_h > 0)
+                       ? static_cast<double>(height) / static_cast<double>(in_h)
+                       : 1.0;
+  if (scale_x <= 0.0)
+    scale_x = 1.0;
+  if (scale_y <= 0.0)
+    scale_y = 1.0;
+  result.space.global_scale_x = in_space.global_scale_x * scale_x;
+  result.space.global_scale_y = in_space.global_scale_y * scale_y;
+  auto scale_mat = make_scale_matrix(scale_x, scale_y);
+  auto inv_scale_mat =
+      make_scale_matrix(1.0 / scale_x, 1.0 / scale_y);
+  result.space.transform_matrix =
+      multiply_matrix(scale_mat, in_space.transform_matrix);
+  result.space.inverse_matrix =
+      multiply_matrix(in_space.inverse_matrix, inv_scale_mat);
+  if (in_space.absolute_roi.width > 0 && in_space.absolute_roi.height > 0) {
+    result.space.absolute_roi = in_space.absolute_roi;
+  }
   return result;
 }
 
@@ -517,6 +567,30 @@ static NodeOutput op_crop(const Node& node,
     u_src(intersect).copyTo(u_canvas(dst_roi));
   NodeOutput result;
   result.image_buffer = fromCvUMat(u_canvas);
+  const auto& in_space = inputs[0]->space;
+  result.space = in_space;
+  auto translation = make_translation_matrix(-static_cast<double>(x),
+                                             -static_cast<double>(y));
+  auto inv_translation = make_translation_matrix(static_cast<double>(x),
+                                                 static_cast<double>(y));
+  result.space.transform_matrix =
+      multiply_matrix(translation, in_space.transform_matrix);
+  result.space.inverse_matrix =
+      multiply_matrix(in_space.inverse_matrix, inv_translation);
+  result.space.global_scale_x = in_space.global_scale_x;
+  result.space.global_scale_y = in_space.global_scale_y;
+  if (in_space.absolute_roi.width > 0 && in_space.absolute_roi.height > 0) {
+    cv::Rect parent_world = in_space.absolute_roi;
+    cv::Rect world_request(parent_world.x + x, parent_world.y + y, w, h);
+    cv::Rect clipped = world_request & parent_world;
+    if (clipped.width > 0 && clipped.height > 0) {
+      result.space.absolute_roi = clipped;
+    } else {
+      result.space.absolute_roi = world_request;
+    }
+  } else {
+    result.space.absolute_roi = cv::Rect(x, y, w, h);
+  }
   return result;
 }
 

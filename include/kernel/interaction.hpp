@@ -158,6 +158,10 @@ class InteractionService {
                                            bool show_parameters) {
     return kernel_.dump_dependency_tree(graph, node_id, show_parameters);
   }
+  std::optional<std::string> cmd_inspect_node(const std::string& graph,
+                                              int node_id) {
+    return kernel_.inspect_node(graph, node_id);
+  }
   std::optional<Kernel::LastError> cmd_last_error(
       const std::string& graph) const {
     return kernel_.last_error(graph);

@@ -1,6 +1,8 @@
 #pragma once
 #include <yaml-cpp/yaml.h>
 
+#include <array>
+#include <cstdint>
 #include <filesystem>
 #include <functional>
 #include <iostream>
@@ -43,9 +45,29 @@ struct CacheEntry {
   std::string location;
 };
 
+struct SpatialContext {
+  std::array<double, 9> transform_matrix{1, 0, 0, 0, 1, 0, 0, 0, 1};
+  std::array<double, 9> inverse_matrix{1, 0, 0, 0, 1, 0, 0, 0, 1};
+  cv::Rect absolute_roi{0, 0, 0, 0};
+  double global_scale_x{1.0};
+  double global_scale_y{1.0};
+};
+
+struct DebugMeta {
+  int computed_by_worker_id{-1};
+  uint64_t timestamp_us{0};
+  uint64_t execution_time_ms{0};
+  double min_val{0.0};
+  double max_val{0.0};
+  bool has_nan{false};
+  std::string compute_device{"UNKNOWN"};
+};
+
 struct NodeOutput {
   ps::ImageBuffer image_buffer;
   std::unordered_map<std::string, OutputValue> data;
+  SpatialContext space;
+  DebugMeta debug;
 };
 
 #if defined(_WIN32)

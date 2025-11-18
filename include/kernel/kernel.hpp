@@ -97,6 +97,8 @@ class Kernel {
   std::optional<std::string> dump_dependency_tree(const std::string& name,
                                                   std::optional<int> node_id,
                                                   bool show_parameters);
+  std::optional<std::string> inspect_node(const std::string& name,
+                                          int node_id);
   std::optional<LastError> last_error(const std::string& name) const;
   std::optional<std::vector<int>> ending_nodes(const std::string& name);
   std::optional<std::vector<int>> topo_postorder_from(const std::string& name,

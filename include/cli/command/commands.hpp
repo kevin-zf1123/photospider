@@ -52,6 +52,12 @@ bool handle_print(std::istringstream& iss, ps::InteractionService& svc,
                   CliConfig& config);
 void print_help_print(const CliConfig& config);
 
+// inspect
+bool handle_inspect(std::istringstream& iss, ps::InteractionService& svc,
+                    std::string& current_graph, bool& modified,
+                    CliConfig& config);
+void print_help_inspect(const CliConfig& config);
+
 // node
 bool handle_node(std::istringstream& iss, ps::InteractionService& svc,
                  std::string& current_graph, bool& modified, CliConfig& config);

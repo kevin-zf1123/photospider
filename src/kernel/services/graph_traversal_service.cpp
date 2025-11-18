@@ -3,6 +3,7 @@
 #include <yaml-cpp/emitter.h>
 
 #include <algorithm>
+#include <array>
 #include <cmath>
 #include <functional>
 #include <optional>
@@ -51,6 +52,55 @@ cv::Rect clamp_rect_to_bounds(const cv::Rect& rect, const cv::Size& bounds) {
   if (x1 <= x0 || y1 <= y0)
     return cv::Rect();
   return cv::Rect(x0, y0, x1 - x0, y1 - y0);
+}
+
+cv::Point2d apply_matrix(const std::array<double, 9>& mat, double x,
+                         double y) {
+  double w = mat[6] * x + mat[7] * y + mat[8];
+  if (std::abs(w) < 1e-9)
+    w = 1.0;
+  double inv_w = 1.0 / w;
+  double tx = (mat[0] * x + mat[1] * y + mat[2]) * inv_w;
+  double ty = (mat[3] * x + mat[4] * y + mat[5]) * inv_w;
+  return {tx, ty};
+}
+
+cv::Rect transform_rect_with_matrix(const cv::Rect& rect,
+                                    const std::array<double, 9>& mat) {
+  if (is_rect_empty(rect))
+    return cv::Rect();
+  std::array<cv::Point2d, 4> pts{
+      apply_matrix(mat, rect.x, rect.y),
+      apply_matrix(mat, rect.x + rect.width, rect.y),
+      apply_matrix(mat, rect.x, rect.y + rect.height),
+      apply_matrix(mat, rect.x + rect.width, rect.y + rect.height)};
+  double min_x = pts[0].x;
+  double max_x = pts[0].x;
+  double min_y = pts[0].y;
+  double max_y = pts[0].y;
+  for (size_t i = 1; i < pts.size(); ++i) {
+    min_x = std::min(min_x, pts[i].x);
+    max_x = std::max(max_x, pts[i].x);
+    min_y = std::min(min_y, pts[i].y);
+    max_y = std::max(max_y, pts[i].y);
+  }
+  int x0 = static_cast<int>(std::floor(min_x));
+  int y0 = static_cast<int>(std::floor(min_y));
+  int x1 = static_cast<int>(std::ceil(max_x));
+  int y1 = static_cast<int>(std::ceil(max_y));
+  if (x1 <= x0 || y1 <= y0)
+    return cv::Rect();
+  return cv::Rect(x0, y0, x1 - x0, y1 - y0);
+}
+
+const NodeOutput* pick_cached_output(const Node& node) {
+  if (node.cached_output)
+    return &node.cached_output.value();
+  if (node.cached_output_high_precision)
+    return &node.cached_output_high_precision.value();
+  if (node.cached_output_real_time)
+    return &node.cached_output_real_time.value();
+  return nullptr;
 }
 
 void topo_postorder_util(const GraphModel& graph, int node_id,
@@ -648,9 +698,23 @@ std::optional<cv::Rect> GraphTraversalService::project_roi_backward(
       return clamp_rect_to_bounds(current_roi, get_size(source_node_id));
 
     const Node& node = graph.nodes.at(current);
-    auto propagate_fn = OpRegistry::instance().get_dirty_propagator(
-        node.type, node.subtype);
-    cv::Rect upstream_roi = propagate_fn(node, current_roi);
+    cv::Rect upstream_roi;
+    bool used_spatial = false;
+    if (node.image_inputs.size() == 1) {
+      if (const NodeOutput* cached = pick_cached_output(node)) {
+        upstream_roi =
+            transform_rect_with_matrix(current_roi,
+                                       cached->space.inverse_matrix);
+        if (!is_rect_empty(upstream_roi)) {
+          used_spatial = true;
+        }
+      }
+    }
+    if (!used_spatial) {
+      auto propagate_fn = OpRegistry::instance().get_dirty_propagator(
+          node.type, node.subtype);
+      upstream_roi = propagate_fn(node, current_roi);
+    }
 
     for (const auto& input : node.image_inputs) {
       int parent_id = input.from_node_id;

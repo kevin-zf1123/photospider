@@ -43,6 +43,7 @@
 #include <algorithm>
 #include <atomic>
 #include <chrono>
+#include <cmath>
 #include <cstdint>
 #include <cstring>
 #include <functional>
@@ -235,6 +236,93 @@ struct HpPlanEntry {
   int halo_hp = 0;
 };
 
+bool approx_equal(double a, double b, double eps = 1e-9) {
+  return std::abs(a - b) <= eps;
+}
+
+bool is_identity_matrix(const std::array<double, 9>& mat) {
+  static constexpr std::array<double, 9> kIdentity{1.0, 0.0, 0.0, 0.0, 1.0,
+                                                   0.0, 0.0, 0.0, 1.0};
+  for (size_t i = 0; i < mat.size(); ++i) {
+    if (!approx_equal(mat[i], kIdentity[i]))
+      return false;
+  }
+  return true;
+}
+
+bool is_default_space(const SpatialContext& ctx) {
+  return (ctx.absolute_roi.width <= 0 || ctx.absolute_roi.height <= 0) &&
+         approx_equal(ctx.global_scale_x, 1.0) &&
+         approx_equal(ctx.global_scale_y, 1.0) &&
+         is_identity_matrix(ctx.transform_matrix) &&
+         is_identity_matrix(ctx.inverse_matrix);
+}
+
+void ensure_absolute_roi(SpatialContext& ctx, const ImageBuffer& buffer) {
+  if ((ctx.absolute_roi.width <= 0 || ctx.absolute_roi.height <= 0) &&
+      buffer.width > 0 && buffer.height > 0) {
+    ctx.absolute_roi = cv::Rect(0, 0, buffer.width, buffer.height);
+  }
+}
+
+void inherit_spatial_context(NodeOutput& output,
+                             const std::vector<const NodeOutput*>& inputs) {
+  if (!inputs.empty() && is_default_space(output.space)) {
+    output.space = inputs.front()->space;
+  }
+  ensure_absolute_roi(output.space, output.image_buffer);
+}
+
+std::string device_to_string(Device device) {
+  switch (device) {
+    case Device::CPU:
+      return "CPU";
+    case Device::GPU_METAL:
+      return "GPU_METAL";
+    default:
+      return "UNKNOWN";
+  }
+}
+
+void populate_debug_statistics(NodeOutput& output) {
+  if (!output.image_buffer.data && !output.image_buffer.context)
+    return;
+  if (output.image_buffer.width <= 0 || output.image_buffer.height <= 0)
+    return;
+  cv::Mat mat = toCvMat(output.image_buffer);
+  if (mat.empty())
+    return;
+  if (!mat.isContinuous())
+    mat = mat.clone();
+  if (mat.channels() > 1)
+    mat = mat.reshape(1);
+  double min_val = 0.0, max_val = 0.0;
+  cv::minMaxIdx(mat, &min_val, &max_val);
+  output.debug.min_val = min_val;
+  output.debug.max_val = max_val;
+  output.debug.has_nan = !cv::checkRange(mat, true, nullptr);
+}
+
+void finalize_output_metadata(NodeOutput& output,
+                              const std::vector<const NodeOutput*>& inputs,
+                              bool enable_timing, double execution_ms) {
+  inherit_spatial_context(output, inputs);
+  auto now = std::chrono::high_resolution_clock::now();
+  output.debug.timestamp_us =
+      static_cast<uint64_t>(std::chrono::duration_cast<std::chrono::microseconds>(
+                                now.time_since_epoch())
+                                .count());
+  output.debug.computed_by_worker_id = GraphRuntime::this_worker_id();
+  if (execution_ms < 0.0)
+    execution_ms = 0.0;
+  output.debug.execution_time_ms =
+      static_cast<uint64_t>(std::llround(execution_ms));
+  output.debug.compute_device = device_to_string(output.image_buffer.device);
+  if (enable_timing) {
+    populate_debug_statistics(output);
+  }
+}
+
 }  // anonymous namespace
 // --- 阶段四核心：重构后的 compute_internal 函数 ---
 
@@ -310,6 +398,7 @@ NodeOutput& ComputeService::compute_internal(
   current_event.op_name = make_key(target_node.type, target_node.subtype);
   current_event.dependency_start_time = start_time_total;
 
+  std::vector<const NodeOutput*> monolithic_inputs;
   do {
     // 1. 内存／磁盘缓存检测
     if (target_node.cached_output.has_value()) {
@@ -353,7 +442,7 @@ NodeOutput& ComputeService::compute_internal(
     }
 
     // 4. 图像依赖解析
-    std::vector<const NodeOutput*> monolithic_inputs;
+    monolithic_inputs.clear();
     for (auto const& i_input : target_node.image_inputs) {
       if (i_input.from_node_id < 0)
         continue;
@@ -615,6 +704,12 @@ NodeOutput& ComputeService::compute_internal(
           .count();
   if (execution_duration_ms < 0)
     execution_duration_ms = 0.0;  // 保险
+
+  if (result_source == "computed" && target_node.cached_output) {
+    finalize_output_metadata(*target_node.cached_output, monolithic_inputs,
+                             enable_timing, execution_duration_ms);
+  }
+
   // 8. 全局与本地计时记录
   if (enable_timing) {
     auto tot = std::chrono::duration<double, std::milli>(end_time_total -
@@ -902,6 +997,7 @@ NodeOutput& ComputeService::compute_node_no_recurse(
   cache_.save_cache_if_configured(graph, target_node, cache_precision);
 
   // Timing & events
+  double exec_ms_for_meta = 0.0;
   if (enable_timing) {
     current_event.execution_end_time =
         std::chrono::high_resolution_clock::now();
@@ -911,6 +1007,7 @@ NodeOutput& ComputeService::compute_node_no_recurse(
             current_event.execution_end_time -
             current_event.execution_start_time)
             .count();
+    exec_ms_for_meta = current_event.execution_duration_ms;
     if (benchmark_events)
       benchmark_events->push_back(current_event);
     {
@@ -923,6 +1020,10 @@ NodeOutput& ComputeService::compute_node_no_recurse(
                  current_event.execution_duration_ms);
   } else {
     events_.push(target_node.id, target_node.name, "computed", 0.0);
+  }
+  if (target_node.cached_output) {
+    finalize_output_metadata(*target_node.cached_output, inputs_ready,
+                             enable_timing, exec_ms_for_meta);
   }
   return *target_node.cached_output;
 }
@@ -2406,6 +2507,7 @@ NodeOutput& ComputeService::compute_parallel(
                                       1, std::memory_order_acq_rel) == 1) {
                                 std::atomic_thread_fence(
                                     std::memory_order_release);
+                                double exec_ms_for_meta = 0.0;
                                 if (enable_timing) {
                                   auto end_tp =
                                       std::chrono::high_resolution_clock::now();
@@ -2413,6 +2515,7 @@ NodeOutput& ComputeService::compute_parallel(
                                       std::chrono::duration<double, std::milli>(
                                           end_tp - *start_tp)
                                           .count();
+                                  exec_ms_for_meta = exec_ms;
                                   BenchmarkEvent ev;
                                   ev.node_id = current_node_id;
                                   ev.op_name = make_key(node_for_exec.type,
@@ -2441,6 +2544,9 @@ NodeOutput& ComputeService::compute_parallel(
                                                nodes.at(current_node_id).name,
                                                "computed", 0.0);
                                 }
+                                finalize_output_metadata(
+                                    *temp_results[current_node_idx], input_ptrs,
+                                    enable_timing, exec_ms_for_meta);
                                 for (int dependent_idx :
                                      dependents_map[current_node_idx]) {
                                   if (--dependency_counters[dependent_idx] ==
@@ -2488,8 +2594,7 @@ NodeOutput& ComputeService::compute_parallel(
               // monolithic finalization.
               return;
             }
-            temp_results[current_node_idx] = std::move(result);
-
+            double exec_ms_for_meta = 0.0;
             if (enable_timing) {
               current_event.execution_end_time =
                   std::chrono::high_resolution_clock::now();
@@ -2497,6 +2602,7 @@ NodeOutput& ComputeService::compute_parallel(
                               current_event.execution_end_time -
                               current_event.execution_start_time)
                               .count();
+              exec_ms_for_meta = ms;
               current_event.source = "computed";
               current_event.execution_duration_ms = ms;
               if (benchmark_events) {
@@ -2512,6 +2618,9 @@ NodeOutput& ComputeService::compute_parallel(
             } else {
               events_.push(target_node.id, target_node.name, "computed", 0.0);
             }
+            finalize_output_metadata(result, inputs_ready, enable_timing,
+                                     exec_ms_for_meta);
+            temp_results[current_node_idx] = std::move(result);
           }
         } catch (const cv::Exception& e) {
           runtime.set_exception(std::make_exception_ptr(GraphError(
