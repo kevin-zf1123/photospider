@@ -702,9 +702,8 @@ std::optional<cv::Rect> GraphTraversalService::project_roi_backward(
     bool used_spatial = false;
     if (node.image_inputs.size() == 1) {
       if (const NodeOutput* cached = pick_cached_output(node)) {
-        upstream_roi =
-            transform_rect_with_matrix(current_roi,
-                                       cached->space.inverse_matrix);
+        upstream_roi = transform_rect_with_matrix(
+            current_roi, cached->space.local_inverse_matrix);
         if (!is_rect_empty(upstream_roi)) {
           used_spatial = true;
         }

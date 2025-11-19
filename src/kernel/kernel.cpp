@@ -497,7 +497,8 @@ std::optional<std::string> Kernel::inspect_node(const std::string& name,
                << "]\n";
           };
           print_matrix("Transform", space.transform_matrix);
-          print_matrix("Inverse", space.inverse_matrix);
+          print_matrix("Inverse (Global)", space.inverse_matrix);
+          print_matrix("Inverse (Local)", space.local_inverse_matrix);
           return ss.str();
         })
         .get();

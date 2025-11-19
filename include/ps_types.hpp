@@ -48,6 +48,7 @@ struct CacheEntry {
 struct SpatialContext {
   std::array<double, 9> transform_matrix{1, 0, 0, 0, 1, 0, 0, 0, 1};
   std::array<double, 9> inverse_matrix{1, 0, 0, 0, 1, 0, 0, 0, 1};
+  std::array<double, 9> local_inverse_matrix{1, 0, 0, 0, 1, 0, 0, 0, 1};
   cv::Rect absolute_roi{0, 0, 0, 0};
   double global_scale_x{1.0};
   double global_scale_y{1.0};
