@@ -8,6 +8,7 @@
 #include <functional>
 #include <optional>
 #include <queue>
+#include <sstream>
 #include <unordered_map>
 
 #include "graph_model.hpp"
@@ -138,10 +139,10 @@ void topo_postorder_util(const GraphModel& graph, int node_id,
   recursion_stack[node_id] = false;
 }
 
-void print_dep_tree_recursive(const GraphModel& graph, std::ostream& os,
-                              int node_id, int level,
-                              std::unordered_set<int>& path,
-                              bool show_parameters) {
+void print_dep_tree_recursive(
+    const GraphModel& graph, std::ostream& os, int node_id, int level,
+    std::unordered_set<int>& path, bool show_parameters, bool show_metadata,
+    GraphTraversalService::MetadataFormatter formatter) {
   auto indent = [&](int l) {
     for (int i = 0; i < l; ++i) {
       os << "  ";
@@ -161,6 +162,27 @@ void print_dep_tree_recursive(const GraphModel& graph, std::ostream& os,
   const auto& node = graph.nodes.at(node_id);
   os << "- Node " << node.id << " (" << node.name << " | " << node.type << ":"
      << node.subtype << ")\n";
+
+  if (show_metadata && formatter) {
+    std::string meta = formatter(node);
+    std::istringstream iss(meta);
+    std::string line;
+    while (std::getline(iss, line)) {
+      if (!line.empty() && line.back() == '\r') {
+        line.pop_back();
+      }
+      std::string normalized = line;
+      auto first_non_space =
+          normalized.find_first_not_of(" \t");  // normalize indentation
+      if (first_non_space != std::string::npos) {
+        normalized.erase(0, first_non_space);
+      } else {
+        normalized.clear();
+      }
+      indent(level + 1);
+      os << normalized << "\n";
+    }
+  }
 
   if (show_parameters && node.parameters && node.parameters.IsMap() &&
       node.parameters.size() > 0) {
@@ -226,7 +248,7 @@ void print_dep_tree_recursive(const GraphModel& graph, std::ostream& os,
       os << "(image from " << input.from_node_id << ":"
          << input.from_output_name << ")\n";
       print_dep_tree_recursive(graph, os, input.from_node_id, level + 2, path,
-                               show_parameters);
+                               show_parameters, show_metadata, formatter);
     }
   }
   for (const auto& input : node.parameter_inputs) {
@@ -236,7 +258,7 @@ void print_dep_tree_recursive(const GraphModel& graph, std::ostream& os,
       os << "(param '" << input.to_parameter_name << "' from "
          << input.from_node_id << ":" << input.from_output_name << ")\n";
       print_dep_tree_recursive(graph, os, input.from_node_id, level + 2, path,
-                               show_parameters);
+                               show_parameters, show_metadata, formatter);
     }
   }
   path.erase(node_id);
@@ -352,9 +374,9 @@ std::vector<int> GraphTraversalService::get_trees_containing_node(
   return result_trees;
 }
 
-void GraphTraversalService::print_dependency_tree(const GraphModel& graph,
-                                                  std::ostream& os,
-                                                  bool show_parameters) const {
+void GraphTraversalService::print_dependency_tree(
+    const GraphModel& graph, std::ostream& os, bool show_parameters,
+    bool show_metadata, MetadataFormatter formatter) const {
   os << "Dependency Tree (reversed from ending nodes):\n";
   auto ends = ending_nodes(graph);
   if (ends.empty() && !graph.nodes.empty()) {
@@ -365,21 +387,23 @@ void GraphTraversalService::print_dependency_tree(const GraphModel& graph,
 
   for (int end_node_id : ends) {
     std::unordered_set<int> path;
-    print_dep_tree_recursive(graph, os, end_node_id, 0, path, show_parameters);
+    print_dep_tree_recursive(graph, os, end_node_id, 0, path, show_parameters,
+                             show_metadata, formatter);
   }
 }
 
-void GraphTraversalService::print_dependency_tree(const GraphModel& graph,
-                                                  std::ostream& os,
-                                                  int start_node_id,
-                                                  bool show_parameters) const {
+void GraphTraversalService::print_dependency_tree(
+    const GraphModel& graph, std::ostream& os, int start_node_id,
+    bool show_parameters, bool show_metadata,
+    MetadataFormatter formatter) const {
   os << "Dependency Tree (starting from Node " << start_node_id << "):\n";
   if (!graph.has_node(start_node_id)) {
     os << "(Node " << start_node_id << " not found in graph)\n";
     return;
   }
   std::unordered_set<int> path;
-  print_dep_tree_recursive(graph, os, start_node_id, 0, path, show_parameters);
+  print_dep_tree_recursive(graph, os, start_node_id, 0, path, show_parameters,
+                           show_metadata, formatter);
 }
 
 namespace {

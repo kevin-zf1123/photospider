@@ -11,16 +11,30 @@ bool handle_inspect(std::istringstream& iss, ps::InteractionService& svc,
     std::cout << "No current graph. Use load/switch.\n";
     return true;
   }
-  std::string node_str;
-  if (!(iss >> node_str)) {
-    std::cout << "Usage: inspect <node_id>\n";
+  std::string target;
+  if (!(iss >> target)) {
+    std::cout << "Usage: inspect <node_id>|all\n";
     return true;
   }
+
+  if (target == "all") {
+    auto report = svc.cmd_inspect_graph(current_graph);
+    if (!report) {
+      std::cout << "Unable to inspect graph.\n";
+      return true;
+    }
+    if (!report->empty())
+      std::cout << *report << "\n";
+    else
+      std::cout << "(No inspectable nodes)\n";
+    return true;
+  }
+
   int node_id = -1;
   try {
-    node_id = std::stoi(node_str);
+    node_id = std::stoi(target);
   } catch (const std::exception&) {
-    std::cout << "Invalid node id '" << node_str << "'.\n";
+    std::cout << "Invalid node id '" << target << "'.\n";
     return true;
   }
   auto report = svc.cmd_inspect_node(current_graph, node_id);

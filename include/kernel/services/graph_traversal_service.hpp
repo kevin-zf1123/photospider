@@ -1,5 +1,6 @@
 #pragma once
 
+#include <functional>
 #include <ostream>
 #include <optional>
 #include <unordered_set>
@@ -13,6 +14,8 @@ namespace ps {
 
 class GraphTraversalService {
  public:
+  using MetadataFormatter = std::function<std::string(const Node&)>;
+
   std::vector<int> topo_postorder_from(const GraphModel& graph,
                                        int end_node_id) const;
   std::vector<int> ending_nodes(const GraphModel& graph) const;
@@ -23,10 +26,14 @@ class GraphTraversalService {
                                              int node_id) const;
 
   void print_dependency_tree(const GraphModel& graph, std::ostream& os,
-                             bool show_parameters = true) const;
+                             bool show_parameters = true,
+                             bool show_metadata = false,
+                             MetadataFormatter formatter = nullptr) const;
   void print_dependency_tree(const GraphModel& graph, std::ostream& os,
                              int start_node_id,
-                             bool show_parameters = true) const;
+                             bool show_parameters = true,
+                             bool show_metadata = false,
+                             MetadataFormatter formatter = nullptr) const;
 
   std::optional<cv::Rect> project_roi_forward(const GraphModel& graph,
                                               int start_node_id,

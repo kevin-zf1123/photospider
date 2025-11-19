@@ -420,19 +420,24 @@ bool Kernel::clear_graph(const std::string& name) {
 }
 
 std::optional<std::string> Kernel::dump_dependency_tree(
-    const std::string& name, std::optional<int> node_id, bool show_parameters) {
+    const std::string& name, std::optional<int> node_id, bool show_parameters,
+    bool show_metadata) {
   auto it = graphs_.find(name);
   if (it == graphs_.end())
     return std::nullopt;
   try {
     return it->second
-        ->post([this, node_id, show_parameters](GraphModel& g) {
+        ->post([this, node_id, show_parameters, show_metadata](GraphModel& g) {
           std::stringstream ss;
+          auto formatter = [this](const Node& n) {
+            return inspect_service_.format_node_metadata(n);
+          };
           if (node_id) {
-            traversal_service_.print_dependency_tree(g, ss, *node_id,
-                                                     show_parameters);
+            traversal_service_.print_dependency_tree(
+                g, ss, *node_id, show_parameters, show_metadata, formatter);
           } else {
-            traversal_service_.print_dependency_tree(g, ss, show_parameters);
+            traversal_service_.print_dependency_tree(
+                g, ss, show_parameters, show_metadata, formatter);
           }
           return ss.str();
         })
@@ -449,7 +454,8 @@ std::optional<std::string> Kernel::inspect_node(const std::string& name,
     return std::nullopt;
   try {
     return it->second
-        ->post([node_id](GraphModel& g) -> std::optional<std::string> {
+        ->post([this, node_id](
+                   GraphModel& g) -> std::optional<std::string> {
           auto itn = g.nodes.find(node_id);
           if (itn == g.nodes.end())
             return std::nullopt;
@@ -457,50 +463,22 @@ std::optional<std::string> Kernel::inspect_node(const std::string& name,
           std::ostringstream ss;
           ss << "Node " << node.id << " (" << node.name << " | " << node.type
              << ":" << node.subtype << ")\n";
-          const NodeOutput* cached = nullptr;
-          if (node.cached_output) {
-            cached = &node.cached_output.value();
-          } else if (node.cached_output_high_precision) {
-            cached = &node.cached_output_high_precision.value();
-          } else if (node.cached_output_real_time) {
-            cached = &node.cached_output_real_time.value();
-          }
-          if (!cached) {
-            ss << "No cached output available.\n";
-            return ss.str();
-          }
-          const auto& meta = cached->debug;
-          const auto& space = cached->space;
-          ss << "[Debug]\n";
-          ss << "  Worker ID: " << meta.computed_by_worker_id << "\n";
-          ss << "  Device:    " << meta.compute_device << "\n";
-          ss << "  Timestamp: " << meta.timestamp_us << " us\n";
-          ss << "  Exec(ms):  " << meta.execution_time_ms << "\n";
-          ss << "  Range:     [" << meta.min_val << ", " << meta.max_val << "]";
-          if (meta.has_nan)
-            ss << " (NaN detected)";
-          ss << "\n";
-          ss << "[Spatial]\n";
-          ss << "  Scale:     " << space.global_scale_x << " x "
-             << space.global_scale_y << "\n";
-          ss << "  ROI:       (" << space.absolute_roi.x << ", "
-             << space.absolute_roi.y << ", " << space.absolute_roi.width << "x"
-             << space.absolute_roi.height << ")\n";
-          auto print_matrix = [&ss](const char* label,
-                                    const std::array<double, 9>& mat) {
-            ss << "  " << label << ":\n";
-            ss << "    [" << mat[0] << ", " << mat[1] << ", " << mat[2]
-               << "]\n";
-            ss << "    [" << mat[3] << ", " << mat[4] << ", " << mat[5]
-               << "]\n";
-            ss << "    [" << mat[6] << ", " << mat[7] << ", " << mat[8]
-               << "]\n";
-          };
-          print_matrix("Transform", space.transform_matrix);
-          print_matrix("Inverse (Global)", space.inverse_matrix);
-          print_matrix("Inverse (Local)", space.local_inverse_matrix);
+          ss << inspect_service_.format_node_metadata(node);
           return ss.str();
         })
+        .get();
+  } catch (...) {
+    return std::nullopt;
+  }
+}
+
+std::optional<std::string> Kernel::inspect_graph(const std::string& name) {
+  auto it = graphs_.find(name);
+  if (it == graphs_.end())
+    return std::nullopt;
+  try {
+    return it->second
+        ->post([this](GraphModel& g) { return inspect_service_.inspect_all_nodes(g); })
         .get();
   } catch (...) {
     return std::nullopt;

@@ -125,6 +125,7 @@ set(PHOTOSPIDER_GRAPH_SOURCES
     src/kernel/services/graph_traversal_service.cpp
     src/kernel/services/graph_io_service.cpp
     src/kernel/services/graph_cache_service.cpp
+    src/kernel/services/graph_inspect_service.cpp
 )
 
 add_library(photospider_graph STATIC ${PHOTOSPIDER_GRAPH_SOURCES})

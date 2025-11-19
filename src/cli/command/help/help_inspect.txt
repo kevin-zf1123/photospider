@@ -1,5 +1,4 @@
-inspect <node_id>
-    Display cached output metadata for the specified node.
-    Shows scheduler/debug timing stats as well as spatial context matrices.
-    Useful after compute commands to understand who produced the data and how
-    it was transformed (scale, ROI, transforms).
+inspect <node_id> | all
+    Display cached output metadata (spatial + debug).
+    - <node_id>: Inspect a single node.
+    - all: Inspect all nodes in the graph sequentially.
