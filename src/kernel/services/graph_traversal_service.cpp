@@ -734,9 +734,9 @@ std::optional<cv::Rect> GraphTraversalService::project_roi_backward(
       }
     }
     if (!used_spatial) {
-      auto propagate_fn = OpRegistry::instance().get_dirty_propagator(
-          node.type, node.subtype);
-      upstream_roi = propagate_fn(node, current_roi);
+      auto propagate_fn =
+          OpRegistry::instance().get_dirty_propagator(node.type, node.subtype);
+      upstream_roi = propagate_fn(node, current_roi, graph);
     }
 
     for (const auto& input : node.image_inputs) {

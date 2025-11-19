@@ -15,6 +15,7 @@
 #include <vector>
 
 #include "adapter/buffer_adapter_opencv.hpp"
+#include "graph_model.hpp"
 #include "kernel/param_utils.hpp"
 
 namespace ps {
@@ -120,7 +121,8 @@ static int infer_radius_from_params(
 }
 
 static cv::Rect gaussian_blur_dirty_roi(const Node& node,
-                                        const cv::Rect& downstream_roi) {
+                                        const cv::Rect& downstream_roi,
+                                        const GraphModel&) {
   int radius =
       infer_radius_from_params(node, {"radius", "kernel_radius"}, {"ksize"});
   if (radius <= 0)
@@ -129,7 +131,8 @@ static cv::Rect gaussian_blur_dirty_roi(const Node& node,
 }
 
 static cv::Rect convolve_dirty_roi(const Node& node,
-                                   const cv::Rect& downstream_roi) {
+                                   const cv::Rect& downstream_roi,
+                                   const GraphModel&) {
   int radius = infer_radius_from_params(node, {"kernel_radius", "radius"},
                                         {"ksize", "kernel_size"});
   if (radius <= 0)
@@ -138,7 +141,8 @@ static cv::Rect convolve_dirty_roi(const Node& node,
 }
 
 static cv::Rect resize_dirty_roi(const Node& node,
-                                 const cv::Rect& downstream_roi) {
+                                 const cv::Rect& downstream_roi,
+                                 const GraphModel&) {
     if (downstream_roi.width <= 0 || downstream_roi.height <= 0) {
         return cv::Rect();
     }
@@ -207,7 +211,8 @@ static cv::Rect resize_dirty_roi(const Node& node,
 }
 
 static cv::Rect crop_dirty_roi(const Node& node,
-                               const cv::Rect& downstream_roi) {
+                               const cv::Rect& downstream_roi,
+                               const GraphModel&) {
   if (downstream_roi.width <= 0 || downstream_roi.height <= 0) {
     return cv::Rect();
   }
@@ -285,6 +290,24 @@ static cv::Rect crop_dirty_roi(const Node& node,
                         valid_downstream_roi.width,
                         valid_downstream_roi.height);
   return upstream_roi;
+}
+
+[[maybe_unused]] static cv::Rect conservative_dirty_roi(
+    const Node& node, const cv::Rect& downstream_roi, const GraphModel&) {
+  if (downstream_roi.width <= 0 || downstream_roi.height <= 0) {
+    return cv::Rect();
+  }
+  int max_disp = 0;
+  if (auto val = node_param_int(node, "max_displacement")) {
+    max_disp = std::max(max_disp, *val);
+  }
+  if (auto brush = node_param_int(node, "radius")) {
+    max_disp = std::max(max_disp, *brush);
+  }
+  if (max_disp <= 0) {
+    return downstream_roi;
+  }
+  return expand_roi(downstream_roi, max_disp);
 }
 
 // =============================================================================
@@ -1343,9 +1366,10 @@ void register_builtin() {
   OpMetadata rt_meta;
   rt_meta.tile_preference = TileSizePreference::MICRO;
 
-  DirtyRoiPropFunc identity_roi = [](const Node&, const cv::Rect& roi) {
-    return roi;
-  };
+  DirtyRoiPropFunc identity_roi =
+      [](const Node&, const cv::Rect& roi, const GraphModel&) {
+        return roi;
+      };
 
   R.register_dirty_propagator("image_source", "path", identity_roi);
   R.register_dirty_propagator("image_generator", "constant", identity_roi);

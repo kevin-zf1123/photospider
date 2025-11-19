@@ -623,6 +623,17 @@ NodeOutput& ComputeService::compute_internal(
                             std::default_delete<char[]>());
 
               const int TILE_SIZE = 256, HALO_SIZE = 16;
+              auto access_pattern = OpMetadata::InputAccessPattern::SpatialAligned;
+              if (auto meta =
+                      OpRegistry::instance().get_metadata(target_node.type,
+                                                          target_node.subtype)) {
+                access_pattern = meta->access_pattern;
+              }
+              auto prop_fn = OpRegistry::instance().get_dirty_propagator(
+                  target_node.type, target_node.subtype);
+              const bool needs_halo =
+                  (target_node.type == "image_process" &&
+                   target_node.subtype == "gaussian_blur");
               for (int y = 0; y < ob.height; y += TILE_SIZE) {
                 for (int x = 0; x < ob.width; x += TILE_SIZE) {
                   ps::TileTask task;
@@ -632,25 +643,29 @@ NodeOutput& ComputeService::compute_internal(
                       cv::Rect(x, y, std::min(TILE_SIZE, ob.width - x),
                                std::min(TILE_SIZE, ob.height - y));
 
-                  // Decide halo usage based on op; only gaussian_blur needs
-                  // halo
-                  const bool needs_halo =
-                      (target_node.type == "image_process" &&
-                       target_node.subtype == "gaussian_blur");
                   for (auto const* in_out : inputs_for_tiling) {
                     ps::Tile in_tile;
                     in_tile.buffer =
                         const_cast<ps::ImageBuffer*>(&in_out->image_buffer);
-                    if (needs_halo) {
-                      in_tile.roi =
-                          calculate_halo(task.output_tile.roi, HALO_SIZE,
-                                         {in_out->image_buffer.width,
-                                          in_out->image_buffer.height});
+                    cv::Rect input_roi;
+                    if (access_pattern ==
+                        OpMetadata::InputAccessPattern::RandomAccess) {
+                      input_roi = prop_fn(target_node, task.output_tile.roi,
+                                          graph);
+                      input_roi = input_roi &
+                                  cv::Rect(0, 0, in_tile.buffer->width,
+                                           in_tile.buffer->height);
+                    } else if (needs_halo) {
+                      input_roi = calculate_halo(
+                          task.output_tile.roi, HALO_SIZE,
+                          {in_out->image_buffer.width,
+                           in_out->image_buffer.height});
                     } else {
-                      // For non-convolution ops, use exact output ROI to avoid
-                      // size mismatch/striping
-                      in_tile.roi = task.output_tile.roi;
+                      // For non-convolution ops, use exact output ROI to
+                      // avoid size mismatch/striping
+                      input_roi = task.output_tile.roi;
                     }
+                    in_tile.roi = input_roi;
                     task.input_tiles.push_back(in_tile);
                   }
                   execute_tile_task(task, op_func);
@@ -948,6 +963,17 @@ NodeOutput& ComputeService::compute_node_no_recurse(
                           std::default_delete<char[]>());
 
             const int TILE_SIZE = 256, HALO_SIZE = 16;
+            auto access_pattern =
+                OpMetadata::InputAccessPattern::SpatialAligned;
+            if (auto meta = OpRegistry::instance().get_metadata(
+                    target_node.type, target_node.subtype)) {
+              access_pattern = meta->access_pattern;
+            }
+            auto prop_fn = OpRegistry::instance().get_dirty_propagator(
+                target_node.type, target_node.subtype);
+            const bool needs_halo =
+                (target_node.type == "image_process" &&
+                 target_node.subtype == "gaussian_blur");
             for (int y = 0; y < ob.height; y += TILE_SIZE) {
               for (int x = 0; x < ob.width; x += TILE_SIZE) {
                 ps::TileTask task;
@@ -956,21 +982,27 @@ NodeOutput& ComputeService::compute_node_no_recurse(
                 task.output_tile.roi =
                     cv::Rect(x, y, std::min(TILE_SIZE, ob.width - x),
                              std::min(TILE_SIZE, ob.height - y));
-                const bool needs_halo =
-                    (target_node.type == "image_process" &&
-                     target_node.subtype == "gaussian_blur");
                 for (auto const* in_out : inputs_for_tiling) {
                   ps::Tile in_tile;
                   in_tile.buffer =
                       const_cast<ps::ImageBuffer*>(&in_out->image_buffer);
-                  if (needs_halo) {
-                    in_tile.roi =
-                        calculate_halo(task.output_tile.roi, HALO_SIZE,
-                                       {in_out->image_buffer.width,
-                                        in_out->image_buffer.height});
+                  cv::Rect input_roi;
+                  if (access_pattern ==
+                      OpMetadata::InputAccessPattern::RandomAccess) {
+                    input_roi = prop_fn(target_node, task.output_tile.roi,
+                                        graph);
+                    input_roi = input_roi &
+                                cv::Rect(0, 0, in_tile.buffer->width,
+                                         in_tile.buffer->height);
+                  } else if (needs_halo) {
+                    input_roi = calculate_halo(
+                        task.output_tile.roi, HALO_SIZE,
+                        {in_out->image_buffer.width,
+                         in_out->image_buffer.height});
                   } else {
-                    in_tile.roi = task.output_tile.roi;
+                    input_roi = task.output_tile.roi;
                   }
+                  in_tile.roi = input_roi;
                   task.input_tiles.push_back(in_tile);
                 }
                 execute_tile_task(task, op_func);
@@ -1200,7 +1232,8 @@ NodeOutput& ComputeService::compute_high_precision_update(
 
     auto propagate_fn = OpRegistry::instance().get_dirty_propagator(
         current_node.type, current_node.subtype);
-    cv::Rect upstream_roi_hp = propagate_fn(current_node, current_entry.roi_hp);
+    cv::Rect upstream_roi_hp =
+        propagate_fn(current_node, current_entry.roi_hp, graph);
     upstream_roi_hp = align_rect(upstream_roi_hp, kHpMicroTileSize);
 
     for (const auto& img_input : current_node.image_inputs) {
@@ -1790,7 +1823,8 @@ NodeOutput& ComputeService::compute_real_time_update(
 
     auto propagate_fn = OpRegistry::instance().get_dirty_propagator(
         current_node.type, current_node.subtype);
-    cv::Rect upstream_roi_hp = propagate_fn(current_node, current_entry.roi_hp);
+    cv::Rect upstream_roi_hp =
+        propagate_fn(current_node, current_entry.roi_hp, graph);
     upstream_roi_hp = clip_rect(upstream_roi_hp, current_entry.hp_size);
     if (is_rect_empty(upstream_roi_hp)) {
       continue;
@@ -2454,6 +2488,14 @@ NodeOutput& ComputeService::compute_parallel(
                            node_for_exec.subtype.find("gaussian_blur") !=
                                std::string::npos);
                       const int HALO_SIZE = 16;
+                      auto access_pattern =
+                          OpMetadata::InputAccessPattern::SpatialAligned;
+                      if (resolved_meta[current_node_idx].has_value()) {
+                        access_pattern =
+                            resolved_meta[current_node_idx]->access_pattern;
+                      }
+                      auto prop_fn = OpRegistry::instance().get_dirty_propagator(
+                          target_node.type, target_node.subtype);
 
                       // Plan tiles and spawn micro tasks
                       int tiles_x = (out_w + tile_size - 1) / tile_size;
@@ -2481,7 +2523,8 @@ NodeOutput& ComputeService::compute_parallel(
                                             remaining, start_tp,
                                             current_node_idx, current_node_id,
                                             node_for_exec, op_func,
-                                            benchmark_events, enable_timing]() {
+                                            benchmark_events, enable_timing,
+                                            access_pattern, prop_fn, &graph]() {
                             try {
                               runtime.log_event(
                                   GraphRuntime::SchedulerEvent::EXECUTE_TILE,
@@ -2495,13 +2538,25 @@ NodeOutput& ComputeService::compute_parallel(
                                 Tile in_tile;
                                 in_tile.buffer = const_cast<ImageBuffer*>(
                                     &in_out->image_buffer);
-                                in_tile.roi =
-                                    needs_halo
-                                        ? calculate_halo(
-                                              tt.output_tile.roi, HALO_SIZE,
-                                              {in_out->image_buffer.width,
-                                               in_out->image_buffer.height})
-                                        : tt.output_tile.roi;
+                                cv::Rect input_roi;
+                                if (access_pattern ==
+                                    OpMetadata::InputAccessPattern::RandomAccess) {
+                                  input_roi = prop_fn(node_for_exec,
+                                                      tt.output_tile.roi,
+                                                      graph);
+                                  input_roi = input_roi &
+                                              cv::Rect(0, 0,
+                                                       in_tile.buffer->width,
+                                                       in_tile.buffer->height);
+                                } else if (needs_halo) {
+                                  input_roi = calculate_halo(
+                                      tt.output_tile.roi, HALO_SIZE,
+                                      {in_out->image_buffer.width,
+                                       in_out->image_buffer.height});
+                                } else {
+                                  input_roi = tt.output_tile.roi;
+                                }
+                                in_tile.roi = input_roi;
                                 tt.input_tiles.push_back(std::move(in_tile));
                               }
                               execute_tile_task(tt, op_func);
