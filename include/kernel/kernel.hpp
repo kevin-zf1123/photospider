@@ -14,6 +14,7 @@
 #include "kernel/plugin_manager.hpp"
 #include "kernel/services/compute_service.hpp"
 #include "kernel/services/graph_cache_service.hpp"
+#include "kernel/services/graph_inspect_service.hpp"
 #include "kernel/services/graph_io_service.hpp"
 #include "kernel/services/graph_traversal_service.hpp"
 
@@ -96,9 +97,11 @@ class Kernel {
 
   std::optional<std::string> dump_dependency_tree(const std::string& name,
                                                   std::optional<int> node_id,
-                                                  bool show_parameters);
+                                                  bool show_parameters,
+                                                  bool show_metadata = false);
   std::optional<std::string> inspect_node(const std::string& name,
                                           int node_id);
+  std::optional<std::string> inspect_graph(const std::string& name);
   std::optional<LastError> last_error(const std::string& name) const;
   std::optional<std::vector<int>> ending_nodes(const std::string& name);
   std::optional<std::vector<int>> topo_postorder_from(const std::string& name,
@@ -149,6 +152,7 @@ class Kernel {
   PluginManager plugin_mgr_;
   std::map<std::string, LastError> last_error_;
   GraphTraversalService traversal_service_;
+  GraphInspectService inspect_service_;
   GraphCacheService cache_service_;
   GraphIOService io_service_;
 };

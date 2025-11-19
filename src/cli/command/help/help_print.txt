@@ -1,6 +1,6 @@
-print [all|<id>] [full|simplified]
+print [all|<id>] [full|simplified] [inspect|i]
 
 Print the dependency tree of the current graph.
 - Target: 'all' (default) or a node id.
 - Mode: 'full' prints parameters; 'simplified' hides parameters.
-
+- Option: 'inspect' (or 'i') dumps cached debug/spatial metadata per node.
