@@ -513,12 +513,12 @@ static NodeOutput op_resize(const Node& node,
   result.space.global_scale_x = in_space.global_scale_x * scale_x;
   result.space.global_scale_y = in_space.global_scale_y * scale_y;
   auto scale_mat = make_scale_matrix(scale_x, scale_y);
-  auto inv_scale_mat =
-      make_scale_matrix(1.0 / scale_x, 1.0 / scale_y);
+  auto inv_scale_mat = make_scale_matrix(1.0 / scale_x, 1.0 / scale_y);
   result.space.transform_matrix =
       multiply_matrix(scale_mat, in_space.transform_matrix);
   result.space.inverse_matrix =
       multiply_matrix(in_space.inverse_matrix, inv_scale_mat);
+  result.space.local_inverse_matrix = inv_scale_mat;
   if (in_space.absolute_roi.width > 0 && in_space.absolute_roi.height > 0) {
     result.space.absolute_roi = in_space.absolute_roi;
   }
@@ -577,6 +577,7 @@ static NodeOutput op_crop(const Node& node,
       multiply_matrix(translation, in_space.transform_matrix);
   result.space.inverse_matrix =
       multiply_matrix(in_space.inverse_matrix, inv_translation);
+  result.space.local_inverse_matrix = inv_translation;
   result.space.global_scale_x = in_space.global_scale_x;
   result.space.global_scale_y = in_space.global_scale_y;
   if (in_space.absolute_roi.width > 0 && in_space.absolute_roi.height > 0) {
