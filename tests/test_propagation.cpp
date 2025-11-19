@@ -1,7 +1,9 @@
 #include <algorithm>
+#include <functional>
 #include <iostream>
 #include <map>
 #include <optional>
+#include <set>
 #include <sstream>
 #include <string>
 #include <vector>
@@ -102,17 +104,13 @@ void handle_dirty(ps::InteractionService& svc, const std::string& graph_name, in
     cv::Rect initial_roi(tile_x * tile_size, tile_y * tile_size, tile_size, tile_size);
     std::cout << "Triggering dirty region at Node " << start_node_id << " tile (" << tile_x << "," << tile_y << ") -> pixel ROI "
               << initial_roi.x << "," << initial_roi.y << "," << initial_roi.width << "," << initial_roi.height << std::endl;
-    std::cout << "--- Propagated Dirty Nodes & Tiles ---" << std::endl;
-
-
-    // **核心修改：调用真正的内核计算管线**
+    
     auto ending_nodes = svc.cmd_ending_nodes(graph_name);
     if (!ending_nodes || ending_nodes->empty()) {
         std::cerr << "Error: No ending nodes in the graph to compute." << std::endl;
         return;
     }
 
-    // 为了简单起见，我们只计算第一个终点节点。对于复杂图，可能需要计算所有相关的终点。
     int target_end_node = (*ending_nodes)[0];
 
     auto projected_roi_opt =
@@ -123,22 +121,62 @@ void handle_dirty(ps::InteractionService& svc, const std::string& graph_name, in
         return;
     }
     cv::Rect target_roi = *projected_roi_opt;
-    std::cout << "Projected ROI for Node " << target_end_node
+    std::cout << "Projected Forward to End Node " << target_end_node
               << " -> pixel ROI " << target_roi.x << "," << target_roi.y << ","
               << target_roi.width << "," << target_roi.height << std::endl;
 
-    if (auto back_roi = svc.cmd_project_roi_backward(
-            graph_name, target_end_node, target_roi, start_node_id)) {
-        std::cout << "Back-projected ROI to Node " << start_node_id
-                  << " -> pixel ROI " << back_roi->x << "," << back_roi->y << ","
-                  << back_roi->width << "," << back_roi->height << std::endl;
-    }
+    // =========================================================
+    // --- 新增：可视化反向传播路径 (Recursive Trace) ---
+    // =========================================================
+    std::cout << "\n--- Visualizing Backward Propagation Path ---" << std::endl;
+    std::cout << "(Walking backwards from End Node " << target_end_node << " to Source Node " << start_node_id << ")\n" << std::endl;
+
+    std::function<void(int, const cv::Rect&, int)> trace_backward;
+    std::set<int> visited_in_trace;
+
+    trace_backward = [&](int current_id, const cv::Rect& current_roi, int depth) {
+        std::string indent(depth * 2, ' ');
+        const auto& node = model.nodes.at(current_id);
+        
+        std::cout << indent << "<- Node " << current_id << " (" << node.name << " | " << node.subtype << ")";
+        std::cout << " requires ROI: [" << current_roi.x << "," << current_roi.y 
+                  << " " << current_roi.width << "x" << current_roi.height << "]" << std::endl;
+
+        if (current_id == start_node_id) {
+            std::cout << indent << "   (Hit Dirty Source!)" << std::endl;
+            return;
+        }
+
+        if (visited_in_trace.count(current_id)) {
+            std::cout << indent << "   (Visited)" << std::endl;
+            return; 
+        }
+        visited_in_trace.insert(current_id);
+
+        for (const auto& input : node.image_inputs) {
+            int parent_id = input.from_node_id;
+            if (parent_id < 0) continue;
+
+            auto parent_roi_opt = svc.cmd_project_roi_backward(
+                graph_name, current_id, current_roi, parent_id
+            );
+
+            if (parent_roi_opt) {
+                trace_backward(parent_id, *parent_roi_opt, depth + 1);
+            } else {
+                std::cout << indent << "   <- Node " << parent_id << " (ROI blocked/empty)" << std::endl;
+            }
+        }
+        visited_in_trace.erase(current_id); 
+    };
+
+    trace_backward(target_end_node, target_roi, 0);
+    std::cout << "---------------------------------------------\n" << std::endl;
 
     // 清空事件队列以捕获本次计算的事件
     svc.cmd_drain_compute_events(graph_name);
 
-    // 调用带有 `RealTimeUpdate` 意图的 `compute_with_intent`
-    // 注意：这个API需要通过Kernel层暴露，我们在 InteractionService 中模拟它
+    std::cout << "--- Triggering Actual Kernel Compute ---" << std::endl;
     auto future_opt = svc.kernel().compute_async(
         graph_name,
         target_end_node,
