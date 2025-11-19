@@ -134,13 +134,20 @@ struct OpMetadata {
   TileSizePreference tile_preference = TileSizePreference::UNDEFINED;
   // [新增] 新增 device_preference 字段，默认为 CPU
   Device device_preference = Device::CPU;
+
+  enum class InputAccessPattern {
+    SpatialAligned,
+    RandomAccess,
+  };
+  InputAccessPattern access_pattern = InputAccessPattern::SpatialAligned;
 };
 
 using MonolithicOpFunc = std::function<NodeOutput(
     const Node&, const std::vector<const NodeOutput*>&)>;
 using TileOpFunc =
     std::function<void(const Node&, const Tile&, const std::vector<Tile>&)>;
-using DirtyRoiPropFunc = std::function<cv::Rect(const Node&, const cv::Rect&)>;
+using DirtyRoiPropFunc =
+    std::function<cv::Rect(const Node&, const cv::Rect&, const GraphModel&)>;
 
 // -----------------------------------------------------------------------------
 // Compute intent for planner/scheduler (Phase 1: API foundation)

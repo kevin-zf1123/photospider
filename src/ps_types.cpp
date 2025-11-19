@@ -196,7 +196,7 @@ DirtyRoiPropFunc OpRegistry::get_dirty_propagator(
     }
   }
   static const DirtyRoiPropFunc kIdentity =
-      [](const Node&, const cv::Rect& roi) { return roi; };
+      [](const Node&, const cv::Rect& roi, const GraphModel&) { return roi; };
   return kIdentity;
 }
 
