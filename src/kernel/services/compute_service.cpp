@@ -269,6 +269,8 @@ void inherit_spatial_context(NodeOutput& output,
                              const std::vector<const NodeOutput*>& inputs) {
   if (!inputs.empty() && is_default_space(output.space)) {
     output.space = inputs.front()->space;
+    output.space.local_inverse_matrix = {1.0, 0.0, 0.0, 0.0, 1.0,
+                                         0.0, 0.0, 0.0, 1.0};
   }
   ensure_absolute_roi(output.space, output.image_buffer);
 }
