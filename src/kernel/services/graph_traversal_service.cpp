@@ -567,7 +567,8 @@ std::optional<cv::Rect> GraphTraversalService::project_roi_forward(
   while (!pending.empty()) {
     int current = pending.front();
     pending.pop();
-    const cv::Rect current_roi = roi_map[current];
+    cv::Rect current_roi =
+        clamp_rect_to_bounds(roi_map[current], get_size(current));
     if (is_rect_empty(current_roi))
       continue;
     if (current == target_node_id)
@@ -577,94 +578,20 @@ std::optional<cv::Rect> GraphTraversalService::project_roi_forward(
     if (child_it == child_map.end())
       continue;
 
+    cv::Size parent_size = get_size(current);
     for (const auto& link : child_it->second) {
       int child_id = link.first;
-      int input_index = link.second;
+      (void)link.second;
       const Node& child = graph.nodes.at(child_id);
-      cv::Rect propagated;
+      cv::Size child_size = get_size(child_id);
+      if (child_size.width <= 0 || child_size.height <= 0)
+        continue;
 
-      auto clamp_to_child = [&](const cv::Rect& rect) {
-        return clamp_rect_to_bounds(rect, get_size(child_id));
-      };
-
-      if (child.type == "image_process") {
-        if (child.subtype == "gaussian_blur" ||
-            child.subtype == "gaussian_blur_tiled" ||
-            child.subtype == "convolve") {
-          int radius = infer_neighborhood_radius(child);
-          if (radius <= 0)
-            radius = 1;
-          propagated = clamp_to_child(expand_rect(current_roi, radius));
-        } else if (child.subtype == "crop") {
-          cv::Size parent_size = get_size(current);
-          cv::Rect crop_rect;
-          std::string mode =
-              node_param_string_opt(child, "mode").value_or("value");
-          if (mode == "ratio") {
-            if (parent_size.width <= 0 || parent_size.height <= 0)
-              continue;
-            auto rx = node_param_double_opt(child, "x");
-            auto ry = node_param_double_opt(child, "y");
-            auto rw = node_param_double_opt(child, "width");
-            auto rh = node_param_double_opt(child, "height");
-            if (!rx || !ry || !rw || !rh)
-              continue;
-            int x = static_cast<int>(*rx * parent_size.width);
-            int y = static_cast<int>(*ry * parent_size.height);
-            int w = static_cast<int>(*rw * parent_size.width);
-            int h = static_cast<int>(*rh * parent_size.height);
-            if (w <= 0 || h <= 0)
-              continue;
-            crop_rect = cv::Rect(x, y, w, h);
-          } else {
-            int x = node_param_int_opt(child, "x").value_or(0);
-            int y = node_param_int_opt(child, "y").value_or(0);
-            auto w = node_param_int_opt(child, "width");
-            auto h = node_param_int_opt(child, "height");
-            if (!w || !h || *w <= 0 || *h <= 0)
-              continue;
-            crop_rect = cv::Rect(x, y, *w, *h);
-          }
-          cv::Rect intersect = current_roi & crop_rect;
-          if (is_rect_empty(intersect))
-            continue;
-          cv::Rect child_roi(intersect.x - crop_rect.x, intersect.y - crop_rect.y,
-                             intersect.width, intersect.height);
-          propagated = clamp_to_child(child_roi);
-        } else if (child.subtype == "resize") {
-          cv::Size parent_size = get_size(current);
-          cv::Size child_size = get_size(child_id);
-          if (parent_size.width <= 0 || parent_size.height <= 0 ||
-              child_size.width <= 0 || child_size.height <= 0)
-            continue;
-
-          double scale_x =
-              static_cast<double>(child_size.width) / parent_size.width;
-          double scale_y =
-              static_cast<double>(child_size.height) / parent_size.height;
-
-          double left = static_cast<double>(current_roi.x) * scale_x;
-          double top = static_cast<double>(current_roi.y) * scale_y;
-          double right =
-              static_cast<double>(current_roi.x + current_roi.width) * scale_x;
-          double bottom =
-              static_cast<double>(current_roi.y + current_roi.height) * scale_y;
-
-          int x0 = static_cast<int>(std::floor(left)) - 2;
-          int y0 = static_cast<int>(std::floor(top)) - 2;
-          int x1 = static_cast<int>(std::ceil(right)) + 2;
-          int y1 = static_cast<int>(std::ceil(bottom)) + 2;
-
-          propagated = clamp_to_child(cv::Rect(x0, y0, x1 - x0, y1 - y0));
-        } else if (child.subtype == "curve_transform") {
-          propagated = clamp_to_child(current_roi);
-        }
-      }
-
-      if (child.type == "image_mixing" && child.subtype == "add_weighted") {
-        (void)input_index;
-        propagated = clamp_to_child(current_roi);
-      }
+      auto forward_fn =
+          OpRegistry::instance().get_forward_propagator(child.type, child.subtype);
+      cv::Rect propagated =
+          forward_fn(child, current_roi, graph, parent_size, child_size);
+      propagated = clamp_rect_to_bounds(propagated, child_size);
 
       if (is_rect_empty(propagated))
         continue;
@@ -722,22 +649,35 @@ std::optional<cv::Rect> GraphTraversalService::project_roi_backward(
       return clamp_rect_to_bounds(current_roi, get_size(source_node_id));
 
     const Node& node = graph.nodes.at(current);
+    current_roi = clamp_rect_to_bounds(current_roi, get_size(current));
+    if (is_rect_empty(current_roi))
+      continue;
     cv::Rect upstream_roi;
-    bool used_spatial = false;
+    bool has_roi = false;
+
+    auto propagate_fn =
+        OpRegistry::instance().get_dirty_propagator(node.type, node.subtype);
+    upstream_roi = propagate_fn(node, current_roi, graph);
+    if (!is_rect_empty(upstream_roi)) {
+      has_roi = true;
+    }
+
     if (node.image_inputs.size() == 1) {
       if (const NodeOutput* cached = pick_cached_output(node)) {
-        upstream_roi = transform_rect_with_matrix(
+        cv::Rect spatial_roi = transform_rect_with_matrix(
             current_roi, cached->space.local_inverse_matrix);
-        if (!is_rect_empty(upstream_roi)) {
-          used_spatial = true;
+        if (!is_rect_empty(spatial_roi)) {
+          if (has_roi) {
+            upstream_roi = merge_rect(upstream_roi, spatial_roi);
+          } else {
+            upstream_roi = spatial_roi;
+          }
+          has_roi = true;
         }
       }
     }
-    if (!used_spatial) {
-      auto propagate_fn =
-          OpRegistry::instance().get_dirty_propagator(node.type, node.subtype);
-      upstream_roi = propagate_fn(node, current_roi, graph);
-    }
+    if (!has_roi)
+      continue;
 
     for (const auto& input : node.image_inputs) {
       int parent_id = input.from_node_id;
