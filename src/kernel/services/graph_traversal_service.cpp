@@ -10,6 +10,7 @@
 #include <queue>
 #include <sstream>
 #include <unordered_map>
+#include <type_traits>
 
 #include "graph_model.hpp"
 #include "kernel/ops.hpp"
@@ -17,7 +18,6 @@
 
 namespace ps {
 
-namespace {
 constexpr int kRtDownscaleFactor = 4;
 
 bool is_rect_empty(const cv::Rect& rect) {
@@ -138,9 +138,8 @@ cv::Rect dependency_lookup(const Node& node, const GraphModel& graph,
   }
   if (!node.dependency_lut ||
       !node.dependency_lut->is_valid_for(child_size)) {
-    SpatialDependencyMap lut =
-        normalize_dependency_map(builder(node, graph, parent_size, child_size),
-                                 child_size);
+    SpatialDependencyMap lut = builder(node, graph, parent_size, child_size);
+    normalize_dependency_map(lut, child_size);
     node.dependency_lut = std::move(lut);
     node.dependency_lut_version += 1;
   }
@@ -149,65 +148,6 @@ cv::Rect dependency_lookup(const Node& node, const GraphModel& graph,
     return cv::Rect();
   }
   return node.dependency_lut->lookup(current_roi);
-}
-
-cv::Rect GraphTraversalService::compute_upstream_roi(
-    const Node& node, const cv::Rect& downstream_roi, const GraphModel& graph,
-    std::unordered_map<int, cv::Size>& size_cache) {
-  if (is_rect_empty(downstream_roi))
-    return cv::Rect();
-
-  auto get_size = [&](int nid) { return infer_output_size(graph, size_cache, nid); };
-  cv::Rect clamped_roi = clamp_rect_to_bounds(downstream_roi, get_size(node.id));
-  if (is_rect_empty(clamped_roi))
-    return cv::Rect();
-
-  cv::Rect upstream_roi;
-  bool has_roi = false;
-
-  auto propagate_fn =
-      OpRegistry::instance().get_dirty_propagator(node.type, node.subtype);
-  upstream_roi = propagate_fn(node, clamped_roi, graph);
-  if (!is_rect_empty(upstream_roi))
-    has_roi = true;
-
-  if (node.image_inputs.size() == 1) {
-    if (const NodeOutput* cached = pick_cached_output(node)) {
-      cv::Rect spatial_roi = transform_rect_with_matrix(
-          clamped_roi, cached->space.local_inverse_matrix);
-      if (!is_rect_empty(spatial_roi)) {
-        upstream_roi =
-            has_roi ? merge_rect(upstream_roi, spatial_roi) : spatial_roi;
-        has_roi = true;
-      }
-    }
-  }
-
-  const auto lut_builder =
-      OpRegistry::instance().get_dependency_builder(node.type, node.subtype);
-  if (lut_builder) {
-    cv::Size downstream_size = get_size(node.id);
-    cv::Size primary_parent_size;
-    for (const auto& input : node.image_inputs) {
-      if (input.from_node_id < 0 || !graph.has_node(input.from_node_id))
-        continue;
-      primary_parent_size = get_size(input.from_node_id);
-      if (primary_parent_size.width > 0 && primary_parent_size.height > 0)
-        break;
-    }
-    if (primary_parent_size.width > 0 && primary_parent_size.height > 0 &&
-        downstream_size.width > 0 && downstream_size.height > 0) {
-      cv::Rect lut_roi = dependency_lookup(node, graph, *lut_builder,
-                                           clamped_roi, primary_parent_size,
-                                           downstream_size);
-      if (!is_rect_empty(lut_roi)) {
-        upstream_roi = has_roi ? merge_rect(upstream_roi, lut_roi) : lut_roi;
-        has_roi = true;
-      }
-    }
-  }
-
-  return has_roi ? upstream_roi : cv::Rect();
 }
 
 void topo_postorder_util(const GraphModel& graph, int node_id,
@@ -369,8 +309,6 @@ void print_dep_tree_recursive(
   }
   path.erase(node_id);
 }
-
-}  // namespace
 
 std::vector<int> GraphTraversalService::topo_postorder_from(
     const GraphModel& graph, int end_node_id) const {
@@ -637,9 +575,68 @@ int infer_neighborhood_radius(const Node& node) {
   return radius;
 }
 
-}  // namespace
+cv::Rect compute_upstream_roi_impl(
+    const Node& node, const cv::Rect& downstream_roi, const GraphModel& graph,
+    std::unordered_map<int, cv::Size>& size_cache) {
+  if (is_rect_empty(downstream_roi))
+    return cv::Rect();
 
-std::optional<cv::Rect> GraphTraversalService::project_roi_forward(
+  auto get_size = [&](int nid) { return infer_output_size(graph, size_cache, nid); };
+  cv::Rect clamped_roi = clamp_rect_to_bounds(downstream_roi, get_size(node.id));
+  if (is_rect_empty(clamped_roi))
+    return cv::Rect();
+
+  cv::Rect upstream_roi;
+  bool has_roi = false;
+
+  auto propagate_fn =
+      OpRegistry::instance().get_dirty_propagator(node.type, node.subtype);
+  upstream_roi = propagate_fn(node, clamped_roi, graph);
+  if (!is_rect_empty(upstream_roi))
+    has_roi = true;
+
+  if (node.image_inputs.size() == 1) {
+    if (const NodeOutput* cached = pick_cached_output(node)) {
+      cv::Rect spatial_roi = transform_rect_with_matrix(
+          clamped_roi, cached->space.local_inverse_matrix);
+      if (!is_rect_empty(spatial_roi)) {
+        upstream_roi =
+            has_roi ? merge_rect(upstream_roi, spatial_roi) : spatial_roi;
+        has_roi = true;
+      }
+    }
+  }
+
+  const auto lut_builder =
+      OpRegistry::instance().get_dependency_builder(node.type, node.subtype);
+  if (lut_builder) {
+    cv::Size downstream_size = get_size(node.id);
+    cv::Size primary_parent_size;
+    for (const auto& input : node.image_inputs) {
+      if (input.from_node_id < 0 || !graph.has_node(input.from_node_id))
+        continue;
+      primary_parent_size = get_size(input.from_node_id);
+      if (primary_parent_size.width > 0 && primary_parent_size.height > 0)
+        break;
+    }
+    if (primary_parent_size.width > 0 && primary_parent_size.height > 0 &&
+        downstream_size.width > 0 && downstream_size.height > 0) {
+      cv::Rect lut_roi = dependency_lookup(node, graph, *lut_builder,
+                                           clamped_roi, primary_parent_size,
+                                           downstream_size);
+      if (!is_rect_empty(lut_roi)) {
+        upstream_roi = has_roi ? merge_rect(upstream_roi, lut_roi) : lut_roi;
+        has_roi = true;
+      }
+    }
+  }
+
+  return has_roi ? upstream_roi : cv::Rect();
+}
+
+}  // namespace ps
+
+std::optional<cv::Rect> ps::GraphTraversalService::project_roi_forward(
     const GraphModel& graph, int start_node_id, const cv::Rect& start_roi,
     int target_node_id) const {
   if (!graph.has_node(start_node_id) || !graph.has_node(target_node_id))
@@ -726,7 +723,7 @@ std::optional<cv::Rect> GraphTraversalService::project_roi_forward(
   return result;
 }
 
-std::optional<cv::Rect> GraphTraversalService::project_roi_backward(
+std::optional<cv::Rect> ps::GraphTraversalService::project_roi_backward(
     const GraphModel& graph, int target_node_id, const cv::Rect& target_roi,
     int source_node_id) const {
   if (!graph.has_node(target_node_id) || !graph.has_node(source_node_id))
