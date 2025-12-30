@@ -157,6 +157,13 @@ void OpRegistry::register_dirty_propagator(const std::string& type,
   impl_table_[key].dirty_propagator = std::move(fn);
 }
 
+void OpRegistry::register_forward_propagator(const std::string& type,
+                                             const std::string& subtype,
+                                             ForwardRoiPropFunc fn) {
+  auto key = make_key(type, subtype);
+  impl_table_[key].forward_propagator = std::move(fn);
+}
+
 std::optional<OpRegistry::OpVariant> OpRegistry::resolve_for_intent(
     const std::string& type, const std::string& subtype,
     ComputeIntent intent) const {
@@ -197,6 +204,21 @@ DirtyRoiPropFunc OpRegistry::get_dirty_propagator(
   }
   static const DirtyRoiPropFunc kIdentity =
       [](const Node&, const cv::Rect& roi, const GraphModel&) { return roi; };
+  return kIdentity;
+}
+
+ForwardRoiPropFunc OpRegistry::get_forward_propagator(
+    const std::string& type, const std::string& subtype) const {
+  auto key = make_key(type, subtype);
+  auto it = impl_table_.find(key);
+  if (it != impl_table_.end()) {
+    if (it->second.forward_propagator) {
+      return *(it->second.forward_propagator);
+    }
+  }
+  static const ForwardRoiPropFunc kIdentity =
+      [](const Node&, const cv::Rect& roi, const GraphModel&, const cv::Size&,
+         const cv::Size&) { return roi; };
   return kIdentity;
 }
 

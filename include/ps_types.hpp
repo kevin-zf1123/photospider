@@ -148,6 +148,10 @@ using TileOpFunc =
     std::function<void(const Node&, const Tile&, const std::vector<Tile>&)>;
 using DirtyRoiPropFunc =
     std::function<cv::Rect(const Node&, const cv::Rect&, const GraphModel&)>;
+using ForwardRoiPropFunc =
+    std::function<cv::Rect(const Node&, const cv::Rect&, const GraphModel&,
+                           const cv::Size& parent_size,
+                           const cv::Size& child_size)>;
 
 // -----------------------------------------------------------------------------
 // Compute intent for planner/scheduler (Phase 1: API foundation)
@@ -192,6 +196,7 @@ class OpRegistry {
     std::optional<OpMetadata> meta_hp;
     std::optional<OpMetadata> meta_rt;
     std::optional<DirtyRoiPropFunc> dirty_propagator;
+    std::optional<ForwardRoiPropFunc> forward_propagator;
   };
 
   void register_op_hp_monolithic(const std::string& type,
@@ -204,11 +209,16 @@ class OpRegistry {
   void register_dirty_propagator(const std::string& type,
                                  const std::string& subtype,
                                  DirtyRoiPropFunc fn);
+  void register_forward_propagator(const std::string& type,
+                                   const std::string& subtype,
+                                   ForwardRoiPropFunc fn);
   std::optional<OpVariant> resolve_for_intent(const std::string& type,
                                               const std::string& subtype,
                                               ComputeIntent intent) const;
   DirtyRoiPropFunc get_dirty_propagator(const std::string& type,
                                         const std::string& subtype) const;
+  ForwardRoiPropFunc get_forward_propagator(const std::string& type,
+                                            const std::string& subtype) const;
   const OpImplementations* get_implementations(
       const std::string& type, const std::string& subtype) const;
 

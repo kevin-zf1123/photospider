@@ -181,7 +181,7 @@ void handle_dirty(ps::InteractionService& svc, const std::string& graph_name, in
         graph_name,
         target_end_node,
         "int8",          // cache_precision
-        true,            // force_recache
+        false,            // force_recache
         false,           // enable_timing
         true,            // parallel
         true,            // quiet
