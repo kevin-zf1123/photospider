@@ -1,6 +1,7 @@
 #pragma once
 #include <yaml-cpp/yaml.h>
 
+#include <algorithm>
 #include <array>
 #include <cstdint>
 #include <filesystem>
@@ -69,6 +70,81 @@ struct NodeOutput {
   std::unordered_map<std::string, OutputValue> data;
   SpatialContext space;
   DebugMeta debug;
+};
+
+struct SpatialDependencyMap {
+  int grid_size_x = 64;
+  int grid_size_y = 64;
+  int cols = 0;
+  int rows = 0;
+  cv::Size output_extent{};
+  std::vector<cv::Rect> cell_to_upstream_roi;
+
+  bool is_valid() const {
+    return cols > 0 && rows > 0 && grid_size_x > 0 && grid_size_y > 0 &&
+           output_extent.width > 0 && output_extent.height > 0 &&
+           static_cast<int>(cell_to_upstream_roi.size()) == cols * rows;
+  }
+
+  bool is_valid_for(const cv::Size& extent) const {
+    return is_valid() && output_extent == extent;
+  }
+
+  cv::Rect cell_bounds(int cx, int cy) const {
+    if (cx < 0 || cy < 0 || cx >= cols || cy >= rows || grid_size_x <= 0 ||
+        grid_size_y <= 0) {
+      return cv::Rect();
+    }
+    int x0 = cx * grid_size_x;
+    int y0 = cy * grid_size_y;
+    int w = grid_size_x;
+    int h = grid_size_y;
+    if (output_extent.width > 0) {
+      w = std::min(w, output_extent.width - x0);
+    }
+    if (output_extent.height > 0) {
+      h = std::min(h, output_extent.height - y0);
+    }
+    if (w <= 0 || h <= 0)
+      return cv::Rect();
+    return cv::Rect(x0, y0, w, h);
+  }
+
+  static cv::Rect merge_rect(const cv::Rect& a, const cv::Rect& b) {
+    if (a.width <= 0 || a.height <= 0)
+      return b;
+    if (b.width <= 0 || b.height <= 0)
+      return a;
+    int x0 = std::min(a.x, b.x);
+    int y0 = std::min(a.y, b.y);
+    int x1 = std::max(a.x + a.width, b.x + b.width);
+    int y1 = std::max(a.y + a.height, b.y + b.height);
+    return cv::Rect(x0, y0, x1 - x0, y1 - y0);
+  }
+
+  cv::Rect lookup(const cv::Rect& downstream_roi) const {
+    if (!is_valid() || downstream_roi.width <= 0 || downstream_roi.height <= 0)
+      return cv::Rect();
+    int start_c = std::clamp(downstream_roi.x / grid_size_x, 0, cols - 1);
+    int start_r = std::clamp(downstream_roi.y / grid_size_y, 0, rows - 1);
+    int end_c = std::clamp((downstream_roi.x + downstream_roi.width - 1) /
+                               grid_size_x,
+                           0, cols - 1);
+    int end_r = std::clamp((downstream_roi.y + downstream_roi.height - 1) /
+                               grid_size_y,
+                           0, rows - 1);
+
+    cv::Rect merged;
+    for (int r = start_r; r <= end_r; ++r) {
+      for (int c = start_c; c <= end_c; ++c) {
+        int idx = r * cols + c;
+        if (idx < 0 || idx >= static_cast<int>(cell_to_upstream_roi.size()))
+          continue;
+        merged = merge_rect(merged, cell_to_upstream_roi[idx]);
+      }
+    }
+    return merged;
+  }
 };
 
 #if defined(_WIN32)
@@ -140,6 +216,7 @@ struct OpMetadata {
     RandomAccess,
   };
   InputAccessPattern access_pattern = InputAccessPattern::SpatialAligned;
+  bool data_dependent = false;
 };
 
 using MonolithicOpFunc = std::function<NodeOutput(
@@ -152,6 +229,9 @@ using ForwardRoiPropFunc =
     std::function<cv::Rect(const Node&, const cv::Rect&, const GraphModel&,
                            const cv::Size& parent_size,
                            const cv::Size& child_size)>;
+using DependencyLutBuilder = std::function<SpatialDependencyMap(
+    const Node&, const GraphModel&, const cv::Size& upstream_extent,
+    const cv::Size& downstream_extent)>;
 
 // -----------------------------------------------------------------------------
 // Compute intent for planner/scheduler (Phase 1: API foundation)
@@ -197,6 +277,8 @@ class OpRegistry {
     std::optional<OpMetadata> meta_rt;
     std::optional<DirtyRoiPropFunc> dirty_propagator;
     std::optional<ForwardRoiPropFunc> forward_propagator;
+    std::optional<DependencyLutBuilder> dependency_builder;
+    bool data_dependent = false;
   };
 
   void register_op_hp_monolithic(const std::string& type,
@@ -212,6 +294,10 @@ class OpRegistry {
   void register_forward_propagator(const std::string& type,
                                    const std::string& subtype,
                                    ForwardRoiPropFunc fn);
+  void register_dependency_builder(const std::string& type,
+                                   const std::string& subtype,
+                                   DependencyLutBuilder fn,
+                                   bool mark_data_dependent = true);
   std::optional<OpVariant> resolve_for_intent(const std::string& type,
                                               const std::string& subtype,
                                               ComputeIntent intent) const;
@@ -219,6 +305,10 @@ class OpRegistry {
                                         const std::string& subtype) const;
   ForwardRoiPropFunc get_forward_propagator(const std::string& type,
                                             const std::string& subtype) const;
+  std::optional<DependencyLutBuilder> get_dependency_builder(
+      const std::string& type, const std::string& subtype) const;
+  bool is_data_dependent(const std::string& type,
+                         const std::string& subtype) const;
   const OpImplementations* get_implementations(
       const std::string& type, const std::string& subtype) const;
 

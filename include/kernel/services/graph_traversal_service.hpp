@@ -3,6 +3,7 @@
 #include <functional>
 #include <ostream>
 #include <optional>
+#include <unordered_map>
 #include <unordered_set>
 #include <vector>
 
@@ -44,6 +45,11 @@ class GraphTraversalService {
                                                int target_node_id,
                                                const cv::Rect& target_roi,
                                                int source_node_id) const;
+
+  // Single-node upstream ROI computation (static + spatial + LUT paths).
+  static cv::Rect compute_upstream_roi(
+      const Node& node, const cv::Rect& downstream_roi, const GraphModel& graph,
+      std::unordered_map<int, cv::Size>& size_cache);
 };
 
 }  // namespace ps

@@ -21,6 +21,8 @@ void OpRegistry::register_op(const std::string& type,
   // Phase 1 bridge: also populate multi-impl table as HP monolithic
   impl_table_[key].monolithic_hp = std::move(fn);
   impl_table_[key].meta_hp = meta;
+  impl_table_[key].data_dependent =
+      impl_table_[key].data_dependent || meta.data_dependent;
 }
 
 void OpRegistry::register_op(const std::string& type,
@@ -35,6 +37,8 @@ void OpRegistry::register_op(const std::string& type,
   // Phase 1 bridge: also populate multi-impl table as HP tiled
   impl_table_[key].tiled_hp = std::move(fn);
   impl_table_[key].meta_hp = meta;
+  impl_table_[key].data_dependent =
+      impl_table_[key].data_dependent || meta.data_dependent;
 }
 
 std::optional<OpRegistry::OpVariant> OpRegistry::find(
@@ -132,6 +136,8 @@ void OpRegistry::register_op_hp_monolithic(const std::string& type,
   auto key = make_key(type, subtype);
   impl_table_[key].monolithic_hp = std::move(fn);
   impl_table_[key].meta_hp = meta;
+  impl_table_[key].data_dependent =
+      impl_table_[key].data_dependent || meta.data_dependent;
 }
 
 void OpRegistry::register_op_hp_tiled(const std::string& type,
@@ -140,6 +146,8 @@ void OpRegistry::register_op_hp_tiled(const std::string& type,
   auto key = make_key(type, subtype);
   impl_table_[key].tiled_hp = std::move(fn);
   impl_table_[key].meta_hp = meta;
+  impl_table_[key].data_dependent =
+      impl_table_[key].data_dependent || meta.data_dependent;
 }
 
 void OpRegistry::register_op_rt_tiled(const std::string& type,
@@ -148,6 +156,8 @@ void OpRegistry::register_op_rt_tiled(const std::string& type,
   auto key = make_key(type, subtype);
   impl_table_[key].tiled_rt = std::move(fn);
   impl_table_[key].meta_rt = meta;
+  impl_table_[key].data_dependent =
+      impl_table_[key].data_dependent || meta.data_dependent;
 }
 
 void OpRegistry::register_dirty_propagator(const std::string& type,
@@ -162,6 +172,17 @@ void OpRegistry::register_forward_propagator(const std::string& type,
                                              ForwardRoiPropFunc fn) {
   auto key = make_key(type, subtype);
   impl_table_[key].forward_propagator = std::move(fn);
+}
+
+void OpRegistry::register_dependency_builder(const std::string& type,
+                                             const std::string& subtype,
+                                             DependencyLutBuilder fn,
+                                             bool mark_data_dependent) {
+  auto key = make_key(type, subtype);
+  impl_table_[key].dependency_builder = std::move(fn);
+  if (mark_data_dependent) {
+    impl_table_[key].data_dependent = true;
+  }
 }
 
 std::optional<OpRegistry::OpVariant> OpRegistry::resolve_for_intent(
@@ -220,6 +241,34 @@ ForwardRoiPropFunc OpRegistry::get_forward_propagator(
       [](const Node&, const cv::Rect& roi, const GraphModel&, const cv::Size&,
          const cv::Size&) { return roi; };
   return kIdentity;
+}
+
+std::optional<DependencyLutBuilder> OpRegistry::get_dependency_builder(
+    const std::string& type, const std::string& subtype) const {
+  auto key = make_key(type, subtype);
+  auto it = impl_table_.find(key);
+  if (it != impl_table_.end()) {
+    if (it->second.dependency_builder) {
+      return it->second.dependency_builder;
+    }
+  }
+  return std::nullopt;
+}
+
+bool OpRegistry::is_data_dependent(const std::string& type,
+                                   const std::string& subtype) const {
+  auto key = make_key(type, subtype);
+  auto it = impl_table_.find(key);
+  if (it != impl_table_.end()) {
+    if (it->second.data_dependent)
+      return true;
+    if (it->second.meta_hp && it->second.meta_hp->data_dependent)
+      return true;
+    if (it->second.meta_rt && it->second.meta_rt->data_dependent)
+      return true;
+  }
+  auto meta = get_metadata(type, subtype);
+  return meta && meta->data_dependent;
 }
 
 const OpRegistry::OpImplementations* OpRegistry::get_implementations(
