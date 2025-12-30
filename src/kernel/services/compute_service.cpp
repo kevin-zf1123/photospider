@@ -1218,6 +1218,8 @@ NodeOutput& ComputeService::compute_high_precision_update(
                      "Dirty ROI does not intersect node output.");
   }
 
+  std::unordered_map<int, cv::Size> size_cache;
+
   for (auto it = execution_order.rbegin(); it != execution_order.rend(); ++it) {
     int current_id = *it;
     if (!plan.count(current_id))
@@ -1230,10 +1232,8 @@ NodeOutput& ComputeService::compute_high_precision_update(
     current_entry.halo_hp =
         std::max(current_entry.halo_hp, infer_halo_hp(current_node));
 
-    auto propagate_fn = OpRegistry::instance().get_dirty_propagator(
-        current_node.type, current_node.subtype);
-    cv::Rect upstream_roi_hp =
-        propagate_fn(current_node, current_entry.roi_hp, graph);
+    cv::Rect upstream_roi_hp = GraphTraversalService::compute_upstream_roi(
+        current_node, current_entry.roi_hp, graph, size_cache);
     upstream_roi_hp = align_rect(upstream_roi_hp, kHpMicroTileSize);
 
     for (const auto& img_input : current_node.image_inputs) {
@@ -1805,6 +1805,8 @@ NodeOutput& ComputeService::compute_real_time_update(
                      "Dirty ROI collapses after RT scaling.");
   }
 
+  std::unordered_map<int, cv::Size> size_cache;
+
   for (auto it = execution_order.rbegin(); it != execution_order.rend(); ++it) {
     int current_id = *it;
     auto plan_it = plan.find(current_id);
@@ -1821,10 +1823,8 @@ NodeOutput& ComputeService::compute_real_time_update(
     current_entry.halo_rt =
         (current_entry.halo_hp + kRtDownscaleFactor - 1) / kRtDownscaleFactor;
 
-    auto propagate_fn = OpRegistry::instance().get_dirty_propagator(
-        current_node.type, current_node.subtype);
-    cv::Rect upstream_roi_hp =
-        propagate_fn(current_node, current_entry.roi_hp, graph);
+    cv::Rect upstream_roi_hp = GraphTraversalService::compute_upstream_roi(
+        current_node, current_entry.roi_hp, graph, size_cache);
     upstream_roi_hp = clip_rect(upstream_roi_hp, current_entry.hp_size);
     if (is_rect_empty(upstream_roi_hp)) {
       continue;

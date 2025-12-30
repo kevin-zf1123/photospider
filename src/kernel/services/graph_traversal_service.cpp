@@ -104,6 +104,112 @@ const NodeOutput* pick_cached_output(const Node& node) {
   return nullptr;
 }
 
+SpatialDependencyMap& normalize_dependency_map(SpatialDependencyMap& map,
+                                               const cv::Size& child_size) {
+  if (map.grid_size_x <= 0)
+    map.grid_size_x = 64;
+  if (map.grid_size_y <= 0)
+    map.grid_size_y = 64;
+  if (map.output_extent.width <= 0 || map.output_extent.height <= 0 ||
+      map.output_extent != child_size)
+    map.output_extent = child_size;
+  if (map.cols <= 0)
+    map.cols = (map.output_extent.width + map.grid_size_x - 1) / map.grid_size_x;
+  if (map.rows <= 0)
+    map.rows =
+        (map.output_extent.height + map.grid_size_y - 1) / map.grid_size_y;
+  int required = map.cols * map.rows;
+  if (required > 0 &&
+      static_cast<int>(map.cell_to_upstream_roi.size()) < required) {
+    map.cell_to_upstream_roi.resize(required);
+  }
+  return map;
+}
+
+cv::Rect dependency_lookup(const Node& node, const GraphModel& graph,
+                           const DependencyLutBuilder& builder,
+                           const cv::Rect& current_roi,
+                           const cv::Size& parent_size,
+                           const cv::Size& child_size) {
+  if (is_rect_empty(current_roi) || parent_size.width <= 0 ||
+      parent_size.height <= 0 || child_size.width <= 0 ||
+      child_size.height <= 0) {
+    return cv::Rect();
+  }
+  if (!node.dependency_lut ||
+      !node.dependency_lut->is_valid_for(child_size)) {
+    SpatialDependencyMap lut =
+        normalize_dependency_map(builder(node, graph, parent_size, child_size),
+                                 child_size);
+    node.dependency_lut = std::move(lut);
+    node.dependency_lut_version += 1;
+  }
+  if (!node.dependency_lut ||
+      !node.dependency_lut->is_valid_for(child_size)) {
+    return cv::Rect();
+  }
+  return node.dependency_lut->lookup(current_roi);
+}
+
+cv::Rect GraphTraversalService::compute_upstream_roi(
+    const Node& node, const cv::Rect& downstream_roi, const GraphModel& graph,
+    std::unordered_map<int, cv::Size>& size_cache) {
+  if (is_rect_empty(downstream_roi))
+    return cv::Rect();
+
+  auto get_size = [&](int nid) { return infer_output_size(graph, size_cache, nid); };
+  cv::Rect clamped_roi = clamp_rect_to_bounds(downstream_roi, get_size(node.id));
+  if (is_rect_empty(clamped_roi))
+    return cv::Rect();
+
+  cv::Rect upstream_roi;
+  bool has_roi = false;
+
+  auto propagate_fn =
+      OpRegistry::instance().get_dirty_propagator(node.type, node.subtype);
+  upstream_roi = propagate_fn(node, clamped_roi, graph);
+  if (!is_rect_empty(upstream_roi))
+    has_roi = true;
+
+  if (node.image_inputs.size() == 1) {
+    if (const NodeOutput* cached = pick_cached_output(node)) {
+      cv::Rect spatial_roi = transform_rect_with_matrix(
+          clamped_roi, cached->space.local_inverse_matrix);
+      if (!is_rect_empty(spatial_roi)) {
+        upstream_roi =
+            has_roi ? merge_rect(upstream_roi, spatial_roi) : spatial_roi;
+        has_roi = true;
+      }
+    }
+  }
+
+  const auto lut_builder =
+      OpRegistry::instance().get_dependency_builder(node.type, node.subtype);
+  if (lut_builder) {
+    cv::Size downstream_size = get_size(node.id);
+    cv::Size primary_parent_size;
+    for (const auto& input : node.image_inputs) {
+      if (input.from_node_id < 0 || !graph.has_node(input.from_node_id))
+        continue;
+      primary_parent_size = get_size(input.from_node_id);
+      if (primary_parent_size.width > 0 && primary_parent_size.height > 0)
+        break;
+    }
+    if (primary_parent_size.width > 0 && primary_parent_size.height > 0 &&
+        downstream_size.width > 0 && downstream_size.height > 0) {
+      cv::Rect lut_roi = dependency_lookup(node, graph, *lut_builder,
+                                           clamped_roi, primary_parent_size,
+                                           downstream_size);
+      if (!is_rect_empty(lut_roi)) {
+        upstream_roi = has_roi ? merge_rect(upstream_roi, lut_roi) : lut_roi;
+        has_roi = true;
+      }
+    }
+  }
+
+  return has_roi ? upstream_roi : cv::Rect();
+}
+
 void topo_postorder_util(const GraphModel& graph, int node_id,
                          std::vector<int>& order,
                          std::unordered_map<int, bool>& visited,
@@ -671,6 +777,34 @@ std::optional<cv::Rect> GraphTraversalService::project_roi_backward(
             upstream_roi = merge_rect(upstream_roi, spatial_roi);
           } else {
             upstream_roi = spatial_roi;
+          }
+          has_roi = true;
+        }
+      }
+    }
+
+    const auto lut_builder =
+        OpRegistry::instance().get_dependency_builder(node.type, node.subtype);
+    if (lut_builder) {
+      cv::Size downstream_size = get_size(current);
+      cv::Size primary_parent_size;
+      for (const auto& input : node.image_inputs) {
+        if (input.from_node_id < 0 || !graph.has_node(input.from_node_id))
+          continue;
+        primary_parent_size = get_size(input.from_node_id);
+        if (primary_parent_size.width > 0 && primary_parent_size.height > 0)
+          break;
+      }
+      if (primary_parent_size.width > 0 && primary_parent_size.height > 0 &&
+          downstream_size.width > 0 && downstream_size.height > 0) {
+        cv::Rect lut_roi =
+            dependency_lookup(node, graph, *lut_builder, current_roi,
+                              primary_parent_size, downstream_size);
+        if (!is_rect_empty(lut_roi)) {
+          if (has_roi) {
+            upstream_roi = merge_rect(upstream_roi, lut_roi);
+          } else {
+            upstream_roi = lut_roi;
           }
           has_roi = true;
         }

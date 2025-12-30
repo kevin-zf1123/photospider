@@ -84,6 +84,11 @@ class Node {
   // Metadata: last known full-resolution input extent for ROI propagation
   std::optional<cv::Size> last_input_size_hp;
 
+  // Spatial dependency LUT for data-dependent propagators (e.g., warps)
+  mutable std::optional<SpatialDependencyMap> dependency_lut;
+  mutable uint64_t dependency_lut_version = 0;
+  uint64_t parameters_version = 0;
+
   // --- DEPRECATED: Old image-only cache ---
   // cv::Mat image_matrix;
 
