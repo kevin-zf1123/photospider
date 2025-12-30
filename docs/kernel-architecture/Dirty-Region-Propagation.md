@@ -50,6 +50,18 @@
 - 通道/拼接：`extract_channel`、`merge`
   - 传播：恒等或按通道/拼接规则映射 ROI 到对应输入。
 
+### 5.1. 静态公式 VS 数据依赖 LUT
+
+- **静态公式** 仍然是主战场（`resize`、`crop`、`blur` 等）；这一类算子仅需要依赖参数或缓存后的 `SpatialContext` 信息即可完成 `compute_upstream_roi` 的逆映射。
+- **数据依赖算子**（如 liquid/warp/displacement）无法通过参数静态推导，必须在 `OpRegistry` 中同时注册：
+  - 一个 `DependencyLutBuilder`，它负责生成 `SpatialDependencyMap`（网格化的 tile-to-upstream ROI 表）。
+  - （可选）`OpMetadata::data_dependent` 标记与调度器能够识别它必须访问 LUT。
+- `GraphTraversalService::compute_upstream_roi` 会在静态公式之后尝试使用 LUT：当前 ROI 覆盖的网格 Cell 会被查表，返回的上游 ROI 自动与静态结果合并，供 `ComputeService`/Planner 使用。这样可以在不牺牲性能的前提下，把只涂抹一小块的液化操作定量约束在其真正受影响的输入区域。
+
+LUT 的生命周期附着在 `Node::dependency_lut`，每当参数集 `parameters_version` 发生变化时，builder 会在第一次传播时重新生成。构建过程只遍历有限数量网格点，通常在毫秒级别即可完成，因此可以同步懒加载（ComputeService 或调试命令在传播路径上直接触发），不会引发长时间卡顿。
+
+调度器（ComputeService）已经通过 `GraphTraversalService::compute_upstream_roi` 统一调用上述逻辑，因此 Planner/执行中不再需要关心是静态还是数据依赖算子。只需确保新算子在注册阶段提供 `DependencyLutBuilder`，即可享受精确的 ROI 传播。
+
 ## 6. 典型场景：Micro–Macro–Micro 链（含尺度）
 
 假设：

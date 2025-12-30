@@ -13,6 +13,11 @@
 
 namespace ps {
 
+cv::Rect compute_upstream_roi_impl(const Node& node,
+                                   const cv::Rect& downstream_roi,
+                                   const GraphModel& graph,
+                                   std::unordered_map<int, cv::Size>& size_cache);
+
 class GraphTraversalService {
  public:
   using MetadataFormatter = std::function<std::string(const Node&)>;
@@ -51,5 +56,11 @@ class GraphTraversalService {
       const Node& node, const cv::Rect& downstream_roi, const GraphModel& graph,
       std::unordered_map<int, cv::Size>& size_cache);
 };
+
+inline cv::Rect GraphTraversalService::compute_upstream_roi(
+    const Node& node, const cv::Rect& downstream_roi, const GraphModel& graph,
+    std::unordered_map<int, cv::Size>& size_cache) {
+  return compute_upstream_roi_impl(node, downstream_roi, graph, size_cache);
+}
 
 }  // namespace ps
