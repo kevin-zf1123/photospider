@@ -47,6 +47,7 @@
 #include <cstdint>
 #include <cstring>
 #include <functional>
+#include <iostream>
 #include <map>
 #include <memory>
 #include <mutex>
@@ -2843,12 +2844,29 @@ NodeOutput& ComputeService::compute_parallel(
         throw GraphError(GraphErrc::InvalidParameter,
                          "RealTimeUpdate intent requires a dirty ROI region.");
       }
-      // 启动后台 HP 更新（目前是串行执行，但逻辑上是独立的）
-      compute_high_precision_update(
-          graph, &runtime, node_id, cache_precision, force_recache,
-          enable_timing, disable_disk_cache, benchmark_events, *dirty_roi);
 
-      // 接着执行并返回 RT 更新的结果
+      if (runtime.running()) {
+        runtime.submit_ready_task_any_thread(
+            [this, graph_ptr = &graph, runtime_ptr = &runtime, node_id,
+             cache_precision, force_recache, enable_timing, disable_disk_cache,
+             roi = *dirty_roi]() {
+              try {
+                compute_high_precision_update(
+                    *graph_ptr, runtime_ptr, node_id, cache_precision,
+                    force_recache, enable_timing, disable_disk_cache,
+                    nullptr /* no events */, roi);
+              } catch (const std::exception& e) {
+                std::cerr << "Background HP update failed: " << e.what()
+                          << std::endl;
+              }
+            },
+            TaskPriority::Normal);
+      } else {
+        compute_high_precision_update(
+            graph, &runtime, node_id, cache_precision, force_recache,
+            enable_timing, disable_disk_cache, nullptr, *dirty_roi);
+      }
+
       return compute_real_time_update(
           graph, &runtime, node_id, cache_precision, force_recache,
           enable_timing, disable_disk_cache, benchmark_events, *dirty_roi);
