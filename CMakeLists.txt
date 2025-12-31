@@ -133,8 +133,10 @@ set(COMPUTE_SOURCES
     src/kernel/interaction_benchmark.cpp
     src/kernel/graph_runtime.mm
     src/kernel/scheduler/cpu_work_stealing_scheduler.cpp
+    src/kernel/scheduler/gpu_pipeline_scheduler.cpp
     src/kernel/scheduler/serial_debug_scheduler.cpp
     src/kernel/scheduler/scheduler_factory.cpp
+    src/kernel/scheduler/scheduler_plugin_loader.cpp
 )
 
 if(APPLE)
@@ -228,7 +230,41 @@ foreach(PLUGIN_SOURCE ${PLUGIN_SOURCES})
 endforeach()
 
 # ==============================================================================
-# 6. Metal Support (Apple Only)
+# 6. Scheduler Plugins (Dynamic Loadable Schedulers)
+# ==============================================================================
+
+set(SCHEDULER_PLUGIN_DIR ${CMAKE_BINARY_DIR}/schedulers)
+file(MAKE_DIRECTORY ${SCHEDULER_PLUGIN_DIR})
+
+# 查找所有调度器插件源文件
+file(GLOB SCHEDULER_PLUGIN_SOURCES "scheduler_plugins/*.cpp")
+
+foreach(SCHEDULER_SOURCE ${SCHEDULER_PLUGIN_SOURCES})
+    get_filename_component(SCHEDULER_NAME ${SCHEDULER_SOURCE} NAME_WE)
+    add_library(${SCHEDULER_NAME} SHARED ${SCHEDULER_SOURCE})
+    
+    set_target_properties(${SCHEDULER_NAME} PROPERTIES
+        LIBRARY_OUTPUT_DIRECTORY "${SCHEDULER_PLUGIN_DIR}"
+        BUILD_RPATH "${CMAKE_BINARY_DIR}/lib"
+        INSTALL_RPATH "$ORIGIN/../lib"
+    )
+    
+    if(APPLE)
+        set_target_properties(${SCHEDULER_NAME} PROPERTIES
+            MACOSX_RPATH ON
+            INSTALL_RPATH "@loader_path/../lib"
+        )
+    endif()
+    
+    target_include_directories(${SCHEDULER_NAME} PRIVATE 
+        "${PROJECT_SOURCE_DIR}/include" 
+        "${PROJECT_SOURCE_DIR}/src"
+    )
+    target_link_libraries(${SCHEDULER_NAME} PRIVATE photospider_lib)
+endforeach()
+
+# ==============================================================================
+# 7. Metal Support (Apple Only)
 # ==============================================================================
 if(APPLE)
     set(METAL_ROOT_DIR ${CMAKE_BINARY_DIR}/high_performance/metal)
@@ -277,7 +313,7 @@ if(APPLE)
 endif()
 
 # ==============================================================================
-# 7. Tests
+# 8. Tests
 # ==============================================================================
 if(BUILD_TESTING)
     enable_testing()
@@ -309,9 +345,17 @@ if(BUILD_TESTING)
     # [M3.1] OpRegistry 多设备实现测试
     add_ps_test(test_op_registry_m31 tests/test_op_registry_m31.cpp)
     
+    # [M3.5] GPU Pipeline 调度器测试
+    add_ps_test(test_gpu_pipeline_scheduler tests/test_gpu_pipeline_scheduler.cpp)
+    
+    # [M3.5] 调度器插件加载器测试
+    add_ps_test(test_scheduler_plugin_loader tests/test_scheduler_plugin_loader.cpp)
+    
     gtest_discover_tests(test_scheduler WORKING_DIRECTORY ${PROJECT_SOURCE_DIR})
     gtest_discover_tests(test_op_registry_m31 WORKING_DIRECTORY ${PROJECT_SOURCE_DIR})
     gtest_discover_tests(test_milestone34 WORKING_DIRECTORY ${PROJECT_SOURCE_DIR})
+    gtest_discover_tests(test_gpu_pipeline_scheduler WORKING_DIRECTORY ${PROJECT_SOURCE_DIR})
+    gtest_discover_tests(test_scheduler_plugin_loader WORKING_DIRECTORY ${PROJECT_SOURCE_DIR})
 endif()
 
 # --- Summary ---
@@ -323,6 +367,7 @@ message(STATUS "  Executable        : graph_cli")
 message(STATUS "  Output Bin        : ${CMAKE_RUNTIME_OUTPUT_DIRECTORY}")
 message(STATUS "  Output Lib        : ${CMAKE_LIBRARY_OUTPUT_DIRECTORY}")
 message(STATUS "  Output Plugins    : ${PLUGIN_OUTPUT_DIR}")
+message(STATUS "  Scheduler Plugins : ${SCHEDULER_PLUGIN_DIR}")
 if(APPLE)
     message(STATUS "  Metal Plugins     : ${METAL_ROOT_DIR}")
 endif()
