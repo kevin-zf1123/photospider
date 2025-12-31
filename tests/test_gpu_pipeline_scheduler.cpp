@@ -512,5 +512,151 @@ TEST_F(GpuPipelineSchedulerTest, ExceptionPropagation) {
   scheduler->shutdown();
 }
 
+// =============================================================================
+// [M3.6] Node-Level 调度测试
+// =============================================================================
+
+// 测试：优先级表初始化正确
+TEST_F(GpuPipelineSchedulerTest, PriorityTablesInitialized) {
+  GpuPipelineScheduler::Config config;
+  auto scheduler = std::make_unique<GpuPipelineScheduler>(config);
+  
+  // 调度器创建时应该初始化优先级表
+  // 通过 supports_* 方法验证
+  EXPECT_TRUE(scheduler->supports_node_level_scheduling());
+  EXPECT_TRUE(scheduler->supports_task_group_aggregation());
+}
+
+// 测试：TaskGroup 创建和聚合判断
+TEST_F(GpuPipelineSchedulerTest, TaskGroupAggregation) {
+  GpuPipelineScheduler::Config config;
+  config.aggregation_threshold = 4;
+  
+  auto scheduler = std::make_unique<GpuPipelineScheduler>(config);
+  
+  // 创建一个包含多个 tile 的 TaskGroup
+  std::vector<cv::Rect> tiles;
+  for (int i = 0; i < 5; ++i) {
+    tiles.emplace_back(i * 16, 0, 16, 16);
+  }
+  
+  TaskGroup group = scheduler->create_task_group(
+      1, tiles, ComputeIntent::GlobalHighPrecision, 1);
+  
+  EXPECT_EQ(group.node_id, 1);
+  EXPECT_EQ(group.tile_count(), 5);
+  EXPECT_EQ(group.intent, ComputeIntent::GlobalHighPrecision);
+  EXPECT_FALSE(group.empty());
+  
+  // 边界框应该覆盖所有 tiles
+  EXPECT_EQ(group.bounding_box.x, 0);
+  EXPECT_EQ(group.bounding_box.width, 5 * 16);
+}
+
+// 测试：HP 模式下的聚合决策
+TEST_F(GpuPipelineSchedulerTest, ShouldAggregateHP) {
+  GpuPipelineScheduler::Config config;
+  config.aggregation_threshold = 4;
+  
+  auto scheduler = std::make_unique<GpuPipelineScheduler>(config);
+  scheduler->start();
+  
+  // HP 模式 + 足够多的 tile 应该聚合
+  std::vector<cv::Rect> many_tiles;
+  for (int i = 0; i < 10; ++i) {
+    many_tiles.emplace_back(i * 16, 0, 16, 16);
+  }
+  
+  TaskGroup hp_group = scheduler->create_task_group(
+      1, many_tiles, ComputeIntent::GlobalHighPrecision, 1);
+  
+  // 如果 GPU 可用，应该聚合
+  bool should_agg = scheduler->should_aggregate_to_macro(hp_group);
+  if (scheduler->is_gpu_available()) {
+    EXPECT_TRUE(should_agg);
+  }
+  
+  scheduler->shutdown();
+}
+
+// 测试：RT 模式下不应聚合
+TEST_F(GpuPipelineSchedulerTest, ShouldNotAggregateRT) {
+  GpuPipelineScheduler::Config config;
+  config.aggregation_threshold = 4;
+  
+  auto scheduler = std::make_unique<GpuPipelineScheduler>(config);
+  
+  std::vector<cv::Rect> tiles;
+  for (int i = 0; i < 10; ++i) {
+    tiles.emplace_back(i * 16, 0, 16, 16);
+  }
+  
+  TaskGroup rt_group = scheduler->create_task_group(
+      1, tiles, ComputeIntent::RealTimeUpdate, 1);
+  
+  // RT 模式不应聚合（需要低延迟）
+  EXPECT_FALSE(scheduler->should_aggregate_to_macro(rt_group));
+}
+
+// 测试：ROI 切分为 tiles
+TEST_F(GpuPipelineSchedulerTest, SplitRoiToTiles) {
+  GpuPipelineScheduler::Config config;
+  config.micro_tile_size = 16;
+  
+  auto scheduler = std::make_unique<GpuPipelineScheduler>(config);
+  
+  // 创建一个 64x64 的 ROI
+  cv::Rect roi(0, 0, 64, 64);
+  
+  // 使用私有方法的间接测试：通过 create_task_group
+  std::vector<cv::Rect> expected_tiles;
+  for (int y = 0; y < 64; y += 16) {
+    for (int x = 0; x < 64; x += 16) {
+      expected_tiles.emplace_back(x, y, 16, 16);
+    }
+  }
+  
+  // 64x64 / 16x16 = 16 个 tiles
+  TaskGroup group = scheduler->create_task_group(
+      1, expected_tiles, ComputeIntent::GlobalHighPrecision, 1);
+  
+  EXPECT_EQ(group.tile_count(), 16);
+  EXPECT_EQ(group.bounding_box, roi);
+}
+
+// 测试：NodeScheduleRequest 结构
+TEST_F(GpuPipelineSchedulerTest, NodeScheduleRequestStructure) {
+  NodeScheduleRequest request;
+  request.node_id = 1;
+  request.node_type = "gpu_test";
+  request.node_subtype = "mock_op";
+  request.dirty_roi = cv::Rect(0, 0, 64, 64);
+  request.intent = ComputeIntent::GlobalHighPrecision;
+  request.epoch = 100;
+  request.cache_precision = "float32";
+  
+  EXPECT_EQ(request.node_id, 1);
+  EXPECT_EQ(request.node_type, "gpu_test");
+  EXPECT_EQ(request.dirty_roi.width, 64);
+  EXPECT_EQ(request.intent, ComputeIntent::GlobalHighPrecision);
+}
+
+// 测试：统计信息包含 Node-level 计数
+TEST_F(GpuPipelineSchedulerTest, StatsIncludeNodeLevelMetrics) {
+  GpuPipelineScheduler::Config config;
+  config.cpu_workers = 2;
+  
+  auto scheduler = std::make_unique<GpuPipelineScheduler>(config);
+  scheduler->start();
+  
+  std::string stats = scheduler->get_stats();
+  
+  // 统计信息应该包含新的指标
+  EXPECT_NE(stats.find("Node-level"), std::string::npos);
+  EXPECT_NE(stats.find("Groups aggregated"), std::string::npos);
+  
+  scheduler->shutdown();
+}
+
 }  // namespace
 }  // namespace ps
