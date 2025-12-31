@@ -20,6 +20,10 @@ namespace ps {
 
 constexpr int kRtDownscaleFactor = 4;
 
+namespace {
+
+// --- Helper Functions in Anonymous Namespace ---
+
 bool is_rect_empty(const cv::Rect& rect) {
   return rect.width <= 0 || rect.height <= 0;
 }
@@ -310,6 +314,171 @@ void print_dep_tree_recursive(
   path.erase(node_id);
 }
 
+std::optional<int> node_param_int_opt(const Node& node,
+                                      const std::string& key) {
+  if (node.runtime_parameters && node.runtime_parameters[key]) {
+    try {
+      return node.runtime_parameters[key].as<int>();
+    } catch (...) {
+    }
+  }
+  if (node.parameters && node.parameters[key]) {
+    try {
+      return node.parameters[key].as<int>();
+    } catch (...) {
+    }
+  }
+  return std::nullopt;
+}
+
+std::optional<double> node_param_double_opt(const Node& node,
+                                            const std::string& key) {
+  if (node.runtime_parameters && node.runtime_parameters[key]) {
+    try {
+      return node.runtime_parameters[key].as<double>();
+    } catch (...) {
+    }
+  }
+  if (node.parameters && node.parameters[key]) {
+    try {
+      return node.parameters[key].as<double>();
+    } catch (...) {
+    }
+  }
+  return std::nullopt;
+}
+
+std::optional<std::string> node_param_string_opt(const Node& node,
+                                                 const std::string& key) {
+  if (node.runtime_parameters && node.runtime_parameters[key]) {
+    try {
+      return node.runtime_parameters[key].as<std::string>();
+    } catch (...) {
+    }
+  }
+  if (node.parameters && node.parameters[key]) {
+    try {
+      return node.parameters[key].as<std::string>();
+    } catch (...) {
+    }
+  }
+  return std::nullopt;
+}
+
+cv::Size infer_output_size(const GraphModel& graph,
+                           std::unordered_map<int, cv::Size>& cache,
+                           int node_id) {
+  auto cached = cache.find(node_id);
+  if (cached != cache.end())
+    return cached->second;
+
+  cv::Size size{0, 0};
+  const Node& node = graph.nodes.at(node_id);
+
+  auto take_from_output = [&](const std::optional<NodeOutput>& opt) -> bool {
+    if (!opt)
+      return false;
+    const auto& buf = opt->image_buffer;
+    if (buf.width <= 0 || buf.height <= 0)
+      return false;
+    size = cv::Size(buf.width, buf.height);
+    return true;
+  };
+  if (take_from_output(node.cached_output_high_precision))
+    return cache[node_id] = size;
+  if (take_from_output(node.cached_output))
+    return cache[node_id] = size;
+  if (node.cached_output_real_time) {
+    const auto& buf = node.cached_output_real_time->image_buffer;
+    if (buf.width > 0 && buf.height > 0) {
+      size = cv::Size(buf.width * kRtDownscaleFactor,
+                      buf.height * kRtDownscaleFactor);
+      return cache[node_id] = size;
+    }
+  }
+
+  auto width_opt = node_param_int_opt(node, "width");
+  auto height_opt = node_param_int_opt(node, "height");
+  if (width_opt && height_opt && *width_opt > 0 && *height_opt > 0) {
+    size = cv::Size(*width_opt, *height_opt);
+    return cache[node_id] = size;
+  }
+
+  for (const auto& input : node.image_inputs) {
+    if (input.from_node_id < 0)
+      continue;
+    cv::Size parent_size = infer_output_size(graph, cache, input.from_node_id);
+    if (parent_size.width > 0 && parent_size.height > 0) {
+      size = parent_size;
+      break;
+    }
+  }
+
+  return cache[node_id] = size;
+}
+
+cv::Rect compute_upstream_roi_impl(
+    const Node& node, const cv::Rect& downstream_roi, const GraphModel& graph,
+    std::unordered_map<int, cv::Size>& size_cache) {
+  if (is_rect_empty(downstream_roi))
+    return cv::Rect();
+
+  auto get_size = [&](int nid) { return infer_output_size(graph, size_cache, nid); };
+  cv::Rect clamped_roi = clamp_rect_to_bounds(downstream_roi, get_size(node.id));
+  if (is_rect_empty(clamped_roi))
+    return cv::Rect();
+
+  cv::Rect upstream_roi;
+  bool has_roi = false;
+
+  auto propagate_fn =
+      OpRegistry::instance().get_dirty_propagator(node.type, node.subtype);
+  upstream_roi = propagate_fn(node, clamped_roi, graph);
+  if (!is_rect_empty(upstream_roi))
+    has_roi = true;
+
+  if (node.image_inputs.size() == 1) {
+    if (const NodeOutput* cached = pick_cached_output(node)) {
+      cv::Rect spatial_roi = transform_rect_with_matrix(
+          clamped_roi, cached->space.local_inverse_matrix);
+      if (!is_rect_empty(spatial_roi)) {
+        upstream_roi =
+            has_roi ? merge_rect(upstream_roi, spatial_roi) : spatial_roi;
+        has_roi = true;
+      }
+    }
+  }
+
+  const auto lut_builder =
+      OpRegistry::instance().get_dependency_builder(node.type, node.subtype);
+  if (lut_builder) {
+    cv::Size downstream_size = get_size(node.id);
+    cv::Size primary_parent_size;
+    for (const auto& input : node.image_inputs) {
+      if (input.from_node_id < 0 || !graph.has_node(input.from_node_id))
+        continue;
+      primary_parent_size = get_size(input.from_node_id);
+      if (primary_parent_size.width > 0 && primary_parent_size.height > 0)
+        break;
+    }
+    if (primary_parent_size.width > 0 && primary_parent_size.height > 0 &&
+        downstream_size.width > 0 && downstream_size.height > 0) {
+      cv::Rect lut_roi = dependency_lookup(node, graph, *lut_builder,
+                                           clamped_roi, primary_parent_size,
+                                           downstream_size);
+      if (!is_rect_empty(lut_roi)) {
+        upstream_roi = has_roi ? merge_rect(upstream_roi, lut_roi) : lut_roi;
+        has_roi = true;
+      }
+    }
+  }
+
+  return has_roi ? upstream_roi : cv::Rect();
+}
+
+} // namespace anonymous
+
+// Member function definitions inside namespace ps
 std::vector<int> GraphTraversalService::topo_postorder_from(
     const GraphModel& graph, int end_node_id) const {
   if (!graph.has_node(end_node_id)) {
@@ -450,191 +619,15 @@ void GraphTraversalService::print_dependency_tree(
                            show_metadata, formatter);
 }
 
-namespace {
-
-std::optional<int> node_param_int_opt(const Node& node,
-                                      const std::string& key) {
-  if (node.runtime_parameters && node.runtime_parameters[key]) {
-    try {
-      return node.runtime_parameters[key].as<int>();
-    } catch (...) {
-    }
-  }
-  if (node.parameters && node.parameters[key]) {
-    try {
-      return node.parameters[key].as<int>();
-    } catch (...) {
-    }
-  }
-  return std::nullopt;
-}
-
-std::optional<double> node_param_double_opt(const Node& node,
-                                            const std::string& key) {
-  if (node.runtime_parameters && node.runtime_parameters[key]) {
-    try {
-      return node.runtime_parameters[key].as<double>();
-    } catch (...) {
-    }
-  }
-  if (node.parameters && node.parameters[key]) {
-    try {
-      return node.parameters[key].as<double>();
-    } catch (...) {
-    }
-  }
-  return std::nullopt;
-}
-
-std::optional<std::string> node_param_string_opt(const Node& node,
-                                                 const std::string& key) {
-  if (node.runtime_parameters && node.runtime_parameters[key]) {
-    try {
-      return node.runtime_parameters[key].as<std::string>();
-    } catch (...) {
-    }
-  }
-  if (node.parameters && node.parameters[key]) {
-    try {
-      return node.parameters[key].as<std::string>();
-    } catch (...) {
-    }
-  }
-  return std::nullopt;
-}
-
-cv::Size infer_output_size(const GraphModel& graph,
-                           std::unordered_map<int, cv::Size>& cache,
-                           int node_id) {
-  auto cached = cache.find(node_id);
-  if (cached != cache.end())
-    return cached->second;
-
-  cv::Size size{0, 0};
-  const Node& node = graph.nodes.at(node_id);
-
-  auto take_from_output = [&](const std::optional<NodeOutput>& opt) -> bool {
-    if (!opt)
-      return false;
-    const auto& buf = opt->image_buffer;
-    if (buf.width <= 0 || buf.height <= 0)
-      return false;
-    size = cv::Size(buf.width, buf.height);
-    return true;
-  };
-  if (take_from_output(node.cached_output_high_precision))
-    return cache[node_id] = size;
-  if (take_from_output(node.cached_output))
-    return cache[node_id] = size;
-  if (node.cached_output_real_time) {
-    const auto& buf = node.cached_output_real_time->image_buffer;
-    if (buf.width > 0 && buf.height > 0) {
-      size = cv::Size(buf.width * kRtDownscaleFactor,
-                      buf.height * kRtDownscaleFactor);
-      return cache[node_id] = size;
-    }
-  }
-
-  auto width_opt = node_param_int_opt(node, "width");
-  auto height_opt = node_param_int_opt(node, "height");
-  if (width_opt && height_opt && *width_opt > 0 && *height_opt > 0) {
-    size = cv::Size(*width_opt, *height_opt);
-    return cache[node_id] = size;
-  }
-
-  for (const auto& input : node.image_inputs) {
-    if (input.from_node_id < 0)
-      continue;
-    cv::Size parent_size = infer_output_size(graph, cache, input.from_node_id);
-    if (parent_size.width > 0 && parent_size.height > 0) {
-      size = parent_size;
-      break;
-    }
-  }
-
-  return cache[node_id] = size;
-}
-
-int infer_neighborhood_radius(const Node& node) {
-  int radius = 0;
-  auto try_update = [&](std::optional<int> candidate) {
-    if (candidate)
-      radius = std::max(radius, std::max(0, *candidate));
-  };
-  try_update(node_param_int_opt(node, "radius"));
-  try_update(node_param_int_opt(node, "kernel_radius"));
-  try_update(node_param_int_opt(node, "border"));
-  if (auto ksize = node_param_int_opt(node, "ksize")) {
-    if (*ksize > 0)
-      radius = std::max(radius, std::max(0, (*ksize - 1) / 2));
-  }
-  if (auto kernel_size = node_param_int_opt(node, "kernel_size")) {
-    if (*kernel_size > 0)
-      radius = std::max(radius, std::max(0, (*kernel_size - 1) / 2));
-  }
-  return radius;
-}
-
-cv::Rect compute_upstream_roi_impl(
+cv::Rect GraphTraversalService::compute_upstream_roi(
     const Node& node, const cv::Rect& downstream_roi, const GraphModel& graph,
     std::unordered_map<int, cv::Size>& size_cache) {
-  if (is_rect_empty(downstream_roi))
-    return cv::Rect();
-
-  auto get_size = [&](int nid) { return infer_output_size(graph, size_cache, nid); };
-  cv::Rect clamped_roi = clamp_rect_to_bounds(downstream_roi, get_size(node.id));
-  if (is_rect_empty(clamped_roi))
-    return cv::Rect();
-
-  cv::Rect upstream_roi;
-  bool has_roi = false;
-
-  auto propagate_fn =
-      OpRegistry::instance().get_dirty_propagator(node.type, node.subtype);
-  upstream_roi = propagate_fn(node, clamped_roi, graph);
-  if (!is_rect_empty(upstream_roi))
-    has_roi = true;
-
-  if (node.image_inputs.size() == 1) {
-    if (const NodeOutput* cached = pick_cached_output(node)) {
-      cv::Rect spatial_roi = transform_rect_with_matrix(
-          clamped_roi, cached->space.local_inverse_matrix);
-      if (!is_rect_empty(spatial_roi)) {
-        upstream_roi =
-            has_roi ? merge_rect(upstream_roi, spatial_roi) : spatial_roi;
-        has_roi = true;
-      }
-    }
-  }
-
-  const auto lut_builder =
-      OpRegistry::instance().get_dependency_builder(node.type, node.subtype);
-  if (lut_builder) {
-    cv::Size downstream_size = get_size(node.id);
-    cv::Size primary_parent_size;
-    for (const auto& input : node.image_inputs) {
-      if (input.from_node_id < 0 || !graph.has_node(input.from_node_id))
-        continue;
-      primary_parent_size = get_size(input.from_node_id);
-      if (primary_parent_size.width > 0 && primary_parent_size.height > 0)
-        break;
-    }
-    if (primary_parent_size.width > 0 && primary_parent_size.height > 0 &&
-        downstream_size.width > 0 && downstream_size.height > 0) {
-      cv::Rect lut_roi = dependency_lookup(node, graph, *lut_builder,
-                                           clamped_roi, primary_parent_size,
-                                           downstream_size);
-      if (!is_rect_empty(lut_roi)) {
-        upstream_roi = has_roi ? merge_rect(upstream_roi, lut_roi) : lut_roi;
-        has_roi = true;
-      }
-    }
-  }
-
-  return has_roi ? upstream_roi : cv::Rect();
+  return compute_upstream_roi_impl(node, downstream_roi, graph, size_cache);
 }
 
 }  // namespace ps
+
+// --- Methods defined outside namespace ps (fully qualified) ---
 
 std::optional<cv::Rect> ps::GraphTraversalService::project_roi_forward(
     const GraphModel& graph, int start_node_id, const cv::Rect& start_roi,
@@ -835,5 +828,3 @@ std::optional<cv::Rect> ps::GraphTraversalService::project_roi_backward(
 
   return std::nullopt;
 }
-
-}  // namespace ps
