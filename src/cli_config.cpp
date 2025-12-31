@@ -16,6 +16,7 @@ bool write_config_to_file(const CliConfig& config, const std::string& path) {
   root["cache_root_dir"] = config.cache_root_dir;
   root["cache_precision"] = config.cache_precision;
   root["plugin_dirs"] = config.plugin_dirs;
+  root["scheduler_dirs"] = config.scheduler_dirs;
   root["history_size"] = config.history_size;
   root["default_print_mode"] = config.default_print_mode;
   root["default_traversal_arg"] = config.default_traversal_arg;
@@ -62,6 +63,11 @@ void load_or_create_config(const std::string& config_path, CliConfig& config) {
       } else if (root["plugin_dir"] && root["plugin_dir"].IsScalar()) {
         config.plugin_dirs.clear();
         config.plugin_dirs.push_back(root["plugin_dir"].as<std::string>());
+      }
+      
+      // Scheduler directories
+      if (root["scheduler_dirs"] && root["scheduler_dirs"].IsSequence()) {
+        config.scheduler_dirs = root["scheduler_dirs"].as<std::vector<std::string>>();
       }
 
       if (root["default_print_mode"])
@@ -135,6 +141,7 @@ void load_or_create_config(const std::string& config_path, CliConfig& config) {
         << "Configuration file 'config.yaml' not found. Creating a default one."
         << std::endl;
     config.plugin_dirs = {"build/plugins"};
+    config.scheduler_dirs = {"build/schedulers"};
     config.cache_precision = "int8";
     config.history_size = 1000;
     config.editor_save_behavior = "ask";

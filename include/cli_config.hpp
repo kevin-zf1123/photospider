@@ -10,6 +10,7 @@ struct CliConfig {
   std::string loaded_config_path;
   std::string cache_root_dir = "cache";
   std::vector<std::string> plugin_dirs = {"build/plugins"};
+  std::vector<std::string> scheduler_dirs = {"build/schedulers"};
   std::string cache_precision = "int8";
   std::string default_print_mode = "full";
   std::string default_traversal_arg = "n";
