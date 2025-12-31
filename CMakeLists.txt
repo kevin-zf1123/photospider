@@ -1,35 +1,51 @@
-# FILE: CMakeLists.txt (Corrected with proper platform-specific isolation)
-
 # Minimum CMake version required
 cmake_minimum_required(VERSION 3.16)
-cmake_policy(SET CMP0135 NEW) # Set policy for FetchContent robustness
-
-# Define the project and specify C++17
+cmake_policy(SET CMP0135 NEW) 
+# Define the project
 project(Photospider LANGUAGES CXX)
+# 开启 LTO (Link Time Optimization)
+include(CheckIPOSupported)
+check_ipo_supported(RESULT result OUTPUT output)
+if(result)
+    set(CMAKE_INTERPROCEDURAL_OPTIMIZATION TRUE)
+else()
+    message(WARNING "LTO not supported: ${output}")
+endif()
+
+# 强制默认 Release 模式（如果用户未指定）
+if(NOT CMAKE_BUILD_TYPE AND NOT CMAKE_CONFIGURATION_TYPES)
+  message(STATUS "Setting build type to Release as none was specified.")
+  set(CMAKE_BUILD_TYPE Release CACHE STRING "Choose the type of build." FORCE)
+endif()
+# --- Options ---
 option(USE_ASAN "Enable AddressSanitizer" OFF)
 option(USE_TSAN "Enable ThreadSanitizer" OFF)
+option(BUILD_TESTING "Build tests" ON)
 
-# Ensure all targets, including third-party static libraries, are built with
-# position independent code so they can be linked into shared libraries. This
-# avoids linker errors such as "recompile with -fPIC" that were reported on
-# both Linux and macOS build environments when creating libphotospider_lib.so.
-set(CMAKE_POSITION_INDEPENDENT_CODE ON)
+# --- Compiler Settings ---
+set(CMAKE_CXX_STANDARD 17)
+set(CMAKE_CXX_STANDARD_REQUIRED ON)
+set(CMAKE_CXX_EXTENSIONS OFF)
+set(CMAKE_POSITION_INDEPENDENT_CODE ON) # Required for static libs linking into shared libs
 
 if(CMAKE_CXX_COMPILER_ID MATCHES "Clang|GNU")
+    add_compile_options(-Wall -Wextra -Wno-unused-parameter)
     if(USE_ASAN)
-        add_compile_options(-fsanitize=address -g)
+        add_compile_options(-fsanitize=address -g -fno-omit-frame-pointer)
         add_link_options(-fsanitize=address)
     elseif(USE_TSAN)
         add_compile_options(-fsanitize=thread -g)
         add_link_options(-fsanitize=thread)
     endif()
 endif()
-set(CMAKE_CXX_STANDARD 17)
-set(CMAKE_CXX_STANDARD_REQUIRED ON)
-set(CMAKE_CXX_EXTENSIONS OFF)
 
-# --- Find Dependencies ---
-# Prioritize Homebrew packages over Anaconda to avoid ABI conflicts
+# --- Output Directories ---
+set(CMAKE_ARCHIVE_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/lib)
+set(CMAKE_LIBRARY_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/lib)
+set(CMAKE_RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin)
+set(PLUGIN_OUTPUT_DIR ${CMAKE_BINARY_DIR}/plugins)
+
+# --- Dependencies ---
 if(APPLE)
     list(APPEND CMAKE_PREFIX_PATH "/opt/homebrew")
 endif()
@@ -37,346 +53,268 @@ endif()
 find_package(Threads REQUIRED)
 find_package(OpenCV REQUIRED COMPONENTS core imgproc imgcodecs videoio)
 find_package(yaml-cpp REQUIRED)
-find_package(CURL REQUIRED)
-find_package(OpenSSL REQUIRED)
+find_package(CURL) 
+find_package(OpenSSL)
 
-message(STATUS "Found OpenSSL version: ${OPENSSL_VERSION}")
-message(STATUS "OpenSSL Libraries: ${OPENSSL_LIBRARIES}")
-message(STATUS "OpenSSL Include Dirs: ${OPENSSL_INCLUDE_DIRS}")
-message(STATUS "Found CURL Libraries: ${CURL_LIBRARIES}")
-message(STATUS "Found CURL Include Dirs: ${CURL_INCLUDE_DIR}")
-# --- FIX: Unset potential problematic variables from OpenCV on non-Apple platforms ---
-# This is a robust safeguard. Even with proper if(APPLE) guards, if the OpenCV
-# package itself sets these cache variables unconditionally, this will clean them up.
-if(NOT APPLE)
-    message(STATUS "Unsetting any residual Apple-specific framework variables for non-Apple build.")
-    foreach(fw_var FW_COREIMAGE FW_COREVIDEO FW_METAL FW_QUARTZCORE FW_FOUNDATION)
-        unset(${fw_var} CACHE)
-    endforeach()
-endif()
-
-# --- Find Google Test and nlohmann_json ---
-find_package(GTest REQUIRED)
-find_package(nlohmann_json REQUIRED)
-
-# --- Build FTXUI as Modular Static Libraries ---
+# --- FTXUI (Frontend UI Lib) ---
 set(FTXUI_INCLUDE_DIR "${PROJECT_SOURCE_DIR}/extern/ftxui/include")
 set(FTXUI_SRC_DIR "${PROJECT_SOURCE_DIR}/extern/ftxui/src")
-set(FTXUI_COMPONENT_TARGET "")
+set(FTXUI_TARGETS "")
 
-if(EXISTS "${FTXUI_SRC_DIR}" AND IS_DIRECTORY "${FTXUI_SRC_DIR}" AND
-   EXISTS "${FTXUI_INCLUDE_DIR}" AND IS_DIRECTORY "${FTXUI_INCLUDE_DIR}")
+if(EXISTS "${FTXUI_SRC_DIR}")
     file(GLOB_RECURSE FTXUI_SCREEN_SOURCES "${FTXUI_SRC_DIR}/ftxui/screen/*.cpp")
     file(GLOB_RECURSE FTXUI_DOM_SOURCES "${FTXUI_SRC_DIR}/ftxui/dom/*.cpp")
     file(GLOB_RECURSE FTXUI_COMPONENT_SOURCES "${FTXUI_SRC_DIR}/ftxui/component/*.cpp")
+    
+    foreach(src_list FTXUI_SCREEN_SOURCES FTXUI_DOM_SOURCES FTXUI_COMPONENT_SOURCES)
+        list(FILTER ${src_list} EXCLUDE REGEX ".*_test\\.cpp$")
+        list(FILTER ${src_list} EXCLUDE REGEX ".*_fuzzer\\.cpp$")
+        list(FILTER ${src_list} EXCLUDE REGEX ".*_benchmark\\.cpp$")
+    endforeach()
 
-    function(filter_ftxui_sources out_var)
-        list(FILTER ${out_var} EXCLUDE REGEX ".*_test\\.cpp$")
-        list(FILTER ${out_var} EXCLUDE REGEX ".*_fuzzer\\.cpp$")
-        list(FILTER ${out_var} EXCLUDE REGEX ".*_benchmark\\.cpp$")
-        set(${out_var} ${${out_var}} PARENT_SCOPE)
-    endfunction()
+    add_library(ftxui-screen STATIC ${FTXUI_SCREEN_SOURCES})
+    target_include_directories(ftxui-screen PUBLIC ${FTXUI_INCLUDE_DIR} PRIVATE ${FTXUI_SRC_DIR})
 
-    filter_ftxui_sources(FTXUI_SCREEN_SOURCES)
-    filter_ftxui_sources(FTXUI_DOM_SOURCES)
-    filter_ftxui_sources(FTXUI_COMPONENT_SOURCES)
+    add_library(ftxui-dom STATIC ${FTXUI_DOM_SOURCES})
+    target_include_directories(ftxui-dom PUBLIC ${FTXUI_INCLUDE_DIR} PRIVATE ${FTXUI_SRC_DIR})
+    target_link_libraries(ftxui-dom PUBLIC ftxui-screen)
 
-    if(FTXUI_SCREEN_SOURCES AND FTXUI_DOM_SOURCES AND FTXUI_COMPONENT_SOURCES)
-        add_library(ftxui-screen STATIC ${FTXUI_SCREEN_SOURCES})
-        target_include_directories(ftxui-screen PUBLIC ${FTXUI_INCLUDE_DIR} PRIVATE ${FTXUI_SRC_DIR})
-
-        add_library(ftxui-dom STATIC ${FTXUI_DOM_SOURCES})
-        target_include_directories(ftxui-dom PUBLIC ${FTXUI_INCLUDE_DIR} PRIVATE ${FTXUI_SRC_DIR})
-        target_link_libraries(ftxui-dom PUBLIC ftxui-screen)
-
-        add_library(ftxui-component STATIC ${FTXUI_COMPONENT_SOURCES})
-        target_include_directories(ftxui-component PUBLIC ${FTXUI_INCLUDE_DIR} PRIVATE ${FTXUI_SRC_DIR})
-        target_link_libraries(ftxui-component PUBLIC ftxui-dom)
-
-        set(FTXUI_COMPONENT_TARGET ftxui-component)
-    endif()
-endif()
-
-if(NOT FTXUI_COMPONENT_TARGET)
-    message(STATUS "FTXUI sources not found locally; trying to find installed package")
+    add_library(ftxui-component STATIC ${FTXUI_COMPONENT_SOURCES})
+    target_include_directories(ftxui-component PUBLIC ${FTXUI_INCLUDE_DIR} PRIVATE ${FTXUI_SRC_DIR})
+    target_link_libraries(ftxui-component PUBLIC ftxui-dom)
+    
+    set(FTXUI_TARGETS ftxui-component)
+else()
     find_package(ftxui REQUIRED)
-    set(FTXUI_COMPONENT_TARGET ftxui::component)
+    set(FTXUI_TARGETS ftxui::component)
 endif()
 
-# --- Modular Photospider Libraries ---
-set(PHOTOSPIDER_CORE_TYPES_SOURCES
+# ==============================================================================
+# 1. Internal Static Modules (The Building Blocks)
+# ==============================================================================
+
+# Module: Core Types
+add_library(photospider_core_types STATIC
     src/ps_types.cpp
     src/adapter/buffer_adapter_opencv.cpp
     src/ops.cpp
     src/kernel/node_module/node_yaml.cpp
 )
-
-add_library(photospider_core_types STATIC ${PHOTOSPIDER_CORE_TYPES_SOURCES})
 target_include_directories(photospider_core_types PUBLIC
     "${PROJECT_SOURCE_DIR}/include"
     "${PROJECT_SOURCE_DIR}/src"
     ${OpenCV_INCLUDE_DIRS}
 )
 target_link_libraries(photospider_core_types PUBLIC yaml-cpp::yaml-cpp)
-set_target_properties(photospider_core_types PROPERTIES POSITION_INDEPENDENT_CODE ON)
 
-set(PHOTOSPIDER_GRAPH_SOURCES
+# Module: Graph
+add_library(photospider_graph STATIC
     src/kernel/graph_model.cpp
     src/kernel/services/graph_traversal_service.cpp
     src/kernel/services/graph_io_service.cpp
     src/kernel/services/graph_cache_service.cpp
     src/kernel/services/graph_inspect_service.cpp
 )
-
-add_library(photospider_graph STATIC ${PHOTOSPIDER_GRAPH_SOURCES})
-target_include_directories(photospider_graph PUBLIC
-    "${PROJECT_SOURCE_DIR}/include"
-    "${PROJECT_SOURCE_DIR}/src"
-    ${OpenCV_INCLUDE_DIRS}
-)
 target_link_libraries(photospider_graph PUBLIC photospider_core_types)
-set_target_properties(photospider_graph PROPERTIES POSITION_INDEPENDENT_CODE ON)
 
-set(PHOTOSPIDER_PLUGIN_SOURCES
+# Module: Plugins
+add_library(photospider_plugin STATIC
     src/kernel/plugin_manager.cpp
     src/kernel/plugin_manage_module/plugin_loader.cpp
 )
-
-add_library(photospider_plugin STATIC ${PHOTOSPIDER_PLUGIN_SOURCES})
-target_include_directories(photospider_plugin PUBLIC
-    "${PROJECT_SOURCE_DIR}/include"
-    "${PROJECT_SOURCE_DIR}/src"
-)
 target_link_libraries(photospider_plugin PUBLIC photospider_core_types)
-set_target_properties(photospider_plugin PROPERTIES POSITION_INDEPENDENT_CODE ON)
 
-set(PHOTOSPIDER_COMPUTE_SOURCES
+# Module: Compute
+set(COMPUTE_SOURCES
     src/kernel/services/compute_service.cpp
     src/kernel/services/graph_event_service.cpp
     src/kernel/kernel.cpp
     src/kernel/interaction.cpp
     src/kernel/interaction_benchmark.cpp
-    src/kernel/graph_runtime.mm
+    src/kernel/graph_runtime.mm 
 )
 
 if(APPLE)
     enable_language(OBJCXX)
 else()
-    # The graph runtime implementation is written in standard C++ with
-    # Objective-C++ extensions guarded behind __APPLE__ checks. In order for
-    # GNU-compatible compilers to build it on Linux we explicitly tell CMake to
-    # treat the .mm file as a regular C++ translation unit.
-    set_source_files_properties(src/kernel/graph_runtime.mm PROPERTIES
-        LANGUAGE CXX
-        COMPILE_FLAGS "-x c++"
-    )
+    set_source_files_properties(src/kernel/graph_runtime.mm PROPERTIES LANGUAGE CXX COMPILE_FLAGS "-x c++")
 endif()
 
-add_library(photospider_compute STATIC ${PHOTOSPIDER_COMPUTE_SOURCES})
-target_include_directories(photospider_compute PUBLIC
-    "${PROJECT_SOURCE_DIR}/include"
-    "${PROJECT_SOURCE_DIR}/src"
-    ${OpenCV_INCLUDE_DIRS}
-)
+add_library(photospider_compute STATIC ${COMPUTE_SOURCES})
 target_link_libraries(photospider_compute PUBLIC photospider_graph photospider_plugin)
-set_target_properties(photospider_compute PROPERTIES POSITION_INDEPENDENT_CODE ON)
 
-file(GLOB_RECURSE PHOTOSPIDER_CLI_SOURCES
-    "src/cli/*.cpp"
-    "src/benchmark/*.cpp"
-    "src/cli_config.cpp"
-)
+# ==============================================================================
+# 2. Core Shared Library (The Backend)
+# ==============================================================================
 
-add_library(photospider_lib SHARED ${PHOTOSPIDER_CLI_SOURCES})
+file(GLOB PHOTOSPIDER_BENCHMARK_SOURCES "src/benchmark/*.cpp")
+
+add_library(photospider_lib SHARED ${PHOTOSPIDER_BENCHMARK_SOURCES})
+
 target_compile_definitions(photospider_lib PRIVATE PHOTOSPIDER_LIB_BUILD)
-
-set_target_properties(photospider_lib PROPERTIES
-    CXX_VISIBILITY_PRESET default
-    DEFINE_SYMBOL "PHOTOSPIDER_LIBRARY"
-)
-if(WIN32)
-    set_target_properties(photospider_lib PROPERTIES WINDOWS_EXPORT_ALL_SYMBOLS ON)
-endif()
-
-target_include_directories(photospider_lib PUBLIC
-    "${PROJECT_SOURCE_DIR}/include"
-    "${PROJECT_SOURCE_DIR}/src"
-)
 
 target_link_libraries(photospider_lib PUBLIC
     photospider_compute
     photospider_plugin
-    ${FTXUI_COMPONENT_TARGET}
+    photospider_graph
+    photospider_core_types
     ${OpenCV_LIBS}
-    yaml-cpp::yaml-cpp
-    CURL::libcurl
-    OpenSSL::SSL
-    OpenSSL::Crypto
 )
 
-# --- Configure Main Executable ---
-add_executable(graph_cli cli/graph_cli.cpp)
-target_include_directories(graph_cli PRIVATE
+if(WIN32)
+    set_target_properties(photospider_lib PROPERTIES WINDOWS_EXPORT_ALL_SYMBOLS ON)
+endif()
+
+# ==============================================================================
+# 3. CLI Static Library (The Frontend Logic)
+# ==============================================================================
+
+file(GLOB_RECURSE CLI_LOGIC_SOURCES "src/cli/*.cpp" "src/cli_config.cpp")
+list(REMOVE_ITEM CLI_LOGIC_SOURCES "${PROJECT_SOURCE_DIR}/cli/graph_cli.cpp") 
+
+add_library(photospider_cli_common STATIC ${CLI_LOGIC_SOURCES})
+
+target_include_directories(photospider_cli_common PUBLIC
     "${PROJECT_SOURCE_DIR}/include"
     "${PROJECT_SOURCE_DIR}/src"
 )
-target_link_libraries(graph_cli PRIVATE photospider_lib)
-target_link_libraries(graph_cli PRIVATE ${FTXUI_COMPONENT_TARGET})
+
+target_link_libraries(photospider_cli_common PUBLIC
+    photospider_lib
+    ${FTXUI_TARGETS}
+)
+
+# ==============================================================================
+# 4. Main Executable
+# ==============================================================================
+
+add_executable(graph_cli cli/graph_cli.cpp)
+target_link_libraries(graph_cli PRIVATE photospider_cli_common)
+
 if (UNIX AND NOT APPLE)
-    target_link_libraries(graph_cli PRIVATE anl)
+    target_link_libraries(graph_cli PRIVATE dl pthread)
 endif()
+
 set_target_properties(graph_cli PROPERTIES
-    BUILD_RPATH "${CMAKE_BINARY_DIR}"
+    BUILD_RPATH "${CMAKE_BINARY_DIR}/lib"
     INSTALL_RPATH "$ORIGIN/../lib"
 )
 
-# --- Configure Plugins ---
-set(PLUGIN_OUTPUT_DIR ${CMAKE_BINARY_DIR}/plugins)
+# ==============================================================================
+# 5. Standard Plugins (custom_ops)
+# ==============================================================================
+# Build everything in custom_ops/ EXCEPT the metal loader (which is special)
+
 file(MAKE_DIRECTORY ${PLUGIN_OUTPUT_DIR})
 file(GLOB PLUGIN_SOURCES "custom_ops/*.cpp")
 
+# Exclude the Metal loader from the generic loop; it's handled in the APPLE block
 list(REMOVE_ITEM PLUGIN_SOURCES "${CMAKE_CURRENT_SOURCE_DIR}/custom_ops/metal_ops_loader.cpp")
 
 foreach(PLUGIN_SOURCE ${PLUGIN_SOURCES})
     get_filename_component(PLUGIN_NAME ${PLUGIN_SOURCE} NAME_WE)
     add_library(${PLUGIN_NAME} SHARED ${PLUGIN_SOURCE})
+    
     set_target_properties(${PLUGIN_NAME} PROPERTIES
         LIBRARY_OUTPUT_DIRECTORY "${PLUGIN_OUTPUT_DIR}"
-        RUNTIME_OUTPUT_DIRECTORY "${PLUGIN_OUTPUT_DIR}"
-        BUILD_RPATH "${CMAKE_BINARY_DIR}"
-        INSTALL_RPATH "$ORIGIN/../lib"
+        BUILD_RPATH "${CMAKE_BINARY_DIR}/lib"
     )
+    
     target_include_directories(${PLUGIN_NAME} PRIVATE "${PROJECT_SOURCE_DIR}/include" "${PROJECT_SOURCE_DIR}/src")
     target_link_libraries(${PLUGIN_NAME} PRIVATE photospider_lib)
 endforeach()
 
-# --- Platform-Specific Adjustments ---
+# ==============================================================================
+# 6. Metal Support (Apple Only)
+# ==============================================================================
 if(APPLE)
     set(METAL_ROOT_DIR ${CMAKE_BINARY_DIR}/high_performance/metal)
     set(METAL_OPS_DIR  ${METAL_ROOT_DIR}/ops)
     file(MAKE_DIRECTORY ${METAL_ROOT_DIR})
     file(MAKE_DIRECTORY ${METAL_OPS_DIR})
 
-    # --- FIX: All framework finding and linking is now strictly inside if(APPLE) ---
     find_library(METAL_FRAMEWORK Metal REQUIRED)
     find_library(FOUNDATION_FRAMEWORK Foundation REQUIRED)
     find_library(COREIMAGE_FRAMEWORK CoreImage REQUIRED)
     find_library(COREVIDEO_FRAMEWORK CoreVideo REQUIRED)
 
-    target_link_libraries(photospider_lib PRIVATE
-        ${METAL_FRAMEWORK}
-        ${FOUNDATION_FRAMEWORK}
-    )
+    # Core lib needs Metal framework
+    target_link_libraries(photospider_lib PRIVATE ${METAL_FRAMEWORK} ${FOUNDATION_FRAMEWORK})
 
+    # 1. The Implementation Library (the actual op logic)
     add_library(perlin_noise_metal SHARED src/metal/perlin_noise_metal.mm)
     set_target_properties(perlin_noise_metal PROPERTIES
         LIBRARY_OUTPUT_DIRECTORY "${METAL_OPS_DIR}"
-        RUNTIME_OUTPUT_DIRECTORY "${METAL_OPS_DIR}"
         MACOSX_RPATH ON
     )
     target_link_libraries(perlin_noise_metal PRIVATE
-        ${METAL_FRAMEWORK}
-        ${FOUNDATION_FRAMEWORK}
-        ${COREIMAGE_FRAMEWORK}
-        ${COREVIDEO_FRAMEWORK}
-        # OpenCV_LIBS might still contain Apple framework placeholders on macOS,
-        # but here they will resolve correctly.
-        ${OpenCV_LIBS}
-        yaml-cpp::yaml-cpp
+        photospider_lib
+        ${METAL_FRAMEWORK} ${FOUNDATION_FRAMEWORK} ${COREIMAGE_FRAMEWORK} ${COREVIDEO_FRAMEWORK}
     )
     target_include_directories(perlin_noise_metal PRIVATE "${PROJECT_SOURCE_DIR}/include")
 
+    # 2. The Loader Plugin (registers the op with the Kernel)
     add_library(metal_ops_loader SHARED custom_ops/metal_ops_loader.cpp)
     set_target_properties(metal_ops_loader PROPERTIES
         LIBRARY_OUTPUT_DIRECTORY "${METAL_ROOT_DIR}"
-        RUNTIME_OUTPUT_DIRECTORY "${METAL_ROOT_DIR}"
-        BUILD_RPATH "@loader_path/ops;${CMAKE_BINARY_DIR}"
+        # Point RPATH to 'ops' subdir so loader can find perlin_noise_metal
+        BUILD_RPATH "@loader_path/ops;${CMAKE_BINARY_DIR}/lib"
         INSTALL_RPATH "@loader_path/ops;$ORIGIN/../lib"
         MACOSX_RPATH ON
     )
-
-    target_include_directories(metal_ops_loader PRIVATE
-        "${PROJECT_SOURCE_DIR}/include"
-        "${PROJECT_SOURCE_DIR}/src"
-    )
-    target_link_libraries(metal_ops_loader PRIVATE
+    
+    # [修复关键点] 必须链接 perlin_noise_metal，否则 loader 运行时找不到符号
+    target_link_libraries(metal_ops_loader PRIVATE 
         perlin_noise_metal
         photospider_lib
     )
-
+    
+    # Allow undefined symbols for dynamic lookup (useful for plugins in general)
     set(CMAKE_SHARED_LINKER_FLAGS "${CMAKE_SHARED_LINKER_FLAGS} -undefined dynamic_lookup")
 endif()
 
-# --- Testing Target ---
-enable_testing()
-set(TEST_OUTPUT_DIR ${CMAKE_BINARY_DIR}/tests)
-file(MAKE_DIRECTORY ${TEST_OUTPUT_DIR})
+# ==============================================================================
+# 7. Tests
+# ==============================================================================
+if(BUILD_TESTING)
+    enable_testing()
+    set(TEST_OUTPUT_DIR ${CMAKE_BINARY_DIR}/tests)
+    file(MAKE_DIRECTORY ${TEST_OUTPUT_DIR})
+    
+    include(GoogleTest)
+    find_package(GTest REQUIRED)
+    find_package(nlohmann_json REQUIRED)
 
-add_executable(test_scheduler tests/test_scheduler.cpp)
-set_target_properties(test_scheduler PROPERTIES
-    RUNTIME_OUTPUT_DIRECTORY "${TEST_OUTPUT_DIR}"
-    BUILD_RPATH "${CMAKE_BINARY_DIR}"
-)
-target_include_directories(test_scheduler PRIVATE
-    "${PROJECT_SOURCE_DIR}/include"
-    "${PROJECT_SOURCE_DIR}/src"
-)
-target_link_libraries(test_scheduler PRIVATE
-    photospider_lib
-    ${FTXUI_COMPONENT_TARGET}
-    GTest::gtest
-    GTest::gtest_main
-    nlohmann_json::nlohmann_json
-    ${CMAKE_THREAD_LIBS_INIT}
-)
+    macro(add_ps_test TEST_NAME SOURCE_FILE)
+        add_executable(${TEST_NAME} ${SOURCE_FILE})
+        set_target_properties(${TEST_NAME} PROPERTIES
+            RUNTIME_OUTPUT_DIRECTORY "${TEST_OUTPUT_DIR}"
+            BUILD_RPATH "${CMAKE_BINARY_DIR}/lib"
+        )
+        target_include_directories(${TEST_NAME} PRIVATE "${PROJECT_SOURCE_DIR}/include" "${PROJECT_SOURCE_DIR}/src")
+        target_link_libraries(${TEST_NAME} PRIVATE photospider_lib GTest::gtest GTest::gtest_main)
+    endmacro()
 
-add_executable(test_milestone2 tests/test_milestone2.cpp)
-set_target_properties(test_milestone2 PROPERTIES
-    RUNTIME_OUTPUT_DIRECTORY "${TEST_OUTPUT_DIR}"
-    BUILD_RPATH "${CMAKE_BINARY_DIR}"
-)
-target_include_directories(test_milestone2 PRIVATE
-    "${PROJECT_SOURCE_DIR}/include"
-    "${PROJECT_SOURCE_DIR}/src"
-)
-target_link_libraries(test_milestone2 PRIVATE photospider_lib ${FTXUI_COMPONENT_TARGET})
-add_test(NAME Milestone2Tests COMMAND test_milestone2)
-
-add_executable(test_milestone3 tests/test_milestone3.cpp)
-set_target_properties(test_milestone3 PROPERTIES
-    RUNTIME_OUTPUT_DIRECTORY "${TEST_OUTPUT_DIR}"
-    BUILD_RPATH "${CMAKE_BINARY_DIR}"
-)
-target_include_directories(test_milestone3 PRIVATE
-    "${PROJECT_SOURCE_DIR}/include"
-    "${PROJECT_SOURCE_DIR}/src"
-)
-target_link_libraries(test_milestone3 PRIVATE photospider_lib ${FTXUI_COMPONENT_TARGET})
-add_test(NAME Milestone3Tests COMMAND test_milestone3)
-
-add_executable(test_propagation tests/test_propagation.cpp)
-set_target_properties(test_propagation PROPERTIES
-    RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/tests"
-    BUILD_RPATH "${CMAKE_BINARY_DIR}"
-)
-target_include_directories(test_propagation PRIVATE
-    "${PROJECT_SOURCE_DIR}/include"
-    "${PROJECT_SOURCE_DIR}/src"
-)
-target_link_libraries(test_propagation PRIVATE
-    photospider_lib
-    ${FTXUI_COMPONENT_TARGET} # 虽然没用TUI，但photospider_lib可能需要它
-)
-
-include(GoogleTest)
-gtest_discover_tests(test_scheduler WORKING_DIRECTORY ${PROJECT_SOURCE_DIR})
-
-# --- Final Output ---
-message(STATUS "Main executable will be built in: ${CMAKE_BINARY_DIR}")
-message(STATUS "Core shared library will be built in: ${CMAKE_BINARY_DIR}")
-message(STATUS "Plugins will be built in: ${PLUGIN_OUTPUT_DIR}")
-if(APPLE)
-    message(STATUS "Metal plugins will be built in: ${METAL_ROOT_DIR}")
-    message(STATUS "Metal ops will be built in: ${METAL_OPS_DIR}")
+    add_ps_test(test_scheduler tests/test_scheduler.cpp)
+    target_link_libraries(test_scheduler PRIVATE nlohmann_json::nlohmann_json)
+    
+    add_ps_test(test_milestone2 tests/test_milestone2.cpp)
+    add_ps_test(test_milestone3 tests/test_milestone3.cpp)
+    add_ps_test(test_propagation tests/test_propagation.cpp)
+    
+    gtest_discover_tests(test_scheduler WORKING_DIRECTORY ${PROJECT_SOURCE_DIR})
 endif()
-message(STATUS "Test executables will be built in: ${TEST_OUTPUT_DIR}")
+
+# --- Summary ---
+message(STATUS "-----------------------------------------------------------")
+message(STATUS "Build Configuration Summary:")
+message(STATUS "  Core Lib (Shared) : libphotospider_lib (Backend)")
+message(STATUS "  CLI Lib (Static)  : libphotospider_cli_common (Frontend)")
+message(STATUS "  Executable        : graph_cli")
+message(STATUS "  Output Bin        : ${CMAKE_RUNTIME_OUTPUT_DIRECTORY}")
+message(STATUS "  Output Lib        : ${CMAKE_LIBRARY_OUTPUT_DIRECTORY}")
+message(STATUS "  Output Plugins    : ${PLUGIN_OUTPUT_DIR}")
+if(APPLE)
+    message(STATUS "  Metal Plugins     : ${METAL_ROOT_DIR}")
+endif()
+message(STATUS "-----------------------------------------------------------")
