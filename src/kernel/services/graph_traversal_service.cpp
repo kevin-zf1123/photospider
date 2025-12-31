@@ -634,12 +634,6 @@ cv::Rect compute_upstream_roi_impl(
   return has_roi ? upstream_roi : cv::Rect();
 }
 
-cv::Rect GraphTraversalService::compute_upstream_roi(
-    const Node& node, const cv::Rect& downstream_roi, const GraphModel& graph,
-    std::unordered_map<int, cv::Size>& size_cache) {
-  return compute_upstream_roi_impl(node, downstream_roi, graph, size_cache);
-}
-
 }  // namespace ps
 
 std::optional<cv::Rect> ps::GraphTraversalService::project_roi_forward(
