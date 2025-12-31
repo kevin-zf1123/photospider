@@ -30,6 +30,16 @@ struct CliConfig {
   // Whether to show a warning when loading/copying over an existing session's
   // content.
   bool session_warning = true;
+  
+  // [M3.4] Scheduler configuration
+  // Default scheduler type for HP (high precision) computations
+  // Supported values: "cpu_work_stealing", "serial_debug"
+  std::string scheduler_hp_type = "cpu_work_stealing";
+  // Default scheduler type for RT (real-time) computations
+  // Supported values: "cpu_work_stealing", "serial_debug"
+  std::string scheduler_rt_type = "cpu_work_stealing";
+  // Number of worker threads for CPU scheduler (0 = auto-detect)
+  int scheduler_worker_count = 0;
 };
 
 // Persist the configuration to a YAML file at `path`.

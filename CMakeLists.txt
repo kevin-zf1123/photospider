@@ -133,6 +133,8 @@ set(COMPUTE_SOURCES
     src/kernel/interaction_benchmark.cpp
     src/kernel/graph_runtime.mm
     src/kernel/scheduler/cpu_work_stealing_scheduler.cpp
+    src/kernel/scheduler/serial_debug_scheduler.cpp
+    src/kernel/scheduler/scheduler_factory.cpp
 )
 
 if(APPLE)
@@ -301,6 +303,7 @@ if(BUILD_TESTING)
     
     add_ps_test(test_milestone2 tests/test_milestone2.cpp)
     add_ps_test(test_milestone3 tests/test_milestone3.cpp)
+    add_ps_test(test_milestone34 tests/test_milestone34.cpp)
     add_ps_test(test_propagation tests/test_propagation.cpp)
     
     # [M3.1] OpRegistry 多设备实现测试
@@ -308,6 +311,7 @@ if(BUILD_TESTING)
     
     gtest_discover_tests(test_scheduler WORKING_DIRECTORY ${PROJECT_SOURCE_DIR})
     gtest_discover_tests(test_op_registry_m31 WORKING_DIRECTORY ${PROJECT_SOURCE_DIR})
+    gtest_discover_tests(test_milestone34 WORKING_DIRECTORY ${PROJECT_SOURCE_DIR})
 endif()
 
 # --- Summary ---

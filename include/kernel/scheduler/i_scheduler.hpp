@@ -100,10 +100,4 @@ class IScheduler {
   virtual bool is_running() const = 0;
 };
 
-// -----------------------------------------------------------------------------
-// SchedulerFactory: 调度器工厂类型别名
-// 用于根据配置动态创建调度器实例
-// -----------------------------------------------------------------------------
-using SchedulerFactory = std::function<std::unique_ptr<IScheduler>()>;
-
 }  // namespace ps

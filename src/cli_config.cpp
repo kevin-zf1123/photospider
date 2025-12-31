@@ -30,6 +30,11 @@ bool write_config_to_file(const CliConfig& config, const std::string& path) {
   root["default_compute_args"] = config.default_compute_args;
   root["switch_after_load"] = config.switch_after_load;
   root["session_warning"] = config.session_warning;
+  
+  // [M3.4] Scheduler configuration
+  root["scheduler_hp_type"] = config.scheduler_hp_type;
+  root["scheduler_rt_type"] = config.scheduler_rt_type;
+  root["scheduler_worker_count"] = config.scheduler_worker_count;
 
   try {
     std::ofstream fout(path);
@@ -109,6 +114,15 @@ void load_or_create_config(const std::string& config_path, CliConfig& config) {
         config.switch_after_load = root["switch_after_load"].as<bool>();
       if (root["session_warning"])
         config.session_warning = root["session_warning"].as<bool>();
+      
+      // [M3.4] Scheduler configuration
+      if (root["scheduler_hp_type"])
+        config.scheduler_hp_type = root["scheduler_hp_type"].as<std::string>();
+      if (root["scheduler_rt_type"])
+        config.scheduler_rt_type = root["scheduler_rt_type"].as<std::string>();
+      if (root["scheduler_worker_count"])
+        config.scheduler_worker_count = root["scheduler_worker_count"].as<int>();
+        
       std::cout << "Loaded configuration from '" << config_path << "'."
                 << std::endl;
     } catch (const std::exception& e) {
@@ -133,6 +147,9 @@ void load_or_create_config(const std::string& config_path, CliConfig& config) {
     config.default_compute_args = "";
     config.switch_after_load = true;
     config.session_warning = true;
+    config.scheduler_hp_type = "cpu_work_stealing";
+    config.scheduler_rt_type = "cpu_work_stealing";
+    config.scheduler_worker_count = 0;
     if (write_config_to_file(config, "config.yaml")) {
       config.loaded_config_path = fs::absolute("config.yaml").string();
     }

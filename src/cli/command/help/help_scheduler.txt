@@ -1,0 +1,56 @@
+scheduler - Manage computation schedulers
+
+SYNOPSIS
+  scheduler list               List all supported scheduler types
+  scheduler get [intent]       Show scheduler info for the current graph
+  scheduler set <intent> <type>  Switch scheduler for the current graph
+
+DESCRIPTION
+  The scheduler command allows you to view and modify the computation
+  schedulers used by the graph processing kernel.
+
+  Each graph maintains two schedulers:
+    - HP (GlobalHighPrecision): Used for full-quality background computations
+    - RT (RealTimeUpdate): Used for real-time preview computations
+
+SUBCOMMANDS
+  list
+    Display all supported scheduler types with descriptions.
+
+  get [intent]
+    Show the current scheduler information. If intent is not specified,
+    shows both HP and RT schedulers.
+    
+    intent can be:
+      hp  - HP (GlobalHighPrecision) scheduler
+      rt  - RT (RealTimeUpdate) scheduler
+      all - Both schedulers (default)
+
+  set <intent> <type>
+    Replace the scheduler for the specified intent with a new scheduler
+    of the given type. The scheduler switch takes effect immediately.
+
+SCHEDULER TYPES
+  cpu_work_stealing
+    Multi-threaded CPU scheduler with work stealing for load balancing.
+    Optimal for parallel computation on multi-core systems.
+
+  serial_debug
+    Single-threaded serial scheduler for debugging.
+    All tasks execute sequentially on the calling thread.
+
+EXAMPLES
+  scheduler list                   # List available scheduler types
+  scheduler get                    # Show all schedulers for current graph
+  scheduler get hp                 # Show HP scheduler only
+  scheduler set hp serial_debug    # Switch HP scheduler to serial mode
+  scheduler set rt cpu_work_stealing  # Switch RT scheduler
+
+CONFIGURATION
+  Default scheduler types can be configured in config.yaml:
+    scheduler_hp_type: cpu_work_stealing
+    scheduler_rt_type: cpu_work_stealing
+    scheduler_worker_count: 0  # 0 = auto-detect
+
+SEE ALSO
+  config, compute

@@ -140,3 +140,10 @@ void print_help_save(const CliConfig& config);
 bool handle_exit(std::istringstream& iss, ps::InteractionService& svc,
                  std::string& current_graph, bool& modified, CliConfig& config);
 void print_help_exit(const CliConfig& config);
+
+// scheduler
+bool handle_scheduler(std::istringstream& iss, ps::InteractionService& svc,
+                      std::string& current_graph, bool& modified,
+                      CliConfig& config);
+void print_help_scheduler(const CliConfig& config);
+
