@@ -281,4 +281,161 @@ const OpRegistry::OpImplementations* OpRegistry::get_implementations(
   return &it->second;
 }
 
+// =============================================================================
+// [M3.1 新增] 多设备实现注册与检索方法
+// =============================================================================
+
+void OpRegistry::register_impl(const std::string& type,
+                               const std::string& subtype, Device device,
+                               MonolithicOpFunc fn, OpMetadata meta) {
+  auto key = make_key(type, subtype);
+  // 设置元数据中的设备偏好
+  meta.device_preference = device;
+
+  OpImplementation impl;
+  impl.func = std::move(fn);
+  impl.metadata = meta;
+
+  impl_table_[key].device_impls.push_back(std::move(impl));
+  impl_table_[key].data_dependent =
+      impl_table_[key].data_dependent || meta.data_dependent;
+
+  // 同时更新传统表以保持向后兼容
+  if (device == Device::CPU) {
+    if (!impl_table_[key].monolithic_hp) {
+      impl_table_[key].monolithic_hp =
+          std::get<MonolithicOpFunc>(impl_table_[key].device_impls.back().func);
+      impl_table_[key].meta_hp = meta;
+    }
+  }
+}
+
+void OpRegistry::register_impl(const std::string& type,
+                               const std::string& subtype, Device device,
+                               TileOpFunc fn, OpMetadata meta) {
+  auto key = make_key(type, subtype);
+  // 设置元数据中的设备偏好
+  meta.device_preference = device;
+
+  OpImplementation impl;
+  impl.func = std::move(fn);
+  impl.metadata = meta;
+
+  impl_table_[key].device_impls.push_back(std::move(impl));
+  impl_table_[key].data_dependent =
+      impl_table_[key].data_dependent || meta.data_dependent;
+
+  // 同时更新传统表以保持向后兼容
+  if (device == Device::CPU) {
+    if (!impl_table_[key].tiled_hp) {
+      impl_table_[key].tiled_hp =
+          std::get<TileOpFunc>(impl_table_[key].device_impls.back().func);
+      impl_table_[key].meta_hp = meta;
+    }
+  }
+}
+
+std::vector<const OpImplementation*> OpRegistry::get_implementations_by_device(
+    const std::string& type, const std::string& subtype, Device device) const {
+  std::vector<const OpImplementation*> result;
+  auto key = make_key(type, subtype);
+  auto it = impl_table_.find(key);
+  if (it == impl_table_.end()) {
+    return result;
+  }
+
+  for (const auto& impl : it->second.device_impls) {
+    if (impl.metadata.device_preference == device) {
+      result.push_back(&impl);
+    }
+  }
+  return result;
+}
+
+std::vector<const OpImplementation*> OpRegistry::get_all_implementations(
+    const std::string& type, const std::string& subtype) const {
+  std::vector<const OpImplementation*> result;
+  auto key = make_key(type, subtype);
+  auto it = impl_table_.find(key);
+  if (it == impl_table_.end()) {
+    return result;
+  }
+
+  for (const auto& impl : it->second.device_impls) {
+    result.push_back(&impl);
+  }
+  return result;
+}
+
+const OpImplementation* OpRegistry::select_best_implementation(
+    const std::string& type, const std::string& subtype,
+    const std::vector<Device>& available_devices, ComputeIntent intent) const {
+  auto key = make_key(type, subtype);
+  auto it = impl_table_.find(key);
+  if (it == impl_table_.end()) {
+    return nullptr;
+  }
+
+  // 收集所有可用设备上的实现
+  std::vector<const OpImplementation*> candidates;
+  for (const auto& impl : it->second.device_impls) {
+    Device impl_device = impl.metadata.device_preference;
+    // 检查实现的设备是否在可用设备列表中
+    if (std::find(available_devices.begin(), available_devices.end(),
+                  impl_device) != available_devices.end()) {
+      candidates.push_back(&impl);
+    }
+  }
+
+  if (candidates.empty()) {
+    return nullptr;
+  }
+
+  // 根据 ComputeIntent 和 cost_score 排序选择最优实现
+  // HP 模式: 优先 GPU > CPU (Monolithic) > CPU (Tiled)，同设备按 cost_score
+  // RT 模式: 优先 CPU (Tiled) > GPU，同设备按 cost_score
+  auto compare_impl = [intent](const OpImplementation* a,
+                               const OpImplementation* b) {
+    Device da = a->metadata.device_preference;
+    Device db = b->metadata.device_preference;
+
+    // 设备优先级映射
+    auto device_priority = [intent](Device d, bool is_tiled) -> int {
+      switch (intent) {
+        case ComputeIntent::GlobalHighPrecision:
+          // HP: GPU > CPU
+          if (d == Device::GPU_METAL || d == Device::GPU_CUDA)
+            return 0;
+          if (d == Device::ASIC_NPU)
+            return 1;
+          return 2;  // CPU
+        case ComputeIntent::RealTimeUpdate:
+          // RT: CPU Tiled > GPU (低延迟优先)
+          if (d == Device::CPU && is_tiled)
+            return 0;
+          if (d == Device::GPU_METAL || d == Device::GPU_CUDA)
+            return 1;
+          return 2;
+        default:
+          return 99;
+      }
+    };
+
+    int prio_a = device_priority(da, a->is_tiled());
+    int prio_b = device_priority(db, b->is_tiled());
+
+    if (prio_a != prio_b) {
+      return prio_a < prio_b;  // 优先级小的排前面
+    }
+
+    // 同优先级按 cost_score 排序
+    return a->metadata.cost_score < b->metadata.cost_score;
+  };
+
+  // 找出最优实现
+  auto best_it = std::min_element(candidates.begin(), candidates.end(),
+                                  compare_impl);
+  return *best_it;
+}
+
 }  // namespace ps

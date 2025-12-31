@@ -11,10 +11,13 @@ class Node;
 enum class DataType { UINT8, INT8, UINT16, INT16, FLOAT32, FLOAT64 };
 
 // 描述数据所在的设备，为异构计算做准备
+// [M3.1] 扩展设备类型以支持多种异构计算后端
 enum class Device {
   CPU,
   GPU_METAL,
-  // 未来可扩展: GPU_CUDA, GPU_OPENCL
+  GPU_CUDA,
+  ASIC_NPU,
+  // 未来可扩展: GPU_OPENCL, GPU_VULKAN
 };
 
 // 通用的、与具体库无关的图像数据描述符。
