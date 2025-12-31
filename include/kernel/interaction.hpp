@@ -248,6 +248,22 @@ class InteractionService {
     return kernel_.get_metal_device(graph);
   }
 
+  // [M3.5] Scheduler information
+  // Get all available scheduler types (built-in + plugins)
+  std::vector<std::string> cmd_scheduler_available_types() const;
+  
+  // Get description for a scheduler type
+  std::string cmd_scheduler_description(const std::string& type_name) const;
+  
+  // Scan and load scheduler plugins from directories
+  size_t cmd_scheduler_scan(const std::vector<std::string>& dirs);
+  
+  // Load a single scheduler plugin
+  bool cmd_scheduler_load(const std::string& path);
+  
+  // Get list of loaded scheduler plugins
+  std::vector<std::string> cmd_scheduler_loaded_plugins() const;
+
  private:
   Kernel& kernel_;
 };

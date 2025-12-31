@@ -178,6 +178,7 @@ class ConfigEditor : public TuiEditor {
  private:
   void SyncModelToUiState() {
     plugin_dirs_str_ = original_config_.plugin_dirs;
+    scheduler_dirs_str_ = original_config_.scheduler_dirs;
     active_config_path_buffer_ = original_config_.loaded_config_path;
     history_size_buffer_ = std::to_string(original_config_.history_size);
     auto find_index = [](const std::vector<std::string>& v,
@@ -260,6 +261,7 @@ class ConfigEditor : public TuiEditor {
   }
   void SyncUiStateToModel() {
     original_config_.plugin_dirs = plugin_dirs_str_;
+    original_config_.scheduler_dirs = scheduler_dirs_str_;
     original_config_.loaded_config_path = active_config_path_buffer_;
     try {
       original_config_.history_size = std::stoi(history_size_buffer_);
@@ -399,6 +401,26 @@ class ConfigEditor : public TuiEditor {
     };
     editable_lines_.push_back(
         {"(Plugin Dirs)", nullptr, false, nullptr, nullptr, add_fn, nullptr});
+
+    // Scheduler directories
+    for (size_t i = 0; i < scheduler_dirs_str_.size(); ++i) {
+      auto del_fn = [this, i] {
+        scheduler_dirs_str_.erase(scheduler_dirs_str_.begin() + i);
+        RebuildLineView();
+        selected_ = std::min((int)editable_lines_.size() - 1, selected_);
+      };
+      editable_lines_.push_back({"scheduler_dirs[" + std::to_string(i) + "]",
+                                 &scheduler_dirs_str_[i], false, nullptr, nullptr,
+                                 nullptr, del_fn});
+    }
+    auto add_scheduler_fn = [this] {
+      scheduler_dirs_str_.push_back("<new_path>");
+      RebuildLineView();
+      selected_ = editable_lines_.size() - 2;
+      EnterEditMode();
+    };
+    editable_lines_.push_back(
+        {"(Scheduler Dirs)", nullptr, false, nullptr, nullptr, add_scheduler_fn, nullptr});
   }
   void EnterEditMode() {
     if (selected_ >= (int)editable_lines_.size())
@@ -549,6 +571,7 @@ class ConfigEditor : public TuiEditor {
   int selected_config_save_idx_ = 0;
   int selected_editor_save_idx_ = 0;
   std::vector<std::string> plugin_dirs_str_;
+  std::vector<std::string> scheduler_dirs_str_;
   std::vector<std::string> cache_precision_entries_ = {"int8", "int16"};
   std::vector<std::string> print_mode_entries_ = {"full", "simplified"};
   std::vector<std::string> ops_list_mode_entries_ = {"all", "builtin",
