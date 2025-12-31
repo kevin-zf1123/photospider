@@ -12,9 +12,60 @@
 #include "graph_model.hpp"                    // NOLINT(build/include_subdir)
 #include "kernel/interaction.hpp"
 #include "kernel/kernel.hpp"
+#include "kernel/scheduler/cpu_work_stealing_scheduler.hpp"  // M3.3: 新调度器
 #include "kernel/services/compute_service.hpp"  // <--- 修正点: 添加缺失的头文件
 #include "kernel/services/graph_cache_service.hpp"  // <--- 修正点: 添加缺失的头文件
 #include "kernel/services/graph_traversal_service.hpp"  // <--- 修正点: 添加缺失的头文件
+
+// =============================================================================
+// M3.3: 使用 CpuWorkStealingScheduler 的并行计算测试
+// =============================================================================
+
+TEST(SchedulerTestM33, ParallelComputeWithNewScheduler) {
+  using ps::InteractionService;
+  using ps::Kernel;
+  using ps::CpuWorkStealingScheduler;
+  using ps::ComputeIntent;
+
+  Kernel kernel;
+  InteractionService svc(kernel);
+
+  svc.cmd_seed_builtin_ops();
+  const std::string graph_name = "scheduler_m33_test";
+  const std::string graph_path = "util/testcases/scheduler_test_parallel.yaml";
+  auto loaded = svc.cmd_load_graph(graph_name, "sessions", graph_path);
+  ASSERT_TRUE(loaded.has_value());
+
+  // 创建并设置新的 CpuWorkStealingScheduler
+  auto& runtime = kernel.runtime(graph_name);
+  auto scheduler = std::make_unique<CpuWorkStealingScheduler>();
+  scheduler->start();
+  runtime.set_scheduler(ComputeIntent::GlobalHighPrecision, std::move(scheduler));
+
+  auto endings = svc.cmd_ending_nodes(graph_name);
+  ASSERT_TRUE(endings.has_value());
+  ASSERT_FALSE(endings->empty());
+  int node_id = (*endings)[0];
+
+  // 使用 submit_compute 通过新调度器执行计算
+  ps::ComputeOptions opts;
+  opts.intent = ComputeIntent::GlobalHighPrecision;
+  opts.node_id = node_id;
+  opts.cache_precision = "int8";
+  opts.force_recache = true;
+
+  auto future = runtime.submit_compute(opts);
+  
+  // 获取结果
+  auto result = future.get();
+  
+  // 验证计算完成
+  EXPECT_TRUE(result.image_buffer.width > 0 || !result.data.empty());
+}
+
+// =============================================================================
+// 原有测试保持不变（用于回归验证）
+// =============================================================================
 
 TEST(SchedulerTest, ParallelLogToJson) {
   using ps::InteractionService;
