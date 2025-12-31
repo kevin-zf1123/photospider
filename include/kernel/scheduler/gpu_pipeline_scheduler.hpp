@@ -1,5 +1,6 @@
 // Photospider kernel: GpuPipelineScheduler
 // M3.5: 异构调度器 - 支持 HP 走 GPU、RT 走 CPU 的混合计算模式
+// M3.6: Node-Level 调度 - Scheduler 内部优先级表决策
 #pragma once
 
 #include <atomic>
@@ -24,9 +25,31 @@ class GraphCacheService;
 class ComputeService;
 
 // =============================================================================
+// PriorityEntry: 优先级表条目
+// 用于 Scheduler 内部决定实现选择策略
+// =============================================================================
+struct PriorityEntry {
+  // 目标设备
+  Device device{Device::CPU};
+  
+  // 是否偏好 Monolithic（整图计算）
+  bool prefer_monolithic{false};
+  
+  // Tile 大小偏好
+  TileSizePreference tile_pref{TileSizePreference::UNDEFINED};
+  
+  // 优先级（越低越优先）
+  int priority{100};
+  
+  // 描述（用于调试）
+  std::string description;
+};
+
+// =============================================================================
 // GpuPipelineScheduler: GPU Pipeline 调度器
 // 实现异构调度：HP 优先使用 GPU，RT 优先使用 CPU 以保证低延迟
 // 支持 RT 和 HP 同时调度，其中 RT 优先级高于 HP
+// M3.6: 实现 Node-Level 调度，内部持有优先级表做实现选择
 // =============================================================================
 class GpuPipelineScheduler : public IScheduler {
  public:
@@ -42,13 +65,22 @@ class GpuPipelineScheduler : public IScheduler {
     bool force_cpu_for_rt;
     // RT 任务抢占阈值（毫秒）
     int rt_preempt_threshold_ms;
+    // Micro tile 大小（RT 模式）
+    int micro_tile_size;
+    // Macro tile 大小（HP 模式聚合用）
+    int macro_tile_size;
+    // 聚合阈值（超过此数量的 micro tile 会被聚合）
+    int aggregation_threshold;
     
     Config()
         : gpu_workers(1),
           cpu_workers(0),
           prefer_gpu_for_hp(true),
           force_cpu_for_rt(true),
-          rt_preempt_threshold_ms(16) {}
+          rt_preempt_threshold_ms(16),
+          micro_tile_size(16),
+          macro_tile_size(256),
+          aggregation_threshold(4) {}
   };
 
   /// @brief 构造函数
@@ -71,6 +103,23 @@ class GpuPipelineScheduler : public IScheduler {
   std::string name() const override;
   std::string get_stats() const override;
   bool is_running() const override;
+
+  // ---------------------------------------------------------------------------
+  // Node-Level 调度接口 (M3.6 新增)
+  // ---------------------------------------------------------------------------
+  
+  /// @brief Node-Level 调度入口
+  std::future<NodeOutput> schedule_node(
+      const NodeScheduleRequest& request, GraphModel& graph) override;
+  
+  /// @brief 检查是否应该聚合为 Macro task
+  bool should_aggregate_to_macro(const TaskGroup& group) const override;
+  
+  /// @brief 是否支持 Node-Level 调度
+  bool supports_node_level_scheduling() const override { return true; }
+  
+  /// @brief 是否支持 TaskGroup 聚合
+  bool supports_task_group_aggregation() const override { return true; }
 
   // ---------------------------------------------------------------------------
   // 调度器内部 API
@@ -150,6 +199,22 @@ class GpuPipelineScheduler : public IScheduler {
   const OpImplementation* select_implementation(
       const std::string& type, const std::string& subtype,
       ComputeIntent intent) const;
+  
+  // [M3.6] 使用优先级表选择最优实现
+  const OpImplementation* select_impl_with_priority(
+      const std::string& type, const std::string& subtype,
+      ComputeIntent intent) const;
+  
+  // [M3.6] 初始化优先级表
+  void init_priority_tables();
+  
+  // [M3.6] 将 ROI 切分为 tile 列表
+  std::vector<cv::Rect> split_roi_to_tiles(
+      const cv::Rect& roi, int tile_size) const;
+  
+  // [M3.6] 执行 Node-Level 计算
+  NodeOutput execute_node_compute(
+      const NodeScheduleRequest& request, GraphModel& graph);
 
   // ---------------------------------------------------------------------------
   // 成员变量
@@ -208,11 +273,27 @@ class GpuPipelineScheduler : public IScheduler {
   std::atomic<uint64_t> hp_cpu_tasks_executed_{0};
   std::atomic<uint64_t> gpu_tasks_executed_{0};
   std::atomic<uint64_t> total_tasks_scheduled_{0};
+  std::atomic<uint64_t> node_level_tasks_scheduled_{0};  // M3.6
+  std::atomic<uint64_t> task_groups_aggregated_{0};      // M3.6
 
   // Thread-local storage
   static thread_local int tls_worker_id_;
   static thread_local uint64_t tls_active_epoch_;
   static thread_local bool tls_is_gpu_worker_;
+  
+  // ---------------------------------------------------------------------------
+  // [M3.6] 优先级表
+  // Scheduler 内部持有，用于决定实现选择策略
+  // ---------------------------------------------------------------------------
+  
+  // HP 模式优先级表: GPU Monolithic > CPU Monolithic > CPU Tiled (Macro) > Others
+  std::vector<PriorityEntry> hp_priority_table_;
+  
+  // RT 模式优先级表: CPU Tiled (Micro 16x16) > CPU Monolithic > Others
+  std::vector<PriorityEntry> rt_priority_table_;
+  
+  // TaskGroup ID 计数器
+  std::atomic<uint64_t> task_group_id_counter_{0};
 };
 
 }  // namespace ps
