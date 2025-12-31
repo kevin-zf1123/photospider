@@ -85,6 +85,12 @@ void print_repl_help(const CliConfig& config) {
       << "  free\n"
       << "    Free memory used by non-essential intermediate nodes.\n\n"
 
+      << "  scheduler <list|get|set> [intent] [type]\n"
+      << "    Manage computation schedulers:\n"
+      << "      list:          List supported scheduler types.\n"
+      << "      get [hp|rt]:   Show scheduler info for current graph.\n"
+      << "      set <hp|rt> <type>: Switch scheduler for an intent.\n\n"
+
       << "  exit\n"
       << "    Quit the shell.\n"
       << "    Sync prompt default (exit_prompt_sync): "
