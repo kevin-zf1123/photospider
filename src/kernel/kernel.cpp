@@ -7,6 +7,7 @@
 #include <sstream>
 
 #include "adapter/buffer_adapter_opencv.hpp"
+#include "kernel/scheduler/scheduler_factory.hpp"  // M3.4
 
 namespace ps {
 
@@ -57,6 +58,10 @@ std::optional<std::string> Kernel::load_graph(const std::string& name,
     }
   } catch (...) {
   }
+  
+  // [M3.4] 为 GraphRuntime 设置调度器
+  setup_schedulers_for_runtime(*rt);
+  
   rt->start();
 
   // [功能修复] 使用推断出的 yaml_target 进行加载
@@ -933,4 +938,66 @@ std::optional<cv::Rect> Kernel::project_roi_backward(
   }
 }
 
+// =============================================================================
+// [M3.4] 调度器配置与管理实现
+// =============================================================================
+
+void Kernel::set_scheduler_config(const SchedulerConfig& config) {
+  scheduler_config_ = config;
+}
+
+const Kernel::SchedulerConfig& Kernel::get_scheduler_config() const {
+  return scheduler_config_;
+}
+
+void Kernel::setup_schedulers_for_runtime(GraphRuntime& runtime) {
+  // 创建 HP 调度器
+  auto hp_scheduler = SchedulerFactory::create(scheduler_config_.hp_type,
+                                               scheduler_config_.worker_count);
+  if (hp_scheduler) {
+    hp_scheduler->start();
+    runtime.set_scheduler(ComputeIntent::GlobalHighPrecision, std::move(hp_scheduler));
+  }
+  
+  // 创建 RT 调度器
+  auto rt_scheduler = SchedulerFactory::create(scheduler_config_.rt_type,
+                                               scheduler_config_.worker_count);
+  if (rt_scheduler) {
+    rt_scheduler->start();
+    runtime.set_scheduler(ComputeIntent::RealTimeUpdate, std::move(rt_scheduler));
+  }
+}
+
+bool Kernel::replace_scheduler(const std::string& name, ComputeIntent intent,
+                               const std::string& type) {
+  auto it = graphs_.find(name);
+  if (it == graphs_.end()) {
+    return false;
+  }
+  
+  auto scheduler = SchedulerFactory::create(type, scheduler_config_.worker_count);
+  if (!scheduler) {
+    return false;
+  }
+  
+  it->second->replace_scheduler(intent, std::move(scheduler));
+  return true;
+}
+
+std::optional<std::pair<std::string, std::string>> Kernel::get_scheduler_info(
+    const std::string& name, ComputeIntent intent) const {
+  auto it = graphs_.find(name);
+  if (it == graphs_.end()) {
+    return std::nullopt;
+  }
+  
+  const IScheduler* scheduler = it->second->get_scheduler(intent);
+  if (!scheduler) {
+    return std::nullopt;
+  }
+  
+  return std::make_pair(scheduler->name(), scheduler->get_stats());
+}
+
 }  // namespace ps
+

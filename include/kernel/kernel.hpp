@@ -147,7 +147,42 @@ class Kernel {
     return *it->second;
   }
 
+  // =========================================================================
+  // [M3.4 新增] 调度器配置与管理 API
+  // =========================================================================
+  
+  /// @brief 调度器配置结构
+  struct SchedulerConfig {
+    std::string hp_type = "cpu_work_stealing";  // HP 调度器类型
+    std::string rt_type = "cpu_work_stealing";  // RT 调度器类型
+    unsigned int worker_count = 0;              // 工作线程数（0=自动）
+  };
+  
+  /// @brief 设置全局调度器配置（影响后续加载的图）
+  /// @param config 调度器配置
+  void set_scheduler_config(const SchedulerConfig& config);
+  
+  /// @brief 获取当前调度器配置
+  const SchedulerConfig& get_scheduler_config() const;
+  
+  /// @brief 为指定图替换调度器
+  /// @param name 图名称
+  /// @param intent 计算意图 (HP/RT)
+  /// @param type 调度器类型名称
+  /// @return true 如果替换成功
+  bool replace_scheduler(const std::string& name, ComputeIntent intent,
+                         const std::string& type);
+  
+  /// @brief 获取指定图的调度器信息
+  /// @param name 图名称
+  /// @param intent 计算意图 (HP/RT)
+  /// @return 调度器名称和统计信息，如果图不存在则返回 nullopt
+  std::optional<std::pair<std::string, std::string>> get_scheduler_info(
+      const std::string& name, ComputeIntent intent) const;
+
  private:
+  void setup_schedulers_for_runtime(GraphRuntime& runtime);
+  
   std::map<std::string, std::unique_ptr<GraphRuntime>> graphs_;
   PluginManager plugin_mgr_;
   std::map<std::string, LastError> last_error_;
@@ -155,6 +190,10 @@ class Kernel {
   GraphInspectService inspect_service_;
   GraphCacheService cache_service_;
   GraphIOService io_service_;
+  
+  // [M3.4] 调度器配置
+  SchedulerConfig scheduler_config_;
 };
 
 }  // namespace ps
+
