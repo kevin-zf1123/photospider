@@ -1,4 +1,5 @@
 // Photospider kernel: GraphRuntime per-graph worker thread and resources
+// M3.2: 改造为资源容器，持有 IScheduler 指针
 #pragma once
 
 #include <atomic>
@@ -22,6 +23,7 @@
 
 #include "graph_model.hpp"  // NOLINT(build/include_subdir)
 #include "kernel/services/graph_event_service.hpp"
+#include "kernel/scheduler/i_scheduler.hpp"  // M3.2: IScheduler 接口
 
 // [修改] 使用预处理器宏和前向声明来隔离平台特定的 Metal API
 #ifdef __OBJC__
@@ -141,6 +143,37 @@ class GraphRuntime {
   id get_metal_device();
   id get_metal_command_queue();
 
+  // =========================================================================
+  // [M3.2 新增] 调度器管理 API
+  // =========================================================================
+  
+  /// @brief 设置指定意图的调度器
+  /// @param intent 计算意图（RT 或 HP）
+  /// @param scheduler 调度器实例的唯一指针
+  /// @note 如果已有调度器，会先 detach 旧调度器再设置新的
+  void set_scheduler(ComputeIntent intent, std::unique_ptr<IScheduler> scheduler);
+  
+  /// @brief 获取指定意图的调度器
+  /// @param intent 计算意图
+  /// @return 调度器指针，如果不存在则返回 nullptr
+  IScheduler* get_scheduler(ComputeIntent intent);
+  const IScheduler* get_scheduler(ComputeIntent intent) const;
+  
+  /// @brief 替换指定意图的调度器（动态切换）
+  /// @param intent 计算意图
+  /// @param scheduler 新的调度器实例
+  /// @note 此方法会先停止旧调度器，然后启动新调度器
+  void replace_scheduler(ComputeIntent intent, std::unique_ptr<IScheduler> scheduler);
+  
+  /// @brief 通过调度器提交计算任务
+  /// @param opts 计算选项
+  /// @return 计算结果的 future
+  /// @throws std::runtime_error 如果对应意图没有注册调度器
+  std::future<NodeOutput> submit_compute(const ComputeOptions& opts);
+  
+  /// @brief 检查是否有调度器注册到指定意图
+  bool has_scheduler(ComputeIntent intent) const;
+
  private:
   void run_loop(int thread_id);
   std::optional<ScheduledTask> steal_task(int stealer_id);
@@ -148,6 +181,11 @@ class GraphRuntime {
   Info info_;
   GraphModel model_;
   GraphEventService event_service_;
+  
+  // [M3.2 新增] 调度器映射表
+  // 根据 ComputeIntent 路由到不同的调度器实例
+  std::map<ComputeIntent, std::unique_ptr<IScheduler>> schedulers_;
+  mutable std::mutex schedulers_mutex_;  // 保护 schedulers_ 的并发访问
 
   std::vector<std::thread> workers_;
   unsigned int num_workers_{0};

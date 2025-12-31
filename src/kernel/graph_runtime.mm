@@ -552,4 +552,87 @@ void GraphRuntime::clear_scheduler_log() {
   scheduler_log_.clear();
 }
 
+// =============================================================================
+// [M3.2 新增] 调度器管理实现
+// =============================================================================
+
+void GraphRuntime::set_scheduler(ComputeIntent intent,
+                                 std::unique_ptr<IScheduler> scheduler) {
+  std::lock_guard<std::mutex> lock(schedulers_mutex_);
+  
+  // 如果已有调度器，先 detach
+  auto it = schedulers_.find(intent);
+  if (it != schedulers_.end() && it->second) {
+    it->second->detach();
+  }
+  
+  // 设置新调度器
+  schedulers_[intent] = std::move(scheduler);
+  
+  // attach 到当前 runtime
+  if (schedulers_[intent]) {
+    schedulers_[intent]->attach(this);
+  }
+}
+
+IScheduler* GraphRuntime::get_scheduler(ComputeIntent intent) {
+  std::lock_guard<std::mutex> lock(schedulers_mutex_);
+  auto it = schedulers_.find(intent);
+  return (it != schedulers_.end()) ? it->second.get() : nullptr;
+}
+
+const IScheduler* GraphRuntime::get_scheduler(ComputeIntent intent) const {
+  std::lock_guard<std::mutex> lock(schedulers_mutex_);
+  auto it = schedulers_.find(intent);
+  return (it != schedulers_.end()) ? it->second.get() : nullptr;
+}
+
+void GraphRuntime::replace_scheduler(ComputeIntent intent,
+                                     std::unique_ptr<IScheduler> scheduler) {
+  std::lock_guard<std::mutex> lock(schedulers_mutex_);
+  
+  auto it = schedulers_.find(intent);
+  if (it != schedulers_.end() && it->second) {
+    // 停止旧调度器
+    it->second->shutdown();
+    it->second->detach();
+  }
+  
+  // 设置新调度器
+  schedulers_[intent] = std::move(scheduler);
+  
+  if (schedulers_[intent]) {
+    // attach 并启动新调度器
+    schedulers_[intent]->attach(this);
+    if (running_) {
+      schedulers_[intent]->start();
+    }
+  }
+}
+
+std::future<NodeOutput> GraphRuntime::submit_compute(const ComputeOptions& opts) {
+  IScheduler* scheduler = nullptr;
+  {
+    std::lock_guard<std::mutex> lock(schedulers_mutex_);
+    auto it = schedulers_.find(opts.intent);
+    if (it == schedulers_.end() || !it->second) {
+      // 没有注册调度器，返回一个包含异常的 future
+      std::promise<NodeOutput> promise;
+      promise.set_exception(std::make_exception_ptr(
+          std::runtime_error("No scheduler registered for intent")));
+      return promise.get_future();
+    }
+    scheduler = it->second.get();
+  }
+  
+  // 调度器的 schedule 方法是线程安全的，可以在锁外调用
+  return scheduler->schedule(opts);
+}
+
+bool GraphRuntime::has_scheduler(ComputeIntent intent) const {
+  std::lock_guard<std::mutex> lock(schedulers_mutex_);
+  auto it = schedulers_.find(intent);
+  return it != schedulers_.end() && it->second != nullptr;
+}
+
 }  // namespace ps
