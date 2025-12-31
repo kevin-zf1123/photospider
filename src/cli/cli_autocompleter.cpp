@@ -104,12 +104,12 @@ CompletionResult CliAutocompleter::Complete(const std::string& line,
     } else if (cmd == "ops") {
       CompleteOpsMode(prefix, result.options);
     } else if (cmd == "scheduler") {
-      // scheduler <list|get|set> [intent] [type]
+      // scheduler <list|get|set|scan|load|plugins> [intent] [type]
       bool completing_first_arg =
           (tokens.size() == 1) || (tokens.size() == 2 && line.back() != ' ');
       if (completing_first_arg) {
         // Subcommands
-        std::vector<std::string> subcmds = {"list", "get", "set", "help"};
+        std::vector<std::string> subcmds = {"list", "get", "set", "scan", "load", "plugins", "help"};
         for (const auto& s : subcmds) {
           if (s.rfind(prefix, 0) == 0)
             result.options.push_back(s);
@@ -127,13 +127,16 @@ CompletionResult CliAutocompleter::Complete(const std::string& line,
                 result.options.push_back(i);
             }
           } else if (subcmd == "set") {
-            // Scheduler types
-            std::vector<std::string> types = {"cpu_work_stealing", "serial_debug"};
+            // Get available scheduler types via InteractionService
+            auto types = svc_.cmd_scheduler_available_types();
             for (const auto& t : types) {
               if (t.rfind(prefix, 0) == 0)
                 result.options.push_back(t);
             }
           }
+        } else if (subcmd == "scan" || subcmd == "load") {
+          // Path completion for scan/load
+          CompletePath(prefix, result.options);
         }
       }
     }

@@ -2,13 +2,12 @@
 // M3.4: CLI scheduler 命令实现 - 查看和切换调度器
 // M3.5: 添加动态加载调度器插件功能
 
+#include <algorithm>
 #include <iostream>
 #include <sstream>
 
 #include "cli/command/commands.hpp"
 #include "cli/command/help_utils.hpp"
-#include "kernel/scheduler/scheduler_factory.hpp"
-#include "kernel/scheduler/scheduler_plugin_loader.hpp"
 
 bool handle_scheduler(std::istringstream& iss, ps::InteractionService& svc,
                       std::string& current_graph, bool& /*modified*/,
@@ -26,27 +25,21 @@ bool handle_scheduler(std::istringstream& iss, ps::InteractionService& svc,
     std::string dir;
     iss >> dir;
     
-    auto& loader = ps::SchedulerPluginLoader::instance();
-    
     if (!dir.empty()) {
       // 扫描指定目录
-      size_t count = loader.scan_and_load(dir);
+      size_t count = svc.cmd_scheduler_scan({dir});
       std::cout << "Scanned '" << dir << "': loaded " << count << " scheduler(s).\n";
     } else {
       // 扫描配置中的所有目录
-      size_t total = 0;
-      for (const auto& scan_dir : config.scheduler_dirs) {
-        size_t count = loader.scan_and_load(scan_dir);
-        std::cout << "Scanned '" << scan_dir << "': loaded " << count << " scheduler(s).\n";
-        total += count;
-      }
-      std::cout << "Total: loaded " << total << " scheduler(s).\n";
+      size_t total = svc.cmd_scheduler_scan(config.scheduler_dirs);
+      std::cout << "Scanned " << config.scheduler_dirs.size() 
+                << " directories: loaded " << total << " scheduler(s).\n";
     }
     
     // 显示当前已加载的调度器
     std::cout << "\nAvailable schedulers:\n";
-    for (const auto& type : loader.get_registered_types()) {
-      auto desc = loader.get_description(type);
+    for (const auto& type : svc.cmd_scheduler_available_types()) {
+      auto desc = svc.cmd_scheduler_description(type);
       std::cout << "  " << type;
       if (!desc.empty()) {
         std::cout << " - " << desc;
@@ -67,11 +60,10 @@ bool handle_scheduler(std::istringstream& iss, ps::InteractionService& svc,
       return true;
     }
     
-    auto& loader = ps::SchedulerPluginLoader::instance();
-    if (loader.load_plugin(path)) {
+    if (svc.cmd_scheduler_load(path)) {
       std::cout << "Successfully loaded scheduler plugin from '" << path << "'.\n";
       std::cout << "Available schedulers:\n";
-      for (const auto& type : loader.get_registered_types()) {
+      for (const auto& type : svc.cmd_scheduler_available_types()) {
         std::cout << "  " << type << "\n";
       }
     } else {
@@ -82,8 +74,7 @@ bool handle_scheduler(std::istringstream& iss, ps::InteractionService& svc,
   
   // scheduler plugins - 列出已加载的插件信息
   if (subcmd == "plugins") {
-    auto& loader = ps::SchedulerPluginLoader::instance();
-    auto plugins = loader.list_loaded_plugins();
+    auto plugins = svc.cmd_scheduler_loaded_plugins();
     
     if (plugins.empty()) {
       std::cout << "No scheduler plugins loaded.\n";
@@ -99,32 +90,12 @@ bool handle_scheduler(std::istringstream& iss, ps::InteractionService& svc,
   
   // scheduler list - 列出所有支持的调度器类型
   if (subcmd == "list") {
-    std::cout << "Built-in scheduler types:\n";
-    for (const auto& type : ps::SchedulerFactory::supported_types()) {
+    std::cout << "Available scheduler types:\n";
+    for (const auto& type : svc.cmd_scheduler_available_types()) {
+      auto desc = svc.cmd_scheduler_description(type);
       std::cout << "  " << type << "\n";
-      std::cout << "    " << ps::SchedulerFactory::description(type) << "\n";
-    }
-    
-    // 同时列出插件提供的调度器
-    auto& loader = ps::SchedulerPluginLoader::instance();
-    auto plugin_types = loader.get_registered_types();
-    
-    // 过滤掉与内置类型重复的
-    std::vector<std::string> plugin_only_types;
-    for (const auto& ptype : plugin_types) {
-      if (!ps::SchedulerFactory::is_supported(ptype)) {
-        plugin_only_types.push_back(ptype);
-      }
-    }
-    
-    if (!plugin_only_types.empty()) {
-      std::cout << "\nPlugin-provided scheduler types:\n";
-      for (const auto& type : plugin_only_types) {
-        auto desc = loader.get_description(type);
-        std::cout << "  " << type << "\n";
-        if (!desc.empty()) {
-          std::cout << "    " << desc << "\n";
-        }
+      if (!desc.empty()) {
+        std::cout << "    " << desc << "\n";
       }
     }
     return true;
@@ -207,7 +178,7 @@ bool handle_scheduler(std::istringstream& iss, ps::InteractionService& svc,
       std::cout << "Usage: scheduler set <intent> <type>\n";
       std::cout << "  intent: hp | rt\n";
       std::cout << "  type: ";
-      for (const auto& t : ps::SchedulerFactory::supported_types()) {
+      for (const auto& t : svc.cmd_scheduler_available_types()) {
         std::cout << t << " ";
       }
       std::cout << "\n";
@@ -229,26 +200,18 @@ bool handle_scheduler(std::istringstream& iss, ps::InteractionService& svc,
       return true;
     }
     
-    // 检查类型是否支持（内置或插件）
-    auto& loader = ps::SchedulerPluginLoader::instance();
-    bool is_supported = ps::SchedulerFactory::is_supported(type_str) || 
-                        loader.is_registered(type_str);
+    // 检查类型是否支持
+    auto available_types = svc.cmd_scheduler_available_types();
+    bool is_supported = std::find(available_types.begin(), available_types.end(), 
+                                   type_str) != available_types.end();
     
     if (!is_supported) {
       std::cout << "Error: Unknown scheduler type '" << type_str << "'.\n";
-      std::cout << "Built-in types: ";
-      for (const auto& t : ps::SchedulerFactory::supported_types()) {
+      std::cout << "Available types: ";
+      for (const auto& t : available_types) {
         std::cout << t << " ";
       }
       std::cout << "\n";
-      auto plugin_types = loader.get_registered_types();
-      if (!plugin_types.empty()) {
-        std::cout << "Plugin types: ";
-        for (const auto& t : plugin_types) {
-          std::cout << t << " ";
-        }
-        std::cout << "\n";
-      }
       return true;
     }
     
