@@ -302,7 +302,11 @@ if(BUILD_TESTING)
     add_ps_test(test_milestone3 tests/test_milestone3.cpp)
     add_ps_test(test_propagation tests/test_propagation.cpp)
     
+    # [M3.1] OpRegistry 多设备实现测试
+    add_ps_test(test_op_registry_m31 tests/test_op_registry_m31.cpp)
+    
     gtest_discover_tests(test_scheduler WORKING_DIRECTORY ${PROJECT_SOURCE_DIR})
+    gtest_discover_tests(test_op_registry_m31 WORKING_DIRECTORY ${PROJECT_SOURCE_DIR})
 endif()
 
 # --- Summary ---

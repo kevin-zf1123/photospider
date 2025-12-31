@@ -206,10 +206,14 @@ enum class TileSizePreference {
 
 // [核心修复] 移除此处的 Device 枚举定义，因为它已在 image_buffer.hpp 中定义
 
+// [M3.1] 扩展 OpMetadata 以支持调度权重
 struct OpMetadata {
   TileSizePreference tile_preference = TileSizePreference::UNDEFINED;
-  // [新增] 新增 device_preference 字段，默认为 CPU
+  // [新增] 设备偏好字段，默认为 CPU
   Device device_preference = Device::CPU;
+  // [M3.1 新增] 启发式调度权重，用于算子选择
+  // 值越小表示优先级越高（成本越低）
+  int cost_score = 100;
 
   enum class InputAccessPattern {
     SpatialAligned,
@@ -239,6 +243,25 @@ using DependencyLutBuilder = std::function<SpatialDependencyMap(
 enum class ComputeIntent {
   GlobalHighPrecision,
   RealTimeUpdate,
+};
+
+// [M3.1 新增] 单个算子实现的描述结构
+// 用于支持同一算子在不同设备上的多个实现
+struct OpImplementation {
+  // 统一函数签名，支持 Monolithic 和 Tiled 两种形式
+  std::variant<MonolithicOpFunc, TileOpFunc> func;
+  // 该实现的元数据（包含设备、成本等信息）
+  OpMetadata metadata;
+  
+  // 辅助方法：判断是否为 Monolithic 实现
+  bool is_monolithic() const {
+    return std::holds_alternative<MonolithicOpFunc>(func);
+  }
+  
+  // 辅助方法：判断是否为 Tiled 实现
+  bool is_tiled() const {
+    return std::holds_alternative<TileOpFunc>(func);
+  }
 };
 
 class OpRegistry {
@@ -279,6 +302,10 @@ class OpRegistry {
     std::optional<ForwardRoiPropFunc> forward_propagator;
     std::optional<DependencyLutBuilder> dependency_builder;
     bool data_dependent = false;
+    
+    // [M3.1 新增] 多设备实现列表
+    // 同一算子可以有多个设备上的实现，按设备类型索引
+    std::vector<OpImplementation> device_impls;
   };
 
   void register_op_hp_monolithic(const std::string& type,
@@ -311,6 +338,40 @@ class OpRegistry {
                          const std::string& subtype) const;
   const OpImplementations* get_implementations(
       const std::string& type, const std::string& subtype) const;
+
+  // ==========================================================================
+  // [M3.1 新增] 多设备实现注册与检索 API
+  // ==========================================================================
+  
+  // 注册一个特定设备上的算子实现
+  // @param type 算子类型（如 "image_process"）
+  // @param subtype 算子子类型（如 "gaussian_blur"）
+  // @param device 目标设备
+  // @param fn 算子实现函数
+  // @param meta 元数据（cost_score 用于调度优先级）
+  void register_impl(const std::string& type, const std::string& subtype,
+                     Device device, MonolithicOpFunc fn, OpMetadata meta = {});
+  void register_impl(const std::string& type, const std::string& subtype,
+                     Device device, TileOpFunc fn, OpMetadata meta);
+  
+  // 获取指定算子在特定设备上的所有实现
+  // @return 该设备上的实现列表（可能为空）
+  std::vector<const OpImplementation*> get_implementations_by_device(
+      const std::string& type, const std::string& subtype, Device device) const;
+  
+  // 获取指定算子的所有实现（跨所有设备）
+  // @return 所有实现的列表
+  std::vector<const OpImplementation*> get_all_implementations(
+      const std::string& type, const std::string& subtype) const;
+  
+  // 根据 ComputeIntent 和可用设备选择最优实现
+  // @param available_devices 当前可用的设备列表
+  // @param intent 计算意图（HP 或 RT）
+  // @return 最优实现的指针，如果无可用实现则返回 nullptr
+  const OpImplementation* select_best_implementation(
+      const std::string& type, const std::string& subtype,
+      const std::vector<Device>& available_devices,
+      ComputeIntent intent) const;
 
  private:
   std::unordered_map<std::string, OpVariant> table_;
