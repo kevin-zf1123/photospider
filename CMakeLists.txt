@@ -131,7 +131,8 @@ set(COMPUTE_SOURCES
     src/kernel/kernel.cpp
     src/kernel/interaction.cpp
     src/kernel/interaction_benchmark.cpp
-    src/kernel/graph_runtime.mm 
+    src/kernel/graph_runtime.mm
+    src/kernel/scheduler/cpu_work_stealing_scheduler.cpp
 )
 
 if(APPLE)
