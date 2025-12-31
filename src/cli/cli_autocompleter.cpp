@@ -18,7 +18,7 @@ CliAutocompleter::CliAutocompleter(ps::InteractionService& svc) : svc_(svc) {
       "config",      "exit",      "quit",        "q",     "free",
       "graphs",      "help",      "inspect",     "load",  "node",
       "ops",         "output",    "print",       "read",  "save",
-      "source",      "switch",    "traversal"};
+      "scheduler",   "source",    "switch",      "traversal"};
   std::sort(commands_.begin(), commands_.end());
 }
 
@@ -103,6 +103,39 @@ CompletionResult CliAutocompleter::Complete(const std::string& line,
       CompleteGraphName(prefix, result.options);
     } else if (cmd == "ops") {
       CompleteOpsMode(prefix, result.options);
+    } else if (cmd == "scheduler") {
+      // scheduler <list|get|set> [intent] [type]
+      bool completing_first_arg =
+          (tokens.size() == 1) || (tokens.size() == 2 && line.back() != ' ');
+      if (completing_first_arg) {
+        // Subcommands
+        std::vector<std::string> subcmds = {"list", "get", "set", "help"};
+        for (const auto& s : subcmds) {
+          if (s.rfind(prefix, 0) == 0)
+            result.options.push_back(s);
+        }
+      } else if (tokens.size() >= 2) {
+        const std::string& subcmd = tokens[1];
+        if (subcmd == "get" || subcmd == "set") {
+          bool completing_intent =
+              (tokens.size() == 2) || (tokens.size() == 3 && line.back() != ' ');
+          if (completing_intent) {
+            // Intent options
+            std::vector<std::string> intents = {"hp", "rt", "all"};
+            for (const auto& i : intents) {
+              if (i.rfind(prefix, 0) == 0)
+                result.options.push_back(i);
+            }
+          } else if (subcmd == "set") {
+            // Scheduler types
+            std::vector<std::string> types = {"cpu_work_stealing", "serial_debug"};
+            for (const auto& t : types) {
+              if (t.rfind(prefix, 0) == 0)
+                result.options.push_back(t);
+            }
+          }
+        }
+      }
     }
     // ... add more context-aware completions for other commands ...
   }
