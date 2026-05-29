@@ -1,283 +1,281 @@
-# Photospider: The Complete User Manual
+# Photospider User Manual
 
-## 1. Introduction
+This manual describes the current command-line and REPL behavior of
+Photospider. For architecture internals, see
+`docs/kernel-architecture/Overview.md`.
 
-Welcome to Photospider, a powerful, node-based command-line tool for orchestrating complex image processing pipelines. It is designed from the ground up as a **dynamic data flow engine**, setting it apart from simple, linear processing tools.
+## 1. Build And Setup
 
-In Photospider, you define a graph of operations in a simple YAML file. Each "node" in the graph performs a specific task, such as loading an image, applying a filter, or analyzing image properties. The true power of Photospider lies in its dynamic nature: nodes can pass not only images but also data (like width, height, or computed values) to downstream nodes. This allows for the creation of intelligent, self-configuring, and highly adaptive pipelines.
+Install the required C++ toolchain, OpenCV, yaml-cpp, and test dependencies if
+you plan to run the GoogleTest suite. Initialize submodules when using the
+vendored FTXUI source:
 
-## 2. Getting Started
-
-### Prerequisites
-
-To build Photospider, you will need a C++17 compliant compiler and the following development libraries:
-*   A C++ Compiler (e.g., `g++`, `clang++`)
-*   `pkg-config`
-*   **OpenCV** (version 4.x is recommended)
-*   **yaml-cpp**
-
-#### Dependency Installation
-
-**On Ubuntu/Debian:**
 ```bash
-sudo apt-get update
-sudo apt-get install build-essential pkg-config libopencv-dev libyaml-cpp-dev
+git submodule update --init --recursive
+cmake -S . -B build -DCMAKE_BUILD_TYPE=RelWithDebInfo
+cmake --build build --target graph_cli -j
 ```
 
-**On macOS (using Homebrew):**
-```bash
-brew install pkg-config opencv yaml-cpp
+The main executable is:
+
+```text
+build/bin/graph_cli
 ```
 
-### How to Build
+Plugin and runtime outputs:
 
-1.  **Clone the repository and its submodules:**
-    ```bash
-    git clone --recurse-submodules https://github.com/kevin-zf1123/photospider.git
-    cd photospider
-    ```
+| Output | Path |
+| --- | --- |
+| executable | `build/bin/graph_cli` |
+| backend libraries | `build/lib` |
+| operation plugins | `build/plugins` |
+| scheduler plugins | `build/schedulers` |
+| test binaries | `build/tests` |
 
-2.  **Configure the project with CMake:**
-    This command prepares the build files in the `build` directory without leaving the project root.
-    ```bash
-    cmake -S . -B build
-    ```
+## 2. Command-Line Mode
 
-3.  **Compile the project:**
-    This command runs the build process from the configured directory.
-    ```bash
-    cmake --build build
-    ```
+Show top-level options:
 
-The main executable `graph_cli` will be created at `build/graph_cli`, and the plugins directory will be at `build/plugins`.
-
----
-
-## 3. Execution Modes
-
-### 3.1. Command-Line Flags
-
-| Flag | Argument | Description |
-| :--- | :--- | :--- |
-| `-h`, `--help` | - | Displays a help message about the command-line flags. |
-| `-r`, `--read` | `<file>` | Loads and processes the specified graph YAML file into a 'default' session. |
-| `-o`, `--output` | `<file>` | Saves the current graph state to a YAML file. |
-| `-p`, `--print` | - | Prints the dependency tree of the loaded graph. |
-| `-t`, `--traversal`| - | Shows the evaluation order of the loaded graph. |
-| `--config` | `<file>` | Specifies a custom configuration file. |
-| `--clear-cache` | - | Deletes the contents of the configured cache directory before execution. |
-| `--repl` | - | Starts the interactive shell (REPL). This is the default if no other actions are specified. |
-
-**Example: Executing a graph directly**
 ```bash
-# Load a graph, compute node 4, and save its output image
-./build/graph_cli --read my_graph.yaml --compute 4 --save 4 final_image.png```
-
-### 3.2. The REPL (Interactive Shell)
-
-The REPL is the most powerful way to use Photospider. Start it by running the application with no flags:
-```bash
-./build/graph_cli
+./build/bin/graph_cli --help
 ```
-This will present you with the `ps>` prompt.
 
----
+Supported options:
 
-## 4. REPL Commands
+| Option | Argument | Description |
+| --- | --- | --- |
+| `-h`, `--help` | none | Print top-level CLI help. |
+| `-r`, `--read` | `<file>` | Load YAML into the `default` session. |
+| `-o`, `--output` | `<file>` | Save the current graph YAML. Requires `--read` first. |
+| `-p`, `--print` | none | Print the loaded graph dependency tree. |
+| `-t`, `--traversal` | none | Print dependency tree and post-order traversal. |
+| `--clear-cache` | none | Clear cache for the current graph after loading one. |
+| `--config` | `<file>` | Use a custom config YAML file. |
+| `--repl` | none | Enter the interactive REPL after CLI actions. |
 
-#### `help`
-Displays a list of all available REPL commands.
+Examples:
 
-#### `read <filepath>`
-Loads a graph from the specified YAML file into the **current session**, overwriting its content. If no session is active, loads into a new 'default' session.
+```bash
+./build/bin/graph_cli --read util/testcases/full_ops.yaml --print
+./build/bin/graph_cli --read util/testcases/full_ops.yaml --traversal
+./build/bin/graph_cli --config config.yaml --read graph.yaml --repl
+```
 
-#### `load <name> [yaml_path]`
-Loads a graph into a named session called `<name>`. If `yaml_path` is omitted, it tries to load from `sessions/<name>/content.yaml`. If provided, it loads from the specified file and copies it into the session.
+Top-level CLI mode does not currently expose `--compute` or `--save`. Use the
+REPL commands `compute` and `save` for execution and image output.
 
-#### `switch <name> [c]`
-Switches the active session to `<name>`. If `c` is provided, it first copies the content of the current session to the target session `<name>` and then switches.
+## 3. REPL Mode
 
-#### `close <name>`
-Closes a loaded graph session, removing it from memory.
+Start the REPL:
 
-#### `graphs`
-Lists all currently loaded graph sessions and indicates which one is active.
+```bash
+./build/bin/graph_cli
+```
 
-#### `source <filepath>`
-Executes a series of REPL commands from a script file. Lines starting with `#` are ignored.
+or load a graph first:
 
-#### `node [<id>]`
-Opens the interactive **TUI Node Editor**. If `<id>` is provided, it focuses on that node.
+```bash
+./build/bin/graph_cli --read graph.yaml --repl
+```
 
-#### `print [<id>|all] [full|simplified]`
-Displays a hierarchical dependency tree.
-*   **Target**: `<id>` for a specific tree, or `all` for all final nodes (default).
-*   **Mode**: `full` shows parameters, `simplified` hides them.
+The prompt is `ps>`. Type `help` for all commands or `help <command>` for
+command-specific help.
 
-#### `traversal [flags]`
-Shows the evaluation order for the graph.
-*   **Tree Flags**: `f` (full), `s` (simplified), `n` (no tree).
-*   **Cache Flags**: `m` (memory status), `d` (disk status), `c` (sync memory to disk), `cr` (sync and remove orphaned disk files).
+## 4. Session Commands
 
-#### `ops [all|builtin|plugins]`
-Lists all registered operations.
-*   `all`: Shows all operations (default).
-*   `builtin`: Shows only built-in operations.
-*   `plugins`: Shows only operations from plugins.
+| Command | Description |
+| --- | --- |
+| `read <file>` | Load YAML into the current session, creating `default` when needed. |
+| `load <name> [yaml]` | Load a named graph session. If `yaml` is omitted, loads `sessions/<name>/content.yaml`. |
+| `switch <name> [c]` | Switch active sessions. With `c`, copy the current session to the target first. |
+| `close <name>` | Close a loaded graph session. |
+| `graphs` | List loaded sessions and mark the current one. |
+| `source <file>` | Execute REPL commands from a script file; blank lines and `#` comments are ignored. |
+| `exit`, `quit`, `q` | Leave the REPL. |
 
-#### `output <filepath>`
-Saves the structure of the currently loaded graph to a new YAML file.
+## 5. Graph Inspection Commands
 
-#### `clear-graph`
-Removes all nodes from the current in-memory graph.
+| Command | Description |
+| --- | --- |
+| `print [all|<id>] [full|simplified] [inspect|i]` | Print dependency trees. `inspect` also dumps cached debug/spatial metadata. |
+| `traversal [f|s|n] [m|d|md] [c|cr]` | Print post-order evaluation for ending nodes. Optional flags control tree detail, cache status, and disk sync. |
+| `inspect <node_id> | all` | Display cached output metadata. |
+| `ops [all|builtin|plugins]` | List registered operations and plugin sources. |
+| `output <file>` | Save the active graph YAML. |
+| `clear-graph` | Remove all nodes and edges from the active graph. |
 
-#### `cc` or `clear-cache [m|d|md]`
-Clears the computation cache for the current graph.
-*   `m`: Clears the in-memory cache only.
-*   `d`: Clears the on-disk cache only.
-*   `md` or `dm`: Clears both (default).
+`print` modes:
 
-#### `compute <id|all> [flags]`
-Executes nodes and their dependencies.
-*   **Target**: `all` computes all final nodes; `<id>` computes a specific node.
-*   **Flags**:
-    *   `force`: Re-computes nodes even if memory caches exist.
-    *   `force-deep`: Re-computes nodes even if memory or disk caches exist.
-    *   `parallel`: Uses a multi-threaded scheduler for computation.
-    *   `t`: Prints a simple console timer summary.
-    *   `tl [path]`: Logs detailed timer info to a structured YAML file.
-    *   `m` or `mute`: Suppresses progress output during computation.
+- `full`: include parameters.
+- `simplified`: hide parameters.
+- `inspect` or `i`: include cache/debug metadata for each node.
 
-#### `config`
-Opens the interactive **TUI Configuration Editor**.
+`traversal` flags:
 
-#### `save <id> <filepath>`
-Computes a node and saves its image output to a file.
+- `f`, `s`, `n`: full tree, simplified tree, or no tree.
+- `m`, `d`, `md`: memory, disk, or both cache status.
+- `c`: check and save cache state.
+- `cr`: synchronize disk cache and remove orphaned files.
 
-#### `free`
-Frees the in-memory cache for any node that is not a final "ending" node.
+## 6. Compute And Cache Commands
 
-#### `exit`
-Quits the interactive shell.
+| Command | Description |
+| --- | --- |
+| `compute <id|all> [flags]` | Compute one node or all ending nodes. |
+| `save <id> <file>` | Compute a node and save its floating-point image output. |
+| `clear-cache [m|d|md]` or `cc [m|d|md]` | Clear memory cache, disk cache, or both. |
+| `free` | Free memory used by non-essential intermediate nodes. |
 
----
+`compute` flags:
 
-## 5. The TUI Editors
+| Flag | Description |
+| --- | --- |
+| `force` | Clear in-memory caches before compute. |
+| `force-deep` | Clear memory and disk caches before compute. |
+| `parallel` | Use multi-threaded compute where supported. |
+| `t`, `-t`, `timer` | Print simple timing to the console. |
+| `tl`, `-tl <path>` | Write detailed timings to a file. |
+| `m`, `-m`, `mute` | Suppress node result output. |
+| `nosave`, `ns` | Skip saving caches for this compute. |
 
-### TUI Node Editor (`node` command)
-*   **Layout**:
-    *   **Left Column**: A list of all nodes and the YAML editor for the selected node.
-    *   **Right Column**: A view of the entire graph's dependency tree and a context-sensitive tree for the selected node.
-*   **Keybindings**:
-    *   `<Tab>`: Cycle focus between the four main panes.
-    *   `<Ctrl-S>`: **Apply** changes from the editor to the in-memory graph.
-    *   `<Ctrl-D>`: **Discard** changes in the editor.
-    *   `<Ctrl-E>`: Open the node's YAML in your system's default `$EDITOR`.
-    *   `<Esc>` or `<Ctrl-C>`: Exit the editor.
+Examples:
 
-### TUI Config Editor (`config` command)
-*   **Modes**: Navigate, Edit, and Command modes for managing settings.
-*   **Keybindings**:
-    *   `e`: Enter **Edit Mode** on the selected line.
-    *   `: `: Enter **Command Mode**.
-    *   `q`: Quit the editor.
-*   **Commands**: In command mode, use `w` to write/save, `a` to apply for the current session, and `q` to quit.
+```text
+compute 7 parallel t
+compute all force tl out/timer.yaml
+save 7 out/result.png
+```
 
----
+## 7. TUI Commands
 
-## 6. Configuration (`config.yaml`)
+| Command | Description |
+| --- | --- |
+| `node [<id>]` | Open the FTXUI node editor and optionally focus a node. |
+| `config` | Open the interactive configuration editor. |
+| `benchmark <benchmark_dir>` | Open the benchmark-suite TUI editor. |
 
-This file controls the application's default behavior.
+The node editor lets you inspect graph structure, edit node YAML, apply or
+discard edits, and open the selected node in `$EDITOR`.
 
-| Key | Description | Example Value |
-| :--- | :--- | :--- |
-| `cache_root_dir` | Directory for on-disk cache files. | `cache` |
-| `plugin_dirs` | List of directories to scan for plugins (`.so`/`.dll`). | `[build/plugins]` |
-| `cache_precision`| Precision for cached images ('int8' or 'int16'). | `int8` |
-| `default_print_mode`| Default mode for the `print` command (`full` or `simplified`).| `full` |
-| `default_traversal_arg`| Default flags for the `traversal` command. | `n` |
-| `default_cache_clear_arg`| Default flags for the `cc` or `clear-cache` command. | `md` |
-| `default_exit_save_path`| Default filename when saving an unsaved graph on exit. | `graph_out.yaml` |
-| `exit_prompt_sync`| Default answer for syncing cache on exit (`true`/`false`). | `true` |
-| `config_save_behavior`| Save action after using the TUI `config` editor (`current`, `default`, `ask`, `none`). | `ask` |
-| `editor_save_behavior`| Behavior for saving from the `node` editor (`ask`, `auto_save_on_apply`, `manual`). | `ask` |
-| `default_timer_log_path`| Default file path for the `compute tl` command. | `out/timer.yaml` |
-| `default_ops_list_mode`| Default mode for the `ops` command (`all`, `builtin`, `plugins`). | `all` |
-| `ops_plugin_path_mode`| How to display plugin paths in `ops` (`name_only`, `relative_path`, `absolute_path`). | `name_only` |
-| `default_compute_args`| Space-separated default flags for the `compute` command. | `t` |
-| `history_size` | Number of commands to remember in REPL history. | `1000` |
-| `switch_after_load`| After a `load`, automatically `switch` to the new session. | `true` |
-| `session_warning`| Show a warning when overwriting an existing session's content. | `true` |
+The config editor edits the active `CliConfig` fields and can save or apply the
+current values depending on `config_save_behavior`.
 
----
+## 8. Scheduler Commands
 
-## 7. Built-in Operations
+Use `scheduler` to inspect or change per-graph schedulers:
 
-### 7.1. Image Source & Generation
+```text
+scheduler list
+scheduler get [hp|rt|all]
+scheduler set <hp|rt> <type>
+scheduler scan [dir]
+scheduler load <path>
+scheduler plugins
+```
 
-#### `image_source:path`
-Loads an image from a local file path.
-*   **Parameters**: `path` (string, required).
+Built-in scheduler types:
 
-#### `image_generator:perlin_noise`
-Generates a Perlin noise image.
-*   **Parameters**: `width` (int, 256), `height` (int, 256), `grid_size` (double, 1.0).
+| Type | Description |
+| --- | --- |
+| `cpu_work_stealing` | Multi-threaded CPU scheduler with work stealing. |
+| `serial_debug` | Single-threaded scheduler useful for debugging. |
+| `gpu_pipeline` | Heterogeneous scheduler with GPU/CPU routing. |
+| `heterogeneous` | Alias for `gpu_pipeline`. |
 
-#### `image_generator:constant`
-Creates an image filled with a constant value.
-*   **Parameters**: `width` (int, 0), `height` (int, 0), `value` (int, 0), `channels` (int, 1).
+Example:
 
-### 7.2. Image Processing
+```text
+scheduler get
+scheduler set hp serial_debug
+scheduler scan build/schedulers
+```
 
-#### `image_process:gaussian_blur`
-Applies a Gaussian blur.
-*   **Parameters**: `ksize` (int, 3), `sigmaX` (double, 0.0).
+## 9. Benchmark Commands
 
-#### `image_process:resize`
-Changes image dimensions.
-*   **Parameters**: `width` (int, required), `height` (int, required), `interpolation` (string, "linear").
+| Command | Description |
+| --- | --- |
+| `benchmark <benchmark_dir>` | Edit `<benchmark_dir>/benchmark_config.yaml` in the benchmark TUI. |
+| `bench <benchmark_dir> <output_dir>` | Run enabled benchmark sessions and write `summary.md` and `raw_data.csv`. |
 
-#### `image_process:crop`
-Extracts a rectangular region.
-*   **Parameters**: `mode` (string, "value"), `x`, `y`, `width`, `height` (required).
+Example:
 
-#### `image_process:extract_channel`
-Isolates a single color channel.
-*   **Parameters**: `channel` (string or int, "a"). Values: "b", "g", "r", "a" or 0-3.
+```text
+benchmark benchmarks/milestone2
+bench benchmarks/milestone2 out/milestone2_results
+```
 
-#### `image_process:convolve`
-Applies a 2D convolution using another image as the kernel.
-*   **Inputs**: 2 images (source, kernel).
-*   **Parameters**: `padding` (string, "replicate"), `absolute` (int, 1), `horizontal_and_vertical` (int, 0).
+## 10. Configuration
 
-#### `image_process:curve_transform`
-Applies the formula `output = 1 / (1 + k * input)`.
-*   **Parameters**: `k` (double, 1.0).
+The default config file is `config.yaml`. If it is missing, `graph_cli` creates
+one with default values.
 
-### 7.3. Image Mixing
+| Key | Default | Description |
+| --- | --- | --- |
+| `cache_root_dir` | `cache` | Disk cache root. |
+| `plugin_dirs` | `[build/plugins]` | Operation plugin search paths. |
+| `scheduler_dirs` | `[build/schedulers]` | Scheduler plugin search paths. |
+| `cache_precision` | `int8` | Disk cache image precision. |
+| `history_size` | `1000` | REPL history length. |
+| `default_print_mode` | `full` | Default `print` mode. |
+| `default_traversal_arg` | `n` | Default traversal flags. |
+| `default_cache_clear_arg` | `md` | Default cache clear target. |
+| `default_exit_save_path` | `graph_out.yaml` | Default save path on exit prompts. |
+| `exit_prompt_sync` | `true` | Prompt to sync cache on exit. |
+| `config_save_behavior` | `current` | Config editor save behavior. |
+| `editor_save_behavior` | `ask` | Node editor save behavior. |
+| `default_timer_log_path` | `out/timer.yaml` | Default detailed timing path. |
+| `default_ops_list_mode` | `all` | Default `ops` list mode. |
+| `ops_plugin_path_mode` | `name_only` | How plugin paths are displayed. |
+| `default_compute_args` | empty | Default flags appended to `compute` when none are provided. |
+| `switch_after_load` | `true` | Make a loaded graph the active session. |
+| `session_warning` | `true` | Warn before overwriting session content. |
+| `scheduler_hp_type` | `cpu_work_stealing` | Default HP scheduler. |
+| `scheduler_rt_type` | `cpu_work_stealing` | Default RT scheduler. |
+| `scheduler_worker_count` | `0` | CPU scheduler worker count; `0` means auto. |
 
-#### `image_mixing:add_weighted`
-Blends two images: `alpha*img1 + beta*img2 + gamma`.
-*   **Inputs**: 2 images.
-*   **Parameters**: `alpha` (double, 0.5), `beta` (double, 0.5), `gamma` (double, 0.0), `merge_strategy` (string, "resize"), `channel_mapping` (map, optional).
+## 11. Built-In Operations
 
-#### `image_mixing:diff`
-Computes the absolute difference between two images.
-*   **Inputs**: 2 images.
-*   **Parameters**: `merge_strategy` (string, "resize").
+Built-ins are registered in `src/ops.cpp`.
 
-#### `image_mixing:multiply`
-Performs pixel-wise multiplication of two images.
-*   **Inputs**: 2 images.
-*   **Parameters**: `scale` (double, 1.0), `merge_strategy` (string, "resize").
+| Type | Subtype | Description |
+| --- | --- | --- |
+| `image_source` | `path` | Load an image from a local path. |
+| `image_generator` | `constant` | Create a constant image. |
+| `image_generator` | `perlin_noise` | Generate a Perlin noise image. |
+| `analyzer` | `get_dimensions` | Emit width and height metadata. |
+| `math` | `divide` | Divide numeric operands. |
+| `image_process` | `convolve` | Apply a convolution kernel image. |
+| `image_process` | `resize` | Resize an image. |
+| `image_process` | `crop` | Crop a rectangular region. |
+| `image_process` | `extract_channel` | Extract B/G/R/A or numeric channel. |
+| `image_process` | `gaussian_blur` | Gaussian blur with monolithic and tiled implementations. |
+| `image_process` | `gaussian_blur_tiled` | Tiled blur alias retained for older graphs. |
+| `image_process` | `curve_transform` | Apply the curve transform kernel. |
+| `image_mixing` | `add_weighted` | Weighted blend of two images. |
+| `image_mixing` | `diff` | Absolute difference of two images. |
+| `image_mixing` | `multiply` | Pixel-wise multiplication. |
 
-### 7.4. Data & Utility
+Plugin examples from `custom_ops/` add `image_process:invert`,
+`image_process:threshold`, `io:save`, and on macOS
+`image_generator:perlin_noise_metal`.
 
-#### `analyzer:get_dimensions`
-Outputs the width and height of an image as data.
-*   **Outputs**: Data (`width`: int, `height`: int).
+## 12. Validation
 
-#### `math:divide`
-Divides two numbers.
-*   **Outputs**: Data (`result`: double).
-*   **Parameters**: `operand1` (double, required), `operand2` (double, required).
+Build the CLI:
+
+```bash
+cmake --build build --target graph_cli -j
+```
+
+Run registered CTest tests:
+
+```bash
+ctest --output-on-failure --test-dir build
+```
+
+Run a specific test executable:
+
+```bash
+cmake --build build --target test_scheduler -j
+./build/tests/test_scheduler
+```
