@@ -1,141 +1,231 @@
-# Photospider: A Dynamic Image Processing Graph Engine
+# Photospider
 
-[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
+Photospider is a C++17 image-processing graph runtime. It loads YAML graphs,
+executes node dependencies, caches intermediate results, and exposes both a
+command-line entry point and an interactive REPL/TUI for graph inspection and
+editing.
 
-Photospider is a powerful, C++17-based command-line tool for creating, managing, and executing complex image processing pipelines. Unlike simple, linear pipeline tools, Photospider is a true **dynamic data flow engine**.
+The current codebase is a mid-migration runtime: the classic recursive compute
+path, cache service, RT/HP scheduler model, ROI propagation, scheduler plugins,
+and Metal hooks all coexist. For architecture details, start with
+`docs/kernel-architecture/Overview.md`.
 
-This means the output of one node (e.g., a computed number, a string, or a dimension) can be used as an **input parameter** for another node. This enables the creation of intelligent, self-configuring graphs where processing steps can adapt based on the data flowing through the system.
+## Repository Layout
 
-## Key Features
+| Path | Purpose |
+| --- | --- |
+| `cli/` | `graph_cli` executable entry point. |
+| `src/cli/` | REPL commands, command help, TUI editors, autocomplete. |
+| `src/kernel/` | Kernel facade, graph runtime, schedulers, services. |
+| `src/adapter/` | Buffer adapters for OpenCV and Metal. |
+| `src/benchmark/` | Benchmark configuration and execution support. |
+| `src/metal/` | Apple Metal-backed operation code. |
+| `include/` | Public headers mirroring the runtime and CLI modules. |
+| `custom_ops/` | Shared operation plugins built into `build/plugins`. |
+| `tests/` | GoogleTest sources. |
+| `docs/` | Maintained documentation. Older phase docs live in `docs/outdated`. |
+| `util/` | Scratch graphs, examples, and local test inputs. |
+| `extern/ftxui/` | Vendored FTXUI source when the submodule is present. |
 
-*   **Dynamic Graph Execution**: Go beyond static pipelines with parameters that are computed at runtime.
-*   **Multi-threaded Compute Engine**: A parallel scheduler to accelerate computations on multi-core CPUs.
-*   **Interactive TUI Editor**: A terminal-based UI to visually inspect and edit your entire node graph, with live dependency trees and YAML editing.
-*   **Advanced REPL/CLI**: An interactive shell (`ps>`) to load, inspect, modify, and run graphs on the fly, with powerful commands and scripting support.
-*   **YAML-Based Definitions**: Define complex graphs in a clean, human-readable format.
-*   **Extensible Plugin System**: Easily add new C++ functions as nodes by dropping shared libraries (`.so`/`.dll`) into a `plugins` folder, with no need to recompile the main application.
-*   **Intelligent Caching**: In-memory and on-disk caching for both images and metadata reduces re-computation.
-*   **Cycle Detection**: Protects against invalid graph structures.
-*   **Performance Profiling**: Built-in tools to time node execution and cache performance.
+Generated directories such as `build/`, `cache/`, `out/`, and `sessions/`
+should remain untracked.
 
-## Interactive TUI Editor
+## Dependencies
 
-Photospider now includes a powerful interactive TUI for editing and inspecting graphs directly in your terminal. Launch it from the REPL using the `node` command.
+Required for the main build:
 
-This interface allows you to:
-*   Navigate the list of all nodes in your graph.
-*   View and edit the full YAML definition for any node.
-*   Instantly see the dependency tree for the entire graph and for the selected node.
-*   Apply, discard, or open the node's configuration in an external editor (`$EDITOR`).
+- C++17 compiler
+- CMake 3.16+
+- OpenCV components: `core`, `imgproc`, `imgcodecs`, `videoio`
+- `yaml-cpp`
+- Threads
+- FTXUI, either from `extern/ftxui` or an installed CMake package
 
-## Prerequisites
+Optional or test-only dependencies:
 
-To build Photospider, you will need a C++17 compliant compiler and the following development libraries:
-*   A C++ Compiler (e.g., `g++`, `clang++`)
-*   `pkg-config`
-*   **OpenCV** (version 4.x recommended)
-*   **yaml-cpp**
+- Apple Metal/Foundation/CoreImage/CoreVideo frameworks on macOS for Metal ops
+- GoogleTest and `nlohmann_json` when `BUILD_TESTING=ON`
+- CURL and OpenSSL are detected when available
 
-### Dependency Installation
+### macOS
 
-**On Ubuntu/Debian:**
+```bash
+brew install cmake pkg-config opencv yaml-cpp googletest nlohmann-json
+git submodule update --init --recursive
+```
+
+### Ubuntu/Debian
+
 ```bash
 sudo apt-get update
-sudo apt-get install build-essential pkg-config libopencv-dev libyaml-cpp-dev
+sudo apt-get install build-essential cmake pkg-config libopencv-dev \
+  libyaml-cpp-dev libgtest-dev nlohmann-json3-dev
+git submodule update --init --recursive
 ```
 
-**On macOS (using Homebrew):**
+## Build
+
+Configure out of tree:
+
 ```bash
-brew install pkg-config opencv yaml-cpp
+cmake -S . -B build -DCMAKE_BUILD_TYPE=RelWithDebInfo
 ```
 
-## How to Build
+Build the CLI and backend:
 
-1.  **Clone the repository and its submodules:**
 ```bash
-git clone --recurse-submodules https://github.com/kevin-zf1123/photospider.git
-cd photospider
+cmake --build build --target graph_cli -j
 ```
 
-2.  **Configure the project with CMake:**
-    This command tells CMake to look for the source (`-S .`) in the current directory and prepare the build files in the `build` directory (`-B build`).
+The executable is written to:
+
+```text
+build/bin/graph_cli
+```
+
+Shared libraries are written under `build/lib`, operation plugins under
+`build/plugins`, scheduler plugins under `build/schedulers`, and tests under
+`build/tests`.
+
+Useful build options:
+
 ```bash
-cmake -S . -B build
+cmake -S . -B build -DBUILD_TESTING=ON
+cmake -S . -B build -DUSE_ASAN=ON
+cmake -S . -B build -DUSE_TSAN=ON
 ```
 
-3.  **Compile the project:**
-    This command invokes the compiler to build the project from the generated files in the `build` directory.
+## Test
+
+Run all tests registered with CTest:
+
 ```bash
-cmake --build build
+ctest --output-on-failure --test-dir build
 ```
-4. **Build specific target:**
-    This command builds the target part of the program from the generated files in the `build` directory.
-    
-    
-    
+
+Build or run a focused test binary:
+
 ```bash
-cmake --build build --target <your target>
+cmake --build build --target test_gpu_pipeline_scheduler -j
+./build/tests/test_gpu_pipeline_scheduler
 ```
 
-The main executable `graph_cli` will be created at `build/graph_cli`, and the `build/plugins` directory will be ready for your custom operations.
+Note: the current `CMakeLists.txt` builds every `tests/test_*.cpp` executable,
+but only selected targets are registered with `gtest_discover_tests`.
 
-## How to Use
+## Run
 
-Photospider can be controlled via command-line arguments or through its interactive REPL shell.
+Print command-line options:
 
-### Command-Line Arguments
 ```bash
-# Load a graph, compute the final nodes, and exit
-./build/graph_cli --read my_graph.yaml
-
-# Load a graph and save the result of node 4 to a file
-./build/graph_cli --read my_graph.yaml --compute 4 --save 4 result.png
+./build/bin/graph_cli --help
 ```
 
-### Interactive Shell (REPL)
+Load a graph, print it, and exit:
 
-For more interactive work, start the REPL. This is the default action if no other flags are provided.
 ```bash
-./build/graph_cli
+./build/bin/graph_cli --read path/to/graph.yaml --print
 ```
-This will give you a `ps>` prompt. Type `help` to see the full list of commands. A more detailed guide is available in `manual.md`.
 
-**Common REPL Commands:**
-*   `read <file>`: Load a graph from a YAML file into the current session.
-*   `load <name> <file>`: Load a graph into a named session.
-*   `node <id>`: Open the interactive TUI editor for a specific node.
-*   `print`: Display the detailed dependency tree of the current graph.
-*   `ops`: List all available operations, including from plugins.
-*   `compute <id|all> [force] [parallel] [t]`: Execute a node or all terminal nodes with optional flags.
-*   `save <id> <file>`: Compute a node and save its image output.
-*   `config`: Open the interactive configuration editor.
-*   `exit`: Quit the shell.
+Load a graph and enter the REPL:
 
-## Available Built-in Operations
+```bash
+./build/bin/graph_cli --read path/to/graph.yaml --repl
+```
 
-| Type | Subtype | Description | Key Parameters |
-| :--- | :--- | :--- | :--- |
-| **image\_source** | `path` | Loads an image from a file path. | `path` |
-| **image\_generator**| `perlin_noise` | Generates Perlin noise. | `width`, `height`, `grid_size` |
-| | `constant` | Creates a constant color image. | `width`, `height`, `value`, `channels`|
-| **image\_process**| `gaussian_blur` | Applies a Gaussian blur filter. | `ksize`, `sigmaX` |
-| | `resize` | Resizes an image to a specific width and height. | `width`, `height`, `interpolation` |
-| | `crop` | Extracts a rectangular region from an image. | `mode`, `x`, `y`, `width`, `height` |
-| | `extract_channel` | Isolates a single channel (B,G,R,A). | `channel` |
-| | `convolve` | Applies a 2D convolution with a kernel image. | `padding`, `absolute` |
-| | `curve_transform`| Applies `1 / (1 + k*I)`. | `k` |
-| **image\_mixing** | `add_weighted` | Blends two images linearly. | `alpha`, `beta`, `gamma`, `merge_strategy` |
-| | `diff` | Computes the absolute difference between two images. | `merge_strategy` |
-| | `multiply` | Multiplies two images pixel-wise. | `scale`, `merge_strategy` |
-| **analyzer** | `get_dimensions` | Outputs the width and height of an image as data. | (None) |
-| **math** | `divide` | Divides two numbers from its parameters. | `operand1`, `operand2` |
+Start the REPL with no preloaded graph:
 
-## License
+```bash
+./build/bin/graph_cli
+```
 
-This project is licensed under the MIT License.
+The command-line parser currently supports graph loading, YAML output, tree
+printing, traversal display, cache clearing, config selection, and REPL entry.
+Graph computation and image saving are REPL commands, not top-level CLI flags.
 
-## Kernel Architecture Docs
+## REPL Commands
 
-- Architecture Overview: `docs/kernel-architecture/Overview.md`
-- Development Roadmap: `docs/kernel-architecture/Roadmap.md`
-- Dirty Region Propagation Spec: `docs/kernel-architecture/Dirty-Region-Propagation.md`
+Type `help` in the REPL for the full command list, or `help <command>` for the
+text stored in `src/cli/command/help/`.
+
+Common commands:
+
+| Command | Purpose |
+| --- | --- |
+| `read <file>` | Load YAML into the current session. |
+| `load <name> [yaml]` | Load or create a named session. |
+| `switch <name> [c]` | Switch sessions; `c` copies current content first. |
+| `graphs` | List loaded graph sessions. |
+| `node [id]` | Open the FTXUI node editor. |
+| `print [all|id] [full|simplified] [inspect|i]` | Print dependency trees and optional cache metadata. |
+| `traversal [f|s|n] [m|d|md] [c|cr]` | Show post-order evaluation and cache state. |
+| `ops [all|builtin|plugins]` | List registered operations. |
+| `compute <id|all> [flags]` | Compute one node or all ending nodes. |
+| `save <id> <file>` | Compute a node and save its image output. |
+| `scheduler ...` | Inspect or change HP/RT scheduler configuration. |
+| `benchmark <dir>` | Edit a benchmark suite. |
+| `bench <benchmark_dir> <output_dir>` | Run benchmark sessions. |
+
+Supported `compute` flags include `force`, `force-deep`, `parallel`,
+`t`/`timer`, `tl <path>`, `m`/`mute`, and `nosave`/`ns`.
+
+## Configuration
+
+By default, `graph_cli` reads `config.yaml` from the working directory. If it is
+missing, the app creates one with defaults.
+
+Important keys:
+
+| Key | Default | Purpose |
+| --- | --- | --- |
+| `cache_root_dir` | `cache` | Disk cache root. |
+| `plugin_dirs` | `[build/plugins]` | Operation plugin search paths. |
+| `scheduler_dirs` | `[build/schedulers]` | Scheduler plugin search paths. |
+| `cache_precision` | `int8` | Disk cache image precision. |
+| `default_print_mode` | `full` | REPL `print` default. |
+| `default_traversal_arg` | `n` | REPL `traversal` default flags. |
+| `default_cache_clear_arg` | `md` | REPL `clear-cache` default target. |
+| `default_timer_log_path` | `out/timer.yaml` | Default `compute tl` output path. |
+| `default_ops_list_mode` | `all` | REPL `ops` default. |
+| `default_compute_args` | empty | Space-separated default `compute` flags. |
+| `scheduler_hp_type` | `cpu_work_stealing` | High-precision scheduler type. |
+| `scheduler_rt_type` | `cpu_work_stealing` | Real-time scheduler type. |
+| `scheduler_worker_count` | `0` | CPU worker count; `0` means auto. |
+
+Use another config file with:
+
+```bash
+./build/bin/graph_cli --config path/to/config.yaml --repl
+```
+
+## Built-In Operations
+
+Built-in operations are registered in `src/ops.cpp`.
+
+| Type | Subtype | Notes |
+| --- | --- | --- |
+| `image_source` | `path` | Load an image from disk. |
+| `image_generator` | `constant` | Create a constant image. |
+| `image_generator` | `perlin_noise` | Generate CPU Perlin noise. |
+| `analyzer` | `get_dimensions` | Return image width/height metadata. |
+| `math` | `divide` | Divide two numeric operands. |
+| `image_process` | `convolve` | Apply a kernel image. |
+| `image_process` | `resize` | Resize an image. |
+| `image_process` | `crop` | Crop a rectangular region. |
+| `image_process` | `extract_channel` | Extract B/G/R/A or numeric channel. |
+| `image_process` | `gaussian_blur` | Monolithic HP plus tiled HP/RT implementations. |
+| `image_process` | `gaussian_blur_tiled` | Backward-compatible tiled alias. |
+| `image_process` | `curve_transform` | Tiled curve transform. |
+| `image_mixing` | `add_weighted` | Blend two images. |
+| `image_mixing` | `diff` | Absolute difference between two images. |
+| `image_mixing` | `multiply` | Pixel-wise multiplication. |
+
+`custom_ops/` currently builds example plugins for `image_process:invert`,
+`image_process:threshold`, `io:save`, and on macOS `image_generator:perlin_noise_metal`.
+
+## Maintained Docs
+
+- `manual.md`: user manual and REPL reference.
+- `docs/kernel-architecture/Overview.md`: current architecture overview.
+- `docs/kernel-architecture/Dirty-Region-Propagation.md`: ROI/dirty-region propagation notes.
+- `docs/outdated/`: older milestone plans, reports, and architecture sketches kept for reference.
