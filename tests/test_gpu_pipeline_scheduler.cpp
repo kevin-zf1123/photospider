@@ -455,6 +455,7 @@ TEST(GpuPipelineIntegrationTest, DualSchedulerConcurrentExecution) {
   rt_opts.node_id = node_id;
   rt_opts.cache_precision = "int8";
   rt_opts.force_recache = true;
+  rt_opts.dirty_roi = cv::Rect(0, 0, 64, 64);
 
   // 并发提交
   auto hp_future = runtime.submit_compute(hp_opts);

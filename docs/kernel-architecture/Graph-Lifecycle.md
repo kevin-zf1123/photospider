@@ -40,9 +40,8 @@ Reloading an existing graph is more sensitive because it operates on a graph
 name that may already be visible. The desired direction is to avoid half-cleared
 or partially rebuilt model state on reload failure.
 
-Open decision: whether failed reload must preserve the previous graph exactly,
-or whether reload should be implemented by loading into a replacement runtime
-and swapping on success.
+Chosen behavior: failed reload preserves the previous graph. Reload validates
+the replacement model before committing it to the visible `GraphModel`.
 
 ## Node YAML Replacement
 
@@ -53,9 +52,9 @@ At minimum, replacement must parse the new node and keep the old node on parse
 or field validation failure. Topology validation should also happen before
 commit so replacement cannot introduce cycles or broken dependencies.
 
-Open decision: whether full graph cycle validation is mandatory before commit
-in the first implementation step, or whether parse-level validation lands first
-and topology validation follows immediately after.
+Replacement validates the candidate topology before commit. If parsing,
+dependency validation, or cycle validation fails, the previous node and graph
+remain visible.
 
 ## GraphModel Clear
 

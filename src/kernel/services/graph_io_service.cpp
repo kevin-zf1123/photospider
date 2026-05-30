@@ -22,11 +22,15 @@ void GraphIOService::load(GraphModel& graph,
     throw GraphError(GraphErrc::InvalidYaml,
                      "YAML root is not a sequence of nodes.");
   }
-  graph.clear();
+  GraphModel loaded(graph.cache_root);
   for (const auto& node_yaml : config) {
     Node node = Node::from_yaml(node_yaml);
-    graph.add_node(node);
+    loaded.add_node(node);
   }
+  loaded.validate_topology();
+
+  graph.clear();
+  graph.nodes = std::move(loaded.nodes);
 }
 
 void GraphIOService::save(const GraphModel& graph,

@@ -11,6 +11,32 @@
 
 namespace ps {
 
+namespace {
+
+const NodeOutput* hp_cache_or_legacy(const Node& node) {
+  if (node.cached_output_high_precision) {
+    return &*node.cached_output_high_precision;
+  }
+  if (node.cached_output) {
+    return &*node.cached_output;
+  }
+  return nullptr;
+}
+
+bool has_memory_cache(const Node& node) {
+  return node.cached_output_high_precision.has_value() ||
+         node.cached_output_real_time.has_value() ||
+         node.cached_output.has_value();
+}
+
+void reset_memory_cache(Node& node) {
+  node.cached_output_high_precision.reset();
+  node.cached_output_real_time.reset();
+  node.cached_output.reset();
+}
+
+}  // namespace
+
 std::filesystem::path GraphCacheService::node_cache_dir(const GraphModel& graph,
                                                         int node_id) const {
   return graph.cache_root / std::to_string(node_id);
@@ -22,12 +48,11 @@ void GraphCacheService::save_cache_if_configured(
   if (graph.skip_save_cache_.load(std::memory_order_relaxed)) {
     return;
   }
-  if (graph.cache_root.empty() || node.caches.empty() ||
-      !node.cached_output.has_value()) {
+  const NodeOutput* output = hp_cache_or_legacy(node);
+  if (graph.cache_root.empty() || node.caches.empty() || !output) {
     return;
   }
 
-  const auto& output = *node.cached_output;
   for (const auto& cache_entry : node.caches) {
     if (cache_entry.cache_type != "image" || cache_entry.location.empty()) {
       continue;
@@ -39,8 +64,8 @@ void GraphCacheService::save_cache_if_configured(
 
     auto start_io = std::chrono::high_resolution_clock::now();
 
-    if (output.image_buffer.width > 0 && output.image_buffer.height > 0) {
-      cv::Mat mat_to_save = toCvMat(output.image_buffer);
+    if (output->image_buffer.width > 0 && output->image_buffer.height > 0) {
+      cv::Mat mat_to_save = toCvMat(output->image_buffer);
       if (!mat_to_save.empty()) {
         cv::Mat out_mat;
         if (cache_precision == "int16") {
@@ -52,11 +77,11 @@ void GraphCacheService::save_cache_if_configured(
       }
     }
 
-    if (!output.data.empty()) {
+    if (!output->data.empty()) {
       fs::path meta_path = final_path;
       meta_path.replace_extension(".yml");
       YAML::Node meta_node;
-      for (const auto& pair : output.data) {
+      for (const auto& pair : output->data) {
         meta_node[pair.first] = pair.second;
       }
       std::ofstream fout(meta_path);
@@ -77,9 +102,11 @@ void GraphCacheService::save_cache_if_configured(
 
 bool GraphCacheService::try_load_from_disk_cache(GraphModel& graph,
                                                  Node& node) const {
-  if (node.cached_output.has_value() || graph.cache_root.empty() ||
+  if (node.cached_output_high_precision.has_value() ||
+      node.cached_output.has_value() || graph.cache_root.empty() ||
       node.caches.empty()) {
-    return node.cached_output.has_value();
+    return node.cached_output_high_precision.has_value() ||
+           node.cached_output.has_value();
   }
 
   auto start_io = std::chrono::high_resolution_clock::now();
@@ -121,7 +148,8 @@ bool GraphCacheService::try_load_from_disk_cache(GraphModel& graph,
         }
       }
 
-      node.cached_output = std::move(loaded_output);
+      node.cached_output_high_precision = std::move(loaded_output);
+      node.cached_output = node.cached_output_high_precision;
       loaded = true;
       break;
     }
@@ -223,8 +251,8 @@ GraphModel::MemoryClearResult GraphCacheService::clear_memory_cache(
     GraphModel& graph) const {
   GraphModel::MemoryClearResult result;
   for (auto& pair : graph.nodes) {
-    if (pair.second.cached_output.has_value()) {
-      pair.second.cached_output.reset();
+    if (has_memory_cache(pair.second)) {
+      reset_memory_cache(pair.second);
       result.cleared_nodes++;
     }
   }
@@ -240,7 +268,7 @@ GraphModel::CacheSaveResult GraphCacheService::cache_all_nodes(
     GraphModel& graph, const std::string& cache_precision) const {
   GraphModel::CacheSaveResult result;
   for (const auto& pair : graph.nodes) {
-    if (pair.second.cached_output.has_value()) {
+    if (hp_cache_or_legacy(pair.second)) {
       save_cache_if_configured(graph, pair.second, cache_precision);
       result.saved_nodes++;
     }
@@ -256,8 +284,8 @@ GraphModel::MemoryClearResult GraphCacheService::free_transient_memory(
 
   GraphModel::MemoryClearResult result;
   for (auto& pair : graph.nodes) {
-    if (pair.second.cached_output.has_value() && !endset.count(pair.first)) {
-      pair.second.cached_output.reset();
+    if (has_memory_cache(pair.second) && !endset.count(pair.first)) {
+      reset_memory_cache(pair.second);
       result.cleared_nodes++;
     }
   }
@@ -271,7 +299,8 @@ GraphModel::DiskSyncResult GraphCacheService::synchronize_disk_cache(
 
   for (const auto& pair : graph.nodes) {
     const Node& node = pair.second;
-    if (node.cached_output.has_value() || node.caches.empty()) {
+    if (hp_cache_or_legacy(node) || node.cached_output_real_time.has_value() ||
+        node.caches.empty()) {
       continue;
     }
 

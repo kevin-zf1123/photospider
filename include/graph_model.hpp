@@ -56,6 +56,7 @@ class GraphModel {
   void clear();
   void add_node(const Node& node);
   bool has_node(int id) const;
+  void validate_topology() const;
 
   void set_skip_save_cache(bool v);
   bool skip_save_cache() const;

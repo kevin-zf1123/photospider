@@ -37,6 +37,49 @@ bool is_ancestor(const GraphModel& graph, int potential_ancestor_id,
   return false;
 }
 
+void validate_node_dfs(const GraphModel& graph, int node_id,
+                       std::unordered_set<int>& visiting,
+                       std::unordered_set<int>& visited) {
+  if (visited.count(node_id)) {
+    return;
+  }
+  if (visiting.count(node_id)) {
+    throw GraphError(GraphErrc::Cycle,
+                     "Cycle detected while validating graph topology.");
+  }
+
+  auto node_it = graph.nodes.find(node_id);
+  if (node_it == graph.nodes.end()) {
+    throw GraphError(GraphErrc::MissingDependency,
+                     "Missing node " + std::to_string(node_id) +
+                         " while validating graph topology.");
+  }
+
+  visiting.insert(node_id);
+  const Node& node = node_it->second;
+  auto visit_dependency = [&](int dependency_id) {
+    if (dependency_id == -1) {
+      return;
+    }
+    if (!graph.has_node(dependency_id)) {
+      throw GraphError(GraphErrc::MissingDependency,
+                       "Node " + std::to_string(node.id) +
+                           " references missing node " +
+                           std::to_string(dependency_id) + ".");
+    }
+    validate_node_dfs(graph, dependency_id, visiting, visited);
+  };
+
+  for (const auto& input : node.image_inputs) {
+    visit_dependency(input.from_node_id);
+  }
+  for (const auto& input : node.parameter_inputs) {
+    visit_dependency(input.from_node_id);
+  }
+  visiting.erase(node_id);
+  visited.insert(node_id);
+}
+
 }  // namespace
 
 GraphModel::GraphModel(fs::path cache_root_dir)
@@ -56,6 +99,11 @@ bool GraphModel::is_quiet() const {
 
 void GraphModel::clear() {
   nodes.clear();
+  timing_results.node_timings.clear();
+  timing_results.total_ms = 0.0;
+  total_io_time_ms.store(0.0, std::memory_order_relaxed);
+  skip_save_cache_.store(false, std::memory_order_relaxed);
+  quiet_ = true;
 }
 
 void GraphModel::add_node(const Node& node) {
@@ -87,6 +135,14 @@ void GraphModel::add_node(const Node& node) {
 
 bool GraphModel::has_node(int id) const {
   return nodes.count(id) > 0;
+}
+
+void GraphModel::validate_topology() const {
+  std::unordered_set<int> visiting;
+  std::unordered_set<int> visited;
+  for (const auto& [id, _] : nodes) {
+    validate_node_dfs(*this, id, visiting, visited);
+  }
 }
 
 void GraphModel::set_skip_save_cache(bool v) {

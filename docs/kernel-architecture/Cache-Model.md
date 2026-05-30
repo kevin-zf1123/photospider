@@ -78,7 +78,6 @@ known migration area.
   migrate to `cached_output_high_precision`.
 - Tests should verify HP and RT fields independently.
 
-`GraphInspectService` currently picks cached output in legacy order
-(`cached_output`, then HP, then RT) and formats debug/spatial metadata. After
-the legacy HP name is removed, inspect behavior should be redefined to show HP,
-RT, or both explicitly.
+`GraphInspectService` prefers HP, then RT, then legacy `cached_output` for
+compatibility. Future inspect work should display HP and RT metadata explicitly
+instead of collapsing them into one selected output.

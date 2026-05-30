@@ -2,6 +2,7 @@
 
 #include <memory>
 #include <opencv2/core.hpp>  // 用于 cv::Rect
+#include <cstddef>
 #include <vector>
 
 namespace ps {
@@ -39,6 +40,13 @@ struct ImageBuffer {
   // 这使得我们可以在不污染核心数据结构的前提下，传递GPU纹理等信息。
   std::shared_ptr<void> context = nullptr;
 };
+
+size_t image_buffer_bytes_per_channel(DataType type);
+size_t aligned_image_buffer_step(int width, int channels, DataType type,
+                                 size_t alignment = 64);
+ImageBuffer make_aligned_cpu_image_buffer(int width, int height, int channels,
+                                          DataType type,
+                                          size_t alignment = 64);
 
 // 图像分块的视图（View）。
 // 它不拥有数据，只是指向 ImageBuffer 的一部分，非常轻量。

@@ -26,6 +26,10 @@ The repo should also document or provide:
 - lint and formatting commands
 - the expected local validation command set
 
+The root CMake configuration exports `compile_commands.json` and defaults
+mainline macOS builds to `arm64` when no `CMAKE_OSX_ARCHITECTURES` value is
+provided.
+
 ## CTest Registration
 
 All intended GoogleTest binaries should be registered with CTest. This includes
@@ -34,6 +38,10 @@ milestone and propagation tests that may currently be low-confidence.
 Low-confidence tests should still be visible in validation rather than silently
 excluded. If a test is not reliable enough to gate development, document that
 status explicitly and create follow-up work to upgrade or replace it.
+
+Milestone and propagation tests are registered with CTest so they are visible,
+but they remain low-confidence legacy tests until a follow-up pass rewrites them
+as narrower regression tests with clearer fixtures and assertions.
 
 ## Known Test Quality Caveat
 
