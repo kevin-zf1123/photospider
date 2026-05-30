@@ -99,12 +99,12 @@ cv::Rect transform_rect_with_matrix(const cv::Rect& rect,
 }
 
 const NodeOutput* pick_cached_output(const Node& node) {
-  if (node.cached_output)
-    return &node.cached_output.value();
   if (node.cached_output_high_precision)
     return &node.cached_output_high_precision.value();
   if (node.cached_output_real_time)
     return &node.cached_output_real_time.value();
+  if (node.cached_output)
+    return &node.cached_output.value();
   return nullptr;
 }
 

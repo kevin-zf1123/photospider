@@ -706,7 +706,12 @@ bool Kernel::set_node_yaml(const std::string& name, int node_id,
           YAML::Node root = YAML::Load(yaml_text);
           ps::Node updated = ps::Node::from_yaml(root);
           updated.id = node_id;
-          g.nodes[node_id] = std::move(updated);
+          GraphModel candidate(g.cache_root);
+          candidate.nodes = g.nodes;
+          candidate.nodes.erase(node_id);
+          candidate.add_node(updated);
+          candidate.validate_topology();
+          g.nodes = std::move(candidate.nodes);
           return true;
         })
         .get();
@@ -1000,4 +1005,3 @@ std::optional<std::pair<std::string, std::string>> Kernel::get_scheduler_info(
 }
 
 }  // namespace ps
-

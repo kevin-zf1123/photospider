@@ -21,12 +21,17 @@ endif()
 option(USE_ASAN "Enable AddressSanitizer" OFF)
 option(USE_TSAN "Enable ThreadSanitizer" OFF)
 option(BUILD_TESTING "Build tests" ON)
+set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
 
 # --- Compiler Settings ---
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_CXX_EXTENSIONS OFF)
 set(CMAKE_POSITION_INDEPENDENT_CODE ON) # Required for static libs linking into shared libs
+
+if(APPLE AND NOT CMAKE_OSX_ARCHITECTURES)
+    set(CMAKE_OSX_ARCHITECTURES "arm64" CACHE STRING "macOS target architecture" FORCE)
+endif()
 
 if(CMAKE_CXX_COMPILER_ID MATCHES "Clang|GNU")
     add_compile_options(-Wall -Wextra -Wno-unused-parameter)
@@ -95,6 +100,7 @@ endif()
 
 # Module: Core Types
 add_library(photospider_core_types STATIC
+    src/image_buffer.cpp
     src/ps_types.cpp
     src/adapter/buffer_adapter_opencv.cpp
     src/ops.cpp
@@ -341,6 +347,7 @@ if(BUILD_TESTING)
     add_ps_test(test_milestone3 tests/test_milestone3.cpp)
     add_ps_test(test_milestone34 tests/test_milestone34.cpp)
     add_ps_test(test_propagation tests/test_propagation.cpp)
+    add_ps_test(test_kernel_contracts tests/test_kernel_contracts.cpp)
     
     # [M3.1] OpRegistry 多设备实现测试
     add_ps_test(test_op_registry_m31 tests/test_op_registry_m31.cpp)
@@ -350,10 +357,15 @@ if(BUILD_TESTING)
     
     # [M3.5] 调度器插件加载器测试
     add_ps_test(test_scheduler_plugin_loader tests/test_scheduler_plugin_loader.cpp)
+    target_link_libraries(test_scheduler_plugin_loader PRIVATE ${CMAKE_DL_LIBS})
     
     gtest_discover_tests(test_scheduler WORKING_DIRECTORY ${PROJECT_SOURCE_DIR})
+    gtest_discover_tests(test_milestone2 WORKING_DIRECTORY ${PROJECT_SOURCE_DIR})
+    gtest_discover_tests(test_milestone3 WORKING_DIRECTORY ${PROJECT_SOURCE_DIR})
     gtest_discover_tests(test_op_registry_m31 WORKING_DIRECTORY ${PROJECT_SOURCE_DIR})
     gtest_discover_tests(test_milestone34 WORKING_DIRECTORY ${PROJECT_SOURCE_DIR})
+    gtest_discover_tests(test_propagation WORKING_DIRECTORY ${PROJECT_SOURCE_DIR})
+    gtest_discover_tests(test_kernel_contracts WORKING_DIRECTORY ${PROJECT_SOURCE_DIR})
     gtest_discover_tests(test_gpu_pipeline_scheduler WORKING_DIRECTORY ${PROJECT_SOURCE_DIR})
     gtest_discover_tests(test_scheduler_plugin_loader WORKING_DIRECTORY ${PROJECT_SOURCE_DIR})
 endif()

@@ -101,6 +101,7 @@ graph TD
 | `Scheduler-Architecture.md` | Formal `IScheduler` target model, built-in schedulers, and migration state. |
 | `Plugin-ABI.md` | Operation plugin and scheduler plugin ABI contracts. |
 | `Development-Validation.md` | Mainline macOS architecture, CTest expectations, and follow-up refactor boundaries. |
+| `Benchmark-Spikes.md` | Metal adapter and ARM alignment benchmark plans and follow-up status. |
 
 ## Compute Flow
 

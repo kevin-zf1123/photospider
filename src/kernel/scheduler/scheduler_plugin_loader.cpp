@@ -2,6 +2,7 @@
 #include "kernel/scheduler/scheduler_plugin_loader.hpp"
 
 #include <algorithm>
+#include <future>
 #include <iostream>
 #include <sstream>
 
@@ -15,22 +16,96 @@
 
 namespace ps {
 
+namespace {
+
+std::shared_ptr<void> make_library_lifetime(void* handle) {
+#ifdef _WIN32
+  return std::shared_ptr<void>(handle, [](void* ptr) {
+    if (ptr) {
+      FreeLibrary(static_cast<HMODULE>(ptr));
+    }
+  });
+#else
+  return std::shared_ptr<void>(handle, [](void* ptr) {
+    if (ptr) {
+      dlclose(ptr);
+    }
+  });
+#endif
+}
+
+class PluginSchedulerOwner final : public IScheduler {
+ public:
+  PluginSchedulerOwner(IScheduler* scheduler,
+                       void (*destroy)(IScheduler*),
+                       std::shared_ptr<void> library)
+      : scheduler_(scheduler), destroy_(destroy), library_(std::move(library)) {}
+
+  ~PluginSchedulerOwner() override {
+    if (scheduler_) {
+      scheduler_->shutdown();
+      scheduler_->detach();
+      destroy_(scheduler_);
+      scheduler_ = nullptr;
+    }
+  }
+
+  void attach(GraphRuntime* runtime) override { scheduler_->attach(runtime); }
+  void detach() override { scheduler_->detach(); }
+  void start() override { scheduler_->start(); }
+  void shutdown() override { scheduler_->shutdown(); }
+
+  std::future<NodeOutput> schedule(const ComputeOptions& opts) override {
+    return scheduler_->schedule(opts);
+  }
+
+  std::future<NodeOutput> schedule_node(
+      const NodeScheduleRequest& request, GraphModel& graph) override {
+    return scheduler_->schedule_node(request, graph);
+  }
+
+  std::vector<std::future<NodeOutput>> schedule_nodes(
+      const std::vector<NodeScheduleRequest>& requests,
+      GraphModel& graph) override {
+    return scheduler_->schedule_nodes(requests, graph);
+  }
+
+  TaskGroup create_task_group(int node_id,
+                              const std::vector<cv::Rect>& dirty_tiles,
+                              ComputeIntent intent,
+                              uint64_t epoch) override {
+    return scheduler_->create_task_group(node_id, dirty_tiles, intent, epoch);
+  }
+
+  bool should_aggregate_to_macro(const TaskGroup& group) const override {
+    return scheduler_->should_aggregate_to_macro(group);
+  }
+
+  std::string name() const override { return scheduler_->name(); }
+  std::string get_stats() const override { return scheduler_->get_stats(); }
+  bool is_running() const override { return scheduler_->is_running(); }
+  bool supports_node_level_scheduling() const override {
+    return scheduler_->supports_node_level_scheduling();
+  }
+  bool supports_task_group_aggregation() const override {
+    return scheduler_->supports_task_group_aggregation();
+  }
+
+ private:
+  IScheduler* scheduler_ = nullptr;
+  void (*destroy_)(IScheduler*) = nullptr;
+  std::shared_ptr<void> library_;
+};
+
+}  // namespace
+
 SchedulerPluginLoader& SchedulerPluginLoader::instance() {
   static SchedulerPluginLoader instance;
   return instance;
 }
 
 SchedulerPluginLoader::~SchedulerPluginLoader() {
-  // 卸载所有插件
-  for (auto& [path, handle] : loaded_plugins_) {
-    if (handle.handle) {
-#ifdef _WIN32
-      FreeLibrary(static_cast<HMODULE>(handle.handle));
-#else
-      dlclose(handle.handle);
-#endif
-    }
-  }
+  loaded_plugins_.clear();
 }
 
 size_t SchedulerPluginLoader::scan_and_load(const std::string& dir_path) {
@@ -122,6 +197,7 @@ bool SchedulerPluginLoader::load_plugin_internal_unlocked(const fs::path& plugin
                            " (LoadLibrary failed)");
     return false;
   }
+  handle.library = make_library_lifetime(handle.handle);
   
   handle.get_count = reinterpret_cast<decltype(handle.get_count)>(
       GetProcAddress(static_cast<HMODULE>(handle.handle),
@@ -149,6 +225,7 @@ bool SchedulerPluginLoader::load_plugin_internal_unlocked(const fs::path& plugin
                            (err ? err : "unknown error") + ")");
     return false;
   }
+  handle.library = make_library_lifetime(handle.handle);
   
   // 清除之前的错误
   dlerror();
@@ -168,16 +245,12 @@ bool SchedulerPluginLoader::load_plugin_internal_unlocked(const fs::path& plugin
 #endif
 
   // 验证必要的函数
-  if (!handle.get_count || !handle.get_name || !handle.create) {
+  if (!handle.get_count || !handle.get_name || !handle.create ||
+      !handle.destroy) {
     load_errors_.push_back(
         "Plugin missing required exports: " + abs_path +
         " (need " PS_SCHEDULER_PLUGIN_GET_COUNT ", " PS_SCHEDULER_PLUGIN_GET_NAME
-        ", " PS_SCHEDULER_PLUGIN_CREATE ")");
-#ifdef _WIN32
-    FreeLibrary(static_cast<HMODULE>(handle.handle));
-#else
-    dlclose(handle.handle);
-#endif
+        ", " PS_SCHEDULER_PLUGIN_CREATE ", " PS_SCHEDULER_PLUGIN_DESTROY ")");
     return false;
   }
   
@@ -247,15 +320,6 @@ bool SchedulerPluginLoader::unload_plugin(const fs::path& plugin_path) {
   for (const auto& type_name : it->second.registered_types) {
     type_to_plugin_.erase(type_name);
     type_info_.erase(type_name);
-  }
-  
-  // 关闭动态库
-  if (it->second.handle) {
-#ifdef _WIN32
-    FreeLibrary(static_cast<HMODULE>(it->second.handle));
-#else
-    dlclose(it->second.handle);
-#endif
   }
   
   loaded_plugins_.erase(it);
@@ -373,11 +437,8 @@ std::unique_ptr<IScheduler> SchedulerPluginLoader::create(
     return nullptr;
   }
   
-  // 注意：插件创建的调度器需要通过插件的 destroy 函数销毁
-  // 但由于插件的生命周期由 SchedulerPluginLoader 管理，
-  // 且 IScheduler 有虚析构函数，这里直接使用 default_delete
-  // 确保 IScheduler 的析构函数正确实现释放资源
-  return std::unique_ptr<IScheduler>(raw_ptr);
+  return std::make_unique<PluginSchedulerOwner>(
+      raw_ptr, handle.destroy, handle.library);
 }
 
 void SchedulerPluginLoader::register_builtin(
@@ -393,17 +454,6 @@ void SchedulerPluginLoader::register_builtin(
 
 void SchedulerPluginLoader::clear_plugins() {
   std::lock_guard<std::mutex> lock(mutex_);
-  
-  // 卸载所有插件
-  for (auto& [path, handle] : loaded_plugins_) {
-    if (handle.handle) {
-#ifdef _WIN32
-      FreeLibrary(static_cast<HMODULE>(handle.handle));
-#else
-      dlclose(handle.handle);
-#endif
-    }
-  }
   
   loaded_plugins_.clear();
   type_to_plugin_.clear();

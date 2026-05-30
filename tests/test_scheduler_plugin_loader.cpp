@@ -3,8 +3,16 @@
 
 #include <gtest/gtest.h>
 
-#include "kernel/scheduler/scheduler_plugin_loader.hpp"
+#include <filesystem>
+
 #include "kernel/scheduler/scheduler_factory.hpp"
+#include "kernel/scheduler/scheduler_plugin_loader.hpp"
+
+#ifdef _WIN32
+#include <windows.h>
+#else
+#include <dlfcn.h>
+#endif
 
 namespace ps {
 
@@ -174,6 +182,67 @@ TEST_F(SchedulerPluginLoaderTest, ClearPlugins) {
   loader.scan_and_load("build/schedulers");
   auto reloaded = loader.get_registered_types();
   EXPECT_EQ(reloaded.size(), before_count);
+}
+
+TEST_F(SchedulerPluginLoaderTest, PluginSchedulerUsesPluginDestroyAfterClear) {
+  auto& loader = SchedulerPluginLoader::instance();
+
+#if defined(_WIN32)
+  const auto plugin_path =
+      std::filesystem::path("build/schedulers/destroy_count_scheduler_plugin.dll");
+#elif defined(__APPLE__)
+  const auto plugin_path = std::filesystem::path(
+      "build/schedulers/libdestroy_count_scheduler_plugin.dylib");
+#else
+  const auto plugin_path =
+      std::filesystem::path("build/schedulers/libdestroy_count_scheduler_plugin.so");
+#endif
+
+  if (!std::filesystem::exists(plugin_path)) {
+    GTEST_SKIP() << "destroy-count scheduler plugin was not built";
+  }
+
+#ifdef _WIN32
+  HMODULE test_handle = LoadLibrary(plugin_path.string().c_str());
+  ASSERT_NE(test_handle, nullptr);
+  auto reset_counts = reinterpret_cast<void (*)()>(
+      GetProcAddress(test_handle, "ps_test_scheduler_reset_counts"));
+  auto active_count = reinterpret_cast<int (*)()>(
+      GetProcAddress(test_handle, "ps_test_scheduler_active_count"));
+  auto destroy_count = reinterpret_cast<int (*)()>(
+      GetProcAddress(test_handle, "ps_test_scheduler_destroy_count"));
+#else
+  void* test_handle = dlopen(plugin_path.string().c_str(), RTLD_LAZY);
+  ASSERT_NE(test_handle, nullptr) << dlerror();
+  auto reset_counts = reinterpret_cast<void (*)()>(
+      dlsym(test_handle, "ps_test_scheduler_reset_counts"));
+  auto active_count = reinterpret_cast<int (*)()>(
+      dlsym(test_handle, "ps_test_scheduler_active_count"));
+  auto destroy_count = reinterpret_cast<int (*)()>(
+      dlsym(test_handle, "ps_test_scheduler_destroy_count"));
+#endif
+  ASSERT_NE(reset_counts, nullptr);
+  ASSERT_NE(active_count, nullptr);
+  ASSERT_NE(destroy_count, nullptr);
+  reset_counts();
+
+  ASSERT_TRUE(loader.load_plugin(plugin_path));
+  auto scheduler = loader.create("destroy_count_test", 0);
+  ASSERT_NE(scheduler, nullptr);
+  EXPECT_EQ(active_count(), 1);
+  EXPECT_EQ(destroy_count(), 0);
+
+  loader.clear_plugins();
+  EXPECT_EQ(active_count(), 1);
+  scheduler.reset();
+  EXPECT_EQ(active_count(), 0);
+  EXPECT_EQ(destroy_count(), 1);
+
+#ifdef _WIN32
+  FreeLibrary(test_handle);
+#else
+  dlclose(test_handle);
+#endif
 }
 
 }  // namespace ps

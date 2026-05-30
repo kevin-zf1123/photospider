@@ -204,24 +204,6 @@ inline cv::Rect scale_up_rect(const cv::Rect& rect, int factor) {
   return cv::Rect(x0, y0, x1 - x0, y1 - y0);
 }
 
-inline size_t bytes_per_channel(ps::DataType dt) {
-  switch (dt) {
-    case ps::DataType::UINT8:
-      return sizeof(uint8_t);
-    case ps::DataType::INT8:
-      return sizeof(int8_t);
-    case ps::DataType::UINT16:
-      return sizeof(uint16_t);
-    case ps::DataType::INT16:
-      return sizeof(int16_t);
-    case ps::DataType::FLOAT64:
-      return sizeof(double);
-    case ps::DataType::FLOAT32:
-    default:
-      return sizeof(float);
-  }
-}
-
 struct RtPlanEntry {
   cv::Rect roi_hp;
   cv::Rect roi_rt;
@@ -614,14 +596,7 @@ NodeOutput& ComputeService::compute_internal(
               // 分配输出缓冲
               target_node.cached_output = NodeOutput();
               auto& ob = target_node.cached_output->image_buffer;
-              ob.width = out_w;
-              ob.height = out_h;
-              ob.channels = out_c;
-              ob.type = out_t;
-              size_t pix_sz = bytes_per_channel(out_t);
-              ob.step = out_w * out_c * pix_sz;
-              ob.data.reset(new char[ob.step * ob.height],
-                            std::default_delete<char[]>());
+              ob = make_aligned_cpu_image_buffer(out_w, out_h, out_c, out_t);
 
               const int TILE_SIZE = 256, HALO_SIZE = 16;
               auto access_pattern = OpMetadata::InputAccessPattern::SpatialAligned;
@@ -954,14 +929,7 @@ NodeOutput& ComputeService::compute_node_no_recurse(
 
             target_node.cached_output = NodeOutput();
             auto& ob = target_node.cached_output->image_buffer;
-            ob.width = out_w;
-            ob.height = out_h;
-            ob.channels = out_c;
-            ob.type = out_t;
-            size_t pix_sz = sizeof(float);
-            ob.step = out_w * out_c * pix_sz;
-            ob.data.reset(new char[ob.step * ob.height],
-                          std::default_delete<char[]>());
+            ob = make_aligned_cpu_image_buffer(out_w, out_h, out_c, out_t);
 
             const int TILE_SIZE = 256, HALO_SIZE = 16;
             auto access_pattern =
@@ -1372,17 +1340,8 @@ NodeOutput& ComputeService::compute_high_precision_update(
           hp_buffer.height != entry.hp_size.height ||
           hp_buffer.channels != channels || hp_buffer.type != dtype ||
           !hp_buffer.data) {
-        hp_buffer.width = entry.hp_size.width;
-        hp_buffer.height = entry.hp_size.height;
-        hp_buffer.channels = channels;
-        hp_buffer.type = dtype;
-        hp_buffer.device = Device::CPU;
-        size_t row_bytes =
-            static_cast<size_t>(hp_buffer.width) * channels * sizeof(float);
-        hp_buffer.step = row_bytes;
-        hp_buffer.data.reset(new char[row_bytes * hp_buffer.height],
-                             std::default_delete<char[]>());
-        std::memset(hp_buffer.data.get(), 0, row_bytes * hp_buffer.height);
+        hp_buffer = make_aligned_cpu_image_buffer(
+            entry.hp_size.width, entry.hp_size.height, channels, dtype);
       }
 
       // Execute tiling logic
@@ -1572,22 +1531,9 @@ NodeOutput& ComputeService::compute_high_precision_update(
                            (rt_buffer.type != hp_buffer.type) ||
                            (!rt_buffer.data);
         if (needs_alloc) {
-          size_t pixel_size = bytes_per_channel(hp_buffer.type);
-          if (pixel_size == 0) {
-            pixel_size = sizeof(float);
-          }
-          rt_buffer.width = rt_size.width;
-          rt_buffer.height = rt_size.height;
-          rt_buffer.channels = hp_buffer.channels;
-          rt_buffer.type = hp_buffer.type;
-          rt_buffer.device = Device::CPU;
-          rt_buffer.context.reset();
-          rt_buffer.step = static_cast<size_t>(rt_buffer.width) *
-                           rt_buffer.channels * pixel_size;
-          rt_buffer.data.reset(new char[rt_buffer.step * rt_buffer.height],
-                               std::default_delete<char[]>());
-          std::memset(rt_buffer.data.get(), 0,
-                      rt_buffer.step * rt_buffer.height);
+          rt_buffer = make_aligned_cpu_image_buffer(
+              rt_size.width, rt_size.height, hp_buffer.channels,
+              hp_buffer.type);
         }
 
         cv::Rect roi_rt =
@@ -1996,18 +1942,8 @@ NodeOutput& ComputeService::compute_real_time_update(
                        (rt_buffer.channels != channels) ||
                        (rt_buffer.type != dtype) || (!rt_buffer.data);
     if (needs_alloc) {
-      rt_buffer.width = entry.rt_size.width;
-      rt_buffer.height = entry.rt_size.height;
-      rt_buffer.channels = channels;
-      rt_buffer.type = dtype;
-      rt_buffer.device = Device::CPU;
-      size_t pixel_size = sizeof(float);
-      size_t row_bytes =
-          static_cast<size_t>(rt_buffer.width) * channels * pixel_size;
-      rt_buffer.step = row_bytes;
-      rt_buffer.data.reset(new char[row_bytes * rt_buffer.height],
-                           std::default_delete<char[]>());
-      std::memset(rt_buffer.data.get(), 0, row_bytes * rt_buffer.height);
+      rt_buffer = make_aligned_cpu_image_buffer(
+          entry.rt_size.width, entry.rt_size.height, channels, dtype);
     }
 
     try {
@@ -2019,6 +1955,15 @@ NodeOutput& ComputeService::compute_real_time_update(
               if (result.image_buffer.width > 0 &&
                   result.image_buffer.height > 0) {
                 cv::Mat result_mat = toCvMat(result.image_buffer);
+                if (rt_buffer.width != entry.rt_size.width ||
+                    rt_buffer.height != entry.rt_size.height ||
+                    rt_buffer.channels != result.image_buffer.channels ||
+                    rt_buffer.type != result.image_buffer.type ||
+                    !rt_buffer.data) {
+                  rt_buffer = make_aligned_cpu_image_buffer(
+                      entry.rt_size.width, entry.rt_size.height,
+                      result.image_buffer.channels, result.image_buffer.type);
+                }
                 if (result_mat.cols != entry.rt_size.width ||
                     result_mat.rows != entry.rt_size.height) {
                   cv::resize(
@@ -2465,14 +2410,9 @@ NodeOutput& ComputeService::compute_parallel(
                       // tiles)
                       temp_results[current_node_idx] = NodeOutput{};
                       auto& ob = temp_results[current_node_idx]->image_buffer;
-                      ob.width = out_w;
-                      ob.height = out_h;
-                      ob.channels = out_c;
-                      ob.type = out_t;
-                      ob.step =
-                          static_cast<size_t>(out_w) * out_c * sizeof(float);
-                      ob.data.reset(new char[ob.step * ob.height],
-                                    std::default_delete<char[]>());
+                      ob =
+                          make_aligned_cpu_image_buffer(out_w, out_h, out_c,
+                                                        out_t);
 
                       // Tile size from metadata preference
                       int tile_size = 128;

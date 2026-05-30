@@ -119,6 +119,7 @@ class SchedulerPluginLoader {
   // 内部插件句柄
   struct PluginHandle {
     void* handle = nullptr;                    // 动态库句柄
+    std::shared_ptr<void> library;             // Keeps library loaded for live instances
     std::string path;                          // 文件路径
     std::vector<std::string> registered_types; // 该插件注册的类型
     
