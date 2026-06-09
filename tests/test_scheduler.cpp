@@ -199,15 +199,19 @@ TEST(Scheduler, DirtyRegionTiledComputation) {
   runtime
       .post([&](ps::GraphModel& g) -> void {
         auto& source_node = g.nodes.at(1);
-        ASSERT_TRUE(source_node.cached_output.has_value());
+        // HP formal cache must be populated after compute
+        ASSERT_TRUE(source_node.cached_output_high_precision.has_value());
 
-        // 修正点: 使用 ps::toCvMat
-        cv::Mat mat = ps::toCvMat(source_node.cached_output->image_buffer);
+        // Modify the HP cached image to simulate a dirty region
+        cv::Mat mat =
+            ps::toCvMat(source_node.cached_output_high_precision->image_buffer);
 
         mat(dirty_rect).setTo(cv::Scalar(1.0f));
 
-        g.nodes.at(2).cached_output.reset();
-        g.nodes.at(3).cached_output.reset();
+        // Invalidate downstream HP caches since source was modified.
+        // The HP background update (force_recache=true) will recompute them.
+        g.nodes.at(2).cached_output_high_precision.reset();
+        g.nodes.at(3).cached_output_high_precision.reset();
       })
       .get();
 

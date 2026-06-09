@@ -27,7 +27,12 @@ namespace ps {
  *
  * 缓存部分：
  * - caches：缓存条目列表，用于存储中间结果或其他缓存数据。
- * - cached_output：节点输出的完整缓存，如果存在则可防止重复计算。
+ * - cached_output_high_precision：节点输出的唯一正式可重用缓存，供后续
+ *   HP 计算、磁盘缓存、长期存储及其他可重用缓存行为使用。
+ * - cached_output_real_time：瞬态交互式 RT 状态，用于预览/更新工作流，
+ *   不作为正式缓存权威来源，不作为磁盘缓存同步或长期存储来源。
+ * - cached_output：废弃的旧版统一缓存字段，仅作迁移期间的兼容性回退使用，
+ *   新代码不应写入或依赖此字段。
  *
  * 其他成员：
  * - preserved：标记该节点是否应被保留，防止被强制重新计算。
@@ -65,17 +70,21 @@ class Node {
   // computing
   bool preserved = false;
 
-  // --- MODIFIED: The in-memory cache now holds the entire NodeOutput ---
-  // Legacy unified cache (kept for backward compatibility with existing code
-  // paths)
+  // --- DEPRECATED: Legacy unified cache (migration residue only) ---
+  // Do NOT write to this field in new code. Use
+  // cached_output_high_precision instead. Read fallback allowed only
+  // during migration where cached_output_high_precision is absent.
   std::optional<NodeOutput> cached_output;
 
-  // Phase 1: Dual-cache state for RT/HP separation (not yet fully used by
-  // planner)
-  std::optional<NodeOutput>
-      cached_output_real_time;  // RT cache for interactive preview
-  std::optional<NodeOutput>
-      cached_output_high_precision;  // HP cache for final quality
+  // Transient interactive RT state for preview/update workflows.
+  // NOT a formal cache authority. Must not be used for subsequent HP
+  // compute, disk cache synchronization, or long-term storage.
+  std::optional<NodeOutput> cached_output_real_time;
+
+  // The ONLY formal reusable cache for node output. Authoritative source
+  // for subsequent HP compute, disk cache, long-term storage, and other
+  // reusable cache behavior.
+  std::optional<NodeOutput> cached_output_high_precision;
   int rt_version = 0;
   int hp_version = 0;
   std::optional<cv::Rect> rt_roi;  // Most recent RT dirty/updated ROI

@@ -47,6 +47,7 @@
 #include <cstdint>
 #include <cstring>
 #include <functional>
+#include <future>
 #include <iostream>
 #include <map>
 #include <memory>
@@ -386,7 +387,10 @@ NodeOutput& ComputeService::compute_internal(
   std::vector<const NodeOutput*> monolithic_inputs;
   do {
     // 1. 内存／磁盘缓存检测
-    if (target_node.cached_output.has_value()) {
+    // Prefer HP formal cache; fall back to legacy cached_output for
+    // compatibility during migration.
+    if (target_node.cached_output_high_precision.has_value() ||
+        target_node.cached_output.has_value()) {
       result_source = "memory_cache";
       break;
     }
@@ -468,7 +472,7 @@ NodeOutput& ComputeService::compute_internal(
 
             // Monolithic
             if constexpr (std::is_same_v<T, MonolithicOpFunc>) {
-              target_node.cached_output =
+              target_node.cached_output_high_precision =
                   op_func(target_node, monolithic_inputs);
             } else if constexpr (std::is_same_v<T, TileOpFunc>) {
               // [核心修复] 为 image_mixing 实现 merge_strategy
@@ -594,8 +598,8 @@ NodeOutput& ComputeService::compute_internal(
                                : inputs_for_tiling[0]->image_buffer.type;
 
               // 分配输出缓冲
-              target_node.cached_output = NodeOutput();
-              auto& ob = target_node.cached_output->image_buffer;
+              target_node.cached_output_high_precision = NodeOutput();
+              auto& ob = target_node.cached_output_high_precision->image_buffer;
               ob = make_aligned_cpu_image_buffer(out_w, out_h, out_c, out_t);
 
               const int TILE_SIZE = 256, HALO_SIZE = 16;
@@ -669,13 +673,7 @@ NodeOutput& ComputeService::compute_internal(
     current_event.execution_end_time =
         std::chrono::high_resolution_clock::now();
     result_source = "computed";
-    // Phase 1: Mirror legacy cache to HP cache and bump version for old path
-    try {
-      target_node.cached_output_high_precision = *target_node.cached_output;
-      target_node.hp_version++;
-    } catch (...) {
-      // Best-effort; do not fail compute due to mirror issues
-    }
+    target_node.hp_version++;
     cache_.save_cache_if_configured(graph, target_node, cache_precision);
     visiting[node_id] = false;
   } while (false);
@@ -698,9 +696,11 @@ NodeOutput& ComputeService::compute_internal(
   if (execution_duration_ms < 0)
     execution_duration_ms = 0.0;  // 保险
 
-  if (result_source == "computed" && target_node.cached_output) {
-    finalize_output_metadata(*target_node.cached_output, monolithic_inputs,
-                             enable_timing, execution_duration_ms);
+  if (result_source == "computed" &&
+      target_node.cached_output_high_precision) {
+    finalize_output_metadata(*target_node.cached_output_high_precision,
+                             monolithic_inputs, enable_timing,
+                             execution_duration_ms);
   }
 
   // 8. 全局与本地计时记录
@@ -734,7 +734,10 @@ NodeOutput& ComputeService::compute_internal(
     benchmark_events->push_back(current_event);
   }
 
-  return *target_node.cached_output;
+  // Prefer HP formal cache; fall back to legacy cached_output
+  return target_node.cached_output_high_precision.has_value()
+             ? *target_node.cached_output_high_precision
+             : *target_node.cached_output;
 }
 
 NodeOutput& ComputeService::compute_node_no_recurse(
@@ -746,15 +749,21 @@ NodeOutput& ComputeService::compute_node_no_recurse(
   auto& timing_mutex = graph.timing_mutex_;
 
   auto& target_node = nodes.at(node_id);
-  // Fast path: already computed
-  if (target_node.cached_output.has_value())
-    return *target_node.cached_output;
+  // Fast path: already computed (prefer HP, fall back to legacy)
+  if (target_node.cached_output_high_precision.has_value() ||
+      target_node.cached_output.has_value())
+    return target_node.cached_output_high_precision.has_value()
+               ? *target_node.cached_output_high_precision
+               : *target_node.cached_output;
 
   // Optionally load from disk cache for this node itself
   if (allow_disk_cache) {
     (void)cache_.try_load_from_disk_cache(graph, target_node);
-    if (target_node.cached_output.has_value())
-      return *target_node.cached_output;
+    if (target_node.cached_output_high_precision.has_value() ||
+        target_node.cached_output.has_value())
+      return target_node.cached_output_high_precision.has_value()
+                 ? *target_node.cached_output_high_precision
+                 : *target_node.cached_output;
   }
 
   // Ensure visibility of upstream writes before reading their cached outputs
@@ -771,13 +780,18 @@ NodeOutput& ComputeService::compute_node_no_recurse(
     if (p_input.from_node_id < 0)
       continue;
     const auto itn = nodes.find(p_input.from_node_id);
-    if (itn == nodes.end() || !itn->second.cached_output.has_value()) {
+    if (itn == nodes.end() ||
+        (!itn->second.cached_output_high_precision.has_value() &&
+         !itn->second.cached_output.has_value())) {
       throw GraphError(
           GraphErrc::MissingDependency,
           "Parallel scheduler bug: parameter input not ready for node " +
               std::to_string(node_id));
     }
-    const auto& up_out = *itn->second.cached_output;
+    const auto& up_out =
+        itn->second.cached_output_high_precision.has_value()
+            ? *itn->second.cached_output_high_precision
+            : *itn->second.cached_output;
     auto it = up_out.data.find(p_input.from_output_name);
     if (it == up_out.data.end()) {
       throw GraphError(GraphErrc::MissingDependency,
@@ -795,13 +809,18 @@ NodeOutput& ComputeService::compute_node_no_recurse(
     if (i_input.from_node_id < 0)
       continue;
     const auto itn = nodes.find(i_input.from_node_id);
-    if (itn == nodes.end() || !itn->second.cached_output.has_value()) {
+    if (itn == nodes.end() ||
+        (!itn->second.cached_output_high_precision.has_value() &&
+         !itn->second.cached_output.has_value())) {
       throw GraphError(
           GraphErrc::MissingDependency,
           "Parallel scheduler bug: image input not ready for node " +
               std::to_string(node_id));
     }
-    inputs_ready.push_back(&*itn->second.cached_output);
+    inputs_ready.push_back(
+        itn->second.cached_output_high_precision.has_value()
+            ? &*itn->second.cached_output_high_precision
+            : &*itn->second.cached_output);
   }
 
   if (!inputs_ready.empty()) {
@@ -837,9 +856,8 @@ NodeOutput& ComputeService::compute_node_no_recurse(
         [&](auto&& op_func) {
           using T = std::decay_t<decltype(op_func)>;
           if constexpr (std::is_same_v<T, MonolithicOpFunc>) {
-            target_node.cached_output = op_func(target_node, inputs_ready);
             target_node.cached_output_high_precision =
-                *target_node.cached_output;
+                op_func(target_node, inputs_ready);
             target_node.hp_version++;
           } else if constexpr (std::is_same_v<T, TileOpFunc>) {
             // Prepare normalized inputs similar to compute_internal
@@ -927,8 +945,9 @@ NodeOutput& ComputeService::compute_node_no_recurse(
                              ? ps::DataType::FLOAT32
                              : inputs_for_tiling[0]->image_buffer.type;
 
-            target_node.cached_output = NodeOutput();
-            auto& ob = target_node.cached_output->image_buffer;
+            target_node.cached_output_high_precision = NodeOutput();
+            auto& ob =
+                target_node.cached_output_high_precision->image_buffer;
             ob = make_aligned_cpu_image_buffer(out_w, out_h, out_c, out_t);
 
             const int TILE_SIZE = 256, HALO_SIZE = 16;
@@ -977,9 +996,6 @@ NodeOutput& ComputeService::compute_node_no_recurse(
                 execute_tile_task(task, op_func);
               }
             }
-            // Mirror to HP cache and bump version after tiling finishes
-            target_node.cached_output_high_precision =
-                *target_node.cached_output;
             target_node.hp_version++;
           }
         },
@@ -1024,11 +1040,11 @@ NodeOutput& ComputeService::compute_node_no_recurse(
   } else {
     events_.push(target_node.id, target_node.name, "computed", 0.0);
   }
-  if (target_node.cached_output) {
-    finalize_output_metadata(*target_node.cached_output, inputs_ready,
-                             enable_timing, exec_ms_for_meta);
+  if (target_node.cached_output_high_precision) {
+    finalize_output_metadata(*target_node.cached_output_high_precision,
+                             inputs_ready, enable_timing, exec_ms_for_meta);
   }
-  return *target_node.cached_output;
+  return *target_node.cached_output_high_precision;
 }
 
 NodeOutput& ComputeService::compute_high_precision_update(
@@ -1036,6 +1052,7 @@ NodeOutput& ComputeService::compute_high_precision_update(
     const std::string& cache_precision, bool force_recache, bool enable_timing,
     bool disable_disk_cache, std::vector<BenchmarkEvent>* benchmark_events,
     const cv::Rect& dirty_roi) {
+  [[maybe_unused]] std::unique_lock<std::mutex> graph_lock(graph.graph_mutex_);
   auto& nodes = graph.nodes;
 
   (void)runtime;  // Unused for now, can be used for micro-task scheduling later
@@ -1292,17 +1309,15 @@ NodeOutput& ComputeService::compute_high_precision_update(
     for (const auto& img_input : node.image_inputs) {
       if (img_input.from_node_id < 0)
         continue;
+      // HP update path MUST NOT fall back to RT output.
+      // RT state is interactive-only; formal cache operations use HP.
       const auto* parent_out =
           nodes.at(img_input.from_node_id)
                   .cached_output_high_precision.has_value()
               ? &*nodes.at(img_input.from_node_id).cached_output_high_precision
               : (nodes.at(img_input.from_node_id).cached_output.has_value()
                      ? &*nodes.at(img_input.from_node_id).cached_output
-                     : (nodes.at(img_input.from_node_id)
-                                .cached_output_real_time.has_value()
-                            ? &*nodes.at(img_input.from_node_id)
-                                    .cached_output_real_time
-                            : nullptr));
+                     : nullptr);
       if (!parent_out)
         throw GraphError(
             GraphErrc::MissingDependency,
@@ -1465,7 +1480,6 @@ NodeOutput& ComputeService::compute_high_precision_update(
         [runtime_ptr, &graph,
          event_service = std::ref(events_)](DownsampleRequest request) -> Task {
       return [runtime_ptr, &graph, event_service, request]() {
-        std::unique_lock<std::mutex> lock(graph.graph_mutex_);
         auto node_it = graph.nodes.find(request.node_id);
         if (node_it == graph.nodes.end()) {
           return;
@@ -1565,12 +1579,7 @@ NodeOutput& ComputeService::compute_high_precision_update(
 
     for (const auto& request : downsample_requests) {
       Task task = make_downsample_task(request);
-      if (runtime_ptr) {
-        runtime_ptr->submit_ready_task_any_thread(std::move(task),
-                                                  TaskPriority::High);
-      } else {
-        task();
-      }
+      task();
     }
   }
 
@@ -2096,6 +2105,8 @@ NodeOutput& ComputeService::compute_parallel(
       for (int id : execution_order) {
         if (nodes.count(id)) {
           nodes.at(id).cached_output.reset();
+          nodes.at(id).cached_output_high_precision.reset();
+          nodes.at(id).cached_output_real_time.reset();
         }
       }
     }
@@ -2181,13 +2192,16 @@ NodeOutput& ComputeService::compute_parallel(
               if (temp_results[up_idx].has_value())
                 return &*temp_results[up_idx];
             }
+            if (itn->second.cached_output_high_precision.has_value())
+              return &*itn->second.cached_output_high_precision;
             if (itn->second.cached_output.has_value())
               return &*itn->second.cached_output;
             return nullptr;
           };
 
           // Memory or disk fast path
-          if (!target_node.cached_output.has_value() && allow_disk_cache &&
+          if (!target_node.cached_output_high_precision.has_value() &&
+              !target_node.cached_output.has_value() && allow_disk_cache &&
               !temp_results[current_node_idx].has_value()) {
             NodeOutput from_disk;
             if (cache_.try_load_from_disk_cache_into(graph, target_node,
@@ -2222,7 +2236,8 @@ NodeOutput& ComputeService::compute_parallel(
             }
           }
 
-          if (!target_node.cached_output.has_value() &&
+          if (!target_node.cached_output_high_precision.has_value() &&
+              !target_node.cached_output.has_value() &&
               !temp_results[current_node_idx].has_value()) {
             YAML::Node runtime_params =
                 target_node.parameters ? YAML::Clone(target_node.parameters)
@@ -2695,7 +2710,8 @@ NodeOutput& ComputeService::compute_parallel(
 
     if (execution_order.empty() && graph.has_node(node_id)) {
       // 处理图中只有一个节点的情况
-      if (!nodes.at(node_id).cached_output.has_value()) {
+      if (!nodes.at(node_id).cached_output_high_precision.has_value() &&
+          !nodes.at(node_id).cached_output.has_value()) {
         std::unordered_map<int, bool> visiting;
         compute_internal(graph, node_id, cache_precision, visiting,
                          enable_timing, !disable_disk_cache, benchmark_events);
@@ -2730,25 +2746,23 @@ NodeOutput& ComputeService::compute_parallel(
       for (size_t i = 0; i < num_nodes; ++i) {
         if (temp_results[i].has_value()) {
           int nid = execution_order[i];
-          nodes.at(nid).cached_output = std::move(*temp_results[i]);
-          try {
-            nodes.at(nid).cached_output_high_precision =
-                *nodes.at(nid).cached_output;
-            nodes.at(nid).hp_version++;
-          } catch (...) {
-            // Non-fatal; maintain backward compatibility
-          }
+          nodes.at(nid).cached_output_high_precision =
+              std::move(*temp_results[i]);
+          nodes.at(nid).hp_version++;
           cache_.save_cache_if_configured(graph, nodes.at(nid),
                                           cache_precision);
         }
       }
     }
-    if (!nodes.at(node_id).cached_output) {
+    if (!nodes.at(node_id).cached_output_high_precision &&
+        !nodes.at(node_id).cached_output) {
       throw GraphError(GraphErrc::ComputeError,
                        "Parallel computation finished but target node has no "
                        "output. An upstream error likely occurred.");
     }
-    return *nodes.at(node_id).cached_output;
+    return nodes.at(node_id).cached_output_high_precision.has_value()
+               ? *nodes.at(node_id).cached_output_high_precision
+               : *nodes.at(node_id).cached_output;
   } catch (...) {
     // 捕获在本函数内（任务提交前）抛出的异常，并传递给运行时
     runtime.set_exception(std::current_exception());
@@ -2779,37 +2793,83 @@ NodeOutput& ComputeService::compute_parallel(
       return compute_parallel(graph, runtime, node_id, cache_precision,
                               force_recache, enable_timing, disable_disk_cache,
                               benchmark_events);
-    case ComputeIntent::RealTimeUpdate:
+    case ComputeIntent::RealTimeUpdate: {
       if (!dirty_roi.has_value()) {
         throw GraphError(GraphErrc::InvalidParameter,
                          "RealTimeUpdate intent requires a dirty ROI region.");
       }
 
-      if (runtime.running()) {
-        runtime.submit_ready_task_any_thread(
-            [this, graph_ptr = &graph, runtime_ptr = &runtime, node_id,
-             cache_precision, force_recache, enable_timing, disable_disk_cache,
-             roi = *dirty_roi]() {
-              try {
-                compute_high_precision_update(
-                    *graph_ptr, runtime_ptr, node_id, cache_precision,
-                    force_recache, enable_timing, disable_disk_cache,
-                    nullptr /* no events */, roi);
-              } catch (const std::exception& e) {
-                std::cerr << "Background HP update failed: " << e.what()
-                          << std::endl;
-              }
-            },
-            TaskPriority::Normal);
-      } else {
+      if (!runtime.running()) {
         compute_high_precision_update(
             graph, &runtime, node_id, cache_precision, force_recache,
-            enable_timing, disable_disk_cache, nullptr, *dirty_roi);
+            enable_timing, disable_disk_cache, nullptr /* no events */,
+            *dirty_roi);
+        return compute_real_time_update(
+            graph, &runtime, node_id, cache_precision, force_recache,
+            enable_timing, disable_disk_cache, benchmark_events, *dirty_roi);
       }
 
-      return compute_real_time_update(
-          graph, &runtime, node_id, cache_precision, force_recache,
-          enable_timing, disable_disk_cache, benchmark_events, *dirty_roi);
+      auto hp_done = std::make_shared<std::promise<void>>();
+      auto rt_done = std::make_shared<std::promise<void>>();
+      auto hp_future = hp_done->get_future();
+      auto rt_future = rt_done->get_future();
+
+      runtime.submit_ready_task_any_thread(
+          [this, graph_ptr = &graph, runtime_ptr = &runtime, node_id,
+           cache_precision, force_recache, enable_timing, disable_disk_cache,
+           roi = *dirty_roi, hp_done]() {
+            try {
+              compute_high_precision_update(
+                  *graph_ptr, runtime_ptr, node_id, cache_precision,
+                  force_recache, enable_timing, disable_disk_cache,
+                  nullptr /* no events */, roi);
+              hp_done->set_value();
+            } catch (...) {
+              hp_done->set_exception(std::current_exception());
+            }
+          },
+          TaskPriority::Normal);
+
+      runtime.submit_ready_task_any_thread(
+          [this, graph_ptr = &graph, runtime_ptr = &runtime, node_id,
+           cache_precision, force_recache, enable_timing, disable_disk_cache,
+           benchmark_events, roi = *dirty_roi, rt_done]() {
+            try {
+              compute_real_time_update(
+                  *graph_ptr, runtime_ptr, node_id, cache_precision,
+                  force_recache, enable_timing, disable_disk_cache,
+                  benchmark_events, roi);
+              rt_done->set_value();
+            } catch (...) {
+              rt_done->set_exception(std::current_exception());
+            }
+          },
+          TaskPriority::High);
+
+      std::exception_ptr first_error;
+      try {
+        rt_future.get();
+      } catch (...) {
+        first_error = std::current_exception();
+      }
+      try {
+        hp_future.get();
+      } catch (...) {
+        if (!first_error) {
+          first_error = std::current_exception();
+        }
+      }
+      if (first_error) {
+        std::rethrow_exception(first_error);
+      }
+
+      Node& target = graph.nodes.at(node_id);
+      if (!target.cached_output_real_time) {
+        throw GraphError(GraphErrc::ComputeError,
+                         "RT compute finished without target output.");
+      }
+      return *target.cached_output_real_time;
+    }
     default:
       return compute_parallel(graph, runtime, node_id, cache_precision,
                               force_recache, enable_timing, disable_disk_cache,

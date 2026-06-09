@@ -561,7 +561,9 @@ Kernel::traversal_details(const std::string& name) {
               vec.reserve(order.size());
               for (int nid : order) {
                 const auto& node = g.nodes.at(nid);
-                bool mem = node.cached_output.has_value();
+                bool mem = node.cached_output_high_precision.has_value() ||
+                           node.cached_output_real_time.has_value() ||
+                           node.cached_output.has_value();
                 bool on_disk = false;
                 if (!node.caches.empty()) {
                   for (const auto& cache : node.caches) {
