@@ -1,0 +1,196 @@
+# 内核架构概览
+
+本文档描述当前分支中的架构。较旧的阶段计划和里程碑报告已移动到 `docs/outdated/`。
+
+此目录是内核维护中的开发者文档。应将其视为算子、调度器、插件和内核服务所使用公共契约的事实来源。OpenSpec change artifact 是规划材料，不假定一定随仓库提交。
+
+## 当前状态
+
+Photospider 围绕图运行时构建，包含服务拆分、操作 registry、缓存层和调度器抽象。实现仍处于过渡期：遗留递归路径和 `GraphRuntime` 队列路径，与正式目标接口 `IScheduler` 以及较新的意图驱动 RT/HP 模型共存。
+
+代码可用且可测试，但部分边界尚未最终稳定。尤其是 `Kernel` 和 `ComputeService` 仍协调大量行为，未来可能移动到更窄的服务中。
+
+## 构建模块
+
+根 `CMakeLists.txt` 构建以下内部模块：
+
+| Target | 角色 |
+| --- | --- |
+| `photospider_core_types` | 核心数据类型、OpenCV 适配器、YAML 节点解析、内置 op registry 源。 |
+| `photospider_graph` | `GraphModel` 加图 IO、遍历、缓存和 inspect 服务。 |
+| `photospider_plugin` | 动态操作插件管理器和加载器。 |
+| `photospider_compute` | 内核 facade、交互运行时、调度器、计算服务、事件。 |
+| `photospider_lib` | CLI 和插件链接的共享后端库。 |
+| `photospider_cli_common` | REPL 命令、TUI 编辑器、自动补全、CLI 配置。 |
+| `graph_cli` | 终端用户可执行文件。 |
+
+输出目录：
+
+| 输出 | 路径 |
+| --- | --- |
+| executable | `build/bin` |
+| libraries | `build/lib` |
+| operation plugins | `build/plugins` |
+| scheduler plugins | `build/schedulers` |
+| tests | `build/tests` |
+
+## 运行时所有权
+
+```mermaid
+graph TD
+    CLI["CLI / REPL / TUI"] --> InteractionService
+    InteractionService --> Kernel
+
+    Kernel --> GraphRuntime
+    Kernel --> GraphIOService
+    Kernel --> GraphTraversalService
+    Kernel --> GraphCacheService
+    Kernel --> GraphInspectService
+    Kernel --> PluginManager
+
+    GraphRuntime --> GraphModel
+    GraphRuntime --> GraphEventService
+    GraphRuntime --> IScheduler
+
+    ComputeService --> GraphModel
+    ComputeService --> GraphTraversalService
+    ComputeService --> GraphCacheService
+    ComputeService --> GraphEventService
+    ComputeService --> OpRegistry
+    ComputeService --> IScheduler
+
+    PluginManager --> OpRegistry
+```
+
+## 主要组件
+
+| 组件 | 角色 |
+| --- | --- |
+| `Kernel` | 多图 facade、服务 owner、运行时 bootstrapper、顶层图/缓存/计算 API。 |
+| `GraphRuntime` | 每图执行容器，包含模型、事件、调度器、worker 状态和平台 context。 |
+| `GraphModel` | 图状态持有者：节点、缓存根目录、计时数据、quiet/skip-save 标志。 |
+| `InteractionService` | 面向 CLI 的 `Kernel` wrapper，使命令代码保持较薄。 |
+| `ComputeService` | 解析依赖、检查缓存、执行 op，协调 RT/HP/tiled 路径和计时事件。 |
+| `GraphTraversalService` | 依赖树、遍历顺序、图有效性、ROI 投影 helper。 |
+| `GraphCacheService` | 内存/磁盘缓存操作和缓存同步。 |
+| `GraphInspectService` | 人类可读的缓存和空间元数据 inspect。 |
+| `GraphEventService` | 每节点计算事件收集。 |
+| `PluginManager` | 加载操作插件并记录操作来源。 |
+| `OpRegistry` | 全局操作实现 registry，包括 HP/RT、tiled/monolithic、设备元数据和 ROI propagator。 |
+
+## 维护中文档
+
+| 文档 | 范围 |
+| --- | --- |
+| `Overview.md` | 顶层模块所有权和当前架构状态。 |
+| `Data-Model.md` | `GraphModel`、`Node`、YAML schema、输入、输出、参数和缓存字段。 |
+| `Compute-Flow.md` | 顺序、并行、RT、HP、ROI 更新和事件/计时流程。 |
+| `Cache-Model.md` | HP/RT 内存缓存语义、遗留 HP 缓存重命名和磁盘缓存行为。 |
+| `Graph-Lifecycle.md` | 图运行时所有权、图加载/reload/edit 失败语义和 `GraphModel::clear()`。 |
+| `ImageBuffer-Memory-Contract.md` | 公共 `ImageBuffer` 内存/设备契约、对齐、步长和适配器规则。 |
+| `Dirty-Region-Propagation.md` | ROI 传播、tile 映射和当前可调 tile 默认值。 |
+| `Scheduler-Architecture.md` | 正式 `IScheduler` 目标模型、内置调度器和迁移状态。 |
+| `Plugin-ABI.md` | 操作插件和调度器插件 ABI 契约。 |
+| `Development-Validation.md` | 主线 macOS 架构、CTest 预期和后续重构边界。 |
+| `Benchmark-Spikes.md` | Metal 适配器和 ARM 对齐基准计划与后续状态。 |
+
+## 计算流程
+
+典型 REPL 计算流程：
+
+1. REPL 命令调用 `InteractionService`。
+2. `InteractionService` 调用 `Kernel`。
+3. `Kernel` 解析活跃的 `GraphRuntime`。
+4. `Kernel` 创建或使用 `ComputeService` 所需服务。
+5. `ComputeService` 通过 `GraphTraversalService` 解析依赖。
+6. `ComputeService` 通过 `GraphCacheService` 检查内存和磁盘缓存。
+7. `ComputeService` 从 `OpRegistry` 选择操作实现。
+8. 工作通过递归或配置的调度器路径执行。
+9. `GraphEventService` 记录每节点事件和计时数据。
+10. 结果通过 `Kernel` 和 `InteractionService` 暴露回去。
+
+## 调度器模型
+
+运行时识别两个计算意图：
+
+| 意图 | 含义 |
+| --- | --- |
+| `GlobalHighPrecision` / HP | 完整质量计算路径。 |
+| `RealTimeUpdate` / RT | 交互工作流的低延迟更新路径。 |
+
+内置调度器类型：
+
+| 类型 | 角色 |
+| --- | --- |
+| `cpu_work_stealing` | 多线程 CPU 执行。 |
+| `serial_debug` | 单线程确定性调试路径。 |
+| `gpu_pipeline` | CPU/GPU 路由的异构 pipeline。 |
+| `heterogeneous` | `gpu_pipeline` 的别名。 |
+
+CLI 通过 `scheduler` REPL 命令暴露调度器控制。默认类型和插件目录在 `config.yaml` 中配置。
+
+`IScheduler` 是正式目标接口。`GraphRuntime` 中仍存在的 worker 队列是迁移支持，用于尚未干净路由到调度器实例的路径。
+
+## 操作 Registry
+
+操作以 `type:subtype` 为 key。Registry 支持：
+
+- 遗留 monolithic 操作注册
+- HP monolithic 实现
+- HP tiled 实现
+- RT tiled 实现
+- CPU 和 Metal 等按设备实现
+- dirty ROI propagator
+- forward ROI propagator
+- dependency builder
+
+内置操作在 `src/ops.cpp` 中注册。运行时插件示例位于 `custom_ops/`。
+
+## 缓存模型
+
+缓存层当前跨越旧状态和新状态：
+
+- `Node::cached_output_high_precision`：正式 HP 缓存。
+- `Node::cached_output_real_time`：正式 RT 缓存。
+- `Node::cached_output`：HP 缓存的错误遗留名称，应迁移掉。
+- RT/HP 版本和 ROI 字段。
+- 配置缓存根目录下的磁盘缓存文件。
+
+这种混合模型是主要迁移区域之一。`GraphCacheService` 将缓存命令集中化，但部分计算路径仍需要了解它们正在读写的具体缓存类型。
+
+新代码不应引入对 `cached_output` 的额外依赖。HP 代码应使用 `cached_output_high_precision`；RT 代码应使用 `cached_output_real_time`。
+
+## ImageBuffer 契约
+
+`ImageBuffer` 是公共内核契约，不是内部实现细节。算子、调度器、插件、适配器和缓存代码可以依赖其文档化字段和不变量。
+
+内核拥有的 CPU 缓冲区必须提供 64 字节对齐的行起点。`step` 是字节单位的行步长，可以大于紧凑行大小以保持对齐。ARM Mac 高性能路径可能需要或受益于 128 字节对齐，但 128 字节对齐是优化目标，而不是可移植最低要求。
+
+## 脏区传播
+
+ROI 传播通过 registry 提供的 propagator 和 traversal helper 处理。活跃传播说明位于 `docs/kernel-architecture/Dirty-Region-Propagation.md`。
+
+重要当前行为：
+
+- source/generator/analyzer/math 类节点的恒等传播
+- `resize`、`crop`、`convolve` 和 `gaussian_blur` 的特定传播
+- 下游脏区投影的 forward propagation
+- 可在 tile 空间执行的算子的 tiled compute 元数据
+- 当前 tile 默认值是可调实现参数，不是永久 ABI
+
+## 已知架构张力
+
+这些是实现现实，不是立即阻塞项：
+
+- `Kernel` 较宽，同时充当图管理器、服务 owner、运行时管理器、缓存 API、计算 API 和编辑 API。
+- `ComputeService` 包含 planning、cache coordination、execution、ROI update、scheduler interaction 和 metrics emission。
+- `GraphTraversalService` 将拓扑遍历与 ROI/空间传播 helper 混在一起。
+- 缓存 API 仍同时暴露遗留概念和较新的 RT/HP 概念。
+- 并非所有已构建测试可执行文件都注册到 CTest。
+
+`ComputeService` 拆分和 `GraphTraversalService` 拓扑/ROI 拆分是明确的后续重构，不属于当前 kernel-contract 清理。
+
+## 维护文档边界
+
+活跃文档应描述当前行为。历史规划 artifact、阶段评审、带日期的状态报告和推测性图示属于 `docs/outdated/`。
+

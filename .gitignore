@@ -91,7 +91,10 @@ util/change.txt
 !docs/**/*.md
 !docs/**/*.png
 !docs/**/*.jpg
-
+docs/openspec-zh/
+docs/openspec-zh/*.md
+docs/openspec-zh/**/
+docs/openspec-zh/**/*.md
 # ============================
 # 7. 特例 (Exceptions)
 # ============================
