@@ -163,8 +163,9 @@ live in `custom_ops/`.
 
 The cache layer currently spans older and newer state:
 
-- `Node::cached_output_high_precision`: formal HP cache.
-- `Node::cached_output_real_time`: formal RT cache.
+- `Node::cached_output_high_precision`: formal reusable HP cache.
+- `Node::cached_output_real_time`: transient RT preview/update state, not
+  formal cache authority.
 - `Node::cached_output`: mistaken legacy name for the HP cache; migrate away.
 - RT/HP version and ROI fields
 - disk cache files under the configured cache root
@@ -175,7 +176,9 @@ specific cache flavor they are reading or writing.
 
 New code should not introduce additional dependencies on `cached_output`. HP
 code should use `cached_output_high_precision`; RT code should use
-`cached_output_real_time`.
+`cached_output_real_time` only as interactive state. Formal cache save, load,
+and synchronization behavior, subsequent HP compute, and long-term storage
+should use HP output.
 
 ## ImageBuffer Contract
 

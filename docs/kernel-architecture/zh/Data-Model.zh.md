@@ -65,15 +65,15 @@
 
 ## 缓存字段
 
-正式缓存字段：
+正式可复用缓存字段：
 
 | 字段 | 状态 | 含义 |
 | --- | --- | --- |
-| `cached_output_high_precision` | 正式 | 完整质量输出的 HP 缓存。 |
-| `cached_output_real_time` | 正式 | 交互式预览/更新输出的 RT 缓存。 |
+| `cached_output_high_precision` | 正式缓存 | 完整质量、可复用输出的 HP 缓存。 |
+| `cached_output_real_time` | 临时 RT 状态 | 交互式预览/更新输出。 |
 | `cached_output` | 迁移残留 | HP 缓存的旧误命名。 |
 
-`cached_output` 不是第三种长期缓存类型。它应在整个代码库中迁移到 `cached_output_high_precision`。现有兼容路径只能在调用点迁移前读取或镜像它。
+只有 HP 输出是正式可复用缓存。这意味着只有 HP 输出可以进入后续 HP 计算、磁盘缓存、长期存储以及其他可复用缓存行为。`cached_output_real_time` 是临时交互式状态，不能作为权威缓存输出使用。`cached_output` 不是第三种长期缓存类型。它应在整个代码库中迁移到 `cached_output_high_precision`。现有兼容路径只能在调用点迁移前读取或镜像它。
 
 ## YAML Schema
 
@@ -117,4 +117,3 @@
 | `global_scale_x`, `global_scale_y` | 尺度元数据。 |
 
 `SpatialDependencyMap` 是用于数据依赖空间传播的可选节点本地 LUT。
-

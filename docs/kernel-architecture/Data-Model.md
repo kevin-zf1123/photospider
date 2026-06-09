@@ -75,15 +75,19 @@ Operators may return image data, named data, or both.
 
 ## Cache Fields
 
-The formal cache fields are:
+The formal reusable cache field is:
 
 | Field | Status | Meaning |
 | --- | --- | --- |
-| `cached_output_high_precision` | Formal | HP cache for full-quality output. |
-| `cached_output_real_time` | Formal | RT cache for interactive preview/update output. |
+| `cached_output_high_precision` | Formal cache | HP cache for full-quality reusable output. |
+| `cached_output_real_time` | Transient RT state | Interactive preview/update output. |
 | `cached_output` | Migration residue | Old mistaken name for HP cache. |
 
-`cached_output` is not a third long-term cache kind. It should be migrated to
+Only HP output is formal reusable cache. That means only HP output may feed
+subsequent HP compute, disk cache, long-term storage, and other reusable cache
+behavior. `cached_output_real_time` is transient interactive state and must not
+be used as authoritative cached output. `cached_output` is not a third
+long-term cache kind. It should be migrated to
 `cached_output_high_precision` throughout the codebase. Existing compatibility
 paths may read or mirror it only until call sites are moved.
 

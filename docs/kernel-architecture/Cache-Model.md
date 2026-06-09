@@ -3,14 +3,19 @@
 The kernel has memory cache fields on each `Node` and disk cache files under
 the graph cache root. This document defines the intended cache semantics.
 
-## Formal Memory Caches
+## Formal Cache and Transient State
 
 | Field | Status | Meaning |
 | --- | --- | --- |
-| `cached_output_high_precision` | Formal | Full-quality HP output. |
-| `cached_output_real_time` | Formal | Interactive RT output. |
+| `cached_output_high_precision` | Formal cache | Full-quality reusable HP output. |
+| `cached_output_real_time` | Transient RT state | Interactive preview/update output. |
 | `cached_output` | Migration residue | Old mistaken name for HP output. |
 
+Only high-precision output is formal reusable cache. That means only HP output
+may be used as the authoritative source for subsequent HP compute, disk cache,
+long-term storage, and other reusable cache behavior. `cached_output_real_time`
+is transient interactive state and must not be treated as authoritative cache,
+as a disk-cache synchronization source, or as long-term storage input.
 `cached_output` is not a separate long-term cache kind. It is the old name for
 the HP cache and should be migrated to `cached_output_high_precision`.
 
@@ -28,8 +33,9 @@ Associated fields:
 
 ## RT Cache
 
-RT compute writes `cached_output_real_time`. RT cache is the interactive preview
-or proxy result. It may be lower resolution than HP output.
+RT compute writes `cached_output_real_time`. RT state is the interactive preview
+or proxy result. It may be lower resolution than HP output and is not formal
+cache authority.
 
 Associated fields:
 
@@ -60,7 +66,7 @@ image cache data is converted into float image buffers.
 | Operation | Effect |
 | --- | --- |
 | Clear drive cache | Remove disk cache directory contents and recreate root. |
-| Clear memory cache | Clear in-memory cache state currently tracked by the service. |
+| Clear memory cache | Clear in-memory HP cache and RT transient state currently tracked by the service. |
 | Clear cache | Clear both disk and memory cache. |
 | Cache all nodes | Save cached node outputs to disk when configured. |
 | Free transient memory | Clear non-ending node memory cache state. |
@@ -72,10 +78,13 @@ known migration area.
 ## Migration Rules
 
 - New HP code writes `cached_output_high_precision`.
-- New RT code writes `cached_output_real_time`.
+- New RT code writes `cached_output_real_time` as transient interactive state.
 - New code should not require `cached_output`.
 - Compatibility fallbacks may read `cached_output` only while HP call sites
   migrate to `cached_output_high_precision`.
+- Formal cache save/load/sync behavior, subsequent HP compute, and long-term
+  storage must use HP output and must not promote RT output to authoritative
+  cache.
 - Tests should verify HP and RT fields independently.
 
 `GraphInspectService` prefers HP, then RT, then legacy `cached_output` for
