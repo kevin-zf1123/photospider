@@ -1,0 +1,59 @@
+# 调度器架构
+
+内核具有正式的调度器目标接口和遗留运行时队列。本文档定义如何理解当前实现。
+
+## 正式目标：IScheduler
+
+`IScheduler` 是正式调度器接口。调度器附着到 `GraphRuntime`，启动 worker 资源，调度计算，并干净关闭。
+
+核心生命周期：
+
+```text
+create -> attach(runtime) -> start -> schedule(...) -> shutdown -> detach
+```
+
+按 `ComputeIntent` 路由计算：
+
+| 意图 | 预期调度器角色 |
+| --- | --- |
+| `GlobalHighPrecision` | 面向吞吐的 HP 计算。 |
+| `RealTimeUpdate` | 低延迟交互式更新。 |
+
+`GraphRuntime` 保存以 `ComputeIntent` 为 key 的调度器映射。
+
+## 当前迁移状态
+
+实现中仍在 `GraphRuntime` 直接包含 worker 队列、epoch 和任务提交 API。某些计算路径仍调用 `ComputeService::compute_parallel` 并直接向这些队列提交任务。
+
+这些运行时队列应被视为迁移支持，而不是永久调度器 API。新的面向调度器设计应以 `IScheduler` 为目标。
+
+## 内置调度器
+
+| 类型 | 含义 |
+| --- | --- |
+| `cpu_work_stealing` | 多线程 CPU 调度器。 |
+| `serial_debug` | 确定性单线程调试调度器。 |
+| `gpu_pipeline` | 异构 CPU/GPU 调度器。 |
+| `heterogeneous` | `gpu_pipeline` 的别名。 |
+
+## 节点级调度
+
+`IScheduler` 包含节点级调度钩子，例如 `schedule_node`、`schedule_nodes` 和任务组聚合 helper。这些接口旨在将设备选择和 tile 分组决策移动到调度器层。
+
+默认实现可能 fallback 到遗留 `schedule` 路径。
+
+## Epoch 与取消
+
+运行时和调度器队列使用 epoch 取消陈旧排队工作。Epoch `0` 被视为不可取消兼容工作。新的交互式调度应分配真实 epoch，使过时 RT 工作可以被丢弃。
+
+## 可观测性
+
+`GraphRuntime::SchedulerEvent` 记录分配、节点执行和 tile 执行事件。这有助于在迁移期间验证调度器行为。
+
+## 开发方向
+
+- 保持 `IScheduler` 作为正式公共调度器接口。
+- 随时间推移将更多计算路径路由到调度器实例。
+- 避免新增对 `GraphRuntime` 内部队列的永久依赖。
+- 保持插件调度器生命周期与 `Plugin-ABI.md` 兼容。
+
