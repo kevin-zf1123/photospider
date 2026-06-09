@@ -6,6 +6,19 @@
 # ============================
 # 2. 根目录配置文件 (Root Configs)
 # ============================
+# Personal overlay files are intentionally owned by the local
+# .git-personal repository, not by the primary GitHub project repo.
+# Keep them ignored here; add them to the overlay with:
+# git --git-dir=.git-personal --work-tree=. add -f <path>
+.git-personal/
+AGENTS.md
+CLAUDE.md
+GEMINI.md
+.claude/
+.codex/
+openspec/
+feedback/
+
 # git & github
 !.gitignore
 !.gitattributes
@@ -13,6 +26,9 @@
 !.github/
 !.github/workflows/
 !.github/workflows/*.yml
+.github/skills/
+.github/prompts/
+.github/copilot-instructions.md
 
 # Project configs
 !.clang-format
