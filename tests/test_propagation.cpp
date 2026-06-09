@@ -59,10 +59,15 @@ void handle_tiles(ps::InteractionService& svc, const std::string& graph_name, co
         std::string pref_str = "UNDEFINED";
         int width = 0, height = 0;
 
-        // 尝试从缓存中获取尺寸
-        if (node.cached_output && node.cached_output->image_buffer.width > 0) {
-            width = node.cached_output->image_buffer.width;
-            height = node.cached_output->image_buffer.height;
+        // 尝试从缓存中获取尺寸 (优先 HP 正式缓存，回退 legacy)
+        const auto* out = node.cached_output_high_precision.has_value()
+                              ? &*node.cached_output_high_precision
+                              : (node.cached_output.has_value()
+                                     ? &*node.cached_output
+                                     : nullptr);
+        if (out && out->image_buffer.width > 0) {
+            width = out->image_buffer.width;
+            height = out->image_buffer.height;
         } else {
             std::cout << id << " UNKNOWN (not computed or no image output) - - - -" << std::endl;
             continue;

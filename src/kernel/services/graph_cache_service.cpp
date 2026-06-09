@@ -13,12 +13,9 @@ namespace ps {
 
 namespace {
 
-const NodeOutput* hp_cache_or_legacy(const Node& node) {
+const NodeOutput* hp_cache_ptr(const Node& node) {
   if (node.cached_output_high_precision) {
     return &*node.cached_output_high_precision;
-  }
-  if (node.cached_output) {
-    return &*node.cached_output;
   }
   return nullptr;
 }
@@ -48,7 +45,7 @@ void GraphCacheService::save_cache_if_configured(
   if (graph.skip_save_cache_.load(std::memory_order_relaxed)) {
     return;
   }
-  const NodeOutput* output = hp_cache_or_legacy(node);
+  const NodeOutput* output = hp_cache_ptr(node);
   if (graph.cache_root.empty() || node.caches.empty() || !output) {
     return;
   }
@@ -149,7 +146,6 @@ bool GraphCacheService::try_load_from_disk_cache(GraphModel& graph,
       }
 
       node.cached_output_high_precision = std::move(loaded_output);
-      node.cached_output = node.cached_output_high_precision;
       loaded = true;
       break;
     }
@@ -268,7 +264,7 @@ GraphModel::CacheSaveResult GraphCacheService::cache_all_nodes(
     GraphModel& graph, const std::string& cache_precision) const {
   GraphModel::CacheSaveResult result;
   for (const auto& pair : graph.nodes) {
-    if (hp_cache_or_legacy(pair.second)) {
+    if (hp_cache_ptr(pair.second)) {
       save_cache_if_configured(graph, pair.second, cache_precision);
       result.saved_nodes++;
     }
@@ -299,7 +295,7 @@ GraphModel::DiskSyncResult GraphCacheService::synchronize_disk_cache(
 
   for (const auto& pair : graph.nodes) {
     const Node& node = pair.second;
-    if (hp_cache_or_legacy(node) || node.cached_output_real_time.has_value() ||
+    if (node.cached_output_high_precision.has_value() ||
         node.caches.empty()) {
       continue;
     }

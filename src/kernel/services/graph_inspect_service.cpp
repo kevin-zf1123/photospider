@@ -8,16 +8,21 @@
 namespace ps {
 
 namespace {
-const NodeOutput* pick_cached_output(const Node& node) {
+const NodeOutput* pick_cached_output(const Node& node,
+                                     std::string& source_label) {
   if (node.cached_output_high_precision) {
+    source_label = "HP formal cache";
     return &node.cached_output_high_precision.value();
   }
   if (node.cached_output_real_time) {
+    source_label = "RT transient state (NOT formal cache)";
     return &node.cached_output_real_time.value();
   }
   if (node.cached_output) {
+    source_label = "legacy cache (deprecated)";
     return &node.cached_output.value();
   }
+  source_label.clear();
   return nullptr;
 }
 }  // namespace
@@ -25,11 +30,14 @@ const NodeOutput* pick_cached_output(const Node& node) {
 std::string GraphInspectService::format_node_metadata(
     const Node& node) const {
   std::ostringstream ss;
-  const NodeOutput* cached = pick_cached_output(node);
+  std::string source_label;
+  const NodeOutput* cached = pick_cached_output(node, source_label);
   if (!cached) {
     ss << "  (No cached output available)\n";
     return ss.str();
   }
+
+  ss << "  [Source] " << source_label << "\n";
 
   const auto& meta = cached->debug;
   const auto& space = cached->space;

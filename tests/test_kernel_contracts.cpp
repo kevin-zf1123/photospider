@@ -155,18 +155,125 @@ TEST(CacheSemantics, HpAndRtComputePopulateFormalCaches) {
   graph.add_node(make_contract_process_node());
   graph.validate_topology();
 
+  // HP compute populates cached_output_high_precision only
   NodeOutput& hp = compute.compute(graph, ComputeIntent::GlobalHighPrecision, 2,
                                    "int8", false, false, true, nullptr,
                                    std::nullopt);
   EXPECT_TRUE(graph.nodes.at(2).cached_output_high_precision.has_value());
+  EXPECT_FALSE(graph.nodes.at(2).cached_output.has_value())
+      << "Legacy cached_output must NOT be populated by HP compute";
   EXPECT_EQ(hp.image_buffer.width,
             graph.nodes.at(2).cached_output_high_precision->image_buffer.width);
 
+  // Snapshot HP cache dimensions before RT compute
+  int hp_w_before =
+      graph.nodes.at(2).cached_output_high_precision->image_buffer.width;
+  int hp_h_before =
+      graph.nodes.at(2).cached_output_high_precision->image_buffer.height;
+
+  // RT compute populates cached_output_real_time only;
+  // cached_output_high_precision must remain unchanged.
   NodeOutput& rt = compute.compute(graph, ComputeIntent::RealTimeUpdate, 2,
                                    "int8", false, false, true, nullptr,
                                    cv::Rect(0, 0, 8, 8));
   EXPECT_EQ(&rt, &*graph.nodes.at(2).cached_output_real_time);
   EXPECT_TRUE(graph.nodes.at(2).cached_output_real_time.has_value());
+
+  // Key contract: RT compute must NOT alter the formal HP cache
+  ASSERT_TRUE(graph.nodes.at(2).cached_output_high_precision.has_value());
+  EXPECT_EQ(graph.nodes.at(2).cached_output_high_precision->image_buffer.width,
+            hp_w_before)
+      << "RT compute must not change HP cache width";
+  EXPECT_EQ(graph.nodes.at(2).cached_output_high_precision->image_buffer.height,
+            hp_h_before)
+      << "RT compute must not change HP cache height";
+
+  // RT output should be downscaled relative to HP
+  EXPECT_LE(graph.nodes.at(2).cached_output_real_time->image_buffer.width,
+            hp_w_before)
+      << "RT output should be <= HP output width";
+}
+
+TEST(CacheSemantics, DiskSaveAndSyncIgnoreRtAndLegacy) {
+  register_contract_ops();
+  GraphTraversalService traversal;
+  GraphCacheService cache;
+  GraphEventService events;
+  ComputeService compute(traversal, cache, events);
+
+  auto root = temp_path("photospider-contract-disk-cache");
+  std::filesystem::remove_all(root);
+  GraphModel graph(root);
+
+  // Node 1: source (no caches entry → won't be persisted to disk)
+  graph.add_node(make_contract_node());
+
+  // Node 2: process with HP cache + caches entry → should be saved to disk
+  graph.add_node(make_contract_process_node());
+  graph.nodes.at(2).caches.push_back({"image", "output.png"});
+
+  // Node 3: process with caches entry but only RT cache (simulates a node
+  // that was computed via interactive RT path but never had HP computed)
+  Node rt_only_node;
+  rt_only_node.id = 3;
+  rt_only_node.name = "rt_only";
+  rt_only_node.type = "kernel_contract_test";
+  rt_only_node.subtype = "process";
+  rt_only_node.image_inputs.push_back(ImageInput{1, "image"});
+  rt_only_node.caches.push_back({"image", "rt_output.png"});
+  graph.add_node(rt_only_node);
+
+  graph.validate_topology();
+
+  // HP compute for node 2 — also computes node 1 as dependency
+  compute.compute(graph, ComputeIntent::GlobalHighPrecision, 2, "int8", false,
+                  false, true, nullptr, std::nullopt);
+  ASSERT_TRUE(graph.nodes.at(2).cached_output_high_precision.has_value());
+
+  // Populate RT-only node (node 3) with RT cache — never had HP compute
+  graph.nodes.at(3).cached_output_real_time = NodeOutput{};
+  graph.nodes.at(3).cached_output_real_time->image_buffer =
+      make_aligned_cpu_image_buffer(8, 8, 1, DataType::FLOAT32);
+
+  // Also give node 2 an RT snapshot — RT presence must not affect sync
+  graph.nodes.at(2).cached_output_real_time = NodeOutput{};
+  graph.nodes.at(2).cached_output_real_time->image_buffer =
+      make_aligned_cpu_image_buffer(4, 4, 1, DataType::FLOAT32);
+
+  // Create stale disk file for RT-only node 3 (simulating leftover from a
+  // previous HP run that no longer has valid HP cache).
+  auto dir3 = cache.node_cache_dir(graph, 3);
+  std::filesystem::create_directories(dir3);
+  auto stale_file = dir3 / "rt_output.png";
+  {
+    std::ofstream out(stale_file, std::ios::binary);
+    out << "stale";
+  }
+  ASSERT_TRUE(std::filesystem::exists(stale_file));
+
+  // --- Perform sync ---
+  auto sync_result = cache.synchronize_disk_cache(graph, "int8");
+
+  // Contract 1: Node 2 has HP cache → should be saved to disk
+  EXPECT_GE(sync_result.saved_nodes, 1)
+      << "Nodes with HP cache should be saved to disk";
+
+  // Contract 2: RT-only node (node 3) has NO HP cache → stale disk files
+  // MUST be cleaned up. RT presence alone must not protect stale files.
+  EXPECT_FALSE(std::filesystem::exists(stale_file))
+      << "Stale disk files for RT-only nodes should be removed";
+  EXPECT_GE(sync_result.removed_files, 1)
+      << "Sync should report removed stale files for nodes without HP cache";
+
+  // Contract 3: Node 2 has HP cache + RT cache → only HP is written to disk.
+  // The disk file for node 2 should exist after sync.
+  auto dir2 = cache.node_cache_dir(graph, 2);
+  auto hp_file = dir2 / "output.png";
+  EXPECT_TRUE(std::filesystem::exists(hp_file))
+      << "HP cache file should exist on disk after sync";
+
+  // Clean up
+  std::filesystem::remove_all(root);
 }
 
 TEST(ComputeContracts, RealTimeUpdateWithoutDirtyRoiFailsClearly) {
