@@ -24,6 +24,12 @@ Compute routes by `ComputeIntent`:
 
 `GraphRuntime` stores a scheduler map keyed by `ComputeIntent`.
 
+The long-term scheduler responsibility is resource dispatch after planning.
+Schedulers should pull planned or annotated tasks from intent-aware task pools,
+choose queue order, batching, worker policy, cancellation, and concrete
+execution resources, then dispatch work. They should not own graph-level
+dirty-region propagation or compute-task derivation.
+
 In the current parallel runtime path, a `RealTimeUpdate` request can deliberately
 submit both RT preview work and HP update work for the same dirty region. The RT
 work preserves interactive feedback, while the HP work keeps the mission pool
@@ -55,8 +61,24 @@ API. New scheduler-facing design should target `IScheduler`.
 ## Node-Level Scheduling
 
 `IScheduler` includes node-level scheduling hooks such as `schedule_node`,
-`schedule_nodes`, and task group aggregation helpers. These are intended to move
-device selection and tile grouping decisions into the scheduler layer.
+`schedule_nodes`, and task group aggregation helpers. These are migration
+interfaces. Existing implementations may still split ROI into tiles or aggregate
+task groups inside a scheduler, but that is not the target ownership boundary.
+
+The target model is:
+
+```text
+DirtyRegionPlanner
+  -> DirtyRegionSnapshot
+  -> ComputeTaskPlanner
+  -> intent-aware task pools
+  -> Scheduler resource dispatch
+```
+
+Device selection, queue selection, batching, worker reservation, cancellation,
+and resource-specific dispatch belong in the scheduler. Dirty propagation,
+node/tile expansion, monolithic dirty escalation, and logical compute-task
+derivation belong before scheduler dispatch.
 
 Default implementations may fall back to the legacy `schedule` path.
 
@@ -75,6 +97,9 @@ migration.
 ## Development Direction
 
 - Keep `IScheduler` as the formal public scheduler interface.
-- Route more compute paths through scheduler instances over time.
+- Route planned or annotated tasks through scheduler instances over time.
 - Avoid adding new permanent dependencies on `GraphRuntime` internal queues.
 - Keep plugin scheduler lifecycle compatible with `Plugin-ABI.md`.
+- Move scheduler-local ROI splitting and task-group planning decisions toward
+  `DirtyRegionPlanner`, `ComputeTaskPlanner`, or task annotation before full
+  planned-task routing is considered complete.

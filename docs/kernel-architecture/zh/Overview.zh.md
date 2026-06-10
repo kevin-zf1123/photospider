@@ -85,6 +85,7 @@ graph TD
 | `Overview.md` | 顶层模块所有权和当前架构状态。 |
 | `Data-Model.md` | `GraphModel`、`Node`、YAML schema、输入、输出、参数和缓存字段。 |
 | `Compute-Flow.md` | 顺序、并行、RT、HP、ROI 更新和事件/计时流程。 |
+| `Compute-Service-Split.md` | 计划中的 `ComputeService` facade/内部拆分和 TODO 边界。 |
 | `Cache-Model.md` | HP/RT 内存缓存语义、遗留 HP 缓存重命名和磁盘缓存行为。 |
 | `Graph-Lifecycle.md` | 图运行时所有权、图加载/reload/edit 失败语义和 `GraphModel::clear()`。 |
 | `ImageBuffer-Memory-Contract.md` | 公共 `ImageBuffer` 内存/设备契约、对齐、步长和适配器规则。 |
@@ -186,9 +187,10 @@ ROI 传播通过 registry 提供的 propagator 和 traversal helper 处理。活
 - `ComputeService` 包含 planning、cache coordination、execution、ROI update、scheduler interaction 和 metrics emission。
 - `GraphTraversalService` 将拓扑遍历与 ROI/空间传播 helper 混在一起。
 - 缓存 API 仍同时暴露遗留概念和较新的 RT/HP 概念。
-- 并非所有已构建测试可执行文件都注册到 CTest。
 
-`ComputeService` 拆分和 `GraphTraversalService` 拓扑/ROI 拆分是明确的后续重构，不属于当前 kernel-contract 清理。
+`ComputeService` 拆分现在由 `split-compute-service` OpenSpec change 和维护文档
+`Compute-Service-Split.md` 跟踪。TODO：实现仍待完成。`GraphTraversalService`
+拓扑/ROI 拆分仍是独立的后续重构。
 
 ## 维护文档边界
 

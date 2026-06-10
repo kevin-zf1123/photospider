@@ -94,6 +94,7 @@ graph TD
 | `Overview.md` | Top-level module ownership and current architecture state. |
 | `Data-Model.md` | `GraphModel`, `Node`, YAML schema, inputs, outputs, parameters, and cache fields. |
 | `Compute-Flow.md` | Sequential, parallel, RT, HP, ROI update, and event/timing flow. |
+| `Compute-Service-Split.md` | Planned `ComputeService` facade/internal split and TODO boundaries. |
 | `Cache-Model.md` | HP/RT memory cache semantics, legacy HP cache rename, and disk cache behavior. |
 | `Graph-Lifecycle.md` | Graph runtime ownership, graph load/reload/edit failure semantics, and `GraphModel::clear()`. |
 | `ImageBuffer-Memory-Contract.md` | Public `ImageBuffer` memory/device contract, alignment, stride, and adapter rules. |
@@ -217,10 +218,11 @@ These are implementation realities, not immediate blockers:
 - `GraphTraversalService` mixes topology traversal with ROI and spatial
   propagation helpers.
 - Cache APIs still expose legacy and newer RT/HP concepts together.
-- Not every built test executable is registered with CTest.
 
-The `ComputeService` split and `GraphTraversalService` topology/ROI split are
-explicit follow-up refactors, not part of the current kernel-contract cleanup.
+The `ComputeService` split is now tracked by the `split-compute-service`
+OpenSpec change and the maintained `Compute-Service-Split.md` plan. TODO:
+implementation is still pending. The `GraphTraversalService` topology/ROI split
+remains a separate follow-up refactor.
 
 ## Maintained Documentation Boundary
 

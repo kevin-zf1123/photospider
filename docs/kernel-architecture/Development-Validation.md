@@ -54,9 +54,13 @@ then upgraded later into clearer, higher-confidence tests.
 The following are recognized follow-up refactors, not part of the current
 kernel-contract cleanup:
 
-- Split `ComputeService` into planning, execution, intent update coordination,
-  cache coordination, and metrics concerns.
 - Split `GraphTraversalService` topology traversal from ROI/spatial propagation.
 
-Those changes should receive separate OpenSpec changes once the contracts and
-validation surface are stable.
+The `ComputeService` split now has a dedicated `split-compute-service`
+OpenSpec change and a maintained plan in `Compute-Service-Split.md`. TODO:
+implementation is pending. Each extraction step should identify focused tests
+or retained regression tests before duplicate logic is removed from
+`compute_service.cpp`.
+
+The `GraphTraversalService` topology/ROI split should receive a separate
+OpenSpec change after the compute split boundaries are stable.
