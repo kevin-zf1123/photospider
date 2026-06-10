@@ -24,6 +24,16 @@ Compute routes by `ComputeIntent`:
 
 `GraphRuntime` stores a scheduler map keyed by `ComputeIntent`.
 
+In the current parallel runtime path, a `RealTimeUpdate` request can deliberately
+submit both RT preview work and HP update work for the same dirty region. The RT
+work preserves interactive feedback, while the HP work keeps the mission pool
+and formal HP cache synchronized with the graph state. If this dual-submit path
+creates blocking, starvation, or worker re-entrancy concerns, those concerns
+belong in scheduler design: reserve or steal workers appropriately, use epochs
+and cancellation for stale RT work, and avoid waiting policies that can deadlock
+worker-owned execution. Do not solve this by making RT output a formal HP cache
+source.
+
 ## Current Migration State
 
 The implementation still contains worker queues, epochs, and task submission

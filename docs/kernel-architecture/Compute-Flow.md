@@ -64,7 +64,7 @@ trigger full recompute in some entry paths.
 
 HP dirty-region update computes a backward ROI plan, aligns dirty regions to HP
 tile boundaries, updates affected HP tiles, records HP ROI/version metadata, and
-can schedule downsample work to refresh RT cache.
+can schedule downsample work to refresh RT transient state.
 
 ## RealTimeUpdate
 

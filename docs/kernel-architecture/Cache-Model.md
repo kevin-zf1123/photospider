@@ -31,7 +31,7 @@ Associated fields:
 | `hp_version` | Version counter for HP output changes. |
 | `hp_roi` | Most recent or merged HP region updated. |
 
-## RT Cache
+## RT State
 
 RT compute writes `cached_output_real_time`. RT state is the interactive preview
 or proxy result. It may be lower resolution than HP output and is not formal
@@ -48,8 +48,8 @@ Associated fields:
 
 `cached_output` exists for legacy compute paths and current migration support.
 It should be treated as a mistaken HP cache name. Migration should move HP reads
-and writes to `cached_output_high_precision`, then remove mirroring once callers
-are updated.
+and writes to `cached_output_high_precision`. Remaining compatibility fallbacks
+may read it only while callers are verified on HP output.
 
 ## Disk Cache
 
@@ -68,12 +68,14 @@ image cache data is converted into float image buffers.
 | Clear drive cache | Remove disk cache directory contents and recreate root. |
 | Clear memory cache | Clear in-memory HP cache and RT transient state currently tracked by the service. |
 | Clear cache | Clear both disk and memory cache. |
-| Cache all nodes | Save cached node outputs to disk when configured. |
+| Cache all nodes | Save nodes with HP output to disk when configured. |
 | Free transient memory | Clear non-ending node memory cache state. |
-| Synchronize disk cache | Save memory cache and remove stale disk files. |
+| Synchronize disk cache | Save HP output and remove stale disk files for nodes without HP output. |
 
-Some cache commands still operate on the old `cached_output` path. This is a
-known migration area.
+Disk cache save, load, and synchronization use `cached_output_high_precision`
+only. RT output does not protect stale disk files and is not promoted to disk
+cache state. Legacy `cached_output` is cleared with other memory state, but it
+is not a disk-cache source.
 
 ## Migration Rules
 
@@ -87,6 +89,7 @@ known migration area.
   cache.
 - Tests should verify HP and RT fields independently.
 
-`GraphInspectService` prefers HP, then RT, then legacy `cached_output` for
-compatibility. Future inspect work should display HP and RT metadata explicitly
-instead of collapsing them into one selected output.
+`GraphInspectService` selects a display source in HP, RT, legacy order for
+compatibility and labels the selected source explicitly. RT metadata may be
+shown for inspection, but it is labeled as transient state rather than formal
+cache authority.

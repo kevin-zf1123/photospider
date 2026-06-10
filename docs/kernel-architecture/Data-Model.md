@@ -75,7 +75,7 @@ Operators may return image data, named data, or both.
 
 ## Cache Fields
 
-The formal reusable cache field is:
+The cache-related node fields are:
 
 | Field | Status | Meaning |
 | --- | --- | --- |
@@ -89,7 +89,7 @@ behavior. `cached_output_real_time` is transient interactive state and must not
 be used as authoritative cached output. `cached_output` is not a third
 long-term cache kind. It should be migrated to
 `cached_output_high_precision` throughout the codebase. Existing compatibility
-paths may read or mirror it only until call sites are moved.
+paths may read it only until call sites are verified on HP output.
 
 ## YAML Schema
 

@@ -9,16 +9,14 @@
 #include <optional>
 #include <queue>
 #include <sstream>
-#include <unordered_map>
 #include <type_traits>
+#include <unordered_map>
 
 #include "graph_model.hpp"
 #include "kernel/ops.hpp"
 #include "kernel/param_utils.hpp"
 
 namespace ps {
-
-constexpr int kRtDownscaleFactor = 4;
 
 namespace {
 
@@ -43,8 +41,8 @@ cv::Rect merge_rect(const cv::Rect& a, const cv::Rect& b) {
 cv::Rect expand_rect(const cv::Rect& rect, int padding) {
   if (padding <= 0 || is_rect_empty(rect))
     return rect;
-  return cv::Rect(rect.x - padding, rect.y - padding,
-                  rect.width + padding * 2, rect.height + padding * 2);
+  return cv::Rect(rect.x - padding, rect.y - padding, rect.width + padding * 2,
+                  rect.height + padding * 2);
 }
 
 cv::Rect clamp_rect_to_bounds(const cv::Rect& rect, const cv::Size& bounds) {
@@ -59,8 +57,7 @@ cv::Rect clamp_rect_to_bounds(const cv::Rect& rect, const cv::Size& bounds) {
   return cv::Rect(x0, y0, x1 - x0, y1 - y0);
 }
 
-cv::Point2d apply_matrix(const std::array<double, 9>& mat, double x,
-                         double y) {
+cv::Point2d apply_matrix(const std::array<double, 9>& mat, double x, double y) {
   double w = mat[6] * x + mat[7] * y + mat[8];
   if (std::abs(w) < 1e-9)
     w = 1.0;
@@ -101,8 +98,6 @@ cv::Rect transform_rect_with_matrix(const cv::Rect& rect,
 const NodeOutput* pick_cached_output(const Node& node) {
   if (node.cached_output_high_precision)
     return &node.cached_output_high_precision.value();
-  if (node.cached_output_real_time)
-    return &node.cached_output_real_time.value();
   if (node.cached_output)
     return &node.cached_output.value();
   return nullptr;
@@ -118,7 +113,8 @@ SpatialDependencyMap& normalize_dependency_map(SpatialDependencyMap& map,
       map.output_extent != child_size)
     map.output_extent = child_size;
   if (map.cols <= 0)
-    map.cols = (map.output_extent.width + map.grid_size_x - 1) / map.grid_size_x;
+    map.cols =
+        (map.output_extent.width + map.grid_size_x - 1) / map.grid_size_x;
   if (map.rows <= 0)
     map.rows =
         (map.output_extent.height + map.grid_size_y - 1) / map.grid_size_y;
@@ -140,15 +136,13 @@ cv::Rect dependency_lookup(const Node& node, const GraphModel& graph,
       child_size.height <= 0) {
     return cv::Rect();
   }
-  if (!node.dependency_lut ||
-      !node.dependency_lut->is_valid_for(child_size)) {
+  if (!node.dependency_lut || !node.dependency_lut->is_valid_for(child_size)) {
     SpatialDependencyMap lut = builder(node, graph, parent_size, child_size);
     normalize_dependency_map(lut, child_size);
     node.dependency_lut = std::move(lut);
     node.dependency_lut_version += 1;
   }
-  if (!node.dependency_lut ||
-      !node.dependency_lut->is_valid_for(child_size)) {
+  if (!node.dependency_lut || !node.dependency_lut->is_valid_for(child_size)) {
     return cv::Rect();
   }
   return node.dependency_lut->lookup(current_roi);
@@ -388,14 +382,6 @@ cv::Size infer_output_size(const GraphModel& graph,
     return cache[node_id] = size;
   if (take_from_output(node.cached_output))
     return cache[node_id] = size;
-  if (node.cached_output_real_time) {
-    const auto& buf = node.cached_output_real_time->image_buffer;
-    if (buf.width > 0 && buf.height > 0) {
-      size = cv::Size(buf.width * kRtDownscaleFactor,
-                      buf.height * kRtDownscaleFactor);
-      return cache[node_id] = size;
-    }
-  }
 
   auto width_opt = node_param_int_opt(node, "width");
   auto height_opt = node_param_int_opt(node, "height");
@@ -423,8 +409,11 @@ cv::Rect compute_upstream_roi_impl(
   if (is_rect_empty(downstream_roi))
     return cv::Rect();
 
-  auto get_size = [&](int nid) { return infer_output_size(graph, size_cache, nid); };
-  cv::Rect clamped_roi = clamp_rect_to_bounds(downstream_roi, get_size(node.id));
+  auto get_size = [&](int nid) {
+    return infer_output_size(graph, size_cache, nid);
+  };
+  cv::Rect clamped_roi =
+      clamp_rect_to_bounds(downstream_roi, get_size(node.id));
   if (is_rect_empty(clamped_roi))
     return cv::Rect();
 
@@ -463,9 +452,9 @@ cv::Rect compute_upstream_roi_impl(
     }
     if (primary_parent_size.width > 0 && primary_parent_size.height > 0 &&
         downstream_size.width > 0 && downstream_size.height > 0) {
-      cv::Rect lut_roi = dependency_lookup(node, graph, *lut_builder,
-                                           clamped_roi, primary_parent_size,
-                                           downstream_size);
+      cv::Rect lut_roi =
+          dependency_lookup(node, graph, *lut_builder, clamped_roi,
+                            primary_parent_size, downstream_size);
       if (!is_rect_empty(lut_roi)) {
         upstream_roi = has_roi ? merge_rect(upstream_roi, lut_roi) : lut_roi;
         has_roi = true;
@@ -476,7 +465,7 @@ cv::Rect compute_upstream_roi_impl(
   return has_roi ? upstream_roi : cv::Rect();
 }
 
-} // namespace anonymous
+}  // namespace
 
 // Member function definitions inside namespace ps
 std::vector<int> GraphTraversalService::topo_postorder_from(
@@ -648,7 +637,9 @@ std::optional<cv::Rect> ps::GraphTraversalService::project_roi_forward(
   }
 
   std::unordered_map<int, cv::Size> size_cache;
-  auto get_size = [&](int nid) { return infer_output_size(graph, size_cache, nid); };
+  auto get_size = [&](int nid) {
+    return infer_output_size(graph, size_cache, nid);
+  };
 
   std::unordered_map<int, cv::Rect> roi_map;
   std::queue<int> pending;
@@ -683,8 +674,8 @@ std::optional<cv::Rect> ps::GraphTraversalService::project_roi_forward(
       if (child_size.width <= 0 || child_size.height <= 0)
         continue;
 
-      auto forward_fn =
-          OpRegistry::instance().get_forward_propagator(child.type, child.subtype);
+      auto forward_fn = OpRegistry::instance().get_forward_propagator(
+          child.type, child.subtype);
       cv::Rect propagated =
           forward_fn(child, current_roi, graph, parent_size, child_size);
       propagated = clamp_rect_to_bounds(propagated, child_size);
@@ -727,7 +718,9 @@ std::optional<cv::Rect> ps::GraphTraversalService::project_roi_backward(
   std::unordered_map<int, cv::Rect> roi_map;
   std::queue<int> pending;
   std::unordered_map<int, cv::Size> size_cache;
-  auto get_size = [&](int nid) { return infer_output_size(graph, size_cache, nid); };
+  auto get_size = [&](int nid) {
+    return infer_output_size(graph, size_cache, nid);
+  };
 
   cv::Rect seed = clamp_rect_to_bounds(target_roi, get_size(target_node_id));
   if (is_rect_empty(seed))

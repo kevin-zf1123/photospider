@@ -347,6 +347,7 @@ if(BUILD_TESTING)
     add_ps_test(test_milestone3 tests/test_milestone3.cpp)
     add_ps_test(test_milestone34 tests/test_milestone34.cpp)
     add_ps_test(test_propagation tests/test_propagation.cpp)
+    add_ps_test(test_propagation_contracts tests/test_propagation_contracts.cpp)
     add_ps_test(test_kernel_contracts tests/test_kernel_contracts.cpp)
     
     # [M3.1] OpRegistry 多设备实现测试
@@ -364,7 +365,10 @@ if(BUILD_TESTING)
     gtest_discover_tests(test_milestone3 WORKING_DIRECTORY ${PROJECT_SOURCE_DIR})
     gtest_discover_tests(test_op_registry_m31 WORKING_DIRECTORY ${PROJECT_SOURCE_DIR})
     gtest_discover_tests(test_milestone34 WORKING_DIRECTORY ${PROJECT_SOURCE_DIR})
-    gtest_discover_tests(test_propagation WORKING_DIRECTORY ${PROJECT_SOURCE_DIR})
+    # test_propagation is intentionally a scriptable REPL/tool target rather
+    # than a GTest binary. Keep it buildable for CI scripts, but do not run
+    # gtest discovery on it.
+    gtest_discover_tests(test_propagation_contracts WORKING_DIRECTORY ${PROJECT_SOURCE_DIR})
     gtest_discover_tests(test_kernel_contracts WORKING_DIRECTORY ${PROJECT_SOURCE_DIR})
     gtest_discover_tests(test_gpu_pipeline_scheduler WORKING_DIRECTORY ${PROJECT_SOURCE_DIR})
     gtest_discover_tests(test_scheduler_plugin_loader WORKING_DIRECTORY ${PROJECT_SOURCE_DIR})
