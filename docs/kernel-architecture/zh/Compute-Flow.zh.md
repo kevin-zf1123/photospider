@@ -52,7 +52,7 @@ CLI / TUI
 
 `GlobalHighPrecision` 是完整质量路径。没有 dirty ROI 时，它执行普通完整计算。在当前代码中，global compute 上的 dirty ROI 在某些入口路径中仍可能触发完整重算。
 
-HP 脏区更新会计算反向 ROI 计划，将脏区对齐到 HP tile 边界，更新受影响 HP tile，记录 HP ROI/版本元数据，并可调度 downsample 工作刷新 RT 缓存。
+HP 脏区更新会计算反向 ROI 计划，将脏区对齐到 HP tile 边界，更新受影响 HP tile，记录 HP ROI/版本元数据，并可调度 downsample 工作刷新 RT 临时状态。
 
 ## RealTimeUpdate
 
@@ -78,4 +78,3 @@ HP 脏区更新会计算反向 ROI 计划，将脏区对齐到 HP tile 边界，
 ## 错误处理
 
 计算失败会尽可能抛出带 `GraphErrc` 分类的 `GraphError`。`Kernel` 捕获这些错误，并为前端检查存储每图 `LastError`。
-

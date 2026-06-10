@@ -212,7 +212,7 @@ TEST(CacheSemantics, DiskSaveAndSyncIgnoreRtAndLegacy) {
   graph.add_node(make_contract_process_node());
   graph.nodes.at(2).caches.push_back({"image", "output.png"});
 
-  // Node 3: process with caches entry but only RT cache (simulates a node
+  // Node 3: process with caches entry but only RT state (simulates a node
   // that was computed via interactive RT path but never had HP computed)
   Node rt_only_node;
   rt_only_node.id = 3;
@@ -230,7 +230,7 @@ TEST(CacheSemantics, DiskSaveAndSyncIgnoreRtAndLegacy) {
                   false, true, nullptr, std::nullopt);
   ASSERT_TRUE(graph.nodes.at(2).cached_output_high_precision.has_value());
 
-  // Populate RT-only node (node 3) with RT cache — never had HP compute
+  // Populate RT-only node (node 3) with RT state; it never had HP compute.
   graph.nodes.at(3).cached_output_real_time = NodeOutput{};
   graph.nodes.at(3).cached_output_real_time->image_buffer =
       make_aligned_cpu_image_buffer(8, 8, 1, DataType::FLOAT32);
@@ -265,7 +265,7 @@ TEST(CacheSemantics, DiskSaveAndSyncIgnoreRtAndLegacy) {
   EXPECT_GE(sync_result.removed_files, 1)
       << "Sync should report removed stale files for nodes without HP cache";
 
-  // Contract 3: Node 2 has HP cache + RT cache → only HP is written to disk.
+  // Contract 3: Node 2 has HP cache + RT state, so only HP is written to disk.
   // The disk file for node 2 should exist after sync.
   auto dir2 = cache.node_cache_dir(graph, 2);
   auto hp_file = dir2 / "output.png";

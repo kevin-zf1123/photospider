@@ -294,10 +294,10 @@ void finalize_output_metadata(NodeOutput& output,
                               bool enable_timing, double execution_ms) {
   inherit_spatial_context(output, inputs);
   auto now = std::chrono::high_resolution_clock::now();
-  output.debug.timestamp_us =
-      static_cast<uint64_t>(std::chrono::duration_cast<std::chrono::microseconds>(
-                                now.time_since_epoch())
-                                .count());
+  output.debug.timestamp_us = static_cast<uint64_t>(
+      std::chrono::duration_cast<std::chrono::microseconds>(
+          now.time_since_epoch())
+          .count());
   output.debug.computed_by_worker_id = GraphRuntime::this_worker_id();
   if (execution_ms < 0.0)
     execution_ms = 0.0;
@@ -603,17 +603,16 @@ NodeOutput& ComputeService::compute_internal(
               ob = make_aligned_cpu_image_buffer(out_w, out_h, out_c, out_t);
 
               const int TILE_SIZE = 256, HALO_SIZE = 16;
-              auto access_pattern = OpMetadata::InputAccessPattern::SpatialAligned;
-              if (auto meta =
-                      OpRegistry::instance().get_metadata(target_node.type,
-                                                          target_node.subtype)) {
+              auto access_pattern =
+                  OpMetadata::InputAccessPattern::SpatialAligned;
+              if (auto meta = OpRegistry::instance().get_metadata(
+                      target_node.type, target_node.subtype)) {
                 access_pattern = meta->access_pattern;
               }
               auto prop_fn = OpRegistry::instance().get_dirty_propagator(
                   target_node.type, target_node.subtype);
-              const bool needs_halo =
-                  (target_node.type == "image_process" &&
-                   target_node.subtype == "gaussian_blur");
+              const bool needs_halo = (target_node.type == "image_process" &&
+                                       target_node.subtype == "gaussian_blur");
               for (int y = 0; y < ob.height; y += TILE_SIZE) {
                 for (int x = 0; x < ob.width; x += TILE_SIZE) {
                   ps::TileTask task;
@@ -630,16 +629,16 @@ NodeOutput& ComputeService::compute_internal(
                     cv::Rect input_roi;
                     if (access_pattern ==
                         OpMetadata::InputAccessPattern::RandomAccess) {
-                      input_roi = prop_fn(target_node, task.output_tile.roi,
-                                          graph);
-                      input_roi = input_roi &
-                                  cv::Rect(0, 0, in_tile.buffer->width,
-                                           in_tile.buffer->height);
+                      input_roi =
+                          prop_fn(target_node, task.output_tile.roi, graph);
+                      input_roi =
+                          input_roi & cv::Rect(0, 0, in_tile.buffer->width,
+                                               in_tile.buffer->height);
                     } else if (needs_halo) {
-                      input_roi = calculate_halo(
-                          task.output_tile.roi, HALO_SIZE,
-                          {in_out->image_buffer.width,
-                           in_out->image_buffer.height});
+                      input_roi =
+                          calculate_halo(task.output_tile.roi, HALO_SIZE,
+                                         {in_out->image_buffer.width,
+                                          in_out->image_buffer.height});
                     } else {
                       // For non-convolution ops, use exact output ROI to
                       // avoid size mismatch/striping
@@ -696,8 +695,7 @@ NodeOutput& ComputeService::compute_internal(
   if (execution_duration_ms < 0)
     execution_duration_ms = 0.0;  // 保险
 
-  if (result_source == "computed" &&
-      target_node.cached_output_high_precision) {
+  if (result_source == "computed" && target_node.cached_output_high_precision) {
     finalize_output_metadata(*target_node.cached_output_high_precision,
                              monolithic_inputs, enable_timing,
                              execution_duration_ms);
@@ -788,10 +786,9 @@ NodeOutput& ComputeService::compute_node_no_recurse(
           "Parallel scheduler bug: parameter input not ready for node " +
               std::to_string(node_id));
     }
-    const auto& up_out =
-        itn->second.cached_output_high_precision.has_value()
-            ? *itn->second.cached_output_high_precision
-            : *itn->second.cached_output;
+    const auto& up_out = itn->second.cached_output_high_precision.has_value()
+                             ? *itn->second.cached_output_high_precision
+                             : *itn->second.cached_output;
     auto it = up_out.data.find(p_input.from_output_name);
     if (it == up_out.data.end()) {
       throw GraphError(GraphErrc::MissingDependency,
@@ -817,10 +814,9 @@ NodeOutput& ComputeService::compute_node_no_recurse(
           "Parallel scheduler bug: image input not ready for node " +
               std::to_string(node_id));
     }
-    inputs_ready.push_back(
-        itn->second.cached_output_high_precision.has_value()
-            ? &*itn->second.cached_output_high_precision
-            : &*itn->second.cached_output);
+    inputs_ready.push_back(itn->second.cached_output_high_precision.has_value()
+                               ? &*itn->second.cached_output_high_precision
+                               : &*itn->second.cached_output);
   }
 
   if (!inputs_ready.empty()) {
@@ -946,8 +942,7 @@ NodeOutput& ComputeService::compute_node_no_recurse(
                              : inputs_for_tiling[0]->image_buffer.type;
 
             target_node.cached_output_high_precision = NodeOutput();
-            auto& ob =
-                target_node.cached_output_high_precision->image_buffer;
+            auto& ob = target_node.cached_output_high_precision->image_buffer;
             ob = make_aligned_cpu_image_buffer(out_w, out_h, out_c, out_t);
 
             const int TILE_SIZE = 256, HALO_SIZE = 16;
@@ -959,9 +954,8 @@ NodeOutput& ComputeService::compute_node_no_recurse(
             }
             auto prop_fn = OpRegistry::instance().get_dirty_propagator(
                 target_node.type, target_node.subtype);
-            const bool needs_halo =
-                (target_node.type == "image_process" &&
-                 target_node.subtype == "gaussian_blur");
+            const bool needs_halo = (target_node.type == "image_process" &&
+                                     target_node.subtype == "gaussian_blur");
             for (int y = 0; y < ob.height; y += TILE_SIZE) {
               for (int x = 0; x < ob.width; x += TILE_SIZE) {
                 ps::TileTask task;
@@ -977,16 +971,15 @@ NodeOutput& ComputeService::compute_node_no_recurse(
                   cv::Rect input_roi;
                   if (access_pattern ==
                       OpMetadata::InputAccessPattern::RandomAccess) {
-                    input_roi = prop_fn(target_node, task.output_tile.roi,
-                                        graph);
-                    input_roi = input_roi &
-                                cv::Rect(0, 0, in_tile.buffer->width,
-                                         in_tile.buffer->height);
+                    input_roi =
+                        prop_fn(target_node, task.output_tile.roi, graph);
+                    input_roi =
+                        input_roi & cv::Rect(0, 0, in_tile.buffer->width,
+                                             in_tile.buffer->height);
                   } else if (needs_halo) {
-                    input_roi = calculate_halo(
-                        task.output_tile.roi, HALO_SIZE,
-                        {in_out->image_buffer.width,
-                         in_out->image_buffer.height});
+                    input_roi = calculate_halo(task.output_tile.roi, HALO_SIZE,
+                                               {in_out->image_buffer.width,
+                                                in_out->image_buffer.height});
                   } else {
                     input_roi = task.output_tile.roi;
                   }
@@ -1104,16 +1097,6 @@ NodeOutput& ComputeService::compute_high_precision_update(
       hp_size_cache[nid] = size;
       return size;
     }
-    if (node.cached_output_real_time) {
-      const auto& buf = node.cached_output_real_time->image_buffer;
-      if (buf.width > 0 && buf.height > 0) {
-        size = cv::Size(buf.width * kRtDownscaleFactor,
-                        buf.height * kRtDownscaleFactor);
-        hp_size_cache[nid] = size;
-        return size;
-      }
-    }
-
     int width = as_int_flexible(node.runtime_parameters, "width",
                                 as_int_flexible(node.parameters, "width", 0));
     int height = as_int_flexible(node.runtime_parameters, "height",
@@ -1545,9 +1528,9 @@ NodeOutput& ComputeService::compute_high_precision_update(
                            (rt_buffer.type != hp_buffer.type) ||
                            (!rt_buffer.data);
         if (needs_alloc) {
-          rt_buffer = make_aligned_cpu_image_buffer(
-              rt_size.width, rt_size.height, hp_buffer.channels,
-              hp_buffer.type);
+          rt_buffer =
+              make_aligned_cpu_image_buffer(rt_size.width, rt_size.height,
+                                            hp_buffer.channels, hp_buffer.type);
         }
 
         cv::Rect roi_rt =
@@ -1648,16 +1631,6 @@ NodeOutput& ComputeService::compute_real_time_update(
       hp_size_cache[nid] = size;
       return size;
     }
-    if (node.cached_output_real_time) {
-      const auto& img = node.cached_output_real_time->image_buffer;
-      if (img.width > 0 && img.height > 0) {
-        size = cv::Size(img.width * kRtDownscaleFactor,
-                        img.height * kRtDownscaleFactor);
-        hp_size_cache[nid] = size;
-        return size;
-      }
-    }
-
     int width = as_int_flexible(node.runtime_parameters, "width",
                                 as_int_flexible(node.parameters, "width", 0));
     int height = as_int_flexible(node.runtime_parameters, "height",
@@ -2072,8 +2045,6 @@ NodeOutput& ComputeService::compute_real_time_update(
   return *target.cached_output_real_time;
 }
 
-
-
 NodeOutput& ComputeService::compute_parallel(
     GraphModel& graph, GraphRuntime& runtime, int node_id,
     const std::string& cache_precision, bool force_recache, bool enable_timing,
@@ -2425,9 +2396,8 @@ NodeOutput& ComputeService::compute_parallel(
                       // tiles)
                       temp_results[current_node_idx] = NodeOutput{};
                       auto& ob = temp_results[current_node_idx]->image_buffer;
-                      ob =
-                          make_aligned_cpu_image_buffer(out_w, out_h, out_c,
-                                                        out_t);
+                      ob = make_aligned_cpu_image_buffer(out_w, out_h, out_c,
+                                                         out_t);
 
                       // Tile size from metadata preference
                       int tile_size = 128;
@@ -2450,8 +2420,9 @@ NodeOutput& ComputeService::compute_parallel(
                         access_pattern =
                             resolved_meta[current_node_idx]->access_pattern;
                       }
-                      auto prop_fn = OpRegistry::instance().get_dirty_propagator(
-                          target_node.type, target_node.subtype);
+                      auto prop_fn =
+                          OpRegistry::instance().get_dirty_propagator(
+                              target_node.type, target_node.subtype);
 
                       // Plan tiles and spawn micro tasks
                       int tiles_x = (out_w + tile_size - 1) / tile_size;
@@ -2496,14 +2467,14 @@ NodeOutput& ComputeService::compute_parallel(
                                     &in_out->image_buffer);
                                 cv::Rect input_roi;
                                 if (access_pattern ==
-                                    OpMetadata::InputAccessPattern::RandomAccess) {
-                                  input_roi = prop_fn(node_for_exec,
-                                                      tt.output_tile.roi,
-                                                      graph);
-                                  input_roi = input_roi &
-                                              cv::Rect(0, 0,
-                                                       in_tile.buffer->width,
-                                                       in_tile.buffer->height);
+                                    OpMetadata::InputAccessPattern::
+                                        RandomAccess) {
+                                  input_roi = prop_fn(
+                                      node_for_exec, tt.output_tile.roi, graph);
+                                  input_roi =
+                                      input_roi &
+                                      cv::Rect(0, 0, in_tile.buffer->width,
+                                               in_tile.buffer->height);
                                 } else if (needs_halo) {
                                   input_roi = calculate_halo(
                                       tt.output_tile.roi, HALO_SIZE,
@@ -2800,10 +2771,10 @@ NodeOutput& ComputeService::compute_parallel(
       }
 
       if (!runtime.running()) {
-        compute_high_precision_update(
-            graph, &runtime, node_id, cache_precision, force_recache,
-            enable_timing, disable_disk_cache, nullptr /* no events */,
-            *dirty_roi);
+        compute_high_precision_update(graph, &runtime, node_id, cache_precision,
+                                      force_recache, enable_timing,
+                                      disable_disk_cache,
+                                      nullptr /* no events */, *dirty_roi);
         return compute_real_time_update(
             graph, &runtime, node_id, cache_precision, force_recache,
             enable_timing, disable_disk_cache, benchmark_events, *dirty_roi);
@@ -2819,10 +2790,10 @@ NodeOutput& ComputeService::compute_parallel(
            cache_precision, force_recache, enable_timing, disable_disk_cache,
            roi = *dirty_roi, hp_done]() {
             try {
-              compute_high_precision_update(
-                  *graph_ptr, runtime_ptr, node_id, cache_precision,
-                  force_recache, enable_timing, disable_disk_cache,
-                  nullptr /* no events */, roi);
+              compute_high_precision_update(*graph_ptr, runtime_ptr, node_id,
+                                            cache_precision, force_recache,
+                                            enable_timing, disable_disk_cache,
+                                            nullptr /* no events */, roi);
               hp_done->set_value();
             } catch (...) {
               hp_done->set_exception(std::current_exception());
@@ -2835,10 +2806,10 @@ NodeOutput& ComputeService::compute_parallel(
            cache_precision, force_recache, enable_timing, disable_disk_cache,
            benchmark_events, roi = *dirty_roi, rt_done]() {
             try {
-              compute_real_time_update(
-                  *graph_ptr, runtime_ptr, node_id, cache_precision,
-                  force_recache, enable_timing, disable_disk_cache,
-                  benchmark_events, roi);
+              compute_real_time_update(*graph_ptr, runtime_ptr, node_id,
+                                       cache_precision, force_recache,
+                                       enable_timing, disable_disk_cache,
+                                       benchmark_events, roi);
               rt_done->set_value();
             } catch (...) {
               rt_done->set_exception(std::current_exception());

@@ -21,6 +21,8 @@ create -> attach(runtime) -> start -> schedule(...) -> shutdown -> detach
 
 `GraphRuntime` 保存以 `ComputeIntent` 为 key 的调度器映射。
 
+在当前并行运行时路径中，一个 `RealTimeUpdate` 请求可以有意为同一脏区同时提交 RT 预览工作与 HP 更新工作。RT 工作保留交互反馈，而 HP 工作让任务池和正式 HP 缓存与图状态保持同步。如果这个双提交路径带来阻塞、饥饿或 worker 重入问题，这些问题属于调度器设计责任：应恰当地保留或窃取 worker，使用 epoch 和取消处理陈旧 RT 工作，并避免可能让 worker 所有的执行死锁的等待策略。不要通过让 RT 输出成为正式 HP 缓存来源来解决。
+
 ## 当前迁移状态
 
 实现中仍在 `GraphRuntime` 直接包含 worker 队列、epoch 和任务提交 API。某些计算路径仍调用 `ComputeService::compute_parallel` 并直接向这些队列提交任务。
