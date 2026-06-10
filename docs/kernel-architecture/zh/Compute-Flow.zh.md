@@ -17,6 +17,24 @@ CLI / TUI
 
 `Kernel` 拥有多图 API。`GraphRuntime` 拥有一个图模型、事件服务、worker 状态、平台 context 和调度器实例。
 
+`InteractionService` 是面向前端的 kernel interaction facade。它的总体职责是将 CLI/TUI/frontend
+命令与 kernel 内部解耦。在 dirty-region 语境中，它应暴露图级 dirty snapshot 查询和可视化 hook；
+它不是 dirty-region generation 或 propagation 的权威来源。
+
+`ComputeService` 拆分后的目标 planning 流程：
+
+```text
+ComputeService facade
+  -> DirtyRegionPlanner
+  -> DirtyRegionSnapshot
+  -> ComputeTaskPlanner
+  -> ComputePlan / ComputeTaskGraph
+  -> task pools / scheduler / execution resources
+```
+
+单线程和并行执行应共享同一逻辑 `ComputePlan` 或 `ComputeTaskGraph`。执行模式应在 task pool、
+scheduler policy 和执行资源上不同，而不是在图级 dirty propagation 或 compute-task derivation 上不同。
+
 ## 计算意图
 
 内核识别两个正式计算意图：
@@ -27,6 +45,9 @@ CLI / TUI
 | `RealTimeUpdate` | 交互式更新，需要 dirty ROI。 |
 
 意图模型是正式的。当前实现仍有若干绕过 `IScheduler` 并直接调用 `ComputeService` 的路径。
+
+计划中的 `ComputeService` 就地拆分记录在 `Compute-Service-Split.md`。TODO：
+facade/内部模块拆分尚未实现；在相关任务落地前，本文档描述当前行为。
 
 ## 顺序计算
 
@@ -40,13 +61,18 @@ CLI / TUI
 6. 执行 monolithic 或 tiled 操作。
 7. 存储输出、发出事件、更新时间，并在启用时保存磁盘缓存。
 
-顺序计算适合简单执行和调试，但不代表目标调度器架构。
+顺序计算适合简单执行和调试，但不代表目标调度器架构。TODO：引入 compute task planning 后，
+顺序计算应执行与并行路径相同的逻辑 plan。
 
 ## 并行计算
 
 并行计算从 `topo_postorder_from` 构建 DAG，跟踪依赖计数器，并将 ready 节点任务提交到 `GraphRuntime` worker 队列。Tiled 操作可能产生微任务并递增运行时完成计数器。
 
-该路径是当前行为，但也是调度器迁移表面的一部分。正式长期目标是通过 `IScheduler` 实例路由计算。
+该路径是当前行为，但也是调度器迁移表面的一部分。正式长期目标是在 dirty-region state 和
+compute-task planning 已产生 planned work 后，通过 `IScheduler` 实例路由计算。
+
+TODO：`split-compute-service` change 应先将该遗留 `GraphRuntime` 队列路径隔离到
+parallel executor 边界后面，再由后续 change 完成完整 planned-task scheduler routing。
 
 ## GlobalHighPrecision
 
@@ -54,11 +80,17 @@ CLI / TUI
 
 HP 脏区更新会计算反向 ROI 计划，将脏区对齐到 HP tile 边界，更新受影响 HP tile，记录 HP ROI/版本元数据，并可调度 downsample 工作刷新 RT 临时状态。
 
+TODO：将 dirty-region state planning 移入独立图级 `DirtyRegionPlanner`，并将产生的
+`DirtyRegionSnapshot` 暴露给 compute task planning 和交互层检查。
+
 ## RealTimeUpdate
 
 `RealTimeUpdate` 需要 dirty ROI。没有 `dirty_roi` 的请求是非法的，应通过内核和交互层 API 返回清晰错误。它不会隐式表示全帧 RT 更新。
 
 带有效 dirty ROI 时，RT 计算会更新受影响区域的代理输出，并可能通过运行时排入后台 HP 更新。
+
+TODO：在 node-local dirty report、算子 propagation 和图级 dirty snapshot 拥有 dirty-region
+state 之前，将传入的 dirty ROI 视为过渡性 compute input。
 
 当前默认值：
 

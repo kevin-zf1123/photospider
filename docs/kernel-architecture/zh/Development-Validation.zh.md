@@ -38,8 +38,11 @@
 
 以下是已识别的后续重构，不属于当前 kernel-contract 清理：
 
-- 将 `ComputeService` 拆分为 planning、execution、intent update coordination、cache coordination 和 metrics 关注点。
 - 将 `GraphTraversalService` 的拓扑遍历与 ROI/空间传播拆分。
 
-这些变更应在契约和验证表面稳定后接收单独的 OpenSpec change。
+`ComputeService` 拆分现在已有专门的 `split-compute-service` OpenSpec change，
+并在维护文档 `Compute-Service-Split.md` 中记录计划。TODO：实现仍待完成。每个
+抽取步骤都应在从 `compute_service.cpp` 删除重复逻辑前明确聚焦测试或保留的回归测试。
 
+`GraphTraversalService` 拓扑/ROI 拆分应在 compute split 边界稳定后接收单独的
+OpenSpec change。

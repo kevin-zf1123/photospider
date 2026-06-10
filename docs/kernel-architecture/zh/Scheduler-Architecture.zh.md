@@ -21,6 +21,10 @@ create -> attach(runtime) -> start -> schedule(...) -> shutdown -> detach
 
 `GraphRuntime` 保存以 `ComputeIntent` 为 key 的调度器映射。
 
+长期 scheduler 职责是 planning 之后的资源 dispatch。Scheduler 应从 intent-aware task pool
+中拉取 planned 或 annotated task，选择队列顺序、批处理、worker 策略、取消和具体执行资源，
+然后分发工作。它们不应拥有图级 dirty-region propagation 或 compute-task derivation。
+
 在当前并行运行时路径中，一个 `RealTimeUpdate` 请求可以有意为同一脏区同时提交 RT 预览工作与 HP 更新工作。RT 工作保留交互反馈，而 HP 工作让任务池和正式 HP 缓存与图状态保持同步。如果这个双提交路径带来阻塞、饥饿或 worker 重入问题，这些问题属于调度器设计责任：应恰当地保留或窃取 worker，使用 epoch 和取消处理陈旧 RT 工作，并避免可能让 worker 所有的执行死锁的等待策略。不要通过让 RT 输出成为正式 HP 缓存来源来解决。
 
 ## 当前迁移状态
@@ -40,7 +44,23 @@ create -> attach(runtime) -> start -> schedule(...) -> shutdown -> detach
 
 ## 节点级调度
 
-`IScheduler` 包含节点级调度钩子，例如 `schedule_node`、`schedule_nodes` 和任务组聚合 helper。这些接口旨在将设备选择和 tile 分组决策移动到调度器层。
+`IScheduler` 包含节点级调度钩子，例如 `schedule_node`、`schedule_nodes` 和任务组聚合 helper。
+这些接口是迁移接口。现有实现仍可能在 scheduler 内部将 ROI 拆成 tile 或聚合 task group，
+但这不是目标职责边界。
+
+目标模型是：
+
+```text
+DirtyRegionPlanner
+  -> DirtyRegionSnapshot
+  -> ComputeTaskPlanner
+  -> intent-aware task pools
+  -> Scheduler resource dispatch
+```
+
+设备选择、队列选择、批处理、worker reservation、取消和资源专用 dispatch 属于 scheduler。
+Dirty propagation、node/tile 展开、monolithic dirty escalation 和逻辑 compute-task derivation
+属于 scheduler dispatch 之前的阶段。
 
 默认实现可能 fallback 到遗留 `schedule` 路径。
 
@@ -55,7 +75,8 @@ create -> attach(runtime) -> start -> schedule(...) -> shutdown -> detach
 ## 开发方向
 
 - 保持 `IScheduler` 作为正式公共调度器接口。
-- 随时间推移将更多计算路径路由到调度器实例。
+- 随时间推移将 planned 或 annotated task 路由到调度器实例。
 - 避免新增对 `GraphRuntime` 内部队列的永久依赖。
 - 保持插件调度器生命周期与 `Plugin-ABI.md` 兼容。
-
+- 在完整 planned-task routing 被视为完成前，将 scheduler-local ROI splitting 和 task-group
+  planning decision 迁移到 `DirtyRegionPlanner`、`ComputeTaskPlanner` 或 task annotation。
