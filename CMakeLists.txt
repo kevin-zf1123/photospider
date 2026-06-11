@@ -362,6 +362,8 @@ if(BUILD_TESTING)
     add_ps_test(test_graph_topology_boundaries tests/test_graph_topology_boundaries.cpp)
     add_ps_test(test_kernel_contracts tests/test_kernel_contracts.cpp)
     add_ps_test(test_compute_service_split tests/test_compute_service_split.cpp)
+    add_ps_test(test_node_editor_layout tests/test_node_editor_layout.cpp)
+    target_link_libraries(test_node_editor_layout PRIVATE ${FTXUI_TARGETS})
 
     add_executable(split_compute_service_trace tests/split_compute_service_trace.cpp)
     set_target_properties(split_compute_service_trace PROPERTIES
@@ -393,6 +395,7 @@ if(BUILD_TESTING)
     gtest_discover_tests(test_graph_topology_boundaries WORKING_DIRECTORY ${PROJECT_SOURCE_DIR})
     gtest_discover_tests(test_kernel_contracts WORKING_DIRECTORY ${PROJECT_SOURCE_DIR})
     gtest_discover_tests(test_compute_service_split WORKING_DIRECTORY ${PROJECT_SOURCE_DIR})
+    gtest_discover_tests(test_node_editor_layout WORKING_DIRECTORY ${PROJECT_SOURCE_DIR})
     gtest_discover_tests(test_gpu_pipeline_scheduler WORKING_DIRECTORY ${PROJECT_SOURCE_DIR})
     gtest_discover_tests(test_scheduler_plugin_loader WORKING_DIRECTORY ${PROJECT_SOURCE_DIR})
     add_test(NAME SplitComputeServiceRuntimeTrace
