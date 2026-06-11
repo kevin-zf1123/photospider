@@ -57,10 +57,12 @@ kernel-contract cleanup:
 - Split `GraphTraversalService` topology traversal from ROI/spatial propagation.
 
 The `ComputeService` split now has a dedicated `split-compute-service`
-OpenSpec change and a maintained plan in `Compute-Service-Split.md`. TODO:
-implementation is pending. Each extraction step should identify focused tests
-or retained regression tests before duplicate logic is removed from
-`compute_service.cpp`.
+OpenSpec change and a maintained plan in `Compute-Service-Split.md`. The first
+split is implemented behind internal modules under
+`src/kernel/services/compute-service/`. Boundary coverage lives in
+`tests/test_compute_service_split.cpp`, with retained regression coverage from
+`test_kernel_contracts`, `test_propagation_contracts`, `test_scheduler`,
+`test_milestone34`, and `test_gpu_pipeline_scheduler`.
 
 The `GraphTraversalService` topology/ROI split should receive a separate
 OpenSpec change after the compute split boundaries are stable.

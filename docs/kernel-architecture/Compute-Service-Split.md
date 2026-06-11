@@ -1,9 +1,9 @@
 # ComputeService Split Plan
 
-This document records the planned in-place split of `ComputeService`. It is a
-maintained architecture document for the active branch, but the implementation
-is not complete yet. Items marked TODO are intentionally deferred or still
-pending implementation.
+This document records the in-place split of `ComputeService`. The first split
+has landed behind the existing public facade. Items still marked TODO are
+intentionally deferred to later scheduler, traversal, cache-migration, or
+planner-plugin changes.
 
 ## Current Problem
 
@@ -34,16 +34,16 @@ ComputeService facade
 
 | Boundary | Responsibility | Status |
 | --- | --- | --- |
-| `ComputeService` facade | Preserve current public compute entry points. | TODO |
-| `ComputeCachePolicy` | Centralize HP/RT/legacy cache selection. | TODO |
-| `NodeInputResolver` | Build runtime parameters and collect ready image inputs. | TODO |
-| `NodeExecutor` | Execute monolithic and tiled operators consistently. | TODO |
-| `DirtyRegionPlanner` | Build graph-scoped dirty-region state from node-local dirty reports and operator propagation. | TODO |
-| `DirtyRegionSnapshot` | Enumerate dirty tiles, dirty monolithic nodes, per-node dirty ROIs, and per-edge ROI mappings using stable ids instead of raw pointers. | TODO |
-| `ComputeTaskPlanner` | Convert compute requests and dirty snapshots into shared `ComputePlan` / `ComputeTaskGraph` semantics. | TODO |
-| `IntentUpdateCoordinator` | Coordinate `GlobalHighPrecision` and `RealTimeUpdate` branching. | TODO |
-| `ParallelGraphExecutor` | Encapsulate the current legacy `GraphRuntime` queue DAG path. | TODO |
-| `ComputeMetricsRecorder` | Centralize events, timings, benchmark events, and debug metadata. | TODO |
+| `ComputeService` facade | Preserve current public compute entry points and construct internal collaborators. | Implemented |
+| `ComputeCachePolicy` | Centralize HP/RT/legacy cache selection. | Implemented in `src/kernel/services/compute-service/compute_cache_policy.*` |
+| `NodeInputResolver` | Build runtime parameters and collect ready image inputs. | Implemented in `src/kernel/services/compute-service/node_input_resolver.*` |
+| `NodeExecutor` | Execute monolithic and tiled operators consistently. | Implemented in `src/kernel/services/compute-service/node_executor.*` |
+| `DirtyRegionPlanner` | Build graph-scoped dirty-region state from node-local dirty reports and operator propagation. | Implemented in `src/kernel/services/compute-service/dirty_region_planner.*` |
+| `DirtyRegionSnapshot` | Enumerate dirty tiles, dirty monolithic nodes, per-node dirty ROIs, and per-edge ROI mappings using stable ids instead of raw pointers. | Implemented as an internal snapshot model |
+| `ComputeTaskPlanner` | Convert compute requests and dirty snapshots into shared `ComputePlan` / `ComputeTaskGraph` semantics. | Implemented as an internal planning boundary; plugin ABI remains TODO |
+| `IntentUpdateCoordinator` | Coordinate `GlobalHighPrecision` and `RealTimeUpdate` branching. | Implemented in `src/kernel/services/compute-service/intent_update_coordinator.*` |
+| `ParallelGraphExecutor` | Encapsulate the current legacy `GraphRuntime` queue DAG path. | Implemented in `src/kernel/services/compute-service/parallel_graph_executor.*` |
+| `ComputeMetricsRecorder` | Centralize events, timings, benchmark events, and debug metadata. | Implemented in `src/kernel/services/compute-service/compute_metrics_recorder.*` |
 
 ## Cache Rules
 
@@ -66,30 +66,30 @@ dependency information, or data-dependent LUTs. Current identity propagation
 fallback is migration support and should not be treated as sufficient for new
 operators.
 
-`DirtyRegionPlanner` should own graph-scoped dirty-region state. The state
-should be exposed as a `DirtyRegionSnapshot` that uses stable node ids, tile
-coordinates, pixel ROIs, graph generation metadata, and edge mappings. The
-snapshot is the shared source for visualization and compute task planning.
+`DirtyRegionPlanner` owns graph-scoped dirty-region state for the current HP and
+RT dirty update paths. It exposes a `DirtyRegionSnapshot` using stable node ids,
+tile coordinates, pixel ROIs, graph generation metadata, and edge mappings.
+`ComputeService` stores an inspection summary on the graph, and
+`InteractionService` exposes that summary for frontend/debug queries.
 
-TODO: introduce the graph-scoped dirty snapshot and operator propagation
-validation; current code still passes dirty ROI through compute paths and
-projection helpers directly.
+TODO: add richer dirty snapshot visualization after the frontend has a concrete
+mask/tile rendering contract.
 
 ## Compute Task Planning Boundary
 
 Single-threaded and parallel compute should share one logical `ComputePlan` or
-`ComputeTaskGraph`. `ComputeTaskPlanner` should consume compute requests and
-dirty snapshots, then produce planned work. Execution modes should differ only
-in task pools, scheduler policy, and resource selection.
+`ComputeTaskGraph`. `ComputeTaskPlanner` consumes compute requests and dirty
+snapshots, then produces internal `ComputePlan` semantics used by sequential,
+parallel, HP, and RT paths before execution-specific dispatch. Execution modes
+should differ only in task pools, scheduler policy, and resource selection.
 
-TODO: define the internal compute task planning representation and keep planner
-plugin ABI explicitly deferred to a later change.
+TODO: planner plugin ABI remains explicitly deferred to a later change.
 
 ## Scheduler Boundary
 
 The current parallel compute path still uses legacy `GraphRuntime` queues and
-completion counters in some paths. The first split should isolate that behavior
-behind `ParallelGraphExecutor`.
+completion counters. That behavior is now isolated behind
+`ParallelGraphExecutor`.
 
 Schedulers should pull planned or annotated tasks from intent-aware task pools
 and schedule compute resources. They should not own graph-level dirty
@@ -115,8 +115,10 @@ the kernel. In the dirty-region context, it should expose graph-scoped dirty
 snapshot inspection and visualization APIs. It is not the authoritative source
 of dirty-region generation or propagation.
 
-TODO: add dirty snapshot query/visualization APIs after the graph-scoped dirty
-state exists.
+`InteractionService` now exposes a dirty snapshot debug summary for inspection.
+
+TODO: add richer visualization APIs after the graph-scoped dirty state has a
+frontend display contract.
 
 ## Global HP Dirty ROI
 
