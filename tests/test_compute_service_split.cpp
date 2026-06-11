@@ -276,8 +276,8 @@ TEST(ComputeTaskPlannerSplit, PreservesSequentialParallelPlanParity) {
   snapshot.dirty_monolithic_nodes.push_back(
       {100, compute::DirtyDomain::HighPrecision, cv::Rect(0, 0, 8, 8), true});
   snapshot.edge_mappings.push_back(
-      {42, 100, cv::Rect(0, 0, 16, 16), cv::Rect(0, 0, 8, 8),
-       compute::DirtyEdgeDirection::BackwardDemand});
+      {42, 100, compute::DirtyDomain::HighPrecision, cv::Rect(0, 0, 16, 16),
+       cv::Rect(0, 0, 8, 8), compute::DirtyEdgeDirection::BackwardDemand});
   std::vector<int> execution_order{10, 42, 100};
 
   compute::ComputeTaskPlanner planner;
@@ -303,6 +303,8 @@ TEST(ComputeTaskPlannerSplit, PreservesSequentialParallelPlanParity) {
   ASSERT_EQ(sequential_plan.task_graph.dependencies.size(), 1u);
   EXPECT_EQ(sequential_plan.task_graph.dependencies[0].from_node_id, 42);
   EXPECT_EQ(sequential_plan.task_graph.dependencies[0].to_node_id, 100);
+  EXPECT_EQ(sequential_plan.task_graph.dependencies[0].domain,
+            compute::DirtyDomain::HighPrecision);
   ASSERT_EQ(sequential_plan.task_graph.tasks.size(), 2u);
   auto task_for_node = [&](int node_id) -> const compute::PlannedTask& {
     auto it = std::find_if(sequential_plan.task_graph.tasks.begin(),
@@ -329,6 +331,41 @@ TEST(ComputeTaskPlannerSplit, PreservesSequentialParallelPlanParity) {
             parallel_plan.task_graph.dependencies.size());
   EXPECT_EQ(sequential_plan.task_graph.tasks.size(),
             parallel_plan.task_graph.tasks.size());
+}
+
+TEST(ComputeTaskPlannerSplit, FiltersCrossDomainSnapshotEdges) {
+  compute::DirtyRegionSnapshot snapshot;
+  snapshot.graph_generation = 11;
+  snapshot.per_node_dirty_rois[1].push_back(cv::Rect(0, 0, 64, 64));
+  snapshot.per_node_dirty_rois[2].push_back(cv::Rect(0, 0, 64, 64));
+  snapshot.dirty_tiles.push_back({1, compute::DirtyDomain::RealTime,
+                                  compute::DirtyTileLevel::Micro, 0, 0, 16,
+                                  cv::Rect(0, 0, 16, 16)});
+  snapshot.dirty_tiles.push_back({2, compute::DirtyDomain::RealTime,
+                                  compute::DirtyTileLevel::Micro, 1, 0, 16,
+                                  cv::Rect(16, 0, 16, 16)});
+  snapshot.edge_mappings.push_back(
+      {1, 2, compute::DirtyDomain::RealTime, cv::Rect(0, 0, 64, 64),
+       cv::Rect(0, 0, 64, 64), compute::DirtyEdgeDirection::BackwardDemand});
+  snapshot.edge_mappings.push_back(
+      {1, 2, compute::DirtyDomain::HighPrecision, cv::Rect(0, 0, 64, 64),
+       cv::Rect(0, 0, 64, 64), compute::DirtyEdgeDirection::BackwardDemand});
+
+  compute::ComputeTaskPlanner planner;
+  compute::ComputeRequest request;
+  request.intent = ComputeIntent::RealTimeUpdate;
+  request.target_node_id = 2;
+  request.dirty_roi = cv::Rect(0, 0, 64, 64);
+
+  const auto plan = planner.plan(request, {1, 2}, &snapshot);
+
+  ASSERT_EQ(plan.task_graph.dependencies.size(), 1u);
+  EXPECT_EQ(plan.task_graph.dependencies[0].domain,
+            compute::DirtyDomain::RealTime);
+  ASSERT_EQ(plan.task_graph.tasks.size(), 2u);
+  for (const auto& task : plan.task_graph.tasks) {
+    EXPECT_EQ(task.domain, compute::DirtyDomain::RealTime);
+  }
 }
 
 TEST(IntentUpdateCoordinatorSplit,

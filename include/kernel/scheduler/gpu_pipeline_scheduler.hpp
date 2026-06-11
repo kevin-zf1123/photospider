@@ -31,16 +31,16 @@ class ComputeService;
 struct PriorityEntry {
   // 目标设备
   Device device{Device::CPU};
-  
+
   // 是否偏好 Monolithic（整图计算）
   bool prefer_monolithic{false};
-  
+
   // Tile 大小偏好
   TileSizePreference tile_pref{TileSizePreference::UNDEFINED};
-  
+
   // 优先级（越低越优先）
   int priority{100};
-  
+
   // 描述（用于调试）
   std::string description;
 };
@@ -65,13 +65,13 @@ class GpuPipelineScheduler : public IScheduler {
     bool force_cpu_for_rt;
     // RT 任务抢占阈值（毫秒）
     int rt_preempt_threshold_ms;
-    // Micro tile 大小（RT 模式）
+    // Micro tile 大小，具体含义由 compute domain 决定
     int micro_tile_size;
-    // Macro tile 大小（HP 模式聚合用）
+    // Macro tile 大小，具体含义由 compute domain 决定
     int macro_tile_size;
     // 聚合阈值（超过此数量的 micro tile 会被聚合）
     int aggregation_threshold;
-    
+
     Config()
         : gpu_workers(1),
           cpu_workers(0),
@@ -107,17 +107,17 @@ class GpuPipelineScheduler : public IScheduler {
   // ---------------------------------------------------------------------------
   // Node-Level 调度接口 (M3.6 新增)
   // ---------------------------------------------------------------------------
-  
+
   /// @brief Node-Level 调度入口
-  std::future<NodeOutput> schedule_node(
-      const NodeScheduleRequest& request, GraphModel& graph) override;
-  
+  std::future<NodeOutput> schedule_node(const NodeScheduleRequest& request,
+                                        GraphModel& graph) override;
+
   /// @brief 检查是否应该聚合为 Macro task
   bool should_aggregate_to_macro(const TaskGroup& group) const override;
-  
+
   /// @brief 是否支持 Node-Level 调度
   bool supports_node_level_scheduling() const override { return true; }
-  
+
   /// @brief 是否支持 TaskGroup 聚合
   bool supports_task_group_aggregation() const override { return true; }
 
@@ -160,10 +160,10 @@ class GpuPipelineScheduler : public IScheduler {
   // ---------------------------------------------------------------------------
   // 设备能力查询
   // ---------------------------------------------------------------------------
-  
+
   /// @brief 检查 GPU 是否可用
   bool is_gpu_available() const;
-  
+
   /// @brief 获取当前可用设备列表
   std::vector<Device> get_available_devices() const;
 
@@ -175,61 +175,62 @@ class GpuPipelineScheduler : public IScheduler {
     ComputeIntent intent{ComputeIntent::GlobalHighPrecision};
 
     ScheduledTask() = default;
-    ScheduledTask(uint64_t e, Task&& t, ComputeIntent i = ComputeIntent::GlobalHighPrecision)
+    ScheduledTask(uint64_t e, Task&& t,
+                  ComputeIntent i = ComputeIntent::GlobalHighPrecision)
         : epoch(e), task(std::move(t)), intent(i) {}
     explicit operator bool() const { return static_cast<bool>(task); }
   };
 
   // CPU 工作线程主循环
   void cpu_run_loop(int thread_id);
-  
+
   // GPU 工作线程主循环
   void gpu_run_loop(int thread_id);
-  
+
   // 从其他工作线程窃取任务
   std::optional<ScheduledTask> steal_task(int stealer_id);
-  
+
   // 取消过期的排队任务
   void cancel_stale_enqueued_tasks(uint64_t min_epoch);
 
   // 执行单次计算
   NodeOutput execute_compute(const ComputeOptions& opts);
-  
+
   // 选择最优算子实现
-  const OpImplementation* select_implementation(
-      const std::string& type, const std::string& subtype,
-      ComputeIntent intent) const;
-  
+  const OpImplementation* select_implementation(const std::string& type,
+                                                const std::string& subtype,
+                                                ComputeIntent intent) const;
+
   // [M3.6] 使用优先级表选择最优实现
-  const OpImplementation* select_impl_with_priority(
-      const std::string& type, const std::string& subtype,
-      ComputeIntent intent) const;
-  
+  const OpImplementation* select_impl_with_priority(const std::string& type,
+                                                    const std::string& subtype,
+                                                    ComputeIntent intent) const;
+
   // [M3.6] 初始化优先级表
   void init_priority_tables();
-  
+
   // [M3.6] 将 ROI 切分为 tile 列表
-  std::vector<cv::Rect> split_roi_to_tiles(
-      const cv::Rect& roi, int tile_size) const;
-  
+  std::vector<cv::Rect> split_roi_to_tiles(const cv::Rect& roi,
+                                           int tile_size) const;
+
   // [M3.6] 执行 Node-Level 计算
-  NodeOutput execute_node_compute(
-      const NodeScheduleRequest& request, GraphModel& graph);
+  NodeOutput execute_node_compute(const NodeScheduleRequest& request,
+                                  GraphModel& graph);
 
   // ---------------------------------------------------------------------------
   // 成员变量
   // ---------------------------------------------------------------------------
   GraphRuntime* runtime_ = nullptr;
   Config config_;
-  
+
   // CPU 工作线程
   std::vector<std::thread> cpu_workers_;
   unsigned int num_cpu_workers_{0};
-  
+
   // GPU 工作线程
   std::vector<std::thread> gpu_workers_;
   unsigned int num_gpu_workers_{0};
-  
+
   std::atomic<bool> running_{false};
 
   // RT 任务队列（高优先级，CPU 处理）
@@ -241,7 +242,7 @@ class GpuPipelineScheduler : public IScheduler {
   std::queue<ScheduledTask> hp_cpu_queue_;
   std::mutex hp_cpu_queue_mutex_;
   std::condition_variable hp_cpu_cv_;
-  
+
   // GPU 任务队列（HP 优先使用）
   std::queue<ScheduledTask> gpu_queue_;
   std::mutex gpu_queue_mutex_;
@@ -280,18 +281,18 @@ class GpuPipelineScheduler : public IScheduler {
   static thread_local int tls_worker_id_;
   static thread_local uint64_t tls_active_epoch_;
   static thread_local bool tls_is_gpu_worker_;
-  
+
   // ---------------------------------------------------------------------------
   // [M3.6] 优先级表
   // Scheduler 内部持有，用于决定实现选择策略
   // ---------------------------------------------------------------------------
-  
-  // HP 模式优先级表: GPU Monolithic > CPU Monolithic > CPU Tiled (Macro) > Others
+
+  // HP 模式优先级表；Macro/Micro 是 HP domain 内的粒度偏好
   std::vector<PriorityEntry> hp_priority_table_;
-  
-  // RT 模式优先级表: CPU Tiled (Micro 16x16) > CPU Monolithic > Others
+
+  // RT 模式优先级表；Macro/Micro 是 RT domain 内的粒度偏好
   std::vector<PriorityEntry> rt_priority_table_;
-  
+
   // TaskGroup ID 计数器
   std::atomic<uint64_t> task_group_id_counter_{0};
 };

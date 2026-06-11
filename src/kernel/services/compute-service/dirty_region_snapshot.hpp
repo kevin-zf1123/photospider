@@ -43,6 +43,7 @@ struct DirtyMonolithicRegion {
 struct DirtyEdgeMapping {
   int from_node_id = -1;
   int to_node_id = -1;
+  DirtyDomain domain = DirtyDomain::HighPrecision;
   cv::Rect from_roi;
   cv::Rect to_roi;
   DirtyEdgeDirection direction = DirtyEdgeDirection::BackwardDemand;

@@ -89,7 +89,8 @@ HighPrecisionDirtyPlan DirtyRegionPlanner::plan_high_precision(
               : clip_rect(merge_rect(parent_entry.roi_hp, parent_roi),
                           parent_entry.hp_size);
       result.snapshot.edge_mappings.push_back(
-          {img_input.from_node_id, current_id, parent_roi, current_entry.roi_hp,
+          {img_input.from_node_id, current_id, DirtyDomain::HighPrecision,
+           parent_roi, current_entry.roi_hp,
            DirtyEdgeDirection::BackwardDemand});
     }
   }
@@ -223,7 +224,8 @@ RealTimeDirtyPlan DirtyRegionPlanner::plan_real_time(
               : clip_rect(merge_rect(parent_entry.roi_hp, parent_roi),
                           parent_entry.hp_size);
       result.snapshot.edge_mappings.push_back(
-          {img_input.from_node_id, current_id, parent_roi, current_entry.roi_hp,
+          {img_input.from_node_id, current_id, DirtyDomain::RealTime,
+           parent_roi, current_entry.roi_hp,
            DirtyEdgeDirection::BackwardDemand});
     }
   }
