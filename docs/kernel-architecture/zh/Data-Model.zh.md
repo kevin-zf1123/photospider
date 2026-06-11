@@ -10,14 +10,26 @@
 
 | 字段 | 含义 |
 | --- | --- |
-| `nodes` | 从节点 id 到 `Node` 的映射。 |
+| 私有节点存储 | 从节点 id 到 `Node` 的映射，通过 `GraphModel` 查找、遍历和变更 helper 访问。 |
+| 拓扑邻接索引 | 面向图像边和参数边的 incoming/outgoing `GraphTopologyEdge` 映射，以稳定节点 id 为键。 |
 | `cache_root` | 磁盘缓存文件的根目录。 |
 | `timing_results` | 启用计时时的最新计时摘要。 |
 | `total_io_time_ms` | 累计磁盘缓存 IO 时间。 |
 
-内部服务是 `GraphModel` 的 friend，因此它们可以协调锁、计时、缓存和遍历行为。大多数前端代码应通过 `Kernel` 或 `InteractionService` 访问图状态。
+外部代码不得通过原始节点 map 改变图结构。读取使用 `node()`、`find_node()`、`node_ids()` 和受控遍历等 helper。结构变更使用 `add_node()`、`replace_node()`、`remove_node()` 和输入重连 API；这些 helper 会在返回前验证并刷新拓扑邻接。节点本地运行态缓存/状态更新可以使用 `mutable_node()`，但结构编辑仍属于模型变更 helper。
 
-`GraphModel::clear()` 的目标是重置模型级运行时状态，而不只是删除 `nodes`。清理图应重置节点、计时结果、累计 IO 时间、skip-save 状态和其他单次运行状态，使 reload 行为不受陈旧元数据污染。
+内部服务通过模型边界协调锁、计时、缓存、拓扑和遍历行为。大多数前端代码应通过 `Kernel` 或 `InteractionService` 访问图状态。
+
+`GraphModel::clear()` 的目标是重置模型级运行时状态，而不只是删除节点。清理图会重置节点、拓扑邻接、计时结果、累计 IO 时间、skip-save 状态和其他单次运行状态，使 reload 行为不受陈旧元数据污染。
+
+## 拓扑邻接
+
+`GraphModel` 拥有 `GraphTopologyIndex`，它记录图边的两个方向：
+
+- `incoming_by_node`：某个节点的上游依赖。
+- `outgoing_by_node`：某个节点的下游依赖者。
+
+每条 `GraphTopologyEdge` 都保存稳定的源/目标节点 id、边类型（`ImageInput` 或 `ParameterInput`）、源输出名、目标输入/参数身份和输入槽位索引。成功的图加载、清空、节点添加、节点替换、节点删除和输入重连，都会在图状态暴露给遍历、计算、缓存、inspect、CLI 或 interaction 消费者之前刷新或清空该索引。
 
 ## 节点身份
 

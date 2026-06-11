@@ -1,9 +1,7 @@
 #include "kernel/services/graph_inspect_service.hpp"
 
 #include <algorithm>
-#include <array>
-#include <sstream>
-#include <vector>
+#include <unordered_set>
 
 namespace ps {
 
@@ -21,77 +19,131 @@ const NodeOutput* pick_cached_output(const Node& node,
   source_label.clear();
   return nullptr;
 }
-}  // namespace
 
-std::string GraphInspectService::format_node_metadata(
-    const Node& node) const {
-  std::ostringstream ss;
+void append_dependency_tree_entries(
+    const GraphModel& graph, const GraphInspectService& inspect_service,
+    DependencyTree& tree, int node_id, int depth,
+    std::optional<GraphTopologyEdge> incoming_edge,
+    std::unordered_set<int>& path, bool include_metadata) {
+  DependencyTreeEntry entry;
+  entry.depth = depth;
+  entry.incoming_edge = std::move(incoming_edge);
+
+  const Node* node = graph.find_node(node_id);
+  if (node) {
+    entry.node = inspect_service.inspect_node(*node, include_metadata);
+  } else {
+    entry.node.id = node_id;
+  }
+
+  if (path.count(node_id)) {
+    entry.cycle = true;
+    tree.entries.push_back(std::move(entry));
+    return;
+  }
+
+  if (!node) {
+    tree.entries.push_back(std::move(entry));
+    return;
+  }
+
+  path.insert(node_id);
+  tree.entries.push_back(std::move(entry));
+
+  for (const auto& edge : graph.upstream_edges(node_id)) {
+    if (edge.from_node_id < 0 || !graph.has_node(edge.from_node_id)) {
+      continue;
+    }
+    append_dependency_tree_entries(graph, inspect_service, tree,
+                                   edge.from_node_id, depth + 2, edge, path,
+                                   include_metadata);
+  }
+
+  path.erase(node_id);
+}
+
+NodeMetadataSummary metadata_summary_for(const Node& node) {
+  NodeMetadataSummary summary;
   std::string source_label;
   const NodeOutput* cached = pick_cached_output(node, source_label);
   if (!cached) {
-    ss << "  (No cached output available)\n";
-    return ss.str();
+    return summary;
   }
 
-  ss << "  [Source] " << source_label << "\n";
+  summary.has_cached_output = true;
+  summary.source_label = source_label;
+  summary.debug = cached->debug;
+  summary.space = cached->space;
+  return summary;
+}
+}  // namespace
 
-  const auto& meta = cached->debug;
-  const auto& space = cached->space;
-
-  ss << "  [Debug]\n";
-  ss << "    Worker ID: " << meta.computed_by_worker_id << "\n";
-  ss << "    Device:    " << meta.compute_device << "\n";
-  ss << "    Timestamp: " << meta.timestamp_us << " us\n";
-  ss << "    Exec(ms):  " << meta.execution_time_ms << "\n";
-  ss << "    Range:     [" << meta.min_val << ", " << meta.max_val << "]";
-  if (meta.has_nan) {
-    ss << " (NaN detected)";
+GraphNodeInspectInfo GraphInspectService::inspect_node(
+    const Node& node, bool include_metadata) const {
+  GraphNodeInspectInfo info;
+  info.id = node.id;
+  info.name = node.name;
+  info.type = node.type;
+  info.subtype = node.subtype;
+  info.parameters = YAML::Clone(node.parameters);
+  if (include_metadata) {
+    info.metadata = metadata_summary_for(node);
   }
-  ss << "\n";
-
-  ss << "  [Spatial]\n";
-  ss << "    Scale:     " << space.global_scale_x << " x "
-     << space.global_scale_y << "\n";
-  ss << "    ROI:       (" << space.absolute_roi.x << ", "
-     << space.absolute_roi.y << ", " << space.absolute_roi.width << "x"
-     << space.absolute_roi.height << ")\n";
-
-  auto print_matrix = [&ss](const char* label,
-                            const std::array<double, 9>& mat) {
-    ss << "    " << label << ":\n";
-    ss << "      [" << mat[0] << ", " << mat[1] << ", " << mat[2] << "]\n";
-    ss << "      [" << mat[3] << ", " << mat[4] << ", " << mat[5] << "]\n";
-    ss << "      [" << mat[6] << ", " << mat[7] << ", " << mat[8] << "]\n";
-  };
-
-  print_matrix("Transform", space.transform_matrix);
-  print_matrix("Inverse (Global)", space.inverse_matrix);
-  print_matrix("Inverse (Local)", space.local_inverse_matrix);
-
-  return ss.str();
+  return info;
 }
 
-std::string GraphInspectService::inspect_all_nodes(
-    const GraphModel& graph) const {
-  std::ostringstream ss;
-  std::vector<int> ids;
-  ids.reserve(graph.nodes.size());
-  for (const auto& kv : graph.nodes) {
-    ids.push_back(kv.first);
+GraphInspectionSnapshot GraphInspectService::inspect_graph(
+    const GraphModel& graph, bool include_metadata) const {
+  GraphInspectionSnapshot snapshot;
+  std::vector<int> ids = graph.node_ids();
+  snapshot.nodes.reserve(ids.size());
+  for (int id : ids) {
+    snapshot.nodes.push_back(inspect_node(graph.node(id), include_metadata));
   }
-  std::sort(ids.begin(), ids.end());
+  return snapshot;
+}
 
-  for (size_t idx = 0; idx < ids.size(); ++idx) {
-    int id = ids[idx];
-    const auto& node = graph.nodes.at(id);
-    ss << "=== Node " << node.id << " (" << node.name << " | " << node.type
-       << ":" << node.subtype << ") ===\n";
-    ss << format_node_metadata(node);
-    if (idx + 1 < ids.size()) {
-      ss << "\n";
+DependencyTree GraphInspectService::dependency_tree(
+    const GraphModel& graph, bool include_metadata) const {
+  DependencyTree tree;
+  tree.scope = DependencyTree::Scope::EndingNodes;
+  tree.graph_empty = graph.empty();
+  if (tree.graph_empty) {
+    return tree;
+  }
+
+  for (int node_id : graph.node_ids()) {
+    if (graph.downstream_edges(node_id).empty()) {
+      tree.root_node_ids.push_back(node_id);
     }
   }
-  return ss.str();
+  std::sort(tree.root_node_ids.begin(), tree.root_node_ids.end());
+  tree.no_ending_nodes = tree.root_node_ids.empty();
+
+  for (int root_node_id : tree.root_node_ids) {
+    std::unordered_set<int> path;
+    append_dependency_tree_entries(graph, *this, tree, root_node_id, 0,
+                                   std::nullopt, path, include_metadata);
+  }
+  return tree;
+}
+
+DependencyTree GraphInspectService::dependency_tree(
+    const GraphModel& graph, int start_node_id, bool include_metadata) const {
+  DependencyTree tree;
+  tree.scope = DependencyTree::Scope::StartNode;
+  tree.start_node_id = start_node_id;
+  tree.graph_empty = graph.empty();
+  tree.start_node_found = graph.has_node(start_node_id);
+  if (!tree.start_node_found) {
+    return tree;
+  }
+
+  tree.root_node_ids.push_back(start_node_id);
+  std::unordered_set<int> path;
+  append_dependency_tree_entries(graph, *this, tree, start_node_id, 0,
+                                 std::nullopt, path, include_metadata);
+  return tree;
 }
 
 }  // namespace ps

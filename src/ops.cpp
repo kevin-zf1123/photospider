@@ -137,11 +137,10 @@ static cv::Size infer_input_size_hint(const Node& node,
   for (const auto& input : node.image_inputs) {
     if (input.from_node_id < 0)
       continue;
-    auto it = graph.nodes.find(input.from_node_id);
-    if (it == graph.nodes.end())
+    const Node* parent = graph.find_node(input.from_node_id);
+    if (!parent)
       continue;
-    const Node& parent = it->second;
-    cv::Size size = cached_image_size(parent.cached_output_high_precision);
+    cv::Size size = cached_image_size(parent->cached_output_high_precision);
     if (size.width > 0 && size.height > 0)
       return size;
   }

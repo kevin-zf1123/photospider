@@ -8,6 +8,7 @@
 #include <sstream>
 #include <vector>
 
+#include "cli/dependency_tree_formatter.hpp"
 #include "ftxui/component/component.hpp"
 #include "ftxui/component/screen_interactive.hpp"
 #include "ftxui/dom/elements.hpp"
@@ -71,9 +72,9 @@ void run_node_editor_decoupled(ps::InteractionService& svc,
     last_saved_text = editor_text;
     dirty = false;
     // Refresh trees
-    auto t1 =
-        svc.cmd_dump_tree(graph_name, ids[selected_index], tree_show_params);
-    tree1_text = t1.value_or("(failed to dump tree)\n");
+    auto t1 = svc.cmd_dependency_tree(graph_name, ids[selected_index]);
+    tree1_text = t1 ? ps::cli::format_dependency_tree(*t1, tree_show_params)
+                    : "(failed to dump tree)\n";
     containing_ends.clear();
     containing_idx = 0;
     auto ends = svc.cmd_trees_containing_node(graph_name, ids[selected_index]);
@@ -87,10 +88,17 @@ void run_node_editor_decoupled(ps::InteractionService& svc,
               "(no end trees contain this node)\n");
         int end_id = containing_ends[std::min(containing_idx,
                                               (int)containing_ends.size() - 1)];
-        return svc.cmd_dump_tree(graph_name, end_id, tree_show_params);
+        auto tree = svc.cmd_dependency_tree(graph_name, end_id);
+        if (!tree)
+          return std::optional<std::string>();
+        return std::optional<std::string>(
+            ps::cli::format_dependency_tree(*tree, tree_show_params));
       } else {
-        return svc.cmd_dump_tree(graph_name, ids[selected_index],
-                                 tree_show_params);
+        auto tree = svc.cmd_dependency_tree(graph_name, ids[selected_index]);
+        if (!tree)
+          return std::optional<std::string>();
+        return std::optional<std::string>(
+            ps::cli::format_dependency_tree(*tree, tree_show_params));
       }
     }();
     tree2_text = t2.value_or("(failed to dump tree)\n");

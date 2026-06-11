@@ -78,6 +78,7 @@
 #include "kernel/services/graph_cache_service.hpp"
 #include "kernel/services/graph_event_service.hpp"
 #include "kernel/services/graph_traversal_service.hpp"
+#include "kernel/services/roi_propagation_service.hpp"
 
 namespace ps {
 
@@ -209,10 +210,9 @@ NodeOutput& ComputeService::compute_internal(
     GraphModel& graph, int node_id, const std::string& cache_precision,
     std::unordered_map<int, bool>& visiting, bool enable_timing,
     bool allow_disk_cache, std::vector<BenchmarkEvent>* benchmark_events) {
-  auto& nodes = graph.nodes;
   auto& timing_results = graph.timing_results;
   auto& timing_mutex = graph.timing_mutex_;
-  auto& target_node = nodes.at(node_id);
+  auto& target_node = graph.mutable_node(node_id);
   std::string result_source = "unknown";
 
   // 将计时器移到更早的位置，以捕获依赖解析时间
@@ -338,11 +338,10 @@ NodeOutput& ComputeService::compute_node_no_recurse(
     GraphModel& graph, int node_id, const std::string& cache_precision,
     bool enable_timing, bool allow_disk_cache,
     std::vector<BenchmarkEvent>* benchmark_events) {
-  auto& nodes = graph.nodes;
   auto& timing_results = graph.timing_results;
   auto& timing_mutex = graph.timing_mutex_;
 
-  auto& target_node = nodes.at(node_id);
+  auto& target_node = graph.mutable_node(node_id);
   // Fast path: already computed.
   if (compute::ComputeCachePolicy::has_reusable_output(target_node))
     return *compute::ComputeCachePolicy::reusable_output(target_node);
@@ -360,10 +359,10 @@ NodeOutput& ComputeService::compute_node_no_recurse(
   auto resolved_inputs = compute::NodeInputResolver::resolve(
       target_node,
       [&](int upstream_id) -> const NodeOutput* {
-        auto itn = nodes.find(upstream_id);
-        if (itn == nodes.end())
+        const Node* upstream = graph.find_node(upstream_id);
+        if (!upstream)
           return nullptr;
-        return compute::ComputeCachePolicy::reusable_output(itn->second);
+        return compute::ComputeCachePolicy::reusable_output(*upstream);
       },
       "Parallel scheduler bug");
   const auto& inputs_ready = resolved_inputs.image_inputs;
@@ -429,7 +428,6 @@ NodeOutput& ComputeService::compute_high_precision_update(
     bool disable_disk_cache, std::vector<BenchmarkEvent>* benchmark_events,
     const cv::Rect& dirty_roi) {
   [[maybe_unused]] std::unique_lock<std::mutex> graph_lock(graph.graph_mutex_);
-  auto& nodes = graph.nodes;
 
   (void)runtime;  // Unused for now, can be used for micro-task scheduling later
   (void)cache_precision;
@@ -437,7 +435,8 @@ NodeOutput& ComputeService::compute_high_precision_update(
   (void)benchmark_events;
   (void)enable_timing;
 
-  compute::DirtyRegionPlanner dirty_planner(traversal_);
+  RoiPropagationService roi_propagation;
+  compute::DirtyRegionPlanner dirty_planner(traversal_, roi_propagation);
   auto dirty_plan =
       dirty_planner.plan_high_precision(graph, node_id, dirty_roi);
   graph.last_dirty_region_snapshot_debug =
@@ -469,9 +468,10 @@ NodeOutput& ComputeService::compute_high_precision_update(
   GraphRuntime* runtime_ptr = runtime;
   if (force_recache) {
     for (const auto& [nid, _] : plan) {
-      nodes.at(nid).cached_output_high_precision.reset();
-      nodes.at(nid).hp_roi.reset();
-      nodes.at(nid).hp_version = 0;
+      Node& node = graph.mutable_node(nid);
+      node.cached_output_high_precision.reset();
+      node.hp_roi.reset();
+      node.hp_version = 0;
     }
   }
 
@@ -480,7 +480,7 @@ NodeOutput& ComputeService::compute_high_precision_update(
   auto compute_node_hp = [&](int nid, HpPlanEntry& entry) {
     if (is_rect_empty(entry.roi_hp))
       return;
-    Node& node = nodes.at(nid);
+    Node& node = graph.mutable_node(nid);
 
     if (runtime_ptr) {
       runtime_ptr->log_event(GraphRuntime::SchedulerEvent::EXECUTE, nid);
@@ -489,10 +489,10 @@ NodeOutput& ComputeService::compute_high_precision_update(
     auto resolved_inputs = compute::NodeInputResolver::resolve(
         node,
         [&](int upstream_id) -> const NodeOutput* {
-          auto itn = nodes.find(upstream_id);
-          if (itn == nodes.end())
+          const Node* upstream = graph.find_node(upstream_id);
+          if (!upstream)
             return nullptr;
-          return compute::ComputeCachePolicy::reusable_output(itn->second);
+          return compute::ComputeCachePolicy::reusable_output(*upstream);
         },
         "HP update");
     const auto& image_inputs_ready = resolved_inputs.image_inputs;
@@ -653,11 +653,11 @@ NodeOutput& ComputeService::compute_high_precision_update(
         [runtime_ptr, &graph,
          event_service = std::ref(events_)](DownsampleRequest request) -> Task {
       return [runtime_ptr, &graph, event_service, request]() {
-        auto node_it = graph.nodes.find(request.node_id);
-        if (node_it == graph.nodes.end()) {
+        Node* node_ptr = graph.find_node_mutable(request.node_id);
+        if (!node_ptr) {
           return;
         }
-        Node& node = node_it->second;
+        Node& node = *node_ptr;
         if (!node.cached_output_high_precision) {
           return;
         }
@@ -756,7 +756,7 @@ NodeOutput& ComputeService::compute_high_precision_update(
     }
   }
 
-  Node& target = nodes.at(node_id);
+  Node& target = graph.mutable_node(node_id);
   if (!target.cached_output_high_precision) {
     throw GraphError(GraphErrc::ComputeError,
                      "HP compute finished without target output.");
@@ -770,7 +770,6 @@ NodeOutput& ComputeService::compute_real_time_update(
     bool disable_disk_cache, std::vector<BenchmarkEvent>* benchmark_events,
     const cv::Rect& dirty_roi) {
   [[maybe_unused]] std::unique_lock<std::mutex> graph_lock(graph.graph_mutex_);
-  auto& nodes = graph.nodes;
 
   (void)runtime;
   (void)cache_precision;
@@ -778,7 +777,8 @@ NodeOutput& ComputeService::compute_real_time_update(
   (void)benchmark_events;
   (void)enable_timing;
 
-  compute::DirtyRegionPlanner dirty_planner(traversal_);
+  RoiPropagationService roi_propagation;
+  compute::DirtyRegionPlanner dirty_planner(traversal_, roi_propagation);
   auto dirty_plan = dirty_planner.plan_real_time(graph, node_id, dirty_roi);
   graph.last_dirty_region_snapshot_debug =
       compute::DirtyRegionPlanner::describe_snapshot(dirty_plan.snapshot);
@@ -806,7 +806,7 @@ NodeOutput& ComputeService::compute_real_time_update(
 
   if (force_recache) {
     for (const auto& kv : plan) {
-      Node& node = nodes.at(kv.first);
+      Node& node = graph.mutable_node(kv.first);
       node.cached_output_real_time.reset();
       node.rt_roi.reset();
       node.rt_version = 0;
@@ -814,17 +814,17 @@ NodeOutput& ComputeService::compute_real_time_update(
   }
 
   auto compute_node_rt = [&](int nid, RtPlanEntry& entry) {
-    Node& node = nodes.at(nid);
+    Node& node = graph.mutable_node(nid);
     if (is_rect_empty(entry.roi_rt))
       return;
 
     auto resolved_inputs = compute::NodeInputResolver::resolve(
         node,
         [&](int upstream_id) -> const NodeOutput* {
-          auto itn = nodes.find(upstream_id);
-          if (itn == nodes.end())
+          const Node* upstream = graph.find_node(upstream_id);
+          if (!upstream)
             return nullptr;
-          return compute::ComputeCachePolicy::interactive_output(itn->second);
+          return compute::ComputeCachePolicy::interactive_output(*upstream);
         },
         "RT update");
     const auto& image_inputs_ready = resolved_inputs.image_inputs;
@@ -986,7 +986,7 @@ NodeOutput& ComputeService::compute_real_time_update(
     compute_node_rt(work.node_id, it->second);
   }
 
-  Node& target = nodes.at(node_id);
+  Node& target = graph.mutable_node(node_id);
   if (!target.cached_output_real_time) {
     throw GraphError(GraphErrc::ComputeError,
                      "RT compute finished without target output.");
@@ -1031,10 +1031,9 @@ NodeOutput& ComputeService::compute_intent_update_impl(
     std::vector<BenchmarkEvent>* benchmark_events,
     std::optional<cv::Rect> dirty_roi) {
   compute::IntentUpdateCallbacks callbacks;
-  const auto node_name_it = graph.nodes.find(node_id);
-  const std::string coordinator_node_name = node_name_it == graph.nodes.end()
-                                                ? std::string()
-                                                : node_name_it->second.name;
+  const Node* coordinator_node = graph.find_node(node_id);
+  const std::string coordinator_node_name =
+      coordinator_node ? coordinator_node->name : std::string();
   callbacks.run_global_high_precision = [&]() -> NodeOutput& {
     if (use_parallel_executor) {
       if (!runtime) {
@@ -1073,7 +1072,7 @@ NodeOutput& ComputeService::compute_intent_update_impl(
         disable_disk_cache, benchmark_events, *dirty_roi);
   };
   callbacks.real_time_output = [&]() -> NodeOutput& {
-    Node& target = graph.nodes.at(node_id);
+    Node& target = graph.mutable_node(node_id);
     if (!target.cached_output_real_time) {
       throw GraphError(GraphErrc::ComputeError,
                        "RT compute finished without target output.");
@@ -1153,7 +1152,7 @@ NodeOutput& ComputeService::compute_sequential_impl(
   if (force_recache) {
     std::lock_guard<std::mutex> lk(graph.graph_mutex_);
     for (int nid : execution_order) {
-      auto& node = graph.nodes.at(nid);
+      auto& node = graph.mutable_node(nid);
       node.cached_output_high_precision.reset();
     }
   }

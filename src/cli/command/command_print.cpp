@@ -5,6 +5,7 @@
 
 #include "cli/command/commands.hpp"
 #include "cli/command/help_utils.hpp"
+#include "cli/dependency_tree_formatter.hpp"
 
 bool handle_print(std::istringstream& iss, ps::InteractionService& svc,
                   std::string& current_graph, bool& /*modified*/,
@@ -47,10 +48,11 @@ bool handle_print(std::istringstream& iss, ps::InteractionService& svc,
     }
   }
 
-  auto dump = svc.cmd_dump_tree(current_graph, target_node, show_params,
-                                show_metadata);
-  if (dump)
-    std::cout << *dump;
+  auto tree =
+      svc.cmd_dependency_tree(current_graph, target_node, show_metadata);
+  if (tree)
+    std::cout << ps::cli::format_dependency_tree(*tree, show_params,
+                                                 show_metadata);
   else
     std::cout << "(failed to dump tree)\n";
   return true;

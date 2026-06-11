@@ -153,18 +153,17 @@ class InteractionService {
     return kernel_.clear_graph(graph);
   }
 
-  std::optional<std::string> cmd_dump_tree(const std::string& graph,
-                                           std::optional<int> node_id,
-                                           bool show_parameters,
-                                           bool show_metadata = false) {
-    return kernel_.dump_dependency_tree(graph, node_id, show_parameters,
-                                        show_metadata);
+  std::optional<DependencyTree> cmd_dependency_tree(
+      const std::string& graph, std::optional<int> node_id,
+      bool include_metadata = false) {
+    return kernel_.dependency_tree(graph, node_id, include_metadata);
   }
-  std::optional<std::string> cmd_inspect_node(const std::string& graph,
-                                              int node_id) {
+  std::optional<GraphNodeInspectInfo> cmd_inspect_node(const std::string& graph,
+                                                       int node_id) {
     return kernel_.inspect_node(graph, node_id);
   }
-  std::optional<std::string> cmd_inspect_graph(const std::string& graph) {
+  std::optional<GraphInspectionSnapshot> cmd_inspect_graph(
+      const std::string& graph) {
     return kernel_.inspect_graph(graph);
   }
   std::optional<Kernel::LastError> cmd_last_error(

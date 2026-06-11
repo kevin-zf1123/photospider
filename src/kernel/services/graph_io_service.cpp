@@ -22,28 +22,24 @@ void GraphIOService::load(GraphModel& graph,
     throw GraphError(GraphErrc::InvalidYaml,
                      "YAML root is not a sequence of nodes.");
   }
-  GraphModel loaded(graph.cache_root);
+  GraphModel::NodeMap loaded_nodes;
   for (const auto& node_yaml : config) {
     Node node = Node::from_yaml(node_yaml);
-    loaded.add_node(node);
+    if (loaded_nodes.count(node.id)) {
+      throw GraphError(
+          GraphErrc::InvalidYaml,
+          "Duplicate node id " + std::to_string(node.id) + " in graph YAML.");
+    }
+    loaded_nodes[node.id] = std::move(node);
   }
-  loaded.validate_topology();
-
-  graph.clear();
-  graph.nodes = std::move(loaded.nodes);
+  graph.replace_nodes(std::move(loaded_nodes));
 }
 
 void GraphIOService::save(const GraphModel& graph,
                           const std::filesystem::path& yaml_path) const {
   YAML::Node root(YAML::NodeType::Sequence);
-  std::vector<int> sorted_ids;
-  sorted_ids.reserve(graph.nodes.size());
-  for (const auto& pair : graph.nodes) {
-    sorted_ids.push_back(pair.first);
-  }
-  std::sort(sorted_ids.begin(), sorted_ids.end());
-  for (int id : sorted_ids) {
-    root.push_back(graph.nodes.at(id).to_yaml());
+  for (int id : graph.node_ids()) {
+    root.push_back(graph.node(id).to_yaml());
   }
 
   std::ofstream fout(yaml_path);

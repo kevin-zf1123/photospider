@@ -61,7 +61,6 @@ NodeOutput& ParallelGraphExecutor::execute(
     const std::string& cache_precision, bool force_recache, bool enable_timing,
     bool disable_disk_cache, std::vector<BenchmarkEvent>* benchmark_events,
     SequentialFallback sequential_fallback) {
-  auto& nodes = graph.nodes;
   auto& timing_results = graph.timing_results;
   auto& timing_mutex = graph.timing_mutex_;
   auto& graph_mutex = graph.graph_mutex_;
@@ -92,8 +91,8 @@ NodeOutput& ParallelGraphExecutor::execute(
     if (force_recache) {
       std::scoped_lock lock(graph_mutex);
       for (int id : execution_order) {
-        if (nodes.count(id)) {
-          nodes.at(id).cached_output_high_precision.reset();
+        if (graph.has_node(id)) {
+          graph.mutable_node(id).cached_output_high_precision.reset();
         }
       }
     }
@@ -118,7 +117,7 @@ NodeOutput& ParallelGraphExecutor::execute(
     std::vector<std::optional<OpRegistry::OpVariant>> resolved_ops(num_nodes);
     std::vector<std::optional<OpMetadata>> resolved_meta(num_nodes);
     for (size_t i = 0; i < num_nodes; ++i) {
-      const auto& n = nodes.at(execution_order[i]);
+      const auto& n = graph.node(execution_order[i]);
       resolved_ops[i] = OpRegistry::instance().resolve_for_intent(
           n.type, n.subtype, ComputeIntent::GlobalHighPrecision);
       resolved_meta[i] = OpRegistry::instance().get_metadata(n.type, n.subtype);
@@ -143,7 +142,7 @@ NodeOutput& ParallelGraphExecutor::execute(
       int current_node_id = execution_order[i];
       int current_node_idx = i;
 
-      auto inner_task = [this, &graph, &nodes, &timing_mutex, &timing_results,
+      auto inner_task = [this, &graph, &timing_mutex, &timing_results,
                          &task_runtime, &dependency_counters, &dependents_map,
                          &all_tasks, &id_to_idx, &temp_results, &resolved_ops,
                          &resolved_meta, current_node_id, current_node_idx,
@@ -151,7 +150,7 @@ NodeOutput& ParallelGraphExecutor::execute(
                          benchmark_events, force_recache]() {
         // 1) Pure compute into temp_results without mutating GraphModel
         try {
-          const Node& target_node = nodes.at(current_node_id);
+          const Node& target_node = graph.node(current_node_id);
           bool allow_disk_cache = (!disable_disk_cache) && (!force_recache);
 
           // Ensure upstream writes visible
@@ -160,8 +159,8 @@ NodeOutput& ParallelGraphExecutor::execute(
           auto get_upstream_output = [&](int up_id) -> const NodeOutput* {
             if (up_id < 0)
               return nullptr;
-            auto itn = nodes.find(up_id);
-            if (itn == nodes.end())
+            const Node* upstream = graph.find_node(up_id);
+            if (!upstream)
               return nullptr;
             auto it_idx = id_to_idx.find(up_id);
             if (it_idx != id_to_idx.end()) {
@@ -169,8 +168,8 @@ NodeOutput& ParallelGraphExecutor::execute(
               if (temp_results[up_idx].has_value())
                 return &*temp_results[up_idx];
             }
-            if (itn->second.cached_output_high_precision.has_value())
-              return &*itn->second.cached_output_high_precision;
+            if (upstream->cached_output_high_precision.has_value())
+              return &*upstream->cached_output_high_precision;
             return nullptr;
           };
 
@@ -446,12 +445,12 @@ NodeOutput& ParallelGraphExecutor::execute(
                           SchedulerTaskRuntime::Task tile_task =
                               [this, &task_runtime, &dependents_map,
                                &dependency_counters, &all_tasks, &temp_results,
-                               &nodes, &timing_mutex, &timing_results, x, y, w,
-                               h, needs_halo, input_ptrs, norm_store_sp,
-                               remaining, start_tp, current_node_idx,
-                               current_node_id, node_for_exec, op_func,
-                               benchmark_events, enable_timing, access_pattern,
-                               prop_fn, &graph]() {
+                               &timing_mutex, &timing_results, x, y, w, h,
+                               needs_halo, input_ptrs, norm_store_sp, remaining,
+                               start_tp, current_node_idx, current_node_id,
+                               node_for_exec, op_func, benchmark_events,
+                               enable_timing, access_pattern, prop_fn,
+                               &graph]() {
                                 try {
                                   task_runtime.log_event(
                                       SchedulerTraceAction::ExecuteTile,
@@ -523,17 +522,17 @@ NodeOutput& ParallelGraphExecutor::execute(
                                         std::lock_guard lk(timing_mutex);
                                         timing_results.node_timings.push_back(
                                             {current_node_id,
-                                             nodes.at(current_node_id).name,
+                                             graph.node(current_node_id).name,
                                              exec_ms, std::string("computed")});
                                       }
                                       events_.push(
                                           current_node_id,
-                                          nodes.at(current_node_id).name,
+                                          graph.node(current_node_id).name,
                                           "computed", exec_ms);
                                     } else {
                                       events_.push(
                                           current_node_id,
-                                          nodes.at(current_node_id).name,
+                                          graph.node(current_node_id).name,
                                           "computed", 0.0);
                                     }
                                     finalize_output_metadata(
@@ -558,7 +557,7 @@ NodeOutput& ParallelGraphExecutor::execute(
                                           std::string("Tile stage at node ") +
                                               std::to_string(current_node_id) +
                                               " (" +
-                                              nodes.at(current_node_id).name +
+                                              graph.node(current_node_id).name +
                                               ") failed: " + e.what())));
                                 } catch (...) {
                                   task_runtime.set_exception(
@@ -567,7 +566,7 @@ NodeOutput& ParallelGraphExecutor::execute(
                                           std::string("Tile stage at node ") +
                                               std::to_string(current_node_id) +
                                               " (" +
-                                              nodes.at(current_node_id).name +
+                                              graph.node(current_node_id).name +
                                               ") failed: unknown exception")));
                                 }
                                 task_runtime.dec_tasks_to_complete();
@@ -621,21 +620,21 @@ NodeOutput& ParallelGraphExecutor::execute(
           task_runtime.set_exception(std::make_exception_ptr(GraphError(
               GraphErrc::ComputeError,
               "Compute stage at node " + std::to_string(current_node_id) +
-                  " (" + nodes.at(current_node_id).name +
+                  " (" + graph.node(current_node_id).name +
                   ") failed: " + std::string(e.what()))));
           return;
         } catch (const std::exception& e) {
           task_runtime.set_exception(std::make_exception_ptr(GraphError(
               GraphErrc::ComputeError,
               "Compute stage at node " + std::to_string(current_node_id) +
-                  " (" + nodes.at(current_node_id).name +
+                  " (" + graph.node(current_node_id).name +
                   ") failed: " + e.what())));
           return;
         } catch (...) {
           task_runtime.set_exception(std::make_exception_ptr(GraphError(
               GraphErrc::ComputeError,
               "Compute stage at node " + std::to_string(current_node_id) +
-                  " (" + nodes.at(current_node_id).name +
+                  " (" + graph.node(current_node_id).name +
                   ") failed: unknown exception")));
           return;
         }
@@ -655,19 +654,19 @@ NodeOutput& ParallelGraphExecutor::execute(
           task_runtime.set_exception(std::make_exception_ptr(GraphError(
               GraphErrc::ComputeError,
               "Scheduling stage after node " + std::to_string(current_node_id) +
-                  " (" + nodes.at(current_node_id).name +
+                  " (" + graph.node(current_node_id).name +
                   ") failed: out_of_range: " + std::string(e.what()))));
         } catch (const std::exception& e) {
           task_runtime.set_exception(std::make_exception_ptr(GraphError(
               GraphErrc::ComputeError,
               "Scheduling stage after node " + std::to_string(current_node_id) +
-                  " (" + nodes.at(current_node_id).name +
+                  " (" + graph.node(current_node_id).name +
                   ") failed: " + e.what())));
         } catch (...) {
           task_runtime.set_exception(std::make_exception_ptr(GraphError(
               GraphErrc::ComputeError,
               "Scheduling stage after node " + std::to_string(current_node_id) +
-                  " (" + nodes.at(current_node_id).name +
+                  " (" + graph.node(current_node_id).name +
                   ") failed: unknown exception")));
         }
       };
@@ -712,7 +711,7 @@ NodeOutput& ParallelGraphExecutor::execute(
 
     if (execution_order.empty() && graph.has_node(node_id)) {
       // 处理图中只有一个节点的情况
-      if (!nodes.at(node_id).cached_output_high_precision.has_value()) {
+      if (!graph.node(node_id).cached_output_high_precision.has_value()) {
         sequential_fallback(graph, node_id, !disable_disk_cache);
       }
     } else {
@@ -745,20 +744,19 @@ NodeOutput& ParallelGraphExecutor::execute(
       for (size_t i = 0; i < num_nodes; ++i) {
         if (temp_results[i].has_value()) {
           int nid = execution_order[i];
-          nodes.at(nid).cached_output_high_precision =
-              std::move(*temp_results[i]);
-          nodes.at(nid).hp_version++;
-          cache_.save_cache_if_configured(graph, nodes.at(nid),
-                                          cache_precision);
+          Node& node = graph.mutable_node(nid);
+          node.cached_output_high_precision = std::move(*temp_results[i]);
+          node.hp_version++;
+          cache_.save_cache_if_configured(graph, node, cache_precision);
         }
       }
     }
-    if (!nodes.at(node_id).cached_output_high_precision) {
+    if (!graph.node(node_id).cached_output_high_precision) {
       throw GraphError(GraphErrc::ComputeError,
                        "Parallel computation finished but target node has no "
                        "output. An upstream error likely occurred.");
     }
-    return *nodes.at(node_id).cached_output_high_precision;
+    return *graph.mutable_node(node_id).cached_output_high_precision;
   } catch (...) {
     // 捕获在本函数内（任务提交前）抛出的异常，并传递给运行时
     task_runtime.set_exception(std::current_exception());

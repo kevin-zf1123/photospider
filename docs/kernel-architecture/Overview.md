@@ -56,6 +56,7 @@ graph TD
     Kernel --> GraphTraversalService
     Kernel --> GraphCacheService
     Kernel --> GraphInspectService
+    Kernel --> RoiPropagationService
     Kernel --> PluginManager
 
     GraphRuntime --> GraphModel
@@ -64,6 +65,8 @@ graph TD
 
     ComputeService --> GraphModel
     ComputeService --> GraphTraversalService
+    ComputeService --> RoiPropagationService
+    ComputeService --> GraphExtentResolver
     ComputeService --> GraphCacheService
     ComputeService --> GraphEventService
     ComputeService --> OpRegistry
@@ -78,12 +81,14 @@ graph TD
 | --- | --- |
 | `Kernel` | Multi-graph facade, service owner, runtime bootstrapper, top-level graph/cache/compute API. |
 | `GraphRuntime` | Per-graph execution container with model, events, schedulers, worker state, and platform context. |
-| `GraphModel` | Graph state holder: nodes, cache root, timing data, quiet/skip-save flags. |
+| `GraphModel` | Graph state holder: private node storage, topology adjacency index, cache root, timing data, quiet/skip-save flags. |
 | `InteractionService` | CLI-facing wrapper around `Kernel`; keeps command code thin. |
 | `ComputeService` | Resolves dependencies, checks caches, executes ops, coordinates RT/HP/tiled paths and timing events. |
-| `GraphTraversalService` | Dependency trees, traversal orders, graph validity, ROI projection helpers. |
+| `GraphTraversalService` | Topology-only traversal orders, ending-node discovery, ancestor checks, upstream dependency queries, and downstream dependent queries backed by `GraphModel` adjacency. |
+| `RoiPropagationService` | ROI/spatial propagation boundary for upstream ROI computation and graph-level forward/backward ROI projection. |
+| `GraphExtentResolver` | HP-authoritative output extent resolver used by ROI propagation and dirty-region planning. |
 | `GraphCacheService` | Memory/disk cache operations and cache synchronization. |
-| `GraphInspectService` | Human-readable cache and spatial metadata inspection. |
+| `GraphInspectService` | Structured cache/spatial metadata inspection and dependency-tree snapshots built from graph topology. |
 | `GraphEventService` | Per-node compute event collection. |
 | `PluginManager` | Loads operation plugins and records operation sources. |
 | `OpRegistry` | Global operation implementation registry, including HP/RT, tiled/monolithic, device metadata, and ROI propagators. |
@@ -113,12 +118,14 @@ Typical REPL compute flow:
 2. `InteractionService` calls `Kernel`.
 3. `Kernel` resolves the active `GraphRuntime`.
 4. `Kernel` creates or uses services needed by `ComputeService`.
-5. `ComputeService` resolves dependencies with `GraphTraversalService`.
+5. `ComputeService` resolves topology order with `GraphTraversalService`.
 6. `ComputeService` checks memory and disk cache with `GraphCacheService`.
-7. `ComputeService` selects operation implementations from `OpRegistry`.
-8. Work executes recursively or through the configured scheduler path.
-9. `GraphEventService` records per-node events and timing data.
-10. Results are exposed back through `Kernel` and `InteractionService`.
+7. Dirty-region paths use `RoiPropagationService` and `GraphExtentResolver`
+   for ROI demand and HP-authoritative extents.
+8. `ComputeService` selects operation implementations from `OpRegistry`.
+9. Work executes recursively or through the configured scheduler path.
+10. `GraphEventService` records per-node events and timing data.
+11. Results are exposed back through `Kernel` and `InteractionService`.
 
 ## Scheduler Model
 
@@ -191,8 +198,9 @@ the portable minimum.
 
 ## Dirty Region Propagation
 
-ROI propagation is handled through registry-provided propagators and traversal
-helpers. The active propagation notes are in
+ROI propagation is handled through `RoiPropagationService` using
+registry-provided propagators, `GraphModel` topology adjacency, and
+`GraphExtentResolver`. The active propagation notes are in
 `docs/kernel-architecture/Dirty-Region-Propagation.md`.
 
 Important current behavior:
@@ -211,15 +219,15 @@ These are implementation realities, not immediate blockers:
   cache API, compute API, and editing API.
 - `ComputeService` contains planning, cache coordination, execution, ROI update,
   scheduler interaction, and metrics emission.
-- `GraphTraversalService` mixes topology traversal with ROI and spatial
-  propagation helpers.
 - Cache APIs expose HP and RT concepts, while compute boundary cleanup is still
   ongoing.
 
 The `ComputeService` split is now tracked by the `split-compute-service`
-OpenSpec change and the maintained `Compute-Service-Split.md` plan. TODO:
-implementation is still pending. The `GraphTraversalService` topology/ROI split
-remains a separate follow-up refactor.
+OpenSpec change and the maintained `Compute-Service-Split.md` plan. The
+`GraphTraversalService` topology/ROI split has landed: traversal is topology
+only, ROI propagation is a separate service, extent resolution is explicit, and
+dependency-tree data is structured by the inspection boundary, exposed through
+`InteractionService`, and rendered by CLI/TUI/frontend code.
 
 ## Maintained Documentation Boundary
 

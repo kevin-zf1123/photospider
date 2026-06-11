@@ -424,27 +424,20 @@ bool Kernel::clear_graph(const std::string& name) {
   }
 }
 
-std::optional<std::string> Kernel::dump_dependency_tree(
-    const std::string& name, std::optional<int> node_id, bool show_parameters,
-    bool show_metadata) {
+std::optional<DependencyTree> Kernel::dependency_tree(
+    const std::string& name, std::optional<int> node_id,
+    bool include_metadata) {
   auto it = graphs_.find(name);
   if (it == graphs_.end())
     return std::nullopt;
   try {
     return it->second
-        ->post([this, node_id, show_parameters, show_metadata](GraphModel& g) {
-          std::stringstream ss;
-          auto formatter = [this](const Node& n) {
-            return inspect_service_.format_node_metadata(n);
-          };
+        ->post([this, node_id, include_metadata](GraphModel& g) {
           if (node_id) {
-            traversal_service_.print_dependency_tree(
-                g, ss, *node_id, show_parameters, show_metadata, formatter);
-          } else {
-            traversal_service_.print_dependency_tree(g, ss, show_parameters,
-                                                     show_metadata, formatter);
+            return inspect_service_.dependency_tree(g, *node_id,
+                                                    include_metadata);
           }
-          return ss.str();
+          return inspect_service_.dependency_tree(g, include_metadata);
         })
         .get();
   } catch (...) {
@@ -452,23 +445,19 @@ std::optional<std::string> Kernel::dump_dependency_tree(
   }
 }
 
-std::optional<std::string> Kernel::inspect_node(const std::string& name,
-                                                int node_id) {
+std::optional<GraphNodeInspectInfo> Kernel::inspect_node(
+    const std::string& name, int node_id) {
   auto it = graphs_.find(name);
   if (it == graphs_.end())
     return std::nullopt;
   try {
     return it->second
-        ->post([this, node_id](GraphModel& g) -> std::optional<std::string> {
-          auto itn = g.nodes.find(node_id);
-          if (itn == g.nodes.end())
+        ->post([this,
+                node_id](GraphModel& g) -> std::optional<GraphNodeInspectInfo> {
+          const Node* node_ptr = g.find_node(node_id);
+          if (!node_ptr)
             return std::nullopt;
-          const Node& node = itn->second;
-          std::ostringstream ss;
-          ss << "Node " << node.id << " (" << node.name << " | " << node.type
-             << ":" << node.subtype << ")\n";
-          ss << inspect_service_.format_node_metadata(node);
-          return ss.str();
+          return inspect_service_.inspect_node(*node_ptr);
         })
         .get();
   } catch (...) {
@@ -476,14 +465,15 @@ std::optional<std::string> Kernel::inspect_node(const std::string& name,
   }
 }
 
-std::optional<std::string> Kernel::inspect_graph(const std::string& name) {
+std::optional<GraphInspectionSnapshot> Kernel::inspect_graph(
+    const std::string& name) {
   auto it = graphs_.find(name);
   if (it == graphs_.end())
     return std::nullopt;
   try {
     return it->second
         ->post([this](GraphModel& g) {
-          return inspect_service_.inspect_all_nodes(g);
+          return inspect_service_.inspect_graph(g);
         })
         .get();
   } catch (...) {
@@ -561,7 +551,7 @@ Kernel::traversal_details(const std::string& name) {
               std::vector<Kernel::TraversalNodeInfo> vec;
               vec.reserve(order.size());
               for (int nid : order) {
-                const auto& node = g.nodes.at(nid);
+                const auto& node = g.node(nid);
                 bool mem = node.cached_output_high_precision.has_value() ||
                            node.cached_output_real_time.has_value();
                 bool on_disk = false;
@@ -659,16 +649,7 @@ std::optional<std::vector<int>> Kernel::list_node_ids(const std::string& name) {
   if (it == graphs_.end())
     return std::nullopt;
   try {
-    return it->second
-        ->post([](GraphModel& g) {
-          std::vector<int> ids;
-          ids.reserve(g.nodes.size());
-          for (auto& kv : g.nodes)
-            ids.push_back(kv.first);
-          std::sort(ids.begin(), ids.end());
-          return ids;
-        })
-        .get();
+    return it->second->post([](GraphModel& g) { return g.node_ids(); }).get();
   } catch (...) {
     return std::nullopt;
   }
@@ -684,7 +665,7 @@ std::optional<std::string> Kernel::get_node_yaml(const std::string& name,
         ->post([=](GraphModel& g) {
           if (!g.has_node(node_id))
             throw std::runtime_error("node not found");
-          auto n = g.nodes.at(node_id).to_yaml();
+          auto n = g.node(node_id).to_yaml();
           std::stringstream ss;
           ss << n;
           return ss.str();
@@ -708,12 +689,7 @@ bool Kernel::set_node_yaml(const std::string& name, int node_id,
           YAML::Node root = YAML::Load(yaml_text);
           ps::Node updated = ps::Node::from_yaml(root);
           updated.id = node_id;
-          GraphModel candidate(g.cache_root);
-          candidate.nodes = g.nodes;
-          candidate.nodes.erase(node_id);
-          candidate.add_node(updated);
-          candidate.validate_topology();
-          g.nodes = std::move(candidate.nodes);
+          g.replace_node(updated);
           return true;
         })
         .get();
@@ -971,7 +947,7 @@ std::optional<cv::Rect> Kernel::project_roi_forward(const std::string& name,
   try {
     auto future = runtime_ptr->post(
         [&, start_node_id, start_roi, target_node_id](GraphModel& g) {
-          return traversal_service_.project_roi_forward(
+          return roi_propagation_service_.project_roi_forward(
               g, start_node_id, start_roi, target_node_id);
         });
     auto result = future.get();
@@ -1002,7 +978,7 @@ std::optional<cv::Rect> Kernel::project_roi_backward(const std::string& name,
   try {
     auto future = runtime_ptr->post(
         [&, target_node_id, target_roi, source_node_id](GraphModel& g) {
-          return traversal_service_.project_roi_backward(
+          return roi_propagation_service_.project_roi_backward(
               g, target_node_id, target_roi, source_node_id);
         });
     auto result = future.get();

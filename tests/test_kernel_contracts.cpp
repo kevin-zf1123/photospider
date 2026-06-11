@@ -7,6 +7,7 @@
 
 #include "adapter/buffer_adapter_opencv.hpp"
 #include "graph_model.hpp"
+#include "kernel/interaction.hpp"
 #include "kernel/kernel.hpp"
 #include "kernel/services/compute_service.hpp"
 #include "kernel/services/graph_cache_service.hpp"
@@ -25,35 +26,35 @@ void register_contract_ops() {
 
     registry.register_op_hp_monolithic(
         "kernel_contract_test", "source",
-        MonolithicOpFunc([](const Node& node,
-                            const std::vector<const NodeOutput*>&) {
-          const int width = node.runtime_parameters["width"].as<int>(17);
-          const int height = node.runtime_parameters["height"].as<int>(3);
-          NodeOutput output;
-          output.image_buffer = make_aligned_cpu_image_buffer(
-              width, height, 1, DataType::FLOAT32);
-          cv::Mat mat = toCvMat(output.image_buffer);
-          mat.setTo(1.0f);
-          return output;
-        }));
+        MonolithicOpFunc(
+            [](const Node& node, const std::vector<const NodeOutput*>&) {
+              const int width = node.runtime_parameters["width"].as<int>(17);
+              const int height = node.runtime_parameters["height"].as<int>(3);
+              NodeOutput output;
+              output.image_buffer = make_aligned_cpu_image_buffer(
+                  width, height, 1, DataType::FLOAT32);
+              cv::Mat mat = toCvMat(output.image_buffer);
+              mat.setTo(1.0f);
+              return output;
+            }));
 
     registry.register_op_hp_monolithic(
         "kernel_contract_test", "process",
-        MonolithicOpFunc([](const Node&,
-                            const std::vector<const NodeOutput*>& inputs) {
-          if (inputs.empty()) {
-            throw GraphError(GraphErrc::MissingDependency,
-                             "process requires an input");
-          }
-          NodeOutput output;
-          const auto& input = inputs.front()->image_buffer;
-          output.image_buffer = make_aligned_cpu_image_buffer(
-              input.width, input.height, input.channels, input.type);
-          cv::Mat src = toCvMat(input);
-          cv::Mat dst = toCvMat(output.image_buffer);
-          src.copyTo(dst);
-          return output;
-        }));
+        MonolithicOpFunc(
+            [](const Node&, const std::vector<const NodeOutput*>& inputs) {
+              if (inputs.empty()) {
+                throw GraphError(GraphErrc::MissingDependency,
+                                 "process requires an input");
+              }
+              NodeOutput output;
+              const auto& input = inputs.front()->image_buffer;
+              output.image_buffer = make_aligned_cpu_image_buffer(
+                  input.width, input.height, input.channels, input.type);
+              cv::Mat src = toCvMat(input);
+              cv::Mat dst = toCvMat(output.image_buffer);
+              src.copyTo(dst);
+              return output;
+            }));
 
     registry.register_op_rt_tiled(
         "kernel_contract_test", "process",
@@ -143,6 +144,71 @@ TEST(ImageBufferContract, OpenCvAndTileAccessRespectPaddedStep) {
   EXPECT_FLOAT_EQ(mat.at<float>(1, 8), 0.0f);
 }
 
+TEST(InteractionInspectionContracts,
+     ReturnsStructuredDependencyTreeAndInspection) {
+  auto root = temp_path("photospider-interaction-inspect-contract");
+  std::filesystem::remove_all(root);
+  const auto yaml_path = root / "graph.yaml";
+  write_text(yaml_path, R"YAML(
+- id: 1
+  name: source
+  type: kernel_contract_test
+  subtype: source
+  parameters:
+    width: 17
+    height: 3
+- id: 2
+  name: process
+  type: kernel_contract_test
+  subtype: process
+  image_inputs:
+    - from_node_id: 1
+      from_output_name: image
+)YAML");
+
+  Kernel kernel;
+  InteractionService svc(kernel);
+  auto loaded =
+      svc.cmd_load_graph("inspect_contract", root.string(), yaml_path.string());
+  ASSERT_TRUE(loaded.has_value());
+
+  auto tree = svc.cmd_dependency_tree(*loaded, 2, true);
+  ASSERT_TRUE(tree.has_value());
+  EXPECT_EQ(tree->scope, DependencyTree::Scope::StartNode);
+  ASSERT_TRUE(tree->start_node_id.has_value());
+  EXPECT_EQ(*tree->start_node_id, 2);
+  EXPECT_TRUE(tree->start_node_found);
+  ASSERT_EQ(tree->root_node_ids, std::vector<int>({2}));
+  ASSERT_EQ(tree->entries.size(), 2u);
+
+  EXPECT_EQ(tree->entries[0].depth, 0);
+  EXPECT_FALSE(tree->entries[0].incoming_edge.has_value());
+  EXPECT_EQ(tree->entries[0].node.id, 2);
+  EXPECT_EQ(tree->entries[0].node.name, "process");
+  ASSERT_TRUE(tree->entries[0].node.metadata.has_value());
+  EXPECT_FALSE(tree->entries[0].node.metadata->has_cached_output);
+
+  EXPECT_EQ(tree->entries[1].depth, 2);
+  ASSERT_TRUE(tree->entries[1].incoming_edge.has_value());
+  EXPECT_EQ(tree->entries[1].incoming_edge->kind,
+            GraphTopologyEdgeKind::ImageInput);
+  EXPECT_EQ(tree->entries[1].incoming_edge->from_node_id, 1);
+  EXPECT_EQ(tree->entries[1].incoming_edge->to_node_id, 2);
+  EXPECT_EQ(tree->entries[1].incoming_edge->from_output_name, "image");
+  EXPECT_EQ(tree->entries[1].node.id, 1);
+  EXPECT_EQ(tree->entries[1].node.parameters["width"].as<int>(), 17);
+
+  auto graph = svc.cmd_inspect_graph(*loaded);
+  ASSERT_TRUE(graph.has_value());
+  ASSERT_EQ(graph->nodes.size(), 2u);
+  EXPECT_EQ(graph->nodes[0].id, 1);
+  EXPECT_EQ(graph->nodes[1].id, 2);
+  ASSERT_TRUE(graph->nodes[0].metadata.has_value());
+  EXPECT_FALSE(graph->nodes[0].metadata->has_cached_output);
+
+  std::filesystem::remove_all(root);
+}
+
 TEST(CacheSemantics, HpAndRtComputePopulateFormalCaches) {
   register_contract_ops();
   GraphTraversalService traversal;
@@ -156,38 +222,38 @@ TEST(CacheSemantics, HpAndRtComputePopulateFormalCaches) {
   graph.validate_topology();
 
   // HP compute populates cached_output_high_precision only
-  NodeOutput& hp = compute.compute(graph, ComputeIntent::GlobalHighPrecision, 2,
-                                   "int8", false, false, true, nullptr,
-                                   std::nullopt);
-  EXPECT_TRUE(graph.nodes.at(2).cached_output_high_precision.has_value());
+  NodeOutput& hp =
+      compute.compute(graph, ComputeIntent::GlobalHighPrecision, 2, "int8",
+                      false, false, true, nullptr, std::nullopt);
+  EXPECT_TRUE(graph.node(2).cached_output_high_precision.has_value());
   EXPECT_EQ(hp.image_buffer.width,
-            graph.nodes.at(2).cached_output_high_precision->image_buffer.width);
+            graph.node(2).cached_output_high_precision->image_buffer.width);
 
   // Snapshot HP cache dimensions before RT compute
   int hp_w_before =
-      graph.nodes.at(2).cached_output_high_precision->image_buffer.width;
+      graph.node(2).cached_output_high_precision->image_buffer.width;
   int hp_h_before =
-      graph.nodes.at(2).cached_output_high_precision->image_buffer.height;
+      graph.node(2).cached_output_high_precision->image_buffer.height;
 
   // RT compute populates cached_output_real_time only;
   // cached_output_high_precision must remain unchanged.
-  NodeOutput& rt = compute.compute(graph, ComputeIntent::RealTimeUpdate, 2,
-                                   "int8", false, false, true, nullptr,
-                                   cv::Rect(0, 0, 8, 8));
-  EXPECT_EQ(&rt, &*graph.nodes.at(2).cached_output_real_time);
-  EXPECT_TRUE(graph.nodes.at(2).cached_output_real_time.has_value());
+  NodeOutput& rt =
+      compute.compute(graph, ComputeIntent::RealTimeUpdate, 2, "int8", false,
+                      false, true, nullptr, cv::Rect(0, 0, 8, 8));
+  EXPECT_EQ(&rt, &*graph.node(2).cached_output_real_time);
+  EXPECT_TRUE(graph.node(2).cached_output_real_time.has_value());
 
   // Key contract: RT compute must NOT alter the formal HP cache
-  ASSERT_TRUE(graph.nodes.at(2).cached_output_high_precision.has_value());
-  EXPECT_EQ(graph.nodes.at(2).cached_output_high_precision->image_buffer.width,
+  ASSERT_TRUE(graph.node(2).cached_output_high_precision.has_value());
+  EXPECT_EQ(graph.node(2).cached_output_high_precision->image_buffer.width,
             hp_w_before)
       << "RT compute must not change HP cache width";
-  EXPECT_EQ(graph.nodes.at(2).cached_output_high_precision->image_buffer.height,
+  EXPECT_EQ(graph.node(2).cached_output_high_precision->image_buffer.height,
             hp_h_before)
       << "RT compute must not change HP cache height";
 
   // RT output should be downscaled relative to HP
-  EXPECT_LE(graph.nodes.at(2).cached_output_real_time->image_buffer.width,
+  EXPECT_LE(graph.node(2).cached_output_real_time->image_buffer.width,
             hp_w_before)
       << "RT output should be <= HP output width";
 }
@@ -208,7 +274,9 @@ TEST(CacheSemantics, DiskSaveAndSyncIgnoreRtOnlyState) {
 
   // Node 2: process with HP cache + caches entry → should be saved to disk
   graph.add_node(make_contract_process_node());
-  graph.nodes.at(2).caches.push_back({"image", "output.png"});
+  graph.mutate_node_runtime_state(2, [](auto& state) {
+    state.caches.push_back({"image", "output.png"});
+  });
 
   // Node 3: process with caches entry but only RT state (simulates a node
   // that was computed via interactive RT path but never had HP computed)
@@ -226,17 +294,21 @@ TEST(CacheSemantics, DiskSaveAndSyncIgnoreRtOnlyState) {
   // HP compute for node 2 — also computes node 1 as dependency
   compute.compute(graph, ComputeIntent::GlobalHighPrecision, 2, "int8", false,
                   false, true, nullptr, std::nullopt);
-  ASSERT_TRUE(graph.nodes.at(2).cached_output_high_precision.has_value());
+  ASSERT_TRUE(graph.node(2).cached_output_high_precision.has_value());
 
   // Populate RT-only node (node 3) with RT state; it never had HP compute.
-  graph.nodes.at(3).cached_output_real_time = NodeOutput{};
-  graph.nodes.at(3).cached_output_real_time->image_buffer =
-      make_aligned_cpu_image_buffer(8, 8, 1, DataType::FLOAT32);
+  graph.mutate_node_runtime_state(3, [](auto& state) {
+    state.cached_output_real_time = NodeOutput{};
+    state.cached_output_real_time->image_buffer =
+        make_aligned_cpu_image_buffer(8, 8, 1, DataType::FLOAT32);
+  });
 
   // Also give node 2 an RT snapshot — RT presence must not affect sync
-  graph.nodes.at(2).cached_output_real_time = NodeOutput{};
-  graph.nodes.at(2).cached_output_real_time->image_buffer =
-      make_aligned_cpu_image_buffer(4, 4, 1, DataType::FLOAT32);
+  graph.mutate_node_runtime_state(2, [](auto& state) {
+    state.cached_output_real_time = NodeOutput{};
+    state.cached_output_real_time->image_buffer =
+        make_aligned_cpu_image_buffer(4, 4, 1, DataType::FLOAT32);
+  });
 
   // Create stale disk file for RT-only node 3 (simulating leftover from a
   // previous HP run that no longer has valid HP cache).
@@ -284,10 +356,9 @@ TEST(ComputeContracts, RealTimeUpdateWithoutDirtyRoiFailsClearly) {
   GraphModel graph(temp_path("photospider-contract-rt-error"));
   graph.add_node(make_contract_node());
 
-  EXPECT_THROW(
-      compute.compute(graph, ComputeIntent::RealTimeUpdate, 1, "int8", false,
-                      false, true, nullptr, std::nullopt),
-      GraphError);
+  EXPECT_THROW(compute.compute(graph, ComputeIntent::RealTimeUpdate, 1, "int8",
+                               false, false, true, nullptr, std::nullopt),
+               GraphError);
 }
 
 TEST(GraphModelContract, ClearResetsModelRuntimeState) {
@@ -301,7 +372,7 @@ TEST(GraphModelContract, ClearResetsModelRuntimeState) {
 
   graph.clear();
 
-  EXPECT_TRUE(graph.nodes.empty());
+  EXPECT_TRUE(graph.empty());
   EXPECT_TRUE(graph.timing_results.node_timings.empty());
   EXPECT_DOUBLE_EQ(graph.timing_results.total_ms, 0.0);
   EXPECT_DOUBLE_EQ(graph.total_io_time_ms.load(), 0.0);
@@ -328,11 +399,11 @@ TEST(GraphIoContract, FailedReloadPreservesPreviousGraph) {
   GraphModel graph(temp_path("photospider-contract-reload-cache"));
   GraphIOService io;
   io.load(graph, valid_path);
-  ASSERT_EQ(graph.nodes.at(1).name, "valid");
+  ASSERT_EQ(graph.node(1).name, "valid");
 
   EXPECT_THROW(io.load(graph, invalid_path), GraphError);
   ASSERT_TRUE(graph.has_node(1));
-  EXPECT_EQ(graph.nodes.at(1).name, "valid");
+  EXPECT_EQ(graph.node(1).name, "valid");
 }
 
 TEST(GraphMutationContract, InvalidNodeReplacementPreservesPreviousNode) {
@@ -346,8 +417,8 @@ TEST(GraphMutationContract, InvalidNodeReplacementPreservesPreviousNode) {
              "  subtype: source\n");
 
   Kernel kernel;
-  auto loaded = kernel.load_graph("contract_graph", root.string(),
-                                  yaml_path.string());
+  auto loaded =
+      kernel.load_graph("contract_graph", root.string(), yaml_path.string());
   ASSERT_TRUE(loaded.has_value());
 
   const std::string invalid_replacement =

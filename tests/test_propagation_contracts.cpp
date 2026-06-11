@@ -6,7 +6,7 @@
 #include "adapter/buffer_adapter_opencv.hpp"
 #include "graph_model.hpp"
 #include "kernel/ops.hpp"
-#include "kernel/services/graph_traversal_service.hpp"
+#include "kernel/services/roi_propagation_service.hpp"
 
 namespace ps {
 namespace {
@@ -79,10 +79,12 @@ GraphModel make_graph() {
                     "photospider-propagation-contracts");
 }
 
-void seed_hp_extent(Node& node, int width, int height) {
-  node.cached_output_high_precision = NodeOutput{};
-  node.cached_output_high_precision->image_buffer =
-      make_aligned_cpu_image_buffer(width, height, 1, DataType::FLOAT32);
+void seed_hp_extent(GraphModel& graph, int node_id, int width, int height) {
+  graph.mutate_node_runtime_state(node_id, [&](auto& state) {
+    state.cached_output_high_precision = NodeOutput{};
+    state.cached_output_high_precision->image_buffer =
+        make_aligned_cpu_image_buffer(width, height, 1, DataType::FLOAT32);
+  });
 }
 
 }  // namespace
@@ -95,18 +97,18 @@ TEST(PropagationContracts, BackwardLinearChainPropagatesPreciseDirtyRoi) {
   graph.add_node(make_resize_node(20, 2, 512, 512));
   graph.add_node(make_curve_node(200, 20));
   graph.validate_topology();
-  seed_hp_extent(graph.nodes.at(2), 1024, 1024);
-  seed_hp_extent(graph.nodes.at(20), 512, 512);
-  seed_hp_extent(graph.nodes.at(200), 512, 512);
+  seed_hp_extent(graph, 2, 1024, 1024);
+  seed_hp_extent(graph, 20, 512, 512);
+  seed_hp_extent(graph, 200, 512, 512);
 
-  GraphTraversalService traversal;
+  RoiPropagationService propagation;
   std::optional<cv::Rect> propagated =
-      traversal.project_roi_backward(graph, 200, cv::Rect(10, 20, 30, 40), 1);
+      propagation.project_roi_backward(graph, 200, cv::Rect(10, 20, 30, 40), 1);
 
   ASSERT_TRUE(propagated.has_value());
   // curve_transform: identity.
   // resize 512->1024 with linear padding 1 yields [19,39,62x82].
-  // The traversal service also merges single-input local_inverse_matrix
+  // The ROI propagation boundary also merges single-input local_inverse_matrix
   // propagation; with the default identity matrix, the resize step therefore
   // carries the union of [19,39,62x82] and [10,20,30x40] = [10,20,71x101].
   // gaussian_blur ksize=21 expands by radius 10, producing [0,10,91x121].
@@ -120,21 +122,26 @@ TEST(PropagationContracts, BackwardResizeIgnoresRtOnlyParentExtent) {
   graph.add_node(make_resize_node(2, 1, 4, 4, "nearest"));
   graph.validate_topology();
 
-  graph.nodes.at(1).cached_output_real_time = NodeOutput{};
-  graph.nodes.at(1).cached_output_real_time->image_buffer =
-      make_aligned_cpu_image_buffer(8, 8, 1, DataType::FLOAT32);
+  graph.mutate_node_runtime_state(1, [](auto& state) {
+    state.cached_output_real_time = NodeOutput{};
+    state.cached_output_real_time->image_buffer =
+        make_aligned_cpu_image_buffer(8, 8, 1, DataType::FLOAT32);
+  });
 
-  GraphTraversalService traversal;
-  EXPECT_FALSE(traversal.project_roi_backward(graph, 2, cv::Rect(1, 1, 1, 1), 1)
-                   .has_value())
+  RoiPropagationService propagation;
+  EXPECT_FALSE(
+      propagation.project_roi_backward(graph, 2, cv::Rect(1, 1, 1, 1), 1)
+          .has_value())
       << "RT-only transient state must not provide HP propagation extent.";
 
-  graph.nodes.at(1).cached_output_high_precision = NodeOutput{};
-  graph.nodes.at(1).cached_output_high_precision->image_buffer =
-      make_aligned_cpu_image_buffer(8, 8, 1, DataType::FLOAT32);
+  graph.mutate_node_runtime_state(1, [](auto& state) {
+    state.cached_output_high_precision = NodeOutput{};
+    state.cached_output_high_precision->image_buffer =
+        make_aligned_cpu_image_buffer(8, 8, 1, DataType::FLOAT32);
+  });
 
   std::optional<cv::Rect> propagated =
-      traversal.project_roi_backward(graph, 2, cv::Rect(1, 1, 1, 1), 1);
+      propagation.project_roi_backward(graph, 2, cv::Rect(1, 1, 1, 1), 1);
   ASSERT_TRUE(propagated.has_value());
   EXPECT_EQ(*propagated, cv::Rect(2, 2, 2, 2));
 }

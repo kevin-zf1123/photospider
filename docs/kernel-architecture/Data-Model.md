@@ -13,19 +13,43 @@ Important fields:
 
 | Field | Meaning |
 | --- | --- |
-| `nodes` | Map from node id to `Node`. |
+| private node storage | Map from node id to `Node`, accessed through `GraphModel` lookup, iteration, and mutation helpers. |
+| topology adjacency index | Incoming and outgoing `GraphTopologyEdge` maps for image and parameter edges, keyed by stable node id. |
 | `cache_root` | Root directory for disk cache files. |
 | `timing_results` | Latest timing summary when timing is enabled. |
 | `total_io_time_ms` | Accumulated disk cache IO time. |
 
-Internal services are friends of `GraphModel` so they can coordinate locking,
-timing, cache, and traversal behavior. Most frontend code should reach graph
+External code must not mutate graph structure through raw node-map access.
+Reads use helpers such as `node()`, `find_node()`, `node_ids()`, and controlled
+iteration. Structural changes use helpers such as `add_node()`,
+`replace_node()`, `remove_node()`, and input-rewire APIs, which validate and
+refresh topology adjacency before returning. Runtime cache/state updates may
+use `mutable_node()` for node-local runtime fields, but structural edits still
+belong to the model mutation helpers.
+
+Internal services coordinate locking, timing, cache, topology, and traversal
+behavior through the model boundary. Most frontend code should reach graph
 state through `Kernel` or `InteractionService`.
 
 `GraphModel::clear()` is intended to reset model-level runtime state, not only
-erase `nodes`. Clearing a graph should reset nodes, timing results, accumulated
-IO time, skip-save state, and other per-run state so reload behavior is not
-polluted by stale metadata.
+erase nodes. Clearing a graph resets nodes, topology adjacency, timing results,
+accumulated IO time, skip-save state, and other per-run state so reload behavior
+is not polluted by stale metadata.
+
+## Topology Adjacency
+
+`GraphModel` owns `GraphTopologyIndex`, which records both directions of graph
+edges:
+
+- `incoming_by_node`: upstream dependencies for a node.
+- `outgoing_by_node`: downstream dependents for a node.
+
+Each `GraphTopologyEdge` stores stable source and target node ids, edge kind
+(`ImageInput` or `ParameterInput`), source output name, target input/parameter
+identity, and input slot index. Successful graph load, clear, node addition,
+node replacement, node removal, and input rewiring refresh or clear this index
+before graph state is visible to traversal, compute, cache, inspection, CLI, or
+interaction consumers.
 
 ## Node Identity
 

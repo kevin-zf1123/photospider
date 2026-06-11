@@ -13,6 +13,7 @@ CLI / TUI
   -> GraphRuntime
   -> ComputeService
   -> OpRegistry / GraphCacheService / GraphTraversalService
+  -> RoiPropagationService / GraphExtentResolver
 ```
 
 `Kernel` 拥有多图 API。`GraphRuntime` 拥有一个图模型、事件服务、worker 状态、平台 context 和调度器实例。
@@ -20,6 +21,8 @@ CLI / TUI
 `InteractionService` 是面向前端的 kernel interaction facade。它的总体职责是将 CLI/TUI/frontend
 命令与 kernel 内部解耦。在 dirty-region 语境中，它应暴露图级 dirty snapshot 查询和可视化 hook；
 它不是 dirty-region generation 或 propagation 的权威来源。
+
+`GraphTraversalService` 现在只负责拓扑。它从 `GraphModel` 邻接索引提供遍历顺序和显式的上游/下游拓扑查询。脏区需求和 ROI 投影使用 `RoiPropagationService`，正式传播范围来自 `GraphExtentResolver`。
 
 `ComputeService` 拆分后的目标 planning 流程：
 

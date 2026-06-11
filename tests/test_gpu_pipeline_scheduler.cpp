@@ -391,7 +391,7 @@ TEST(GpuPipelineIntegrationTest, SchedulerWithRuntime) {
                                  /*parallel*/ true);
   ASSERT_TRUE(success);
   const auto& result =
-      runtime.model().nodes.at(node_id).cached_output_high_precision.value();
+      runtime.model().node(node_id).cached_output_high_precision.value();
 
   // 验证计算完成
   EXPECT_TRUE(result.image_buffer.width > 0 || !result.data.empty());
@@ -447,9 +447,8 @@ TEST(GpuPipelineIntegrationTest, DualSchedulerConcurrentExecution) {
       runtime.model(), runtime, ComputeIntent::RealTimeUpdate, node_id, "int8",
       true, false, false, nullptr, cv::Rect(0, 0, 64, 64));
 
-  EXPECT_TRUE(runtime.model()
-                  .nodes.at(node_id)
-                  .cached_output_high_precision.has_value());
+  EXPECT_TRUE(
+      runtime.model().node(node_id).cached_output_high_precision.has_value());
   EXPECT_TRUE(rt_result.image_buffer.width > 0 || !rt_result.data.empty());
 }
 

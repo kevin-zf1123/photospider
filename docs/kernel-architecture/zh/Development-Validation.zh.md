@@ -38,7 +38,8 @@
 
 以下是已识别的后续重构，不属于当前 kernel-contract 清理：
 
-- 将 `GraphTraversalService` 的拓扑遍历与 ROI/空间传播拆分。
+- 在 frontend 展示契约定义后，添加更丰富的 dirty snapshot 可视化 API。
+- 决定 global HP dirty ROI 是否应在所有入口路径中使用优化后的局部 HP update planning。
 
 `ComputeService` 拆分现在已有专门的 `split-compute-service` OpenSpec change，
 并在维护文档 `Compute-Service-Split.md` 中记录计划。第一轮拆分已经通过
@@ -47,5 +48,6 @@
 `test_propagation_contracts`、`test_scheduler`、`test_milestone34` 和
 `test_gpu_pipeline_scheduler` 的回归覆盖。
 
-`GraphTraversalService` 拓扑/ROI 拆分应在 compute split 边界稳定后接收单独的
-OpenSpec change。
+`GraphTraversalService` 拓扑/ROI 拆分已经落地。边界覆盖位于
+`tests/test_graph_topology_boundaries.cpp`、`tests/test_propagation_contracts.cpp`，
+以及 `tests/results/split-graph-traversal-service/` 下的可复现证据。

@@ -162,7 +162,7 @@ Micro_16 to satisfy frame-budget constraints.
 - **Static formulas** remain the primary path for operators such as `resize`,
   `crop`, and `blur`. These operators only need parameters or cached
   `SpatialContext` information to compute inverse upstream ROI through
-  `compute_upstream_roi`.
+  `RoiPropagationService::compute_upstream_roi`.
 - **Data-dependent operators**, such as liquify, warp, or displacement, cannot
   be derived statically from parameters. They must register the following in
   `OpRegistry`:
@@ -170,7 +170,7 @@ Micro_16 to satisfy frame-budget constraints.
     grid-based tile-to-upstream-ROI table.
   - optionally, `OpMetadata::data_dependent`, so schedulers can recognize that
     the operator must access a LUT.
-- `GraphTraversalService::compute_upstream_roi` tries the LUT after applying the
+- `RoiPropagationService::compute_upstream_roi` tries the LUT after applying the
   static formula. Grid cells covered by the current ROI are looked up, and the
   returned upstream ROIs are merged with the static result for use by
   `ComputeService` or a planner. This keeps operations such as a small liquify
@@ -184,12 +184,16 @@ usually millisecond-scale, so it can be lazily loaded synchronously by
 `ComputeService` or a debug command on the propagation path without causing a
 long stall.
 
-`ComputeService` already calls the above logic through
-`GraphTraversalService::compute_upstream_roi`, so planners and execution code do
-not need to care whether an operator is static or data-dependent. A new operator
-must explicitly define dirty/forward propagation semantics; when the dependency
-is data-dependent, it should provide a `DependencyLutBuilder` at registration
-time to receive precise ROI propagation.
+`ComputeService` and `DirtyRegionPlanner` call the above logic through
+`RoiPropagationService`, so execution code does not need to care whether an
+operator is static or data-dependent. The service consumes `GraphModel`
+topology adjacency but does not own topology. Formal propagation bounds come
+from `GraphExtentResolver`: HP cache output, explicit width/height parameters,
+or upstream HP-derived fallback may provide extents; RT-only transient state is
+not a formal HP propagation extent. A new operator must explicitly define
+dirty/forward propagation semantics; when the dependency is data-dependent, it
+should provide a `DependencyLutBuilder` at registration time to receive precise
+ROI propagation.
 
 ## 7. Monolithic Dirty Escalation
 

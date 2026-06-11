@@ -97,8 +97,8 @@ void GraphCacheService::save_cache_if_configured(
 
 bool GraphCacheService::try_load_from_disk_cache(GraphModel& graph,
                                                  Node& node) const {
-  if (node.cached_output_high_precision.has_value() || graph.cache_root.empty() ||
-      node.caches.empty()) {
+  if (node.cached_output_high_precision.has_value() ||
+      graph.cache_root.empty() || node.caches.empty()) {
     return node.cached_output_high_precision.has_value();
   }
 
@@ -242,9 +242,10 @@ GraphModel::DriveClearResult GraphCacheService::clear_drive_cache(
 GraphModel::MemoryClearResult GraphCacheService::clear_memory_cache(
     GraphModel& graph) const {
   GraphModel::MemoryClearResult result;
-  for (auto& pair : graph.nodes) {
-    if (has_memory_cache(pair.second)) {
-      reset_memory_cache(pair.second);
+  for (int node_id : graph.node_ids()) {
+    Node& node = graph.mutable_node(node_id);
+    if (has_memory_cache(node)) {
+      reset_memory_cache(node);
       result.cleared_nodes++;
     }
   }
@@ -259,9 +260,10 @@ void GraphCacheService::clear_cache(GraphModel& graph) const {
 GraphModel::CacheSaveResult GraphCacheService::cache_all_nodes(
     GraphModel& graph, const std::string& cache_precision) const {
   GraphModel::CacheSaveResult result;
-  for (const auto& pair : graph.nodes) {
-    if (hp_cache_ptr(pair.second)) {
-      save_cache_if_configured(graph, pair.second, cache_precision);
+  for (int node_id : graph.node_ids()) {
+    const Node& node = graph.node(node_id);
+    if (hp_cache_ptr(node)) {
+      save_cache_if_configured(graph, node, cache_precision);
       result.saved_nodes++;
     }
   }
@@ -275,9 +277,10 @@ GraphModel::MemoryClearResult GraphCacheService::free_transient_memory(
   std::unordered_set<int> endset(ends.begin(), ends.end());
 
   GraphModel::MemoryClearResult result;
-  for (auto& pair : graph.nodes) {
-    if (has_memory_cache(pair.second) && !endset.count(pair.first)) {
-      reset_memory_cache(pair.second);
+  for (int node_id : graph.node_ids()) {
+    Node& node = graph.mutable_node(node_id);
+    if (has_memory_cache(node) && !endset.count(node_id)) {
+      reset_memory_cache(node);
       result.cleared_nodes++;
     }
   }
@@ -289,10 +292,9 @@ GraphModel::DiskSyncResult GraphCacheService::synchronize_disk_cache(
   GraphModel::DiskSyncResult result;
   result.saved_nodes = cache_all_nodes(graph, cache_precision).saved_nodes;
 
-  for (const auto& pair : graph.nodes) {
-    const Node& node = pair.second;
-    if (node.cached_output_high_precision.has_value() ||
-        node.caches.empty()) {
+  for (int node_id : graph.node_ids()) {
+    const Node& node = graph.node(node_id);
+    if (node.cached_output_high_precision.has_value() || node.caches.empty()) {
       continue;
     }
 
