@@ -11,9 +11,10 @@ and are not assumed to be committed with the repository.
 ## Current State
 
 Photospider is built around a graph runtime with a service split, operation
-registry, cache layer, and scheduler abstraction. The implementation is still in
-transition: legacy recursive and `GraphRuntime` queue paths coexist with the
-formal `IScheduler` target interface and newer intent-driven RT/HP model.
+registry, cache layer, and scheduler abstraction. Parallel planned work now
+dispatches through scheduler-owned task runtimes; remaining recursive paths and
+`GraphRuntime` support queues are not the compute-service parallel dispatch
+contract.
 
 The code is useful and testable, but some boundaries are not final. In
 particular, `Kernel` and `ComputeService` still coordinate a large amount of
@@ -99,7 +100,7 @@ graph TD
 | `Graph-Lifecycle.md` | Graph runtime ownership, graph load/reload/edit failure semantics, and `GraphModel::clear()`. |
 | `ImageBuffer-Memory-Contract.md` | Public `ImageBuffer` memory/device contract, alignment, stride, and adapter rules. |
 | `Dirty-Region-Propagation.md` | ROI propagation, tile mapping, and current tunable tile defaults. |
-| `Scheduler-Architecture.md` | Formal `IScheduler` target model, built-in schedulers, and migration state. |
+| `Scheduler-Architecture.md` | Formal `IScheduler` lifecycle, built-in schedulers, and task-runtime dispatch boundary. |
 | `Plugin-ABI.md` | Operation plugin and scheduler plugin ABI contracts. |
 | `Development-Validation.md` | Mainline macOS architecture, CTest expectations, and follow-up refactor boundaries. |
 | `Benchmark-Spikes.md` | Metal adapter and ARM alignment benchmark plans and follow-up status. |
@@ -140,9 +141,10 @@ Built-in scheduler types:
 The CLI exposes scheduler controls through the `scheduler` REPL command. Default
 types and plugin directories are configured in `config.yaml`.
 
-`IScheduler` is the formal target interface. The worker queues still present in
-`GraphRuntime` are migration support for paths that have not yet been routed
-cleanly through scheduler instances.
+`IScheduler` is the formal lifecycle interface, and scheduler-owned
+`SchedulerTaskRuntime` is the dispatch contract for compute-service planned
+parallel work. `GraphRuntime` worker queues remain support infrastructure, not
+the compute-service parallel dispatch API.
 
 ## Operation Registry
 

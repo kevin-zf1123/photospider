@@ -1,7 +1,8 @@
 # Scheduler Architecture
 
-The kernel has a formal scheduler target interface and legacy runtime queues.
-This document defines how to read the current implementation.
+The kernel has a formal scheduler interface for intent-aware resource dispatch.
+This document defines how to read the current implementation after planned
+parallel work was routed through scheduler-owned task runtimes.
 
 ## Formal Target: IScheduler
 
@@ -12,7 +13,7 @@ cleanly.
 Core lifecycle:
 
 ```text
-create -> attach(runtime) -> start -> schedule(...) -> shutdown -> detach
+create -> attach(runtime) -> start -> dispatch planned tasks -> shutdown -> detach
 ```
 
 Compute routes by `ComputeIntent`:
@@ -40,14 +41,20 @@ and cancellation for stale RT work, and avoid waiting policies that can deadlock
 worker-owned execution. Do not solve this by making RT output a formal HP cache
 source.
 
-## Current Migration State
+## Current Dispatch State
 
-The implementation still contains worker queues, epochs, and task submission
-APIs directly in `GraphRuntime`. Some compute paths still call
-`ComputeService::compute_parallel` and submit tasks to those queues directly.
+Parallel compute planning still belongs to `ComputeService` collaborators:
+`DirtyRegionPlanner`, `ComputeTaskPlanner`, `IntentUpdateCoordinator`, and
+`ParallelGraphExecutor`. After planning, the concrete planned tasks are
+submitted through the configured `IScheduler` instance for the relevant
+`ComputeIntent` via `SchedulerTaskRuntime`.
 
-Treat these runtime queues as migration support, not the permanent scheduler
-API. New scheduler-facing design should target `IScheduler`.
+`GraphRuntime` still owns graph state, scheduler registration, events, and some
+runtime queue APIs used by graph-runtime support paths and tests. Those queues
+are no longer the compute-service parallel dispatch route. New
+scheduler-facing design should extend `IScheduler` and
+`SchedulerTaskRuntime`, not add new dependencies on `GraphRuntime` internal
+queues.
 
 ## Built-in Schedulers
 
@@ -58,12 +65,11 @@ API. New scheduler-facing design should target `IScheduler`.
 | `gpu_pipeline` | Heterogeneous CPU/GPU scheduler. |
 | `heterogeneous` | Alias for `gpu_pipeline`. |
 
-## Node-Level Scheduling
+## Scheduler Dispatch Boundary
 
-`IScheduler` includes node-level scheduling hooks such as `schedule_node`,
-`schedule_nodes`, and task group aggregation helpers. These are migration
-interfaces. Existing implementations may still split ROI into tiles or aggregate
-task groups inside a scheduler, but that is not the target ownership boundary.
+`IScheduler` no longer exposes compute-planning helpers. Removed planning
+interfaces must not be reintroduced, so scheduler implementations cannot
+accidentally own graph/task planning.
 
 The target model is:
 
@@ -80,7 +86,8 @@ and resource-specific dispatch belong in the scheduler. Dirty propagation,
 node/tile expansion, monolithic dirty escalation, and logical compute-task
 derivation belong before scheduler dispatch.
 
-Default implementations may fall back to the legacy `schedule` path.
+The compute-service path derives planned work before scheduler dispatch and
+does not expose a compatibility compute path outside planned-task dispatch.
 
 ## Epoch and Cancellation
 
@@ -91,15 +98,14 @@ should assign real epochs so obsolete RT work can be dropped.
 ## Observability
 
 `GraphRuntime::SchedulerEvent` records assignment, node execution, and tile
-execution events. This is useful for validating scheduler behavior during the
-migration.
+execution events. This is useful for validating scheduler behavior.
 
 ## Development Direction
 
 - Keep `IScheduler` as the formal public scheduler interface.
-- Route planned or annotated tasks through scheduler instances over time.
+- Keep planned parallel work routed through scheduler-owned task runtimes.
 - Avoid adding new permanent dependencies on `GraphRuntime` internal queues.
 - Keep plugin scheduler lifecycle compatible with `Plugin-ABI.md`.
-- Move scheduler-local ROI splitting and task-group planning decisions toward
-  `DirtyRegionPlanner`, `ComputeTaskPlanner`, or task annotation before full
-  planned-task routing is considered complete.
+- Continue later work on richer annotated task pools, planner plugin ABI, and
+  scheduler policy metadata without moving graph-level dirty planning into a
+  scheduler.

@@ -1739,7 +1739,7 @@ int main(int argc, char** argv) {
               "parallel facade returned success");
     task6.add("scheduler node events recorded", ">=5", execute_count,
               execute_count >= 5,
-              "legacy queue executor emitted node-level scheduling events");
+              "parallel executor emitted scheduler dispatch events");
     task6.add("scheduler tile events recorded", ">0", tile_count,
               tile_count > 0,
               "tiled nodes emitted micro-task completion events");

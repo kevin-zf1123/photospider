@@ -386,12 +386,6 @@ TEST(IntentUpdateCoordinatorSplit,
   EXPECT_TRUE(inline_decision.run_real_time_update);
   EXPECT_FALSE(inline_decision.submit_updates_concurrently);
 
-  GraphRuntime::Info runtime_info;
-  runtime_info.name = "split-coordinator-test";
-  runtime_info.root = "cache/split-coordinator-test";
-  runtime_info.yaml = "";
-  runtime_info.config = "";
-  GraphRuntime runtime(runtime_info);
   bool ran_hp = false;
   bool ran_rt = false;
   std::vector<std::string> stages;
@@ -415,7 +409,7 @@ TEST(IntentUpdateCoordinatorSplit,
 
   NodeOutput& coordinated =
       compute::IntentUpdateCoordinator::coordinate_intent_update(
-          ComputeIntent::RealTimeUpdate, &runtime, cv::Rect(0, 0, 4, 4),
+          ComputeIntent::RealTimeUpdate, nullptr, nullptr, cv::Rect(0, 0, 4, 4),
           callbacks);
   EXPECT_EQ(&coordinated, &rt_output);
   EXPECT_TRUE(ran_hp);
@@ -435,7 +429,7 @@ TEST(IntentUpdateCoordinatorSplit,
   stages.clear();
   NodeOutput& coordinated_without_runtime =
       compute::IntentUpdateCoordinator::coordinate_intent_update(
-          ComputeIntent::RealTimeUpdate, nullptr, cv::Rect(0, 0, 4, 4),
+          ComputeIntent::RealTimeUpdate, nullptr, nullptr, cv::Rect(0, 0, 4, 4),
           callbacks);
   EXPECT_EQ(&coordinated_without_runtime, &rt_output);
   EXPECT_TRUE(ran_hp);

@@ -6,7 +6,9 @@
 
 ## 当前状态
 
-Photospider 围绕图运行时构建，包含服务拆分、操作 registry、缓存层和调度器抽象。实现仍处于过渡期：遗留递归路径和 `GraphRuntime` 队列路径，与正式目标接口 `IScheduler` 以及较新的意图驱动 RT/HP 模型共存。
+Photospider 围绕图运行时构建，包含服务拆分、操作 registry、缓存层和调度器抽象。Parallel
+planned work 现在会通过 scheduler-owned task runtime dispatch；剩余递归路径和
+`GraphRuntime` support queue 不是 compute-service parallel dispatch 契约。
 
 代码可用且可测试，但部分边界尚未最终稳定。尤其是 `Kernel` 和 `ComputeService` 仍协调大量行为，未来可能移动到更窄的服务中。
 
@@ -90,7 +92,7 @@ graph TD
 | `Graph-Lifecycle.md` | 图运行时所有权、图加载/reload/edit 失败语义和 `GraphModel::clear()`。 |
 | `ImageBuffer-Memory-Contract.md` | 公共 `ImageBuffer` 内存/设备契约、对齐、步长和适配器规则。 |
 | `Dirty-Region-Propagation.md` | ROI 传播、tile 映射和当前可调 tile 默认值。 |
-| `Scheduler-Architecture.md` | 正式 `IScheduler` 目标模型、内置调度器和迁移状态。 |
+| `Scheduler-Architecture.md` | 正式 `IScheduler` 生命周期、内置调度器和 task-runtime dispatch 边界。 |
 | `Plugin-ABI.md` | 操作插件和调度器插件 ABI 契约。 |
 | `Development-Validation.md` | 主线 macOS 架构、CTest 预期和后续重构边界。 |
 | `Benchmark-Spikes.md` | Metal 适配器和 ARM 对齐基准计划与后续状态。 |
@@ -130,7 +132,9 @@ graph TD
 
 CLI 通过 `scheduler` REPL 命令暴露调度器控制。默认类型和插件目录在 `config.yaml` 中配置。
 
-`IScheduler` 是正式目标接口。`GraphRuntime` 中仍存在的 worker 队列是迁移支持，用于尚未干净路由到调度器实例的路径。
+`IScheduler` 是正式生命周期接口，scheduler-owned `SchedulerTaskRuntime` 是 compute-service
+planned parallel work 的 dispatch 契约。`GraphRuntime` worker queue 仍是 support infrastructure，
+不是 compute-service parallel dispatch API。
 
 ## 操作 Registry
 

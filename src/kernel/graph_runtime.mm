@@ -21,6 +21,8 @@ namespace ps {
 
 thread_local int GraphRuntime::tls_worker_id_ = -1;
 thread_local uint64_t GraphRuntime::tls_active_epoch_ = 0;
+thread_local int GraphRuntime::tls_scheduler_log_worker_id_ = -1;
+thread_local uint64_t GraphRuntime::tls_scheduler_log_epoch_ = 0;
 
 struct GraphRuntime::GpuContext {
 #ifdef __APPLE__
@@ -130,6 +132,16 @@ void GraphRuntime::stop() {
 
 uint64_t GraphRuntime::this_task_epoch() {
   return tls_active_epoch_;
+}
+
+void GraphRuntime::set_scheduler_log_context(int worker_id, uint64_t epoch) {
+  tls_scheduler_log_worker_id_ = worker_id;
+  tls_scheduler_log_epoch_ = epoch;
+}
+
+void GraphRuntime::clear_scheduler_log_context() {
+  tls_scheduler_log_worker_id_ = -1;
+  tls_scheduler_log_epoch_ = 0;
 }
 
 uint64_t GraphRuntime::active_epoch() const {
@@ -533,16 +545,30 @@ void GraphRuntime::set_exception(std::exception_ptr e) {
 void GraphRuntime::log_event(SchedulerEvent::Action action, int node_id) {
   uint64_t epoch = this_task_epoch();
   if (epoch == 0) {
+    epoch = tls_scheduler_log_epoch_;
+  }
+  if (epoch == 0) {
     epoch = active_epoch();
   }
-
-  std::lock_guard<std::mutex> lock(log_mutex_);
-  scheduler_log_.push_back(
-      {epoch, node_id, this_worker_id(), action,
-       std::chrono::high_resolution_clock::now()});
+  int worker_id = this_worker_id();
+  if (worker_id < 0) {
+    worker_id = tls_scheduler_log_worker_id_;
+  }
+  log_event(action, node_id, worker_id, epoch);
 }
 
-std::vector<GraphRuntime::SchedulerEvent> GraphRuntime::get_scheduler_log() const {
+void GraphRuntime::log_event(SchedulerEvent::Action action, int node_id,
+                             int worker_id, uint64_t epoch) {
+  if (epoch == 0) {
+    epoch = active_epoch();
+  }
+  std::lock_guard<std::mutex> lock(log_mutex_);
+  scheduler_log_.push_back({epoch, node_id, worker_id, action,
+                            std::chrono::high_resolution_clock::now()});
+}
+
+std::vector<GraphRuntime::SchedulerEvent> GraphRuntime::get_scheduler_log()
+    const {
   std::lock_guard<std::mutex> lock(log_mutex_);
   return scheduler_log_;
 }
@@ -559,16 +585,16 @@ void GraphRuntime::clear_scheduler_log() {
 void GraphRuntime::set_scheduler(ComputeIntent intent,
                                  std::unique_ptr<IScheduler> scheduler) {
   std::lock_guard<std::mutex> lock(schedulers_mutex_);
-  
+
   // 如果已有调度器，先 detach
   auto it = schedulers_.find(intent);
   if (it != schedulers_.end() && it->second) {
     it->second->detach();
   }
-  
+
   // 设置新调度器
   schedulers_[intent] = std::move(scheduler);
-  
+
   // attach 到当前 runtime
   if (schedulers_[intent]) {
     schedulers_[intent]->attach(this);
@@ -590,17 +616,17 @@ const IScheduler* GraphRuntime::get_scheduler(ComputeIntent intent) const {
 void GraphRuntime::replace_scheduler(ComputeIntent intent,
                                      std::unique_ptr<IScheduler> scheduler) {
   std::lock_guard<std::mutex> lock(schedulers_mutex_);
-  
+
   auto it = schedulers_.find(intent);
   if (it != schedulers_.end() && it->second) {
     // 停止旧调度器
     it->second->shutdown();
     it->second->detach();
   }
-  
+
   // 设置新调度器
   schedulers_[intent] = std::move(scheduler);
-  
+
   if (schedulers_[intent]) {
     // attach 并启动新调度器
     schedulers_[intent]->attach(this);
@@ -608,25 +634,6 @@ void GraphRuntime::replace_scheduler(ComputeIntent intent,
       schedulers_[intent]->start();
     }
   }
-}
-
-std::future<NodeOutput> GraphRuntime::submit_compute(const ComputeOptions& opts) {
-  IScheduler* scheduler = nullptr;
-  {
-    std::lock_guard<std::mutex> lock(schedulers_mutex_);
-    auto it = schedulers_.find(opts.intent);
-    if (it == schedulers_.end() || !it->second) {
-      // 没有注册调度器，返回一个包含异常的 future
-      std::promise<NodeOutput> promise;
-      promise.set_exception(std::make_exception_ptr(
-          std::runtime_error("No scheduler registered for intent")));
-      return promise.get_future();
-    }
-    scheduler = it->second.get();
-  }
-  
-  // 调度器的 schedule 方法是线程安全的，可以在锁外调用
-  return scheduler->schedule(opts);
 }
 
 bool GraphRuntime::has_scheduler(ComputeIntent intent) const {

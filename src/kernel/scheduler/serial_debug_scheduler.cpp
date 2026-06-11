@@ -6,9 +6,6 @@
 #include <sstream>
 
 #include "kernel/graph_runtime.hpp"
-#include "kernel/services/compute_service.hpp"
-#include "kernel/services/graph_cache_service.hpp"
-#include "kernel/services/graph_traversal_service.hpp"
 
 namespace ps {
 
@@ -48,55 +45,89 @@ bool SerialDebugScheduler::is_running() const {
   return running_.load(std::memory_order_acquire);
 }
 
-std::future<NodeOutput> SerialDebugScheduler::schedule(const ComputeOptions& opts) {
-  auto promise = std::make_shared<std::promise<NodeOutput>>();
-  auto future = promise->get_future();
-  
-  // 在当前线程同步执行计算
-  try {
-    if (!runtime_) {
-      throw std::runtime_error("SerialDebugScheduler: not attached to runtime");
+bool SerialDebugScheduler::task_runtime_running() const {
+  return is_running();
+}
+
+void SerialDebugScheduler::submit_initial_tasks(std::vector<Task>&& tasks,
+                                                int total_task_count,
+                                                TaskPriority priority) {
+  (void)priority;
+  inline_exception_ = nullptr;
+  inline_tasks_to_complete_ = total_task_count;
+  for (auto& task : tasks) {
+    if (!task || inline_exception_) {
+      continue;
     }
-    
-    if (!running_.load(std::memory_order_acquire)) {
-      throw std::runtime_error("SerialDebugScheduler: scheduler is not running");
+    try {
+      task();
+    } catch (...) {
+      set_exception(std::current_exception());
     }
-    
-    // 使用 runtime 的 post 机制来访问 GraphModel 并执行计算
-    auto compute_future = runtime_->post([this, &opts](GraphModel& graph) -> NodeOutput {
-      // 构造服务实例
-      GraphTraversalService traversal;
-      GraphCacheService cache;
-      ComputeService compute(traversal, cache, runtime_->event_service());
-      
-      // 执行串行计算（不使用并行版本）
-      if (opts.dirty_roi.has_value()) {
-        // 有脏区时使用带 intent 的版本
-        NodeOutput& result = compute.compute(
-            graph, opts.intent, opts.node_id, opts.cache_precision,
-            opts.force_recache, opts.enable_timing, opts.disable_disk_cache,
-            nullptr, opts.dirty_roi);
-        return result;
-      } else {
-        // 无脏区时使用基础版本
-        NodeOutput& result = compute.compute(
-            graph, opts.node_id, opts.cache_precision,
-            opts.force_recache, opts.enable_timing, opts.disable_disk_cache,
-            nullptr);
-        return result;
-      }
-    });
-    
-    // 等待计算完成并获取结果
-    NodeOutput result = compute_future.get();
-    tasks_executed_.fetch_add(1, std::memory_order_relaxed);
-    promise->set_value(std::move(result));
-    
-  } catch (...) {
-    promise->set_exception(std::current_exception());
   }
-  
-  return future;
+}
+
+void SerialDebugScheduler::submit_ready_task_from_worker(
+    Task&& task, TaskPriority priority) {
+  submit_ready_task_any_thread(std::move(task), priority, std::nullopt);
+}
+
+void SerialDebugScheduler::submit_ready_task_any_thread(
+    Task&& task, TaskPriority priority, std::optional<uint64_t> epoch) {
+  (void)priority;
+  (void)epoch;
+  if (!task || inline_exception_) {
+    return;
+  }
+  try {
+    task();
+  } catch (...) {
+    set_exception(std::current_exception());
+  }
+}
+
+void SerialDebugScheduler::wait_for_completion() {
+  if (inline_exception_) {
+    std::rethrow_exception(inline_exception_);
+  }
+}
+
+void SerialDebugScheduler::set_exception(std::exception_ptr e) {
+  if (!inline_exception_) {
+    inline_exception_ = e;
+  }
+}
+
+void SerialDebugScheduler::inc_tasks_to_complete(int delta) {
+  if (delta > 0) {
+    inline_tasks_to_complete_ += delta;
+  }
+}
+
+void SerialDebugScheduler::dec_tasks_to_complete() {
+  if (inline_tasks_to_complete_ > 0) {
+    --inline_tasks_to_complete_;
+  }
+}
+
+void SerialDebugScheduler::log_event(SchedulerTraceAction action, int node_id) {
+  if (!runtime_) {
+    return;
+  }
+  GraphRuntime::SchedulerEvent::Action runtime_action =
+      GraphRuntime::SchedulerEvent::EXECUTE;
+  switch (action) {
+    case SchedulerTraceAction::AssignInitial:
+      runtime_action = GraphRuntime::SchedulerEvent::ASSIGN_INITIAL;
+      break;
+    case SchedulerTraceAction::Execute:
+      runtime_action = GraphRuntime::SchedulerEvent::EXECUTE;
+      break;
+    case SchedulerTraceAction::ExecuteTile:
+      runtime_action = GraphRuntime::SchedulerEvent::EXECUTE_TILE;
+      break;
+  }
+  runtime_->log_event(runtime_action, node_id);
 }
 
 }  // namespace ps

@@ -5,7 +5,7 @@
 #include <memory>
 #include <utility>
 
-#include "kernel/graph_runtime.hpp"
+#include "kernel/scheduler/scheduler_task_runtime.hpp"
 
 namespace ps::compute {
 namespace {
@@ -56,7 +56,8 @@ void IntentUpdateCoordinator::validate(
 }
 
 NodeOutput& IntentUpdateCoordinator::coordinate_intent_update(
-    ComputeIntent intent, GraphRuntime* runtime,
+    ComputeIntent intent, SchedulerTaskRuntime* hp_task_runtime,
+    SchedulerTaskRuntime* rt_task_runtime,
     const std::optional<cv::Rect>& dirty_roi,
     const IntentUpdateCallbacks& callbacks) {
   switch (intent) {
@@ -75,18 +76,19 @@ NodeOutput& IntentUpdateCoordinator::coordinate_intent_update(
 
     case ComputeIntent::RealTimeUpdate: {
       validate(intent, dirty_roi);
+      require_callback(callbacks.run_high_precision_update,
+                       "run_high_precision_update");
+      require_callback(callbacks.run_real_time_update, "run_real_time_update");
+      require_callback(callbacks.real_time_output, "real_time_output");
       const bool can_submit_concurrently =
-          runtime != nullptr && runtime->running();
+          hp_task_runtime != nullptr && rt_task_runtime != nullptr &&
+          hp_task_runtime->task_runtime_running() &&
+          rt_task_runtime->task_runtime_running();
       const IntentUpdateDecision decision =
           decide(intent, can_submit_concurrently, dirty_roi.has_value());
       record_stage(callbacks, decision.submit_updates_concurrently
                                   ? "intent_coordinator_decision_concurrent"
                                   : "intent_coordinator_decision_inline");
-
-      require_callback(callbacks.run_high_precision_update,
-                       "run_high_precision_update");
-      require_callback(callbacks.run_real_time_update, "run_real_time_update");
-      require_callback(callbacks.real_time_output, "real_time_output");
 
       if (!decision.submit_updates_concurrently) {
         record_stage(callbacks, "intent_coordinator_inline_hp");
@@ -106,7 +108,7 @@ NodeOutput& IntentUpdateCoordinator::coordinate_intent_update(
       auto rt_future = rt_done->get_future();
 
       record_stage(callbacks, "intent_coordinator_submit_hp");
-      runtime->submit_ready_task_any_thread(
+      hp_task_runtime->submit_ready_task_any_thread(
           [run_hp = callbacks.run_high_precision_update,
            record = callbacks.record_stage, hp_done]() {
             try {
@@ -122,10 +124,10 @@ NodeOutput& IntentUpdateCoordinator::coordinate_intent_update(
               hp_done->set_exception(std::current_exception());
             }
           },
-          TaskPriority::Normal);
+          SchedulerTaskPriority::Normal);
 
       record_stage(callbacks, "intent_coordinator_submit_rt");
-      runtime->submit_ready_task_any_thread(
+      rt_task_runtime->submit_ready_task_any_thread(
           [run_rt = callbacks.run_real_time_update,
            record = callbacks.record_stage, rt_done]() {
             try {
@@ -141,7 +143,7 @@ NodeOutput& IntentUpdateCoordinator::coordinate_intent_update(
               rt_done->set_exception(std::current_exception());
             }
           },
-          TaskPriority::High);
+          SchedulerTaskPriority::High);
 
       std::exception_ptr first_error;
       try {

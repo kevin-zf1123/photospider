@@ -1,6 +1,7 @@
 # 调度器架构
 
-内核具有正式的调度器目标接口和遗留运行时队列。本文档定义如何理解当前实现。
+内核具有用于 intent-aware 资源 dispatch 的正式调度器接口。本文档定义 planned parallel work
+已经通过 scheduler-owned task runtime 路由之后，如何理解当前实现。
 
 ## 正式目标：IScheduler
 
@@ -9,7 +10,7 @@
 核心生命周期：
 
 ```text
-create -> attach(runtime) -> start -> schedule(...) -> shutdown -> detach
+create -> attach(runtime) -> start -> dispatch planned tasks -> shutdown -> detach
 ```
 
 按 `ComputeIntent` 路由计算：
@@ -27,11 +28,16 @@ create -> attach(runtime) -> start -> schedule(...) -> shutdown -> detach
 
 在当前并行运行时路径中，一个 `RealTimeUpdate` 请求可以有意为同一脏区同时提交 RT 预览工作与 HP 更新工作。RT 工作保留交互反馈，而 HP 工作让任务池和正式 HP 缓存与图状态保持同步。如果这个双提交路径带来阻塞、饥饿或 worker 重入问题，这些问题属于调度器设计责任：应恰当地保留或窃取 worker，使用 epoch 和取消处理陈旧 RT 工作，并避免可能让 worker 所有的执行死锁的等待策略。不要通过让 RT 输出成为正式 HP 缓存来源来解决。
 
-## 当前迁移状态
+## 当前 Dispatch 状态
 
-实现中仍在 `GraphRuntime` 直接包含 worker 队列、epoch 和任务提交 API。某些计算路径仍调用 `ComputeService::compute_parallel` 并直接向这些队列提交任务。
+并行计算规划仍属于 `ComputeService` 协作者：`DirtyRegionPlanner`、`ComputeTaskPlanner`、
+`IntentUpdateCoordinator` 和 `ParallelGraphExecutor`。规划完成后，具体 planned task
+会通过相关 `ComputeIntent` 配置的 `IScheduler` 实例，并经由 `SchedulerTaskRuntime` 提交。
 
-这些运行时队列应被视为迁移支持，而不是永久调度器 API。新的面向调度器设计应以 `IScheduler` 为目标。
+`GraphRuntime` 仍拥有图状态、scheduler 注册、事件，以及一些供 graph-runtime support path
+和测试使用的 runtime queue API。这些队列不再是 compute-service parallel dispatch
+路径。新的 scheduler-facing 设计应扩展 `IScheduler` 与 `SchedulerTaskRuntime`，而不是新增对
+`GraphRuntime` 内部队列的依赖。
 
 ## 内置调度器
 
@@ -42,11 +48,10 @@ create -> attach(runtime) -> start -> schedule(...) -> shutdown -> detach
 | `gpu_pipeline` | 异构 CPU/GPU 调度器。 |
 | `heterogeneous` | `gpu_pipeline` 的别名。 |
 
-## 节点级调度
+## 调度器 Dispatch 边界
 
-`IScheduler` 包含节点级调度钩子，例如 `schedule_node`、`schedule_nodes` 和任务组聚合 helper。
-这些接口是迁移接口。现有实现仍可能在 scheduler 内部将 ROI 拆成 tile 或聚合 task group，
-但这不是目标职责边界。
+`IScheduler` 不再暴露 compute-planning helper。已移除的 planning interface 不得重新引入，
+避免 scheduler 实现意外拥有 graph/task planning。
 
 目标模型是：
 
@@ -62,7 +67,8 @@ DirtyRegionPlanner
 Dirty propagation、node/tile 展开、monolithic dirty escalation 和逻辑 compute-task derivation
 属于 scheduler dispatch 之前的阶段。
 
-默认实现可能 fallback 到遗留 `schedule` 路径。
+compute-service 路径会先推导 planned work，再进入 scheduler dispatch，并且不再暴露绕过
+planned-task dispatch 的兼容计算路径。
 
 ## Epoch 与取消
 
@@ -70,13 +76,13 @@ Dirty propagation、node/tile 展开、monolithic dirty escalation 和逻辑 com
 
 ## 可观测性
 
-`GraphRuntime::SchedulerEvent` 记录分配、节点执行和 tile 执行事件。这有助于在迁移期间验证调度器行为。
+`GraphRuntime::SchedulerEvent` 记录分配、节点执行和 tile 执行事件。这有助于验证调度器行为。
 
 ## 开发方向
 
 - 保持 `IScheduler` 作为正式公共调度器接口。
-- 随时间推移将 planned 或 annotated task 路由到调度器实例。
+- 保持 planned parallel work 通过 scheduler-owned task runtime 路由。
 - 避免新增对 `GraphRuntime` 内部队列的永久依赖。
 - 保持插件调度器生命周期与 `Plugin-ABI.md` 兼容。
-- 在完整 planned-task routing 被视为完成前，将 scheduler-local ROI splitting 和 task-group
-  planning decision 迁移到 `DirtyRegionPlanner`、`ComputeTaskPlanner` 或 task annotation。
+- 继续后续 richer annotated task pool、planner plugin ABI 和 scheduler policy metadata
+  工作，但不把图级 dirty planning 移入 scheduler。
