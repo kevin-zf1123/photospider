@@ -1,6 +1,6 @@
 // Photospider kernel: GpuPipelineScheduler implementation
 // M3.5: 异构调度器 - 支持 HP 走 GPU、RT 走 CPU 的混合计算模式
-// M3.6: Node-Level 调度 - Scheduler 内部优先级表决策
+// Scheduler dispatches already-planned HP/RT tasks.
 
 #include "kernel/scheduler/gpu_pipeline_scheduler.hpp"
 
@@ -13,9 +13,6 @@
 #include <utility>
 
 #include "kernel/graph_runtime.hpp"
-#include "kernel/services/compute_service.hpp"
-#include "kernel/services/graph_cache_service.hpp"
-#include "kernel/services/graph_traversal_service.hpp"
 
 namespace ps {
 
@@ -29,12 +26,11 @@ GpuPipelineScheduler::GpuPipelineScheduler(const Config& config)
   if (config_.cpu_workers == 0) {
     config_.cpu_workers = std::max(1u, std::thread::hardware_concurrency());
   }
-  // [M3.6] 初始化优先级表
   init_priority_tables();
 }
 
 // =============================================================================
-// [M3.6] 优先级表初始化
+// 资源偏好表初始化
 // =============================================================================
 void GpuPipelineScheduler::init_priority_tables() {
   // HP 模式优先级表；Macro/Micro 是 HP domain 内的粒度偏好。
@@ -93,8 +89,6 @@ void GpuPipelineScheduler::start() {
   hp_cpu_tasks_executed_.store(0, std::memory_order_relaxed);
   gpu_tasks_executed_.store(0, std::memory_order_relaxed);
   total_tasks_scheduled_.store(0, std::memory_order_relaxed);
-  node_level_tasks_scheduled_.store(0, std::memory_order_relaxed);
-  task_groups_aggregated_.store(0, std::memory_order_relaxed);
 
   running_.store(true, std::memory_order_release);
 
@@ -189,16 +183,90 @@ std::string GpuPipelineScheduler::get_stats() const {
       << ", GPU executed: "
       << gpu_tasks_executed_.load(std::memory_order_relaxed)
       << ", Total scheduled: "
-      << total_tasks_scheduled_.load(std::memory_order_relaxed)
-      << ", Node-level: "
-      << node_level_tasks_scheduled_.load(std::memory_order_relaxed)
-      << ", Groups aggregated: "
-      << task_groups_aggregated_.load(std::memory_order_relaxed);
+      << total_tasks_scheduled_.load(std::memory_order_relaxed);
   return oss.str();
 }
 
 bool GpuPipelineScheduler::is_running() const {
   return running_.load(std::memory_order_acquire);
+}
+
+bool GpuPipelineScheduler::task_runtime_running() const {
+  return is_running();
+}
+
+void GpuPipelineScheduler::submit_initial_tasks(std::vector<Task>&& tasks,
+                                                int total_task_count,
+                                                TaskPriority priority) {
+  has_exception_.store(false, std::memory_order_relaxed);
+  first_exception_ = nullptr;
+
+  uint64_t epoch = begin_new_epoch();
+  tasks_to_complete_.store(total_task_count, std::memory_order_relaxed);
+
+  if (total_task_count == 0) {
+    std::lock_guard<std::mutex> lk(completion_mutex_);
+    cv_completion_.notify_one();
+    return;
+  }
+
+  if (tasks.empty()) {
+    tasks_to_complete_.store(0, std::memory_order_relaxed);
+    std::lock_guard<std::mutex> lk(completion_mutex_);
+    cv_completion_.notify_one();
+    return;
+  }
+
+  for (auto& task : tasks) {
+    submit_ready_task_any_thread(std::move(task), priority, epoch);
+  }
+}
+
+void GpuPipelineScheduler::submit_ready_task_from_worker(
+    Task&& task, TaskPriority priority) {
+  submit_ready_task_any_thread(std::move(task), priority, tls_active_epoch_);
+}
+
+void GpuPipelineScheduler::submit_ready_task_any_thread(
+    Task&& task, TaskPriority priority, std::optional<uint64_t> epoch) {
+  if (!task) {
+    return;
+  }
+  uint64_t resolved_epoch = epoch.value_or(active_epoch());
+  if (should_cancel_epoch(resolved_epoch)) {
+    return;
+  }
+  if (priority == TaskPriority::High) {
+    submit_rt_task(std::move(task), resolved_epoch);
+    return;
+  }
+  if (config_.prefer_gpu_for_hp && is_gpu_available()) {
+    submit_gpu_task(std::move(task), resolved_epoch);
+  } else {
+    submit_hp_task(std::move(task), resolved_epoch);
+  }
+}
+
+void GpuPipelineScheduler::log_event(SchedulerTraceAction action, int node_id) {
+  if (!runtime_) {
+    return;
+  }
+
+  GraphRuntime::SchedulerEvent::Action runtime_action =
+      GraphRuntime::SchedulerEvent::EXECUTE;
+  switch (action) {
+    case SchedulerTraceAction::AssignInitial:
+      runtime_action = GraphRuntime::SchedulerEvent::ASSIGN_INITIAL;
+      break;
+    case SchedulerTraceAction::Execute:
+      runtime_action = GraphRuntime::SchedulerEvent::EXECUTE;
+      break;
+    case SchedulerTraceAction::ExecuteTile:
+      runtime_action = GraphRuntime::SchedulerEvent::EXECUTE_TILE;
+      break;
+  }
+  runtime_->log_event(runtime_action, node_id, this_worker_id(),
+                      this_task_epoch());
 }
 
 int GpuPipelineScheduler::this_worker_id() {
@@ -367,6 +435,12 @@ void GpuPipelineScheduler::cpu_run_loop(int thread_id) {
             }
             ~EpochScope() { *slot = prev; }
           } epoch_scope(&tls_active_epoch_, scheduled.epoch);
+          struct RuntimeLogScope {
+            RuntimeLogScope(int worker_id, uint64_t epoch) {
+              GraphRuntime::set_scheduler_log_context(worker_id, epoch);
+            }
+            ~RuntimeLogScope() { GraphRuntime::clear_scheduler_log_context(); }
+          } runtime_log_scope(thread_id, scheduled.epoch);
 
           scheduled.task();
 
@@ -448,6 +522,12 @@ void GpuPipelineScheduler::gpu_run_loop(int thread_id) {
             }
             ~EpochScope() { *slot = prev; }
           } epoch_scope(&tls_active_epoch_, scheduled.epoch);
+          struct RuntimeLogScope {
+            RuntimeLogScope(int worker_id, uint64_t epoch) {
+              GraphRuntime::set_scheduler_log_context(worker_id, epoch);
+            }
+            ~RuntimeLogScope() { GraphRuntime::clear_scheduler_log_context(); }
+          } runtime_log_scope(thread_id, scheduled.epoch);
 
           scheduled.task();
           gpu_tasks_executed_.fetch_add(1, std::memory_order_relaxed);
@@ -620,348 +700,6 @@ void GpuPipelineScheduler::set_exception(std::exception_ptr e) {
       cv_completion_.notify_all();
     }
   }
-}
-
-// =============================================================================
-// 核心调度实现
-// =============================================================================
-
-const OpImplementation* GpuPipelineScheduler::select_implementation(
-    const std::string& type, const std::string& subtype,
-    ComputeIntent intent) const {
-  auto& registry = OpRegistry::instance();
-  auto available_devices = get_available_devices();
-  return registry.select_best_implementation(type, subtype, available_devices,
-                                             intent);
-}
-
-std::future<NodeOutput> GpuPipelineScheduler::schedule(
-    const ComputeOptions& opts) {
-  total_tasks_scheduled_.fetch_add(1, std::memory_order_relaxed);
-
-  auto promise = std::make_shared<std::promise<NodeOutput>>();
-  auto future = promise->get_future();
-
-  // 创建计算任务
-  auto compute_task = [this, opts, promise]() {
-    try {
-      NodeOutput result = execute_compute(opts);
-      promise->set_value(std::move(result));
-    } catch (...) {
-      promise->set_exception(std::current_exception());
-    }
-  };
-
-  // 根据 intent 决定提交到哪个队列
-  if (opts.intent == ComputeIntent::RealTimeUpdate) {
-    // RT 任务总是走 CPU（保证低延迟）
-    if (config_.force_cpu_for_rt) {
-      submit_rt_task(std::move(compute_task), opts.epoch);
-    } else {
-      submit_rt_task(std::move(compute_task), opts.epoch);
-    }
-  } else {
-    // HP 任务：优先走 GPU（如果可用且配置允许）
-    if (config_.prefer_gpu_for_hp && is_gpu_available()) {
-      submit_gpu_task(std::move(compute_task), opts.epoch);
-    } else {
-      // 回退到 CPU
-      submit_hp_task(std::move(compute_task), opts.epoch);
-    }
-  }
-
-  return future;
-}
-
-NodeOutput GpuPipelineScheduler::execute_compute(const ComputeOptions& opts) {
-  if (!runtime_) {
-    throw std::runtime_error("GpuPipelineScheduler: not attached to runtime");
-  }
-
-  // 使用 runtime 的 post 机制来访问 GraphModel 并执行计算
-  // 注意：这里需要确保 GraphModel 的线程安全访问
-  auto future = runtime_->post([this, &opts](GraphModel& graph) -> NodeOutput {
-    // 构造服务实例
-    GraphTraversalService traversal;
-    GraphCacheService cache;
-    ComputeService compute(traversal, cache, runtime_->event_service());
-
-    // 根据 intent 选择不同的计算策略
-    // HP 模式：可以使用 GPU 加速
-    // RT 模式：使用 CPU 以保证低延迟
-
-    // 执行计算
-    NodeOutput& result = compute.compute_parallel(
-        graph, *runtime_, opts.intent, opts.node_id, opts.cache_precision,
-        opts.force_recache, opts.enable_timing, opts.disable_disk_cache,
-        nullptr, opts.dirty_roi);
-
-    // 返回副本避免引用悬挂
-    return result;
-  });
-
-  return future.get();
-}
-
-// =============================================================================
-// [M3.6] Node-Level 调度实现
-// =============================================================================
-
-std::future<NodeOutput> GpuPipelineScheduler::schedule_node(
-    const NodeScheduleRequest& request, GraphModel& graph) {
-  node_level_tasks_scheduled_.fetch_add(1, std::memory_order_relaxed);
-  total_tasks_scheduled_.fetch_add(1, std::memory_order_relaxed);
-
-  auto promise = std::make_shared<std::promise<NodeOutput>>();
-  auto future = promise->get_future();
-
-  // 获取节点信息
-  auto it = graph.nodes.find(request.node_id);
-  if (it == graph.nodes.end()) {
-    promise->set_exception(std::make_exception_ptr(std::runtime_error(
-        "Node not found: " + std::to_string(request.node_id))));
-    return future;
-  }
-
-  const Node& node = it->second;
-  const std::string& type = node.type;
-  const std::string& subtype = node.subtype;
-
-  // [M3.6] 使用优先级表选择最优实现
-  const OpImplementation* impl =
-      select_impl_with_priority(type, subtype, request.intent);
-
-  if (!impl) {
-    // 回退到传统方法
-    ComputeOptions opts;
-    opts.intent = request.intent;
-    opts.node_id = request.node_id;
-    opts.dirty_roi = request.dirty_roi;
-    opts.cache_precision = request.cache_precision;
-    opts.force_recache = request.force_recache;
-    opts.enable_timing = request.enable_timing;
-    opts.disable_disk_cache = request.disable_disk_cache;
-    opts.epoch = request.epoch;
-    return schedule(opts);
-  }
-
-  // 根据选择的实现决定调度策略
-  bool use_gpu = (impl->metadata.device_preference == Device::GPU_METAL) &&
-                 is_gpu_available();
-  bool is_monolithic = impl->is_monolithic();
-
-  // 创建计算任务
-  auto compute_task = [this, request, promise, &graph]() {
-    try {
-      NodeOutput result = execute_node_compute(request, graph);
-      promise->set_value(std::move(result));
-    } catch (...) {
-      promise->set_exception(std::current_exception());
-    }
-  };
-
-  // 根据实现类型和 intent 决定提交到哪个队列
-  if (request.intent == ComputeIntent::RealTimeUpdate) {
-    // RT 模式
-    if (config_.force_cpu_for_rt || !use_gpu) {
-      // RT 总是走 CPU 队列（保证低延迟）
-      if (!is_monolithic && request.dirty_roi.width > 0) {
-        // Tiled 模式：切分为 micro tiles
-        auto tiles =
-            split_roi_to_tiles(request.dirty_roi, config_.micro_tile_size);
-        inc_tasks_to_complete(static_cast<int>(tiles.size()));
-
-        for (const auto& tile : tiles) {
-          NodeScheduleRequest tile_req = request;
-          tile_req.dirty_roi = tile;
-
-          auto tile_task = [this, tile_req, &graph]() {
-            try {
-              execute_node_compute(tile_req, graph);
-            } catch (const std::exception& e) {
-              set_exception(std::current_exception());
-            }
-            dec_tasks_to_complete();
-          };
-          submit_rt_task(std::move(tile_task), request.epoch);
-        }
-
-        // 等待所有 tile 完成后设置结果
-        // 注：实际实现中应该聚合结果，这里简化处理
-      } else {
-        submit_rt_task(std::move(compute_task), request.epoch);
-      }
-    } else {
-      submit_rt_task(std::move(compute_task), request.epoch);
-    }
-  } else {
-    // HP 模式
-    if (use_gpu) {
-      // HP 优先走 GPU
-      if (!is_monolithic && request.dirty_roi.width > 0) {
-        // 检查是否应该聚合
-        auto tiles =
-            split_roi_to_tiles(request.dirty_roi, config_.micro_tile_size);
-        TaskGroup group = create_task_group(request.node_id, tiles,
-                                            request.intent, request.epoch);
-
-        if (should_aggregate_to_macro(group)) {
-          // 聚合为 Macro task
-          task_groups_aggregated_.fetch_add(1, std::memory_order_relaxed);
-          submit_gpu_task(std::move(compute_task), request.epoch);
-        } else {
-          // 不聚合，按 tile 提交
-          submit_gpu_task(std::move(compute_task), request.epoch);
-        }
-      } else {
-        submit_gpu_task(std::move(compute_task), request.epoch);
-      }
-    } else {
-      // 回退到 CPU
-      submit_hp_task(std::move(compute_task), request.epoch);
-    }
-  }
-
-  return future;
-}
-
-const OpImplementation* GpuPipelineScheduler::select_impl_with_priority(
-    const std::string& type, const std::string& subtype,
-    ComputeIntent intent) const {
-  auto& registry = OpRegistry::instance();
-  auto all_impls = registry.get_all_implementations(type, subtype);
-
-  if (all_impls.empty()) {
-    return nullptr;
-  }
-
-  // 选择对应的优先级表
-  const auto& priority_table = (intent == ComputeIntent::RealTimeUpdate)
-                                   ? rt_priority_table_
-                                   : hp_priority_table_;
-
-  const OpImplementation* best_impl = nullptr;
-  int best_priority = std::numeric_limits<int>::max();
-
-  auto available_devices = get_available_devices();
-
-  for (const auto* impl : all_impls) {
-    if (!impl)
-      continue;
-
-    // 检查设备是否可用
-    bool device_available =
-        std::find(available_devices.begin(), available_devices.end(),
-                  impl->metadata.device_preference) != available_devices.end();
-    if (!device_available)
-      continue;
-
-    // 在优先级表中查找匹配的条目
-    for (const auto& entry : priority_table) {
-      if (entry.device != impl->metadata.device_preference)
-        continue;
-
-      // 检查 Monolithic vs Tiled
-      bool impl_is_mono = impl->is_monolithic();
-      if (entry.prefer_monolithic != impl_is_mono)
-        continue;
-
-      // 检查 tile 偏好（如果有）
-      if (entry.tile_pref != TileSizePreference::UNDEFINED &&
-          impl->metadata.tile_preference != TileSizePreference::UNDEFINED) {
-        if (entry.tile_pref != impl->metadata.tile_preference)
-          continue;
-      }
-
-      // 匹配成功，检查优先级
-      int effective_priority = entry.priority + impl->metadata.cost_score;
-      if (effective_priority < best_priority) {
-        best_priority = effective_priority;
-        best_impl = impl;
-      }
-      break;  // 找到匹配的 entry 就跳出
-    }
-  }
-
-  // 如果优先级表没有匹配，回退到 cost_score 最低的实现
-  if (!best_impl && !all_impls.empty()) {
-    for (const auto* impl : all_impls) {
-      if (!impl)
-        continue;
-      bool device_available =
-          std::find(available_devices.begin(), available_devices.end(),
-                    impl->metadata.device_preference) !=
-          available_devices.end();
-      if (!device_available)
-        continue;
-
-      if (!best_impl ||
-          impl->metadata.cost_score < best_impl->metadata.cost_score) {
-        best_impl = impl;
-      }
-    }
-  }
-
-  return best_impl;
-}
-
-bool GpuPipelineScheduler::should_aggregate_to_macro(
-    const TaskGroup& group) const {
-  // HP 模式下，如果 tile 数量超过阈值且 GPU 可用，则聚合
-  if (group.intent == ComputeIntent::GlobalHighPrecision) {
-    if (is_gpu_available() &&
-        static_cast<int>(group.tile_count()) >= config_.aggregation_threshold) {
-      return true;
-    }
-  }
-  return false;
-}
-
-std::vector<cv::Rect> GpuPipelineScheduler::split_roi_to_tiles(
-    const cv::Rect& roi, int tile_size) const {
-  std::vector<cv::Rect> tiles;
-
-  if (roi.width <= 0 || roi.height <= 0 || tile_size <= 0) {
-    return tiles;
-  }
-
-  for (int y = roi.y; y < roi.y + roi.height; y += tile_size) {
-    for (int x = roi.x; x < roi.x + roi.width; x += tile_size) {
-      int w = std::min(tile_size, roi.x + roi.width - x);
-      int h = std::min(tile_size, roi.y + roi.height - y);
-      tiles.emplace_back(x, y, w, h);
-    }
-  }
-
-  return tiles;
-}
-
-NodeOutput GpuPipelineScheduler::execute_node_compute(
-    const NodeScheduleRequest& request, GraphModel& graph) {
-  if (!runtime_) {
-    throw std::runtime_error("GpuPipelineScheduler: not attached to runtime");
-  }
-
-  // 使用 runtime 的 post 机制来访问 GraphModel 并执行计算
-  auto future = runtime_->post([this, &request](GraphModel& g) -> NodeOutput {
-    GraphTraversalService traversal;
-    GraphCacheService cache;
-    ComputeService compute(traversal, cache, runtime_->event_service());
-
-    std::optional<cv::Rect> dirty_roi;
-    if (request.dirty_roi.width > 0 && request.dirty_roi.height > 0) {
-      dirty_roi = request.dirty_roi;
-    }
-
-    NodeOutput& result = compute.compute_parallel(
-        g, *runtime_, request.intent, request.node_id, request.cache_precision,
-        request.force_recache, request.enable_timing,
-        request.disable_disk_cache, nullptr, dirty_roi);
-
-    return result;
-  });
-
-  return future.get();
 }
 
 }  // namespace ps

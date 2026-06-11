@@ -6,7 +6,6 @@
 #include <condition_variable>
 #include <deque>
 #include <functional>
-#include <future>
 #include <memory>
 #include <mutex>
 #include <queue>
@@ -15,19 +14,17 @@
 #include <vector>
 
 #include "kernel/scheduler/i_scheduler.hpp"
+#include "kernel/scheduler/scheduler_task_runtime.hpp"
 
 namespace ps {
 
 class GraphRuntime;
-class GraphTraversalService;
-class GraphCacheService;
-class ComputeService;
-
 // =============================================================================
 // CpuWorkStealingScheduler: CPU Work-Stealing 调度器
 // 实现基于工作窃取的多线程任务调度，从 GraphRuntime 迁移而来
 // =============================================================================
-class CpuWorkStealingScheduler : public IScheduler {
+class CpuWorkStealingScheduler : public IScheduler,
+                                 public SchedulerTaskRuntime {
  public:
   /// @brief 构造函数
   /// @param num_workers 工作线程数量，0 表示使用硬件并发数
@@ -45,44 +42,47 @@ class CpuWorkStealingScheduler : public IScheduler {
   void detach() override;
   void start() override;
   void shutdown() override;
-  std::future<NodeOutput> schedule(const ComputeOptions& opts) override;
   std::string name() const override;
   std::string get_stats() const override;
   bool is_running() const override;
+  bool task_runtime_running() const override;
 
   // ---------------------------------------------------------------------------
   // 调度器内部任务提交 API（供 ComputeService 使用）
   // ---------------------------------------------------------------------------
-  using Task = std::function<void()>;
-  enum class TaskPriority { Normal, High };
+  using Task = SchedulerTaskRuntime::Task;
+  using TaskPriority = SchedulerTaskPriority;
 
   /// @brief 提交初始任务集合，开始一次计算批次
   /// @param tasks 任务列表
   /// @param total_task_count 总任务数（包括后续可能动态添加的任务）
   /// @param priority 任务优先级
-  void submit_initial_tasks(std::vector<Task>&& tasks, int total_task_count,
-                            TaskPriority priority = TaskPriority::Normal);
+  void submit_initial_tasks(
+      std::vector<Task>&& tasks, int total_task_count,
+      TaskPriority priority = TaskPriority::Normal) override;
 
   /// @brief 从工作线程内部提交新就绪的任务
-  void submit_ready_task_from_worker(Task&& task,
-                                     TaskPriority priority = TaskPriority::Normal);
+  void submit_ready_task_from_worker(
+      Task&& task, TaskPriority priority = TaskPriority::Normal) override;
 
   /// @brief 从任意线程提交新就绪的任务
-  void submit_ready_task_any_thread(Task&& task,
-                                    TaskPriority priority = TaskPriority::Normal,
-                                    std::optional<uint64_t> epoch = std::nullopt);
+  void submit_ready_task_any_thread(
+      Task&& task, TaskPriority priority = TaskPriority::Normal,
+      std::optional<uint64_t> epoch = std::nullopt) override;
 
   /// @brief 等待当前批次的所有任务完成
-  void wait_for_completion();
+  void wait_for_completion() override;
 
   /// @brief 减少待完成任务计数
-  void dec_tasks_to_complete();
+  void dec_tasks_to_complete() override;
 
   /// @brief 增加待完成任务计数
-  void inc_tasks_to_complete(int delta);
+  void inc_tasks_to_complete(int delta) override;
 
   /// @brief 设置异常状态
-  void set_exception(std::exception_ptr e);
+  void set_exception(std::exception_ptr e) override;
+
+  void log_event(SchedulerTraceAction action, int node_id) override;
 
   // ---------------------------------------------------------------------------
   // Epoch 管理
@@ -106,21 +106,18 @@ class CpuWorkStealingScheduler : public IScheduler {
 
   // 工作线程主循环
   void run_loop(int thread_id);
-  
+
   // 从其他工作线程窃取任务
   std::optional<ScheduledTask> steal_task(int stealer_id);
-  
+
   // 取消过期的排队任务
   void cancel_stale_enqueued_tasks(uint64_t min_epoch);
-
-  // 执行单次计算
-  NodeOutput execute_compute(const ComputeOptions& opts);
 
   // ---------------------------------------------------------------------------
   // 成员变量
   // ---------------------------------------------------------------------------
   GraphRuntime* runtime_ = nullptr;
-  
+
   // 工作线程管理
   std::vector<std::thread> workers_;
   unsigned int num_workers_{0};

@@ -65,6 +65,7 @@
 #include "benchmark/benchmark_types.hpp"
 #include "kernel/graph_runtime.hpp"
 #include "kernel/param_utils.hpp"
+#include "kernel/scheduler/scheduler_task_runtime.hpp"
 #include "kernel/services/compute-service/compute_cache_policy.hpp"
 #include "kernel/services/compute-service/compute_geometry.hpp"
 #include "kernel/services/compute-service/compute_metrics_recorder.hpp"
@@ -103,6 +104,24 @@ namespace {
 
 using RtPlanEntry = compute::RtPlanEntry;
 using HpPlanEntry = compute::HpPlanEntry;
+
+SchedulerTaskRuntime& scheduler_task_runtime_for(GraphRuntime& runtime,
+                                                 ComputeIntent intent) {
+  IScheduler* scheduler = runtime.get_scheduler(intent);
+  if (!scheduler) {
+    throw GraphError(GraphErrc::ComputeError,
+                     "No scheduler registered for requested compute intent.");
+  }
+  auto* task_runtime = dynamic_cast<SchedulerTaskRuntime*>(scheduler);
+  if (!task_runtime) {
+    throw GraphError(GraphErrc::ComputeError,
+                     "Registered scheduler cannot dispatch planned tasks.");
+  }
+  if (!task_runtime->task_runtime_running()) {
+    scheduler->start();
+  }
+  return *task_runtime;
+}
 
 void finalize_output_metadata(NodeOutput& output,
                               const std::vector<const NodeOutput*>& inputs,
@@ -980,9 +999,11 @@ NodeOutput& ComputeService::compute_parallel(
     const std::string& cache_precision, bool force_recache, bool enable_timing,
     bool disable_disk_cache, std::vector<BenchmarkEvent>* benchmark_events) {
   compute::ParallelGraphExecutor executor(traversal_, cache_, events_);
+  SchedulerTaskRuntime& task_runtime =
+      scheduler_task_runtime_for(runtime, ComputeIntent::GlobalHighPrecision);
   return executor.execute(
-      graph, runtime, node_id, cache_precision, force_recache, enable_timing,
-      disable_disk_cache, benchmark_events,
+      graph, task_runtime, node_id, cache_precision, force_recache,
+      enable_timing, disable_disk_cache, benchmark_events,
       [this, &cache_precision, enable_timing, benchmark_events](
           GraphModel& fallback_graph, int fallback_node_id,
           bool allow_disk_cache) -> NodeOutput& {
@@ -1064,8 +1085,19 @@ NodeOutput& ComputeService::compute_intent_update_impl(
     events_.push(node_id, coordinator_node_name, stage, 0.0);
   };
 
+  SchedulerTaskRuntime* hp_task_runtime = nullptr;
+  SchedulerTaskRuntime* rt_task_runtime = nullptr;
+  if (use_parallel_executor && runtime) {
+    hp_task_runtime = &scheduler_task_runtime_for(
+        *runtime, ComputeIntent::GlobalHighPrecision);
+    if (intent == ComputeIntent::RealTimeUpdate) {
+      rt_task_runtime =
+          &scheduler_task_runtime_for(*runtime, ComputeIntent::RealTimeUpdate);
+    }
+  }
+
   return compute::IntentUpdateCoordinator::coordinate_intent_update(
-      intent, runtime, dirty_roi, callbacks);
+      intent, hp_task_runtime, rt_task_runtime, dirty_roi, callbacks);
 }
 
 // Phase 1 overload: intent-based entry to sequential compute

@@ -7,8 +7,8 @@
 ## 当前问题
 
 `ComputeService` 是公开计算入口，但它的实现同时包含依赖解析、缓存策略、
-monolithic 与 tiled 分发、脏区状态规划、compute task 推导、运行时队列编排、
-计时、benchmark 事件和输出 debug 元数据。
+monolithic 与 tiled 分发、脏区状态规划、compute task 推导、scheduler task-runtime
+dispatch 协调、计时、benchmark 事件和输出 debug 元数据。
 
 拆分应先保持行为不变。它不是重写图引擎，也不是插件 ABI 变更。
 
@@ -39,7 +39,7 @@ ComputeService facade
 | `DirtyRegionSnapshot` | 使用稳定 id 而不是原始指针枚举 dirty tiles、dirty monolithic nodes、per-node dirty ROI 和 per-edge ROI mapping。 | 已作为内部 snapshot model 实现 |
 | `ComputeTaskPlanner` | 将 compute request 和 dirty snapshot 转换为共享 `ComputePlan` / `ComputeTaskGraph` 语义。 | 已作为内部规划边界实现；plugin ABI 仍是 TODO |
 | `IntentUpdateCoordinator` | 协调 `GlobalHighPrecision` 与 `RealTimeUpdate` intent 语义，包括与执行模式无关的 realtime HP/RT 双路径行为。 | 已在 `src/kernel/services/compute-service/intent_update_coordinator.*` 实现 |
-| `ParallelGraphExecutor` | 封装当前遗留 `GraphRuntime` 队列 DAG 路径。 | 已在 `src/kernel/services/compute-service/parallel_graph_executor.*` 实现 |
+| `ParallelGraphExecutor` | 封装并行 DAG 执行，并通过 `SchedulerTaskRuntime` dispatch planned work。 | 已在 `src/kernel/services/compute-service/parallel_graph_executor.*` 实现 |
 | `ComputeMetricsRecorder` | 集中事件、计时、benchmark 事件和 debug 元数据。 | 已在 `src/kernel/services/compute-service/compute_metrics_recorder.*` 实现 |
 
 ## 缓存规则
@@ -74,8 +74,8 @@ policy 和资源选择上不同。
 Realtime HP/RT 双路径选择不是执行模式。Non-realtime 请求只启用 HP 路径。`RealTimeUpdate`
 请求会针对 dirty ROI 同时启用 HP 和 RT 工作，无论调用方选择 single-threaded、parallel、GPU
 还是其他 scheduler/resource policy。当前实现通过 `IntentUpdateCoordinator` 协调这一点；
-legacy runtime 队列可以并发提交 HP 和 RT 工作，而 single-threaded 执行会 inline 运行同一份
-intent 工作。
+parallel 执行会将 HP 与 RT sibling work 提交到各自 intent-specific scheduler task runtime，
+而 single-threaded 执行会 inline 运行同一份 intent 工作。
 
 HP 与 RT 路径会分别调用共享的 `ComputeTaskPlanner`。HP 路径基于自己的 HP dirty snapshot
 创建 `GlobalHighPrecision` plan，RT 路径基于自己的 RT dirty snapshot 创建 `RealTimeUpdate`
@@ -86,19 +86,19 @@ TODO：planner plugin ABI 继续明确推迟到后续 change。
 
 ## 调度器边界
 
-当前并行计算路径仍使用遗留 `GraphRuntime` 队列和完成计数器。该行为现在已经隔离到
-`ParallelGraphExecutor` 后面。
+当前并行计算路径会通过请求 `ComputeIntent` 选中的 scheduler dispatch 已经 planned 的图工作。
+`ParallelGraphExecutor` 拥有内部 DAG counter、临时结果存储、tile micro-task accounting、
+异常传播和最终输出选择，但会把具体任务执行交给 `SchedulerTaskRuntime`。
 
-Scheduler 应从 intent-aware task pool 中拉取 planned 或 annotated task 并调度计算资源。
-它们不应拥有图级 dirty propagation 或 compute-task derivation。现有 `IScheduler::schedule_node`、
-scheduler-local tile splitting 和 task-group aggregation 是迁移接口。
+Scheduler 应从 intent-aware task pool 拉取 planned 或 annotated task，或通过
+`SchedulerTaskRuntime` 接收 planned work，然后调度计算资源。它们不应拥有图级 dirty
+propagation 或 compute-task derivation。Compute-planning helper 已经从正式 scheduler 表面移除。
 
 目标 task-pool 模型拥有分离的 HP 和 RT pool，并且可以分别选择 scheduler 配置。例如，HP 可以使用
 single-thread scheduler，RT 可以使用 GPU scheduler。Realtime 与 non-realtime 模式也可以使用不同的
-scheduler 配置。本次拆分不实现完整 scheduler-owned HP/RT task-pool routing；它只确保 intent
-边界不再耦合到 legacy parallel executor。
-
-TODO：在后续调度器专题 change 中，通过 scheduler-owned task pool 路由 planned tasks。
+scheduler 配置。Planned parallel work 现在会在 compute-service planning 之后到达
+scheduler-owned task runtime。后续 scheduler-focused 工作可以增加 richer annotated task pool、
+planner plugin ABI 和更详细的 scheduler policy metadata。
 
 ## Traversal 边界
 

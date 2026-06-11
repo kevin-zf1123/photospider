@@ -8,7 +8,8 @@
 
 namespace ps {
 class GraphRuntime;
-}
+class SchedulerTaskRuntime;
+}  // namespace ps
 
 namespace ps::compute {
 
@@ -37,7 +38,8 @@ class IntentUpdateCoordinator {
   static void validate(ComputeIntent intent,
                        const std::optional<cv::Rect>& dirty_roi);
   static NodeOutput& coordinate_intent_update(
-      ComputeIntent intent, GraphRuntime* runtime,
+      ComputeIntent intent, SchedulerTaskRuntime* hp_task_runtime,
+      SchedulerTaskRuntime* rt_task_runtime,
       const std::optional<cv::Rect>& dirty_roi,
       const IntentUpdateCallbacks& callbacks);
 };

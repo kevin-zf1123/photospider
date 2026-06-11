@@ -1,15 +1,20 @@
-#include "kernel/scheduler/scheduler_plugin_api.hpp"
-
 #include <atomic>
-#include <future>
+#include <exception>
+#include <optional>
 #include <string>
+#include <utility>
+#include <vector>
+
+#include "kernel/scheduler/scheduler_plugin_api.hpp"
+#include "kernel/scheduler/scheduler_task_runtime.hpp"
 
 namespace {
 
 std::atomic<int> g_active_count{0};
 std::atomic<int> g_destroy_count{0};
 
-class DestroyCountScheduler final : public ps::IScheduler {
+class DestroyCountScheduler final : public ps::IScheduler,
+                                    public ps::SchedulerTaskRuntime {
  public:
   DestroyCountScheduler() { g_active_count.fetch_add(1); }
   ~DestroyCountScheduler() override { g_active_count.fetch_sub(1); }
@@ -19,18 +24,56 @@ class DestroyCountScheduler final : public ps::IScheduler {
   void start() override { running_ = true; }
   void shutdown() override { running_ = false; }
 
-  std::future<ps::NodeOutput> schedule(const ps::ComputeOptions&) override {
-    std::promise<ps::NodeOutput> promise;
-    promise.set_value(ps::NodeOutput{});
-    return promise.get_future();
-  }
-
   std::string name() const override { return "destroy_count_test"; }
   std::string get_stats() const override { return "destroy-count-test"; }
   bool is_running() const override { return running_; }
+  bool task_runtime_running() const override { return running_; }
+
+  void submit_initial_tasks(std::vector<Task>&& tasks, int total_task_count,
+                            ps::SchedulerTaskPriority priority =
+                                ps::SchedulerTaskPriority::Normal) override {
+    (void)priority;
+    tasks_to_complete_ = total_task_count;
+    for (auto& task : tasks) {
+      if (task) {
+        task();
+      }
+    }
+  }
+
+  void submit_ready_task_from_worker(
+      Task&& task, ps::SchedulerTaskPriority priority =
+                       ps::SchedulerTaskPriority::Normal) override {
+    submit_ready_task_any_thread(std::move(task), priority, std::nullopt);
+  }
+
+  void submit_ready_task_any_thread(
+      Task&& task,
+      ps::SchedulerTaskPriority priority = ps::SchedulerTaskPriority::Normal,
+      std::optional<uint64_t> epoch = std::nullopt) override {
+    (void)priority;
+    (void)epoch;
+    if (task) {
+      task();
+    }
+  }
+
+  void wait_for_completion() override {}
+  void set_exception(std::exception_ptr e) override { exception_ = e; }
+  void inc_tasks_to_complete(int delta) override {
+    tasks_to_complete_ += delta;
+  }
+  void dec_tasks_to_complete() override {
+    if (tasks_to_complete_ > 0) {
+      --tasks_to_complete_;
+    }
+  }
+  void log_event(ps::SchedulerTraceAction, int) override {}
 
  private:
   bool running_ = false;
+  int tasks_to_complete_ = 0;
+  std::exception_ptr exception_;
 };
 
 }  // namespace
@@ -78,5 +121,4 @@ void ps_test_scheduler_reset_counts() {
   g_active_count.store(0);
   g_destroy_count.store(0);
 }
-
 }

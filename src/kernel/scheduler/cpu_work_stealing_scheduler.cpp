@@ -12,9 +12,6 @@
 #include <utility>
 
 #include "kernel/graph_runtime.hpp"
-#include "kernel/services/compute_service.hpp"
-#include "kernel/services/graph_cache_service.hpp"
-#include "kernel/services/graph_traversal_service.hpp"
 
 namespace ps {
 
@@ -68,7 +65,7 @@ void CpuWorkStealingScheduler::start() {
 
   workers_.reserve(num_workers_);
   for (unsigned int i = 0; i < num_workers_; ++i) {
-    workers_.emplace_back(&CpuWorkStealingScheduler::run_loop, this, 
+    workers_.emplace_back(&CpuWorkStealingScheduler::run_loop, this,
                           static_cast<int>(i));
   }
 }
@@ -111,20 +108,48 @@ std::string CpuWorkStealingScheduler::get_stats() const {
   std::ostringstream oss;
   oss << "Workers: " << num_workers_
       << ", Ready tasks: " << ready_task_count_.load(std::memory_order_relaxed)
-      << ", Sleeping: " << sleeping_thread_count_.load(std::memory_order_relaxed)
-      << ", High enqueued/executed: " 
+      << ", Sleeping: "
+      << sleeping_thread_count_.load(std::memory_order_relaxed)
+      << ", High enqueued/executed: "
       << high_enqueued_.load(std::memory_order_relaxed) << "/"
       << high_executed_.load(std::memory_order_relaxed)
       << ", Normal enqueued/executed: "
       << normal_enqueued_.load(std::memory_order_relaxed) << "/"
       << normal_executed_.load(std::memory_order_relaxed)
-      << ", Total scheduled: " 
+      << ", Total scheduled: "
       << total_tasks_scheduled_.load(std::memory_order_relaxed);
   return oss.str();
 }
 
 bool CpuWorkStealingScheduler::is_running() const {
   return running_.load(std::memory_order_acquire);
+}
+
+bool CpuWorkStealingScheduler::task_runtime_running() const {
+  return is_running();
+}
+
+void CpuWorkStealingScheduler::log_event(SchedulerTraceAction action,
+                                         int node_id) {
+  if (!runtime_) {
+    return;
+  }
+
+  GraphRuntime::SchedulerEvent::Action runtime_action =
+      GraphRuntime::SchedulerEvent::EXECUTE;
+  switch (action) {
+    case SchedulerTraceAction::AssignInitial:
+      runtime_action = GraphRuntime::SchedulerEvent::ASSIGN_INITIAL;
+      break;
+    case SchedulerTraceAction::Execute:
+      runtime_action = GraphRuntime::SchedulerEvent::EXECUTE;
+      break;
+    case SchedulerTraceAction::ExecuteTile:
+      runtime_action = GraphRuntime::SchedulerEvent::EXECUTE_TILE;
+      break;
+  }
+  runtime_->log_event(runtime_action, node_id, this_worker_id(),
+                      this_task_epoch());
 }
 
 int CpuWorkStealingScheduler::this_worker_id() {
@@ -201,7 +226,7 @@ void CpuWorkStealingScheduler::cancel_stale_enqueued_tasks(uint64_t min_epoch) {
   }
 }
 
-std::optional<CpuWorkStealingScheduler::ScheduledTask> 
+std::optional<CpuWorkStealingScheduler::ScheduledTask>
 CpuWorkStealingScheduler::steal_task(int stealer_id) {
   int n = static_cast<int>(num_workers_);
   if (n <= 1) {
@@ -313,10 +338,16 @@ void CpuWorkStealingScheduler::run_loop(int thread_id) {
             }
             ~EpochScope() { *slot = prev; }
           } epoch_scope(&tls_active_epoch_, scheduled.epoch);
+          struct RuntimeLogScope {
+            RuntimeLogScope(int worker_id, uint64_t epoch) {
+              GraphRuntime::set_scheduler_log_context(worker_id, epoch);
+            }
+            ~RuntimeLogScope() { GraphRuntime::clear_scheduler_log_context(); }
+          } runtime_log_scope(thread_id, scheduled.epoch);
           scheduled.task();
         } else {
-          set_exception(std::make_exception_ptr(
-              std::runtime_error("CpuWorkStealingScheduler: empty task invoked")));
+          set_exception(std::make_exception_ptr(std::runtime_error(
+              "CpuWorkStealingScheduler: empty task invoked")));
         }
       } catch (...) {
         set_exception(std::current_exception());
@@ -343,8 +374,8 @@ void CpuWorkStealingScheduler::run_loop(int thread_id) {
 }
 
 void CpuWorkStealingScheduler::submit_initial_tasks(std::vector<Task>&& tasks,
-                                                     int total_task_count,
-                                                     TaskPriority priority) {
+                                                    int total_task_count,
+                                                    TaskPriority priority) {
   has_exception_.store(false, std::memory_order_relaxed);
   first_exception_ = nullptr;
 
@@ -387,7 +418,8 @@ void CpuWorkStealingScheduler::submit_initial_tasks(std::vector<Task>&& tasks,
       int target_thread =
           std::uniform_int_distribution<int>(0, num_threads - 1)(rng);
       std::lock_guard<std::mutex> lock(*local_queue_mutexes_[target_thread]);
-      local_task_queues_[target_thread].push_back(wrap_task(std::move(tasks[i])));
+      local_task_queues_[target_thread].push_back(
+          wrap_task(std::move(tasks[i])));
       normal_enqueued_.fetch_add(1, std::memory_order_relaxed);
     }
     ready_task_count_.fetch_add(static_cast<int>(task_count),
@@ -524,58 +556,6 @@ void CpuWorkStealingScheduler::set_exception(std::exception_ptr e) {
       cv_completion_.notify_all();
     }
   }
-}
-
-std::future<NodeOutput> CpuWorkStealingScheduler::schedule(
-    const ComputeOptions& opts) {
-  total_tasks_scheduled_.fetch_add(1, std::memory_order_relaxed);
-  
-  auto promise = std::make_shared<std::promise<NodeOutput>>();
-  auto future = promise->get_future();
-  
-  // 创建一个计算任务
-  auto compute_task = [this, opts, promise]() {
-    try {
-      NodeOutput result = execute_compute(opts);
-      promise->set_value(std::move(result));
-    } catch (...) {
-      promise->set_exception(std::current_exception());
-    }
-  };
-  
-  // 根据优先级提交任务
-  TaskPriority priority = (opts.intent == ComputeIntent::RealTimeUpdate)
-                              ? TaskPriority::High
-                              : TaskPriority::Normal;
-  
-  submit_ready_task_any_thread(std::move(compute_task), priority, opts.epoch);
-  
-  return future;
-}
-
-NodeOutput CpuWorkStealingScheduler::execute_compute(const ComputeOptions& opts) {
-  if (!runtime_) {
-    throw std::runtime_error("CpuWorkStealingScheduler: not attached to runtime");
-  }
-  
-  // 使用 runtime 的 post 机制来访问 GraphModel 并执行计算
-  auto future = runtime_->post([this, &opts](GraphModel& graph) -> NodeOutput {
-    // 构造服务实例
-    GraphTraversalService traversal;
-    GraphCacheService cache;
-    ComputeService compute(traversal, cache, runtime_->event_service());
-    
-    // 执行计算
-    NodeOutput& result = compute.compute_parallel(
-        graph, *runtime_, opts.intent, opts.node_id, opts.cache_precision,
-        opts.force_recache, opts.enable_timing, opts.disable_disk_cache,
-        nullptr, opts.dirty_roi);
-    
-    // 返回副本避免引用悬挂
-    return result;
-  });
-  
-  return future.get();
 }
 
 }  // namespace ps

@@ -48,17 +48,13 @@ TEST(SchedulerTestM33, ParallelComputeWithNewScheduler) {
   ASSERT_FALSE(endings->empty());
   int node_id = (*endings)[0];
 
-  // 使用 submit_compute 通过新调度器执行计算
-  ps::ComputeOptions opts;
-  opts.intent = ComputeIntent::GlobalHighPrecision;
-  opts.node_id = node_id;
-  opts.cache_precision = "int8";
-  opts.force_recache = true;
-
-  auto future = runtime.submit_compute(opts);
-
-  // 获取结果
-  auto result = future.get();
+  // 通过 ComputeService facade 触发 scheduler-owned task runtime 执行。
+  bool success = svc.cmd_compute(graph_name, node_id, "int8",
+                                 /*force*/ true, /*timing*/ false,
+                                 /*parallel*/ true);
+  ASSERT_TRUE(success);
+  const auto& result =
+      runtime.model().nodes.at(node_id).cached_output_high_precision.value();
 
   // 验证计算完成
   EXPECT_TRUE(result.image_buffer.width > 0 || !result.data.empty());

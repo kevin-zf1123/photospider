@@ -6,9 +6,9 @@
 
 #include "benchmark/benchmark_types.hpp"
 #include "graph_model.hpp"
+#include "kernel/scheduler/scheduler_task_runtime.hpp"
 
 namespace ps {
-class GraphRuntime;
 class GraphTraversalService;
 class GraphCacheService;
 class GraphEventService;
@@ -24,9 +24,10 @@ class ParallelGraphExecutor {
   ParallelGraphExecutor(GraphTraversalService& traversal,
                         GraphCacheService& cache, GraphEventService& events);
 
-  NodeOutput& execute(GraphModel& graph, GraphRuntime& runtime, int node_id,
-                      const std::string& cache_precision, bool force_recache,
-                      bool enable_timing, bool disable_disk_cache,
+  NodeOutput& execute(GraphModel& graph, SchedulerTaskRuntime& task_runtime,
+                      int node_id, const std::string& cache_precision,
+                      bool force_recache, bool enable_timing,
+                      bool disable_disk_cache,
                       std::vector<BenchmarkEvent>* benchmark_events,
                       SequentialFallback sequential_fallback);
 

@@ -74,8 +74,9 @@ The kernel recognizes two formal compute intents:
 | `GlobalHighPrecision` | Full-quality HP compute. Owns high-precision output. Non-realtime compute enables only this HP path. |
 | `RealTimeUpdate` | Interactive realtime update. Requires a dirty ROI and enables the HP/RT dual path. |
 
-The intent model is formal. The current implementation still has several paths
-that bypass `IScheduler` and call `ComputeService` directly.
+The intent model is formal. `ComputeService` remains the compute facade and
+planning boundary, while parallel planned work is dispatched through the
+configured `IScheduler` task runtime for each intent.
 
 HP/RT dual path semantics belong to realtime intent, not to the parallel
 execution mode. In realtime mode, HP computes the full-size authoritative node
@@ -109,17 +110,15 @@ before executing the recursive path.
 ## Parallel Compute
 
 Parallel compute builds a DAG from `topo_postorder_from`, tracks dependency
-counters, and submits ready node tasks to `GraphRuntime` worker queues. Tiled
-operations may spawn micro-tasks and increment runtime completion counters.
+counters, and submits ready node tasks through the configured scheduler's
+`SchedulerTaskRuntime`. Tiled operations may spawn micro-tasks and increment
+scheduler-owned completion counters.
 
-This path is current behavior, but it is also part of the scheduler migration
-surface. The formal long-term target is to route compute through `IScheduler`
-instances after dirty-region state and compute-task planning have produced
-planned work.
-
-The legacy `GraphRuntime` queue path is isolated behind
-`ParallelGraphExecutor`. TODO: full planned-task scheduler routing remains a
-later scheduler-focused change.
+`ParallelGraphExecutor` keeps dependency accounting, sparse node-id mapping,
+temporary result storage, event logging, exception propagation, and final target
+selection inside the compute-service boundary. It dispatches already-planned
+work through scheduler task-runtime queues; it does not make the scheduler own
+dirty propagation or compute-task derivation.
 
 ## GlobalHighPrecision
 
@@ -143,11 +142,11 @@ does not implicitly mean full-frame RT update.
 
 With a valid dirty ROI, realtime compute enables both paths. HP updates the
 full-size authoritative output for the affected graph work, while RT updates
-the proxy output for the affected region. When a runtime queue is available,
-the current implementation may submit the HP and RT updates concurrently; when
-single-threaded execution is selected, it still runs both HP and RT work inline.
-This distinction is an execution-mode choice, not the switch that enables or
-disables the HP/RT dual path.
+the proxy output for the affected region. When scheduler task runtimes are
+available, the implementation may submit the HP and RT updates concurrently to
+their intent-specific schedulers; when single-threaded execution is selected, it
+still runs both HP and RT work inline. This distinction is an execution-mode
+choice, not the switch that enables or disables the HP/RT dual path.
 
 Realtime planning is intentionally per path, not a single mixed-domain planner
 call. `IntentUpdateCoordinator` dispatches sibling HP and RT update callbacks.

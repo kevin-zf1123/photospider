@@ -14,7 +14,6 @@
 
 #include "adapter/buffer_adapter_opencv.hpp"
 #include "benchmark/benchmark_types.hpp"
-#include "kernel/graph_runtime.hpp"
 #include "kernel/param_utils.hpp"
 #include "kernel/services/compute-service/compute_geometry.hpp"
 #include "kernel/services/compute-service/compute_metrics_recorder.hpp"
@@ -58,7 +57,7 @@ void ParallelGraphExecutor::clear_timing_results(GraphModel& graph) {
 }
 
 NodeOutput& ParallelGraphExecutor::execute(
-    GraphModel& graph, GraphRuntime& runtime, int node_id,
+    GraphModel& graph, SchedulerTaskRuntime& task_runtime, int node_id,
     const std::string& cache_precision, bool force_recache, bool enable_timing,
     bool disable_disk_cache, std::vector<BenchmarkEvent>* benchmark_events,
     SequentialFallback sequential_fallback) {
@@ -111,7 +110,7 @@ NodeOutput& ParallelGraphExecutor::execute(
     // --- 使用基于稠密索引的 std::vector 进行依赖管理 ---
     std::vector<std::atomic<int>> dependency_counters(num_nodes);
     std::vector<std::vector<int>> dependents_map(num_nodes);
-    std::vector<Task> all_tasks;
+    std::vector<SchedulerTaskRuntime::Task> all_tasks;
     all_tasks.resize(num_nodes);
     // Scheme B: temporary results storage per node index
     std::vector<std::optional<NodeOutput>> temp_results(num_nodes);
@@ -145,7 +144,7 @@ NodeOutput& ParallelGraphExecutor::execute(
       int current_node_idx = i;
 
       auto inner_task = [this, &graph, &nodes, &timing_mutex, &timing_results,
-                         &runtime, &dependency_counters, &dependents_map,
+                         &task_runtime, &dependency_counters, &dependents_map,
                          &all_tasks, &id_to_idx, &temp_results, &resolved_ops,
                          &resolved_meta, current_node_id, current_node_idx,
                          cache_precision, enable_timing, disable_disk_cache,
@@ -431,7 +430,7 @@ NodeOutput& ParallelGraphExecutor::execute(
                       int tiles_x = (out_w + tile_size - 1) / tile_size;
                       int tiles_y = (out_h + tile_size - 1) / tile_size;
                       int total_tiles = tiles_x * tiles_y;
-                      runtime.inc_graph_tasks_to_complete(total_tiles);
+                      task_runtime.inc_tasks_to_complete(total_tiles);
                       auto remaining =
                           std::make_shared<std::atomic<int>>(total_tiles);
                       auto start_tp = std::make_shared<
@@ -444,127 +443,136 @@ NodeOutput& ParallelGraphExecutor::execute(
                           int y = ty * tile_size;
                           int w = std::min(tile_size, out_w - x);
                           int h = std::min(tile_size, out_h - y);
-                          Task tile_task = [this, &runtime, &dependents_map,
-                                            &dependency_counters, &all_tasks,
-                                            &temp_results, &nodes,
-                                            &timing_mutex, &timing_results, x,
-                                            y, w, h, needs_halo, input_ptrs,
-                                            norm_store_sp, remaining, start_tp,
-                                            current_node_idx, current_node_id,
-                                            node_for_exec, op_func,
-                                            benchmark_events, enable_timing,
-                                            access_pattern, prop_fn, &graph]() {
-                            try {
-                              runtime.log_event(
-                                  GraphRuntime::SchedulerEvent::EXECUTE_TILE,
-                                  current_node_id);
-                              TileTask tt;
-                              tt.node = &node_for_exec;
-                              tt.output_tile.buffer =
-                                  &temp_results[current_node_idx]->image_buffer;
-                              tt.output_tile.roi = cv::Rect(x, y, w, h);
-                              for (auto const* in_out : input_ptrs) {
-                                Tile in_tile;
-                                in_tile.buffer = const_cast<ImageBuffer*>(
-                                    &in_out->image_buffer);
-                                cv::Rect input_roi;
-                                if (access_pattern ==
-                                    OpMetadata::InputAccessPattern::
-                                        RandomAccess) {
-                                  input_roi = prop_fn(
-                                      node_for_exec, tt.output_tile.roi, graph);
-                                  input_roi =
-                                      input_roi &
-                                      cv::Rect(0, 0, in_tile.buffer->width,
-                                               in_tile.buffer->height);
-                                } else if (needs_halo) {
-                                  input_roi = calculate_halo(
-                                      tt.output_tile.roi, HALO_SIZE,
-                                      {in_out->image_buffer.width,
-                                       in_out->image_buffer.height});
-                                } else {
-                                  input_roi = tt.output_tile.roi;
-                                }
-                                in_tile.roi = input_roi;
-                                tt.input_tiles.push_back(std::move(in_tile));
-                              }
-                              compute::NodeExecutor::execute_tile_task(tt,
-                                                                       op_func);
-                              if (remaining->fetch_sub(
-                                      1, std::memory_order_acq_rel) == 1) {
-                                std::atomic_thread_fence(
-                                    std::memory_order_release);
-                                double exec_ms_for_meta = 0.0;
-                                if (enable_timing) {
-                                  auto end_tp =
-                                      std::chrono::high_resolution_clock::now();
-                                  double exec_ms =
-                                      std::chrono::duration<double, std::milli>(
-                                          end_tp - *start_tp)
-                                          .count();
-                                  exec_ms_for_meta = exec_ms;
-                                  BenchmarkEvent ev;
-                                  ev.node_id = current_node_id;
-                                  ev.op_name = make_key(node_for_exec.type,
-                                                        node_for_exec.subtype);
-                                  ev.execution_start_time = *start_tp;
-                                  ev.dependency_start_time = *start_tp;
-                                  ev.execution_end_time = end_tp;
-                                  ev.execution_duration_ms = exec_ms;
-                                  ev.source = "computed";
-                                  if (benchmark_events) {
-                                    std::lock_guard lk(timing_mutex);
-                                    benchmark_events->push_back(ev);
+                          SchedulerTaskRuntime::Task tile_task =
+                              [this, &task_runtime, &dependents_map,
+                               &dependency_counters, &all_tasks, &temp_results,
+                               &nodes, &timing_mutex, &timing_results, x, y, w,
+                               h, needs_halo, input_ptrs, norm_store_sp,
+                               remaining, start_tp, current_node_idx,
+                               current_node_id, node_for_exec, op_func,
+                               benchmark_events, enable_timing, access_pattern,
+                               prop_fn, &graph]() {
+                                try {
+                                  task_runtime.log_event(
+                                      SchedulerTraceAction::ExecuteTile,
+                                      current_node_id);
+                                  TileTask tt;
+                                  tt.node = &node_for_exec;
+                                  tt.output_tile.buffer =
+                                      &temp_results[current_node_idx]
+                                           ->image_buffer;
+                                  tt.output_tile.roi = cv::Rect(x, y, w, h);
+                                  for (auto const* in_out : input_ptrs) {
+                                    Tile in_tile;
+                                    in_tile.buffer = const_cast<ImageBuffer*>(
+                                        &in_out->image_buffer);
+                                    cv::Rect input_roi;
+                                    if (access_pattern ==
+                                        OpMetadata::InputAccessPattern::
+                                            RandomAccess) {
+                                      input_roi =
+                                          prop_fn(node_for_exec,
+                                                  tt.output_tile.roi, graph);
+                                      input_roi =
+                                          input_roi &
+                                          cv::Rect(0, 0, in_tile.buffer->width,
+                                                   in_tile.buffer->height);
+                                    } else if (needs_halo) {
+                                      input_roi = calculate_halo(
+                                          tt.output_tile.roi, HALO_SIZE,
+                                          {in_out->image_buffer.width,
+                                           in_out->image_buffer.height});
+                                    } else {
+                                      input_roi = tt.output_tile.roi;
+                                    }
+                                    in_tile.roi = input_roi;
+                                    tt.input_tiles.push_back(
+                                        std::move(in_tile));
                                   }
-                                  {
-                                    std::lock_guard lk(timing_mutex);
-                                    timing_results.node_timings.push_back(
-                                        {current_node_id,
-                                         nodes.at(current_node_id).name,
-                                         exec_ms, std::string("computed")});
+                                  compute::NodeExecutor::execute_tile_task(
+                                      tt, op_func);
+                                  if (remaining->fetch_sub(
+                                          1, std::memory_order_acq_rel) == 1) {
+                                    std::atomic_thread_fence(
+                                        std::memory_order_release);
+                                    double exec_ms_for_meta = 0.0;
+                                    if (enable_timing) {
+                                      auto end_tp = std::chrono::
+                                          high_resolution_clock::now();
+                                      double exec_ms =
+                                          std::chrono::duration<double,
+                                                                std::milli>(
+                                              end_tp - *start_tp)
+                                              .count();
+                                      exec_ms_for_meta = exec_ms;
+                                      BenchmarkEvent ev;
+                                      ev.node_id = current_node_id;
+                                      ev.op_name =
+                                          make_key(node_for_exec.type,
+                                                   node_for_exec.subtype);
+                                      ev.execution_start_time = *start_tp;
+                                      ev.dependency_start_time = *start_tp;
+                                      ev.execution_end_time = end_tp;
+                                      ev.execution_duration_ms = exec_ms;
+                                      ev.source = "computed";
+                                      if (benchmark_events) {
+                                        std::lock_guard lk(timing_mutex);
+                                        benchmark_events->push_back(ev);
+                                      }
+                                      {
+                                        std::lock_guard lk(timing_mutex);
+                                        timing_results.node_timings.push_back(
+                                            {current_node_id,
+                                             nodes.at(current_node_id).name,
+                                             exec_ms, std::string("computed")});
+                                      }
+                                      events_.push(
+                                          current_node_id,
+                                          nodes.at(current_node_id).name,
+                                          "computed", exec_ms);
+                                    } else {
+                                      events_.push(
+                                          current_node_id,
+                                          nodes.at(current_node_id).name,
+                                          "computed", 0.0);
+                                    }
+                                    finalize_output_metadata(
+                                        *temp_results[current_node_idx],
+                                        input_ptrs, enable_timing,
+                                        exec_ms_for_meta);
+                                    for (int dependent_idx :
+                                         dependents_map[current_node_idx]) {
+                                      if (--dependency_counters
+                                              [dependent_idx] == 0) {
+                                        task_runtime
+                                            .submit_ready_task_from_worker(
+                                                std::move(
+                                                    all_tasks[dependent_idx]));
+                                      }
+                                    }
                                   }
-                                  events_.push(current_node_id,
-                                               nodes.at(current_node_id).name,
-                                               "computed", exec_ms);
-                                } else {
-                                  events_.push(current_node_id,
-                                               nodes.at(current_node_id).name,
-                                               "computed", 0.0);
+                                } catch (const std::exception& e) {
+                                  task_runtime.set_exception(
+                                      std::make_exception_ptr(GraphError(
+                                          GraphErrc::ComputeError,
+                                          std::string("Tile stage at node ") +
+                                              std::to_string(current_node_id) +
+                                              " (" +
+                                              nodes.at(current_node_id).name +
+                                              ") failed: " + e.what())));
+                                } catch (...) {
+                                  task_runtime.set_exception(
+                                      std::make_exception_ptr(GraphError(
+                                          GraphErrc::ComputeError,
+                                          std::string("Tile stage at node ") +
+                                              std::to_string(current_node_id) +
+                                              " (" +
+                                              nodes.at(current_node_id).name +
+                                              ") failed: unknown exception")));
                                 }
-                                finalize_output_metadata(
-                                    *temp_results[current_node_idx], input_ptrs,
-                                    enable_timing, exec_ms_for_meta);
-                                for (int dependent_idx :
-                                     dependents_map[current_node_idx]) {
-                                  if (--dependency_counters[dependent_idx] ==
-                                      0) {
-                                    runtime.submit_ready_task_from_worker(
-                                        std::move(all_tasks[dependent_idx]));
-                                  }
-                                }
-                              }
-                            } catch (const std::exception& e) {
-                              runtime.set_exception(
-                                  std::make_exception_ptr(GraphError(
-                                      GraphErrc::ComputeError,
-                                      std::string("Tile stage at node ") +
-                                          std::to_string(current_node_id) +
-                                          " (" +
-                                          nodes.at(current_node_id).name +
-                                          ") failed: " + e.what())));
-                            } catch (...) {
-                              runtime.set_exception(
-                                  std::make_exception_ptr(GraphError(
-                                      GraphErrc::ComputeError,
-                                      std::string("Tile stage at node ") +
-                                          std::to_string(current_node_id) +
-                                          " (" +
-                                          nodes.at(current_node_id).name +
-                                          ") failed: unknown exception")));
-                            }
-                            runtime.dec_graph_tasks_to_complete();
-                          };
-                          runtime.submit_ready_task_from_worker(
+                                task_runtime.dec_tasks_to_complete();
+                              };
+                          task_runtime.submit_ready_task_from_worker(
                               std::move(tile_task));
                         }
                       }
@@ -610,21 +618,21 @@ NodeOutput& ParallelGraphExecutor::execute(
             temp_results[current_node_idx] = std::move(result);
           }
         } catch (const cv::Exception& e) {
-          runtime.set_exception(std::make_exception_ptr(GraphError(
+          task_runtime.set_exception(std::make_exception_ptr(GraphError(
               GraphErrc::ComputeError,
               "Compute stage at node " + std::to_string(current_node_id) +
                   " (" + nodes.at(current_node_id).name +
                   ") failed: " + std::string(e.what()))));
           return;
         } catch (const std::exception& e) {
-          runtime.set_exception(std::make_exception_ptr(GraphError(
+          task_runtime.set_exception(std::make_exception_ptr(GraphError(
               GraphErrc::ComputeError,
               "Compute stage at node " + std::to_string(current_node_id) +
                   " (" + nodes.at(current_node_id).name +
                   ") failed: " + e.what())));
           return;
         } catch (...) {
-          runtime.set_exception(std::make_exception_ptr(GraphError(
+          task_runtime.set_exception(std::make_exception_ptr(GraphError(
               GraphErrc::ComputeError,
               "Compute stage at node " + std::to_string(current_node_id) +
                   " (" + nodes.at(current_node_id).name +
@@ -639,24 +647,24 @@ NodeOutput& ParallelGraphExecutor::execute(
           std::atomic_thread_fence(std::memory_order_release);
           for (int dependent_idx : dependents_map[current_node_idx]) {
             if (--dependency_counters[dependent_idx] == 0) {
-              runtime.submit_ready_task_from_worker(
+              task_runtime.submit_ready_task_from_worker(
                   std::move(all_tasks[dependent_idx]));
             }
           }
         } catch (const std::out_of_range& e) {
-          runtime.set_exception(std::make_exception_ptr(GraphError(
+          task_runtime.set_exception(std::make_exception_ptr(GraphError(
               GraphErrc::ComputeError,
               "Scheduling stage after node " + std::to_string(current_node_id) +
                   " (" + nodes.at(current_node_id).name +
                   ") failed: out_of_range: " + std::string(e.what()))));
         } catch (const std::exception& e) {
-          runtime.set_exception(std::make_exception_ptr(GraphError(
+          task_runtime.set_exception(std::make_exception_ptr(GraphError(
               GraphErrc::ComputeError,
               "Scheduling stage after node " + std::to_string(current_node_id) +
                   " (" + nodes.at(current_node_id).name +
                   ") failed: " + e.what())));
         } catch (...) {
-          runtime.set_exception(std::make_exception_ptr(GraphError(
+          task_runtime.set_exception(std::make_exception_ptr(GraphError(
               GraphErrc::ComputeError,
               "Scheduling stage after node " + std::to_string(current_node_id) +
                   " (" + nodes.at(current_node_id).name +
@@ -665,17 +673,16 @@ NodeOutput& ParallelGraphExecutor::execute(
       };
 
       // --- 包装任务以处理异常和完成计数 ---
-      all_tasks[i] = [inner_task = std::move(inner_task), &runtime,
+      all_tasks[i] = [inner_task = std::move(inner_task), &task_runtime,
                       current_node_id]() {
-        runtime.log_event(GraphRuntime::SchedulerEvent::EXECUTE,
-                          current_node_id);
+        task_runtime.log_event(SchedulerTraceAction::Execute, current_node_id);
         inner_task();
-        runtime.dec_graph_tasks_to_complete();
+        task_runtime.dec_tasks_to_complete();
       };
     }
 
     // --- 提交初始就绪任务 ---
-    std::vector<Task> initial_tasks;
+    std::vector<SchedulerTaskRuntime::Task> initial_tasks;
     std::unordered_set<int> submitted_initial_indices;
     for (int task_id : compute_plan.task_graph.initial_task_ids) {
       if (task_id < 0 ||
@@ -709,15 +716,15 @@ NodeOutput& ParallelGraphExecutor::execute(
         sequential_fallback(graph, node_id, !disable_disk_cache);
       }
     } else {
-      runtime.submit_initial_tasks(std::move(initial_tasks),
-                                   execution_order.size());
+      task_runtime.submit_initial_tasks(std::move(initial_tasks),
+                                        execution_order.size());
       for (size_t i = 0; i < num_nodes; ++i) {
         if (submitted_initial_indices.count(static_cast<int>(i))) {
-          runtime.log_event(GraphRuntime::SchedulerEvent::ASSIGN_INITIAL,
-                            execution_order[i]);
+          task_runtime.log_event(SchedulerTraceAction::AssignInitial,
+                                 execution_order[i]);
         }
       }
-      runtime.wait_for_completion();
+      task_runtime.wait_for_completion();
     }
 
     // --- 后续处理（计时、结果返回） ---
@@ -754,9 +761,9 @@ NodeOutput& ParallelGraphExecutor::execute(
     return *nodes.at(node_id).cached_output_high_precision;
   } catch (...) {
     // 捕获在本函数内（任务提交前）抛出的异常，并传递给运行时
-    runtime.set_exception(std::current_exception());
+    task_runtime.set_exception(std::current_exception());
     // 等待运行时处理异常并唤醒
-    runtime.wait_for_completion();
+    task_runtime.wait_for_completion();
     // wait_for_completion 内部会重新抛出异常，这里我们只需确保函数有返回值
     // 在实际情况下，由于 rethrow，代码不会执行到这里
     throw GraphError(
