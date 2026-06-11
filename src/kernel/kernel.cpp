@@ -840,6 +840,20 @@ std::optional<std::string> Kernel::dirty_region_snapshot_debug(
   }
 }
 
+std::optional<compute::DirtyRegionSnapshot> Kernel::dirty_region_snapshot(
+    const std::string& name) {
+  auto it = graphs_.find(name);
+  if (it == graphs_.end())
+    return std::nullopt;
+  try {
+    return it->second
+        ->post([](GraphModel& g) { return g.last_dirty_region_snapshot; })
+        .get();
+  } catch (...) {
+    return std::nullopt;
+  }
+}
+
 std::optional<double> Kernel::get_last_io_time(const std::string& name) {
   auto it = graphs_.find(name);
   if (it == graphs_.end()) {
@@ -866,42 +880,81 @@ std::optional<std::future<bool>> Kernel::compute_async(
     return std::nullopt;
   }
 
+  const int id = node_id;
+  const std::string precision = cache_precision;
+  const bool frc = force_recache;
+  const bool timing = enable_timing;
+  const bool par = parallel;
+  const bool q = quiet;
+  const bool disable_dc = disable_disk_cache;
+  const std::string name_copy = name;
   GraphRuntime* const runtime_ptr = it->second.get();
+
+  if (par) {
+    return std::optional<std::future<bool>>(std::async(
+        std::launch::async,
+        [this, runtime_ptr, id, precision, frc, timing, q, disable_dc, nosave,
+         benchmark_events, intent, dirty_roi, name_copy]() {
+          try {
+            if (!runtime_ptr->running())
+              runtime_ptr->start();
+            GraphModel& model = runtime_ptr->model();
+            ComputeService compute_service(traversal_service_, cache_service_,
+                                           runtime_ptr->event_service());
+
+            bool prev_quiet = model.is_quiet();
+            model.set_quiet(q);
+            model.set_skip_save_cache(nosave);
+
+            compute_service.compute_parallel(model, *runtime_ptr, intent, id,
+                                             precision, frc, timing, disable_dc,
+                                             benchmark_events, dirty_roi);
+
+            model.set_skip_save_cache(false);
+            model.set_quiet(prev_quiet);
+            last_error_.erase(name_copy);
+            return true;
+          } catch (const GraphError& ge) {
+            last_error_[name_copy] = {ge.code(), ge.what()};
+            return false;
+          } catch (const std::exception& e) {
+            last_error_[name_copy] = {
+                GraphErrc::Unknown,
+                std::string("Async compute failed: ") + e.what()};
+            return false;
+          }
+        }));
+  }
+
   if (!runtime_ptr->running())
     runtime_ptr->start();
+  return runtime_ptr->post([this, runtime_ptr, id, precision, frc, timing, q,
+                            disable_dc, nosave, benchmark_events, intent,
+                            dirty_roi, name_copy](GraphModel& model) {
+    try {
+      ComputeService compute_service(traversal_service_, cache_service_,
+                                     runtime_ptr->event_service());
 
-  // 捕获所有参数
-  return std::optional<std::future<bool>>(std::async(
-      std::launch::async,
-      [this, runtime_ptr, node_id, cache_precision, force_recache,
-       enable_timing, quiet, disable_disk_cache, nosave, benchmark_events,
-       intent, dirty_roi, name]() {
-        try {
-          GraphModel& model = runtime_ptr->model();
-          ComputeService compute_service(traversal_service_, cache_service_,
-                                         runtime_ptr->event_service());
+      bool prev_quiet = model.is_quiet();
+      model.set_quiet(q);
+      model.set_skip_save_cache(nosave);
 
-          model.set_quiet(quiet);
-          model.set_skip_save_cache(nosave);
+      compute_service.compute(model, intent, id, precision, frc, timing,
+                              disable_dc, benchmark_events, dirty_roi);
 
-          compute_service.compute_parallel(model, *runtime_ptr, intent, node_id,
-                                           cache_precision, force_recache,
-                                           enable_timing, disable_disk_cache,
-                                           benchmark_events, dirty_roi);
-
-          model.set_skip_save_cache(false);
-          last_error_.erase(name);
-          return true;
-        } catch (const GraphError& ge) {
-          last_error_[name] = {ge.code(), ge.what()};
-          return false;
-        } catch (const std::exception& e) {
-          last_error_[name] = {
-              GraphErrc::Unknown,
-              std::string("Async compute failed: ") + e.what()};
-          return false;
-        }
-      }));
+      model.set_skip_save_cache(false);
+      model.set_quiet(prev_quiet);
+      last_error_.erase(name_copy);
+      return true;
+    } catch (const GraphError& ge) {
+      last_error_[name_copy] = {ge.code(), ge.what()};
+      return false;
+    } catch (const std::exception& e) {
+      last_error_[name_copy] = {
+          GraphErrc::Unknown, std::string("Async compute failed: ") + e.what()};
+      return false;
+    }
+  });
 }
 
 std::optional<cv::Rect> Kernel::project_roi_forward(const std::string& name,

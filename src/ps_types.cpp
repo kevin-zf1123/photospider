@@ -243,6 +243,26 @@ ForwardRoiPropFunc OpRegistry::get_forward_propagator(
   return kIdentity;
 }
 
+PropagationContractStatus OpRegistry::dirty_propagation_contract_status(
+    const std::string& type, const std::string& subtype) const {
+  auto key = make_key(type, subtype);
+  auto it = impl_table_.find(key);
+  if (it != impl_table_.end() && it->second.dirty_propagator) {
+    return PropagationContractStatus::Explicit;
+  }
+  return PropagationContractStatus::LegacyIdentityFallback;
+}
+
+PropagationContractStatus OpRegistry::forward_propagation_contract_status(
+    const std::string& type, const std::string& subtype) const {
+  auto key = make_key(type, subtype);
+  auto it = impl_table_.find(key);
+  if (it != impl_table_.end() && it->second.forward_propagator) {
+    return PropagationContractStatus::Explicit;
+  }
+  return PropagationContractStatus::LegacyIdentityFallback;
+}
+
 std::optional<DependencyLutBuilder> OpRegistry::get_dependency_builder(
     const std::string& type, const std::string& subtype) const {
   auto key = make_key(type, subtype);
@@ -433,8 +453,8 @@ const OpImplementation* OpRegistry::select_best_implementation(
   };
 
   // 找出最优实现
-  auto best_it = std::min_element(candidates.begin(), candidates.end(),
-                                  compare_impl);
+  auto best_it =
+      std::min_element(candidates.begin(), candidates.end(), compare_impl);
   return *best_it;
 }
 

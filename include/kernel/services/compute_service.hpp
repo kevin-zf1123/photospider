@@ -81,6 +81,13 @@ class ComputeService {
       std::vector<BenchmarkEvent>* benchmark_events,
       std::optional<cv::Rect> dirty_roi);
 
+  NodeOutput& compute_intent_update_impl(
+      GraphModel& graph, GraphRuntime* runtime, bool use_parallel_executor,
+      ComputeIntent intent, int node_id, const std::string& cache_precision,
+      bool force_recache, bool enable_timing, bool disable_disk_cache,
+      std::vector<BenchmarkEvent>* benchmark_events,
+      std::optional<cv::Rect> dirty_roi);
+
   GraphTraversalService& traversal_;
   GraphCacheService& cache_;
   GraphEventService& events_;

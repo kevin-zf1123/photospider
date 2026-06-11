@@ -187,6 +187,10 @@ class InteractionService {
       const std::string& graph) {
     return kernel_.dirty_region_snapshot_debug(graph);
   }
+  std::optional<compute::DirtyRegionSnapshot> cmd_dirty_region_snapshot(
+      const std::string& graph) {
+    return kernel_.dirty_region_snapshot(graph);
+  }
   std::optional<cv::Mat> cmd_compute_and_get_image(
       const std::string& graph, int node_id, const std::string& precision,
       bool force, bool timing, bool parallel, bool disable_disk_cache = false) {

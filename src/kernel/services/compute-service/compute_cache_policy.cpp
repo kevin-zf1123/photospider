@@ -66,7 +66,6 @@ void ComputeCachePolicy::clear_for_recompute(Node& node, bool clear_legacy) {
   if (clear_legacy)
     node.cached_output.reset();
   node.cached_output_high_precision.reset();
-  node.cached_output_real_time.reset();
 }
 
 }  // namespace ps::compute

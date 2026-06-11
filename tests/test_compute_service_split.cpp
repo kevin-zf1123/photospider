@@ -7,6 +7,7 @@
 
 #include "adapter/buffer_adapter_opencv.hpp"
 #include "graph_model.hpp"
+#include "kernel/graph_runtime.hpp"
 #include "kernel/services/compute-service/compute_cache_policy.hpp"
 #include "kernel/services/compute-service/compute_geometry.hpp"
 #include "kernel/services/compute-service/compute_metrics_recorder.hpp"
@@ -269,6 +270,14 @@ TEST(ComputeTaskPlannerSplit, PreservesSequentialParallelPlanParity) {
   snapshot.graph_generation = 7;
   snapshot.per_node_dirty_rois[42].push_back(cv::Rect(0, 0, 16, 16));
   snapshot.per_node_dirty_rois[100].push_back(cv::Rect(0, 0, 8, 8));
+  snapshot.dirty_tiles.push_back({42, compute::DirtyDomain::HighPrecision,
+                                  compute::DirtyTileLevel::Micro, 0, 0, 16,
+                                  cv::Rect(0, 0, 16, 16)});
+  snapshot.dirty_monolithic_nodes.push_back(
+      {100, compute::DirtyDomain::HighPrecision, cv::Rect(0, 0, 8, 8), true});
+  snapshot.edge_mappings.push_back(
+      {42, 100, cv::Rect(0, 0, 16, 16), cv::Rect(0, 0, 8, 8),
+       compute::DirtyEdgeDirection::BackwardDemand});
   std::vector<int> execution_order{10, 42, 100};
 
   compute::ComputeTaskPlanner planner;
@@ -283,9 +292,47 @@ TEST(ComputeTaskPlannerSplit, PreservesSequentialParallelPlanParity) {
   auto parallel_plan = planner.plan(parallel, execution_order, &snapshot);
   EXPECT_EQ(sequential_plan.planned_nodes, parallel_plan.planned_nodes);
   EXPECT_EQ(sequential_plan.planned_nodes, (std::vector<int>{42, 100}));
+  ASSERT_EQ(sequential_plan.planned_work.size(), 2u);
+  EXPECT_EQ(sequential_plan.planned_work[0].node_id, 42);
+  EXPECT_EQ(sequential_plan.planned_work[0].represented_hp_roi,
+            cv::Rect(0, 0, 16, 16));
+  EXPECT_EQ(sequential_plan.planned_work[0].execution_roi,
+            cv::Rect(0, 0, 16, 16));
+  EXPECT_EQ(sequential_plan.planned_work[1].node_id, 100);
+  EXPECT_TRUE(sequential_plan.planned_work[1].whole_output);
+  ASSERT_EQ(sequential_plan.task_graph.dependencies.size(), 1u);
+  EXPECT_EQ(sequential_plan.task_graph.dependencies[0].from_node_id, 42);
+  EXPECT_EQ(sequential_plan.task_graph.dependencies[0].to_node_id, 100);
+  ASSERT_EQ(sequential_plan.task_graph.tasks.size(), 2u);
+  auto task_for_node = [&](int node_id) -> const compute::PlannedTask& {
+    auto it = std::find_if(sequential_plan.task_graph.tasks.begin(),
+                           sequential_plan.task_graph.tasks.end(),
+                           [&](const compute::PlannedTask& task) {
+                             return task.node_id == node_id;
+                           });
+    EXPECT_NE(it, sequential_plan.task_graph.tasks.end());
+    return *it;
+  };
+  const auto& tile_task = task_for_node(42);
+  const auto& mono_task = task_for_node(100);
+  EXPECT_EQ(tile_task.kind, compute::PlannedTaskKind::Tile);
+  EXPECT_EQ(mono_task.kind, compute::PlannedTaskKind::Monolithic);
+  EXPECT_TRUE(mono_task.whole_output);
+  EXPECT_NE(std::find(sequential_plan.task_graph.initial_task_ids.begin(),
+                      sequential_plan.task_graph.initial_task_ids.end(),
+                      tile_task.task_id),
+            sequential_plan.task_graph.initial_task_ids.end());
+  EXPECT_NE(std::find(mono_task.dependency_task_ids.begin(),
+                      mono_task.dependency_task_ids.end(), tile_task.task_id),
+            mono_task.dependency_task_ids.end());
+  EXPECT_EQ(sequential_plan.task_graph.dependencies.size(),
+            parallel_plan.task_graph.dependencies.size());
+  EXPECT_EQ(sequential_plan.task_graph.tasks.size(),
+            parallel_plan.task_graph.tasks.size());
 }
 
-TEST(IntentUpdateCoordinatorSplit, ValidatesRtDirtyRoiAndDualSubmitDecision) {
+TEST(IntentUpdateCoordinatorSplit,
+     ValidatesRtDirtyRoiAndCoordinatesDualPathWithoutParallel) {
   EXPECT_THROW(compute::IntentUpdateCoordinator::validate(
                    ComputeIntent::RealTimeUpdate, std::nullopt),
                GraphError);
@@ -298,6 +345,71 @@ TEST(IntentUpdateCoordinatorSplit, ValidatesRtDirtyRoiAndDualSubmitDecision) {
   EXPECT_TRUE(decision.run_high_precision_update);
   EXPECT_TRUE(decision.run_real_time_update);
   EXPECT_TRUE(decision.submit_updates_concurrently);
+
+  auto inline_decision = compute::IntentUpdateCoordinator::decide(
+      ComputeIntent::RealTimeUpdate, false, true);
+  EXPECT_TRUE(inline_decision.requires_dirty_roi);
+  EXPECT_TRUE(inline_decision.run_high_precision_update);
+  EXPECT_TRUE(inline_decision.run_real_time_update);
+  EXPECT_FALSE(inline_decision.submit_updates_concurrently);
+
+  GraphRuntime::Info runtime_info;
+  runtime_info.name = "split-coordinator-test";
+  runtime_info.root = "cache/split-coordinator-test";
+  runtime_info.yaml = "";
+  runtime_info.config = "";
+  GraphRuntime runtime(runtime_info);
+  bool ran_hp = false;
+  bool ran_rt = false;
+  std::vector<std::string> stages;
+  NodeOutput rt_output = make_image_output(4, 4);
+  compute::IntentUpdateCallbacks callbacks;
+  callbacks.run_global_high_precision = [&]() -> NodeOutput& {
+    return rt_output;
+  };
+  callbacks.run_global_high_precision_dirty_recompute = [&]() -> NodeOutput& {
+    return rt_output;
+  };
+  callbacks.run_high_precision_update = [&]() { ran_hp = true; };
+  callbacks.run_real_time_update = [&]() -> NodeOutput& {
+    ran_rt = true;
+    return rt_output;
+  };
+  callbacks.real_time_output = [&]() -> NodeOutput& { return rt_output; };
+  callbacks.record_stage = [&](const std::string& stage) {
+    stages.push_back(stage);
+  };
+
+  NodeOutput& coordinated =
+      compute::IntentUpdateCoordinator::coordinate_intent_update(
+          ComputeIntent::RealTimeUpdate, &runtime, cv::Rect(0, 0, 4, 4),
+          callbacks);
+  EXPECT_EQ(&coordinated, &rt_output);
+  EXPECT_TRUE(ran_hp);
+  EXPECT_TRUE(ran_rt);
+  EXPECT_NE(std::find(stages.begin(), stages.end(),
+                      "intent_coordinator_decision_inline"),
+            stages.end());
+  EXPECT_NE(
+      std::find(stages.begin(), stages.end(), "intent_coordinator_inline_hp"),
+      stages.end());
+  EXPECT_NE(
+      std::find(stages.begin(), stages.end(), "intent_coordinator_inline_rt"),
+      stages.end());
+
+  ran_hp = false;
+  ran_rt = false;
+  stages.clear();
+  NodeOutput& coordinated_without_runtime =
+      compute::IntentUpdateCoordinator::coordinate_intent_update(
+          ComputeIntent::RealTimeUpdate, nullptr, cv::Rect(0, 0, 4, 4),
+          callbacks);
+  EXPECT_EQ(&coordinated_without_runtime, &rt_output);
+  EXPECT_TRUE(ran_hp);
+  EXPECT_TRUE(ran_rt);
+  EXPECT_NE(std::find(stages.begin(), stages.end(),
+                      "intent_coordinator_decision_inline"),
+            stages.end());
 }
 
 }  // namespace ps
