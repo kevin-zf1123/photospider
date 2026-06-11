@@ -123,11 +123,18 @@ and more detailed scheduler policy metadata.
 
 ## Traversal Boundary
 
-Dirty-region planning should continue to call current
-`GraphTraversalService::compute_upstream_roi` and related traversal APIs.
+Dirty-region planning now consumes the narrowed topology and propagation
+boundaries directly. `GraphTraversalService` is topology-only and provides
+traversal order plus explicit upstream/downstream topology queries backed by
+`GraphModel` adjacency. `DirtyRegionPlanner` uses `RoiPropagationService` for
+upstream ROI demand and `GraphExtentResolver` for HP-authoritative extent
+resolution. Traversal no longer exposes ROI projection, upstream ROI
+computation, dependency-tree formatting, or compatibility wrappers for removed
+APIs.
 
-TODO: split `GraphTraversalService` topology traversal from ROI/spatial
-propagation in a separate change.
+Dependency-tree inspection is structured: `GraphInspectService` builds
+dependency-tree snapshots from topology adjacency, `Kernel`/`InteractionService`
+return those snapshots, and CLI/TUI/frontend code renders human-readable text.
 
 ## Interaction Boundary
 
@@ -137,6 +144,8 @@ snapshot inspection and visualization APIs. It is not the authoritative source
 of dirty-region generation or propagation.
 
 `InteractionService` now exposes a dirty snapshot debug summary for inspection.
+It also exposes structured dependency-tree and graph-inspection snapshots so
+frontends can parse graph structure before choosing a presentation format.
 
 TODO: add richer visualization APIs after the graph-scoped dirty state has a
 frontend display contract.

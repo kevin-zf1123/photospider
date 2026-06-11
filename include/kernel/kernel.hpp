@@ -17,6 +17,7 @@
 #include "kernel/services/graph_inspect_service.hpp"
 #include "kernel/services/graph_io_service.hpp"
 #include "kernel/services/graph_traversal_service.hpp"
+#include "kernel/services/roi_propagation_service.hpp"
 
 namespace ps {
 
@@ -95,12 +96,12 @@ class Kernel {
   std::optional<GraphModel::DiskSyncResult> synchronize_disk_cache_stats(
       const std::string& name, const std::string& cache_precision);
 
-  std::optional<std::string> dump_dependency_tree(const std::string& name,
-                                                  std::optional<int> node_id,
-                                                  bool show_parameters,
-                                                  bool show_metadata = false);
-  std::optional<std::string> inspect_node(const std::string& name, int node_id);
-  std::optional<std::string> inspect_graph(const std::string& name);
+  std::optional<DependencyTree> dependency_tree(const std::string& name,
+                                                std::optional<int> node_id,
+                                                bool include_metadata = false);
+  std::optional<GraphNodeInspectInfo> inspect_node(const std::string& name,
+                                                   int node_id);
+  std::optional<GraphInspectionSnapshot> inspect_graph(const std::string& name);
   std::optional<LastError> last_error(const std::string& name) const;
   std::optional<std::vector<int>> ending_nodes(const std::string& name);
   std::optional<std::vector<int>> topo_postorder_from(const std::string& name,
@@ -193,6 +194,7 @@ class Kernel {
   GraphInspectService inspect_service_;
   GraphCacheService cache_service_;
   GraphIOService io_service_;
+  RoiPropagationService roi_propagation_service_;
 
   // [M3.4] 调度器配置
   SchedulerConfig scheduler_config_;

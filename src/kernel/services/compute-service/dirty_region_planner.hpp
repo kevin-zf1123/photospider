@@ -5,10 +5,12 @@
 
 #include "graph_model.hpp"
 #include "kernel/services/compute-service/dirty_region_snapshot.hpp"
+#include "kernel/services/graph_extent_resolver.hpp"
 
 namespace ps {
 class GraphTraversalService;
-}
+class RoiPropagationService;
+}  // namespace ps
 
 namespace ps::compute {
 
@@ -41,7 +43,8 @@ struct RealTimeDirtyPlan {
 
 class DirtyRegionPlanner {
  public:
-  explicit DirtyRegionPlanner(GraphTraversalService& traversal);
+  DirtyRegionPlanner(GraphTraversalService& traversal,
+                     RoiPropagationService& roi_propagation);
 
   HighPrecisionDirtyPlan plan_high_precision(GraphModel& graph, int node_id,
                                              const cv::Rect& dirty_roi);
@@ -60,6 +63,8 @@ class DirtyRegionPlanner {
                        const cv::Rect& roi, int tile_size) const;
 
   GraphTraversalService& traversal_;
+  RoiPropagationService& roi_propagation_;
+  GraphExtentResolver extent_resolver_;
   uint64_t generation_counter_ = 0;
 };
 

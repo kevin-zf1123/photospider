@@ -1,4 +1,5 @@
 #include <algorithm>
+#include <array>
 #include <atomic>
 #include <chrono>
 #include <cmath>
@@ -67,6 +68,100 @@ json rect_json(const cv::Rect& rect) {
 
 json size_json(const cv::Size& size) {
   return {{"width", size.width}, {"height", size.height}};
+}
+
+std::string yaml_string(const YAML::Node& node);
+
+json matrix_json(const std::array<double, 9>& matrix) {
+  return json::array({matrix[0], matrix[1], matrix[2], matrix[3], matrix[4],
+                      matrix[5], matrix[6], matrix[7], matrix[8]});
+}
+
+json metadata_json(const std::optional<ps::NodeMetadataSummary>& metadata) {
+  if (!metadata) {
+    return {{"included", false}};
+  }
+  json out = {{"included", true},
+              {"has_cached_output", metadata->has_cached_output},
+              {"source_label", metadata->source_label}};
+  if (!metadata->has_cached_output) {
+    return out;
+  }
+  out["debug"] = {{"worker", metadata->debug.computed_by_worker_id},
+                  {"timestamp_us", metadata->debug.timestamp_us},
+                  {"execution_time_ms", metadata->debug.execution_time_ms},
+                  {"min_val", metadata->debug.min_val},
+                  {"max_val", metadata->debug.max_val},
+                  {"has_nan", metadata->debug.has_nan},
+                  {"compute_device", metadata->debug.compute_device}};
+  out["space"] = {
+      {"absolute_roi", rect_json(metadata->space.absolute_roi)},
+      {"global_scale_x", metadata->space.global_scale_x},
+      {"global_scale_y", metadata->space.global_scale_y},
+      {"transform_matrix", matrix_json(metadata->space.transform_matrix)},
+      {"inverse_matrix", matrix_json(metadata->space.inverse_matrix)},
+      {"local_inverse_matrix",
+       matrix_json(metadata->space.local_inverse_matrix)}};
+  return out;
+}
+
+json node_inspect_json(const ps::GraphNodeInspectInfo& node) {
+  return {{"id", node.id},
+          {"name", node.name},
+          {"type", node.type},
+          {"subtype", node.subtype},
+          {"parameters", yaml_string(node.parameters)},
+          {"metadata", metadata_json(node.metadata)}};
+}
+
+json graph_inspection_json(const ps::GraphInspectionSnapshot& snapshot) {
+  json nodes = json::array();
+  for (const auto& node : snapshot.nodes) {
+    nodes.push_back(node_inspect_json(node));
+  }
+  return {{"nodes", nodes}, {"node_count", nodes.size()}};
+}
+
+std::string edge_kind_name(ps::GraphTopologyEdgeKind kind) {
+  switch (kind) {
+    case ps::GraphTopologyEdgeKind::ImageInput:
+      return "image";
+    case ps::GraphTopologyEdgeKind::ParameterInput:
+      return "parameter";
+  }
+  return "unknown";
+}
+
+json topology_edge_json(const ps::GraphTopologyEdge& edge) {
+  return {{"from_node_id", edge.from_node_id},
+          {"to_node_id", edge.to_node_id},
+          {"kind", edge_kind_name(edge.kind)},
+          {"from_output_name", edge.from_output_name},
+          {"to_input_name", edge.to_input_name},
+          {"input_index", edge.input_index}};
+}
+
+json dependency_tree_json(const ps::DependencyTree& tree) {
+  json entries = json::array();
+  for (const auto& entry : tree.entries) {
+    entries.push_back(
+        {{"depth", entry.depth},
+         {"cycle", entry.cycle},
+         {"incoming_edge", entry.incoming_edge
+                               ? topology_edge_json(*entry.incoming_edge)
+                               : json(nullptr)},
+         {"node", node_inspect_json(entry.node)}});
+  }
+  return {{"scope", tree.scope == ps::DependencyTree::Scope::StartNode
+                        ? "start_node"
+                        : "ending_nodes"},
+          {"start_node_id",
+           tree.start_node_id ? json(*tree.start_node_id) : json(nullptr)},
+          {"graph_empty", tree.graph_empty},
+          {"start_node_found", tree.start_node_found},
+          {"no_ending_nodes", tree.no_ending_nodes},
+          {"root_node_ids", tree.root_node_ids},
+          {"entries", entries}};
 }
 
 std::string data_type_name(ps::DataType type) {
@@ -536,16 +631,11 @@ json graph_snapshot(ps::Kernel& kernel, const std::string& graph_name) {
         out["last_compute_plan"] = compute_plan_json(graph.last_compute_plan);
         out["recent_compute_plans"] =
             compute_plan_history_json(graph.recent_compute_plans);
-        std::vector<int> ids;
-        ids.reserve(graph.nodes.size());
-        for (const auto& [id, _] : graph.nodes) {
-          ids.push_back(id);
-        }
-        std::sort(ids.begin(), ids.end());
+        std::vector<int> ids = graph.node_ids();
         out["node_order"] = ids;
         out["nodes"] = json::object();
         for (int id : ids) {
-          const ps::Node& node = graph.nodes.at(id);
+          const ps::Node& node = graph.node(id);
           json node_json;
           node_json["id"] = node.id;
           node_json["name"] = node.name;
@@ -1191,17 +1281,20 @@ void mutate_dirty_region(ps::Kernel& kernel, const std::string& graph_name,
                          const cv::Rect& dirty_roi) {
   kernel.runtime(graph_name)
       .post([dirty_roi](ps::GraphModel& graph) {
-        auto& source = graph.nodes.at(1);
-        if (source.cached_output_high_precision) {
-          cv::Mat mat =
-              ps::toCvMat(source.cached_output_high_precision->image_buffer);
-          mat(dirty_roi).setTo(cv::Scalar::all(33.0f));
-        }
+        graph.mutate_node_runtime_state(1, [&](auto& source_state) {
+          if (source_state.cached_output_high_precision) {
+            cv::Mat mat = ps::toCvMat(
+                source_state.cached_output_high_precision->image_buffer);
+            mat(dirty_roi).setTo(cv::Scalar::all(33.0f));
+          }
+        });
         for (int id : {2, 100}) {
-          graph.nodes.at(id).cached_output_high_precision.reset();
-          graph.nodes.at(id).cached_output_real_time.reset();
-          graph.nodes.at(id).hp_roi.reset();
-          graph.nodes.at(id).rt_roi.reset();
+          graph.mutate_node_runtime_state(id, [](auto& state) {
+            state.cached_output_high_precision.reset();
+            state.cached_output_real_time.reset();
+            state.hp_roi.reset();
+            state.rt_roi.reset();
+          });
         }
         return 0;
       })
@@ -1263,6 +1356,9 @@ int main(int argc, char** argv) {
         " legacy=" + std::to_string(loaded_legacy.has_value()) +
         " error=" + std::to_string(loaded_error.has_value()));
 
+    auto full_graph_inspect = svc.cmd_inspect_graph(full_graph);
+    auto full_tree = svc.cmd_dependency_tree(full_graph, 100, true);
+
     json before = {
         {"graphs", svc.cmd_list_graphs()},
         {"full_node_ids",
@@ -1274,9 +1370,11 @@ int main(int argc, char** argv) {
         {"full_traversal_orders",
          svc.cmd_traversal_orders(full_graph)
              .value_or(std::map<int, std::vector<int>>{})},
-        {"full_graph_inspect", svc.cmd_inspect_graph(full_graph).value_or("")},
-        {"full_tree",
-         svc.cmd_dump_tree(full_graph, 100, true, true).value_or("")}};
+        {"full_graph_inspect_struct",
+         full_graph_inspect ? graph_inspection_json(*full_graph_inspect)
+                            : json(nullptr)},
+        {"full_dependency_tree_struct",
+         full_tree ? dependency_tree_json(*full_tree) : json(nullptr)}};
     write_json(root / "full-kernel-run" / "actual" / "before_compute.json",
                before);
 

@@ -54,7 +54,10 @@ then upgraded later into clearer, higher-confidence tests.
 The following are recognized follow-up refactors, not part of the current
 kernel-contract cleanup:
 
-- Split `GraphTraversalService` topology traversal from ROI/spatial propagation.
+- Add richer dirty snapshot visualization APIs after the frontend display
+  contract is defined.
+- Decide whether global HP dirty ROI should use optimized partial HP update
+  planning in all entry paths.
 
 The `ComputeService` split now has a dedicated `split-compute-service`
 OpenSpec change and a maintained plan in `Compute-Service-Split.md`. The first
@@ -64,5 +67,7 @@ split is implemented behind internal modules under
 `test_kernel_contracts`, `test_propagation_contracts`, `test_scheduler`,
 `test_milestone34`, and `test_gpu_pipeline_scheduler`.
 
-The `GraphTraversalService` topology/ROI split should receive a separate
-OpenSpec change after the compute split boundaries are stable.
+The `GraphTraversalService` topology/ROI split has landed. Boundary coverage
+lives in `tests/test_graph_topology_boundaries.cpp`,
+`tests/test_propagation_contracts.cpp`, and the reproducible evidence under
+`tests/results/split-graph-traversal-service/`.

@@ -102,10 +102,12 @@ planner plugin ABI 和更详细的 scheduler policy metadata。
 
 ## Traversal 边界
 
-脏区规划应继续调用当前 `GraphTraversalService::compute_upstream_roi` 以及相关
-traversal API。
+脏区规划现在直接消费收窄后的拓扑边界和传播边界。`GraphTraversalService` 只负责拓扑，通过
+`GraphModel` 邻接索引提供遍历顺序和显式的上游/下游拓扑查询。`DirtyRegionPlanner` 使用
+`RoiPropagationService` 计算上游 ROI 需求，并使用 `GraphExtentResolver` 进行 HP 权威范围解析。
+Traversal 不再暴露 ROI 投影、上游 ROI 计算、依赖树格式化，也不保留已移除 API 的兼容 wrapper。
 
-TODO：在独立 change 中拆分 `GraphTraversalService` 的拓扑遍历和 ROI/空间传播。
+Dependency-tree inspect 是结构化的：`GraphInspectService` 基于 topology adjacency 构建 dependency-tree snapshot，`Kernel`/`InteractionService` 返回这些 snapshot，CLI/TUI/frontend code 再渲染人类可读文本。
 
 ## 交互边界
 
@@ -113,7 +115,7 @@ TODO：在独立 change 中拆分 `GraphTraversalService` 的拓扑遍历和 ROI
 语境中，它应暴露图级 dirty snapshot 检查和可视化 API。它不是 dirty-region generation 或
 propagation 的权威来源。
 
-`InteractionService` 现在已经暴露 dirty snapshot debug 摘要，供 inspection 使用。
+`InteractionService` 现在已经暴露 dirty snapshot debug 摘要，供 inspection 使用。它也会暴露结构化 dependency-tree 和 graph-inspection snapshot，使 frontend 可以先解析图结构，再选择展示格式。
 
 TODO：在图级 dirty state 具备 frontend 展示契约后，添加更丰富的可视化 API。
 

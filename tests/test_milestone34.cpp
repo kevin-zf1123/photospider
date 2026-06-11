@@ -266,7 +266,7 @@ TEST(M34_Integration, ComputeWithInjectedScheduler) {
   ASSERT_TRUE(success);
   auto& runtime = kernel.runtime(graph_name);
   const auto& result =
-      runtime.model().nodes.at(node_id).cached_output_high_precision.value();
+      runtime.model().node(node_id).cached_output_high_precision.value();
 
   // Verify computation completed
   EXPECT_TRUE(result.image_buffer.width > 0 || !result.data.empty());
@@ -304,7 +304,7 @@ TEST(M34_Integration, ComputeWithSerialScheduler) {
   ASSERT_TRUE(success);
   auto& runtime = kernel.runtime(graph_name);
   const auto& result =
-      runtime.model().nodes.at(node_id).cached_output_high_precision.value();
+      runtime.model().node(node_id).cached_output_high_precision.value();
 
   // Verify computation completed
   EXPECT_TRUE(result.image_buffer.width > 0 || !result.data.empty());

@@ -14,6 +14,7 @@ CLI / TUI
   -> GraphRuntime
   -> ComputeService
   -> OpRegistry / GraphCacheService / GraphTraversalService
+  -> RoiPropagationService / GraphExtentResolver
 ```
 
 `Kernel` owns the multi-graph API. `GraphRuntime` owns one graph model, event
@@ -24,6 +25,11 @@ overall role is to decouple CLI/TUI/frontend commands from kernel internals. In
 the dirty-region context, it should expose graph-scoped dirty snapshot queries
 and visualization hooks; it is not the authoritative source of dirty-region
 generation or propagation.
+
+`GraphTraversalService` is topology-only. It provides traversal order and
+explicit upstream/downstream topology queries from `GraphModel` adjacency.
+Dirty-region demand and ROI projection use `RoiPropagationService`, while
+formal propagation extents come from `GraphExtentResolver`.
 
 Target compute planning flow after the `ComputeService` split:
 

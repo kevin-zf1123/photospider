@@ -146,23 +146,18 @@ void populate_dependencies_from_graph(ComputePlan& result, DirtyDomain domain,
   std::unordered_set<int> planned_set(result.planned_nodes.begin(),
                                       result.planned_nodes.end());
   for (int node_id : result.planned_nodes) {
-    auto node_it = graph->nodes.find(node_id);
-    if (node_it == graph->nodes.end())
+    if (!graph->has_node(node_id))
       continue;
-    const Node& node = node_it->second;
-    for (const auto& input : node.image_inputs) {
-      if (input.from_node_id >= 0 && planned_set.count(input.from_node_id)) {
-        add_dependency(result.task_graph.dependencies, input.from_node_id,
-                       node_id, domain, "image", cv::Rect(), cv::Rect(),
-                       DirtyEdgeDirection::BackwardDemand);
+    for (const auto& edge : graph->upstream_edges(node_id)) {
+      if (edge.from_node_id < 0 || !planned_set.count(edge.from_node_id)) {
+        continue;
       }
-    }
-    for (const auto& input : node.parameter_inputs) {
-      if (input.from_node_id >= 0 && planned_set.count(input.from_node_id)) {
-        add_dependency(result.task_graph.dependencies, input.from_node_id,
-                       node_id, domain, "parameter", cv::Rect(), cv::Rect(),
-                       DirtyEdgeDirection::BackwardDemand);
-      }
+      const char* kind = edge.kind == GraphTopologyEdgeKind::ImageInput
+                             ? "image"
+                             : "parameter";
+      add_dependency(result.task_graph.dependencies, edge.from_node_id, node_id,
+                     domain, kind, cv::Rect(), cv::Rect(),
+                     DirtyEdgeDirection::BackwardDemand);
     }
   }
 }

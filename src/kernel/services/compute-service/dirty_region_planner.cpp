@@ -6,6 +6,7 @@
 #include "kernel/param_utils.hpp"
 #include "kernel/services/compute-service/compute_geometry.hpp"
 #include "kernel/services/graph_traversal_service.hpp"
+#include "kernel/services/roi_propagation_service.hpp"
 
 namespace ps::compute {
 
@@ -14,8 +15,9 @@ bool DirtyRegionSnapshot::empty() const {
          per_node_dirty_rois.empty() && edge_mappings.empty();
 }
 
-DirtyRegionPlanner::DirtyRegionPlanner(GraphTraversalService& traversal)
-    : traversal_(traversal) {}
+DirtyRegionPlanner::DirtyRegionPlanner(GraphTraversalService& traversal,
+                                       RoiPropagationService& roi_propagation)
+    : traversal_(traversal), roi_propagation_(roi_propagation) {}
 
 HighPrecisionDirtyPlan DirtyRegionPlanner::plan_high_precision(
     GraphModel& graph, int node_id, const cv::Rect& dirty_roi) {
@@ -40,12 +42,12 @@ HighPrecisionDirtyPlan DirtyRegionPlanner::plan_high_precision(
     auto [it, inserted] = result.entries.emplace(nid, HpPlanEntry{});
     if (inserted) {
       it->second.hp_size = infer_hp_size(graph, nid, hp_size_cache);
-      it->second.halo_hp = infer_halo_hp(graph.nodes.at(nid));
+      it->second.halo_hp = infer_halo_hp(graph.node(nid));
     } else {
       if (it->second.hp_size.width <= 0 || it->second.hp_size.height <= 0)
         it->second.hp_size = infer_hp_size(graph, nid, hp_size_cache);
       if (it->second.halo_hp == 0)
-        it->second.halo_hp = infer_halo_hp(graph.nodes.at(nid));
+        it->second.halo_hp = infer_halo_hp(graph.node(nid));
     }
     return it->second;
   };
@@ -68,18 +70,19 @@ HighPrecisionDirtyPlan DirtyRegionPlanner::plan_high_precision(
     if (is_rect_empty(current_entry.roi_hp))
       continue;
 
-    const Node& current_node = graph.nodes.at(current_id);
+    const Node& current_node = graph.node(current_id);
     current_entry.halo_hp =
         std::max(current_entry.halo_hp, infer_halo_hp(current_node));
 
-    cv::Rect upstream_roi_hp = GraphTraversalService::compute_upstream_roi(
+    cv::Rect upstream_roi_hp = roi_propagation_.compute_upstream_roi(
         current_node, current_entry.roi_hp, graph, size_cache);
     upstream_roi_hp = align_rect(upstream_roi_hp, kHpMicroTileSize);
 
-    for (const auto& img_input : current_node.image_inputs) {
-      if (img_input.from_node_id < 0)
+    for (const auto& edge : graph.upstream_edges(current_id)) {
+      if (edge.kind != GraphTopologyEdgeKind::ImageInput ||
+          edge.from_node_id < 0)
         continue;
-      HpPlanEntry& parent_entry = ensure_entry(img_input.from_node_id);
+      HpPlanEntry& parent_entry = ensure_entry(edge.from_node_id);
       cv::Rect parent_roi = clip_rect(upstream_roi_hp, parent_entry.hp_size);
       if (is_rect_empty(parent_roi))
         continue;
@@ -89,7 +92,7 @@ HighPrecisionDirtyPlan DirtyRegionPlanner::plan_high_precision(
               : clip_rect(merge_rect(parent_entry.roi_hp, parent_roi),
                           parent_entry.hp_size);
       result.snapshot.edge_mappings.push_back(
-          {img_input.from_node_id, current_id, DirtyDomain::HighPrecision,
+          {edge.from_node_id, current_id, DirtyDomain::HighPrecision,
            parent_roi, current_entry.roi_hp,
            DirtyEdgeDirection::BackwardDemand});
     }
@@ -108,8 +111,8 @@ HighPrecisionDirtyPlan DirtyRegionPlanner::plan_high_precision(
       continue;
     }
     if (entry.halo_hp == 0)
-      entry.halo_hp = infer_halo_hp(graph.nodes.at(nid));
-    if (is_monolithic_boundary(graph.nodes.at(nid))) {
+      entry.halo_hp = infer_halo_hp(graph.node(nid));
+    if (is_monolithic_boundary(graph.node(nid))) {
       entry.roi_hp = cv::Rect(0, 0, entry.hp_size.width, entry.hp_size.height);
       result.snapshot.dirty_monolithic_nodes.push_back(
           {nid, DirtyDomain::HighPrecision, entry.roi_hp, true});
@@ -153,7 +156,7 @@ RealTimeDirtyPlan DirtyRegionPlanner::plan_real_time(
       it->second.hp_size = infer_hp_size(graph, nid, hp_size_cache);
       it->second.rt_size =
           scale_down_size(it->second.hp_size, kRtDownscaleFactor);
-      it->second.halo_hp = infer_halo_hp(graph.nodes.at(nid));
+      it->second.halo_hp = infer_halo_hp(graph.node(nid));
       it->second.halo_rt =
           (it->second.halo_hp + kRtDownscaleFactor - 1) / kRtDownscaleFactor;
     } else {
@@ -163,7 +166,7 @@ RealTimeDirtyPlan DirtyRegionPlanner::plan_real_time(
             scale_down_size(it->second.hp_size, kRtDownscaleFactor);
       }
       if (it->second.halo_hp == 0) {
-        it->second.halo_hp = infer_halo_hp(graph.nodes.at(nid));
+        it->second.halo_hp = infer_halo_hp(graph.node(nid));
         it->second.halo_rt =
             (it->second.halo_hp + kRtDownscaleFactor - 1) / kRtDownscaleFactor;
       }
@@ -198,22 +201,23 @@ RealTimeDirtyPlan DirtyRegionPlanner::plan_real_time(
     if (is_rect_empty(current_entry.roi_hp))
       continue;
 
-    const Node& current_node = graph.nodes.at(current_id);
+    const Node& current_node = graph.node(current_id);
     current_entry.halo_hp =
         std::max(current_entry.halo_hp, infer_halo_hp(current_node));
     current_entry.halo_rt =
         (current_entry.halo_hp + kRtDownscaleFactor - 1) / kRtDownscaleFactor;
 
-    cv::Rect upstream_roi_hp = GraphTraversalService::compute_upstream_roi(
+    cv::Rect upstream_roi_hp = roi_propagation_.compute_upstream_roi(
         current_node, current_entry.roi_hp, graph, size_cache);
     upstream_roi_hp = clip_rect(upstream_roi_hp, current_entry.hp_size);
     if (is_rect_empty(upstream_roi_hp))
       continue;
 
-    for (const auto& img_input : current_node.image_inputs) {
-      if (img_input.from_node_id < 0)
+    for (const auto& edge : graph.upstream_edges(current_id)) {
+      if (edge.kind != GraphTopologyEdgeKind::ImageInput ||
+          edge.from_node_id < 0)
         continue;
-      RtPlanEntry& parent_entry = ensure_entry(img_input.from_node_id);
+      RtPlanEntry& parent_entry = ensure_entry(edge.from_node_id);
       cv::Rect parent_roi = clip_rect(align_rect(upstream_roi_hp, kHpAlignment),
                                       parent_entry.hp_size);
       if (is_rect_empty(parent_roi))
@@ -224,9 +228,8 @@ RealTimeDirtyPlan DirtyRegionPlanner::plan_real_time(
               : clip_rect(merge_rect(parent_entry.roi_hp, parent_roi),
                           parent_entry.hp_size);
       result.snapshot.edge_mappings.push_back(
-          {img_input.from_node_id, current_id, DirtyDomain::RealTime,
-           parent_roi, current_entry.roi_hp,
-           DirtyEdgeDirection::BackwardDemand});
+          {edge.from_node_id, current_id, DirtyDomain::RealTime, parent_roi,
+           current_entry.roi_hp, DirtyEdgeDirection::BackwardDemand});
     }
   }
 
@@ -252,11 +255,11 @@ RealTimeDirtyPlan DirtyRegionPlanner::plan_real_time(
       continue;
     }
     if (entry.halo_hp == 0) {
-      entry.halo_hp = infer_halo_hp(graph.nodes.at(nid));
+      entry.halo_hp = infer_halo_hp(graph.node(nid));
       entry.halo_rt =
           (entry.halo_hp + kRtDownscaleFactor - 1) / kRtDownscaleFactor;
     }
-    if (is_monolithic_boundary(graph.nodes.at(nid))) {
+    if (is_monolithic_boundary(graph.node(nid))) {
       entry.roi_hp = cv::Rect(0, 0, entry.hp_size.width, entry.hp_size.height);
       entry.roi_rt = cv::Rect(0, 0, entry.rt_size.width, entry.rt_size.height);
       result.snapshot.dirty_monolithic_nodes.push_back(
@@ -284,43 +287,7 @@ cv::Size DirtyRegionPlanner::infer_hp_size(
     return cache.at(node_id);
 
   cv::Size size{0, 0};
-  const Node& node = graph.nodes.at(node_id);
-  auto take_from_output = [&](const std::optional<NodeOutput>& opt) -> bool {
-    if (!opt)
-      return false;
-    const auto& img = opt->image_buffer;
-    if (img.width <= 0 || img.height <= 0)
-      return false;
-    size = cv::Size(img.width, img.height);
-    return true;
-  };
-  if (take_from_output(node.cached_output_high_precision)) {
-    cache[node_id] = size;
-    return size;
-  }
-
-  const int width =
-      as_int_flexible(node.runtime_parameters, "width",
-                      as_int_flexible(node.parameters, "width", 0));
-  const int height =
-      as_int_flexible(node.runtime_parameters, "height",
-                      as_int_flexible(node.parameters, "height", 0));
-  if (width > 0 && height > 0) {
-    size = cv::Size(width, height);
-    cache[node_id] = size;
-    return size;
-  }
-
-  for (const auto& input : node.image_inputs) {
-    if (input.from_node_id < 0)
-      continue;
-    cv::Size parent_size = infer_hp_size(graph, input.from_node_id, cache);
-    if (parent_size.width > 0 && parent_size.height > 0) {
-      size = parent_size;
-      break;
-    }
-  }
-  cache[node_id] = size;
+  size = extent_resolver_.resolve_output_extent(graph, node_id, cache);
   return size;
 }
 

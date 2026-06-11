@@ -48,6 +48,7 @@ graph TD
     Kernel --> GraphTraversalService
     Kernel --> GraphCacheService
     Kernel --> GraphInspectService
+    Kernel --> RoiPropagationService
     Kernel --> PluginManager
 
     GraphRuntime --> GraphModel
@@ -56,6 +57,8 @@ graph TD
 
     ComputeService --> GraphModel
     ComputeService --> GraphTraversalService
+    ComputeService --> RoiPropagationService
+    ComputeService --> GraphExtentResolver
     ComputeService --> GraphCacheService
     ComputeService --> GraphEventService
     ComputeService --> OpRegistry
@@ -70,12 +73,14 @@ graph TD
 | --- | --- |
 | `Kernel` | 多图 facade、服务 owner、运行时 bootstrapper、顶层图/缓存/计算 API。 |
 | `GraphRuntime` | 每图执行容器，包含模型、事件、调度器、worker 状态和平台 context。 |
-| `GraphModel` | 图状态持有者：节点、缓存根目录、计时数据、quiet/skip-save 标志。 |
+| `GraphModel` | 图状态持有者：私有节点存储、拓扑邻接索引、缓存根目录、计时数据、quiet/skip-save 标志。 |
 | `InteractionService` | 面向 CLI 的 `Kernel` wrapper，使命令代码保持较薄。 |
 | `ComputeService` | 解析依赖、检查缓存、执行 op，协调 RT/HP/tiled 路径和计时事件。 |
-| `GraphTraversalService` | 依赖树、遍历顺序、图有效性、ROI 投影 helper。 |
+| `GraphTraversalService` | 只负责拓扑：基于 `GraphModel` 邻接索引提供遍历顺序、结束节点发现、祖先检查、上游依赖查询和下游依赖查询。 |
+| `RoiPropagationService` | ROI/空间传播边界，负责单节点上游 ROI 计算以及图级 forward/backward ROI 投影。 |
+| `GraphExtentResolver` | HP 权威的输出范围解析器，供 ROI 传播和脏区规划使用。 |
 | `GraphCacheService` | 内存/磁盘缓存操作和缓存同步。 |
-| `GraphInspectService` | 人类可读的缓存和空间元数据 inspect。 |
+| `GraphInspectService` | 基于图拓扑构建结构化缓存/空间元数据 inspect 和 dependency-tree snapshot。 |
 | `GraphEventService` | 每节点计算事件收集。 |
 | `PluginManager` | 加载操作插件并记录操作来源。 |
 | `OpRegistry` | 全局操作实现 registry，包括 HP/RT、tiled/monolithic、设备元数据和 ROI propagator。 |
@@ -105,12 +110,13 @@ graph TD
 2. `InteractionService` 调用 `Kernel`。
 3. `Kernel` 解析活跃的 `GraphRuntime`。
 4. `Kernel` 创建或使用 `ComputeService` 所需服务。
-5. `ComputeService` 通过 `GraphTraversalService` 解析依赖。
+5. `ComputeService` 通过 `GraphTraversalService` 解析拓扑顺序。
 6. `ComputeService` 通过 `GraphCacheService` 检查内存和磁盘缓存。
-7. `ComputeService` 从 `OpRegistry` 选择操作实现。
-8. 工作通过递归或配置的调度器路径执行。
-9. `GraphEventService` 记录每节点事件和计时数据。
-10. 结果通过 `Kernel` 和 `InteractionService` 暴露回去。
+7. 脏区路径通过 `RoiPropagationService` 和 `GraphExtentResolver` 计算 ROI 需求和 HP 权威范围。
+8. `ComputeService` 从 `OpRegistry` 选择操作实现。
+9. 工作通过递归或配置的调度器路径执行。
+10. `GraphEventService` 记录每节点事件和计时数据。
+11. 结果通过 `Kernel` 和 `InteractionService` 暴露回去。
 
 ## 调度器模型
 
@@ -170,7 +176,7 @@ planned parallel work 的 dispatch 契约。`GraphRuntime` worker queue 仍是 s
 
 ## 脏区传播
 
-ROI 传播通过 registry 提供的 propagator 和 traversal helper 处理。活跃传播说明位于 `docs/kernel-architecture/Dirty-Region-Propagation.md`。
+ROI 传播通过 `RoiPropagationService` 处理，它使用 registry 提供的 propagator、`GraphModel` 拓扑邻接和 `GraphExtentResolver`。活跃传播说明位于 `docs/kernel-architecture/Dirty-Region-Propagation.md`。
 
 重要当前行为：
 
@@ -186,12 +192,11 @@ ROI 传播通过 registry 提供的 propagator 和 traversal helper 处理。活
 
 - `Kernel` 较宽，同时充当图管理器、服务 owner、运行时管理器、缓存 API、计算 API 和编辑 API。
 - `ComputeService` 包含 planning、cache coordination、execution、ROI update、scheduler interaction 和 metrics emission。
-- `GraphTraversalService` 将拓扑遍历与 ROI/空间传播 helper 混在一起。
 - 缓存 API 仍同时暴露遗留概念和较新的 RT/HP 概念。
 
 `ComputeService` 拆分现在由 `split-compute-service` OpenSpec change 和维护文档
-`Compute-Service-Split.md` 跟踪。TODO：实现仍待完成。`GraphTraversalService`
-拓扑/ROI 拆分仍是独立的后续重构。
+`Compute-Service-Split.md` 跟踪。`GraphTraversalService` 拓扑/ROI 拆分已经落地：
+traversal 现在只负责拓扑，ROI 传播是独立服务，范围解析显式化，dependency-tree data 由 inspect 边界结构化，通过 `InteractionService` 暴露，并由 CLI/TUI/frontend code 渲染。
 
 ## 维护文档边界
 

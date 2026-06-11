@@ -54,7 +54,7 @@ TEST(SchedulerTestM33, ParallelComputeWithNewScheduler) {
                                  /*parallel*/ true);
   ASSERT_TRUE(success);
   const auto& result =
-      runtime.model().nodes.at(node_id).cached_output_high_precision.value();
+      runtime.model().node(node_id).cached_output_high_precision.value();
 
   // 验证计算完成
   EXPECT_TRUE(result.image_buffer.width > 0 || !result.data.empty());
@@ -195,20 +195,26 @@ TEST(Scheduler, DirtyRegionTiledComputation) {
   // 修正点: 明确 Lambda 返回类型为 void
   runtime
       .post([&](ps::GraphModel& g) -> void {
-        auto& source_node = g.nodes.at(1);
-        // HP formal cache must be populated after compute
-        ASSERT_TRUE(source_node.cached_output_high_precision.has_value());
+        g.mutate_node_runtime_state(1, [&](auto& source_state) {
+          // HP formal cache must be populated after compute
+          ASSERT_TRUE(
+              source_state.cached_output_high_precision.has_value());
 
-        // Modify the HP cached image to simulate a dirty region
-        cv::Mat mat =
-            ps::toCvMat(source_node.cached_output_high_precision->image_buffer);
+          // Modify the HP cached image to simulate a dirty region
+          cv::Mat mat = ps::toCvMat(
+              source_state.cached_output_high_precision->image_buffer);
 
-        mat(dirty_rect).setTo(cv::Scalar(1.0f));
+          mat(dirty_rect).setTo(cv::Scalar(1.0f));
+        });
 
         // Invalidate downstream HP caches since source was modified.
         // The HP background update (force_recache=true) will recompute them.
-        g.nodes.at(2).cached_output_high_precision.reset();
-        g.nodes.at(3).cached_output_high_precision.reset();
+        g.mutate_node_runtime_state(2, [](auto& state) {
+          state.cached_output_high_precision.reset();
+        });
+        g.mutate_node_runtime_state(3, [](auto& state) {
+          state.cached_output_high_precision.reset();
+        });
       })
       .get();
 

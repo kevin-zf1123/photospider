@@ -17,6 +17,7 @@
 #include "kernel/services/compute-service/node_executor.hpp"
 #include "kernel/services/compute-service/node_input_resolver.hpp"
 #include "kernel/services/graph_traversal_service.hpp"
+#include "kernel/services/roi_propagation_service.hpp"
 
 namespace ps {
 namespace {
@@ -121,7 +122,7 @@ TEST(NodeInputResolverSplit,
       child,
       [&](int upstream_id) -> const NodeOutput* {
         return compute::ComputeCachePolicy::reusable_output(
-            graph.nodes.at(upstream_id));
+            graph.node(upstream_id));
       },
       "resolver test");
 
@@ -137,7 +138,7 @@ TEST(NodeInputResolverSplit,
   EXPECT_THROW(compute::NodeInputResolver::resolve(
                    missing_named_output,
                    [&](int) -> const NodeOutput* {
-                     return &*graph.nodes.at(10).cached_output_high_precision;
+                     return &*graph.node(10).cached_output_high_precision;
                    },
                    "resolver test"),
                GraphError);
@@ -244,7 +245,8 @@ TEST(DirtyRegionPlannerSplit,
   graph.validate_topology();
 
   GraphTraversalService traversal;
-  compute::DirtyRegionPlanner planner(traversal);
+  RoiPropagationService propagation;
+  compute::DirtyRegionPlanner planner(traversal, propagation);
   auto plan = planner.plan_high_precision(graph, 42, cv::Rect(5, 5, 10, 10));
 
   ASSERT_TRUE(plan.entries.count(42));

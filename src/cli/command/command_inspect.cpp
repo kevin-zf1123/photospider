@@ -3,6 +3,7 @@
 
 #include "cli/command/commands.hpp"
 #include "cli/command/help_utils.hpp"
+#include "cli/dependency_tree_formatter.hpp"
 
 bool handle_inspect(std::istringstream& iss, ps::InteractionService& svc,
                     std::string& current_graph, bool& /*modified*/,
@@ -23,8 +24,8 @@ bool handle_inspect(std::istringstream& iss, ps::InteractionService& svc,
       std::cout << "Unable to inspect graph.\n";
       return true;
     }
-    if (!report->empty())
-      std::cout << *report << "\n";
+    if (!report->nodes.empty())
+      std::cout << ps::cli::format_graph_inspection(*report) << "\n";
     else
       std::cout << "(No inspectable nodes)\n";
     return true;
@@ -42,8 +43,9 @@ bool handle_inspect(std::istringstream& iss, ps::InteractionService& svc,
     std::cout << "Unable to inspect node " << node_id << ".\n";
     return true;
   }
-  std::cout << *report;
-  if (!report->empty() && report->back() != '\n')
+  std::string text = ps::cli::format_node_inspection(*report);
+  std::cout << text;
+  if (!text.empty() && text.back() != '\n')
     std::cout << '\n';
   return true;
 }

@@ -116,7 +116,9 @@ target_link_libraries(photospider_core_types PUBLIC yaml-cpp::yaml-cpp)
 # Module: Graph
 add_library(photospider_graph STATIC
     src/kernel/graph_model.cpp
+    src/kernel/services/graph_extent_resolver.cpp
     src/kernel/services/graph_traversal_service.cpp
+    src/kernel/services/roi_propagation_service.cpp
     src/kernel/services/graph_io_service.cpp
     src/kernel/services/graph_cache_service.cpp
     src/kernel/services/graph_inspect_service.cpp
@@ -357,6 +359,7 @@ if(BUILD_TESTING)
     add_ps_test(test_milestone34 tests/test_milestone34.cpp)
     add_ps_test(test_propagation tests/test_propagation.cpp)
     add_ps_test(test_propagation_contracts tests/test_propagation_contracts.cpp)
+    add_ps_test(test_graph_topology_boundaries tests/test_graph_topology_boundaries.cpp)
     add_ps_test(test_kernel_contracts tests/test_kernel_contracts.cpp)
     add_ps_test(test_compute_service_split tests/test_compute_service_split.cpp)
 
@@ -387,6 +390,7 @@ if(BUILD_TESTING)
     # than a GTest binary. Keep it buildable for CI scripts, but do not run
     # gtest discovery on it.
     gtest_discover_tests(test_propagation_contracts WORKING_DIRECTORY ${PROJECT_SOURCE_DIR})
+    gtest_discover_tests(test_graph_topology_boundaries WORKING_DIRECTORY ${PROJECT_SOURCE_DIR})
     gtest_discover_tests(test_kernel_contracts WORKING_DIRECTORY ${PROJECT_SOURCE_DIR})
     gtest_discover_tests(test_compute_service_split WORKING_DIRECTORY ${PROJECT_SOURCE_DIR})
     gtest_discover_tests(test_gpu_pipeline_scheduler WORKING_DIRECTORY ${PROJECT_SOURCE_DIR})

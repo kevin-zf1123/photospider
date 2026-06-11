@@ -28,7 +28,7 @@ the load must return an error and must not expose a partially loaded graph.
 The desired behavior is:
 
 ```text
-parse YAML -> validate all nodes/topology -> create/commit runtime
+parse YAML -> validate all nodes/topology -> rebuild adjacency -> create/commit runtime
                                       \-> on failure: return error, expose none
 ```
 
@@ -41,7 +41,8 @@ name that may already be visible. The desired direction is to avoid half-cleared
 or partially rebuilt model state on reload failure.
 
 Chosen behavior: failed reload preserves the previous graph. Reload validates
-the replacement model before committing it to the visible `GraphModel`.
+the replacement model and rebuilds topology adjacency before committing it to
+the visible `GraphModel`.
 
 ## Node YAML Replacement
 
@@ -64,6 +65,7 @@ remain visible.
 Clear should reset:
 
 - node map
+- topology adjacency index
 - timing results
 - accumulated IO time
 - skip-save state
