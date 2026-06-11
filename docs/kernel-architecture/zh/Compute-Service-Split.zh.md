@@ -50,8 +50,10 @@ ComputeService facade
 - `cached_output_real_time` 是临时交互式状态。
 - `cached_output` 是遗留迁移残留，不应再接收新的写入。
 
-TODO：在所有 HP 调用点验证完成后，通过后续 change 移除或隐藏 legacy
-`cached_output` fallback。
+截至 2026-06-11 本次反馈扫描，正式 HP 写入和磁盘缓存权威已迁移到
+`cached_output_high_precision`，但 legacy `cached_output` 仍作为废弃字段、只读兼容
+fallback 和内存清理目标存在。TODO：在调用方不再需要该 fallback 后，通过后续 cache-cleanup
+change 移除或隐藏它。
 
 ## 脏区边界
 
@@ -78,6 +80,11 @@ Realtime HP/RT 双路径选择不是执行模式。Non-realtime 请求只启用 
 还是其他 scheduler/resource policy。当前实现通过 `IntentUpdateCoordinator` 协调这一点；
 legacy runtime 队列可以并发提交 HP 和 RT 工作，而 single-threaded 执行会 inline 运行同一份
 intent 工作。
+
+HP 与 RT 路径会分别调用共享的 `ComputeTaskPlanner`。HP 路径基于自己的 HP dirty snapshot
+创建 `GlobalHighPrecision` plan，RT 路径基于自己的 RT dirty snapshot 创建 `RealTimeUpdate`
+plan。单次 `ComputeTaskPlanner` 调用不得同时发出 HP 和 RT 两份 task pool。未来扩展新的
+task pool 时也应保持这种按 domain 分别调用 planner 的模式。
 
 TODO：planner plugin ABI 继续明确推迟到后续 change。
 

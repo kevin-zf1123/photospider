@@ -46,6 +46,25 @@ and each node/operator implementation can be monolithic or tiled. Tiled
 execution can further use macro or micro task granularity. These choices are
 node execution details and are independent from HP/RT intent semantics.
 
+HP/RT compute domain and Micro/Macro granularity are orthogonal. The current
+implementation defaults favor RT Micro_16 for interactive work and HP
+Macro_256 for throughput work, but the model still has four distinct
+domain/granularity cases:
+
+| Case | Current tile size | Meaning |
+| --- | --- | --- |
+| `rt-micro` | 16x16 in RT proxy space | Low-latency RT proxy tile. |
+| `rt-macro` | 64x64 in RT proxy space | Coarser RT proxy tile or aggregated RT work. |
+| `hp-micro` | 64x64 in HP full-resolution space | Small HP tile. |
+| `hp-macro` | 256x256 in HP full-resolution space | Throughput-oriented HP tile. |
+
+`rt-macro` and `hp-micro` currently share the numeric size 64x64, but they are
+not the same task type because they live in different coordinate spaces and
+different task pools. A compute plan must not create dependencies from RT tasks
+to HP tasks or from HP tasks to RT tasks. Realtime intent coordinates separate
+HP and RT sibling work; scale conversion is used only to represent
+corresponding ROIs, downsample state, or inspection data.
+
 ## Compute Intents
 
 The kernel recognizes two formal compute intents:
@@ -130,6 +149,16 @@ single-threaded execution is selected, it still runs both HP and RT work inline.
 This distinction is an execution-mode choice, not the switch that enables or
 disables the HP/RT dual path.
 
+Realtime planning is intentionally per path, not a single mixed-domain planner
+call. `IntentUpdateCoordinator` dispatches sibling HP and RT update callbacks.
+The HP callback invokes `DirtyRegionPlanner::plan_high_precision()` and then
+calls the shared `ComputeTaskPlanner` with `GlobalHighPrecision`; the RT
+callback invokes `DirtyRegionPlanner::plan_real_time()` and then calls the same
+`ComputeTaskPlanner` with `RealTimeUpdate`. Each planner call produces one
+single-domain task graph. This keeps `ComputeTaskPlanner` simple and leaves
+future task pools or modes free to reuse the same planner contract with their
+own domain.
+
 The passed dirty ROI is converted into graph-scoped planner state for the
 current request. TODO: node-local dirty reports should become the origin source
 for future frontend-driven dirty-region updates.
@@ -139,7 +168,8 @@ Current defaults:
 | Parameter | Current value | Status |
 | --- | --- | --- |
 | RT downscale factor | `4` | Tunable implementation default. |
-| RT tile size | `16` | Tunable implementation default. |
+| RT micro tile size | `16` | Tunable implementation default. |
+| RT macro tile size | `64` | Tunable implementation default; same numeric size as HP micro, different domain. |
 | HP micro tile size | `64` | Tunable implementation default. |
 | HP macro tile size | `256` | Tunable implementation default. |
 

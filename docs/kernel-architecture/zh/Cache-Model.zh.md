@@ -38,6 +38,8 @@ RT 计算写入 `cached_output_real_time`。RT 状态是交互式预览或代理
 
 `cached_output` 存在于遗留计算路径和当前迁移支持中。它应被视为错误的 HP 缓存名称。迁移应将 HP 读写移动到 `cached_output_high_precision`。剩余兼容 fallback 只能在调用点已确认使用 HP 输出前读取它。
 
+截至 2026-06-11 本次反馈扫描，legacy `cached_output` 尚未彻底移除。它仍作为 `Node` 上的废弃字段存在，兼容 fallback 路径仍可能读取它，并且会随其他内存状态一起清理。新的正式 HP 写入目标是 `cached_output_high_precision`；磁盘缓存保存、加载和同步路径使用 HP 输出，而不是 RT 输出或 legacy `cached_output`。
+
 ## 磁盘缓存
 
 `GraphCacheService` 处理 `GraphModel::cache_root` 下的磁盘缓存文件。节点缓存条目描述缓存类型和位置。图像缓存文件保存为图像文件，命名的 `NodeOutput::data` 条目保存为图像文件旁边的 YAML 元数据。

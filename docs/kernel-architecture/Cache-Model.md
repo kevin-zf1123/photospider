@@ -51,6 +51,13 @@ It should be treated as a mistaken HP cache name. Migration should move HP reads
 and writes to `cached_output_high_precision`. Remaining compatibility fallbacks
 may read it only while callers are verified on HP output.
 
+Current code status as of the 2026-06-11 feedback scan: legacy
+`cached_output` has not been completely removed. It remains as a deprecated
+field on `Node`, may still be read by compatibility fallback paths, and is
+cleared together with other memory state. New formal HP writes target
+`cached_output_high_precision`, and disk cache save/load/sync paths use HP
+output rather than RT output or legacy `cached_output`.
+
 ## Disk Cache
 
 `GraphCacheService` handles disk cache files under `GraphModel::cache_root`.

@@ -54,8 +54,11 @@ The split must preserve the existing cache contract:
 - `cached_output` is legacy migration residue and should not receive new
   writes.
 
-TODO: remove or hide legacy `cached_output` fallback in a later change after
-all HP call sites are verified.
+Current code status as of the 2026-06-11 feedback scan: formal HP writes and
+disk cache authority have moved to `cached_output_high_precision`, but legacy
+`cached_output` still exists as a deprecated field, read-only compatibility
+fallback, and memory-clear target. TODO: remove or hide that fallback in a later
+cache-cleanup change after callers no longer need it.
 
 ## Dirty-Region Boundary
 
@@ -90,6 +93,12 @@ single-threaded, parallel, GPU, or another scheduler/resource policy. The
 current implementation coordinates this through `IntentUpdateCoordinator`; the
 legacy runtime queue can submit HP and RT work concurrently, while
 single-threaded execution runs the same intent work inline.
+
+The HP and RT paths call the shared `ComputeTaskPlanner` separately. The HP
+path creates a `GlobalHighPrecision` plan from its HP dirty snapshot, and the RT
+path creates a `RealTimeUpdate` plan from its RT dirty snapshot. A single
+`ComputeTaskPlanner` invocation must not emit both HP and RT task pools. Future
+task-pool extensions should keep this per-domain planner invocation pattern.
 
 TODO: planner plugin ABI remains explicitly deferred to a later change.
 
