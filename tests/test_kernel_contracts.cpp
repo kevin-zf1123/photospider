@@ -160,8 +160,6 @@ TEST(CacheSemantics, HpAndRtComputePopulateFormalCaches) {
                                    "int8", false, false, true, nullptr,
                                    std::nullopt);
   EXPECT_TRUE(graph.nodes.at(2).cached_output_high_precision.has_value());
-  EXPECT_FALSE(graph.nodes.at(2).cached_output.has_value())
-      << "Legacy cached_output must NOT be populated by HP compute";
   EXPECT_EQ(hp.image_buffer.width,
             graph.nodes.at(2).cached_output_high_precision->image_buffer.width);
 
@@ -194,7 +192,7 @@ TEST(CacheSemantics, HpAndRtComputePopulateFormalCaches) {
       << "RT output should be <= HP output width";
 }
 
-TEST(CacheSemantics, DiskSaveAndSyncIgnoreRtAndLegacy) {
+TEST(CacheSemantics, DiskSaveAndSyncIgnoreRtOnlyState) {
   register_contract_ops();
   GraphTraversalService traversal;
   GraphCacheService cache;

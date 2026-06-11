@@ -9,15 +9,12 @@ the graph cache root. This document defines the intended cache semantics.
 | --- | --- | --- |
 | `cached_output_high_precision` | Formal cache | Full-quality reusable HP output. |
 | `cached_output_real_time` | Transient RT state | Interactive preview/update output. |
-| `cached_output` | Migration residue | Old mistaken name for HP output. |
 
 Only high-precision output is formal reusable cache. That means only HP output
 may be used as the authoritative source for subsequent HP compute, disk cache,
 long-term storage, and other reusable cache behavior. `cached_output_real_time`
 is transient interactive state and must not be treated as authoritative cache,
 as a disk-cache synchronization source, or as long-term storage input.
-`cached_output` is not a separate long-term cache kind. It is the old name for
-the HP cache and should be migrated to `cached_output_high_precision`.
 
 ## HP Cache
 
@@ -44,20 +41,6 @@ Associated fields:
 | `rt_version` | Version counter for RT output changes. |
 | `rt_roi` | Most recent or merged HP-space region represented by RT update. |
 
-## Legacy HP Name
-
-`cached_output` exists for legacy compute paths and current migration support.
-It should be treated as a mistaken HP cache name. Migration should move HP reads
-and writes to `cached_output_high_precision`. Remaining compatibility fallbacks
-may read it only while callers are verified on HP output.
-
-Current code status as of the 2026-06-11 feedback scan: legacy
-`cached_output` has not been completely removed. It remains as a deprecated
-field on `Node`, may still be read by compatibility fallback paths, and is
-cleared together with other memory state. New formal HP writes target
-`cached_output_high_precision`, and disk cache save/load/sync paths use HP
-output rather than RT output or legacy `cached_output`.
-
 ## Disk Cache
 
 `GraphCacheService` handles disk cache files under `GraphModel::cache_root`.
@@ -81,22 +64,17 @@ image cache data is converted into float image buffers.
 
 Disk cache save, load, and synchronization use `cached_output_high_precision`
 only. RT output does not protect stale disk files and is not promoted to disk
-cache state. Legacy `cached_output` is cleared with other memory state, but it
-is not a disk-cache source.
+cache state.
 
-## Migration Rules
+## Cache Rules
 
 - New HP code writes `cached_output_high_precision`.
 - New RT code writes `cached_output_real_time` as transient interactive state.
-- New code should not require `cached_output`.
-- Compatibility fallbacks may read `cached_output` only while HP call sites
-  migrate to `cached_output_high_precision`.
 - Formal cache save/load/sync behavior, subsequent HP compute, and long-term
   storage must use HP output and must not promote RT output to authoritative
   cache.
 - Tests should verify HP and RT fields independently.
 
-`GraphInspectService` selects a display source in HP, RT, legacy order for
-compatibility and labels the selected source explicitly. RT metadata may be
-shown for inspection, but it is labeled as transient state rather than formal
-cache authority.
+`GraphInspectService` selects a display source in HP, then RT order and labels
+the selected source explicitly. RT metadata may be shown for inspection, but it
+is labeled as transient state rather than formal cache authority.

@@ -94,7 +94,6 @@ NodeOutput& ParallelGraphExecutor::execute(
       std::scoped_lock lock(graph_mutex);
       for (int id : execution_order) {
         if (nodes.count(id)) {
-          nodes.at(id).cached_output.reset();
           nodes.at(id).cached_output_high_precision.reset();
         }
       }
@@ -173,15 +172,12 @@ NodeOutput& ParallelGraphExecutor::execute(
             }
             if (itn->second.cached_output_high_precision.has_value())
               return &*itn->second.cached_output_high_precision;
-            if (itn->second.cached_output.has_value())
-              return &*itn->second.cached_output;
             return nullptr;
           };
 
           // Memory or disk fast path
           if (!target_node.cached_output_high_precision.has_value() &&
-              !target_node.cached_output.has_value() && allow_disk_cache &&
-              !temp_results[current_node_idx].has_value()) {
+              allow_disk_cache && !temp_results[current_node_idx].has_value()) {
             NodeOutput from_disk;
             if (cache_.try_load_from_disk_cache_into(graph, target_node,
                                                      from_disk)) {
@@ -216,7 +212,6 @@ NodeOutput& ParallelGraphExecutor::execute(
           }
 
           if (!target_node.cached_output_high_precision.has_value() &&
-              !target_node.cached_output.has_value() &&
               !temp_results[current_node_idx].has_value()) {
             YAML::Node runtime_params =
                 target_node.parameters ? YAML::Clone(target_node.parameters)
@@ -710,8 +705,7 @@ NodeOutput& ParallelGraphExecutor::execute(
 
     if (execution_order.empty() && graph.has_node(node_id)) {
       // 处理图中只有一个节点的情况
-      if (!nodes.at(node_id).cached_output_high_precision.has_value() &&
-          !nodes.at(node_id).cached_output.has_value()) {
+      if (!nodes.at(node_id).cached_output_high_precision.has_value()) {
         sequential_fallback(graph, node_id, !disable_disk_cache);
       }
     } else {
@@ -752,15 +746,12 @@ NodeOutput& ParallelGraphExecutor::execute(
         }
       }
     }
-    if (!nodes.at(node_id).cached_output_high_precision &&
-        !nodes.at(node_id).cached_output) {
+    if (!nodes.at(node_id).cached_output_high_precision) {
       throw GraphError(GraphErrc::ComputeError,
                        "Parallel computation finished but target node has no "
                        "output. An upstream error likely occurred.");
     }
-    return nodes.at(node_id).cached_output_high_precision.has_value()
-               ? *nodes.at(node_id).cached_output_high_precision
-               : *nodes.at(node_id).cached_output;
+    return *nodes.at(node_id).cached_output_high_precision;
   } catch (...) {
     // 捕获在本函数内（任务提交前）抛出的异常，并传递给运行时
     runtime.set_exception(std::current_exception());

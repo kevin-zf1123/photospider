@@ -3,23 +3,18 @@
 namespace ps::compute {
 
 bool ComputeCachePolicy::has_reusable_output(const Node& node) {
-  return node.cached_output_high_precision.has_value() ||
-         node.cached_output.has_value();
+  return node.cached_output_high_precision.has_value();
 }
 
 NodeOutput* ComputeCachePolicy::reusable_output(Node& node) {
   if (node.cached_output_high_precision)
     return &*node.cached_output_high_precision;
-  if (node.cached_output)
-    return &*node.cached_output;
   return nullptr;
 }
 
 const NodeOutput* ComputeCachePolicy::reusable_output(const Node& node) {
   if (node.cached_output_high_precision)
     return &*node.cached_output_high_precision;
-  if (node.cached_output)
-    return &*node.cached_output;
   return nullptr;
 }
 
@@ -62,9 +57,7 @@ bool ComputeCachePolicy::can_read_disk_cache(bool disable_disk_cache,
   return !disable_disk_cache && !force_recache;
 }
 
-void ComputeCachePolicy::clear_for_recompute(Node& node, bool clear_legacy) {
-  if (clear_legacy)
-    node.cached_output.reset();
+void ComputeCachePolicy::clear_for_recompute(Node& node) {
   node.cached_output_high_precision.reset();
 }
 

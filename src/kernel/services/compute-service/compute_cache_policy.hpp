@@ -26,7 +26,7 @@ class ComputeCachePolicy {
                                                         CacheReadMode mode);
 
   static bool can_read_disk_cache(bool disable_disk_cache, bool force_recache);
-  static void clear_for_recompute(Node& node, bool clear_legacy = true);
+  static void clear_for_recompute(Node& node);
 };
 
 }  // namespace ps::compute

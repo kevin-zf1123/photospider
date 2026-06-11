@@ -87,6 +87,7 @@ feedback/
 !tests/
 !tests/**/
 !tests/**/*.cpp
+!tests/**/*.py
 tests/results/
 
 # Utilities (Python scripts, YAML configs, Testcases)

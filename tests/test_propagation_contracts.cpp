@@ -127,8 +127,7 @@ TEST(PropagationContracts, BackwardResizeIgnoresRtOnlyParentExtent) {
   GraphTraversalService traversal;
   EXPECT_FALSE(traversal.project_roi_backward(graph, 2, cv::Rect(1, 1, 1, 1), 1)
                    .has_value())
-      << "RT-only transient state must not provide HP/legacy propagation "
-         "extent.";
+      << "RT-only transient state must not provide HP propagation extent.";
 
   graph.nodes.at(1).cached_output_high_precision = NodeOutput{};
   graph.nodes.at(1).cached_output_high_precision->image_buffer =

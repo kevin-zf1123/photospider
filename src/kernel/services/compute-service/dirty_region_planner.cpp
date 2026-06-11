@@ -294,8 +294,7 @@ cv::Size DirtyRegionPlanner::infer_hp_size(
     size = cv::Size(img.width, img.height);
     return true;
   };
-  if (take_from_output(node.cached_output_high_precision) ||
-      take_from_output(node.cached_output)) {
+  if (take_from_output(node.cached_output_high_precision)) {
     cache[node_id] = size;
     return size;
   }
