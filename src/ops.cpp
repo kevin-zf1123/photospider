@@ -1516,10 +1516,11 @@ void register_builtin() {
   R.register_op_hp_monolithic("image_mixing", "multiply",
                               MonolithicOpFunc(op_multiply_monolithic));
 
-  // Tiled HP implementations (default MACRO preference)
+  // Tiled HP implementations currently prefer HP-domain Macro granularity.
   OpMetadata tiled_meta;
   tiled_meta.tile_preference = TileSizePreference::MACRO;
-  // RT implementations default to Micro tiles to match proxy pipeline
+  // RT implementations currently prefer RT-domain Micro granularity to match
+  // the proxy pipeline; RT-domain Macro remains a valid scheduling category.
   OpMetadata rt_meta;
   rt_meta.tile_preference = TileSizePreference::MICRO;
 

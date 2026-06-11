@@ -39,17 +39,18 @@ bool same_dependency(const PlannedDependency& dependency, int from_node_id,
 }
 
 void add_dependency(std::vector<PlannedDependency>& dependencies,
-                    int from_node_id, int to_node_id,
+                    int from_node_id, int to_node_id, DirtyDomain domain,
                     const std::string& input_kind, const cv::Rect& from_roi,
                     const cv::Rect& to_roi, DirtyEdgeDirection direction) {
   auto it = std::find_if(dependencies.begin(), dependencies.end(),
                          [&](const PlannedDependency& dependency) {
                            return same_dependency(dependency, from_node_id,
-                                                  to_node_id, input_kind);
+                                                  to_node_id, input_kind) &&
+                                  dependency.domain == domain;
                          });
   if (it == dependencies.end()) {
-    dependencies.push_back(
-        {from_node_id, to_node_id, input_kind, from_roi, to_roi, direction});
+    dependencies.push_back({from_node_id, to_node_id, domain, input_kind,
+                            from_roi, to_roi, direction});
     return;
   }
   it->from_roi = merge_optional_rect(it->from_roi, from_roi);
@@ -137,7 +138,7 @@ void populate_node_regions(ComputePlan& result,
   }
 }
 
-void populate_dependencies_from_graph(ComputePlan& result,
+void populate_dependencies_from_graph(ComputePlan& result, DirtyDomain domain,
                                       const GraphModel* graph) {
   if (!graph)
     return;
@@ -152,14 +153,14 @@ void populate_dependencies_from_graph(ComputePlan& result,
     for (const auto& input : node.image_inputs) {
       if (input.from_node_id >= 0 && planned_set.count(input.from_node_id)) {
         add_dependency(result.task_graph.dependencies, input.from_node_id,
-                       node_id, "image", cv::Rect(), cv::Rect(),
+                       node_id, domain, "image", cv::Rect(), cv::Rect(),
                        DirtyEdgeDirection::BackwardDemand);
       }
     }
     for (const auto& input : node.parameter_inputs) {
       if (input.from_node_id >= 0 && planned_set.count(input.from_node_id)) {
         add_dependency(result.task_graph.dependencies, input.from_node_id,
-                       node_id, "parameter", cv::Rect(), cv::Rect(),
+                       node_id, domain, "parameter", cv::Rect(), cv::Rect(),
                        DirtyEdgeDirection::BackwardDemand);
       }
     }
@@ -167,19 +168,22 @@ void populate_dependencies_from_graph(ComputePlan& result,
 }
 
 void populate_dependencies_from_snapshot(ComputePlan& result,
-                                         const DirtyRegionSnapshot* snapshot) {
+                                         const DirtyRegionSnapshot* snapshot,
+                                         DirtyDomain domain) {
   if (!snapshot)
     return;
 
   std::unordered_set<int> planned_set(result.planned_nodes.begin(),
                                       result.planned_nodes.end());
   for (const auto& edge : snapshot->edge_mappings) {
+    if (edge.domain != domain)
+      continue;
     if (!planned_set.count(edge.from_node_id) ||
         !planned_set.count(edge.to_node_id)) {
       continue;
     }
     add_dependency(result.task_graph.dependencies, edge.from_node_id,
-                   edge.to_node_id, "image", edge.from_roi, edge.to_roi,
+                   edge.to_node_id, domain, "image", edge.from_roi, edge.to_roi,
                    edge.direction);
   }
 }
@@ -327,8 +331,8 @@ ComputePlan ComputeTaskPlanner::plan(const ComputeRequest& request,
   }
 
   populate_node_regions(result, snapshot, domain);
-  populate_dependencies_from_graph(result, graph);
-  populate_dependencies_from_snapshot(result, snapshot);
+  populate_dependencies_from_graph(result, domain, graph);
+  populate_dependencies_from_snapshot(result, snapshot, domain);
   populate_node_dependency_lists(result);
   populate_tasks(result, snapshot, domain);
   populate_task_dependencies(result);

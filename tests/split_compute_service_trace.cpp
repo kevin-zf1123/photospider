@@ -362,6 +362,7 @@ json dirty_snapshot_json(
     out["edge_mappings"].push_back(
         {{"from_node_id", edge.from_node_id},
          {"to_node_id", edge.to_node_id},
+         {"domain", dirty_domain_name(edge.domain)},
          {"from_roi", rect_json(edge.from_roi)},
          {"to_roi", rect_json(edge.to_roi)},
          {"direction", dirty_edge_direction_name(edge.direction)}});
@@ -404,6 +405,7 @@ json compute_plan_json(const std::optional<ps::compute::ComputePlan>& plan) {
     dependencies.push_back(
         {{"from_node_id", dependency.from_node_id},
          {"to_node_id", dependency.to_node_id},
+         {"domain", dirty_domain_name(dependency.domain)},
          {"input_kind", dependency.input_kind},
          {"from_roi", rect_json(dependency.from_roi)},
          {"to_roi", rect_json(dependency.to_roi)},

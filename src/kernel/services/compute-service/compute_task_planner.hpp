@@ -22,6 +22,7 @@ enum class PlannedTaskKind {
 struct PlannedDependency {
   int from_node_id = -1;
   int to_node_id = -1;
+  DirtyDomain domain = DirtyDomain::HighPrecision;
   std::string input_kind = "image";
   cv::Rect from_roi;
   cv::Rect to_roi;
