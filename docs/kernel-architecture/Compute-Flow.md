@@ -53,9 +53,9 @@ The kernel recognizes two formal compute intents:
 The intent model is formal. The current implementation still has several paths
 that bypass `IScheduler` and call `ComputeService` directly.
 
-The planned in-place `ComputeService` split is documented in
-`Compute-Service-Split.md`. TODO: the facade/internal module split is not yet
-implemented; this document describes current behavior until those tasks land.
+The in-place `ComputeService` split is documented in
+`Compute-Service-Split.md`. The current implementation keeps the public facade
+and routes internal work through compute-service collaborators.
 
 ## Sequential Compute
 
@@ -69,10 +69,9 @@ Sequential compute uses recursive dependency resolution:
 6. Execute monolithic or tiled operation.
 7. Store output, emit events, update timing, and save disk cache when enabled.
 
-Sequential compute is useful for simple execution and debugging, but it does not
-represent the scheduler target architecture. TODO: after compute task planning
-is introduced, sequential compute should execute the same logical plan as the
-parallel path.
+Sequential compute is useful for simple execution and debugging. It now creates
+the same internal `ComputeTaskPlanner` plan semantics as the parallel path
+before executing the recursive path.
 
 ## Parallel Compute
 
@@ -85,9 +84,9 @@ surface. The formal long-term target is to route compute through `IScheduler`
 instances after dirty-region state and compute-task planning have produced
 planned work.
 
-TODO: the `split-compute-service` change should first isolate this legacy
-`GraphRuntime` queue path behind a parallel executor boundary before any later
-full planned-task scheduler routing change.
+The legacy `GraphRuntime` queue path is isolated behind
+`ParallelGraphExecutor`. TODO: full planned-task scheduler routing remains a
+later scheduler-focused change.
 
 ## GlobalHighPrecision
 
@@ -99,9 +98,9 @@ HP dirty-region update computes a backward ROI plan, aligns dirty regions to HP
 tile boundaries, updates affected HP tiles, records HP ROI/version metadata, and
 can schedule downsample work to refresh RT transient state.
 
-TODO: move dirty-region state planning into an independent graph-scoped
-`DirtyRegionPlanner` and expose the resulting `DirtyRegionSnapshot` to compute
-task planning and interaction-facing inspection.
+Dirty-region state planning now runs through the graph-scoped
+`DirtyRegionPlanner`, and the resulting `DirtyRegionSnapshot` feeds compute
+task planning and interaction-facing inspection summaries.
 
 ## RealTimeUpdate
 
@@ -112,9 +111,9 @@ does not implicitly mean full-frame RT update.
 With a valid dirty ROI, RT compute updates the proxy output for the affected
 region and may enqueue a background HP update through the runtime.
 
-TODO: treat the passed dirty ROI as a transitional compute input until
-node-local dirty reports, operator propagation, and graph-scoped dirty snapshots
-own dirty-region state.
+The passed dirty ROI is converted into graph-scoped planner state for the
+current request. TODO: node-local dirty reports should become the origin source
+for future frontend-driven dirty-region updates.
 
 Current defaults:
 

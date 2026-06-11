@@ -1,7 +1,8 @@
 # ComputeService 拆分计划
 
-本文档记录 `ComputeService` 的就地拆分计划。它是当前分支的维护性架构文档，
-但实现尚未完成。标记为 TODO 的项目是有意推迟或仍待实现的工作。
+本文档记录 `ComputeService` 的就地拆分。第一轮拆分已经在现有公开 facade 后落地。
+仍标记为 TODO 的项目，是有意推迟到后续 scheduler、traversal、cache migration
+或 planner plugin change 中处理的工作。
 
 ## 当前问题
 
@@ -30,16 +31,16 @@ ComputeService facade
 
 | 边界 | 职责 | 状态 |
 | --- | --- | --- |
-| `ComputeService` facade | 保留当前公开 compute 入口。 | TODO |
-| `ComputeCachePolicy` | 集中 HP/RT/legacy 缓存选择。 | TODO |
-| `NodeInputResolver` | 构建运行时参数并收集已就绪图像输入。 | TODO |
-| `NodeExecutor` | 一致地执行 monolithic 与 tiled 算子。 | TODO |
-| `DirtyRegionPlanner` | 基于 node-local dirty report 和算子 propagation 构建图级脏区状态。 | TODO |
-| `DirtyRegionSnapshot` | 使用稳定 id 而不是原始指针枚举 dirty tiles、dirty monolithic nodes、per-node dirty ROI 和 per-edge ROI mapping。 | TODO |
-| `ComputeTaskPlanner` | 将 compute request 和 dirty snapshot 转换为共享 `ComputePlan` / `ComputeTaskGraph` 语义。 | TODO |
-| `IntentUpdateCoordinator` | 协调 `GlobalHighPrecision` 与 `RealTimeUpdate` 分支。 | TODO |
-| `ParallelGraphExecutor` | 封装当前遗留 `GraphRuntime` 队列 DAG 路径。 | TODO |
-| `ComputeMetricsRecorder` | 集中事件、计时、benchmark 事件和 debug 元数据。 | TODO |
+| `ComputeService` facade | 保留当前公开 compute 入口并构造内部协作者。 | 已实现 |
+| `ComputeCachePolicy` | 集中 HP/RT/legacy 缓存选择。 | 已在 `src/kernel/services/compute-service/compute_cache_policy.*` 实现 |
+| `NodeInputResolver` | 构建运行时参数并收集已就绪图像输入。 | 已在 `src/kernel/services/compute-service/node_input_resolver.*` 实现 |
+| `NodeExecutor` | 一致地执行 monolithic 与 tiled 算子。 | 已在 `src/kernel/services/compute-service/node_executor.*` 实现 |
+| `DirtyRegionPlanner` | 基于 node-local dirty report 和算子 propagation 构建图级脏区状态。 | 已在 `src/kernel/services/compute-service/dirty_region_planner.*` 实现 |
+| `DirtyRegionSnapshot` | 使用稳定 id 而不是原始指针枚举 dirty tiles、dirty monolithic nodes、per-node dirty ROI 和 per-edge ROI mapping。 | 已作为内部 snapshot model 实现 |
+| `ComputeTaskPlanner` | 将 compute request 和 dirty snapshot 转换为共享 `ComputePlan` / `ComputeTaskGraph` 语义。 | 已作为内部规划边界实现；plugin ABI 仍是 TODO |
+| `IntentUpdateCoordinator` | 协调 `GlobalHighPrecision` 与 `RealTimeUpdate` 分支。 | 已在 `src/kernel/services/compute-service/intent_update_coordinator.*` 实现 |
+| `ParallelGraphExecutor` | 封装当前遗留 `GraphRuntime` 队列 DAG 路径。 | 已在 `src/kernel/services/compute-service/parallel_graph_executor.*` 实现 |
+| `ComputeMetricsRecorder` | 集中事件、计时、benchmark 事件和 debug 元数据。 | 已在 `src/kernel/services/compute-service/compute_metrics_recorder.*` 实现 |
 
 ## 缓存规则
 
@@ -58,25 +59,26 @@ Dirty region 来自 node-local change，但 propagation 语义是算子契约。
 dirty 和 forward propagation 行为，并可使用节点参数、空间元数据、缓存依赖信息或
 data-dependent LUT。当前 identity propagation fallback 是迁移支持，不应被视为新算子的充分行为。
 
-`DirtyRegionPlanner` 应拥有图级 dirty-region state。该状态应以 `DirtyRegionSnapshot`
-暴露，使用稳定 node id、tile 坐标、pixel ROI、graph generation 元数据和 edge mapping。
-Snapshot 是可视化和 compute task planning 的共享来源。
+`DirtyRegionPlanner` 已经为当前 HP 和 RT dirty update 路径拥有图级 dirty-region state。
+它通过使用稳定 node id、tile 坐标、pixel ROI、graph generation 元数据和 edge mapping
+的 `DirtyRegionSnapshot` 暴露状态。`ComputeService` 会在 graph 上保存 inspection 摘要，
+`InteractionService` 会把该摘要暴露给 frontend/debug 查询。
 
-TODO：引入图级 dirty snapshot 和算子 propagation 验证；当前代码仍直接通过 compute path
-和 projection helper 传递 dirty ROI。
+TODO：在 frontend 具备具体 mask/tile 渲染契约后，添加更丰富的 dirty snapshot 可视化。
 
 ## Compute Task Planning 边界
 
 单线程和并行计算应共享一个逻辑 `ComputePlan` 或 `ComputeTaskGraph`。`ComputeTaskPlanner`
-应消费 compute request 和 dirty snapshot，然后产生 planned work。执行模式只应在 task pool、
-scheduler policy 和资源选择上不同。
+消费 compute request 和 dirty snapshot，然后产生内部 `ComputePlan` 语义，供 sequential、
+parallel、HP 和 RT 路径在具体执行分发前共同使用。执行模式只应在 task pool、scheduler
+policy 和资源选择上不同。
 
-TODO：定义内部 compute task planning 表示，并将 planner plugin ABI 明确推迟到后续 change。
+TODO：planner plugin ABI 继续明确推迟到后续 change。
 
 ## 调度器边界
 
-当前并行计算路径在部分路径中仍使用遗留 `GraphRuntime` 队列和完成计数器。
-第一轮拆分应先把该行为隔离到 `ParallelGraphExecutor` 后面。
+当前并行计算路径仍使用遗留 `GraphRuntime` 队列和完成计数器。该行为现在已经隔离到
+`ParallelGraphExecutor` 后面。
 
 Scheduler 应从 intent-aware task pool 中拉取 planned 或 annotated task 并调度计算资源。
 它们不应拥有图级 dirty propagation 或 compute-task derivation。现有 `IScheduler::schedule_node`、
@@ -97,7 +99,9 @@ TODO：在独立 change 中拆分 `GraphTraversalService` 的拓扑遍历和 ROI
 语境中，它应暴露图级 dirty snapshot 检查和可视化 API。它不是 dirty-region generation 或
 propagation 的权威来源。
 
-TODO：在图级 dirty state 存在后，添加 dirty snapshot 查询/可视化 API。
+`InteractionService` 现在已经暴露 dirty snapshot debug 摘要，供 inspection 使用。
+
+TODO：在图级 dirty state 具备 frontend 展示契约后，添加更丰富的可视化 API。
 
 ## Global HP Dirty ROI
 
