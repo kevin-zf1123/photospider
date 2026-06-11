@@ -132,6 +132,15 @@ target_link_libraries(photospider_plugin PUBLIC photospider_core_types)
 
 # Module: Compute
 set(COMPUTE_SOURCES
+    src/kernel/services/compute-service/compute_cache_policy.cpp
+    src/kernel/services/compute-service/compute_geometry.cpp
+    src/kernel/services/compute-service/compute_metrics_recorder.cpp
+    src/kernel/services/compute-service/compute_task_planner.cpp
+    src/kernel/services/compute-service/dirty_region_planner.cpp
+    src/kernel/services/compute-service/intent_update_coordinator.cpp
+    src/kernel/services/compute-service/node_executor.cpp
+    src/kernel/services/compute-service/node_input_resolver.cpp
+    src/kernel/services/compute-service/parallel_graph_executor.cpp
     src/kernel/services/compute_service.cpp
     src/kernel/services/graph_event_service.cpp
     src/kernel/kernel.cpp
@@ -349,6 +358,15 @@ if(BUILD_TESTING)
     add_ps_test(test_propagation tests/test_propagation.cpp)
     add_ps_test(test_propagation_contracts tests/test_propagation_contracts.cpp)
     add_ps_test(test_kernel_contracts tests/test_kernel_contracts.cpp)
+    add_ps_test(test_compute_service_split tests/test_compute_service_split.cpp)
+
+    add_executable(split_compute_service_trace tests/split_compute_service_trace.cpp)
+    set_target_properties(split_compute_service_trace PROPERTIES
+        RUNTIME_OUTPUT_DIRECTORY "${TEST_OUTPUT_DIR}"
+        BUILD_RPATH "${CMAKE_BINARY_DIR}/lib"
+    )
+    target_include_directories(split_compute_service_trace PRIVATE "${PROJECT_SOURCE_DIR}/include" "${PROJECT_SOURCE_DIR}/src")
+    target_link_libraries(split_compute_service_trace PRIVATE photospider_lib nlohmann_json::nlohmann_json)
     
     # [M3.1] OpRegistry 多设备实现测试
     add_ps_test(test_op_registry_m31 tests/test_op_registry_m31.cpp)
@@ -370,8 +388,12 @@ if(BUILD_TESTING)
     # gtest discovery on it.
     gtest_discover_tests(test_propagation_contracts WORKING_DIRECTORY ${PROJECT_SOURCE_DIR})
     gtest_discover_tests(test_kernel_contracts WORKING_DIRECTORY ${PROJECT_SOURCE_DIR})
+    gtest_discover_tests(test_compute_service_split WORKING_DIRECTORY ${PROJECT_SOURCE_DIR})
     gtest_discover_tests(test_gpu_pipeline_scheduler WORKING_DIRECTORY ${PROJECT_SOURCE_DIR})
     gtest_discover_tests(test_scheduler_plugin_loader WORKING_DIRECTORY ${PROJECT_SOURCE_DIR})
+    add_test(NAME SplitComputeServiceRuntimeTrace
+        COMMAND split_compute_service_trace "${PROJECT_SOURCE_DIR}/tests/results/split-compute-service"
+        WORKING_DIRECTORY ${PROJECT_SOURCE_DIR})
 endif()
 
 # --- Summary ---
