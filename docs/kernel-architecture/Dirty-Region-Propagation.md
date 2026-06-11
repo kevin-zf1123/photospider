@@ -4,7 +4,10 @@ This document defines how dirty regions (ROI) propagate through the node graph,
 how they map to tile grids, and how common operators should describe their
 propagation behavior. The implementation goal is to be precise enough to avoid
 missed work, conservative enough to remain correct, and compatible with
-Micro/Macro execution boundaries.
+Micro/Macro execution boundaries. HP/RT compute domain and Micro/Macro
+granularity are independent axes: dirty propagation may cross graph node
+boundaries, but it must not model an RT task as directly connected to an HP task
+or vice versa.
 
 The RT/HP grid sizes in this document are current implementation parameters,
 not permanent ABI. Schedulers and operators may rely on the data flow and safety
@@ -26,7 +29,9 @@ external compatibility promises.
   operator-provided `propagate_dirty_roi(downstream_roi, node)` function to
   derive required upstream input regions.
 - At granularity boundaries (Micro to Macro, or Macro to Micro), `ReTileTask`
-  bridges ROI geometry and tile-grid mapping/cropping.
+  bridges ROI geometry and tile-grid mapping/cropping inside the same compute
+  domain. HP/RT synchronization is a separate coordinator/cache update concern,
+  not a dirty-propagation edge between RT and HP tasks.
 - `DirtyRegionPlanner` should maintain graph-scoped dirty state instead of
   forcing each consumer to recompute propagation independently.
 
@@ -81,28 +86,36 @@ version increments.
 - Union / bounding box: when multiple ROIs are merged, the default behavior is
   the minimal bounding box of their union. This can later be extended to a sparse
   ROI representation for higher precision.
-- Grid alignment: align ROIs to the current grid (RT proxy: 16; HP: 64/256) so
-  they can be split into discrete tile sets.
+- Grid alignment: align ROIs to the current domain grid so they can be split
+  into discrete tile sets.
 - Scale mapping: the current RT proxy is one quarter of the source width and
   height, or roughly one sixteenth of the pixel count. Therefore:
-  - RT 16x16 maps to HP 64x64 by scaling up 4x, or back down by dividing by 4.
+  - RT Micro_16 maps to HP Micro_64 by scaling up 4x, or back down by dividing
+    by 4.
+  - RT Macro_64 maps to HP Macro_256 by the same scale rule.
 
 Current defaults:
 
-| Parameter | Current value | Notes |
-| --- | --- | --- |
-| RT downscale factor | 4 | Current proxy scale, tunable. |
-| RT Micro tile | 16x16 | Current interactive update granularity, tunable. |
-| HP Micro tile | 64x64 | Current HP small-tile granularity, tunable. |
-| HP Macro tile | 256x256 | Current HP throughput-oriented granularity, tunable. |
+| Domain granularity | Current value | Coordinate space | Notes |
+| --- | --- | --- | --- |
+| RT downscale factor | 4 | N/A | Current proxy scale, tunable. |
+| RT Micro tile | 16x16 | RT proxy space | Current interactive update granularity, tunable. |
+| RT Macro tile | 64x64 | RT proxy space | Current RT throughput/coarsening granularity, tunable. |
+| HP Micro tile | 64x64 | HP full-resolution space | Current HP small-tile granularity, tunable. |
+| HP Macro tile | 256x256 | HP full-resolution space | Current HP throughput-oriented granularity, tunable. |
+
+RT Macro_64 and HP Micro_64 currently share the same numeric tile size, but
+they are different domain/granularity cases. The numeric equality does not make
+an RT macro tile interchangeable with an HP micro tile.
 
 ## 4. Micro to Macro: Upsampling Boundary
 
 - HP domain: input consists of multiple HP Micro_64 tiles; take their union,
   align to HP Macro_256, and insert a `ReTileTask` to aggregate them.
-- RT to HP cross-scale: input consists of RT 16x16 tiles; first scale them up to
-  HP 64x64, then map them to HP Macro_256 as above.
-- Output: a set of Macro tile tasks, each 256x256.
+- RT domain: input consists of multiple RT Micro_16 tiles; take their union,
+  align to RT Macro_64, and insert a `ReTileTask` to aggregate them.
+- Output: a set of Macro tile tasks in the same domain as the input
+  (RT Macro_64 or HP Macro_256).
 
 Purpose: ensure Macro operators receive complete, contiguous large blocks of
 data and avoid discrete-point inputs that can break algorithms such as FFT or
@@ -112,9 +125,10 @@ convolution-domain blocking.
 
 - HP domain: input consists of one or more HP Macro_256 tiles; intersect them
   with the HP Micro_64 grid to get every affected Micro_64 tile.
-- HP to RT cross-scale: first shrink HP Macro_256 to RT 64x64, then intersect
-  with the RT 16x16 grid to get affected RT tiles.
-- Output: a set of Micro tile tasks (HP: 64; RT: 16).
+- RT domain: input consists of one or more RT Macro_64 tiles; intersect them
+  with the RT Micro_16 grid to get every affected Micro_16 tile.
+- Output: a set of Micro tile tasks in the same domain as the input
+  (RT Micro_16 or HP Micro_64).
 
 Purpose: spread Macro-level changes uniformly into downstream micro tiles so no
 affected work is missed.
@@ -188,20 +202,28 @@ Downstream propagation may still narrow the affected region again. For example,
 a following crop, resize, or transform may project the monolithic node's dirty
 output to a smaller region in a downstream node.
 
-## 8. Typical Scenario: Micro-Macro-Micro Chain with Scale
+## 8. Typical Scenario: Domain-Local Micro-Macro-Micro Chains
 
-Assume:
+Assume an RT-domain chain:
 
-- trigger: node A updates three 16x16 tiles, `(0,0)`, `(1,1)`, and `(3,1)`.
+- nodes A, B, and C all execute in the RT task pool.
+- trigger: node A updates three RT Micro_16 tiles, `(0,0)`, `(1,1)`, and
+  `(3,1)`.
 - derivation:
-  1. A to B: scale the three RT 16x16 tiles up 4x to HP 64x64. Their union falls
-     into the same `B_macro(0,0)` tile (256x256), so the whole block must be
+  1. A to B: the three RT Micro_16 tiles are aggregated to the containing RT
+     Macro_64 tile, `B_rt_macro(0,0)`, so the whole 64x64 proxy block must be
      recomputed.
-  2. B to C: shrink `B_macro(0,0)` (256x256) to RT 64x64. Intersecting that with
-     the 16x16 grid produces 16 tiles: `C:(0,0)-(3,3)`.
+  2. B to C: `B_rt_macro(0,0)` intersects the RT Micro_16 grid and produces
+     16 tiles: `C_rt_micro:(0,0)-(3,3)`.
 
-Conclusion: C must update 16 tiles, not only the three discrete points. A Macro
-node is an information-spreading point.
+The same shape applies inside the HP task pool: three HP Micro_64 tiles can
+aggregate to `B_hp_macro(0,0)` and then fan out to the 16 HP Micro_64 tiles
+covered by that HP Macro_256 block.
+
+Conclusion: C must update 16 same-domain micro tiles, not only the three
+discrete points. A Macro node is an information-spreading point. This scenario
+does not create an RT-to-HP or HP-to-RT graph edge; HP and RT work are separate
+task-pool siblings coordinated by compute intent.
 
 ## 9. ROI Use in the RT/HP Dual Path
 
@@ -215,6 +237,10 @@ node is an information-spreading point.
     Macro_256 where appropriate.
   - after completion, it triggers downsample updates into RT and synchronizes
     versions.
+
+The planner may represent corresponding HP and RT ROIs using scale conversion
+for synchronization or inspection, but task dependencies stay inside each
+domain: RT Micro_16 <-> RT Macro_64 and HP Micro_64 <-> HP Macro_256.
 
 ## 10. ROI Bounds and Clipping
 
