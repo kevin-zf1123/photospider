@@ -183,6 +183,10 @@ class InteractionService {
   cmd_drain_compute_events(const std::string& graph) {
     return kernel_.drain_compute_events(graph);
   }
+  std::optional<std::string> cmd_dirty_region_snapshot_debug(
+      const std::string& graph) {
+    return kernel_.dirty_region_snapshot_debug(graph);
+  }
   std::optional<cv::Mat> cmd_compute_and_get_image(
       const std::string& graph, int node_id, const std::string& precision,
       bool force, bool timing, bool parallel, bool disable_disk_cache = false) {
@@ -251,16 +255,16 @@ class InteractionService {
   // [M3.5] Scheduler information
   // Get all available scheduler types (built-in + plugins)
   std::vector<std::string> cmd_scheduler_available_types() const;
-  
+
   // Get description for a scheduler type
   std::string cmd_scheduler_description(const std::string& type_name) const;
-  
+
   // Scan and load scheduler plugins from directories
   size_t cmd_scheduler_scan(const std::vector<std::string>& dirs);
-  
+
   // Load a single scheduler plugin
   bool cmd_scheduler_load(const std::string& path);
-  
+
   // Get list of loaded scheduler plugins
   std::vector<std::string> cmd_scheduler_loaded_plugins() const;
 

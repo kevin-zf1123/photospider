@@ -14,6 +14,9 @@ class GraphCacheService;
 class GraphIOService;
 class GraphTraversalService;
 class ComputeService;
+namespace compute {
+class ParallelGraphExecutor;
+}
 
 struct NodeTiming {
   int id = -1;
@@ -32,6 +35,7 @@ class GraphModel {
   TimingCollector timing_results;
   std::unordered_map<int, Node> nodes;
   fs::path cache_root;
+  std::optional<std::string> last_dirty_region_snapshot_debug;
 
   struct DriveClearResult {
     uintmax_t removed_entries = 0;
@@ -68,6 +72,7 @@ class GraphModel {
   friend class GraphIOService;
   friend class GraphTraversalService;
   friend class ComputeService;
+  friend class compute::ParallelGraphExecutor;
 
   std::mutex graph_mutex_;
   mutable std::mutex timing_mutex_;

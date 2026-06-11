@@ -101,6 +101,7 @@ void GraphModel::clear() {
   nodes.clear();
   timing_results.node_timings.clear();
   timing_results.total_ms = 0.0;
+  last_dirty_region_snapshot_debug.reset();
   total_io_time_ms.store(0.0, std::memory_order_relaxed);
   skip_save_cache_.store(false, std::memory_order_relaxed);
   quiet_ = true;

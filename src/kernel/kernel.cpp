@@ -58,10 +58,10 @@ std::optional<std::string> Kernel::load_graph(const std::string& name,
     }
   } catch (...) {
   }
-  
+
   // [M3.4] 为 GraphRuntime 设置调度器
   setup_schedulers_for_runtime(*rt);
-  
+
   rt->start();
 
   // [功能修复] 使用推断出的 yaml_target 进行加载
@@ -441,8 +441,8 @@ std::optional<std::string> Kernel::dump_dependency_tree(
             traversal_service_.print_dependency_tree(
                 g, ss, *node_id, show_parameters, show_metadata, formatter);
           } else {
-            traversal_service_.print_dependency_tree(
-                g, ss, show_parameters, show_metadata, formatter);
+            traversal_service_.print_dependency_tree(g, ss, show_parameters,
+                                                     show_metadata, formatter);
           }
           return ss.str();
         })
@@ -459,8 +459,7 @@ std::optional<std::string> Kernel::inspect_node(const std::string& name,
     return std::nullopt;
   try {
     return it->second
-        ->post([this, node_id](
-                   GraphModel& g) -> std::optional<std::string> {
+        ->post([this, node_id](GraphModel& g) -> std::optional<std::string> {
           auto itn = g.nodes.find(node_id);
           if (itn == g.nodes.end())
             return std::nullopt;
@@ -483,7 +482,9 @@ std::optional<std::string> Kernel::inspect_graph(const std::string& name) {
     return std::nullopt;
   try {
     return it->second
-        ->post([this](GraphModel& g) { return inspect_service_.inspect_all_nodes(g); })
+        ->post([this](GraphModel& g) {
+          return inspect_service_.inspect_all_nodes(g);
+        })
         .get();
   } catch (...) {
     return std::nullopt;
@@ -825,6 +826,20 @@ Kernel::drain_compute_events(const std::string& name) {
   }
 }
 
+std::optional<std::string> Kernel::dirty_region_snapshot_debug(
+    const std::string& name) {
+  auto it = graphs_.find(name);
+  if (it == graphs_.end())
+    return std::nullopt;
+  try {
+    return it->second
+        ->post([](GraphModel& g) { return g.last_dirty_region_snapshot_debug; })
+        .get();
+  } catch (...) {
+    return std::nullopt;
+  }
+}
+
 std::optional<double> Kernel::get_last_io_time(const std::string& name) {
   auto it = graphs_.find(name);
   if (it == graphs_.end()) {
@@ -843,50 +858,56 @@ std::optional<std::future<bool>> Kernel::compute_async(
     bool force_recache, bool enable_timing, bool parallel, bool quiet,
     bool disable_disk_cache, bool nosave,
     std::vector<BenchmarkEvent>* benchmark_events,
-    ComputeIntent intent, // 新增
-    std::optional<cv::Rect> dirty_roi // 新增
+    ComputeIntent intent,              // 新增
+    std::optional<cv::Rect> dirty_roi  // 新增
 ) {
-    auto it = graphs_.find(name);
-    if (it == graphs_.end()) {
-        return std::nullopt;
-    }
+  auto it = graphs_.find(name);
+  if (it == graphs_.end()) {
+    return std::nullopt;
+  }
 
-    GraphRuntime* const runtime_ptr = it->second.get();
-    if (!runtime_ptr->running()) runtime_ptr->start();
+  GraphRuntime* const runtime_ptr = it->second.get();
+  if (!runtime_ptr->running())
+    runtime_ptr->start();
 
-    // 捕获所有参数
-    return std::optional<std::future<bool>>(std::async(
-        std::launch::async,
-        [this, runtime_ptr, node_id, cache_precision, force_recache, enable_timing, quiet,
-        disable_disk_cache, nosave, benchmark_events, intent, dirty_roi, name]() {
-            try {
-                GraphModel& model = runtime_ptr->model();
-                ComputeService compute_service(traversal_service_, cache_service_, runtime_ptr->event_service());
-                
-                model.set_quiet(quiet);
-                model.set_skip_save_cache(nosave);
+  // 捕获所有参数
+  return std::optional<std::future<bool>>(std::async(
+      std::launch::async,
+      [this, runtime_ptr, node_id, cache_precision, force_recache,
+       enable_timing, quiet, disable_disk_cache, nosave, benchmark_events,
+       intent, dirty_roi, name]() {
+        try {
+          GraphModel& model = runtime_ptr->model();
+          ComputeService compute_service(traversal_service_, cache_service_,
+                                         runtime_ptr->event_service());
 
-                compute_service.compute_parallel(
-                    model, *runtime_ptr, intent, node_id, cache_precision,
-                    force_recache, enable_timing, disable_disk_cache,
-                    benchmark_events, dirty_roi);
+          model.set_quiet(quiet);
+          model.set_skip_save_cache(nosave);
 
-                model.set_skip_save_cache(false);
-                last_error_.erase(name);
-                return true;
-            } catch (const GraphError& ge) {
-                last_error_[name] = {ge.code(), ge.what()};
-                return false;
-            } catch (const std::exception& e) {
-                last_error_[name] = {GraphErrc::Unknown, std::string("Async compute failed: ") + e.what()};
-                return false;
-            }
-        }));
+          compute_service.compute_parallel(model, *runtime_ptr, intent, node_id,
+                                           cache_precision, force_recache,
+                                           enable_timing, disable_disk_cache,
+                                           benchmark_events, dirty_roi);
+
+          model.set_skip_save_cache(false);
+          last_error_.erase(name);
+          return true;
+        } catch (const GraphError& ge) {
+          last_error_[name] = {ge.code(), ge.what()};
+          return false;
+        } catch (const std::exception& e) {
+          last_error_[name] = {
+              GraphErrc::Unknown,
+              std::string("Async compute failed: ") + e.what()};
+          return false;
+        }
+      }));
 }
 
-std::optional<cv::Rect> Kernel::project_roi_forward(
-    const std::string& name, int start_node_id, const cv::Rect& start_roi,
-    int target_node_id) {
+std::optional<cv::Rect> Kernel::project_roi_forward(const std::string& name,
+                                                    int start_node_id,
+                                                    const cv::Rect& start_roi,
+                                                    int target_node_id) {
   auto it = graphs_.find(name);
   if (it == graphs_.end())
     return std::nullopt;
@@ -898,8 +919,8 @@ std::optional<cv::Rect> Kernel::project_roi_forward(
   try {
     auto future = runtime_ptr->post(
         [&, start_node_id, start_roi, target_node_id](GraphModel& g) {
-          return traversal_service_.project_roi_forward(g, start_node_id,
-                                                        start_roi, target_node_id);
+          return traversal_service_.project_roi_forward(
+              g, start_node_id, start_roi, target_node_id);
         });
     auto result = future.get();
     last_error_.erase(name);
@@ -914,9 +935,10 @@ std::optional<cv::Rect> Kernel::project_roi_forward(
   }
 }
 
-std::optional<cv::Rect> Kernel::project_roi_backward(
-    const std::string& name, int target_node_id, const cv::Rect& target_roi,
-    int source_node_id) {
+std::optional<cv::Rect> Kernel::project_roi_backward(const std::string& name,
+                                                     int target_node_id,
+                                                     const cv::Rect& target_roi,
+                                                     int source_node_id) {
   auto it = graphs_.find(name);
   if (it == graphs_.end())
     return std::nullopt;
@@ -963,15 +985,17 @@ void Kernel::setup_schedulers_for_runtime(GraphRuntime& runtime) {
                                                scheduler_config_.worker_count);
   if (hp_scheduler) {
     hp_scheduler->start();
-    runtime.set_scheduler(ComputeIntent::GlobalHighPrecision, std::move(hp_scheduler));
+    runtime.set_scheduler(ComputeIntent::GlobalHighPrecision,
+                          std::move(hp_scheduler));
   }
-  
+
   // 创建 RT 调度器
   auto rt_scheduler = SchedulerFactory::create(scheduler_config_.rt_type,
                                                scheduler_config_.worker_count);
   if (rt_scheduler) {
     rt_scheduler->start();
-    runtime.set_scheduler(ComputeIntent::RealTimeUpdate, std::move(rt_scheduler));
+    runtime.set_scheduler(ComputeIntent::RealTimeUpdate,
+                          std::move(rt_scheduler));
   }
 }
 
@@ -981,12 +1005,13 @@ bool Kernel::replace_scheduler(const std::string& name, ComputeIntent intent,
   if (it == graphs_.end()) {
     return false;
   }
-  
-  auto scheduler = SchedulerFactory::create(type, scheduler_config_.worker_count);
+
+  auto scheduler =
+      SchedulerFactory::create(type, scheduler_config_.worker_count);
   if (!scheduler) {
     return false;
   }
-  
+
   it->second->replace_scheduler(intent, std::move(scheduler));
   return true;
 }
@@ -997,12 +1022,12 @@ std::optional<std::pair<std::string, std::string>> Kernel::get_scheduler_info(
   if (it == graphs_.end()) {
     return std::nullopt;
   }
-  
+
   const IScheduler* scheduler = it->second->get_scheduler(intent);
   if (!scheduler) {
     return std::nullopt;
   }
-  
+
   return std::make_pair(scheduler->name(), scheduler->get_stats());
 }
 
