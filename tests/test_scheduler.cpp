@@ -22,10 +22,10 @@
 // =============================================================================
 
 TEST(SchedulerTestM33, ParallelComputeWithNewScheduler) {
+  using ps::ComputeIntent;
+  using ps::CpuWorkStealingScheduler;
   using ps::InteractionService;
   using ps::Kernel;
-  using ps::CpuWorkStealingScheduler;
-  using ps::ComputeIntent;
 
   Kernel kernel;
   InteractionService svc(kernel);
@@ -40,7 +40,8 @@ TEST(SchedulerTestM33, ParallelComputeWithNewScheduler) {
   auto& runtime = kernel.runtime(graph_name);
   auto scheduler = std::make_unique<CpuWorkStealingScheduler>();
   scheduler->start();
-  runtime.set_scheduler(ComputeIntent::GlobalHighPrecision, std::move(scheduler));
+  runtime.set_scheduler(ComputeIntent::GlobalHighPrecision,
+                        std::move(scheduler));
 
   auto endings = svc.cmd_ending_nodes(graph_name);
   ASSERT_TRUE(endings.has_value());
@@ -55,10 +56,10 @@ TEST(SchedulerTestM33, ParallelComputeWithNewScheduler) {
   opts.force_recache = true;
 
   auto future = runtime.submit_compute(opts);
-  
+
   // 获取结果
   auto result = future.get();
-  
+
   // 验证计算完成
   EXPECT_TRUE(result.image_buffer.width > 0 || !result.data.empty());
 }
@@ -238,6 +239,11 @@ TEST(Scheduler, DirtyRegionTiledComputation) {
 
   // 等待并获取结果（尽管我们不使用结果，但 get() 会等待完成并传播异常）
   future.get();
+
+  auto dirty_snapshot = svc.cmd_dirty_region_snapshot_debug(graph_name);
+  ASSERT_TRUE(dirty_snapshot.has_value());
+  EXPECT_NE(dirty_snapshot->find("tiles="), std::string::npos);
+  EXPECT_NE(dirty_snapshot->find("edges="), std::string::npos);
 
   auto log_incremental_compute = runtime.get_scheduler_log();
   ASSERT_FALSE(log_incremental_compute.empty());

@@ -57,13 +57,13 @@ class Kernel {
       std::vector<BenchmarkEvent>* benchmark_events = nullptr);
   std::optional<TimingCollector> get_timing(const std::string& name);
   std::optional<std::future<bool>> compute_async(
-    const std::string& name, int node_id, const std::string& cache_precision,
-    bool force_recache, bool enable_timing, bool parallel, bool quiet,
-    bool disable_disk_cache, bool nosave,
-    std::vector<BenchmarkEvent>* benchmark_events,
-    ComputeIntent intent, // 新增
-    std::optional<cv::Rect> dirty_roi // 新增
-);
+      const std::string& name, int node_id, const std::string& cache_precision,
+      bool force_recache, bool enable_timing, bool parallel, bool quiet,
+      bool disable_disk_cache, bool nosave,
+      std::vector<BenchmarkEvent>* benchmark_events,
+      ComputeIntent intent,              // 新增
+      std::optional<cv::Rect> dirty_roi  // 新增
+  );
   std::optional<cv::Rect> project_roi_forward(const std::string& name,
                                               int start_node_id,
                                               const cv::Rect& start_roi,
@@ -99,8 +99,7 @@ class Kernel {
                                                   std::optional<int> node_id,
                                                   bool show_parameters,
                                                   bool show_metadata = false);
-  std::optional<std::string> inspect_node(const std::string& name,
-                                          int node_id);
+  std::optional<std::string> inspect_node(const std::string& name, int node_id);
   std::optional<std::string> inspect_graph(const std::string& name);
   std::optional<LastError> last_error(const std::string& name) const;
   std::optional<std::vector<int>> ending_nodes(const std::string& name);
@@ -118,6 +117,8 @@ class Kernel {
   traversal_details(const std::string& name);
   std::optional<std::vector<GraphEventService::ComputeEvent>>
   drain_compute_events(const std::string& name);
+  std::optional<std::string> dirty_region_snapshot_debug(
+      const std::string& name);
   std::optional<cv::Mat> compute_and_get_image(
       const std::string& name, int node_id, const std::string& cache_precision,
       bool force_recache, bool enable_timing, bool parallel,
@@ -150,21 +151,21 @@ class Kernel {
   // =========================================================================
   // [M3.4 新增] 调度器配置与管理 API
   // =========================================================================
-  
+
   /// @brief 调度器配置结构
   struct SchedulerConfig {
     std::string hp_type = "cpu_work_stealing";  // HP 调度器类型
     std::string rt_type = "cpu_work_stealing";  // RT 调度器类型
     unsigned int worker_count = 0;              // 工作线程数（0=自动）
   };
-  
+
   /// @brief 设置全局调度器配置（影响后续加载的图）
   /// @param config 调度器配置
   void set_scheduler_config(const SchedulerConfig& config);
-  
+
   /// @brief 获取当前调度器配置
   const SchedulerConfig& get_scheduler_config() const;
-  
+
   /// @brief 为指定图替换调度器
   /// @param name 图名称
   /// @param intent 计算意图 (HP/RT)
@@ -172,7 +173,7 @@ class Kernel {
   /// @return true 如果替换成功
   bool replace_scheduler(const std::string& name, ComputeIntent intent,
                          const std::string& type);
-  
+
   /// @brief 获取指定图的调度器信息
   /// @param name 图名称
   /// @param intent 计算意图 (HP/RT)
@@ -182,7 +183,7 @@ class Kernel {
 
  private:
   void setup_schedulers_for_runtime(GraphRuntime& runtime);
-  
+
   std::map<std::string, std::unique_ptr<GraphRuntime>> graphs_;
   PluginManager plugin_mgr_;
   std::map<std::string, LastError> last_error_;
@@ -190,10 +191,9 @@ class Kernel {
   GraphInspectService inspect_service_;
   GraphCacheService cache_service_;
   GraphIOService io_service_;
-  
+
   // [M3.4] 调度器配置
   SchedulerConfig scheduler_config_;
 };
 
 }  // namespace ps
-
