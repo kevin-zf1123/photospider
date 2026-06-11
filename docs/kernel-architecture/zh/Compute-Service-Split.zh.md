@@ -32,7 +32,7 @@ ComputeService facade
 | 边界 | 职责 | 状态 |
 | --- | --- | --- |
 | `ComputeService` facade | 保留当前公开 compute 入口并构造内部协作者。 | 已实现 |
-| `ComputeCachePolicy` | 集中 HP/RT/legacy 缓存选择。 | 已在 `src/kernel/services/compute-service/compute_cache_policy.*` 实现 |
+| `ComputeCachePolicy` | 集中 HP/RT 缓存选择。 | 已在 `src/kernel/services/compute-service/compute_cache_policy.*` 实现 |
 | `NodeInputResolver` | 构建运行时参数并收集已就绪图像输入。 | 已在 `src/kernel/services/compute-service/node_input_resolver.*` 实现 |
 | `NodeExecutor` | 一致地执行 monolithic 与 tiled 算子。 | 已在 `src/kernel/services/compute-service/node_executor.*` 实现 |
 | `DirtyRegionPlanner` | 基于 node-local dirty report 和算子 propagation 构建图级脏区状态。 | 已在 `src/kernel/services/compute-service/dirty_region_planner.*` 实现 |
@@ -48,12 +48,8 @@ ComputeService facade
 
 - `cached_output_high_precision` 是唯一正式可复用缓存。
 - `cached_output_real_time` 是临时交互式状态。
-- `cached_output` 是遗留迁移残留，不应再接收新的写入。
 
-截至 2026-06-11 本次反馈扫描，正式 HP 写入和磁盘缓存权威已迁移到
-`cached_output_high_precision`，但 legacy `cached_output` 仍作为废弃字段、只读兼容
-fallback 和内存清理目标存在。TODO：在调用方不再需要该 fallback 后，通过后续 cache-cleanup
-change 移除或隐藏它。
+正式 HP 写入和磁盘缓存权威都通过 `cached_output_high_precision` 处理；RT 输出不会被提升为可复用缓存权威。
 
 ## 脏区边界
 

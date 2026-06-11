@@ -586,9 +586,7 @@ json graph_snapshot(ps::Kernel& kernel, const std::string& graph_name) {
                                      : nullptr)},
               {"rt", image_stats(node.cached_output_real_time
                                      ? &*node.cached_output_real_time
-                                     : nullptr)},
-              {"legacy", image_stats(node.cached_output ? &*node.cached_output
-                                                        : nullptr)}};
+                                     : nullptr)}};
           out["nodes"][std::to_string(id)] = node_json;
         }
         return out;
@@ -1517,11 +1515,6 @@ int main(int argc, char** argv) {
               sequential_snapshot["nodes"]["100"]["cache"]["hp"]["present"]
                   .get<bool>(),
               "formal HP cache is populated by kernel compute");
-    task3.add("legacy cache not written", false,
-              sequential_snapshot["nodes"]["100"]["cache"]["legacy"]["present"],
-              !sequential_snapshot["nodes"]["100"]["cache"]["legacy"]["present"]
-                   .get<bool>(),
-              "legacy cache remains a read fallback, not a write target");
     task3.add(
         "RT cache coexists without replacing HP", true,
         dirty_actual["graph_snapshot"]["nodes"]["100"]["cache"]["hp"]
@@ -1537,7 +1530,6 @@ int main(int argc, char** argv) {
                          {"dirty_snapshot", dirty_actual["graph_snapshot"]}};
     json task3_expected = {{"geometry_clip", rect_json(cv::Rect(0, 2, 7, 6))},
                            {"hp_cache_present", true},
-                           {"legacy_cache_written", false},
                            {"rt_cache_coexists_with_hp", true}};
     write_task_bundle(
         root, "task-03", "Task 3 utility/cache runtime evidence",

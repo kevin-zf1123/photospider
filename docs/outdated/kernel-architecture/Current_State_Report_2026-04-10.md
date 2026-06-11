@@ -2,14 +2,18 @@
 
 _Generated on 2026-04-10 from the codebase, build system, and test results. This report intentionally treats existing docs as secondary sources because the repository documentation is known to be stale._
 
+_Removal note, 2026-06-11: references below to legacy `Node::cached_output`
+describe removed content. The current branch no longer has that node field or a
+legacy cache fallback._
+
 ## TL;DR
 
 - The repo is **not in an early prototype stage anymore**; it is in a **mid-migration architecture stage**.
 - The kernel already has a meaningful service split (`GraphIOService`, `GraphTraversalService`, `GraphCacheService`, `GraphInspectService`, `GraphEventService`, `ComputeService`), but the real orchestration still concentrates in two large classes: `Kernel` and `ComputeService`.
 - The codebase is currently **between two designs**:
-  - a legacy single-cache / recursive compute model centered on `Node::cached_output`
+  - a legacy single-cache / recursive compute model centered on `Node::cached_output` (removed on 2026-06-11)
   - a newer intent-driven RT/HP model with schedulers, dual caches, ROI propagation, and heterogeneous execution hooks
-- The scheduler/runtime work is real and fairly advanced, but the migration is incomplete. The strongest sign is that `Node` still carries both legacy and new cache fields, while services such as disk caching still mostly operate on the legacy path.
+- The scheduler/runtime work is real and fairly advanced, but the migration was incomplete when this report was written. The strongest sign at the time was that `Node` still carried both legacy and new cache fields, while services such as disk caching still mostly operated on the legacy path. Removal status: the legacy node field called out here was removed on 2026-06-11.
 - Validation status today:
   - `cmake -S . -B build -DCMAKE_BUILD_TYPE=RelWithDebInfo`: configures successfully
   - `ctest --output-on-failure --test-dir build`: **60/61 tests pass**
@@ -34,8 +38,8 @@ This repo is in a **late experimental / pre-hardening stage**, with visible evid
    There is a per-graph `GraphRuntime`, scheduler injection, scheduler plugins, dual-priority queues, epoch cancellation, and Metal/GPU hooks.
 
 3. **The code is in migration, not in consolidation.**
-   `Node` still exposes:
-   - `cached_output` (legacy)
+   Historical state at report time: `Node` exposed:
+   - `cached_output` (legacy; removed on 2026-06-11)
    - `cached_output_real_time`
    - `cached_output_high_precision`
    - `rt_version`, `hp_version`, `rt_roi`, `hp_roi`
@@ -230,7 +234,7 @@ This service manages:
 
 ### Assessment
 
-Its main weakness is conceptual drift: the node model now has RT/HP caches, but the cache service still mostly targets the old `cached_output` path. That means the service boundary no longer matches the real execution model.
+Historical weakness at report time: the node model had RT/HP caches, but the cache service still mostly targeted the old `cached_output` path. That meant the service boundary no longer matched the real execution model. Removal status: this old path was removed on 2026-06-11.
 
 ## `GraphIOService`
 
@@ -268,7 +272,7 @@ These parts are directionally good:
 
 The codebase is split between:
 
-- old recursive compute + `cached_output`
+- old recursive compute + `cached_output` (removed on 2026-06-11)
 - newer intent-driven RT/HP scheduling + per-intent caches
 
 This is the single most important structural fact about the repo today.
@@ -385,15 +389,15 @@ It clears `nodes`, but does not reset everything associated with previous runs, 
 
 ---
 
-### 6. Cache service still mostly targets the legacy cache model
+### 6. Historical: cache service still mostly targeted the legacy cache model
 
-The node type now supports:
+At report time, the node type supported:
 
-- unified legacy cache
+- unified legacy cache (removed on 2026-06-11)
 - RT cache
 - HP cache
 
-But `GraphCacheService` still mostly saves/loads/clears the unified `cached_output` path.
+At report time, `GraphCacheService` still mostly saved/loaded/cleared the unified `cached_output` path. Removal status: this path was removed on 2026-06-11.
 
 ### Impact
 
@@ -417,13 +421,13 @@ These are the highest-value missing developments, based on the code as it exists
 
 ## A. Finish the cache-model migration
 
-Unify the semantics of:
+Historical cleanup target:
 
-- `cached_output`
+- `cached_output` (removed on 2026-06-11)
 - `cached_output_real_time`
 - `cached_output_high_precision`
 
-and decide whether the legacy unified cache remains a compatibility bridge or gets removed entirely.
+The legacy unified cache has since been removed rather than retained as a compatibility bridge.
 
 ## B. Split `ComputeService`
 

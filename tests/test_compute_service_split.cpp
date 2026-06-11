@@ -88,10 +88,6 @@ TEST(ComputeCachePolicySplit, PreservesHpAuthorityAndRtNonAuthority) {
   EXPECT_EQ(compute::ComputeCachePolicy::reusable_output(node), nullptr);
   ASSERT_NE(compute::ComputeCachePolicy::interactive_output(node), nullptr);
 
-  node.cached_output = make_image_output(6, 6);
-  ASSERT_EQ(
-      compute::ComputeCachePolicy::reusable_output(node)->image_buffer.width,
-      6);
   node.cached_output_high_precision = make_image_output(8, 8);
   EXPECT_EQ(
       compute::ComputeCachePolicy::reusable_output(node)->image_buffer.width,

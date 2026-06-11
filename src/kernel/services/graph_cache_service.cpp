@@ -22,14 +22,12 @@ const NodeOutput* hp_cache_ptr(const Node& node) {
 
 bool has_memory_cache(const Node& node) {
   return node.cached_output_high_precision.has_value() ||
-         node.cached_output_real_time.has_value() ||
-         node.cached_output.has_value();
+         node.cached_output_real_time.has_value();
 }
 
 void reset_memory_cache(Node& node) {
   node.cached_output_high_precision.reset();
   node.cached_output_real_time.reset();
-  node.cached_output.reset();
 }
 
 }  // namespace
@@ -99,11 +97,9 @@ void GraphCacheService::save_cache_if_configured(
 
 bool GraphCacheService::try_load_from_disk_cache(GraphModel& graph,
                                                  Node& node) const {
-  if (node.cached_output_high_precision.has_value() ||
-      node.cached_output.has_value() || graph.cache_root.empty() ||
+  if (node.cached_output_high_precision.has_value() || graph.cache_root.empty() ||
       node.caches.empty()) {
-    return node.cached_output_high_precision.has_value() ||
-           node.cached_output.has_value();
+    return node.cached_output_high_precision.has_value();
   }
 
   auto start_io = std::chrono::high_resolution_clock::now();

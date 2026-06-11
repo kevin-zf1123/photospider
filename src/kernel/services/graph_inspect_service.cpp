@@ -18,10 +18,6 @@ const NodeOutput* pick_cached_output(const Node& node,
     source_label = "RT transient state (NOT formal cache)";
     return &node.cached_output_real_time.value();
   }
-  if (node.cached_output) {
-    source_label = "legacy cache (deprecated)";
-    return &node.cached_output.value();
-  }
   source_label.clear();
   return nullptr;
 }

@@ -95,7 +95,7 @@ graph TD
 | `Data-Model.md` | `GraphModel`, `Node`, YAML schema, inputs, outputs, parameters, and cache fields. |
 | `Compute-Flow.md` | Sequential, parallel, RT, HP, ROI update, and event/timing flow. |
 | `Compute-Service-Split.md` | Planned `ComputeService` facade/internal split and TODO boundaries. |
-| `Cache-Model.md` | HP/RT memory cache semantics, legacy HP cache rename, and disk cache behavior. |
+| `Cache-Model.md` | HP/RT memory cache semantics and disk cache behavior. |
 | `Graph-Lifecycle.md` | Graph runtime ownership, graph load/reload/edit failure semantics, and `GraphModel::clear()`. |
 | `ImageBuffer-Memory-Contract.md` | Public `ImageBuffer` memory/device contract, alignment, stride, and adapter rules. |
 | `Dirty-Region-Propagation.md` | ROI propagation, tile mapping, and current tunable tile defaults. |
@@ -162,24 +162,18 @@ live in `custom_ops/`.
 
 ## Cache Model
 
-The cache layer currently spans older and newer state:
+The cache layer uses two node output states:
 
 - `Node::cached_output_high_precision`: formal reusable HP cache.
 - `Node::cached_output_real_time`: transient RT preview/update state, not
   formal cache authority.
-- `Node::cached_output`: mistaken legacy name for the HP cache; migrate away.
 - RT/HP version and ROI fields
 - disk cache files under the configured cache root
 
-This mixed model is one of the main migration areas. `GraphCacheService` keeps
-cache commands centralized, but some compute paths still need to know about the
-specific cache flavor they are reading or writing.
-
-New code should not introduce additional dependencies on `cached_output`. HP
-code should use `cached_output_high_precision`; RT code should use
-`cached_output_real_time` only as interactive state. Formal cache save, load,
-and synchronization behavior, subsequent HP compute, and long-term storage
-should use HP output.
+`GraphCacheService` keeps cache commands centralized. HP code should use
+`cached_output_high_precision`; RT code should use `cached_output_real_time`
+only as interactive state. Formal cache save, load, and synchronization
+behavior, subsequent HP compute, and long-term storage should use HP output.
 
 ## ImageBuffer Contract
 
@@ -217,7 +211,8 @@ These are implementation realities, not immediate blockers:
   scheduler interaction, and metrics emission.
 - `GraphTraversalService` mixes topology traversal with ROI and spatial
   propagation helpers.
-- Cache APIs still expose legacy and newer RT/HP concepts together.
+- Cache APIs expose HP and RT concepts, while compute boundary cleanup is still
+  ongoing.
 
 The `ComputeService` split is now tracked by the `split-compute-service`
 OpenSpec change and the maintained `Compute-Service-Split.md` plan. TODO:

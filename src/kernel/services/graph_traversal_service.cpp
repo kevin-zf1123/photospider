@@ -98,8 +98,6 @@ cv::Rect transform_rect_with_matrix(const cv::Rect& rect,
 const NodeOutput* pick_cached_output(const Node& node) {
   if (node.cached_output_high_precision)
     return &node.cached_output_high_precision.value();
-  if (node.cached_output)
-    return &node.cached_output.value();
   return nullptr;
 }
 
@@ -379,8 +377,6 @@ cv::Size infer_output_size(const GraphModel& graph,
     return true;
   };
   if (take_from_output(node.cached_output_high_precision))
-    return cache[node_id] = size;
-  if (take_from_output(node.cached_output))
     return cache[node_id] = size;
 
   auto width_opt = node_param_int_opt(node, "width");

@@ -35,7 +35,7 @@ ComputeService facade
 | Boundary | Responsibility | Status |
 | --- | --- | --- |
 | `ComputeService` facade | Preserve current public compute entry points and construct internal collaborators. | Implemented |
-| `ComputeCachePolicy` | Centralize HP/RT/legacy cache selection. | Implemented in `src/kernel/services/compute-service/compute_cache_policy.*` |
+| `ComputeCachePolicy` | Centralize HP/RT cache selection. | Implemented in `src/kernel/services/compute-service/compute_cache_policy.*` |
 | `NodeInputResolver` | Build runtime parameters and collect ready image inputs. | Implemented in `src/kernel/services/compute-service/node_input_resolver.*` |
 | `NodeExecutor` | Execute monolithic and tiled operators consistently. | Implemented in `src/kernel/services/compute-service/node_executor.*` |
 | `DirtyRegionPlanner` | Build graph-scoped dirty-region state from node-local dirty reports and operator propagation. | Implemented in `src/kernel/services/compute-service/dirty_region_planner.*` |
@@ -51,14 +51,10 @@ The split must preserve the existing cache contract:
 
 - `cached_output_high_precision` is the only formal reusable cache.
 - `cached_output_real_time` is transient interactive state.
-- `cached_output` is legacy migration residue and should not receive new
-  writes.
 
-Current code status as of the 2026-06-11 feedback scan: formal HP writes and
-disk cache authority have moved to `cached_output_high_precision`, but legacy
-`cached_output` still exists as a deprecated field, read-only compatibility
-fallback, and memory-clear target. TODO: remove or hide that fallback in a later
-cache-cleanup change after callers no longer need it.
+Formal HP writes and disk cache authority are handled through
+`cached_output_high_precision`; RT output is never promoted to reusable cache
+authority.
 
 ## Dirty-Region Boundary
 

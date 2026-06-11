@@ -142,8 +142,6 @@ static cv::Size infer_input_size_hint(const Node& node,
       continue;
     const Node& parent = it->second;
     cv::Size size = cached_image_size(parent.cached_output_high_precision);
-    if (size.width <= 0 || size.height <= 0)
-      size = cached_image_size(parent.cached_output);
     if (size.width > 0 && size.height > 0)
       return size;
   }

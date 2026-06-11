@@ -208,8 +208,6 @@ NodeOutput& ComputeService::compute_internal(
   std::vector<const NodeOutput*> monolithic_inputs;
   do {
     // 1. 内存／磁盘缓存检测
-    // Prefer HP formal cache; fall back to legacy cached_output for
-    // compatibility during migration.
     if (compute::ComputeCachePolicy::has_reusable_output(target_node)) {
       result_source = "memory_cache";
       break;
@@ -314,7 +312,6 @@ NodeOutput& ComputeService::compute_internal(
     benchmark_events->push_back(current_event);
   }
 
-  // Prefer HP formal cache; fall back to legacy cached_output
   return *compute::ComputeCachePolicy::reusable_output(target_node);
 }
 
@@ -327,7 +324,7 @@ NodeOutput& ComputeService::compute_node_no_recurse(
   auto& timing_mutex = graph.timing_mutex_;
 
   auto& target_node = nodes.at(node_id);
-  // Fast path: already computed (prefer HP, fall back to legacy)
+  // Fast path: already computed.
   if (compute::ComputeCachePolicy::has_reusable_output(target_node))
     return *compute::ComputeCachePolicy::reusable_output(target_node);
 
@@ -1125,7 +1122,6 @@ NodeOutput& ComputeService::compute_sequential_impl(
     std::lock_guard<std::mutex> lk(graph.graph_mutex_);
     for (int nid : execution_order) {
       auto& node = graph.nodes.at(nid);
-      node.cached_output.reset();
       node.cached_output_high_precision.reset();
     }
   }

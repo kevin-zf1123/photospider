@@ -8,9 +8,8 @@
 | --- | --- | --- |
 | `cached_output_high_precision` | 正式缓存 | 完整质量、可复用的 HP 输出。 |
 | `cached_output_real_time` | 临时 RT 状态 | 交互式预览/更新输出。 |
-| `cached_output` | 迁移残留 | HP 输出的旧误命名。 |
 
-只有高精度输出是正式可复用缓存。这意味着只有 HP 输出可以作为后续 HP 计算、磁盘缓存、长期存储以及其他可复用缓存行为的权威来源。`cached_output_real_time` 是临时交互式状态，不能被视为权威缓存，不能作为磁盘缓存同步来源，也不能作为长期存储输入。`cached_output` 不是独立的长期缓存类型。它是 HP 缓存的旧名称，应迁移到 `cached_output_high_precision`。
+只有高精度输出是正式可复用缓存。这意味着只有 HP 输出可以作为后续 HP 计算、磁盘缓存、长期存储以及其他可复用缓存行为的权威来源。`cached_output_real_time` 是临时交互式状态，不能被视为权威缓存，不能作为磁盘缓存同步来源，也不能作为长期存储输入。
 
 ## HP 缓存
 
@@ -34,12 +33,6 @@ RT 计算写入 `cached_output_real_time`。RT 状态是交互式预览或代理
 | `rt_version` | RT 输出变化的版本计数器。 |
 | `rt_roi` | RT 更新所代表的最近或合并后的 HP 空间区域。 |
 
-## 遗留 HP 名称
-
-`cached_output` 存在于遗留计算路径和当前迁移支持中。它应被视为错误的 HP 缓存名称。迁移应将 HP 读写移动到 `cached_output_high_precision`。剩余兼容 fallback 只能在调用点已确认使用 HP 输出前读取它。
-
-截至 2026-06-11 本次反馈扫描，legacy `cached_output` 尚未彻底移除。它仍作为 `Node` 上的废弃字段存在，兼容 fallback 路径仍可能读取它，并且会随其他内存状态一起清理。新的正式 HP 写入目标是 `cached_output_high_precision`；磁盘缓存保存、加载和同步路径使用 HP 输出，而不是 RT 输出或 legacy `cached_output`。
-
 ## 磁盘缓存
 
 `GraphCacheService` 处理 `GraphModel::cache_root` 下的磁盘缓存文件。节点缓存条目描述缓存类型和位置。图像缓存文件保存为图像文件，命名的 `NodeOutput::data` 条目保存为图像文件旁边的 YAML 元数据。
@@ -57,15 +50,13 @@ RT 计算写入 `cached_output_real_time`。RT 状态是交互式预览或代理
 | Free transient memory | 清理非终点节点的内存缓存状态。 |
 | Synchronize disk cache | 保存 HP 输出，并为没有 HP 输出的节点移除陈旧磁盘文件。 |
 
-磁盘缓存保存、加载和同步只使用 `cached_output_high_precision`。RT 输出不会保护陈旧磁盘文件，也不会被提升为磁盘缓存状态。遗留 `cached_output` 会随其他内存状态一起清理，但它不是磁盘缓存来源。
+磁盘缓存保存、加载和同步只使用 `cached_output_high_precision`。RT 输出不会保护陈旧磁盘文件，也不会被提升为磁盘缓存状态。
 
-## 迁移规则
+## 缓存规则
 
 - 新 HP 代码写入 `cached_output_high_precision`。
 - 新 RT 代码将 `cached_output_real_time` 写为临时交互式状态。
-- 新代码不应依赖 `cached_output`。
-- 兼容 fallback 只能在 HP 调用点迁移到 `cached_output_high_precision` 期间读取 `cached_output`。
 - 正式缓存的保存、加载、同步行为、后续 HP 计算和长期存储必须使用 HP 输出，不能将 RT 输出提升为权威缓存。
 - 测试应分别验证 HP 和 RT 字段。
 
-出于兼容性，`GraphInspectService` 按 HP、RT、遗留顺序选择显示来源，并明确标注所选来源。RT 元数据可以用于 inspect 展示，但会标注为临时状态，而不是正式缓存权威。
+`GraphInspectService` 按 HP、RT 顺序选择显示来源，并明确标注所选来源。RT 元数据可以用于 inspect 展示，但会标注为临时状态，而不是正式缓存权威。
