@@ -41,7 +41,7 @@ ComputeService facade
 | `DirtyRegionPlanner` | Build graph-scoped dirty-region state from node-local dirty reports and operator propagation. | Implemented in `src/kernel/services/compute-service/dirty_region_planner.*` |
 | `DirtyRegionSnapshot` | Enumerate dirty tiles, dirty monolithic nodes, per-node dirty ROIs, and per-edge ROI mappings using stable ids instead of raw pointers. | Implemented as an internal snapshot model |
 | `ComputeTaskPlanner` | Convert compute requests and dirty snapshots into shared `ComputePlan` / `ComputeTaskGraph` semantics. | Implemented as an internal planning boundary; plugin ABI remains TODO |
-| `IntentUpdateCoordinator` | Coordinate `GlobalHighPrecision` and `RealTimeUpdate` branching. | Implemented in `src/kernel/services/compute-service/intent_update_coordinator.*` |
+| `IntentUpdateCoordinator` | Coordinate `GlobalHighPrecision` and `RealTimeUpdate` intent semantics, including realtime HP/RT dual path behavior independent from execution mode. | Implemented in `src/kernel/services/compute-service/intent_update_coordinator.*` |
 | `ParallelGraphExecutor` | Encapsulate the current legacy `GraphRuntime` queue DAG path. | Implemented in `src/kernel/services/compute-service/parallel_graph_executor.*` |
 | `ComputeMetricsRecorder` | Centralize events, timings, benchmark events, and debug metadata. | Implemented in `src/kernel/services/compute-service/compute_metrics_recorder.*` |
 
@@ -83,6 +83,14 @@ snapshots, then produces internal `ComputePlan` semantics used by sequential,
 parallel, HP, and RT paths before execution-specific dispatch. Execution modes
 should differ only in task pools, scheduler policy, and resource selection.
 
+Realtime HP/RT dual path selection is not an execution mode. Non-realtime
+requests enable the HP path only. `RealTimeUpdate` requests enable both HP and
+RT work for the dirty ROI regardless of whether the caller selected
+single-threaded, parallel, GPU, or another scheduler/resource policy. The
+current implementation coordinates this through `IntentUpdateCoordinator`; the
+legacy runtime queue can submit HP and RT work concurrently, while
+single-threaded execution runs the same intent work inline.
+
 TODO: planner plugin ABI remains explicitly deferred to a later change.
 
 ## Scheduler Boundary
@@ -96,6 +104,13 @@ and schedule compute resources. They should not own graph-level dirty
 propagation or compute-task derivation. Existing `IScheduler::schedule_node`,
 scheduler-local tile splitting, and task-group aggregation are migration
 interfaces.
+
+The target task-pool model has separate HP and RT pools with independently
+selectable scheduler configuration. For example, HP can use a single-thread
+scheduler while RT uses a GPU scheduler. Realtime and non-realtime modes can
+also use different scheduler configuration. This split does not implement full
+scheduler-owned HP/RT task-pool routing; it only keeps the intent boundary from
+being coupled to the legacy parallel executor.
 
 TODO: route planned tasks through scheduler-owned task pools in a later
 scheduler-focused change.

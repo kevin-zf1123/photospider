@@ -8,6 +8,7 @@
 #include <iostream>
 #include <mutex>
 #include <nlohmann/json.hpp>
+#include <optional>
 #include <sstream>
 #include <string>
 #include <vector>
@@ -254,6 +255,268 @@ json benchmark_events_json(const std::vector<ps::BenchmarkEvent>& events) {
   return out;
 }
 
+std::string dirty_domain_name(ps::compute::DirtyDomain domain) {
+  switch (domain) {
+    case ps::compute::DirtyDomain::HighPrecision:
+      return "high_precision";
+    case ps::compute::DirtyDomain::RealTime:
+      return "real_time";
+  }
+  return "unknown";
+}
+
+std::string dirty_tile_level_name(ps::compute::DirtyTileLevel level) {
+  switch (level) {
+    case ps::compute::DirtyTileLevel::Micro:
+      return "micro";
+    case ps::compute::DirtyTileLevel::Macro:
+      return "macro";
+  }
+  return "unknown";
+}
+
+std::string dirty_edge_direction_name(
+    ps::compute::DirtyEdgeDirection direction) {
+  switch (direction) {
+    case ps::compute::DirtyEdgeDirection::ForwardAffected:
+      return "forward_affected";
+    case ps::compute::DirtyEdgeDirection::BackwardDemand:
+      return "backward_demand";
+  }
+  return "unknown";
+}
+
+std::string compute_intent_name(ps::ComputeIntent intent) {
+  switch (intent) {
+    case ps::ComputeIntent::GlobalHighPrecision:
+      return "global_high_precision";
+    case ps::ComputeIntent::RealTimeUpdate:
+      return "real_time_update";
+  }
+  return "unknown";
+}
+
+std::string planned_task_kind_name(ps::compute::PlannedTaskKind kind) {
+  switch (kind) {
+    case ps::compute::PlannedTaskKind::Node:
+      return "node";
+    case ps::compute::PlannedTaskKind::Tile:
+      return "tile";
+    case ps::compute::PlannedTaskKind::Monolithic:
+      return "monolithic";
+  }
+  return "unknown";
+}
+
+std::string propagation_status_name(ps::PropagationContractStatus status) {
+  switch (status) {
+    case ps::PropagationContractStatus::Explicit:
+      return "explicit";
+    case ps::PropagationContractStatus::LegacyIdentityFallback:
+      return "legacy_identity_fallback";
+  }
+  return "unknown";
+}
+
+json dirty_snapshot_json(
+    const std::optional<ps::compute::DirtyRegionSnapshot>& snapshot) {
+  if (!snapshot) {
+    return json(nullptr);
+  }
+  json out;
+  out["graph_generation"] = snapshot->graph_generation;
+  out["dirty_tiles"] = json::array();
+  for (const auto& tile : snapshot->dirty_tiles) {
+    out["dirty_tiles"].push_back({{"node_id", tile.node_id},
+                                  {"domain", dirty_domain_name(tile.domain)},
+                                  {"level", dirty_tile_level_name(tile.level)},
+                                  {"tile_x", tile.tile_x},
+                                  {"tile_y", tile.tile_y},
+                                  {"tile_size", tile.tile_size},
+                                  {"pixel_roi", rect_json(tile.pixel_roi)}});
+  }
+  out["dirty_monolithic_nodes"] = json::array();
+  for (const auto& region : snapshot->dirty_monolithic_nodes) {
+    out["dirty_monolithic_nodes"].push_back(
+        {{"node_id", region.node_id},
+         {"domain", dirty_domain_name(region.domain)},
+         {"pixel_roi", rect_json(region.pixel_roi)},
+         {"whole_output", region.whole_output}});
+  }
+  out["per_node_dirty_rois"] = json::object();
+  std::vector<int> node_ids;
+  node_ids.reserve(snapshot->per_node_dirty_rois.size());
+  for (const auto& [node_id, _] : snapshot->per_node_dirty_rois) {
+    node_ids.push_back(node_id);
+  }
+  std::sort(node_ids.begin(), node_ids.end());
+  for (int node_id : node_ids) {
+    json rois = json::array();
+    for (const auto& roi : snapshot->per_node_dirty_rois.at(node_id)) {
+      rois.push_back(rect_json(roi));
+    }
+    out["per_node_dirty_rois"][std::to_string(node_id)] = rois;
+  }
+  out["edge_mappings"] = json::array();
+  for (const auto& edge : snapshot->edge_mappings) {
+    out["edge_mappings"].push_back(
+        {{"from_node_id", edge.from_node_id},
+         {"to_node_id", edge.to_node_id},
+         {"from_roi", rect_json(edge.from_roi)},
+         {"to_roi", rect_json(edge.to_roi)},
+         {"direction", dirty_edge_direction_name(edge.direction)}});
+  }
+  return out;
+}
+
+json dirty_snapshot_history_json(
+    const std::vector<ps::compute::DirtyRegionSnapshot>& snapshots) {
+  json out = json::array();
+  for (const auto& snapshot : snapshots) {
+    out.push_back(dirty_snapshot_json(snapshot));
+  }
+  return out;
+}
+
+json compute_plan_json(const std::optional<ps::compute::ComputePlan>& plan) {
+  if (!plan) {
+    return json(nullptr);
+  }
+  json planned_work = json::array();
+  for (const auto& work : plan->planned_work) {
+    planned_work.push_back(
+        {{"node_id", work.node_id},
+         {"domain", dirty_domain_name(work.domain)},
+         {"represented_hp_roi", rect_json(work.represented_hp_roi)},
+         {"execution_roi", rect_json(work.execution_roi)},
+         {"whole_output", work.whole_output},
+         {"dirty_rois", json::array()},
+         {"dependency_node_ids", work.dependency_node_ids},
+         {"dependent_node_ids", work.dependent_node_ids},
+         {"task_ids", work.task_ids}});
+    for (const auto& roi : work.dirty_rois) {
+      planned_work.back()["dirty_rois"].push_back(rect_json(roi));
+    }
+  }
+
+  json dependencies = json::array();
+  for (const auto& dependency : plan->task_graph.dependencies) {
+    dependencies.push_back(
+        {{"from_node_id", dependency.from_node_id},
+         {"to_node_id", dependency.to_node_id},
+         {"input_kind", dependency.input_kind},
+         {"from_roi", rect_json(dependency.from_roi)},
+         {"to_roi", rect_json(dependency.to_roi)},
+         {"direction", dirty_edge_direction_name(dependency.direction)}});
+  }
+
+  json tasks = json::array();
+  for (const auto& task : plan->task_graph.tasks) {
+    tasks.push_back({{"task_id", task.task_id},
+                     {"node_id", task.node_id},
+                     {"kind", planned_task_kind_name(task.kind)},
+                     {"domain", dirty_domain_name(task.domain)},
+                     {"output_roi", rect_json(task.output_roi)},
+                     {"tile_x", task.tile_x},
+                     {"tile_y", task.tile_y},
+                     {"tile_size", task.tile_size},
+                     {"whole_output", task.whole_output},
+                     {"dependency_task_ids", task.dependency_task_ids}});
+  }
+
+  return {{"intent", compute_intent_name(plan->intent)},
+          {"target_node_id", plan->target_node_id},
+          {"parallel", plan->parallel},
+          {"execution_order", plan->execution_order},
+          {"planned_nodes", plan->planned_nodes},
+          {"planned_work", planned_work},
+          {"task_graph",
+           {{"dependencies", dependencies},
+            {"tasks", tasks},
+            {"initial_task_ids", plan->task_graph.initial_task_ids}}}};
+}
+
+json compute_plan_history_json(
+    const std::vector<ps::compute::ComputePlan>& plans) {
+  json out = json::array();
+  for (const auto& plan : plans) {
+    out.push_back(compute_plan_json(plan));
+  }
+  return out;
+}
+
+std::vector<std::string> trace_phase_set(const std::vector<json>& events) {
+  std::vector<std::string> phases;
+  for (const auto& event : events) {
+    const std::string phase = event.value("phase", "");
+    if (!phase.empty() &&
+        std::find(phases.begin(), phases.end(), phase) == phases.end()) {
+      phases.push_back(phase);
+    }
+  }
+  std::sort(phases.begin(), phases.end());
+  return phases;
+}
+
+bool json_int_array_equals(const json& actual,
+                           const std::vector<int>& expected) {
+  if (!actual.is_array() || actual.size() != expected.size()) {
+    return false;
+  }
+  for (size_t i = 0; i < expected.size(); ++i) {
+    if (!actual[i].is_number_integer() || actual[i].get<int>() != expected[i]) {
+      return false;
+    }
+  }
+  return true;
+}
+
+bool contains_compute_plan_graph(const json& plans, const std::string& intent,
+                                 bool parallel,
+                                 const std::vector<int>& planned_nodes,
+                                 size_t min_dependencies, size_t min_tasks) {
+  if (!plans.is_array()) {
+    return false;
+  }
+  return std::any_of(plans.begin(), plans.end(), [&](const json& plan) {
+    if (!plan.contains("planned_nodes") || plan.value("intent", "") != intent ||
+        plan.value("parallel", !parallel) != parallel ||
+        !json_int_array_equals(plan["planned_nodes"], planned_nodes)) {
+      return false;
+    }
+    if (!plan.contains("planned_work") || !plan["planned_work"].is_array() ||
+        plan["planned_work"].size() != planned_nodes.size()) {
+      return false;
+    }
+    if (!plan.contains("task_graph") || !plan["task_graph"].is_object()) {
+      return false;
+    }
+    const json& graph = plan["task_graph"];
+    return graph.contains("dependencies") && graph["dependencies"].is_array() &&
+           graph["dependencies"].size() >= min_dependencies &&
+           graph.contains("tasks") && graph["tasks"].is_array() &&
+           graph["tasks"].size() >= min_tasks &&
+           graph.contains("initial_task_ids") &&
+           graph["initial_task_ids"].is_array() &&
+           !graph["initial_task_ids"].empty();
+  });
+}
+
+bool compute_events_contain_source(const json& events,
+                                   const std::string& source) {
+  if (!events.is_array()) {
+    return false;
+  }
+  return std::any_of(events.begin(), events.end(), [&](const json& event) {
+    return event.value("source", "") == source;
+  });
+}
+
+bool contains_phase(const std::vector<std::string>& phases,
+                    const std::string& phase) {
+  return std::find(phases.begin(), phases.end(), phase) != phases.end();
+}
+
 json graph_snapshot(ps::Kernel& kernel, const std::string& graph_name) {
   auto& runtime = kernel.runtime(graph_name);
   return runtime
@@ -264,6 +527,13 @@ json graph_snapshot(ps::Kernel& kernel, const std::string& graph_name) {
         out["skip_save_cache"] = graph.skip_save_cache();
         out["last_dirty_region_snapshot_debug"] =
             graph.last_dirty_region_snapshot_debug.value_or("");
+        out["last_dirty_region_snapshot"] =
+            dirty_snapshot_json(graph.last_dirty_region_snapshot);
+        out["recent_dirty_region_snapshots"] =
+            dirty_snapshot_history_json(graph.recent_dirty_region_snapshots);
+        out["last_compute_plan"] = compute_plan_json(graph.last_compute_plan);
+        out["recent_compute_plans"] =
+            compute_plan_history_json(graph.recent_compute_plans);
         std::vector<int> ids;
         ids.reserve(graph.nodes.size());
         for (const auto& [id, _] : graph.nodes) {
@@ -1054,10 +1324,17 @@ int main(int argc, char** argv) {
     const bool legacy_ok =
         svc.cmd_compute(legacy_graph, 20, "int8", true, true, false, false,
                         true, true, &legacy_benchmark);
+    auto& registry = ps::OpRegistry::instance();
     auto legacy_forward =
         svc.cmd_project_roi(legacy_graph, 1, cv::Rect(3, 4, 5, 6), 20);
     json legacy_actual = {
         {"ok", legacy_ok},
+        {"dirty_propagation_contract_status",
+         propagation_status_name(registry.dirty_propagation_contract_status(
+             "trace_process", "legacy_identity"))},
+        {"forward_propagation_contract_status",
+         propagation_status_name(registry.forward_propagation_contract_status(
+             "trace_process", "legacy_identity"))},
         {"forward_projected_roi",
          legacy_forward ? rect_json(*legacy_forward) : json(nullptr)},
         {"graph_snapshot", graph_snapshot(kernel, legacy_graph)},
@@ -1084,6 +1361,7 @@ int main(int argc, char** argv) {
     log("dirty rt update ok=" + std::to_string(dirty_ok));
     auto dirty_snapshot_text =
         svc.cmd_dirty_region_snapshot_debug(dirty_graph).value_or("");
+    auto dirty_snapshot_struct = svc.cmd_dirty_region_snapshot(dirty_graph);
     auto dirty_forward = svc.cmd_project_roi(dirty_graph, 1, dirty_roi, 100);
     auto dirty_backward =
         svc.cmd_project_roi_backward(dirty_graph, 100, dirty_roi, 1);
@@ -1091,9 +1369,12 @@ int main(int argc, char** argv) {
         scheduler_events_json(kernel.runtime(dirty_graph).get_scheduler_log());
     json dirty_actual = {
         {"bootstrap_ok", dirty_bootstrap_ok},
+        {"requested_parallel", true},
         {"dirty_update_ok", dirty_ok},
         {"dirty_roi", rect_json(dirty_roi)},
         {"interaction_dirty_snapshot_debug", dirty_snapshot_text},
+        {"interaction_dirty_snapshot",
+         dirty_snapshot_json(dirty_snapshot_struct)},
         {"project_forward",
          dirty_forward ? rect_json(*dirty_forward) : json(nullptr)},
         {"project_backward",
@@ -1105,6 +1386,43 @@ int main(int argc, char** argv) {
         {"benchmark_events", benchmark_events_json(dirty_benchmark)}};
     write_json(root / "full-kernel-run" / "actual" / "dirty_rt_update.json",
                dirty_actual);
+
+    const cv::Rect dirty_single_thread_roi(24, 12, 16, 16);
+    mutate_dirty_region(kernel, dirty_graph, dirty_single_thread_roi);
+
+    std::vector<ps::BenchmarkEvent> dirty_single_thread_benchmark;
+    g_trace.set_phase("dirty_rt_update_single_thread");
+    kernel.runtime(dirty_graph).clear_scheduler_log();
+    auto dirty_single_thread_future = kernel.compute_async(
+        dirty_graph, 100, "int8", true, true, false, false, true, true,
+        &dirty_single_thread_benchmark, ps::ComputeIntent::RealTimeUpdate,
+        dirty_single_thread_roi);
+    const bool dirty_single_thread_ok =
+        dirty_single_thread_future && dirty_single_thread_future->get();
+    log("dirty rt update single-thread ok=" +
+        std::to_string(dirty_single_thread_ok));
+    auto dirty_single_thread_snapshot_text =
+        svc.cmd_dirty_region_snapshot_debug(dirty_graph).value_or("");
+    auto dirty_single_thread_snapshot_struct =
+        svc.cmd_dirty_region_snapshot(dirty_graph);
+    json dirty_single_thread_actual = {
+        {"requested_parallel", false},
+        {"dirty_update_ok", dirty_single_thread_ok},
+        {"dirty_roi", rect_json(dirty_single_thread_roi)},
+        {"interaction_dirty_snapshot_debug", dirty_single_thread_snapshot_text},
+        {"interaction_dirty_snapshot",
+         dirty_snapshot_json(dirty_single_thread_snapshot_struct)},
+        {"graph_snapshot", graph_snapshot(kernel, dirty_graph)},
+        {"scheduler_events",
+         scheduler_events_json(
+             kernel.runtime(dirty_graph).get_scheduler_log())},
+        {"compute_events",
+         compute_events_json(svc.cmd_drain_compute_events(dirty_graph))},
+        {"benchmark_events",
+         benchmark_events_json(dirty_single_thread_benchmark)}};
+    write_json(root / "full-kernel-run" / "actual" /
+                   "dirty_rt_update_single_thread.json",
+               dirty_single_thread_actual);
 
     g_trace.set_phase("parallel_error_path");
     std::vector<ps::BenchmarkEvent> error_benchmark;
@@ -1127,6 +1445,8 @@ int main(int argc, char** argv) {
                error_actual);
 
     std::vector<json> operator_trace = g_trace.snapshot();
+    const std::vector<std::string> observed_phases =
+        trace_phase_set(operator_trace);
     write_jsonl(root / "full-kernel-run" / "trace.jsonl", operator_trace);
     write_json(root / "full-kernel-run" / "actual" / "operator_trace.json",
                operator_trace);
@@ -1145,16 +1465,19 @@ int main(int argc, char** argv) {
                expected_common);
 
     CheckSet task2;
+    const bool full_graph_input_exists =
+        fs::exists(input_dir / "kernel_trace_graph.yaml");
+    const bool sequential_state_exists =
+        fs::exists(root / "full-kernel-run" / "actual" / "sequential_hp.json");
     task2.add("kernel trace testbench produced full graph input", true,
-              fs::exists(input_dir / "kernel_trace_graph.yaml"), true,
+              full_graph_input_exists, full_graph_input_exists,
               "input graph was generated and loaded through Kernel");
     task2.add("operator trace captures runtime calls", "non_empty",
               operator_trace.size(), !operator_trace.empty(),
               "trace.jsonl records op calls and propagator calls");
-    task2.add(
-        "full run writes actual state dumps", true,
-        fs::exists(root / "full-kernel-run" / "actual" / "sequential_hp.json"),
-        true, "kernel state dumps exist for review");
+    task2.add("full run writes actual state dumps", true,
+              sequential_state_exists, sequential_state_exists,
+              "kernel state dumps exist for review");
     json task2_actual = {
         {"coverage_matrix",
          {{"task_3", "geometry/cache/metadata observed in task-03"},
@@ -1210,11 +1533,15 @@ int main(int argc, char** argv) {
     json task3_actual = {{"geometry", geometry_actual},
                          {"sequential_snapshot", sequential_snapshot},
                          {"dirty_snapshot", dirty_actual["graph_snapshot"]}};
+    json task3_expected = {{"geometry_clip", rect_json(cv::Rect(0, 2, 7, 6))},
+                           {"hp_cache_present", true},
+                           {"legacy_cache_written", false},
+                           {"rt_cache_coexists_with_hp", true}};
     write_task_bundle(
         root, "task-03", "Task 3 utility/cache runtime evidence",
         "Geometry, metrics, and cache policy helpers must preserve "
         "HP authority and RT non-authority.",
-        command, "Full and dirty kernel graphs.", expected_common, task3_actual,
+        command, "Full and dirty kernel graphs.", task3_expected, task3_actual,
         task3, operator_trace);
 
     CheckSet task4;
@@ -1246,23 +1573,43 @@ int main(int argc, char** argv) {
     json task4_actual = {{"sequential_snapshot", sequential_snapshot},
                          {"error_path", error_actual},
                          {"operator_trace_count", operator_trace.size()}};
+    json task4_expected = {{"runtime_gain", 5.0},
+                           {"last_input_size_hp", size_json(cv::Size(64, 48))},
+                           {"image_mixing_input_normalized", true},
+                           {"random_access_roi_expanded", true},
+                           {"parallel_error_returns_ok", false}};
     write_task_bundle(
         root, "task-04", "Task 4 input/execution runtime evidence",
         "Shared input resolution and node execution must be visible "
         "in kernel execution, including normalization and errors.",
-        command, "Full graph plus error graph.", expected_common, task4_actual,
+        command, "Full graph plus error graph.", task4_expected, task4_actual,
         task4, operator_trace);
 
     CheckSet task5;
     const std::string dirty_text =
         dirty_actual.value("interaction_dirty_snapshot_debug", "");
+    const json& dirty_struct = dirty_actual["interaction_dirty_snapshot"];
     const bool snapshot_has_shape =
         dirty_text.find("generation=") != std::string::npos &&
         dirty_text.find("tiles=") != std::string::npos &&
         dirty_text.find("edges=") != std::string::npos;
+    const bool dirty_detail_ok =
+        dirty_struct.is_object() && dirty_struct.contains("dirty_tiles") &&
+        dirty_struct.contains("dirty_monolithic_nodes") &&
+        dirty_struct.contains("per_node_dirty_rois") &&
+        dirty_struct.contains("edge_mappings") &&
+        dirty_struct.value("graph_generation", 0) >= 1 &&
+        dirty_struct["dirty_tiles"].size() == 1 &&
+        dirty_struct["dirty_monolithic_nodes"].size() == 2 &&
+        dirty_struct["per_node_dirty_rois"].size() == 3 &&
+        dirty_struct["edge_mappings"].size() == 2;
     task5.add("InteractionService exposes dirty snapshot", true,
               snapshot_has_shape, snapshot_has_shape,
               "frontend facade read graph-scoped dirty snapshot summary");
+    task5.add("InteractionService exposes dirty snapshot details", true,
+              dirty_detail_ok, dirty_detail_ok,
+              "structured snapshot exposes stable node ids, tile keys, ROIs, "
+              "monolithic escalation, and edge mappings");
     task5.add(
         "dirty RT update succeeded", true, dirty_actual["dirty_update_ok"],
         dirty_actual["dirty_update_ok"].get<bool>(),
@@ -1291,6 +1638,15 @@ int main(int argc, char** argv) {
               "node without explicit propagator still projects identity and is "
               "documented as legacy");
     task5.add(
+        "missing propagation contract is explicitly flagged as legacy",
+        "legacy_identity_fallback",
+        legacy_actual["forward_propagation_contract_status"],
+        legacy_actual.value("dirty_propagation_contract_status", "") ==
+                "legacy_identity_fallback" &&
+            legacy_actual.value("forward_propagation_contract_status", "") ==
+                "legacy_identity_fallback",
+        "missing propagators are diagnosable and are not reported as explicit");
+    task5.add(
         "RT cache present after dirty update", true,
         dirty_actual["graph_snapshot"]["nodes"]["100"]["cache"]["rt"]
                     ["present"],
@@ -1298,13 +1654,84 @@ int main(int argc, char** argv) {
             .get<bool>(),
         "dirty update produced frontend RT state without making "
         "InteractionService the authority");
-    json task5_actual = {{"dirty_update", dirty_actual},
-                         {"legacy_identity", legacy_actual}};
+    task5.add("dirty execution consumed planner output", true,
+              dirty_actual["graph_snapshot"]["recent_compute_plans"],
+              contains_compute_plan_graph(
+                  dirty_actual["graph_snapshot"]["recent_compute_plans"],
+                  "global_high_precision", false, {1, 2, 100}, 2, 3) &&
+                  contains_compute_plan_graph(
+                      dirty_actual["graph_snapshot"]["recent_compute_plans"],
+                      "real_time_update", false, {1, 2, 100}, 2, 3),
+              "HP and RT dirty update plans expose regions, dependencies, and "
+              "planned task graph semantics consumed by execution");
+    task5.add(
+        "intent coordinator drove concurrent dual submit", true,
+        dirty_actual["compute_events"],
+        compute_events_contain_source(
+            dirty_actual["compute_events"],
+            "intent_coordinator_decision_concurrent") &&
+            compute_events_contain_source(dirty_actual["compute_events"],
+                                          "intent_coordinator_submit_hp") &&
+            compute_events_contain_source(dirty_actual["compute_events"],
+                                          "intent_coordinator_submit_rt") &&
+            compute_events_contain_source(dirty_actual["compute_events"],
+                                          "intent_coordinator_complete"),
+        "RealTimeUpdate HP/RT dual submit was orchestrated inside "
+        "IntentUpdateCoordinator");
+    task5.add(
+        "non-parallel realtime intent still ran HP and RT", true,
+        dirty_single_thread_actual["compute_events"],
+        dirty_single_thread_actual["dirty_update_ok"].get<bool>() &&
+            dirty_single_thread_actual["requested_parallel"] == false &&
+            compute_events_contain_source(
+                dirty_single_thread_actual["compute_events"],
+                "intent_coordinator_decision_inline") &&
+            compute_events_contain_source(
+                dirty_single_thread_actual["compute_events"],
+                "intent_coordinator_inline_hp") &&
+            compute_events_contain_source(
+                dirty_single_thread_actual["compute_events"],
+                "intent_coordinator_inline_rt") &&
+            contains_compute_plan_graph(
+                dirty_single_thread_actual["graph_snapshot"]
+                                          ["recent_compute_plans"],
+                "global_high_precision", false, {1, 2, 100}, 2, 3) &&
+            contains_compute_plan_graph(
+                dirty_single_thread_actual["graph_snapshot"]
+                                          ["recent_compute_plans"],
+                "real_time_update", false, {1, 2, 100}, 2, 3),
+        "parallel=false selected inline execution, but RealTimeUpdate still "
+        "coordinated both HP and RT plans");
+    json task5_actual = {
+        {"dirty_update", dirty_actual},
+        {"dirty_update_single_thread", dirty_single_thread_actual},
+        {"legacy_identity", legacy_actual}};
+    json task5_expected = {
+        {"dirty_snapshot_debug_contains", {"generation=", "tiles=", "edges="}},
+        {"dirty_snapshot_detail",
+         {{"dirty_tiles", 1},
+          {"dirty_monolithic_nodes", 2},
+          {"per_node_dirty_rois", 3},
+          {"edge_mappings", 2}}},
+        {"dirty_planned_nodes", {1, 2, 100}},
+        {"dirty_plan_dependencies", ">=2"},
+        {"dirty_plan_tasks", ">=3"},
+        {"intent_coordinator_sources",
+         {"intent_coordinator_decision_concurrent",
+          "intent_coordinator_submit_hp", "intent_coordinator_submit_rt",
+          "intent_coordinator_complete"}},
+        {"intent_coordinator_inline_sources",
+         {"intent_coordinator_decision_inline", "intent_coordinator_inline_hp",
+          "intent_coordinator_inline_rt"}},
+        {"non_parallel_realtime_dual_path", true},
+        {"legacy_identity_forward_roi", rect_json(cv::Rect(3, 4, 5, 6))},
+        {"legacy_contract_status", "legacy_identity_fallback"},
+        {"rt_cache_present", true}};
     write_task_bundle(
         root, "task-05", "Task 5 dirty planning runtime evidence",
         "Dirty planning, snapshots, InteractionService exposure, "
         "task planning, and intent coordination must be observed.",
-        command, "Dirty graph, legacy fallback graph.", expected_common,
+        command, "Dirty graph, legacy fallback graph.", task5_expected,
         task5_actual, task5, operator_trace);
 
     CheckSet task6;
@@ -1326,6 +1753,17 @@ int main(int argc, char** argv) {
               std::abs(seq_checksum - par_checksum) < 0.01,
               "temp result commit produced the same final HP output");
     task6.add(
+        "parallel execution consumed planner output",
+        json::array({1, 2, 4, 30, 100}), parallel_snapshot["last_compute_plan"],
+        json_int_array_equals(
+            parallel_snapshot["last_compute_plan"]["planned_nodes"],
+            {1, 2, 4, 30, 100}) &&
+            contains_compute_plan_graph(
+                json::array({parallel_snapshot["last_compute_plan"]}),
+                "global_high_precision", true, {1, 2, 4, 30, 100}, 4, 5),
+        "ParallelGraphExecutor builds dependency counters and initial tasks "
+        "from ComputeTaskGraph semantics");
+    task6.add(
         "sparse node id target committed", true,
         parallel_snapshot["nodes"]["100"]["cache"]["hp"]["present"],
         parallel_snapshot["nodes"]["100"]["cache"]["hp"]["present"].get<bool>(),
@@ -1338,11 +1776,19 @@ int main(int argc, char** argv) {
                          {"error_path", error_actual},
                          {"sequential_checksum", seq_checksum},
                          {"parallel_checksum", par_checksum}};
+    json task6_expected = {{"parallel_ok", true},
+                           {"scheduler_execute_count", ">=5"},
+                           {"scheduler_tile_count", ">0"},
+                           {"final_checksum", expected_final_checksum},
+                           {"planned_nodes", {1, 2, 4, 30, 100}},
+                           {"plan_dependencies", ">=4"},
+                           {"plan_tasks", ">=5"},
+                           {"parallel_error_returns_ok", false}};
     write_task_bundle(root, "task-06",
                       "Task 6 parallel executor runtime evidence",
                       "Parallel executor must preserve dependency scheduling, "
                       "tile completion, commit, cache, events, and errors.",
-                      command, "Full graph and error graph.", expected_common,
+                      command, "Full graph and error graph.", task6_expected,
                       task6_actual, task6, operator_trace);
 
     CheckSet task7;
@@ -1356,21 +1802,39 @@ int main(int argc, char** argv) {
     task7.add("public Kernel intent API used for dirty update", true, dirty_ok,
               dirty_ok,
               "Kernel::compute_async intent path drove HP/RT coordination");
+    task7.add("public Kernel intent API respects execution mode", true,
+              dirty_single_thread_ok,
+              dirty_single_thread_ok &&
+                  dirty_single_thread_actual["requested_parallel"] == false,
+              "Kernel::compute_async intent path used single-threaded "
+              "execution without disabling HP/RT coordination");
     task7.add(
-        "operator trace includes facade-visible phases", 4,
-        json::array({"sequential_hp", "parallel_hp", "dirty_rt_update",
-                     "parallel_error_path"}),
-        sequential_ok && parallel_ok && dirty_ok && !error_ok,
+        "operator trace includes facade-visible phases", 5, observed_phases,
+        contains_phase(observed_phases, "sequential_hp") &&
+            contains_phase(observed_phases, "parallel_hp") &&
+            contains_phase(observed_phases, "dirty_rt_update") &&
+            contains_phase(observed_phases, "dirty_rt_update_single_thread") &&
+            contains_phase(observed_phases, "parallel_error_path"),
         "runtime evidence covers facade, scheduler, dirty, and error paths");
     json task7_actual = {{"sequential", sequential_actual},
                          {"parallel", parallel_actual},
                          {"dirty", dirty_actual},
-                         {"error", error_actual}};
+                         {"dirty_single_thread", dirty_single_thread_actual},
+                         {"error", error_actual},
+                         {"observed_phases", observed_phases}};
+    json task7_expected = {
+        {"public_facade_sequential_ok", true},
+        {"public_facade_parallel_ok", true},
+        {"public_kernel_dirty_intent_ok", true},
+        {"public_kernel_dirty_intent_single_thread_ok", true},
+        {"required_phases",
+         {"sequential_hp", "parallel_hp", "dirty_rt_update",
+          "dirty_rt_update_single_thread", "parallel_error_path"}}};
     write_task_bundle(root, "task-07",
                       "Task 7 facade/build integration evidence",
                       "ComputeService must remain a facade while new internal "
                       "modules integrate with build and runtime paths.",
-                      command, "All generated graphs.", expected_common,
+                      command, "All generated graphs.", task7_expected,
                       task7_actual, task7, operator_trace);
 
     CheckSet all;

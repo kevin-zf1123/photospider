@@ -127,12 +127,12 @@ struct SpatialDependencyMap {
       return cv::Rect();
     int start_c = std::clamp(downstream_roi.x / grid_size_x, 0, cols - 1);
     int start_r = std::clamp(downstream_roi.y / grid_size_y, 0, rows - 1);
-    int end_c = std::clamp((downstream_roi.x + downstream_roi.width - 1) /
-                               grid_size_x,
-                           0, cols - 1);
-    int end_r = std::clamp((downstream_roi.y + downstream_roi.height - 1) /
-                               grid_size_y,
-                           0, rows - 1);
+    int end_c =
+        std::clamp((downstream_roi.x + downstream_roi.width - 1) / grid_size_x,
+                   0, cols - 1);
+    int end_r =
+        std::clamp((downstream_roi.y + downstream_roi.height - 1) / grid_size_y,
+                   0, rows - 1);
 
     cv::Rect merged;
     for (int r = start_r; r <= end_r; ++r) {
@@ -229,10 +229,9 @@ using TileOpFunc =
     std::function<void(const Node&, const Tile&, const std::vector<Tile>&)>;
 using DirtyRoiPropFunc =
     std::function<cv::Rect(const Node&, const cv::Rect&, const GraphModel&)>;
-using ForwardRoiPropFunc =
-    std::function<cv::Rect(const Node&, const cv::Rect&, const GraphModel&,
-                           const cv::Size& parent_size,
-                           const cv::Size& child_size)>;
+using ForwardRoiPropFunc = std::function<cv::Rect(
+    const Node&, const cv::Rect&, const GraphModel&,
+    const cv::Size& parent_size, const cv::Size& child_size)>;
 using DependencyLutBuilder = std::function<SpatialDependencyMap(
     const Node&, const GraphModel&, const cv::Size& upstream_extent,
     const cv::Size& downstream_extent)>;
@@ -245,6 +244,11 @@ enum class ComputeIntent {
   RealTimeUpdate,
 };
 
+enum class PropagationContractStatus {
+  Explicit,
+  LegacyIdentityFallback,
+};
+
 // [M3.1 新增] 单个算子实现的描述结构
 // 用于支持同一算子在不同设备上的多个实现
 struct OpImplementation {
@@ -252,16 +256,14 @@ struct OpImplementation {
   std::variant<MonolithicOpFunc, TileOpFunc> func;
   // 该实现的元数据（包含设备、成本等信息）
   OpMetadata metadata;
-  
+
   // 辅助方法：判断是否为 Monolithic 实现
   bool is_monolithic() const {
     return std::holds_alternative<MonolithicOpFunc>(func);
   }
-  
+
   // 辅助方法：判断是否为 Tiled 实现
-  bool is_tiled() const {
-    return std::holds_alternative<TileOpFunc>(func);
-  }
+  bool is_tiled() const { return std::holds_alternative<TileOpFunc>(func); }
 };
 
 class OpRegistry {
@@ -302,7 +304,7 @@ class OpRegistry {
     std::optional<ForwardRoiPropFunc> forward_propagator;
     std::optional<DependencyLutBuilder> dependency_builder;
     bool data_dependent = false;
-    
+
     // [M3.1 新增] 多设备实现列表
     // 同一算子可以有多个设备上的实现，按设备类型索引
     std::vector<OpImplementation> device_impls;
@@ -332,6 +334,10 @@ class OpRegistry {
                                         const std::string& subtype) const;
   ForwardRoiPropFunc get_forward_propagator(const std::string& type,
                                             const std::string& subtype) const;
+  PropagationContractStatus dirty_propagation_contract_status(
+      const std::string& type, const std::string& subtype) const;
+  PropagationContractStatus forward_propagation_contract_status(
+      const std::string& type, const std::string& subtype) const;
   std::optional<DependencyLutBuilder> get_dependency_builder(
       const std::string& type, const std::string& subtype) const;
   bool is_data_dependent(const std::string& type,
@@ -342,7 +348,7 @@ class OpRegistry {
   // ==========================================================================
   // [M3.1 新增] 多设备实现注册与检索 API
   // ==========================================================================
-  
+
   // 注册一个特定设备上的算子实现
   // @param type 算子类型（如 "image_process"）
   // @param subtype 算子子类型（如 "gaussian_blur"）
@@ -353,25 +359,24 @@ class OpRegistry {
                      Device device, MonolithicOpFunc fn, OpMetadata meta = {});
   void register_impl(const std::string& type, const std::string& subtype,
                      Device device, TileOpFunc fn, OpMetadata meta);
-  
+
   // 获取指定算子在特定设备上的所有实现
   // @return 该设备上的实现列表（可能为空）
   std::vector<const OpImplementation*> get_implementations_by_device(
       const std::string& type, const std::string& subtype, Device device) const;
-  
+
   // 获取指定算子的所有实现（跨所有设备）
   // @return 所有实现的列表
   std::vector<const OpImplementation*> get_all_implementations(
       const std::string& type, const std::string& subtype) const;
-  
+
   // 根据 ComputeIntent 和可用设备选择最优实现
   // @param available_devices 当前可用的设备列表
   // @param intent 计算意图（HP 或 RT）
   // @return 最优实现的指针，如果无可用实现则返回 nullptr
   const OpImplementation* select_best_implementation(
       const std::string& type, const std::string& subtype,
-      const std::vector<Device>& available_devices,
-      ComputeIntent intent) const;
+      const std::vector<Device>& available_devices, ComputeIntent intent) const;
 
  private:
   std::unordered_map<std::string, OpVariant> table_;

@@ -111,6 +111,25 @@ void finalize_output_metadata(NodeOutput& output,
       output, inputs, enable_timing, execution_ms);
 }
 
+void remember_compute_plan(GraphModel& graph,
+                           const compute::ComputePlan& compute_plan) {
+  graph.last_compute_plan = compute_plan;
+  graph.recent_compute_plans.push_back(compute_plan);
+  if (graph.recent_compute_plans.size() > 16) {
+    graph.recent_compute_plans.erase(graph.recent_compute_plans.begin());
+  }
+}
+
+void remember_dirty_snapshot(GraphModel& graph,
+                             const compute::DirtyRegionSnapshot& snapshot) {
+  graph.last_dirty_region_snapshot = snapshot;
+  graph.recent_dirty_region_snapshots.push_back(snapshot);
+  if (graph.recent_dirty_region_snapshots.size() > 16) {
+    graph.recent_dirty_region_snapshots.erase(
+        graph.recent_dirty_region_snapshots.begin());
+  }
+}
+
 }  // anonymous namespace
 // --- 阶段四核心：重构后的 compute_internal 函数 ---
 
@@ -407,12 +426,23 @@ NodeOutput& ComputeService::compute_high_precision_update(
       dirty_planner.plan_high_precision(graph, node_id, dirty_roi);
   graph.last_dirty_region_snapshot_debug =
       compute::DirtyRegionPlanner::describe_snapshot(dirty_plan.snapshot);
-  auto execution_order = dirty_plan.execution_order;
+  remember_dirty_snapshot(graph, dirty_plan.snapshot);
   auto plan = dirty_plan.entries;
+  auto execution_order = dirty_plan.execution_order;
   compute::ComputeTaskPlanner task_planner;
-  (void)task_planner.plan(
+  const compute::ComputePlan compute_plan = task_planner.plan(
       {ComputeIntent::GlobalHighPrecision, node_id, false, dirty_roi},
-      execution_order, &dirty_plan.snapshot);
+      execution_order, &dirty_plan.snapshot, &graph);
+  remember_compute_plan(graph, compute_plan);
+  for (const auto& work : compute_plan.planned_work) {
+    auto entry_it = plan.find(work.node_id);
+    if (entry_it == plan.end())
+      continue;
+    if (!is_rect_empty(work.represented_hp_roi)) {
+      entry_it->second.roi_hp =
+          clip_rect(work.represented_hp_roi, entry_it->second.hp_size);
+    }
+  }
 
   struct DownsampleRequest {
     int node_id = -1;
@@ -595,9 +625,10 @@ NodeOutput& ComputeService::compute_high_precision_update(
     }
   };
 
-  for (int nid : execution_order) {
-    if (plan.count(nid)) {
-      compute_node_hp(nid, plan.at(nid));
+  for (const auto& work : compute_plan.planned_work) {
+    auto entry_it = plan.find(work.node_id);
+    if (entry_it != plan.end()) {
+      compute_node_hp(work.node_id, entry_it->second);
     }
   }
 
@@ -735,12 +766,27 @@ NodeOutput& ComputeService::compute_real_time_update(
   auto dirty_plan = dirty_planner.plan_real_time(graph, node_id, dirty_roi);
   graph.last_dirty_region_snapshot_debug =
       compute::DirtyRegionPlanner::describe_snapshot(dirty_plan.snapshot);
-  auto execution_order = dirty_plan.execution_order;
+  remember_dirty_snapshot(graph, dirty_plan.snapshot);
   auto plan = dirty_plan.entries;
+  auto execution_order = dirty_plan.execution_order;
   compute::ComputeTaskPlanner task_planner;
-  (void)task_planner.plan(
+  const compute::ComputePlan compute_plan = task_planner.plan(
       {ComputeIntent::RealTimeUpdate, node_id, false, dirty_roi},
-      execution_order, &dirty_plan.snapshot);
+      execution_order, &dirty_plan.snapshot, &graph);
+  remember_compute_plan(graph, compute_plan);
+  for (const auto& work : compute_plan.planned_work) {
+    auto entry_it = plan.find(work.node_id);
+    if (entry_it == plan.end())
+      continue;
+    if (!is_rect_empty(work.represented_hp_roi)) {
+      entry_it->second.roi_hp =
+          clip_rect(work.represented_hp_roi, entry_it->second.hp_size);
+    }
+    if (!is_rect_empty(work.execution_roi)) {
+      entry_it->second.roi_rt =
+          clip_rect(work.execution_roi, entry_it->second.rt_size);
+    }
+  }
 
   if (force_recache) {
     for (const auto& kv : plan) {
@@ -917,11 +963,11 @@ NodeOutput& ComputeService::compute_real_time_update(
     events_.push(node.id, node.name, "rt_update", 0.0);
   };
 
-  for (int nid : execution_order) {
-    auto it = plan.find(nid);
+  for (const auto& work : compute_plan.planned_work) {
+    auto it = plan.find(work.node_id);
     if (it == plan.end())
       continue;
-    compute_node_rt(nid, it->second);
+    compute_node_rt(work.node_id, it->second);
   }
 
   Node& target = nodes.at(node_id);
@@ -955,99 +1001,74 @@ NodeOutput& ComputeService::compute_parallel(
     const std::string& cache_precision, bool force_recache, bool enable_timing,
     bool disable_disk_cache, std::vector<BenchmarkEvent>* benchmark_events,
     std::optional<cv::Rect> dirty_roi) {
-  switch (intent) {
-    case ComputeIntent::GlobalHighPrecision:
-      if (dirty_roi.has_value()) {
-        // TODO: For now, a dirty ROI on a global compute triggers a full
-        // recompute. In the future, this could be an optimized partial update.
-        return compute_parallel(graph, runtime, node_id, cache_precision, true,
-                                enable_timing, disable_disk_cache,
-                                benchmark_events);
-      }
-      return compute_parallel(graph, runtime, node_id, cache_precision,
-                              force_recache, enable_timing, disable_disk_cache,
-                              benchmark_events);
-    case ComputeIntent::RealTimeUpdate: {
-      compute::IntentUpdateCoordinator::validate(intent, dirty_roi);
-      auto decision = compute::IntentUpdateCoordinator::decide(
-          intent, runtime.running(), dirty_roi.has_value());
+  return compute_intent_update_impl(
+      graph, &runtime, true, intent, node_id, cache_precision, force_recache,
+      enable_timing, disable_disk_cache, benchmark_events, dirty_roi);
+}
 
-      if (!decision.submit_updates_concurrently) {
-        compute_high_precision_update(graph, &runtime, node_id, cache_precision,
-                                      force_recache, enable_timing,
-                                      disable_disk_cache,
-                                      nullptr /* no events */, *dirty_roi);
-        return compute_real_time_update(
-            graph, &runtime, node_id, cache_precision, force_recache,
-            enable_timing, disable_disk_cache, benchmark_events, *dirty_roi);
-      }
-
-      auto hp_done = std::make_shared<std::promise<void>>();
-      auto rt_done = std::make_shared<std::promise<void>>();
-      auto hp_future = hp_done->get_future();
-      auto rt_future = rt_done->get_future();
-
-      runtime.submit_ready_task_any_thread(
-          [this, graph_ptr = &graph, runtime_ptr = &runtime, node_id,
-           cache_precision, force_recache, enable_timing, disable_disk_cache,
-           roi = *dirty_roi, hp_done]() {
-            try {
-              compute_high_precision_update(*graph_ptr, runtime_ptr, node_id,
-                                            cache_precision, force_recache,
-                                            enable_timing, disable_disk_cache,
-                                            nullptr /* no events */, roi);
-              hp_done->set_value();
-            } catch (...) {
-              hp_done->set_exception(std::current_exception());
-            }
-          },
-          TaskPriority::Normal);
-
-      runtime.submit_ready_task_any_thread(
-          [this, graph_ptr = &graph, runtime_ptr = &runtime, node_id,
-           cache_precision, force_recache, enable_timing, disable_disk_cache,
-           benchmark_events, roi = *dirty_roi, rt_done]() {
-            try {
-              compute_real_time_update(*graph_ptr, runtime_ptr, node_id,
-                                       cache_precision, force_recache,
-                                       enable_timing, disable_disk_cache,
-                                       benchmark_events, roi);
-              rt_done->set_value();
-            } catch (...) {
-              rt_done->set_exception(std::current_exception());
-            }
-          },
-          TaskPriority::High);
-
-      std::exception_ptr first_error;
-      try {
-        rt_future.get();
-      } catch (...) {
-        first_error = std::current_exception();
-      }
-      try {
-        hp_future.get();
-      } catch (...) {
-        if (!first_error) {
-          first_error = std::current_exception();
-        }
-      }
-      if (first_error) {
-        std::rethrow_exception(first_error);
-      }
-
-      Node& target = graph.nodes.at(node_id);
-      if (!target.cached_output_real_time) {
+NodeOutput& ComputeService::compute_intent_update_impl(
+    GraphModel& graph, GraphRuntime* runtime, bool use_parallel_executor,
+    ComputeIntent intent, int node_id, const std::string& cache_precision,
+    bool force_recache, bool enable_timing, bool disable_disk_cache,
+    std::vector<BenchmarkEvent>* benchmark_events,
+    std::optional<cv::Rect> dirty_roi) {
+  compute::IntentUpdateCallbacks callbacks;
+  const auto node_name_it = graph.nodes.find(node_id);
+  const std::string coordinator_node_name = node_name_it == graph.nodes.end()
+                                                ? std::string()
+                                                : node_name_it->second.name;
+  callbacks.run_global_high_precision = [&]() -> NodeOutput& {
+    if (use_parallel_executor) {
+      if (!runtime) {
         throw GraphError(GraphErrc::ComputeError,
-                         "RT compute finished without target output.");
+                         "Parallel HP compute requires a runtime.");
       }
-      return *target.cached_output_real_time;
-    }
-    default:
-      return compute_parallel(graph, runtime, node_id, cache_precision,
+      return compute_parallel(graph, *runtime, node_id, cache_precision,
                               force_recache, enable_timing, disable_disk_cache,
                               benchmark_events);
-  }
+    }
+    return compute(graph, node_id, cache_precision, force_recache,
+                   enable_timing, disable_disk_cache, benchmark_events);
+  };
+  callbacks.run_global_high_precision_dirty_recompute = [&]() -> NodeOutput& {
+    // TODO: For now, a dirty ROI on a global compute triggers a full recompute.
+    if (use_parallel_executor) {
+      if (!runtime) {
+        throw GraphError(GraphErrc::ComputeError,
+                         "Parallel HP compute requires a runtime.");
+      }
+      return compute_parallel(graph, *runtime, node_id, cache_precision, true,
+                              enable_timing, disable_disk_cache,
+                              benchmark_events);
+    }
+    return compute(graph, node_id, cache_precision, true, enable_timing,
+                   disable_disk_cache, benchmark_events);
+  };
+  callbacks.run_high_precision_update = [&]() {
+    compute_high_precision_update(
+        graph, runtime, node_id, cache_precision, force_recache, enable_timing,
+        disable_disk_cache, nullptr /* no events */, *dirty_roi);
+  };
+  callbacks.run_real_time_update = [&]() -> NodeOutput& {
+    return compute_real_time_update(
+        graph, runtime, node_id, cache_precision, force_recache, enable_timing,
+        disable_disk_cache, benchmark_events, *dirty_roi);
+  };
+  callbacks.real_time_output = [&]() -> NodeOutput& {
+    Node& target = graph.nodes.at(node_id);
+    if (!target.cached_output_real_time) {
+      throw GraphError(GraphErrc::ComputeError,
+                       "RT compute finished without target output.");
+    }
+    return *target.cached_output_real_time;
+  };
+  callbacks.record_stage = [&,
+                            coordinator_node_name](const std::string& stage) {
+    events_.push(node_id, coordinator_node_name, stage, 0.0);
+  };
+
+  return compute::IntentUpdateCoordinator::coordinate_intent_update(
+      intent, runtime, dirty_roi, callbacks);
 }
 
 // Phase 1 overload: intent-based entry to sequential compute
@@ -1056,19 +1077,9 @@ NodeOutput& ComputeService::compute_with_intent_impl(
     const std::string& cache_precision, bool force_recache, bool enable_timing,
     bool disable_disk_cache, std::vector<BenchmarkEvent>* benchmark_events,
     std::optional<cv::Rect> dirty_roi) {
-  switch (intent) {
-    case ComputeIntent::GlobalHighPrecision:
-      return compute(graph, node_id, cache_precision, force_recache,
-                     enable_timing, disable_disk_cache, benchmark_events);
-    case ComputeIntent::RealTimeUpdate:
-      compute::IntentUpdateCoordinator::validate(intent, dirty_roi);
-      return compute_real_time_update(
-          graph, nullptr, node_id, cache_precision, force_recache,
-          enable_timing, disable_disk_cache, benchmark_events, *dirty_roi);
-    default:
-      return compute(graph, node_id, cache_precision, force_recache,
-                     enable_timing, disable_disk_cache, benchmark_events);
-  }
+  return compute_intent_update_impl(
+      graph, nullptr, false, intent, node_id, cache_precision, force_recache,
+      enable_timing, disable_disk_cache, benchmark_events, dirty_roi);
 }
 
 NodeOutput& ComputeService::compute(
@@ -1104,9 +1115,11 @@ NodeOutput& ComputeService::compute_sequential_impl(
     throw;
   }
   compute::ComputeTaskPlanner task_planner;
-  (void)task_planner.plan(
+  const compute::ComputePlan compute_plan = task_planner.plan(
       {ComputeIntent::GlobalHighPrecision, node_id, false, std::nullopt},
-      execution_order, nullptr);
+      execution_order, nullptr, &graph);
+  remember_compute_plan(graph, compute_plan);
+  execution_order = compute_plan.planned_nodes;
 
   if (force_recache) {
     std::lock_guard<std::mutex> lk(graph.graph_mutex_);
@@ -1114,7 +1127,6 @@ NodeOutput& ComputeService::compute_sequential_impl(
       auto& node = graph.nodes.at(nid);
       node.cached_output.reset();
       node.cached_output_high_precision.reset();
-      node.cached_output_real_time.reset();
     }
   }
 

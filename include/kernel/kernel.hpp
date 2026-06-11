@@ -119,6 +119,8 @@ class Kernel {
   drain_compute_events(const std::string& name);
   std::optional<std::string> dirty_region_snapshot_debug(
       const std::string& name);
+  std::optional<compute::DirtyRegionSnapshot> dirty_region_snapshot(
+      const std::string& name);
   std::optional<cv::Mat> compute_and_get_image(
       const std::string& name, int node_id, const std::string& cache_precision,
       bool force_recache, bool enable_timing, bool parallel,

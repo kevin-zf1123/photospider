@@ -5,6 +5,7 @@
 #include <unordered_map>
 #include <vector>
 
+#include "kernel/services/compute-service/compute_task_planner.hpp"
 #include "node.hpp"
 #include "ps_types.hpp"
 
@@ -36,6 +37,10 @@ class GraphModel {
   std::unordered_map<int, Node> nodes;
   fs::path cache_root;
   std::optional<std::string> last_dirty_region_snapshot_debug;
+  std::optional<compute::DirtyRegionSnapshot> last_dirty_region_snapshot;
+  std::vector<compute::DirtyRegionSnapshot> recent_dirty_region_snapshots;
+  std::optional<compute::ComputePlan> last_compute_plan;
+  std::vector<compute::ComputePlan> recent_compute_plans;
 
   struct DriveClearResult {
     uintmax_t removed_entries = 0;

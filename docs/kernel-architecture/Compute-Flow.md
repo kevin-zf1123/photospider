@@ -41,17 +41,31 @@ Single-threaded and parallel execution should share the same logical
 pools, scheduler policy, and execution resources, not in graph-level dirty
 propagation or compute-task derivation.
 
+Execution granularity is a separate layer. A graph can contain multiple nodes,
+and each node/operator implementation can be monolithic or tiled. Tiled
+execution can further use macro or micro task granularity. These choices are
+node execution details and are independent from HP/RT intent semantics.
+
 ## Compute Intents
 
 The kernel recognizes two formal compute intents:
 
 | Intent | Meaning |
 | --- | --- |
-| `GlobalHighPrecision` | Full-quality HP compute. Owns high-precision output. |
-| `RealTimeUpdate` | Interactive update. Requires a dirty ROI. |
+| `GlobalHighPrecision` | Full-quality HP compute. Owns high-precision output. Non-realtime compute enables only this HP path. |
+| `RealTimeUpdate` | Interactive realtime update. Requires a dirty ROI and enables the HP/RT dual path. |
 
 The intent model is formal. The current implementation still has several paths
 that bypass `IScheduler` and call `ComputeService` directly.
+
+HP/RT dual path semantics belong to realtime intent, not to the parallel
+execution mode. In realtime mode, HP computes the full-size authoritative node
+work while RT computes the downscaled proxy, currently one quarter of width and
+height, or one sixteenth of the pixel count. HP and RT work should be treated
+as separate intent task pools. Scheduler/resource policy then decides how each
+pool is executed: HP may use a single-thread scheduler, RT may use a GPU
+scheduler, and realtime and non-realtime modes may use different scheduler
+configuration.
 
 The in-place `ComputeService` split is documented in
 `Compute-Service-Split.md`. The current implementation keeps the public facade
@@ -108,8 +122,13 @@ task planning and interaction-facing inspection summaries.
 and should return a clear error through kernel and interaction-facing APIs. It
 does not implicitly mean full-frame RT update.
 
-With a valid dirty ROI, RT compute updates the proxy output for the affected
-region and may enqueue a background HP update through the runtime.
+With a valid dirty ROI, realtime compute enables both paths. HP updates the
+full-size authoritative output for the affected graph work, while RT updates
+the proxy output for the affected region. When a runtime queue is available,
+the current implementation may submit the HP and RT updates concurrently; when
+single-threaded execution is selected, it still runs both HP and RT work inline.
+This distinction is an execution-mode choice, not the switch that enables or
+disables the HP/RT dual path.
 
 The passed dirty ROI is converted into graph-scoped planner state for the
 current request. TODO: node-local dirty reports should become the origin source

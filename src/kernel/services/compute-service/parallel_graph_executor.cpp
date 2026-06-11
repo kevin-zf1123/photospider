@@ -36,6 +36,14 @@ void finalize_output_metadata(NodeOutput& output,
                                                    enable_timing, execution_ms);
 }
 
+void remember_compute_plan(GraphModel& graph, const ComputePlan& compute_plan) {
+  graph.last_compute_plan = compute_plan;
+  graph.recent_compute_plans.push_back(compute_plan);
+  if (graph.recent_compute_plans.size() > 16) {
+    graph.recent_compute_plans.erase(graph.recent_compute_plans.begin());
+  }
+}
+
 }  // namespace
 
 ParallelGraphExecutor::ParallelGraphExecutor(GraphTraversalService& traversal,
@@ -74,9 +82,11 @@ NodeOutput& ParallelGraphExecutor::execute(
 
     auto execution_order = traversal_.topo_postorder_from(graph, node_id);
     compute::ComputeTaskPlanner task_planner;
-    (void)task_planner.plan(
+    const ComputePlan compute_plan = task_planner.plan(
         {ComputeIntent::GlobalHighPrecision, node_id, true, std::nullopt},
-        execution_order, nullptr);
+        execution_order, nullptr, &graph);
+    remember_compute_plan(graph, compute_plan);
+    execution_order = compute_plan.planned_nodes;
     std::unordered_set<int> execution_set(execution_order.begin(),
                                           execution_order.end());
 
@@ -86,7 +96,6 @@ NodeOutput& ParallelGraphExecutor::execute(
         if (nodes.count(id)) {
           nodes.at(id).cached_output.reset();
           nodes.at(id).cached_output_high_precision.reset();
-          nodes.at(id).cached_output_real_time.reset();
         }
       }
     }
@@ -118,25 +127,17 @@ NodeOutput& ParallelGraphExecutor::execute(
     }
 
     for (size_t i = 0; i < num_nodes; ++i) {
-      int current_node_id = execution_order[i];
-      auto& node = nodes.at(current_node_id);
-      int num_deps = 0;
-
-      auto count_dep = [&](int dep_id) {
-        if (dep_id != -1 && execution_set.count(dep_id)) {
-          // 使用稠密索引构建依赖关系
-          int dep_idx = id_to_idx.at(dep_id);
-          dependents_map[dep_idx].push_back(i);  // i 是当前节点的稠密索引
-          num_deps++;
-        }
-      };
-
-      for (const auto& input : node.image_inputs)
-        count_dep(input.from_node_id);
-      for (const auto& input : node.parameter_inputs)
-        count_dep(input.from_node_id);
-
-      dependency_counters[i] = num_deps;
+      dependency_counters[i] = 0;
+    }
+    for (const auto& dependency : compute_plan.task_graph.dependencies) {
+      if (!execution_set.count(dependency.from_node_id) ||
+          !execution_set.count(dependency.to_node_id)) {
+        continue;
+      }
+      const int dep_idx = id_to_idx.at(dependency.from_node_id);
+      const int dependent_idx = id_to_idx.at(dependency.to_node_id);
+      dependents_map[dep_idx].push_back(dependent_idx);
+      ++dependency_counters[dependent_idx];
     }
 
     // --- 为每个节点（按稠密索引）创建任务 ---
@@ -680,9 +681,30 @@ NodeOutput& ParallelGraphExecutor::execute(
 
     // --- 提交初始就绪任务 ---
     std::vector<Task> initial_tasks;
-    for (size_t i = 0; i < num_nodes; ++i) {
-      if (dependency_counters[i] == 0) {
-        initial_tasks.push_back(std::move(all_tasks[i]));
+    std::unordered_set<int> submitted_initial_indices;
+    for (int task_id : compute_plan.task_graph.initial_task_ids) {
+      if (task_id < 0 ||
+          task_id >= static_cast<int>(compute_plan.task_graph.tasks.size())) {
+        continue;
+      }
+      const int planned_node_id =
+          compute_plan.task_graph.tasks[task_id].node_id;
+      auto idx_it = id_to_idx.find(planned_node_id);
+      if (idx_it == id_to_idx.end())
+        continue;
+      const int node_idx = idx_it->second;
+      if (dependency_counters[node_idx] != 0)
+        continue;
+      if (submitted_initial_indices.insert(node_idx).second) {
+        initial_tasks.push_back(std::move(all_tasks[node_idx]));
+      }
+    }
+    if (initial_tasks.empty()) {
+      for (size_t i = 0; i < num_nodes; ++i) {
+        if (dependency_counters[i] == 0) {
+          submitted_initial_indices.insert(static_cast<int>(i));
+          initial_tasks.push_back(std::move(all_tasks[i]));
+        }
       }
     }
 
@@ -696,7 +718,7 @@ NodeOutput& ParallelGraphExecutor::execute(
       runtime.submit_initial_tasks(std::move(initial_tasks),
                                    execution_order.size());
       for (size_t i = 0; i < num_nodes; ++i) {
-        if (dependency_counters[i] == 0) {
+        if (submitted_initial_indices.count(static_cast<int>(i))) {
           runtime.log_event(GraphRuntime::SchedulerEvent::ASSIGN_INITIAL,
                             execution_order[i]);
         }
