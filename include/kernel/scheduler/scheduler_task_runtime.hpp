@@ -14,6 +14,11 @@ enum class SchedulerTraceAction {
   AssignInitial,
   Execute,
   ExecuteTile,
+  ExecuteDirtySource,
+  ExecuteDirtyDownstreamNode,
+  ExecuteDirtyDownstreamTile,
+  SkipStaleGeneration,
+  RethrowException,
 };
 
 class SchedulerTaskRuntime {

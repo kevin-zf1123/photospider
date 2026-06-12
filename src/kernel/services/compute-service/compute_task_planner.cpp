@@ -1,9 +1,12 @@
 #include "kernel/services/compute-service/compute_task_planner.hpp"
 
 #include <algorithm>
+#include <unordered_map>
 #include <unordered_set>
 
 #include "graph_model.hpp"
+#include "kernel/services/compute-service/compute_geometry.hpp"
+#include "kernel/services/graph_extent_resolver.hpp"
 
 namespace ps::compute {
 namespace {
@@ -61,27 +64,9 @@ void add_dependency(std::vector<PlannedDependency>& dependencies,
 std::vector<int> derive_planned_nodes(const ComputeRequest& request,
                                       const std::vector<int>& execution_order,
                                       const DirtyRegionSnapshot* snapshot) {
-  if (!snapshot || snapshot->per_node_dirty_rois.empty()) {
-    return execution_order;
-  }
-
-  std::unordered_set<int> dirty_nodes;
-  for (const auto& [node_id, _] : snapshot->per_node_dirty_rois) {
-    dirty_nodes.insert(node_id);
-  }
-
-  std::vector<int> planned_nodes;
-  for (int node_id : execution_order) {
-    if (dirty_nodes.count(node_id)) {
-      planned_nodes.push_back(node_id);
-    }
-  }
-  if (planned_nodes.empty() &&
-      std::find(execution_order.begin(), execution_order.end(),
-                request.target_node_id) != execution_order.end()) {
-    planned_nodes.push_back(request.target_node_id);
-  }
-  return planned_nodes;
+  (void)request;
+  (void)snapshot;
+  return execution_order;
 }
 
 void populate_node_regions(ComputePlan& result,
@@ -204,8 +189,98 @@ void populate_node_dependency_lists(ComputePlan& result) {
   }
 }
 
-void add_task(ComputePlan& result, PlannedTask task) {
+bool is_dirty_source(const DirtyRegionSnapshot* snapshot, int node_id) {
+  if (!snapshot)
+    return false;
+  return std::find(snapshot->dirty_source_nodes.begin(),
+                   snapshot->dirty_source_nodes.end(),
+                   node_id) != snapshot->dirty_source_nodes.end();
+}
+
+cv::Rect dirty_roi_for_node(const DirtyRegionSnapshot* snapshot, int node_id,
+                            DirtyDomain domain) {
+  if (!snapshot)
+    return cv::Rect();
+  cv::Rect merged;
+  auto actual_it = snapshot->actual_dirty_rois.find(node_id);
+  if (actual_it != snapshot->actual_dirty_rois.end()) {
+    for (const auto& roi : actual_it->second) {
+      merged = merge_optional_rect(merged, roi);
+    }
+  }
+  auto roi_it = snapshot->per_node_dirty_rois.find(node_id);
+  if (roi_it != snapshot->per_node_dirty_rois.end()) {
+    for (const auto& roi : roi_it->second) {
+      merged = merge_optional_rect(merged, roi);
+    }
+  }
+  for (const auto& tile : snapshot->dirty_tiles) {
+    if (tile.domain == domain && tile.node_id == node_id) {
+      merged = merge_optional_rect(merged, tile.pixel_roi);
+    }
+  }
+  for (const auto& region : snapshot->dirty_monolithic_nodes) {
+    if (region.domain == domain && region.node_id == node_id) {
+      merged = merge_optional_rect(merged, region.pixel_roi);
+    }
+  }
+  return merged;
+}
+
+bool intersects_dirty_roi(const PlannedTask& task,
+                          const DirtyRegionSnapshot* snapshot) {
+  if (!snapshot)
+    return true;
+  const cv::Rect dirty_roi =
+      dirty_roi_for_node(snapshot, task.node_id, task.domain);
+  if (dirty_roi.width <= 0 || dirty_roi.height <= 0)
+    return false;
+  if (task.output_roi.width <= 0 || task.output_roi.height <= 0)
+    return true;
+  return (task.output_roi & dirty_roi).area() > 0;
+}
+
+int tile_size_for_node(const Node& node) {
+  int tile_size = 128;
+  auto meta = OpRegistry::instance().get_metadata(node.type, node.subtype);
+  if (!meta)
+    return tile_size;
+  if (meta->tile_preference == TileSizePreference::MICRO)
+    return 16;
+  if (meta->tile_preference == TileSizePreference::MACRO)
+    return 256;
+  return tile_size;
+}
+
+bool has_tiled_impl(const Node& node, DirtyDomain domain) {
+  const auto* impls =
+      OpRegistry::instance().get_implementations(node.type, node.subtype);
+  if (!impls)
+    return false;
+  return domain == DirtyDomain::RealTime ? static_cast<bool>(impls->tiled_rt)
+                                         : static_cast<bool>(impls->tiled_hp);
+}
+
+bool has_monolithic_impl(const Node& node, DirtyDomain domain) {
+  const auto* impls =
+      OpRegistry::instance().get_implementations(node.type, node.subtype);
+  if (!impls)
+    return false;
+  (void)domain;
+  return static_cast<bool>(impls->monolithic_hp);
+}
+
+void apply_task_dirty_metadata(PlannedTask& task,
+                               const DirtyRegionSnapshot* snapshot) {
+  task.source_boundary_eligible = is_dirty_source(snapshot, task.node_id);
+  task.dirty_generation = snapshot ? snapshot->graph_generation : 0;
+  task.dirty_selected = intersects_dirty_roi(task, snapshot);
+}
+
+void add_task(ComputePlan& result, PlannedTask task,
+              const DirtyRegionSnapshot* snapshot) {
   task.task_id = static_cast<int>(result.task_graph.tasks.size());
+  apply_task_dirty_metadata(task, snapshot);
   auto work_it =
       std::find_if(result.planned_work.begin(), result.planned_work.end(),
                    [&](const PlannedNodeWork& work) {
@@ -218,8 +293,8 @@ void add_task(ComputePlan& result, PlannedTask task) {
 }
 
 void populate_tasks(ComputePlan& result, const DirtyRegionSnapshot* snapshot,
-                    DirtyDomain domain) {
-  if (snapshot) {
+                    DirtyDomain domain, const GraphModel* graph) {
+  if (!graph && snapshot) {
     for (const auto& region : snapshot->dirty_monolithic_nodes) {
       if (region.domain != domain)
         continue;
@@ -227,16 +302,21 @@ void populate_tasks(ComputePlan& result, const DirtyRegionSnapshot* snapshot,
                     region.node_id) == result.planned_nodes.end()) {
         continue;
       }
-      add_task(result, PlannedTask{-1,
-                                   region.node_id,
-                                   PlannedTaskKind::Monolithic,
-                                   domain,
-                                   region.pixel_roi,
-                                   -1,
-                                   -1,
-                                   0,
-                                   region.whole_output,
-                                   {}});
+      add_task(result,
+               PlannedTask{-1,
+                           region.node_id,
+                           PlannedTaskKind::Monolithic,
+                           domain,
+                           region.pixel_roi,
+                           -1,
+                           -1,
+                           0,
+                           region.whole_output,
+                           false,
+                           false,
+                           0,
+                           {}},
+               snapshot);
     }
     for (const auto& tile : snapshot->dirty_tiles) {
       if (tile.domain != domain)
@@ -245,32 +325,121 @@ void populate_tasks(ComputePlan& result, const DirtyRegionSnapshot* snapshot,
                     tile.node_id) == result.planned_nodes.end()) {
         continue;
       }
-      add_task(result, PlannedTask{-1,
-                                   tile.node_id,
-                                   PlannedTaskKind::Tile,
-                                   domain,
-                                   tile.pixel_roi,
-                                   tile.tile_x,
-                                   tile.tile_y,
-                                   tile.tile_size,
-                                   false,
-                                   {}});
+      add_task(result,
+               PlannedTask{-1,
+                           tile.node_id,
+                           PlannedTaskKind::Tile,
+                           domain,
+                           tile.pixel_roi,
+                           tile.tile_x,
+                           tile.tile_y,
+                           tile.tile_size,
+                           false,
+                           false,
+                           false,
+                           0,
+                           {}},
+               snapshot);
     }
+    for (const auto& work : result.planned_work) {
+      if (!work.task_ids.empty())
+        continue;
+      add_task(result,
+               PlannedTask{-1,
+                           work.node_id,
+                           PlannedTaskKind::Node,
+                           domain,
+                           work.execution_roi,
+                           -1,
+                           -1,
+                           0,
+                           work.whole_output,
+                           false,
+                           false,
+                           0,
+                           {}},
+               snapshot);
+    }
+    return;
+  }
+  if (!graph) {
+    for (const auto& work : result.planned_work) {
+      add_task(result,
+               PlannedTask{-1,
+                           work.node_id,
+                           PlannedTaskKind::Node,
+                           domain,
+                           work.execution_roi,
+                           -1,
+                           -1,
+                           0,
+                           work.whole_output,
+                           false,
+                           false,
+                           0,
+                           {}},
+               snapshot);
+    }
+    return;
   }
 
+  GraphExtentResolver extent_resolver;
+  std::unordered_map<int, cv::Size> extent_cache;
   for (const auto& work : result.planned_work) {
-    if (!work.task_ids.empty())
+    if (!graph->has_node(work.node_id))
       continue;
-    add_task(result, PlannedTask{-1,
-                                 work.node_id,
-                                 PlannedTaskKind::Node,
-                                 domain,
-                                 work.execution_roi,
-                                 -1,
-                                 -1,
-                                 0,
-                                 work.whole_output,
-                                 {}});
+    const Node& node = graph->node(work.node_id);
+    cv::Size extent = extent_resolver.resolve_output_extent(
+        const_cast<GraphModel&>(*graph), work.node_id, extent_cache);
+    cv::Rect full_output(0, 0, std::max(0, extent.width),
+                         std::max(0, extent.height));
+    if (has_tiled_impl(node, domain) && full_output.width > 0 &&
+        full_output.height > 0) {
+      const int tile_size = tile_size_for_node(node);
+      for (int y = 0; y < full_output.height; y += tile_size) {
+        for (int x = 0; x < full_output.width; x += tile_size) {
+          cv::Rect tile_roi(x, y,
+                            std::min(tile_size, full_output.width - x),
+                            std::min(tile_size, full_output.height - y));
+          add_task(result,
+                   PlannedTask{-1,
+                               work.node_id,
+                               PlannedTaskKind::Tile,
+                               domain,
+                               tile_roi,
+                               x / tile_size,
+                               y / tile_size,
+                               tile_size,
+                               false,
+                               false,
+                               false,
+                               0,
+                               {}},
+                   snapshot);
+        }
+      }
+      continue;
+    }
+
+    const PlannedTaskKind kind =
+        has_monolithic_impl(node, domain) ? PlannedTaskKind::Monolithic
+                                         : PlannedTaskKind::Node;
+    add_task(result,
+             PlannedTask{-1,
+                         work.node_id,
+                         kind,
+                         domain,
+                         full_output.width > 0 ? full_output
+                                               : work.execution_roi,
+                         -1,
+                         -1,
+                         0,
+                         kind == PlannedTaskKind::Monolithic,
+                         false,
+                         false,
+                         0,
+                         {}},
+             snapshot);
   }
 }
 
@@ -329,9 +498,64 @@ ComputePlan ComputeTaskPlanner::plan(const ComputeRequest& request,
   populate_dependencies_from_graph(result, domain, graph);
   populate_dependencies_from_snapshot(result, snapshot, domain);
   populate_node_dependency_lists(result);
-  populate_tasks(result, snapshot, domain);
+  populate_tasks(result, snapshot, domain, graph);
   populate_task_dependencies(result);
   return result;
+}
+
+DirtyUpdateWorkSet DirtySourceTaskCollector::collect(
+    const ComputePlan& plan, const DirtyRegionSnapshot& snapshot) const {
+  DirtyUpdateWorkSet work_set;
+  work_set.generation = snapshot.graph_generation;
+  std::unordered_set<int> source_nodes(snapshot.dirty_source_nodes.begin(),
+                                       snapshot.dirty_source_nodes.end());
+  for (const auto& task : plan.task_graph.tasks) {
+    if (source_nodes.count(task.node_id)) {
+      work_set.dirty_source_task_ids.push_back(task.task_id);
+    }
+  }
+  return work_set;
+}
+
+DirtyUpdateWorkSet DirtyWorkPruner::materialize(
+    const ComputePlan& plan, const DirtyRegionSnapshot& snapshot) const {
+  DirtyUpdateWorkSet work_set =
+      DirtySourceTaskCollector().collect(plan, snapshot);
+  std::unordered_set<int> source_nodes(snapshot.dirty_source_nodes.begin(),
+                                       snapshot.dirty_source_nodes.end());
+  for (const auto& task : plan.task_graph.tasks) {
+    if (source_nodes.count(task.node_id))
+      continue;
+    if (task.dirty_selected) {
+      work_set.downstream_task_ids.push_back(task.task_id);
+    }
+  }
+  return work_set;
+}
+
+std::vector<int> TaskGraphReadyChecker::initial_ready_task_ids(
+    const ComputeTaskGraph& graph,
+    const std::vector<int>* allowed_task_ids) const {
+  std::unordered_set<int> allowed;
+  if (allowed_task_ids) {
+    allowed.insert(allowed_task_ids->begin(), allowed_task_ids->end());
+  }
+  std::vector<int> ready;
+  for (const auto& task : graph.tasks) {
+    if (allowed_task_ids && !allowed.count(task.task_id))
+      continue;
+    bool all_dependencies_allowed = true;
+    for (int dependency_id : task.dependency_task_ids) {
+      if (!allowed_task_ids || allowed.count(dependency_id)) {
+        all_dependencies_allowed = false;
+        break;
+      }
+    }
+    if (all_dependencies_allowed) {
+      ready.push_back(task.task_id);
+    }
+  }
+  return ready;
 }
 
 }  // namespace ps::compute

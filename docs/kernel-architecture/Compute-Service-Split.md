@@ -21,12 +21,14 @@ engine and it is not a plugin ABI change.
 ComputeService facade
   -> ComputeCachePolicy
   -> NodeInputResolver
-  -> NodeExecutor
+  -> ComputeTaskPlanner
+  -> ComputePlan / ComputeTaskGraph
   -> DirtyRegionPlanner
   -> DirtyRegionSnapshot
-  -> ComputeTaskPlanner
   -> IntentUpdateCoordinator
-  -> ComputePlanExecutor
+  -> ComputeTaskDispatcher
+  -> DirtyUpdateWorkSet
+  -> NodeExecutor
   -> ComputeMetricsRecorder
 ```
 
@@ -40,9 +42,9 @@ ComputeService facade
 | `NodeExecutor` | Execute monolithic and tiled operators consistently. | Implemented in `src/kernel/services/compute-service/node_executor.*` |
 | `DirtyRegionPlanner` | Build graph-scoped dirty-region state from node-local dirty reports and operator propagation. | Implemented in `src/kernel/services/compute-service/dirty_region_planner.*` |
 | `DirtyRegionSnapshot` | Enumerate dirty tiles, dirty monolithic nodes, per-node dirty ROIs, and per-edge ROI mappings using stable ids instead of raw pointers. | Implemented as an internal snapshot model |
-| `ComputeTaskPlanner` | Convert compute requests and dirty snapshots into shared `ComputePlan` / `ComputeTaskGraph` semantics. | Implemented as an internal planning boundary; plugin ABI remains TODO |
+| `ComputeTaskPlanner` | Convert compute requests and graph topology into request-scoped `ComputePlan` / `ComputeTaskGraph` semantics. | Implemented as an internal planning boundary; plugin ABI remains TODO |
 | `IntentUpdateCoordinator` | Coordinate `GlobalHighPrecision` and `RealTimeUpdate` intent semantics, including realtime HP/RT dual path behavior independent from execution mode. | Implemented in `src/kernel/services/compute-service/intent_update_coordinator.*` |
-| `ComputePlanExecutor` | Execute `ComputeTaskPlanner` plan semantics by materializing task-graph work, dispatching ready tasks through `SchedulerTaskRuntime`, and committing results. | Implemented in `src/kernel/services/compute-service/compute_plan_executor.*` |
+| `ComputeTaskDispatcher` | Execute `ComputeTaskPlanner` plan semantics by collecting source tasks, checking task-graph readiness, pruning dirty work, dispatching ready tasks through `SchedulerTaskRuntime`, and committing results. | Target boundary for the dirty task split |
 | `ComputeMetricsRecorder` | Centralize events, timings, benchmark events, and debug metadata. | Implemented in `src/kernel/services/compute-service/compute_metrics_recorder.*` |
 
 ## Cache Rules
@@ -71,18 +73,46 @@ tile coordinates, pixel ROIs, graph generation metadata, and edge mappings.
 `ComputeService` stores an inspection summary on the graph, and
 `InteractionService` exposes that summary for frontend/debug queries.
 
+`DirtyRegionSnapshot` is graph-scoped state alongside graph topology, not a
+scheduler graph. It records the current dirty facts used to activate or clip
+work from a request-scoped `ComputeTaskGraph`.
+
+Dirty-region lifecycle is separate from compute triggering. Dirty signals are
+node-originated: frontend interaction may feed a node, and compute may cause a
+node to discover dirty state, but the graph-scoped snapshot is updated through
+that node's begin/update/end dirty-region lifecycle. Dirty signals should not
+automatically enqueue a compute request. This allows an interaction such as a
+brush stroke to accumulate or stream ROI updates through its node without
+rebuilding a full compute plan for every stamp event.
+
+Dirty lifecycle updates should pass through a serialized `DirtyControlLane`
+owned by the dirty-state/executor boundary. The control lane updates
+`dirty_source_nodes` and source lifecycle state. `dirty_updating_count` is
+derived from that lifecycle state, and the propagator derives the propagated
+`actual_dirty_region` snapshot from the source set, then wakes materialization.
+It should not be modeled as a scheduler-owned compute task queue or as
+node-local compute ownership.
+
 TODO: add richer dirty snapshot visualization after the frontend has a concrete
 mask/tile rendering contract.
 
 ## Compute Task Planning Boundary
 
 Single-threaded and parallel compute should share one logical `ComputePlan` or
-`ComputeTaskGraph`. `ComputeTaskPlanner` consumes compute requests and dirty
-snapshots, then produces internal `ComputePlan` semantics used by sequential,
-parallel, HP, and RT paths before execution-specific dispatch. Execution modes
-should differ only in task pools, scheduler policy, and resource selection.
-No separate task-graph composer is introduced while this planner boundary stays
-cohesive.
+`ComputeTaskGraph`. `ComputeTaskPlanner` consumes compute requests and graph
+topology, then produces request-scoped static plan semantics used by
+sequential, parallel, HP, and RT paths before execution-specific dispatch.
+Dirty-region state is applied after this static analysis: each dirty snapshot
+activates or clips a `DirtyUpdateWorkSet` from the plan for the current update
+queue. Execution modes should differ only in task pools, scheduler policy, and
+resource selection. No separate task-graph composer is introduced while this
+planner boundary stays cohesive.
+
+`ComputeTaskPlanner` must enumerate the real task graph for the request,
+including node tasks and tile tasks. A dirty snapshot prunes that already
+planned graph; it does not expand tiles or create new executable task shapes.
+This preserves full-frame tiled compute as the same task model used by HP and
+RT dirty updates.
 
 Realtime HP/RT dual path selection is not an execution mode. Non-realtime
 requests enable the HP path only. `RealTimeUpdate` requests enable both HP and
@@ -93,28 +123,62 @@ parallel execution submits HP and RT sibling work to their intent-specific
 scheduler task runtimes, while single-threaded execution runs the same intent
 work inline.
 
-The HP and RT paths call the shared `ComputeTaskPlanner` separately. The HP
-path creates a `GlobalHighPrecision` plan from its HP dirty snapshot, and the RT
-path creates a `RealTimeUpdate` plan from its RT dirty snapshot. A single
-`ComputeTaskPlanner` invocation must not emit both HP and RT task pools. Future
-task-pool extensions should keep this per-domain planner invocation pattern.
+The HP and RT paths keep separate single-domain plans and dirty snapshots. The
+HP path uses a `GlobalHighPrecision` plan and clips HP work from an HP dirty
+snapshot. The RT path uses a `RealTimeUpdate` plan and clips RT work from an RT
+dirty snapshot. A single `ComputeTaskPlanner` invocation must not emit both HP
+and RT task pools. Future task-pool extensions should keep this per-domain
+planner invocation pattern.
 
 TODO: planner plugin ABI remains explicitly deferred to a later change.
 
 ## Scheduler Boundary
 
-The current parallel compute path dispatches already-planned graph work through
+The target parallel compute path dispatches already-planned graph work through
 the scheduler selected for the request's `ComputeIntent`.
-`ComputePlanExecutor` owns compute-plan execution, internal DAG counters,
+`ComputeTaskDispatcher` owns compute-plan execution, internal DAG counters,
 temporary result storage, tile micro-task accounting, exception propagation,
-and final output selection, but hands concrete task execution to
+and final output selection, but hands concrete ready task callbacks to
 `SchedulerTaskRuntime`.
 
-Schedulers should pull planned or annotated tasks from intent-aware task pools
-or receive planned work through `SchedulerTaskRuntime`, then schedule compute
-resources. They should not own graph-level dirty propagation or compute-task
-derivation. Compute-planning helpers have been removed from the formal
-scheduler surface.
+For dirty updates, `ComputeTaskDispatcher` materializes the per-update work set
+from the request plan and dirty snapshot before submitting ready task callbacks
+to the scheduler runtime.
+Runtime dependency counters, task reference counts, and ready queues are owned
+by the dispatcher during that materialization. The scheduler receives concrete
+ready task callbacks with epoch context and optional scheduler-specific hints;
+it does not receive task graphs, own dirty-state lookup, or derive task graphs.
+
+Realtime materialization must consider both current running work and the dirty
+node lifecycle. If a node is still creating dirty regions, an empty ready queue
+should not force the realtime compute request to terminate and rebuild a new
+full plan for the next ROI update. Source-node tasks for a dirty generation
+should be submitted source-first by the dispatcher before dependent downstream
+dirty work is released, not as a separate dirty source queue and not as a
+scheduler-wide priority contract. Later work may extract the work-set selection
+logic behind a task-pruner plugin interface.
+
+The dispatcher must treat `ComputeTaskGraph` as immutable once scheduler-visible
+tasks have been derived from it. New dirty updates produce new
+`DirtyUpdateWorkSet` generations from the same plan and latest snapshot, then
+submit concrete ready task callbacks as work becomes ready. The dispatcher may
+attach generation and epoch metadata, plus optional scheduler-specific hints,
+but it should not destruct and replace a task graph concurrently with a running
+scheduler runtime.
+
+Schedulers should receive ready task callbacks from intent-aware dispatcher
+paths, then schedule compute resources. They should not own task graphs,
+graph-level dirty propagation, dependency counters, dirty work pruning, or
+compute-task derivation. Compute-planning helpers have been removed from the
+formal scheduler surface.
+
+Scheduler behavior for newly submitted ready tasks is policy-specific: a
+scheduler may drop stale queued work by epoch, route tasks through FIFO/LIFO or
+work-stealing queues, prefer CPU/GPU resources, or let previous work finish if
+that matches its latency/throughput policy. The scheduler's input should still
+be concrete ready task callbacks with generic metadata such as epoch and dirty
+generation. It should not need a
+dirty-feature-specific queue.
 
 The target task-pool model has separate HP and RT pools with independently
 selectable scheduler configuration. For example, HP can use a single-thread
@@ -159,8 +223,11 @@ Current global HP compute with a dirty ROI may still trigger full recompute in
 some entry paths. This split should document that behavior and avoid changing
 it accidentally.
 
-TODO: decide in a later change whether global HP dirty ROI should use optimized
-partial HP update planning.
+Target HP dirty updates must accept dirty ROI and clip HP work from the
+high-precision task graph so large graphs and large images do not pay for
+unaffected work. The existing full-recompute behavior is a compatibility
+fallback only for entry points not yet routed through optimized HP dirty
+planning.
 
 ## Validation Expectations
 

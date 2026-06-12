@@ -308,6 +308,21 @@ json scheduler_events_json(
       case ps::GraphRuntime::SchedulerEvent::EXECUTE_TILE:
         action = "EXECUTE_TILE";
         break;
+      case ps::GraphRuntime::SchedulerEvent::EXECUTE_DIRTY_SOURCE:
+        action = "EXECUTE_DIRTY_SOURCE";
+        break;
+      case ps::GraphRuntime::SchedulerEvent::EXECUTE_DIRTY_DOWNSTREAM_NODE:
+        action = "EXECUTE_DIRTY_DOWNSTREAM_NODE";
+        break;
+      case ps::GraphRuntime::SchedulerEvent::EXECUTE_DIRTY_DOWNSTREAM_TILE:
+        action = "EXECUTE_DIRTY_DOWNSTREAM_TILE";
+        break;
+      case ps::GraphRuntime::SchedulerEvent::SKIP_STALE_GENERATION:
+        action = "SKIP_STALE_GENERATION";
+        break;
+      case ps::GraphRuntime::SchedulerEvent::RETHROW_EXCEPTION:
+        action = "RETHROW_EXCEPTION";
+        break;
     }
     out.push_back(
         {{"epoch", event.epoch},
@@ -1758,19 +1773,25 @@ int main(int argc, char** argv) {
               "HP and RT dirty update plans expose regions, dependencies, and "
               "planned task graph semantics consumed by execution");
     task5.add(
-        "intent coordinator drove concurrent dual submit", true,
+        "dirty realtime avoids coarse coordinator scheduler submit", true,
         dirty_actual["compute_events"],
         compute_events_contain_source(
             dirty_actual["compute_events"],
-            "intent_coordinator_decision_concurrent") &&
+            "intent_coordinator_decision_inline") &&
             compute_events_contain_source(dirty_actual["compute_events"],
-                                          "intent_coordinator_submit_hp") &&
+                                          "intent_coordinator_inline_hp") &&
             compute_events_contain_source(dirty_actual["compute_events"],
-                                          "intent_coordinator_submit_rt") &&
-            compute_events_contain_source(dirty_actual["compute_events"],
-                                          "intent_coordinator_complete"),
-        "RealTimeUpdate HP/RT dual submit was orchestrated inside "
-        "IntentUpdateCoordinator");
+                                          "intent_coordinator_inline_rt") &&
+            !compute_events_contain_source(
+                dirty_actual["compute_events"],
+                "intent_coordinator_decision_concurrent") &&
+            !compute_events_contain_source(dirty_actual["compute_events"],
+                                           "intent_coordinator_submit_hp") &&
+            !compute_events_contain_source(dirty_actual["compute_events"],
+                                           "intent_coordinator_submit_rt"),
+        "RealTimeUpdate no longer submits coarse HP/RT callbacks through "
+        "IntentUpdateCoordinator; HP/RT callbacks submit dirty ready tasks "
+        "internally.");
     task5.add(
         "non-parallel realtime intent still ran HP and RT", true,
         dirty_single_thread_actual["compute_events"],
@@ -1810,9 +1831,11 @@ int main(int argc, char** argv) {
         {"dirty_plan_dependencies", ">=2"},
         {"dirty_plan_tasks", ">=3"},
         {"intent_coordinator_sources",
+         {"intent_coordinator_decision_inline", "intent_coordinator_inline_hp",
+          "intent_coordinator_inline_rt"}},
+        {"coarse_intent_submit_sources_absent",
          {"intent_coordinator_decision_concurrent",
-          "intent_coordinator_submit_hp", "intent_coordinator_submit_rt",
-          "intent_coordinator_complete"}},
+          "intent_coordinator_submit_hp", "intent_coordinator_submit_rt"}},
         {"intent_coordinator_inline_sources",
          {"intent_coordinator_decision_inline", "intent_coordinator_inline_hp",
           "intent_coordinator_inline_rt"}},
@@ -1838,7 +1861,7 @@ int main(int argc, char** argv) {
               "parallel facade returned success");
     task6.add("scheduler node events recorded", ">=5", execute_count,
               execute_count >= 5,
-              "ComputePlanExecutor emitted scheduler dispatch events");
+              "ComputeTaskDispatcher emitted scheduler dispatch events");
     task6.add("scheduler tile events recorded", ">0", tile_count,
               tile_count > 0,
               "tiled nodes emitted micro-task completion events");
@@ -1854,7 +1877,7 @@ int main(int argc, char** argv) {
             contains_compute_plan_graph(
                 json::array({parallel_snapshot["last_compute_plan"]}),
                 "global_high_precision", true, {1, 2, 4, 30, 100}, 4, 5),
-        "ComputePlanExecutor builds dependency counters and initial tasks "
+        "ComputeTaskDispatcher builds dependency counters and initial tasks "
         "from ComputeTaskGraph semantics");
     task6.add(
         "sparse node id target committed", true,
@@ -1879,7 +1902,7 @@ int main(int argc, char** argv) {
                            {"parallel_error_returns_ok", false}};
     write_task_bundle(
         root, "task-06", "Task 6 compute plan executor runtime evidence",
-        "ComputePlanExecutor must preserve dependency scheduling, "
+        "ComputeTaskDispatcher must preserve dependency scheduling, "
         "tile completion, commit, cache, events, and errors.",
         command, "Full graph and error graph.", task6_expected, task6_actual,
         task6, operator_trace);

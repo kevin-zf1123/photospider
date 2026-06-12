@@ -118,6 +118,8 @@ class Kernel {
   traversal_details(const std::string& name);
   std::optional<std::vector<GraphEventService::ComputeEvent>>
   drain_compute_events(const std::string& name);
+  std::optional<std::vector<GraphRuntime::SchedulerEvent>> scheduler_trace(
+      const std::string& name);
   std::optional<std::string> dirty_region_snapshot_debug(
       const std::string& name);
   std::optional<compute::DirtyRegionSnapshot> dirty_region_snapshot(

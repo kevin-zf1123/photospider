@@ -801,6 +801,18 @@ Kernel::drain_compute_events(const std::string& name) {
   }
 }
 
+std::optional<std::vector<GraphRuntime::SchedulerEvent>> Kernel::scheduler_trace(
+    const std::string& name) {
+  auto it = graphs_.find(name);
+  if (it == graphs_.end())
+    return std::nullopt;
+  try {
+    return it->second->get_scheduler_log();
+  } catch (...) {
+    return std::nullopt;
+  }
+}
+
 std::optional<std::string> Kernel::dirty_region_snapshot_debug(
     const std::string& name) {
   auto it = graphs_.find(name);

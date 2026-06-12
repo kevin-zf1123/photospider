@@ -69,7 +69,7 @@
 #include "kernel/services/compute-service/compute_cache_policy.hpp"
 #include "kernel/services/compute-service/compute_geometry.hpp"
 #include "kernel/services/compute-service/compute_metrics_recorder.hpp"
-#include "kernel/services/compute-service/compute_plan_executor.hpp"
+#include "kernel/services/compute-service/compute_task_dispatcher.hpp"
 #include "kernel/services/compute-service/compute_task_planner.hpp"
 #include "kernel/services/compute-service/dirty_region_planner.hpp"
 #include "kernel/services/compute-service/intent_update_coordinator.hpp"
@@ -147,6 +147,50 @@ void remember_dirty_snapshot(GraphModel& graph,
   if (graph.recent_dirty_region_snapshots.size() > 16) {
     graph.recent_dirty_region_snapshots.erase(
         graph.recent_dirty_region_snapshots.begin());
+  }
+}
+
+std::vector<int> planned_nodes_for_task_ids(
+    const compute::ComputePlan& compute_plan,
+    const std::vector<int>& task_ids) {
+  std::unordered_set<int> selected_task_ids(task_ids.begin(), task_ids.end());
+  std::vector<int> node_ids;
+  std::unordered_set<int> selected_node_ids;
+  for (const auto& work : compute_plan.planned_work) {
+    bool selected = false;
+    for (int task_id : work.task_ids) {
+      if (selected_task_ids.count(task_id)) {
+        selected = true;
+        break;
+      }
+    }
+    if (selected && selected_node_ids.insert(work.node_id).second) {
+      node_ids.push_back(work.node_id);
+    }
+  }
+  return node_ids;
+}
+
+void validate_dirty_source_boundaries_ready(
+    const GraphModel& graph, const compute::DirtyRegionSnapshot& snapshot,
+    compute::DirtyDomain domain) {
+  for (int source_node_id : snapshot.dirty_source_nodes) {
+    const Node* source = graph.find_node(source_node_id);
+    if (!source) {
+      throw GraphError(GraphErrc::NotFound,
+                       "Dirty source node " +
+                           std::to_string(source_node_id) + " not found.");
+    }
+    const NodeOutput* output =
+        domain == compute::DirtyDomain::RealTime
+            ? compute::ComputeCachePolicy::interactive_output(*source)
+            : compute::ComputeCachePolicy::reusable_output(*source);
+    if (!output) {
+      throw GraphError(
+          GraphErrc::MissingDependency,
+          "Dirty source boundary output is not ready for node " +
+              std::to_string(source_node_id) + ".");
+    }
   }
 }
 
@@ -449,6 +493,12 @@ NodeOutput& ComputeService::compute_high_precision_update(
       {ComputeIntent::GlobalHighPrecision, node_id, false, dirty_roi},
       execution_order, &dirty_plan.snapshot, &graph);
   remember_compute_plan(graph, compute_plan);
+  auto is_dirty_source_node = [&](int nid) {
+    return std::find(dirty_plan.snapshot.dirty_source_nodes.begin(),
+                     dirty_plan.snapshot.dirty_source_nodes.end(),
+                     nid) != dirty_plan.snapshot.dirty_source_nodes.end();
+  };
+  const uint64_t dirty_generation = dirty_plan.snapshot.graph_generation;
   for (const auto& work : compute_plan.planned_work) {
     auto entry_it = plan.find(work.node_id);
     if (entry_it == plan.end())
@@ -481,9 +531,27 @@ NodeOutput& ComputeService::compute_high_precision_update(
     if (is_rect_empty(entry.roi_hp))
       return;
     Node& node = graph.mutable_node(nid);
+    const bool dirty_source = is_dirty_source_node(nid);
+    if (dirty_source) {
+      const uint64_t committed_generation =
+          graph.dirty_source_hp_commit_generation[nid];
+      if (committed_generation > dirty_generation) {
+        if (runtime_ptr) {
+          runtime_ptr->log_event(
+              GraphRuntime::SchedulerEvent::SKIP_STALE_GENERATION, nid);
+        }
+        return;
+      }
+    }
 
     if (runtime_ptr) {
       runtime_ptr->log_event(GraphRuntime::SchedulerEvent::EXECUTE, nid);
+      runtime_ptr->log_event(dirty_source
+                                 ? GraphRuntime::SchedulerEvent::
+                                       EXECUTE_DIRTY_SOURCE
+                                 : GraphRuntime::SchedulerEvent::
+                                       EXECUTE_DIRTY_DOWNSTREAM_NODE,
+                             nid);
     }
 
     auto resolved_inputs = compute::NodeInputResolver::resolve(
@@ -572,6 +640,9 @@ NodeOutput& ComputeService::compute_high_precision_update(
             if (runtime_ptr) {
               runtime_ptr->log_event(GraphRuntime::SchedulerEvent::EXECUTE_TILE,
                                      nid);
+              runtime_ptr->log_event(
+                  GraphRuntime::SchedulerEvent::EXECUTE_DIRTY_DOWNSTREAM_TILE,
+                  nid);
             }
             compute::NodeExecutor::execute_tile_task(task, *hp_tile_fn);
             continue;
@@ -607,6 +678,10 @@ NodeOutput& ComputeService::compute_high_precision_update(
               if (runtime_ptr) {
                 runtime_ptr->log_event(
                     GraphRuntime::SchedulerEvent::EXECUTE_TILE, nid);
+                runtime_ptr->log_event(
+                    GraphRuntime::SchedulerEvent::
+                        EXECUTE_DIRTY_DOWNSTREAM_TILE,
+                    nid);
               }
               compute::NodeExecutor::execute_tile_task(task, *hp_tile_fn);
             }
@@ -634,6 +709,9 @@ NodeOutput& ComputeService::compute_high_precision_update(
             ? clip_rect(merge_rect(*node.hp_roi, entry.roi_hp), entry.hp_size)
             : entry.roi_hp;
     node.hp_version++;
+    if (dirty_source) {
+      graph.dirty_source_hp_commit_generation[nid] = dirty_generation;
+    }
     events_.push(node.id, node.name, "hp_update", 0.0);
 
     if (runtime_ptr) {
@@ -641,10 +719,61 @@ NodeOutput& ComputeService::compute_high_precision_update(
     }
   };
 
-  for (const auto& work : compute_plan.planned_work) {
-    auto entry_it = plan.find(work.node_id);
-    if (entry_it != plan.end()) {
-      compute_node_hp(work.node_id, entry_it->second);
+  compute::DirtyWorkPruner dirty_work_pruner;
+  const compute::DirtyUpdateWorkSet dirty_work_set =
+      dirty_work_pruner.materialize(compute_plan, dirty_plan.snapshot);
+  const std::vector<int> source_node_ids = planned_nodes_for_task_ids(
+      compute_plan, dirty_work_set.dirty_source_task_ids);
+  const std::vector<int> downstream_node_ids = planned_nodes_for_task_ids(
+      compute_plan, dirty_work_set.downstream_task_ids);
+
+  auto make_hp_task = [&](int task_node_id) -> Task {
+    return [&, task_node_id]() {
+      auto entry_it = plan.find(task_node_id);
+      if (entry_it == plan.end()) {
+        return;
+      }
+      try {
+        compute_node_hp(task_node_id, entry_it->second);
+      } catch (...) {
+        if (runtime_ptr) {
+          runtime_ptr->log_event(
+              GraphRuntime::SchedulerEvent::RETHROW_EXCEPTION, task_node_id);
+        }
+        throw;
+      }
+    };
+  };
+
+  auto validate_hp_source_boundaries = [&]() {
+    validate_dirty_source_boundaries_ready(
+        graph, dirty_plan.snapshot, compute::DirtyDomain::HighPrecision);
+  };
+
+  if (runtime_ptr) {
+    SchedulerTaskRuntime& dirty_task_runtime = scheduler_task_runtime_for(
+        *runtime_ptr, ComputeIntent::GlobalHighPrecision);
+    std::vector<Task> source_tasks;
+    std::vector<Task> downstream_tasks;
+    source_tasks.reserve(source_node_ids.size());
+    downstream_tasks.reserve(downstream_node_ids.size());
+    for (int source_node_id : source_node_ids) {
+      source_tasks.push_back(make_hp_task(source_node_id));
+    }
+    for (int downstream_node_id : downstream_node_ids) {
+      downstream_tasks.push_back(make_hp_task(downstream_node_id));
+    }
+    compute::ComputeTaskDispatcher::submit_dirty_ready_tasks_source_first(
+        dirty_task_runtime, std::move(source_tasks),
+        std::move(downstream_tasks), dirty_generation,
+        validate_hp_source_boundaries);
+  } else {
+    for (int source_node_id : source_node_ids) {
+      make_hp_task(source_node_id)();
+    }
+    validate_hp_source_boundaries();
+    for (int downstream_node_id : downstream_node_ids) {
+      make_hp_task(downstream_node_id)();
     }
   }
 
@@ -662,9 +791,17 @@ NodeOutput& ComputeService::compute_high_precision_update(
           return;
         }
         if (node.hp_version < request.hp_version) {
+          if (runtime_ptr) {
+            runtime_ptr->log_event(
+                GraphRuntime::SchedulerEvent::SKIP_STALE_GENERATION, node.id);
+          }
           return;
         }
         if (node.rt_version > request.hp_version) {
+          if (runtime_ptr) {
+            runtime_ptr->log_event(
+                GraphRuntime::SchedulerEvent::SKIP_STALE_GENERATION, node.id);
+          }
           return;
         }
 
@@ -771,7 +908,6 @@ NodeOutput& ComputeService::compute_real_time_update(
     const cv::Rect& dirty_roi) {
   [[maybe_unused]] std::unique_lock<std::mutex> graph_lock(graph.graph_mutex_);
 
-  (void)runtime;
   (void)cache_precision;
   (void)disable_disk_cache;
   (void)benchmark_events;
@@ -790,6 +926,13 @@ NodeOutput& ComputeService::compute_real_time_update(
       {ComputeIntent::RealTimeUpdate, node_id, false, dirty_roi},
       execution_order, &dirty_plan.snapshot, &graph);
   remember_compute_plan(graph, compute_plan);
+  GraphRuntime* runtime_ptr = runtime;
+  auto is_dirty_source_node = [&](int nid) {
+    return std::find(dirty_plan.snapshot.dirty_source_nodes.begin(),
+                     dirty_plan.snapshot.dirty_source_nodes.end(),
+                     nid) != dirty_plan.snapshot.dirty_source_nodes.end();
+  };
+  const uint64_t dirty_generation = dirty_plan.snapshot.graph_generation;
   for (const auto& work : compute_plan.planned_work) {
     auto entry_it = plan.find(work.node_id);
     if (entry_it == plan.end())
@@ -817,6 +960,28 @@ NodeOutput& ComputeService::compute_real_time_update(
     Node& node = graph.mutable_node(nid);
     if (is_rect_empty(entry.roi_rt))
       return;
+    const bool dirty_source = is_dirty_source_node(nid);
+    if (dirty_source) {
+      const uint64_t committed_generation =
+          graph.dirty_source_rt_commit_generation[nid];
+      if (committed_generation > dirty_generation) {
+        if (runtime_ptr) {
+          runtime_ptr->log_event(
+              GraphRuntime::SchedulerEvent::SKIP_STALE_GENERATION, nid);
+        }
+        return;
+      }
+    }
+
+    if (runtime_ptr) {
+      runtime_ptr->log_event(GraphRuntime::SchedulerEvent::EXECUTE, nid);
+      runtime_ptr->log_event(dirty_source
+                                 ? GraphRuntime::SchedulerEvent::
+                                       EXECUTE_DIRTY_SOURCE
+                                 : GraphRuntime::SchedulerEvent::
+                                       EXECUTE_DIRTY_DOWNSTREAM_NODE,
+                             nid);
+    }
 
     auto resolved_inputs = compute::NodeInputResolver::resolve(
         node,
@@ -952,6 +1117,14 @@ NodeOutput& ComputeService::compute_real_time_update(
                     task.input_tiles.push_back(input_tile);
                   }
                   compute::NodeExecutor::execute_tile_task(task, fn);
+                  if (runtime_ptr) {
+                    runtime_ptr->log_event(
+                        GraphRuntime::SchedulerEvent::EXECUTE_TILE, nid);
+                    runtime_ptr->log_event(
+                        GraphRuntime::SchedulerEvent::
+                            EXECUTE_DIRTY_DOWNSTREAM_TILE,
+                        nid);
+                  }
                 }
               }
             }
@@ -976,14 +1149,68 @@ NodeOutput& ComputeService::compute_real_time_update(
       node.rt_roi = entry.roi_hp;
     }
     node.rt_version++;
+    if (dirty_source) {
+      graph.dirty_source_rt_commit_generation[nid] = dirty_generation;
+    }
     events_.push(node.id, node.name, "rt_update", 0.0);
   };
 
-  for (const auto& work : compute_plan.planned_work) {
-    auto it = plan.find(work.node_id);
-    if (it == plan.end())
-      continue;
-    compute_node_rt(work.node_id, it->second);
+  compute::DirtyWorkPruner dirty_work_pruner;
+  const compute::DirtyUpdateWorkSet dirty_work_set =
+      dirty_work_pruner.materialize(compute_plan, dirty_plan.snapshot);
+  const std::vector<int> source_node_ids = planned_nodes_for_task_ids(
+      compute_plan, dirty_work_set.dirty_source_task_ids);
+  const std::vector<int> downstream_node_ids = planned_nodes_for_task_ids(
+      compute_plan, dirty_work_set.downstream_task_ids);
+
+  auto make_rt_task = [&](int task_node_id) -> Task {
+    return [&, task_node_id]() {
+      auto entry_it = plan.find(task_node_id);
+      if (entry_it == plan.end()) {
+        return;
+      }
+      try {
+        compute_node_rt(task_node_id, entry_it->second);
+      } catch (...) {
+        if (runtime_ptr) {
+          runtime_ptr->log_event(
+              GraphRuntime::SchedulerEvent::RETHROW_EXCEPTION, task_node_id);
+        }
+        throw;
+      }
+    };
+  };
+
+  auto validate_rt_source_boundaries = [&]() {
+    validate_dirty_source_boundaries_ready(
+        graph, dirty_plan.snapshot, compute::DirtyDomain::RealTime);
+  };
+
+  if (runtime_ptr) {
+    SchedulerTaskRuntime& dirty_task_runtime =
+        scheduler_task_runtime_for(*runtime_ptr, ComputeIntent::RealTimeUpdate);
+    std::vector<Task> source_tasks;
+    std::vector<Task> downstream_tasks;
+    source_tasks.reserve(source_node_ids.size());
+    downstream_tasks.reserve(downstream_node_ids.size());
+    for (int source_node_id : source_node_ids) {
+      source_tasks.push_back(make_rt_task(source_node_id));
+    }
+    for (int downstream_node_id : downstream_node_ids) {
+      downstream_tasks.push_back(make_rt_task(downstream_node_id));
+    }
+    compute::ComputeTaskDispatcher::submit_dirty_ready_tasks_source_first(
+        dirty_task_runtime, std::move(source_tasks),
+        std::move(downstream_tasks), dirty_generation,
+        validate_rt_source_boundaries);
+  } else {
+    for (int source_node_id : source_node_ids) {
+      make_rt_task(source_node_id)();
+    }
+    validate_rt_source_boundaries();
+    for (int downstream_node_id : downstream_node_ids) {
+      make_rt_task(downstream_node_id)();
+    }
   }
 
   Node& target = graph.mutable_node(node_id);
@@ -998,7 +1225,7 @@ NodeOutput& ComputeService::compute_parallel(
     GraphModel& graph, GraphRuntime& runtime, int node_id,
     const std::string& cache_precision, bool force_recache, bool enable_timing,
     bool disable_disk_cache, std::vector<BenchmarkEvent>* benchmark_events) {
-  compute::ComputePlanExecutor executor(traversal_, cache_, events_);
+  compute::ComputeTaskDispatcher executor(traversal_, cache_, events_);
   SchedulerTaskRuntime& task_runtime =
       scheduler_task_runtime_for(runtime, ComputeIntent::GlobalHighPrecision);
   return executor.execute(
@@ -1087,11 +1314,15 @@ NodeOutput& ComputeService::compute_intent_update_impl(
   SchedulerTaskRuntime* hp_task_runtime = nullptr;
   SchedulerTaskRuntime* rt_task_runtime = nullptr;
   if (use_parallel_executor && runtime) {
-    hp_task_runtime = &scheduler_task_runtime_for(
-        *runtime, ComputeIntent::GlobalHighPrecision);
-    if (intent == ComputeIntent::RealTimeUpdate) {
-      rt_task_runtime =
-          &scheduler_task_runtime_for(*runtime, ComputeIntent::RealTimeUpdate);
+    const bool dirty_rt_update =
+        intent == ComputeIntent::RealTimeUpdate && dirty_roi.has_value();
+    if (!dirty_rt_update) {
+      hp_task_runtime = &scheduler_task_runtime_for(
+          *runtime, ComputeIntent::GlobalHighPrecision);
+      if (intent == ComputeIntent::RealTimeUpdate) {
+        rt_task_runtime =
+            &scheduler_task_runtime_for(*runtime, ComputeIntent::RealTimeUpdate);
+      }
     }
   }
 

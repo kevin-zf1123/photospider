@@ -43,12 +43,13 @@ source.
 
 ## Current Dispatch State
 
-Parallel compute planning and plan execution still belong to `ComputeService`
+Parallel compute planning and plan execution belong to `ComputeService`
 collaborators: `DirtyRegionPlanner`, `ComputeTaskPlanner`,
-`IntentUpdateCoordinator`, and `ComputePlanExecutor`. After planning,
-`ComputePlanExecutor` materializes the planned task graph into concrete tasks
-and submits ready work through the configured `IScheduler` instance for the
-relevant `ComputeIntent` via `SchedulerTaskRuntime`.
+`IntentUpdateCoordinator`, and `ComputeTaskDispatcher`. After planning,
+`ComputeTaskDispatcher` materializes either the full planned task graph or the
+dirty-clipped update work set into concrete tasks and submits ready work through
+the configured `IScheduler` instance for the relevant `ComputeIntent` via
+`SchedulerTaskRuntime`.
 
 `GraphRuntime` still owns graph state, scheduler registration, events, and some
 runtime queue APIs used by graph-runtime support paths and tests. Those queues
@@ -75,17 +76,28 @@ accidentally own graph/task planning.
 The target model is:
 
 ```text
-DirtyRegionPlanner
-  -> DirtyRegionSnapshot
+GraphModel topology
   -> ComputeTaskPlanner
-  -> intent-aware task pools
+  -> ComputePlan / ComputeTaskGraph
+  -> DirtyRegionSnapshot
+  -> DirtyUpdateWorkSet
   -> Scheduler resource dispatch
 ```
 
 Device selection, queue selection, batching, worker reservation, cancellation,
 and resource-specific dispatch belong in the scheduler. Dirty propagation,
-node/tile expansion, monolithic dirty escalation, and logical compute-task
-derivation belong before scheduler dispatch.
+dirty work-set activation, node/tile expansion, monolithic dirty escalation,
+and logical compute-task derivation belong before scheduler dispatch.
+
+The dirty control lane is not a dirty-feature-specific scheduler queue. Dirty
+nodes update graph-scoped dirty lifecycle and ROI state through a serialized
+control path; the dispatcher materializes dirty work generations from that
+state and submits only concrete ready task callbacks to the scheduler.
+Scheduler implementations should make decisions from generic ready-task
+metadata such as epoch, dirty generation, and optional scheduler-specific
+priority hints. A scheduler may drop stale queued work by epoch, use FIFO/LIFO
+or work-stealing queues, route CPU/GPU resources, or keep older work running,
+but it should not receive task graphs or require a bespoke dirty-source queue.
 
 The compute-service path derives planned work before scheduler dispatch and
 does not expose a compatibility compute path outside planned-task dispatch.
@@ -106,6 +118,9 @@ execution events. This is useful for validating scheduler behavior.
 - Keep `IScheduler` as the formal public scheduler interface.
 - Keep planned parallel work routed through scheduler-owned task runtimes.
 - Avoid adding new permanent dependencies on `GraphRuntime` internal queues.
+- Keep scheduler runtimes ready-task-only: they receive concrete callbacks with
+  epoch/generation metadata and optional scheduler-specific hints, not task
+  graphs or dirty work-set state.
 - Keep plugin scheduler lifecycle compatible with `Plugin-ABI.md`.
 - Continue later work on richer annotated task pools, planner plugin ABI, and
   scheduler policy metadata without moving graph-level dirty planning into a

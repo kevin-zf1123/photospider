@@ -126,6 +126,23 @@ void SerialDebugScheduler::log_event(SchedulerTraceAction action, int node_id) {
     case SchedulerTraceAction::ExecuteTile:
       runtime_action = GraphRuntime::SchedulerEvent::EXECUTE_TILE;
       break;
+    case SchedulerTraceAction::ExecuteDirtySource:
+      runtime_action = GraphRuntime::SchedulerEvent::EXECUTE_DIRTY_SOURCE;
+      break;
+    case SchedulerTraceAction::ExecuteDirtyDownstreamNode:
+      runtime_action =
+          GraphRuntime::SchedulerEvent::EXECUTE_DIRTY_DOWNSTREAM_NODE;
+      break;
+    case SchedulerTraceAction::ExecuteDirtyDownstreamTile:
+      runtime_action =
+          GraphRuntime::SchedulerEvent::EXECUTE_DIRTY_DOWNSTREAM_TILE;
+      break;
+    case SchedulerTraceAction::SkipStaleGeneration:
+      runtime_action = GraphRuntime::SchedulerEvent::SKIP_STALE_GENERATION;
+      break;
+    case SchedulerTraceAction::RethrowException:
+      runtime_action = GraphRuntime::SchedulerEvent::RETHROW_EXCEPTION;
+      break;
   }
   runtime_->log_event(runtime_action, node_id);
 }

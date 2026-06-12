@@ -19,7 +19,7 @@ class GraphIOService;
 class GraphTraversalService;
 class ComputeService;
 namespace compute {
-class ComputePlanExecutor;
+class ComputeTaskDispatcher;
 }
 
 struct NodeTiming {
@@ -65,6 +65,9 @@ class GraphModel {
   std::optional<std::string> last_dirty_region_snapshot_debug;
   std::optional<compute::DirtyRegionSnapshot> last_dirty_region_snapshot;
   std::vector<compute::DirtyRegionSnapshot> recent_dirty_region_snapshots;
+  uint64_t dirty_generation_counter = 0;
+  std::unordered_map<int, uint64_t> dirty_source_hp_commit_generation;
+  std::unordered_map<int, uint64_t> dirty_source_rt_commit_generation;
   std::optional<compute::ComputePlan> last_compute_plan;
   std::vector<compute::ComputePlan> recent_compute_plans;
 
@@ -139,7 +142,7 @@ class GraphModel {
   friend class GraphIOService;
   friend class GraphTraversalService;
   friend class ComputeService;
-  friend class compute::ComputePlanExecutor;
+  friend class compute::ComputeTaskDispatcher;
 
   Node* find_node_mutable(int id);
   Node& mutable_node(int id);

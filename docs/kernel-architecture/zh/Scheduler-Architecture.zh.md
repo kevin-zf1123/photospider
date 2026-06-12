@@ -30,10 +30,11 @@ create -> attach(runtime) -> start -> dispatch planned tasks -> shutdown -> deta
 
 ## 当前 Dispatch 状态
 
-并行计算规划和 plan execution 仍属于 `ComputeService` 协作者：`DirtyRegionPlanner`、
-`ComputeTaskPlanner`、`IntentUpdateCoordinator` 和 `ComputePlanExecutor`。规划完成后，
-`ComputePlanExecutor` 会把 planned task graph materialize 为具体 task，并通过相关
-`ComputeIntent` 配置的 `IScheduler` 实例，经由 `SchedulerTaskRuntime` 提交 ready work。
+并行计算规划和 plan execution 属于 `ComputeService` 协作者：`DirtyRegionPlanner`、
+`ComputeTaskPlanner`、`IntentUpdateCoordinator` 和 `ComputeTaskDispatcher`。规划完成后，
+`ComputeTaskDispatcher` 会把完整 planned task graph 或 dirty 裁剪后的 update work set
+materialize 为具体 task，并通过相关 `ComputeIntent` 配置的 `IScheduler` 实例，经由
+`SchedulerTaskRuntime` 提交 ready work。
 
 `GraphRuntime` 仍拥有图状态、scheduler 注册、事件，以及一些供 graph-runtime support path
 和测试使用的 runtime queue API。这些队列不再是 compute-service parallel dispatch
@@ -57,16 +58,25 @@ create -> attach(runtime) -> start -> dispatch planned tasks -> shutdown -> deta
 目标模型是：
 
 ```text
-DirtyRegionPlanner
-  -> DirtyRegionSnapshot
+GraphModel topology
   -> ComputeTaskPlanner
-  -> intent-aware task pools
+  -> ComputePlan / ComputeTaskGraph
+  -> DirtyRegionSnapshot
+  -> DirtyUpdateWorkSet
   -> Scheduler resource dispatch
 ```
 
 设备选择、队列选择、批处理、worker reservation、取消和资源专用 dispatch 属于 scheduler。
-Dirty propagation、node/tile 展开、monolithic dirty escalation 和逻辑 compute-task derivation
-属于 scheduler dispatch 之前的阶段。
+Dirty propagation、dirty work-set activation、node/tile 展开、monolithic dirty escalation
+和逻辑 compute-task derivation 属于 scheduler dispatch 之前的阶段。
+
+Dirty control lane 不是 dirty-feature-specific scheduler queue。Dirty node 通过串行 control
+path 更新图级 dirty lifecycle 和 ROI state；dispatcher 再从该状态 materialize dirty work
+generation，并且只把具体 ready task callback 提交给 scheduler。Scheduler 实现应根据通用
+ready-task metadata 做决策，例如 epoch、dirty generation 和 optional scheduler-specific
+priority hint。Scheduler 可以通过 epoch drop stale queued work，可以使用 FIFO/LIFO 或
+work-stealing queue，可以路由 CPU/GPU resource，也可以保留旧 work 继续运行，但它不应接收
+task graph，也不应需要专门的 dirty-source queue。
 
 compute-service 路径会先推导 planned work，再进入 scheduler dispatch，并且不再暴露绕过
 planned-task dispatch 的兼容计算路径。
@@ -84,6 +94,8 @@ planned-task dispatch 的兼容计算路径。
 - 保持 `IScheduler` 作为正式公共调度器接口。
 - 保持 planned parallel work 通过 scheduler-owned task runtime 路由。
 - 避免新增对 `GraphRuntime` 内部队列的永久依赖。
+- 保持 scheduler runtime 为 ready-task-only：它们接收带 epoch/generation metadata 和 optional
+  scheduler-specific hint 的具体 callback，而不是 task graph 或 dirty work-set state。
 - 保持插件调度器生命周期与 `Plugin-ABI.md` 兼容。
 - 继续后续 richer annotated task pool、planner plugin ABI 和 scheduler policy metadata
   工作，但不把图级 dirty planning 移入 scheduler。

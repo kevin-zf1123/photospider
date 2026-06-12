@@ -39,6 +39,9 @@ struct PlannedTask {
   int tile_y = -1;
   int tile_size = 0;
   bool whole_output = false;
+  bool source_boundary_eligible = false;
+  bool dirty_selected = false;
+  uint64_t dirty_generation = 0;
   std::vector<int> dependency_task_ids;
 };
 
@@ -58,6 +61,12 @@ struct ComputeTaskGraph {
   std::vector<PlannedTask> tasks;
   std::vector<PlannedDependency> dependencies;
   std::vector<int> initial_task_ids;
+};
+
+struct DirtyUpdateWorkSet {
+  uint64_t generation = 0;
+  std::vector<int> dirty_source_task_ids;
+  std::vector<int> downstream_task_ids;
 };
 
 struct ComputeRequest {
@@ -83,6 +92,25 @@ class ComputeTaskPlanner {
                    const std::vector<int>& execution_order,
                    const DirtyRegionSnapshot* snapshot = nullptr,
                    const GraphModel* graph = nullptr) const;
+};
+
+class DirtySourceTaskCollector {
+ public:
+  DirtyUpdateWorkSet collect(const ComputePlan& plan,
+                             const DirtyRegionSnapshot& snapshot) const;
+};
+
+class DirtyWorkPruner {
+ public:
+  DirtyUpdateWorkSet materialize(const ComputePlan& plan,
+                                 const DirtyRegionSnapshot& snapshot) const;
+};
+
+class TaskGraphReadyChecker {
+ public:
+  std::vector<int> initial_ready_task_ids(
+      const ComputeTaskGraph& graph,
+      const std::vector<int>* allowed_task_ids = nullptr) const;
 };
 
 }  // namespace ps::compute
