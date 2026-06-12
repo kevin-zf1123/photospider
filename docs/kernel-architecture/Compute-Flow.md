@@ -115,16 +115,39 @@ before executing the recursive path.
 
 ## Parallel Compute
 
-Parallel compute builds a DAG from `topo_postorder_from`, tracks dependency
-counters, and submits ready node tasks through the configured scheduler's
-`SchedulerTaskRuntime`. Tiled operations may spawn micro-tasks and increment
-scheduler-owned completion counters.
+Parallel compute derives a `ComputePlan` from `topo_postorder_from` and
+`ComputeTaskPlanner`, materializes the plan's `ComputeTaskGraph` into scheduler
+tasks, tracks dependency counters, and submits ready node tasks through the
+configured scheduler's `SchedulerTaskRuntime`. Tiled operations may spawn
+micro-tasks and increment scheduler-owned completion counters.
 
-`ParallelGraphExecutor` keeps dependency accounting, sparse node-id mapping,
-temporary result storage, event logging, exception propagation, and final target
-selection inside the compute-service boundary. It dispatches already-planned
-work through scheduler task-runtime queues; it does not make the scheduler own
-dirty propagation or compute-task derivation.
+`ComputePlanExecutor` keeps plan execution, dependency accounting, sparse
+node-id mapping, temporary result storage, event logging, exception
+propagation, and final target selection inside the compute-service boundary. It
+dispatches already-planned work through scheduler task-runtime queues; it does
+not make the scheduler own dirty propagation, compute-task derivation, or the
+task graph itself.
+
+## Graph-State Access and Commit Policy
+
+Graph-state operations such as YAML loading, cache commands, inspection, and
+ROI projection are operations on the visible `GraphModel`. They are not
+compute-task dispatch and should not be routed through `SchedulerTaskRuntime`.
+
+The current default is per-graph exclusive access: compute and graph-state
+operations for the same graph do not concurrently read or mutate the visible
+`GraphModel`. This keeps graph topology, cache fields, dirty snapshots, timing,
+and node runtime state coherent while the legacy `GraphRuntime` worker queue is
+removed.
+
+Future work may add a `ComputeCommitPolicy` separate from `ComputeIntent`.
+`DirectGraphCommit` keeps the current behavior, where compute writes visible
+graph state during the request and graph-state operations wait. A future
+`StagedInterruptibleCommit` policy would stage outputs outside the visible
+graph state, allow graph-state operations to request cancellation before commit,
+discard uncommitted buffers on cancellation, and commit only coherent results.
+This policy is intentionally not part of `ComputeIntent`, because HP/RT intent
+semantics are independent from commit and interruption behavior.
 
 ## GlobalHighPrecision
 

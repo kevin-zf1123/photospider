@@ -43,11 +43,12 @@ source.
 
 ## Current Dispatch State
 
-Parallel compute planning still belongs to `ComputeService` collaborators:
-`DirtyRegionPlanner`, `ComputeTaskPlanner`, `IntentUpdateCoordinator`, and
-`ParallelGraphExecutor`. After planning, the concrete planned tasks are
-submitted through the configured `IScheduler` instance for the relevant
-`ComputeIntent` via `SchedulerTaskRuntime`.
+Parallel compute planning and plan execution still belong to `ComputeService`
+collaborators: `DirtyRegionPlanner`, `ComputeTaskPlanner`,
+`IntentUpdateCoordinator`, and `ComputePlanExecutor`. After planning,
+`ComputePlanExecutor` materializes the planned task graph into concrete tasks
+and submits ready work through the configured `IScheduler` instance for the
+relevant `ComputeIntent` via `SchedulerTaskRuntime`.
 
 `GraphRuntime` still owns graph state, scheduler registration, events, and some
 runtime queue APIs used by graph-runtime support paths and tests. Those queues
