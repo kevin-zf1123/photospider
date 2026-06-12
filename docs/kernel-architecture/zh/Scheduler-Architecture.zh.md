@@ -30,9 +30,10 @@ create -> attach(runtime) -> start -> dispatch planned tasks -> shutdown -> deta
 
 ## 当前 Dispatch 状态
 
-并行计算规划仍属于 `ComputeService` 协作者：`DirtyRegionPlanner`、`ComputeTaskPlanner`、
-`IntentUpdateCoordinator` 和 `ParallelGraphExecutor`。规划完成后，具体 planned task
-会通过相关 `ComputeIntent` 配置的 `IScheduler` 实例，并经由 `SchedulerTaskRuntime` 提交。
+并行计算规划和 plan execution 仍属于 `ComputeService` 协作者：`DirtyRegionPlanner`、
+`ComputeTaskPlanner`、`IntentUpdateCoordinator` 和 `ComputePlanExecutor`。规划完成后，
+`ComputePlanExecutor` 会把 planned task graph materialize 为具体 task，并通过相关
+`ComputeIntent` 配置的 `IScheduler` 实例，经由 `SchedulerTaskRuntime` 提交 ready work。
 
 `GraphRuntime` 仍拥有图状态、scheduler 注册、事件，以及一些供 graph-runtime support path
 和测试使用的 runtime queue API。这些队列不再是 compute-service parallel dispatch

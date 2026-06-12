@@ -1,4 +1,4 @@
-#include "kernel/services/compute-service/parallel_graph_executor.hpp"
+#include "kernel/services/compute-service/compute_plan_executor.hpp"
 
 #include <atomic>
 #include <chrono>
@@ -45,18 +45,18 @@ void remember_compute_plan(GraphModel& graph, const ComputePlan& compute_plan) {
 
 }  // namespace
 
-ParallelGraphExecutor::ParallelGraphExecutor(GraphTraversalService& traversal,
-                                             GraphCacheService& cache,
-                                             GraphEventService& events)
+ComputePlanExecutor::ComputePlanExecutor(GraphTraversalService& traversal,
+                                         GraphCacheService& cache,
+                                         GraphEventService& events)
     : traversal_(traversal), cache_(cache), events_(events) {}
 
-void ParallelGraphExecutor::clear_timing_results(GraphModel& graph) {
+void ComputePlanExecutor::clear_timing_results(GraphModel& graph) {
   std::lock_guard<std::mutex> lk(graph.timing_mutex_);
   graph.timing_results.node_timings.clear();
   graph.timing_results.total_ms = 0.0;
 }
 
-NodeOutput& ParallelGraphExecutor::execute(
+NodeOutput& ComputePlanExecutor::execute(
     GraphModel& graph, SchedulerTaskRuntime& task_runtime, int node_id,
     const std::string& cache_precision, bool force_recache, bool enable_timing,
     bool disable_disk_cache, std::vector<BenchmarkEvent>* benchmark_events,

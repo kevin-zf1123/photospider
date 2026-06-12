@@ -16,13 +16,16 @@ class GraphEventService;
 
 namespace ps::compute {
 
-class ParallelGraphExecutor {
+// Executes ComputeTaskPlanner plan semantics by materializing scheduler tasks,
+// dispatching ready work, and committing results. Scheduling policy stays in
+// the configured SchedulerTaskRuntime.
+class ComputePlanExecutor {
  public:
   using SequentialFallback =
       std::function<NodeOutput&(GraphModel&, int, bool allow_disk_cache)>;
 
-  ParallelGraphExecutor(GraphTraversalService& traversal,
-                        GraphCacheService& cache, GraphEventService& events);
+  ComputePlanExecutor(GraphTraversalService& traversal,
+                      GraphCacheService& cache, GraphEventService& events);
 
   NodeOutput& execute(GraphModel& graph, SchedulerTaskRuntime& task_runtime,
                       int node_id, const std::string& cache_precision,

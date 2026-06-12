@@ -69,12 +69,12 @@
 #include "kernel/services/compute-service/compute_cache_policy.hpp"
 #include "kernel/services/compute-service/compute_geometry.hpp"
 #include "kernel/services/compute-service/compute_metrics_recorder.hpp"
+#include "kernel/services/compute-service/compute_plan_executor.hpp"
 #include "kernel/services/compute-service/compute_task_planner.hpp"
 #include "kernel/services/compute-service/dirty_region_planner.hpp"
 #include "kernel/services/compute-service/intent_update_coordinator.hpp"
 #include "kernel/services/compute-service/node_executor.hpp"
 #include "kernel/services/compute-service/node_input_resolver.hpp"
-#include "kernel/services/compute-service/parallel_graph_executor.hpp"
 #include "kernel/services/graph_cache_service.hpp"
 #include "kernel/services/graph_event_service.hpp"
 #include "kernel/services/graph_traversal_service.hpp"
@@ -998,7 +998,7 @@ NodeOutput& ComputeService::compute_parallel(
     GraphModel& graph, GraphRuntime& runtime, int node_id,
     const std::string& cache_precision, bool force_recache, bool enable_timing,
     bool disable_disk_cache, std::vector<BenchmarkEvent>* benchmark_events) {
-  compute::ParallelGraphExecutor executor(traversal_, cache_, events_);
+  compute::ComputePlanExecutor executor(traversal_, cache_, events_);
   SchedulerTaskRuntime& task_runtime =
       scheduler_task_runtime_for(runtime, ComputeIntent::GlobalHighPrecision);
   return executor.execute(

@@ -92,13 +92,31 @@ plan 语义，再执行递归路径。
 
 ## 并行计算
 
-并行计算从 `topo_postorder_from` 构建 DAG，跟踪依赖计数器，并通过已配置 scheduler 的
-`SchedulerTaskRuntime` 提交 ready 节点任务。Tiled 操作可能产生微任务并递增 scheduler-owned
+并行计算从 `topo_postorder_from` 和 `ComputeTaskPlanner` 推导 `ComputePlan`，
+再把 plan 中的 `ComputeTaskGraph` materialize 为 scheduler task，跟踪依赖计数器，
+并通过已配置 scheduler 的 `SchedulerTaskRuntime` 提交 ready 节点任务。Tiled 操作可能产生微任务并递增 scheduler-owned
 完成计数器。
 
-`ParallelGraphExecutor` 将依赖计数、稀疏 node-id 映射、临时结果存储、事件日志、异常传播和最终目标选择保留在 compute-service 边界内。它通过 scheduler task-runtime queue
-dispatch 已经 planned 的 work；它不会让 scheduler 拥有 dirty propagation 或 compute-task
-derivation。
+`ComputePlanExecutor` 将 plan execution、依赖计数、稀疏 node-id 映射、临时结果存储、事件日志、异常传播和最终目标选择保留在 compute-service 边界内。它通过 scheduler task-runtime queue
+dispatch 已经 planned 的 work；它不会让 scheduler 拥有 dirty propagation、compute-task
+derivation 或 task graph 本身。
+
+## 图状态访问与提交策略
+
+YAML 加载、cache 命令、inspection 和 ROI projection 等 graph-state operation
+都是对可见 `GraphModel` 的操作。它们不是 compute-task dispatch，不应通过
+`SchedulerTaskRuntime` 路由。
+
+当前默认语义是 per-graph exclusive access：同一个 graph 的 compute 与 graph-state
+operation 不会并发读取或修改可见 `GraphModel`。在移除旧 `GraphRuntime` worker queue
+时，这能保持 graph topology、cache 字段、dirty snapshot、timing 和 node runtime state
+一致。
+
+后续可以新增独立于 `ComputeIntent` 的 `ComputeCommitPolicy`。`DirectGraphCommit`
+保留当前行为：compute 在请求期间写入可见图状态，graph-state operation 等待。
+未来的 `StagedInterruptibleCommit` 策略会把输出暂存在可见图状态之外，允许 graph-state
+operation 在 commit 前请求取消，在取消时丢弃未提交 buffer，并且只提交一致的结果。
+该策略有意不属于 `ComputeIntent`，因为 HP/RT intent 语义独立于提交和中断行为。
 
 ## GlobalHighPrecision
 

@@ -23,7 +23,7 @@ ComputeService facade
   -> DirtyRegionSnapshot
   -> ComputeTaskPlanner
   -> IntentUpdateCoordinator
-  -> ParallelGraphExecutor
+  -> ComputePlanExecutor
   -> ComputeMetricsRecorder
 ```
 
@@ -39,7 +39,7 @@ ComputeService facade
 | `DirtyRegionSnapshot` | 使用稳定 id 而不是原始指针枚举 dirty tiles、dirty monolithic nodes、per-node dirty ROI 和 per-edge ROI mapping。 | 已作为内部 snapshot model 实现 |
 | `ComputeTaskPlanner` | 将 compute request 和 dirty snapshot 转换为共享 `ComputePlan` / `ComputeTaskGraph` 语义。 | 已作为内部规划边界实现；plugin ABI 仍是 TODO |
 | `IntentUpdateCoordinator` | 协调 `GlobalHighPrecision` 与 `RealTimeUpdate` intent 语义，包括与执行模式无关的 realtime HP/RT 双路径行为。 | 已在 `src/kernel/services/compute-service/intent_update_coordinator.*` 实现 |
-| `ParallelGraphExecutor` | 封装并行 DAG 执行，并通过 `SchedulerTaskRuntime` dispatch planned work。 | 已在 `src/kernel/services/compute-service/parallel_graph_executor.*` 实现 |
+| `ComputePlanExecutor` | 执行 `ComputeTaskPlanner` 的 plan 语义：materialize task-graph work，通过 `SchedulerTaskRuntime` dispatch ready task，并提交结果。 | 已在 `src/kernel/services/compute-service/compute_plan_executor.*` 实现 |
 | `ComputeMetricsRecorder` | 集中事件、计时、benchmark 事件和 debug 元数据。 | 已在 `src/kernel/services/compute-service/compute_metrics_recorder.*` 实现 |
 
 ## 缓存规则
@@ -70,6 +70,7 @@ TODO：在 frontend 具备具体 mask/tile 渲染契约后，添加更丰富的 
 消费 compute request 和 dirty snapshot，然后产生内部 `ComputePlan` 语义，供 sequential、
 parallel、HP 和 RT 路径在具体执行分发前共同使用。执行模式只应在 task pool、scheduler
 policy 和资源选择上不同。
+只要该 planner 边界仍保持内聚，就不额外引入 task-graph composer。
 
 Realtime HP/RT 双路径选择不是执行模式。Non-realtime 请求只启用 HP 路径。`RealTimeUpdate`
 请求会针对 dirty ROI 同时启用 HP 和 RT 工作，无论调用方选择 single-threaded、parallel、GPU
@@ -87,8 +88,9 @@ TODO：planner plugin ABI 继续明确推迟到后续 change。
 ## 调度器边界
 
 当前并行计算路径会通过请求 `ComputeIntent` 选中的 scheduler dispatch 已经 planned 的图工作。
-`ParallelGraphExecutor` 拥有内部 DAG counter、临时结果存储、tile micro-task accounting、
-异常传播和最终输出选择，但会把具体任务执行交给 `SchedulerTaskRuntime`。
+`ComputePlanExecutor` 拥有 compute-plan execution、内部 DAG counter、临时结果存储、
+tile micro-task accounting、异常传播和最终输出选择，但会把具体任务执行交给
+`SchedulerTaskRuntime`。
 
 Scheduler 应从 intent-aware task pool 拉取 planned 或 annotated task，或通过
 `SchedulerTaskRuntime` 接收 planned work，然后调度计算资源。它们不应拥有图级 dirty

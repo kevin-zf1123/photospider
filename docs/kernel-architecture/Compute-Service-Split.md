@@ -26,7 +26,7 @@ ComputeService facade
   -> DirtyRegionSnapshot
   -> ComputeTaskPlanner
   -> IntentUpdateCoordinator
-  -> ParallelGraphExecutor
+  -> ComputePlanExecutor
   -> ComputeMetricsRecorder
 ```
 
@@ -42,7 +42,7 @@ ComputeService facade
 | `DirtyRegionSnapshot` | Enumerate dirty tiles, dirty monolithic nodes, per-node dirty ROIs, and per-edge ROI mappings using stable ids instead of raw pointers. | Implemented as an internal snapshot model |
 | `ComputeTaskPlanner` | Convert compute requests and dirty snapshots into shared `ComputePlan` / `ComputeTaskGraph` semantics. | Implemented as an internal planning boundary; plugin ABI remains TODO |
 | `IntentUpdateCoordinator` | Coordinate `GlobalHighPrecision` and `RealTimeUpdate` intent semantics, including realtime HP/RT dual path behavior independent from execution mode. | Implemented in `src/kernel/services/compute-service/intent_update_coordinator.*` |
-| `ParallelGraphExecutor` | Encapsulate parallel DAG execution and dispatch planned work through `SchedulerTaskRuntime`. | Implemented in `src/kernel/services/compute-service/parallel_graph_executor.*` |
+| `ComputePlanExecutor` | Execute `ComputeTaskPlanner` plan semantics by materializing task-graph work, dispatching ready tasks through `SchedulerTaskRuntime`, and committing results. | Implemented in `src/kernel/services/compute-service/compute_plan_executor.*` |
 | `ComputeMetricsRecorder` | Centralize events, timings, benchmark events, and debug metadata. | Implemented in `src/kernel/services/compute-service/compute_metrics_recorder.*` |
 
 ## Cache Rules
@@ -81,6 +81,8 @@ Single-threaded and parallel compute should share one logical `ComputePlan` or
 snapshots, then produces internal `ComputePlan` semantics used by sequential,
 parallel, HP, and RT paths before execution-specific dispatch. Execution modes
 should differ only in task pools, scheduler policy, and resource selection.
+No separate task-graph composer is introduced while this planner boundary stays
+cohesive.
 
 Realtime HP/RT dual path selection is not an execution mode. Non-realtime
 requests enable the HP path only. `RealTimeUpdate` requests enable both HP and
@@ -103,9 +105,10 @@ TODO: planner plugin ABI remains explicitly deferred to a later change.
 
 The current parallel compute path dispatches already-planned graph work through
 the scheduler selected for the request's `ComputeIntent`.
-`ParallelGraphExecutor` owns the internal DAG counters, temporary result
-storage, tile micro-task accounting, exception propagation, and final output
-selection, but hands concrete task execution to `SchedulerTaskRuntime`.
+`ComputePlanExecutor` owns compute-plan execution, internal DAG counters,
+temporary result storage, tile micro-task accounting, exception propagation,
+and final output selection, but hands concrete task execution to
+`SchedulerTaskRuntime`.
 
 Schedulers should pull planned or annotated tasks from intent-aware task pools
 or receive planned work through `SchedulerTaskRuntime`, then schedule compute

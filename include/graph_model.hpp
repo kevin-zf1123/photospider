@@ -19,7 +19,7 @@ class GraphIOService;
 class GraphTraversalService;
 class ComputeService;
 namespace compute {
-class ParallelGraphExecutor;
+class ComputePlanExecutor;
 }
 
 struct NodeTiming {
@@ -139,7 +139,7 @@ class GraphModel {
   friend class GraphIOService;
   friend class GraphTraversalService;
   friend class ComputeService;
-  friend class compute::ParallelGraphExecutor;
+  friend class compute::ComputePlanExecutor;
 
   Node* find_node_mutable(int id);
   Node& mutable_node(int id);
