@@ -51,9 +51,31 @@ class DirtyRegionPlanner {
   RealTimeDirtyPlan plan_real_time(GraphModel& graph, int node_id,
                                    const cv::Rect& dirty_roi);
 
+  DirtyRegionSnapshot begin_dirty_source(GraphModel& graph, int node_id,
+                                         DirtyDomain domain,
+                                         const cv::Rect& source_roi);
+  DirtyRegionSnapshot update_dirty_source(GraphModel& graph, int node_id,
+                                          DirtyDomain domain,
+                                          const cv::Rect& source_roi);
+  DirtyRegionSnapshot end_dirty_source(GraphModel& graph, int node_id,
+                                       DirtyDomain domain);
+
   static std::string describe_snapshot(const DirtyRegionSnapshot& snapshot);
 
  private:
+  template <typename EntryMap>
+  void populate_dirty_source_metadata(GraphModel& graph,
+                                      DirtyRegionSnapshot& snapshot,
+                                      DirtyDomain domain,
+                                      const EntryMap& entries) const;
+  void refresh_actual_dirty_regions(GraphModel& graph,
+                                    DirtyRegionSnapshot& snapshot,
+                                    DirtyDomain domain) const;
+  void apply_source_lifecycle_event(GraphModel& graph,
+                                    DirtyRegionSnapshot& snapshot, int node_id,
+                                    DirtyDomain domain,
+                                    const cv::Rect* source_roi,
+                                    DirtySourceLifecycleState lifecycle);
   cv::Size infer_hp_size(GraphModel& graph, int node_id,
                          std::unordered_map<int, cv::Size>& cache) const;
   int infer_halo_hp(const Node& node) const;
@@ -65,7 +87,6 @@ class DirtyRegionPlanner {
   GraphTraversalService& traversal_;
   RoiPropagationService& roi_propagation_;
   GraphExtentResolver extent_resolver_;
-  uint64_t generation_counter_ = 0;
 };
 
 }  // namespace ps::compute

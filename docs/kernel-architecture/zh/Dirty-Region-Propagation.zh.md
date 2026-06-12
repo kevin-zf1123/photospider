@@ -7,6 +7,8 @@
 ## 1. 基本原则
 
 - Dirty region 来自 node-local change。发生变化的节点在自己的输出坐标空间中报告 local dirty region。
+  Frontend interaction 可以更新某个 node，compute 也可以让某个 node 发现 dirty state，但发出的
+  dirty region 永远由 node 产生。
 - Propagation 语义由节点对应的算子提供，而不是由 `InteractionService` 或 scheduler 提供。
   算子应显式定义 dirty 和 forward propagation 行为；identity fallback 是 legacy migration
   support，不应被视为新算子的充分行为。
@@ -15,15 +17,40 @@
   Backward compute-demand propagation 使用算子提供的 `propagate_dirty_roi(downstream_roi, node)`
   推导所需上游输入区域。
 - 在粒度边界（Micro↔Macro）处，使用 `ReTileTask` 承接，在同一 compute domain 内完成 ROI 与 Tile 网格之间的映射与裁剪。HP/RT 同步是单独的 coordinator/cache update 职责，不是 RT 与 HP task 之间的 dirty-propagation 边。
+- Dirty-region signal 只更新图级 dirty state；它们不是 compute-task trigger。`DirtyRegionNode`
+  应明确自己的 lifecycle：开始创建 dirty region、用当前 ROI 更新 dirty region、结束创建 dirty
+  region。之后由 compute policy 决定是在 node 关闭 region 后创建 HP 或 RT request，还是在 node
+  仍在更新时把变化合并进已经活跃的 realtime request。
 - `DirtyRegionPlanner` 应维护图级 dirty state，而不是强迫每个消费者独立重新计算 propagation。
 
 ## 2. 图级 Dirty Snapshot
 
 目标 dirty-region state 是图级 `DirtyRegionSnapshot`。它应由当前 graph/runtime 的 dirty-state
-层拥有，并由 `InteractionService`、compute task planning、测试和 debug tooling 消费。
+层拥有，并由 `InteractionService`、dirty work-set materialization、测试和 debug tooling 消费。
+
+Snapshot 应包含三类状态，但只有 dirty source membership 和 lifecycle 可以直接由 node lifecycle event 写入：
+
+- `dirty_source_nodes`：当前 dirty generation 中发出过 dirty state 的 node 集合。即使触发某个
+  dirty event 的局部事件已经被处理，该 node 仍保持 dirty 标记，因为下游 work 可能会一直被 abort
+  或刷新，直到最后一次 dirty update 稳定下来。
+- `dirty_updating_count`：从 dirty source node lifecycle 派生出的计数，表示当前处于
+  begin/end dirty-region lifecycle 中的 dirty source node 数量。当它降到 0 时，executor
+  可以在最后一批相关 work 结束后结束当前 compute request。它不是 compute-task reference count。
+- `actual_dirty_region`：由 propagator 根据 dirty source set 产生的 dirty region、tile、
+  monolithic escalation 和 edge mapping。每次 dirty source set 变化后，它会通过增量或全量
+  propagation 刷新。
+
+Snapshot 与 graph topology state 同级存在。它不是可执行的 `ComputeTaskGraph`，也不拥有运行期依赖计数器、引用计数、ready queue、task-priority queue 或 scheduler policy。这些执行期产物会在每次 update 中由 executor 和 scheduler 基于该请求的 compute plan 与当前 dirty snapshot 维护。
+
+Snapshot 不创建 compute task。`ComputeTaskGraph` 会枚举 compute request 可用的 node task 和 tile task，包括没有 dirty ROI 时的 full-frame tiled parallelism。Dirty work-set materialization 只从该 graph 中选择或裁剪 task。
 
 Snapshot 应避免保存原始 node 或 tile 指针。它应使用稳定 id 和坐标数据，使其在 undo/redo、
 reload 和 node replacement 工作流中仍可检查。
+
+Dirty-node lifecycle event 应进入串行的图级 `DirtyControlLane`。Control lane 更新
+`DirtyRegionSnapshot` 中的 dirty source membership 和 lifecycle state；随后 propagator 从这些
+source 派生 `actual_dirty_region`，并唤醒 executor 进行 work-set materialization。它不是 scheduler
+拥有的普通 compute task queue，也不应下放为 node-local compute ownership。
 
 建议的内部 key：
 

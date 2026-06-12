@@ -4,22 +4,141 @@
 #include <fstream>
 #include <iomanip>
 #include <iostream>
+#include <limits>
+#include <mutex>
 #include <nlohmann/json.hpp>
+#include <optional>
 #include <set>
 #include <string>
+#include <vector>
 
 #include "adapter/buffer_adapter_opencv.hpp"  // <--- 修正点: 添加缺失的头文件
 #include "graph_model.hpp"                    // NOLINT(build/include_subdir)
 #include "kernel/interaction.hpp"
 #include "kernel/kernel.hpp"
 #include "kernel/scheduler/cpu_work_stealing_scheduler.hpp"  // M3.3: 新调度器
+#include "kernel/scheduler/serial_debug_scheduler.hpp"
+#include "kernel/services/compute-service/compute_task_dispatcher.hpp"
 #include "kernel/services/compute_service.hpp"  // <--- 修正点: 添加缺失的头文件
 #include "kernel/services/graph_cache_service.hpp"  // <--- 修正点: 添加缺失的头文件
 #include "kernel/services/graph_traversal_service.hpp"  // <--- 修正点: 添加缺失的头文件
 
+namespace {
+
+void register_micro_blur_for_dirty_scheduler_tests() {
+  auto& registry = ps::OpRegistry::instance();
+  const auto* base_impl =
+      registry.get_implementations("image_process", "gaussian_blur_tiled");
+  ASSERT_TRUE(base_impl && base_impl->tiled_hp);
+
+  ps::OpMetadata micro_meta;
+  micro_meta.tile_preference = ps::TileSizePreference::MICRO;
+  registry.register_op_hp_tiled("image_process", "micro_blur_for_test",
+                                *base_impl->tiled_hp, micro_meta);
+}
+
+std::optional<size_t> first_trace_index(
+    const std::vector<ps::GraphRuntime::SchedulerEvent>& log,
+    ps::GraphRuntime::SchedulerEvent::Action action) {
+  for (size_t i = 0; i < log.size(); ++i) {
+    if (log[i].action == action) {
+      return i;
+    }
+  }
+  return std::nullopt;
+}
+
+const char* scheduler_action_name(
+    ps::GraphRuntime::SchedulerEvent::Action action) {
+  switch (action) {
+    case ps::GraphRuntime::SchedulerEvent::ASSIGN_INITIAL:
+      return "ASSIGN_INITIAL";
+    case ps::GraphRuntime::SchedulerEvent::EXECUTE:
+      return "EXECUTE";
+    case ps::GraphRuntime::SchedulerEvent::EXECUTE_TILE:
+      return "EXECUTE_TILE";
+    case ps::GraphRuntime::SchedulerEvent::EXECUTE_DIRTY_SOURCE:
+      return "EXECUTE_DIRTY_SOURCE";
+    case ps::GraphRuntime::SchedulerEvent::EXECUTE_DIRTY_DOWNSTREAM_NODE:
+      return "EXECUTE_DIRTY_DOWNSTREAM_NODE";
+    case ps::GraphRuntime::SchedulerEvent::EXECUTE_DIRTY_DOWNSTREAM_TILE:
+      return "EXECUTE_DIRTY_DOWNSTREAM_TILE";
+    case ps::GraphRuntime::SchedulerEvent::SKIP_STALE_GENERATION:
+      return "SKIP_STALE_GENERATION";
+    case ps::GraphRuntime::SchedulerEvent::RETHROW_EXCEPTION:
+      return "RETHROW_EXCEPTION";
+  }
+  return "UNKNOWN";
+}
+
+nlohmann::json scheduler_trace_json(
+    const std::vector<ps::GraphRuntime::SchedulerEvent>& events) {
+  nlohmann::json j = nlohmann::json::array();
+  for (const auto& e : events) {
+    j.push_back(
+        {{"epoch", e.epoch},
+         {"node_id", e.node_id},
+         {"worker_id", e.worker_id},
+         {"action", scheduler_action_name(e.action)},
+         {"ts_us", std::chrono::duration_cast<std::chrono::microseconds>(
+                       e.timestamp.time_since_epoch())
+                       .count()}});
+  }
+  return j;
+}
+
+void write_scheduler_trace_json(
+    const std::string& path,
+    const std::vector<ps::GraphRuntime::SchedulerEvent>& events) {
+  std::ofstream ofs(path);
+  ofs << std::setw(2) << scheduler_trace_json(events) << std::endl;
+}
+
+}  // namespace
+
 // =============================================================================
 // M3.3: 使用 CpuWorkStealingScheduler 的并行计算测试
 // =============================================================================
+
+TEST(SchedulerDirtyReadyTasks, SourceFirstOrderOnSerialAndCpuSchedulers) {
+  auto run_case = [](ps::SchedulerTaskRuntime& runtime) {
+    std::mutex mutex;
+    std::vector<int> order;
+    auto append = [&](int value) {
+      std::lock_guard<std::mutex> lock(mutex);
+      order.push_back(value);
+    };
+
+    std::vector<ps::SchedulerTaskRuntime::Task> source_tasks;
+    source_tasks.push_back([&] { append(1); });
+    source_tasks.push_back([&] { append(2); });
+
+    std::vector<ps::SchedulerTaskRuntime::Task> downstream_tasks;
+    downstream_tasks.push_back([&] {
+      std::lock_guard<std::mutex> lock(mutex);
+      EXPECT_EQ(order.size(), 2u)
+          << "downstream task must wait for all dirty source tasks";
+      order.push_back(3);
+    });
+
+    ps::compute::ComputeTaskDispatcher::submit_dirty_ready_tasks_source_first(
+        runtime, std::move(source_tasks), std::move(downstream_tasks), 44);
+
+    std::lock_guard<std::mutex> lock(mutex);
+    ASSERT_EQ(order.size(), 3u);
+    EXPECT_EQ(order.back(), 3);
+  };
+
+  ps::SerialDebugScheduler serial;
+  serial.start();
+  run_case(serial);
+  serial.shutdown();
+
+  ps::CpuWorkStealingScheduler cpu(2);
+  cpu.start();
+  run_case(cpu);
+  cpu.shutdown();
+}
 
 TEST(SchedulerTestM33, ParallelComputeWithNewScheduler) {
   using ps::ComputeIntent;
@@ -92,35 +211,11 @@ TEST(SchedulerTest, ParallelLogToJson) {
 
   auto events = kernel.runtime(graph_name).get_scheduler_log();
   ASSERT_FALSE(events.empty());
+  auto facade_events = svc.cmd_scheduler_trace(graph_name);
+  ASSERT_TRUE(facade_events.has_value());
+  EXPECT_EQ(facade_events->size(), events.size());
 
-  nlohmann::json j = nlohmann::json::array();
-  for (const auto& e : events) {
-    const char* action_str = "UNKNOWN";
-    switch (e.action) {
-      case ps::GraphRuntime::SchedulerEvent::ASSIGN_INITIAL:
-        action_str = "ASSIGN_INITIAL";
-        break;
-      case ps::GraphRuntime::SchedulerEvent::EXECUTE:
-        action_str = "EXECUTE";
-        break;
-      case ps::GraphRuntime::SchedulerEvent::EXECUTE_TILE:
-        action_str = "EXECUTE_TILE";
-        break;
-    }
-
-    j.push_back(
-        {{"epoch", e.epoch},
-         {"node_id", e.node_id},
-         {"worker_id", e.worker_id},
-         {"action", action_str},
-         {"ts_us", std::chrono::duration_cast<std::chrono::microseconds>(
-                       e.timestamp.time_since_epoch())
-                       .count()}});
-  }
-
-  std::ofstream ofs("scheduler_log.json");
-  ofs << std::setw(2) << j << std::endl;
-  ofs.close();
+  write_scheduler_trace_json("scheduler_log.json", events);
 
   std::ifstream ifs("scheduler_log.json");
   ASSERT_TRUE(static_cast<bool>(ifs));
@@ -130,20 +225,7 @@ TEST(Scheduler, DirtyRegionTiledComputation) {
   ps::Kernel kernel;
   ps::InteractionService svc(kernel);
   svc.cmd_seed_builtin_ops();
-  {
-    auto& registry = ps::OpRegistry::instance();
-    const auto* base_impl =
-        registry.get_implementations("image_process", "gaussian_blur_tiled");
-    ASSERT_TRUE(base_impl && base_impl->tiled_hp);
-
-    ps::OpMetadata micro_meta;
-    micro_meta.tile_preference =
-        ps::TileSizePreference::MICRO;  // 强制 MICRO 粒度
-
-    // 注册一个新别名，使用相同的函数但用新的元数据
-    registry.register_op_hp_tiled("image_process", "micro_blur_for_test",
-                                  *base_impl->tiled_hp, micro_meta);
-  }
+  register_micro_blur_for_dirty_scheduler_tests();
   const std::string graph_name = "dirty_region_test";
   const std::string yaml_path = "util/testcases/dirty_region_test.yaml";
   const int final_node_id = 3;
@@ -242,6 +324,18 @@ TEST(Scheduler, DirtyRegionTiledComputation) {
   // 等待并获取结果（尽管我们不使用结果，但 get() 会等待完成并传播异常）
   future.get();
 
+  runtime
+      .post([&](ps::GraphModel& g) -> void {
+        const auto& target = g.node(final_node_id);
+        ASSERT_TRUE(target.cached_output_high_precision.has_value());
+        ASSERT_TRUE(target.cached_output_real_time.has_value());
+        EXPECT_GT(target.hp_version, 0);
+        EXPECT_GT(target.rt_version, 0);
+        EXPECT_TRUE(target.hp_roi.has_value());
+        EXPECT_TRUE(target.rt_roi.has_value());
+      })
+      .get();
+
   auto dirty_snapshot = svc.cmd_dirty_region_snapshot_debug(graph_name);
   ASSERT_TRUE(dirty_snapshot.has_value());
   EXPECT_NE(dirty_snapshot->find("tiles="), std::string::npos);
@@ -252,12 +346,24 @@ TEST(Scheduler, DirtyRegionTiledComputation) {
 
   size_t incremental_compute_task_count = 0;
   size_t incremental_tile_task_count = 0;
+  size_t dirty_source_task_count = 0;
+  size_t dirty_downstream_node_count = 0;
+  size_t dirty_downstream_tile_count = 0;
   std::set<int> workers_used;
   for (const auto& event : log_incremental_compute) {
     if (event.action == ps::GraphRuntime::SchedulerEvent::EXECUTE) {
       incremental_compute_task_count++;
     } else if (event.action == ps::GraphRuntime::SchedulerEvent::EXECUTE_TILE) {
       incremental_tile_task_count++;
+    } else if (event.action ==
+               ps::GraphRuntime::SchedulerEvent::EXECUTE_DIRTY_SOURCE) {
+      dirty_source_task_count++;
+    } else if (event.action == ps::GraphRuntime::SchedulerEvent::
+                                   EXECUTE_DIRTY_DOWNSTREAM_NODE) {
+      dirty_downstream_node_count++;
+    } else if (event.action == ps::GraphRuntime::SchedulerEvent::
+                                   EXECUTE_DIRTY_DOWNSTREAM_TILE) {
+      dirty_downstream_tile_count++;
     }
     if ((event.action == ps::GraphRuntime::SchedulerEvent::EXECUTE ||
          event.action == ps::GraphRuntime::SchedulerEvent::EXECUTE_TILE) &&
@@ -274,8 +380,124 @@ TEST(Scheduler, DirtyRegionTiledComputation) {
   // 步骤 4: 断言和验证
   // ========================================================================
   ASSERT_LT(incremental_tile_task_count, full_compute_tile_count / 10);
+  EXPECT_GT(dirty_source_task_count, 0u);
+  EXPECT_GT(dirty_downstream_node_count, 0u);
+  EXPECT_GT(dirty_downstream_tile_count, 0u);
+  auto first_dirty_source = first_trace_index(
+      log_incremental_compute,
+      ps::GraphRuntime::SchedulerEvent::EXECUTE_DIRTY_SOURCE);
+  auto first_dirty_downstream = first_trace_index(
+      log_incremental_compute,
+      ps::GraphRuntime::SchedulerEvent::EXECUTE_DIRTY_DOWNSTREAM_NODE);
+  ASSERT_TRUE(first_dirty_source.has_value());
+  ASSERT_TRUE(first_dirty_downstream.has_value());
+  EXPECT_LT(*first_dirty_source, *first_dirty_downstream);
+  auto facade_scheduler_trace = svc.cmd_scheduler_trace(graph_name);
+  ASSERT_TRUE(facade_scheduler_trace.has_value());
+  EXPECT_EQ(facade_scheduler_trace->size(), log_incremental_compute.size());
   if (std::thread::hardware_concurrency() > 1) {
     ASSERT_GT(workers_used.size(),
               0);  // 在任务很少时，可能只用到1个worker，所以改为>0
   }
+  write_scheduler_trace_json("dirty_scheduler_log.json",
+                             log_incremental_compute);
+}
+
+TEST(Scheduler,
+     DirtyRegionProductionTraceCoversStaleGenerationAndExceptionRethrow) {
+  ps::Kernel kernel;
+  ps::InteractionService svc(kernel);
+  svc.cmd_seed_builtin_ops();
+  register_micro_blur_for_dirty_scheduler_tests();
+
+  const std::string stale_graph_name = "dirty_region_stale_generation_test";
+  ASSERT_TRUE(svc.cmd_load_graph(stale_graph_name, "sessions",
+                                 "util/testcases/dirty_region_test.yaml")
+                  .has_value());
+  ps::GraphRuntime& stale_runtime = kernel.runtime(stale_graph_name);
+  ASSERT_TRUE(svc.cmd_compute(stale_graph_name, 3, "int8",
+                              /*force*/ false, /*timing*/ false,
+                              /*parallel*/ true));
+
+  const cv::Rect dirty_rect(200, 200, 128, 128);
+  stale_runtime
+      .post([&](ps::GraphModel& g) -> void {
+        g.dirty_source_hp_commit_generation[1] =
+            std::numeric_limits<uint64_t>::max();
+        g.dirty_source_rt_commit_generation[1] =
+            std::numeric_limits<uint64_t>::max();
+        g.mutate_node_runtime_state(2, [](auto& state) {
+          state.cached_output_high_precision.reset();
+          state.cached_output_real_time.reset();
+        });
+        g.mutate_node_runtime_state(3, [](auto& state) {
+          state.cached_output_high_precision.reset();
+          state.cached_output_real_time.reset();
+        });
+      })
+      .get();
+  stale_runtime.clear_scheduler_log();
+  auto stale_future =
+      stale_runtime.post([&](ps::GraphModel& g) -> ps::NodeOutput {
+        ps::GraphTraversalService traversal_service;
+        ps::GraphCacheService cache_service;
+        ps::ComputeService compute_svc(traversal_service, cache_service,
+                                       stale_runtime.event_service());
+        return compute_svc.compute_parallel(
+            g, stale_runtime, ps::ComputeIntent::RealTimeUpdate, 3, "int8",
+            /*force*/ false, /*timing*/ false, /*disable_disk_cache*/ true,
+            nullptr, dirty_rect);
+      });
+  EXPECT_NO_THROW(stale_future.get());
+  const auto stale_log = stale_runtime.get_scheduler_log();
+  EXPECT_TRUE(first_trace_index(
+                  stale_log,
+                  ps::GraphRuntime::SchedulerEvent::SKIP_STALE_GENERATION)
+                  .has_value());
+  write_scheduler_trace_json("dirty_scheduler_stale_log.json", stale_log);
+
+  const std::string exception_graph_name = "dirty_region_exception_test";
+  ASSERT_TRUE(svc.cmd_load_graph(exception_graph_name, "sessions",
+                                 "util/testcases/dirty_region_test.yaml")
+                  .has_value());
+  ps::GraphRuntime& exception_runtime = kernel.runtime(exception_graph_name);
+  ASSERT_TRUE(svc.cmd_compute(exception_graph_name, 3, "int8",
+                              /*force*/ false, /*timing*/ false,
+                              /*parallel*/ true));
+  exception_runtime
+      .post([&](ps::GraphModel& g) -> void {
+        ps::Node broken = g.node(2);
+        broken.type = "missing_op";
+        broken.subtype = "dirty_exception";
+        g.replace_node(broken);
+        g.mutate_node_runtime_state(2, [](auto& state) {
+          state.cached_output_high_precision.reset();
+          state.cached_output_real_time.reset();
+        });
+        g.mutate_node_runtime_state(3, [](auto& state) {
+          state.cached_output_high_precision.reset();
+          state.cached_output_real_time.reset();
+        });
+      })
+      .get();
+  exception_runtime.clear_scheduler_log();
+  auto exception_future =
+      exception_runtime.post([&](ps::GraphModel& g) -> ps::NodeOutput {
+        ps::GraphTraversalService traversal_service;
+        ps::GraphCacheService cache_service;
+        ps::ComputeService compute_svc(traversal_service, cache_service,
+                                       exception_runtime.event_service());
+        return compute_svc.compute_parallel(
+            g, exception_runtime, ps::ComputeIntent::RealTimeUpdate, 3, "int8",
+            /*force*/ false, /*timing*/ false, /*disable_disk_cache*/ true,
+            nullptr, dirty_rect);
+      });
+  EXPECT_THROW(exception_future.get(), ps::GraphError);
+  const auto exception_log = exception_runtime.get_scheduler_log();
+  EXPECT_TRUE(first_trace_index(
+                  exception_log,
+                  ps::GraphRuntime::SchedulerEvent::RETHROW_EXCEPTION)
+                  .has_value());
+  write_scheduler_trace_json("dirty_scheduler_exception_log.json",
+                             exception_log);
 }

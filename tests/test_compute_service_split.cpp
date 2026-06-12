@@ -61,6 +61,22 @@ void register_split_ops() {
               return make_image_output(inputs.front()->image_buffer.width,
                                        inputs.front()->image_buffer.height);
             }));
+    ps::OpMetadata micro_meta;
+    micro_meta.tile_preference = ps::TileSizePreference::MICRO;
+    registry.register_op_hp_tiled(
+        "split_plan", "tile",
+        TileOpFunc([](const Node&, const Tile& output_tile,
+                      const std::vector<Tile>&) {
+          toCvMat(output_tile).setTo(2.0f);
+        }),
+        micro_meta);
+    registry.register_op_rt_tiled(
+        "split_plan", "tile",
+        TileOpFunc([](const Node&, const Tile& output_tile,
+                      const std::vector<Tile>&) {
+          toCvMat(output_tile).setTo(2.0f);
+        }),
+        micro_meta);
   });
 }
 
@@ -235,7 +251,7 @@ TEST(DirtyRegionPlannerSplit,
      ProducesGraphScopedSnapshotAndMonolithicEscalation) {
   register_split_ops();
   GraphModel graph("cache/split-dirty-planner");
-  Node source = make_node(10, "split_plan", "source");
+  Node source = make_node(10, "split_plan", "tile");
   source.parameters["width"] = 128;
   source.parameters["height"] = 128;
   Node mono = make_node(42, "split_plan", "monolithic");
@@ -254,6 +270,8 @@ TEST(DirtyRegionPlannerSplit,
       << "monolithic nodes must escalate local dirty work to the full output";
   EXPECT_FALSE(plan.snapshot.empty());
   EXPECT_FALSE(plan.snapshot.dirty_monolithic_nodes.empty());
+  EXPECT_FALSE(plan.snapshot.dirty_source_nodes.empty());
+  EXPECT_FALSE(plan.snapshot.actual_dirty_rois.empty());
   EXPECT_TRUE(plan.snapshot.per_node_dirty_rois.count(42));
   EXPECT_FALSE(plan.snapshot.edge_mappings.empty());
   EXPECT_NE(compute::DirtyRegionPlanner::describe_snapshot(plan.snapshot)
@@ -263,11 +281,60 @@ TEST(DirtyRegionPlannerSplit,
   EXPECT_THROW(planner.plan_real_time(graph, 42, cv::Rect()), GraphError);
 }
 
+TEST(DirtyRegionPlannerSplit,
+     SourceLifecycleKeepsMembershipAndDerivesActualRegions) {
+  register_split_ops();
+  GraphModel graph("cache/split-dirty-source-lifecycle");
+  Node source = make_node(10, "split_plan", "tile");
+  source.parameters["width"] = 64;
+  source.parameters["height"] = 64;
+  graph.add_node(source);
+  graph.validate_topology();
+
+  GraphTraversalService traversal;
+  RoiPropagationService propagation;
+  compute::DirtyRegionPlanner planner(traversal, propagation);
+
+  EXPECT_THROW(planner.begin_dirty_source(
+                   graph, 99, compute::DirtyDomain::HighPrecision,
+                   cv::Rect(0, 0, 8, 8)),
+               GraphError);
+  EXPECT_THROW(planner.begin_dirty_source(
+                   graph, 10, compute::DirtyDomain::HighPrecision, cv::Rect()),
+               GraphError);
+
+  auto begin = planner.begin_dirty_source(
+      graph, 10, compute::DirtyDomain::HighPrecision, cv::Rect(1, 2, 8, 8));
+  EXPECT_EQ(begin.dirty_source_nodes, (std::vector<int>{10}));
+  ASSERT_TRUE(begin.dirty_source_state.count(10));
+  EXPECT_EQ(begin.dirty_source_state.at(10).lifecycle,
+            compute::DirtySourceLifecycleState::Updating);
+  EXPECT_EQ(begin.dirty_updating_count, 1u);
+  EXPECT_TRUE(begin.actual_dirty_rois.count(10));
+  EXPECT_FALSE(begin.dirty_tiles.empty());
+
+  auto end =
+      planner.end_dirty_source(graph, 10, compute::DirtyDomain::HighPrecision);
+  EXPECT_EQ(end.dirty_source_nodes, (std::vector<int>{10}))
+      << "source membership remains until the dirty generation settles";
+  ASSERT_TRUE(end.dirty_source_state.count(10));
+  EXPECT_EQ(end.dirty_source_state.at(10).lifecycle,
+            compute::DirtySourceLifecycleState::Settled);
+  EXPECT_EQ(end.dirty_updating_count, 0u);
+  ASSERT_TRUE(graph.last_dirty_region_snapshot_debug.has_value());
+  EXPECT_NE(graph.last_dirty_region_snapshot_debug->find("sources=1"),
+            std::string::npos);
+  EXPECT_NE(graph.last_dirty_region_snapshot_debug->find("actual=1"),
+            std::string::npos);
+}
+
 TEST(ComputeTaskPlannerSplit, PreservesSequentialParallelPlanParity) {
   compute::DirtyRegionSnapshot snapshot;
   snapshot.graph_generation = 7;
+  snapshot.dirty_source_nodes.push_back(42);
   snapshot.per_node_dirty_rois[42].push_back(cv::Rect(0, 0, 16, 16));
   snapshot.per_node_dirty_rois[100].push_back(cv::Rect(0, 0, 8, 8));
+  snapshot.actual_dirty_rois = snapshot.per_node_dirty_rois;
   snapshot.dirty_tiles.push_back({42, compute::DirtyDomain::HighPrecision,
                                   compute::DirtyTileLevel::Micro, 0, 0, 16,
                                   cv::Rect(0, 0, 16, 16)});
@@ -289,21 +356,22 @@ TEST(ComputeTaskPlannerSplit, PreservesSequentialParallelPlanParity) {
   auto sequential_plan = planner.plan(sequential, execution_order, &snapshot);
   auto parallel_plan = planner.plan(parallel, execution_order, &snapshot);
   EXPECT_EQ(sequential_plan.planned_nodes, parallel_plan.planned_nodes);
-  EXPECT_EQ(sequential_plan.planned_nodes, (std::vector<int>{42, 100}));
-  ASSERT_EQ(sequential_plan.planned_work.size(), 2u);
-  EXPECT_EQ(sequential_plan.planned_work[0].node_id, 42);
-  EXPECT_EQ(sequential_plan.planned_work[0].represented_hp_roi,
+  EXPECT_EQ(sequential_plan.planned_nodes,
+            (std::vector<int>{10, 42, 100}));
+  ASSERT_EQ(sequential_plan.planned_work.size(), 3u);
+  EXPECT_EQ(sequential_plan.planned_work[1].node_id, 42);
+  EXPECT_EQ(sequential_plan.planned_work[1].represented_hp_roi,
             cv::Rect(0, 0, 16, 16));
-  EXPECT_EQ(sequential_plan.planned_work[0].execution_roi,
+  EXPECT_EQ(sequential_plan.planned_work[1].execution_roi,
             cv::Rect(0, 0, 16, 16));
-  EXPECT_EQ(sequential_plan.planned_work[1].node_id, 100);
-  EXPECT_TRUE(sequential_plan.planned_work[1].whole_output);
+  EXPECT_EQ(sequential_plan.planned_work[2].node_id, 100);
+  EXPECT_TRUE(sequential_plan.planned_work[2].whole_output);
   ASSERT_EQ(sequential_plan.task_graph.dependencies.size(), 1u);
   EXPECT_EQ(sequential_plan.task_graph.dependencies[0].from_node_id, 42);
   EXPECT_EQ(sequential_plan.task_graph.dependencies[0].to_node_id, 100);
   EXPECT_EQ(sequential_plan.task_graph.dependencies[0].domain,
             compute::DirtyDomain::HighPrecision);
-  ASSERT_EQ(sequential_plan.task_graph.tasks.size(), 2u);
+  ASSERT_EQ(sequential_plan.task_graph.tasks.size(), 3u);
   auto task_for_node = [&](int node_id) -> const compute::PlannedTask& {
     auto it = std::find_if(sequential_plan.task_graph.tasks.begin(),
                            sequential_plan.task_graph.tasks.end(),
@@ -316,6 +384,9 @@ TEST(ComputeTaskPlannerSplit, PreservesSequentialParallelPlanParity) {
   const auto& tile_task = task_for_node(42);
   const auto& mono_task = task_for_node(100);
   EXPECT_EQ(tile_task.kind, compute::PlannedTaskKind::Tile);
+  EXPECT_TRUE(tile_task.source_boundary_eligible);
+  EXPECT_TRUE(tile_task.dirty_selected);
+  EXPECT_EQ(tile_task.dirty_generation, 7u);
   EXPECT_EQ(mono_task.kind, compute::PlannedTaskKind::Monolithic);
   EXPECT_TRUE(mono_task.whole_output);
   EXPECT_NE(std::find(sequential_plan.task_graph.initial_task_ids.begin(),
@@ -329,6 +400,80 @@ TEST(ComputeTaskPlannerSplit, PreservesSequentialParallelPlanParity) {
             parallel_plan.task_graph.dependencies.size());
   EXPECT_EQ(sequential_plan.task_graph.tasks.size(),
             parallel_plan.task_graph.tasks.size());
+}
+
+TEST(ComputeTaskPlannerSplit,
+     EnumeratesFullFrameTileTasksBeforeDirtyClipping) {
+  register_split_ops();
+  GraphModel graph("cache/split-full-tile-plan");
+  Node tiled = make_node(7, "split_plan", "tile");
+  tiled.parameters["width"] = 32;
+  tiled.parameters["height"] = 16;
+  graph.add_node(tiled);
+  graph.validate_topology();
+
+  compute::ComputeTaskPlanner planner;
+  compute::ComputeRequest request;
+  request.intent = ComputeIntent::GlobalHighPrecision;
+  request.target_node_id = 7;
+
+  const auto plan = planner.plan(request, {7}, nullptr, &graph);
+
+  EXPECT_EQ(plan.planned_nodes, (std::vector<int>{7}));
+  ASSERT_EQ(plan.task_graph.tasks.size(), 2u);
+  for (const auto& task : plan.task_graph.tasks) {
+    EXPECT_EQ(task.node_id, 7);
+    EXPECT_EQ(task.kind, compute::PlannedTaskKind::Tile);
+    EXPECT_EQ(task.domain, compute::DirtyDomain::HighPrecision);
+    EXPECT_EQ(task.tile_size, 16);
+    EXPECT_TRUE(task.dirty_selected)
+        << "without a dirty snapshot, all full-frame tasks are active";
+  }
+}
+
+TEST(ComputeTaskPlannerSplit, DirtyWorkPrunerExcludesSourceBoundaryTasks) {
+  register_split_ops();
+  GraphModel graph("cache/split-dirty-pruner");
+  Node source = make_node(1, "split_plan", "tile");
+  source.parameters["width"] = 32;
+  source.parameters["height"] = 16;
+  Node downstream = make_node(2, "split_plan", "tile");
+  downstream.image_inputs.push_back({1, "image"});
+  graph.add_node(source);
+  graph.add_node(downstream);
+  graph.validate_topology();
+
+  compute::DirtyRegionSnapshot snapshot;
+  snapshot.graph_generation = 3;
+  snapshot.dirty_source_nodes.push_back(1);
+  snapshot.source_roi_records[1].push_back(
+      {1, compute::DirtyDomain::HighPrecision, cv::Rect(0, 0, 16, 16), 3});
+  snapshot.per_node_dirty_rois[2].push_back(cv::Rect(0, 0, 16, 16));
+  snapshot.actual_dirty_rois = snapshot.per_node_dirty_rois;
+
+  compute::ComputeTaskPlanner planner;
+  compute::ComputeRequest request;
+  request.intent = ComputeIntent::GlobalHighPrecision;
+  request.target_node_id = 2;
+  request.dirty_roi = cv::Rect(0, 0, 16, 16);
+  const auto plan = planner.plan(request, {1, 2}, &snapshot, &graph);
+
+  compute::DirtyWorkPruner pruner;
+  const auto work_set = pruner.materialize(plan, snapshot);
+  EXPECT_EQ(work_set.generation, 3u);
+  EXPECT_EQ(work_set.dirty_source_task_ids.size(), 2u);
+  ASSERT_EQ(work_set.downstream_task_ids.size(), 1u);
+  const auto& downstream_task =
+      plan.task_graph.tasks.at(work_set.downstream_task_ids.front());
+  EXPECT_EQ(downstream_task.node_id, 2);
+  EXPECT_FALSE(downstream_task.source_boundary_eligible);
+  EXPECT_TRUE(downstream_task.dirty_selected);
+
+  compute::TaskGraphReadyChecker ready_checker;
+  const auto ready = ready_checker.initial_ready_task_ids(
+      plan.task_graph, &work_set.downstream_task_ids);
+  EXPECT_EQ(ready, work_set.downstream_task_ids)
+      << "source-boundary dependencies are satisfied by the source lane";
 }
 
 TEST(ComputeTaskPlannerSplit, FiltersCrossDomainSnapshotEdges) {

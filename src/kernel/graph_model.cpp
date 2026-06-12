@@ -177,6 +177,9 @@ void GraphModel::clear() {
   last_dirty_region_snapshot_debug.reset();
   last_dirty_region_snapshot.reset();
   recent_dirty_region_snapshots.clear();
+  dirty_generation_counter = 0;
+  dirty_source_hp_commit_generation.clear();
+  dirty_source_rt_commit_generation.clear();
   last_compute_plan.reset();
   recent_compute_plans.clear();
   total_io_time_ms.store(0.0, std::memory_order_relaxed);

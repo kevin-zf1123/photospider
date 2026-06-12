@@ -1,8 +1,9 @@
-#include "kernel/services/compute-service/compute_plan_executor.hpp"
+#include "kernel/services/compute-service/compute_task_dispatcher.hpp"
 
 #include <atomic>
 #include <chrono>
 #include <functional>
+#include <future>
 #include <memory>
 #include <mutex>
 #include <optional>
@@ -45,18 +46,97 @@ void remember_compute_plan(GraphModel& graph, const ComputePlan& compute_plan) {
 
 }  // namespace
 
-ComputePlanExecutor::ComputePlanExecutor(GraphTraversalService& traversal,
-                                         GraphCacheService& cache,
-                                         GraphEventService& events)
+ComputeTaskDispatcher::ComputeTaskDispatcher(GraphTraversalService& traversal,
+                                             GraphCacheService& cache,
+                                             GraphEventService& events)
     : traversal_(traversal), cache_(cache), events_(events) {}
 
-void ComputePlanExecutor::clear_timing_results(GraphModel& graph) {
+void ComputeTaskDispatcher::clear_timing_results(GraphModel& graph) {
   std::lock_guard<std::mutex> lk(graph.timing_mutex_);
   graph.timing_results.node_timings.clear();
   graph.timing_results.total_ms = 0.0;
 }
 
-NodeOutput& ComputePlanExecutor::execute(
+void ComputeTaskDispatcher::submit_dirty_ready_tasks_source_first(
+    SchedulerTaskRuntime& task_runtime,
+    std::vector<SchedulerTaskRuntime::Task>&& source_tasks,
+    std::vector<SchedulerTaskRuntime::Task>&& downstream_tasks,
+    std::optional<uint64_t> epoch, std::function<void()> before_downstream) {
+  auto submit_one = [&](SchedulerTaskRuntime::Task&& task,
+                        SchedulerTaskPriority priority) {
+    auto done = std::make_shared<std::promise<void>>();
+    std::future<void> future = done->get_future();
+    task_runtime.submit_ready_task_any_thread(
+        [task = std::move(task), done, &task_runtime]() mutable {
+          try {
+            if (task) {
+              task();
+            }
+            done->set_value();
+          } catch (...) {
+            auto error = std::current_exception();
+            task_runtime.log_event(SchedulerTraceAction::RethrowException, -1);
+            task_runtime.set_exception(error);
+            done->set_exception(error);
+          }
+        },
+        priority, epoch);
+    future.get();
+  };
+
+  auto submit_and_wait = [&](std::vector<SchedulerTaskRuntime::Task>&& tasks,
+                             SchedulerTaskPriority priority,
+                             bool preserve_order) {
+    if (preserve_order) {
+      for (auto& task : tasks) {
+        submit_one(std::move(task), priority);
+      }
+      return;
+    }
+    std::vector<std::future<void>> futures;
+    futures.reserve(tasks.size());
+    for (auto& task : tasks) {
+      auto done = std::make_shared<std::promise<void>>();
+      futures.push_back(done->get_future());
+      task_runtime.submit_ready_task_any_thread(
+          [task = std::move(task), done, &task_runtime]() mutable {
+            try {
+              if (task) {
+                task();
+              }
+              done->set_value();
+            } catch (...) {
+              auto error = std::current_exception();
+              task_runtime.log_event(SchedulerTraceAction::RethrowException,
+                                     -1);
+              task_runtime.set_exception(error);
+              done->set_exception(error);
+            }
+          },
+          priority, epoch);
+    }
+    for (auto& future : futures) {
+      future.get();
+    }
+  };
+
+  submit_and_wait(std::move(source_tasks), SchedulerTaskPriority::High,
+                  false);
+  if (before_downstream) {
+    try {
+      before_downstream();
+    } catch (...) {
+      auto error = std::current_exception();
+      task_runtime.log_event(SchedulerTraceAction::RethrowException, -1);
+      task_runtime.set_exception(error);
+      std::rethrow_exception(error);
+    }
+  }
+  submit_and_wait(std::move(downstream_tasks), SchedulerTaskPriority::Normal,
+                  true);
+}
+
+NodeOutput& ComputeTaskDispatcher::execute(
     GraphModel& graph, SchedulerTaskRuntime& task_runtime, int node_id,
     const std::string& cache_precision, bool force_recache, bool enable_timing,
     bool disable_disk_cache, std::vector<BenchmarkEvent>* benchmark_events,
@@ -683,7 +763,10 @@ NodeOutput& ComputePlanExecutor::execute(
     // --- 提交初始就绪任务 ---
     std::vector<SchedulerTaskRuntime::Task> initial_tasks;
     std::unordered_set<int> submitted_initial_indices;
-    for (int task_id : compute_plan.task_graph.initial_task_ids) {
+    TaskGraphReadyChecker ready_checker;
+    const std::vector<int> initial_ready_task_ids =
+        ready_checker.initial_ready_task_ids(compute_plan.task_graph);
+    for (int task_id : initial_ready_task_ids) {
       if (task_id < 0 ||
           task_id >= static_cast<int>(compute_plan.task_graph.tasks.size())) {
         continue;
@@ -759,6 +842,7 @@ NodeOutput& ComputePlanExecutor::execute(
     return *graph.mutable_node(node_id).cached_output_high_precision;
   } catch (...) {
     // 捕获在本函数内（任务提交前）抛出的异常，并传递给运行时
+    task_runtime.log_event(SchedulerTraceAction::RethrowException, node_id);
     task_runtime.set_exception(std::current_exception());
     // 等待运行时处理异常并唤醒
     task_runtime.wait_for_completion();

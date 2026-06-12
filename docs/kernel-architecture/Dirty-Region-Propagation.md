@@ -17,7 +17,9 @@ external compatibility promises.
 ## 1. Basic Principles
 
 - Dirty regions originate from node-local changes. The changed node reports the
-  local dirty region in its own output coordinate space.
+  local dirty region in its own output coordinate space. Frontend interaction
+  may update a node, and compute may cause a node to discover dirty state, but
+  the emitted dirty region is always node-originated.
 - Propagation semantics are provided by the node's operator, not by
   `InteractionService` or the scheduler. Operators should explicitly define
   dirty and forward propagation behavior; identity fallback is legacy migration
@@ -32,6 +34,12 @@ external compatibility promises.
   bridges ROI geometry and tile-grid mapping/cropping inside the same compute
   domain. HP/RT synchronization is a separate coordinator/cache update concern,
   not a dirty-propagation edge between RT and HP tasks.
+- Dirty-region signals update graph dirty state; they are not compute-task
+  triggers. A `DirtyRegionNode` should make its lifecycle explicit: begin
+  dirty-region creation, update dirty region with the current ROI, and end
+  dirty-region creation. Compute policy can then decide whether to create an HP
+  or RT request after the node closes the region, or to coalesce updates into
+  an already active realtime request while the node is still updating.
 - `DirtyRegionPlanner` should maintain graph-scoped dirty state instead of
   forcing each consumer to recompute propagation independently.
 
@@ -39,11 +47,45 @@ external compatibility promises.
 
 The target dirty-region state is a graph-scoped `DirtyRegionSnapshot`. It should
 be owned by the current graph/runtime dirty-state layer and consumed by
-`InteractionService`, compute task planning, tests, and debug tooling.
+`InteractionService`, dirty work-set materialization, tests, and debug tooling.
+
+The snapshot should contain three categories of state, but only dirty-source
+membership and lifecycle can be written directly from node lifecycle events:
+
+- `dirty_source_nodes`: the set of nodes that have emitted dirty state for the
+  current dirty generation. A node remains marked as dirty even after the event
+  that caused it has been locally handled, because downstream work may keep
+  being aborted or refreshed until the final dirty update settles.
+- `dirty_updating_count`: a derived count of dirty source nodes currently
+  inside a begin/end dirty-region lifecycle. When it reaches zero, the executor
+  may end the current compute request after the last relevant work finishes. It
+  is not a compute-task reference count.
+- `actual_dirty_region`: the propagated dirty regions, tiles, monolithic
+  escalations, and edge mappings produced by the propagator from the dirty
+  source set. It is refreshed incrementally or fully whenever the dirty source
+  set changes.
+
+The snapshot sits alongside graph topology state. It is not the executable
+`ComputeTaskGraph` and it does not own runtime dependency counters, reference
+counts, ready queues, task-priority queues, or scheduler policy. Those execution
+artifacts are maintained by the executor and scheduler from the request's
+compute plan and the current dirty snapshot for each update.
+
+The snapshot does not create compute tasks. `ComputeTaskGraph` enumerates the
+node and tile tasks available to a compute request, including full-frame tiled
+parallelism when no dirty ROI is active. Dirty work-set materialization only
+selects or prunes tasks from that graph.
 
 The snapshot should avoid raw node or tile pointers. It should use stable ids and
 coordinate data so it remains inspectable across undo/redo, reload, and node
 replacement workflows.
+
+Dirty-node lifecycle events should enter a serialized graph-scoped
+`DirtyControlLane`. The control lane updates dirty source membership and
+lifecycle state in `DirtyRegionSnapshot`; the propagator then derives
+`actual_dirty_region` from those sources and wakes the executor for work-set
+materialization. It is not a normal compute task queue owned by the scheduler,
+and it should not be delegated to node-local compute ownership.
 
 Recommended internal keys:
 

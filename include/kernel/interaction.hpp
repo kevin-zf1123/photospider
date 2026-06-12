@@ -182,6 +182,10 @@ class InteractionService {
   cmd_drain_compute_events(const std::string& graph) {
     return kernel_.drain_compute_events(graph);
   }
+  std::optional<std::vector<GraphRuntime::SchedulerEvent>> cmd_scheduler_trace(
+      const std::string& graph) {
+    return kernel_.scheduler_trace(graph);
+  }
   std::optional<std::string> cmd_dirty_region_snapshot_debug(
       const std::string& graph) {
     return kernel_.dirty_region_snapshot_debug(graph);
