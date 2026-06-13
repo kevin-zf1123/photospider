@@ -43,11 +43,7 @@ class ComputeService {
                                std::vector<BenchmarkEvent>* benchmark_events,
                                std::optional<cv::Rect> dirty_roi);
 
-  NodeOutput& compute_node_no_recurse(
-      GraphModel& graph, int node_id, const std::string& cache_precision,
-      bool enable_timing, bool allow_disk_cache,
-      std::vector<BenchmarkEvent>* benchmark_events);
-
+ private:
   NodeOutput& compute_internal(GraphModel& graph, int node_id,
                                const std::string& cache_precision,
                                std::unordered_map<int, bool>& visiting,
@@ -68,7 +64,6 @@ class ComputeService {
 
   void clear_timing_results(GraphModel& graph);
 
- private:
   NodeOutput& compute_sequential_impl(
       GraphModel& graph, int node_id, const std::string& cache_precision,
       bool force_recache, bool enable_timing, bool disable_disk_cache,

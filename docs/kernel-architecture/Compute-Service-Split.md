@@ -21,10 +21,13 @@ engine and it is not a plugin ABI change.
 ComputeService facade
   -> ComputeCachePolicy
   -> NodeInputResolver
-  -> ComputeTaskPlanner
-  -> ComputePlan / ComputeTaskGraph
+  -> FullTaskGraphExpander
+  -> FullTaskGraph
+  -> NodeCacheTaskGraphPruner
+  -> ComputePlan / pruned ComputeTaskGraph
   -> DirtyRegionPlanner
   -> DirtyRegionSnapshot
+  -> DirtySnapshotTaskGraphPruner
   -> IntentUpdateCoordinator
   -> ComputeTaskDispatcher
   -> DirtyUpdateWorkSet
@@ -42,9 +45,11 @@ ComputeService facade
 | `NodeExecutor` | Execute monolithic and tiled operators consistently. | Implemented in `src/kernel/services/compute-service/node_executor.*` |
 | `DirtyRegionPlanner` | Build graph-scoped dirty-region state from node-local dirty reports and operator propagation. | Implemented in `src/kernel/services/compute-service/dirty_region_planner.*` |
 | `DirtyRegionSnapshot` | Enumerate dirty tiles, dirty monolithic nodes, per-node dirty ROIs, and per-edge ROI mappings using stable ids instead of raw pointers. | Implemented as an internal snapshot model |
-| `ComputeTaskPlanner` | Convert compute requests and graph topology into request-scoped `ComputePlan` / `ComputeTaskGraph` semantics. | Implemented as an internal planning boundary; plugin ABI remains TODO |
+| `FullTaskGraphExpander` | Expand the raw graph into a full node/tile `FullTaskGraph` for one compute domain without using request target, cache state, or dirty snapshot. | Implemented in `src/kernel/services/compute-service/task_graph_planning.*` |
+| `NodeCacheTaskGraphPruner` | Prune a `FullTaskGraph` to the request target/dependency cone and record selected node cache availability. | Implemented in `src/kernel/services/compute-service/task_graph_planning.*` |
+| `DirtySnapshotTaskGraphPruner` | Apply a `DirtyRegionSnapshot` to a node/cache-pruned `ComputeTaskGraph` and materialize the active `DirtyUpdateWorkSet`. | Implemented in `src/kernel/services/compute-service/task_graph_planning.*`; plugin ABI remains TODO |
 | `IntentUpdateCoordinator` | Coordinate `GlobalHighPrecision` and `RealTimeUpdate` intent semantics, including realtime HP/RT dual path behavior independent from execution mode. | Implemented in `src/kernel/services/compute-service/intent_update_coordinator.*` |
-| `ComputeTaskDispatcher` | Execute `ComputeTaskPlanner` plan semantics by collecting source tasks, checking task-graph readiness, pruning dirty work, dispatching ready tasks through `SchedulerTaskRuntime`, and committing results. | Target boundary for the dirty task split |
+| `ComputeTaskDispatcher` | Execute node/cache-pruned task graph semantics by collecting source tasks, checking task-graph readiness, dispatching ready tasks through `SchedulerTaskRuntime`, and committing results. | Target boundary for the dirty task split |
 | `ComputeMetricsRecorder` | Centralize events, timings, benchmark events, and debug metadata. | Implemented in `src/kernel/services/compute-service/compute_metrics_recorder.*` |
 
 ## Cache Rules
@@ -98,21 +103,24 @@ mask/tile rendering contract.
 
 ## Compute Task Planning Boundary
 
-Single-threaded and parallel compute should share one logical `ComputePlan` or
-`ComputeTaskGraph`. `ComputeTaskPlanner` consumes compute requests and graph
-topology, then produces request-scoped static plan semantics used by
-sequential, parallel, HP, and RT paths before execution-specific dispatch.
-Dirty-region state is applied after this static analysis: each dirty snapshot
-activates or clips a `DirtyUpdateWorkSet` from the plan for the current update
-queue. Execution modes should differ only in task pools, scheduler policy, and
-resource selection. No separate task-graph composer is introduced while this
-planner boundary stays cohesive.
+Task graph planning is split into explicit expansion and pruning boundaries.
+`FullTaskGraphExpander` expands the raw graph into a full node/tile task graph
+for one compute domain. This full expansion does not depend on request target,
+node cache state, or dirty snapshot. It answers only "what executable node/tile
+tasks exist for this graph and domain?"
 
-`ComputeTaskPlanner` must enumerate the real task graph for the request,
-including node tasks and tile tasks. A dirty snapshot prunes that already
-planned graph; it does not expand tiles or create new executable task shapes.
-This preserves full-frame tiled compute as the same task model used by HP and
-RT dirty updates.
+`NodeCacheTaskGraphPruner` consumes that `FullTaskGraph`, the requested target
+node/dependency cone, and current node/cache state, then emits the pruned
+`ComputePlan` / `ComputeTaskGraph` used by sequential and parallel execution.
+It records cache availability for selected nodes while preserving the existing
+execution contract that cache hits are resolved during task execution.
+
+`DirtySnapshotTaskGraphPruner` is a separate dirty-source pruner. It consumes a
+node/cache-pruned `ComputeTaskGraph` plus a `DirtyRegionSnapshot`, annotates the
+selected graph with dirty metadata, and materializes the active
+`DirtyUpdateWorkSet`. It may clip or activate already-expanded tasks, but it
+must not create new tile or node task shapes. This preserves full-frame tiled
+compute as the same task model used by HP and RT dirty updates.
 
 Realtime HP/RT dual path selection is not an execution mode. Non-realtime
 requests enable the HP path only. `RealTimeUpdate` requests enable both HP and
@@ -126,9 +134,9 @@ work inline.
 The HP and RT paths keep separate single-domain plans and dirty snapshots. The
 HP path uses a `GlobalHighPrecision` plan and clips HP work from an HP dirty
 snapshot. The RT path uses a `RealTimeUpdate` plan and clips RT work from an RT
-dirty snapshot. A single `ComputeTaskPlanner` invocation must not emit both HP
-and RT task pools. Future task-pool extensions should keep this per-domain
-planner invocation pattern.
+dirty snapshot. A single full graph expansion or pruner pass must not emit both
+HP and RT task pools. Future task-pool extensions should keep this per-domain
+expansion and pruning pattern.
 
 TODO: planner plugin ABI remains explicitly deferred to a later change.
 
@@ -214,6 +222,16 @@ of dirty-region generation or propagation.
 It also exposes structured dependency-tree and graph-inspection snapshots so
 frontends can parse graph structure before choosing a presentation format.
 
+The CLI/REPL frontend does not currently promise realtime update interaction
+commands such as `compute rt` or `--dirty-roi`. `RealTimeUpdate` remains a
+kernel intent for a future GUI/interaction environment.
+
+TODO: design the missing node-to-`InteractionService` interface for realtime
+dirty updates. The interface must let nodes provide dirty-region lifecycle
+events, realtime update events, and update requests while keeping
+`InteractionService` as a facade for frontend consumption rather than the owner
+of dirty-region generation or compute scheduling.
+
 TODO: add richer visualization APIs after the graph-scoped dirty state has a
 frontend display contract.
 
@@ -228,6 +246,12 @@ high-precision task graph so large graphs and large images do not pay for
 unaffected work. The existing full-recompute behavior is a compatibility
 fallback only for entry points not yet routed through optimized HP dirty
 planning.
+
+The optimized partial-update path remains a TODO for any
+`GlobalHighPrecision` entry path that still reaches
+`run_global_high_precision_dirty_recompute`. Do not treat those paths as
+performance validation for dirty ROI; they preserve correctness by falling back
+to full recompute.
 
 ## Validation Expectations
 

@@ -32,9 +32,13 @@ struct GraphRuntime::GpuContext {
 };
 
 GraphRuntime::GraphRuntime(const Info& info)
-    : info_(info), model_(info.root / "cache") {
+    : info_(info),
+      model_(info.cache_root.empty() ? info.root / "cache"
+                                     : info.cache_root) {
   std::filesystem::create_directories(info_.root);
-  std::filesystem::create_directories(info_.root / "cache");
+  if (!model_.cache_root.empty()) {
+    std::filesystem::create_directories(model_.cache_root);
+  }
 
 #ifdef __APPLE__
   gpu_context_ = std::make_unique<GpuContext>();

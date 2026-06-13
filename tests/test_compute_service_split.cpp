@@ -11,7 +11,7 @@
 #include "kernel/services/compute-service/compute_cache_policy.hpp"
 #include "kernel/services/compute-service/compute_geometry.hpp"
 #include "kernel/services/compute-service/compute_metrics_recorder.hpp"
-#include "kernel/services/compute-service/compute_task_planner.hpp"
+#include "kernel/services/compute-service/task_graph_planning.hpp"
 #include "kernel/services/compute-service/dirty_region_planner.hpp"
 #include "kernel/services/compute-service/intent_update_coordinator.hpp"
 #include "kernel/services/compute-service/node_executor.hpp"
@@ -78,6 +78,27 @@ void register_split_ops() {
         }),
         micro_meta);
   });
+}
+
+compute::FullTaskGraph expand_full_task_graph(GraphModel& graph,
+                                              ComputeIntent intent) {
+  compute::FullTaskGraphExpander expander;
+  return expander.expand(graph, intent);
+}
+
+compute::ComputePlan node_cache_pruned_plan(
+    GraphModel& graph, const compute::ComputeRequest& request,
+    const std::vector<int>& execution_order) {
+  compute::NodeCacheTaskGraphPruner pruner;
+  return pruner.prune(expand_full_task_graph(graph, request.intent), request,
+                      execution_order, graph);
+}
+
+compute::ComputePlan dirty_snapshot_pruned_plan(
+    const compute::ComputePlan& node_cache_plan,
+    const compute::DirtyRegionSnapshot& snapshot) {
+  compute::DirtySnapshotTaskGraphPruner pruner;
+  return pruner.prune(node_cache_plan, snapshot);
 }
 
 }  // namespace
@@ -328,7 +349,22 @@ TEST(DirtyRegionPlannerSplit,
             std::string::npos);
 }
 
-TEST(ComputeTaskPlannerSplit, PreservesSequentialParallelPlanParity) {
+TEST(TaskGraphPlanningSplit, PreservesSequentialParallelPlanParity) {
+  register_split_ops();
+  GraphModel graph("cache/split-plan-parity");
+  Node independent = make_node(10, "split_plan", "source");
+  independent.parameters["width"] = 16;
+  independent.parameters["height"] = 16;
+  Node dirty_source = make_node(42, "split_plan", "tile");
+  dirty_source.parameters["width"] = 16;
+  dirty_source.parameters["height"] = 16;
+  Node monolithic = make_node(100, "split_plan", "monolithic");
+  monolithic.image_inputs.push_back({42, "image"});
+  graph.add_node(independent);
+  graph.add_node(dirty_source);
+  graph.add_node(monolithic);
+  graph.validate_topology();
+
   compute::DirtyRegionSnapshot snapshot;
   snapshot.graph_generation = 7;
   snapshot.dirty_source_nodes.push_back(42);
@@ -345,7 +381,6 @@ TEST(ComputeTaskPlannerSplit, PreservesSequentialParallelPlanParity) {
        cv::Rect(0, 0, 8, 8), compute::DirtyEdgeDirection::BackwardDemand});
   std::vector<int> execution_order{10, 42, 100};
 
-  compute::ComputeTaskPlanner planner;
   compute::ComputeRequest sequential;
   sequential.intent = ComputeIntent::GlobalHighPrecision;
   sequential.target_node_id = 100;
@@ -353,8 +388,13 @@ TEST(ComputeTaskPlannerSplit, PreservesSequentialParallelPlanParity) {
   compute::ComputeRequest parallel = sequential;
   parallel.parallel = true;
 
-  auto sequential_plan = planner.plan(sequential, execution_order, &snapshot);
-  auto parallel_plan = planner.plan(parallel, execution_order, &snapshot);
+  const auto sequential_base =
+      node_cache_pruned_plan(graph, sequential, execution_order);
+  const auto parallel_base =
+      node_cache_pruned_plan(graph, parallel, execution_order);
+  const auto sequential_plan =
+      dirty_snapshot_pruned_plan(sequential_base, snapshot);
+  const auto parallel_plan = dirty_snapshot_pruned_plan(parallel_base, snapshot);
   EXPECT_EQ(sequential_plan.planned_nodes, parallel_plan.planned_nodes);
   EXPECT_EQ(sequential_plan.planned_nodes,
             (std::vector<int>{10, 42, 100}));
@@ -402,27 +442,50 @@ TEST(ComputeTaskPlannerSplit, PreservesSequentialParallelPlanParity) {
             parallel_plan.task_graph.tasks.size());
 }
 
-TEST(ComputeTaskPlannerSplit,
-     EnumeratesFullFrameTileTasksBeforeDirtyClipping) {
+TEST(TaskGraphPlanningSplit,
+     ExpandsFullGraphBeforeNodeCachePruning) {
   register_split_ops();
   GraphModel graph("cache/split-full-tile-plan");
-  Node tiled = make_node(7, "split_plan", "tile");
-  tiled.parameters["width"] = 32;
-  tiled.parameters["height"] = 16;
-  graph.add_node(tiled);
+  Node source = make_node(1, "split_plan", "tile");
+  source.parameters["width"] = 32;
+  source.parameters["height"] = 16;
+  source.cached_output_high_precision = make_image_output(32, 16);
+  Node downstream = make_node(2, "split_plan", "tile");
+  downstream.parameters["width"] = 32;
+  downstream.parameters["height"] = 16;
+  downstream.image_inputs.push_back({1, "image"});
+  Node unrelated = make_node(99, "split_plan", "tile");
+  unrelated.parameters["width"] = 32;
+  unrelated.parameters["height"] = 16;
+  graph.add_node(source);
+  graph.add_node(downstream);
+  graph.add_node(unrelated);
   graph.validate_topology();
 
-  compute::ComputeTaskPlanner planner;
+  const auto full_graph =
+      expand_full_task_graph(graph, ComputeIntent::GlobalHighPrecision);
+  EXPECT_EQ(full_graph.expanded_node_ids, (std::vector<int>{1, 2, 99}));
+  ASSERT_EQ(full_graph.task_graph.tasks.size(), 6u);
+  EXPECT_NE(std::find_if(full_graph.task_graph.tasks.begin(),
+                         full_graph.task_graph.tasks.end(),
+                         [](const compute::PlannedTask& task) {
+                           return task.node_id == 99;
+                         }),
+            full_graph.task_graph.tasks.end())
+      << "full expansion must include unrelated nodes before request pruning";
+
   compute::ComputeRequest request;
   request.intent = ComputeIntent::GlobalHighPrecision;
-  request.target_node_id = 7;
+  request.target_node_id = 2;
+  const auto plan = node_cache_pruned_plan(graph, request, {1, 2});
 
-  const auto plan = planner.plan(request, {7}, nullptr, &graph);
-
-  EXPECT_EQ(plan.planned_nodes, (std::vector<int>{7}));
-  ASSERT_EQ(plan.task_graph.tasks.size(), 2u);
+  EXPECT_EQ(plan.planned_nodes, (std::vector<int>{1, 2}));
+  ASSERT_EQ(plan.planned_work.size(), 2u);
+  EXPECT_TRUE(plan.planned_work.front().reusable_cache_available)
+      << "node/cache pruning records cache state without changing full graph";
+  ASSERT_EQ(plan.task_graph.tasks.size(), 4u);
   for (const auto& task : plan.task_graph.tasks) {
-    EXPECT_EQ(task.node_id, 7);
+    EXPECT_NE(task.node_id, 99);
     EXPECT_EQ(task.kind, compute::PlannedTaskKind::Tile);
     EXPECT_EQ(task.domain, compute::DirtyDomain::HighPrecision);
     EXPECT_EQ(task.tile_size, 16);
@@ -431,7 +494,8 @@ TEST(ComputeTaskPlannerSplit,
   }
 }
 
-TEST(ComputeTaskPlannerSplit, DirtyWorkPrunerExcludesSourceBoundaryTasks) {
+TEST(TaskGraphPlanningSplit,
+     DirtySnapshotTaskGraphPrunerExcludesSourceBoundaryTasks) {
   register_split_ops();
   GraphModel graph("cache/split-dirty-pruner");
   Node source = make_node(1, "split_plan", "tile");
@@ -451,14 +515,14 @@ TEST(ComputeTaskPlannerSplit, DirtyWorkPrunerExcludesSourceBoundaryTasks) {
   snapshot.per_node_dirty_rois[2].push_back(cv::Rect(0, 0, 16, 16));
   snapshot.actual_dirty_rois = snapshot.per_node_dirty_rois;
 
-  compute::ComputeTaskPlanner planner;
   compute::ComputeRequest request;
   request.intent = ComputeIntent::GlobalHighPrecision;
   request.target_node_id = 2;
   request.dirty_roi = cv::Rect(0, 0, 16, 16);
-  const auto plan = planner.plan(request, {1, 2}, &snapshot, &graph);
+  const auto base_plan = node_cache_pruned_plan(graph, request, {1, 2});
+  const auto plan = dirty_snapshot_pruned_plan(base_plan, snapshot);
 
-  compute::DirtyWorkPruner pruner;
+  compute::DirtySnapshotTaskGraphPruner pruner;
   const auto work_set = pruner.materialize(plan, snapshot);
   EXPECT_EQ(work_set.generation, 3u);
   EXPECT_EQ(work_set.dirty_source_task_ids.size(), 2u);
@@ -476,7 +540,20 @@ TEST(ComputeTaskPlannerSplit, DirtyWorkPrunerExcludesSourceBoundaryTasks) {
       << "source-boundary dependencies are satisfied by the source lane";
 }
 
-TEST(ComputeTaskPlannerSplit, FiltersCrossDomainSnapshotEdges) {
+TEST(TaskGraphPlanningSplit, DirtySnapshotTaskGraphPrunerFiltersCrossDomainEdges) {
+  register_split_ops();
+  GraphModel graph("cache/split-cross-domain-pruner");
+  Node source = make_node(1, "split_plan", "tile");
+  source.parameters["width"] = 64;
+  source.parameters["height"] = 16;
+  Node downstream = make_node(2, "split_plan", "tile");
+  downstream.parameters["width"] = 64;
+  downstream.parameters["height"] = 16;
+  downstream.image_inputs.push_back({1, "image"});
+  graph.add_node(source);
+  graph.add_node(downstream);
+  graph.validate_topology();
+
   compute::DirtyRegionSnapshot snapshot;
   snapshot.graph_generation = 11;
   snapshot.per_node_dirty_rois[1].push_back(cv::Rect(0, 0, 64, 64));
@@ -494,18 +571,19 @@ TEST(ComputeTaskPlannerSplit, FiltersCrossDomainSnapshotEdges) {
       {1, 2, compute::DirtyDomain::HighPrecision, cv::Rect(0, 0, 64, 64),
        cv::Rect(0, 0, 64, 64), compute::DirtyEdgeDirection::BackwardDemand});
 
-  compute::ComputeTaskPlanner planner;
   compute::ComputeRequest request;
   request.intent = ComputeIntent::RealTimeUpdate;
   request.target_node_id = 2;
   request.dirty_roi = cv::Rect(0, 0, 64, 64);
 
-  const auto plan = planner.plan(request, {1, 2}, &snapshot);
+  const auto base_plan = node_cache_pruned_plan(graph, request, {1, 2});
+  const auto plan = dirty_snapshot_pruned_plan(base_plan, snapshot);
 
   ASSERT_EQ(plan.task_graph.dependencies.size(), 1u);
   EXPECT_EQ(plan.task_graph.dependencies[0].domain,
             compute::DirtyDomain::RealTime);
-  ASSERT_EQ(plan.task_graph.tasks.size(), 2u);
+  EXPECT_EQ(plan.task_graph.dependencies[0].from_roi, cv::Rect(0, 0, 64, 64));
+  ASSERT_EQ(plan.task_graph.tasks.size(), 8u);
   for (const auto& task : plan.task_graph.tasks) {
     EXPECT_EQ(task.domain, compute::DirtyDomain::RealTime);
   }

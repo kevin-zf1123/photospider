@@ -406,6 +406,64 @@ TEST(GraphIoContract, FailedReloadPreservesPreviousGraph) {
   EXPECT_EQ(graph.node(1).name, "valid");
 }
 
+TEST(GraphIoContract, SuccessfulReloadResetsRuntimeMetadata) {
+  const auto valid_path = temp_path("photospider-contract-runtime-old.yaml");
+  const auto replacement_path =
+      temp_path("photospider-contract-runtime-new.yaml");
+  write_text(valid_path,
+             "- id: 1\n"
+             "  name: old_graph\n"
+             "  type: kernel_contract_test\n"
+             "  subtype: source\n");
+  write_text(replacement_path,
+             "- id: 3\n"
+             "  name: new_graph\n"
+             "  type: kernel_contract_test\n"
+             "  subtype: source\n");
+
+  GraphModel graph(temp_path("photospider-contract-reload-runtime-cache"));
+  GraphIOService io;
+  io.load(graph, valid_path);
+  ASSERT_EQ(graph.node(1).name, "old_graph");
+
+  graph.timing_results.node_timings.push_back({1, "old_graph", 9.0,
+                                               "computed"});
+  graph.timing_results.total_ms = 9.0;
+  graph.total_io_time_ms.store(7.0);
+  graph.set_skip_save_cache(true);
+  graph.dirty_generation_counter = 42;
+  graph.dirty_source_hp_commit_generation[1] = 42;
+  graph.dirty_source_rt_commit_generation[1] = 43;
+  graph.last_dirty_region_snapshot_debug = "stale dirty snapshot";
+  compute::DirtyRegionSnapshot snapshot;
+  snapshot.graph_generation = 42;
+  snapshot.dirty_source_nodes.push_back(1);
+  graph.last_dirty_region_snapshot = snapshot;
+  graph.recent_dirty_region_snapshots.push_back(snapshot);
+  compute::ComputePlan plan;
+  plan.target_node_id = 1;
+  graph.last_compute_plan = plan;
+  graph.recent_compute_plans.push_back(plan);
+
+  io.load(graph, replacement_path);
+
+  ASSERT_FALSE(graph.has_node(1));
+  ASSERT_TRUE(graph.has_node(3));
+  EXPECT_EQ(graph.node(3).name, "new_graph");
+  EXPECT_TRUE(graph.timing_results.node_timings.empty());
+  EXPECT_DOUBLE_EQ(graph.timing_results.total_ms, 0.0);
+  EXPECT_DOUBLE_EQ(graph.total_io_time_ms.load(), 0.0);
+  EXPECT_FALSE(graph.skip_save_cache());
+  EXPECT_EQ(graph.dirty_generation_counter, 0u);
+  EXPECT_TRUE(graph.dirty_source_hp_commit_generation.empty());
+  EXPECT_TRUE(graph.dirty_source_rt_commit_generation.empty());
+  EXPECT_FALSE(graph.last_dirty_region_snapshot_debug.has_value());
+  EXPECT_FALSE(graph.last_dirty_region_snapshot.has_value());
+  EXPECT_TRUE(graph.recent_dirty_region_snapshots.empty());
+  EXPECT_FALSE(graph.last_compute_plan.has_value());
+  EXPECT_TRUE(graph.recent_compute_plans.empty());
+}
+
 TEST(GraphMutationContract, InvalidNodeReplacementPreservesPreviousNode) {
   const auto root = temp_path("photospider-contract-kernel-root");
   const auto yaml_path = temp_path("photospider-contract-kernel.yaml");

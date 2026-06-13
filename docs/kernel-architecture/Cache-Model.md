@@ -48,6 +48,12 @@ Node cache entries describe cache type and location. Image cache files are saved
 as image files, and named `NodeOutput::data` entries are saved as YAML metadata
 next to the image file.
 
+For CLI-loaded graphs, `GraphModel::cache_root` is configured from
+`cache_root_dir` before graph load and resolves to
+`<cache_root_dir>/<graph_name>`. Relative `cache_root_dir` values are relative
+to the process working directory. Direct `Kernel::load_graph` callers that do
+not provide a cache root continue to use `<root_dir>/<graph_name>/cache`.
+
 Disk cache precision currently supports `int8` and `int16` save paths. Loaded
 image cache data is converted into float image buffers.
 

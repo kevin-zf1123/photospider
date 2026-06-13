@@ -51,6 +51,7 @@ struct PlannedNodeWork {
   cv::Rect represented_hp_roi;
   cv::Rect execution_roi;
   bool whole_output = false;
+  bool reusable_cache_available = false;
   std::vector<cv::Rect> dirty_rois;
   std::vector<int> dependency_node_ids;
   std::vector<int> dependent_node_ids;
@@ -86,22 +87,31 @@ struct ComputePlan {
   ComputeTaskGraph task_graph;
 };
 
-class ComputeTaskPlanner {
- public:
-  ComputePlan plan(const ComputeRequest& request,
-                   const std::vector<int>& execution_order,
-                   const DirtyRegionSnapshot* snapshot = nullptr,
-                   const GraphModel* graph = nullptr) const;
+struct FullTaskGraph {
+  ComputeIntent intent = ComputeIntent::GlobalHighPrecision;
+  DirtyDomain domain = DirtyDomain::HighPrecision;
+  std::vector<int> expanded_node_ids;
+  std::vector<PlannedNodeWork> expanded_work;
+  ComputeTaskGraph task_graph;
 };
 
-class DirtySourceTaskCollector {
+class FullTaskGraphExpander {
  public:
-  DirtyUpdateWorkSet collect(const ComputePlan& plan,
-                             const DirtyRegionSnapshot& snapshot) const;
+  FullTaskGraph expand(const GraphModel& graph, ComputeIntent intent) const;
 };
 
-class DirtyWorkPruner {
+class NodeCacheTaskGraphPruner {
  public:
+  ComputePlan prune(const FullTaskGraph& full_graph,
+                    const ComputeRequest& request,
+                    const std::vector<int>& execution_order,
+                    const GraphModel& graph) const;
+};
+
+class DirtySnapshotTaskGraphPruner {
+ public:
+  ComputePlan prune(const ComputePlan& node_cache_plan,
+                    const DirtyRegionSnapshot& snapshot) const;
   DirtyUpdateWorkSet materialize(const ComputePlan& plan,
                                  const DirtyRegionSnapshot& snapshot) const;
 };

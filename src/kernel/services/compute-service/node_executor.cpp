@@ -72,42 +72,8 @@ NodeOutput NodeExecutor::execute(GraphModel& graph, Node& node,
             NodeOutput output;
             output.image_buffer = make_aligned_cpu_image_buffer(
                 output_size.width, output_size.height, channels, dtype);
-
-            TileTask task;
-            task.node = &node;
-            task.output_tile.buffer = &output.image_buffer;
-
-            const cv::Rect full_roi(0, 0, output.image_buffer.width,
-                                    output.image_buffer.height);
-            const cv::Rect work_roi =
-                config.output_roi ? clip_rect(*config.output_roi, output_size)
-                                  : full_roi;
-            for (int y = work_roi.y; y < work_roi.y + work_roi.height;
-                 y += config.tile_size) {
-              for (int x = work_roi.x; x < work_roi.x + work_roi.width;
-                   x += config.tile_size) {
-                task.output_tile.roi = clip_rect(
-                    cv::Rect(x, y,
-                             std::min(config.tile_size,
-                                      work_roi.x + work_roi.width - x),
-                             std::min(config.tile_size,
-                                      work_roi.y + work_roi.height - y)),
-                    output_size);
-                if (is_rect_empty(task.output_tile.roi))
-                  continue;
-                task.input_tiles.clear();
-                for (const auto* input : input_context.inputs) {
-                  Tile input_tile;
-                  input_tile.buffer =
-                      const_cast<ImageBuffer*>(&input->image_buffer);
-                  input_tile.roi =
-                      input_roi_for_tile(graph, node, task.output_tile.roi,
-                                         input->image_buffer, config);
-                  task.input_tiles.push_back(input_tile);
-                }
-                execute_tile_task(task, op_func);
-              }
-            }
+            execute_tiled_into(graph, node, op_func, inputs,
+                               output.image_buffer, config);
             return output;
           }
         },
@@ -122,6 +88,56 @@ NodeOutput NodeExecutor::execute(GraphModel& graph, Node& node,
     throw GraphError(GraphErrc::ComputeError,
                      "Node " + std::to_string(node.id) + " (" + node.name +
                          ") failed: unknown exception");
+  }
+}
+
+void NodeExecutor::execute_tiled_into(
+    GraphModel& graph, Node& node, const TileOpFunc& tiled_op,
+    const std::vector<const NodeOutput*>& inputs, ImageBuffer& output_buffer,
+    const TiledExecutionConfig& config) {
+  TiledInputContext input_context = normalize_tiled_inputs(node, inputs);
+  if (input_context.inputs.empty() && node.type != "image_generator") {
+    throw GraphError(GraphErrc::MissingDependency,
+                     "Tiled node '" + node.name +
+                         "' requires at least one image input");
+  }
+
+  const cv::Size output_size =
+      config.output_size
+          ? *config.output_size
+          : cv::Size(output_buffer.width, output_buffer.height);
+  TileTask task;
+  task.node = &node;
+  task.output_tile.buffer = &output_buffer;
+
+  const cv::Rect full_roi(0, 0, output_size.width, output_size.height);
+  const cv::Rect work_roi =
+      config.output_roi ? clip_rect(*config.output_roi, output_size) : full_roi;
+  for (int y = work_roi.y; y < work_roi.y + work_roi.height;
+       y += config.tile_size) {
+    for (int x = work_roi.x; x < work_roi.x + work_roi.width;
+         x += config.tile_size) {
+      task.output_tile.roi = clip_rect(
+          cv::Rect(x, y, std::min(config.tile_size,
+                                  work_roi.x + work_roi.width - x),
+                   std::min(config.tile_size,
+                            work_roi.y + work_roi.height - y)),
+          output_size);
+      if (is_rect_empty(task.output_tile.roi))
+        continue;
+      task.input_tiles.clear();
+      for (const auto* input : input_context.inputs) {
+        Tile input_tile;
+        input_tile.buffer = const_cast<ImageBuffer*>(&input->image_buffer);
+        input_tile.roi = input_roi_for_tile(
+            graph, node, task.output_tile.roi, input->image_buffer, config);
+        task.input_tiles.push_back(input_tile);
+      }
+      if (config.on_tile) {
+        config.on_tile(task.output_tile.roi);
+      }
+      execute_tile_task(task, tiled_op);
+    }
   }
 }
 

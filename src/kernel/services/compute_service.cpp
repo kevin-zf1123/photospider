@@ -1,42 +1,9 @@
 /**
  * @文件说明
- * 本文件包含了图计算引擎中节点执行和依赖管理的核心逻辑，以及实现分块图像计算任务的辅助函数。
- *
- * 主要包含以下功能模块：
- *
- * 1. 辅助函数:
- *    - execute_tile_task:
- *         用于执行一个分块计算任务，调用给定的分块操作函数。
- *    - calculate_halo:
- *         为输出分块计算并返回包含光环的输入区域，确保计算过程中不会超出输入图像的边界。
- *
- * 2. 核心计算逻辑:
- *    - compute_internal:
- *         递归计算并返回指定节点的输出。该函数执行以下几个阶段：
- *         a. 缓存查找：优先从内存或磁盘缓存中加载已存在的节点计算结果。
- *         b.
- * 依赖解析：递归计算所有上游节点，解析输入参数及图像数据。若存在循环依赖或缺失依赖则抛出异常。
- *         c. 操作分派：根据节点类型和子类型，使用 std::visit
- * 调用对应的操作函数:
- *              - 整体（Monolithic）操作：直接计算并返回完整的图像输出。
- *              -
- * 分块（Tiled）操作：将图像按分块进行处理，每个分块可能扩展光环区域以满足边界需求。
- *         d.
- * 时间计量与事件记录：统计节点计算所耗费的时间，并更新内部性能指标与事件记录。
- *
- *    - compute:
- *         对外接口，用于计算并返回指定节点的输出。该函数在开始计算前可能清除部分缓存，并在计算完成后更新总的执行时间。
- *
- * 3. 定时统计:
- *    - clear_timing_results:
- *         清除所有节点计时记录，并重置总计时，用于重新开始性能统计。
- *
- * @注意事项：
- * - 程序中对于分块计算设有固定的 TILE_SIZE 和 HALO_SIZE，目前 HALO_SIZE
- * 被固定为 16 像素。
- * - 异常处理机制保证了循环依赖、缺失依赖和无效操作类型都能被及时捕捉和处理。
- * -
- * 依赖于全局缓存与磁盘缓存机制，以提升图计算的性能，但需要根据具体应用进行配置。
+ * ComputeService 负责把用户计算意图转换成顺序、并行或 dirty update
+ * 执行流，并维护缓存、计时、事件和调度 trace。节点级执行细节由
+ * compute-service 下的拆分组件承担，其中 tiled 节点统一经
+ * NodeExecutor 分块执行。
  */
 #include "kernel/services/compute_service.hpp"
 
@@ -70,7 +37,7 @@
 #include "kernel/services/compute-service/compute_geometry.hpp"
 #include "kernel/services/compute-service/compute_metrics_recorder.hpp"
 #include "kernel/services/compute-service/compute_task_dispatcher.hpp"
-#include "kernel/services/compute-service/compute_task_planner.hpp"
+#include "kernel/services/compute-service/task_graph_planning.hpp"
 #include "kernel/services/compute-service/dirty_region_planner.hpp"
 #include "kernel/services/compute-service/intent_update_coordinator.hpp"
 #include "kernel/services/compute-service/node_executor.hpp"
@@ -87,13 +54,9 @@ ComputeService::ComputeService(GraphTraversalService& traversal,
                                GraphEventService& events)
     : traversal_(traversal), cache_(cache), events_(events) {}
 
-using compute::align_rect;
-using compute::calculate_halo;
 using compute::clip_rect;
-using compute::expand_rect;
 using compute::is_rect_empty;
 using compute::kHpAlignment;
-using compute::kHpMacroTileSize;
 using compute::kHpMicroTileSize;
 using compute::kRtDownscaleFactor;
 using compute::kRtTileSize;
@@ -138,6 +101,23 @@ void remember_compute_plan(GraphModel& graph,
   if (graph.recent_compute_plans.size() > 16) {
     graph.recent_compute_plans.erase(graph.recent_compute_plans.begin());
   }
+}
+
+compute::ComputePlan prune_node_cache_task_graph(
+    const GraphModel& graph, const compute::ComputeRequest& request,
+    const std::vector<int>& execution_order) {
+  compute::FullTaskGraphExpander full_expander;
+  compute::NodeCacheTaskGraphPruner node_cache_pruner;
+  const compute::FullTaskGraph full_graph =
+      full_expander.expand(graph, request.intent);
+  return node_cache_pruner.prune(full_graph, request, execution_order, graph);
+}
+
+compute::ComputePlan prune_dirty_snapshot_task_graph(
+    const compute::ComputePlan& node_cache_plan,
+    const compute::DirtyRegionSnapshot& snapshot) {
+  compute::DirtySnapshotTaskGraphPruner dirty_snapshot_pruner;
+  return dirty_snapshot_pruner.prune(node_cache_plan, snapshot);
 }
 
 void remember_dirty_snapshot(GraphModel& graph,
@@ -378,94 +358,6 @@ NodeOutput& ComputeService::compute_internal(
   return *compute::ComputeCachePolicy::reusable_output(target_node);
 }
 
-NodeOutput& ComputeService::compute_node_no_recurse(
-    GraphModel& graph, int node_id, const std::string& cache_precision,
-    bool enable_timing, bool allow_disk_cache,
-    std::vector<BenchmarkEvent>* benchmark_events) {
-  auto& timing_results = graph.timing_results;
-  auto& timing_mutex = graph.timing_mutex_;
-
-  auto& target_node = graph.mutable_node(node_id);
-  // Fast path: already computed.
-  if (compute::ComputeCachePolicy::has_reusable_output(target_node))
-    return *compute::ComputeCachePolicy::reusable_output(target_node);
-
-  // Optionally load from disk cache for this node itself
-  if (allow_disk_cache) {
-    (void)cache_.try_load_from_disk_cache(graph, target_node);
-    if (compute::ComputeCachePolicy::has_reusable_output(target_node))
-      return *compute::ComputeCachePolicy::reusable_output(target_node);
-  }
-
-  // Ensure visibility of upstream writes before reading their cached outputs
-  std::atomic_thread_fence(std::memory_order_acquire);
-
-  auto resolved_inputs = compute::NodeInputResolver::resolve(
-      target_node,
-      [&](int upstream_id) -> const NodeOutput* {
-        const Node* upstream = graph.find_node(upstream_id);
-        if (!upstream)
-          return nullptr;
-        return compute::ComputeCachePolicy::reusable_output(*upstream);
-      },
-      "Parallel scheduler bug");
-  const auto& inputs_ready = resolved_inputs.image_inputs;
-
-  auto op_opt = OpRegistry::instance().resolve_for_intent(
-      target_node.type, target_node.subtype,
-      ComputeIntent::GlobalHighPrecision);
-  if (!op_opt) {
-    throw GraphError(GraphErrc::NoOperation, "No op for " + target_node.type +
-                                                 ":" + target_node.subtype);
-  }
-
-  // Timing event for benchmarking
-  BenchmarkEvent current_event;
-  current_event.node_id = node_id;
-  current_event.op_name = make_key(target_node.type, target_node.subtype);
-  current_event.dependency_start_time =
-      std::chrono::high_resolution_clock::now();
-  current_event.execution_start_time = current_event.dependency_start_time;
-
-  target_node.cached_output_high_precision =
-      compute::NodeExecutor::execute(graph, target_node, *op_opt, inputs_ready);
-  target_node.hp_version++;
-
-  // Save disk cache if configured
-  cache_.save_cache_if_configured(graph, target_node, cache_precision);
-
-  // Timing & events
-  double exec_ms_for_meta = 0.0;
-  if (enable_timing) {
-    current_event.execution_end_time =
-        std::chrono::high_resolution_clock::now();
-    current_event.source = "computed";
-    current_event.execution_duration_ms =
-        std::chrono::duration<double, std::milli>(
-            current_event.execution_end_time -
-            current_event.execution_start_time)
-            .count();
-    exec_ms_for_meta = current_event.execution_duration_ms;
-    if (benchmark_events)
-      benchmark_events->push_back(current_event);
-    {
-      std::lock_guard lk(timing_mutex);
-      timing_results.node_timings.push_back(
-          {target_node.id, target_node.name,
-           current_event.execution_duration_ms, "computed"});
-    }
-    events_.push(target_node.id, target_node.name, "computed",
-                 current_event.execution_duration_ms);
-  } else {
-    events_.push(target_node.id, target_node.name, "computed", 0.0);
-  }
-  if (target_node.cached_output_high_precision) {
-    finalize_output_metadata(*target_node.cached_output_high_precision,
-                             inputs_ready, enable_timing, exec_ms_for_meta);
-  }
-  return *target_node.cached_output_high_precision;
-}
-
 NodeOutput& ComputeService::compute_high_precision_update(
     GraphModel& graph, GraphRuntime* runtime, int node_id,
     const std::string& cache_precision, bool force_recache, bool enable_timing,
@@ -488,10 +380,12 @@ NodeOutput& ComputeService::compute_high_precision_update(
   remember_dirty_snapshot(graph, dirty_plan.snapshot);
   auto plan = dirty_plan.entries;
   auto execution_order = dirty_plan.execution_order;
-  compute::ComputeTaskPlanner task_planner;
-  const compute::ComputePlan compute_plan = task_planner.plan(
-      {ComputeIntent::GlobalHighPrecision, node_id, false, dirty_roi},
-      execution_order, &dirty_plan.snapshot, &graph);
+  const compute::ComputeRequest request{
+      ComputeIntent::GlobalHighPrecision, node_id, false, dirty_roi};
+  const compute::ComputePlan node_cache_plan =
+      prune_node_cache_task_graph(graph, request, execution_order);
+  const compute::ComputePlan compute_plan =
+      prune_dirty_snapshot_task_graph(node_cache_plan, dirty_plan.snapshot);
   remember_compute_plan(graph, compute_plan);
   auto is_dirty_source_node = [&](int nid) {
     return std::find(dirty_plan.snapshot.dirty_source_nodes.begin(),
@@ -599,95 +493,22 @@ NodeOutput& ComputeService::compute_high_precision_update(
             entry.hp_size.width, entry.hp_size.height, channels, dtype);
       }
 
-      // Execute tiling logic
-      TileTask task;
-      task.node = &node;
-      task.output_tile.buffer = &hp_buffer;
-      const cv::Size out_bounds(hp_buffer.width, hp_buffer.height);
-
-      // Prioritize Macro tiles
-      cv::Rect macro_cover = align_rect(entry.roi_hp, kHpMacroTileSize);
-      macro_cover = clip_rect(macro_cover, out_bounds);
-      for (int y = macro_cover.y; y < macro_cover.y + macro_cover.height;
-           y += kHpMacroTileSize) {
-        for (int x = macro_cover.x; x < macro_cover.x + macro_cover.width;
-             x += kHpMacroTileSize) {
-          cv::Rect macro_tile(
-              x, y,
-              std::min(kHpMacroTileSize, macro_cover.x + macro_cover.width - x),
-              std::min(kHpMacroTileSize,
-                       macro_cover.y + macro_cover.height - y));
-          macro_tile = clip_rect(macro_tile, out_bounds);
-          if (is_rect_empty(macro_tile))
-            continue;
-          cv::Rect touched = macro_tile & entry.roi_hp;
-          if (is_rect_empty(touched))
-            continue;
-
-          // If ROI covers the entire macro tile, process it as one big tile
-          if (touched == macro_tile && macro_tile.width >= kHpMacroTileSize &&
-              macro_tile.height >= kHpMacroTileSize) {
-            task.output_tile.roi = macro_tile;
-            task.input_tiles.clear();
-            for (const auto* in_out : image_inputs_ready) {
-              Tile in_tile;
-              in_tile.buffer = const_cast<ImageBuffer*>(&in_out->image_buffer);
-              in_tile.roi = clip_rect(expand_rect(macro_tile, entry.halo_hp),
-                                      cv::Size(in_out->image_buffer.width,
-                                               in_out->image_buffer.height));
-              task.input_tiles.push_back(in_tile);
-            }
-            if (runtime_ptr) {
-              runtime_ptr->log_event(GraphRuntime::SchedulerEvent::EXECUTE_TILE,
-                                     nid);
-              runtime_ptr->log_event(
-                  GraphRuntime::SchedulerEvent::EXECUTE_DIRTY_DOWNSTREAM_TILE,
-                  nid);
-            }
-            compute::NodeExecutor::execute_tile_task(task, *hp_tile_fn);
-            continue;
-          }
-
-          // Otherwise, fall back to micro tiles for the intersected region
-          cv::Rect micro_cover = align_rect(touched, kHpMicroTileSize);
-          micro_cover = clip_rect(micro_cover, out_bounds) & macro_tile;
-          for (int my = micro_cover.y; my < micro_cover.y + micro_cover.height;
-               my += kHpMicroTileSize) {
-            for (int mx = micro_cover.x; mx < micro_cover.x + micro_cover.width;
-                 mx += kHpMicroTileSize) {
-              cv::Rect micro_tile(
-                  mx, my,
-                  std::min(kHpMicroTileSize,
-                           micro_cover.x + micro_cover.width - mx),
-                  std::min(kHpMicroTileSize,
-                           micro_cover.y + micro_cover.height - my));
-              micro_tile = clip_rect(micro_tile, out_bounds);
-              if (is_rect_empty(micro_tile))
-                continue;
-              task.output_tile.roi = micro_tile;
-              task.input_tiles.clear();
-              for (const auto* in_out : image_inputs_ready) {
-                Tile in_tile;
-                in_tile.buffer =
-                    const_cast<ImageBuffer*>(&in_out->image_buffer);
-                in_tile.roi = clip_rect(expand_rect(micro_tile, entry.halo_hp),
-                                        cv::Size(in_out->image_buffer.width,
-                                                 in_out->image_buffer.height));
-                task.input_tiles.push_back(in_tile);
-              }
-              if (runtime_ptr) {
-                runtime_ptr->log_event(
-                    GraphRuntime::SchedulerEvent::EXECUTE_TILE, nid);
-                runtime_ptr->log_event(
-                    GraphRuntime::SchedulerEvent::
-                        EXECUTE_DIRTY_DOWNSTREAM_TILE,
-                    nid);
-              }
-              compute::NodeExecutor::execute_tile_task(task, *hp_tile_fn);
-            }
-          }
-        }
+      compute::TiledExecutionConfig config;
+      config.tile_size = kHpMicroTileSize;
+      config.output_roi = entry.roi_hp;
+      config.output_size = entry.hp_size;
+      config.forced_halo = entry.halo_hp;
+      if (auto metadata =
+              OpRegistry::instance().get_metadata(node.type, node.subtype)) {
+        config.metadata = *metadata;
       }
+      if (runtime_ptr) {
+        runtime_ptr->log_event(GraphRuntime::SchedulerEvent::EXECUTE_TILE, nid);
+        runtime_ptr->log_event(
+            GraphRuntime::SchedulerEvent::EXECUTE_DIRTY_DOWNSTREAM_TILE, nid);
+      }
+      compute::NodeExecutor::execute_tiled_into(
+          graph, node, *hp_tile_fn, image_inputs_ready, hp_buffer, config);
     } else if (hp_mono_fn) {
       node.cached_output_high_precision =
           (*hp_mono_fn)(node, image_inputs_ready);
@@ -719,9 +540,9 @@ NodeOutput& ComputeService::compute_high_precision_update(
     }
   };
 
-  compute::DirtyWorkPruner dirty_work_pruner;
+  compute::DirtySnapshotTaskGraphPruner dirty_snapshot_pruner;
   const compute::DirtyUpdateWorkSet dirty_work_set =
-      dirty_work_pruner.materialize(compute_plan, dirty_plan.snapshot);
+      dirty_snapshot_pruner.materialize(compute_plan, dirty_plan.snapshot);
   const std::vector<int> source_node_ids = planned_nodes_for_task_ids(
       compute_plan, dirty_work_set.dirty_source_task_ids);
   const std::vector<int> downstream_node_ids = planned_nodes_for_task_ids(
@@ -921,10 +742,12 @@ NodeOutput& ComputeService::compute_real_time_update(
   remember_dirty_snapshot(graph, dirty_plan.snapshot);
   auto plan = dirty_plan.entries;
   auto execution_order = dirty_plan.execution_order;
-  compute::ComputeTaskPlanner task_planner;
-  const compute::ComputePlan compute_plan = task_planner.plan(
-      {ComputeIntent::RealTimeUpdate, node_id, false, dirty_roi},
-      execution_order, &dirty_plan.snapshot, &graph);
+  const compute::ComputeRequest request{ComputeIntent::RealTimeUpdate, node_id,
+                                        false, dirty_roi};
+  const compute::ComputePlan node_cache_plan =
+      prune_node_cache_task_graph(graph, request, execution_order);
+  const compute::ComputePlan compute_plan =
+      prune_dirty_snapshot_task_graph(node_cache_plan, dirty_plan.snapshot);
   remember_compute_plan(graph, compute_plan);
   GraphRuntime* runtime_ptr = runtime;
   auto is_dirty_source_node = [&](int nid) {
@@ -1072,60 +895,23 @@ NodeOutput& ComputeService::compute_real_time_update(
               }
               node.cached_output_real_time->data = result.data;
             } else if constexpr (std::is_same_v<T, TileOpFunc>) {
-              if (image_inputs_ready.empty()) {
-                throw GraphError(GraphErrc::MissingDependency,
-                                 "RT tiled op requires image inputs for node " +
-                                     std::to_string(nid));
+              compute::TiledExecutionConfig config;
+              config.tile_size = kRtTileSize;
+              config.output_roi = entry.roi_rt;
+              config.output_size = entry.rt_size;
+              config.forced_halo = entry.halo_rt;
+              if (auto metadata = OpRegistry::instance().get_metadata(
+                      node.type, node.subtype)) {
+                config.metadata = *metadata;
               }
-              TileTask task;
-              task.node = &node;
-              task.output_tile.buffer = &rt_buffer;
-              const cv::Size out_bounds(rt_buffer.width, rt_buffer.height);
-              const int halo_rt = entry.halo_rt;
-              for (int y = entry.roi_rt.y;
-                   y < entry.roi_rt.y + entry.roi_rt.height; y += kRtTileSize) {
-                for (int x = entry.roi_rt.x;
-                     x < entry.roi_rt.x + entry.roi_rt.width;
-                     x += kRtTileSize) {
-                  int tile_w = std::min(
-                      kRtTileSize, entry.roi_rt.x + entry.roi_rt.width - x);
-                  int tile_h = std::min(
-                      kRtTileSize, entry.roi_rt.y + entry.roi_rt.height - y);
-                  cv::Rect tile_roi(x, y, tile_w, tile_h);
-                  tile_roi = clip_rect(tile_roi, out_bounds);
-                  if (is_rect_empty(tile_roi))
-                    continue;
-                  task.output_tile.roi = tile_roi;
-                  task.input_tiles.clear();
-                  for (const NodeOutput* input_out : image_inputs_ready) {
-                    Tile input_tile;
-                    input_tile.buffer =
-                        const_cast<ImageBuffer*>(&input_out->image_buffer);
-                    cv::Rect input_roi = tile_roi;
-                    if (halo_rt > 0) {
-                      input_roi = expand_rect(input_roi, halo_rt);
-                    }
-                    input_roi = clip_rect(
-                        input_roi, cv::Size(input_out->image_buffer.width,
-                                            input_out->image_buffer.height));
-                    if (is_rect_empty(input_roi)) {
-                      input_roi = clip_rect(
-                          tile_roi, cv::Size(input_out->image_buffer.width,
-                                             input_out->image_buffer.height));
-                    }
-                    input_tile.roi = input_roi;
-                    task.input_tiles.push_back(input_tile);
-                  }
-                  compute::NodeExecutor::execute_tile_task(task, fn);
-                  if (runtime_ptr) {
-                    runtime_ptr->log_event(
-                        GraphRuntime::SchedulerEvent::EXECUTE_TILE, nid);
-                    runtime_ptr->log_event(
-                        GraphRuntime::SchedulerEvent::
-                            EXECUTE_DIRTY_DOWNSTREAM_TILE,
-                        nid);
-                  }
-                }
+              compute::NodeExecutor::execute_tiled_into(
+                  graph, node, fn, image_inputs_ready, rt_buffer, config);
+              if (runtime_ptr) {
+                runtime_ptr->log_event(
+                    GraphRuntime::SchedulerEvent::EXECUTE_TILE, nid);
+                runtime_ptr->log_event(
+                    GraphRuntime::SchedulerEvent::EXECUTE_DIRTY_DOWNSTREAM_TILE,
+                    nid);
               }
             }
           },
@@ -1155,9 +941,9 @@ NodeOutput& ComputeService::compute_real_time_update(
     events_.push(node.id, node.name, "rt_update", 0.0);
   };
 
-  compute::DirtyWorkPruner dirty_work_pruner;
+  compute::DirtySnapshotTaskGraphPruner dirty_snapshot_pruner;
   const compute::DirtyUpdateWorkSet dirty_work_set =
-      dirty_work_pruner.materialize(compute_plan, dirty_plan.snapshot);
+      dirty_snapshot_pruner.materialize(compute_plan, dirty_plan.snapshot);
   const std::vector<int> source_node_ids = planned_nodes_for_task_ids(
       compute_plan, dirty_work_set.dirty_source_task_ids);
   const std::vector<int> downstream_node_ids = planned_nodes_for_task_ids(
@@ -1373,10 +1159,10 @@ NodeOutput& ComputeService::compute_sequential_impl(
   } catch (const GraphError&) {
     throw;
   }
-  compute::ComputeTaskPlanner task_planner;
-  const compute::ComputePlan compute_plan = task_planner.plan(
-      {ComputeIntent::GlobalHighPrecision, node_id, false, std::nullopt},
-      execution_order, nullptr, &graph);
+  const compute::ComputeRequest request{
+      ComputeIntent::GlobalHighPrecision, node_id, false, std::nullopt};
+  const compute::ComputePlan compute_plan =
+      prune_node_cache_task_graph(graph, request, execution_order);
   remember_compute_plan(graph, compute_plan);
   execution_order = compute_plan.planned_nodes;
 

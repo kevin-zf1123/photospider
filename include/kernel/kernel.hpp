@@ -31,7 +31,8 @@ class Kernel {
   std::optional<std::string> load_graph(const std::string& name,
                                         const std::string& root_dir,
                                         const std::string& yaml_path,
-                                        const std::string& config_path = "");
+                                        const std::string& config_path = "",
+                                        const std::string& cache_root_dir = "");
 
   bool close_graph(const std::string& name);
   std::vector<std::string> list_graphs() const;

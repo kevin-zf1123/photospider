@@ -72,7 +72,8 @@ bool handle_load(std::istringstream& iss, ps::InteractionService& svc,
         }
       }
       auto ok = svc.cmd_load_graph(def, "sessions", yaml_path,
-                                   config.loaded_config_path);
+                                   config.loaded_config_path,
+                                   config.cache_root_dir);
       if (!ok) {
         std::cout << "Error: failed to load session 'default' from '"
                   << yaml_path << "'.\n";
@@ -100,7 +101,8 @@ bool handle_load(std::istringstream& iss, ps::InteractionService& svc,
       return true;
     }
     auto ok =
-        svc.cmd_load_graph(name, "sessions", "", config.loaded_config_path);
+        svc.cmd_load_graph(name, "sessions", "", config.loaded_config_path,
+                           config.cache_root_dir);
     if (!ok) {
       std::cout << "Error: failed to load session '" << name << "'.\n";
       return true;
@@ -117,7 +119,8 @@ bool handle_load(std::istringstream& iss, ps::InteractionService& svc,
   if (args.size() >= 2) {
     auto yaml_path = args[1];
     auto ok = svc.cmd_load_graph(name, "sessions", yaml_path,
-                                 config.loaded_config_path);
+                                 config.loaded_config_path,
+                                 config.cache_root_dir);
     if (!ok) {
       std::cout << "Error: failed to load session '" << name << "' from '"
                 << yaml_path << "'.\n";

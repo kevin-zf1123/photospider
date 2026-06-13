@@ -137,7 +137,7 @@ set(COMPUTE_SOURCES
     src/kernel/services/compute-service/compute_cache_policy.cpp
     src/kernel/services/compute-service/compute_geometry.cpp
     src/kernel/services/compute-service/compute_metrics_recorder.cpp
-    src/kernel/services/compute-service/compute_task_planner.cpp
+    src/kernel/services/compute-service/task_graph_planning.cpp
     src/kernel/services/compute-service/dirty_region_planner.cpp
     src/kernel/services/compute-service/intent_update_coordinator.cpp
     src/kernel/services/compute-service/node_executor.cpp

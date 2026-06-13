@@ -1,5 +1,6 @@
 #pragma once
 
+#include <functional>
 #include <optional>
 #include <vector>
 
@@ -15,6 +16,7 @@ struct TiledExecutionConfig {
   std::optional<cv::Size> output_size;
   std::optional<int> forced_halo;
   std::optional<OpMetadata> metadata;
+  std::function<void(const cv::Rect&)> on_tile;
 };
 
 struct TiledInputContext {
@@ -31,6 +33,11 @@ class NodeExecutor {
 
   static TiledInputContext normalize_tiled_inputs(
       Node& node, const std::vector<const NodeOutput*>& inputs);
+
+  static void execute_tiled_into(
+      GraphModel& graph, Node& node, const TileOpFunc& tiled_op,
+      const std::vector<const NodeOutput*>& inputs, ImageBuffer& output_buffer,
+      const TiledExecutionConfig& config = {});
 
   static cv::Rect input_roi_for_tile(GraphModel& graph, const Node& node,
                                      const cv::Rect& output_roi,

@@ -44,12 +44,13 @@ source.
 ## Current Dispatch State
 
 Parallel compute planning and plan execution belong to `ComputeService`
-collaborators: `DirtyRegionPlanner`, `ComputeTaskPlanner`,
-`IntentUpdateCoordinator`, and `ComputeTaskDispatcher`. After planning,
-`ComputeTaskDispatcher` materializes either the full planned task graph or the
-dirty-clipped update work set into concrete tasks and submits ready work through
-the configured `IScheduler` instance for the relevant `ComputeIntent` via
-`SchedulerTaskRuntime`.
+collaborators: `FullTaskGraphExpander`, `NodeCacheTaskGraphPruner`,
+`DirtyRegionPlanner`, `DirtySnapshotTaskGraphPruner`,
+`IntentUpdateCoordinator`, and `ComputeTaskDispatcher`. After pruning,
+`ComputeTaskDispatcher` materializes either the node/cache-pruned task graph or
+the dirty-clipped update work set into concrete tasks and submits ready work
+through the configured `IScheduler` instance for the relevant `ComputeIntent`
+via `SchedulerTaskRuntime`.
 
 `GraphRuntime` still owns graph state, scheduler registration, events, and some
 runtime queue APIs used by graph-runtime support paths and tests. Those queues
@@ -77,9 +78,12 @@ The target model is:
 
 ```text
 GraphModel topology
-  -> ComputeTaskPlanner
-  -> ComputePlan / ComputeTaskGraph
+  -> FullTaskGraphExpander
+  -> FullTaskGraph
+  -> NodeCacheTaskGraphPruner
+  -> ComputePlan / pruned ComputeTaskGraph
   -> DirtyRegionSnapshot
+  -> DirtySnapshotTaskGraphPruner
   -> DirtyUpdateWorkSet
   -> Scheduler resource dispatch
 ```

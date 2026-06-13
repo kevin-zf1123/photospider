@@ -26,6 +26,12 @@ the dirty-region context, it should expose graph-scoped dirty snapshot queries
 and visualization hooks; it is not the authoritative source of dirty-region
 generation or propagation.
 
+The current CLI/REPL frontend is batch-oriented. It does not promise realtime
+update interaction commands such as `compute rt` or `--dirty-roi`.
+`RealTimeUpdate` exists as a kernel intent for a future GUI/interaction
+environment, and the CLI should not be treated as the production realtime
+control surface.
+
 `GraphTraversalService` is topology-only. It provides traversal order and
 explicit upstream/downstream topology queries from `GraphModel` adjacency.
 Dirty-region demand and ROI projection use `RoiPropagationService`, while
@@ -37,18 +43,29 @@ request-scoped static planning from per-update dirty work selection:
 ```text
 ComputeService facade
   -> GraphModel topology / GraphTraversalService queries
-  -> ComputeTaskPlanner
-  -> ComputePlan / ComputeTaskGraph
+  -> FullTaskGraphExpander
+  -> FullTaskGraph
+  -> NodeCacheTaskGraphPruner
+  -> ComputePlan / pruned ComputeTaskGraph
   -> DirtyRegionPlanner
   -> DirtyRegionSnapshot
+  -> DirtySnapshotTaskGraphPruner
   -> DirtyUpdateWorkSet
   -> task pools / scheduler / execution resources
 ```
 
-Single-threaded and parallel execution should share the same logical
+`FullTaskGraphExpander` expands the raw graph into the full node/tile task graph
+for one compute domain. It does not depend on the request target, cache state,
+or dirty snapshot. `NodeCacheTaskGraphPruner` then prunes that graph to the
+request target/dependency cone and records cache availability for selected
+nodes. Dirty updates add a separate `DirtySnapshotTaskGraphPruner` pass that
+annotates the selected graph with dirty metadata and produces the active
+`DirtyUpdateWorkSet`.
+
+Single-threaded and parallel execution should share the same pruned
 `ComputePlan` or `ComputeTaskGraph`. Execution modes should differ in task
 pools, scheduler policy, and execution resources, not in graph-level dirty
-propagation or compute-task derivation.
+propagation, full task expansion, or task-graph pruning.
 
 `ComputePlan` is a static analysis for the current compute request and domain.
 It is derived while graph state is stable and remains the topology contract for
@@ -134,16 +151,17 @@ Sequential compute uses recursive dependency resolution:
 7. Store output, emit events, update timing, and save disk cache when enabled.
 
 Sequential compute is useful for simple execution and debugging. It now creates
-the same internal `ComputeTaskPlanner` plan semantics as the parallel path
-before executing the recursive path.
+the same internal full-expansion and node/cache-pruned task graph semantics as
+the parallel path before executing the recursive path.
 
 ## Parallel Compute
 
-Parallel compute derives a `ComputePlan` from `topo_postorder_from` and
-`ComputeTaskPlanner`, materializes the plan's `ComputeTaskGraph` into scheduler
-tasks, tracks dependency counters, and submits ready node tasks through the
-configured scheduler's `SchedulerTaskRuntime`. Tiled operations may spawn
-micro-tasks and increment scheduler-owned completion counters.
+Parallel compute derives a `ComputePlan` by expanding the full task graph and
+then pruning it with `NodeCacheTaskGraphPruner` from `topo_postorder_from`.
+It materializes the plan's `ComputeTaskGraph` into scheduler tasks, tracks
+dependency counters, and submits ready node tasks through the configured
+scheduler's `SchedulerTaskRuntime`. Tiled operations may spawn micro-tasks and
+increment scheduler-owned completion counters.
 
 `ComputeTaskDispatcher` keeps plan execution, dependency accounting, sparse
 node-id mapping, temporary result storage, event logging, exception
@@ -211,6 +229,11 @@ downsample work to refresh RT transient state. The current full-recompute
 fallback remains a compatibility path for entry points that have not yet been
 routed through optimized HP dirty planning.
 
+TODO: optimized partial HP dirty planning is not complete for every
+`GlobalHighPrecision` entry path. Treat a dirty ROI on global compute as a
+compatibility hint that can still force full recompute; performance-sensitive
+callers must not assume ROI-bounded HP work until this TODO is closed.
+
 Dirty-region state planning now runs through the graph-scoped
 `DirtyRegionPlanner`, and the resulting `DirtyRegionSnapshot` feeds dirty
 work-set materialization and interaction-facing inspection summaries.
@@ -232,16 +255,23 @@ choice, not the switch that enables or disables the HP/RT dual path.
 Realtime planning is intentionally per path, not a single mixed-domain planner
 call. `IntentUpdateCoordinator` dispatches sibling HP and RT update callbacks.
 Each path uses a single-domain request plan and a same-domain dirty snapshot:
-the HP callback uses a `GlobalHighPrecision` plan with an HP dirty snapshot, and
-the RT callback uses a `RealTimeUpdate` plan with an RT dirty snapshot. The
-dirty snapshot clips or activates the update work set from the path's task
-graph. This keeps `ComputeTaskPlanner` focused on stable topology semantics and
-leaves future task pools or modes free to reuse the same planner contract with
-their own domain.
+the HP callback uses a `GlobalHighPrecision` node/cache-pruned plan with an HP
+dirty snapshot, and the RT callback uses a `RealTimeUpdate` node/cache-pruned
+plan with an RT dirty snapshot. The dirty snapshot clips or activates the update
+work set from the path's task graph. This keeps full task expansion, node/cache
+pruning, and dirty snapshot pruning as separate contracts so future task pools
+or modes can reuse the same boundaries with their own domain.
 
 The passed dirty ROI is converted into graph-scoped planner state for the
 current request. TODO: node-local dirty reports should become the origin source
 for future frontend-driven dirty-region updates.
+
+TODO: design the node-to-`InteractionService` boundary for realtime dirty
+updates. The design must define how nodes emit realtime events, dirty regions,
+and update requests; which layer owns dirty-region generation; how the
+interaction facade stays separate from node and compute ownership; and how a
+future GUI consumes those events without turning the CLI into a realtime
+interaction surface.
 
 Current defaults:
 

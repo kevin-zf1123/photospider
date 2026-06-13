@@ -158,6 +158,7 @@ Common commands:
 | `graphs` | List loaded graph sessions. |
 | `node [id]` | Open the FTXUI node editor. |
 | `print [all|id] [full|simplified] [inspect|i]` | Print dependency trees and optional cache metadata. |
+| `inspect <id|all|dirty>` | Inspect cached metadata or the latest backend dirty snapshot. |
 | `traversal [f|s|n] [m|d|md] [c|cr]` | Show post-order evaluation and cache state. |
 | `ops [all|builtin|plugins]` | List registered operations. |
 | `compute <id|all> [flags]` | Compute one node or all ending nodes. |
@@ -169,6 +170,12 @@ Common commands:
 Supported `compute` flags include `force`, `force-deep`, `parallel`,
 `t`/`timer`, `tl <path>`, `m`/`mute`, and `nosave`/`ns`.
 
+The CLI and REPL do not currently expose realtime update interaction commands
+such as `compute rt` or `--dirty-roi`. `RealTimeUpdate` is a kernel intent for a
+future GUI/interaction path, not a committed CLI feature surface.
+`inspect dirty` is read-only inspection of the latest backend dirty snapshot; it
+does not create a dirty ROI or trigger realtime compute.
+
 ## Configuration
 
 By default, `graph_cli` reads `config.yaml` from the working directory. If it is
@@ -178,7 +185,7 @@ Important keys:
 
 | Key | Default | Purpose |
 | --- | --- | --- |
-| `cache_root_dir` | `cache` | Disk cache root. |
+| `cache_root_dir` | `cache` | Shared disk cache root; each loaded graph uses `<cache_root_dir>/<graph_name>`. |
 | `plugin_dirs` | `[build/plugins]` | Operation plugin search paths. |
 | `scheduler_dirs` | `[build/schedulers]` | Scheduler plugin search paths. |
 | `cache_precision` | `int8` | Disk cache image precision. |
@@ -197,6 +204,15 @@ Use another config file with:
 ```bash
 ./build/bin/graph_cli --config path/to/config.yaml --repl
 ```
+
+When the CLI loads a config file, `scheduler_hp_type`, `scheduler_rt_type`, and
+`scheduler_worker_count` are copied into `Kernel::SchedulerConfig` before any
+graph is loaded. Newly loaded graphs therefore inherit those scheduler defaults;
+use `scheduler set <hp|rt> <type>` for an immediate per-graph switch.
+
+`cache_root_dir` is also applied before graph load. Relative values are resolved
+from the current working directory, and the graph cache root becomes
+`<cache_root_dir>/<graph_name>`.
 
 ## Built-In Operations
 

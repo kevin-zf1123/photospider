@@ -1,4 +1,7 @@
-inspect <node_id> | all
-    Display cached output metadata (spatial + debug).
+inspect <node_id> | all | dirty
+    Display cached output metadata or backend dirty snapshot state.
     - <node_id>: Inspect a single node.
     - all: Inspect all nodes in the graph sequentially.
+    - dirty: Inspect the latest backend dirty region snapshot, if recorded.
+      This is read-only inspection; it does not trigger realtime or dirty
+      compute.

@@ -8,7 +8,7 @@
 #include <unordered_map>
 #include <vector>
 
-#include "kernel/services/compute-service/compute_task_planner.hpp"
+#include "kernel/services/compute-service/task_graph_planning.hpp"
 #include "node.hpp"
 #include "ps_types.hpp"
 
@@ -144,6 +144,7 @@ class GraphModel {
   friend class ComputeService;
   friend class compute::ComputeTaskDispatcher;
 
+  void reset_runtime_state();
   Node* find_node_mutable(int id);
   Node& mutable_node(int id);
 

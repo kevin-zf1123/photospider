@@ -33,21 +33,46 @@ provided.
 ## CTest Registration
 
 All intended GoogleTest binaries should be registered with CTest. This includes
-milestone and propagation tests that may currently be low-confidence.
+milestone tests and `test_propagation_contracts`, which may currently be
+low-confidence.
 
 Low-confidence tests should still be visible in validation rather than silently
 excluded. If a test is not reliable enough to gate development, document that
 status explicitly and create follow-up work to upgrade or replace it.
 
-Milestone and propagation tests are registered with CTest so they are visible,
-but they remain low-confidence legacy tests until a follow-up pass rewrites them
-as narrower regression tests with clearer fixtures and assertions.
+Milestone tests and `test_propagation_contracts` are registered with CTest so
+they are visible, but they remain low-confidence legacy tests until a follow-up
+pass rewrites them as narrower regression tests with clearer fixtures and
+assertions.
+
+`test_propagation` is different: it is a scriptable REPL/tool target, not a
+GoogleTest binary. CMake keeps it buildable for manual scripts and ad hoc
+validation, but CTest does not discover or run it. Do not cite `ctest` evidence
+as covering `test_propagation`; cite the specific manual command transcript if
+that target is used.
 
 ## Known Test Quality Caveat
 
-Some milestone and propagation tests were written as development checks rather
-than polished regression tests. They should be registered so they are visible,
-then upgraded later into clearer, higher-confidence tests.
+Some milestone tests and propagation contract tests were written as development
+checks rather than polished regression tests. They should be registered so they
+are visible, then upgraded later into clearer, higher-confidence tests.
+
+`test_propagation` remains a manual tool target until it is either converted
+into a proper GoogleTest binary or replaced with narrower CTest-registered
+fixtures.
+
+## GitHub/CI Integration Status
+
+GitHub Actions and the CI container image are not part of the currently
+maintained validation path. Treat `.github/workflows/*.yml` and `Dockerfile.ci`
+as TODO integration scaffolding unless a future change explicitly re-enables
+and validates them.
+
+Current evidence should come from local build, focused test binaries, CTest, and
+saved `tests/results/...` artifacts. Do not claim that GitHub CI or the
+containerized CI image is a supported or passing test chain until the Dockerfile
+dependencies, workflow triggers, checkout/submodule behavior, build commands,
+and CTest invocation are updated and proven with fresh CI evidence.
 
 ## Refactor Boundaries
 
@@ -56,8 +81,10 @@ kernel-contract cleanup:
 
 - Add richer dirty snapshot visualization APIs after the frontend display
   contract is defined.
-- Decide whether global HP dirty ROI should use optimized partial HP update
-  planning in all entry paths.
+- Keep optimized partial HP dirty planning for all `GlobalHighPrecision` entry
+  paths as an open TODO. Current global HP dirty ROI behavior is a correctness
+  compatibility fallback and may still full recompute; do not claim ROI-bounded
+  HP performance until the fallback is replaced and validated.
 
 The `ComputeService` split now has a dedicated `split-compute-service`
 OpenSpec change and a maintained plan in `Compute-Service-Split.md`. The first

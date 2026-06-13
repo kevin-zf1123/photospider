@@ -99,7 +99,7 @@ command-specific help.
 | --- | --- |
 | `print [all|<id>] [full|simplified] [inspect|i]` | Print dependency trees. `inspect` also dumps cached debug/spatial metadata. |
 | `traversal [f|s|n] [m|d|md] [c|cr]` | Print post-order evaluation for ending nodes. Optional flags control tree detail, cache status, and disk sync. |
-| `inspect <node_id> | all` | Display cached output metadata. |
+| `inspect <node_id> | all | dirty` | Display cached output metadata or the latest backend dirty snapshot. |
 | `ops [all|builtin|plugins]` | List registered operations and plugin sources. |
 | `output <file>` | Save the active graph YAML. |
 | `clear-graph` | Remove all nodes and edges from the active graph. |
@@ -109,6 +109,10 @@ command-specific help.
 - `full`: include parameters.
 - `simplified`: hide parameters.
 - `inspect` or `i`: include cache/debug metadata for each node.
+
+`inspect dirty` is read-only. It reports the latest backend dirty region
+snapshot when one exists, but it does not trigger realtime update or dirty
+compute from the CLI.
 
 `traversal` flags:
 
@@ -145,6 +149,11 @@ compute 7 parallel t
 compute all force tl out/timer.yaml
 save 7 out/result.png
 ```
+
+The CLI and REPL compute surface is batch-oriented. It does not currently expose
+realtime update interaction commands such as `compute rt` or `--dirty-roi`.
+`RealTimeUpdate` is a kernel intent for a future GUI/interaction path, not a
+committed CLI feature surface.
 
 ## 7. TUI Commands
 
@@ -211,7 +220,7 @@ one with default values.
 
 | Key | Default | Description |
 | --- | --- | --- |
-| `cache_root_dir` | `cache` | Disk cache root. |
+| `cache_root_dir` | `cache` | Shared disk cache root; each loaded graph uses `<cache_root_dir>/<graph_name>`. |
 | `plugin_dirs` | `[build/plugins]` | Operation plugin search paths. |
 | `scheduler_dirs` | `[build/schedulers]` | Scheduler plugin search paths. |
 | `cache_precision` | `int8` | Disk cache image precision. |
@@ -232,6 +241,16 @@ one with default values.
 | `scheduler_hp_type` | `cpu_work_stealing` | Default HP scheduler. |
 | `scheduler_rt_type` | `cpu_work_stealing` | Default RT scheduler. |
 | `scheduler_worker_count` | `0` | CPU scheduler worker count; `0` means auto. |
+
+When the CLI loads a config file, these scheduler defaults are copied into
+`Kernel::SchedulerConfig` before any graph is loaded. Newly loaded graphs inherit
+the configured HP/RT scheduler types and worker count. Use `scheduler set
+<hp|rt> <type>` for an immediate per-graph scheduler switch.
+
+`cache_root_dir` is applied before graph load as well. Relative values are
+resolved from the current working directory, and the graph cache root becomes
+`<cache_root_dir>/<graph_name>`. Lower-level `Kernel` callers that omit this
+setting continue to use the session-local `sessions/<name>/cache` fallback.
 
 ## 11. Built-In Operations
 
