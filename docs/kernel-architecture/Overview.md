@@ -12,9 +12,9 @@ and are not assumed to be committed with the repository.
 
 Photospider is built around a graph runtime with a service split, operation
 registry, cache layer, and scheduler abstraction. Parallel planned work now
-dispatches through scheduler-owned task runtimes; remaining recursive paths and
-`GraphRuntime` support queues are not the compute-service parallel dispatch
-contract.
+dispatches through scheduler-owned task runtimes. Graph-state commands and
+non-parallel compute enter an explicit per-graph `GraphStateExecutor` boundary
+instead of the scheduler dispatch path.
 
 The code is useful and testable, but some boundaries are not final. In
 particular, `Kernel` and `ComputeService` still coordinate a large amount of
@@ -60,6 +60,7 @@ graph TD
     Kernel --> PluginManager
 
     GraphRuntime --> GraphModel
+    GraphRuntime --> GraphStateExecutor
     GraphRuntime --> GraphEventService
     GraphRuntime --> IScheduler
 
@@ -80,7 +81,7 @@ graph TD
 | Component | Role |
 | --- | --- |
 | `Kernel` | Multi-graph facade, service owner, runtime bootstrapper, top-level graph/cache/compute API. |
-| `GraphRuntime` | Per-graph execution container with model, events, schedulers, worker state, and platform context. |
+| `GraphRuntime` | Per-graph resource container with model, graph-state executor, events, schedulers, and platform context. |
 | `GraphModel` | Graph state holder: private node storage, topology adjacency index, cache root, timing data, quiet/skip-save flags. |
 | `InteractionService` | CLI-facing wrapper around `Kernel`; keeps command code thin. |
 | `ComputeService` | Resolves dependencies, checks caches, executes ops, coordinates RT/HP/tiled paths and timing events. |
@@ -146,12 +147,14 @@ Built-in scheduler types:
 | `heterogeneous` | Alias for `gpu_pipeline`. |
 
 The CLI exposes scheduler controls through the `scheduler` REPL command. Default
-types and plugin directories are configured in `config.yaml`.
+types and plugin directories are configured in `config.yaml`; startup scans
+`scheduler_dirs` before graph load so plugin-provided default scheduler types are
+available during per-graph scheduler injection.
 
 `IScheduler` is the formal lifecycle interface, and scheduler-owned
 `SchedulerTaskRuntime` is the dispatch contract for compute-service planned
-parallel work. `GraphRuntime` worker queues remain support infrastructure, not
-the compute-service parallel dispatch API.
+parallel work. `GraphStateExecutor` is the separate access boundary for
+graph-state operations and non-parallel compute.
 
 ## Operation Registry
 

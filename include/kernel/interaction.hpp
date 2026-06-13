@@ -196,6 +196,37 @@ class InteractionService {
       const std::string& graph) {
     return kernel_.dirty_region_snapshot(graph);
   }
+  std::optional<compute::DirtyRegionSnapshot> cmd_begin_dirty_source(
+      const std::string& graph, int node_id, compute::DirtyDomain domain,
+      const cv::Rect& source_roi) {
+    return kernel_.begin_dirty_source(graph, node_id, domain, source_roi);
+  }
+  std::optional<compute::DirtyControlLaneResult> cmd_begin_dirty_source_control(
+      const std::string& graph, int node_id, compute::DirtyDomain domain,
+      const cv::Rect& source_roi) {
+    return kernel_.begin_dirty_source_control(graph, node_id, domain,
+                                              source_roi);
+  }
+  std::optional<compute::DirtyRegionSnapshot> cmd_update_dirty_source(
+      const std::string& graph, int node_id, compute::DirtyDomain domain,
+      const cv::Rect& source_roi) {
+    return kernel_.update_dirty_source(graph, node_id, domain, source_roi);
+  }
+  std::optional<compute::DirtyControlLaneResult>
+  cmd_update_dirty_source_control(const std::string& graph, int node_id,
+                                  compute::DirtyDomain domain,
+                                  const cv::Rect& source_roi) {
+    return kernel_.update_dirty_source_control(graph, node_id, domain,
+                                               source_roi);
+  }
+  std::optional<compute::DirtyRegionSnapshot> cmd_end_dirty_source(
+      const std::string& graph, int node_id, compute::DirtyDomain domain) {
+    return kernel_.end_dirty_source(graph, node_id, domain);
+  }
+  std::optional<compute::DirtyControlLaneResult> cmd_end_dirty_source_control(
+      const std::string& graph, int node_id, compute::DirtyDomain domain) {
+    return kernel_.end_dirty_source_control(graph, node_id, domain);
+  }
   std::optional<cv::Mat> cmd_compute_and_get_image(
       const std::string& graph, int node_id, const std::string& precision,
       bool force, bool timing, bool parallel, bool disable_disk_cache = false) {

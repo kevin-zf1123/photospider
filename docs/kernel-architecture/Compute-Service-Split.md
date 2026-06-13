@@ -98,6 +98,21 @@ derived from that lifecycle state, and the propagator derives the propagated
 It should not be modeled as a scheduler-owned compute task queue or as
 node-local compute ownership.
 
+Current production-facing lifecycle writes are exposed through `Kernel` and
+`InteractionService` begin/update/end dirty source methods. They serialize graph
+state mutation through `GraphStateExecutor` and route node/frontend lifecycle
+events through `DirtyControlLane`. The lane reuses `DirtyRegionPlanner` for
+membership, lifecycle, and actual dirty ROI refresh, and returns wakeup/cutoff
+decisions to the facade. Frontend event subscription and reusable request-plan
+coalescing remain follow-up work.
+
+Current constraint: `DirtyControlLane` does not own or cache a
+`ComputeTaskGraph`. It records graph-scoped dirty lifecycle state and wakeup
+intent; each compute request still materializes work from the current snapshot
+inside the compute-service planning boundary. Reusing one immutable request
+plan across multiple dirty generations remains a later optimization, not a
+scheduler responsibility.
+
 TODO: add richer dirty snapshot visualization after the frontend has a concrete
 mask/tile rendering contract.
 
@@ -218,8 +233,11 @@ the kernel. In the dirty-region context, it should expose graph-scoped dirty
 snapshot inspection and visualization APIs. It is not the authoritative source
 of dirty-region generation or propagation.
 
-`InteractionService` now exposes a dirty snapshot debug summary for inspection.
-It also exposes structured dependency-tree and graph-inspection snapshots so
+`InteractionService` now exposes dirty snapshot inspection plus dirty source
+begin/update/end control results. The control result includes generation,
+updating source count, dispatcher wakeup intent, and whether the latest source
+settle event should cut off only after downstream dirty work is complete. It
+also exposes structured dependency-tree and graph-inspection snapshots so
 frontends can parse graph structure before choosing a presentation format.
 
 The CLI/REPL frontend does not currently promise realtime update interaction
@@ -237,21 +255,10 @@ frontend display contract.
 
 ## Global HP Dirty ROI
 
-Current global HP compute with a dirty ROI may still trigger full recompute in
-some entry paths. This split should document that behavior and avoid changing
-it accidentally.
-
-Target HP dirty updates must accept dirty ROI and clip HP work from the
-high-precision task graph so large graphs and large images do not pay for
-unaffected work. The existing full-recompute behavior is a compatibility
-fallback only for entry points not yet routed through optimized HP dirty
-planning.
-
-The optimized partial-update path remains a TODO for any
-`GlobalHighPrecision` entry path that still reaches
-`run_global_high_precision_dirty_recompute`. Do not treat those paths as
-performance validation for dirty ROI; they preserve correctness by falling back
-to full recompute.
+Global HP compute with a dirty ROI routes through HP dirty planning. The HP
+dirty update accepts dirty ROI and clips HP work from the high-precision task
+graph so large graphs and large images do not pay for unaffected work. The
+coordinator records `intent_coordinator_global_dirty_update` for this path.
 
 ## Validation Expectations
 

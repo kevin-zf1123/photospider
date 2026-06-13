@@ -48,10 +48,23 @@ Required exports:
 | --- | --- | --- |
 | `get_count` | Yes | Number of scheduler types in the plugin. |
 | `get_name` | Yes | Type name at an index. |
-| `create` | Yes | Create an `IScheduler` instance for a type. |
+| `create` | Yes | Create a scheduler instance for a type. The returned object must implement both `IScheduler` and `SchedulerTaskRuntime`. |
 | `get_description` | No | Human-readable type description. |
 | `destroy` | Required for ownership | Destroy plugin-created scheduler instance. |
 | `get_version` | No | Plugin version string. |
+
+## Scheduler Instance Runtime Contract
+
+The current scheduler plugin instance is a C++ object returned as
+`ps::IScheduler*`, but the host also requires the same object to implement
+`ps::SchedulerTaskRuntime`. The loader validates this with `dynamic_cast` during
+creation. A plugin that exports valid C symbols and returns an `IScheduler`
+which does not also implement `SchedulerTaskRuntime` can be discovered, but it
+will be rejected when the host tries to instantiate that scheduler type.
+
+This is part of the current transitional C++ ABI. Plugin authors should inherit
+both interfaces in the concrete scheduler class until the long-term pure C ABI
+replaces this requirement.
 
 ## Scheduler Instance Ownership
 
@@ -78,8 +91,8 @@ opaque handles or callback tables so plugins do not depend on C++ binary ABI.
 
 - Operation plugins should use the published registration APIs and public data
   contracts.
-- Scheduler plugins should treat `IScheduler` ABI compatibility as version
-  sensitive.
+- Scheduler plugins should treat both `IScheduler` and `SchedulerTaskRuntime`
+  ABI compatibility as version sensitive.
 - Scheduler plugin authors should implement `ps_scheduler_plugin_destroy`.
 - The host should use plugin destroy for plugin-created scheduler instances.
 - Future C ABI work should be done as a separate compatibility change.

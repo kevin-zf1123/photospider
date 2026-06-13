@@ -4,7 +4,7 @@
 
 ## 运行时所有权
 
-`Kernel` 拥有从图名称到 `GraphRuntime` 实例的映射。每个 `GraphRuntime` 只拥有一个 `GraphModel`、事件服务、调度器映射、worker 状态和平台 context。
+`Kernel` 拥有从图名称到 `GraphRuntime` 实例的映射。每个 `GraphRuntime` 只拥有一个 `GraphModel`、graph-state executor、事件服务、调度器映射和平台 context。
 
 ```text
 Kernel

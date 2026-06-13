@@ -242,10 +242,12 @@ one with default values.
 | `scheduler_rt_type` | `cpu_work_stealing` | Default RT scheduler. |
 | `scheduler_worker_count` | `0` | CPU scheduler worker count; `0` means auto. |
 
-When the CLI loads a config file, these scheduler defaults are copied into
-`Kernel::SchedulerConfig` before any graph is loaded. Newly loaded graphs inherit
-the configured HP/RT scheduler types and worker count. Use `scheduler set
-<hp|rt> <type>` for an immediate per-graph scheduler switch.
+When the CLI loads a config file, it scans `scheduler_dirs` before graph load
+and then copies these scheduler defaults into `Kernel::SchedulerConfig`. Newly
+loaded graphs inherit the configured HP/RT scheduler types and worker count,
+including plugin-provided scheduler types discovered from configured
+directories. Use `scheduler set <hp|rt> <type>` for an immediate per-graph
+scheduler switch.
 
 `cache_root_dir` is applied before graph load as well. Relative values are
 resolved from the current working directory, and the graph cache root becomes

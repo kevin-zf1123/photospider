@@ -23,7 +23,7 @@ struct IntentUpdateDecision {
 
 struct IntentUpdateCallbacks {
   std::function<NodeOutput&()> run_global_high_precision;
-  std::function<NodeOutput&()> run_global_high_precision_dirty_recompute;
+  std::function<NodeOutput&()> run_global_high_precision_dirty_update;
   std::function<void()> run_high_precision_update;
   std::function<NodeOutput&()> run_real_time_update;
   std::function<NodeOutput&()> real_time_output;

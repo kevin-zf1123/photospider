@@ -17,8 +17,9 @@ CLI / TUI
   -> RoiPropagationService / GraphExtentResolver
 ```
 
-`Kernel` owns the multi-graph API. `GraphRuntime` owns one graph model, event
-service, worker state, platform context, and scheduler instances.
+`Kernel` owns the multi-graph API. `GraphRuntime` owns one graph model, the
+per-graph `GraphStateExecutor`, event service, platform context, and scheduler
+instances.
 
 `InteractionService` is the frontend-facing facade for kernel interaction. Its
 overall role is to decouple CLI/TUI/frontend commands from kernel internals. In
@@ -189,10 +190,11 @@ interaction has finished.
 
 Dirty-node lifecycle updates enter a serialized `DirtyControlLane` that updates
 dirty source state in the graph-scoped dirty snapshot, runs propagation to
-refresh `actual_dirty_region`, and wakes the dispatcher. The scheduler receives
-only ready task callbacks with epoch/generation metadata and optional
-scheduler-specific hints; it does not receive task graphs, own the dirty control
-lane, or own compute-service dirty queues.
+refresh `actual_dirty_region`, and returns wakeup/cutoff decisions to the
+`Kernel` / `InteractionService` facade. The scheduler receives only ready task
+callbacks with epoch/generation metadata and optional scheduler-specific hints;
+it does not receive task graphs, own the dirty control lane, or own
+compute-service dirty queues.
 
 ## Graph-State Access and Commit Policy
 
@@ -200,11 +202,11 @@ Graph-state operations such as YAML loading, cache commands, inspection, and
 ROI projection are operations on the visible `GraphModel`. They are not
 compute-task dispatch and should not be routed through `SchedulerTaskRuntime`.
 
-The current default is per-graph exclusive access: compute and graph-state
-operations for the same graph do not concurrently read or mutate the visible
-`GraphModel`. This keeps graph topology, cache fields, dirty snapshots, timing,
-and node runtime state coherent while the legacy `GraphRuntime` worker queue is
-removed.
+The current default is per-graph exclusive access through
+`GraphStateExecutor`: graph-state operations and non-parallel compute for the
+same graph do not concurrently read or mutate the visible `GraphModel`. This
+keeps graph topology, cache fields, dirty snapshots, timing, and node runtime
+state coherent without routing non-compute commands through scheduler queues.
 
 Future work may add a `ComputeCommitPolicy` separate from `ComputeIntent`.
 `DirectGraphCommit` keeps the current behavior, where compute writes visible
@@ -218,21 +220,16 @@ semantics are independent from commit and interruption behavior.
 ## GlobalHighPrecision
 
 `GlobalHighPrecision` is the full-quality path. Without a dirty ROI it performs
-normal full compute. With current code, a dirty ROI on global compute may still
-trigger full recompute in some entry paths.
+normal full compute. With a dirty ROI it enters the HP dirty update path instead
+of the former full-recompute fallback.
 
 HP dirty-region update is a first-class dirty-ROI consumer, not just a full
 recompute fallback. It computes a backward ROI plan, aligns dirty regions to HP
 tile boundaries, clips the HP work set from the request's `ComputeTaskGraph`,
 updates affected HP tiles, records HP ROI/version metadata, and can schedule
-downsample work to refresh RT transient state. The current full-recompute
-fallback remains a compatibility path for entry points that have not yet been
-routed through optimized HP dirty planning.
-
-TODO: optimized partial HP dirty planning is not complete for every
-`GlobalHighPrecision` entry path. Treat a dirty ROI on global compute as a
-compatibility hint that can still force full recompute; performance-sensitive
-callers must not assume ROI-bounded HP work until this TODO is closed.
+downsample work to refresh RT transient state. `IntentUpdateCoordinator` routes
+global HP dirty requests to this path and records
+`intent_coordinator_global_dirty_update`.
 
 Dirty-region state planning now runs through the graph-scoped
 `DirtyRegionPlanner`, and the resulting `DirtyRegionSnapshot` feeds dirty
@@ -263,8 +260,11 @@ pruning, and dirty snapshot pruning as separate contracts so future task pools
 or modes can reuse the same boundaries with their own domain.
 
 The passed dirty ROI is converted into graph-scoped planner state for the
-current request. TODO: node-local dirty reports should become the origin source
-for future frontend-driven dirty-region updates.
+current request. `Kernel` and `InteractionService` expose begin/update/end dirty
+source lifecycle methods so frontend or node-facing code can write source
+lifecycle state through the same graph-owned boundary. TODO: node-local dirty
+reports should become the origin source for future frontend-driven dirty-region
+updates.
 
 TODO: design the node-to-`InteractionService` boundary for realtime dirty
 updates. The design must define how nodes emit realtime events, dirty regions,

@@ -12,6 +12,7 @@
 
 #include "kernel/graph_runtime.hpp"
 #include "kernel/plugin_manager.hpp"
+#include "kernel/services/compute-service/dirty_control_lane.hpp"
 #include "kernel/services/compute_service.hpp"
 #include "kernel/services/graph_cache_service.hpp"
 #include "kernel/services/graph_inspect_service.hpp"
@@ -44,7 +45,7 @@ class Kernel {
     if (it == graphs_.end()) {
       throw std::runtime_error("Graph not found: " + name);
     }
-    return it->second->post(std::forward<Fn>(fn));
+    return it->second->graph_state().submit(std::forward<Fn>(fn));
   }
 
   bool compute(const std::string& name, int node_id,
@@ -125,6 +126,22 @@ class Kernel {
       const std::string& name);
   std::optional<compute::DirtyRegionSnapshot> dirty_region_snapshot(
       const std::string& name);
+  std::optional<compute::DirtyRegionSnapshot> begin_dirty_source(
+      const std::string& name, int node_id, compute::DirtyDomain domain,
+      const cv::Rect& source_roi);
+  std::optional<compute::DirtyControlLaneResult> begin_dirty_source_control(
+      const std::string& name, int node_id, compute::DirtyDomain domain,
+      const cv::Rect& source_roi);
+  std::optional<compute::DirtyRegionSnapshot> update_dirty_source(
+      const std::string& name, int node_id, compute::DirtyDomain domain,
+      const cv::Rect& source_roi);
+  std::optional<compute::DirtyControlLaneResult> update_dirty_source_control(
+      const std::string& name, int node_id, compute::DirtyDomain domain,
+      const cv::Rect& source_roi);
+  std::optional<compute::DirtyRegionSnapshot> end_dirty_source(
+      const std::string& name, int node_id, compute::DirtyDomain domain);
+  std::optional<compute::DirtyControlLaneResult> end_dirty_source_control(
+      const std::string& name, int node_id, compute::DirtyDomain domain);
   std::optional<cv::Mat> compute_and_get_image(
       const std::string& name, int node_id, const std::string& cache_precision,
       bool force_recache, bool enable_timing, bool parallel,
@@ -188,7 +205,8 @@ class Kernel {
       const std::string& name, ComputeIntent intent) const;
 
  private:
-  void setup_schedulers_for_runtime(GraphRuntime& runtime);
+  void setup_schedulers_for_runtime(const std::string& name,
+                                    GraphRuntime& runtime);
 
   std::map<std::string, std::unique_ptr<GraphRuntime>> graphs_;
   PluginManager plugin_mgr_;

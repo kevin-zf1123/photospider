@@ -65,6 +65,9 @@ GpuPipelineScheduler::~GpuPipelineScheduler() {
 
 void GpuPipelineScheduler::attach(GraphRuntime* runtime) {
   runtime_ = runtime;
+  if (running_.load(std::memory_order_acquire)) {
+    start_gpu_workers_if_available();
+  }
 }
 
 void GpuPipelineScheduler::detach() {
@@ -73,6 +76,7 @@ void GpuPipelineScheduler::detach() {
 
 void GpuPipelineScheduler::start() {
   if (running_.load(std::memory_order_acquire)) {
+    start_gpu_workers_if_available();
     return;
   }
 
@@ -100,15 +104,7 @@ void GpuPipelineScheduler::start() {
                               static_cast<int>(i));
   }
 
-  // Start GPU workers (if GPU is available)
-  if (is_gpu_available()) {
-    num_gpu_workers_ = config_.gpu_workers;
-    gpu_workers_.reserve(num_gpu_workers_);
-    for (unsigned int i = 0; i < num_gpu_workers_; ++i) {
-      gpu_workers_.emplace_back(&GpuPipelineScheduler::gpu_run_loop, this,
-                                static_cast<int>(num_cpu_workers_ + i));
-    }
-  }
+  start_gpu_workers_if_available();
 }
 
 void GpuPipelineScheduler::shutdown() {
@@ -139,6 +135,7 @@ void GpuPipelineScheduler::shutdown() {
     }
   }
   gpu_workers_.clear();
+  num_gpu_workers_ = 0;
 
   // Drain pending tasks
   {
@@ -240,7 +237,7 @@ void GpuPipelineScheduler::submit_ready_task_any_thread(
     submit_rt_task(std::move(task), resolved_epoch);
     return;
   }
-  if (config_.prefer_gpu_for_hp && is_gpu_available()) {
+  if (can_dispatch_hp_to_gpu()) {
     submit_gpu_task(std::move(task), resolved_epoch);
   } else {
     submit_hp_task(std::move(task), resolved_epoch);
@@ -380,6 +377,30 @@ bool GpuPipelineScheduler::is_gpu_available() const {
 #else
   return false;
 #endif
+}
+
+void GpuPipelineScheduler::start_gpu_workers_if_available() {
+  if (!is_gpu_available() || config_.gpu_workers == 0 || num_gpu_workers_ > 0) {
+    return;
+  }
+
+  num_gpu_workers_ = config_.gpu_workers;
+  gpu_workers_.reserve(num_gpu_workers_);
+  for (unsigned int i = 0; i < num_gpu_workers_; ++i) {
+    gpu_workers_.emplace_back(&GpuPipelineScheduler::gpu_run_loop, this,
+                              static_cast<int>(num_cpu_workers_ + i));
+  }
+}
+
+bool GpuPipelineScheduler::can_dispatch_hp_to_gpu() const {
+  if (!config_.prefer_gpu_for_hp || !is_gpu_available() ||
+      config_.gpu_workers == 0) {
+    return false;
+  }
+  if (!running_.load(std::memory_order_acquire)) {
+    return true;
+  }
+  return num_gpu_workers_ > 0;
 }
 
 std::vector<Device> GpuPipelineScheduler::get_available_devices() const {

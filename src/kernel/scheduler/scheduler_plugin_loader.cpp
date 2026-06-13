@@ -39,8 +39,9 @@ class PluginSchedulerOwner final : public IScheduler,
                                    public SchedulerTaskRuntime {
  public:
   PluginSchedulerOwner(IScheduler* scheduler, void (*destroy)(IScheduler*),
-                       std::shared_ptr<void> library)
-      : scheduler_(scheduler),
+                       std::shared_ptr<void> library, std::string type_name)
+      : type_name_(std::move(type_name)),
+        scheduler_(scheduler),
         task_runtime_(dynamic_cast<SchedulerTaskRuntime*>(scheduler)),
         destroy_(destroy),
         library_(std::move(library)) {}
@@ -59,7 +60,7 @@ class PluginSchedulerOwner final : public IScheduler,
   void start() override { scheduler_->start(); }
   void shutdown() override { scheduler_->shutdown(); }
 
-  std::string name() const override { return scheduler_->name(); }
+  std::string name() const override { return type_name_; }
   std::string get_stats() const override { return scheduler_->get_stats(); }
   bool is_running() const override { return scheduler_->is_running(); }
 
@@ -118,6 +119,7 @@ class PluginSchedulerOwner final : public IScheduler,
     return *task_runtime_;
   }
 
+  std::string type_name_;
   IScheduler* scheduler_ = nullptr;
   SchedulerTaskRuntime* task_runtime_ = nullptr;
   void (*destroy_)(IScheduler*) = nullptr;
@@ -473,7 +475,7 @@ std::unique_ptr<IScheduler> SchedulerPluginLoader::create(
   }
 
   return std::make_unique<PluginSchedulerOwner>(raw_ptr, handle.destroy,
-                                                handle.library);
+                                                handle.library, type_name);
 }
 
 void SchedulerPluginLoader::register_builtin(

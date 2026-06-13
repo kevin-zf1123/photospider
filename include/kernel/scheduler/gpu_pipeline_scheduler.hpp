@@ -170,6 +170,12 @@ class GpuPipelineScheduler : public IScheduler, public SchedulerTaskRuntime {
   // GPU 工作线程主循环
   void gpu_run_loop(int thread_id);
 
+  // 在 runtime attach 后按需启动 GPU worker。
+  void start_gpu_workers_if_available();
+
+  // HP 任务是否可以安全进入 GPU 队列。
+  bool can_dispatch_hp_to_gpu() const;
+
   // 从其他工作线程窃取任务
   std::optional<ScheduledTask> steal_task(int stealer_id);
 

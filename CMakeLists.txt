@@ -138,6 +138,7 @@ set(COMPUTE_SOURCES
     src/kernel/services/compute-service/compute_geometry.cpp
     src/kernel/services/compute-service/compute_metrics_recorder.cpp
     src/kernel/services/compute-service/task_graph_planning.cpp
+    src/kernel/services/compute-service/dirty_control_lane.cpp
     src/kernel/services/compute-service/dirty_region_planner.cpp
     src/kernel/services/compute-service/intent_update_coordinator.cpp
     src/kernel/services/compute-service/node_executor.cpp
@@ -253,12 +254,31 @@ endforeach()
 set(SCHEDULER_PLUGIN_DIR ${CMAKE_BINARY_DIR}/schedulers)
 file(MAKE_DIRECTORY ${SCHEDULER_PLUGIN_DIR})
 
-# 查找所有调度器插件源文件
-file(GLOB SCHEDULER_PLUGIN_SOURCES "scheduler_plugins/*.cpp")
+# Production/demo scheduler plugins. Test-only fixtures are built into a
+# separate directory below so config.yaml's default scheduler_dirs does not
+# expose lifecycle test schedulers to users.
+file(GLOB SCHEDULER_PLUGIN_SOURCES "scheduler_plugins/*_example_plugin.cpp")
+
+# Remove stale lifecycle fixture outputs left by older build trees.
+file(REMOVE
+    "${SCHEDULER_PLUGIN_DIR}/libdestroy_count_scheduler_plugin.dylib"
+    "${SCHEDULER_PLUGIN_DIR}/libdestroy_count_scheduler_plugin.so"
+    "${SCHEDULER_PLUGIN_DIR}/destroy_count_scheduler_plugin.dll"
+    "${SCHEDULER_PLUGIN_DIR}/libcpu_work_stealing_plugin.dylib"
+    "${SCHEDULER_PLUGIN_DIR}/libcpu_work_stealing_plugin.so"
+    "${SCHEDULER_PLUGIN_DIR}/cpu_work_stealing_plugin.dll"
+    "${SCHEDULER_PLUGIN_DIR}/libgpu_pipeline_plugin.dylib"
+    "${SCHEDULER_PLUGIN_DIR}/libgpu_pipeline_plugin.so"
+    "${SCHEDULER_PLUGIN_DIR}/gpu_pipeline_plugin.dll"
+    "${SCHEDULER_PLUGIN_DIR}/libserial_debug_plugin.dylib"
+    "${SCHEDULER_PLUGIN_DIR}/libserial_debug_plugin.so"
+    "${SCHEDULER_PLUGIN_DIR}/serial_debug_plugin.dll"
+)
 
 foreach(SCHEDULER_SOURCE ${SCHEDULER_PLUGIN_SOURCES})
     get_filename_component(SCHEDULER_NAME ${SCHEDULER_SOURCE} NAME_WE)
     add_library(${SCHEDULER_NAME} SHARED ${SCHEDULER_SOURCE})
+    list(APPEND SCHEDULER_PLUGIN_TARGETS ${SCHEDULER_NAME})
     
     set_target_properties(${SCHEDULER_NAME} PROPERTIES
         LIBRARY_OUTPUT_DIRECTORY "${SCHEDULER_PLUGIN_DIR}"
@@ -279,6 +299,31 @@ foreach(SCHEDULER_SOURCE ${SCHEDULER_PLUGIN_SOURCES})
     )
     target_link_libraries(${SCHEDULER_NAME} PRIVATE photospider_lib)
 endforeach()
+
+if(BUILD_TESTING)
+    set(TEST_SCHEDULER_PLUGIN_DIR ${CMAKE_BINARY_DIR}/test_schedulers)
+    file(MAKE_DIRECTORY ${TEST_SCHEDULER_PLUGIN_DIR})
+
+    add_library(destroy_count_scheduler_plugin SHARED
+        tests/fixtures/scheduler_plugins/destroy_count_scheduler_plugin.cpp
+    )
+    set_target_properties(destroy_count_scheduler_plugin PROPERTIES
+        LIBRARY_OUTPUT_DIRECTORY "${TEST_SCHEDULER_PLUGIN_DIR}"
+        BUILD_RPATH "${CMAKE_BINARY_DIR}/lib"
+        INSTALL_RPATH "$ORIGIN/../lib"
+    )
+    if(APPLE)
+        set_target_properties(destroy_count_scheduler_plugin PROPERTIES
+            MACOSX_RPATH ON
+            INSTALL_RPATH "@loader_path/../lib"
+        )
+    endif()
+    target_include_directories(destroy_count_scheduler_plugin PRIVATE
+        "${PROJECT_SOURCE_DIR}/include"
+        "${PROJECT_SOURCE_DIR}/src"
+    )
+    target_link_libraries(destroy_count_scheduler_plugin PRIVATE photospider_lib)
+endif()
 
 # ==============================================================================
 # 7. Metal Support (Apple Only)
@@ -382,6 +427,10 @@ if(BUILD_TESTING)
     # [M3.5] 调度器插件加载器测试
     add_ps_test(test_scheduler_plugin_loader tests/test_scheduler_plugin_loader.cpp)
     target_link_libraries(test_scheduler_plugin_loader PRIVATE ${CMAKE_DL_LIBS})
+    add_dependencies(test_scheduler_plugin_loader
+        ${SCHEDULER_PLUGIN_TARGETS}
+        destroy_count_scheduler_plugin
+    )
     
     gtest_discover_tests(test_scheduler WORKING_DIRECTORY ${PROJECT_SOURCE_DIR})
     gtest_discover_tests(test_milestone2 WORKING_DIRECTORY ${PROJECT_SOURCE_DIR})

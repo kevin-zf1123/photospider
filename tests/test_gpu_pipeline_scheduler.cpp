@@ -375,7 +375,6 @@ TEST(GpuPipelineIntegrationTest, SchedulerWithRuntime) {
   config.force_cpu_for_rt = true;
 
   auto scheduler = std::make_unique<GpuPipelineScheduler>(config);
-  scheduler->start();
   runtime.set_scheduler(ComputeIntent::GlobalHighPrecision,
                         std::move(scheduler));
 
@@ -424,13 +423,11 @@ TEST(GpuPipelineIntegrationTest, DualSchedulerConcurrentExecution) {
   gpu_config.cpu_workers = 2;
   gpu_config.prefer_gpu_for_hp = true;
   auto hp_scheduler = std::make_unique<GpuPipelineScheduler>(gpu_config);
-  hp_scheduler->start();
   runtime.set_scheduler(ComputeIntent::GlobalHighPrecision,
                         std::move(hp_scheduler));
 
   // 为 RT 设置 CPU Work-Stealing 调度器（高优先级）
   auto rt_scheduler = std::make_unique<CpuWorkStealingScheduler>(4);
-  rt_scheduler->start();
   runtime.set_scheduler(ComputeIntent::RealTimeUpdate, std::move(rt_scheduler));
 
   auto endings = svc.cmd_ending_nodes(graph_name);

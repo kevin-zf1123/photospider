@@ -8,14 +8,18 @@
 #include "adapter/buffer_adapter_opencv.hpp"
 #include "graph_model.hpp"
 #include "kernel/graph_runtime.hpp"
+#include "kernel/interaction.hpp"
 #include "kernel/services/compute-service/compute_cache_policy.hpp"
 #include "kernel/services/compute-service/compute_geometry.hpp"
 #include "kernel/services/compute-service/compute_metrics_recorder.hpp"
-#include "kernel/services/compute-service/task_graph_planning.hpp"
 #include "kernel/services/compute-service/dirty_region_planner.hpp"
 #include "kernel/services/compute-service/intent_update_coordinator.hpp"
 #include "kernel/services/compute-service/node_executor.hpp"
 #include "kernel/services/compute-service/node_input_resolver.hpp"
+#include "kernel/services/compute-service/task_graph_planning.hpp"
+#include "kernel/services/compute_service.hpp"
+#include "kernel/services/graph_cache_service.hpp"
+#include "kernel/services/graph_event_service.hpp"
 #include "kernel/services/graph_traversal_service.hpp"
 #include "kernel/services/roi_propagation_service.hpp"
 
@@ -65,17 +69,17 @@ void register_split_ops() {
     micro_meta.tile_preference = ps::TileSizePreference::MICRO;
     registry.register_op_hp_tiled(
         "split_plan", "tile",
-        TileOpFunc([](const Node&, const Tile& output_tile,
-                      const std::vector<Tile>&) {
-          toCvMat(output_tile).setTo(2.0f);
-        }),
+        TileOpFunc(
+            [](const Node&, const Tile& output_tile, const std::vector<Tile>&) {
+              toCvMat(output_tile).setTo(2.0f);
+            }),
         micro_meta);
     registry.register_op_rt_tiled(
         "split_plan", "tile",
-        TileOpFunc([](const Node&, const Tile& output_tile,
-                      const std::vector<Tile>&) {
-          toCvMat(output_tile).setTo(2.0f);
-        }),
+        TileOpFunc(
+            [](const Node&, const Tile& output_tile, const std::vector<Tile>&) {
+              toCvMat(output_tile).setTo(2.0f);
+            }),
         micro_meta);
   });
 }
@@ -316,10 +320,10 @@ TEST(DirtyRegionPlannerSplit,
   RoiPropagationService propagation;
   compute::DirtyRegionPlanner planner(traversal, propagation);
 
-  EXPECT_THROW(planner.begin_dirty_source(
-                   graph, 99, compute::DirtyDomain::HighPrecision,
-                   cv::Rect(0, 0, 8, 8)),
-               GraphError);
+  EXPECT_THROW(
+      planner.begin_dirty_source(graph, 99, compute::DirtyDomain::HighPrecision,
+                                 cv::Rect(0, 0, 8, 8)),
+      GraphError);
   EXPECT_THROW(planner.begin_dirty_source(
                    graph, 10, compute::DirtyDomain::HighPrecision, cv::Rect()),
                GraphError);
@@ -394,10 +398,10 @@ TEST(TaskGraphPlanningSplit, PreservesSequentialParallelPlanParity) {
       node_cache_pruned_plan(graph, parallel, execution_order);
   const auto sequential_plan =
       dirty_snapshot_pruned_plan(sequential_base, snapshot);
-  const auto parallel_plan = dirty_snapshot_pruned_plan(parallel_base, snapshot);
+  const auto parallel_plan =
+      dirty_snapshot_pruned_plan(parallel_base, snapshot);
   EXPECT_EQ(sequential_plan.planned_nodes, parallel_plan.planned_nodes);
-  EXPECT_EQ(sequential_plan.planned_nodes,
-            (std::vector<int>{10, 42, 100}));
+  EXPECT_EQ(sequential_plan.planned_nodes, (std::vector<int>{10, 42, 100}));
   ASSERT_EQ(sequential_plan.planned_work.size(), 3u);
   EXPECT_EQ(sequential_plan.planned_work[1].node_id, 42);
   EXPECT_EQ(sequential_plan.planned_work[1].represented_hp_roi,
@@ -442,8 +446,7 @@ TEST(TaskGraphPlanningSplit, PreservesSequentialParallelPlanParity) {
             parallel_plan.task_graph.tasks.size());
 }
 
-TEST(TaskGraphPlanningSplit,
-     ExpandsFullGraphBeforeNodeCachePruning) {
+TEST(TaskGraphPlanningSplit, ExpandsFullGraphBeforeNodeCachePruning) {
   register_split_ops();
   GraphModel graph("cache/split-full-tile-plan");
   Node source = make_node(1, "split_plan", "tile");
@@ -540,7 +543,8 @@ TEST(TaskGraphPlanningSplit,
       << "source-boundary dependencies are satisfied by the source lane";
 }
 
-TEST(TaskGraphPlanningSplit, DirtySnapshotTaskGraphPrunerFiltersCrossDomainEdges) {
+TEST(TaskGraphPlanningSplit,
+     DirtySnapshotTaskGraphPrunerFiltersCrossDomainEdges) {
   register_split_ops();
   GraphModel graph("cache/split-cross-domain-pruner");
   Node source = make_node(1, "split_plan", "tile");
@@ -613,13 +617,15 @@ TEST(IntentUpdateCoordinatorSplit,
 
   bool ran_hp = false;
   bool ran_rt = false;
+  bool ran_global_dirty = false;
   std::vector<std::string> stages;
   NodeOutput rt_output = make_image_output(4, 4);
   compute::IntentUpdateCallbacks callbacks;
   callbacks.run_global_high_precision = [&]() -> NodeOutput& {
     return rt_output;
   };
-  callbacks.run_global_high_precision_dirty_recompute = [&]() -> NodeOutput& {
+  callbacks.run_global_high_precision_dirty_update = [&]() -> NodeOutput& {
+    ran_global_dirty = true;
     return rt_output;
   };
   callbacks.run_high_precision_update = [&]() { ran_hp = true; };
@@ -649,6 +655,21 @@ TEST(IntentUpdateCoordinatorSplit,
       std::find(stages.begin(), stages.end(), "intent_coordinator_inline_rt"),
       stages.end());
 
+  stages.clear();
+  NodeOutput& coordinated_global_dirty =
+      compute::IntentUpdateCoordinator::coordinate_intent_update(
+          ComputeIntent::GlobalHighPrecision, nullptr, nullptr,
+          cv::Rect(0, 0, 4, 4), callbacks);
+  EXPECT_EQ(&coordinated_global_dirty, &rt_output);
+  EXPECT_TRUE(ran_global_dirty);
+  EXPECT_NE(std::find(stages.begin(), stages.end(),
+                      "intent_coordinator_global_dirty_update"),
+            stages.end());
+  EXPECT_FALSE(
+      std::any_of(stages.begin(), stages.end(), [](const std::string& stage) {
+        return stage.find("full_recompute") != std::string::npos;
+      }));
+
   ran_hp = false;
   ran_rt = false;
   stages.clear();
@@ -662,6 +683,137 @@ TEST(IntentUpdateCoordinatorSplit,
   EXPECT_NE(std::find(stages.begin(), stages.end(),
                       "intent_coordinator_decision_inline"),
             stages.end());
+}
+
+TEST(GlobalHighPrecisionDirtyUpdate, UsesDirtyPlanningForGlobalHpDirtyRoi) {
+  register_split_ops();
+  GraphModel graph("cache/global-hp-dirty-update");
+  Node source = make_node(1, "split_plan", "source");
+  source.parameters["width"] = 64;
+  source.parameters["height"] = 64;
+  graph.add_node(source);
+  Node downstream = make_node(2, "split_plan", "tile");
+  downstream.image_inputs.push_back({1, "image"});
+  graph.add_node(downstream);
+  graph.rebuild_topology_index();
+
+  GraphTraversalService traversal;
+  GraphCacheService cache;
+  GraphEventService events;
+  ComputeService compute(traversal, cache, events);
+
+  NodeOutput& output = compute.compute(
+      graph, ComputeIntent::GlobalHighPrecision, 2, "float32",
+      false /* force */, false /* timing */, true /* disable disk cache */,
+      nullptr, cv::Rect(8, 8, 16, 16));
+
+  EXPECT_EQ(output.image_buffer.width, 64);
+  EXPECT_EQ(output.image_buffer.height, 64);
+  ASSERT_TRUE(graph.last_dirty_region_snapshot.has_value());
+  EXPECT_FALSE(graph.last_dirty_region_snapshot->actual_dirty_rois.empty());
+  ASSERT_TRUE(graph.last_compute_plan.has_value());
+  EXPECT_EQ(graph.last_compute_plan->intent,
+            ComputeIntent::GlobalHighPrecision);
+  EXPECT_EQ(graph.last_compute_plan->target_node_id, 2);
+  EXPECT_FALSE(graph.last_compute_plan->task_graph.tasks.empty());
+  EXPECT_TRUE(std::any_of(
+      graph.last_compute_plan->task_graph.tasks.begin(),
+      graph.last_compute_plan->task_graph.tasks.end(),
+      [](const compute::PlannedTask& task) { return task.dirty_selected; }));
+
+  auto recorded_events = events.drain();
+  EXPECT_TRUE(std::any_of(recorded_events.begin(), recorded_events.end(),
+                          [](const GraphEventService::ComputeEvent& event) {
+                            return event.source ==
+                                   "intent_coordinator_global_dirty_update";
+                          }));
+  EXPECT_TRUE(std::any_of(recorded_events.begin(), recorded_events.end(),
+                          [](const GraphEventService::ComputeEvent& event) {
+                            return event.source == "hp_update";
+                          }));
+}
+
+TEST(DirtySourceLifecycleFacade, UsesInteractionServicePublicBoundary) {
+  Kernel kernel;
+  InteractionService svc(kernel);
+  svc.cmd_seed_builtin_ops();
+
+  auto loaded = svc.cmd_load_graph("dirty_facade", "sessions",
+                                   "util/testcases/dirty_region_test.yaml");
+  ASSERT_TRUE(loaded.has_value());
+
+  auto begin = svc.cmd_begin_dirty_source(
+      *loaded, 1, compute::DirtyDomain::HighPrecision, cv::Rect(0, 0, 32, 32));
+  ASSERT_TRUE(begin.has_value());
+  EXPECT_EQ(begin->graph_generation, 1u);
+  EXPECT_EQ(begin->dirty_updating_count, 1u);
+  ASSERT_TRUE(begin->dirty_source_state.count(1));
+  EXPECT_EQ(begin->dirty_source_state.at(1).lifecycle,
+            compute::DirtySourceLifecycleState::Updating);
+
+  auto update = svc.cmd_update_dirty_source(*loaded, 1,
+                                            compute::DirtyDomain::HighPrecision,
+                                            cv::Rect(16, 16, 16, 16));
+  ASSERT_TRUE(update.has_value());
+  EXPECT_EQ(update->graph_generation, begin->graph_generation);
+  ASSERT_TRUE(update->source_roi_records.count(1));
+  EXPECT_EQ(update->source_roi_records.at(1).size(), 2u);
+
+  auto snapshot = svc.cmd_dirty_region_snapshot(*loaded);
+  ASSERT_TRUE(snapshot.has_value());
+  EXPECT_EQ(snapshot->graph_generation, update->graph_generation);
+  EXPECT_TRUE(snapshot->actual_dirty_rois.count(1));
+
+  auto end =
+      svc.cmd_end_dirty_source(*loaded, 1, compute::DirtyDomain::HighPrecision);
+  ASSERT_TRUE(end.has_value());
+  EXPECT_EQ(end->dirty_updating_count, 0u);
+  ASSERT_TRUE(end->dirty_source_state.count(1));
+  EXPECT_EQ(end->dirty_source_state.at(1).lifecycle,
+            compute::DirtySourceLifecycleState::Settled);
+}
+
+TEST(DirtyControlLaneFacade, ExposesWakeupAndCutoffThroughInteractionService) {
+  Kernel kernel;
+  InteractionService svc(kernel);
+  svc.cmd_seed_builtin_ops();
+
+  auto loaded = svc.cmd_load_graph("dirty_control_lane", "sessions",
+                                   "util/testcases/dirty_region_test.yaml");
+  ASSERT_TRUE(loaded.has_value());
+
+  auto begin = svc.cmd_begin_dirty_source_control(
+      *loaded, 1, compute::DirtyDomain::HighPrecision, cv::Rect(0, 0, 32, 32));
+  ASSERT_TRUE(begin.has_value());
+  EXPECT_EQ(begin->event, compute::DirtyControlEvent::Begin);
+  EXPECT_EQ(begin->generation, 1u);
+  EXPECT_EQ(begin->dirty_updating_count, 1u);
+  EXPECT_TRUE(begin->should_wake_dispatcher);
+  EXPECT_FALSE(begin->cutoff_after_downstream);
+
+  auto update = svc.cmd_update_dirty_source_control(
+      *loaded, 1, compute::DirtyDomain::HighPrecision,
+      cv::Rect(16, 16, 16, 16));
+  ASSERT_TRUE(update.has_value());
+  EXPECT_EQ(update->event, compute::DirtyControlEvent::Update);
+  EXPECT_EQ(update->generation, begin->generation);
+  EXPECT_EQ(update->dirty_updating_count, 1u);
+  EXPECT_TRUE(update->should_wake_dispatcher);
+  EXPECT_FALSE(update->cutoff_after_downstream);
+  ASSERT_TRUE(update->snapshot.source_roi_records.count(1));
+  EXPECT_EQ(update->snapshot.source_roi_records.at(1).size(), 2u);
+
+  auto end = svc.cmd_end_dirty_source_control(
+      *loaded, 1, compute::DirtyDomain::HighPrecision);
+  ASSERT_TRUE(end.has_value());
+  EXPECT_EQ(end->event, compute::DirtyControlEvent::End);
+  EXPECT_EQ(end->generation, begin->generation);
+  EXPECT_EQ(end->dirty_updating_count, 0u);
+  EXPECT_TRUE(end->should_wake_dispatcher);
+  EXPECT_TRUE(end->cutoff_after_downstream);
+  ASSERT_TRUE(end->snapshot.dirty_source_state.count(1));
+  EXPECT_EQ(end->snapshot.dirty_source_state.at(1).lifecycle,
+            compute::DirtySourceLifecycleState::Settled);
 }
 
 }  // namespace ps

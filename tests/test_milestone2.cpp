@@ -33,6 +33,7 @@ class MockScheduler : public IScheduler, public SchedulerTaskRuntime {
   }
 
   void start() override {
+    runtime_at_start_ = runtime_;
     running_ = true;
     start_called_ = true;
   }
@@ -106,6 +107,7 @@ class MockScheduler : public IScheduler, public SchedulerTaskRuntime {
   bool was_start_called() const { return start_called_; }
   bool was_shutdown_called() const { return shutdown_called_; }
   GraphRuntime* attached_runtime() const { return runtime_; }
+  GraphRuntime* runtime_at_start() const { return runtime_at_start_; }
   int tasks_to_complete() const { return tasks_to_complete_.load(); }
   SchedulerTaskPriority last_priority() const { return last_priority_; }
   uint64_t last_epoch() const { return last_epoch_; }
@@ -114,6 +116,7 @@ class MockScheduler : public IScheduler, public SchedulerTaskRuntime {
 
  private:
   GraphRuntime* runtime_ = nullptr;
+  GraphRuntime* runtime_at_start_ = nullptr;
   bool running_ = false;
   bool attach_called_ = false;
   bool detach_called_ = false;
@@ -231,6 +234,55 @@ TEST_F(GraphRuntimeSchedulerTest, SetAndGetScheduler) {
   EXPECT_TRUE(runtime.has_scheduler(ComputeIntent::RealTimeUpdate));
   EXPECT_EQ(runtime.get_scheduler(ComputeIntent::RealTimeUpdate), rt_ptr);
   EXPECT_TRUE(runtime.has_scheduler(ComputeIntent::GlobalHighPrecision));
+}
+
+TEST_F(GraphRuntimeSchedulerTest, StartStartsAttachedSchedulers) {
+  GraphRuntime::Info info{"scheduler_test", "sessions/scheduler_test_session",
+                          "", ""};
+
+  GraphRuntime runtime(info);
+
+  auto scheduler = std::make_unique<MockScheduler>();
+  MockScheduler* scheduler_ptr = scheduler.get();
+  runtime.set_scheduler(ComputeIntent::GlobalHighPrecision,
+                        std::move(scheduler));
+
+  EXPECT_TRUE(scheduler_ptr->was_attach_called());
+  EXPECT_FALSE(scheduler_ptr->was_start_called());
+  EXPECT_FALSE(scheduler_ptr->is_running());
+
+  runtime.start();
+
+  EXPECT_TRUE(scheduler_ptr->was_start_called());
+  EXPECT_TRUE(scheduler_ptr->is_running());
+  EXPECT_EQ(scheduler_ptr->runtime_at_start(), &runtime);
+
+  runtime.stop();
+
+  EXPECT_TRUE(scheduler_ptr->was_shutdown_called());
+  EXPECT_FALSE(scheduler_ptr->is_running());
+}
+
+TEST_F(GraphRuntimeSchedulerTest,
+       SetSchedulerOnRunningRuntimeStartsAfterAttach) {
+  GraphRuntime::Info info{"scheduler_test", "sessions/scheduler_test_session",
+                          "", ""};
+
+  GraphRuntime runtime(info);
+  runtime.start();
+
+  auto scheduler = std::make_unique<MockScheduler>();
+  MockScheduler* scheduler_ptr = scheduler.get();
+  runtime.set_scheduler(ComputeIntent::GlobalHighPrecision,
+                        std::move(scheduler));
+
+  EXPECT_TRUE(scheduler_ptr->was_attach_called());
+  EXPECT_TRUE(scheduler_ptr->was_start_called());
+  EXPECT_TRUE(scheduler_ptr->is_running());
+  EXPECT_EQ(scheduler_ptr->attached_runtime(), &runtime);
+  EXPECT_EQ(scheduler_ptr->runtime_at_start(), &runtime);
+
+  runtime.stop();
 }
 
 struct SchedulerLifecycleTracker {
