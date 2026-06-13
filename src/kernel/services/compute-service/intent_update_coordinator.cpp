@@ -63,11 +63,10 @@ NodeOutput& IntentUpdateCoordinator::coordinate_intent_update(
   switch (intent) {
     case ComputeIntent::GlobalHighPrecision:
       if (dirty_roi.has_value()) {
-        require_callback(callbacks.run_global_high_precision_dirty_recompute,
-                         "run_global_high_precision_dirty_recompute");
-        record_stage(callbacks,
-                     "intent_coordinator_global_dirty_full_recompute");
-        return callbacks.run_global_high_precision_dirty_recompute();
+        require_callback(callbacks.run_global_high_precision_dirty_update,
+                         "run_global_high_precision_dirty_update");
+        record_stage(callbacks, "intent_coordinator_global_dirty_update");
+        return callbacks.run_global_high_precision_dirty_update();
       }
       require_callback(callbacks.run_global_high_precision,
                        "run_global_high_precision");

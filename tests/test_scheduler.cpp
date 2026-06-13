@@ -275,12 +275,11 @@ TEST(Scheduler, DirtyRegionTiledComputation) {
   cv::Rect dirty_rect(200, 200, 128, 128);
 
   // 修正点: 明确 Lambda 返回类型为 void
-  runtime
-      .post([&](ps::GraphModel& g) -> void {
+  runtime.graph_state()
+      .submit([&](ps::GraphModel& g) -> void {
         g.mutate_node_runtime_state(1, [&](auto& source_state) {
           // HP formal cache must be populated after compute
-          ASSERT_TRUE(
-              source_state.cached_output_high_precision.has_value());
+          ASSERT_TRUE(source_state.cached_output_high_precision.has_value());
 
           // Modify the HP cached image to simulate a dirty region
           cv::Mat mat = ps::toCvMat(
@@ -291,12 +290,10 @@ TEST(Scheduler, DirtyRegionTiledComputation) {
 
         // Invalidate downstream HP caches since source was modified.
         // The HP background update (force_recache=true) will recompute them.
-        g.mutate_node_runtime_state(2, [](auto& state) {
-          state.cached_output_high_precision.reset();
-        });
-        g.mutate_node_runtime_state(3, [](auto& state) {
-          state.cached_output_high_precision.reset();
-        });
+        g.mutate_node_runtime_state(
+            2, [](auto& state) { state.cached_output_high_precision.reset(); });
+        g.mutate_node_runtime_state(
+            3, [](auto& state) { state.cached_output_high_precision.reset(); });
       })
       .get();
 
@@ -308,24 +305,26 @@ TEST(Scheduler, DirtyRegionTiledComputation) {
   runtime.clear_scheduler_log();
 
   // 修正点: post 的 Lambda 返回 NodeOutput，并接收 future 的结果
-  auto future = runtime.post([&](ps::GraphModel& g) -> ps::NodeOutput {
-    // 修正点: 直接构造服务类，不访问 kernel 的私有成员
-    ps::GraphTraversalService traversal_service;
-    ps::GraphCacheService cache_service;
-    ps::ComputeService compute_svc(traversal_service, cache_service,
-                                   runtime.event_service());
+  auto future =
+      runtime.graph_state().submit([&](ps::GraphModel& g) -> ps::NodeOutput {
+        // 修正点: 直接构造服务类，不访问 kernel 的私有成员
+        ps::GraphTraversalService traversal_service;
+        ps::GraphCacheService cache_service;
+        ps::ComputeService compute_svc(traversal_service, cache_service,
+                                       runtime.event_service());
 
-    return compute_svc.compute_parallel(
-        g, runtime, ps::ComputeIntent::RealTimeUpdate, final_node_id, "int8",
-        /*force*/ true,
-        /*timing*/ false, /*disable_disk_cache*/ true, nullptr, dirty_rect);
-  });
+        return compute_svc.compute_parallel(
+            g, runtime, ps::ComputeIntent::RealTimeUpdate, final_node_id,
+            "int8",
+            /*force*/ true,
+            /*timing*/ false, /*disable_disk_cache*/ true, nullptr, dirty_rect);
+      });
 
   // 等待并获取结果（尽管我们不使用结果，但 get() 会等待完成并传播异常）
   future.get();
 
-  runtime
-      .post([&](ps::GraphModel& g) -> void {
+  runtime.graph_state()
+      .submit([&](ps::GraphModel& g) -> void {
         const auto& target = g.node(final_node_id);
         ASSERT_TRUE(target.cached_output_high_precision.has_value());
         ASSERT_TRUE(target.cached_output_real_time.has_value());
@@ -383,9 +382,9 @@ TEST(Scheduler, DirtyRegionTiledComputation) {
   EXPECT_GT(dirty_source_task_count, 0u);
   EXPECT_GT(dirty_downstream_node_count, 0u);
   EXPECT_GT(dirty_downstream_tile_count, 0u);
-  auto first_dirty_source = first_trace_index(
-      log_incremental_compute,
-      ps::GraphRuntime::SchedulerEvent::EXECUTE_DIRTY_SOURCE);
+  auto first_dirty_source =
+      first_trace_index(log_incremental_compute,
+                        ps::GraphRuntime::SchedulerEvent::EXECUTE_DIRTY_SOURCE);
   auto first_dirty_downstream = first_trace_index(
       log_incremental_compute,
       ps::GraphRuntime::SchedulerEvent::EXECUTE_DIRTY_DOWNSTREAM_NODE);
@@ -420,8 +419,8 @@ TEST(Scheduler,
                               /*parallel*/ true));
 
   const cv::Rect dirty_rect(200, 200, 128, 128);
-  stale_runtime
-      .post([&](ps::GraphModel& g) -> void {
+  stale_runtime.graph_state()
+      .submit([&](ps::GraphModel& g) -> void {
         g.dirty_source_hp_commit_generation[1] =
             std::numeric_limits<uint64_t>::max();
         g.dirty_source_rt_commit_generation[1] =
@@ -437,8 +436,8 @@ TEST(Scheduler,
       })
       .get();
   stale_runtime.clear_scheduler_log();
-  auto stale_future =
-      stale_runtime.post([&](ps::GraphModel& g) -> ps::NodeOutput {
+  auto stale_future = stale_runtime.graph_state().submit(
+      [&](ps::GraphModel& g) -> ps::NodeOutput {
         ps::GraphTraversalService traversal_service;
         ps::GraphCacheService cache_service;
         ps::ComputeService compute_svc(traversal_service, cache_service,
@@ -450,10 +449,10 @@ TEST(Scheduler,
       });
   EXPECT_NO_THROW(stale_future.get());
   const auto stale_log = stale_runtime.get_scheduler_log();
-  EXPECT_TRUE(first_trace_index(
-                  stale_log,
-                  ps::GraphRuntime::SchedulerEvent::SKIP_STALE_GENERATION)
-                  .has_value());
+  EXPECT_TRUE(
+      first_trace_index(stale_log,
+                        ps::GraphRuntime::SchedulerEvent::SKIP_STALE_GENERATION)
+          .has_value());
   write_scheduler_trace_json("dirty_scheduler_stale_log.json", stale_log);
 
   const std::string exception_graph_name = "dirty_region_exception_test";
@@ -464,8 +463,8 @@ TEST(Scheduler,
   ASSERT_TRUE(svc.cmd_compute(exception_graph_name, 3, "int8",
                               /*force*/ false, /*timing*/ false,
                               /*parallel*/ true));
-  exception_runtime
-      .post([&](ps::GraphModel& g) -> void {
+  exception_runtime.graph_state()
+      .submit([&](ps::GraphModel& g) -> void {
         ps::Node broken = g.node(2);
         broken.type = "missing_op";
         broken.subtype = "dirty_exception";
@@ -481,8 +480,8 @@ TEST(Scheduler,
       })
       .get();
   exception_runtime.clear_scheduler_log();
-  auto exception_future =
-      exception_runtime.post([&](ps::GraphModel& g) -> ps::NodeOutput {
+  auto exception_future = exception_runtime.graph_state().submit(
+      [&](ps::GraphModel& g) -> ps::NodeOutput {
         ps::GraphTraversalService traversal_service;
         ps::GraphCacheService cache_service;
         ps::ComputeService compute_svc(traversal_service, cache_service,
@@ -494,10 +493,10 @@ TEST(Scheduler,
       });
   EXPECT_THROW(exception_future.get(), ps::GraphError);
   const auto exception_log = exception_runtime.get_scheduler_log();
-  EXPECT_TRUE(first_trace_index(
-                  exception_log,
-                  ps::GraphRuntime::SchedulerEvent::RETHROW_EXCEPTION)
-                  .has_value());
+  EXPECT_TRUE(
+      first_trace_index(exception_log,
+                        ps::GraphRuntime::SchedulerEvent::RETHROW_EXCEPTION)
+          .has_value());
   write_scheduler_trace_json("dirty_scheduler_exception_log.json",
                              exception_log);
 }

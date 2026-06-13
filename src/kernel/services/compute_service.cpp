@@ -37,11 +37,11 @@
 #include "kernel/services/compute-service/compute_geometry.hpp"
 #include "kernel/services/compute-service/compute_metrics_recorder.hpp"
 #include "kernel/services/compute-service/compute_task_dispatcher.hpp"
-#include "kernel/services/compute-service/task_graph_planning.hpp"
 #include "kernel/services/compute-service/dirty_region_planner.hpp"
 #include "kernel/services/compute-service/intent_update_coordinator.hpp"
 #include "kernel/services/compute-service/node_executor.hpp"
 #include "kernel/services/compute-service/node_input_resolver.hpp"
+#include "kernel/services/compute-service/task_graph_planning.hpp"
 #include "kernel/services/graph_cache_service.hpp"
 #include "kernel/services/graph_event_service.hpp"
 #include "kernel/services/graph_traversal_service.hpp"
@@ -157,19 +157,18 @@ void validate_dirty_source_boundaries_ready(
   for (int source_node_id : snapshot.dirty_source_nodes) {
     const Node* source = graph.find_node(source_node_id);
     if (!source) {
-      throw GraphError(GraphErrc::NotFound,
-                       "Dirty source node " +
-                           std::to_string(source_node_id) + " not found.");
+      throw GraphError(GraphErrc::NotFound, "Dirty source node " +
+                                                std::to_string(source_node_id) +
+                                                " not found.");
     }
     const NodeOutput* output =
         domain == compute::DirtyDomain::RealTime
             ? compute::ComputeCachePolicy::interactive_output(*source)
             : compute::ComputeCachePolicy::reusable_output(*source);
     if (!output) {
-      throw GraphError(
-          GraphErrc::MissingDependency,
-          "Dirty source boundary output is not ready for node " +
-              std::to_string(source_node_id) + ".");
+      throw GraphError(GraphErrc::MissingDependency,
+                       "Dirty source boundary output is not ready for node " +
+                           std::to_string(source_node_id) + ".");
     }
   }
 }
@@ -380,8 +379,8 @@ NodeOutput& ComputeService::compute_high_precision_update(
   remember_dirty_snapshot(graph, dirty_plan.snapshot);
   auto plan = dirty_plan.entries;
   auto execution_order = dirty_plan.execution_order;
-  const compute::ComputeRequest request{
-      ComputeIntent::GlobalHighPrecision, node_id, false, dirty_roi};
+  const compute::ComputeRequest request{ComputeIntent::GlobalHighPrecision,
+                                        node_id, false, dirty_roi};
   const compute::ComputePlan node_cache_plan =
       prune_node_cache_task_graph(graph, request, execution_order);
   const compute::ComputePlan compute_plan =
@@ -440,12 +439,11 @@ NodeOutput& ComputeService::compute_high_precision_update(
 
     if (runtime_ptr) {
       runtime_ptr->log_event(GraphRuntime::SchedulerEvent::EXECUTE, nid);
-      runtime_ptr->log_event(dirty_source
-                                 ? GraphRuntime::SchedulerEvent::
-                                       EXECUTE_DIRTY_SOURCE
-                                 : GraphRuntime::SchedulerEvent::
-                                       EXECUTE_DIRTY_DOWNSTREAM_NODE,
-                             nid);
+      runtime_ptr->log_event(
+          dirty_source
+              ? GraphRuntime::SchedulerEvent::EXECUTE_DIRTY_SOURCE
+              : GraphRuntime::SchedulerEvent::EXECUTE_DIRTY_DOWNSTREAM_NODE,
+          nid);
     }
 
     auto resolved_inputs = compute::NodeInputResolver::resolve(
@@ -548,7 +546,7 @@ NodeOutput& ComputeService::compute_high_precision_update(
   const std::vector<int> downstream_node_ids = planned_nodes_for_task_ids(
       compute_plan, dirty_work_set.downstream_task_ids);
 
-  auto make_hp_task = [&](int task_node_id) -> Task {
+  auto make_hp_task = [&](int task_node_id) -> SchedulerTaskRuntime::Task {
     return [&, task_node_id]() {
       auto entry_it = plan.find(task_node_id);
       if (entry_it == plan.end()) {
@@ -567,15 +565,15 @@ NodeOutput& ComputeService::compute_high_precision_update(
   };
 
   auto validate_hp_source_boundaries = [&]() {
-    validate_dirty_source_boundaries_ready(
-        graph, dirty_plan.snapshot, compute::DirtyDomain::HighPrecision);
+    validate_dirty_source_boundaries_ready(graph, dirty_plan.snapshot,
+                                           compute::DirtyDomain::HighPrecision);
   };
 
   if (runtime_ptr) {
     SchedulerTaskRuntime& dirty_task_runtime = scheduler_task_runtime_for(
         *runtime_ptr, ComputeIntent::GlobalHighPrecision);
-    std::vector<Task> source_tasks;
-    std::vector<Task> downstream_tasks;
+    std::vector<SchedulerTaskRuntime::Task> source_tasks;
+    std::vector<SchedulerTaskRuntime::Task> downstream_tasks;
     source_tasks.reserve(source_node_ids.size());
     downstream_tasks.reserve(downstream_node_ids.size());
     for (int source_node_id : source_node_ids) {
@@ -600,8 +598,8 @@ NodeOutput& ComputeService::compute_high_precision_update(
 
   if (!downsample_requests.empty()) {
     auto make_downsample_task =
-        [runtime_ptr, &graph,
-         event_service = std::ref(events_)](DownsampleRequest request) -> Task {
+        [runtime_ptr, &graph, event_service = std::ref(events_)](
+            DownsampleRequest request) -> SchedulerTaskRuntime::Task {
       return [runtime_ptr, &graph, event_service, request]() {
         Node* node_ptr = graph.find_node_mutable(request.node_id);
         if (!node_ptr) {
@@ -709,7 +707,7 @@ NodeOutput& ComputeService::compute_high_precision_update(
     };
 
     for (const auto& request : downsample_requests) {
-      Task task = make_downsample_task(request);
+      SchedulerTaskRuntime::Task task = make_downsample_task(request);
       task();
     }
   }
@@ -798,12 +796,11 @@ NodeOutput& ComputeService::compute_real_time_update(
 
     if (runtime_ptr) {
       runtime_ptr->log_event(GraphRuntime::SchedulerEvent::EXECUTE, nid);
-      runtime_ptr->log_event(dirty_source
-                                 ? GraphRuntime::SchedulerEvent::
-                                       EXECUTE_DIRTY_SOURCE
-                                 : GraphRuntime::SchedulerEvent::
-                                       EXECUTE_DIRTY_DOWNSTREAM_NODE,
-                             nid);
+      runtime_ptr->log_event(
+          dirty_source
+              ? GraphRuntime::SchedulerEvent::EXECUTE_DIRTY_SOURCE
+              : GraphRuntime::SchedulerEvent::EXECUTE_DIRTY_DOWNSTREAM_NODE,
+          nid);
     }
 
     auto resolved_inputs = compute::NodeInputResolver::resolve(
@@ -949,7 +946,7 @@ NodeOutput& ComputeService::compute_real_time_update(
   const std::vector<int> downstream_node_ids = planned_nodes_for_task_ids(
       compute_plan, dirty_work_set.downstream_task_ids);
 
-  auto make_rt_task = [&](int task_node_id) -> Task {
+  auto make_rt_task = [&](int task_node_id) -> SchedulerTaskRuntime::Task {
     return [&, task_node_id]() {
       auto entry_it = plan.find(task_node_id);
       if (entry_it == plan.end()) {
@@ -968,15 +965,15 @@ NodeOutput& ComputeService::compute_real_time_update(
   };
 
   auto validate_rt_source_boundaries = [&]() {
-    validate_dirty_source_boundaries_ready(
-        graph, dirty_plan.snapshot, compute::DirtyDomain::RealTime);
+    validate_dirty_source_boundaries_ready(graph, dirty_plan.snapshot,
+                                           compute::DirtyDomain::RealTime);
   };
 
   if (runtime_ptr) {
     SchedulerTaskRuntime& dirty_task_runtime =
         scheduler_task_runtime_for(*runtime_ptr, ComputeIntent::RealTimeUpdate);
-    std::vector<Task> source_tasks;
-    std::vector<Task> downstream_tasks;
+    std::vector<SchedulerTaskRuntime::Task> source_tasks;
+    std::vector<SchedulerTaskRuntime::Task> downstream_tasks;
     source_tasks.reserve(source_node_ids.size());
     downstream_tasks.reserve(downstream_node_ids.size());
     for (int source_node_id : source_node_ids) {
@@ -1060,19 +1057,10 @@ NodeOutput& ComputeService::compute_intent_update_impl(
     return compute(graph, node_id, cache_precision, force_recache,
                    enable_timing, disable_disk_cache, benchmark_events);
   };
-  callbacks.run_global_high_precision_dirty_recompute = [&]() -> NodeOutput& {
-    // TODO: For now, a dirty ROI on a global compute triggers a full recompute.
-    if (use_parallel_executor) {
-      if (!runtime) {
-        throw GraphError(GraphErrc::ComputeError,
-                         "Parallel HP compute requires a runtime.");
-      }
-      return compute_parallel(graph, *runtime, node_id, cache_precision, true,
-                              enable_timing, disable_disk_cache,
-                              benchmark_events);
-    }
-    return compute(graph, node_id, cache_precision, true, enable_timing,
-                   disable_disk_cache, benchmark_events);
+  callbacks.run_global_high_precision_dirty_update = [&]() -> NodeOutput& {
+    return compute_high_precision_update(
+        graph, runtime, node_id, cache_precision, force_recache, enable_timing,
+        disable_disk_cache, benchmark_events, *dirty_roi);
   };
   callbacks.run_high_precision_update = [&]() {
     compute_high_precision_update(
@@ -1106,8 +1094,8 @@ NodeOutput& ComputeService::compute_intent_update_impl(
       hp_task_runtime = &scheduler_task_runtime_for(
           *runtime, ComputeIntent::GlobalHighPrecision);
       if (intent == ComputeIntent::RealTimeUpdate) {
-        rt_task_runtime =
-            &scheduler_task_runtime_for(*runtime, ComputeIntent::RealTimeUpdate);
+        rt_task_runtime = &scheduler_task_runtime_for(
+            *runtime, ComputeIntent::RealTimeUpdate);
       }
     }
   }
@@ -1159,8 +1147,8 @@ NodeOutput& ComputeService::compute_sequential_impl(
   } catch (const GraphError&) {
     throw;
   }
-  const compute::ComputeRequest request{
-      ComputeIntent::GlobalHighPrecision, node_id, false, std::nullopt};
+  const compute::ComputeRequest request{ComputeIntent::GlobalHighPrecision,
+                                        node_id, false, std::nullopt};
   const compute::ComputePlan compute_plan =
       prune_node_cache_task_graph(graph, request, execution_order);
   remember_compute_plan(graph, compute_plan);

@@ -64,6 +64,13 @@ static void apply_scheduler_config(ps::Kernel& kernel,
   kernel.set_scheduler_config(scheduler_config);
 }
 
+static void load_configured_scheduler_plugins(ps::InteractionService& svc,
+                                              const CliConfig& config) {
+  if (!config.scheduler_dirs.empty()) {
+    svc.cmd_scheduler_scan(config.scheduler_dirs);
+  }
+}
+
 int main(int argc, char** argv) {
   // Hard-disable OpenCL runtime at process start to avoid spurious driver
   // errors
@@ -113,6 +120,7 @@ int main(int argc, char** argv) {
   load_or_create_config(config_to_load, config);
   apply_scheduler_config(kernel, config);
   svc.cmd_plugins_load(config.plugin_dirs);
+  load_configured_scheduler_plugins(svc, config);
   std::string current_graph;
 
   bool did_any_action = false;

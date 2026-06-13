@@ -1,18 +1,13 @@
 name: CI Scheduler Log
 
 on:
-  push:
-    branches: ["main", "develop"]
-  pull_request:
-    branches: ["main", "develop"]
-  issue_comment:
-    types: [created]
+  # Manual-only TODO scaffolding. Re-enable push/pull_request/comment triggers
+  # only after the CI image, dependencies, checkout, build, and CTest path are
+  # validated with fresh GitHub Actions evidence.
   workflow_dispatch:
 
 jobs:
   build_test:
-    # 你的触发条件保持不变
-    if: github.event_name != 'issue_comment' || (github.event.issue.pull_request && contains(github.event.comment.body, '/run-scheduler-ci'))
     runs-on: ubuntu-latest
 
     # 关键：使用我们刚推的镜像

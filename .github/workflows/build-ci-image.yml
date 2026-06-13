@@ -1,7 +1,7 @@
 name: Build CI Image
 on:
-  push:
-    paths: ["Dockerfile.ci", ".github/workflows/build-ci-image.yml"]
+  # Manual-only TODO scaffolding. Re-enable automatic image publishing only
+  # after the container path is validated and documented as maintained CI.
   workflow_dispatch:
 
 permissions:
@@ -35,6 +35,6 @@ jobs:
         with:
           context: .
           file: Dockerfile.ci
-          push: true
+          push: false
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}

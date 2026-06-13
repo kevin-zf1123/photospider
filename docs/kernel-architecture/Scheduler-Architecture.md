@@ -16,6 +16,13 @@ Core lifecycle:
 create -> attach(runtime) -> start -> dispatch planned tasks -> shutdown -> detach
 ```
 
+`GraphRuntime` owns this lifecycle ordering for registered schedulers. A
+scheduler is attached before it starts; `GraphRuntime::start()` starts
+previously registered schedulers, `GraphRuntime::set_scheduler()` starts a new
+scheduler only after attach when the runtime is already running, and
+`GraphRuntime::stop()` shuts registered schedulers down. `Kernel` bootstrap code
+must register schedulers through `GraphRuntime` instead of pre-starting them.
+
 Compute routes by `ComputeIntent`:
 
 | Intent | Expected scheduler role |
@@ -52,12 +59,11 @@ the dirty-clipped update work set into concrete tasks and submits ready work
 through the configured `IScheduler` instance for the relevant `ComputeIntent`
 via `SchedulerTaskRuntime`.
 
-`GraphRuntime` still owns graph state, scheduler registration, events, and some
-runtime queue APIs used by graph-runtime support paths and tests. Those queues
-are no longer the compute-service parallel dispatch route. New
-scheduler-facing design should extend `IScheduler` and
-`SchedulerTaskRuntime`, not add new dependencies on `GraphRuntime` internal
-queues.
+`GraphRuntime` owns graph state, the `GraphStateExecutor`, scheduler
+registration, events, and platform resources. It no longer exposes a general
+worker queue, task graph, or completion-counter API. Graph-state operations and
+non-parallel compute use `GraphStateExecutor`; scheduler-facing design should
+extend `IScheduler` and `SchedulerTaskRuntime`.
 
 ## Built-in Schedulers
 
@@ -108,9 +114,9 @@ does not expose a compatibility compute path outside planned-task dispatch.
 
 ## Epoch and Cancellation
 
-Runtime and scheduler queues use epochs to cancel stale queued work. Epoch `0`
-is treated as non-cancelable compatibility work. New interactive scheduling
-should assign real epochs so obsolete RT work can be dropped.
+Scheduler queues use epochs to cancel stale queued work. Epoch `0` is treated
+as non-cancelable compatibility work. New interactive scheduling should assign
+real epochs so obsolete RT work can be dropped.
 
 ## Observability
 
@@ -121,7 +127,8 @@ execution events. This is useful for validating scheduler behavior.
 
 - Keep `IScheduler` as the formal public scheduler interface.
 - Keep planned parallel work routed through scheduler-owned task runtimes.
-- Avoid adding new permanent dependencies on `GraphRuntime` internal queues.
+- Keep graph-state commands and non-parallel compute behind
+  `GraphStateExecutor`.
 - Keep scheduler runtimes ready-task-only: they receive concrete callbacks with
   epoch/generation metadata and optional scheduler-specific hints, not task
   graphs or dirty work-set state.

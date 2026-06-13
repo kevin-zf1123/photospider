@@ -205,10 +205,12 @@ Use another config file with:
 ./build/bin/graph_cli --config path/to/config.yaml --repl
 ```
 
-When the CLI loads a config file, `scheduler_hp_type`, `scheduler_rt_type`, and
-`scheduler_worker_count` are copied into `Kernel::SchedulerConfig` before any
-graph is loaded. Newly loaded graphs therefore inherit those scheduler defaults;
-use `scheduler set <hp|rt> <type>` for an immediate per-graph switch.
+When the CLI loads a config file, it scans `scheduler_dirs` before graph load
+and then copies `scheduler_hp_type`, `scheduler_rt_type`, and
+`scheduler_worker_count` into `Kernel::SchedulerConfig`. Newly loaded graphs
+therefore inherit those scheduler defaults, including plugin-provided scheduler
+types discovered from configured directories. Use `scheduler set <hp|rt>
+<type>` for an immediate per-graph switch.
 
 `cache_root_dir` is also applied before graph load. Relative values are resolved
 from the current working directory, and the graph cache root becomes

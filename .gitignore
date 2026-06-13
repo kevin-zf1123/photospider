@@ -70,7 +70,7 @@ feedback/
 
 # Scheduler plugins
 !scheduler_plugins/
-!scheduler_plugins/destroy_count_scheduler_plugin.cpp
+!scheduler_plugins/*_example_plugin.cpp
 
 # External libraries (FTXUI etc.)
 !extern/

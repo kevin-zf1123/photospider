@@ -80,17 +80,18 @@ The snapshot should avoid raw node or tile pointers. It should use stable ids an
 coordinate data so it remains inspectable across undo/redo, reload, and node
 replacement workflows.
 
-Dirty-node lifecycle events should enter a serialized graph-scoped
-`DirtyControlLane`. The control lane updates dirty source membership and
-lifecycle state in `DirtyRegionSnapshot`; the propagator then derives
-`actual_dirty_region` from those sources and wakes the executor for work-set
-materialization. It is not a normal compute task queue owned by the scheduler,
-and it should not be delegated to node-local compute ownership.
+Dirty-node lifecycle events enter a serialized graph-scoped
+`DirtyControlLane` through the `Kernel` / `InteractionService` facade. The
+control lane updates dirty source membership and lifecycle state in
+`DirtyRegionSnapshot`; the propagator then derives `actual_dirty_region` from
+those sources and returns wakeup/cutoff decisions for work-set materialization.
+It is not a normal compute task queue owned by the scheduler, and it should not
+be delegated to node-local compute ownership.
 
-TODO: define the node-to-`InteractionService` event interface for future GUI
-usage. Nodes should be the source of realtime update events and dirty-region
-records, while `InteractionService` should expose frontend-facing inspection,
-subscription, or update-request hooks without becoming the dirty-region
+TODO: define the node-to-`InteractionService` subscription/event transport for
+future GUI usage. Nodes remain the source of realtime update events and
+dirty-region records, while `InteractionService` exposes frontend-facing
+inspection and lifecycle/update-request hooks without becoming the dirty-region
 generator. The design must document event source, dirty-region generation
 responsibility, node/facade boundaries, and GUI consumption.
 

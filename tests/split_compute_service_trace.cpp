@@ -631,8 +631,8 @@ bool contains_phase(const std::vector<std::string>& phases,
 
 json graph_snapshot(ps::Kernel& kernel, const std::string& graph_name) {
   auto& runtime = kernel.runtime(graph_name);
-  return runtime
-      .post([](ps::GraphModel& graph) {
+  return runtime.graph_state()
+      .submit([](ps::GraphModel& graph) {
         json out;
         out["cache_root"] = graph.cache_root.string();
         out["quiet"] = graph.is_quiet();
@@ -1295,7 +1295,8 @@ void write_task_bundle(const fs::path& root, const std::string& task_dir,
 void mutate_dirty_region(ps::Kernel& kernel, const std::string& graph_name,
                          const cv::Rect& dirty_roi) {
   kernel.runtime(graph_name)
-      .post([dirty_roi](ps::GraphModel& graph) {
+      .graph_state()
+      .submit([dirty_roi](ps::GraphModel& graph) {
         graph.mutate_node_runtime_state(1, [&](auto& source_state) {
           if (source_state.cached_output_high_precision) {
             cv::Mat mat = ps::toCvMat(
@@ -1775,9 +1776,8 @@ int main(int argc, char** argv) {
     task5.add(
         "dirty realtime avoids coarse coordinator scheduler submit", true,
         dirty_actual["compute_events"],
-        compute_events_contain_source(
-            dirty_actual["compute_events"],
-            "intent_coordinator_decision_inline") &&
+        compute_events_contain_source(dirty_actual["compute_events"],
+                                      "intent_coordinator_decision_inline") &&
             compute_events_contain_source(dirty_actual["compute_events"],
                                           "intent_coordinator_inline_hp") &&
             compute_events_contain_source(dirty_actual["compute_events"],

@@ -45,10 +45,19 @@ ps_scheduler_plugin_get_version
 | --- | --- | --- |
 | `get_count` | 是 | 插件中的调度器类型数量。 |
 | `get_name` | 是 | 某索引处的类型名称。 |
-| `create` | 是 | 为某类型创建 `IScheduler` 实例。 |
+| `create` | 是 | 为某类型创建调度器实例。返回对象必须同时实现 `IScheduler` 和 `SchedulerTaskRuntime`。 |
 | `get_description` | 否 | 人类可读类型描述。 |
 | `destroy` | 所有权所需 | 销毁插件创建的调度器实例。 |
 | `get_version` | 否 | 插件版本字符串。 |
+
+## 调度器实例运行时契约
+
+当前调度器插件实例是以 `ps::IScheduler*` 返回的 C++ 对象，但 host 还要求同一个对象实现
+`ps::SchedulerTaskRuntime`。加载器会在创建期间通过 `dynamic_cast` 验证这一点。一个插件即使导出了有效的
+C 符号，并返回了 `IScheduler`，如果该对象没有同时实现 `SchedulerTaskRuntime`，它可以被发现，但在 host
+尝试实例化该调度器类型时会被拒绝。
+
+这是当前过渡性 C++ ABI 的一部分。在长期纯 C ABI 替代该要求之前，插件作者应让具体调度器类同时继承这两个接口。
 
 ## 调度器实例所有权
 
@@ -67,8 +76,7 @@ ps_scheduler_plugin_get_version
 ## 兼容性指南
 
 - 操作插件应使用已发布的注册 API 和公共数据契约。
-- 调度器插件应将 `IScheduler` ABI 兼容性视为版本敏感。
+- 调度器插件应将 `IScheduler` 和 `SchedulerTaskRuntime` ABI 兼容性都视为版本敏感。
 - 调度器插件作者应实现 `ps_scheduler_plugin_destroy`。
 - Host 应使用插件 destroy 销毁插件创建的调度器实例。
 - 未来 C ABI 工作应作为单独的兼容性 change 完成。
-

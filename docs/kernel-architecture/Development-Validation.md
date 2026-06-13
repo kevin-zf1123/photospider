@@ -64,9 +64,9 @@ fixtures.
 ## GitHub/CI Integration Status
 
 GitHub Actions and the CI container image are not part of the currently
-maintained validation path. Treat `.github/workflows/*.yml` and `Dockerfile.ci`
-as TODO integration scaffolding unless a future change explicitly re-enables
-and validates them.
+maintained validation path. The workflows are manual-only `workflow_dispatch`
+scaffolding, and `Dockerfile.ci` is TODO integration scaffolding unless a future
+change explicitly re-enables and validates them.
 
 Current evidence should come from local build, focused test binaries, CTest, and
 saved `tests/results/...` artifacts. Do not claim that GitHub CI or the
@@ -81,10 +81,10 @@ kernel-contract cleanup:
 
 - Add richer dirty snapshot visualization APIs after the frontend display
   contract is defined.
-- Keep optimized partial HP dirty planning for all `GlobalHighPrecision` entry
-  paths as an open TODO. Current global HP dirty ROI behavior is a correctness
-  compatibility fallback and may still full recompute; do not claim ROI-bounded
-  HP performance until the fallback is replaced and validated.
+- Global HP dirty ROI now routes through HP dirty planning instead of the former
+  full-recompute fallback. Evidence should include the coordinator stage,
+  planned work, and dirty snapshot artifacts before claiming performance
+  improvements beyond the covered path.
 
 The `ComputeService` split now has a dedicated `split-compute-service`
 OpenSpec change and a maintained plan in `Compute-Service-Split.md`. The first

@@ -6,8 +6,8 @@ load, reload, edit, and clear operations.
 ## Runtime Ownership
 
 `Kernel` owns a map of graph names to `GraphRuntime` instances. Each
-`GraphRuntime` owns exactly one `GraphModel`, event service, scheduler map,
-worker state, and platform context.
+`GraphRuntime` owns exactly one `GraphModel`, graph-state executor, event
+service, scheduler map, and platform context.
 
 ```text
 Kernel

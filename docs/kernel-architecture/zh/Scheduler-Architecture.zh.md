@@ -13,6 +13,12 @@
 create -> attach(runtime) -> start -> dispatch planned tasks -> shutdown -> detach
 ```
 
+`GraphRuntime` 拥有已注册 scheduler 的生命周期顺序。Scheduler 必须先 attach
+到 runtime，再启动；`GraphRuntime::start()` 会启动此前已注册的 scheduler，
+`GraphRuntime::set_scheduler()` 在 runtime 已运行时只会在 attach 之后启动新
+scheduler，`GraphRuntime::stop()` 会关闭已注册 scheduler。`Kernel` 的
+bootstrap 代码必须通过 `GraphRuntime` 注册 scheduler，而不是预先启动 scheduler。
+
 按 `ComputeIntent` 路由计算：
 
 | 意图 | 预期调度器角色 |
@@ -36,10 +42,10 @@ create -> attach(runtime) -> start -> dispatch planned tasks -> shutdown -> deta
 会把 node/cache-pruned task graph 或 dirty 裁剪后的 update work set materialize 为具体 task，
 并通过相关 `ComputeIntent` 配置的 `IScheduler` 实例，经由 `SchedulerTaskRuntime` 提交 ready work。
 
-`GraphRuntime` 仍拥有图状态、scheduler 注册、事件，以及一些供 graph-runtime support path
-和测试使用的 runtime queue API。这些队列不再是 compute-service parallel dispatch
-路径。新的 scheduler-facing 设计应扩展 `IScheduler` 与 `SchedulerTaskRuntime`，而不是新增对
-`GraphRuntime` 内部队列的依赖。
+`GraphRuntime` 拥有图状态、`GraphStateExecutor`、scheduler 注册、事件和平台资源。它不再暴露通用
+worker queue、task graph 或 completion-counter API。Graph-state operation 和非并行 compute
+使用 `GraphStateExecutor`；新的 scheduler-facing 设计应扩展 `IScheduler` 与
+`SchedulerTaskRuntime`。
 
 ## 内置调度器
 
@@ -86,7 +92,7 @@ planned-task dispatch 的兼容计算路径。
 
 ## Epoch 与取消
 
-运行时和调度器队列使用 epoch 取消陈旧排队工作。Epoch `0` 被视为不可取消兼容工作。新的交互式调度应分配真实 epoch，使过时 RT 工作可以被丢弃。
+调度器队列使用 epoch 取消陈旧排队工作。Epoch `0` 被视为不可取消兼容工作。新的交互式调度应分配真实 epoch，使过时 RT 工作可以被丢弃。
 
 ## 可观测性
 
@@ -96,7 +102,7 @@ planned-task dispatch 的兼容计算路径。
 
 - 保持 `IScheduler` 作为正式公共调度器接口。
 - 保持 planned parallel work 通过 scheduler-owned task runtime 路由。
-- 避免新增对 `GraphRuntime` 内部队列的永久依赖。
+- 保持 graph-state 命令和非并行 compute 位于 `GraphStateExecutor` 边界内。
 - 保持 scheduler runtime 为 ready-task-only：它们接收带 epoch/generation metadata 和 optional
   scheduler-specific hint 的具体 callback，而不是 task graph 或 dirty work-set state。
 - 保持插件调度器生命周期与 `Plugin-ABI.md` 兼容。

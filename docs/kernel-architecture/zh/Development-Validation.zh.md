@@ -40,7 +40,9 @@
 
 ## GitHub/CI 集成状态
 
-GitHub Actions 和 CI container image 不是当前维护中的验证路径。除非未来某个 change 明确重新启用并验证它们，否则应把 `.github/workflows/*.yml` 和 `Dockerfile.ci` 视为 TODO 集成脚手架。
+GitHub Actions 和 CI container image 不是当前维护中的验证路径。当前 workflow 是仅支持
+`workflow_dispatch` 的手动脚手架；除非未来某个 change 明确重新启用并验证它们，否则应把
+`.github/workflows/*.yml` 和 `Dockerfile.ci` 视为 TODO 集成脚手架。
 
 当前证据应来自本地 build、focused test binary、CTest，以及保存到 `tests/results/...` 的 artifact。在 Dockerfile 依赖、workflow trigger、checkout/submodule 行为、build 命令和 CTest 调用被更新并通过新的 CI 证据证明之前，不要声称 GitHub CI 或 containerized CI image 是受支持或已通过的测试链路。
 
@@ -49,9 +51,8 @@ GitHub Actions 和 CI container image 不是当前维护中的验证路径。除
 以下是已识别的后续重构，不属于当前 kernel-contract 清理：
 
 - 在 frontend 展示契约定义后，添加更丰富的 dirty snapshot 可视化 API。
-- 将所有 `GlobalHighPrecision` 入口路径的优化局部 HP dirty planning 保持为开放 TODO。
-  当前 global HP dirty ROI 行为是正确性兼容 fallback，仍可能完整重算；在替换并验证该
-  fallback 前，不要声称它具备 ROI bounded 的 HP 性能。
+- Global HP dirty ROI 现在会进入 HP dirty planning，而不是过去的完整重算 fallback。
+  在宣称 covered path 之外的性能收益前，证据应包含 coordinator stage、planned work 和 dirty snapshot artifact。
 
 `ComputeService` 拆分现在已有专门的 `split-compute-service` OpenSpec change，
 并在维护文档 `Compute-Service-Split.md` 中记录计划。第一轮拆分已经通过

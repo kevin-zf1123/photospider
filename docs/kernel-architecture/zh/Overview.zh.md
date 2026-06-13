@@ -7,8 +7,8 @@
 ## 当前状态
 
 Photospider 围绕图运行时构建，包含服务拆分、操作 registry、缓存层和调度器抽象。Parallel
-planned work 现在会通过 scheduler-owned task runtime dispatch；剩余递归路径和
-`GraphRuntime` support queue 不是 compute-service parallel dispatch 契约。
+planned work 现在会通过 scheduler-owned task runtime dispatch。Graph-state 命令和非并行
+compute 会进入显式的每图 `GraphStateExecutor` 边界，而不是 scheduler dispatch 路径。
 
 代码可用且可测试，但部分边界尚未最终稳定。尤其是 `Kernel` 和 `ComputeService` 仍协调大量行为，未来可能移动到更窄的服务中。
 
@@ -52,6 +52,7 @@ graph TD
     Kernel --> PluginManager
 
     GraphRuntime --> GraphModel
+    GraphRuntime --> GraphStateExecutor
     GraphRuntime --> GraphEventService
     GraphRuntime --> IScheduler
 
@@ -72,7 +73,7 @@ graph TD
 | 组件 | 角色 |
 | --- | --- |
 | `Kernel` | 多图 facade、服务 owner、运行时 bootstrapper、顶层图/缓存/计算 API。 |
-| `GraphRuntime` | 每图执行容器，包含模型、事件、调度器、worker 状态和平台 context。 |
+| `GraphRuntime` | 每图资源容器，包含模型、graph-state executor、事件、调度器和平台 context。 |
 | `GraphModel` | 图状态持有者：私有节点存储、拓扑邻接索引、缓存根目录、计时数据、quiet/skip-save 标志。 |
 | `InteractionService` | 面向 CLI 的 `Kernel` wrapper，使命令代码保持较薄。 |
 | `ComputeService` | 解析依赖、检查缓存、执行 op，协调 RT/HP/tiled 路径和计时事件。 |
@@ -136,11 +137,12 @@ graph TD
 | `gpu_pipeline` | CPU/GPU 路由的异构 pipeline。 |
 | `heterogeneous` | `gpu_pipeline` 的别名。 |
 
-CLI 通过 `scheduler` REPL 命令暴露调度器控制。默认类型和插件目录在 `config.yaml` 中配置。
+CLI 通过 `scheduler` REPL 命令暴露调度器控制。默认类型和插件目录在 `config.yaml` 中配置；启动时会在图加载前扫描
+`scheduler_dirs`，因此插件提供的默认调度器类型可用于每图调度器注入。
 
 `IScheduler` 是正式生命周期接口，scheduler-owned `SchedulerTaskRuntime` 是 compute-service
-planned parallel work 的 dispatch 契约。`GraphRuntime` worker queue 仍是 support infrastructure，
-不是 compute-service parallel dispatch API。
+planned parallel work 的 dispatch 契约。`GraphStateExecutor` 是 graph-state operation
+和非并行 compute 的独立访问边界。
 
 ## 操作 Registry
 
