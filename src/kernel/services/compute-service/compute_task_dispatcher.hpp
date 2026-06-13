@@ -17,9 +17,9 @@ class GraphEventService;
 
 namespace ps::compute {
 
-// Dispatches ComputeTaskPlanner plan semantics by materializing scheduler
-// tasks, releasing ready work, and committing results. Scheduling policy stays
-// in the configured SchedulerTaskRuntime.
+// Dispatches node/cache-pruned ComputeTaskGraph semantics by materializing
+// scheduler tasks, releasing ready work, and committing results. Scheduling
+// policy stays in the configured SchedulerTaskRuntime.
 class ComputeTaskDispatcher {
  public:
   using SequentialFallback =

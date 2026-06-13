@@ -67,6 +67,7 @@ class GraphRuntime {
     std::filesystem::path root;
     std::filesystem::path yaml;
     std::filesystem::path config;
+    std::filesystem::path cache_root;
   };
 
   struct SchedulerEvent {

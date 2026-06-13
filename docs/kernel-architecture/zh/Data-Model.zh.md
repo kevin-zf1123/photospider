@@ -12,13 +12,17 @@
 | --- | --- |
 | 私有节点存储 | 从节点 id 到 `Node` 的映射，通过 `GraphModel` 查找、遍历和变更 helper 访问。 |
 | 拓扑邻接索引 | 面向图像边和参数边的 incoming/outgoing `GraphTopologyEdge` 映射，以稳定节点 id 为键。 |
-| `cache_root` | 磁盘缓存文件的根目录。 |
+| `cache_root` | 当前图磁盘缓存文件的已解析根目录。 |
 | `timing_results` | 启用计时时的最新计时摘要。 |
 | `total_io_time_ms` | 累计磁盘缓存 IO 时间。 |
 
 外部代码不得通过原始节点 map 改变图结构。读取使用 `node()`、`find_node()`、`node_ids()` 和受控遍历等 helper。结构变更使用 `add_node()`、`replace_node()`、`remove_node()` 和输入重连 API；这些 helper 会在返回前验证并刷新拓扑邻接。节点本地运行态缓存/状态更新可以使用 `mutable_node()`，但结构编辑仍属于模型变更 helper。
 
 内部服务通过模型边界协调锁、计时、缓存、拓扑和遍历行为。大多数前端代码应通过 `Kernel` 或 `InteractionService` 访问图状态。
+
+对于 CLI 加载的 graph，`cache_root` 会从已加载配置中的 `cache_root_dir` 推导为
+`<cache_root_dir>/<graph_name>`；相对路径按进程当前工作目录解析。未提供 cache root 的底层
+`Kernel::load_graph` 调用继续使用 session-local fallback：`<root_dir>/<graph_name>/cache`。
 
 `GraphModel::clear()` 的目标是重置模型级运行时状态，而不只是删除节点。清理图会重置节点、拓扑邻接、计时结果、累计 IO 时间、skip-save 状态和其他单次运行状态，使 reload 行为不受陈旧元数据污染。
 

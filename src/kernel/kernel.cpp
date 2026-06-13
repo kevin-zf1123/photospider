@@ -22,7 +22,8 @@ id Kernel::get_metal_device(const std::string& name) {
 std::optional<std::string> Kernel::load_graph(const std::string& name,
                                               const std::string& root_dir,
                                               const std::string& yaml_path,
-                                              const std::string& config_path) {
+                                              const std::string& config_path,
+                                              const std::string& cache_root_dir) {
   if (graphs_.count(name))
     return std::nullopt;
 
@@ -33,8 +34,14 @@ std::optional<std::string> Kernel::load_graph(const std::string& name,
         (std::filesystem::path(root_dir) / name / "content.yaml").string();
   }
 
+  std::filesystem::path effective_cache_root;
+  if (!cache_root_dir.empty()) {
+    effective_cache_root = std::filesystem::path(cache_root_dir) / name;
+  }
+
   GraphRuntime::Info info{name, std::filesystem::path(root_dir) / name,
-                          effective_yaml_path, config_path};
+                          effective_yaml_path, config_path,
+                          effective_cache_root};
   auto rt = std::make_unique<GraphRuntime>(info);
   try {
     std::filesystem::create_directories(info.root);
@@ -731,9 +738,6 @@ std::optional<std::future<bool>> Kernel::compute_async(
             GraphModel& model = runtime_ptr->model();
             ComputeService compute_service(traversal_service_, cache_service_,
                                            runtime_ptr->event_service());
-            if (timing) {
-              compute_service.clear_timing_results(model);
-            }
             bool prev_quiet = model.is_quiet();
             model.set_quiet(q);
             model.set_skip_save_cache(nosave);
@@ -764,9 +768,6 @@ std::optional<std::future<bool>> Kernel::compute_async(
     try {
       ComputeService compute_service(traversal_service_, cache_service_,
                                      runtime_capture->event_service());
-      if (timing) {
-        compute_service.clear_timing_results(g);
-      }
       bool prev_quiet = g.is_quiet();
       g.set_quiet(q);
       g.set_skip_save_cache(nosave);

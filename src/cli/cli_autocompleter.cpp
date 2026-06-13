@@ -66,6 +66,15 @@ CompletionResult CliAutocompleter::Complete(const std::string& line,
       CompleteNodeId(prefix, result.options);
     } else if (cmd == "inspect") {
       CompleteNodeId(prefix, result.options);
+      for (const std::string& option : {"all", "dirty"}) {
+        if (option.rfind(prefix, 0) == 0) {
+          result.options.push_back(option);
+        }
+      }
+      std::sort(result.options.begin(), result.options.end());
+      result.options.erase(
+          std::unique(result.options.begin(), result.options.end()),
+          result.options.end());
     } else if (cmd == "print") {
       // print <id|all> <mode>
       bool completing_first_arg =

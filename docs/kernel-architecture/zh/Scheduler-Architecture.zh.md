@@ -30,11 +30,11 @@ create -> attach(runtime) -> start -> dispatch planned tasks -> shutdown -> deta
 
 ## 当前 Dispatch 状态
 
-并行计算规划和 plan execution 属于 `ComputeService` 协作者：`DirtyRegionPlanner`、
-`ComputeTaskPlanner`、`IntentUpdateCoordinator` 和 `ComputeTaskDispatcher`。规划完成后，
-`ComputeTaskDispatcher` 会把完整 planned task graph 或 dirty 裁剪后的 update work set
-materialize 为具体 task，并通过相关 `ComputeIntent` 配置的 `IScheduler` 实例，经由
-`SchedulerTaskRuntime` 提交 ready work。
+并行计算规划和 plan execution 属于 `ComputeService` 协作者：`FullTaskGraphExpander`、
+`NodeCacheTaskGraphPruner`、`DirtyRegionPlanner`、`DirtySnapshotTaskGraphPruner`、
+`IntentUpdateCoordinator` 和 `ComputeTaskDispatcher`。裁剪完成后，`ComputeTaskDispatcher`
+会把 node/cache-pruned task graph 或 dirty 裁剪后的 update work set materialize 为具体 task，
+并通过相关 `ComputeIntent` 配置的 `IScheduler` 实例，经由 `SchedulerTaskRuntime` 提交 ready work。
 
 `GraphRuntime` 仍拥有图状态、scheduler 注册、事件，以及一些供 graph-runtime support path
 和测试使用的 runtime queue API。这些队列不再是 compute-service parallel dispatch
@@ -59,9 +59,12 @@ materialize 为具体 task，并通过相关 `ComputeIntent` 配置的 `ISchedul
 
 ```text
 GraphModel topology
-  -> ComputeTaskPlanner
-  -> ComputePlan / ComputeTaskGraph
+  -> FullTaskGraphExpander
+  -> FullTaskGraph
+  -> NodeCacheTaskGraphPruner
+  -> ComputePlan / pruned ComputeTaskGraph
   -> DirtyRegionSnapshot
+  -> DirtySnapshotTaskGraphPruner
   -> DirtyUpdateWorkSet
   -> Scheduler resource dispatch
 ```

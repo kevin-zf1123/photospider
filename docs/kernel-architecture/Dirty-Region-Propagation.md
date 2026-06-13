@@ -87,6 +87,13 @@ lifecycle state in `DirtyRegionSnapshot`; the propagator then derives
 materialization. It is not a normal compute task queue owned by the scheduler,
 and it should not be delegated to node-local compute ownership.
 
+TODO: define the node-to-`InteractionService` event interface for future GUI
+usage. Nodes should be the source of realtime update events and dirty-region
+records, while `InteractionService` should expose frontend-facing inspection,
+subscription, or update-request hooks without becoming the dirty-region
+generator. The design must document event source, dirty-region generation
+responsibility, node/facade boundaries, and GUI consumption.
+
 Recommended internal keys:
 
 ```text
@@ -308,6 +315,9 @@ domain: RT Micro_16 <-> RT Macro_64 and HP Micro_64 <-> HP Macro_256.
   the dirty-region context, it should expose graph-scoped snapshot queries and
   visualization hooks; it should not be treated as the authoritative source of
   dirty-region generation or propagation.
+- CLI/REPL commands do not currently expose realtime dirty-update interaction.
+  `RealTimeUpdate` is reserved for future GUI/interaction paths; adding
+  `compute rt` or `--dirty-roi` is outside the current CLI contract.
 - In build or test modes, provide `debug roi` output that draws ROI/tile coverage
   as masks so propagation correctness can be verified.
 - Metrics should record ROI area, tile count, merge count, and cancellation count

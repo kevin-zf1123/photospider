@@ -15,7 +15,7 @@ Important fields:
 | --- | --- |
 | private node storage | Map from node id to `Node`, accessed through `GraphModel` lookup, iteration, and mutation helpers. |
 | topology adjacency index | Incoming and outgoing `GraphTopologyEdge` maps for image and parameter edges, keyed by stable node id. |
-| `cache_root` | Root directory for disk cache files. |
+| `cache_root` | Resolved root directory for this graph's disk cache files. |
 | `timing_results` | Latest timing summary when timing is enabled. |
 | `total_io_time_ms` | Accumulated disk cache IO time. |
 
@@ -30,6 +30,12 @@ belong to the model mutation helpers.
 Internal services coordinate locking, timing, cache, topology, and traversal
 behavior through the model boundary. Most frontend code should reach graph
 state through `Kernel` or `InteractionService`.
+
+For CLI-loaded graphs, `cache_root` is derived from the loaded
+`cache_root_dir` config as `<cache_root_dir>/<graph_name>`, with relative paths
+resolved from the process working directory. Lower-level `Kernel::load_graph`
+callers that omit a cache root keep the session-local fallback
+`<root_dir>/<graph_name>/cache`.
 
 `GraphModel::clear()` is intended to reset model-level runtime state, not only
 erase nodes. Clearing a graph resets nodes, topology adjacency, timing results,

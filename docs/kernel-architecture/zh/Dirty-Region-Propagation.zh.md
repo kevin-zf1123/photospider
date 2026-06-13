@@ -52,6 +52,11 @@ Dirty-node lifecycle event 应进入串行的图级 `DirtyControlLane`。Control
 source 派生 `actual_dirty_region`，并唤醒 executor 进行 work-set materialization。它不是 scheduler
 拥有的普通 compute task queue，也不应下放为 node-local compute ownership。
 
+TODO：定义面向未来 GUI 的 node 到 `InteractionService` event 接口。Node 应作为 realtime update
+event 和 dirty-region record 的来源，而 `InteractionService` 只暴露面向前端的 inspection、
+subscription 或 update-request hook，不成为 dirty-region generator。该设计必须说明事件来源、
+dirty-region 生成责任、node/facade 边界以及 GUI 消费方式。
+
 建议的内部 key：
 
 ```text
@@ -202,5 +207,7 @@ Planner 可以为了同步或 inspection 使用尺度转换表达相互对应的
 - `InteractionService` 是面向前端的 kernel interaction facade。在 dirty-region 语境中，
   它应暴露图级 snapshot 查询和可视化 hook；它不应被视为 dirty-region generation 或
   propagation 的权威来源。
+- CLI/REPL 命令当前不暴露 realtime dirty-update interaction。`RealTimeUpdate` 保留给未来
+  GUI/interaction 路径；新增 `compute rt` 或 `--dirty-roi` 不属于当前 CLI contract。
 - 在构建或测试模式下，提供 `debug roi`：将 ROI/Tile 覆盖绘制为掩码输出，便于验证传播正确性。
 - 指标：记录 ROI 面积、Tile 数、合并次数、取消次数，辅助调参。

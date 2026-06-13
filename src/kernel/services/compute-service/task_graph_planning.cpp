@@ -1,10 +1,11 @@
-#include "kernel/services/compute-service/compute_task_planner.hpp"
+#include "kernel/services/compute-service/task_graph_planning.hpp"
 
 #include <algorithm>
 #include <unordered_map>
 #include <unordered_set>
 
 #include "graph_model.hpp"
+#include "kernel/services/compute-service/compute_cache_policy.hpp"
 #include "kernel/services/compute-service/compute_geometry.hpp"
 #include "kernel/services/graph_extent_resolver.hpp"
 
@@ -59,14 +60,6 @@ void add_dependency(std::vector<PlannedDependency>& dependencies,
   it->from_roi = merge_optional_rect(it->from_roi, from_roi);
   it->to_roi = merge_optional_rect(it->to_roi, to_roi);
   it->direction = direction;
-}
-
-std::vector<int> derive_planned_nodes(const ComputeRequest& request,
-                                      const std::vector<int>& execution_order,
-                                      const DirtyRegionSnapshot* snapshot) {
-  (void)request;
-  (void)snapshot;
-  return execution_order;
 }
 
 void populate_node_regions(ComputePlan& result,
@@ -172,6 +165,8 @@ void populate_node_dependency_lists(ComputePlan& result) {
   std::unordered_map<int, size_t> work_index;
   work_index.reserve(result.planned_work.size());
   for (size_t i = 0; i < result.planned_work.size(); ++i) {
+    result.planned_work[i].dependency_node_ids.clear();
+    result.planned_work[i].dependent_node_ids.clear();
     work_index[result.planned_work[i].node_id] = i;
   }
 
@@ -444,6 +439,11 @@ void populate_tasks(ComputePlan& result, const DirtyRegionSnapshot* snapshot,
 }
 
 void populate_task_dependencies(ComputePlan& result) {
+  result.task_graph.initial_task_ids.clear();
+  for (auto& task : result.task_graph.tasks) {
+    task.dependency_task_ids.clear();
+  }
+
   std::unordered_map<int, std::vector<int>> task_ids_by_node;
   for (const auto& task : result.task_graph.tasks) {
     task_ids_by_node[task.node_id].push_back(task.task_id);
@@ -471,19 +471,45 @@ void populate_task_dependencies(ComputePlan& result) {
   }
 }
 
-}  // namespace
+void rebuild_work_task_ids(ComputePlan& result) {
+  std::unordered_map<int, size_t> work_index;
+  work_index.reserve(result.planned_work.size());
+  for (size_t i = 0; i < result.planned_work.size(); ++i) {
+    result.planned_work[i].task_ids.clear();
+    work_index[result.planned_work[i].node_id] = i;
+  }
+  for (const auto& task : result.task_graph.tasks) {
+    auto work_it = work_index.find(task.node_id);
+    if (work_it != work_index.end()) {
+      result.planned_work[work_it->second].task_ids.push_back(task.task_id);
+    }
+  }
+}
 
-ComputePlan ComputeTaskPlanner::plan(const ComputeRequest& request,
-                                     const std::vector<int>& execution_order,
-                                     const DirtyRegionSnapshot* snapshot,
-                                     const GraphModel* graph) const {
+void clear_dirty_work_metadata(ComputePlan& result) {
+  for (auto& work : result.planned_work) {
+    work.represented_hp_roi = cv::Rect();
+    work.execution_roi = cv::Rect();
+    work.whole_output = false;
+    work.dirty_rois.clear();
+  }
+  for (auto& task : result.task_graph.tasks) {
+    task.source_boundary_eligible = false;
+    task.dirty_selected = true;
+    task.dirty_generation = 0;
+  }
+}
+
+ComputePlan build_plan_from_nodes(const ComputeRequest& request,
+                                  const std::vector<int>& planned_nodes,
+                                  const DirtyRegionSnapshot* snapshot,
+                                  const GraphModel* graph) {
   ComputePlan result;
   result.intent = request.intent;
   result.target_node_id = request.target_node_id;
   result.parallel = request.parallel;
-  result.execution_order = execution_order;
-  result.planned_nodes =
-      derive_planned_nodes(request, execution_order, snapshot);
+  result.execution_order = planned_nodes;
+  result.planned_nodes = planned_nodes;
 
   const DirtyDomain domain = domain_for_intent(request.intent);
   result.planned_work.reserve(result.planned_nodes.size());
@@ -503,8 +529,8 @@ ComputePlan ComputeTaskPlanner::plan(const ComputeRequest& request,
   return result;
 }
 
-DirtyUpdateWorkSet DirtySourceTaskCollector::collect(
-    const ComputePlan& plan, const DirtyRegionSnapshot& snapshot) const {
+DirtyUpdateWorkSet collect_dirty_source_tasks(
+    const ComputePlan& plan, const DirtyRegionSnapshot& snapshot) {
   DirtyUpdateWorkSet work_set;
   work_set.generation = snapshot.graph_generation;
   std::unordered_set<int> source_nodes(snapshot.dirty_source_nodes.begin(),
@@ -517,10 +543,109 @@ DirtyUpdateWorkSet DirtySourceTaskCollector::collect(
   return work_set;
 }
 
-DirtyUpdateWorkSet DirtyWorkPruner::materialize(
+}  // namespace
+
+FullTaskGraph FullTaskGraphExpander::expand(const GraphModel& graph,
+                                            ComputeIntent intent) const {
+  ComputeRequest request;
+  request.intent = intent;
+  const ComputePlan full_plan =
+      build_plan_from_nodes(request, graph.node_ids(), nullptr, &graph);
+
+  FullTaskGraph expanded;
+  expanded.intent = intent;
+  expanded.domain = domain_for_intent(intent);
+  expanded.expanded_node_ids = full_plan.planned_nodes;
+  expanded.expanded_work = full_plan.planned_work;
+  expanded.task_graph = full_plan.task_graph;
+  return expanded;
+}
+
+ComputePlan NodeCacheTaskGraphPruner::prune(
+    const FullTaskGraph& full_graph, const ComputeRequest& request,
+    const std::vector<int>& execution_order, const GraphModel& graph) const {
+  ComputePlan result;
+  result.intent = request.intent;
+  result.target_node_id = request.target_node_id;
+  result.parallel = request.parallel;
+  result.execution_order = execution_order;
+  result.planned_nodes = execution_order;
+
+  std::unordered_set<int> selected_nodes(execution_order.begin(),
+                                         execution_order.end());
+  std::unordered_map<int, const PlannedNodeWork*> full_work_by_node;
+  full_work_by_node.reserve(full_graph.expanded_work.size());
+  for (const auto& work : full_graph.expanded_work) {
+    full_work_by_node[work.node_id] = &work;
+  }
+
+  result.planned_work.reserve(execution_order.size());
+  for (int node_id : execution_order) {
+    if (!graph.has_node(node_id)) {
+      throw GraphError(GraphErrc::NotFound,
+                       "Cannot prune task graph: node " +
+                           std::to_string(node_id) + " not found.");
+    }
+    auto full_work_it = full_work_by_node.find(node_id);
+    if (full_work_it == full_work_by_node.end()) {
+      throw GraphError(GraphErrc::ComputeError,
+                       "Full task graph is missing node " +
+                           std::to_string(node_id) + ".");
+    }
+    PlannedNodeWork work = *full_work_it->second;
+    work.task_ids.clear();
+    work.dependency_node_ids.clear();
+    work.dependent_node_ids.clear();
+    work.dirty_rois.clear();
+    work.reusable_cache_available =
+        ComputeCachePolicy::has_reusable_output(graph.node(node_id));
+    result.planned_work.push_back(std::move(work));
+  }
+
+  for (const auto& task : full_graph.task_graph.tasks) {
+    if (!selected_nodes.count(task.node_id))
+      continue;
+    PlannedTask pruned_task = task;
+    pruned_task.task_id = static_cast<int>(result.task_graph.tasks.size());
+    pruned_task.dependency_task_ids.clear();
+    result.task_graph.tasks.push_back(std::move(pruned_task));
+  }
+
+  for (const auto& dependency : full_graph.task_graph.dependencies) {
+    if (!selected_nodes.count(dependency.from_node_id) ||
+        !selected_nodes.count(dependency.to_node_id)) {
+      continue;
+    }
+    result.task_graph.dependencies.push_back(dependency);
+  }
+
+  rebuild_work_task_ids(result);
+  populate_node_dependency_lists(result);
+  populate_task_dependencies(result);
+  return result;
+}
+
+ComputePlan DirtySnapshotTaskGraphPruner::prune(
+    const ComputePlan& node_cache_plan,
+    const DirtyRegionSnapshot& snapshot) const {
+  ComputePlan result = node_cache_plan;
+  const DirtyDomain domain = domain_for_intent(result.intent);
+
+  clear_dirty_work_metadata(result);
+  populate_node_regions(result, &snapshot, domain);
+  populate_dependencies_from_snapshot(result, &snapshot, domain);
+  for (auto& task : result.task_graph.tasks) {
+    apply_task_dirty_metadata(task, &snapshot);
+  }
+  rebuild_work_task_ids(result);
+  populate_node_dependency_lists(result);
+  populate_task_dependencies(result);
+  return result;
+}
+
+DirtyUpdateWorkSet DirtySnapshotTaskGraphPruner::materialize(
     const ComputePlan& plan, const DirtyRegionSnapshot& snapshot) const {
-  DirtyUpdateWorkSet work_set =
-      DirtySourceTaskCollector().collect(plan, snapshot);
+  DirtyUpdateWorkSet work_set = collect_dirty_source_tasks(plan, snapshot);
   std::unordered_set<int> source_nodes(snapshot.dirty_source_nodes.begin(),
                                        snapshot.dirty_source_nodes.end());
   for (const auto& task : plan.task_graph.tasks) {

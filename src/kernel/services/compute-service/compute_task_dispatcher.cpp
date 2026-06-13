@@ -13,12 +13,9 @@
 #include <variant>
 #include <vector>
 
-#include "adapter/buffer_adapter_opencv.hpp"
 #include "benchmark/benchmark_types.hpp"
-#include "kernel/param_utils.hpp"
-#include "kernel/services/compute-service/compute_geometry.hpp"
 #include "kernel/services/compute-service/compute_metrics_recorder.hpp"
-#include "kernel/services/compute-service/compute_task_planner.hpp"
+#include "kernel/services/compute-service/task_graph_planning.hpp"
 #include "kernel/services/compute-service/node_executor.hpp"
 #include "kernel/services/graph_cache_service.hpp"
 #include "kernel/services/graph_event_service.hpp"
@@ -26,8 +23,6 @@
 
 namespace ps::compute {
 namespace {
-
-using compute::calculate_halo;
 
 void finalize_output_metadata(NodeOutput& output,
                               const std::vector<const NodeOutput*>& inputs,
@@ -159,10 +154,14 @@ NodeOutput& ComputeTaskDispatcher::execute(
     }
 
     auto execution_order = traversal_.topo_postorder_from(graph, node_id);
-    compute::ComputeTaskPlanner task_planner;
-    const ComputePlan compute_plan = task_planner.plan(
-        {ComputeIntent::GlobalHighPrecision, node_id, true, std::nullopt},
-        execution_order, nullptr, &graph);
+    FullTaskGraphExpander full_expander;
+    NodeCacheTaskGraphPruner node_cache_pruner;
+    const ComputeRequest request{ComputeIntent::GlobalHighPrecision, node_id,
+                                 true, std::nullopt};
+    const FullTaskGraph full_graph =
+        full_expander.expand(graph, request.intent);
+    const ComputePlan compute_plan =
+        node_cache_pruner.prune(full_graph, request, execution_order, graph);
     remember_compute_plan(graph, compute_plan);
     execution_order = compute_plan.planned_nodes;
     std::unordered_set<int> execution_set(execution_order.begin(),
@@ -195,12 +194,10 @@ NodeOutput& ComputeTaskDispatcher::execute(
     std::vector<std::optional<NodeOutput>> temp_results(num_nodes);
     // Pre-resolve ops on main thread to avoid concurrent registry access
     std::vector<std::optional<OpRegistry::OpVariant>> resolved_ops(num_nodes);
-    std::vector<std::optional<OpMetadata>> resolved_meta(num_nodes);
     for (size_t i = 0; i < num_nodes; ++i) {
       const auto& n = graph.node(execution_order[i]);
       resolved_ops[i] = OpRegistry::instance().resolve_for_intent(
           n.type, n.subtype, ComputeIntent::GlobalHighPrecision);
-      resolved_meta[i] = OpRegistry::instance().get_metadata(n.type, n.subtype);
     }
 
     for (size_t i = 0; i < num_nodes; ++i) {
@@ -225,7 +222,7 @@ NodeOutput& ComputeTaskDispatcher::execute(
       auto inner_task = [this, &graph, &timing_mutex, &timing_results,
                          &task_runtime, &dependency_counters, &dependents_map,
                          &all_tasks, &id_to_idx, &temp_results, &resolved_ops,
-                         &resolved_meta, current_node_id, current_node_idx,
+                         current_node_id, current_node_idx,
                          cache_precision, enable_timing, disable_disk_cache,
                          benchmark_events, force_recache]() {
         // 1) Pure compute into temp_results without mutating GraphModel
@@ -347,327 +344,27 @@ NodeOutput& ComputeTaskDispatcher::execute(
             Node node_for_exec = target_node;
             node_for_exec.runtime_parameters = runtime_params;
 
-            NodeOutput result;
-            bool tiled_dispatched = false;
-            try {
-              std::visit(
-                  [&](auto&& op_func) {
-                    using T = std::decay_t<decltype(op_func)>;
-                    if constexpr (std::is_same_v<T, MonolithicOpFunc>) {
-                      result = op_func(node_for_exec, inputs_ready);
-                    } else if constexpr (std::is_same_v<T, TileOpFunc>) {
-                      // Build normalized inputs that must outlive tile
-                      // micro-tasks
-                      std::vector<NodeOutput> normalized_storage_local;
-                      std::vector<const NodeOutput*> inputs_for_tiling =
-                          inputs_ready;
-                      bool is_mixing = (target_node.type == "image_mixing");
-                      if (is_mixing && inputs_ready.size() >= 2) {
-                        const auto& base_buffer = inputs_ready[0]->image_buffer;
-                        if (base_buffer.width == 0 || base_buffer.height == 0) {
-                          throw GraphError(
-                              GraphErrc::InvalidParameter,
-                              "Base image for image_mixing is empty.");
-                        }
-                        const int base_w = base_buffer.width;
-                        const int base_h = base_buffer.height;
-                        const int base_c = base_buffer.channels;
-                        const std::string strategy =
-                            as_str(node_for_exec.runtime_parameters,
-                                   "merge_strategy", "resize");
-                        normalized_storage_local.reserve(inputs_ready.size() -
-                                                         1);
-                        for (size_t i = 1; i < inputs_ready.size(); ++i) {
-                          const auto& current_buffer =
-                              inputs_ready[i]->image_buffer;
-                          if (current_buffer.width == 0 ||
-                              current_buffer.height == 0) {
-                            throw GraphError(
-                                GraphErrc::InvalidParameter,
-                                "Secondary image for image_mixing is empty.");
-                          }
-                          cv::Mat current_mat = toCvMat(current_buffer);
-                          if (current_mat.cols != base_w ||
-                              current_mat.rows != base_h) {
-                            if (strategy == "resize") {
-                              cv::resize(current_mat, current_mat,
-                                         cv::Size(base_w, base_h), 0, 0,
-                                         cv::INTER_LINEAR);
-                            } else if (strategy == "crop") {
-                              cv::Rect crop_roi(
-                                  0, 0, std::min(current_mat.cols, base_w),
-                                  std::min(current_mat.rows, base_h));
-                              cv::Mat cropped = cv::Mat::zeros(
-                                  base_h, base_w, current_mat.type());
-                              current_mat(crop_roi).copyTo(cropped(crop_roi));
-                              current_mat = cropped;
-                            } else {
-                              throw GraphError(GraphErrc::InvalidParameter,
-                                               "Unsupported merge_strategy for "
-                                               "tiled mixing.");
-                            }
-                          }
-                          if (current_mat.channels() != base_c) {
-                            if (current_mat.channels() == 1 &&
-                                (base_c == 3 || base_c == 4)) {
-                              std::vector<cv::Mat> planes(base_c, current_mat);
-                              cv::merge(planes, current_mat);
-                            } else if ((current_mat.channels() == 3 ||
-                                        current_mat.channels() == 4) &&
-                                       base_c == 1) {
-                              cv::cvtColor(current_mat, current_mat,
-                                           cv::COLOR_BGR2GRAY);
-                            } else if (current_mat.channels() == 4 &&
-                                       base_c == 3) {
-                              cv::cvtColor(current_mat, current_mat,
-                                           cv::COLOR_BGRA2BGR);
-                            } else if (current_mat.channels() == 3 &&
-                                       base_c == 4) {
-                              cv::cvtColor(current_mat, current_mat,
-                                           cv::COLOR_BGR2BGRA);
-                            } else {
-                              throw GraphError(GraphErrc::InvalidParameter,
-                                               "Unsupported channel conversion "
-                                               "in tiled mixing.");
-                            }
-                          }
-                          NodeOutput tmp;
-                          tmp.image_buffer = fromCvMat(current_mat);
-                          normalized_storage_local.push_back(std::move(tmp));
-                          inputs_for_tiling[i] =
-                              &normalized_storage_local.back();
-                        }
-                      }
-
-                      // Prepare shared store for normalized inputs to extend
-                      // lifetime
-                      auto norm_store_sp =
-                          std::make_shared<std::vector<NodeOutput>>(
-                              std::move(normalized_storage_local));
-                      // Build input_ptrs that reference shared store for
-                      // secondary images
-                      std::vector<const NodeOutput*> input_ptrs = inputs_ready;
-                      if (is_mixing && inputs_ready.size() >= 2) {
-                        for (size_t i = 1, k = 0; i < inputs_ready.size();
-                             ++i, ++k) {
-                          if (k < norm_store_sp->size())
-                            input_ptrs[i] = &(*norm_store_sp)[k];
-                        }
-                      }
-
-                      // Infer output shape
-                      int out_w = input_ptrs.empty()
-                                      ? as_int_flexible(
-                                            node_for_exec.runtime_parameters,
-                                            "width", 256)
-                                      : input_ptrs[0]->image_buffer.width;
-                      int out_h = input_ptrs.empty()
-                                      ? as_int_flexible(
-                                            node_for_exec.runtime_parameters,
-                                            "height", 256)
-                                      : input_ptrs[0]->image_buffer.height;
-                      int out_c = input_ptrs.empty()
-                                      ? 1
-                                      : input_ptrs[0]->image_buffer.channels;
-                      auto out_t = input_ptrs.empty()
-                                       ? ps::DataType::FLOAT32
-                                       : input_ptrs[0]->image_buffer.type;
-
-                      // Allocate output buffer in temp_results (visible for
-                      // tiles)
-                      temp_results[current_node_idx] = NodeOutput{};
-                      auto& ob = temp_results[current_node_idx]->image_buffer;
-                      ob = make_aligned_cpu_image_buffer(out_w, out_h, out_c,
-                                                         out_t);
-
-                      // Tile size from metadata preference
-                      int tile_size = 128;
-                      if (resolved_meta[current_node_idx].has_value()) {
-                        auto pref =
-                            resolved_meta[current_node_idx]->tile_preference;
-                        if (pref == TileSizePreference::MICRO)
-                          tile_size = 16;
-                        else if (pref == TileSizePreference::MACRO)
-                          tile_size = 256;
-                      }
-                      const bool needs_halo =
-                          (node_for_exec.type == "image_process" &&
-                           node_for_exec.subtype.find("gaussian_blur") !=
-                               std::string::npos);
-                      const int HALO_SIZE = 16;
-                      auto access_pattern =
-                          OpMetadata::InputAccessPattern::SpatialAligned;
-                      if (resolved_meta[current_node_idx].has_value()) {
-                        access_pattern =
-                            resolved_meta[current_node_idx]->access_pattern;
-                      }
-                      auto prop_fn =
-                          OpRegistry::instance().get_dirty_propagator(
-                              target_node.type, target_node.subtype);
-
-                      // Plan tiles and spawn micro tasks
-                      int tiles_x = (out_w + tile_size - 1) / tile_size;
-                      int tiles_y = (out_h + tile_size - 1) / tile_size;
-                      int total_tiles = tiles_x * tiles_y;
-                      task_runtime.inc_tasks_to_complete(total_tiles);
-                      auto remaining =
-                          std::make_shared<std::atomic<int>>(total_tiles);
-                      auto start_tp = std::make_shared<
-                          std::chrono::high_resolution_clock::time_point>(
-                          std::chrono::high_resolution_clock::now());
-
-                      for (int ty = 0; ty < tiles_y; ++ty) {
-                        for (int tx = 0; tx < tiles_x; ++tx) {
-                          int x = tx * tile_size;
-                          int y = ty * tile_size;
-                          int w = std::min(tile_size, out_w - x);
-                          int h = std::min(tile_size, out_h - y);
-                          SchedulerTaskRuntime::Task tile_task =
-                              [this, &task_runtime, &dependents_map,
-                               &dependency_counters, &all_tasks, &temp_results,
-                               &timing_mutex, &timing_results, x, y, w, h,
-                               needs_halo, input_ptrs, norm_store_sp, remaining,
-                               start_tp, current_node_idx, current_node_id,
-                               node_for_exec, op_func, benchmark_events,
-                               enable_timing, access_pattern, prop_fn,
-                               &graph]() {
-                                try {
-                                  task_runtime.log_event(
-                                      SchedulerTraceAction::ExecuteTile,
-                                      current_node_id);
-                                  TileTask tt;
-                                  tt.node = &node_for_exec;
-                                  tt.output_tile.buffer =
-                                      &temp_results[current_node_idx]
-                                           ->image_buffer;
-                                  tt.output_tile.roi = cv::Rect(x, y, w, h);
-                                  for (auto const* in_out : input_ptrs) {
-                                    Tile in_tile;
-                                    in_tile.buffer = const_cast<ImageBuffer*>(
-                                        &in_out->image_buffer);
-                                    cv::Rect input_roi;
-                                    if (access_pattern ==
-                                        OpMetadata::InputAccessPattern::
-                                            RandomAccess) {
-                                      input_roi =
-                                          prop_fn(node_for_exec,
-                                                  tt.output_tile.roi, graph);
-                                      input_roi =
-                                          input_roi &
-                                          cv::Rect(0, 0, in_tile.buffer->width,
-                                                   in_tile.buffer->height);
-                                    } else if (needs_halo) {
-                                      input_roi = calculate_halo(
-                                          tt.output_tile.roi, HALO_SIZE,
-                                          {in_out->image_buffer.width,
-                                           in_out->image_buffer.height});
-                                    } else {
-                                      input_roi = tt.output_tile.roi;
-                                    }
-                                    in_tile.roi = input_roi;
-                                    tt.input_tiles.push_back(
-                                        std::move(in_tile));
-                                  }
-                                  compute::NodeExecutor::execute_tile_task(
-                                      tt, op_func);
-                                  if (remaining->fetch_sub(
-                                          1, std::memory_order_acq_rel) == 1) {
-                                    std::atomic_thread_fence(
-                                        std::memory_order_release);
-                                    double exec_ms_for_meta = 0.0;
-                                    if (enable_timing) {
-                                      auto end_tp = std::chrono::
-                                          high_resolution_clock::now();
-                                      double exec_ms =
-                                          std::chrono::duration<double,
-                                                                std::milli>(
-                                              end_tp - *start_tp)
-                                              .count();
-                                      exec_ms_for_meta = exec_ms;
-                                      BenchmarkEvent ev;
-                                      ev.node_id = current_node_id;
-                                      ev.op_name =
-                                          make_key(node_for_exec.type,
-                                                   node_for_exec.subtype);
-                                      ev.execution_start_time = *start_tp;
-                                      ev.dependency_start_time = *start_tp;
-                                      ev.execution_end_time = end_tp;
-                                      ev.execution_duration_ms = exec_ms;
-                                      ev.source = "computed";
-                                      if (benchmark_events) {
-                                        std::lock_guard lk(timing_mutex);
-                                        benchmark_events->push_back(ev);
-                                      }
-                                      {
-                                        std::lock_guard lk(timing_mutex);
-                                        timing_results.node_timings.push_back(
-                                            {current_node_id,
-                                             graph.node(current_node_id).name,
-                                             exec_ms, std::string("computed")});
-                                      }
-                                      events_.push(
-                                          current_node_id,
-                                          graph.node(current_node_id).name,
-                                          "computed", exec_ms);
-                                    } else {
-                                      events_.push(
-                                          current_node_id,
-                                          graph.node(current_node_id).name,
-                                          "computed", 0.0);
-                                    }
-                                    finalize_output_metadata(
-                                        *temp_results[current_node_idx],
-                                        input_ptrs, enable_timing,
-                                        exec_ms_for_meta);
-                                    for (int dependent_idx :
-                                         dependents_map[current_node_idx]) {
-                                      if (--dependency_counters
-                                              [dependent_idx] == 0) {
-                                        task_runtime
-                                            .submit_ready_task_from_worker(
-                                                std::move(
-                                                    all_tasks[dependent_idx]));
-                                      }
-                                    }
-                                  }
-                                } catch (const std::exception& e) {
-                                  task_runtime.set_exception(
-                                      std::make_exception_ptr(GraphError(
-                                          GraphErrc::ComputeError,
-                                          std::string("Tile stage at node ") +
-                                              std::to_string(current_node_id) +
-                                              " (" +
-                                              graph.node(current_node_id).name +
-                                              ") failed: " + e.what())));
-                                } catch (...) {
-                                  task_runtime.set_exception(
-                                      std::make_exception_ptr(GraphError(
-                                          GraphErrc::ComputeError,
-                                          std::string("Tile stage at node ") +
-                                              std::to_string(current_node_id) +
-                                              " (" +
-                                              graph.node(current_node_id).name +
-                                              ") failed: unknown exception")));
-                                }
-                                task_runtime.dec_tasks_to_complete();
-                              };
-                          task_runtime.submit_ready_task_from_worker(
-                              std::move(tile_task));
-                        }
-                      }
-                      tiled_dispatched = true;
-                    }
-                  },
-                  *op_opt);
-            } catch (const std::exception& e) {
-              throw;
+            TiledExecutionConfig tiled_config;
+            if (std::holds_alternative<TileOpFunc>(*op_opt)) {
+              if (auto metadata = OpRegistry::instance().get_metadata(
+                      target_node.type, target_node.subtype)) {
+                tiled_config.metadata = *metadata;
+                if (metadata->tile_preference == TileSizePreference::MICRO) {
+                  tiled_config.tile_size = 16;
+                } else if (metadata->tile_preference ==
+                           TileSizePreference::MACRO) {
+                  tiled_config.tile_size = 256;
+                }
+              }
+              tiled_config.on_tile = [&task_runtime,
+                                      current_node_id](const cv::Rect&) {
+                task_runtime.log_event(SchedulerTraceAction::ExecuteTile,
+                                       current_node_id);
+              };
             }
-
-            if (tiled_dispatched) {
-              // Tiled micro-tasks handle timing and dependent scheduling; skip
-              // monolithic finalization.
-              return;
-            }
+            NodeOutput result =
+                NodeExecutor::execute(graph, node_for_exec, *op_opt,
+                                      inputs_ready, tiled_config);
             double exec_ms_for_meta = 0.0;
             if (enable_timing) {
               current_event.execution_end_time =

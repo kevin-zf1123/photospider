@@ -169,9 +169,7 @@ bool GraphModel::is_quiet() const {
   return quiet_;
 }
 
-void GraphModel::clear() {
-  nodes_.clear();
-  topology_.clear();
+void GraphModel::reset_runtime_state() {
   timing_results.node_timings.clear();
   timing_results.total_ms = 0.0;
   last_dirty_region_snapshot_debug.reset();
@@ -184,6 +182,12 @@ void GraphModel::clear() {
   recent_compute_plans.clear();
   total_io_time_ms.store(0.0, std::memory_order_relaxed);
   skip_save_cache_.store(false, std::memory_order_relaxed);
+}
+
+void GraphModel::clear() {
+  nodes_.clear();
+  topology_.clear();
+  reset_runtime_state();
   quiet_ = true;
 }
 
@@ -299,6 +303,7 @@ void GraphModel::replace_nodes(NodeMap nodes) {
   GraphTopologyIndex topology = build_topology_index(nodes);
   nodes_ = std::move(nodes);
   topology_ = std::move(topology);
+  reset_runtime_state();
 }
 
 bool GraphModel::has_node(int id) const {

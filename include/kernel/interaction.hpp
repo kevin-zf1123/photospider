@@ -21,8 +21,10 @@ class InteractionService {
   // Graph lifecycle
   std::optional<std::string> cmd_load_graph(
       const std::string& name, const std::string& root_dir,
-      const std::string& yaml_path, const std::string& config_path = "") {
-    return kernel_.load_graph(name, root_dir, yaml_path, config_path);
+      const std::string& yaml_path, const std::string& config_path = "",
+      const std::string& cache_root_dir = "") {
+    return kernel_.load_graph(name, root_dir, yaml_path, config_path,
+                              cache_root_dir);
   }
   bool cmd_close_graph(const std::string& name) {
     return kernel_.close_graph(name);

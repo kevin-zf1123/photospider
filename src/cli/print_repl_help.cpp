@@ -34,8 +34,8 @@ void print_repl_help(const CliConfig& config) {
       << "  print [all|<id>] [full|simplified]\n"
       << "    Print dependency tree.\n\n"
 
-      << "  inspect <id>\n"
-      << "    Show cached output metadata for a node (spatial + debug).\n\n"
+      << "  inspect <id|all|dirty>\n"
+      << "    Show cached output metadata or latest backend dirty snapshot.\n\n"
 
       << "  node [<id>]\n"
       << "    Open the FTXUI node editor (optionally for a specific id).\n\n"

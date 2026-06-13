@@ -52,6 +52,18 @@ namespace fs = std::filesystem;
 #include "kernel/interaction.hpp"
 #include "kernel/kernel.hpp"
 
+static void apply_scheduler_config(ps::Kernel& kernel,
+                                   const CliConfig& config) {
+  ps::Kernel::SchedulerConfig scheduler_config;
+  scheduler_config.hp_type = config.scheduler_hp_type;
+  scheduler_config.rt_type = config.scheduler_rt_type;
+  scheduler_config.worker_count =
+      config.scheduler_worker_count > 0
+          ? static_cast<unsigned int>(config.scheduler_worker_count)
+          : 0;
+  kernel.set_scheduler_config(scheduler_config);
+}
+
 int main(int argc, char** argv) {
   // Hard-disable OpenCL runtime at process start to avoid spurious driver
   // errors
@@ -99,6 +111,7 @@ int main(int argc, char** argv) {
   std::string config_to_load =
       custom_config_path.empty() ? "config.yaml" : custom_config_path;
   load_or_create_config(config_to_load, config);
+  apply_scheduler_config(kernel, config);
   svc.cmd_plugins_load(config.plugin_dirs);
   std::string current_graph;
 
@@ -114,7 +127,8 @@ int main(int argc, char** argv) {
           return 0;
         case 'r': {
           auto ok = svc.cmd_load_graph("default", "sessions", optarg,
-                                       config.loaded_config_path);
+                                       config.loaded_config_path,
+                                       config.cache_root_dir);
           if (ok) {
             if (config.switch_after_load)
               current_graph = *ok;
