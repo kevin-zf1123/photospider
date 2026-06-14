@@ -133,6 +133,15 @@ add_library(photospider_plugin STATIC
 target_link_libraries(photospider_plugin PUBLIC photospider_core_types)
 
 # Module: Compute
+set(KERNEL_FACADE_SOURCES
+    src/kernel/kernel.cpp
+    src/kernel/kernel_compute.cpp
+    src/kernel/kernel_dirty_roi_facade.cpp
+    src/kernel/kernel_inspection_facade.cpp
+    src/kernel/kernel_io_cache_facade.cpp
+    src/kernel/kernel_scheduler_facade.cpp
+)
+
 set(COMPUTE_SOURCES
     src/kernel/services/compute-service/compute_cache_policy.cpp
     src/kernel/services/compute-service/compute_geometry.cpp
@@ -150,7 +159,6 @@ set(COMPUTE_SOURCES
     src/kernel/services/compute-service/compute_task_dispatcher.cpp
     src/kernel/services/compute_service.cpp
     src/kernel/services/graph_event_service.cpp
-    src/kernel/kernel.cpp
     src/kernel/interaction.cpp
     src/kernel/interaction_benchmark.cpp
     src/kernel/graph_runtime.mm
@@ -176,7 +184,8 @@ target_link_libraries(photospider_compute PUBLIC photospider_graph photospider_p
 
 file(GLOB PHOTOSPIDER_BENCHMARK_SOURCES "src/benchmark/*.cpp")
 
-add_library(photospider_lib SHARED ${PHOTOSPIDER_BENCHMARK_SOURCES})
+add_library(photospider_lib SHARED ${PHOTOSPIDER_BENCHMARK_SOURCES}
+                                  ${KERNEL_FACADE_SOURCES})
 
 target_compile_definitions(photospider_lib PRIVATE PHOTOSPIDER_LIB_BUILD)
 
@@ -367,13 +376,13 @@ if(APPLE)
         INSTALL_RPATH "@loader_path/ops;$ORIGIN/../lib"
         MACOSX_RPATH ON
     )
-    
+
     # [修复关键点] 必须链接 perlin_noise_metal，否则 loader 运行时找不到符号
     target_link_libraries(metal_ops_loader PRIVATE 
         perlin_noise_metal
         photospider_lib
     )
-    
+
     # Allow undefined symbols for dynamic lookup (useful for plugins in general)
     set(CMAKE_SHARED_LINKER_FLAGS "${CMAKE_SHARED_LINKER_FLAGS} -undefined dynamic_lookup")
 endif()
@@ -421,13 +430,13 @@ if(BUILD_TESTING)
     )
     target_include_directories(split_compute_service_trace PRIVATE "${PROJECT_SOURCE_DIR}/include" "${PROJECT_SOURCE_DIR}/src")
     target_link_libraries(split_compute_service_trace PRIVATE photospider_lib nlohmann_json::nlohmann_json)
-    
+
     # [M3.1] OpRegistry 多设备实现测试
     add_ps_test(test_op_registry_m31 tests/test_op_registry_m31.cpp)
-    
+
     # [M3.5] GPU Pipeline 调度器测试
     add_ps_test(test_gpu_pipeline_scheduler tests/test_gpu_pipeline_scheduler.cpp)
-    
+
     # [M3.5] 调度器插件加载器测试
     add_ps_test(test_scheduler_plugin_loader tests/test_scheduler_plugin_loader.cpp)
     target_link_libraries(test_scheduler_plugin_loader PRIVATE ${CMAKE_DL_LIBS})
