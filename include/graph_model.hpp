@@ -9,8 +9,8 @@
 #include <vector>
 
 #include "kernel/services/compute-service/task_graph_planning.hpp"
-#include "node.hpp"
-#include "ps_types.hpp"
+#include "node.hpp"      // NOLINT(build/include_subdir)
+#include "ps_types.hpp"  // NOLINT(build/include_subdir)
 
 namespace ps {
 
@@ -20,7 +20,10 @@ class GraphTraversalService;
 class ComputeService;
 namespace compute {
 class ComputeTaskDispatcher;
-}
+class DownsampleExecutor;
+class HighPrecisionDirtyExecutor;
+class RealTimeDirtyExecutor;
+}  // namespace compute
 
 struct NodeTiming {
   int id = -1;
@@ -143,6 +146,9 @@ class GraphModel {
   friend class GraphTraversalService;
   friend class ComputeService;
   friend class compute::ComputeTaskDispatcher;
+  friend class compute::DownsampleExecutor;
+  friend class compute::HighPrecisionDirtyExecutor;
+  friend class compute::RealTimeDirtyExecutor;
 
   void reset_runtime_state();
   Node* find_node_mutable(int id);
