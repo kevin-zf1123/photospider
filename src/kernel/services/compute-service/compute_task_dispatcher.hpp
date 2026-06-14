@@ -25,14 +25,20 @@ class ComputeTaskDispatcher {
   using SequentialFallback =
       std::function<NodeOutput&(GraphModel&, int, bool allow_disk_cache)>;
 
+  struct ComputeDispatchRequest {
+    int node_id = -1;
+    std::string cache_precision;
+    bool force_recache = false;
+    bool enable_timing = false;
+    bool disable_disk_cache = false;
+    std::vector<BenchmarkEvent>* benchmark_events = nullptr;
+  };
+
   ComputeTaskDispatcher(GraphTraversalService& traversal,
                         GraphCacheService& cache, GraphEventService& events);
 
   NodeOutput& execute(GraphModel& graph, SchedulerTaskRuntime& task_runtime,
-                      int node_id, const std::string& cache_precision,
-                      bool force_recache, bool enable_timing,
-                      bool disable_disk_cache,
-                      std::vector<BenchmarkEvent>* benchmark_events,
+                      const ComputeDispatchRequest& request,
                       SequentialFallback sequential_fallback);
 
   static void submit_dirty_ready_tasks_source_first(
