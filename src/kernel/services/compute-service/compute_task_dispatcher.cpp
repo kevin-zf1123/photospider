@@ -83,6 +83,8 @@ struct NodeTaskRunnerContext {
 
 // Runs one planned graph node without mutating GraphModel. Outputs stay in the
 // per-plan temp slots until ResultCommitter performs the serialized commit.
+// The referenced containers are owned by TaskSubmissionPlan for one execute()
+// call; NodeTaskRunner must never outlive that plan.
 class NodeTaskRunner {
  public:
   explicit NodeTaskRunner(NodeTaskRunnerContext context)
@@ -148,6 +150,8 @@ class NodeTaskRunner {
 
   void compute_node(int node_idx, int node_id) {
     const Node& target_node = graph_.node(node_id);
+    // Pairs with release_dependents() so downstream nodes see upstream
+    // temp_results writes before resolving their inputs.
     std::atomic_thread_fence(std::memory_order_acquire);
 
     if (!has_memory_or_temp_output(target_node, node_idx)) {
@@ -164,6 +168,8 @@ class NodeTaskRunner {
     }
     NodeOutput from_disk;
     if (cache_.try_load_from_disk_cache_into(graph_, target_node, from_disk)) {
+      // Disk hits follow the same temp-result path as computed nodes, keeping
+      // all formal GraphModel cache mutation in ResultCommitter.
       temp_results_[node_idx] = std::move(from_disk);
       record_disk_cache_hit(target_node);
     }
@@ -256,6 +262,8 @@ class NodeTaskRunner {
         resolve_image_inputs(target_node);
     BenchmarkEvent current_event = start_event(target_node);
 
+    // Runtime parameters are node-local execution state; copying avoids
+    // mutating GraphModel while worker tasks are still running.
     Node node_for_exec = target_node;
     node_for_exec.runtime_parameters = runtime_params;
     TiledExecutionConfig tiled_config = tiled_config_for(target_node, *op_opt);
@@ -352,6 +360,8 @@ class TaskSubmissionPlan {
     compute_plan_ =
         node_cache_pruner.prune(full_graph, request, execution_order_, graph);
     remember_compute_plan(graph, compute_plan_);
+    // The pruned plan is the authority for both node order and dependencies;
+    // do not rebuild dependencies from raw GraphModel edges below.
     execution_order_ = compute_plan_.planned_nodes;
     build_dense_index();
     build_dependency_state();
@@ -389,6 +399,8 @@ class TaskSubmissionPlan {
           runner.run_node(current_node_idx);
           release_dependents(current_node_idx, current_node_id, task_runtime);
         } catch (...) {
+          // SchedulerTaskRuntime owns cross-thread exception capture. The task
+          // only adds trace context, then rethrows to the runtime wrapper.
           task_runtime.log_event(SchedulerTraceAction::RethrowException,
                                  current_node_id);
           throw;
@@ -403,6 +415,9 @@ class TaskSubmissionPlan {
     submitted_initial_indices_.clear();
     append_graph_ready_tasks();
     if (initial_tasks_.empty()) {
+      // Some cache-pruned or legacy plans may not carry initial task ids.
+      // Falling back to zero-dependency nodes keeps the scheduler contract
+      // live.
       append_zero_dependency_tasks();
     }
     return std::move(initial_tasks_);
@@ -433,6 +448,8 @@ class TaskSubmissionPlan {
       counter.store(0, std::memory_order_relaxed);
     }
 
+    // Scheduler arrays are indexed densely, not by node id. This preserves
+    // sparse graph ids such as node 100 without oversized vectors.
     std::unordered_set<int> execution_set(execution_order_.begin(),
                                           execution_order_.end());
     for (const auto& dependency : compute_plan_.task_graph.dependencies) {
@@ -460,6 +477,8 @@ class TaskSubmissionPlan {
   void release_dependents(int current_node_idx, int current_node_id,
                           SchedulerTaskRuntime& task_runtime) {
     try {
+      // Publish temp_results before the dependent task can observe its counter
+      // reaching zero and start resolving upstream outputs.
       std::atomic_thread_fence(std::memory_order_release);
       for (int dependent_idx : dependents_map_[current_node_idx]) {
         const int previous = dependency_counters_[dependent_idx].fetch_sub(
@@ -558,6 +577,8 @@ class ResultCommitter {
         continue;
       }
       const int node_id = execution_order[i];
+      // A single serialized commit preserves GraphModel's HP cache authority
+      // after worker tasks have finished producing independent outputs.
       graph.mutate_node_runtime_state(
           node_id, [&](GraphModel::NodeRuntimeState& state) {
             state.cached_output_high_precision = std::move(*temp_results[i]);

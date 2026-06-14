@@ -25,6 +25,9 @@ class ComputeTaskDispatcher {
   using SequentialFallback =
       std::function<NodeOutput&(GraphModel&, int, bool allow_disk_cache)>;
 
+  // Immutable per-call knobs for the parallel HP path. The dispatcher keeps
+  // these together so helper objects can share the same execution contract
+  // without growing another long positional argument list.
   struct ComputeDispatchRequest {
     int node_id = -1;
     std::string cache_precision;
