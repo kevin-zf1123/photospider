@@ -140,6 +140,7 @@ set(COMPUTE_SOURCES
     src/kernel/services/compute-service/task_graph_planning.cpp
     src/kernel/services/compute-service/dirty_control_lane.cpp
     src/kernel/services/compute-service/dirty_region_planner.cpp
+    src/kernel/services/compute-service/dirty_update_executor.cpp
     src/kernel/services/compute-service/intent_update_coordinator.cpp
     src/kernel/services/compute-service/node_executor.cpp
     src/kernel/services/compute-service/node_input_resolver.cpp
