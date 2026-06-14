@@ -1012,8 +1012,10 @@ NodeOutput& ComputeService::compute_parallel(
   SchedulerTaskRuntime& task_runtime =
       scheduler_task_runtime_for(runtime, ComputeIntent::GlobalHighPrecision);
   return executor.execute(
-      graph, task_runtime, node_id, cache_precision, force_recache,
-      enable_timing, disable_disk_cache, benchmark_events,
+      graph, task_runtime,
+      compute::ComputeTaskDispatcher::ComputeDispatchRequest{
+          node_id, cache_precision, force_recache, enable_timing,
+          disable_disk_cache, benchmark_events},
       [this, &cache_precision, enable_timing, benchmark_events](
           GraphModel& fallback_graph, int fallback_node_id,
           bool allow_disk_cache) -> NodeOutput& {
