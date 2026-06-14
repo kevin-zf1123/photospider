@@ -6,7 +6,7 @@
 
 #include "benchmark/benchmark_types.hpp"
 #include "graph_model.hpp"  // NOLINT(build/include_subdir)
-#include "kernel/scheduler/scheduler_task_runtime.hpp"
+#include "kernel/services/compute-service/dirty_execution_common.hpp"
 
 namespace ps {
 class GraphEventService;
@@ -15,26 +15,6 @@ class GraphTraversalService;
 }  // namespace ps
 
 namespace ps::compute {
-
-/**
- * @brief Returns a running scheduler task runtime for one compute intent.
- *
- * This helper preserves the ComputeService scheduler contract used by full
- * graph dispatch and dirty ROI dispatch. It looks up the scheduler registered
- * on the supplied GraphRuntime, verifies that it implements
- * SchedulerTaskRuntime, starts it when necessary, and returns the task-runtime
- * facade that accepts concrete ready task callbacks.
- *
- * @param runtime Per-graph runtime that owns intent-specific schedulers.
- * @param intent Compute intent whose scheduler should receive work.
- * @return Running SchedulerTaskRuntime for the requested intent.
- * @throws GraphError when no scheduler is registered or the registered
- * scheduler cannot dispatch planned task callbacks.
- * @note The returned reference remains owned by GraphRuntime. Callers must not
- * store it beyond the active compute request.
- */
-SchedulerTaskRuntime& ensure_scheduler_task_runtime(GraphRuntime& runtime,
-                                                    ComputeIntent intent);
 
 /**
  * @brief Immutable options for one dirty update executor call.
@@ -67,84 +47,6 @@ struct DirtyUpdateRequest {
 
   /** @brief Dirty ROI in high-precision graph coordinates. */
   cv::Rect dirty_roi;
-};
-
-/**
- * @brief Refreshes real-time proxy buffers from committed HP dirty outputs.
- *
- * DownsampleExecutor owns the HP-to-RT refresh that follows high-precision
- * dirty execution when a GraphRuntime is present. Each request records the HP
- * ROI and HP version observed immediately after a node update. Execution skips
- * stale requests, allocates or reuses RT buffers, copies non-image payloads,
- * and records the same downsample/downsample_passthrough events used before
- * the dirty executor split.
- *
- * @note Instances borrow GraphModel, GraphRuntime, and GraphEventService for a
- * single call chain. The graph must remain exclusively owned by the caller for
- * the whole execute() call.
- */
-class DownsampleExecutor {
- public:
-  /**
-   * @brief One pending HP-to-RT refresh request.
-   *
-   * @note hp_version is compared against the node's current HP and RT versions
-   * to avoid overwriting newer RT state with stale downsample work.
-   */
-  struct Request {
-    /** @brief Node whose HP output should refresh the RT proxy. */
-    int node_id = -1;
-
-    /** @brief HP-space region that changed during dirty execution. */
-    cv::Rect roi_hp;
-
-    /** @brief HP version captured after the dirty node update. */
-    int hp_version = 0;
-  };
-
-  /**
-   * @brief Constructs a downsample executor for one graph-owned update.
-   *
-   * @param graph Graph containing HP and RT node cache state.
-   * @param runtime Optional runtime used only for scheduler trace events.
-   * @param events Event service that receives downsample status events.
-   * @throws Nothing directly.
-   * @note The executor stores borrowed references and performs no ownership
-   * transfer.
-   */
-  DownsampleExecutor(GraphModel& graph, GraphRuntime* runtime,
-                     GraphEventService& events);
-
-  /**
-   * @brief Executes all pending downsample requests in caller order.
-   *
-   * @param requests Pending node refreshes created by HP dirty execution.
-   * @throws GraphError or OpenCV exceptions if image conversion or resize
-   * fails unexpectedly.
-   * @note Empty request vectors are valid and leave graph state unchanged.
-   */
-  void execute(const std::vector<Request>& requests);
-
- private:
-  /**
-   * @brief Applies one HP-to-RT refresh request.
-   *
-   * @param request Request describing the node, ROI, and HP version to copy.
-   * @throws GraphError or OpenCV exceptions from buffer conversion or resize.
-   * @note Missing nodes, missing HP outputs, and stale generations are skipped
-   * to preserve the previous dirty update behavior.
-   */
-  void execute_one(const Request& request);
-
-  /** @brief Borrowed graph whose node cache state is refreshed. */
-  GraphModel& graph_;
-
-  /** @brief Optional runtime used for stale-generation and tile trace events.
-   */
-  GraphRuntime* runtime_;
-
-  /** @brief Borrowed event sink for downsample status events. */
-  GraphEventService& events_;
 };
 
 /**
@@ -190,6 +92,28 @@ class HighPrecisionDirtyExecutor {
                       const DirtyUpdateRequest& request);
 
  private:
+  /**
+   * @brief Clears HP cache metadata for nodes selected by one dirty plan.
+   *
+   * @param graph Graph whose selected HP node state is reset.
+   * @param plan HP dirty planner output for the active request.
+   * @throws GraphError when a planned node is missing.
+   * @note Only HP reusable cache, HP ROI, and HP version state are reset.
+   */
+  void reset_plan_cache(GraphModel& graph,
+                        const HighPrecisionDirtyPlan& plan) const;
+
+  /**
+   * @brief Validates and returns the target HP output after dirty execution.
+   *
+   * @param graph Graph containing the target node cache.
+   * @param node_id Target node id requested by the public facade.
+   * @return Mutable high-precision output stored on the target node.
+   * @throws GraphError when execution finishes without target HP output.
+   * @note This preserves the previous dirty update failure mode.
+   */
+  NodeOutput& require_target_output(GraphModel& graph, int node_id) const;
+
   /** @brief Borrowed traversal service for dirty ROI planning. */
   GraphTraversalService& traversal_;
 
@@ -238,6 +162,28 @@ class RealTimeDirtyExecutor {
                       const DirtyUpdateRequest& request);
 
  private:
+  /**
+   * @brief Clears RT cache metadata for nodes selected by one dirty plan.
+   *
+   * @param graph Graph whose selected RT node state is reset.
+   * @param plan RT dirty planner output for the active request.
+   * @throws GraphError when a planned node is missing.
+   * @note Only transient RT cache, RT ROI, and RT version state are reset.
+   */
+  void reset_plan_cache(GraphModel& graph, const RealTimeDirtyPlan& plan) const;
+
+  /**
+   * @brief Validates and returns the target RT output after dirty execution.
+   *
+   * @param graph Graph containing the target node cache.
+   * @param node_id Target node id requested by the public facade.
+   * @return Mutable real-time output stored on the target node.
+   * @throws GraphError when execution finishes without target RT output.
+   * @note RT output remains transient state and is validated separately from HP
+   * cache authority.
+   */
+  NodeOutput& require_target_output(GraphModel& graph, int node_id) const;
+
   /** @brief Borrowed traversal service for dirty ROI planning. */
   GraphTraversalService& traversal_;
 

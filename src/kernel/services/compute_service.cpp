@@ -70,8 +70,8 @@ void finalize_output_metadata(NodeOutput& output,
  * @note The history cap is intentionally small because plans are diagnostic
  * state, not an unbounded runtime log.
  */
-void remember_compute_plan(GraphModel& graph,
-                           const compute::ComputePlan& compute_plan) {
+void remember_facade_compute_plan(GraphModel& graph,
+                                  const compute::ComputePlan& compute_plan) {
   graph.last_compute_plan = compute_plan;
   graph.recent_compute_plans.push_back(compute_plan);
   if (graph.recent_compute_plans.size() > 16) {
@@ -90,7 +90,7 @@ void remember_compute_plan(GraphModel& graph,
  * @note Dirty update executors have their own same-boundary helper because
  * they also record dirty snapshots and materialized work sets.
  */
-compute::ComputePlan prune_node_cache_task_graph(
+compute::ComputePlan prune_facade_node_cache_task_graph(
     const GraphModel& graph, const compute::ComputeRequest& request,
     const std::vector<int>& execution_order) {
   compute::FullTaskGraphExpander full_expander;
@@ -558,8 +558,8 @@ NodeOutput& ComputeService::compute_sequential_impl(
   const compute::ComputeRequest request{ComputeIntent::GlobalHighPrecision,
                                         node_id, false, std::nullopt};
   const compute::ComputePlan compute_plan =
-      prune_node_cache_task_graph(graph, request, execution_order);
-  remember_compute_plan(graph, compute_plan);
+      prune_facade_node_cache_task_graph(graph, request, execution_order);
+  remember_facade_compute_plan(graph, compute_plan);
   execution_order = compute_plan.planned_nodes;
 
   if (force_recache) {
