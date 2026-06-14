@@ -1,13 +1,23 @@
-// Photospider kernel: Kernel implementation
+/**
+ * @file kernel.cpp
+ * @brief Implements Kernel graph lifecycle and scheduler bootstrap methods.
+ *
+ * The broader Kernel facade is split by responsibility across
+ * kernel_compute.cpp, kernel_io_cache_facade.cpp,
+ * kernel_inspection_facade.cpp, kernel_dirty_roi_facade.cpp, and
+ * kernel_scheduler_facade.cpp. This file keeps ownership setup for graph
+ * runtimes, graph listing/closing, Metal device access, and scheduler
+ * configuration so the public Kernel API remains unchanged while the
+ * implementation no longer concentrates every thin wrapper in one translation
+ * unit.
+ */
 #include "kernel/kernel.hpp"
 
 #include <filesystem>
-#include <future>
 #include <iostream>
 #include <sstream>
 
-#include "adapter/buffer_adapter_opencv.hpp"
-#include "kernel/scheduler/scheduler_factory.hpp"  // M3.4
+#include "kernel/scheduler/scheduler_factory.hpp"
 
 namespace ps {
 
@@ -23,10 +33,10 @@ std::optional<std::string> Kernel::load_graph(
     const std::string& name, const std::string& root_dir,
     const std::string& yaml_path, const std::string& config_path,
     const std::string& cache_root_dir) {
-  if (graphs_.count(name))
+  if (graphs_.count(name)) {
     return std::nullopt;
+  }
 
-  // [功能修复] 当 yaml_path 为空时，推断默认的 session 文件路径
   std::string effective_yaml_path = yaml_path;
   if (effective_yaml_path.empty()) {
     effective_yaml_path =
@@ -41,43 +51,36 @@ std::optional<std::string> Kernel::load_graph(
   GraphRuntime::Info info{name, std::filesystem::path(root_dir) / name,
                           effective_yaml_path, config_path,
                           effective_cache_root};
-  auto rt = std::make_unique<GraphRuntime>(info);
+  auto runtime = std::make_unique<GraphRuntime>(info);
   try {
     std::filesystem::create_directories(info.root);
-    auto yaml_target = info.root / "content.yaml";
+    const auto yaml_target = info.root / "content.yaml";
 
-    // [功能修复] 确保即使 yaml_path 最初为空，我们仍使用 effective_yaml_path
-    if (!info.yaml.empty() && std::filesystem::exists(info.yaml)) {
-      // 如果提供了 yaml_path（非空），则总是拷贝
-      if (!yaml_path.empty()) {
-        std::filesystem::copy_file(
-            info.yaml, yaml_target,
-            std::filesystem::copy_options::overwrite_existing);
-      }
+    if (!info.yaml.empty() && std::filesystem::exists(info.yaml) &&
+        !yaml_path.empty()) {
+      std::filesystem::copy_file(
+          info.yaml, yaml_target,
+          std::filesystem::copy_options::overwrite_existing);
     }
 
     if (!config_path.empty() && std::filesystem::exists(config_path)) {
-      auto cfg_target = info.root / "config.yaml";
+      const auto config_target = info.root / "config.yaml";
       std::filesystem::copy_file(
-          config_path, cfg_target,
+          config_path, config_target,
           std::filesystem::copy_options::overwrite_existing);
     }
   } catch (...) {
   }
 
-  // [M3.4] 为 GraphRuntime 设置调度器
-  setup_schedulers_for_runtime(name, *rt);
+  setup_schedulers_for_runtime(name, *runtime);
+  runtime->start();
 
-  rt->start();
-
-  // [功能修复] 使用推断出的 yaml_target 进行加载
-  auto final_yaml_to_load = info.root / "content.yaml";
-
+  const auto final_yaml_to_load = info.root / "content.yaml";
   if (std::filesystem::exists(final_yaml_to_load)) {
     try {
-      rt->graph_state()
-          .submit([this, yaml = final_yaml_to_load](GraphModel& g) {
-            io_service_.load(g, yaml);
+      runtime->graph_state()
+          .submit([this, yaml = final_yaml_to_load](GraphModel& graph) {
+            io_service_.load(graph, yaml);
             return 0;
           })
           .get();
@@ -87,19 +90,19 @@ std::optional<std::string> Kernel::load_graph(
       return std::nullopt;
     }
   } else if (!yaml_path.empty()) {
-    // 如果提供了原始yaml_path但目标不存在，说明拷贝失败或源文件不存在
     std::cerr << "Warning: source YAML file not found for graph '" << name
               << "': " << yaml_path << std::endl;
   }
 
-  graphs_[name] = std::move(rt);
+  graphs_[name] = std::move(runtime);
   return name;
 }
 
 bool Kernel::close_graph(const std::string& name) {
   auto it = graphs_.find(name);
-  if (it == graphs_.end())
+  if (it == graphs_.end()) {
     return false;
+  }
   it->second->stop();
   graphs_.erase(it);
   return true;
@@ -108,913 +111,11 @@ bool Kernel::close_graph(const std::string& name) {
 std::vector<std::string> Kernel::list_graphs() const {
   std::vector<std::string> names;
   names.reserve(graphs_.size());
-  for (const auto& kv : graphs_)
-    names.push_back(kv.first);
+  for (const auto& [graph_name, _] : graphs_) {
+    names.push_back(graph_name);
+  }
   return names;
 }
-
-bool Kernel::compute(const std::string& name, int node_id,
-                     const std::string& cache_precision, bool force_recache,
-                     bool enable_timing, bool parallel, bool quiet,
-                     bool disable_disk_cache, bool nosave,
-                     std::vector<BenchmarkEvent>* benchmark_events) {
-  auto it = graphs_.find(name);
-  if (it == graphs_.end())
-    return false;
-  try {
-    auto& runtime = *it->second;
-    if (!runtime.running())
-      runtime.start();
-    auto& model = runtime.model();
-    runtime.graph_state()
-        .submit([nosave](GraphModel& g) {
-          g.set_skip_save_cache(nosave);
-          return 0;
-        })
-        .get();
-    model.set_quiet(quiet);
-
-    if (parallel) {
-      ComputeService compute_service(traversal_service_, cache_service_,
-                                     runtime.event_service());
-      compute_service.compute_parallel(model, runtime, node_id, cache_precision,
-                                       force_recache, enable_timing,
-                                       disable_disk_cache, benchmark_events);
-    } else {
-      const int id = node_id;
-      const std::string precision = cache_precision;
-      const bool frc = force_recache;
-      const bool timing = enable_timing;
-      const bool disable_dc = disable_disk_cache;
-      auto fut = runtime.graph_state().submit(
-          [this, &runtime, id, precision, frc, timing, disable_dc,
-           benchmark_events](GraphModel& g) {
-            ComputeService compute_service(traversal_service_, cache_service_,
-                                           runtime.event_service());
-            compute_service.compute(g, id, precision, frc, timing, disable_dc,
-                                    benchmark_events);
-            return 0;
-          });
-      fut.get();
-    }
-
-    last_error_.erase(name);
-    runtime.graph_state()
-        .submit([](GraphModel& g) {
-          g.set_skip_save_cache(false);
-          return 0;
-        })
-        .get();
-    return true;
-  } catch (const GraphError& ge) {
-    last_error_[name] = {ge.code(), ge.what()};
-    return false;
-  } catch (const std::exception& e) {
-    std::stringstream ss;
-    ss << "std::exception during compute: " << e.what()
-       << " (while computing node " << node_id << ")";
-    last_error_[name] = {GraphErrc::Unknown, ss.str()};
-    return false;
-  } catch (...) {
-    last_error_[name] = {GraphErrc::Unknown, std::string("unknown error")};
-    return false;
-  }
-}
-
-std::optional<TimingCollector> Kernel::get_timing(const std::string& name) {
-  auto it = graphs_.find(name);
-  if (it == graphs_.end())
-    return std::nullopt;
-  try {
-    return it->second->graph_state()
-        .submit([](GraphModel& g) { return g.timing_results; })
-        .get();
-  } catch (...) {
-    return std::nullopt;
-  }
-}
-
-bool Kernel::reload_graph_yaml(const std::string& name,
-                               const std::string& yaml_path) {
-  auto it = graphs_.find(name);
-  if (it == graphs_.end())
-    return false;
-  try {
-    std::filesystem::path path = yaml_path;
-    it->second->graph_state()
-        .submit([this, path](GraphModel& g) {
-          io_service_.load(g, path);
-          return 0;
-        })
-        .get();
-    return true;
-  } catch (...) {
-    return false;
-  }
-}
-
-bool Kernel::save_graph_yaml(const std::string& name,
-                             const std::string& yaml_path) {
-  auto it = graphs_.find(name);
-  if (it == graphs_.end())
-    return false;
-  try {
-    std::filesystem::path path = yaml_path;
-    it->second->graph_state()
-        .submit([this, path](GraphModel& g) {
-          io_service_.save(g, path);
-          return 0;
-        })
-        .get();
-    return true;
-  } catch (...) {
-    return false;
-  }
-}
-
-bool Kernel::clear_drive_cache(const std::string& name) {
-  auto it = graphs_.find(name);
-  if (it == graphs_.end())
-    return false;
-  try {
-    it->second->graph_state()
-        .submit([this](GraphModel& g) {
-          cache_service_.clear_drive_cache(g);
-          return 0;
-        })
-        .get();
-    return true;
-  } catch (...) {
-    return false;
-  }
-}
-
-bool Kernel::clear_memory_cache(const std::string& name) {
-  auto it = graphs_.find(name);
-  if (it == graphs_.end())
-    return false;
-  try {
-    it->second->graph_state()
-        .submit([this](GraphModel& g) {
-          cache_service_.clear_memory_cache(g);
-          return 0;
-        })
-        .get();
-    return true;
-  } catch (...) {
-    return false;
-  }
-}
-
-bool Kernel::clear_cache(const std::string& name) {
-  auto it = graphs_.find(name);
-  if (it == graphs_.end())
-    return false;
-  try {
-    it->second->graph_state()
-        .submit([this](GraphModel& g) {
-          cache_service_.clear_cache(g);
-          return 0;
-        })
-        .get();
-    return true;
-  } catch (...) {
-    return false;
-  }
-}
-
-bool Kernel::cache_all_nodes(const std::string& name,
-                             const std::string& cache_precision) {
-  auto it = graphs_.find(name);
-  if (it == graphs_.end())
-    return false;
-  try {
-    it->second->graph_state()
-        .submit([this, cache_precision](GraphModel& g) {
-          cache_service_.cache_all_nodes(g, cache_precision);
-          return 0;
-        })
-        .get();
-    return true;
-  } catch (...) {
-    return false;
-  }
-}
-
-bool Kernel::free_transient_memory(const std::string& name) {
-  auto it = graphs_.find(name);
-  if (it == graphs_.end())
-    return false;
-  try {
-    it->second->graph_state()
-        .submit([this](GraphModel& g) {
-          cache_service_.free_transient_memory(g);
-          return 0;
-        })
-        .get();
-    return true;
-  } catch (...) {
-    return false;
-  }
-}
-
-std::optional<GraphModel::DriveClearResult> Kernel::clear_drive_cache_stats(
-    const std::string& name) {
-  auto it = graphs_.find(name);
-  if (it == graphs_.end())
-    return std::nullopt;
-  try {
-    return it->second->graph_state()
-        .submit([this](GraphModel& g) {
-          return cache_service_.clear_drive_cache(g);
-        })
-        .get();
-  } catch (...) {
-    return std::nullopt;
-  }
-}
-
-std::optional<GraphModel::MemoryClearResult> Kernel::clear_memory_cache_stats(
-    const std::string& name) {
-  auto it = graphs_.find(name);
-  if (it == graphs_.end())
-    return std::nullopt;
-  try {
-    return it->second->graph_state()
-        .submit([this](GraphModel& g) {
-          return cache_service_.clear_memory_cache(g);
-        })
-        .get();
-  } catch (...) {
-    return std::nullopt;
-  }
-}
-
-std::optional<GraphModel::CacheSaveResult> Kernel::cache_all_nodes_stats(
-    const std::string& name, const std::string& cache_precision) {
-  auto it = graphs_.find(name);
-  if (it == graphs_.end())
-    return std::nullopt;
-  try {
-    return it->second->graph_state()
-        .submit([this, cache_precision](GraphModel& g) {
-          return cache_service_.cache_all_nodes(g, cache_precision);
-        })
-        .get();
-  } catch (...) {
-    return std::nullopt;
-  }
-}
-
-std::optional<GraphModel::MemoryClearResult>
-Kernel::free_transient_memory_stats(const std::string& name) {
-  auto it = graphs_.find(name);
-  if (it == graphs_.end())
-    return std::nullopt;
-  try {
-    return it->second->graph_state()
-        .submit([this](GraphModel& g) {
-          return cache_service_.free_transient_memory(g);
-        })
-        .get();
-  } catch (...) {
-    return std::nullopt;
-  }
-}
-
-std::optional<GraphModel::DiskSyncResult> Kernel::synchronize_disk_cache_stats(
-    const std::string& name, const std::string& cache_precision) {
-  auto it = graphs_.find(name);
-  if (it == graphs_.end())
-    return std::nullopt;
-  try {
-    return it->second->graph_state()
-        .submit([this, cache_precision](GraphModel& g) {
-          return cache_service_.synchronize_disk_cache(g, cache_precision);
-        })
-        .get();
-  } catch (...) {
-    return std::nullopt;
-  }
-}
-
-bool Kernel::synchronize_disk_cache(const std::string& name,
-                                    const std::string& cache_precision) {
-  auto it = graphs_.find(name);
-  if (it == graphs_.end())
-    return false;
-  try {
-    it->second->graph_state()
-        .submit([this, cache_precision](GraphModel& g) {
-          cache_service_.synchronize_disk_cache(g, cache_precision);
-          return 0;
-        })
-        .get();
-    return true;
-  } catch (...) {
-    return false;
-  }
-}
-
-bool Kernel::clear_graph(const std::string& name) {
-  auto it = graphs_.find(name);
-  if (it == graphs_.end())
-    return false;
-  try {
-    it->second->graph_state()
-        .submit([](GraphModel& g) {
-          g.clear();
-          return 0;
-        })
-        .get();
-    return true;
-  } catch (...) {
-    return false;
-  }
-}
-
-std::optional<DependencyTree> Kernel::dependency_tree(
-    const std::string& name, std::optional<int> node_id,
-    bool include_metadata) {
-  auto it = graphs_.find(name);
-  if (it == graphs_.end())
-    return std::nullopt;
-  try {
-    return it->second->graph_state()
-        .submit([this, node_id, include_metadata](GraphModel& g) {
-          if (node_id) {
-            return inspect_service_.dependency_tree(g, *node_id,
-                                                    include_metadata);
-          }
-          return inspect_service_.dependency_tree(g, include_metadata);
-        })
-        .get();
-  } catch (...) {
-    return std::nullopt;
-  }
-}
-
-std::optional<GraphNodeInspectInfo> Kernel::inspect_node(
-    const std::string& name, int node_id) {
-  auto it = graphs_.find(name);
-  if (it == graphs_.end())
-    return std::nullopt;
-  try {
-    return it->second->graph_state()
-        .submit([this, node_id](
-                    GraphModel& g) -> std::optional<GraphNodeInspectInfo> {
-          const Node* node_ptr = g.find_node(node_id);
-          if (!node_ptr)
-            return std::nullopt;
-          return inspect_service_.inspect_node(*node_ptr);
-        })
-        .get();
-  } catch (...) {
-    return std::nullopt;
-  }
-}
-
-std::optional<GraphInspectionSnapshot> Kernel::inspect_graph(
-    const std::string& name) {
-  auto it = graphs_.find(name);
-  if (it == graphs_.end())
-    return std::nullopt;
-  try {
-    return it->second->graph_state()
-        .submit(
-            [this](GraphModel& g) { return inspect_service_.inspect_graph(g); })
-        .get();
-  } catch (...) {
-    return std::nullopt;
-  }
-}
-
-std::optional<Kernel::LastError> Kernel::last_error(
-    const std::string& name) const {
-  auto it = last_error_.find(name);
-  if (it == last_error_.end())
-    return std::nullopt;
-  return it->second;
-}
-
-std::optional<std::vector<int>> Kernel::ending_nodes(const std::string& name) {
-  auto it = graphs_.find(name);
-  if (it == graphs_.end())
-    return std::nullopt;
-  try {
-    return it->second->graph_state()
-        .submit([this](GraphModel& g) {
-          return traversal_service_.ending_nodes(g);
-        })
-        .get();
-  } catch (...) {
-    return std::nullopt;
-  }
-}
-
-std::optional<std::vector<int>> Kernel::topo_postorder_from(
-    const std::string& name, int end_node_id) {
-  auto it = graphs_.find(name);
-  if (it == graphs_.end())
-    return std::nullopt;
-  try {
-    return it->second->graph_state()
-        .submit([this, end_node_id](GraphModel& g) {
-          return traversal_service_.topo_postorder_from(g, end_node_id);
-        })
-        .get();
-  } catch (...) {
-    return std::nullopt;
-  }
-}
-
-std::optional<std::map<int, std::vector<int>>> Kernel::traversal_orders(
-    const std::string& name) {
-  auto ends = ending_nodes(name);
-  if (!ends)
-    return std::nullopt;
-  std::map<int, std::vector<int>> out;
-  for (int end : *ends) {
-    auto order = topo_postorder_from(name, end);
-    if (!order)
-      return std::nullopt;
-    out[end] = *order;
-  }
-  return out;
-}
-
-std::optional<std::map<int, std::vector<Kernel::TraversalNodeInfo>>>
-Kernel::traversal_details(const std::string& name) {
-  auto it = graphs_.find(name);
-  if (it == graphs_.end())
-    return std::nullopt;
-  try {
-    return it->second->graph_state()
-        .submit([this](GraphModel& g) {
-          std::map<int, std::vector<Kernel::TraversalNodeInfo>> result;
-          auto ends = traversal_service_.ending_nodes(g);
-          for (int end : ends) {
-            try {
-              auto order = traversal_service_.topo_postorder_from(g, end);
-              std::vector<Kernel::TraversalNodeInfo> vec;
-              vec.reserve(order.size());
-              for (int nid : order) {
-                const auto& node = g.node(nid);
-                bool mem = node.cached_output_high_precision.has_value() ||
-                           node.cached_output_real_time.has_value();
-                bool on_disk = false;
-                if (!node.caches.empty()) {
-                  for (const auto& cache : node.caches) {
-                    std::filesystem::path cache_file =
-                        cache_service_.node_cache_dir(g, node.id) /
-                        cache.location;
-                    std::filesystem::path meta_file = cache_file;
-                    meta_file.replace_extension(".yml");
-                    if (std::filesystem::exists(cache_file) ||
-                        std::filesystem::exists(meta_file)) {
-                      on_disk = true;
-                      break;
-                    }
-                  }
-                }
-                vec.push_back(Kernel::TraversalNodeInfo{node.id, node.name, mem,
-                                                        on_disk});
-              }
-              result[end] = std::move(vec);
-            } catch (...) {
-            }
-          }
-          return result;
-        })
-        .get();
-  } catch (...) {
-    return std::nullopt;
-  }
-}
-
-std::optional<cv::Mat> Kernel::compute_and_get_image(
-    const std::string& name, int node_id, const std::string& cache_precision,
-    bool force_recache, bool enable_timing, bool parallel,
-    bool disable_disk_cache, std::vector<BenchmarkEvent>* benchmark_events) {
-  auto it = graphs_.find(name);
-  if (it == graphs_.end())
-    return std::nullopt;
-  try {
-    NodeOutput output;
-    auto& runtime = *it->second;
-    if (!runtime.running())
-      runtime.start();
-    auto& model = runtime.model();
-
-    if (parallel) {
-      ComputeService compute_service(traversal_service_, cache_service_,
-                                     runtime.event_service());
-      output = compute_service.compute_parallel(
-          model, runtime, node_id, cache_precision, force_recache,
-          enable_timing, disable_disk_cache, benchmark_events);
-    } else {
-      std::future<NodeOutput> fut = runtime.graph_state().submit(
-          [this, &runtime, node_id, cache_precision, force_recache,
-           enable_timing, disable_disk_cache,
-           benchmark_events](GraphModel& g) -> NodeOutput {
-            ComputeService compute_service(traversal_service_, cache_service_,
-                                           runtime.event_service());
-            NodeOutput& ref = compute_service.compute(
-                g, node_id, cache_precision, force_recache, enable_timing,
-                disable_disk_cache, benchmark_events);
-            return ref;
-          });
-      output = fut.get();
-    }
-
-    if (output.image_buffer.width == 0)
-      return std::nullopt;
-    return toCvMat(output.image_buffer).clone();
-  } catch (...) {
-    return std::nullopt;
-  }
-}
-
-std::optional<std::vector<int>> Kernel::trees_containing_node(
-    const std::string& name, int node_id) {
-  auto it = graphs_.find(name);
-  if (it == graphs_.end())
-    return std::nullopt;
-  try {
-    return it->second->graph_state()
-        .submit([this, node_id](GraphModel& g) {
-          return traversal_service_.get_trees_containing_node(g, node_id);
-        })
-        .get();
-  } catch (...) {
-    return std::nullopt;
-  }
-}
-
-std::optional<std::vector<int>> Kernel::list_node_ids(const std::string& name) {
-  auto it = graphs_.find(name);
-  if (it == graphs_.end())
-    return std::nullopt;
-  try {
-    return it->second->graph_state()
-        .submit([](GraphModel& g) { return g.node_ids(); })
-        .get();
-  } catch (...) {
-    return std::nullopt;
-  }
-}
-
-std::optional<std::string> Kernel::get_node_yaml(const std::string& name,
-                                                 int node_id) {
-  auto it = graphs_.find(name);
-  if (it == graphs_.end())
-    return std::nullopt;
-  try {
-    return it->second->graph_state()
-        .submit([=](GraphModel& g) {
-          if (!g.has_node(node_id))
-            throw std::runtime_error("node not found");
-          auto n = g.node(node_id).to_yaml();
-          std::stringstream ss;
-          ss << n;
-          return ss.str();
-        })
-        .get();
-  } catch (...) {
-    return std::nullopt;
-  }
-}
-
-bool Kernel::set_node_yaml(const std::string& name, int node_id,
-                           const std::string& yaml_text) {
-  auto it = graphs_.find(name);
-  if (it == graphs_.end())
-    return false;
-  try {
-    return it->second->graph_state()
-        .submit([=](GraphModel& g) {
-          if (!g.has_node(node_id))
-            return false;
-          YAML::Node root = YAML::Load(yaml_text);
-          ps::Node updated = ps::Node::from_yaml(root);
-          updated.id = node_id;
-          g.replace_node(updated);
-          return true;
-        })
-        .get();
-  } catch (...) {
-    return false;
-  }
-}
-
-std::optional<std::future<bool>> Kernel::compute_async(
-    const std::string& name, int node_id, const std::string& cache_precision,
-    bool force_recache, bool enable_timing, bool parallel, bool quiet,
-    bool disable_disk_cache, bool nosave,
-    std::vector<BenchmarkEvent>* benchmark_events) {
-  auto it = graphs_.find(name);
-  if (it == graphs_.end()) {
-    return std::nullopt;
-  }
-
-  // Capture all invocation arguments by value to avoid dangling references when
-  // executed asynchronously.
-  const int id = node_id;
-  const std::string precision = cache_precision;
-  const bool frc = force_recache;
-  const bool timing = enable_timing;
-  const bool par = parallel;
-  const bool q = quiet;
-  const bool disable_dc = disable_disk_cache;
-  const std::string name_copy = name;
-  GraphRuntime* const runtime_ptr = it->second.get();
-
-  if (par) {
-    return std::optional<std::future<bool>>(std::async(
-        std::launch::async,
-        [this, runtime_ptr, id, precision, frc, timing, q, disable_dc, nosave,
-         name_copy, benchmark_events]() {
-          try {
-            if (!runtime_ptr->running())
-              runtime_ptr->start();
-            GraphModel& model = runtime_ptr->model();
-            ComputeService compute_service(traversal_service_, cache_service_,
-                                           runtime_ptr->event_service());
-            bool prev_quiet = model.is_quiet();
-            model.set_quiet(q);
-            model.set_skip_save_cache(nosave);
-            compute_service.compute_parallel(model, *runtime_ptr, id, precision,
-                                             frc, timing, disable_dc,
-                                             benchmark_events);
-            model.set_skip_save_cache(false);
-            model.set_quiet(prev_quiet);
-            last_error_.erase(name_copy);
-            return true;
-          } catch (const GraphError& ge) {
-            last_error_[name_copy] = {ge.code(), ge.what()};
-            return false;
-          } catch (const std::exception& e) {
-            std::stringstream ss;
-            ss << "std::exception: " << e.what() << " (while computing node "
-               << id << ")";
-            last_error_[name_copy] = {GraphErrc::Unknown, ss.str()};
-            return false;
-          }
-        }));
-  }
-
-  if (!it->second->running())
-    it->second->start();
-  GraphRuntime* runtime_capture = it->second.get();
-  return it->second->graph_state().submit([=](GraphModel& g) {
-    try {
-      ComputeService compute_service(traversal_service_, cache_service_,
-                                     runtime_capture->event_service());
-      bool prev_quiet = g.is_quiet();
-      g.set_quiet(q);
-      g.set_skip_save_cache(nosave);
-      compute_service.compute(g, id, precision, frc, timing, disable_dc,
-                              benchmark_events);
-      g.set_skip_save_cache(false);
-      g.set_quiet(prev_quiet);
-      last_error_.erase(name_copy);
-      return true;
-    } catch (const GraphError& ge) {
-      last_error_[name_copy] = {ge.code(), ge.what()};
-      return false;
-    } catch (const std::exception& e) {
-      std::stringstream ss;
-      ss << "std::exception: " << e.what() << " (while computing node " << id
-         << ")";
-      last_error_[name_copy] = {GraphErrc::Unknown, ss.str()};
-      return false;
-    }
-  });
-}
-
-std::optional<std::vector<GraphEventService::ComputeEvent>>
-Kernel::drain_compute_events(const std::string& name) {
-  auto it = graphs_.find(name);
-  if (it == graphs_.end())
-    return std::nullopt;
-  try {
-    return it->second->drain_compute_events_now();
-  } catch (...) {
-    return std::nullopt;
-  }
-}
-
-std::optional<std::vector<GraphRuntime::SchedulerEvent>>
-Kernel::scheduler_trace(const std::string& name) {
-  auto it = graphs_.find(name);
-  if (it == graphs_.end())
-    return std::nullopt;
-  try {
-    return it->second->get_scheduler_log();
-  } catch (...) {
-    return std::nullopt;
-  }
-}
-
-std::optional<std::string> Kernel::dirty_region_snapshot_debug(
-    const std::string& name) {
-  auto it = graphs_.find(name);
-  if (it == graphs_.end())
-    return std::nullopt;
-  try {
-    return it->second->graph_state()
-        .submit(
-            [](GraphModel& g) { return g.last_dirty_region_snapshot_debug; })
-        .get();
-  } catch (...) {
-    return std::nullopt;
-  }
-}
-
-std::optional<compute::DirtyRegionSnapshot> Kernel::dirty_region_snapshot(
-    const std::string& name) {
-  auto it = graphs_.find(name);
-  if (it == graphs_.end())
-    return std::nullopt;
-  try {
-    return it->second->graph_state()
-        .submit([](GraphModel& g) { return g.last_dirty_region_snapshot; })
-        .get();
-  } catch (...) {
-    return std::nullopt;
-  }
-}
-
-std::optional<double> Kernel::get_last_io_time(const std::string& name) {
-  auto it = graphs_.find(name);
-  if (it == graphs_.end()) {
-    return std::nullopt;
-  }
-  try {
-    return it->second->graph_state()
-        .submit([](GraphModel& g) { return g.total_io_time_ms.load(); })
-        .get();
-  } catch (...) {
-    return std::nullopt;
-  }
-}
-std::optional<std::future<bool>> Kernel::compute_async(
-    const std::string& name, int node_id, const std::string& cache_precision,
-    bool force_recache, bool enable_timing, bool parallel, bool quiet,
-    bool disable_disk_cache, bool nosave,
-    std::vector<BenchmarkEvent>* benchmark_events,
-    ComputeIntent intent,              // 新增
-    std::optional<cv::Rect> dirty_roi  // 新增
-) {
-  auto it = graphs_.find(name);
-  if (it == graphs_.end()) {
-    return std::nullopt;
-  }
-
-  const int id = node_id;
-  const std::string precision = cache_precision;
-  const bool frc = force_recache;
-  const bool timing = enable_timing;
-  const bool par = parallel;
-  const bool q = quiet;
-  const bool disable_dc = disable_disk_cache;
-  const std::string name_copy = name;
-  GraphRuntime* const runtime_ptr = it->second.get();
-
-  if (par) {
-    return std::optional<std::future<bool>>(std::async(
-        std::launch::async,
-        [this, runtime_ptr, id, precision, frc, timing, q, disable_dc, nosave,
-         benchmark_events, intent, dirty_roi, name_copy]() {
-          try {
-            if (!runtime_ptr->running())
-              runtime_ptr->start();
-            GraphModel& model = runtime_ptr->model();
-            ComputeService compute_service(traversal_service_, cache_service_,
-                                           runtime_ptr->event_service());
-
-            bool prev_quiet = model.is_quiet();
-            model.set_quiet(q);
-            model.set_skip_save_cache(nosave);
-
-            compute_service.compute_parallel(model, *runtime_ptr, intent, id,
-                                             precision, frc, timing, disable_dc,
-                                             benchmark_events, dirty_roi);
-
-            model.set_skip_save_cache(false);
-            model.set_quiet(prev_quiet);
-            last_error_.erase(name_copy);
-            return true;
-          } catch (const GraphError& ge) {
-            last_error_[name_copy] = {ge.code(), ge.what()};
-            return false;
-          } catch (const std::exception& e) {
-            last_error_[name_copy] = {
-                GraphErrc::Unknown,
-                std::string("Async compute failed: ") + e.what()};
-            return false;
-          }
-        }));
-  }
-
-  if (!runtime_ptr->running())
-    runtime_ptr->start();
-  return runtime_ptr->graph_state().submit([this, runtime_ptr, id, precision,
-                                            frc, timing, q, disable_dc, nosave,
-                                            benchmark_events, intent, dirty_roi,
-                                            name_copy](GraphModel& model) {
-    try {
-      ComputeService compute_service(traversal_service_, cache_service_,
-                                     runtime_ptr->event_service());
-
-      bool prev_quiet = model.is_quiet();
-      model.set_quiet(q);
-      model.set_skip_save_cache(nosave);
-
-      compute_service.compute(model, intent, id, precision, frc, timing,
-                              disable_dc, benchmark_events, dirty_roi);
-
-      model.set_skip_save_cache(false);
-      model.set_quiet(prev_quiet);
-      last_error_.erase(name_copy);
-      return true;
-    } catch (const GraphError& ge) {
-      last_error_[name_copy] = {ge.code(), ge.what()};
-      return false;
-    } catch (const std::exception& e) {
-      last_error_[name_copy] = {
-          GraphErrc::Unknown, std::string("Async compute failed: ") + e.what()};
-      return false;
-    }
-  });
-}
-
-std::optional<cv::Rect> Kernel::project_roi_forward(const std::string& name,
-                                                    int start_node_id,
-                                                    const cv::Rect& start_roi,
-                                                    int target_node_id) {
-  auto it = graphs_.find(name);
-  if (it == graphs_.end())
-    return std::nullopt;
-
-  GraphRuntime* runtime_ptr = it->second.get();
-  if (!runtime_ptr->running())
-    runtime_ptr->start();
-
-  try {
-    auto future = runtime_ptr->graph_state().submit(
-        [&, start_node_id, start_roi, target_node_id](GraphModel& g) {
-          return roi_propagation_service_.project_roi_forward(
-              g, start_node_id, start_roi, target_node_id);
-        });
-    auto result = future.get();
-    last_error_.erase(name);
-    return result;
-  } catch (const GraphError& ge) {
-    last_error_[name] = {ge.code(), ge.what()};
-    return std::nullopt;
-  } catch (const std::exception& e) {
-    last_error_[name] = {GraphErrc::Unknown,
-                         std::string("ROI projection failed: ") + e.what()};
-    return std::nullopt;
-  }
-}
-
-std::optional<cv::Rect> Kernel::project_roi_backward(const std::string& name,
-                                                     int target_node_id,
-                                                     const cv::Rect& target_roi,
-                                                     int source_node_id) {
-  auto it = graphs_.find(name);
-  if (it == graphs_.end())
-    return std::nullopt;
-
-  GraphRuntime* runtime_ptr = it->second.get();
-  if (!runtime_ptr->running())
-    runtime_ptr->start();
-
-  try {
-    auto future = runtime_ptr->graph_state().submit(
-        [&, target_node_id, target_roi, source_node_id](GraphModel& g) {
-          return roi_propagation_service_.project_roi_backward(
-              g, target_node_id, target_roi, source_node_id);
-        });
-    auto result = future.get();
-    last_error_.erase(name);
-    return result;
-  } catch (const GraphError& ge) {
-    last_error_[name] = {ge.code(), ge.what()};
-    return std::nullopt;
-  } catch (const std::exception& e) {
-    last_error_[name] = {
-        GraphErrc::Unknown,
-        std::string("ROI back-projection failed: ") + e.what()};
-    return std::nullopt;
-  }
-}
-
-// =============================================================================
-// [M3.4] 调度器配置与管理实现
-// =============================================================================
 
 void Kernel::set_scheduler_config(const SchedulerConfig& config) {
   scheduler_config_ = config;
@@ -1028,7 +129,6 @@ void Kernel::setup_schedulers_for_runtime(const std::string& name,
                                           GraphRuntime& runtime) {
   std::vector<std::string> failures;
 
-  // 创建 HP 调度器
   auto hp_scheduler = SchedulerFactory::create(scheduler_config_.hp_type,
                                                scheduler_config_.worker_count);
   if (hp_scheduler) {
@@ -1038,7 +138,6 @@ void Kernel::setup_schedulers_for_runtime(const std::string& name,
     failures.push_back("HP scheduler type '" + scheduler_config_.hp_type + "'");
   }
 
-  // 创建 RT 调度器
   auto rt_scheduler = SchedulerFactory::create(scheduler_config_.rt_type,
                                                scheduler_config_.worker_count);
   if (rt_scheduler) {
@@ -1067,150 +166,6 @@ void Kernel::setup_schedulers_for_runtime(const std::string& name,
   } else {
     last_error_.erase(name);
   }
-}
-
-std::optional<compute::DirtyRegionSnapshot> Kernel::begin_dirty_source(
-    const std::string& name, int node_id, compute::DirtyDomain domain,
-    const cv::Rect& source_roi) {
-  auto result = begin_dirty_source_control(name, node_id, domain, source_roi);
-  if (!result) {
-    return std::nullopt;
-  }
-  return result->snapshot;
-}
-
-std::optional<compute::DirtyControlLaneResult>
-Kernel::begin_dirty_source_control(const std::string& name, int node_id,
-                                   compute::DirtyDomain domain,
-                                   const cv::Rect& source_roi) {
-  auto it = graphs_.find(name);
-  if (it == graphs_.end()) {
-    return std::nullopt;
-  }
-  try {
-    auto future = it->second->graph_state().submit(
-        [this, node_id, domain, source_roi](GraphModel& graph) {
-          compute::DirtyControlLane lane(traversal_service_,
-                                         roi_propagation_service_);
-          return lane.begin_dirty_source(graph, node_id, domain, source_roi);
-        });
-    auto result = future.get();
-    last_error_.erase(name);
-    return result;
-  } catch (const GraphError& ge) {
-    last_error_[name] = {ge.code(), ge.what()};
-    return std::nullopt;
-  } catch (const std::exception& e) {
-    last_error_[name] = {GraphErrc::Unknown,
-                         std::string("Dirty source begin failed: ") + e.what()};
-    return std::nullopt;
-  }
-}
-
-std::optional<compute::DirtyRegionSnapshot> Kernel::update_dirty_source(
-    const std::string& name, int node_id, compute::DirtyDomain domain,
-    const cv::Rect& source_roi) {
-  auto result = update_dirty_source_control(name, node_id, domain, source_roi);
-  if (!result) {
-    return std::nullopt;
-  }
-  return result->snapshot;
-}
-
-std::optional<compute::DirtyControlLaneResult>
-Kernel::update_dirty_source_control(const std::string& name, int node_id,
-                                    compute::DirtyDomain domain,
-                                    const cv::Rect& source_roi) {
-  auto it = graphs_.find(name);
-  if (it == graphs_.end()) {
-    return std::nullopt;
-  }
-  try {
-    auto future = it->second->graph_state().submit(
-        [this, node_id, domain, source_roi](GraphModel& graph) {
-          compute::DirtyControlLane lane(traversal_service_,
-                                         roi_propagation_service_);
-          return lane.update_dirty_source(graph, node_id, domain, source_roi);
-        });
-    auto result = future.get();
-    last_error_.erase(name);
-    return result;
-  } catch (const GraphError& ge) {
-    last_error_[name] = {ge.code(), ge.what()};
-    return std::nullopt;
-  } catch (const std::exception& e) {
-    last_error_[name] = {
-        GraphErrc::Unknown,
-        std::string("Dirty source update failed: ") + e.what()};
-    return std::nullopt;
-  }
-}
-
-std::optional<compute::DirtyRegionSnapshot> Kernel::end_dirty_source(
-    const std::string& name, int node_id, compute::DirtyDomain domain) {
-  auto result = end_dirty_source_control(name, node_id, domain);
-  if (!result) {
-    return std::nullopt;
-  }
-  return result->snapshot;
-}
-
-std::optional<compute::DirtyControlLaneResult> Kernel::end_dirty_source_control(
-    const std::string& name, int node_id, compute::DirtyDomain domain) {
-  auto it = graphs_.find(name);
-  if (it == graphs_.end()) {
-    return std::nullopt;
-  }
-  try {
-    auto future = it->second->graph_state().submit(
-        [this, node_id, domain](GraphModel& graph) {
-          compute::DirtyControlLane lane(traversal_service_,
-                                         roi_propagation_service_);
-          return lane.end_dirty_source(graph, node_id, domain);
-        });
-    auto result = future.get();
-    last_error_.erase(name);
-    return result;
-  } catch (const GraphError& ge) {
-    last_error_[name] = {ge.code(), ge.what()};
-    return std::nullopt;
-  } catch (const std::exception& e) {
-    last_error_[name] = {GraphErrc::Unknown,
-                         std::string("Dirty source end failed: ") + e.what()};
-    return std::nullopt;
-  }
-}
-
-bool Kernel::replace_scheduler(const std::string& name, ComputeIntent intent,
-                               const std::string& type) {
-  auto it = graphs_.find(name);
-  if (it == graphs_.end()) {
-    return false;
-  }
-
-  auto scheduler =
-      SchedulerFactory::create(type, scheduler_config_.worker_count);
-  if (!scheduler) {
-    return false;
-  }
-
-  it->second->replace_scheduler(intent, std::move(scheduler));
-  return true;
-}
-
-std::optional<std::pair<std::string, std::string>> Kernel::get_scheduler_info(
-    const std::string& name, ComputeIntent intent) const {
-  auto it = graphs_.find(name);
-  if (it == graphs_.end()) {
-    return std::nullopt;
-  }
-
-  const IScheduler* scheduler = it->second->get_scheduler(intent);
-  if (!scheduler) {
-    return std::nullopt;
-  }
-
-  return std::make_pair(scheduler->name(), scheduler->get_stats());
 }
 
 }  // namespace ps

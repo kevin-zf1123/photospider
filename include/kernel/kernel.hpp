@@ -1,12 +1,14 @@
 // Photospider kernel: multi-graph Kernel facade
 #pragma once
 
+#include <future>
 #include <map>
 #include <memory>
 #include <opencv2/opencv.hpp>
 #include <optional>
 #include <stdexcept>
 #include <string>
+#include <type_traits>
 #include <utility>
 #include <vector>
 
@@ -22,8 +24,31 @@
 
 namespace ps {
 
+/**
+ * @brief Multi-graph facade for graph lifecycle, graph-state commands, compute,
+ * scheduler access, and plugin management.
+ *
+ * Kernel owns one GraphRuntime per graph name and keeps frontend-facing APIs
+ * stable while delegating graph IO, traversal, inspection, cache, ROI, dirty
+ * control, and compute work to narrower services. Graph-state operations run
+ * through each runtime's GraphStateExecutor so topology and runtime metadata
+ * remain serialized with non-parallel compute. Parallel compute may use the
+ * runtime model and configured schedulers directly, matching the documented
+ * compute boundary.
+ *
+ * @note Public methods return bool or std::optional for frontend-friendly
+ * failure handling. Compute and ROI/dirty APIs additionally store per-graph
+ * LastError details when their service boundary reports GraphError or
+ * std::exception.
+ */
 class Kernel {
  public:
+  /**
+   * @brief Last frontend-visible error recorded for one graph.
+   *
+   * @note The value is best-effort diagnostic state. Missing graphs and helper
+   * APIs that historically returned only false/nullopt do not always update it.
+   */
   struct LastError {
     GraphErrc code = GraphErrc::Unknown;
     std::string message;
@@ -110,6 +135,12 @@ class Kernel {
                                                       int end_node_id);
   std::optional<std::map<int, std::vector<int>>> traversal_orders(
       const std::string& name);
+  /**
+   * @brief Cache and display metadata for one node in a traversal tree.
+   *
+   * @note Disk-cache presence is derived from cache file metadata at inspection
+   * time and is not a durable graph-state field.
+   */
   struct TraversalNodeInfo {
     int id;
     std::string name;
@@ -205,6 +236,261 @@ class Kernel {
       const std::string& name, ComputeIntent intent) const;
 
  private:
+  /**
+   * @brief Checks whether a node has a materialized disk-cache payload or
+   * metadata file.
+   *
+   * @param graph Graph that owns the node and cache-root configuration.
+   * @param node Node whose configured cache entries should be inspected.
+   * @return true when any cache payload or matching .yml metadata file exists.
+   * @throws std::filesystem::filesystem_error if the platform cannot inspect a
+   * configured cache path.
+   * @note This helper performs point-in-time filesystem inspection only; it
+   * does not mutate graph cache state or trigger cache synchronization.
+   */
+  bool has_node_disk_cache(const GraphModel& graph, const Node& node) const;
+
+  /**
+   * @brief Builds frontend traversal metadata for one node id.
+   *
+   * @param graph Graph containing the requested node.
+   * @param node_id Node identifier to inspect.
+   * @return TraversalNodeInfo with node identity plus memory and disk cache
+   * visibility.
+   * @throws GraphError/std::exception when node lookup or filesystem inspection
+   * fails; traversal_details_for_end converts those failures to a skipped
+   * traversal branch to preserve the historical facade behavior.
+   * @note Memory-cache visibility reflects either high-precision or real-time
+   * cached output; disk-cache visibility is derived from configured cache
+   * paths.
+   */
+  TraversalNodeInfo build_traversal_node_info(const GraphModel& graph,
+                                              int node_id) const;
+
+  /**
+   * @brief Builds traversal metadata for one ending node.
+   *
+   * @param graph Graph whose traversal order should be inspected.
+   * @param end_node_id Ending node used as the traversal root.
+   * @return Node metadata in topological postorder, or nullopt when this
+   * traversal branch cannot be inspected.
+   * @throws Nothing; all branch-local failures are swallowed to preserve the
+   * previous traversal_details contract.
+   * @note The caller still receives details for other ending nodes when one
+   * branch fails.
+   */
+  std::optional<std::vector<TraversalNodeInfo>> traversal_details_for_end(
+      GraphModel& graph, int end_node_id) const;
+
+  /**
+   * @brief Normalized private compute request shared by synchronous,
+   * asynchronous, and image-returning Kernel compute facades.
+   *
+   * This struct preserves the public API while removing duplicated parameter
+   * capture, runtime-start, ComputeService construction, and HP/RT intent
+   * branching from the public methods.
+   *
+   * @note intent=nullopt selects the legacy HP-only ComputeService overloads.
+   * A populated intent selects the intent-aware overloads and forwards
+   * dirty_roi unchanged. benchmark_events is a caller-owned optional sink and
+   * must outlive the compute call or async future that uses it.
+   */
+  struct ComputeRequest {
+    std::string name;
+    int node_id = 0;
+    std::string cache_precision;
+    bool force_recache = false;
+    bool enable_timing = false;
+    bool parallel = false;
+    bool quiet = false;
+    bool disable_disk_cache = false;
+    bool nosave = false;
+    std::vector<BenchmarkEvent>* benchmark_events = nullptr;
+    std::optional<ComputeIntent> intent;
+    std::optional<cv::Rect> dirty_roi;
+  };
+
+  /**
+   * @brief Executes a graph-runtime facade operation with missing-graph and
+   * exception-to-nullopt handling.
+   *
+   * @param name Graph name to resolve.
+   * @param op Callable invoked as op(GraphRuntime&).
+   * @return Optional operation result, or nullopt when the graph is missing or
+   * the operation throws.
+   * @throws Nothing; all exceptions from op are converted to nullopt to match
+   * existing thin facade APIs.
+   * @note This helper is for historically quiet runtime accessors. APIs that
+   * must update LastError keep their explicit GraphError/std::exception
+   * handling.
+   */
+  template <typename Fn>
+  auto with_runtime(const std::string& name, Fn&& op)
+      -> std::optional<std::decay_t<std::invoke_result_t<Fn, GraphRuntime&>>> {
+    auto it = graphs_.find(name);
+    if (it == graphs_.end()) {
+      return std::nullopt;
+    }
+    try {
+      return std::forward<Fn>(op)(*it->second);
+    } catch (...) {
+      return std::nullopt;
+    }
+  }
+
+  /**
+   * @brief Const overload for runtime facade accessors.
+   *
+   * @param name Graph name to resolve.
+   * @param op Callable invoked as op(const GraphRuntime&).
+   * @return Optional operation result, or nullopt when the graph is missing or
+   * the operation throws.
+   * @throws Nothing; all exceptions from op are converted to nullopt.
+   * @note Used by const inspection APIs such as scheduler metadata queries.
+   */
+  template <typename Fn>
+  auto with_runtime(const std::string& name, Fn&& op) const -> std::optional<
+      std::decay_t<std::invoke_result_t<Fn, const GraphRuntime&>>> {
+    auto it = graphs_.find(name);
+    if (it == graphs_.end()) {
+      return std::nullopt;
+    }
+    try {
+      return std::forward<Fn>(op)(*it->second);
+    } catch (...) {
+      return std::nullopt;
+    }
+  }
+
+  /**
+   * @brief Executes one serialized GraphModel operation through the graph-state
+   * executor.
+   *
+   * @param name Graph name to resolve.
+   * @param op Callable submitted as op(GraphModel&).
+   * @return Optional result from op, or nullopt when the graph is missing,
+   * submit/get fails, or op throws.
+   * @throws Nothing; submit, future get, and op exceptions are converted to
+   * nullopt.
+   * @note This helper preserves the facade contract for graph-state commands:
+   * they remain serialized by GraphStateExecutor and are not routed through
+   * scheduler task runtimes.
+   */
+  template <typename Fn>
+  auto with_graph_state(const std::string& name, Fn&& op)
+      -> std::optional<std::decay_t<std::invoke_result_t<Fn, GraphModel&>>> {
+    auto it = graphs_.find(name);
+    if (it == graphs_.end()) {
+      return std::nullopt;
+    }
+    try {
+      return it->second->graph_state().submit(std::forward<Fn>(op)).get();
+    } catch (...) {
+      return std::nullopt;
+    }
+  }
+
+  /**
+   * @brief Executes one serialized graph-state operation and records LastError
+   * details on handled failures.
+   *
+   * @param name Graph name to resolve.
+   * @param exception_prefix Prefix used for std::exception diagnostic messages.
+   * @param op Callable submitted as op(GraphModel&).
+   * @param start_runtime Whether to start the owning runtime before submit.
+   * @return Optional result from op, or nullopt when the graph is missing or
+   * the operation reports a handled failure.
+   * @throws Nothing; GraphError and std::exception are converted to LastError
+   * and nullopt.
+   * @note Use this helper for facade APIs whose existing contract exposes
+   * best-effort LastError details. Historically quiet accessors should keep
+   * using with_graph_state so they continue to hide diagnostic state.
+   */
+  template <typename Fn>
+  auto with_graph_state_last_error(const std::string& name,
+                                   const char* exception_prefix, Fn&& op,
+                                   bool start_runtime = false)
+      -> std::optional<std::decay_t<std::invoke_result_t<Fn, GraphModel&>>> {
+    auto it = graphs_.find(name);
+    if (it == graphs_.end()) {
+      return std::nullopt;
+    }
+    try {
+      if (start_runtime && !it->second->running()) {
+        it->second->start();
+      }
+      auto result =
+          it->second->graph_state().submit(std::forward<Fn>(op)).get();
+      last_error_.erase(name);
+      return result;
+    } catch (const GraphError& ge) {
+      last_error_[name] = {ge.code(), ge.what()};
+      return std::nullopt;
+    } catch (const std::exception& e) {
+      last_error_[name] = {GraphErrc::Unknown,
+                           std::string(exception_prefix) + e.what()};
+      return std::nullopt;
+    }
+  }
+
+  /**
+   * @brief Runs the public synchronous compute facade from a normalized
+   * request.
+   *
+   * @param request Public compute arguments captured into a stable request.
+   * @return true when ComputeService completes successfully; false when the
+   * graph is missing or compute reports a handled failure.
+   * @throws Nothing; GraphError/std::exception/unknown exceptions are mapped to
+   * the existing LastError behavior and false.
+   * @note The historical synchronous quiet and skip-save side effects are kept:
+   * quiet is set to request.quiet and skip-save is reset only after successful
+   * compute.
+   */
+  bool compute_request(const ComputeRequest& request);
+
+  /**
+   * @brief Schedules the async compute facade from a normalized request.
+   *
+   * @param request Public async compute arguments captured by value.
+   * @return Future that resolves to the compute status, or nullopt when the
+   * graph is missing.
+   * @throws std::system_error if std::async cannot launch the parallel branch.
+   * @note The returned future owns the request copy. benchmark_events remains
+   * caller-owned and must outlive future completion.
+   */
+  std::optional<std::future<bool>> compute_async_request(
+      ComputeRequest request);
+
+  /**
+   * @brief Runs compute and returns the target output as an OpenCV image.
+   *
+   * @param request Compute request with image-returning facade arguments.
+   * @return Cloned cv::Mat target image, or nullopt on missing graph, compute
+   * failure, or empty output.
+   * @throws Nothing; failures are converted to nullopt to preserve the previous
+   * save/preview facade contract.
+   * @note This path intentionally does not modify LastError, matching the prior
+   * compute_and_get_image behavior.
+   */
+  std::optional<cv::Mat> compute_and_get_image_request(
+      const ComputeRequest& request);
+
+  /**
+   * @brief Dispatches one request through the correct ComputeService overload.
+   *
+   * @param compute_service Request-scoped ComputeService collaborator.
+   * @param runtime Runtime that owns scheduler/event services for the graph.
+   * @param graph Visible graph model to compute against.
+   * @param request Normalized compute request.
+   * @return Mutable output owned by the graph node cache.
+   * @throws GraphError or std::exception from ComputeService.
+   * @note intent=nullopt selects legacy HP-only overloads; otherwise intent and
+   * dirty_roi are forwarded to the intent-aware HP/RT path.
+   */
+  NodeOutput& run_compute_request(ComputeService& compute_service,
+                                  GraphRuntime& runtime, GraphModel& graph,
+                                  const ComputeRequest& request);
+
   void setup_schedulers_for_runtime(const std::string& name,
                                     GraphRuntime& runtime);
 
