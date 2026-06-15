@@ -1,28 +1,56 @@
 #include "kernel/services/compute-service/task_graph_planning.hpp"
 
 #include <algorithm>
+#include <string>
 #include <unordered_map>
 #include <unordered_set>
+#include <utility>
+#include <vector>
 
-#include "graph_model.hpp"
+#include "graph_model.hpp"  // NOLINT(build/include_subdir)
 #include "kernel/services/compute-service/compute_cache_policy.hpp"
-#include "kernel/services/compute-service/compute_geometry.hpp"
-#include "kernel/services/graph_extent_resolver.hpp"
+#include "kernel/services/compute-service/task_population_strategy.hpp"
 
 namespace ps::compute {
 namespace {
 
+/**
+ * @brief Maps a compute intent to the single dirty/task domain being planned.
+ *
+ * @param intent Compute intent supplied by the request.
+ * @return RealTime for realtime intent, otherwise HighPrecision.
+ * @throws Nothing.
+ * @note Callers must invoke this per HP or RT path; the function never creates
+ * a mixed-domain plan.
+ */
 DirtyDomain domain_for_intent(ComputeIntent intent) {
   return intent == ComputeIntent::RealTimeUpdate ? DirtyDomain::RealTime
                                                  : DirtyDomain::HighPrecision;
 }
 
+/**
+ * @brief Appends a value only when the vector does not already contain it.
+ *
+ * @param values Vector being updated in stable insertion order.
+ * @param value Node or task id to append.
+ * @throws std::bad_alloc if vector growth fails.
+ * @note The helper preserves first-seen order for inspection output.
+ */
 void append_unique(std::vector<int>& values, int value) {
   if (std::find(values.begin(), values.end(), value) == values.end()) {
     values.push_back(value);
   }
 }
 
+/**
+ * @brief Merges two optional cv::Rect values using empty-as-missing semantics.
+ *
+ * @param current Current accumulated rectangle, possibly empty.
+ * @param next Next rectangle to merge, possibly empty.
+ * @return Union rectangle, or the non-empty side when only one side is valid.
+ * @throws Nothing.
+ * @note Empty rectangles are used as "unknown/no ROI" rather than geometry.
+ */
 cv::Rect merge_optional_rect(const cv::Rect& current, const cv::Rect& next) {
   if (next.width <= 0 || next.height <= 0)
     return current;
@@ -35,6 +63,18 @@ cv::Rect merge_optional_rect(const cv::Rect& current, const cv::Rect& next) {
   return cv::Rect(x0, y0, x1 - x0, y1 - y0);
 }
 
+/**
+ * @brief Checks whether an existing dependency matches node endpoints and kind.
+ *
+ * @param dependency Existing dependency entry.
+ * @param from_node_id Candidate upstream node id.
+ * @param to_node_id Candidate downstream node id.
+ * @param input_kind Candidate input kind label.
+ * @return true when endpoints and input kind match.
+ * @throws Nothing.
+ * @note Domain is checked by add_dependency() because same endpoints can exist
+ * in HP and RT plans independently.
+ */
 bool same_dependency(const PlannedDependency& dependency, int from_node_id,
                      int to_node_id, const std::string& input_kind) {
   return dependency.from_node_id == from_node_id &&
@@ -42,26 +82,43 @@ bool same_dependency(const PlannedDependency& dependency, int from_node_id,
          dependency.input_kind == input_kind;
 }
 
+/**
+ * @brief Adds or merges one planned dependency into a dependency vector.
+ *
+ * @param dependencies Mutable dependency list owned by ComputeTaskGraph.
+ * @param next New dependency edge to append or merge by endpoint/kind/domain.
+ * @throws std::bad_alloc if dependency storage grows.
+ * @note Duplicate dependencies merge ROI metadata so snapshot and graph edges
+ * preserve one edge record per endpoint/kind/domain.
+ */
 void add_dependency(std::vector<PlannedDependency>& dependencies,
-                    int from_node_id, int to_node_id, DirtyDomain domain,
-                    const std::string& input_kind, const cv::Rect& from_roi,
-                    const cv::Rect& to_roi, DirtyEdgeDirection direction) {
-  auto it = std::find_if(dependencies.begin(), dependencies.end(),
-                         [&](const PlannedDependency& dependency) {
-                           return same_dependency(dependency, from_node_id,
-                                                  to_node_id, input_kind) &&
-                                  dependency.domain == domain;
-                         });
+                    PlannedDependency next) {
+  auto it =
+      std::find_if(dependencies.begin(), dependencies.end(),
+                   [&](const PlannedDependency& dependency) {
+                     return same_dependency(dependency, next.from_node_id,
+                                            next.to_node_id, next.input_kind) &&
+                            dependency.domain == next.domain;
+                   });
   if (it == dependencies.end()) {
-    dependencies.push_back({from_node_id, to_node_id, domain, input_kind,
-                            from_roi, to_roi, direction});
+    dependencies.push_back(std::move(next));
     return;
   }
-  it->from_roi = merge_optional_rect(it->from_roi, from_roi);
-  it->to_roi = merge_optional_rect(it->to_roi, to_roi);
-  it->direction = direction;
+  it->from_roi = merge_optional_rect(it->from_roi, next.from_roi);
+  it->to_roi = merge_optional_rect(it->to_roi, next.to_roi);
+  it->direction = next.direction;
 }
 
+/**
+ * @brief Copies dirty ROI metadata from a snapshot onto planned node work.
+ *
+ * @param result Plan whose PlannedNodeWork records are updated.
+ * @param snapshot Optional dirty snapshot; null leaves node work unchanged.
+ * @param domain HP or RT domain being planned.
+ * @throws std::bad_alloc if temporary lookup storage grows.
+ * @note High-precision plans also update represented_hp_roi because HP output
+ * remains the authoritative ROI space.
+ */
 void populate_node_regions(ComputePlan& result,
                            const DirtyRegionSnapshot* snapshot,
                            DirtyDomain domain) {
@@ -116,6 +173,15 @@ void populate_node_regions(ComputePlan& result,
   }
 }
 
+/**
+ * @brief Adds graph topology dependencies between planned nodes.
+ *
+ * @param result Plan whose task_graph.dependencies receives graph edges.
+ * @param domain HP or RT domain for the dependency records.
+ * @param graph Optional source graph; null skips graph dependency discovery.
+ * @throws std::bad_alloc if dependency or temporary set storage grows.
+ * @note Only dependencies whose upstream node survived pruning are recorded.
+ */
 void populate_dependencies_from_graph(ComputePlan& result, DirtyDomain domain,
                                       const GraphModel* graph) {
   if (!graph)
@@ -133,13 +199,24 @@ void populate_dependencies_from_graph(ComputePlan& result, DirtyDomain domain,
       const char* kind = edge.kind == GraphTopologyEdgeKind::ImageInput
                              ? "image"
                              : "parameter";
-      add_dependency(result.task_graph.dependencies, edge.from_node_id, node_id,
-                     domain, kind, cv::Rect(), cv::Rect(),
-                     DirtyEdgeDirection::BackwardDemand);
+      add_dependency(result.task_graph.dependencies,
+                     PlannedDependency{edge.from_node_id, node_id, domain, kind,
+                                       cv::Rect(), cv::Rect(),
+                                       DirtyEdgeDirection::BackwardDemand});
     }
   }
 }
 
+/**
+ * @brief Adds dirty snapshot edge mappings between planned nodes.
+ *
+ * @param result Plan whose task_graph.dependencies receives dirty mappings.
+ * @param snapshot Optional dirty snapshot; null skips this source.
+ * @param domain HP or RT domain for the dependency records.
+ * @throws std::bad_alloc if dependency or temporary set storage grows.
+ * @note Edge mappings outside the selected plan or different domain are
+ * ignored so HP and RT paths remain independent.
+ */
 void populate_dependencies_from_snapshot(ComputePlan& result,
                                          const DirtyRegionSnapshot* snapshot,
                                          DirtyDomain domain) {
@@ -155,12 +232,21 @@ void populate_dependencies_from_snapshot(ComputePlan& result,
         !planned_set.count(edge.to_node_id)) {
       continue;
     }
-    add_dependency(result.task_graph.dependencies, edge.from_node_id,
-                   edge.to_node_id, domain, "image", edge.from_roi, edge.to_roi,
-                   edge.direction);
+    add_dependency(
+        result.task_graph.dependencies,
+        PlannedDependency{edge.from_node_id, edge.to_node_id, domain, "image",
+                          edge.from_roi, edge.to_roi, edge.direction});
   }
 }
 
+/**
+ * @brief Rebuilds per-node dependency and dependent node lists from edges.
+ *
+ * @param result Plan whose PlannedNodeWork dependency lists are refreshed.
+ * @throws std::bad_alloc if lookup or node-list storage grows.
+ * @note The lists are diagnostic and planning metadata; task-level dependency
+ * ids are rebuilt separately after task population.
+ */
 void populate_node_dependency_lists(ComputePlan& result) {
   std::unordered_map<int, size_t> work_index;
   work_index.reserve(result.planned_work.size());
@@ -184,260 +270,16 @@ void populate_node_dependency_lists(ComputePlan& result) {
   }
 }
 
-bool is_dirty_source(const DirtyRegionSnapshot* snapshot, int node_id) {
-  if (!snapshot)
-    return false;
-  return std::find(snapshot->dirty_source_nodes.begin(),
-                   snapshot->dirty_source_nodes.end(),
-                   node_id) != snapshot->dirty_source_nodes.end();
-}
-
-cv::Rect dirty_roi_for_node(const DirtyRegionSnapshot* snapshot, int node_id,
-                            DirtyDomain domain) {
-  if (!snapshot)
-    return cv::Rect();
-  cv::Rect merged;
-  auto actual_it = snapshot->actual_dirty_rois.find(node_id);
-  if (actual_it != snapshot->actual_dirty_rois.end()) {
-    for (const auto& roi : actual_it->second) {
-      merged = merge_optional_rect(merged, roi);
-    }
-  }
-  auto roi_it = snapshot->per_node_dirty_rois.find(node_id);
-  if (roi_it != snapshot->per_node_dirty_rois.end()) {
-    for (const auto& roi : roi_it->second) {
-      merged = merge_optional_rect(merged, roi);
-    }
-  }
-  for (const auto& tile : snapshot->dirty_tiles) {
-    if (tile.domain == domain && tile.node_id == node_id) {
-      merged = merge_optional_rect(merged, tile.pixel_roi);
-    }
-  }
-  for (const auto& region : snapshot->dirty_monolithic_nodes) {
-    if (region.domain == domain && region.node_id == node_id) {
-      merged = merge_optional_rect(merged, region.pixel_roi);
-    }
-  }
-  return merged;
-}
-
-bool intersects_dirty_roi(const PlannedTask& task,
-                          const DirtyRegionSnapshot* snapshot) {
-  if (!snapshot)
-    return true;
-  const cv::Rect dirty_roi =
-      dirty_roi_for_node(snapshot, task.node_id, task.domain);
-  if (dirty_roi.width <= 0 || dirty_roi.height <= 0)
-    return false;
-  if (task.output_roi.width <= 0 || task.output_roi.height <= 0)
-    return true;
-  return (task.output_roi & dirty_roi).area() > 0;
-}
-
-int tile_size_for_node(const Node& node) {
-  int tile_size = 128;
-  auto meta = OpRegistry::instance().get_metadata(node.type, node.subtype);
-  if (!meta)
-    return tile_size;
-  if (meta->tile_preference == TileSizePreference::MICRO)
-    return 16;
-  if (meta->tile_preference == TileSizePreference::MACRO)
-    return 256;
-  return tile_size;
-}
-
-bool has_tiled_impl(const Node& node, DirtyDomain domain) {
-  const auto* impls =
-      OpRegistry::instance().get_implementations(node.type, node.subtype);
-  if (!impls)
-    return false;
-  return domain == DirtyDomain::RealTime ? static_cast<bool>(impls->tiled_rt)
-                                         : static_cast<bool>(impls->tiled_hp);
-}
-
-bool has_monolithic_impl(const Node& node, DirtyDomain domain) {
-  const auto* impls =
-      OpRegistry::instance().get_implementations(node.type, node.subtype);
-  if (!impls)
-    return false;
-  (void)domain;
-  return static_cast<bool>(impls->monolithic_hp);
-}
-
-void apply_task_dirty_metadata(PlannedTask& task,
-                               const DirtyRegionSnapshot* snapshot) {
-  task.source_boundary_eligible = is_dirty_source(snapshot, task.node_id);
-  task.dirty_generation = snapshot ? snapshot->graph_generation : 0;
-  task.dirty_selected = intersects_dirty_roi(task, snapshot);
-}
-
-void add_task(ComputePlan& result, PlannedTask task,
-              const DirtyRegionSnapshot* snapshot) {
-  task.task_id = static_cast<int>(result.task_graph.tasks.size());
-  apply_task_dirty_metadata(task, snapshot);
-  auto work_it =
-      std::find_if(result.planned_work.begin(), result.planned_work.end(),
-                   [&](const PlannedNodeWork& work) {
-                     return work.node_id == task.node_id;
-                   });
-  if (work_it != result.planned_work.end()) {
-    work_it->task_ids.push_back(task.task_id);
-  }
-  result.task_graph.tasks.push_back(std::move(task));
-}
-
-void populate_tasks(ComputePlan& result, const DirtyRegionSnapshot* snapshot,
-                    DirtyDomain domain, const GraphModel* graph) {
-  if (!graph && snapshot) {
-    for (const auto& region : snapshot->dirty_monolithic_nodes) {
-      if (region.domain != domain)
-        continue;
-      if (std::find(result.planned_nodes.begin(), result.planned_nodes.end(),
-                    region.node_id) == result.planned_nodes.end()) {
-        continue;
-      }
-      add_task(result,
-               PlannedTask{-1,
-                           region.node_id,
-                           PlannedTaskKind::Monolithic,
-                           domain,
-                           region.pixel_roi,
-                           -1,
-                           -1,
-                           0,
-                           region.whole_output,
-                           false,
-                           false,
-                           0,
-                           {}},
-               snapshot);
-    }
-    for (const auto& tile : snapshot->dirty_tiles) {
-      if (tile.domain != domain)
-        continue;
-      if (std::find(result.planned_nodes.begin(), result.planned_nodes.end(),
-                    tile.node_id) == result.planned_nodes.end()) {
-        continue;
-      }
-      add_task(result,
-               PlannedTask{-1,
-                           tile.node_id,
-                           PlannedTaskKind::Tile,
-                           domain,
-                           tile.pixel_roi,
-                           tile.tile_x,
-                           tile.tile_y,
-                           tile.tile_size,
-                           false,
-                           false,
-                           false,
-                           0,
-                           {}},
-               snapshot);
-    }
-    for (const auto& work : result.planned_work) {
-      if (!work.task_ids.empty())
-        continue;
-      add_task(result,
-               PlannedTask{-1,
-                           work.node_id,
-                           PlannedTaskKind::Node,
-                           domain,
-                           work.execution_roi,
-                           -1,
-                           -1,
-                           0,
-                           work.whole_output,
-                           false,
-                           false,
-                           0,
-                           {}},
-               snapshot);
-    }
-    return;
-  }
-  if (!graph) {
-    for (const auto& work : result.planned_work) {
-      add_task(result,
-               PlannedTask{-1,
-                           work.node_id,
-                           PlannedTaskKind::Node,
-                           domain,
-                           work.execution_roi,
-                           -1,
-                           -1,
-                           0,
-                           work.whole_output,
-                           false,
-                           false,
-                           0,
-                           {}},
-               snapshot);
-    }
-    return;
-  }
-
-  GraphExtentResolver extent_resolver;
-  std::unordered_map<int, cv::Size> extent_cache;
-  for (const auto& work : result.planned_work) {
-    if (!graph->has_node(work.node_id))
-      continue;
-    const Node& node = graph->node(work.node_id);
-    cv::Size extent = extent_resolver.resolve_output_extent(
-        const_cast<GraphModel&>(*graph), work.node_id, extent_cache);
-    cv::Rect full_output(0, 0, std::max(0, extent.width),
-                         std::max(0, extent.height));
-    if (has_tiled_impl(node, domain) && full_output.width > 0 &&
-        full_output.height > 0) {
-      const int tile_size = tile_size_for_node(node);
-      for (int y = 0; y < full_output.height; y += tile_size) {
-        for (int x = 0; x < full_output.width; x += tile_size) {
-          cv::Rect tile_roi(x, y,
-                            std::min(tile_size, full_output.width - x),
-                            std::min(tile_size, full_output.height - y));
-          add_task(result,
-                   PlannedTask{-1,
-                               work.node_id,
-                               PlannedTaskKind::Tile,
-                               domain,
-                               tile_roi,
-                               x / tile_size,
-                               y / tile_size,
-                               tile_size,
-                               false,
-                               false,
-                               false,
-                               0,
-                               {}},
-                   snapshot);
-        }
-      }
-      continue;
-    }
-
-    const PlannedTaskKind kind =
-        has_monolithic_impl(node, domain) ? PlannedTaskKind::Monolithic
-                                         : PlannedTaskKind::Node;
-    add_task(result,
-             PlannedTask{-1,
-                         work.node_id,
-                         kind,
-                         domain,
-                         full_output.width > 0 ? full_output
-                                               : work.execution_roi,
-                         -1,
-                         -1,
-                         0,
-                         kind == PlannedTaskKind::Monolithic,
-                         false,
-                         false,
-                         0,
-                         {}},
-             snapshot);
-  }
-}
-
+/**
+ * @brief Builds task-level dependency ids and initial ready task ids.
+ *
+ * @param result Plan whose ComputeTaskGraph task dependency metadata is
+ * refreshed.
+ * @throws std::bad_alloc if node-to-task lookup or ready ids grow.
+ * @note Every task belonging to an upstream node is treated as a dependency of
+ * every task belonging to the downstream node, matching existing node-level
+ * execution semantics.
+ */
 void populate_task_dependencies(ComputePlan& result) {
   result.task_graph.initial_task_ids.clear();
   for (auto& task : result.task_graph.tasks) {
@@ -471,6 +313,14 @@ void populate_task_dependencies(ComputePlan& result) {
   }
 }
 
+/**
+ * @brief Rebuilds PlannedNodeWork::task_ids from the task graph.
+ *
+ * @param result Plan whose per-node task lists are refreshed.
+ * @throws std::bad_alloc if lookup or task-id vectors grow.
+ * @note Used after pruning copies tasks because copied task ids may no longer
+ * align with the destination task graph.
+ */
 void rebuild_work_task_ids(ComputePlan& result) {
   std::unordered_map<int, size_t> work_index;
   work_index.reserve(result.planned_work.size());
@@ -486,6 +336,14 @@ void rebuild_work_task_ids(ComputePlan& result) {
   }
 }
 
+/**
+ * @brief Clears dirty ROI metadata before applying a new dirty snapshot.
+ *
+ * @param result Plan copy being prepared for dirty snapshot pruning.
+ * @throws Nothing directly.
+ * @note Task selected flags are reset to true so apply_task_dirty_metadata()
+ * can re-evaluate them from the new snapshot.
+ */
 void clear_dirty_work_metadata(ComputePlan& result) {
   for (auto& work : result.planned_work) {
     work.represented_hp_roi = cv::Rect();
@@ -500,6 +358,20 @@ void clear_dirty_work_metadata(ComputePlan& result) {
   }
 }
 
+/**
+ * @brief Builds a ComputePlan from an explicit planned node list.
+ *
+ * @param request Planning request containing intent, target, and mode flags.
+ * @param planned_nodes Node ids to include in execution order.
+ * @param snapshot Optional dirty snapshot used for ROI metadata and task
+ * population.
+ * @param graph Optional graph used for topology dependencies and task shape.
+ * @return ComputePlan with node work, dependencies, tasks, and initial ids.
+ * @throws GraphError or standard exceptions from task population, graph access,
+ * op metadata lookup, or allocation.
+ * @note This helper is the shared spine for full graph expansion, node/cache
+ * pruning compatibility, and dirty snapshot pruning.
+ */
 ComputePlan build_plan_from_nodes(const ComputeRequest& request,
                                   const std::vector<int>& planned_nodes,
                                   const DirtyRegionSnapshot* snapshot,
@@ -524,11 +396,21 @@ ComputePlan build_plan_from_nodes(const ComputeRequest& request,
   populate_dependencies_from_graph(result, domain, graph);
   populate_dependencies_from_snapshot(result, snapshot, domain);
   populate_node_dependency_lists(result);
-  populate_tasks(result, snapshot, domain, graph);
+  TaskPopulationStrategy task_population;
+  task_population.populate(result, snapshot, domain, graph);
   populate_task_dependencies(result);
   return result;
 }
 
+/**
+ * @brief Collects task ids that belong to dirty source nodes.
+ *
+ * @param plan Dirty-annotated plan whose task graph is scanned.
+ * @param snapshot Dirty snapshot providing generation and source node ids.
+ * @return Work set with generation and source task ids populated.
+ * @throws std::bad_alloc if temporary sets or output vectors grow.
+ * @note Downstream dirty task ids are appended later by materialize().
+ */
 DirtyUpdateWorkSet collect_dirty_source_tasks(
     const ComputePlan& plan, const DirtyRegionSnapshot& snapshot) {
   DirtyUpdateWorkSet work_set;
@@ -582,15 +464,15 @@ ComputePlan NodeCacheTaskGraphPruner::prune(
   result.planned_work.reserve(execution_order.size());
   for (int node_id : execution_order) {
     if (!graph.has_node(node_id)) {
-      throw GraphError(GraphErrc::NotFound,
-                       "Cannot prune task graph: node " +
-                           std::to_string(node_id) + " not found.");
+      throw GraphError(GraphErrc::NotFound, "Cannot prune task graph: node " +
+                                                std::to_string(node_id) +
+                                                " not found.");
     }
     auto full_work_it = full_work_by_node.find(node_id);
     if (full_work_it == full_work_by_node.end()) {
-      throw GraphError(GraphErrc::ComputeError,
-                       "Full task graph is missing node " +
-                           std::to_string(node_id) + ".");
+      throw GraphError(
+          GraphErrc::ComputeError,
+          "Full task graph is missing node " + std::to_string(node_id) + ".");
     }
     PlannedNodeWork work = *full_work_it->second;
     work.task_ids.clear();

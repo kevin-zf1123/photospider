@@ -2,6 +2,8 @@
  * @file kernel_dirty_roi_facade.cpp
  * @brief Implements Kernel ROI projection and dirty-source lifecycle facades.
  */
+#include <string>
+
 #include "kernel/kernel.hpp"
 
 namespace ps {
@@ -10,26 +12,28 @@ std::optional<cv::Rect> Kernel::project_roi_forward(const std::string& name,
                                                     int start_node_id,
                                                     const cv::Rect& start_roi,
                                                     int target_node_id) {
-  return with_graph_state_last_error(
+  auto result = with_graph_state_last_error(
       name, "ROI projection failed: ",
       [this, start_node_id, start_roi, target_node_id](GraphModel& graph) {
         return roi_propagation_service_.project_roi_forward(
             graph, start_node_id, start_roi, target_node_id);
       },
       true);
+  return result ? *result : std::nullopt;
 }
 
 std::optional<cv::Rect> Kernel::project_roi_backward(const std::string& name,
                                                      int target_node_id,
                                                      const cv::Rect& target_roi,
                                                      int source_node_id) {
-  return with_graph_state_last_error(
+  auto result = with_graph_state_last_error(
       name, "ROI back-projection failed: ",
       [this, target_node_id, target_roi, source_node_id](GraphModel& graph) {
         return roi_propagation_service_.project_roi_backward(
             graph, target_node_id, target_roi, source_node_id);
       },
       true);
+  return result ? *result : std::nullopt;
 }
 
 std::optional<compute::DirtyRegionSnapshot> Kernel::begin_dirty_source(

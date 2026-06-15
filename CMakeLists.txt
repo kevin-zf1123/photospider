@@ -144,9 +144,15 @@ set(KERNEL_FACADE_SOURCES
 
 set(COMPUTE_SOURCES
     src/kernel/services/compute-service/compute_cache_policy.cpp
+    src/kernel/services/compute-service/compute_dispatch_plan_builder.cpp
     src/kernel/services/compute-service/compute_geometry.cpp
     src/kernel/services/compute-service/compute_metrics_recorder.cpp
+    src/kernel/services/compute-service/compute_node_task_runner.cpp
+    src/kernel/services/compute-service/compute_result_committer.cpp
+    src/kernel/services/compute-service/compute_task_dependency_state.cpp
+    src/kernel/services/compute-service/compute_task_submission.cpp
     src/kernel/services/compute-service/task_graph_planning.cpp
+    src/kernel/services/compute-service/task_population_strategy.cpp
     src/kernel/services/compute-service/dirty_control_lane.cpp
     src/kernel/services/compute-service/dirty_execution_common.cpp
     src/kernel/services/compute-service/dirty_node_executor.cpp
