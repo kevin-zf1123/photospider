@@ -50,6 +50,22 @@ class TaskDependencyState {
                       const std::vector<int>& active_task_ids);
 
   /**
+   * @brief Builds dependency state for an active subset with dependency view.
+   *
+   * @param execution_order Dense planned node ids produced by the pruned plan.
+   * @param task_graph Task graph containing task count and node metadata.
+   * @param active_task_ids Task ids that participate in this runtime view.
+   * @param dependency_task_ids Dependency ids aligned with task id.
+   * @throws std::bad_alloc if counter, map, or adjacency storage cannot grow.
+   * @note Dirty overlays use this constructor so snapshot ROI edge mappings can
+   * affect ready release without copying PlannedTask objects.
+   */
+  TaskDependencyState(const std::vector<int>& execution_order,
+                      const ComputeTaskGraph& task_graph,
+                      const std::vector<int>& active_task_ids,
+                      const std::vector<std::vector<int>>& dependency_task_ids);
+
+  /**
    * @brief Returns the node id to dense execution-index map.
    *
    * @return Const reference used by worker input resolution.
@@ -100,8 +116,10 @@ class TaskDependencyState {
   void build_dense_index(const std::vector<int>& execution_order);
 
   /** @brief Builds counters and dependent adjacency from task dependencies. */
-  void build_dependency_state(const ComputeTaskGraph& task_graph,
-                              const std::unordered_set<int>* active_task_ids);
+  void build_dependency_state(
+      const ComputeTaskGraph& task_graph,
+      const std::unordered_set<int>* active_task_ids,
+      const std::vector<std::vector<int>>* dependency_task_ids = nullptr);
 
   /** @brief Node id to dense execution index lookup. */
   std::unordered_map<int, int> id_to_idx_;

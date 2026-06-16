@@ -501,6 +501,213 @@ DirtyUpdateWorkSet collect_dirty_source_tasks(
   return work_set;
 }
 
+/**
+ * @brief Returns an overlay node selection record, creating it from work.
+ *
+ * @param overlay Dirty task selection receiving node ROI metadata.
+ * @param work Planned work record whose node id seeds a missing selection.
+ * @return Mutable node selection keyed by work.node_id.
+ * @throws std::bad_alloc if the unordered_map grows.
+ * @note The helper stores only dirty-generation metadata, not full
+ * PlannedNodeWork.
+ */
+DirtyNodeSelection& ensure_node_selection(DirtyTaskSelectionOverlay& overlay,
+                                          const PlannedNodeWork& work) {
+  auto [it, _] = overlay.node_selections.try_emplace(work.node_id);
+  DirtyNodeSelection& selection = it->second;
+  selection.node_id = work.node_id;
+  return selection;
+}
+
+/**
+ * @brief Looks up planned node work by node id for overlay ROI selection.
+ *
+ * @param plan Immutable node/cache-pruned plan being viewed.
+ * @return Map from node id to PlannedNodeWork pointer.
+ * @throws std::bad_alloc if lookup storage grows.
+ * @note Pointers remain valid for the lifetime of plan.
+ */
+std::unordered_map<int, const PlannedNodeWork*> planned_work_by_node(
+    const ComputePlan& plan) {
+  std::unordered_map<int, const PlannedNodeWork*> work_by_node;
+  work_by_node.reserve(plan.planned_work.size());
+  for (const auto& work : plan.planned_work) {
+    work_by_node[work.node_id] = &work;
+  }
+  return work_by_node;
+}
+
+/**
+ * @brief Applies dirty ROI metadata to an overlay instead of a plan copy.
+ *
+ * @param plan Immutable node/cache-pruned plan whose nodes are eligible.
+ * @param snapshot Dirty snapshot for the current generation.
+ * @param domain HP or RT domain being selected.
+ * @param overlay Overlay receiving per-node ROI metadata.
+ * @throws std::bad_alloc if overlay maps or vectors grow.
+ * @note This mirrors populate_node_regions() without clearing or copying
+ * PlannedNodeWork records.
+ */
+void populate_overlay_node_regions(const ComputePlan& plan,
+                                   const DirtyRegionSnapshot& snapshot,
+                                   DirtyDomain domain,
+                                   DirtyTaskSelectionOverlay& overlay) {
+  const auto work_by_node = planned_work_by_node(plan);
+
+  for (const auto& [node_id, rois] : snapshot.per_node_dirty_rois) {
+    auto work_it = work_by_node.find(node_id);
+    if (work_it == work_by_node.end())
+      continue;
+    DirtyNodeSelection& selection =
+        ensure_node_selection(overlay, *work_it->second);
+    for (const auto& roi : rois) {
+      selection.dirty_rois.push_back(roi);
+      selection.represented_hp_roi =
+          merge_optional_rect(selection.represented_hp_roi, roi);
+      if (domain == DirtyDomain::HighPrecision) {
+        selection.execution_roi =
+            merge_optional_rect(selection.execution_roi, roi);
+      }
+    }
+  }
+
+  for (const auto& tile : snapshot.dirty_tiles) {
+    if (tile.domain != domain)
+      continue;
+    auto work_it = work_by_node.find(tile.node_id);
+    if (work_it == work_by_node.end())
+      continue;
+    DirtyNodeSelection& selection =
+        ensure_node_selection(overlay, *work_it->second);
+    selection.execution_roi =
+        merge_optional_rect(selection.execution_roi, tile.pixel_roi);
+  }
+
+  for (const auto& region : snapshot.dirty_monolithic_nodes) {
+    if (region.domain != domain)
+      continue;
+    auto work_it = work_by_node.find(region.node_id);
+    if (work_it == work_by_node.end())
+      continue;
+    DirtyNodeSelection& selection =
+        ensure_node_selection(overlay, *work_it->second);
+    selection.whole_output = selection.whole_output || region.whole_output;
+    selection.execution_roi =
+        merge_optional_rect(selection.execution_roi, region.pixel_roi);
+    if (domain == DirtyDomain::HighPrecision) {
+      selection.represented_hp_roi =
+          merge_optional_rect(selection.represented_hp_roi, region.pixel_roi);
+    }
+  }
+}
+
+/**
+ * @brief Merges snapshot dependency ROI mappings without copying a plan.
+ *
+ * @param plan Immutable node/cache-pruned plan whose dependencies are used.
+ * @param snapshot Dirty snapshot supplying ROI edge mappings.
+ * @param domain HP or RT dependency domain.
+ * @return Dependency records used by the generation-local overlay.
+ * @throws std::bad_alloc if dependency storage or planned-node set grows.
+ * @note Snapshot mappings outside the selected plan or different domain are
+ * ignored so sibling HP/RT paths remain independent.
+ */
+std::vector<PlannedDependency> merged_overlay_dependencies(
+    const ComputePlan& plan, const DirtyRegionSnapshot& snapshot,
+    DirtyDomain domain) {
+  std::vector<PlannedDependency> dependencies = plan.task_graph.dependencies;
+  std::unordered_set<int> planned_set(plan.planned_nodes.begin(),
+                                      plan.planned_nodes.end());
+  for (const auto& edge : snapshot.edge_mappings) {
+    if (edge.domain != domain)
+      continue;
+    if (!planned_set.count(edge.from_node_id) ||
+        !planned_set.count(edge.to_node_id)) {
+      continue;
+    }
+    add_dependency(
+        dependencies,
+        PlannedDependency{edge.from_node_id, edge.to_node_id, domain, "image",
+                          edge.from_roi, edge.to_roi, edge.direction});
+  }
+  return dependencies;
+}
+
+/**
+ * @brief Builds task dependency ids from explicit dependency records.
+ *
+ * @param plan Immutable task graph whose tasks are inspected.
+ * @param dependencies Node-level dependencies with optional ROI mappings.
+ * @return Dependency ids aligned with plan.task_graph.tasks.
+ * @throws std::bad_alloc or std::out_of_range on inconsistent task ids.
+ * @note The helper is the overlay equivalent of populate_task_dependencies()
+ * and does not mutate PlannedTask records.
+ */
+std::vector<std::vector<int>> build_dependency_ids_for_view(
+    const ComputePlan& plan,
+    const std::vector<PlannedDependency>& dependencies) {
+  const size_t task_count = plan.task_graph.tasks.size();
+  std::vector<std::vector<int>> dependency_ids(task_count);
+
+  std::unordered_map<int, std::vector<int>> task_ids_by_node;
+  for (const auto& task : plan.task_graph.tasks) {
+    task_ids_by_node[task.node_id].push_back(task.task_id);
+  }
+
+  for (const auto& dependency : dependencies) {
+    const auto from_it = task_ids_by_node.find(dependency.from_node_id);
+    const auto to_it = task_ids_by_node.find(dependency.to_node_id);
+    if (from_it == task_ids_by_node.end() || to_it == task_ids_by_node.end())
+      continue;
+    for (int to_task_id : to_it->second) {
+      const PlannedTask& to_task = plan.task_graph.tasks.at(to_task_id);
+      for (int from_task_id : from_it->second) {
+        const PlannedTask& from_task = plan.task_graph.tasks.at(from_task_id);
+        if (!task_dependency_applies(dependency, from_task, to_task)) {
+          continue;
+        }
+        append_unique(dependency_ids.at(to_task_id), from_task_id);
+      }
+    }
+  }
+  return dependency_ids;
+}
+
+/**
+ * @brief Finds initially ready task ids inside an active dependency view.
+ *
+ * @param active_task_ids Active task ids to inspect in stable order.
+ * @param dependency_ids Dependency task ids aligned with task id.
+ * @return Active tasks whose dependencies are outside active_task_ids.
+ * @throws std::bad_alloc if temporary sets or output vectors grow.
+ * @note Dependencies outside the active view are treated as already satisfied,
+ * matching dirty source-before-downstream semantics.
+ */
+std::vector<int> initial_ready_task_ids_for_view(
+    const std::vector<int>& active_task_ids,
+    const std::vector<std::vector<int>>& dependency_ids) {
+  std::unordered_set<int> active(active_task_ids.begin(),
+                                 active_task_ids.end());
+  std::vector<int> ready;
+  ready.reserve(active_task_ids.size());
+  for (int task_id : active_task_ids) {
+    if (task_id < 0 || task_id >= static_cast<int>(dependency_ids.size())) {
+      continue;
+    }
+    bool has_active_dependency = false;
+    for (int dependency_id : dependency_ids[task_id]) {
+      if (active.count(dependency_id)) {
+        has_active_dependency = true;
+        break;
+      }
+    }
+    if (!has_active_dependency) {
+      ready.push_back(task_id);
+    }
+  }
+  return ready;
+}
+
 }  // namespace
 
 std::string full_task_graph_cache_key(const GraphModel& graph,
@@ -525,6 +732,7 @@ std::shared_ptr<const FullTaskGraph> get_or_expand_full_task_graph(
 
 ComputePlanSummary summarize_compute_plan(
     const GraphModel& graph, const ComputePlan& compute_plan,
+    const DirtyTaskSelectionOverlay* selection,
     std::shared_ptr<const ComputePlan> shared_plan) {
   ComputePlanSummary summary;
   summary.intent = compute_plan.intent;
@@ -537,6 +745,14 @@ ComputePlanSummary summarize_compute_plan(
   summary.task_count = compute_plan.task_graph.tasks.size();
   summary.dependency_count = compute_plan.task_graph.dependencies.size();
   summary.initial_task_count = compute_plan.task_graph.initial_task_ids.size();
+  summary.active_task_count = selection ? selection->active_task_ids.size()
+                                        : compute_plan.task_graph.tasks.size();
+  summary.dirty_source_task_count =
+      selection ? selection->dirty_source_task_ids.size() : 0;
+  summary.downstream_task_count =
+      selection ? selection->downstream_task_ids.size() : 0;
+  summary.initial_downstream_task_count =
+      selection ? selection->initial_downstream_task_ids.size() : 0;
   for (const auto& task : compute_plan.task_graph.tasks) {
     switch (task.kind) {
       case PlannedTaskKind::Tile:
@@ -566,6 +782,13 @@ ComputePlanSummary summarize_compute_plan(
           static_cast<std::ptrdiff_t>(task_sample_count));
   summary.shared_plan = std::move(shared_plan);
   return summary;
+}
+
+ComputePlanSummary summarize_compute_plan(
+    const GraphModel& graph, const ComputePlan& compute_plan,
+    std::shared_ptr<const ComputePlan> shared_plan) {
+  return summarize_compute_plan(graph, compute_plan, nullptr,
+                                std::move(shared_plan));
 }
 
 FullTaskGraph FullTaskGraphExpander::expand(const GraphModel& graph,
@@ -651,12 +874,26 @@ ComputePlan NodeCacheTaskGraphPruner::prune(
 ComputePlan DirtySnapshotTaskGraphPruner::prune(
     const ComputePlan& node_cache_plan,
     const DirtyRegionSnapshot& snapshot) const {
+  const DirtyTaskSelectionOverlay selection = select(node_cache_plan, snapshot);
   ComputePlan result = node_cache_plan;
-  const DirtyDomain domain = domain_for_intent(result.intent);
 
   clear_dirty_work_metadata(result);
-  populate_node_regions(result, &snapshot, domain);
-  populate_dependencies_from_snapshot(result, &snapshot, domain);
+  std::unordered_map<int, size_t> work_index;
+  work_index.reserve(result.planned_work.size());
+  for (size_t i = 0; i < result.planned_work.size(); ++i) {
+    work_index[result.planned_work[i].node_id] = i;
+  }
+  for (const auto& [node_id, node_selection] : selection.node_selections) {
+    auto work_it = work_index.find(node_id);
+    if (work_it == work_index.end())
+      continue;
+    PlannedNodeWork& work = result.planned_work[work_it->second];
+    work.represented_hp_roi = node_selection.represented_hp_roi;
+    work.execution_roi = node_selection.execution_roi;
+    work.whole_output = node_selection.whole_output;
+    work.dirty_rois = node_selection.dirty_rois;
+  }
+  result.task_graph.dependencies = selection.dependencies;
   for (auto& task : result.task_graph.tasks) {
     apply_task_dirty_metadata(task, &snapshot);
   }
@@ -664,6 +901,60 @@ ComputePlan DirtySnapshotTaskGraphPruner::prune(
   populate_node_dependency_lists(result);
   populate_task_dependencies(result);
   return result;
+}
+
+DirtyTaskSelectionOverlay DirtySnapshotTaskGraphPruner::select(
+    const ComputePlan& node_cache_plan,
+    const DirtyRegionSnapshot& snapshot) const {
+  DirtyTaskSelectionOverlay selection;
+  selection.generation = snapshot.graph_generation;
+  selection.domain = domain_for_intent(node_cache_plan.intent);
+  const size_t task_count = node_cache_plan.task_graph.tasks.size();
+  selection.active_task_flags.assign(task_count, false);
+  selection.source_boundary_task_flags.assign(task_count, false);
+
+  populate_overlay_node_regions(node_cache_plan, snapshot, selection.domain,
+                                selection);
+  selection.dependencies =
+      merged_overlay_dependencies(node_cache_plan, snapshot, selection.domain);
+  selection.dependency_task_ids =
+      build_dependency_ids_for_view(node_cache_plan, selection.dependencies);
+
+  std::unordered_set<int> source_nodes(snapshot.dirty_source_nodes.begin(),
+                                       snapshot.dirty_source_nodes.end());
+  for (const auto& task : node_cache_plan.task_graph.tasks) {
+    if (task.task_id < 0 || task.task_id >= static_cast<int>(task_count)) {
+      continue;
+    }
+    PlannedTask selected_task = task;
+    selected_task.dependency_task_ids =
+        selection.dependency_task_ids.at(task.task_id);
+    apply_task_dirty_metadata(selected_task, &snapshot);
+    selection.source_boundary_task_flags[task.task_id] =
+        selected_task.source_boundary_eligible;
+    if (!selected_task.dirty_selected) {
+      continue;
+    }
+    selection.active_task_flags[task.task_id] = true;
+    selection.active_task_ids.push_back(task.task_id);
+    if (source_nodes.count(task.node_id)) {
+      selection.dirty_source_task_ids.push_back(task.task_id);
+    } else {
+      selection.downstream_task_ids.push_back(task.task_id);
+    }
+  }
+  selection.initial_downstream_task_ids = initial_ready_task_ids_for_view(
+      selection.downstream_task_ids, selection.dependency_task_ids);
+  return selection;
+}
+
+DirtyUpdateWorkSet DirtySnapshotTaskGraphPruner::materialize(
+    const DirtyTaskSelectionOverlay& selection) const {
+  DirtyUpdateWorkSet work_set;
+  work_set.generation = selection.generation;
+  work_set.dirty_source_task_ids = selection.dirty_source_task_ids;
+  work_set.downstream_task_ids = selection.downstream_task_ids;
+  return work_set;
 }
 
 DirtyUpdateWorkSet DirtySnapshotTaskGraphPruner::materialize(

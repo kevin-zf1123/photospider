@@ -100,7 +100,7 @@ SchedulerTaskRuntime::Task make_planned_dirty_task(
 /**
  * @brief Builds request-local locks for graph nodes present in a dirty plan.
  *
- * @param compute_plan Dirty-pruned plan whose planned work will be executed.
+ * @param compute_plan Node/cache-pruned plan whose planned work will execute.
  * @return Mutex map keyed by node id for shared cache allocation and commit.
  * @throws std::bad_alloc if mutex allocation fails.
  * @note Locks are intentionally request-local so sibling HP/RT dirty graphs do
@@ -145,7 +145,7 @@ NodeOutput& HighPrecisionDirtyExecutor::require_target_output(
 NodeOutput& HighPrecisionDirtyExecutor::execute(
     GraphModel& graph, GraphRuntime* runtime,
     const DirtyUpdateRequest& request) {
-  [[maybe_unused]] std::unique_lock<std::mutex> graph_lock(graph.graph_mutex_);
+  std::unique_lock<std::mutex> graph_lock(graph.graph_mutex_);
 
   RoiPropagationService roi_propagation;
   DirtyRegionPlanner dirty_planner(traversal_, roi_propagation);
@@ -159,12 +159,15 @@ NodeOutput& HighPrecisionDirtyExecutor::execute(
   if (request.force_recache) {
     reset_plan_cache(graph, dirty_plan);
   }
+  graph_lock.unlock();
 
   std::vector<DownsampleExecutor::Request> downsample_requests;
   std::mutex downsample_requests_mutex;
   DirtyNodeMutexMap node_mutexes =
       make_dirty_node_mutexes(prepared.compute_plan);
-  DirtyNodeExecutionContext node_context{graph, runtime, events_,
+  DirtyNodeExecutionContext node_context{graph,
+                                         runtime,
+                                         events_,
                                          dirty_plan.snapshot,
                                          dirty_plan.snapshot.graph_generation,
                                          node_mutexes};
@@ -182,6 +185,7 @@ NodeOutput& HighPrecisionDirtyExecutor::execute(
         });
   };
   auto validate_hp_source_boundaries = [&]() {
+    std::lock_guard<std::mutex> lock(graph.graph_mutex_);
     validate_dirty_source_boundaries_ready(graph, dirty_plan.snapshot,
                                            DirtyDomain::HighPrecision);
   };
@@ -189,9 +193,11 @@ NodeOutput& HighPrecisionDirtyExecutor::execute(
   run_dirty_source_first(
       DirtySourceFirstRunRequest{
           runtime, ComputeIntent::GlobalHighPrecision, &prepared.compute_plan,
-          &prepared.source_task_ids, &prepared.downstream_task_ids,
-          dirty_plan.snapshot.graph_generation, validate_hp_source_boundaries},
+          &prepared.selection, &prepared.source_task_ids,
+          &prepared.downstream_task_ids, dirty_plan.snapshot.graph_generation,
+          validate_hp_source_boundaries},
       make_hp_task);
+  graph_lock.lock();
   DownsampleExecutor(graph, runtime, events_).execute(downsample_requests);
   return require_target_output(graph, request.node_id);
 }
@@ -224,7 +230,7 @@ NodeOutput& RealTimeDirtyExecutor::require_target_output(GraphModel& graph,
 NodeOutput& RealTimeDirtyExecutor::execute(GraphModel& graph,
                                            GraphRuntime* runtime,
                                            const DirtyUpdateRequest& request) {
-  [[maybe_unused]] std::unique_lock<std::mutex> graph_lock(graph.graph_mutex_);
+  std::unique_lock<std::mutex> graph_lock(graph.graph_mutex_);
 
   RoiPropagationService roi_propagation;
   DirtyRegionPlanner dirty_planner(traversal_, roi_propagation);
@@ -237,10 +243,13 @@ NodeOutput& RealTimeDirtyExecutor::execute(GraphModel& graph,
   if (request.force_recache) {
     reset_plan_cache(graph, dirty_plan);
   }
+  graph_lock.unlock();
 
   DirtyNodeMutexMap node_mutexes =
       make_dirty_node_mutexes(prepared.compute_plan);
-  DirtyNodeExecutionContext node_context{graph, runtime, events_,
+  DirtyNodeExecutionContext node_context{graph,
+                                         runtime,
+                                         events_,
                                          dirty_plan.snapshot,
                                          dirty_plan.snapshot.graph_generation,
                                          node_mutexes};
@@ -255,6 +264,7 @@ NodeOutput& RealTimeDirtyExecutor::execute(GraphModel& graph,
         });
   };
   auto validate_rt_source_boundaries = [&]() {
+    std::lock_guard<std::mutex> lock(graph.graph_mutex_);
     validate_dirty_source_boundaries_ready(graph, dirty_plan.snapshot,
                                            DirtyDomain::RealTime);
   };
@@ -262,9 +272,11 @@ NodeOutput& RealTimeDirtyExecutor::execute(GraphModel& graph,
   run_dirty_source_first(
       DirtySourceFirstRunRequest{
           runtime, ComputeIntent::RealTimeUpdate, &prepared.compute_plan,
-          &prepared.source_task_ids, &prepared.downstream_task_ids,
-          dirty_plan.snapshot.graph_generation, validate_rt_source_boundaries},
+          &prepared.selection, &prepared.source_task_ids,
+          &prepared.downstream_task_ids, dirty_plan.snapshot.graph_generation,
+          validate_rt_source_boundaries},
       make_rt_task);
+  graph_lock.lock();
   return require_target_output(graph, request.node_id);
 }
 

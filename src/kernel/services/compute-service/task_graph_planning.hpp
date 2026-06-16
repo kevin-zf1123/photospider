@@ -3,6 +3,7 @@
 #include <memory>
 #include <optional>
 #include <string>
+#include <unordered_map>
 #include <vector>
 
 #include "kernel/services/compute-service/dirty_region_snapshot.hpp"
@@ -175,6 +176,66 @@ struct DirtyUpdateWorkSet {
 };
 
 /**
+ * @brief Dirty ROI metadata selected for one node in a generation overlay.
+ *
+ * DirtyTaskSelectionOverlay keeps these records outside ComputePlan so the
+ * node/cache-pruned plan can remain immutable and reusable across repeated ROI
+ * updates. The record contains only generation-local ROI overrides required by
+ * dirty execution and inspection summaries.
+ *
+ * @note The ROI values are planning metadata. They do not own image buffers and
+ * must not be treated as committed cache state.
+ */
+struct DirtyNodeSelection {
+  /** @brief Graph node id represented by this selected dirty metadata. */
+  int node_id = -1;
+  /** @brief HP-space ROI represented by the selected dirty task view. */
+  cv::Rect represented_hp_roi;
+  /** @brief Domain-local ROI selected for execution. */
+  cv::Rect execution_roi;
+  /** @brief Whether selected dirty work covers the whole output. */
+  bool whole_output = false;
+  /** @brief Dirty ROIs associated with this node in the snapshot. */
+  std::vector<cv::Rect> dirty_rois;
+};
+
+/**
+ * @brief Generation-local active task view over an immutable ComputePlan.
+ *
+ * The overlay records which already-expanded PlannedTask ids are active for a
+ * dirty snapshot, their task-level dependency ids after snapshot ROI mappings,
+ * and the source/downstream work sets used by source-first dirty execution.
+ * It avoids copying the full ComputePlan on high-frequency dirty paths.
+ *
+ * @note Task ids refer to the node/cache-pruned ComputePlan used to create the
+ * overlay. The overlay never creates new task shapes.
+ */
+struct DirtyTaskSelectionOverlay {
+  /** @brief Dirty snapshot generation used for this active view. */
+  uint64_t generation = 0;
+  /** @brief HP or RT domain selected by the parent compute intent. */
+  DirtyDomain domain = DirtyDomain::HighPrecision;
+  /** @brief Active dirty task ids, including source and downstream work. */
+  std::vector<int> active_task_ids;
+  /** @brief Dirty source-boundary task ids submitted before downstream work. */
+  std::vector<int> dirty_source_task_ids;
+  /** @brief Non-source dirty task ids released by task dependencies. */
+  std::vector<int> downstream_task_ids;
+  /** @brief Initially ready downstream task ids for this active view. */
+  std::vector<int> initial_downstream_task_ids;
+  /** @brief Active flags aligned with the parent ComputeTaskGraph::tasks. */
+  std::vector<bool> active_task_flags;
+  /** @brief Source-boundary flags aligned with ComputeTaskGraph::tasks. */
+  std::vector<bool> source_boundary_task_flags;
+  /** @brief Dependency task ids aligned with ComputeTaskGraph::tasks. */
+  std::vector<std::vector<int>> dependency_task_ids;
+  /** @brief Node-level dirty ROI overrides keyed by graph node id. */
+  std::unordered_map<int, DirtyNodeSelection> node_selections;
+  /** @brief Snapshot-aware dependency records used to build the overlay. */
+  std::vector<PlannedDependency> dependencies;
+};
+
+/**
  * @brief Request attributes used by task graph expansion and pruning.
  *
  * ComputeRequest is the planning-layer description of intent, target node,
@@ -261,6 +322,14 @@ struct ComputePlanSummary {
   size_t dependency_count = 0;
   /** @brief Number of initially ready tasks. */
   size_t initial_task_count = 0;
+  /** @brief Number of dirty-overlay active tasks, or task_count without one. */
+  size_t active_task_count = 0;
+  /** @brief Number of dirty source tasks selected by an overlay. */
+  size_t dirty_source_task_count = 0;
+  /** @brief Number of downstream dirty tasks selected by an overlay. */
+  size_t downstream_task_count = 0;
+  /** @brief Number of initially ready downstream dirty tasks. */
+  size_t initial_downstream_task_count = 0;
   /** @brief Prefix sample of planned node ids for inspection. */
   std::vector<int> planned_node_sample;
   /** @brief Prefix sample of planned tasks for inspection. */
@@ -351,23 +420,53 @@ class NodeCacheTaskGraphPruner {
 class DirtySnapshotTaskGraphPruner {
  public:
   /**
+   * @brief Selects dirty tasks without copying the node/cache-pruned plan.
+   *
+   * @param node_cache_plan Immutable plan produced by
+   * NodeCacheTaskGraphPruner.
+   * @param snapshot Graph-scoped dirty facts for the same compute domain.
+   * @return Generation-local active task overlay and source/downstream groups.
+   * @throws std::bad_alloc if overlay vectors or maps cannot grow.
+   * @note This is the dirty execution path: it does not mutate or duplicate
+   * PlannedTask records, and it preserves task ids from node_cache_plan.
+   */
+  DirtyTaskSelectionOverlay select(const ComputePlan& node_cache_plan,
+                                   const DirtyRegionSnapshot& snapshot) const;
+
+  /**
    * @brief Annotates and clips a node/cache-pruned plan with dirty metadata.
    *
    * @param node_cache_plan Plan produced by NodeCacheTaskGraphPruner.
    * @param snapshot Graph-scoped dirty facts for the same compute domain.
    * @return ComputePlan copy with dirty ROI/work metadata refreshed.
    * @throws std::bad_alloc if copied vectors or maps cannot grow.
+   * @note Compatibility and inspection helper only. Dirty execution should use
+   * select() so high-frequency ROI updates avoid copying the full plan.
    */
   ComputePlan prune(const ComputePlan& node_cache_plan,
                     const DirtyRegionSnapshot& snapshot) const;
 
   /**
+   * @brief Materializes source/downstream groups from an active overlay.
+   *
+   * @param selection Dirty task overlay produced by select().
+   * @return DirtyUpdateWorkSet containing source-first and downstream groups.
+   * @throws std::bad_alloc if output vectors cannot grow.
+   * @note The returned ids preserve task-level granularity and are not folded
+   * back to planned nodes.
+   */
+  DirtyUpdateWorkSet materialize(
+      const DirtyTaskSelectionOverlay& selection) const;
+
+  /**
    * @brief Selects source and downstream dirty task ids from a pruned plan.
    *
-   * @param plan Dirty-annotated plan whose tasks are inspected.
+   * @param plan Dirty-annotated compatibility plan whose tasks are inspected.
    * @param snapshot Dirty snapshot that supplies generation and source nodes.
    * @return DirtyUpdateWorkSet containing source-first and downstream groups.
    * @throws std::bad_alloc if output task id vectors cannot grow.
+   * @note This overload exists for tests and legacy inspection. Production
+   * dirty execution uses materialize(const DirtyTaskSelectionOverlay&).
    */
   DirtyUpdateWorkSet materialize(const ComputePlan& plan,
                                  const DirtyRegionSnapshot& snapshot) const;
@@ -436,6 +535,21 @@ std::shared_ptr<const FullTaskGraph> get_or_expand_full_task_graph(
  * @throws std::bad_alloc if sample vectors grow.
  * @note Samples are intentionally capped to keep repeated inspection history
  * cheap as tile task graphs grow.
+ */
+ComputePlanSummary summarize_compute_plan(
+    const GraphModel& graph, const ComputePlan& compute_plan,
+    const DirtyTaskSelectionOverlay* selection,
+    std::shared_ptr<const ComputePlan> shared_plan = nullptr);
+
+/**
+ * @brief Builds a bounded summary for compute plan inspection.
+ *
+ * @param graph Graph whose topology generation is recorded.
+ * @param compute_plan Plan to summarize.
+ * @param shared_plan Optional shared deep plan reference.
+ * @return Summary containing counts and bounded node/task samples.
+ * @throws std::bad_alloc if sample vectors grow.
+ * @note This overload summarizes an unfiltered plan with no dirty overlay.
  */
 ComputePlanSummary summarize_compute_plan(
     const GraphModel& graph, const ComputePlan& compute_plan,
