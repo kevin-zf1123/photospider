@@ -1,12 +1,15 @@
 #include "kernel/services/compute-service/compute_node_task_runner.hpp"
 
+#include <algorithm>
 #include <atomic>
 #include <chrono>
+#include <memory>
 #include <string>
 #include <utility>
 #include <variant>
 #include <vector>
 
+#include "kernel/param_utils.hpp"
 #include "kernel/services/compute-service/compute_metrics_recorder.hpp"
 #include "kernel/services/compute-service/node_executor.hpp"
 #include "kernel/services/graph_cache_service.hpp"
@@ -70,6 +73,41 @@ std::exception_ptr compute_failure(const GraphModel& graph, int node_id,
                                               " failed: " + detail));
 }
 
+/**
+ * @brief Merges a tile ROI into a planned full output size.
+ *
+ * @param current Current accumulated output size.
+ * @param roi Tile ROI from the immutable task graph.
+ * @return Size large enough to contain roi and current.
+ * @throws Nothing.
+ * @note The planner emits tile ROIs in output coordinates, so the max extents
+ * across all tile tasks reconstruct the full node output size.
+ */
+cv::Size merge_task_extent(const cv::Size& current, const cv::Rect& roi) {
+  if (roi.width <= 0 || roi.height <= 0) {
+    return current;
+  }
+  return cv::Size(std::max(current.width, roi.x + roi.width),
+                  std::max(current.height, roi.y + roi.height));
+}
+
+/**
+ * @brief Infers channel count and data type for a tile output buffer.
+ *
+ * @param image_inputs Ready image inputs for the node.
+ * @return Channel count and DataType for allocation.
+ * @throws Nothing.
+ * @note This mirrors NodeExecutor tiled allocation semantics.
+ */
+std::pair<int, DataType> infer_tile_channels_and_type(
+    const std::vector<const NodeOutput*>& image_inputs) {
+  if (image_inputs.empty()) {
+    return {1, DataType::FLOAT32};
+  }
+  const ImageBuffer& input = image_inputs.front()->image_buffer;
+  return {input.channels, input.type};
+}
+
 }  // namespace
 
 NodeTaskRunner::NodeTaskRunner(NodeTaskRunnerContext context)
@@ -83,10 +121,35 @@ NodeTaskRunner::NodeTaskRunner(NodeTaskRunnerContext context)
       id_to_idx_(context.id_to_idx),
       temp_results_(context.temp_results),
       resolved_ops_(context.resolved_ops),
+      task_graph_(context.task_graph),
       force_recache_(context.force_recache),
       enable_timing_(context.enable_timing),
       disable_disk_cache_(context.disable_disk_cache),
       benchmark_events_(context.benchmark_events) {
+  planned_output_sizes_.assign(execution_order_.size(), cv::Size());
+  tile_task_counts_.assign(execution_order_.size(), 0);
+  completed_tile_counts_ =
+      std::vector<std::atomic<int>>(execution_order_.size());
+  node_precomputed_ = std::vector<std::atomic<bool>>(execution_order_.size());
+  output_mutexes_.reserve(execution_order_.size());
+  for (size_t i = 0; i < execution_order_.size(); ++i) {
+    completed_tile_counts_[i].store(0, std::memory_order_relaxed);
+    node_precomputed_[i].store(false, std::memory_order_relaxed);
+    output_mutexes_.push_back(std::make_unique<std::mutex>());
+  }
+  for (const PlannedTask& task : task_graph_.tasks) {
+    if (task.kind != PlannedTaskKind::Tile) {
+      continue;
+    }
+    auto idx_it = id_to_idx_.find(task.node_id);
+    if (idx_it == id_to_idx_.end()) {
+      continue;
+    }
+    const int node_idx = idx_it->second;
+    ++tile_task_counts_[node_idx];
+    planned_output_sizes_[node_idx] =
+        merge_task_extent(planned_output_sizes_[node_idx], task.output_roi);
+  }
 }  // NOLINT(whitespace/indent_namespace)
 
 void NodeTaskRunner::run_node(int node_idx) {
@@ -100,6 +163,30 @@ void NodeTaskRunner::run_node(int node_idx) {
   } catch (...) {
     std::rethrow_exception(
         compute_failure(graph_, node_id, "unknown exception"));
+  }
+}
+
+void NodeTaskRunner::run_task(int task_id) {
+  const PlannedTask& task = task_graph_.tasks.at(task_id);
+  try {
+    if (task.kind == PlannedTaskKind::Tile) {
+      compute_tile_task(task);
+      return;
+    }
+    auto idx_it = id_to_idx_.find(task.node_id);
+    if (idx_it == id_to_idx_.end()) {
+      throw GraphError(
+          GraphErrc::ComputeError,
+          "Task references unplanned node " + std::to_string(task.node_id));
+    }
+    run_node(idx_it->second);
+  } catch (const cv::Exception& e) {
+    std::rethrow_exception(compute_failure(graph_, task.node_id, e.what()));
+  } catch (const std::exception& e) {
+    std::rethrow_exception(compute_failure(graph_, task.node_id, e.what()));
+  } catch (...) {
+    std::rethrow_exception(
+        compute_failure(graph_, task.node_id, "unknown exception"));
   }
 }
 
@@ -144,6 +231,107 @@ void NodeTaskRunner::compute_node(int node_idx, int node_id) {
   if (!has_memory_or_temp_output(target_node, node_idx)) {
     compute_uncached_node(target_node, node_idx);
   }
+}
+
+void NodeTaskRunner::compute_tile_task(const PlannedTask& task) {
+  auto idx_it = id_to_idx_.find(task.node_id);
+  if (idx_it == id_to_idx_.end()) {
+    throw GraphError(
+        GraphErrc::ComputeError,
+        "Tile task references unplanned node " + std::to_string(task.node_id));
+  }
+  const int node_idx = idx_it->second;
+  const Node& target_node = graph_.node(task.node_id);
+  if (!force_recache_ && target_node.cached_output_high_precision) {
+    node_precomputed_[node_idx].store(true, std::memory_order_release);
+    return;
+  }
+  if (node_precomputed_[node_idx].load(std::memory_order_acquire)) {
+    return;
+  }
+
+  const auto& op_opt = resolved_ops_[node_idx];
+  if (!op_opt.has_value() || !std::holds_alternative<TileOpFunc>(*op_opt)) {
+    throw GraphError(
+        GraphErrc::NoOperation,
+        "No tiled op for " + target_node.type + ":" + target_node.subtype);
+  }
+
+  Node node_for_exec;
+  {
+    std::lock_guard<std::mutex> lock(*output_mutexes_.at(node_idx));
+    node_for_exec = target_node;
+    node_for_exec.runtime_parameters = resolve_runtime_parameters(target_node);
+  }
+  std::vector<const NodeOutput*> inputs_ready =
+      resolve_image_inputs(target_node);
+
+  if (allow_disk_cache()) {
+    std::lock_guard<std::mutex> lock(*output_mutexes_.at(node_idx));
+    if (!temp_results_[node_idx].has_value()) {
+      try_load_disk_cache(target_node, node_idx);
+      if (temp_results_[node_idx].has_value()) {
+        node_precomputed_[node_idx].store(true, std::memory_order_release);
+        return;
+      }
+    }
+  }
+
+  ImageBuffer& output_buffer =
+      ensure_tile_output_buffer(node_idx, target_node, inputs_ready);
+  TiledExecutionConfig tiled_config = tiled_config_for(target_node, *op_opt);
+  tiled_config.tile_size =
+      task.tile_size > 0 ? task.tile_size : tiled_config.tile_size;
+  tiled_config.output_roi = task.output_roi;
+  tiled_config.output_size = planned_output_sizes_.at(node_idx);
+  tiled_config.on_tile = nullptr;
+
+  BenchmarkEvent current_event = start_event(target_node);
+  NodeExecutor::execute_tiled_into(graph_, node_for_exec,
+                                   std::get<TileOpFunc>(*op_opt), inputs_ready,
+                                   output_buffer, tiled_config);
+  finalize_tiled_node_if_complete(node_idx, target_node, inputs_ready,
+                                  current_event);
+}
+
+ImageBuffer& NodeTaskRunner::ensure_tile_output_buffer(
+    int node_idx, const Node& target_node,
+    const std::vector<const NodeOutput*>& image_inputs) {
+  std::lock_guard<std::mutex> lock(*output_mutexes_.at(node_idx));
+  if (!temp_results_[node_idx].has_value()) {
+    const cv::Size planned_size = planned_output_sizes_.at(node_idx);
+    const cv::Size output_size =
+        planned_size.width > 0 && planned_size.height > 0
+            ? planned_size
+            : cv::Size(
+                  as_int_flexible(target_node.runtime_parameters, "width", 256),
+                  as_int_flexible(target_node.runtime_parameters, "height",
+                                  256));
+    auto [channels, dtype] = infer_tile_channels_and_type(image_inputs);
+    temp_results_[node_idx] = NodeOutput{};
+    temp_results_[node_idx]->image_buffer = make_aligned_cpu_image_buffer(
+        output_size.width, output_size.height, channels, dtype);
+  }
+  return temp_results_[node_idx]->image_buffer;
+}
+
+void NodeTaskRunner::finalize_tiled_node_if_complete(
+    int node_idx, const Node& target_node,
+    const std::vector<const NodeOutput*>& image_inputs,
+    BenchmarkEvent& current_event) {
+  const int expected_tiles = tile_task_counts_.at(node_idx);
+  if (expected_tiles <= 0) {
+    return;
+  }
+  const int previous =
+      completed_tile_counts_[node_idx].fetch_add(1, std::memory_order_acq_rel);
+  if (previous + 1 != expected_tiles) {
+    return;
+  }
+  NodeOutput& output = *temp_results_[node_idx];
+  const double execution_ms =
+      record_computed_output(target_node, current_event);
+  finalize_output_metadata(output, image_inputs, enable_timing_, execution_ms);
 }
 
 void NodeTaskRunner::try_load_disk_cache(const Node& target_node,

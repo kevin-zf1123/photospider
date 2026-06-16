@@ -13,6 +13,7 @@
 
 #include <chrono>
 #include <functional>
+#include <memory>
 #include <mutex>
 #include <optional>
 #include <string>
@@ -62,20 +63,24 @@ void finalize_output_metadata(NodeOutput& output,
 }
 
 /**
- * @brief Stores the latest compute plan and a bounded recent-plan history.
+ * @brief Stores the latest compute plan and bounded summary history.
  *
  * @param graph Graph whose inspection state receives the plan snapshot.
  * @param compute_plan Plan produced for the current request.
- * @throws std::bad_alloc if history storage cannot grow.
- * @note The history cap is intentionally small because plans are diagnostic
- * state, not an unbounded runtime log.
+ * @throws std::bad_alloc if summary history storage cannot grow.
+ * @note Full ComputePlan data is kept only for the latest request so
+ * inspection history does not copy large task graphs repeatedly.
  */
 void remember_facade_compute_plan(GraphModel& graph,
                                   const compute::ComputePlan& compute_plan) {
   graph.last_compute_plan = compute_plan;
-  graph.recent_compute_plans.push_back(compute_plan);
-  if (graph.recent_compute_plans.size() > 16) {
-    graph.recent_compute_plans.erase(graph.recent_compute_plans.begin());
+  graph.last_compute_plan_summary =
+      compute::summarize_compute_plan(graph, compute_plan);
+  graph.recent_compute_plan_summaries.push_back(
+      *graph.last_compute_plan_summary);
+  if (graph.recent_compute_plan_summaries.size() > 16) {
+    graph.recent_compute_plan_summaries.erase(
+        graph.recent_compute_plan_summaries.begin());
   }
 }
 
@@ -91,13 +96,12 @@ void remember_facade_compute_plan(GraphModel& graph,
  * they also record dirty snapshots and materialized work sets.
  */
 compute::ComputePlan prune_facade_node_cache_task_graph(
-    const GraphModel& graph, const compute::ComputeRequest& request,
+    GraphModel& graph, const compute::ComputeRequest& request,
     const std::vector<int>& execution_order) {
-  compute::FullTaskGraphExpander full_expander;
   compute::NodeCacheTaskGraphPruner node_cache_pruner;
-  const compute::FullTaskGraph full_graph =
-      full_expander.expand(graph, request.intent);
-  return node_cache_pruner.prune(full_graph, request, execution_order, graph);
+  const std::shared_ptr<const compute::FullTaskGraph> full_graph =
+      compute::get_or_expand_full_task_graph(graph, request.intent);
+  return node_cache_pruner.prune(*full_graph, request, execution_order, graph);
 }
 
 }  // namespace

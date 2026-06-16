@@ -28,7 +28,7 @@ namespace ps::compute {
  * Therefore the plan must remain alive until SchedulerTaskRuntime has drained
  * all submitted tasks.
  */
-class TaskSubmissionPlan {
+class TaskSubmissionPlan : public TaskExecutor {
  public:
   /**
    * @brief Builds scheduler submission state for one target node.
@@ -45,22 +45,22 @@ class TaskSubmissionPlan {
                      int node_id);
 
   /**
-   * @brief Reports whether the pruned plan contains no executable nodes.
+   * @brief Reports whether the pruned plan contains no executable tasks.
    *
-   * @return true when execution_order_ is empty.
+   * @return true when the task graph has no PlannedTask entries.
    * @throws Nothing.
    * @note An empty plan may still require sequential fallback for the target
    * node if no high-precision cache exists.
    */
-  bool empty() const { return execution_order_.empty(); }
+  bool empty() const { return compute_plan_.task_graph.tasks.empty(); }
 
   /**
-   * @brief Returns the number of planned executable nodes.
+   * @brief Returns the number of planned executable tasks.
    *
-   * @return Dense task count aligned with execution_order_.
+   * @return Dense task count aligned with compute_plan_.task_graph.tasks.
    * @throws Nothing.
    */
-  size_t size() const { return execution_order_.size(); }
+  size_t size() const { return compute_plan_.task_graph.tasks.size(); }
 
   /**
    * @brief Returns the planned node id order.
@@ -71,6 +71,15 @@ class TaskSubmissionPlan {
    * alive.
    */
   const std::vector<int>& execution_order() const { return execution_order_; }
+
+  /**
+   * @brief Returns the immutable compute plan used by this submission.
+   *
+   * @return Const reference to the cache-pruned plan.
+   * @throws Nothing.
+   * @note The reference remains valid only while this TaskSubmissionPlan lives.
+   */
+  const ComputePlan& compute_plan() const { return compute_plan_; }
 
   /**
    * @brief Returns the node id to dense index lookup.
@@ -124,15 +133,25 @@ class TaskSubmissionPlan {
                              SchedulerTaskRuntime& task_runtime);
 
   /**
-   * @brief Moves ready initial scheduler tasks out of the plan.
+   * @brief Moves ready initial scheduler task handles out of the plan.
    *
-   * @return Initial task closures that may be submitted to
+   * @return Initial task handles that may be submitted to
    * SchedulerTaskRuntime.
    * @throws std::bad_alloc if temporary ready-task storage grows.
    * @note TaskGraphReadyChecker is preferred. If the pruned graph carries no
    * initial ids, zero-dependency nodes are used as a compatibility fallback.
    */
-  std::vector<SchedulerTaskRuntime::Task> take_initial_tasks();
+  std::vector<TaskHandle> take_initial_task_handles();
+
+  /**
+   * @brief Executes one task handle selected by the scheduler.
+   *
+   * @param task_id Dense PlannedTask id from compute_plan_.task_graph.
+   * @throws GraphError or operation exceptions from NodeTaskRunner.
+   * @note This method is called by SchedulerTaskRuntime after epoch checks and
+   * owns dependency release plus completion accounting for the task.
+   */
+  void run_task(int task_id) override;
 
   /**
    * @brief Emits trace events for tasks selected as initial scheduler work.
@@ -150,17 +169,20 @@ class TaskSubmissionPlan {
   void resolve_operations();
 
   /** @brief Releases dependent tasks whose upstream counters reached zero. */
-  void release_dependents(int current_node_idx, int current_node_id,
+  void release_dependents(int current_task_id, int current_node_id,
                           SchedulerTaskRuntime& task_runtime);
 
-  /** @brief Appends a node task when all dependencies are satisfied. */
-  void append_initial_task_for_node(int node_idx);
+  /** @brief Appends a task handle when all dependencies are satisfied. */
+  void append_initial_task_handle(int task_id);
 
   /** @brief Appends initial tasks identified by the planned task graph. */
   void append_graph_ready_tasks();
 
   /** @brief Appends zero-dependency nodes as compatibility initial work. */
   void append_zero_dependency_tasks();
+
+  /** @brief Builds one lightweight handle for a planned task id. */
+  TaskHandle make_handle(int task_id) const;
 
   /** @brief Borrowed graph used for operation resolution and errors. */
   GraphModel& graph_;
@@ -175,14 +197,21 @@ class TaskSubmissionPlan {
   /** @brief Runtime dependency counters and dense node-id mapping. */
   TaskDependencyState dependency_state_;
 
-  /** @brief Scheduler closures aligned with execution_order_. */
-  std::vector<SchedulerTaskRuntime::Task> tasks_;
+  /** @brief Scheduler handles aligned with task_graph.tasks. */
+  std::vector<TaskHandle> task_handles_;
 
-  /** @brief Initial task closures moved out for submit_initial_tasks(). */
-  std::vector<SchedulerTaskRuntime::Task> initial_tasks_;
+  /** @brief Initial task handles moved out for submit_initial_task_handles().
+   */
+  std::vector<TaskHandle> initial_task_handles_;
 
-  /** @brief Dense indexes already selected as initial tasks. */
-  std::unordered_set<int> submitted_initial_indices_;
+  /** @brief Task ids already selected as initial tasks. */
+  std::unordered_set<int> submitted_initial_task_ids_;
+
+  /** @brief Runner borrowed after build_scheduler_tasks() binds execution. */
+  NodeTaskRunner* runner_ = nullptr;
+
+  /** @brief Scheduler runtime borrowed for logging and dependency release. */
+  SchedulerTaskRuntime* task_runtime_ = nullptr;
 
   /** @brief Temporary worker outputs aligned with execution_order_. */
   std::vector<std::optional<NodeOutput>> temp_results_;

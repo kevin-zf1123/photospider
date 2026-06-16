@@ -1,6 +1,8 @@
 #include "kernel/services/compute-service/task_graph_planning.hpp"
 
 #include <algorithm>
+#include <cstddef>
+#include <memory>
 #include <string>
 #include <unordered_map>
 #include <unordered_set>
@@ -13,6 +15,9 @@
 
 namespace ps::compute {
 namespace {
+
+/** @brief Task-shape config token used by FullTaskGraph cache keys. */
+constexpr const char* kTaskShapeConfigVersion = "task-shape-v1";
 
 /**
  * @brief Maps a compute intent to the single dirty/task domain being planned.
@@ -271,14 +276,81 @@ void populate_node_dependency_lists(ComputePlan& result) {
 }
 
 /**
+ * @brief Returns whether a rectangle contains usable ROI information.
+ *
+ * @param roi Rectangle supplied by a task or dependency mapping.
+ * @return True when width and height are positive.
+ * @throws Nothing.
+ * @note Empty dependency ROIs mean "unknown/full dependency" rather than an
+ * empty spatial relationship.
+ */
+bool has_roi(const cv::Rect& roi) {
+  return roi.width > 0 && roi.height > 0;
+}
+
+/**
+ * @brief Returns whether two task ROIs overlap.
+ *
+ * @param upstream_roi Candidate producer ROI.
+ * @param downstream_roi Candidate consumer input ROI.
+ * @return True when the rectangles overlap with positive area.
+ * @throws Nothing.
+ * @note Empty rectangles are treated by callers before this helper is used.
+ */
+bool rois_overlap(const cv::Rect& upstream_roi,
+                  const cv::Rect& downstream_roi) {
+  return (upstream_roi & downstream_roi).area() > 0;
+}
+
+/**
+ * @brief Determines whether one upstream task must precede one downstream task.
+ *
+ * @param dependency Node-level dependency carrying optional ROI mapping.
+ * @param from_task Candidate upstream task.
+ * @param to_task Candidate downstream task.
+ * @return True when to_task must wait for from_task.
+ * @throws Nothing.
+ * @note Tile-to-tile image dependencies use ROI overlap. Non-image,
+ * non-tiled, monolithic, or unknown ROI relationships keep whole-node
+ * compatibility semantics.
+ */
+bool task_dependency_applies(const PlannedDependency& dependency,
+                             const PlannedTask& from_task,
+                             const PlannedTask& to_task) {
+  if (dependency.input_kind != "image") {
+    return true;
+  }
+  if (from_task.kind != PlannedTaskKind::Tile ||
+      to_task.kind != PlannedTaskKind::Tile) {
+    return true;
+  }
+  if (!has_roi(from_task.output_roi) || !has_roi(to_task.output_roi)) {
+    return true;
+  }
+
+  const bool dependency_has_roi =
+      has_roi(dependency.from_roi) || has_roi(dependency.to_roi);
+  if (dependency_has_roi) {
+    if (has_roi(dependency.to_roi) &&
+        !rois_overlap(to_task.output_roi, dependency.to_roi)) {
+      return false;
+    }
+    const cv::Rect upstream_roi =
+        has_roi(dependency.from_roi) ? dependency.from_roi : to_task.output_roi;
+    return rois_overlap(from_task.output_roi, upstream_roi);
+  }
+
+  return rois_overlap(from_task.output_roi, to_task.output_roi);
+}
+
+/**
  * @brief Builds task-level dependency ids and initial ready task ids.
  *
  * @param result Plan whose ComputeTaskGraph task dependency metadata is
  * refreshed.
  * @throws std::bad_alloc if node-to-task lookup or ready ids grow.
- * @note Every task belonging to an upstream node is treated as a dependency of
- * every task belonging to the downstream node, matching existing node-level
- * execution semantics.
+ * @note Tile-to-tile image edges depend only on overlapping ROIs; non-tiled or
+ * unknown spatial relationships retain whole-node compatibility semantics.
  */
 void populate_task_dependencies(ComputePlan& result) {
   result.task_graph.initial_task_ids.clear();
@@ -300,6 +372,10 @@ void populate_task_dependencies(ComputePlan& result) {
     for (int to_task_id : to_it->second) {
       PlannedTask& to_task = result.task_graph.tasks.at(to_task_id);
       for (int from_task_id : from_it->second) {
+        const PlannedTask& from_task = result.task_graph.tasks.at(from_task_id);
+        if (!task_dependency_applies(dependency, from_task, to_task)) {
+          continue;
+        }
         append_unique(to_task.dependency_task_ids, from_task_id);
         dependent_task_ids.insert(to_task_id);
       }
@@ -418,7 +494,7 @@ DirtyUpdateWorkSet collect_dirty_source_tasks(
   std::unordered_set<int> source_nodes(snapshot.dirty_source_nodes.begin(),
                                        snapshot.dirty_source_nodes.end());
   for (const auto& task : plan.task_graph.tasks) {
-    if (source_nodes.count(task.node_id)) {
+    if (source_nodes.count(task.node_id) && task.dirty_selected) {
       work_set.dirty_source_task_ids.push_back(task.task_id);
     }
   }
@@ -426,6 +502,71 @@ DirtyUpdateWorkSet collect_dirty_source_tasks(
 }
 
 }  // namespace
+
+std::string full_task_graph_cache_key(const GraphModel& graph,
+                                      ComputeIntent intent) {
+  return std::to_string(graph.topology_generation()) + ":" +
+         std::to_string(static_cast<int>(intent)) + ":" +
+         kTaskShapeConfigVersion;
+}
+
+std::shared_ptr<const FullTaskGraph> get_or_expand_full_task_graph(
+    GraphModel& graph, ComputeIntent intent) {
+  const std::string key = full_task_graph_cache_key(graph, intent);
+  if (auto cached = graph.cached_full_task_graph(key)) {
+    return cached;
+  }
+  FullTaskGraphExpander expander;
+  auto expanded =
+      std::make_shared<FullTaskGraph>(expander.expand(graph, intent));
+  graph.remember_full_task_graph(key, expanded);
+  return expanded;
+}
+
+ComputePlanSummary summarize_compute_plan(
+    const GraphModel& graph, const ComputePlan& compute_plan,
+    std::shared_ptr<const ComputePlan> shared_plan) {
+  ComputePlanSummary summary;
+  summary.intent = compute_plan.intent;
+  summary.target_node_id = compute_plan.target_node_id;
+  summary.parallel = compute_plan.parallel;
+  summary.topology_generation = graph.topology_generation();
+  summary.full_graph_cache_key =
+      full_task_graph_cache_key(graph, compute_plan.intent);
+  summary.planned_node_count = compute_plan.planned_nodes.size();
+  summary.task_count = compute_plan.task_graph.tasks.size();
+  summary.dependency_count = compute_plan.task_graph.dependencies.size();
+  summary.initial_task_count = compute_plan.task_graph.initial_task_ids.size();
+  for (const auto& task : compute_plan.task_graph.tasks) {
+    switch (task.kind) {
+      case PlannedTaskKind::Tile:
+        ++summary.tile_task_count;
+        break;
+      case PlannedTaskKind::Monolithic:
+        ++summary.monolithic_task_count;
+        break;
+      case PlannedTaskKind::Node:
+        ++summary.node_task_count;
+        break;
+    }
+  }
+
+  constexpr size_t kSampleLimit = 16;
+  const size_t node_sample_count =
+      std::min(kSampleLimit, compute_plan.planned_nodes.size());
+  summary.planned_node_sample.insert(
+      summary.planned_node_sample.end(), compute_plan.planned_nodes.begin(),
+      compute_plan.planned_nodes.begin() +
+          static_cast<std::ptrdiff_t>(node_sample_count));
+  const size_t task_sample_count =
+      std::min(kSampleLimit, compute_plan.task_graph.tasks.size());
+  summary.task_sample.insert(
+      summary.task_sample.end(), compute_plan.task_graph.tasks.begin(),
+      compute_plan.task_graph.tasks.begin() +
+          static_cast<std::ptrdiff_t>(task_sample_count));
+  summary.shared_plan = std::move(shared_plan);
+  return summary;
+}
 
 FullTaskGraph FullTaskGraphExpander::expand(const GraphModel& graph,
                                             ComputeIntent intent) const {

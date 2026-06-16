@@ -1,6 +1,7 @@
 #include "kernel/services/compute-service/dirty_execution_common.hpp"
 
 #include <algorithm>
+#include <memory>
 #include <string>
 #include <unordered_set>
 #include <utility>
@@ -42,19 +43,22 @@ void remember_dirty_snapshot(GraphModel& graph,
 
 void remember_compute_plan(GraphModel& graph, const ComputePlan& compute_plan) {
   graph.last_compute_plan = compute_plan;
-  graph.recent_compute_plans.push_back(compute_plan);
-  if (graph.recent_compute_plans.size() > 16) {
-    graph.recent_compute_plans.erase(graph.recent_compute_plans.begin());
+  graph.last_compute_plan_summary = summarize_compute_plan(graph, compute_plan);
+  graph.recent_compute_plan_summaries.push_back(
+      *graph.last_compute_plan_summary);
+  if (graph.recent_compute_plan_summaries.size() > 16) {
+    graph.recent_compute_plan_summaries.erase(
+        graph.recent_compute_plan_summaries.begin());
   }
 }
 
 ComputePlan prune_node_cache_task_graph(
-    const GraphModel& graph, const ComputeRequest& request,
+    GraphModel& graph, const ComputeRequest& request,
     const std::vector<int>& execution_order) {
-  FullTaskGraphExpander full_expander;
   NodeCacheTaskGraphPruner node_cache_pruner;
-  const FullTaskGraph full_graph = full_expander.expand(graph, request.intent);
-  return node_cache_pruner.prune(full_graph, request, execution_order, graph);
+  const std::shared_ptr<const FullTaskGraph> full_graph =
+      get_or_expand_full_task_graph(graph, request.intent);
+  return node_cache_pruner.prune(*full_graph, request, execution_order, graph);
 }
 
 ComputePlan prune_dirty_snapshot_task_graph(

@@ -46,6 +46,14 @@ cv::Rect dirty_roi_for_node(const DirtyRegionSnapshot* snapshot, int node_id,
       merged = merge_optional_rect(merged, roi);
     }
   }
+  auto source_it = snapshot->source_roi_records.find(node_id);
+  if (source_it != snapshot->source_roi_records.end()) {
+    for (const auto& record : source_it->second) {
+      if (record.domain == domain) {
+        merged = merge_optional_rect(merged, record.source_roi);
+      }
+    }
+  }
   auto roi_it = snapshot->per_node_dirty_rois.find(node_id);
   if (roi_it != snapshot->per_node_dirty_rois.end()) {
     for (const auto& roi : roi_it->second) {
