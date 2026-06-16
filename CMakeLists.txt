@@ -158,6 +158,7 @@ set(COMPUTE_SOURCES
     src/kernel/services/compute-service/dirty_execution_common.cpp
     src/kernel/services/compute-service/dirty_node_executor.cpp
     src/kernel/services/compute-service/dirty_region_planner.cpp
+    src/kernel/services/compute-service/dirty_region_snapshot_builder.cpp
     src/kernel/services/compute-service/dirty_update_executor.cpp
     src/kernel/services/compute-service/downsample_executor.cpp
     src/kernel/services/compute-service/intent_update_coordinator.cpp

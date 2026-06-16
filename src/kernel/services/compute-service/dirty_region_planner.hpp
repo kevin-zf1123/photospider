@@ -6,6 +6,7 @@
 
 #include "graph_model.hpp"  // NOLINT(build/include_subdir)
 #include "kernel/services/compute-service/dirty_region_snapshot.hpp"
+#include "kernel/services/compute-service/dirty_region_snapshot_builder.hpp"
 #include "kernel/services/graph_extent_resolver.hpp"
 
 namespace ps {
@@ -292,6 +293,23 @@ class DirtyRegionPlanner {
   void finalize_dirty_entries(GraphModel& graph, typename Policy::Plan& plan);
 
   /**
+   * @brief Applies a dirty source lifecycle update and stores the snapshot.
+   *
+   * @param graph Graph whose dirty snapshot is updated.
+   * @param node_id Source node receiving the lifecycle transition.
+   * @param domain Dirty domain associated with the source node.
+   * @param source_roi Optional ROI appended for begin/update transitions.
+   * @param lifecycle New lifecycle state for the source node.
+   * @return Updated graph-scoped dirty snapshot.
+   * @throws GraphError when node_id is missing or source_roi is empty.
+   * @note This helper owns the shared begin/update/end storage flow; snapshot
+   * derivation is delegated to DirtyRegionSnapshotBuilder.
+   */
+  DirtyRegionSnapshot update_dirty_source_snapshot(
+      GraphModel& graph, int node_id, DirtyDomain domain,
+      const cv::Rect* source_roi, DirtySourceLifecycleState lifecycle);
+
+  /**
    * @brief Populates dirty source metadata from finalized plan entries.
    *
    * @tparam EntryMap Map type keyed by node id with HP or RT entry values.
@@ -308,39 +326,6 @@ class DirtyRegionPlanner {
                                       DirtyRegionSnapshot& snapshot,
                                       DirtyDomain domain,
                                       const EntryMap& entries) const;
-
-  /**
-   * @brief Rebuilds actual dirty ROIs from graph-scoped source records.
-   *
-   * @param graph Graph used for extent lookup and monolithic boundary checks.
-   * @param snapshot Snapshot whose derived dirty regions are replaced.
-   * @param domain Dirty domain to refresh.
-   * @throws GraphError from extent lookup when graph metadata is invalid.
-   * @note Source lifecycle state is preserved; only derived regions, tiles, and
-   * edge mappings are cleared and rebuilt.
-   */
-  void refresh_actual_dirty_regions(GraphModel& graph,
-                                    DirtyRegionSnapshot& snapshot,
-                                    DirtyDomain domain) const;
-
-  /**
-   * @brief Applies one source lifecycle transition to a dirty snapshot.
-   *
-   * @param graph Graph used to validate node_id.
-   * @param snapshot Snapshot whose source membership and lifecycle are updated.
-   * @param node_id Source node id.
-   * @param domain Dirty domain for the source node.
-   * @param source_roi Optional dirty ROI to append for begin/update events.
-   * @param lifecycle New lifecycle state for the source node.
-   * @throws GraphError when node_id is missing or source_roi is empty.
-   * @note dirty_updating_count is recomputed from lifecycle states after the
-   * transition.
-   */
-  void apply_source_lifecycle_event(GraphModel& graph,
-                                    DirtyRegionSnapshot& snapshot, int node_id,
-                                    DirtyDomain domain,
-                                    const cv::Rect* source_roi,
-                                    DirtySourceLifecycleState lifecycle);
 
   /**
    * @brief Resolves an HP output extent with request-local memoization.
@@ -367,36 +352,10 @@ class DirtyRegionPlanner {
    */
   int infer_halo_hp(const Node& node) const;
 
-  /**
-   * @brief Detects whether a node must escalate dirty work to full output.
-   *
-   * @param node Node whose registered implementations are inspected.
-   * @return True when only monolithic HP execution is available.
-   * @throws Nothing directly.
-   * @note This is a local dirty boundary; downstream propagation may narrow
-   * ROIs again after the monolithic node.
-   */
-  bool is_monolithic_boundary(const Node& node) const;
-
-  /**
-   * @brief Enumerates micro dirty tiles covering one ROI.
-   *
-   * @param snapshot Snapshot receiving tile keys.
-   * @param node_id Node id associated with the tiles.
-   * @param domain Dirty domain for the tile records.
-   * @param level Tile granularity level to store.
-   * @param roi Domain-local ROI to tile.
-   * @param tile_size Domain-local tile size.
-   * @throws std::bad_alloc if snapshot storage grows and allocation fails.
-   * @note The ROI is aligned to tile_size before tile keys are appended.
-   */
-  void enumerate_tiles(DirtyRegionSnapshot& snapshot, int node_id,
-                       DirtyDomain domain, DirtyTileLevel level,
-                       const cv::Rect& roi, int tile_size) const;
-
   GraphTraversalService& traversal_;
   RoiPropagationService& roi_propagation_;
   GraphExtentResolver extent_resolver_;
+  DirtyRegionSnapshotBuilder snapshot_builder_;
 };
 
 }  // namespace ps::compute

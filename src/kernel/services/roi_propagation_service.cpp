@@ -4,6 +4,8 @@
 #include <array>
 #include <cmath>
 #include <queue>
+#include <unordered_map>
+#include <utility>
 
 #include "kernel/ops.hpp"
 
@@ -83,6 +85,155 @@ const NodeOutput* pick_cached_output(const Node& node) {
   return nullptr;
 }
 
+/**
+ * @brief Accumulates alternative upstream ROI contributions for one node.
+ *
+ * RoiAccumulator keeps the "no ROI yet" state separate from an empty cv::Rect
+ * so operator propagation, spatial metadata, and dependency LUT lookup can be
+ * merged without losing the distinction between "no contribution" and "empty
+ * contribution".
+ *
+ * @note The accumulator performs bounding-box union only. Callers remain
+ * responsible for clipping the final ROI to the appropriate node extent.
+ */
+class RoiAccumulator {
+ public:
+  /**
+   * @brief Adds one non-empty ROI contribution.
+   *
+   * @param roi Candidate ROI contribution.
+   * @throws Nothing.
+   * @note Empty ROIs are ignored to preserve existing fallback behavior.
+   */
+  void include(const cv::Rect& roi) {
+    if (is_rect_empty(roi))
+      return;
+    roi_ = has_roi_ ? merge_rect(roi_, roi) : roi;
+    has_roi_ = true;
+  }
+
+  /**
+   * @brief Returns the accumulated ROI.
+   *
+   * @return Bounding-box union of included ROIs, or an empty rect when no ROI
+   * was included.
+   * @throws Nothing.
+   */
+  cv::Rect value() const { return has_roi_ ? roi_ : cv::Rect(); }
+
+ private:
+  cv::Rect roi_;
+  bool has_roi_ = false;
+};
+
+/**
+ * @brief Owns graph-level ROI frontier traversal state.
+ *
+ * RoiFrontier stores the best known ROI per node plus the pending queue used by
+ * graph-level forward/backward projection. It hides the repeated "merge ROI,
+ * clip to node bounds, enqueue when changed" sequence shared by both
+ * projection directions.
+ *
+ * @note The frontier stores node ids and value-type cv::Rect records only; it
+ * never stores GraphModel pointers or scheduler/runtime state.
+ */
+class RoiFrontier {
+ public:
+  /**
+   * @brief Seeds the traversal with a clipped ROI.
+   *
+   * @param node_id Starting node id.
+   * @param roi Candidate starting ROI.
+   * @param bounds Output extent used to clip the ROI.
+   * @return True when a non-empty seed was accepted.
+   * @throws std::bad_alloc if map or queue storage grows and allocation fails.
+   */
+  bool seed(int node_id, const cv::Rect& roi, const cv::Size& bounds) {
+    const cv::Rect clipped = clamp_rect_to_bounds(roi, bounds);
+    if (is_rect_empty(clipped))
+      return false;
+    roi_map_[node_id] = clipped;
+    pending_.push(node_id);
+    return true;
+  }
+
+  /**
+   * @brief Checks whether traversal has pending nodes.
+   *
+   * @return True when no frontier node remains queued.
+   * @throws Nothing.
+   */
+  bool empty() const { return pending_.empty(); }
+
+  /**
+   * @brief Removes and returns the next queued node id.
+   *
+   * @return Node id at the front of the traversal queue.
+   * @throws Undefined behavior if called when empty() is true.
+   */
+  int pop() {
+    const int node_id = pending_.front();
+    pending_.pop();
+    return node_id;
+  }
+
+  /**
+   * @brief Reads the current ROI for one node and clips it to bounds.
+   *
+   * @param node_id Node id to read.
+   * @param bounds Output extent used to clip the ROI.
+   * @return Clipped ROI when present and non-empty; otherwise nullopt.
+   * @throws Nothing.
+   */
+  std::optional<cv::Rect> clipped_roi(int node_id,
+                                      const cv::Size& bounds) const {
+    const auto it = roi_map_.find(node_id);
+    if (it == roi_map_.end())
+      return std::nullopt;
+    const cv::Rect clipped = clamp_rect_to_bounds(it->second, bounds);
+    if (is_rect_empty(clipped))
+      return std::nullopt;
+    return clipped;
+  }
+
+  /**
+   * @brief Merges a propagated ROI into a node and enqueues it when changed.
+   *
+   * @param node_id Node receiving propagated ROI.
+   * @param roi Candidate propagated ROI.
+   * @param bounds Output extent used to clip the merged ROI.
+   * @return True when node_id was newly inserted or its ROI changed.
+   * @throws std::bad_alloc if map or queue storage grows and allocation fails.
+   * @note The method preserves prior behavior where only changed bounding boxes
+   * are requeued.
+   */
+  bool merge_or_enqueue(int node_id, const cv::Rect& roi,
+                        const cv::Size& bounds) {
+    const cv::Rect clipped = clamp_rect_to_bounds(roi, bounds);
+    if (is_rect_empty(clipped))
+      return false;
+
+    const auto it = roi_map_.find(node_id);
+    if (it == roi_map_.end()) {
+      roi_map_[node_id] = clipped;
+      pending_.push(node_id);
+      return true;
+    }
+
+    const cv::Rect merged =
+        clamp_rect_to_bounds(merge_rect(it->second, clipped), bounds);
+    if (merged == it->second || is_rect_empty(merged))
+      return false;
+    roi_map_[node_id] = merged;
+    pending_.push(node_id);
+    return true;
+  }
+
+ private:
+  std::unordered_map<int, cv::Rect> roi_map_;
+  std::queue<int> pending_;
+};
+
 SpatialDependencyMap& normalize_dependency_map(SpatialDependencyMap& map,
                                                const cv::Size& child_size) {
   if (map.grid_size_x <= 0)
@@ -128,6 +279,160 @@ cv::Rect dependency_lookup(const Node& node, const GraphModel& graph,
   return node.dependency_lut->lookup(current_roi);
 }
 
+/**
+ * @brief Resolves the first valid image-input parent extent for a node.
+ *
+ * @tparam SizeResolver Callable taking a node id and returning cv::Size.
+ * @param graph Graph providing image-input edges.
+ * @param node_id Child node whose primary parent is requested.
+ * @param get_size Extent resolver with request-local caching.
+ * @return First valid image-input parent extent, or an empty size.
+ * @throws GraphError from get_size when extent resolution fails.
+ * @note Data-dependent LUT builders currently consume one primary image-input
+ * extent, matching the legacy propagation path.
+ */
+template <typename SizeResolver>
+cv::Size first_valid_image_parent_size(const GraphModel& graph, int node_id,
+                                       SizeResolver get_size) {
+  for (const auto& edge : graph.upstream_edges(node_id)) {
+    if (edge.kind != GraphTopologyEdgeKind::ImageInput ||
+        edge.from_node_id < 0 || !graph.has_node(edge.from_node_id)) {
+      continue;
+    }
+    cv::Size parent_size = get_size(edge.from_node_id);
+    if (parent_size.width > 0 && parent_size.height > 0)
+      return parent_size;
+  }
+  return cv::Size();
+}
+
+/**
+ * @brief Adds operator-provided dirty propagation to an accumulator.
+ *
+ * @param node Node whose operator propagator is resolved.
+ * @param clamped_roi Downstream ROI already clipped to node output extent.
+ * @param graph Graph passed to the operator propagator.
+ * @param accumulator Accumulator receiving the propagated upstream ROI.
+ * @throws Exceptions propagated by registered operator propagators.
+ */
+void append_operator_upstream_roi(const Node& node, const cv::Rect& clamped_roi,
+                                  const GraphModel& graph,
+                                  RoiAccumulator& accumulator) {
+  auto propagate_fn =
+      OpRegistry::instance().get_dirty_propagator(node.type, node.subtype);
+  accumulator.include(propagate_fn(node, clamped_roi, graph));
+}
+
+/**
+ * @brief Adds cached spatial metadata projection to an accumulator.
+ *
+ * @param node Node whose single-input spatial metadata may be used.
+ * @param clamped_roi Downstream ROI already clipped to node output extent.
+ * @param accumulator Accumulator receiving the matrix-projected ROI.
+ * @throws Nothing directly.
+ * @note Spatial metadata contributes only for single-image-input nodes with a
+ * high-precision cached output, preserving the existing HP-authoritative rule.
+ */
+void append_spatial_metadata_roi(const Node& node, const cv::Rect& clamped_roi,
+                                 RoiAccumulator& accumulator) {
+  if (node.image_inputs.size() != 1)
+    return;
+  if (const NodeOutput* cached = pick_cached_output(node)) {
+    accumulator.include(transform_rect_with_matrix(
+        clamped_roi, cached->space.local_inverse_matrix));
+  }
+}
+
+/**
+ * @brief Adds data-dependent dependency LUT projection to an accumulator.
+ *
+ * @tparam SizeResolver Callable taking a node id and returning cv::Size.
+ * @param node Node whose dependency builder may be registered.
+ * @param graph Graph used by the dependency LUT builder.
+ * @param clamped_roi Downstream ROI already clipped to node output extent.
+ * @param get_size Extent resolver with request-local caching.
+ * @param accumulator Accumulator receiving LUT-derived upstream ROI.
+ * @throws Exceptions propagated by the registered LUT builder or extent
+ * resolver.
+ * @note The LUT contribution is merged with static/operator propagation rather
+ * than replacing it.
+ */
+template <typename SizeResolver>
+void append_dependency_lut_roi(const Node& node, const GraphModel& graph,
+                               const cv::Rect& clamped_roi,
+                               SizeResolver get_size,
+                               RoiAccumulator& accumulator) {
+  const auto lut_builder =
+      OpRegistry::instance().get_dependency_builder(node.type, node.subtype);
+  if (!lut_builder)
+    return;
+
+  const cv::Size downstream_size = get_size(node.id);
+  const cv::Size primary_parent_size =
+      first_valid_image_parent_size(graph, node.id, get_size);
+  if (primary_parent_size.width <= 0 || primary_parent_size.height <= 0 ||
+      downstream_size.width <= 0 || downstream_size.height <= 0) {
+    return;
+  }
+  accumulator.include(dependency_lookup(node, graph, *lut_builder, clamped_roi,
+                                        primary_parent_size, downstream_size));
+}
+
+/**
+ * @brief Propagates one forward image edge into a child ROI.
+ *
+ * @param graph Graph containing the child node.
+ * @param edge Image-input edge from the current parent to a child.
+ * @param parent_roi Current ROI in parent output coordinates.
+ * @param parent_size Parent output extent.
+ * @param child_size Child output extent.
+ * @return Child ROI clipped to child output extent, or nullopt when no work is
+ * affected.
+ * @throws Exceptions propagated by registered forward propagators.
+ */
+std::optional<cv::Rect> propagate_forward_edge_roi(
+    const GraphModel& graph, const GraphTopologyEdge& edge,
+    const cv::Rect& parent_roi, const cv::Size& parent_size,
+    const cv::Size& child_size) {
+  const Node& child = graph.node(edge.to_node_id);
+  auto forward_fn =
+      OpRegistry::instance().get_forward_propagator(child.type, child.subtype);
+  const cv::Rect propagated = clamp_rect_to_bounds(
+      forward_fn(child, parent_roi, graph, parent_size, child_size),
+      child_size);
+  if (is_rect_empty(propagated))
+    return std::nullopt;
+  return propagated;
+}
+
+/**
+ * @brief Enqueues parent ROIs produced by a backward propagation step.
+ *
+ * @tparam SizeResolver Callable taking a node id and returning cv::Size.
+ * @param graph Graph containing the current node's image-input edges.
+ * @param current_id Node whose parents receive upstream demand.
+ * @param upstream_roi Upstream ROI computed by RoiPropagationService.
+ * @param get_size Extent resolver with request-local caching.
+ * @param frontier Frontier receiving parent ROI merges.
+ * @throws GraphError from get_size when extent resolution fails.
+ * @note The same upstream ROI is clipped independently to each valid image
+ * parent, matching the previous multi-input propagation behavior.
+ */
+template <typename SizeResolver>
+void enqueue_backward_parent_rois(const GraphModel& graph, int current_id,
+                                  const cv::Rect& upstream_roi,
+                                  SizeResolver get_size,
+                                  RoiFrontier& frontier) {
+  for (const auto& edge : graph.upstream_edges(current_id)) {
+    if (edge.kind != GraphTopologyEdgeKind::ImageInput ||
+        edge.from_node_id < 0 || !graph.has_node(edge.from_node_id)) {
+      continue;
+    }
+    const int parent_id = edge.from_node_id;
+    frontier.merge_or_enqueue(parent_id, upstream_roi, get_size(parent_id));
+  }
+}
+
 }  // namespace
 
 cv::Rect RoiPropagationService::compute_upstream_roi(
@@ -144,54 +449,11 @@ cv::Rect RoiPropagationService::compute_upstream_roi(
   if (is_rect_empty(clamped_roi))
     return cv::Rect();
 
-  cv::Rect upstream_roi;
-  bool has_roi = false;
-
-  auto propagate_fn =
-      OpRegistry::instance().get_dirty_propagator(node.type, node.subtype);
-  upstream_roi = propagate_fn(node, clamped_roi, graph);
-  if (!is_rect_empty(upstream_roi))
-    has_roi = true;
-
-  if (node.image_inputs.size() == 1) {
-    if (const NodeOutput* cached = pick_cached_output(node)) {
-      cv::Rect spatial_roi = transform_rect_with_matrix(
-          clamped_roi, cached->space.local_inverse_matrix);
-      if (!is_rect_empty(spatial_roi)) {
-        upstream_roi =
-            has_roi ? merge_rect(upstream_roi, spatial_roi) : spatial_roi;
-        has_roi = true;
-      }
-    }
-  }
-
-  const auto lut_builder =
-      OpRegistry::instance().get_dependency_builder(node.type, node.subtype);
-  if (lut_builder) {
-    cv::Size downstream_size = get_size(node.id);
-    cv::Size primary_parent_size;
-    for (const auto& edge : graph.upstream_edges(node.id)) {
-      if (edge.kind != GraphTopologyEdgeKind::ImageInput ||
-          edge.from_node_id < 0 || !graph.has_node(edge.from_node_id)) {
-        continue;
-      }
-      primary_parent_size = get_size(edge.from_node_id);
-      if (primary_parent_size.width > 0 && primary_parent_size.height > 0)
-        break;
-    }
-    if (primary_parent_size.width > 0 && primary_parent_size.height > 0 &&
-        downstream_size.width > 0 && downstream_size.height > 0) {
-      cv::Rect lut_roi =
-          dependency_lookup(node, graph, *lut_builder, clamped_roi,
-                            primary_parent_size, downstream_size);
-      if (!is_rect_empty(lut_roi)) {
-        upstream_roi = has_roi ? merge_rect(upstream_roi, lut_roi) : lut_roi;
-        has_roi = true;
-      }
-    }
-  }
-
-  return has_roi ? upstream_roi : cv::Rect();
+  RoiAccumulator upstream;
+  append_operator_upstream_roi(node, clamped_roi, graph, upstream);
+  append_spatial_metadata_roi(node, clamped_roi, upstream);
+  append_dependency_lut_roi(node, graph, clamped_roi, get_size, upstream);
+  return upstream.value();
 }
 
 std::optional<cv::Rect> RoiPropagationService::project_roi_forward(
@@ -207,22 +469,15 @@ std::optional<cv::Rect> RoiPropagationService::project_roi_forward(
     return extent_resolver_.resolve_output_extent(graph, nid, size_cache);
   };
 
-  std::unordered_map<int, cv::Rect> roi_map;
-  std::queue<int> pending;
+  RoiFrontier frontier;
 
-  cv::Rect seed_roi = clamp_rect_to_bounds(start_roi, get_size(start_node_id));
-  if (is_rect_empty(seed_roi))
+  if (!frontier.seed(start_node_id, start_roi, get_size(start_node_id)))
     return std::nullopt;
 
-  roi_map[start_node_id] = seed_roi;
-  pending.push(start_node_id);
-
-  while (!pending.empty()) {
-    int current = pending.front();
-    pending.pop();
-    cv::Rect current_roi =
-        clamp_rect_to_bounds(roi_map[current], get_size(current));
-    if (is_rect_empty(current_roi))
+  while (!frontier.empty()) {
+    int current = frontier.pop();
+    auto current_roi = frontier.clipped_roi(current, get_size(current));
+    if (!current_roi)
       continue;
     if (current == target_node_id)
       break;
@@ -233,42 +488,19 @@ std::optional<cv::Rect> RoiPropagationService::project_roi_forward(
         continue;
       }
       int child_id = edge.to_node_id;
-      const Node& child = graph.node(child_id);
       cv::Size child_size = get_size(child_id);
       if (child_size.width <= 0 || child_size.height <= 0)
         continue;
 
-      auto forward_fn = OpRegistry::instance().get_forward_propagator(
-          child.type, child.subtype);
-      cv::Rect propagated =
-          forward_fn(child, current_roi, graph, parent_size, child_size);
-      propagated = clamp_rect_to_bounds(propagated, child_size);
-
-      if (is_rect_empty(propagated))
-        continue;
-
-      auto it = roi_map.find(child_id);
-      if (it == roi_map.end()) {
-        roi_map[child_id] = propagated;
-        pending.push(child_id);
-      } else {
-        cv::Rect merged = merge_rect(it->second, propagated);
-        if (merged != it->second) {
-          roi_map[child_id] = clamp_rect_to_bounds(merged, get_size(child_id));
-          pending.push(child_id);
-        }
+      auto propagated = propagate_forward_edge_roi(graph, edge, *current_roi,
+                                                   parent_size, child_size);
+      if (propagated) {
+        frontier.merge_or_enqueue(child_id, *propagated, child_size);
       }
     }
   }
 
-  auto result_it = roi_map.find(target_node_id);
-  if (result_it == roi_map.end())
-    return std::nullopt;
-  cv::Rect result =
-      clamp_rect_to_bounds(result_it->second, get_size(target_node_id));
-  if (is_rect_empty(result))
-    return std::nullopt;
-  return result;
+  return frontier.clipped_roi(target_node_id, get_size(target_node_id));
 }
 
 std::optional<cv::Rect> RoiPropagationService::project_roi_backward(
@@ -279,62 +511,32 @@ std::optional<cv::Rect> RoiPropagationService::project_roi_backward(
   if (is_rect_empty(target_roi))
     return std::nullopt;
 
-  std::unordered_map<int, cv::Rect> roi_map;
-  std::queue<int> pending;
   std::unordered_map<int, cv::Size> size_cache;
   auto get_size = [&](int nid) {
     return extent_resolver_.resolve_output_extent(graph, nid, size_cache);
   };
+  RoiFrontier frontier;
 
-  cv::Rect seed = clamp_rect_to_bounds(target_roi, get_size(target_node_id));
-  if (is_rect_empty(seed))
+  if (!frontier.seed(target_node_id, target_roi, get_size(target_node_id)))
     return std::nullopt;
-  roi_map[target_node_id] = seed;
-  pending.push(target_node_id);
 
-  while (!pending.empty()) {
-    int current = pending.front();
-    pending.pop();
-    cv::Rect current_roi = roi_map[current];
-    if (is_rect_empty(current_roi))
+  while (!frontier.empty()) {
+    int current = frontier.pop();
+    auto current_roi = frontier.clipped_roi(current, get_size(current));
+    if (!current_roi)
       continue;
     if (current == source_node_id)
-      return clamp_rect_to_bounds(current_roi, get_size(source_node_id));
+      return current_roi;
 
     const Node& node = graph.node(current);
-    current_roi = clamp_rect_to_bounds(current_roi, get_size(current));
-    if (is_rect_empty(current_roi))
-      continue;
 
     cv::Rect upstream_roi =
-        compute_upstream_roi(node, current_roi, graph, size_cache);
+        compute_upstream_roi(node, *current_roi, graph, size_cache);
     if (is_rect_empty(upstream_roi))
       continue;
 
-    for (const auto& edge : graph.upstream_edges(current)) {
-      if (edge.kind != GraphTopologyEdgeKind::ImageInput) {
-        continue;
-      }
-      int parent_id = edge.from_node_id;
-      if (parent_id < 0 || !graph.has_node(parent_id))
-        continue;
-      cv::Rect parent_roi =
-          clamp_rect_to_bounds(upstream_roi, get_size(parent_id));
-      if (is_rect_empty(parent_roi))
-        continue;
-      auto it = roi_map.find(parent_id);
-      if (it == roi_map.end()) {
-        roi_map[parent_id] = parent_roi;
-        pending.push(parent_id);
-      } else {
-        cv::Rect merged = merge_rect(it->second, parent_roi);
-        if (merged != it->second) {
-          roi_map[parent_id] =
-              clamp_rect_to_bounds(merged, get_size(parent_id));
-          pending.push(parent_id);
-        }
-      }
-    }
+    enqueue_backward_parent_rois(graph, current, upstream_roi, get_size,
+                                 frontier);
   }
 
   return std::nullopt;
