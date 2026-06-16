@@ -4,6 +4,7 @@
 #include <filesystem>
 #include <fstream>
 #include <mutex>
+#include <system_error>
 
 #include "adapter/buffer_adapter_opencv.hpp"
 #include "graph_model.hpp"
@@ -98,11 +99,104 @@ std::filesystem::path temp_path(const std::string& name) {
   return std::filesystem::temp_directory_path() / name;
 }
 
+/**
+ * @brief Removes and returns a deterministic temporary cache root.
+ *
+ * @param name Directory name appended to the system temporary directory.
+ * @return Clean root path ready for GraphModel construction.
+ * @throws std::filesystem::filesystem_error if cleanup fails.
+ * @note Tests use deterministic names so failed runs leave inspectable paths.
+ */
+std::filesystem::path clean_temp_path(const std::string& name) {
+  auto root = temp_path(name);
+  std::filesystem::remove_all(root);
+  return root;
+}
+
 void write_text(const std::filesystem::path& path, const std::string& text) {
   std::filesystem::create_directories(path.parent_path());
   std::ofstream out(path);
   out << text;
 }
+
+/**
+ * @brief Builds a process node with one image disk-cache entry.
+ *
+ * @param location CacheEntry location to attach to the process node.
+ * @return Node configured for disk-cache service tests.
+ * @throws std::bad_alloc if node strings or vectors cannot allocate.
+ * @note The node does not need to be added to GraphModel for cache load tests
+ * because GraphCacheService resolves disk paths from node id and cache entry.
+ */
+Node make_cached_process_node(const std::string& location) {
+  Node node = make_contract_process_node();
+  node.caches.push_back({"image", location});
+  return node;
+}
+
+/**
+ * @brief Owns common disk-cache diagnostic test state.
+ *
+ * The context prepares a clean cache root, constructs a GraphModel, creates one
+ * cached process node, and removes the root in the destructor with
+ * `std::error_code` so cleanup never masks assertion failures.
+ *
+ * @note The helper keeps the four disk-cache diagnostic tests focused on their
+ * distinct miss/hit/error assertions instead of repeating filesystem setup.
+ */
+struct DiskCacheDiagnosticContext {
+  GraphCacheService cache;
+  std::filesystem::path root;
+  GraphModel graph;
+  Node node;
+
+  /**
+   * @brief Creates a clean graph cache root and one cached process node.
+   *
+   * @param root_name Temporary directory name for this test case.
+   * @param cache_location CacheEntry location to configure on the node.
+   * @throws std::filesystem::filesystem_error if root cleanup or creation
+   * fails.
+   */
+  DiskCacheDiagnosticContext(const std::string& root_name,
+                             const std::string& cache_location)
+      : root(clean_temp_path(root_name)),
+        graph(root),
+        node(make_cached_process_node(cache_location)) {}
+
+  /**
+   * @brief Removes the temporary cache root without throwing.
+   *
+   * @note Cleanup errors are intentionally ignored at teardown because the test
+   * assertions already captured the behavior under validation.
+   */
+  ~DiskCacheDiagnosticContext() {
+    std::error_code ignored;
+    std::filesystem::remove_all(root, ignored);
+  }
+
+  /**
+   * @brief Returns the image cache path for the configured node.
+   *
+   * @return Resolved path for the node's first cache entry.
+   * @throws std::bad_alloc if path construction cannot allocate.
+   */
+  std::filesystem::path cache_file() const {
+    return cache.node_cache_dir(graph, node.id) / node.caches.front().location;
+  }
+
+  /**
+   * @brief Returns the YAML metadata path for the configured node.
+   *
+   * @return Resolved `.yml` path paired with `cache_file()`.
+   * @throws std::bad_alloc if path construction cannot allocate.
+   */
+  std::filesystem::path metadata_file() const {
+    auto path = cache_file();
+    path.replace_extension(".yml");
+    return path;
+  }
+};
 
 }  // namespace
 
@@ -343,6 +437,81 @@ TEST(CacheSemantics, DiskSaveAndSyncIgnoreRtOnlyState) {
 
   // Clean up
   std::filesystem::remove_all(root);
+}
+
+TEST(CacheSemantics, DiskCacheMissRecordsDiagnostic) {
+  DiskCacheDiagnosticContext ctx("photospider-contract-disk-cache-miss",
+                                 "missing.png");
+
+  NodeOutput out;
+  EXPECT_FALSE(
+      ctx.cache.try_load_from_disk_cache_into(ctx.graph, ctx.node, out));
+
+  ASSERT_TRUE(ctx.graph.last_disk_cache_load_result.has_value());
+  const auto& result = *ctx.graph.last_disk_cache_load_result;
+  EXPECT_EQ(result.status, GraphModel::DiskCacheLoadStatus::Miss);
+  EXPECT_EQ(result.code, GraphErrc::Unknown);
+  EXPECT_EQ(result.node_id, ctx.node.id);
+  EXPECT_EQ(result.location, "missing.png");
+  EXPECT_NE(result.message.find("No disk cache files"), std::string::npos);
+}
+
+TEST(CacheSemantics, DiskCacheMetadataHitPreservesTryLoadBehavior) {
+  DiskCacheDiagnosticContext ctx("photospider-contract-disk-cache-hit",
+                                 "output.png");
+  auto metadata_file = ctx.metadata_file();
+  write_text(metadata_file, "answer: 42\nlabel: cached\n");
+
+  NodeOutput out;
+  EXPECT_TRUE(
+      ctx.cache.try_load_from_disk_cache_into(ctx.graph, ctx.node, out));
+  ASSERT_NE(out.data.find("answer"), out.data.end());
+  ASSERT_NE(out.data.find("label"), out.data.end());
+  EXPECT_EQ(out.data["answer"].as<int>(), 42);
+  EXPECT_EQ(out.data["label"].as<std::string>(), "cached");
+
+  ASSERT_TRUE(ctx.graph.last_disk_cache_load_result.has_value());
+  const auto& result = *ctx.graph.last_disk_cache_load_result;
+  EXPECT_EQ(result.status, GraphModel::DiskCacheLoadStatus::Hit);
+  EXPECT_EQ(result.code, GraphErrc::Unknown);
+  EXPECT_EQ(result.metadata_file, metadata_file);
+}
+
+TEST(CacheSemantics, DiskCacheInvalidMetadataRecordsErrorDiagnostic) {
+  DiskCacheDiagnosticContext ctx("photospider-contract-disk-cache-bad-yaml",
+                                 "output.png");
+  auto metadata_file = ctx.metadata_file();
+  write_text(metadata_file, "answer: [1, 2\n");
+
+  NodeOutput out;
+  EXPECT_FALSE(
+      ctx.cache.try_load_from_disk_cache_into(ctx.graph, ctx.node, out));
+
+  ASSERT_TRUE(ctx.graph.last_disk_cache_load_result.has_value());
+  const auto& result = *ctx.graph.last_disk_cache_load_result;
+  EXPECT_EQ(result.status, GraphModel::DiskCacheLoadStatus::Error);
+  EXPECT_EQ(result.code, GraphErrc::InvalidYaml);
+  EXPECT_EQ(result.metadata_file, metadata_file);
+  EXPECT_NE(result.message.find("Failed to parse disk cache metadata"),
+            std::string::npos);
+}
+
+TEST(CacheSemantics, DiskCacheCorruptImageRecordsErrorWithoutHpMutation) {
+  DiskCacheDiagnosticContext ctx("photospider-contract-disk-cache-bad-image",
+                                 "output.png");
+  auto image_file = ctx.cache_file();
+  write_text(image_file, "not an image");
+
+  EXPECT_FALSE(ctx.cache.try_load_from_disk_cache(ctx.graph, ctx.node));
+  EXPECT_FALSE(ctx.node.cached_output_high_precision.has_value());
+
+  ASSERT_TRUE(ctx.graph.last_disk_cache_load_result.has_value());
+  const auto& result = *ctx.graph.last_disk_cache_load_result;
+  EXPECT_EQ(result.status, GraphModel::DiskCacheLoadStatus::Error);
+  EXPECT_EQ(result.code, GraphErrc::Io);
+  EXPECT_EQ(result.cache_file, image_file);
+  EXPECT_NE(result.message.find("Failed to decode disk cache image"),
+            std::string::npos);
 }
 
 TEST(ComputeContracts, RealTimeUpdateWithoutDirtyRoiFailsClearly) {

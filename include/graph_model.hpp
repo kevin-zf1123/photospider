@@ -88,6 +88,58 @@ class GraphModel {
     int removed_files = 0;
     int removed_dirs = 0;
   };
+
+  /**
+   * @brief Status of the most recent disk-cache load attempt.
+   *
+   * The status is diagnostic state recorded by GraphCacheService. It separates
+   * true misses from skipped attempts, successful disk hits, and read/parse
+   * failures while preserving the legacy bool-returning cache-load API.
+   *
+   * @note Status values describe only disk-cache loading. In-memory HP cache
+   * reuse can cause a load attempt to be skipped while the legacy wrapper still
+   * returns true because the node already has reusable output.
+   */
+  enum class DiskCacheLoadStatus {
+    Skipped,
+    Miss,
+    Hit,
+    Error,
+  };
+
+  /**
+   * @brief Diagnostic record for one disk-cache load attempt.
+   *
+   * The record captures the node, cache entry, resolved disk paths, status,
+   * optional error code, and human-readable message produced by
+   * GraphCacheService. It is intentionally value-type state so tests,
+   * frontends, and future event/LastError bridges can inspect the last attempt
+   * without owning cached image data.
+   *
+   * @note `code` is meaningful when `status == DiskCacheLoadStatus::Error`.
+   * For misses, hits, and skipped attempts it remains `GraphErrc::Unknown`.
+   */
+  struct DiskCacheLoadResult {
+    /** @brief Node id whose disk-cache entry was evaluated. */
+    int node_id = -1;
+    /** @brief Cache type from the selected CacheEntry, usually `image`. */
+    std::string cache_type;
+    /** @brief Cache location from the selected CacheEntry. */
+    std::string location;
+    /** @brief Resolved image cache path, when an image cache was considered. */
+    fs::path cache_file;
+    /** @brief Resolved YAML metadata path paired with the image cache path. */
+    fs::path metadata_file;
+    /** @brief Outcome category for the attempt. */
+    DiskCacheLoadStatus status = DiskCacheLoadStatus::Skipped;
+    /** @brief Error category for read/parse failures. */
+    GraphErrc code = GraphErrc::Unknown;
+    /** @brief Reader-facing diagnostic message for the attempt. */
+    std::string message;
+  };
+
+  std::optional<DiskCacheLoadResult> last_disk_cache_load_result;
+
   struct NodeRuntimeState {
     YAML::Node& runtime_parameters;
     std::vector<OutputPort>& outputs;
