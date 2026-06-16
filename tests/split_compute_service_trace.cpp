@@ -710,7 +710,7 @@ ps::NodeOutput make_output(int width, int height, int channels, float value) {
   return output;
 }
 
-json tile_inputs_json(const std::vector<ps::Tile>& input_tiles) {
+json tile_inputs_json(const std::vector<ps::InputTile>& input_tiles) {
   json inputs = json::array();
   for (size_t i = 0; i < input_tiles.size(); ++i) {
     const auto& tile = input_tiles[i];
@@ -791,8 +791,9 @@ void register_trace_ops() {
     gain_rt_meta.tile_preference = ps::TileSizePreference::MICRO;
     registry.register_op_rt_tiled(
         "trace_process", "apply_gain",
-        ps::TileOpFunc([](const ps::Node& node, const ps::Tile& output_tile,
-                          const std::vector<ps::Tile>& input_tiles) {
+        ps::TileOpFunc([](const ps::Node& node,
+                          const ps::OutputTile& output_tile,
+                          const std::vector<ps::InputTile>& input_tiles) {
           if (input_tiles.empty()) {
             throw ps::GraphError(ps::GraphErrc::MissingDependency,
                                  "apply_gain RT requires input tiles");
@@ -813,8 +814,9 @@ void register_trace_ops() {
 
     registry.register_op_hp_tiled(
         "image_mixing", "trace_mix",
-        ps::TileOpFunc([](const ps::Node& node, const ps::Tile& output_tile,
-                          const std::vector<ps::Tile>& input_tiles) {
+        ps::TileOpFunc([](const ps::Node& node,
+                          const ps::OutputTile& output_tile,
+                          const std::vector<ps::InputTile>& input_tiles) {
           if (input_tiles.size() < 2) {
             throw ps::GraphError(ps::GraphErrc::MissingDependency,
                                  "trace_mix requires two input tiles");
@@ -840,8 +842,9 @@ void register_trace_ops() {
         ps::OpMetadata::InputAccessPattern::RandomAccess;
     registry.register_op_hp_tiled(
         "trace_process", "random_roi",
-        ps::TileOpFunc([](const ps::Node& node, const ps::Tile& output_tile,
-                          const std::vector<ps::Tile>& input_tiles) {
+        ps::TileOpFunc([](const ps::Node& node,
+                          const ps::OutputTile& output_tile,
+                          const std::vector<ps::InputTile>& input_tiles) {
           if (input_tiles.empty()) {
             throw ps::GraphError(ps::GraphErrc::MissingDependency,
                                  "random_roi requires input tiles");
@@ -861,8 +864,9 @@ void register_trace_ops() {
         random_meta);
     registry.register_op_rt_tiled(
         "trace_process", "random_roi",
-        ps::TileOpFunc([](const ps::Node& node, const ps::Tile& output_tile,
-                          const std::vector<ps::Tile>& input_tiles) {
+        ps::TileOpFunc([](const ps::Node& node,
+                          const ps::OutputTile& output_tile,
+                          const std::vector<ps::InputTile>& input_tiles) {
           if (input_tiles.empty()) {
             throw ps::GraphError(ps::GraphErrc::MissingDependency,
                                  "random_roi RT requires input tiles");

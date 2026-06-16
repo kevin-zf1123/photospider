@@ -69,8 +69,8 @@ NodeOutput mock_cpu_op(const Node& node,
 }
 
 // 模拟 Tiled CPU 算子（用于 RT 路径）
-void mock_tiled_cpu_op(const Node& node, const Tile& output_tile,
-                       const std::vector<Tile>& input_tiles) {
+void mock_tiled_cpu_op(const Node& node, const OutputTile& output_tile,
+                       const std::vector<InputTile>& input_tiles) {
   // 模拟分块计算
   std::this_thread::sleep_for(std::chrono::milliseconds(1));
 }

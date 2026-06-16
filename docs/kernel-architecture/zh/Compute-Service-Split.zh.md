@@ -49,6 +49,12 @@ ComputeService facade
 | `ComputeTaskDispatcher` | 执行 node/cache-pruned task graph 语义：收集 source task、检查 task-graph readiness、通过 `SchedulerTaskRuntime` dispatch ready task，并提交结果。 | dirty task split 的目标边界 |
 | `ComputeMetricsRecorder` | 集中事件、计时、benchmark 事件和 debug 元数据。 | 已在 `src/kernel/services/compute-service/compute_metrics_recorder.*` 实现 |
 
+`NodeExecutor` 将 tiled 输入准备保持在 per-tile 循环之外。`TiledInputNormalizer`
+helper 会在每次节点调用时一次性 materialize image_mixing secondary 输入的 resize/crop
+和通道转换，然后 `NodeExecutor` 复用这个 normalized context，为每个 tile task 构造只读
+`InputTile` view 和可写 `OutputTile` view。这个边界避免把上游 `NodeOutput` buffer cast
+成可变 tile 输入，也避免整图输入归一化在每个 tile 上重复执行。
+
 ## 缓存规则
 
 拆分必须保留现有缓存契约：

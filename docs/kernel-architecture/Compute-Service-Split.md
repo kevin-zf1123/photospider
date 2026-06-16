@@ -52,6 +52,14 @@ ComputeService facade
 | `ComputeTaskDispatcher` | Execute node/cache-pruned task graph semantics by collecting source tasks, checking task-graph readiness, dispatching ready tasks through `SchedulerTaskRuntime`, and committing results. | Target boundary for the dirty task split |
 | `ComputeMetricsRecorder` | Centralize events, timings, benchmark events, and debug metadata. | Implemented in `src/kernel/services/compute-service/compute_metrics_recorder.*` |
 
+`NodeExecutor` keeps tiled input preparation outside the per-tile loop. The
+`TiledInputNormalizer` helper materializes image_mixing secondary resize/crop
+and channel conversions once per node invocation, then `NodeExecutor` reuses the
+normalized context while building read-only `InputTile` views and writable
+`OutputTile` views for each tile task. This boundary avoids casting upstream
+`NodeOutput` buffers to mutable tile inputs and prevents whole-input
+normalization from repeating per tile.
+
 ## Cache Rules
 
 The split must preserve the existing cache contract:

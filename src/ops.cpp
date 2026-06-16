@@ -837,8 +837,9 @@ static NodeOutput op_divide(const Node& node,
 // =============================================================================
 // ==                       类型二: TILED (分块计算) 操作 ==
 // =============================================================================
-static void op_curve_transform_tiled(const Node& node, const Tile& output_tile,
-                                     const std::vector<Tile>& input_tiles) {
+static void op_curve_transform_tiled(
+    const Node& node, const OutputTile& output_tile,
+    const std::vector<InputTile>& input_tiles) {
   std::lock_guard<std::mutex> lock(g_opencv_op_mutex);
 
   if (input_tiles.empty())
@@ -857,8 +858,9 @@ static void op_curve_transform_tiled(const Node& node, const Tile& output_tile,
   cv::divide(1.0, temp, output_mat);
 }
 
-static void op_gaussian_blur_tiled(const Node& node, const Tile& output_tile,
-                                   const std::vector<Tile>& input_tiles) {
+static void op_gaussian_blur_tiled(const Node& node,
+                                   const OutputTile& output_tile,
+                                   const std::vector<InputTile>& input_tiles) {
   std::lock_guard<std::mutex> lock(g_opencv_op_mutex);
 
   if (input_tiles.empty()) {
@@ -866,7 +868,7 @@ static void op_gaussian_blur_tiled(const Node& node, const Tile& output_tile,
                      "gaussian_blur requires one input tile with halo.");
   }
 
-  const Tile& input_tile_with_halo = input_tiles[0];
+  const InputTile& input_tile_with_halo = input_tiles[0];
   cv::Mat input_mat = toCvMat(input_tile_with_halo);
   cv::Mat output_mat = toCvMat(output_tile);
 
@@ -927,8 +929,9 @@ static NodeOutput op_gaussian_blur_monolithic(
   return result;
 }
 
-static void op_add_weighted_tiled(const Node& node, const Tile& output_tile,
-                                  const std::vector<Tile>& input_tiles) {
+static void op_add_weighted_tiled(const Node& node,
+                                  const OutputTile& output_tile,
+                                  const std::vector<InputTile>& input_tiles) {
   std::lock_guard<std::mutex> lock(g_opencv_op_mutex);
 
   if (input_tiles.size() < 2)
@@ -1109,8 +1112,8 @@ static void op_add_weighted_tiled(const Node& node, const Tile& output_tile,
   cv::merge(O, output);
 }
 
-static void op_abs_diff_tiled(const Node& node, const Tile& output_tile,
-                              const std::vector<Tile>& input_tiles) {
+static void op_abs_diff_tiled(const Node& node, const OutputTile& output_tile,
+                              const std::vector<InputTile>& input_tiles) {
   std::lock_guard<std::mutex> lock(g_opencv_op_mutex);
 
   if (input_tiles.size() < 2)
@@ -1172,8 +1175,8 @@ static void op_abs_diff_tiled(const Node& node, const Tile& output_tile,
   cv::merge(Oo, output);
 }
 
-static void op_multiply_tiled(const Node& node, const Tile& output_tile,
-                              const std::vector<Tile>& input_tiles) {
+static void op_multiply_tiled(const Node& node, const OutputTile& output_tile,
+                              const std::vector<InputTile>& input_tiles) {
   std::lock_guard<std::mutex> lock(g_opencv_op_mutex);
 
   if (input_tiles.size() < 2)

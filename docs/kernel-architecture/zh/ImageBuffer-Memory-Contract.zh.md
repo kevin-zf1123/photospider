@@ -15,7 +15,11 @@
 | `data` | CPU 可访问的数据 owner 或 view。 |
 | `context` | 后端特定资源 owner 或 handle。 |
 
-`Tile` 是指向 `ImageBuffer` 加 `cv::Rect` ROI 的非拥有 view。
+`InputTile` 是指向上游 `ImageBuffer` 加 `cv::Rect` ROI 的只读非拥有 view。它携带
+`const ImageBuffer*`，因此 tiled 算子不能通过 tile API 替换或修改上游 buffer
+元数据。`OutputTile` 是面向目标区域的可写对应类型，携带可变 `ImageBuffer*`。
+`TileTask` 将一个 `OutputTile` 与零个或多个 `InputTile` view 组合起来，交给 tiled
+算子回调执行。
 
 ## CPU 缓冲区契约
 
@@ -89,4 +93,3 @@ OpenCV 适配器必须通过使用提供的 `step` 构造 `cv::Mat` 来保持步
 - copy、add 和简单 curve transform 等轻量操作。
 - 上传/下载密集工作负载。
 - ARM Mac 上的 64 字节与 128 字节行对齐。
-

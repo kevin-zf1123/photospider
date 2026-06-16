@@ -3,13 +3,22 @@
 #include <algorithm>
 #include <type_traits>
 
-#include "adapter/buffer_adapter_opencv.hpp"
 #include "kernel/param_utils.hpp"
 #include "kernel/services/compute-service/compute_geometry.hpp"
 
 namespace ps::compute {
 namespace {
 
+/**
+ * @brief Infers the output channel count and data type for tiled allocation.
+ *
+ * @param inputs Normalized tiled inputs in execution order.
+ * @return Channel count and DataType copied from the first input, or the legacy
+ * FLOAT32 single-channel default for generator-style nodes.
+ * @throws Nothing.
+ * @note This preserves the pre-refactor allocation rule and intentionally does
+ * not inspect secondary inputs.
+ */
 std::pair<int, DataType> infer_channels_and_type(
     const std::vector<const NodeOutput*>& inputs) {
   if (inputs.empty())
@@ -18,6 +27,19 @@ std::pair<int, DataType> infer_channels_and_type(
   return {input.channels, input.type};
 }
 
+/**
+ * @brief Infers the full output image size for a tiled node invocation.
+ *
+ * @param node Node whose runtime width/height parameters are used for
+ * generators.
+ * @param inputs Normalized tiled inputs in execution order.
+ * @param config Optional execution size override.
+ * @return Output size for allocation or existing-buffer iteration.
+ * @throws YAML conversion exceptions when generator width/height parameters are
+ * present but invalid.
+ * @note The first normalized input remains the size source when no explicit
+ * output_size is supplied.
+ */
 cv::Size infer_output_size(const Node& node,
                            const std::vector<const NodeOutput*>& inputs,
                            const TiledExecutionConfig& config) {
@@ -31,16 +53,195 @@ cv::Size infer_output_size(const Node& node,
                   as_int_flexible(node.runtime_parameters, "height", 256));
 }
 
+/**
+ * @brief Detects legacy gaussian blur operators that need implicit halo.
+ *
+ * @param node Node whose type/subtype identify the operation.
+ * @return True for image_process gaussian_blur variants.
+ * @throws Nothing.
+ * @note The metadata path can override this through forced_halo.
+ */
 bool needs_gaussian_halo(const Node& node) {
   return node.type == "image_process" &&
          node.subtype.find("gaussian_blur") != std::string::npos;
 }
 
+/**
+ * @brief Re-throws an operation exception with node identity context.
+ *
+ * @param node Node whose operator failed.
+ * @param e Original exception.
+ * @throws GraphError always.
+ * @note GraphError exceptions are propagated before this helper is used.
+ */
 [[noreturn]] void wrap_node_exception(const Node& node,
                                       const std::exception& e) {
   throw GraphError(GraphErrc::ComputeError,
                    "Node " + std::to_string(node.id) + " (" + node.name +
                        ") failed: " + std::string(e.what()));
+}
+
+/**
+ * @brief Ensures a tiled operator has the inputs required by its node type.
+ *
+ * @param node Node being executed.
+ * @param input_context Normalized input context.
+ * @throws GraphError when a non-generator tiled node has no image input.
+ * @note image_generator nodes intentionally allow an empty input list.
+ */
+void require_tiled_inputs(const Node& node,
+                          const TiledInputContext& input_context) {
+  if (input_context.inputs.empty() && node.type != "image_generator") {
+    throw GraphError(
+        GraphErrc::MissingDependency,
+        "Tiled node '" + node.name + "' requires at least one image input");
+  }
+}
+
+/**
+ * @brief Resolves the output extent used by an existing tiled destination.
+ *
+ * @param output_buffer Destination buffer passed by the caller.
+ * @param config Optional output_size override.
+ * @return Size used for tile grid iteration.
+ * @throws Nothing.
+ * @note Dirty HP/RT paths pass output_size so iteration can use planned domain
+ * extents even when the destination buffer was just allocated.
+ */
+cv::Size output_size_for_buffer(const ImageBuffer& output_buffer,
+                                const TiledExecutionConfig& config) {
+  return config.output_size
+             ? *config.output_size
+             : cv::Size(output_buffer.width, output_buffer.height);
+}
+
+/**
+ * @brief Clips the configured output ROI to the full output extent.
+ *
+ * @param output_size Full output extent for this tiled invocation.
+ * @param config Optional output_roi.
+ * @return Work ROI that tile iteration should cover.
+ * @throws Nothing.
+ * @note Missing output_roi means the whole output image is recomputed.
+ */
+cv::Rect clipped_work_roi(const cv::Size& output_size,
+                          const TiledExecutionConfig& config) {
+  const cv::Rect full_roi(0, 0, output_size.width, output_size.height);
+  return config.output_roi ? clip_rect(*config.output_roi, output_size)
+                           : full_roi;
+}
+
+/**
+ * @brief Computes and clips one output tile ROI inside a work region.
+ *
+ * @param x Tile start x coordinate.
+ * @param y Tile start y coordinate.
+ * @param work_roi Clipped work region being tiled.
+ * @param output_size Full output extent.
+ * @param tile_size Nominal tile size.
+ * @return Output tile ROI clipped to output_size.
+ * @throws Nothing.
+ * @note Edge tiles are shortened to the remaining work region size.
+ */
+cv::Rect make_output_tile_roi(int x, int y, const cv::Rect& work_roi,
+                              const cv::Size& output_size, int tile_size) {
+  const int width = std::min(tile_size, work_roi.x + work_roi.width - x);
+  const int height = std::min(tile_size, work_roi.y + work_roi.height - y);
+  return clip_rect(cv::Rect(x, y, width, height), output_size);
+}
+
+/**
+ * @brief Ensures tile iteration cannot enter a non-advancing loop.
+ *
+ * @param config Tiled execution config supplied by the caller.
+ * @throws GraphError when tile_size is not positive.
+ * @note Previous callers used positive defaults; this guard makes the executor
+ * boundary explicit without changing valid execution.
+ */
+void validate_tile_size(const TiledExecutionConfig& config) {
+  if (config.tile_size <= 0) {
+    throw GraphError(GraphErrc::InvalidParameter,
+                     "Tiled execution requires a positive tile_size.");
+  }
+}
+
+/**
+ * @brief Rebuilds read-only input tile views for one output tile.
+ *
+ * @param graph Graph used for random-access ROI propagation.
+ * @param node Node whose operator is being executed.
+ * @param input_context Normalized tiled inputs.
+ * @param output_roi Output tile ROI being computed.
+ * @param config Tiled execution metadata and halo controls.
+ * @param input_tiles Destination vector reused across tile callbacks.
+ * @throws GraphError when a normalized input pointer is unexpectedly null.
+ * @note The vector capacity is retained between calls to avoid per-tile
+ * allocation churn.
+ */
+void populate_input_tiles(GraphModel& graph, const Node& node,
+                          const TiledInputContext& input_context,
+                          const cv::Rect& output_roi,
+                          const TiledExecutionConfig& config,
+                          std::vector<InputTile>* input_tiles) {
+  input_tiles->clear();
+  input_tiles->reserve(input_context.inputs.size());
+  for (const auto* input : input_context.inputs) {
+    if (!input) {
+      throw GraphError(
+          GraphErrc::MissingDependency,
+          "Tiled node '" + node.name + "' received a missing image input");
+    }
+    const ImageBuffer& input_buffer = input->image_buffer;
+    input_tiles->push_back(InputTile{
+        &input_buffer, NodeExecutor::input_roi_for_tile(graph, node, output_roi,
+                                                        input_buffer, config)});
+  }
+}
+
+/**
+ * @brief Runs tiled execution using an already normalized input context.
+ *
+ * @param graph Graph used for ROI propagation.
+ * @param node Node whose tiled operator is executed.
+ * @param tiled_op Tiled operator callback.
+ * @param input_context Normalized input context that must outlive callbacks.
+ * @param output_buffer Destination image buffer.
+ * @param config Tiled execution controls.
+ * @throws GraphError for invalid tile size or propagated operation failures.
+ * @note This helper is shared by execute() and execute_tiled_into() so
+ * normalization happens once per node invocation.
+ */
+void execute_tiled_context_into(GraphModel& graph, Node& node,
+                                const TileOpFunc& tiled_op,
+                                const TiledInputContext& input_context,
+                                ImageBuffer& output_buffer,
+                                const TiledExecutionConfig& config) {
+  validate_tile_size(config);
+  const cv::Size output_size = output_size_for_buffer(output_buffer, config);
+  const cv::Rect work_roi = clipped_work_roi(output_size, config);
+
+  TileTask task;
+  task.node = &node;
+  task.output_tile.buffer = &output_buffer;
+  task.input_tiles.reserve(input_context.inputs.size());
+
+  for (int y = work_roi.y; y < work_roi.y + work_roi.height;
+       y += config.tile_size) {
+    for (int x = work_roi.x; x < work_roi.x + work_roi.width;
+         x += config.tile_size) {
+      task.output_tile.roi =
+          make_output_tile_roi(x, y, work_roi, output_size, config.tile_size);
+      if (is_rect_empty(task.output_tile.roi)) {
+        continue;
+      }
+      populate_input_tiles(graph, node, input_context, task.output_tile.roi,
+                           config, &task.input_tiles);
+      if (config.on_tile) {
+        config.on_tile(task.output_tile.roi);
+      }
+      NodeExecutor::execute_tile_task(task, tiled_op);
+    }
+  }
 }
 
 }  // namespace
@@ -57,13 +258,8 @@ NodeOutput NodeExecutor::execute(GraphModel& graph, Node& node,
             return op_func(node, inputs);
           } else {
             TiledInputContext input_context =
-                normalize_tiled_inputs(node, inputs);
-            if (input_context.inputs.empty() &&
-                node.type != "image_generator") {
-              throw GraphError(GraphErrc::MissingDependency,
-                               "Tiled node '" + node.name +
-                                   "' requires at least one image input");
-            }
+                TiledInputNormalizer::normalize(node, inputs);
+            require_tiled_inputs(node, input_context);
 
             const cv::Size output_size =
                 infer_output_size(node, input_context.inputs, config);
@@ -72,8 +268,8 @@ NodeOutput NodeExecutor::execute(GraphModel& graph, Node& node,
             NodeOutput output;
             output.image_buffer = make_aligned_cpu_image_buffer(
                 output_size.width, output_size.height, channels, dtype);
-            execute_tiled_into(graph, node, op_func, inputs,
-                               output.image_buffer, config);
+            execute_tiled_context_into(graph, node, op_func, input_context,
+                                       output.image_buffer, config);
             return output;
           }
         },
@@ -95,130 +291,11 @@ void NodeExecutor::execute_tiled_into(
     GraphModel& graph, Node& node, const TileOpFunc& tiled_op,
     const std::vector<const NodeOutput*>& inputs, ImageBuffer& output_buffer,
     const TiledExecutionConfig& config) {
-  TiledInputContext input_context = normalize_tiled_inputs(node, inputs);
-  if (input_context.inputs.empty() && node.type != "image_generator") {
-    throw GraphError(GraphErrc::MissingDependency,
-                     "Tiled node '" + node.name +
-                         "' requires at least one image input");
-  }
-
-  const cv::Size output_size =
-      config.output_size
-          ? *config.output_size
-          : cv::Size(output_buffer.width, output_buffer.height);
-  TileTask task;
-  task.node = &node;
-  task.output_tile.buffer = &output_buffer;
-
-  const cv::Rect full_roi(0, 0, output_size.width, output_size.height);
-  const cv::Rect work_roi =
-      config.output_roi ? clip_rect(*config.output_roi, output_size) : full_roi;
-  for (int y = work_roi.y; y < work_roi.y + work_roi.height;
-       y += config.tile_size) {
-    for (int x = work_roi.x; x < work_roi.x + work_roi.width;
-         x += config.tile_size) {
-      task.output_tile.roi = clip_rect(
-          cv::Rect(x, y, std::min(config.tile_size,
-                                  work_roi.x + work_roi.width - x),
-                   std::min(config.tile_size,
-                            work_roi.y + work_roi.height - y)),
-          output_size);
-      if (is_rect_empty(task.output_tile.roi))
-        continue;
-      task.input_tiles.clear();
-      for (const auto* input : input_context.inputs) {
-        Tile input_tile;
-        input_tile.buffer = const_cast<ImageBuffer*>(&input->image_buffer);
-        input_tile.roi = input_roi_for_tile(
-            graph, node, task.output_tile.roi, input->image_buffer, config);
-        task.input_tiles.push_back(input_tile);
-      }
-      if (config.on_tile) {
-        config.on_tile(task.output_tile.roi);
-      }
-      execute_tile_task(task, tiled_op);
-    }
-  }
-}
-
-TiledInputContext NodeExecutor::normalize_tiled_inputs(
-    Node& node, const std::vector<const NodeOutput*>& inputs) {
-  TiledInputContext context;
-  context.inputs = inputs;
-  const bool is_mixing = node.type == "image_mixing";
-  if (!is_mixing || inputs.size() < 2)
-    return context;
-
-  const auto& base_buffer = inputs[0]->image_buffer;
-  if (base_buffer.width == 0 || base_buffer.height == 0) {
-    throw GraphError(GraphErrc::InvalidParameter,
-                     "Base image for image_mixing node " +
-                         std::to_string(node.id) + " is empty.");
-  }
-
-  const int base_w = base_buffer.width;
-  const int base_h = base_buffer.height;
-  const int base_c = base_buffer.channels;
-  const std::string strategy =
-      as_str(node.runtime_parameters, "merge_strategy", "resize");
-  context.normalized_storage.reserve(inputs.size() - 1);
-
-  for (size_t i = 1; i < inputs.size(); ++i) {
-    const auto& current_buffer = inputs[i]->image_buffer;
-    if (current_buffer.width == 0 || current_buffer.height == 0) {
-      throw GraphError(GraphErrc::InvalidParameter,
-                       "Secondary image for image_mixing node " +
-                           std::to_string(node.id) + " is empty.");
-    }
-    if (current_buffer.width == base_w && current_buffer.height == base_h &&
-        current_buffer.channels == base_c) {
-      continue;
-    }
-
-    cv::Mat current_mat = toCvMat(current_buffer);
-    if (current_mat.cols != base_w || current_mat.rows != base_h) {
-      if (strategy == "resize") {
-        cv::resize(current_mat, current_mat, cv::Size(base_w, base_h), 0, 0,
-                   cv::INTER_LINEAR);
-      } else if (strategy == "crop") {
-        cv::Rect crop_roi(0, 0, std::min(current_mat.cols, base_w),
-                          std::min(current_mat.rows, base_h));
-        cv::Mat cropped = cv::Mat::zeros(base_h, base_w, current_mat.type());
-        current_mat(crop_roi).copyTo(cropped(crop_roi));
-        current_mat = cropped;
-      } else {
-        throw GraphError(GraphErrc::InvalidParameter,
-                         "Unsupported merge_strategy '" + strategy +
-                             "' for tiled image_mixing.");
-      }
-    }
-
-    if (current_mat.channels() != base_c) {
-      if (current_mat.channels() == 1 && (base_c == 3 || base_c == 4)) {
-        std::vector<cv::Mat> planes(base_c, current_mat);
-        cv::merge(planes, current_mat);
-      } else if ((current_mat.channels() == 3 || current_mat.channels() == 4) &&
-                 base_c == 1) {
-        cv::cvtColor(current_mat, current_mat, cv::COLOR_BGR2GRAY);
-      } else if (current_mat.channels() == 4 && base_c == 3) {
-        cv::cvtColor(current_mat, current_mat, cv::COLOR_BGRA2BGR);
-      } else if (current_mat.channels() == 3 && base_c == 4) {
-        cv::cvtColor(current_mat, current_mat, cv::COLOR_BGR2BGRA);
-      } else if (current_mat.channels() != base_c) {
-        throw GraphError(GraphErrc::InvalidParameter,
-                         "Unsupported channel conversion for image_mixing: " +
-                             std::to_string(current_mat.channels()) + " -> " +
-                             std::to_string(base_c));
-      }
-    }
-
-    NodeOutput temp_output;
-    temp_output.image_buffer = fromCvMat(current_mat);
-    context.normalized_storage.push_back(std::move(temp_output));
-    context.inputs[i] = &context.normalized_storage.back();
-  }
-
-  return context;
+  TiledInputContext input_context =
+      TiledInputNormalizer::normalize(node, inputs);
+  require_tiled_inputs(node, input_context);
+  execute_tiled_context_into(graph, node, tiled_op, input_context,
+                             output_buffer, config);
 }
 
 cv::Rect NodeExecutor::input_roi_for_tile(GraphModel& graph, const Node& node,
