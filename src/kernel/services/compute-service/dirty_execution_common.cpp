@@ -63,10 +63,11 @@ ComputePlan prune_node_cache_task_graph(
   return node_cache_pruner.prune(*full_graph, request, execution_order, graph);
 }
 
-ComputePlan prune_dirty_snapshot_task_graph(
-    const ComputePlan& node_cache_plan, const DirtyRegionSnapshot& snapshot) {
+ComputePlan prune_dirty_snapshot_task_graph(const ComputePlan& node_cache_plan,
+                                            const DirtyRegionSnapshot& snapshot,
+                                            const GraphModel& graph) {
   DirtySnapshotTaskGraphPruner dirty_snapshot_pruner;
-  return dirty_snapshot_pruner.prune(node_cache_plan, snapshot);
+  return dirty_snapshot_pruner.prune(node_cache_plan, snapshot, graph);
 }
 
 std::vector<int> planned_nodes_for_task_ids(const ComputePlan& compute_plan,

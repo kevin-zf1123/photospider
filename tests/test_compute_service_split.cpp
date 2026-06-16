@@ -84,6 +84,30 @@ void register_split_ops() {
           toCvMat(output_tile).setTo(2.0f);
         }),
         micro_meta);
+    registry.register_op_hp_tiled(
+        "image_process", "gaussian_blur_dependency_test",
+        TileOpFunc([](const Node&, const OutputTile& output_tile,
+                      const std::vector<InputTile>&) {
+          toCvMat(output_tile).setTo(4.0f);
+        }),
+        micro_meta);
+    ps::OpMetadata random_meta = micro_meta;
+    random_meta.access_pattern =
+        ps::OpMetadata::InputAccessPattern::RandomAccess;
+    registry.register_op_hp_tiled(
+        "split_plan", "random_tile",
+        TileOpFunc([](const Node&, const OutputTile& output_tile,
+                      const std::vector<InputTile>&) {
+          toCvMat(output_tile).setTo(5.0f);
+        }),
+        random_meta);
+    registry.register_dirty_propagator(
+        "split_plan", "random_tile",
+        DirtyRoiPropFunc(
+            [](const Node& node, const cv::Rect& roi, const GraphModel&) {
+              const int radius = node.parameters["radius"].as<int>(16);
+              return compute::expand_rect(roi, radius);
+            }));
   });
 }
 
@@ -103,9 +127,9 @@ compute::ComputePlan node_cache_pruned_plan(
 
 compute::ComputePlan dirty_snapshot_pruned_plan(
     const compute::ComputePlan& node_cache_plan,
-    const compute::DirtyRegionSnapshot& snapshot) {
+    const compute::DirtyRegionSnapshot& snapshot, GraphModel& graph) {
   compute::DirtySnapshotTaskGraphPruner pruner;
-  return pruner.prune(node_cache_plan, snapshot);
+  return pruner.prune(node_cache_plan, snapshot, graph);
 }
 
 }  // namespace
@@ -481,9 +505,9 @@ TEST(TaskGraphPlanningSplit, PreservesSequentialParallelPlanParity) {
   const auto parallel_base =
       node_cache_pruned_plan(graph, parallel, execution_order);
   const auto sequential_plan =
-      dirty_snapshot_pruned_plan(sequential_base, snapshot);
+      dirty_snapshot_pruned_plan(sequential_base, snapshot, graph);
   const auto parallel_plan =
-      dirty_snapshot_pruned_plan(parallel_base, snapshot);
+      dirty_snapshot_pruned_plan(parallel_base, snapshot, graph);
   EXPECT_EQ(sequential_plan.planned_nodes, parallel_plan.planned_nodes);
   EXPECT_EQ(sequential_plan.planned_nodes, (std::vector<int>{10, 42, 100}));
   ASSERT_EQ(sequential_plan.planned_work.size(), 3u);
@@ -621,6 +645,79 @@ TEST(TaskGraphPlanningSplit, TileDependenciesFollowRoiOverlap) {
          "four-edge Cartesian product";
 }
 
+TEST(TaskGraphPlanningSplit, TileDependenciesUseGaussianHaloInputRoi) {
+  register_split_ops();
+  GraphModel graph("cache/split-tile-halo-dependencies");
+  Node source = make_node(1, "split_plan", "tile");
+  source.parameters["width"] = 32;
+  source.parameters["height"] = 16;
+  Node downstream =
+      make_node(2, "image_process", "gaussian_blur_dependency_test");
+  downstream.parameters["width"] = 32;
+  downstream.parameters["height"] = 16;
+  downstream.image_inputs.push_back({1, "image"});
+  graph.add_node(source);
+  graph.add_node(downstream);
+  graph.validate_topology();
+
+  compute::ComputeRequest request;
+  request.intent = ComputeIntent::GlobalHighPrecision;
+  request.target_node_id = 2;
+  const auto plan = node_cache_pruned_plan(graph, request, {1, 2});
+
+  std::vector<const compute::PlannedTask*> downstream_tasks;
+  for (const auto& task : plan.task_graph.tasks) {
+    if (task.node_id == 2) {
+      downstream_tasks.push_back(&task);
+    }
+  }
+  ASSERT_EQ(downstream_tasks.size(), 2u);
+  for (const auto* task : downstream_tasks) {
+    EXPECT_EQ(task->dependency_task_ids.size(), 2u)
+        << "gaussian halo expands each downstream tile input ROI across both "
+           "upstream tiles";
+    for (int dependency_task_id : task->dependency_task_ids) {
+      EXPECT_EQ(plan.task_graph.tasks.at(dependency_task_id).node_id, 1);
+    }
+  }
+}
+
+TEST(TaskGraphPlanningSplit, TileDependenciesUseRandomAccessInputRoi) {
+  register_split_ops();
+  GraphModel graph("cache/split-tile-random-access-dependencies");
+  Node source = make_node(1, "split_plan", "tile");
+  source.parameters["width"] = 48;
+  source.parameters["height"] = 16;
+  Node downstream = make_node(2, "split_plan", "random_tile");
+  downstream.parameters["width"] = 48;
+  downstream.parameters["height"] = 16;
+  downstream.parameters["radius"] = 16;
+  downstream.image_inputs.push_back({1, "image"});
+  graph.add_node(source);
+  graph.add_node(downstream);
+  graph.validate_topology();
+
+  compute::ComputeRequest request;
+  request.intent = ComputeIntent::GlobalHighPrecision;
+  request.target_node_id = 2;
+  const auto plan = node_cache_pruned_plan(graph, request, {1, 2});
+
+  const compute::PlannedTask* middle_downstream_task = nullptr;
+  for (const auto& task : plan.task_graph.tasks) {
+    if (task.node_id == 2 && task.output_roi == cv::Rect(16, 0, 16, 16)) {
+      middle_downstream_task = &task;
+      break;
+    }
+  }
+  ASSERT_NE(middle_downstream_task, nullptr);
+  ASSERT_EQ(middle_downstream_task->dependency_task_ids.size(), 3u)
+      << "random-access input ROI expands the middle tile across three "
+         "upstream tiles";
+  for (int dependency_task_id : middle_downstream_task->dependency_task_ids) {
+    EXPECT_EQ(plan.task_graph.tasks.at(dependency_task_id).node_id, 1);
+  }
+}
+
 TEST(TaskGraphPlanningSplit, CachesFullTaskGraphPerIntentAndTopology) {
   register_split_ops();
   GraphModel graph("cache/split-full-task-graph-cache");
@@ -673,10 +770,10 @@ TEST(TaskGraphPlanningSplit,
   request.target_node_id = 2;
   request.dirty_roi = cv::Rect(0, 0, 16, 16);
   const auto base_plan = node_cache_pruned_plan(graph, request, {1, 2});
-  const auto plan = dirty_snapshot_pruned_plan(base_plan, snapshot);
+  const auto plan = dirty_snapshot_pruned_plan(base_plan, snapshot, graph);
 
   compute::DirtySnapshotTaskGraphPruner pruner;
-  const auto selection = pruner.select(base_plan, snapshot);
+  const auto selection = pruner.select(base_plan, snapshot, graph);
   const auto work_set = pruner.materialize(selection);
   EXPECT_EQ(work_set.generation, 3u);
   EXPECT_EQ(selection.generation, 3u);
@@ -743,9 +840,9 @@ TEST(TaskGraphPlanningSplit,
   request.dirty_roi = cv::Rect(0, 0, 64, 64);
 
   const auto base_plan = node_cache_pruned_plan(graph, request, {1, 2});
-  const auto plan = dirty_snapshot_pruned_plan(base_plan, snapshot);
+  const auto plan = dirty_snapshot_pruned_plan(base_plan, snapshot, graph);
   compute::DirtySnapshotTaskGraphPruner pruner;
-  const auto selection = pruner.select(base_plan, snapshot);
+  const auto selection = pruner.select(base_plan, snapshot, graph);
 
   ASSERT_EQ(plan.task_graph.dependencies.size(), 1u);
   EXPECT_EQ(plan.task_graph.dependencies[0].domain,

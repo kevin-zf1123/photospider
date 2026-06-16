@@ -194,54 +194,6 @@ bool CpuWorkStealingScheduler::should_cancel_epoch(uint64_t epoch) const {
   return epoch < active_epoch();
 }
 
-void CpuWorkStealingScheduler::cancel_stale_enqueued_tasks(uint64_t min_epoch) {
-  if (min_epoch == 0) {
-    return;
-  }
-
-  size_t removed = 0;
-  {
-    std::lock_guard<std::mutex> lock(global_queues_mutex_);
-    auto purge_queue = [&](auto& q) {
-      std::queue<ScheduledTask> kept;
-      while (!q.empty()) {
-        auto task = std::move(q.front());
-        q.pop();
-        if (task.epoch != 0 && task.epoch < min_epoch) {
-          ++removed;
-          continue;
-        }
-        kept.push(std::move(task));
-      }
-      q.swap(kept);
-    };
-    purge_queue(high_priority_queue_);
-    purge_queue(normal_priority_queue_);
-  }
-
-  for (size_t i = 0; i < local_task_queues_.size(); ++i) {
-    if (i >= local_queue_mutexes_.size() || !local_queue_mutexes_[i]) {
-      continue;
-    }
-    std::lock_guard<std::mutex> lock(*local_queue_mutexes_[i]);
-    auto& dq = local_task_queues_[i];
-    auto it = dq.begin();
-    while (it != dq.end()) {
-      if (it->epoch != 0 && it->epoch < min_epoch) {
-        it = dq.erase(it);
-        ++removed;
-      } else {
-        ++it;
-      }
-    }
-  }
-
-  if (removed > 0) {
-    ready_task_count_.fetch_sub(static_cast<int>(removed),
-                                std::memory_order_acq_rel);
-  }
-}
-
 std::optional<CpuWorkStealingScheduler::ScheduledTask>
 CpuWorkStealingScheduler::steal_task(int stealer_id) {
   int n = static_cast<int>(num_workers_);

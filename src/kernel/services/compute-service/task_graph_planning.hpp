@@ -359,6 +359,27 @@ struct FullTaskGraph {
   std::vector<PlannedNodeWork> expanded_work;
   /** @brief Full task graph before request pruning. */
   ComputeTaskGraph task_graph;
+  /**
+   * @brief Expanded work index keyed by graph node id.
+   *
+   * The index is built with the immutable full graph and lets request pruning
+   * copy only selected nodes instead of scanning expanded_work on every call.
+   */
+  std::unordered_map<int, size_t> work_index_by_node;
+  /**
+   * @brief Full task ids grouped by graph node id.
+   *
+   * The vectors reference task_graph.tasks ids and are used to copy only the
+   * selected task pool during node/cache pruning.
+   */
+  std::unordered_map<int, std::vector<int>> task_ids_by_node;
+  /**
+   * @brief Dependency record indices grouped by downstream node id.
+   *
+   * The vectors reference task_graph.dependencies and let pruning enumerate
+   * only candidate edges for selected downstream nodes.
+   */
+  std::unordered_map<int, std::vector<size_t>> dependency_indices_by_to_node;
 };
 
 /**
@@ -431,7 +452,8 @@ class DirtySnapshotTaskGraphPruner {
    * PlannedTask records, and it preserves task ids from node_cache_plan.
    */
   DirtyTaskSelectionOverlay select(const ComputePlan& node_cache_plan,
-                                   const DirtyRegionSnapshot& snapshot) const;
+                                   const DirtyRegionSnapshot& snapshot,
+                                   const GraphModel& graph) const;
 
   /**
    * @brief Annotates and clips a node/cache-pruned plan with dirty metadata.
@@ -444,7 +466,8 @@ class DirtySnapshotTaskGraphPruner {
    * select() so high-frequency ROI updates avoid copying the full plan.
    */
   ComputePlan prune(const ComputePlan& node_cache_plan,
-                    const DirtyRegionSnapshot& snapshot) const;
+                    const DirtyRegionSnapshot& snapshot,
+                    const GraphModel& graph) const;
 
   /**
    * @brief Materializes source/downstream groups from an active overlay.
