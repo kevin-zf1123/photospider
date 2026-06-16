@@ -303,7 +303,36 @@ class OpRegistry {
   // Combined keys: collapse multiple implementations into a single op key
   // (type:subtype)
   std::vector<std::string> get_combined_keys() const;
+  /**
+   * @brief Removes all registered implementations for one operation name.
+   *
+   * The method converts `type` and `subtype` into the canonical
+   * `type:subtype` registry key, then removes legacy, metadata, and
+   * multi-implementation entries for that key.
+   *
+   * @param type Operation type, such as `"image_process"`.
+   * @param subtype Operation subtype, such as `"gaussian_blur"`.
+   * @return True when at least one registry entry was removed.
+   * @throws Nothing under current container erase behavior.
+   * @note Dynamic plugin unload relies on this method to remove callbacks
+   * before releasing the plugin library handle.
+   */
   bool unregister_op(const std::string& type, const std::string& subtype);
+
+  /**
+   * @brief Removes all registry state stored under one canonical operation key.
+   *
+   * This clears `table_`, `metadata_table_`, and `impl_table_` entries so both
+   * legacy `register_op` callbacks and newer HP/RT/tiled/device implementations
+   * are removed together.
+   *
+   * @param key Canonical operation key in `type:subtype` form.
+   * @return True when at least one legacy, metadata, or multi-implementation
+   * entry was erased.
+   * @throws Nothing under current container erase behavior.
+   * @note The method deliberately removes the entire multi-implementation group
+   * for the key; partial per-device unload is not part of the current ABI.
+   */
   bool unregister_key(const std::string& key);
 
   // Phase 1 scaffolding: multi-implementation registry (not wired yet in

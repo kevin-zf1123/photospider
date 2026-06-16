@@ -29,6 +29,24 @@ Supported operation registrations include:
 Operation plugins depend on the public `ImageBuffer` and `NodeOutput`
 contracts.
 
+## Operation Plugin Library Lifetime
+
+Operation callbacks registered by a plugin may point to code or callable
+objects inside that plugin's dynamic library. The host must therefore retain
+the library handle for as long as any registered operation key from that plugin
+can be resolved from `OpRegistry`.
+
+`PluginManager` owns operation plugin handles. A successful load records the
+absolute plugin path, the newly registered operation keys, and a retained RAII
+library handle. Unload first removes the plugin's keys from `OpRegistry`, then
+releases the retained handle. This ordering prevents the registry from exposing
+callbacks whose code has already been unmapped.
+
+The legacy `load_plugins` helper keeps successful operation plugin libraries
+resident for process lifetime. Callers that need explicit unload semantics
+should use `PluginManager` or the handle-retaining loader API rather than
+dropping the library immediately after registration.
+
 ## Scheduler Plugin ABI
 
 A scheduler plugin exports C symbols with these names:

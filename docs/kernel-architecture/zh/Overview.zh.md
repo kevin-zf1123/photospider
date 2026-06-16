@@ -83,7 +83,7 @@ graph TD
 | `GraphCacheService` | 内存/磁盘缓存操作和缓存同步。 |
 | `GraphInspectService` | 基于图拓扑构建结构化缓存/空间元数据 inspect 和 dependency-tree snapshot。 |
 | `GraphEventService` | 每节点计算事件收集。 |
-| `PluginManager` | 加载操作插件并记录操作来源。 |
+| `PluginManager` | 加载操作插件、记录操作来源，并在卸载前持有动态库句柄。 |
 | `OpRegistry` | 全局操作实现 registry，包括 HP/RT、tiled/monolithic、设备元数据和 ROI propagator。 |
 
 ## 维护中文档
