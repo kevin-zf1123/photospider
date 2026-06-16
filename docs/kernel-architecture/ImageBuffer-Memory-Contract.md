@@ -17,7 +17,12 @@ invariants in this document.
 | `data` | CPU-accessible data owner or view. |
 | `context` | Backend-specific resource owner or handle. |
 
-`Tile` is a non-owning view into an `ImageBuffer` plus a `cv::Rect` ROI.
+`InputTile` is a read-only non-owning view into an upstream `ImageBuffer` plus a
+`cv::Rect` ROI. It carries a `const ImageBuffer*` so tiled operators cannot
+replace or mutate upstream buffer metadata through the tile API. `OutputTile` is
+the writable counterpart for destination regions and carries a mutable
+`ImageBuffer*`. `TileTask` combines one `OutputTile` with zero or more
+`InputTile` views for a tiled operator callback.
 
 ## CPU Buffer Contract
 

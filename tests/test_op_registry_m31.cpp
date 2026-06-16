@@ -35,11 +35,13 @@ NodeOutput dummy_cuda_op(const Node&, const std::vector<const NodeOutput*>&) {
   return output;
 }
 
-void dummy_tiled_cpu_op(const Node&, const Tile&, const std::vector<Tile>&) {
+void dummy_tiled_cpu_op(const Node&, const OutputTile&,
+                        const std::vector<InputTile>&) {
   // Tiled CPU 实现
 }
 
-void dummy_tiled_metal_op(const Node&, const Tile&, const std::vector<Tile>&) {
+void dummy_tiled_metal_op(const Node&, const OutputTile&,
+                          const std::vector<InputTile>&) {
   // Tiled Metal 实现
 }
 
@@ -74,7 +76,8 @@ TEST_F(OpRegistryM31Test, RegisterMultiDeviceImplementations) {
                          dummy_metal_op, metal_meta);
 
   // 验证两个版本都已注册
-  auto all_impls = registry.get_all_implementations("m31_test", "gaussian_blur");
+  auto all_impls =
+      registry.get_all_implementations("m31_test", "gaussian_blur");
   ASSERT_EQ(all_impls.size(), 2);
 }
 
@@ -112,14 +115,14 @@ TEST_F(OpRegistryM31Test, GetImplementationsByDevice) {
   ASSERT_EQ(metal_impls.size(), 1);
   EXPECT_EQ(metal_impls[0]->metadata.device_preference, Device::GPU_METAL);
 
-  auto cuda_impls = registry.get_implementations_by_device(
-      "m31_test", "invert", Device::GPU_CUDA);
+  auto cuda_impls = registry.get_implementations_by_device("m31_test", "invert",
+                                                           Device::GPU_CUDA);
   ASSERT_EQ(cuda_impls.size(), 1);
   EXPECT_EQ(cuda_impls[0]->metadata.device_preference, Device::GPU_CUDA);
 
   // 检索不存在的设备
-  auto npu_impls = registry.get_implementations_by_device(
-      "m31_test", "invert", Device::ASIC_NPU);
+  auto npu_impls = registry.get_implementations_by_device("m31_test", "invert",
+                                                          Device::ASIC_NPU);
   EXPECT_TRUE(npu_impls.empty());
 }
 
@@ -135,8 +138,8 @@ TEST_F(OpRegistryM31Test, GetMetadataWithCostScore) {
   registry.register_impl("m31_test", "contrast", Device::CPU, dummy_cpu_op,
                          meta);
 
-  auto impls =
-      registry.get_implementations_by_device("m31_test", "contrast", Device::CPU);
+  auto impls = registry.get_implementations_by_device("m31_test", "contrast",
+                                                      Device::CPU);
   ASSERT_EQ(impls.size(), 1);
   EXPECT_EQ(impls[0]->metadata.cost_score, 150);
   EXPECT_EQ(impls[0]->metadata.tile_preference, TileSizePreference::MACRO);
@@ -162,7 +165,8 @@ TEST_F(OpRegistryM31Test, SelectBestImplementationForHP) {
   // HP 模式下，当 GPU 可用时应选择 GPU
   std::vector<Device> available_devices = {Device::CPU, Device::GPU_METAL};
   auto best = registry.select_best_implementation(
-      "m31_test", "sharpen", available_devices, ComputeIntent::GlobalHighPrecision);
+      "m31_test", "sharpen", available_devices,
+      ComputeIntent::GlobalHighPrecision);
 
   ASSERT_NE(best, nullptr);
   EXPECT_EQ(best->metadata.device_preference, Device::GPU_METAL);
@@ -188,7 +192,8 @@ TEST_F(OpRegistryM31Test, SelectBestImplementationHPCpuOnly) {
   // 仅 CPU 可用时应选择 CPU
   std::vector<Device> available_devices = {Device::CPU};
   auto best = registry.select_best_implementation(
-      "m31_test", "denoise", available_devices, ComputeIntent::GlobalHighPrecision);
+      "m31_test", "denoise", available_devices,
+      ComputeIntent::GlobalHighPrecision);
 
   ASSERT_NE(best, nullptr);
   EXPECT_EQ(best->metadata.device_preference, Device::CPU);
@@ -240,8 +245,8 @@ TEST_F(OpRegistryM31Test, OpImplementationHelperMethods) {
   registry.register_impl("m31_test", "tiled_op", Device::GPU_METAL,
                          dummy_tiled_metal_op, tiled_meta);
 
-  auto mono_impls =
-      registry.get_implementations_by_device("m31_test", "mono_op", Device::CPU);
+  auto mono_impls = registry.get_implementations_by_device(
+      "m31_test", "mono_op", Device::CPU);
   ASSERT_EQ(mono_impls.size(), 1);
   EXPECT_TRUE(mono_impls[0]->is_monolithic());
   EXPECT_FALSE(mono_impls[0]->is_tiled());
@@ -289,7 +294,8 @@ TEST_F(OpRegistryM31Test, MultipleSameDeviceImplsSortedByCost) {
   // 选择最优时应返回 cost_score 较低的
   std::vector<Device> available_devices = {Device::CPU};
   auto best = registry.select_best_implementation(
-      "m31_test", "multi_cpu", available_devices, ComputeIntent::GlobalHighPrecision);
+      "m31_test", "multi_cpu", available_devices,
+      ComputeIntent::GlobalHighPrecision);
 
   ASSERT_NE(best, nullptr);
   EXPECT_EQ(best->metadata.cost_score, 50);

@@ -225,8 +225,22 @@ struct OpMetadata {
 
 using MonolithicOpFunc = std::function<NodeOutput(
     const Node&, const std::vector<const NodeOutput*>&)>;
-using TileOpFunc =
-    std::function<void(const Node&, const Tile&, const std::vector<Tile>&)>;
+
+/**
+ * @brief Tiled operator callback signature.
+ *
+ * Tiled callbacks receive the node being executed, one writable output tile,
+ * and all read-only input tile views needed to produce that output ROI. The
+ * callback owns no buffers; all tile views are borrowed from NodeExecutor for
+ * the duration of the call.
+ *
+ * @note InputTile carries const ImageBuffer pointers so tiled operators cannot
+ * replace or mutate upstream ImageBuffer metadata through the tile API. Pixel
+ * data returned by adapter views must still be treated as read-only by
+ * convention when sourced from InputTile.
+ */
+using TileOpFunc = std::function<void(const Node&, const OutputTile&,
+                                      const std::vector<InputTile>&)>;
 using DirtyRoiPropFunc =
     std::function<cv::Rect(const Node&, const cv::Rect&, const GraphModel&)>;
 using ForwardRoiPropFunc = std::function<cv::Rect(

@@ -58,8 +58,8 @@ void register_contract_ops() {
 
     registry.register_op_rt_tiled(
         "kernel_contract_test", "process",
-        TileOpFunc([](const Node&, const Tile& output_tile,
-                      const std::vector<Tile>& input_tiles) {
+        TileOpFunc([](const Node&, const OutputTile& output_tile,
+                      const std::vector<InputTile>& input_tiles) {
           if (input_tiles.empty()) {
             throw GraphError(GraphErrc::MissingDependency,
                              "process requires input tiles");
@@ -130,9 +130,9 @@ TEST(ImageBufferContract, OpenCvAndTileAccessRespectPaddedStep) {
   mat.setTo(0.0f);
 
   Node node;
-  Tile output_tile{&buffer, cv::Rect(3, 1, 5, 2)};
-  TileOpFunc write_tile = [](const Node&, const Tile& tile,
-                             const std::vector<Tile>&) {
+  OutputTile output_tile{&buffer, cv::Rect(3, 1, 5, 2)};
+  TileOpFunc write_tile = [](const Node&, const OutputTile& tile,
+                             const std::vector<InputTile>&) {
     cv::Mat tile_mat = toCvMat(tile);
     tile_mat.setTo(7.0f);
   };
@@ -274,9 +274,8 @@ TEST(CacheSemantics, DiskSaveAndSyncIgnoreRtOnlyState) {
 
   // Node 2: process with HP cache + caches entry → should be saved to disk
   graph.add_node(make_contract_process_node());
-  graph.mutate_node_runtime_state(2, [](auto& state) {
-    state.caches.push_back({"image", "output.png"});
-  });
+  graph.mutate_node_runtime_state(
+      2, [](auto& state) { state.caches.push_back({"image", "output.png"}); });
 
   // Node 3: process with caches entry but only RT state (simulates a node
   // that was computed via interactive RT path but never had HP computed)
@@ -426,8 +425,8 @@ TEST(GraphIoContract, SuccessfulReloadResetsRuntimeMetadata) {
   io.load(graph, valid_path);
   ASSERT_EQ(graph.node(1).name, "old_graph");
 
-  graph.timing_results.node_timings.push_back({1, "old_graph", 9.0,
-                                               "computed"});
+  graph.timing_results.node_timings.push_back(
+      {1, "old_graph", 9.0, "computed"});
   graph.timing_results.total_ms = 9.0;
   graph.total_io_time_ms.store(7.0);
   graph.set_skip_save_cache(true);

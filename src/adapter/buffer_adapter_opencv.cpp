@@ -5,6 +5,15 @@
 namespace ps {
 
 // --- 内部辅助函数 (不变) ---
+/**
+ * @brief Converts a Photospider DataType/channel pair to an OpenCV matrix type.
+ *
+ * @param type Channel scalar type from ImageBuffer.
+ * @param channels Number of channels per pixel.
+ * @return OpenCV CV_* type matching the input description.
+ * @throws std::runtime_error when type is not supported by the adapter.
+ * @note This helper performs no memory access and is safe for CPU/GPU buffers.
+ */
 static int toCvType(ps::DataType type, int channels) {
   switch (type) {
     case ps::DataType::UINT8:
@@ -23,6 +32,14 @@ static int toCvType(ps::DataType type, int channels) {
   throw std::runtime_error("Unsupported data type for OpenCV conversion");
 }
 
+/**
+ * @brief Converts an OpenCV matrix depth to a Photospider DataType.
+ *
+ * @param cv_type OpenCV matrix type code.
+ * @return DataType representing the matrix scalar depth.
+ * @throws std::runtime_error when the OpenCV depth has no ImageBuffer mapping.
+ * @note Channel count is handled separately by fromCvMat/fromCvUMat.
+ */
 static ps::DataType fromCvType(int cv_type) {
   switch (CV_MAT_DEPTH(cv_type)) {
     case CV_8U:
@@ -41,6 +58,78 @@ static ps::DataType fromCvType(int cv_type) {
       throw std::runtime_error(
           "Unsupported cv::Mat depth for ImageBuffer conversion");
   }
+}
+
+/**
+ * @brief Returns the ImageBuffer pointer carried by an input tile.
+ *
+ * @param tile Read-only tile view to inspect.
+ * @return Borrowed ImageBuffer pointer.
+ * @throws Nothing.
+ * @note Used by templated tile adapters so input/output overloads share ROI
+ * validation and slicing behavior.
+ */
+static const ImageBuffer* tile_buffer(const InputTile& tile) {
+  return tile.buffer;
+}
+
+/**
+ * @brief Returns the ImageBuffer pointer carried by an output tile.
+ *
+ * @param tile Writable tile view to inspect.
+ * @return Borrowed ImageBuffer pointer.
+ * @throws Nothing.
+ * @note Used by templated tile adapters so input/output overloads share ROI
+ * validation and slicing behavior.
+ */
+static ImageBuffer* tile_buffer(const OutputTile& tile) {
+  return tile.buffer;
+}
+
+/**
+ * @brief Converts any tile view to an ROI-scoped cv::Mat.
+ *
+ * @tparam TileView InputTile or OutputTile.
+ * @param tile Tile view carrying a buffer pointer and ROI.
+ * @param missing_message Error text used when the tile has no buffer.
+ * @return cv::Mat view covering tile.roi.
+ * @throws std::runtime_error when tile has no buffer or the ImageBuffer adapter
+ * cannot expose a matrix.
+ * @note InputTile pixel immutability is a caller contract because OpenCV
+ * returns mutable cv::Mat handles even for const source buffers.
+ */
+template <typename TileView>
+static cv::Mat toCvMatForTile(const TileView& tile,
+                              const char* missing_message) {
+  auto* buffer = tile_buffer(tile);
+  if (!buffer) {
+    throw std::runtime_error(missing_message);
+  }
+  cv::Mat full_mat = toCvMat(*buffer);
+  return full_mat(tile.roi);
+}
+
+/**
+ * @brief Converts any tile view to an ROI-scoped cv::UMat.
+ *
+ * @tparam TileView InputTile or OutputTile.
+ * @param tile Tile view carrying a buffer pointer and ROI.
+ * @param missing_message Error text used when the tile has no buffer.
+ * @return cv::UMat view covering tile.roi.
+ * @throws std::runtime_error when tile has no buffer or the ImageBuffer adapter
+ * cannot expose a UMat.
+ * @note InputTile pixel immutability is a caller contract because OpenCV UMat
+ * views can still be passed to mutating APIs.
+ */
+template <typename TileView>
+static cv::UMat toCvUMatForTile(const TileView& tile,
+                                const char* missing_message) {
+  auto* buffer = tile_buffer(tile);
+  if (!buffer) {
+    throw std::runtime_error(missing_message);
+  }
+  cv::UMat full_umat = toCvUMat(*buffer);
+  return full_umat(tile.roi);
 }
 
 // --- 实现：智能转换函数 ---
@@ -63,14 +152,12 @@ cv::Mat toCvMat(const ImageBuffer& buffer) {
   throw std::runtime_error("toCvMat: Buffer has no data on CPU or GPU.");
 }
 
-cv::Mat toCvMat(const Tile& tile) {
-  if (!tile.buffer) {
-    throw std::runtime_error("toCvMat: Tile has no associated buffer.");
-  }
-  // 先获取整个 buffer 的 Mat (可能会触发下载)
-  cv::Mat full_mat = toCvMat(*tile.buffer);
-  // 返回 ROI 视图 (零拷贝)
-  return full_mat(tile.roi);
+cv::Mat toCvMat(const InputTile& tile) {
+  return toCvMatForTile(tile, "toCvMat: InputTile has no associated buffer.");
+}
+
+cv::Mat toCvMat(const OutputTile& tile) {
+  return toCvMatForTile(tile, "toCvMat: OutputTile has no associated buffer.");
 }
 
 // 将 ImageBuffer 转换为 cv::UMat
@@ -91,14 +178,13 @@ cv::UMat toCvUMat(const ImageBuffer& buffer) {
   throw std::runtime_error("toCvUMat: Buffer has no data on CPU or GPU.");
 }
 
-cv::UMat toCvUMat(const Tile& tile) {
-  if (!tile.buffer) {
-    throw std::runtime_error("toCvUMat: Tile has no associated buffer.");
-  }
-  // 先获取整个 buffer 的 UMat (可能会触发上传)
-  cv::UMat full_umat = toCvUMat(*tile.buffer);
-  // 返回 ROI 视图 (零拷贝)
-  return full_umat(tile.roi);
+cv::UMat toCvUMat(const InputTile& tile) {
+  return toCvUMatForTile(tile, "toCvUMat: InputTile has no associated buffer.");
+}
+
+cv::UMat toCvUMat(const OutputTile& tile) {
+  return toCvUMatForTile(tile,
+                         "toCvUMat: OutputTile has no associated buffer.");
 }
 
 // 从 cv::Mat 创建 ImageBuffer

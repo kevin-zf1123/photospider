@@ -2,6 +2,7 @@
 
 #include <algorithm>
 #include <mutex>
+#include <set>
 #include <stdexcept>
 #include <vector>
 
@@ -69,17 +70,17 @@ void register_split_ops() {
     micro_meta.tile_preference = ps::TileSizePreference::MICRO;
     registry.register_op_hp_tiled(
         "split_plan", "tile",
-        TileOpFunc(
-            [](const Node&, const Tile& output_tile, const std::vector<Tile>&) {
-              toCvMat(output_tile).setTo(2.0f);
-            }),
+        TileOpFunc([](const Node&, const OutputTile& output_tile,
+                      const std::vector<InputTile>&) {
+          toCvMat(output_tile).setTo(2.0f);
+        }),
         micro_meta);
     registry.register_op_rt_tiled(
         "split_plan", "tile",
-        TileOpFunc(
-            [](const Node&, const Tile& output_tile, const std::vector<Tile>&) {
-              toCvMat(output_tile).setTo(2.0f);
-            }),
+        TileOpFunc([](const Node&, const OutputTile& output_tile,
+                      const std::vector<InputTile>&) {
+          toCvMat(output_tile).setTo(2.0f);
+        }),
         micro_meta);
   });
 }
@@ -212,10 +213,15 @@ TEST(NodeExecutorSplit,
 
   Node tiled = make_node(2, "image_mixing", "tile");
   bool saw_normalized_second_input = false;
+  int tiled_calls = 0;
+  std::set<const ImageBuffer*> normalized_second_buffers;
   OpRegistry::OpVariant tile_op =
-      TileOpFunc([&](const Node&, const Tile& output_tile,
-                     const std::vector<Tile>& input_tiles) {
+      TileOpFunc([&](const Node&, const OutputTile& output_tile,
+                     const std::vector<InputTile>& input_tiles) {
         ASSERT_EQ(input_tiles.size(), 2u);
+        ASSERT_NE(input_tiles[1].buffer, nullptr);
+        ++tiled_calls;
+        normalized_second_buffers.insert(input_tiles[1].buffer);
         saw_normalized_second_input = input_tiles[1].buffer->width == 8 &&
                                       input_tiles[1].buffer->height == 8 &&
                                       input_tiles[1].buffer->channels == 3;
@@ -224,9 +230,14 @@ TEST(NodeExecutorSplit,
   NodeOutput base = make_image_output(8, 8, 3);
   NodeOutput secondary = make_image_output(4, 4, 1);
   std::vector<const NodeOutput*> tiled_inputs{&base, &secondary};
-  NodeOutput tiled_output =
-      compute::NodeExecutor::execute(graph, tiled, tile_op, tiled_inputs);
+  compute::TiledExecutionConfig tiled_config;
+  tiled_config.tile_size = 4;
+  NodeOutput tiled_output = compute::NodeExecutor::execute(
+      graph, tiled, tile_op, tiled_inputs, tiled_config);
   EXPECT_TRUE(saw_normalized_second_input);
+  EXPECT_EQ(tiled_calls, 4);
+  ASSERT_EQ(normalized_second_buffers.size(), 1u);
+  EXPECT_NE(*normalized_second_buffers.begin(), &secondary.image_buffer);
   EXPECT_EQ(tiled_output.image_buffer.width, 8);
   EXPECT_EQ(tiled_output.image_buffer.channels, 3);
 

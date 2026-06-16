@@ -153,6 +153,7 @@ set(COMPUTE_SOURCES
     src/kernel/services/compute-service/compute_task_submission.cpp
     src/kernel/services/compute-service/task_graph_planning.cpp
     src/kernel/services/compute-service/task_population_strategy.cpp
+    src/kernel/services/compute-service/tiled_input_normalizer.cpp
     src/kernel/services/compute-service/dirty_control_lane.cpp
     src/kernel/services/compute-service/dirty_execution_common.cpp
     src/kernel/services/compute-service/dirty_node_executor.cpp

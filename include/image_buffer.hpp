@@ -1,8 +1,8 @@
 #pragma once
 
+#include <cstddef>
 #include <memory>
 #include <opencv2/core.hpp>  // 用于 cv::Rect
-#include <cstddef>
 #include <vector>
 
 namespace ps {
@@ -45,23 +45,70 @@ size_t image_buffer_bytes_per_channel(DataType type);
 size_t aligned_image_buffer_step(int width, int channels, DataType type,
                                  size_t alignment = 64);
 ImageBuffer make_aligned_cpu_image_buffer(int width, int height, int channels,
-                                          DataType type,
-                                          size_t alignment = 64);
+                                          DataType type, size_t alignment = 64);
 
-// 图像分块的视图（View）。
-// 它不拥有数据，只是指向 ImageBuffer 的一部分，非常轻量。
-struct Tile {
-  ImageBuffer* buffer = nullptr;  // 指向其所属的完整 ImageBuffer
-  cv::Rect roi;                   // 定义了它在 buffer 中的位置和大小
+/**
+ * @brief Read-only non-owning view over an input image region.
+ *
+ * InputTile carries the upstream ImageBuffer pointer and pixel ROI required by
+ * a tiled operator. It does not own image memory and does not extend the
+ * lifetime of the referenced buffer. The kernel creates input tiles from
+ * resolved upstream NodeOutput objects or from temporary normalized input
+ * storage.
+ *
+ * @note The buffer pointer is const so tiled operator APIs cannot mutate
+ * ImageBuffer metadata or replace the upstream payload. OpenCV cv::Mat views do
+ * not provide hard pixel immutability, so tiled operators must still treat
+ * matrices obtained from InputTile as read-only.
+ */
+struct InputTile {
+  /** @brief Borrowed upstream buffer that must remain alive during tile work.
+   */
+  const ImageBuffer* buffer = nullptr;
+
+  /** @brief Pixel ROI inside buffer, clipped by the executor before dispatch.
+   */
+  cv::Rect roi;
 };
 
-// 调度器处理的基本工作单元。
-// 每个任务都明确定义了它要计算哪个节点的哪个输出分块，以及它依赖哪些输入分块。
+/**
+ * @brief Writable non-owning view over an output image region.
+ *
+ * OutputTile identifies the destination ImageBuffer and ROI that a tiled
+ * operator must fill. It does not own image memory; allocation and lifetime are
+ * managed by the compute service before tile dispatch.
+ *
+ * @note The buffer pointer is mutable because output tiles are the only tile
+ * views that may write pixels or update the destination buffer contents.
+ */
+struct OutputTile {
+  /** @brief Borrowed destination buffer that receives tile output. */
+  ImageBuffer* buffer = nullptr;
+
+  /** @brief Pixel ROI inside buffer, clipped by the executor before dispatch.
+   */
+  cv::Rect roi;
+};
+
+/**
+ * @brief Scheduler-visible unit of tiled node work.
+ *
+ * TileTask binds one node, one writable output tile, and all read-only input
+ * tiles required by the selected operator. The task owns no image memory; all
+ * buffer pointers are borrowed for the duration of the tiled operator callback.
+ *
+ * @note Input tiles may point to normalized temporary NodeOutput storage owned
+ * by the TiledInputContext for the surrounding node execution.
+ */
 struct TileTask {
-  const Node* node = nullptr;  // 任务所属的节点
-  Tile output_tile;            // 任务需要计算并填充的输出分块
-  std::vector<Tile>
-      input_tiles;  // 执行此任务所需的所有输入分块 (包括 "Halo" 区域)
+  /** @brief Node whose tiled operator is being invoked. */
+  const Node* node = nullptr;
+
+  /** @brief Writable output region for this task. */
+  OutputTile output_tile;
+
+  /** @brief Read-only input regions, including halo where required. */
+  std::vector<InputTile> input_tiles;
 };
 
 }  // namespace ps
