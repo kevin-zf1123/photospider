@@ -58,8 +58,12 @@ void handle_tiles(ps::InteractionService& svc, const std::string& graph_name,
   auto ending_nodes = svc.cmd_ending_nodes(graph_name);
   if (ending_nodes && !ending_nodes->empty()) {
     for (int end_node_id : *ending_nodes) {
-      auto fut_opt = svc.cmd_compute_async(graph_name, end_node_id, "int8",
-                                           false, false, true);
+      ps::Kernel::ComputeRequest request;
+      request.name = graph_name;
+      request.node_id = end_node_id;
+      request.cache.precision = "int8";
+      request.execution.parallel = true;
+      auto fut_opt = svc.cmd_compute_async(request);
       if (fut_opt)
         fut_opt->get();
     }
@@ -207,19 +211,16 @@ void handle_dirty(ps::InteractionService& svc, const std::string& graph_name,
   svc.cmd_drain_compute_events(graph_name);
 
   std::cout << "--- Triggering Actual Kernel Compute ---" << std::endl;
-  auto future_opt = svc.kernel().compute_async(
-      graph_name, target_end_node,
-      "int8",                             // cache_precision
-      false,                              // force_recache
-      false,                              // enable_timing
-      true,                               // parallel
-      true,                               // quiet
-      true,                               // disable_disk_cache
-      false,                              // nosave
-      nullptr,                            // benchmark_events
-      ps::ComputeIntent::RealTimeUpdate,  // **关键意图**
-      target_roi                          // **关键脏区（已投射到目标坐标）**
-  );
+  ps::Kernel::ComputeRequest request;
+  request.name = graph_name;
+  request.node_id = target_end_node;
+  request.cache.precision = "int8";
+  request.cache.disable_disk_cache = true;
+  request.execution.parallel = true;
+  request.execution.quiet = true;
+  request.intent = ps::ComputeIntent::RealTimeUpdate;
+  request.dirty_roi = target_roi;
+  auto future_opt = svc.kernel().compute_async(request);
 
   if (!future_opt) {
     std::cerr << "Failed to start compute task." << std::endl;

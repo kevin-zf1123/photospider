@@ -316,9 +316,12 @@ TEST(CacheSemantics, HpAndRtComputePopulateFormalCaches) {
   graph.validate_topology();
 
   // HP compute populates cached_output_high_precision only
-  NodeOutput& hp =
-      compute.compute(graph, ComputeIntent::GlobalHighPrecision, 2, "int8",
-                      false, false, true, nullptr, std::nullopt);
+  ComputeService::Request hp_request;
+  hp_request.node_id = 2;
+  hp_request.cache.precision = "int8";
+  hp_request.cache.disable_disk_cache = true;
+  hp_request.intent = ComputeIntent::GlobalHighPrecision;
+  NodeOutput& hp = compute.compute(graph, hp_request);
   EXPECT_TRUE(graph.node(2).cached_output_high_precision.has_value());
   EXPECT_EQ(hp.image_buffer.width,
             graph.node(2).cached_output_high_precision->image_buffer.width);
@@ -331,9 +334,10 @@ TEST(CacheSemantics, HpAndRtComputePopulateFormalCaches) {
 
   // RT compute populates cached_output_real_time only;
   // cached_output_high_precision must remain unchanged.
-  NodeOutput& rt =
-      compute.compute(graph, ComputeIntent::RealTimeUpdate, 2, "int8", false,
-                      false, true, nullptr, cv::Rect(0, 0, 8, 8));
+  ComputeService::Request rt_request = hp_request;
+  rt_request.intent = ComputeIntent::RealTimeUpdate;
+  rt_request.dirty_roi = cv::Rect(0, 0, 8, 8);
+  NodeOutput& rt = compute.compute(graph, rt_request);
   EXPECT_EQ(&rt, &*graph.node(2).cached_output_real_time);
   EXPECT_TRUE(graph.node(2).cached_output_real_time.has_value());
 
@@ -385,8 +389,12 @@ TEST(CacheSemantics, DiskSaveAndSyncIgnoreRtOnlyState) {
   graph.validate_topology();
 
   // HP compute for node 2 — also computes node 1 as dependency
-  compute.compute(graph, ComputeIntent::GlobalHighPrecision, 2, "int8", false,
-                  false, true, nullptr, std::nullopt);
+  ComputeService::Request hp_request;
+  hp_request.node_id = 2;
+  hp_request.cache.precision = "int8";
+  hp_request.cache.disable_disk_cache = true;
+  hp_request.intent = ComputeIntent::GlobalHighPrecision;
+  compute.compute(graph, hp_request);
   ASSERT_TRUE(graph.node(2).cached_output_high_precision.has_value());
 
   // Populate RT-only node (node 3) with RT state; it never had HP compute.
@@ -524,9 +532,12 @@ TEST(ComputeContracts, RealTimeUpdateWithoutDirtyRoiFailsClearly) {
   GraphModel graph(temp_path("photospider-contract-rt-error"));
   graph.add_node(make_contract_node());
 
-  EXPECT_THROW(compute.compute(graph, ComputeIntent::RealTimeUpdate, 1, "int8",
-                               false, false, true, nullptr, std::nullopt),
-               GraphError);
+  ComputeService::Request request;
+  request.node_id = 1;
+  request.cache.precision = "int8";
+  request.cache.disable_disk_cache = true;
+  request.intent = ComputeIntent::RealTimeUpdate;
+  EXPECT_THROW(compute.compute(graph, request), GraphError);
 }
 
 TEST(GraphModelContract, ClearResetsModelRuntimeState) {

@@ -5,6 +5,7 @@
 #include <future>
 #include <optional>
 #include <string>
+#include <utility>
 #include <vector>
 
 #include "benchmark/benchmark_types.hpp"
@@ -38,15 +39,18 @@ class InteractionService {
     return kernel_.ending_nodes(graph);
   }
 
-  // Compute
-  bool cmd_compute(const std::string& graph, int node_id,
-                   const std::string& cache_precision, bool force, bool timing,
-                   bool parallel, bool quiet = false,
-                   bool disable_disk_cache = false, bool nosave = false,
-                   std::vector<BenchmarkEvent>* benchmark_events = nullptr) {
-    return kernel_.compute(graph, node_id, cache_precision, force, timing,
-                           parallel, quiet, disable_disk_cache, nosave,
-                           benchmark_events);
+  /**
+   * @brief Runs a synchronous compute command from a Kernel request object.
+   *
+   * @param request Graph, target node, cache, execution, telemetry, and
+   * optional dirty/intent controls supplied by the frontend.
+   * @return true when Kernel compute succeeds; false on missing graph or
+   * handled compute failure.
+   * @throws Nothing directly; Kernel records handled errors in last_error().
+   * @note The request is forwarded without retaining borrowed benchmark sinks.
+   */
+  bool cmd_compute(const Kernel::ComputeRequest& request) {
+    return kernel_.compute(request);
   }
   std::optional<TimingCollector> cmd_timing(const std::string& graph) {
     return kernel_.get_timing(graph);
@@ -227,11 +231,18 @@ class InteractionService {
       const std::string& graph, int node_id, compute::DirtyDomain domain) {
     return kernel_.end_dirty_source_control(graph, node_id, domain);
   }
+  /**
+   * @brief Computes a node and returns an image from a Kernel request object.
+   *
+   * @param request Graph, target node, cache, execution, telemetry, and
+   * optional dirty/intent controls supplied by the frontend.
+   * @return Cloned image, or nullopt when compute or image extraction fails.
+   * @throws Nothing directly; Kernel keeps the preview/save nullopt contract.
+   * @note The request is not retained after image extraction completes.
+   */
   std::optional<cv::Mat> cmd_compute_and_get_image(
-      const std::string& graph, int node_id, const std::string& precision,
-      bool force, bool timing, bool parallel, bool disable_disk_cache = false) {
-    return kernel_.compute_and_get_image(graph, node_id, precision, force,
-                                         timing, parallel, disable_disk_cache);
+      const Kernel::ComputeRequest& request) {
+    return kernel_.compute_and_get_image(request);
   }
   std::optional<std::vector<int>> cmd_trees_containing_node(
       const std::string& graph, int node_id) {
@@ -250,14 +261,18 @@ class InteractionService {
                          const std::string& yaml_text) {
     return kernel_.set_node_yaml(graph, node_id, yaml_text);
   }
+  /**
+   * @brief Schedules an asynchronous compute command from a request object.
+   *
+   * @param request Graph, target node, cache, execution, telemetry, and
+   * optional dirty/intent controls captured by value.
+   * @return Future resolving to success, or nullopt when the graph is missing.
+   * @throws std::system_error if Kernel cannot launch the async parallel path.
+   * @note benchmark_events is still caller-owned and must outlive the future.
+   */
   std::optional<std::future<bool>> cmd_compute_async(
-      const std::string& graph, int node_id, const std::string& cache_precision,
-      bool force, bool timing, bool parallel, bool quiet = false,
-      bool disable_disk_cache = false, bool nosave = false,
-      std::vector<BenchmarkEvent>* benchmark_events = nullptr) {
-    return kernel_.compute_async(graph, node_id, cache_precision, force, timing,
-                                 parallel, quiet, disable_disk_cache, nosave,
-                                 benchmark_events);
+      Kernel::ComputeRequest request) {
+    return kernel_.compute_async(std::move(request));
   }
   std::optional<cv::Rect> cmd_project_roi(const std::string& graph,
                                           int start_node_id,

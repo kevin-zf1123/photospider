@@ -54,6 +54,101 @@ class Kernel {
     std::string message;
   };
 
+  /**
+   * @brief Cache and persistence controls for one Kernel compute request.
+   *
+   * CacheOptions groups precision, recache, disk-cache, and save behavior so
+   * callers cannot accidentally swap unrelated boolean flags. These settings
+   * are applied for one compute request and then the graph skip-save flag is
+   * restored according to the historical compute facade rules.
+   *
+   * @note disable_disk_cache affects reads from disk cache. nosave controls
+   * cache save side effects through GraphModel::set_skip_save_cache().
+   */
+  struct ComputeCacheOptions {
+    /** @brief Precision label passed to cache read/write paths. */
+    std::string precision;
+
+    /** @brief Whether selected in-memory caches should be recomputed. */
+    bool force_recache = false;
+
+    /** @brief Whether disk-cache reads are disabled for this request. */
+    bool disable_disk_cache = false;
+
+    /** @brief Whether this request should skip saving cache outputs. */
+    bool nosave = false;
+  };
+
+  /**
+   * @brief Execution-mode controls for one Kernel compute request.
+   *
+   * ExecutionOptions separates scheduler and frontend quiet-mode choices from
+   * cache and telemetry options. It is copied into async futures, so callers
+   * should treat it as immutable once the request is submitted.
+   *
+   * @note parallel selects scheduler-backed compute where supported. quiet is
+   * applied to the graph model around the compute call.
+   */
+  struct ComputeExecutionOptions {
+    /** @brief Whether the request should use scheduler-backed execution. */
+    bool parallel = false;
+
+    /** @brief Whether graph output should be quiet during this request. */
+    bool quiet = false;
+  };
+
+  /**
+   * @brief Timing and benchmark controls for one Kernel compute request.
+   *
+   * TelemetryOptions owns no storage. benchmark_events is a borrowed optional
+   * sink and must outlive any asynchronous future that receives the request.
+   *
+   * @note enable_timing resets and fills graph timing state for the target
+   * graph when the service path supports timing collection.
+   */
+  struct ComputeTelemetryOptions {
+    /** @brief Whether graph timing data should be collected. */
+    bool enable_timing = false;
+
+    /** @brief Optional caller-owned per-node benchmark event sink. */
+    std::vector<BenchmarkEvent>* benchmark_events = nullptr;
+  };
+
+  /**
+   * @brief Public compute request shared by sync, async, and image facades.
+   *
+   * ComputeRequest is the public Kernel compute contract. It preserves CLI and
+   * frontend behavior while preventing long positional parameter lists from
+   * spreading into Kernel and ComputeService. A missing intent selects the
+   * legacy high-precision path; a populated intent enables HP/RT coordination
+   * and forwards dirty_roi to ComputeService.
+   *
+   * @note name identifies the graph runtime. benchmark_events is caller-owned
+   * and must remain valid for the full synchronous call or async future.
+   */
+  struct ComputeRequest {
+    /** @brief Graph name resolved by Kernel before dispatch. */
+    std::string name;
+
+    /** @brief Target graph node id to compute. */
+    int node_id = 0;
+
+    /** @brief Cache precision, recache, disk-cache, and save controls. */
+    ComputeCacheOptions cache;
+
+    /** @brief Scheduler and quiet-mode execution controls. */
+    ComputeExecutionOptions execution;
+
+    /** @brief Timing and benchmark recording controls. */
+    ComputeTelemetryOptions telemetry;
+
+    /** @brief Optional compute intent; nullopt selects legacy HP behavior. */
+    std::optional<ComputeIntent> intent;
+
+    /** @brief Optional HP-space dirty ROI for dirty HP or RT updates. */
+    std::optional<cv::Rect> dirty_roi;
+  };
+
   std::optional<std::string> load_graph(const std::string& name,
                                         const std::string& root_dir,
                                         const std::string& yaml_path,
@@ -73,25 +168,31 @@ class Kernel {
     return it->second->graph_state().submit(std::forward<Fn>(fn));
   }
 
-  bool compute(const std::string& name, int node_id,
-               const std::string& cache_precision, bool force_recache,
-               bool enable_timing, bool parallel, bool quiet,
-               bool disable_disk_cache, bool nosave,
-               std::vector<BenchmarkEvent>* benchmark_events = nullptr);
-  std::optional<std::future<bool>> compute_async(
-      const std::string& name, int node_id, const std::string& cache_precision,
-      bool force_recache, bool enable_timing, bool parallel, bool quiet,
-      bool disable_disk_cache, bool nosave,
-      std::vector<BenchmarkEvent>* benchmark_events = nullptr);
+  /**
+   * @brief Computes a graph node synchronously from a structured request.
+   *
+   * @param request Graph name, target node, cache, execution, telemetry, and
+   * optional intent/dirty ROI controls.
+   * @return true when compute completes; false when the graph is missing or
+   * the compute boundary reports a handled failure.
+   * @throws Nothing; handled failures are recorded in last_error().
+   * @note The request object is not retained after the call. benchmark_events
+   * remains caller-owned for the duration of the call.
+   */
+  bool compute(const ComputeRequest& request);
+
+  /**
+   * @brief Schedules a graph node compute from a structured request.
+   *
+   * @param request Graph name, target node, cache, execution, telemetry, and
+   * optional intent/dirty ROI controls captured by value.
+   * @return Future resolving to success, or nullopt when the graph is missing.
+   * @throws std::system_error if std::async cannot launch the parallel branch.
+   * @note The future owns the request copy, but benchmark_events remains
+   * caller-owned and must outlive future completion.
+   */
+  std::optional<std::future<bool>> compute_async(ComputeRequest request);
   std::optional<TimingCollector> get_timing(const std::string& name);
-  std::optional<std::future<bool>> compute_async(
-      const std::string& name, int node_id, const std::string& cache_precision,
-      bool force_recache, bool enable_timing, bool parallel, bool quiet,
-      bool disable_disk_cache, bool nosave,
-      std::vector<BenchmarkEvent>* benchmark_events,
-      ComputeIntent intent,              // 新增
-      std::optional<cv::Rect> dirty_roi  // 新增
-  );
   std::optional<cv::Rect> project_roi_forward(const std::string& name,
                                               int start_node_id,
                                               const cv::Rect& start_roi,
@@ -173,11 +274,18 @@ class Kernel {
       const std::string& name, int node_id, compute::DirtyDomain domain);
   std::optional<compute::DirtyControlLaneResult> end_dirty_source_control(
       const std::string& name, int node_id, compute::DirtyDomain domain);
-  std::optional<cv::Mat> compute_and_get_image(
-      const std::string& name, int node_id, const std::string& cache_precision,
-      bool force_recache, bool enable_timing, bool parallel,
-      bool disable_disk_cache = false,
-      std::vector<BenchmarkEvent>* benchmark_events = nullptr);
+  /**
+   * @brief Computes a node and returns its output image from a request object.
+   *
+   * @param request Graph name, target node, cache, execution, telemetry, and
+   * optional intent/dirty ROI controls.
+   * @return Cloned output image, or nullopt when graph lookup, compute, or
+   * image conversion fails.
+   * @throws Nothing; this facade preserves the historical quiet failure
+   * contract for preview/save helpers.
+   * @note The image is cloned out of graph-owned storage before returning.
+   */
+  std::optional<cv::Mat> compute_and_get_image(const ComputeRequest& request);
 
   std::optional<std::vector<int>> list_node_ids(const std::string& name);
   std::optional<std::string> get_node_yaml(const std::string& name,
@@ -281,34 +389,6 @@ class Kernel {
    */
   std::optional<std::vector<TraversalNodeInfo>> traversal_details_for_end(
       GraphModel& graph, int end_node_id) const;
-
-  /**
-   * @brief Normalized private compute request shared by synchronous,
-   * asynchronous, and image-returning Kernel compute facades.
-   *
-   * This struct preserves the public API while removing duplicated parameter
-   * capture, runtime-start, ComputeService construction, and HP/RT intent
-   * branching from the public methods.
-   *
-   * @note intent=nullopt selects the legacy HP-only ComputeService overloads.
-   * A populated intent selects the intent-aware overloads and forwards
-   * dirty_roi unchanged. benchmark_events is a caller-owned optional sink and
-   * must outlive the compute call or async future that uses it.
-   */
-  struct ComputeRequest {
-    std::string name;
-    int node_id = 0;
-    std::string cache_precision;
-    bool force_recache = false;
-    bool enable_timing = false;
-    bool parallel = false;
-    bool quiet = false;
-    bool disable_disk_cache = false;
-    bool nosave = false;
-    std::vector<BenchmarkEvent>* benchmark_events = nullptr;
-    std::optional<ComputeIntent> intent;
-    std::optional<cv::Rect> dirty_roi;
-  };
 
   /**
    * @brief Executes a graph-runtime facade operation with missing-graph and
@@ -434,24 +514,24 @@ class Kernel {
   }
 
   /**
-   * @brief Runs the public synchronous compute facade from a normalized
-   * request.
+   * @brief Runs the public synchronous compute facade from a request object.
    *
-   * @param request Public compute arguments captured into a stable request.
+   * @param request Public compute request with graph, cache, execution, and
+   * telemetry options.
    * @return true when ComputeService completes successfully; false when the
    * graph is missing or compute reports a handled failure.
    * @throws Nothing; GraphError/std::exception/unknown exceptions are mapped to
    * the existing LastError behavior and false.
    * @note The historical synchronous quiet and skip-save side effects are kept:
-   * quiet is set to request.quiet and skip-save is reset only after successful
-   * compute.
+   * quiet is set to request.execution.quiet and skip-save is reset only after
+   * successful compute.
    */
   bool compute_request(const ComputeRequest& request);
 
   /**
-   * @brief Schedules the async compute facade from a normalized request.
+   * @brief Schedules the async compute facade from a request object.
    *
-   * @param request Public async compute arguments captured by value.
+   * @param request Public async compute request captured by value.
    * @return Future that resolves to the compute status, or nullopt when the
    * graph is missing.
    * @throws std::system_error if std::async cannot launch the parallel branch.
@@ -476,12 +556,12 @@ class Kernel {
       const ComputeRequest& request);
 
   /**
-   * @brief Dispatches one request through the correct ComputeService overload.
+   * @brief Dispatches one request through the correct ComputeService path.
    *
    * @param compute_service Request-scoped ComputeService collaborator.
    * @param runtime Runtime that owns scheduler/event services for the graph.
    * @param graph Visible graph model to compute against.
-   * @param request Normalized compute request.
+   * @param request Kernel compute request to translate into service options.
    * @return Mutable output owned by the graph node cache.
    * @throws GraphError or std::exception from ComputeService.
    * @note intent=nullopt selects legacy HP-only overloads; otherwise intent and

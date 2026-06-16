@@ -1470,9 +1470,16 @@ int main(int argc, char** argv) {
     std::vector<ps::BenchmarkEvent> sequential_benchmark;
     g_trace.set_phase("sequential_hp");
     kernel.runtime(full_graph).clear_scheduler_log();
-    const bool sequential_ok =
-        svc.cmd_compute(full_graph, 100, "int8", true, true, false, false, true,
-                        true, &sequential_benchmark);
+    ps::Kernel::ComputeRequest sequential_request;
+    sequential_request.name = full_graph;
+    sequential_request.node_id = 100;
+    sequential_request.cache.precision = "int8";
+    sequential_request.cache.force_recache = true;
+    sequential_request.cache.disable_disk_cache = true;
+    sequential_request.cache.nosave = true;
+    sequential_request.telemetry.enable_timing = true;
+    sequential_request.telemetry.benchmark_events = &sequential_benchmark;
+    const bool sequential_ok = svc.cmd_compute(sequential_request);
     log("sequential compute ok=" + std::to_string(sequential_ok));
     json sequential_snapshot = graph_snapshot(kernel, full_graph);
     json sequential_actual = {
@@ -1489,9 +1496,10 @@ int main(int argc, char** argv) {
     std::vector<ps::BenchmarkEvent> parallel_benchmark;
     g_trace.set_phase("parallel_hp");
     kernel.runtime(full_graph).clear_scheduler_log();
-    const bool parallel_ok =
-        svc.cmd_compute(full_graph, 100, "int8", true, true, true, false, true,
-                        true, &parallel_benchmark);
+    ps::Kernel::ComputeRequest parallel_request = sequential_request;
+    parallel_request.execution.parallel = true;
+    parallel_request.telemetry.benchmark_events = &parallel_benchmark;
+    const bool parallel_ok = svc.cmd_compute(parallel_request);
     log("parallel compute ok=" + std::to_string(parallel_ok));
     json parallel_scheduler =
         scheduler_events_json(kernel.runtime(full_graph).get_scheduler_log());
@@ -1508,9 +1516,12 @@ int main(int argc, char** argv) {
 
     g_trace.set_phase("legacy_identity_fallback");
     std::vector<ps::BenchmarkEvent> legacy_benchmark;
-    const bool legacy_ok =
-        svc.cmd_compute(legacy_graph, 20, "int8", true, true, false, false,
-                        true, true, &legacy_benchmark);
+    ps::Kernel::ComputeRequest legacy_request = sequential_request;
+    legacy_request.name = legacy_graph;
+    legacy_request.node_id = 20;
+    legacy_request.execution.parallel = false;
+    legacy_request.telemetry.benchmark_events = &legacy_benchmark;
+    const bool legacy_ok = svc.cmd_compute(legacy_request);
     auto& registry = ps::OpRegistry::instance();
     auto legacy_forward =
         svc.cmd_project_roi(legacy_graph, 1, cv::Rect(3, 4, 5, 6), 20);
@@ -1531,9 +1542,11 @@ int main(int argc, char** argv) {
 
     std::vector<ps::BenchmarkEvent> dirty_bootstrap_benchmark;
     g_trace.set_phase("dirty_bootstrap_hp");
-    const bool dirty_bootstrap_ok =
-        svc.cmd_compute(dirty_graph, 100, "int8", true, true, true, false, true,
-                        true, &dirty_bootstrap_benchmark);
+    ps::Kernel::ComputeRequest dirty_bootstrap_request = parallel_request;
+    dirty_bootstrap_request.name = dirty_graph;
+    dirty_bootstrap_request.telemetry.benchmark_events =
+        &dirty_bootstrap_benchmark;
+    const bool dirty_bootstrap_ok = svc.cmd_compute(dirty_bootstrap_request);
     log("dirty bootstrap hp ok=" + std::to_string(dirty_bootstrap_ok));
     const cv::Rect dirty_roi(16, 20, 18, 12);
     mutate_dirty_region(kernel, dirty_graph, dirty_roi);
@@ -1541,9 +1554,11 @@ int main(int argc, char** argv) {
     std::vector<ps::BenchmarkEvent> dirty_benchmark;
     g_trace.set_phase("dirty_rt_update");
     kernel.runtime(dirty_graph).clear_scheduler_log();
-    auto dirty_future = kernel.compute_async(
-        dirty_graph, 100, "int8", true, true, true, false, true, true,
-        &dirty_benchmark, ps::ComputeIntent::RealTimeUpdate, dirty_roi);
+    ps::Kernel::ComputeRequest dirty_request = dirty_bootstrap_request;
+    dirty_request.telemetry.benchmark_events = &dirty_benchmark;
+    dirty_request.intent = ps::ComputeIntent::RealTimeUpdate;
+    dirty_request.dirty_roi = dirty_roi;
+    auto dirty_future = kernel.compute_async(dirty_request);
     const bool dirty_ok = dirty_future && dirty_future->get();
     log("dirty rt update ok=" + std::to_string(dirty_ok));
     auto dirty_snapshot_text =
@@ -1580,10 +1595,13 @@ int main(int argc, char** argv) {
     std::vector<ps::BenchmarkEvent> dirty_single_thread_benchmark;
     g_trace.set_phase("dirty_rt_update_single_thread");
     kernel.runtime(dirty_graph).clear_scheduler_log();
-    auto dirty_single_thread_future = kernel.compute_async(
-        dirty_graph, 100, "int8", true, true, false, false, true, true,
-        &dirty_single_thread_benchmark, ps::ComputeIntent::RealTimeUpdate,
-        dirty_single_thread_roi);
+    ps::Kernel::ComputeRequest dirty_single_thread_request = dirty_request;
+    dirty_single_thread_request.execution.parallel = false;
+    dirty_single_thread_request.telemetry.benchmark_events =
+        &dirty_single_thread_benchmark;
+    dirty_single_thread_request.dirty_roi = dirty_single_thread_roi;
+    auto dirty_single_thread_future =
+        kernel.compute_async(dirty_single_thread_request);
     const bool dirty_single_thread_ok =
         dirty_single_thread_future && dirty_single_thread_future->get();
     log("dirty rt update single-thread ok=" +
@@ -1614,9 +1632,10 @@ int main(int argc, char** argv) {
     g_trace.set_phase("parallel_error_path");
     std::vector<ps::BenchmarkEvent> error_benchmark;
     kernel.runtime(error_graph).clear_scheduler_log();
-    const bool error_ok =
-        svc.cmd_compute(error_graph, 100, "int8", true, true, true, false, true,
-                        true, &error_benchmark);
+    ps::Kernel::ComputeRequest error_request = parallel_request;
+    error_request.name = error_graph;
+    error_request.telemetry.benchmark_events = &error_benchmark;
+    const bool error_ok = svc.cmd_compute(error_request);
     auto last_error = svc.cmd_last_error(error_graph);
     json error_actual = {
         {"compute_returned_ok", error_ok},

@@ -260,9 +260,13 @@ TEST(M34_Integration, ComputeWithInjectedScheduler) {
   ASSERT_FALSE(endings->empty());
   int node_id = (*endings)[0];
 
-  bool success = svc.cmd_compute(graph_name, node_id, "int8",
-                                 /*force*/ true, /*timing*/ false,
-                                 /*parallel*/ true);
+  Kernel::ComputeRequest request;
+  request.name = graph_name;
+  request.node_id = node_id;
+  request.cache.precision = "int8";
+  request.cache.force_recache = true;
+  request.execution.parallel = true;
+  bool success = svc.cmd_compute(request);
   ASSERT_TRUE(success);
   auto& runtime = kernel.runtime(graph_name);
   const auto& result =
@@ -298,9 +302,13 @@ TEST(M34_Integration, ComputeWithSerialScheduler) {
   ASSERT_FALSE(endings->empty());
   int node_id = (*endings)[0];
 
-  bool success = svc.cmd_compute(graph_name, node_id, "int8",
-                                 /*force*/ true, /*timing*/ false,
-                                 /*parallel*/ true);
+  Kernel::ComputeRequest request;
+  request.name = graph_name;
+  request.node_id = node_id;
+  request.cache.precision = "int8";
+  request.cache.force_recache = true;
+  request.execution.parallel = true;
+  bool success = svc.cmd_compute(request);
   ASSERT_TRUE(success);
   auto& runtime = kernel.runtime(graph_name);
   const auto& result =

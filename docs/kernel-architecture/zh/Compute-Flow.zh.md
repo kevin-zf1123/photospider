@@ -22,6 +22,12 @@ CLI / TUI
 命令与 kernel 内部解耦。在 dirty-region 语境中，它应暴露图级 dirty snapshot 查询和可视化 hook；
 它不是 dirty-region generation 或 propagation 的权威来源。
 
+frontend compute 命令现在构造 `Kernel::ComputeRequest`，不再把位置式 boolean flag
+沿调用栈继续传递。`Kernel` 负责 graph lookup、runtime start、quiet-mode 与 skip-save
+副作用、async scheduling、image extraction 和 LastError 映射。随后它把请求转换为
+`ComputeService::Request`，后者只承载 node target、cache、telemetry、intent 和 dirty ROI
+数据。parallel/runtime 选择则通过独立的 `ComputeService::ExecutionStrategy` 承载。
+
 当前 CLI/REPL 前端是批处理取向。它不承诺提供 `compute rt` 或 `--dirty-roi` 这样的 realtime
 update 交互命令。`RealTimeUpdate` 是面向未来 GUI/interaction 环境的 kernel intent，不应把 CLI
 视为生产 realtime 控制面。
