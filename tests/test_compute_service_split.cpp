@@ -676,25 +676,33 @@ TEST(TaskGraphPlanningSplit,
   const auto plan = dirty_snapshot_pruned_plan(base_plan, snapshot);
 
   compute::DirtySnapshotTaskGraphPruner pruner;
-  const auto work_set = pruner.materialize(plan, snapshot);
+  const auto selection = pruner.select(base_plan, snapshot);
+  const auto work_set = pruner.materialize(selection);
   EXPECT_EQ(work_set.generation, 3u);
+  EXPECT_EQ(selection.generation, 3u);
+  EXPECT_EQ(selection.active_task_ids.size(), 2u);
   ASSERT_EQ(work_set.dirty_source_task_ids.size(), 1u);
   const auto& source_task =
-      plan.task_graph.tasks.at(work_set.dirty_source_task_ids.front());
+      base_plan.task_graph.tasks.at(work_set.dirty_source_task_ids.front());
   EXPECT_EQ(source_task.node_id, 1);
   EXPECT_EQ(source_task.output_roi, cv::Rect(0, 0, 16, 16));
+  EXPECT_TRUE(selection.active_task_flags.at(source_task.task_id));
+  EXPECT_TRUE(selection.source_boundary_task_flags.at(source_task.task_id));
   ASSERT_EQ(work_set.downstream_task_ids.size(), 1u);
   const auto& downstream_task =
-      plan.task_graph.tasks.at(work_set.downstream_task_ids.front());
+      base_plan.task_graph.tasks.at(work_set.downstream_task_ids.front());
   EXPECT_EQ(downstream_task.node_id, 2);
-  EXPECT_FALSE(downstream_task.source_boundary_eligible);
-  EXPECT_TRUE(downstream_task.dirty_selected);
+  EXPECT_TRUE(selection.active_task_flags.at(downstream_task.task_id));
+  EXPECT_FALSE(
+      selection.source_boundary_task_flags.at(downstream_task.task_id));
 
   compute::TaskGraphReadyChecker ready_checker;
   const auto ready = ready_checker.initial_ready_task_ids(
       plan.task_graph, &work_set.downstream_task_ids);
   EXPECT_EQ(ready, work_set.downstream_task_ids)
       << "source-boundary dependencies are satisfied by the source lane";
+  EXPECT_EQ(selection.initial_downstream_task_ids, work_set.downstream_task_ids)
+      << "overlay ready set must preserve task-level source/downstream split";
 }
 
 TEST(TaskGraphPlanningSplit,
@@ -736,11 +744,16 @@ TEST(TaskGraphPlanningSplit,
 
   const auto base_plan = node_cache_pruned_plan(graph, request, {1, 2});
   const auto plan = dirty_snapshot_pruned_plan(base_plan, snapshot);
+  compute::DirtySnapshotTaskGraphPruner pruner;
+  const auto selection = pruner.select(base_plan, snapshot);
 
   ASSERT_EQ(plan.task_graph.dependencies.size(), 1u);
   EXPECT_EQ(plan.task_graph.dependencies[0].domain,
             compute::DirtyDomain::RealTime);
   EXPECT_EQ(plan.task_graph.dependencies[0].from_roi, cv::Rect(0, 0, 64, 64));
+  ASSERT_EQ(selection.dependencies.size(), 1u);
+  EXPECT_EQ(selection.dependencies[0].domain, compute::DirtyDomain::RealTime);
+  EXPECT_EQ(selection.dependencies[0].from_roi, cv::Rect(0, 0, 64, 64));
   ASSERT_EQ(plan.task_graph.tasks.size(), 8u);
   for (const auto& task : plan.task_graph.tasks) {
     EXPECT_EQ(task.domain, compute::DirtyDomain::RealTime);
@@ -880,6 +893,10 @@ TEST(GlobalHighPrecisionDirtyUpdate, UsesDirtyPlanningForGlobalHpDirtyRoi) {
   EXPECT_EQ(graph.last_compute_plan_summary->target_node_id, 2);
   EXPECT_GT(graph.last_compute_plan_summary->task_count, 0u);
   EXPECT_GT(graph.last_compute_plan_summary->tile_task_count, 0u);
+  EXPECT_GT(graph.last_compute_plan_summary->active_task_count, 0u);
+  EXPECT_GT(graph.last_compute_plan_summary->downstream_task_count, 0u);
+  EXPECT_LE(graph.last_compute_plan_summary->active_task_count,
+            graph.last_compute_plan_summary->task_count);
 
   auto recorded_events = events.drain();
   EXPECT_TRUE(std::any_of(recorded_events.begin(), recorded_events.end(),

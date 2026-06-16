@@ -58,9 +58,9 @@ struct DirtyUpdateRequest {
  * commits, and optional HP-to-RT downsample refresh. ComputeService remains the
  * facade and delegates one fully validated request at a time.
  *
- * @note The executor mutates GraphModel cache and dirty inspection state under
- * the caller's graph ownership rules. It does not change scheduler policy or
- * plugin ABI.
+ * @note Planning/inspection and final validation take graph_mutex_, while
+ * scheduler execution runs outside the outer graph lock and relies on
+ * request-local node locks for cache writes.
  */
 class HighPrecisionDirtyExecutor {
  public:
@@ -85,8 +85,9 @@ class HighPrecisionDirtyExecutor {
    * @return Mutable high-precision target output stored in the graph.
    * @throws GraphError when planning, dependency resolution, operation
    * dispatch, scheduler submission, or target output validation fails.
-   * @note The method preserves the previous lock scope by holding the graph
-   * mutex for the duration of planning and execution.
+   * @note The method is phase-split: planning/reset and final validation are
+   * serialized with graph_mutex_, but scheduler task execution is not wrapped
+   * by the outer graph lock.
    */
   NodeOutput& execute(GraphModel& graph, GraphRuntime* runtime,
                       const DirtyUpdateRequest& request);
@@ -155,8 +156,9 @@ class RealTimeDirtyExecutor {
    * @return Mutable real-time target output stored in the graph.
    * @throws GraphError when planning, dependency resolution, operation
    * dispatch, scheduler submission, or target output validation fails.
-   * @note The method preserves the previous graph mutex lock scope and dirty
-   * source-before-downstream ordering.
+   * @note The method is phase-split: planning/reset and final validation are
+   * serialized with graph_mutex_, while dirty source-before-downstream task
+   * execution runs outside the outer graph lock.
    */
   NodeOutput& execute(GraphModel& graph, GraphRuntime* runtime,
                       const DirtyUpdateRequest& request);

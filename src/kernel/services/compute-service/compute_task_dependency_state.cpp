@@ -8,7 +8,7 @@ TaskDependencyState::TaskDependencyState(
     const std::vector<int>& execution_order,
     const ComputeTaskGraph& task_graph) {
   build_dense_index(execution_order);
-  build_dependency_state(task_graph, nullptr);
+  build_dependency_state(task_graph, nullptr, nullptr);
 }
 
 TaskDependencyState::TaskDependencyState(
@@ -17,7 +17,17 @@ TaskDependencyState::TaskDependencyState(
   build_dense_index(execution_order);
   std::unordered_set<int> active(active_task_ids.begin(),
                                  active_task_ids.end());
-  build_dependency_state(task_graph, &active);
+  build_dependency_state(task_graph, &active, nullptr);
+}
+
+TaskDependencyState::TaskDependencyState(
+    const std::vector<int>& execution_order, const ComputeTaskGraph& task_graph,
+    const std::vector<int>& active_task_ids,
+    const std::vector<std::vector<int>>& dependency_task_ids) {
+  build_dense_index(execution_order);
+  std::unordered_set<int> active(active_task_ids.begin(),
+                                 active_task_ids.end());
+  build_dependency_state(task_graph, &active, &dependency_task_ids);
 }
 
 bool TaskDependencyState::ready_for_initial_submit(int task_id) const {
@@ -55,7 +65,8 @@ void TaskDependencyState::build_dense_index(
 
 void TaskDependencyState::build_dependency_state(
     const ComputeTaskGraph& task_graph,
-    const std::unordered_set<int>* active_task_ids) {
+    const std::unordered_set<int>* active_task_ids,
+    const std::vector<std::vector<int>>* dependency_task_ids) {
   const size_t task_count = task_graph.tasks.size();
   dependency_counters_ = std::vector<std::atomic<int>>(task_count);
   dependents_map_.assign(task_count, {});
@@ -82,7 +93,10 @@ void TaskDependencyState::build_dependency_state(
     if (!is_active(task.task_id)) {
       continue;
     }
-    for (int dependency_task_id : task.dependency_task_ids) {
+    const std::vector<int>& dependencies =
+        dependency_task_ids ? dependency_task_ids->at(task.task_id)
+                            : task.dependency_task_ids;
+    for (int dependency_task_id : dependencies) {
       if (!is_active(dependency_task_id)) {
         continue;
       }

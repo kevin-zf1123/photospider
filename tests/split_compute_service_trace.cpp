@@ -571,20 +571,25 @@ json compute_plan_summary_json(
                            {"output_roi", rect_json(task.output_roi)},
                            {"dependency_task_ids", task.dependency_task_ids}});
   }
-  return {{"intent", compute_intent_name(summary->intent)},
-          {"target_node_id", summary->target_node_id},
-          {"parallel", summary->parallel},
-          {"topology_generation", summary->topology_generation},
-          {"full_graph_cache_key", summary->full_graph_cache_key},
-          {"planned_node_count", summary->planned_node_count},
-          {"task_count", summary->task_count},
-          {"tile_task_count", summary->tile_task_count},
-          {"monolithic_task_count", summary->monolithic_task_count},
-          {"node_task_count", summary->node_task_count},
-          {"dependency_count", summary->dependency_count},
-          {"initial_task_count", summary->initial_task_count},
-          {"planned_node_sample", summary->planned_node_sample},
-          {"task_sample", task_sample}};
+  return {
+      {"intent", compute_intent_name(summary->intent)},
+      {"target_node_id", summary->target_node_id},
+      {"parallel", summary->parallel},
+      {"topology_generation", summary->topology_generation},
+      {"full_graph_cache_key", summary->full_graph_cache_key},
+      {"planned_node_count", summary->planned_node_count},
+      {"task_count", summary->task_count},
+      {"tile_task_count", summary->tile_task_count},
+      {"monolithic_task_count", summary->monolithic_task_count},
+      {"node_task_count", summary->node_task_count},
+      {"dependency_count", summary->dependency_count},
+      {"initial_task_count", summary->initial_task_count},
+      {"active_task_count", summary->active_task_count},
+      {"dirty_source_task_count", summary->dirty_source_task_count},
+      {"downstream_task_count", summary->downstream_task_count},
+      {"initial_downstream_task_count", summary->initial_downstream_task_count},
+      {"planned_node_sample", summary->planned_node_sample},
+      {"task_sample", task_sample}};
 }
 
 json compute_plan_summary_history_json(
@@ -656,8 +661,7 @@ bool contains_compute_plan_graph(const json& plans, const std::string& intent,
 bool contains_compute_plan_summary(const json& summaries,
                                    const std::string& intent, bool parallel,
                                    const std::vector<int>& planned_nodes,
-                                   size_t min_dependencies,
-                                   size_t min_tasks) {
+                                   size_t min_dependencies, size_t min_tasks) {
   if (!summaries.is_array()) {
     return false;
   }
@@ -1832,18 +1836,17 @@ int main(int argc, char** argv) {
             .get<bool>(),
         "dirty update produced frontend RT state without making "
         "InteractionService the authority");
-    task5.add("dirty execution consumed planner output", true,
-              dirty_actual["graph_snapshot"]["recent_compute_plan_summaries"],
-              contains_compute_plan_summary(
-                  dirty_actual["graph_snapshot"]
-                              ["recent_compute_plan_summaries"],
-                  "global_high_precision", false, {1, 2, 100}, 2, 3) &&
-                  contains_compute_plan_summary(
-                      dirty_actual["graph_snapshot"]
-                                  ["recent_compute_plan_summaries"],
-                      "real_time_update", false, {1, 2, 100}, 2, 3),
-              "HP and RT dirty update plans expose regions, dependencies, and "
-              "planned task graph summary semantics consumed by execution");
+    task5.add(
+        "dirty execution consumed planner output", true,
+        dirty_actual["graph_snapshot"]["recent_compute_plan_summaries"],
+        contains_compute_plan_summary(
+            dirty_actual["graph_snapshot"]["recent_compute_plan_summaries"],
+            "global_high_precision", false, {1, 2, 100}, 2, 3) &&
+            contains_compute_plan_summary(
+                dirty_actual["graph_snapshot"]["recent_compute_plan_summaries"],
+                "real_time_update", false, {1, 2, 100}, 2, 3),
+        "HP and RT dirty update plans expose regions, dependencies, and "
+        "planned task graph summary semantics consumed by execution");
     task5.add(
         "dirty realtime avoids coarse coordinator scheduler submit", true,
         dirty_actual["compute_events"],

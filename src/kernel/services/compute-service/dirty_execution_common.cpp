@@ -41,9 +41,11 @@ void remember_dirty_snapshot(GraphModel& graph,
   }
 }
 
-void remember_compute_plan(GraphModel& graph, const ComputePlan& compute_plan) {
+void remember_compute_plan(GraphModel& graph, const ComputePlan& compute_plan,
+                           const DirtyTaskSelectionOverlay* selection) {
   graph.last_compute_plan = compute_plan;
-  graph.last_compute_plan_summary = summarize_compute_plan(graph, compute_plan);
+  graph.last_compute_plan_summary =
+      summarize_compute_plan(graph, compute_plan, selection);
   graph.recent_compute_plan_summaries.push_back(
       *graph.last_compute_plan_summary);
   if (graph.recent_compute_plan_summaries.size() > 16) {
@@ -167,33 +169,33 @@ std::pair<int, DataType> infer_output_spec(
 }
 
 void apply_planned_work_rois(std::unordered_map<int, HpPlanEntry>& entries,
-                             const ComputePlan& compute_plan) {
-  for (const auto& work : compute_plan.planned_work) {
-    auto entry_it = entries.find(work.node_id);
+                             const DirtyTaskSelectionOverlay& selection) {
+  for (const auto& [node_id, node_selection] : selection.node_selections) {
+    auto entry_it = entries.find(node_id);
     if (entry_it == entries.end()) {
       continue;
     }
-    if (!is_rect_empty(work.represented_hp_roi)) {
-      entry_it->second.roi_hp =
-          clip_rect(work.represented_hp_roi, entry_it->second.hp_size);
+    if (!is_rect_empty(node_selection.represented_hp_roi)) {
+      entry_it->second.roi_hp = clip_rect(node_selection.represented_hp_roi,
+                                          entry_it->second.hp_size);
     }
   }
 }
 
 void apply_planned_work_rois(std::unordered_map<int, RtPlanEntry>& entries,
-                             const ComputePlan& compute_plan) {
-  for (const auto& work : compute_plan.planned_work) {
-    auto entry_it = entries.find(work.node_id);
+                             const DirtyTaskSelectionOverlay& selection) {
+  for (const auto& [node_id, node_selection] : selection.node_selections) {
+    auto entry_it = entries.find(node_id);
     if (entry_it == entries.end()) {
       continue;
     }
-    if (!is_rect_empty(work.represented_hp_roi)) {
-      entry_it->second.roi_hp =
-          clip_rect(work.represented_hp_roi, entry_it->second.hp_size);
+    if (!is_rect_empty(node_selection.represented_hp_roi)) {
+      entry_it->second.roi_hp = clip_rect(node_selection.represented_hp_roi,
+                                          entry_it->second.hp_size);
     }
-    if (!is_rect_empty(work.execution_roi)) {
+    if (!is_rect_empty(node_selection.execution_roi)) {
       entry_it->second.roi_rt =
-          clip_rect(work.execution_roi, entry_it->second.rt_size);
+          clip_rect(node_selection.execution_roi, entry_it->second.rt_size);
     }
   }
 }

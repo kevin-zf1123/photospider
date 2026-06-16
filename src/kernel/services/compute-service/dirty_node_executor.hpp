@@ -38,8 +38,8 @@ using DirtyNodeMutexMap = std::unordered_map<int, std::shared_ptr<std::mutex>>;
  * constructor parameter list.
  *
  * @note All references are borrowed for scheduler callbacks created by the
- * owning dirty update executor. The context must not outlive the graph lock
- * and prepared dirty plan that produced it.
+ * owning dirty update executor. The context must not outlive the prepared
+ * dirty plan, node mutex map, or scheduler wait for that generation.
  */
 struct DirtyNodeExecutionContext {
   /** @brief Graph used for dependency lookup, tiled execution, and commits. */
@@ -88,9 +88,9 @@ struct DownsampleRequestSink {
  * a later downsample request. It does not build dirty snapshots or decide task
  * ordering.
  *
- * @note The owner must hold graph mutation ownership for the whole call. The
- * downsample request vector is protected because scheduler workers may execute
- * multiple HP node tasks concurrently.
+ * @note The owner phase-splits graph_mutex_ around planning and final commit.
+ * Per-node request locks protect dirty cache writes while scheduler workers
+ * execute multiple HP tasks.
  */
 class HighPrecisionDirtyNodeExecutor {
  public:
@@ -169,10 +169,10 @@ class HighPrecisionDirtyNodeExecutor {
    * @note Scheduler tile trace events are emitted before execution to mirror
    * the previous combined dirty executor.
    */
-  void execute_tiled(
-      Node& node, const TileOpFunc& tile_fn, const HpPlanEntry& entry,
-      const std::vector<const NodeOutput*>& image_inputs_ready,
-      ImageBuffer& hp_buffer) const;
+  void execute_tiled(Node& node, const TileOpFunc& tile_fn,
+                     const HpPlanEntry& entry,
+                     const std::vector<const NodeOutput*>& image_inputs_ready,
+                     ImageBuffer& hp_buffer) const;
 
   /**
    * @brief Runs a monolithic HP implementation and stores its output.
