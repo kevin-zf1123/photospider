@@ -2,14 +2,21 @@
 
 #include <algorithm>
 #include <sstream>
+#include <string>
+#include <unordered_map>
 #include <unordered_set>
+#include <vector>
 
 #include "kernel/param_utils.hpp"
 #include "kernel/services/compute-service/compute_geometry.hpp"
+#include "kernel/services/compute-service/dirty_region_planning_policy.hpp"
 #include "kernel/services/graph_traversal_service.hpp"
 #include "kernel/services/roi_propagation_service.hpp"
 
 namespace ps::compute {
+using detail::has_valid_size;
+using detail::HighPrecisionDirtyPolicy;
+using detail::RealTimeDirtyPolicy;
 
 bool DirtyRegionSnapshot::empty() const {
   return dirty_source_nodes.empty() && dirty_tiles.empty() &&
@@ -21,71 +28,58 @@ DirtyRegionPlanner::DirtyRegionPlanner(GraphTraversalService& traversal,
                                        RoiPropagationService& roi_propagation)
     : traversal_(traversal), roi_propagation_(roi_propagation) {}
 
-HighPrecisionDirtyPlan DirtyRegionPlanner::plan_high_precision(
-    GraphModel& graph, int node_id, const cv::Rect& dirty_roi) {
-  if (!graph.has_node(node_id)) {
-    throw GraphError(GraphErrc::NotFound, "Cannot compute HP update: node " +
-                                              std::to_string(node_id) +
-                                              " not found.");
+template <typename Policy>
+typename Policy::Entry& DirtyRegionPlanner::ensure_plan_entry(
+    GraphModel& graph, typename Policy::Plan& plan, int node_id,
+    std::unordered_map<int, cv::Size>& hp_size_cache) {
+  auto [it, inserted] = plan.entries.emplace(node_id, typename Policy::Entry{});
+  typename Policy::Entry& entry = it->second;
+  if (inserted || !has_valid_size(entry.hp_size)) {
+    entry.hp_size = infer_hp_size(graph, node_id, hp_size_cache);
+    Policy::refresh_size_fields(entry);
   }
-  if (is_rect_empty(dirty_roi)) {
-    throw GraphError(GraphErrc::InvalidParameter,
-                     "Cannot compute HP update: dirty ROI is empty.");
+  if (inserted || entry.halo_hp == 0) {
+    entry.halo_hp = infer_halo_hp(graph.node(node_id));
+    Policy::refresh_halo_fields(entry);
   }
+  return entry;
+}
 
-  HighPrecisionDirtyPlan result;
-  result.execution_order = traversal_.topo_postorder_from(graph, node_id);
-  if (result.execution_order.empty())
-    result.execution_order.push_back(node_id);
-  result.snapshot.graph_generation = ++graph.dirty_generation_counter;
-
-  std::unordered_map<int, cv::Size> hp_size_cache;
-  auto ensure_entry = [&](int nid) -> HpPlanEntry& {
-    auto [it, inserted] = result.entries.emplace(nid, HpPlanEntry{});
-    if (inserted) {
-      it->second.hp_size = infer_hp_size(graph, nid, hp_size_cache);
-      it->second.halo_hp = infer_halo_hp(graph.node(nid));
-    } else {
-      if (it->second.hp_size.width <= 0 || it->second.hp_size.height <= 0)
-        it->second.hp_size = infer_hp_size(graph, nid, hp_size_cache);
-      if (it->second.halo_hp == 0)
-        it->second.halo_hp = infer_halo_hp(graph.node(nid));
-    }
-    return it->second;
-  };
-
-  HpPlanEntry& target_entry = ensure_entry(node_id);
-  target_entry.roi_hp =
-      clip_rect(align_rect(dirty_roi, kHpMicroTileSize), target_entry.hp_size);
-  if (is_rect_empty(target_entry.roi_hp)) {
-    throw GraphError(GraphErrc::InvalidParameter,
-                     "Dirty ROI does not intersect node output.");
-  }
-
+template <typename Policy>
+void DirtyRegionPlanner::propagate_dirty_entries(
+    GraphModel& graph, typename Policy::Plan& plan,
+    std::unordered_map<int, cv::Size>& hp_size_cache) {
   std::unordered_map<int, cv::Size> size_cache;
-  for (auto it = result.execution_order.rbegin();
-       it != result.execution_order.rend(); ++it) {
+  for (auto it = plan.execution_order.rbegin();
+       it != plan.execution_order.rend(); ++it) {
     const int current_id = *it;
-    if (!result.entries.count(current_id))
+    auto plan_it = plan.entries.find(current_id);
+    if (plan_it == plan.entries.end())
       continue;
-    HpPlanEntry& current_entry = result.entries.at(current_id);
+    typename Policy::Entry& current_entry = plan_it->second;
     if (is_rect_empty(current_entry.roi_hp))
       continue;
 
     const Node& current_node = graph.node(current_id);
     current_entry.halo_hp =
         std::max(current_entry.halo_hp, infer_halo_hp(current_node));
+    Policy::refresh_halo_fields(current_entry);
 
     cv::Rect upstream_roi_hp = roi_propagation_.compute_upstream_roi(
         current_node, current_entry.roi_hp, graph, size_cache);
-    upstream_roi_hp = align_rect(upstream_roi_hp, kHpMicroTileSize);
+    upstream_roi_hp =
+        Policy::normalize_upstream_roi(upstream_roi_hp, current_entry);
+    if (Policy::skip_empty_upstream_roi(upstream_roi_hp))
+      continue;
 
     for (const auto& edge : graph.upstream_edges(current_id)) {
       if (edge.kind != GraphTopologyEdgeKind::ImageInput ||
           edge.from_node_id < 0)
         continue;
-      HpPlanEntry& parent_entry = ensure_entry(edge.from_node_id);
-      cv::Rect parent_roi = clip_rect(upstream_roi_hp, parent_entry.hp_size);
+      typename Policy::Entry& parent_entry = ensure_plan_entry<Policy>(
+          graph, plan, edge.from_node_id, hp_size_cache);
+      cv::Rect parent_roi =
+          Policy::parent_hp_roi(upstream_roi_hp, parent_entry);
       if (is_rect_empty(parent_roi))
         continue;
       parent_entry.roi_hp =
@@ -93,199 +87,103 @@ HighPrecisionDirtyPlan DirtyRegionPlanner::plan_high_precision(
               ? parent_roi
               : clip_rect(merge_rect(parent_entry.roi_hp, parent_roi),
                           parent_entry.hp_size);
-      result.snapshot.edge_mappings.push_back(
-          {edge.from_node_id, current_id, DirtyDomain::HighPrecision,
-           parent_roi, current_entry.roi_hp,
-           DirtyEdgeDirection::BackwardDemand});
+      plan.snapshot.edge_mappings.push_back(
+          {edge.from_node_id, current_id, Policy::kDomain, parent_roi,
+           current_entry.roi_hp, DirtyEdgeDirection::BackwardDemand});
     }
   }
+}
 
+template <typename Policy>
+void DirtyRegionPlanner::finalize_dirty_entries(GraphModel& graph,
+                                                typename Policy::Plan& plan) {
   std::vector<int> erase_ids;
-  for (auto& [nid, entry] : result.entries) {
-    if (entry.hp_size.width <= 0 || entry.hp_size.height <= 0) {
-      erase_ids.push_back(nid);
+  for (auto& [node_id, entry] : plan.entries) {
+    if (!has_valid_size(entry.hp_size)) {
+      erase_ids.push_back(node_id);
       continue;
     }
-    entry.roi_hp =
-        clip_rect(align_rect(entry.roi_hp, kHpMicroTileSize), entry.hp_size);
+    entry.roi_hp = Policy::finalize_hp_roi(entry.roi_hp, entry.hp_size);
     if (is_rect_empty(entry.roi_hp)) {
-      erase_ids.push_back(nid);
+      erase_ids.push_back(node_id);
       continue;
     }
-    if (entry.halo_hp == 0)
-      entry.halo_hp = infer_halo_hp(graph.node(nid));
-    if (is_monolithic_boundary(graph.node(nid))) {
-      entry.roi_hp = cv::Rect(0, 0, entry.hp_size.width, entry.hp_size.height);
-      result.snapshot.dirty_monolithic_nodes.push_back(
-          {nid, DirtyDomain::HighPrecision, entry.roi_hp, true});
-    } else {
-      enumerate_tiles(result.snapshot, nid, DirtyDomain::HighPrecision,
-                      DirtyTileLevel::Micro, entry.roi_hp, kHpMicroTileSize);
+    Policy::refresh_size_fields(entry);
+    if (!Policy::refresh_domain_roi(entry)) {
+      erase_ids.push_back(node_id);
+      continue;
     }
-    result.snapshot.per_node_dirty_rois[nid].push_back(entry.roi_hp);
+    if (entry.halo_hp == 0) {
+      entry.halo_hp = infer_halo_hp(graph.node(node_id));
+      Policy::refresh_halo_fields(entry);
+    }
+    if (is_monolithic_boundary(graph.node(node_id))) {
+      Policy::promote_monolithic(entry);
+      plan.snapshot.dirty_monolithic_nodes.push_back(
+          {node_id, Policy::kDomain, Policy::snapshot_work_roi(entry), true});
+    } else {
+      enumerate_tiles(plan.snapshot, node_id, Policy::kDomain,
+                      DirtyTileLevel::Micro, Policy::snapshot_work_roi(entry),
+                      Policy::tile_size());
+    }
+    plan.snapshot.per_node_dirty_rois[node_id].push_back(entry.roi_hp);
   }
-  for (int nid : erase_ids)
-    result.entries.erase(nid);
+  for (int node_id : erase_ids)
+    plan.entries.erase(node_id);
+}
 
-  if (result.entries.empty())
+template <typename Policy>
+typename Policy::Plan DirtyRegionPlanner::plan_dirty_domain(
+    GraphModel& graph, int node_id, const cv::Rect& dirty_roi) {
+  if (!graph.has_node(node_id)) {
+    throw GraphError(GraphErrc::NotFound,
+                     std::string("Cannot compute ") + Policy::kIntentLabel +
+                         " update: node " + std::to_string(node_id) +
+                         " not found.");
+  }
+  if (is_rect_empty(dirty_roi)) {
     throw GraphError(GraphErrc::InvalidParameter,
-                     "HP planner produced empty execution set.");
+                     std::string("Cannot compute ") + Policy::kIntentLabel +
+                         " update: dirty ROI is empty.");
+  }
+
+  typename Policy::Plan result;
+  result.execution_order = traversal_.topo_postorder_from(graph, node_id);
+  if (result.execution_order.empty())
+    result.execution_order.push_back(node_id);
+  result.snapshot.graph_generation = ++graph.dirty_generation_counter;
+
+  std::unordered_map<int, cv::Size> hp_size_cache;
+  typename Policy::Entry& target_entry =
+      ensure_plan_entry<Policy>(graph, result, node_id, hp_size_cache);
+  target_entry.roi_hp = Policy::target_hp_roi(dirty_roi, target_entry);
+  if (is_rect_empty(target_entry.roi_hp)) {
+    throw GraphError(GraphErrc::InvalidParameter,
+                     "Dirty ROI does not intersect node output.");
+  }
+  if (!Policy::refresh_domain_roi(target_entry)) {
+    throw GraphError(GraphErrc::InvalidParameter,
+                     Policy::domain_roi_empty_message());
+  }
+
+  propagate_dirty_entries<Policy>(graph, result, hp_size_cache);
+  finalize_dirty_entries<Policy>(graph, result);
+  if (result.entries.empty())
+    throw GraphError(GraphErrc::InvalidParameter, Policy::kEmptyPlanMessage);
   result.snapshot.actual_dirty_rois = result.snapshot.per_node_dirty_rois;
-  populate_dirty_source_metadata(graph, result.snapshot,
-                                 DirtyDomain::HighPrecision, result.entries);
+  populate_dirty_source_metadata(graph, result.snapshot, Policy::kDomain,
+                                 result.entries);
   return result;
+}
+
+HighPrecisionDirtyPlan DirtyRegionPlanner::plan_high_precision(
+    GraphModel& graph, int node_id, const cv::Rect& dirty_roi) {
+  return plan_dirty_domain<HighPrecisionDirtyPolicy>(graph, node_id, dirty_roi);
 }
 
 RealTimeDirtyPlan DirtyRegionPlanner::plan_real_time(
     GraphModel& graph, int node_id, const cv::Rect& dirty_roi) {
-  if (!graph.has_node(node_id)) {
-    throw GraphError(GraphErrc::NotFound, "Cannot compute RT update: node " +
-                                              std::to_string(node_id) +
-                                              " not found.");
-  }
-  if (is_rect_empty(dirty_roi)) {
-    throw GraphError(GraphErrc::InvalidParameter,
-                     "Cannot compute RT update: dirty ROI is empty.");
-  }
-
-  RealTimeDirtyPlan result;
-  result.execution_order = traversal_.topo_postorder_from(graph, node_id);
-  if (result.execution_order.empty())
-    result.execution_order.push_back(node_id);
-  result.snapshot.graph_generation = ++graph.dirty_generation_counter;
-
-  std::unordered_map<int, cv::Size> hp_size_cache;
-  auto ensure_entry = [&](int nid) -> RtPlanEntry& {
-    auto [it, inserted] = result.entries.emplace(nid, RtPlanEntry{});
-    if (inserted) {
-      it->second.hp_size = infer_hp_size(graph, nid, hp_size_cache);
-      it->second.rt_size =
-          scale_down_size(it->second.hp_size, kRtDownscaleFactor);
-      it->second.halo_hp = infer_halo_hp(graph.node(nid));
-      it->second.halo_rt =
-          (it->second.halo_hp + kRtDownscaleFactor - 1) / kRtDownscaleFactor;
-    } else {
-      if (it->second.hp_size.width <= 0 || it->second.hp_size.height <= 0) {
-        it->second.hp_size = infer_hp_size(graph, nid, hp_size_cache);
-        it->second.rt_size =
-            scale_down_size(it->second.hp_size, kRtDownscaleFactor);
-      }
-      if (it->second.halo_hp == 0) {
-        it->second.halo_hp = infer_halo_hp(graph.node(nid));
-        it->second.halo_rt =
-            (it->second.halo_hp + kRtDownscaleFactor - 1) / kRtDownscaleFactor;
-      }
-    }
-    return it->second;
-  };
-
-  RtPlanEntry& target_entry = ensure_entry(node_id);
-  target_entry.roi_hp =
-      clip_rect(align_rect(dirty_roi, kHpAlignment), target_entry.hp_size);
-  if (is_rect_empty(target_entry.roi_hp)) {
-    throw GraphError(GraphErrc::InvalidParameter,
-                     "Dirty ROI does not intersect node output.");
-  }
-  target_entry.roi_rt = clip_rect(
-      align_rect(scale_down_rect(target_entry.roi_hp, kRtDownscaleFactor),
-                 kRtTileSize),
-      target_entry.rt_size);
-  if (is_rect_empty(target_entry.roi_rt)) {
-    throw GraphError(GraphErrc::InvalidParameter,
-                     "Dirty ROI collapses after RT scaling.");
-  }
-
-  std::unordered_map<int, cv::Size> size_cache;
-  for (auto it = result.execution_order.rbegin();
-       it != result.execution_order.rend(); ++it) {
-    const int current_id = *it;
-    auto plan_it = result.entries.find(current_id);
-    if (plan_it == result.entries.end())
-      continue;
-    RtPlanEntry& current_entry = plan_it->second;
-    if (is_rect_empty(current_entry.roi_hp))
-      continue;
-
-    const Node& current_node = graph.node(current_id);
-    current_entry.halo_hp =
-        std::max(current_entry.halo_hp, infer_halo_hp(current_node));
-    current_entry.halo_rt =
-        (current_entry.halo_hp + kRtDownscaleFactor - 1) / kRtDownscaleFactor;
-
-    cv::Rect upstream_roi_hp = roi_propagation_.compute_upstream_roi(
-        current_node, current_entry.roi_hp, graph, size_cache);
-    upstream_roi_hp = clip_rect(upstream_roi_hp, current_entry.hp_size);
-    if (is_rect_empty(upstream_roi_hp))
-      continue;
-
-    for (const auto& edge : graph.upstream_edges(current_id)) {
-      if (edge.kind != GraphTopologyEdgeKind::ImageInput ||
-          edge.from_node_id < 0)
-        continue;
-      RtPlanEntry& parent_entry = ensure_entry(edge.from_node_id);
-      cv::Rect parent_roi = clip_rect(align_rect(upstream_roi_hp, kHpAlignment),
-                                      parent_entry.hp_size);
-      if (is_rect_empty(parent_roi))
-        continue;
-      parent_entry.roi_hp =
-          is_rect_empty(parent_entry.roi_hp)
-              ? parent_roi
-              : clip_rect(merge_rect(parent_entry.roi_hp, parent_roi),
-                          parent_entry.hp_size);
-      result.snapshot.edge_mappings.push_back(
-          {edge.from_node_id, current_id, DirtyDomain::RealTime, parent_roi,
-           current_entry.roi_hp, DirtyEdgeDirection::BackwardDemand});
-    }
-  }
-
-  std::vector<int> erase_ids;
-  for (auto& [nid, entry] : result.entries) {
-    if (entry.hp_size.width <= 0 || entry.hp_size.height <= 0) {
-      erase_ids.push_back(nid);
-      continue;
-    }
-    entry.roi_hp =
-        clip_rect(align_rect(entry.roi_hp, kHpAlignment), entry.hp_size);
-    if (is_rect_empty(entry.roi_hp)) {
-      erase_ids.push_back(nid);
-      continue;
-    }
-    entry.rt_size = scale_down_size(entry.hp_size, kRtDownscaleFactor);
-    entry.roi_rt =
-        clip_rect(align_rect(scale_down_rect(entry.roi_hp, kRtDownscaleFactor),
-                             kRtTileSize),
-                  entry.rt_size);
-    if (is_rect_empty(entry.roi_rt)) {
-      erase_ids.push_back(nid);
-      continue;
-    }
-    if (entry.halo_hp == 0) {
-      entry.halo_hp = infer_halo_hp(graph.node(nid));
-      entry.halo_rt =
-          (entry.halo_hp + kRtDownscaleFactor - 1) / kRtDownscaleFactor;
-    }
-    if (is_monolithic_boundary(graph.node(nid))) {
-      entry.roi_hp = cv::Rect(0, 0, entry.hp_size.width, entry.hp_size.height);
-      entry.roi_rt = cv::Rect(0, 0, entry.rt_size.width, entry.rt_size.height);
-      result.snapshot.dirty_monolithic_nodes.push_back(
-          {nid, DirtyDomain::RealTime, entry.roi_rt, true});
-    } else {
-      enumerate_tiles(result.snapshot, nid, DirtyDomain::RealTime,
-                      DirtyTileLevel::Micro, entry.roi_rt, kRtTileSize);
-    }
-    result.snapshot.per_node_dirty_rois[nid].push_back(entry.roi_hp);
-  }
-  for (int nid : erase_ids)
-    result.entries.erase(nid);
-
-  if (result.entries.empty()) {
-    throw GraphError(GraphErrc::InvalidParameter,
-                     "RT planner produced empty execution set.");
-  }
-  result.snapshot.actual_dirty_rois = result.snapshot.per_node_dirty_rois;
-  populate_dirty_source_metadata(graph, result.snapshot, DirtyDomain::RealTime,
-                                 result.entries);
-  return result;
+  return plan_dirty_domain<RealTimeDirtyPolicy>(graph, node_id, dirty_roi);
 }
 
 DirtyRegionSnapshot DirtyRegionPlanner::begin_dirty_source(
@@ -383,8 +281,7 @@ void DirtyRegionPlanner::populate_dirty_source_metadata(
                   source_node_id) == snapshot.dirty_source_nodes.end()) {
       snapshot.dirty_source_nodes.push_back(source_node_id);
     }
-    DirtySourceNodeState& state =
-        snapshot.dirty_source_state[source_node_id];
+    DirtySourceNodeState& state = snapshot.dirty_source_state[source_node_id];
     state.node_id = source_node_id;
     state.domain = domain;
     state.lifecycle = DirtySourceLifecycleState::Settled;
@@ -434,10 +331,10 @@ void DirtyRegionPlanner::refresh_actual_dirty_regions(
         clipped = clip_rect(align_rect(clipped, kHpMicroTileSize), hp_size);
       } else {
         cv::Size rt_size = scale_down_size(hp_size, kRtDownscaleFactor);
-        clipped = clip_rect(
-            align_rect(scale_down_rect(clipped, kRtDownscaleFactor),
-                       kRtTileSize),
-            rt_size);
+        clipped =
+            clip_rect(align_rect(scale_down_rect(clipped, kRtDownscaleFactor),
+                                 kRtTileSize),
+                      rt_size);
       }
       snapshot.per_node_dirty_rois[node_id].push_back(clipped);
       snapshot.actual_dirty_rois[node_id].push_back(clipped);
@@ -447,9 +344,8 @@ void DirtyRegionPlanner::refresh_actual_dirty_regions(
       } else {
         enumerate_tiles(snapshot, node_id, domain, DirtyTileLevel::Micro,
                         clipped,
-                        domain == DirtyDomain::HighPrecision
-                            ? kHpMicroTileSize
-                            : kRtTileSize);
+                        domain == DirtyDomain::HighPrecision ? kHpMicroTileSize
+                                                             : kRtTileSize);
       }
     }
   }
@@ -460,14 +356,14 @@ void DirtyRegionPlanner::apply_source_lifecycle_event(
     DirtyDomain domain, const cv::Rect* source_roi,
     DirtySourceLifecycleState lifecycle) {
   if (!graph.has_node(node_id)) {
-    throw GraphError(GraphErrc::NotFound, "Dirty source node " +
-                                              std::to_string(node_id) +
-                                              " not found.");
+    throw GraphError(
+        GraphErrc::NotFound,
+        "Dirty source node " + std::to_string(node_id) + " not found.");
   }
   if (source_roi && is_rect_empty(*source_roi)) {
-    throw GraphError(GraphErrc::InvalidParameter,
-                     "Dirty source ROI is empty for node " +
-                         std::to_string(node_id) + ".");
+    throw GraphError(
+        GraphErrc::InvalidParameter,
+        "Dirty source ROI is empty for node " + std::to_string(node_id) + ".");
   }
 
   if (std::find(snapshot.dirty_source_nodes.begin(),

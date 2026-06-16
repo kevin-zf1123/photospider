@@ -4,10 +4,12 @@
 #include <mutex>
 #include <set>
 #include <stdexcept>
+#include <string>
+#include <utility>
 #include <vector>
 
 #include "adapter/buffer_adapter_opencv.hpp"
-#include "graph_model.hpp"
+#include "graph_model.hpp"  // NOLINT(build/include_subdir)
 #include "kernel/graph_runtime.hpp"
 #include "kernel/interaction.hpp"
 #include "kernel/services/compute-service/compute_cache_policy.hpp"
@@ -109,7 +111,14 @@ compute::ComputePlan dirty_snapshot_pruned_plan(
 }  // namespace
 
 TEST(ComputeGeometrySplit, CoversClippingAlignmentScalingMergingAndHalo) {
-  using namespace compute;
+  using compute::align_rect;
+  using compute::calculate_halo;
+  using compute::clip_rect;
+  using compute::is_rect_empty;
+  using compute::merge_rect;
+  using compute::scale_down_rect;
+  using compute::scale_down_size;
+  using compute::scale_up_rect;
 
   EXPECT_TRUE(is_rect_empty(cv::Rect(0, 0, 0, 5)));
   EXPECT_EQ(clip_rect(cv::Rect(-5, 2, 12, 10), cv::Size(10, 8)),
@@ -315,6 +324,70 @@ TEST(DirtyRegionPlannerSplit,
             std::string::npos);
 
   EXPECT_THROW(planner.plan_real_time(graph, 42, cv::Rect()), GraphError);
+}
+
+TEST(DirtyRegionPlannerSplit, PreservesDomainSpecificHpAndRtProjection) {
+  register_split_ops();
+  GraphModel graph("cache/split-dirty-domain-policy");
+  Node source = make_node(10, "split_plan", "tile");
+  source.parameters["width"] = 128;
+  source.parameters["height"] = 128;
+  Node target = make_node(20, "split_plan", "tile");
+  target.image_inputs.push_back({10, "image"});
+  graph.add_node(source);
+  graph.add_node(target);
+  graph.validate_topology();
+
+  GraphTraversalService traversal;
+  RoiPropagationService propagation;
+  compute::DirtyRegionPlanner planner(traversal, propagation);
+
+  auto hp_plan = planner.plan_high_precision(graph, 20, cv::Rect(5, 5, 10, 10));
+  ASSERT_EQ(hp_plan.entries.size(), 2u);
+  ASSERT_TRUE(hp_plan.entries.count(10));
+  ASSERT_TRUE(hp_plan.entries.count(20));
+  EXPECT_EQ(hp_plan.entries.at(20).roi_hp, cv::Rect(0, 0, 64, 64));
+  EXPECT_EQ(hp_plan.entries.at(10).roi_hp, cv::Rect(0, 0, 64, 64));
+  ASSERT_EQ(hp_plan.snapshot.edge_mappings.size(), 1u);
+  EXPECT_EQ(hp_plan.snapshot.edge_mappings.front().domain,
+            compute::DirtyDomain::HighPrecision);
+  EXPECT_EQ(hp_plan.snapshot.edge_mappings.front().from_roi,
+            cv::Rect(0, 0, 64, 64));
+  EXPECT_EQ(hp_plan.snapshot.edge_mappings.front().to_roi,
+            cv::Rect(0, 0, 64, 64));
+  ASSERT_EQ(hp_plan.snapshot.dirty_tiles.size(), 2u);
+  for (const auto& tile : hp_plan.snapshot.dirty_tiles) {
+    EXPECT_EQ(tile.domain, compute::DirtyDomain::HighPrecision);
+    EXPECT_EQ(tile.tile_size, compute::kHpMicroTileSize);
+    EXPECT_EQ(tile.pixel_roi, cv::Rect(0, 0, 64, 64));
+  }
+
+  auto rt_plan = planner.plan_real_time(graph, 20, cv::Rect(5, 5, 10, 10));
+  ASSERT_EQ(rt_plan.entries.size(), 2u);
+  ASSERT_TRUE(rt_plan.entries.count(10));
+  ASSERT_TRUE(rt_plan.entries.count(20));
+  EXPECT_EQ(rt_plan.entries.at(20).hp_size, cv::Size(128, 128));
+  EXPECT_EQ(rt_plan.entries.at(20).rt_size, cv::Size(32, 32));
+  EXPECT_EQ(rt_plan.entries.at(20).roi_hp, cv::Rect(0, 0, 64, 64));
+  EXPECT_EQ(rt_plan.entries.at(20).roi_rt, cv::Rect(0, 0, 16, 16));
+  EXPECT_EQ(rt_plan.entries.at(10).roi_hp, cv::Rect(0, 0, 64, 64));
+  EXPECT_EQ(rt_plan.entries.at(10).roi_rt, cv::Rect(0, 0, 16, 16));
+  ASSERT_EQ(rt_plan.snapshot.edge_mappings.size(), 1u);
+  EXPECT_EQ(rt_plan.snapshot.edge_mappings.front().domain,
+            compute::DirtyDomain::RealTime);
+  EXPECT_EQ(rt_plan.snapshot.edge_mappings.front().from_roi,
+            cv::Rect(0, 0, 64, 64));
+  EXPECT_EQ(rt_plan.snapshot.edge_mappings.front().to_roi,
+            cv::Rect(0, 0, 64, 64));
+  ASSERT_EQ(rt_plan.snapshot.dirty_tiles.size(), 2u);
+  for (const auto& tile : rt_plan.snapshot.dirty_tiles) {
+    EXPECT_EQ(tile.domain, compute::DirtyDomain::RealTime);
+    EXPECT_EQ(tile.tile_size, compute::kRtTileSize);
+    EXPECT_EQ(tile.pixel_roi, cv::Rect(0, 0, 16, 16));
+  }
+  ASSERT_TRUE(rt_plan.snapshot.per_node_dirty_rois.count(20));
+  EXPECT_EQ(rt_plan.snapshot.per_node_dirty_rois.at(20).front(),
+            cv::Rect(0, 0, 64, 64));
 }
 
 TEST(DirtyRegionPlannerSplit,
