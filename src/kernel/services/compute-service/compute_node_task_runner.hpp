@@ -1,5 +1,7 @@
 #pragma once
 
+#include <atomic>
+#include <memory>
 #include <mutex>
 #include <optional>
 #include <string>
@@ -10,6 +12,7 @@
 #include "graph_model.hpp"  // NOLINT(build/include_subdir)
 #include "kernel/scheduler/scheduler_task_runtime.hpp"
 #include "kernel/services/compute-service/node_executor.hpp"
+#include "kernel/services/compute-service/task_graph_planning.hpp"
 
 namespace ps {
 class GraphCacheService;
@@ -61,6 +64,9 @@ struct NodeTaskRunnerContext {
   /** @brief Operation variants resolved once for the planned HP intent. */
   const std::vector<std::optional<OpRegistry::OpVariant>>& resolved_ops;
 
+  /** @brief Immutable task graph whose PlannedTask entries workers execute. */
+  const ComputeTaskGraph& task_graph;
+
   /** @brief Whether worker tasks must ignore existing HP cache state. */
   bool force_recache = false;
 
@@ -111,6 +117,16 @@ class NodeTaskRunner {
    */
   void run_node(int node_idx);
 
+  /**
+   * @brief Runs one planned task by task id.
+   *
+   * @param task_id Dense id into task_graph.tasks.
+   * @throws GraphError with compute-stage context for operation failures.
+   * @note Tile tasks execute only their PlannedTask::output_roi. Node and
+   * monolithic tasks delegate to run_node().
+   */
+  void run_task(int task_id);
+
  private:
   /** @brief Returns whether disk cache reads are allowed for this dispatch. */
   bool allow_disk_cache() const;
@@ -124,6 +140,20 @@ class NodeTaskRunner {
 
   /** @brief Computes or cache-loads one planned node. */
   void compute_node(int node_idx, int node_id);
+
+  /** @brief Computes one tile task into the node's temporary output buffer. */
+  void compute_tile_task(const PlannedTask& task);
+
+  /** @brief Ensures a tile output buffer exists for the planned node. */
+  ImageBuffer& ensure_tile_output_buffer(
+      int node_idx, const Node& target_node,
+      const std::vector<const NodeOutput*>& image_inputs);
+
+  /** @brief Finalizes per-node metadata after the last tile task completes. */
+  void finalize_tiled_node_if_complete(
+      int node_idx, const Node& target_node,
+      const std::vector<const NodeOutput*>& image_inputs,
+      BenchmarkEvent& current_event);
 
   /** @brief Attempts to satisfy a node from disk cache into its temp slot. */
   void try_load_disk_cache(const Node& target_node, int node_idx);
@@ -183,6 +213,24 @@ class NodeTaskRunner {
   /** @brief Resolved high-precision operations aligned with execution_order_.
    */
   const std::vector<std::optional<OpRegistry::OpVariant>>& resolved_ops_;
+
+  /** @brief Immutable task graph containing task ids and ROIs. */
+  const ComputeTaskGraph& task_graph_;
+
+  /** @brief Full output size inferred from all tile tasks for each node. */
+  std::vector<cv::Size> planned_output_sizes_;
+
+  /** @brief Number of tile tasks planned per node index. */
+  std::vector<int> tile_task_counts_;
+
+  /** @brief Completed tile count per node index. */
+  std::vector<std::atomic<int>> completed_tile_counts_;
+
+  /** @brief Marks nodes satisfied by existing memory or disk cache. */
+  std::vector<std::atomic<bool>> node_precomputed_;
+
+  /** @brief Mutexes guarding per-node temp output allocation. */
+  std::vector<std::unique_ptr<std::mutex>> output_mutexes_;
 
   /** @brief Whether in-memory and disk cache should be bypassed. */
   bool force_recache_;

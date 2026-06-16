@@ -1,6 +1,5 @@
 #include "kernel/services/compute-service/compute_task_dependency_state.hpp"
 
-#include <unordered_set>
 #include <vector>
 
 namespace ps::compute {
@@ -9,23 +8,41 @@ TaskDependencyState::TaskDependencyState(
     const std::vector<int>& execution_order,
     const ComputeTaskGraph& task_graph) {
   build_dense_index(execution_order);
-  build_dependency_state(execution_order, task_graph);
+  build_dependency_state(task_graph, nullptr);
 }
 
-bool TaskDependencyState::ready_for_initial_submit(int node_idx) const {
-  return dependency_counters_.at(node_idx).load(std::memory_order_acquire) == 0;
+TaskDependencyState::TaskDependencyState(
+    const std::vector<int>& execution_order, const ComputeTaskGraph& task_graph,
+    const std::vector<int>& active_task_ids) {
+  build_dense_index(execution_order);
+  std::unordered_set<int> active(active_task_ids.begin(),
+                                 active_task_ids.end());
+  build_dependency_state(task_graph, &active);
+}
+
+bool TaskDependencyState::ready_for_initial_submit(int task_id) const {
+  return active_tasks_.at(task_id) &&
+         dependency_counters_.at(task_id).load(std::memory_order_acquire) == 0;
 }
 
 void TaskDependencyState::release_dependents(
-    int current_node_idx,
-    const std::function<void(int dependent_idx)>& submit_ready) {
-  for (int dependent_idx : dependents_map_.at(current_node_idx)) {
-    const int previous = dependency_counters_.at(dependent_idx)
+    int current_task_id,
+    const std::function<void(int dependent_task_id)>& submit_ready) {
+  for (int dependent_task_id : release_dependents(current_task_id)) {
+    submit_ready(dependent_task_id);
+  }
+}
+
+std::vector<int> TaskDependencyState::release_dependents(int current_task_id) {
+  std::vector<int> ready;
+  for (int dependent_task_id : dependents_map_.at(current_task_id)) {
+    const int previous = dependency_counters_.at(dependent_task_id)
                              .fetch_sub(1, std::memory_order_acq_rel);
     if (previous == 1) {
-      submit_ready(dependent_idx);
+      ready.push_back(dependent_task_id);
     }
   }
+  return ready;
 }
 
 void TaskDependencyState::build_dense_index(
@@ -37,26 +54,42 @@ void TaskDependencyState::build_dense_index(
 }
 
 void TaskDependencyState::build_dependency_state(
-    const std::vector<int>& execution_order,
-    const ComputeTaskGraph& task_graph) {
-  const size_t node_count = execution_order.size();
-  dependency_counters_ = std::vector<std::atomic<int>>(node_count);
-  dependents_map_.assign(node_count, {});
+    const ComputeTaskGraph& task_graph,
+    const std::unordered_set<int>* active_task_ids) {
+  const size_t task_count = task_graph.tasks.size();
+  dependency_counters_ = std::vector<std::atomic<int>>(task_count);
+  dependents_map_.assign(task_count, {});
+  active_tasks_.assign(task_count, false);
   for (auto& counter : dependency_counters_) {
     counter.store(0, std::memory_order_relaxed);
   }
 
-  std::unordered_set<int> execution_set(execution_order.begin(),
-                                        execution_order.end());
-  for (const auto& dependency : task_graph.dependencies) {
-    if (!execution_set.count(dependency.from_node_id) ||
-        !execution_set.count(dependency.to_node_id)) {
+  auto is_active = [&](int task_id) {
+    if (task_id < 0 || task_id >= static_cast<int>(task_count)) {
+      return false;
+    }
+    return active_task_ids == nullptr || active_task_ids->count(task_id) > 0;
+  };
+
+  for (const auto& task : task_graph.tasks) {
+    if (task.task_id < 0 || task.task_id >= static_cast<int>(task_count)) {
       continue;
     }
-    const int dep_idx = id_to_idx_.at(dependency.from_node_id);
-    const int dependent_idx = id_to_idx_.at(dependency.to_node_id);
-    dependents_map_[dep_idx].push_back(dependent_idx);
-    dependency_counters_[dependent_idx].fetch_add(1, std::memory_order_relaxed);
+    active_tasks_[task.task_id] = is_active(task.task_id);
+  }
+
+  for (const auto& task : task_graph.tasks) {
+    if (!is_active(task.task_id)) {
+      continue;
+    }
+    for (int dependency_task_id : task.dependency_task_ids) {
+      if (!is_active(dependency_task_id)) {
+        continue;
+      }
+      dependents_map_.at(dependency_task_id).push_back(task.task_id);
+      dependency_counters_.at(task.task_id)
+          .fetch_add(1, std::memory_order_relaxed);
+    }
   }
 }
 

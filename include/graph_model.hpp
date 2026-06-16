@@ -2,6 +2,7 @@
 
 #include <atomic>
 #include <functional>
+#include <memory>
 #include <mutex>
 #include <optional>
 #include <string>
@@ -73,6 +74,8 @@ class GraphModel {
   std::unordered_map<int, uint64_t> dirty_source_rt_commit_generation;
   std::optional<compute::ComputePlan> last_compute_plan;
   std::vector<compute::ComputePlan> recent_compute_plans;
+  std::optional<compute::ComputePlanSummary> last_compute_plan_summary;
+  std::vector<compute::ComputePlanSummary> recent_compute_plan_summaries;
 
   struct DriveClearResult {
     uintmax_t removed_entries = 0;
@@ -187,6 +190,42 @@ class GraphModel {
   const std::vector<GraphTopologyEdge>& upstream_edges(int node_id) const;
   const std::vector<GraphTopologyEdge>& downstream_edges(int node_id) const;
 
+  /**
+   * @brief Returns the topology generation for task graph cache keys.
+   *
+   * @return Monotonic generation incremented when graph topology is rebuilt.
+   * @throws Nothing.
+   * @note Runtime cache, ROI, and dirty state changes do not affect this
+   * generation; FullTaskGraph expansion intentionally depends only on topology
+   * and task-shape configuration.
+   */
+  uint64_t topology_generation() const;
+
+  /**
+   * @brief Looks up an immutable cached FullTaskGraph by key.
+   *
+   * @param key Cache key built from topology generation, intent, and task shape
+   * config.
+   * @return Shared immutable graph when present, otherwise nullptr.
+   * @throws Nothing directly.
+   * @note The graph owns no runtime dependency state and may be shared by HP
+   * and RT sibling planning only when the key intent matches.
+   */
+  std::shared_ptr<const compute::FullTaskGraph> cached_full_task_graph(
+      const std::string& key) const;
+
+  /**
+   * @brief Stores an immutable FullTaskGraph cache entry.
+   *
+   * @param key Cache key built by the compute planning layer.
+   * @param graph Immutable full graph to share across request pruning.
+   * @throws std::bad_alloc if cache storage grows.
+   * @note Inserting a null graph is ignored.
+   */
+  void remember_full_task_graph(
+      const std::string& key,
+      std::shared_ptr<const compute::FullTaskGraph> graph);
+
   void set_skip_save_cache(bool v);
   bool skip_save_cache() const;
 
@@ -210,6 +249,9 @@ class GraphModel {
   GraphTopologyIndex topology_;
   std::mutex graph_mutex_;
   mutable std::mutex timing_mutex_;
+  uint64_t topology_generation_ = 0;
+  std::unordered_map<std::string, std::shared_ptr<const compute::FullTaskGraph>>
+      full_task_graph_cache_;
   bool quiet_ = true;
   std::atomic<bool> skip_save_cache_{false};
 };

@@ -23,7 +23,8 @@ HighPrecisionDirtyNodeExecutor::HighPrecisionDirtyNodeExecutor(
       snapshot_(context.snapshot),
       dirty_generation_(context.dirty_generation),
       downsample_requests_(downsample_sink.requests),
-      downsample_requests_mutex_(downsample_sink.mutex) {
+      downsample_requests_mutex_(downsample_sink.mutex),
+      node_mutexes_(context.node_mutexes) {
 }  // NOLINT(whitespace/indent_namespace)
 
 void HighPrecisionDirtyNodeExecutor::execute(Node& node,
@@ -37,10 +38,50 @@ void HighPrecisionDirtyNodeExecutor::execute(Node& node,
   }
 
   log_dirty_node_execution(runtime_, node.id, dirty_source);
-  ResolvedNodeInputs resolved_inputs = resolve_inputs(node);
-  execute_operation(node, entry, resolved_inputs.image_inputs);
-  commit_node(node, entry, dirty_source);
-  queue_downsample_request(node, entry);
+  Node node_for_exec;
+  ResolvedNodeInputs resolved_inputs;
+  {
+    std::lock_guard<std::mutex> lock(node_mutex(node.id));
+    node_for_exec = node;
+    resolved_inputs = resolve_inputs(node_for_exec);
+  }
+
+  const auto* impls = OpRegistry::instance().get_implementations(
+      node_for_exec.type, node_for_exec.subtype);
+  const TileOpFunc* hp_tile_fn =
+      (impls && impls->tiled_hp) ? &*impls->tiled_hp : nullptr;
+  const MonolithicOpFunc* hp_mono_fn =
+      (impls && impls->monolithic_hp) ? &*impls->monolithic_hp : nullptr;
+
+  if (hp_tile_fn) {
+    ImageBuffer* hp_buffer = nullptr;
+    {
+      std::lock_guard<std::mutex> lock(node_mutex(node.id));
+      hp_buffer = &ensure_hp_buffer(node, entry, resolved_inputs.image_inputs);
+    }
+    execute_tiled(node_for_exec, *hp_tile_fn, entry,
+                  resolved_inputs.image_inputs, *hp_buffer);
+  } else if (hp_mono_fn) {
+    NodeOutput result = (*hp_mono_fn)(node_for_exec,
+                                      resolved_inputs.image_inputs);
+    if (!result.image_buffer.data && result.data.empty()) {
+      throw GraphError(GraphErrc::ComputeError,
+                       "Monolithic HP operator produced no output for " +
+                           node_for_exec.type + ":" + node_for_exec.subtype);
+    }
+    std::lock_guard<std::mutex> lock(node_mutex(node.id));
+    node.cached_output_high_precision = std::move(result);
+  } else {
+    throw GraphError(GraphErrc::NoOperation,
+                     "No suitable HP operator (tiled or monolithic) for " +
+                         node_for_exec.type + ":" + node_for_exec.subtype);
+  }
+
+  {
+    std::lock_guard<std::mutex> lock(node_mutex(node.id));
+    commit_node(node, entry, dirty_source);
+    queue_downsample_request(node, entry);
+  }
 }
 
 ResolvedNodeInputs HighPrecisionDirtyNodeExecutor::resolve_inputs(
@@ -68,7 +109,8 @@ void HighPrecisionDirtyNodeExecutor::execute_operation(
       (impls && impls->monolithic_hp) ? &*impls->monolithic_hp : nullptr;
 
   if (hp_tile_fn) {
-    execute_tiled(node, *hp_tile_fn, entry, image_inputs_ready);
+    ImageBuffer& hp_buffer = ensure_hp_buffer(node, entry, image_inputs_ready);
+    execute_tiled(node, *hp_tile_fn, entry, image_inputs_ready, hp_buffer);
     return;
   }
   if (hp_mono_fn) {
@@ -102,8 +144,8 @@ ImageBuffer& HighPrecisionDirtyNodeExecutor::ensure_hp_buffer(
 
 void HighPrecisionDirtyNodeExecutor::execute_tiled(
     Node& node, const TileOpFunc& tile_fn, const HpPlanEntry& entry,
-    const std::vector<const NodeOutput*>& image_inputs_ready) const {
-  ImageBuffer& hp_buffer = ensure_hp_buffer(node, entry, image_inputs_ready);
+    const std::vector<const NodeOutput*>& image_inputs_ready,
+    ImageBuffer& hp_buffer) const {
   TiledExecutionConfig config;
   config.tile_size = kHpMicroTileSize;
   config.output_roi = entry.roi_hp;
@@ -164,13 +206,18 @@ bool HighPrecisionDirtyNodeExecutor::should_skip_node(const Node& node,
                              dirty_generation_);
 }
 
+std::mutex& HighPrecisionDirtyNodeExecutor::node_mutex(int node_id) const {
+  return *node_mutexes_.at(node_id);
+}
+
 RealTimeDirtyNodeExecutor::RealTimeDirtyNodeExecutor(
     DirtyNodeExecutionContext context)
     : graph_(context.graph),
       runtime_(context.runtime),
       events_(context.events),
       snapshot_(context.snapshot),
-      dirty_generation_(context.dirty_generation) {
+      dirty_generation_(context.dirty_generation),
+      node_mutexes_(context.node_mutexes) {
 }  // NOLINT(whitespace/indent_namespace)
 
 void RealTimeDirtyNodeExecutor::execute(Node& node, const RtPlanEntry& entry) {
@@ -183,18 +230,44 @@ void RealTimeDirtyNodeExecutor::execute(Node& node, const RtPlanEntry& entry) {
   }
 
   log_dirty_node_execution(runtime_, node.id, dirty_source);
-  ResolvedNodeInputs resolved_inputs = resolve_inputs(node);
-  std::optional<OpRegistry::OpVariant> op_variant = resolve_operation(node);
+  Node node_for_exec;
+  ResolvedNodeInputs resolved_inputs;
+  {
+    std::lock_guard<std::mutex> lock(node_mutex(node.id));
+    node_for_exec = node;
+    resolved_inputs = resolve_inputs(node_for_exec);
+  }
+  std::optional<OpRegistry::OpVariant> op_variant =
+      resolve_operation(node_for_exec);
   if (!op_variant) {
     throw GraphError(
         GraphErrc::NoOperation,
-        "No operator registered for node " + node.type + ":" + node.subtype);
+        "No operator registered for node " + node_for_exec.type + ":" +
+            node_for_exec.subtype);
   }
-  ImageBuffer& rt_buffer =
-      ensure_rt_buffer(node, entry, resolved_inputs.image_inputs);
-  execute_operation(node, entry, resolved_inputs.image_inputs, rt_buffer,
-                    *op_variant);
-  commit_node(node, entry, dirty_source);
+  if (std::holds_alternative<MonolithicOpFunc>(*op_variant)) {
+    NodeOutput result =
+        std::get<MonolithicOpFunc>(*op_variant)(node_for_exec,
+                                                resolved_inputs.image_inputs);
+    std::lock_guard<std::mutex> lock(node_mutex(node.id));
+    ImageBuffer& rt_buffer =
+        ensure_rt_buffer(node, entry, resolved_inputs.image_inputs);
+    copy_monolithic_image_roi(result, entry, rt_buffer);
+    node.cached_output_real_time->data = result.data;
+  } else {
+    ImageBuffer* rt_buffer = nullptr;
+    {
+      std::lock_guard<std::mutex> lock(node_mutex(node.id));
+      rt_buffer = &ensure_rt_buffer(node, entry, resolved_inputs.image_inputs);
+    }
+    execute_tiled(node_for_exec, std::get<TileOpFunc>(*op_variant), entry,
+                  resolved_inputs.image_inputs, *rt_buffer);
+  }
+
+  {
+    std::lock_guard<std::mutex> lock(node_mutex(node.id));
+    commit_node(node, entry, dirty_source);
+  }
 }
 
 ResolvedNodeInputs RealTimeDirtyNodeExecutor::resolve_inputs(Node& node) const {
@@ -350,6 +423,10 @@ bool RealTimeDirtyNodeExecutor::should_skip_node(const Node& node,
                              runtime_, node.id,
                              graph_.dirty_source_rt_commit_generation[node.id],
                              dirty_generation_);
+}
+
+std::mutex& RealTimeDirtyNodeExecutor::node_mutex(int node_id) const {
+  return *node_mutexes_.at(node_id);
 }
 
 }  // namespace ps::compute

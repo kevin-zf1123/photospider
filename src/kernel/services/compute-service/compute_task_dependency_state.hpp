@@ -3,6 +3,7 @@
 #include <atomic>
 #include <functional>
 #include <unordered_map>
+#include <unordered_set>
 #include <vector>
 
 #include "kernel/services/compute-service/task_graph_planning.hpp"
@@ -12,7 +13,7 @@ namespace ps::compute {
 /**
  * @brief Dense runtime dependency state for a pruned ComputeTaskGraph.
  *
- * TaskDependencyState converts node-id based plan dependencies into compact
+ * TaskDependencyState converts PlannedTask dependency_task_ids into compact
  * scheduler counters and dependent adjacency lists. It owns only per-dispatch
  * runtime bookkeeping; the immutable ComputeTaskGraph remains owned by the
  * submission plan.
@@ -24,16 +25,29 @@ namespace ps::compute {
 class TaskDependencyState {
  public:
   /**
-   * @brief Builds dense dependency counters from planned nodes and task edges.
+   * @brief Builds dense dependency counters from planned tasks.
    *
    * @param execution_order Dense planned node ids produced by the pruned plan.
-   * @param task_graph Task graph containing node-level dependency metadata.
+   * @param task_graph Task graph containing PlannedTask dependency metadata.
    * @throws std::bad_alloc if counter, map, or adjacency storage cannot grow.
-   * @note Dependencies whose endpoints are not in execution_order are ignored
-   * because they were pruned out of this dispatch.
+   * @note All tasks in task_graph are active for this constructor.
    */
   TaskDependencyState(const std::vector<int>& execution_order,
                       const ComputeTaskGraph& task_graph);
+
+  /**
+   * @brief Builds dependency state for an explicit active task subset.
+   *
+   * @param execution_order Dense planned node ids produced by the pruned plan.
+   * @param task_graph Task graph containing PlannedTask dependency metadata.
+   * @param active_task_ids Task ids that participate in this runtime view.
+   * @throws std::bad_alloc if counter, map, or adjacency storage cannot grow.
+   * @note Dependencies outside active_task_ids are treated as already
+   * satisfied, which is how dirty source completion releases downstream work.
+   */
+  TaskDependencyState(const std::vector<int>& execution_order,
+                      const ComputeTaskGraph& task_graph,
+                      const std::vector<int>& active_task_ids);
 
   /**
    * @brief Returns the node id to dense execution-index map.
@@ -45,21 +59,21 @@ class TaskDependencyState {
   const std::unordered_map<int, int>& id_to_idx() const { return id_to_idx_; }
 
   /**
-   * @brief Checks whether a dense node can be submitted as initial work.
+   * @brief Checks whether a task can be submitted as initial work.
    *
-   * @param node_idx Dense execution index being considered.
-   * @return true when the node has no remaining dependencies.
-   * @throws std::out_of_range if node_idx is not a valid dense index.
+   * @param task_id Dense PlannedTask id being considered.
+   * @return true when the task is active and has no remaining dependencies.
+   * @throws std::out_of_range if task_id is not a valid dense task id.
    * @note Uses acquire ordering so initial submission observes dependency
    * counter initialization.
    */
-  bool ready_for_initial_submit(int node_idx) const;
+  bool ready_for_initial_submit(int task_id) const;
 
   /**
-   * @brief Releases dependent nodes after one upstream node completes.
+   * @brief Releases dependent tasks after one upstream task completes.
    *
-   * @param current_node_idx Dense execution index of the completed node.
-   * @param submit_ready Callback invoked with each dependent dense index whose
+   * @param current_task_id Dense id of the completed PlannedTask.
+   * @param submit_ready Callback invoked with each dependent task id whose
    * counter reaches zero.
    * @throws std::out_of_range for inconsistent dense indexes, or exceptions
    * propagated by submit_ready.
@@ -67,25 +81,39 @@ class TaskDependencyState {
    * invoking this method.
    */
   void release_dependents(
-      int current_node_idx,
-      const std::function<void(int dependent_idx)>& submit_ready);
+      int current_task_id,
+      const std::function<void(int dependent_task_id)>& submit_ready);
+
+  /**
+   * @brief Releases dependent tasks and returns ready ids as a batch.
+   *
+   * @param current_task_id Dense id of the completed PlannedTask.
+   * @return Dependent task ids whose counters reached zero.
+   * @throws std::out_of_range if current_task_id is invalid.
+   * @note Batch release lets dispatchers submit ready handles with one queue
+   * operation instead of one lock/notify per dependent tile.
+   */
+  std::vector<int> release_dependents(int current_task_id);
 
  private:
   /** @brief Builds the node id to dense execution index lookup. */
   void build_dense_index(const std::vector<int>& execution_order);
 
   /** @brief Builds counters and dependent adjacency from task dependencies. */
-  void build_dependency_state(const std::vector<int>& execution_order,
-                              const ComputeTaskGraph& task_graph);
+  void build_dependency_state(const ComputeTaskGraph& task_graph,
+                              const std::unordered_set<int>* active_task_ids);
 
   /** @brief Node id to dense execution index lookup. */
   std::unordered_map<int, int> id_to_idx_;
 
-  /** @brief Remaining dependency count for each dense planned node. */
+  /** @brief Remaining dependency count for each dense planned task. */
   std::vector<std::atomic<int>> dependency_counters_;
 
-  /** @brief Dense dependent node indexes keyed by upstream dense index. */
+  /** @brief Dependent task ids keyed by upstream task id. */
   std::vector<std::vector<int>> dependents_map_;
+
+  /** @brief Active task flags aligned with dependency_counters_. */
+  std::vector<bool> active_tasks_;
 };
 
 }  // namespace ps::compute

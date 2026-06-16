@@ -219,9 +219,45 @@ void GpuPipelineScheduler::submit_initial_tasks(std::vector<Task>&& tasks,
   }
 }
 
+void GpuPipelineScheduler::submit_initial_task_handles(
+    std::vector<TaskHandle>&& handles, int total_task_count,
+    TaskPriority priority) {
+  has_exception_.store(false, std::memory_order_relaxed);
+  first_exception_ = nullptr;
+
+  uint64_t epoch = begin_new_epoch();
+  tasks_to_complete_.store(total_task_count, std::memory_order_relaxed);
+
+  if (total_task_count == 0) {
+    std::lock_guard<std::mutex> lk(completion_mutex_);
+    cv_completion_.notify_one();
+    return;
+  }
+
+  if (handles.empty()) {
+    tasks_to_complete_.store(0, std::memory_order_relaxed);
+    std::lock_guard<std::mutex> lk(completion_mutex_);
+    cv_completion_.notify_one();
+    return;
+  }
+
+  submit_ready_task_handles_any_thread(std::move(handles), priority, epoch);
+}
+
 void GpuPipelineScheduler::submit_ready_task_from_worker(
     Task&& task, TaskPriority priority) {
   submit_ready_task_any_thread(std::move(task), priority, tls_active_epoch_);
+}
+
+void GpuPipelineScheduler::submit_ready_task_handle_from_worker(
+    TaskHandle handle, TaskPriority priority) {
+  submit_ready_task_handle_any_thread(handle, priority, tls_active_epoch_);
+}
+
+void GpuPipelineScheduler::submit_ready_task_handles_from_worker(
+    std::vector<TaskHandle>&& handles, TaskPriority priority) {
+  submit_ready_task_handles_any_thread(std::move(handles), priority,
+                                       tls_active_epoch_);
 }
 
 void GpuPipelineScheduler::submit_ready_task_any_thread(
@@ -241,6 +277,93 @@ void GpuPipelineScheduler::submit_ready_task_any_thread(
     submit_gpu_task(std::move(task), resolved_epoch);
   } else {
     submit_hp_task(std::move(task), resolved_epoch);
+  }
+}
+
+void GpuPipelineScheduler::submit_ready_task_handle_any_thread(
+    TaskHandle handle, TaskPriority priority, std::optional<uint64_t> epoch) {
+  if (!handle) {
+    return;
+  }
+  uint64_t resolved_epoch = epoch.value_or(active_epoch());
+  if (should_cancel_epoch(resolved_epoch)) {
+    return;
+  }
+  if (priority == TaskPriority::High) {
+    submit_rt_task_handle(handle, resolved_epoch);
+    return;
+  }
+  if (can_dispatch_hp_to_gpu()) {
+    submit_gpu_task_handle(handle, resolved_epoch);
+  } else {
+    submit_hp_task_handle(handle, resolved_epoch);
+  }
+}
+
+void GpuPipelineScheduler::submit_ready_task_handles_any_thread(
+    std::vector<TaskHandle>&& handles, TaskPriority priority,
+    std::optional<uint64_t> epoch) {
+  if (handles.empty()) {
+    return;
+  }
+  uint64_t resolved_epoch = epoch.value_or(active_epoch());
+  if (should_cancel_epoch(resolved_epoch)) {
+    return;
+  }
+
+  if (priority == TaskPriority::High) {
+    int submitted = 0;
+    {
+      std::lock_guard<std::mutex> lock(rt_queue_mutex_);
+      for (TaskHandle handle : handles) {
+        if (!handle)
+          continue;
+        rt_queue_.push(ScheduledTask(resolved_epoch, handle,
+                                     ComputeIntent::RealTimeUpdate));
+        rt_ready_count_.fetch_add(1, std::memory_order_relaxed);
+        ++submitted;
+      }
+    }
+    if (submitted > 0) {
+      rt_cv_.notify_all();
+    }
+    return;
+  }
+
+  const bool dispatch_gpu = can_dispatch_hp_to_gpu();
+  int submitted = 0;
+  if (dispatch_gpu) {
+    {
+      std::lock_guard<std::mutex> lock(gpu_queue_mutex_);
+      for (TaskHandle handle : handles) {
+        if (!handle)
+          continue;
+        gpu_queue_.push(ScheduledTask(resolved_epoch, handle,
+                                      ComputeIntent::GlobalHighPrecision));
+        gpu_ready_count_.fetch_add(1, std::memory_order_relaxed);
+        ++submitted;
+      }
+    }
+    if (submitted > 0) {
+      gpu_cv_.notify_all();
+    }
+    return;
+  }
+
+  {
+    std::lock_guard<std::mutex> lock(hp_cpu_queue_mutex_);
+    for (TaskHandle handle : handles) {
+      if (!handle)
+        continue;
+      hp_cpu_queue_.push(ScheduledTask(resolved_epoch, handle,
+                                       ComputeIntent::GlobalHighPrecision));
+      hp_cpu_ready_count_.fetch_add(1, std::memory_order_relaxed);
+      ++submitted;
+    }
+  }
+  if (submitted > 0) {
+    hp_cpu_cv_.notify_all();
+    rt_cv_.notify_all();
   }
 }
 
@@ -298,7 +421,6 @@ uint64_t GpuPipelineScheduler::active_epoch() const {
 uint64_t GpuPipelineScheduler::begin_new_epoch() {
   uint64_t next = epoch_counter_.fetch_add(1, std::memory_order_acq_rel) + 1;
   active_epoch_.store(next, std::memory_order_release);
-  cancel_stale_enqueued_tasks(next);
   return next;
 }
 
@@ -464,7 +586,7 @@ void GpuPipelineScheduler::cpu_run_loop(int thread_id) {
       }
 
       try {
-        if (scheduled.task) {
+        if (scheduled) {
           struct EpochScope {
             uint64_t* slot;
             uint64_t prev;
@@ -480,7 +602,7 @@ void GpuPipelineScheduler::cpu_run_loop(int thread_id) {
             ~RuntimeLogScope() { GraphRuntime::clear_scheduler_log_context(); }
           } runtime_log_scope(thread_id, scheduled.epoch);
 
-          scheduled.task();
+          scheduled.run();
 
           // 更新统计
           if (scheduled.intent == ComputeIntent::RealTimeUpdate) {
@@ -551,7 +673,7 @@ void GpuPipelineScheduler::gpu_run_loop(int thread_id) {
       }
 
       try {
-        if (scheduled.task) {
+        if (scheduled) {
           struct EpochScope {
             uint64_t* slot;
             uint64_t prev;
@@ -567,7 +689,7 @@ void GpuPipelineScheduler::gpu_run_loop(int thread_id) {
             ~RuntimeLogScope() { GraphRuntime::clear_scheduler_log_context(); }
           } runtime_log_scope(thread_id, scheduled.epoch);
 
-          scheduled.task();
+          scheduled.run();
           gpu_tasks_executed_.fetch_add(1, std::memory_order_relaxed);
         } else {
           set_exception(std::make_exception_ptr(std::runtime_error(
@@ -615,6 +737,26 @@ void GpuPipelineScheduler::submit_rt_task(Task&& task, uint64_t epoch) {
   rt_cv_.notify_one();
 }
 
+void GpuPipelineScheduler::submit_rt_task_handle(TaskHandle handle,
+                                                 uint64_t epoch) {
+  if (!handle) {
+    return;
+  }
+  uint64_t resolved_epoch = epoch != 0 ? epoch : active_epoch();
+  if (should_cancel_epoch(resolved_epoch)) {
+    return;
+  }
+
+  ScheduledTask scheduled(resolved_epoch, handle,
+                          ComputeIntent::RealTimeUpdate);
+  {
+    std::lock_guard<std::mutex> lock(rt_queue_mutex_);
+    rt_queue_.push(std::move(scheduled));
+    rt_ready_count_.fetch_add(1, std::memory_order_relaxed);
+  }
+  rt_cv_.notify_one();
+}
+
 void GpuPipelineScheduler::submit_hp_task(Task&& task, uint64_t epoch) {
   if (!task) {
     return;
@@ -635,6 +777,27 @@ void GpuPipelineScheduler::submit_hp_task(Task&& task, uint64_t epoch) {
   rt_cv_.notify_one();  // CPU workers also handle HP tasks
 }
 
+void GpuPipelineScheduler::submit_hp_task_handle(TaskHandle handle,
+                                                 uint64_t epoch) {
+  if (!handle) {
+    return;
+  }
+  uint64_t resolved_epoch = epoch != 0 ? epoch : active_epoch();
+  if (should_cancel_epoch(resolved_epoch)) {
+    return;
+  }
+
+  ScheduledTask scheduled(resolved_epoch, handle,
+                          ComputeIntent::GlobalHighPrecision);
+  {
+    std::lock_guard<std::mutex> lock(hp_cpu_queue_mutex_);
+    hp_cpu_queue_.push(std::move(scheduled));
+    hp_cpu_ready_count_.fetch_add(1, std::memory_order_relaxed);
+  }
+  hp_cpu_cv_.notify_one();
+  rt_cv_.notify_one();
+}
+
 void GpuPipelineScheduler::submit_gpu_task(Task&& task, uint64_t epoch) {
   if (!task) {
     return;
@@ -645,6 +808,26 @@ void GpuPipelineScheduler::submit_gpu_task(Task&& task, uint64_t epoch) {
   }
 
   ScheduledTask scheduled(resolved_epoch, std::move(task),
+                          ComputeIntent::GlobalHighPrecision);
+  {
+    std::lock_guard<std::mutex> lock(gpu_queue_mutex_);
+    gpu_queue_.push(std::move(scheduled));
+    gpu_ready_count_.fetch_add(1, std::memory_order_relaxed);
+  }
+  gpu_cv_.notify_one();
+}
+
+void GpuPipelineScheduler::submit_gpu_task_handle(TaskHandle handle,
+                                                  uint64_t epoch) {
+  if (!handle) {
+    return;
+  }
+  uint64_t resolved_epoch = epoch != 0 ? epoch : active_epoch();
+  if (should_cancel_epoch(resolved_epoch)) {
+    return;
+  }
+
+  ScheduledTask scheduled(resolved_epoch, handle,
                           ComputeIntent::GlobalHighPrecision);
   {
     std::lock_guard<std::mutex> lock(gpu_queue_mutex_);

@@ -101,15 +101,11 @@ NodeOutput& IntentUpdateCoordinator::coordinate_intent_update(
         return callbacks.real_time_output();
       }
 
-      auto hp_done = std::make_shared<std::promise<void>>();
-      auto rt_done = std::make_shared<std::promise<void>>();
-      auto hp_future = hp_done->get_future();
-      auto rt_future = rt_done->get_future();
-
       record_stage(callbacks, "intent_coordinator_submit_hp");
-      hp_task_runtime->submit_ready_task_any_thread(
+      auto hp_future = std::async(
+          std::launch::async,
           [run_hp = callbacks.run_high_precision_update,
-           record = callbacks.record_stage, hp_done]() {
+           record = callbacks.record_stage]() {
             try {
               if (record) {
                 record("intent_coordinator_run_hp");
@@ -118,17 +114,16 @@ NodeOutput& IntentUpdateCoordinator::coordinate_intent_update(
               if (record) {
                 record("intent_coordinator_hp_done");
               }
-              hp_done->set_value();
             } catch (...) {
-              hp_done->set_exception(std::current_exception());
+              throw;
             }
-          },
-          SchedulerTaskPriority::Normal);
+          });
 
       record_stage(callbacks, "intent_coordinator_submit_rt");
-      rt_task_runtime->submit_ready_task_any_thread(
+      auto rt_future = std::async(
+          std::launch::async,
           [run_rt = callbacks.run_real_time_update,
-           record = callbacks.record_stage, rt_done]() {
+           record = callbacks.record_stage]() {
             try {
               if (record) {
                 record("intent_coordinator_run_rt");
@@ -137,12 +132,10 @@ NodeOutput& IntentUpdateCoordinator::coordinate_intent_update(
               if (record) {
                 record("intent_coordinator_rt_done");
               }
-              rt_done->set_value();
             } catch (...) {
-              rt_done->set_exception(std::current_exception());
+              throw;
             }
-          },
-          SchedulerTaskPriority::High);
+          });
 
       std::exception_ptr first_error;
       try {

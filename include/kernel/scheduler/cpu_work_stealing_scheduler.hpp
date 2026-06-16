@@ -61,13 +61,77 @@ class CpuWorkStealingScheduler : public IScheduler,
       std::vector<Task>&& tasks, int total_task_count,
       TaskPriority priority = TaskPriority::Normal) override;
 
+  /**
+   * @brief 提交初始任务句柄集合，开始一次计算批次。
+   *
+   * @param handles 调度器借用的轻量任务句柄列表。
+   * @param total_task_count 本批次需要完成的活跃任务数。
+   * @param priority 任务优先级。
+   * @throws Nothing directly; queue allocation may throw before enqueue.
+   * @note 句柄保持 dispatcher-owned executor 指针，scheduler 不拥有 task
+   * graph。
+   */
+  void submit_initial_task_handles(
+      std::vector<TaskHandle>&& handles, int total_task_count,
+      TaskPriority priority = TaskPriority::Normal) override;
+
   /// @brief 从工作线程内部提交新就绪的任务
   void submit_ready_task_from_worker(
       Task&& task, TaskPriority priority = TaskPriority::Normal) override;
 
+  /**
+   * @brief 从工作线程内部提交一个新就绪任务句柄。
+   *
+   * @param handle 依赖计数归零后释放的任务句柄。
+   * @param priority 任务优先级。
+   * @throws Nothing directly.
+   * @note 普通优先级会优先进入当前 worker 的本地队列。
+   */
+  void submit_ready_task_handle_from_worker(
+      TaskHandle handle, TaskPriority priority = TaskPriority::Normal) override;
+
+  /**
+   * @brief 从工作线程内部批量提交新就绪任务句柄。
+   *
+   * @param handles 同一依赖释放阶段产生的 ready 句柄。
+   * @param priority 任务优先级。
+   * @throws std::bad_alloc if queue growth fails.
+   * @note 批量路径减少 tile 级调度时的逐任务锁和唤醒。
+   */
+  void submit_ready_task_handles_from_worker(
+      std::vector<TaskHandle>&& handles,
+      TaskPriority priority = TaskPriority::Normal) override;
+
   /// @brief 从任意线程提交新就绪的任务
   void submit_ready_task_any_thread(
       Task&& task, TaskPriority priority = TaskPriority::Normal,
+      std::optional<uint64_t> epoch = std::nullopt) override;
+
+  /**
+   * @brief 从任意线程提交一个新就绪任务句柄。
+   *
+   * @param handle Ready task handle to enqueue.
+   * @param priority Scheduler priority.
+   * @param epoch Optional epoch for lazy cancellation.
+   * @throws Nothing directly.
+   * @note 旧 epoch 在提交和出队时惰性丢弃，不扫描队列。
+   */
+  void submit_ready_task_handle_any_thread(
+      TaskHandle handle, TaskPriority priority = TaskPriority::Normal,
+      std::optional<uint64_t> epoch = std::nullopt) override;
+
+  /**
+   * @brief 从任意线程批量提交新就绪任务句柄。
+   *
+   * @param handles Ready task handles to enqueue.
+   * @param priority Scheduler priority shared by the batch.
+   * @param epoch Optional epoch for lazy cancellation.
+   * @throws std::bad_alloc if queue growth fails.
+   * @note 高优先级批次共享一次全局队列锁和一次通知。
+   */
+  void submit_ready_task_handles_any_thread(
+      std::vector<TaskHandle>&& handles,
+      TaskPriority priority = TaskPriority::Normal,
       std::optional<uint64_t> epoch = std::nullopt) override;
 
   /// @brief 等待当前批次的所有任务完成
@@ -98,10 +162,23 @@ class CpuWorkStealingScheduler : public IScheduler,
   struct ScheduledTask {
     uint64_t epoch{0};
     Task task;
+    TaskHandle handle;
+    bool use_handle{false};
 
     ScheduledTask() = default;
     ScheduledTask(uint64_t e, Task&& t) : epoch(e), task(std::move(t)) {}
-    explicit operator bool() const { return static_cast<bool>(task); }
+    ScheduledTask(uint64_t e, TaskHandle h)
+        : epoch(e), handle(h), use_handle(true) {}
+    explicit operator bool() const {
+      return use_handle ? static_cast<bool>(handle) : static_cast<bool>(task);
+    }
+    void run() {
+      if (use_handle) {
+        handle.run();
+      } else if (task) {
+        task();
+      }
+    }
   };
 
   // 工作线程主循环

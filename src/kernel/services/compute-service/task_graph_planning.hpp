@@ -1,5 +1,6 @@
 #pragma once
 
+#include <memory>
 #include <optional>
 #include <string>
 #include <vector>
@@ -203,8 +204,9 @@ struct ComputeRequest {
  * is the stable topology contract for one request while scheduler runtime
  * state is built separately.
  *
- * @note The plan is value-type diagnostic data and may be copied into
- * GraphModel inspection history.
+ * @note The latest plan remains value-type diagnostic data. Repeated
+ * inspection history should store ComputePlanSummary instead of copying every
+ * PlannedTask.
  */
 struct ComputePlan {
   /** @brief Compute intent whose single-domain task graph was planned. */
@@ -221,6 +223,50 @@ struct ComputePlan {
   std::vector<PlannedNodeWork> planned_work;
   /** @brief Executable task graph derived from planned work. */
   ComputeTaskGraph task_graph;
+};
+
+/**
+ * @brief Bounded inspection summary for a ComputePlan.
+ *
+ * ComputePlanSummary stores cheap reader-facing statistics and small task
+ * samples instead of copying every PlannedTask into long inspection histories.
+ * It may optionally reference a shared immutable full plan when callers need
+ * on-demand deep inspection.
+ *
+ * @note The summary is value-type diagnostic data. Keeping a shared_plan
+ * pointer is optional and must not be used by schedulers for runtime state.
+ */
+struct ComputePlanSummary {
+  /** @brief Compute intent represented by the summarized plan. */
+  ComputeIntent intent = ComputeIntent::GlobalHighPrecision;
+  /** @brief Target node id from the request. */
+  int target_node_id = -1;
+  /** @brief Whether the caller intended scheduler-backed execution. */
+  bool parallel = false;
+  /** @brief Graph topology generation used by full graph cache key. */
+  uint64_t topology_generation = 0;
+  /** @brief FullTaskGraph cache key used for this plan, when known. */
+  std::string full_graph_cache_key;
+  /** @brief Number of planned nodes. */
+  size_t planned_node_count = 0;
+  /** @brief Number of planned tasks. */
+  size_t task_count = 0;
+  /** @brief Number of tile tasks. */
+  size_t tile_task_count = 0;
+  /** @brief Number of monolithic tasks. */
+  size_t monolithic_task_count = 0;
+  /** @brief Number of generic node tasks. */
+  size_t node_task_count = 0;
+  /** @brief Number of node-level dependency records. */
+  size_t dependency_count = 0;
+  /** @brief Number of initially ready tasks. */
+  size_t initial_task_count = 0;
+  /** @brief Prefix sample of planned node ids for inspection. */
+  std::vector<int> planned_node_sample;
+  /** @brief Prefix sample of planned tasks for inspection. */
+  std::vector<PlannedTask> task_sample;
+  /** @brief Optional shared deep plan reference for on-demand inspection. */
+  std::shared_ptr<const ComputePlan> shared_plan;
 };
 
 /**
@@ -352,5 +398,47 @@ class TaskGraphReadyChecker {
       const ComputeTaskGraph& graph,
       const std::vector<int>* allowed_task_ids = nullptr) const;
 };
+
+/**
+ * @brief Builds the stable cache key for a FullTaskGraph expansion.
+ *
+ * @param graph Graph whose topology generation participates in the key.
+ * @param intent Compute intent whose HP/RT domain is expanded.
+ * @return Cache key covering topology generation, intent, and task-shape
+ * configuration version.
+ * @throws std::bad_alloc if string construction fails.
+ * @note The shape config token must change when tile sizing or task shape
+ * selection semantics change.
+ */
+std::string full_task_graph_cache_key(const GraphModel& graph,
+                                      ComputeIntent intent);
+
+/**
+ * @brief Returns a cached immutable FullTaskGraph or expands and stores one.
+ *
+ * @param graph GraphModel owning the per-topology full graph cache.
+ * @param intent Compute intent whose single-domain full graph is required.
+ * @return Shared immutable full graph for request/cache/dirty pruning.
+ * @throws GraphError or standard exceptions from expansion or allocation.
+ * @note HP and RT requests use distinct keys and therefore never share task
+ * pools or cross-intent dependencies.
+ */
+std::shared_ptr<const FullTaskGraph> get_or_expand_full_task_graph(
+    GraphModel& graph, ComputeIntent intent);
+
+/**
+ * @brief Builds a bounded summary for compute plan inspection.
+ *
+ * @param graph Graph whose topology generation is recorded.
+ * @param compute_plan Plan to summarize.
+ * @param shared_plan Optional shared deep plan reference.
+ * @return Summary containing counts and bounded node/task samples.
+ * @throws std::bad_alloc if sample vectors grow.
+ * @note Samples are intentionally capped to keep repeated inspection history
+ * cheap as tile task graphs grow.
+ */
+ComputePlanSummary summarize_compute_plan(
+    const GraphModel& graph, const ComputePlan& compute_plan,
+    std::shared_ptr<const ComputePlan> shared_plan = nullptr);
 
 }  // namespace ps::compute

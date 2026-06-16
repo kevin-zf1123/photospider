@@ -1,5 +1,6 @@
 #include "kernel/services/compute-service/compute_task_submission.hpp"
 
+#include <algorithm>
 #include <atomic>
 #include <future>
 #include <memory>
@@ -149,70 +150,104 @@ TaskSubmissionPlan::TaskSubmissionPlan(GraphModel& graph,
       dependency_state_(execution_order_, compute_plan_.task_graph) {
   resolve_operations();
   temp_results_.resize(execution_order_.size());
-  tasks_.resize(execution_order_.size());
+  task_handles_.resize(compute_plan_.task_graph.tasks.size());
 }
 
 void TaskSubmissionPlan::build_scheduler_tasks(
     NodeTaskRunner& runner, SchedulerTaskRuntime& task_runtime) {
-  for (size_t i = 0; i < execution_order_.size(); ++i) {
-    const int current_node_id = execution_order_[i];
-    const int current_node_idx = static_cast<int>(i);
-    tasks_[i] = [this, &runner, &task_runtime, current_node_id,
-                 current_node_idx]() {
-      task_runtime.log_event(SchedulerTraceAction::Execute, current_node_id);
-      try {
-        runner.run_node(current_node_idx);
-        release_dependents(current_node_idx, current_node_id, task_runtime);
-      } catch (...) {
-        task_runtime.log_event(SchedulerTraceAction::RethrowException,
-                               current_node_id);
-        throw;
-      }
-      task_runtime.dec_tasks_to_complete();
-    };
+  runner_ = &runner;
+  task_runtime_ = &task_runtime;
+  for (const auto& task : compute_plan_.task_graph.tasks) {
+    if (task.task_id < 0 ||
+        task.task_id >= static_cast<int>(task_handles_.size())) {
+      continue;
+    }
+    task_handles_[task.task_id] = make_handle(task.task_id);
   }
 }
 
-std::vector<SchedulerTaskRuntime::Task>
-TaskSubmissionPlan::take_initial_tasks() {
-  initial_tasks_.clear();
-  submitted_initial_indices_.clear();
+std::vector<TaskHandle> TaskSubmissionPlan::take_initial_task_handles() {
+  initial_task_handles_.clear();
+  submitted_initial_task_ids_.clear();
   append_graph_ready_tasks();
-  if (initial_tasks_.empty()) {
+  if (initial_task_handles_.empty()) {
     append_zero_dependency_tasks();
   }
-  return std::move(initial_tasks_);
+  return std::move(initial_task_handles_);
 }
 
 void TaskSubmissionPlan::log_initial_assignments(
     SchedulerTaskRuntime& task_runtime) const {
-  for (size_t i = 0; i < execution_order_.size(); ++i) {
-    if (submitted_initial_indices_.count(static_cast<int>(i))) {
-      task_runtime.log_event(SchedulerTraceAction::AssignInitial,
-                             execution_order_[i]);
+  for (int task_id : submitted_initial_task_ids_) {
+    if (task_id < 0 ||
+        task_id >= static_cast<int>(compute_plan_.task_graph.tasks.size())) {
+      continue;
+    }
+    const int node_id = compute_plan_.task_graph.tasks[task_id].node_id;
+    if (std::find(execution_order_.begin(), execution_order_.end(), node_id) !=
+        execution_order_.end()) {
+      task_runtime.log_event(SchedulerTraceAction::AssignInitial, node_id);
     }
   }
+}
+
+void TaskSubmissionPlan::run_task(int task_id) {
+  if (!runner_ || !task_runtime_) {
+    throw GraphError(GraphErrc::ComputeError,
+                     "TaskSubmissionPlan has no bound task runner.");
+  }
+  const PlannedTask& task = compute_plan_.task_graph.tasks.at(task_id);
+  const SchedulerTraceAction execute_action =
+      task.kind == PlannedTaskKind::Tile ? SchedulerTraceAction::ExecuteTile
+                                         : SchedulerTraceAction::Execute;
+  task_runtime_->log_event(execute_action, task.node_id);
+  try {
+    runner_->run_task(task_id);
+    release_dependents(task.task_id, task.node_id, *task_runtime_);
+  } catch (...) {
+    task_runtime_->log_event(SchedulerTraceAction::RethrowException,
+                             task.node_id);
+    throw;
+  }
+  task_runtime_->dec_tasks_to_complete();
 }
 
 void TaskSubmissionPlan::resolve_operations() {
   resolved_ops_.resize(execution_order_.size());
   for (size_t i = 0; i < execution_order_.size(); ++i) {
     const auto& node = graph_.node(execution_order_[i]);
+    const bool has_tile_task = std::any_of(
+        compute_plan_.task_graph.tasks.begin(),
+        compute_plan_.task_graph.tasks.end(), [&](const PlannedTask& task) {
+          return task.node_id == node.id && task.kind == PlannedTaskKind::Tile;
+        });
+    if (has_tile_task) {
+      const auto* impls =
+          OpRegistry::instance().get_implementations(node.type, node.subtype);
+      if (impls && impls->tiled_hp) {
+        resolved_ops_[i] = OpRegistry::OpVariant{*impls->tiled_hp};
+        continue;
+      }
+    }
     resolved_ops_[i] = OpRegistry::instance().resolve_for_intent(
         node.type, node.subtype, ComputeIntent::GlobalHighPrecision);
   }
 }
 
 void TaskSubmissionPlan::release_dependents(
-    int current_node_idx, int current_node_id,
+    int current_task_id, int current_node_id,
     SchedulerTaskRuntime& task_runtime) {
   try {
     std::atomic_thread_fence(std::memory_order_release);
-    dependency_state_.release_dependents(
-        current_node_idx, [&](int dependent_idx) {
-          task_runtime.submit_ready_task_from_worker(
-              std::move(tasks_.at(dependent_idx)));
-        });
+    std::vector<int> ready_task_ids =
+        dependency_state_.release_dependents(current_task_id);
+    std::vector<TaskHandle> ready_handles;
+    ready_handles.reserve(ready_task_ids.size());
+    for (int dependent_task_id : ready_task_ids) {
+      ready_handles.push_back(task_handles_.at(dependent_task_id));
+    }
+    task_runtime.submit_ready_task_handles_from_worker(
+        std::move(ready_handles));
   } catch (const std::out_of_range& e) {
     std::rethrow_exception(scheduling_failure(
         graph_, current_node_id, "out_of_range: " + std::string(e.what())));
@@ -225,12 +260,12 @@ void TaskSubmissionPlan::release_dependents(
   }
 }
 
-void TaskSubmissionPlan::append_initial_task_for_node(int node_idx) {
-  if (!dependency_state_.ready_for_initial_submit(node_idx)) {
+void TaskSubmissionPlan::append_initial_task_handle(int task_id) {
+  if (!dependency_state_.ready_for_initial_submit(task_id)) {
     return;
   }
-  if (submitted_initial_indices_.insert(node_idx).second) {
-    initial_tasks_.push_back(std::move(tasks_.at(node_idx)));
+  if (submitted_initial_task_ids_.insert(task_id).second) {
+    initial_task_handles_.push_back(task_handles_.at(task_id));
   }
 }
 
@@ -243,19 +278,24 @@ void TaskSubmissionPlan::append_graph_ready_tasks() {
         task_id >= static_cast<int>(compute_plan_.task_graph.tasks.size())) {
       continue;
     }
-    const int planned_node_id = compute_plan_.task_graph.tasks[task_id].node_id;
-    auto idx_it = dependency_state_.id_to_idx().find(planned_node_id);
-    if (idx_it == dependency_state_.id_to_idx().end()) {
-      continue;
-    }
-    append_initial_task_for_node(idx_it->second);
+    append_initial_task_handle(task_id);
   }
 }
 
 void TaskSubmissionPlan::append_zero_dependency_tasks() {
-  for (size_t i = 0; i < execution_order_.size(); ++i) {
-    append_initial_task_for_node(static_cast<int>(i));
+  for (const auto& task : compute_plan_.task_graph.tasks) {
+    append_initial_task_handle(task.task_id);
   }
+}
+
+TaskHandle TaskSubmissionPlan::make_handle(int task_id) const {
+  if (task_id < 0 ||
+      task_id >= static_cast<int>(compute_plan_.task_graph.tasks.size())) {
+    return {};
+  }
+  const PlannedTask& task = compute_plan_.task_graph.tasks[task_id];
+  return TaskHandle{const_cast<TaskSubmissionPlan*>(this), task_id,
+                    task.node_id};
 }
 
 void dispatch_or_run_fallback(
@@ -269,10 +309,10 @@ void dispatch_or_run_fallback(
     return;
   }
 
-  std::vector<SchedulerTaskRuntime::Task> initial_tasks =
-      plan.take_initial_tasks();
-  task_runtime.submit_initial_tasks(std::move(initial_tasks),
-                                    static_cast<int>(plan.size()));
+  std::vector<TaskHandle> initial_task_handles =
+      plan.take_initial_task_handles();
+  task_runtime.submit_initial_task_handles(std::move(initial_task_handles),
+                                           static_cast<int>(plan.size()));
   plan.log_initial_assignments(task_runtime);
   task_runtime.wait_for_completion();
 }

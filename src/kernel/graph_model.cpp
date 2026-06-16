@@ -180,6 +180,9 @@ void GraphModel::reset_runtime_state() {
   dirty_source_rt_commit_generation.clear();
   last_compute_plan.reset();
   recent_compute_plans.clear();
+  last_compute_plan_summary.reset();
+  recent_compute_plan_summaries.clear();
+  full_task_graph_cache_.clear();
   last_disk_cache_load_result.reset();
   total_io_time_ms.store(0.0, std::memory_order_relaxed);
   skip_save_cache_.store(false, std::memory_order_relaxed);
@@ -389,6 +392,8 @@ void GraphModel::validate_topology() const {
 void GraphModel::rebuild_topology_index() {
   validate_node_map(nodes_);
   topology_ = build_topology_index(nodes_);
+  ++topology_generation_;
+  full_task_graph_cache_.clear();
 }
 
 const GraphTopologyIndex& GraphModel::topology() const {
@@ -413,6 +418,28 @@ const std::vector<GraphTopologyEdge>& GraphModel::downstream_edges(
     return empty_edges;
   }
   return it->second;
+}
+
+uint64_t GraphModel::topology_generation() const {
+  return topology_generation_;
+}
+
+std::shared_ptr<const compute::FullTaskGraph>
+GraphModel::cached_full_task_graph(const std::string& key) const {
+  auto it = full_task_graph_cache_.find(key);
+  if (it == full_task_graph_cache_.end()) {
+    return nullptr;
+  }
+  return it->second;
+}
+
+void GraphModel::remember_full_task_graph(
+    const std::string& key,
+    std::shared_ptr<const compute::FullTaskGraph> graph) {
+  if (!graph) {
+    return;
+  }
+  full_task_graph_cache_[key] = std::move(graph);
 }
 
 void GraphModel::set_skip_save_cache(bool v) {

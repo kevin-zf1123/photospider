@@ -557,6 +557,45 @@ json compute_plan_history_json(
   return out;
 }
 
+json compute_plan_summary_json(
+    const std::optional<ps::compute::ComputePlanSummary>& summary) {
+  if (!summary) {
+    return json(nullptr);
+  }
+  json task_sample = json::array();
+  for (const auto& task : summary->task_sample) {
+    task_sample.push_back({{"task_id", task.task_id},
+                           {"node_id", task.node_id},
+                           {"kind", planned_task_kind_name(task.kind)},
+                           {"domain", dirty_domain_name(task.domain)},
+                           {"output_roi", rect_json(task.output_roi)},
+                           {"dependency_task_ids", task.dependency_task_ids}});
+  }
+  return {{"intent", compute_intent_name(summary->intent)},
+          {"target_node_id", summary->target_node_id},
+          {"parallel", summary->parallel},
+          {"topology_generation", summary->topology_generation},
+          {"full_graph_cache_key", summary->full_graph_cache_key},
+          {"planned_node_count", summary->planned_node_count},
+          {"task_count", summary->task_count},
+          {"tile_task_count", summary->tile_task_count},
+          {"monolithic_task_count", summary->monolithic_task_count},
+          {"node_task_count", summary->node_task_count},
+          {"dependency_count", summary->dependency_count},
+          {"initial_task_count", summary->initial_task_count},
+          {"planned_node_sample", summary->planned_node_sample},
+          {"task_sample", task_sample}};
+}
+
+json compute_plan_summary_history_json(
+    const std::vector<ps::compute::ComputePlanSummary>& summaries) {
+  json out = json::array();
+  for (const auto& summary : summaries) {
+    out.push_back(compute_plan_summary_json(summary));
+  }
+  return out;
+}
+
 std::vector<std::string> trace_phase_set(const std::vector<json>& events) {
   std::vector<std::string> phases;
   for (const auto& event : events) {
@@ -614,6 +653,27 @@ bool contains_compute_plan_graph(const json& plans, const std::string& intent,
   });
 }
 
+bool contains_compute_plan_summary(const json& summaries,
+                                   const std::string& intent, bool parallel,
+                                   const std::vector<int>& planned_nodes,
+                                   size_t min_dependencies,
+                                   size_t min_tasks) {
+  if (!summaries.is_array()) {
+    return false;
+  }
+  return std::any_of(
+      summaries.begin(), summaries.end(), [&](const json& summary) {
+        return summary.value("intent", "") == intent &&
+               summary.value("parallel", !parallel) == parallel &&
+               json_int_array_equals(summary["planned_node_sample"],
+                                     planned_nodes) &&
+               summary.value("dependency_count", size_t{0}) >=
+                   min_dependencies &&
+               summary.value("task_count", size_t{0}) >= min_tasks &&
+               summary.value("initial_task_count", size_t{0}) > 0;
+      });
+}
+
 bool compute_events_contain_source(const json& events,
                                    const std::string& source) {
   if (!events.is_array()) {
@@ -646,6 +706,11 @@ json graph_snapshot(ps::Kernel& kernel, const std::string& graph_name) {
         out["last_compute_plan"] = compute_plan_json(graph.last_compute_plan);
         out["recent_compute_plans"] =
             compute_plan_history_json(graph.recent_compute_plans);
+        out["last_compute_plan_summary"] =
+            compute_plan_summary_json(graph.last_compute_plan_summary);
+        out["recent_compute_plan_summaries"] =
+            compute_plan_summary_history_json(
+                graph.recent_compute_plan_summaries);
         std::vector<int> ids = graph.node_ids();
         out["node_order"] = ids;
         out["nodes"] = json::object();
@@ -1768,15 +1833,17 @@ int main(int argc, char** argv) {
         "dirty update produced frontend RT state without making "
         "InteractionService the authority");
     task5.add("dirty execution consumed planner output", true,
-              dirty_actual["graph_snapshot"]["recent_compute_plans"],
-              contains_compute_plan_graph(
-                  dirty_actual["graph_snapshot"]["recent_compute_plans"],
+              dirty_actual["graph_snapshot"]["recent_compute_plan_summaries"],
+              contains_compute_plan_summary(
+                  dirty_actual["graph_snapshot"]
+                              ["recent_compute_plan_summaries"],
                   "global_high_precision", false, {1, 2, 100}, 2, 3) &&
-                  contains_compute_plan_graph(
-                      dirty_actual["graph_snapshot"]["recent_compute_plans"],
+                  contains_compute_plan_summary(
+                      dirty_actual["graph_snapshot"]
+                                  ["recent_compute_plan_summaries"],
                       "real_time_update", false, {1, 2, 100}, 2, 3),
               "HP and RT dirty update plans expose regions, dependencies, and "
-              "planned task graph semantics consumed by execution");
+              "planned task graph summary semantics consumed by execution");
     task5.add(
         "dirty realtime avoids coarse coordinator scheduler submit", true,
         dirty_actual["compute_events"],
@@ -1810,13 +1877,13 @@ int main(int argc, char** argv) {
             compute_events_contain_source(
                 dirty_single_thread_actual["compute_events"],
                 "intent_coordinator_inline_rt") &&
-            contains_compute_plan_graph(
+            contains_compute_plan_summary(
                 dirty_single_thread_actual["graph_snapshot"]
-                                          ["recent_compute_plans"],
+                                          ["recent_compute_plan_summaries"],
                 "global_high_precision", false, {1, 2, 100}, 2, 3) &&
-            contains_compute_plan_graph(
+            contains_compute_plan_summary(
                 dirty_single_thread_actual["graph_snapshot"]
-                                          ["recent_compute_plans"],
+                                          ["recent_compute_plan_summaries"],
                 "real_time_update", false, {1, 2, 100}, 2, 3),
         "parallel=false selected inline execution, but RealTimeUpdate still "
         "coordinated both HP and RT plans");
@@ -1859,13 +1926,17 @@ int main(int argc, char** argv) {
         count_scheduler_action(parallel_scheduler, "EXECUTE");
     const int tile_count =
         count_scheduler_action(parallel_scheduler, "EXECUTE_TILE");
+    const int planned_task_count = static_cast<int>(
+        parallel_snapshot["last_compute_plan"]["task_graph"]["tasks"].size());
     const double seq_checksum = node_checksum(sequential_snapshot, 100, "hp");
     const double par_checksum = node_checksum(parallel_snapshot, 100, "hp");
     task6.add("parallel compute returned ok", true, parallel_ok, parallel_ok,
               "parallel facade returned success");
-    task6.add("scheduler node events recorded", ">=5", execute_count,
-              execute_count >= 5,
-              "ComputeTaskDispatcher emitted scheduler dispatch events");
+    task6.add("scheduler planned task events recorded", planned_task_count,
+              execute_count + tile_count,
+              execute_count + tile_count == planned_task_count,
+              "ComputeTaskDispatcher emitted scheduler dispatch events for "
+              "every planned task");
     task6.add("scheduler tile events recorded", ">0", tile_count,
               tile_count > 0,
               "tiled nodes emitted micro-task completion events");

@@ -581,6 +581,72 @@ TEST(TaskGraphPlanningSplit, ExpandsFullGraphBeforeNodeCachePruning) {
   }
 }
 
+TEST(TaskGraphPlanningSplit, TileDependenciesFollowRoiOverlap) {
+  register_split_ops();
+  GraphModel graph("cache/split-tile-overlap-dependencies");
+  Node source = make_node(1, "split_plan", "tile");
+  source.parameters["width"] = 32;
+  source.parameters["height"] = 16;
+  Node downstream = make_node(2, "split_plan", "tile");
+  downstream.parameters["width"] = 32;
+  downstream.parameters["height"] = 16;
+  downstream.image_inputs.push_back({1, "image"});
+  graph.add_node(source);
+  graph.add_node(downstream);
+  graph.validate_topology();
+
+  compute::ComputeRequest request;
+  request.intent = ComputeIntent::GlobalHighPrecision;
+  request.target_node_id = 2;
+  const auto plan = node_cache_pruned_plan(graph, request, {1, 2});
+
+  std::vector<const compute::PlannedTask*> downstream_tasks;
+  for (const auto& task : plan.task_graph.tasks) {
+    if (task.node_id == 2) {
+      downstream_tasks.push_back(&task);
+    }
+  }
+  ASSERT_EQ(downstream_tasks.size(), 2u);
+  size_t dependency_edges = 0;
+  for (const auto* task : downstream_tasks) {
+    ASSERT_EQ(task->dependency_task_ids.size(), 1u);
+    const auto& upstream_task =
+        plan.task_graph.tasks.at(task->dependency_task_ids.front());
+    EXPECT_EQ(upstream_task.node_id, 1);
+    EXPECT_GT((upstream_task.output_roi & task->output_roi).area(), 0);
+    dependency_edges += task->dependency_task_ids.size();
+  }
+  EXPECT_EQ(dependency_edges, 2u)
+      << "two upstream tiles feeding two downstream tiles should not form the "
+         "four-edge Cartesian product";
+}
+
+TEST(TaskGraphPlanningSplit, CachesFullTaskGraphPerIntentAndTopology) {
+  register_split_ops();
+  GraphModel graph("cache/split-full-task-graph-cache");
+  Node source = make_node(1, "split_plan", "tile");
+  source.parameters["width"] = 32;
+  source.parameters["height"] = 16;
+  graph.add_node(source);
+
+  const auto hp_first = compute::get_or_expand_full_task_graph(
+      graph, ComputeIntent::GlobalHighPrecision);
+  const auto hp_second = compute::get_or_expand_full_task_graph(
+      graph, ComputeIntent::GlobalHighPrecision);
+  const auto rt_first = compute::get_or_expand_full_task_graph(
+      graph, ComputeIntent::RealTimeUpdate);
+  EXPECT_EQ(hp_first.get(), hp_second.get());
+  EXPECT_NE(hp_first.get(), rt_first.get())
+      << "HP and RT keep sibling task graphs with separate task pools";
+
+  Node downstream = make_node(2, "split_plan", "tile");
+  downstream.image_inputs.push_back({1, "image"});
+  graph.add_node(downstream);
+  const auto hp_after_topology_change = compute::get_or_expand_full_task_graph(
+      graph, ComputeIntent::GlobalHighPrecision);
+  EXPECT_NE(hp_first.get(), hp_after_topology_change.get());
+}
+
 TEST(TaskGraphPlanningSplit,
      DirtySnapshotTaskGraphPrunerExcludesSourceBoundaryTasks) {
   register_split_ops();
@@ -612,7 +678,11 @@ TEST(TaskGraphPlanningSplit,
   compute::DirtySnapshotTaskGraphPruner pruner;
   const auto work_set = pruner.materialize(plan, snapshot);
   EXPECT_EQ(work_set.generation, 3u);
-  EXPECT_EQ(work_set.dirty_source_task_ids.size(), 2u);
+  ASSERT_EQ(work_set.dirty_source_task_ids.size(), 1u);
+  const auto& source_task =
+      plan.task_graph.tasks.at(work_set.dirty_source_task_ids.front());
+  EXPECT_EQ(source_task.node_id, 1);
+  EXPECT_EQ(source_task.output_roi, cv::Rect(0, 0, 16, 16));
   ASSERT_EQ(work_set.downstream_task_ids.size(), 1u);
   const auto& downstream_task =
       plan.task_graph.tasks.at(work_set.downstream_task_ids.front());
@@ -804,6 +874,12 @@ TEST(GlobalHighPrecisionDirtyUpdate, UsesDirtyPlanningForGlobalHpDirtyRoi) {
       graph.last_compute_plan->task_graph.tasks.begin(),
       graph.last_compute_plan->task_graph.tasks.end(),
       [](const compute::PlannedTask& task) { return task.dirty_selected; }));
+  ASSERT_TRUE(graph.last_compute_plan_summary.has_value());
+  EXPECT_EQ(graph.last_compute_plan_summary->intent,
+            ComputeIntent::GlobalHighPrecision);
+  EXPECT_EQ(graph.last_compute_plan_summary->target_node_id, 2);
+  EXPECT_GT(graph.last_compute_plan_summary->task_count, 0u);
+  EXPECT_GT(graph.last_compute_plan_summary->tile_task_count, 0u);
 
   auto recorded_events = events.drain();
   EXPECT_TRUE(std::any_of(recorded_events.begin(), recorded_events.end(),

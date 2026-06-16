@@ -114,6 +114,7 @@ NodeOutput& ComputeTaskDispatcher::execute(
       plan.id_to_idx(),
       plan.temp_results(),
       plan.resolved_ops(),
+      plan.compute_plan().task_graph,
       request.force_recache,
       request.enable_timing,
       request.disable_disk_cache,

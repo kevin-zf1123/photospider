@@ -100,11 +100,39 @@ class GpuPipelineScheduler : public IScheduler, public SchedulerTaskRuntime {
   /// @brief 提交任务到 RT 队列（高优先级）
   void submit_rt_task(Task&& task, uint64_t epoch = 0);
 
+  /**
+   * @brief 提交 RT 任务句柄到高优先级 CPU 队列。
+   *
+   * @param handle Dispatcher-owned ready task handle.
+   * @param epoch Scheduler epoch used for lazy cancellation.
+   * @throws Nothing directly.
+   * @note 句柄路径避免在 tile 级 ready work 上为队列项分配闭包。
+   */
+  void submit_rt_task_handle(TaskHandle handle, uint64_t epoch = 0);
+
   /// @brief 提交任务到 HP 队列（普通优先级）
   void submit_hp_task(Task&& task, uint64_t epoch = 0);
 
+  /**
+   * @brief 提交 HP CPU 任务句柄到普通优先级队列。
+   *
+   * @param handle Dispatcher-owned ready task handle.
+   * @param epoch Scheduler epoch used for lazy cancellation.
+   * @throws Nothing directly.
+   */
+  void submit_hp_task_handle(TaskHandle handle, uint64_t epoch = 0);
+
   /// @brief 提交 GPU 任务
   void submit_gpu_task(Task&& task, uint64_t epoch = 0);
+
+  /**
+   * @brief 提交 GPU 任务句柄。
+   *
+   * @param handle Dispatcher-owned ready task handle.
+   * @param epoch Scheduler epoch used for lazy cancellation.
+   * @throws Nothing directly.
+   */
+  void submit_gpu_task_handle(TaskHandle handle, uint64_t epoch = 0);
 
   /// @brief 等待当前批次完成
   void wait_for_completion() override;
@@ -122,11 +150,31 @@ class GpuPipelineScheduler : public IScheduler, public SchedulerTaskRuntime {
       std::vector<Task>&& tasks, int total_task_count,
       TaskPriority priority = TaskPriority::Normal) override;
 
+  void submit_initial_task_handles(
+      std::vector<TaskHandle>&& handles, int total_task_count,
+      TaskPriority priority = TaskPriority::Normal) override;
+
   void submit_ready_task_from_worker(
       Task&& task, TaskPriority priority = TaskPriority::Normal) override;
 
+  void submit_ready_task_handle_from_worker(
+      TaskHandle handle, TaskPriority priority = TaskPriority::Normal) override;
+
+  void submit_ready_task_handles_from_worker(
+      std::vector<TaskHandle>&& handles,
+      TaskPriority priority = TaskPriority::Normal) override;
+
   void submit_ready_task_any_thread(
       Task&& task, TaskPriority priority = TaskPriority::Normal,
+      std::optional<uint64_t> epoch = std::nullopt) override;
+
+  void submit_ready_task_handle_any_thread(
+      TaskHandle handle, TaskPriority priority = TaskPriority::Normal,
+      std::optional<uint64_t> epoch = std::nullopt) override;
+
+  void submit_ready_task_handles_any_thread(
+      std::vector<TaskHandle>&& handles,
+      TaskPriority priority = TaskPriority::Normal,
       std::optional<uint64_t> epoch = std::nullopt) override;
 
   void log_event(SchedulerTraceAction action, int node_id) override;
@@ -155,13 +203,27 @@ class GpuPipelineScheduler : public IScheduler, public SchedulerTaskRuntime {
   struct ScheduledTask {
     uint64_t epoch{0};
     Task task;
+    TaskHandle handle;
+    bool use_handle{false};
     ComputeIntent intent{ComputeIntent::GlobalHighPrecision};
 
     ScheduledTask() = default;
     ScheduledTask(uint64_t e, Task&& t,
                   ComputeIntent i = ComputeIntent::GlobalHighPrecision)
         : epoch(e), task(std::move(t)), intent(i) {}
-    explicit operator bool() const { return static_cast<bool>(task); }
+    ScheduledTask(uint64_t e, TaskHandle h,
+                  ComputeIntent i = ComputeIntent::GlobalHighPrecision)
+        : epoch(e), handle(h), use_handle(true), intent(i) {}
+    explicit operator bool() const {
+      return use_handle ? static_cast<bool>(handle) : static_cast<bool>(task);
+    }
+    void run() {
+      if (use_handle) {
+        handle.run();
+      } else if (task) {
+        task();
+      }
+    }
   };
 
   // CPU 工作线程主循环

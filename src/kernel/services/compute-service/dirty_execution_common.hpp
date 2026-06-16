@@ -9,6 +9,7 @@
 
 #include "graph_model.hpp"  // NOLINT(build/include_subdir)
 #include "kernel/scheduler/scheduler_task_runtime.hpp"
+#include "kernel/services/compute-service/compute_task_dependency_state.hpp"
 #include "kernel/services/compute-service/compute_task_dispatcher.hpp"
 #include "kernel/services/compute-service/dirty_region_planner.hpp"
 #include "kernel/services/compute-service/task_graph_planning.hpp"
@@ -65,11 +66,11 @@ struct PreparedDirtyPlan {
   /** @brief Task id groups selected by DirtySnapshotTaskGraphPruner. */
   DirtyUpdateWorkSet work_set;
 
-  /** @brief Dirty source node ids selected from materialized task ids. */
-  std::vector<int> source_node_ids;
+  /** @brief Dirty source task ids selected by materialization. */
+  std::vector<int> source_task_ids;
 
-  /** @brief Downstream dirty node ids selected from materialized task ids. */
-  std::vector<int> downstream_node_ids;
+  /** @brief Downstream dirty task ids selected by materialization. */
+  std::vector<int> downstream_task_ids;
 };
 
 /**
@@ -86,11 +87,14 @@ struct DirtySourceFirstRunRequest {
   /** @brief Intent-specific scheduler task pool to target. */
   ComputeIntent intent = ComputeIntent::GlobalHighPrecision;
 
-  /** @brief Dirty source node ids submitted before downstream work. */
-  const std::vector<int>* source_node_ids = nullptr;
+  /** @brief Compute plan containing immutable dirty task graph metadata. */
+  const ComputePlan* compute_plan = nullptr;
 
-  /** @brief Downstream dirty node ids submitted after source validation. */
-  const std::vector<int>* downstream_node_ids = nullptr;
+  /** @brief Dirty source task ids submitted before downstream work. */
+  const std::vector<int>* source_task_ids = nullptr;
+
+  /** @brief Downstream dirty task ids released by task dependencies. */
+  const std::vector<int>* downstream_task_ids = nullptr;
 
   /** @brief Dirty snapshot generation forwarded as scheduler epoch metadata. */
   uint64_t dirty_generation = 0;
@@ -112,12 +116,13 @@ void remember_dirty_snapshot(GraphModel& graph,
                              const DirtyRegionSnapshot& snapshot);
 
 /**
- * @brief Stores the latest compute plan and bounded recent-plan history.
+ * @brief Stores the latest compute plan and bounded summary history.
  *
  * @param graph Graph whose inspection state receives the compute plan.
  * @param compute_plan Dirty-pruned plan for the current request.
- * @throws std::bad_alloc if plan history storage cannot grow.
- * @note Plans are diagnostic state, not an unbounded runtime trace.
+ * @throws std::bad_alloc if summary history storage cannot grow.
+ * @note Full dirty-pruned plans are retained only as the latest inspection
+ * entry; repeated history stores summaries to avoid copying large task graphs.
  */
 void remember_compute_plan(GraphModel& graph, const ComputePlan& compute_plan);
 
@@ -133,7 +138,7 @@ void remember_compute_plan(GraphModel& graph, const ComputePlan& compute_plan);
  * task pool.
  */
 ComputePlan prune_node_cache_task_graph(
-    const GraphModel& graph, const ComputeRequest& request,
+    GraphModel& graph, const ComputeRequest& request,
     const std::vector<int>& execution_order);
 
 /**
@@ -287,15 +292,132 @@ PreparedDirtyPlan<DirtyPlan> prepare_dirty_execution(
   DirtySnapshotTaskGraphPruner dirty_snapshot_pruner;
   DirtyUpdateWorkSet work_set =
       dirty_snapshot_pruner.materialize(compute_plan, dirty_plan.snapshot);
-  std::vector<int> source_node_ids =
-      planned_nodes_for_task_ids(compute_plan, work_set.dirty_source_task_ids);
-  std::vector<int> downstream_node_ids =
-      planned_nodes_for_task_ids(compute_plan, work_set.downstream_task_ids);
+  std::vector<int> source_task_ids = work_set.dirty_source_task_ids;
+  std::vector<int> downstream_task_ids = work_set.downstream_task_ids;
 
   return PreparedDirtyPlan<DirtyPlan>{
       std::move(dirty_plan), std::move(compute_plan), std::move(work_set),
-      std::move(source_node_ids), std::move(downstream_node_ids)};
+      std::move(source_task_ids), std::move(downstream_task_ids)};
 }
+
+/**
+ * @brief Closure-backed TaskExecutor used by dirty update task handles.
+ *
+ * The executor stores task closures outside scheduler queues and exposes them
+ * as compact TaskHandle entries. For downstream dirty work it also owns a
+ * task-level TaskDependencyState so completed tasks release ready dependents in
+ * batches.
+ *
+ * @note The executor is stack-owned by run_dirty_source_first() and must remain
+ * alive until the matching SchedulerTaskRuntime::wait_for_completion() returns.
+ */
+class DirtyClosureTaskExecutor : public TaskExecutor {
+ public:
+  /**
+   * @brief Binds closure tasks, dependency state, and scheduler runtime.
+   *
+   * @param compute_plan Plan whose task graph owns task metadata.
+   * @param active_task_ids Task ids active in this source or downstream phase.
+   * @param tasks_by_id Closures aligned with task ids.
+   * @param task_runtime Runtime used for dependent handle submission.
+   * @param release_dependents Whether completed tasks should release
+   * downstream dependents.
+   * @param priority Priority used when dependency release submits ready work.
+   * @throws std::bad_alloc if dependency state allocation fails.
+   */
+  DirtyClosureTaskExecutor(const ComputePlan& compute_plan,
+                           const std::vector<int>& active_task_ids,
+                           std::vector<SchedulerTaskRuntime::Task> tasks_by_id,
+                           SchedulerTaskRuntime& task_runtime,
+                           bool release_dependents,
+                           SchedulerTaskPriority priority)
+      : compute_plan_(compute_plan),
+        dependency_state_(compute_plan.execution_order, compute_plan.task_graph,
+                          active_task_ids),
+        tasks_by_id_(std::move(tasks_by_id)),
+        task_runtime_(task_runtime),
+        release_dependents_(release_dependents),
+        priority_(priority) {
+    task_handles_.resize(compute_plan_.task_graph.tasks.size());
+    for (const auto& task : compute_plan_.task_graph.tasks) {
+      if (task.task_id < 0 ||
+          task.task_id >= static_cast<int>(task_handles_.size())) {
+        continue;
+      }
+      task_handles_[task.task_id] =
+          TaskHandle{this, task.task_id, task.node_id};
+    }
+  }
+
+  /**
+   * @brief Builds handles for selected task ids.
+   *
+   * @param task_ids Task ids to expose as scheduler handles.
+   * @return Handles aligned with task_ids order, skipping invalid ids.
+   * @throws std::bad_alloc if output allocation fails.
+   */
+  std::vector<TaskHandle> handles_for(const std::vector<int>& task_ids) const {
+    std::vector<TaskHandle> handles;
+    handles.reserve(task_ids.size());
+    for (int task_id : task_ids) {
+      if (task_id < 0 || task_id >= static_cast<int>(task_handles_.size())) {
+        continue;
+      }
+      handles.push_back(task_handles_[task_id]);
+    }
+    return handles;
+  }
+
+  /**
+   * @brief Executes one dirty closure and releases dependent task handles.
+   *
+   * @param task_id Dirty task id selected by scheduler.
+   * @throws Any exception propagated by the dirty node executor closure.
+   * @note Completion accounting mirrors TaskSubmissionPlan::run_task().
+   */
+  void run_task(int task_id) override {
+    const auto& task = compute_plan_.task_graph.tasks.at(task_id);
+    try {
+      if (task_id >= 0 && task_id < static_cast<int>(tasks_by_id_.size()) &&
+          tasks_by_id_[task_id]) {
+        tasks_by_id_[task_id]();
+      }
+      if (release_dependents_) {
+        std::vector<int> ready_ids =
+            dependency_state_.release_dependents(task_id);
+        task_runtime_.submit_ready_task_handles_from_worker(
+            handles_for(ready_ids), priority_);
+      }
+    } catch (...) {
+      task_runtime_.log_event(SchedulerTraceAction::RethrowException,
+                              task.node_id);
+      throw;
+    }
+    task_runtime_.dec_tasks_to_complete();
+  }
+
+ private:
+  /** @brief Dirty-pruned compute plan whose task ids are executed. */
+  const ComputePlan& compute_plan_;
+
+  /** @brief Task-level dependency counters for this active phase. */
+  TaskDependencyState dependency_state_;
+
+  /** @brief Dirty execution closures aligned with task id. */
+  std::vector<SchedulerTaskRuntime::Task> tasks_by_id_;
+
+  /** @brief Scheduler runtime borrowed for ready release and completion. */
+  SchedulerTaskRuntime& task_runtime_;
+
+  /** @brief Ready handles aligned with task id. */
+  std::vector<TaskHandle> task_handles_;
+
+  /** @brief Whether this executor releases downstream dependents. */
+  bool release_dependents_ = false;
+
+  /** @brief Priority used for ready dependent submissions. */
+  SchedulerTaskPriority priority_ = SchedulerTaskPriority::Normal;
+};
 
 /**
  * @brief Runs dirty source tasks before downstream dirty tasks.
@@ -312,36 +434,77 @@ PreparedDirtyPlan<DirtyPlan> prepare_dirty_execution(
 template <typename MakeTask>
 void run_dirty_source_first(const DirtySourceFirstRunRequest& request,
                             MakeTask make_task) {
-  const std::vector<int>& source_node_ids = *request.source_node_ids;
-  const std::vector<int>& downstream_node_ids = *request.downstream_node_ids;
+  const ComputePlan& compute_plan = *request.compute_plan;
+  const std::vector<int>& source_task_ids = *request.source_task_ids;
+  const std::vector<int>& downstream_task_ids = *request.downstream_task_ids;
+  auto build_tasks_by_id = [&](const std::vector<int>& task_ids) {
+    std::vector<SchedulerTaskRuntime::Task> tasks_by_id(
+        compute_plan.task_graph.tasks.size());
+    for (int task_id : task_ids) {
+      if (task_id < 0 ||
+          task_id >= static_cast<int>(compute_plan.task_graph.tasks.size())) {
+        continue;
+      }
+      tasks_by_id[task_id] = make_task(task_id);
+    }
+    return tasks_by_id;
+  };
+
   if (request.runtime) {
     SchedulerTaskRuntime& dirty_task_runtime =
         ensure_scheduler_task_runtime(*request.runtime, request.intent);
-    std::vector<SchedulerTaskRuntime::Task> source_tasks;
-    std::vector<SchedulerTaskRuntime::Task> downstream_tasks;
-    source_tasks.reserve(source_node_ids.size());
-    downstream_tasks.reserve(downstream_node_ids.size());
-    for (int source_node_id : source_node_ids) {
-      source_tasks.push_back(make_task(source_node_id));
+    DirtyClosureTaskExecutor source_executor(
+        compute_plan, source_task_ids, build_tasks_by_id(source_task_ids),
+        dirty_task_runtime, false, SchedulerTaskPriority::High);
+    dirty_task_runtime.submit_initial_task_handles(
+        source_executor.handles_for(source_task_ids),
+        static_cast<int>(source_task_ids.size()), SchedulerTaskPriority::High);
+    dirty_task_runtime.wait_for_completion();
+
+    if (request.before_downstream) {
+      request.before_downstream();
     }
-    for (int downstream_node_id : downstream_node_ids) {
-      downstream_tasks.push_back(make_task(downstream_node_id));
-    }
-    ComputeTaskDispatcher::submit_dirty_ready_tasks_source_first(
-        dirty_task_runtime, std::move(source_tasks),
-        std::move(downstream_tasks), request.dirty_generation,
-        request.before_downstream);
+
+    DirtyClosureTaskExecutor downstream_executor(
+        compute_plan, downstream_task_ids,
+        build_tasks_by_id(downstream_task_ids), dirty_task_runtime, true,
+        SchedulerTaskPriority::Normal);
+    TaskGraphReadyChecker ready_checker;
+    std::vector<int> initial_downstream_ids =
+        ready_checker.initial_ready_task_ids(compute_plan.task_graph,
+                                             &downstream_task_ids);
+    dirty_task_runtime.submit_initial_task_handles(
+        downstream_executor.handles_for(initial_downstream_ids),
+        static_cast<int>(downstream_task_ids.size()),
+        SchedulerTaskPriority::Normal);
+    dirty_task_runtime.wait_for_completion();
     return;
   }
 
-  for (int source_node_id : source_node_ids) {
-    make_task(source_node_id)();
+  for (int source_task_id : source_task_ids) {
+    make_task(source_task_id)();
   }
   if (request.before_downstream) {
     request.before_downstream();
   }
-  for (int downstream_node_id : downstream_node_ids) {
-    make_task(downstream_node_id)();
+  std::vector<SchedulerTaskRuntime::Task> downstream_tasks =
+      build_tasks_by_id(downstream_task_ids);
+  TaskDependencyState dependency_state(compute_plan.execution_order,
+                                       compute_plan.task_graph,
+                                       downstream_task_ids);
+  std::function<void(int)> run_ready = [&](int task_id) {
+    if (task_id >= 0 && task_id < static_cast<int>(downstream_tasks.size()) &&
+        downstream_tasks[task_id]) {
+      downstream_tasks[task_id]();
+    }
+    for (int ready_id : dependency_state.release_dependents(task_id)) {
+      run_ready(ready_id);
+    }
+  };
+  TaskGraphReadyChecker ready_checker;
+  for (int task_id : ready_checker.initial_ready_task_ids(
+           compute_plan.task_graph, &downstream_task_ids)) {
+    run_ready(task_id);
   }
 }
 
