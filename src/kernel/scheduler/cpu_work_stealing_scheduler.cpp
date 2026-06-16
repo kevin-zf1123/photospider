@@ -8,8 +8,10 @@
 #include <iostream>
 #include <random>
 #include <sstream>
+#include <string>
 #include <thread>
 #include <utility>
+#include <vector>
 
 #include "kernel/graph_runtime.hpp"
 
@@ -71,11 +73,15 @@ void CpuWorkStealingScheduler::start() {
 }
 
 void CpuWorkStealingScheduler::shutdown() {
-  if (!running_.load(std::memory_order_acquire)) {
-    return;
+  {
+    std::scoped_lock<std::mutex, std::mutex> lock(global_queues_mutex_,
+                                                  completion_mutex_);
+    if (!running_.load(std::memory_order_acquire)) {
+      return;
+    }
+    running_.store(false, std::memory_order_release);
   }
 
-  running_.store(false, std::memory_order_release);
   cv_task_available_.notify_all();
   cv_completion_.notify_all();
 

@@ -18,6 +18,9 @@ create -> attach(runtime) -> start -> dispatch planned tasks -> shutdown -> deta
 `GraphRuntime::set_scheduler()` 在 runtime 已运行时只会在 attach 之后启动新
 scheduler，`GraphRuntime::stop()` 会关闭已注册 scheduler。`Kernel` 的
 bootstrap 代码必须通过 `GraphRuntime` 注册 scheduler，而不是预先启动 scheduler。
+Scheduler 关闭时必须先在 idle worker wait 和 completion wait 使用的同一同步保护下发布
+stop state，再通知这些 waiter。这样可以避免一个 worker 在批次最后一个任务完成后正要进入
+condition-variable sleep 时，shutdown 丢失唤醒。
 
 按 `ComputeIntent` 路由计算：
 
