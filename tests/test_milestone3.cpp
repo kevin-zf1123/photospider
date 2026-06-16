@@ -7,8 +7,11 @@
 #include <chrono>
 #include <filesystem>
 #include <future>
+#include <memory>
 #include <set>
+#include <string>
 #include <thread>
+#include <utility>
 #include <vector>
 
 #include "kernel/graph_runtime.hpp"
@@ -108,6 +111,35 @@ TEST(M33CpuWorkStealingScheduler, SubmitAndExecuteMultipleTasks) {
   EXPECT_EQ(counter.load(), kNumTasks);
 
   scheduler.shutdown();
+}
+
+TEST(M33CpuWorkStealingScheduler,
+     RepeatedShutdownAfterCompletedBatchDoesNotHang) {
+  constexpr int kIterations = 64;
+  constexpr int kNumTasks = 100;
+
+  for (int iteration = 0; iteration < kIterations; ++iteration) {
+    CpuWorkStealingScheduler scheduler(4);
+    scheduler.start();
+
+    std::atomic<int> counter{0};
+    std::vector<CpuWorkStealingScheduler::Task> tasks;
+    tasks.reserve(kNumTasks);
+    for (int i = 0; i < kNumTasks; ++i) {
+      tasks.push_back([&counter, &scheduler]() {
+        counter.fetch_add(1);
+        scheduler.dec_tasks_to_complete();
+      });
+    }
+
+    scheduler.submit_initial_tasks(std::move(tasks), kNumTasks);
+    scheduler.wait_for_completion();
+
+    EXPECT_EQ(counter.load(), kNumTasks);
+
+    scheduler.shutdown();
+    EXPECT_FALSE(scheduler.is_running());
+  }
 }
 
 TEST(M33CpuWorkStealingScheduler, HighPriorityTasks) {

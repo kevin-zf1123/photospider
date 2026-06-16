@@ -11,6 +11,7 @@
 #include <queue>
 #include <string>
 #include <thread>
+#include <utility>
 #include <vector>
 
 #include "kernel/scheduler/i_scheduler.hpp"
@@ -41,6 +42,20 @@ class CpuWorkStealingScheduler : public IScheduler,
   void attach(GraphRuntime* runtime) override;
   void detach() override;
   void start() override;
+  /**
+   * @brief Stops worker dispatch and joins all scheduler-owned threads.
+   *
+   * shutdown publishes the stop state under the same mutexes used by idle
+   * worker and completion waiters, then wakes both condition variables before
+   * joining workers. This preserves the scheduler lifecycle contract even when
+   * the last task completes while an idle worker is transitioning into
+   * condition-variable sleep.
+   *
+   * @throws Nothing directly; std::thread::join may terminate only if the
+   * thread object is invalid, which the scheduler guards with joinable().
+   * @note Pending queued callbacks are discarded after all workers have
+   * observed the stop state and exited.
+   */
   void shutdown() override;
   std::string name() const override;
   std::string get_stats() const override;
@@ -181,7 +196,21 @@ class CpuWorkStealingScheduler : public IScheduler,
     }
   };
 
-  // 工作线程主循环
+  /**
+   * @brief Executes the worker loop for one scheduler-owned CPU thread.
+   *
+   * The loop prefers high-priority global work, then local normal work, then
+   * global normal work, and finally stolen work from peer queues. When no work
+   * is visible, the worker parks on cv_task_available_ using
+   * global_queues_mutex_ so shutdown can publish the stop state without losing
+   * the wakeup.
+   *
+   * @param thread_id Stable worker index used for local queue ownership and
+   * trace context.
+   * @throws Nothing escapes; task exceptions are captured with set_exception().
+   * @note The method owns thread-local worker id and epoch context for the
+   * lifetime of the worker thread.
+   */
   void run_loop(int thread_id);
 
   // 从其他工作线程窃取任务

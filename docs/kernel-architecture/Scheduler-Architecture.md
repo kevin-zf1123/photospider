@@ -22,6 +22,10 @@ previously registered schedulers, `GraphRuntime::set_scheduler()` starts a new
 scheduler only after attach when the runtime is already running, and
 `GraphRuntime::stop()` shuts registered schedulers down. `Kernel` bootstrap code
 must register schedulers through `GraphRuntime` instead of pre-starting them.
+Scheduler shutdown must publish the stop state under the same synchronization
+used by idle worker waits and completion waits before notifying those waiters.
+This prevents shutdown from missing a worker that is transitioning into
+condition-variable sleep after the final task in a batch has completed.
 
 Compute routes by `ComputeIntent`:
 
