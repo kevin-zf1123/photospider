@@ -117,15 +117,14 @@ void DirtyRegionPlanner::finalize_dirty_entries(GraphModel& graph,
       entry.halo_hp = infer_halo_hp(graph.node(node_id));
       Policy::refresh_halo_fields(entry);
     }
-    if (is_monolithic_boundary(graph.node(node_id))) {
+    const Node& node = graph.node(node_id);
+    if (snapshot_builder_.is_monolithic_boundary(node)) {
       Policy::promote_monolithic(entry);
-      plan.snapshot.dirty_monolithic_nodes.push_back(
-          {node_id, Policy::kDomain, Policy::snapshot_work_roi(entry), true});
-    } else {
-      enumerate_tiles(plan.snapshot, node_id, Policy::kDomain,
-                      DirtyTileLevel::Micro, Policy::snapshot_work_roi(entry),
-                      Policy::tile_size());
     }
+    snapshot_builder_.append_node_work(
+        plan.snapshot, DirtyNodeWorkRecord{&node, node_id, Policy::kDomain,
+                                           Policy::snapshot_work_roi(entry),
+                                           Policy::tile_size()});
     plan.snapshot.per_node_dirty_rois[node_id].push_back(entry.roi_hp);
   }
   for (int node_id : erase_ids)
@@ -189,56 +188,36 @@ RealTimeDirtyPlan DirtyRegionPlanner::plan_real_time(
 DirtyRegionSnapshot DirtyRegionPlanner::begin_dirty_source(
     GraphModel& graph, int node_id, DirtyDomain domain,
     const cv::Rect& source_roi) {
-  DirtyRegionSnapshot snapshot =
-      graph.last_dirty_region_snapshot.value_or(DirtyRegionSnapshot{});
-  if (snapshot.graph_generation == 0) {
-    snapshot.graph_generation = ++graph.dirty_generation_counter;
-  }
-  apply_source_lifecycle_event(graph, snapshot, node_id, domain, &source_roi,
-                               DirtySourceLifecycleState::Updating);
-  refresh_actual_dirty_regions(graph, snapshot, domain);
-  graph.last_dirty_region_snapshot = snapshot;
-  graph.recent_dirty_region_snapshots.push_back(snapshot);
-  if (graph.recent_dirty_region_snapshots.size() > 16) {
-    graph.recent_dirty_region_snapshots.erase(
-        graph.recent_dirty_region_snapshots.begin());
-  }
-  graph.last_dirty_region_snapshot_debug = describe_snapshot(snapshot);
-  return snapshot;
+  return update_dirty_source_snapshot(graph, node_id, domain, &source_roi,
+                                      DirtySourceLifecycleState::Updating);
 }
 
 DirtyRegionSnapshot DirtyRegionPlanner::update_dirty_source(
     GraphModel& graph, int node_id, DirtyDomain domain,
     const cv::Rect& source_roi) {
-  DirtyRegionSnapshot snapshot =
-      graph.last_dirty_region_snapshot.value_or(DirtyRegionSnapshot{});
-  if (snapshot.graph_generation == 0) {
-    snapshot.graph_generation = ++graph.dirty_generation_counter;
-  }
-  apply_source_lifecycle_event(graph, snapshot, node_id, domain, &source_roi,
-                               DirtySourceLifecycleState::Updating);
-  refresh_actual_dirty_regions(graph, snapshot, domain);
-  graph.last_dirty_region_snapshot = snapshot;
-  graph.recent_dirty_region_snapshots.push_back(snapshot);
-  if (graph.recent_dirty_region_snapshots.size() > 16) {
-    graph.recent_dirty_region_snapshots.erase(
-        graph.recent_dirty_region_snapshots.begin());
-  }
-  graph.last_dirty_region_snapshot_debug = describe_snapshot(snapshot);
-  return snapshot;
+  return update_dirty_source_snapshot(graph, node_id, domain, &source_roi,
+                                      DirtySourceLifecycleState::Updating);
 }
 
 DirtyRegionSnapshot DirtyRegionPlanner::end_dirty_source(GraphModel& graph,
                                                          int node_id,
                                                          DirtyDomain domain) {
+  return update_dirty_source_snapshot(graph, node_id, domain, nullptr,
+                                      DirtySourceLifecycleState::Settled);
+}
+
+DirtyRegionSnapshot DirtyRegionPlanner::update_dirty_source_snapshot(
+    GraphModel& graph, int node_id, DirtyDomain domain,
+    const cv::Rect* source_roi, DirtySourceLifecycleState lifecycle) {
   DirtyRegionSnapshot snapshot =
       graph.last_dirty_region_snapshot.value_or(DirtyRegionSnapshot{});
   if (snapshot.graph_generation == 0) {
     snapshot.graph_generation = ++graph.dirty_generation_counter;
   }
-  apply_source_lifecycle_event(graph, snapshot, node_id, domain, nullptr,
-                               DirtySourceLifecycleState::Settled);
-  refresh_actual_dirty_regions(graph, snapshot, domain);
+  snapshot_builder_.apply_source_lifecycle_event(
+      graph, snapshot,
+      DirtySourceLifecycleUpdate{node_id, domain, source_roi, lifecycle});
+  snapshot_builder_.refresh_actual_dirty_regions(graph, snapshot, domain);
   graph.last_dirty_region_snapshot = snapshot;
   graph.recent_dirty_region_snapshots.push_back(snapshot);
   if (graph.recent_dirty_region_snapshots.size() > 16) {
@@ -303,94 +282,6 @@ void DirtyRegionPlanner::populate_dirty_source_metadata(
   snapshot.dirty_updating_count = 0;
 }
 
-void DirtyRegionPlanner::refresh_actual_dirty_regions(
-    GraphModel& graph, DirtyRegionSnapshot& snapshot,
-    DirtyDomain domain) const {
-  snapshot.dirty_tiles.clear();
-  snapshot.dirty_monolithic_nodes.clear();
-  snapshot.per_node_dirty_rois.clear();
-  snapshot.actual_dirty_rois.clear();
-  snapshot.edge_mappings.clear();
-
-  std::unordered_map<int, cv::Size> hp_size_cache;
-  for (const auto& [node_id, records] : snapshot.source_roi_records) {
-    if (!graph.has_node(node_id)) {
-      continue;
-    }
-    const Node& node = graph.node(node_id);
-    const cv::Size hp_size = infer_hp_size(graph, node_id, hp_size_cache);
-    for (const auto& record : records) {
-      if (record.domain != domain || is_rect_empty(record.source_roi)) {
-        continue;
-      }
-      cv::Rect clipped = clip_rect(record.source_roi, hp_size);
-      if (is_rect_empty(clipped)) {
-        continue;
-      }
-      if (domain == DirtyDomain::HighPrecision) {
-        clipped = clip_rect(align_rect(clipped, kHpMicroTileSize), hp_size);
-      } else {
-        cv::Size rt_size = scale_down_size(hp_size, kRtDownscaleFactor);
-        clipped =
-            clip_rect(align_rect(scale_down_rect(clipped, kRtDownscaleFactor),
-                                 kRtTileSize),
-                      rt_size);
-      }
-      snapshot.per_node_dirty_rois[node_id].push_back(clipped);
-      snapshot.actual_dirty_rois[node_id].push_back(clipped);
-      if (is_monolithic_boundary(node)) {
-        snapshot.dirty_monolithic_nodes.push_back(
-            {node_id, domain, clipped, true});
-      } else {
-        enumerate_tiles(snapshot, node_id, domain, DirtyTileLevel::Micro,
-                        clipped,
-                        domain == DirtyDomain::HighPrecision ? kHpMicroTileSize
-                                                             : kRtTileSize);
-      }
-    }
-  }
-}
-
-void DirtyRegionPlanner::apply_source_lifecycle_event(
-    GraphModel& graph, DirtyRegionSnapshot& snapshot, int node_id,
-    DirtyDomain domain, const cv::Rect* source_roi,
-    DirtySourceLifecycleState lifecycle) {
-  if (!graph.has_node(node_id)) {
-    throw GraphError(
-        GraphErrc::NotFound,
-        "Dirty source node " + std::to_string(node_id) + " not found.");
-  }
-  if (source_roi && is_rect_empty(*source_roi)) {
-    throw GraphError(
-        GraphErrc::InvalidParameter,
-        "Dirty source ROI is empty for node " + std::to_string(node_id) + ".");
-  }
-
-  if (std::find(snapshot.dirty_source_nodes.begin(),
-                snapshot.dirty_source_nodes.end(),
-                node_id) == snapshot.dirty_source_nodes.end()) {
-    snapshot.dirty_source_nodes.push_back(node_id);
-  }
-
-  DirtySourceNodeState& state = snapshot.dirty_source_state[node_id];
-  state.node_id = node_id;
-  state.domain = domain;
-  state.lifecycle = lifecycle;
-  state.generation = snapshot.graph_generation;
-  if (source_roi) {
-    state.source_rois.push_back(*source_roi);
-    snapshot.source_roi_records[node_id].push_back(
-        {node_id, domain, *source_roi, snapshot.graph_generation});
-  }
-
-  snapshot.dirty_updating_count = 0;
-  for (const auto& [_, source_state] : snapshot.dirty_source_state) {
-    if (source_state.lifecycle == DirtySourceLifecycleState::Updating) {
-      ++snapshot.dirty_updating_count;
-    }
-  }
-}
-
 cv::Size DirtyRegionPlanner::infer_hp_size(
     GraphModel& graph, int node_id,
     std::unordered_map<int, cv::Size>& cache) const {
@@ -437,31 +328,6 @@ int DirtyRegionPlanner::infer_halo_hp(const Node& node) const {
     return radius;
   }
   return 0;
-}
-
-bool DirtyRegionPlanner::is_monolithic_boundary(const Node& node) const {
-  const auto* impls =
-      OpRegistry::instance().get_implementations(node.type, node.subtype);
-  return impls && impls->monolithic_hp && !impls->tiled_hp;
-}
-
-void DirtyRegionPlanner::enumerate_tiles(DirtyRegionSnapshot& snapshot,
-                                         int node_id, DirtyDomain domain,
-                                         DirtyTileLevel level,
-                                         const cv::Rect& roi,
-                                         int tile_size) const {
-  if (is_rect_empty(roi) || tile_size <= 0)
-    return;
-  const cv::Rect aligned = align_rect(roi, tile_size);
-  for (int y = aligned.y; y < aligned.y + aligned.height; y += tile_size) {
-    for (int x = aligned.x; x < aligned.x + aligned.width; x += tile_size) {
-      cv::Rect tile_roi(x, y,
-                        std::min(tile_size, aligned.x + aligned.width - x),
-                        std::min(tile_size, aligned.y + aligned.height - y));
-      snapshot.dirty_tiles.push_back({node_id, domain, level, x / tile_size,
-                                      y / tile_size, tile_size, tile_roi});
-    }
-  }
 }
 
 std::string DirtyRegionPlanner::describe_snapshot(
