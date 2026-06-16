@@ -91,7 +91,7 @@ graph TD
 | `GraphCacheService` | Memory/disk cache operations and cache synchronization. |
 | `GraphInspectService` | Structured cache/spatial metadata inspection and dependency-tree snapshots built from graph topology. |
 | `GraphEventService` | Per-node compute event collection. |
-| `PluginManager` | Loads operation plugins and records operation sources. |
+| `PluginManager` | Loads operation plugins, records operation sources, and owns dynamic library handles until unload. |
 | `OpRegistry` | Global operation implementation registry, including HP/RT, tiled/monolithic, device metadata, and ROI propagators. |
 
 ## Maintained Documents

@@ -26,6 +26,18 @@ extern "C" void register_photospider_ops();
 
 操作插件依赖公共 `ImageBuffer` 和 `NodeOutput` 契约。
 
+## 操作插件库生命周期
+
+插件注册的操作回调可能指向该插件动态库内部的代码或 callable 对象。因此，只要该插件注册的任何操作 key
+仍能从 `OpRegistry` 中解析，host 就必须保留该动态库句柄。
+
+`PluginManager` 拥有操作插件句柄。一次成功加载会记录插件绝对路径、新注册的操作 key，以及一个由 RAII
+管理的动态库句柄。卸载时会先从 `OpRegistry` 移除该插件的 key，然后释放保留的句柄。这个顺序可以防止
+registry 暴露代码已经被卸载的回调。
+
+旧的 `load_plugins` helper 会让成功加载的操作插件库在进程生命周期内常驻。需要显式卸载语义的调用方应使用
+`PluginManager` 或保留句柄的 loader API，而不是在注册后立即丢弃动态库。
+
 ## 调度器插件 ABI
 
 调度器插件导出这些名称的 C 符号：

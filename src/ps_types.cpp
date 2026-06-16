@@ -117,12 +117,10 @@ bool OpRegistry::unregister_op(const std::string& type,
 }
 
 bool OpRegistry::unregister_key(const std::string& key) {
-  metadata_table_.erase(key);  // 同时清理元数据
-  auto it = table_.find(key);
-  if (it == table_.end())
-    return false;
-  table_.erase(it);
-  return true;
+  const bool removed_metadata = metadata_table_.erase(key) > 0;
+  const bool removed_legacy = table_.erase(key) > 0;
+  const bool removed_impls = impl_table_.erase(key) > 0;
+  return removed_metadata || removed_legacy || removed_impls;
 }
 
 // -------------------------

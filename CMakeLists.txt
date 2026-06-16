@@ -322,7 +322,9 @@ endforeach()
 
 if(BUILD_TESTING)
     set(TEST_SCHEDULER_PLUGIN_DIR ${CMAKE_BINARY_DIR}/test_schedulers)
+    set(TEST_OP_PLUGIN_DIR ${CMAKE_BINARY_DIR}/test_plugins)
     file(MAKE_DIRECTORY ${TEST_SCHEDULER_PLUGIN_DIR})
+    file(MAKE_DIRECTORY ${TEST_OP_PLUGIN_DIR})
 
     add_library(destroy_count_scheduler_plugin SHARED
         tests/fixtures/scheduler_plugins/destroy_count_scheduler_plugin.cpp
@@ -343,6 +345,27 @@ if(BUILD_TESTING)
         "${PROJECT_SOURCE_DIR}/src"
     )
     target_link_libraries(destroy_count_scheduler_plugin PRIVATE photospider_lib)
+
+    add_library(lifecycle_op_plugin SHARED
+        tests/fixtures/ops/lifecycle_op_plugin.cpp
+    )
+    set_target_properties(lifecycle_op_plugin PROPERTIES
+        LIBRARY_OUTPUT_DIRECTORY "${TEST_OP_PLUGIN_DIR}/lifecycle"
+        RUNTIME_OUTPUT_DIRECTORY "${TEST_OP_PLUGIN_DIR}/lifecycle"
+        BUILD_RPATH "${CMAKE_BINARY_DIR}/lib"
+        INSTALL_RPATH "$ORIGIN/../../lib"
+    )
+    if(APPLE)
+        set_target_properties(lifecycle_op_plugin PROPERTIES
+            MACOSX_RPATH ON
+            INSTALL_RPATH "@loader_path/../../lib"
+        )
+    endif()
+    target_include_directories(lifecycle_op_plugin PRIVATE
+        "${PROJECT_SOURCE_DIR}/include"
+        "${PROJECT_SOURCE_DIR}/src"
+    )
+    target_link_libraries(lifecycle_op_plugin PRIVATE photospider_lib)
 endif()
 
 # ==============================================================================
@@ -441,6 +464,11 @@ if(BUILD_TESTING)
     # [M3.1] OpRegistry 多设备实现测试
     add_ps_test(test_op_registry_m31 tests/test_op_registry_m31.cpp)
 
+    # Operation plugin manager handle lifetime tests
+    add_ps_test(test_plugin_manager tests/test_plugin_manager.cpp)
+    target_link_libraries(test_plugin_manager PRIVATE ${CMAKE_DL_LIBS})
+    add_dependencies(test_plugin_manager lifecycle_op_plugin)
+
     # [M3.5] GPU Pipeline 调度器测试
     add_ps_test(test_gpu_pipeline_scheduler tests/test_gpu_pipeline_scheduler.cpp)
 
@@ -456,6 +484,7 @@ if(BUILD_TESTING)
     gtest_discover_tests(test_milestone2 WORKING_DIRECTORY ${PROJECT_SOURCE_DIR})
     gtest_discover_tests(test_milestone3 WORKING_DIRECTORY ${PROJECT_SOURCE_DIR})
     gtest_discover_tests(test_op_registry_m31 WORKING_DIRECTORY ${PROJECT_SOURCE_DIR})
+    gtest_discover_tests(test_plugin_manager WORKING_DIRECTORY ${PROJECT_SOURCE_DIR})
     gtest_discover_tests(test_milestone34 WORKING_DIRECTORY ${PROJECT_SOURCE_DIR})
     # test_propagation is intentionally a scriptable REPL/tool target rather
     # than a GTest binary. Keep it buildable for CI scripts, but do not run
