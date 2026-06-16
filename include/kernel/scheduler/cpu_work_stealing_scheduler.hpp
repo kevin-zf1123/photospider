@@ -187,9 +187,6 @@ class CpuWorkStealingScheduler : public IScheduler,
   // 从其他工作线程窃取任务
   std::optional<ScheduledTask> steal_task(int stealer_id);
 
-  // 取消过期的排队任务
-  void cancel_stale_enqueued_tasks(uint64_t min_epoch);
-
   // ---------------------------------------------------------------------------
   // 成员变量
   // ---------------------------------------------------------------------------

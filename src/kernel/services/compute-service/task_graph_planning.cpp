@@ -2,6 +2,7 @@
 
 #include <algorithm>
 #include <cstddef>
+#include <cstdint>
 #include <memory>
 #include <string>
 #include <unordered_map>
@@ -11,7 +12,10 @@
 
 #include "graph_model.hpp"  // NOLINT(build/include_subdir)
 #include "kernel/services/compute-service/compute_cache_policy.hpp"
+#include "kernel/services/compute-service/compute_geometry.hpp"
+#include "kernel/services/compute-service/node_executor.hpp"
 #include "kernel/services/compute-service/task_population_strategy.hpp"
+#include "kernel/services/graph_extent_resolver.hpp"
 
 namespace ps::compute {
 namespace {
@@ -303,44 +307,301 @@ bool rois_overlap(const cv::Rect& upstream_roi,
 }
 
 /**
- * @brief Determines whether one upstream task must precede one downstream task.
+ * @brief Builds a stable integer key for a tile grid coordinate.
  *
- * @param dependency Node-level dependency carrying optional ROI mapping.
- * @param from_task Candidate upstream task.
- * @param to_task Candidate downstream task.
- * @return True when to_task must wait for from_task.
+ * @param tile_x Tile x coordinate from PlannedTask.
+ * @param tile_y Tile y coordinate from PlannedTask.
+ * @return Packed coordinate key suitable for unordered_map lookup.
  * @throws Nothing.
- * @note Tile-to-tile image dependencies use ROI overlap. Non-image,
- * non-tiled, monolithic, or unknown ROI relationships keep whole-node
- * compatibility semantics.
+ * @note Tile coordinates are non-negative planner ids, not pixel positions.
  */
-bool task_dependency_applies(const PlannedDependency& dependency,
-                             const PlannedTask& from_task,
-                             const PlannedTask& to_task) {
-  if (dependency.input_kind != "image") {
-    return true;
-  }
-  if (from_task.kind != PlannedTaskKind::Tile ||
-      to_task.kind != PlannedTaskKind::Tile) {
-    return true;
-  }
-  if (!has_roi(from_task.output_roi) || !has_roi(to_task.output_roi)) {
-    return true;
-  }
+std::int64_t tile_coordinate_key(int tile_x, int tile_y) {
+  return (static_cast<std::int64_t>(tile_x) << 32) ^
+         static_cast<std::uint32_t>(tile_y);
+}
 
-  const bool dependency_has_roi =
-      has_roi(dependency.from_roi) || has_roi(dependency.to_roi);
-  if (dependency_has_roi) {
-    if (has_roi(dependency.to_roi) &&
-        !rois_overlap(to_task.output_roi, dependency.to_roi)) {
-      return false;
+/**
+ * @brief Tile lookup for one upstream node inside a task graph.
+ *
+ * The index stores all task ids plus a grid map for tiled nodes whose tasks
+ * have consistent positive tile sizes and coordinates. Grid lookup lets
+ * dependency construction enumerate only tiles covered by an input ROI.
+ */
+struct NodeTaskDependencyIndex {
+  /** @brief All task ids owned by the node in stable task order. */
+  std::vector<int> task_ids;
+  /** @brief Task ids that are not tile-grid addressable. */
+  std::vector<int> non_grid_task_ids;
+  /** @brief Tile size shared by grid-addressable tile tasks. */
+  int tile_size = 0;
+  /** @brief Whether tile_by_coordinate can be used for ROI range lookup. */
+  bool grid_addressable = true;
+  /** @brief Tile task id keyed by tile_x/tile_y coordinate. */
+  std::unordered_map<std::int64_t, int> tile_by_coordinate;
+};
+
+/**
+ * @brief Appends one task to a per-node dependency index.
+ *
+ * @param task Task being indexed.
+ * @param index Node-local task index being updated.
+ * @throws std::bad_alloc if vectors or maps grow.
+ * @note Mixed tile sizes or missing tile coordinates disable range lookup for
+ * that node; downstream tasks then depend on the node-level producer tasks.
+ */
+void add_task_to_dependency_index(const PlannedTask& task,
+                                  NodeTaskDependencyIndex& index) {
+  index.task_ids.push_back(task.task_id);
+  if (task.kind != PlannedTaskKind::Tile || task.tile_size <= 0 ||
+      task.tile_x < 0 || task.tile_y < 0 || !has_roi(task.output_roi)) {
+    index.non_grid_task_ids.push_back(task.task_id);
+    return;
+  }
+  if (index.tile_size == 0) {
+    index.tile_size = task.tile_size;
+  } else if (index.tile_size != task.tile_size) {
+    index.grid_addressable = false;
+  }
+  index.tile_by_coordinate[tile_coordinate_key(task.tile_x, task.tile_y)] =
+      task.task_id;
+}
+
+/**
+ * @brief Builds node-keyed task indexes for dependency construction.
+ *
+ * @param tasks Dense task list from a ComputeTaskGraph.
+ * @return Map from node id to task id and tile-grid lookup metadata.
+ * @throws std::bad_alloc if index storage grows.
+ * @note The returned indexes never mutate tasks and can be reused for both
+ * full plans and dirty overlay dependency views.
+ */
+std::unordered_map<int, NodeTaskDependencyIndex> build_task_dependency_index(
+    const std::vector<PlannedTask>& tasks) {
+  std::unordered_map<int, NodeTaskDependencyIndex> indexes;
+  for (const auto& task : tasks) {
+    add_task_to_dependency_index(task, indexes[task.node_id]);
+  }
+  for (auto& [_, index] : indexes) {
+    if (!index.non_grid_task_ids.empty() || index.tile_size <= 0 ||
+        index.tile_by_coordinate.empty()) {
+      index.grid_addressable = false;
     }
-    const cv::Rect upstream_roi =
-        has_roi(dependency.from_roi) ? dependency.from_roi : to_task.output_roi;
-    return rois_overlap(from_task.output_roi, upstream_roi);
+  }
+  return indexes;
+}
+
+/**
+ * @brief Resolves one node output extent for planning-time ROI inference.
+ *
+ * @param graph Graph whose node extents are resolved.
+ * @param node_id Node id to resolve.
+ * @param resolver Shared resolver used by the dependency builder.
+ * @param extent_cache Request-local extent cache.
+ * @return Resolved output size, or an empty size for invalid ids.
+ * @throws GraphError or standard exceptions from GraphExtentResolver.
+ * @note The cache is local to dependency construction and does not persist in
+ * GraphModel.
+ */
+cv::Size resolve_planned_extent(
+    const GraphModel& graph, int node_id, GraphExtentResolver& resolver,
+    std::unordered_map<int, cv::Size>& extent_cache) {
+  if (!graph.has_node(node_id)) {
+    return cv::Size();
+  }
+  return resolver.resolve_output_extent(graph, node_id, extent_cache);
+}
+
+/**
+ * @brief Infers the input ROI consumed by one downstream tile task.
+ *
+ * @param dependency Node-level edge whose upstream node provides the input.
+ * @param to_task Downstream tile task being planned.
+ * @param graph Optional graph used to match NodeExecutor ROI behavior.
+ * @param resolver Shared extent resolver for graph-backed inference.
+ * @param extent_cache Request-local extent cache.
+ * @return Upstream ROI required by to_task, or an empty rectangle when unknown.
+ * @throws GraphError or propagator exceptions from graph-backed ROI mapping.
+ * @note When graph is present this calls NodeExecutor::input_roi_for_tile() so
+ * halo and RandomAccess operators match the execution path. Without graph, the
+ * function falls back to dependency ROI metadata or aligned output ROI.
+ */
+cv::Rect required_upstream_roi_for_task(
+    const PlannedDependency& dependency, const PlannedTask& to_task,
+    const GraphModel* graph, GraphExtentResolver& resolver,
+    std::unordered_map<int, cv::Size>& extent_cache) {
+  if (graph && graph->has_node(dependency.from_node_id) &&
+      graph->has_node(dependency.to_node_id) && has_roi(to_task.output_roi)) {
+    const cv::Size upstream_extent = resolve_planned_extent(
+        *graph, dependency.from_node_id, resolver, extent_cache);
+    if (upstream_extent.width > 0 && upstream_extent.height > 0) {
+      ImageBuffer input_buffer;
+      input_buffer.width = upstream_extent.width;
+      input_buffer.height = upstream_extent.height;
+      input_buffer.channels = 1;
+      input_buffer.type = DataType::FLOAT32;
+
+      TiledExecutionConfig config;
+      config.tile_size = to_task.tile_size > 0 ? to_task.tile_size : 256;
+      config.output_roi = to_task.output_roi;
+      const cv::Size downstream_extent = resolve_planned_extent(
+          *graph, dependency.to_node_id, resolver, extent_cache);
+      if (downstream_extent.width > 0 && downstream_extent.height > 0) {
+        config.output_size = downstream_extent;
+      }
+      const Node& downstream_node = graph->node(dependency.to_node_id);
+      if (auto metadata = OpRegistry::instance().get_metadata(
+              downstream_node.type, downstream_node.subtype)) {
+        config.metadata = *metadata;
+      }
+      return NodeExecutor::input_roi_for_tile(
+          const_cast<GraphModel&>(*graph), downstream_node, to_task.output_roi,
+          input_buffer, config);
+    }
   }
 
-  return rois_overlap(from_task.output_roi, to_task.output_roi);
+  if (has_roi(dependency.from_roi)) {
+    return dependency.from_roi;
+  }
+  return to_task.output_roi;
+}
+
+/**
+ * @brief Appends upstream tile ids whose output tiles overlap a required ROI.
+ *
+ * @param dependency_ids Destination dependency ids for one downstream task.
+ * @param upstream_index Grid-addressable upstream task index.
+ * @param required_roi Upstream input ROI consumed by the downstream task.
+ * @param tasks Dense task list used to verify edge-tile overlap.
+ * @throws std::bad_alloc if dependency_ids grows.
+ * @note The helper enumerates coordinate ranges directly and performs a final
+ * ROI overlap check only for edge tiles.
+ */
+void append_covering_upstream_tiles(
+    std::vector<int>& dependency_ids,
+    const NodeTaskDependencyIndex& upstream_index, const cv::Rect& required_roi,
+    const std::vector<PlannedTask>& tasks) {
+  if (!upstream_index.grid_addressable || upstream_index.tile_size <= 0) {
+    return;
+  }
+  if (!has_roi(required_roi)) {
+    return;
+  }
+  const int tile_size = upstream_index.tile_size;
+  const int x_begin = std::max(0, required_roi.x) / tile_size;
+  const int y_begin = std::max(0, required_roi.y) / tile_size;
+  const int x_last =
+      std::max(0, required_roi.x + required_roi.width - 1) / tile_size;
+  const int y_last =
+      std::max(0, required_roi.y + required_roi.height - 1) / tile_size;
+  for (int tile_y = y_begin; tile_y <= y_last; ++tile_y) {
+    for (int tile_x = x_begin; tile_x <= x_last; ++tile_x) {
+      const auto tile_it = upstream_index.tile_by_coordinate.find(
+          tile_coordinate_key(tile_x, tile_y));
+      if (tile_it == upstream_index.tile_by_coordinate.end()) {
+        continue;
+      }
+      const int from_task_id = tile_it->second;
+      if (from_task_id < 0 || from_task_id >= static_cast<int>(tasks.size())) {
+        continue;
+      }
+      const PlannedTask& from_task = tasks[from_task_id];
+      if (!rois_overlap(from_task.output_roi, required_roi)) {
+        continue;
+      }
+      append_unique(dependency_ids, from_task_id);
+    }
+  }
+}
+
+/**
+ * @brief Determines whether a task pair can use spatial tile dependency logic.
+ *
+ * @param dependency Node-level dependency under consideration.
+ * @param upstream_index Task index for dependency.from_node_id.
+ * @param to_task Downstream task being populated.
+ * @return True when the edge can be reduced to ROI-covered upstream tiles.
+ * @throws Nothing.
+ * @note Non-image edges and non-tile downstream work keep whole-node
+ * dependency semantics.
+ */
+bool can_use_spatial_tile_dependency(
+    const PlannedDependency& dependency,
+    const NodeTaskDependencyIndex& upstream_index, const PlannedTask& to_task) {
+  return dependency.input_kind == "image" && upstream_index.grid_addressable &&
+         to_task.kind == PlannedTaskKind::Tile && has_roi(to_task.output_roi);
+}
+
+/**
+ * @brief Appends every producer task for a node-level dependency.
+ *
+ * @param dependency_ids Destination dependency ids for one downstream task.
+ * @param upstream_index Upstream node task index.
+ * @throws std::bad_alloc if dependency_ids grows.
+ * @note This is used for parameter edges, monolithic producers, and downstream
+ * tasks that execute a whole output rather than a tile ROI.
+ */
+void append_node_dependency_tasks(
+    std::vector<int>& dependency_ids,
+    const NodeTaskDependencyIndex& upstream_index) {
+  for (int from_task_id : upstream_index.task_ids) {
+    append_unique(dependency_ids, from_task_id);
+  }
+}
+
+/**
+ * @brief Builds dependency ids from node dependencies and optional graph hints.
+ *
+ * @param tasks Dense task graph tasks to inspect.
+ * @param dependencies Node-level dependencies to lower to task ids.
+ * @param graph Optional graph used for execution-accurate tile input ROI.
+ * @return Dependency task ids aligned with tasks by dense task id.
+ * @throws GraphError, std::out_of_range, or standard allocation exceptions.
+ * @note Tiled image edges enumerate upstream tile ranges directly. Whole-node,
+ * parameter, and non-grid producer dependencies attach the upstream node's
+ * task ids without constructing a Cartesian task pair scan.
+ */
+std::vector<std::vector<int>> build_task_dependency_ids(
+    const std::vector<PlannedTask>& tasks,
+    const std::vector<PlannedDependency>& dependencies,
+    const GraphModel* graph) {
+  std::vector<std::vector<int>> dependency_ids(tasks.size());
+  const auto task_index_by_node = build_task_dependency_index(tasks);
+  GraphExtentResolver extent_resolver;
+  std::unordered_map<int, cv::Size> extent_cache;
+
+  for (const auto& dependency : dependencies) {
+    const auto from_it = task_index_by_node.find(dependency.from_node_id);
+    const auto to_it = task_index_by_node.find(dependency.to_node_id);
+    if (from_it == task_index_by_node.end() ||
+        to_it == task_index_by_node.end()) {
+      continue;
+    }
+    const NodeTaskDependencyIndex& upstream_index = from_it->second;
+    const NodeTaskDependencyIndex& downstream_index = to_it->second;
+    for (int to_task_id : downstream_index.task_ids) {
+      if (to_task_id < 0 || to_task_id >= static_cast<int>(tasks.size())) {
+        continue;
+      }
+      const PlannedTask& to_task = tasks[to_task_id];
+      if (has_roi(dependency.to_roi) &&
+          (!has_roi(to_task.output_roi) ||
+           !rois_overlap(to_task.output_roi, dependency.to_roi))) {
+        continue;
+      }
+      std::vector<int>& ids = dependency_ids.at(to_task_id);
+      if (can_use_spatial_tile_dependency(dependency, upstream_index,
+                                          to_task)) {
+        const cv::Rect required_roi = required_upstream_roi_for_task(
+            dependency, to_task, graph, extent_resolver, extent_cache);
+        append_covering_upstream_tiles(ids, upstream_index, required_roi,
+                                       tasks);
+        continue;
+      }
+      append_node_dependency_tasks(ids, upstream_index);
+    }
+  }
+
+  return dependency_ids;
 }
 
 /**
@@ -349,36 +610,23 @@ bool task_dependency_applies(const PlannedDependency& dependency,
  * @param result Plan whose ComputeTaskGraph task dependency metadata is
  * refreshed.
  * @throws std::bad_alloc if node-to-task lookup or ready ids grow.
- * @note Tile-to-tile image edges depend only on overlapping ROIs; non-tiled or
- * unknown spatial relationships retain whole-node compatibility semantics.
+ * @note Tile-to-tile image edges depend on the downstream input ROI. Whole-node
+ * and parameter dependencies attach producer task ids directly.
  */
-void populate_task_dependencies(ComputePlan& result) {
+void populate_task_dependencies(ComputePlan& result, const GraphModel* graph) {
   result.task_graph.initial_task_ids.clear();
-  for (auto& task : result.task_graph.tasks) {
-    task.dependency_task_ids.clear();
-  }
-
-  std::unordered_map<int, std::vector<int>> task_ids_by_node;
-  for (const auto& task : result.task_graph.tasks) {
-    task_ids_by_node[task.node_id].push_back(task.task_id);
-  }
-
   std::unordered_set<int> dependent_task_ids;
-  for (const auto& dependency : result.task_graph.dependencies) {
-    const auto from_it = task_ids_by_node.find(dependency.from_node_id);
-    const auto to_it = task_ids_by_node.find(dependency.to_node_id);
-    if (from_it == task_ids_by_node.end() || to_it == task_ids_by_node.end())
+  std::vector<std::vector<int>> dependency_ids = build_task_dependency_ids(
+      result.task_graph.tasks, result.task_graph.dependencies, graph);
+  for (auto& task : result.task_graph.tasks) {
+    if (task.task_id < 0 ||
+        task.task_id >= static_cast<int>(dependency_ids.size())) {
+      task.dependency_task_ids.clear();
       continue;
-    for (int to_task_id : to_it->second) {
-      PlannedTask& to_task = result.task_graph.tasks.at(to_task_id);
-      for (int from_task_id : from_it->second) {
-        const PlannedTask& from_task = result.task_graph.tasks.at(from_task_id);
-        if (!task_dependency_applies(dependency, from_task, to_task)) {
-          continue;
-        }
-        append_unique(to_task.dependency_task_ids, from_task_id);
-        dependent_task_ids.insert(to_task_id);
-      }
+    }
+    task.dependency_task_ids = std::move(dependency_ids[task.task_id]);
+    if (!task.dependency_task_ids.empty()) {
+      dependent_task_ids.insert(task.task_id);
     }
   }
 
@@ -446,7 +694,7 @@ void clear_dirty_work_metadata(ComputePlan& result) {
  * @throws GraphError or standard exceptions from task population, graph access,
  * op metadata lookup, or allocation.
  * @note This helper is the shared spine for full graph expansion, node/cache
- * pruning compatibility, and dirty snapshot pruning.
+ * pruning, and dirty snapshot inspection.
  */
 ComputePlan build_plan_from_nodes(const ComputeRequest& request,
                                   const std::vector<int>& planned_nodes,
@@ -474,7 +722,7 @@ ComputePlan build_plan_from_nodes(const ComputeRequest& request,
   populate_node_dependency_lists(result);
   TaskPopulationStrategy task_population;
   task_population.populate(result, snapshot, domain, graph);
-  populate_task_dependencies(result);
+  populate_task_dependencies(result, graph);
   return result;
 }
 
@@ -638,39 +886,17 @@ std::vector<PlannedDependency> merged_overlay_dependencies(
  *
  * @param plan Immutable task graph whose tasks are inspected.
  * @param dependencies Node-level dependencies with optional ROI mappings.
+ * @param graph Optional graph used for execution-accurate tile input ROI.
  * @return Dependency ids aligned with plan.task_graph.tasks.
  * @throws std::bad_alloc or std::out_of_range on inconsistent task ids.
- * @note The helper is the overlay equivalent of populate_task_dependencies()
- * and does not mutate PlannedTask records.
+ * @note The helper is the overlay equivalent of populate_task_dependencies();
+ * it shares the same tile range builder and does not mutate PlannedTask
+ * records.
  */
 std::vector<std::vector<int>> build_dependency_ids_for_view(
-    const ComputePlan& plan,
-    const std::vector<PlannedDependency>& dependencies) {
-  const size_t task_count = plan.task_graph.tasks.size();
-  std::vector<std::vector<int>> dependency_ids(task_count);
-
-  std::unordered_map<int, std::vector<int>> task_ids_by_node;
-  for (const auto& task : plan.task_graph.tasks) {
-    task_ids_by_node[task.node_id].push_back(task.task_id);
-  }
-
-  for (const auto& dependency : dependencies) {
-    const auto from_it = task_ids_by_node.find(dependency.from_node_id);
-    const auto to_it = task_ids_by_node.find(dependency.to_node_id);
-    if (from_it == task_ids_by_node.end() || to_it == task_ids_by_node.end())
-      continue;
-    for (int to_task_id : to_it->second) {
-      const PlannedTask& to_task = plan.task_graph.tasks.at(to_task_id);
-      for (int from_task_id : from_it->second) {
-        const PlannedTask& from_task = plan.task_graph.tasks.at(from_task_id);
-        if (!task_dependency_applies(dependency, from_task, to_task)) {
-          continue;
-        }
-        append_unique(dependency_ids.at(to_task_id), from_task_id);
-      }
-    }
-  }
-  return dependency_ids;
+    const ComputePlan& plan, const std::vector<PlannedDependency>& dependencies,
+    const GraphModel* graph) {
+  return build_task_dependency_ids(plan.task_graph.tasks, dependencies, graph);
 }
 
 /**
@@ -791,6 +1017,37 @@ ComputePlanSummary summarize_compute_plan(
                                 std::move(shared_plan));
 }
 
+/**
+ * @brief Builds immutable lookup indexes for a full task graph expansion.
+ *
+ * @param expanded Full task graph whose index fields are rebuilt.
+ * @throws std::bad_alloc if any index grows.
+ * @note Indexes reference vector positions and task ids owned by expanded, so
+ * callers must rebuild them whenever expanded_work, tasks, or dependencies are
+ * replaced.
+ */
+void populate_full_task_graph_indexes(FullTaskGraph& expanded) {
+  expanded.work_index_by_node.clear();
+  expanded.task_ids_by_node.clear();
+  expanded.dependency_indices_by_to_node.clear();
+  expanded.work_index_by_node.reserve(expanded.expanded_work.size());
+  expanded.task_ids_by_node.reserve(expanded.expanded_work.size());
+  expanded.dependency_indices_by_to_node.reserve(
+      expanded.task_graph.dependencies.size());
+  for (size_t i = 0; i < expanded.expanded_work.size(); ++i) {
+    expanded.work_index_by_node[expanded.expanded_work[i].node_id] = i;
+  }
+  for (const auto& task : expanded.task_graph.tasks) {
+    expanded.task_ids_by_node[task.node_id].push_back(task.task_id);
+  }
+  for (size_t i = 0; i < expanded.task_graph.dependencies.size(); ++i) {
+    expanded
+        .dependency_indices_by_to_node[expanded.task_graph.dependencies[i]
+                                           .to_node_id]
+        .push_back(i);
+  }
+}
+
 FullTaskGraph FullTaskGraphExpander::expand(const GraphModel& graph,
                                             ComputeIntent intent) const {
   ComputeRequest request;
@@ -804,6 +1061,7 @@ FullTaskGraph FullTaskGraphExpander::expand(const GraphModel& graph,
   expanded.expanded_node_ids = full_plan.planned_nodes;
   expanded.expanded_work = full_plan.planned_work;
   expanded.task_graph = full_plan.task_graph;
+  populate_full_task_graph_indexes(expanded);
   return expanded;
 }
 
@@ -819,12 +1077,6 @@ ComputePlan NodeCacheTaskGraphPruner::prune(
 
   std::unordered_set<int> selected_nodes(execution_order.begin(),
                                          execution_order.end());
-  std::unordered_map<int, const PlannedNodeWork*> full_work_by_node;
-  full_work_by_node.reserve(full_graph.expanded_work.size());
-  for (const auto& work : full_graph.expanded_work) {
-    full_work_by_node[work.node_id] = &work;
-  }
-
   result.planned_work.reserve(execution_order.size());
   for (int node_id : execution_order) {
     if (!graph.has_node(node_id)) {
@@ -832,13 +1084,14 @@ ComputePlan NodeCacheTaskGraphPruner::prune(
                                                 std::to_string(node_id) +
                                                 " not found.");
     }
-    auto full_work_it = full_work_by_node.find(node_id);
-    if (full_work_it == full_work_by_node.end()) {
+    auto full_work_it = full_graph.work_index_by_node.find(node_id);
+    if (full_work_it == full_graph.work_index_by_node.end() ||
+        full_work_it->second >= full_graph.expanded_work.size()) {
       throw GraphError(
           GraphErrc::ComputeError,
           "Full task graph is missing node " + std::to_string(node_id) + ".");
     }
-    PlannedNodeWork work = *full_work_it->second;
+    PlannedNodeWork work = full_graph.expanded_work[full_work_it->second];
     work.task_ids.clear();
     work.dependency_node_ids.clear();
     work.dependent_node_ids.clear();
@@ -848,33 +1101,55 @@ ComputePlan NodeCacheTaskGraphPruner::prune(
     result.planned_work.push_back(std::move(work));
   }
 
-  for (const auto& task : full_graph.task_graph.tasks) {
-    if (!selected_nodes.count(task.node_id))
-      continue;
-    PlannedTask pruned_task = task;
-    pruned_task.task_id = static_cast<int>(result.task_graph.tasks.size());
-    pruned_task.dependency_task_ids.clear();
-    result.task_graph.tasks.push_back(std::move(pruned_task));
-  }
-
-  for (const auto& dependency : full_graph.task_graph.dependencies) {
-    if (!selected_nodes.count(dependency.from_node_id) ||
-        !selected_nodes.count(dependency.to_node_id)) {
+  for (int node_id : execution_order) {
+    auto task_ids_it = full_graph.task_ids_by_node.find(node_id);
+    if (task_ids_it == full_graph.task_ids_by_node.end()) {
       continue;
     }
-    result.task_graph.dependencies.push_back(dependency);
+    for (int full_task_id : task_ids_it->second) {
+      if (full_task_id < 0 ||
+          full_task_id >=
+              static_cast<int>(full_graph.task_graph.tasks.size())) {
+        continue;
+      }
+      PlannedTask pruned_task = full_graph.task_graph.tasks[full_task_id];
+      pruned_task.task_id = static_cast<int>(result.task_graph.tasks.size());
+      pruned_task.dependency_task_ids.clear();
+      result.task_graph.tasks.push_back(std::move(pruned_task));
+    }
+  }
+
+  for (int to_node_id : execution_order) {
+    auto dependency_indices_it =
+        full_graph.dependency_indices_by_to_node.find(to_node_id);
+    if (dependency_indices_it ==
+        full_graph.dependency_indices_by_to_node.end()) {
+      continue;
+    }
+    for (size_t dependency_index : dependency_indices_it->second) {
+      if (dependency_index >= full_graph.task_graph.dependencies.size()) {
+        continue;
+      }
+      const PlannedDependency& dependency =
+          full_graph.task_graph.dependencies[dependency_index];
+      if (!selected_nodes.count(dependency.from_node_id)) {
+        continue;
+      }
+      result.task_graph.dependencies.push_back(dependency);
+    }
   }
 
   rebuild_work_task_ids(result);
   populate_node_dependency_lists(result);
-  populate_task_dependencies(result);
+  populate_task_dependencies(result, &graph);
   return result;
 }
 
 ComputePlan DirtySnapshotTaskGraphPruner::prune(
-    const ComputePlan& node_cache_plan,
-    const DirtyRegionSnapshot& snapshot) const {
-  const DirtyTaskSelectionOverlay selection = select(node_cache_plan, snapshot);
+    const ComputePlan& node_cache_plan, const DirtyRegionSnapshot& snapshot,
+    const GraphModel& graph) const {
+  const DirtyTaskSelectionOverlay selection =
+      select(node_cache_plan, snapshot, graph);
   ComputePlan result = node_cache_plan;
 
   clear_dirty_work_metadata(result);
@@ -899,13 +1174,13 @@ ComputePlan DirtySnapshotTaskGraphPruner::prune(
   }
   rebuild_work_task_ids(result);
   populate_node_dependency_lists(result);
-  populate_task_dependencies(result);
+  populate_task_dependencies(result, &graph);
   return result;
 }
 
 DirtyTaskSelectionOverlay DirtySnapshotTaskGraphPruner::select(
-    const ComputePlan& node_cache_plan,
-    const DirtyRegionSnapshot& snapshot) const {
+    const ComputePlan& node_cache_plan, const DirtyRegionSnapshot& snapshot,
+    const GraphModel& graph) const {
   DirtyTaskSelectionOverlay selection;
   selection.generation = snapshot.graph_generation;
   selection.domain = domain_for_intent(node_cache_plan.intent);
@@ -917,8 +1192,8 @@ DirtyTaskSelectionOverlay DirtySnapshotTaskGraphPruner::select(
                                 selection);
   selection.dependencies =
       merged_overlay_dependencies(node_cache_plan, snapshot, selection.domain);
-  selection.dependency_task_ids =
-      build_dependency_ids_for_view(node_cache_plan, selection.dependencies);
+  selection.dependency_task_ids = build_dependency_ids_for_view(
+      node_cache_plan, selection.dependencies, &graph);
 
   std::unordered_set<int> source_nodes(snapshot.dirty_source_nodes.begin(),
                                        snapshot.dirty_source_nodes.end());

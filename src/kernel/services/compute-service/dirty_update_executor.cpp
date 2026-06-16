@@ -44,7 +44,7 @@ HpPlanEntry entry_for_task(const HpPlanEntry& entry, const PlannedTask& task) {
  * @return Entry copy scoped to the task output ROI.
  * @throws Nothing directly.
  * @note RT task output_roi is already in RT execution coordinates; HP ROI is
- * conservatively preserved for commit/inspection metadata.
+ * kept in the base entry for commit and inspection metadata.
  */
 RtPlanEntry entry_for_task(const RtPlanEntry& entry, const PlannedTask& task) {
   RtPlanEntry clipped = entry;
@@ -56,7 +56,7 @@ RtPlanEntry entry_for_task(const RtPlanEntry& entry, const PlannedTask& task) {
 }
 
 /**
- * @brief Creates a scheduler task that executes a planned dirty task entry.
+ * @brief Executes one planned dirty task entry by dense task id.
  *
  * @tparam EntryMap Unordered map from node id to HP or RT plan entry.
  * @tparam ExecuteNode Callable that receives node id, base entry, and
@@ -66,35 +66,31 @@ RtPlanEntry entry_for_task(const RtPlanEntry& entry, const PlannedTask& task) {
  * @param compute_plan Dirty-pruned plan containing task metadata.
  * @param task_id Task id requested by source-first task dispatch.
  * @param execute_node Callable that runs the dirty executor for the task.
- * @return Scheduler callback for one dirty task.
- * @throws std::bad_alloc if the closure allocation fails.
- * @note Missing plan entries remain no-ops, matching previous wrapper
- * behavior for pruned or stale dirty work.
+ * @throws Exceptions propagated by execute_node.
+ * @note Missing plan entries remain no-ops for pruned or stale dirty work.
  */
 template <typename EntryMap, typename ExecuteNode>
-SchedulerTaskRuntime::Task make_planned_dirty_task(
-    GraphRuntime* runtime, EntryMap& plan, const ComputePlan& compute_plan,
-    int task_id, ExecuteNode execute_node) {
-  return [runtime, &plan, &compute_plan, task_id, execute_node]() {
-    if (task_id < 0 ||
-        task_id >= static_cast<int>(compute_plan.task_graph.tasks.size())) {
-      return;
+void run_planned_dirty_task(GraphRuntime* runtime, EntryMap& plan,
+                            const ComputePlan& compute_plan, int task_id,
+                            ExecuteNode execute_node) {
+  if (task_id < 0 ||
+      task_id >= static_cast<int>(compute_plan.task_graph.tasks.size())) {
+    return;
+  }
+  const PlannedTask& task = compute_plan.task_graph.tasks[task_id];
+  auto entry_it = plan.find(task.node_id);
+  if (entry_it == plan.end()) {
+    return;
+  }
+  try {
+    execute_node(task.node_id, entry_it->second, task);
+  } catch (...) {
+    if (runtime) {
+      runtime->log_event(GraphRuntime::SchedulerEvent::RETHROW_EXCEPTION,
+                         task.node_id);
     }
-    const PlannedTask& task = compute_plan.task_graph.tasks[task_id];
-    auto entry_it = plan.find(task.node_id);
-    if (entry_it == plan.end()) {
-      return;
-    }
-    try {
-      execute_node(task.node_id, entry_it->second, task);
-    } catch (...) {
-      if (runtime) {
-        runtime->log_event(GraphRuntime::SchedulerEvent::RETHROW_EXCEPTION,
-                           task.node_id);
-      }
-      throw;
-    }
-  };
+    throw;
+  }
 }
 
 /**
@@ -175,8 +171,8 @@ NodeOutput& HighPrecisionDirtyExecutor::execute(
       node_context,
       DownsampleRequestSink{downsample_requests, downsample_requests_mutex});
 
-  auto make_hp_task = [&](int task_id) -> SchedulerTaskRuntime::Task {
-    return make_planned_dirty_task(
+  auto run_hp_task = [&](int task_id) {
+    run_planned_dirty_task(
         runtime, dirty_plan.entries, prepared.compute_plan, task_id,
         [&](int node_id, HpPlanEntry& entry, const PlannedTask& task) {
           Node& node = graph.mutable_node(node_id);
@@ -196,7 +192,7 @@ NodeOutput& HighPrecisionDirtyExecutor::execute(
           &prepared.selection, &prepared.source_task_ids,
           &prepared.downstream_task_ids, dirty_plan.snapshot.graph_generation,
           validate_hp_source_boundaries},
-      make_hp_task);
+      run_hp_task);
   graph_lock.lock();
   DownsampleExecutor(graph, runtime, events_).execute(downsample_requests);
   return require_target_output(graph, request.node_id);
@@ -254,8 +250,8 @@ NodeOutput& RealTimeDirtyExecutor::execute(GraphModel& graph,
                                          dirty_plan.snapshot.graph_generation,
                                          node_mutexes};
   RealTimeDirtyNodeExecutor node_executor(node_context);
-  auto make_rt_task = [&](int task_id) -> SchedulerTaskRuntime::Task {
-    return make_planned_dirty_task(
+  auto run_rt_task = [&](int task_id) {
+    run_planned_dirty_task(
         runtime, dirty_plan.entries, prepared.compute_plan, task_id,
         [&](int node_id, RtPlanEntry& entry, const PlannedTask& task) {
           Node& node = graph.mutable_node(node_id);
@@ -275,7 +271,7 @@ NodeOutput& RealTimeDirtyExecutor::execute(GraphModel& graph,
           &prepared.selection, &prepared.source_task_ids,
           &prepared.downstream_task_ids, dirty_plan.snapshot.graph_generation,
           validate_rt_source_boundaries},
-      make_rt_task);
+      run_rt_task);
   graph_lock.lock();
   return require_target_output(graph, request.node_id);
 }

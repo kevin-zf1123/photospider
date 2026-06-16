@@ -431,68 +431,6 @@ bool GpuPipelineScheduler::should_cancel_epoch(uint64_t epoch) const {
   return epoch < active_epoch();
 }
 
-void GpuPipelineScheduler::cancel_stale_enqueued_tasks(uint64_t min_epoch) {
-  if (min_epoch == 0) {
-    return;
-  }
-
-  size_t removed = 0;
-
-  // Purge RT queue
-  {
-    std::lock_guard<std::mutex> lock(rt_queue_mutex_);
-    std::queue<ScheduledTask> kept;
-    while (!rt_queue_.empty()) {
-      auto task = std::move(rt_queue_.front());
-      rt_queue_.pop();
-      if (task.epoch != 0 && task.epoch < min_epoch) {
-        ++removed;
-        continue;
-      }
-      kept.push(std::move(task));
-    }
-    rt_queue_.swap(kept);
-  }
-
-  // Purge HP CPU queue
-  {
-    std::lock_guard<std::mutex> lock(hp_cpu_queue_mutex_);
-    std::queue<ScheduledTask> kept;
-    while (!hp_cpu_queue_.empty()) {
-      auto task = std::move(hp_cpu_queue_.front());
-      hp_cpu_queue_.pop();
-      if (task.epoch != 0 && task.epoch < min_epoch) {
-        ++removed;
-        continue;
-      }
-      kept.push(std::move(task));
-    }
-    hp_cpu_queue_.swap(kept);
-  }
-
-  // Purge GPU queue
-  {
-    std::lock_guard<std::mutex> lock(gpu_queue_mutex_);
-    std::queue<ScheduledTask> kept;
-    while (!gpu_queue_.empty()) {
-      auto task = std::move(gpu_queue_.front());
-      gpu_queue_.pop();
-      if (task.epoch != 0 && task.epoch < min_epoch) {
-        ++removed;
-        continue;
-      }
-      kept.push(std::move(task));
-    }
-    gpu_queue_.swap(kept);
-  }
-
-  if (removed > 0) {
-    // Adjust ready counts (conservatively handled by the queue-specific logic
-    // above) Note: We can't precisely track which queue the removed tasks came
-    // from, so we rely on the per-queue tracking in the purge logic
-  }
-}
-
 bool GpuPipelineScheduler::is_gpu_available() const {
 #ifdef __APPLE__
   return runtime_ && runtime_->get_metal_device() != nullptr;
