@@ -18,6 +18,7 @@ Important fields:
 | `cache_root` | Resolved root directory for this graph's disk cache files. |
 | `timing_results` | Latest timing summary when timing is enabled. |
 | `total_io_time_ms` | Accumulated disk cache IO time. |
+| `last_disk_cache_load_result` | Most recent disk-cache load diagnostic, including skipped/miss/hit/error status and error details when a read fails. |
 
 External code must not mutate graph structure through raw node-map access.
 Reads use helpers such as `node()`, `find_node()`, `node_ids()`, and controlled

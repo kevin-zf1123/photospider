@@ -180,6 +180,7 @@ void GraphModel::reset_runtime_state() {
   dirty_source_rt_commit_generation.clear();
   last_compute_plan.reset();
   recent_compute_plans.clear();
+  last_disk_cache_load_result.reset();
   total_io_time_ms.store(0.0, std::memory_order_relaxed);
   skip_save_cache_.store(false, std::memory_order_relaxed);
 }
