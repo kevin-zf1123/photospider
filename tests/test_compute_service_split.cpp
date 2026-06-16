@@ -19,6 +19,7 @@
 #include "kernel/services/compute-service/intent_update_coordinator.hpp"
 #include "kernel/services/compute-service/node_executor.hpp"
 #include "kernel/services/compute-service/node_input_resolver.hpp"
+#include "kernel/services/compute-service/task_population_strategy.hpp"
 #include "kernel/services/compute-service/task_graph_planning.hpp"
 #include "kernel/services/compute_service.hpp"
 #include "kernel/services/graph_cache_service.hpp"
@@ -603,6 +604,45 @@ TEST(TaskGraphPlanningSplit, ExpandsFullGraphBeforeNodeCachePruning) {
     EXPECT_TRUE(task.dirty_selected)
         << "without a dirty snapshot, all full-frame tasks are active";
   }
+}
+
+TEST(TaskGraphPlanningSplit,
+     GraphlessSnapshotPopulationDoesNotCreateDirtyTaskShapes) {
+  compute::ComputePlan plan;
+  plan.intent = ComputeIntent::GlobalHighPrecision;
+  plan.target_node_id = 1;
+  plan.planned_nodes = {1};
+  compute::PlannedNodeWork work;
+  work.node_id = 1;
+  work.domain = compute::DirtyDomain::HighPrecision;
+  work.execution_roi = cv::Rect(0, 0, 64, 64);
+  plan.planned_work.push_back(work);
+
+  compute::DirtyRegionSnapshot snapshot;
+  snapshot.graph_generation = 9;
+  snapshot.dirty_source_nodes.push_back(1);
+  snapshot.per_node_dirty_rois[1].push_back(cv::Rect(0, 0, 16, 16));
+  snapshot.dirty_tiles.push_back({1, compute::DirtyDomain::HighPrecision,
+                                  compute::DirtyTileLevel::Micro, 0, 0, 16,
+                                  cv::Rect(0, 0, 16, 16)});
+  snapshot.dirty_monolithic_nodes.push_back(
+      {1, compute::DirtyDomain::HighPrecision, cv::Rect(0, 0, 64, 64), true});
+
+  compute::TaskPopulationStrategy strategy;
+  strategy.populate(plan, &snapshot, compute::DirtyDomain::HighPrecision,
+                    nullptr);
+
+  ASSERT_EQ(plan.task_graph.tasks.size(), 1u);
+  const auto& task = plan.task_graph.tasks.front();
+  EXPECT_EQ(task.kind, compute::PlannedTaskKind::Node);
+  EXPECT_EQ(task.node_id, 1);
+  EXPECT_EQ(task.output_roi, cv::Rect(0, 0, 64, 64));
+  EXPECT_EQ(task.tile_size, 0);
+  EXPECT_EQ(task.tile_x, -1);
+  EXPECT_EQ(task.tile_y, -1);
+  EXPECT_TRUE(task.source_boundary_eligible);
+  EXPECT_TRUE(task.dirty_selected);
+  EXPECT_EQ(task.dirty_generation, 9u);
 }
 
 TEST(TaskGraphPlanningSplit, TileDependenciesFollowRoiOverlap) {
