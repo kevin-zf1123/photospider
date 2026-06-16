@@ -2,7 +2,6 @@
 
 #include <algorithm>
 #include <unordered_map>
-#include <unordered_set>
 #include <utility>
 
 #include "graph_model.hpp"  // NOLINT(build/include_subdir)
@@ -197,76 +196,11 @@ class TaskAppender {
 };
 
 /**
- * @brief Populates dirty snapshot tile/monolithic tasks without graph access.
- */
-class SnapshotOnlyTaskPopulationStrategy {
- public:
-  /** @brief Appends snapshot tasks and fallback node tasks for planned work. */
-  void populate(ComputePlan& result, const DirtyRegionSnapshot& snapshot,
-                DirtyDomain domain) const {
-    TaskAppender appender(result, &snapshot);
-    const std::unordered_set<int> planned_set(result.planned_nodes.begin(),
-                                              result.planned_nodes.end());
-    append_monolithic_snapshot_tasks(result, snapshot, domain, planned_set,
-                                     appender);
-    append_tile_snapshot_tasks(result, snapshot, domain, planned_set, appender);
-    append_missing_node_tasks(result, domain, appender);
-  }
-
- private:
-  /** @brief Appends dirty monolithic regions that are still in the plan. */
-  void append_monolithic_snapshot_tasks(
-      ComputePlan& result, const DirtyRegionSnapshot& snapshot,
-      DirtyDomain domain, const std::unordered_set<int>& planned_set,
-      TaskAppender& appender) const {
-    (void)result;
-    for (const auto& region : snapshot.dirty_monolithic_nodes) {
-      if (region.domain != domain || !planned_set.count(region.node_id)) {
-        continue;
-      }
-      appender.add(make_task(region.node_id, PlannedTaskKind::Monolithic,
-                             domain, region.pixel_roi, -1, -1, 0,
-                             region.whole_output));
-    }
-  }
-
-  /** @brief Appends dirty tile records that are still in the plan. */
-  void append_tile_snapshot_tasks(ComputePlan& result,
-                                  const DirtyRegionSnapshot& snapshot,
-                                  DirtyDomain domain,
-                                  const std::unordered_set<int>& planned_set,
-                                  TaskAppender& appender) const {
-    (void)result;
-    for (const auto& tile : snapshot.dirty_tiles) {
-      if (tile.domain != domain || !planned_set.count(tile.node_id)) {
-        continue;
-      }
-      appender.add(make_task(tile.node_id, PlannedTaskKind::Tile, domain,
-                             tile.pixel_roi, tile.tile_x, tile.tile_y,
-                             tile.tile_size, false));
-    }
-  }
-
-  /** @brief Appends node fallback tasks for planned work with no explicit task.
-   */
-  void append_missing_node_tasks(ComputePlan& result, DirtyDomain domain,
-                                 TaskAppender& appender) const {
-    for (const auto& work : result.planned_work) {
-      if (!work.task_ids.empty()) {
-        continue;
-      }
-      appender.add(make_task(work.node_id, PlannedTaskKind::Node, domain,
-                             work.execution_roi, -1, -1, 0, work.whole_output));
-    }
-  }
-};
-
-/**
- * @brief Populates simple node tasks when neither graph nor snapshot is known.
+ * @brief Populates simple node tasks when graph-backed shape data is unavailable.
  */
 class NodeOnlyTaskPopulationStrategy {
  public:
-  /** @brief Appends one node task per planned work item. */
+  /** @brief Appends one node task per planned work item with optional metadata. */
   void populate(ComputePlan& result, const DirtyRegionSnapshot* snapshot,
                 DirtyDomain domain) const {
     TaskAppender appender(result, snapshot);
@@ -357,10 +291,6 @@ void TaskPopulationStrategy::populate(ComputePlan& result,
                                       const DirtyRegionSnapshot* snapshot,
                                       DirtyDomain domain,
                                       const GraphModel* graph) const {
-  if (!graph && snapshot) {
-    SnapshotOnlyTaskPopulationStrategy{}.populate(result, *snapshot, domain);
-    return;
-  }
   if (!graph) {
     NodeOnlyTaskPopulationStrategy{}.populate(result, snapshot, domain);
     return;
