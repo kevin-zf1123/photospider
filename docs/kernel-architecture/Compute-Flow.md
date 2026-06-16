@@ -27,6 +27,14 @@ the dirty-region context, it should expose graph-scoped dirty snapshot queries
 and visualization hooks; it is not the authoritative source of dirty-region
 generation or propagation.
 
+Frontend compute commands build a `Kernel::ComputeRequest` rather than passing
+positional boolean flags through the stack. `Kernel` owns graph lookup,
+runtime start, quiet-mode and skip-save side effects, async scheduling, image
+extraction, and LastError mapping. It then translates the request to
+`ComputeService::Request`, which carries only node target, cache, telemetry,
+intent, and dirty ROI data. Parallel/runtime selection is carried separately as
+`ComputeService::ExecutionStrategy`.
+
 The current CLI/REPL frontend is batch-oriented. It does not promise realtime
 update interaction commands such as `compute rt` or `--dirty-roi`.
 `RealTimeUpdate` exists as a kernel intent for a future GUI/interaction

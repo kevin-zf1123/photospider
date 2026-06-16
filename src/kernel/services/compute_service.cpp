@@ -85,6 +85,115 @@ void remember_facade_compute_plan(GraphModel& graph,
 }
 
 /**
+ * @brief Selects the planning intent for a ComputeService facade request.
+ *
+ * @param request Service request whose optional intent may preserve legacy HP
+ * behavior.
+ * @return Requested intent, or GlobalHighPrecision when the legacy path was
+ * selected.
+ * @throws Nothing directly.
+ * @note A missing intent is only a facade compatibility signal; planning still
+ * needs an explicit single-domain compute intent.
+ */
+ComputeIntent planning_intent_for_request(
+    const ComputeService::Request& request) {
+  return request.intent.value_or(ComputeIntent::GlobalHighPrecision);
+}
+
+/**
+ * @brief Builds a planning-layer request from a ComputeService request.
+ *
+ * @param request Service request carrying target node, intent, and dirty ROI.
+ * @param use_parallel_executor Whether the caller selected scheduler-backed
+ * execution for this service call.
+ * @return Narrow compute::ComputeRequest used by task graph planning.
+ * @throws Nothing directly.
+ * @note Planning uses only semantic target/domain data and the selected
+ * execution mode; cache and telemetry options are consumed later by execution.
+ */
+compute::ComputeRequest make_planning_request(
+    const ComputeService::Request& request, bool use_parallel_executor) {
+  return compute::ComputeRequest{planning_intent_for_request(request),
+                                 request.node_id, use_parallel_executor,
+                                 request.dirty_roi};
+}
+
+/**
+ * @brief Builds a dispatcher request for full HP task execution.
+ *
+ * @param request Service request whose cache and telemetry options are used by
+ * the dispatcher.
+ * @return Immutable dispatcher options for one GlobalHighPrecision run.
+ * @throws std::bad_alloc if copying the cache precision string allocates.
+ * @note Dirty ROI and intent are intentionally ignored here; dirty and RT
+ * semantics are coordinated before this full-frame dispatcher path is invoked.
+ */
+compute::ComputeTaskDispatcher::ComputeDispatchRequest make_dispatch_request(
+    const ComputeService::Request& request) {
+  return compute::ComputeTaskDispatcher::ComputeDispatchRequest{
+      request.node_id,
+      request.cache.precision,
+      request.cache.force_recache,
+      request.telemetry.enable_timing,
+      request.cache.disable_disk_cache,
+      request.telemetry.benchmark_events};
+}
+
+/**
+ * @brief Builds a dirty-executor request from a service request.
+ *
+ * @param request Service request validated by IntentUpdateCoordinator.
+ * @return DirtyUpdateRequest with the requested dirty ROI.
+ * @throws std::bad_optional_access if called before dirty_roi validation.
+ * @note Intent-specific executor selection happens in ComputeService; this
+ * request only carries the knobs shared by HP and RT dirty executors.
+ */
+compute::DirtyUpdateRequest make_dirty_update_request(
+    const ComputeService::Request& request) {
+  return compute::DirtyUpdateRequest{request.node_id,
+                                     request.cache.precision,
+                                     request.cache.force_recache,
+                                     request.telemetry.enable_timing,
+                                     request.cache.disable_disk_cache,
+                                     request.telemetry.benchmark_events,
+                                     request.dirty_roi.value()};
+}
+
+/**
+ * @brief Creates the legacy HP-only request used inside intent callbacks.
+ *
+ * @param request Intent-aware request being coordinated.
+ * @return Copy of request with intent and dirty ROI cleared.
+ * @throws std::bad_alloc if copying cache precision allocates.
+ * @note IntentUpdateCoordinator calls this through HP fallback callbacks; the
+ * cleared intent prevents recursion back into intent coordination.
+ */
+ComputeService::Request make_global_high_precision_request(
+    const ComputeService::Request& request) {
+  ComputeService::Request hp_request = request;
+  hp_request.intent = std::nullopt;
+  hp_request.dirty_roi = std::nullopt;
+  return hp_request;
+}
+
+/**
+ * @brief Creates an HP dirty update request that suppresses benchmark output.
+ *
+ * @param request Dirty intent request whose semantic and cache options are
+ * preserved.
+ * @return Request copy with benchmark_events cleared.
+ * @throws std::bad_alloc if copying cache precision allocates.
+ * @note The old HP side-update callback passed nullptr for benchmark_events;
+ * keeping that behavior avoids double-counting benchmark records in RT updates.
+ */
+ComputeService::Request make_silent_dirty_request(
+    const ComputeService::Request& request) {
+  ComputeService::Request silent_request = request;
+  silent_request.telemetry.benchmark_events = nullptr;
+  return silent_request;
+}
+
+/**
  * @brief Builds the node/cache-pruned plan used by sequential compute.
  *
  * @param graph Graph that supplies topology, node metadata, and cache state.
@@ -117,11 +226,8 @@ compute::ComputePlan prune_facade_node_cache_task_graph(
  *
  * @param graph Graph whose nodes and caches are read and mutated.
  * @param node_id Node id to compute.
- * @param cache_precision Cache precision label used for disk cache writes.
- * @param visiting Recursion state used to detect dependency cycles.
- * @param enable_timing Whether node timing should be stored on the graph.
- * @param allow_disk_cache Whether disk cache may be read before computation.
- * @param benchmark_events Optional sink for per-node benchmark timing.
+ * @param context Request-wide cache, timing, disk-cache, benchmark, and cycle
+ * detection state shared by all recursive calls.
  * @return Mutable HP output owned by the target node.
  * @throws GraphError when a cycle, missing dependency, missing operation, disk
  * cache failure, or compute failure occurs.
@@ -130,9 +236,7 @@ compute::ComputePlan prune_facade_node_cache_task_graph(
  * with ComputeTaskDispatcher::execute.
  */
 NodeOutput& ComputeService::compute_internal(
-    GraphModel& graph, int node_id, const std::string& cache_precision,
-    std::unordered_map<int, bool>& visiting, bool enable_timing,
-    bool allow_disk_cache, std::vector<BenchmarkEvent>* benchmark_events) {
+    GraphModel& graph, int node_id, const RecursiveComputeContext& context) {
   auto& timing_results = graph.timing_results;
   auto& timing_mutex = graph.timing_mutex_;
   auto& target_node = graph.mutable_node(node_id);
@@ -151,24 +255,22 @@ NodeOutput& ComputeService::compute_internal(
       result_source = "memory_cache";
       break;
     }
-    if (allow_disk_cache &&
+    if (context.allow_disk_cache &&
         cache_.try_load_from_disk_cache(graph, target_node)) {
       result_source = "disk_cache";
       break;
     }
 
-    if (visiting[node_id]) {
+    if (context.visiting[node_id]) {
       throw GraphError(GraphErrc::Cycle,
                        "Cycle detected: " + std::to_string(node_id));
     }
-    visiting[node_id] = true;
+    context.visiting[node_id] = true;
 
     auto resolved_inputs = compute::NodeInputResolver::resolve(
         target_node,
         [&](int upstream_id) -> const NodeOutput* {
-          return &compute_internal(graph, upstream_id, cache_precision,
-                                   visiting, enable_timing, allow_disk_cache,
-                                   benchmark_events);
+          return &compute_internal(graph, upstream_id, context);
         },
         "Sequential compute");
     monolithic_inputs = resolved_inputs.image_inputs;
@@ -191,8 +293,9 @@ NodeOutput& ComputeService::compute_internal(
         std::chrono::high_resolution_clock::now();
     result_source = "computed";
     target_node.hp_version++;
-    cache_.save_cache_if_configured(graph, target_node, cache_precision);
-    visiting[node_id] = false;
+    cache_.save_cache_if_configured(graph, target_node,
+                                    context.cache_precision);
+    context.visiting[node_id] = false;
   } while (false);
 
   auto end_time_total = std::chrono::high_resolution_clock::now();
@@ -214,11 +317,11 @@ NodeOutput& ComputeService::compute_internal(
 
   if (result_source == "computed" && target_node.cached_output_high_precision) {
     finalize_output_metadata(*target_node.cached_output_high_precision,
-                             monolithic_inputs, enable_timing,
+                             monolithic_inputs, context.enable_timing,
                              execution_duration_ms);
   }
 
-  if (enable_timing) {
+  if (context.enable_timing) {
     {
       std::lock_guard lk(timing_mutex);
       timing_results.node_timings.push_back({target_node.id, target_node.name,
@@ -231,7 +334,7 @@ NodeOutput& ComputeService::compute_internal(
     events_.push(target_node.id, target_node.name, result_source, 0.0);
   }
 
-  if (benchmark_events) {
+  if (context.benchmark_events) {
     current_event.execution_duration_ms =
         std::chrono::duration<double, std::milli>(
             current_event.execution_end_time -
@@ -242,7 +345,7 @@ NodeOutput& ComputeService::compute_internal(
             current_event.execution_start_time -
             current_event.dependency_start_time)
             .count();
-    benchmark_events->push_back(current_event);
+    context.benchmark_events->push_back(current_event);
   }
 
   return *compute::ComputeCachePolicy::reusable_output(target_node);
@@ -252,62 +355,42 @@ NodeOutput& ComputeService::compute_internal(
  * @brief Delegates HP dirty ROI execution to HighPrecisionDirtyExecutor.
  *
  * @param graph Graph whose HP dirty state and cache are updated.
- * @param runtime Optional runtime for scheduler-backed dirty task dispatch.
- * @param node_id Target node id.
- * @param cache_precision Cache precision label from the facade request.
- * @param force_recache Whether HP dirty caches in the plan should be cleared.
- * @param enable_timing Whether timing was requested by the caller.
- * @param disable_disk_cache Whether disk cache reads are disabled.
- * @param benchmark_events Optional benchmark sink from the facade request.
- * @param dirty_roi HP-space dirty region to execute.
+ * @param strategy Execution strategy that may supply a scheduler runtime.
+ * @param request Request carrying target, cache, telemetry, and dirty ROI.
  * @return Mutable target HP output stored in the graph.
  * @throws GraphError from dirty planning, execution, scheduler dispatch, or
- * target output validation.
+ * target output validation; std::bad_optional_access if dirty_roi is missing
+ * before coordinator validation.
  * @note This method intentionally contains no node-level dirty execution logic;
  * ComputeService remains only the public orchestration boundary.
  */
 NodeOutput& ComputeService::compute_high_precision_update(
-    GraphModel& graph, GraphRuntime* runtime, int node_id,
-    const std::string& cache_precision, bool force_recache, bool enable_timing,
-    bool disable_disk_cache, std::vector<BenchmarkEvent>* benchmark_events,
-    const cv::Rect& dirty_roi) {
+    GraphModel& graph, const ExecutionStrategy& strategy,
+    const Request& request) {
   compute::HighPrecisionDirtyExecutor executor(traversal_, events_);
-  return executor.execute(
-      graph, runtime,
-      compute::DirtyUpdateRequest{node_id, cache_precision, force_recache,
-                                  enable_timing, disable_disk_cache,
-                                  benchmark_events, dirty_roi});
+  return executor.execute(graph, strategy.runtime,
+                          make_dirty_update_request(request));
 }
 
 /**
  * @brief Delegates RT dirty ROI execution to RealTimeDirtyExecutor.
  *
  * @param graph Graph whose RT dirty state and proxy cache are updated.
- * @param runtime Optional runtime for scheduler-backed dirty task dispatch.
- * @param node_id Target node id.
- * @param cache_precision Cache precision label from the facade request.
- * @param force_recache Whether RT dirty caches in the plan should be cleared.
- * @param enable_timing Whether timing was requested by the caller.
- * @param disable_disk_cache Whether disk cache reads are disabled.
- * @param benchmark_events Optional benchmark sink from the facade request.
- * @param dirty_roi HP-space dirty region to execute through the RT planner.
+ * @param strategy Execution strategy that may supply a scheduler runtime.
+ * @param request Request carrying target, cache, telemetry, and dirty ROI.
  * @return Mutable target RT output stored in the graph.
  * @throws GraphError from dirty planning, execution, scheduler dispatch, or
- * target output validation.
+ * target output validation; std::bad_optional_access if dirty_roi is missing
+ * before coordinator validation.
  * @note RT dirty output stays transient and does not become reusable HP cache
  * authority.
  */
 NodeOutput& ComputeService::compute_real_time_update(
-    GraphModel& graph, GraphRuntime* runtime, int node_id,
-    const std::string& cache_precision, bool force_recache, bool enable_timing,
-    bool disable_disk_cache, std::vector<BenchmarkEvent>* benchmark_events,
-    const cv::Rect& dirty_roi) {
+    GraphModel& graph, const ExecutionStrategy& strategy,
+    const Request& request) {
   compute::RealTimeDirtyExecutor executor(traversal_, events_);
-  return executor.execute(
-      graph, runtime,
-      compute::DirtyUpdateRequest{node_id, cache_precision, force_recache,
-                                  enable_timing, disable_disk_cache,
-                                  benchmark_events, dirty_roi});
+  return executor.execute(graph, strategy.runtime,
+                          make_dirty_update_request(request));
 }
 
 /**
@@ -315,83 +398,44 @@ NodeOutput& ComputeService::compute_real_time_update(
  *
  * @param graph Graph being computed.
  * @param runtime Graph runtime that owns the HP scheduler.
- * @param node_id Target node id.
- * @param cache_precision Cache precision label used for disk cache writes.
- * @param force_recache Whether planned HP memory caches should be cleared.
- * @param enable_timing Whether graph timing should be collected.
- * @param disable_disk_cache Whether disk cache reads are disabled.
- * @param benchmark_events Optional benchmark sink for node timing data.
+ * @param request Service request carrying target, cache, telemetry, and
+ * optional intent semantics.
  * @return Mutable target HP output stored in the graph.
  * @throws GraphError from scheduler lookup, task dispatch, fallback execution,
  * cache access, or missing target output.
- * @note Dirty ROI requests are routed through compute_intent_update_impl, not
- * this full-frame dispatcher entry.
+ * @note Legacy HP requests run the full-frame dispatcher directly. Requests
+ * with intent are routed through compute_intent_update_impl.
  */
-NodeOutput& ComputeService::compute_parallel(
-    GraphModel& graph, GraphRuntime& runtime, int node_id,
-    const std::string& cache_precision, bool force_recache, bool enable_timing,
-    bool disable_disk_cache, std::vector<BenchmarkEvent>* benchmark_events) {
+NodeOutput& ComputeService::compute_parallel(GraphModel& graph,
+                                             GraphRuntime& runtime,
+                                             const Request& request) {
+  if (request.intent) {
+    return compute_intent_update_impl(graph, ExecutionStrategy{&runtime, true},
+                                      request);
+  }
+
   compute::ComputeTaskDispatcher executor(traversal_, cache_, events_);
   SchedulerTaskRuntime& task_runtime = compute::ensure_scheduler_task_runtime(
       runtime, ComputeIntent::GlobalHighPrecision);
   return executor.execute(
-      graph, task_runtime,
-      compute::ComputeTaskDispatcher::ComputeDispatchRequest{
-          node_id, cache_precision, force_recache, enable_timing,
-          disable_disk_cache, benchmark_events},
-      [this, &cache_precision, enable_timing, benchmark_events](
-          GraphModel& fallback_graph, int fallback_node_id,
-          bool allow_disk_cache) -> NodeOutput& {
+      graph, task_runtime, make_dispatch_request(request),
+      [this, &request](GraphModel& fallback_graph, int fallback_node_id,
+                       bool allow_disk_cache) -> NodeOutput& {
         std::unordered_map<int, bool> visiting;
-        return compute_internal(fallback_graph, fallback_node_id,
-                                cache_precision, visiting, enable_timing,
-                                allow_disk_cache, benchmark_events);
+        const RecursiveComputeContext context{
+            request.cache.precision, visiting, request.telemetry.enable_timing,
+            allow_disk_cache, request.telemetry.benchmark_events};
+        return compute_internal(fallback_graph, fallback_node_id, context);
       });
-}
-
-/**
- * @brief Executes an intent-aware parallel request.
- *
- * @param graph Graph being computed.
- * @param runtime Runtime that owns intent-specific schedulers.
- * @param intent Compute intent selected by the caller.
- * @param node_id Target node id.
- * @param cache_precision Cache precision label from the facade request.
- * @param force_recache Whether relevant caches should be cleared.
- * @param enable_timing Whether graph timing should be collected.
- * @param disable_disk_cache Whether disk cache reads are disabled.
- * @param benchmark_events Optional benchmark sink.
- * @param dirty_roi Optional dirty ROI for dirty HP or RT update semantics.
- * @return Mutable output for the selected intent.
- * @throws GraphError from intent validation, scheduler lookup, or execution.
- * @note RealTimeUpdate with a dirty ROI intentionally bypasses coarse HP/RT
- * scheduler callbacks and delegates to dirty executors for each path.
- */
-NodeOutput& ComputeService::compute_parallel(
-    GraphModel& graph, GraphRuntime& runtime, ComputeIntent intent, int node_id,
-    const std::string& cache_precision, bool force_recache, bool enable_timing,
-    bool disable_disk_cache, std::vector<BenchmarkEvent>* benchmark_events,
-    std::optional<cv::Rect> dirty_roi) {
-  return compute_intent_update_impl(
-      graph, &runtime, true, intent, node_id, cache_precision, force_recache,
-      enable_timing, disable_disk_cache, benchmark_events, dirty_roi);
 }
 
 /**
  * @brief Coordinates intent semantics and binds ComputeService callbacks.
  *
  * @param graph Graph being computed.
- * @param runtime Optional runtime for scheduler-backed execution.
- * @param use_parallel_executor Whether full non-dirty work should use the
- * parallel dispatcher.
- * @param intent Compute intent selected by the caller.
- * @param node_id Target node id.
- * @param cache_precision Cache precision label from the facade request.
- * @param force_recache Whether relevant caches should be cleared.
- * @param enable_timing Whether graph timing should be collected.
- * @param disable_disk_cache Whether disk cache reads are disabled.
- * @param benchmark_events Optional benchmark sink.
- * @param dirty_roi Optional dirty ROI for HP dirty or RT dual-path updates.
+ * @param strategy Runtime and scheduler-backed execution policy.
+ * @param request Intent-aware request carrying target, cache, telemetry, and
+ * optional dirty ROI.
  * @return Mutable output selected by IntentUpdateCoordinator.
  * @throws GraphError from intent validation, callback execution, scheduler
  * lookup, or missing target output.
@@ -399,45 +443,36 @@ NodeOutput& ComputeService::compute_parallel(
  * supplies the concrete execution callbacks.
  */
 NodeOutput& ComputeService::compute_intent_update_impl(
-    GraphModel& graph, GraphRuntime* runtime, bool use_parallel_executor,
-    ComputeIntent intent, int node_id, const std::string& cache_precision,
-    bool force_recache, bool enable_timing, bool disable_disk_cache,
-    std::vector<BenchmarkEvent>* benchmark_events,
-    std::optional<cv::Rect> dirty_roi) {
+    GraphModel& graph, const ExecutionStrategy& strategy,
+    const Request& request) {
   compute::IntentUpdateCallbacks callbacks;
-  const Node* coordinator_node = graph.find_node(node_id);
+  const ComputeIntent intent = request.intent.value();
+  const Node* coordinator_node = graph.find_node(request.node_id);
   const std::string coordinator_node_name =
       coordinator_node ? coordinator_node->name : std::string();
   callbacks.run_global_high_precision = [&]() -> NodeOutput& {
-    if (use_parallel_executor) {
-      if (!runtime) {
+    const Request hp_request = make_global_high_precision_request(request);
+    if (strategy.use_parallel_executor) {
+      if (!strategy.runtime) {
         throw GraphError(GraphErrc::ComputeError,
                          "Parallel HP compute requires a runtime.");
       }
-      return compute_parallel(graph, *runtime, node_id, cache_precision,
-                              force_recache, enable_timing, disable_disk_cache,
-                              benchmark_events);
+      return compute_parallel(graph, *strategy.runtime, hp_request);
     }
-    return compute(graph, node_id, cache_precision, force_recache,
-                   enable_timing, disable_disk_cache, benchmark_events);
+    return compute(graph, hp_request);
   };
   callbacks.run_global_high_precision_dirty_update = [&]() -> NodeOutput& {
-    return compute_high_precision_update(
-        graph, runtime, node_id, cache_precision, force_recache, enable_timing,
-        disable_disk_cache, benchmark_events, *dirty_roi);
+    return compute_high_precision_update(graph, strategy, request);
   };
   callbacks.run_high_precision_update = [&]() {
-    compute_high_precision_update(graph, runtime, node_id, cache_precision,
-                                  force_recache, enable_timing,
-                                  disable_disk_cache, nullptr, *dirty_roi);
+    const Request silent_request = make_silent_dirty_request(request);
+    compute_high_precision_update(graph, strategy, silent_request);
   };
   callbacks.run_real_time_update = [&]() -> NodeOutput& {
-    return compute_real_time_update(
-        graph, runtime, node_id, cache_precision, force_recache, enable_timing,
-        disable_disk_cache, benchmark_events, *dirty_roi);
+    return compute_real_time_update(graph, strategy, request);
   };
   callbacks.real_time_output = [&]() -> NodeOutput& {
-    Node& target = graph.mutable_node(node_id);
+    Node& target = graph.mutable_node(request.node_id);
     if (!target.cached_output_real_time) {
       throw GraphError(GraphErrc::ComputeError,
                        "RT compute finished without target output.");
@@ -446,127 +481,103 @@ NodeOutput& ComputeService::compute_intent_update_impl(
   };
   callbacks.record_stage = [&,
                             coordinator_node_name](const std::string& stage) {
-    events_.push(node_id, coordinator_node_name, stage, 0.0);
+    events_.push(request.node_id, coordinator_node_name, stage, 0.0);
   };
 
   SchedulerTaskRuntime* hp_task_runtime = nullptr;
   SchedulerTaskRuntime* rt_task_runtime = nullptr;
-  if (use_parallel_executor && runtime) {
-    const bool dirty_rt_update =
-        intent == ComputeIntent::RealTimeUpdate && dirty_roi.has_value();
+  if (strategy.use_parallel_executor && strategy.runtime) {
+    const bool dirty_rt_update = intent == ComputeIntent::RealTimeUpdate &&
+                                 request.dirty_roi.has_value();
     if (!dirty_rt_update) {
       hp_task_runtime = &compute::ensure_scheduler_task_runtime(
-          *runtime, ComputeIntent::GlobalHighPrecision);
+          *strategy.runtime, ComputeIntent::GlobalHighPrecision);
       if (intent == ComputeIntent::RealTimeUpdate) {
         rt_task_runtime = &compute::ensure_scheduler_task_runtime(
-            *runtime, ComputeIntent::RealTimeUpdate);
+            *strategy.runtime, ComputeIntent::RealTimeUpdate);
       }
     }
   }
 
   return compute::IntentUpdateCoordinator::coordinate_intent_update(
-      intent, hp_task_runtime, rt_task_runtime, dirty_roi, callbacks);
+      intent, hp_task_runtime, rt_task_runtime, request.dirty_roi, callbacks);
 }
 
 /**
  * @brief Executes an intent-aware request without a GraphRuntime.
  *
  * @param graph Graph being computed.
- * @param intent Compute intent selected by the caller.
- * @param node_id Target node id.
- * @param cache_precision Cache precision label from the facade request.
- * @param force_recache Whether relevant caches should be cleared.
- * @param enable_timing Whether graph timing should be collected.
- * @param disable_disk_cache Whether disk cache reads are disabled.
- * @param benchmark_events Optional benchmark sink.
- * @param dirty_roi Optional dirty ROI for HP dirty or RT update semantics.
+ * @param request Intent-aware request carrying target, cache, telemetry, and
+ * optional dirty ROI.
  * @return Mutable output selected by IntentUpdateCoordinator.
  * @throws GraphError from intent validation or execution.
  * @note Dirty HP and RT callbacks still use the dirty executors, but run node
  * work inline because no scheduler runtime is available.
  */
-NodeOutput& ComputeService::compute_with_intent_impl(
-    GraphModel& graph, ComputeIntent intent, int node_id,
-    const std::string& cache_precision, bool force_recache, bool enable_timing,
-    bool disable_disk_cache, std::vector<BenchmarkEvent>* benchmark_events,
-    std::optional<cv::Rect> dirty_roi) {
-  return compute_intent_update_impl(
-      graph, nullptr, false, intent, node_id, cache_precision, force_recache,
-      enable_timing, disable_disk_cache, benchmark_events, dirty_roi);
+NodeOutput& ComputeService::compute_with_intent_impl(GraphModel& graph,
+                                                     const Request& request) {
+  return compute_intent_update_impl(graph, ExecutionStrategy{}, request);
 }
 
 /**
- * @brief Public sequential high-precision compute entry point.
+ * @brief Public non-parallel ComputeService entry point.
  *
  * @param graph Graph being computed.
- * @param node_id Target node id.
- * @param cache_precision Cache precision label used for disk cache writes.
- * @param force_recache Whether planned HP memory caches should be cleared.
- * @param enable_timing Whether graph timing should be collected.
- * @param disable_disk_cache Whether disk cache reads are disabled.
- * @param benchmark_events Optional benchmark sink.
- * @return Mutable target HP output stored in the graph.
+ * @param request Service request carrying target, cache, telemetry, and
+ * optional intent semantics.
+ * @return Mutable output selected by the request.
  * @throws GraphError from validation, planning, recursive compute, or cache
  * operations.
- * @note This overload is the legacy non-intent facade and always executes the
- * GlobalHighPrecision path.
+ * @note A missing intent selects the legacy GlobalHighPrecision path.
  */
-NodeOutput& ComputeService::compute(
-    GraphModel& graph, int node_id, const std::string& cache_precision,
-    bool force_recache, bool enable_timing, bool disable_disk_cache,
-    std::vector<BenchmarkEvent>* benchmark_events) {
-  return compute_sequential_impl(graph, node_id, cache_precision, force_recache,
-                                 enable_timing, disable_disk_cache,
-                                 benchmark_events);
+NodeOutput& ComputeService::compute(GraphModel& graph, const Request& request) {
+  if (request.intent) {
+    return compute_with_intent_impl(graph, request);
+  }
+  return compute_sequential_impl(graph, request);
 }
 
 /**
  * @brief Implements sequential high-precision compute with plan inspection.
  *
  * @param graph Graph being computed.
- * @param node_id Target node id.
- * @param cache_precision Cache precision label used for disk cache writes.
- * @param force_recache Whether planned HP memory caches should be cleared.
- * @param enable_timing Whether graph timing should be collected.
- * @param disable_disk_cache Whether disk cache reads are disabled.
- * @param benchmark_events Optional benchmark sink.
+ * @param request Legacy HP request with target, cache, and telemetry options.
  * @return Mutable target HP output stored in the graph.
  * @throws GraphError when the target is missing, topology is invalid, planning
  * fails, recursive compute fails, or target output is unavailable.
  * @note The method records the same node/cache-pruned plan shape used by the
  * parallel path before delegating to the recursive executor.
  */
-NodeOutput& ComputeService::compute_sequential_impl(
-    GraphModel& graph, int node_id, const std::string& cache_precision,
-    bool force_recache, bool enable_timing, bool disable_disk_cache,
-    std::vector<BenchmarkEvent>* benchmark_events) {
-  if (!graph.has_node(node_id)) {
-    throw GraphError(GraphErrc::NotFound, "Node " + std::to_string(node_id) +
-                                              " not found in graph.");
+NodeOutput& ComputeService::compute_sequential_impl(GraphModel& graph,
+                                                    const Request& request) {
+  if (!graph.has_node(request.node_id)) {
+    throw GraphError(
+        GraphErrc::NotFound,
+        "Node " + std::to_string(request.node_id) + " not found in graph.");
   }
 
-  if (benchmark_events) {
-    benchmark_events->clear();
+  if (request.telemetry.benchmark_events) {
+    request.telemetry.benchmark_events->clear();
   }
 
-  if (enable_timing) {
+  if (request.telemetry.enable_timing) {
     clear_timing_results(graph);
   }
 
   std::vector<int> execution_order;
   try {
-    execution_order = traversal_.topo_postorder_from(graph, node_id);
+    execution_order = traversal_.topo_postorder_from(graph, request.node_id);
   } catch (const GraphError&) {
     throw;
   }
-  const compute::ComputeRequest request{ComputeIntent::GlobalHighPrecision,
-                                        node_id, false, std::nullopt};
-  const compute::ComputePlan compute_plan =
-      prune_facade_node_cache_task_graph(graph, request, execution_order);
+  const compute::ComputeRequest planning_request =
+      make_planning_request(request, false);
+  const compute::ComputePlan compute_plan = prune_facade_node_cache_task_graph(
+      graph, planning_request, execution_order);
   remember_facade_compute_plan(graph, compute_plan);
   execution_order = compute_plan.planned_nodes;
 
-  if (force_recache) {
+  if (request.cache.force_recache) {
     std::lock_guard<std::mutex> lk(graph.graph_mutex_);
     for (int nid : execution_order) {
       auto& node = graph.mutable_node(nid);
@@ -575,12 +586,14 @@ NodeOutput& ComputeService::compute_sequential_impl(
   }
 
   std::unordered_map<int, bool> visiting;
-  bool allow_disk_cache = !disable_disk_cache && !force_recache;
-  NodeOutput& result =
-      compute_internal(graph, node_id, cache_precision, visiting, enable_timing,
-                       allow_disk_cache, benchmark_events);
+  const bool allow_disk_cache =
+      !request.cache.disable_disk_cache && !request.cache.force_recache;
+  const RecursiveComputeContext context{
+      request.cache.precision, visiting, request.telemetry.enable_timing,
+      allow_disk_cache, request.telemetry.benchmark_events};
+  NodeOutput& result = compute_internal(graph, request.node_id, context);
 
-  if (enable_timing) {
+  if (request.telemetry.enable_timing) {
     double total = 0.0;
     {
       std::lock_guard<std::mutex> lk(graph.timing_mutex_);
@@ -592,34 +605,6 @@ NodeOutput& ComputeService::compute_sequential_impl(
   }
 
   return result;
-}
-
-/**
- * @brief Public intent-aware compute entry point without GraphRuntime.
- *
- * @param graph Graph being computed.
- * @param intent Compute intent selected by the caller.
- * @param node_id Target node id.
- * @param cache_precision Cache precision label from the facade request.
- * @param force_recache Whether relevant caches should be cleared.
- * @param enable_timing Whether graph timing should be collected.
- * @param disable_disk_cache Whether disk cache reads are disabled.
- * @param benchmark_events Optional benchmark sink.
- * @param dirty_roi Optional dirty ROI for HP dirty or RT update semantics.
- * @return Mutable output selected by IntentUpdateCoordinator.
- * @throws GraphError from intent validation, planning, compute, or output
- * validation.
- * @note Realtime intent still requires a non-empty dirty ROI through
- * IntentUpdateCoordinator validation.
- */
-NodeOutput& ComputeService::compute(
-    GraphModel& graph, ComputeIntent intent, int node_id,
-    const std::string& cache_precision, bool force_recache, bool enable_timing,
-    bool disable_disk_cache, std::vector<BenchmarkEvent>* benchmark_events,
-    std::optional<cv::Rect> dirty_roi) {
-  return compute_with_intent_impl(
-      graph, intent, node_id, cache_precision, force_recache, enable_timing,
-      disable_disk_cache, benchmark_events, dirty_roi);
 }
 
 /**

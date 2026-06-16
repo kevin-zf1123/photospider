@@ -168,9 +168,13 @@ TEST(SchedulerTestM33, ParallelComputeWithNewScheduler) {
   int node_id = (*endings)[0];
 
   // 通过 ComputeService facade 触发 scheduler-owned task runtime 执行。
-  bool success = svc.cmd_compute(graph_name, node_id, "int8",
-                                 /*force*/ true, /*timing*/ false,
-                                 /*parallel*/ true);
+  Kernel::ComputeRequest request;
+  request.name = graph_name;
+  request.node_id = node_id;
+  request.cache.precision = "int8";
+  request.cache.force_recache = true;
+  request.execution.parallel = true;
+  bool success = svc.cmd_compute(request);
   ASSERT_TRUE(success);
   const auto& result =
       runtime.model().node(node_id).cached_output_high_precision.value();
@@ -203,9 +207,13 @@ TEST(SchedulerTest, ParallelLogToJson) {
 
   kernel.runtime(graph_name).clear_scheduler_log();
 
-  auto ok = svc.cmd_compute_async(graph_name, node_id, "int8",
-                                  /*force*/ true, /*timing*/ false,
-                                  /*parallel*/ true);
+  Kernel::ComputeRequest request;
+  request.name = graph_name;
+  request.node_id = node_id;
+  request.cache.precision = "int8";
+  request.cache.force_recache = true;
+  request.execution.parallel = true;
+  auto ok = svc.cmd_compute_async(request);
   ASSERT_TRUE(ok.has_value());
   ASSERT_TRUE(ok->get());
 
@@ -244,9 +252,12 @@ TEST(Scheduler, DirtyRegionTiledComputation) {
             << std::endl;
   runtime.clear_scheduler_log();
 
-  bool success_full =
-      svc.cmd_compute(graph_name, final_node_id, "int8",
-                      /*force*/ false, /*timing*/ false, /*parallel*/ true);
+  ps::Kernel::ComputeRequest full_request;
+  full_request.name = graph_name;
+  full_request.node_id = final_node_id;
+  full_request.cache.precision = "int8";
+  full_request.execution.parallel = true;
+  bool success_full = svc.cmd_compute(full_request);
   ASSERT_TRUE(success_full);
 
   auto log_full_compute = runtime.get_scheduler_log();
@@ -313,11 +324,14 @@ TEST(Scheduler, DirtyRegionTiledComputation) {
         ps::ComputeService compute_svc(traversal_service, cache_service,
                                        runtime.event_service());
 
-        return compute_svc.compute_parallel(
-            g, runtime, ps::ComputeIntent::RealTimeUpdate, final_node_id,
-            "int8",
-            /*force*/ true,
-            /*timing*/ false, /*disable_disk_cache*/ true, nullptr, dirty_rect);
+        ps::ComputeService::Request request;
+        request.node_id = final_node_id;
+        request.cache.precision = "int8";
+        request.cache.force_recache = true;
+        request.cache.disable_disk_cache = true;
+        request.intent = ps::ComputeIntent::RealTimeUpdate;
+        request.dirty_roi = dirty_rect;
+        return compute_svc.compute_parallel(g, runtime, request);
       });
 
   // 等待并获取结果（尽管我们不使用结果，但 get() 会等待完成并传播异常）
@@ -414,9 +428,12 @@ TEST(Scheduler,
                                  "util/testcases/dirty_region_test.yaml")
                   .has_value());
   ps::GraphRuntime& stale_runtime = kernel.runtime(stale_graph_name);
-  ASSERT_TRUE(svc.cmd_compute(stale_graph_name, 3, "int8",
-                              /*force*/ false, /*timing*/ false,
-                              /*parallel*/ true));
+  ps::Kernel::ComputeRequest stale_hp_request;
+  stale_hp_request.name = stale_graph_name;
+  stale_hp_request.node_id = 3;
+  stale_hp_request.cache.precision = "int8";
+  stale_hp_request.execution.parallel = true;
+  ASSERT_TRUE(svc.cmd_compute(stale_hp_request));
 
   const cv::Rect dirty_rect(200, 200, 128, 128);
   stale_runtime.graph_state()
@@ -442,10 +459,13 @@ TEST(Scheduler,
         ps::GraphCacheService cache_service;
         ps::ComputeService compute_svc(traversal_service, cache_service,
                                        stale_runtime.event_service());
-        return compute_svc.compute_parallel(
-            g, stale_runtime, ps::ComputeIntent::RealTimeUpdate, 3, "int8",
-            /*force*/ false, /*timing*/ false, /*disable_disk_cache*/ true,
-            nullptr, dirty_rect);
+        ps::ComputeService::Request request;
+        request.node_id = 3;
+        request.cache.precision = "int8";
+        request.cache.disable_disk_cache = true;
+        request.intent = ps::ComputeIntent::RealTimeUpdate;
+        request.dirty_roi = dirty_rect;
+        return compute_svc.compute_parallel(g, stale_runtime, request);
       });
   EXPECT_NO_THROW(stale_future.get());
   const auto stale_log = stale_runtime.get_scheduler_log();
@@ -460,9 +480,12 @@ TEST(Scheduler,
                                  "util/testcases/dirty_region_test.yaml")
                   .has_value());
   ps::GraphRuntime& exception_runtime = kernel.runtime(exception_graph_name);
-  ASSERT_TRUE(svc.cmd_compute(exception_graph_name, 3, "int8",
-                              /*force*/ false, /*timing*/ false,
-                              /*parallel*/ true));
+  ps::Kernel::ComputeRequest exception_hp_request;
+  exception_hp_request.name = exception_graph_name;
+  exception_hp_request.node_id = 3;
+  exception_hp_request.cache.precision = "int8";
+  exception_hp_request.execution.parallel = true;
+  ASSERT_TRUE(svc.cmd_compute(exception_hp_request));
   exception_runtime.graph_state()
       .submit([&](ps::GraphModel& g) -> void {
         ps::Node broken = g.node(2);
@@ -486,10 +509,13 @@ TEST(Scheduler,
         ps::GraphCacheService cache_service;
         ps::ComputeService compute_svc(traversal_service, cache_service,
                                        exception_runtime.event_service());
-        return compute_svc.compute_parallel(
-            g, exception_runtime, ps::ComputeIntent::RealTimeUpdate, 3, "int8",
-            /*force*/ false, /*timing*/ false, /*disable_disk_cache*/ true,
-            nullptr, dirty_rect);
+        ps::ComputeService::Request request;
+        request.node_id = 3;
+        request.cache.precision = "int8";
+        request.cache.disable_disk_cache = true;
+        request.intent = ps::ComputeIntent::RealTimeUpdate;
+        request.dirty_roi = dirty_rect;
+        return compute_svc.compute_parallel(g, exception_runtime, request);
       });
   EXPECT_THROW(exception_future.get(), ps::GraphError);
   const auto exception_log = exception_runtime.get_scheduler_log();

@@ -385,9 +385,13 @@ TEST(GpuPipelineIntegrationTest, SchedulerWithRuntime) {
   }
   int node_id = (*endings)[0];
 
-  bool success = svc.cmd_compute(graph_name, node_id, "int8",
-                                 /*force*/ true, /*timing*/ false,
-                                 /*parallel*/ true);
+  Kernel::ComputeRequest hp_request;
+  hp_request.name = graph_name;
+  hp_request.node_id = node_id;
+  hp_request.cache.precision = "int8";
+  hp_request.cache.force_recache = true;
+  hp_request.execution.parallel = true;
+  bool success = svc.cmd_compute(hp_request);
   ASSERT_TRUE(success);
   const auto& result =
       runtime.model().node(node_id).cached_output_high_precision.value();
@@ -440,9 +444,14 @@ TEST(GpuPipelineIntegrationTest, DualSchedulerConcurrentExecution) {
   GraphCacheService cache;
   ComputeService compute(traversal, cache, runtime.event_service());
 
-  NodeOutput& rt_result = compute.compute_parallel(
-      runtime.model(), runtime, ComputeIntent::RealTimeUpdate, node_id, "int8",
-      true, false, false, nullptr, cv::Rect(0, 0, 64, 64));
+  ComputeService::Request rt_request;
+  rt_request.node_id = node_id;
+  rt_request.cache.precision = "int8";
+  rt_request.cache.force_recache = true;
+  rt_request.intent = ComputeIntent::RealTimeUpdate;
+  rt_request.dirty_roi = cv::Rect(0, 0, 64, 64);
+  NodeOutput& rt_result =
+      compute.compute_parallel(runtime.model(), runtime, rt_request);
 
   EXPECT_TRUE(
       runtime.model().node(node_id).cached_output_high_precision.has_value());

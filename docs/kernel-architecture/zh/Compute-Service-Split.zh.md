@@ -12,6 +12,13 @@ dispatch 协调、计时、benchmark 事件和输出 debug 元数据。
 
 拆分应先保持行为不变。它不是重写图引擎，也不是插件 ABI 变更。
 
+compute facade 现在在公开边界和 service 边界都使用结构化请求对象。
+`Kernel::ComputeRequest` 从 frontend 承载 graph name、cache、execution、telemetry、
+intent 和 dirty ROI 控制项。`ComputeService::Request` 只接收 target node、cache、
+telemetry、intent 和 dirty ROI 数据，而 `ComputeService::ExecutionStrategy` 承载 runtime
+和 scheduler-backed execution policy。这样可以保持 CLI 行为稳定，同时避免继续扩展长的
+位置式 boolean 参数列表。
+
 ## 目标形态
 
 ```text
@@ -36,7 +43,7 @@ ComputeService facade
 
 | 边界 | 职责 | 状态 |
 | --- | --- | --- |
-| `ComputeService` facade | 保留当前公开 compute 入口并构造内部协作者。 | 已实现 |
+| `ComputeService` facade | 接收结构化 compute request，保留既有行为，并构造内部协作者。 | 已实现 |
 | `ComputeCachePolicy` | 集中 HP/RT 缓存选择。 | 已在 `src/kernel/services/compute-service/compute_cache_policy.*` 实现 |
 | `NodeInputResolver` | 构建运行时参数并收集已就绪图像输入。 | 已在 `src/kernel/services/compute-service/node_input_resolver.*` 实现 |
 | `NodeExecutor` | 一致地执行 monolithic 与 tiled 算子。 | 已在 `src/kernel/services/compute-service/node_executor.*` 实现 |

@@ -966,10 +966,13 @@ TEST(GlobalHighPrecisionDirtyUpdate, UsesDirtyPlanningForGlobalHpDirtyRoi) {
   GraphEventService events;
   ComputeService compute(traversal, cache, events);
 
-  NodeOutput& output = compute.compute(
-      graph, ComputeIntent::GlobalHighPrecision, 2, "float32",
-      false /* force */, false /* timing */, true /* disable disk cache */,
-      nullptr, cv::Rect(8, 8, 16, 16));
+  ComputeService::Request request;
+  request.node_id = 2;
+  request.cache.precision = "float32";
+  request.cache.disable_disk_cache = true;
+  request.intent = ComputeIntent::GlobalHighPrecision;
+  request.dirty_roi = cv::Rect(8, 8, 16, 16);
+  NodeOutput& output = compute.compute(graph, request);
 
   EXPECT_EQ(output.image_buffer.width, 64);
   EXPECT_EQ(output.image_buffer.height, 64);

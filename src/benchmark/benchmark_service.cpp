@@ -96,16 +96,18 @@ BenchmarkResult BenchmarkService::Run(const std::string& benchmark_dir,
 
     auto start_total = std::chrono::high_resolution_clock::now();
 
-    bool success =
-        svc_.cmd_compute(session_name, target_node_id, "int8",
-                         true,  // force (clears memory cache)
-                         true,  // timing
-                         config.execution.parallel,  // parallel
-                         true,                       // quiet
-                         true,   // disable_disk_cache (read)
-                         false,  // nosave: keep as false here to measure IO if
-                                 // desired; set true to exclude write IO
-                         &single_run_result.events);
+    Kernel::ComputeRequest request;
+    request.name = session_name;
+    request.node_id = target_node_id;
+    request.cache.precision = "int8";
+    request.cache.force_recache = true;
+    request.cache.disable_disk_cache = true;
+    request.cache.nosave = false;
+    request.execution.parallel = config.execution.parallel;
+    request.execution.quiet = true;
+    request.telemetry.enable_timing = true;
+    request.telemetry.benchmark_events = &single_run_result.events;
+    bool success = svc_.cmd_compute(request);
 
     auto end_total = std::chrono::high_resolution_clock::now();
     single_run_result.total_duration_ms =

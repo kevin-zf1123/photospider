@@ -10,6 +10,7 @@
  */
 #include <future>
 #include <sstream>
+#include <utility>
 
 #include "adapter/buffer_adapter_opencv.hpp"
 #include "kernel/kernel.hpp"
@@ -56,17 +57,32 @@ std::string make_async_exception_message(bool intent_aware, int node_id,
   return ss.str();
 }
 
+/**
+ * @brief Converts a Kernel request into the narrower ComputeService request.
+ *
+ * @param request Public Kernel compute request being dispatched.
+ * @return Service request containing only target, cache, telemetry, intent, and
+ * dirty ROI data.
+ * @throws std::bad_alloc if copying the cache precision string allocates.
+ * @note Graph name, quiet mode, skip-save, and scheduler selection stay in the
+ * Kernel facade because they belong to GraphRuntime orchestration.
+ */
+ComputeService::Request make_service_compute_request(
+    const Kernel::ComputeRequest& request) {
+  return ComputeService::Request{
+      request.node_id,
+      ComputeService::CacheOptions{request.cache.precision,
+                                   request.cache.force_recache,
+                                   request.cache.disable_disk_cache},
+      ComputeService::TelemetryOptions{request.telemetry.enable_timing,
+                                       request.telemetry.benchmark_events},
+      request.intent, request.dirty_roi};
+}
+
 }  // namespace
 
-bool Kernel::compute(const std::string& name, int node_id,
-                     const std::string& cache_precision, bool force_recache,
-                     bool enable_timing, bool parallel, bool quiet,
-                     bool disable_disk_cache, bool nosave,
-                     std::vector<BenchmarkEvent>* benchmark_events) {
-  return compute_request(
-      ComputeRequest{name, node_id, cache_precision, force_recache,
-                     enable_timing, parallel, quiet, disable_disk_cache, nosave,
-                     benchmark_events, std::nullopt, std::nullopt});
+bool Kernel::compute(const ComputeRequest& request) {
+  return compute_request(request);
 }
 
 bool Kernel::compute_request(const ComputeRequest& request) {
@@ -83,16 +99,16 @@ bool Kernel::compute_request(const ComputeRequest& request) {
 
     auto& model = runtime.model();
     runtime.graph_state()
-        .submit([nosave = request.nosave](GraphModel& graph) {
+        .submit([nosave = request.cache.nosave](GraphModel& graph) {
           graph.set_skip_save_cache(nosave);
           return 0;
         })
         .get();
-    model.set_quiet(request.quiet);
+    model.set_quiet(request.execution.quiet);
 
     ComputeService compute_service(traversal_service_, cache_service_,
                                    runtime.event_service());
-    if (request.parallel) {
+    if (request.execution.parallel) {
       (void)run_compute_request(compute_service, runtime, model, request);
     } else {
       runtime.graph_state()
@@ -129,13 +145,8 @@ bool Kernel::compute_request(const ComputeRequest& request) {
 }
 
 std::optional<cv::Mat> Kernel::compute_and_get_image(
-    const std::string& name, int node_id, const std::string& cache_precision,
-    bool force_recache, bool enable_timing, bool parallel,
-    bool disable_disk_cache, std::vector<BenchmarkEvent>* benchmark_events) {
-  return compute_and_get_image_request(
-      ComputeRequest{name, node_id, cache_precision, force_recache,
-                     enable_timing, parallel, false, disable_disk_cache, false,
-                     benchmark_events, std::nullopt, std::nullopt});
+    const ComputeRequest& request) {
+  return compute_and_get_image_request(request);
 }
 
 std::optional<cv::Mat> Kernel::compute_and_get_image_request(
@@ -154,7 +165,7 @@ std::optional<cv::Mat> Kernel::compute_and_get_image_request(
 
     ComputeService compute_service(traversal_service_, cache_service_,
                                    runtime.event_service());
-    if (request.parallel) {
+    if (request.execution.parallel) {
       output = run_compute_request(compute_service, runtime, runtime.model(),
                                    request);
     } else {
@@ -178,26 +189,8 @@ std::optional<cv::Mat> Kernel::compute_and_get_image_request(
   }
 }
 
-std::optional<std::future<bool>> Kernel::compute_async(
-    const std::string& name, int node_id, const std::string& cache_precision,
-    bool force_recache, bool enable_timing, bool parallel, bool quiet,
-    bool disable_disk_cache, bool nosave,
-    std::vector<BenchmarkEvent>* benchmark_events) {
-  return compute_async_request(
-      ComputeRequest{name, node_id, cache_precision, force_recache,
-                     enable_timing, parallel, quiet, disable_disk_cache, nosave,
-                     benchmark_events, std::nullopt, std::nullopt});
-}
-
-std::optional<std::future<bool>> Kernel::compute_async(
-    const std::string& name, int node_id, const std::string& cache_precision,
-    bool force_recache, bool enable_timing, bool parallel, bool quiet,
-    bool disable_disk_cache, bool nosave,
-    std::vector<BenchmarkEvent>* benchmark_events, ComputeIntent intent,
-    std::optional<cv::Rect> dirty_roi) {
-  return compute_async_request(ComputeRequest{
-      name, node_id, cache_precision, force_recache, enable_timing, parallel,
-      quiet, disable_disk_cache, nosave, benchmark_events, intent, dirty_roi});
+std::optional<std::future<bool>> Kernel::compute_async(ComputeRequest request) {
+  return compute_async_request(std::move(request));
 }
 
 std::optional<std::future<bool>> Kernel::compute_async_request(
@@ -208,7 +201,7 @@ std::optional<std::future<bool>> Kernel::compute_async_request(
   }
 
   GraphRuntime* const runtime_ptr = it->second.get();
-  if (request.parallel) {
+  if (request.execution.parallel) {
     return std::optional<std::future<bool>>(std::async(
         std::launch::async,
         [this, runtime_ptr, request = std::move(request)]() {
@@ -221,8 +214,8 @@ std::optional<std::future<bool>> Kernel::compute_async_request(
             ComputeService compute_service(traversal_service_, cache_service_,
                                            runtime_ptr->event_service());
             const bool prev_quiet = model.is_quiet();
-            model.set_quiet(request.quiet);
-            model.set_skip_save_cache(request.nosave);
+            model.set_quiet(request.execution.quiet);
+            model.set_skip_save_cache(request.cache.nosave);
             (void)run_compute_request(compute_service, *runtime_ptr, model,
                                       request);
             model.set_skip_save_cache(false);
@@ -251,8 +244,8 @@ std::optional<std::future<bool>> Kernel::compute_async_request(
           ComputeService compute_service(traversal_service_, cache_service_,
                                          runtime_ptr->event_service());
           const bool prev_quiet = model.is_quiet();
-          model.set_quiet(request.quiet);
-          model.set_skip_save_cache(request.nosave);
+          model.set_quiet(request.execution.quiet);
+          model.set_skip_save_cache(request.cache.nosave);
           (void)run_compute_request(compute_service, *runtime_ptr, model,
                                     request);
           model.set_skip_save_cache(false);
@@ -276,31 +269,13 @@ NodeOutput& Kernel::run_compute_request(ComputeService& compute_service,
                                         GraphRuntime& runtime,
                                         GraphModel& graph,
                                         const ComputeRequest& request) {
-  if (request.parallel) {
-    if (request.intent) {
-      return compute_service.compute_parallel(
-          graph, runtime, *request.intent, request.node_id,
-          request.cache_precision, request.force_recache, request.enable_timing,
-          request.disable_disk_cache, request.benchmark_events,
-          request.dirty_roi);
-    }
-    return compute_service.compute_parallel(
-        graph, runtime, request.node_id, request.cache_precision,
-        request.force_recache, request.enable_timing,
-        request.disable_disk_cache, request.benchmark_events);
+  const ComputeService::Request service_request =
+      make_service_compute_request(request);
+  if (request.execution.parallel) {
+    return compute_service.compute_parallel(graph, runtime, service_request);
   }
 
-  if (request.intent) {
-    return compute_service.compute(graph, *request.intent, request.node_id,
-                                   request.cache_precision,
-                                   request.force_recache, request.enable_timing,
-                                   request.disable_disk_cache,
-                                   request.benchmark_events, request.dirty_roi);
-  }
-  return compute_service.compute(
-      graph, request.node_id, request.cache_precision, request.force_recache,
-      request.enable_timing, request.disable_disk_cache,
-      request.benchmark_events);
+  return compute_service.compute(graph, service_request);
 }
 
 }  // namespace ps

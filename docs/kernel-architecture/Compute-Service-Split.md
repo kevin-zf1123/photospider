@@ -15,6 +15,14 @@ dispatch coordination, timing, benchmark events, and output debug metadata.
 The split should preserve behavior first. It is not a rewrite of the graph
 engine and it is not a plugin ABI change.
 
+The compute facade now uses structured request objects at both public and
+service boundaries. `Kernel::ComputeRequest` carries graph name, cache,
+execution, telemetry, intent, and dirty ROI controls from frontends.
+`ComputeService::Request` receives only target node, cache, telemetry, intent,
+and dirty ROI data, while `ComputeService::ExecutionStrategy` carries the
+runtime and scheduler-backed execution policy. This keeps CLI behavior stable
+without extending long positional boolean parameter lists.
+
 ## Target Shape
 
 ```text
@@ -39,7 +47,7 @@ ComputeService facade
 
 | Boundary | Responsibility | Status |
 | --- | --- | --- |
-| `ComputeService` facade | Preserve current public compute entry points and construct internal collaborators. | Implemented |
+| `ComputeService` facade | Accept structured compute requests, preserve existing behavior, and construct internal collaborators. | Implemented |
 | `ComputeCachePolicy` | Centralize HP/RT cache selection. | Implemented in `src/kernel/services/compute-service/compute_cache_policy.*` |
 | `NodeInputResolver` | Build runtime parameters and collect ready image inputs. | Implemented in `src/kernel/services/compute-service/node_input_resolver.*` |
 | `NodeExecutor` | Execute monolithic and tiled operators consistently. | Implemented in `src/kernel/services/compute-service/node_executor.*` |
