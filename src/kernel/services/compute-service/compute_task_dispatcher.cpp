@@ -1,5 +1,6 @@
 #include "kernel/services/compute-service/compute_task_dispatcher.hpp"
 
+#include <exception>
 #include <mutex>
 #include <optional>
 #include <utility>
@@ -62,6 +63,49 @@ void ComputeTaskDispatcher::submit_dirty_ready_tasks_source_first(
   ps::compute::submit_dirty_ready_tasks_source_first(
       task_runtime, std::move(source_tasks), std::move(downstream_tasks), epoch,
       std::move(before_downstream));
+}
+
+/**
+ * @brief Submits dirty task handles through dispatcher-owned source-first
+ * ordering.
+ *
+ * @param task_runtime Scheduler runtime receiving the dirty task batches.
+ * @param source_handles Dirty source handles submitted and drained first.
+ * @param source_task_count Total source tasks tracked by scheduler completion.
+ * @param initial_downstream_handles First downstream handles released after
+ * the source boundary.
+ * @param downstream_task_count Total downstream tasks tracked by scheduler
+ * completion.
+ * @param before_downstream Optional boundary validation callback.
+ * @throws Rethrows task_runtime, task, or before_downstream exceptions.
+ * @note The helper centralizes production dirty source-first submission while
+ * dirty executors retain their request-local TaskExecutor ownership.
+ */
+void ComputeTaskDispatcher::submit_dirty_ready_tasks_source_first(
+    SchedulerTaskRuntime& task_runtime,
+    std::vector<TaskHandle>&& source_handles, int source_task_count,
+    std::vector<TaskHandle>&& initial_downstream_handles,
+    int downstream_task_count, std::function<void()> before_downstream) {
+  task_runtime.submit_initial_task_handles(std::move(source_handles),
+                                           source_task_count,
+                                           SchedulerTaskPriority::High);
+  task_runtime.wait_for_completion();
+
+  if (before_downstream) {
+    try {
+      before_downstream();
+    } catch (...) {
+      auto error = std::current_exception();
+      task_runtime.log_event(SchedulerTraceAction::RethrowException, -1);
+      task_runtime.set_exception(error);
+      std::rethrow_exception(error);
+    }
+  }
+
+  task_runtime.submit_initial_task_handles(
+      std::move(initial_downstream_handles), downstream_task_count,
+      SchedulerTaskPriority::Normal);
+  task_runtime.wait_for_completion();
 }
 
 /**

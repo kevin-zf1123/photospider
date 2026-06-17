@@ -444,8 +444,10 @@ class DirtyHandleTaskExecutor : public TaskExecutor {
  * @param run_task Task runner invoked with dense task ids.
  * @throws Exceptions from task construction, task execution, boundary
  * validation, scheduler lookup, or scheduler submission.
- * @note Ordering intentionally mirrors the pre-split ComputeService logic:
- * all source tasks finish before downstream tasks are released.
+ * @note Scheduler-backed execution delegates source-first submission to
+ * ComputeTaskDispatcher::submit_dirty_ready_tasks_source_first. The dirty
+ * executor owns only request-local TaskExecutor construction and inline
+ * fallback ordering.
  */
 template <typename RunTask>
 void run_dirty_source_first(const DirtySourceFirstRunRequest& request,
@@ -460,15 +462,6 @@ void run_dirty_source_first(const DirtySourceFirstRunRequest& request,
     DirtyHandleTaskExecutor<RunTask> source_executor(
         compute_plan, request.selection, source_task_ids, run_task,
         dirty_task_runtime, false, SchedulerTaskPriority::High);
-    dirty_task_runtime.submit_initial_task_handles(
-        source_executor.handles_for(source_task_ids),
-        static_cast<int>(source_task_ids.size()), SchedulerTaskPriority::High);
-    dirty_task_runtime.wait_for_completion();
-
-    if (request.before_downstream) {
-      request.before_downstream();
-    }
-
     DirtyHandleTaskExecutor<RunTask> downstream_executor(
         compute_plan, request.selection, downstream_task_ids, run_task,
         dirty_task_runtime, true, SchedulerTaskPriority::Normal);
@@ -480,11 +473,12 @@ void run_dirty_source_first(const DirtySourceFirstRunRequest& request,
       initial_downstream_ids = ready_checker.initial_ready_task_ids(
           compute_plan.task_graph, &downstream_task_ids);
     }
-    dirty_task_runtime.submit_initial_task_handles(
+    ComputeTaskDispatcher::submit_dirty_ready_tasks_source_first(
+        dirty_task_runtime, source_executor.handles_for(source_task_ids),
+        static_cast<int>(source_task_ids.size()),
         downstream_executor.handles_for(initial_downstream_ids),
         static_cast<int>(downstream_task_ids.size()),
-        SchedulerTaskPriority::Normal);
-    dirty_task_runtime.wait_for_completion();
+        request.before_downstream);
     return;
   }
 

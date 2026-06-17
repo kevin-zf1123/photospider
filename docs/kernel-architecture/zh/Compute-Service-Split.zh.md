@@ -147,17 +147,19 @@ TODO：planner plugin ABI 继续明确推迟到后续 change。
 tile micro-task accounting、异常传播和最终输出选择，但会把具体 ready task callback 交给
 `SchedulerTaskRuntime`。
 
-对于 dirty update，`ComputeTaskDispatcher` 会先从请求 plan 和 dirty snapshot 中 materialize
-每次 update 的 work set，再向 scheduler runtime 提交 ready task callback。运行期依赖计数器、task 引用计数和 ready queue
-在 materialization 期间由 dispatcher 拥有。Scheduler 接收带 epoch context 和 optional scheduler-specific
-hint 的具体 ready task callback；它不接收 task graph，不拥有 dirty-state lookup 或 task-graph derivation。
+对于 dirty update，production HP 和 RT executor 会先从请求 plan 和 dirty snapshot 构建
+request-local dirty `TaskExecutor` handle，然后调用公开静态
+`ComputeTaskDispatcher::submit_dirty_ready_tasks_source_first` helper 作为 source-first
+submission 边界。运行期依赖计数器、task 引用计数和 ready queue 在 compute-service dispatcher
+state 内拥有。Scheduler 接收带 scheduler priority 和 completion accounting 的具体 ready task
+handle；它不接收 task graph，不拥有 dirty-state lookup 或 task-graph derivation。
 
 Realtime materialization 必须同时考虑当前 running work 和 dirty node lifecycle。如果 node
 仍在创建 dirty region，ready queue 为空不应强制 realtime compute request 结束并为下一次 ROI
-update 重建完整 plan。某个 dirty generation 的 source-node task 应由 dispatcher source-first
-提交，并在依赖的 downstream dirty work 释放前完成，而不是单独的 dirty source queue，也不是
-scheduler-wide priority contract。后续工作可以把 work-set selection 逻辑抽取到 task-pruner
-plugin interface 后面。
+update 重建完整 plan。某个 dirty generation 的 source-node task 会由 dispatcher helper
+source-first 提交，并在依赖的 downstream dirty work 释放前完成，而不是单独的 dirty source queue，
+也不是 scheduler-wide priority contract。后续工作可以把 work-set selection 逻辑抽取到
+task-pruner plugin interface 后面。
 
 一旦 scheduler-visible task 已经从 `ComputeTaskGraph` 派生，dispatcher 必须把该 graph 视为
 immutable。新的 dirty update 会基于同一个 plan 和最新 snapshot 产生新的

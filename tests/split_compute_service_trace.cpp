@@ -11,6 +11,7 @@
 #include <nlohmann/json.hpp>
 #include <optional>
 #include <sstream>
+#include <stdexcept>
 #include <string>
 #include <vector>
 
@@ -281,6 +282,180 @@ void write_jsonl(const fs::path& path, const std::vector<json>& rows) {
   for (const auto& row : rows) {
     out << row.dump() << "\n";
   }
+}
+
+/**
+ * @brief Reads a UTF-8 source file for focused source-audit evidence.
+ *
+ * @param path File to read relative to the repository root.
+ * @return Complete source text.
+ * @throws std::runtime_error when the file cannot be opened.
+ * @note The trace harness uses this only to verify production call-chain
+ * boundaries that cannot be observed directly from runtime event payloads.
+ */
+std::string read_source_text(const fs::path& path) {
+  std::ifstream in(path);
+  if (!in) {
+    throw std::runtime_error("failed to read source file: " + path.string());
+  }
+  std::ostringstream buffer;
+  buffer << in.rdbuf();
+  return buffer.str();
+}
+
+/**
+ * @brief Extracts the first C++ function body whose signature contains a token.
+ *
+ * @param source Source text to scan.
+ * @param signature_start Stable function signature prefix.
+ * @param required_token Token that must appear between the signature prefix and
+ * the opening brace.
+ * @return Function body including braces, or an empty string when not found.
+ * @throws Nothing directly.
+ * @note This brace scanner is intentionally narrow and is used only on local
+ * helper functions with ordinary C++ function syntax.
+ */
+std::string function_body_with_token(const std::string& source,
+                                     const std::string& signature_start,
+                                     const std::string& required_token) {
+  size_t search_pos = 0;
+  while (true) {
+    const size_t start = source.find(signature_start, search_pos);
+    if (start == std::string::npos) {
+      return "";
+    }
+    const size_t brace = source.find('{', start);
+    if (brace == std::string::npos) {
+      return "";
+    }
+    const std::string signature = source.substr(start, brace - start);
+    if (signature.find(required_token) == std::string::npos) {
+      search_pos = brace + 1;
+      continue;
+    }
+    int depth = 0;
+    for (size_t index = brace; index < source.size(); ++index) {
+      if (source[index] == '{') {
+        ++depth;
+      } else if (source[index] == '}') {
+        --depth;
+        if (depth == 0) {
+          return source.substr(brace, index - brace + 1);
+        }
+      }
+    }
+    return "";
+  }
+}
+
+/**
+ * @brief Counts source-line occurrences of a token for call-chain evidence.
+ *
+ * @param source Source text to scan.
+ * @param token Token to search for.
+ * @return Matching 1-based line numbers.
+ * @throws Nothing directly.
+ * @note Line numbers are recorded in JSON so reviewers can jump from evidence
+ * to the exact production call sites.
+ */
+std::vector<int> source_line_numbers(const std::string& source,
+                                     const std::string& token) {
+  std::vector<int> lines;
+  std::istringstream input(source);
+  std::string line;
+  int line_number = 1;
+  while (std::getline(input, line)) {
+    if (line.find(token) != std::string::npos) {
+      lines.push_back(line_number);
+    }
+    ++line_number;
+  }
+  return lines;
+}
+
+/**
+ * @brief Audits the dirty executor to dispatcher helper production call chain.
+ *
+ * @param repo_root Repository root used to locate source files.
+ * @return JSON object with boolean checks and source line evidence.
+ * @throws std::runtime_error when a required source file cannot be read.
+ * @note This complements runtime scheduler traces by proving the production
+ * dirty update path routes source-first submission through the public
+ * ComputeTaskDispatcher helper.
+ */
+json dirty_dispatcher_call_chain_audit(const fs::path& repo_root) {
+  const fs::path dirty_executor_path =
+      repo_root /
+      "src/kernel/services/compute-service/dirty_update_executor.cpp";
+  const fs::path dirty_common_path =
+      repo_root /
+      "src/kernel/services/compute-service/dirty_execution_common.hpp";
+  const fs::path dispatcher_path =
+      repo_root /
+      "src/kernel/services/compute-service/compute_task_dispatcher.cpp";
+  const std::string dirty_executor = read_source_text(dirty_executor_path);
+  const std::string dirty_common = read_source_text(dirty_common_path);
+  const std::string dispatcher = read_source_text(dispatcher_path);
+  const std::string run_dirty_body = function_body_with_token(
+      dirty_common, "void run_dirty_source_first", "RunTask run_task");
+  const std::string dispatcher_handle_body = function_body_with_token(
+      dispatcher,
+      "void ComputeTaskDispatcher::submit_dirty_ready_tasks_source_first",
+      "std::vector<TaskHandle>&& source_handles");
+  const bool executor_calls_common_helper =
+      source_line_numbers(dirty_executor, "run_dirty_source_first(").size() >=
+      2;
+  const bool common_calls_dispatcher_helper =
+      run_dirty_body.find(
+          "ComputeTaskDispatcher::submit_dirty_ready_tasks_source_first") !=
+      std::string::npos;
+  const bool common_no_direct_runtime_submit =
+      run_dirty_body.find("dirty_task_runtime.submit_initial_task_handles") ==
+      std::string::npos;
+  const bool dispatcher_submits_source_first =
+      dispatcher_handle_body.find("SchedulerTaskPriority::High") !=
+          std::string::npos &&
+      dispatcher_handle_body.find("SchedulerTaskPriority::Normal") !=
+          std::string::npos &&
+      dispatcher_handle_body.find("before_downstream") != std::string::npos;
+  const bool dispatcher_reaches_scheduler_runtime =
+      dispatcher_handle_body.find("task_runtime.submit_initial_task_handles") !=
+          std::string::npos &&
+      dispatcher_handle_body.find("task_runtime.wait_for_completion") !=
+          std::string::npos;
+  const bool dispatcher_records_callback_exception =
+      dispatcher_handle_body.find("SchedulerTraceAction::RethrowException") !=
+          std::string::npos &&
+      dispatcher_handle_body.find("task_runtime.set_exception") !=
+          std::string::npos;
+  const bool all_checks =
+      executor_calls_common_helper && common_calls_dispatcher_helper &&
+      common_no_direct_runtime_submit && dispatcher_submits_source_first &&
+      dispatcher_reaches_scheduler_runtime &&
+      dispatcher_records_callback_exception;
+  return {
+      {"checks",
+       {{"executor_calls_common_helper", executor_calls_common_helper},
+        {"common_calls_dispatcher_helper", common_calls_dispatcher_helper},
+        {"common_no_direct_runtime_submit", common_no_direct_runtime_submit},
+        {"dispatcher_submits_source_first", dispatcher_submits_source_first},
+        {"dispatcher_reaches_scheduler_runtime",
+         dispatcher_reaches_scheduler_runtime},
+        {"dispatcher_records_callback_exception",
+         dispatcher_records_callback_exception}}},
+      {"line_evidence",
+       {{"dirty_update_executor_run_dirty_source_first",
+         source_line_numbers(dirty_executor, "run_dirty_source_first(")},
+        {"dirty_execution_common_dispatcher_helper",
+         source_line_numbers(
+             dirty_common,
+             "ComputeTaskDispatcher::submit_dirty_ready_tasks_source_first")},
+        {"dispatcher_scheduler_submit",
+         source_line_numbers(dispatcher,
+                             "task_runtime.submit_initial_task_handles")},
+        {"dispatcher_scheduler_wait",
+         source_line_numbers(dispatcher, "task_runtime.wait_for_completion")}}},
+      {"passed", all_checks}};
 }
 
 std::string command_line(int argc, char** argv) {
@@ -1396,6 +1571,7 @@ int main(int argc, char** argv) {
   const fs::path root = argc > 1
                             ? fs::path(argv[1])
                             : fs::path("tests/results/split-compute-service");
+  const fs::path repo_root = fs::current_path();
   const std::string command = command_line(argc, argv);
   fs::create_directories(root / "full-kernel-run" / "input");
   fs::create_directories(root / "full-kernel-run" / "actual");
@@ -1966,6 +2142,8 @@ int main(int argc, char** argv) {
         parallel_snapshot["last_compute_plan"]["task_graph"]["tasks"].size());
     const double seq_checksum = node_checksum(sequential_snapshot, 100, "hp");
     const double par_checksum = node_checksum(parallel_snapshot, 100, "hp");
+    const json dirty_dispatcher_audit =
+        dirty_dispatcher_call_chain_audit(repo_root);
     task6.add("parallel compute returned ok", true, parallel_ok, parallel_ok,
               "parallel facade returned success");
     task6.add("scheduler planned task events recorded", planned_task_count,
@@ -1999,10 +2177,18 @@ int main(int argc, char** argv) {
         "parallel exception propagated", false, error_ok,
         !error_ok && last_error.has_value(),
         "error graph propagates executor exception to Kernel::last_error");
-    json task6_actual = {{"parallel", parallel_actual},
-                         {"error_path", error_actual},
-                         {"sequential_checksum", seq_checksum},
-                         {"parallel_checksum", par_checksum}};
+    task6.add(
+        "dirty source-first path uses dispatcher helper", true,
+        dirty_dispatcher_audit, dirty_dispatcher_audit["passed"].get<bool>(),
+        "source audit verifies dirty executors enter run_dirty_source_first, "
+        "which delegates scheduler-backed source-first submission to "
+        "ComputeTaskDispatcher before reaching SchedulerTaskRuntime");
+    json task6_actual = {
+        {"parallel", parallel_actual},
+        {"error_path", error_actual},
+        {"sequential_checksum", seq_checksum},
+        {"parallel_checksum", par_checksum},
+        {"dirty_dispatcher_call_chain", dirty_dispatcher_audit}};
     json task6_expected = {{"parallel_ok", true},
                            {"scheduler_execute_count", ">=5"},
                            {"scheduler_tile_count", ">0"},
@@ -2010,6 +2196,7 @@ int main(int argc, char** argv) {
                            {"planned_nodes", {1, 2, 4, 30, 100}},
                            {"plan_dependencies", ">=4"},
                            {"plan_tasks", ">=5"},
+                           {"dirty_dispatcher_call_chain_passed", true},
                            {"parallel_error_returns_ok", false}};
     write_task_bundle(
         root, "task-06", "Task 6 compute plan executor runtime evidence",
@@ -2043,17 +2230,26 @@ int main(int argc, char** argv) {
             contains_phase(observed_phases, "dirty_rt_update_single_thread") &&
             contains_phase(observed_phases, "parallel_error_path"),
         "runtime evidence covers facade, scheduler, dirty, and error paths");
-    json task7_actual = {{"sequential", sequential_actual},
-                         {"parallel", parallel_actual},
-                         {"dirty", dirty_actual},
-                         {"dirty_single_thread", dirty_single_thread_actual},
-                         {"error", error_actual},
-                         {"observed_phases", observed_phases}};
+    task7.add(
+        "evidence records dirty dispatcher helper chain", true,
+        dirty_dispatcher_audit["checks"],
+        dirty_dispatcher_audit["passed"].get<bool>(),
+        "build integration evidence includes source lines from dirty executor "
+        "through ComputeTaskDispatcher to scheduler runtime submission");
+    json task7_actual = {
+        {"sequential", sequential_actual},
+        {"parallel", parallel_actual},
+        {"dirty", dirty_actual},
+        {"dirty_single_thread", dirty_single_thread_actual},
+        {"error", error_actual},
+        {"observed_phases", observed_phases},
+        {"dirty_dispatcher_call_chain", dirty_dispatcher_audit}};
     json task7_expected = {
         {"public_facade_sequential_ok", true},
         {"public_facade_parallel_ok", true},
         {"public_kernel_dirty_intent_ok", true},
         {"public_kernel_dirty_intent_single_thread_ok", true},
+        {"dirty_dispatcher_call_chain_passed", true},
         {"required_phases",
          {"sequential_hp", "parallel_hp", "dirty_rt_update",
           "dirty_rt_update_single_thread", "parallel_error_path"}}};
