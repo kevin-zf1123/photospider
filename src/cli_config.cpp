@@ -31,8 +31,10 @@ bool write_config_to_file(const CliConfig& config, const std::string& path) {
   root["default_compute_args"] = config.default_compute_args;
   root["switch_after_load"] = config.switch_after_load;
   root["session_warning"] = config.session_warning;
-  
-  // [M3.4] Scheduler configuration
+
+  // Scheduler defaults. Built-in types are cpu_work_stealing, serial_debug,
+  // gpu_pipeline, and heterogeneous; plugin scheduler names are valid after
+  // scheduler_dirs scanning or explicit scheduler load commands.
   root["scheduler_hp_type"] = config.scheduler_hp_type;
   root["scheduler_rt_type"] = config.scheduler_rt_type;
   root["scheduler_worker_count"] = config.scheduler_worker_count;
@@ -64,10 +66,11 @@ void load_or_create_config(const std::string& config_path, CliConfig& config) {
         config.plugin_dirs.clear();
         config.plugin_dirs.push_back(root["plugin_dir"].as<std::string>());
       }
-      
+
       // Scheduler directories
       if (root["scheduler_dirs"] && root["scheduler_dirs"].IsSequence()) {
-        config.scheduler_dirs = root["scheduler_dirs"].as<std::vector<std::string>>();
+        config.scheduler_dirs =
+            root["scheduler_dirs"].as<std::vector<std::string>>();
       }
 
       if (root["default_print_mode"])
@@ -120,15 +123,17 @@ void load_or_create_config(const std::string& config_path, CliConfig& config) {
         config.switch_after_load = root["switch_after_load"].as<bool>();
       if (root["session_warning"])
         config.session_warning = root["session_warning"].as<bool>();
-      
-      // [M3.4] Scheduler configuration
+
+      // Scheduler selection from config accepts built-ins and scanned plugin
+      // scheduler names.
       if (root["scheduler_hp_type"])
         config.scheduler_hp_type = root["scheduler_hp_type"].as<std::string>();
       if (root["scheduler_rt_type"])
         config.scheduler_rt_type = root["scheduler_rt_type"].as<std::string>();
       if (root["scheduler_worker_count"])
-        config.scheduler_worker_count = root["scheduler_worker_count"].as<int>();
-        
+        config.scheduler_worker_count =
+            root["scheduler_worker_count"].as<int>();
+
       std::cout << "Loaded configuration from '" << config_path << "'."
                 << std::endl;
     } catch (const std::exception& e) {

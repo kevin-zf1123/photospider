@@ -31,15 +31,24 @@ struct CliConfig {
   // Whether to show a warning when loading/copying over an existing session's
   // content.
   bool session_warning = true;
-  
-  // [M3.4] Scheduler configuration
-  // Default scheduler type for HP (high precision) computations
-  // Supported values: "cpu_work_stealing", "serial_debug"
+
+  /** @brief Default scheduler type for HP high-precision computations.
+   *
+   * Built-in values are "cpu_work_stealing", "serial_debug",
+   * "gpu_pipeline", and "heterogeneous". Scheduler plugin names become valid
+   * after graph_cli scans scheduler_dirs or a user runs scheduler scan/load.
+   */
   std::string scheduler_hp_type = "cpu_work_stealing";
-  // Default scheduler type for RT (real-time) computations
-  // Supported values: "cpu_work_stealing", "serial_debug"
+
+  /** @brief Default scheduler type for RT real-time kernel intent work.
+   *
+   * This selects the scheduler attached to ComputeIntent::RealTimeUpdate for
+   * kernel/API callers. It does not make graph_cli expose RT compute commands
+   * or dirty source lifecycle commands.
+   */
   std::string scheduler_rt_type = "cpu_work_stealing";
-  // Number of worker threads for CPU scheduler (0 = auto-detect)
+
+  /** @brief Worker count for built-in CPU-backed schedulers; 0 means auto. */
   int scheduler_worker_count = 0;
 };
 
