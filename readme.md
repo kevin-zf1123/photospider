@@ -195,8 +195,8 @@ Important keys:
 | `default_timer_log_path` | `out/timer.yaml` | Default `compute tl` output path. |
 | `default_ops_list_mode` | `all` | REPL `ops` default. |
 | `default_compute_args` | empty | Space-separated default `compute` flags. |
-| `scheduler_hp_type` | `cpu_work_stealing` | High-precision scheduler type. |
-| `scheduler_rt_type` | `cpu_work_stealing` | Real-time scheduler type. |
+| `scheduler_hp_type` | `cpu_work_stealing` | High-precision scheduler type: built-in `cpu_work_stealing`, `serial_debug`, `gpu_pipeline`, `heterogeneous`, or a loaded plugin scheduler name. |
+| `scheduler_rt_type` | `cpu_work_stealing` | Kernel RT intent scheduler type using the same supported values; this does not enable CLI RT commands. |
 | `scheduler_worker_count` | `0` | CPU worker count; `0` means auto. |
 
 Use another config file with:

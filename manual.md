@@ -61,8 +61,8 @@ Examples:
 ./build/bin/graph_cli --config config.yaml --read graph.yaml --repl
 ```
 
-Top-level CLI mode does not currently expose `--compute` or `--save`. Use the
-REPL commands `compute` and `save` for execution and image output.
+Top-level CLI mode does not expose `--compute` or `--save`. Use the REPL
+commands `compute` and `save` for execution and image output.
 
 ## 3. REPL Mode
 
@@ -238,8 +238,8 @@ one with default values.
 | `default_compute_args` | empty | Default flags appended to `compute` when none are provided. |
 | `switch_after_load` | `true` | Make a loaded graph the active session. |
 | `session_warning` | `true` | Warn before overwriting session content. |
-| `scheduler_hp_type` | `cpu_work_stealing` | Default HP scheduler. |
-| `scheduler_rt_type` | `cpu_work_stealing` | Default RT scheduler. |
+| `scheduler_hp_type` | `cpu_work_stealing` | Default HP scheduler: built-in `cpu_work_stealing`, `serial_debug`, `gpu_pipeline`, `heterogeneous`, or a loaded plugin scheduler name. |
+| `scheduler_rt_type` | `cpu_work_stealing` | Default kernel RT intent scheduler using the same supported values; this does not enable CLI RT commands. |
 | `scheduler_worker_count` | `0` | CPU scheduler worker count; `0` means auto. |
 
 When the CLI loads a config file, it scans `scheduler_dirs` before graph load
