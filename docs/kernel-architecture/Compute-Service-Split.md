@@ -181,19 +181,20 @@ temporary result storage, tile micro-task accounting, exception propagation,
 and final output selection, but hands concrete ready task callbacks to
 `SchedulerTaskRuntime`.
 
-For dirty updates, `ComputeTaskDispatcher` materializes the per-update work set
-from the request plan and dirty snapshot before submitting ready task callbacks
-to the scheduler runtime.
-Runtime dependency counters, task reference counts, and ready queues are owned
-by the dispatcher during that materialization. The scheduler receives concrete
-ready task callbacks with epoch context and optional scheduler-specific hints;
-it does not receive task graphs, own dirty-state lookup, or derive task graphs.
+For dirty updates, production HP and RT executors build request-local dirty
+`TaskExecutor` handles from the request plan and dirty snapshot, then call the
+public static `ComputeTaskDispatcher::submit_dirty_ready_tasks_source_first`
+helper as the source-first submission boundary. Runtime dependency counters,
+task reference counts, and ready queues are owned inside compute-service
+dispatcher state during that materialization. The scheduler receives concrete
+ready task handles with scheduler priority and completion accounting; it does
+not receive task graphs, own dirty-state lookup, or derive task graphs.
 
 Realtime materialization must consider both current running work and the dirty
 node lifecycle. If a node is still creating dirty regions, an empty ready queue
 should not force the realtime compute request to terminate and rebuild a new
 full plan for the next ROI update. Source-node tasks for a dirty generation
-should be submitted source-first by the dispatcher before dependent downstream
+are submitted source-first by the dispatcher helper before dependent downstream
 dirty work is released, not as a separate dirty source queue and not as a
 scheduler-wide priority contract. Later work may extract the work-set selection
 logic behind a task-pruner plugin interface.

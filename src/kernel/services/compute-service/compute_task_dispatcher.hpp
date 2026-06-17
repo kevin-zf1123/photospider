@@ -157,6 +157,35 @@ class ComputeTaskDispatcher {
       std::optional<uint64_t> epoch = std::nullopt,
       std::function<void()> before_downstream = nullptr);
 
+  /**
+   * @brief Runs dirty task handles with source-before-downstream ordering.
+   *
+   * Source handles are submitted as the first dirty dependency batch with high
+   * priority and waited to completion. The optional before_downstream callback
+   * then validates the source boundary on the caller thread. Finally, initial
+   * downstream handles are submitted as a normal-priority dependency batch and
+   * waited until scheduler dependency release drains the full downstream count.
+   *
+   * @param task_runtime Scheduler runtime used by the dirty-update caller.
+   * @param source_handles Ready dirty source task handles to submit first.
+   * @param source_task_count Total source task count tracked by the scheduler.
+   * @param initial_downstream_handles Initial downstream handles whose
+   * dependencies are already satisfied after source completion.
+   * @param downstream_task_count Total downstream dirty task count tracked by
+   * the scheduler.
+   * @param before_downstream Optional callback for source-boundary validation.
+   * @throws Rethrows any scheduler, task, or callback exception.
+   * @note Production HP and RT dirty executors use this overload so
+   * source-first scheduler submission remains a ComputeTaskDispatcher boundary
+   * while dirty executors own only plan-specific TaskExecutor construction.
+   */
+  static void submit_dirty_ready_tasks_source_first(
+      SchedulerTaskRuntime& task_runtime,
+      std::vector<TaskHandle>&& source_handles, int source_task_count,
+      std::vector<TaskHandle>&& initial_downstream_handles,
+      int downstream_task_count,
+      std::function<void()> before_downstream = nullptr);
+
  private:
   /**
    * @brief Clears graph timing state before a timed dispatch.
