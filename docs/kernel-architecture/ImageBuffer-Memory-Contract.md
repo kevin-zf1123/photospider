@@ -85,16 +85,26 @@ object stored in `context` is backend-specific.
 
 ## Metal Buffers
 
-Current Metal adapter behavior:
+The Metal buffer adapter is implemented in `include/adapter/buffer_adapter_metal.hpp`
+and `src/adapter/buffer_adapter_metal.mm`, but it is not currently enabled in
+the core library build and is not connected to the production compute path.
+`CMakeLists.txt` builds the current Metal operation path separately through
+`src/metal/perlin_noise_metal.mm` and `custom_ops/metal_ops_loader.cpp`; that op
+path registers `image_generator:perlin_noise_metal` when the loader directory is
+manually present in `plugin_dirs`.
+
+Implemented adapter behavior:
 
 - Upload supports `FLOAT32` buffers with 1 or 4 channels.
 - Uploaded buffers use `Device::GPU_METAL`.
 - `context` owns a Metal texture holder.
 - Download returns a new CPU `ImageBuffer`.
 
-Plugin and scheduler code should prefer adapter APIs for Metal access. Direct
-interpretation of `context` is a performance-sensitive escape hatch and should
-not become required without benchmark evidence.
+Plugin, scheduler, and core compute code must not treat the Metal buffer adapter
+as a production runtime boundary until a future change wires it into the build,
+documents the call chain, and records validation evidence. Direct interpretation
+of `context` remains backend-specific and should not become a broader contract
+without benchmark evidence.
 
 ## Benchmark Questions
 
