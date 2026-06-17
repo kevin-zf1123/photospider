@@ -1,6 +1,7 @@
 #include <gtest/gtest.h>
 
 #include <algorithm>
+#include <atomic>
 #include <mutex>
 #include <set>
 #include <stdexcept>
@@ -12,6 +13,7 @@
 #include "graph_model.hpp"  // NOLINT(build/include_subdir)
 #include "kernel/graph_runtime.hpp"
 #include "kernel/interaction.hpp"
+#include "kernel/scheduler/serial_debug_scheduler.hpp"
 #include "kernel/services/compute-service/compute_cache_policy.hpp"
 #include "kernel/services/compute-service/compute_geometry.hpp"
 #include "kernel/services/compute-service/compute_metrics_recorder.hpp"
@@ -19,8 +21,8 @@
 #include "kernel/services/compute-service/intent_update_coordinator.hpp"
 #include "kernel/services/compute-service/node_executor.hpp"
 #include "kernel/services/compute-service/node_input_resolver.hpp"
-#include "kernel/services/compute-service/task_population_strategy.hpp"
 #include "kernel/services/compute-service/task_graph_planning.hpp"
+#include "kernel/services/compute-service/task_population_strategy.hpp"
 #include "kernel/services/compute_service.hpp"
 #include "kernel/services/graph_cache_service.hpp"
 #include "kernel/services/graph_event_service.hpp"
@@ -919,10 +921,11 @@ TEST(IntentUpdateCoordinatorSplit,
   EXPECT_TRUE(inline_decision.run_real_time_update);
   EXPECT_FALSE(inline_decision.submit_updates_concurrently);
 
-  bool ran_hp = false;
-  bool ran_rt = false;
+  std::atomic_bool ran_hp{false};
+  std::atomic_bool ran_rt{false};
   bool ran_global_dirty = false;
   std::vector<std::string> stages;
+  std::mutex stages_mutex;
   NodeOutput rt_output = make_image_output(4, 4);
   compute::IntentUpdateCallbacks callbacks;
   callbacks.run_global_high_precision = [&]() -> NodeOutput& {
@@ -932,13 +935,14 @@ TEST(IntentUpdateCoordinatorSplit,
     ran_global_dirty = true;
     return rt_output;
   };
-  callbacks.run_high_precision_update = [&]() { ran_hp = true; };
+  callbacks.run_high_precision_update = [&]() { ran_hp.store(true); };
   callbacks.run_real_time_update = [&]() -> NodeOutput& {
-    ran_rt = true;
+    ran_rt.store(true);
     return rt_output;
   };
   callbacks.real_time_output = [&]() -> NodeOutput& { return rt_output; };
   callbacks.record_stage = [&](const std::string& stage) {
+    std::lock_guard<std::mutex> lock(stages_mutex);
     stages.push_back(stage);
   };
 
@@ -947,8 +951,8 @@ TEST(IntentUpdateCoordinatorSplit,
           ComputeIntent::RealTimeUpdate, nullptr, nullptr, cv::Rect(0, 0, 4, 4),
           callbacks);
   EXPECT_EQ(&coordinated, &rt_output);
-  EXPECT_TRUE(ran_hp);
-  EXPECT_TRUE(ran_rt);
+  EXPECT_TRUE(ran_hp.load());
+  EXPECT_TRUE(ran_rt.load());
   EXPECT_NE(std::find(stages.begin(), stages.end(),
                       "intent_coordinator_decision_inline"),
             stages.end());
@@ -974,19 +978,54 @@ TEST(IntentUpdateCoordinatorSplit,
         return stage.find("full_recompute") != std::string::npos;
       }));
 
-  ran_hp = false;
-  ran_rt = false;
+  ran_hp.store(false);
+  ran_rt.store(false);
   stages.clear();
   NodeOutput& coordinated_without_runtime =
       compute::IntentUpdateCoordinator::coordinate_intent_update(
           ComputeIntent::RealTimeUpdate, nullptr, nullptr, cv::Rect(0, 0, 4, 4),
           callbacks);
   EXPECT_EQ(&coordinated_without_runtime, &rt_output);
-  EXPECT_TRUE(ran_hp);
-  EXPECT_TRUE(ran_rt);
+  EXPECT_TRUE(ran_hp.load());
+  EXPECT_TRUE(ran_rt.load());
   EXPECT_NE(std::find(stages.begin(), stages.end(),
                       "intent_coordinator_decision_inline"),
             stages.end());
+
+  SerialDebugScheduler hp_runtime;
+  SerialDebugScheduler rt_runtime;
+  hp_runtime.start();
+  rt_runtime.start();
+  ran_hp.store(false);
+  ran_rt.store(false);
+  stages.clear();
+  NodeOutput& coordinated_with_runtimes =
+      compute::IntentUpdateCoordinator::coordinate_intent_update(
+          ComputeIntent::RealTimeUpdate, &hp_runtime, &rt_runtime,
+          cv::Rect(0, 0, 4, 4), callbacks);
+  EXPECT_EQ(&coordinated_with_runtimes, &rt_output);
+  EXPECT_TRUE(ran_hp.load());
+  EXPECT_TRUE(ran_rt.load());
+  EXPECT_NE(std::find(stages.begin(), stages.end(),
+                      "intent_coordinator_decision_concurrent"),
+            stages.end());
+  EXPECT_NE(std::find(stages.begin(), stages.end(),
+                      "intent_coordinator_submit_hp_scheduler_runtime"),
+            stages.end());
+  EXPECT_NE(std::find(stages.begin(), stages.end(),
+                      "intent_coordinator_submit_rt_scheduler_runtime"),
+            stages.end());
+  EXPECT_NE(std::find(stages.begin(), stages.end(),
+                      "intent_coordinator_wait_rt_scheduler_runtime"),
+            stages.end());
+  EXPECT_NE(std::find(stages.begin(), stages.end(),
+                      "intent_coordinator_wait_hp_scheduler_runtime"),
+            stages.end());
+  EXPECT_NE(std::find(stages.begin(), stages.end(),
+                      "intent_coordinator_scheduler_runtime_complete"),
+            stages.end());
+  hp_runtime.shutdown();
+  rt_runtime.shutdown();
 }
 
 TEST(GlobalHighPrecisionDirtyUpdate, UsesDirtyPlanningForGlobalHpDirtyRoi) {

@@ -1867,24 +1867,32 @@ int main(int argc, char** argv) {
         "HP and RT dirty update plans expose regions, dependencies, and "
         "planned task graph summary semantics consumed by execution");
     task5.add(
-        "dirty realtime avoids coarse coordinator scheduler submit", true,
+        "dirty realtime submits HP/RT scheduler runtime siblings", true,
         dirty_actual["compute_events"],
-        compute_events_contain_source(dirty_actual["compute_events"],
-                                      "intent_coordinator_decision_inline") &&
-            compute_events_contain_source(dirty_actual["compute_events"],
-                                          "intent_coordinator_inline_hp") &&
-            compute_events_contain_source(dirty_actual["compute_events"],
-                                          "intent_coordinator_inline_rt") &&
+        compute_events_contain_source(
+            dirty_actual["compute_events"],
+            "intent_coordinator_decision_concurrent") &&
+            compute_events_contain_source(
+                dirty_actual["compute_events"],
+                "intent_coordinator_submit_hp_scheduler_runtime") &&
+            compute_events_contain_source(
+                dirty_actual["compute_events"],
+                "intent_coordinator_submit_rt_scheduler_runtime") &&
+            compute_events_contain_source(
+                dirty_actual["compute_events"],
+                "intent_coordinator_wait_rt_scheduler_runtime") &&
+            compute_events_contain_source(
+                dirty_actual["compute_events"],
+                "intent_coordinator_wait_hp_scheduler_runtime") &&
+            compute_events_contain_source(
+                dirty_actual["compute_events"],
+                "intent_coordinator_scheduler_runtime_complete") &&
             !compute_events_contain_source(
                 dirty_actual["compute_events"],
-                "intent_coordinator_decision_concurrent") &&
-            !compute_events_contain_source(dirty_actual["compute_events"],
-                                           "intent_coordinator_submit_hp") &&
-            !compute_events_contain_source(dirty_actual["compute_events"],
-                                           "intent_coordinator_submit_rt"),
-        "RealTimeUpdate no longer submits coarse HP/RT callbacks through "
-        "IntentUpdateCoordinator; HP/RT callbacks submit dirty ready tasks "
-        "internally.");
+                "intent_coordinator_decision_inline"),
+        "Parallel RealTimeUpdate starts HP and RT dirty callbacks against "
+        "their scheduler task runtimes, waits for RT then HP, and records "
+        "completion after both paths finish.");
     task5.add(
         "non-parallel realtime intent still ran HP and RT", true,
         dirty_single_thread_actual["compute_events"],
@@ -1924,11 +1932,17 @@ int main(int argc, char** argv) {
         {"dirty_plan_dependencies", ">=2"},
         {"dirty_plan_tasks", ">=3"},
         {"intent_coordinator_sources",
+         {"intent_coordinator_decision_concurrent",
+          "intent_coordinator_submit_hp_scheduler_runtime",
+          "intent_coordinator_submit_rt_scheduler_runtime",
+          "intent_coordinator_wait_rt_scheduler_runtime",
+          "intent_coordinator_wait_hp_scheduler_runtime",
+          "intent_coordinator_scheduler_runtime_complete"}},
+        {"intent_coordinator_inline_sources_absent",
          {"intent_coordinator_decision_inline", "intent_coordinator_inline_hp",
           "intent_coordinator_inline_rt"}},
-        {"coarse_intent_submit_sources_absent",
-         {"intent_coordinator_decision_concurrent",
-          "intent_coordinator_submit_hp", "intent_coordinator_submit_rt"}},
+        {"legacy_coarse_intent_submit_sources_absent",
+         {"intent_coordinator_submit_hp", "intent_coordinator_submit_rt"}},
         {"intent_coordinator_inline_sources",
          {"intent_coordinator_decision_inline", "intent_coordinator_inline_hp",
           "intent_coordinator_inline_rt"}},

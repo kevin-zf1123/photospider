@@ -487,15 +487,11 @@ NodeOutput& ComputeService::compute_intent_update_impl(
   SchedulerTaskRuntime* hp_task_runtime = nullptr;
   SchedulerTaskRuntime* rt_task_runtime = nullptr;
   if (strategy.use_parallel_executor && strategy.runtime) {
-    const bool dirty_rt_update = intent == ComputeIntent::RealTimeUpdate &&
-                                 request.dirty_roi.has_value();
-    if (!dirty_rt_update) {
-      hp_task_runtime = &compute::ensure_scheduler_task_runtime(
-          *strategy.runtime, ComputeIntent::GlobalHighPrecision);
-      if (intent == ComputeIntent::RealTimeUpdate) {
-        rt_task_runtime = &compute::ensure_scheduler_task_runtime(
-            *strategy.runtime, ComputeIntent::RealTimeUpdate);
-      }
+    hp_task_runtime = &compute::ensure_scheduler_task_runtime(
+        *strategy.runtime, ComputeIntent::GlobalHighPrecision);
+    if (intent == ComputeIntent::RealTimeUpdate) {
+      rt_task_runtime = &compute::ensure_scheduler_task_runtime(
+          *strategy.runtime, ComputeIntent::RealTimeUpdate);
     }
   }
 

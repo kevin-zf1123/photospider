@@ -101,36 +101,34 @@ NodeOutput& IntentUpdateCoordinator::coordinate_intent_update(
         return callbacks.real_time_output();
       }
 
-      record_stage(callbacks, "intent_coordinator_submit_hp");
+      record_stage(callbacks, "intent_coordinator_submit_hp_scheduler_runtime");
       auto hp_future = std::async(
-          std::launch::async,
-          [run_hp = callbacks.run_high_precision_update,
-           record = callbacks.record_stage]() {
+          std::launch::async, [run_hp = callbacks.run_high_precision_update,
+                               record = callbacks.record_stage]() {
             try {
               if (record) {
-                record("intent_coordinator_run_hp");
+                record("intent_coordinator_run_hp_scheduler_runtime");
               }
               run_hp();
               if (record) {
-                record("intent_coordinator_hp_done");
+                record("intent_coordinator_hp_scheduler_runtime_done");
               }
             } catch (...) {
               throw;
             }
           });
 
-      record_stage(callbacks, "intent_coordinator_submit_rt");
+      record_stage(callbacks, "intent_coordinator_submit_rt_scheduler_runtime");
       auto rt_future = std::async(
-          std::launch::async,
-          [run_rt = callbacks.run_real_time_update,
-           record = callbacks.record_stage]() {
+          std::launch::async, [run_rt = callbacks.run_real_time_update,
+                               record = callbacks.record_stage]() {
             try {
               if (record) {
-                record("intent_coordinator_run_rt");
+                record("intent_coordinator_run_rt_scheduler_runtime");
               }
               run_rt();
               if (record) {
-                record("intent_coordinator_rt_done");
+                record("intent_coordinator_rt_scheduler_runtime_done");
               }
             } catch (...) {
               throw;
@@ -139,11 +137,13 @@ NodeOutput& IntentUpdateCoordinator::coordinate_intent_update(
 
       std::exception_ptr first_error;
       try {
+        record_stage(callbacks, "intent_coordinator_wait_rt_scheduler_runtime");
         rt_future.get();
       } catch (...) {
         first_error = std::current_exception();
       }
       try {
+        record_stage(callbacks, "intent_coordinator_wait_hp_scheduler_runtime");
         hp_future.get();
       } catch (...) {
         if (!first_error) {
@@ -154,7 +154,7 @@ NodeOutput& IntentUpdateCoordinator::coordinate_intent_update(
         std::rethrow_exception(first_error);
       }
 
-      record_stage(callbacks, "intent_coordinator_complete");
+      record_stage(callbacks, "intent_coordinator_scheduler_runtime_complete");
       return callbacks.real_time_output();
     }
   }
