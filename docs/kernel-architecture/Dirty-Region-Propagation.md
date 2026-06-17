@@ -316,10 +316,11 @@ domain: RT Micro_16 <-> RT Macro_64 and HP Micro_64 <-> HP Macro_256.
   the dirty-region context, it should expose graph-scoped snapshot queries and
   visualization hooks; it should not be treated as the authoritative source of
   dirty-region generation or propagation.
-- CLI/REPL commands do not currently expose realtime dirty-update interaction.
-  `RealTimeUpdate` is reserved for future GUI/interaction paths; adding
-  `compute rt` or `--dirty-roi` is outside the current CLI contract.
-- In build or test modes, provide `debug roi` output that draws ROI/tile coverage
-  as masks so propagation correctness can be verified.
+- CLI/REPL commands are not a realtime dirty-update control surface. They must
+  not expose RT intent commands, dirty ROI creation, or dirty source lifecycle
+  commands such as `compute rt`, `--dirty-roi`, `dirty begin`, `dirty update`,
+  or `dirty end`.
+- In build, test, or frontend visualization modes, provide non-CLI ROI/tile
+  coverage artifacts as masks so propagation correctness can be verified.
 - Metrics should record ROI area, tile count, merge count, and cancellation count
   to support tuning.

@@ -35,11 +35,12 @@ extraction, and LastError mapping. It then translates the request to
 intent, and dirty ROI data. Parallel/runtime selection is carried separately as
 `ComputeService::ExecutionStrategy`.
 
-The current CLI/REPL frontend is batch-oriented. It does not promise realtime
-update interaction commands such as `compute rt` or `--dirty-roi`.
-`RealTimeUpdate` exists as a kernel intent for a future GUI/interaction
-environment, and the CLI should not be treated as the production realtime
-control surface.
+The CLI/REPL frontend is a permanent batch-oriented surface. It does not expose
+RT intent commands, dirty ROI creation, or dirty source lifecycle commands such
+as `compute rt`, `--dirty-roi`, `dirty begin`, `dirty update`, or `dirty end`.
+`RealTimeUpdate` and dirty source lifecycle APIs remain kernel/test and future
+GUI/WebUI-style frontend contracts, and the CLI must not be treated as the
+production realtime control surface.
 
 `GraphTraversalService` is topology-only. It provides traversal order and
 explicit upstream/downstream topology queries from `GraphModel` adjacency.

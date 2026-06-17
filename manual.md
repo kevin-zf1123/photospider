@@ -150,10 +150,11 @@ compute all force tl out/timer.yaml
 save 7 out/result.png
 ```
 
-The CLI and REPL compute surface is batch-oriented. It does not currently expose
-realtime update interaction commands such as `compute rt` or `--dirty-roi`.
-`RealTimeUpdate` is a kernel intent for a future GUI/interaction path, not a
-committed CLI feature surface.
+The CLI and REPL compute surface is permanently batch-oriented. It does not
+expose RT intent commands, dirty ROI creation, or dirty source lifecycle
+commands such as `compute rt`, `--dirty-roi`, `dirty begin`, `dirty update`, or
+`dirty end`. `RealTimeUpdate` and dirty source lifecycle APIs are reserved for
+kernel tests and future GUI/WebUI-style frontends, not for `graph_cli`.
 
 ## 7. TUI Commands
 
