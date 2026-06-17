@@ -157,10 +157,11 @@ Realtime HP/RT dual path selection is not an execution mode. Non-realtime
 requests enable the HP path only. `RealTimeUpdate` requests enable both HP and
 RT work for the dirty ROI regardless of whether the caller selected
 single-threaded, parallel, GPU, or another scheduler/resource policy. The
-current implementation coordinates this through `IntentUpdateCoordinator`;
-parallel execution submits HP and RT sibling work to their intent-specific
-scheduler task runtimes, while single-threaded execution runs the same intent
-work inline.
+current implementation coordinates this through `IntentUpdateCoordinator`.
+Parallel execution starts HP and RT dirty siblings concurrently, each sibling
+submits ready dirty work to its intent-specific scheduler task runtime, and the
+coordinator waits for RT then HP before returning the RT output.
+Single-threaded execution runs the same intent work inline.
 
 The HP and RT paths keep separate single-domain plans and dirty snapshots. The
 HP path uses a `GlobalHighPrecision` plan and clips HP work from an HP dirty

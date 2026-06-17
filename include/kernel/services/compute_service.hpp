@@ -147,8 +147,11 @@ class ComputeService {
    * @return Mutable output selected by the request, owned by graph node state.
    * @throws GraphError for scheduler lookup, validation, planning, dispatch, or
    * missing output failures; may propagate operation-specific exceptions.
-   * @note Dirty RT updates intentionally bypass coarse HP/RT scheduler
-   * callbacks and delegate to dirty executors for each path.
+   * @note Dirty RT updates pass HP and RT scheduler task runtimes to
+   * IntentUpdateCoordinator when both runtimes are available. The coordinator
+   * starts sibling dirty callbacks concurrently, and each dirty callback
+   * submits its source-first ready work through the intent-specific scheduler
+   * runtime.
    */
   NodeOutput& compute_parallel(GraphModel& graph, GraphRuntime& runtime,
                                const Request& request);

@@ -252,20 +252,24 @@ does not implicitly mean full-frame RT update.
 With a valid dirty ROI, realtime compute enables both paths. HP updates the
 full-size authoritative output for the affected graph work, while RT updates
 the proxy output for the affected region. When scheduler task runtimes are
-available, the implementation may submit the HP and RT updates concurrently to
-their intent-specific schedulers; when single-threaded execution is selected, it
+available, `IntentUpdateCoordinator` starts the HP and RT dirty siblings
+concurrently; each sibling then submits ready dirty work to its
+intent-specific scheduler runtime. The coordinator waits for RT and then HP
+before returning the RT output. When single-threaded execution is selected, it
 still runs both HP and RT work inline. This distinction is an execution-mode
 choice, not the switch that enables or disables the HP/RT dual path.
 
 Realtime planning is intentionally per path, not a single mixed-domain planner
-call. `IntentUpdateCoordinator` dispatches sibling HP and RT update callbacks.
-Each path uses a single-domain request plan and a same-domain dirty snapshot:
-the HP callback uses a `GlobalHighPrecision` node/cache-pruned plan with an HP
-dirty snapshot, and the RT callback uses a `RealTimeUpdate` node/cache-pruned
-plan with an RT dirty snapshot. The dirty snapshot clips or activates the update
-work set from the path's task graph. This keeps full task expansion, node/cache
-pruning, and dirty snapshot pruning as separate contracts so future task pools
-or modes can reuse the same boundaries with their own domain.
+call. `IntentUpdateCoordinator` dispatches sibling HP and RT update callbacks
+and records scheduler-runtime submission, wait, and completion stages for
+parallel Dirty RT requests. Each path uses a single-domain request plan and a
+same-domain dirty snapshot: the HP callback uses a `GlobalHighPrecision`
+node/cache-pruned plan with an HP dirty snapshot, and the RT callback uses a
+`RealTimeUpdate` node/cache-pruned plan with an RT dirty snapshot. The dirty
+snapshot clips or activates the update work set from the path's task graph.
+This keeps full task expansion, node/cache pruning, and dirty snapshot pruning
+as separate contracts so future task pools or modes can reuse the same
+boundaries with their own domain.
 
 The passed dirty ROI is converted into graph-scoped planner state for the
 current request. `Kernel` and `InteractionService` expose begin/update/end dirty

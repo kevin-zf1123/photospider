@@ -191,11 +191,15 @@ Dirty-region state planning 现在通过图级 `DirtyRegionPlanner` 运行，产
 `RealTimeUpdate` 需要 dirty ROI。没有 `dirty_roi` 的请求是非法的，应通过内核和交互层 API 返回清晰错误。它不会隐式表示全帧 RT 更新。
 
 带有效 dirty ROI 时，realtime 计算会启用两条路径。HP 更新受影响 graph 工作的完整尺寸权威输出，
-RT 更新受影响区域的代理输出。当 scheduler task runtime 可用时，实现可以把 HP 和 RT 更新并发提交到各自 intent-specific scheduler；当选择单线程执行时，它仍会 inline 运行 HP 和 RT 工作。
-这个区别是执行模式选择，而不是启用或禁用 HP/RT 双路径的开关。
+RT 更新受影响区域的代理输出。当 scheduler task runtime 可用时，`IntentUpdateCoordinator`
+会并发启动 HP 和 RT dirty sibling；每个 sibling 再把 ready dirty work 提交到各自
+intent-specific scheduler runtime。Coordinator 会先等待 RT、再等待 HP，然后返回 RT 输出。
+当选择单线程执行时，它仍会 inline 运行 HP 和 RT 工作。这个区别是执行模式选择，而不是启用或禁用
+HP/RT 双路径的开关。
 
 Realtime planning 有意按路径分别执行，而不是通过一次混合 domain 的 planner 调用生成两份任务池。
-`IntentUpdateCoordinator` 会分发 sibling HP 与 RT update callback。每条路径都使用一个
+`IntentUpdateCoordinator` 会分发 sibling HP 与 RT update callback，并为 parallel Dirty RT
+request 记录 scheduler-runtime submission、wait 和 completion 阶段。每条路径都使用一个
 single-domain request plan 和同 domain 的 dirty snapshot：HP callback 使用
 `GlobalHighPrecision` node/cache-pruned plan 与 HP dirty snapshot，RT callback 使用
 `RealTimeUpdate` node/cache-pruned plan 与 RT dirty snapshot。Dirty snapshot 会从该路径的
