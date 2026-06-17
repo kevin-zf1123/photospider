@@ -200,8 +200,10 @@ propagation 的权威来源。
 
 `InteractionService` 现在已经暴露 dirty snapshot debug 摘要，供 inspection 使用。它也会暴露结构化 dependency-tree 和 graph-inspection snapshot，使 frontend 可以先解析图结构，再选择展示格式。
 
-当前 CLI/REPL 前端不承诺提供 `compute rt` 或 `--dirty-roi` 这样的 realtime update 交互命令。
-`RealTimeUpdate` 仍是面向未来 GUI/interaction 环境的 kernel intent。
+CLI/REPL 前端是固定的批处理取向界面。它不暴露 RT intent 命令、dirty ROI 创建命令，
+也不暴露 `compute rt`、`--dirty-roi`、`dirty begin`、`dirty update` 或 `dirty end`
+这类 dirty source lifecycle 命令。`RealTimeUpdate` 和 dirty source lifecycle API
+保留给 kernel/test 以及未来 GUI/WebUI 风格前端。
 
 TODO：设计缺失的 node 到 `InteractionService` realtime dirty update 接口。该接口必须允许 node
 提供 dirty-region lifecycle event、realtime update event 和 update request，同时保持

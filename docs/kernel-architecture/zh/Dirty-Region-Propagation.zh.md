@@ -208,7 +208,8 @@ Planner 可以为了同步或 inspection 使用尺度转换表达相互对应的
 - `InteractionService` 是面向前端的 kernel interaction facade。在 dirty-region 语境中，
   它应暴露图级 snapshot 查询和可视化 hook；它不应被视为 dirty-region generation 或
   propagation 的权威来源。
-- CLI/REPL 命令当前不暴露 realtime dirty-update interaction。`RealTimeUpdate` 保留给未来
-  GUI/interaction 路径；新增 `compute rt` 或 `--dirty-roi` 不属于当前 CLI contract。
-- 在构建或测试模式下，提供 `debug roi`：将 ROI/Tile 覆盖绘制为掩码输出，便于验证传播正确性。
+- CLI/REPL 命令不是 realtime dirty-update 控制面。它不得暴露 RT intent 命令、dirty ROI
+  创建命令，也不得暴露 `compute rt`、`--dirty-roi`、`dirty begin`、`dirty update`
+  或 `dirty end` 这类 dirty source lifecycle 命令。
+- 在构建、测试或前端可视化模式下，提供非 CLI 的 ROI/Tile 覆盖掩码 artifact，便于验证传播正确性。
 - 指标：记录 ROI 面积、Tile 数、合并次数、取消次数，辅助调参。

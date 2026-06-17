@@ -170,11 +170,13 @@ Common commands:
 Supported `compute` flags include `force`, `force-deep`, `parallel`,
 `t`/`timer`, `tl <path>`, `m`/`mute`, and `nosave`/`ns`.
 
-The CLI and REPL do not currently expose realtime update interaction commands
-such as `compute rt` or `--dirty-roi`. `RealTimeUpdate` is a kernel intent for a
-future GUI/interaction path, not a committed CLI feature surface.
-`inspect dirty` is read-only inspection of the latest backend dirty snapshot; it
-does not create a dirty ROI or trigger realtime compute.
+The CLI and REPL are permanently batch-oriented surfaces. They do not expose
+RT intent commands, dirty ROI creation, or dirty source lifecycle commands such
+as `compute rt`, `--dirty-roi`, `dirty begin`, `dirty update`, or `dirty end`.
+`RealTimeUpdate` and dirty source lifecycle APIs are reserved for kernel tests
+and future GUI/WebUI-style frontends, not for `graph_cli`. `inspect dirty` is
+read-only inspection of the latest backend dirty snapshot; it does not create a
+dirty ROI or trigger realtime compute.
 
 ## Configuration
 

@@ -258,9 +258,11 @@ settle event should cut off only after downstream dirty work is complete. It
 also exposes structured dependency-tree and graph-inspection snapshots so
 frontends can parse graph structure before choosing a presentation format.
 
-The CLI/REPL frontend does not currently promise realtime update interaction
-commands such as `compute rt` or `--dirty-roi`. `RealTimeUpdate` remains a
-kernel intent for a future GUI/interaction environment.
+The CLI/REPL frontend is a permanent batch-oriented surface. It does not expose
+RT intent commands, dirty ROI creation, or dirty source lifecycle commands such
+as `compute rt`, `--dirty-roi`, `dirty begin`, `dirty update`, or `dirty end`.
+`RealTimeUpdate` and dirty source lifecycle APIs remain kernel/test and future
+GUI/WebUI-style frontend contracts.
 
 TODO: design the missing node-to-`InteractionService` interface for realtime
 dirty updates. The interface must let nodes provide dirty-region lifecycle
