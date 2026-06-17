@@ -17,7 +17,7 @@ and Metal hooks all coexist. For architecture details, start with
 | `cli/` | `graph_cli` executable entry point. |
 | `src/cli/` | REPL commands, command help, TUI editors, autocomplete. |
 | `src/kernel/` | Kernel facade, graph runtime, schedulers, services. |
-| `src/adapter/` | Buffer adapters for OpenCV and Metal. |
+| `src/adapter/` | OpenCV buffer adapter plus currently unenabled Metal adapter source. |
 | `src/benchmark/` | Benchmark configuration and execution support. |
 | `src/metal/` | Apple Metal-backed operation code. |
 | `include/` | Public headers mirroring the runtime and CLI modules. |

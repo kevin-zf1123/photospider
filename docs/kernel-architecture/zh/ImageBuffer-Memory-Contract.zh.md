@@ -76,14 +76,21 @@ OpenCV 适配器必须通过使用提供的 `step` 构造 `cv::Mat` 来保持步
 
 ## Metal 缓冲区
 
-当前 Metal 适配器行为：
+Metal buffer adapter 已在 `include/adapter/buffer_adapter_metal.hpp` 和
+`src/adapter/buffer_adapter_metal.mm` 中实现，但当前未在核心库构建中启用，也未接入生产
+compute 路径。`CMakeLists.txt` 通过 `src/metal/perlin_noise_metal.mm` 和
+`custom_ops/metal_ops_loader.cpp` 单独构建当前 Metal operation 路径；只有当 loader
+目录被手动加入 `plugin_dirs` 后，该 op 路径才会注册
+`image_generator:perlin_noise_metal`。
+
+已实现的 adapter 行为：
 
 - 上传支持 1 或 4 通道的 `FLOAT32` 缓冲区。
 - 上传后的缓冲区使用 `Device::GPU_METAL`。
 - `context` 拥有 Metal texture holder。
 - 下载返回新的 CPU `ImageBuffer`。
 
-插件和调度器代码应优先使用适配器 API 访问 Metal。直接解释 `context` 是性能敏感的逃生口，不应在没有基准证据的情况下成为必需路径。
+插件、调度器和核心 compute 代码在未来变更把 Metal buffer adapter 接入构建、记录调用链并补充验证证据之前，不得把它视为生产运行边界。直接解释 `context` 仍是后端特定行为；没有基准证据前，不应把它扩大为更广泛的契约。
 
 ## 基准问题
 

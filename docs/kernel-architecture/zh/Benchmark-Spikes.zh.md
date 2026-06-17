@@ -4,14 +4,14 @@
 
 ## Metal 适配器访问
 
-比较 Metal 适配器 API 与直接解释后端 `context` 在以下场景中的表现：
+Metal buffer adapter 是已实现但当前未启用的候选路径。将它作为生产运行边界启用之前，需要比较它的 API、当前后端特定 Metal operation 路径，以及直接解释后端 `context` 在以下场景中的表现：
 
 - 16x16 和 64x64 tile
 - copy、add、curve transform 等轻量操作
 - 上传/下载密集工作负载
 - 适配器开销可能影响 RT 延迟的混合 CPU/GPU 调度路径
 
-在该基准产生数据之前，适配器 API 是推荐路径，直接访问 `context` 仍是实现敏感的逃生口。
+在 adapter 接入构建且该基准产生数据之前，不要把 adapter API 描述为生产 Metal 路径。直接访问 `context` 仍是后端特定且实现敏感的行为。
 
 ## ARM Mac 对齐
 
@@ -23,4 +23,3 @@
 - 内存使用和 padding 开销
 
 目前尚未记录基准结果。后续 OpenSpec change 应捕获实现细节、脚本、原始结果，以及 128 字节对齐是变为可配置项还是仅保留为实验的决策。
-

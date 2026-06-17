@@ -5,15 +5,19 @@ policy or changing the portable CPU row-alignment requirement.
 
 ## Metal Adapter Access
 
-Compare Metal adapter APIs against direct backend `context` interpretation for:
+The Metal buffer adapter is an implemented but currently unenabled candidate.
+Before enabling it as a production runtime boundary, compare its APIs against
+the current backend-specific Metal operation path and direct backend `context`
+interpretation for:
 
 - 16x16 and 64x64 tiles
 - lightweight operations such as copy, add, and curve transform
 - upload/download-heavy workloads
 - mixed CPU/GPU scheduler paths where adapter overhead can affect RT latency
 
-Until this benchmark has data, adapter APIs are the recommended path and direct
-`context` access remains an implementation-sensitive escape hatch.
+Until the adapter is wired into the build and this benchmark has data, do not
+describe adapter APIs as the production Metal path. Direct `context` access
+remains backend-specific and implementation-sensitive.
 
 ## ARM Mac Alignment
 
