@@ -216,6 +216,18 @@ types discovered from configured directories. Use `scheduler set <hp|rt>
 from the current working directory, and the graph cache root becomes
 `<cache_root_dir>/<graph_name>`.
 
+Metal operation plugins are manual config entries, not generated defaults. On
+macOS, CMake places the Metal loader plugin in `build/high_performance/metal`
+and its implementation library under `build/high_performance/metal/ops`. Add the
+loader directory to `plugin_dirs` before starting `graph_cli` if
+`image_generator:perlin_noise_metal` should be scanned and registered:
+
+```yaml
+plugin_dirs:
+  - build/plugins
+  - build/high_performance/metal
+```
+
 ## Built-In Operations
 
 Built-in operations are registered in `src/ops.cpp`.
@@ -239,7 +251,9 @@ Built-in operations are registered in `src/ops.cpp`.
 | `image_mixing` | `multiply` | Pixel-wise multiplication. |
 
 `custom_ops/` currently builds example plugins for `image_process:invert`,
-`image_process:threshold`, `io:save`, and on macOS `image_generator:perlin_noise_metal`.
+`image_process:threshold`, and `io:save`. On macOS, Metal builds also produce
+`image_generator:perlin_noise_metal`, but it is only scanned when
+`build/high_performance/metal` is manually present in `plugin_dirs`.
 
 ## Maintained Docs
 
