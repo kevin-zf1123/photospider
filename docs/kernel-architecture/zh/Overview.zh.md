@@ -138,8 +138,11 @@ graph TD
 | `gpu_pipeline` | CPU/GPU 路由的异构 pipeline。 |
 | `heterogeneous` | `gpu_pipeline` 的别名。 |
 
-CLI 通过 `scheduler` REPL 命令暴露调度器控制。默认类型和插件目录在 `config.yaml` 中配置；启动时会在图加载前扫描
-`scheduler_dirs`，因此插件提供的默认调度器类型可用于每图调度器注入。
+CLI 通过 `scheduler` REPL 命令暴露调度器控制。默认类型和插件目录在本地 `config.yaml`
+中配置；根 `config.yaml` 被仓库忽略，应视为每个工作树自己的覆盖配置。启动时会在图加载前扫描
+`scheduler_dirs`，因此插件提供的 scheduler 类型可用于每图调度器注入。发现插件本身不会选中
+scheduler：当前图实际使用 `scheduler_hp_type` / `scheduler_rt_type` 配置的类型，或之后通过
+`scheduler set <hp|rt> <type>` 显式切换的类型。
 
 `IScheduler` 是正式生命周期接口，scheduler-owned `SchedulerTaskRuntime` 是 compute-service
 planned parallel work 的 dispatch 契约。`GraphStateExecutor` 是 graph-state operation

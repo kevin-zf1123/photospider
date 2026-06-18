@@ -81,6 +81,21 @@ direct ownership of the runtime model.
 | `gpu_pipeline` | Heterogeneous CPU/GPU scheduler. |
 | `heterogeneous` | Alias for `gpu_pipeline`. |
 
+## Plugin Discovery vs Graph Selection
+
+`graph_cli` scans `scheduler_dirs` during startup after config load and before
+graph load. That scan only makes plugin-provided scheduler types available to
+the scheduler factory. It does not change the scheduler instances already
+selected for a graph.
+
+Newly loaded graphs receive scheduler instances from
+`Kernel::SchedulerConfig`, which is populated from `scheduler_hp_type`,
+`scheduler_rt_type`, and `scheduler_worker_count`. A plugin scheduler therefore
+becomes active only when one of those config keys names the scanned plugin type,
+or when the user later runs `scheduler set <hp|rt> <type>` for the current
+graph. `scheduler plugins` reports discovery state; `scheduler get all` reports
+the actual HP/RT scheduler instances attached to the current graph.
+
 ## Scheduler Dispatch Boundary
 
 `IScheduler` no longer exposes compute-planning helpers. Removed planning

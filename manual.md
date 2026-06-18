@@ -216,8 +216,12 @@ bench benchmarks/milestone2 out/milestone2_results
 
 ## 10. Configuration
 
-The default config file is `config.yaml`. If it is missing, `graph_cli` creates
-one with default values.
+The default config file is `config.yaml`. The root `config.yaml` is intentionally
+ignored by the project `.gitignore`; it is a local override, not a tracked
+repository default. If it is missing, `graph_cli` creates one with the generated
+default values shown below. If it exists, `graph_cli` loads that local file
+as-is, so local entries such as `cache_precision`, `plugin_dirs`, or
+`default_compute_args` can intentionally differ from generated defaults.
 
 | Key | Default | Description |
 | --- | --- | --- |
@@ -249,6 +253,13 @@ loaded graphs inherit the configured HP/RT scheduler types and worker count,
 including plugin-provided scheduler types discovered from configured
 directories. Use `scheduler set <hp|rt> <type>` for an immediate per-graph
 scheduler switch.
+
+Scheduler plugin discovery and scheduler selection are separate phases.
+`scheduler plugins` reports plugins scanned from `scheduler_dirs`; it does not
+mean the current graph is using that scheduler. `scheduler get all` reports the
+actual HP/RT scheduler instances for the current graph. To use a scanned plugin,
+name it with `scheduler_hp_type` or `scheduler_rt_type` before graph load, or
+run `scheduler set <hp|rt> <type>` for the current graph.
 
 `cache_root_dir` is applied before graph load as well. Relative values are
 resolved from the current working directory, and the graph cache root becomes
