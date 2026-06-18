@@ -255,9 +255,11 @@ file(GLOB PLUGIN_SOURCES "custom_ops/*.cpp")
 # Exclude the Metal loader from the generic loop; it's handled in the APPLE block
 list(REMOVE_ITEM PLUGIN_SOURCES "${CMAKE_CURRENT_SOURCE_DIR}/custom_ops/metal_ops_loader.cpp")
 
+set(OP_PLUGIN_TARGETS "")
 foreach(PLUGIN_SOURCE ${PLUGIN_SOURCES})
     get_filename_component(PLUGIN_NAME ${PLUGIN_SOURCE} NAME_WE)
     add_library(${PLUGIN_NAME} SHARED ${PLUGIN_SOURCE})
+    list(APPEND OP_PLUGIN_TARGETS ${PLUGIN_NAME})
     
     set_target_properties(${PLUGIN_NAME} PROPERTIES
         LIBRARY_OUTPUT_DIRECTORY "${PLUGIN_OUTPUT_DIR}"
@@ -468,7 +470,7 @@ if(BUILD_TESTING)
     # Operation plugin manager handle lifetime tests
     add_ps_test(test_plugin_manager tests/test_plugin_manager.cpp)
     target_link_libraries(test_plugin_manager PRIVATE ${CMAKE_DL_LIBS})
-    add_dependencies(test_plugin_manager lifecycle_op_plugin)
+    add_dependencies(test_plugin_manager lifecycle_op_plugin ${OP_PLUGIN_TARGETS})
 
     # [M3.5] GPU Pipeline 调度器测试
     add_ps_test(test_gpu_pipeline_scheduler tests/test_gpu_pipeline_scheduler.cpp)

@@ -1867,7 +1867,7 @@ int main(int argc, char** argv) {
           {"task_5",
            "dirty planner/interaction/task planner observed in task-05"},
           {"task_6",
-           "compute plan executor/scheduler/error observed in task-06"},
+           "ComputeTaskDispatcher/scheduler/error observed in task-06"},
           {"task_7", "facade/build integration observed in task-07"}}},
         {"trace_event_count", operator_trace.size()}};
     write_task_bundle(root, "task-02", "Task 2 runtime validation plan",
@@ -2198,12 +2198,13 @@ int main(int argc, char** argv) {
                            {"plan_tasks", ">=5"},
                            {"dirty_dispatcher_call_chain_passed", true},
                            {"parallel_error_returns_ok", false}};
-    write_task_bundle(
-        root, "task-06", "Task 6 compute plan executor runtime evidence",
-        "ComputeTaskDispatcher must preserve dependency scheduling, "
-        "tile completion, commit, cache, events, and errors.",
-        command, "Full graph and error graph.", task6_expected, task6_actual,
-        task6, operator_trace);
+    write_task_bundle(root, "task-06",
+                      "Task 6 ComputeTaskDispatcher runtime evidence",
+                      "ComputeTaskDispatcher must preserve dependency "
+                      "scheduling, tile completion, commit, cache, events, "
+                      "and errors.",
+                      command, "Full graph and error graph.", task6_expected,
+                      task6_actual, task6, operator_trace);
 
     CheckSet task7;
     task7.add(

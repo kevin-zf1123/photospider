@@ -1,5 +1,11 @@
 FROM ubuntu:24.04
 
+# LEGACY / TODO SCAFFOLDING:
+# This image definition is not a maintained CI runtime. GitHub Actions workflows
+# that reference it are manual-only and disabled by default. Revalidate system
+# packages, dependency versions, build commands, and CTest behavior before
+# treating this Dockerfile as a supported validation path.
+
 # 1) 安装系统依赖（不装 python3-pip，装 python3-venv）
 RUN apt-get update && DEBIAN_FRONTEND=noninteractive apt-get install -y \
     build-essential cmake pkg-config\

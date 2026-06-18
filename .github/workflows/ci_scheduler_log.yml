@@ -1,5 +1,10 @@
 name: CI Scheduler Log
 
+# LEGACY / DISABLED-BY-DEFAULT:
+# This workflow is retained as manual scaffolding only. It is not a maintained
+# validation chain and must not be cited as passing CI until a future change
+# rebuilds the container image path, dependencies, triggers, checkout behavior,
+# build commands, CTest invocation, and fresh GitHub Actions evidence.
 on:
   # Manual-only TODO scaffolding. Re-enable push/pull_request/comment triggers
   # only after the CI image, dependencies, checkout, build, and CTest path are

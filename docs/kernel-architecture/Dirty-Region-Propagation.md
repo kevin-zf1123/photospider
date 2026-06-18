@@ -207,6 +207,18 @@ Micro_16 to satisfy frame-budget constraints.
   - propagation: identity mapping, or mapping ROI to the relevant input based on
     channel/merge rules.
 
+- Loadable operation plugins:
+  - propagation: every current plugin should register both dirty and forward
+    ROI propagators. Legacy identity fallback remains migration support only and
+    should not be used as evidence that a plugin contract is complete.
+  - standard plugin examples: `image_process:invert` and
+    `image_process:threshold` are pointwise HP monolithic transforms and use
+    explicit pass-through ROI; `io:save` is a side-effecting HP monolithic sink
+    whose explicit pass-through ROI describes planning metadata while execution
+    rewrites the full file; `image_generator:perlin_noise_metal` is a
+    monolithic Metal generator with explicit generator-local pass-through ROI
+    metadata, not a tiled Metal execution path.
+
 ### 6.1. Static Formula vs. Data-Dependent LUT
 
 - **Static formulas** remain the primary path for operators such as `resize`,

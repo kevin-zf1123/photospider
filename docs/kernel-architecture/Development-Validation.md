@@ -68,6 +68,13 @@ maintained validation path. The workflows are manual-only `workflow_dispatch`
 scaffolding, and `Dockerfile.ci` is TODO integration scaffolding unless a future
 change explicitly re-enables and validates them.
 
+The workflow files and `Dockerfile.ci` are retained only to preserve historical
+context and possible future bootstrap work. They are legacy/manual-only
+artifacts, not reviewer-facing proof of correctness. A future CI revival must be
+handled as a separate change with updated triggers, image publishing policy,
+dependency installation, checkout/submodule behavior, build/test commands, and
+fresh GitHub Actions evidence.
+
 Current evidence should come from local build, focused test binaries, CTest, and
 saved `tests/results/...` artifacts. Do not claim that GitHub CI or the
 containerized CI image is a supported or passing test chain until the Dockerfile

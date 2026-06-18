@@ -15,6 +15,7 @@ namespace {
 constexpr const char* kLifecycleType = "plugin_lifecycle";
 constexpr const char* kLifecycleSubtype = "op";
 constexpr const char* kLifecycleKey = "plugin_lifecycle:op";
+constexpr const char* kStandardPluginDir = "build/plugins";
 
 /**
  * @brief Returns the build output path for the lifecycle op plugin fixture.
@@ -63,6 +64,44 @@ std::string describe_errors(const std::vector<PluginLoadError>& errors) {
 bool result_contains_lifecycle_key(const PluginLoadResult& result) {
   return std::find(result.new_op_keys.begin(), result.new_op_keys.end(),
                    kLifecycleKey) != result.new_op_keys.end();
+}
+
+/**
+ * @brief Checks whether a load result reports a standard plugin operation key.
+ *
+ * @param result Plugin load result to inspect.
+ * @param key Canonical `type:subtype` operation key.
+ * @return True when `new_op_keys` contains `key`.
+ * @throws Nothing.
+ * @note Standard plugins are loaded from `build/plugins`, and this helper keeps
+ * test assertions independent from platform-specific shared library suffixes.
+ */
+bool result_contains_key(const PluginLoadResult& result,
+                         const std::string& key) {
+  return std::find(result.new_op_keys.begin(), result.new_op_keys.end(), key) !=
+         result.new_op_keys.end();
+}
+
+/**
+ * @brief Asserts that one operation uses explicit dirty and forward contracts.
+ *
+ * @param type Operation type registered in OpRegistry.
+ * @param subtype Operation subtype registered in OpRegistry.
+ * @return Nothing.
+ * @throws GTest assertion failures when either contract is missing.
+ * @note The helper checks contract status rather than callback return values so
+ * side-effecting plugins such as `io:save` can document explicit pass-through
+ * behavior without pretending to produce an image output.
+ */
+void expect_explicit_roi_contract(const std::string& type,
+                                  const std::string& subtype) {
+  auto& registry = OpRegistry::instance();
+  EXPECT_EQ(registry.dirty_propagation_contract_status(type, subtype),
+            PropagationContractStatus::Explicit)
+      << type << ":" << subtype << " dirty ROI contract";
+  EXPECT_EQ(registry.forward_propagation_contract_status(type, subtype),
+            PropagationContractStatus::Explicit)
+      << type << ":" << subtype << " forward ROI contract";
 }
 
 /**
@@ -155,6 +194,41 @@ TEST_F(PluginManagerLifecycleTest, UnloadAllPluginsReleasesRetainedHandles) {
                    .resolve_for_intent(kLifecycleType, kLifecycleSubtype,
                                        ComputeIntent::GlobalHighPrecision)
                    .has_value());
+}
+
+TEST_F(PluginManagerLifecycleTest,
+       StandardOperationPluginsRegisterExplicitRoiContracts) {
+  OpRegistry::instance().unregister_key("image_process:invert");
+  OpRegistry::instance().unregister_key("image_process:threshold");
+  OpRegistry::instance().unregister_key("io:save");
+  OpRegistry::instance().unregister_key("image_generator:perlin_noise_metal");
+
+  ASSERT_TRUE(std::filesystem::exists(kStandardPluginDir))
+      << "standard operation plugin directory was not built: "
+      << kStandardPluginDir;
+
+  PluginManager manager;
+  const auto result = manager.load_from_dirs_report({kStandardPluginDir});
+
+  EXPECT_GE(result.loaded, 3) << describe_errors(result.errors);
+  EXPECT_TRUE(result.errors.empty()) << describe_errors(result.errors);
+  EXPECT_TRUE(result_contains_key(result, "image_process:invert"));
+  EXPECT_TRUE(result_contains_key(result, "image_process:threshold"));
+  EXPECT_TRUE(result_contains_key(result, "io:save"));
+  const bool metal_perlin_loaded =
+      result_contains_key(result, "image_generator:perlin_noise_metal");
+
+  expect_explicit_roi_contract("image_process", "invert");
+  expect_explicit_roi_contract("image_process", "threshold");
+  expect_explicit_roi_contract("io", "save");
+  if (metal_perlin_loaded) {
+    expect_explicit_roi_contract("image_generator", "perlin_noise_metal");
+  }
+
+  EXPECT_GE(manager.unload_all_plugins(), 3);
+  EXPECT_EQ(OpRegistry::instance().dirty_propagation_contract_status(
+                "image_process", "invert"),
+            PropagationContractStatus::LegacyIdentityFallback);
 }
 
 }  // namespace ps
