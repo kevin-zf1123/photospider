@@ -180,8 +180,13 @@ dirty ROI or trigger realtime compute.
 
 ## Configuration
 
-By default, `graph_cli` reads `config.yaml` from the working directory. If it is
-missing, the app creates one with defaults.
+By default, `graph_cli` reads `config.yaml` from the working directory. The root
+`config.yaml` is intentionally ignored by the project `.gitignore`, so treat it
+as a local override rather than a tracked repository default. If the file is
+missing, the app creates one with the generated defaults shown below. If the
+file already exists, `graph_cli` loads it as-is, so local values such as
+`cache_precision`, `plugin_dirs`, or `default_compute_args` can differ from the
+generated defaults.
 
 Important keys:
 
@@ -213,6 +218,13 @@ and then copies `scheduler_hp_type`, `scheduler_rt_type`, and
 therefore inherit those scheduler defaults, including plugin-provided scheduler
 types discovered from configured directories. Use `scheduler set <hp|rt>
 <type>` for an immediate per-graph switch.
+
+Scheduler plugin discovery and scheduler selection are separate phases.
+`scheduler plugins` can show a plugin because it was scanned from
+`scheduler_dirs`, while `scheduler get all` still shows the graph's configured
+HP/RT schedulers. A scanned plugin is used only after the config names it via
+`scheduler_hp_type` or `scheduler_rt_type`, or after an explicit
+`scheduler set` command.
 
 `cache_root_dir` is also applied before graph load. Relative values are resolved
 from the current working directory, and the graph cache root becomes

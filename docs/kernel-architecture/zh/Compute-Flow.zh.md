@@ -49,6 +49,7 @@ ComputeService facade
   -> DirtyRegionSnapshot
   -> DirtySnapshotTaskGraphPruner
   -> DirtyUpdateWorkSet
+  -> TaskSubmissionPlan / ComputeTaskDispatcher
   -> task pools / scheduler / execution resources
 ```
 
@@ -132,9 +133,10 @@ facade，并将内部工作路由到 compute-service 协作者。
 ## 并行计算
 
 并行计算先展开完整 task graph，再从 `topo_postorder_from` 通过 `NodeCacheTaskGraphPruner`
-裁剪得到 `ComputePlan`。随后它把 plan 中的 `ComputeTaskGraph` materialize 为 scheduler task，
-跟踪依赖计数器，并通过已配置 scheduler 的 `SchedulerTaskRuntime` 提交 ready 节点任务。
-Tiled 操作可能产生微任务并递增 scheduler-owned 完成计数器。
+裁剪得到 `ComputePlan`。`ComputeDispatchPlanBuilder` 会记录这个 cache-pruned plan 供检查使用。
+`TaskSubmissionPlan` 随后把 plan 中的 `ComputeTaskGraph` materialize 为 scheduler closure、
+dependency counter、ready handle、operation variant 和临时结果槽，并通过已配置 scheduler 的
+`SchedulerTaskRuntime` 提交 ready 节点任务。Tiled 操作可能产生微任务并递增 scheduler-owned 完成计数器。
 
 `ComputeTaskDispatcher` 将 plan execution、依赖计数、稀疏 node-id 映射、临时结果存储、事件日志、异常传播和最终目标选择保留在 compute-service 边界内。它通过 scheduler task-runtime queue
 dispatch 已经 planned 的 work；它不会让 scheduler 拥有 dirty propagation、compute-task

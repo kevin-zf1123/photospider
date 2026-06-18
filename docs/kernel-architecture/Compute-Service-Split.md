@@ -33,11 +33,14 @@ ComputeService facade
   -> FullTaskGraph
   -> NodeCacheTaskGraphPruner
   -> ComputePlan / pruned ComputeTaskGraph
+  -> ComputeDispatchPlanBuilder
+  -> TaskPopulationStrategy / task dependency population helpers
   -> DirtyRegionPlanner
   -> DirtyRegionSnapshot
   -> DirtySnapshotTaskGraphPruner
   -> IntentUpdateCoordinator
   -> ComputeTaskDispatcher
+  -> TaskSubmissionPlan / dispatch_planned_tasks
   -> DirtyUpdateWorkSet
   -> NodeExecutor
   -> ComputeMetricsRecorder
@@ -55,9 +58,12 @@ ComputeService facade
 | `DirtyRegionSnapshot` | Enumerate dirty tiles, dirty monolithic nodes, per-node dirty ROIs, and per-edge ROI mappings using stable ids instead of raw pointers. | Implemented as an internal snapshot model |
 | `FullTaskGraphExpander` | Expand the raw graph into a full node/tile `FullTaskGraph` for one compute domain without using request target, cache state, or dirty snapshot. | Implemented in `src/kernel/services/compute-service/task_graph_planning.*` |
 | `NodeCacheTaskGraphPruner` | Prune a `FullTaskGraph` to the request target/dependency cone and record selected node cache availability. | Implemented in `src/kernel/services/compute-service/task_graph_planning.*` |
+| `ComputeDispatchPlanBuilder` | Build and record the cache-pruned high-precision plan used by scheduler-backed dispatcher execution. | Implemented in `src/kernel/services/compute-service/compute_dispatch_plan_builder.*` |
+| `TaskPopulationStrategy` and task population helpers | Populate graph-backed or graphless planned task records and task dependencies without using dirty snapshots to create new task shapes. | Implemented in `src/kernel/services/compute-service/task_population_strategy.*` and `task_graph_planning.*` |
 | `DirtySnapshotTaskGraphPruner` | Apply a `DirtyRegionSnapshot` to a node/cache-pruned `ComputeTaskGraph` and materialize the active `DirtyUpdateWorkSet`. | Implemented in `src/kernel/services/compute-service/task_graph_planning.*`; plugin ABI remains TODO |
 | `IntentUpdateCoordinator` | Coordinate `GlobalHighPrecision` and `RealTimeUpdate` intent semantics, including realtime HP/RT dual path behavior independent from execution mode. | Implemented in `src/kernel/services/compute-service/intent_update_coordinator.*` |
-| `ComputeTaskDispatcher` | Execute node/cache-pruned task graph semantics by collecting source tasks, checking task-graph readiness, dispatching ready tasks through `SchedulerTaskRuntime`, and committing results. | Target boundary for the dirty task split |
+| `ComputeTaskDispatcher` | Execute node/cache-pruned task graph semantics by collecting source tasks, checking task-graph readiness, dispatching ready tasks through `SchedulerTaskRuntime`, and committing results. | Implemented in `src/kernel/services/compute-service/compute_task_dispatcher.*` |
+| `TaskSubmissionPlan` and `dispatch_planned_tasks` | Convert a cache-pruned plan into scheduler closures, dependency counters, ready handles, and empty-plan validation for one dispatcher call. | Implemented in `src/kernel/services/compute-service/compute_task_submission.*` |
 | `ComputeMetricsRecorder` | Centralize events, timings, benchmark events, and debug metadata. | Implemented in `src/kernel/services/compute-service/compute_metrics_recorder.*` |
 
 `NodeExecutor` keeps tiled input preparation outside the per-tile loop. The
@@ -140,6 +146,15 @@ for one compute domain. This full expansion does not depend on request target,
 node cache state, or dirty snapshot. It answers only "what executable node/tile
 tasks exist for this graph and domain?"
 
+There is no current single planner class that owns all plan creation. The
+current implementation is a module chain: `ComputeDispatchPlanBuilder` derives
+the request traversal and records the high-precision plan,
+`FullTaskGraphExpander` enumerates full-domain task shapes,
+`NodeCacheTaskGraphPruner` narrows them to the request/cache cone,
+`TaskPopulationStrategy` and task dependency helpers populate executable task
+records, and `DirtySnapshotTaskGraphPruner` later activates dirty work from the
+already-pruned graph.
+
 `NodeCacheTaskGraphPruner` consumes that `FullTaskGraph`, the requested target
 node/dependency cone, and current node/cache state, then emits the pruned
 `ComputePlan` / `ComputeTaskGraph` used by sequential and parallel execution.
@@ -180,6 +195,14 @@ the scheduler selected for the request's `ComputeIntent`.
 temporary result storage, tile micro-task accounting, exception propagation,
 and final output selection, but hands concrete ready task callbacks to
 `SchedulerTaskRuntime`.
+
+For full high-precision parallel dispatch, `TaskSubmissionPlan` converts the
+cache-pruned plan into dense node indexes, dependency counters, scheduler task
+handles, operation variants, and temporary result slots. `dispatch_planned_tasks`
+then submits initial ready handles and validates empty plans. An empty plan is
+legal only when the target already has reusable high-precision output; an
+uncached empty target is a planning contract error rather than a recursive
+sequential fallback.
 
 For dirty updates, production HP and RT executors build request-local dirty
 `TaskExecutor` handles from the request plan and dirty snapshot, then call the

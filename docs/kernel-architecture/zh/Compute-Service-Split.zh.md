@@ -29,11 +29,14 @@ ComputeService facade
   -> FullTaskGraph
   -> NodeCacheTaskGraphPruner
   -> ComputePlan / pruned ComputeTaskGraph
+  -> ComputeDispatchPlanBuilder
+  -> TaskPopulationStrategy / task dependency population helpers
   -> DirtyRegionPlanner
   -> DirtyRegionSnapshot
   -> DirtySnapshotTaskGraphPruner
   -> IntentUpdateCoordinator
   -> ComputeTaskDispatcher
+  -> TaskSubmissionPlan / dispatch_planned_tasks
   -> DirtyUpdateWorkSet
   -> NodeExecutor
   -> ComputeMetricsRecorder
@@ -51,9 +54,12 @@ ComputeService facade
 | `DirtyRegionSnapshot` | 使用稳定 id 而不是原始指针枚举 dirty tiles、dirty monolithic nodes、per-node dirty ROI 和 per-edge ROI mapping。 | 已作为内部 snapshot model 实现 |
 | `FullTaskGraphExpander` | 将原始 graph 展开为一个 compute domain 的完整 node/tile `FullTaskGraph`，不使用请求目标、cache 状态或 dirty snapshot。 | 已在 `src/kernel/services/compute-service/task_graph_planning.*` 实现 |
 | `NodeCacheTaskGraphPruner` | 将 `FullTaskGraph` 裁剪到请求目标/依赖锥，并记录所选节点的 cache 可用性。 | 已在 `src/kernel/services/compute-service/task_graph_planning.*` 实现 |
+| `ComputeDispatchPlanBuilder` | 构建并记录 scheduler-backed dispatcher execution 使用的 cache-pruned high-precision plan。 | 已在 `src/kernel/services/compute-service/compute_dispatch_plan_builder.*` 实现 |
+| `TaskPopulationStrategy` 和 task population helpers | 填充 graph-backed 或 graphless planned task record 以及 task dependency；dirty snapshot 不得用来创建新的 task shape。 | 已在 `src/kernel/services/compute-service/task_population_strategy.*` 和 `task_graph_planning.*` 实现 |
 | `DirtySnapshotTaskGraphPruner` | 将 `DirtyRegionSnapshot` 应用于 node/cache-pruned `ComputeTaskGraph`，并 materialize 活跃的 `DirtyUpdateWorkSet`。 | 已在 `src/kernel/services/compute-service/task_graph_planning.*` 实现；plugin ABI 仍是 TODO |
 | `IntentUpdateCoordinator` | 协调 `GlobalHighPrecision` 与 `RealTimeUpdate` intent 语义，包括与执行模式无关的 realtime HP/RT 双路径行为。 | 已在 `src/kernel/services/compute-service/intent_update_coordinator.*` 实现 |
-| `ComputeTaskDispatcher` | 执行 node/cache-pruned task graph 语义：收集 source task、检查 task-graph readiness、通过 `SchedulerTaskRuntime` dispatch ready task，并提交结果。 | dirty task split 的目标边界 |
+| `ComputeTaskDispatcher` | 执行 node/cache-pruned task graph 语义：收集 source task、检查 task-graph readiness、通过 `SchedulerTaskRuntime` dispatch ready task，并提交结果。 | 已在 `src/kernel/services/compute-service/compute_task_dispatcher.*` 实现 |
+| `TaskSubmissionPlan` 和 `dispatch_planned_tasks` | 将 cache-pruned plan 转为一次 dispatcher 调用所需的 scheduler closure、dependency counter、ready handle 和 empty-plan validation。 | 已在 `src/kernel/services/compute-service/compute_task_submission.*` 实现 |
 | `ComputeMetricsRecorder` | 集中事件、计时、benchmark 事件和 debug 元数据。 | 已在 `src/kernel/services/compute-service/compute_metrics_recorder.*` 实现 |
 
 `NodeExecutor` 将 tiled 输入准备保持在 per-tile 循环之外。`TiledInputNormalizer`
@@ -115,6 +121,12 @@ Task graph planning 被拆成明确的 expansion 和 pruning 边界。`FullTaskG
 请求目标、node cache 状态或 dirty snapshot；它只回答“这个 graph 和 domain 中存在哪些可执行
 node/tile task”。
 
+当前没有一个单一 planner 类拥有全部 plan 创建职责。当前实现是一条模块链：
+`ComputeDispatchPlanBuilder` 推导请求 traversal 并记录 high-precision plan，
+`FullTaskGraphExpander` 枚举完整 domain 的 task shape，`NodeCacheTaskGraphPruner`
+将其收窄到请求/cache 锥，`TaskPopulationStrategy` 与 task dependency helper 填充可执行
+task record，`DirtySnapshotTaskGraphPruner` 随后从已经裁剪的 graph 中激活 dirty work。
+
 `NodeCacheTaskGraphPruner` 消费该 `FullTaskGraph`、请求目标节点/依赖锥和当前 node/cache
 状态，然后产出 sequential 与 parallel execution 使用的 pruned `ComputePlan` /
 `ComputeTaskGraph`。它会记录所选节点的 cache 可用性，同时保留现有执行契约：cache hit 仍在
@@ -146,6 +158,12 @@ TODO：planner plugin ABI 继续明确推迟到后续 change。
 `ComputeTaskDispatcher` 拥有 compute-plan execution、内部 DAG counter、临时结果存储、
 tile micro-task accounting、异常传播和最终输出选择，但会把具体 ready task callback 交给
 `SchedulerTaskRuntime`。
+
+对于完整 high-precision parallel dispatch，`TaskSubmissionPlan` 会将 cache-pruned plan
+转换为 dense node index、dependency counter、scheduler task handle、operation variant
+和临时结果槽。`dispatch_planned_tasks` 随后提交初始 ready handle，并验证 empty plan。
+Empty plan 只有在目标已经拥有可复用 high-precision 输出时才合法；未缓存目标的 empty plan
+是 planning contract error，而不是递归顺序计算 fallback。
 
 对于 dirty update，production HP 和 RT executor 会先从请求 plan 和 dirty snapshot 构建
 request-local dirty `TaskExecutor` handle，然后调用公开静态

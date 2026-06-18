@@ -149,9 +149,13 @@ Built-in scheduler types:
 | `heterogeneous` | Alias for `gpu_pipeline`. |
 
 The CLI exposes scheduler controls through the `scheduler` REPL command. Default
-types and plugin directories are configured in `config.yaml`; startup scans
-`scheduler_dirs` before graph load so plugin-provided default scheduler types are
-available during per-graph scheduler injection.
+types and plugin directories are configured in the local `config.yaml`; the root
+file is ignored by the repository and should be treated as a per-worktree
+override. Startup scans `scheduler_dirs` before graph load so plugin-provided
+scheduler types are discoverable during per-graph scheduler injection. Discovery
+does not select a scheduler by itself: the active graph uses the configured
+`scheduler_hp_type` / `scheduler_rt_type` values, or a later
+`scheduler set <hp|rt> <type>` command.
 
 `IScheduler` is the formal lifecycle interface, and scheduler-owned
 `SchedulerTaskRuntime` is the dispatch contract for compute-service planned

@@ -59,6 +59,17 @@ compute。新的 scheduler-facing 设计应扩展 `IScheduler` 与 `SchedulerTas
 | `gpu_pipeline` | 异构 CPU/GPU 调度器。 |
 | `heterogeneous` | `gpu_pipeline` 的别名。 |
 
+## 插件发现与图调度器选择
+
+`graph_cli` 会在加载配置后、加载 graph 前扫描 `scheduler_dirs`。该扫描只会让 scheduler factory
+发现 plugin 提供的 scheduler 类型，不会改变某个 graph 已经选择的 scheduler 实例。
+
+新加载的 graph 会从 `Kernel::SchedulerConfig` 接收 scheduler 实例；该配置由
+`scheduler_hp_type`、`scheduler_rt_type` 和 `scheduler_worker_count` 填充。因此，plugin
+scheduler 只有在这些配置键命名了已扫描的 plugin 类型时才会生效，或者在用户随后对当前 graph
+运行 `scheduler set <hp|rt> <type>` 后生效。`scheduler plugins` 报告的是发现状态；
+`scheduler get all` 报告的是当前 graph 实际挂载的 HP/RT scheduler 实例。
+
 ## 调度器 Dispatch 边界
 
 `IScheduler` 不再暴露 compute-planning helper。已移除的 planning interface 不得重新引入，

@@ -61,6 +61,7 @@ ComputeService facade
   -> DirtyRegionSnapshot
   -> DirtySnapshotTaskGraphPruner
   -> DirtyUpdateWorkSet
+  -> TaskSubmissionPlan / ComputeTaskDispatcher
   -> task pools / scheduler / execution resources
 ```
 
@@ -168,10 +169,12 @@ the parallel path before executing the recursive path.
 
 Parallel compute derives a `ComputePlan` by expanding the full task graph and
 then pruning it with `NodeCacheTaskGraphPruner` from `topo_postorder_from`.
-It materializes the plan's `ComputeTaskGraph` into scheduler tasks, tracks
-dependency counters, and submits ready node tasks through the configured
-scheduler's `SchedulerTaskRuntime`. Tiled operations may spawn micro-tasks and
-increment scheduler-owned completion counters.
+`ComputeDispatchPlanBuilder` records that cache-pruned plan for inspection.
+`TaskSubmissionPlan` materializes the plan's `ComputeTaskGraph` into scheduler
+closures, dependency counters, ready handles, operation variants, and temporary
+result slots, then submits ready node tasks through the configured scheduler's
+`SchedulerTaskRuntime`. Tiled operations may spawn micro-tasks and increment
+scheduler-owned completion counters.
 
 `ComputeTaskDispatcher` keeps plan execution, dependency accounting, sparse
 node-id mapping, temporary result storage, event logging, exception
