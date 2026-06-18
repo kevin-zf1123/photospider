@@ -79,6 +79,60 @@ ComputeService::Request make_service_compute_request(
       request.intent, request.dirty_roi};
 }
 
+/**
+ * @brief Applies and restores per-request GraphModel compute flags.
+ *
+ * The guard records the graph's visible quiet and skip-save flags before a
+ * Kernel compute request mutates them, applies the request values for the
+ * active compute call, and restores the exact previous values when the compute
+ * boundary exits.
+ *
+ * @param graph Graph whose request-scoped flags are temporarily changed.
+ * @param request Kernel compute request supplying quiet and nosave values.
+ * @throws Nothing directly; GraphModel flag setters are non-throwing.
+ * @note The guard must be created inside GraphStateExecutor work so request
+ * flag mutation is serialized with graph-state operations and with the compute
+ * that reads those flags.
+ */
+class ScopedComputeRequestState {
+ public:
+  ScopedComputeRequestState(GraphModel& graph,
+                            const Kernel::ComputeRequest& request)
+      : graph_(graph),
+        previous_quiet_(graph.is_quiet()),
+        previous_skip_save_cache_(graph.skip_save_cache()) {
+    graph_.set_quiet(request.execution.quiet);
+    graph_.set_skip_save_cache(request.cache.nosave);
+  }
+
+  ScopedComputeRequestState(const ScopedComputeRequestState&) = delete;
+  ScopedComputeRequestState& operator=(const ScopedComputeRequestState&) =
+      delete;
+
+  /**
+   * @brief Restores the graph flags captured before the compute request.
+   *
+   * @throws Nothing.
+   * @note Restoration runs for success, GraphError, std::exception, and
+   * unknown exception paths because the guard lives on the stack inside the
+   * submitted graph-state closure.
+   */
+  ~ScopedComputeRequestState() noexcept {
+    graph_.set_skip_save_cache(previous_skip_save_cache_);
+    graph_.set_quiet(previous_quiet_);
+  }
+
+ private:
+  /** @brief Graph whose flags are restored by the destructor. */
+  GraphModel& graph_;
+
+  /** @brief Quiet flag observed before the request was applied. */
+  bool previous_quiet_ = true;
+
+  /** @brief Skip-save flag observed before the request was applied. */
+  bool previous_skip_save_cache_ = false;
+};
+
 }  // namespace
 
 bool Kernel::compute(const ComputeRequest& request) {
@@ -97,37 +151,17 @@ bool Kernel::compute_request(const ComputeRequest& request) {
       runtime.start();
     }
 
-    auto& model = runtime.model();
     runtime.graph_state()
-        .submit([nosave = request.cache.nosave](GraphModel& graph) {
-          graph.set_skip_save_cache(nosave);
+        .submit([this, &runtime, request](GraphModel& graph) {
+          ScopedComputeRequestState request_state(graph, request);
+          ComputeService service(traversal_service_, cache_service_,
+                                 runtime.event_service());
+          (void)run_compute_request(service, runtime, graph, request);
           return 0;
         })
         .get();
-    model.set_quiet(request.execution.quiet);
-
-    ComputeService compute_service(traversal_service_, cache_service_,
-                                   runtime.event_service());
-    if (request.execution.parallel) {
-      (void)run_compute_request(compute_service, runtime, model, request);
-    } else {
-      runtime.graph_state()
-          .submit([this, &runtime, request](GraphModel& graph) {
-            ComputeService service(traversal_service_, cache_service_,
-                                   runtime.event_service());
-            (void)run_compute_request(service, runtime, graph, request);
-            return 0;
-          })
-          .get();
-    }
 
     last_error_.erase(request.name);
-    runtime.graph_state()
-        .submit([](GraphModel& graph) {
-          graph.set_skip_save_cache(false);
-          return 0;
-        })
-        .get();
     return true;
   } catch (const GraphError& ge) {
     last_error_[request.name] = {ge.code(), ge.what()};
@@ -163,22 +197,14 @@ std::optional<cv::Mat> Kernel::compute_and_get_image_request(
       runtime.start();
     }
 
-    ComputeService compute_service(traversal_service_, cache_service_,
-                                   runtime.event_service());
-    if (request.execution.parallel) {
-      output = run_compute_request(compute_service, runtime, runtime.model(),
-                                   request);
-    } else {
-      output =
-          runtime.graph_state()
-              .submit([this, &runtime,
-                       request](GraphModel& graph) -> NodeOutput {
-                ComputeService service(traversal_service_, cache_service_,
-                                       runtime.event_service());
-                return run_compute_request(service, runtime, graph, request);
-              })
-              .get();
-    }
+    output = runtime.graph_state()
+                 .submit([this, &runtime, request](GraphModel& graph) {
+                   ScopedComputeRequestState request_state(graph, request);
+                   ComputeService service(traversal_service_, cache_service_,
+                                          runtime.event_service());
+                   return run_compute_request(service, runtime, graph, request);
+                 })
+                 .get();
 
     if (output.image_buffer.width == 0) {
       return std::nullopt;
@@ -201,55 +227,16 @@ std::optional<std::future<bool>> Kernel::compute_async_request(
   }
 
   GraphRuntime* const runtime_ptr = it->second.get();
-  if (request.execution.parallel) {
-    return std::optional<std::future<bool>>(std::async(
-        std::launch::async,
-        [this, runtime_ptr, request = std::move(request)]() {
-          try {
-            if (!runtime_ptr->running()) {
-              runtime_ptr->start();
-            }
-
-            GraphModel& model = runtime_ptr->model();
-            ComputeService compute_service(traversal_service_, cache_service_,
-                                           runtime_ptr->event_service());
-            const bool prev_quiet = model.is_quiet();
-            model.set_quiet(request.execution.quiet);
-            model.set_skip_save_cache(request.cache.nosave);
-            (void)run_compute_request(compute_service, *runtime_ptr, model,
-                                      request);
-            model.set_skip_save_cache(false);
-            model.set_quiet(prev_quiet);
-            last_error_.erase(request.name);
-            return true;
-          } catch (const GraphError& ge) {
-            last_error_[request.name] = {ge.code(), ge.what()};
-            return false;
-          } catch (const std::exception& e) {
-            last_error_[request.name] = {
-                GraphErrc::Unknown,
-                make_async_exception_message(request.intent.has_value(),
-                                             request.node_id, e.what())};
-            return false;
-          }
-        }));
-  }
-
   if (!runtime_ptr->running()) {
     runtime_ptr->start();
   }
   return runtime_ptr->graph_state().submit(
-      [this, runtime_ptr, request = std::move(request)](GraphModel& model) {
+      [this, runtime_ptr, request = std::move(request)](GraphModel& graph) {
         try {
-          ComputeService compute_service(traversal_service_, cache_service_,
-                                         runtime_ptr->event_service());
-          const bool prev_quiet = model.is_quiet();
-          model.set_quiet(request.execution.quiet);
-          model.set_skip_save_cache(request.cache.nosave);
-          (void)run_compute_request(compute_service, *runtime_ptr, model,
-                                    request);
-          model.set_skip_save_cache(false);
-          model.set_quiet(prev_quiet);
+          ScopedComputeRequestState request_state(graph, request);
+          ComputeService service(traversal_service_, cache_service_,
+                                 runtime_ptr->event_service());
+          (void)run_compute_request(service, *runtime_ptr, graph, request);
           last_error_.erase(request.name);
           return true;
         } catch (const GraphError& ge) {
@@ -260,6 +247,10 @@ std::optional<std::future<bool>> Kernel::compute_async_request(
               GraphErrc::Unknown,
               make_async_exception_message(request.intent.has_value(),
                                            request.node_id, e.what())};
+          return false;
+        } catch (...) {
+          last_error_[request.name] = {GraphErrc::Unknown,
+                                       std::string("unknown error")};
           return false;
         }
       });

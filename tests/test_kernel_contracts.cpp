@@ -1,10 +1,15 @@
 #include <gtest/gtest.h>
 
+#include <atomic>
+#include <chrono>
 #include <cstdint>
 #include <filesystem>
 #include <fstream>
+#include <future>
 #include <mutex>
 #include <system_error>
+#include <thread>
+#include <utility>
 
 #include "adapter/buffer_adapter_opencv.hpp"
 #include "graph_model.hpp"
@@ -19,6 +24,58 @@
 
 namespace ps {
 namespace {
+
+std::mutex g_blocking_source_mutex;
+std::shared_future<void> g_blocking_source_release;
+std::atomic<bool> g_blocking_source_started{false};
+
+/**
+ * @brief Configures the blocking contract op release signal for one test.
+ *
+ * @param release Future that the blocking source op waits on after signalling
+ * that execution has started.
+ * @throws std::bad_alloc if shared_future state copying allocates.
+ * @note The op reads this state under g_blocking_source_mutex so tests can
+ * safely install a fresh release future before submitting compute work.
+ */
+void configure_blocking_contract_source(std::shared_future<void> release) {
+  std::lock_guard<std::mutex> lock(g_blocking_source_mutex);
+  g_blocking_source_started.store(false, std::memory_order_release);
+  g_blocking_source_release = std::move(release);
+}
+
+/**
+ * @brief Clears the blocking contract op release signal after a test.
+ *
+ * @throws Nothing directly.
+ * @note Leaving the future unset would make later blocking-source computes
+ * wait on stale test state.
+ */
+void reset_blocking_contract_source() {
+  std::lock_guard<std::mutex> lock(g_blocking_source_mutex);
+  g_blocking_source_release = std::shared_future<void>();
+  g_blocking_source_started.store(false, std::memory_order_release);
+}
+
+/**
+ * @brief Waits until the blocking contract op reports that it is running.
+ *
+ * @param timeout Maximum time to wait for the op to start.
+ * @return true when the op started before timeout, otherwise false.
+ * @throws Nothing directly.
+ * @note Tests use this to know the graph-state compute closure has entered
+ * scheduler-backed work and is holding the graph-state executor boundary.
+ */
+bool wait_for_blocking_contract_source(std::chrono::milliseconds timeout) {
+  const auto deadline = std::chrono::steady_clock::now() + timeout;
+  while (std::chrono::steady_clock::now() < deadline) {
+    if (g_blocking_source_started.load(std::memory_order_acquire)) {
+      return true;
+    }
+    std::this_thread::sleep_for(std::chrono::milliseconds(5));
+  }
+  return g_blocking_source_started.load(std::memory_order_acquire);
+}
 
 void register_contract_ops() {
   static std::once_flag once;
@@ -54,6 +111,30 @@ void register_contract_ops() {
               cv::Mat src = toCvMat(input);
               cv::Mat dst = toCvMat(output.image_buffer);
               src.copyTo(dst);
+              return output;
+            }));
+
+    registry.register_op_hp_monolithic(
+        "kernel_contract_test", "blocking_source",
+        MonolithicOpFunc(
+            [](const Node& node, const std::vector<const NodeOutput*>&) {
+              std::shared_future<void> release;
+              {
+                std::lock_guard<std::mutex> lock(g_blocking_source_mutex);
+                release = g_blocking_source_release;
+              }
+              g_blocking_source_started.store(true, std::memory_order_release);
+              if (release.valid()) {
+                release.wait();
+              }
+
+              const int width = node.runtime_parameters["width"].as<int>(17);
+              const int height = node.runtime_parameters["height"].as<int>(3);
+              NodeOutput output;
+              output.image_buffer = make_aligned_cpu_image_buffer(
+                  width, height, 1, DataType::FLOAT32);
+              cv::Mat mat = toCvMat(output.image_buffer);
+              mat.setTo(3.0f);
               return output;
             }));
 
@@ -117,6 +198,48 @@ void write_text(const std::filesystem::path& path, const std::string& text) {
   std::filesystem::create_directories(path.parent_path());
   std::ofstream out(path);
   out << text;
+}
+
+/**
+ * @brief Writes a single-node graph whose operation intentionally is missing.
+ *
+ * @param path YAML file path to create.
+ * @throws std::filesystem::filesystem_error or std::ios_base::failure from
+ * directory creation or file writing.
+ * @note The graph is valid topology, so compute reaches operation resolution
+ * and fails inside the compute request boundary.
+ */
+void write_missing_op_graph(const std::filesystem::path& path) {
+  write_text(path, R"YAML(
+- id: 1
+  name: missing_op
+  type: kernel_contract_test
+  subtype: missing_op
+  parameters:
+    width: 8
+    height: 8
+)YAML");
+}
+
+/**
+ * @brief Writes a graph that runs the blocking contract source operation.
+ *
+ * @param path YAML file path to create.
+ * @throws std::filesystem::filesystem_error or std::ios_base::failure from
+ * directory creation or file writing.
+ * @note The source has explicit dimensions so planned parallel dispatch emits
+ * a deterministic single monolithic scheduler task.
+ */
+void write_blocking_source_graph(const std::filesystem::path& path) {
+  write_text(path, R"YAML(
+- id: 1
+  name: blocking_source
+  type: kernel_contract_test
+  subtype: blocking_source
+  parameters:
+    width: 8
+    height: 8
+)YAML");
 }
 
 /**
@@ -538,6 +661,143 @@ TEST(ComputeContracts, RealTimeUpdateWithoutDirtyRoiFailsClearly) {
   request.cache.disable_disk_cache = true;
   request.intent = ComputeIntent::RealTimeUpdate;
   EXPECT_THROW(compute.compute(graph, request), GraphError);
+}
+
+TEST(ComputeContracts, SyncFailureRestoresRequestScopedGraphState) {
+  register_contract_ops();
+  const std::string graph_name = "contract_sync_state_restore";
+  const auto root = clean_temp_path("photospider-contract-sync-state-root");
+  const auto yaml_path = temp_path("photospider-contract-sync-state.yaml");
+  write_missing_op_graph(yaml_path);
+
+  Kernel kernel;
+  auto loaded =
+      kernel.load_graph(graph_name, root.string(), yaml_path.string());
+  ASSERT_TRUE(loaded.has_value());
+  kernel
+      .post(graph_name,
+            [](GraphModel& graph) {
+              graph.set_quiet(false);
+              graph.set_skip_save_cache(true);
+              return 0;
+            })
+      .get();
+
+  Kernel::ComputeRequest request;
+  request.name = graph_name;
+  request.node_id = 1;
+  request.cache.precision = "int8";
+  request.cache.disable_disk_cache = true;
+  request.cache.nosave = false;
+  request.execution.quiet = true;
+
+  EXPECT_FALSE(kernel.compute(request));
+  auto restored = kernel
+                      .post(graph_name,
+                            [](GraphModel& graph) {
+                              return std::make_pair(graph.is_quiet(),
+                                                    graph.skip_save_cache());
+                            })
+                      .get();
+  EXPECT_FALSE(restored.first);
+  EXPECT_TRUE(restored.second);
+  kernel.close_graph(graph_name);
+  std::filesystem::remove_all(root);
+}
+
+TEST(ComputeContracts, AsyncParallelFailureRestoresRequestScopedGraphState) {
+  register_contract_ops();
+  const std::string graph_name = "contract_async_state_restore";
+  const auto root = clean_temp_path("photospider-contract-async-state-root");
+  const auto yaml_path = temp_path("photospider-contract-async-state.yaml");
+  write_missing_op_graph(yaml_path);
+
+  Kernel kernel;
+  auto loaded =
+      kernel.load_graph(graph_name, root.string(), yaml_path.string());
+  ASSERT_TRUE(loaded.has_value());
+  kernel
+      .post(graph_name,
+            [](GraphModel& graph) {
+              graph.set_quiet(false);
+              graph.set_skip_save_cache(true);
+              return 0;
+            })
+      .get();
+
+  Kernel::ComputeRequest request;
+  request.name = graph_name;
+  request.node_id = 1;
+  request.cache.precision = "int8";
+  request.cache.disable_disk_cache = true;
+  request.cache.nosave = false;
+  request.execution.parallel = true;
+  request.execution.quiet = true;
+
+  auto future = kernel.compute_async(request);
+  ASSERT_TRUE(future.has_value());
+  EXPECT_FALSE(future->get());
+  auto restored = kernel
+                      .post(graph_name,
+                            [](GraphModel& graph) {
+                              return std::make_pair(graph.is_quiet(),
+                                                    graph.skip_save_cache());
+                            })
+                      .get();
+  EXPECT_FALSE(restored.first);
+  EXPECT_TRUE(restored.second);
+  kernel.close_graph(graph_name);
+  std::filesystem::remove_all(root);
+}
+
+TEST(ComputeContracts, ParallelComputeSerializesGraphStateOperations) {
+  register_contract_ops();
+  const std::string graph_name = "contract_parallel_graph_state";
+  const auto root = clean_temp_path("photospider-contract-parallel-state-root");
+  const auto yaml_path = temp_path("photospider-contract-parallel-state.yaml");
+  write_blocking_source_graph(yaml_path);
+
+  Kernel kernel;
+  auto loaded =
+      kernel.load_graph(graph_name, root.string(), yaml_path.string());
+  ASSERT_TRUE(loaded.has_value());
+
+  std::promise<void> release_compute;
+  configure_blocking_contract_source(release_compute.get_future().share());
+
+  Kernel::ComputeRequest request;
+  request.name = graph_name;
+  request.node_id = 1;
+  request.cache.precision = "int8";
+  request.cache.force_recache = true;
+  request.cache.disable_disk_cache = true;
+  request.execution.parallel = true;
+
+  auto compute_future = kernel.compute_async(request);
+  ASSERT_TRUE(compute_future.has_value());
+  EXPECT_TRUE(
+      wait_for_blocking_contract_source(std::chrono::milliseconds(2000)));
+
+  std::atomic<bool> post_ran{false};
+  auto post_future = kernel.post(graph_name, [&post_ran](GraphModel& graph) {
+    post_ran.store(true, std::memory_order_release);
+    return graph.node_count();
+  });
+
+  EXPECT_EQ(post_future.wait_for(std::chrono::milliseconds(100)),
+            std::future_status::timeout);
+  EXPECT_FALSE(post_ran.load(std::memory_order_acquire));
+
+  release_compute.set_value();
+  EXPECT_TRUE(compute_future->get());
+  EXPECT_EQ(post_future.wait_for(std::chrono::milliseconds(2000)),
+            std::future_status::ready);
+  EXPECT_EQ(post_future.get(), 1u);
+  EXPECT_TRUE(post_ran.load(std::memory_order_acquire));
+
+  reset_blocking_contract_source();
+  kernel.close_graph(graph_name);
+  std::filesystem::remove_all(root);
 }
 
 TEST(GraphModelContract, ClearResetsModelRuntimeState) {

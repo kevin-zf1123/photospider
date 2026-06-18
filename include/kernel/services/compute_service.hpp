@@ -151,7 +151,8 @@ class ComputeService {
    * IntentUpdateCoordinator when both runtimes are available. The coordinator
    * starts sibling dirty callbacks concurrently, and each dirty callback
    * submits its source-first ready work through the intent-specific scheduler
-   * runtime.
+   * runtime. Kernel callers must enter this method from GraphStateExecutor so
+   * scheduler-backed work remains serialized with graph-state operations.
    */
   NodeOutput& compute_parallel(GraphModel& graph, GraphRuntime& runtime,
                                const Request& request);

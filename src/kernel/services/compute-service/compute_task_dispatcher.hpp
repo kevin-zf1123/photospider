@@ -40,22 +40,6 @@ namespace ps::compute {
 class ComputeTaskDispatcher {
  public:
   /**
-   * @brief Sequential execution callback used when planning produces no
-   * scheduler tasks.
-   *
-   * @param graph Graph being computed.
-   * @param node_id Target node that still needs a high-precision output.
-   * @param allow_disk_cache Whether the fallback may read disk cache entries.
-   * @return Mutable high-precision output owned by the graph.
-   * @throws GraphError or operation-specific exceptions from the fallback
-   * implementation.
-   * @note The callback is invoked synchronously on the caller thread and is
-   * expected to preserve ComputeService::compute_internal cache semantics.
-   */
-  using SequentialFallback =
-      std::function<NodeOutput&(GraphModel&, int, bool allow_disk_cache)>;
-
-  /**
    * @brief Immutable per-call options for one high-precision dispatch.
    *
    * The request groups cache, timing, and benchmark knobs so helper objects
@@ -115,20 +99,17 @@ class ComputeTaskDispatcher {
    * @param task_runtime Scheduler runtime that receives initial and
    * dependency-ready tasks.
    * @param request Immutable execution options for this dispatch.
-   * @param sequential_fallback Synchronous fallback used when no scheduler task
-   * graph is produced but the target still needs output.
    * @return Mutable target high-precision output stored in the graph.
    * @throws GraphError when the node is missing, no operation exists, a
    * dependency is unavailable, scheduling fails, or dispatch finishes without
-   * target output. It may also rethrow operation, OpenCV, cache, or fallback
-   * exceptions wrapped with compute-stage context.
+   * target output. It may also rethrow operation, OpenCV, or cache exceptions
+   * wrapped with compute-stage context.
    * @note Worker tasks do not mutate GraphModel caches directly. They publish
    * temporary results, and execute() serializes final cache ownership after the
    * scheduler drains.
    */
   NodeOutput& execute(GraphModel& graph, SchedulerTaskRuntime& task_runtime,
-                      const ComputeDispatchRequest& request,
-                      SequentialFallback sequential_fallback);
+                      const ComputeDispatchRequest& request);
 
   /**
    * @brief Runs dirty-source tasks before downstream dirty-update tasks.

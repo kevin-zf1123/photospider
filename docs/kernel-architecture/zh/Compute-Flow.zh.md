@@ -138,7 +138,7 @@ Tiled 操作可能产生微任务并递增 scheduler-owned 完成计数器。
 
 `ComputeTaskDispatcher` 将 plan execution、依赖计数、稀疏 node-id 映射、临时结果存储、事件日志、异常传播和最终目标选择保留在 compute-service 边界内。它通过 scheduler task-runtime queue
 dispatch 已经 planned 的 work；它不会让 scheduler 拥有 dirty propagation、compute-task
-derivation 或 task graph 本身。
+derivation 或 task graph 本身。如果裁剪后的 planned dispatch 为空，但目标没有可复用 HP 输出，dispatcher 会报告 planning contract error，而不是回退到递归顺序计算。
 
 对于 dirty 执行，dispatcher 应只 materialize 当前 dirty snapshot 从该 request 的
 `ComputeTaskGraph` 中选出的活跃 `DirtyUpdateWorkSet`。运行期依赖计数器和 ready-task queue
@@ -164,9 +164,7 @@ YAML 加载、cache 命令、inspection 和 ROI projection 等 graph-state opera
 `SchedulerTaskRuntime` 路由。
 
 当前默认语义是通过 `GraphStateExecutor` 提供 per-graph exclusive access：同一个 graph 的
-graph-state operation 和非并行 compute 不会并发读取或修改可见 `GraphModel`。这能在不把非
-compute 命令路由到 scheduler queue 的情况下，保持 graph topology、cache 字段、dirty
-snapshot、timing 和 node runtime state 一致。
+graph-state operation 和 compute request 不会并发读取或修改可见 `GraphModel`。这也包括 scheduler-backed parallel compute：外层 Kernel request 进入 `GraphStateExecutor`，而 ready node/tile callback 在该边界内通过 scheduler runtime dispatch。这能在不把非 compute 命令路由到 scheduler queue 的情况下，保持 graph topology、cache 字段、dirty snapshot、timing 和 node runtime state 一致。
 
 后续可以新增独立于 `ComputeIntent` 的 `ComputeCommitPolicy`。`DirectGraphCommit`
 保留当前行为：compute 在请求期间写入可见图状态，graph-state operation 等待。

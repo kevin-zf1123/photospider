@@ -231,9 +231,9 @@ compute::ComputePlan prune_facade_node_cache_task_graph(
  * @return Mutable HP output owned by the target node.
  * @throws GraphError when a cycle, missing dependency, missing operation, disk
  * cache failure, or compute failure occurs.
- * @note This method is used as the fallback for full parallel dispatch when no
- * scheduler task graph is available, so its cache semantics must stay aligned
- * with ComputeTaskDispatcher::execute.
+ * @note This method is used only by the sequential HP path and HP callbacks
+ * that explicitly select sequential execution. Scheduler-backed dispatch does
+ * not call this method as a compatibility fallback.
  */
 NodeOutput& ComputeService::compute_internal(
     GraphModel& graph, int node_id, const RecursiveComputeContext& context) {
@@ -401,8 +401,8 @@ NodeOutput& ComputeService::compute_real_time_update(
  * @param request Service request carrying target, cache, telemetry, and
  * optional intent semantics.
  * @return Mutable target HP output stored in the graph.
- * @throws GraphError from scheduler lookup, task dispatch, fallback execution,
- * cache access, or missing target output.
+ * @throws GraphError from scheduler lookup, task dispatch, cache access, or
+ * missing target output.
  * @note Legacy HP requests run the full-frame dispatcher directly. Requests
  * with intent are routed through compute_intent_update_impl.
  */
@@ -417,16 +417,7 @@ NodeOutput& ComputeService::compute_parallel(GraphModel& graph,
   compute::ComputeTaskDispatcher executor(traversal_, cache_, events_);
   SchedulerTaskRuntime& task_runtime = compute::ensure_scheduler_task_runtime(
       runtime, ComputeIntent::GlobalHighPrecision);
-  return executor.execute(
-      graph, task_runtime, make_dispatch_request(request),
-      [this, &request](GraphModel& fallback_graph, int fallback_node_id,
-                       bool allow_disk_cache) -> NodeOutput& {
-        std::unordered_map<int, bool> visiting;
-        const RecursiveComputeContext context{
-            request.cache.precision, visiting, request.telemetry.enable_timing,
-            allow_disk_cache, request.telemetry.benchmark_events};
-        return compute_internal(fallback_graph, fallback_node_id, context);
-      });
+  return executor.execute(graph, task_runtime, make_dispatch_request(request));
 }
 
 /**

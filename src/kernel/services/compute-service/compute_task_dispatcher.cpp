@@ -114,18 +114,16 @@ void ComputeTaskDispatcher::submit_dirty_ready_tasks_source_first(
  * @param graph GraphModel whose target output is computed.
  * @param task_runtime Scheduler runtime used for this dispatch.
  * @param request Per-call dispatch options.
- * @param sequential_fallback Synchronous fallback for empty task plans.
  * @return Mutable high-precision output stored on the target graph node.
  * @throws GraphError for missing targets, missing final output, compute
- * failures, or scheduling failures; may also propagate operation/cache/fallback
+ * failures, or scheduling failures; may also propagate operation/cache
  * exceptions with added context.
  * @note The function builds all worker closures before submission, waits for
  * completion, then commits temp outputs under graph_mutex_.
  */
 NodeOutput& ComputeTaskDispatcher::execute(
     GraphModel& graph, SchedulerTaskRuntime& task_runtime,
-    const ComputeDispatchRequest& request,
-    SequentialFallback sequential_fallback) {
+    const ComputeDispatchRequest& request) {
   const int node_id = request.node_id;
   auto& timing_results = graph.timing_results;
   auto& timing_mutex = graph.timing_mutex_;
@@ -165,9 +163,7 @@ NodeOutput& ComputeTaskDispatcher::execute(
       request.benchmark_events,
   });
   plan.build_scheduler_tasks(runner, task_runtime);
-  dispatch_or_run_fallback(graph, task_runtime, node_id,
-                           request.disable_disk_cache, plan,
-                           std::move(sequential_fallback));
+  dispatch_planned_tasks(graph, task_runtime, node_id, plan);
 
   ComputeResultCommitter committer(cache_, graph_mutex,
                                    request.cache_precision);
