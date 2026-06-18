@@ -26,6 +26,20 @@ extern "C" void register_photospider_ops();
 
 操作插件依赖公共 `ImageBuffer` 和 `NodeOutput` 契约。
 
+打算通过 `plugin_dirs` 作为当前可加载插件使用的 operation plugin，也必须显式注册 dirty 与
+forward ROI propagator。Registry 仍提供 legacy identity fallback 作为迁移支持，但该 fallback
+不是完整插件契约。逐像素图像操作可以注册 pass-through ROI 函数；带副作用的 monolithic
+操作必须说明自己的副作用语义，并仍然注册显式 propagator，用来描述上游需求和下游受影响区域元数据。
+
+标准示例插件遵守该规则：
+
+| 插件 op | 执行形态 | ROI 契约 |
+| --- | --- | --- |
+| `image_process:invert` | HP monolithic 逐像素图像变换 | 显式 pass-through dirty 与 forward ROI。 |
+| `image_process:threshold` | HP monolithic 逐像素图像变换 | 显式 pass-through dirty 与 forward ROI。 |
+| `io:save` | HP monolithic 副作用 sink | 显式 pass-through planning metadata；执行阶段重写完整文件。 |
+| `image_generator:perlin_noise_metal` | HP monolithic Metal generator | 显式 generator-local pass-through ROI metadata；未启用 tiled Metal 执行。 |
+
 ## 操作插件库生命周期
 
 插件注册的操作回调可能指向该插件动态库内部的代码或 callable 对象。因此，只要该插件注册的任何操作 key

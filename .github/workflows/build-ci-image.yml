@@ -1,4 +1,10 @@
 name: Build CI Image
+
+# LEGACY / DISABLED-BY-DEFAULT:
+# This workflow is retained as manual scaffolding only. It currently sets
+# push: false and does not publish a maintained CI image. Do not treat it as an
+# active validation or release path until a future change revalidates and
+# documents the container workflow end to end.
 on:
   # Manual-only TODO scaffolding. Re-enable automatic image publishing only
   # after the container path is validated and documented as maintained CI.

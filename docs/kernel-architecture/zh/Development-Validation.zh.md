@@ -44,6 +44,11 @@ GitHub Actions 和 CI container image 不是当前维护中的验证路径。当
 `workflow_dispatch` 的手动脚手架；除非未来某个 change 明确重新启用并验证它们，否则应把
 `.github/workflows/*.yml` 和 `Dockerfile.ci` 视为 TODO 集成脚手架。
 
+这些 workflow 文件和 `Dockerfile.ci` 只用于保留历史上下文和未来可能的 bootstrap 工作。它们是
+legacy/manual-only artifact，不是面向 reviewer 的正确性证据。未来如果恢复 CI，必须作为单独
+change 处理，包含更新 trigger、image publishing policy、依赖安装、checkout/submodule 行为、
+build/test 命令，并提供新的 GitHub Actions 证据。
+
 当前证据应来自本地 build、focused test binary、CTest，以及保存到 `tests/results/...` 的 artifact。在 Dockerfile 依赖、workflow trigger、checkout/submodule 行为、build 命令和 CTest 调用被更新并通过新的 CI 证据证明之前，不要声称 GitHub CI 或 containerized CI image 是受支持或已通过的测试链路。
 
 ## 重构边界

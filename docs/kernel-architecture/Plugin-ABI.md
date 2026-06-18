@@ -29,6 +29,23 @@ Supported operation registrations include:
 Operation plugins depend on the public `ImageBuffer` and `NodeOutput`
 contracts.
 
+Current operation plugins that are intended to be loadable through
+`plugin_dirs` must also register explicit dirty and forward ROI propagators. The
+registry still provides legacy identity fallback for migration, but that
+fallback is not a complete plugin contract. Pointwise image operations can
+register pass-through ROI functions; side-effecting monolithic operations must
+document their side-effect semantics and still register explicit propagators
+that describe upstream demand and downstream affected-region metadata.
+
+The standard example plugins follow this rule:
+
+| Plugin op | Execution shape | ROI contract |
+| --- | --- | --- |
+| `image_process:invert` | HP monolithic pointwise image transform | Explicit pass-through dirty and forward ROI. |
+| `image_process:threshold` | HP monolithic pointwise image transform | Explicit pass-through dirty and forward ROI. |
+| `io:save` | HP monolithic side-effect sink | Explicit pass-through planning metadata; execution rewrites the full file. |
+| `image_generator:perlin_noise_metal` | HP monolithic Metal generator | Explicit generator-local pass-through ROI metadata; tiled Metal execution is not enabled. |
+
 ## Operation Plugin Library Lifetime
 
 Operation callbacks registered by a plugin may point to code or callable
