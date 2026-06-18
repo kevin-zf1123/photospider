@@ -66,8 +66,11 @@ via `SchedulerTaskRuntime`.
 `GraphRuntime` owns graph state, the `GraphStateExecutor`, scheduler
 registration, events, and platform resources. It no longer exposes a general
 worker queue, task graph, or completion-counter API. Graph-state operations and
-non-parallel compute use `GraphStateExecutor`; scheduler-facing design should
-extend `IScheduler` and `SchedulerTaskRuntime`.
+compute requests that mutate the visible `GraphModel` use
+`GraphStateExecutor`, including scheduler-backed parallel compute. The
+scheduler-facing design should extend `IScheduler` and
+`SchedulerTaskRuntime`; it should not bypass graph-state access by taking
+direct ownership of the runtime model.
 
 ## Built-in Schedulers
 
@@ -114,7 +117,9 @@ or work-stealing queues, route CPU/GPU resources, or keep older work running,
 but it should not receive task graphs or require a bespoke dirty-source queue.
 
 The compute-service path derives planned work before scheduler dispatch and
-does not expose a compatibility compute path outside planned-task dispatch.
+does not expose a compatibility compute path outside planned-task dispatch. An
+empty planned dispatch is acceptable only when the target already has reusable
+HP output; otherwise it is a planning contract error.
 
 ## Epoch and Cancellation
 
@@ -131,7 +136,7 @@ execution events. This is useful for validating scheduler behavior.
 
 - Keep `IScheduler` as the formal public scheduler interface.
 - Keep planned parallel work routed through scheduler-owned task runtimes.
-- Keep graph-state commands and non-parallel compute behind
+- Keep graph-state commands and visible graph compute requests behind
   `GraphStateExecutor`.
 - Keep scheduler runtimes ready-task-only: they receive concrete callbacks with
   epoch/generation metadata and optional scheduler-specific hints, not task

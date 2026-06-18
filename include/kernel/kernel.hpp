@@ -32,9 +32,9 @@ namespace ps {
  * stable while delegating graph IO, traversal, inspection, cache, ROI, dirty
  * control, and compute work to narrower services. Graph-state operations run
  * through each runtime's GraphStateExecutor so topology and runtime metadata
- * remain serialized with non-parallel compute. Parallel compute may use the
- * runtime model and configured schedulers directly, matching the documented
- * compute boundary.
+ * remain serialized with compute, including scheduler-backed parallel compute.
+ * Schedulers receive ready task callbacks; they do not own graph-state
+ * operation dispatch.
  *
  * @note Public methods return bool or std::optional for frontend-friendly
  * failure handling. Compute and ROI/dirty APIs additionally store per-graph
@@ -522,9 +522,8 @@ class Kernel {
    * graph is missing or compute reports a handled failure.
    * @throws Nothing; GraphError/std::exception/unknown exceptions are mapped to
    * the existing LastError behavior and false.
-   * @note The historical synchronous quiet and skip-save side effects are kept:
-   * quiet is set to request.execution.quiet and skip-save is reset only after
-   * successful compute.
+   * @note quiet and skip-save are applied only for the active request and are
+   * restored on every success or failure exit path.
    */
   bool compute_request(const ComputeRequest& request);
 
@@ -534,7 +533,8 @@ class Kernel {
    * @param request Public async compute request captured by value.
    * @return Future that resolves to the compute status, or nullopt when the
    * graph is missing.
-   * @throws std::system_error if std::async cannot launch the parallel branch.
+   * @throws std::system_error if GraphStateExecutor cannot launch the async
+   * graph-state work.
    * @note The returned future owns the request copy. benchmark_events remains
    * caller-owned and must outlive future completion.
    */
@@ -565,7 +565,9 @@ class Kernel {
    * @return Mutable output owned by the graph node cache.
    * @throws GraphError or std::exception from ComputeService.
    * @note intent=nullopt selects legacy HP-only overloads; otherwise intent and
-   * dirty_roi are forwarded to the intent-aware HP/RT path.
+   * dirty_roi are forwarded to the intent-aware HP/RT path. Callers should
+   * invoke this only from a GraphStateExecutor work item when the graph is a
+   * visible runtime model.
    */
   NodeOutput& run_compute_request(ComputeService& compute_service,
                                   GraphRuntime& runtime, GraphModel& graph,

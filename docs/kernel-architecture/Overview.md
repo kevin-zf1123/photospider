@@ -13,8 +13,10 @@ and are not assumed to be committed with the repository.
 Photospider is built around a graph runtime with a service split, operation
 registry, cache layer, and scheduler abstraction. Parallel planned work now
 dispatches through scheduler-owned task runtimes. Graph-state commands and
-non-parallel compute enter an explicit per-graph `GraphStateExecutor` boundary
-instead of the scheduler dispatch path.
+compute requests that mutate visible graph state enter an explicit per-graph
+`GraphStateExecutor` boundary instead of the scheduler dispatch path.
+Scheduler-backed parallel compute uses the scheduler runtime for ready task
+callbacks inside that graph-state boundary.
 
 The code is useful and testable, but some boundaries are not final. In
 particular, `Kernel` and `ComputeService` still coordinate a large amount of
@@ -154,7 +156,8 @@ available during per-graph scheduler injection.
 `IScheduler` is the formal lifecycle interface, and scheduler-owned
 `SchedulerTaskRuntime` is the dispatch contract for compute-service planned
 parallel work. `GraphStateExecutor` is the separate access boundary for
-graph-state operations and non-parallel compute.
+graph-state operations and compute requests that read or mutate the visible
+`GraphModel`.
 
 ## Operation Registry
 

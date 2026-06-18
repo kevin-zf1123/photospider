@@ -6,9 +6,9 @@
 #include <unordered_set>
 #include <vector>
 
+#include "graph_model.hpp"
 #include "kernel/services/compute-service/compute_node_task_runner.hpp"
 #include "kernel/services/compute-service/compute_task_dependency_state.hpp"
-#include "kernel/services/compute-service/compute_task_dispatcher.hpp"
 
 namespace ps {
 class GraphTraversalService;
@@ -49,8 +49,9 @@ class TaskSubmissionPlan : public TaskExecutor {
    *
    * @return true when the task graph has no PlannedTask entries.
    * @throws Nothing.
-   * @note An empty plan may still require sequential fallback for the target
-   * node if no high-precision cache exists.
+   * @note An empty plan is legal only when the target already has reusable
+   * high-precision output; dispatch treats an uncached empty target as a
+   * planning contract error.
    */
   bool empty() const { return compute_plan_.task_graph.tasks.empty(); }
 
@@ -221,24 +222,21 @@ class TaskSubmissionPlan : public TaskExecutor {
 };
 
 /**
- * @brief Submits the planned scheduler work or runs the sequential fallback.
+ * @brief Submits the planned scheduler work for one dispatch request.
  *
  * @param graph GraphModel being computed.
  * @param task_runtime Scheduler runtime receiving initial planned tasks.
- * @param node_id Target node id for fallback checks.
- * @param disable_disk_cache Whether the sequential fallback may read disk
- * cache.
+ * @param node_id Target node id used when validating empty plans.
  * @param plan Built scheduler submission plan.
- * @param sequential_fallback Fallback callback for empty plans.
- * @throws Exceptions from fallback execution, task submission, or scheduler
- * completion.
- * @note Scheduler completion is awaited before plan-owned task closures and
- * temporary result slots can be destroyed.
+ * @throws GraphError when planning yields no scheduler tasks and the target
+ * does not already have a reusable high-precision output. It may also rethrow
+ * task submission or scheduler completion exceptions.
+ * @note Empty plans are legal only when the target output is already present.
+ * The dispatcher no longer falls back to recursive compute_internal.
  */
-void dispatch_or_run_fallback(
-    GraphModel& graph, SchedulerTaskRuntime& task_runtime, int node_id,
-    bool disable_disk_cache, TaskSubmissionPlan& plan,
-    ComputeTaskDispatcher::SequentialFallback sequential_fallback);
+void dispatch_planned_tasks(GraphModel& graph,
+                            SchedulerTaskRuntime& task_runtime, int node_id,
+                            TaskSubmissionPlan& plan);
 
 /**
  * @brief Submits dirty ready tasks with source-before-downstream ordering.

@@ -178,7 +178,9 @@ node-id mapping, temporary result storage, event logging, exception
 propagation, and final target selection inside the compute-service boundary. It
 dispatches already-planned work through scheduler task-runtime queues; it does
 not make the scheduler own dirty propagation, compute-task derivation, or the
-task graph itself.
+task graph itself. If the pruned planned dispatch is empty while the target has
+no reusable HP output, the dispatcher reports a planning contract error instead
+of falling back to recursive sequential compute.
 
 For dirty execution, the dispatcher should materialize only the active
 `DirtyUpdateWorkSet` selected from the request's `ComputeTaskGraph` by the
@@ -212,10 +214,13 @@ ROI projection are operations on the visible `GraphModel`. They are not
 compute-task dispatch and should not be routed through `SchedulerTaskRuntime`.
 
 The current default is per-graph exclusive access through
-`GraphStateExecutor`: graph-state operations and non-parallel compute for the
-same graph do not concurrently read or mutate the visible `GraphModel`. This
-keeps graph topology, cache fields, dirty snapshots, timing, and node runtime
-state coherent without routing non-compute commands through scheduler queues.
+`GraphStateExecutor`: graph-state operations and compute requests for the same
+graph do not concurrently read or mutate the visible `GraphModel`. This includes
+scheduler-backed parallel compute; the outer Kernel request enters
+`GraphStateExecutor`, while ready node/tile callbacks are dispatched through
+the scheduler runtime inside that boundary. This keeps graph topology, cache
+fields, dirty snapshots, timing, and node runtime state coherent without
+routing non-compute commands through scheduler queues.
 
 Future work may add a `ComputeCommitPolicy` separate from `ComputeIntent`.
 `DirectGraphCommit` keeps the current behavior, where compute writes visible

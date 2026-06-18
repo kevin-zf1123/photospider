@@ -298,13 +298,29 @@ TaskHandle TaskSubmissionPlan::make_handle(int task_id) const {
                     task.node_id};
 }
 
-void dispatch_or_run_fallback(
-    GraphModel& graph, SchedulerTaskRuntime& task_runtime, int node_id,
-    bool disable_disk_cache, TaskSubmissionPlan& plan,
-    ComputeTaskDispatcher::SequentialFallback sequential_fallback) {
+/**
+ * @brief Submits one planned high-precision scheduler task graph.
+ *
+ * @param graph GraphModel used to validate target cache state for empty plans.
+ * @param task_runtime Scheduler runtime receiving initial task handles.
+ * @param node_id Request target node id used in empty-plan diagnostics.
+ * @param plan Built task submission plan whose task handles are submitted.
+ * @throws GraphError when no scheduler tasks were planned and the target has
+ * no reusable HP output; otherwise rethrows scheduler submission or task
+ * completion failures.
+ * @note This function is the planned-dispatch boundary. It intentionally
+ * avoids recursive ComputeService execution.
+ */
+void dispatch_planned_tasks(GraphModel& graph,
+                            SchedulerTaskRuntime& task_runtime, int node_id,
+                            TaskSubmissionPlan& plan) {
   if (plan.empty() && graph.has_node(node_id)) {
     if (!graph.node(node_id).cached_output_high_precision.has_value()) {
-      sequential_fallback(graph, node_id, !disable_disk_cache);
+      throw GraphError(
+          GraphErrc::ComputeError,
+          "Planned dispatch produced no scheduler tasks for node " +
+              std::to_string(node_id) +
+              " and the target has no reusable high-precision output.");
     }
     return;
   }
