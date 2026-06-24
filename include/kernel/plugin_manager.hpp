@@ -84,7 +84,9 @@ class PluginManager {
    * @throws std::filesystem_error when path normalization fails.
    * @note The retained dynamic library handle is released only after registry
    * callbacks from that plugin have been removed and previous callbacks, if
-   * any, have been restored.
+   * any, have been restored. If the plugin was already shadowed by a later
+   * plugin and owns no active keys, dependent restoration snapshots are still
+   * cleared before releasing the handle.
    */
   int unload_by_plugin_path(const std::string& absolute_plugin_path);
 

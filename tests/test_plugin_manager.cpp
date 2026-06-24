@@ -294,6 +294,54 @@ TEST_F(PluginManagerLifecycleTest,
 }
 
 TEST_F(PluginManagerLifecycleTest,
+       UnloadShadowedPluginDropsDependentRestorationSnapshot) {
+  const auto plugin_path = lifecycle_plugin_path();
+  const auto override_path = override_lifecycle_plugin_path();
+  ASSERT_TRUE(std::filesystem::exists(plugin_path))
+      << "lifecycle op plugin was not built: " << plugin_path;
+  ASSERT_TRUE(std::filesystem::exists(override_path))
+      << "override lifecycle op plugin was not built: " << override_path;
+
+  PluginManager manager;
+  const auto first_result =
+      manager.load_from_dirs_report({plugin_path.parent_path().string()});
+  ASSERT_EQ(first_result.loaded, 1) << describe_errors(first_result.errors);
+  ASSERT_TRUE(first_result.errors.empty())
+      << describe_errors(first_result.errors);
+
+  const std::string original_path =
+      std::filesystem::absolute(plugin_path).string();
+  ASSERT_EQ(manager.op_sources().at(kLifecycleKey), original_path);
+  EXPECT_EQ(current_lifecycle_compute_device(), "PLUGIN_LIFECYCLE_TEST");
+
+  const auto replacement_result =
+      manager.load_from_dirs_report({override_path.parent_path().string()});
+  ASSERT_EQ(replacement_result.loaded, 1)
+      << describe_errors(replacement_result.errors);
+  ASSERT_TRUE(replacement_result.errors.empty())
+      << describe_errors(replacement_result.errors);
+
+  const std::string replacement_path =
+      std::filesystem::absolute(override_path).string();
+  ASSERT_EQ(manager.loaded_plugin_count(), 2u);
+  ASSERT_EQ(manager.op_sources().at(kLifecycleKey), replacement_path);
+  EXPECT_EQ(current_lifecycle_compute_device(), "PLUGIN_OVERRIDE_TEST");
+
+  EXPECT_EQ(manager.unload_by_plugin_path(original_path), 0);
+  EXPECT_EQ(manager.loaded_plugin_count(), 1u);
+  ASSERT_EQ(manager.op_sources().at(kLifecycleKey), replacement_path);
+  EXPECT_EQ(current_lifecycle_compute_device(), "PLUGIN_OVERRIDE_TEST");
+
+  EXPECT_EQ(manager.unload_by_plugin_path(replacement_path), 1);
+  EXPECT_EQ(manager.loaded_plugin_count(), 0u);
+  EXPECT_EQ(manager.op_sources().count(kLifecycleKey), 0u);
+  EXPECT_FALSE(OpRegistry::instance()
+                   .resolve_for_intent(kLifecycleType, kLifecycleSubtype,
+                                       ComputeIntent::GlobalHighPrecision)
+                   .has_value());
+}
+
+TEST_F(PluginManagerLifecycleTest,
        StandardOperationPluginsRegisterExplicitRoiContracts) {
   OpRegistry::instance().unregister_key("image_process:invert");
   OpRegistry::instance().unregister_key("image_process:threshold");
