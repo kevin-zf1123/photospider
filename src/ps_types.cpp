@@ -5,9 +5,111 @@
 
 namespace ps {
 
+namespace {
+
+/**
+ * @brief Thread-local capture currently observing OpRegistry registrations.
+ *
+ * @note Plugin loading invokes registration on the calling thread, so a
+ * thread-local pointer avoids adding process-global registry state while still
+ * allowing nested callers to restore the previous capture.
+ */
+thread_local OpRegistry::RegistrationCapture* active_registration_capture =
+    nullptr;
+
+/**
+ * @brief Sorts and deduplicates captured canonical operation keys.
+ *
+ * @param keys Mutable list of keys captured during one registration call.
+ * @throws std::bad_alloc if sorting or unique operations allocate internally.
+ * @note Stable sorted output keeps plugin unload metadata deterministic.
+ */
+void sort_unique_keys(std::vector<std::string>& keys) {
+  std::sort(keys.begin(), keys.end());
+  keys.erase(std::unique(keys.begin(), keys.end()), keys.end());
+}
+
+}  // namespace
+
 OpRegistry& OpRegistry::instance() {
   static OpRegistry inst;
   return inst;
+}
+
+OpRegistry::RegistryEntrySnapshot OpRegistry::snapshot_entry(
+    const std::string& key) const {
+  RegistryEntrySnapshot snapshot;
+  if (auto it = table_.find(key); it != table_.end()) {
+    snapshot.legacy_op = it->second;
+  }
+  if (auto it = metadata_table_.find(key); it != metadata_table_.end()) {
+    snapshot.metadata = it->second;
+  }
+  if (auto it = impl_table_.find(key); it != impl_table_.end()) {
+    snapshot.implementations = it->second;
+  }
+  return snapshot;
+}
+
+void OpRegistry::restore_entry(const std::string& key,
+                               const RegistryEntrySnapshot& snapshot) {
+  if (snapshot.legacy_op) {
+    table_[key] = *snapshot.legacy_op;
+  } else {
+    table_.erase(key);
+  }
+  if (snapshot.metadata) {
+    metadata_table_[key] = *snapshot.metadata;
+  } else {
+    metadata_table_.erase(key);
+  }
+  if (snapshot.implementations) {
+    impl_table_[key] = *snapshot.implementations;
+  } else {
+    impl_table_.erase(key);
+  }
+}
+
+void OpRegistry::capture_key_before_mutation(const std::string& key) {
+  if (!active_registration_capture) {
+    return;
+  }
+  if (active_registration_capture->previous_entries.count(key) == 0) {
+    active_registration_capture->previous_entries.emplace(key,
+                                                          snapshot_entry(key));
+  }
+  active_registration_capture->registered_keys.push_back(key);
+}
+
+void OpRegistry::capture_registration(const std::function<void()>& registration,
+                                      RegistrationCapture& capture) {
+  capture.registered_keys.clear();
+  capture.previous_entries.clear();
+
+  auto* previous_capture = active_registration_capture;
+  active_registration_capture = &capture;
+  auto finish_capture = [&]() {
+    active_registration_capture = previous_capture;
+    sort_unique_keys(capture.registered_keys);
+  };
+
+  try {
+    registration();
+  } catch (...) {
+    finish_capture();
+    throw;
+  }
+  finish_capture();
+}
+
+void OpRegistry::restore_registration_capture(
+    const RegistrationCapture& capture) {
+  for (const auto& key : capture.registered_keys) {
+    auto snapshot_it = capture.previous_entries.find(key);
+    if (snapshot_it != capture.previous_entries.end()) {
+      restore_entry(key, snapshot_it->second);
+    }
+  }
 }
 
 // --- 修改: 实现新的 register_op 和 get_metadata ---
@@ -16,6 +118,7 @@ void OpRegistry::register_op(const std::string& type,
                              const std::string& subtype, MonolithicOpFunc fn,
                              OpMetadata meta) {
   auto key = make_key(type, subtype);
+  capture_key_before_mutation(key);
   table_[key] = fn;
   metadata_table_[key] = meta;  // 存储元数据
   // Phase 1 bridge: also populate multi-impl table as HP monolithic
@@ -29,6 +132,7 @@ void OpRegistry::register_op(const std::string& type,
                              const std::string& subtype, TileOpFunc fn,
                              OpMetadata meta) {
   auto key = make_key(type, subtype);
+  capture_key_before_mutation(key);
   if (meta.tile_preference == TileSizePreference::UNDEFINED) {
     // Tiled 操作可以不指定偏好，默认为 UNDEFINED
   }
@@ -132,6 +236,7 @@ void OpRegistry::register_op_hp_monolithic(const std::string& type,
                                            MonolithicOpFunc fn,
                                            OpMetadata meta) {
   auto key = make_key(type, subtype);
+  capture_key_before_mutation(key);
   impl_table_[key].monolithic_hp = std::move(fn);
   impl_table_[key].meta_hp = meta;
   impl_table_[key].data_dependent =
@@ -142,6 +247,7 @@ void OpRegistry::register_op_hp_tiled(const std::string& type,
                                       const std::string& subtype, TileOpFunc fn,
                                       OpMetadata meta) {
   auto key = make_key(type, subtype);
+  capture_key_before_mutation(key);
   impl_table_[key].tiled_hp = std::move(fn);
   impl_table_[key].meta_hp = meta;
   impl_table_[key].data_dependent =
@@ -152,6 +258,7 @@ void OpRegistry::register_op_rt_tiled(const std::string& type,
                                       const std::string& subtype, TileOpFunc fn,
                                       OpMetadata meta) {
   auto key = make_key(type, subtype);
+  capture_key_before_mutation(key);
   impl_table_[key].tiled_rt = std::move(fn);
   impl_table_[key].meta_rt = meta;
   impl_table_[key].data_dependent =
@@ -162,6 +269,7 @@ void OpRegistry::register_dirty_propagator(const std::string& type,
                                            const std::string& subtype,
                                            DirtyRoiPropFunc fn) {
   auto key = make_key(type, subtype);
+  capture_key_before_mutation(key);
   impl_table_[key].dirty_propagator = std::move(fn);
 }
 
@@ -169,6 +277,7 @@ void OpRegistry::register_forward_propagator(const std::string& type,
                                              const std::string& subtype,
                                              ForwardRoiPropFunc fn) {
   auto key = make_key(type, subtype);
+  capture_key_before_mutation(key);
   impl_table_[key].forward_propagator = std::move(fn);
 }
 
@@ -177,6 +286,7 @@ void OpRegistry::register_dependency_builder(const std::string& type,
                                              DependencyLutBuilder fn,
                                              bool mark_data_dependent) {
   auto key = make_key(type, subtype);
+  capture_key_before_mutation(key);
   impl_table_[key].dependency_builder = std::move(fn);
   if (mark_data_dependent) {
     impl_table_[key].data_dependent = true;
@@ -307,6 +417,7 @@ void OpRegistry::register_impl(const std::string& type,
                                const std::string& subtype, Device device,
                                MonolithicOpFunc fn, OpMetadata meta) {
   auto key = make_key(type, subtype);
+  capture_key_before_mutation(key);
   // 设置元数据中的设备偏好
   meta.device_preference = device;
 
@@ -332,6 +443,7 @@ void OpRegistry::register_impl(const std::string& type,
                                const std::string& subtype, Device device,
                                TileOpFunc fn, OpMetadata meta) {
   auto key = make_key(type, subtype);
+  capture_key_before_mutation(key);
   // 设置元数据中的设备偏好
   meta.device_preference = device;
 

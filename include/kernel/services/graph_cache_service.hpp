@@ -18,8 +18,8 @@ namespace ps {
  *
  * @note Disk-cache load wrappers keep their historical bool return contract:
  * true means a reusable output is available, false means the caller should
- * compute normally. Detailed miss/error diagnostics are stored in
- * GraphModel::last_disk_cache_load_result.
+ * compute normally. Detailed miss/error diagnostics are recorded through
+ * GraphModel's locked disk-cache diagnostic API.
  */
 class GraphCacheService {
  public:
@@ -122,8 +122,8 @@ class GraphCacheService {
    * @return true when HP output is already present or disk cache was loaded;
    * false on cache miss, skipped load, or read/parse error.
    * @throws std::bad_alloc from diagnostic/output storage. Disk read and parse
-   * failures are recorded in GraphModel::last_disk_cache_load_result and
-   * reported as false.
+   * failures are recorded through GraphModel's locked disk-cache diagnostic API
+   * and reported as false.
    * @note This preserves the legacy try-load bool contract while making disk
    * errors distinguishable from misses through graph diagnostics.
    */
@@ -138,8 +138,8 @@ class GraphCacheService {
    * @return true on disk cache hit; false on cache miss, skipped load, or
    * read/parse error.
    * @throws std::bad_alloc from diagnostic/output storage. Disk read and parse
-   * failures are recorded in GraphModel::last_disk_cache_load_result and
-   * reported as false.
+   * failures are recorded through GraphModel's locked disk-cache diagnostic API
+   * and reported as false.
    * @note Used by scheduler worker paths that stage outputs outside the
    * formal HP cache before committing.
    */

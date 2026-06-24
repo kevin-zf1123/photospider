@@ -43,10 +43,11 @@ RT 计算写入 `cached_output_real_time`。RT 状态是交互式预览或代理
 
 磁盘缓存精度当前支持 `int8` 和 `int16` 保存路径。加载的图像缓存数据会转换为浮点图像缓冲区。
 
-磁盘缓存加载尝试会保留既有 try-load 布尔返回契约，同时记录
-`GraphModel::last_disk_cache_load_result`。该诊断结果会区分跳过的尝试、真实
-miss、命中以及读取/解析错误。损坏的图像文件、无效的 YAML 元数据和文件系统失败
-会被记录为带错误码和消息的错误，而不是与普通缓存 miss 混在一起。
+磁盘缓存加载尝试会保留既有 try-load 布尔返回契约，同时通过 GraphModel 专用的
+disk-cache diagnostic mutex 记录最新诊断。调用方通过 snapshot API 检查该状态，
+而不是直接读取可变 optional 存储。该诊断结果会区分跳过的尝试、真实 miss、命中以及读取/解析错误。
+损坏的图像文件、无效的 YAML 元数据和文件系统失败会被记录为带错误码和消息的错误，而不是与普通缓存
+miss 混在一起。
 
 ## 缓存命令
 

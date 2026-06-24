@@ -26,11 +26,12 @@ struct PluginLoadError {
  * `attempted` counts candidate shared libraries that were actually opened or
  * considered for opening. `loaded` counts libraries whose registration entry
  * point completed successfully and whose handle was retained. `new_op_keys`
- * lists operation keys that appeared in `OpRegistry` after successful
- * registration.
+ * lists operation keys touched by successful registration, including keys that
+ * replaced an existing implementation.
  *
- * @note A plugin can be counted as loaded with no `new_op_keys` if its entry
- * point succeeds but only re-registers existing operations.
+ * @note The field keeps its legacy name for callers, but its values now
+ * describe registered or replaced keys so unloadable plugin handles can be
+ * tracked safely.
  */
 struct PluginLoadResult {
   int attempted = 0;

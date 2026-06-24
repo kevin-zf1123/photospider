@@ -54,10 +54,13 @@ the library handle for as long as any registered operation key from that plugin
 can be resolved from `OpRegistry`.
 
 `PluginManager` owns operation plugin handles. A successful load records the
-absolute plugin path, the newly registered operation keys, and a retained RAII
-library handle. Unload first removes the plugin's keys from `OpRegistry`, then
-releases the retained handle. This ordering prevents the registry from exposing
-callbacks whose code has already been unmapped.
+absolute plugin path, the operation keys registered or replaced by the plugin,
+the previous registry/source state for those keys, and a retained RAII library
+handle. Unload first removes the plugin's callbacks from `OpRegistry`, restores
+any previous implementation that the plugin replaced, then releases the
+retained handle. This ordering prevents the registry from exposing callbacks
+whose code has already been unmapped while still allowing overriding plugins to
+be unloaded cleanly.
 
 The legacy `load_plugins` helper keeps successful operation plugin libraries
 resident for process lifetime. Callers that need explicit unload semantics

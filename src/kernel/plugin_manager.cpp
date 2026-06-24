@@ -67,15 +67,16 @@ std::vector<std::string> keys_for_source(
 }
 
 /**
- * @brief Returns unique keys from plugin handle metadata and source mappings.
+ * @brief Returns unique keys currently owned by a plugin path.
  *
  * @param source_path Absolute plugin source path.
  * @param loaded_plugins Retained plugin handle map.
  * @param op_sources Current operation source map.
  * @return Sorted unique operation keys to unregister.
  * @throws std::bad_alloc from vector or set allocation.
- * @note Combining both sources keeps unload robust if a caller mutates
- * `op_sources` or if a plugin registered no newly discovered keys.
+ * @note Registered-key metadata is filtered through current `op_sources` so an
+ * older plugin that was replaced by a newer plugin cannot unregister the
+ * newer plugin's active callback.
  */
 std::vector<std::string> collect_plugin_keys(
     const std::string& source_path, const LoadedOpPluginMap& loaded_plugins,
@@ -84,8 +85,12 @@ std::vector<std::string> collect_plugin_keys(
 
   auto loaded_it = loaded_plugins.find(source_path);
   if (loaded_it != loaded_plugins.end()) {
-    unique_keys.insert(loaded_it->second.registered_keys.begin(),
-                       loaded_it->second.registered_keys.end());
+    for (const auto& key : loaded_it->second.registered_keys) {
+      auto source_it = op_sources.find(key);
+      if (source_it == op_sources.end() || source_it->second == source_path) {
+        unique_keys.insert(key);
+      }
+    }
   }
 
   const auto mapped_keys = keys_for_source(source_path, op_sources);
@@ -95,18 +100,85 @@ std::vector<std::string> collect_plugin_keys(
 }
 
 /**
- * @brief Erases operation source entries for a list of keys.
+ * @brief Drops restore snapshots that depend on an unloading plugin path.
  *
- * @param keys Operation keys whose source records should be removed.
+ * @param source_path Plugin path whose handle is about to be released.
+ * @param loaded_plugins Retained plugin metadata to sanitize.
+ * @throws Nothing under current map erase/optional reset behavior.
+ * @note If an older plugin is unloaded while a newer plugin has replaced its
+ * key, the newer plugin must not later restore callbacks into the released
+ * older library.
+ */
+void drop_dependent_restoration(const std::string& source_path,
+                                LoadedOpPluginMap& loaded_plugins) {
+  for (auto& [path, plugin] : loaded_plugins) {
+    if (path == source_path) {
+      continue;
+    }
+    for (auto& [key, previous_source] : plugin.previous_sources) {
+      if (previous_source && *previous_source == source_path) {
+        previous_source.reset();
+        plugin.previous_registry_entries.erase(key);
+      }
+    }
+  }
+}
+
+/**
+ * @brief Restores operation source entries after a plugin is removed.
+ *
+ * @param keys Operation keys whose source records should be restored.
+ * @param loaded_plugin Optional retained plugin metadata with prior sources.
  * @param op_sources Mutable operation source map.
  * @throws Nothing under current `std::map::erase(key)` behavior.
- * @note Built-in entries are not passed to this helper by unload callers.
+ * @note Keys without retained prior-source metadata are erased for
+ * compatibility with legacy plugin metadata.
  */
-void erase_source_entries(const std::vector<std::string>& keys,
-                          std::map<std::string, std::string>& op_sources) {
+void restore_source_entries(const std::vector<std::string>& keys,
+                            const LoadedOpPlugin* loaded_plugin,
+                            std::map<std::string, std::string>& op_sources) {
   for (const auto& key : keys) {
+    if (loaded_plugin) {
+      auto previous_it = loaded_plugin->previous_sources.find(key);
+      if (previous_it != loaded_plugin->previous_sources.end()) {
+        if (previous_it->second) {
+          op_sources[key] = *previous_it->second;
+        } else {
+          op_sources.erase(key);
+        }
+        continue;
+      }
+    }
     op_sources.erase(key);
   }
+}
+
+/**
+ * @brief Restores registry callbacks that existed before plugin registration.
+ *
+ * @param keys Operation keys removed from the plugin-owned registry entries.
+ * @param loaded_plugin Optional retained plugin metadata with prior registry
+ * snapshots.
+ * @throws std::bad_alloc if restoring callbacks or metadata allocates.
+ * @note The plugin-owned callbacks must already have been unregistered before
+ * this helper restores any previous implementation.
+ */
+void restore_registry_entries(const std::vector<std::string>& keys,
+                              const LoadedOpPlugin* loaded_plugin) {
+  if (!loaded_plugin) {
+    return;
+  }
+
+  OpRegistry::RegistrationCapture restore_capture;
+  for (const auto& key : keys) {
+    auto previous_it = loaded_plugin->previous_registry_entries.find(key);
+    if (previous_it == loaded_plugin->previous_registry_entries.end()) {
+      continue;
+    }
+    restore_capture.registered_keys.push_back(key);
+    restore_capture.previous_entries.emplace(key, previous_it->second);
+  }
+  OpRegistry::instance().restore_registration_capture(restore_capture);
 }
 
 }  // namespace
@@ -148,6 +220,9 @@ void PluginManager::seed_builtins_from_registry() {
 int PluginManager::unload_by_plugin_path(
     const std::string& absolute_plugin_path) {
   const std::string source_path = plugin_source_key(absolute_plugin_path);
+  const auto loaded_it = loaded_plugins_.find(source_path);
+  const LoadedOpPlugin* loaded_plugin =
+      loaded_it == loaded_plugins_.end() ? nullptr : &loaded_it->second;
   const auto plugin_keys =
       collect_plugin_keys(source_path, loaded_plugins_, op_sources_);
   if (plugin_keys.empty()) {
@@ -156,7 +231,9 @@ int PluginManager::unload_by_plugin_path(
   }
 
   const int removed = unregister_operation_keys(plugin_keys);
-  erase_source_entries(plugin_keys, op_sources_);
+  restore_registry_entries(plugin_keys, loaded_plugin);
+  restore_source_entries(plugin_keys, loaded_plugin, op_sources_);
+  drop_dependent_restoration(source_path, loaded_plugins_);
   loaded_plugins_.erase(source_path);
   return removed;
 }
@@ -174,10 +251,15 @@ int PluginManager::unload_all_plugins() {
 
   int removed = 0;
   for (const auto& path : plugin_paths) {
+    const auto loaded_it = loaded_plugins_.find(path);
+    const LoadedOpPlugin* loaded_plugin =
+        loaded_it == loaded_plugins_.end() ? nullptr : &loaded_it->second;
     const auto plugin_keys =
         collect_plugin_keys(path, loaded_plugins_, op_sources_);
     removed += unregister_operation_keys(plugin_keys);
-    erase_source_entries(plugin_keys, op_sources_);
+    restore_registry_entries(plugin_keys, loaded_plugin);
+    restore_source_entries(plugin_keys, loaded_plugin, op_sources_);
+    drop_dependent_restoration(path, loaded_plugins_);
     loaded_plugins_.erase(path);
   }
   return removed;

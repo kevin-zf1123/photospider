@@ -7,9 +7,11 @@
 #include <fstream>
 #include <future>
 #include <mutex>
+#include <string>
 #include <system_error>
 #include <thread>
 #include <utility>
+#include <vector>
 
 #include "adapter/buffer_adapter_opencv.hpp"
 #include "graph_model.hpp"
@@ -578,13 +580,13 @@ TEST(CacheSemantics, DiskCacheMissRecordsDiagnostic) {
   EXPECT_FALSE(
       ctx.cache.try_load_from_disk_cache_into(ctx.graph, ctx.node, out));
 
-  ASSERT_TRUE(ctx.graph.last_disk_cache_load_result.has_value());
-  const auto& result = *ctx.graph.last_disk_cache_load_result;
-  EXPECT_EQ(result.status, GraphModel::DiskCacheLoadStatus::Miss);
-  EXPECT_EQ(result.code, GraphErrc::Unknown);
-  EXPECT_EQ(result.node_id, ctx.node.id);
-  EXPECT_EQ(result.location, "missing.png");
-  EXPECT_NE(result.message.find("No disk cache files"), std::string::npos);
+  const auto result = ctx.graph.last_disk_cache_load_result_snapshot();
+  ASSERT_TRUE(result.has_value());
+  EXPECT_EQ(result->status, GraphModel::DiskCacheLoadStatus::Miss);
+  EXPECT_EQ(result->code, GraphErrc::Unknown);
+  EXPECT_EQ(result->node_id, ctx.node.id);
+  EXPECT_EQ(result->location, "missing.png");
+  EXPECT_NE(result->message.find("No disk cache files"), std::string::npos);
 }
 
 TEST(CacheSemantics, DiskCacheMetadataHitPreservesTryLoadBehavior) {
@@ -601,11 +603,11 @@ TEST(CacheSemantics, DiskCacheMetadataHitPreservesTryLoadBehavior) {
   EXPECT_EQ(out.data["answer"].as<int>(), 42);
   EXPECT_EQ(out.data["label"].as<std::string>(), "cached");
 
-  ASSERT_TRUE(ctx.graph.last_disk_cache_load_result.has_value());
-  const auto& result = *ctx.graph.last_disk_cache_load_result;
-  EXPECT_EQ(result.status, GraphModel::DiskCacheLoadStatus::Hit);
-  EXPECT_EQ(result.code, GraphErrc::Unknown);
-  EXPECT_EQ(result.metadata_file, metadata_file);
+  const auto result = ctx.graph.last_disk_cache_load_result_snapshot();
+  ASSERT_TRUE(result.has_value());
+  EXPECT_EQ(result->status, GraphModel::DiskCacheLoadStatus::Hit);
+  EXPECT_EQ(result->code, GraphErrc::Unknown);
+  EXPECT_EQ(result->metadata_file, metadata_file);
 }
 
 TEST(CacheSemantics, DiskCacheInvalidMetadataRecordsErrorDiagnostic) {
@@ -618,12 +620,12 @@ TEST(CacheSemantics, DiskCacheInvalidMetadataRecordsErrorDiagnostic) {
   EXPECT_FALSE(
       ctx.cache.try_load_from_disk_cache_into(ctx.graph, ctx.node, out));
 
-  ASSERT_TRUE(ctx.graph.last_disk_cache_load_result.has_value());
-  const auto& result = *ctx.graph.last_disk_cache_load_result;
-  EXPECT_EQ(result.status, GraphModel::DiskCacheLoadStatus::Error);
-  EXPECT_EQ(result.code, GraphErrc::InvalidYaml);
-  EXPECT_EQ(result.metadata_file, metadata_file);
-  EXPECT_NE(result.message.find("Failed to parse disk cache metadata"),
+  const auto result = ctx.graph.last_disk_cache_load_result_snapshot();
+  ASSERT_TRUE(result.has_value());
+  EXPECT_EQ(result->status, GraphModel::DiskCacheLoadStatus::Error);
+  EXPECT_EQ(result->code, GraphErrc::InvalidYaml);
+  EXPECT_EQ(result->metadata_file, metadata_file);
+  EXPECT_NE(result->message.find("Failed to parse disk cache metadata"),
             std::string::npos);
 }
 
@@ -636,13 +638,49 @@ TEST(CacheSemantics, DiskCacheCorruptImageRecordsErrorWithoutHpMutation) {
   EXPECT_FALSE(ctx.cache.try_load_from_disk_cache(ctx.graph, ctx.node));
   EXPECT_FALSE(ctx.node.cached_output_high_precision.has_value());
 
-  ASSERT_TRUE(ctx.graph.last_disk_cache_load_result.has_value());
-  const auto& result = *ctx.graph.last_disk_cache_load_result;
-  EXPECT_EQ(result.status, GraphModel::DiskCacheLoadStatus::Error);
-  EXPECT_EQ(result.code, GraphErrc::Io);
-  EXPECT_EQ(result.cache_file, image_file);
-  EXPECT_NE(result.message.find("Failed to decode disk cache image"),
+  const auto result = ctx.graph.last_disk_cache_load_result_snapshot();
+  ASSERT_TRUE(result.has_value());
+  EXPECT_EQ(result->status, GraphModel::DiskCacheLoadStatus::Error);
+  EXPECT_EQ(result->code, GraphErrc::Io);
+  EXPECT_EQ(result->cache_file, image_file);
+  EXPECT_NE(result->message.find("Failed to decode disk cache image"),
             std::string::npos);
+}
+
+TEST(CacheSemantics, DiskCacheDiagnosticSnapshotSupportsConcurrentWriters) {
+  GraphModel graph(
+      temp_path("photospider-contract-disk-cache-diagnostic-lock"));
+  std::promise<void> release;
+  auto ready = release.get_future().share();
+  std::vector<std::future<void>> writers;
+  constexpr int kWriterCount = 32;
+
+  for (int i = 0; i < kWriterCount; ++i) {
+    writers.push_back(std::async(std::launch::async, [&, i]() {
+      ready.wait();
+      GraphModel::DiskCacheLoadResult result;
+      result.node_id = i;
+      result.location = "entry-" + std::to_string(i) + ".png";
+      result.status = GraphModel::DiskCacheLoadStatus::Miss;
+      result.message = "concurrent diagnostic " + std::to_string(i);
+      graph.record_disk_cache_load_result(std::move(result));
+
+      const auto snapshot = graph.last_disk_cache_load_result_snapshot();
+      ASSERT_TRUE(snapshot.has_value());
+      EXPECT_FALSE(snapshot->message.empty());
+    }));
+  }
+
+  release.set_value();
+  for (auto& writer : writers) {
+    writer.get();
+  }
+
+  const auto final_snapshot = graph.last_disk_cache_load_result_snapshot();
+  ASSERT_TRUE(final_snapshot.has_value());
+  EXPECT_GE(final_snapshot->node_id, 0);
+  EXPECT_LT(final_snapshot->node_id, kWriterCount);
+  EXPECT_EQ(final_snapshot->status, GraphModel::DiskCacheLoadStatus::Miss);
 }
 
 TEST(ComputeContracts, RealTimeUpdateWithoutDirtyRoiFailsClearly) {

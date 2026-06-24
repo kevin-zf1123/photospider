@@ -169,6 +169,22 @@ bool GraphModel::is_quiet() const {
   return quiet_;
 }
 
+void GraphModel::record_disk_cache_load_result(DiskCacheLoadResult result) {
+  std::lock_guard<std::mutex> lock(disk_cache_diagnostics_mutex_);
+  last_disk_cache_load_result_ = std::move(result);
+}
+
+std::optional<GraphModel::DiskCacheLoadResult>
+GraphModel::last_disk_cache_load_result_snapshot() const {
+  std::lock_guard<std::mutex> lock(disk_cache_diagnostics_mutex_);
+  return last_disk_cache_load_result_;
+}
+
+void GraphModel::clear_disk_cache_load_result() {
+  std::lock_guard<std::mutex> lock(disk_cache_diagnostics_mutex_);
+  last_disk_cache_load_result_.reset();
+}
+
 void GraphModel::reset_runtime_state() {
   timing_results.node_timings.clear();
   timing_results.total_ms = 0.0;
@@ -183,7 +199,7 @@ void GraphModel::reset_runtime_state() {
   last_compute_plan_summary.reset();
   recent_compute_plan_summaries.clear();
   full_task_graph_cache_.clear();
-  last_disk_cache_load_result.reset();
+  clear_disk_cache_load_result();
   total_io_time_ms.store(0.0, std::memory_order_relaxed);
   skip_save_cache_.store(false, std::memory_order_relaxed);
 }
