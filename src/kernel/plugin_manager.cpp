@@ -226,6 +226,7 @@ int PluginManager::unload_by_plugin_path(
   const auto plugin_keys =
       collect_plugin_keys(source_path, loaded_plugins_, op_sources_);
   if (plugin_keys.empty()) {
+    drop_dependent_restoration(source_path, loaded_plugins_);
     loaded_plugins_.erase(source_path);
     return 0;
   }

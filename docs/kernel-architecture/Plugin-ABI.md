@@ -62,6 +62,11 @@ retained handle. This ordering prevents the registry from exposing callbacks
 whose code has already been unmapped while still allowing overriding plugins to
 be unloaded cleanly.
 
+If an older plugin has already been shadowed by a newer plugin, unloading the
+older plugin may remove no active operation keys. `PluginManager` still clears
+dependent restoration snapshots before releasing the older handle so the newer
+plugin cannot later restore callbacks into an unmapped library.
+
 The legacy `load_plugins` helper keeps successful operation plugin libraries
 resident for process lifetime. Callers that need explicit unload semantics
 should use `PluginManager` or the handle-retaining loader API rather than
