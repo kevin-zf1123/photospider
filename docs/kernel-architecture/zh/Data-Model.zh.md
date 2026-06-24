@@ -15,7 +15,7 @@
 | `cache_root` | 当前图磁盘缓存文件的已解析根目录。 |
 | `timing_results` | 启用计时时的最新计时摘要。 |
 | `total_io_time_ms` | 累计磁盘缓存 IO 时间。 |
-| `last_disk_cache_load_result` | 最近一次磁盘缓存加载诊断，包含 skipped/miss/hit/error 状态，并在读取失败时包含错误详情。 |
+| disk-cache diagnostic snapshot | 最近一次磁盘缓存加载诊断，包含 skipped/miss/hit/error 状态，并在读取失败时包含错误详情。GraphModel 使用专用 diagnostic mutex 保护该状态，并向读取方暴露值快照。 |
 
 外部代码不得通过原始节点 map 改变图结构。读取使用 `node()`、`find_node()`、`node_ids()` 和受控遍历等 helper。结构变更使用 `add_node()`、`replace_node()`、`remove_node()` 和输入重连 API；这些 helper 会在返回前验证并刷新拓扑邻接。节点本地运行态缓存/状态更新可以使用 `mutable_node()`，但结构编辑仍属于模型变更 helper。
 

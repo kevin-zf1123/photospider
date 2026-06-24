@@ -17,9 +17,10 @@ namespace ps {
  * keys came from which plugin path, and keeps each library handle alive while
  * registered callbacks may still be invoked.
  *
- * Unload operations first remove plugin keys from `OpRegistry`, then release
- * the retained library handle. Built-in operations are tracked as `"built-in"`
- * sources and are never unloaded by this manager.
+ * Unload operations first remove plugin-owned keys from `OpRegistry`, restore
+ * any previous implementation replaced by the plugin, then release the
+ * retained library handle. Built-in operations are tracked as `"built-in"`
+ * sources and are restored when an overriding plugin is unloaded.
  *
  * @note The manager is intentionally separate from scheduler plugin loading
  * because operation plugins register callbacks into `OpRegistry`, while
@@ -54,7 +55,7 @@ class PluginManager {
    *
    * @param dir_patterns Directories or trailing-star patterns to scan.
    * @return Load result containing attempted files, successful libraries,
-   * newly registered keys, and per-plugin errors.
+   * keys registered or replaced by plugins, and per-plugin errors.
    * @throws std::filesystem_error when iteration fails for an existing
    * directory.
    * @note Successful plugin handles are retained by this manager until the
@@ -75,14 +76,15 @@ class PluginManager {
   void seed_builtins_from_registry();
 
   /**
-   * @brief Unloads all operation keys registered by one plugin path.
+   * @brief Unloads operation keys registered or replaced by one plugin path.
    *
    * @param absolute_plugin_path Plugin path to unload. Relative inputs are
    * normalized with `std::filesystem::absolute` for convenience.
    * @return Number of operation keys removed from `OpRegistry`.
    * @throws std::filesystem_error when path normalization fails.
    * @note The retained dynamic library handle is released only after registry
-   * callbacks from that plugin have been removed.
+   * callbacks from that plugin have been removed and previous callbacks, if
+   * any, have been restored.
    */
   int unload_by_plugin_path(const std::string& absolute_plugin_path);
 

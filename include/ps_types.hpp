@@ -286,6 +286,50 @@ class OpRegistry {
 
   using OpVariant = std::variant<MonolithicOpFunc, TileOpFunc>;
 
+  // Phase 1 scaffolding: multi-implementation registry (not wired yet in
+  // executor)
+  struct OpImplementations {
+    std::optional<MonolithicOpFunc> monolithic_hp;  // optional
+    std::optional<TileOpFunc> tiled_hp;             // preferred available
+    std::optional<TileOpFunc> tiled_rt;             // optional
+    std::optional<OpMetadata> meta_hp;
+    std::optional<OpMetadata> meta_rt;
+    std::optional<DirtyRoiPropFunc> dirty_propagator;
+    std::optional<ForwardRoiPropFunc> forward_propagator;
+    std::optional<DependencyLutBuilder> dependency_builder;
+    bool data_dependent = false;
+
+    // [M3.1 新增] 多设备实现列表
+    // 同一算子可以有多个设备上的实现，按设备类型索引
+    std::vector<OpImplementation> device_impls;
+  };
+
+  /**
+   * @brief Previous registry state for one canonical operation key.
+   *
+   * The snapshot records all registry tables that may hold callbacks for a
+   * key. Empty optionals mean the key had no entry in that table before a
+   * plugin registration touched it.
+   */
+  struct RegistryEntrySnapshot {
+    std::optional<OpVariant> legacy_op;
+    std::optional<OpMetadata> metadata;
+    std::optional<OpImplementations> implementations;
+  };
+
+  /**
+   * @brief Captured key mutations made by one plugin registration call.
+   *
+   * `registered_keys` contains every canonical key touched through a
+   * registration API, including replacements of existing keys. The snapshot
+   * map stores each touched key's pre-registration state so plugin unload can
+   * restore replaced operations before releasing the dynamic library.
+   */
+  struct RegistrationCapture {
+    std::vector<std::string> registered_keys;
+    std::unordered_map<std::string, RegistryEntrySnapshot> previous_entries;
+  };
+
   // [修改] 重载 register_op 以接收元数据
   void register_op(const std::string& type, const std::string& subtype,
                    MonolithicOpFunc fn, OpMetadata meta = {});
@@ -334,24 +378,6 @@ class OpRegistry {
    * for the key; partial per-device unload is not part of the current ABI.
    */
   bool unregister_key(const std::string& key);
-
-  // Phase 1 scaffolding: multi-implementation registry (not wired yet in
-  // executor)
-  struct OpImplementations {
-    std::optional<MonolithicOpFunc> monolithic_hp;  // optional
-    std::optional<TileOpFunc> tiled_hp;             // preferred available
-    std::optional<TileOpFunc> tiled_rt;             // optional
-    std::optional<OpMetadata> meta_hp;
-    std::optional<OpMetadata> meta_rt;
-    std::optional<DirtyRoiPropFunc> dirty_propagator;
-    std::optional<ForwardRoiPropFunc> forward_propagator;
-    std::optional<DependencyLutBuilder> dependency_builder;
-    bool data_dependent = false;
-
-    // [M3.1 新增] 多设备实现列表
-    // 同一算子可以有多个设备上的实现，按设备类型索引
-    std::vector<OpImplementation> device_impls;
-  };
 
   void register_op_hp_monolithic(const std::string& type,
                                  const std::string& subtype,
@@ -421,7 +447,59 @@ class OpRegistry {
       const std::string& type, const std::string& subtype,
       const std::vector<Device>& available_devices, ComputeIntent intent) const;
 
+  /**
+   * @brief Runs a registration callback while capturing touched keys.
+   *
+   * @param registration Callback that calls one or more OpRegistry register
+   * APIs, usually a plugin's `register_photospider_ops` entry point.
+   * @param capture Output capture receiving touched keys and prior table state.
+   * @throws Any exception propagated by `registration`.
+   * @note The capture is populated before each key mutation, so callers can
+   * restore overwritten entries if registration fails or when a plugin unloads.
+   */
+  void capture_registration(const std::function<void()>& registration,
+                            RegistrationCapture& capture);
+
+  /**
+   * @brief Restores registry entries saved by a registration capture.
+   *
+   * @param capture Capture whose previous entries should be restored.
+   * @throws std::bad_alloc if restoring copied callbacks or metadata allocates.
+   * @note Used by plugin load rollback and unload. Keys absent before the
+   * capture are erased from all registry tables.
+   */
+  void restore_registration_capture(const RegistrationCapture& capture);
+
  private:
+  /**
+   * @brief Saves a key's previous state for the active registration capture.
+   *
+   * @param key Canonical operation key that is about to be mutated.
+   * @throws std::bad_alloc if the capture needs to copy callbacks or grow.
+   * @note No-op when registration capture is not active.
+   */
+  void capture_key_before_mutation(const std::string& key);
+
+  /**
+   * @brief Copies current registry table state for one key.
+   *
+   * @param key Canonical operation key to snapshot.
+   * @return Snapshot of legacy, metadata, and multi-implementation tables.
+   * @throws std::bad_alloc if copying callbacks or metadata allocates.
+   */
+  RegistryEntrySnapshot snapshot_entry(const std::string& key) const;
+
+  /**
+   * @brief Restores one key to a previous snapshot.
+   *
+   * @param key Canonical operation key to restore.
+   * @param snapshot Previous table state for the key.
+   * @throws std::bad_alloc if copying callbacks or metadata allocates.
+   * @note Empty snapshot fields erase the corresponding table entries.
+   */
+  void restore_entry(const std::string& key,
+                     const RegistryEntrySnapshot& snapshot);
+
   std::unordered_map<std::string, OpVariant> table_;
   // [修改] 元数据表现在可以存储包含设备偏好的完整 OpMetadata
   std::unordered_map<std::string, OpMetadata> metadata_table_;

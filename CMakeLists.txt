@@ -369,6 +369,27 @@ if(BUILD_TESTING)
         "${PROJECT_SOURCE_DIR}/src"
     )
     target_link_libraries(lifecycle_op_plugin PRIVATE photospider_lib)
+
+    add_library(override_lifecycle_op_plugin SHARED
+        tests/fixtures/ops/override_lifecycle_op_plugin.cpp
+    )
+    set_target_properties(override_lifecycle_op_plugin PROPERTIES
+        LIBRARY_OUTPUT_DIRECTORY "${TEST_OP_PLUGIN_DIR}/override"
+        RUNTIME_OUTPUT_DIRECTORY "${TEST_OP_PLUGIN_DIR}/override"
+        BUILD_RPATH "${CMAKE_BINARY_DIR}/lib"
+        INSTALL_RPATH "$ORIGIN/../../lib"
+    )
+    if(APPLE)
+        set_target_properties(override_lifecycle_op_plugin PROPERTIES
+            MACOSX_RPATH ON
+            INSTALL_RPATH "@loader_path/../../lib"
+        )
+    endif()
+    target_include_directories(override_lifecycle_op_plugin PRIVATE
+        "${PROJECT_SOURCE_DIR}/include"
+        "${PROJECT_SOURCE_DIR}/src"
+    )
+    target_link_libraries(override_lifecycle_op_plugin PRIVATE photospider_lib)
 endif()
 
 # ==============================================================================
@@ -470,7 +491,8 @@ if(BUILD_TESTING)
     # Operation plugin manager handle lifetime tests
     add_ps_test(test_plugin_manager tests/test_plugin_manager.cpp)
     target_link_libraries(test_plugin_manager PRIVATE ${CMAKE_DL_LIBS})
-    add_dependencies(test_plugin_manager lifecycle_op_plugin ${OP_PLUGIN_TARGETS})
+    add_dependencies(test_plugin_manager lifecycle_op_plugin
+        override_lifecycle_op_plugin ${OP_PLUGIN_TARGETS})
 
     # [M3.5] GPU Pipeline 调度器测试
     add_ps_test(test_gpu_pipeline_scheduler tests/test_gpu_pipeline_scheduler.cpp)

@@ -141,8 +141,6 @@ class GraphModel {
     std::string message;
   };
 
-  std::optional<DiskCacheLoadResult> last_disk_cache_load_result;
-
   struct NodeRuntimeState {
     YAML::Node& runtime_parameters;
     std::vector<OutputPort>& outputs;
@@ -164,6 +162,36 @@ class GraphModel {
 
   void set_quiet(bool q);
   bool is_quiet() const;
+
+  /**
+   * @brief Stores the latest disk-cache load diagnostic under its own lock.
+   *
+   * @param result Value-type diagnostic produced by GraphCacheService.
+   * @throws std::bad_alloc if optional storage or member copies allocate.
+   * @note Disk-cache diagnostics are updated from scheduler worker paths, so
+   * they use a dedicated mutex instead of graph_mutex_ or timing_mutex_.
+   */
+  void record_disk_cache_load_result(DiskCacheLoadResult result);
+
+  /**
+   * @brief Returns a locked snapshot of the latest disk-cache load diagnostic.
+   *
+   * @return Diagnostic snapshot when one has been recorded, otherwise nullopt.
+   * @throws std::bad_alloc if copying path/string members allocates.
+   * @note Callers receive a value copy so they do not hold the diagnostic lock
+   * while inspecting frontend or test state.
+   */
+  std::optional<DiskCacheLoadResult> last_disk_cache_load_result_snapshot()
+      const;
+
+  /**
+   * @brief Clears the latest disk-cache load diagnostic under its own lock.
+   *
+   * @throws Nothing under current optional reset behavior.
+   * @note Graph reload and clear paths use this to avoid stale diagnostics
+   * leaking across graph lifetimes.
+   */
+  void clear_disk_cache_load_result();
 
   void clear();
   void add_node(const Node& node);
@@ -249,6 +277,8 @@ class GraphModel {
   GraphTopologyIndex topology_;
   std::mutex graph_mutex_;
   mutable std::mutex timing_mutex_;
+  mutable std::mutex disk_cache_diagnostics_mutex_;
+  std::optional<DiskCacheLoadResult> last_disk_cache_load_result_;
   uint64_t topology_generation_ = 0;
   std::unordered_map<std::string, std::shared_ptr<const compute::FullTaskGraph>>
       full_task_graph_cache_;

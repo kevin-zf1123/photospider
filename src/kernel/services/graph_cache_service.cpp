@@ -341,7 +341,7 @@ DiskCacheReadAttempt read_first_disk_cache_entry(const GraphModel& graph,
  */
 void record_disk_cache_load_result(GraphModel& graph,
                                    GraphModel::DiskCacheLoadResult result) {
-  graph.last_disk_cache_load_result = std::move(result);
+  graph.record_disk_cache_load_result(std::move(result));
 }
 
 /**

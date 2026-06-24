@@ -1,10 +1,9 @@
 #include "plugin_loader.hpp"  // NOLINT(build/include_subdir)
 
-#include <algorithm>
 #include <exception>
-#include <iterator>
 #include <map>
 #include <memory>
+#include <optional>
 #include <string>
 #include <utility>
 #include <vector>
@@ -260,74 +259,64 @@ void visit_plugin_candidates(const ScanPattern& pattern, Callback&& callback) {
 }
 
 /**
- * @brief Computes newly registered operation keys after plugin registration.
- *
- * @param keys_before Sorted registry keys captured before registration.
- * @param keys_after Sorted registry keys captured after registration.
- * @return Keys present in `keys_after` but absent from `keys_before`.
- * @throws std::bad_alloc if result allocation fails.
- * @note `OpRegistry::get_keys()` returns sorted unique keys, so set difference
- * can be applied directly.
- */
-std::vector<std::string> collect_new_keys(
-    const std::vector<std::string>& keys_before,
-    const std::vector<std::string>& keys_after) {
-  std::vector<std::string> new_keys;
-  std::set_difference(keys_after.begin(), keys_after.end(), keys_before.begin(),
-                      keys_before.end(), std::back_inserter(new_keys));
-  return new_keys;
-}
-
-/**
- * @brief Removes operation keys from the global registry after a failed load.
- *
- * @param keys Operation keys to unregister.
- * @return Count of registry entries that were removed.
- * @throws Nothing from the loop body under current `OpRegistry` behavior.
- * @note Rollback prevents callbacks from a closing plugin library from being
- * left in `OpRegistry` when `register_photospider_ops` throws.
- */
-int unregister_keys(const std::vector<std::string>& keys) {
-  auto& registry = OpRegistry::instance();
-  int removed = 0;
-  for (const auto& key : keys) {
-    removed += registry.unregister_key(key) ? 1 : 0;
-  }
-  return removed;
-}
-
-/**
- * @brief Appends newly registered operation sources to the result and map.
+ * @brief Appends registered operation sources to the result and map.
  *
  * @param plugin_path Absolute plugin path used as the operation source.
- * @param new_keys Operation keys discovered during registration.
+ * @param registered_keys Operation keys touched during registration.
  * @param op_sources Destination `op key -> plugin path` map.
- * @param result Load result receiving `new_op_keys`.
+ * @param result Load result receiving registered operation keys.
  * @throws std::bad_alloc from map or vector growth.
- * @note Existing source entries are overwritten only for keys that appeared as
- * new during this load, matching the legacy loader behavior.
+ * @note Existing source entries are overwritten for keys replaced by this
+ * plugin so unload can identify the plugin-owned callback.
  */
-void record_new_operation_sources(
-    const std::string& plugin_path, const std::vector<std::string>& new_keys,
+void record_registered_operation_sources(
+    const std::string& plugin_path,
+    const std::vector<std::string>& registered_keys,
     std::map<std::string, std::string>& op_sources, PluginLoadResult& result) {
-  for (const auto& key : new_keys) {
+  for (const auto& key : registered_keys) {
     op_sources[key] = plugin_path;
     result.new_op_keys.push_back(key);
   }
 }
 
 /**
+ * @brief Captures previous source-map entries for keys a plugin registered.
+ *
+ * @param registered_keys Operation keys touched by the plugin.
+ * @param op_sources Current operation source map before plugin source writes.
+ * @return Map from key to previous source; nullopt means no prior source.
+ * @throws std::bad_alloc from map growth or string copies.
+ * @note The loader stores this beside registry snapshots so unload can restore
+ * both lookup callbacks and frontend-visible source labels.
+ */
+std::map<std::string, std::optional<std::string>> collect_previous_sources(
+    const std::vector<std::string>& registered_keys,
+    const std::map<std::string, std::string>& op_sources) {
+  std::map<std::string, std::optional<std::string>> previous_sources;
+  for (const auto& key : registered_keys) {
+    auto source_it = op_sources.find(key);
+    if (source_it == op_sources.end()) {
+      previous_sources.emplace(key, std::nullopt);
+      continue;
+    }
+    previous_sources.emplace(key, source_it->second);
+  }
+  return previous_sources;
+}
+
+/**
  * @brief Loads one operation plugin file and retains its dynamic library.
  *
  * @param path Candidate shared library path.
- * @param op_sources Operation source map to update with newly registered keys.
+ * @param op_sources Operation source map to update with registered or replaced
+ * keys.
  * @param loaded_plugins Caller-owned handle map keyed by absolute plugin path.
  * @param result Accumulated load result.
  * @throws std::filesystem_error from `fs::absolute`.
  * @throws std::bad_alloc from result, map, vector, or library owner allocation.
  * @note The handle is stored only after `register_photospider_ops` completes.
- * Failure paths close the library and roll back keys registered before an
- * exception.
+ * Failure paths close the library and restore keys touched before an
+ * exception to their previous registry state.
  */
 void load_one_plugin(const fs::path& path,
                      std::map<std::string, std::string>& op_sources,
@@ -357,28 +346,31 @@ void load_one_plugin(const fs::path& path,
   }
 
   auto& registry = OpRegistry::instance();
-  const auto keys_before = registry.get_keys();
+  OpRegistry::RegistrationCapture registration_capture;
   try {
-    register_ops();
+    registry.capture_registration([&]() { register_ops(); },
+                                  registration_capture);
   } catch (const std::exception& e) {
-    const auto new_keys = collect_new_keys(keys_before, registry.get_keys());
-    unregister_keys(new_keys);
+    registry.restore_registration_capture(registration_capture);
     result.errors.push_back({absolute_path, GraphErrc::Unknown, e.what()});
     return;
   } catch (...) {
-    const auto new_keys = collect_new_keys(keys_before, registry.get_keys());
-    unregister_keys(new_keys);
+    registry.restore_registration_capture(registration_capture);
     result.errors.push_back(
         {absolute_path, GraphErrc::Unknown, "register_photospider_ops threw"});
     return;
   }
 
-  const auto new_keys = collect_new_keys(keys_before, registry.get_keys());
-  record_new_operation_sources(absolute_path, new_keys, op_sources, result);
+  const auto previous_sources = collect_previous_sources(
+      registration_capture.registered_keys, op_sources);
+  record_registered_operation_sources(
+      absolute_path, registration_capture.registered_keys, op_sources, result);
 
   LoadedOpPlugin loaded;
   loaded.library = library->lifetime();
-  loaded.registered_keys = new_keys;
+  loaded.registered_keys = registration_capture.registered_keys;
+  loaded.previous_registry_entries = registration_capture.previous_entries;
+  loaded.previous_sources = previous_sources;
   loaded_plugins[absolute_path] = std::move(loaded);
   ++result.loaded;
 }

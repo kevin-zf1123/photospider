@@ -58,11 +58,13 @@ Disk cache precision currently supports `int8` and `int16` save paths. Loaded
 image cache data is converted into float image buffers.
 
 Disk cache load attempts preserve the legacy try-load bool contract while also
-recording `GraphModel::last_disk_cache_load_result`. The diagnostic result
-distinguishes skipped attempts, true misses, hits, and read/parse errors. Bad
-image files, invalid YAML metadata, and filesystem failures are recorded as
-errors with an error code and message instead of being indistinguishable from a
-normal cache miss.
+recording the latest diagnostic through GraphModel's dedicated disk-cache
+diagnostic mutex. Callers inspect that state through a snapshot API instead of
+reading mutable optional storage directly. The diagnostic result distinguishes
+skipped attempts, true misses, hits, and read/parse errors. Bad image files,
+invalid YAML metadata, and filesystem failures are recorded as errors with an
+error code and message instead of being indistinguishable from a normal cache
+miss.
 
 ## Cache Commands
 
