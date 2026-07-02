@@ -232,7 +232,7 @@ class TaskSubmissionPlan : public TaskExecutor {
  * does not already have a reusable high-precision output. It may also rethrow
  * task submission or scheduler completion exceptions.
  * @note Empty plans are legal only when the target output is already present.
- * The dispatcher no longer falls back to recursive compute_internal.
+ * The dispatcher no longer falls back to the legacy recursive HP path.
  */
 void dispatch_planned_tasks(GraphModel& graph,
                             SchedulerTaskRuntime& task_runtime, int node_id,
