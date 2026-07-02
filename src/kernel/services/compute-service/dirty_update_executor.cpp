@@ -143,6 +143,10 @@ NodeOutput& HighPrecisionDirtyExecutor::execute(
     const DirtyUpdateRequest& request) {
   std::unique_lock<std::mutex> graph_lock(graph.graph_mutex_);
 
+  if (request.force_recache) {
+    graph.clear_full_task_graph_cache();
+  }
+
   RoiPropagationService roi_propagation;
   DirtyRegionPlanner dirty_planner(traversal_, roi_propagation);
   auto prepared = prepare_dirty_execution(
@@ -227,6 +231,10 @@ NodeOutput& RealTimeDirtyExecutor::execute(GraphModel& graph,
                                            GraphRuntime* runtime,
                                            const DirtyUpdateRequest& request) {
   std::unique_lock<std::mutex> graph_lock(graph.graph_mutex_);
+
+  if (request.force_recache) {
+    graph.clear_full_task_graph_cache();
+  }
 
   RoiPropagationService roi_propagation;
   DirtyRegionPlanner dirty_planner(traversal_, roi_propagation);

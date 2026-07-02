@@ -139,6 +139,10 @@ NodeOutput& ComputeTaskDispatcher::execute(
     graph.total_io_time_ms = 0.0;
   }
 
+  if (request.force_recache) {
+    graph.clear_full_task_graph_cache();
+  }
+
   TaskSubmissionPlan plan(graph, traversal_, node_id);
   if (request.force_recache) {
     clear_planned_high_precision_caches(graph, graph_mutex,

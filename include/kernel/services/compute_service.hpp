@@ -32,7 +32,12 @@ class ComputeService {
     /** @brief Precision label used when reading or writing disk cache data. */
     std::string precision;
 
-    /** @brief Clears selected in-memory caches before executing the request. */
+    /**
+     * @brief Clears selected in-memory caches before executing the request.
+     *
+     * @note Also invalidates cached full task graph expansions before planning
+     * so input-shape changes rebuild tiled task ROIs.
+     */
     bool force_recache = false;
 
     /** @brief Prevents disk-cache reads for the active request. */

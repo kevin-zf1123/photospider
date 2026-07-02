@@ -254,6 +254,16 @@ class GraphModel {
       const std::string& key,
       std::shared_ptr<const compute::FullTaskGraph> graph);
 
+  /**
+   * @brief Clears cached FullTaskGraph expansions for all compute intents.
+   *
+   * @throws Nothing under current unordered_map clear behavior.
+   * @note Force-recache and input-shape-changing paths use this before
+   * planning so tiled task ROIs are rebuilt from current graph extents instead
+   * of a previous expansion.
+   */
+  void clear_full_task_graph_cache();
+
   void set_skip_save_cache(bool v);
   bool skip_save_cache() const;
 

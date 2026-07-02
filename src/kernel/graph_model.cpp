@@ -458,6 +458,10 @@ void GraphModel::remember_full_task_graph(
   full_task_graph_cache_[key] = std::move(graph);
 }
 
+void GraphModel::clear_full_task_graph_cache() {
+  full_task_graph_cache_.clear();
+}
+
 void GraphModel::set_skip_save_cache(bool v) {
   skip_save_cache_.store(v, std::memory_order_relaxed);
 }

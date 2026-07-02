@@ -155,6 +155,13 @@ the request traversal and records the high-precision plan,
 records, and `DirtySnapshotTaskGraphPruner` later activates dirty work from the
 already-pruned graph.
 
+`GraphModel` caches immutable `FullTaskGraph` expansions by topology
+generation, compute intent, and task-shape configuration. A `force_recache`
+request clears that cache before planning because input data or source
+parameters may change output extents without changing graph topology; tiled
+task ROIs must therefore be rebuilt from current extents instead of a previous
+expansion.
+
 `NodeCacheTaskGraphPruner` consumes that `FullTaskGraph`, the requested target
 node/dependency cone, and current node/cache state, then emits the pruned
 `ComputePlan` / `ComputeTaskGraph` used by sequential and parallel execution.

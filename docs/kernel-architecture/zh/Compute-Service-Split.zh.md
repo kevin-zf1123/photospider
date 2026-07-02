@@ -127,6 +127,11 @@ node/tile task”。
 将其收窄到请求/cache 锥，`TaskPopulationStrategy` 与 task dependency helper 填充可执行
 task record，`DirtySnapshotTaskGraphPruner` 随后从已经裁剪的 graph 中激活 dirty work。
 
+`GraphModel` 会按 topology generation、compute intent 和 task-shape 配置缓存 immutable
+`FullTaskGraph` expansion。`force_recache` 请求会在 planning 前清空该 cache，因为输入数据或
+source 参数可能在不改变 graph topology 的情况下改变输出 extent；tiled task ROI 必须基于当前
+extent 重新展开，而不能复用旧 expansion。
+
 `NodeCacheTaskGraphPruner` 消费该 `FullTaskGraph`、请求目标节点/依赖锥和当前 node/cache
 状态，然后产出 sequential 与 parallel execution 使用的 pruned `ComputePlan` /
 `ComputeTaskGraph`。它会记录所选节点的 cache 可用性，同时保留现有执行契约：cache hit 仍在
