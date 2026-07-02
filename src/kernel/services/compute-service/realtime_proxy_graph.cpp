@@ -8,6 +8,15 @@ namespace ps::compute {
 void RealtimeProxyGraph::synchronize_with_graph(const GraphModel& graph) {
   std::lock_guard<std::mutex> lock(mutex_);
   const std::vector<int> ids = graph.node_ids();
+  const uint64_t graph_generation = graph.topology_generation();
+  if (topology_generation_ != graph_generation) {
+    nodes_.clear();
+    for (int id : ids) {
+      nodes_.emplace(id, NodeState{});
+    }
+    topology_generation_ = graph_generation;
+    return;
+  }
   std::set<int> live_ids(ids.begin(), ids.end());
   for (auto it = nodes_.begin(); it != nodes_.end();) {
     if (!live_ids.count(it->first)) {
@@ -19,7 +28,7 @@ void RealtimeProxyGraph::synchronize_with_graph(const GraphModel& graph) {
   for (int id : ids) {
     nodes_.try_emplace(id);
   }
-  topology_generation_ = graph.topology_generation();
+  topology_generation_ = graph_generation;
 }
 
 uint64_t RealtimeProxyGraph::topology_generation() const {

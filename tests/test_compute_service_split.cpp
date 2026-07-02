@@ -78,6 +78,8 @@ void register_split_ops() {
             }));
     ps::OpMetadata micro_meta;
     micro_meta.tile_preference = ps::TileSizePreference::MICRO;
+    ps::OpMetadata macro_meta;
+    macro_meta.tile_preference = ps::TileSizePreference::MACRO;
     registry.register_op_hp_tiled(
         "split_plan", "tile",
         TileOpFunc([](const Node&, const OutputTile& output_tile,
@@ -90,6 +92,20 @@ void register_split_ops() {
         TileOpFunc([](const Node&, const OutputTile& output_tile,
                       const std::vector<InputTile>&) {
           toCvMat(output_tile).setTo(2.0f);
+        }),
+        micro_meta);
+    registry.register_op_hp_tiled(
+        "split_plan", "domain_tile",
+        TileOpFunc([](const Node&, const OutputTile& output_tile,
+                      const std::vector<InputTile>&) {
+          toCvMat(output_tile).setTo(6.0f);
+        }),
+        macro_meta);
+    registry.register_op_rt_tiled(
+        "split_plan", "domain_tile",
+        TileOpFunc([](const Node&, const OutputTile& output_tile,
+                      const std::vector<InputTile>&) {
+          toCvMat(output_tile).setTo(6.0f);
         }),
         micro_meta);
     registry.register_op_hp_tiled(
@@ -109,8 +125,32 @@ void register_split_ops() {
           toCvMat(output_tile).setTo(5.0f);
         }),
         random_meta);
+    ps::OpMetadata rt_random_meta = micro_meta;
+    rt_random_meta.access_pattern =
+        ps::OpMetadata::InputAccessPattern::RandomAccess;
+    registry.register_op_hp_tiled(
+        "split_plan", "domain_random_tile",
+        TileOpFunc([](const Node&, const OutputTile& output_tile,
+                      const std::vector<InputTile>&) {
+          toCvMat(output_tile).setTo(7.0f);
+        }),
+        macro_meta);
+    registry.register_op_rt_tiled(
+        "split_plan", "domain_random_tile",
+        TileOpFunc([](const Node&, const OutputTile& output_tile,
+                      const std::vector<InputTile>&) {
+          toCvMat(output_tile).setTo(7.0f);
+        }),
+        rt_random_meta);
     registry.register_dirty_propagator(
         "split_plan", "random_tile",
+        DirtyRoiPropFunc(
+            [](const Node& node, const cv::Rect& roi, const GraphModel&) {
+              const int radius = node.parameters["radius"].as<int>(16);
+              return compute::expand_rect(roi, radius);
+            }));
+    registry.register_dirty_propagator(
+        "split_plan", "domain_random_tile",
         DirtyRoiPropFunc(
             [](const Node& node, const cv::Rect& roi, const GraphModel&) {
               const int radius = node.parameters["radius"].as<int>(16);
@@ -764,6 +804,83 @@ TEST(TaskGraphPlanningSplit, TileDependenciesUseRandomAccessInputRoi) {
   }
 }
 
+TEST(TaskGraphPlanningSplit, UsesDomainSpecificMetadataForTileShape) {
+  register_split_ops();
+  GraphModel graph("cache/split-domain-specific-tile-shape");
+  Node node = make_node(1, "split_plan", "domain_tile");
+  node.parameters["width"] = 512;
+  node.parameters["height"] = 16;
+  graph.add_node(node);
+
+  const auto hp_graph =
+      expand_full_task_graph(graph, ComputeIntent::GlobalHighPrecision);
+  const auto rt_graph =
+      expand_full_task_graph(graph, ComputeIntent::RealTimeUpdate);
+
+  std::vector<const compute::PlannedTask*> hp_tiles;
+  for (const auto& task : hp_graph.task_graph.tasks) {
+    if (task.kind == compute::PlannedTaskKind::Tile) {
+      hp_tiles.push_back(&task);
+    }
+  }
+  ASSERT_EQ(hp_tiles.size(), 2u);
+  for (const auto* task : hp_tiles) {
+    EXPECT_EQ(task->domain, compute::DirtyDomain::HighPrecision);
+    EXPECT_EQ(task->tile_size, compute::kHpMacroTileSize);
+  }
+
+  std::vector<const compute::PlannedTask*> rt_tiles;
+  for (const auto& task : rt_graph.task_graph.tasks) {
+    if (task.kind == compute::PlannedTaskKind::Tile) {
+      rt_tiles.push_back(&task);
+    }
+  }
+  ASSERT_EQ(rt_tiles.size(), 32u);
+  for (const auto* task : rt_tiles) {
+    EXPECT_EQ(task->domain, compute::DirtyDomain::RealTime);
+    EXPECT_EQ(task->tile_size, compute::kRtTileSize);
+  }
+}
+
+TEST(TaskGraphPlanningSplit, RtDependencyPlanningUsesRtMetadata) {
+  register_split_ops();
+  GraphModel graph("cache/split-rt-domain-metadata-dependencies");
+  Node source = make_node(1, "split_plan", "domain_tile");
+  source.parameters["width"] = 64;
+  source.parameters["height"] = 16;
+  Node downstream = make_node(2, "split_plan", "domain_random_tile");
+  downstream.parameters["width"] = 64;
+  downstream.parameters["height"] = 16;
+  downstream.parameters["radius"] = 16;
+  downstream.image_inputs.push_back({1, "image"});
+  graph.add_node(source);
+  graph.add_node(downstream);
+  graph.validate_topology();
+
+  compute::ComputeRequest request;
+  request.intent = ComputeIntent::RealTimeUpdate;
+  request.target_node_id = 2;
+  const auto plan = node_cache_pruned_plan(graph, request, {1, 2});
+
+  const compute::PlannedTask* middle_downstream_task = nullptr;
+  for (const auto& task : plan.task_graph.tasks) {
+    if (task.node_id == 2 && task.output_roi == cv::Rect(16, 0, 16, 16)) {
+      middle_downstream_task = &task;
+      break;
+    }
+  }
+  ASSERT_NE(middle_downstream_task, nullptr);
+  ASSERT_EQ(middle_downstream_task->dependency_task_ids.size(), 3u)
+      << "RT random-access metadata expands the middle RT micro tile input "
+         "ROI across three upstream RT micro tiles";
+  for (int dependency_task_id : middle_downstream_task->dependency_task_ids) {
+    const auto& upstream_task = plan.task_graph.tasks.at(dependency_task_id);
+    EXPECT_EQ(upstream_task.node_id, 1);
+    EXPECT_EQ(upstream_task.domain, compute::DirtyDomain::RealTime);
+    EXPECT_EQ(upstream_task.tile_size, compute::kRtTileSize);
+  }
+}
+
 TEST(TaskGraphPlanningSplit, CachesFullTaskGraphPerIntentAndTopology) {
   register_split_ops();
   GraphModel graph("cache/split-full-task-graph-cache");
@@ -1155,6 +1272,63 @@ TEST(RealtimeProxyWriteBuffer, StagesDeepCopyAndCommitsToProxyGraph) {
   EXPECT_EQ(committed_state->roi_hp, cv::Rect(0, 0, 3, 3));
   ASSERT_TRUE(committed_state->dirty_source_generation.has_value());
   EXPECT_EQ(*committed_state->dirty_source_generation, 42u);
+}
+
+TEST(RealtimeProxyGraph, PreservesWithinGenerationAndResetsOnGraphReplacement) {
+  GraphModel graph("cache/rt-proxy-generation-reset");
+  Node node = make_node(1, "split_plan", "tile");
+  graph.add_node(node);
+
+  compute::RealtimeProxyGraph proxy_graph;
+  proxy_graph.synchronize_with_graph(graph);
+  compute::RealtimeProxyGraph::NodeState initial_state;
+  initial_state.output = make_image_output(4, 4, 1, 3.0f);
+  initial_state.version = 7;
+  initial_state.roi_hp = cv::Rect(0, 0, 4, 4);
+  initial_state.dirty_source_generation = 42;
+  proxy_graph.commit_node_state(1, std::move(initial_state));
+
+  proxy_graph.synchronize_with_graph(graph);
+  const auto* preserved_state = proxy_graph.find_state(1);
+  ASSERT_NE(preserved_state, nullptr);
+  ASSERT_TRUE(preserved_state->output.has_value());
+  EXPECT_EQ(preserved_state->version, 7);
+  ASSERT_TRUE(preserved_state->dirty_source_generation.has_value());
+  EXPECT_EQ(*preserved_state->dirty_source_generation, 42u);
+
+  GraphModel::NodeMap replacement_nodes;
+  Node replacement = make_node(1, "split_plan", "domain_tile");
+  replacement.parameters["width"] = 16;
+  replacement.parameters["height"] = 16;
+  replacement_nodes.emplace(1, std::move(replacement));
+  graph.replace_nodes(std::move(replacement_nodes));
+  proxy_graph.synchronize_with_graph(graph);
+
+  const auto* replaced_state = proxy_graph.find_state(1);
+  ASSERT_NE(replaced_state, nullptr);
+  EXPECT_FALSE(replaced_state->output.has_value());
+  EXPECT_EQ(replaced_state->version, 0);
+  EXPECT_FALSE(replaced_state->dirty_source_generation.has_value());
+
+  compute::RealtimeProxyGraph::NodeState stale_after_replacement;
+  stale_after_replacement.output = make_image_output(4, 4, 1, 9.0f);
+  stale_after_replacement.version = 3;
+  stale_after_replacement.dirty_source_generation = 88;
+  proxy_graph.commit_node_state(1, std::move(stale_after_replacement));
+
+  graph.clear();
+  Node reloaded = make_node(1, "split_plan", "tile");
+  reloaded.parameters["width"] = 16;
+  reloaded.parameters["height"] = 16;
+  graph.add_node(reloaded);
+  proxy_graph.synchronize_with_graph(graph);
+
+  const auto* reloaded_state = proxy_graph.find_state(1);
+  ASSERT_NE(reloaded_state, nullptr);
+  EXPECT_FALSE(reloaded_state->output.has_value());
+  EXPECT_EQ(reloaded_state->version, 0);
+  EXPECT_FALSE(reloaded_state->dirty_source_generation.has_value());
+  EXPECT_EQ(proxy_graph.topology_generation(), graph.topology_generation());
 }
 
 TEST(HighPrecisionDirtyWriteBuffer, StagesGraphWritesUntilCommit) {

@@ -33,7 +33,7 @@ parse YAML -> validate all nodes/topology -> rebuild adjacency -> create/commit 
 
 Reload 现有图更敏感，因为它操作的图名称可能已经可见。目标方向是在 reload 失败时避免半清空或部分重建的模型状态。
 
-选择的行为：失败的 reload 保留之前的图。Reload 会在提交到可见 `GraphModel` 之前验证替换模型并重建拓扑邻接。
+选择的行为：失败的 reload 保留之前的图。Reload 会在提交到可见 `GraphModel` 之前验证替换模型并重建拓扑邻接。成功 replacement 即使复用 node id，也会推进 topology generation，使 `RealtimeProxyGraph` 等 runtime-owned mirror 在下次 compute 前重置陈旧的 per-node state。
 
 ## 节点 YAML 替换
 
@@ -51,12 +51,13 @@ Clear 应重置：
 
 - 节点映射
 - 拓扑邻接索引
+- topology generation
 - 计时结果
 - 累计 IO 时间
 - skip-save 状态
 - 其他可能影响后续加载或计算的单次运行模型状态
 
-这让 reload 和 clear 行为更容易推理，并避免陈旧元数据附着在空图上。
+这让 reload 和 clear 行为更容易推理，并避免陈旧元数据附着在空图上。按 node id keyed 的 runtime-owned state 必须把 generation change 视为 invalidation boundary，而不是为复用 id 保留 entry。
 
 ## 错误表面
 

@@ -34,7 +34,10 @@ Associated fields:
 RT compute writes `RealtimeProxyGraph`. Each proxy node is keyed by the original
 graph node id and stores only low-resolution output, HP-space ROI metadata,
 version, and RT dirty-source generation. It does not copy Node parameters,
-inputs, topology, caches, or formal HP state.
+inputs, topology, caches, or formal HP state. When the observed graph topology
+generation changes, synchronization resets live proxy entries rather than
+preserving state by reused node id, so reload/edit workflows cannot expose stale
+low-resolution output from an earlier graph.
 
 Dirty RT execution does not write graph-owned RT fields. Worker tasks stage
 proxy output, ROI metadata, version counters, and dirty-source commit
