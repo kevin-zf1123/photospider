@@ -118,6 +118,12 @@ subsequent HP compute, disk cache, long-term storage, and other reusable cache
 behavior. `cached_output_real_time` is transient interactive state and must not
 be used as authoritative cached output.
 
+Dirty RT worker tasks stage `cached_output_real_time`, `rt_roi`, `rt_version`,
+and dirty-source commit generation through `RealtimeDirtyWriteBuffer` before a
+single graph commit. Dirty HP still writes the formal HP cache directly under
+the current `DirectGraphCommit` policy; HP migration to a general output buffer
+belongs to the later staged commit work.
+
 ## YAML Schema
 
 Graph YAML root is a sequence of node objects. Supported node fields:

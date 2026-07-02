@@ -22,7 +22,13 @@ struct IntentUpdateDecision {
   bool run_high_precision_update = false;
   /** @brief Whether the RT sibling update should run. */
   bool run_real_time_update = false;
-  /** @brief Whether HP and RT dirty siblings may start concurrently. */
+  /**
+   * @brief Whether HP and RT dirty siblings may start concurrently.
+   *
+   * @note This remains false under DirectGraphCommit. It is retained so a
+   * future buffered commit policy can re-enable sibling concurrency without
+   * changing the decision shape.
+   */
   bool submit_updates_concurrently = false;
 };
 
@@ -34,10 +40,10 @@ struct IntentUpdateDecision {
  * invokes these callbacks to let ComputeService build and dispatch the real
  * task-level HP/RT work.
  *
- * @note Concurrent Dirty RT coordination starts HP/RT sibling callbacks with
- * std::async after confirming both scheduler task runtimes are alive. Each
- * callback then pushes its own ready TaskHandle batches to the matching
- * scheduler runtime.
+ * @note DirectGraphCommit currently runs HP and RT sibling callbacks in a
+ * deterministic inline order because both paths can still touch visible graph
+ * state. Scheduler runtimes still receive ready task batches from each
+ * callback.
  */
 struct IntentUpdateCallbacks {
   /** @brief Runs a normal full-graph HP compute. */
@@ -57,13 +63,13 @@ struct IntentUpdateCallbacks {
 /**
  * @brief Coordinates compute intent callbacks without owning task graphs.
  *
- * The coordinator decides which intent paths must run and whether HP/RT
- * RealTimeUpdate siblings may execute concurrently. Actual task graph planning,
- * dependency release, and scheduler submission remain inside the callbacks.
+ * The coordinator decides which intent paths must run. Under the current
+ * DirectGraphCommit policy it does not start HP/RT RealTimeUpdate siblings
+ * concurrently; actual task graph planning, dependency release, and scheduler
+ * submission remain inside the callbacks.
  *
- * @note Concurrent sibling execution uses std::async only to start the HP and
- * RT dirty callbacks together. Scheduler queues receive the fine-grained ready
- * work emitted by those callbacks through their intent-specific dispatchers.
+ * @note Scheduler queues still receive the fine-grained ready work emitted by
+ * each callback through their intent-specific dispatchers.
  */
 class IntentUpdateCoordinator {
  public:
@@ -72,7 +78,7 @@ class IntentUpdateCoordinator {
    *
    * @param intent Requested compute intent.
    * @param can_submit_concurrently Whether HP and RT runtimes are available and
-   * running.
+   * running; reserved for a future buffered commit policy.
    * @param has_dirty_roi Whether the request supplied a dirty ROI.
    * @return Decision describing required HP/RT paths and execution mode.
    * @throws Nothing directly.
@@ -96,17 +102,17 @@ class IntentUpdateCoordinator {
    *
    * @param intent Requested compute intent.
    * @param hp_task_runtime Optional HP scheduler runtime used to decide whether
-   * HP/RT siblings can start concurrently.
+   * scheduler-backed work may run inside each sequential sibling callback.
    * @param rt_task_runtime Optional RT scheduler runtime used to decide whether
-   * HP/RT siblings can start concurrently.
+   * scheduler-backed work may run inside each sequential sibling callback.
    * @param dirty_roi Optional dirty ROI for dirty intents.
    * @param callbacks Callback bundle that performs actual compute work.
    * @return Output for the requested target after required paths complete.
    * @throws GraphError for invalid inputs or missing callbacks; rethrows
-   * callback exceptions after both sibling paths have been joined.
+   * callback exceptions from the active sibling path.
    * @note The coordinator never owns scheduler dependency state. It records
-   * sibling submission, wait, and completion stages, while callbacks submit
-   * concrete dirty task batches to scheduler queues.
+   * inline sibling stages, while callbacks submit concrete dirty task batches
+   * to scheduler queues.
    */
   static NodeOutput& coordinate_intent_update(
       ComputeIntent intent, SchedulerTaskRuntime* hp_task_runtime,

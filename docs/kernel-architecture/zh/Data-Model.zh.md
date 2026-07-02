@@ -91,6 +91,11 @@
 
 只有 HP 输出是正式可复用缓存。这意味着只有 HP 输出可以进入后续 HP 计算、磁盘缓存、长期存储以及其他可复用缓存行为。`cached_output_real_time` 是临时交互式状态，不能作为权威缓存输出使用。
 
+Dirty RT worker task 会先通过 `RealtimeDirtyWriteBuffer` stage
+`cached_output_real_time`、`rt_roi`、`rt_version` 和 dirty-source commit generation，
+然后再进行一次 graph commit。当前 `DirectGraphCommit` policy 下 dirty HP 仍直接写正式 HP
+cache；HP 迁移到通用 output buffer 属于后续 staged commit 工作。
+
 ## YAML Schema
 
 图 YAML 根节点是节点对象序列。支持的节点字段：

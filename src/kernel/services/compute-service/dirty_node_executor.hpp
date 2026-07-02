@@ -10,6 +10,7 @@
 #include "kernel/services/compute-service/dirty_region_planner.hpp"
 #include "kernel/services/compute-service/downsample_executor.hpp"
 #include "kernel/services/compute-service/node_input_resolver.hpp"
+#include "kernel/services/compute-service/realtime_dirty_write_buffer.hpp"
 
 namespace ps {
 class GraphEventService;
@@ -262,9 +263,10 @@ class HighPrecisionDirtyNodeExecutor {
  * @brief Executes one real-time dirty node from a prepared RT plan.
  *
  * The executor owns the RT node-level work: resolving transient inputs,
- * selecting an RT operator with HP fallback, allocating proxy buffers, running
- * tiled or monolithic execution, and committing RT ROI/version metadata. It
- * does not build dirty snapshots or decide source-first task ordering.
+ * selecting an RT operator with HP fallback, allocating staged proxy buffers,
+ * running tiled or monolithic execution, and recording RT ROI/version metadata
+ * into a request-local write buffer. It does not build dirty snapshots, decide
+ * source-first task ordering, or commit staged output to GraphModel.
  *
  * @note RT output remains transient interactive state and is never promoted to
  * reusable high-precision cache authority.
@@ -275,11 +277,14 @@ class RealTimeDirtyNodeExecutor {
    * @brief Constructs a node executor for one RT dirty generation.
    *
    * @param context Borrowed graph/runtime/event/snapshot generation context.
+   * @param rt_write_buffer Request-local RT output buffer committed by the
+   * owning RealTimeDirtyExecutor after all dirty tasks complete.
    * @throws Nothing directly.
    * @note References are borrowed and must outlive scheduler callbacks created
    * for the same dirty generation.
    */
-  explicit RealTimeDirtyNodeExecutor(DirtyNodeExecutionContext context);
+  RealTimeDirtyNodeExecutor(DirtyNodeExecutionContext context,
+                            RealtimeDirtyWriteBuffer& rt_write_buffer);
 
   /**
    * @brief Runs RT dirty execution for one planned node.
@@ -294,12 +299,13 @@ class RealTimeDirtyNodeExecutor {
 
  private:
   /**
-   * @brief Resolves transient RT outputs for image dependencies.
+   * @brief Resolves staged or committed RT outputs for image dependencies.
    *
    * @param node Node whose inputs are resolved.
    * @return Ready image inputs for RT execution.
    * @throws GraphError from NodeInputResolver when required inputs are missing.
-   * @note RT dependency lookup uses interactive cache state only.
+   * @note Dependency lookup first checks the request-local RT write buffer,
+   * then falls back to committed graph interactive state for compatibility.
    */
   ResolvedNodeInputs resolve_inputs(Node& node) const;
 
@@ -316,18 +322,19 @@ class RealTimeDirtyNodeExecutor {
       const Node& node) const;
 
   /**
-   * @brief Ensures the RT proxy buffer matches the planned RT extent.
+   * @brief Ensures the staged RT proxy buffer matches the planned RT extent.
    *
-   * @param node Node whose RT cache is allocated.
+   * @param node Node whose existing committed RT state seeds the staged output.
    * @param entry RT extent metadata.
    * @param image_inputs_ready Resolved inputs used to infer format.
-   * @return Mutable RT image buffer matching the planned extent and format.
+   * @return Mutable staged RT image buffer matching the planned extent and
+   * format.
    * @throws GraphError or std::bad_alloc if allocation fails.
-   * @note HP cache shape is used as a final format hint when RT cache and
-   * inputs do not carry concrete image metadata.
+   * @note HP cache shape is used as a final format hint when staged RT output
+   * and inputs do not carry concrete image metadata.
    */
   ImageBuffer& ensure_rt_buffer(
-      Node& node, const RtPlanEntry& entry,
+      const Node& node, const RtPlanEntry& entry,
       const std::vector<const NodeOutput*>& image_inputs_ready) const;
 
   /**
@@ -397,14 +404,14 @@ class RealTimeDirtyNodeExecutor {
                      ImageBuffer& rt_buffer) const;
 
   /**
-   * @brief Commits RT ROI, version, source generation, and node event state.
+   * @brief Records RT ROI, version, source generation, and node event state.
    *
-   * @param node Node whose RT cache was updated.
+   * @param node Node whose staged RT output was updated.
    * @param entry HP-space ROI and extent used for inspection metadata.
    * @param dirty_source Whether the node is a dirty source boundary.
    * @throws std::bad_alloc if event storage grows and allocation fails.
-   * @note RT ROI metadata stays in HP coordinates for frontend/debug
-   * consistency.
+   * @note RT ROI metadata is staged in HP coordinates for frontend/debug
+   * consistency and committed by the owning RealTimeDirtyExecutor.
    */
   void commit_node(Node& node, const RtPlanEntry& entry, bool dirty_source);
 
@@ -444,6 +451,10 @@ class RealTimeDirtyNodeExecutor {
 
   /** @brief Dirty generation used to detect stale source callbacks. */
   uint64_t dirty_generation_;
+
+  /** @brief Request-local buffer that receives RT output and metadata writes.
+   */
+  RealtimeDirtyWriteBuffer& rt_write_buffer_;
 
   /** @brief Per-node dirty cache locks borrowed from the request executor. */
   DirtyNodeMutexMap& node_mutexes_;

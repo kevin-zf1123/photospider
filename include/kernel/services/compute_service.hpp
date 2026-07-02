@@ -153,11 +153,12 @@ class ComputeService {
    * @throws GraphError for scheduler lookup, validation, planning, dispatch, or
    * missing output failures; may propagate operation-specific exceptions.
    * @note Dirty RT updates pass HP and RT scheduler task runtimes to
-   * IntentUpdateCoordinator when both runtimes are available. The coordinator
-   * starts sibling dirty callbacks concurrently, and each dirty callback
-   * submits its source-first ready work through the intent-specific scheduler
-   * runtime. Kernel callers must enter this method from GraphStateExecutor so
-   * scheduler-backed work remains serialized with graph-state operations.
+   * IntentUpdateCoordinator when both runtimes are available. Under the current
+   * DirectGraphCommit policy the coordinator runs HP then RT sibling callbacks
+   * inline, and each dirty callback submits its source-first ready work through
+   * the intent-specific scheduler runtime. Kernel callers must enter this
+   * method from GraphStateExecutor so scheduler-backed work remains serialized
+   * with graph-state operations.
    */
   NodeOutput& compute_parallel(GraphModel& graph, GraphRuntime& runtime,
                                const Request& request);

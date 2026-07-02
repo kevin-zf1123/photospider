@@ -192,20 +192,22 @@ Dirty-region state planning 现在通过图级 `DirtyRegionPlanner` 运行，产
 `RealTimeUpdate` 需要 dirty ROI。没有 `dirty_roi` 的请求是非法的，应通过内核和交互层 API 返回清晰错误。它不会隐式表示全帧 RT 更新。
 
 带有效 dirty ROI 时，realtime 计算会启用两条路径。HP 更新受影响 graph 工作的完整尺寸权威输出，
-RT 更新受影响区域的代理输出。当 scheduler task runtime 可用时，`IntentUpdateCoordinator`
-会并发启动 HP 和 RT dirty sibling；每个 sibling 再把 ready dirty work 提交到各自
-intent-specific scheduler runtime。Coordinator 会先等待 RT、再等待 HP，然后返回 RT 输出。
-当选择单线程执行时，它仍会 inline 运行 HP 和 RT 工作。这个区别是执行模式选择，而不是启用或禁用
-HP/RT 双路径的开关。
+RT 更新受影响区域的代理输出。在当前 `DirectGraphCommit` 行为下，即使 scheduler task runtime
+可用，`IntentUpdateCoordinator` 也会先 inline 运行 HP sibling，再 inline 运行 RT sibling。
+每个 sibling 内部仍可以把 ready dirty work 提交到各自 intent-specific scheduler runtime，
+但跨 intent 的 HP/RT sibling 并发会保持禁用，直到 buffered commit 覆盖两个输出 domain。
+这个区别是 commit policy 约束，而不是启用或禁用 HP/RT 双路径的开关。
 
 Realtime planning 有意按路径分别执行，而不是通过一次混合 domain 的 planner 调用生成两份任务池。
-`IntentUpdateCoordinator` 会分发 sibling HP 与 RT update callback，并为 parallel Dirty RT
-request 记录 scheduler-runtime submission、wait 和 completion 阶段。每条路径都使用一个
-single-domain request plan 和同 domain 的 dirty snapshot：HP callback 使用
+`IntentUpdateCoordinator` 会分发 sibling HP 与 RT update callback，并为 Dirty RT request
+记录 inline HP/RT 阶段。每条路径都使用一个 single-domain request plan 和同 domain 的
+dirty snapshot：HP callback 使用
 `GlobalHighPrecision` node/cache-pruned plan 与 HP dirty snapshot，RT callback 使用
-`RealTimeUpdate` node/cache-pruned plan 与 RT dirty snapshot。Dirty snapshot 会从该路径的
-task graph 中裁剪或激活 update work set。这样会把完整 task expansion、node/cache pruning
-和 dirty snapshot pruning 保持为独立契约，使未来新增 task pool 或 task mode 时继续复用这些边界。
+`RealTimeUpdate` node/cache-pruned plan 与 RT dirty snapshot。RT dirty node execution 会写入
+request-local `RealtimeDirtyWriteBuffer`，并且只在 RT dirty work drain 之后提交 staged proxy
+output。Dirty snapshot 会从该路径的 task graph 中裁剪或激活 update work set。这样会把完整
+task expansion、node/cache pruning、dirty snapshot pruning 和 output commit 保持为独立契约，
+使未来新增 task pool 或 task mode 时继续复用这些边界。
 
 传入的 dirty ROI 会在当前请求中转换为图级 planner state。`Kernel` 和 `InteractionService` 已暴露
 begin/update/end dirty source lifecycle 方法，使 frontend 或 node-facing 代码可以通过同一个图级 owner

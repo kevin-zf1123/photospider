@@ -6,11 +6,13 @@
 #include <vector>
 
 #include "kernel/graph_runtime.hpp"
+#include "kernel/services/compute-service/compute_cache_policy.hpp"
 #include "kernel/services/compute-service/compute_geometry.hpp"
 #include "kernel/services/compute-service/dirty_execution_common.hpp"
 #include "kernel/services/compute-service/dirty_node_executor.hpp"
 #include "kernel/services/compute-service/dirty_region_planner.hpp"
 #include "kernel/services/compute-service/downsample_executor.hpp"
+#include "kernel/services/compute-service/realtime_dirty_write_buffer.hpp"
 #include "kernel/services/graph_event_service.hpp"
 #include "kernel/services/graph_traversal_service.hpp"
 #include "kernel/services/roi_propagation_service.hpp"
@@ -111,6 +113,38 @@ DirtyNodeMutexMap make_dirty_node_mutexes(const ComputePlan& compute_plan) {
   return mutexes;
 }
 
+/**
+ * @brief Validates RT dirty source boundaries against staged and graph output.
+ *
+ * @param graph Graph used for node lookup and committed fallback state.
+ * @param snapshot Dirty snapshot containing source node ids.
+ * @param rt_write_buffer Request-local RT output buffer populated by source
+ * tasks before downstream RT work is released.
+ * @throws GraphError when a source node is missing or has no staged/committed
+ * interactive output.
+ * @note RT dirty source output may still be staged, so validation cannot read
+ * only `GraphModel::cached_output_real_time`.
+ */
+void validate_rt_source_boundaries_ready(
+    const GraphModel& graph, const DirtyRegionSnapshot& snapshot,
+    const RealtimeDirtyWriteBuffer& rt_write_buffer) {
+  for (int source_node_id : snapshot.dirty_source_nodes) {
+    const Node* source = graph.find_node(source_node_id);
+    if (!source) {
+      throw GraphError(GraphErrc::NotFound, "Dirty source node " +
+                                                std::to_string(source_node_id) +
+                                                " not found.");
+    }
+    if (rt_write_buffer.has_output(source_node_id) ||
+        ComputeCachePolicy::interactive_output(*source)) {
+      continue;
+    }
+    throw GraphError(GraphErrc::MissingDependency,
+                     "Dirty source boundary output is not ready for node " +
+                         std::to_string(source_node_id) + ".");
+  }
+}
+
 }  // namespace
 
 HighPrecisionDirtyExecutor::HighPrecisionDirtyExecutor(
@@ -198,7 +232,9 @@ NodeOutput& HighPrecisionDirtyExecutor::execute(
           validate_hp_source_boundaries},
       run_hp_task);
   graph_lock.lock();
-  DownsampleExecutor(graph, runtime, events_).execute(downsample_requests);
+  if (!request.suppress_graph_downsample) {
+    DownsampleExecutor(graph, runtime, events_).execute(downsample_requests);
+  }
   return require_target_output(graph, request.node_id);
 }
 
@@ -249,6 +285,7 @@ NodeOutput& RealTimeDirtyExecutor::execute(GraphModel& graph,
   }
   graph_lock.unlock();
 
+  RealtimeDirtyWriteBuffer rt_write_buffer;
   DirtyNodeMutexMap node_mutexes =
       make_dirty_node_mutexes(prepared.compute_plan);
   DirtyNodeExecutionContext node_context{graph,
@@ -257,7 +294,7 @@ NodeOutput& RealTimeDirtyExecutor::execute(GraphModel& graph,
                                          dirty_plan.snapshot,
                                          dirty_plan.snapshot.graph_generation,
                                          node_mutexes};
-  RealTimeDirtyNodeExecutor node_executor(node_context);
+  RealTimeDirtyNodeExecutor node_executor(node_context, rt_write_buffer);
   auto run_rt_task = [&](int task_id) {
     run_planned_dirty_task(
         runtime, dirty_plan.entries, prepared.compute_plan, task_id,
@@ -269,8 +306,8 @@ NodeOutput& RealTimeDirtyExecutor::execute(GraphModel& graph,
   };
   auto validate_rt_source_boundaries = [&]() {
     std::lock_guard<std::mutex> lock(graph.graph_mutex_);
-    validate_dirty_source_boundaries_ready(graph, dirty_plan.snapshot,
-                                           DirtyDomain::RealTime);
+    validate_rt_source_boundaries_ready(graph, dirty_plan.snapshot,
+                                        rt_write_buffer);
   };
 
   run_dirty_source_first(
@@ -281,6 +318,7 @@ NodeOutput& RealTimeDirtyExecutor::execute(GraphModel& graph,
           validate_rt_source_boundaries},
       run_rt_task);
   graph_lock.lock();
+  rt_write_buffer.commit_to_graph(graph);
   return require_target_output(graph, request.node_id);
 }
 

@@ -301,8 +301,9 @@ task-pool siblings coordinated by compute intent.
 - HP:
   - currently advances throughput with a Micro_64/Macro_256 mix, preferring
     Macro_256 where appropriate.
-  - after completion, it triggers downsample updates into RT and synchronizes
-    versions.
+  - Global HP dirty ROI may refresh RT through downsample after completion.
+    RealTimeUpdate HP sibling work suppresses direct graph RT downsample writes;
+    the following RT sibling stages and commits its own proxy output.
 
 The planner may represent corresponding HP and RT ROIs using scale conversion
 for synchronization or inspection, but task dependencies stay inside each

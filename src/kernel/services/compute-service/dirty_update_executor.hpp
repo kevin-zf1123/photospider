@@ -47,6 +47,16 @@ struct DirtyUpdateRequest {
 
   /** @brief Dirty ROI in high-precision graph coordinates. */
   cv::Rect dirty_roi;
+
+  /**
+   * @brief Suppresses direct graph RT downsample writes after HP dirty work.
+   *
+   * @note RealTimeUpdate HP sibling work sets this flag because the following
+   * RT dirty path stages and commits its own proxy output through
+   * RealtimeDirtyWriteBuffer. GlobalHighPrecision dirty ROI keeps the legacy
+   * graph downsample refresh.
+   */
+  bool suppress_graph_downsample = false;
 };
 
 /**

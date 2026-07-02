@@ -191,8 +191,10 @@ The cache layer uses two node output states:
 
 `GraphCacheService` keeps cache commands centralized. HP code should use
 `cached_output_high_precision`; RT code should use `cached_output_real_time`
-only as interactive state. Formal cache save, load, and synchronization
-behavior, subsequent HP compute, and long-term storage should use HP output.
+only as interactive state. Dirty RT worker writes are staged through
+`RealtimeDirtyWriteBuffer` before graph commit, while formal cache save, load,
+and synchronization behavior, subsequent HP compute, and long-term storage
+should use HP output.
 
 ## ImageBuffer Contract
 

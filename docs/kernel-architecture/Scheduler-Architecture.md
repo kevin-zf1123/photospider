@@ -42,15 +42,14 @@ choose queue order, batching, worker policy, cancellation, and concrete
 execution resources, then dispatch work. They should not own graph-level
 dirty-region propagation or compute-task derivation.
 
-In the current parallel runtime path, a `RealTimeUpdate` request can deliberately
-submit both RT preview work and HP update work for the same dirty region. The RT
-work preserves interactive feedback, while the HP work keeps the mission pool
-and formal HP cache synchronized with the graph state. If this dual-submit path
-creates blocking, starvation, or worker re-entrancy concerns, those concerns
-belong in scheduler design: reserve or steal workers appropriately, use epochs
-and cancellation for stale RT work, and avoid waiting policies that can deadlock
-worker-owned execution. Do not solve this by making RT output a formal HP cache
-source.
+In the current `DirectGraphCommit` path, a `RealTimeUpdate` request still
+performs both HP and RT dirty work for the same dirty region, but
+`IntentUpdateCoordinator` runs the HP sibling before the RT sibling. The RT
+path stages proxy writes in `RealtimeDirtyWriteBuffer` and commits them after
+RT dirty work drains. Cross-intent HP/RT sibling concurrency is a future
+buffered-commit capability, not a scheduler workaround. Schedulers should keep
+handling resource dispatch for ready task callbacks, epochs, cancellation, and
+queue policy without making RT output a formal HP cache source.
 
 ## Current Dispatch State
 

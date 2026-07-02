@@ -172,7 +172,7 @@ planned parallel work 的 dispatch 契约。`GraphStateExecutor` 是 graph-state
 - RT/HP 版本和 ROI 字段。
 - 配置缓存根目录下的磁盘缓存文件。
 
-`GraphCacheService` 将缓存命令集中化。HP 代码应使用 `cached_output_high_precision`；RT 代码只能将 `cached_output_real_time` 用作交互式状态。正式缓存保存、加载和同步行为、后续 HP 计算以及长期存储应使用 HP 输出。
+`GraphCacheService` 将缓存命令集中化。HP 代码应使用 `cached_output_high_precision`；RT 代码只能将 `cached_output_real_time` 用作交互式状态。Dirty RT worker 写入会先通过 `RealtimeDirtyWriteBuffer` stage，再提交到 graph；正式缓存保存、加载和同步行为、后续 HP 计算以及长期存储应使用 HP 输出。
 
 ## ImageBuffer 契约
 
