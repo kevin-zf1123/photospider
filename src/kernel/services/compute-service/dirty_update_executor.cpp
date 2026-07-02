@@ -182,6 +182,50 @@ void validate_rt_source_boundaries_ready(
   }
 }
 
+/**
+ * @brief Selects the HP-space planning ROI for one HP dirty executor request.
+ *
+ * @param graph Graph containing the target HP cache used for forced full-frame
+ * dirty planning.
+ * @param request Dirty update request inherited from ComputeService.
+ * @return Requested dirty ROI for normal updates, or the full target HP extent
+ * for forced HP dirty updates.
+ * @throws GraphError when a forced dirty update cannot derive a valid current
+ * HP extent from the target node.
+ * @note Forced HP dirty updates do not seed existing HP output into the staging
+ * buffer, so their dirty plan must cover the entire authoritative HP frame
+ * before commit.
+ */
+cv::Rect hp_planning_roi_for_request(const GraphModel& graph,
+                                     const DirtyUpdateRequest& request) {
+  if (!request.force_recache) {
+    return request.dirty_roi;
+  }
+
+  const Node* target = graph.find_node(request.node_id);
+  if (!target) {
+    throw GraphError(GraphErrc::NotFound,
+                     "Cannot compute forced HP dirty update: node " +
+                         std::to_string(request.node_id) + " not found.");
+  }
+  const NodeOutput* target_output =
+      ComputeCachePolicy::reusable_output(*target);
+  if (!target_output) {
+    throw GraphError(GraphErrc::MissingDependency,
+                     "Cannot compute forced HP dirty update for node " +
+                         std::to_string(request.node_id) +
+                         ": existing HP output extent is unavailable.");
+  }
+  const ImageBuffer& buffer = target_output->image_buffer;
+  if (buffer.width <= 0 || buffer.height <= 0) {
+    throw GraphError(GraphErrc::InvalidParameter,
+                     "Cannot compute forced HP dirty update for node " +
+                         std::to_string(request.node_id) +
+                         ": existing HP output extent is invalid.");
+  }
+  return cv::Rect(0, 0, buffer.width, buffer.height);
+}
+
 }  // namespace
 
 HighPrecisionDirtyExecutor::HighPrecisionDirtyExecutor(
@@ -221,12 +265,12 @@ NodeOutput& HighPrecisionDirtyExecutor::execute(
 
   RoiPropagationService roi_propagation;
   DirtyRegionPlanner dirty_planner(traversal_, roi_propagation);
+  const cv::Rect planning_roi = hp_planning_roi_for_request(graph, request);
   auto prepared = prepare_dirty_execution(
       graph,
-      dirty_planner.plan_high_precision(graph, request.node_id,
-                                        request.dirty_roi),
+      dirty_planner.plan_high_precision(graph, request.node_id, planning_roi),
       ComputeRequest{ComputeIntent::GlobalHighPrecision, request.node_id, false,
-                     request.dirty_roi});
+                     planning_roi});
   HighPrecisionDirtyPlan& dirty_plan = prepared.dirty_plan;
   graph_lock.unlock();
 

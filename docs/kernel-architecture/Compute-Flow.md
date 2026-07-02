@@ -240,15 +240,21 @@ interruption behavior.
 
 `GlobalHighPrecision` is the full-quality path. Without a dirty ROI it performs
 normal full compute. With a dirty ROI it enters the HP dirty update path instead
-of the former full-recompute fallback.
+of the former unconditional full-recompute fallback.
 
 HP dirty-region update is a first-class dirty-ROI consumer, not just a full
-recompute fallback. It computes a backward ROI plan, aligns dirty regions to HP
-tile boundaries, clips the HP work set from the request's `ComputeTaskGraph`,
-updates affected HP tiles, records HP ROI/version metadata, and can schedule
-downsample work to refresh `RealtimeProxyGraph` state. `IntentUpdateCoordinator` routes
-global HP dirty requests to this path and records
-`intent_coordinator_global_dirty_update`.
+recompute fallback. Normal dirty ROI requests compute a backward ROI plan, align
+dirty regions to HP tile boundaries, clip the HP work set from the request's
+`ComputeTaskGraph`, update affected HP tiles, record HP ROI/version metadata,
+and can schedule downsample work to refresh `RealtimeProxyGraph` state.
+`IntentUpdateCoordinator` routes global HP dirty requests to this path and
+records `intent_coordinator_global_dirty_update`.
+
+Forced HP dirty updates are the exception: when `force_recache=true`, the HP
+staging buffer intentionally does not seed pixels from the previous HP cache, so
+the executor expands the HP planning ROI to the target node's full current HP
+extent before committing. This preserves complete authoritative HP output while
+keeping non-forced dirty ROI requests local.
 
 Dirty-region state planning now runs through the graph-scoped
 `DirtyRegionPlanner`, and the resulting `DirtyRegionSnapshot` feeds dirty
@@ -263,7 +269,9 @@ does not implicitly mean full-frame RT update.
 With a valid dirty ROI, realtime compute enables both paths. RT is launched
 first and updates a low-resolution `RealtimeProxyGraph`; HP updates the
 full-size authoritative output for the affected graph work through a staged
-buffer. When HP and RT scheduler runtimes are available,
+buffer. If the request is forced, the HP sibling follows the same full-frame HP
+planning rule as Global HP dirty update, while RT proxy work remains scoped to
+the RT dirty plan. When HP and RT scheduler runtimes are available,
 `IntentUpdateCoordinator` starts both siblings concurrently, waits for RT first,
 and uses a sibling commit gate so HP mutates `GraphModel` only after RT proxy
 commit succeeds. Without scheduler runtimes, the same callbacks run inline in

@@ -89,9 +89,10 @@ kernel-contract cleanup:
 - Add richer dirty snapshot visualization APIs after the frontend display
   contract is defined.
 - Global HP dirty ROI now routes through HP dirty planning instead of the former
-  full-recompute fallback. Evidence should include the coordinator stage,
-  planned work, and dirty snapshot artifacts before claiming performance
-  improvements beyond the covered path.
+  unconditional full-recompute fallback. Non-forced requests should prove local
+  dirty work selection; forced HP dirty requests should prove full-frame HP
+  planning and complete authoritative HP output before claiming correctness or
+  performance improvements beyond the covered path.
 
 The `ComputeService` split now has a dedicated `split-compute-service`
 OpenSpec change and a maintained plan in `Compute-Service-Split.md`. The first

@@ -178,14 +178,19 @@ RT dirty worker 写入 `RealtimeProxyWriteBuffer`，并提交到 runtime-owned
 
 ## GlobalHighPrecision
 
-`GlobalHighPrecision` 是完整质量路径。没有 dirty ROI 时，它执行普通完整计算。带 dirty ROI 时，它会进入 HP dirty update 路径，而不是过去的完整重算 fallback。
+`GlobalHighPrecision` 是完整质量路径。没有 dirty ROI 时，它执行普通完整计算。带 dirty ROI 时，它会进入 HP dirty update 路径，而不是过去无条件的完整重算 fallback。
 
-HP 脏区更新是一等的 dirty-ROI 消费方，而不只是完整重算 fallback。它会计算反向 ROI 计划，
-将脏区对齐到 HP tile 边界，从该 request 的 `ComputeTaskGraph` 中裁剪 HP work set，
-更新受影响 HP tile，记录 HP ROI/版本元数据，并可调度 downsample 工作刷新
-`RealtimeProxyGraph` 状态。
+HP 脏区更新是一等的 dirty-ROI 消费方，而不只是完整重算 fallback。普通 dirty ROI request
+会计算反向 ROI 计划，将脏区对齐到 HP tile 边界，从该 request 的 `ComputeTaskGraph`
+中裁剪 HP work set，更新受影响 HP tile，记录 HP ROI/版本元数据，并可调度 downsample
+工作刷新 `RealtimeProxyGraph` 状态。
 `IntentUpdateCoordinator` 会把 global HP dirty request 路由到该路径，并记录
 `intent_coordinator_global_dirty_update`。
+
+forced HP dirty update 是例外：当 `force_recache=true` 时，HP staging buffer
+有意不从旧 HP cache seed 像素，因此 executor 会在提交前把 HP planning ROI 扩展为目标节点
+当前完整 HP extent。这样可以保持 authoritative HP output 完整，同时让非 forced dirty ROI
+request 继续保持局部执行。
 
 Dirty-region state planning 现在通过图级 `DirtyRegionPlanner` 运行，产生的
 `DirtyRegionSnapshot` 会输入 dirty work-set materialization，并提供给交互层 inspection 摘要。
@@ -196,6 +201,8 @@ Dirty-region state planning 现在通过图级 `DirtyRegionPlanner` 运行，产
 
 带有效 dirty ROI 时，realtime 计算会启用两条路径。RT 会先启动并更新低分辨率
 `RealtimeProxyGraph`；HP 会通过 staged buffer 更新受影响 graph 工作的完整尺寸权威输出。
+如果 request 是 forced，HP sibling 会遵循与 Global HP dirty update 相同的 full-frame HP
+planning 规则；RT proxy work 仍然按 RT dirty plan 的局部范围执行。
 当 HP 和 RT scheduler runtime 都可用时，`IntentUpdateCoordinator` 会并发启动两个 sibling，
 先等待 RT，并通过 sibling commit gate 保证 HP 只在 RT proxy commit 成功后才修改
 `GraphModel`。没有 scheduler runtime 时，同一批 callback 会按 RT 后 HP 的顺序 inline 执行。

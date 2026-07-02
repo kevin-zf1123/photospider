@@ -43,7 +43,9 @@ class ComputeService {
      * @brief Clears selected in-memory caches before executing the request.
      *
      * @note Also invalidates cached full task graph expansions before planning
-     * so input-shape changes rebuild tiled task ROIs.
+     * so input-shape changes rebuild tiled task ROIs. For HP dirty updates this
+     * forces a full-frame HP plan because the staging buffer intentionally does
+     * not seed old HP pixels.
      */
     bool force_recache = false;
 

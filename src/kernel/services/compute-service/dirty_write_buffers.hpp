@@ -28,7 +28,8 @@ class HighPrecisionDirtyWriteBuffer {
    * @brief Constructs an HP staging buffer.
    *
    * @param seed_existing_outputs Whether ensure_output() should seed from
-   * existing GraphModel HP cache. Force-recache requests pass false.
+   * existing GraphModel HP cache. Force-recache HP dirty requests pass false
+   * only after the executor has expanded planning to the full HP frame.
    * @throws Nothing.
    */
   explicit HighPrecisionDirtyWriteBuffer(bool seed_existing_outputs = true);
@@ -61,7 +62,8 @@ class HighPrecisionDirtyWriteBuffer {
    * @throws GraphError when existing image output cannot be cloned; may throw
    * std::bad_alloc while allocating map entries or image storage.
    * @note When constructed with seed_existing_outputs=false, the staged output
-   * starts empty even if the graph already has HP cache.
+   * starts empty even if the graph already has HP cache; callers must then
+   * execute a full-output HP plan before commit.
    */
   NodeOutput& ensure_output(const Node& node);
 

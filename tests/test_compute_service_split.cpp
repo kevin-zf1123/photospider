@@ -1427,6 +1427,123 @@ TEST(GlobalHighPrecisionDirtyUpdate, UsesDirtyPlanningForGlobalHpDirtyRoi) {
                           }));
 }
 
+TEST(GlobalHighPrecisionDirtyUpdate, ForceRecacheRecomputesFullHpFrame) {
+  register_split_ops();
+  GraphModel graph("cache/global-hp-force-dirty-full-frame");
+  Node source = make_node(1, "split_plan", "source");
+  source.parameters["width"] = 128;
+  source.parameters["height"] = 128;
+  graph.add_node(source);
+  Node downstream = make_node(2, "split_plan", "tile");
+  downstream.image_inputs.push_back({1, "image"});
+  graph.add_node(downstream);
+  graph.rebuild_topology_index();
+
+  GraphTraversalService traversal;
+  GraphCacheService cache;
+  GraphEventService events;
+  ComputeService compute(traversal, cache, events);
+
+  ComputeService::Request full_request;
+  full_request.node_id = 2;
+  full_request.cache.precision = "float32";
+  full_request.cache.disable_disk_cache = true;
+  NodeOutput& initial_output = compute.compute(graph, full_request);
+  ASSERT_EQ(initial_output.image_buffer.width, 128);
+  ASSERT_EQ(initial_output.image_buffer.height, 128);
+
+  graph.mutate_node_runtime_state(2, [](GraphModel::NodeRuntimeState& state) {
+    ASSERT_TRUE(state.cached_output_high_precision.has_value());
+    toCvMat(state.cached_output_high_precision->image_buffer).setTo(9.0f);
+  });
+
+  ComputeService::Request dirty_request;
+  dirty_request.node_id = 2;
+  dirty_request.cache.precision = "float32";
+  dirty_request.cache.force_recache = true;
+  dirty_request.cache.disable_disk_cache = true;
+  dirty_request.intent = ComputeIntent::GlobalHighPrecision;
+  dirty_request.dirty_roi = cv::Rect(16, 16, 16, 16);
+  NodeOutput& forced_output = compute.compute(graph, dirty_request);
+
+  ASSERT_EQ(forced_output.image_buffer.width, 128);
+  ASSERT_EQ(forced_output.image_buffer.height, 128);
+  const cv::Mat forced_mat = toCvMat(forced_output.image_buffer);
+  for (int y = 0; y < forced_mat.rows; ++y) {
+    for (int x = 0; x < forced_mat.cols; ++x) {
+      EXPECT_FLOAT_EQ(forced_mat.at<float>(y, x), 2.0f)
+          << "forced HP dirty update must recompute full-frame pixel " << x
+          << "," << y;
+    }
+  }
+
+  ASSERT_TRUE(graph.last_dirty_region_snapshot.has_value());
+  ASSERT_TRUE(graph.last_dirty_region_snapshot->actual_dirty_rois.count(2));
+  EXPECT_EQ(graph.last_dirty_region_snapshot->actual_dirty_rois.at(2).front(),
+            cv::Rect(0, 0, 128, 128));
+  ASSERT_TRUE(graph.last_compute_plan_summary.has_value());
+  EXPECT_EQ(graph.last_compute_plan_summary->active_task_count,
+            graph.last_compute_plan_summary->task_count);
+}
+
+TEST(RealTimeDirtyUpdate, ForceRecacheHpSiblingCommitsCompleteHpOutput) {
+  register_split_ops();
+  GraphModel graph("cache/rt-force-dirty-hp-full-frame");
+  Node source = make_node(1, "split_plan", "source");
+  source.parameters["width"] = 128;
+  source.parameters["height"] = 128;
+  graph.add_node(source);
+  Node downstream = make_node(2, "split_plan", "tile");
+  downstream.image_inputs.push_back({1, "image"});
+  graph.add_node(downstream);
+  graph.rebuild_topology_index();
+
+  GraphTraversalService traversal;
+  GraphCacheService cache;
+  GraphEventService events;
+  ComputeService compute(traversal, cache, events);
+
+  ComputeService::Request full_request;
+  full_request.node_id = 2;
+  full_request.cache.precision = "float32";
+  full_request.cache.disable_disk_cache = true;
+  NodeOutput& initial_output = compute.compute(graph, full_request);
+  ASSERT_EQ(initial_output.image_buffer.width, 128);
+  ASSERT_EQ(initial_output.image_buffer.height, 128);
+
+  graph.mutate_node_runtime_state(2, [](GraphModel::NodeRuntimeState& state) {
+    ASSERT_TRUE(state.cached_output_high_precision.has_value());
+    toCvMat(state.cached_output_high_precision->image_buffer).setTo(9.0f);
+  });
+
+  ComputeService::Request rt_request;
+  rt_request.node_id = 2;
+  rt_request.cache.precision = "float32";
+  rt_request.cache.force_recache = true;
+  rt_request.cache.disable_disk_cache = true;
+  rt_request.intent = ComputeIntent::RealTimeUpdate;
+  rt_request.dirty_roi = cv::Rect(16, 16, 16, 16);
+  NodeOutput& rt_output = compute.compute(graph, rt_request);
+
+  EXPECT_GT(rt_output.image_buffer.width, 0);
+  EXPECT_GT(rt_output.image_buffer.height, 0);
+  ASSERT_TRUE(graph.node(2).cached_output_high_precision.has_value());
+  const cv::Mat hp_mat =
+      toCvMat(graph.node(2).cached_output_high_precision->image_buffer);
+  ASSERT_EQ(hp_mat.cols, 128);
+  ASSERT_EQ(hp_mat.rows, 128);
+  for (int y = 0; y < hp_mat.rows; ++y) {
+    for (int x = 0; x < hp_mat.cols; ++x) {
+      EXPECT_FLOAT_EQ(hp_mat.at<float>(y, x), 2.0f)
+          << "RT HP sibling must commit full-frame HP pixel " << x << "," << y;
+    }
+  }
+  ASSERT_TRUE(graph.last_dirty_region_snapshot.has_value());
+  ASSERT_TRUE(graph.last_dirty_region_snapshot->actual_dirty_rois.count(2));
+  EXPECT_EQ(graph.last_dirty_region_snapshot->actual_dirty_rois.at(2).front(),
+            cv::Rect(0, 0, 128, 128));
+}
+
 TEST(DirtySourceLifecycleFacade, UsesInteractionServicePublicBoundary) {
   Kernel kernel;
   InteractionService svc(kernel);
