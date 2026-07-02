@@ -143,20 +143,24 @@ compute::ComputeTaskDispatcher::ComputeDispatchRequest make_dispatch_request(
  * @brief Builds a dirty-executor request from a service request.
  *
  * @param request Service request validated by IntentUpdateCoordinator.
+ * @param suppress_graph_downsample Whether HP dirty execution should skip
+ * direct HP-to-RT graph downsample writes for this request.
  * @return DirtyUpdateRequest with the requested dirty ROI.
  * @throws std::bad_optional_access if called before dirty_roi validation.
  * @note Intent-specific executor selection happens in ComputeService; this
  * request only carries the knobs shared by HP and RT dirty executors.
  */
 compute::DirtyUpdateRequest make_dirty_update_request(
-    const ComputeService::Request& request) {
+    const ComputeService::Request& request,
+    bool suppress_graph_downsample = false) {
   return compute::DirtyUpdateRequest{request.node_id,
                                      request.cache.precision,
                                      request.cache.force_recache,
                                      request.telemetry.enable_timing,
                                      request.cache.disable_disk_cache,
                                      request.telemetry.benchmark_events,
-                                     request.dirty_roi.value()};
+                                     request.dirty_roi.value(),
+                                     suppress_graph_downsample};
 }
 
 /**
@@ -457,7 +461,10 @@ NodeOutput& ComputeService::compute_intent_update_impl(
   };
   callbacks.run_high_precision_update = [&]() {
     const Request silent_request = make_silent_dirty_request(request);
-    compute_high_precision_update(graph, strategy, silent_request);
+    compute::HighPrecisionDirtyExecutor executor(traversal_, events_);
+    executor.execute(graph, strategy.runtime,
+                     make_dirty_update_request(
+                         silent_request, true));
   };
   callbacks.run_real_time_update = [&]() -> NodeOutput& {
     return compute_real_time_update(graph, strategy, request);

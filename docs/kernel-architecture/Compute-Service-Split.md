@@ -180,17 +180,20 @@ requests enable the HP path only. `RealTimeUpdate` requests enable both HP and
 RT work for the dirty ROI regardless of whether the caller selected
 single-threaded, parallel, GPU, or another scheduler/resource policy. The
 current implementation coordinates this through `IntentUpdateCoordinator`.
-Parallel execution starts HP and RT dirty siblings concurrently, each sibling
-submits ready dirty work to its intent-specific scheduler task runtime, and the
-coordinator waits for RT then HP before returning the RT output.
-Single-threaded execution runs the same intent work inline.
+Under the current `DirectGraphCommit` policy, the coordinator runs the HP dirty
+sibling and then the RT dirty sibling inline. Each sibling may still submit
+ready dirty work to its intent-specific scheduler task runtime internally, but
+cross-intent HP/RT sibling concurrency is deferred until buffered commit covers
+both output domains.
 
 The HP and RT paths keep separate single-domain plans and dirty snapshots. The
 HP path uses a `GlobalHighPrecision` plan and clips HP work from an HP dirty
 snapshot. The RT path uses a `RealTimeUpdate` plan and clips RT work from an RT
-dirty snapshot. A single full graph expansion or pruner pass must not emit both
-HP and RT task pools. Future task-pool extensions should keep this per-domain
-expansion and pruning pattern.
+dirty snapshot. RT dirty node execution stages proxy output through
+`RealtimeDirtyWriteBuffer` and commits it to `GraphModel` only after the RT
+work set drains. A single full graph expansion or pruner pass must not emit
+both HP and RT task pools. Future task-pool extensions should keep this
+per-domain expansion, pruning, and commit pattern.
 
 TODO: planner plugin ABI remains explicitly deferred to a later change.
 

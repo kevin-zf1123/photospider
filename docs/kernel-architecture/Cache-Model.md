@@ -34,6 +34,13 @@ RT compute writes `cached_output_real_time`. RT state is the interactive preview
 or proxy result. It may be lower resolution than HP output and is not formal
 cache authority.
 
+Dirty RT execution does not write graph-owned RT fields directly from worker
+tasks. It stages proxy output, ROI metadata, version counters, and dirty-source
+commit generation in `RealtimeDirtyWriteBuffer`, then commits that staged state
+to `GraphModel` after the RT dirty work set drains. This keeps the current
+`DirectGraphCommit` path deterministic while leaving room for a later buffered
+commit policy to restore cross-intent HP/RT sibling concurrency.
+
 Associated fields:
 
 | Field | Meaning |
@@ -84,7 +91,8 @@ cache state.
 ## Cache Rules
 
 - New HP code writes `cached_output_high_precision`.
-- New RT code writes `cached_output_real_time` as transient interactive state.
+- New RT code writes `cached_output_real_time` as transient interactive state,
+  using `RealtimeDirtyWriteBuffer` for dirty worker writes before graph commit.
 - Formal cache save/load/sync behavior, subsequent HP compute, and long-term
   storage must use HP output and must not promote RT output to authoritative
   cache.

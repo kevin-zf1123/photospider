@@ -35,7 +35,11 @@ condition-variable sleep 时，shutdown 丢失唤醒。
 中拉取 planned 或 annotated task，选择队列顺序、批处理、worker 策略、取消和具体执行资源，
 然后分发工作。它们不应拥有图级 dirty-region propagation 或 compute-task derivation。
 
-在当前并行运行时路径中，一个 `RealTimeUpdate` 请求可以有意为同一脏区同时提交 RT 预览工作与 HP 更新工作。RT 工作保留交互反馈，而 HP 工作让任务池和正式 HP 缓存与图状态保持同步。如果这个双提交路径带来阻塞、饥饿或 worker 重入问题，这些问题属于调度器设计责任：应恰当地保留或窃取 worker，使用 epoch 和取消处理陈旧 RT 工作，并避免可能让 worker 所有的执行死锁的等待策略。不要通过让 RT 输出成为正式 HP 缓存来源来解决。
+在当前 `DirectGraphCommit` 路径中，一个 `RealTimeUpdate` 请求仍会为同一脏区执行 HP 和 RT dirty
+work，但 `IntentUpdateCoordinator` 会先运行 HP sibling，再运行 RT sibling。RT 路径会把代理写入
+stage 到 `RealtimeDirtyWriteBuffer`，并在 RT dirty work drain 后提交。跨 intent 的 HP/RT
+sibling 并发是后续 buffered-commit 能力，不是 scheduler workaround。Scheduler 应继续只负责
+ready task callback 的资源 dispatch、epoch、取消和队列策略，不要让 RT 输出成为正式 HP 缓存来源。
 
 ## 当前 Dispatch 状态
 

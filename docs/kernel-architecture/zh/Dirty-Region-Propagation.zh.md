@@ -198,7 +198,8 @@ LUT 的生命周期附着在 `Node::dependency_lut`，每当参数集 `parameter
 
 - HP：
   - 当前采用 Micro_64/Macro_256 混合（优先 Macro_256）推进吞吐；
-  - 完成后触发 Downsample 更新 RT，并同步版本。
+  - Global HP dirty ROI 完成后可以通过 downsample 刷新 RT。RealTimeUpdate HP sibling work
+    会抑制直接 graph RT downsample 写入；后续 RT sibling 会 stage 并提交自己的代理输出。
 
 Planner 可以为了同步或 inspection 使用尺度转换表达相互对应的 HP/RT ROI，但 task dependency 仍留在各自 domain 内：RT Micro_16 <-> RT Macro_64，HP Micro_64 <-> HP Macro_256。
 

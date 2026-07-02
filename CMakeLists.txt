@@ -164,6 +164,7 @@ set(COMPUTE_SOURCES
     src/kernel/services/compute-service/intent_update_coordinator.cpp
     src/kernel/services/compute-service/node_executor.cpp
     src/kernel/services/compute-service/node_input_resolver.cpp
+    src/kernel/services/compute-service/realtime_dirty_write_buffer.cpp
     src/kernel/services/compute-service/compute_task_dispatcher.cpp
     src/kernel/services/compute_service.cpp
     src/kernel/services/graph_event_service.cpp
