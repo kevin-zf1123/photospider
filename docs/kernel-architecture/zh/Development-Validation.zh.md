@@ -56,8 +56,9 @@ build/test 命令，并提供新的 GitHub Actions 证据。
 以下是已识别的后续重构，不属于当前 kernel-contract 清理：
 
 - 在 frontend 展示契约定义后，添加更丰富的 dirty snapshot 可视化 API。
-- Global HP dirty ROI 现在会进入 HP dirty planning，而不是过去的完整重算 fallback。
-  在宣称 covered path 之外的性能收益前，证据应包含 coordinator stage、planned work 和 dirty snapshot artifact。
+- Global HP dirty ROI 现在会进入 HP dirty planning，而不是过去无条件的完整重算 fallback。
+  非 forced request 应证明局部 dirty work selection；forced HP dirty request 应证明 full-frame
+  HP planning 和完整 authoritative HP output，然后才能宣称 covered path 之外的正确性或性能收益。
 
 `ComputeService` 拆分现在已有专门的 `split-compute-service` OpenSpec change，
 并在维护文档 `Compute-Service-Split.md` 中记录计划。第一轮拆分已经通过

@@ -36,7 +36,14 @@ struct DirtyUpdateRequest {
   /** @brief Cache precision label from the public compute entry point. */
   std::string cache_precision;
 
-  /** @brief Whether existing intent-specific dirty caches should be cleared. */
+  /**
+   * @brief Whether this request must ignore existing intent-specific dirty
+   * cache.
+   *
+   * @note HP dirty execution upgrades forced requests to a full-frame HP plan
+   * because its staging buffer is not seeded from existing HP output. RT dirty
+   * execution keeps RT proxy writes scoped to the RT dirty plan.
+   */
   bool force_recache = false;
 
   /** @brief Whether timing collection was requested by the caller. */
@@ -77,8 +84,10 @@ struct DirtyUpdateRequest {
  * The executor owns the HP dirty update flow that used to live directly in
  * ComputeService: dirty-region planning, compute-task pruning, source-first
  * task submission, tiled or monolithic HP node execution, HP ROI/version
- * commits, and optional HP-to-RT downsample refresh. ComputeService remains the
- * facade and delegates one fully validated request at a time.
+ * commits, and optional HP-to-RT downsample refresh. Forced dirty requests use
+ * the target node's current HP extent as the planning ROI so commit installs a
+ * complete authoritative HP output. ComputeService remains the facade and
+ * delegates one fully validated request at a time.
  *
  * @note Planning/inspection and final validation take graph_mutex_, while
  * scheduler execution runs outside the outer graph lock and relies on
@@ -111,7 +120,9 @@ class HighPrecisionDirtyExecutor {
    * dispatch, scheduler submission, or target output validation fails.
    * @note The method is phase-split: planning/reset and final validation are
    * serialized with graph_mutex_, but scheduler task execution is not wrapped
-   * by the outer graph lock.
+   * by the outer graph lock. Forced HP dirty requests must already have a valid
+   * target HP extent because they recompute the full frame instead of
+   * preserving pixels from the old HP cache.
    */
   NodeOutput& execute(GraphModel& graph, RealtimeProxyGraph& proxy_graph,
                       GraphRuntime* runtime, const DirtyUpdateRequest& request);

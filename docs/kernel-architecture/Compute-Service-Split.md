@@ -186,15 +186,17 @@ the sibling commit gate keep HP `GraphModel` mutation behind RT proxy commit.
 Without scheduler runtimes, the same work runs inline in RT-then-HP order.
 
 The HP and RT paths keep separate single-domain plans and dirty snapshots. The
-HP path uses a `GlobalHighPrecision` plan and clips HP work from an HP dirty
-snapshot. The RT path uses a `RealTimeUpdate` plan and clips RT work from an RT
-dirty snapshot. RT dirty node execution stages proxy output through
-`RealtimeProxyWriteBuffer` and commits it to `RealtimeProxyGraph` only after
-the RT work set drains. HP dirty node execution stages HP output through
-`HighPrecisionDirtyWriteBuffer` and commits it to `GraphModel` after the RT
-gate opens. A single full graph expansion or pruner pass must not emit both HP
-and RT task pools. Future task-pool extensions should keep this per-domain
-expansion, pruning, and commit pattern.
+HP path uses a `GlobalHighPrecision` plan and normally clips HP work from an HP
+dirty snapshot. When HP dirty execution is forced, it expands the HP planning
+ROI to the target node's full current HP extent because the HP staging buffer is
+not seeded from old pixels. The RT path uses a `RealTimeUpdate` plan and clips
+RT work from an RT dirty snapshot. RT dirty node execution stages proxy output
+through `RealtimeProxyWriteBuffer` and commits it to `RealtimeProxyGraph` only
+after the RT work set drains. HP dirty node execution stages HP output through
+`HighPrecisionDirtyWriteBuffer` and commits it to `GraphModel` after the RT gate
+opens. A single full graph expansion or pruner pass must not emit both HP and RT
+task pools. Future task-pool extensions should keep this per-domain expansion,
+pruning, and commit pattern.
 
 TODO: planner plugin ABI remains explicitly deferred to a later change.
 
@@ -310,9 +312,12 @@ frontend display contract.
 ## Global HP Dirty ROI
 
 Global HP compute with a dirty ROI routes through HP dirty planning. The HP
-dirty update accepts dirty ROI and clips HP work from the high-precision task
-graph so large graphs and large images do not pay for unaffected work. The
-coordinator records `intent_coordinator_global_dirty_update` for this path.
+dirty update accepts dirty ROI and normally clips HP work from the
+high-precision task graph so large graphs and large images do not pay for
+unaffected work. If `force_recache=true`, the executor instead plans the full
+target HP frame before commit because staging starts empty and cannot preserve
+ROI-external pixels from the previous HP cache. The coordinator records
+`intent_coordinator_global_dirty_update` for this path.
 
 ## Validation Expectations
 
