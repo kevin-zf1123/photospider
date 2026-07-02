@@ -181,20 +181,22 @@ live in `custom_ops/`.
 
 ## Cache Model
 
-The cache layer uses two node output states:
+The cache layer uses one node-local formal cache plus one runtime-owned RT
+proxy graph:
 
 - `Node::cached_output_high_precision`: formal reusable HP cache.
-- `Node::cached_output_real_time`: transient RT preview/update state, not
-  formal cache authority.
-- RT/HP version and ROI fields
+- `RealtimeProxyGraph`: transient low-resolution RT preview/update state keyed
+  by node id, not formal cache authority.
+- HP version/ROI fields on `Node`; RT version/ROI fields on proxy node state.
 - disk cache files under the configured cache root
 
 `GraphCacheService` keeps cache commands centralized. HP code should use
-`cached_output_high_precision`; RT code should use `cached_output_real_time`
-only as interactive state. Dirty RT worker writes are staged through
-`RealtimeDirtyWriteBuffer` before graph commit, while formal cache save, load,
-and synchronization behavior, subsequent HP compute, and long-term storage
-should use HP output.
+`cached_output_high_precision`; RT code should use `RealtimeProxyGraph` only as
+interactive state. Dirty RT worker writes are staged through
+`RealtimeProxyWriteBuffer` before proxy commit; dirty HP worker writes are
+staged through `HighPrecisionDirtyWriteBuffer` before graph commit. Formal
+cache save, load, synchronization behavior, subsequent HP compute, and
+long-term storage use HP output.
 
 ## ImageBuffer Contract
 

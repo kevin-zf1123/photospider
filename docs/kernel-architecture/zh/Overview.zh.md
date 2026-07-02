@@ -165,14 +165,14 @@ planned parallel work 的 dispatch 契约。`GraphStateExecutor` 是 graph-state
 
 ## 缓存模型
 
-缓存层使用两类节点输出状态：
+缓存层使用一个 node-local 正式缓存，加上一个 runtime-owned RT proxy graph：
 
 - `Node::cached_output_high_precision`：正式可复用 HP 缓存。
-- `Node::cached_output_real_time`：临时 RT 预览/更新状态，不是正式缓存权威。
-- RT/HP 版本和 ROI 字段。
+- `RealtimeProxyGraph`：按 node id 保存的低分辨率临时 RT 预览/更新状态，不是正式缓存权威。
+- HP version/ROI 字段位于 `Node`；RT version/ROI 字段位于 proxy node state。
 - 配置缓存根目录下的磁盘缓存文件。
 
-`GraphCacheService` 将缓存命令集中化。HP 代码应使用 `cached_output_high_precision`；RT 代码只能将 `cached_output_real_time` 用作交互式状态。Dirty RT worker 写入会先通过 `RealtimeDirtyWriteBuffer` stage，再提交到 graph；正式缓存保存、加载和同步行为、后续 HP 计算以及长期存储应使用 HP 输出。
+`GraphCacheService` 将缓存命令集中化。HP 代码应使用 `cached_output_high_precision`；RT 代码只能将 `RealtimeProxyGraph` 用作交互式状态。Dirty RT worker 写入会先通过 `RealtimeProxyWriteBuffer` stage，再提交到 proxy；dirty HP worker 写入会先通过 `HighPrecisionDirtyWriteBuffer` stage，再提交到 graph。正式缓存保存、加载和同步行为、后续 HP 计算以及长期存储应使用 HP 输出。
 
 ## ImageBuffer 契约
 

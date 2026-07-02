@@ -29,6 +29,9 @@ typedef void* id;
 namespace ps {
 
 class GraphRuntime;  // 前向声明
+namespace compute {
+class RealtimeProxyGraph;
+}  // namespace compute
 
 class GraphRuntime {
  public:
@@ -76,6 +79,16 @@ class GraphRuntime {
   GraphModel& model() { return model_; }
   GraphStateExecutor& graph_state() { return graph_state_; }
   GraphEventService& event_service() { return event_service_; }
+  /**
+   * @brief Returns the runtime-owned low-resolution RT proxy graph.
+   *
+   * @return Mutable proxy graph used by RealTimeUpdate dirty execution.
+   * @throws Nothing.
+   * @note The proxy graph is separate from GraphModel. Callers synchronize it
+   * with the model under graph-state serialization before RT planning or
+   * commit. It stores only transient RT output state keyed by node id.
+   */
+  compute::RealtimeProxyGraph& realtime_proxy_graph();
 
   void log_event(SchedulerEvent::Action action, int node_id);
   void log_event(SchedulerEvent::Action action, int node_id, int worker_id,
@@ -124,6 +137,7 @@ class GraphRuntime {
   GraphModel model_;
   GraphStateExecutor graph_state_;
   GraphEventService event_service_;
+  std::unique_ptr<compute::RealtimeProxyGraph> realtime_proxy_graph_;
 
   // [M3.2 新增] 调度器映射表
   // 根据 ComputeIntent 路由到不同的调度器实例

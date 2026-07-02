@@ -55,14 +55,14 @@ std::pair<int, DataType> infer_staged_rt_output_spec(
 }  // namespace
 
 HighPrecisionDirtyNodeExecutor::HighPrecisionDirtyNodeExecutor(
-    DirtyNodeExecutionContext context, DownsampleRequestSink downsample_sink)
+    DirtyNodeExecutionContext context,
+    HighPrecisionDirtyWriteBuffer& hp_write_buffer)
     : graph_(context.graph),
       runtime_(context.runtime),
       events_(context.events),
       snapshot_(context.snapshot),
       dirty_generation_(context.dirty_generation),
-      downsample_requests_(downsample_sink.requests),
-      downsample_requests_mutex_(downsample_sink.mutex),
+      hp_write_buffer_(hp_write_buffer),
       node_mutexes_(context.node_mutexes) {
 }  // NOLINT(whitespace/indent_namespace)
 
@@ -109,7 +109,7 @@ void HighPrecisionDirtyNodeExecutor::execute(Node& node,
                            node_for_exec.type + ":" + node_for_exec.subtype);
     }
     std::lock_guard<std::mutex> lock(node_mutex(node.id));
-    node.cached_output_high_precision = std::move(result);
+    hp_write_buffer_.ensure_output(node) = std::move(result);
   } else {
     throw GraphError(GraphErrc::NoOperation,
                      "No suitable HP operator (tiled or monolithic) for " +
@@ -119,7 +119,6 @@ void HighPrecisionDirtyNodeExecutor::execute(Node& node,
   {
     std::lock_guard<std::mutex> lock(node_mutex(node.id));
     commit_node(node, entry, dirty_source);
-    queue_downsample_request(node, entry);
   }
 }
 
@@ -128,6 +127,10 @@ ResolvedNodeInputs HighPrecisionDirtyNodeExecutor::resolve_inputs(
   return NodeInputResolver::resolve(
       node,
       [&](int upstream_id) -> const NodeOutput* {
+        if (const NodeOutput* staged =
+                hp_write_buffer_.find_output(upstream_id)) {
+          return staged;
+        }
         const Node* upstream = graph_.find_node(upstream_id);
         if (!upstream) {
           return nullptr;
@@ -164,12 +167,12 @@ void HighPrecisionDirtyNodeExecutor::execute_operation(
 ImageBuffer& HighPrecisionDirtyNodeExecutor::ensure_hp_buffer(
     Node& node, const HpPlanEntry& entry,
     const std::vector<const NodeOutput*>& image_inputs_ready) const {
-  auto [channels, dtype] =
-      infer_output_spec(node.cached_output_high_precision, image_inputs_ready);
-  if (!node.cached_output_high_precision) {
-    node.cached_output_high_precision = NodeOutput{};
-  }
-  ImageBuffer& hp_buffer = node.cached_output_high_precision->image_buffer;
+  NodeOutput& staged_output = hp_write_buffer_.ensure_output(node);
+  std::optional<NodeOutput> staged_shape;
+  staged_shape = staged_output;
+  auto [channels, dtype] = infer_output_spec(
+      staged_shape, image_inputs_ready, &node.cached_output_high_precision);
+  ImageBuffer& hp_buffer = staged_output.image_buffer;
   const bool needs_alloc = (hp_buffer.width != entry.hp_size.width) ||
                            (hp_buffer.height != entry.hp_size.height) ||
                            (hp_buffer.channels != channels) ||
@@ -206,43 +209,33 @@ void HighPrecisionDirtyNodeExecutor::execute_tiled(
 void HighPrecisionDirtyNodeExecutor::execute_monolithic(
     Node& node, const MonolithicOpFunc& mono_fn,
     const std::vector<const NodeOutput*>& image_inputs_ready) const {
-  node.cached_output_high_precision = mono_fn(node, image_inputs_ready);
-  if (!node.cached_output_high_precision) {
+  NodeOutput result = mono_fn(node, image_inputs_ready);
+  if (!result.image_buffer.data && result.data.empty()) {
     throw GraphError(GraphErrc::ComputeError,
                      "Monolithic HP operator produced no output for " +
                          node.type + ":" + node.subtype);
   }
+  hp_write_buffer_.ensure_output(node) = std::move(result);
 }
 
 void HighPrecisionDirtyNodeExecutor::commit_node(Node& node,
                                                  const HpPlanEntry& entry,
                                                  bool dirty_source) {
-  node.hp_roi =
-      node.hp_roi.has_value()
-          ? clip_rect(merge_rect(*node.hp_roi, entry.roi_hp), entry.hp_size)
-          : entry.roi_hp;
-  node.hp_version++;
-  if (dirty_source) {
-    graph_.dirty_source_hp_commit_generation[node.id] = dirty_generation_;
-  }
+  hp_write_buffer_.mark_updated(node, entry.roi_hp, entry.hp_size, dirty_source,
+                                dirty_generation_);
   events_.push(node.id, node.name, "hp_update", 0.0);
-}
-
-void HighPrecisionDirtyNodeExecutor::queue_downsample_request(
-    const Node& node, const HpPlanEntry& entry) {
-  if (!runtime_) {
-    return;
-  }
-  std::lock_guard<std::mutex> lock(downsample_requests_mutex_);
-  downsample_requests_.push_back({node.id, entry.roi_hp, node.hp_version});
 }
 
 bool HighPrecisionDirtyNodeExecutor::should_skip_node(const Node& node,
                                                       bool dirty_source) const {
-  return dirty_source && should_skip_stale_dirty_source(
-                             runtime_, node.id,
-                             graph_.dirty_source_hp_commit_generation[node.id],
-                             dirty_generation_);
+  uint64_t committed_generation = 0;
+  auto generation_it = graph_.dirty_source_hp_commit_generation.find(node.id);
+  if (generation_it != graph_.dirty_source_hp_commit_generation.end()) {
+    committed_generation = generation_it->second;
+  }
+  return dirty_source &&
+         should_skip_stale_dirty_source(runtime_, node.id, committed_generation,
+                                        dirty_generation_);
 }
 
 std::mutex& HighPrecisionDirtyNodeExecutor::node_mutex(int node_id) const {
@@ -250,13 +243,14 @@ std::mutex& HighPrecisionDirtyNodeExecutor::node_mutex(int node_id) const {
 }
 
 RealTimeDirtyNodeExecutor::RealTimeDirtyNodeExecutor(
-    DirtyNodeExecutionContext context,
-    RealtimeDirtyWriteBuffer& rt_write_buffer)
+    DirtyNodeExecutionContext context, RealtimeProxyGraph& proxy_graph,
+    RealtimeProxyWriteBuffer& rt_write_buffer)
     : graph_(context.graph),
       runtime_(context.runtime),
       events_(context.events),
       snapshot_(context.snapshot),
       dirty_generation_(context.dirty_generation),
+      proxy_graph_(proxy_graph),
       rt_write_buffer_(rt_write_buffer),
       node_mutexes_(context.node_mutexes) {
 }  // NOLINT(whitespace/indent_namespace)
@@ -292,7 +286,7 @@ void RealTimeDirtyNodeExecutor::execute(Node& node, const RtPlanEntry& entry) {
     ImageBuffer& rt_buffer =
         ensure_rt_buffer(node, entry, resolved_inputs.image_inputs);
     copy_monolithic_image_roi(result, entry, rt_buffer);
-    rt_write_buffer_.ensure_output(node).data = result.data;
+    rt_write_buffer_.ensure_output(node.id).data = result.data;
   } else {
     ImageBuffer* rt_buffer = nullptr;
     {
@@ -317,11 +311,15 @@ ResolvedNodeInputs RealTimeDirtyNodeExecutor::resolve_inputs(Node& node) const {
                 rt_write_buffer_.find_output(upstream_id)) {
           return staged;
         }
+        if (const NodeOutput* proxy_output =
+                proxy_graph_.find_output(upstream_id)) {
+          return proxy_output;
+        }
         const Node* upstream = graph_.find_node(upstream_id);
         if (!upstream) {
           return nullptr;
         }
-        return ComputeCachePolicy::interactive_output(*upstream);
+        return ComputeCachePolicy::reusable_output(*upstream);
       },
       "RT update");
 }
@@ -340,7 +338,7 @@ RealTimeDirtyNodeExecutor::resolve_operation(const Node& node) const {
 ImageBuffer& RealTimeDirtyNodeExecutor::ensure_rt_buffer(
     const Node& node, const RtPlanEntry& entry,
     const std::vector<const NodeOutput*>& image_inputs_ready) const {
-  NodeOutput& staged_output = rt_write_buffer_.ensure_output(node);
+  NodeOutput& staged_output = rt_write_buffer_.ensure_output(node.id);
   auto [channels, dtype] = infer_staged_rt_output_spec(
       staged_output, image_inputs_ready, node.cached_output_high_precision);
   ImageBuffer& rt_buffer = staged_output.image_buffer;
@@ -386,7 +384,7 @@ void RealTimeDirtyNodeExecutor::execute_monolithic(
     ImageBuffer& rt_buffer, const MonolithicOpFunc& mono_fn) const {
   NodeOutput result = mono_fn(node, image_inputs_ready);
   copy_monolithic_image_roi(result, entry, rt_buffer);
-  rt_write_buffer_.ensure_output(node).data = result.data;
+  rt_write_buffer_.ensure_output(node.id).data = result.data;
 }
 
 void RealTimeDirtyNodeExecutor::copy_monolithic_image_roi(
@@ -451,11 +449,8 @@ void RealTimeDirtyNodeExecutor::commit_node(Node& node,
 
 bool RealTimeDirtyNodeExecutor::should_skip_node(const Node& node,
                                                  bool dirty_source) const {
-  uint64_t committed_generation = 0;
-  auto generation_it = graph_.dirty_source_rt_commit_generation.find(node.id);
-  if (generation_it != graph_.dirty_source_rt_commit_generation.end()) {
-    committed_generation = generation_it->second;
-  }
+  const uint64_t committed_generation =
+      proxy_graph_.dirty_source_generation(node.id);
   return dirty_source &&
          should_skip_stale_dirty_source(runtime_, node.id, committed_generation,
                                         dirty_generation_);

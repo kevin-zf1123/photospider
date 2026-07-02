@@ -79,7 +79,7 @@ normalization from repeating per tile.
 The split must preserve the existing cache contract:
 
 - `cached_output_high_precision` is the only formal reusable cache.
-- `cached_output_real_time` is transient interactive state.
+- `RealtimeProxyGraph` owns transient RT interactive state outside `GraphModel`.
 
 Formal HP writes and disk cache authority are handled through
 `cached_output_high_precision`; RT output is never promoted to reusable cache
@@ -180,20 +180,21 @@ requests enable the HP path only. `RealTimeUpdate` requests enable both HP and
 RT work for the dirty ROI regardless of whether the caller selected
 single-threaded, parallel, GPU, or another scheduler/resource policy. The
 current implementation coordinates this through `IntentUpdateCoordinator`.
-Under the current `DirectGraphCommit` policy, the coordinator runs the HP dirty
-sibling and then the RT dirty sibling inline. Each sibling may still submit
-ready dirty work to its intent-specific scheduler task runtime internally, but
-cross-intent HP/RT sibling concurrency is deferred until buffered commit covers
-both output domains.
+When both scheduler task runtimes are available, the coordinator starts the RT
+dirty sibling first, starts the HP sibling second, waits for RT first, and lets
+the sibling commit gate keep HP `GraphModel` mutation behind RT proxy commit.
+Without scheduler runtimes, the same work runs inline in RT-then-HP order.
 
 The HP and RT paths keep separate single-domain plans and dirty snapshots. The
 HP path uses a `GlobalHighPrecision` plan and clips HP work from an HP dirty
 snapshot. The RT path uses a `RealTimeUpdate` plan and clips RT work from an RT
 dirty snapshot. RT dirty node execution stages proxy output through
-`RealtimeDirtyWriteBuffer` and commits it to `GraphModel` only after the RT
-work set drains. A single full graph expansion or pruner pass must not emit
-both HP and RT task pools. Future task-pool extensions should keep this
-per-domain expansion, pruning, and commit pattern.
+`RealtimeProxyWriteBuffer` and commits it to `RealtimeProxyGraph` only after
+the RT work set drains. HP dirty node execution stages HP output through
+`HighPrecisionDirtyWriteBuffer` and commits it to `GraphModel` after the RT
+gate opens. A single full graph expansion or pruner pass must not emit both HP
+and RT task pools. Future task-pool extensions should keep this per-domain
+expansion, pruning, and commit pattern.
 
 TODO: planner plugin ABI remains explicitly deferred to a later change.
 

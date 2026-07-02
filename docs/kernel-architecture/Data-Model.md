@@ -111,18 +111,18 @@ The cache-related node fields are:
 | Field | Status | Meaning |
 | --- | --- | --- |
 | `cached_output_high_precision` | Formal cache | HP cache for full-quality reusable output. |
-| `cached_output_real_time` | Transient RT state | Interactive preview/update output. |
 
 Only HP output is formal reusable cache. That means only HP output may feed
 subsequent HP compute, disk cache, long-term storage, and other reusable cache
-behavior. `cached_output_real_time` is transient interactive state and must not
-be used as authoritative cached output.
+behavior. RT output is not stored on `Node`; it lives in `RealtimeProxyGraph`,
+which mirrors node ids and stores low-resolution proxy output, HP-space ROI,
+version, and RT dirty-source generation.
 
-Dirty RT worker tasks stage `cached_output_real_time`, `rt_roi`, `rt_version`,
-and dirty-source commit generation through `RealtimeDirtyWriteBuffer` before a
-single graph commit. Dirty HP still writes the formal HP cache directly under
-the current `DirectGraphCommit` policy; HP migration to a general output buffer
-belongs to the later staged commit work.
+Dirty RT worker tasks stage proxy output through `RealtimeProxyWriteBuffer`
+before committing to `RealtimeProxyGraph`. Dirty HP worker tasks stage formal
+HP output through `HighPrecisionDirtyWriteBuffer` before committing to
+`GraphModel`, with RealTimeUpdate HP commits gated behind successful RT proxy
+commit.
 
 ## YAML Schema
 

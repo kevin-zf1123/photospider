@@ -35,11 +35,12 @@ condition-variable sleep 时，shutdown 丢失唤醒。
 中拉取 planned 或 annotated task，选择队列顺序、批处理、worker 策略、取消和具体执行资源，
 然后分发工作。它们不应拥有图级 dirty-region propagation 或 compute-task derivation。
 
-在当前 `DirectGraphCommit` 路径中，一个 `RealTimeUpdate` 请求仍会为同一脏区执行 HP 和 RT dirty
-work，但 `IntentUpdateCoordinator` 会先运行 HP sibling，再运行 RT sibling。RT 路径会把代理写入
-stage 到 `RealtimeDirtyWriteBuffer`，并在 RT dirty work drain 后提交。跨 intent 的 HP/RT
-sibling 并发是后续 buffered-commit 能力，不是 scheduler workaround。Scheduler 应继续只负责
-ready task callback 的资源 dispatch、epoch、取消和队列策略，不要让 RT 输出成为正式 HP 缓存来源。
+对于 `RealTimeUpdate`，scheduler-backed 路径现在会先启动 RT dirty sibling，再启动 HP dirty
+sibling，并且当两个 scheduler runtime 都在运行时允许两个 sibling 并发计算。RT 写入会 stage 到
+`RealtimeProxyWriteBuffer`，并提交到 `RealtimeProxyGraph`；HP 写入会 stage 到
+`HighPrecisionDirtyWriteBuffer`，并且只在 RT proxy commit gate 打开后提交到 `GraphModel`。
+Scheduler 仍然只负责 ready task callback、epoch、取消和队列策略；它们不会让 RT 输出成为正式
+HP 缓存来源。
 
 ## 当前 Dispatch 状态
 

@@ -44,29 +44,28 @@ const NodeOutput* hp_cache_ptr(const Node& node) {
 }
 
 /**
- * @brief Tests whether a node has either formal HP cache or transient RT state.
+ * @brief Tests whether a node has formal HP cache state.
  *
  * @param node Node whose memory cache fields should be inspected.
- * @return true when either cache field is populated.
+ * @return true when the HP cache field is populated.
  * @throws Nothing.
- * @note The helper is used only by memory-clear paths; disk persistence still
- * checks HP cache explicitly.
+ * @note RT proxy state is owned outside GraphModel and is not cleared by this
+ * node-local helper.
  */
 bool has_memory_cache(const Node& node) {
-  return node.cached_output_high_precision.has_value() ||
-         node.cached_output_real_time.has_value();
+  return node.cached_output_high_precision.has_value();
 }
 
 /**
- * @brief Clears both formal HP cache and transient RT state from a node.
+ * @brief Clears formal HP cache state from a node.
  *
  * @param node Node whose memory cache fields should be reset.
  * @throws Destructors for cached payload members are expected not to throw.
- * @note Topology, cache entries, and version counters are left unchanged.
+ * @note Topology, cache entries, and version counters are left unchanged. RT
+ * proxy state is not stored on Node.
  */
 void reset_memory_cache(Node& node) {
   node.cached_output_high_precision.reset();
-  node.cached_output_real_time.reset();
 }
 
 /**

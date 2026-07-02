@@ -21,10 +21,11 @@
 #include "kernel/services/compute-service/compute_geometry.hpp"
 #include "kernel/services/compute-service/compute_metrics_recorder.hpp"
 #include "kernel/services/compute-service/dirty_region_planner.hpp"
+#include "kernel/services/compute-service/dirty_write_buffers.hpp"
 #include "kernel/services/compute-service/intent_update_coordinator.hpp"
 #include "kernel/services/compute-service/node_executor.hpp"
 #include "kernel/services/compute-service/node_input_resolver.hpp"
-#include "kernel/services/compute-service/realtime_dirty_write_buffer.hpp"
+#include "kernel/services/compute-service/realtime_proxy_graph.hpp"
 #include "kernel/services/compute-service/task_graph_planning.hpp"
 #include "kernel/services/compute-service/task_population_strategy.hpp"
 #include "kernel/services/compute_service.hpp"
@@ -166,10 +167,10 @@ TEST(ComputeGeometrySplit, CoversClippingAlignmentScalingMergingAndHalo) {
 
 TEST(ComputeCachePolicySplit, PreservesHpAuthorityAndRtNonAuthority) {
   Node node = make_node(1, "split", "cache");
-  node.cached_output_real_time = make_image_output(4, 4);
   EXPECT_FALSE(compute::ComputeCachePolicy::has_reusable_output(node));
   EXPECT_EQ(compute::ComputeCachePolicy::reusable_output(node), nullptr);
-  ASSERT_NE(compute::ComputeCachePolicy::interactive_output(node), nullptr);
+  EXPECT_FALSE(compute::ComputeCachePolicy::select_output(
+      node, compute::CacheReadMode::InteractivePreferred));
 
   node.cached_output_high_precision = make_image_output(8, 8);
   EXPECT_EQ(
@@ -179,12 +180,11 @@ TEST(ComputeCachePolicySplit, PreservesHpAuthorityAndRtNonAuthority) {
   EXPECT_FALSE(compute::ComputeCachePolicy::can_read_disk_cache(true, false));
   EXPECT_FALSE(compute::ComputeCachePolicy::can_read_disk_cache(false, true));
 
-  NodeOutput& rt_target = compute::ComputeCachePolicy::ensure_target_output(
-      node, ComputeIntent::RealTimeUpdate);
-  EXPECT_EQ(&rt_target, &*node.cached_output_real_time);
-  NodeOutput& hp_target = compute::ComputeCachePolicy::ensure_target_output(
-      node, ComputeIntent::GlobalHighPrecision);
-  EXPECT_EQ(&hp_target, &*node.cached_output_high_precision);
+  auto selected = compute::ComputeCachePolicy::select_output(
+      node, compute::CacheReadMode::InteractivePreferred);
+  ASSERT_TRUE(selected.has_value());
+  EXPECT_EQ(*selected, &*node.cached_output_high_precision)
+      << "node-level interactive mode now degrades to HP; RT lives in proxy";
 }
 
 TEST(NodeInputResolverSplit,
@@ -946,7 +946,7 @@ TEST(TaskGraphPlanningSplit,
 }
 
 TEST(IntentUpdateCoordinatorSplit,
-     ValidatesRtDirtyRoiAndCoordinatesDualPathWithoutParallel) {
+     ValidatesRtDirtyRoiAndCoordinatesRtFirstConcurrency) {
   EXPECT_THROW(compute::IntentUpdateCoordinator::validate(
                    ComputeIntent::RealTimeUpdate, std::nullopt),
                GraphError);
@@ -958,7 +958,7 @@ TEST(IntentUpdateCoordinatorSplit,
   EXPECT_TRUE(decision.requires_dirty_roi);
   EXPECT_TRUE(decision.run_high_precision_update);
   EXPECT_TRUE(decision.run_real_time_update);
-  EXPECT_FALSE(decision.submit_updates_concurrently);
+  EXPECT_TRUE(decision.submit_updates_concurrently);
 
   auto inline_decision = compute::IntentUpdateCoordinator::decide(
       ComputeIntent::RealTimeUpdate, false, true);
@@ -975,6 +975,13 @@ TEST(IntentUpdateCoordinatorSplit,
   std::vector<std::string> stages;
   std::mutex stages_mutex;
   NodeOutput rt_output = make_image_output(4, 4);
+  auto update_max_active = [&]() {
+    const int active = active_callbacks.fetch_add(1) + 1;
+    int observed = max_active_callbacks.load();
+    while (active > observed &&
+           !max_active_callbacks.compare_exchange_weak(observed, active)) {
+    }
+  };
   compute::IntentUpdateCallbacks callbacks;
   callbacks.run_global_high_precision = [&]() -> NodeOutput& {
     return rt_output;
@@ -984,16 +991,15 @@ TEST(IntentUpdateCoordinatorSplit,
     return rt_output;
   };
   callbacks.run_high_precision_update = [&]() {
-    const int active = active_callbacks.fetch_add(1) + 1;
-    max_active_callbacks.store(std::max(max_active_callbacks.load(), active));
+    update_max_active();
     std::this_thread::sleep_for(std::chrono::milliseconds(20));
     ran_hp.store(true);
     active_callbacks.fetch_sub(1);
   };
   callbacks.run_real_time_update = [&]() -> NodeOutput& {
-    const int active = active_callbacks.fetch_add(1) + 1;
-    max_active_callbacks.store(std::max(max_active_callbacks.load(), active));
+    update_max_active();
     ran_rt.store(true);
+    std::this_thread::sleep_for(std::chrono::milliseconds(20));
     active_callbacks.fetch_sub(1);
     return rt_output;
   };
@@ -1019,6 +1025,14 @@ TEST(IntentUpdateCoordinatorSplit,
   EXPECT_NE(
       std::find(stages.begin(), stages.end(), "intent_coordinator_inline_rt"),
       stages.end());
+  auto inline_rt_stage =
+      std::find(stages.begin(), stages.end(), "intent_coordinator_inline_rt");
+  auto inline_hp_stage =
+      std::find(stages.begin(), stages.end(), "intent_coordinator_inline_hp");
+  ASSERT_NE(inline_rt_stage, stages.end());
+  ASSERT_NE(inline_hp_stage, stages.end());
+  EXPECT_LT(std::distance(stages.begin(), inline_rt_stage),
+            std::distance(stages.begin(), inline_hp_stage));
 
   stages.clear();
   NodeOutput& coordinated_global_dirty =
@@ -1048,6 +1062,14 @@ TEST(IntentUpdateCoordinatorSplit,
   EXPECT_NE(std::find(stages.begin(), stages.end(),
                       "intent_coordinator_decision_inline"),
             stages.end());
+  inline_rt_stage =
+      std::find(stages.begin(), stages.end(), "intent_coordinator_inline_rt");
+  inline_hp_stage =
+      std::find(stages.begin(), stages.end(), "intent_coordinator_inline_hp");
+  ASSERT_NE(inline_rt_stage, stages.end());
+  ASSERT_NE(inline_hp_stage, stages.end());
+  EXPECT_LT(std::distance(stages.begin(), inline_rt_stage),
+            std::distance(stages.begin(), inline_hp_stage));
 
   SerialDebugScheduler hp_runtime;
   SerialDebugScheduler rt_runtime;
@@ -1058,6 +1080,23 @@ TEST(IntentUpdateCoordinatorSplit,
   active_callbacks.store(0);
   max_active_callbacks.store(0);
   stages.clear();
+  std::atomic_bool rt_started{false};
+  std::atomic_bool hp_saw_rt_started{false};
+  callbacks.run_high_precision_update = [&]() {
+    hp_saw_rt_started.store(rt_started.load());
+    update_max_active();
+    std::this_thread::sleep_for(std::chrono::milliseconds(30));
+    ran_hp.store(true);
+    active_callbacks.fetch_sub(1);
+  };
+  callbacks.run_real_time_update = [&]() -> NodeOutput& {
+    rt_started.store(true);
+    update_max_active();
+    std::this_thread::sleep_for(std::chrono::milliseconds(50));
+    ran_rt.store(true);
+    active_callbacks.fetch_sub(1);
+    return rt_output;
+  };
   NodeOutput& coordinated_with_runtimes =
       compute::IntentUpdateCoordinator::coordinate_intent_update(
           ComputeIntent::RealTimeUpdate, &hp_runtime, &rt_runtime,
@@ -1066,49 +1105,91 @@ TEST(IntentUpdateCoordinatorSplit,
   EXPECT_TRUE(ran_hp.load());
   EXPECT_TRUE(ran_rt.load());
   EXPECT_NE(std::find(stages.begin(), stages.end(),
-                      "intent_coordinator_decision_inline"),
+                      "intent_coordinator_decision_concurrent"),
             stages.end());
-  EXPECT_NE(
-      std::find(stages.begin(), stages.end(), "intent_coordinator_inline_hp"),
-      stages.end());
-  EXPECT_NE(
-      std::find(stages.begin(), stages.end(), "intent_coordinator_inline_rt"),
-      stages.end());
-  EXPECT_EQ(max_active_callbacks.load(), 1);
+  auto concurrent_rt_start = std::find(
+      stages.begin(), stages.end(), "intent_coordinator_concurrent_rt_start");
+  auto concurrent_hp_start = std::find(
+      stages.begin(), stages.end(), "intent_coordinator_concurrent_hp_start");
+  ASSERT_NE(concurrent_rt_start, stages.end());
+  ASSERT_NE(concurrent_hp_start, stages.end());
+  EXPECT_LT(std::distance(stages.begin(), concurrent_rt_start),
+            std::distance(stages.begin(), concurrent_hp_start));
+  EXPECT_TRUE(hp_saw_rt_started.load());
+  EXPECT_GE(max_active_callbacks.load(), 2);
   hp_runtime.shutdown();
   rt_runtime.shutdown();
 }
 
-TEST(RealtimeDirtyWriteBuffer, StagesDeepCopyAndCommitsExplicitly) {
-  GraphModel graph("cache/rt-dirty-write-buffer");
+TEST(RealtimeProxyWriteBuffer, StagesDeepCopyAndCommitsToProxyGraph) {
+  GraphModel graph("cache/rt-proxy-write-buffer");
   Node node = make_node(1, "split_plan", "tile");
-  node.cached_output_real_time = make_image_output(4, 4, 1, 3.0f);
-  node.rt_version = 7;
-  node.rt_roi = cv::Rect(0, 0, 1, 1);
   graph.add_node(node);
 
-  compute::RealtimeDirtyWriteBuffer buffer;
-  NodeOutput& staged = buffer.ensure_output(graph.node(1));
+  compute::RealtimeProxyGraph proxy_graph;
+  proxy_graph.synchronize_with_graph(graph);
+  compute::RealtimeProxyGraph::NodeState initial_state;
+  initial_state.output = make_image_output(4, 4, 1, 3.0f);
+  initial_state.version = 7;
+  initial_state.roi_hp = cv::Rect(0, 0, 1, 1);
+  proxy_graph.commit_node_state(1, std::move(initial_state));
+
+  compute::RealtimeProxyWriteBuffer buffer(proxy_graph);
+  NodeOutput& staged = buffer.ensure_output(1);
   toCvMat(staged.image_buffer).setTo(9.0f);
   buffer.mark_updated(1, cv::Rect(1, 1, 2, 2), cv::Size(4, 4), true, 42);
 
-  ASSERT_TRUE(graph.node(1).cached_output_real_time.has_value());
-  EXPECT_FLOAT_EQ(toCvMat(graph.node(1).cached_output_real_time->image_buffer)
-                      .at<float>(0, 0),
-                  3.0f);
-  EXPECT_EQ(graph.node(1).rt_version, 7);
-  EXPECT_EQ(graph.node(1).rt_roi, cv::Rect(0, 0, 1, 1));
-  EXPECT_FALSE(graph.dirty_source_rt_commit_generation.count(1));
+  ASSERT_NE(proxy_graph.find_output(1), nullptr);
+  EXPECT_FLOAT_EQ(
+      toCvMat(proxy_graph.find_output(1)->image_buffer).at<float>(0, 0), 3.0f);
+  ASSERT_EQ(graph.find_node(1)->cached_output_high_precision, std::nullopt);
+
+  buffer.commit_to_proxy_graph();
+
+  const auto* committed_state = proxy_graph.find_state(1);
+  ASSERT_NE(committed_state, nullptr);
+  ASSERT_TRUE(committed_state->output.has_value());
+  EXPECT_FLOAT_EQ(
+      toCvMat(committed_state->output->image_buffer).at<float>(0, 0), 9.0f);
+  EXPECT_EQ(committed_state->version, 8);
+  EXPECT_EQ(committed_state->roi_hp, cv::Rect(0, 0, 3, 3));
+  ASSERT_TRUE(committed_state->dirty_source_generation.has_value());
+  EXPECT_EQ(*committed_state->dirty_source_generation, 42u);
+}
+
+TEST(HighPrecisionDirtyWriteBuffer, StagesGraphWritesUntilCommit) {
+  GraphModel graph("cache/hp-dirty-write-buffer");
+  Node node = make_node(1, "split_plan", "tile");
+  node.cached_output_high_precision = make_image_output(4, 4, 1, 2.0f);
+  node.hp_version = 3;
+  node.hp_roi = cv::Rect(0, 0, 1, 1);
+  graph.add_node(node);
+
+  compute::HighPrecisionDirtyWriteBuffer buffer;
+  NodeOutput& staged = buffer.ensure_output(graph.node(1));
+  toCvMat(staged.image_buffer).setTo(6.0f);
+  buffer.mark_updated(graph.node(1), cv::Rect(1, 1, 2, 2), cv::Size(4, 4), true,
+                      77);
+
+  ASSERT_TRUE(graph.node(1).cached_output_high_precision.has_value());
+  EXPECT_FLOAT_EQ(
+      toCvMat(graph.node(1).cached_output_high_precision->image_buffer)
+          .at<float>(0, 0),
+      2.0f);
+  EXPECT_EQ(graph.node(1).hp_version, 3);
+  EXPECT_EQ(graph.node(1).hp_roi, cv::Rect(0, 0, 1, 1));
+  EXPECT_FALSE(graph.dirty_source_hp_commit_generation.count(1));
 
   buffer.commit_to_graph(graph);
 
-  ASSERT_TRUE(graph.node(1).cached_output_real_time.has_value());
-  EXPECT_FLOAT_EQ(toCvMat(graph.node(1).cached_output_real_time->image_buffer)
-                      .at<float>(0, 0),
-                  9.0f);
-  EXPECT_EQ(graph.node(1).rt_version, 8);
-  EXPECT_EQ(graph.node(1).rt_roi, cv::Rect(0, 0, 3, 3));
-  EXPECT_EQ(graph.dirty_source_rt_commit_generation[1], 42u);
+  ASSERT_TRUE(graph.node(1).cached_output_high_precision.has_value());
+  EXPECT_FLOAT_EQ(
+      toCvMat(graph.node(1).cached_output_high_precision->image_buffer)
+          .at<float>(0, 0),
+      6.0f);
+  EXPECT_EQ(graph.node(1).hp_version, 4);
+  EXPECT_EQ(graph.node(1).hp_roi, cv::Rect(0, 0, 3, 3));
+  EXPECT_EQ(graph.dirty_source_hp_commit_generation[1], 77u);
 }
 
 TEST(GlobalHighPrecisionDirtyUpdate, UsesDirtyPlanningForGlobalHpDirtyRoi) {

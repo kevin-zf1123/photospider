@@ -29,8 +29,8 @@ namespace ps {
  * - caches：缓存条目列表，用于存储中间结果或其他缓存数据。
  * - cached_output_high_precision：节点输出的唯一正式可重用缓存，供后续
  *   HP 计算、磁盘缓存、长期存储及其他可重用缓存行为使用。
- * - cached_output_real_time：瞬态交互式 RT 状态，用于预览/更新工作流，
- *   不作为正式缓存权威来源，不作为磁盘缓存同步或长期存储来源。
+ * RT 代理输出不存放在 Node 内，而由 compute-service 内部的
+ * RealtimeProxyGraph 按节点 id 持有。
  *
  * 其他成员：
  * - preserved：标记该节点是否应被保留，防止被强制重新计算。
@@ -68,18 +68,11 @@ class Node {
   // computing
   bool preserved = false;
 
-  // Transient interactive RT state for preview/update workflows.
-  // NOT a formal cache authority. Must not be used for subsequent HP
-  // compute, disk cache synchronization, or long-term storage.
-  std::optional<NodeOutput> cached_output_real_time;
-
   // The ONLY formal reusable cache for node output. Authoritative source
   // for subsequent HP compute, disk cache, long-term storage, and other
   // reusable cache behavior.
   std::optional<NodeOutput> cached_output_high_precision;
-  int rt_version = 0;
   int hp_version = 0;
-  std::optional<cv::Rect> rt_roi;  // Most recent RT dirty/updated ROI
   std::optional<cv::Rect> hp_roi;  // Most recent HP dirty/updated ROI
 
   // Metadata: last known full-resolution input extent for ROI propagation

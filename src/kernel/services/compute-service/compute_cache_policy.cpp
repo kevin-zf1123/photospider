@@ -18,35 +18,10 @@ const NodeOutput* ComputeCachePolicy::reusable_output(const Node& node) {
   return nullptr;
 }
 
-NodeOutput* ComputeCachePolicy::interactive_output(Node& node) {
-  if (node.cached_output_real_time)
-    return &*node.cached_output_real_time;
-  return reusable_output(node);
-}
-
-const NodeOutput* ComputeCachePolicy::interactive_output(const Node& node) {
-  if (node.cached_output_real_time)
-    return &*node.cached_output_real_time;
-  return reusable_output(node);
-}
-
-NodeOutput& ComputeCachePolicy::ensure_target_output(Node& node,
-                                                     ComputeIntent intent) {
-  if (intent == ComputeIntent::RealTimeUpdate) {
-    if (!node.cached_output_real_time)
-      node.cached_output_real_time = NodeOutput{};
-    return *node.cached_output_real_time;
-  }
-  if (!node.cached_output_high_precision)
-    node.cached_output_high_precision = NodeOutput{};
-  return *node.cached_output_high_precision;
-}
-
 std::optional<const NodeOutput*> ComputeCachePolicy::select_output(
     const Node& node, CacheReadMode mode) {
-  const NodeOutput* output = mode == CacheReadMode::InteractivePreferred
-                                 ? interactive_output(node)
-                                 : reusable_output(node);
+  (void)mode;
+  const NodeOutput* output = reusable_output(node);
   if (!output)
     return std::nullopt;
   return output;

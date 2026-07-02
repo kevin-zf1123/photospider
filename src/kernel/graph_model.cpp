@@ -193,7 +193,6 @@ void GraphModel::reset_runtime_state() {
   recent_dirty_region_snapshots.clear();
   dirty_generation_counter = 0;
   dirty_source_hp_commit_generation.clear();
-  dirty_source_rt_commit_generation.clear();
   last_compute_plan.reset();
   recent_compute_plans.clear();
   last_compute_plan_summary.reset();
@@ -380,11 +379,8 @@ void GraphModel::mutate_node_runtime_state(
       node.outputs,
       node.caches,
       node.preserved,
-      node.cached_output_real_time,
       node.cached_output_high_precision,
-      node.rt_version,
       node.hp_version,
-      node.rt_roi,
       node.hp_roi,
       node.last_input_size_hp,
       node.dependency_lut,

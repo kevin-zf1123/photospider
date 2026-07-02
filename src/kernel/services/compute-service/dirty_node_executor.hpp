@@ -8,9 +8,9 @@
 #include <vector>
 
 #include "kernel/services/compute-service/dirty_region_planner.hpp"
+#include "kernel/services/compute-service/dirty_write_buffers.hpp"
 #include "kernel/services/compute-service/downsample_executor.hpp"
 #include "kernel/services/compute-service/node_input_resolver.hpp"
-#include "kernel/services/compute-service/realtime_dirty_write_buffer.hpp"
 
 namespace ps {
 class GraphEventService;
@@ -64,34 +64,17 @@ struct DirtyNodeExecutionContext {
 };
 
 /**
- * @brief Shared downsample queue sink populated by HP dirty node commits.
- *
- * HP dirty tasks may run through scheduler worker callbacks, so the vector is
- * protected by a mutex while node-level executors append refresh requests.
- *
- * @note The sink is borrowed from HighPrecisionDirtyExecutor::execute() and
- * must outlive all HP dirty scheduler callbacks for that request.
- */
-struct DownsampleRequestSink {
-  /** @brief Queue of HP-to-RT refresh requests to execute after HP work. */
-  std::vector<DownsampleExecutor::Request>& requests;
-
-  /** @brief Mutex protecting requests when scheduler workers append entries. */
-  std::mutex& mutex;
-};
-
-/**
  * @brief Executes one high-precision dirty node from a prepared HP plan.
  *
  * The executor is intentionally node-scoped: it receives an already selected
  * HpPlanEntry, resolves HP inputs, chooses tiled or monolithic HP execution,
- * commits HP ROI/version metadata, records node events, and optionally queues
- * a later downsample request. It does not build dirty snapshots or decide task
- * ordering.
+ * writes output/ROI/version metadata into a request-local HP write buffer, and
+ * records node events. It does not build dirty snapshots, commit GraphModel, or
+ * decide task ordering.
  *
- * @note The owner phase-splits graph_mutex_ around planning and final commit.
- * Per-node request locks protect dirty cache writes while scheduler workers
- * execute multiple HP tasks.
+ * @note Worker execution never mutates GraphModel HP cache directly. The owner
+ * commits the write buffer after the sibling commit gate permits original
+ * graph mutation.
  */
 class HighPrecisionDirtyNodeExecutor {
  public:
@@ -99,13 +82,15 @@ class HighPrecisionDirtyNodeExecutor {
    * @brief Constructs a node executor for one HP dirty generation.
    *
    * @param context Borrowed graph/runtime/event/snapshot generation context.
-   * @param downsample_sink Shared request queue populated after HP commits.
+   * @param hp_write_buffer Request-local HP output buffer committed by the
+   * owning HighPrecisionDirtyExecutor after dirty work completes.
    * @throws Nothing directly.
    * @note All references are borrowed and must outlive scheduler callbacks
    * created for the same dirty generation.
    */
-  HighPrecisionDirtyNodeExecutor(DirtyNodeExecutionContext context,
-                                 DownsampleRequestSink downsample_sink);
+  HighPrecisionDirtyNodeExecutor(
+      DirtyNodeExecutionContext context,
+      HighPrecisionDirtyWriteBuffer& hp_write_buffer);
 
   /**
    * @brief Runs HP dirty execution for one planned node.
@@ -120,13 +105,13 @@ class HighPrecisionDirtyNodeExecutor {
 
  private:
   /**
-   * @brief Resolves reusable HP outputs for image dependencies.
+   * @brief Resolves staged or committed HP outputs for image dependencies.
    *
    * @param node Node whose inputs are resolved.
    * @return Ready image inputs for HP execution.
    * @throws GraphError from NodeInputResolver when required inputs are missing.
-   * @note Missing upstream nodes are reported through the resolver's existing
-   * missing-dependency policy.
+   * @note Lookup checks the current HP write buffer first so downstream work
+   * can consume upstream staged output before GraphModel commit.
    */
   ResolvedNodeInputs resolve_inputs(Node& node) const;
 
@@ -148,12 +133,13 @@ class HighPrecisionDirtyNodeExecutor {
   /**
    * @brief Ensures the HP cache image buffer can receive tiled dirty output.
    *
-   * @param node Node whose HP cache is allocated.
+   * @param node Node whose staged HP cache is allocated.
    * @param entry HP output extent.
    * @param image_inputs_ready Resolved inputs used to infer format.
    * @return Mutable HP image buffer matching the planned extent and format.
    * @throws GraphError or std::bad_alloc if allocation fails.
-   * @note Existing HP data payloads remain owned by the same NodeOutput object.
+   * @note Existing HP data payloads remain owned by the staged NodeOutput
+   * object, not by GraphModel.
    */
   ImageBuffer& ensure_hp_buffer(
       Node& node, const HpPlanEntry& entry,
@@ -189,27 +175,16 @@ class HighPrecisionDirtyNodeExecutor {
       const std::vector<const NodeOutput*>& image_inputs_ready) const;
 
   /**
-   * @brief Commits HP ROI, version, source generation, and node event state.
+   * @brief Stages HP ROI, version, source generation, and node event state.
    *
-   * @param node Node whose HP cache was updated.
+   * @param node Node whose staged HP cache was updated.
    * @param entry HP ROI and extent used for metadata.
    * @param dirty_source Whether the node is a dirty source boundary.
    * @throws std::bad_alloc if event storage grows and allocation fails.
-   * @note HP ROI metadata stays in HP coordinates and merges with previous
-   * dirty ROI metadata for the node.
+   * @note HP ROI metadata stays in HP coordinates and is committed later by
+   * HighPrecisionDirtyExecutor.
    */
   void commit_node(Node& node, const HpPlanEntry& entry, bool dirty_source);
-
-  /**
-   * @brief Queues a later HP-to-RT refresh when scheduler runtime is present.
-   *
-   * @param node Node whose committed HP output should be downsampled.
-   * @param entry HP ROI represented by the committed output.
-   * @throws std::bad_alloc if the shared request vector grows.
-   * @note Inline dirty execution intentionally leaves this queue empty to
-   * preserve the previous post-split behavior.
-   */
-  void queue_downsample_request(const Node& node, const HpPlanEntry& entry);
 
   /**
    * @brief Checks and logs stale dirty source generations.
@@ -249,11 +224,8 @@ class HighPrecisionDirtyNodeExecutor {
   /** @brief Dirty generation used to detect stale source callbacks. */
   uint64_t dirty_generation_;
 
-  /** @brief Shared queue of HP-to-RT refresh requests. */
-  std::vector<DownsampleExecutor::Request>& downsample_requests_;
-
-  /** @brief Mutex protecting the shared downsample request queue. */
-  std::mutex& downsample_requests_mutex_;
+  /** @brief Request-local buffer receiving HP output and metadata writes. */
+  HighPrecisionDirtyWriteBuffer& hp_write_buffer_;
 
   /** @brief Per-node dirty cache locks borrowed from the request executor. */
   DirtyNodeMutexMap& node_mutexes_;
@@ -266,10 +238,10 @@ class HighPrecisionDirtyNodeExecutor {
  * selecting an RT operator with HP fallback, allocating staged proxy buffers,
  * running tiled or monolithic execution, and recording RT ROI/version metadata
  * into a request-local write buffer. It does not build dirty snapshots, decide
- * source-first task ordering, or commit staged output to GraphModel.
+ * source-first task ordering, or commit staged output to RealtimeProxyGraph.
  *
- * @note RT output remains transient interactive state and is never promoted to
- * reusable high-precision cache authority.
+ * @note RT output remains in RealtimeProxyGraph and is never promoted to
+ * GraphModel or reusable high-precision cache authority.
  */
 class RealTimeDirtyNodeExecutor {
  public:
@@ -277,14 +249,17 @@ class RealTimeDirtyNodeExecutor {
    * @brief Constructs a node executor for one RT dirty generation.
    *
    * @param context Borrowed graph/runtime/event/snapshot generation context.
-   * @param rt_write_buffer Request-local RT output buffer committed by the
-   * owning RealTimeDirtyExecutor after all dirty tasks complete.
+   * @param proxy_graph Committed RT proxy graph used for upstream fallback and
+   * stale source generation checks.
+   * @param rt_write_buffer Request-local RT output buffer committed to
+   * RealtimeProxyGraph after all dirty tasks complete.
    * @throws Nothing directly.
    * @note References are borrowed and must outlive scheduler callbacks created
    * for the same dirty generation.
    */
   RealTimeDirtyNodeExecutor(DirtyNodeExecutionContext context,
-                            RealtimeDirtyWriteBuffer& rt_write_buffer);
+                            RealtimeProxyGraph& proxy_graph,
+                            RealtimeProxyWriteBuffer& rt_write_buffer);
 
   /**
    * @brief Runs RT dirty execution for one planned node.
@@ -305,7 +280,8 @@ class RealTimeDirtyNodeExecutor {
    * @return Ready image inputs for RT execution.
    * @throws GraphError from NodeInputResolver when required inputs are missing.
    * @note Dependency lookup first checks the request-local RT write buffer,
-   * then falls back to committed graph interactive state for compatibility.
+   * then committed proxy graph state, then original graph HP output as a
+   * serial compatibility fallback.
    */
   ResolvedNodeInputs resolve_inputs(Node& node) const;
 
@@ -324,7 +300,7 @@ class RealTimeDirtyNodeExecutor {
   /**
    * @brief Ensures the staged RT proxy buffer matches the planned RT extent.
    *
-   * @param node Node whose existing committed RT state seeds the staged output.
+   * @param node Node whose id and HP fallback state are used.
    * @param entry RT extent metadata.
    * @param image_inputs_ready Resolved inputs used to infer format.
    * @return Mutable staged RT image buffer matching the planned extent and
@@ -452,9 +428,12 @@ class RealTimeDirtyNodeExecutor {
   /** @brief Dirty generation used to detect stale source callbacks. */
   uint64_t dirty_generation_;
 
+  /** @brief Committed proxy graph used for RT fallback and source metadata. */
+  RealtimeProxyGraph& proxy_graph_;
+
   /** @brief Request-local buffer that receives RT output and metadata writes.
    */
-  RealtimeDirtyWriteBuffer& rt_write_buffer_;
+  RealtimeProxyWriteBuffer& rt_write_buffer_;
 
   /** @brief Per-node dirty cache locks borrowed from the request executor. */
   DirtyNodeMutexMap& node_mutexes_;

@@ -108,8 +108,7 @@ bool Kernel::has_node_disk_cache(const GraphModel& graph,
 Kernel::TraversalNodeInfo Kernel::build_traversal_node_info(
     const GraphModel& graph, int node_id) const {
   const auto& node = graph.node(node_id);
-  const bool has_memory_cache = node.cached_output_high_precision.has_value() ||
-                                node.cached_output_real_time.has_value();
+  const bool has_memory_cache = node.cached_output_high_precision.has_value();
   return Kernel::TraversalNodeInfo{node.id, node.name, has_memory_cache,
                                    has_node_disk_cache(graph, node)};
 }

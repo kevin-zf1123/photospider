@@ -1,6 +1,8 @@
 #include "kernel/services/compute-service/downsample_executor.hpp"
 
 #include <algorithm>
+#include <string>
+#include <utility>
 #include <vector>
 
 #include "adapter/buffer_adapter_opencv.hpp"
@@ -9,10 +11,68 @@
 #include "kernel/services/graph_event_service.hpp"
 
 namespace ps::compute {
+namespace {
 
-DownsampleExecutor::DownsampleExecutor(GraphModel& graph, GraphRuntime* runtime,
+/**
+ * @brief Deep-copies an image buffer before downsample staging writes.
+ *
+ * @param source Source proxy image buffer.
+ * @return Independent ImageBuffer with cloned image payload when present.
+ * @throws GraphError when adapter conversion fails.
+ * @note Empty buffers keep shape metadata but drop shared data/context
+ * ownership so later allocation can fill them safely.
+ */
+ImageBuffer clone_image_buffer(const ImageBuffer& source) {
+  ImageBuffer cloned = source;
+  cloned.data.reset();
+  cloned.context.reset();
+  if (source.width <= 0 || source.height <= 0 || source.channels <= 0 ||
+      (!source.data && !source.context)) {
+    return cloned;
+  }
+  try {
+    return fromCvMat(toCvMat(source).clone());
+  } catch (const std::exception& e) {
+    throw GraphError(
+        GraphErrc::ComputeError,
+        "Failed to clone downsample proxy buffer: " + std::string(e.what()));
+  }
+}
+
+/**
+ * @brief Deep-copies committed proxy node state for staged downsample writes.
+ *
+ * @param state Committed proxy state to copy.
+ * @return Independent proxy state safe for ROI mutation before commit.
+ * @throws GraphError when image payload cloning fails.
+ */
+RealtimeProxyGraph::NodeState clone_proxy_state(
+    const RealtimeProxyGraph::NodeState& state) {
+  RealtimeProxyGraph::NodeState cloned;
+  cloned.roi_hp = state.roi_hp;
+  cloned.version = state.version;
+  cloned.dirty_source_generation = state.dirty_source_generation;
+  if (state.output) {
+    NodeOutput output;
+    output.image_buffer = clone_image_buffer(state.output->image_buffer);
+    output.data = state.output->data;
+    output.space = state.output->space;
+    output.debug = state.output->debug;
+    cloned.output = std::move(output);
+  }
+  return cloned;
+}
+
+}  // namespace
+
+DownsampleExecutor::DownsampleExecutor(GraphModel& graph,
+                                       RealtimeProxyGraph& proxy_graph,
+                                       GraphRuntime* runtime,
                                        GraphEventService& events)
-    : graph_(graph), runtime_(runtime), events_(events) {}
+    : graph_(graph),
+      proxy_graph_(proxy_graph),
+      runtime_(runtime),
+      events_(events) {}
 
 void DownsampleExecutor::execute(const std::vector<Request>& requests) {
   for (const auto& request : requests) {
@@ -26,30 +86,42 @@ void DownsampleExecutor::execute_one(const Request& request) {
     return;
   }
   Node& node = *node_ptr;
+  RealtimeProxyGraph::NodeState proxy_state;
+  if (const RealtimeProxyGraph::NodeState* existing =
+          proxy_graph_.find_state(node.id)) {
+    proxy_state = clone_proxy_state(*existing);
+  }
+  if (proxy_state.version > request.hp_version) {
+    log_stale_generation(node.id);
+    return;
+  }
   const NodeOutput& hp_output = *node.cached_output_high_precision;
   const ImageBuffer& hp_buffer = hp_output.image_buffer;
   cv::Size hp_size(std::max(hp_buffer.width, 0), std::max(hp_buffer.height, 0));
   cv::Rect roi_hp = normalize_hp_roi(request.roi_hp, hp_size);
 
-  if (!node.cached_output_real_time) {
-    node.cached_output_real_time = NodeOutput{};
+  if (!proxy_state.output) {
+    proxy_state.output = NodeOutput{};
   }
-  node.cached_output_real_time->data = hp_output.data;
+  proxy_state.output->data = hp_output.data;
 
   if (hp_buffer.width <= 0 || hp_buffer.height <= 0 || !hp_buffer.data) {
-    apply_passthrough(node, roi_hp, hp_size, request.hp_version);
+    apply_passthrough(node, proxy_state, roi_hp, hp_size, request.hp_version);
+    proxy_graph_.commit_node_state(node.id, std::move(proxy_state));
     return;
   }
 
   cv::Size rt_size = scale_down_size(hp_size, kRtDownscaleFactor);
   if (rt_size.width <= 0 || rt_size.height <= 0) {
-    apply_passthrough(node, roi_hp, hp_size, request.hp_version);
+    apply_passthrough(node, proxy_state, roi_hp, hp_size, request.hp_version);
+    proxy_graph_.commit_node_state(node.id, std::move(proxy_state));
     return;
   }
 
-  ImageBuffer& rt_buffer = ensure_rt_buffer(node, hp_buffer, rt_size);
+  ImageBuffer& rt_buffer = ensure_rt_buffer(proxy_state, hp_buffer, rt_size);
   downsample_roi(hp_buffer, rt_buffer, roi_hp, rt_size);
-  commit_rt_metadata(node, roi_hp, hp_size, request.hp_version);
+  commit_rt_metadata(proxy_state, roi_hp, hp_size, request.hp_version);
+  proxy_graph_.commit_node_state(node.id, std::move(proxy_state));
   events_.push(node.id, node.name, "downsample", 0.0);
 
   if (runtime_) {
@@ -63,8 +135,7 @@ Node* DownsampleExecutor::find_current_node(const Request& request) {
     return nullptr;
   }
   Node& node = *node_ptr;
-  if (node.hp_version < request.hp_version ||
-      node.rt_version > request.hp_version) {
+  if (node.hp_version < request.hp_version) {
     log_stale_generation(node.id);
     return nullptr;
   }
@@ -80,18 +151,21 @@ cv::Rect DownsampleExecutor::normalize_hp_roi(const cv::Rect& request_roi,
   return roi_hp;
 }
 
-void DownsampleExecutor::apply_passthrough(Node& node, const cv::Rect& roi_hp,
-                                           const cv::Size& hp_size,
-                                           int hp_version) {
-  node.cached_output_real_time = node.cached_output_high_precision;
-  commit_rt_metadata(node, roi_hp, hp_size, hp_version);
+void DownsampleExecutor::apply_passthrough(
+    Node& node, RealtimeProxyGraph::NodeState& proxy_state,
+    const cv::Rect& roi_hp, const cv::Size& hp_size, int hp_version) {
+  proxy_state.output = node.cached_output_high_precision;
+  commit_rt_metadata(proxy_state, roi_hp, hp_size, hp_version);
   events_.push(node.id, node.name, "downsample_passthrough", 0.0);
 }
 
-ImageBuffer& DownsampleExecutor::ensure_rt_buffer(Node& node,
-                                                  const ImageBuffer& hp_buffer,
-                                                  const cv::Size& rt_size) {
-  ImageBuffer& rt_buffer = node.cached_output_real_time->image_buffer;
+ImageBuffer& DownsampleExecutor::ensure_rt_buffer(
+    RealtimeProxyGraph::NodeState& proxy_state, const ImageBuffer& hp_buffer,
+    const cv::Size& rt_size) {
+  if (!proxy_state.output) {
+    proxy_state.output = NodeOutput{};
+  }
+  ImageBuffer& rt_buffer = proxy_state.output->image_buffer;
   const bool needs_alloc = (rt_buffer.width != rt_size.width) ||
                            (rt_buffer.height != rt_size.height) ||
                            (rt_buffer.channels != hp_buffer.channels) ||
@@ -124,15 +198,16 @@ cv::Rect DownsampleExecutor::downsample_roi(const ImageBuffer& hp_buffer,
   return roi_rt;
 }
 
-void DownsampleExecutor::commit_rt_metadata(Node& node, const cv::Rect& roi_hp,
-                                            const cv::Size& hp_size,
-                                            int hp_version) {
+void DownsampleExecutor::commit_rt_metadata(
+    RealtimeProxyGraph::NodeState& proxy_state, const cv::Rect& roi_hp,
+    const cv::Size& hp_size, int hp_version) {
   if (!is_rect_empty(roi_hp)) {
-    node.rt_roi = node.rt_roi.has_value()
-                      ? clip_rect(merge_rect(*node.rt_roi, roi_hp), hp_size)
-                      : roi_hp;
+    proxy_state.roi_hp =
+        proxy_state.roi_hp.has_value()
+            ? clip_rect(merge_rect(*proxy_state.roi_hp, roi_hp), hp_size)
+            : roi_hp;
   }
-  node.rt_version = hp_version;
+  proxy_state.version = hp_version;
 }
 
 void DownsampleExecutor::log_stale_generation(int node_id) const {

@@ -1,5 +1,6 @@
 #pragma once
 
+#include <memory>
 #include <optional>
 #include <string>
 #include <vector>
@@ -15,6 +16,8 @@ class GraphTraversalService;
 }  // namespace ps
 
 namespace ps::compute {
+class DirtySiblingCommitGate;
+class RealtimeProxyGraph;
 
 /**
  * @brief Immutable options for one dirty update executor call.
@@ -52,11 +55,20 @@ struct DirtyUpdateRequest {
    * @brief Suppresses direct graph RT downsample writes after HP dirty work.
    *
    * @note RealTimeUpdate HP sibling work sets this flag because the following
-   * RT dirty path stages and commits its own proxy output through
-   * RealtimeDirtyWriteBuffer. GlobalHighPrecision dirty ROI keeps the legacy
-   * graph downsample refresh.
+   * RT dirty path stages and commits its own output through RealtimeProxyGraph.
+   * GlobalHighPrecision dirty ROI may still downsample committed HP output into
+   * the runtime-owned RT proxy graph.
    */
   bool suppress_graph_downsample = false;
+
+  /**
+   * @brief Optional sibling commit gate for RealTimeUpdate HP work.
+   *
+   * @note When present, HP dirty execution may compute concurrently but must
+   * wait here before mutating GraphModel. The RT sibling marks the gate after
+   * committing proxy output; RT failure aborts the HP commit.
+   */
+  std::shared_ptr<DirtySiblingCommitGate> sibling_commit_gate;
 };
 
 /**
@@ -89,6 +101,8 @@ class HighPrecisionDirtyExecutor {
    * @brief Runs one HP dirty ROI update and returns the target HP output.
    *
    * @param graph Graph whose dirty state and HP caches are updated.
+   * @param proxy_graph Runtime-owned RT proxy graph that receives optional
+   * GlobalHighPrecision downsample output.
    * @param runtime Optional runtime used to dispatch scheduler tasks and record
    * trace events. A null runtime executes source and downstream work inline.
    * @param request Dirty update options inherited from ComputeService.
@@ -99,8 +113,8 @@ class HighPrecisionDirtyExecutor {
    * serialized with graph_mutex_, but scheduler task execution is not wrapped
    * by the outer graph lock.
    */
-  NodeOutput& execute(GraphModel& graph, GraphRuntime* runtime,
-                      const DirtyUpdateRequest& request);
+  NodeOutput& execute(GraphModel& graph, RealtimeProxyGraph& proxy_graph,
+                      GraphRuntime* runtime, const DirtyUpdateRequest& request);
 
  private:
   /**
@@ -140,8 +154,8 @@ class HighPrecisionDirtyExecutor {
  * scheduler submission, RT/HP operation fallback resolution, proxy buffer
  * allocation, tiled or monolithic ROI execution, and RT ROI/version commits.
  *
- * @note RT output remains transient interactive state and is never promoted to
- * reusable high-precision cache authority.
+ * @note RT output is committed to RealtimeProxyGraph and is never promoted to
+ * reusable high-precision cache authority or GraphModel node state.
  */
 class RealTimeDirtyExecutor {
  public:
@@ -159,42 +173,46 @@ class RealTimeDirtyExecutor {
   /**
    * @brief Runs one RT dirty ROI update and returns the target RT output.
    *
-   * @param graph Graph whose dirty state and RT caches are updated.
+   * @param graph Graph used for topology, parameters, and HP fallback output.
+   * @param proxy_graph Runtime-owned RT proxy graph receiving staged output.
    * @param runtime Optional runtime used to dispatch scheduler tasks and record
    * trace events. A null runtime executes all work inline.
    * @param request Dirty update options inherited from ComputeService.
-   * @return Mutable real-time target output stored in the graph.
+   * @return Mutable real-time target output stored in the proxy graph.
    * @throws GraphError when planning, dependency resolution, operation
    * dispatch, scheduler submission, or target output validation fails.
    * @note The method is phase-split: planning/reset and final validation are
    * serialized with graph_mutex_, while dirty source-before-downstream task
    * execution runs outside the outer graph lock.
    */
-  NodeOutput& execute(GraphModel& graph, GraphRuntime* runtime,
-                      const DirtyUpdateRequest& request);
+  NodeOutput& execute(GraphModel& graph, RealtimeProxyGraph& proxy_graph,
+                      GraphRuntime* runtime, const DirtyUpdateRequest& request);
 
  private:
   /**
    * @brief Clears RT cache metadata for nodes selected by one dirty plan.
    *
-   * @param graph Graph whose selected RT node state is reset.
+   * @param proxy_graph Proxy graph whose selected RT node state is reset.
    * @param plan RT dirty planner output for the active request.
-   * @throws GraphError when a planned node is missing.
-   * @note Only transient RT cache, RT ROI, and RT version state are reset.
+   * @throws std::bad_alloc if reset bookkeeping grows.
+   * @note Only proxy output, proxy ROI, proxy version, and RT dirty-source
+   * generation metadata are reset.
    */
-  void reset_plan_cache(GraphModel& graph, const RealTimeDirtyPlan& plan) const;
+  void reset_plan_cache(RealtimeProxyGraph& proxy_graph,
+                        const RealTimeDirtyPlan& plan) const;
 
   /**
    * @brief Validates and returns the target RT output after dirty execution.
    *
-   * @param graph Graph containing the target node cache.
+   * @param proxy_graph Proxy graph containing the target RT output.
    * @param node_id Target node id requested by the public facade.
-   * @return Mutable real-time output stored on the target node.
+   * @return Mutable real-time output stored on the proxy node.
    * @throws GraphError when execution finishes without target RT output.
-   * @note RT output remains transient state and is validated separately from HP
-   * cache authority.
+   * @note RT output remains outside GraphModel and is validated separately from
+   * HP cache authority.
    */
-  NodeOutput& require_target_output(GraphModel& graph, int node_id) const;
+  NodeOutput& require_target_output(RealtimeProxyGraph& proxy_graph,
+                                    int node_id) const;
 
   /** @brief Borrowed traversal service for dirty ROI planning. */
   GraphTraversalService& traversal_;

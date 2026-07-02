@@ -12,10 +12,6 @@ const NodeOutput* pick_cached_output(const Node& node,
     source_label = "HP formal cache";
     return &node.cached_output_high_precision.value();
   }
-  if (node.cached_output_real_time) {
-    source_label = "RT transient state (NOT formal cache)";
-    return &node.cached_output_real_time.value();
-  }
   source_label.clear();
   return nullptr;
 }

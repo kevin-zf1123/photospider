@@ -42,14 +42,14 @@ choose queue order, batching, worker policy, cancellation, and concrete
 execution resources, then dispatch work. They should not own graph-level
 dirty-region propagation or compute-task derivation.
 
-In the current `DirectGraphCommit` path, a `RealTimeUpdate` request still
-performs both HP and RT dirty work for the same dirty region, but
-`IntentUpdateCoordinator` runs the HP sibling before the RT sibling. The RT
-path stages proxy writes in `RealtimeDirtyWriteBuffer` and commits them after
-RT dirty work drains. Cross-intent HP/RT sibling concurrency is a future
-buffered-commit capability, not a scheduler workaround. Schedulers should keep
-handling resource dispatch for ready task callbacks, epochs, cancellation, and
-queue policy without making RT output a formal HP cache source.
+For `RealTimeUpdate`, the scheduler-backed path now starts the RT dirty sibling
+before the HP dirty sibling and allows both siblings to compute concurrently
+when both scheduler runtimes are running. RT writes are staged in
+`RealtimeProxyWriteBuffer` and committed to `RealtimeProxyGraph`; HP writes are
+staged in `HighPrecisionDirtyWriteBuffer` and commit to `GraphModel` only after
+the RT proxy commit gate opens. Schedulers still handle ready task callbacks,
+epochs, cancellation, and queue policy; they do not make RT output a formal HP
+cache source.
 
 ## Current Dispatch State
 

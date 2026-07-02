@@ -66,7 +66,7 @@ SCHEDULER_FILTER = (
 )
 
 COMPUTE_SPLIT_FILTER = (
-    "IntentUpdateCoordinatorSplit.ValidatesRtDirtyRoiAndCoordinatesDualPathWithoutParallel:"
+    "IntentUpdateCoordinatorSplit.ValidatesRtDirtyRoiAndCoordinatesRtFirstConcurrency:"
     "GlobalHighPrecisionDirtyUpdate.UsesDirtyPlanningForGlobalHpDirtyRoi:"
     "DirtySourceLifecycleFacade.UsesInteractionServicePublicBoundary"
 )

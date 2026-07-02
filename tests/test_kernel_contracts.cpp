@@ -457,14 +457,12 @@ TEST(CacheSemantics, HpAndRtComputePopulateFormalCaches) {
   int hp_h_before =
       graph.node(2).cached_output_high_precision->image_buffer.height;
 
-  // RT compute populates cached_output_real_time only;
-  // cached_output_high_precision must remain unchanged.
+  // RT compute returns proxy output; cached_output_high_precision must remain
+  // unchanged.
   ComputeService::Request rt_request = hp_request;
   rt_request.intent = ComputeIntent::RealTimeUpdate;
   rt_request.dirty_roi = cv::Rect(0, 0, 8, 8);
   NodeOutput& rt = compute.compute(graph, rt_request);
-  EXPECT_EQ(&rt, &*graph.node(2).cached_output_real_time);
-  EXPECT_TRUE(graph.node(2).cached_output_real_time.has_value());
 
   // Key contract: RT compute must NOT alter the formal HP cache
   ASSERT_TRUE(graph.node(2).cached_output_high_precision.has_value());
@@ -476,12 +474,11 @@ TEST(CacheSemantics, HpAndRtComputePopulateFormalCaches) {
       << "RT compute must not change HP cache height";
 
   // RT output should be downscaled relative to HP
-  EXPECT_LE(graph.node(2).cached_output_real_time->image_buffer.width,
-            hp_w_before)
+  EXPECT_LE(rt.image_buffer.width, hp_w_before)
       << "RT output should be <= HP output width";
 }
 
-TEST(CacheSemantics, DiskSaveAndSyncIgnoreRtOnlyState) {
+TEST(CacheSemantics, DiskSaveAndSyncIgnoreNodesWithoutHpState) {
   register_contract_ops();
   GraphTraversalService traversal;
   GraphCacheService cache;
@@ -500,8 +497,8 @@ TEST(CacheSemantics, DiskSaveAndSyncIgnoreRtOnlyState) {
   graph.mutate_node_runtime_state(
       2, [](auto& state) { state.caches.push_back({"image", "output.png"}); });
 
-  // Node 3: process with caches entry but only RT state (simulates a node
-  // that was computed via interactive RT path but never had HP computed)
+  // Node 3: process with caches entry but no HP state. RT proxy state is not
+  // stored on GraphModel and therefore cannot protect disk cache files.
   Node rt_only_node;
   rt_only_node.id = 3;
   rt_only_node.name = "rt_only";
@@ -522,22 +519,8 @@ TEST(CacheSemantics, DiskSaveAndSyncIgnoreRtOnlyState) {
   compute.compute(graph, hp_request);
   ASSERT_TRUE(graph.node(2).cached_output_high_precision.has_value());
 
-  // Populate RT-only node (node 3) with RT state; it never had HP compute.
-  graph.mutate_node_runtime_state(3, [](auto& state) {
-    state.cached_output_real_time = NodeOutput{};
-    state.cached_output_real_time->image_buffer =
-        make_aligned_cpu_image_buffer(8, 8, 1, DataType::FLOAT32);
-  });
-
-  // Also give node 2 an RT snapshot — RT presence must not affect sync
-  graph.mutate_node_runtime_state(2, [](auto& state) {
-    state.cached_output_real_time = NodeOutput{};
-    state.cached_output_real_time->image_buffer =
-        make_aligned_cpu_image_buffer(4, 4, 1, DataType::FLOAT32);
-  });
-
-  // Create stale disk file for RT-only node 3 (simulating leftover from a
-  // previous HP run that no longer has valid HP cache).
+  // Create stale disk file for node 3 (simulating leftover from a previous HP
+  // run that no longer has valid HP cache).
   auto dir3 = cache.node_cache_dir(graph, 3);
   std::filesystem::create_directories(dir3);
   auto stale_file = dir3 / "rt_output.png";
@@ -554,14 +537,14 @@ TEST(CacheSemantics, DiskSaveAndSyncIgnoreRtOnlyState) {
   EXPECT_GE(sync_result.saved_nodes, 1)
       << "Nodes with HP cache should be saved to disk";
 
-  // Contract 2: RT-only node (node 3) has NO HP cache → stale disk files
-  // MUST be cleaned up. RT presence alone must not protect stale files.
+  // Contract 2: node 3 has NO HP cache, so stale disk files must be cleaned
+  // up. RT proxy state is outside GraphModel and cannot protect stale files.
   EXPECT_FALSE(std::filesystem::exists(stale_file))
-      << "Stale disk files for RT-only nodes should be removed";
+      << "Stale disk files for nodes without HP cache should be removed";
   EXPECT_GE(sync_result.removed_files, 1)
       << "Sync should report removed stale files for nodes without HP cache";
 
-  // Contract 3: Node 2 has HP cache + RT state, so only HP is written to disk.
+  // Contract 3: Node 2 has HP cache, so HP is written to disk.
   // The disk file for node 2 should exist after sync.
   auto dir2 = cache.node_cache_dir(graph, 2);
   auto hp_file = dir2 / "output.png";
@@ -910,7 +893,6 @@ TEST(GraphIoContract, SuccessfulReloadResetsRuntimeMetadata) {
   graph.set_skip_save_cache(true);
   graph.dirty_generation_counter = 42;
   graph.dirty_source_hp_commit_generation[1] = 42;
-  graph.dirty_source_rt_commit_generation[1] = 43;
   graph.last_dirty_region_snapshot_debug = "stale dirty snapshot";
   compute::DirtyRegionSnapshot snapshot;
   snapshot.graph_generation = 42;
@@ -933,7 +915,6 @@ TEST(GraphIoContract, SuccessfulReloadResetsRuntimeMetadata) {
   EXPECT_FALSE(graph.skip_save_cache());
   EXPECT_EQ(graph.dirty_generation_counter, 0u);
   EXPECT_TRUE(graph.dirty_source_hp_commit_generation.empty());
-  EXPECT_TRUE(graph.dirty_source_rt_commit_generation.empty());
   EXPECT_FALSE(graph.last_dirty_region_snapshot_debug.has_value());
   EXPECT_FALSE(graph.last_dirty_region_snapshot.has_value());
   EXPECT_TRUE(graph.recent_dirty_region_snapshots.empty());

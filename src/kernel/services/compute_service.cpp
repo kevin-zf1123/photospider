@@ -26,10 +26,12 @@
 #include "kernel/services/compute-service/compute_cache_policy.hpp"
 #include "kernel/services/compute-service/compute_metrics_recorder.hpp"
 #include "kernel/services/compute-service/compute_task_dispatcher.hpp"
+#include "kernel/services/compute-service/dirty_sibling_commit_gate.hpp"
 #include "kernel/services/compute-service/dirty_update_executor.hpp"
 #include "kernel/services/compute-service/intent_update_coordinator.hpp"
 #include "kernel/services/compute-service/node_executor.hpp"
 #include "kernel/services/compute-service/node_input_resolver.hpp"
+#include "kernel/services/compute-service/realtime_proxy_graph.hpp"
 #include "kernel/services/compute-service/task_graph_planning.hpp"
 #include "kernel/services/graph_cache_service.hpp"
 #include "kernel/services/graph_event_service.hpp"
@@ -41,6 +43,8 @@ ComputeService::ComputeService(GraphTraversalService& traversal,
                                GraphCacheService& cache,
                                GraphEventService& events)
     : traversal_(traversal), cache_(cache), events_(events) {}
+
+ComputeService::~ComputeService() = default;
 
 namespace {
 
@@ -152,7 +156,9 @@ compute::ComputeTaskDispatcher::ComputeDispatchRequest make_dispatch_request(
  */
 compute::DirtyUpdateRequest make_dirty_update_request(
     const ComputeService::Request& request,
-    bool suppress_graph_downsample = false) {
+    bool suppress_graph_downsample = false,
+    std::shared_ptr<compute::DirtySiblingCommitGate> sibling_commit_gate =
+        nullptr) {
   return compute::DirtyUpdateRequest{request.node_id,
                                      request.cache.precision,
                                      request.cache.force_recache,
@@ -160,7 +166,8 @@ compute::DirtyUpdateRequest make_dirty_update_request(
                                      request.cache.disable_disk_cache,
                                      request.telemetry.benchmark_events,
                                      request.dirty_roi.value(),
-                                     suppress_graph_downsample};
+                                     suppress_graph_downsample,
+                                     std::move(sibling_commit_gate)};
 }
 
 /**
@@ -359,8 +366,12 @@ NodeOutput& ComputeService::compute_internal(
  * @brief Delegates HP dirty ROI execution to HighPrecisionDirtyExecutor.
  *
  * @param graph Graph whose HP dirty state and cache are updated.
+ * @param proxy_graph RT proxy graph that may receive GlobalHighPrecision
+ * downsample output after HP commit.
  * @param strategy Execution strategy that may supply a scheduler runtime.
  * @param request Request carrying target, cache, telemetry, and dirty ROI.
+ * @param sibling_commit_gate Optional RealTimeUpdate gate that delays HP graph
+ * commit until RT proxy commit succeeds.
  * @return Mutable target HP output stored in the graph.
  * @throws GraphError from dirty planning, execution, scheduler dispatch, or
  * target output validation; std::bad_optional_access if dirty_roi is missing
@@ -369,32 +380,48 @@ NodeOutput& ComputeService::compute_internal(
  * ComputeService remains only the public orchestration boundary.
  */
 NodeOutput& ComputeService::compute_high_precision_update(
-    GraphModel& graph, const ExecutionStrategy& strategy,
-    const Request& request) {
+    GraphModel& graph, compute::RealtimeProxyGraph& proxy_graph,
+    const ExecutionStrategy& strategy, const Request& request,
+    std::shared_ptr<compute::DirtySiblingCommitGate> sibling_commit_gate) {
   compute::HighPrecisionDirtyExecutor executor(traversal_, events_);
-  return executor.execute(graph, strategy.runtime,
-                          make_dirty_update_request(request));
+  return executor.execute(graph, proxy_graph, strategy.runtime,
+                          make_dirty_update_request(
+                              request, false, std::move(sibling_commit_gate)));
 }
 
 /**
  * @brief Delegates RT dirty ROI execution to RealTimeDirtyExecutor.
  *
- * @param graph Graph whose RT dirty state and proxy cache are updated.
+ * @param graph Graph used for topology, parameters, and HP fallback output.
+ * @param proxy_graph RT proxy graph whose low-resolution state is updated.
  * @param strategy Execution strategy that may supply a scheduler runtime.
  * @param request Request carrying target, cache, telemetry, and dirty ROI.
- * @return Mutable target RT output stored in the graph.
+ * @return Mutable target RT output stored in the proxy graph.
  * @throws GraphError from dirty planning, execution, scheduler dispatch, or
  * target output validation; std::bad_optional_access if dirty_roi is missing
  * before coordinator validation.
- * @note RT dirty output stays transient and does not become reusable HP cache
- * authority.
+ * @note RT dirty output stays outside GraphModel and does not become reusable
+ * HP cache authority.
  */
 NodeOutput& ComputeService::compute_real_time_update(
-    GraphModel& graph, const ExecutionStrategy& strategy,
-    const Request& request) {
+    GraphModel& graph, compute::RealtimeProxyGraph& proxy_graph,
+    const ExecutionStrategy& strategy, const Request& request) {
   compute::RealTimeDirtyExecutor executor(traversal_, events_);
-  return executor.execute(graph, strategy.runtime,
+  return executor.execute(graph, proxy_graph, strategy.runtime,
                           make_dirty_update_request(request));
+}
+
+compute::RealtimeProxyGraph& ComputeService::realtime_proxy_graph_for(
+    GraphModel& graph, const ExecutionStrategy& strategy) {
+  if (strategy.runtime) {
+    return strategy.runtime->realtime_proxy_graph();
+  }
+  std::lock_guard<std::mutex> lock(inline_rt_proxy_graphs_mutex_);
+  auto& proxy = inline_rt_proxy_graphs_[&graph];
+  if (!proxy) {
+    proxy = std::make_unique<compute::RealtimeProxyGraph>();
+  }
+  return *proxy;
 }
 
 /**
@@ -442,6 +469,13 @@ NodeOutput& ComputeService::compute_intent_update_impl(
     const Request& request) {
   compute::IntentUpdateCallbacks callbacks;
   const ComputeIntent intent = request.intent.value();
+  compute::RealtimeProxyGraph& rt_proxy_graph =
+      realtime_proxy_graph_for(graph, strategy);
+  std::shared_ptr<compute::DirtySiblingCommitGate> sibling_commit_gate;
+  if (intent == ComputeIntent::RealTimeUpdate) {
+    sibling_commit_gate = std::make_shared<compute::DirtySiblingCommitGate>();
+    callbacks.sibling_commit_gate = sibling_commit_gate;
+  }
   const Node* coordinator_node = graph.find_node(request.node_id);
   const std::string coordinator_node_name =
       coordinator_node ? coordinator_node->name : std::string();
@@ -457,25 +491,26 @@ NodeOutput& ComputeService::compute_intent_update_impl(
     return compute(graph, hp_request);
   };
   callbacks.run_global_high_precision_dirty_update = [&]() -> NodeOutput& {
-    return compute_high_precision_update(graph, strategy, request);
+    return compute_high_precision_update(graph, rt_proxy_graph, strategy,
+                                         request);
   };
   callbacks.run_high_precision_update = [&]() {
     const Request silent_request = make_silent_dirty_request(request);
     compute::HighPrecisionDirtyExecutor executor(traversal_, events_);
-    executor.execute(graph, strategy.runtime,
-                     make_dirty_update_request(
-                         silent_request, true));
+    executor.execute(
+        graph, rt_proxy_graph, strategy.runtime,
+        make_dirty_update_request(silent_request, true, sibling_commit_gate));
   };
   callbacks.run_real_time_update = [&]() -> NodeOutput& {
-    return compute_real_time_update(graph, strategy, request);
+    NodeOutput& output =
+        compute_real_time_update(graph, rt_proxy_graph, strategy, request);
+    if (sibling_commit_gate) {
+      sibling_commit_gate->mark_rt_committed();
+    }
+    return output;
   };
   callbacks.real_time_output = [&]() -> NodeOutput& {
-    Node& target = graph.mutable_node(request.node_id);
-    if (!target.cached_output_real_time) {
-      throw GraphError(GraphErrc::ComputeError,
-                       "RT compute finished without target output.");
-    }
-    return *target.cached_output_real_time;
+    return rt_proxy_graph.require_output(request.node_id);
   };
   callbacks.record_stage = [&,
                             coordinator_node_name](const std::string& stage) {

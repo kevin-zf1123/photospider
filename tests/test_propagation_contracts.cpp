@@ -115,24 +115,18 @@ TEST(PropagationContracts, BackwardLinearChainPropagatesPreciseDirtyRoi) {
   EXPECT_EQ(*propagated, cv::Rect(0, 10, 91, 121));
 }
 
-TEST(PropagationContracts, BackwardResizeIgnoresRtOnlyParentExtent) {
+TEST(PropagationContracts, BackwardResizeRequiresHpParentExtent) {
   ops::register_builtin();
   GraphModel graph = make_graph();
-  graph.add_node(make_unparameterized_source_node(1, "rt_only_source"));
+  graph.add_node(make_unparameterized_source_node(1, "source_without_hp"));
   graph.add_node(make_resize_node(2, 1, 4, 4, "nearest"));
   graph.validate_topology();
-
-  graph.mutate_node_runtime_state(1, [](auto& state) {
-    state.cached_output_real_time = NodeOutput{};
-    state.cached_output_real_time->image_buffer =
-        make_aligned_cpu_image_buffer(8, 8, 1, DataType::FLOAT32);
-  });
 
   RoiPropagationService propagation;
   EXPECT_FALSE(
       propagation.project_roi_backward(graph, 2, cv::Rect(1, 1, 1, 1), 1)
           .has_value())
-      << "RT-only transient state must not provide HP propagation extent.";
+      << "Missing HP state must not provide propagation extent.";
 
   graph.mutate_node_runtime_state(1, [](auto& state) {
     state.cached_output_high_precision = NodeOutput{};

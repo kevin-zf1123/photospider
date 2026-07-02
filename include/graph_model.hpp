@@ -71,7 +71,6 @@ class GraphModel {
   std::vector<compute::DirtyRegionSnapshot> recent_dirty_region_snapshots;
   uint64_t dirty_generation_counter = 0;
   std::unordered_map<int, uint64_t> dirty_source_hp_commit_generation;
-  std::unordered_map<int, uint64_t> dirty_source_rt_commit_generation;
   std::optional<compute::ComputePlan> last_compute_plan;
   std::vector<compute::ComputePlan> recent_compute_plans;
   std::optional<compute::ComputePlanSummary> last_compute_plan_summary;
@@ -146,11 +145,8 @@ class GraphModel {
     std::vector<OutputPort>& outputs;
     std::vector<CacheEntry>& caches;
     bool& preserved;
-    std::optional<NodeOutput>& cached_output_real_time;
     std::optional<NodeOutput>& cached_output_high_precision;
-    int& rt_version;
     int& hp_version;
-    std::optional<cv::Rect>& rt_roi;
     std::optional<cv::Rect>& hp_roi;
     std::optional<cv::Size>& last_input_size_hp;
     std::optional<SpatialDependencyMap>& dependency_lut;

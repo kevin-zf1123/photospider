@@ -226,13 +226,15 @@ fields, dirty snapshots, timing, and node runtime state coherent without
 routing non-compute commands through scheduler queues.
 
 Future work may add a `ComputeCommitPolicy` separate from `ComputeIntent`.
-`DirectGraphCommit` keeps the current behavior, where compute writes visible
-graph state during the request and graph-state operations wait. A future
-`StagedInterruptibleCommit` policy would stage outputs outside the visible
-graph state, allow graph-state operations to request cancellation before commit,
-discard uncommitted buffers on cancellation, and commit only coherent results.
-This policy is intentionally not part of `ComputeIntent`, because HP/RT intent
-semantics are independent from commit and interruption behavior.
+The current dirty update implementation already uses staged output commits for
+HP/RT sibling safety: HP dirty workers write `HighPrecisionDirtyWriteBuffer`
+and commit to the visible `GraphModel` only after the RT sibling has committed;
+RT dirty workers write `RealtimeProxyWriteBuffer` and commit to the
+runtime-owned `RealtimeProxyGraph`. A future `StagedInterruptibleCommit` policy
+would extend this boundary with cancellation before commit and discard
+uncommitted buffers on cancellation. This policy is intentionally not part of
+`ComputeIntent`, because HP/RT intent semantics are independent from commit and
+interruption behavior.
 
 ## GlobalHighPrecision
 
@@ -244,7 +246,7 @@ HP dirty-region update is a first-class dirty-ROI consumer, not just a full
 recompute fallback. It computes a backward ROI plan, aligns dirty regions to HP
 tile boundaries, clips the HP work set from the request's `ComputeTaskGraph`,
 updates affected HP tiles, records HP ROI/version metadata, and can schedule
-downsample work to refresh RT transient state. `IntentUpdateCoordinator` routes
+downsample work to refresh `RealtimeProxyGraph` state. `IntentUpdateCoordinator` routes
 global HP dirty requests to this path and records
 `intent_coordinator_global_dirty_update`.
 
@@ -258,28 +260,28 @@ work-set materialization and interaction-facing inspection summaries.
 and should return a clear error through kernel and interaction-facing APIs. It
 does not implicitly mean full-frame RT update.
 
-With a valid dirty ROI, realtime compute enables both paths. HP updates the
-full-size authoritative output for the affected graph work, while RT updates
-the proxy output for the affected region. Under the current
-`DirectGraphCommit` behavior, `IntentUpdateCoordinator` runs the HP sibling and
-then the RT sibling inline, even when scheduler task runtimes are available.
-Each sibling may still submit ready dirty work to its intent-specific scheduler
-runtime internally, but cross-intent HP/RT sibling concurrency stays disabled
-until buffered commit covers both output domains. This distinction is a commit
-policy constraint, not the switch that enables or disables the HP/RT dual path.
+With a valid dirty ROI, realtime compute enables both paths. RT is launched
+first and updates a low-resolution `RealtimeProxyGraph`; HP updates the
+full-size authoritative output for the affected graph work through a staged
+buffer. When HP and RT scheduler runtimes are available,
+`IntentUpdateCoordinator` starts both siblings concurrently, waits for RT first,
+and uses a sibling commit gate so HP mutates `GraphModel` only after RT proxy
+commit succeeds. Without scheduler runtimes, the same callbacks run inline in
+RT-then-HP order.
 
 Realtime planning is intentionally per path, not a single mixed-domain planner
 call. `IntentUpdateCoordinator` dispatches sibling HP and RT update callbacks
-and records inline HP/RT stages for Dirty RT requests. Each path uses a
+and records RT-first/concurrent stages for Dirty RT requests. Each path uses a
 single-domain request plan and a same-domain dirty snapshot: the HP callback
 uses a `GlobalHighPrecision` node/cache-pruned plan with an HP dirty snapshot,
 and the RT callback uses a `RealTimeUpdate` node/cache-pruned plan with an RT
-dirty snapshot. RT dirty node execution writes into a request-local
-`RealtimeDirtyWriteBuffer` and commits the staged proxy output only after RT
-dirty work drains. The dirty snapshot clips or activates the update work set
-from the path's task graph. This keeps full task expansion, node/cache pruning,
-dirty snapshot pruning, and output commit as separate contracts so future task
-pools or modes can reuse the same boundaries with their own domain.
+dirty snapshot. HP dirty node execution writes into
+`HighPrecisionDirtyWriteBuffer`; RT dirty node execution writes into
+`RealtimeProxyWriteBuffer` and commits only to `RealtimeProxyGraph`. The dirty
+snapshot clips or activates the update work set from the path's task graph.
+This keeps full task expansion, node/cache pruning, dirty snapshot pruning, and
+output commit as separate contracts so future task pools or modes can reuse the
+same boundaries with their own domain.
 
 The passed dirty ROI is converted into graph-scoped planner state for the
 current request. `Kernel` and `InteractionService` expose begin/update/end dirty
