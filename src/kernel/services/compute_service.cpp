@@ -551,6 +551,10 @@ NodeOutput& ComputeService::compute_sequential_impl(GraphModel& graph,
     clear_timing_results(graph);
   }
 
+  if (request.cache.force_recache) {
+    graph.clear_full_task_graph_cache();
+  }
+
   std::vector<int> execution_order;
   try {
     execution_order = traversal_.topo_postorder_from(graph, request.node_id);

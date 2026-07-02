@@ -2,6 +2,7 @@
 
 #include <algorithm>
 #include <atomic>
+#include <memory>
 #include <mutex>
 #include <set>
 #include <stdexcept>
@@ -784,6 +785,48 @@ TEST(TaskGraphPlanningSplit, CachesFullTaskGraphPerIntentAndTopology) {
   const auto hp_after_topology_change = compute::get_or_expand_full_task_graph(
       graph, ComputeIntent::GlobalHighPrecision);
   EXPECT_NE(hp_first.get(), hp_after_topology_change.get());
+}
+
+TEST(TaskGraphPlanningSplit, ForceRecacheClearsFullTaskGraphCacheBeforePlan) {
+  register_split_ops();
+  GraphRuntime::Info info;
+  info.name = "split-force-recache-task-graph-cache";
+  info.root = "cache/split-force-recache-task-graph-cache";
+  info.cache_root = "cache/split-force-recache-task-graph-cache/cache";
+  GraphRuntime runtime(info);
+  runtime.set_scheduler(ComputeIntent::GlobalHighPrecision,
+                        std::make_unique<SerialDebugScheduler>());
+  runtime.start();
+
+  GraphModel& graph = runtime.model();
+  Node source = make_node(1, "split_plan", "source");
+  source.parameters["width"] = 32;
+  source.parameters["height"] = 16;
+  graph.add_node(source);
+
+  const auto cached_before = compute::get_or_expand_full_task_graph(
+      graph, ComputeIntent::GlobalHighPrecision);
+  ASSERT_NE(cached_before, nullptr);
+
+  GraphTraversalService traversal;
+  GraphCacheService cache;
+  GraphEventService events;
+  ComputeService compute(traversal, cache, events);
+
+  ComputeService::Request request;
+  request.node_id = 1;
+  request.cache.precision = "float32";
+  request.cache.force_recache = true;
+  request.cache.disable_disk_cache = true;
+  NodeOutput& output = compute.compute_parallel(graph, runtime, request);
+  EXPECT_EQ(output.image_buffer.width, 32);
+  EXPECT_EQ(output.image_buffer.height, 16);
+
+  const auto cached_after = compute::get_or_expand_full_task_graph(
+      graph, ComputeIntent::GlobalHighPrecision);
+  EXPECT_NE(cached_before.get(), cached_after.get())
+      << "force-recache must discard stale task ROIs before planning";
+  runtime.stop();
 }
 
 TEST(TaskGraphPlanningSplit,
