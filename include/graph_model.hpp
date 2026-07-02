@@ -189,6 +189,18 @@ class GraphModel {
    */
   void clear_disk_cache_load_result();
 
+  /**
+   * @brief Clears all nodes and resets model-level runtime state.
+   *
+   * The clear operation removes the visible graph topology, clears cache,
+   * timing, dirty, diagnostic, and task-graph state, and advances the topology
+   * generation so runtime-owned mirrors such as RealtimeProxyGraph discard any
+   * state keyed by reused node ids from the previous graph contents.
+   *
+   * @throws Nothing directly under current container reset behavior.
+   * @note The graph remains usable after clear; later loads or replacements
+   * start from an empty topology generation boundary.
+   */
   void clear();
   void add_node(const Node& node);
   void replace_node(const Node& node);
@@ -198,6 +210,16 @@ class GraphModel {
   void rewire_parameter_input(int node_id, size_t input_index, int from_node_id,
                               std::string from_output_name,
                               std::string to_parameter_name);
+  /**
+   * @brief Atomically replaces the graph node map after validating topology.
+   *
+   * @param nodes Replacement nodes keyed by node id.
+   * @throws GraphError when the replacement set is invalid or cyclic.
+   * @throws std::bad_alloc if validation or storage allocation fails.
+   * @note Successful replacement resets graph runtime state and advances
+   * topology generation even when node ids are reused, preventing runtime-owned
+   * mirrors from preserving stale per-node state across graph reloads.
+   */
   void replace_nodes(NodeMap nodes);
   bool has_node(int id) const;
   bool empty() const;
@@ -217,7 +239,8 @@ class GraphModel {
   /**
    * @brief Returns the topology generation for task graph cache keys.
    *
-   * @return Monotonic generation incremented when graph topology is rebuilt.
+   * @return Monotonic generation incremented when graph topology is rebuilt,
+   * cleared, or replaced.
    * @throws Nothing.
    * @note Runtime cache, ROI, and dirty state changes do not affect this
    * generation; FullTaskGraph expansion intentionally depends only on topology

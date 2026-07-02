@@ -42,7 +42,9 @@ or partially rebuilt model state on reload failure.
 
 Chosen behavior: failed reload preserves the previous graph. Reload validates
 the replacement model and rebuilds topology adjacency before committing it to
-the visible `GraphModel`.
+the visible `GraphModel`. A successful replacement advances topology generation
+even when node ids are reused, so runtime-owned mirrors such as
+`RealtimeProxyGraph` reset stale per-node state before the next compute.
 
 ## Node YAML Replacement
 
@@ -66,13 +68,16 @@ Clear should reset:
 
 - node map
 - topology adjacency index
+- topology generation
 - timing results
 - accumulated IO time
 - skip-save state
 - other per-run model state that could affect a subsequent load or compute
 
 This makes reload and clear behavior easier to reason about and avoids stale
-metadata attached to an empty graph.
+metadata attached to an empty graph. Runtime-owned state keyed by node id must
+treat the generation change as an invalidation boundary rather than preserving
+entries for reused ids.
 
 ## Error Surface
 

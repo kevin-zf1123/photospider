@@ -207,6 +207,7 @@ void GraphModel::clear() {
   nodes_.clear();
   topology_.clear();
   reset_runtime_state();
+  ++topology_generation_;
   quiet_ = true;
 }
 
@@ -323,6 +324,7 @@ void GraphModel::replace_nodes(NodeMap nodes) {
   nodes_ = std::move(nodes);
   topology_ = std::move(topology);
   reset_runtime_state();
+  ++topology_generation_;
 }
 
 bool GraphModel::has_node(int id) const {

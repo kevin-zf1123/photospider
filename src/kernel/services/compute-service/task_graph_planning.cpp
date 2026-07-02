@@ -13,6 +13,7 @@
 #include "graph_model.hpp"  // NOLINT(build/include_subdir)
 #include "kernel/services/compute-service/compute_cache_policy.hpp"
 #include "kernel/services/compute-service/compute_geometry.hpp"
+#include "kernel/services/compute-service/domain_op_metadata.hpp"
 #include "kernel/services/compute-service/node_executor.hpp"
 #include "kernel/services/compute-service/task_population_strategy.hpp"
 #include "kernel/services/graph_extent_resolver.hpp"
@@ -21,7 +22,7 @@ namespace ps::compute {
 namespace {
 
 /** @brief Task-shape config token used by FullTaskGraph cache keys. */
-constexpr const char* kTaskShapeConfigVersion = "task-shape-v1";
+constexpr const char* kTaskShapeConfigVersion = "task-shape-v2";
 
 /**
  * @brief Maps a compute intent to the single dirty/task domain being planned.
@@ -449,8 +450,8 @@ cv::Rect required_upstream_roi_for_task(
         config.output_size = downstream_extent;
       }
       const Node& downstream_node = graph->node(dependency.to_node_id);
-      if (auto metadata = OpRegistry::instance().get_metadata(
-              downstream_node.type, downstream_node.subtype)) {
+      if (auto metadata = metadata_for_domain(
+              downstream_node.type, downstream_node.subtype, to_task.domain)) {
         config.metadata = *metadata;
       }
       return NodeExecutor::input_roi_for_tile(

@@ -290,6 +290,11 @@ lifecycle state through the same graph-owned boundary. TODO: node-local dirty
 reports should become the origin source for future frontend-driven dirty-region
 updates.
 
+RT task graph expansion is domain-aware. When an operation has distinct HP and
+RT metadata, the `RealTimeUpdate` plan uses RT metadata for tile size and
+dependency ROI planning, while the HP sibling uses HP metadata. This keeps RT
+Micro_16 planning independent from HP Macro_256 throughput defaults.
+
 TODO: design the node-to-`InteractionService` boundary for realtime dirty
 updates. The design must define how nodes emit realtime events, dirty regions,
 and update requests; which layer owns dirty-region generation; how the

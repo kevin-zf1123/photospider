@@ -50,8 +50,10 @@ class RealtimeProxyGraph {
    *
    * @param graph Source graph whose node ids and topology generation are used.
    * @throws std::bad_alloc if map storage grows.
-   * @note Existing NodeState payloads are preserved for unchanged ids. Removed
-   * graph nodes are dropped from the proxy.
+   * @note Existing NodeState payloads are preserved only while the observed
+   * graph topology generation is unchanged. Reload, replacement, clear, and
+   * topology edits reset all live proxy entries so reused node ids cannot read
+   * output from a previous graph state.
    */
   void synchronize_with_graph(const GraphModel& graph);
 

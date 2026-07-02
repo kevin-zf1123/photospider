@@ -11,6 +11,7 @@
 #include "kernel/services/compute-service/compute_cache_policy.hpp"
 #include "kernel/services/compute-service/compute_geometry.hpp"
 #include "kernel/services/compute-service/dirty_execution_common.hpp"
+#include "kernel/services/compute-service/domain_op_metadata.hpp"
 #include "kernel/services/compute-service/node_executor.hpp"
 #include "kernel/services/graph_event_service.hpp"
 
@@ -427,7 +428,7 @@ void RealTimeDirtyNodeExecutor::execute_tiled(
   config.output_size = entry.rt_size;
   config.forced_halo = entry.halo_rt;
   if (auto metadata =
-          OpRegistry::instance().get_metadata(node.type, node.subtype)) {
+          metadata_for_domain(node.type, node.subtype, DirtyDomain::RealTime)) {
     config.metadata = *metadata;
   }
   NodeExecutor::execute_tiled_into(graph_, node, tile_fn, image_inputs_ready,

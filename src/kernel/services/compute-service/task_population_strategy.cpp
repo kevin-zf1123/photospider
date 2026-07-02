@@ -5,6 +5,7 @@
 #include <utility>
 
 #include "graph_model.hpp"  // NOLINT(build/include_subdir)
+#include "kernel/services/compute-service/domain_op_metadata.hpp"
 #include "kernel/services/graph_extent_resolver.hpp"
 
 namespace ps::compute {
@@ -127,7 +128,7 @@ class DomainTaskShapeStrategy {
   /** @brief Returns current tile size preference for tiled graph expansion. */
   int tile_size_for_node(const Node& node) const {
     int tile_size = 128;
-    auto meta = OpRegistry::instance().get_metadata(node.type, node.subtype);
+    auto meta = metadata_for_domain(node.type, node.subtype, domain_);
     if (!meta) {
       return tile_size;
     }
@@ -196,11 +197,13 @@ class TaskAppender {
 };
 
 /**
- * @brief Populates simple node tasks when graph-backed shape data is unavailable.
+ * @brief Populates simple node tasks when graph-backed shape data is
+ * unavailable.
  */
 class NodeOnlyTaskPopulationStrategy {
  public:
-  /** @brief Appends one node task per planned work item with optional metadata. */
+  /** @brief Appends one node task per planned work item with optional metadata.
+   */
   void populate(ComputePlan& result, const DirtyRegionSnapshot* snapshot,
                 DirtyDomain domain) const {
     TaskAppender appender(result, snapshot);
