@@ -10,6 +10,7 @@
 #include <optional>
 #include <set>
 #include <string>
+#include <utility>
 #include <vector>
 
 #include "adapter/buffer_adapter_opencv.hpp"  // <--- 修正点: 添加缺失的头文件
@@ -19,6 +20,7 @@
 #include "kernel/scheduler/cpu_work_stealing_scheduler.hpp"  // M3.3: 新调度器
 #include "kernel/scheduler/serial_debug_scheduler.hpp"
 #include "kernel/services/compute-service/compute_task_dispatcher.hpp"
+#include "kernel/services/compute-service/realtime_proxy_graph.hpp"
 #include "kernel/services/compute_service.hpp"  // <--- 修正点: 添加缺失的头文件
 #include "kernel/services/graph_cache_service.hpp"  // <--- 修正点: 添加缺失的头文件
 #include "kernel/services/graph_traversal_service.hpp"  // <--- 修正点: 添加缺失的头文件
@@ -341,13 +343,16 @@ TEST(Scheduler, DirtyRegionTiledComputation) {
       .submit([&](ps::GraphModel& g) -> void {
         const auto& target = g.node(final_node_id);
         ASSERT_TRUE(target.cached_output_high_precision.has_value());
-        ASSERT_TRUE(target.cached_output_real_time.has_value());
         EXPECT_GT(target.hp_version, 0);
-        EXPECT_GT(target.rt_version, 0);
         EXPECT_TRUE(target.hp_roi.has_value());
-        EXPECT_TRUE(target.rt_roi.has_value());
       })
       .get();
+  const auto* proxy_state =
+      runtime.realtime_proxy_graph().find_state(final_node_id);
+  ASSERT_NE(proxy_state, nullptr);
+  ASSERT_TRUE(proxy_state->output.has_value());
+  EXPECT_GT(proxy_state->version, 0);
+  EXPECT_TRUE(proxy_state->roi_hp.has_value());
 
   auto dirty_snapshot = svc.cmd_dirty_region_snapshot_debug(graph_name);
   ASSERT_TRUE(dirty_snapshot.has_value());
@@ -440,16 +445,15 @@ TEST(Scheduler,
       .submit([&](ps::GraphModel& g) -> void {
         g.dirty_source_hp_commit_generation[1] =
             std::numeric_limits<uint64_t>::max();
-        g.dirty_source_rt_commit_generation[1] =
-            std::numeric_limits<uint64_t>::max();
-        g.mutate_node_runtime_state(2, [](auto& state) {
-          state.cached_output_high_precision.reset();
-          state.cached_output_real_time.reset();
-        });
-        g.mutate_node_runtime_state(3, [](auto& state) {
-          state.cached_output_high_precision.reset();
-          state.cached_output_real_time.reset();
-        });
+        stale_runtime.realtime_proxy_graph().synchronize_with_graph(g);
+        ps::compute::RealtimeProxyGraph::NodeState rt_state;
+        rt_state.dirty_source_generation = std::numeric_limits<uint64_t>::max();
+        stale_runtime.realtime_proxy_graph().commit_node_state(
+            1, std::move(rt_state));
+        g.mutate_node_runtime_state(
+            2, [](auto& state) { state.cached_output_high_precision.reset(); });
+        g.mutate_node_runtime_state(
+            3, [](auto& state) { state.cached_output_high_precision.reset(); });
       })
       .get();
   stale_runtime.clear_scheduler_log();
@@ -492,14 +496,10 @@ TEST(Scheduler,
         broken.type = "missing_op";
         broken.subtype = "dirty_exception";
         g.replace_node(broken);
-        g.mutate_node_runtime_state(2, [](auto& state) {
-          state.cached_output_high_precision.reset();
-          state.cached_output_real_time.reset();
-        });
-        g.mutate_node_runtime_state(3, [](auto& state) {
-          state.cached_output_high_precision.reset();
-          state.cached_output_real_time.reset();
-        });
+        g.mutate_node_runtime_state(
+            2, [](auto& state) { state.cached_output_high_precision.reset(); });
+        g.mutate_node_runtime_state(
+            3, [](auto& state) { state.cached_output_high_precision.reset(); });
       })
       .get();
   exception_runtime.clear_scheduler_log();

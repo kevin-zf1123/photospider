@@ -1,20 +1,21 @@
 # Kernel Cache Model
 
-The kernel has memory cache fields on each `Node` and disk cache files under
-the graph cache root. This document defines the intended cache semantics.
+The kernel has formal HP memory cache on each `Node`, transient RT proxy state
+in `RealtimeProxyGraph`, and disk cache files under the graph cache root. This
+document defines the intended cache semantics.
 
 ## Formal Cache and Transient State
 
-| Field | Status | Meaning |
+| Location | Status | Meaning |
 | --- | --- | --- |
-| `cached_output_high_precision` | Formal cache | Full-quality reusable HP output. |
-| `cached_output_real_time` | Transient RT state | Interactive preview/update output. |
+| `Node::cached_output_high_precision` | Formal cache | Full-quality reusable HP output. |
+| `RealtimeProxyGraph` node state | Transient RT proxy | Low-resolution interactive preview/update output. |
 
 Only high-precision output is formal reusable cache. That means only HP output
 may be used as the authoritative source for subsequent HP compute, disk cache,
-long-term storage, and other reusable cache behavior. `cached_output_real_time`
-is transient interactive state and must not be treated as authoritative cache,
-as a disk-cache synchronization source, or as long-term storage input.
+long-term storage, and other reusable cache behavior. RT proxy output is
+transient interactive state and must not be treated as authoritative cache, as a
+disk-cache synchronization source, or as long-term storage input.
 
 ## HP Cache
 
@@ -30,23 +31,26 @@ Associated fields:
 
 ## RT State
 
-RT compute writes `cached_output_real_time`. RT state is the interactive preview
-or proxy result. It may be lower resolution than HP output and is not formal
-cache authority.
+RT compute writes `RealtimeProxyGraph`. Each proxy node is keyed by the original
+graph node id and stores only low-resolution output, HP-space ROI metadata,
+version, and RT dirty-source generation. It does not copy Node parameters,
+inputs, topology, caches, or formal HP state.
 
-Dirty RT execution does not write graph-owned RT fields directly from worker
-tasks. It stages proxy output, ROI metadata, version counters, and dirty-source
-commit generation in `RealtimeDirtyWriteBuffer`, then commits that staged state
-to `GraphModel` after the RT dirty work set drains. This keeps the current
-`DirectGraphCommit` path deterministic while leaving room for a later buffered
-commit policy to restore cross-intent HP/RT sibling concurrency.
+Dirty RT execution does not write graph-owned RT fields. Worker tasks stage
+proxy output, ROI metadata, version counters, and dirty-source commit
+generation in `RealtimeProxyWriteBuffer`, then commit that staged state to
+`RealtimeProxyGraph` after the RT dirty work set drains. Dirty HP execution
+similarly stages HP output in `HighPrecisionDirtyWriteBuffer` before committing
+to `GraphModel`, so HP/RT siblings can compute concurrently while preserving
+RT-first commit ordering.
 
 Associated fields:
 
-| Field | Meaning |
+| Proxy field | Meaning |
 | --- | --- |
-| `rt_version` | Version counter for RT output changes. |
-| `rt_roi` | Most recent or merged HP-space region represented by RT update. |
+| `version` | Version counter for RT proxy output changes. |
+| `roi_hp` | Most recent or merged HP-space region represented by RT update. |
+| `dirty_source_generation` | RT dirty source generation committed for stale source checks. |
 
 ## Disk Cache
 
@@ -78,26 +82,26 @@ miss.
 | Operation | Effect |
 | --- | --- |
 | Clear drive cache | Remove disk cache directory contents and recreate root. |
-| Clear memory cache | Clear in-memory HP cache and RT transient state currently tracked by the service. |
+| Clear memory cache | Clear in-memory HP cache tracked by `GraphModel`. |
 | Clear cache | Clear both disk and memory cache. |
 | Cache all nodes | Save nodes with HP output to disk when configured. |
 | Free transient memory | Clear non-ending node memory cache state. |
 | Synchronize disk cache | Save HP output and remove stale disk files for nodes without HP output. |
 
 Disk cache save, load, and synchronization use `cached_output_high_precision`
-only. RT output does not protect stale disk files and is not promoted to disk
-cache state.
+only. RT proxy output does not protect stale disk files and is not promoted to
+disk cache state.
 
 ## Cache Rules
 
 - New HP code writes `cached_output_high_precision`.
-- New RT code writes `cached_output_real_time` as transient interactive state,
-  using `RealtimeDirtyWriteBuffer` for dirty worker writes before graph commit.
+- New RT code writes `RealtimeProxyGraph` as transient interactive state, using
+  `RealtimeProxyWriteBuffer` for dirty worker writes before proxy commit.
 - Formal cache save/load/sync behavior, subsequent HP compute, and long-term
   storage must use HP output and must not promote RT output to authoritative
   cache.
-- Tests should verify HP and RT fields independently.
+- Tests should verify HP graph cache and RT proxy graph state independently.
 
-`GraphInspectService` selects a display source in HP, then RT order and labels
-the selected source explicitly. RT metadata may be shown for inspection, but it
-is labeled as transient state rather than formal cache authority.
+`GraphInspectService` selects node-local display metadata from HP cache only.
+RT proxy inspection can be added as a separate frontend-facing view without
+embedding RT state back into `GraphModel`.

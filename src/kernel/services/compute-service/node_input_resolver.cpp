@@ -60,9 +60,8 @@ ResolvedNodeInputs NodeInputResolver::resolve(
 
 const NodeOutput* NodeInputResolver::output_from_node(const Node& node,
                                                       CacheReadMode mode) {
-  return mode == CacheReadMode::InteractivePreferred
-             ? ComputeCachePolicy::interactive_output(node)
-             : ComputeCachePolicy::reusable_output(node);
+  (void)mode;
+  return ComputeCachePolicy::reusable_output(node);
 }
 
 }  // namespace ps::compute

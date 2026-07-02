@@ -87,14 +87,13 @@
 | 字段 | 状态 | 含义 |
 | --- | --- | --- |
 | `cached_output_high_precision` | 正式缓存 | 完整质量、可复用输出的 HP 缓存。 |
-| `cached_output_real_time` | 临时 RT 状态 | 交互式预览/更新输出。 |
 
-只有 HP 输出是正式可复用缓存。这意味着只有 HP 输出可以进入后续 HP 计算、磁盘缓存、长期存储以及其他可复用缓存行为。`cached_output_real_time` 是临时交互式状态，不能作为权威缓存输出使用。
+只有 HP 输出是正式可复用缓存。这意味着只有 HP 输出可以进入后续 HP 计算、磁盘缓存、长期存储以及其他可复用缓存行为。RT 输出不存放在 `Node` 上，而是位于 `RealtimeProxyGraph`，后者镜像 node id，并保存低分辨率 proxy output、HP-space ROI、version 和 RT dirty-source generation。
 
-Dirty RT worker task 会先通过 `RealtimeDirtyWriteBuffer` stage
-`cached_output_real_time`、`rt_roi`、`rt_version` 和 dirty-source commit generation，
-然后再进行一次 graph commit。当前 `DirectGraphCommit` policy 下 dirty HP 仍直接写正式 HP
-cache；HP 迁移到通用 output buffer 属于后续 staged commit 工作。
+Dirty RT worker task 会先通过 `RealtimeProxyWriteBuffer` stage proxy output，再提交到
+`RealtimeProxyGraph`。Dirty HP worker task 会先通过 `HighPrecisionDirtyWriteBuffer`
+stage 正式 HP 输出，再提交到 `GraphModel`；RealTimeUpdate 的 HP commit 会被 gate 到成功的
+RT proxy commit 之后。
 
 ## YAML Schema
 

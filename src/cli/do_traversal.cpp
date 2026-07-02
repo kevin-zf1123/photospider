@@ -28,8 +28,6 @@ void do_traversal(const ps::GraphModel& graph, bool show_mem, bool show_disk) {
         if (show_mem) {
           if (node.cached_output_high_precision.has_value()) {
             statuses.push_back("HP in memory");
-          } else if (node.cached_output_real_time.has_value()) {
-            statuses.push_back("RT in memory");
           }
         }
         if (show_disk && !node.caches.empty()) {

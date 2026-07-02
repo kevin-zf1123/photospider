@@ -7,6 +7,8 @@
 #include <memory>
 #include <utility>
 
+#include "kernel/services/compute-service/realtime_proxy_graph.hpp"
+
 #ifdef __APPLE__
 #import <Metal/Metal.h>
 #endif
@@ -27,7 +29,8 @@ struct GraphRuntime::GpuContext {
 GraphRuntime::GraphRuntime(const Info& info)
     : info_(info),
       model_(info.cache_root.empty() ? info.root / "cache" : info.cache_root),
-      graph_state_(model_) {
+      graph_state_(model_),
+      realtime_proxy_graph_(std::make_unique<compute::RealtimeProxyGraph>()) {
   std::filesystem::create_directories(info_.root);
   if (!model_.cache_root.empty()) {
     std::filesystem::create_directories(model_.cache_root);
@@ -71,6 +74,10 @@ id GraphRuntime::get_metal_command_queue() {
 #else
   return nullptr;
 #endif
+}
+
+compute::RealtimeProxyGraph& GraphRuntime::realtime_proxy_graph() {
+  return *realtime_proxy_graph_;
 }
 
 void GraphRuntime::start() {

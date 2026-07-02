@@ -100,10 +100,8 @@ void validate_dirty_source_boundaries_ready(const GraphModel& graph,
                                                 std::to_string(source_node_id) +
                                                 " not found.");
     }
-    const NodeOutput* output =
-        domain == DirtyDomain::RealTime
-            ? ComputeCachePolicy::interactive_output(*source)
-            : ComputeCachePolicy::reusable_output(*source);
+    (void)domain;
+    const NodeOutput* output = ComputeCachePolicy::reusable_output(*source);
     if (!output) {
       throw GraphError(GraphErrc::MissingDependency,
                        "Dirty source boundary output is not ready for node " +

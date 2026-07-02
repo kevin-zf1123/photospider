@@ -3,6 +3,7 @@
 #include <vector>
 
 #include "graph_model.hpp"  // NOLINT(build/include_subdir)
+#include "kernel/services/compute-service/realtime_proxy_graph.hpp"
 
 namespace ps {
 class GraphEventService;
@@ -16,14 +17,14 @@ namespace ps::compute {
  *
  * DownsampleExecutor owns the HP-to-RT refresh that follows high-precision
  * dirty execution when a GraphRuntime is present. Each request records the HP
- * ROI and HP version observed immediately after a node update. Execution skips
- * stale requests, allocates or reuses RT buffers, copies non-image payloads,
- * and records the same downsample/downsample_passthrough events used before
- * the dirty executor split.
+ * ROI and HP version committed for a node. Execution skips stale requests,
+ * allocates or reuses proxy buffers, copies non-image payloads, and records the
+ * same downsample/downsample_passthrough events used before the dirty executor
+ * split.
  *
- * @note Instances borrow GraphModel, GraphRuntime, and GraphEventService for a
- * single call chain. The graph must remain exclusively owned by the caller for
- * the whole execute() call.
+ * @note Instances borrow GraphModel, RealtimeProxyGraph, GraphRuntime, and
+ * GraphEventService for a single call chain. RT output is committed only to the
+ * proxy graph; GraphModel keeps HP cache authority.
  */
 class DownsampleExecutor {
  public:
@@ -31,7 +32,7 @@ class DownsampleExecutor {
    * @brief One pending HP-to-RT refresh request.
    *
    * @note hp_version is compared against the node's current HP and RT versions
-   * to avoid overwriting newer RT state with stale downsample work.
+   * to avoid overwriting newer proxy state with stale downsample work.
    */
   struct Request {
     /** @brief Node whose HP output should refresh the RT proxy. */
@@ -47,15 +48,16 @@ class DownsampleExecutor {
   /**
    * @brief Constructs a downsample executor for one graph-owned update.
    *
-   * @param graph Graph containing HP and RT node cache state.
+   * @param graph Graph containing committed HP node cache state.
+   * @param proxy_graph RT proxy graph receiving downsampled output.
    * @param runtime Optional runtime used only for scheduler trace events.
    * @param events Event service that receives downsample status events.
    * @throws Nothing directly.
    * @note The executor stores borrowed references and performs no ownership
    * transfer.
    */
-  DownsampleExecutor(GraphModel& graph, GraphRuntime* runtime,
-                     GraphEventService& events);
+  DownsampleExecutor(GraphModel& graph, RealtimeProxyGraph& proxy_graph,
+                     GraphRuntime* runtime, GraphEventService& events);
 
   /**
    * @brief Executes all pending downsample requests in caller order.
@@ -105,7 +107,8 @@ class DownsampleExecutor {
   /**
    * @brief Copies HP output directly to RT cache for non-image payloads.
    *
-   * @param node Node whose RT state is updated.
+   * @param node Node whose HP output is copied.
+   * @param proxy_state Proxy node state receiving RT output and metadata.
    * @param roi_hp HP-space region represented by the update.
    * @param hp_size HP output extent used to merge RT ROI metadata.
    * @param hp_version HP version that becomes the RT version.
@@ -113,20 +116,22 @@ class DownsampleExecutor {
    * @note This path handles empty image buffers and zero-sized RT proxy
    * extents.
    */
-  void apply_passthrough(Node& node, const cv::Rect& roi_hp,
-                         const cv::Size& hp_size, int hp_version);
+  void apply_passthrough(Node& node, RealtimeProxyGraph::NodeState& proxy_state,
+                         const cv::Rect& roi_hp, const cv::Size& hp_size,
+                         int hp_version);
 
   /**
    * @brief Ensures the RT image buffer matches the downscaled HP image shape.
    *
-   * @param node Node whose RT cache is allocated.
+   * @param proxy_state Proxy node state whose RT buffer is allocated.
    * @param hp_buffer Source HP image buffer.
    * @param rt_size Downscaled RT image extent.
    * @return Mutable RT image buffer with matching dimensions and format.
    * @throws GraphError or std::bad_alloc if allocation fails.
-   * @note Existing RT payload data map is preserved by reusing NodeOutput.
+   * @note Existing proxy payload data map is preserved by reusing NodeOutput.
    */
-  ImageBuffer& ensure_rt_buffer(Node& node, const ImageBuffer& hp_buffer,
+  ImageBuffer& ensure_rt_buffer(RealtimeProxyGraph::NodeState& proxy_state,
+                                const ImageBuffer& hp_buffer,
                                 const cv::Size& rt_size);
 
   /**
@@ -149,15 +154,16 @@ class DownsampleExecutor {
   /**
    * @brief Updates RT ROI/version metadata after a successful image refresh.
    *
-   * @param node Node whose RT metadata is updated.
+   * @param proxy_state Proxy node state whose RT metadata is updated.
    * @param roi_hp HP-space ROI represented by the RT proxy update.
    * @param hp_size HP output extent used to clamp merged ROI state.
    * @param hp_version HP version copied into RT metadata.
    * @throws Nothing directly.
    * @note RT ROI remains stored in HP coordinates for inspection consistency.
    */
-  void commit_rt_metadata(Node& node, const cv::Rect& roi_hp,
-                          const cv::Size& hp_size, int hp_version);
+  void commit_rt_metadata(RealtimeProxyGraph::NodeState& proxy_state,
+                          const cv::Rect& roi_hp, const cv::Size& hp_size,
+                          int hp_version);
 
   /**
    * @brief Emits a stale-generation scheduler trace event when possible.
@@ -168,8 +174,11 @@ class DownsampleExecutor {
    */
   void log_stale_generation(int node_id) const;
 
-  /** @brief Borrowed graph whose node cache state is refreshed. */
+  /** @brief Borrowed graph whose HP cache state is read. */
   GraphModel& graph_;
+
+  /** @brief Borrowed proxy graph whose RT state is refreshed. */
+  RealtimeProxyGraph& proxy_graph_;
 
   /** @brief Optional runtime used for stale-generation and tile trace events.
    */

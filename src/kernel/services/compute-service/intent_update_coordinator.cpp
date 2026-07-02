@@ -1,6 +1,9 @@
 #include "kernel/services/compute-service/intent_update_coordinator.hpp"
 
+#include <future>
+
 #include "kernel/scheduler/scheduler_task_runtime.hpp"
+#include "kernel/services/compute-service/dirty_sibling_commit_gate.hpp"
 
 namespace ps::compute {
 namespace {
@@ -24,14 +27,14 @@ void require_callback(const Fn& fn, const std::string& name) {
 
 IntentUpdateDecision IntentUpdateCoordinator::decide(
     ComputeIntent intent, bool can_submit_concurrently, bool has_dirty_roi) {
-  (void)can_submit_concurrently;
   IntentUpdateDecision decision;
   decision.intent = intent;
   if (intent == ComputeIntent::RealTimeUpdate) {
     decision.requires_dirty_roi = true;
     decision.run_high_precision_update = has_dirty_roi;
     decision.run_real_time_update = has_dirty_roi;
-    decision.submit_updates_concurrently = false;
+    decision.submit_updates_concurrently =
+        has_dirty_roi && can_submit_concurrently;
   }
   return decision;
 }
@@ -84,13 +87,52 @@ NodeOutput& IntentUpdateCoordinator::coordinate_intent_update(
                                   ? "intent_coordinator_decision_concurrent"
                                   : "intent_coordinator_decision_inline");
 
+      if (decision.submit_updates_concurrently) {
+        record_stage(callbacks, "intent_coordinator_concurrent_rt_start");
+        auto rt_future = std::async(std::launch::async, [&]() -> NodeOutput* {
+          if (decision.run_real_time_update) {
+            return &callbacks.run_real_time_update();
+          }
+          return &callbacks.real_time_output();
+        });
+
+        record_stage(callbacks, "intent_coordinator_concurrent_hp_start");
+        auto hp_future = std::async(std::launch::async, [&]() {
+          if (decision.run_high_precision_update) {
+            callbacks.run_high_precision_update();
+          }
+        });
+
+        try {
+          NodeOutput* rt_output = rt_future.get();
+          record_stage(callbacks, "intent_coordinator_concurrent_rt_done");
+          hp_future.get();
+          record_stage(callbacks, "intent_coordinator_concurrent_hp_done");
+          return *rt_output;
+        } catch (...) {
+          if (callbacks.sibling_commit_gate) {
+            callbacks.sibling_commit_gate->abort_hp_commit();
+          }
+          try {
+            hp_future.get();
+          } catch (...) {
+          }
+          throw;
+        }
+      }
+
+      record_stage(callbacks, "intent_coordinator_inline_rt");
+      if (decision.run_real_time_update) {
+        NodeOutput& rt_output = callbacks.run_real_time_update();
+        record_stage(callbacks, "intent_coordinator_inline_hp");
+        if (decision.run_high_precision_update) {
+          callbacks.run_high_precision_update();
+        }
+        return rt_output;
+      }
       record_stage(callbacks, "intent_coordinator_inline_hp");
       if (decision.run_high_precision_update) {
         callbacks.run_high_precision_update();
-      }
-      record_stage(callbacks, "intent_coordinator_inline_rt");
-      if (decision.run_real_time_update) {
-        return callbacks.run_real_time_update();
       }
       return callbacks.real_time_output();
     }

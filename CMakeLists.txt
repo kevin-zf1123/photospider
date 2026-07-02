@@ -159,12 +159,14 @@ set(COMPUTE_SOURCES
     src/kernel/services/compute-service/dirty_node_executor.cpp
     src/kernel/services/compute-service/dirty_region_planner.cpp
     src/kernel/services/compute-service/dirty_region_snapshot_builder.cpp
+    src/kernel/services/compute-service/dirty_sibling_commit_gate.cpp
     src/kernel/services/compute-service/dirty_update_executor.cpp
+    src/kernel/services/compute-service/dirty_write_buffers.cpp
     src/kernel/services/compute-service/downsample_executor.cpp
     src/kernel/services/compute-service/intent_update_coordinator.cpp
     src/kernel/services/compute-service/node_executor.cpp
     src/kernel/services/compute-service/node_input_resolver.cpp
-    src/kernel/services/compute-service/realtime_dirty_write_buffer.cpp
+    src/kernel/services/compute-service/realtime_proxy_graph.cpp
     src/kernel/services/compute-service/compute_task_dispatcher.cpp
     src/kernel/services/compute_service.cpp
     src/kernel/services/graph_event_service.cpp

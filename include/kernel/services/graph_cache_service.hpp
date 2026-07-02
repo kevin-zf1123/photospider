@@ -47,12 +47,13 @@ class GraphCacheService {
   GraphModel::DriveClearResult clear_drive_cache(GraphModel& graph) const;
 
   /**
-   * @brief Clears in-memory formal HP and transient RT cache state.
+   * @brief Clears in-memory formal HP cache state.
    *
    * @param graph Graph whose nodes should be inspected and cleared.
    * @return Number of nodes that had memory cache state removed.
    * @throws GraphError or std::exception from graph node access.
-   * @note Graph topology and disk cache files are not changed.
+   * @note Graph topology, disk cache files, and RT proxy graph state are not
+   * changed.
    */
   GraphModel::MemoryClearResult clear_memory_cache(GraphModel& graph) const;
 
@@ -85,7 +86,8 @@ class GraphCacheService {
    * @param graph Graph whose traversal endings define retained nodes.
    * @return Number of nodes whose memory cache was cleared.
    * @throws GraphError or std::exception from traversal or graph access.
-   * @note This preserves final outputs while freeing intermediate HP/RT memory.
+   * @note This preserves final outputs while freeing intermediate HP memory.
+   * RT proxy memory is owned outside GraphModel.
    */
   GraphModel::MemoryClearResult free_transient_memory(GraphModel& graph) const;
 

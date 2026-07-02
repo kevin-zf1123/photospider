@@ -21,6 +21,7 @@
 #include "kernel/interaction.hpp"
 #include "kernel/kernel.hpp"
 #include "kernel/services/compute-service/compute_geometry.hpp"
+#include "kernel/services/compute-service/realtime_proxy_graph.hpp"
 #include "ps_types.hpp"
 
 namespace fs = std::filesystem;
@@ -871,7 +872,7 @@ bool contains_phase(const std::vector<std::string>& phases,
 json graph_snapshot(ps::Kernel& kernel, const std::string& graph_name) {
   auto& runtime = kernel.runtime(graph_name);
   return runtime.graph_state()
-      .submit([](ps::GraphModel& graph) {
+      .submit([&runtime](ps::GraphModel& graph) {
         json out;
         out["cache_root"] = graph.cache_root.string();
         out["quiet"] = graph.is_quiet();
@@ -901,11 +902,15 @@ json graph_snapshot(ps::Kernel& kernel, const std::string& graph_name) {
           node_json["type"] = node.type;
           node_json["subtype"] = node.subtype;
           node_json["hp_version"] = node.hp_version;
-          node_json["rt_version"] = node.rt_version;
+          const auto* proxy_state =
+              runtime.realtime_proxy_graph().find_state(id);
+          node_json["rt_proxy_version"] =
+              proxy_state ? proxy_state->version : 0;
           node_json["hp_roi"] =
               node.hp_roi ? rect_json(*node.hp_roi) : json(nullptr);
-          node_json["rt_roi"] =
-              node.rt_roi ? rect_json(*node.rt_roi) : json(nullptr);
+          node_json["rt_proxy_roi"] = (proxy_state && proxy_state->roi_hp)
+                                          ? rect_json(*proxy_state->roi_hp)
+                                          : json(nullptr);
           node_json["last_input_size_hp"] =
               node.last_input_size_hp ? size_json(*node.last_input_size_hp)
                                       : json(nullptr);
@@ -933,8 +938,8 @@ json graph_snapshot(ps::Kernel& kernel, const std::string& graph_name) {
               {"hp", image_stats(node.cached_output_high_precision
                                      ? &*node.cached_output_high_precision
                                      : nullptr)},
-              {"rt", image_stats(node.cached_output_real_time
-                                     ? &*node.cached_output_real_time
+              {"rt", image_stats(proxy_state && proxy_state->output
+                                     ? &*proxy_state->output
                                      : nullptr)}};
           out["nodes"][std::to_string(id)] = node_json;
         }
@@ -1542,9 +1547,9 @@ void write_task_bundle(const fs::path& root, const std::string& task_dir,
 
 void mutate_dirty_region(ps::Kernel& kernel, const std::string& graph_name,
                          const cv::Rect& dirty_roi) {
-  kernel.runtime(graph_name)
-      .graph_state()
-      .submit([dirty_roi](ps::GraphModel& graph) {
+  auto& runtime = kernel.runtime(graph_name);
+  runtime.graph_state()
+      .submit([dirty_roi, &runtime](ps::GraphModel& graph) {
         graph.mutate_node_runtime_state(1, [&](auto& source_state) {
           if (source_state.cached_output_high_precision) {
             cv::Mat mat = ps::toCvMat(
@@ -1555,11 +1560,11 @@ void mutate_dirty_region(ps::Kernel& kernel, const std::string& graph_name,
         for (int id : {2, 100}) {
           graph.mutate_node_runtime_state(id, [](auto& state) {
             state.cached_output_high_precision.reset();
-            state.cached_output_real_time.reset();
             state.hp_roi.reset();
-            state.rt_roi.reset();
           });
         }
+        runtime.realtime_proxy_graph().synchronize_with_graph(graph);
+        runtime.realtime_proxy_graph().reset_nodes({2, 100});
         return 0;
       })
       .get();
@@ -2043,26 +2048,23 @@ int main(int argc, char** argv) {
         "HP and RT dirty update plans expose regions, dependencies, and "
         "planned task graph summary semantics consumed by execution");
     task5.add(
-        "dirty realtime submits HP/RT scheduler runtime siblings", true,
+        "dirty realtime starts RT/HP scheduler runtime siblings", true,
         dirty_actual["compute_events"],
         compute_events_contain_source(
             dirty_actual["compute_events"],
             "intent_coordinator_decision_concurrent") &&
             compute_events_contain_source(
                 dirty_actual["compute_events"],
-                "intent_coordinator_submit_hp_scheduler_runtime") &&
+                "intent_coordinator_concurrent_rt_start") &&
             compute_events_contain_source(
                 dirty_actual["compute_events"],
-                "intent_coordinator_submit_rt_scheduler_runtime") &&
+                "intent_coordinator_concurrent_hp_start") &&
             compute_events_contain_source(
                 dirty_actual["compute_events"],
-                "intent_coordinator_wait_rt_scheduler_runtime") &&
+                "intent_coordinator_concurrent_rt_done") &&
             compute_events_contain_source(
                 dirty_actual["compute_events"],
-                "intent_coordinator_wait_hp_scheduler_runtime") &&
-            compute_events_contain_source(
-                dirty_actual["compute_events"],
-                "intent_coordinator_scheduler_runtime_complete") &&
+                "intent_coordinator_concurrent_hp_done") &&
             !compute_events_contain_source(
                 dirty_actual["compute_events"],
                 "intent_coordinator_decision_inline"),
@@ -2109,11 +2111,10 @@ int main(int argc, char** argv) {
         {"dirty_plan_tasks", ">=3"},
         {"intent_coordinator_sources",
          {"intent_coordinator_decision_concurrent",
-          "intent_coordinator_submit_hp_scheduler_runtime",
-          "intent_coordinator_submit_rt_scheduler_runtime",
-          "intent_coordinator_wait_rt_scheduler_runtime",
-          "intent_coordinator_wait_hp_scheduler_runtime",
-          "intent_coordinator_scheduler_runtime_complete"}},
+          "intent_coordinator_concurrent_rt_start",
+          "intent_coordinator_concurrent_hp_start",
+          "intent_coordinator_concurrent_rt_done",
+          "intent_coordinator_concurrent_hp_done"}},
         {"intent_coordinator_inline_sources_absent",
          {"intent_coordinator_decision_inline", "intent_coordinator_inline_hp",
           "intent_coordinator_inline_rt"}},

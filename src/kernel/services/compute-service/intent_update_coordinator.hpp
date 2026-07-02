@@ -1,6 +1,7 @@
 #pragma once
 
 #include <functional>
+#include <memory>
 #include <optional>
 #include <string>
 
@@ -12,6 +13,7 @@ class SchedulerTaskRuntime;
 }  // namespace ps
 
 namespace ps::compute {
+class DirtySiblingCommitGate;
 
 struct IntentUpdateDecision {
   /** @brief Intent being coordinated. */
@@ -25,9 +27,9 @@ struct IntentUpdateDecision {
   /**
    * @brief Whether HP and RT dirty siblings may start concurrently.
    *
-   * @note This remains false under DirectGraphCommit. It is retained so a
-   * future buffered commit policy can re-enable sibling concurrency without
-   * changing the decision shape.
+   * @note This is true only when both sibling scheduler runtimes are available
+   * and dirty output commits are protected by staged buffers plus the sibling
+   * commit gate.
    */
   bool submit_updates_concurrently = false;
 };
@@ -40,10 +42,9 @@ struct IntentUpdateDecision {
  * invokes these callbacks to let ComputeService build and dispatch the real
  * task-level HP/RT work.
  *
- * @note DirectGraphCommit currently runs HP and RT sibling callbacks in a
- * deterministic inline order because both paths can still touch visible graph
- * state. Scheduler runtimes still receive ready task batches from each
- * callback.
+ * @note Concurrent RealTimeUpdate uses sibling_commit_gate to let HP compute
+ * overlap RT while delaying HP GraphModel commit until RT proxy commit has
+ * completed.
  */
 struct IntentUpdateCallbacks {
   /** @brief Runs a normal full-graph HP compute. */
@@ -58,15 +59,18 @@ struct IntentUpdateCallbacks {
   std::function<NodeOutput&()> real_time_output;
   /** @brief Records a coordinator stage in ComputeService event history. */
   std::function<void(const std::string&)> record_stage;
+  /** @brief Optional gate shared by concurrent HP/RT dirty siblings. */
+  std::shared_ptr<DirtySiblingCommitGate> sibling_commit_gate;
 };
 
 /**
  * @brief Coordinates compute intent callbacks without owning task graphs.
  *
  * The coordinator decides which intent paths must run. Under the current
- * DirectGraphCommit policy it does not start HP/RT RealTimeUpdate siblings
- * concurrently; actual task graph planning, dependency release, and scheduler
- * submission remain inside the callbacks.
+ * staged commit policy it starts RT before HP when both scheduler runtimes are
+ * available, waits for RT first, and lets the sibling commit gate keep HP graph
+ * mutation behind RT proxy commit. Actual task graph planning, dependency
+ * release, and scheduler submission remain inside the callbacks.
  *
  * @note Scheduler queues still receive the fine-grained ready work emitted by
  * each callback through their intent-specific dispatchers.
@@ -78,7 +82,7 @@ class IntentUpdateCoordinator {
    *
    * @param intent Requested compute intent.
    * @param can_submit_concurrently Whether HP and RT runtimes are available and
-   * running; reserved for a future buffered commit policy.
+   * running.
    * @param has_dirty_roi Whether the request supplied a dirty ROI.
    * @return Decision describing required HP/RT paths and execution mode.
    * @throws Nothing directly.
@@ -111,8 +115,8 @@ class IntentUpdateCoordinator {
    * @throws GraphError for invalid inputs or missing callbacks; rethrows
    * callback exceptions from the active sibling path.
    * @note The coordinator never owns scheduler dependency state. It records
-   * inline sibling stages, while callbacks submit concrete dirty task batches
-   * to scheduler queues.
+   * sibling stages, while callbacks submit concrete dirty task batches to
+   * scheduler queues.
    */
   static NodeOutput& coordinate_intent_update(
       ComputeIntent intent, SchedulerTaskRuntime* hp_task_runtime,
