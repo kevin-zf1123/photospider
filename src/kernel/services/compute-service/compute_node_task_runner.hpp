@@ -144,8 +144,34 @@ class NodeTaskRunner {
   /** @brief Computes one tile task into the node's temporary output buffer. */
   void compute_tile_task(const PlannedTask& task);
 
-  /** @brief Ensures a tile output buffer exists for the planned node. */
-  ImageBuffer& ensure_tile_output_buffer(
+  /**
+   * @brief Stops a tile task when the node was satisfied by disk cache.
+   *
+   * @param target_node Graph node whose disk cache entries may be inspected.
+   * @param node_idx Dense planned-node index for temp output and status state.
+   * @return True when the caller must skip tile execution.
+   * @throws Exceptions from disk-cache diagnostic/output storage.
+   * @note The method holds the per-node output mutex while it rechecks
+   * node_precomputed_ and, if no staging output exists, attempts a single
+   * disk-cache load. `temp_results_` alone is not an authority signal because
+   * normal tiled execution also uses it as a partially written staging buffer.
+   */
+  bool try_satisfy_tile_from_disk_cache(const Node& target_node, int node_idx);
+
+  /**
+   * @brief Ensures a tile output buffer exists for the planned node.
+   *
+   * @param node_idx Dense planned-node index for output staging state.
+   * @param target_node Node whose fallback dimensions may seed allocation.
+   * @param image_inputs Ready image inputs used to infer channels and type.
+   * @return Mutable buffer for tile writes, or nullptr when the node became
+   * precomputed before buffer allocation.
+   * @throws std::bad_alloc or OpenCV allocation exceptions when creating a new
+   * aligned image buffer.
+   * @note Callers must treat nullptr as a successful skip, not as a compute
+   * error, because another tile task has already provided whole-node output.
+   */
+  ImageBuffer* ensure_tile_output_buffer(
       int node_idx, const Node& target_node,
       const std::vector<const NodeOutput*>& image_inputs);
 
@@ -226,7 +252,13 @@ class NodeTaskRunner {
   /** @brief Completed tile count per node index. */
   std::vector<std::atomic<int>> completed_tile_counts_;
 
-  /** @brief Marks nodes satisfied by existing memory or disk cache. */
+  /**
+   * @brief Marks nodes satisfied by whole-node memory or disk-cache output.
+   *
+   * @note This flag is distinct from temp_results_ presence: temp_results_ can
+   * also hold the partially written staging buffer used by ordinary tiled
+   * execution.
+   */
   std::vector<std::atomic<bool>> node_precomputed_;
 
   /** @brief Mutexes guarding per-node temp output allocation. */
