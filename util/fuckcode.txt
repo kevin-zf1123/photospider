@@ -1,0 +1,1047 @@
+# 🌸 屎山代码分析报告 🌸
+
+## 总体评估
+
+- **质量评分**: 45.98/100
+- **质量等级**: 💩 中度屎山 - 臭味明显，开窗也救不了
+- **分析文件数**: 68
+- **代码总行数**: 5609
+
+## 质量指标
+
+| 指标 | 得分 | 权重 | 状态 |
+|------|------|------|------|
+| 状态管理 | 22.84 | 0.20 | ✓ |
+| 错误处理 | 25.00 | 0.10 | ✓ |
+| 代码结构 | 30.00 | 0.15 | ✓ |
+| 代码重复度 | 35.00 | 0.15 | ○ |
+| 注释覆盖率 | 60.75 | 0.15 | ⚠ |
+| 循环复杂度 | 74.51 | 0.30 | ! |
+
+## 问题文件 (Top 5)
+
+### 1. /Users/zhufeng/document/code/photospider/src/cli/print_repl_help.cpp (得分: 64.59)
+**问题分类**: 📝 注释问题:1, ⚠️ 其他问题:1
+
+**主要问题**:
+- 函数 'print_repl_help' () 过长 (76 行)，建议拆分
+- 代码注释率极低 (1.23%)，几乎没有注释
+
+### 2. /Users/zhufeng/document/code/photospider/src/cli/run_repl.cpp (得分: 60.14)
+**问题分类**: 🔄 复杂度问题:6, 📝 注释问题:1, ⚠️ 其他问题:3
+
+**主要问题**:
+- 函数 run_repl 的循环复杂度过高 (38)，考虑重构
+- 函数 while 的循环复杂度过高 (30)，考虑重构
+- 函数 switch 的循环复杂度过高 (28)，考虑重构
+- 函数 'run_repl' () 极度过长 (190 行)，必须拆分
+- 函数 'run_repl' () 复杂度严重过高 (38)，必须简化
+- 函数 'while' () 极度过长 (135 行)，必须拆分
+- 函数 'while' () 复杂度严重过高 (30)，必须简化
+- 函数 'switch' () 极度过长 (128 行)，必须拆分
+- 函数 'switch' () 复杂度严重过高 (28)，必须简化
+- 代码注释率极低 (0.49%)，几乎没有注释
+
+### 3. /Users/zhufeng/document/code/photospider/src/cli/do_traversal.cpp (得分: 57.83)
+**问题分类**: 🔄 复杂度问题:6, 📝 注释问题:1, ⚠️ 其他问题:1
+
+**主要问题**:
+- 函数 do_traversal 的循环复杂度过高 (17)，考虑重构
+- 函数 for 的循环复杂度过高 (16)，考虑重构
+- 函数 order.size 的循环复杂度较高 (13)，建议简化
+- 函数 'do_traversal' () 较长 (46 行)，可考虑重构
+- 函数 'do_traversal' () 复杂度过高 (17)，建议简化
+- 函数 'for' () 复杂度过高 (16)，建议简化
+- 函数 'order.size' () 复杂度过高 (13)，建议简化
+- 代码注释率极低 (1.89%)，几乎没有注释
+
+### 4. /Users/zhufeng/document/code/photospider/src/kernel/node_module/node_graph_cache.cpp (得分: 56.88)
+**问题分类**: 🔄 复杂度问题:5, 📝 注释问题:1
+
+**主要问题**:
+- 函数 NodeGraph::save_cache_if_configured 的循环复杂度较高 (12)，建议简化
+- 函数 NodeGraph::try_load_from_disk_cache 的循环复杂度较高 (15)，建议简化
+- 函数 for 的循环复杂度较高 (12)，建议简化
+- 函数 !cache_entry.location.empty 的循环复杂度较高 (11)，建议简化
+- 函数 'NodeGraph::try_load_from_disk_cache' () 复杂度过高 (15)，建议简化
+- 代码注释率极低 (2.70%)，几乎没有注释
+
+### 5. /Users/zhufeng/document/code/photospider/src/cli/config_editor.cpp (得分: 56.67)
+**问题分类**: 🔄 复杂度问题:23, 📝 注释问题:1, ⚠️ 其他问题:4
+
+**主要问题**:
+- 代码注释率极低 (3.58%)，几乎没有注释
+- 函数 Run 的循环复杂度过高 (44)，考虑重构
+- 函数 Renderer 的循环复杂度较高 (15)，建议简化
+- 函数 editable_lines_.size 的循环复杂度较高 (15)，建议简化
+- 函数 CatchEvent([&] 的循环复杂度过高 (30)，考虑重构
+- 函数 if 的循环复杂度较高 (13)，建议简化
+- 函数 SyncModelToUiState 的循环复杂度过高 (29)，考虑重构
+- 函数 while 的循环复杂度较高 (15)，建议简化
+- 函数 while 的循环复杂度较高 (13)，建议简化
+- 函数 SyncUiStateToModel 的循环复杂度过高 (16)，考虑重构
+- 函数 ExecuteCommand 的循环复杂度过高 (23)，考虑重构
+- 函数 if 的循环复杂度较高 (11)，建议简化
+- 函数 run_config_editor 的循环复杂度较高 (15)，建议简化
+- 函数 'Run' () 较长 (66 行)，可考虑重构
+- 函数 'Run' () 复杂度严重过高 (44)，必须简化
+- 函数 'Renderer' () 复杂度过高 (15)，建议简化
+- 函数 'editable_lines_.size' () 复杂度过高 (15)，建议简化
+- 函数 'CatchEvent([&]' () 复杂度严重过高 (30)，必须简化
+- 函数 'if' () 复杂度过高 (13)，建议简化
+- 函数 'SyncModelToUiState' () 较长 (48 行)，可考虑重构
+- 函数 'SyncModelToUiState' () 复杂度严重过高 (29)，必须简化
+- 函数 'while' () 复杂度过高 (15)，建议简化
+- 函数 'while' () 复杂度过高 (13)，建议简化
+- 函数 'SyncUiStateToModel' () 较长 (41 行)，可考虑重构
+- 函数 'SyncUiStateToModel' () 复杂度过高 (16)，建议简化
+- 函数 'RebuildLineView' () 较长 (41 行)，可考虑重构
+- 函数 'ExecuteCommand' () 复杂度严重过高 (23)，必须简化
+- 函数 'run_config_editor' () 复杂度过高 (15)，建议简化
+
+## 改进建议
+
+### 高优先级
+- 重构复杂度过高的函数和模块
+- 降低循环复杂度，简化控制流
+
+### 中优先级
+- 改善变量和函数命名规范
+- 增加代码注释覆盖率
+- 消除重复代码，提取公共方法
+
+### 低优先级
+- 优化代码结构，减少嵌套层级
+- 统一代码风格和格式
+
+# 🌸 屎山代码分析报告 🌸
+
+## 总体评估
+
+- **质量评分**: 37.19/100
+- **质量等级**: 😐 微臭青年 - 略有异味，建议适量通风
+- **分析文件数**: 333
+- **代码总行数**: 36129
+
+## 质量指标
+
+| 指标 | 得分 | 权重 | 状态 |
+|------|------|------|------|
+| 状态管理 | 15.22 | 0.20 | ✓✓ |
+| 错误处理 | 25.00 | 0.10 | ✓ |
+| 代码结构 | 30.00 | 0.15 | ✓ |
+| 代码重复度 | 35.00 | 0.15 | ○ |
+| 注释覆盖率 | 37.88 | 0.15 | ○ |
+| 循环复杂度 | 60.24 | 0.30 | ⚠ |
+
+## 问题文件 (Top 5)
+
+### 1. /Users/zhufeng/document/code/photospider/src/cli/print_repl_help.cpp (得分: 64.59)
+**问题分类**: 📝 注释问题:1, ⚠️ 其他问题:1
+
+**主要问题**:
+- 函数 'print_repl_help' () 过长 (76 行)，建议拆分
+- 代码注释率极低 (1.23%)，几乎没有注释
+
+### 2. /Users/zhufeng/document/code/photospider/src/cli/run_repl.cpp (得分: 60.14)
+**问题分类**: 🔄 复杂度问题:6, 📝 注释问题:1, ⚠️ 其他问题:3
+
+**主要问题**:
+- 函数 run_repl 的循环复杂度过高 (38)，考虑重构
+- 函数 while 的循环复杂度过高 (30)，考虑重构
+- 函数 switch 的循环复杂度过高 (28)，考虑重构
+- 函数 'run_repl' () 极度过长 (190 行)，必须拆分
+- 函数 'run_repl' () 复杂度严重过高 (38)，必须简化
+- 函数 'while' () 极度过长 (135 行)，必须拆分
+- 函数 'while' () 复杂度严重过高 (30)，必须简化
+- 函数 'switch' () 极度过长 (128 行)，必须拆分
+- 函数 'switch' () 复杂度严重过高 (28)，必须简化
+- 代码注释率极低 (0.49%)，几乎没有注释
+
+### 3. /Users/zhufeng/document/code/photospider/cli/graph_cli.cpp (得分: 58.33)
+**问题分类**: 🔄 复杂度问题:6, 📝 注释问题:1, ⚠️ 其他问题:3
+
+**主要问题**:
+- 代码注释率极低 (2.72%)，几乎没有注释
+- 函数 main 的循环复杂度过高 (34)，考虑重构
+- 函数 getopt_long 的循环复杂度过高 (27)，考虑重构
+- 函数 switch 的循环复杂度过高 (25)，考虑重构
+- 函数 'main' () 过长 (91 行)，建议拆分
+- 函数 'main' () 复杂度严重过高 (34)，必须简化
+- 函数 'getopt_long' () 较长 (47 行)，可考虑重构
+- 函数 'getopt_long' () 复杂度严重过高 (27)，必须简化
+- 函数 'switch' () 较长 (41 行)，可考虑重构
+- 函数 'switch' () 复杂度严重过高 (25)，必须简化
+
+### 4. /Users/zhufeng/document/code/photospider/src/cli/do_traversal.cpp (得分: 57.83)
+**问题分类**: 🔄 复杂度问题:6, 📝 注释问题:1, ⚠️ 其他问题:1
+
+**主要问题**:
+- 函数 do_traversal 的循环复杂度过高 (17)，考虑重构
+- 函数 for 的循环复杂度过高 (16)，考虑重构
+- 函数 order.size 的循环复杂度较高 (13)，建议简化
+- 函数 'do_traversal' () 较长 (46 行)，可考虑重构
+- 函数 'do_traversal' () 复杂度过高 (17)，建议简化
+- 函数 'for' () 复杂度过高 (16)，建议简化
+- 函数 'order.size' () 复杂度过高 (13)，建议简化
+- 代码注释率极低 (1.89%)，几乎没有注释
+
+### 5. /Users/zhufeng/document/code/photospider/src/kernel/node_module/node_graph_cache.cpp (得分: 56.88)
+**问题分类**: 🔄 复杂度问题:5, 📝 注释问题:1
+
+**主要问题**:
+- 函数 NodeGraph::save_cache_if_configured 的循环复杂度较高 (12)，建议简化
+- 函数 NodeGraph::try_load_from_disk_cache 的循环复杂度较高 (15)，建议简化
+- 函数 for 的循环复杂度较高 (12)，建议简化
+- 函数 !cache_entry.location.empty 的循环复杂度较高 (11)，建议简化
+- 函数 'NodeGraph::try_load_from_disk_cache' () 复杂度过高 (15)，建议简化
+- 代码注释率极低 (2.70%)，几乎没有注释
+
+## 改进建议
+
+### 高优先级
+- 继续保持当前的代码质量标准
+
+### 中优先级
+- 可以考虑进一步优化性能和可读性
+- 完善文档和注释，便于团队协作
+
+invalid argument "op" for "-t, --top" flag: strconv.ParseInt: parsing "op": invalid syntax
+# 🌸 屎山代码分析报告 🌸
+
+## 总体评估
+
+- **质量评分**: 37.19/100
+- **质量等级**: 😐 微臭青年 - 略有异味，建议适量通风
+- **分析文件数**: 333
+- **代码总行数**: 36129
+
+## 质量指标
+
+| 指标 | 得分 | 权重 | 状态 |
+|------|------|------|------|
+| 状态管理 | 15.22 | 0.20 | ✓✓ |
+| 错误处理 | 25.00 | 0.10 | ✓ |
+| 代码结构 | 30.00 | 0.15 | ✓ |
+| 代码重复度 | 35.00 | 0.15 | ○ |
+| 注释覆盖率 | 37.88 | 0.15 | ○ |
+| 循环复杂度 | 60.24 | 0.30 | ⚠ |
+
+## 问题文件 (Top 100)
+
+### 1. /Users/zhufeng/document/code/photospider/src/cli/print_repl_help.cpp (得分: 64.59)
+**问题分类**: 📝 注释问题:1, ⚠️ 其他问题:1
+
+**主要问题**:
+- 代码注释率极低 (1.23%)，几乎没有注释
+- 函数 'print_repl_help' () 过长 (76 行)，建议拆分
+
+### 2. /Users/zhufeng/document/code/photospider/src/cli/run_repl.cpp (得分: 60.14)
+**问题分类**: 🔄 复杂度问题:6, 📝 注释问题:1, ⚠️ 其他问题:3
+
+**主要问题**:
+- 函数 'run_repl' () 极度过长 (190 行)，必须拆分
+- 函数 'run_repl' () 复杂度严重过高 (38)，必须简化
+- 函数 'while' () 极度过长 (135 行)，必须拆分
+- 函数 'while' () 复杂度严重过高 (30)，必须简化
+- 函数 'switch' () 极度过长 (128 行)，必须拆分
+- 函数 'switch' () 复杂度严重过高 (28)，必须简化
+- 代码注释率极低 (0.49%)，几乎没有注释
+- 函数 run_repl 的循环复杂度过高 (38)，考虑重构
+- 函数 while 的循环复杂度过高 (30)，考虑重构
+- 函数 switch 的循环复杂度过高 (28)，考虑重构
+
+### 3. /Users/zhufeng/document/code/photospider/cli/graph_cli.cpp (得分: 58.33)
+**问题分类**: 🔄 复杂度问题:6, 📝 注释问题:1, ⚠️ 其他问题:3
+
+**主要问题**:
+- 函数 main 的循环复杂度过高 (34)，考虑重构
+- 函数 getopt_long 的循环复杂度过高 (27)，考虑重构
+- 函数 switch 的循环复杂度过高 (25)，考虑重构
+- 函数 'main' () 过长 (91 行)，建议拆分
+- 函数 'main' () 复杂度严重过高 (34)，必须简化
+- 函数 'getopt_long' () 较长 (47 行)，可考虑重构
+- 函数 'getopt_long' () 复杂度严重过高 (27)，必须简化
+- 函数 'switch' () 较长 (41 行)，可考虑重构
+- 函数 'switch' () 复杂度严重过高 (25)，必须简化
+- 代码注释率极低 (2.72%)，几乎没有注释
+
+### 4. /Users/zhufeng/document/code/photospider/src/cli/do_traversal.cpp (得分: 57.83)
+**问题分类**: 🔄 复杂度问题:6, 📝 注释问题:1, ⚠️ 其他问题:1
+
+**主要问题**:
+- 代码注释率极低 (1.89%)，几乎没有注释
+- 函数 do_traversal 的循环复杂度过高 (17)，考虑重构
+- 函数 for 的循环复杂度过高 (16)，考虑重构
+- 函数 order.size 的循环复杂度较高 (13)，建议简化
+- 函数 'do_traversal' () 较长 (46 行)，可考虑重构
+- 函数 'do_traversal' () 复杂度过高 (17)，建议简化
+- 函数 'for' () 复杂度过高 (16)，建议简化
+- 函数 'order.size' () 复杂度过高 (13)，建议简化
+
+### 5. /Users/zhufeng/document/code/photospider/src/kernel/node_module/node_graph_cache.cpp (得分: 56.88)
+**问题分类**: 🔄 复杂度问题:5, 📝 注释问题:1
+
+**主要问题**:
+- 函数 NodeGraph::save_cache_if_configured 的循环复杂度较高 (12)，建议简化
+- 函数 NodeGraph::try_load_from_disk_cache 的循环复杂度较高 (15)，建议简化
+- 函数 for 的循环复杂度较高 (12)，建议简化
+- 函数 !cache_entry.location.empty 的循环复杂度较高 (11)，建议简化
+- 函数 'NodeGraph::try_load_from_disk_cache' () 复杂度过高 (15)，建议简化
+- 代码注释率极低 (2.70%)，几乎没有注释
+
+### 6. /Users/zhufeng/document/code/photospider/src/cli/config_editor.cpp (得分: 56.67)
+**问题分类**: 🔄 复杂度问题:23, 📝 注释问题:1, ⚠️ 其他问题:4
+
+**主要问题**:
+- 函数 Run 的循环复杂度过高 (44)，考虑重构
+- 函数 Renderer 的循环复杂度较高 (15)，建议简化
+- 函数 editable_lines_.size 的循环复杂度较高 (15)，建议简化
+- 函数 CatchEvent([&] 的循环复杂度过高 (30)，考虑重构
+- 函数 if 的循环复杂度较高 (13)，建议简化
+- 函数 SyncModelToUiState 的循环复杂度过高 (29)，考虑重构
+- 函数 while 的循环复杂度较高 (15)，建议简化
+- 函数 while 的循环复杂度较高 (13)，建议简化
+- 函数 SyncUiStateToModel 的循环复杂度过高 (16)，考虑重构
+- 函数 ExecuteCommand 的循环复杂度过高 (23)，考虑重构
+- 函数 if 的循环复杂度较高 (11)，建议简化
+- 函数 run_config_editor 的循环复杂度较高 (15)，建议简化
+- 函数 'Run' () 较长 (66 行)，可考虑重构
+- 函数 'Run' () 复杂度严重过高 (44)，必须简化
+- 函数 'Renderer' () 复杂度过高 (15)，建议简化
+- 函数 'editable_lines_.size' () 复杂度过高 (15)，建议简化
+- 函数 'CatchEvent([&]' () 复杂度严重过高 (30)，必须简化
+- 函数 'if' () 复杂度过高 (13)，建议简化
+- 函数 'SyncModelToUiState' () 较长 (48 行)，可考虑重构
+- 函数 'SyncModelToUiState' () 复杂度严重过高 (29)，必须简化
+- 函数 'while' () 复杂度过高 (15)，建议简化
+- 函数 'while' () 复杂度过高 (13)，建议简化
+- 函数 'SyncUiStateToModel' () 较长 (41 行)，可考虑重构
+- 函数 'SyncUiStateToModel' () 复杂度过高 (16)，建议简化
+- 函数 'RebuildLineView' () 较长 (41 行)，可考虑重构
+- 函数 'ExecuteCommand' () 复杂度严重过高 (23)，必须简化
+- 函数 'run_config_editor' () 复杂度过高 (15)，建议简化
+- 代码注释率极低 (3.58%)，几乎没有注释
+
+### 7. /Users/zhufeng/document/code/photospider/src/cli/terminal_input.cpp (得分: 56.19)
+**问题分类**: 🔄 复杂度问题:8, 📝 注释问题:1
+
+**主要问题**:
+- 函数 TerminalInput::GetChar 的循环复杂度较高 (15)，建议简化
+- 函数 TerminalInput::GetChar 的循环复杂度过高 (24)，考虑重构
+- 函数 if 的循环复杂度过高 (19)，考虑重构
+- 函数 if 的循环复杂度较高 (14)，建议简化
+- 函数 'TerminalInput::GetChar' () 复杂度过高 (15)，建议简化
+- 函数 'TerminalInput::GetChar' () 复杂度严重过高 (24)，必须简化
+- 函数 'if' () 复杂度严重过高 (19)，必须简化
+- 函数 'if' () 复杂度过高 (14)，建议简化
+- 代码注释率极低 (1.47%)，几乎没有注释
+
+### 8. /Users/zhufeng/document/code/photospider/src/cli/node_graph_print.cpp (得分: 56.09)
+**问题分类**: 🔄 复杂度问题:4, 📝 注释问题:1, ⚠️ 其他问题:1
+
+**主要问题**:
+- 函数 print_dep_tree_recursive 的循环复杂度过高 (21)，考虑重构
+- 函数 node.parameters.size 的循环复杂度较高 (13)，建议简化
+- 函数 'print_dep_tree_recursive' () 较长 (69 行)，可考虑重构
+- 函数 'print_dep_tree_recursive' () 复杂度严重过高 (21)，必须简化
+- 函数 'node.parameters.size' () 复杂度过高 (13)，建议简化
+- 代码注释率极低 (0.98%)，几乎没有注释
+
+### 9. /Users/zhufeng/document/code/photospider/src/cli_config.cpp (得分: 55.53)
+**问题分类**: 🔄 复杂度问题:4, 📝 注释问题:1, ⚠️ 其他问题:2
+
+**主要问题**:
+- 函数 load_or_create_config 的循环复杂度过高 (36)，考虑重构
+- 函数 (fs::exists 的循环复杂度过高 (35)，考虑重构
+- 函数 'load_or_create_config' () 过长 (71 行)，建议拆分
+- 函数 'load_or_create_config' () 复杂度严重过高 (36)，必须简化
+- 函数 '(fs::exists' () 较长 (51 行)，可考虑重构
+- 函数 '(fs::exists' () 复杂度严重过高 (35)，必须简化
+- 代码注释率较低 (6.25%)，建议增加注释
+
+### 10. /Users/zhufeng/document/code/photospider/src/cli/command/command_help.cpp (得分: 54.67)
+**问题分类**: 🔄 复杂度问题:2, 📝 注释问题:1
+
+**主要问题**:
+- 函数 dispatch_print 的循环复杂度过高 (22)，考虑重构
+- 函数 'dispatch_print' () 复杂度严重过高 (22)，必须简化
+- 代码注释率较低 (5.80%)，建议增加注释
+
+### 11. /Users/zhufeng/document/code/photospider/src/cli/ask_yesno.cpp (得分: 54.61)
+**问题分类**: 📝 注释问题:1
+
+**主要问题**:
+- 代码注释率较低 (5.88%)，建议增加注释
+
+### 12. /Users/zhufeng/document/code/photospider/src/kernel/plugin_manage_module/plugin_loader.cpp (得分: 54.41)
+**问题分类**: 🔄 复杂度问题:3, 📝 注释问题:1, ⚠️ 其他问题:2
+
+**主要问题**:
+- 代码注释率较低 (7.41%)，建议增加注释
+- 函数 [&] 的循环复杂度过高 (21)，考虑重构
+- 函数 [&] 的循环复杂度较高 (12)，建议简化
+- 函数 '[&]' () 较长 (59 行)，可考虑重构
+- 函数 '[&]' () 复杂度严重过高 (21)，必须简化
+- 函数 '[&]' () 较长 (44 行)，可考虑重构
+
+### 13. /Users/zhufeng/document/code/photospider/src/cli/node_editor.cpp (得分: 54.26)
+**问题分类**: 🔄 复杂度问题:4, 📝 注释问题:1, ⚠️ 其他问题:2
+
+**主要问题**:
+- 函数 run_node_editor_decoupled 的循环复杂度过高 (58)，考虑重构
+- 函数 CatchEvent([&] 的循环复杂度过高 (32)，考虑重构
+- 函数 'run_node_editor_decoupled' () 极度过长 (201 行)，必须拆分
+- 函数 'run_node_editor_decoupled' () 复杂度严重过高 (58)，必须简化
+- 函数 'CatchEvent([&]' () 过长 (73 行)，建议拆分
+- 函数 'CatchEvent([&]' () 复杂度严重过高 (32)，必须简化
+- 代码注释率较低 (7.59%)，建议增加注释
+
+### 14. /Users/zhufeng/document/code/photospider/src/cli/handle_interactive_save.cpp (得分: 53.88)
+**问题分类**: 📝 注释问题:1
+
+**主要问题**:
+- 代码注释率极低 (3.70%)，几乎没有注释
+
+### 15. /Users/zhufeng/document/code/photospider/src/cli/autocomplete/FindLongestCommonPrefix.cpp (得分: 53.10)
+**问题分类**: 📝 注释问题:1
+
+**主要问题**:
+- 代码注释率极低 (0.00%)，几乎没有注释
+
+### 16. /Users/zhufeng/document/code/photospider/src/kernel/node_module/node_graph_traversal.cpp (得分: 53.00)
+**问题分类**: 📝 注释问题:1, 🏗️ 结构问题:1
+
+**主要问题**:
+- 函数 'topo_postorder_util' () 参数过多 (7 个)，建议使用结构体封装
+- 代码注释率极低 (1.96%)，几乎没有注释
+
+### 17. /Users/zhufeng/document/code/photospider/src/cli/command/command_ops.cpp (得分: 52.51)
+**问题分类**: 📝 注释问题:1
+
+**主要问题**:
+- 代码注释率极低 (1.28%)，几乎没有注释
+
+### 18. /Users/zhufeng/document/code/photospider/extern/ftxui/src/ftxui/component/component_fuzzer.cpp (得分: 52.38)
+**问题分类**: 🔄 复杂度问题:4, 📝 注释问题:1, ⚠️ 其他问题:2
+
+**主要问题**:
+- 函数 GeneratorComponent 的循环复杂度过高 (22)，考虑重构
+- 函数 switch 的循环复杂度过高 (21)，考虑重构
+- 函数 'GeneratorComponent' () 较长 (69 行)，可考虑重构
+- 函数 'GeneratorComponent' () 复杂度严重过高 (22)，必须简化
+- 函数 'switch' () 较长 (60 行)，可考虑重构
+- 函数 'switch' () 复杂度严重过高 (21)，必须简化
+- 代码注释率极低 (2.16%)，几乎没有注释
+
+### 19. /Users/zhufeng/document/code/photospider/src/cli/autocomplete/CompleteNodeId.cpp (得分: 51.95)
+**问题分类**: 📝 注释问题:1
+
+**主要问题**:
+- 代码注释率极低 (0.00%)，几乎没有注释
+
+### 20. /Users/zhufeng/document/code/photospider/src/cli/autocomplete/CompleteYamlPath.cpp (得分: 51.67)
+
+### 21. /Users/zhufeng/document/code/photospider/src/cli/command/command_switch.cpp (得分: 51.41)
+**问题分类**: 🔄 复杂度问题:2, 📝 注释问题:1
+
+**主要问题**:
+- 函数 if 的循环复杂度过高 (17)，考虑重构
+- 函数 'if' () 复杂度过高 (17)，建议简化
+- 代码注释率较低 (5.56%)，建议增加注释
+
+### 22. /Users/zhufeng/document/code/photospider/extern/ftxui/src/ftxui/dom/flexbox_helper.cpp (得分: 51.36)
+**问题分类**: 🔄 复杂度问题:4, 📝 注释问题:1, ⚠️ 其他问题:5
+
+**主要问题**:
+- 函数 SetY 的循环复杂度过高 (28)，考虑重构
+- 函数 switch 的循环复杂度较高 (15)，建议简化
+- 函数 'SetY' () 极度过长 (125 行)，必须拆分
+- 函数 'SetY' () 复杂度严重过高 (28)，必须简化
+- 函数 'switch' () 较长 (54 行)，可考虑重构
+- 函数 'switch' () 复杂度过高 (15)，建议简化
+- 函数 'JustifyContent' () 较长 (49 行)，可考虑重构
+- 函数 'for' () 较长 (47 行)，可考虑重构
+- 函数 'switch' () 较长 (43 行)，可考虑重构
+- 代码注释率极低 (3.15%)，几乎没有注释
+
+### 23. /Users/zhufeng/document/code/photospider/src/cli/path_complete.cpp (得分: 50.78)
+**问题分类**: 📝 注释问题:1
+
+**主要问题**:
+- 代码注释率极低 (1.64%)，几乎没有注释
+
+### 24. /Users/zhufeng/document/code/photospider/src/cli/command/command_traversal.cpp (得分: 50.67)
+**问题分类**: 🔄 复杂度问题:3, 📝 注释问题:1
+
+**主要问题**:
+- 函数 [&] 的循环复杂度较高 (12)，建议简化
+- 函数 for 的循环复杂度较高 (12)，建议简化
+- 函数 for 的循环复杂度较高 (12)，建议简化
+- 代码注释率较低 (6.31%)，建议增加注释
+
+### 25. /Users/zhufeng/document/code/photospider/util/3d.py (得分: 49.95)
+**问题分类**: 🔄 复杂度问题:2, ⚠️ 其他问题:1
+
+**主要问题**:
+- 函数 view_heightmap 的循环复杂度过高 (20)，考虑重构
+- 函数 'view_heightmap' () 较长 (69 行)，可考虑重构
+- 函数 'view_heightmap' () 复杂度严重过高 (20)，必须简化
+
+### 26. /Users/zhufeng/document/code/photospider/src/cli/autocomplete/CompleteSessionName.cpp (得分: 49.69)
+**问题分类**: 📝 注释问题:1
+
+**主要问题**:
+- 代码注释率极低 (4.76%)，几乎没有注释
+
+### 27. /Users/zhufeng/document/code/photospider/extern/ftxui/src/ftxui/dom/size.cpp (得分: 49.07)
+**问题分类**: 🔄 复杂度问题:1, 📝 注释问题:1
+
+**主要问题**:
+- 函数 SetBox 的循环复杂度较高 (11)，建议简化
+- 代码注释率较低 (9.38%)，建议增加注释
+
+### 28. /Users/zhufeng/document/code/photospider/src/cli/process_command.cpp (得分: 49.00)
+**问题分类**: 📝 注释问题:1
+
+**主要问题**:
+- 代码注释率极低 (1.39%)，几乎没有注释
+
+### 29. /Users/zhufeng/document/code/photospider/src/cli/command/command_print.cpp (得分: 48.75)
+**问题分类**: 📝 注释问题:1
+
+**主要问题**:
+- 代码注释率极低 (2.08%)，几乎没有注释
+
+### 30. /Users/zhufeng/document/code/photospider/src/cli/autocomplete/CompleteOpsMode.cpp (得分: 48.52)
+**问题分类**: 📝 注释问题:1
+
+**主要问题**:
+- 代码注释率极低 (0.00%)，几乎没有注释
+
+### 31. /Users/zhufeng/document/code/photospider/src/cli/autocomplete/CompleteGraphName.cpp (得分: 48.52)
+**问题分类**: 📝 注释问题:1
+
+**主要问题**:
+- 代码注释率极低 (0.00%)，几乎没有注释
+
+### 32. /Users/zhufeng/document/code/photospider/src/cli/tui_editor.cpp (得分: 48.45)
+**问题分类**: 🔄 复杂度问题:7, 📝 注释问题:1, ⚠️ 其他问题:1
+
+**主要问题**:
+- 函数 ApplyYAMLToFullNode 的循环复杂度过高 (17)，考虑重构
+- 函数 BuildComponents 的循环复杂度过高 (30)，考虑重构
+- 函数 [&] 的循环复杂度过高 (20)，考虑重构
+- 函数 if 的循环复杂度较高 (12)，建议简化
+- 函数 'ApplyYAMLToFullNode' () 复杂度过高 (17)，建议简化
+- 函数 'BuildComponents' () 过长 (118 行)，建议拆分
+- 函数 'BuildComponents' () 复杂度严重过高 (30)，必须简化
+- 函数 '[&]' () 复杂度严重过高 (20)，必须简化
+- 代码注释率较低 (7.56%)，建议增加注释
+
+### 33. /Users/zhufeng/document/code/photospider/src/cli/command/command_source.cpp (得分: 47.93)
+**问题分类**: 📝 注释问题:1
+
+**主要问题**:
+- 代码注释率极低 (3.23%)，几乎没有注释
+
+### 34. /Users/zhufeng/document/code/photospider/src/kernel/node_module/node_graph_io.cpp (得分: 47.67)
+**问题分类**: 📝 注释问题:1
+
+**主要问题**:
+- 代码注释率极低 (3.33%)，几乎没有注释
+
+### 35. /Users/zhufeng/document/code/photospider/src/cli/cli_autocompleter.cpp (得分: 47.62)
+**问题分类**: 🔄 复杂度问题:2, ⚠️ 其他问题:1
+
+**主要问题**:
+- 函数 CliAutocompleter::Complete 的循环复杂度过高 (39)，考虑重构
+- 函数 'CliAutocompleter::Complete' () 过长 (96 行)，建议拆分
+- 函数 'CliAutocompleter::Complete' () 复杂度严重过高 (39)，必须简化
+
+### 36. /Users/zhufeng/document/code/photospider/src/cli/autocomplete/CompleteCommand.cpp (得分: 47.38)
+**问题分类**: 📝 注释问题:1
+
+**主要问题**:
+- 代码注释率极低 (0.00%)，几乎没有注释
+
+### 37. /Users/zhufeng/document/code/photospider/src/cli/command/command_compute.cpp (得分: 47.29)
+**问题分类**: 🔄 复杂度问题:3, 📝 注释问题:1
+
+**主要问题**:
+- 函数 flags.size 的循环复杂度较高 (13)，建议简化
+- 函数 if 的循环复杂度较高 (11)，建议简化
+- 函数 'flags.size' () 复杂度过高 (13)，建议简化
+- 代码注释率较低 (7.10%)，建议增加注释
+
+### 38. /Users/zhufeng/document/code/photospider/extern/ftxui/src/ftxui/component/dropdown.cpp (得分: 47.06)
+**问题分类**: 🔄 复杂度问题:4, ⚠️ 其他问题:1
+
+**主要问题**:
+- 函数 Dropdown 的循环复杂度过高 (21)，考虑重构
+- 函数 OnEvent 的循环复杂度较高 (13)，建议简化
+- 函数 'Dropdown' () 过长 (107 行)，建议拆分
+- 函数 'Dropdown' () 复杂度严重过高 (21)，必须简化
+- 函数 'OnEvent' () 复杂度过高 (13)，建议简化
+
+### 39. /Users/zhufeng/document/code/photospider/src/kernel/node_module/node_graph_parallel.cpp (得分: 46.89)
+**问题分类**: 🔄 复杂度问题:6, ⚠️ 其他问题:3
+
+**主要问题**:
+- 函数 for 的循环复杂度过高 (38)，考虑重构
+- 函数 workers.emplace_back 的循环复杂度过高 (37)，考虑重构
+- 函数 while 的循环复杂度过高 (35)，考虑重构
+- 函数 'for' () 极度过长 (136 行)，必须拆分
+- 函数 'for' () 复杂度严重过高 (38)，必须简化
+- 函数 'workers.emplace_back' () 极度过长 (134 行)，必须拆分
+- 函数 'workers.emplace_back' () 复杂度严重过高 (37)，必须简化
+- 函数 'while' () 过长 (119 行)，建议拆分
+- 函数 'while' () 复杂度严重过高 (35)，必须简化
+
+### 40. /Users/zhufeng/document/code/photospider/extern/ftxui/src/ftxui/screen/string.cpp (得分: 46.86)
+**问题分类**: 📝 注释问题:1, ⚠️ 其他问题:3
+
+**主要问题**:
+- 函数 'Utf8ToGlyphs' () 较长 (41 行)，可考虑重构
+- 函数 'to_string' () 较长 (70 行)，可考虑重构
+- 函数 '(EatCodePoint' () 较长 (63 行)，可考虑重构
+- 代码注释率极低 (4.79%)，几乎没有注释
+
+### 41. /Users/zhufeng/document/code/photospider/extern/ftxui/src/ftxui/dom/scroll_indicator.cpp (得分: 46.84)
+**问题分类**: 📝 注释问题:1, ⚠️ 其他问题:2
+
+**主要问题**:
+- 函数 'vscroll_indicator' () 较长 (51 行)，可考虑重构
+- 函数 'hscroll_indicator' () 较长 (52 行)，可考虑重构
+- 代码注释率较低 (6.92%)，建议增加注释
+
+### 42. /Users/zhufeng/document/code/photospider/extern/ftxui/examples/component/menu_style.cpp (得分: 46.62)
+**问题分类**: 📝 注释问题:1, ⚠️ 其他问题:1
+
+**主要问题**:
+- 函数 'main' () 过长 (77 行)，建议拆分
+- 代码注释率极低 (1.16%)，几乎没有注释
+
+### 43. /Users/zhufeng/document/code/photospider/extern/ftxui/examples/component/input_style.cpp (得分: 46.59)
+**问题分类**: 📝 注释问题:1, ⚠️ 其他问题:1
+
+**主要问题**:
+- 函数 'main' () 过长 (82 行)，建议拆分
+- 代码注释率极低 (3.06%)，几乎没有注释
+
+### 44. /Users/zhufeng/document/code/photospider/src/cli/command/command_load.cpp (得分: 46.44)
+**问题分类**: 🔄 复杂度问题:2, 📝 注释问题:1
+
+**主要问题**:
+- 函数 'fs::exists' () 复杂度过高 (15)，建议简化
+- 代码注释率较低 (8.91%)，建议增加注释
+- 函数 fs::exists 的循环复杂度较高 (15)，建议简化
+
+### 45. /Users/zhufeng/document/code/photospider/src/kernel/kernel.cpp (得分: 46.27)
+**问题分类**: 🔄 复杂度问题:1, 📝 注释问题:1
+
+**主要问题**:
+- 代码注释率极低 (4.81%)，几乎没有注释
+- 函数 Kernel::traversal_details 的循环复杂度较高 (11)，建议简化
+
+### 46. /Users/zhufeng/document/code/photospider/src/ops.cpp (得分: 46.22)
+**问题分类**: 🔄 复杂度问题:2, 📝 注释问题:1, ⚠️ 其他问题:2
+
+**主要问题**:
+- 函数 op_perlin_noise 的循环复杂度较高 (13)，建议简化
+- 函数 'op_perlin_noise' () 较长 (53 行)，可考虑重构
+- 函数 'op_perlin_noise' () 复杂度过高 (13)，建议简化
+- 函数 'op_convolve' () 较长 (41 行)，可考虑重构
+- 代码注释率较低 (9.04%)，建议增加注释
+
+### 47. /Users/zhufeng/document/code/photospider/src/cli/cli_history.cpp (得分: 46.16)
+**问题分类**: 📝 注释问题:1
+
+**主要问题**:
+- 代码注释率极低 (2.27%)，几乎没有注释
+
+### 48. /Users/zhufeng/document/code/photospider/extern/ftxui/src/ftxui/dom/graph.cpp (得分: 46.15)
+
+### 49. /Users/zhufeng/document/code/photospider/extern/ftxui/examples/dom/color_gallery.cpp (得分: 45.43)
+**问题分类**: 📝 注释问题:1, ⚠️ 其他问题:1
+
+**主要问题**:
+- 函数 'main' () 极度过长 (124 行)，必须拆分
+- 代码注释率极低 (4.93%)，几乎没有注释
+
+### 50. /Users/zhufeng/document/code/photospider/extern/ftxui/src/ftxui/dom/spinner.cpp (得分: 45.29)
+**问题分类**: 📝 注释问题:1
+
+**主要问题**:
+- 代码注释率极低 (3.32%)，几乎没有注释
+
+### 51. /Users/zhufeng/document/code/photospider/src/cli/autocomplete/Tokenize.cpp (得分: 45.10)
+**问题分类**: 📝 注释问题:1
+
+**主要问题**:
+- 代码注释率极低 (0.00%)，几乎没有注释
+
+### 52. /Users/zhufeng/document/code/photospider/src/cli/save_fp32_image.cpp (得分: 44.95)
+**问题分类**: 📝 注释问题:1
+
+**主要问题**:
+- 代码注释率较低 (5.00%)，建议增加注释
+
+### 53. /Users/zhufeng/document/code/photospider/src/cli/autocomplete/CompleteTraversalArgs.cpp (得分: 44.81)
+
+### 54. /Users/zhufeng/document/code/photospider/src/cli/command/help_utils.cpp (得分: 44.06)
+**问题分类**: 📝 注释问题:1
+
+**主要问题**:
+- 代码注释率极低 (3.85%)，几乎没有注释
+
+### 55. /Users/zhufeng/document/code/photospider/src/cli/ask.cpp (得分: 44.06)
+**问题分类**: 📝 注释问题:1
+
+**主要问题**:
+- 代码注释率较低 (6.25%)，建议增加注释
+
+### 56. /Users/zhufeng/document/code/photospider/extern/ftxui/examples/component/flexbox_gallery.cpp (得分: 43.73)
+**问题分类**: 📝 注释问题:1, ⚠️ 其他问题:1
+
+**主要问题**:
+- 函数 'main' () 极度过长 (173 行)，必须拆分
+- 代码注释率极低 (1.56%)，几乎没有注释
+
+### 57. /Users/zhufeng/document/code/photospider/extern/ftxui/examples/dom/html_like.cpp (得分: 43.52)
+**问题分类**: 📝 注释问题:1, ⚠️ 其他问题:1
+
+**主要问题**:
+- 函数 'main' () 较长 (45 行)，可考虑重构
+- 代码注释率较低 (5.00%)，建议增加注释
+
+### 58. /Users/zhufeng/document/code/photospider/extern/ftxui/examples/component/dropdown_custom.cpp (得分: 43.39)
+**问题分类**: 📝 注释问题:1, ⚠️ 其他问题:1
+
+**主要问题**:
+- 函数 'main' () 过长 (94 行)，建议拆分
+- 代码注释率极低 (2.86%)，几乎没有注释
+
+### 59. /Users/zhufeng/document/code/photospider/extern/ftxui/src/ftxui/component/slider.cpp (得分: 43.26)
+**问题分类**: 🔄 复杂度问题:1, ⚠️ 其他问题:1
+
+**主要问题**:
+- 函数 OnEvent 的循环复杂度较高 (12)，建议简化
+- 函数 'OnCapturedMouseEvent' () 较长 (42 行)，可考虑重构
+
+### 60. /Users/zhufeng/document/code/photospider/custom_ops/threshold_op.cpp (得分: 43.25)
+**问题分类**: 📝 注释问题:1
+
+**主要问题**:
+- 代码注释率较低 (9.30%)，建议增加注释
+
+### 61. /Users/zhufeng/document/code/photospider/src/cli/autocomplete/CompleteComputeArgs.cpp (得分: 43.03)
+**问题分类**: 📝 注释问题:1
+
+**主要问题**:
+- 代码注释率较低 (7.69%)，建议增加注释
+
+### 62. /Users/zhufeng/document/code/photospider/extern/ftxui/examples/dom/package_manager.cpp (得分: 42.90)
+**问题分类**: 🔄 复杂度问题:1, 📝 注释问题:1, ⚠️ 其他问题:1
+
+**主要问题**:
+- 函数 main 的循环复杂度较高 (11)，建议简化
+- 函数 'main' () 极度过长 (131 行)，必须拆分
+- 代码注释率较低 (6.04%)，建议增加注释
+
+### 63. /Users/zhufeng/document/code/photospider/extern/ftxui/examples/dom/spinner.cpp (得分: 42.59)
+**问题分类**: 📝 注释问题:1
+
+**主要问题**:
+- 代码注释率较低 (6.38%)，建议增加注释
+
+### 64. /Users/zhufeng/document/code/photospider/src/cli/command/command_graphs.cpp (得分: 42.54)
+**问题分类**: 📝 注释问题:1
+
+**主要问题**:
+- 代码注释率极低 (3.57%)，几乎没有注释
+
+### 65. /Users/zhufeng/document/code/photospider/extern/ftxui/src/ftxui/component/terminal_input_parser.cpp (得分: 42.53)
+**问题分类**: 🔄 复杂度问题:12, ⚠️ 其他问题:4
+
+**主要问题**:
+- 函数 TerminalInputParser::ParseUTF8 的循环复杂度较高 (15)，建议简化
+- 函数 TerminalInputParser::ParseESC 的循环复杂度过高 (16)，考虑重构
+- 函数 (Current 的循环复杂度较高 (15)，建议简化
+- 函数 TerminalInputParser::ParseDCS 的循环复杂度较高 (11)，建议简化
+- 函数 while 的循环复杂度较高 (11)，建议简化
+- 函数 TerminalInputParser::ParseCSI 的循环复杂度过高 (16)，考虑重构
+- 函数 while 的循环复杂度过高 (16)，考虑重构
+- 函数 'TerminalInputParser::Send' () 较长 (43 行)，可考虑重构
+- 函数 'TerminalInputParser::ParseUTF8' () 较长 (62 行)，可考虑重构
+- 函数 'TerminalInputParser::ParseUTF8' () 复杂度过高 (15)，建议简化
+- 函数 'TerminalInputParser::ParseESC' () 复杂度过高 (16)，建议简化
+- 函数 '(Current' () 复杂度过高 (15)，建议简化
+- 函数 'TerminalInputParser::ParseCSI' () 较长 (54 行)，可考虑重构
+- 函数 'TerminalInputParser::ParseCSI' () 复杂度过高 (16)，建议简化
+- 函数 'while' () 较长 (49 行)，可考虑重构
+- 函数 'while' () 复杂度过高 (16)，建议简化
+
+### 66. /Users/zhufeng/document/code/photospider/src/kernel/plugin_manager.cpp (得分: 42.45)
+**问题分类**: 📝 注释问题:1
+
+**主要问题**:
+- 代码注释率较低 (7.81%)，建议增加注释
+
+### 67. /Users/zhufeng/document/code/photospider/extern/ftxui/examples/component/menu_entries.cpp (得分: 42.23)
+**问题分类**: 📝 注释问题:1, ⚠️ 其他问题:1
+
+**主要问题**:
+- 函数 'main' () 较长 (48 行)，可考虑重构
+- 代码注释率较低 (6.10%)，建议增加注释
+
+### 68. /Users/zhufeng/document/code/photospider/extern/ftxui/src/ftxui/component/event.cpp (得分: 42.12)
+**问题分类**: 📝 注释问题:1, ⚠️ 其他问题:2
+
+**主要问题**:
+- 函数 'Event::DebugString' () 极度过长 (191 行)，必须拆分
+- 函数 'switch' () 较长 (41 行)，可考虑重构
+- 代码注释率较低 (9.07%)，建议增加注释
+
+### 69. /Users/zhufeng/document/code/photospider/custom_ops/save_op.cpp (得分: 42.03)
+**问题分类**: 📝 注释问题:1
+
+**主要问题**:
+- 代码注释率较低 (9.09%)，建议增加注释
+
+### 70. /Users/zhufeng/document/code/photospider/extern/ftxui/examples/dom/graph.cpp (得分: 41.96)
+**问题分类**: 📝 注释问题:1, ⚠️ 其他问题:1
+
+**主要问题**:
+- 代码注释率极低 (3.41%)，几乎没有注释
+- 函数 'main' () 较长 (43 行)，可考虑重构
+
+### 71. /Users/zhufeng/document/code/photospider/extern/ftxui/examples/component/print_key_press.cpp (得分: 41.90)
+**问题分类**: 📝 注释问题:1
+
+**主要问题**:
+- 代码注释率极低 (4.48%)，几乎没有注释
+
+### 72. /Users/zhufeng/document/code/photospider/src/ps_types.cpp (得分: 41.86)
+**问题分类**: 📝 注释问题:1
+
+**主要问题**:
+- 代码注释率极低 (2.13%)，几乎没有注释
+
+### 73. /Users/zhufeng/document/code/photospider/src/kernel/node_module/node_graph_compute.cpp (得分: 41.85)
+**问题分类**: 🔄 复杂度问题:4, ⚠️ 其他问题:3
+
+**主要问题**:
+- 函数 NodeGraph::compute_internal 的循环复杂度过高 (28)，考虑重构
+- 函数 std::visit([&] 的循环复杂度较高 (12)，建议简化
+- 函数 constexpr 的循环复杂度较高 (11)，建议简化
+- 函数 'NodeGraph::compute_internal' () 过长 (119 行)，建议拆分
+- 函数 'NodeGraph::compute_internal' () 复杂度严重过高 (28)，必须简化
+- 函数 'std::visit([&]' () 较长 (58 行)，可考虑重构
+- 函数 'constexpr' () 较长 (48 行)，可考虑重构
+
+### 74. /Users/zhufeng/document/code/photospider/src/cli/autocomplete/CompletePath.cpp (得分: 41.67)
+**问题分类**: 📝 注释问题:1
+
+**主要问题**:
+- 代码注释率极低 (0.00%)，几乎没有注释
+
+### 75. /Users/zhufeng/document/code/photospider/extern/ftxui/examples/component/scrollbar.cpp (得分: 41.53)
+**问题分类**: 📝 注释问题:1, ⚠️ 其他问题:2
+
+**主要问题**:
+- 函数 'DummyWindowContent' () 过长 (76 行)，建议拆分
+- 函数 'Impl' () 较长 (66 行)，可考虑重构
+- 代码注释率极低 (2.63%)，几乎没有注释
+
+### 76. /Users/zhufeng/document/code/photospider/extern/ftxui/examples/component/canvas_animated.cpp (得分: 41.48)
+**问题分类**: 🔄 复杂度问题:1, 📝 注释问题:1, ⚠️ 其他问题:1
+
+**主要问题**:
+- 函数 main 的循环复杂度较高 (12)，建议简化
+- 函数 'main' () 极度过长 (243 行)，必须拆分
+- 代码注释率较低 (6.84%)，建议增加注释
+
+### 77. /Users/zhufeng/document/code/photospider/extern/ftxui/examples/dom/color_truecolor_HSV.cpp (得分: 41.43)
+**问题分类**: 📝 注释问题:1
+
+**主要问题**:
+- 代码注释率较低 (8.33%)，建议增加注释
+
+### 78. /Users/zhufeng/document/code/photospider/extern/ftxui/examples/component/menu_underline_animated_gallery.cpp (得分: 41.34)
+**问题分类**: 📝 注释问题:1, ⚠️ 其他问题:1
+
+**主要问题**:
+- 函数 'main' () 较长 (61 行)，可考虑重构
+- 代码注释率极低 (4.26%)，几乎没有注释
+
+### 79. /Users/zhufeng/document/code/photospider/extern/ftxui/examples/component/focus.cpp (得分: 41.05)
+**问题分类**: 📝 注释问题:1
+
+**主要问题**:
+- 代码注释率极低 (4.29%)，几乎没有注释
+
+### 80. /Users/zhufeng/document/code/photospider/src/kernel/graph_runtime.cpp (得分: 41.01)
+
+### 81. /Users/zhufeng/document/code/photospider/extern/ftxui/src/ftxui/component/window.cpp (得分: 40.95)
+**问题分类**: 🔄 复杂度问题:2, ⚠️ 其他问题:1
+
+**主要问题**:
+- 函数 OnEvent 的循环复杂度过高 (19)，考虑重构
+- 函数 'OnEvent' () 过长 (107 行)，建议拆分
+- 函数 'OnEvent' () 复杂度严重过高 (19)，必须简化
+
+### 82. /Users/zhufeng/document/code/photospider/extern/ftxui/examples/dom/gauge_direction.cpp (得分: 40.81)
+**问题分类**: 📝 注释问题:1, ⚠️ 其他问题:2
+
+**主要问题**:
+- 函数 'main' () 较长 (65 行)，可考虑重构
+- 函数 'for' () 较长 (58 行)，可考虑重构
+- 代码注释率极低 (3.80%)，几乎没有注释
+
+### 83. /Users/zhufeng/document/code/photospider/src/cli/autocomplete/CompletePrintArgs.cpp (得分: 40.59)
+
+### 84. /Users/zhufeng/document/code/photospider/extern/ftxui/examples/dom/style_color.cpp (得分: 40.52)
+**问题分类**: 📝 注释问题:1, ⚠️ 其他问题:2
+
+**主要问题**:
+- 函数 'main' () 较长 (56 行)，可考虑重构
+- 函数 'hbox' () 较长 (47 行)，可考虑重构
+- 代码注释率极低 (4.41%)，几乎没有注释
+
+### 85. /Users/zhufeng/document/code/photospider/extern/ftxui/src/ftxui/dom/selection.cpp (得分: 40.49)
+
+### 86. /Users/zhufeng/document/code/photospider/extern/ftxui/src/ftxui/screen/screen.cpp (得分: 40.45)
+**问题分类**: 🔄 复杂度问题:1
+
+**主要问题**:
+- 函数 operator< 的循环复杂度较高 (11)，建议简化
+
+### 87. /Users/zhufeng/document/code/photospider/extern/ftxui/src/ftxui/screen/color_info.cpp (得分: 40.40)
+**问题分类**: 📝 注释问题:1
+
+**主要问题**:
+- 代码注释率极低 (1.77%)，几乎没有注释
+
+### 88. /Users/zhufeng/document/code/photospider/src/cli/command/command_exit.cpp (得分: 40.28)
+**问题分类**: 📝 注释问题:1
+
+**主要问题**:
+- 代码注释率极低 (4.35%)，几乎没有注释
+
+### 89. /Users/zhufeng/document/code/photospider/extern/ftxui/examples/component/maybe.cpp (得分: 39.99)
+**问题分类**: 📝 注释问题:1
+
+**主要问题**:
+- 代码注释率较低 (7.14%)，建议增加注释
+
+### 90. /Users/zhufeng/document/code/photospider/extern/ftxui/examples/component/selection.cpp (得分: 39.99)
+**问题分类**: 📝 注释问题:1, ⚠️ 其他问题:3
+
+**主要问题**:
+- 函数 'main' () 较长 (64 行)，可考虑重构
+- 函数 'Renderer' () 较长 (47 行)，可考虑重构
+- 函数 'vbox' () 较长 (45 行)，可考虑重构
+- 代码注释率极低 (4.55%)，几乎没有注释
+
+### 91. /Users/zhufeng/document/code/photospider/extern/ftxui/examples/dom/color_truecolor_RGB.cpp (得分: 39.87)
+**问题分类**: 📝 注释问题:1, ⚠️ 其他问题:1
+
+**主要问题**:
+- 函数 'main' () 较长 (42 行)，可考虑重构
+- 代码注释率较低 (5.56%)，建议增加注释
+
+### 92. /Users/zhufeng/document/code/photospider/extern/ftxui/examples/component/menu_multiple.cpp (得分: 39.72)
+**问题分类**: 📝 注释问题:1, ⚠️ 其他问题:1
+
+**主要问题**:
+- 函数 'main' () 较长 (55 行)，可考虑重构
+- 代码注释率极低 (3.85%)，几乎没有注释
+
+### 93. /Users/zhufeng/document/code/photospider/extern/ftxui/examples/component/window.cpp (得分: 39.65)
+**问题分类**: 📝 注释问题:1, ⚠️ 其他问题:1
+
+**主要问题**:
+- 函数 'main' () 较长 (61 行)，可考虑重构
+- 代码注释率极低 (3.33%)，几乎没有注释
+
+### 94. /Users/zhufeng/document/code/photospider/extern/ftxui/examples/component/tab_vertical.cpp (得分: 39.65)
+**问题分类**: 📝 注释问题:1, ⚠️ 其他问题:1
+
+**主要问题**:
+- 函数 'main' () 较长 (55 行)，可考虑重构
+- 代码注释率极低 (4.23%)，几乎没有注释
+
+### 95. /Users/zhufeng/document/code/photospider/extern/ftxui/examples/component/tab_horizontal.cpp (得分: 39.65)
+**问题分类**: 📝 注释问题:1, ⚠️ 其他问题:1
+
+**主要问题**:
+- 函数 'main' () 较长 (55 行)，可考虑重构
+- 代码注释率极低 (4.23%)，几乎没有注释
+
+### 96. /Users/zhufeng/document/code/photospider/extern/ftxui/examples/component/homescreen.cpp (得分: 39.39)
+**问题分类**: 🔄 复杂度问题:1, 📝 注释问题:1, ⚠️ 其他问题:4
+
+**主要问题**:
+- 函数 main 的循环复杂度较高 (12)，建议简化
+- 函数 'main' () 极度过长 (506 行)，必须拆分
+- 函数 'Renderer' () 较长 (54 行)，可考虑重构
+- 函数 'Renderer' () 过长 (98 行)，建议拆分
+- 函数 'vbox' () 较长 (44 行)，可考虑重构
+- 代码注释率较低 (6.34%)，建议增加注释
+
+### 97. /Users/zhufeng/document/code/photospider/extern/ftxui/examples/component/toggle.cpp (得分: 39.37)
+**问题分类**: 📝 注释问题:1, ⚠️ 其他问题:1
+
+**主要问题**:
+- 函数 'main' () 较长 (49 行)，可考虑重构
+- 代码注释率极低 (4.62%)，几乎没有注释
+
+### 98. /Users/zhufeng/document/code/photospider/extern/ftxui/src/ftxui/screen/color.cpp (得分: 39.28)
+**问题分类**: 🔄 复杂度问题:2, ⚠️ 其他问题:1
+
+**主要问题**:
+- 函数 Color::Print 的循环复杂度较高 (13)，建议简化
+- 函数 'Color::Print' () 复杂度过高 (13)，建议简化
+- 函数 'Color::Interpolate' () 较长 (66 行)，可考虑重构
+
+### 99. /Users/zhufeng/document/code/photospider/src/kernel/node_module/node_yaml.cpp (得分: 39.13)
+**问题分类**: 🔄 复杂度问题:2, ⚠️ 其他问题:1
+
+**主要问题**:
+- 函数 Node::from_yaml 的循环复杂度较高 (15)，建议简化
+- 函数 'Node::from_yaml' () 较长 (63 行)，可考虑重构
+- 函数 'Node::from_yaml' () 复杂度过高 (15)，建议简化
+
+### 100. /Users/zhufeng/document/code/photospider/extern/ftxui/src/ftxui/component/screen_interactive.cpp (得分: 39.04)
+**问题分类**: 🔄 复杂度问题:10, ⚠️ 其他问题:8
+
+**主要问题**:
+- 函数 EventListener 的循环复杂度较高 (15)，建议简化
+- 函数 while 的循环复杂度较高 (15)，建议简化
+- 函数 RecordSignal 的循环复杂度较高 (11)，建议简化
+- 函数 switch 的循环复杂度较高 (11)，建议简化
+- 函数 ScreenInteractive::HandleTask 的循环复杂度较高 (11)，建议简化
+- 函数 [&] 的循环复杂度较高 (11)，建议简化
+- 函数 ScreenInteractive::Draw 的循环复杂度过高 (27)，考虑重构
+- 函数 'EventListener' () 较长 (50 行)，可考虑重构
+- 函数 'EventListener' () 复杂度过高 (15)，建议简化
+- 函数 'while' () 较长 (45 行)，可考虑重构
+- 函数 'while' () 复杂度过高 (15)，建议简化
+- 函数 'Report' () 较长 (57 行)，可考虑重构
+- 函数 'ScreenInteractive::Install' () 极度过长 (140 行)，必须拆分
+- 函数 'ScreenInteractive::HandleTask' () 较长 (70 行)，可考虑重构
+- 函数 '[&]' () 较长 (65 行)，可考虑重构
+- 函数 'ScreenInteractive::HandleSelection' () 较长 (51 行)，可考虑重构
+- 函数 'ScreenInteractive::Draw' () 过长 (113 行)，建议拆分
+- 函数 'ScreenInteractive::Draw' () 复杂度严重过高 (27)，必须简化
+
+## 改进建议
+
+### 高优先级
+- 继续保持当前的代码质量标准
+
+### 中优先级
+- 可以考虑进一步优化性能和可读性
+- 完善文档和注释，便于团队协作
+

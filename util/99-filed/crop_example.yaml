@@ -1,0 +1,47 @@
+# crop_example.yaml
+# Demonstrates how to use the new image_process:crop node.
+
+# 1. Load a source image that we want to crop.
+- id: 1
+  name: source-image
+  type: image_source
+  subtype: path
+  parameters:
+    path: assets/a.jpg  # Make sure this image exists
+
+# 2. Apply the crop operation.
+# This node takes the image from node 1 and crops it according to
+# the x, y, width, and height parameters.
+- id: 2
+  name: cropped-region
+  type: image_process
+  subtype: crop
+  image_inputs:
+    - from_node_id: 1
+  parameters:
+    x: 250      # The top-left x-coordinate of the crop rectangle.
+    y: 100      # The top-left y-coordinate of the crop rectangle.
+    width: 400  # The width of the crop rectangle.
+    height: 350 # The height of the crop rectangle.
+  caches:
+    - cache_type: image
+      location: my_cropped_image.png
+
+# 3. (Optional) A second crop to demonstrate chaining.
+# This node takes the ALREADY CROPPED image from node 2
+# and crops a smaller region out of it.
+- id: 3
+  name: second-crop
+  type: image_process
+  subtype: crop
+  image_inputs:
+    - from_node_id: 1 # Input is the result of the first crop
+  parameters:
+    mode: "ratio"
+    x: 0.25
+    y: 0.25
+    width: 2
+    height: 2
+  caches:
+    - cache_type: image
+      location: second_crop_result.png

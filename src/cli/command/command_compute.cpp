@@ -6,39 +6,75 @@
 #include <numeric>
 #include <sstream>
 #include <unordered_set>
+#include <utility>
 #include <vector>
 
 #include "cli/command/commands.hpp"
 #include "cli/command/help_utils.hpp"
 
-// [核心修复] 将异步执行和结果处理逻辑提取到一个辅助函数中
-static bool execute_and_wait(ps::InteractionService& svc,
-                             const std::string& current_graph, int node_id,
-                             const CliConfig& config, bool force,
-                             bool force_deep, bool parallel, bool timer_console,
-                             bool timer_log, bool mute,
-                             const std::string& timer_log_path, bool nosave) {
-  (void)svc.cmd_drain_compute_events(current_graph);
+namespace {
 
-  auto future_opt = svc.cmd_compute_async(
-      current_graph, node_id, config.cache_precision, (force || force_deep),
-      (timer_console || timer_log), parallel, mute, force_deep, nosave);
+/**
+ * @brief CLI-local request for scheduling compute and polling status.
+ *
+ * The struct keeps frontend polling/logging switches separate from the Kernel
+ * compute request so execute_and_wait receives one stable object instead of a
+ * sequence of booleans.
+ *
+ * @note compute.telemetry.enable_timing is derived from timer_console or
+ * timer_log before the request is passed to this helper.
+ */
+struct ComputeWaitRequest {
+  /** @brief Kernel compute request built from parsed CLI arguments. */
+  ps::Kernel::ComputeRequest compute;
+
+  /** @brief Whether timing should be printed to the console after compute. */
+  bool timer_console = false;
+
+  /** @brief Whether timing should be appended to timer_log_path. */
+  bool timer_log = false;
+
+  /** @brief Whether progress events and startup text should be suppressed. */
+  bool mute = false;
+
+  /** @brief File path used when timer_log is enabled. */
+  std::string timer_log_path;
+};
+
+/**
+ * @brief Schedules one async compute request and waits for completion.
+ *
+ * @param svc Interaction facade used by the CLI command.
+ * @param request Kernel compute request plus CLI polling/logging controls.
+ * @return true when the future completes successfully, false on schedule or
+ * compute failure.
+ * @throws Nothing directly; future exceptions are converted by Kernel into the
+ * returned status and last_error message.
+ * @note Progress events are drained before and during the wait loop to keep the
+ * CLI output behavior unchanged.
+ */
+bool execute_and_wait(ps::InteractionService& svc,
+                      const ComputeWaitRequest& request) {
+  (void)svc.cmd_drain_compute_events(request.compute.name);
+
+  auto future_opt = svc.cmd_compute_async(request.compute);
 
   if (!future_opt) {
-    std::cout << "Error: failed to schedule compute task for node " << node_id
-              << ".\n";
+    std::cout << "Error: failed to schedule compute task for node "
+              << request.compute.node_id << ".\n";
     return false;
   }
 
   auto& future = *future_opt;
-  if (!mute) {
-    std::cout << "Computing node " << node_id << "..." << std::endl;
+  if (!request.mute) {
+    std::cout << "Computing node " << request.compute.node_id << "..."
+              << std::endl;
   }
 
   while (future.wait_for(std::chrono::milliseconds(50)) ==
          std::future_status::timeout) {
-    if (!mute) {
-      if (auto events = svc.cmd_drain_compute_events(current_graph)) {
+    if (!request.mute) {
+      if (auto events = svc.cmd_drain_compute_events(request.compute.name)) {
         for (const auto& event : *events) {
           std::cout << "  - Node " << event.id << " (" << event.name
                     << ") completed [" << event.source << "]" << std::endl;
@@ -47,8 +83,8 @@ static bool execute_and_wait(ps::InteractionService& svc,
     }
   }
 
-  if (!mute) {
-    if (auto tail_events = svc.cmd_drain_compute_events(current_graph)) {
+  if (!request.mute) {
+    if (auto tail_events = svc.cmd_drain_compute_events(request.compute.name)) {
       for (const auto& event : *tail_events) {
         std::cout << "  - Node " << event.id << " (" << event.name
                   << ") completed [" << event.source << "]" << std::endl;
@@ -58,13 +94,16 @@ static bool execute_and_wait(ps::InteractionService& svc,
 
   bool ok = future.get();
   if (!ok) {
-    std::cout << "Error: Compute task failed for node " << node_id << ".\n";
-    if (auto err = svc.cmd_last_error(current_graph)) {
+    std::cout << "Error: Compute task failed for node "
+              << request.compute.node_id << ".\n";
+    if (auto err = svc.cmd_last_error(request.compute.name)) {
       std::cout << "  Reason: " << err->message << std::endl;
     }
   }
   return ok;
 }
+
+}  // namespace
 
 bool handle_compute(std::istringstream& iss, ps::InteractionService& svc,
                     std::string& current_graph, bool& /*modified*/,
@@ -174,9 +213,19 @@ bool handle_compute(std::istringstream& iss, ps::InteractionService& svc,
   aggregated_timings.reserve(128);
 
   for (int node_id : nodes_to_compute) {
-    if (!execute_and_wait(svc, current_graph, node_id, config, force,
-                          force_deep, parallel, timer_console, timer_log, mute,
-                          timer_log_path, nosave)) {
+    ps::Kernel::ComputeRequest compute_request;
+    compute_request.name = current_graph;
+    compute_request.node_id = node_id;
+    compute_request.cache.precision = config.cache_precision;
+    compute_request.cache.force_recache = force || force_deep;
+    compute_request.cache.disable_disk_cache = force_deep;
+    compute_request.cache.nosave = nosave;
+    compute_request.execution.parallel = parallel;
+    compute_request.execution.quiet = mute;
+    compute_request.telemetry.enable_timing = timer_console || timer_log;
+    ComputeWaitRequest wait_request{std::move(compute_request), timer_console,
+                                    timer_log, mute, timer_log_path};
+    if (!execute_and_wait(svc, wait_request)) {
       all_ok = false;
       break;  // 一个失败就停止
     }

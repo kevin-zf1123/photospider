@@ -1,0 +1,19 @@
+- id: 1
+  name: source
+  type: image_generator
+  subtype: constant
+  parameters: {width: 100, height: 100, value: 50}
+
+- id: 2
+  name: scaler
+  type: image_process
+  subtype: resize
+  image_inputs: [{from_node_id: 1}]
+  parameters: {width: 200, height: 200}
+
+- id: 3
+  name: cropper
+  type: image_process
+  subtype: crop
+  image_inputs: [{from_node_id: 2}]
+  parameters: {x: 10, y: 10, width: 50, height: 50}

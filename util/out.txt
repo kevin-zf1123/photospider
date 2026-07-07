@@ -1,0 +1,688 @@
+Loaded configuration from 'config.yaml'.
+Photospider dynamic graph shell (decoupled). Type 'help' for commands.
+History file: "/Users/zhufeng/.photospider_history"
+[Kps> [4C[Kps> s[5C[Kps> so[6C[Kps> sou[7C[Kps> sour[8C[Kps> sourc[9C[Kps> source[10C[Kps> source [11C[Kps> source u[12C[Kps> source ut[13C[Kps> source uti[14C[Kps> source util[15C[Kps> source util/[16C[Kps> source util/t[17C[Kps> source util/te[18C[Kps> source util/tes[19C[Kps> source util/test[20C[Kps> source util/testc[21C[Kps> source util/testca[22C[Kps> source util/testcas[23C[Kps> source util/testcase[24C[Kps> source util/testcases[25C[Kps> source util/testcases/[26C[Kps> source util/testcases/f[27C[Kps> source util/testcases/fu[28C[Kps> source util/testcases/ful[29C[Kps> source util/testcases/full[30C[Kps> source util/testcases/full_[31C[Kps> source util/testcases/full_c[32C[Kps> source util/testcases/full_cl[33C[Kps> source util/testcases/full_cli[34C[Kps> source util/testcases/full_cli.[35C[Kps> source util/testcases/full_cli.t[36C[Kps> source util/testcases/full_cli.tx[37C[Kps> source util/testcases/full_cli.txt[38C
+ps> clear
+[2J[1;1Hps> graphs
+(no graphs loaded)
+ps> ops all
+Available Operations (all):
+
+  Type: analyzer
+    - get_dimensions
+
+  Type: image_generator
+    - constant
+    - perlin_noise
+    - perlin_noise_metal  [plugin: build/high_performance/metal/libmetal_ops_loader.dylib]
+
+  Type: image_mixing
+    - add_weighted
+    - diff
+    - multiply
+
+  Type: image_process
+    - convolve
+    - crop
+    - curve_transform
+    - extract_channel
+    - gaussian_blur
+    - gaussian_blur_tiled
+    - invert  [plugin: build/plugins/libinvert_op_custom_example.dylib]
+    - resize
+    - threshold  [plugin: build/plugins/libthreshold_op.dylib]
+
+  Type: image_source
+    - path
+
+  Type: io
+    - save  [plugin: build/plugins/libsave_op.dylib]
+
+  Type: math
+    - divide
+ps> close cli_full
+Error: failed to close 'cli_full'.
+ps> load cli_full util/testcases/full_ops.yaml
+Loaded session 'cli_full' (yaml: util/testcases/full_ops.yaml).
+ps> graphs
+Loaded graphs:
+  - cli_full  [current]
+ps> print all full
+Dependency Tree (reversed from ending nodes):
+
+- Node 16 (get_dimensions | analyzer:get_dimensions)
+
+  (image from 2:image)
+
+    - Node 2 (gen_gray_32x32_3ch | image_generator:constant)
+      static_params:
+        width: 32
+        height: 32
+        value: 64
+        channels: 3
+
+- Node 17 (crop_negative | image_process:crop)
+  static_params:
+    x: 0
+    y: 0
+    width: -10
+    height: 20
+
+  (image from 1:image)
+
+    - Node 1 (gen_gray_64x64_1ch | image_generator:constant)
+      static_params:
+        width: 64
+        height: 64
+        value: 128
+        channels: 1
+
+- Node 11 (convolve_ok | image_process:convolve)
+  static_params:
+    padding: replicate
+
+  (image from 3:image)
+
+    - Node 3 (perlin_64x64 | image_generator:perlin_noise)
+      static_params:
+        width: 64
+        height: 64
+        grid_size: 8
+
+  (image from 2:image)
+
+    - Node 2 (gen_gray_32x32_3ch | image_generator:constant)
+      static_params:
+        width: 32
+        height: 32
+        value: 64
+        channels: 3
+
+- Node 10 (convolve_missing_kernel | image_process:convolve)
+  static_params:
+    padding: replicate
+
+  (image from 3:image)
+
+    - Node 3 (perlin_64x64 | image_generator:perlin_noise)
+      static_params:
+        width: 64
+        height: 64
+        grid_size: 8
+
+- Node 9 (resize_zero_dimensions | image_process:resize)
+  static_params:
+    width: 0
+    height: 0
+    interpolation: nearest
+
+  (image from 1:image)
+
+    - Node 1 (gen_gray_64x64_1ch | image_generator:constant)
+      static_params:
+        width: 64
+        height: 64
+        value: 128
+        channels: 1
+
+- Node 8 (resize_negative_width | image_process:resize)
+  static_params:
+    width: -1
+    height: 32
+    interpolation: linear
+
+  (image from 1:image)
+
+    - Node 1 (gen_gray_64x64_1ch | image_generator:constant)
+      static_params:
+        width: 64
+        height: 64
+        value: 128
+        channels: 1
+
+- Node 7 (gaussian_blur_ok | image_process:gaussian_blur)
+  static_params:
+    ksize: 9
+    sigmaX: 1.5
+
+  (image from 3:image)
+
+    - Node 3 (perlin_64x64 | image_generator:perlin_noise)
+      static_params:
+        width: 64
+        height: 64
+        grid_size: 8
+
+- Node 6 (gaussian_blur_no_input | image_process:gaussian_blur)
+  static_params:
+    ksize: 7
+    sigmaX: 2
+
+- Node 5 (add_weighted_mixed_sizes_channels | image_mixing:add_weighted)
+  static_params:
+    alpha: 0.5
+    beta: 0.5
+    gamma: 0.0
+    merge_strategy: crop
+
+  (image from 1:image)
+
+    - Node 1 (gen_gray_64x64_1ch | image_generator:constant)
+      static_params:
+        width: 64
+        height: 64
+        value: 128
+        channels: 1
+
+  (image from 2:image)
+
+    - Node 2 (gen_gray_32x32_3ch | image_generator:constant)
+      static_params:
+        width: 32
+        height: 32
+        value: 64
+        channels: 3
+
+- Node 4 (add_weighted_one_input_only | image_mixing:add_weighted)
+  static_params:
+    alpha: 0.7
+    beta: 0.3
+    gamma: 0.0
+    merge_strategy: crop
+
+  (image from 1:image)
+
+    - Node 1 (gen_gray_64x64_1ch | image_generator:constant)
+      static_params:
+        width: 64
+        height: 64
+        value: 128
+        channels: 1
+
+- Node 14 (gen_with_input_spurious | image_generator:constant)
+  static_params:
+    width: 16
+    height: 16
+    value: 200
+    channels: 4
+
+  (image from 1:image)
+
+    - Node 1 (gen_gray_64x64_1ch | image_generator:constant)
+      static_params:
+        width: 64
+        height: 64
+        value: 128
+        channels: 1
+
+- Node 12 (extract_channel_invalid_on_1ch | image_process:extract_channel)
+  static_params:
+    channel: 3
+
+  (image from 1:image)
+
+    - Node 1 (gen_gray_64x64_1ch | image_generator:constant)
+      static_params:
+        width: 64
+        height: 64
+        value: 128
+        channels: 1
+ps> traversal f md
+Dependency Tree (reversed from ending nodes):
+
+- Node 16 (get_dimensions | analyzer:get_dimensions)
+
+  (image from 2:image)
+
+    - Node 2 (gen_gray_32x32_3ch | image_generator:constant)
+      static_params:
+        width: 32
+        height: 32
+        value: 64
+        channels: 3
+
+- Node 17 (crop_negative | image_process:crop)
+  static_params:
+    x: 0
+    y: 0
+    width: -10
+    height: 20
+
+  (image from 1:image)
+
+    - Node 1 (gen_gray_64x64_1ch | image_generator:constant)
+      static_params:
+        width: 64
+        height: 64
+        value: 128
+        channels: 1
+
+- Node 11 (convolve_ok | image_process:convolve)
+  static_params:
+    padding: replicate
+
+  (image from 3:image)
+
+    - Node 3 (perlin_64x64 | image_generator:perlin_noise)
+      static_params:
+        width: 64
+        height: 64
+        grid_size: 8
+
+  (image from 2:image)
+
+    - Node 2 (gen_gray_32x32_3ch | image_generator:constant)
+      static_params:
+        width: 32
+        height: 32
+        value: 64
+        channels: 3
+
+- Node 10 (convolve_missing_kernel | image_process:convolve)
+  static_params:
+    padding: replicate
+
+  (image from 3:image)
+
+    - Node 3 (perlin_64x64 | image_generator:perlin_noise)
+      static_params:
+        width: 64
+        height: 64
+        grid_size: 8
+
+- Node 9 (resize_zero_dimensions | image_process:resize)
+  static_params:
+    width: 0
+    height: 0
+    interpolation: nearest
+
+  (image from 1:image)
+
+    - Node 1 (gen_gray_64x64_1ch | image_generator:constant)
+      static_params:
+        width: 64
+        height: 64
+        value: 128
+        channels: 1
+
+- Node 8 (resize_negative_width | image_process:resize)
+  static_params:
+    width: -1
+    height: 32
+    interpolation: linear
+
+  (image from 1:image)
+
+    - Node 1 (gen_gray_64x64_1ch | image_generator:constant)
+      static_params:
+        width: 64
+        height: 64
+        value: 128
+        channels: 1
+
+- Node 7 (gaussian_blur_ok | image_process:gaussian_blur)
+  static_params:
+    ksize: 9
+    sigmaX: 1.5
+
+  (image from 3:image)
+
+    - Node 3 (perlin_64x64 | image_generator:perlin_noise)
+      static_params:
+        width: 64
+        height: 64
+        grid_size: 8
+
+- Node 6 (gaussian_blur_no_input | image_process:gaussian_blur)
+  static_params:
+    ksize: 7
+    sigmaX: 2
+
+- Node 5 (add_weighted_mixed_sizes_channels | image_mixing:add_weighted)
+  static_params:
+    alpha: 0.5
+    beta: 0.5
+    gamma: 0.0
+    merge_strategy: crop
+
+  (image from 1:image)
+
+    - Node 1 (gen_gray_64x64_1ch | image_generator:constant)
+      static_params:
+        width: 64
+        height: 64
+        value: 128
+        channels: 1
+
+  (image from 2:image)
+
+    - Node 2 (gen_gray_32x32_3ch | image_generator:constant)
+      static_params:
+        width: 32
+        height: 32
+        value: 64
+        channels: 3
+
+- Node 4 (add_weighted_one_input_only | image_mixing:add_weighted)
+  static_params:
+    alpha: 0.7
+    beta: 0.3
+    gamma: 0.0
+    merge_strategy: crop
+
+  (image from 1:image)
+
+    - Node 1 (gen_gray_64x64_1ch | image_generator:constant)
+      static_params:
+        width: 64
+        height: 64
+        value: 128
+        channels: 1
+
+- Node 14 (gen_with_input_spurious | image_generator:constant)
+  static_params:
+    width: 16
+    height: 16
+    value: 200
+    channels: 4
+
+  (image from 1:image)
+
+    - Node 1 (gen_gray_64x64_1ch | image_generator:constant)
+      static_params:
+        width: 64
+        height: 64
+        value: 128
+        channels: 1
+
+- Node 12 (extract_channel_invalid_on_1ch | image_process:extract_channel)
+  static_params:
+    channel: 3
+
+  (image from 1:image)
+
+    - Node 1 (gen_gray_64x64_1ch | image_generator:constant)
+      static_params:
+        width: 64
+        height: 64
+        value: 128
+        channels: 1
+Post-order (eval order) for end node 4:
+1. 1 (gen_gray_64x64_1ch)
+2. 4 (add_weighted_one_input_only)
+
+Post-order (eval order) for end node 5:
+1. 1 (gen_gray_64x64_1ch)
+2. 2 (gen_gray_32x32_3ch)
+3. 5 (add_weighted_mixed_sizes_channels)
+
+Post-order (eval order) for end node 6:
+1. 6 (gaussian_blur_no_input)
+
+Post-order (eval order) for end node 7:
+1. 3 (perlin_64x64)
+2. 7 (gaussian_blur_ok)
+
+Post-order (eval order) for end node 8:
+1. 1 (gen_gray_64x64_1ch)
+2. 8 (resize_negative_width)
+
+Post-order (eval order) for end node 9:
+1. 1 (gen_gray_64x64_1ch)
+2. 9 (resize_zero_dimensions)
+
+Post-order (eval order) for end node 10:
+1. 3 (perlin_64x64)
+2. 10 (convolve_missing_kernel)
+
+Post-order (eval order) for end node 11:
+1. 3 (perlin_64x64)
+2. 2 (gen_gray_32x32_3ch)
+3. 11 (convolve_ok)
+
+Post-order (eval order) for end node 12:
+1. 1 (gen_gray_64x64_1ch)
+2. 12 (extract_channel_invalid_on_1ch)
+
+Post-order (eval order) for end node 14:
+1. 1 (gen_gray_64x64_1ch)
+2. 14 (gen_with_input_spurious)
+
+Post-order (eval order) for end node 16:
+1. 2 (gen_gray_32x32_3ch)
+2. 16 (get_dimensions)
+
+Post-order (eval order) for end node 17:
+1. 1 (gen_gray_64x64_1ch)
+2. 17 (crop_negative)
+ps> cc
+ps> compute 7 t tl parallel nosave m
+Computation finished.
+Timing Report (total 3.65829 ms, wall 4.59083 ms):
+  - Node 3 (perlin_64x64) completed in 2.45721 ms [computed]
+  - Node 7 (gaussian_blur_ok) completed in 1.20108 ms [computed]
+Timing report appended to out/timer.yaml
+ps> compute 5 t tl parallel nosave m
+Computation finished.
+Timing Report (total 1.37454 ms, wall 1.55329 ms):
+  - Node 2 (gen_gray_32x32_3ch) completed in 0.339625 ms [computed]
+  - Node 1 (gen_gray_64x64_1ch) completed in 0.338458 ms [computed]
+  - Node 5 (add_weighted_mixed_sizes_channels) completed in 0.696459 ms [computed]
+Timing report appended to out/timer.yaml
+ps> compute 11 t tl parallel nosave m
+Error: Compute task failed for node 11.
+  Reason: Compute stage at node 11 (convolve_ok) failed: The kernel for convolve must be single-channel.
+Computation failed.
+Timing Report (total 0 ms, wall 13.5571 ms):
+Timing report appended to out/timer.yaml
+ps> compute 16 t tl parallel nosave m
+Computation finished.
+Timing Report (total 0.069042 ms, wall 0.457667 ms):
+  - Node 16 (get_dimensions) completed in 0.069042 ms [computed]
+Timing report appended to out/timer.yaml
+ps> compute 14 t tl parallel nosave m
+Computation finished.
+Timing Report (total 0.090959 ms, wall 0.42 ms):
+  - Node 14 (gen_with_input_spurious) completed in 0.090959 ms [computed]
+Timing report appended to out/timer.yaml
+ps> compute 4 t m        # add_weighted with only one input
+Error: Compute task failed for node 4.
+  Reason: Node 4 (add_weighted_one_input_only) failed: add_weighted requires two input images.
+Computation failed.
+Timing Report (total 0 ms, wall 0.304875 ms):
+ps> compute 6 t m        # gaussian_blur without input
+Error: Compute task failed for node 6.
+  Reason: Node 6 (gaussian_blur_no_input) failed: gaussian_blur requires one input image.
+Computation failed.
+Timing Report (total 0 ms, wall 0.206166 ms):
+ps> compute 8 t m        # resize with negative width
+Error: Compute task failed for node 8.
+  Reason: Node 8 (resize_negative_width) failed: Resize requires positive width and height.
+Computation failed.
+Timing Report (total 0 ms, wall 0.286625 ms):
+ps> compute 9 t m        # resize with zero width
+Error: Compute task failed for node 9.
+  Reason: Node 9 (resize_zero_dimensions) failed: Resize requires positive width and height.
+Computation failed.
+Timing Report (total 0 ms, wall 0.24875 ms):
+ps> compute 10 t m       # convolve missing kernel
+Error: Compute task failed for node 10.
+  Reason: Node 10 (convolve_missing_kernel) failed: Convolve requires two non-empty input images (src and kernel).
+Computation failed.
+Timing Report (total 0 ms, wall 0.242042 ms):
+ps> compute 12 t m       # extract_channel invalid channel on 1ch image
+Error: Compute task failed for node 12.
+  Reason: Node 12 (extract_channel_invalid_on_1ch) failed: Invalid or unavailable channel for extraction.
+Computation failed.
+Timing Report (total 0 ms, wall 0.217709 ms):
+ps> compute 17 t m       # crop with negative width
+Error: Compute task failed for node 17.
+  Reason: Node 17 (crop_negative) failed: Crop value mode requires positive width and height.
+Computation failed.
+Timing Report (total 0 ms, wall 0.298833 ms):
+ps> save 7 util/testcases/full_out_blur.png
+Saved image to util/testcases/full_out_blur.png
+ps> output util/testcases/full_ops_out.yaml
+Saved to util/testcases/full_ops_out.yaml
+ps> source util/testcases/full_cli_part.txt
+ps> ops builtin
+Available Operations (built-in):
+
+  Type: analyzer
+    - get_dimensions
+
+  Type: image_generator
+    - constant
+    - perlin_noise
+
+  Type: image_mixing
+    - add_weighted
+    - diff
+    - multiply
+
+  Type: image_process
+    - convolve
+    - crop
+    - curve_transform
+    - extract_channel
+    - gaussian_blur
+    - gaussian_blur_tiled
+    - resize
+
+  Type: image_source
+    - path
+
+  Type: math
+    - divide
+ps> traversal s m
+Dependency Tree (reversed from ending nodes):
+
+- Node 16 (get_dimensions | analyzer:get_dimensions)
+
+  (image from 2:image)
+
+    - Node 2 (gen_gray_32x32_3ch | image_generator:constant)
+
+- Node 17 (crop_negative | image_process:crop)
+
+  (image from 1:image)
+
+    - Node 1 (gen_gray_64x64_1ch | image_generator:constant)
+
+- Node 11 (convolve_ok | image_process:convolve)
+
+  (image from 3:image)
+
+    - Node 3 (perlin_64x64 | image_generator:perlin_noise)
+
+  (image from 2:image)
+
+    - Node 2 (gen_gray_32x32_3ch | image_generator:constant)
+
+- Node 10 (convolve_missing_kernel | image_process:convolve)
+
+  (image from 3:image)
+
+    - Node 3 (perlin_64x64 | image_generator:perlin_noise)
+
+- Node 9 (resize_zero_dimensions | image_process:resize)
+
+  (image from 1:image)
+
+    - Node 1 (gen_gray_64x64_1ch | image_generator:constant)
+
+- Node 8 (resize_negative_width | image_process:resize)
+
+  (image from 1:image)
+
+    - Node 1 (gen_gray_64x64_1ch | image_generator:constant)
+
+- Node 7 (gaussian_blur_ok | image_process:gaussian_blur)
+
+  (image from 3:image)
+
+    - Node 3 (perlin_64x64 | image_generator:perlin_noise)
+
+- Node 6 (gaussian_blur_no_input | image_process:gaussian_blur)
+
+- Node 5 (add_weighted_mixed_sizes_channels | image_mixing:add_weighted)
+
+  (image from 1:image)
+
+    - Node 1 (gen_gray_64x64_1ch | image_generator:constant)
+
+  (image from 2:image)
+
+    - Node 2 (gen_gray_32x32_3ch | image_generator:constant)
+
+- Node 4 (add_weighted_one_input_only | image_mixing:add_weighted)
+
+  (image from 1:image)
+
+    - Node 1 (gen_gray_64x64_1ch | image_generator:constant)
+
+- Node 14 (gen_with_input_spurious | image_generator:constant)
+
+  (image from 1:image)
+
+    - Node 1 (gen_gray_64x64_1ch | image_generator:constant)
+
+- Node 12 (extract_channel_invalid_on_1ch | image_process:extract_channel)
+
+  (image from 1:image)
+
+    - Node 1 (gen_gray_64x64_1ch | image_generator:constant)
+Post-order (eval order) for end node 4:
+1. 1 (gen_gray_64x64_1ch) (in memory)
+2. 4 (add_weighted_one_input_only)
+
+Post-order (eval order) for end node 5:
+1. 1 (gen_gray_64x64_1ch) (in memory)
+2. 2 (gen_gray_32x32_3ch) (in memory)
+3. 5 (add_weighted_mixed_sizes_channels) (in memory)
+
+Post-order (eval order) for end node 6:
+1. 6 (gaussian_blur_no_input)
+
+Post-order (eval order) for end node 7:
+1. 3 (perlin_64x64) (in memory)
+2. 7 (gaussian_blur_ok) (in memory)
+
+Post-order (eval order) for end node 8:
+1. 1 (gen_gray_64x64_1ch) (in memory)
+2. 8 (resize_negative_width)
+
+Post-order (eval order) for end node 9:
+1. 1 (gen_gray_64x64_1ch) (in memory)
+2. 9 (resize_zero_dimensions)
+
+Post-order (eval order) for end node 10:
+1. 3 (perlin_64x64) (in memory)
+2. 10 (convolve_missing_kernel)
+
+Post-order (eval order) for end node 11:
+1. 3 (perlin_64x64) (in memory)
+2. 2 (gen_gray_32x32_3ch) (in memory)
+3. 11 (convolve_ok)
+
+Post-order (eval order) for end node 12:
+1. 1 (gen_gray_64x64_1ch) (in memory)
+2. 12 (extract_channel_invalid_on_1ch)
+
+Post-order (eval order) for end node 14:
+1. 1 (gen_gray_64x64_1ch) (in memory)
+2. 14 (gen_with_input_spurious) (in memory)
+
+Post-order (eval order) for end node 16:
+1. 2 (gen_gray_32x32_3ch) (in memory)
+2. 16 (get_dimensions) (in memory)
+
+Post-order (eval order) for end node 17:
+1. 1 (gen_gray_64x64_1ch) (in memory)
+2. 17 (crop_negative)
+ps> graphs
+Loaded graphs:
+  - cli_full  [current]
+ps> close cli_full
+Closed graph 'cli_full'.
+[Kps> [4C

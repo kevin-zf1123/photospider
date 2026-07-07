@@ -1,0 +1,67 @@
+# 1. 起点：一个1024x1024的大尺寸数据源
+- id: 1
+  name: SourceImage
+  type: image_generator
+  subtype: constant
+  parameters:
+    width: 1024
+    height: 1024
+    value: 128
+
+# 2. 模糊：对源图像进行一次高斯模糊，这将引入邻域计算
+#    ksize=21 意味着计算半径为10像素，会显著扩大脏区
+- id: 2
+  name: GaussianBlur_Base
+  type: image_process
+  subtype: gaussian_blur
+  image_inputs:
+    - from_node_id: 1
+  parameters:
+    ksize: 21
+
+# 3. 扇出 (Fan-out)：从模糊后的图像创建两个并行分支
+
+#    分支A：裁剪出一个512x512的区域。这将测试“窗口化”传播。
+- id: 10
+  name: Crop_Quadrant
+  type: image_process
+  subtype: crop
+  image_inputs:
+    - from_node_id: 2
+  parameters:
+    x: 200
+    y: 300
+    width: 512
+    height: 512
+
+#    分支B：将整个图像缩放到512x512。这将测试“缩放”传播。
+- id: 20
+  name: Resize_Half
+  type: image_process
+  subtype: resize
+  image_inputs:
+    - from_node_id: 2
+  parameters:
+    width: 512
+    height: 512
+
+# 4. 扇入 (Fan-in)：将裁剪和缩放后的两个分支结果合并
+#    这个节点的脏区将是两个上游分支脏区的并集。
+- id: 100
+  name: Merge_Crop_Resize
+  type: image_mixing
+  subtype: add_weighted
+  image_inputs:
+    - from_node_id: 10 # 来自裁剪分支
+    - from_node_id: 20 # 来自缩放分支
+  parameters:
+    alpha: 0.5
+    beta: 0.5
+
+# 5. 最终输出节点
+- id: 200
+  name: FinalOutput
+  type: image_process
+  subtype: curve_transform
+  image_inputs:
+    - from_node_id: 100

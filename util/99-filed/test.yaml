@@ -1,0 +1,6 @@
+- id: 1
+  name: "perlin_cpu_256"
+  type: "image_generator"
+  subtype: "perlin_noise" # The original CPU version
+  parameters: { width: 256, height: 256, grid_size: 8 }
+  caches: [ { cache_type: "image", location: "perlin_cpu_256.png" } ]

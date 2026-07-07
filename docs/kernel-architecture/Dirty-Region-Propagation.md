@@ -1,88 +1,339 @@
-# 脏区传播与 Tile 映射规范
+# Dirty Region Propagation and Tile Mapping
 
-本文规范脏区（Dirty Region, ROI）在节点图中的传播规则、与 Tile 网格的相互映射，以及常见算子的传播策略。实现目标是：充分精确、不漏算、尽量少算，且与 Micro/Macro 粒度边界自然衔接。
+This document defines how dirty regions (ROI) propagate through the node graph,
+how they map to tile grids, and how common operators should describe their
+propagation behavior. The implementation goal is to be precise enough to avoid
+missed work, conservative enough to remain correct, and compatible with
+Micro/Macro execution boundaries. HP/RT compute domain and Micro/Macro
+granularity are independent axes: dirty propagation may cross graph node
+boundaries, but it must not model an RT task as directly connected to an HP task
+or vice versa.
 
-## 1. 基本原则
+The RT/HP grid sizes in this document are current implementation parameters,
+not permanent ABI. Schedulers and operators may rely on the data flow and safety
+requirements described here, but should not treat concrete tile sizes as
+external compatibility promises.
 
-- 传播单位是几何区域 `cv::Rect`（或 ROI 集），而非离散 Tile 索引。
-- 在跨节点传播时，使用算子提供的 `propagate_dirty_roi(downstream_roi, node)` 做“反向需求”推导。
-- 在粒度边界（Micro↔Macro）处，使用 `ReTileTask` 承接，完成 ROI 与 Tile 网格之间的映射与裁剪。
+## 1. Basic Principles
 
-## 2. ROI 运算、网格与尺度
+- Dirty regions originate from node-local changes. The changed node reports the
+  local dirty region in its own output coordinate space. Frontend interaction
+  may update a node, and compute may cause a node to discover dirty state, but
+  the emitted dirty region is always node-originated.
+- Propagation semantics are provided by the node's operator, not by
+  `InteractionService` or the scheduler. Operators should explicitly define
+  dirty and forward propagation behavior; identity fallback is legacy migration
+  support and should not be treated as sufficient for new operators.
+- The propagation unit is a geometric region such as `cv::Rect`, or a set of
+  ROIs, rather than a discrete tile index.
+- Forward affected-region propagation maps local dirty regions downstream to
+  affected nodes and tiles. Backward compute-demand propagation uses the
+  operator-provided `propagate_dirty_roi(downstream_roi, node)` function to
+  derive required upstream input regions.
+- At granularity boundaries (Micro to Macro, or Macro to Micro), `ReTileTask`
+  bridges ROI geometry and tile-grid mapping/cropping inside the same compute
+  domain. HP/RT synchronization is a separate coordinator/cache update concern,
+  not a dirty-propagation edge between RT and HP tasks.
+- Dirty-region signals update graph dirty state; they are not compute-task
+  triggers. A `DirtyRegionNode` should make its lifecycle explicit: begin
+  dirty-region creation, update dirty region with the current ROI, and end
+  dirty-region creation. Compute policy can then decide whether to create an HP
+  or RT request after the node closes the region, or to coalesce updates into
+  an already active realtime request while the node is still updating.
+- `DirtyRegionPlanner` should maintain graph-scoped dirty state instead of
+  forcing each consumer to recompute propagation independently.
 
-- 并集/包围盒：多个 ROI 合并时，默认取并集的最小包围盒（可扩展为稀疏 ROI 表示以提升精度）。
-- 网格对齐：按固定网格对齐（RT 代理：16；HP：64/256）以便切分成离散 Tile 集。
-- 尺度映射：RT 代理为原图宽高 1/4（像素约 1/16）。因此
-  - RT 16x16 ↔ HP 64x64（×4 放大或 ÷4 缩小）；
-  - HP 256x256 ↔ RT 64x64。
+## 2. Graph-Scoped Dirty Snapshot
 
-参考实现见《Overview.md》附录。
+The target dirty-region state is a graph-scoped `DirtyRegionSnapshot`. It should
+be owned by the current graph/runtime dirty-state layer and consumed by
+`InteractionService`, dirty work-set materialization, tests, and debug tooling.
 
-## 3. Micro→Macro：上采样边界
+The snapshot should contain three categories of state, but only dirty-source
+membership and lifecycle can be written directly from node lifecycle events:
 
-- HP 域：输入为多个 HP Micro_64；并集→对齐到 HP Macro_256；插入 `ReTileTask` 聚合。
-- RT→HP 跨尺度：输入为 RT 16x16；先放大到 HP 64x64，再按上段规则映射到 HP Macro_256。
-- 输出：Macro Tile 任务集合（每块 256x256）。
+- `dirty_source_nodes`: the set of nodes that have emitted dirty state for the
+  current dirty generation. A node remains marked as dirty even after the event
+  that caused it has been locally handled, because downstream work may keep
+  being aborted or refreshed until the final dirty update settles.
+- `dirty_updating_count`: a derived count of dirty source nodes currently
+  inside a begin/end dirty-region lifecycle. When it reaches zero, the executor
+  may end the current compute request after the last relevant work finishes. It
+  is not a compute-task reference count.
+- `actual_dirty_region`: the propagated dirty regions, tiles, monolithic
+  escalations, and edge mappings produced by the propagator from the dirty
+  source set. It is refreshed incrementally or fully whenever the dirty source
+  set changes.
 
-目的：保证 Macro 算子获取完整、连续的大块数据；避免“离散点”破坏算法特性（如 FFT、卷积域分块）。
+The snapshot sits alongside graph topology state. It is not the executable
+`ComputeTaskGraph` and it does not own runtime dependency counters, reference
+counts, ready queues, task-priority queues, or scheduler policy. Those execution
+artifacts are maintained by the executor and scheduler from the request's
+compute plan and the current dirty snapshot for each update.
 
-## 4. Macro→Micro：下采样边界
+The snapshot does not create compute tasks. `ComputeTaskGraph` enumerates the
+node and tile tasks available to a compute request, including full-frame tiled
+parallelism when no dirty ROI is active. Dirty work-set materialization only
+selects or prunes tasks from that graph.
 
-- HP 域：输入为一个或多个 HP Macro_256；与 HP Micro_64 网格相交得到所有受影响的 Micro_64。
-- HP→RT 跨尺度：对 HP Macro_256 先缩小至 RT 64x64，再与 RT 16x16 网格相交得到受影响 RT Tiles。
-- 输出：Micro Tile 任务集合（HP: 64；RT: 16）。
+The snapshot should avoid raw node or tile pointers. It should use stable ids and
+coordinate data so it remains inspectable across undo/redo, reload, and node
+replacement workflows.
 
-目的：将 Macro 级变化“均匀扩散”到下游微块，确保不漏算。
+Dirty-node lifecycle events enter a serialized graph-scoped
+`DirtyControlLane` through the `Kernel` / `InteractionService` facade. The
+control lane updates dirty source membership and lifecycle state in
+`DirtyRegionSnapshot`; the propagator then derives `actual_dirty_region` from
+those sources and returns wakeup/cutoff decisions for work-set materialization.
+It is not a normal compute task queue owned by the scheduler, and it should not
+be delegated to node-local compute ownership.
 
-注：在 HP 路径中，Planner 可在 Macro→Micro 映射后对下游 Micro 进行“动态粒度粗化”，将一组对齐同一 Macro_256 的 Micro_64 合并为单一 Macro_256 任务，减少调度碎片与切换；RT 路径默认不进行此粗化（强制 Proxy Micro_16 以满足帧预算）。
+TODO: define the node-to-`InteractionService` subscription/event transport for
+future GUI usage. Nodes remain the source of realtime update events and
+dirty-region records, while `InteractionService` exposes frontend-facing
+inspection and lifecycle/update-request hooks without becoming the dirty-region
+generator. The design must document event source, dirty-region generation
+responsibility, node/facade boundaries, and GUI consumption.
 
-## 5. 算子传播策略（示例）
+Recommended internal keys:
 
-- 点算子（像素级无邻域）：`add_weighted`、`multiply`、`curve_transform`
-  - 传播：`propagate_dirty_roi` 恒等返回。
+```text
+DirtyTileKey {
+  node_id
+  domain: HP | RT
+  level: Micro | Macro
+  tile_x
+  tile_y
+  tile_size
+  pixel_roi
+}
 
-- 邻域算子（卷积/模糊）：`gaussian_blur`、`convolve`
-  - 传播：对 `downstream_roi` 向外扩展 kernel 半径（含 padding 策略）。
+DirtyMonolithicRegion {
+  node_id
+  domain: HP | RT
+  pixel_roi
+  whole_output: true
+}
 
-- 几何算子：`resize`、`warp`
-  - 传播：对 `downstream_roi` 做逆变换；结果取包围盒；必要时添加安全边距。
+DirtyEdgeMapping {
+  from_node_id
+  to_node_id
+  from_roi
+  to_roi
+  direction: ForwardAffected | BackwardDemand
+}
+```
 
-- 通道/拼接：`extract_channel`、`merge`
-  - 传播：恒等或按通道/拼接规则映射 ROI 到对应输入。
+Display-only strings may format these keys as `node:12/hp.micro(3,1)` or
+`edge:12->15`, but string paths should not be the primary storage format.
 
-## 6. 典型场景：Micro–Macro–Micro 链（含尺度）
+For future undo/redo or replay, the snapshot may need generation metadata and
+origin events such as parameter changes, user actions, cache invalidations, or
+version increments.
 
-假设：
+## 3. ROI Operations, Grids, and Scale
 
-- A：RT Proxy Micro_16（16x16），B：HP Macro_256（256x256），C：RT Proxy Micro_16（16x16）。
-- 触发：A 的 `(0,0) (1,1) (3,1)` 三个 16x16 Tile 更新；
-- 推导：
-  1) A→B：将三块 RT 16x16 放大 4× 到 HP 64x64，三者并集落入同一 `B_macro(0,0)`（256x256），需重算整块。
-  2) B→C：将 `B_macro(0,0)`（256x256）缩小至 RT 64x64，与 16x16 网格相交，得到 `C:(0,0)–(3,3)` 16 个 Tile。
+- Union / bounding box: when multiple ROIs are merged, the default behavior is
+  the minimal bounding box of their union. This can later be extended to a sparse
+  ROI representation for higher precision.
+- Grid alignment: align ROIs to the current domain grid so they can be split
+  into discrete tile sets.
+- Scale mapping: the current RT proxy is one quarter of the source width and
+  height, or roughly one sixteenth of the pixel count. Therefore:
+  - RT Micro_16 maps to HP Micro_64 by scaling up 4x, or back down by dividing
+    by 4.
+  - RT Macro_64 maps to HP Macro_256 by the same scale rule.
 
-结论：C 需要更新 16 个 Tile，而不是那 3 个离散点。Macro 节点是“信息扩散点”。
+Current defaults:
 
-## 7. RT/HP 双路径中的 ROI 使用
+| Domain granularity | Current value | Coordinate space | Notes |
+| --- | --- | --- | --- |
+| RT downscale factor | 4 | N/A | Current proxy scale, tunable. |
+| RT Micro tile | 16x16 | RT proxy space | Current interactive update granularity, tunable. |
+| RT Macro tile | 64x64 | RT proxy space | Current RT throughput/coarsening granularity, tunable. |
+| HP Micro tile | 64x64 | HP full-resolution space | Current HP small-tile granularity, tunable. |
+| HP Macro tile | 256x256 | HP full-resolution space | Current HP throughput-oriented granularity, tunable. |
 
-- RT：
-  - 粒度固定为 RT Proxy Micro_16，尽量只在 `dirty_roi` 及其传播影响范围内更新；
-  - 如缺 `tiled_op_rt`，回退 `tiled_op_hp`（在 RT 代理尺度）。
+RT Macro_64 and HP Micro_64 currently share the same numeric tile size, but
+they are different domain/granularity cases. The numeric equality does not make
+an RT macro tile interchangeable with an HP micro tile.
 
-- HP：
-  - 采用 Micro_64/Macro_256 混合（优先 Macro_256）推进吞吐；
-  - 完成后触发 Downsample 更新 RT，并同步版本。
+## 4. Micro to Macro: Upsampling Boundary
 
-## 8. ROI 边界与裁剪
+- HP domain: input consists of multiple HP Micro_64 tiles; take their union,
+  align to HP Macro_256, and insert a `ReTileTask` to aggregate them.
+- RT domain: input consists of multiple RT Micro_16 tiles; take their union,
+  align to RT Macro_64, and insert a `ReTileTask` to aggregate them.
+- Output: a set of Macro tile tasks in the same domain as the input
+  (RT Macro_64 or HP Macro_256).
 
-- 对图像边界处 ROI 进行裁剪，避免越界读写。
-- 对大核半径或复杂逆变换导致的“远程影响”，引入面积上限与分批推进（逐步收敛）。
+Purpose: ensure Macro operators receive complete, contiguous large blocks of
+data and avoid discrete-point inputs that can break algorithms such as FFT or
+convolution-domain blocking.
 
-## 9. 取消、合并与去重
+## 5. Macro to Micro: Downsampling Boundary
 
-- 相同节点上的 ROI 任务可按时间窗合并（包围盒或稀疏集合），防止任务风暴。
-- 以版本戳做“软取消”：执行前校验是否过期，过期即弃。
+- HP domain: input consists of one or more HP Macro_256 tiles; intersect them
+  with the HP Micro_64 grid to get every affected Micro_64 tile.
+- RT domain: input consists of one or more RT Macro_64 tiles; intersect them
+  with the RT Micro_16 grid to get every affected Micro_16 tile.
+- Output: a set of Micro tile tasks in the same domain as the input
+  (RT Micro_16 or HP Micro_64).
 
-## 10. 校验与可视化
+Purpose: spread Macro-level changes uniformly into downstream micro tiles so no
+affected work is missed.
 
-- 在构建或测试模式下，提供 `debug roi`：将 ROI/Tile 覆盖绘制为掩码输出，便于验证传播正确性。
-- 指标：记录 ROI 面积、Tile 数、合并次数、取消次数，辅助调参。
+Note: on the HP path, after Macro-to-Micro mapping, the planner may dynamically
+coarsen downstream Micro tasks by merging Micro_64 tiles aligned to the same
+Macro_256 into a single Macro_256 task. This reduces scheduler fragmentation
+and switching cost. The RT path does not coarsen by default; it stays on proxy
+Micro_16 to satisfy frame-budget constraints.
+
+## 6. Operator Propagation Strategies
+
+- Point operators with no pixel neighborhood, such as `add_weighted`,
+  `multiply`, and `curve_transform`:
+  - propagation: `propagate_dirty_roi` returns the input ROI unchanged.
+
+- Neighborhood operators, such as `gaussian_blur` and `convolve`:
+  - propagation: expand `downstream_roi` by the kernel radius, including padding
+    policy.
+
+- Geometric operators, such as `resize` and `warp`:
+  - propagation: apply the inverse transform to `downstream_roi`; use the
+    bounding box of the result and add safety margins when needed.
+
+- Channel and merge operators, such as `extract_channel` and `merge`:
+  - propagation: identity mapping, or mapping ROI to the relevant input based on
+    channel/merge rules.
+
+- Loadable operation plugins:
+  - propagation: every current plugin should register both dirty and forward
+    ROI propagators. Legacy identity fallback remains migration support only and
+    should not be used as evidence that a plugin contract is complete.
+  - standard plugin examples: `image_process:invert` and
+    `image_process:threshold` are pointwise HP monolithic transforms and use
+    explicit pass-through ROI; `io:save` is a side-effecting HP monolithic sink
+    whose explicit pass-through ROI describes planning metadata while execution
+    rewrites the full file; `image_generator:perlin_noise_metal` is a
+    monolithic Metal generator with explicit generator-local pass-through ROI
+    metadata, not a tiled Metal execution path.
+
+### 6.1. Static Formula vs. Data-Dependent LUT
+
+- **Static formulas** remain the primary path for operators such as `resize`,
+  `crop`, and `blur`. These operators only need parameters or cached
+  `SpatialContext` information to compute inverse upstream ROI through
+  `RoiPropagationService::compute_upstream_roi`.
+- **Data-dependent operators**, such as liquify, warp, or displacement, cannot
+  be derived statically from parameters. They must register the following in
+  `OpRegistry`:
+  - a `DependencyLutBuilder` that generates a `SpatialDependencyMap`, which is a
+    grid-based tile-to-upstream-ROI table.
+  - optionally, `OpMetadata::data_dependent`, so schedulers can recognize that
+    the operator must access a LUT.
+- `RoiPropagationService::compute_upstream_roi` tries the LUT after applying the
+  static formula. Grid cells covered by the current ROI are looked up, and the
+  returned upstream ROIs are merged with the static result for use by
+  `ComputeService` or a planner. This keeps operations such as a small liquify
+  stroke quantitatively constrained to the truly affected input region without
+  sacrificing performance.
+
+The LUT lifetime is attached to `Node::dependency_lut`. Whenever
+`parameters_version` changes, the builder regenerates the LUT on the first
+propagation request. Building only walks a bounded number of grid points and is
+usually millisecond-scale, so it can be lazily loaded synchronously by
+`ComputeService` or a debug command on the propagation path without causing a
+long stall.
+
+`ComputeService` and `DirtyRegionPlanner` call the above logic through
+`RoiPropagationService`, so execution code does not need to care whether an
+operator is static or data-dependent. The service consumes `GraphModel`
+topology adjacency but does not own topology. Formal propagation bounds come
+from `GraphExtentResolver`: HP cache output, explicit width/height parameters,
+or upstream HP-derived fallback may provide extents; RT-only transient state is
+not a formal HP propagation extent. A new operator must explicitly define
+dirty/forward propagation semantics; when the dependency is data-dependent, it
+should provide a `DependencyLutBuilder` at registration time to receive precise
+ROI propagation.
+
+## 7. Monolithic Dirty Escalation
+
+When a tiled dirty region propagates into a monolithic node, the planner must
+mark the entire monolithic node output dirty for that node. This is a local
+escalation at the monolithic boundary: the node cannot safely recompute only the
+incoming tile if its implementation produces the output as one unit.
+
+Downstream propagation may still narrow the affected region again. For example,
+a following crop, resize, or transform may project the monolithic node's dirty
+output to a smaller region in a downstream node.
+
+## 8. Typical Scenario: Domain-Local Micro-Macro-Micro Chains
+
+Assume an RT-domain chain:
+
+- nodes A, B, and C all execute in the RT task pool.
+- trigger: node A updates three RT Micro_16 tiles, `(0,0)`, `(1,1)`, and
+  `(3,1)`.
+- derivation:
+  1. A to B: the three RT Micro_16 tiles are aggregated to the containing RT
+     Macro_64 tile, `B_rt_macro(0,0)`, so the whole 64x64 proxy block must be
+     recomputed.
+  2. B to C: `B_rt_macro(0,0)` intersects the RT Micro_16 grid and produces
+     16 tiles: `C_rt_micro:(0,0)-(3,3)`.
+
+The same shape applies inside the HP task pool: three HP Micro_64 tiles can
+aggregate to `B_hp_macro(0,0)` and then fan out to the 16 HP Micro_64 tiles
+covered by that HP Macro_256 block.
+
+Conclusion: C must update 16 same-domain micro tiles, not only the three
+discrete points. A Macro node is an information-spreading point. This scenario
+does not create an RT-to-HP or HP-to-RT graph edge; HP and RT work are separate
+task-pool siblings coordinated by compute intent.
+
+## 9. ROI Use in the RT/HP Dual Path
+
+- RT:
+  - current granularity is RT Proxy Micro_16, and the system tries to update only
+    `dirty_roi` and its propagated affected region.
+  - if `tiled_op_rt` is missing, fall back to `tiled_op_hp` at RT proxy scale.
+
+- HP:
+  - currently advances throughput with a Micro_64/Macro_256 mix, preferring
+    Macro_256 where appropriate.
+  - Global HP dirty ROI may refresh RT through downsample after completion.
+    RealTimeUpdate HP sibling work suppresses direct graph RT downsample writes;
+    the following RT sibling stages and commits its own proxy output.
+
+The planner may represent corresponding HP and RT ROIs using scale conversion
+for synchronization or inspection, but task dependencies stay inside each
+domain: RT Micro_16 <-> RT Macro_64 and HP Micro_64 <-> HP Macro_256.
+
+## 10. ROI Bounds and Clipping
+
+- Clip ROIs at image boundaries to avoid out-of-bounds reads or writes.
+- For large kernel radii or complex inverse transforms that produce long-range
+  influence, introduce area caps and batched advancement so updates can converge
+  incrementally.
+
+## 11. Cancellation, Merging, and Deduplication
+
+- ROI tasks on the same node may be merged within a time window, using bounding
+  boxes or sparse sets, to prevent task storms.
+- Version stamps provide soft cancellation: work checks whether it is stale
+  before execution and drops itself if obsolete.
+
+## 12. Validation and Visualization
+
+- `InteractionService` is the frontend-facing facade for kernel interaction. In
+  the dirty-region context, it should expose graph-scoped snapshot queries and
+  visualization hooks; it should not be treated as the authoritative source of
+  dirty-region generation or propagation.
+- CLI/REPL commands are not a realtime dirty-update control surface. They must
+  not expose RT intent commands, dirty ROI creation, or dirty source lifecycle
+  commands such as `compute rt`, `--dirty-roi`, `dirty begin`, `dirty update`,
+  or `dirty end`.
+- In build, test, or frontend visualization modes, provide non-CLI ROI/tile
+  coverage artifacts as masks so propagation correctness can be verified.
+- Metrics should record ROI area, tile count, merge count, and cancellation count
+  to support tuning.

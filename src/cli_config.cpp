@@ -16,6 +16,7 @@ bool write_config_to_file(const CliConfig& config, const std::string& path) {
   root["cache_root_dir"] = config.cache_root_dir;
   root["cache_precision"] = config.cache_precision;
   root["plugin_dirs"] = config.plugin_dirs;
+  root["scheduler_dirs"] = config.scheduler_dirs;
   root["history_size"] = config.history_size;
   root["default_print_mode"] = config.default_print_mode;
   root["default_traversal_arg"] = config.default_traversal_arg;
@@ -30,6 +31,13 @@ bool write_config_to_file(const CliConfig& config, const std::string& path) {
   root["default_compute_args"] = config.default_compute_args;
   root["switch_after_load"] = config.switch_after_load;
   root["session_warning"] = config.session_warning;
+
+  // Scheduler defaults. Built-in types are cpu_work_stealing, serial_debug,
+  // gpu_pipeline, and heterogeneous; plugin scheduler names are valid after
+  // scheduler_dirs scanning or explicit scheduler load commands.
+  root["scheduler_hp_type"] = config.scheduler_hp_type;
+  root["scheduler_rt_type"] = config.scheduler_rt_type;
+  root["scheduler_worker_count"] = config.scheduler_worker_count;
 
   try {
     std::ofstream fout(path);
@@ -57,6 +65,12 @@ void load_or_create_config(const std::string& config_path, CliConfig& config) {
       } else if (root["plugin_dir"] && root["plugin_dir"].IsScalar()) {
         config.plugin_dirs.clear();
         config.plugin_dirs.push_back(root["plugin_dir"].as<std::string>());
+      }
+
+      // Scheduler directories
+      if (root["scheduler_dirs"] && root["scheduler_dirs"].IsSequence()) {
+        config.scheduler_dirs =
+            root["scheduler_dirs"].as<std::vector<std::string>>();
       }
 
       if (root["default_print_mode"])
@@ -109,6 +123,17 @@ void load_or_create_config(const std::string& config_path, CliConfig& config) {
         config.switch_after_load = root["switch_after_load"].as<bool>();
       if (root["session_warning"])
         config.session_warning = root["session_warning"].as<bool>();
+
+      // Scheduler selection from config accepts built-ins and scanned plugin
+      // scheduler names.
+      if (root["scheduler_hp_type"])
+        config.scheduler_hp_type = root["scheduler_hp_type"].as<std::string>();
+      if (root["scheduler_rt_type"])
+        config.scheduler_rt_type = root["scheduler_rt_type"].as<std::string>();
+      if (root["scheduler_worker_count"])
+        config.scheduler_worker_count =
+            root["scheduler_worker_count"].as<int>();
+
       std::cout << "Loaded configuration from '" << config_path << "'."
                 << std::endl;
     } catch (const std::exception& e) {
@@ -121,6 +146,7 @@ void load_or_create_config(const std::string& config_path, CliConfig& config) {
         << "Configuration file 'config.yaml' not found. Creating a default one."
         << std::endl;
     config.plugin_dirs = {"build/plugins"};
+    config.scheduler_dirs = {"build/schedulers"};
     config.cache_precision = "int8";
     config.history_size = 1000;
     config.editor_save_behavior = "ask";
@@ -133,6 +159,9 @@ void load_or_create_config(const std::string& config_path, CliConfig& config) {
     config.default_compute_args = "";
     config.switch_after_load = true;
     config.session_warning = true;
+    config.scheduler_hp_type = "cpu_work_stealing";
+    config.scheduler_rt_type = "cpu_work_stealing";
+    config.scheduler_worker_count = 0;
     if (write_config_to_file(config, "config.yaml")) {
       config.loaded_config_path = fs::absolute("config.yaml").string();
     }

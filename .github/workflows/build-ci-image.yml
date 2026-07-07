@@ -1,7 +1,13 @@
 name: Build CI Image
+
+# LEGACY / DISABLED-BY-DEFAULT:
+# This workflow is retained as manual scaffolding only. It currently sets
+# push: false and does not publish a maintained CI image. Do not treat it as an
+# active validation or release path until a future change revalidates and
+# documents the container workflow end to end.
 on:
-  push:
-    paths: ["Dockerfile.ci", ".github/workflows/build-ci-image.yml"]
+  # Manual-only TODO scaffolding. Re-enable automatic image publishing only
+  # after the container path is validated and documented as maintained CI.
   workflow_dispatch:
 
 permissions:
@@ -35,6 +41,6 @@ jobs:
         with:
           context: .
           file: Dockerfile.ci
-          push: true
+          push: false
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
