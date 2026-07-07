@@ -1,26 +1,20 @@
-// Photospider kernel: GraphRuntime per-graph worker thread and resources
+// Photospider kernel: GraphRuntime per-graph resources and scheduler registry
 #pragma once
 
 #include <atomic>
 #include <chrono>
-#include <condition_variable>
 #include <cstdint>
-#include <deque>
-#include <exception>
 #include <filesystem>
-#include <functional>
-#include <future>
 #include <map>
 #include <memory>
 #include <mutex>
 #include <optional>
-#include <queue>
 #include <string>
-#include <thread>
-#include <utility>
 #include <vector>
 
 #include "graph_model.hpp"  // NOLINT(build/include_subdir)
+#include "kernel/graph_state_executor.hpp"
+#include "kernel/scheduler/i_scheduler.hpp"  // M3.2: IScheduler 接口
 #include "kernel/services/graph_event_service.hpp"
 
 // [修改] 使用预处理器宏和前向声明来隔离平台特定的 Metal API
@@ -34,29 +28,10 @@ typedef void* id;
 
 namespace ps {
 
-using Task = std::function<void()>;
-
-struct ScheduledTask {
-  uint64_t epoch{0};
-  Task task;
-
-  ScheduledTask() = default;
-  ScheduledTask(uint64_t e, Task&& t) : epoch(e), task(std::move(t)) {}
-
-  explicit operator bool() const { return static_cast<bool>(task); }
-};
-
-enum class TaskPriority { Normal, High };
-
 class GraphRuntime;  // 前向声明
-
-struct TaskGraph {
-  std::map<int, Task> tasks;
-  std::map<int, std::atomic<int>> dependency_counters;
-  std::map<int, std::vector<int>> dependents_map;
-  std::vector<int> initial_ready_nodes;
-  GraphRuntime* runtime_ptr = nullptr;
-};
+namespace compute {
+class RealtimeProxyGraph;
+}  // namespace compute
 
 class GraphRuntime {
  public:
@@ -65,10 +40,20 @@ class GraphRuntime {
     std::filesystem::path root;
     std::filesystem::path yaml;
     std::filesystem::path config;
+    std::filesystem::path cache_root;
   };
 
   struct SchedulerEvent {
-    enum Action { ASSIGN_INITIAL, EXECUTE, EXECUTE_TILE };
+    enum Action {
+      ASSIGN_INITIAL,
+      EXECUTE,
+      EXECUTE_TILE,
+      EXECUTE_DIRTY_SOURCE,
+      EXECUTE_DIRTY_DOWNSTREAM_NODE,
+      EXECUTE_DIRTY_DOWNSTREAM_TILE,
+      SKIP_STALE_GENERATION,
+      RETHROW_EXCEPTION,
+    };
     uint64_t epoch;
     int node_id;
     int worker_id;
@@ -86,108 +71,87 @@ class GraphRuntime {
   void stop();
   bool running() const { return running_; }
 
-  template <typename Fn>
-  auto post(Fn&& fn) -> std::future<decltype(fn(std::declval<GraphModel&>()))> {
-    using Ret = decltype(fn(std::declval<GraphModel&>()));
-    auto task = std::make_shared<std::packaged_task<Ret()>>(
-        [this, f = std::forward<Fn>(fn)]() {
-          if constexpr (!std::is_void_v<Ret>) {
-            return f(model_);
-          } else {
-            f(model_);
-          }
-        });
-    std::future<Ret> fut = task->get_future();
-    submit_ready_task_any_thread([task] { (*task)(); }, TaskPriority::Normal,
-                                 std::optional<uint64_t>{0});
-    return fut;
-  }
-
   std::vector<GraphEventService::ComputeEvent> drain_compute_events_now() {
     return event_service_.drain();
   }
 
   const Info& info() const { return info_; }
   GraphModel& model() { return model_; }
+  GraphStateExecutor& graph_state() { return graph_state_; }
   GraphEventService& event_service() { return event_service_; }
-
-  // [核心修改] 任务提交与执行接口
-  void submit_initial_tasks(std::vector<Task>&& tasks, int total_task_count,
-                            TaskPriority priority = TaskPriority::Normal);
-  void submit_ready_task_from_worker(
-      Task&& task, TaskPriority priority = TaskPriority::Normal);
-  void submit_ready_task_any_thread(
-      Task&& task, TaskPriority priority = TaskPriority::Normal,
-      std::optional<uint64_t> epoch = std::nullopt);
-  void wait_for_completion();
-  void set_exception(std::exception_ptr e);
+  /**
+   * @brief Returns the runtime-owned low-resolution RT proxy graph.
+   *
+   * @return Mutable proxy graph used by RealTimeUpdate dirty execution.
+   * @throws Nothing.
+   * @note The proxy graph is separate from GraphModel. Callers synchronize it
+   * with the model under graph-state serialization before RT planning or
+   * commit. It stores only transient RT output state keyed by node id.
+   */
+  compute::RealtimeProxyGraph& realtime_proxy_graph();
 
   void log_event(SchedulerEvent::Action action, int node_id);
+  void log_event(SchedulerEvent::Action action, int node_id, int worker_id,
+                 uint64_t epoch);
   std::vector<SchedulerEvent> get_scheduler_log() const;
   void clear_scheduler_log();
 
-  void dec_graph_tasks_to_complete();
-  // Increment outstanding tasks in-flight; used when a node "kickoff" spawns
-  // micro-tasks lazily.
-  void inc_graph_tasks_to_complete(int delta);
-
   static int this_worker_id();
   static uint64_t this_task_epoch();
-  uint64_t active_epoch() const;
-  uint64_t begin_new_epoch();
-  bool should_cancel_epoch(uint64_t epoch) const;
-  void cancel_stale_enqueued_tasks(uint64_t min_epoch);
+  static void set_scheduler_log_context(int worker_id, uint64_t epoch);
+  static void clear_scheduler_log_context();
 
   id get_metal_device();
   id get_metal_command_queue();
 
- private:
-  void run_loop(int thread_id);
-  std::optional<ScheduledTask> steal_task(int stealer_id);
+  // =========================================================================
+  // [M3.2 新增] 调度器管理 API
+  // =========================================================================
 
+  /// @brief 设置指定意图的调度器
+  /// @param intent 计算意图（RT 或 HP）
+  /// @param scheduler 调度器实例的唯一指针
+  /// @note 如果已有调度器，会先 detach 旧调度器再设置新的
+  /// @note 如果 runtime 已运行，新调度器会先 attach 到 runtime 再 start
+  void set_scheduler(ComputeIntent intent,
+                     std::unique_ptr<IScheduler> scheduler);
+
+  /// @brief 获取指定意图的调度器
+  /// @param intent 计算意图
+  /// @return 调度器指针，如果不存在则返回 nullptr
+  IScheduler* get_scheduler(ComputeIntent intent);
+  const IScheduler* get_scheduler(ComputeIntent intent) const;
+
+  /// @brief 替换指定意图的调度器（动态切换）
+  /// @param intent 计算意图
+  /// @param scheduler 新的调度器实例
+  /// @note 此方法会先停止旧调度器，然后启动新调度器
+  void replace_scheduler(ComputeIntent intent,
+                         std::unique_ptr<IScheduler> scheduler);
+
+  /// @brief 检查是否有调度器注册到指定意图
+  bool has_scheduler(ComputeIntent intent) const;
+
+ private:
   Info info_;
   GraphModel model_;
+  GraphStateExecutor graph_state_;
   GraphEventService event_service_;
+  std::unique_ptr<compute::RealtimeProxyGraph> realtime_proxy_graph_;
 
-  std::vector<std::thread> workers_;
-  unsigned int num_workers_{0};
+  // [M3.2 新增] 调度器映射表
+  // 根据 ComputeIntent 路由到不同的调度器实例
+  std::map<ComputeIntent, std::unique_ptr<IScheduler>> schedulers_;
+  mutable std::mutex schedulers_mutex_;  // 保护 schedulers_ 的并发访问
+
   std::atomic<bool> running_{false};
 
-  std::vector<std::deque<ScheduledTask>>
-      local_task_queues_;  // normal priority local queues
-  std::vector<std::unique_ptr<std::mutex>> local_queue_mutexes_;
-
-  // Phase 1: dual-priority global queues
-  std::queue<ScheduledTask> high_priority_queue_;
-  std::queue<ScheduledTask> normal_priority_queue_;
-  std::mutex global_queues_mutex_;
-  std::condition_variable cv_task_available_;
-
-  std::atomic<int> ready_task_count_{0};
-  std::atomic<int> sleeping_thread_count_{0};
-
-  std::mutex completion_mutex_;
-  std::condition_variable cv_completion_;
-  std::atomic<int> tasks_to_complete_{0};
-
-  std::mutex exception_mutex_;
-  std::exception_ptr first_exception_{nullptr};
-  std::atomic<bool> has_exception_{false};
-
   static thread_local int tls_worker_id_;
-  static thread_local uint64_t tls_active_epoch_;
-
-  std::atomic<uint64_t> epoch_counter_{0};
-  std::atomic<uint64_t> active_epoch_{0};
+  static thread_local int tls_scheduler_log_worker_id_;
+  static thread_local uint64_t tls_scheduler_log_epoch_;
 
   struct GpuContext;
   std::unique_ptr<GpuContext> gpu_context_;
-
-  // Minimal metrics for priority effectiveness (Phase 1 observability)
-  std::atomic<uint64_t> high_enqueued_{0};
-  std::atomic<uint64_t> normal_enqueued_{0};
-  std::atomic<uint64_t> high_executed_{0};
-  std::atomic<uint64_t> normal_executed_{0};
 
   mutable std::mutex log_mutex_;
   std::vector<SchedulerEvent> scheduler_log_;

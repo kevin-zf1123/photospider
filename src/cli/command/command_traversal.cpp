@@ -6,6 +6,7 @@
 
 #include "cli/command/commands.hpp"
 #include "cli/command/help_utils.hpp"
+#include "cli/dependency_tree_formatter.hpp"
 
 bool handle_traversal(std::istringstream& iss, ps::InteractionService& svc,
                       std::string& current_graph, bool& /*modified*/,
@@ -67,13 +68,13 @@ bool handle_traversal(std::istringstream& iss, ps::InteractionService& svc,
 
   // 3. 打印可选的依赖树
   if (print_tree_mode == "full") {
-    auto s = svc.cmd_dump_tree(current_graph, std::nullopt, true);
-    if (s)
-      std::cout << *s;
+    auto tree = svc.cmd_dependency_tree(current_graph, std::nullopt);
+    if (tree)
+      std::cout << ps::cli::format_dependency_tree(*tree, true);
   } else if (print_tree_mode == "simplified") {
-    auto s = svc.cmd_dump_tree(current_graph, std::nullopt, false);
-    if (s)
-      std::cout << *s;
+    auto tree = svc.cmd_dependency_tree(current_graph, std::nullopt);
+    if (tree)
+      std::cout << ps::cli::format_dependency_tree(*tree, false);
   }
 
   // 4. 输出后序遍历详细信息

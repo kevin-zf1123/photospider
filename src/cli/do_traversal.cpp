@@ -21,12 +21,14 @@ void do_traversal(const ps::GraphModel& graph, bool show_mem, bool show_disk) {
       auto order = traversal.topo_postorder_from(graph, end);
       std::cout << "\nPost-order (eval order) for end node " << end << ":\n";
       for (size_t i = 0; i < order.size(); ++i) {
-        const auto& node = graph.nodes.at(order[i]);
+        const auto& node = graph.node(order[i]);
         std::cout << (i + 1) << ". " << node.id << " (" << node.name << ")";
 
         std::vector<std::string> statuses;
-        if (show_mem && node.cached_output.has_value()) {
-          statuses.push_back("in memory");
+        if (show_mem) {
+          if (node.cached_output_high_precision.has_value()) {
+            statuses.push_back("HP in memory");
+          }
         }
         if (show_disk && !node.caches.empty()) {
           bool on_disk = false;

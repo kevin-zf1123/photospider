@@ -1,6 +1,7 @@
 // in: src/ops.cpp (REPLACE WITH THIS FINAL VERSION)
 #include "kernel/ops.hpp"
 
+#include <array>
 #include <cmath>
 #include <initializer_list>
 #include <mutex>
@@ -14,6 +15,7 @@
 #include <vector>
 
 #include "adapter/buffer_adapter_opencv.hpp"
+#include "graph_model.hpp"
 #include "kernel/param_utils.hpp"
 
 namespace ps {
@@ -32,6 +34,30 @@ static cv::Rect expand_roi(const cv::Rect& roi, int padding) {
   }
   return cv::Rect(roi.x - padding, roi.y - padding, roi.width + padding * 2,
                   roi.height + padding * 2);
+}
+
+static std::array<double, 9> multiply_matrix(const std::array<double, 9>& lhs,
+                                             const std::array<double, 9>& rhs) {
+  std::array<double, 9> out{};
+  auto idx = [](int row, int col) { return row * 3 + col; };
+  for (int r = 0; r < 3; ++r) {
+    for (int c = 0; c < 3; ++c) {
+      double sum = 0.0;
+      for (int k = 0; k < 3; ++k) {
+        sum += lhs[idx(r, k)] * rhs[idx(k, c)];
+      }
+      out[idx(r, c)] = sum;
+    }
+  }
+  return out;
+}
+
+static std::array<double, 9> make_scale_matrix(double sx, double sy) {
+  return {sx, 0.0, 0.0, 0.0, sy, 0.0, 0.0, 0.0, 1.0};
+}
+
+static std::array<double, 9> make_translation_matrix(double tx, double ty) {
+  return {1.0, 0.0, tx, 0.0, 1.0, ty, 0.0, 0.0, 1.0};
 }
 
 static std::optional<int> node_param_int(const Node& node,
@@ -72,6 +98,55 @@ static std::optional<double> node_param_double(const Node& node,
   return std::nullopt;
 }
 
+static std::optional<std::string> node_param_string(const Node& node,
+                                                    const std::string& key) {
+  if (node.runtime_parameters && node.runtime_parameters[key]) {
+    try {
+      return node.runtime_parameters[key].as<std::string>();
+    } catch (...) {
+      return std::nullopt;
+    }
+  }
+  if (node.parameters && node.parameters[key]) {
+    try {
+      return node.parameters[key].as<std::string>();
+    } catch (...) {
+      return std::nullopt;
+    }
+  }
+  return std::nullopt;
+}
+
+static cv::Size cached_image_size(const std::optional<NodeOutput>& output_opt) {
+  if (!output_opt)
+    return cv::Size();
+  const auto& buf = output_opt->image_buffer;
+  if (buf.width <= 0 || buf.height <= 0)
+    return cv::Size();
+  return cv::Size(buf.width, buf.height);
+}
+
+// Best-effort input extent without forcing execution; tries runtime hints,
+// then parent cached outputs.
+static cv::Size infer_input_size_hint(const Node& node,
+                                      const GraphModel& graph) {
+  if (node.last_input_size_hp && node.last_input_size_hp->width > 0 &&
+      node.last_input_size_hp->height > 0) {
+    return *node.last_input_size_hp;
+  }
+  for (const auto& input : node.image_inputs) {
+    if (input.from_node_id < 0)
+      continue;
+    const Node* parent = graph.find_node(input.from_node_id);
+    if (!parent)
+      continue;
+    cv::Size size = cached_image_size(parent->cached_output_high_precision);
+    if (size.width > 0 && size.height > 0)
+      return size;
+  }
+  return cv::Size();
+}
+
 static int infer_radius_from_params(
     const Node& node, std::initializer_list<const char*> radius_keys,
     std::initializer_list<const char*> size_keys, int fallback = 0) {
@@ -95,7 +170,8 @@ static int infer_radius_from_params(
 }
 
 static cv::Rect gaussian_blur_dirty_roi(const Node& node,
-                                        const cv::Rect& downstream_roi) {
+                                        const cv::Rect& downstream_roi,
+                                        const GraphModel&) {
   int radius =
       infer_radius_from_params(node, {"radius", "kernel_radius"}, {"ksize"});
   if (radius <= 0)
@@ -104,7 +180,8 @@ static cv::Rect gaussian_blur_dirty_roi(const Node& node,
 }
 
 static cv::Rect convolve_dirty_roi(const Node& node,
-                                   const cv::Rect& downstream_roi) {
+                                   const cv::Rect& downstream_roi,
+                                   const GraphModel&) {
   int radius = infer_radius_from_params(node, {"kernel_radius", "radius"},
                                         {"ksize", "kernel_size"});
   if (radius <= 0)
@@ -112,99 +189,70 @@ static cv::Rect convolve_dirty_roi(const Node& node,
   return expand_roi(downstream_roi, radius);
 }
 
+static int interpolation_padding(const Node& node) {
+  std::string interp =
+      node_param_string(node, "interpolation").value_or("linear");
+  if (interp == "nearest")
+    return 0;
+  if (interp == "cubic")
+    return 2;
+  if (interp == "area")
+    return 1;
+  return 1;  // linear and default
+}
+
 static cv::Rect resize_dirty_roi(const Node& node,
-                                 const cv::Rect& downstream_roi) {
+                                 const cv::Rect& downstream_roi,
+                                 const GraphModel& graph) {
   if (downstream_roi.width <= 0 || downstream_roi.height <= 0) {
     return cv::Rect();
   }
-
-  if (!node.last_input_size_hp || node.last_input_size_hp->width <= 0 ||
-      node.last_input_size_hp->height <= 0) {
-    return downstream_roi;
-  }
-
-  const cv::Size input_size = *node.last_input_size_hp;
 
   auto maybe_out_w = node_param_int(node, "width");
   auto maybe_out_h = node_param_int(node, "height");
-  int out_w = maybe_out_w.value_or(0);
-  int out_h = maybe_out_h.value_or(0);
-
-  auto infer_output_size_from_cache = [&]() -> cv::Size {
-    cv::Size size{0, 0};
-    auto take_from = [&](const std::optional<NodeOutput>& opt) {
-      if (!opt.has_value())
-        return false;
-      const auto& buf = opt->image_buffer;
-      if (buf.width <= 0 || buf.height <= 0)
-        return false;
-      size = cv::Size(buf.width, buf.height);
-      return true;
-    };
-    if (take_from(node.cached_output_high_precision))
-      return size;
-    if (take_from(node.cached_output))
-      return size;
-    return size;
-  };
-
-  if (out_w <= 0 || out_h <= 0) {
-    cv::Size cached = infer_output_size_from_cache();
-    if (cached.width > 0 && cached.height > 0) {
-      out_w = cached.width;
-      out_h = cached.height;
-    }
+  if (!maybe_out_w || !maybe_out_h || *maybe_out_w <= 0 || *maybe_out_h <= 0) {
+    return cv::Rect();
   }
 
-  if (out_w <= 0 || out_h <= 0) {
-    return cv::Rect(0, 0, input_size.width, input_size.height);
+  const cv::Size input_size = infer_input_size_hint(node, graph);
+  if (input_size.width <= 0 || input_size.height <= 0) {
+    return cv::Rect();
   }
 
   const double scale_x =
-      static_cast<double>(input_size.width) / static_cast<double>(out_w);
-  const double scale_y =
-      static_cast<double>(input_size.height) / static_cast<double>(out_h);
-  if (!std::isfinite(scale_x) || !std::isfinite(scale_y) || scale_x <= 0.0 ||
-      scale_y <= 0.0) {
-    return cv::Rect(0, 0, input_size.width, input_size.height);
-  }
+      static_cast<double>(input_size.width) / static_cast<double>(*maybe_out_w);
+  const double scale_y = static_cast<double>(input_size.height) /
+                         static_cast<double>(*maybe_out_h);
 
-  const double left = static_cast<double>(downstream_roi.x) * scale_x;
-  const double top = static_cast<double>(downstream_roi.y) * scale_y;
+  const int pad = interpolation_padding(node);
+  const double left = static_cast<double>(downstream_roi.x) * scale_x -
+                      static_cast<double>(pad);
+  const double top = static_cast<double>(downstream_roi.y) * scale_y -
+                     static_cast<double>(pad);
   const double right =
-      static_cast<double>(downstream_roi.x + downstream_roi.width) * scale_x;
+      static_cast<double>(downstream_roi.x + downstream_roi.width) * scale_x +
+      static_cast<double>(pad);
   const double bottom =
-      static_cast<double>(downstream_roi.y + downstream_roi.height) * scale_y;
+      static_cast<double>(downstream_roi.y + downstream_roi.height) * scale_y +
+      static_cast<double>(pad);
 
-  int upstream_x = static_cast<int>(std::floor(left));
-  int upstream_y = static_cast<int>(std::floor(top));
-  int upstream_w = static_cast<int>(std::ceil(right) - upstream_x);
-  int upstream_h = static_cast<int>(std::ceil(bottom) - upstream_y);
-  upstream_w = std::max(upstream_w, 0);
-  upstream_h = std::max(upstream_h, 0);
+  int x0 = static_cast<int>(std::floor(left));
+  int y0 = static_cast<int>(std::floor(top));
+  int x1 = static_cast<int>(std::ceil(right));
+  int y1 = static_cast<int>(std::ceil(bottom));
 
-  cv::Rect upstream_roi(upstream_x, upstream_y, upstream_w, upstream_h);
-  upstream_roi = expand_roi(upstream_roi, 2);
-
-  cv::Rect input_bounds(0, 0, input_size.width, input_size.height);
-  upstream_roi = upstream_roi & input_bounds;
-  if (upstream_roi.width <= 0 || upstream_roi.height <= 0) {
-    return cv::Rect();
-  }
-  return upstream_roi;
+  cv::Rect upstream_roi(x0, y0, x1 - x0, y1 - y0);
+  return upstream_roi & cv::Rect(0, 0, input_size.width, input_size.height);
 }
 
-static cv::Rect crop_dirty_roi(const Node& node,
-                               const cv::Rect& downstream_roi) {
+static cv::Rect crop_dirty_roi(const Node& node, const cv::Rect& downstream_roi,
+                               const GraphModel& graph) {
   if (downstream_roi.width <= 0 || downstream_roi.height <= 0) {
     return cv::Rect();
   }
 
-  const bool have_input_size = node.last_input_size_hp &&
-                               node.last_input_size_hp->width > 0 &&
-                               node.last_input_size_hp->height > 0;
-  const cv::Size input_size =
-      have_input_size ? *node.last_input_size_hp : cv::Size();
+  const cv::Size input_size = infer_input_size_hint(node, graph);
+  const bool have_input_size = input_size.width > 0 && input_size.height > 0;
   const cv::Rect input_bounds =
       have_input_size ? cv::Rect(0, 0, input_size.width, input_size.height)
                       : cv::Rect();
@@ -218,14 +266,14 @@ static cv::Rect crop_dirty_roi(const Node& node,
   cv::Rect crop_rect;
   if (mode == "ratio") {
     if (!have_input_size) {
-      return downstream_roi;
+      return cv::Rect();
     }
     auto rx_opt = node_param_double(node, "x");
     auto ry_opt = node_param_double(node, "y");
     auto rw_opt = node_param_double(node, "width");
     auto rh_opt = node_param_double(node, "height");
     if (!rx_opt || !ry_opt || !rw_opt || !rh_opt) {
-      return downstream_roi;
+      return cv::Rect();
     }
     double rx = *rx_opt;
     double ry = *ry_opt;
@@ -273,6 +321,147 @@ static cv::Rect crop_dirty_roi(const Node& node,
                         valid_downstream_roi.width,
                         valid_downstream_roi.height);
   return upstream_roi;
+}
+
+static cv::Rect gaussian_blur_forward_roi(const Node& node,
+                                          const cv::Rect& upstream_roi,
+                                          const GraphModel& graph,
+                                          const cv::Size& parent_size,
+                                          const cv::Size&) {
+  (void)graph;
+  if (upstream_roi.width <= 0 || upstream_roi.height <= 0) {
+    return cv::Rect();
+  }
+  int radius =
+      infer_radius_from_params(node, {"radius", "kernel_radius"}, {"ksize"});
+  if (radius <= 0)
+    radius = 1;
+  return expand_roi(
+      upstream_roi & cv::Rect(0, 0, parent_size.width, parent_size.height),
+      radius);
+}
+
+static cv::Rect convolve_forward_roi(const Node& node,
+                                     const cv::Rect& upstream_roi,
+                                     const GraphModel& graph,
+                                     const cv::Size& parent_size,
+                                     const cv::Size&) {
+  (void)graph;
+  if (upstream_roi.width <= 0 || upstream_roi.height <= 0) {
+    return cv::Rect();
+  }
+  int radius = infer_radius_from_params(node, {"kernel_radius", "radius"},
+                                        {"ksize", "kernel_size"});
+  if (radius <= 0)
+    radius = 1;
+  return expand_roi(
+      upstream_roi & cv::Rect(0, 0, parent_size.width, parent_size.height),
+      radius);
+}
+
+static cv::Rect resize_forward_roi(const Node& node,
+                                   const cv::Rect& upstream_roi,
+                                   const GraphModel&,
+                                   const cv::Size& parent_size,
+                                   const cv::Size& child_size) {
+  if (upstream_roi.width <= 0 || upstream_roi.height <= 0) {
+    return cv::Rect();
+  }
+  if (parent_size.width <= 0 || parent_size.height <= 0 ||
+      child_size.width <= 0 || child_size.height <= 0) {
+    return cv::Rect();
+  }
+  const double scale_x = static_cast<double>(child_size.width) /
+                         static_cast<double>(parent_size.width);
+  const double scale_y = static_cast<double>(child_size.height) /
+                         static_cast<double>(parent_size.height);
+  const int pad = interpolation_padding(node);
+
+  const double left =
+      static_cast<double>(upstream_roi.x) * scale_x - static_cast<double>(pad);
+  const double top =
+      static_cast<double>(upstream_roi.y) * scale_y - static_cast<double>(pad);
+  const double right =
+      static_cast<double>(upstream_roi.x + upstream_roi.width) * scale_x +
+      static_cast<double>(pad);
+  const double bottom =
+      static_cast<double>(upstream_roi.y + upstream_roi.height) * scale_y +
+      static_cast<double>(pad);
+
+  int x0 = static_cast<int>(std::floor(left));
+  int y0 = static_cast<int>(std::floor(top));
+  int x1 = static_cast<int>(std::ceil(right));
+  int y1 = static_cast<int>(std::ceil(bottom));
+
+  return cv::Rect(x0, y0, x1 - x0, y1 - y0);
+}
+
+static cv::Rect crop_forward_roi(const Node& node, const cv::Rect& upstream_roi,
+                                 const GraphModel&, const cv::Size& parent_size,
+                                 const cv::Size&) {
+  if (upstream_roi.width <= 0 || upstream_roi.height <= 0) {
+    return cv::Rect();
+  }
+  std::string mode = node_param_string(node, "mode").value_or("value");
+  cv::Rect crop_rect;
+  if (mode == "ratio") {
+    if (parent_size.width <= 0 || parent_size.height <= 0)
+      return cv::Rect();
+    auto rx = node_param_double(node, "x");
+    auto ry = node_param_double(node, "y");
+    auto rw = node_param_double(node, "width");
+    auto rh = node_param_double(node, "height");
+    if (!rx || !ry || !rw || !rh)
+      return cv::Rect();
+    int x = static_cast<int>(*rx * parent_size.width);
+    int y = static_cast<int>(*ry * parent_size.height);
+    int w = static_cast<int>(*rw * parent_size.width);
+    int h = static_cast<int>(*rh * parent_size.height);
+    if (w <= 0 || h <= 0)
+      return cv::Rect();
+    crop_rect = cv::Rect(x, y, w, h);
+  } else {
+    int x = node_param_int(node, "x").value_or(0);
+    int y = node_param_int(node, "y").value_or(0);
+    auto w = node_param_int(node, "width");
+    auto h = node_param_int(node, "height");
+    if (!w || !h || *w <= 0 || *h <= 0)
+      return cv::Rect();
+    crop_rect = cv::Rect(x, y, *w, *h);
+  }
+
+  cv::Rect intersect = upstream_roi &
+                       cv::Rect(0, 0, parent_size.width, parent_size.height) &
+                       crop_rect;
+  if (intersect.width <= 0 || intersect.height <= 0) {
+    return cv::Rect();
+  }
+  return cv::Rect(intersect.x - crop_rect.x, intersect.y - crop_rect.y,
+                  intersect.width, intersect.height);
+}
+
+static cv::Rect identity_forward_roi(const Node&, const cv::Rect& upstream_roi,
+                                     const GraphModel&, const cv::Size&,
+                                     const cv::Size&) {
+  return upstream_roi;
+}
+
+[[maybe_unused]] static cv::Rect conservative_dirty_roi(
+    const Node& node, const cv::Rect& downstream_roi, const GraphModel&) {
+  if (downstream_roi.width <= 0 || downstream_roi.height <= 0) {
+    return cv::Rect();
+  }
+  int max_disp = 0;
+  if (auto val = node_param_int(node, "max_displacement")) {
+    max_disp = std::max(max_disp, *val);
+  }
+  if (auto brush = node_param_int(node, "radius")) {
+    max_disp = std::max(max_disp, *brush);
+  }
+  if (max_disp <= 0) {
+    return downstream_roi;
+  }
+  return expand_roi(downstream_roi, max_disp);
 }
 
 // =============================================================================
@@ -485,6 +674,31 @@ static NodeOutput op_resize(const Node& node,
   cv::resize(u_input, u_output, cv::Size(width, height), 0, 0, flag);
   NodeOutput result;
   result.image_buffer = fromCvUMat(u_output);
+  const auto& in_space = inputs[0]->space;
+  result.space = in_space;
+  const int in_w = inputs[0]->image_buffer.width;
+  const int in_h = inputs[0]->image_buffer.height;
+  double scale_x =
+      (in_w > 0) ? static_cast<double>(width) / static_cast<double>(in_w) : 1.0;
+  double scale_y = (in_h > 0)
+                       ? static_cast<double>(height) / static_cast<double>(in_h)
+                       : 1.0;
+  if (scale_x <= 0.0)
+    scale_x = 1.0;
+  if (scale_y <= 0.0)
+    scale_y = 1.0;
+  result.space.global_scale_x = in_space.global_scale_x * scale_x;
+  result.space.global_scale_y = in_space.global_scale_y * scale_y;
+  auto scale_mat = make_scale_matrix(scale_x, scale_y);
+  auto inv_scale_mat = make_scale_matrix(1.0 / scale_x, 1.0 / scale_y);
+  result.space.transform_matrix =
+      multiply_matrix(scale_mat, in_space.transform_matrix);
+  result.space.inverse_matrix =
+      multiply_matrix(in_space.inverse_matrix, inv_scale_mat);
+  result.space.local_inverse_matrix = inv_scale_mat;
+  if (in_space.absolute_roi.width > 0 && in_space.absolute_roi.height > 0) {
+    result.space.absolute_roi = in_space.absolute_roi;
+  }
   return result;
 }
 
@@ -530,6 +744,31 @@ static NodeOutput op_crop(const Node& node,
     u_src(intersect).copyTo(u_canvas(dst_roi));
   NodeOutput result;
   result.image_buffer = fromCvUMat(u_canvas);
+  const auto& in_space = inputs[0]->space;
+  result.space = in_space;
+  auto translation =
+      make_translation_matrix(-static_cast<double>(x), -static_cast<double>(y));
+  auto inv_translation =
+      make_translation_matrix(static_cast<double>(x), static_cast<double>(y));
+  result.space.transform_matrix =
+      multiply_matrix(translation, in_space.transform_matrix);
+  result.space.inverse_matrix =
+      multiply_matrix(in_space.inverse_matrix, inv_translation);
+  result.space.local_inverse_matrix = inv_translation;
+  result.space.global_scale_x = in_space.global_scale_x;
+  result.space.global_scale_y = in_space.global_scale_y;
+  if (in_space.absolute_roi.width > 0 && in_space.absolute_roi.height > 0) {
+    cv::Rect parent_world = in_space.absolute_roi;
+    cv::Rect world_request(parent_world.x + x, parent_world.y + y, w, h);
+    cv::Rect clipped = world_request & parent_world;
+    if (clipped.width > 0 && clipped.height > 0) {
+      result.space.absolute_roi = clipped;
+    } else {
+      result.space.absolute_roi = world_request;
+    }
+  } else {
+    result.space.absolute_roi = cv::Rect(x, y, w, h);
+  }
   return result;
 }
 
@@ -598,8 +837,9 @@ static NodeOutput op_divide(const Node& node,
 // =============================================================================
 // ==                       类型二: TILED (分块计算) 操作 ==
 // =============================================================================
-static void op_curve_transform_tiled(const Node& node, const Tile& output_tile,
-                                     const std::vector<Tile>& input_tiles) {
+static void op_curve_transform_tiled(
+    const Node& node, const OutputTile& output_tile,
+    const std::vector<InputTile>& input_tiles) {
   std::lock_guard<std::mutex> lock(g_opencv_op_mutex);
 
   if (input_tiles.empty())
@@ -618,8 +858,9 @@ static void op_curve_transform_tiled(const Node& node, const Tile& output_tile,
   cv::divide(1.0, temp, output_mat);
 }
 
-static void op_gaussian_blur_tiled(const Node& node, const Tile& output_tile,
-                                   const std::vector<Tile>& input_tiles) {
+static void op_gaussian_blur_tiled(const Node& node,
+                                   const OutputTile& output_tile,
+                                   const std::vector<InputTile>& input_tiles) {
   std::lock_guard<std::mutex> lock(g_opencv_op_mutex);
 
   if (input_tiles.empty()) {
@@ -627,7 +868,7 @@ static void op_gaussian_blur_tiled(const Node& node, const Tile& output_tile,
                      "gaussian_blur requires one input tile with halo.");
   }
 
-  const Tile& input_tile_with_halo = input_tiles[0];
+  const InputTile& input_tile_with_halo = input_tiles[0];
   cv::Mat input_mat = toCvMat(input_tile_with_halo);
   cv::Mat output_mat = toCvMat(output_tile);
 
@@ -688,8 +929,9 @@ static NodeOutput op_gaussian_blur_monolithic(
   return result;
 }
 
-static void op_add_weighted_tiled(const Node& node, const Tile& output_tile,
-                                  const std::vector<Tile>& input_tiles) {
+static void op_add_weighted_tiled(const Node& node,
+                                  const OutputTile& output_tile,
+                                  const std::vector<InputTile>& input_tiles) {
   std::lock_guard<std::mutex> lock(g_opencv_op_mutex);
 
   if (input_tiles.size() < 2)
@@ -870,8 +1112,8 @@ static void op_add_weighted_tiled(const Node& node, const Tile& output_tile,
   cv::merge(O, output);
 }
 
-static void op_abs_diff_tiled(const Node& node, const Tile& output_tile,
-                              const std::vector<Tile>& input_tiles) {
+static void op_abs_diff_tiled(const Node& node, const OutputTile& output_tile,
+                              const std::vector<InputTile>& input_tiles) {
   std::lock_guard<std::mutex> lock(g_opencv_op_mutex);
 
   if (input_tiles.size() < 2)
@@ -933,8 +1175,8 @@ static void op_abs_diff_tiled(const Node& node, const Tile& output_tile,
   cv::merge(Oo, output);
 }
 
-static void op_multiply_tiled(const Node& node, const Tile& output_tile,
-                              const std::vector<Tile>& input_tiles) {
+static void op_multiply_tiled(const Node& node, const OutputTile& output_tile,
+                              const std::vector<InputTile>& input_tiles) {
   std::lock_guard<std::mutex> lock(g_opencv_op_mutex);
 
   if (input_tiles.size() < 2)
@@ -1274,22 +1516,31 @@ void register_builtin() {
   R.register_op_hp_monolithic("image_mixing", "multiply",
                               MonolithicOpFunc(op_multiply_monolithic));
 
-  // Tiled HP implementations (default MACRO preference)
+  // Tiled HP implementations currently prefer HP-domain Macro granularity.
   OpMetadata tiled_meta;
   tiled_meta.tile_preference = TileSizePreference::MACRO;
-  // RT implementations default to Micro tiles to match proxy pipeline
+  // RT implementations currently prefer RT-domain Micro granularity to match
+  // the proxy pipeline; RT-domain Macro remains a valid scheduling category.
   OpMetadata rt_meta;
   rt_meta.tile_preference = TileSizePreference::MICRO;
 
-  DirtyRoiPropFunc identity_roi = [](const Node&, const cv::Rect& roi) {
-    return roi;
-  };
+  DirtyRoiPropFunc identity_roi = [](const Node&, const cv::Rect& roi,
+                                     const GraphModel&) { return roi; };
+  ForwardRoiPropFunc identity_forward =
+      ForwardRoiPropFunc(identity_forward_roi);
 
   R.register_dirty_propagator("image_source", "path", identity_roi);
   R.register_dirty_propagator("image_generator", "constant", identity_roi);
   R.register_dirty_propagator("image_generator", "perlin_noise", identity_roi);
   R.register_dirty_propagator("analyzer", "get_dimensions", identity_roi);
   R.register_dirty_propagator("math", "divide", identity_roi);
+  R.register_forward_propagator("image_source", "path", identity_forward);
+  R.register_forward_propagator("image_generator", "constant",
+                                identity_forward);
+  R.register_forward_propagator("image_generator", "perlin_noise",
+                                identity_forward);
+  R.register_forward_propagator("analyzer", "get_dimensions", identity_forward);
+  R.register_forward_propagator("math", "divide", identity_forward);
   R.register_dirty_propagator("image_process", "resize",
                               DirtyRoiPropFunc(resize_dirty_roi));
   R.register_dirty_propagator("image_process", "crop",
@@ -1299,9 +1550,23 @@ void register_builtin() {
   R.register_dirty_propagator("image_mixing", "add_weighted", identity_roi);
   R.register_dirty_propagator("image_mixing", "diff", identity_roi);
   R.register_dirty_propagator("image_mixing", "multiply", identity_roi);
+  R.register_forward_propagator("image_process", "resize",
+                                ForwardRoiPropFunc(resize_forward_roi));
+  R.register_forward_propagator("image_process", "crop",
+                                ForwardRoiPropFunc(crop_forward_roi));
+  R.register_forward_propagator("image_process", "extract_channel",
+                                identity_forward);
+  R.register_forward_propagator("image_process", "curve_transform",
+                                identity_forward);
+  R.register_forward_propagator("image_mixing", "add_weighted",
+                                identity_forward);
+  R.register_forward_propagator("image_mixing", "diff", identity_forward);
+  R.register_forward_propagator("image_mixing", "multiply", identity_forward);
 
   R.register_dirty_propagator("image_process", "convolve",
                               DirtyRoiPropFunc(convolve_dirty_roi));
+  R.register_forward_propagator("image_process", "convolve",
+                                ForwardRoiPropFunc(convolve_forward_roi));
 
   // Gaussian blur: register both monolithic HP and tiled HP under the same key
   R.register_op_hp_monolithic("image_process", "gaussian_blur",
@@ -1321,6 +1586,10 @@ void register_builtin() {
                               DirtyRoiPropFunc(gaussian_blur_dirty_roi));
   R.register_dirty_propagator("image_process", "gaussian_blur_tiled",
                               DirtyRoiPropFunc(gaussian_blur_dirty_roi));
+  R.register_forward_propagator("image_process", "gaussian_blur",
+                                ForwardRoiPropFunc(gaussian_blur_forward_roi));
+  R.register_forward_propagator("image_process", "gaussian_blur_tiled",
+                                ForwardRoiPropFunc(gaussian_blur_forward_roi));
 
   R.register_op_hp_tiled("image_process", "curve_transform",
                          TileOpFunc(op_curve_transform_tiled), tiled_meta);

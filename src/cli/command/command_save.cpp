@@ -26,10 +26,15 @@ bool handle_save(std::istringstream& iss, ps::InteractionService& svc,
     return true;
   }
 
-  auto image = svc.cmd_compute_and_get_image(
-      current_graph, node_id, config.cache_precision,
-      /*force*/ false, /*timing*/ false, /*parallel*/ false,
-      /*disable_disk_cache*/ false);
+  ps::Kernel::ComputeRequest request;
+  request.name = current_graph;
+  request.node_id = node_id;
+  request.cache.precision = config.cache_precision;
+  request.cache.force_recache = false;
+  request.cache.disable_disk_cache = false;
+  request.telemetry.enable_timing = false;
+  request.execution.parallel = false;
+  auto image = svc.cmd_compute_and_get_image(request);
   if (!image || image->empty()) {
     std::cout << "No image to save (node produced no image).\n";
     return true;

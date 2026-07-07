@@ -13,11 +13,13 @@
 #include <string>
 #include <vector>
 
+#include "cli/dependency_tree_formatter.hpp"
 #include "ftxui/component/component.hpp"
 #include "ftxui/component/component_options.hpp"
 #include "ftxui/component/mouse.hpp"
 #include "ftxui/component/screen_interactive.hpp"
 #include "ftxui/dom/elements.hpp"
+#include "kernel/services/graph_inspect_service.hpp"
 #include "kernel/services/graph_traversal_service.hpp"
 
 using namespace ftxui;
@@ -296,7 +298,7 @@ class NodeEditorUI {
     // Node list entries
     node_entries_.clear();
     for (int id : ids_)
-      node_entries_.push_back(NodeTitle(graph_.nodes.at(id)));
+      node_entries_.push_back(NodeTitle(graph_.node(id)));
 
     MenuOption menu_option;
     menu_option.entries = &node_entries_;
@@ -479,22 +481,20 @@ class NodeEditorUI {
   void RefreshTrees() {
     const bool detailed = (detail_mode_index_ == 0);  // 0=Full, 1=Simplified
     GraphTraversalService traversal;
-    tree_full_.text = [&] {
-      std::stringstream ss;
-      traversal.print_dependency_tree(graph_, ss, detailed);
-      return ss.str();
-    }();
+    GraphInspectService inspect;
+    tree_full_.text =
+        cli::format_dependency_tree(inspect.dependency_tree(graph_), detailed);
 
     if (tree_context_mode_index_ == 0) {
-      std::stringstream ss;
-      traversal.print_dependency_tree(graph_, ss, active_node_id_, detailed);
-      tree_context_.text = ss.str();
+      tree_context_.text = cli::format_dependency_tree(
+          inspect.dependency_tree(graph_, active_node_id_), detailed);
     } else {
       std::stringstream ss;
       auto trees = traversal.get_trees_containing_node(graph_, active_node_id_);
       for (size_t i = 0; i < trees.size(); ++i) {
         ss << "[Tree #" << (i + 1) << "] ending at node " << trees[i] << "\n";
-        traversal.print_dependency_tree(graph_, ss, trees[i], detailed);
+        ss << cli::format_dependency_tree(
+            inspect.dependency_tree(graph_, trees[i]), detailed);
         ss << "\n";
       }
       tree_context_.text = ss.str();
@@ -502,7 +502,7 @@ class NodeEditorUI {
   }
 
   void LoadEditorFromCurrentNode() {
-    const auto& n = graph_.nodes.at(ids_[node_list_index_]);
+    const auto& n = graph_.node(ids_[node_list_index_]);
     active_node_id_ = n.id;
     editor_text_ = NodeToYAML(n);
     last_applied_text_ = editor_text_;
@@ -517,10 +517,17 @@ class NodeEditorUI {
   void OnNodeListChanged() { LoadEditorFromCurrentNode(); }
 
   void ApplyEditor() {
-    auto& n = graph_.nodes.at(active_node_id_);
+    Node updated = graph_.node(active_node_id_);
     std::string err;
-    if (!ApplyYAMLToFullNode(n, editor_text_, err)) {
+    if (!ApplyYAMLToFullNode(updated, editor_text_, err)) {
       ShowToast(std::string("Invalid YAML: ") + err);
+      return;
+    }
+    updated.id = active_node_id_;
+    try {
+      graph_.replace_node(updated);
+    } catch (const std::exception& e) {
+      ShowToast(std::string("Invalid graph topology: ") + e.what());
       return;
     }
     last_applied_text_ = editor_text_;

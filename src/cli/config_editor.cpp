@@ -178,8 +178,11 @@ class ConfigEditor : public TuiEditor {
  private:
   void SyncModelToUiState() {
     plugin_dirs_str_ = original_config_.plugin_dirs;
+    scheduler_dirs_str_ = original_config_.scheduler_dirs;
     active_config_path_buffer_ = original_config_.loaded_config_path;
     history_size_buffer_ = std::to_string(original_config_.history_size);
+    scheduler_worker_count_buffer_ =
+        std::to_string(original_config_.scheduler_worker_count);
     auto find_index = [](const std::vector<std::string>& v,
                          const std::string& val) {
       for (size_t i = 0; i < v.size(); ++i)
@@ -260,6 +263,7 @@ class ConfigEditor : public TuiEditor {
   }
   void SyncUiStateToModel() {
     original_config_.plugin_dirs = plugin_dirs_str_;
+    original_config_.scheduler_dirs = scheduler_dirs_str_;
     original_config_.loaded_config_path = active_config_path_buffer_;
     try {
       original_config_.history_size = std::stoi(history_size_buffer_);
@@ -281,6 +285,13 @@ class ConfigEditor : public TuiEditor {
         config_save_entries_[selected_config_save_idx_];
     original_config_.editor_save_behavior =
         editor_save_entries_[selected_editor_save_idx_];
+    try {
+      original_config_.scheduler_worker_count =
+          std::stoi(scheduler_worker_count_buffer_);
+      if (original_config_.scheduler_worker_count < 0)
+        original_config_.scheduler_worker_count = 0;
+    } catch (...) {
+    }
 
     // Compose traversal defaults from UI state
     {
@@ -380,6 +391,9 @@ class ConfigEditor : public TuiEditor {
                    &selected_path_mode_idx_);
     add_radio_line("default_cache_clear_arg", &cache_clear_entries_,
                    &selected_cache_clear_idx_);
+    add_line("scheduler_hp_type", &original_config_.scheduler_hp_type);
+    add_line("scheduler_rt_type", &original_config_.scheduler_rt_type);
+    add_line("scheduler_worker_count", &scheduler_worker_count_buffer_);
 
     for (size_t i = 0; i < plugin_dirs_str_.size(); ++i) {
       auto del_fn = [this, i] {
@@ -399,6 +413,26 @@ class ConfigEditor : public TuiEditor {
     };
     editable_lines_.push_back(
         {"(Plugin Dirs)", nullptr, false, nullptr, nullptr, add_fn, nullptr});
+
+    // Scheduler directories
+    for (size_t i = 0; i < scheduler_dirs_str_.size(); ++i) {
+      auto del_fn = [this, i] {
+        scheduler_dirs_str_.erase(scheduler_dirs_str_.begin() + i);
+        RebuildLineView();
+        selected_ = std::min((int)editable_lines_.size() - 1, selected_);
+      };
+      editable_lines_.push_back({"scheduler_dirs[" + std::to_string(i) + "]",
+                                 &scheduler_dirs_str_[i], false, nullptr, nullptr,
+                                 nullptr, del_fn});
+    }
+    auto add_scheduler_fn = [this] {
+      scheduler_dirs_str_.push_back("<new_path>");
+      RebuildLineView();
+      selected_ = editable_lines_.size() - 2;
+      EnterEditMode();
+    };
+    editable_lines_.push_back(
+        {"(Scheduler Dirs)", nullptr, false, nullptr, nullptr, add_scheduler_fn, nullptr});
   }
   void EnterEditMode() {
     if (selected_ >= (int)editable_lines_.size())
@@ -540,6 +574,7 @@ class ConfigEditor : public TuiEditor {
   int dummy_radio_selected_idx_ = 0;
   std::string active_config_path_buffer_;
   std::string history_size_buffer_;
+  std::string scheduler_worker_count_buffer_;
   int selected_cache_precision_idx_ = 0;
   int selected_print_mode_idx_ = 0;
   int selected_ops_list_mode_idx_ = 0;
@@ -549,6 +584,7 @@ class ConfigEditor : public TuiEditor {
   int selected_config_save_idx_ = 0;
   int selected_editor_save_idx_ = 0;
   std::vector<std::string> plugin_dirs_str_;
+  std::vector<std::string> scheduler_dirs_str_;
   std::vector<std::string> cache_precision_entries_ = {"int8", "int16"};
   std::vector<std::string> print_mode_entries_ = {"full", "simplified"};
   std::vector<std::string> ops_list_mode_entries_ = {"all", "builtin",
@@ -606,12 +642,12 @@ static bool ask_yesno(const std::string& q, bool def) {
   }
 }
 
-void run_config_editor(CliConfig& config) {
+bool run_config_editor(CliConfig& config) {
   auto screen = ScreenInteractive::Fullscreen();
   ConfigEditor editor(screen, config);
   editor.Run();
   if (!editor.changes_applied)
-    return;
+    return false;
   if (config.config_save_behavior == "ask") {
     if (ask_yesno("Save configuration changes to a file?", true)) {
       std::string default_path = config.loaded_config_path.empty()
@@ -650,4 +686,5 @@ void run_config_editor(CliConfig& config) {
       std::cout << "Configuration saved to default 'config.yaml'." << std::endl;
     }
   }
+  return true;
 }

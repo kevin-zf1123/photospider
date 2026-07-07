@@ -52,6 +52,12 @@ bool handle_print(std::istringstream& iss, ps::InteractionService& svc,
                   CliConfig& config);
 void print_help_print(const CliConfig& config);
 
+// inspect
+bool handle_inspect(std::istringstream& iss, ps::InteractionService& svc,
+                    std::string& current_graph, bool& modified,
+                    CliConfig& config);
+void print_help_inspect(const CliConfig& config);
+
 // node
 bool handle_node(std::istringstream& iss, ps::InteractionService& svc,
                  std::string& current_graph, bool& modified, CliConfig& config);
@@ -134,3 +140,10 @@ void print_help_save(const CliConfig& config);
 bool handle_exit(std::istringstream& iss, ps::InteractionService& svc,
                  std::string& current_graph, bool& modified, CliConfig& config);
 void print_help_exit(const CliConfig& config);
+
+// scheduler
+bool handle_scheduler(std::istringstream& iss, ps::InteractionService& svc,
+                      std::string& current_graph, bool& modified,
+                      CliConfig& config);
+void print_help_scheduler(const CliConfig& config);
+

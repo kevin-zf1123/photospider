@@ -1,218 +1,345 @@
-#include <cassert>
+// Photospider M3.2 IScheduler Interface Tests
+// Tests for scheduler lifecycle, GraphRuntime scheduler ownership, and
+// planned-task runtime dispatch.
+
+#include <gtest/gtest.h>
+
+#include <atomic>
+#include <exception>
 #include <filesystem>
-#include <iostream>
+#include <optional>
+#include <stdexcept>
+#include <string>
+#include <utility>
+#include <vector>
 
-#include "adapter/buffer_adapter_opencv.hpp"
-#include "graph_model.hpp"
 #include "kernel/graph_runtime.hpp"
-#include "kernel/ops.hpp"
-#include "kernel/services/compute_service.hpp"
-#include "kernel/services/graph_cache_service.hpp"
-#include "kernel/services/graph_event_service.hpp"
-#include "kernel/services/graph_traversal_service.hpp"
+#include "kernel/scheduler/i_scheduler.hpp"
+#include "kernel/scheduler/scheduler_task_runtime.hpp"
 
-// Helper for asserting conditions
-void ps_assert(bool condition, const std::string& message) {
-  if (!condition) {
-    std::cerr << "Assertion failed: " << message << std::endl;
-    std::exit(1);
+namespace ps {
+namespace {
+
+class MockScheduler : public IScheduler, public SchedulerTaskRuntime {
+ public:
+  void attach(GraphRuntime* runtime) override {
+    runtime_ = runtime;
+    attach_called_ = true;
   }
+
+  void detach() override {
+    runtime_ = nullptr;
+    detach_called_ = true;
+  }
+
+  void start() override {
+    runtime_at_start_ = runtime_;
+    running_ = true;
+    start_called_ = true;
+  }
+
+  void shutdown() override {
+    running_ = false;
+    shutdown_called_ = true;
+  }
+
+  std::string name() const override { return "MockScheduler"; }
+  std::string get_stats() const override { return "Mock stats"; }
+  bool is_running() const override { return running_; }
+  bool task_runtime_running() const override { return running_; }
+
+  void submit_initial_tasks(
+      std::vector<Task>&& tasks, int total_task_count,
+      SchedulerTaskPriority priority = SchedulerTaskPriority::Normal) override {
+    last_priority_ = priority;
+    tasks_to_complete_.store(total_task_count, std::memory_order_relaxed);
+    for (auto& task : tasks) {
+      if (task) {
+        task();
+      }
+    }
+  }
+
+  void submit_ready_task_from_worker(
+      Task&& task,
+      SchedulerTaskPriority priority = SchedulerTaskPriority::Normal) override {
+    submit_ready_task_any_thread(std::move(task), priority, std::nullopt);
+  }
+
+  void submit_ready_task_any_thread(
+      Task&& task,
+      SchedulerTaskPriority priority = SchedulerTaskPriority::Normal,
+      std::optional<uint64_t> epoch = std::nullopt) override {
+    last_priority_ = priority;
+    last_epoch_ = epoch.value_or(0);
+    if (task) {
+      task();
+    }
+  }
+
+  void wait_for_completion() override {
+    if (first_exception_) {
+      std::rethrow_exception(first_exception_);
+    }
+  }
+
+  void set_exception(std::exception_ptr e) override {
+    if (!first_exception_) {
+      first_exception_ = e;
+    }
+  }
+
+  void inc_tasks_to_complete(int delta) override {
+    tasks_to_complete_.fetch_add(delta, std::memory_order_relaxed);
+  }
+
+  void dec_tasks_to_complete() override {
+    tasks_to_complete_.fetch_sub(1, std::memory_order_relaxed);
+  }
+
+  void log_event(SchedulerTraceAction action, int node_id) override {
+    last_action_ = action;
+    last_node_id_ = node_id;
+  }
+
+  bool was_attach_called() const { return attach_called_; }
+  bool was_detach_called() const { return detach_called_; }
+  bool was_start_called() const { return start_called_; }
+  bool was_shutdown_called() const { return shutdown_called_; }
+  GraphRuntime* attached_runtime() const { return runtime_; }
+  GraphRuntime* runtime_at_start() const { return runtime_at_start_; }
+  int tasks_to_complete() const { return tasks_to_complete_.load(); }
+  SchedulerTaskPriority last_priority() const { return last_priority_; }
+  uint64_t last_epoch() const { return last_epoch_; }
+  SchedulerTraceAction last_action() const { return last_action_; }
+  int last_node_id() const { return last_node_id_; }
+
+ private:
+  GraphRuntime* runtime_ = nullptr;
+  GraphRuntime* runtime_at_start_ = nullptr;
+  bool running_ = false;
+  bool attach_called_ = false;
+  bool detach_called_ = false;
+  bool start_called_ = false;
+  bool shutdown_called_ = false;
+  std::atomic<int> tasks_to_complete_{0};
+  SchedulerTaskPriority last_priority_{SchedulerTaskPriority::Normal};
+  uint64_t last_epoch_{0};
+  SchedulerTraceAction last_action_{SchedulerTraceAction::Execute};
+  int last_node_id_{-1};
+  std::exception_ptr first_exception_;
+};
+
+TEST(M32InterfaceAbstraction, MockSchedulerLifecycle) {
+  auto scheduler = std::make_unique<MockScheduler>();
+
+  EXPECT_FALSE(scheduler->is_running());
+  EXPECT_FALSE(scheduler->task_runtime_running());
+  EXPECT_EQ(scheduler->name(), "MockScheduler");
+  EXPECT_FALSE(scheduler->was_attach_called());
+  EXPECT_FALSE(scheduler->was_start_called());
+
+  scheduler->attach(nullptr);
+  EXPECT_TRUE(scheduler->was_attach_called());
+
+  scheduler->start();
+  EXPECT_TRUE(scheduler->was_start_called());
+  EXPECT_TRUE(scheduler->is_running());
+  EXPECT_TRUE(scheduler->task_runtime_running());
+
+  scheduler->shutdown();
+  EXPECT_TRUE(scheduler->was_shutdown_called());
+  EXPECT_FALSE(scheduler->is_running());
+
+  scheduler->detach();
+  EXPECT_TRUE(scheduler->was_detach_called());
 }
 
-void test_simple_sequential_compute() {
-  std::cout << "--- Running test: test_simple_sequential_compute ---\n";
-  ps::ops::register_builtin();
-  ps::GraphModel graph;
-  ps::GraphTraversalService traversal;
-  ps::GraphCacheService cache;
-  ps::GraphEventService events;
-  ps::ComputeService compute(traversal, cache, events);
+TEST(M32InterfaceAbstraction, MockSchedulerTaskRuntimeDispatch) {
+  MockScheduler scheduler;
+  scheduler.start();
+  std::atomic<int> counter{0};
 
-  ps::Node n1, n2, n3;
-  n1.id = 1;
-  n1.name = "const100";
-  n1.type = "image_generator";
-  n1.subtype = "constant";
-  n1.parameters["width"] = 10;
-  n1.parameters["height"] = 10;
-  n1.parameters["value"] = 100;
+  std::vector<SchedulerTaskRuntime::Task> tasks;
+  tasks.emplace_back([&]() {
+    counter.fetch_add(1);
+    scheduler.submit_ready_task_from_worker([&]() {
+      counter.fetch_add(10);
+      scheduler.dec_tasks_to_complete();
+    });
+    scheduler.dec_tasks_to_complete();
+  });
 
-  n2.id = 2;
-  n2.name = "const50";
-  n2.type = "image_generator";
-  n2.subtype = "constant";
-  n2.parameters["width"] = 10;
-  n2.parameters["height"] = 10;
-  n2.parameters["value"] = 50;
+  scheduler.submit_initial_tasks(std::move(tasks), 2,
+                                 SchedulerTaskPriority::High);
+  scheduler.wait_for_completion();
 
-  n3.id = 3;
-  n3.name = "add";
-  n3.type = "image_mixing";
-  n3.subtype = "add_weighted";
-  n3.image_inputs.push_back({1, "image"});
-  n3.image_inputs.push_back({2, "image"});
-  n3.parameters["alpha"] = 0.5;
-  n3.parameters["beta"] = 0.5;
+  EXPECT_EQ(counter.load(), 11);
+  EXPECT_EQ(scheduler.tasks_to_complete(), 0);
+  EXPECT_EQ(scheduler.last_priority(), SchedulerTaskPriority::Normal);
 
-  graph.add_node(n1);
-  graph.add_node(n2);
-  graph.add_node(n3);
+  scheduler.submit_ready_task_any_thread([] {}, SchedulerTaskPriority::High,
+                                         42);
+  EXPECT_EQ(scheduler.last_priority(), SchedulerTaskPriority::High);
+  EXPECT_EQ(scheduler.last_epoch(), 42u);
 
-  auto& output =
-      compute.compute(graph, 3, "int8", false, false, false, nullptr);
-  cv::Mat result_mat = ps::toCvMat(output.image_buffer);
-
-  float expected = (100.0f / 255.0f * 0.5f) + (50.0f / 255.0f * 0.5f);
-  ps_assert(std::abs(result_mat.at<float>(0, 0) - expected) < 1e-6,
-            "Pixel value mismatch in sequential compute");
-
-  std::cout << "PASS\n";
+  scheduler.log_event(SchedulerTraceAction::ExecuteTile, 7);
+  EXPECT_EQ(scheduler.last_action(), SchedulerTraceAction::ExecuteTile);
+  EXPECT_EQ(scheduler.last_node_id(), 7);
 }
 
-void test_parallel_scheduler_simple() {
-  std::cout << "--- Running test: test_parallel_scheduler_simple ---\n";
-  ps::ops::register_builtin();
+TEST(M32InterfaceAbstraction, MockSchedulerTaskRuntimePropagatesException) {
+  MockScheduler scheduler;
+  scheduler.set_exception(
+      std::make_exception_ptr(std::runtime_error("planned task failed")));
+  EXPECT_THROW(scheduler.wait_for_completion(), std::runtime_error);
+}
 
-  ps::GraphRuntime::Info info{"test_session", "sessions/test_session"};
-  ps::GraphRuntime runtime(info);
+class GraphRuntimeSchedulerTest : public ::testing::Test {
+ protected:
+  void SetUp() override {
+    std::filesystem::create_directories(
+        "sessions/scheduler_test_session/cache");
+  }
+
+  void TearDown() override {
+    std::filesystem::remove_all("sessions/scheduler_test_session");
+  }
+};
+
+TEST_F(GraphRuntimeSchedulerTest, SetAndGetScheduler) {
+  GraphRuntime::Info info{"scheduler_test", "sessions/scheduler_test_session",
+                          "", ""};
+
+  GraphRuntime runtime(info);
+
+  EXPECT_FALSE(runtime.has_scheduler(ComputeIntent::GlobalHighPrecision));
+  EXPECT_FALSE(runtime.has_scheduler(ComputeIntent::RealTimeUpdate));
+  EXPECT_EQ(runtime.get_scheduler(ComputeIntent::GlobalHighPrecision), nullptr);
+
+  auto hp_scheduler = std::make_unique<MockScheduler>();
+  MockScheduler* hp_ptr = hp_scheduler.get();
+  runtime.set_scheduler(ComputeIntent::GlobalHighPrecision,
+                        std::move(hp_scheduler));
+
+  EXPECT_TRUE(runtime.has_scheduler(ComputeIntent::GlobalHighPrecision));
+  EXPECT_EQ(runtime.get_scheduler(ComputeIntent::GlobalHighPrecision), hp_ptr);
+  EXPECT_TRUE(hp_ptr->was_attach_called());
+  EXPECT_EQ(hp_ptr->attached_runtime(), &runtime);
+
+  auto rt_scheduler = std::make_unique<MockScheduler>();
+  MockScheduler* rt_ptr = rt_scheduler.get();
+  runtime.set_scheduler(ComputeIntent::RealTimeUpdate, std::move(rt_scheduler));
+
+  EXPECT_TRUE(runtime.has_scheduler(ComputeIntent::RealTimeUpdate));
+  EXPECT_EQ(runtime.get_scheduler(ComputeIntent::RealTimeUpdate), rt_ptr);
+  EXPECT_TRUE(runtime.has_scheduler(ComputeIntent::GlobalHighPrecision));
+}
+
+TEST_F(GraphRuntimeSchedulerTest, StartStartsAttachedSchedulers) {
+  GraphRuntime::Info info{"scheduler_test", "sessions/scheduler_test_session",
+                          "", ""};
+
+  GraphRuntime runtime(info);
+
+  auto scheduler = std::make_unique<MockScheduler>();
+  MockScheduler* scheduler_ptr = scheduler.get();
+  runtime.set_scheduler(ComputeIntent::GlobalHighPrecision,
+                        std::move(scheduler));
+
+  EXPECT_TRUE(scheduler_ptr->was_attach_called());
+  EXPECT_FALSE(scheduler_ptr->was_start_called());
+  EXPECT_FALSE(scheduler_ptr->is_running());
+
   runtime.start();
 
-  auto& graph = runtime.model();
-  ps::GraphTraversalService traversal;
-  ps::GraphCacheService cache;
+  EXPECT_TRUE(scheduler_ptr->was_start_called());
+  EXPECT_TRUE(scheduler_ptr->is_running());
+  EXPECT_EQ(scheduler_ptr->runtime_at_start(), &runtime);
 
-  ps::Node n1, n2, n3;
-  n1.id = 1;
-  n1.name = "const100";
-  n1.type = "image_generator";
-  n1.subtype = "constant";
-  n1.parameters["width"] = 20;
-  n1.parameters["height"] = 20;
-  n1.parameters["value"] = 100;
+  runtime.stop();
 
-  n2.id = 2;
-  n2.name = "const50";
-  n2.type = "image_generator";
-  n2.subtype = "constant";
-  n2.parameters["width"] = 20;
-  n2.parameters["height"] = 20;
-  n2.parameters["value"] = 50;
+  EXPECT_TRUE(scheduler_ptr->was_shutdown_called());
+  EXPECT_FALSE(scheduler_ptr->is_running());
+}
 
-  n3.id = 3;
-  n3.name = "add";
-  n3.type = "image_mixing";
-  n3.subtype = "add_weighted";
-  n3.image_inputs.push_back({1, "image"});
-  n3.image_inputs.push_back({2, "image"});
-  n3.parameters["alpha"] = 1.0;
-  n3.parameters["beta"] = 1.0;
+TEST_F(GraphRuntimeSchedulerTest,
+       SetSchedulerOnRunningRuntimeStartsAfterAttach) {
+  GraphRuntime::Info info{"scheduler_test", "sessions/scheduler_test_session",
+                          "", ""};
 
-  graph.add_node(n1);
-  graph.add_node(n2);
-  graph.add_node(n3);
+  GraphRuntime runtime(info);
+  runtime.start();
 
-  ps::ComputeService compute(traversal, cache, runtime.event_service());
-  auto& output = compute.compute_parallel(graph, runtime, 3, "int8", false,
-                                          false, false, nullptr);
-  cv::Mat result_mat = ps::toCvMat(output.image_buffer);
+  auto scheduler = std::make_unique<MockScheduler>();
+  MockScheduler* scheduler_ptr = scheduler.get();
+  runtime.set_scheduler(ComputeIntent::GlobalHighPrecision,
+                        std::move(scheduler));
 
-  float expected = (100.0f / 255.0f) + (50.0f / 255.0f);
-  ps_assert(std::abs(result_mat.at<float>(5, 5) - expected) < 1e-6,
-            "Pixel value mismatch in parallel compute");
+  EXPECT_TRUE(scheduler_ptr->was_attach_called());
+  EXPECT_TRUE(scheduler_ptr->was_start_called());
+  EXPECT_TRUE(scheduler_ptr->is_running());
+  EXPECT_EQ(scheduler_ptr->attached_runtime(), &runtime);
+  EXPECT_EQ(scheduler_ptr->runtime_at_start(), &runtime);
 
-  std::cout << "PASS\n";
   runtime.stop();
 }
 
-// [新增] 专门用于验证本次修复的测试用例
-void test_parallel_mixing_with_resize() {
-  std::cout << "--- Running test: test_parallel_mixing_with_resize ---\n";
-  ps::ops::register_builtin();
+struct SchedulerLifecycleTracker {
+  static std::atomic<int> shutdown_count;
+  static std::atomic<int> detach_count;
 
-  ps::GraphRuntime::Info info{"resize_test", "sessions/resize_test"};
-  ps::GraphRuntime runtime(info);
-  runtime.start();
+  static void reset() {
+    shutdown_count.store(0);
+    detach_count.store(0);
+  }
+};
 
-  auto& graph = runtime.model();
-  ps::GraphTraversalService traversal;
-  ps::GraphCacheService cache;
+std::atomic<int> SchedulerLifecycleTracker::shutdown_count{0};
+std::atomic<int> SchedulerLifecycleTracker::detach_count{0};
 
-  // Node 1: Base image, 100x100
-  ps::Node n1;
-  n1.id = 1;
-  n1.name = "base_img";
-  n1.type = "image_generator";
-  n1.subtype = "constant";
-  n1.parameters["width"] = 100;
-  n1.parameters["height"] = 100;
-  n1.parameters["value"] = 200;
-
-  // Node 2: Smaller image, 50x50, to be resized
-  ps::Node n2;
-  n2.id = 2;
-  n2.name = "small_img";
-  n2.type = "image_generator";
-  n2.subtype = "constant";
-  n2.parameters["width"] = 50;
-  n2.parameters["height"] = 50;
-  n2.parameters["value"] = 50;
-
-  // Node 3: Add them. Default merge_strategy is "resize"
-  ps::Node n3;
-  n3.id = 3;
-  n3.name = "add_diff_size";
-  n3.type = "image_mixing";
-  n3.subtype = "add_weighted";
-  n3.image_inputs.push_back({1, "image"});
-  n3.image_inputs.push_back({2, "image"});
-  n3.parameters["alpha"] = 1.0;
-  n3.parameters["beta"] = 1.0;
-
-  graph.add_node(n1);
-  graph.add_node(n2);
-  graph.add_node(n3);
-
-  bool threw = false;
-  try {
-    ps::ComputeService compute(traversal, cache, runtime.event_service());
-    auto& output = compute.compute_parallel(graph, runtime, 3, "int8", false,
-                                            false, false, nullptr);
-    cv::Mat result_mat = ps::toCvMat(output.image_buffer);
-
-    ps_assert(result_mat.cols == 100, "Result width should match first input");
-    ps_assert(result_mat.rows == 100, "Result height should match first input");
-
-    float expected =
-        (200.0f / 255.0f) +
-        (50.0f / 255.0f);  // smaller image is resized and then added
-    ps_assert(std::abs(result_mat.at<float>(50, 50) - expected) < 1e-6,
-              "Pixel value mismatch after resize");
-  } catch (const std::exception& e) {
-    std::cerr << "Caught exception: " << e.what() << std::endl;
-    threw = true;
+class TrackedMockScheduler : public MockScheduler {
+ public:
+  void shutdown() override {
+    MockScheduler::shutdown();
+    SchedulerLifecycleTracker::shutdown_count.fetch_add(1);
   }
 
-  ps_assert(!threw,
-            "compute_parallel should not throw for different-sized inputs with "
-            "default resize strategy");
+  void detach() override {
+    MockScheduler::detach();
+    SchedulerLifecycleTracker::detach_count.fetch_add(1);
+  }
+};
 
-  std::cout << "PASS\n";
+TEST_F(GraphRuntimeSchedulerTest, ReplaceScheduler) {
+  GraphRuntime::Info info{"scheduler_test", "sessions/scheduler_test_session",
+                          "", ""};
+
+  GraphRuntime runtime(info);
+  runtime.start();
+
+  SchedulerLifecycleTracker::reset();
+
+  auto scheduler1 = std::make_unique<TrackedMockScheduler>();
+  runtime.set_scheduler(ComputeIntent::GlobalHighPrecision,
+                        std::move(scheduler1));
+
+  EXPECT_EQ(SchedulerLifecycleTracker::shutdown_count.load(), 0);
+  EXPECT_EQ(SchedulerLifecycleTracker::detach_count.load(), 0);
+
+  auto scheduler2 = std::make_unique<TrackedMockScheduler>();
+  MockScheduler* ptr2 = scheduler2.get();
+  runtime.replace_scheduler(ComputeIntent::GlobalHighPrecision,
+                            std::move(scheduler2));
+
+  EXPECT_EQ(SchedulerLifecycleTracker::shutdown_count.load(), 1);
+  EXPECT_EQ(SchedulerLifecycleTracker::detach_count.load(), 1);
+  EXPECT_TRUE(ptr2->was_attach_called());
+  EXPECT_TRUE(ptr2->was_start_called());
+  EXPECT_EQ(runtime.get_scheduler(ComputeIntent::GlobalHighPrecision), ptr2);
+
   runtime.stop();
 }
 
-int main() {
-  try {
-    // 清理旧的测试会话，以防干扰
-    std::filesystem::remove_all("sessions");
-
-    test_simple_sequential_compute();
-    test_parallel_scheduler_simple();
-    test_parallel_mixing_with_resize();  // 运行新测试
-
-    std::cout << "\nAll Milestone 2 tests passed!\n";
-  } catch (const std::exception& e) {
-    std::cerr << "\nMilestone 2 test suite failed: " << e.what() << std::endl;
-    return 1;
-  }
-  return 0;
-}
+}  // namespace
+}  // namespace ps

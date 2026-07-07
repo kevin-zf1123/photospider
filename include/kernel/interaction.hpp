@@ -5,6 +5,7 @@
 #include <future>
 #include <optional>
 #include <string>
+#include <utility>
 #include <vector>
 
 #include "benchmark/benchmark_types.hpp"
@@ -17,12 +18,14 @@ namespace ps {
 class InteractionService {
  public:
   explicit InteractionService(Kernel& kernel) : kernel_(kernel) {}
-
+  Kernel& kernel() { return kernel_; }
   // Graph lifecycle
   std::optional<std::string> cmd_load_graph(
       const std::string& name, const std::string& root_dir,
-      const std::string& yaml_path, const std::string& config_path = "") {
-    return kernel_.load_graph(name, root_dir, yaml_path, config_path);
+      const std::string& yaml_path, const std::string& config_path = "",
+      const std::string& cache_root_dir = "") {
+    return kernel_.load_graph(name, root_dir, yaml_path, config_path,
+                              cache_root_dir);
   }
   bool cmd_close_graph(const std::string& name) {
     return kernel_.close_graph(name);
@@ -36,15 +39,18 @@ class InteractionService {
     return kernel_.ending_nodes(graph);
   }
 
-  // Compute
-  bool cmd_compute(const std::string& graph, int node_id,
-                   const std::string& cache_precision, bool force, bool timing,
-                   bool parallel, bool quiet = false,
-                   bool disable_disk_cache = false, bool nosave = false,
-                   std::vector<BenchmarkEvent>* benchmark_events = nullptr) {
-    return kernel_.compute(graph, node_id, cache_precision, force, timing,
-                           parallel, quiet, disable_disk_cache, nosave,
-                           benchmark_events);
+  /**
+   * @brief Runs a synchronous compute command from a Kernel request object.
+   *
+   * @param request Graph, target node, cache, execution, telemetry, and
+   * optional dirty/intent controls supplied by the frontend.
+   * @return true when Kernel compute succeeds; false on missing graph or
+   * handled compute failure.
+   * @throws Nothing directly; Kernel records handled errors in last_error().
+   * @note The request is forwarded without retaining borrowed benchmark sinks.
+   */
+  bool cmd_compute(const Kernel::ComputeRequest& request) {
+    return kernel_.compute(request);
   }
   std::optional<TimingCollector> cmd_timing(const std::string& graph) {
     return kernel_.get_timing(graph);
@@ -153,10 +159,18 @@ class InteractionService {
     return kernel_.clear_graph(graph);
   }
 
-  std::optional<std::string> cmd_dump_tree(const std::string& graph,
-                                           std::optional<int> node_id,
-                                           bool show_parameters) {
-    return kernel_.dump_dependency_tree(graph, node_id, show_parameters);
+  std::optional<DependencyTree> cmd_dependency_tree(
+      const std::string& graph, std::optional<int> node_id,
+      bool include_metadata = false) {
+    return kernel_.dependency_tree(graph, node_id, include_metadata);
+  }
+  std::optional<GraphNodeInspectInfo> cmd_inspect_node(const std::string& graph,
+                                                       int node_id) {
+    return kernel_.inspect_node(graph, node_id);
+  }
+  std::optional<GraphInspectionSnapshot> cmd_inspect_graph(
+      const std::string& graph) {
+    return kernel_.inspect_graph(graph);
   }
   std::optional<Kernel::LastError> cmd_last_error(
       const std::string& graph) const {
@@ -174,11 +188,61 @@ class InteractionService {
   cmd_drain_compute_events(const std::string& graph) {
     return kernel_.drain_compute_events(graph);
   }
+  std::optional<std::vector<GraphRuntime::SchedulerEvent>> cmd_scheduler_trace(
+      const std::string& graph) {
+    return kernel_.scheduler_trace(graph);
+  }
+  std::optional<std::string> cmd_dirty_region_snapshot_debug(
+      const std::string& graph) {
+    return kernel_.dirty_region_snapshot_debug(graph);
+  }
+  std::optional<compute::DirtyRegionSnapshot> cmd_dirty_region_snapshot(
+      const std::string& graph) {
+    return kernel_.dirty_region_snapshot(graph);
+  }
+  std::optional<compute::DirtyRegionSnapshot> cmd_begin_dirty_source(
+      const std::string& graph, int node_id, compute::DirtyDomain domain,
+      const cv::Rect& source_roi) {
+    return kernel_.begin_dirty_source(graph, node_id, domain, source_roi);
+  }
+  std::optional<compute::DirtyControlLaneResult> cmd_begin_dirty_source_control(
+      const std::string& graph, int node_id, compute::DirtyDomain domain,
+      const cv::Rect& source_roi) {
+    return kernel_.begin_dirty_source_control(graph, node_id, domain,
+                                              source_roi);
+  }
+  std::optional<compute::DirtyRegionSnapshot> cmd_update_dirty_source(
+      const std::string& graph, int node_id, compute::DirtyDomain domain,
+      const cv::Rect& source_roi) {
+    return kernel_.update_dirty_source(graph, node_id, domain, source_roi);
+  }
+  std::optional<compute::DirtyControlLaneResult>
+  cmd_update_dirty_source_control(const std::string& graph, int node_id,
+                                  compute::DirtyDomain domain,
+                                  const cv::Rect& source_roi) {
+    return kernel_.update_dirty_source_control(graph, node_id, domain,
+                                               source_roi);
+  }
+  std::optional<compute::DirtyRegionSnapshot> cmd_end_dirty_source(
+      const std::string& graph, int node_id, compute::DirtyDomain domain) {
+    return kernel_.end_dirty_source(graph, node_id, domain);
+  }
+  std::optional<compute::DirtyControlLaneResult> cmd_end_dirty_source_control(
+      const std::string& graph, int node_id, compute::DirtyDomain domain) {
+    return kernel_.end_dirty_source_control(graph, node_id, domain);
+  }
+  /**
+   * @brief Computes a node and returns an image from a Kernel request object.
+   *
+   * @param request Graph, target node, cache, execution, telemetry, and
+   * optional dirty/intent controls supplied by the frontend.
+   * @return Cloned image, or nullopt when compute or image extraction fails.
+   * @throws Nothing directly; Kernel keeps the preview/save nullopt contract.
+   * @note The request is not retained after image extraction completes.
+   */
   std::optional<cv::Mat> cmd_compute_and_get_image(
-      const std::string& graph, int node_id, const std::string& precision,
-      bool force, bool timing, bool parallel, bool disable_disk_cache = false) {
-    return kernel_.compute_and_get_image(graph, node_id, precision, force,
-                                         timing, parallel, disable_disk_cache);
+      const Kernel::ComputeRequest& request) {
+    return kernel_.compute_and_get_image(request);
   }
   std::optional<std::vector<int>> cmd_trees_containing_node(
       const std::string& graph, int node_id) {
@@ -197,14 +261,32 @@ class InteractionService {
                          const std::string& yaml_text) {
     return kernel_.set_node_yaml(graph, node_id, yaml_text);
   }
+  /**
+   * @brief Schedules an asynchronous compute command from a request object.
+   *
+   * @param request Graph, target node, cache, execution, telemetry, and
+   * optional dirty/intent controls captured by value.
+   * @return Future resolving to success, or nullopt when the graph is missing.
+   * @throws std::system_error if Kernel cannot launch the async parallel path.
+   * @note benchmark_events is still caller-owned and must outlive the future.
+   */
   std::optional<std::future<bool>> cmd_compute_async(
-      const std::string& graph, int node_id, const std::string& cache_precision,
-      bool force, bool timing, bool parallel, bool quiet = false,
-      bool disable_disk_cache = false, bool nosave = false,
-      std::vector<BenchmarkEvent>* benchmark_events = nullptr) {
-    return kernel_.compute_async(graph, node_id, cache_precision, force, timing,
-                                 parallel, quiet, disable_disk_cache, nosave,
-                                 benchmark_events);
+      Kernel::ComputeRequest request) {
+    return kernel_.compute_async(std::move(request));
+  }
+  std::optional<cv::Rect> cmd_project_roi(const std::string& graph,
+                                          int start_node_id,
+                                          const cv::Rect& start_roi,
+                                          int target_node_id) {
+    return kernel_.project_roi_forward(graph, start_node_id, start_roi,
+                                       target_node_id);
+  }
+  std::optional<cv::Rect> cmd_project_roi_backward(const std::string& graph,
+                                                   int target_node_id,
+                                                   const cv::Rect& target_roi,
+                                                   int source_node_id) {
+    return kernel_.project_roi_backward(graph, target_node_id, target_roi,
+                                        source_node_id);
   }
   std::optional<double> cmd_get_last_io_time(const std::string& graph) {
     return kernel_.get_last_io_time(graph);
@@ -224,6 +306,22 @@ class InteractionService {
   id cmd_get_metal_device(const std::string& graph) {
     return kernel_.get_metal_device(graph);
   }
+
+  // [M3.5] Scheduler information
+  // Get all available scheduler types (built-in + plugins)
+  std::vector<std::string> cmd_scheduler_available_types() const;
+
+  // Get description for a scheduler type
+  std::string cmd_scheduler_description(const std::string& type_name) const;
+
+  // Scan and load scheduler plugins from directories
+  size_t cmd_scheduler_scan(const std::vector<std::string>& dirs);
+
+  // Load a single scheduler plugin
+  bool cmd_scheduler_load(const std::string& path);
+
+  // Get list of loaded scheduler plugins
+  std::vector<std::string> cmd_scheduler_loaded_plugins() const;
 
  private:
   Kernel& kernel_;
