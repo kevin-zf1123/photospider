@@ -3,6 +3,7 @@
 #include <algorithm>
 #include <atomic>
 #include <chrono>
+#include <filesystem>
 #include <memory>
 #include <mutex>
 #include <set>
@@ -16,6 +17,7 @@
 #include "graph_model.hpp"  // NOLINT(build/include_subdir)
 #include "kernel/graph_runtime.hpp"
 #include "kernel/interaction.hpp"
+#include "kernel/scheduler/cpu_work_stealing_scheduler.hpp"
 #include "kernel/scheduler/serial_debug_scheduler.hpp"
 #include "kernel/services/compute-service/compute_cache_policy.hpp"
 #include "kernel/services/compute-service/compute_geometry.hpp"
@@ -36,6 +38,15 @@
 
 namespace ps {
 namespace {
+
+/**
+ * @brief Counts real tile invocations for the disk-cache guard regression.
+ *
+ * @note The counter is reset by the focused test before scheduler submission.
+ * Any positive value means at least one tile executed after a whole-node disk
+ * cache hit should have satisfied the node.
+ */
+std::atomic_int g_disk_cache_guard_tile_calls{0};
 
 Node make_node(int id, std::string type, std::string subtype) {
   Node node;
@@ -142,6 +153,14 @@ void register_split_ops() {
           toCvMat(output_tile).setTo(7.0f);
         }),
         rt_random_meta);
+    registry.register_op_hp_tiled(
+        "split_plan", "disk_cache_guard_tile",
+        TileOpFunc([](const Node&, const OutputTile& output_tile,
+                      const std::vector<InputTile>&) {
+          g_disk_cache_guard_tile_calls.fetch_add(1, std::memory_order_relaxed);
+          toCvMat(output_tile).setTo(11.0f);
+        }),
+        micro_meta);
     registry.register_dirty_propagator(
         "split_plan", "random_tile",
         DirtyRoiPropFunc(
@@ -947,6 +966,69 @@ TEST(TaskGraphPlanningSplit, ForceRecacheClearsFullTaskGraphCacheBeforePlan) {
   EXPECT_NE(cached_before.get(), cached_after.get())
       << "force-recache must discard stale task ROIs before planning";
   runtime.stop();
+}
+
+TEST(ComputeTaskRunnerSplit, TiledDiskCacheHitStopsSiblingTileTasks) {
+  register_split_ops();
+  g_disk_cache_guard_tile_calls.store(0, std::memory_order_relaxed);
+
+  const std::filesystem::path root = "cache/split-tiled-disk-cache-hit-guard";
+  std::filesystem::remove_all(root);
+  GraphRuntime::Info info;
+  info.name = "split-tiled-disk-cache-hit-guard";
+  info.root = root;
+  info.cache_root = root / "cache";
+  GraphRuntime runtime(info);
+  runtime.set_scheduler(ComputeIntent::GlobalHighPrecision,
+                        std::make_unique<CpuWorkStealingScheduler>(8));
+  runtime.start();
+
+  GraphModel& graph = runtime.model();
+  Node cached_tile = make_node(1, "split_plan", "disk_cache_guard_tile");
+  cached_tile.parameters["width"] = 256;
+  cached_tile.parameters["height"] = 256;
+  cached_tile.caches.push_back({"image", "output.png"});
+  cached_tile.cached_output_high_precision =
+      make_image_output(256, 256, 1, 64.0f / 255.0f);
+  graph.add_node(cached_tile);
+  graph.validate_topology();
+
+  GraphTraversalService traversal;
+  GraphCacheService cache;
+  GraphEventService events;
+  cache.save_cache_if_configured(graph, graph.node(1), "int8");
+  const auto cache_file = cache.node_cache_dir(graph, 1) / "output.png";
+  ASSERT_TRUE(std::filesystem::exists(cache_file));
+  graph.mutate_node_runtime_state(
+      1, [](auto& state) { state.cached_output_high_precision.reset(); });
+
+  ComputeService compute(traversal, cache, events);
+  ComputeService::Request request;
+  request.node_id = 1;
+  request.cache.precision = "int8";
+  request.telemetry.enable_timing = true;
+  NodeOutput& output = compute.compute_parallel(graph, runtime, request);
+
+  const auto result = graph.last_disk_cache_load_result_snapshot();
+  ASSERT_TRUE(result.has_value());
+  EXPECT_EQ(result->status, GraphModel::DiskCacheLoadStatus::Hit);
+  EXPECT_EQ(result->node_id, 1);
+  EXPECT_EQ(g_disk_cache_guard_tile_calls.load(std::memory_order_relaxed), 0)
+      << "disk-cache hit must stop sibling tile tasks before tile execution";
+
+  ASSERT_TRUE(graph.node(1).cached_output_high_precision.has_value());
+  EXPECT_EQ(&output, &*graph.node(1).cached_output_high_precision);
+  ASSERT_EQ(output.image_buffer.width, 256);
+  ASSERT_EQ(output.image_buffer.height, 256);
+  const cv::Mat output_mat = toCvMat(output.image_buffer);
+  ASSERT_EQ(output_mat.rows, 256);
+  ASSERT_EQ(output_mat.cols, 256);
+  EXPECT_NEAR(output_mat.at<float>(0, 0), 64.0f / 255.0f, 1.0f / 255.0f);
+  EXPECT_NEAR(output_mat.at<float>(128, 128), 64.0f / 255.0f, 1.0f / 255.0f);
+  EXPECT_NEAR(output_mat.at<float>(255, 255), 64.0f / 255.0f, 1.0f / 255.0f);
+
+  runtime.stop();
+  std::filesystem::remove_all(root);
 }
 
 TEST(TaskGraphPlanningSplit,

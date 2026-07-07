@@ -266,19 +266,15 @@ void NodeTaskRunner::compute_tile_task(const PlannedTask& task) {
   std::vector<const NodeOutput*> inputs_ready =
       resolve_image_inputs(target_node);
 
-  if (allow_disk_cache()) {
-    std::lock_guard<std::mutex> lock(*output_mutexes_.at(node_idx));
-    if (!temp_results_[node_idx].has_value()) {
-      try_load_disk_cache(target_node, node_idx);
-      if (temp_results_[node_idx].has_value()) {
-        node_precomputed_[node_idx].store(true, std::memory_order_release);
-        return;
-      }
-    }
+  if (try_satisfy_tile_from_disk_cache(target_node, node_idx)) {
+    return;
   }
 
-  ImageBuffer& output_buffer =
+  ImageBuffer* output_buffer =
       ensure_tile_output_buffer(node_idx, target_node, inputs_ready);
+  if (!output_buffer) {
+    return;
+  }
   TiledExecutionConfig tiled_config = tiled_config_for(target_node, *op_opt);
   tiled_config.tile_size =
       task.tile_size > 0 ? task.tile_size : tiled_config.tile_size;
@@ -289,15 +285,40 @@ void NodeTaskRunner::compute_tile_task(const PlannedTask& task) {
   BenchmarkEvent current_event = start_event(target_node);
   NodeExecutor::execute_tiled_into(graph_, node_for_exec,
                                    std::get<TileOpFunc>(*op_opt), inputs_ready,
-                                   output_buffer, tiled_config);
+                                   *output_buffer, tiled_config);
   finalize_tiled_node_if_complete(node_idx, target_node, inputs_ready,
                                   current_event);
 }
 
-ImageBuffer& NodeTaskRunner::ensure_tile_output_buffer(
+bool NodeTaskRunner::try_satisfy_tile_from_disk_cache(const Node& target_node,
+                                                      int node_idx) {
+  if (!allow_disk_cache()) {
+    return node_precomputed_[node_idx].load(std::memory_order_acquire);
+  }
+
+  std::lock_guard<std::mutex> lock(*output_mutexes_.at(node_idx));
+  if (node_precomputed_[node_idx].load(std::memory_order_acquire)) {
+    return true;
+  }
+  if (temp_results_[node_idx].has_value()) {
+    return false;
+  }
+
+  try_load_disk_cache(target_node, node_idx);
+  if (temp_results_[node_idx].has_value()) {
+    node_precomputed_[node_idx].store(true, std::memory_order_release);
+    return true;
+  }
+  return false;
+}
+
+ImageBuffer* NodeTaskRunner::ensure_tile_output_buffer(
     int node_idx, const Node& target_node,
     const std::vector<const NodeOutput*>& image_inputs) {
   std::lock_guard<std::mutex> lock(*output_mutexes_.at(node_idx));
+  if (node_precomputed_[node_idx].load(std::memory_order_acquire)) {
+    return nullptr;
+  }
   if (!temp_results_[node_idx].has_value()) {
     const cv::Size planned_size = planned_output_sizes_.at(node_idx);
     const cv::Size output_size =
@@ -312,7 +333,7 @@ ImageBuffer& NodeTaskRunner::ensure_tile_output_buffer(
     temp_results_[node_idx]->image_buffer = make_aligned_cpu_image_buffer(
         output_size.width, output_size.height, channels, dtype);
   }
-  return temp_results_[node_idx]->image_buffer;
+  return &temp_results_[node_idx]->image_buffer;
 }
 
 void NodeTaskRunner::finalize_tiled_node_if_complete(
