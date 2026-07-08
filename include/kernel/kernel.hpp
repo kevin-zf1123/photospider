@@ -201,6 +201,22 @@ class Kernel {
                                                int target_node_id,
                                                const cv::Rect& target_roi,
                                                int source_node_id);
+
+  /**
+   * @brief Reloads an existing graph session from YAML through graph-state
+   * serialization.
+   *
+   * @param name Graph session name to reload.
+   * @param yaml_path Source YAML file path.
+   * @return true when reload succeeds; false when the graph is missing or the
+   * reload fails with a handled IO/YAML error.
+   * @throws Nothing; GraphError/std::exception from the backend load path are
+   * converted to last_error() and false.
+   * @note Missing graph sessions preserve the legacy quiet false result without
+   * updating LastError. For existing sessions, GraphIOService error categories
+   * such as GraphErrc::Io and GraphErrc::InvalidYaml are retained in
+   * last_error().
+   */
   bool reload_graph_yaml(const std::string& name, const std::string& yaml_path);
   bool save_graph_yaml(const std::string& name, const std::string& yaml_path);
   bool clear_drive_cache(const std::string& name);

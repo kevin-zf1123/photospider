@@ -3,6 +3,7 @@
  * @brief Implements Kernel graph IO, timing, cache, and graph-clear facades.
  */
 #include <filesystem>
+#include <string>
 
 #include "kernel/kernel.hpp"
 
@@ -13,14 +14,28 @@ std::optional<TimingCollector> Kernel::get_timing(const std::string& name) {
       name, [](GraphModel& graph) { return graph.timing_results; });
 }
 
+/**
+ * @brief Reloads one existing graph from a YAML file and records load errors.
+ *
+ * @param name Graph session name to reload.
+ * @param yaml_path Source YAML file path.
+ * @return true when GraphIOService loads and replaces graph nodes; false when
+ *         the graph is missing or reload fails.
+ * @throws Nothing; backend GraphError/std::exception failures are captured by
+ *         with_graph_state_last_error().
+ * @note Existing-session failures preserve GraphIOService classifications in
+ *       Kernel::last_error(), allowing Host callers to distinguish unreadable
+ *       input from malformed YAML. Missing sessions still return false without
+ *       creating LastError state.
+ */
 bool Kernel::reload_graph_yaml(const std::string& name,
                                const std::string& yaml_path) {
   const std::filesystem::path path = yaml_path;
-  return with_graph_state(name,
-                          [this, path](GraphModel& graph) {
-                            io_service_.load(graph, path);
-                            return true;
-                          })
+  return with_graph_state_last_error(name, "Reload graph YAML failed: ",
+                                     [this, path](GraphModel& graph) {
+                                       io_service_.load(graph, path);
+                                       return true;
+                                     })
       .value_or(false);
 }
 
