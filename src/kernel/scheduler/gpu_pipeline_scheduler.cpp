@@ -436,7 +436,7 @@ std::vector<Device> GpuPipelineScheduler::get_available_devices() const {
   std::vector<Device> devices;
   devices.push_back(Device::CPU);
 
-  if (is_gpu_available()) {
+  if (can_dispatch_hp_to_gpu()) {
     devices.push_back(Device::GPU_METAL);
   }
 

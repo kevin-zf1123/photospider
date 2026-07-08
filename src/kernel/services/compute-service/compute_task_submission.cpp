@@ -53,22 +53,6 @@ std::exception_ptr scheduling_failure(const GraphModel& graph, int node_id,
 }
 
 /**
- * @brief Checks whether one implementation can run on an available device.
- *
- * @param impl Registered operation implementation candidate.
- * @param available_devices Devices exposed by the active scheduler runtime.
- * @return True when impl metadata names a device in available_devices.
- * @throws Nothing directly.
- * @note Device selection is intentionally tied to scheduler runtime capability
- * rather than compile-time platform checks.
- */
-bool implementation_device_available(
-    const OpImplementation& impl, const std::vector<Device>& available_devices) {
-  return std::find(available_devices.begin(), available_devices.end(),
-                   impl.metadata.device_preference) != available_devices.end();
-}
-
-/**
  * @brief Checks whether a candidate matches the planned task shape.
  *
  * @param impl Registered operation implementation candidate.
@@ -93,11 +77,10 @@ bool implementation_shape_compatible(const OpImplementation& impl,
  * @param require_tiled Whether task graph materialization requires TileOpFunc.
  * @return Selected operation variant, or nullopt when no compatible
  * per-device implementation is available.
- * @throws std::bad_alloc if registry helper vectors allocate.
- * @note The primary selection path calls OpRegistry::select_best_implementation.
- * If that best candidate does not match the already materialized task shape,
- * this helper falls back to the lowest-cost compatible implementation instead
- * of handing a monolithic function to a tile task.
+ * @throws std::bad_alloc if registry candidate storage allocation fails.
+ * @note The registry owns available-device filtering, HP device priority, and
+ * cost_score tie-breaking. This helper contributes only the local task-shape
+ * predicate required by the already materialized dispatch plan.
  */
 std::optional<OpRegistry::OpVariant> select_device_aware_hp_op(
     const Node& node, const std::vector<Device>& available_devices,
@@ -105,34 +88,14 @@ std::optional<OpRegistry::OpVariant> select_device_aware_hp_op(
   const OpRegistry& registry = OpRegistry::instance();
   const OpImplementation* best = registry.select_best_implementation(
       node.type, node.subtype, available_devices,
-      ComputeIntent::GlobalHighPrecision);
-  if (best && implementation_shape_compatible(*best, require_tiled)) {
-    return best->func;
-  }
-
-  std::vector<const OpImplementation*> compatible;
-  for (const OpImplementation* impl :
-       registry.get_all_implementations(node.type, node.subtype)) {
-    if (!impl) {
-      continue;
-    }
-    if (!implementation_device_available(*impl, available_devices)) {
-      continue;
-    }
-    if (!implementation_shape_compatible(*impl, require_tiled)) {
-      continue;
-    }
-    compatible.push_back(impl);
-  }
-  if (compatible.empty()) {
+      ComputeIntent::GlobalHighPrecision,
+      [require_tiled](const OpImplementation& impl) {
+        return implementation_shape_compatible(impl, require_tiled);
+      });
+  if (!best) {
     return std::nullopt;
   }
-  auto best_compatible = std::min_element(
-      compatible.begin(), compatible.end(),
-      [](const OpImplementation* lhs, const OpImplementation* rhs) {
-        return lhs->metadata.cost_score < rhs->metadata.cost_score;
-      });
-  return (*best_compatible)->func;
+  return best->func;
 }
 
 /**

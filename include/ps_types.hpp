@@ -439,13 +439,56 @@ class OpRegistry {
   std::vector<const OpImplementation*> get_all_implementations(
       const std::string& type, const std::string& subtype) const;
 
-  // 根据 ComputeIntent 和可用设备选择最优实现
-  // @param available_devices 当前可用的设备列表
-  // @param intent 计算意图（HP 或 RT）
-  // @return 最优实现的指针，如果无可用实现则返回 nullptr
+  /**
+   * @brief Selects the best registered implementation for an intent.
+   *
+   * The registry owns the intent-specific ordering policy. It first restricts
+   * candidates to implementations whose `device_preference` is present in
+   * `available_devices`, then orders the remaining candidates by
+   * `ComputeIntent` device priority and `cost_score`.
+   *
+   * @param type Operation type, such as `"image_process"`.
+   * @param subtype Operation subtype, such as `"gaussian_blur"`.
+   * @param available_devices Devices exposed by the active scheduler runtime.
+   * @param intent Compute path selecting the HP or RT priority policy.
+   * @return Pointer to the selected implementation, or nullptr when the key is
+   * missing or no implementation can run on an available device.
+   * @throws std::bad_alloc if temporary candidate storage allocation fails.
+   * @note Returned pointers borrow storage owned by OpRegistry and remain valid
+   * until the matching operation key is unregistered or the registry is mutated
+   * in a way that reallocates that key's implementation vector.
+   */
   const OpImplementation* select_best_implementation(
       const std::string& type, const std::string& subtype,
       const std::vector<Device>& available_devices, ComputeIntent intent) const;
+
+  /**
+   * @brief Selects the best registered implementation after caller filtering.
+   *
+   * This overload applies the same registry-owned device and intent ordering as
+   * the four-argument overload, while allowing a caller to reject candidates
+   * for local execution constraints such as task-shape compatibility. An empty
+   * `candidate_filter` accepts every available-device candidate.
+   *
+   * @param type Operation type, such as `"image_process"`.
+   * @param subtype Operation subtype, such as `"gaussian_blur"`.
+   * @param available_devices Devices exposed by the active scheduler runtime.
+   * @param intent Compute path selecting the HP or RT priority policy.
+   * @param candidate_filter Optional predicate; returning false removes the
+   * candidate before registry ordering is applied.
+   * @return Pointer to the selected implementation, or nullptr when the key is
+   * missing or no available candidate survives filtering.
+   * @throws std::bad_alloc if temporary candidate storage allocation fails.
+   * @throws Any exception thrown by `candidate_filter`.
+   * @note The filter must not mutate OpRegistry or retain references to
+   * candidates beyond the call. Sorting policy remains centralized in
+   * OpRegistry.
+   */
+  const OpImplementation* select_best_implementation(
+      const std::string& type, const std::string& subtype,
+      const std::vector<Device>& available_devices, ComputeIntent intent,
+      const std::function<bool(const OpImplementation&)>& candidate_filter)
+      const;
 
   /**
    * @brief Runs a registration callback while capturing touched keys.

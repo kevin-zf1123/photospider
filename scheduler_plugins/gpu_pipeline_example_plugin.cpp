@@ -34,14 +34,34 @@ const char* ps_scheduler_plugin_get_description(int index) {
   return (index == 0 || index == 1) ? desc : nullptr;
 }
 
+/**
+ * @brief Creates an example GPU pipeline scheduler plugin instance.
+ *
+ * The example aliases use the active `GpuPipelineScheduler::Config` surface:
+ * HP dispatch may prefer GPU work queues, while RT dispatch stays on the
+ * scheduler's CPU RT queue through the scheduler's built-in queue topology
+ * rather than through a deprecated config flag.
+ *
+ * @param type_name Scheduler type requested by the plugin loader; nullptr is
+ * rejected as an unsupported scheduler type.
+ * @param num_workers Requested CPU worker count; zero preserves the scheduler's
+ * automatic worker-count behavior.
+ * @return A heap-allocated scheduler for supported aliases, or nullptr when
+ * `type_name` is not provided by this plugin.
+ * @throws std::bad_alloc if scheduler allocation fails.
+ * @note Ownership transfers to the plugin loader, which must release the
+ * instance through `ps_scheduler_plugin_destroy()`.
+ */
 ps::IScheduler* ps_scheduler_plugin_create(const char* type_name,
                                            unsigned int num_workers) {
+  if (!type_name) {
+    return nullptr;
+  }
   std::string name(type_name);
   if (name == "gpu_pipeline_example" || name == "heterogeneous_example") {
     ps::GpuPipelineScheduler::Config config;
     config.cpu_workers = num_workers;
     config.prefer_gpu_for_hp = true;
-    config.force_cpu_for_rt = true;
     return new ps::GpuPipelineScheduler(config);
   }
   return nullptr;

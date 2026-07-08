@@ -10,12 +10,14 @@
 
 #include <gtest/gtest.h>
 
+#include <algorithm>
 #include <atomic>
 #include <chrono>
 #include <future>
 #include <thread>
 #include <vector>
 
+#include "adapter/buffer_adapter_opencv.hpp"
 #include "kernel/graph_runtime.hpp"
 #include "kernel/interaction.hpp"
 #include "kernel/kernel.hpp"
@@ -137,6 +139,44 @@ NodeOutput production_gpu_marker_op(
   output.image_buffer.type = DataType::FLOAT32;
   output.image_buffer.device = Device::GPU_METAL;
   return output;
+}
+
+/**
+ * @brief CPU tiled marker used to catch incorrect fallback selection.
+ *
+ * @param node Node being computed, unused by the marker.
+ * @param output_tile Destination tile whose buffer is tagged as CPU.
+ * @param input_tiles Resolved input tiles, unused for generator tests.
+ * @throws OpenCV exceptions if the destination tile cannot be viewed.
+ * @note The callback writes a visible pixel value and device tag so production
+ * compute tests can identify which compatible tiled implementation ran.
+ */
+void production_cpu_tiled_marker_op(const Node& node,
+                                    const OutputTile& output_tile,
+                                    const std::vector<InputTile>& input_tiles) {
+  (void)node;
+  (void)input_tiles;
+  output_tile.buffer->device = Device::CPU;
+  toCvMat(output_tile).setTo(1.0f);
+}
+
+/**
+ * @brief GPU tiled marker used to prove fallback preserves HP device priority.
+ *
+ * @param node Node being computed, unused by the marker.
+ * @param output_tile Destination tile whose buffer is tagged as GPU_METAL.
+ * @param input_tiles Resolved input tiles, unused for generator tests.
+ * @throws OpenCV exceptions if the destination tile cannot be viewed.
+ * @note The callback does not require real Metal execution; it marks the
+ * selected implementation path while the test scheduler runs tasks serially.
+ */
+void production_gpu_tiled_marker_op(const Node& node,
+                                    const OutputTile& output_tile,
+                                    const std::vector<InputTile>& input_tiles) {
+  (void)node;
+  (void)input_tiles;
+  output_tile.buffer->device = Device::GPU_METAL;
+  toCvMat(output_tile).setTo(2.0f);
 }
 
 class GpuPipelineSchedulerTest : public ::testing::Test {
@@ -296,17 +336,16 @@ TEST_F(GpuPipelineSchedulerTest, ProductionComputeUsesDeviceImplementation) {
   OpMetadata cpu_meta;
   cpu_meta.device_preference = Device::CPU;
   cpu_meta.cost_score = 100;
-  registry.register_impl(kType, kSubtype, Device::CPU,
-                         production_cpu_marker_op, cpu_meta);
+  registry.register_impl(kType, kSubtype, Device::CPU, production_cpu_marker_op,
+                         cpu_meta);
 
   GraphRuntime::Info info;
   info.name = "device-routing-production";
   info.root = "build/test-device-routing-production";
   info.cache_root = "build/test-device-routing-production/cache";
   GraphRuntime runtime(info);
-  runtime.set_scheduler(
-      ComputeIntent::GlobalHighPrecision,
-      std::make_unique<GpuAvailableSerialScheduler>());
+  runtime.set_scheduler(ComputeIntent::GlobalHighPrecision,
+                        std::make_unique<GpuAvailableSerialScheduler>());
   runtime.start();
 
   Node node;
@@ -326,14 +365,117 @@ TEST_F(GpuPipelineSchedulerTest, ProductionComputeUsesDeviceImplementation) {
   request.cache.force_recache = true;
   request.cache.disable_disk_cache = true;
 
-  NodeOutput& result = compute.compute_parallel(runtime.model(), runtime,
-                                                request);
+  NodeOutput& result =
+      compute.compute_parallel(runtime.model(), runtime, request);
   EXPECT_EQ(result.image_buffer.device, Device::GPU_METAL);
   EXPECT_EQ(result.image_buffer.width, 8);
   EXPECT_EQ(result.image_buffer.height, 8);
 
   runtime.stop();
   registry.unregister_key(make_key(kType, kSubtype));
+}
+
+TEST_F(GpuPipelineSchedulerTest,
+       ProductionTiledFallbackPreservesHpDevicePriority) {
+  constexpr const char* kType = "image_generator";
+  constexpr const char* kSubtype = "tiled_device_priority_fallback";
+  auto& registry = OpRegistry::instance();
+  registry.unregister_key(make_key(kType, kSubtype));
+
+  OpMetadata gpu_monolithic_meta;
+  gpu_monolithic_meta.device_preference = Device::GPU_METAL;
+  gpu_monolithic_meta.cost_score = 1;
+  registry.register_impl(kType, kSubtype, Device::GPU_METAL,
+                         production_gpu_marker_op, gpu_monolithic_meta);
+
+  OpMetadata cpu_tiled_meta;
+  cpu_tiled_meta.device_preference = Device::CPU;
+  cpu_tiled_meta.cost_score = 5;
+  cpu_tiled_meta.tile_preference = TileSizePreference::MICRO;
+  registry.register_impl(kType, kSubtype, Device::CPU,
+                         production_cpu_tiled_marker_op, cpu_tiled_meta);
+
+  OpMetadata gpu_tiled_meta;
+  gpu_tiled_meta.device_preference = Device::GPU_METAL;
+  gpu_tiled_meta.cost_score = 100;
+  gpu_tiled_meta.tile_preference = TileSizePreference::MICRO;
+  registry.register_impl(kType, kSubtype, Device::GPU_METAL,
+                         production_gpu_tiled_marker_op, gpu_tiled_meta);
+
+  GraphRuntime::Info info;
+  info.name = "tiled-device-priority-fallback";
+  info.root = "build/test-tiled-device-priority-fallback";
+  info.cache_root = "build/test-tiled-device-priority-fallback/cache";
+  GraphRuntime runtime(info);
+  runtime.set_scheduler(ComputeIntent::GlobalHighPrecision,
+                        std::make_unique<GpuAvailableSerialScheduler>());
+  runtime.start();
+
+  Node node;
+  node.id = 1;
+  node.name = "tiled_device_route";
+  node.type = kType;
+  node.subtype = kSubtype;
+  node.parameters["width"] = 32;
+  node.parameters["height"] = 32;
+  runtime.model().add_node(node);
+
+  GraphTraversalService traversal;
+  GraphCacheService cache;
+  ComputeService compute(traversal, cache, runtime.event_service());
+  ComputeService::Request request;
+  request.node_id = node.id;
+  request.cache.force_recache = true;
+  request.cache.disable_disk_cache = true;
+
+  NodeOutput& result =
+      compute.compute_parallel(runtime.model(), runtime, request);
+  ASSERT_TRUE(runtime.model().last_compute_plan.has_value());
+  const auto& tasks = runtime.model().last_compute_plan->task_graph.tasks;
+  EXPECT_TRUE(std::any_of(tasks.begin(), tasks.end(), [](const auto& task) {
+    return task.kind == ps::compute::PlannedTaskKind::Tile;
+  }));
+  EXPECT_EQ(result.image_buffer.device, Device::GPU_METAL);
+  EXPECT_EQ(result.debug.compute_device, "GPU_METAL");
+  EXPECT_EQ(toCvMat(result.image_buffer).at<float>(0, 0), 2.0f);
+
+  runtime.stop();
+  registry.unregister_key(make_key(kType, kSubtype));
+}
+
+TEST_F(GpuPipelineSchedulerTest, AvailableDevicesHonorGpuDispatchConfig) {
+  GraphRuntime::Info info;
+  info.name = "available-device-config";
+  info.root = "build/test-available-device-config";
+  info.cache_root = "build/test-available-device-config/cache";
+  GraphRuntime runtime(info);
+  if (runtime.get_metal_device() == nullptr) {
+    GTEST_SKIP() << "Metal device is unavailable on this host.";
+  }
+
+  GpuPipelineScheduler::Config disabled_workers;
+  disabled_workers.gpu_workers = 0;
+  disabled_workers.prefer_gpu_for_hp = true;
+  GpuPipelineScheduler no_gpu_workers(disabled_workers);
+  no_gpu_workers.attach(&runtime);
+  EXPECT_EQ(no_gpu_workers.available_devices(),
+            std::vector<Device>{Device::CPU});
+
+  GpuPipelineScheduler::Config cpu_hp_config;
+  cpu_hp_config.gpu_workers = 1;
+  cpu_hp_config.prefer_gpu_for_hp = false;
+  GpuPipelineScheduler cpu_hp_scheduler(cpu_hp_config);
+  cpu_hp_scheduler.attach(&runtime);
+  EXPECT_EQ(cpu_hp_scheduler.available_devices(),
+            std::vector<Device>{Device::CPU});
+
+  GpuPipelineScheduler::Config enabled_config;
+  enabled_config.gpu_workers = 1;
+  enabled_config.prefer_gpu_for_hp = true;
+  GpuPipelineScheduler gpu_enabled_scheduler(enabled_config);
+  gpu_enabled_scheduler.attach(&runtime);
+  EXPECT_EQ(gpu_enabled_scheduler.available_devices(),
+            (std::vector<Device>{Device::CPU, Device::GPU_METAL}));
 }
 
 // =============================================================================

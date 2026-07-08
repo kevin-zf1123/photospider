@@ -38,10 +38,7 @@ class GpuPipelineScheduler : public IScheduler, public SchedulerTaskRuntime {
     // 是否优先使用 GPU（HP 模式）
     bool prefer_gpu_for_hp;
 
-    Config()
-        : gpu_workers(1),
-          cpu_workers(0),
-          prefer_gpu_for_hp(true) {}
+    Config() : gpu_workers(1), cpu_workers(0), prefer_gpu_for_hp(true) {}
   };
 
   /// @brief 构造函数
@@ -169,16 +166,26 @@ class GpuPipelineScheduler : public IScheduler, public SchedulerTaskRuntime {
   /// @brief 检查 GPU 是否可用
   bool is_gpu_available() const;
 
-  /// @brief 获取当前可用设备列表
+  /**
+   * @brief Returns devices that HP production compute may target here.
+   *
+   * @return CPU plus GPU_METAL only when a Metal device is attached and HP GPU
+   * dispatch is enabled by config and worker availability.
+   * @throws std::bad_alloc if vector allocation fails.
+   * @note This list feeds TaskSubmissionPlan operation resolution. It must
+   * remain aligned with can_dispatch_hp_to_gpu() so disabled GPU workers or
+   * CPU-for-HP configurations do not select GPU implementations for CPU queues.
+   */
   std::vector<Device> get_available_devices() const;
 
   /**
    * @brief Reports devices available to compute tasks submitted here.
    *
-   * @return CPU plus GPU_METAL when this runtime has an attached Metal device.
+   * @return Same list as get_available_devices().
    * @throws std::bad_alloc if vector allocation fails.
    * @note This overrides SchedulerTaskRuntime so production operation
-   * resolution can choose registered per-device implementations.
+   * resolution can choose registered per-device implementations only for
+   * devices this scheduler is currently willing to dispatch.
    */
   std::vector<Device> available_devices() const override;
 
@@ -287,7 +294,6 @@ class GpuPipelineScheduler : public IScheduler, public SchedulerTaskRuntime {
   static thread_local int tls_worker_id_;
   static thread_local uint64_t tls_active_epoch_;
   static thread_local bool tls_is_gpu_worker_;
-
 };
 
 }  // namespace ps
