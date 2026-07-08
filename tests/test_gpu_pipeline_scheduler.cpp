@@ -14,7 +14,10 @@
 #include <atomic>
 #include <chrono>
 #include <future>
+#include <memory>
+#include <string>
 #include <thread>
+#include <utility>
 #include <vector>
 
 #include "adapter/buffer_adapter_opencv.hpp"
@@ -28,7 +31,7 @@
 #include "kernel/services/compute_service.hpp"
 #include "kernel/services/graph_cache_service.hpp"
 #include "kernel/services/graph_traversal_service.hpp"
-#include "ps_types.hpp"
+#include "ps_types.hpp"  // NOLINT(build/include_subdir)
 
 namespace ps {
 namespace {
@@ -583,11 +586,30 @@ TEST_F(GpuPipelineSchedulerTest, NewEpochCancelsStale) {
   scheduler->start();
 
   std::atomic<int> executed{0};
+  std::promise<void> blocker_started;
+  std::promise<void> release_blocker;
+  auto blocker_started_future = blocker_started.get_future();
+  auto release_blocker_future = release_blocker.get_future().share();
+
+  // Keep the single worker busy so the stale task remains queued until epoch2
+  // becomes active. Epoch cancellation is a queued-work guarantee; tasks that
+  // have already started may finish.
+  scheduler->submit_hp_task([&blocker_started, release_blocker_future]() {
+    blocker_started.set_value();
+    release_blocker_future.wait();
+  });
+
+  if (blocker_started_future.wait_for(std::chrono::seconds(1)) !=
+      std::future_status::ready) {
+    release_blocker.set_value();
+    scheduler->shutdown();
+    FAIL() << "Timed out waiting for the blocker task to start";
+  }
 
   // 获取当前 epoch
   uint64_t epoch1 = scheduler->begin_new_epoch();
 
-  // 提交使用旧 epoch 的任务
+  // 提交使用旧 epoch 的任务；该任务仍在队列中，稍后应被取消。
   scheduler->submit_hp_task([&executed]() { executed.fetch_add(1); }, epoch1);
 
   // 开始新 epoch（应取消上面的任务）
@@ -595,9 +617,21 @@ TEST_F(GpuPipelineSchedulerTest, NewEpochCancelsStale) {
   EXPECT_GT(epoch2, epoch1);
 
   // 提交使用新 epoch 的任务
-  scheduler->submit_hp_task([&executed]() { executed.fetch_add(10); }, epoch2);
+  std::promise<void> new_task_done;
+  auto new_task_done_future = new_task_done.get_future();
+  scheduler->submit_hp_task(
+      [&executed, &new_task_done]() {
+        executed.fetch_add(10);
+        new_task_done.set_value();
+      },
+      epoch2);
 
-  std::this_thread::sleep_for(std::chrono::milliseconds(50));
+  release_blocker.set_value();
+  if (new_task_done_future.wait_for(std::chrono::seconds(1)) !=
+      std::future_status::ready) {
+    scheduler->shutdown();
+    FAIL() << "Timed out waiting for the new epoch task to run";
+  }
   scheduler->shutdown();
 
   // 旧任务应该被取消，只有新任务执行
