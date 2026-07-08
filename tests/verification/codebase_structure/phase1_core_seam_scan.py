@@ -81,7 +81,10 @@ def rel(repo: Path, path: Path) -> str:
 
 
 def strip_comments(text: str) -> str:
-    without_blocks = re.sub(r"/\*.*?\*/", "", text, flags=re.DOTALL)
+    def replace_block(match: re.Match[str]) -> str:
+        return "\n" * match.group(0).count("\n")
+
+    without_blocks = re.sub(r"/\*.*?\*/", replace_block, text, flags=re.DOTALL)
     return "\n".join(line.split("//", 1)[0] for line in without_blocks.splitlines())
 
 
@@ -164,14 +167,15 @@ def inspect_core_headers(repo: Path) -> dict[str, Any]:
     for path_name in CORE_HEADERS:
         path = repo / path_name
         text = path.read_text(encoding="utf-8") if path.exists() else ""
-        combined_text += "\n" + strip_comments(text)
+        code_text = strip_comments(text)
+        combined_text += "\n" + code_text
         rows.append(
             {
                 "path": path_name,
                 "exists": path.exists(),
                 "uses_namespace_ps": (
                     path_name not in VALUE_CONTRACT_HEADERS
-                    or bool(NAMESPACE_PS_RE.search(text))
+                    or bool(NAMESPACE_PS_RE.search(code_text))
                 ),
                 "has_doxygen_file_brief": "@file" in text and "@brief" in text,
             }

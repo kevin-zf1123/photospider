@@ -95,9 +95,19 @@ def normalize_include(include: str) -> str:
     return include.replace("\\", "/")
 
 
+def strip_comments(text: str) -> str:
+    def replace_block(match: re.Match[str]) -> str:
+        return "\n" * match.group(0).count("\n")
+
+    without_blocks = re.sub(r"/\*.*?\*/", replace_block, text, flags=re.DOTALL)
+    return "\n".join(
+        line.split("//", 1)[0] for line in without_blocks.splitlines()
+    )
+
+
 def include_violations(header: str, text: str) -> list[dict[str, Any]]:
     violations: list[dict[str, Any]] = []
-    for line_number, line in enumerate(text.splitlines(), start=1):
+    for line_number, line in enumerate(strip_comments(text).splitlines(), start=1):
         match = INCLUDE_RE.match(line)
         if not match:
             continue
@@ -189,6 +199,9 @@ def detector_selftest() -> dict[str, Any]:
         [
             '#include "src/private.hpp"',
             '#include <kernel/services/compute_service.hpp>',
+            "/*",
+            '#include "src/commented_private.hpp"',
+            "*/",
             "namespace ps { class Public; }",
         ]
     )
@@ -204,6 +217,9 @@ def detector_selftest() -> dict[str, Any]:
         "detects_kernel_services_include": any(
             hit["include"] == "kernel/services/compute_service.hpp"
             for hit in include_hits
+        ),
+        "ignores_block_comment_include": not any(
+            hit["include"] == "src/commented_private.hpp" for hit in include_hits
         ),
         "detects_implementation_type": any(
             hit["type"] == "GraphRuntime" for hit in type_hits
@@ -302,6 +318,7 @@ def main() -> int:
         "detector_selftest": {
             "detects_src_include": True,
             "detects_kernel_services_include": True,
+            "ignores_block_comment_include": True,
             "detects_implementation_type": True,
         },
         "document_ownership": {
@@ -341,6 +358,11 @@ def main() -> int:
             "detector_selftest.detects_implementation_type",
             actual["detector_selftest"]["detects_implementation_type"]
             == expected["detector_selftest"]["detects_implementation_type"],
+        ),
+        (
+            "detector_selftest.ignores_block_comment_include",
+            actual["detector_selftest"]["ignores_block_comment_include"]
+            == expected["detector_selftest"]["ignores_block_comment_include"],
         ),
         (
             "document_ownership.all_docs_exist",
