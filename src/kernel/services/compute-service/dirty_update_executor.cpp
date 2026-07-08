@@ -2,6 +2,7 @@
 
 #include <memory>
 #include <mutex>
+#include <unordered_map>
 #include <utility>
 #include <vector>
 
@@ -16,6 +17,7 @@
 #include "kernel/services/compute-service/downsample_executor.hpp"
 #include "kernel/services/compute-service/realtime_proxy_graph.hpp"
 #include "kernel/services/graph_event_service.hpp"
+#include "kernel/services/graph_extent_resolver.hpp"
 #include "kernel/services/graph_traversal_service.hpp"
 #include "kernel/services/roi_propagation_service.hpp"
 
@@ -208,22 +210,26 @@ cv::Rect hp_planning_roi_for_request(const GraphModel& graph,
                      "Cannot compute forced HP dirty update: node " +
                          std::to_string(request.node_id) + " not found.");
   }
-  const NodeOutput* target_output =
-      ComputeCachePolicy::reusable_output(*target);
-  if (!target_output) {
-    throw GraphError(GraphErrc::MissingDependency,
-                     "Cannot compute forced HP dirty update for node " +
-                         std::to_string(request.node_id) +
-                         ": existing HP output extent is unavailable.");
+  if (const NodeOutput* target_output =
+          ComputeCachePolicy::reusable_output(*target)) {
+    const ImageBuffer& buffer = target_output->image_buffer;
+    if (buffer.width > 0 && buffer.height > 0) {
+      return cv::Rect(0, 0, buffer.width, buffer.height);
+    }
   }
-  const ImageBuffer& buffer = target_output->image_buffer;
-  if (buffer.width <= 0 || buffer.height <= 0) {
+
+  GraphExtentResolver extent_resolver;
+  std::unordered_map<int, cv::Size> extent_cache;
+  const cv::Size target_extent =
+      extent_resolver.resolve_output_extent(graph, request.node_id,
+                                            extent_cache);
+  if (target_extent.width <= 0 || target_extent.height <= 0) {
     throw GraphError(GraphErrc::InvalidParameter,
                      "Cannot compute forced HP dirty update for node " +
                          std::to_string(request.node_id) +
-                         ": existing HP output extent is invalid.");
+                         ": HP output extent is unavailable.");
   }
-  return cv::Rect(0, 0, buffer.width, buffer.height);
+  return cv::Rect(0, 0, target_extent.width, target_extent.height);
 }
 
 }  // namespace

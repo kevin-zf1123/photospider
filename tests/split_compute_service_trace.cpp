@@ -1975,13 +1975,14 @@ int main(int argc, char** argv) {
         dirty_text.find("generation=") != std::string::npos &&
         dirty_text.find("tiles=") != std::string::npos &&
         dirty_text.find("edges=") != std::string::npos;
+    const size_t expected_dirty_tile_count = 4;
     const bool dirty_detail_ok =
         dirty_struct.is_object() && dirty_struct.contains("dirty_tiles") &&
         dirty_struct.contains("dirty_monolithic_nodes") &&
         dirty_struct.contains("per_node_dirty_rois") &&
         dirty_struct.contains("edge_mappings") &&
         dirty_struct.value("graph_generation", 0) >= 1 &&
-        dirty_struct["dirty_tiles"].size() == 1 &&
+        dirty_struct["dirty_tiles"].size() == expected_dirty_tile_count &&
         dirty_struct["dirty_monolithic_nodes"].size() == 2 &&
         dirty_struct["per_node_dirty_rois"].size() == 3 &&
         dirty_struct["edge_mappings"].size() == 2;
@@ -2102,7 +2103,7 @@ int main(int argc, char** argv) {
     json task5_expected = {
         {"dirty_snapshot_debug_contains", {"generation=", "tiles=", "edges="}},
         {"dirty_snapshot_detail",
-         {{"dirty_tiles", 1},
+         {{"dirty_tiles", expected_dirty_tile_count},
           {"dirty_monolithic_nodes", 2},
           {"per_node_dirty_rois", 3},
           {"edge_mappings", 2}}},

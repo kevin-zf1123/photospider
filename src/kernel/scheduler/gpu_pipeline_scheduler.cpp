@@ -1,5 +1,5 @@
 // Photospider kernel: GpuPipelineScheduler implementation
-// M3.5: 异构调度器 - 支持 HP 走 GPU、RT 走 CPU 的混合计算模式
+// M3.5: 异构调度器 - 支持 HP GPU 队列和 RT CPU 高优先级队列
 // Scheduler dispatches already-planned HP/RT tasks.
 
 #include "kernel/scheduler/gpu_pipeline_scheduler.hpp"
@@ -26,37 +26,6 @@ GpuPipelineScheduler::GpuPipelineScheduler(const Config& config)
   if (config_.cpu_workers == 0) {
     config_.cpu_workers = std::max(1u, std::thread::hardware_concurrency());
   }
-  init_priority_tables();
-}
-
-// =============================================================================
-// 资源偏好表初始化
-// =============================================================================
-void GpuPipelineScheduler::init_priority_tables() {
-  // HP 模式优先级表；Macro/Micro 是 HP domain 内的粒度偏好。
-  // 优先级值越小越优先
-  hp_priority_table_ = {
-      {Device::GPU_METAL, true, TileSizePreference::UNDEFINED, 10,
-       "GPU Monolithic"},
-      {Device::CPU, true, TileSizePreference::UNDEFINED, 30, "CPU Monolithic"},
-      {Device::CPU, false, TileSizePreference::MACRO, 50, "CPU Tiled (Macro)"},
-      {Device::GPU_METAL, false, TileSizePreference::MACRO, 60,
-       "GPU Tiled (Macro)"},
-      {Device::CPU, false, TileSizePreference::MICRO, 80, "CPU Tiled (Micro)"},
-  };
-
-  // RT 模式优先级表；Macro/Micro 是 RT domain 内的粒度偏好。
-  // 小 tile 可以快速返回第一个结果，适合实时预览。
-  rt_priority_table_ = {
-      {Device::CPU, false, TileSizePreference::MICRO, 10, "CPU Tiled (Micro)"},
-      {Device::CPU, true, TileSizePreference::UNDEFINED, 50, "CPU Monolithic"},
-      {Device::CPU, false, TileSizePreference::MACRO, 70, "CPU Tiled (Macro)"},
-      // GPU 在 RT 模式下不优先（延迟较高）
-      {Device::GPU_METAL, true, TileSizePreference::UNDEFINED, 100,
-       "GPU Monolithic"},
-      {Device::GPU_METAL, false, TileSizePreference::MACRO, 110,
-       "GPU Tiled (Macro)"},
-  };
 }
 
 GpuPipelineScheduler::~GpuPipelineScheduler() {
@@ -472,6 +441,10 @@ std::vector<Device> GpuPipelineScheduler::get_available_devices() const {
   }
 
   return devices;
+}
+
+std::vector<Device> GpuPipelineScheduler::available_devices() const {
+  return get_available_devices();
 }
 
 // =============================================================================

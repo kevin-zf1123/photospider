@@ -6,6 +6,7 @@
 #include <memory>
 #include <string>
 #include <utility>
+#include <variant>
 #include <vector>
 
 #include "kernel/services/compute-service/compute_dispatch_plan_builder.hpp"
@@ -49,6 +50,89 @@ std::exception_ptr scheduling_failure(const GraphModel& graph, int node_id,
       GraphError(GraphErrc::ComputeError, "Scheduling stage after " +
                                               node_context(graph, node_id) +
                                               " failed: " + detail));
+}
+
+/**
+ * @brief Checks whether one implementation can run on an available device.
+ *
+ * @param impl Registered operation implementation candidate.
+ * @param available_devices Devices exposed by the active scheduler runtime.
+ * @return True when impl metadata names a device in available_devices.
+ * @throws Nothing directly.
+ * @note Device selection is intentionally tied to scheduler runtime capability
+ * rather than compile-time platform checks.
+ */
+bool implementation_device_available(
+    const OpImplementation& impl, const std::vector<Device>& available_devices) {
+  return std::find(available_devices.begin(), available_devices.end(),
+                   impl.metadata.device_preference) != available_devices.end();
+}
+
+/**
+ * @brief Checks whether a candidate matches the planned task shape.
+ *
+ * @param impl Registered operation implementation candidate.
+ * @param require_tiled Whether the planned task graph contains tile tasks for
+ * this node.
+ * @return True when the implementation shape is compatible.
+ * @throws Nothing.
+ * @note Node/monolithic planned tasks may run either monolithic callbacks or
+ * full-node tiled callbacks through NodeExecutor::execute(). Materialized tile
+ * tasks must run a TileOpFunc.
+ */
+bool implementation_shape_compatible(const OpImplementation& impl,
+                                     bool require_tiled) {
+  return !require_tiled || impl.is_tiled();
+}
+
+/**
+ * @brief Chooses a shape-compatible per-device implementation for HP compute.
+ *
+ * @param node Graph node whose operation is being resolved.
+ * @param available_devices Devices exposed by the active scheduler runtime.
+ * @param require_tiled Whether task graph materialization requires TileOpFunc.
+ * @return Selected operation variant, or nullopt when no compatible
+ * per-device implementation is available.
+ * @throws std::bad_alloc if registry helper vectors allocate.
+ * @note The primary selection path calls OpRegistry::select_best_implementation.
+ * If that best candidate does not match the already materialized task shape,
+ * this helper falls back to the lowest-cost compatible implementation instead
+ * of handing a monolithic function to a tile task.
+ */
+std::optional<OpRegistry::OpVariant> select_device_aware_hp_op(
+    const Node& node, const std::vector<Device>& available_devices,
+    bool require_tiled) {
+  const OpRegistry& registry = OpRegistry::instance();
+  const OpImplementation* best = registry.select_best_implementation(
+      node.type, node.subtype, available_devices,
+      ComputeIntent::GlobalHighPrecision);
+  if (best && implementation_shape_compatible(*best, require_tiled)) {
+    return best->func;
+  }
+
+  std::vector<const OpImplementation*> compatible;
+  for (const OpImplementation* impl :
+       registry.get_all_implementations(node.type, node.subtype)) {
+    if (!impl) {
+      continue;
+    }
+    if (!implementation_device_available(*impl, available_devices)) {
+      continue;
+    }
+    if (!implementation_shape_compatible(*impl, require_tiled)) {
+      continue;
+    }
+    compatible.push_back(impl);
+  }
+  if (compatible.empty()) {
+    return std::nullopt;
+  }
+  auto best_compatible = std::min_element(
+      compatible.begin(), compatible.end(),
+      [](const OpImplementation* lhs, const OpImplementation* rhs) {
+        return lhs->metadata.cost_score < rhs->metadata.cost_score;
+      });
+  return (*best_compatible)->func;
 }
 
 /**
@@ -141,12 +225,14 @@ void submit_dirty_batch(SchedulerTaskRuntime& task_runtime,
 
 TaskSubmissionPlan::TaskSubmissionPlan(GraphModel& graph,
                                        GraphTraversalService& traversal,
-                                       int node_id)
+                                       int node_id,
+                                       std::vector<Device> available_devices)
     : graph_(graph),
       compute_plan_(
           ComputeDispatchPlanBuilder(traversal).build_high_precision_plan(
               graph, node_id)),
       execution_order_(compute_plan_.planned_nodes),
+      available_devices_(std::move(available_devices)),
       dependency_state_(execution_order_, compute_plan_.task_graph) {
   resolve_operations();
   temp_results_.resize(execution_order_.size());
@@ -222,12 +308,22 @@ void TaskSubmissionPlan::resolve_operations() {
           return task.node_id == node.id && task.kind == PlannedTaskKind::Tile;
         });
     if (has_tile_task) {
+      if (auto device_op =
+              select_device_aware_hp_op(node, available_devices_, true)) {
+        resolved_ops_[i] = std::move(*device_op);
+        continue;
+      }
       const auto* impls =
           OpRegistry::instance().get_implementations(node.type, node.subtype);
       if (impls && impls->tiled_hp) {
         resolved_ops_[i] = OpRegistry::OpVariant{*impls->tiled_hp};
         continue;
       }
+    }
+    if (auto device_op =
+            select_device_aware_hp_op(node, available_devices_, false)) {
+      resolved_ops_[i] = std::move(*device_op);
+      continue;
     }
     resolved_ops_[i] = OpRegistry::instance().resolve_for_intent(
         node.type, node.subtype, ComputeIntent::GlobalHighPrecision);

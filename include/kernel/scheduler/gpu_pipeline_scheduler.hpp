@@ -21,30 +21,10 @@
 namespace ps {
 
 class GraphRuntime;
-// =============================================================================
-// PriorityEntry: 优先级表条目
-// 用于记录 scheduler 资源偏好元数据。
-// =============================================================================
-struct PriorityEntry {
-  // 目标设备
-  Device device{Device::CPU};
-
-  // 是否偏好 Monolithic（整图计算）
-  bool prefer_monolithic{false};
-
-  // Tile 大小偏好
-  TileSizePreference tile_pref{TileSizePreference::UNDEFINED};
-
-  // 优先级（越低越优先）
-  int priority{100};
-
-  // 描述（用于调试）
-  std::string description;
-};
 
 // =============================================================================
 // GpuPipelineScheduler: GPU Pipeline 调度器
-// 实现异构调度：HP 优先使用 GPU，RT 优先使用 CPU 以保证低延迟
+// 实现异构队列调度：HP 可进入 GPU 队列，RT 使用高优先级 CPU 队列
 // 支持 RT 和 HP 同时调度，其中 RT 优先级高于 HP
 // =============================================================================
 class GpuPipelineScheduler : public IScheduler, public SchedulerTaskRuntime {
@@ -57,17 +37,11 @@ class GpuPipelineScheduler : public IScheduler, public SchedulerTaskRuntime {
     unsigned int cpu_workers;  // 0 表示使用硬件并发数
     // 是否优先使用 GPU（HP 模式）
     bool prefer_gpu_for_hp;
-    // 是否强制 RT 使用 CPU（保证低延迟）
-    bool force_cpu_for_rt;
-    // RT 任务抢占阈值（毫秒）
-    int rt_preempt_threshold_ms;
 
     Config()
         : gpu_workers(1),
           cpu_workers(0),
-          prefer_gpu_for_hp(true),
-          force_cpu_for_rt(true),
-          rt_preempt_threshold_ms(16) {}
+          prefer_gpu_for_hp(true) {}
   };
 
   /// @brief 构造函数
@@ -198,6 +172,16 @@ class GpuPipelineScheduler : public IScheduler, public SchedulerTaskRuntime {
   /// @brief 获取当前可用设备列表
   std::vector<Device> get_available_devices() const;
 
+  /**
+   * @brief Reports devices available to compute tasks submitted here.
+   *
+   * @return CPU plus GPU_METAL when this runtime has an attached Metal device.
+   * @throws std::bad_alloc if vector allocation fails.
+   * @note This overrides SchedulerTaskRuntime so production operation
+   * resolution can choose registered per-device implementations.
+   */
+  std::vector<Device> available_devices() const override;
+
  private:
   // 内部任务结构
   struct ScheduledTask {
@@ -240,9 +224,6 @@ class GpuPipelineScheduler : public IScheduler, public SchedulerTaskRuntime {
 
   // 从其他工作线程窃取任务
   std::optional<ScheduledTask> steal_task(int stealer_id);
-
-  // 初始化调度资源偏好表。
-  void init_priority_tables();
 
   // ---------------------------------------------------------------------------
   // 成员变量
@@ -307,12 +288,6 @@ class GpuPipelineScheduler : public IScheduler, public SchedulerTaskRuntime {
   static thread_local uint64_t tls_active_epoch_;
   static thread_local bool tls_is_gpu_worker_;
 
-  // ---------------------------------------------------------------------------
-  // HP 模式资源偏好表。
-  std::vector<PriorityEntry> hp_priority_table_;
-
-  // RT 模式资源偏好表。
-  std::vector<PriorityEntry> rt_priority_table_;
 };
 
 }  // namespace ps

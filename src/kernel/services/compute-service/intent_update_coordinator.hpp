@@ -66,11 +66,10 @@ struct IntentUpdateCallbacks {
 /**
  * @brief Coordinates compute intent callbacks without owning task graphs.
  *
- * The coordinator decides which intent paths must run. Under the current
- * staged commit policy it starts RT before HP when both scheduler runtimes are
- * available, waits for RT first, and lets the sibling commit gate keep HP graph
- * mutation behind RT proxy commit. Actual task graph planning, dependency
- * release, and scheduler submission remain inside the callbacks.
+ * The coordinator decides which intent paths must run. Under the staged commit
+ * policy it starts RT before HP and overlaps HP with RT when both scheduler
+ * runtimes are available. Actual task graph planning, dependency release,
+ * graph mutation, and scheduler submission remain inside the callbacks.
  *
  * @note Scheduler queues still receive the fine-grained ready work emitted by
  * each callback through their intent-specific dispatchers.
@@ -106,9 +105,9 @@ class IntentUpdateCoordinator {
    *
    * @param intent Requested compute intent.
    * @param hp_task_runtime Optional HP scheduler runtime used to decide whether
-   * scheduler-backed work may run inside each sequential sibling callback.
+   * scheduler-backed work may run inside each sibling callback.
    * @param rt_task_runtime Optional RT scheduler runtime used to decide whether
-   * scheduler-backed work may run inside each sequential sibling callback.
+   * scheduler-backed work may run inside each sibling callback.
    * @param dirty_roi Optional dirty ROI for dirty intents.
    * @param callbacks Callback bundle that performs actual compute work.
    * @return Output for the requested target after required paths complete.

@@ -61,8 +61,15 @@ compute。新的 scheduler-facing 设计应扩展 `IScheduler` 与 `SchedulerTas
 | --- | --- |
 | `cpu_work_stealing` | 多线程 CPU 调度器。 |
 | `serial_debug` | 确定性单线程调试调度器。 |
-| `gpu_pipeline` | 异构 CPU/GPU 调度器。 |
+| `gpu_pipeline` | 带可选 GPU HP 队列和设备可用性报告的 CPU 调度器。 |
 | `heterogeneous` | `gpu_pipeline` 的别名。 |
+
+`GpuPipelineScheduler::Config` 目前只暴露实际生效的队列控制项：
+`cpu_workers`、`gpu_workers` 和 `prefer_gpu_for_hp`。当前 scheduler 总是把 RT
+ready work 路由到高优先级 CPU 队列。普通优先级 HP ready work 只有在
+`prefer_gpu_for_hp=true`、已配置 GPU worker 且 runtime 挂载了 Metal device 时，才可能进入
+GPU 队列。`force_cpu_for_rt`、`rt_preempt_threshold_ms` 以及 scheduler-local implementation
+priority table 这类旧字段，不再是当前代码路径的 active configuration。
 
 ## 插件发现与图调度器选择
 
@@ -94,9 +101,13 @@ GraphModel topology
   -> Scheduler resource dispatch
 ```
 
-设备选择、队列选择、批处理、worker reservation、取消和资源专用 dispatch 属于 scheduler。
-Dirty propagation、dirty work-set activation、node/tile 展开、monolithic dirty escalation
-和逻辑 compute-task derivation 属于 scheduler dispatch 之前的阶段。
+队列选择、批处理、worker reservation、取消和资源专用 dispatch 属于 scheduler。Scheduler
+runtime 还会通过 `SchedulerTaskRuntime::available_devices()` 报告可用设备。
+`ComputeTaskDispatcher` 会使用这个设备列表和
+`OpRegistry::select_best_implementation()`，选择与已经 materialized 的 task shape 匹配的
+operation callback。因此，scheduler queue routing 不拥有 operation implementation
+selection。Dirty propagation、dirty work-set activation、node/tile 展开、monolithic dirty
+escalation 和逻辑 compute-task derivation 属于 scheduler dispatch 之前的阶段。
 
 Dirty control lane 不是 dirty-feature-specific scheduler queue。Dirty node 通过串行 control
 path 更新图级 dirty lifecycle 和 ROI state；dispatcher 再从该状态 materialize dirty work
