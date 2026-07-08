@@ -8,8 +8,8 @@ source "$SCRIPT_DIR/common.sh"
 
 cd "$REPO_ROOT"
 
-run_logged cmake_configure configure_ci_build
-run_logged build_propagation_tool build_ci_targets test_propagation
+ensure_ci_configured cmake_configure
+ensure_ci_targets build_propagation_tool test_propagation
 
 linear_log="$CI_ARTIFACT_DIR/propagation_linear_tiles.log"
 printf 'tiles all\nexit\n' |

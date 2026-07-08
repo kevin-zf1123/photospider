@@ -52,8 +52,8 @@ run_gtest_checked() {
   run_logged "$name" "${run_cmd[@]}"
 }
 
-run_logged "cmake_configure_$SANITIZER" configure_ci_build
-run_logged "build_sanitizer_$SANITIZER" build_ci_targets \
+ensure_ci_configured "cmake_configure_$SANITIZER"
+ensure_ci_targets "build_sanitizer_$SANITIZER" \
   test_scheduler \
   test_compute_service_split \
   test_propagation_contracts

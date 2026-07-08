@@ -14,29 +14,28 @@ on:
 
 permissions:
   contents: read
+  packages: read
 
 jobs:
   sanitizer:
     runs-on: ubuntu-latest
     timeout-minutes: 90
+    container:
+      image: ghcr.io/${{ github.repository }}/photospider-ci:latest
+      credentials:
+        username: ${{ github.actor }}
+        password: ${{ secrets.GITHUB_TOKEN }}
     steps:
       - uses: actions/checkout@v4
         with:
           fetch-depth: 0
           submodules: recursive
 
-      - name: Build local CI image
-        run: docker build -t photospider-ci:local -f Dockerfile.ci .
-
       - name: Run sanitizer tests
-        run: |
-          docker run --rm \
-            -e SANITIZER="${{ inputs.sanitizer }}" \
-            -e CI_ARTIFACT_DIR="/workspace/CI-results/sanitizer-${{ inputs.sanitizer }}" \
-            -v "$PWD:/workspace" \
-            -w /workspace \
-            photospider-ci:local \
-            bash ci/scripts/sanitizer_test.sh
+        env:
+          SANITIZER: ${{ inputs.sanitizer }}
+          CI_ARTIFACT_DIR: ${{ github.workspace }}/CI-results/sanitizer-${{ inputs.sanitizer }}
+        run: bash ci/scripts/sanitizer_test.sh
 
       - name: Upload sanitizer logs
         if: always()

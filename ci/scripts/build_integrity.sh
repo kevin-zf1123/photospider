@@ -8,8 +8,8 @@ source "$SCRIPT_DIR/common.sh"
 
 cd "$REPO_ROOT"
 
-run_logged cmake_configure configure_ci_build
-run_logged build_required_targets build_ci_targets \
+ensure_ci_configured cmake_configure
+ensure_ci_targets build_required_targets \
   graph_cli \
   test_propagation \
   lifecycle_op_plugin \
@@ -18,7 +18,8 @@ run_logged build_required_targets build_ci_targets \
   cpu_work_stealing_example_plugin \
   gpu_pipeline_example_plugin \
   serial_debug_example_plugin
-run_logged build_all build_ci_all
+ensure_ci_all build_all
+mark_ci_build_reusable
 run_logged ctest_discovery ctest -N --test-dir "$BUILD_DIR"
 
 total_tests=$(awk '/Total Tests:/ {print $3}' "$CI_ARTIFACT_DIR/ctest_discovery.log" | tail -n 1)
