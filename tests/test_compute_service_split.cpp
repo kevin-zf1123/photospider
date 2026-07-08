@@ -3,6 +3,7 @@
 #include <algorithm>
 #include <atomic>
 #include <chrono>
+#include <condition_variable>
 #include <filesystem>
 #include <memory>
 #include <mutex>
@@ -1279,19 +1280,34 @@ TEST(IntentUpdateCoordinatorSplit,
   active_callbacks.store(0);
   max_active_callbacks.store(0);
   stages.clear();
-  std::atomic_bool rt_started{false};
-  std::atomic_bool hp_saw_rt_started{false};
+  std::mutex concurrent_callbacks_mutex;
+  std::condition_variable concurrent_callbacks_cv;
+  bool hp_callback_entered = false;
+  bool rt_callback_entered = false;
+  bool concurrent_callbacks_timed_out = false;
+  auto mark_concurrent_callback_entered = [&](bool is_rt_callback) {
+    std::unique_lock<std::mutex> lock(concurrent_callbacks_mutex);
+    if (is_rt_callback) {
+      rt_callback_entered = true;
+    } else {
+      hp_callback_entered = true;
+    }
+    concurrent_callbacks_cv.notify_all();
+    if (!concurrent_callbacks_cv.wait_for(lock, std::chrono::seconds(2), [&]() {
+          return hp_callback_entered && rt_callback_entered;
+        })) {
+      concurrent_callbacks_timed_out = true;
+    }
+  };
   callbacks.run_high_precision_update = [&]() {
-    hp_saw_rt_started.store(rt_started.load());
     update_max_active();
-    std::this_thread::sleep_for(std::chrono::milliseconds(30));
+    mark_concurrent_callback_entered(false);
     ran_hp.store(true);
     active_callbacks.fetch_sub(1);
   };
   callbacks.run_real_time_update = [&]() -> NodeOutput& {
-    rt_started.store(true);
     update_max_active();
-    std::this_thread::sleep_for(std::chrono::milliseconds(50));
+    mark_concurrent_callback_entered(true);
     ran_rt.store(true);
     active_callbacks.fetch_sub(1);
     return rt_output;
@@ -1314,7 +1330,9 @@ TEST(IntentUpdateCoordinatorSplit,
   ASSERT_NE(concurrent_hp_start, stages.end());
   EXPECT_LT(std::distance(stages.begin(), concurrent_rt_start),
             std::distance(stages.begin(), concurrent_hp_start));
-  EXPECT_TRUE(hp_saw_rt_started.load());
+  EXPECT_TRUE(rt_callback_entered);
+  EXPECT_TRUE(hp_callback_entered);
+  EXPECT_FALSE(concurrent_callbacks_timed_out);
   EXPECT_GE(max_active_callbacks.load(), 2);
   hp_runtime.shutdown();
   rt_runtime.shutdown();
