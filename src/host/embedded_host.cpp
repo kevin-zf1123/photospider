@@ -1351,15 +1351,22 @@ class EmbeddedHost final : public Host {
    * @brief Computes a node and returns a copied image descriptor.
    *
    * @param request Public compute request.
-   * @return ImageBuffer value, or a failed status.
+   * @return ImageBuffer value, NotFound for a missing or closed session, or a
+   *         compute failure status for existing sessions.
    * @throws std::bad_alloc on allocation failure.
-   * @note Backend image memory is cloned before conversion to the public
-   *       descriptor.
+   * @note The Host pre-checks session existence so missing lifecycle state is
+   *       not collapsed into a generic compute failure. Backend image memory is
+   *       cloned before conversion to the public descriptor.
    */
   Result<ImageBuffer> compute_and_get_image(
       const HostComputeRequest& request) override {
     return guarded_result<ImageBuffer>(
         "compute_and_get_image", GraphErrc::ComputeError, [&] {
+          if (!session_exists(*state_, request.session)) {
+            return failure_result<ImageBuffer>(
+                GraphErrc::NotFound,
+                "graph session not found: " + request.session.value);
+          }
           const auto kernel_request = to_kernel_compute_request(request);
           auto image =
               state_->interaction.cmd_compute_and_get_image(kernel_request);
@@ -2226,14 +2233,21 @@ class EmbeddedHost final : public Host {
    * @param session Session to update.
    * @param intent Compute intent whose scheduler is replaced.
    * @param type Scheduler type name.
-   * @return Success or failure status.
+   * @return Success, NotFound for a missing or closed session, or
+   *         InvalidParameter for an unavailable scheduler type.
    * @throws std::bad_alloc on allocation failure.
-   * @note Replacement lifecycle remains owned by backend runtime state.
+   * @note The Host pre-checks session existence before calling the backend bool
+   *       facade because the backend uses the same false return for missing
+   *       runtimes and unsupported scheduler types.
    */
   VoidResult replace_scheduler(const GraphSessionId& session,
                                ComputeIntent intent,
                                const std::string& type) override {
     return guarded_void("replace_scheduler", GraphErrc::InvalidParameter, [&] {
+      if (!session_exists(*state_, session)) {
+        return failure_void(GraphErrc::NotFound,
+                            "graph session not found: " + session.value);
+      }
       if (!state_->kernel.replace_scheduler(session.value, intent, type)) {
         return failure_void(
             GraphErrc::InvalidParameter,
