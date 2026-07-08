@@ -2,10 +2,15 @@ name: CI Healthcheck
 
 on:
   pull_request:
+    branches:
+      - main
+  pull_request_target:
+    branches:
+      - main
   push:
     branches:
       - main
-      - CI/workflow-design
+      - 'CI/**'
   workflow_dispatch:
 
 permissions:
@@ -13,19 +18,90 @@ permissions:
   packages: read
 
 jobs:
+  protected-ci-paths:
+    if: >-
+      ${{
+        (github.event_name != 'pull_request' || startsWith(github.head_ref, 'CI/')) &&
+        (github.event_name != 'pull_request_target' || !startsWith(github.head_ref, 'CI/'))
+      }}
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          repository: ${{ (github.event_name == 'pull_request' || github.event_name == 'pull_request_target') && github.event.pull_request.head.repo.full_name || github.repository }}
+          fetch-depth: 0
+          submodules: recursive
+          ref: ${{ (github.event_name == 'pull_request' || github.event_name == 'pull_request_target') && github.event.pull_request.head.sha || github.sha }}
+
+      - name: Protect CI workflow paths
+        env:
+          CI_BRANCH_NAME: ${{ github.head_ref || github.ref_name }}
+          CI_EVENT_NAME: ${{ github.event_name }}
+          CI_ARTIFACT_DIR: ${{ github.workspace }}/CI-results/protected-ci-paths
+        run: |
+          set -Eeuo pipefail
+          mkdir -p "$CI_ARTIFACT_DIR"
+          git fetch --no-tags --prune origin main
+          : > "$CI_ARTIFACT_DIR/changed-files.txt"
+          : > "$CI_ARTIFACT_DIR/protected-files.txt"
+
+          if [[ "$CI_EVENT_NAME" == "push" && "$CI_BRANCH_NAME" == "main" ]]; then
+            echo "main branch push may update CI workflow files." |
+              tee "$CI_ARTIFACT_DIR/summary.log"
+            exit 0
+          fi
+          if [[ "$CI_BRANCH_NAME" == CI/* ]]; then
+            echo "CI branch '$CI_BRANCH_NAME' may update CI workflow files." |
+              tee "$CI_ARTIFACT_DIR/summary.log"
+            exit 0
+          fi
+
+          git diff --name-only --diff-filter=ACMRD origin/main...HEAD |
+            sort -u |
+            tee "$CI_ARTIFACT_DIR/changed-files.txt"
+          awk '
+            $0 == "Dockerfile.ci" || $0 ~ /^ci\// || $0 ~ /^\.github\/workflows\// {
+              print
+            }
+          ' "$CI_ARTIFACT_DIR/changed-files.txt" |
+            tee "$CI_ARTIFACT_DIR/protected-files.txt"
+
+          if [[ -s "$CI_ARTIFACT_DIR/protected-files.txt" ]]; then
+            {
+              echo "Non-CI branches must not change ci/, .github/workflows/, or Dockerfile.ci."
+              echo "Use a branch whose name starts with CI/ for CI workflow changes."
+            } | tee "$CI_ARTIFACT_DIR/summary.log" >&2
+            exit 1
+          fi
+
+          echo "No protected CI workflow paths changed on '$CI_BRANCH_NAME'." |
+            tee "$CI_ARTIFACT_DIR/summary.log"
+
+      - name: Upload protected path logs
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: healthcheck-protected-ci-paths
+          path: CI-results/protected-ci-paths
+          if-no-files-found: warn
+
   ci-image-change:
+    needs: protected-ci-paths
+    if: needs.protected-ci-paths.result == 'success'
     runs-on: ubuntu-latest
     outputs:
       changed: ${{ steps.detect.outputs.changed }}
     steps:
       - uses: actions/checkout@v4
         with:
+          repository: ${{ (github.event_name == 'pull_request' || github.event_name == 'pull_request_target') && github.event.pull_request.head.repo.full_name || github.repository }}
           fetch-depth: 0
           submodules: recursive
+          ref: ${{ (github.event_name == 'pull_request' || github.event_name == 'pull_request_target') && github.event.pull_request.head.sha || github.sha }}
       - name: Detect CI image input changes
         id: detect
         env:
-          CI_IMAGE_BASE_REF: ${{ github.event_name == 'pull_request' && format('origin/{0}', github.base_ref) || github.event.before }}
+          CI_IMAGE_BASE_REF: ${{ (github.event_name == 'pull_request' || github.event_name == 'pull_request_target') && format('origin/{0}', github.base_ref) || github.event.before }}
           CI_ARTIFACT_DIR: ${{ github.workspace }}/CI-results/ci-image-change
         run: bash ci/scripts/ci_image_changed.sh
       - name: Upload CI image change logs
@@ -48,8 +124,10 @@ jobs:
     steps:
       - uses: actions/checkout@v4
         with:
+          repository: ${{ (github.event_name == 'pull_request' || github.event_name == 'pull_request_target') && github.event.pull_request.head.repo.full_name || github.repository }}
           fetch-depth: 0
           submodules: recursive
+          ref: ${{ (github.event_name == 'pull_request' || github.event_name == 'pull_request_target') && github.event.pull_request.head.sha || github.sha }}
 
       - name: Run healthcheck
         env:
@@ -72,8 +150,10 @@ jobs:
     steps:
       - uses: actions/checkout@v4
         with:
+          repository: ${{ (github.event_name == 'pull_request' || github.event_name == 'pull_request_target') && github.event.pull_request.head.repo.full_name || github.repository }}
           fetch-depth: 0
           submodules: recursive
+          ref: ${{ (github.event_name == 'pull_request' || github.event_name == 'pull_request_target') && github.event.pull_request.head.sha || github.sha }}
 
       - name: Build local CI image
         run: docker build -t photospider-ci:local -f Dockerfile.ci .

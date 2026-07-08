@@ -2,10 +2,24 @@
 
 ## Workflow
 
-- `.github/workflows/ci-healthcheck.yml`：在 pull request、推送到 `main` 和 `CI/workflow-design`、手动触发时运行静态 healthcheck。
+- `.github/workflows/ci-healthcheck.yml`：在目标为 `main` 的 pull request、推送到 `main` 和 `CI/**`、手动触发时运行静态 healthcheck。
 - `.github/workflows/ci-integration.yml`：运行构建完整性、主线 CTest、`graph_cli` 脚本测试、propagation 脚本测试、插件加载测试和 scheduler 重复测试。
 - `.github/workflows/ci-sanitizer.yml`：手动运行 ASan 或 TSan 聚焦检查。
 - `.github/workflows/build-ci-image.yml`：在镜像输入相关 push 和手动触发时发布 GHCR 镜像 `ghcr.io/<owner>/<repo>/photospider-ci`。
+
+## 分支与 workflow 保护
+
+由 push 触发的 CI 只在 `main` 和名称以 `CI/` 开头的分支上运行。这样可以防止普通 feature 分支运行该分支自行修改过的 workflow 文件。
+
+目标为 `main` 的 pull request 使用两种事件模式。`CI/**` 分支运行 `pull_request` workflow，用于在合并前验证 CI 分支上的 workflow 修改。非 `CI/**` 分支运行 `pull_request_target` 路径，即使用 base 分支上的 workflow 定义，同时 checkout pull request 的 head commit 作为被测代码。
+
+healthcheck 和 integration 的第一个 job 会在执行任何仓库脚本或本地 CI 镜像构建前保护 CI workflow 输入。对非 `CI/**` 分支，它会比较 `origin/main...HEAD`，并在 diff 修改以下任一路径时失败：
+
+- `ci/**`
+- `.github/workflows/**`
+- `Dockerfile.ci`
+
+因此，CI workflow 相关修改必须放在 `CI/**` 分支开发。该保护也覆盖目标为 `main` 的非 `CI/**` pull request，避免 workflow 相关文件通过普通 feature 分支合并。
 
 ## 运行环境
 
