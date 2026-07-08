@@ -1,0 +1,42 @@
+name: CI Healthcheck
+
+on:
+  pull_request:
+  push:
+    branches:
+      - main
+      - CI/workflow-design
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  healthcheck:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          submodules: recursive
+
+      - name: Build local CI image
+        run: docker build -t photospider-ci:local -f Dockerfile.ci .
+
+      - name: Run healthcheck
+        run: |
+          docker run --rm \
+            -e CI_BASE_REF="origin/${{ github.base_ref || 'main' }}" \
+            -e CI_ARTIFACT_DIR=/workspace/CI-results/healthcheck \
+            -v "$PWD:/workspace" \
+            -w /workspace \
+            photospider-ci:local \
+            bash ci/scripts/healthcheck.sh
+
+      - name: Upload healthcheck logs
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: healthcheck-results
+          path: CI-results/healthcheck
+          if-no-files-found: warn

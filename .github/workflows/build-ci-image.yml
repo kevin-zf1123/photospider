@@ -1,14 +1,13 @@
 name: Build CI Image
 
-# LEGACY / DISABLED-BY-DEFAULT:
-# This workflow is retained as manual scaffolding only. It currently sets
-# push: false and does not publish a maintained CI image. Do not treat it as an
-# active validation or release path until a future change revalidates and
-# documents the container workflow end to end.
 on:
-  # Manual-only TODO scaffolding. Re-enable automatic image publishing only
-  # after the container path is validated and documented as maintained CI.
   workflow_dispatch:
+    inputs:
+      tag:
+        description: Extra image tag to publish.
+        required: false
+        default: manual
+        type: string
 
 permissions:
   contents: read
@@ -31,9 +30,10 @@ jobs:
         id: meta
         uses: docker/metadata-action@v5
         with:
-          images: ghcr.io/${{ github.repository }}/ci-scheduler
+          images: ghcr.io/${{ github.repository }}/photospider-ci
           tags: |
             type=raw,value=latest
+            type=raw,value=${{ inputs.tag }}
             type=sha
 
       - name: Build and push
@@ -41,6 +41,6 @@ jobs:
         with:
           context: .
           file: Dockerfile.ci
-          push: false
+          push: true
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
