@@ -22,14 +22,12 @@ std::unique_ptr<IScheduler> SchedulerFactory::create(const std::string& type_nam
     GpuPipelineScheduler::Config config;
     config.cpu_workers = num_workers;
     config.prefer_gpu_for_hp = true;
-    config.force_cpu_for_rt = true;
     return std::make_unique<GpuPipelineScheduler>(config);
   } else if (type_name == "heterogeneous") {
     // 别名：异构调度器
     GpuPipelineScheduler::Config config;
     config.cpu_workers = num_workers;
     config.prefer_gpu_for_hp = true;
-    config.force_cpu_for_rt = true;
     return std::make_unique<GpuPipelineScheduler>(config);
   }
   
@@ -71,8 +69,8 @@ std::string SchedulerFactory::description(const std::string& type_name) {
            "All tasks execute sequentially on the calling thread.";
   } else if (type_name == "gpu_pipeline" || type_name == "heterogeneous") {
     return "Heterogeneous GPU/CPU pipeline scheduler. "
-           "HP tasks prefer GPU (Metal) for throughput, "
-           "RT tasks use CPU for low latency. "
+           "Normal-priority HP tasks may use a GPU queue when Metal is "
+           "available, RT tasks use a high-priority CPU queue, "
            "Supports concurrent RT and HP scheduling with RT priority.";
   }
   

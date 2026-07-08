@@ -77,8 +77,17 @@ direct ownership of the runtime model.
 | --- | --- |
 | `cpu_work_stealing` | Multi-threaded CPU scheduler. |
 | `serial_debug` | Deterministic single-threaded debugging scheduler. |
-| `gpu_pipeline` | Heterogeneous CPU/GPU scheduler. |
+| `gpu_pipeline` | CPU scheduler with optional GPU HP queue and device availability reporting. |
 | `heterogeneous` | Alias for `gpu_pipeline`. |
+
+`GpuPipelineScheduler::Config` currently exposes only active queue controls:
+`cpu_workers`, `gpu_workers`, and `prefer_gpu_for_hp`. The scheduler always
+routes RT ready work to the high-priority CPU queue. Normal-priority HP ready
+work may enter the GPU queue when `prefer_gpu_for_hp=true`, GPU workers are
+configured, and a Metal device is attached to the runtime. Older fields such as
+`force_cpu_for_rt`, `rt_preempt_threshold_ms`, and scheduler-local
+implementation priority tables are not active configuration in the current
+code path.
 
 ## Plugin Discovery vs Graph Selection
 
@@ -115,10 +124,15 @@ GraphModel topology
   -> Scheduler resource dispatch
 ```
 
-Device selection, queue selection, batching, worker reservation, cancellation,
-and resource-specific dispatch belong in the scheduler. Dirty propagation,
-dirty work-set activation, node/tile expansion, monolithic dirty escalation,
-and logical compute-task derivation belong before scheduler dispatch.
+Queue selection, batching, worker reservation, cancellation, and
+resource-specific dispatch belong in the scheduler. Scheduler runtimes also
+report available devices through `SchedulerTaskRuntime::available_devices()`.
+`ComputeTaskDispatcher` uses that list with
+`OpRegistry::select_best_implementation()` to choose operation callbacks that
+match the already materialized task shape. Scheduler queue routing therefore
+does not own operation implementation selection. Dirty propagation, dirty
+work-set activation, node/tile expansion, monolithic dirty escalation, and
+logical compute-task derivation belong before scheduler dispatch.
 
 The dirty control lane is not a dirty-feature-specific scheduler queue. Dirty
 nodes update graph-scoped dirty lifecycle and ROI state through a serialized

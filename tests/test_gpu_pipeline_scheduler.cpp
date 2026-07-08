@@ -22,6 +22,7 @@
 #include "kernel/scheduler/cpu_work_stealing_scheduler.hpp"
 #include "kernel/scheduler/gpu_pipeline_scheduler.hpp"
 #include "kernel/scheduler/scheduler_factory.hpp"
+#include "kernel/scheduler/serial_debug_scheduler.hpp"
 #include "kernel/services/compute_service.hpp"
 #include "kernel/services/graph_cache_service.hpp"
 #include "kernel/services/graph_traversal_service.hpp"
@@ -73,6 +74,69 @@ void mock_tiled_cpu_op(const Node& node, const OutputTile& output_tile,
                        const std::vector<InputTile>& input_tiles) {
   // 模拟分块计算
   std::this_thread::sleep_for(std::chrono::milliseconds(1));
+}
+
+/**
+ * @brief Test scheduler that exposes a GPU device to production compute.
+ *
+ * The scheduler executes tasks serially like SerialDebugScheduler but reports
+ * GPU_METAL as available. This isolates operation selection from real Metal
+ * hardware so the test can assert ComputeTaskDispatcher uses device-aware
+ * registry resolution.
+ */
+class GpuAvailableSerialScheduler : public SerialDebugScheduler {
+ public:
+  /**
+   * @brief Reports CPU and GPU_METAL as available devices.
+   *
+   * @return Device list used by TaskSubmissionPlan for op selection.
+   * @throws std::bad_alloc if vector allocation fails.
+   */
+  std::vector<Device> available_devices() const override {
+    return {Device::CPU, Device::GPU_METAL};
+  }
+};
+
+/**
+ * @brief CPU marker op used to prove production routing does not pick CPU.
+ *
+ * @param node Node being computed.
+ * @param inputs Resolved image inputs, unused for this source-like test op.
+ * @return Output tagged as CPU.
+ * @throws Nothing directly.
+ */
+NodeOutput production_cpu_marker_op(
+    const Node& node, const std::vector<const NodeOutput*>& inputs) {
+  (void)node;
+  (void)inputs;
+  NodeOutput output;
+  output.image_buffer.width = 8;
+  output.image_buffer.height = 8;
+  output.image_buffer.channels = 1;
+  output.image_buffer.type = DataType::FLOAT32;
+  output.image_buffer.device = Device::CPU;
+  return output;
+}
+
+/**
+ * @brief GPU marker op used to prove production routing selects GPU.
+ *
+ * @param node Node being computed.
+ * @param inputs Resolved image inputs, unused for this source-like test op.
+ * @return Output tagged as GPU_METAL.
+ * @throws Nothing directly.
+ */
+NodeOutput production_gpu_marker_op(
+    const Node& node, const std::vector<const NodeOutput*>& inputs) {
+  (void)node;
+  (void)inputs;
+  NodeOutput output;
+  output.image_buffer.width = 8;
+  output.image_buffer.height = 8;
+  output.image_buffer.channels = 1;
+  output.image_buffer.type = DataType::FLOAT32;
+  output.image_buffer.device = Device::GPU_METAL;
+  return output;
 }
 
 class GpuPipelineSchedulerTest : public ::testing::Test {
@@ -215,6 +279,61 @@ TEST_F(GpuPipelineSchedulerTest, HPFallbackToCPU) {
 
   ASSERT_NE(best, nullptr);
   EXPECT_EQ(best->metadata.device_preference, Device::CPU);
+}
+
+TEST_F(GpuPipelineSchedulerTest, ProductionComputeUsesDeviceImplementation) {
+  constexpr const char* kType = "gpu_test";
+  constexpr const char* kSubtype = "production_route";
+  auto& registry = OpRegistry::instance();
+  registry.unregister_key(make_key(kType, kSubtype));
+
+  OpMetadata gpu_meta;
+  gpu_meta.device_preference = Device::GPU_METAL;
+  gpu_meta.cost_score = 10;
+  registry.register_impl(kType, kSubtype, Device::GPU_METAL,
+                         production_gpu_marker_op, gpu_meta);
+
+  OpMetadata cpu_meta;
+  cpu_meta.device_preference = Device::CPU;
+  cpu_meta.cost_score = 100;
+  registry.register_impl(kType, kSubtype, Device::CPU,
+                         production_cpu_marker_op, cpu_meta);
+
+  GraphRuntime::Info info;
+  info.name = "device-routing-production";
+  info.root = "build/test-device-routing-production";
+  info.cache_root = "build/test-device-routing-production/cache";
+  GraphRuntime runtime(info);
+  runtime.set_scheduler(
+      ComputeIntent::GlobalHighPrecision,
+      std::make_unique<GpuAvailableSerialScheduler>());
+  runtime.start();
+
+  Node node;
+  node.id = 1;
+  node.name = "device_route";
+  node.type = kType;
+  node.subtype = kSubtype;
+  node.parameters["width"] = 8;
+  node.parameters["height"] = 8;
+  runtime.model().add_node(node);
+
+  GraphTraversalService traversal;
+  GraphCacheService cache;
+  ComputeService compute(traversal, cache, runtime.event_service());
+  ComputeService::Request request;
+  request.node_id = node.id;
+  request.cache.force_recache = true;
+  request.cache.disable_disk_cache = true;
+
+  NodeOutput& result = compute.compute_parallel(runtime.model(), runtime,
+                                                request);
+  EXPECT_EQ(result.image_buffer.device, Device::GPU_METAL);
+  EXPECT_EQ(result.image_buffer.width, 8);
+  EXPECT_EQ(result.image_buffer.height, 8);
+
+  runtime.stop();
+  registry.unregister_key(make_key(kType, kSubtype));
 }
 
 // =============================================================================
@@ -372,7 +491,6 @@ TEST(GpuPipelineIntegrationTest, SchedulerWithRuntime) {
   GpuPipelineScheduler::Config config;
   config.cpu_workers = 4;
   config.prefer_gpu_for_hp = true;
-  config.force_cpu_for_rt = true;
 
   auto scheduler = std::make_unique<GpuPipelineScheduler>(config);
   runtime.set_scheduler(ComputeIntent::GlobalHighPrecision,

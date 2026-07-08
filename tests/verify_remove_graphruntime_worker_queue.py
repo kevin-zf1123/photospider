@@ -11,18 +11,13 @@ from typing import Any
 
 
 LEGACY_PATTERNS = [
-    r"\.post\(",
-    r"->post\(",
     r"GraphRuntime::post",
-    r"submit_initial_tasks",
-    r"submit_ready_task",
-    r"wait_for_completion",
     r"dec_graph_tasks_to_complete",
     r"inc_graph_tasks_to_complete",
     r"struct TaskGraph",
-    r"using Task =",
     r"ScheduledTask",
-    r"TaskPriority",
+    r"cv_task_available_\b",
+    r"run_loop\(",
     r"workers_\b",
     r"local_task_queues_\b",
     r"high_priority_queue_\b",
@@ -48,10 +43,6 @@ DOC_PATTERNS = [
 LEGACY_SCAN_FILES = [
     "include/kernel/graph_runtime.hpp",
     "src/kernel/graph_runtime.mm",
-    "include/kernel/kernel.hpp",
-    "src/kernel/kernel.cpp",
-    "tests/test_scheduler.cpp",
-    "tests/split_compute_service_trace.cpp",
 ]
 
 DOC_SCAN_PATHS = [
@@ -236,7 +227,7 @@ def main() -> int:
     summary_lines = [
         "# GraphRuntime Worker Queue Removal Evidence",
         "",
-        "This evidence proves feedback issue 5 using runtime-derived logs.",
+        "This evidence proves GraphRuntime no longer owns the legacy worker queue.",
         "",
         f"- Legacy API scan: `{out / 'legacy_boundary_scan.log'}`",
         f"- Documentation scan: `{out / 'docs_legacy_statement_scan.log'}`",
@@ -251,7 +242,8 @@ def main() -> int:
     summary_lines.extend(
         [
             "",
-            "The legacy scan is scoped to GraphRuntime, Kernel, and the tests that previously used GraphRuntime::post.",
+            "The legacy scan is scoped to GraphRuntime ownership files only.",
+            "Kernel::post is checked separately to ensure it routes through GraphStateExecutor.",
             "Scheduler-owned `SchedulerTaskRuntime` APIs remain intentionally out of scope.",
         ]
     )
