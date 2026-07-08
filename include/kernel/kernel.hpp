@@ -159,8 +159,8 @@ class Kernel {
   std::vector<std::string> list_graphs() const;
 
   template <typename Fn>
-  auto post(const std::string& name, Fn&& fn)
-      -> std::future<decltype(fn(std::declval<GraphModel&>()))> {
+  auto post(const std::string& name,
+            Fn&& fn) -> std::future<decltype(fn(std::declval<GraphModel&>()))> {
     auto it = graphs_.find(name);
     if (it == graphs_.end()) {
       throw std::runtime_error("Graph not found: " + name);
@@ -445,8 +445,9 @@ class Kernel {
    * @note Used by const inspection APIs such as scheduler metadata queries.
    */
   template <typename Fn>
-  auto with_runtime(const std::string& name, Fn&& op) const -> std::optional<
-      std::decay_t<std::invoke_result_t<Fn, const GraphRuntime&>>> {
+  auto with_runtime(const std::string& name, Fn&& op) const
+      -> std::optional<
+          std::decay_t<std::invoke_result_t<Fn, const GraphRuntime&>>> {
     auto it = graphs_.find(name);
     if (it == graphs_.end()) {
       return std::nullopt;
