@@ -4,14 +4,37 @@
 #include <string>
 #include <vector>
 
-#include "graph_model.hpp"
+#include "graph_model.hpp"  // NOLINT(build/include_subdir)
 
 namespace ps {
 
+/**
+ * @brief Cached output metadata copied for node inspection.
+ *
+ * @throws Nothing for value construction except string allocation when copied.
+ * @note This internal summary keeps implementation-owned cache objects out of
+ *       frontend-facing inspection snapshots while preserving the output
+ *       dimensions needed to describe local pixel space.
+ */
 struct NodeMetadataSummary {
+  /** @brief Whether a high-precision cached output was available. */
   bool has_cached_output = false;
+
+  /** @brief Human-readable label for the cache source that produced metadata.
+   */
   std::string source_label;
+
+  /** @brief Cached output width in local pixels. */
+  int output_width = 0;
+
+  /** @brief Cached output height in local pixels. */
+  int output_height = 0;
+
+  /** @brief Debug metadata copied from the cached output. */
   DebugMeta debug;
+
+  /** @brief Spatial transform and absolute ROI copied from the cached output.
+   */
   SpatialContext space;
 };
 

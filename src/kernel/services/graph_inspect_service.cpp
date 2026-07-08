@@ -1,7 +1,10 @@
 #include "kernel/services/graph_inspect_service.hpp"
 
 #include <algorithm>
+#include <string>
 #include <unordered_set>
+#include <utility>
+#include <vector>
 
 namespace ps {
 
@@ -58,6 +61,15 @@ void append_dependency_tree_entries(
   path.erase(node_id);
 }
 
+/**
+ * @brief Copies cache metadata into an inspection-safe summary.
+ *
+ * @param node Node whose high-precision cache may be inspected.
+ * @return Metadata summary with local output dimensions when a cache exists.
+ * @throws std::bad_alloc if source label copying allocates and fails.
+ * @note The summary intentionally copies only scalar/value metadata so public
+ *       Host inspection can report extents without exposing NodeOutput storage.
+ */
 NodeMetadataSummary metadata_summary_for(const Node& node) {
   NodeMetadataSummary summary;
   std::string source_label;
@@ -68,6 +80,8 @@ NodeMetadataSummary metadata_summary_for(const Node& node) {
 
   summary.has_cached_output = true;
   summary.source_label = source_label;
+  summary.output_width = cached->image_buffer.width;
+  summary.output_height = cached->image_buffer.height;
   summary.debug = cached->debug;
   summary.space = cached->space;
   return summary;
