@@ -134,6 +134,7 @@ target_link_libraries(photospider_plugin PUBLIC photospider_core_types)
 
 # Module: Compute
 set(KERNEL_FACADE_SOURCES
+    src/host/embedded_host.cpp
     src/kernel/kernel.cpp
     src/kernel/kernel_compute.cpp
     src/kernel/kernel_dirty_roi_facade.cpp
@@ -478,6 +479,11 @@ if(BUILD_TESTING)
     add_ps_test(test_graph_topology_boundaries tests/test_graph_topology_boundaries.cpp)
     add_ps_test(test_kernel_contracts tests/test_kernel_contracts.cpp)
     add_ps_test(test_image_buffer_contracts tests/test_image_buffer_contracts.cpp)
+    add_ps_test(test_host_adapter tests/test_host_adapter.cpp)
+    target_compile_definitions(test_host_adapter PRIVATE
+        PS_TEST_OP_PLUGIN_DIR="${TEST_OP_PLUGIN_DIR}"
+    )
+    add_dependencies(test_host_adapter lifecycle_op_plugin)
     add_ps_test(test_compute_service_split tests/test_compute_service_split.cpp)
     add_ps_test(test_node_editor_layout tests/test_node_editor_layout.cpp)
     target_link_libraries(test_node_editor_layout PRIVATE ${FTXUI_TARGETS})
@@ -572,6 +578,12 @@ if(BUILD_TESTING)
             --repo "${PROJECT_SOURCE_DIR}"
             --out "${CMAKE_BINARY_DIR}/tests/phase1_core_seam_scan"
         WORKING_DIRECTORY ${PROJECT_SOURCE_DIR})
+    add_test(NAME Phase2HostAdapterScan
+        COMMAND ${Python3_EXECUTABLE}
+            "${PROJECT_SOURCE_DIR}/tests/verification/codebase_structure/phase2_host_adapter_scan.py"
+            --repo "${PROJECT_SOURCE_DIR}"
+            --out "${CMAKE_BINARY_DIR}/tests/phase2_host_adapter_scan"
+        WORKING_DIRECTORY ${PROJECT_SOURCE_DIR})
     add_test(NAME PublicHeaderSelfContainment
         COMMAND ${CMAKE_COMMAND} --build "${CMAKE_BINARY_DIR}"
             --target public_header_self_containment --config $<CONFIG>
@@ -590,6 +602,7 @@ if(BUILD_TESTING)
     gtest_discover_tests(test_graph_topology_boundaries WORKING_DIRECTORY ${PROJECT_SOURCE_DIR})
     gtest_discover_tests(test_kernel_contracts WORKING_DIRECTORY ${PROJECT_SOURCE_DIR})
     gtest_discover_tests(test_image_buffer_contracts WORKING_DIRECTORY ${PROJECT_SOURCE_DIR})
+    gtest_discover_tests(test_host_adapter WORKING_DIRECTORY ${PROJECT_SOURCE_DIR})
     gtest_discover_tests(test_compute_service_split WORKING_DIRECTORY ${PROJECT_SOURCE_DIR})
     gtest_discover_tests(test_node_editor_layout WORKING_DIRECTORY ${PROJECT_SOURCE_DIR})
     gtest_discover_tests(test_gpu_pipeline_scheduler WORKING_DIRECTORY ${PROJECT_SOURCE_DIR})

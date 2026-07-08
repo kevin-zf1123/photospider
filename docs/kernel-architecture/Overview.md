@@ -11,12 +11,12 @@ and are not assumed to be committed with the repository.
 ## Current State
 
 Photospider is built around a graph runtime with a service split, operation
-registry, cache layer, and scheduler abstraction. Parallel planned work now
-dispatches through scheduler-owned task runtimes. Graph-state commands and
-compute requests that mutate visible graph state enter an explicit per-graph
-`GraphStateExecutor` boundary instead of the scheduler dispatch path.
-Scheduler-backed parallel compute uses the scheduler runtime for ready task
-callbacks inside that graph-state boundary.
+registry, cache layer, scheduler abstraction, and a frontend-facing Host seam.
+Parallel planned work now dispatches through scheduler-owned task runtimes.
+Graph-state commands and compute requests that mutate visible graph state enter
+an explicit per-graph `GraphStateExecutor` boundary instead of the scheduler
+dispatch path. Scheduler-backed parallel compute uses the scheduler runtime for
+ready task callbacks inside that graph-state boundary.
 
 The code is useful and testable, but some boundaries are not final. In
 particular, `Kernel` and `ComputeService` still coordinate a large amount of
@@ -32,7 +32,7 @@ The root `CMakeLists.txt` builds these internal modules:
 | `photospider_graph` | `GraphModel` plus graph IO, traversal, cache, and inspect services. |
 | `photospider_plugin` | Dynamic operation plugin manager and loader. |
 | `photospider_compute` | Kernel facade, interaction runtime, schedulers, compute service, events. |
-| `photospider_lib` | Shared backend library linked by CLI and plugins. |
+| `photospider_lib` | Shared backend library linked by CLI, plugins, and embedded Host frontends. |
 | `photospider_cli_common` | REPL commands, TUI editors, autocomplete, CLI config. |
 | `graph_cli` | End-user executable. |
 
@@ -51,6 +51,9 @@ Output directories:
 ```mermaid
 graph TD
     CLI["CLI / REPL / TUI"] --> InteractionService
+    Frontend["Embedded frontend"] --> Host["ps::Host"]
+    Host --> EmbeddedHost["embedded Host adapter"]
+    EmbeddedHost --> InteractionService
     InteractionService --> Kernel
 
     Kernel --> GraphRuntime
@@ -83,9 +86,11 @@ graph TD
 | Component | Role |
 | --- | --- |
 | `Kernel` | Multi-graph facade, service owner, runtime bootstrapper, top-level graph/cache/compute API. |
+| `ps::Host` | Public frontend interface under `include/photospider/host`; returns copied request/result/snapshot values and hides Kernel, GraphModel, and GraphRuntime. |
+| `embedded Host adapter` | In-process Host implementation backed by `Kernel` and `InteractionService`, used by local frontends while CLI behavior remains unchanged. |
 | `GraphRuntime` | Per-graph resource container with model, graph-state executor, events, schedulers, and platform context. |
 | `GraphModel` | Graph state holder: private node storage, topology adjacency index, cache root, timing data, quiet/skip-save flags. |
-| `InteractionService` | CLI-facing wrapper around `Kernel`; keeps command code thin. |
+| `InteractionService` | CLI-facing and embedded-adapter wrapper around `Kernel`; keeps command code thin while Host becomes the stable installable frontend seam. |
 | `ComputeService` | Resolves dependencies, checks caches, executes ops, coordinates RT/HP/tiled paths and timing events. |
 | `GraphTraversalService` | Topology-only traversal orders, ending-node discovery, ancestor checks, upstream dependency queries, and downstream dependent queries backed by `GraphModel` adjacency. |
 | `RoiPropagationService` | ROI/spatial propagation boundary for upstream ROI computation and graph-level forward/backward ROI projection. |
@@ -129,6 +134,21 @@ Typical REPL compute flow:
 9. Work executes recursively or through the configured scheduler path.
 10. `GraphEventService` records per-node events and timing data.
 11. Results are exposed back through `Kernel` and `InteractionService`.
+
+Typical embedded Host compute flow:
+
+1. A local frontend creates `ps::Host` through `create_embedded_host()`.
+2. The frontend sends `GraphLoadRequest`, `HostComputeRequest`, or inspection
+   requests using public value types from `include/photospider/host` and
+   `include/photospider/core`.
+3. The embedded Host adapter converts those values into existing
+   `InteractionService` / `Kernel` requests.
+4. Kernel and service execution follows the same graph-state, compute, cache,
+   scheduler, and plugin paths used by the CLI.
+5. Results are copied back as `OperationStatus`, `GraphInspectionView`,
+   `DirtyRegionInspectionSnapshot`, timing/event snapshots, scheduler info, or
+   other Host value snapshots. Host callers never receive `Kernel`,
+   `GraphModel`, `GraphRuntime`, OpenCV rectangles, or YAML nodes.
 
 ## Scheduler Model
 
