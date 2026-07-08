@@ -152,12 +152,25 @@ struct SpatialDependencyMap {
 class Node;
 class GraphModel;
 
-// --- 新增: 定义操作元数据 ---
-// 用于描述一个操作对分块大小的偏好
+/**
+ * @brief Describes an operation implementation's preferred tile granularity.
+ *
+ * The scheduler and operator selection paths use this metadata as a hint when
+ * choosing between micro-tiled, macro-tiled, and monolithic execution styles.
+ *
+ * @throws Nothing. This value type performs no work by itself.
+ * @note The preference does not allocate tile state, change cache ownership, or
+ *       force a scheduler to choose a specific execution backend.
+ */
 enum class TileSizePreference {
-  UNDEFINED,  // 未定义或不适用 (例如 Monolithic 操作)
-  MICRO,      // 偏好小分块 (例如 16x16)，适用于交互式、低延迟任务
-  MACRO       // 偏好大分块 (例如 256x256)，适用于吞吐量优先的批处理任务
+  /** @brief No tile-size preference or not applicable to monolithic work. */
+  UNDEFINED,
+
+  /** @brief Prefer small tiles, such as 16x16, for low-latency work. */
+  MICRO,
+
+  /** @brief Prefer large tiles, such as 256x256, for batch throughput. */
+  MACRO,
 };
 
 // [核心修复] 移除此处的 Device 枚举定义，因为它已在 image_buffer.hpp 中定义
