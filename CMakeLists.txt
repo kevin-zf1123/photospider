@@ -494,6 +494,10 @@ if(BUILD_TESTING)
     # Operation plugin manager handle lifetime tests
     add_ps_test(test_plugin_manager tests/test_plugin_manager.cpp)
     target_link_libraries(test_plugin_manager PRIVATE ${CMAKE_DL_LIBS})
+    target_compile_definitions(test_plugin_manager PRIVATE
+        PS_STANDARD_OP_PLUGIN_DIR="${PLUGIN_OUTPUT_DIR}"
+        PS_TEST_OP_PLUGIN_DIR="${TEST_OP_PLUGIN_DIR}"
+    )
     add_dependencies(test_plugin_manager lifecycle_op_plugin
         override_lifecycle_op_plugin ${OP_PLUGIN_TARGETS})
 
@@ -503,6 +507,10 @@ if(BUILD_TESTING)
     # [M3.5] 调度器插件加载器测试
     add_ps_test(test_scheduler_plugin_loader tests/test_scheduler_plugin_loader.cpp)
     target_link_libraries(test_scheduler_plugin_loader PRIVATE ${CMAKE_DL_LIBS})
+    target_compile_definitions(test_scheduler_plugin_loader PRIVATE
+        PS_SCHEDULER_PLUGIN_DIR="${SCHEDULER_PLUGIN_DIR}"
+        PS_TEST_SCHEDULER_PLUGIN_DIR="${TEST_SCHEDULER_PLUGIN_DIR}"
+    )
     add_dependencies(test_scheduler_plugin_loader
         ${SCHEDULER_PLUGIN_TARGETS}
         destroy_count_scheduler_plugin
