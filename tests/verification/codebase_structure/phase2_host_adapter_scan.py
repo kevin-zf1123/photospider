@@ -62,7 +62,10 @@ TYPE_DECL_RE_TEMPLATE = (
 
 
 def rel(repo: Path, path: Path) -> str:
-    return path.relative_to(repo).as_posix()
+    try:
+        return path.relative_to(repo).as_posix()
+    except ValueError:
+        return path.as_posix()
 
 
 def strip_comments(text: str) -> str:
