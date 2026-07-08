@@ -8,18 +8,32 @@ source "$SCRIPT_DIR/common.sh"
 
 cd "$REPO_ROOT"
 
-changed_files() {
+is_valid_ref() {
+  local ref=${1:-}
+  [[ -n "$ref" ]] && git rev-parse --verify "$ref^{commit}" >/dev/null 2>&1
+}
+
+diff_base_ref() {
   local base=${CI_BASE_REF:-}
-  if [[ -n "$base" ]] && git rev-parse --verify "$base" >/dev/null 2>&1; then
+  if is_valid_ref "$base"; then
+    printf '%s\n' "$base"
+    return
+  fi
+  if is_valid_ref origin/main; then
+    printf '%s\n' origin/main
+    return
+  fi
+  if is_valid_ref HEAD~1; then
+    printf '%s\n' HEAD~1
+    return
+  fi
+  return 1
+}
+
+changed_files() {
+  local base
+  if base=$(diff_base_ref); then
     git diff --name-only --diff-filter=ACMR "$base"...HEAD
-    return
-  fi
-  if git rev-parse --verify origin/main >/dev/null 2>&1; then
-    git diff --name-only --diff-filter=ACMR origin/main...HEAD
-    return
-  fi
-  if git rev-parse --verify HEAD~1 >/dev/null 2>&1; then
-    git diff --name-only --diff-filter=ACMR HEAD~1...HEAD
     return
   fi
   git diff --name-only --diff-filter=ACMR HEAD
@@ -31,7 +45,11 @@ mapfile -t cpp_files < <(
     sort -u
 )
 
-run_logged git_diff_check git diff --check
+if diff_base=$(diff_base_ref); then
+  run_logged git_diff_check git diff --check "$diff_base"...HEAD
+else
+  run_logged git_diff_check git diff --check HEAD
+fi
 
 if ((${#cpp_files[@]} == 0)); then
   echo "No changed C++ files; clang-format and cpplint skipped." |
