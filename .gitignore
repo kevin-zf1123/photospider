@@ -21,6 +21,7 @@ feedback/
 
 # git & github
 !.gitignore
+!.dockerignore
 !.gitattributes
 !.gitmodules
 !.github/
@@ -38,6 +39,11 @@ feedback/
 !manual.md
 !readme.md
 !LICENSE
+
+# CI entrypoints
+!ci/
+!ci/**/
+!ci/scripts/*.sh
 
 # ============================
 # 3. 头文件 (Headers)
