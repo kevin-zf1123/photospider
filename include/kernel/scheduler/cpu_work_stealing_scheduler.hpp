@@ -68,10 +68,23 @@ class CpuWorkStealingScheduler : public IScheduler,
   using Task = SchedulerTaskRuntime::Task;
   using TaskPriority = SchedulerTaskPriority;
 
-  /// @brief 提交初始任务集合，开始一次计算批次
-  /// @param tasks 任务列表
-  /// @param total_task_count 总任务数（包括后续可能动态添加的任务）
-  /// @param priority 任务优先级
+  /**
+   * @brief 提交初始任务集合并开始一个新的调度 epoch。
+   *
+   * 该入口重置批次异常状态，递增 active epoch，设置
+   * tasks_to_complete_，然后按优先级发布初始 ready work。高优先级任务进入全局
+   * FIFO 队列；普通优先级任务按 worker 分散到本地队列，并通过
+   * publish_ready_tasks() 在全局等待互斥量下发布 ready 计数，避免单 worker
+   * 已准备睡眠时错过本地队列任务唤醒。
+   *
+   * @param tasks 本批次立即 ready 的回调任务；scheduler 接管其可调用对象。
+   * @param total_task_count
+   * 本批次需要完成的总任务数，包括任务运行期间动态增加的 ready work。
+   * @param priority 初始任务的调度优先级。
+   * @throws std::bad_alloc if queue growth fails while storing callbacks.
+   * @note 调用方必须保证 total_task_count 与任务内部的 dec_tasks_to_complete()
+   * 调用保持一致；空批次会直接通知 completion waiter。
+   */
   void submit_initial_tasks(
       std::vector<Task>&& tasks, int total_task_count,
       TaskPriority priority = TaskPriority::Normal) override;
@@ -79,7 +92,13 @@ class CpuWorkStealingScheduler : public IScheduler,
   /**
    * @brief 提交初始任务句柄集合，开始一次计算批次。
    *
-   * @param handles 调度器借用的轻量任务句柄列表。
+   * 句柄路径与回调路径共享
+   * epoch、异常重置、完成计数和唤醒语义。高优先级句柄进入 全局 FIFO
+   * 队列；普通句柄进入 per-worker 本地队列，并在所有有效句柄入队后通过
+   * publish_ready_tasks() 发布 ready 数量。这样本地队列可见性与 worker
+   * condition-variable 睡眠判定保持同一个唤醒边界。
+   *
+   * @param handles 调度器借用的轻量任务句柄列表；空句柄会被跳过。
    * @param total_task_count 本批次需要完成的活跃任务数。
    * @param priority 任务优先级。
    * @throws Nothing directly; queue allocation may throw before enqueue.
@@ -202,8 +221,9 @@ class CpuWorkStealingScheduler : public IScheduler,
    * The loop prefers high-priority global work, then local normal work, then
    * global normal work, and finally stolen work from peer queues. When no work
    * is visible, the worker parks on cv_task_available_ using
-   * global_queues_mutex_ so shutdown can publish the stop state without losing
-   * the wakeup.
+   * global_queues_mutex_. All local-queue publishers must update
+   * ready_task_count_ through publish_ready_tasks() under that same mutex so a
+   * single worker cannot miss the only wakeup for ordinary initial work.
    *
    * @param thread_id Stable worker index used for local queue ownership and
    * trace context.
@@ -215,6 +235,26 @@ class CpuWorkStealingScheduler : public IScheduler,
 
   // 从其他工作线程窃取任务
   std::optional<ScheduledTask> steal_task(int stealer_id);
+
+  /**
+   * @brief Publishes newly visible local-queue work to idle workers.
+   *
+   * Local normal-priority queues have per-worker mutexes, but idle workers
+   * decide whether to sleep under global_queues_mutex_ by reading
+   * ready_task_count_. This helper updates that predicate while holding the
+   * global mutex, then wakes one or all workers. The ordering closes the
+   * condition-variable lost-wakeup window that matters most when there is only
+   * one worker and no later task submission can send another notification.
+   *
+   * @param count Number of ready tasks made available by the caller.
+   * @param wake_all true to wake all workers for a batch, false to wake one
+   * worker for a single local submission.
+   * @throws Nothing directly.
+   * @note Call after the tasks have been placed in their local queues. If an
+   * already-running worker consumes a task before publication, the later
+   * increment balances that worker's ready_task_count_ decrement.
+   */
+  void publish_ready_tasks(int count, bool wake_all);
 
   // ---------------------------------------------------------------------------
   // 成员变量

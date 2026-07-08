@@ -5,6 +5,9 @@
 
 #include <algorithm>
 #include <filesystem>
+#include <iostream>
+#include <string>
+#include <vector>
 
 #include "kernel/scheduler/scheduler_factory.hpp"
 #include "kernel/scheduler/scheduler_plugin_api.hpp"
@@ -19,10 +22,49 @@
 namespace ps {
 namespace {
 
+#ifndef PS_SCHEDULER_PLUGIN_DIR
+#define PS_SCHEDULER_PLUGIN_DIR "build/schedulers"
+#endif
+
+#ifndef PS_TEST_SCHEDULER_PLUGIN_DIR
+#define PS_TEST_SCHEDULER_PLUGIN_DIR "build/test_schedulers"
+#endif
+
+/**
+ * @brief Returns the CMake output directory for scheduler plugins.
+ *
+ * @param test_fixture True selects the test-only scheduler fixture output
+ * directory; false selects the production/demo scheduler plugin output
+ * directory.
+ * @return Filesystem path injected by CMake for this test target, or the
+ * legacy source-root-relative `build/schedulers` tree when compiled outside
+ * CMake.
+ * @throws std::bad_alloc from path string construction.
+ * @note CMake injects absolute paths during normal builds so the loader tests
+ * can execute from the source tree, the binary tree, or nested CI build
+ * directories without assuming a literal `build/` directory name.
+ */
+std::filesystem::path scheduler_plugin_dir(bool test_fixture = false) {
+  return std::filesystem::path(test_fixture ? PS_TEST_SCHEDULER_PLUGIN_DIR
+                                            : PS_SCHEDULER_PLUGIN_DIR);
+}
+
+/**
+ * @brief Builds the expected shared library path for a scheduler plugin.
+ *
+ * @param stem Platform-independent library target stem without prefix or
+ * extension.
+ * @param test_fixture True when the plugin lives in the test-only scheduler
+ * output directory.
+ * @return Platform-specific plugin path inside `scheduler_plugin_dir()`.
+ * @throws std::bad_alloc from path and filename string construction.
+ * @note The helper mirrors CMake's target output directories instead of using
+ * source-root-relative paths, preserving CI compatibility with arbitrary
+ * `BUILD_DIR` values.
+ */
 std::filesystem::path scheduler_plugin_path(const std::string& stem,
                                             bool test_fixture = false) {
-  const std::filesystem::path dir =
-      test_fixture ? "build/test_schedulers" : "build/schedulers";
+  const std::filesystem::path dir = scheduler_plugin_dir(test_fixture);
 #if defined(_WIN32)
   return dir / (stem + ".dll");
 #elif defined(__APPLE__)
@@ -81,8 +123,8 @@ TEST_F(SchedulerPluginLoaderTest, ScanNonExistentDirectory) {
 TEST_F(SchedulerPluginLoaderTest, ScanSchedulerDirectory) {
   auto& loader = SchedulerPluginLoader::instance();
 
-  // 扫描 build/schedulers 目录
-  size_t count = loader.scan_and_load("build/schedulers");
+  const auto plugin_dir = scheduler_plugin_dir();
+  size_t count = loader.scan_and_load(plugin_dir.string());
 
   EXPECT_GE(count, 3u);
 
@@ -95,8 +137,7 @@ TEST_F(SchedulerPluginLoaderTest, ScanSchedulerDirectory) {
     EXPECT_TRUE(contains_type(types, "gpu_pipeline_example"));
     EXPECT_TRUE(contains_type(types, "heterogeneous_example"));
     EXPECT_FALSE(contains_type(types, "destroy_count_test"))
-        << "test-only scheduler fixture must not be exposed in "
-           "build/schedulers";
+        << "test-only scheduler fixture must not be exposed in " << plugin_dir;
 
     // 打印已加载的类型
     std::cout << "Loaded scheduler types from plugins:\n";
@@ -122,8 +163,7 @@ TEST_F(SchedulerPluginLoaderTest, LoadSinglePlugin) {
 TEST_F(SchedulerPluginLoaderTest, GetDescription) {
   auto& loader = SchedulerPluginLoader::instance();
 
-  // 先加载插件
-  loader.scan_and_load("build/schedulers");
+  loader.scan_and_load(scheduler_plugin_dir().string());
 
   auto types = loader.get_registered_types();
   for (const auto& type : types) {
@@ -137,10 +177,10 @@ TEST_F(SchedulerPluginLoaderTest, GetDescription) {
 TEST_F(SchedulerPluginLoaderTest, CreateSchedulerFromPlugin) {
   auto& loader = SchedulerPluginLoader::instance();
 
-  // 加载插件
-  size_t count = loader.scan_and_load("build/schedulers");
+  const auto plugin_dir = scheduler_plugin_dir();
+  size_t count = loader.scan_and_load(plugin_dir.string());
   if (count == 0) {
-    GTEST_SKIP() << "No plugins found in build/schedulers";
+    GTEST_SKIP() << "No plugins found in " << plugin_dir;
   }
 
   auto types = loader.get_registered_types();
@@ -163,8 +203,7 @@ TEST_F(SchedulerPluginLoaderTest, CreateSchedulerFromPlugin) {
 TEST_F(SchedulerPluginLoaderTest, ListLoadedPlugins) {
   auto& loader = SchedulerPluginLoader::instance();
 
-  // 加载插件
-  loader.scan_and_load("build/schedulers");
+  loader.scan_and_load(scheduler_plugin_dir().string());
 
   auto plugins = loader.list_loaded_plugins();
   std::cout << "Loaded plugins:\n";
@@ -177,8 +216,7 @@ TEST_F(SchedulerPluginLoaderTest, ListLoadedPlugins) {
 TEST_F(SchedulerPluginLoaderTest, FactoryIntegration) {
   auto& loader = SchedulerPluginLoader::instance();
 
-  // 加载插件
-  size_t count = loader.scan_and_load("build/schedulers");
+  size_t count = loader.scan_and_load(scheduler_plugin_dir().string());
   if (count == 0) {
     GTEST_SKIP() << "No plugins found";
   }
@@ -224,8 +262,8 @@ TEST_F(SchedulerPluginLoaderTest, GpuPipelineExampleCreateRejectsNullTypeName) {
 TEST_F(SchedulerPluginLoaderTest, ClearPlugins) {
   auto& loader = SchedulerPluginLoader::instance();
 
-  // 加载插件
-  loader.scan_and_load("build/schedulers");
+  const auto plugin_dir = scheduler_plugin_dir();
+  loader.scan_and_load(plugin_dir.string());
 
   auto before = loader.get_registered_types();
   size_t before_count = before.size();
@@ -237,7 +275,7 @@ TEST_F(SchedulerPluginLoaderTest, ClearPlugins) {
   EXPECT_TRUE(after.empty());
 
   // 可以重新加载
-  loader.scan_and_load("build/schedulers");
+  loader.scan_and_load(plugin_dir.string());
   auto reloaded = loader.get_registered_types();
   EXPECT_EQ(reloaded.size(), before_count);
 }

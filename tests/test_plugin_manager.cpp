@@ -17,18 +17,54 @@ namespace {
 constexpr const char* kLifecycleType = "plugin_lifecycle";
 constexpr const char* kLifecycleSubtype = "op";
 constexpr const char* kLifecycleKey = "plugin_lifecycle:op";
-constexpr const char* kStandardPluginDir = "build/plugins";
+
+#ifndef PS_STANDARD_OP_PLUGIN_DIR
+#define PS_STANDARD_OP_PLUGIN_DIR "build/plugins"
+#endif
+
+#ifndef PS_TEST_OP_PLUGIN_DIR
+#define PS_TEST_OP_PLUGIN_DIR "build/test_plugins"
+#endif
+
+/**
+ * @brief Returns the CMake output root for test-only operation plugins.
+ *
+ * @return Filesystem path injected by CMake for this test target, or the legacy
+ * `build/test_plugins` fallback when the source is compiled outside CMake.
+ * @throws std::bad_alloc from path string construction.
+ * @note The value is an absolute path in normal CMake builds, which lets the
+ * test run from any working directory and from nested build trees such as
+ * `build/ci`.
+ */
+std::filesystem::path test_op_plugin_dir() {
+  return std::filesystem::path(PS_TEST_OP_PLUGIN_DIR);
+}
+
+/**
+ * @brief Returns the CMake output directory for standard operation plugins.
+ *
+ * @return Filesystem path injected by CMake for standard plugin shared
+ * libraries, or the legacy `build/plugins` fallback outside CMake.
+ * @throws std::bad_alloc from path string construction.
+ * @note Plugin manager lifecycle tests intentionally consume the build output
+ * directory instead of a source-relative `build/` path so CI jobs can choose
+ * any binary directory.
+ */
+std::filesystem::path standard_plugin_dir() {
+  return std::filesystem::path(PS_STANDARD_OP_PLUGIN_DIR);
+}
 
 /**
  * @brief Returns the build output path for the lifecycle op plugin fixture.
  *
- * @return Platform-specific shared library path under `build/test_plugins`.
+ * @return Platform-specific shared library path under `test_op_plugin_dir()`.
  * @throws std::bad_alloc from path string construction.
- * @note Tests run with the repository root as working directory, matching the
- * existing scheduler plugin loader tests.
+ * @note The plugin directory comes from the test target's CMake definitions so
+ * the fixture follows the active binary directory rather than a hard-coded
+ * `build/` tree.
  */
 std::filesystem::path lifecycle_plugin_path() {
-  const std::filesystem::path dir = "build/test_plugins/lifecycle";
+  const std::filesystem::path dir = test_op_plugin_dir() / "lifecycle";
 #if defined(_WIN32)
   return dir / "lifecycle_op_plugin.dll";
 #elif defined(__APPLE__)
@@ -41,13 +77,14 @@ std::filesystem::path lifecycle_plugin_path() {
 /**
  * @brief Returns the build output path for the replacement lifecycle plugin.
  *
- * @return Platform-specific shared library path under `build/test_plugins`.
+ * @return Platform-specific shared library path under `test_op_plugin_dir()`.
  * @throws std::bad_alloc from path string construction.
  * @note The replacement plugin intentionally registers the same operation key
- * as `lifecycle_op_plugin`.
+ * as `lifecycle_op_plugin`, and its directory is injected by CMake for the
+ * active build tree.
  */
 std::filesystem::path override_lifecycle_plugin_path() {
-  const std::filesystem::path dir = "build/test_plugins/override";
+  const std::filesystem::path dir = test_op_plugin_dir() / "override";
 #if defined(_WIN32)
   return dir / "override_lifecycle_op_plugin.dll";
 #elif defined(__APPLE__)
@@ -120,8 +157,9 @@ std::string current_lifecycle_compute_device() {
  * @param key Canonical `type:subtype` operation key.
  * @return True when reported keys contain `key`.
  * @throws Nothing.
- * @note Standard plugins are loaded from `build/plugins`, and this helper keeps
- * test assertions independent from platform-specific shared library suffixes.
+ * @note Standard plugins are loaded from `standard_plugin_dir()`, and this
+ * helper keeps test assertions independent from platform-specific shared
+ * library suffixes.
  */
 bool result_contains_key(const PluginLoadResult& result,
                          const std::string& key) {
@@ -348,12 +386,12 @@ TEST_F(PluginManagerLifecycleTest,
   OpRegistry::instance().unregister_key("io:save");
   OpRegistry::instance().unregister_key("image_generator:perlin_noise_metal");
 
-  ASSERT_TRUE(std::filesystem::exists(kStandardPluginDir))
-      << "standard operation plugin directory was not built: "
-      << kStandardPluginDir;
+  const auto plugin_dir = standard_plugin_dir();
+  ASSERT_TRUE(std::filesystem::exists(plugin_dir))
+      << "standard operation plugin directory was not built: " << plugin_dir;
 
   PluginManager manager;
-  const auto result = manager.load_from_dirs_report({kStandardPluginDir});
+  const auto result = manager.load_from_dirs_report({plugin_dir.string()});
 
   EXPECT_GE(result.loaded, 3) << describe_errors(result.errors);
   EXPECT_TRUE(result.errors.empty()) << describe_errors(result.errors);
