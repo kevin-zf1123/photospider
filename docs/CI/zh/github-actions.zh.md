@@ -45,6 +45,16 @@ docker run --rm -v "$PWD:/workspace" -w /workspace photospider-ci:local \
   bash ci/scripts/build_integrity.sh
 ```
 
+可选本地镜像源构建：
+
+```bash
+docker build -t photospider-ci:local -f Dockerfile.ci \
+  --build-arg APT_MIRROR=http://mirrors.tuna.tsinghua.edu.cn/ubuntu-ports/ \
+  --build-arg PIP_INDEX_URL=https://pypi.tuna.tsinghua.edu.cn/simple .
+```
+
+本机 arm64 构建使用 `ubuntu-ports`。amd64 使用 `http://mirrors.tuna.tsinghua.edu.cn/ubuntu/`。
+
 ## 本地 artifact 下载
 
 使用 personal overlay 脚本下载 GitHub Actions artifact：
