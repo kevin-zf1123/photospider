@@ -6,10 +6,11 @@
 
 ## 当前状态
 
-Photospider 围绕图运行时构建，包含服务拆分、操作 registry、缓存层和调度器抽象。Parallel
-planned work 现在会通过 scheduler-owned task runtime dispatch。Graph-state 命令和会修改可见图状态的
-compute request 会进入显式的每图 `GraphStateExecutor` 边界，而不是 scheduler dispatch 路径。
-Scheduler-backed parallel compute 会在该 graph-state 边界内使用 scheduler runtime 执行 ready task callback。
+Photospider 围绕图运行时构建，包含服务拆分、操作 registry、缓存层、调度器抽象，以及面向前端的
+Host seam。Parallel planned work 现在会通过 scheduler-owned task runtime dispatch。Graph-state
+命令和会修改可见图状态的 compute request 会进入显式的每图 `GraphStateExecutor` 边界，而不是
+scheduler dispatch 路径。Scheduler-backed parallel compute 会在该 graph-state 边界内使用
+scheduler runtime 执行 ready task callback。
 
 代码可用且可测试，但部分边界尚未最终稳定。尤其是 `Kernel` 和 `ComputeService` 仍协调大量行为，未来可能移动到更窄的服务中。
 
@@ -23,7 +24,7 @@ Scheduler-backed parallel compute 会在该 graph-state 边界内使用 schedule
 | `photospider_graph` | `GraphModel` 加图 IO、遍历、缓存和 inspect 服务。 |
 | `photospider_plugin` | 动态操作插件管理器和加载器。 |
 | `photospider_compute` | 内核 facade、交互运行时、调度器、计算服务、事件。 |
-| `photospider_lib` | CLI 和插件链接的共享后端库。 |
+| `photospider_lib` | CLI、插件和 embedded Host 前端链接的共享后端库。 |
 | `photospider_cli_common` | REPL 命令、TUI 编辑器、自动补全、CLI 配置。 |
 | `graph_cli` | 终端用户可执行文件。 |
 
@@ -42,6 +43,9 @@ Scheduler-backed parallel compute 会在该 graph-state 边界内使用 schedule
 ```mermaid
 graph TD
     CLI["CLI / REPL / TUI"] --> InteractionService
+    Frontend["Embedded frontend"] --> Host["ps::Host"]
+    Host --> EmbeddedHost["embedded Host adapter"]
+    EmbeddedHost --> InteractionService
     InteractionService --> Kernel
 
     Kernel --> GraphRuntime
@@ -74,9 +78,11 @@ graph TD
 | 组件 | 角色 |
 | --- | --- |
 | `Kernel` | 多图 facade、服务 owner、运行时 bootstrapper、顶层图/缓存/计算 API。 |
+| `ps::Host` | `include/photospider/host` 下的 public frontend interface；返回复制的 request/result/snapshot value，并隐藏 Kernel、GraphModel 和 GraphRuntime。 |
+| `embedded Host adapter` | 由 `Kernel` 和 `InteractionService` 支撑的 in-process Host 实现，供本地前端使用，同时保持 CLI 行为不变。 |
 | `GraphRuntime` | 每图资源容器，包含模型、graph-state executor、事件、调度器和平台 context。 |
 | `GraphModel` | 图状态持有者：私有节点存储、拓扑邻接索引、缓存根目录、计时数据、quiet/skip-save 标志。 |
-| `InteractionService` | 面向 CLI 的 `Kernel` wrapper，使命令代码保持较薄。 |
+| `InteractionService` | 面向 CLI 和 embedded adapter 的 `Kernel` wrapper，使命令代码保持较薄，同时 Host 成为稳定的可安装 frontend seam。 |
 | `ComputeService` | 解析依赖、检查缓存、执行 op，协调 RT/HP/tiled 路径和计时事件。 |
 | `GraphTraversalService` | 只负责拓扑：基于 `GraphModel` 邻接索引提供遍历顺序、结束节点发现、祖先检查、上游依赖查询和下游依赖查询。 |
 | `RoiPropagationService` | ROI/空间传播边界，负责单节点上游 ROI 计算以及图级 forward/backward ROI 投影。 |
@@ -119,6 +125,18 @@ graph TD
 9. 工作通过递归或配置的调度器路径执行。
 10. `GraphEventService` 记录每节点事件和计时数据。
 11. 结果通过 `Kernel` 和 `InteractionService` 暴露回去。
+
+典型 embedded Host 计算流程：
+
+1. 本地前端通过 `create_embedded_host()` 创建 `ps::Host`。
+2. 前端使用 `include/photospider/host` 和 `include/photospider/core` 中的 public value type
+   发送 `GraphLoadRequest`、`HostComputeRequest` 或 inspection request。
+3. embedded Host adapter 将这些 value 转换为现有 `InteractionService` / `Kernel` request。
+4. Kernel 和 service execution 继续走与 CLI 相同的 graph-state、compute、cache、scheduler 和 plugin
+   路径。
+5. 结果会复制回 `OperationStatus`、`GraphInspectionView`、`DirtyRegionInspectionSnapshot`、
+   timing/event snapshot、scheduler info 或其他 Host value snapshot。Host caller 不会收到
+   `Kernel`、`GraphModel`、`GraphRuntime`、OpenCV rectangle 或 YAML node。
 
 ## 调度器模型
 
