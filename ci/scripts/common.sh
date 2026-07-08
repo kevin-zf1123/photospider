@@ -23,8 +23,11 @@ run_logged() {
   shift
   local log_file="$CI_ARTIFACT_DIR/${name}.log"
   log_section "$name"
-  printf '$ %q' "$@" | tee "$log_file"
-  printf '\n' | tee -a "$log_file"
+  {
+    printf '$'
+    printf ' %q' "$@"
+    printf '\n'
+  } | tee "$log_file"
   "$@" > >(tee -a "$log_file") 2> >(tee -a "$log_file" >&2)
 }
 

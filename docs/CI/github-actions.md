@@ -5,17 +5,21 @@
 - `.github/workflows/ci-healthcheck.yml`: static healthcheck on pull requests, pushes to `main` and `CI/workflow-design`, and manual dispatch.
 - `.github/workflows/ci-integration.yml`: build integrity, mainline CTest, scripted `graph_cli`, scripted propagation, plugin loading, and scheduler repeat checks.
 - `.github/workflows/ci-sanitizer.yml`: manual ASan or TSan focused checks.
-- `.github/workflows/build-ci-image.yml`: manual GHCR image publish for `ghcr.io/<owner>/<repo>/photospider-ci`.
+- `.github/workflows/build-ci-image.yml`: GHCR image publish for `ghcr.io/<owner>/<repo>/photospider-ci` on image-input pushes and manual dispatch.
 
 ## Runtime
 
-`Dockerfile.ci` defines the GitHub Linux test environment. Integration jobs build it locally as `photospider-ci:local`, then run the same scripts used for local reproduction.
+`Dockerfile.ci` defines the GitHub Linux test environment. Normal healthcheck and integration jobs run inside the published `ghcr.io/<owner>/<repo>/photospider-ci:latest` image.
+
+When a pull request or push changes the CI image inputs (`Dockerfile.ci`, `.dockerignore`, or `.github/workflows/build-ci-image.yml`), the healthcheck and integration workflows build `photospider-ci:local` inside the workflow and run the same scripts there. This avoids racing another workflow that may still be publishing the new `latest` image.
 
 The image includes CMake, a C++ toolchain, OpenCV, yaml-cpp, CURL, OpenSSL, GTest, nlohmann-json, clang-format, Python, and cpplint.
 
 ## Scripts
 
 - `ci/scripts/healthcheck.sh`: runs `git diff --check`, `clang-format --dry-run --Werror`, and `cpplint` on changed C++ files.
+- `ci/scripts/ci_image_changed.sh`: detects whether the current diff changes CI image inputs.
+- `ci/scripts/integration_suite.sh`: runs the integration checks sequentially for the local-image fallback path.
 - `ci/scripts/build_integrity.sh`: configures CMake, explicitly builds `graph_cli`, `test_propagation`, test plugins, scheduler plugins, then runs `ctest -N`.
 - `ci/scripts/ctest_full.sh`: builds all targets and runs CTest. It excludes `SplitComputeServiceRuntimeTrace` by default because that test writes personal-overlay evidence under `tests/results/`.
 - `ci/scripts/graph_cli_script_test.sh`: runs positive and negative scripted REPL checks.

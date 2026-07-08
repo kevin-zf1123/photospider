@@ -27,8 +27,7 @@ changed_files() {
 
 mapfile -t cpp_files < <(
   changed_files |
-    grep -E '\.(c|cc|cpp|cxx|h|hpp|hh|mm)$' |
-    grep -Ev '^extern/' |
+    awk '/\.(c|cc|cpp|cxx|h|hpp|hh|mm)$/ && !/^extern\// { print }' |
     sort -u
 )
 

@@ -5,17 +5,21 @@
 - `.github/workflows/ci-healthcheck.yml`：在 pull request、推送到 `main` 和 `CI/workflow-design`、手动触发时运行静态 healthcheck。
 - `.github/workflows/ci-integration.yml`：运行构建完整性、主线 CTest、`graph_cli` 脚本测试、propagation 脚本测试、插件加载测试和 scheduler 重复测试。
 - `.github/workflows/ci-sanitizer.yml`：手动运行 ASan 或 TSan 聚焦检查。
-- `.github/workflows/build-ci-image.yml`：手动发布 GHCR 镜像 `ghcr.io/<owner>/<repo>/photospider-ci`。
+- `.github/workflows/build-ci-image.yml`：在镜像输入相关 push 和手动触发时发布 GHCR 镜像 `ghcr.io/<owner>/<repo>/photospider-ci`。
 
 ## 运行环境
 
-`Dockerfile.ci` 定义 GitHub Linux 测试环境。集成测试 job 会本地构建 `photospider-ci:local`，再运行与本地复现相同的脚本。
+`Dockerfile.ci` 定义 GitHub Linux 测试环境。常规 healthcheck 和 integration job 会在已发布的 `ghcr.io/<owner>/<repo>/photospider-ci:latest` 镜像中运行。
+
+当 pull request 或 push 修改 CI 镜像输入（`Dockerfile.ci`、`.dockerignore` 或 `.github/workflows/build-ci-image.yml`）时，healthcheck 和 integration workflow 会在当前 workflow 内构建 `photospider-ci:local`，并在该镜像中运行相同脚本。这样可以避免另一个 workflow 尚未发布新 `latest` 镜像时产生竞态。
 
 镜像包含 CMake、C++ 工具链、OpenCV、yaml-cpp、CURL、OpenSSL、GTest、nlohmann-json、clang-format、Python 和 cpplint。
 
 ## 脚本
 
 - `ci/scripts/healthcheck.sh`：对改动的 C++ 文件运行 `git diff --check`、`clang-format --dry-run --Werror` 和 `cpplint`。
+- `ci/scripts/ci_image_changed.sh`：检测当前 diff 是否修改 CI 镜像输入。
+- `ci/scripts/integration_suite.sh`：为本地镜像 fallback 路径顺序运行 integration 检查。
 - `ci/scripts/build_integrity.sh`：配置 CMake，显式构建 `graph_cli`、`test_propagation`、测试插件和 scheduler 插件，然后运行 `ctest -N`。
 - `ci/scripts/ctest_full.sh`：构建全部目标并运行 CTest。默认排除 `SplitComputeServiceRuntimeTrace`，因为该测试会向 personal overlay 的 `tests/results/` 写证据。
 - `ci/scripts/graph_cli_script_test.sh`：运行正路径和负路径 REPL 脚本检查。

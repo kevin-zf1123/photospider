@@ -13,7 +13,32 @@ permissions:
   packages: read
 
 jobs:
+  ci-image-change:
+    runs-on: ubuntu-latest
+    outputs:
+      changed: ${{ steps.detect.outputs.changed }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          submodules: recursive
+      - name: Detect CI image input changes
+        id: detect
+        env:
+          CI_IMAGE_BASE_REF: ${{ github.event_name == 'pull_request' && format('origin/{0}', github.base_ref) || github.event.before }}
+          CI_ARTIFACT_DIR: ${{ github.workspace }}/CI-results/ci-image-change
+        run: bash ci/scripts/ci_image_changed.sh
+      - name: Upload CI image change logs
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: integration-ci-image-change
+          path: CI-results/ci-image-change
+          if-no-files-found: warn
+
   build-integrity:
+    needs: ci-image-change
+    if: needs.ci-image-change.outputs.changed != 'true'
     runs-on: ubuntu-latest
     container:
       image: ghcr.io/${{ github.repository }}/photospider-ci:latest
@@ -48,6 +73,39 @@ jobs:
           if-no-files-found: error
           retention-days: 3
           compression-level: 0
+
+  local-image-integration:
+    needs: ci-image-change
+    if: needs.ci-image-change.outputs.changed == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          submodules: recursive
+
+      - name: Build local CI image
+        run: docker build -t photospider-ci:local -f Dockerfile.ci .
+
+      - name: Run integration suite in local CI image
+        run: |
+          docker run --rm \
+            -v "${{ github.workspace }}:/workspace" \
+            -w /workspace \
+            -e CI_ARTIFACT_ROOT=/workspace/CI-results \
+            -e SCHEDULER_REPEAT=5 \
+            -e GPU_PIPELINE_REPEAT=3 \
+            photospider-ci:local \
+            bash ci/scripts/integration_suite.sh
+
+      - name: Upload local image integration logs
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: integration-local-image-results
+          path: CI-results
+          if-no-files-found: warn
 
   full-ctest:
     needs: build-integrity
