@@ -26,10 +26,12 @@ class Node;
  *       still treat matrices obtained from InputTile as read-only.
  */
 struct InputTile {
-  /** @brief Borrowed upstream buffer that must remain alive during tile work. */
+  /** @brief Borrowed upstream buffer that must remain alive during tile work.
+   */
   const ImageBuffer* buffer = nullptr;
 
-  /** @brief Pixel ROI inside buffer, clipped by the executor before dispatch. */
+  /** @brief Pixel ROI inside buffer, clipped by the executor before dispatch.
+   */
   cv::Rect roi;
 };
 
@@ -48,7 +50,8 @@ struct OutputTile {
   /** @brief Borrowed destination buffer that receives tile output. */
   ImageBuffer* buffer = nullptr;
 
-  /** @brief Pixel ROI inside buffer, clipped by the executor before dispatch. */
+  /** @brief Pixel ROI inside buffer, clipped by the executor before dispatch.
+   */
   cv::Rect roi;
 };
 
