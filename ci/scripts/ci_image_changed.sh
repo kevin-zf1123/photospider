@@ -17,18 +17,18 @@ changed_files() {
   local base=${CI_IMAGE_BASE_REF:-${CI_BASE_REF:-}}
   if [[ -n "$base" ]] && ! is_zero_sha "$base" &&
     git rev-parse --verify "$base^{commit}" >/dev/null 2>&1; then
-    git diff --name-only --diff-filter=ACMR "$base"...HEAD
+    git diff --name-only --diff-filter=ACMRD "$base"...HEAD
     return
   fi
   if git rev-parse --verify origin/main >/dev/null 2>&1; then
-    git diff --name-only --diff-filter=ACMR origin/main...HEAD
+    git diff --name-only --diff-filter=ACMRD origin/main...HEAD
     return
   fi
   if git rev-parse --verify HEAD~1 >/dev/null 2>&1; then
-    git diff --name-only --diff-filter=ACMR HEAD~1...HEAD
+    git diff --name-only --diff-filter=ACMRD HEAD~1...HEAD
     return
   fi
-  git diff --name-only --diff-filter=ACMR HEAD
+  git diff --name-only --diff-filter=ACMRD HEAD
 }
 
 mapfile -t changed_paths < <(changed_files | sort -u)
