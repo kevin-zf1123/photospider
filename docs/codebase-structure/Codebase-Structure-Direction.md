@@ -344,6 +344,12 @@ Recommended order:
    - Fail when installable headers include `src/`, `kernel/services/...`, or
      implementation-only graph/runtime/compute planning headers.
    - Add one header self-containment compile test for public headers.
+   - Phase 0 establishes a replayable public-header scan and the
+     `public_header_self_containment` CMake target as the independent compile
+     guard for each header under `include/photospider/`.
+   - `include/photospider/public_boundary.hpp` is only a marker header for the
+     installable include root. Stable value contracts remain part of the next
+     core seam phase.
 2. Introduce `include/photospider/*`.
    - Move stable value contracts first: errors, image buffer, compute request,
      inspection snapshots.
