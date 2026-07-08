@@ -109,16 +109,17 @@ size_t image_buffer_bytes_per_channel(DataType type);
  * @brief Computes an aligned row stride for an image buffer.
  *
  * The function multiplies width, channel count, and bytes per channel, then
- * rounds the result up to the requested byte alignment.
+ * rounds the result up to the requested power-of-two byte alignment.
  *
  * @param width Image width in pixels.
  * @param channels Number of channels per pixel.
  * @param type Channel storage format.
- * @param alignment Positive byte alignment target.
- * @return Row stride in bytes, or zero when width/channels/alignment are not
- *         positive.
- * @throws Nothing.
- * @note The function does not allocate memory.
+ * @param alignment Positive power-of-two byte alignment target.
+ * @return Row stride in bytes, or zero when width or channels are not positive
+ *         after alignment validation succeeds.
+ * @throws std::invalid_argument if alignment is zero or is not a power of two.
+ * @note Alignment is validated before dimensions are interpreted. The function
+ *       does not allocate memory.
  */
 size_t aligned_image_buffer_step(int width, int channels, DataType type,
                                  size_t alignment = 64);
@@ -133,11 +134,16 @@ size_t aligned_image_buffer_step(int width, int channels, DataType type,
  * @param height Image height in pixels.
  * @param channels Number of channels per pixel.
  * @param type Channel storage format.
- * @param alignment Positive byte alignment target for each row.
+ * @param alignment Positive power-of-two byte alignment target for each row;
+ *        must be at least `sizeof(void*)` for portable CPU allocation.
  * @return ImageBuffer describing the allocated CPU payload, or an empty
- *         descriptor when dimensions or alignment are invalid.
+ *         descriptor with a zero step when dimensions are invalid after
+ *         alignment validation succeeds.
+ * @throws std::invalid_argument if alignment is zero, is not a power of two, or
+ *         is smaller than `sizeof(void*)`.
  * @throws std::bad_alloc if CPU memory allocation fails.
- * @note The returned buffer uses `Device::CPU` and has no backend context.
+ * @note Alignment is validated before dimensions are interpreted. The returned
+ *       buffer uses `Device::CPU` and has no backend context.
  */
 ImageBuffer make_aligned_cpu_image_buffer(int width, int height, int channels,
                                           DataType type, size_t alignment = 64);
