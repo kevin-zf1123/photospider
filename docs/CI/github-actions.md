@@ -45,6 +45,16 @@ docker run --rm -v "$PWD:/workspace" -w /workspace photospider-ci:local \
   bash ci/scripts/build_integrity.sh
 ```
 
+Optional local mirror build:
+
+```bash
+docker build -t photospider-ci:local -f Dockerfile.ci \
+  --build-arg APT_MIRROR=http://mirrors.tuna.tsinghua.edu.cn/ubuntu-ports/ \
+  --build-arg PIP_INDEX_URL=https://pypi.tuna.tsinghua.edu.cn/simple .
+```
+
+Use `ubuntu-ports` for local arm64 builds. Use `http://mirrors.tuna.tsinghua.edu.cn/ubuntu/` for amd64.
+
 ## Local Artifact Download
 
 Use the personal-overlay script to download GitHub Actions artifacts:
