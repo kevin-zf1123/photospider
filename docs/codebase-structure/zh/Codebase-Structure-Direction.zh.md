@@ -314,10 +314,11 @@ graph TD
    - Phase 0 建立可重放的 public header 扫描，并将
      `public_header_self_containment` CMake target 作为 `include/photospider/`
      下每个头文件的独立编译护栏。
-   - `include/photospider/public_boundary.hpp` 只是可安装 include root 的 marker 头。
-     稳定值契约仍属于下一阶段 core seam。
+   - `include/photospider/public_boundary.hpp` 仍是可安装 include root 的 marker 头。
+     Phase 1 在 `include/photospider/core/` 下加入第一批稳定值契约。
 2. 引入 `include/photospider/*`。
-   - 先移动稳定值契约：error、image buffer、compute request、inspect snapshot。
+   - 先移动稳定值契约：error、result/status 值、compute intent、无 OpenCV 依赖的
+     image/tile buffer 值和 inspect snapshot。
    - 保持 `GraphModel`、`GraphRuntime` 和 compute planning 头为内部实现。
 3. 创建 host interface。
    - 将 `InteractionService` 转换为稳定 host-facing 模块，或隐藏在其背后。

@@ -563,6 +563,12 @@ if(BUILD_TESTING)
             --repo "${PROJECT_SOURCE_DIR}"
             --out "${CMAKE_BINARY_DIR}/tests/public_header_boundary_scan"
         WORKING_DIRECTORY ${PROJECT_SOURCE_DIR})
+    add_test(NAME Phase1CoreSeamScan
+        COMMAND ${Python3_EXECUTABLE}
+            "${PROJECT_SOURCE_DIR}/tests/verification/codebase_structure/phase1_core_seam_scan.py"
+            --repo "${PROJECT_SOURCE_DIR}"
+            --out "${CMAKE_BINARY_DIR}/tests/phase1_core_seam_scan"
+        WORKING_DIRECTORY ${PROJECT_SOURCE_DIR})
     add_test(NAME PublicHeaderSelfContainment
         COMMAND ${CMAKE_COMMAND} --build "${CMAKE_BINARY_DIR}"
             --target public_header_self_containment --config $<CONFIG>

@@ -18,6 +18,8 @@
 #include <vector>
 
 #include "image_buffer.hpp"
+#include "photospider/core/compute_intent.hpp"
+#include "photospider/core/graph_error.hpp"
 
 namespace ps {
 namespace fs = std::filesystem;
@@ -147,52 +149,6 @@ struct SpatialDependencyMap {
   }
 };
 
-#if defined(_WIN32)
-#if defined(PHOTOSPIDER_LIB_BUILD)
-#define PHOTOSPIDER_API __declspec(dllexport)
-#else
-#define PHOTOSPIDER_API __declspec(dllimport)
-#endif
-#else  // Non-Windows platforms
-#if defined(PHOTOSPIDER_LIB_BUILD)
-#define PHOTOSPIDER_API __attribute__((visibility("default")))
-#else
-#define PHOTOSPIDER_API
-#endif
-#endif
-
-enum class GraphErrc {
-  Unknown = 1,
-  NotFound,
-  Cycle,
-  Io,
-  InvalidYaml,
-  MissingDependency,
-  NoOperation,
-  InvalidParameter,
-  ComputeError,
-};
-struct PHOTOSPIDER_API GraphError : public std::runtime_error {
-  explicit GraphError(const std::string& what)
-      : std::runtime_error(what), code_(GraphErrc::Unknown) {}
-  GraphError(GraphErrc code, const std::string& what)
-      : std::runtime_error(what), code_(code) {}
-  GraphErrc code() const noexcept { return code_; }
-
- private:
-  GraphErrc code_;
-};
-
-// struct GraphError : public std::runtime_error {
-//     explicit GraphError(const std::string& what)
-//         : std::runtime_error(what), code_(GraphErrc::Unknown) {}
-//     GraphError(GraphErrc code, const std::string& what)
-//         : std::runtime_error(what), code_(code) {}
-//     GraphErrc code() const noexcept { return code_; }
-// private:
-//     GraphErrc code_;
-// };
-
 class Node;
 class GraphModel;
 
@@ -249,14 +205,6 @@ using ForwardRoiPropFunc = std::function<cv::Rect(
 using DependencyLutBuilder = std::function<SpatialDependencyMap(
     const Node&, const GraphModel&, const cv::Size& upstream_extent,
     const cv::Size& downstream_extent)>;
-
-// -----------------------------------------------------------------------------
-// Compute intent for planner/scheduler (Phase 1: API foundation)
-// -----------------------------------------------------------------------------
-enum class ComputeIntent {
-  GlobalHighPrecision,
-  RealTimeUpdate,
-};
 
 enum class PropagationContractStatus {
   Explicit,

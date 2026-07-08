@@ -347,12 +347,13 @@ Recommended order:
    - Phase 0 establishes a replayable public-header scan and the
      `public_header_self_containment` CMake target as the independent compile
      guard for each header under `include/photospider/`.
-   - `include/photospider/public_boundary.hpp` is only a marker header for the
-     installable include root. Stable value contracts remain part of the next
-     core seam phase.
+   - `include/photospider/public_boundary.hpp` remains a marker header for the
+     installable include root. Phase 1 adds the first stable value contracts
+     under `include/photospider/core/`.
 2. Introduce `include/photospider/*`.
-   - Move stable value contracts first: errors, image buffer, compute request,
-     inspection snapshots.
+   - Move stable value contracts first: errors, result/status values,
+     compute intent, OpenCV-free image/tile buffer values, and inspection
+     snapshots.
    - Keep `GraphModel`, `GraphRuntime`, and compute planning headers internal.
 3. Create the host interface.
    - Convert `InteractionService` into or behind a stable host-facing module.
