@@ -6,6 +6,8 @@
 #include <optional>
 #include <vector>
 
+#include "ps_types.hpp"  // NOLINT(build/include_subdir)
+
 namespace ps {
 
 enum class SchedulerTaskPriority { Normal, High };
@@ -93,6 +95,21 @@ class SchedulerTaskRuntime {
   virtual ~SchedulerTaskRuntime() = default;
 
   virtual bool task_runtime_running() const = 0;
+
+  /**
+   * @brief Reports devices usable by tasks submitted to this runtime.
+   *
+   * @return Device list ordered by runtime preference. The base scheduler
+   * runtime exposes CPU only, which preserves existing schedulers that do not
+   * manage accelerator resources.
+   * @throws std::bad_alloc if vector allocation fails.
+   * @note Compute task submission uses this list when selecting registered
+   * per-device operation implementations. Concrete heterogeneous schedulers
+   * should override it when accelerator availability is runtime-dependent.
+   */
+  virtual std::vector<Device> available_devices() const {
+    return {Device::CPU};
+  }
 
   virtual void submit_initial_tasks(
       std::vector<Task>&& tasks, int total_task_count,

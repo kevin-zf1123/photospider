@@ -247,12 +247,12 @@ as-is, so local entries such as `cache_precision`, `plugin_dirs`, or
 | `scheduler_rt_type` | `cpu_work_stealing` | Default kernel RT intent scheduler using the same supported values; this does not enable CLI RT commands. |
 | `scheduler_worker_count` | `0` | CPU scheduler worker count; `0` means auto. |
 
-When the CLI loads a config file, it scans `scheduler_dirs` before graph load
-and then copies these scheduler defaults into `Kernel::SchedulerConfig`. Newly
-loaded graphs inherit the configured HP/RT scheduler types and worker count,
-including plugin-provided scheduler types discovered from configured
-directories. Use `scheduler set <hp|rt> <type>` for an immediate per-graph
-scheduler switch.
+When the CLI loads a config file, it first copies these scheduler defaults into
+`Kernel::SchedulerConfig`, then scans configured plugin directories before any
+graph load. Scheduler type strings are resolved when a graph creates its
+scheduler instances during graph load, or later through `scheduler set <hp|rt>
+<type>`, so newly loaded graphs can still use plugin-provided scheduler types
+discovered during startup.
 
 Scheduler plugin discovery and scheduler selection are separate phases.
 `scheduler plugins` reports plugins scanned from `scheduler_dirs`; it does not

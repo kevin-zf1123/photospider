@@ -301,12 +301,9 @@ TEST(Scheduler, DirtyRegionTiledComputation) {
           mat(dirty_rect).setTo(cv::Scalar(1.0f));
         });
 
-        // Invalidate downstream HP caches since source was modified.
-        // The HP background update (force_recache=true) will recompute them.
-        g.mutate_node_runtime_state(
-            2, [](auto& state) { state.cached_output_high_precision.reset(); });
-        g.mutate_node_runtime_state(
-            3, [](auto& state) { state.cached_output_high_precision.reset(); });
+        // Keep downstream HP outputs as dirty update seeds. The dirty ROI
+        // executor refreshes only the changed region while preserving the
+        // existing full-frame HP output outside that ROI.
       })
       .get();
 
@@ -329,7 +326,6 @@ TEST(Scheduler, DirtyRegionTiledComputation) {
         ps::ComputeService::Request request;
         request.node_id = final_node_id;
         request.cache.precision = "int8";
-        request.cache.force_recache = true;
         request.cache.disable_disk_cache = true;
         request.intent = ps::ComputeIntent::RealTimeUpdate;
         request.dirty_roi = dirty_rect;

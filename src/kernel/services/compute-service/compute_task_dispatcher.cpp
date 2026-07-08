@@ -143,7 +143,8 @@ NodeOutput& ComputeTaskDispatcher::execute(
     graph.clear_full_task_graph_cache();
   }
 
-  TaskSubmissionPlan plan(graph, traversal_, node_id);
+  TaskSubmissionPlan plan(graph, traversal_, node_id,
+                          task_runtime.available_devices());
   if (request.force_recache) {
     clear_planned_high_precision_caches(graph, graph_mutex,
                                         plan.execution_order());

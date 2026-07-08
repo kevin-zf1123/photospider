@@ -36,13 +36,14 @@ class TaskSubmissionPlan : public TaskExecutor {
    * @param graph GraphModel used for planning and operation resolution.
    * @param traversal Traversal service used by ComputeDispatchPlanBuilder.
    * @param node_id Target node id for the GlobalHighPrecision request.
+   * @param available_devices Devices exposed by the active scheduler runtime.
    * @throws GraphError or standard exceptions from plan construction, graph
    * lookup, allocation, or operation resolution.
    * @note The underlying ComputePlan is recorded on GraphModel by the planning
    * unit before dependency state is constructed.
    */
   TaskSubmissionPlan(GraphModel& graph, GraphTraversalService& traversal,
-                     int node_id);
+                     int node_id, std::vector<Device> available_devices);
 
   /**
    * @brief Reports whether the pruned plan contains no executable tasks.
@@ -194,6 +195,10 @@ class TaskSubmissionPlan : public TaskExecutor {
 
   /** @brief Dense planned node ids after cache pruning. */
   std::vector<int> execution_order_;
+
+  /** @brief Devices that may execute operation implementations this dispatch.
+   */
+  std::vector<Device> available_devices_;
 
   /** @brief Runtime dependency counters and dense node-id mapping. */
   TaskDependencyState dependency_state_;

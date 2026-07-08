@@ -212,12 +212,13 @@ Use another config file with:
 ./build/bin/graph_cli --config path/to/config.yaml --repl
 ```
 
-When the CLI loads a config file, it scans `scheduler_dirs` before graph load
-and then copies `scheduler_hp_type`, `scheduler_rt_type`, and
-`scheduler_worker_count` into `Kernel::SchedulerConfig`. Newly loaded graphs
-therefore inherit those scheduler defaults, including plugin-provided scheduler
-types discovered from configured directories. Use `scheduler set <hp|rt>
-<type>` for an immediate per-graph switch.
+When the CLI loads a config file, it first copies `scheduler_hp_type`,
+`scheduler_rt_type`, and `scheduler_worker_count` into
+`Kernel::SchedulerConfig`, then scans configured plugin directories before any
+graph load. Scheduler type strings are resolved when a graph creates its
+scheduler instances during graph load, or later through `scheduler set <hp|rt>
+<type>`, so newly loaded graphs can still use plugin-provided scheduler types
+discovered during startup.
 
 Scheduler plugin discovery and scheduler selection are separate phases.
 `scheduler plugins` can show a plugin because it was scanned from
