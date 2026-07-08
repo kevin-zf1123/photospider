@@ -1,6 +1,14 @@
 name: Build CI Image
 
 on:
+  push:
+    branches:
+      - main
+      - CI/workflow-design
+    paths:
+      - Dockerfile.ci
+      - .dockerignore
+      - .github/workflows/build-ci-image.yml
   workflow_dispatch:
     inputs:
       tag:
@@ -33,7 +41,7 @@ jobs:
           images: ghcr.io/${{ github.repository }}/photospider-ci
           tags: |
             type=raw,value=latest
-            type=raw,value=${{ inputs.tag }}
+            type=raw,value=${{ github.event.inputs.tag }},enable=${{ github.event_name == 'workflow_dispatch' && github.event.inputs.tag != '' }}
             type=sha
 
       - name: Build and push

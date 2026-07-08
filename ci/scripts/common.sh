@@ -7,6 +7,8 @@ REPO_ROOT=$(cd -- "$SCRIPT_DIR/../.." && pwd)
 BUILD_DIR=${BUILD_DIR:-"$REPO_ROOT/build/ci"}
 CI_ARTIFACT_DIR=${CI_ARTIFACT_DIR:-"$REPO_ROOT/CI-results/$(basename "${0%.sh}")"}
 CI_JOBS=${CI_JOBS:-2}
+CI_REUSE_BUILD=${CI_REUSE_BUILD:-OFF}
+CI_BUILD_STAMP="$BUILD_DIR/.photospider-ci-build-complete"
 
 mkdir -p "$CI_ARTIFACT_DIR"
 
@@ -26,6 +28,14 @@ run_logged() {
   "$@" > >(tee -a "$log_file") 2> >(tee -a "$log_file" >&2)
 }
 
+log_reused_step() {
+  local name=$1
+  local message=$2
+  local log_file="$CI_ARTIFACT_DIR/${name}.log"
+  log_section "$name"
+  printf '%s\n' "$message" | tee "$log_file"
+}
+
 configure_ci_build() {
   cmake -S "$REPO_ROOT" -B "$BUILD_DIR" \
     -DCMAKE_BUILD_TYPE="${CMAKE_BUILD_TYPE:-RelWithDebInfo}" \
@@ -41,6 +51,54 @@ build_ci_targets() {
 
 build_ci_all() {
   cmake --build "$BUILD_DIR" -j "$CI_JOBS"
+}
+
+ci_reuse_build_enabled() {
+  case "$CI_REUSE_BUILD" in
+    1 | ON | On | on | TRUE | True | true | YES | Yes | yes) return 0 ;;
+    *) return 1 ;;
+  esac
+}
+
+ci_build_is_reusable() {
+  [[ -f "$CI_BUILD_STAMP" && -f "$BUILD_DIR/CMakeCache.txt" ]]
+}
+
+mark_ci_build_reusable() {
+  mkdir -p "$BUILD_DIR"
+  cat > "$CI_BUILD_STAMP" <<EOF
+build_dir=$BUILD_DIR
+source_dir=$REPO_ROOT
+created_at=$(date -u '+%Y-%m-%dT%H:%M:%SZ')
+EOF
+}
+
+ensure_ci_configured() {
+  local name=$1
+  if ci_reuse_build_enabled && ci_build_is_reusable; then
+    log_reused_step "$name" "Reusing prebuilt CMake tree at $BUILD_DIR."
+    return
+  fi
+  run_logged "$name" configure_ci_build
+}
+
+ensure_ci_targets() {
+  local name=$1
+  shift
+  if ci_reuse_build_enabled && ci_build_is_reusable; then
+    log_reused_step "$name" "Reusing prebuilt targets from $BUILD_DIR."
+    return
+  fi
+  run_logged "$name" build_ci_targets "$@"
+}
+
+ensure_ci_all() {
+  local name=$1
+  if ci_reuse_build_enabled && ci_build_is_reusable; then
+    log_reused_step "$name" "Reusing prebuilt full build from $BUILD_DIR."
+    return
+  fi
+  run_logged "$name" build_ci_all
 }
 
 write_cli_config() {

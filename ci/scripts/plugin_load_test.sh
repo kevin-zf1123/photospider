@@ -8,8 +8,8 @@ source "$SCRIPT_DIR/common.sh"
 
 cd "$REPO_ROOT"
 
-run_logged cmake_configure configure_ci_build
-run_logged build_plugin_targets build_ci_targets \
+ensure_ci_configured cmake_configure
+ensure_ci_targets build_plugin_targets \
   graph_cli \
   test_plugin_manager \
   test_scheduler_plugin_loader \

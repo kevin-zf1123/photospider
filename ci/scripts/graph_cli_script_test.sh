@@ -8,8 +8,8 @@ source "$SCRIPT_DIR/common.sh"
 
 cd "$REPO_ROOT"
 
-run_logged cmake_configure configure_ci_build
-run_logged build_graph_cli build_ci_targets graph_cli cpu_work_stealing_example_plugin serial_debug_example_plugin
+ensure_ci_configured cmake_configure
+ensure_ci_targets build_graph_cli graph_cli cpu_work_stealing_example_plugin serial_debug_example_plugin
 
 mkdir -p "$CI_ARTIFACT_DIR/cache" "$CI_ARTIFACT_DIR/sessions"
 config_path="$CI_ARTIFACT_DIR/graph_cli_config.yaml"

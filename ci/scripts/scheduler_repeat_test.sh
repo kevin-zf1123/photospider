@@ -11,8 +11,8 @@ cd "$REPO_ROOT"
 SCHEDULER_REPEAT=${SCHEDULER_REPEAT:-5}
 GPU_PIPELINE_REPEAT=${GPU_PIPELINE_REPEAT:-3}
 
-run_logged cmake_configure configure_ci_build
-run_logged build_scheduler_tests build_ci_targets test_scheduler test_gpu_pipeline_scheduler test_milestone2
+ensure_ci_configured cmake_configure
+ensure_ci_targets build_scheduler_tests test_scheduler test_gpu_pipeline_scheduler test_milestone2
 
 run_logged scheduler_ready_repeat \
   "$BUILD_DIR/tests/test_scheduler" \

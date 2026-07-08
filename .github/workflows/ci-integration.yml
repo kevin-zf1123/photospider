@@ -10,25 +10,29 @@ on:
 
 permissions:
   contents: read
+  packages: read
 
 jobs:
   build-integrity:
     runs-on: ubuntu-latest
+    container:
+      image: ghcr.io/${{ github.repository }}/photospider-ci:latest
+      credentials:
+        username: ${{ github.actor }}
+        password: ${{ secrets.GITHUB_TOKEN }}
     steps:
       - uses: actions/checkout@v4
         with:
           fetch-depth: 0
           submodules: recursive
-      - name: Build local CI image
-        run: docker build -t photospider-ci:local -f Dockerfile.ci .
       - name: Run build integrity
+        env:
+          CI_ARTIFACT_DIR: ${{ github.workspace }}/CI-results/build-integrity
+        run: bash ci/scripts/build_integrity.sh
+      - name: Pack reusable build
         run: |
-          docker run --rm \
-            -e CI_ARTIFACT_DIR=/workspace/CI-results/build-integrity \
-            -v "$PWD:/workspace" \
-            -w /workspace \
-            photospider-ci:local \
-            bash ci/scripts/build_integrity.sh
+          mkdir -p CI-results/reusable-build
+          tar -C build -czf CI-results/reusable-build/ci-build.tar.gz ci
       - name: Upload build integrity logs
         if: always()
         uses: actions/upload-artifact@v4
@@ -36,24 +40,43 @@ jobs:
           name: build-integrity-results
           path: CI-results/build-integrity
           if-no-files-found: warn
+      - name: Upload reusable build
+        uses: actions/upload-artifact@v4
+        with:
+          name: ci-build-dir
+          path: CI-results/reusable-build/ci-build.tar.gz
+          if-no-files-found: error
+          retention-days: 3
+          compression-level: 0
 
   full-ctest:
+    needs: build-integrity
     runs-on: ubuntu-latest
+    container:
+      image: ghcr.io/${{ github.repository }}/photospider-ci:latest
+      credentials:
+        username: ${{ github.actor }}
+        password: ${{ secrets.GITHUB_TOKEN }}
     steps:
       - uses: actions/checkout@v4
         with:
           fetch-depth: 0
           submodules: recursive
-      - name: Build local CI image
-        run: docker build -t photospider-ci:local -f Dockerfile.ci .
-      - name: Run full ctest
+      - name: Download reusable build
+        uses: actions/download-artifact@v4
+        with:
+          name: ci-build-dir
+          path: CI-results/reusable-build
+      - name: Restore reusable build
         run: |
-          docker run --rm \
-            -e CI_ARTIFACT_DIR=/workspace/CI-results/ctest-full \
-            -v "$PWD:/workspace" \
-            -w /workspace \
-            photospider-ci:local \
-            bash ci/scripts/ctest_full.sh
+          rm -rf build/ci
+          mkdir -p build
+          tar -C build -xzf CI-results/reusable-build/ci-build.tar.gz
+      - name: Run full ctest
+        env:
+          CI_ARTIFACT_DIR: ${{ github.workspace }}/CI-results/ctest-full
+          CI_REUSE_BUILD: ON
+        run: bash ci/scripts/ctest_full.sh
       - name: Upload ctest logs
         if: always()
         uses: actions/upload-artifact@v4
@@ -63,22 +86,33 @@ jobs:
           if-no-files-found: warn
 
   scripted-cli:
+    needs: build-integrity
     runs-on: ubuntu-latest
+    container:
+      image: ghcr.io/${{ github.repository }}/photospider-ci:latest
+      credentials:
+        username: ${{ github.actor }}
+        password: ${{ secrets.GITHUB_TOKEN }}
     steps:
       - uses: actions/checkout@v4
         with:
           fetch-depth: 0
           submodules: recursive
-      - name: Build local CI image
-        run: docker build -t photospider-ci:local -f Dockerfile.ci .
-      - name: Run graph_cli script test
+      - name: Download reusable build
+        uses: actions/download-artifact@v4
+        with:
+          name: ci-build-dir
+          path: CI-results/reusable-build
+      - name: Restore reusable build
         run: |
-          docker run --rm \
-            -e CI_ARTIFACT_DIR=/workspace/CI-results/graph-cli \
-            -v "$PWD:/workspace" \
-            -w /workspace \
-            photospider-ci:local \
-            bash ci/scripts/graph_cli_script_test.sh
+          rm -rf build/ci
+          mkdir -p build
+          tar -C build -xzf CI-results/reusable-build/ci-build.tar.gz
+      - name: Run graph_cli script test
+        env:
+          CI_ARTIFACT_DIR: ${{ github.workspace }}/CI-results/graph-cli
+          CI_REUSE_BUILD: ON
+        run: bash ci/scripts/graph_cli_script_test.sh
       - name: Upload graph_cli logs
         if: always()
         uses: actions/upload-artifact@v4
@@ -88,22 +122,33 @@ jobs:
           if-no-files-found: warn
 
   propagation-script:
+    needs: build-integrity
     runs-on: ubuntu-latest
+    container:
+      image: ghcr.io/${{ github.repository }}/photospider-ci:latest
+      credentials:
+        username: ${{ github.actor }}
+        password: ${{ secrets.GITHUB_TOKEN }}
     steps:
       - uses: actions/checkout@v4
         with:
           fetch-depth: 0
           submodules: recursive
-      - name: Build local CI image
-        run: docker build -t photospider-ci:local -f Dockerfile.ci .
-      - name: Run propagation script test
+      - name: Download reusable build
+        uses: actions/download-artifact@v4
+        with:
+          name: ci-build-dir
+          path: CI-results/reusable-build
+      - name: Restore reusable build
         run: |
-          docker run --rm \
-            -e CI_ARTIFACT_DIR=/workspace/CI-results/propagation \
-            -v "$PWD:/workspace" \
-            -w /workspace \
-            photospider-ci:local \
-            bash ci/scripts/propagation_script_test.sh
+          rm -rf build/ci
+          mkdir -p build
+          tar -C build -xzf CI-results/reusable-build/ci-build.tar.gz
+      - name: Run propagation script test
+        env:
+          CI_ARTIFACT_DIR: ${{ github.workspace }}/CI-results/propagation
+          CI_REUSE_BUILD: ON
+        run: bash ci/scripts/propagation_script_test.sh
       - name: Upload propagation logs
         if: always()
         uses: actions/upload-artifact@v4
@@ -113,22 +158,33 @@ jobs:
           if-no-files-found: warn
 
   plugin-load:
+    needs: build-integrity
     runs-on: ubuntu-latest
+    container:
+      image: ghcr.io/${{ github.repository }}/photospider-ci:latest
+      credentials:
+        username: ${{ github.actor }}
+        password: ${{ secrets.GITHUB_TOKEN }}
     steps:
       - uses: actions/checkout@v4
         with:
           fetch-depth: 0
           submodules: recursive
-      - name: Build local CI image
-        run: docker build -t photospider-ci:local -f Dockerfile.ci .
-      - name: Run plugin load test
+      - name: Download reusable build
+        uses: actions/download-artifact@v4
+        with:
+          name: ci-build-dir
+          path: CI-results/reusable-build
+      - name: Restore reusable build
         run: |
-          docker run --rm \
-            -e CI_ARTIFACT_DIR=/workspace/CI-results/plugin-load \
-            -v "$PWD:/workspace" \
-            -w /workspace \
-            photospider-ci:local \
-            bash ci/scripts/plugin_load_test.sh
+          rm -rf build/ci
+          mkdir -p build
+          tar -C build -xzf CI-results/reusable-build/ci-build.tar.gz
+      - name: Run plugin load test
+        env:
+          CI_ARTIFACT_DIR: ${{ github.workspace }}/CI-results/plugin-load
+          CI_REUSE_BUILD: ON
+        run: bash ci/scripts/plugin_load_test.sh
       - name: Upload plugin logs
         if: always()
         uses: actions/upload-artifact@v4
@@ -138,24 +194,35 @@ jobs:
           if-no-files-found: warn
 
   scheduler-repeat:
+    needs: build-integrity
     runs-on: ubuntu-latest
+    container:
+      image: ghcr.io/${{ github.repository }}/photospider-ci:latest
+      credentials:
+        username: ${{ github.actor }}
+        password: ${{ secrets.GITHUB_TOKEN }}
     steps:
       - uses: actions/checkout@v4
         with:
           fetch-depth: 0
           submodules: recursive
-      - name: Build local CI image
-        run: docker build -t photospider-ci:local -f Dockerfile.ci .
-      - name: Run scheduler repeat test
+      - name: Download reusable build
+        uses: actions/download-artifact@v4
+        with:
+          name: ci-build-dir
+          path: CI-results/reusable-build
+      - name: Restore reusable build
         run: |
-          docker run --rm \
-            -e CI_ARTIFACT_DIR=/workspace/CI-results/scheduler-repeat \
-            -e SCHEDULER_REPEAT=5 \
-            -e GPU_PIPELINE_REPEAT=3 \
-            -v "$PWD:/workspace" \
-            -w /workspace \
-            photospider-ci:local \
-            bash ci/scripts/scheduler_repeat_test.sh
+          rm -rf build/ci
+          mkdir -p build
+          tar -C build -xzf CI-results/reusable-build/ci-build.tar.gz
+      - name: Run scheduler repeat test
+        env:
+          CI_ARTIFACT_DIR: ${{ github.workspace }}/CI-results/scheduler-repeat
+          CI_REUSE_BUILD: ON
+          SCHEDULER_REPEAT: 5
+          GPU_PIPELINE_REPEAT: 3
+        run: bash ci/scripts/scheduler_repeat_test.sh
       - name: Upload scheduler repeat logs
         if: always()
         uses: actions/upload-artifact@v4
