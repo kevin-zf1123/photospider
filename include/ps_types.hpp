@@ -17,7 +17,7 @@
 #include <variant>
 #include <vector>
 
-#include "image_buffer.hpp"
+#include "image_buffer.hpp"  // NOLINT(build/include_subdir)
 #include "photospider/core/compute_intent.hpp"
 #include "photospider/core/graph_error.hpp"
 
@@ -197,8 +197,9 @@ using MonolithicOpFunc = std::function<NodeOutput(
  */
 using TileOpFunc = std::function<void(const Node&, const OutputTile&,
                                       const std::vector<InputTile>&)>;
-using DirtyRoiPropFunc =
-    std::function<cv::Rect(const Node&, const cv::Rect&, const GraphModel&)>;
+using DirtyRoiPropFunc = std::function<cv::Rect(
+    const Node&, const cv::Rect&,
+    const GraphModel&)>;  // NOLINT(whitespace/indent_namespace)
 using ForwardRoiPropFunc = std::function<cv::Rect(
     const Node&, const cv::Rect&, const GraphModel&,
     const cv::Size& parent_size, const cv::Size& child_size)>;
