@@ -556,6 +556,31 @@ TEST(M33CpuWorkStealingScheduler, SingleWorker) {
   scheduler.shutdown();
 }
 
+TEST(M33CpuWorkStealingScheduler, SingleWorkerRepeatedInitialTasks) {
+  for (int iteration = 0; iteration < 64; ++iteration) {
+    SCOPED_TRACE(iteration);
+    CpuWorkStealingScheduler scheduler(1);
+    scheduler.start();
+
+    std::atomic<int> counter{0};
+
+    std::vector<CpuWorkStealingScheduler::Task> tasks;
+    for (int i = 0; i < 4; ++i) {
+      tasks.push_back([&counter, &scheduler]() {
+        counter.fetch_add(1);
+        scheduler.dec_tasks_to_complete();
+      });
+    }
+
+    scheduler.submit_initial_tasks(std::move(tasks), 4);
+    scheduler.wait_for_completion();
+
+    EXPECT_EQ(counter.load(), 4);
+
+    scheduler.shutdown();
+  }
+}
+
 TEST(M33CpuWorkStealingScheduler, RapidStartStopCycles) {
   CpuWorkStealingScheduler scheduler(2);
 
