@@ -1,0 +1,46 @@
+name: CI Sanitizer
+
+on:
+  workflow_dispatch:
+    inputs:
+      sanitizer:
+        description: Sanitizer to run.
+        required: true
+        default: asan
+        type: choice
+        options:
+          - asan
+          - tsan
+
+permissions:
+  contents: read
+  packages: read
+
+jobs:
+  sanitizer:
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    container:
+      image: ghcr.io/${{ github.repository }}/photospider-ci:latest
+      credentials:
+        username: ${{ github.actor }}
+        password: ${{ secrets.GITHUB_TOKEN }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          submodules: recursive
+
+      - name: Run sanitizer tests
+        env:
+          SANITIZER: ${{ inputs.sanitizer }}
+          CI_ARTIFACT_DIR: ${{ github.workspace }}/CI-results/sanitizer-${{ inputs.sanitizer }}
+        run: bash ci/scripts/sanitizer_test.sh
+
+      - name: Upload sanitizer logs
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: sanitizer-${{ inputs.sanitizer }}-results
+          path: CI-results/sanitizer-${{ inputs.sanitizer }}
+          if-no-files-found: warn

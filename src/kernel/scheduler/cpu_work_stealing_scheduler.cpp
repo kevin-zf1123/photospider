@@ -233,6 +233,23 @@ CpuWorkStealingScheduler::steal_task(int stealer_id) {
   return std::nullopt;
 }
 
+void CpuWorkStealingScheduler::publish_ready_tasks(int count, bool wake_all) {
+  if (count <= 0) {
+    return;
+  }
+
+  {
+    std::lock_guard<std::mutex> lock(global_queues_mutex_);
+    ready_task_count_.fetch_add(count, std::memory_order_release);
+  }
+
+  if (wake_all) {
+    cv_task_available_.notify_all();
+  } else {
+    cv_task_available_.notify_one();
+  }
+}
+
 void CpuWorkStealingScheduler::run_loop(int thread_id) {
   tls_worker_id_ = thread_id;
 
@@ -396,9 +413,7 @@ void CpuWorkStealingScheduler::submit_initial_tasks(std::vector<Task>&& tasks,
           wrap_task(std::move(tasks[i])));
       normal_enqueued_.fetch_add(1, std::memory_order_relaxed);
     }
-    ready_task_count_.fetch_add(static_cast<int>(task_count),
-                                std::memory_order_release);
-    cv_task_available_.notify_all();
+    publish_ready_tasks(static_cast<int>(task_count), true);
   }
 }
 
@@ -431,22 +446,25 @@ void CpuWorkStealingScheduler::submit_initial_task_handles(
     return ScheduledTask(epoch, handle);
   };
 
-  const size_t task_count = handles.size();
   if (priority == TaskPriority::High) {
+    int submitted = 0;
     std::lock_guard<std::mutex> lock(global_queues_mutex_);
     for (TaskHandle handle : handles) {
       if (!handle)
         continue;
       high_priority_queue_.push(wrap_handle(handle));
       high_enqueued_.fetch_add(1, std::memory_order_relaxed);
+      ++submitted;
     }
-    ready_task_count_.fetch_add(static_cast<int>(task_count),
-                                std::memory_order_release);
-    cv_task_available_.notify_all();
+    ready_task_count_.fetch_add(submitted, std::memory_order_release);
+    if (submitted > 0) {
+      cv_task_available_.notify_all();
+    }
     return;
   }
 
   static thread_local std::mt19937 rng(std::random_device{}());
+  int submitted = 0;
   for (TaskHandle handle : handles) {
     if (!handle)
       continue;
@@ -455,10 +473,9 @@ void CpuWorkStealingScheduler::submit_initial_task_handles(
     std::lock_guard<std::mutex> lock(*local_queue_mutexes_[target_thread]);
     local_task_queues_[target_thread].push_back(wrap_handle(handle));
     normal_enqueued_.fetch_add(1, std::memory_order_relaxed);
+    ++submitted;
   }
-  ready_task_count_.fetch_add(static_cast<int>(task_count),
-                              std::memory_order_release);
-  cv_task_available_.notify_all();
+  publish_ready_tasks(submitted, true);
 }
 
 void CpuWorkStealingScheduler::submit_ready_task_any_thread(
@@ -574,9 +591,8 @@ void CpuWorkStealingScheduler::submit_ready_task_from_worker(
       std::lock_guard<std::mutex> lock(*local_queue_mutexes_[worker_id]);
       local_task_queues_[worker_id].push_back(std::move(scheduled));
       normal_enqueued_.fetch_add(1, std::memory_order_relaxed);
-      ready_task_count_.fetch_add(1, std::memory_order_relaxed);
     }
-    cv_task_available_.notify_one();
+    publish_ready_tasks(1, false);
   }
 }
 
@@ -606,9 +622,8 @@ void CpuWorkStealingScheduler::submit_ready_task_handle_from_worker(
       std::lock_guard<std::mutex> lock(*local_queue_mutexes_[worker_id]);
       local_task_queues_[worker_id].push_back(std::move(scheduled));
       normal_enqueued_.fetch_add(1, std::memory_order_relaxed);
-      ready_task_count_.fetch_add(1, std::memory_order_relaxed);
     }
-    cv_task_available_.notify_one();
+    publish_ready_tasks(1, false);
   }
 }
 
@@ -644,15 +659,8 @@ void CpuWorkStealingScheduler::submit_ready_task_handles_from_worker(
       normal_enqueued_.fetch_add(1, std::memory_order_relaxed);
       ++submitted;
     }
-    if (submitted > 0) {
-      ready_task_count_.fetch_add(submitted, std::memory_order_relaxed);
-    }
   }
-  if (submitted > 1) {
-    cv_task_available_.notify_all();
-  } else if (submitted == 1) {
-    cv_task_available_.notify_one();
-  }
+  publish_ready_tasks(submitted, submitted > 1);
 }
 
 void CpuWorkStealingScheduler::dec_tasks_to_complete() {
