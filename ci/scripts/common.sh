@@ -6,7 +6,7 @@ SCRIPT_DIR=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)
 REPO_ROOT=$(cd -- "$SCRIPT_DIR/../.." && pwd)
 BUILD_DIR=${BUILD_DIR:-"$REPO_ROOT/build/ci"}
 CI_ARTIFACT_DIR=${CI_ARTIFACT_DIR:-"$REPO_ROOT/CI-results/$(basename "${0%.sh}")"}
-CI_JOBS=${CI_JOBS:-2}
+CI_JOBS=${CI_JOBS:-4}
 CI_REUSE_BUILD=${CI_REUSE_BUILD:-OFF}
 CI_BUILD_STAMP="$BUILD_DIR/.photospider-ci-build-complete"
 
