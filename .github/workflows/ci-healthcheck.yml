@@ -13,7 +13,32 @@ permissions:
   packages: read
 
 jobs:
+  ci-image-change:
+    runs-on: ubuntu-latest
+    outputs:
+      changed: ${{ steps.detect.outputs.changed }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          submodules: recursive
+      - name: Detect CI image input changes
+        id: detect
+        env:
+          CI_IMAGE_BASE_REF: ${{ github.event_name == 'pull_request' && format('origin/{0}', github.base_ref) || github.event.before }}
+          CI_ARTIFACT_DIR: ${{ github.workspace }}/CI-results/ci-image-change
+        run: bash ci/scripts/ci_image_changed.sh
+      - name: Upload CI image change logs
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: healthcheck-ci-image-change
+          path: CI-results/ci-image-change
+          if-no-files-found: warn
+
   healthcheck:
+    needs: ci-image-change
+    if: needs.ci-image-change.outputs.changed != 'true'
     runs-on: ubuntu-latest
     container:
       image: ghcr.io/${{ github.repository }}/photospider-ci:latest
@@ -31,6 +56,39 @@ jobs:
           CI_BASE_REF: origin/${{ github.base_ref || 'main' }}
           CI_ARTIFACT_DIR: ${{ github.workspace }}/CI-results/healthcheck
         run: bash ci/scripts/healthcheck.sh
+
+      - name: Upload healthcheck logs
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: healthcheck-results
+          path: CI-results/healthcheck
+          if-no-files-found: warn
+
+  healthcheck-local-image:
+    needs: ci-image-change
+    if: needs.ci-image-change.outputs.changed == 'true'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          submodules: recursive
+
+      - name: Build local CI image
+        run: docker build -t photospider-ci:local -f Dockerfile.ci .
+
+      - name: Run healthcheck in local CI image
+        env:
+          CI_BASE_REF: origin/${{ github.base_ref || 'main' }}
+        run: |
+          docker run --rm \
+            -v "${{ github.workspace }}:/workspace" \
+            -w /workspace \
+            -e CI_BASE_REF \
+            -e CI_ARTIFACT_DIR=/workspace/CI-results/healthcheck \
+            photospider-ci:local \
+            bash ci/scripts/healthcheck.sh
 
       - name: Upload healthcheck logs
         if: always()
