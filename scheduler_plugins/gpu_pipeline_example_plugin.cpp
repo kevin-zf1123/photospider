@@ -42,7 +42,8 @@ const char* ps_scheduler_plugin_get_description(int index) {
  * scheduler's CPU RT queue through the scheduler's built-in queue topology
  * rather than through a deprecated config flag.
  *
- * @param type_name Scheduler type requested by the plugin loader.
+ * @param type_name Scheduler type requested by the plugin loader; nullptr is
+ * rejected as an unsupported scheduler type.
  * @param num_workers Requested CPU worker count; zero preserves the scheduler's
  * automatic worker-count behavior.
  * @return A heap-allocated scheduler for supported aliases, or nullptr when
@@ -53,6 +54,9 @@ const char* ps_scheduler_plugin_get_description(int index) {
  */
 ps::IScheduler* ps_scheduler_plugin_create(const char* type_name,
                                            unsigned int num_workers) {
+  if (!type_name) {
+    return nullptr;
+  }
   std::string name(type_name);
   if (name == "gpu_pipeline_example" || name == "heterogeneous_example") {
     ps::GpuPipelineScheduler::Config config;

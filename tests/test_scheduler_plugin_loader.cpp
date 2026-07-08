@@ -7,6 +7,7 @@
 #include <filesystem>
 
 #include "kernel/scheduler/scheduler_factory.hpp"
+#include "kernel/scheduler/scheduler_plugin_api.hpp"
 #include "kernel/scheduler/scheduler_plugin_loader.hpp"
 
 #ifdef _WIN32
@@ -189,6 +190,34 @@ TEST_F(SchedulerPluginLoaderTest, FactoryIntegration) {
     auto scheduler = SchedulerFactory::create(type, 2);
     EXPECT_NE(scheduler, nullptr) << "Factory failed to create: " << type;
   }
+}
+
+TEST_F(SchedulerPluginLoaderTest, GpuPipelineExampleCreateRejectsNullTypeName) {
+  const auto plugin_path = scheduler_plugin_path("gpu_pipeline_example_plugin");
+
+  if (!std::filesystem::exists(plugin_path)) {
+    GTEST_SKIP() << "gpu pipeline scheduler plugin was not built";
+  }
+
+#ifdef _WIN32
+  HMODULE test_handle = LoadLibrary(plugin_path.string().c_str());
+  ASSERT_NE(test_handle, nullptr);
+  auto create_scheduler = reinterpret_cast<SchedulerPluginCreateFunc>(
+      GetProcAddress(test_handle, PS_SCHEDULER_PLUGIN_CREATE));
+#else
+  void* test_handle = dlopen(plugin_path.string().c_str(), RTLD_LAZY);
+  ASSERT_NE(test_handle, nullptr) << dlerror();
+  auto create_scheduler = reinterpret_cast<SchedulerPluginCreateFunc>(
+      dlsym(test_handle, PS_SCHEDULER_PLUGIN_CREATE));
+#endif
+  ASSERT_NE(create_scheduler, nullptr);
+  EXPECT_EQ(create_scheduler(nullptr, 0), nullptr);
+
+#ifdef _WIN32
+  FreeLibrary(test_handle);
+#else
+  dlclose(test_handle);
+#endif
 }
 
 // 测试清除插件
