@@ -5,6 +5,9 @@
 
 #include <algorithm>
 #include <filesystem>
+#include <iostream>
+#include <string>
+#include <vector>
 
 #include "kernel/scheduler/scheduler_factory.hpp"
 #include "kernel/scheduler/scheduler_plugin_api.hpp"
