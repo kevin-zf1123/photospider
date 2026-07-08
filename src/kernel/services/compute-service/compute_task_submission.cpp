@@ -63,7 +63,8 @@ std::exception_ptr scheduling_failure(const GraphModel& graph, int node_id,
  * rather than compile-time platform checks.
  */
 bool implementation_device_available(
-    const OpImplementation& impl, const std::vector<Device>& available_devices) {
+    const OpImplementation& impl,
+    const std::vector<Device>& available_devices) {
   return std::find(available_devices.begin(), available_devices.end(),
                    impl.metadata.device_preference) != available_devices.end();
 }
@@ -86,6 +87,50 @@ bool implementation_shape_compatible(const OpImplementation& impl,
 }
 
 /**
+ * @brief Returns the HP implementation device priority used by OpRegistry.
+ *
+ * @param device Candidate implementation device.
+ * @return Lower value for higher GlobalHighPrecision preference.
+ * @throws Nothing.
+ * @note This mirrors OpRegistry::select_best_implementation() for the
+ * shape-filtered fallback path: GPU backends are preferred before accelerators
+ * and CPU, with cost_score used only inside the same priority tier.
+ */
+int high_precision_device_priority(Device device) {
+  if (device == Device::GPU_METAL || device == Device::GPU_CUDA) {
+    return 0;
+  }
+  if (device == Device::ASIC_NPU) {
+    return 1;
+  }
+  return 2;
+}
+
+/**
+ * @brief Orders compatible HP implementations by registry-equivalent priority.
+ *
+ * @param lhs Left compatible implementation candidate.
+ * @param rhs Right compatible implementation candidate.
+ * @return True when lhs should be selected before rhs.
+ * @throws Nothing.
+ * @note The fallback has already filtered by available device and required
+ * task shape. This comparator preserves HP device preference before applying
+ * cost_score, preventing a cheaper CPU tiled implementation from displacing a
+ * GPU tiled implementation when GPU execution is available.
+ */
+bool high_precision_implementation_less(const OpImplementation* lhs,
+                                        const OpImplementation* rhs) {
+  const int lhs_priority =
+      high_precision_device_priority(lhs->metadata.device_preference);
+  const int rhs_priority =
+      high_precision_device_priority(rhs->metadata.device_preference);
+  if (lhs_priority != rhs_priority) {
+    return lhs_priority < rhs_priority;
+  }
+  return lhs->metadata.cost_score < rhs->metadata.cost_score;
+}
+
+/**
  * @brief Chooses a shape-compatible per-device implementation for HP compute.
  *
  * @param node Graph node whose operation is being resolved.
@@ -94,10 +139,11 @@ bool implementation_shape_compatible(const OpImplementation& impl,
  * @return Selected operation variant, or nullopt when no compatible
  * per-device implementation is available.
  * @throws std::bad_alloc if registry helper vectors allocate.
- * @note The primary selection path calls OpRegistry::select_best_implementation.
- * If that best candidate does not match the already materialized task shape,
- * this helper falls back to the lowest-cost compatible implementation instead
- * of handing a monolithic function to a tile task.
+ * @note The primary selection path calls
+ * OpRegistry::select_best_implementation. If that best candidate does not match
+ * the already materialized task shape, this helper falls back to a compatible
+ * implementation using the same HP device priority as OpRegistry before
+ * comparing cost_score.
  */
 std::optional<OpRegistry::OpVariant> select_device_aware_hp_op(
     const Node& node, const std::vector<Device>& available_devices,
@@ -127,11 +173,8 @@ std::optional<OpRegistry::OpVariant> select_device_aware_hp_op(
   if (compatible.empty()) {
     return std::nullopt;
   }
-  auto best_compatible = std::min_element(
-      compatible.begin(), compatible.end(),
-      [](const OpImplementation* lhs, const OpImplementation* rhs) {
-        return lhs->metadata.cost_score < rhs->metadata.cost_score;
-      });
+  auto best_compatible = std::min_element(compatible.begin(), compatible.end(),
+                                          high_precision_implementation_less);
   return (*best_compatible)->func;
 }
 
