@@ -2,7 +2,7 @@
 
 ## Workflows
 
-- `.github/workflows/ci-healthcheck.yml`: static healthcheck on pull requests targeting `main`, pushes to `main` and `CI/**`, and manual dispatch.
+- `.github/workflows/ci-healthcheck.yml`: static healthcheck on pull requests targeting `main` through `pull_request_target`, pushes to `main` and `CI/**`, and manual dispatch.
 - `.github/workflows/ci-integration.yml`: build integrity, mainline CTest, scripted `graph_cli`, scripted propagation, plugin loading, and scheduler repeat checks.
 - `.github/workflows/ci-sanitizer.yml`: manual ASan or TSan focused checks.
 - `.github/workflows/build-ci-image.yml`: GHCR image publish for `ghcr.io/<owner>/<repo>/photospider-ci` on image-input pushes and manual dispatch.
@@ -11,7 +11,7 @@
 
 Push-triggered CI runs only on `main` and branches whose names start with `CI/`. This prevents ordinary feature branches from running workflow files changed on that branch.
 
-Pull requests targeting `main` use two event modes. `CI/**` branches run the `pull_request` workflow so workflow changes on the CI branch can be validated before merge. Non-`CI/**` branches run the `pull_request_target` path, which uses the workflow definition from the base branch while checking out the pull request head commit for tests.
+Pull requests targeting `main` use `pull_request_target`, which uses the workflow definition from the base branch while checking out the pull request head commit for tests. `CI/**` branches validate branch-modified workflows through the push trigger instead of a second pull request run, avoiding duplicate local-image integration runs on the same commit.
 
 The first healthcheck and integration job protects CI workflow inputs before any repository script or local CI image build runs. For non-`CI/**` branches it compares `origin/main...HEAD` and fails if the diff changes any of:
 

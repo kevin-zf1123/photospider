@@ -1,9 +1,6 @@
 name: CI Healthcheck
 
 on:
-  pull_request:
-    branches:
-      - main
   pull_request_target:
     branches:
       - main
