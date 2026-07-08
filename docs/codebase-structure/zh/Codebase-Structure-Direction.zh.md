@@ -311,6 +311,11 @@ graph TD
 1. 添加公开头依赖扫描。
    - 当可安装头包含 `src/`、`kernel/services/...` 或实现专属的 graph/runtime/compute planning 头时失败。
    - 为公开头添加一个 header self-containment 编译测试。
+   - Phase 0 建立可重放的 public header 扫描，并将
+     `public_header_self_containment` CMake target 作为 `include/photospider/`
+     下每个头文件的独立编译护栏。
+   - `include/photospider/public_boundary.hpp` 只是可安装 include root 的 marker 头。
+     稳定值契约仍属于下一阶段 core seam。
 2. 引入 `include/photospider/*`。
    - 先移动稳定值契约：error、image buffer、compute request、inspect snapshot。
    - 保持 `GraphModel`、`GraphRuntime` 和 compute planning 头为内部实现。
