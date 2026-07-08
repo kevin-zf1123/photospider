@@ -608,6 +608,16 @@ TEST(EmbeddedHostAdapter, ReloadSaveSetNodeAndClearGraphReturnStatuses) {
   EXPECT_FALSE(missing_reload.status.ok);
   EXPECT_EQ(missing_reload.status.code, GraphErrc::NotFound);
 
+  const auto missing_file_path =
+      temp.root() / "source" / "missing_reload_graph.yaml";
+  auto io_reload = host->reload_graph(session, missing_file_path.string());
+  EXPECT_FALSE(io_reload.status.ok);
+  EXPECT_EQ(io_reload.status.code, GraphErrc::Io);
+
+  auto after_io_reload = host->inspect_node(session, NodeId{1});
+  ASSERT_TRUE(after_io_reload.status.ok) << after_io_reload.status.message;
+  EXPECT_EQ(after_io_reload.value.parameters.at("width"), "11");
+
   const auto invalid_yaml_path =
       temp.root() / "source" / "invalid_reload_graph.yaml";
   {
@@ -617,6 +627,11 @@ TEST(EmbeddedHostAdapter, ReloadSaveSetNodeAndClearGraphReturnStatuses) {
   auto invalid_reload = host->reload_graph(session, invalid_yaml_path.string());
   EXPECT_FALSE(invalid_reload.status.ok);
   EXPECT_EQ(invalid_reload.status.code, GraphErrc::InvalidYaml);
+
+  auto after_invalid_reload = host->inspect_node(session, NodeId{1});
+  ASSERT_TRUE(after_invalid_reload.status.ok)
+      << after_invalid_reload.status.message;
+  EXPECT_EQ(after_invalid_reload.value.parameters.at("width"), "11");
 
   auto clear = host->clear_graph(session);
   ASSERT_TRUE(clear.status.ok) << clear.status.message;

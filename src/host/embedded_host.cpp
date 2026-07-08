@@ -1197,11 +1197,13 @@ class EmbeddedHost final : public Host {
    *
    * @param session Session to reload.
    * @param yaml_path Source YAML path.
-   * @return Success, NotFound for missing sessions, or InvalidYaml for rejected
-   *         reload input.
+   * @return Success, NotFound for missing sessions, Io for unreadable reload
+   *         input, or InvalidYaml for rejected YAML content.
    * @throws std::bad_alloc on allocation failure.
    * @note Host checks session existence before calling the backend bool API so
-   *       lifecycle errors are not reported as malformed YAML.
+   *       lifecycle errors are not reported as malformed YAML. Backend
+   *       LastError preserves the reload failure classification for existing
+   *       sessions.
    */
   VoidResult reload_graph(const GraphSessionId& session,
                           const std::string& yaml_path) override {
@@ -1211,8 +1213,9 @@ class EmbeddedHost final : public Host {
                             "graph session not found: " + session.value);
       }
       if (!state_->interaction.cmd_reload_yaml(session.value, yaml_path)) {
-        return failure_void(GraphErrc::InvalidYaml,
-                            "failed to reload graph session: " + session.value);
+        return VoidResult{failure_from_last_error(
+            *state_, session, GraphErrc::InvalidYaml,
+            "failed to reload graph session: " + session.value)};
       }
       return success_void();
     });

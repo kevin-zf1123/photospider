@@ -251,11 +251,13 @@ class PHOTOSPIDER_API Host {
    *
    * @param session Session to reload.
    * @param yaml_path YAML path to load.
-   * @return Success, `GraphErrc::NotFound` for missing sessions, or a reload
-   *         failure status for rejected YAML.
+   * @return Success, `GraphErrc::NotFound` for missing sessions,
+   *         `GraphErrc::Io` for unreadable input, or `GraphErrc::InvalidYaml`
+   *         for rejected YAML content.
    * @throws Nothing directly.
    * @note The embedded adapter checks session existence before invoking the
-   *       backend reload path and serializes mutation through the backend
+   *       backend reload path, preserves backend reload failure
+   *       classification, and serializes mutation through the backend
    *       graph-state boundary.
    */
   virtual VoidResult reload_graph(const GraphSessionId& session,
