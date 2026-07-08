@@ -74,6 +74,11 @@ REQUIRED_PUBLIC_TYPES = (
 )
 INCLUDE_RE = re.compile(r"^\s*#\s*include\s*[<\"]([^>\"]+)[>\"]")
 NAMESPACE_PS_RE = re.compile(r"\bnamespace\s+ps\b")
+NAMESPACE_OPEN_RE_TEMPLATE = r"\bnamespace\s+{}\s*\{{"
+TYPE_DECL_RE_TEMPLATE = (
+    r"\b(class|struct|enum\s+class)\s+"
+    r"(?:[A-Z_][A-Z0-9_]*\s+)?{}\b"
+)
 
 
 def rel(repo: Path, path: Path) -> str:
@@ -86,6 +91,49 @@ def strip_comments(text: str) -> str:
 
     without_blocks = re.sub(r"/\*.*?\*/", replace_block, text, flags=re.DOTALL)
     return "\n".join(line.split("//", 1)[0] for line in without_blocks.splitlines())
+
+
+def namespace_body_ranges(text: str, namespace_name: str) -> list[tuple[int, int]]:
+    ranges: list[tuple[int, int]] = []
+    namespace_re = re.compile(
+        NAMESPACE_OPEN_RE_TEMPLATE.format(re.escape(namespace_name))
+    )
+    for match in namespace_re.finditer(text):
+        open_brace = match.end() - 1
+        depth = 1
+        index = open_brace + 1
+        while index < len(text):
+            char = text[index]
+            if char == "{":
+                depth += 1
+            elif char == "}":
+                depth -= 1
+                if depth == 0:
+                    ranges.append((open_brace + 1, index))
+                    break
+            index += 1
+    return ranges
+
+
+def namespace_bodies(text: str, namespace_name: str) -> list[str]:
+    return [
+        text[start:end]
+        for start, end in namespace_body_ranges(text, namespace_name)
+    ]
+
+
+def type_declaration_re(type_name: str) -> re.Pattern[str]:
+    return re.compile(TYPE_DECL_RE_TEMPLATE.format(re.escape(type_name)))
+
+
+def type_declared_in_namespace(
+    code_text: str, type_name: str, namespace_name: str
+) -> bool:
+    type_decl_re = type_declaration_re(type_name)
+    return any(
+        type_decl_re.search(body)
+        for body in namespace_bodies(code_text, namespace_name)
+    )
 
 
 def public_headers(repo: Path) -> list[Path]:
@@ -182,19 +230,58 @@ def inspect_core_headers(repo: Path) -> dict[str, Any]:
         )
     type_rows = []
     for type_name in REQUIRED_PUBLIC_TYPES:
-        type_decl_re = re.compile(
-            rf"\b(class|struct|enum\s+class)\s+"
-            rf"(?:[A-Z_][A-Z0-9_]*\s+)?{re.escape(type_name)}\b"
-        )
+        type_decl_re = type_declaration_re(type_name)
         type_rows.append(
             {
                 "name": type_name,
                 "declared": bool(type_decl_re.search(combined_text)),
+                "declared_in_namespace_ps": bool(
+                    type_declared_in_namespace(combined_text, type_name, "ps")
+                ),
             }
         )
     return {
         "headers": rows,
         "required_types": type_rows,
+    }
+
+
+def detector_selftest() -> dict[str, Any]:
+    in_namespace = strip_comments(
+        """
+        namespace ps {
+        struct ImageBuffer {};
+        }
+        """
+    )
+    global_with_unrelated_namespace = strip_comments(
+        """
+        struct ImageBuffer {};
+        namespace ps {
+        }
+        """
+    )
+    comment_only_namespace = strip_comments(
+        """
+        /* namespace ps { struct ImageBuffer {}; } */
+        namespace ps {
+        }
+        """
+    )
+    return {
+        "detects_type_in_namespace_ps": type_declared_in_namespace(
+            in_namespace, "ImageBuffer", "ps"
+        ),
+        "rejects_global_type_with_unrelated_namespace_ps": (
+            not type_declared_in_namespace(
+                global_with_unrelated_namespace, "ImageBuffer", "ps"
+            )
+        ),
+        "rejects_comment_only_namespace_type": (
+            not type_declared_in_namespace(
+                comment_only_namespace, "ImageBuffer", "ps"
+            )
+        ),
     }
 
 
@@ -222,6 +309,7 @@ def write_json(path: Path, payload: dict[str, Any]) -> None:
 
 def make_summary(out: Path, actual: dict[str, Any], passed: bool) -> str:
     public_headers = actual["public_headers"]
+    detector_selftest = actual["detector_selftest"]
     return "\n".join(
         [
             "# codebase-refactor phase-1 core seam evidence",
@@ -247,6 +335,9 @@ def make_summary(out: Path, actual: dict[str, Any], passed: bool) -> str:
             f"{len(public_headers['core_external_include_violations'])}",
             "- Implementation-only type occurrences: "
             f"{len(public_headers['implementation_type_occurrences'])}",
+            "- Namespace detector self-test cases passed: "
+            f"{sum(1 for value in detector_selftest.values() if value)}"
+            f"/{len(detector_selftest)}",
             f"- Overall: {'PASS' if passed else 'FAIL'}",
             "",
             "## Interpretation",
@@ -257,7 +348,9 @@ def make_summary(out: Path, actual: dict[str, Any], passed: bool) -> str:
             "`src/`, `kernel/services/...`, GraphModel, GraphRuntime, or",
             "ComputeService implementation details through `include/photospider`.",
             "It also proves core value headers do not require OpenCV or yaml-cpp",
-            "includes.",
+            "includes. The detector self-test proves required public type",
+            "declarations must be inside `namespace ps`; a global declaration",
+            "with an unrelated `namespace ps` block does not satisfy the seam.",
             "",
             "## Replay command logs",
             "",
@@ -287,6 +380,7 @@ def main() -> int:
 
     actual = {
         "core_headers": inspect_core_headers(repo),
+        "detector_selftest": detector_selftest(),
         "legacy_headers": inspect_legacy_headers(repo),
         "public_headers": scan_public_headers(repo),
     }
@@ -296,10 +390,16 @@ def main() -> int:
             "all_use_namespace_ps": True,
             "all_have_doxygen_file_brief": True,
             "all_required_types_declared": True,
+            "all_required_types_declared_in_namespace_ps": True,
         },
         "legacy_headers": {
             "all_exist": True,
             "all_include_photospider_core": True,
+        },
+        "detector_selftest": {
+            "detects_type_in_namespace_ps": True,
+            "rejects_global_type_with_unrelated_namespace_ps": True,
+            "rejects_comment_only_namespace_type": True,
         },
         "public_headers": {
             "include_violations": [],
@@ -329,6 +429,16 @@ def main() -> int:
             == expected["core_headers"]["all_required_types_declared"],
         ),
         (
+            "core_headers.all_required_types_declared_in_namespace_ps",
+            all(
+                row["declared_in_namespace_ps"]
+                for row in actual["core_headers"]["required_types"]
+            )
+            == expected["core_headers"][
+                "all_required_types_declared_in_namespace_ps"
+            ],
+        ),
+        (
             "legacy_headers.all_exist",
             all(row["exists"] for row in actual["legacy_headers"]["headers"])
             == expected["legacy_headers"]["all_exist"],
@@ -340,6 +450,27 @@ def main() -> int:
                 for row in actual["legacy_headers"]["headers"]
             )
             == expected["legacy_headers"]["all_include_photospider_core"],
+        ),
+        (
+            "detector_selftest.detects_type_in_namespace_ps",
+            actual["detector_selftest"]["detects_type_in_namespace_ps"]
+            == expected["detector_selftest"]["detects_type_in_namespace_ps"],
+        ),
+        (
+            "detector_selftest.rejects_global_type_with_unrelated_namespace_ps",
+            actual["detector_selftest"][
+                "rejects_global_type_with_unrelated_namespace_ps"
+            ]
+            == expected["detector_selftest"][
+                "rejects_global_type_with_unrelated_namespace_ps"
+            ],
+        ),
+        (
+            "detector_selftest.rejects_comment_only_namespace_type",
+            actual["detector_selftest"]["rejects_comment_only_namespace_type"]
+            == expected["detector_selftest"][
+                "rejects_comment_only_namespace_type"
+            ],
         ),
         (
             "public_headers.include_violations",
