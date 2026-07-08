@@ -665,16 +665,18 @@ DebugMetadataSnapshot to_public_debug(const DebugMeta& debug) {
  * @brief Converts spatial metadata into a public snapshot.
  *
  * @param space Backend spatial context.
+ * @param output_width Cached output width in local pixels.
+ * @param output_height Cached output height in local pixels.
  * @return Public spatial snapshot.
  * @throws Nothing.
- * @note The backend summary does not expose the original ImageBuffer extent,
- *       so the first Host slice reports the absolute ROI extent.
+ * @note The local output extent can differ from absolute ROI when an operation
+ *       resizes, crops, or scales pixels while preserving graph-space coverage.
  */
-SpatialSnapshot to_public_space(const SpatialContext& space) {
+SpatialSnapshot to_public_space(const SpatialContext& space, int output_width,
+                                int output_height) {
   SpatialSnapshot snapshot;
   snapshot.absolute_roi = to_pixel_rect(space.absolute_roi);
-  snapshot.extent =
-      PixelSize{space.absolute_roi.width, space.absolute_roi.height};
+  snapshot.extent = PixelSize{output_width, output_height};
   snapshot.global_scale_x = space.global_scale_x;
   snapshot.global_scale_y = space.global_scale_y;
   std::copy(space.transform_matrix.begin(), space.transform_matrix.end(),
@@ -707,7 +709,9 @@ NodeInspectionView to_public_node(const GraphNodeInspectInfo& info) {
     }
     if (info.metadata->has_cached_output) {
       view.debug = to_public_debug(info.metadata->debug);
-      view.space = to_public_space(info.metadata->space);
+      view.space =
+          to_public_space(info.metadata->space, info.metadata->output_width,
+                          info.metadata->output_height);
     }
   }
   return view;
@@ -1193,13 +1197,19 @@ class EmbeddedHost final : public Host {
    *
    * @param session Session to reload.
    * @param yaml_path Source YAML path.
-   * @return Success or failure status.
+   * @return Success, NotFound for missing sessions, or InvalidYaml for rejected
+   *         reload input.
    * @throws std::bad_alloc on allocation failure.
-   * @note YAML and IO failures are normalized to OperationStatus.
+   * @note Host checks session existence before calling the backend bool API so
+   *       lifecycle errors are not reported as malformed YAML.
    */
   VoidResult reload_graph(const GraphSessionId& session,
                           const std::string& yaml_path) override {
     return guarded_void("reload_graph", GraphErrc::InvalidYaml, [&] {
+      if (!session_exists(*state_, session)) {
+        return failure_void(GraphErrc::NotFound,
+                            "graph session not found: " + session.value);
+      }
       if (!state_->interaction.cmd_reload_yaml(session.value, yaml_path)) {
         return failure_void(GraphErrc::InvalidYaml,
                             "failed to reload graph session: " + session.value);
@@ -2104,14 +2114,22 @@ class EmbeddedHost final : public Host {
    * @brief Reads a scheduler description.
    *
    * @param type_name Scheduler type name.
-   * @return Description text, or a failed status.
+   * @return Description text, or NotFound when the scheduler type is
+   * unavailable.
    * @throws std::bad_alloc on allocation failure.
-   * @note Descriptions are display diagnostics only.
+   * @note The adapter checks the available type list before calling the backend
+   *       description helper because that helper has a display fallback string.
    */
   Result<std::string> scheduler_description(
       const std::string& type_name) const override {
     return guarded_result<std::string>(
         "scheduler_description", GraphErrc::NotFound, [&] {
+          const auto types =
+              state_->interaction.cmd_scheduler_available_types();
+          if (std::find(types.begin(), types.end(), type_name) == types.end()) {
+            return failure_result<std::string>(
+                GraphErrc::NotFound, "scheduler type not found: " + type_name);
+          }
           return success_result(
               state_->interaction.cmd_scheduler_description(type_name));
         });

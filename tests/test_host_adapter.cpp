@@ -74,6 +74,26 @@ void register_host_adapter_ops() {
               return output;
             }));
     OpRegistry::instance().register_op_hp_monolithic(
+        "host_adapter_test", "resized_extent",
+        MonolithicOpFunc(
+            [](const Node& node, const std::vector<const NodeOutput*>&) {
+              const YAML::Node& params = node.runtime_parameters
+                                             ? node.runtime_parameters
+                                             : node.parameters;
+              const int width = params["width"].as<int>(6);
+              const int height = params["height"].as<int>(4);
+              const int roi_width = params["roi_width"].as<int>(12);
+              const int roi_height = params["roi_height"].as<int>(9);
+              NodeOutput output;
+              output.image_buffer = make_aligned_cpu_image_buffer(
+                  width, height, 1, DataType::FLOAT32);
+              cv::Mat mat = toCvMat(output.image_buffer);
+              mat.setTo(5.0f);
+              output.space.absolute_roi = cv::Rect(0, 0, roi_width, roi_height);
+              output.debug.compute_device = "host-adapter-resized-test";
+              return output;
+            }));
+    OpRegistry::instance().register_op_hp_monolithic(
         "host_adapter_test", "identity",
         MonolithicOpFunc(
             [](const Node& node, const std::vector<const NodeOutput*>& inputs) {
@@ -180,6 +200,10 @@ void write_host_adapter_graph(const std::filesystem::path& path, int width = 6,
       << "    height: " << height << "\n";
   if (subtype == "slow_source") {
     out << "    sleep_ms: 75\n";
+  }
+  if (subtype == "resized_extent") {
+    out << "    roi_width: 12\n"
+        << "    roi_height: 9\n";
   }
 }
 
@@ -427,6 +451,11 @@ TEST(EmbeddedHostAdapter,
   ASSERT_TRUE(description.status.ok) << description.status.message;
   EXPECT_NE(description.value.find("Single-threaded"), std::string::npos);
 
+  auto missing_description =
+      host->scheduler_description("missing_scheduler_type");
+  EXPECT_FALSE(missing_description.status.ok);
+  EXPECT_EQ(missing_description.status.code, GraphErrc::NotFound);
+
   auto plugins = host->plugins_load_report({});
   ASSERT_TRUE(plugins.status.ok) << plugins.status.message;
   EXPECT_EQ(plugins.value.loaded, 0);
@@ -447,6 +476,46 @@ TEST(EmbeddedHostAdapter,
 
   auto close = host->close_graph(session);
   EXPECT_TRUE(close.status.ok) << close.status.message;
+}
+
+TEST(EmbeddedHostAdapter,
+     SpatialSnapshotPreservesOutputExtentSeparatelyFromRoi) {
+  register_host_adapter_ops();
+  ScopedTempDir temp("photospider_host_adapter_spatial_extent_test");
+  auto host = create_embedded_host();
+  ASSERT_NE(host, nullptr);
+
+  const GraphSessionId session =
+      load_test_graph(*host, temp.root(), "spatial_extent", "resized_extent");
+  const HostComputeRequest compute_request = make_compute_request(session);
+  auto compute_status = host->compute(compute_request);
+  ASSERT_TRUE(compute_status.status.ok) << compute_status.status.message;
+
+  auto node_view = host->inspect_node(session, NodeId{1});
+  ASSERT_TRUE(node_view.status.ok) << node_view.status.message;
+  ASSERT_TRUE(node_view.value.space.has_value());
+  EXPECT_EQ(node_view.value.space->extent.width, 6);
+  EXPECT_EQ(node_view.value.space->extent.height, 4);
+  EXPECT_EQ(node_view.value.space->absolute_roi.width, 12);
+  EXPECT_EQ(node_view.value.space->absolute_roi.height, 9);
+
+  auto graph_view = host->inspect_graph(session);
+  ASSERT_TRUE(graph_view.status.ok) << graph_view.status.message;
+  ASSERT_EQ(graph_view.value.nodes.size(), 1u);
+  ASSERT_TRUE(graph_view.value.nodes.front().space.has_value());
+  EXPECT_EQ(graph_view.value.nodes.front().space->extent.width, 6);
+  EXPECT_EQ(graph_view.value.nodes.front().space->extent.height, 4);
+  EXPECT_EQ(graph_view.value.nodes.front().space->absolute_roi.width, 12);
+  EXPECT_EQ(graph_view.value.nodes.front().space->absolute_roi.height, 9);
+
+  auto tree = host->dependency_tree(session, std::nullopt, true);
+  ASSERT_TRUE(tree.status.ok) << tree.status.message;
+  ASSERT_EQ(tree.value.entries.size(), 1u);
+  ASSERT_TRUE(tree.value.entries.front().node.space.has_value());
+  EXPECT_EQ(tree.value.entries.front().node.space->extent.width, 6);
+  EXPECT_EQ(tree.value.entries.front().node.space->extent.height, 4);
+  EXPECT_EQ(tree.value.entries.front().node.space->absolute_roi.width, 12);
+  EXPECT_EQ(tree.value.entries.front().node.space->absolute_roi.height, 9);
 }
 
 TEST(EmbeddedHostAdapter, AsyncComputeCanFinishAfterCloseGraphRequest) {
@@ -506,6 +575,21 @@ TEST(EmbeddedHostAdapter, ReloadSaveSetNodeAndClearGraphReturnStatuses) {
   auto reloaded = host->inspect_node(session, NodeId{1});
   ASSERT_TRUE(reloaded.status.ok) << reloaded.status.message;
   EXPECT_EQ(reloaded.value.parameters.at("width"), "11");
+
+  auto missing_reload =
+      host->reload_graph(GraphSessionId{"missing_graph"}, reload_path.string());
+  EXPECT_FALSE(missing_reload.status.ok);
+  EXPECT_EQ(missing_reload.status.code, GraphErrc::NotFound);
+
+  const auto invalid_yaml_path =
+      temp.root() / "source" / "invalid_reload_graph.yaml";
+  {
+    std::ofstream invalid_yaml(invalid_yaml_path);
+    invalid_yaml << "not: a sequence\n";
+  }
+  auto invalid_reload = host->reload_graph(session, invalid_yaml_path.string());
+  EXPECT_FALSE(invalid_reload.status.ok);
+  EXPECT_EQ(invalid_reload.status.code, GraphErrc::InvalidYaml);
 
   auto clear = host->clear_graph(session);
   ASSERT_TRUE(clear.status.ok) << clear.status.message;

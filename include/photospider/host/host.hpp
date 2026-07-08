@@ -251,10 +251,12 @@ class PHOTOSPIDER_API Host {
    *
    * @param session Session to reload.
    * @param yaml_path YAML path to load.
-   * @return Success or failure status.
+   * @return Success, `GraphErrc::NotFound` for missing sessions, or a reload
+   *         failure status for rejected YAML.
    * @throws Nothing directly.
-   * @note The embedded adapter preserves existing reload behavior and
-   *       serializes mutation through the backend graph-state boundary.
+   * @note The embedded adapter checks session existence before invoking the
+   *       backend reload path and serializes mutation through the backend
+   *       graph-state boundary.
    */
   virtual VoidResult reload_graph(const GraphSessionId& session,
                                   const std::string& yaml_path) = 0;
@@ -717,9 +719,11 @@ class PHOTOSPIDER_API Host {
    * @brief Returns a scheduler type description.
    *
    * @param type_name Scheduler type name.
-   * @return Description text, or a failure status.
+   * @return Description text, or `GraphErrc::NotFound` when the scheduler type
+   *         is not available to the Host.
    * @throws Nothing directly.
-   * @note Descriptions are for display and must not drive behavior.
+   * @note Descriptions are for display and must not drive behavior; callers can
+   *       use the status code to distinguish typos from real descriptions.
    */
   virtual Result<std::string> scheduler_description(
       const std::string& type_name) const = 0;
