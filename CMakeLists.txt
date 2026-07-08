@@ -552,12 +552,7 @@ if(BUILD_TESTING)
         ${PHOTOSPIDER_PUBLIC_HEADER_SELF_CONTAINMENT_SOURCES}
     )
     target_include_directories(public_header_self_containment_objects
-        PRIVATE
-            "${PROJECT_SOURCE_DIR}/include"
-            ${OpenCV_INCLUDE_DIRS}
-    )
-    target_link_libraries(public_header_self_containment_objects
-        PRIVATE yaml-cpp::yaml-cpp
+        PRIVATE "${PROJECT_SOURCE_DIR}/include"
     )
     target_compile_features(public_header_self_containment_objects
         PRIVATE cxx_std_17
