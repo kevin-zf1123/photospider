@@ -4,7 +4,7 @@ on:
   push:
     branches:
       - main
-      - CI/workflow-design
+      - 'CI/**'
     paths:
       - Dockerfile.ci
       - .dockerignore
