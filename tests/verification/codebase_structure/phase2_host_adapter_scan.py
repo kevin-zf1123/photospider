@@ -6,6 +6,9 @@ from __future__ import annotations
 import argparse
 import json
 import re
+import shlex
+import shutil
+import subprocess
 from pathlib import Path
 from typing import Any
 
@@ -23,6 +26,7 @@ REQUIRED_PUBLIC_TYPES = (
     "GraphLoadRequest",
     "HostComputeRequest",
     "ComputeEventSnapshot",
+    "HostSchedulerTraceAction",
     "SchedulerInfoSnapshot",
     "HostDependencyTreeSnapshot",
     "HostPluginLoadReport",
@@ -204,6 +208,84 @@ def inspect_implementation(repo: Path) -> dict[str, Any]:
     }
 
 
+def compile_probe_include_flags(repo: Path) -> list[str]:
+    flags = [f"-I{repo / 'include'}", f"-I{repo / 'src'}"]
+    pkg_config = shutil.which("pkg-config")
+    if pkg_config is not None:
+        for package in ("yaml-cpp", "opencv4"):
+            completed = subprocess.run(
+                [pkg_config, "--cflags", package],
+                cwd=repo,
+                text=True,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                check=False,
+            )
+            if completed.returncode == 0:
+                flags.extend(shlex.split(completed.stdout))
+    for include_dir in (
+        Path("/opt/homebrew/include"),
+        Path("/usr/local/include"),
+        Path("/usr/include/opencv4"),
+        Path("/opt/homebrew/opt/opencv/include/opencv4"),
+        Path("/usr/local/opt/opencv/include/opencv4"),
+    ):
+        if include_dir.exists():
+            flag = f"-I{include_dir}"
+            if flag not in flags:
+                flags.append(flag)
+    return flags
+
+
+def run_public_internal_include_probe(repo: Path, out: Path) -> dict[str, Any]:
+    source = out / "public_internal_include_probe.cpp"
+    source.write_text(
+        "\n".join(
+            [
+                '#include "photospider/host/host.hpp"',
+                '#include "kernel/scheduler/scheduler_task_runtime.hpp"',
+                "",
+                "int main() { return 0; }",
+                "",
+            ]
+        ),
+        encoding="utf-8",
+    )
+    compiler = shutil.which("c++") or shutil.which("clang++") or shutil.which("g++")
+    if compiler is None:
+        return {
+            "source": rel(repo, source),
+            "command": [],
+            "returncode": None,
+            "stdout": "",
+            "stderr": "no C++ compiler found on PATH",
+            "passed": False,
+        }
+    command = [
+        compiler,
+        "-std=c++17",
+        "-fsyntax-only",
+        *compile_probe_include_flags(repo),
+        str(source),
+    ]
+    completed = subprocess.run(
+        command,
+        cwd=repo,
+        text=True,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        check=False,
+    )
+    return {
+        "source": rel(repo, source),
+        "command": command,
+        "returncode": completed.returncode,
+        "stdout": completed.stdout,
+        "stderr": completed.stderr,
+        "passed": completed.returncode == 0,
+    }
+
+
 def write_json(path: Path, payload: dict[str, Any]) -> None:
     path.write_text(
         json.dumps(payload, indent=2, sort_keys=True) + "\n",
@@ -246,6 +328,10 @@ def make_compare(actual: dict[str, Any], expected: dict[str, Any]) -> tuple[bool
         == expected["host_headers"]["all_required_functions_declared"],
         "embedded implementation wired": all(actual["implementation"].values())
         == expected["implementation"]["all_wired"],
+        "public host header compiles with internal scheduler runtime": actual[
+            "public_internal_include_probe"
+        ]["passed"]
+        == expected["public_internal_include_probe"]["passed"],
     }
     passed = all(checks.values())
     lines = ["phase2_host_adapter_scan"]
@@ -285,6 +371,8 @@ def make_summary(out: Path, actual: dict[str, Any], passed: bool) -> str:
             "- Embedded implementation wired in CMake: "
             f"{implementation['implementation_in_cmake']}",
             f"- Focused Host test wired in CMake: {implementation['test_in_cmake']}",
+            "- Public/internal include probe: "
+            f"{actual['public_internal_include_probe']['passed']}",
             f"- Overall: {'PASS' if passed else 'FAIL'}",
             "",
             "## Interpretation",
@@ -293,8 +381,11 @@ def make_summary(out: Path, actual: dict[str, Any], passed: bool) -> str:
             "`ps::Host` and `create_embedded_host` in namespace `ps`, keeps the",
             "public Host header set self-contained through public value headers,",
             "and confines Kernel/InteractionService usage to the embedded",
-            "implementation file. It complements the focused C++ test by",
-            "checking the source boundary directly.",
+            "implementation file. The include probe compiles the public Host",
+            "header next to the internal scheduler runtime header, proving the",
+            "public Host snapshot names do not collide with backend scheduler",
+            "types. It complements the focused C++ test by checking the source",
+            "boundary directly.",
         ]
     )
 
@@ -312,6 +403,9 @@ def main() -> int:
     actual = {
         "host_headers": inspect_host_headers(repo),
         "implementation": inspect_implementation(repo),
+        "public_internal_include_probe": run_public_internal_include_probe(
+            repo, out
+        ),
     }
     expected = {
         "host_headers": {
@@ -324,6 +418,7 @@ def main() -> int:
             "all_required_functions_declared": True,
         },
         "implementation": {"all_wired": True},
+        "public_internal_include_probe": {"passed": True},
     }
     passed, compare = make_compare(actual, expected)
 

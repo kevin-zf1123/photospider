@@ -13,6 +13,7 @@
 #include <vector>
 
 #include "adapter/buffer_adapter_opencv.hpp"
+#include "kernel/scheduler/scheduler_task_runtime.hpp"  // NOLINT(build/include_subdir)
 #include "node.hpp"  // NOLINT(build/include_subdir)
 #include "photospider/host/host.hpp"
 #include "ps_types.hpp"  // NOLINT(build/include_subdir)
@@ -541,6 +542,32 @@ TEST(EmbeddedHostAdapter, AsyncComputeCanFinishAfterCloseGraphRequest) {
   auto ids_after_close = host->list_node_ids(session);
   EXPECT_FALSE(ids_after_close.status.ok);
   EXPECT_EQ(ids_after_close.status.code, GraphErrc::NotFound);
+}
+
+TEST(EmbeddedHostAdapter, ComputeReturnsNotFoundForMissingSession) {
+  register_host_adapter_ops();
+  ScopedTempDir temp("photospider_host_adapter_compute_missing_test");
+  auto host = create_embedded_host();
+  ASSERT_NE(host, nullptr);
+
+  HostComputeRequest missing_request =
+      make_compute_request(GraphSessionId{"missing_compute_graph"});
+  auto missing = host->compute(missing_request);
+  EXPECT_FALSE(missing.status.ok);
+  EXPECT_EQ(missing.status.code, GraphErrc::NotFound);
+
+  const GraphSessionId session =
+      load_test_graph(*host, temp.root(), "closed_compute_graph");
+  HostComputeRequest closed_request = make_compute_request(session);
+  auto initial = host->compute(closed_request);
+  ASSERT_TRUE(initial.status.ok) << initial.status.message;
+
+  auto close = host->close_graph(session);
+  ASSERT_TRUE(close.status.ok) << close.status.message;
+
+  auto closed = host->compute(closed_request);
+  EXPECT_FALSE(closed.status.ok);
+  EXPECT_EQ(closed.status.code, GraphErrc::NotFound);
 }
 
 TEST(EmbeddedHostAdapter, ReloadSaveSetNodeAndClearGraphReturnStatuses) {

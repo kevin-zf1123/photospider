@@ -288,9 +288,11 @@ class PHOTOSPIDER_API Host {
    * @brief Computes one node synchronously.
    *
    * @param request Host compute request.
-   * @return Success or failure status.
+   * @return Success, NotFound when the graph session is missing or closed, or
+   *         a compute failure status for existing sessions.
    * @throws Nothing directly.
-   * @note Failures include the backend LastError diagnostic when available.
+   * @note Backend LastError diagnostics are used only after the Host has
+   *       established that the requested graph session exists.
    */
   virtual VoidResult compute(const HostComputeRequest& request) = 0;
 
