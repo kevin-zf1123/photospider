@@ -555,6 +555,9 @@ TEST(EmbeddedHostAdapter, ComputeReturnsNotFoundForMissingSession) {
   auto missing = host->compute(missing_request);
   EXPECT_FALSE(missing.status.ok);
   EXPECT_EQ(missing.status.code, GraphErrc::NotFound);
+  auto missing_image = host->compute_and_get_image(missing_request);
+  EXPECT_FALSE(missing_image.status.ok);
+  EXPECT_EQ(missing_image.status.code, GraphErrc::NotFound);
 
   const GraphSessionId session =
       load_test_graph(*host, temp.root(), "closed_compute_graph");
@@ -566,6 +569,37 @@ TEST(EmbeddedHostAdapter, ComputeReturnsNotFoundForMissingSession) {
   ASSERT_TRUE(close.status.ok) << close.status.message;
 
   auto closed = host->compute(closed_request);
+  EXPECT_FALSE(closed.status.ok);
+  EXPECT_EQ(closed.status.code, GraphErrc::NotFound);
+  auto closed_image = host->compute_and_get_image(closed_request);
+  EXPECT_FALSE(closed_image.status.ok);
+  EXPECT_EQ(closed_image.status.code, GraphErrc::NotFound);
+}
+
+TEST(EmbeddedHostAdapter, ReplaceSchedulerReturnsNotFoundForMissingSession) {
+  register_host_adapter_ops();
+  ScopedTempDir temp("photospider_host_adapter_scheduler_missing_test");
+  auto host = create_embedded_host();
+  ASSERT_NE(host, nullptr);
+
+  auto missing = host->replace_scheduler(
+      GraphSessionId{"missing_scheduler_graph"},
+      ComputeIntent::GlobalHighPrecision, "serial_debug");
+  EXPECT_FALSE(missing.status.ok);
+  EXPECT_EQ(missing.status.code, GraphErrc::NotFound);
+
+  const GraphSessionId session =
+      load_test_graph(*host, temp.root(), "closed_scheduler_graph");
+  auto invalid_type = host->replace_scheduler(
+      session, ComputeIntent::GlobalHighPrecision, "missing_scheduler_type");
+  EXPECT_FALSE(invalid_type.status.ok);
+  EXPECT_EQ(invalid_type.status.code, GraphErrc::InvalidParameter);
+
+  auto close = host->close_graph(session);
+  ASSERT_TRUE(close.status.ok) << close.status.message;
+
+  auto closed = host->replace_scheduler(
+      session, ComputeIntent::GlobalHighPrecision, "serial_debug");
   EXPECT_FALSE(closed.status.ok);
   EXPECT_EQ(closed.status.code, GraphErrc::NotFound);
 }

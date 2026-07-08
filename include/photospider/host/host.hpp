@@ -317,10 +317,12 @@ class PHOTOSPIDER_API Host {
    * @brief Computes one node and returns an image snapshot descriptor.
    *
    * @param request Host compute request.
-   * @return ImageBuffer descriptor on success, or a failure status.
+   * @return ImageBuffer descriptor on success, `GraphErrc::NotFound` when the
+   *         graph session is missing or closed, or a compute failure status for
+   *         existing sessions.
    * @throws Nothing directly.
-   * @note The embedded adapter clones the backend image before wrapping it in
-   *       the returned ImageBuffer descriptor.
+   * @note The embedded adapter pre-checks session existence, then clones the
+   *       backend image into its public ImageBuffer descriptor.
    */
   virtual Result<ImageBuffer> compute_and_get_image(
       const HostComputeRequest& request) = 0;
@@ -780,10 +782,11 @@ class PHOTOSPIDER_API Host {
    * @param session Session to update.
    * @param intent Compute intent whose scheduler should be replaced.
    * @param type Scheduler type name.
-   * @return Success or failure status.
+   * @return Success, `GraphErrc::NotFound` for missing/closed sessions, or
+   *         `GraphErrc::InvalidParameter` for unavailable scheduler types.
    * @throws Nothing directly.
-   * @note Replacement preserves backend lifecycle ordering and returns only a
-   *       status snapshot to the caller.
+   * @note Replacement preserves backend lifecycle ordering. Session lifecycle
+   *       failures are reported before scheduler type validation.
    */
   virtual VoidResult replace_scheduler(const GraphSessionId& session,
                                        ComputeIntent intent,
