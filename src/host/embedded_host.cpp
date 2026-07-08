@@ -932,27 +932,27 @@ std::vector<ComputeEventSnapshot> to_public_compute_events(
  * @return Public scheduler trace action.
  * @throws Nothing.
  */
-SchedulerTraceAction to_public_scheduler_action(
+HostSchedulerTraceAction to_public_scheduler_action(
     GraphRuntime::SchedulerEvent::Action action) {
   switch (action) {
     case GraphRuntime::SchedulerEvent::ASSIGN_INITIAL:
-      return SchedulerTraceAction::AssignInitial;
+      return HostSchedulerTraceAction::AssignInitial;
     case GraphRuntime::SchedulerEvent::EXECUTE:
-      return SchedulerTraceAction::Execute;
+      return HostSchedulerTraceAction::Execute;
     case GraphRuntime::SchedulerEvent::EXECUTE_TILE:
-      return SchedulerTraceAction::ExecuteTile;
+      return HostSchedulerTraceAction::ExecuteTile;
     case GraphRuntime::SchedulerEvent::EXECUTE_DIRTY_SOURCE:
-      return SchedulerTraceAction::ExecuteDirtySource;
+      return HostSchedulerTraceAction::ExecuteDirtySource;
     case GraphRuntime::SchedulerEvent::EXECUTE_DIRTY_DOWNSTREAM_NODE:
-      return SchedulerTraceAction::ExecuteDirtyDownstreamNode;
+      return HostSchedulerTraceAction::ExecuteDirtyDownstreamNode;
     case GraphRuntime::SchedulerEvent::EXECUTE_DIRTY_DOWNSTREAM_TILE:
-      return SchedulerTraceAction::ExecuteDirtyDownstreamTile;
+      return HostSchedulerTraceAction::ExecuteDirtyDownstreamTile;
     case GraphRuntime::SchedulerEvent::SKIP_STALE_GENERATION:
-      return SchedulerTraceAction::SkipStaleGeneration;
+      return HostSchedulerTraceAction::SkipStaleGeneration;
     case GraphRuntime::SchedulerEvent::RETHROW_EXCEPTION:
-      return SchedulerTraceAction::RethrowException;
+      return HostSchedulerTraceAction::RethrowException;
   }
-  return SchedulerTraceAction::Unknown;
+  return HostSchedulerTraceAction::Unknown;
 }
 
 /**
@@ -1156,7 +1156,7 @@ class EmbeddedHost final : public Host {
    * @brief Closes a graph after adapter-submitted async compute completes.
    *
    * @param session Session to close.
-   * @return Success or failure status.
+   * @return Success or NotFound when the graph session does not exist.
    * @throws std::bad_alloc on diagnostic allocation failure.
    * @note Waiting first prevents backend async work from accessing a released
    *       runtime owned by the graph session.
@@ -1260,12 +1260,19 @@ class EmbeddedHost final : public Host {
    * @brief Runs synchronous compute through the embedded backend.
    *
    * @param request Public compute request.
-   * @return Success or failure status.
+   * @return Success, NotFound for a missing or closed session, or compute
+   *         failure status.
    * @throws std::bad_alloc on allocation failure.
-   * @note Backend LastError is used when the compute facade reports failure.
+   * @note The Host checks session existence before calling the backend bool
+   * API; Backend LastError is used only when the compute facade reports failure
+   * for an existing session.
    */
   VoidResult compute(const HostComputeRequest& request) override {
     return guarded_void("compute", GraphErrc::ComputeError, [&] {
+      if (!session_exists(*state_, request.session)) {
+        return failure_void(GraphErrc::NotFound, "graph session not found: " +
+                                                     request.session.value);
+      }
       const auto kernel_request = to_kernel_compute_request(request);
       if (!state_->interaction.cmd_compute(kernel_request)) {
         return VoidResult{failure_from_last_error(

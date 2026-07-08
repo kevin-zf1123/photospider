@@ -82,7 +82,7 @@ struct TimingSnapshot {
  * @note Values are copied from backend trace actions and deliberately do not
  *       expose scheduler queue internals or task handles.
  */
-enum class SchedulerTraceAction {
+enum class HostSchedulerTraceAction {
   /** @brief Initial node or task assignment. */
   AssignInitial,
 
@@ -130,7 +130,7 @@ struct SchedulerTraceEventSnapshot {
   int worker_id = -1;
 
   /** @brief Public trace action label. */
-  SchedulerTraceAction action = SchedulerTraceAction::Unknown;
+  HostSchedulerTraceAction action = HostSchedulerTraceAction::Unknown;
 
   /** @brief Backend high-resolution clock timestamp in microseconds. */
   uint64_t timestamp_us = 0;
