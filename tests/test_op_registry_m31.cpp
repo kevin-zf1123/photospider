@@ -301,6 +301,66 @@ TEST_F(OpRegistryM31Test, MultipleSameDeviceImplsSortedByCost) {
   EXPECT_EQ(best->metadata.cost_score, 50);
 }
 
+TEST_F(OpRegistryM31Test, FilteredSelectionKeepsHpDevicePriority) {
+  constexpr const char* kType = "m31_filter";
+  constexpr const char* kSubtype = "hp_shape_filtered";
+  auto& registry = OpRegistry::instance();
+  registry.unregister_key(make_key(kType, kSubtype));
+
+  OpMetadata gpu_monolithic_meta;
+  gpu_monolithic_meta.device_preference = Device::GPU_METAL;
+  gpu_monolithic_meta.cost_score = 1;
+  registry.register_impl(kType, kSubtype, Device::GPU_METAL, dummy_metal_op,
+                         gpu_monolithic_meta);
+
+  OpMetadata cpu_tiled_meta;
+  cpu_tiled_meta.device_preference = Device::CPU;
+  cpu_tiled_meta.cost_score = 5;
+  cpu_tiled_meta.tile_preference = TileSizePreference::MICRO;
+  registry.register_impl(kType, kSubtype, Device::CPU, dummy_tiled_cpu_op,
+                         cpu_tiled_meta);
+
+  OpMetadata gpu_tiled_meta;
+  gpu_tiled_meta.device_preference = Device::GPU_METAL;
+  gpu_tiled_meta.cost_score = 100;
+  gpu_tiled_meta.tile_preference = TileSizePreference::MICRO;
+  registry.register_impl(kType, kSubtype, Device::GPU_METAL,
+                         dummy_tiled_metal_op, gpu_tiled_meta);
+
+  const std::vector<Device> available_devices = {Device::CPU,
+                                                 Device::GPU_METAL};
+  const OpImplementation* best = registry.select_best_implementation(
+      kType, kSubtype, available_devices, ComputeIntent::GlobalHighPrecision,
+      [](const OpImplementation& impl) { return impl.is_tiled(); });
+
+  ASSERT_NE(best, nullptr);
+  EXPECT_EQ(best->metadata.device_preference, Device::GPU_METAL);
+  EXPECT_TRUE(best->is_tiled());
+  EXPECT_EQ(best->metadata.cost_score, 100);
+
+  registry.unregister_key(make_key(kType, kSubtype));
+}
+
+TEST_F(OpRegistryM31Test, FilteredSelectionReturnsNullWhenAllRejected) {
+  constexpr const char* kType = "m31_filter";
+  constexpr const char* kSubtype = "reject_all";
+  auto& registry = OpRegistry::instance();
+  registry.unregister_key(make_key(kType, kSubtype));
+
+  OpMetadata cpu_meta;
+  cpu_meta.device_preference = Device::CPU;
+  cpu_meta.cost_score = 10;
+  registry.register_impl(kType, kSubtype, Device::CPU, dummy_cpu_op, cpu_meta);
+
+  const OpImplementation* best = registry.select_best_implementation(
+      kType, kSubtype, {Device::CPU}, ComputeIntent::GlobalHighPrecision,
+      [](const OpImplementation&) { return false; });
+
+  EXPECT_EQ(best, nullptr);
+
+  registry.unregister_key(make_key(kType, kSubtype));
+}
+
 // 测试：向后兼容性 - 传统 API 仍然可用
 TEST_F(OpRegistryM31Test, BackwardCompatibilityWithLegacyAPI) {
   auto& registry = OpRegistry::instance();
