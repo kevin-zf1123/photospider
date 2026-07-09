@@ -1,5 +1,16 @@
-// Photospider kernel: multi-graph Kernel facade
 #pragma once
+
+/**
+ * @file kernel.hpp
+ * @brief Legacy source-tree Kernel facade for repository internals.
+ *
+ * This header is not part of the installable `include/photospider/**` public
+ * interface. It intentionally names implementation headers that live under the
+ * private `src/` include root, so only repository targets that receive
+ * `PHOTOSPIDER_PRIVATE_INCLUDE_DIRS` should include it. External frontends
+ * should use `photospider/host/host.hpp` and copied Host value snapshots
+ * instead of depending on Kernel, GraphRuntime, or compute-service ownership.
+ */
 
 #include <future>
 #include <map>
