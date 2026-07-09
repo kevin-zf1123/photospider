@@ -1,11 +1,154 @@
 #include <gtest/gtest.h>
 
+#include <chrono>
+#include <filesystem>
+#include <fstream>
+#include <iostream>
+#include <mutex>
+#include <sstream>
 #include <string>
+#include <system_error>
+#include <vector>
 
+#include "adapter/buffer_adapter_opencv.hpp"
+#include "cli/command/commands.hpp"
 #include "cli/dependency_tree_formatter.hpp"
+#include "node.hpp"      // NOLINT(build/include_subdir)
+#include "ps_types.hpp"  // NOLINT(build/include_subdir)
 
 namespace ps::cli {
 namespace {
+
+/**
+ * @brief Registers deterministic operations used by dirty inspect CLI tests.
+ *
+ * @throws std::bad_alloc if registry storage allocation fails.
+ * @note The test operation is monolithic and CPU-only. Dirty planning therefore
+ *       emits a monolithic dirty-region record that the CLI can render
+ *       deterministically.
+ */
+void register_dirty_inspect_ops() {
+  static std::once_flag once;
+  std::call_once(once, [] {
+    OpRegistry::instance().register_op_hp_monolithic(
+        "cli_dirty_test", "source",
+        MonolithicOpFunc(
+            [](const Node& node, const std::vector<const NodeOutput*>&) {
+              const int width = node.parameters["width"].as<int>(256);
+              const int height = node.parameters["height"].as<int>(128);
+              NodeOutput output;
+              output.image_buffer = make_aligned_cpu_image_buffer(
+                  width, height, 1, DataType::FLOAT32);
+              toCvMat(output.image_buffer).setTo(3.0f);
+              output.space.absolute_roi = cv::Rect(0, 0, width, height);
+              output.debug.compute_device = "cli-dirty-test-source";
+              return output;
+            }));
+    OpRegistry::instance().register_op_hp_monolithic(
+        "cli_dirty_test", "offset_identity",
+        MonolithicOpFunc(
+            [](const Node&, const std::vector<const NodeOutput*>& inputs) {
+              if (inputs.empty() || inputs.front() == nullptr) {
+                throw GraphError(GraphErrc::InvalidParameter,
+                                 "cli dirty inspect requires one input");
+              }
+              const NodeOutput& input = *inputs.front();
+              NodeOutput output;
+              output.image_buffer = make_aligned_cpu_image_buffer(
+                  input.image_buffer.width, input.image_buffer.height,
+                  input.image_buffer.channels, input.image_buffer.type);
+              toCvMat(input.image_buffer).copyTo(toCvMat(output.image_buffer));
+              output.space.absolute_roi = input.space.absolute_roi;
+              output.debug.compute_device = "cli-dirty-test-offset-identity";
+              return output;
+            }));
+    OpRegistry::instance().register_dirty_propagator(
+        "cli_dirty_test", "offset_identity",
+        DirtyRoiPropFunc(
+            [](const Node&, const cv::Rect& roi, const GraphModel&) {
+              return cv::Rect(roi.x + 64, roi.y, roi.width, roi.height);
+            }));
+  });
+}
+
+/**
+ * @brief Owns a unique temporary directory for one dirty inspect CLI test.
+ *
+ * @throws std::filesystem::filesystem_error if setup cleanup or directory
+ *         creation fails.
+ * @note Cleanup is best-effort so test failures are not masked by filesystem
+ *       teardown errors.
+ */
+class ScopedTempDir {
+ public:
+  /**
+   * @brief Creates an empty unique temporary directory.
+   *
+   * @param name Directory name below the platform temporary directory.
+   * @throws std::filesystem::filesystem_error if directory creation fails.
+   */
+  explicit ScopedTempDir(const std::string& name)
+      : root_(std::filesystem::temp_directory_path() /
+              (name + "_" +
+               std::to_string(std::chrono::high_resolution_clock::now()
+                                  .time_since_epoch()
+                                  .count()))) {
+    std::filesystem::remove_all(root_);
+    std::filesystem::create_directories(root_);
+  }
+
+  ScopedTempDir(const ScopedTempDir&) = delete;
+  ScopedTempDir& operator=(const ScopedTempDir&) = delete;
+
+  /**
+   * @brief Removes the temporary directory.
+   *
+   * @throws Nothing.
+   */
+  ~ScopedTempDir() {
+    std::error_code ec;
+    std::filesystem::remove_all(root_, ec);
+  }
+
+  /**
+   * @brief Returns the root path for the temporary directory.
+   *
+   * @return Temporary root path.
+   * @throws Nothing.
+   */
+  const std::filesystem::path& root() const { return root_; }
+
+ private:
+  /** @brief Temporary directory root owned by this helper. */
+  std::filesystem::path root_;
+};
+
+/**
+ * @brief Writes a two-node graph that emits non-empty dirty diagnostics.
+ *
+ * @param path YAML file path to create.
+ * @throws std::filesystem::filesystem_error or std::ios_base::failure if file
+ *         creation fails.
+ * @note Node 2 is monolithic and shifts backward dirty ROI demand, producing
+ *       both monolithic dirty-region and edge-mapping diagnostics.
+ */
+void write_dirty_inspect_graph(const std::filesystem::path& path) {
+  std::filesystem::create_directories(path.parent_path());
+  std::ofstream out(path);
+  out << "- id: 1\n"
+      << "  name: dirty_source\n"
+      << "  type: cli_dirty_test\n"
+      << "  subtype: source\n"
+      << "  parameters:\n"
+      << "    width: 256\n"
+      << "    height: 128\n"
+      << "- id: 2\n"
+      << "  name: dirty_offset_identity\n"
+      << "  type: cli_dirty_test\n"
+      << "  subtype: offset_identity\n"
+      << "  image_inputs:\n"
+      << "    - from_node_id: 1\n";
+}
 
 TEST(CliDirtySnapshotFormatter, RendersMonolithicAndEdgeMappings) {
   DirtyRegionInspectionSnapshot snapshot;
@@ -25,6 +168,60 @@ TEST(CliDirtySnapshotFormatter, RendersMonolithicAndEdgeMappings) {
   EXPECT_NE(text.find("Edge mappings: 1"), std::string::npos);
   EXPECT_NE(text.find("node 1 -> 2 hp backward-demand "
                       "from=[0,0 8x6] to=[1,1 2x2]"),
+            std::string::npos);
+}
+
+TEST(CliDirtySnapshotFormatter,
+     InspectDirtyCommandRendersNonEmptyHostSnapshot) {
+  register_dirty_inspect_ops();
+  ScopedTempDir temp("photospider_cli_inspect_dirty_non_empty_test");
+  auto host = create_embedded_host();
+  ASSERT_NE(host, nullptr);
+
+  const auto yaml_path = temp.root() / "source" / "dirty_inspect_graph.yaml";
+  write_dirty_inspect_graph(yaml_path);
+
+  GraphLoadRequest request;
+  request.session = GraphSessionId{"cli_dirty_inspect"};
+  request.root_dir = (temp.root() / "sessions").string();
+  request.yaml_path = yaml_path.string();
+  request.cache_root_dir = (temp.root() / "cache").string();
+
+  auto loaded = host->load_graph(request);
+  ASSERT_TRUE(loaded.status.ok) << loaded.status.message;
+
+  HostComputeRequest full_request;
+  full_request.session = request.session;
+  full_request.node = NodeId{2};
+  full_request.cache.precision = "fp32";
+  auto initial_compute = host->compute(full_request);
+  ASSERT_TRUE(initial_compute.status.ok) << initial_compute.status.message;
+
+  HostComputeRequest dirty_request = full_request;
+  dirty_request.intent = ComputeIntent::GlobalHighPrecision;
+  dirty_request.dirty_roi = PixelRect{70, 10, 20, 20};
+  auto dirty_compute = host->compute(dirty_request);
+  ASSERT_TRUE(dirty_compute.status.ok) << dirty_compute.status.message;
+
+  std::istringstream args("dirty");
+  std::string current_graph = request.session.value;
+  bool modified = false;
+  CliConfig config;
+  std::ostringstream captured;
+  auto* original_buffer = std::cout.rdbuf(captured.rdbuf());
+  const bool handled =
+      ::handle_inspect(args, *host, current_graph, modified, config);
+  std::cout.rdbuf(original_buffer);
+
+  const std::string text = captured.str();
+  EXPECT_TRUE(handled);
+  EXPECT_EQ(text.find("(No dirty snapshot recorded.)"), std::string::npos);
+  EXPECT_NE(text.find("Monolithic dirty regions:"), std::string::npos);
+  EXPECT_NE(text.find("node 2 hp whole=true roi=0,0 256x128"),
+            std::string::npos);
+  EXPECT_NE(text.find("Edge mappings: 1"), std::string::npos);
+  EXPECT_NE(text.find("node 1 -> 2 hp backward-demand "
+                      "from=[64,0 128x64] to=[64,0 64x64]"),
             std::string::npos);
 }
 

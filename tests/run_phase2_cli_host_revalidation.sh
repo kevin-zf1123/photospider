@@ -85,7 +85,12 @@ actual = {
     "cli_boundary_rg_passed": boundary_ok,
     "ctest_boundary_passed": "100% tests passed" in ctest,
     "host_adapter_tests_passed": "[  PASSED  ] 11 tests." in host_test,
-    "dirty_snapshot_formatter_tests_passed": "[  PASSED  ] 1 test." in formatter_test,
+    "dirty_snapshot_formatter_tests_passed": "[  PASSED  ] 2 tests." in formatter_test,
+    "cli_inspect_dirty_non_empty_test_passed": (
+        "[       OK ] "
+        "CliDirtySnapshotFormatter.InspectDirtyCommandRendersNonEmptyHostSnapshot"
+        in formatter_test
+    ),
     "graph_cli_repl_returncode": repl_rc,
     "graph_cli_loaded_session": "Loaded session 'phase2_cli_host'" in clean_stdout,
     "graph_cli_compute_finished": "Computation finished." in clean_stdout,
@@ -98,6 +103,7 @@ expected = {
     "ctest_boundary_passed": True,
     "host_adapter_tests_passed": True,
     "dirty_snapshot_formatter_tests_passed": True,
+    "cli_inspect_dirty_non_empty_test_passed": True,
     "graph_cli_repl_returncode": 0,
     "graph_cli_loaded_session": True,
     "graph_cli_compute_finished": True,
@@ -160,6 +166,8 @@ overall = all(checks.values())
             f"- Host adapter tests passed: {actual['host_adapter_tests_passed']}",
             "- Dirty snapshot formatter tests passed: "
             f"{actual['dirty_snapshot_formatter_tests_passed']}",
+            "- Non-empty inspect dirty command test passed: "
+            f"{actual['cli_inspect_dirty_non_empty_test_passed']}",
             f"- REPL returned 0: {actual['graph_cli_repl_returncode'] == 0}",
             f"- Loaded session observed: {actual['graph_cli_loaded_session']}",
             f"- Compute finished observed: {actual['graph_cli_compute_finished']}",
@@ -175,9 +183,10 @@ overall = all(checks.values())
             "GraphModel, GraphRuntime, direct kernel includes, graph_model.hpp,",
             "or old cmd_* calls. The REPL transcript proves `load ...`,",
             "`compute all parallel nosave m`, and `inspect dirty` still complete",
-            "through the default embedded Host path. The Host adapter and formatter",
-            "tests prove `inspect dirty` can still display monolithic dirty-region",
-            "and edge-mapping diagnostics after the CLI Host migration.",
+            "through the default embedded Host path. The Host adapter, formatter,",
+            "and command-handler tests prove `inspect dirty` can still display",
+            "non-empty monolithic dirty-region and edge-mapping diagnostics after",
+            "the CLI Host migration.",
         ]
     ) + "\n",
     encoding="utf-8",
