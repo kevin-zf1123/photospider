@@ -138,7 +138,7 @@ def main() -> int:
     graph_runtime_header = (
         repo / "src/kernel/graph_runtime.hpp"
     ).read_text(encoding="utf-8")
-    kernel_header = (repo / "include/kernel/kernel.hpp").read_text(
+    kernel_header = (repo / "src/kernel/kernel.hpp").read_text(
         encoding="utf-8"
     )
 

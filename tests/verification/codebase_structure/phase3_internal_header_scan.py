@@ -52,6 +52,14 @@ MOVED_INTERNAL_HEADERS = {
         "include/kernel/scheduler/serial_debug_scheduler.hpp",
         "src/kernel/scheduler/serial_debug_scheduler.hpp",
     ),
+    "kernel_facade": (
+        "include/kernel/kernel.hpp",
+        "src/kernel/kernel.hpp",
+    ),
+    "interaction_facade": (
+        "include/kernel/interaction.hpp",
+        "src/kernel/interaction.hpp",
+    ),
 }
 PRIVATE_PLANNING_HEADERS = (
     "src/kernel/services/compute-service/task_graph_planning.hpp",
