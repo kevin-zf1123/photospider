@@ -683,6 +683,8 @@ SpatialSnapshot to_public_space(const SpatialContext& space, int output_width,
             snapshot.transform_matrix);
   std::copy(space.inverse_matrix.begin(), space.inverse_matrix.end(),
             snapshot.inverse_matrix);
+  std::copy(space.local_inverse_matrix.begin(),
+            space.local_inverse_matrix.end(), snapshot.local_inverse_matrix);
   return snapshot;
 }
 

@@ -160,6 +160,7 @@ std::string format_node_metadata(const NodeInspectionView& node) {
 
   dump_matrix(os, "Transform", space.transform_matrix);
   dump_matrix(os, "Inverse (Global)", space.inverse_matrix);
+  dump_matrix(os, "Inverse (Local)", space.local_inverse_matrix);
 
   return os.str();
 }
