@@ -3,6 +3,7 @@
 
 #include <functional>
 #include <future>
+#include <map>
 #include <optional>
 #include <string>
 #include <utility>
@@ -14,11 +15,29 @@
 
 namespace ps {
 
-// Minimal interaction facade to decouple frontends from Kernel internals.
+/**
+ * @brief Command-oriented facade that keeps frontends on Kernel value APIs.
+ *
+ * InteractionService owns no graph state. It translates CLI/host-style command
+ * calls to Kernel facades and deliberately does not expose the underlying
+ * Kernel reference, runtime map, or graph-state executor. Tests that must
+ * inspect internals use the internal-only helper under tests/support; frontend
+ * code should use the cmd_* value accessors here.
+ *
+ * @note The referenced Kernel must outlive the InteractionService instance.
+ */
 class InteractionService {
  public:
+  /**
+   * @brief Binds the interaction facade to an existing Kernel.
+   *
+   * @param kernel Kernel instance that owns graph runtimes and services.
+   * @throws Nothing.
+   * @note The service stores a borrowed reference and performs no ownership or
+   * lifetime management.
+   */
   explicit InteractionService(Kernel& kernel) : kernel_(kernel) {}
-  Kernel& kernel() { return kernel_; }
+
   // Graph lifecycle
   std::optional<std::string> cmd_load_graph(
       const std::string& name, const std::string& root_dir,

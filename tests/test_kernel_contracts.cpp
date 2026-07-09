@@ -14,7 +14,7 @@
 #include <vector>
 
 #include "adapter/buffer_adapter_opencv.hpp"
-#include "graph_model.hpp"
+#include "graph_model.hpp"  // NOLINT(build/include_subdir)
 #include "kernel/interaction.hpp"
 #include "kernel/kernel.hpp"
 #include "kernel/services/compute_service.hpp"
@@ -22,7 +22,8 @@
 #include "kernel/services/graph_event_service.hpp"
 #include "kernel/services/graph_io_service.hpp"
 #include "kernel/services/graph_traversal_service.hpp"
-#include "ps_types.hpp"
+#include "ps_types.hpp"  // NOLINT(build/include_subdir)
+#include "support/kernel_test_access.hpp"
 
 namespace ps {
 namespace {
@@ -695,13 +696,13 @@ TEST(ComputeContracts, SyncFailureRestoresRequestScopedGraphState) {
   auto loaded =
       kernel.load_graph(graph_name, root.string(), yaml_path.string());
   ASSERT_TRUE(loaded.has_value());
-  kernel
-      .post(graph_name,
-            [](GraphModel& graph) {
-              graph.set_quiet(false);
-              graph.set_skip_save_cache(true);
-              return 0;
-            })
+  testing::KernelTestAccess::submit_graph_state(
+      kernel, graph_name,
+      [](GraphModel& graph) {
+        graph.set_quiet(false);
+        graph.set_skip_save_cache(true);
+        return 0;
+      })
       .get();
 
   Kernel::ComputeRequest request;
@@ -713,13 +714,13 @@ TEST(ComputeContracts, SyncFailureRestoresRequestScopedGraphState) {
   request.execution.quiet = true;
 
   EXPECT_FALSE(kernel.compute(request));
-  auto restored = kernel
-                      .post(graph_name,
-                            [](GraphModel& graph) {
-                              return std::make_pair(graph.is_quiet(),
-                                                    graph.skip_save_cache());
-                            })
-                      .get();
+  auto restored =
+      testing::KernelTestAccess::submit_graph_state(
+          kernel, graph_name,
+          [](GraphModel& graph) {
+            return std::make_pair(graph.is_quiet(), graph.skip_save_cache());
+          })
+          .get();
   EXPECT_FALSE(restored.first);
   EXPECT_TRUE(restored.second);
   kernel.close_graph(graph_name);
@@ -737,13 +738,13 @@ TEST(ComputeContracts, AsyncParallelFailureRestoresRequestScopedGraphState) {
   auto loaded =
       kernel.load_graph(graph_name, root.string(), yaml_path.string());
   ASSERT_TRUE(loaded.has_value());
-  kernel
-      .post(graph_name,
-            [](GraphModel& graph) {
-              graph.set_quiet(false);
-              graph.set_skip_save_cache(true);
-              return 0;
-            })
+  testing::KernelTestAccess::submit_graph_state(
+      kernel, graph_name,
+      [](GraphModel& graph) {
+        graph.set_quiet(false);
+        graph.set_skip_save_cache(true);
+        return 0;
+      })
       .get();
 
   Kernel::ComputeRequest request;
@@ -758,13 +759,13 @@ TEST(ComputeContracts, AsyncParallelFailureRestoresRequestScopedGraphState) {
   auto future = kernel.compute_async(request);
   ASSERT_TRUE(future.has_value());
   EXPECT_FALSE(future->get());
-  auto restored = kernel
-                      .post(graph_name,
-                            [](GraphModel& graph) {
-                              return std::make_pair(graph.is_quiet(),
-                                                    graph.skip_save_cache());
-                            })
-                      .get();
+  auto restored =
+      testing::KernelTestAccess::submit_graph_state(
+          kernel, graph_name,
+          [](GraphModel& graph) {
+            return std::make_pair(graph.is_quiet(), graph.skip_save_cache());
+          })
+          .get();
   EXPECT_FALSE(restored.first);
   EXPECT_TRUE(restored.second);
   kernel.close_graph(graph_name);
@@ -800,10 +801,11 @@ TEST(ComputeContracts, ParallelComputeSerializesGraphStateOperations) {
       wait_for_blocking_contract_source(std::chrono::milliseconds(2000)));
 
   std::atomic<bool> post_ran{false};
-  auto post_future = kernel.post(graph_name, [&post_ran](GraphModel& graph) {
-    post_ran.store(true, std::memory_order_release);
-    return graph.node_count();
-  });
+  auto post_future = testing::KernelTestAccess::submit_graph_state(
+      kernel, graph_name, [&post_ran](GraphModel& graph) {
+        post_ran.store(true, std::memory_order_release);
+        return graph.node_count();
+      });
 
   EXPECT_EQ(post_future.wait_for(std::chrono::milliseconds(100)),
             std::future_status::timeout);

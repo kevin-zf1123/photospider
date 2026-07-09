@@ -32,6 +32,7 @@
 #include "kernel/services/graph_cache_service.hpp"
 #include "kernel/services/graph_traversal_service.hpp"
 #include "ps_types.hpp"  // NOLINT(build/include_subdir)
+#include "support/kernel_test_access.hpp"
 
 namespace ps {
 namespace {
@@ -662,7 +663,7 @@ TEST(GpuPipelineIntegrationTest, SchedulerWithRuntime) {
   }
 
   // 创建并设置 GPU Pipeline 调度器
-  auto& runtime = kernel.runtime(graph_name);
+  auto& runtime = testing::KernelTestAccess::runtime(kernel, graph_name);
 
   GpuPipelineScheduler::Config config;
   config.cpu_workers = 4;
@@ -714,7 +715,7 @@ TEST(GpuPipelineIntegrationTest, DualSchedulerConcurrentExecution) {
     GTEST_SKIP() << "Test graph not found";
   }
 
-  auto& runtime = kernel.runtime(graph_name);
+  auto& runtime = testing::KernelTestAccess::runtime(kernel, graph_name);
 
   // 为 HP 设置 GPU Pipeline 调度器
   GpuPipelineScheduler::Config gpu_config;

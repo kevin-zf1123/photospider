@@ -12,6 +12,7 @@
 #include "kernel/scheduler/cpu_work_stealing_scheduler.hpp"
 #include "kernel/scheduler/scheduler_factory.hpp"
 #include "kernel/scheduler/serial_debug_scheduler.hpp"
+#include "support/kernel_test_access.hpp"
 
 // =============================================================================
 // M3.4: SchedulerFactory Tests
@@ -268,9 +269,9 @@ TEST(M34_Integration, ComputeWithInjectedScheduler) {
   request.execution.parallel = true;
   bool success = svc.cmd_compute(request);
   ASSERT_TRUE(success);
-  auto& runtime = kernel.runtime(graph_name);
-  const auto& result =
-      runtime.model().node(node_id).cached_output_high_precision.value();
+  const auto& result = ps::testing::KernelTestAccess::model(kernel, graph_name)
+                           .node(node_id)
+                           .cached_output_high_precision.value();
 
   // Verify computation completed
   EXPECT_TRUE(result.image_buffer.width > 0 || !result.data.empty());
@@ -310,9 +311,9 @@ TEST(M34_Integration, ComputeWithSerialScheduler) {
   request.execution.parallel = true;
   bool success = svc.cmd_compute(request);
   ASSERT_TRUE(success);
-  auto& runtime = kernel.runtime(graph_name);
-  const auto& result =
-      runtime.model().node(node_id).cached_output_high_precision.value();
+  const auto& result = ps::testing::KernelTestAccess::model(kernel, graph_name)
+                           .node(node_id)
+                           .cached_output_high_precision.value();
 
   // Verify computation completed
   EXPECT_TRUE(result.image_buffer.width > 0 || !result.data.empty());

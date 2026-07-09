@@ -148,7 +148,7 @@ def main() -> int:
         "graph_state_executor": {
             "header_exists": True,
             "runtime_owns_executor": True,
-            "kernel_post_routes_to_executor": True,
+            "kernel_graph_state_helpers_route_to_executor": True,
         },
         "focused_tests": {
             "test_scheduler_ok": True,
@@ -163,7 +163,7 @@ def main() -> int:
             "header_exists": graph_state_header.exists(),
             "runtime_owns_executor": "GraphStateExecutor graph_state_;"
             in graph_runtime_header,
-            "kernel_post_routes_to_executor": "graph_state().submit"
+            "kernel_graph_state_helpers_route_to_executor": "graph_state().submit"
             in kernel_header,
         },
         "focused_tests": {
@@ -195,8 +195,10 @@ def main() -> int:
             actual["graph_state_executor"]["runtime_owns_executor"],
         ),
         (
-            "Kernel::post routes to GraphStateExecutor",
-            actual["graph_state_executor"]["kernel_post_routes_to_executor"],
+            "Kernel graph-state helpers route to GraphStateExecutor",
+            actual["graph_state_executor"][
+                "kernel_graph_state_helpers_route_to_executor"
+            ],
         ),
         ("test_scheduler focused tests", actual["focused_tests"]["test_scheduler_ok"]),
         (
@@ -243,7 +245,7 @@ def main() -> int:
         [
             "",
             "The legacy scan is scoped to GraphRuntime ownership files only.",
-            "Kernel::post is checked separately to ensure it routes through GraphStateExecutor.",
+            "Kernel graph-state helpers are checked separately to ensure they route through GraphStateExecutor.",
             "Scheduler-owned `SchedulerTaskRuntime` APIs remain intentionally out of scope.",
         ]
     )

@@ -34,10 +34,15 @@
   和运行时 generation 状态。
 - `include/kernel/kernel.hpp` 包含 `GraphRuntime`、`ComputeService`、图服务、插件管理器和
   dirty-control-lane 实现类型。
-- `Kernel::post()`、`Kernel::runtime()` 和 `InteractionService::kernel()` 允许外部代码绕过预期的
-  `InteractionService` 接口。
 - `include/plugin_api.hpp` 包含完整 `Node`，把节点运行时/cache 状态暴露给操作插件，而不是暴露更小的插件契约。
 - CLI 和 benchmark 头与内核契约位于同一个 public include root 下，因此 install 规则会意外发布应用内部实现。
+
+当前分支已经完成的 seam 收紧：
+
+- 原先直接提交 graph-state 工作和访问 runtime 的 escape hatch 已从公开 `Kernel` 和
+  `InteractionService` facade 中移除。仍需要内部 runtime 或 graph-state 访问的测试现在必须显式包含
+  internal-only 的 `tests/support/kernel_test_access.hpp` helper，并通过
+  `ps::testing::KernelTestAccess` 进行这些访问。
 
 ## 外部接口规则
 
