@@ -159,8 +159,8 @@ class Kernel {
   std::vector<std::string> list_graphs() const;
 
   template <typename Fn>
-  auto post(const std::string& name,
-            Fn&& fn) -> std::future<decltype(fn(std::declval<GraphModel&>()))> {
+  auto post(const std::string& name, Fn&& fn)
+      -> std::future<decltype(fn(std::declval<GraphModel&>()))> {
     auto it = graphs_.find(name);
     if (it == graphs_.end()) {
       throw std::runtime_error("Graph not found: " + name);
@@ -445,9 +445,8 @@ class Kernel {
    * @note Used by const inspection APIs such as scheduler metadata queries.
    */
   template <typename Fn>
-  auto with_runtime(const std::string& name, Fn&& op) const
-      -> std::optional<
-          std::decay_t<std::invoke_result_t<Fn, const GraphRuntime&>>> {
+  auto with_runtime(const std::string& name, Fn&& op) const -> std::optional<
+      std::decay_t<std::invoke_result_t<Fn, const GraphRuntime&>>> {
     auto it = graphs_.find(name);
     if (it == graphs_.end()) {
       return std::nullopt;
@@ -564,10 +563,11 @@ class Kernel {
    * @param request Compute request with image-returning facade arguments.
    * @return Cloned cv::Mat target image, or nullopt on missing graph, compute
    * failure, or empty output.
-   * @throws Nothing; failures are converted to nullopt to preserve the previous
-   * save/preview facade contract.
-   * @note This path intentionally does not modify LastError, matching the prior
-   * compute_and_get_image behavior.
+   * @throws Nothing; handled compute failures are recorded in last_error() and
+   * converted to nullopt to preserve the save/preview facade contract.
+   * @note Missing graphs return nullopt before LastError state is touched.
+   * Successful compute paths clear stale LastError state, including the
+   * no-image-output case.
    */
   std::optional<cv::Mat> compute_and_get_image_request(
       const ComputeRequest& request);

@@ -1421,8 +1421,9 @@ class EmbeddedHost final : public Host {
    *         compute failure status for existing sessions.
    * @throws std::bad_alloc on allocation failure.
    * @note The Host pre-checks session existence so missing lifecycle state is
-   *       not collapsed into a generic compute failure. Backend image memory is
-   *       cloned before conversion to the public descriptor.
+   *       not collapsed into a generic compute failure. Backend LastError is
+   *       used when image compute reports a handled failure, and backend image
+   *       memory is cloned before conversion to the public descriptor.
    */
   Result<ImageBuffer> compute_and_get_image(
       const HostComputeRequest& request) override {
@@ -1437,10 +1438,12 @@ class EmbeddedHost final : public Host {
           auto image =
               state_->interaction.cmd_compute_and_get_image(kernel_request);
           if (!image) {
-            return failure_result<ImageBuffer>(
-                GraphErrc::ComputeError,
+            Result<ImageBuffer> result;
+            result.status = failure_from_last_error(
+                *state_, request.session, GraphErrc::ComputeError,
                 "failed to compute image for graph session: " +
                     request.session.value);
+            return result;
           }
           return success_result(fromCvMat(*image));
         });

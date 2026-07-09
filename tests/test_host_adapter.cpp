@@ -234,6 +234,28 @@ void write_host_adapter_graph(const std::filesystem::path& path, int width = 6,
 }
 
 /**
+ * @brief Writes a graph whose node has no registered operation.
+ *
+ * @param path YAML file path to create.
+ * @throws std::filesystem::filesystem_error or std::ios_base::failure if file
+ *         creation fails.
+ * @note Loading succeeds because operation lookup is deferred to compute, so
+ *       Host image-compute failure mapping can verify GraphErrc::NoOperation.
+ */
+void write_host_adapter_unregistered_op_graph(
+    const std::filesystem::path& path) {
+  std::filesystem::create_directories(path.parent_path());
+  std::ofstream out(path);
+  out << "- id: 1\n"
+      << "  name: missing_op_source\n"
+      << "  type: host_adapter_missing\n"
+      << "  subtype: source\n"
+      << "  parameters:\n"
+      << "    width: 6\n"
+      << "    height: 4\n";
+}
+
+/**
  * @brief Writes a two-node graph with identity ROI propagation.
  *
  * @param path YAML file path to create.
@@ -631,6 +653,55 @@ TEST(EmbeddedHostAdapter, ComputeReturnsNotFoundForMissingSession) {
   auto closed_image = host->compute_and_get_image(closed_request);
   EXPECT_FALSE(closed_image.status.ok);
   EXPECT_EQ(closed_image.status.code, GraphErrc::NotFound);
+}
+
+TEST(EmbeddedHostAdapter, ComputeImagePreservesBackendFailureStatus) {
+  register_host_adapter_ops();
+  ScopedTempDir temp("photospider_host_adapter_image_status_test");
+  auto host = create_embedded_host();
+  ASSERT_NE(host, nullptr);
+
+  const GraphSessionId session =
+      load_test_graph(*host, temp.root(), "image_status_graph");
+  HostComputeRequest missing_node_request = make_compute_request(session);
+  missing_node_request.node = NodeId{99};
+
+  auto missing_node_image = host->compute_and_get_image(missing_node_request);
+  EXPECT_FALSE(missing_node_image.status.ok);
+  EXPECT_EQ(missing_node_image.status.code, GraphErrc::NotFound);
+  EXPECT_FALSE(missing_node_image.status.message.empty());
+
+  auto missing_node_error = host->last_error(session);
+  EXPECT_FALSE(missing_node_error.ok);
+  EXPECT_EQ(missing_node_error.code, GraphErrc::NotFound);
+  EXPECT_FALSE(missing_node_error.message.empty());
+
+  auto recovered_image =
+      host->compute_and_get_image(make_compute_request(session));
+  ASSERT_TRUE(recovered_image.status.ok) << recovered_image.status.message;
+  auto cleared_error = host->last_error(session);
+  EXPECT_TRUE(cleared_error.ok) << cleared_error.message;
+
+  GraphLoadRequest missing_op_load;
+  missing_op_load.session = GraphSessionId{"image_missing_op_graph"};
+  missing_op_load.root_dir = (temp.root() / "sessions").string();
+  missing_op_load.yaml_path =
+      (temp.root() / "source" / "image_missing_op_graph.yaml").string();
+  missing_op_load.cache_root_dir = (temp.root() / "cache").string();
+  write_host_adapter_unregistered_op_graph(missing_op_load.yaml_path);
+  auto loaded_missing_op = host->load_graph(missing_op_load);
+  ASSERT_TRUE(loaded_missing_op.status.ok) << loaded_missing_op.status.message;
+
+  auto missing_op_image = host->compute_and_get_image(
+      make_compute_request(missing_op_load.session));
+  EXPECT_FALSE(missing_op_image.status.ok);
+  EXPECT_EQ(missing_op_image.status.code, GraphErrc::NoOperation);
+  EXPECT_NE(missing_op_image.status.message.find("No op"), std::string::npos);
+
+  auto missing_op_error = host->last_error(missing_op_load.session);
+  EXPECT_FALSE(missing_op_error.ok);
+  EXPECT_EQ(missing_op_error.code, GraphErrc::NoOperation);
+  EXPECT_NE(missing_op_error.message.find("No op"), std::string::npos);
 }
 
 TEST(EmbeddedHostAdapter, ReplaceSchedulerReturnsNotFoundForMissingSession) {
