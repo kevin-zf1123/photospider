@@ -5,6 +5,8 @@
 #include <algorithm>
 #include <iostream>
 #include <sstream>
+#include <string>
+#include <vector>
 
 #include "cli/command/commands.hpp"
 #include "cli/command/help_utils.hpp"

@@ -1,6 +1,7 @@
 // FILE: src/cli/command/command_output.cpp
 #include <iostream>
 #include <sstream>
+#include <string>
 
 #include "cli/command/commands.hpp"
 #include "cli/command/help_utils.hpp"
@@ -14,9 +15,9 @@ bool handle_output(std::istringstream& iss, ps::Host& svc,
   }
   std::string path;
   iss >> path;
-  if (path.empty())
+  if (path.empty()) {
     std::cout << "Usage: output <filepath>\n";
-  else {
+  } else {
     if (svc.save_graph(ps::GraphSessionId{current_graph}, path).status.ok) {
       modified = false;
       std::cout << "Saved to " << path << "\n";

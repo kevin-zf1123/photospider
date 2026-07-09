@@ -1,4 +1,6 @@
 #include <iostream>
+#include <sstream>
+#include <string>
 
 #include "cli/benchmark_config_editor.hpp"
 #include "cli/command/commands.hpp"

@@ -51,7 +51,7 @@
 #include "photospider/host/host.hpp"
 
 namespace fs = std::filesystem;
-using namespace ftxui;
+using namespace ftxui;  // NOLINT(build/namespaces)
 
 namespace ps {
 
@@ -403,8 +403,8 @@ class BenchmarkConfigEditor {
     for (const auto& cfg : configs_) {
       session_entries_.push_back((cfg.enabled ? "[x] " : "[ ] ") + cfg.name);
     }
-    if (selected_session_ >= (int)configs_.size()) {
-      selected_session_ = (int)configs_.size() - 1;
+    if (selected_session_ >= static_cast<int>(configs_.size())) {
+      selected_session_ = static_cast<int>(configs_.size()) - 1;
     }
     if (selected_session_ < 0) {
       selected_session_ = 0;
@@ -417,7 +417,7 @@ class BenchmarkConfigEditor {
     menu |= CatchEvent([this](Event event) {
       if (event == Event::Return) {
         if (selected_session_ >= 0 &&
-            selected_session_ < (int)configs_.size()) {
+            selected_session_ < static_cast<int>(configs_.size())) {
           configs_[selected_session_].enabled =
               !configs_[selected_session_].enabled;
           RebuildSessionList();
@@ -426,7 +426,7 @@ class BenchmarkConfigEditor {
       }
       return false;
     });
-    session_list_ = Renderer(menu, [this, menu] {
+    session_list_ = Renderer(menu, [menu] {
       return vbox({text("Sessions (Enter to toggle, 'a' add, 'd' del)") | bold,
                    separator(), menu->Render()}) |
              vscroll_indicator | frame;
@@ -434,8 +434,10 @@ class BenchmarkConfigEditor {
     RebuildDetailsPane();
   }
   void SyncStatisticsModel() {
-    if (selected_session_ < 0 || selected_session_ >= (int)configs_.size())
+    if (selected_session_ < 0 ||
+        selected_session_ >= static_cast<int>(configs_.size())) {
       return;
+    }
     auto& stats_vec = configs_[selected_session_].statistics;
     stats_vec.clear();
     for (const auto& pair : statistics_checked_map_) {
@@ -456,12 +458,13 @@ class BenchmarkConfigEditor {
     new_cfg.name = GenerateSessionName(
         new_cfg, fs::path(benchmark_dir_).filename().string());
     configs_.push_back(new_cfg);
-    selected_session_ = (int)configs_.size() - 1;
+    selected_session_ = static_cast<int>(configs_.size()) - 1;
     RebuildSessionList();
     status_message_ = "New session added. Press Ctrl+S to save.";
   }
   void DeleteSelectedSession() {
-    if (selected_session_ >= 0 && selected_session_ < (int)configs_.size()) {
+    if (selected_session_ >= 0 &&
+        selected_session_ < static_cast<int>(configs_.size())) {
       configs_.erase(configs_.begin() + selected_session_);
       RebuildSessionList();
       status_message_ = "Session deleted. Press Ctrl+S to save.";
@@ -489,7 +492,8 @@ class BenchmarkConfigEditor {
 
   // --- 关键修改点 2: 完善 RebuildDetailsPane ---
   void RebuildDetailsPane() {
-    if (selected_session_ < 0 || selected_session_ >= (int)configs_.size()) {
+    if (selected_session_ < 0 ||
+        selected_session_ >= static_cast<int>(configs_.size())) {
       details_pane_ = Renderer([] {
         return text("No session selected or list is empty.") | center;
       });

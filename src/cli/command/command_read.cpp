@@ -1,6 +1,7 @@
 // FILE: src/cli/command/command_read.cpp
 #include <iostream>
 #include <sstream>
+#include <string>
 
 #include "cli/command/commands.hpp"
 #include "cli/command/help_utils.hpp"
@@ -14,9 +15,9 @@ bool handle_read(std::istringstream& iss, ps::Host& svc,
   }
   std::string path;
   iss >> path;
-  if (path.empty())
+  if (path.empty()) {
     std::cout << "Usage: read <filepath>\n";
-  else {
+  } else {
     if (svc.reload_graph(ps::GraphSessionId{current_graph}, path).status.ok) {
       modified = false;
       std::cout << "Loaded graph from " << path << "\n";

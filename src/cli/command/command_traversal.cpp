@@ -22,34 +22,37 @@ bool handle_traversal(std::istringstream& iss, ps::Host& svc,
 
   // 1. 参数解析
   std::vector<std::string> args;
-  while (iss >> arg)
+  while (iss >> arg) {
     args.push_back(arg);
+  }
   const auto parse_tokens = [&](const std::vector<std::string>& toks) {
     for (const auto& a : toks) {
-      if (a == "f" || a == "full")
+      if (a == "f" || a == "full") {
         print_tree_mode = "full";
-      else if (a == "s" || a == "simplified")
+      } else if (a == "s" || a == "simplified") {
         print_tree_mode = "simplified";
-      else if (a == "n" || a == "no_tree")
+      } else if (a == "n" || a == "no_tree") {
         print_tree_mode = "none";
-      else if (a == "md") {
+      } else if (a == "md") {
         show_mem = true;
         show_disk = true;
-      } else if (a == "m")
+      } else if (a == "m") {
         show_mem = true;
-      else if (a == "d")
+      } else if (a == "d") {
         show_disk = true;
-      else if (a == "cr")
+      } else if (a == "cr") {
         do_check_remove = true;
-      else if (a == "c")
+      } else if (a == "c") {
         do_check = true;
+      }
     }
   };
   if (args.empty()) {
     std::istringstream default_iss(config.default_traversal_arg);
     std::vector<std::string> def_args;
-    while (default_iss >> arg)
+    while (default_iss >> arg) {
       def_args.push_back(arg);
+    }
     parse_tokens(def_args);
   } else {
     parse_tokens(args);
@@ -72,13 +75,15 @@ bool handle_traversal(std::istringstream& iss, ps::Host& svc,
   if (print_tree_mode == "full") {
     auto tree =
         svc.dependency_tree(ps::GraphSessionId{current_graph}, std::nullopt);
-    if (tree.status.ok)
+    if (tree.status.ok) {
       std::cout << ps::cli::format_dependency_tree(tree.value, true);
+    }
   } else if (print_tree_mode == "simplified") {
     auto tree =
         svc.dependency_tree(ps::GraphSessionId{current_graph}, std::nullopt);
-    if (tree.status.ok)
+    if (tree.status.ok) {
       std::cout << ps::cli::format_dependency_tree(tree.value, false);
+    }
   }
 
   // 4. 输出后序遍历详细信息

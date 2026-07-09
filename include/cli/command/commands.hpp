@@ -4,7 +4,7 @@
 #include <sstream>
 #include <string>
 
-#include "cli_config.hpp"
+#include "cli_config.hpp"  // NOLINT(build/include_subdir)
 #include "photospider/host/host.hpp"
 
 // Each command exposes two functions:

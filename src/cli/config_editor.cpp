@@ -6,17 +6,18 @@
 #include <functional>
 #include <iostream>
 #include <string>
+#include <utility>
 #include <vector>
 
 #include "cli/path_complete.hpp"
 #include "cli/tui_editor.hpp"
-#include "cli_config.hpp"
+#include "cli_config.hpp"  // NOLINT(build/include_subdir)
 #include "ftxui/component/component.hpp"
 #include "ftxui/component/screen_interactive.hpp"
 #include "ftxui/dom/elements.hpp"
 
-using namespace ftxui;
-using namespace ps;
+using namespace ftxui;  // NOLINT(build/namespaces)
+using namespace ps;     // NOLINT(build/namespaces)
 namespace fs = std::filesystem;
 
 // Local editor UI (moved from cli/graph_cli.cpp), trimmed for encapsulation.
@@ -51,7 +52,7 @@ class ConfigEditor : public TuiEditor {
       for (size_t i = 0; i < editable_lines_.size(); ++i) {
         auto& line = editable_lines_[i];
         Element display_element;
-        if (mode_ == Mode::Edit && selected_ == (int)i) {
+        if (mode_ == Mode::Edit && selected_ == static_cast<int>(i)) {
           if (line.is_radio)
             display_element = radio_editor_->Render();
           else if (line.is_toggle && line.toggle_ptr)
@@ -73,7 +74,7 @@ class ConfigEditor : public TuiEditor {
             text(line.label) | size(WIDTH, EQUAL, 28),
             display_element | flex,
         });
-        if (selected_ == (int)i)
+        if (selected_ == static_cast<int>(i))
           content |= inverted;
         line_elements.push_back(content);
       }
@@ -113,12 +114,12 @@ class ConfigEditor : public TuiEditor {
           CommitEdit();
           return true;
         }
-        if (editable_lines_[selected_].is_radio)
+        if (editable_lines_[selected_].is_radio) {
           return radio_editor_->OnEvent(event);
-        else {
+        } else {
           // Basic path completion on Tab
           auto is_path_like = [&]() {
-            if (selected_ >= (int)editable_lines_.size())
+            if (selected_ >= static_cast<int>(editable_lines_.size()))
               return false;
             const auto& lbl = editable_lines_[selected_].label;
             return lbl.find("path") != std::string::npos ||
@@ -129,8 +130,9 @@ class ConfigEditor : public TuiEditor {
             auto options = ps::PathCompleteOptions(edit_buffer_);
             if (!options.empty()) {
               auto common = ps::LongestCommonPrefix(options);
-              if (!common.empty())
+              if (!common.empty()) {
                 edit_buffer_ = common;
+              }
             }
             return true;
           }
@@ -150,7 +152,8 @@ class ConfigEditor : public TuiEditor {
         return true;
       }
       if (event == Event::ArrowDown) {
-        selected_ = std::min(selected_ + 1, (int)editable_lines_.size() - 1);
+        selected_ = std::min(selected_ + 1,
+                             static_cast<int>(editable_lines_.size()) - 1);
         return true;
       }
       if (event == Event::ArrowUp) {
@@ -158,14 +161,14 @@ class ConfigEditor : public TuiEditor {
         return true;
       }
       if (event == Event::Character('a')) {
-        if (selected_ < (int)editable_lines_.size() &&
+        if (selected_ < static_cast<int>(editable_lines_.size()) &&
             editable_lines_[selected_].add_fn) {
           editable_lines_[selected_].add_fn();
           return true;
         }
       }
       if (event == Event::Character('d')) {
-        if (selected_ < (int)editable_lines_.size() &&
+        if (selected_ < static_cast<int>(editable_lines_.size()) &&
             editable_lines_[selected_].del_fn) {
           editable_lines_[selected_].del_fn();
           return true;
@@ -188,7 +191,7 @@ class ConfigEditor : public TuiEditor {
                          const std::string& val) {
       for (size_t i = 0; i < v.size(); ++i)
         if (v[i] == val)
-          return (int)i;
+          return static_cast<int>(i);
       return 0;
     };
     selected_cache_precision_idx_ =
@@ -220,23 +223,24 @@ class ConfigEditor : public TuiEditor {
       std::istringstream iss(original_config_.default_traversal_arg);
       std::string tok;
       while (iss >> tok) {
-        if (tok == "f" || tok == "full" || tok == "detailed")
+        if (tok == "f" || tok == "full" || tok == "detailed") {
           selected_traversal_tree_idx_ = 0;
-        else if (tok == "s" || tok == "simplified")
+        } else if (tok == "s" || tok == "simplified") {
           selected_traversal_tree_idx_ = 1;
-        else if (tok == "n" || tok == "no_tree" || tok == "none")
+        } else if (tok == "n" || tok == "no_tree" || tok == "none") {
           selected_traversal_tree_idx_ = 2;
-        else if (tok == "m")
+        } else if (tok == "m") {
           traversal_cache_m_ = true;
-        else if (tok == "d")
+        } else if (tok == "d") {
           traversal_cache_d_ = true;
-        else if (tok == "md") {
+        } else if (tok == "md") {
           traversal_cache_m_ = true;
           traversal_cache_d_ = true;
-        } else if (tok == "c")
+        } else if (tok == "c") {
           selected_traversal_check_idx_ = 1;
-        else if (tok == "cr")
+        } else if (tok == "cr") {
           selected_traversal_check_idx_ = 2;
+        }
       }
     }
 
@@ -247,18 +251,19 @@ class ConfigEditor : public TuiEditor {
       std::istringstream iss(original_config_.default_compute_args);
       std::string tok;
       while (iss >> tok) {
-        if (tok == "force")
+        if (tok == "force") {
           compute_force_ = true;
-        else if (tok == "force-deep")
+        } else if (tok == "force-deep") {
           compute_force_deep_ = true;
-        else if (tok == "parallel")
+        } else if (tok == "parallel") {
           compute_parallel_ = true;
-        else if (tok == "t" || tok == "-t" || tok == "timer")
+        } else if (tok == "t" || tok == "-t" || tok == "timer") {
           compute_timer_console_ = true;
-        else if (tok == "tl" || tok == "-tl")
+        } else if (tok == "tl" || tok == "-tl") {
           compute_timer_log_ = true;
-        else if (tok == "m" || tok == "-m" || tok == "mute")
+        } else if (tok == "m" || tok == "-m" || tok == "mute") {
           compute_mute_ = true;
+        }
       }
     }
   }
@@ -289,8 +294,9 @@ class ConfigEditor : public TuiEditor {
     try {
       original_config_.scheduler_worker_count =
           std::stoi(scheduler_worker_count_buffer_);
-      if (original_config_.scheduler_worker_count < 0)
+      if (original_config_.scheduler_worker_count < 0) {
         original_config_.scheduler_worker_count = 0;
+      }
     } catch (...) {
     }
 
@@ -298,20 +304,24 @@ class ConfigEditor : public TuiEditor {
     {
       std::ostringstream oss;
       // tree mode first
-      if (selected_traversal_tree_idx_ == 0)
+      if (selected_traversal_tree_idx_ == 0) {
         oss << "f";
-      else if (selected_traversal_tree_idx_ == 1)
+      } else if (selected_traversal_tree_idx_ == 1) {
         oss << "s";
-      else
+      } else {
         oss << "n";
-      if (traversal_cache_m_)
+      }
+      if (traversal_cache_m_) {
         oss << " m";
-      if (traversal_cache_d_)
+      }
+      if (traversal_cache_d_) {
         oss << " d";
-      if (selected_traversal_check_idx_ == 1)
+      }
+      if (selected_traversal_check_idx_ == 1) {
         oss << " c";
-      else if (selected_traversal_check_idx_ == 2)
+      } else if (selected_traversal_check_idx_ == 2) {
         oss << " cr";
+      }
       original_config_.default_traversal_arg = oss.str();
     }
 
@@ -320,23 +330,30 @@ class ConfigEditor : public TuiEditor {
       std::ostringstream oss;
       bool first = true;
       auto add = [&](const std::string& s) {
-        if (!first)
+        if (!first) {
           oss << ' ';
+        }
         oss << s;
         first = false;
       };
-      if (compute_force_)
+      if (compute_force_) {
         add("force");
-      if (compute_force_deep_)
+      }
+      if (compute_force_deep_) {
         add("force-deep");
-      if (compute_parallel_)
+      }
+      if (compute_parallel_) {
         add("parallel");
-      if (compute_timer_console_)
+      }
+      if (compute_timer_console_) {
         add("t");
-      if (compute_timer_log_)
+      }
+      if (compute_timer_log_) {
         add("tl");
-      if (compute_mute_)
+      }
+      if (compute_mute_) {
         add("m");
+      }
       original_config_.default_compute_args = oss.str();
     }
   }
@@ -400,7 +417,8 @@ class ConfigEditor : public TuiEditor {
       auto del_fn = [this, i] {
         plugin_dirs_str_.erase(plugin_dirs_str_.begin() + i);
         RebuildLineView();
-        selected_ = std::min((int)editable_lines_.size() - 1, selected_);
+        selected_ =
+            std::min(static_cast<int>(editable_lines_.size()) - 1, selected_);
       };
       editable_lines_.push_back({"plugin_dirs[" + std::to_string(i) + "]",
                                  &plugin_dirs_str_[i], false, nullptr, nullptr,
@@ -420,7 +438,8 @@ class ConfigEditor : public TuiEditor {
       auto del_fn = [this, i] {
         scheduler_dirs_str_.erase(scheduler_dirs_str_.begin() + i);
         RebuildLineView();
-        selected_ = std::min((int)editable_lines_.size() - 1, selected_);
+        selected_ =
+            std::min(static_cast<int>(editable_lines_.size()) - 1, selected_);
       };
       editable_lines_.push_back({"scheduler_dirs[" + std::to_string(i) + "]",
                                  &scheduler_dirs_str_[i], false, nullptr,
@@ -436,11 +455,13 @@ class ConfigEditor : public TuiEditor {
                                nullptr, add_scheduler_fn, nullptr});
   }
   void EnterEditMode() {
-    if (selected_ >= (int)editable_lines_.size())
+    if (selected_ >= static_cast<int>(editable_lines_.size())) {
       return;
+    }
     const auto& line = editable_lines_[selected_];
-    if (!line.is_radio && !line.value_ptr && !line.is_toggle)
+    if (!line.is_radio && !line.value_ptr && !line.is_toggle) {
       return;
+    }
     mode_ = Mode::Edit;
     if (line.is_radio) {
       RadioboxOption opt;
@@ -459,26 +480,30 @@ class ConfigEditor : public TuiEditor {
     }
   }
   void CommitEdit() {
-    if (selected_ >= (int)editable_lines_.size())
+    if (selected_ >= static_cast<int>(editable_lines_.size())) {
       return;
+    }
     const auto& line = editable_lines_[selected_];
-    if (!line.is_radio && line.value_ptr)
+    if (!line.is_radio && line.value_ptr) {
       *line.value_ptr = edit_buffer_;
+    }
     mode_ = Mode::Navigate;
   }
   Element RenderStatusBar() {
     std::string help;
     if (mode_ == Mode::Navigate) {
       help = "↑/↓:Move | e:Edit | q:Quit | ::Command";
-      if (selected_ < (int)editable_lines_.size()) {
-        if (editable_lines_[selected_].add_fn)
+      if (selected_ < static_cast<int>(editable_lines_.size())) {
+        if (editable_lines_[selected_].add_fn) {
           help += " | a:Add";
-        if (editable_lines_[selected_].del_fn)
+        }
+        if (editable_lines_[selected_].del_fn) {
           help += " | d:Delete";
+        }
       }
-    } else if (mode_ == Mode::Edit)
+    } else if (mode_ == Mode::Edit) {
       help = "Enter:Accept | Esc:Cancel | ←/→:Change";
-    else if (mode_ == Mode::Command) {
+    } else if (mode_ == Mode::Command) {
       return hbox({
                  text(":" + command_buffer_),
                  text(" ") | blink,
@@ -503,8 +528,9 @@ class ConfigEditor : public TuiEditor {
       s.erase(j);
     };
     do_trim(cmd);
-    for (auto& c : cmd)
-      c = (char)std::tolower((unsigned char)c);
+    for (auto& c : cmd) {
+      c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
+    }
     command_buffer_.clear();
     mode_ = Mode::Navigate;
     if (cmd == "a" || cmd == "apply") {

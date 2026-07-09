@@ -1,6 +1,7 @@
 // FILE: src/cli/command/command_clear_graph.cpp
 #include <iostream>
 #include <sstream>
+#include <string>
 
 #include "cli/command/commands.hpp"
 #include "cli/command/help_utils.hpp"

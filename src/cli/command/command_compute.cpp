@@ -5,6 +5,7 @@
 #include <iostream>
 #include <numeric>
 #include <sstream>
+#include <string>
 #include <unordered_set>
 #include <utility>
 #include <vector>
@@ -189,15 +190,15 @@ bool handle_compute(std::istringstream& iss, ps::Host& svc,
       "-tl",   "m",          "-m",       "mute", "nosave", "ns"};
   for (size_t i = 0; i < flags.size(); ++i) {
     const auto& f = flags[i];
-    if (f == "force")
+    if (f == "force") {
       force = true;
-    else if (f == "force-deep")
+    } else if (f == "force-deep") {
       force_deep = true;
-    else if (f == "parallel")
+    } else if (f == "parallel") {
       parallel = true;
-    else if (f == "t" || f == "-t" || f == "timer")
+    } else if (f == "t" || f == "-t" || f == "timer") {
       timer_console = true;
-    else if (f == "tl" || f == "-tl") {
+    } else if (f == "tl" || f == "-tl") {
       // Enable timer log; only consume next token as a path if it is NOT a
       // known flag.
       timer_log = true;
@@ -208,10 +209,11 @@ bool handle_compute(std::istringstream& iss, ps::Host& svc,
           ++i;  // consume the path token
         }
       }
-    } else if (f == "m" || f == "-m" || f == "mute")
+    } else if (f == "m" || f == "-m" || f == "mute") {
       mute = true;
-    else if (f == "nosave" || f == "ns")
+    } else if (f == "nosave" || f == "ns") {
       nosave = true;
+    }
   }
 
   // [核心修复] 循环执行计算，并聚合每次 compute 的计时

@@ -1,6 +1,7 @@
 // FILE: src/cli/command/command_exit.cpp
 #include <iostream>
 #include <sstream>
+#include <string>
 
 #include "cli/ask_yesno.hpp"
 #include "cli/command/commands.hpp"
