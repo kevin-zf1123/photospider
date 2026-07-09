@@ -728,6 +728,38 @@ TEST(EmbeddedHostAdapter, AsyncComputeRejectsNewWorkWhileCloseIsWaiting) {
   EXPECT_TRUE(close.status.ok) << close.status.message;
 }
 
+TEST(EmbeddedHostAdapter, AsyncComputeFailureStatusSurvivesCloseGraph) {
+  register_host_adapter_ops();
+  ScopedTempDir temp("photospider_host_adapter_async_failure_close_test");
+  auto host = create_embedded_host();
+  ASSERT_NE(host, nullptr);
+
+  GraphLoadRequest missing_op_load;
+  missing_op_load.session = GraphSessionId{"async_missing_op_graph"};
+  missing_op_load.root_dir = (temp.root() / "sessions").string();
+  missing_op_load.yaml_path =
+      (temp.root() / "source" / "async_missing_op_graph.yaml").string();
+  missing_op_load.cache_root_dir = (temp.root() / "cache").string();
+  write_host_adapter_unregistered_op_graph(missing_op_load.yaml_path);
+  auto loaded_missing_op = host->load_graph(missing_op_load);
+  ASSERT_TRUE(loaded_missing_op.status.ok) << loaded_missing_op.status.message;
+
+  auto async_compute =
+      host->compute_async(make_compute_request(missing_op_load.session));
+  ASSERT_TRUE(async_compute.status.ok) << async_compute.status.message;
+
+  auto close = host->close_graph(missing_op_load.session);
+  ASSERT_TRUE(close.status.ok) << close.status.message;
+
+  OperationStatus async_status = async_compute.value.get();
+  EXPECT_FALSE(async_status.ok);
+  EXPECT_EQ(async_status.code, GraphErrc::NoOperation);
+  EXPECT_NE(async_status.message.find("No op"), std::string::npos);
+
+  auto closed_error = host->last_error(missing_op_load.session);
+  EXPECT_TRUE(closed_error.ok) << closed_error.message;
+}
+
 TEST(EmbeddedHostAdapter, ComputeReturnsNotFoundForMissingSession) {
   register_host_adapter_ops();
   ScopedTempDir temp("photospider_host_adapter_compute_missing_test");

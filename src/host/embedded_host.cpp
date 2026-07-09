@@ -1,6 +1,7 @@
 #include <algorithm>
 #include <atomic>
 #include <chrono>
+#include <condition_variable>
 #include <cstdint>
 #include <exception>
 #include <filesystem>
@@ -51,9 +52,10 @@ struct EmbeddedHostState {
     /**
      * @brief Shared backend completion future for the compute request.
      *
-     * @note The value may be invalid only for an in-progress registration while
-     *       async_mutex_ is held; close/shutdown wait paths never observe that
-     *       placeholder state.
+     * @note The entry stays in outstanding_async_ until the Host wrapper has
+     *       converted the backend bool into OperationStatus. A ready backend
+     *       future alone is not enough to close the session because the wrapper
+     *       may still need the session's LastError diagnostic.
      */
     std::shared_future<bool> future;
   };
@@ -72,7 +74,7 @@ struct EmbeddedHostState {
     /** @brief Adapter-local tracking id for the scheduled backend future. */
     uint64_t tracking_id = 0;
 
-    /** @brief Shared backend completion future visible to close_graph waits. */
+    /** @brief Shared backend completion future consumed by the Host wrapper. */
     std::shared_future<bool> future;
   };
 
@@ -120,8 +122,6 @@ struct EmbeddedHostState {
                   "future::share must not allocate after backend scheduling");
 
     std::lock_guard<std::mutex> lock(async_mutex_);
-    prune_completed_async_compute_locked();
-
     if (session_close_in_progress_locked(session)) {
       return AsyncComputeRegistration{};
     }
@@ -167,60 +167,51 @@ struct EmbeddedHostState {
   }
 
   /**
-   * @brief Removes one completed async compute from the tracking table.
+   * @brief Removes one status-mapped async compute from the tracking table.
    *
    * @param id Tracking id returned by track_async_compute().
    * @throws Nothing.
-   * @note The method is best-effort because close_graph may already have
-   *       pruned the same entry after waiting for it.
+   * @note The Host wrapper calls this only after it has converted the backend
+   *       bool into OperationStatus. close_graph waits for this removal before
+   *       clearing backend LastError state during graph close.
    */
   void mark_async_compute_finished(uint64_t id) {
-    std::lock_guard<std::mutex> lock(async_mutex_);
-    outstanding_async_.erase(
-        std::remove_if(outstanding_async_.begin(), outstanding_async_.end(),
-                       [id](const TrackedAsyncCompute& tracked) {
-                         return tracked.id == id;
-                       }),
-        outstanding_async_.end());
+    {
+      std::lock_guard<std::mutex> lock(async_mutex_);
+      outstanding_async_.erase(
+          std::remove_if(outstanding_async_.begin(), outstanding_async_.end(),
+                         [id](const TrackedAsyncCompute& tracked) {
+                           return tracked.id == id;
+                         }),
+          outstanding_async_.end());
+    }
+    async_cv_.notify_all();
   }
 
   /**
    * @brief Marks a session closing and waits for tracked async compute users.
    *
    * @param session Session about to be closed.
-   * @throws std::bad_alloc if tracking vectors allocate while collecting waits.
+   * @throws std::bad_alloc if recording the closing marker allocates.
    * @note The closing marker is inserted while holding async_mutex_ before
-   *       futures are collected. New compute_async calls for the same session
-   *       are rejected until finish_session_close() removes the marker.
+   *       waiting for Host wrapper status mapping. New compute_async calls for
+   *       the same session are rejected until finish_session_close() removes
+   *       the marker.
    */
   void begin_session_close_and_wait(const GraphSessionId& session) {
-    std::vector<std::shared_future<bool>> futures;
     bool marked_closing = false;
     try {
-      {
-        std::lock_guard<std::mutex> lock(async_mutex_);
-        mark_session_closing_locked(session);
-        marked_closing = true;
-        prune_completed_async_compute_locked();
-        for (const auto& tracked : outstanding_async_) {
-          if (tracked.session.value == session.value) {
-            futures.push_back(tracked.future);
-          }
-        }
-      }
+      std::unique_lock<std::mutex> lock(async_mutex_);
+      mark_session_closing_locked(session);
+      marked_closing = true;
+      async_cv_.wait(
+          lock, [&] { return !has_outstanding_async_compute_locked(session); });
     } catch (...) {
       if (marked_closing) {
         finish_session_close(session);
       }
       throw;
     }
-
-    for (const auto& future : futures) {
-      wait_without_throwing(future);
-    }
-
-    std::lock_guard<std::mutex> lock(async_mutex_);
-    prune_completed_async_compute_locked();
   }
 
   /**
@@ -240,66 +231,33 @@ struct EmbeddedHostState {
   }
 
   /**
-   * @brief Waits for every tracked async compute.
+   * @brief Waits for every tracked async compute wrapper to finish.
    *
    * @throws Nothing.
    * @note Used during adapter-state destruction before Kernel member teardown.
+   *       Entries are removed only after Host OperationStatus mapping finishes.
    */
   void wait_for_all_async_compute() {
-    std::vector<std::shared_future<bool>> futures;
-    {
-      std::lock_guard<std::mutex> lock(async_mutex_);
-      prune_completed_async_compute_locked();
-      futures.reserve(outstanding_async_.size());
-      for (const auto& tracked : outstanding_async_) {
-        futures.push_back(tracked.future);
-      }
-    }
-
-    for (const auto& future : futures) {
-      wait_without_throwing(future);
-    }
-
-    std::lock_guard<std::mutex> lock(async_mutex_);
-    prune_completed_async_compute_locked();
+    std::unique_lock<std::mutex> lock(async_mutex_);
+    async_cv_.wait(lock, [&] { return outstanding_async_.empty(); });
   }
 
  private:
   /**
-   * @brief Waits for one shared future while suppressing wait/get exceptions.
+   * @brief Returns whether one session still has Host async status work.
    *
-   * @param future Future to wait for.
+   * @param session Session label to search.
+   * @return True when a backend future may still need Host status conversion.
    * @throws Nothing.
-   * @note std::shared_future::wait is not expected to throw for valid futures;
-   *       the catch block keeps shutdown best-effort if an invalid future ever
-   *       enters the table.
+   * @note Caller must hold async_mutex_. Entries remain until
+   *       mark_async_compute_finished() runs after LastError has been captured.
    */
-  static void wait_without_throwing(const std::shared_future<bool>& future) {
-    try {
-      if (future.valid()) {
-        future.wait();
-      }
-    } catch (...) {
-    }
-  }
-
-  /**
-   * @brief Drops completed entries from the async tracking table.
-   *
-   * @throws Nothing.
-   * @note Caller must hold async_mutex_.
-   */
-  void prune_completed_async_compute_locked() {
-    outstanding_async_.erase(
-        std::remove_if(outstanding_async_.begin(), outstanding_async_.end(),
-                       [](const TrackedAsyncCompute& tracked) {
-                         if (!tracked.future.valid()) {
-                           return true;
-                         }
-                         return tracked.future.wait_for(std::chrono::seconds(
-                                    0)) == std::future_status::ready;
-                       }),
-        outstanding_async_.end());
+  bool has_outstanding_async_compute_locked(
+      const GraphSessionId& session) const {
+    return std::any_of(outstanding_async_.begin(), outstanding_async_.end(),
+                       [&session](const TrackedAsyncCompute& tracked) {
+                         return tracked.session.value == session.value;
+                       });
   }
 
   /**
@@ -332,6 +290,9 @@ struct EmbeddedHostState {
   /** @brief Protects outstanding_async_ tracking mutations. */
   std::mutex async_mutex_;
 
+  /** @brief Notifies close waiters when Host async status mapping completes. */
+  std::condition_variable async_cv_;
+
   /** @brief Adapter-local async compute tracking table. */
   std::vector<TrackedAsyncCompute> outstanding_async_;
 
@@ -340,6 +301,57 @@ struct EmbeddedHostState {
 
   /** @brief Monotonic id source for async tracking entries. */
   std::atomic<uint64_t> next_async_id_{1};
+};
+
+/**
+ * @brief Marks one Host async compute complete when a wrapper exits.
+ *
+ * @throws Nothing from destruction.
+ * @note The guard is constructed inside the adapter wrapper future before it
+ *       waits on the backend future. Its destructor runs only after the wrapper
+ *       has converted the backend bool or exception into OperationStatus, so
+ *       close_graph cannot clear backend LastError before status mapping reads
+ *       it.
+ */
+class AsyncComputeCompletionGuard {
+ public:
+  /**
+   * @brief Creates a completion guard for one tracked async request.
+   *
+   * @param state Shared adapter state that owns the tracking table.
+   * @param tracking_id Tracking id returned by
+   * schedule_and_track_async_compute().
+   * @throws Nothing.
+   */
+  AsyncComputeCompletionGuard(std::shared_ptr<EmbeddedHostState> state,
+                              uint64_t tracking_id) noexcept
+      : state_(std::move(state)), tracking_id_(tracking_id) {}
+
+  /**
+   * @brief Releases the tracking entry and wakes close waiters.
+   *
+   * @throws Nothing.
+   */
+  ~AsyncComputeCompletionGuard() {
+    if (state_) {
+      state_->mark_async_compute_finished(tracking_id_);
+    }
+  }
+
+  /** @brief Copying would double-release a tracking entry and is disabled. */
+  AsyncComputeCompletionGuard(const AsyncComputeCompletionGuard&) = delete;
+
+  /** @brief Copy assignment would double-release a tracking entry and is
+   * disabled. */
+  AsyncComputeCompletionGuard& operator=(const AsyncComputeCompletionGuard&) =
+      delete;
+
+ private:
+  /** @brief Adapter state containing the async tracking entry. */
+  std::shared_ptr<EmbeddedHostState> state_;
+
+  /** @brief Adapter-local tracking id to release on wrapper exit. */
+  uint64_t tracking_id_ = 0;
 };
 
 /**
@@ -1455,14 +1467,17 @@ class EmbeddedHost final : public Host {
   }
 
   /**
-   * @brief Closes a graph after adapter-submitted async compute completes.
+   * @brief Closes a graph after adapter-submitted async status mapping
+   * completes.
    *
    * @param session Session to close.
    * @return Success or NotFound when the graph session does not exist.
    * @throws std::bad_alloc on diagnostic allocation failure.
    * @note The adapter first marks the session closing, then waits for tracked
-   *       async work before invoking the backend close. New async computes for
-   *       that session are rejected while the marker is present.
+   *       async wrappers to finish backend bool-to-OperationStatus conversion
+   *       before invoking the backend close. New async computes for that
+   * session are rejected while the marker is present, and failed async requests
+   * can still read LastError before close clears backend diagnostics.
    */
   VoidResult close_graph(const GraphSessionId& session) override {
     return guarded_void("close_graph", GraphErrc::NotFound, [&] {
@@ -1598,20 +1613,22 @@ class EmbeddedHost final : public Host {
   }
 
   /**
-   * @brief Schedules async compute and tracks runtime lifetime.
+   * @brief Schedules async compute and tracks runtime and diagnostic lifetime.
    *
    * @param request Public compute request captured by value.
    * @return Future resolving to OperationStatus, or scheduling failure.
    * @throws std::bad_alloc on allocation failure.
    * @note Backend scheduling and Host tracking are performed under the same
-   *       lifecycle lock. close_graph either sees the tracked backend future or
-   *       marks the session closing before backend work is queued.
+   *       lifecycle lock. close_graph either waits for the tracked Host wrapper
+   *       to convert backend failure into OperationStatus, or marks the session
+   *       closing before backend work is queued.
    */
   Result<std::future<OperationStatus>> compute_async(
       HostComputeRequest request) override {
     return guarded_result<std::future<OperationStatus>>(
         "compute_async", GraphErrc::ComputeError, [&] {
           auto kernel_request = to_kernel_compute_request(request);
+          GraphSessionId session = request.session;
           auto state = state_;
           auto registration = state->schedule_and_track_async_compute(
               request.session,
@@ -1626,39 +1643,47 @@ class EmbeddedHost final : public Host {
                     request.session.value);
           }
 
-          GraphSessionId session = request.session;
           std::shared_future<bool> shared_future =
               std::move(registration.future);
           const uint64_t tracking_id = registration.tracking_id;
-          auto wrapped = std::async(
-              std::launch::async,
-              [state, session, tracking_id, shared_future]() mutable {
-                try {
-                  const bool ok = shared_future.get();
-                  state->mark_async_compute_finished(tracking_id);
-                  if (ok) {
-                    return success_status();
-                  }
-                  return failure_from_last_error(
-                      *state, session, GraphErrc::ComputeError,
-                      "async compute failed for graph session: " +
-                          session.value);
-                } catch (const std::bad_alloc&) {
-                  state->mark_async_compute_finished(tracking_id);
-                  throw;
-                } catch (const GraphError& error) {
-                  state->mark_async_compute_finished(tracking_id);
-                  return status_from_exception("compute_async", error);
-                } catch (const std::exception& error) {
-                  state->mark_async_compute_finished(tracking_id);
-                  return status_from_exception("compute_async",
-                                               GraphErrc::ComputeError, error);
-                } catch (...) {
-                  state->mark_async_compute_finished(tracking_id);
-                  return status_from_unknown_exception("compute_async",
-                                                       GraphErrc::ComputeError);
+          std::future<OperationStatus> wrapped;
+          try {
+            // After registration, all wrapper setup must either install the
+            // completion guard or release tracking through this catch block.
+            wrapped = std::async(std::launch::async, [state, session,
+                                                      tracking_id,
+                                                      shared_future]() mutable {
+              AsyncComputeCompletionGuard completion(state, tracking_id);
+              try {
+                const bool ok = shared_future.get();
+                if (ok) {
+                  return success_status();
                 }
-              });
+                return failure_from_last_error(
+                    *state, session, GraphErrc::ComputeError,
+                    "async compute failed for graph session: " + session.value);
+              } catch (const std::bad_alloc&) {
+                throw;
+              } catch (const GraphError& error) {
+                return status_from_exception("compute_async", error);
+              } catch (const std::exception& error) {
+                return status_from_exception("compute_async",
+                                             GraphErrc::ComputeError, error);
+              } catch (...) {
+                return status_from_unknown_exception("compute_async",
+                                                     GraphErrc::ComputeError);
+              }
+            });
+          } catch (...) {
+            try {
+              if (shared_future.valid()) {
+                shared_future.wait();
+              }
+            } catch (...) {
+            }
+            state->mark_async_compute_finished(tracking_id);
+            throw;
+          }
           return success_result(std::move(wrapped));
         });
   }
