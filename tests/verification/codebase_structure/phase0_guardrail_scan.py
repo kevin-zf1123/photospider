@@ -8,7 +8,7 @@ import json
 import re
 import subprocess
 from pathlib import Path
-from typing import Any
+from typing import Any, Optional
 
 
 PUBLIC_HEADER_GLOBS = ("*.h", "*.hpp", "*.hh", "*.hxx")
@@ -70,7 +70,7 @@ def git_tracks(repo: Path, path: str) -> bool:
     return code == 0 and path in output.splitlines()
 
 
-def personal_tracks(repo: Path, path: str) -> bool | None:
+def personal_tracks(repo: Path, path: str) -> Optional[bool]:
     if not (repo / ".git-personal").exists():
         return None
     code, output = run_personal_git(repo, ["ls-files", "--", path])

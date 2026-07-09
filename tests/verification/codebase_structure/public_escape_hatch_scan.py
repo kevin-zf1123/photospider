@@ -7,7 +7,7 @@ import argparse
 import json
 import re
 from pathlib import Path
-from typing import Any
+from typing import Any, Optional
 
 
 SCAN_HEADERS = (
@@ -76,7 +76,7 @@ def line_number_for_offset(text: str, offset: int) -> int:
     return text.count("\n", 0, offset) + 1
 
 
-def find_class_body(code: str, class_name: str) -> tuple[str, int] | None:
+def find_class_body(code: str, class_name: str) -> Optional[tuple[str, int]]:
     """Return one class body and its offset within the full source text."""
 
     class_match = re.search(rf"\bclass\s+{re.escape(class_name)}\b", code)
