@@ -20,14 +20,15 @@ namespace ps::cli {
 namespace {
 
 /**
- * @brief Registers deterministic operations used by dirty inspect CLI tests.
+ * @brief Registers deterministic operations used by CLI command tests.
  *
  * @throws std::bad_alloc if registry storage allocation fails.
- * @note The test operation is monolithic and CPU-only. Dirty planning therefore
- *       emits a monolithic dirty-region record that the CLI can render
- *       deterministically.
+ * @note The test operations are monolithic and CPU-only. Dirty planning emits
+ *       a monolithic dirty-region record for inspect tests, while the
+ *       empty-output op lets save-command tests exercise successful computes
+ *       with no image.
  */
-void register_dirty_inspect_ops() {
+void register_cli_command_ops() {
   static std::once_flag once;
   std::call_once(once, [] {
     OpRegistry::instance().register_op_hp_monolithic(
@@ -67,6 +68,12 @@ void register_dirty_inspect_ops() {
         DirtyRoiPropFunc(
             [](const Node&, const cv::Rect& roi, const GraphModel&) {
               return cv::Rect(roi.x + 64, roi.y, roi.width, roi.height);
+            }));
+    OpRegistry::instance().register_op_hp_monolithic(
+        "cli_dirty_test", "empty_output",
+        MonolithicOpFunc(
+            [](const Node&, const std::vector<const NodeOutput*>&) {
+              return NodeOutput{};
             }));
   });
 }
@@ -150,6 +157,24 @@ void write_dirty_inspect_graph(const std::filesystem::path& path) {
       << "    - from_node_id: 1\n";
 }
 
+/**
+ * @brief Writes a single-node graph whose operation succeeds with no image.
+ *
+ * @param path YAML file path to create.
+ * @throws std::filesystem::filesystem_error or std::ios_base::failure if file
+ *         creation fails.
+ * @note The graph exercises the Host image-compute path where Kernel returns
+ *       nullopt without LastError to represent successful no-image output.
+ */
+void write_empty_output_graph(const std::filesystem::path& path) {
+  std::filesystem::create_directories(path.parent_path());
+  std::ofstream out(path);
+  out << "- id: 1\n"
+      << "  name: empty_output\n"
+      << "  type: cli_dirty_test\n"
+      << "  subtype: empty_output\n";
+}
+
 TEST(CliDirtySnapshotFormatter, RendersMonolithicAndEdgeMappings) {
   DirtyRegionInspectionSnapshot snapshot;
   snapshot.graph_generation = 7;
@@ -195,7 +220,7 @@ TEST(CliNodeInspectionFormatter, RendersLocalInverseMatrix) {
 
 TEST(CliDirtySnapshotFormatter,
      InspectDirtyCommandRendersNonEmptyHostSnapshot) {
-  register_dirty_inspect_ops();
+  register_cli_command_ops();
   ScopedTempDir temp("photospider_cli_inspect_dirty_non_empty_test");
   auto host = create_embedded_host();
   ASSERT_NE(host, nullptr);
@@ -268,6 +293,42 @@ TEST(CliDirtySnapshotFormatter, InspectDirtyReportsHostFailures) {
             std::string::npos);
   EXPECT_NE(text.find("Reason:"), std::string::npos);
   EXPECT_EQ(text.find("(No dirty snapshot recorded.)"), std::string::npos);
+}
+
+TEST(CliSaveCommand, ReportsSuccessfulEmptyImageOutputs) {
+  register_cli_command_ops();
+  ScopedTempDir temp("photospider_cli_save_empty_output_test");
+  auto host = create_embedded_host();
+  ASSERT_NE(host, nullptr);
+
+  const auto yaml_path = temp.root() / "source" / "empty_output_graph.yaml";
+  write_empty_output_graph(yaml_path);
+
+  GraphLoadRequest request;
+  request.session = GraphSessionId{"cli_save_empty_output"};
+  request.root_dir = (temp.root() / "sessions").string();
+  request.yaml_path = yaml_path.string();
+  request.cache_root_dir = (temp.root() / "cache").string();
+  auto loaded = host->load_graph(request);
+  ASSERT_TRUE(loaded.status.ok) << loaded.status.message;
+
+  std::istringstream args("1 /tmp/photospider_empty_output.png");
+  std::string current_graph = request.session.value;
+  bool modified = false;
+  CliConfig config;
+  std::ostringstream captured;
+  auto* original_buffer = std::cout.rdbuf(captured.rdbuf());
+  const bool handled =
+      ::handle_save(args, *host, current_graph, modified, config);
+  std::cout.rdbuf(original_buffer);
+
+  const std::string text = captured.str();
+  EXPECT_TRUE(handled);
+  EXPECT_NE(text.find("No image to save (node produced no CPU image)."),
+            std::string::npos);
+  EXPECT_EQ(text.find("Failed to compute image for node 1."),
+            std::string::npos);
+  EXPECT_EQ(text.find("Reason:"), std::string::npos);
 }
 
 TEST(CliSaveCommand, ReportsImageComputeFailures) {

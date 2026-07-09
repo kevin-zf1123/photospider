@@ -99,6 +99,12 @@ void register_host_adapter_ops() {
               return output;
             }));
     OpRegistry::instance().register_op_hp_monolithic(
+        "host_adapter_test", "no_image",
+        MonolithicOpFunc(
+            [](const Node&, const std::vector<const NodeOutput*>&) {
+              return NodeOutput{};
+            }));
+    OpRegistry::instance().register_op_hp_monolithic(
         "host_adapter_test", "identity",
         MonolithicOpFunc(
             [](const Node& node, const std::vector<const NodeOutput*>& inputs) {
@@ -718,6 +724,30 @@ TEST(EmbeddedHostAdapter, ComputeImagePreservesBackendFailureStatus) {
   EXPECT_FALSE(missing_op_error.ok);
   EXPECT_EQ(missing_op_error.code, GraphErrc::NoOperation);
   EXPECT_NE(missing_op_error.message.find("No op"), std::string::npos);
+}
+
+TEST(EmbeddedHostAdapter, ComputeImagePreservesSuccessfulEmptyOutput) {
+  register_host_adapter_ops();
+  ScopedTempDir temp("photospider_host_adapter_empty_image_test");
+  auto host = create_embedded_host();
+  ASSERT_NE(host, nullptr);
+
+  const GraphSessionId session =
+      load_test_graph(*host, temp.root(), "empty_image_graph", "no_image");
+  HostComputeRequest missing_node_request = make_compute_request(session);
+  missing_node_request.node = NodeId{99};
+  auto missing_node_image = host->compute_and_get_image(missing_node_request);
+  ASSERT_FALSE(missing_node_image.status.ok);
+  ASSERT_EQ(missing_node_image.status.code, GraphErrc::NotFound);
+
+  auto empty_image = host->compute_and_get_image(make_compute_request(session));
+  ASSERT_TRUE(empty_image.status.ok) << empty_image.status.message;
+  EXPECT_EQ(empty_image.value.width, 0);
+  EXPECT_EQ(empty_image.value.height, 0);
+  EXPECT_EQ(empty_image.value.data, nullptr);
+
+  auto cleared_error = host->last_error(session);
+  EXPECT_TRUE(cleared_error.ok) << cleared_error.message;
 }
 
 TEST(EmbeddedHostAdapter, ReplaceSchedulerReturnsNotFoundForMissingSession) {
