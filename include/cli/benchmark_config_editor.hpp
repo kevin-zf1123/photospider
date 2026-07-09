@@ -3,7 +3,7 @@
 #include <string>
 
 namespace ps {
-class InteractionService;
+class Host;
 }
 
 namespace ps {
@@ -14,7 +14,7 @@ namespace ps {
  * @param svc The interaction service to get ops list from.
  * @param benchmark_dir 包含 benchmark_config.yaml 的目录路径。
  */
-void run_benchmark_config_editor(ps::InteractionService& svc,
+void run_benchmark_config_editor(ps::Host& svc,
                                  const std::string& benchmark_dir);
 
 }  // namespace ps

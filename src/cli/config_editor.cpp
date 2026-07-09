@@ -2,6 +2,7 @@
 #include "cli/config_editor.hpp"
 
 #include <algorithm>
+#include <filesystem>
 #include <functional>
 #include <iostream>
 #include <string>
@@ -422,8 +423,8 @@ class ConfigEditor : public TuiEditor {
         selected_ = std::min((int)editable_lines_.size() - 1, selected_);
       };
       editable_lines_.push_back({"scheduler_dirs[" + std::to_string(i) + "]",
-                                 &scheduler_dirs_str_[i], false, nullptr, nullptr,
-                                 nullptr, del_fn});
+                                 &scheduler_dirs_str_[i], false, nullptr,
+                                 nullptr, nullptr, del_fn});
     }
     auto add_scheduler_fn = [this] {
       scheduler_dirs_str_.push_back("<new_path>");
@@ -431,8 +432,8 @@ class ConfigEditor : public TuiEditor {
       selected_ = editable_lines_.size() - 2;
       EnterEditMode();
     };
-    editable_lines_.push_back(
-        {"(Scheduler Dirs)", nullptr, false, nullptr, nullptr, add_scheduler_fn, nullptr});
+    editable_lines_.push_back({"(Scheduler Dirs)", nullptr, false, nullptr,
+                               nullptr, add_scheduler_fn, nullptr});
   }
   void EnterEditMode() {
     if (selected_ >= (int)editable_lines_.size())

@@ -58,7 +58,7 @@ void save_benchmark_results(const std::string& output_dir,
   csv_file.close();
 }
 
-bool handle_bench(std::istringstream& iss, ps::InteractionService& svc,
+bool handle_bench(std::istringstream& iss, ps::Host& svc,
                   std::string& /*current_graph*/, bool& /*modified*/,
                   CliConfig& /*config*/) {
   std::string benchmark_dir, output_dir;
@@ -73,12 +73,13 @@ bool handle_bench(std::istringstream& iss, ps::InteractionService& svc,
     // 在这里添加UI反馈
     std::cout << "Cleaning up previous benchmark artifacts in '"
               << benchmark_dir << "'..." << std::endl;
-    svc.cmd_cleanup_benchmark_artifacts(benchmark_dir);
+    ps::BenchmarkService benchmark_service(svc);
+    benchmark_service.CleanupArtifacts(benchmark_dir);
 
     std::cout << "Running all enabled benchmarks in '" << benchmark_dir
               << "'..." << std::endl;
 
-    auto results = svc.cmd_run_all_benchmarks(benchmark_dir);
+    auto results = benchmark_service.RunAll(benchmark_dir);
     save_benchmark_results(output_dir, results);
     std::cout << "Benchmark finished. Results saved to '" << output_dir << "'."
               << std::endl;

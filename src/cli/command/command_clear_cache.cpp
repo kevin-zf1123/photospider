@@ -5,7 +5,7 @@
 #include "cli/command/commands.hpp"
 #include "cli/command/help_utils.hpp"
 
-bool handle_clear_cache(std::istringstream& iss, ps::InteractionService& svc,
+bool handle_clear_cache(std::istringstream& iss, ps::Host& svc,
                         std::string& current_graph, bool& /*modified*/,
                         CliConfig& config) {
   if (current_graph.empty()) {
@@ -18,11 +18,11 @@ bool handle_clear_cache(std::istringstream& iss, ps::InteractionService& svc,
     arg = config.default_cache_clear_arg;
   }
   if (arg == "both" || arg == "md" || arg == "dm")
-    svc.cmd_clear_cache(current_graph);
+    svc.clear_cache(ps::GraphSessionId{current_graph});
   else if (arg == "drive" || arg == "d")
-    svc.cmd_clear_drive_cache(current_graph);
+    svc.clear_drive_cache(ps::GraphSessionId{current_graph});
   else if (arg == "memory" || arg == "m")
-    svc.cmd_clear_memory_cache(current_graph);
+    svc.clear_memory_cache(ps::GraphSessionId{current_graph});
   else {
     std::cout << "Error: Invalid argument for clear-cache. Use: m, d, or md."
               << std::endl;

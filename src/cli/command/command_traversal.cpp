@@ -8,7 +8,7 @@
 #include "cli/command/help_utils.hpp"
 #include "cli/dependency_tree_formatter.hpp"
 
-bool handle_traversal(std::istringstream& iss, ps::InteractionService& svc,
+bool handle_traversal(std::istringstream& iss, ps::Host& svc,
                       std::string& current_graph, bool& /*modified*/,
                       CliConfig& config) {
   if (current_graph.empty()) {
@@ -58,34 +58,38 @@ bool handle_traversal(std::istringstream& iss, ps::InteractionService& svc,
   // 2. 执行缓存操作
   if (do_check_remove) {
     std::cout << "Synchronizing disk cache with memory state..." << std::endl;
-    svc.cmd_synchronize_disk_cache(current_graph, config.cache_precision);
+    svc.synchronize_disk_cache(ps::GraphSessionId{current_graph},
+                               config.cache_precision);
     std::cout << "Done." << std::endl;
   } else if (do_check) {
     std::cout << "Checking and saving caches for all nodes..." << std::endl;
-    svc.cmd_cache_all_nodes(current_graph, config.cache_precision);
+    svc.cache_all_nodes(ps::GraphSessionId{current_graph},
+                        config.cache_precision);
     std::cout << "Done." << std::endl;
   }
 
   // 3. 打印可选的依赖树
   if (print_tree_mode == "full") {
-    auto tree = svc.cmd_dependency_tree(current_graph, std::nullopt);
-    if (tree)
-      std::cout << ps::cli::format_dependency_tree(*tree, true);
+    auto tree =
+        svc.dependency_tree(ps::GraphSessionId{current_graph}, std::nullopt);
+    if (tree.status.ok)
+      std::cout << ps::cli::format_dependency_tree(tree.value, true);
   } else if (print_tree_mode == "simplified") {
-    auto tree = svc.cmd_dependency_tree(current_graph, std::nullopt);
-    if (tree)
-      std::cout << ps::cli::format_dependency_tree(*tree, false);
+    auto tree =
+        svc.dependency_tree(ps::GraphSessionId{current_graph}, std::nullopt);
+    if (tree.status.ok)
+      std::cout << ps::cli::format_dependency_tree(tree.value, false);
   }
 
   // 4. 输出后序遍历详细信息
-  auto details_map_opt = svc.cmd_traversal_details(current_graph);
-  if (!details_map_opt || details_map_opt->empty()) {
+  auto details_map = svc.traversal_details(ps::GraphSessionId{current_graph});
+  if (!details_map.status.ok || details_map.value.empty()) {
     std::cout << "(No ending nodes found or graph is cyclic)\n";
     return true;
   }
 
   bool first_tree = true;
-  for (const auto& [end_node_id, node_info_vector] : *details_map_opt) {
+  for (const auto& [end_node_id, node_info_vector] : details_map.value) {
     if (!first_tree) {
       std::cout << "\n";
     }
@@ -95,8 +99,8 @@ bool handle_traversal(std::istringstream& iss, ps::InteractionService& svc,
     int counter = 1;
     for (const auto& node_info : node_info_vector) {
       // 打印行号、ID 和名称
-      std::cout << counter++ << ". " << node_info.id << " (" << node_info.name
-                << ")";
+      std::cout << counter++ << ". " << node_info.node.value << " ("
+                << node_info.name << ")";
 
       // 构建并打印缓存状态
       std::vector<std::string> statuses;

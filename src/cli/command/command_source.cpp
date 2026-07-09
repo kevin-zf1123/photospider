@@ -7,7 +7,7 @@
 #include "cli/command/help_utils.hpp"
 #include "cli/process_command.hpp"
 
-bool handle_source(std::istringstream& iss, ps::InteractionService& svc,
+bool handle_source(std::istringstream& iss, ps::Host& svc,
                    std::string& current_graph, bool& modified,
                    CliConfig& config) {
   std::string filename;

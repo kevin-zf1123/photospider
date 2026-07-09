@@ -1,73 +1,34 @@
 // FILE: cli/graph_cli.cpp
 #include <getopt.h>
 
-#include <algorithm>
-#include <chrono>
 #include <filesystem>
-#include <fstream>
 #include <iostream>
-#include <limits>
-#include <map>
 #include <opencv2/core/ocl.hpp>
-#include <optional>
-#include <regex>
-#include <sstream>
-#include <unordered_set>
 
-#include "cli/cli_autocompleter.hpp"
-#include "cli/cli_history.hpp"
-#include "cli/node_editor.hpp"
-#include "cli/node_editor_full.hpp"
-#include "cli/path_complete.hpp"
-#include "cli/terminal_input.hpp"
-#include "cli/tui_editor.hpp"
-#include "cli_config.hpp"
-#include "ftxui/component/component.hpp"
-#include "ftxui/component/screen_interactive.hpp"
-#include "ftxui/dom/elements.hpp"
-#include "ftxui/dom/node.hpp"
-#include "graph_model.hpp"
-#include "input_match_state.hpp"
-#include "kernel/interaction.hpp"
-#include "kernel/kernel.hpp"
-#include "plugin_loader.hpp"
-
-// Extracted CLI functions
 #include "cli/dependency_tree_formatter.hpp"
-#include "cli/do_traversal.hpp"
-#include "cli/handle_interactive_save.hpp"
 #include "cli/print_cli_help.hpp"
-#include "cli/print_repl_help.hpp"
-#include "cli/process_command.hpp"
 #include "cli/run_repl.hpp"
-#include "cli/save_fp32_image.hpp"
+#include "cli_config.hpp"
+#include "photospider/host/host.hpp"
 
 using namespace ps;
-using namespace ftxui;
 namespace fs = std::filesystem;
 
-// Front-end config editor extracted
-#include "cli/config_editor.hpp"
-// Kernel interaction layer
-#include "kernel/interaction.hpp"
-#include "kernel/kernel.hpp"
-
-static void apply_scheduler_config(ps::Kernel& kernel,
-                                   const CliConfig& config) {
-  ps::Kernel::SchedulerConfig scheduler_config;
+static void apply_scheduler_config(ps::Host& host, const CliConfig& config) {
+  ps::HostSchedulerConfig scheduler_config;
   scheduler_config.hp_type = config.scheduler_hp_type;
   scheduler_config.rt_type = config.scheduler_rt_type;
   scheduler_config.worker_count =
       config.scheduler_worker_count > 0
           ? static_cast<unsigned int>(config.scheduler_worker_count)
           : 0;
-  kernel.set_scheduler_config(scheduler_config);
+  (void)host.configure_scheduler_defaults(scheduler_config);
 }
 
-static void load_configured_scheduler_plugins(ps::InteractionService& svc,
+static void load_configured_scheduler_plugins(ps::Host& host,
                                               const CliConfig& config) {
   if (!config.scheduler_dirs.empty()) {
-    svc.cmd_scheduler_scan(config.scheduler_dirs);
+    (void)host.scheduler_scan(config.scheduler_dirs);
   }
 }
 
@@ -88,9 +49,9 @@ int main(int argc, char** argv) {
     }
   }
 
-  ps::Kernel kernel;
-  ps::InteractionService svc(kernel);
-  svc.cmd_seed_builtin_ops();
+  auto host = ps::create_embedded_host();
+  ps::Host& svc = *host;
+  (void)svc.seed_builtin_ops();
 
   CliConfig config;
   std::string custom_config_path;
@@ -118,8 +79,8 @@ int main(int argc, char** argv) {
   std::string config_to_load =
       custom_config_path.empty() ? "config.yaml" : custom_config_path;
   load_or_create_config(config_to_load, config);
-  apply_scheduler_config(kernel, config);
-  svc.cmd_plugins_load(config.plugin_dirs);
+  apply_scheduler_config(svc, config);
+  (void)svc.plugins_load(config.plugin_dirs);
   load_configured_scheduler_plugins(svc, config);
   std::string current_graph;
 
@@ -134,15 +95,14 @@ int main(int argc, char** argv) {
           print_cli_help();
           return 0;
         case 'r': {
-          auto ok = svc.cmd_load_graph("default", "sessions", optarg,
-                                       config.loaded_config_path,
-                                       config.cache_root_dir);
-          if (ok) {
+          auto result = svc.load_graph(ps::GraphLoadRequest{
+              ps::GraphSessionId{"default"}, "sessions", optarg,
+              config.loaded_config_path, config.cache_root_dir});
+          if (result.status.ok) {
             if (config.switch_after_load)
-              current_graph = *ok;
+              current_graph = result.value.value;
             config.loaded_config_path =
-                (ps::fs::absolute(ps::fs::path("sessions") / "default" /
-                                  "config.yaml"))
+                (fs::absolute(fs::path("sessions") / "default" / "config.yaml"))
                     .string();
             std::cout << "Loaded graph from " << optarg << "\n";
             did_any_action = true;
@@ -156,7 +116,8 @@ int main(int argc, char** argv) {
             std::cerr << "No graph loaded; use -r first.\n";
             break;
           }
-          if (svc.cmd_save_yaml(current_graph, optarg)) {
+          if (svc.save_graph(ps::GraphSessionId{current_graph}, optarg)
+                  .status.ok) {
             std::cout << "Saved graph to " << optarg << "\n";
             did_any_action = true;
           } else {
@@ -169,10 +130,11 @@ int main(int argc, char** argv) {
             std::cerr << "No graph loaded; use -r first.\n";
             break;
           }
-          auto tree = svc.cmd_dependency_tree(current_graph, std::nullopt);
-          if (tree) {
+          auto tree = svc.dependency_tree(ps::GraphSessionId{current_graph},
+                                          std::nullopt);
+          if (tree.status.ok) {
             std::cout << ps::cli::format_dependency_tree(
-                *tree, /*show_parameters*/ true);
+                tree.value, /*show_parameters*/ true);
             did_any_action = true;
           } else
             std::cerr << "Failed to print tree.\n";
@@ -183,20 +145,21 @@ int main(int argc, char** argv) {
             std::cerr << "No graph loaded; use -r first.\n";
             break;
           }
-          auto tree = svc.cmd_dependency_tree(current_graph, std::nullopt);
-          if (tree)
+          auto tree = svc.dependency_tree(ps::GraphSessionId{current_graph},
+                                          std::nullopt);
+          if (tree.status.ok)
             std::cout << ps::cli::format_dependency_tree(
-                *tree, /*show_parameters*/ true);
-          auto orders = svc.cmd_traversal_orders(current_graph);
-          if (orders) {
-            for (const auto& kv : *orders) {
+                tree.value, /*show_parameters*/ true);
+          auto orders = svc.traversal_orders(ps::GraphSessionId{current_graph});
+          if (orders.status.ok) {
+            for (const auto& kv : orders.value) {
               std::cout << "\nPost-order (eval order) for end node " << kv.first
                         << ":\n";
               bool first = true;
-              for (int id : kv.second) {
+              for (const auto& id : kv.second) {
                 if (!first)
                   std::cout << " -> ";
-                std::cout << id;
+                std::cout << id.value;
                 first = false;
               }
               std::cout << "\n";
@@ -208,7 +171,7 @@ int main(int argc, char** argv) {
 
         case 1001:
           if (!current_graph.empty()) {
-            svc.cmd_clear_cache(current_graph);
+            (void)svc.clear_cache(ps::GraphSessionId{current_graph});
             did_any_action = true;
           }
           break;

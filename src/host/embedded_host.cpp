@@ -1401,6 +1401,27 @@ class EmbeddedHost final : public Host {
   }
 
   /**
+   * @brief Reads the backend IO-time accumulator for a graph session.
+   *
+   * @param session Session to inspect.
+   * @return Latest IO duration in milliseconds, or a failed status.
+   * @throws std::bad_alloc on allocation failure.
+   * @note The value is copied from Kernel diagnostic state and may be zero for
+   *       compute paths that performed no measured disk IO.
+   */
+  Result<double> last_io_time(const GraphSessionId& session) const override {
+    return guarded_result<double>("last_io_time", GraphErrc::NotFound, [&] {
+      auto io_time = state_->interaction.cmd_get_last_io_time(session.value);
+      if (!io_time) {
+        return failure_result<double>(
+            GraphErrc::NotFound,
+            "IO timing not available for graph session: " + session.value);
+      }
+      return success_result(*io_time);
+    });
+  }
+
+  /**
    * @brief Reads the backend last-error snapshot.
    *
    * @param session Session to inspect.
@@ -2197,6 +2218,27 @@ class EmbeddedHost final : public Host {
           return success_result(
               state_->interaction.cmd_scheduler_loaded_plugins());
         });
+  }
+
+  /**
+   * @brief Applies scheduler defaults for subsequently loaded graph sessions.
+   *
+   * @param config Public scheduler default values.
+   * @return Success status.
+   * @throws std::bad_alloc if scheduler type strings allocate while copied.
+   * @note Existing runtime schedulers are not replaced by this method.
+   */
+  VoidResult configure_scheduler_defaults(
+      const HostSchedulerConfig& config) override {
+    return guarded_void("configure_scheduler_defaults", GraphErrc::Unknown,
+                        [&] {
+                          Kernel::SchedulerConfig backend_config;
+                          backend_config.hp_type = config.hp_type;
+                          backend_config.rt_type = config.rt_type;
+                          backend_config.worker_count = config.worker_count;
+                          state_->kernel.set_scheduler_config(backend_config);
+                          return success_void();
+                        });
   }
 
   /**

@@ -12,7 +12,7 @@
 #include "cli/terminal_input.hpp"
 #include "input_match_state.hpp"
 
-void run_repl(ps::InteractionService& svc, CliConfig& config,
+void run_repl(ps::Host& svc, CliConfig& config,
               const std::string& initial_graph) {
   bool modified = false;
   std::string current_graph = initial_graph;

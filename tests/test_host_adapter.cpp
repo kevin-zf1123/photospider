@@ -424,6 +424,10 @@ TEST(EmbeddedHostAdapter,
   ASSERT_TRUE(timing.status.ok) << timing.status.message;
   EXPECT_FALSE(timing.value.node_timings.empty());
 
+  auto io_time = host->last_io_time(session);
+  ASSERT_TRUE(io_time.status.ok) << io_time.status.message;
+  EXPECT_GE(io_time.value, 0.0);
+
   auto events = host->drain_compute_events(session);
   ASSERT_TRUE(events.status.ok) << events.status.message;
 

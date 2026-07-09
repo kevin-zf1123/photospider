@@ -5,19 +5,18 @@
 #include "cli/command/help_utils.hpp"
 #include "cli/config_editor.hpp"
 
-static void apply_scheduler_config(ps::InteractionService& svc,
-                                   const CliConfig& config) {
-  ps::Kernel::SchedulerConfig scheduler_config;
+static void apply_scheduler_config(ps::Host& svc, const CliConfig& config) {
+  ps::HostSchedulerConfig scheduler_config;
   scheduler_config.hp_type = config.scheduler_hp_type;
   scheduler_config.rt_type = config.scheduler_rt_type;
   scheduler_config.worker_count =
       config.scheduler_worker_count > 0
           ? static_cast<unsigned int>(config.scheduler_worker_count)
           : 0;
-  svc.kernel().set_scheduler_config(scheduler_config);
+  (void)svc.configure_scheduler_defaults(scheduler_config);
 }
 
-bool handle_config(std::istringstream& /*iss*/, ps::InteractionService& svc,
+bool handle_config(std::istringstream& /*iss*/, ps::Host& svc,
                    std::string& /*current_graph*/, bool& /*modified*/,
                    CliConfig& config) {
   if (run_config_editor(config)) {

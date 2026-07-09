@@ -5,7 +5,7 @@
 #include <vector>
 
 namespace ps {
-class InteractionService;
+class Host;
 }
 
 namespace ps {
@@ -21,7 +21,7 @@ class CliAutocompleter {
   // Build a completer bound to the backend interaction layer.
   // op_sources is optional and may be empty; it's only used for `ops` listing,
   // not for completion.
-  explicit CliAutocompleter(ps::InteractionService& svc);
+  explicit CliAutocompleter(ps::Host& svc);
 
   // Set or update the current graph name so dynamic completions (node ids) can
   // be provided.
@@ -62,7 +62,7 @@ class CliAutocompleter {
   void CompleteSessionName(const std::string& prefix,
                            std::vector<std::string>& options) const;
 
-  ps::InteractionService& svc_;
+  ps::Host& svc_;
   std::string current_graph_;
   std::vector<std::string> commands_;
 };

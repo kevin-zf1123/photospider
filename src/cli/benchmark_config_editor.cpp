@@ -48,7 +48,7 @@
 #include "ftxui/component/component.hpp"
 #include "ftxui/component/screen_interactive.hpp"
 #include "ftxui/dom/elements.hpp"
-#include "kernel/interaction.hpp"
+#include "photospider/host/host.hpp"
 
 namespace fs = std::filesystem;
 using namespace ftxui;
@@ -284,7 +284,7 @@ static void save_benchmark_configs_to_file(
  *  - 保存修改到磁盘
  *
  * 成员函数：
- *  - BenchmarkConfigEditor(ScreenInteractive&, ps::InteractionService&, const
+ *  - BenchmarkConfigEditor(ScreenInteractive&, ps::Host&, const
  * std::string&) ·
  * 构造函数，初始化界面与服务引用，加载配置文件，构建初始会话列表 · @param
  * screen 终端交互屏幕实例 · @param svc 基准测试交互服务，用于获取可用操作类型
@@ -323,7 +323,7 @@ static void save_benchmark_configs_to_file(
  *
  * 私有成员变量：
  *  - ScreenInteractive& screen_  交互式屏幕对象引用
- *  - ps::InteractionService& svc_ 交互服务引用，用于获取可用操作类型
+ *  - ps::Host& svc_ 交互服务引用，用于获取可用操作类型
  *  - std::string benchmark_dir_   基准测试配置目录
  *  - fs::path    config_path_     YAML 配置文件路径
  *  - std::vector<BenchmarkSessionConfig> configs_  会话配置列表
@@ -339,15 +339,17 @@ static void save_benchmark_configs_to_file(
  */
 class BenchmarkConfigEditor {
  public:
-  BenchmarkConfigEditor(ScreenInteractive& screen, ps::InteractionService& svc,
+  BenchmarkConfigEditor(ScreenInteractive& screen, ps::Host& svc,
                         const std::string& benchmark_dir)
       : screen_(screen), svc_(svc), benchmark_dir_(benchmark_dir) {
     config_path_ = fs::path(benchmark_dir) / "benchmark_config.yaml";
     configs_ = load_benchmark_configs_from_file(config_path_);
 
-    auto op_sources = svc_.cmd_ops_sources();
-    for (const auto& pair : op_sources) {
-      available_ops_.push_back(pair.first);
+    auto op_sources = svc_.ops_sources();
+    if (op_sources.status.ok) {
+      for (const auto& pair : op_sources.value) {
+        available_ops_.push_back(pair.first);
+      }
     }
     std::sort(available_ops_.begin(), available_ops_.end());
 
@@ -699,7 +701,7 @@ class BenchmarkConfigEditor {
   // --- 关键修改点 3: 在类中添加新的成员变量 ---
   // UI State
   ScreenInteractive& screen_;
-  ps::InteractionService& svc_;
+  ps::Host& svc_;
   std::string benchmark_dir_;
   fs::path config_path_;
   std::vector<BenchmarkSessionConfig> configs_;
@@ -745,7 +747,7 @@ class BenchmarkConfigEditor {
  * @param svc 引用交互服务对象，用于处理用户输入/输出交互
  * @param benchmark_dir 基准测试配置保存的目录路径
  */
-void run_benchmark_config_editor(ps::InteractionService& svc,
+void run_benchmark_config_editor(ps::Host& svc,
                                  const std::string& benchmark_dir) {
   if (!fs::is_directory(benchmark_dir)) {
     std::cout << "Error: Benchmark directory not found: " << benchmark_dir

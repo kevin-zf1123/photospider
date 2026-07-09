@@ -6,18 +6,18 @@
 #include <sstream>
 
 #include "cli/path_complete.hpp"
-#include "kernel/interaction.hpp"
+#include "photospider/host/host.hpp"
 
 namespace ps {
 
-CliAutocompleter::CliAutocompleter(ps::InteractionService& svc) : svc_(svc) {
+CliAutocompleter::CliAutocompleter(ps::Host& svc) : svc_(svc) {
   // This list should be kept in sync with commands in `process_command`
   commands_ = {
       "bench",       "benchmark", "clear",       "cls",  // 如果您想补全别名，也在这里添加
-      "clear-cache", "cc",        "clear-graph", "close", "compute",
-      "config",      "exit",      "quit",        "q",     "free",
-      "graphs",      "help",      "inspect",     "load",  "node",
-      "ops",         "output",    "print",       "read",  "save",
+      "clear-cache", "cc",        "clear-graph", "close",    "compute",
+      "config",      "exit",      "quit",        "q",        "free",
+      "graphs",      "help",      "inspect",     "load",     "node",
+      "ops",         "output",    "print",       "read",     "save",
       "scheduler",   "source",    "switch",      "traversal"};
   std::sort(commands_.begin(), commands_.end());
 }
@@ -118,7 +118,8 @@ CompletionResult CliAutocompleter::Complete(const std::string& line,
           (tokens.size() == 1) || (tokens.size() == 2 && line.back() != ' ');
       if (completing_first_arg) {
         // Subcommands
-        std::vector<std::string> subcmds = {"list", "get", "set", "scan", "load", "plugins", "help"};
+        std::vector<std::string> subcmds = {"list", "get",     "set", "scan",
+                                            "load", "plugins", "help"};
         for (const auto& s : subcmds) {
           if (s.rfind(prefix, 0) == 0)
             result.options.push_back(s);
@@ -126,8 +127,8 @@ CompletionResult CliAutocompleter::Complete(const std::string& line,
       } else if (tokens.size() >= 2) {
         const std::string& subcmd = tokens[1];
         if (subcmd == "get" || subcmd == "set") {
-          bool completing_intent =
-              (tokens.size() == 2) || (tokens.size() == 3 && line.back() != ' ');
+          bool completing_intent = (tokens.size() == 2) ||
+                                   (tokens.size() == 3 && line.back() != ' ');
           if (completing_intent) {
             // Intent options
             std::vector<std::string> intents = {"hp", "rt", "all"};
@@ -136,11 +137,12 @@ CompletionResult CliAutocompleter::Complete(const std::string& line,
                 result.options.push_back(i);
             }
           } else if (subcmd == "set") {
-            // Get available scheduler types via InteractionService
-            auto types = svc_.cmd_scheduler_available_types();
-            for (const auto& t : types) {
-              if (t.rfind(prefix, 0) == 0)
-                result.options.push_back(t);
+            auto types = svc_.scheduler_available_types();
+            if (types.status.ok) {
+              for (const auto& t : types.value) {
+                if (t.rfind(prefix, 0) == 0)
+                  result.options.push_back(t);
+              }
             }
           }
         } else if (subcmd == "scan" || subcmd == "load") {

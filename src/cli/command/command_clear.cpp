@@ -5,7 +5,7 @@
 #include "cli/command/commands.hpp"
 #include "cli/command/help_utils.hpp"
 
-bool handle_clear(std::istringstream& /*iss*/, ps::InteractionService& /*svc*/,
+bool handle_clear(std::istringstream& /*iss*/, ps::Host& /*svc*/,
                   std::string& /*current_graph*/, bool& /*modified*/,
                   CliConfig& /*config*/) {
   std::cout << "\033[2J\033[1;1H";

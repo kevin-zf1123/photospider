@@ -7,7 +7,7 @@
 #include "cli/command/help_utils.hpp"
 #include "cli/node_editor_full.hpp"
 
-bool handle_node(std::istringstream& iss, ps::InteractionService& svc,
+bool handle_node(std::istringstream& iss, ps::Host& svc,
                  std::string& current_graph, bool& /*modified*/,
                  CliConfig& /*config*/) {
   if (current_graph.empty()) {

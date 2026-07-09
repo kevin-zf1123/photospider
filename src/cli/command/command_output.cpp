@@ -5,7 +5,7 @@
 #include "cli/command/commands.hpp"
 #include "cli/command/help_utils.hpp"
 
-bool handle_output(std::istringstream& iss, ps::InteractionService& svc,
+bool handle_output(std::istringstream& iss, ps::Host& svc,
                    std::string& current_graph, bool& modified,
                    CliConfig& /*config*/) {
   if (current_graph.empty()) {
@@ -17,7 +17,7 @@ bool handle_output(std::istringstream& iss, ps::InteractionService& svc,
   if (path.empty())
     std::cout << "Usage: output <filepath>\n";
   else {
-    if (svc.cmd_save_yaml(current_graph, path)) {
+    if (svc.save_graph(ps::GraphSessionId{current_graph}, path).status.ok) {
       modified = false;
       std::cout << "Saved to " << path << "\n";
     } else {
