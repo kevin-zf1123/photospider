@@ -408,6 +408,27 @@ class Kernel {
       GraphModel& graph, int end_node_id) const;
 
   /**
+   * @brief Borrowed graph-name parameter used by private runtime helpers.
+   *
+   * @note This private alias names the existing `const std::string&` calling
+   * convention; it does not take ownership of, copy, or extend the graph-name
+   * lifetime.
+   */
+  using GraphName = const std::string&;
+
+  /**
+   * @brief Result wrapper for const graph-runtime facade callbacks.
+   *
+   * @tparam Fn Callable type invoked with `const GraphRuntime&`.
+   * @note This alias keeps the const `with_runtime` signature stable across
+   * the clang-format versions used by local development and CI without changing
+   * the private helper's exception or lifetime behavior.
+   */
+  template <typename Fn>
+  using ConstRuntimeResult = std::optional<
+      std::decay_t<std::invoke_result_t<Fn, const GraphRuntime&>>>;
+
+  /**
    * @brief Executes a graph-runtime facade operation with missing-graph and
    * exception-to-nullopt handling.
    *
@@ -446,8 +467,7 @@ class Kernel {
    * @note Used by const inspection APIs such as scheduler metadata queries.
    */
   template <typename Fn>
-  auto with_runtime(const std::string& name, Fn&& op) const -> std::optional<
-      std::decay_t<std::invoke_result_t<Fn, const GraphRuntime&>>> {
+  auto with_runtime(GraphName name, Fn&& op) const -> ConstRuntimeResult<Fn> {
     auto it = graphs_.find(name);
     if (it == graphs_.end()) {
       return std::nullopt;
