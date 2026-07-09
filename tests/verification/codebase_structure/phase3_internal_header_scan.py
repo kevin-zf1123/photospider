@@ -200,6 +200,12 @@ def inspect_cmake_boundary(repo: Path) -> dict[str, Any]:
     """Check CMake uses private include roots for internal implementation."""
 
     cmake = (repo / "CMakeLists.txt").read_text(encoding="utf-8")
+    product_include = re.search(
+        r"target_include_directories\s*\(\s*photospider\b.*?\n\s*\)",
+        cmake,
+        re.DOTALL,
+    )
+    product_include_block = product_include.group(0) if product_include else ""
     return {
         "declares_public_include_dir": "PHOTOSPIDER_PUBLIC_INCLUDE_DIR" in cmake,
         "declares_private_include_dirs": "PHOTOSPIDER_PRIVATE_INCLUDE_DIRS" in cmake
@@ -208,9 +214,18 @@ def inspect_cmake_boundary(repo: Path) -> dict[str, Any]:
             'set(PHOTOSPIDER_PUBLIC_HEADER_ROOT' in cmake
             and '"${PROJECT_SOURCE_DIR}/include/photospider"' in cmake
         ),
-        "photospider_lib_links_internal_targets_privately": (
-            re.search(r"target_link_libraries\s*\(\s*photospider_lib\s+PRIVATE", cmake)
+        "photospider_static_product_exists": (
+            re.search(r"add_library\s*\(\s*photospider\s+STATIC\b", cmake)
             is not None
+        ),
+        "photospider_product_keeps_src_private": (
+            "PRIVATE" in product_include_block
+            and "${PHOTOSPIDER_PRIVATE_INCLUDE_DIRS}" in product_include_block
+            and not re.search(
+                r"\bPUBLIC\b(?:(?!\bPRIVATE\b).)*\$\{PROJECT_SOURCE_DIR\}/src",
+                product_include_block,
+                re.DOTALL,
+            )
         ),
         "phase3_scan_registered": "Phase3InternalHeaderScan" in cmake,
     }
@@ -270,8 +285,11 @@ def make_compare(actual: dict[str, Any], expected: dict[str, Any]) -> tuple[bool
         "CMake installable root is include/photospider": actual[
             "cmake_boundary"
         ]["installable_public_header_root_is_photospider"],
-        "photospider_lib links internals privately": actual["cmake_boundary"][
-            "photospider_lib_links_internal_targets_privately"
+        "photospider static product exists": actual["cmake_boundary"][
+            "photospider_static_product_exists"
+        ],
+        "photospider product keeps src private": actual["cmake_boundary"][
+            "photospider_product_keeps_src_private"
         ],
         "Phase3 CTest registered": actual["cmake_boundary"][
             "phase3_scan_registered"
@@ -349,7 +367,9 @@ def make_summary(out: Path, actual: dict[str, Any], passed: bool) -> str:
             "headers still exist under `src/` for internal targets. The scan also",
             "checks that dirty-region, compute planning, and scheduler trace",
             "diagnostics are exposed through public value snapshots and Host",
-            "methods rather than through backend implementation headers.",
+            "methods rather than through backend implementation headers. The",
+            "CMake boundary check now expects the static `photospider` product",
+            "target to keep `src/` as a private include root.",
         ]
     )
     return "\n".join(lines)

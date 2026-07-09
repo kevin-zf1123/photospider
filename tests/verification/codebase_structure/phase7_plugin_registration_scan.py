@@ -31,6 +31,7 @@ SHIM_FORBIDDEN_SOURCES = (
     "src/kernel/plugin_manager.cpp",
     "src/kernel/plugin_manage_module/plugin_loader.cpp",
 )
+BROAD_BACKEND_LINK_TARGETS = ("photospider_lib", "photospider")
 LEGACY_ENTRY_RE = re.compile(
     r'extern\s+"C"\s+PLUGIN_API\s+void\s+register_photospider_ops\s*'
     r"\(\s*\)"
@@ -186,6 +187,18 @@ def add_library_block(cmake: str, target: str) -> str:
     return "" if match is None else match.group(0)
 
 
+def block_mentions_link_target(block: str, target: str) -> bool:
+    """Return true when a CMake link block names an exact link target."""
+
+    return (
+        re.search(
+            rf"(?<![A-Za-z0-9_:.-]){re.escape(target)}(?![A-Za-z0-9_:.-])",
+            block,
+        )
+        is not None
+    )
+
+
 def inspect_cmake(repo: Path) -> dict[str, Any]:
     """Check operation plugin targets avoid broad backend linking."""
 
@@ -205,9 +218,19 @@ def inspect_cmake(repo: Path) -> dict[str, Any]:
         "perlin_noise_metal": metal_impl_block,
     }
     broad_backend_hits = [
-        {"target": target, "contains_photospider_lib": "photospider_lib" in block}
+        {
+            "target": target,
+            "broad_backend_targets": [
+                backend
+                for backend in BROAD_BACKEND_LINK_TARGETS
+                if block_mentions_link_target(block, backend)
+            ],
+        }
         for target, block in target_blocks.items()
-        if "photospider_lib" in block
+        if any(
+            block_mentions_link_target(block, backend)
+            for backend in BROAD_BACKEND_LINK_TARGETS
+        )
     ]
     return {
         "declares_operation_plugin_shim": bool(shim_block),
@@ -221,7 +244,7 @@ def inspect_cmake(repo: Path) -> dict[str, Any]:
         "generic_custom_ops_use_shim": (
             "photospider_operation_plugin_shim" in generic_loop
         ),
-        "operation_plugin_targets_with_photospider_lib": broad_backend_hits,
+        "operation_plugin_targets_with_broad_backend": broad_backend_hits,
         "phase7_scan_registered": "Phase7PluginRegistrationScan" in cmake,
     }
 
@@ -340,7 +363,7 @@ def make_expected() -> dict[str, Any]:
             "shim_uses_runtime_adapter_sources": True,
             "shim_forbidden_source_hits": [],
             "generic_custom_ops_use_shim": True,
-            "operation_plugin_targets_with_photospider_lib": [],
+            "operation_plugin_targets_with_broad_backend": [],
             "phase7_scan_registered": True,
         },
         "loader_and_api": {
@@ -404,10 +427,10 @@ def make_compare(actual: dict[str, Any], expected: dict[str, Any]) -> tuple[bool
             "generic_custom_ops_use_shim"
         ]
         == expected["cmake"]["generic_custom_ops_use_shim"],
-        "operation plugin targets avoid photospider_lib": actual["cmake"][
-            "operation_plugin_targets_with_photospider_lib"
+        "operation plugin targets avoid broad backend products": actual["cmake"][
+            "operation_plugin_targets_with_broad_backend"
         ]
-        == expected["cmake"]["operation_plugin_targets_with_photospider_lib"],
+        == expected["cmake"]["operation_plugin_targets_with_broad_backend"],
         "phase-7 scan is registered with CTest": actual["cmake"][
             "phase7_scan_registered"
         ]
@@ -433,7 +456,7 @@ def write_summary(path: Path, passed: bool, actual: dict[str, Any]) -> None:
 
     status = "PASS" if passed else "FAIL"
     docs = actual["docs"]["docs"]
-    target_hits = actual["cmake"]["operation_plugin_targets_with_photospider_lib"]
+    target_hits = actual["cmake"]["operation_plugin_targets_with_broad_backend"]
     body = [
         "# Phase 7 Plugin Registration Scan",
         "",
@@ -447,7 +470,7 @@ def write_summary(path: Path, passed: bool, actual: dict[str, Any]) -> None:
         f"{len(actual['plugin_sources']['forbidden_registry_instance_hits'])}",
         "- Legacy no-argument entry hits: "
         f"{len(actual['plugin_sources']['legacy_no_arg_entry_hits'])}",
-        "- Operation plugin targets still linking `photospider_lib`: "
+        "- Operation plugin targets still linking broad backend products: "
         f"{len(target_hits)}",
         "- Required docs checked: " + ", ".join(row["file"] for row in docs),
         "",

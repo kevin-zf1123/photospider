@@ -35,7 +35,7 @@ host 可能观察到不同的 registry singleton。
 
 ## 操作插件 Shim 与链接方式
 
-操作插件不再为了访问 registry 符号而链接宽泛的 `photospider_lib` 后端。仓库内 operation plugin 通过
+操作插件不会为了访问 registry 符号而链接宽泛的静态 `photospider` 产品。仓库内 operation plugin 通过
 `OperationPluginRegistrar` 注册；标准插件 target 在需要 `ImageBuffer`/OpenCV adapter 转换函数等运行时
 helper 符号时，链接窄边界 `photospider_operation_plugin_shim`。该 shim 明确不包含 `OpRegistry`、内置
 operation 注册、plugin manager、plugin loader、graph、scheduler 或 compute-service 代码。
@@ -142,7 +142,7 @@ C 符号，并返回了 `IScheduler`，如果该对象没有同时实现 `Schedu
 
 - 操作插件应使用已发布的注册 API 和公共数据契约。
 - 操作插件必须使用 `OperationPluginRegistrar` 和 `register_photospider_ops_v1`；无参数注册 ABI 不受支持。
-- 操作插件不得仅为了共享 registry 状态而链接 `photospider_lib`。只有当插件 callback 代码需要窄运行时 helper
+- 操作插件不得仅为了共享 registry 状态而链接 `photospider`。只有当插件 callback 代码需要窄运行时 helper
   符号时，才使用 `photospider_operation_plugin_shim`。
 - 调度器插件应将 `IScheduler` 和 `SchedulerTaskRuntime` ABI 兼容性都视为版本敏感。
 - 调度器插件作者应实现 `ps_scheduler_plugin_destroy`。

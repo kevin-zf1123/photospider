@@ -35,6 +35,10 @@ feedback/
 !.clang-format
 !CPPLINT.cfg
 !CMakeLists.txt
+!cmake/
+!cmake/**/
+!cmake/*.cmake.in
+!cmake/**/*.cmake.in
 !Dockerfile.ci
 !manual.md
 !readme.md

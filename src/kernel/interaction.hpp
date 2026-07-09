@@ -9,7 +9,8 @@
  * `kernel/kernel.hpp`, which depends on private implementation headers;
  * repository targets that still use InteractionService must receive the private
  * include roots. External frontends should use `photospider/host/host.hpp`
- * rather than linking `photospider_lib` and including this source-tree facade.
+ * rather than including this source-tree facade through the static
+ * `photospider` product.
  */
 
 #include <functional>

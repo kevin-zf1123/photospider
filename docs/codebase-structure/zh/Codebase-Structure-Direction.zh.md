@@ -22,8 +22,8 @@
 | `photospider_graph` | 静态 `GraphModel` 和图服务。 | 通过公开头暴露 `GraphModel`。 |
 | `photospider_plugin` | 静态插件管理器和加载器。 | Host 侧插件所有权仍位于遗留 target 中，但 operation 注册现在通过 `OperationPluginRegistrar` 进行。 |
 | `photospider_compute` | 静态计算、运行时、调度器和交互代码。 | 内部 compute planning 头通过公开头泄漏。 |
-| `photospider_lib` | CLI 和 embedded Host 前端链接的共享后端库。 | 名称和链接形态都不符合目标中的静态 `libphotospider`；operation plugin 现在使用 `register_photospider_ops_v1` 加窄 shim，而不是为了 registry 访问链接该后端。 |
-| `photospider_cli_common` | 静态 CLI 命令、TUI、自动补全代码。 | 把 `src/` 作为 public include root，并依赖宽泛的内核头。 |
+| `photospider` | 静态可安装后端产品，归档文件名为 `libphotospider`。 | 现在已经符合目标中的静态产品形态，但在后续源码布局拆分落地前，仍把遗留后端内部实现折叠在公开 Host seam 背后。 |
+| `photospider_cli_common` | 静态 CLI 命令、TUI、自动补全代码。 | 仍依赖宽泛的内核头，但它的 `src/` include root 已只对仓库内部 target 私有。 |
 | `graph_cli` | CLI 可执行入口。 | 直接创建 `Kernel`，还没有 daemon-client 模式。 |
 
 仍遗留和刚完成修复的接口泄漏：
@@ -32,7 +32,7 @@
   dirty-region snapshot、planner summary、full task graph cache handle 和 runtime generation
   state 现在都归入私有 include root。
 - 遗留的内部 `Kernel` 和 `InteractionService` facade 现在位于 `src/kernel/`。它们包含 runtime、
-  compute service、图服务、插件管理器和 dirty-control-lane 实现类型，因此不是 `photospider_lib`
+  compute service、图服务、插件管理器和 dirty-control-lane 实现类型，因此不是 `photospider`
   链接消费者可依赖的受支持头；仍包含它们的仓库内部 target 必须获得私有 `src/` include root。后续阶段应
   继续把它们留在该私有 root 后面，或用更窄的 Host-only public target 取代其面向前端的职责。
 - `include/plugin_api.hpp` 包含完整 `Node`，把节点运行时/cache 状态暴露给操作插件，而不是暴露更小的插件契约。Issue #33
@@ -225,13 +225,29 @@ CMake 规则：
 - 内部 target 可以把 `src/` 作为 `PRIVATE` include root。
 - 可安装 target 只暴露 `include/photospider`。
 - 当前 phase-3 guardrail 会强制可安装头扫描只遍历 `include/photospider/**`，检查已移动的实现头
-  位于 `src/`，并确认 `photospider_lib` 以 private 方式链接内部实现 target。
-- `libphotospider` 默认应为 `STATIC`。
+  位于 `src/`，并确认 `photospider` 产品把 `src/` 保持为 private include root。
+- phase-4 install/export 阶段将 `photospider` 设为可安装的 `STATIC` target，归档输出为
+  `libphotospider.a`，只安装 `include/photospider/**`，并通过 `PhotospiderConfig.cmake`
+  导出 `Photospider::photospider`。
+- `photospider` 的 build-tree consumer 会获得一个生成的 public include root，其中只包含
+  `photospider/` 头文件树。源码树的 `include/` 和 `src/` root 仍是仓库内部 target 的私有实现 include path。
+- 静态产品归档会把产品实现源码直接折叠进 `photospider`。仓库内部的静态 helper 模块仍可用于本地构建组织，
+  但不会导出给 package consumer。
 - 后续可以作为显式兼容产品添加共享库，但不应让共享库继续充当主要后端。
 - 当前 phase-7 operation plugin 导出 `register_photospider_ops_v1`，并从 host 接收
-  `OperationPluginRegistrar`。它们不再仅为了共享 `OpRegistry` 而链接 `photospider_lib`；
+  `OperationPluginRegistrar`。它们不再仅为了共享 `OpRegistry` 而链接 `photospider`；
   标准 operation plugin 只在插件 callback 代码需要窄运行时 helper 符号时链接
   `photospider_operation_plugin_shim`。
+- OpenCV（`core`、`imgproc`、`imgcodecs`、`videoio`）、`yaml-cpp`、`Threads` 和 POSIX
+  dynamic-loader 库是静态归档的 link-only 实现依赖。`PhotospiderConfig.cmake` 会寻找这些依赖，
+  因此外部嵌入式 consumer 可以链接导出的静态 target，但 public Host/core 头不要求 OpenCV 或
+  `yaml-cpp` 类型。
+- 在 Apple 平台，静态产品为 Objective-C++ runtime 源码携带系统 `Metal` 和 `Foundation` framework
+  链接标志。Metal operation plugin 及其 `CoreImage`/`CoreVideo` 依赖仍是可选 runtime plugin artifact，
+  不是 public package requirement。
+- FTXUI 和 `photospider_cli_common` 是 CLI-only 依赖，不属于 embedded package export。
+  Operation plugin shim、operation plugin 和 scheduler plugin 仍是 runtime extension artifact，
+  不是 `Photospider::photospider` 的依赖。
 - `graph_cli` 本地模式链接 `libphotospider`，daemon 模式链接 `photospider_ipc_client`。
 - `photospiderd` 链接 `libphotospider` 并拥有 IPC server。
 - Operation plugin 不应仅为了访问 registry 符号而链接宽泛共享后端。当前实现使用 host-provided
@@ -362,7 +378,9 @@ graph TD
 任何根据本文档推进的实现变更，都应：
 
 - 运行公开头依赖扫描，并把证据保存到 `tests/results/...`。
-- 构建 `libphotospider`、`graph_cli` 和 `photospiderd`。
+- 构建 `libphotospider` 和 `graph_cli`；`photospiderd` 在应用拆分阶段落地之前仍是未来 daemon target。
+- 对静态 package 工作，应运行 phase-4 static product scan 和 package consumer smoke test，并把 summary、
+  命令日志、expected/actual JSON 和 compare 输出保存到对应 issue 的 `tests/results/...` 路径。
 - 运行 kernel、scheduler、plugin、interaction 和 CLI 相关 CTest。
 - 增加 IPC 集成测试：启动 `photospiderd`，发送请求，并将响应 JSON 与 expected output 对比。
 - 对 daemon lifecycle 变更，保存 startup、graph load、compute 或 inspect、client disconnect、signal shutdown

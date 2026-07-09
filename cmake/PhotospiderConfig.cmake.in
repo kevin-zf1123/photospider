@@ -1,0 +1,16 @@
+@PACKAGE_INIT@
+
+include(CMakeFindDependencyMacro)
+
+find_dependency(Threads)
+find_dependency(OpenCV COMPONENTS core imgproc imgcodecs videoio)
+find_dependency(yaml-cpp)
+
+if(APPLE)
+  find_library(PHOTOSPIDER_METAL_FRAMEWORK Metal REQUIRED)
+  find_library(PHOTOSPIDER_FOUNDATION_FRAMEWORK Foundation REQUIRED)
+endif()
+
+include("${CMAKE_CURRENT_LIST_DIR}/PhotospiderTargets.cmake")
+
+check_required_components(Photospider)
