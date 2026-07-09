@@ -1,6 +1,6 @@
 #include "metal/perlin_noise_metal.hpp"
-#include "plugin_api.hpp"
-#include "ps_types.hpp"
+#include "plugin_api.hpp"  // NOLINT(build/include_subdir)
+#include "ps_types.hpp"    // NOLINT(build/include_subdir)
 
 namespace {
 

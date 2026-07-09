@@ -5,8 +5,8 @@
 #include <string>
 #include <utility>
 
-#include "node.hpp"
-#include "ps_types.hpp"
+#include "node.hpp"      // NOLINT(build/include_subdir)
+#include "ps_types.hpp"  // NOLINT(build/include_subdir)
 
 /**
  * @file plugin_api.hpp
@@ -453,7 +453,7 @@ using RegisterPhotospiderOpsV1 = void (*)(OperationPluginRegistrar* registrar);
  * @note Keep this string synchronized with the exported declaration below.
  */
 inline constexpr const char* kOperationPluginRegisterSymbolV1 =
-    "register_photospider_ops_v1";
+    "register_photospider_ops_v1";  // NOLINT(whitespace/indent_namespace)
 
 }  // namespace ps
 

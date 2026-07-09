@@ -1,5 +1,8 @@
+#include <string>
+#include <vector>
+
 #include "adapter/buffer_adapter_opencv.hpp"
-#include "plugin_api.hpp"
+#include "plugin_api.hpp"  // NOLINT(build/include_subdir)
 
 namespace {
 
