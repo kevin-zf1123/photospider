@@ -720,6 +720,74 @@ TEST(EmbeddedHostAdapter, RoiProjectionUsesPublicPixelRectValues) {
   EXPECT_EQ(missing_target.status.code, GraphErrc::InvalidParameter);
 }
 
+TEST(EmbeddedHostAdapter, DirtySnapshotPreservesMonolithicAndEdgeDetails) {
+  register_host_adapter_ops();
+  ScopedTempDir temp("photospider_host_adapter_dirty_snapshot_details_test");
+  auto host = create_embedded_host();
+  ASSERT_NE(host, nullptr);
+
+  const auto yaml_path = temp.root() / "source" / "dirty_roi_graph.yaml";
+  write_host_adapter_roi_graph(yaml_path);
+
+  GraphLoadRequest request;
+  request.session = GraphSessionId{"dirty_snapshot_details"};
+  request.root_dir = (temp.root() / "sessions").string();
+  request.yaml_path = yaml_path.string();
+  request.cache_root_dir = (temp.root() / "cache").string();
+
+  auto loaded = host->load_graph(request);
+  ASSERT_TRUE(loaded.status.ok) << loaded.status.message;
+
+  HostComputeRequest full_request;
+  full_request.session = request.session;
+  full_request.node = NodeId{2};
+  full_request.cache.precision = "fp32";
+  auto initial_compute = host->compute(full_request);
+  ASSERT_TRUE(initial_compute.status.ok) << initial_compute.status.message;
+
+  HostComputeRequest dirty_request = full_request;
+  dirty_request.intent = ComputeIntent::GlobalHighPrecision;
+  dirty_request.dirty_roi = PixelRect{1, 1, 2, 2};
+  auto dirty_compute = host->compute(dirty_request);
+  ASSERT_TRUE(dirty_compute.status.ok) << dirty_compute.status.message;
+
+  auto snapshot = host->dirty_region_snapshot(request.session);
+  ASSERT_TRUE(snapshot.status.ok) << snapshot.status.message;
+  EXPECT_FALSE(snapshot.value.dirty_monolithic_nodes.empty());
+  EXPECT_FALSE(snapshot.value.edge_mappings.empty());
+
+  const auto monolithic_node =
+      std::find_if(snapshot.value.dirty_monolithic_nodes.begin(),
+                   snapshot.value.dirty_monolithic_nodes.end(),
+                   [](const DirtyMonolithicRegionSnapshot& region) {
+                     return region.node.value == 2 &&
+                            region.domain == DirtyDomain::HighPrecision;
+                   });
+  ASSERT_NE(monolithic_node, snapshot.value.dirty_monolithic_nodes.end());
+  EXPECT_TRUE(monolithic_node->whole_output);
+  EXPECT_EQ(monolithic_node->pixel_roi.x, 0);
+  EXPECT_EQ(monolithic_node->pixel_roi.y, 0);
+  EXPECT_EQ(monolithic_node->pixel_roi.width, 8);
+  EXPECT_EQ(monolithic_node->pixel_roi.height, 6);
+
+  const auto edge_mapping = std::find_if(
+      snapshot.value.edge_mappings.begin(), snapshot.value.edge_mappings.end(),
+      [](const DirtyEdgeMappingSnapshot& mapping) {
+        return mapping.from_node.value == 1 && mapping.to_node.value == 2 &&
+               mapping.domain == DirtyDomain::HighPrecision;
+      });
+  ASSERT_NE(edge_mapping, snapshot.value.edge_mappings.end());
+  EXPECT_EQ(edge_mapping->direction, DirtyEdgeDirection::BackwardDemand);
+  EXPECT_EQ(edge_mapping->from_roi.x, 0);
+  EXPECT_EQ(edge_mapping->from_roi.y, 0);
+  EXPECT_EQ(edge_mapping->from_roi.width, 8);
+  EXPECT_EQ(edge_mapping->from_roi.height, 6);
+  EXPECT_EQ(edge_mapping->to_roi.x, 0);
+  EXPECT_EQ(edge_mapping->to_roi.y, 0);
+  EXPECT_EQ(edge_mapping->to_roi.width, 8);
+  EXPECT_EQ(edge_mapping->to_roi.height, 6);
+}
+
 TEST(EmbeddedHostAdapter, DirtySourceAndCacheControlsExposeFrontendStatus) {
   register_host_adapter_ops();
   ScopedTempDir temp("photospider_host_adapter_dirty_cache_test");

@@ -1021,12 +1021,67 @@ DirtyTileSnapshot to_public_dirty_tile(const compute::DirtyTileKey& tile) {
 }
 
 /**
+ * @brief Converts backend dirty edge direction into a public value.
+ *
+ * @param direction Backend dirty propagation direction.
+ * @return Public dirty propagation direction.
+ * @throws Nothing.
+ */
+DirtyEdgeDirection to_public_dirty_edge_direction(
+    compute::DirtyEdgeDirection direction) {
+  switch (direction) {
+    case compute::DirtyEdgeDirection::ForwardAffected:
+      return DirtyEdgeDirection::ForwardAffected;
+    case compute::DirtyEdgeDirection::BackwardDemand:
+      return DirtyEdgeDirection::BackwardDemand;
+  }
+  return DirtyEdgeDirection::BackwardDemand;
+}
+
+/**
+ * @brief Converts backend monolithic dirty work into a public snapshot.
+ *
+ * @param region Backend monolithic dirty record.
+ * @return Public monolithic dirty record snapshot.
+ * @throws Nothing.
+ */
+DirtyMonolithicRegionSnapshot to_public_dirty_monolithic_region(
+    const compute::DirtyMonolithicRegion& region) {
+  DirtyMonolithicRegionSnapshot snapshot;
+  snapshot.node = NodeId{region.node_id};
+  snapshot.domain = to_public_dirty_domain(region.domain);
+  snapshot.pixel_roi = to_pixel_rect(region.pixel_roi);
+  snapshot.whole_output = region.whole_output;
+  return snapshot;
+}
+
+/**
+ * @brief Converts backend dirty edge provenance into a public snapshot.
+ *
+ * @param mapping Backend dirty edge mapping.
+ * @return Public dirty edge mapping snapshot.
+ * @throws Nothing.
+ */
+DirtyEdgeMappingSnapshot to_public_dirty_edge_mapping(
+    const compute::DirtyEdgeMapping& mapping) {
+  DirtyEdgeMappingSnapshot snapshot;
+  snapshot.from_node = NodeId{mapping.from_node_id};
+  snapshot.to_node = NodeId{mapping.to_node_id};
+  snapshot.domain = to_public_dirty_domain(mapping.domain);
+  snapshot.from_roi = to_pixel_rect(mapping.from_roi);
+  snapshot.to_roi = to_pixel_rect(mapping.to_roi);
+  snapshot.direction = to_public_dirty_edge_direction(mapping.direction);
+  return snapshot;
+}
+
+/**
  * @brief Converts backend dirty-region state into a public snapshot.
  *
  * @param snapshot Backend dirty-region snapshot.
  * @return Public dirty-region inspection snapshot.
  * @throws std::bad_alloc if container allocation fails.
- * @note Only frontend-facing source, tile, and actual ROI values are copied.
+ * @note Only frontend-facing source, tile, monolithic work, actual ROI, and
+ *       propagation provenance values are copied.
  */
 DirtyRegionInspectionSnapshot to_public_dirty_snapshot(
     const compute::DirtyRegionSnapshot& snapshot) {
@@ -1050,12 +1105,23 @@ DirtyRegionInspectionSnapshot to_public_dirty_snapshot(
     out.dirty_tiles.push_back(to_public_dirty_tile(tile));
   }
 
+  out.dirty_monolithic_nodes.reserve(snapshot.dirty_monolithic_nodes.size());
+  for (const auto& region : snapshot.dirty_monolithic_nodes) {
+    out.dirty_monolithic_nodes.push_back(
+        to_public_dirty_monolithic_region(region));
+  }
+
   for (const auto& [node_id, rois] : snapshot.actual_dirty_rois) {
     auto& converted = out.actual_dirty_rois[node_id];
     converted.reserve(rois.size());
     for (const auto& roi : rois) {
       converted.push_back(to_pixel_rect(roi));
     }
+  }
+
+  out.edge_mappings.reserve(snapshot.edge_mappings.size());
+  for (const auto& mapping : snapshot.edge_mappings) {
+    out.edge_mappings.push_back(to_public_dirty_edge_mapping(mapping));
   }
   return out;
 }

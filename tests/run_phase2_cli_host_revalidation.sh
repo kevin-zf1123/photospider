@@ -39,6 +39,11 @@ cmake --build build --target test_host_adapter -j \
   >"$OUT/build_test_host_adapter.log" 2>&1
 ./build/tests/test_host_adapter >"$OUT/test_host_adapter.log" 2>&1
 
+cmake --build build --target test_cli_dirty_snapshot_formatter -j \
+  >"$OUT/build_test_cli_dirty_snapshot_formatter.log" 2>&1
+./build/tests/test_cli_dirty_snapshot_formatter \
+  >"$OUT/test_cli_dirty_snapshot_formatter.log" 2>&1
+
 cat >"$OUT/repl_commands.txt" <<'CMDS'
 load phase2_cli_host util/testcases/propagation_linear_test.yaml
 compute all parallel nosave m
@@ -67,6 +72,9 @@ stdout = (out / "graph_cli_repl_stdout.log").read_text(encoding="utf-8", errors=
 stderr = (out / "graph_cli_repl_stderr.log").read_text(encoding="utf-8", errors="replace")
 ctest = (out / "ctest_boundary.log").read_text(encoding="utf-8", errors="replace")
 host_test = (out / "test_host_adapter.log").read_text(encoding="utf-8", errors="replace")
+formatter_test = (out / "test_cli_dirty_snapshot_formatter.log").read_text(
+    encoding="utf-8", errors="replace"
+)
 
 ansi_re = re.compile(r"\x1b\[[0-9;?]*[ -/]*[@-~]")
 clean_stdout = ansi_re.sub("", stdout).replace("\r", "")
@@ -75,7 +83,8 @@ clean_stdout = ansi_re.sub("", stdout).replace("\r", "")
 actual = {
     "cli_boundary_rg_passed": boundary_ok,
     "ctest_boundary_passed": "100% tests passed" in ctest,
-    "host_adapter_tests_passed": "[  PASSED  ] 9 tests." in host_test,
+    "host_adapter_tests_passed": "[  PASSED  ] 10 tests." in host_test,
+    "dirty_snapshot_formatter_tests_passed": "[  PASSED  ] 1 test." in formatter_test,
     "graph_cli_repl_returncode": repl_rc,
     "graph_cli_loaded_session": "Loaded session 'phase2_cli_host'" in clean_stdout,
     "graph_cli_compute_finished": "Computation finished." in clean_stdout,
@@ -85,6 +94,7 @@ expected = {
     "cli_boundary_rg_passed": True,
     "ctest_boundary_passed": True,
     "host_adapter_tests_passed": True,
+    "dirty_snapshot_formatter_tests_passed": True,
     "graph_cli_repl_returncode": 0,
     "graph_cli_loaded_session": True,
     "graph_cli_compute_finished": True,
@@ -122,6 +132,8 @@ overall = all(checks.values())
             "- `ctest --output-on-failure --test-dir build -R 'Phase2(CliHost|HostAdapter)Scan|PublicHeaderSelfContainment'`",
             "- `cmake --build build --target test_host_adapter -j`",
             "- `./build/tests/test_host_adapter`",
+            "- `cmake --build build --target test_cli_dirty_snapshot_formatter -j`",
+            "- `./build/tests/test_cli_dirty_snapshot_formatter`",
             "- `HOME=$OUT/home ./build/bin/graph_cli --repl < $OUT/repl_commands.txt`",
             "",
             "## Evidence files",
@@ -130,6 +142,7 @@ overall = all(checks.values())
             "- `build_graph_cli.log`",
             "- `ctest_boundary.log`",
             "- `test_host_adapter.log`",
+            "- `test_cli_dirty_snapshot_formatter.log`",
             "- `graph_cli_repl_stdout.clean.log`",
             "- `graph_cli_repl_stderr.log`",
             "- `expected.json`, `actual.json`, `compare.log`",
@@ -139,6 +152,8 @@ overall = all(checks.values())
             f"- CLI boundary scan passed: {actual['cli_boundary_rg_passed']}",
             f"- Boundary CTest passed: {actual['ctest_boundary_passed']}",
             f"- Host adapter tests passed: {actual['host_adapter_tests_passed']}",
+            "- Dirty snapshot formatter tests passed: "
+            f"{actual['dirty_snapshot_formatter_tests_passed']}",
             f"- REPL returned 0: {actual['graph_cli_repl_returncode'] == 0}",
             f"- Loaded session observed: {actual['graph_cli_loaded_session']}",
             f"- Compute finished observed: {actual['graph_cli_compute_finished']}",
@@ -151,7 +166,9 @@ overall = all(checks.values())
             "GraphModel, GraphRuntime, direct kernel includes, graph_model.hpp,",
             "or old cmd_* calls. The REPL transcript proves `load ...` and",
             "`compute all parallel nosave m` still complete through the default",
-            "embedded Host path.",
+            "embedded Host path. The Host adapter and formatter tests prove",
+            "`inspect dirty` can still display monolithic dirty-region and",
+            "edge-mapping diagnostics after the CLI Host migration.",
         ]
     ) + "\n",
     encoding="utf-8",

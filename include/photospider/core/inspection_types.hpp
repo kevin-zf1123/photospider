@@ -185,6 +185,21 @@ enum class DirtySourceLifecycleState {
 };
 
 /**
+ * @brief Direction of a dirty ROI mapping across a graph edge.
+ *
+ * @throws Nothing.
+ * @note The value describes diagnostic propagation provenance only; it is not a
+ *       scheduler dependency direction or mutable graph edge handle.
+ */
+enum class DirtyEdgeDirection {
+  /** @brief Dirty source ROI projected downstream to affected output. */
+  ForwardAffected,
+
+  /** @brief Target dirty ROI projected upstream to required input. */
+  BackwardDemand,
+};
+
+/**
  * @brief Dirty source state copied for frontend inspection.
  *
  * @throws Nothing for value operations except vector allocation on mutation.
@@ -235,6 +250,61 @@ struct DirtyTileSnapshot {
 };
 
 /**
+ * @brief Monolithic dirty work record copied for frontend inspection.
+ *
+ * The record identifies a node whose dirty work could not be represented as
+ * tiles and therefore must be recomputed as a single domain-local region.
+ *
+ * @throws Nothing.
+ * @note This is diagnostic planning state. It does not expose task ownership,
+ *       scheduler queues, or mutable node output buffers.
+ */
+struct DirtyMonolithicRegionSnapshot {
+  /** @brief Node whose output region is dirty. */
+  NodeId node;
+
+  /** @brief Compute domain represented by the dirty record. */
+  DirtyDomain domain = DirtyDomain::HighPrecision;
+
+  /** @brief Domain-local pixel ROI covered by the monolithic record. */
+  PixelRect pixel_roi;
+
+  /** @brief True when the whole node output is represented by this record. */
+  bool whole_output = true;
+};
+
+/**
+ * @brief Dirty ROI propagation record copied for frontend inspection.
+ *
+ * The record preserves the source and target node ids plus the ROI on both
+ * sides of one graph edge so diagnostic views can explain why upstream or
+ * downstream dirty work was selected.
+ *
+ * @throws Nothing.
+ * @note Edge mappings are value snapshots. They must not be interpreted as
+ *       runtime dependency counters or as writable graph topology.
+ */
+struct DirtyEdgeMappingSnapshot {
+  /** @brief Upstream node id for the mapped edge. */
+  NodeId from_node;
+
+  /** @brief Downstream node id for the mapped edge. */
+  NodeId to_node;
+
+  /** @brief Compute domain represented by the mapping. */
+  DirtyDomain domain = DirtyDomain::HighPrecision;
+
+  /** @brief ROI on the upstream side of the edge. */
+  PixelRect from_roi;
+
+  /** @brief ROI on the downstream side of the edge. */
+  PixelRect to_roi;
+
+  /** @brief Direction of the recorded dirty propagation. */
+  DirtyEdgeDirection direction = DirtyEdgeDirection::BackwardDemand;
+};
+
+/**
  * @brief Dirty-region snapshot copied from the kernel for inspection.
  *
  * @throws Nothing for value operations except vector allocation on mutation.
@@ -251,8 +321,14 @@ struct DirtyRegionInspectionSnapshot {
   /** @brief Domain-local dirty tiles derived for recomputation. */
   std::vector<DirtyTileSnapshot> dirty_tiles;
 
+  /** @brief Monolithic dirty records derived for non-tiled recomputation. */
+  std::vector<DirtyMonolithicRegionSnapshot> dirty_monolithic_nodes;
+
   /** @brief Dirty ROIs keyed by node id value after propagation. */
   std::map<int, std::vector<PixelRect>> actual_dirty_rois;
+
+  /** @brief Edge-level ROI mappings produced by dirty propagation. */
+  std::vector<DirtyEdgeMappingSnapshot> edge_mappings;
 };
 
 /**
