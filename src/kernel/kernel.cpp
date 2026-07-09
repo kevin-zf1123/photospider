@@ -15,7 +15,11 @@
 
 #include <filesystem>
 #include <iostream>
+#include <memory>
 #include <sstream>
+#include <string>
+#include <utility>
+#include <vector>
 
 #include "kernel/scheduler/scheduler_factory.hpp"
 
@@ -105,6 +109,7 @@ bool Kernel::close_graph(const std::string& name) {
   }
   it->second->stop();
   graphs_.erase(it);
+  last_error_.erase(name);
   return true;
 }
 

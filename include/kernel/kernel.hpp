@@ -172,6 +172,18 @@ class Kernel {
                                         const std::string& config_path = "",
                                         const std::string& cache_root_dir = "");
 
+  /**
+   * @brief Stops and removes a loaded graph runtime.
+   *
+   * @param name Graph session name to close.
+   * @return true when a runtime existed and was removed; false when the session
+   *         name is unknown.
+   * @throws Any exception propagated while stopping the runtime; no exception
+   *         is thrown when the graph name is unknown.
+   * @note Closing first stops the runtime, then erases the owned runtime and
+   *       stored LastError for the same graph name. Clearing the diagnostic
+   *       prevents stale compute errors after the session is closed.
+   */
   bool close_graph(const std::string& name);
   std::vector<std::string> list_graphs() const;
 
