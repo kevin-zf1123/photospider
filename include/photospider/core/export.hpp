@@ -12,7 +12,21 @@
  *       value types that do not cross a dynamic-library ABI do not need it.
  */
 
-#if defined(_WIN32)
+#if defined(PHOTOSPIDER_PLUGIN_BUILD)
+/**
+ * @brief Leaves Photospider declarations unannotated inside operation plugins.
+ *
+ * Operation plugin targets are loaded through a registrar ABI and may link only
+ * the narrow operation-plugin shim rather than the backend library. Keeping
+ * `PHOTOSPIDER_API` empty in those plugin builds prevents Windows
+ * `dllimport` annotations from requiring backend DLL symbols for public value
+ * contracts such as `ps::GraphError`.
+ *
+ * @note Plugin entry points must use `PLUGIN_API`; this macro does not export
+ *       plugin registrar symbols or change callback ownership/lifetime rules.
+ */
+#define PHOTOSPIDER_API
+#elif defined(_WIN32)
 #if defined(PHOTOSPIDER_LIB_BUILD)
 /**
  * @brief Marks Photospider symbols exported by the backend library.

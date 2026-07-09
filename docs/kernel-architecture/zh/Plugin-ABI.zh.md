@@ -49,7 +49,13 @@ operation 注册、plugin manager、plugin loader、graph、scheduler 或 comput
 
 符号可见性规则：
 
-- Operation plugin 只通过 `PLUGIN_API` 导出 `register_photospider_ops_v1`。
+- Operation plugin registrar entry 使用 `PLUGIN_API`，loader 只把
+  `register_photospider_ops_v1` 视为受支持的 operation-plugin ABI 入口。
+  任何其他外部可见的 callback helper 符号都不是 loader 入口或兼容性契约。
+- Operation plugin target 会定义 `PHOTOSPIDER_PLUGIN_BUILD`，因此即使在
+  Windows 上，`PHOTOSPIDER_API` 也保持为空。插件 callback 代码不得通过
+  `ps::GraphError` 等公共 value contract 导入 backend library 符号；只有
+  registrar 入口通过 `PLUGIN_API` 导出。
 - Loader 解析精确的带版本符号名。
 - Shim 导出插件 callback 所需的运行时 adapter helper 符号；Windows 上使用 `WINDOWS_EXPORT_ALL_SYMBOLS`。
 - 这仍然是 C++ ABI 边界，因为 callback 使用 `std::function`、`NodeOutput`、`Node` 和 `OpMetadata`。
