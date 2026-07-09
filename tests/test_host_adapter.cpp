@@ -91,6 +91,10 @@ void register_host_adapter_ops() {
               cv::Mat mat = toCvMat(output.image_buffer);
               mat.setTo(5.0f);
               output.space.absolute_roi = cv::Rect(0, 0, roi_width, roi_height);
+              output.space.inverse_matrix = {2.0, 0.0, 5.0, 0.0, 3.0,
+                                             7.0, 0.0, 0.0, 1.0};
+              output.space.local_inverse_matrix = {1.0,  0.0, 11.0, 0.0, 1.0,
+                                                   13.0, 0.0, 0.0,  1.0};
               output.debug.compute_device = "host-adapter-resized-test";
               return output;
             }));
@@ -578,6 +582,10 @@ TEST(EmbeddedHostAdapter,
   EXPECT_EQ(node_view.value.space->extent.height, 4);
   EXPECT_EQ(node_view.value.space->absolute_roi.width, 12);
   EXPECT_EQ(node_view.value.space->absolute_roi.height, 9);
+  EXPECT_EQ(node_view.value.space->inverse_matrix[2], 5.0);
+  EXPECT_EQ(node_view.value.space->inverse_matrix[5], 7.0);
+  EXPECT_EQ(node_view.value.space->local_inverse_matrix[2], 11.0);
+  EXPECT_EQ(node_view.value.space->local_inverse_matrix[5], 13.0);
 
   auto graph_view = host->inspect_graph(session);
   ASSERT_TRUE(graph_view.status.ok) << graph_view.status.message;
@@ -587,6 +595,10 @@ TEST(EmbeddedHostAdapter,
   EXPECT_EQ(graph_view.value.nodes.front().space->extent.height, 4);
   EXPECT_EQ(graph_view.value.nodes.front().space->absolute_roi.width, 12);
   EXPECT_EQ(graph_view.value.nodes.front().space->absolute_roi.height, 9);
+  EXPECT_EQ(graph_view.value.nodes.front().space->local_inverse_matrix[2],
+            11.0);
+  EXPECT_EQ(graph_view.value.nodes.front().space->local_inverse_matrix[5],
+            13.0);
 
   auto tree = host->dependency_tree(session, std::nullopt, true);
   ASSERT_TRUE(tree.status.ok) << tree.status.message;
@@ -596,6 +608,10 @@ TEST(EmbeddedHostAdapter,
   EXPECT_EQ(tree.value.entries.front().node.space->extent.height, 4);
   EXPECT_EQ(tree.value.entries.front().node.space->absolute_roi.width, 12);
   EXPECT_EQ(tree.value.entries.front().node.space->absolute_roi.height, 9);
+  EXPECT_EQ(tree.value.entries.front().node.space->local_inverse_matrix[2],
+            11.0);
+  EXPECT_EQ(tree.value.entries.front().node.space->local_inverse_matrix[5],
+            13.0);
 }
 
 TEST(EmbeddedHostAdapter, AsyncComputeCanFinishAfterCloseGraphRequest) {

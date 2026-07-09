@@ -98,6 +98,9 @@ struct SpatialSnapshot {
 
   /** @brief Row-major inverse transform matrix. */
   double inverse_matrix[9] = {1, 0, 0, 0, 1, 0, 0, 0, 1};
+
+  /** @brief Row-major local inverse transform used for upstream ROI mapping. */
+  double local_inverse_matrix[9] = {1, 0, 0, 0, 1, 0, 0, 0, 1};
 };
 
 /**

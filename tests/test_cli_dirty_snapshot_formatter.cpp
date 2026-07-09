@@ -171,6 +171,28 @@ TEST(CliDirtySnapshotFormatter, RendersMonolithicAndEdgeMappings) {
             std::string::npos);
 }
 
+TEST(CliNodeInspectionFormatter, RendersLocalInverseMatrix) {
+  NodeInspectionView node;
+  node.id = NodeId{3};
+  node.name = "spatial_node";
+  node.type = "image_process";
+  node.subtype = "crop";
+  node.has_cached_output = true;
+  node.source_label = std::string("computed");
+  node.debug = DebugMetadataSnapshot{};
+  node.space = SpatialSnapshot{};
+  node.space->absolute_roi = PixelRect{4, 5, 6, 7};
+  node.space->local_inverse_matrix[2] = 11.0;
+  node.space->local_inverse_matrix[5] = 13.0;
+
+  const std::string text = format_node_inspection(node);
+
+  EXPECT_NE(text.find("Inverse (Global)"), std::string::npos);
+  EXPECT_NE(text.find("Inverse (Local)"), std::string::npos);
+  EXPECT_NE(text.find("11"), std::string::npos);
+  EXPECT_NE(text.find("13"), std::string::npos);
+}
+
 TEST(CliDirtySnapshotFormatter,
      InspectDirtyCommandRendersNonEmptyHostSnapshot) {
   register_dirty_inspect_ops();

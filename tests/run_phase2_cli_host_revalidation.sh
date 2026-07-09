@@ -2,6 +2,7 @@
 set -euo pipefail
 
 OUT="${1:-tests/results/codebase-refactor/phase-2-cli-host}"
+GRAPH_CLI_BIN="${PHOTOSPIDER_REVALIDATION_GRAPH_CLI:-./build/bin/graph_cli}"
 mkdir -p "$OUT"
 
 BOUNDARY_PATTERN='InteractionService|Kernel::|svc\.kernel\(|GraphModel|GraphRuntime|kernel/interaction|kernel/kernel|graph_model.hpp|cmd_'
@@ -47,17 +48,20 @@ cmake --build build --target test_cli_dirty_snapshot_formatter -j \
 cat >"$OUT/repl_commands.txt" <<'CMDS'
 load phase2_cli_host util/testcases/propagation_linear_test.yaml
 compute all parallel nosave m
+inspect all
 inspect dirty
 exit
 n
 CMDS
 
 mkdir -p "$OUT/home"
-HOME="$PWD/$OUT/home" ./build/bin/graph_cli --repl \
+set +e
+HOME="$PWD/$OUT/home" "$GRAPH_CLI_BIN" --repl \
   <"$OUT/repl_commands.txt" \
   >"$OUT/graph_cli_repl_stdout.log" \
   2>"$OUT/graph_cli_repl_stderr.log"
 REPL_RC=$?
+set -e
 
 python3 - "$OUT" "$BOUNDARY_OK" "$REPL_RC" <<'PY'
 import json
@@ -90,7 +94,11 @@ actual = {
         "EmbeddedHostAdapter.ComputeImagePreservesBackendFailureStatus"
         in host_test
     ),
-    "dirty_snapshot_formatter_tests_passed": "[  PASSED  ] 2 tests." in formatter_test,
+    "dirty_snapshot_formatter_tests_passed": "[  PASSED  ] 3 tests." in formatter_test,
+    "cli_local_inverse_formatter_test_passed": (
+        "[       OK ] CliNodeInspectionFormatter.RendersLocalInverseMatrix"
+        in formatter_test
+    ),
     "cli_inspect_dirty_non_empty_test_passed": (
         "[       OK ] "
         "CliDirtySnapshotFormatter.InspectDirtyCommandRendersNonEmptyHostSnapshot"
@@ -99,6 +107,7 @@ actual = {
     "graph_cli_repl_returncode": repl_rc,
     "graph_cli_loaded_session": "Loaded session 'phase2_cli_host'" in clean_stdout,
     "graph_cli_compute_finished": "Computation finished." in clean_stdout,
+    "graph_cli_inspect_all_local_inverse": "Inverse (Local)" in clean_stdout,
     "graph_cli_inspect_dirty_ran": "inspect dirty" in clean_stdout,
     "graph_cli_inspect_dirty_no_snapshot": "(No dirty snapshot recorded.)" in clean_stdout,
     "graph_cli_stderr_warnings": [line for line in stderr.splitlines() if line.strip()],
@@ -109,10 +118,12 @@ expected = {
     "host_adapter_tests_passed": True,
     "host_image_compute_status_test_passed": True,
     "dirty_snapshot_formatter_tests_passed": True,
+    "cli_local_inverse_formatter_test_passed": True,
     "cli_inspect_dirty_non_empty_test_passed": True,
     "graph_cli_repl_returncode": 0,
     "graph_cli_loaded_session": True,
     "graph_cli_compute_finished": True,
+    "graph_cli_inspect_all_local_inverse": True,
     "graph_cli_inspect_dirty_ran": True,
     "graph_cli_inspect_dirty_no_snapshot": True,
 }
@@ -120,6 +131,34 @@ checks = {
     key: actual.get(key) == value for key, value in expected.items()
 }
 overall = all(checks.values())
+if overall:
+    interpretation_lines = [
+        "The boundary scan proves the CLI entrypoint and common/frontend",
+        "helpers no longer name InteractionService, Kernel request types,",
+        "GraphModel, GraphRuntime, direct kernel includes, graph_model.hpp,",
+        "or old cmd_* calls. The REPL transcript proves `load ...`,",
+        "`compute all parallel nosave m`, `inspect all`, and",
+        "`inspect dirty` still complete",
+        "through the default embedded Host path. The Host adapter status",
+        "test proves image compute preserves backend NotFound and",
+        "NoOperation classifications through the Host Result/last_error",
+        "surface instead of collapsing them into ComputeError. The Host",
+        "adapter and formatter tests prove local inverse spatial metadata",
+        "survives the Host boundary and remains visible in inspect output.",
+        "The Host adapter, formatter, and command-handler tests prove",
+        "`inspect dirty` can still display non-empty monolithic",
+        "dirty-region and edge-mapping diagnostics after the CLI Host",
+        "migration.",
+    ]
+else:
+    interpretation_lines = [
+        "The script preserved REPL stdout, stderr, and the non-zero return",
+        "code before writing actual.json, expected.json, compare.log, and",
+        "summary.md. The failed checks identify the missing transcript",
+        "markers that caused the final comparison to fail, so REPL failures",
+        "are diagnosable from evidence instead of being hidden by early shell",
+        "exit.",
+    ]
 (out / "actual.json").write_text(json.dumps(actual, indent=2, sort_keys=True) + "\n", encoding="utf-8")
 (out / "expected.json").write_text(json.dumps(expected, indent=2, sort_keys=True) + "\n", encoding="utf-8")
 (out / "compare.log").write_text(
@@ -152,7 +191,7 @@ overall = all(checks.values())
             "- `./build/tests/test_host_adapter`",
             "- `cmake --build build --target test_cli_dirty_snapshot_formatter -j`",
             "- `./build/tests/test_cli_dirty_snapshot_formatter`",
-            "- `HOME=$OUT/home ./build/bin/graph_cli --repl < $OUT/repl_commands.txt`",
+            "- `HOME=$OUT/home $GRAPH_CLI_BIN --repl < $OUT/repl_commands.txt`",
             "",
             "## Evidence files",
             "",
@@ -174,11 +213,15 @@ overall = all(checks.values())
             f"{actual['host_image_compute_status_test_passed']}",
             "- Dirty snapshot formatter tests passed: "
             f"{actual['dirty_snapshot_formatter_tests_passed']}",
+            "- Local inverse formatter test passed: "
+            f"{actual['cli_local_inverse_formatter_test_passed']}",
             "- Non-empty inspect dirty command test passed: "
             f"{actual['cli_inspect_dirty_non_empty_test_passed']}",
             f"- REPL returned 0: {actual['graph_cli_repl_returncode'] == 0}",
             f"- Loaded session observed: {actual['graph_cli_loaded_session']}",
             f"- Compute finished observed: {actual['graph_cli_compute_finished']}",
+            "- Inspect all local inverse output observed: "
+            f"{actual['graph_cli_inspect_all_local_inverse']}",
             f"- Inspect dirty command observed: {actual['graph_cli_inspect_dirty_ran']}",
             "- Inspect dirty no-snapshot output observed: "
             f"{actual['graph_cli_inspect_dirty_no_snapshot']}",
@@ -186,19 +229,7 @@ overall = all(checks.values())
             "",
             "## Interpretation",
             "",
-            "The boundary scan proves the CLI entrypoint and common/frontend",
-            "helpers no longer name InteractionService, Kernel request types,",
-            "GraphModel, GraphRuntime, direct kernel includes, graph_model.hpp,",
-            "or old cmd_* calls. The REPL transcript proves `load ...`,",
-            "`compute all parallel nosave m`, and `inspect dirty` still complete",
-            "through the default embedded Host path. The Host adapter status",
-            "test proves image compute preserves backend NotFound and",
-            "NoOperation classifications through the Host Result/last_error",
-            "surface instead of collapsing them into ComputeError. The Host",
-            "adapter, formatter, and command-handler tests prove `inspect dirty`",
-            "can still display non-empty monolithic dirty-region and",
-            "edge-mapping diagnostics after the CLI Host migration.",
-        ]
+        ] + interpretation_lines
     ) + "\n",
     encoding="utf-8",
 )
