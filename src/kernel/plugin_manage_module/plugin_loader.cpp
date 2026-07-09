@@ -4,11 +4,13 @@
 #include <map>
 #include <memory>
 #include <optional>
+#include <stdexcept>
 #include <string>
 #include <utility>
 #include <vector>
 
-#include "ps_types.hpp"  // NOLINT(build/include_subdir)
+#include "plugin_api.hpp"  // NOLINT(build/include_subdir)
+#include "ps_types.hpp"    // NOLINT(build/include_subdir)
 
 #ifdef _WIN32
 #include <windows.h>
@@ -19,7 +21,265 @@
 namespace ps {
 namespace {
 
-using RegisterOpsFunc = void (*)();
+using RegisterOpsFunc = RegisterPhotospiderOpsV1;
+
+/**
+ * @brief Host context passed through the operation plugin registrar.
+ *
+ * The context points at the host-owned registry that should receive all
+ * registration calls made by a plugin. It has stack lifetime inside
+ * `load_one_plugin` and is valid only while the plugin registration entry
+ * point is executing.
+ *
+ * @note Plugins receive only the opaque `user_data` pointer inside
+ * `OperationPluginRegistrar`; they must not retain it after registration.
+ */
+struct HostRegistrarContext {
+  /** @brief Host registry that owns all operation callbacks and metadata. */
+  OpRegistry* registry = nullptr;
+};
+
+/**
+ * @brief Returns the host registrar context or reports ABI misuse.
+ *
+ * @param user_data Opaque pointer supplied by `OperationPluginRegistrar`.
+ * @return Mutable context reference owned by the loader stack frame.
+ * @throws std::invalid_argument if the pointer or registry is missing.
+ * @note A missing context indicates a loader bug or a plugin calling a copied
+ * registrar after its valid registration lifetime.
+ */
+HostRegistrarContext& require_registrar_context(void* user_data) {
+  if (!user_data) {
+    throw std::invalid_argument("Operation plugin registrar has no context.");
+  }
+  auto& context = *static_cast<HostRegistrarContext*>(user_data);
+  if (!context.registry) {
+    throw std::invalid_argument("Operation plugin registrar has no registry.");
+  }
+  return context;
+}
+
+/**
+ * @brief Converts a borrowed operation name segment to a C++ string.
+ *
+ * @param value Borrowed null-terminated type or subtype string.
+ * @param label Diagnostic label used for invalid input.
+ * @return Copied operation name segment.
+ * @throws std::invalid_argument when `value` is null or empty.
+ * @throws std::bad_alloc if copying the string allocates and fails.
+ * @note The registrar copies names immediately so plugin-owned string storage
+ * does not have to outlive the registration callback.
+ */
+std::string require_name_segment(const char* value, const char* label) {
+  if (!value || value[0] == '\0') {
+    throw std::invalid_argument(std::string("Operation plugin missing ") +
+                                label + ".");
+  }
+  return std::string(value);
+}
+
+/**
+ * @brief Registers an HP monolithic callback through the host registry.
+ *
+ * @param user_data Opaque registrar context created by the loader.
+ * @param type Borrowed operation type string.
+ * @param subtype Borrowed operation subtype string.
+ * @param fn Monolithic callback moved from the plugin into the registry.
+ * @param meta Metadata associated with the HP implementation.
+ * @throws std::invalid_argument for invalid registrar context or names.
+ * @throws Exceptions from `OpRegistry` callback storage may propagate.
+ * @note This callback is the host-side implementation of
+ * `OperationPluginRegistrar::register_op_hp_monolithic`.
+ */
+void registrar_register_hp_monolithic(void* user_data, const char* type,
+                                      const char* subtype, MonolithicOpFunc fn,
+                                      OpMetadata meta) {
+  auto& context = require_registrar_context(user_data);
+  context.registry->register_op_hp_monolithic(
+      require_name_segment(type, "operation type"),
+      require_name_segment(subtype, "operation subtype"), std::move(fn), meta);
+}
+
+/**
+ * @brief Registers an HP tiled callback through the host registry.
+ *
+ * @param user_data Opaque registrar context created by the loader.
+ * @param type Borrowed operation type string.
+ * @param subtype Borrowed operation subtype string.
+ * @param fn Tiled callback moved from the plugin into the registry.
+ * @param meta Metadata associated with the HP tiled implementation.
+ * @throws std::invalid_argument for invalid registrar context or names.
+ * @throws Exceptions from `OpRegistry` callback storage may propagate.
+ * @note This callback is the host-side implementation of
+ * `OperationPluginRegistrar::register_op_hp_tiled`.
+ */
+void registrar_register_hp_tiled(void* user_data, const char* type,
+                                 const char* subtype, TileOpFunc fn,
+                                 OpMetadata meta) {
+  auto& context = require_registrar_context(user_data);
+  context.registry->register_op_hp_tiled(
+      require_name_segment(type, "operation type"),
+      require_name_segment(subtype, "operation subtype"), std::move(fn), meta);
+}
+
+/**
+ * @brief Registers an RT tiled callback through the host registry.
+ *
+ * @param user_data Opaque registrar context created by the loader.
+ * @param type Borrowed operation type string.
+ * @param subtype Borrowed operation subtype string.
+ * @param fn Tiled callback moved from the plugin into the registry.
+ * @param meta Metadata associated with the RT tiled implementation.
+ * @throws std::invalid_argument for invalid registrar context or names.
+ * @throws Exceptions from `OpRegistry` callback storage may propagate.
+ * @note This callback is the host-side implementation of
+ * `OperationPluginRegistrar::register_op_rt_tiled`.
+ */
+void registrar_register_rt_tiled(void* user_data, const char* type,
+                                 const char* subtype, TileOpFunc fn,
+                                 OpMetadata meta) {
+  auto& context = require_registrar_context(user_data);
+  context.registry->register_op_rt_tiled(
+      require_name_segment(type, "operation type"),
+      require_name_segment(subtype, "operation subtype"), std::move(fn), meta);
+}
+
+/**
+ * @brief Registers a dirty ROI propagator through the host registry.
+ *
+ * @param user_data Opaque registrar context created by the loader.
+ * @param type Borrowed operation type string.
+ * @param subtype Borrowed operation subtype string.
+ * @param fn Propagator moved from the plugin into the registry.
+ * @throws std::invalid_argument for invalid registrar context or names.
+ * @throws Exceptions from `OpRegistry` callback storage may propagate.
+ * @note The active registration capture records the touched operation key.
+ */
+void registrar_register_dirty_propagator(void* user_data, const char* type,
+                                         const char* subtype,
+                                         DirtyRoiPropFunc fn) {
+  auto& context = require_registrar_context(user_data);
+  context.registry->register_dirty_propagator(
+      require_name_segment(type, "operation type"),
+      require_name_segment(subtype, "operation subtype"), std::move(fn));
+}
+
+/**
+ * @brief Registers a forward ROI propagator through the host registry.
+ *
+ * @param user_data Opaque registrar context created by the loader.
+ * @param type Borrowed operation type string.
+ * @param subtype Borrowed operation subtype string.
+ * @param fn Propagator moved from the plugin into the registry.
+ * @throws std::invalid_argument for invalid registrar context or names.
+ * @throws Exceptions from `OpRegistry` callback storage may propagate.
+ * @note The active registration capture records the touched operation key.
+ */
+void registrar_register_forward_propagator(void* user_data, const char* type,
+                                           const char* subtype,
+                                           ForwardRoiPropFunc fn) {
+  auto& context = require_registrar_context(user_data);
+  context.registry->register_forward_propagator(
+      require_name_segment(type, "operation type"),
+      require_name_segment(subtype, "operation subtype"), std::move(fn));
+}
+
+/**
+ * @brief Registers a dependency LUT builder through the host registry.
+ *
+ * @param user_data Opaque registrar context created by the loader.
+ * @param type Borrowed operation type string.
+ * @param subtype Borrowed operation subtype string.
+ * @param fn Builder moved from the plugin into the registry.
+ * @param mark_data_dependent Whether the operation is marked data-dependent.
+ * @throws std::invalid_argument for invalid registrar context or names.
+ * @throws Exceptions from `OpRegistry` callback storage may propagate.
+ * @note The active registration capture records the touched operation key.
+ */
+void registrar_register_dependency_builder(void* user_data, const char* type,
+                                           const char* subtype,
+                                           DependencyLutBuilder fn,
+                                           bool mark_data_dependent) {
+  auto& context = require_registrar_context(user_data);
+  context.registry->register_dependency_builder(
+      require_name_segment(type, "operation type"),
+      require_name_segment(subtype, "operation subtype"), std::move(fn),
+      mark_data_dependent);
+}
+
+/**
+ * @brief Registers a device-specific monolithic callback through the host.
+ *
+ * @param user_data Opaque registrar context created by the loader.
+ * @param type Borrowed operation type string.
+ * @param subtype Borrowed operation subtype string.
+ * @param device Device capability label for the implementation.
+ * @param fn Monolithic callback moved from the plugin into the registry.
+ * @param meta Metadata associated with the device implementation.
+ * @throws std::invalid_argument for invalid registrar context or names.
+ * @throws Exceptions from `OpRegistry` callback storage may propagate.
+ * @note This callback preserves the host-owned implementation selection policy.
+ */
+void registrar_register_device_monolithic(void* user_data, const char* type,
+                                          const char* subtype, Device device,
+                                          MonolithicOpFunc fn,
+                                          OpMetadata meta) {
+  auto& context = require_registrar_context(user_data);
+  context.registry->register_impl(
+      require_name_segment(type, "operation type"),
+      require_name_segment(subtype, "operation subtype"), device, std::move(fn),
+      meta);
+}
+
+/**
+ * @brief Registers a device-specific tiled callback through the host.
+ *
+ * @param user_data Opaque registrar context created by the loader.
+ * @param type Borrowed operation type string.
+ * @param subtype Borrowed operation subtype string.
+ * @param device Device capability label for the implementation.
+ * @param fn Tiled callback moved from the plugin into the registry.
+ * @param meta Metadata associated with the device implementation.
+ * @throws std::invalid_argument for invalid registrar context or names.
+ * @throws Exceptions from `OpRegistry` callback storage may propagate.
+ * @note This callback preserves the host-owned implementation selection policy.
+ */
+void registrar_register_device_tiled(void* user_data, const char* type,
+                                     const char* subtype, Device device,
+                                     TileOpFunc fn, OpMetadata meta) {
+  auto& context = require_registrar_context(user_data);
+  context.registry->register_impl(
+      require_name_segment(type, "operation type"),
+      require_name_segment(subtype, "operation subtype"), device, std::move(fn),
+      meta);
+}
+
+/**
+ * @brief Builds the registrar table passed to a plugin registration entry.
+ *
+ * @param context Host context whose lifetime covers the registration call.
+ * @return Registrar populated with every supported operation registration
+ * callback.
+ * @throws Nothing.
+ * @note The returned value is borrowed by plugin code only for the immediate
+ * `register_photospider_ops_v1` call.
+ */
+OperationPluginRegistrar make_operation_plugin_registrar(
+    HostRegistrarContext& context) {
+  OperationPluginRegistrar registrar;
+  registrar.user_data = &context;
+  registrar.register_hp_monolithic = registrar_register_hp_monolithic;
+  registrar.register_hp_tiled = registrar_register_hp_tiled;
+  registrar.register_rt_tiled = registrar_register_rt_tiled;
+  registrar.register_dirty_propagator_fn = registrar_register_dirty_propagator;
+  registrar.register_forward_propagator_fn =
+      registrar_register_forward_propagator;
+  registrar.register_dependency_builder_fn =
+      registrar_register_dependency_builder;
+  registrar.register_device_monolithic = registrar_register_device_monolithic;
+  registrar.register_device_tiled = registrar_register_device_tiled;
+  return registrar;
+}
 
 /**
  * @brief Returns the platform shared-library suffix for operation plugins.
@@ -172,7 +432,12 @@ class DynamicLibrary final {
   explicit DynamicLibrary(void* handle)
       : handle_(handle), library_(make_library_lifetime(handle)) {}
 
+  /** @brief Native dynamic-library handle used for symbol lookup. */
   void* handle_ = nullptr;
+  /**
+   * @brief Shared lifetime owner that unloads the native library after the last
+   * plugin handle releases it.
+   */
   std::shared_ptr<void> library_;
 };
 
@@ -184,7 +449,12 @@ class DynamicLibrary final {
  * explicit single-star suffix both scan one directory level.
  */
 struct ScanPattern {
+  /** @brief Directory root visited by the plugin scanner. */
   fs::path base_dir;
+  /**
+   * @brief True when the raw scan pattern requested recursive
+   * slash-double-star walking.
+   */
   bool recursive = false;
 };
 
@@ -314,9 +584,9 @@ std::map<std::string, std::optional<std::string>> collect_previous_sources(
  * @param result Accumulated load result.
  * @throws std::filesystem_error from `fs::absolute`.
  * @throws std::bad_alloc from result, map, vector, or library owner allocation.
- * @note The handle is stored only after `register_photospider_ops` completes.
- * Failure paths close the library and restore keys touched before an
- * exception to their previous registry state.
+ * @note The handle is stored only after `register_photospider_ops_v1`
+ * completes. Failure paths close the library and restore keys touched before
+ * an exception to their previous registry state.
  */
 void load_one_plugin(const fs::path& path,
                      std::map<std::string, std::string>& op_sources,
@@ -338,7 +608,7 @@ void load_one_plugin(const fs::path& path,
   }
 
   auto register_ops = library->resolve<RegisterOpsFunc>(
-      "register_photospider_ops", error_message);
+      kOperationPluginRegisterSymbolV1, error_message);
   if (!register_ops) {
     result.errors.push_back(
         {absolute_path, GraphErrc::InvalidParameter, error_message});
@@ -348,16 +618,21 @@ void load_one_plugin(const fs::path& path,
   auto& registry = OpRegistry::instance();
   OpRegistry::RegistrationCapture registration_capture;
   try {
-    registry.capture_registration([&]() { register_ops(); },
-                                  registration_capture);
+    registry.capture_registration(
+        [&]() {
+          HostRegistrarContext context{&registry};
+          auto registrar = make_operation_plugin_registrar(context);
+          register_ops(&registrar);
+        },
+        registration_capture);
   } catch (const std::exception& e) {
     registry.restore_registration_capture(registration_capture);
     result.errors.push_back({absolute_path, GraphErrc::Unknown, e.what()});
     return;
   } catch (...) {
     registry.restore_registration_capture(registration_capture);
-    result.errors.push_back(
-        {absolute_path, GraphErrc::Unknown, "register_photospider_ops threw"});
+    result.errors.push_back({absolute_path, GraphErrc::Unknown,
+                             "register_photospider_ops_v1 threw"});
     return;
   }
 

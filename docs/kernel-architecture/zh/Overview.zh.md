@@ -21,10 +21,11 @@ scheduler runtime 执行 ready task callback。
 | Target | 角色 |
 | --- | --- |
 | `photospider_core_types` | 核心数据类型、OpenCV 适配器、YAML 节点解析、内置 op registry 源。 |
+| `photospider_operation_plugin_shim` | 面向动态 operation callback 代码的窄共享 helper 库，用于提供 `ImageBuffer`/OpenCV adapter 符号，不包含 registry 状态。 |
 | `photospider_graph` | `GraphModel` 加图 IO、遍历、缓存和 inspect 服务。 |
 | `photospider_plugin` | 动态操作插件管理器和加载器。 |
 | `photospider_compute` | 内核 facade、交互运行时、调度器、计算服务、事件。 |
-| `photospider_lib` | CLI、插件和 embedded Host 前端链接的共享后端库。 |
+| `photospider_lib` | CLI 和 embedded Host 前端链接的共享后端库；operation plugin 通过 `OperationPluginRegistrar` 和 `register_photospider_ops_v1` 注册，而不是为了 registry 状态链接该后端。 |
 | `photospider_cli_common` | REPL 命令、TUI 编辑器、自动补全、CLI 配置。 |
 | `graph_cli` | 终端用户可执行文件。 |
 
@@ -90,7 +91,7 @@ graph TD
 | `GraphCacheService` | 内存/磁盘缓存操作和缓存同步。 |
 | `GraphInspectService` | 基于图拓扑构建结构化缓存/空间元数据 inspect 和 dependency-tree snapshot。 |
 | `GraphEventService` | 每节点计算事件收集。 |
-| `PluginManager` | 加载操作插件、记录操作来源，并在卸载前持有动态库句柄。 |
+| `PluginManager` | 加载操作插件、传入 host-provided registrar、记录操作来源，并在卸载前持有动态库句柄。 |
 | `OpRegistry` | 全局操作实现 registry，包括 HP/RT、tiled/monolithic、设备元数据和 ROI propagator。 |
 
 ## 维护中文档
