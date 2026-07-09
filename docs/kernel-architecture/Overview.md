@@ -29,10 +29,11 @@ The root `CMakeLists.txt` builds these internal modules:
 | Target | Role |
 | --- | --- |
 | `photospider_core_types` | Core data types, OpenCV adapter, YAML node parsing, builtin op registry source. |
+| `photospider_operation_plugin_shim` | Narrow shared helper library for dynamic operation callback code that needs `ImageBuffer`/OpenCV adapter symbols without registry state. |
 | `photospider_graph` | `GraphModel` plus graph IO, traversal, cache, and inspect services. |
 | `photospider_plugin` | Dynamic operation plugin manager and loader. |
 | `photospider_compute` | Kernel facade, interaction runtime, schedulers, compute service, events. |
-| `photospider_lib` | Shared backend library linked by CLI, plugins, and embedded Host frontends. |
+| `photospider_lib` | Shared backend library linked by CLI and embedded Host frontends; operation plugins register through `OperationPluginRegistrar` and `register_photospider_ops_v1` instead of linking this backend for registry state. |
 | `photospider_cli_common` | REPL commands, TUI editors, autocomplete, CLI config. |
 | `graph_cli` | End-user executable. |
 
@@ -98,7 +99,7 @@ graph TD
 | `GraphCacheService` | Memory/disk cache operations and cache synchronization. |
 | `GraphInspectService` | Structured cache/spatial metadata inspection and dependency-tree snapshots built from graph topology. |
 | `GraphEventService` | Per-node compute event collection. |
-| `PluginManager` | Loads operation plugins, records operation sources, and owns dynamic library handles until unload. |
+| `PluginManager` | Loads operation plugins, passes the host-provided registrar, records operation sources, and owns dynamic library handles until unload. |
 | `OpRegistry` | Global operation implementation registry, including HP/RT, tiled/monolithic, device metadata, and ROI propagators. |
 
 ## Maintained Documents

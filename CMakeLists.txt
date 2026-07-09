@@ -120,6 +120,30 @@ target_include_directories(photospider_core_types PRIVATE
 )
 target_link_libraries(photospider_core_types PRIVATE yaml-cpp::yaml-cpp)
 
+# Module: Operation Plugin Runtime Shim
+add_library(photospider_operation_plugin_shim SHARED
+    src/image_buffer.cpp
+    src/adapter/buffer_adapter_opencv.cpp
+)
+target_include_directories(photospider_operation_plugin_shim
+    PUBLIC
+        "$<BUILD_INTERFACE:${PHOTOSPIDER_PUBLIC_INCLUDE_DIR}>"
+    PRIVATE
+        ${PHOTOSPIDER_PRIVATE_INCLUDE_DIRS}
+        ${OpenCV_INCLUDE_DIRS}
+)
+target_link_libraries(photospider_operation_plugin_shim PUBLIC
+    ${OpenCV_LIBS}
+)
+set_target_properties(photospider_operation_plugin_shim PROPERTIES
+    BUILD_RPATH "${CMAKE_BINARY_DIR}/lib"
+    INSTALL_RPATH "$ORIGIN"
+)
+if(WIN32)
+    set_target_properties(photospider_operation_plugin_shim PROPERTIES
+        WINDOWS_EXPORT_ALL_SYMBOLS ON)
+endif()
+
 # Module: Graph
 add_library(photospider_graph STATIC
     src/kernel/graph_model.cpp
@@ -307,6 +331,8 @@ foreach(PLUGIN_SOURCE ${PLUGIN_SOURCES})
     get_filename_component(PLUGIN_NAME ${PLUGIN_SOURCE} NAME_WE)
     add_library(${PLUGIN_NAME} SHARED ${PLUGIN_SOURCE})
     list(APPEND OP_PLUGIN_TARGETS ${PLUGIN_NAME})
+    target_compile_definitions(${PLUGIN_NAME} PRIVATE
+        PHOTOSPIDER_PLUGIN_BUILD)
     
     set_target_properties(${PLUGIN_NAME} PROPERTIES
         LIBRARY_OUTPUT_DIRECTORY "${PLUGIN_OUTPUT_DIR}"
@@ -319,9 +345,8 @@ foreach(PLUGIN_SOURCE ${PLUGIN_SOURCES})
         ${OpenCV_INCLUDE_DIRS}
     )
     target_link_libraries(${PLUGIN_NAME} PRIVATE
-        photospider_lib
+        photospider_operation_plugin_shim
         yaml-cpp::yaml-cpp
-        ${OpenCV_LIBS}
     )
 endforeach()
 
@@ -417,6 +442,8 @@ if(BUILD_TESTING)
     add_library(lifecycle_op_plugin SHARED
         tests/fixtures/ops/lifecycle_op_plugin.cpp
     )
+    target_compile_definitions(lifecycle_op_plugin PRIVATE
+        PHOTOSPIDER_PLUGIN_BUILD)
     set_target_properties(lifecycle_op_plugin PROPERTIES
         LIBRARY_OUTPUT_DIRECTORY "${TEST_OP_PLUGIN_DIR}/lifecycle"
         RUNTIME_OUTPUT_DIRECTORY "${TEST_OP_PLUGIN_DIR}/lifecycle"
@@ -435,7 +462,6 @@ if(BUILD_TESTING)
         ${OpenCV_INCLUDE_DIRS}
     )
     target_link_libraries(lifecycle_op_plugin PRIVATE
-        photospider_lib
         yaml-cpp::yaml-cpp
         ${OpenCV_LIBS}
     )
@@ -443,6 +469,8 @@ if(BUILD_TESTING)
     add_library(override_lifecycle_op_plugin SHARED
         tests/fixtures/ops/override_lifecycle_op_plugin.cpp
     )
+    target_compile_definitions(override_lifecycle_op_plugin PRIVATE
+        PHOTOSPIDER_PLUGIN_BUILD)
     set_target_properties(override_lifecycle_op_plugin PROPERTIES
         LIBRARY_OUTPUT_DIRECTORY "${TEST_OP_PLUGIN_DIR}/override"
         RUNTIME_OUTPUT_DIRECTORY "${TEST_OP_PLUGIN_DIR}/override"
@@ -461,7 +489,6 @@ if(BUILD_TESTING)
         ${OpenCV_INCLUDE_DIRS}
     )
     target_link_libraries(override_lifecycle_op_plugin PRIVATE
-        photospider_lib
         yaml-cpp::yaml-cpp
         ${OpenCV_LIBS}
     )
@@ -491,10 +518,9 @@ if(APPLE)
         MACOSX_RPATH ON
     )
     target_link_libraries(perlin_noise_metal PRIVATE
-        photospider_lib
+        photospider_operation_plugin_shim
         yaml-cpp::yaml-cpp
         ${METAL_FRAMEWORK} ${FOUNDATION_FRAMEWORK} ${COREIMAGE_FRAMEWORK} ${COREVIDEO_FRAMEWORK}
-        ${OpenCV_LIBS}
     )
     target_include_directories(perlin_noise_metal PRIVATE
         "${PROJECT_SOURCE_DIR}/include"
@@ -504,6 +530,8 @@ if(APPLE)
 
     # 2. The Loader Plugin (registers the op with the Kernel)
     add_library(metal_ops_loader SHARED custom_ops/metal_ops_loader.cpp)
+    target_compile_definitions(metal_ops_loader PRIVATE
+        PHOTOSPIDER_PLUGIN_BUILD)
     set_target_properties(metal_ops_loader PROPERTIES
         LIBRARY_OUTPUT_DIRECTORY "${METAL_ROOT_DIR}"
         # Point RPATH to 'ops' subdir so loader can find perlin_noise_metal
@@ -521,9 +549,7 @@ if(APPLE)
     # [修复关键点] 必须链接 perlin_noise_metal，否则 loader 运行时找不到符号
     target_link_libraries(metal_ops_loader PRIVATE 
         perlin_noise_metal
-        photospider_lib
         yaml-cpp::yaml-cpp
-        ${OpenCV_LIBS}
     )
 
     # Allow undefined symbols for dynamic lookup (useful for plugins in general)
@@ -707,6 +733,12 @@ if(BUILD_TESTING)
             "${PROJECT_SOURCE_DIR}/tests/verification/codebase_structure/phase3_internal_header_scan.py"
             --repo "${PROJECT_SOURCE_DIR}"
             --out "${CMAKE_BINARY_DIR}/tests/phase3_internal_header_scan"
+        WORKING_DIRECTORY ${PROJECT_SOURCE_DIR})
+    add_test(NAME Phase7PluginRegistrationScan
+        COMMAND ${Python3_EXECUTABLE}
+            "${PROJECT_SOURCE_DIR}/tests/verification/codebase_structure/phase7_plugin_registration_scan.py"
+            --repo "${PROJECT_SOURCE_DIR}"
+            --out "${CMAKE_BINARY_DIR}/tests/phase7_plugin_registration_scan"
         WORKING_DIRECTORY ${PROJECT_SOURCE_DIR})
     add_test(NAME PublicHeaderSelfContainment
         COMMAND ${CMAKE_COMMAND} --build "${CMAKE_BINARY_DIR}"

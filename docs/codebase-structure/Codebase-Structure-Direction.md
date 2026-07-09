@@ -23,9 +23,9 @@ Observed build targets in the current root `CMakeLists.txt`:
 | --- | --- | --- |
 | `photospider_core_types` | Static core data and operation registry source. | Publishes both `include/` and `src/` as include roots. |
 | `photospider_graph` | Static `GraphModel` and graph services. | Exposes `GraphModel` through public headers. |
-| `photospider_plugin` | Static plugin manager and loader. | Operation plugin SDK and host-side plugin ownership are coupled. |
+| `photospider_plugin` | Static plugin manager and loader. | Host-side plugin ownership still lives in the legacy target, but operation registration now goes through `OperationPluginRegistrar`. |
 | `photospider_compute` | Static compute, runtime, schedulers, and interaction code. | Internal compute planning headers leak through public headers. |
-| `photospider_lib` | Shared backend library linked by CLI and plugins. | Name and linkage do not match the desired static `libphotospider` target. |
+| `photospider_lib` | Shared backend library linked by CLI and embedded Host frontends. | Name and linkage do not match the desired static `libphotospider` target; operation plugins now use `register_photospider_ops_v1` plus a narrow shim instead of linking this backend for registry access. |
 | `photospider_cli_common` | Static CLI command/TUI/autocomplete code. | Publishes `src/` as a public include root and depends on broad kernel headers. |
 | `graph_cli` | CLI executable entry point. | Creates `Kernel` directly and has no daemon-client mode. |
 
@@ -43,7 +43,9 @@ Remaining and recently resolved interface leaks:
   Later phases should either keep them behind that private root or replace their
   frontend-facing role with a narrower Host-only public target.
 - `include/plugin_api.hpp` includes full `Node`, exposing node runtime/cache
-  state to operation plugins instead of a smaller plugin contract.
+  state to operation plugins instead of a smaller plugin contract. Issue #33
+  narrows the registration path with `OperationPluginRegistrar`, but a future
+  public plugin contract still needs a smaller node view.
 - CLI and benchmark headers live under the same public include root as kernel
   contracts, so an install rule would accidentally publish application internals.
 
@@ -214,6 +216,7 @@ Recommended final targets:
 | `photospider_graph_internal` | Static | No | `GraphModel`, graph IO, traversal, cache, inspection implementation. |
 | `photospider_compute_internal` | Static | No | Compute planning, dirty-region state, dispatcher, scheduler interaction. |
 | `photospider_plugin_host_internal` | Static | No | Host-side dynamic plugin loading and lifetime ownership. |
+| `photospider_operation_plugin_shim` | Shared | Optional | Narrow runtime helper boundary for dynamic operation callback code, currently `ImageBuffer`/OpenCV adapter helpers with no registry state. |
 | `photospider_scheduler_internal` | Static | No | Built-in scheduler implementations and factory. |
 | `photospider` / `libphotospider` | Static | Yes | Public static library for in-process frontends. |
 | `photospider_ipc_client` | Static | Yes | Client-side IPC adapter for daemon frontends. |
@@ -250,12 +253,20 @@ CMake rules:
 - `libphotospider` should be `STATIC` by default.
 - A shared library can be added later as an explicit compatibility product, not
   as the primary backend.
+- Current phase-7 operation plugins export `register_photospider_ops_v1` and
+  receive `OperationPluginRegistrar` from the host. They do not link
+  `photospider_lib` merely to share `OpRegistry`; standard operation plugins
+  link `photospider_operation_plugin_shim` only for narrow runtime helper
+  symbols used by plugin callback code.
 - `graph_cli` should link `libphotospider` for local mode and
   `photospider_ipc_client` for daemon mode.
 - `photospiderd` should link `libphotospider` and own the IPC server.
-- Operation and scheduler plugins should not link to a broad shared backend
-  merely to reach registry symbols. Long term, plugins should use a narrow SDK
-  with host-provided registration callbacks or opaque handles.
+- Operation plugins should not link to a broad shared backend merely to reach
+  registry symbols. The current implementation uses host-provided
+  `OperationPluginRegistrar` callbacks and the versioned
+  `register_photospider_ops_v1` entry; long term, plugins should move from
+  this C++ callback table to a pure C ABI or opaque handles. Scheduler plugin
+  ABI cleanup remains a separate compatibility change.
 
 ## Daemon Shape
 

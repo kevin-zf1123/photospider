@@ -1,18 +1,28 @@
 # Plugin ABI
 
 Photospider supports operation plugins and scheduler plugins. Operation plugins
-extend `OpRegistry`. Scheduler plugins provide `IScheduler` implementations.
+extend the host-owned `OpRegistry` through a host-provided registrar. Scheduler
+plugins provide `IScheduler` implementations.
 
 ## Operation Plugin ABI
 
-An operation plugin exports:
+An operation plugin exports a versioned registrar entry:
 
 ```cpp
-extern "C" void register_photospider_ops();
+extern "C" PLUGIN_API void register_photospider_ops_v1(
+    ps::OperationPluginRegistrar* registrar);
 ```
 
-The loader calls this function after loading the dynamic library. The plugin
-registers operations through `OpRegistry`.
+The loader calls this function after loading the dynamic library. The host
+creates an `OperationPluginRegistrar`, passes it to the plugin, and forwards
+each registration into the host-owned `OpRegistry`. Operation plugins must not
+call `OpRegistry::instance()` during registration, because a dynamic plugin and
+a static host can otherwise observe different registry singletons.
+
+The old no-argument `register_photospider_ops()` entry is not a supported
+compatibility ABI. It used the same C symbol shape without a signature marker,
+so the loader now resolves only `register_photospider_ops_v1` and rejects old
+plugins instead of guessing at an incompatible function pointer type.
 
 Supported operation registrations include:
 
@@ -28,6 +38,38 @@ Supported operation registrations include:
 
 Operation plugins depend on the public `ImageBuffer` and `NodeOutput`
 contracts.
+
+## Operation Plugin Shim and Linkage
+
+Operation plugins no longer link the broad `photospider_lib` backend to reach
+registry symbols. Repo-owned operation plugins register through
+`OperationPluginRegistrar`, and standard plugin targets link the narrow
+`photospider_operation_plugin_shim` when they need runtime helper symbols such
+as `ImageBuffer`/OpenCV adapter conversion functions. The shim deliberately
+does not include `OpRegistry`, built-in operation registration, plugin manager,
+plugin loader, graph, scheduler, or compute-service code.
+
+This split supports the static-host direction:
+
+- The host may own `OpRegistry` inside a static Photospider link.
+- Dynamic operation plugins receive registration callbacks from the host, so
+  registry mutation stays in that host-owned instance.
+- `photospider_operation_plugin_shim` is only a shared runtime helper boundary
+  for plugin callback code that needs buffer adapter functions.
+- Plugin callback objects may still point into plugin code, so the host must
+  retain plugin libraries while registered keys are active.
+
+Symbol visibility rules:
+
+- Operation plugins export only `register_photospider_ops_v1` through
+  `PLUGIN_API`.
+- The loader resolves the exact versioned symbol name.
+- The shim exports runtime adapter helper symbols needed by plugin callbacks;
+  on Windows it uses `WINDOWS_EXPORT_ALL_SYMBOLS`.
+- This remains a C++ ABI boundary because callbacks use `std::function`,
+  `NodeOutput`, `Node`, and `OpMetadata`. Compiler, standard library, and
+  Photospider header compatibility are version-sensitive until a future pure C
+  ABI replaces the callback shapes.
 
 Current operation plugins that are intended to be loadable through
 `plugin_dirs` must also register explicit dirty and forward ROI propagators. The
@@ -54,13 +96,13 @@ the library handle for as long as any registered operation key from that plugin
 can be resolved from `OpRegistry`.
 
 `PluginManager` owns operation plugin handles. A successful load records the
-absolute plugin path, the operation keys registered or replaced by the plugin,
-the previous registry/source state for those keys, and a retained RAII library
-handle. Unload first removes the plugin's callbacks from `OpRegistry`, restores
-any previous implementation that the plugin replaced, then releases the
-retained handle. This ordering prevents the registry from exposing callbacks
-whose code has already been unmapped while still allowing overriding plugins to
-be unloaded cleanly.
+absolute plugin path, the operation keys registered or replaced through the
+host-provided registrar, the previous registry/source state for those keys, and
+a retained RAII library handle. Unload first removes the plugin's callbacks
+from `OpRegistry`, restores any previous implementation that the plugin
+replaced, then releases the retained handle. This ordering prevents the
+registry from exposing callbacks whose code has already been unmapped while
+still allowing overriding plugins to be unloaded cleanly.
 
 If an older plugin has already been shadowed by a newer plugin, unloading the
 older plugin may remove no active operation keys. `PluginManager` still clears
@@ -134,6 +176,12 @@ opaque handles or callback tables so plugins do not depend on C++ binary ABI.
 
 - Operation plugins should use the published registration APIs and public data
   contracts.
+- Operation plugins must use `OperationPluginRegistrar` and
+  `register_photospider_ops_v1`; the no-argument registration ABI is not
+  supported.
+- Operation plugins must not link `photospider_lib` merely to share registry
+  state. Use `photospider_operation_plugin_shim` only for narrow runtime helper
+  symbols needed by plugin callback code.
 - Scheduler plugins should treat both `IScheduler` and `SchedulerTaskRuntime`
   ABI compatibility as version sensitive.
 - Scheduler plugin authors should implement `ps_scheduler_plugin_destroy`.

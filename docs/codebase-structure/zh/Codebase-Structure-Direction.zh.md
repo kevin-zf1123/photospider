@@ -20,9 +20,9 @@
 | --- | --- | --- |
 | `photospider_core_types` | 静态核心数据和操作 registry 源码。 | 同时把 `include/` 和 `src/` 发布为 include root。 |
 | `photospider_graph` | 静态 `GraphModel` 和图服务。 | 通过公开头暴露 `GraphModel`。 |
-| `photospider_plugin` | 静态插件管理器和加载器。 | 操作插件 SDK 与 host 侧插件所有权耦合。 |
+| `photospider_plugin` | 静态插件管理器和加载器。 | Host 侧插件所有权仍位于遗留 target 中，但 operation 注册现在通过 `OperationPluginRegistrar` 进行。 |
 | `photospider_compute` | 静态计算、运行时、调度器和交互代码。 | 内部 compute planning 头通过公开头泄漏。 |
-| `photospider_lib` | CLI 和插件链接的共享后端库。 | 名称和链接形态都不符合目标中的静态 `libphotospider`。 |
+| `photospider_lib` | CLI 和 embedded Host 前端链接的共享后端库。 | 名称和链接形态都不符合目标中的静态 `libphotospider`；operation plugin 现在使用 `register_photospider_ops_v1` 加窄 shim，而不是为了 registry 访问链接该后端。 |
 | `photospider_cli_common` | 静态 CLI 命令、TUI、自动补全代码。 | 把 `src/` 作为 public include root，并依赖宽泛的内核头。 |
 | `graph_cli` | CLI 可执行入口。 | 直接创建 `Kernel`，还没有 daemon-client 模式。 |
 
@@ -35,7 +35,8 @@
   compute service、图服务、插件管理器和 dirty-control-lane 实现类型，因此不是 `photospider_lib`
   链接消费者可依赖的受支持头；仍包含它们的仓库内部 target 必须获得私有 `src/` include root。后续阶段应
   继续把它们留在该私有 root 后面，或用更窄的 Host-only public target 取代其面向前端的职责。
-- `include/plugin_api.hpp` 包含完整 `Node`，把节点运行时/cache 状态暴露给操作插件，而不是暴露更小的插件契约。
+- `include/plugin_api.hpp` 包含完整 `Node`，把节点运行时/cache 状态暴露给操作插件，而不是暴露更小的插件契约。Issue #33
+  已通过 `OperationPluginRegistrar` 收窄注册路径，但后续 public plugin contract 仍需要更小的 node view。
 - CLI 和 benchmark 头与内核契约位于同一个 public include root 下，因此 install 规则会意外发布应用内部实现。
 
 当前分支已经完成的 seam 收紧：
@@ -193,6 +194,7 @@ tests/
 | `photospider_graph_internal` | Static | 否 | `GraphModel`、graph IO、traversal、cache、inspect 实现。 |
 | `photospider_compute_internal` | Static | 否 | Compute planning、dirty-region state、dispatcher、scheduler interaction。 |
 | `photospider_plugin_host_internal` | Static | 否 | Host 侧动态插件加载和生命周期所有权。 |
+| `photospider_operation_plugin_shim` | Shared | 可选 | 面向动态 operation callback 代码的窄运行时 helper 边界，目前只包含 `ImageBuffer`/OpenCV adapter helper，不包含 registry 状态。 |
 | `photospider_scheduler_internal` | Static | 否 | 内置调度器实现和 factory。 |
 | `photospider` / `libphotospider` | Static | 是 | 面向进程内前端的公共静态库。 |
 | `photospider_ipc_client` | Static | 是 | 面向 daemon 前端的客户端 IPC adapter。 |
@@ -226,10 +228,15 @@ CMake 规则：
   位于 `src/`，并确认 `photospider_lib` 以 private 方式链接内部实现 target。
 - `libphotospider` 默认应为 `STATIC`。
 - 后续可以作为显式兼容产品添加共享库，但不应让共享库继续充当主要后端。
+- 当前 phase-7 operation plugin 导出 `register_photospider_ops_v1`，并从 host 接收
+  `OperationPluginRegistrar`。它们不再仅为了共享 `OpRegistry` 而链接 `photospider_lib`；
+  标准 operation plugin 只在插件 callback 代码需要窄运行时 helper 符号时链接
+  `photospider_operation_plugin_shim`。
 - `graph_cli` 本地模式链接 `libphotospider`，daemon 模式链接 `photospider_ipc_client`。
 - `photospiderd` 链接 `libphotospider` 并拥有 IPC server。
-- 操作插件和调度器插件不应仅为了访问 registry 符号而链接宽泛的共享后端。长期方向是插件使用窄 SDK，
-  通过 host 提供的 registration callback 或 opaque handle 注册。
+- Operation plugin 不应仅为了访问 registry 符号而链接宽泛共享后端。当前实现使用 host-provided
+  `OperationPluginRegistrar` callback 和带版本的 `register_photospider_ops_v1` 入口；长期方向是从这个
+  C++ callback table 迁移到纯 C ABI 或 opaque handle。Scheduler plugin ABI cleanup 仍是单独的兼容性变更。
 
 ## Daemon 形态
 

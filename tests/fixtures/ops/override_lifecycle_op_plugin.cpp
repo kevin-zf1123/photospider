@@ -32,15 +32,23 @@ ps::NodeOutput override_lifecycle_test_op(
 /**
  * @brief Re-registers the lifecycle fixture key with a replacement callback.
  *
- * @throws std::bad_alloc if registry storage allocation fails.
- * @note This intentionally touches an existing key so plugin unload can prove
- * overwritten callbacks are tracked and the previous implementation is
- * restored.
+ * @param registrar Host-provided operation registration API.
+ * @throws std::invalid_argument when the loader passes a null registrar.
+ * @throws std::logic_error if the host registrar is incomplete.
+ * @throws std::bad_alloc if host registry storage allocation fails.
+ * @note This intentionally touches an existing key through the host registrar
+ * so plugin unload can prove overwritten callbacks are tracked and the
+ * previous implementation is restored.
  */
-extern "C" PLUGIN_API void register_photospider_ops() {
+extern "C" PLUGIN_API void register_photospider_ops_v1(
+    ps::OperationPluginRegistrar* registrar) {
+  if (!registrar) {
+    throw std::invalid_argument(
+        "register_photospider_ops_v1 requires registrar");
+  }
   ps::OpMetadata metadata;
   metadata.cost_score = 2;
-  ps::OpRegistry::instance().register_op_hp_monolithic(
+  registrar->register_op_hp_monolithic(
       "plugin_lifecycle", "op",
       ps::MonolithicOpFunc(override_lifecycle_test_op), metadata);
 }

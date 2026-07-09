@@ -59,25 +59,32 @@ cv::Rect perlin_metal_forward_roi(const ps::Node& node, const cv::Rect& roi,
  * @brief Registers the Metal Perlin generator and explicit ROI contracts.
  *
  * @return Nothing.
- * @throws Exceptions from OpRegistry allocation, Metal eager initialization, or
- * callback storage may propagate to the plugin loader.
+ * @param registrar Host-provided registration API. The pointer is valid only
+ * during this call.
+ * @throws std::invalid_argument when the loader passes a null registrar.
+ * @throws std::logic_error if the host registrar is incomplete.
+ * @throws Exceptions from host registry allocation, Metal eager
+ * initialization, or callback storage may propagate to the plugin loader.
  * @note `extern "C"` keeps the symbol name stable for dynamic plugin loading.
  * The registered op is HP monolithic GPU work; tiled Metal execution remains a
- * future capability.
+ * future capability. Registration is routed through the host-owned registry.
  */
-extern "C" PLUGIN_API void register_photospider_ops() {
-  auto& registry = ps::OpRegistry::instance();
-
+extern "C" PLUGIN_API void register_photospider_ops_v1(
+    ps::OperationPluginRegistrar* registrar) {
+  if (!registrar) {
+    throw std::invalid_argument(
+        "register_photospider_ops_v1 requires registrar");
+  }
   ps::OpMetadata metal_meta;
   metal_meta.device_preference = ps::Device::GPU_METAL;
 
-  registry.register_op_hp_monolithic("image_generator", "perlin_noise_metal",
-                                     ps::ops::op_perlin_noise_metal,
-                                     metal_meta);
-  registry.register_dirty_propagator(
+  registrar->register_op_hp_monolithic("image_generator", "perlin_noise_metal",
+                                       ps::ops::op_perlin_noise_metal,
+                                       metal_meta);
+  registrar->register_dirty_propagator(
       "image_generator", "perlin_noise_metal",
       ps::DirtyRoiPropFunc(perlin_metal_dirty_roi));
-  registry.register_forward_propagator(
+  registrar->register_forward_propagator(
       "image_generator", "perlin_noise_metal",
       ps::ForwardRoiPropFunc(perlin_metal_forward_roi));
 

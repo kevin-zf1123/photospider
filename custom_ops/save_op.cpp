@@ -104,16 +104,25 @@ ps::NodeOutput op_save(const ps::Node& node,
  * @brief Registers the save side-effect operation and explicit ROI contracts.
  *
  * @return Nothing.
- * @throws Exceptions from OpRegistry allocation or callback storage may
+ * @param registrar Host-provided registration API. The pointer is valid only
+ * during this call.
+ * @throws std::invalid_argument when the loader passes a null registrar.
+ * @throws std::logic_error if the host registrar is incomplete.
+ * @throws Exceptions from host registry allocation or callback storage may
  * propagate to the plugin loader.
  * @note Save remains an HP monolithic side-effect plugin. Explicit ROI
- * propagators document its planning contract and avoid legacy fallback.
+ * propagators document its planning contract and avoid legacy fallback while
+ * registration stays on the host-owned registry.
  */
-extern "C" PLUGIN_API void register_photospider_ops() {
-  auto& registry = ps::OpRegistry::instance();
-  registry.register_op_hp_monolithic("io", "save", op_save);
-  registry.register_dirty_propagator("io", "save",
-                                     ps::DirtyRoiPropFunc(save_dirty_roi));
-  registry.register_forward_propagator(
+extern "C" PLUGIN_API void register_photospider_ops_v1(
+    ps::OperationPluginRegistrar* registrar) {
+  if (!registrar) {
+    throw std::invalid_argument(
+        "register_photospider_ops_v1 requires registrar");
+  }
+  registrar->register_op_hp_monolithic("io", "save", op_save);
+  registrar->register_dirty_propagator("io", "save",
+                                       ps::DirtyRoiPropFunc(save_dirty_roi));
+  registrar->register_forward_propagator(
       "io", "save", ps::ForwardRoiPropFunc(save_forward_roi));
 }

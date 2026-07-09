@@ -90,16 +90,25 @@ ps::NodeOutput op_invert(const ps::Node& node,
  * @brief Registers the invert operation and its explicit ROI contracts.
  *
  * @return Nothing.
- * @throws Exceptions from OpRegistry allocation or callback storage may
+ * @param registrar Host-provided registration API. The pointer is valid only
+ * during this call.
+ * @throws std::invalid_argument when the loader passes a null registrar.
+ * @throws std::logic_error if the host registrar is incomplete.
+ * @throws Exceptions from host registry allocation or callback storage may
  * propagate to the plugin loader.
- * @note The plugin uses current HP monolithic registration plus explicit
- * dirty/forward propagators instead of depending on legacy identity fallback.
+ * @note The plugin uses the host-provided registrar, not
+ * `OpRegistry::instance()`, so dynamic plugins do not depend on a shared
+ * registry singleton.
  */
-extern "C" PLUGIN_API void register_photospider_ops() {
-  auto& registry = ps::OpRegistry::instance();
-  registry.register_op_hp_monolithic("image_process", "invert", op_invert);
-  registry.register_dirty_propagator("image_process", "invert",
-                                     ps::DirtyRoiPropFunc(invert_dirty_roi));
-  registry.register_forward_propagator(
+extern "C" PLUGIN_API void register_photospider_ops_v1(
+    ps::OperationPluginRegistrar* registrar) {
+  if (!registrar) {
+    throw std::invalid_argument(
+        "register_photospider_ops_v1 requires registrar");
+  }
+  registrar->register_op_hp_monolithic("image_process", "invert", op_invert);
+  registrar->register_dirty_propagator("image_process", "invert",
+                                       ps::DirtyRoiPropFunc(invert_dirty_roi));
+  registrar->register_forward_propagator(
       "image_process", "invert", ps::ForwardRoiPropFunc(invert_forward_roi));
 }

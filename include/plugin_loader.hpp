@@ -59,9 +59,11 @@ using LoadedOpPluginMap = std::map<std::string, LoadedOpPlugin>;
  * @brief Scans operation plugin directories and keeps libraries resident.
  *
  * This legacy entry point loads platform shared libraries from the requested
- * directory patterns, calls `register_photospider_ops`, updates `op_sources`
- * with operation keys registered or replaced by plugins, and retains
- * successful dynamic library handles for the remainder of the process.
+ * directory patterns, calls the versioned
+ * `register_photospider_ops_v1(OperationPluginRegistrar*)` entry with a
+ * host-provided registrar, updates `op_sources` with operation keys registered
+ * or replaced by plugins, and retains successful dynamic library handles for
+ * the remainder of the process.
  *
  * @param plugin_dir_paths Directories or suffix patterns to scan. Plain paths
  * and a trailing single-star suffix perform a shallow scan, while a trailing
@@ -85,7 +87,9 @@ PluginLoadResult load_plugins(const std::vector<std::string>& plugin_dir_paths,
  * This overload has the same scan and registration behavior as `load_plugins`,
  * but stores each successful library in `loaded_plugins`. `PluginManager` uses
  * this form so plugin handles have an owner, can be released on unload, and do
- * not depend on hidden process-lifetime retention.
+ * not depend on hidden process-lifetime retention. Plugin callbacks are
+ * registered only through the host-provided registrar passed to the versioned
+ * entry point.
  *
  * @param plugin_dir_paths Directories or suffix patterns to scan.
  * @param op_sources Map updated with registered or replaced operation sources.
