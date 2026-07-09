@@ -51,15 +51,15 @@ def rel(repo: Path, path: Path) -> str:
 def iter_scan_files(repo: Path) -> list[Path]:
     files: list[Path] = []
     for root in SCAN_ROOTS:
-      path = repo / root
-      if path.is_file():
-          files.append(path)
-      elif path.is_dir():
-          files.extend(
-              child
-              for child in path.rglob("*")
-              if child.is_file() and child.suffix in TEXT_EXTENSIONS
-          )
+        path = repo / root
+        if path.is_file():
+            files.append(path)
+        elif path.is_dir():
+            files.extend(
+                child
+                for child in path.rglob("*")
+                if child.is_file() and child.suffix in TEXT_EXTENSIONS
+            )
     return sorted(files)
 
 

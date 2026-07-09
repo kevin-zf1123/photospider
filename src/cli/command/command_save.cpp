@@ -59,6 +59,21 @@ cv::Mat cpu_image_buffer_view(const ps::ImageBuffer& image) {
 
 }  // namespace
 
+/**
+ * @brief Handles the REPL `save` command through the Host image-compute API.
+ *
+ * @param iss Parsed command stream containing `<node_id> <file>`.
+ * @param svc Host boundary used to compute and retrieve the requested image.
+ * @param current_graph Current graph session label.
+ * @param config CLI cache precision and image save configuration.
+ * @return Always true so the REPL continues after command handling.
+ * @throws Nothing directly; Host and save failures are reported as user-facing
+ *         CLI text.
+ * @note Compute failures are distinct from successful computes that produce no
+ *       CPU image. Failure status messages are surfaced so missing sessions,
+ *       missing nodes, and operation errors are not hidden as normal no-output
+ *       cases.
+ */
 bool handle_save(std::istringstream& iss, ps::Host& svc,
                  std::string& current_graph, bool& /*modified*/,
                  CliConfig& config) {
@@ -89,7 +104,10 @@ bool handle_save(std::istringstream& iss, ps::Host& svc,
   request.execution.parallel = false;
   auto image = svc.compute_and_get_image(request);
   if (!image.status.ok) {
-    std::cout << "No image to save (node produced no image).\n";
+    std::cout << "Failed to compute image for node " << node_id << ".\n";
+    if (!image.status.message.empty()) {
+      std::cout << "Reason: " << image.status.message << "\n";
+    }
     return true;
   }
   cv::Mat image_view = cpu_image_buffer_view(image.value);

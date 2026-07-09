@@ -7,6 +7,18 @@
 #include "cli/command/help_utils.hpp"
 #include "cli/dependency_tree_formatter.hpp"
 
+/**
+ * @brief Handles graph, node, and dirty-region inspection commands.
+ *
+ * @param iss Parsed command stream containing `all`, `dirty`, or a node id.
+ * @param svc Host boundary used to read inspection snapshots.
+ * @param current_graph Current graph session label.
+ * @return Always true so the REPL continues after command handling.
+ * @throws Nothing directly; Host failures are reported as user-facing CLI text.
+ * @note Dirty-region failures are printed as errors with Host status messages,
+ *       while successful empty dirty snapshots are still rendered by
+ *       `format_dirty_snapshot()` as the existing no-snapshot diagnostic.
+ */
 bool handle_inspect(std::istringstream& iss, ps::Host& svc,
                     std::string& current_graph, bool& /*modified*/,
                     CliConfig& /*config*/) {
@@ -24,7 +36,11 @@ bool handle_inspect(std::istringstream& iss, ps::Host& svc,
     auto snapshot =
         svc.dirty_region_snapshot(ps::GraphSessionId{current_graph});
     if (!snapshot.status.ok) {
-      std::cout << "(No dirty snapshot recorded.)\n";
+      std::cout << "Unable to inspect dirty regions for graph '"
+                << current_graph << "'.\n";
+      if (!snapshot.status.message.empty()) {
+        std::cout << "Reason: " << snapshot.status.message << "\n";
+      }
       return true;
     }
     std::cout << ps::cli::format_dirty_snapshot(snapshot.value);
