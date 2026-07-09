@@ -1855,21 +1855,30 @@ class EmbeddedHost final : public Host {
    * @param source_roi Source-local ROI.
    * @return Updated dirty-region snapshot, or a failed status.
    * @throws std::bad_alloc on allocation failure.
-   * @note The mutation is serialized by the backend graph-state boundary.
+   * @note Missing sessions are reported as NotFound before entering the
+   *       backend; missing nodes and invalid ROIs preserve backend LastError
+   *       classifications.
    */
   Result<DirtyRegionInspectionSnapshot> begin_dirty_source(
       const GraphSessionId& session, NodeId node, DirtyDomain domain,
       const PixelRect& source_roi) override {
     return guarded_result<DirtyRegionInspectionSnapshot>(
         "begin_dirty_source", GraphErrc::InvalidParameter, [&] {
+          if (!session_exists(*state_, session)) {
+            return failure_result<DirtyRegionInspectionSnapshot>(
+                GraphErrc::NotFound,
+                "graph session not found: " + session.value);
+          }
           auto snapshot = state_->interaction.cmd_begin_dirty_source(
               session.value, node.value, to_compute_dirty_domain(domain),
               to_cv_rect(source_roi));
           if (!snapshot) {
-            return failure_result<DirtyRegionInspectionSnapshot>(
-                GraphErrc::InvalidParameter,
+            Result<DirtyRegionInspectionSnapshot> result;
+            result.status = failure_from_last_error(
+                *state_, session, GraphErrc::InvalidParameter,
                 "failed to begin dirty source for node " +
                     std::to_string(node.value));
+            return result;
           }
           return success_result(to_public_dirty_snapshot(*snapshot));
         });
@@ -1884,21 +1893,30 @@ class EmbeddedHost final : public Host {
    * @param source_roi Additional source-local ROI.
    * @return Updated dirty-region snapshot, or a failed status.
    * @throws std::bad_alloc on allocation failure.
-   * @note Repeated updates are delegated to backend dirty-source state.
+   * @note Missing sessions are reported as NotFound before entering the
+   *       backend; missing nodes and invalid ROIs preserve backend LastError
+   *       classifications.
    */
   Result<DirtyRegionInspectionSnapshot> update_dirty_source(
       const GraphSessionId& session, NodeId node, DirtyDomain domain,
       const PixelRect& source_roi) override {
     return guarded_result<DirtyRegionInspectionSnapshot>(
         "update_dirty_source", GraphErrc::InvalidParameter, [&] {
+          if (!session_exists(*state_, session)) {
+            return failure_result<DirtyRegionInspectionSnapshot>(
+                GraphErrc::NotFound,
+                "graph session not found: " + session.value);
+          }
           auto snapshot = state_->interaction.cmd_update_dirty_source(
               session.value, node.value, to_compute_dirty_domain(domain),
               to_cv_rect(source_roi));
           if (!snapshot) {
-            return failure_result<DirtyRegionInspectionSnapshot>(
-                GraphErrc::InvalidParameter,
+            Result<DirtyRegionInspectionSnapshot> result;
+            result.status = failure_from_last_error(
+                *state_, session, GraphErrc::InvalidParameter,
                 "failed to update dirty source for node " +
                     std::to_string(node.value));
+            return result;
           }
           return success_result(to_public_dirty_snapshot(*snapshot));
         });
@@ -1912,19 +1930,27 @@ class EmbeddedHost final : public Host {
    * @param domain Dirty domain.
    * @return Updated dirty-region snapshot, or a failed status.
    * @throws std::bad_alloc on allocation failure.
-   * @note Ending marks the current source generation settled.
+   * @note Missing sessions are reported as NotFound before entering the
+   *       backend; missing nodes preserve backend LastError classifications.
    */
   Result<DirtyRegionInspectionSnapshot> end_dirty_source(
       const GraphSessionId& session, NodeId node, DirtyDomain domain) override {
     return guarded_result<DirtyRegionInspectionSnapshot>(
         "end_dirty_source", GraphErrc::InvalidParameter, [&] {
+          if (!session_exists(*state_, session)) {
+            return failure_result<DirtyRegionInspectionSnapshot>(
+                GraphErrc::NotFound,
+                "graph session not found: " + session.value);
+          }
           auto snapshot = state_->interaction.cmd_end_dirty_source(
               session.value, node.value, to_compute_dirty_domain(domain));
           if (!snapshot) {
-            return failure_result<DirtyRegionInspectionSnapshot>(
-                GraphErrc::InvalidParameter,
+            Result<DirtyRegionInspectionSnapshot> result;
+            result.status = failure_from_last_error(
+                *state_, session, GraphErrc::InvalidParameter,
                 "failed to end dirty source for node " +
                     std::to_string(node.value));
+            return result;
           }
           return success_result(to_public_dirty_snapshot(*snapshot));
         });

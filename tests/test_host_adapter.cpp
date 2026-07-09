@@ -893,6 +893,86 @@ TEST(EmbeddedHostAdapter, DirtySourceAndCacheControlsExposeFrontendStatus) {
   EXPECT_TRUE(free_memory.status.ok) << free_memory.status.message;
 }
 
+TEST(EmbeddedHostAdapter, DirtySourceFailuresPreserveStatusCodes) {
+  register_host_adapter_ops();
+  ScopedTempDir temp("photospider_host_adapter_dirty_status_test");
+  auto host = create_embedded_host();
+  ASSERT_NE(host, nullptr);
+
+  const GraphSessionId session =
+      load_test_graph(*host, temp.root(), "dirty_status");
+  const PixelRect roi{1, 1, 2, 2};
+  const PixelRect empty_roi{1, 1, 0, 2};
+
+  auto missing_session_begin =
+      host->begin_dirty_source(GraphSessionId{"missing_dirty_session"},
+                               NodeId{1}, DirtyDomain::HighPrecision, roi);
+  EXPECT_FALSE(missing_session_begin.status.ok);
+  EXPECT_EQ(missing_session_begin.status.code, GraphErrc::NotFound);
+
+  auto missing_session_update =
+      host->update_dirty_source(GraphSessionId{"missing_dirty_session"},
+                                NodeId{1}, DirtyDomain::HighPrecision, roi);
+  EXPECT_FALSE(missing_session_update.status.ok);
+  EXPECT_EQ(missing_session_update.status.code, GraphErrc::NotFound);
+
+  auto missing_session_end =
+      host->end_dirty_source(GraphSessionId{"missing_dirty_session"}, NodeId{1},
+                             DirtyDomain::HighPrecision);
+  EXPECT_FALSE(missing_session_end.status.ok);
+  EXPECT_EQ(missing_session_end.status.code, GraphErrc::NotFound);
+
+  auto missing_node_begin = host->begin_dirty_source(
+      session, NodeId{99}, DirtyDomain::HighPrecision, roi);
+  EXPECT_FALSE(missing_node_begin.status.ok);
+  EXPECT_EQ(missing_node_begin.status.code, GraphErrc::NotFound);
+  EXPECT_NE(missing_node_begin.status.message.find("Dirty source node 99"),
+            std::string::npos);
+  auto missing_node_begin_error = host->last_error(session);
+  EXPECT_FALSE(missing_node_begin_error.ok);
+  EXPECT_EQ(missing_node_begin_error.code, GraphErrc::NotFound);
+
+  auto missing_node_update = host->update_dirty_source(
+      session, NodeId{99}, DirtyDomain::HighPrecision, roi);
+  EXPECT_FALSE(missing_node_update.status.ok);
+  EXPECT_EQ(missing_node_update.status.code, GraphErrc::NotFound);
+  EXPECT_NE(missing_node_update.status.message.find("Dirty source node 99"),
+            std::string::npos);
+  auto missing_node_update_error = host->last_error(session);
+  EXPECT_FALSE(missing_node_update_error.ok);
+  EXPECT_EQ(missing_node_update_error.code, GraphErrc::NotFound);
+
+  auto missing_node_end =
+      host->end_dirty_source(session, NodeId{99}, DirtyDomain::HighPrecision);
+  EXPECT_FALSE(missing_node_end.status.ok);
+  EXPECT_EQ(missing_node_end.status.code, GraphErrc::NotFound);
+  EXPECT_NE(missing_node_end.status.message.find("Dirty source node 99"),
+            std::string::npos);
+  auto missing_node_end_error = host->last_error(session);
+  EXPECT_FALSE(missing_node_end_error.ok);
+  EXPECT_EQ(missing_node_end_error.code, GraphErrc::NotFound);
+
+  auto invalid_begin = host->begin_dirty_source(
+      session, NodeId{1}, DirtyDomain::HighPrecision, empty_roi);
+  EXPECT_FALSE(invalid_begin.status.ok);
+  EXPECT_EQ(invalid_begin.status.code, GraphErrc::InvalidParameter);
+  EXPECT_NE(invalid_begin.status.message.find("Dirty source ROI is empty"),
+            std::string::npos);
+  auto invalid_begin_error = host->last_error(session);
+  EXPECT_FALSE(invalid_begin_error.ok);
+  EXPECT_EQ(invalid_begin_error.code, GraphErrc::InvalidParameter);
+
+  auto invalid_update = host->update_dirty_source(
+      session, NodeId{1}, DirtyDomain::HighPrecision, empty_roi);
+  EXPECT_FALSE(invalid_update.status.ok);
+  EXPECT_EQ(invalid_update.status.code, GraphErrc::InvalidParameter);
+  EXPECT_NE(invalid_update.status.message.find("Dirty source ROI is empty"),
+            std::string::npos);
+  auto invalid_update_error = host->last_error(session);
+  EXPECT_FALSE(invalid_update_error.ok);
+  EXPECT_EQ(invalid_update_error.code, GraphErrc::InvalidParameter);
+}
+
 TEST(EmbeddedHostAdapter, SchedulerScanLoadAndPluginUnloadUseStatusValues) {
   register_host_adapter_ops();
   ScopedTempDir temp("photospider_host_adapter_scheduler_test");

@@ -84,7 +84,7 @@ clean_stdout = ansi_re.sub("", stdout).replace("\r", "")
 actual = {
     "cli_boundary_rg_passed": boundary_ok,
     "ctest_boundary_passed": "100% tests passed" in ctest,
-    "host_adapter_tests_passed": "[  PASSED  ] 10 tests." in host_test,
+    "host_adapter_tests_passed": "[  PASSED  ] 11 tests." in host_test,
     "dirty_snapshot_formatter_tests_passed": "[  PASSED  ] 1 test." in formatter_test,
     "graph_cli_repl_returncode": repl_rc,
     "graph_cli_loaded_session": "Loaded session 'phase2_cli_host'" in clean_stdout,
