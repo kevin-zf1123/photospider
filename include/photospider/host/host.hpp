@@ -336,14 +336,16 @@ class PHOTOSPIDER_API Host {
    * @brief Computes one node and returns an image snapshot descriptor.
    *
    * @param request Host compute request.
-   * @return ImageBuffer descriptor on success, `GraphErrc::NotFound` when the
-   *         graph session is missing or closed, or a compute failure status for
-   *         existing sessions.
+   * @return ImageBuffer descriptor on success, an ok empty descriptor when the
+   *         compute succeeds without image output, `GraphErrc::NotFound` when
+   *         the graph session is missing or closed, or a compute failure status
+   *         for existing sessions.
    * @throws Nothing directly.
    * @note The embedded adapter pre-checks session existence, then clones the
    *       backend image into its public ImageBuffer descriptor. Backend
    *       GraphError classifications such as `GraphErrc::NoOperation` are
-   *       preserved when image compute fails after session validation.
+   *       preserved when image compute fails after session validation; a
+   *       no-LastError empty backend result remains a successful empty image.
    */
   virtual Result<ImageBuffer> compute_and_get_image(
       const HostComputeRequest& request) = 0;
