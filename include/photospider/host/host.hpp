@@ -327,7 +327,9 @@ class PHOTOSPIDER_API Host {
    *         result/future wrapper.
    * @note The embedded adapter keeps its backend state alive until the returned
    *       future completes and waits for Host-submitted async work before graph
-   *       close.
+   *       close. It also serializes async scheduling/tracking with graph close:
+   *       close either waits for an adapter-submitted backend task or rejects
+   *       new scheduling before that task can capture a closing runtime.
    */
   virtual Result<std::future<OperationStatus>> compute_async(
       HostComputeRequest request) = 0;
@@ -342,8 +344,9 @@ class PHOTOSPIDER_API Host {
    *         for existing sessions.
    * @throws Nothing directly.
    * @note The embedded adapter checks session existence before dispatch and
-   *       again before accepting a no-LastError empty backend result as a
-   *       successful empty image.
+   *       rechecks it before consulting LastError for an empty backend result,
+   *       so closed-session failures take precedence over stale diagnostics and
+   *       over successful no-image interpretation.
    * @note Backend GraphError classifications such as `GraphErrc::NoOperation`
    *       are preserved when image compute fails after session validation, and
    *       successful backend image memory is cloned into the public descriptor.

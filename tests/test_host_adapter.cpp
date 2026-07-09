@@ -4,6 +4,7 @@
 #include <chrono>
 #include <filesystem>
 #include <fstream>
+#include <future>
 #include <memory>
 #include <mutex>
 #include <sstream>
@@ -224,7 +225,8 @@ class ScopedTempDir {
  */
 void write_host_adapter_graph(const std::filesystem::path& path, int width = 6,
                               int height = 4,
-                              const std::string& subtype = "source") {
+                              const std::string& subtype = "source",
+                              int slow_sleep_ms = 75) {
   std::filesystem::create_directories(path.parent_path());
   std::ofstream out(path);
   out << "- id: 1\n"
@@ -235,7 +237,7 @@ void write_host_adapter_graph(const std::filesystem::path& path, int width = 6,
       << "    width: " << width << "\n"
       << "    height: " << height << "\n";
   if (subtype == "slow_source") {
-    out << "    sleep_ms: 75\n";
+    out << "    sleep_ms: " << slow_sleep_ms << "\n";
   }
   if (subtype == "resized_extent") {
     out << "    roi_width: 12\n"
@@ -367,19 +369,21 @@ parameters:
  * @param root Temporary root containing source and session folders.
  * @param session Session label to load.
  * @param subtype Operation subtype to write into the graph YAML.
+ * @param slow_sleep_ms Milliseconds used by the slow_source fixture op.
  * @return Loaded session id.
  * @throws std::bad_alloc if path or diagnostic strings allocate and fail.
  * @note Test assertions fail immediately if loading is rejected.
  */
 GraphSessionId load_test_graph(Host& host, const std::filesystem::path& root,
                                const std::string& session,
-                               const std::string& subtype = "source") {
+                               const std::string& subtype = "source",
+                               int slow_sleep_ms = 75) {
   GraphLoadRequest request;
   request.session = GraphSessionId{session};
   request.root_dir = (root / "sessions").string();
   request.yaml_path = (root / "source" / (session + ".yaml")).string();
   request.cache_root_dir = (root / "cache").string();
-  write_host_adapter_graph(request.yaml_path, 6, 4, subtype);
+  write_host_adapter_graph(request.yaml_path, 6, 4, subtype, slow_sleep_ms);
   auto loaded = host.load_graph(request);
   EXPECT_TRUE(loaded.status.ok) << loaded.status.message;
   EXPECT_EQ(loaded.value.value, session);
@@ -645,6 +649,38 @@ TEST(EmbeddedHostAdapter, AsyncComputeCanFinishAfterCloseGraphRequest) {
   EXPECT_EQ(ids_after_close.status.code, GraphErrc::NotFound);
 }
 
+TEST(EmbeddedHostAdapter, AsyncComputeRejectsNewWorkWhileCloseIsWaiting) {
+  register_host_adapter_ops();
+  ScopedTempDir temp("photospider_host_adapter_async_close_gate_test");
+  auto host = create_embedded_host();
+  ASSERT_NE(host, nullptr);
+
+  const GraphSessionId session = load_test_graph(
+      *host, temp.root(), "async_close_gate_graph", "slow_source", 250);
+  HostComputeRequest request = make_compute_request(session);
+  request.execution.parallel = true;
+
+  auto initial_async = host->compute_async(request);
+  ASSERT_TRUE(initial_async.status.ok) << initial_async.status.message;
+
+  auto close_future = std::async(std::launch::async, [&host, session]() {
+    return host->close_graph(session);
+  });
+  std::this_thread::sleep_for(std::chrono::milliseconds(20));
+  ASSERT_EQ(close_future.wait_for(std::chrono::milliseconds(0)),
+            std::future_status::timeout);
+
+  auto rejected_async = host->compute_async(request);
+  EXPECT_FALSE(rejected_async.status.ok);
+  EXPECT_EQ(rejected_async.status.code, GraphErrc::NotFound);
+
+  OperationStatus initial_status = initial_async.value.get();
+  EXPECT_TRUE(initial_status.ok) << initial_status.message;
+
+  auto close = close_future.get();
+  EXPECT_TRUE(close.status.ok) << close.status.message;
+}
+
 TEST(EmbeddedHostAdapter, ComputeReturnsNotFoundForMissingSession) {
   register_host_adapter_ops();
   ScopedTempDir temp("photospider_host_adapter_compute_missing_test");
@@ -673,6 +709,37 @@ TEST(EmbeddedHostAdapter, ComputeReturnsNotFoundForMissingSession) {
   EXPECT_FALSE(closed.status.ok);
   EXPECT_EQ(closed.status.code, GraphErrc::NotFound);
   auto closed_image = host->compute_and_get_image(closed_request);
+  EXPECT_FALSE(closed_image.status.ok);
+  EXPECT_EQ(closed_image.status.code, GraphErrc::NotFound);
+}
+
+TEST(EmbeddedHostAdapter, CloseGraphClearsStaleLastErrorBeforeImageCompute) {
+  register_host_adapter_ops();
+  ScopedTempDir temp("photospider_host_adapter_close_clears_error_test");
+  auto host = create_embedded_host();
+  ASSERT_NE(host, nullptr);
+
+  const GraphSessionId session =
+      load_test_graph(*host, temp.root(), "close_clears_error_graph");
+  HostComputeRequest missing_node_request = make_compute_request(session);
+  missing_node_request.node = NodeId{99};
+
+  auto missing_node_image = host->compute_and_get_image(missing_node_request);
+  ASSERT_FALSE(missing_node_image.status.ok);
+  ASSERT_EQ(missing_node_image.status.code, GraphErrc::NotFound);
+
+  auto stale_error = host->last_error(session);
+  ASSERT_FALSE(stale_error.ok);
+  ASSERT_EQ(stale_error.code, GraphErrc::NotFound);
+
+  auto close = host->close_graph(session);
+  ASSERT_TRUE(close.status.ok) << close.status.message;
+
+  auto closed_error = host->last_error(session);
+  EXPECT_TRUE(closed_error.ok) << closed_error.message;
+
+  auto closed_image =
+      host->compute_and_get_image(make_compute_request(session));
   EXPECT_FALSE(closed_image.status.ok);
   EXPECT_EQ(closed_image.status.code, GraphErrc::NotFound);
 }
