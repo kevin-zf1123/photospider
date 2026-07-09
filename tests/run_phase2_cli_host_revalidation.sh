@@ -84,7 +84,12 @@ clean_stdout = ansi_re.sub("", stdout).replace("\r", "")
 actual = {
     "cli_boundary_rg_passed": boundary_ok,
     "ctest_boundary_passed": "100% tests passed" in ctest,
-    "host_adapter_tests_passed": "[  PASSED  ] 11 tests." in host_test,
+    "host_adapter_tests_passed": "[  PASSED  ] 12 tests." in host_test,
+    "host_image_compute_status_test_passed": (
+        "[       OK ] "
+        "EmbeddedHostAdapter.ComputeImagePreservesBackendFailureStatus"
+        in host_test
+    ),
     "dirty_snapshot_formatter_tests_passed": "[  PASSED  ] 2 tests." in formatter_test,
     "cli_inspect_dirty_non_empty_test_passed": (
         "[       OK ] "
@@ -102,6 +107,7 @@ expected = {
     "cli_boundary_rg_passed": True,
     "ctest_boundary_passed": True,
     "host_adapter_tests_passed": True,
+    "host_image_compute_status_test_passed": True,
     "dirty_snapshot_formatter_tests_passed": True,
     "cli_inspect_dirty_non_empty_test_passed": True,
     "graph_cli_repl_returncode": 0,
@@ -164,6 +170,8 @@ overall = all(checks.values())
             f"- CLI boundary scan passed: {actual['cli_boundary_rg_passed']}",
             f"- Boundary CTest passed: {actual['ctest_boundary_passed']}",
             f"- Host adapter tests passed: {actual['host_adapter_tests_passed']}",
+            "- Host image compute status test passed: "
+            f"{actual['host_image_compute_status_test_passed']}",
             "- Dirty snapshot formatter tests passed: "
             f"{actual['dirty_snapshot_formatter_tests_passed']}",
             "- Non-empty inspect dirty command test passed: "
@@ -183,10 +191,13 @@ overall = all(checks.values())
             "GraphModel, GraphRuntime, direct kernel includes, graph_model.hpp,",
             "or old cmd_* calls. The REPL transcript proves `load ...`,",
             "`compute all parallel nosave m`, and `inspect dirty` still complete",
-            "through the default embedded Host path. The Host adapter, formatter,",
-            "and command-handler tests prove `inspect dirty` can still display",
-            "non-empty monolithic dirty-region and edge-mapping diagnostics after",
-            "the CLI Host migration.",
+            "through the default embedded Host path. The Host adapter status",
+            "test proves image compute preserves backend NotFound and",
+            "NoOperation classifications through the Host Result/last_error",
+            "surface instead of collapsing them into ComputeError. The Host",
+            "adapter, formatter, and command-handler tests prove `inspect dirty`",
+            "can still display non-empty monolithic dirty-region and",
+            "edge-mapping diagnostics after the CLI Host migration.",
         ]
     ) + "\n",
     encoding="utf-8",

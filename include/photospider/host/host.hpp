@@ -341,7 +341,9 @@ class PHOTOSPIDER_API Host {
    *         existing sessions.
    * @throws Nothing directly.
    * @note The embedded adapter pre-checks session existence, then clones the
-   *       backend image into its public ImageBuffer descriptor.
+   *       backend image into its public ImageBuffer descriptor. Backend
+   *       GraphError classifications such as `GraphErrc::NoOperation` are
+   *       preserved when image compute fails after session validation.
    */
   virtual Result<ImageBuffer> compute_and_get_image(
       const HostComputeRequest& request) = 0;

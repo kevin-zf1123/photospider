@@ -10,6 +10,7 @@
  */
 #include <future>
 #include <sstream>
+#include <string>
 #include <utility>
 
 #include "adapter/buffer_adapter_opencv.hpp"
@@ -207,10 +208,22 @@ std::optional<cv::Mat> Kernel::compute_and_get_image_request(
                  .get();
 
     if (output.image_buffer.width == 0) {
+      last_error_.erase(request.name);
       return std::nullopt;
     }
+    last_error_.erase(request.name);
     return toCvMat(output.image_buffer).clone();
+  } catch (const GraphError& ge) {
+    last_error_[request.name] = {ge.code(), ge.what()};
+    return std::nullopt;
+  } catch (const std::exception& e) {
+    last_error_[request.name] = {
+        GraphErrc::Unknown,
+        make_sync_exception_message(request.node_id, e.what())};
+    return std::nullopt;
   } catch (...) {
+    last_error_[request.name] = {GraphErrc::Unknown,
+                                 std::string("unknown error")};
     return std::nullopt;
   }
 }
