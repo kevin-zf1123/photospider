@@ -50,6 +50,10 @@ set(CMAKE_LIBRARY_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/lib)
 set(CMAKE_RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin)
 set(PLUGIN_OUTPUT_DIR ${CMAKE_BINARY_DIR}/plugins)
 set(PHOTOSPIDER_PUBLIC_INCLUDE_DIR "${PROJECT_SOURCE_DIR}/include")
+# Linked consumers receive only the public include root. The remaining
+# include/kernel/* facade headers are migration-period source-tree internals:
+# repository targets that still include them must use the private include roots
+# below, and photospider_lib must not publish src/ to external consumers.
 set(PHOTOSPIDER_PRIVATE_INCLUDE_DIRS
     "${PROJECT_SOURCE_DIR}/include"
     "${PROJECT_SOURCE_DIR}/src")

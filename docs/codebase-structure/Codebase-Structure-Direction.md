@@ -38,8 +38,10 @@ Remaining and recently resolved interface leaks:
 - The legacy internal `include/kernel/kernel.hpp` still includes runtime,
   compute service, graph services, plugin manager, and dirty-control-lane
   implementation types. It remains outside the installable
-  `include/photospider/**` inventory, and later phases should move the
-  remaining `include/kernel/*` facade headers behind the same private root or a
+  `include/photospider/**` inventory and is not a supported header for linked
+  consumers of `photospider_lib`; repository targets that still include it must
+  receive the private `src/` include root. Later phases should move the
+  remaining `include/kernel/*` facade headers behind that private root or a
   narrower public Host-only target.
 - `include/plugin_api.hpp` includes full `Node`, exposing node runtime/cache
   state to operation plugins instead of a smaller plugin contract.
