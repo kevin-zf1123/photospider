@@ -1423,11 +1423,13 @@ class EmbeddedHost final : public Host {
    *         completes without image output, NotFound for a missing or closed
    *         session, or a compute failure status for existing sessions.
    * @throws std::bad_alloc on allocation failure.
-   * @note The Host pre-checks session existence so missing lifecycle state is
-   *       not collapsed into a generic compute failure. Backend LastError is
-   *       used to distinguish handled failures from successful no-image output,
-   *       and backend image memory is cloned before conversion to the public
-   *       descriptor.
+   * @note The Host checks session existence before dispatch and again before
+   *       accepting an empty no-LastError backend result. Missing lifecycle
+   *       state is therefore not collapsed into a generic compute failure or a
+   *       successful empty image.
+   * @note Backend LastError is used to distinguish handled failures from
+   *       successful no-image output, and backend image memory is cloned before
+   *       conversion to the public descriptor.
    */
   Result<ImageBuffer> compute_and_get_image(
       const HostComputeRequest& request) override {
@@ -1445,6 +1447,11 @@ class EmbeddedHost final : public Host {
             const auto error =
                 state_->interaction.cmd_last_error(request.session.value);
             if (!error) {
+              if (!session_exists(*state_, request.session)) {
+                return failure_result<ImageBuffer>(
+                    GraphErrc::NotFound,
+                    "graph session not found: " + request.session.value);
+              }
               return success_result(ImageBuffer{});
             }
             Result<ImageBuffer> result;

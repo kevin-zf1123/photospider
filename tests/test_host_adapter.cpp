@@ -748,6 +748,14 @@ TEST(EmbeddedHostAdapter, ComputeImagePreservesSuccessfulEmptyOutput) {
 
   auto cleared_error = host->last_error(session);
   EXPECT_TRUE(cleared_error.ok) << cleared_error.message;
+
+  auto closed = host->close_graph(session);
+  ASSERT_TRUE(closed.status.ok) << closed.status.message;
+
+  auto closed_image =
+      host->compute_and_get_image(make_compute_request(session));
+  EXPECT_FALSE(closed_image.status.ok);
+  EXPECT_EQ(closed_image.status.code, GraphErrc::NotFound);
 }
 
 TEST(EmbeddedHostAdapter, ReplaceSchedulerReturnsNotFoundForMissingSession) {
