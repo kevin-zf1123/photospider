@@ -38,12 +38,18 @@ Main interface leaks:
   graph cache handles, and runtime generation state.
 - `include/kernel/kernel.hpp` includes `GraphRuntime`, `ComputeService`,
   graph services, plugin manager, and dirty-control-lane implementation types.
-- `Kernel::post()`, `Kernel::runtime()`, and `InteractionService::kernel()`
-  let external code bypass the intended `InteractionService` interface.
 - `include/plugin_api.hpp` includes full `Node`, exposing node runtime/cache
   state to operation plugins instead of a smaller plugin contract.
 - CLI and benchmark headers live under the same public include root as kernel
   contracts, so an install rule would accidentally publish application internals.
+
+Resolved seam tightening in the current branch:
+
+- The former direct graph-state submission and runtime access escape hatches
+  have been removed from the public `Kernel` and `InteractionService` facades.
+  Tests that still need internal runtime or graph-state access now include the
+  internal-only `tests/support/kernel_test_access.hpp` helper explicitly and
+  route those calls through `ps::testing::KernelTestAccess`.
 
 ## External Interface Rule
 

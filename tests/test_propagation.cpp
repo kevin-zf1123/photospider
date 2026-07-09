@@ -8,17 +8,29 @@
 #include <string>
 #include <vector>
 
-#include "graph_model.hpp"
+#include "graph_model.hpp"  // NOLINT(build/include_subdir)
 #include "kernel/interaction.hpp"
 #include "kernel/kernel.hpp"
 #include "kernel/services/graph_event_service.hpp"  // 为了事件结构
-#include "ps_types.hpp"
+#include "ps_types.hpp"  // NOLINT(build/include_subdir)
+#include "support/kernel_test_access.hpp"
 
-// Tiling 常量
+/** @brief Micro-tile fallback edge length used by the scriptable test tool. */
 const int TILE_SIZE_MICRO = 64;
+
+/** @brief Macro-tile fallback edge length used by the scriptable test tool. */
 const int TILE_SIZE_MACRO = 256;
 
-// 获取节点的瓦片大小 (这个辅助函数仍然有用)
+/**
+ * @brief Resolves the tile edge length implied by a node operation metadata.
+ *
+ * @param node Graph node whose type/subtype metadata should be inspected.
+ * @return Tile edge length in pixels; defaults to TILE_SIZE_MICRO when the op
+ * metadata is missing or monolithic.
+ * @throws Nothing directly; registry lookup returns optional metadata.
+ * @note This helper is only used by the propagation test REPL output and does
+ * not mutate graph state.
+ */
 int get_tile_size(const ps::Node& node) {
   auto meta_opt =
       ps::OpRegistry::instance().get_metadata(node.type, node.subtype);
@@ -32,19 +44,33 @@ int get_tile_size(const ps::Node& node) {
   return TILE_SIZE_MICRO;
 }
 
-void handle_tiles(ps::InteractionService& svc, const std::string& graph_name,
+/**
+ * @brief Prints computed tile counts for one node or all nodes in a graph.
+ *
+ * @param kernel Kernel owning the graph; used only through internal test
+ * access to inspect cached output dimensions.
+ * @param svc Interaction facade used for graph lifecycle and compute commands.
+ * @param graph_name Loaded graph session name.
+ * @param target_node_str Either "all" or a decimal node id.
+ * @throws std::runtime_error if the graph is unexpectedly missing from Kernel.
+ * @note The function computes graph endings before inspection so cached output
+ * metadata exists for tile reporting.
+ */
+void handle_tiles(ps::Kernel& kernel, ps::InteractionService& svc,
+                  const std::string& graph_name,
                   const std::string& target_node_str) {
   std::vector<int> node_ids_to_query;
-  ps::GraphModel& model = svc.kernel().runtime(graph_name).model();
+  ps::GraphModel& model =
+      ps::testing::KernelTestAccess::model(kernel, graph_name);
 
   if (target_node_str == "all") {
     node_ids_to_query = model.node_ids();
   } else {
     try {
       int id = std::stoi(target_node_str);
-      if (model.has_node(id))
+      if (model.has_node(id)) {
         node_ids_to_query.push_back(id);
-      else {
+      } else {
         std::cerr << "Error: Node " << id << " not found." << std::endl;
         return;
       }
@@ -64,8 +90,9 @@ void handle_tiles(ps::InteractionService& svc, const std::string& graph_name,
       request.cache.precision = "int8";
       request.execution.parallel = true;
       auto fut_opt = svc.cmd_compute_async(request);
-      if (fut_opt)
+      if (fut_opt) {
         fut_opt->get();
+      }
     }
   }
 
@@ -104,9 +131,25 @@ void handle_tiles(ps::InteractionService& svc, const std::string& graph_name,
   }
 }
 
-void handle_dirty(ps::InteractionService& svc, const std::string& graph_name,
-                  int start_node_id, const std::string& tile_coords_str) {
-  ps::GraphModel& model = svc.kernel().runtime(graph_name).model();
+/**
+ * @brief Simulates a dirty tile update and prints propagated recompute events.
+ *
+ * @param kernel Kernel owning the graph; used only through internal test
+ * access to inspect topology during scriptable propagation diagnostics.
+ * @param svc Interaction facade used for ROI projection, compute, and events.
+ * @param graph_name Loaded graph session name.
+ * @param start_node_id Dirty source node id.
+ * @param tile_coords_str Tile coordinate text in "x,y" form.
+ * @throws std::runtime_error if the graph is unexpectedly missing from Kernel.
+ * @note This scriptable helper validates the propagation path through public
+ * InteractionService commands while limiting direct model access to internal
+ * test setup and diagnostic traversal.
+ */
+void handle_dirty(ps::Kernel& kernel, ps::InteractionService& svc,
+                  const std::string& graph_name, int start_node_id,
+                  const std::string& tile_coords_str) {
+  ps::GraphModel& model =
+      ps::testing::KernelTestAccess::model(kernel, graph_name);
   if (!model.has_node(start_node_id)) {
     std::cerr << "Error: Start node " << start_node_id << " not found."
               << std::endl;
@@ -220,7 +263,7 @@ void handle_dirty(ps::InteractionService& svc, const std::string& graph_name,
   request.execution.quiet = true;
   request.intent = ps::ComputeIntent::RealTimeUpdate;
   request.dirty_roi = target_roi;
-  auto future_opt = svc.kernel().compute_async(request);
+  auto future_opt = svc.cmd_compute_async(request);
 
   if (!future_opt) {
     std::cerr << "Failed to start compute task." << std::endl;
@@ -290,23 +333,26 @@ int main(int argc, char** argv) {
     std::string command;
     iss >> command;
 
-    if (command == "exit")
+    if (command == "exit") {
       break;
-    else if (command == "dirty") {
+    } else if (command == "dirty") {
       int node_id;
       std::string tile_str;
-      if (!(iss >> node_id >> tile_str))
+      if (!(iss >> node_id >> tile_str)) {
         std::cerr << "Usage: dirty <id> <x,y>" << std::endl;
-      else
-        handle_dirty(svc, graph_name, node_id, tile_str);
+      } else {
+        handle_dirty(kernel, svc, graph_name, node_id, tile_str);
+      }
     } else if (command == "tiles") {
       std::string target;
-      if (!(iss >> target))
+      if (!(iss >> target)) {
         std::cerr << "Usage: tiles all|<id>" << std::endl;
-      else
-        handle_tiles(svc, graph_name, target);
-    } else if (!command.empty())
+      } else {
+        handle_tiles(kernel, svc, graph_name, target);
+      }
+    } else if (!command.empty()) {
       std::cerr << "Unknown command." << std::endl;
+    }
 
     std::cout << "> " << std::flush;
   }

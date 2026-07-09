@@ -5,6 +5,7 @@
 #include <iomanip>
 #include <iostream>
 #include <limits>
+#include <memory>
 #include <mutex>
 #include <nlohmann/json.hpp>
 #include <optional>
@@ -24,6 +25,7 @@
 #include "kernel/services/compute_service.hpp"  // <--- 修正点: 添加缺失的头文件
 #include "kernel/services/graph_cache_service.hpp"  // <--- 修正点: 添加缺失的头文件
 #include "kernel/services/graph_traversal_service.hpp"  // <--- 修正点: 添加缺失的头文件
+#include "support/kernel_test_access.hpp"
 
 namespace {
 
@@ -158,7 +160,7 @@ TEST(SchedulerTestM33, ParallelComputeWithNewScheduler) {
   ASSERT_TRUE(loaded.has_value());
 
   // 创建并设置新的 CpuWorkStealingScheduler
-  auto& runtime = kernel.runtime(graph_name);
+  auto& runtime = ps::testing::KernelTestAccess::runtime(kernel, graph_name);
   auto scheduler = std::make_unique<CpuWorkStealingScheduler>();
   scheduler->start();
   runtime.set_scheduler(ComputeIntent::GlobalHighPrecision,
@@ -207,7 +209,7 @@ TEST(SchedulerTest, ParallelLogToJson) {
   ASSERT_FALSE(endings->empty());
   int node_id = (*endings)[0];
 
-  kernel.runtime(graph_name).clear_scheduler_log();
+  ps::testing::KernelTestAccess::clear_scheduler_trace(kernel, graph_name);
 
   Kernel::ComputeRequest request;
   request.name = graph_name;
@@ -219,7 +221,8 @@ TEST(SchedulerTest, ParallelLogToJson) {
   ASSERT_TRUE(ok.has_value());
   ASSERT_TRUE(ok->get());
 
-  auto events = kernel.runtime(graph_name).get_scheduler_log();
+  auto events =
+      ps::testing::KernelTestAccess::scheduler_trace(kernel, graph_name);
   ASSERT_FALSE(events.empty());
   auto facade_events = svc.cmd_scheduler_trace(graph_name);
   ASSERT_TRUE(facade_events.has_value());
@@ -245,7 +248,8 @@ TEST(Scheduler, DirtyRegionTiledComputation) {
   ASSERT_TRUE(loaded_name.has_value());
   ASSERT_EQ(*loaded_name, graph_name);
 
-  ps::GraphRuntime& runtime = kernel.runtime(graph_name);
+  ps::GraphRuntime& runtime =
+      ps::testing::KernelTestAccess::runtime(kernel, graph_name);
 
   // ========================================================================
   // 步骤 1: 第一次完整计算 (填充缓存)
@@ -428,7 +432,8 @@ TEST(Scheduler,
   ASSERT_TRUE(svc.cmd_load_graph(stale_graph_name, "sessions",
                                  "util/testcases/dirty_region_test.yaml")
                   .has_value());
-  ps::GraphRuntime& stale_runtime = kernel.runtime(stale_graph_name);
+  ps::GraphRuntime& stale_runtime =
+      ps::testing::KernelTestAccess::runtime(kernel, stale_graph_name);
   ps::Kernel::ComputeRequest stale_hp_request;
   stale_hp_request.name = stale_graph_name;
   stale_hp_request.node_id = 3;
@@ -479,7 +484,8 @@ TEST(Scheduler,
   ASSERT_TRUE(svc.cmd_load_graph(exception_graph_name, "sessions",
                                  "util/testcases/dirty_region_test.yaml")
                   .has_value());
-  ps::GraphRuntime& exception_runtime = kernel.runtime(exception_graph_name);
+  ps::GraphRuntime& exception_runtime =
+      ps::testing::KernelTestAccess::runtime(kernel, exception_graph_name);
   ps::Kernel::ComputeRequest exception_hp_request;
   exception_hp_request.name = exception_graph_name;
   exception_hp_request.node_id = 3;

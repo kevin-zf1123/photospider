@@ -7,12 +7,15 @@
 #include <fstream>
 #include <iomanip>
 #include <iostream>
+#include <limits>
+#include <map>
 #include <mutex>
 #include <nlohmann/json.hpp>
 #include <optional>
 #include <sstream>
 #include <stdexcept>
 #include <string>
+#include <utility>
 #include <vector>
 
 #include "adapter/buffer_adapter_opencv.hpp"
@@ -22,7 +25,8 @@
 #include "kernel/kernel.hpp"
 #include "kernel/services/compute-service/compute_geometry.hpp"
 #include "kernel/services/compute-service/realtime_proxy_graph.hpp"
-#include "ps_types.hpp"
+#include "ps_types.hpp"  // NOLINT(build/include_subdir)
+#include "support/kernel_test_access.hpp"
 
 namespace fs = std::filesystem;
 using json = nlohmann::json;
@@ -869,8 +873,21 @@ bool contains_phase(const std::vector<std::string>& phases,
   return std::find(phases.begin(), phases.end(), phase) != phases.end();
 }
 
+/**
+ * @brief Captures a detailed JSON snapshot of one graph for trace evidence.
+ *
+ * @param kernel Kernel that owns the graph runtime under inspection.
+ * @param graph_name Loaded graph session name.
+ * @return JSON object containing graph flags, dirty planning state, node
+ * metadata, cached HP output summaries, and RT proxy summaries.
+ * @throws std::runtime_error when the graph is missing; graph-state submission
+ * exceptions propagate through future::get().
+ * @note This testbench intentionally uses KernelTestAccess because the
+ * evidence includes runtime-only RT proxy state that is not part of the public
+ * host inspection contract.
+ */
 json graph_snapshot(ps::Kernel& kernel, const std::string& graph_name) {
-  auto& runtime = kernel.runtime(graph_name);
+  auto& runtime = ps::testing::KernelTestAccess::runtime(kernel, graph_name);
   return runtime.graph_state()
       .submit([&runtime](ps::GraphModel& graph) {
         json out;
@@ -1545,9 +1562,21 @@ void write_task_bundle(const fs::path& root, const std::string& task_dir,
   write_text(dir / "README.md", readme.str());
 }
 
+/**
+ * @brief Mutates cached HP state and RT proxy state to seed a dirty update.
+ *
+ * @param kernel Kernel that owns the graph runtime under test.
+ * @param graph_name Loaded dirty-region graph session name.
+ * @param dirty_roi HP-space ROI to overwrite in the source node cache.
+ * @throws std::runtime_error when the graph is missing; graph-state submission
+ * exceptions propagate through future::get().
+ * @note This is testbench setup code. It uses internal access so the public
+ * Kernel and InteractionService facades do not need dirty-state mutation
+ * escape hatches.
+ */
 void mutate_dirty_region(ps::Kernel& kernel, const std::string& graph_name,
                          const cv::Rect& dirty_roi) {
-  auto& runtime = kernel.runtime(graph_name);
+  auto& runtime = ps::testing::KernelTestAccess::runtime(kernel, graph_name);
   runtime.graph_state()
       .submit([dirty_roi, &runtime](ps::GraphModel& graph) {
         graph.mutate_node_runtime_state(1, [&](auto& source_state) {
@@ -1650,7 +1679,7 @@ int main(int argc, char** argv) {
 
     std::vector<ps::BenchmarkEvent> sequential_benchmark;
     g_trace.set_phase("sequential_hp");
-    kernel.runtime(full_graph).clear_scheduler_log();
+    ps::testing::KernelTestAccess::clear_scheduler_trace(kernel, full_graph);
     ps::Kernel::ComputeRequest sequential_request;
     sequential_request.name = full_graph;
     sequential_request.node_id = 100;
@@ -1669,21 +1698,22 @@ int main(int argc, char** argv) {
         {"compute_events",
          compute_events_json(svc.cmd_drain_compute_events(full_graph))},
         {"scheduler_events",
-         scheduler_events_json(kernel.runtime(full_graph).get_scheduler_log())},
+         scheduler_events_json(ps::testing::KernelTestAccess::scheduler_trace(
+             kernel, full_graph))},
         {"benchmark_events", benchmark_events_json(sequential_benchmark)}};
     write_json(root / "full-kernel-run" / "actual" / "sequential_hp.json",
                sequential_actual);
 
     std::vector<ps::BenchmarkEvent> parallel_benchmark;
     g_trace.set_phase("parallel_hp");
-    kernel.runtime(full_graph).clear_scheduler_log();
+    ps::testing::KernelTestAccess::clear_scheduler_trace(kernel, full_graph);
     ps::Kernel::ComputeRequest parallel_request = sequential_request;
     parallel_request.execution.parallel = true;
     parallel_request.telemetry.benchmark_events = &parallel_benchmark;
     const bool parallel_ok = svc.cmd_compute(parallel_request);
     log("parallel compute ok=" + std::to_string(parallel_ok));
-    json parallel_scheduler =
-        scheduler_events_json(kernel.runtime(full_graph).get_scheduler_log());
+    json parallel_scheduler = scheduler_events_json(
+        ps::testing::KernelTestAccess::scheduler_trace(kernel, full_graph));
     json parallel_snapshot = graph_snapshot(kernel, full_graph);
     json parallel_actual = {
         {"ok", parallel_ok},
@@ -1734,7 +1764,7 @@ int main(int argc, char** argv) {
 
     std::vector<ps::BenchmarkEvent> dirty_benchmark;
     g_trace.set_phase("dirty_rt_update");
-    kernel.runtime(dirty_graph).clear_scheduler_log();
+    ps::testing::KernelTestAccess::clear_scheduler_trace(kernel, dirty_graph);
     ps::Kernel::ComputeRequest dirty_request = dirty_bootstrap_request;
     dirty_request.telemetry.benchmark_events = &dirty_benchmark;
     dirty_request.intent = ps::ComputeIntent::RealTimeUpdate;
@@ -1748,8 +1778,8 @@ int main(int argc, char** argv) {
     auto dirty_forward = svc.cmd_project_roi(dirty_graph, 1, dirty_roi, 100);
     auto dirty_backward =
         svc.cmd_project_roi_backward(dirty_graph, 100, dirty_roi, 1);
-    json dirty_scheduler =
-        scheduler_events_json(kernel.runtime(dirty_graph).get_scheduler_log());
+    json dirty_scheduler = scheduler_events_json(
+        ps::testing::KernelTestAccess::scheduler_trace(kernel, dirty_graph));
     json dirty_actual = {
         {"bootstrap_ok", dirty_bootstrap_ok},
         {"requested_parallel", true},
@@ -1775,7 +1805,7 @@ int main(int argc, char** argv) {
 
     std::vector<ps::BenchmarkEvent> dirty_single_thread_benchmark;
     g_trace.set_phase("dirty_rt_update_single_thread");
-    kernel.runtime(dirty_graph).clear_scheduler_log();
+    ps::testing::KernelTestAccess::clear_scheduler_trace(kernel, dirty_graph);
     ps::Kernel::ComputeRequest dirty_single_thread_request = dirty_request;
     dirty_single_thread_request.execution.parallel = false;
     dirty_single_thread_request.telemetry.benchmark_events =
@@ -1800,8 +1830,8 @@ int main(int argc, char** argv) {
          dirty_snapshot_json(dirty_single_thread_snapshot_struct)},
         {"graph_snapshot", graph_snapshot(kernel, dirty_graph)},
         {"scheduler_events",
-         scheduler_events_json(
-             kernel.runtime(dirty_graph).get_scheduler_log())},
+         scheduler_events_json(ps::testing::KernelTestAccess::scheduler_trace(
+             kernel, dirty_graph))},
         {"compute_events",
          compute_events_json(svc.cmd_drain_compute_events(dirty_graph))},
         {"benchmark_events",
@@ -1812,7 +1842,7 @@ int main(int argc, char** argv) {
 
     g_trace.set_phase("parallel_error_path");
     std::vector<ps::BenchmarkEvent> error_benchmark;
-    kernel.runtime(error_graph).clear_scheduler_log();
+    ps::testing::KernelTestAccess::clear_scheduler_trace(kernel, error_graph);
     ps::Kernel::ComputeRequest error_request = parallel_request;
     error_request.name = error_graph;
     error_request.telemetry.benchmark_events = &error_benchmark;
@@ -1825,8 +1855,8 @@ int main(int argc, char** argv) {
                                   {"message", last_error->message}}
                            : json(nullptr)},
         {"scheduler_events",
-         scheduler_events_json(
-             kernel.runtime(error_graph).get_scheduler_log())},
+         scheduler_events_json(ps::testing::KernelTestAccess::scheduler_trace(
+             kernel, error_graph))},
         {"benchmark_events", benchmark_events_json(error_benchmark)}};
     write_json(root / "full-kernel-run" / "actual" / "error_path.json",
                error_actual);

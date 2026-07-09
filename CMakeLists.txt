@@ -464,7 +464,10 @@ if(BUILD_TESTING)
             RUNTIME_OUTPUT_DIRECTORY "${TEST_OUTPUT_DIR}"
             BUILD_RPATH "${CMAKE_BINARY_DIR}/lib"
         )
-        target_include_directories(${TEST_NAME} PRIVATE "${PROJECT_SOURCE_DIR}/include" "${PROJECT_SOURCE_DIR}/src")
+        target_include_directories(${TEST_NAME} PRIVATE
+            "${PROJECT_SOURCE_DIR}/include"
+            "${PROJECT_SOURCE_DIR}/src"
+            "${PROJECT_SOURCE_DIR}/tests")
         target_link_libraries(${TEST_NAME} PRIVATE photospider_lib GTest::gtest GTest::gtest_main)
     endmacro()
 
@@ -497,7 +500,10 @@ if(BUILD_TESTING)
         RUNTIME_OUTPUT_DIRECTORY "${TEST_OUTPUT_DIR}"
         BUILD_RPATH "${CMAKE_BINARY_DIR}/lib"
     )
-    target_include_directories(split_compute_service_trace PRIVATE "${PROJECT_SOURCE_DIR}/include" "${PROJECT_SOURCE_DIR}/src")
+    target_include_directories(split_compute_service_trace PRIVATE
+        "${PROJECT_SOURCE_DIR}/include"
+        "${PROJECT_SOURCE_DIR}/src"
+        "${PROJECT_SOURCE_DIR}/tests")
     target_link_libraries(split_compute_service_trace PRIVATE photospider_lib nlohmann_json::nlohmann_json)
 
     # [M3.1] OpRegistry 多设备实现测试
@@ -593,6 +599,12 @@ if(BUILD_TESTING)
             "${PROJECT_SOURCE_DIR}/tests/verification/codebase_structure/phase2_cli_host_scan.py"
             --repo "${PROJECT_SOURCE_DIR}"
             --out "${CMAKE_BINARY_DIR}/tests/phase2_cli_host_scan"
+        WORKING_DIRECTORY ${PROJECT_SOURCE_DIR})
+    add_test(NAME PublicEscapeHatchScan
+        COMMAND ${Python3_EXECUTABLE}
+            "${PROJECT_SOURCE_DIR}/tests/verification/codebase_structure/public_escape_hatch_scan.py"
+            --repo "${PROJECT_SOURCE_DIR}"
+            --out "${CMAKE_BINARY_DIR}/tests/public_escape_hatch_scan"
         WORKING_DIRECTORY ${PROJECT_SOURCE_DIR})
     add_test(NAME PublicHeaderSelfContainment
         COMMAND ${CMAKE_COMMAND} --build "${CMAKE_BINARY_DIR}"

@@ -24,6 +24,23 @@
 
 namespace ps {
 
+namespace testing {
+
+/**
+ * @brief Test-only bridge that may inspect Kernel internals.
+ *
+ * KernelTestAccess is declared here only so Kernel can friend it. The
+ * definition lives under tests/support and is not part of frontend or host
+ * API. Production callers must use Kernel value facades such as inspect_graph,
+ * scheduler_trace, compute, and compute_async instead of relying on runtime
+ * ownership details.
+ *
+ * @note This forward declaration intentionally exposes no operations.
+ */
+class KernelTestAccess;
+
+}  // namespace testing
+
 /**
  * @brief Multi-graph facade for graph lifecycle, graph-state commands, compute,
  * scheduler access, and plugin management.
@@ -157,16 +174,6 @@ class Kernel {
 
   bool close_graph(const std::string& name);
   std::vector<std::string> list_graphs() const;
-
-  template <typename Fn>
-  auto post(const std::string& name,
-            Fn&& fn) -> std::future<decltype(fn(std::declval<GraphModel&>()))> {
-    auto it = graphs_.find(name);
-    if (it == graphs_.end()) {
-      throw std::runtime_error("Graph not found: " + name);
-    }
-    return it->second->graph_state().submit(std::forward<Fn>(fn));
-  }
 
   /**
    * @brief Computes a graph node synchronously from a structured request.
@@ -318,14 +325,6 @@ class Kernel {
   // [新增] 暴露 Metal 设备访问器
   id get_metal_device(const std::string& name);
 
-  GraphRuntime& runtime(const std::string& name) {
-    auto it = graphs_.find(name);
-    if (it == graphs_.end()) {
-      throw std::runtime_error("Graph not found: " + name);
-    }
-    return *it->second;
-  }
-
   // =========================================================================
   // [M3.4 新增] 调度器配置与管理 API
   // =========================================================================
@@ -360,6 +359,8 @@ class Kernel {
       const std::string& name, ComputeIntent intent) const;
 
  private:
+  friend class testing::KernelTestAccess;
+
   /**
    * @brief Checks whether a node has a materialized disk-cache payload or
    * metadata file.
@@ -445,9 +446,8 @@ class Kernel {
    * @note Used by const inspection APIs such as scheduler metadata queries.
    */
   template <typename Fn>
-  auto with_runtime(const std::string& name, Fn&& op) const
-      -> std::optional<
-          std::decay_t<std::invoke_result_t<Fn, const GraphRuntime&>>> {
+  auto with_runtime(const std::string& name, Fn&& op) const -> std::optional<
+      std::decay_t<std::invoke_result_t<Fn, const GraphRuntime&>>> {
     auto it = graphs_.find(name);
     if (it == graphs_.end()) {
       return std::nullopt;
