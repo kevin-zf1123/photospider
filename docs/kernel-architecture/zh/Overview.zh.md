@@ -137,6 +137,9 @@ graph TD
 5. 结果会复制回 `OperationStatus`、`GraphInspectionView`、`DirtyRegionInspectionSnapshot`、
    timing/event snapshot、scheduler info 或其他 Host value snapshot。Host caller 不会收到
    `Kernel`、`GraphModel`、`GraphRuntime`、OpenCV rectangle 或 YAML node。
+6. 对 Host 提交的 async compute，`close_graph()` 会等待 Host wrapper 已经把 backend completion
+   转换成 `OperationStatus`。这样失败的 async request 可以在 graph close 清理 runtime diagnostic
+   之前读取 backend `LastError` 分类。
 
 ## 调度器模型
 

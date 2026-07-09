@@ -251,7 +251,8 @@ class PHOTOSPIDER_API Host {
    * @param session Session to close.
    * @return Success or failure status.
    * @throws Nothing directly.
-   * @note Closing releases backend resources owned by the implementation.
+   * @note Closing releases backend resources owned by the implementation after
+   *       Host-submitted async wrappers have captured their final status.
    */
   virtual VoidResult close_graph(const GraphSessionId& session) = 0;
 
@@ -326,10 +327,11 @@ class PHOTOSPIDER_API Host {
    * @throws Nothing directly except allocation failure while building the
    *         result/future wrapper.
    * @note The embedded adapter keeps its backend state alive until the returned
-   *       future completes and waits for Host-submitted async work before graph
-   *       close. It also serializes async scheduling/tracking with graph close:
-   *       close either waits for an adapter-submitted backend task or rejects
-   *       new scheduling before that task can capture a closing runtime.
+   *       future completes and waits for Host-submitted async status wrappers
+   *       before graph close. It also serializes async scheduling/tracking with
+   *       graph close: close either waits for adapter-submitted work to capture
+   *       backend failure status or rejects new scheduling before that work can
+   *       capture a closing runtime.
    */
   virtual Result<std::future<OperationStatus>> compute_async(
       HostComputeRequest request) = 0;

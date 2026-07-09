@@ -149,6 +149,10 @@ Typical embedded Host compute flow:
    `DirtyRegionInspectionSnapshot`, timing/event snapshots, scheduler info, or
    other Host value snapshots. Host callers never receive `Kernel`,
    `GraphModel`, `GraphRuntime`, OpenCV rectangles, or YAML nodes.
+6. For Host-submitted async compute, `close_graph()` waits until the Host
+   wrapper has converted backend completion into `OperationStatus`. This keeps
+   backend `LastError` classifications available to failed async requests before
+   graph close clears runtime diagnostics.
 
 ## Scheduler Model
 
