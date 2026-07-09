@@ -10,112 +10,83 @@
 
 namespace {
 
-const char* dirty_domain_name(ps::compute::DirtyDomain domain) {
+const char* dirty_domain_name(ps::DirtyDomain domain) {
   switch (domain) {
-    case ps::compute::DirtyDomain::HighPrecision:
+    case ps::DirtyDomain::HighPrecision:
       return "hp";
-    case ps::compute::DirtyDomain::RealTime:
+    case ps::DirtyDomain::RealTime:
       return "rt";
   }
   return "unknown";
 }
 
-const char* dirty_tile_level_name(ps::compute::DirtyTileLevel level) {
-  switch (level) {
-    case ps::compute::DirtyTileLevel::Micro:
-      return "micro";
-    case ps::compute::DirtyTileLevel::Macro:
-      return "macro";
+const char* dirty_source_lifecycle_name(
+    ps::DirtySourceLifecycleState lifecycle) {
+  switch (lifecycle) {
+    case ps::DirtySourceLifecycleState::Idle:
+      return "idle";
+    case ps::DirtySourceLifecycleState::Updating:
+      return "updating";
+    case ps::DirtySourceLifecycleState::Settled:
+      return "settled";
   }
   return "unknown";
 }
 
-const char* dirty_edge_direction_name(
-    ps::compute::DirtyEdgeDirection direction) {
-  switch (direction) {
-    case ps::compute::DirtyEdgeDirection::ForwardAffected:
-      return "forward";
-    case ps::compute::DirtyEdgeDirection::BackwardDemand:
-      return "backward";
-  }
-  return "unknown";
-}
-
-std::string rect_text(const cv::Rect& rect) {
+std::string rect_text(const ps::PixelRect& rect) {
   std::ostringstream out;
   out << rect.x << "," << rect.y << " " << rect.width << "x" << rect.height;
   return out.str();
 }
 
 std::string format_dirty_snapshot(
-    const std::optional<std::string>& debug,
-    const std::optional<ps::compute::DirtyRegionSnapshot>& snapshot) {
+    const ps::DirtyRegionInspectionSnapshot& snapshot) {
   std::ostringstream out;
-  if (debug) {
-    out << "Dirty snapshot: " << *debug << "\n";
-  }
-  if (!snapshot) {
+  if (snapshot.graph_generation == 0 && snapshot.sources.empty() &&
+      snapshot.dirty_tiles.empty() && snapshot.actual_dirty_rois.empty()) {
     out << "(No dirty snapshot recorded.)\n";
     return out.str();
   }
 
-  const auto& snap = *snapshot;
-  out << "Generation: " << snap.graph_generation << "\n";
-  out << "Dirty sources: " << snap.dirty_source_nodes.size() << "\n";
-  if (!snap.dirty_source_nodes.empty()) {
-    std::vector<int> source_ids = snap.dirty_source_nodes;
-    std::sort(source_ids.begin(), source_ids.end());
-    out << "  nodes:";
-    for (int node_id : source_ids) {
-      out << " " << node_id;
+  out << "Generation: " << snapshot.graph_generation << "\n";
+  out << "Dirty sources: " << snapshot.sources.size() << "\n";
+  for (const auto& source : snapshot.sources) {
+    out << "  node " << source.node.value << " "
+        << dirty_domain_name(source.domain) << " "
+        << dirty_source_lifecycle_name(source.lifecycle)
+        << " generation=" << source.generation;
+    for (const auto& roi : source.source_rois) {
+      out << " [" << rect_text(roi) << "]";
     }
     out << "\n";
   }
-  out << "Updating sources: " << snap.dirty_updating_count << "\n";
-  out << "Dirty tiles: " << snap.dirty_tiles.size() << "\n";
-  for (const auto& tile : snap.dirty_tiles) {
-    out << "  node " << tile.node_id << " " << dirty_domain_name(tile.domain)
-        << " " << dirty_tile_level_name(tile.level) << " tile("
-        << tile.tile_x << "," << tile.tile_y << ") size=" << tile.tile_size
-        << " roi=" << rect_text(tile.pixel_roi) << "\n";
-  }
-  out << "Monolithic dirty regions: " << snap.dirty_monolithic_nodes.size()
-      << "\n";
-  for (const auto& region : snap.dirty_monolithic_nodes) {
-    out << "  node " << region.node_id << " "
-        << dirty_domain_name(region.domain) << " roi="
-        << rect_text(region.pixel_roi)
-        << " whole_output=" << (region.whole_output ? "true" : "false")
+  out << "Dirty tiles: " << snapshot.dirty_tiles.size() << "\n";
+  for (const auto& tile : snapshot.dirty_tiles) {
+    out << "  node " << tile.node.value << " " << dirty_domain_name(tile.domain)
+        << " tile(" << tile.tile_x << "," << tile.tile_y
+        << ") size=" << tile.tile_size << " roi=" << rect_text(tile.pixel_roi)
         << "\n";
   }
-  out << "Per-node dirty ROIs: " << snap.per_node_dirty_rois.size() << "\n";
+  out << "Per-node dirty ROIs: " << snapshot.actual_dirty_rois.size() << "\n";
   std::vector<int> roi_node_ids;
-  roi_node_ids.reserve(snap.per_node_dirty_rois.size());
-  for (const auto& [node_id, _] : snap.per_node_dirty_rois) {
+  roi_node_ids.reserve(snapshot.actual_dirty_rois.size());
+  for (const auto& [node_id, _] : snapshot.actual_dirty_rois) {
     roi_node_ids.push_back(node_id);
   }
   std::sort(roi_node_ids.begin(), roi_node_ids.end());
   for (int node_id : roi_node_ids) {
     out << "  node " << node_id << ":";
-    for (const auto& roi : snap.per_node_dirty_rois.at(node_id)) {
+    for (const auto& roi : snapshot.actual_dirty_rois.at(node_id)) {
       out << " [" << rect_text(roi) << "]";
     }
     out << "\n";
-  }
-  out << "Edge mappings: " << snap.edge_mappings.size() << "\n";
-  for (const auto& edge : snap.edge_mappings) {
-    out << "  " << edge.from_node_id << " -> " << edge.to_node_id << " "
-        << dirty_domain_name(edge.domain) << " "
-        << dirty_edge_direction_name(edge.direction) << " from="
-        << rect_text(edge.from_roi) << " to=" << rect_text(edge.to_roi)
-        << "\n";
   }
   return out.str();
 }
 
 }  // namespace
 
-bool handle_inspect(std::istringstream& iss, ps::InteractionService& svc,
+bool handle_inspect(std::istringstream& iss, ps::Host& svc,
                     std::string& current_graph, bool& /*modified*/,
                     CliConfig& /*config*/) {
   if (current_graph.empty()) {
@@ -129,20 +100,24 @@ bool handle_inspect(std::istringstream& iss, ps::InteractionService& svc,
   }
 
   if (target == "dirty") {
-    auto debug = svc.cmd_dirty_region_snapshot_debug(current_graph);
-    auto snapshot = svc.cmd_dirty_region_snapshot(current_graph);
-    std::cout << format_dirty_snapshot(debug, snapshot);
+    auto snapshot =
+        svc.dirty_region_snapshot(ps::GraphSessionId{current_graph});
+    if (!snapshot.status.ok) {
+      std::cout << "(No dirty snapshot recorded.)\n";
+      return true;
+    }
+    std::cout << format_dirty_snapshot(snapshot.value);
     return true;
   }
 
   if (target == "all") {
-    auto report = svc.cmd_inspect_graph(current_graph);
-    if (!report) {
+    auto report = svc.inspect_graph(ps::GraphSessionId{current_graph});
+    if (!report.status.ok) {
       std::cout << "Unable to inspect graph.\n";
       return true;
     }
-    if (!report->nodes.empty())
-      std::cout << ps::cli::format_graph_inspection(*report) << "\n";
+    if (!report.value.nodes.empty())
+      std::cout << ps::cli::format_graph_inspection(report.value) << "\n";
     else
       std::cout << "(No inspectable nodes)\n";
     return true;
@@ -155,12 +130,13 @@ bool handle_inspect(std::istringstream& iss, ps::InteractionService& svc,
     std::cout << "Invalid node id '" << target << "'.\n";
     return true;
   }
-  auto report = svc.cmd_inspect_node(current_graph, node_id);
-  if (!report) {
+  auto report =
+      svc.inspect_node(ps::GraphSessionId{current_graph}, ps::NodeId{node_id});
+  if (!report.status.ok) {
     std::cout << "Unable to inspect node " << node_id << ".\n";
     return true;
   }
-  std::string text = ps::cli::format_node_inspection(*report);
+  std::string text = ps::cli::format_node_inspection(report.value);
   std::cout << text;
   if (!text.empty() && text.back() != '\n')
     std::cout << '\n';

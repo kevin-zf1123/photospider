@@ -11,7 +11,7 @@
 
 namespace fs = std::filesystem;
 
-bool handle_switch(std::istringstream& iss, ps::InteractionService& svc,
+bool handle_switch(std::istringstream& iss, ps::Host& svc,
                    std::string& current_graph, bool& /*modified*/,
                    CliConfig& config) {
   // Extended: optional 'c' arg to copy current session to target session then
@@ -36,7 +36,7 @@ bool handle_switch(std::istringstream& iss, ps::InteractionService& svc,
 
     // Ensure current session YAML is saved before copying
     fs::path src_yaml = fs::path("sessions") / current_graph / "content.yaml";
-    (void)svc.cmd_save_yaml(current_graph, src_yaml.string());
+    (void)svc.save_graph(ps::GraphSessionId{current_graph}, src_yaml.string());
     fs::path src_cfg = fs::path("sessions") / current_graph / "config.yaml";
 
     fs::path dst_dir = fs::path("sessions") / name;
@@ -66,28 +66,43 @@ bool handle_switch(std::istringstream& iss, ps::InteractionService& svc,
     }
 
     // If target graph already loaded, reload its YAML; else load it.
-    auto loaded = svc.cmd_list_graphs();
-    if (std::find(loaded.begin(), loaded.end(), name) != loaded.end()) {
-      if (!svc.cmd_reload_yaml(name, dst_yaml.string())) {
+    auto loaded = svc.list_graphs();
+    bool already_loaded = false;
+    if (loaded.status.ok) {
+      already_loaded = std::any_of(loaded.value.begin(), loaded.value.end(),
+                                   [&](const ps::GraphSessionId& session) {
+                                     return session.value == name;
+                                   });
+    }
+    if (already_loaded) {
+      if (!svc.reload_graph(ps::GraphSessionId{name}, dst_yaml.string())
+               .status.ok) {
         std::cout << "Error: failed to reload target session.\n";
         return true;
       }
     } else {
-      auto ok =
-          svc.cmd_load_graph(name, "sessions", "", config.loaded_config_path);
-      if (!ok) {
+      auto result = svc.load_graph(ps::GraphLoadRequest{
+          ps::GraphSessionId{name}, "sessions", "", config.loaded_config_path,
+          config.cache_root_dir});
+      if (!result.status.ok) {
         std::cout << "Error: failed to load copied session '" << name << "'.\n";
         return true;
       }
     }
     current_graph = name;
     config.loaded_config_path =
-        (ps::fs::absolute(ps::fs::path("sessions") / name / "config.yaml"))
-            .string();
+        (fs::absolute(fs::path("sessions") / name / "config.yaml")).string();
     std::cout << "Copied current session to '" << name << "' and switched.\n";
   } else {
-    auto names = svc.cmd_list_graphs();
-    if (std::find(names.begin(), names.end(), name) == names.end()) {
+    auto names = svc.list_graphs();
+    bool found = false;
+    if (names.status.ok) {
+      found = std::any_of(names.value.begin(), names.value.end(),
+                          [&](const ps::GraphSessionId& session) {
+                            return session.value == name;
+                          });
+    }
+    if (!found) {
       std::cout << "Graph not found: " << name << "\n";
       return true;
     }
@@ -121,8 +136,7 @@ bool handle_switch(std::istringstream& iss, ps::InteractionService& svc,
     }
     // Point editor and subsequent saves to the session's config.yaml
     config.loaded_config_path =
-        (ps::fs::absolute(ps::fs::path("sessions") / name / "config.yaml"))
-            .string();
+        (fs::absolute(fs::path("sessions") / name / "config.yaml")).string();
     std::cout << "Switched to '" << name
               << "' (config: " << config.loaded_config_path << ").\n";
   }

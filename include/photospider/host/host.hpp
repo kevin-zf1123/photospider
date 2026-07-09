@@ -197,6 +197,25 @@ struct HostPluginLoadReport {
 };
 
 /**
+ * @brief Scheduler defaults applied to graph sessions loaded after update.
+ *
+ * @throws Nothing for value operations except string allocation on mutation.
+ * @note This mirrors the embedded backend's scheduler default configuration
+ *       without exposing scheduler factories or runtime ownership.
+ */
+struct HostSchedulerConfig {
+  /** @brief Scheduler type used for global high-precision compute. */
+  std::string hp_type = "cpu_work_stealing";
+
+  /** @brief Scheduler type used for real-time dirty-region updates. */
+  std::string rt_type = "cpu_work_stealing";
+
+  /** @brief Worker count requested from scheduler factories; zero means auto.
+   */
+  unsigned int worker_count = 0;
+};
+
+/**
  * @brief Frontend-facing Photospider graph host.
  *
  * Host is the narrow API that local GUI/WebUI code and future IPC adapters
@@ -336,6 +355,18 @@ class PHOTOSPIDER_API Host {
    * @note Timing data is populated only when a compute request enabled timing.
    */
   virtual Result<TimingSnapshot> timing(const GraphSessionId& session) = 0;
+
+  /**
+   * @brief Returns the latest backend IO time for a session.
+   *
+   * @param session Session whose latest IO accumulator should be read.
+   * @return IO time in milliseconds, or a failure status when the session is
+   *         missing or has no readable timing state.
+   * @throws Nothing directly.
+   * @note The value is copied from backend diagnostic state after compute and
+   *       is telemetry only; it does not synchronize with active computes.
+   */
+  virtual Result<double> last_io_time(const GraphSessionId& session) const = 0;
 
   /**
    * @brief Returns the last backend error recorded for a session.
@@ -765,6 +796,18 @@ class PHOTOSPIDER_API Host {
   virtual Result<std::vector<std::string>> scheduler_loaded_plugins() const = 0;
 
   /**
+   * @brief Applies scheduler defaults used when loading future sessions.
+   *
+   * @param config Scheduler type names and worker count.
+   * @return Success or failure status.
+   * @throws Nothing directly.
+   * @note Existing loaded graph sessions keep their current scheduler objects;
+   *       callers can use replace_scheduler() to update them explicitly.
+   */
+  virtual VoidResult configure_scheduler_defaults(
+      const HostSchedulerConfig& config) = 0;
+
+  /**
    * @brief Returns scheduler information for a graph intent.
    *
    * @param session Session to inspect.
@@ -799,9 +842,9 @@ class PHOTOSPIDER_API Host {
  * @return Unique Host implementation backed by the local embedded backend
  *         stack.
  * @throws std::bad_alloc if allocation of adapter state fails.
- * @note The adapter keeps existing CLI behavior intact because CLI code still
- *       calls its existing backend facade directly; the Host is an additional
- *       frontend seam for local embedding and future IPC parity.
+ * @note graph_cli uses this Host-backed embedded path for local operation.
+ *       The adapter preserves in-process behavior while keeping the CLI
+ *       boundary compatible with future IPC-backed Host implementations.
  */
 PHOTOSPIDER_API std::unique_ptr<Host> create_embedded_host();
 

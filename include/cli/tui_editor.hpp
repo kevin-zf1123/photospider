@@ -1,18 +1,7 @@
 // moved to include/cli/tui_editor.hpp
 #pragma once
-#include <yaml-cpp/yaml.h>
 
-#include <optional>
-#include <string>
-#include <unordered_map>
-#include <vector>
-
-#include "ftxui/component/component.hpp"
 #include "ftxui/component/screen_interactive.hpp"
-#include "ftxui/dom/elements.hpp"
-#include "graph_model.hpp"
-#include "node.hpp"
-#include "ps_types.hpp"
 
 // A base class for our interactive editors to share the screen instance.
 class TuiEditor {
@@ -24,10 +13,3 @@ class TuiEditor {
  protected:
   ftxui::ScreenInteractive& screen_;
 };
-namespace ps {
-
-// Launch the node editor UI. If initial_id has value, open directly on that
-// node. If not, open the node picker window first.
-void run_node_editor(GraphModel& graph, std::optional<int> initial_id);
-
-}  // namespace ps

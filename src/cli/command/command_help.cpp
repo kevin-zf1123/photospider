@@ -92,7 +92,7 @@ static bool dispatch_print(const std::string& name, const CliConfig& config) {
   return false;
 }
 
-bool handle_help(std::istringstream& iss, ps::InteractionService& /*svc*/,
+bool handle_help(std::istringstream& iss, ps::Host& /*svc*/,
                  std::string& /*current_graph*/, bool& /*modified*/,
                  CliConfig& config) {
   std::string sub;

@@ -3,16 +3,28 @@
 #include <algorithm>
 #include <filesystem>
 #include <fstream>
+#include <iostream>
+#include <map>
 #include <numeric>
+#include <thread>
 
 #include "benchmark/benchmark_yaml_generator.hpp"
-#include "kernel/kernel.hpp"  // 包含 Kernel 头文件以访问 InteractionService
 
 namespace fs = std::filesystem;
 
 namespace ps {
 
-// [新增] 清理函数，用于删除上次运行生成的临时文件
+/**
+ * @brief Removes transient benchmark artifacts created by previous runs.
+ *
+ * @param benchmark_dir Directory that owns benchmark_config.yaml and generated
+ *        sessions.
+ * @throws Nothing directly; filesystem failures are reported to stderr and the
+ *         remaining cleanup continues.
+ * @note Only the reserved `__benchmark_temp` session directory and generated
+ *       `__generated_*` YAML files are removed. User-authored benchmark inputs
+ *       in the same directory are left untouched.
+ */
 static void cleanup_generated_files(const std::string& benchmark_dir) {
   fs::path dir(benchmark_dir);
   if (!fs::exists(dir) || !fs::is_directory(dir)) {
@@ -46,14 +58,56 @@ static void cleanup_generated_files(const std::string& benchmark_dir) {
   }
 }
 
-BenchmarkService::BenchmarkService(ps::InteractionService& svc) : svc_(svc) {}
+/**
+ * @brief Builds the canonical operation key used by benchmark events.
+ *
+ * @param node Node inspection snapshot copied through the Host boundary.
+ * @return `type:subtype` when both fields are present, otherwise the best
+ *         available non-empty label.
+ * @throws std::bad_alloc if string allocation fails.
+ * @note This mirrors the backend benchmark event key while avoiding any direct
+ *       dependency on backend Node or Kernel types.
+ */
+static std::string benchmark_op_key(const NodeInspectionView& node) {
+  if (!node.type.empty() && !node.subtype.empty()) {
+    return node.type + ":" + node.subtype;
+  }
+  if (!node.type.empty()) {
+    return node.type;
+  }
+  return node.subtype;
+}
 
-// [修复] 更新函数签名以接收 benchmark_dir
+/**
+ * @brief Indexes inspected graph nodes by id for timing-row attribution.
+ *
+ * @param graph Public graph inspection snapshot from Host.
+ * @return Map from node id to canonical benchmark operation key.
+ * @throws std::bad_alloc if container/string allocation fails.
+ * @note Missing or empty operation labels are intentionally omitted so callers
+ *       can fall back to a conservative benchmark label.
+ */
+static std::map<int, std::string> benchmark_op_names_by_node(
+    const GraphInspectionView& graph) {
+  std::map<int, std::string> op_names;
+  for (const auto& node : graph.nodes) {
+    std::string key = benchmark_op_key(node);
+    if (!key.empty()) {
+      op_names.emplace(node.id.value, std::move(key));
+    }
+  }
+  return op_names;
+}
+
+BenchmarkService::BenchmarkService(ps::Host& svc) : svc_(svc) {}
+
 BenchmarkResult BenchmarkService::Run(const std::string& benchmark_dir,
                                       const BenchmarkSessionConfig& config,
                                       int runs) {
   std::vector<BenchmarkResult> all_runs;
   all_runs.reserve(runs);
+  const std::string fallback_op_name =
+      config.auto_generate ? config.generator_config.main_op_type : "custom";
 
   std::string graph_yaml_path;
   if (config.auto_generate) {
@@ -79,26 +133,30 @@ BenchmarkResult BenchmarkService::Run(const std::string& benchmark_dir,
 
     // 注意：这里 root_dir 我们直接使用 benchmark_dir，以确保 session 文件在
     // benchmark 目录下创建
-    auto loaded_name =
-        svc_.cmd_load_graph(session_name, benchmark_dir, graph_yaml_path);
-    if (!loaded_name) {
+    auto loaded = svc_.load_graph(
+        ps::GraphLoadRequest{ps::GraphSessionId{session_name}, benchmark_dir,
+                             graph_yaml_path, "", ""});
+    if (!loaded.status.ok) {
       throw std::runtime_error(
           "Failed to load temporary benchmark graph into session root: " +
           benchmark_dir);
     }
+    auto graph_view = svc_.inspect_graph(GraphSessionId{session_name});
+    const std::map<int, std::string> op_names =
+        graph_view.status.ok ? benchmark_op_names_by_node(graph_view.value)
+                             : std::map<int, std::string>{};
 
     BenchmarkResult single_run_result;
     single_run_result.benchmark_name = config.name;
-    // [修改] 设置线程数
     single_run_result.num_threads = config.execution.threads > 0
                                         ? config.execution.threads
                                         : std::thread::hardware_concurrency();
 
     auto start_total = std::chrono::high_resolution_clock::now();
 
-    Kernel::ComputeRequest request;
-    request.name = session_name;
-    request.node_id = target_node_id;
+    HostComputeRequest request;
+    request.session = GraphSessionId{session_name};
+    request.node = NodeId{target_node_id};
     request.cache.precision = "int8";
     request.cache.force_recache = true;
     request.cache.disable_disk_cache = true;
@@ -106,41 +164,52 @@ BenchmarkResult BenchmarkService::Run(const std::string& benchmark_dir,
     request.execution.parallel = config.execution.parallel;
     request.execution.quiet = true;
     request.telemetry.enable_timing = true;
-    request.telemetry.benchmark_events = &single_run_result.events;
-    bool success = svc_.cmd_compute(request);
+    auto compute_status = svc_.compute(request).status;
 
     auto end_total = std::chrono::high_resolution_clock::now();
     single_run_result.total_duration_ms =
         std::chrono::duration<double, std::milli>(end_total - start_total)
             .count();
 
-    auto last_io_time = svc_.cmd_get_last_io_time(session_name);
-    if (last_io_time) {
-      single_run_result.io_duration_ms = *last_io_time;
+    auto timing = svc_.timing(GraphSessionId{session_name});
+    if (timing.status.ok) {
+      for (const auto& row : timing.value.node_timings) {
+        BenchmarkEvent event;
+        event.node_id = row.node.value;
+        auto op_it = op_names.find(row.node.value);
+        event.op_name =
+            op_it != op_names.end() ? op_it->second : fallback_op_name;
+        event.execution_duration_ms = row.elapsed_ms;
+        event.source = row.source;
+        single_run_result.events.push_back(std::move(event));
+      }
     }
-    // --- 核心修复逻辑 ---
-    if (!success) {
-      svc_.cmd_close_graph(session_name);  // 在抛出异常前，先清理session
-      auto last_err = svc_.cmd_last_error(session_name);
+    auto last_io_time = svc_.last_io_time(GraphSessionId{session_name});
+    if (last_io_time.status.ok) {
+      single_run_result.io_duration_ms = last_io_time.value;
+    }
+    if (!compute_status.ok) {
+      auto last_err = svc_.last_error(GraphSessionId{session_name});
       std::string reason =
-          last_err ? last_err->message : "Unknown error during compute.";
+          !last_err.message.empty() ? last_err.message : compute_status.message;
+      if (reason.empty()) {
+        reason = "Unknown error during compute.";
+      }
+      svc_.close_graph(GraphSessionId{session_name});
       throw std::runtime_error("Benchmark run " + std::to_string(i) + " for '" +
                                config.name + "' failed. Reason: " + reason);
     }
-    // --- 修复结束 ---
 
-    svc_.cmd_close_graph(session_name);
+    svc_.close_graph(GraphSessionId{session_name});
     all_runs.push_back(single_run_result);
   }
 
   BenchmarkResult final_result;
   final_result.benchmark_name = config.name;
-  final_result.op_name =
-      config.auto_generate ? config.generator_config.main_op_type : "custom";
+  final_result.op_name = fallback_op_name;
   final_result.width = config.auto_generate ? config.generator_config.width : 0;
   final_result.height =
       config.auto_generate ? config.generator_config.height : 0;
-  // [修改] 设置最终报告的线程数
   final_result.num_threads = config.execution.threads > 0
                                  ? config.execution.threads
                                  : std::thread::hardware_concurrency();

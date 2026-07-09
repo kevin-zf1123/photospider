@@ -1,4 +1,4 @@
-// Minimal FTXUI-based node editor using InteractionService
+// Minimal FTXUI-based node editor using Host
 #include "cli/node_editor.hpp"
 
 #include <algorithm>
@@ -13,23 +13,26 @@
 #include "ftxui/component/component.hpp"
 #include "ftxui/component/screen_interactive.hpp"
 #include "ftxui/dom/elements.hpp"
-#include "kernel/interaction.hpp"
+#include "photospider/host/host.hpp"
 
 using namespace ftxui;
 namespace node_layout = ps::cli::node_editor_layout;
 
-void run_node_editor_decoupled(ps::InteractionService& svc,
-                               const std::string& graph_name,
+void run_node_editor_decoupled(ps::Host& svc, const std::string& graph_name,
                                std::optional<int> initial_id) {
   auto screen = ScreenInteractive::Fullscreen();
 
   // Fetch node ids
-  auto ids_opt = svc.cmd_list_node_ids(graph_name);
-  if (!ids_opt || ids_opt->empty()) {
+  auto ids_result = svc.list_node_ids(ps::GraphSessionId{graph_name});
+  if (!ids_result.status.ok || ids_result.value.empty()) {
     std::cout << "No nodes available in current graph." << std::endl;
     return;
   }
-  std::vector<int> ids = *ids_opt;
+  std::vector<int> ids;
+  ids.reserve(ids_result.value.size());
+  for (const auto& id : ids_result.value) {
+    ids.push_back(id.value);
+  }
   std::vector<std::string> entries;
   entries.reserve(ids.size());
   for (int id : ids)
@@ -58,19 +61,25 @@ void run_node_editor_decoupled(ps::InteractionService& svc,
   int focus_index = node_layout::kNodesFocusIndex;
   int tree1_v = 0, tree1_h = 0, tree2_v = 0, tree2_h = 0;
   auto load_current = [&] {
-    auto y = svc.cmd_get_node_yaml(graph_name, ids[selected_index]);
-    editor_text = y.value_or("# failed to load node\n");
+    auto y = svc.get_node_yaml(ps::GraphSessionId{graph_name},
+                               ps::NodeId{ids[selected_index]});
+    editor_text = y.status.ok ? y.value : "# failed to load node\n";
     last_saved_text = editor_text;
     dirty = false;
     // Refresh trees
-    auto t1 = svc.cmd_dependency_tree(graph_name, ids[selected_index]);
-    tree1_text = t1 ? ps::cli::format_dependency_tree(*t1, tree_show_params)
-                    : "(failed to dump tree)\n";
+    auto t1 = svc.dependency_tree(ps::GraphSessionId{graph_name},
+                                  ps::NodeId{ids[selected_index]});
+    tree1_text = t1.status.ok ? ps::cli::format_dependency_tree(
+                                    t1.value, tree_show_params)
+                              : "(failed to dump tree)\n";
     containing_ends.clear();
     containing_idx = 0;
-    auto ends = svc.cmd_trees_containing_node(graph_name, ids[selected_index]);
-    if (ends && !ends->empty()) {
-      containing_ends = *ends;
+    auto ends = svc.trees_containing_node(ps::GraphSessionId{graph_name},
+                                          ps::NodeId{ids[selected_index]});
+    if (ends.status.ok && !ends.value.empty()) {
+      for (const auto& end : ends.value) {
+        containing_ends.push_back(end.value);
+      }
     }
     auto t2 = [&]() {
       if (tree2_mode == Tree2Mode::ContainsNode) {
@@ -79,17 +88,19 @@ void run_node_editor_decoupled(ps::InteractionService& svc,
               "(no end trees contain this node)\n");
         int end_id = containing_ends[std::min(containing_idx,
                                               (int)containing_ends.size() - 1)];
-        auto tree = svc.cmd_dependency_tree(graph_name, end_id);
-        if (!tree)
+        auto tree = svc.dependency_tree(ps::GraphSessionId{graph_name},
+                                        ps::NodeId{end_id});
+        if (!tree.status.ok)
           return std::optional<std::string>();
         return std::optional<std::string>(
-            ps::cli::format_dependency_tree(*tree, tree_show_params));
+            ps::cli::format_dependency_tree(tree.value, tree_show_params));
       } else {
-        auto tree = svc.cmd_dependency_tree(graph_name, ids[selected_index]);
-        if (!tree)
+        auto tree = svc.dependency_tree(ps::GraphSessionId{graph_name},
+                                        ps::NodeId{ids[selected_index]});
+        if (!tree.status.ok)
           return std::optional<std::string>();
         return std::optional<std::string>(
-            ps::cli::format_dependency_tree(*tree, tree_show_params));
+            ps::cli::format_dependency_tree(tree.value, tree_show_params));
       }
     }();
     tree2_text = t2.value_or("(failed to dump tree)\n");
@@ -194,12 +205,14 @@ void run_node_editor_decoupled(ps::InteractionService& svc,
   });
 
   auto apply_current_editor = [&] {
-    svc.cmd_set_node_yaml(graph_name, ids[selected_index], editor_text);
+    svc.set_node_yaml(ps::GraphSessionId{graph_name},
+                      ps::NodeId{ids[selected_index]}, editor_text);
     // Validate acyclicity using traversal
-    auto orders = svc.cmd_traversal_orders(graph_name);
-    if (!orders) {
+    auto orders = svc.traversal_orders(ps::GraphSessionId{graph_name});
+    if (!orders.status.ok) {
       // revert
-      svc.cmd_set_node_yaml(graph_name, ids[selected_index], last_saved_text);
+      svc.set_node_yaml(ps::GraphSessionId{graph_name},
+                        ps::NodeId{ids[selected_index]}, last_saved_text);
       editor_text = last_saved_text;
       dirty = false;
       return true;
@@ -211,7 +224,7 @@ void run_node_editor_decoupled(ps::InteractionService& svc,
     std::string content_path =
         (std::filesystem::path("sessions") / graph_name / "content.yaml")
             .string();
-    svc.cmd_save_yaml(graph_name, content_path);
+    svc.save_graph(ps::GraphSessionId{graph_name}, content_path);
     // refresh trees
     load_current();
     return true;

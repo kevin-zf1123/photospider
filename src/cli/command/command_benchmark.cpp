@@ -5,7 +5,7 @@
 #include "cli/command/help_utils.hpp"
 
 bool handle_benchmark(std::istringstream& iss,
-                      ps::InteractionService& svc,  // <-- svc is already here
+                      ps::Host& svc,  // <-- svc is already here
                       std::string& /*current_graph*/, bool& /*modified*/,
                       CliConfig& /*config*/) {
   std::string benchmark_dir;

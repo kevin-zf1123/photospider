@@ -3,7 +3,7 @@
 #include <string>
 
 #include "cli_config.hpp"
-#include "kernel/interaction.hpp"
+#include "photospider/host/host.hpp"
 
-void run_repl(ps::InteractionService& svc, CliConfig& config,
+void run_repl(ps::Host& svc, CliConfig& config,
               const std::string& initial_graph);

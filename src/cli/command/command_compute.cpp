@@ -25,8 +25,8 @@ namespace {
  * timer_log before the request is passed to this helper.
  */
 struct ComputeWaitRequest {
-  /** @brief Kernel compute request built from parsed CLI arguments. */
-  ps::Kernel::ComputeRequest compute;
+  /** @brief Host compute request built from parsed CLI arguments. */
+  ps::HostComputeRequest compute;
 
   /** @brief Whether timing should be printed to the console after compute. */
   bool timer_console = false;
@@ -45,38 +45,38 @@ struct ComputeWaitRequest {
  * @brief Schedules one async compute request and waits for completion.
  *
  * @param svc Interaction facade used by the CLI command.
- * @param request Kernel compute request plus CLI polling/logging controls.
+ * @param request Host compute request plus CLI polling/logging controls.
  * @return true when the future completes successfully, false on schedule or
- * compute failure.
+ *         compute failure.
  * @throws Nothing directly; future exceptions are converted by Kernel into the
  * returned status and last_error message.
  * @note Progress events are drained before and during the wait loop to keep the
  * CLI output behavior unchanged.
  */
-bool execute_and_wait(ps::InteractionService& svc,
-                      const ComputeWaitRequest& request) {
-  (void)svc.cmd_drain_compute_events(request.compute.name);
+bool execute_and_wait(ps::Host& svc, const ComputeWaitRequest& request) {
+  (void)svc.drain_compute_events(request.compute.session);
 
-  auto future_opt = svc.cmd_compute_async(request.compute);
+  auto future_result = svc.compute_async(request.compute);
 
-  if (!future_opt) {
+  if (!future_result.status.ok) {
     std::cout << "Error: failed to schedule compute task for node "
-              << request.compute.node_id << ".\n";
+              << request.compute.node.value << ".\n";
     return false;
   }
 
-  auto& future = *future_opt;
+  auto future = std::move(future_result.value);
   if (!request.mute) {
-    std::cout << "Computing node " << request.compute.node_id << "..."
+    std::cout << "Computing node " << request.compute.node.value << "..."
               << std::endl;
   }
 
   while (future.wait_for(std::chrono::milliseconds(50)) ==
          std::future_status::timeout) {
     if (!request.mute) {
-      if (auto events = svc.cmd_drain_compute_events(request.compute.name)) {
-        for (const auto& event : *events) {
-          std::cout << "  - Node " << event.id << " (" << event.name
+      auto events = svc.drain_compute_events(request.compute.session);
+      if (events.status.ok) {
+        for (const auto& event : events.value) {
+          std::cout << "  - Node " << event.node.value << " (" << event.name
                     << ") completed [" << event.source << "]" << std::endl;
         }
       }
@@ -84,28 +84,32 @@ bool execute_and_wait(ps::InteractionService& svc,
   }
 
   if (!request.mute) {
-    if (auto tail_events = svc.cmd_drain_compute_events(request.compute.name)) {
-      for (const auto& event : *tail_events) {
-        std::cout << "  - Node " << event.id << " (" << event.name
+    auto tail_events = svc.drain_compute_events(request.compute.session);
+    if (tail_events.status.ok) {
+      for (const auto& event : tail_events.value) {
+        std::cout << "  - Node " << event.node.value << " (" << event.name
                   << ") completed [" << event.source << "]" << std::endl;
       }
     }
   }
 
-  bool ok = future.get();
-  if (!ok) {
+  auto status = future.get();
+  if (!status.ok) {
     std::cout << "Error: Compute task failed for node "
-              << request.compute.node_id << ".\n";
-    if (auto err = svc.cmd_last_error(request.compute.name)) {
-      std::cout << "  Reason: " << err->message << std::endl;
+              << request.compute.node.value << ".\n";
+    auto err = svc.last_error(request.compute.session);
+    if (!err.ok && !err.message.empty()) {
+      std::cout << "  Reason: " << err.message << std::endl;
+    } else if (!status.message.empty()) {
+      std::cout << "  Reason: " << status.message << std::endl;
     }
   }
-  return ok;
+  return status.ok;
 }
 
 }  // namespace
 
-bool handle_compute(std::istringstream& iss, ps::InteractionService& svc,
+bool handle_compute(std::istringstream& iss, ps::Host& svc,
                     std::string& current_graph, bool& /*modified*/,
                     CliConfig& config) {
   if (current_graph.empty()) {
@@ -122,18 +126,22 @@ bool handle_compute(std::istringstream& iss, ps::InteractionService& svc,
 
   // [核心修复] 参数解析与验证
   std::vector<int> nodes_to_compute;
-  auto all_node_ids_opt = svc.cmd_list_node_ids(current_graph);
-  if (!all_node_ids_opt) {
+  auto all_node_ids_result =
+      svc.list_node_ids(ps::GraphSessionId{current_graph});
+  if (!all_node_ids_result.status.ok) {
     std::cout << "Error: Could not retrieve node list for current graph.\n";
     return true;
   }
-  auto& all_node_ids = *all_node_ids_opt;
+  auto& all_node_ids = all_node_ids_result.value;
 
   if (target_str == "all") {
-    // [核心修复] 使用正确的 svc.cmd_ending_nodes
-    auto ending_nodes_opt = svc.cmd_ending_nodes(current_graph);
-    if (ending_nodes_opt) {
-      nodes_to_compute = *ending_nodes_opt;
+    // [核心修复] 使用 Host ending_nodes 快照选择终端节点。
+    auto ending_nodes_result =
+        svc.ending_nodes(ps::GraphSessionId{current_graph});
+    if (ending_nodes_result.status.ok) {
+      for (const auto& node : ending_nodes_result.value) {
+        nodes_to_compute.push_back(node.value);
+      }
     }
     if (nodes_to_compute.empty()) {
       std::cout << "No ending nodes to compute in the graph.\n";
@@ -143,8 +151,8 @@ bool handle_compute(std::istringstream& iss, ps::InteractionService& svc,
     try {
       int node_id = std::stoi(target_str);
       bool exists = false;
-      for (int id : all_node_ids) {
-        if (id == node_id) {
+      for (const auto& id : all_node_ids) {
+        if (id.value == node_id) {
           exists = true;
           break;
         }
@@ -209,13 +217,13 @@ bool handle_compute(std::istringstream& iss, ps::InteractionService& svc,
   // [核心修复] 循环执行计算，并聚合每次 compute 的计时
   bool all_ok = true;
   auto overall_start_time = std::chrono::high_resolution_clock::now();
-  std::vector<ps::NodeTiming> aggregated_timings;
+  std::vector<ps::NodeTimingSnapshot> aggregated_timings;
   aggregated_timings.reserve(128);
 
   for (int node_id : nodes_to_compute) {
-    ps::Kernel::ComputeRequest compute_request;
-    compute_request.name = current_graph;
-    compute_request.node_id = node_id;
+    ps::HostComputeRequest compute_request;
+    compute_request.session = ps::GraphSessionId{current_graph};
+    compute_request.node = ps::NodeId{node_id};
     compute_request.cache.precision = config.cache_precision;
     compute_request.cache.force_recache = force || force_deep;
     compute_request.cache.disable_disk_cache = force_deep;
@@ -231,8 +239,9 @@ bool handle_compute(std::istringstream& iss, ps::InteractionService& svc,
     }
     // 在下一次 compute 重置计时之前，抓取本次的节点计时并聚合
     if (timer_console || timer_log) {
-      if (auto timers_opt_local = svc.cmd_timing(current_graph)) {
-        for (const auto& nt : timers_opt_local->node_timings)
+      auto timers = svc.timing(ps::GraphSessionId{current_graph});
+      if (timers.status.ok) {
+        for (const auto& nt : timers.value.node_timings)
           aggregated_timings.push_back(nt);
       }
     }
@@ -244,8 +253,8 @@ bool handle_compute(std::istringstream& iss, ps::InteractionService& svc,
             << std::endl;
 
   if (timer_console || timer_log) {
-    // 构造聚合后的 TimingCollector
-    ps::TimingCollector agg;
+    // 构造聚合后的 timing snapshot
+    ps::TimingSnapshot agg;
     agg.node_timings = std::move(aggregated_timings);
     // 使用节点耗时之和作为 "total"，避免包含 REPL 轮询等待等开销
     double total_node_ms = 0.0;
@@ -261,8 +270,9 @@ bool handle_compute(std::istringstream& iss, ps::InteractionService& svc,
     log_buffer << "Timing Report (total " << agg.total_ms << " ms, wall "
                << wall_ms << " ms):" << std::endl;
     for (const auto& nt : agg.node_timings) {
-      log_buffer << "  - Node " << nt.id << " (" << nt.name << ") completed in "
-                 << nt.elapsed_ms << " ms [" << nt.source << "]" << std::endl;
+      log_buffer << "  - Node " << nt.node.value << " (" << nt.name
+                 << ") completed in " << nt.elapsed_ms << " ms [" << nt.source
+                 << "]" << std::endl;
     }
     if (timer_console)
       std::cout << log_buffer.str();

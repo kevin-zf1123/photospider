@@ -1,5 +1,5 @@
 #include "cli/cli_autocompleter.hpp"
-#include "kernel/interaction.hpp"
+#include "photospider/host/host.hpp"
 
 namespace ps {
 
@@ -9,10 +9,10 @@ void CliAutocompleter::CompleteNodeId(const std::string& prefix,
     options.push_back("all");
   }
   if (!current_graph_.empty()) {
-    auto ids = svc_.cmd_list_node_ids(current_graph_);
-    if (ids) {
-      for (int id : *ids) {
-        std::string id_str = std::to_string(id);
+    auto ids = svc_.list_node_ids(ps::GraphSessionId{current_graph_});
+    if (ids.status.ok) {
+      for (const auto& id : ids.value) {
+        std::string id_str = std::to_string(id.value);
         if (id_str.rfind(prefix, 0) == 0)
           options.push_back(id_str);
       }

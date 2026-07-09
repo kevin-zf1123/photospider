@@ -5,7 +5,7 @@
 #include "cli/command/commands.hpp"
 #include "cli/command/help_utils.hpp"
 
-bool handle_read(std::istringstream& iss, ps::InteractionService& svc,
+bool handle_read(std::istringstream& iss, ps::Host& svc,
                  std::string& current_graph, bool& modified,
                  CliConfig& /*config*/) {
   if (current_graph.empty()) {
@@ -17,7 +17,7 @@ bool handle_read(std::istringstream& iss, ps::InteractionService& svc,
   if (path.empty())
     std::cout << "Usage: read <filepath>\n";
   else {
-    if (svc.cmd_reload_yaml(current_graph, path)) {
+    if (svc.reload_graph(ps::GraphSessionId{current_graph}, path).status.ok) {
       modified = false;
       std::cout << "Loaded graph from " << path << "\n";
     } else {

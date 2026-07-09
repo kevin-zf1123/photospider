@@ -11,7 +11,7 @@
 
 namespace fs = std::filesystem;
 
-bool process_command(const std::string& line, ps::InteractionService& svc,
+bool process_command(const std::string& line, ps::Host& svc,
                      std::string& current_graph, bool& modified,
                      CliConfig& config) {
   std::istringstream iss(line);

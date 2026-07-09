@@ -3,9 +3,9 @@
 #include <string>
 
 #include "cli_config.hpp"
-#include "kernel/interaction.hpp"
+#include "photospider/host/host.hpp"
 
 // Returns whether to continue REPL (false means exit)
-bool process_command(const std::string& line, ps::InteractionService& svc,
+bool process_command(const std::string& line, ps::Host& svc,
                      std::string& current_graph, bool& modified,
                      CliConfig& config);

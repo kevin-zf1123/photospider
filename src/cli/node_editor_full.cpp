@@ -7,10 +7,9 @@
 #include <string>
 
 #include "cli/node_editor.hpp"
-#include "kernel/interaction.hpp"
+#include "photospider/host/host.hpp"
 
-void run_node_editor_full(ps::InteractionService& svc,
-                          const std::string& graph_name,
+void run_node_editor_full(ps::Host& svc, const std::string& graph_name,
                           std::optional<int> initial_id) {
   // Delegate to the minimal decoupled editor for now.
   run_node_editor_decoupled(svc, graph_name, initial_id);

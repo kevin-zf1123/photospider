@@ -5,7 +5,7 @@
 #include "cli/command/commands.hpp"
 #include "cli/command/help_utils.hpp"
 
-bool handle_close(std::istringstream& iss, ps::InteractionService& svc,
+bool handle_close(std::istringstream& iss, ps::Host& svc,
                   std::string& current_graph, bool& /*modified*/,
                   CliConfig& /*config*/) {
   std::string name;
@@ -14,7 +14,7 @@ bool handle_close(std::istringstream& iss, ps::InteractionService& svc,
     std::cout << "Usage: close <name>\n";
     return true;
   }
-  if (!svc.cmd_close_graph(name)) {
+  if (!svc.close_graph(ps::GraphSessionId{name}).status.ok) {
     std::cout << "Error: failed to close '" << name << "'.\n";
     return true;
   }

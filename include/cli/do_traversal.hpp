@@ -1,5 +1,9 @@
 // FILE: include/cli/do_traversal.hpp
 #pragma once
-#include "graph_model.hpp"
 
-void do_traversal(const ps::GraphModel& graph, bool show_mem, bool show_disk);
+#include <string>
+
+#include "photospider/host/host.hpp"
+
+void do_traversal(ps::Host& host, const std::string& graph_name, bool show_mem,
+                  bool show_disk);

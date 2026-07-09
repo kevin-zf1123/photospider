@@ -13,7 +13,7 @@
 
 namespace fs = std::filesystem;
 
-bool handle_load(std::istringstream& iss, ps::InteractionService& svc,
+bool handle_load(std::istringstream& iss, ps::Host& svc,
                  std::string& current_graph, bool& modified,
                  CliConfig& config) {
   // Merged behavior: support
@@ -50,7 +50,8 @@ bool handle_load(std::istringstream& iss, ps::InteractionService& svc,
           return true;
         }
       }
-      if (svc.cmd_reload_yaml(current_graph, yaml_path)) {
+      if (svc.reload_graph(ps::GraphSessionId{current_graph}, yaml_path)
+              .status.ok) {
         modified = false;
         std::cout << "Loaded graph from " << yaml_path << " into session '"
                   << current_graph << "'\n";
@@ -71,19 +72,18 @@ bool handle_load(std::istringstream& iss, ps::InteractionService& svc,
           return true;
         }
       }
-      auto ok = svc.cmd_load_graph(def, "sessions", yaml_path,
-                                   config.loaded_config_path,
-                                   config.cache_root_dir);
-      if (!ok) {
+      auto result = svc.load_graph(ps::GraphLoadRequest{
+          ps::GraphSessionId{def}, "sessions", yaml_path,
+          config.loaded_config_path, config.cache_root_dir});
+      if (!result.status.ok) {
         std::cout << "Error: failed to load session 'default' from '"
                   << yaml_path << "'.\n";
         return true;
       }
       if (config.switch_after_load)
-        current_graph = *ok;
+        current_graph = result.value.value;
       config.loaded_config_path =
-          (ps::fs::absolute(ps::fs::path("sessions") / def / "config.yaml"))
-              .string();
+          (fs::absolute(fs::path("sessions") / def / "config.yaml")).string();
       std::cout << "Loaded graph into session 'default' (yaml: " << yaml_path
                 << ").\n";
     }
@@ -94,43 +94,41 @@ bool handle_load(std::istringstream& iss, ps::InteractionService& svc,
   const std::string name = args[0];
   if (args.size() == 1) {
     // load <name>  (from sessions/<name>/content.yaml)
-    auto session_yaml = ps::fs::path("sessions") / name / "content.yaml";
-    if (!ps::fs::exists(session_yaml)) {
+    auto session_yaml = fs::path("sessions") / name / "content.yaml";
+    if (!fs::exists(session_yaml)) {
       std::cout << "Error: session YAML not found: " << session_yaml << "\n";
       std::cout << "Hint: provide an explicit YAML path: load <name> <yaml>\n";
       return true;
     }
-    auto ok =
-        svc.cmd_load_graph(name, "sessions", "", config.loaded_config_path,
-                           config.cache_root_dir);
-    if (!ok) {
+    auto result = svc.load_graph(
+        ps::GraphLoadRequest{ps::GraphSessionId{name}, "sessions", "",
+                             config.loaded_config_path, config.cache_root_dir});
+    if (!result.status.ok) {
       std::cout << "Error: failed to load session '" << name << "'.\n";
       return true;
     }
     if (config.switch_after_load)
-      current_graph = *ok;
+      current_graph = result.value.value;
     config.loaded_config_path =
-        (ps::fs::absolute(ps::fs::path("sessions") / name / "config.yaml"))
-            .string();
+        (fs::absolute(fs::path("sessions") / name / "config.yaml")).string();
     std::cout << "Loaded session '" << name << "'.\n";
     return true;
   }
 
   if (args.size() >= 2) {
     auto yaml_path = args[1];
-    auto ok = svc.cmd_load_graph(name, "sessions", yaml_path,
-                                 config.loaded_config_path,
-                                 config.cache_root_dir);
-    if (!ok) {
+    auto result = svc.load_graph(
+        ps::GraphLoadRequest{ps::GraphSessionId{name}, "sessions", yaml_path,
+                             config.loaded_config_path, config.cache_root_dir});
+    if (!result.status.ok) {
       std::cout << "Error: failed to load session '" << name << "' from '"
                 << yaml_path << "'.\n";
       return true;
     }
     if (config.switch_after_load)
-      current_graph = *ok;
+      current_graph = result.value.value;
     config.loaded_config_path =
-        (ps::fs::absolute(ps::fs::path("sessions") / name / "config.yaml"))
-            .string();
+        (fs::absolute(fs::path("sessions") / name / "config.yaml")).string();
     std::cout << "Loaded session '" << name << "' (yaml: " << yaml_path
               << ").\n";
     return true;

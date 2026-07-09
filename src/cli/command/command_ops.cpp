@@ -11,7 +11,7 @@
 
 namespace fs = std::filesystem;
 
-bool handle_ops(std::istringstream& iss, ps::InteractionService& svc,
+bool handle_ops(std::istringstream& iss, ps::Host& svc,
                 std::string& /*current_graph*/, bool& /*modified*/,
                 CliConfig& config) {
   std::string mode_arg;
@@ -43,8 +43,12 @@ bool handle_ops(std::istringstream& iss, ps::InteractionService& svc,
       grouped_ops;
   int op_count = 0;
 
-  auto op_sources = svc.cmd_ops_sources();
-  for (const auto& pair : op_sources) {
+  auto op_sources = svc.ops_sources();
+  if (!op_sources.status.ok) {
+    std::cout << "No operations are registered." << std::endl;
+    return true;
+  }
+  for (const auto& pair : op_sources.value) {
     const std::string& key = pair.first;
     const std::string& source = pair.second;
     bool is_builtin = (source == "built-in");

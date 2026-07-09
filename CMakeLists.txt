@@ -584,6 +584,12 @@ if(BUILD_TESTING)
             --repo "${PROJECT_SOURCE_DIR}"
             --out "${CMAKE_BINARY_DIR}/tests/phase2_host_adapter_scan"
         WORKING_DIRECTORY ${PROJECT_SOURCE_DIR})
+    add_test(NAME Phase2CliHostScan
+        COMMAND ${Python3_EXECUTABLE}
+            "${PROJECT_SOURCE_DIR}/tests/verification/codebase_structure/phase2_cli_host_scan.py"
+            --repo "${PROJECT_SOURCE_DIR}"
+            --out "${CMAKE_BINARY_DIR}/tests/phase2_cli_host_scan"
+        WORKING_DIRECTORY ${PROJECT_SOURCE_DIR})
     add_test(NAME PublicHeaderSelfContainment
         COMMAND ${CMAKE_COMMAND} --build "${CMAKE_BINARY_DIR}"
             --target public_header_self_containment --config $<CONFIG>

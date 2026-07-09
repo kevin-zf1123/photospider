@@ -6,16 +6,17 @@
 #include "cli/command/commands.hpp"
 #include "cli/command/help_utils.hpp"
 
-bool handle_graphs(std::istringstream& /*iss*/, ps::InteractionService& svc,
+bool handle_graphs(std::istringstream& /*iss*/, ps::Host& svc,
                    std::string& current_graph, bool& /*modified*/,
                    CliConfig& /*config*/) {
-  auto names = svc.cmd_list_graphs();
-  if (names.empty()) {
+  auto result = svc.list_graphs();
+  if (!result.status.ok || result.value.empty()) {
     std::cout << "(no graphs loaded)\n";
     return true;
   }
   std::cout << "Loaded graphs:" << std::endl;
-  for (auto& n : names) {
+  for (const auto& session : result.value) {
+    const auto& n = session.value;
     std::cout << "  - " << n;
     if (n == current_graph)
       std::cout << "  [current]";
