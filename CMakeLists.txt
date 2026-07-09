@@ -2,7 +2,7 @@
 cmake_minimum_required(VERSION 3.16)
 cmake_policy(SET CMP0135 NEW) 
 # Define the project
-project(Photospider LANGUAGES CXX)
+project(Photospider VERSION 0.1.0 LANGUAGES CXX)
 # 开启 LTO (Link Time Optimization)
 include(CheckIPOSupported)
 check_ipo_supported(RESULT result OUTPUT output)
@@ -22,6 +22,9 @@ option(USE_ASAN "Enable AddressSanitizer" OFF)
 option(USE_TSAN "Enable ThreadSanitizer" OFF)
 option(BUILD_TESTING "Build tests" ON)
 set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
+
+include(GNUInstallDirs)
+include(CMakePackageConfigHelpers)
 
 # --- Compiler Settings ---
 set(CMAKE_CXX_STANDARD 17)
@@ -50,13 +53,24 @@ set(CMAKE_LIBRARY_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/lib)
 set(CMAKE_RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin)
 set(PLUGIN_OUTPUT_DIR ${CMAKE_BINARY_DIR}/plugins)
 set(PHOTOSPIDER_PUBLIC_INCLUDE_DIR "${PROJECT_SOURCE_DIR}/include")
+set(PHOTOSPIDER_BUILD_PUBLIC_INCLUDE_DIR
+    "${CMAKE_BINARY_DIR}/generated/photospider_public_include")
+file(MAKE_DIRECTORY "${PHOTOSPIDER_BUILD_PUBLIC_INCLUDE_DIR}")
+file(REMOVE_RECURSE "${PHOTOSPIDER_BUILD_PUBLIC_INCLUDE_DIR}/photospider")
+file(CREATE_LINK
+    "${PROJECT_SOURCE_DIR}/include/photospider"
+    "${PHOTOSPIDER_BUILD_PUBLIC_INCLUDE_DIR}/photospider"
+    SYMBOLIC COPY_ON_ERROR)
 # Linked consumers receive only the public include root. Kernel/Interaction
 # facades live under src/ as source-tree internals: repository targets that
-# include them must use the private roots below, and photospider_lib must not
-# publish src/ to external consumers.
+# include them must use the private roots below, and the installable
+# photospider product must not publish src/ to external consumers.
 set(PHOTOSPIDER_PRIVATE_INCLUDE_DIRS
     "${PROJECT_SOURCE_DIR}/include"
     "${PROJECT_SOURCE_DIR}/src")
+set(PHOTOSPIDER_INSTALL_CMAKEDIR
+    "${CMAKE_INSTALL_LIBDIR}/cmake/Photospider"
+    CACHE STRING "Install directory for Photospider CMake package files")
 
 # --- Dependencies ---
 if(APPLE)
@@ -107,13 +121,15 @@ endif()
 # ==============================================================================
 
 # Module: Core Types
-add_library(photospider_core_types STATIC
+set(PHOTOSPIDER_CORE_TYPE_SOURCES
     src/image_buffer.cpp
     src/ps_types.cpp
     src/adapter/buffer_adapter_opencv.cpp
     src/ops.cpp
     src/kernel/node_module/node_yaml.cpp
 )
+
+add_library(photospider_core_types STATIC ${PHOTOSPIDER_CORE_TYPE_SOURCES})
 target_include_directories(photospider_core_types PRIVATE
     ${PHOTOSPIDER_PRIVATE_INCLUDE_DIRS}
     ${OpenCV_INCLUDE_DIRS}
@@ -145,7 +161,7 @@ if(WIN32)
 endif()
 
 # Module: Graph
-add_library(photospider_graph STATIC
+set(PHOTOSPIDER_GRAPH_SOURCES
     src/kernel/graph_model.cpp
     src/kernel/services/graph_extent_resolver.cpp
     src/kernel/services/graph_traversal_service.cpp
@@ -154,6 +170,8 @@ add_library(photospider_graph STATIC
     src/kernel/services/graph_cache_service.cpp
     src/kernel/services/graph_inspect_service.cpp
 )
+
+add_library(photospider_graph STATIC ${PHOTOSPIDER_GRAPH_SOURCES})
 target_include_directories(photospider_graph PRIVATE
     ${PHOTOSPIDER_PRIVATE_INCLUDE_DIRS}
     ${OpenCV_INCLUDE_DIRS}
@@ -164,10 +182,12 @@ target_link_libraries(photospider_graph PRIVATE
 )
 
 # Module: Plugins
-add_library(photospider_plugin STATIC
+set(PHOTOSPIDER_PLUGIN_SOURCES
     src/kernel/plugin_manager.cpp
     src/kernel/plugin_manage_module/plugin_loader.cpp
 )
+
+add_library(photospider_plugin STATIC ${PHOTOSPIDER_PLUGIN_SOURCES})
 target_include_directories(photospider_plugin PRIVATE
     ${PHOTOSPIDER_PRIVATE_INCLUDE_DIRS}
     ${OpenCV_INCLUDE_DIRS}
@@ -244,36 +264,84 @@ target_link_libraries(photospider_compute PRIVATE
 )
 
 # ==============================================================================
-# 2. Core Shared Library (The Backend)
+# 2. Installable Static Library (The Embedded Frontend Product)
 # ==============================================================================
 
 file(GLOB PHOTOSPIDER_BENCHMARK_SOURCES "src/benchmark/*.cpp")
 
-add_library(photospider_lib SHARED ${PHOTOSPIDER_BENCHMARK_SOURCES}
-                                  ${KERNEL_FACADE_SOURCES})
+set(PHOTOSPIDER_PRODUCT_SOURCES
+    ${PHOTOSPIDER_CORE_TYPE_SOURCES}
+    ${PHOTOSPIDER_GRAPH_SOURCES}
+    ${PHOTOSPIDER_PLUGIN_SOURCES}
+    ${COMPUTE_SOURCES}
+    ${PHOTOSPIDER_BENCHMARK_SOURCES}
+    ${KERNEL_FACADE_SOURCES}
+)
 
-target_compile_definitions(photospider_lib PRIVATE PHOTOSPIDER_LIB_BUILD)
+add_library(photospider STATIC ${PHOTOSPIDER_PRODUCT_SOURCES})
 
-target_include_directories(photospider_lib
+target_compile_definitions(photospider PUBLIC PHOTOSPIDER_STATIC)
+target_compile_features(photospider PUBLIC cxx_std_17)
+
+target_include_directories(photospider
     PUBLIC
-        "$<BUILD_INTERFACE:${PHOTOSPIDER_PUBLIC_INCLUDE_DIR}>"
+        "$<BUILD_INTERFACE:${PHOTOSPIDER_BUILD_PUBLIC_INCLUDE_DIR}>"
+        "$<INSTALL_INTERFACE:${CMAKE_INSTALL_INCLUDEDIR}>"
     PRIVATE
         ${PHOTOSPIDER_PRIVATE_INCLUDE_DIRS}
         ${OpenCV_INCLUDE_DIRS}
 )
 
-target_link_libraries(photospider_lib PRIVATE
-    photospider_compute
-    photospider_plugin
-    photospider_graph
-    photospider_core_types
+target_link_libraries(photospider PRIVATE
+    Threads::Threads
     yaml-cpp::yaml-cpp
     ${OpenCV_LIBS}
+    ${CMAKE_DL_LIBS}
 )
 
 if(WIN32)
-    set_target_properties(photospider_lib PROPERTIES WINDOWS_EXPORT_ALL_SYMBOLS ON)
+    set_target_properties(photospider PROPERTIES WINDOWS_EXPORT_ALL_SYMBOLS ON)
 endif()
+
+install(TARGETS photospider
+    EXPORT PhotospiderTargets
+    ARCHIVE DESTINATION ${CMAKE_INSTALL_LIBDIR}
+    LIBRARY DESTINATION ${CMAKE_INSTALL_LIBDIR}
+    RUNTIME DESTINATION ${CMAKE_INSTALL_BINDIR}
+    INCLUDES DESTINATION ${CMAKE_INSTALL_INCLUDEDIR}
+)
+
+install(DIRECTORY "${PROJECT_SOURCE_DIR}/include/photospider"
+    DESTINATION ${CMAKE_INSTALL_INCLUDEDIR}
+    FILES_MATCHING
+        PATTERN "*.h"
+        PATTERN "*.hpp"
+        PATTERN "*.hh"
+        PATTERN "*.hxx"
+)
+
+install(EXPORT PhotospiderTargets
+    NAMESPACE Photospider::
+    DESTINATION ${PHOTOSPIDER_INSTALL_CMAKEDIR}
+)
+
+configure_package_config_file(
+    "${PROJECT_SOURCE_DIR}/cmake/PhotospiderConfig.cmake.in"
+    "${CMAKE_CURRENT_BINARY_DIR}/PhotospiderConfig.cmake"
+    INSTALL_DESTINATION ${PHOTOSPIDER_INSTALL_CMAKEDIR}
+)
+
+write_basic_package_version_file(
+    "${CMAKE_CURRENT_BINARY_DIR}/PhotospiderConfigVersion.cmake"
+    VERSION ${PROJECT_VERSION}
+    COMPATIBILITY SameMajorVersion
+)
+
+install(FILES
+    "${CMAKE_CURRENT_BINARY_DIR}/PhotospiderConfig.cmake"
+    "${CMAKE_CURRENT_BINARY_DIR}/PhotospiderConfigVersion.cmake"
+    DESTINATION ${PHOTOSPIDER_INSTALL_CMAKEDIR}
+)
 
 # ==============================================================================
 # 3. CLI Static Library (The Frontend Logic)
@@ -284,14 +352,14 @@ list(REMOVE_ITEM CLI_LOGIC_SOURCES "${PROJECT_SOURCE_DIR}/cli/graph_cli.cpp")
 
 add_library(photospider_cli_common STATIC ${CLI_LOGIC_SOURCES})
 
-target_include_directories(photospider_cli_common PUBLIC
+target_include_directories(photospider_cli_common PRIVATE
     "${PROJECT_SOURCE_DIR}/include"
     "${PROJECT_SOURCE_DIR}/src"
     ${OpenCV_INCLUDE_DIRS}
 )
 
 target_link_libraries(photospider_cli_common PUBLIC
-    photospider_lib
+    photospider
     ${FTXUI_TARGETS}
 )
 target_link_libraries(photospider_cli_common PRIVATE
@@ -304,6 +372,11 @@ target_link_libraries(photospider_cli_common PRIVATE
 # ==============================================================================
 
 add_executable(graph_cli cli/graph_cli.cpp)
+target_include_directories(graph_cli PRIVATE
+    "${PROJECT_SOURCE_DIR}/include"
+    "${PROJECT_SOURCE_DIR}/src"
+    ${OpenCV_INCLUDE_DIRS}
+)
 target_link_libraries(graph_cli PRIVATE photospider_cli_common)
 
 if (UNIX AND NOT APPLE)
@@ -402,7 +475,7 @@ foreach(SCHEDULER_SOURCE ${SCHEDULER_PLUGIN_SOURCES})
         ${OpenCV_INCLUDE_DIRS}
     )
     target_link_libraries(${SCHEDULER_NAME} PRIVATE
-        photospider_lib
+        photospider
         yaml-cpp::yaml-cpp
         ${OpenCV_LIBS}
     )
@@ -434,7 +507,7 @@ if(BUILD_TESTING)
         ${OpenCV_INCLUDE_DIRS}
     )
     target_link_libraries(destroy_count_scheduler_plugin PRIVATE
-        photospider_lib
+        photospider
         yaml-cpp::yaml-cpp
         ${OpenCV_LIBS}
     )
@@ -508,8 +581,11 @@ if(APPLE)
     find_library(COREIMAGE_FRAMEWORK CoreImage REQUIRED)
     find_library(COREVIDEO_FRAMEWORK CoreVideo REQUIRED)
 
-    # Core lib needs Metal framework
-    target_link_libraries(photospider_lib PRIVATE ${METAL_FRAMEWORK} ${FOUNDATION_FRAMEWORK})
+    # Core product needs Metal framework for Objective-C++ runtime sources.
+    target_link_libraries(photospider PRIVATE
+        "-framework Metal"
+        "-framework Foundation"
+    )
 
     # 1. The Implementation Library (the actual op logic)
     add_library(perlin_noise_metal SHARED src/metal/perlin_noise_metal.mm)
@@ -581,7 +657,7 @@ if(BUILD_TESTING)
             "${PROJECT_SOURCE_DIR}/tests"
             ${OpenCV_INCLUDE_DIRS})
         target_link_libraries(${TEST_NAME} PRIVATE
-            photospider_lib
+            photospider
             GTest::gtest
             GTest::gtest_main
             yaml-cpp::yaml-cpp
@@ -623,7 +699,7 @@ if(BUILD_TESTING)
         "${PROJECT_SOURCE_DIR}/tests"
         ${OpenCV_INCLUDE_DIRS})
     target_link_libraries(split_compute_service_trace PRIVATE
-        photospider_lib
+        photospider
         nlohmann_json::nlohmann_json
         yaml-cpp::yaml-cpp
         ${OpenCV_LIBS})
@@ -734,6 +810,22 @@ if(BUILD_TESTING)
             --repo "${PROJECT_SOURCE_DIR}"
             --out "${CMAKE_BINARY_DIR}/tests/phase3_internal_header_scan"
         WORKING_DIRECTORY ${PROJECT_SOURCE_DIR})
+    add_test(NAME Phase4StaticProductScan
+        COMMAND ${Python3_EXECUTABLE}
+            "${PROJECT_SOURCE_DIR}/tests/verification/codebase_structure/phase4_static_product_scan.py"
+            --repo "${PROJECT_SOURCE_DIR}"
+            --out "${CMAKE_BINARY_DIR}/tests/phase4_static_product_scan"
+        WORKING_DIRECTORY ${PROJECT_SOURCE_DIR})
+    add_test(NAME Phase4StaticProductConsumerSmoke
+        COMMAND ${Python3_EXECUTABLE}
+            "${PROJECT_SOURCE_DIR}/tests/verification/codebase_structure/phase4_static_product_consumer_smoke.py"
+            --repo "${PROJECT_SOURCE_DIR}"
+            --build "${CMAKE_BINARY_DIR}"
+            --out "${CMAKE_BINARY_DIR}/tests/phase4_static_product_consumer_smoke"
+            --config $<CONFIG>
+        WORKING_DIRECTORY ${PROJECT_SOURCE_DIR})
+    set_tests_properties(Phase4StaticProductConsumerSmoke PROPERTIES
+        RUN_SERIAL TRUE)
     add_test(NAME Phase7PluginRegistrationScan
         COMMAND ${Python3_EXECUTABLE}
             "${PROJECT_SOURCE_DIR}/tests/verification/codebase_structure/phase7_plugin_registration_scan.py"
@@ -772,7 +864,7 @@ endif()
 # --- Summary ---
 message(STATUS "-----------------------------------------------------------")
 message(STATUS "Build Configuration Summary:")
-message(STATUS "  Core Lib (Shared) : libphotospider_lib (Backend)")
+message(STATUS "  Product Lib (Static): libphotospider (Embedded frontend)")
 message(STATUS "  CLI Lib (Static)  : libphotospider_cli_common (Frontend)")
 message(STATUS "  Executable        : graph_cli")
 message(STATUS "  Output Bin        : ${CMAKE_RUNTIME_OUTPUT_DIRECTORY}")

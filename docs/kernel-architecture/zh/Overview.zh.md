@@ -25,7 +25,7 @@ scheduler runtime 执行 ready task callback。
 | `photospider_graph` | `GraphModel` 加图 IO、遍历、缓存和 inspect 服务。 |
 | `photospider_plugin` | 动态操作插件管理器和加载器。 |
 | `photospider_compute` | 内核 facade、交互运行时、调度器、计算服务、事件。 |
-| `photospider_lib` | CLI 和 embedded Host 前端链接的共享后端库；operation plugin 通过 `OperationPluginRegistrar` 和 `register_photospider_ops_v1` 注册，而不是为了 registry 状态链接该后端。 |
+| `photospider` | 静态可安装后端产品，归档文件名为 `libphotospider`，由 CLI 和 embedded Host 前端链接。它只安装 `include/photospider/**`，并导出 `Photospider::photospider`；operation plugin 通过 `OperationPluginRegistrar` 和 `register_photospider_ops_v1` 注册，而不是为了 registry 状态链接该产品。 |
 | `photospider_cli_common` | REPL 命令、TUI 编辑器、自动补全、CLI 配置。 |
 | `graph_cli` | 终端用户可执行文件。 |
 
@@ -38,6 +38,19 @@ scheduler runtime 执行 ready task callback。
 | operation plugins | `build/plugins` |
 | scheduler plugins | `build/schedulers` |
 | tests | `build/tests` |
+
+Package 边界：
+
+- `cmake --install` 会安装静态 `photospider` 归档、`include/photospider/**` public header tree、
+  `PhotospiderTargets.cmake` 和 `PhotospiderConfig.cmake`。
+- `Photospider::photospider` 为 consumer 携带 `PHOTOSPIDER_STATIC`，并让 `src/` include root
+  只对仓库内部构建私有。在 build tree 中，该 target 的 public include root 是生成目录，且只包含
+  `photospider/` 头文件树。
+- OpenCV（`core`、`imgproc`、`imgcodecs`、`videoio`）、`yaml-cpp`、`Threads`、POSIX
+  dynamic-loader 库，以及 Apple `Metal`/`Foundation` framework 标志，是静态归档的实现链接依赖。
+  Public Host/core 头避免暴露 OpenCV 和 `yaml-cpp` 类型。
+- FTXUI、`photospider_cli_common`、operation plugin shim、operation plugin 和 scheduler plugin
+  都不会作为 embedded static package 的依赖导出。
 
 ## 运行时所有权
 

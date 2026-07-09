@@ -33,7 +33,7 @@ The root `CMakeLists.txt` builds these internal modules:
 | `photospider_graph` | `GraphModel` plus graph IO, traversal, cache, and inspect services. |
 | `photospider_plugin` | Dynamic operation plugin manager and loader. |
 | `photospider_compute` | Kernel facade, interaction runtime, schedulers, compute service, events. |
-| `photospider_lib` | Shared backend library linked by CLI and embedded Host frontends; operation plugins register through `OperationPluginRegistrar` and `register_photospider_ops_v1` instead of linking this backend for registry state. |
+| `photospider` | Static installable backend product, archived as `libphotospider`, linked by CLI and embedded Host frontends. It installs only `include/photospider/**` and exports `Photospider::photospider`; operation plugins register through `OperationPluginRegistrar` and `register_photospider_ops_v1` instead of linking this product for registry state. |
 | `photospider_cli_common` | REPL commands, TUI editors, autocomplete, CLI config. |
 | `graph_cli` | End-user executable. |
 
@@ -46,6 +46,23 @@ Output directories:
 | operation plugins | `build/plugins` |
 | scheduler plugins | `build/schedulers` |
 | tests | `build/tests` |
+
+Package boundary:
+
+- `cmake --install` installs the static `photospider` archive, the
+  `include/photospider/**` public header tree, `PhotospiderTargets.cmake`, and
+  `PhotospiderConfig.cmake`.
+- `Photospider::photospider` carries `PHOTOSPIDER_STATIC` for consumers and
+  keeps `src/` include roots private to repository builds. In the build tree,
+  the target's public include root is generated and contains only the
+  `photospider/` header tree.
+- OpenCV (`core`, `imgproc`, `imgcodecs`, `videoio`), `yaml-cpp`, `Threads`,
+  POSIX dynamic-loader libraries, and Apple `Metal`/`Foundation` framework
+  flags are implementation link dependencies of the static archive. Public
+  Host/core headers avoid OpenCV and `yaml-cpp` types.
+- FTXUI, `photospider_cli_common`, operation plugin shim libraries, operation
+  plugins, and scheduler plugins are not exported as dependencies of the
+  embedded static package.
 
 ## Runtime Ownership
 

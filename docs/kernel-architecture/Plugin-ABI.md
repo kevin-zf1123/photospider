@@ -41,7 +41,7 @@ contracts.
 
 ## Operation Plugin Shim and Linkage
 
-Operation plugins no longer link the broad `photospider_lib` backend to reach
+Operation plugins do not link the broad static `photospider` product to reach
 registry symbols. Repo-owned operation plugins register through
 `OperationPluginRegistrar`, and standard plugin targets link the narrow
 `photospider_operation_plugin_shim` when they need runtime helper symbols such
@@ -185,7 +185,7 @@ opaque handles or callback tables so plugins do not depend on C++ binary ABI.
 - Operation plugins must use `OperationPluginRegistrar` and
   `register_photospider_ops_v1`; the no-argument registration ABI is not
   supported.
-- Operation plugins must not link `photospider_lib` merely to share registry
+- Operation plugins must not link `photospider` merely to share registry
   state. Use `photospider_operation_plugin_shim` only for narrow runtime helper
   symbols needed by plugin callback code.
 - Scheduler plugins should treat both `IScheduler` and `SchedulerTaskRuntime`

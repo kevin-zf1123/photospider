@@ -25,8 +25,8 @@ Observed build targets in the current root `CMakeLists.txt`:
 | `photospider_graph` | Static `GraphModel` and graph services. | Exposes `GraphModel` through public headers. |
 | `photospider_plugin` | Static plugin manager and loader. | Host-side plugin ownership still lives in the legacy target, but operation registration now goes through `OperationPluginRegistrar`. |
 | `photospider_compute` | Static compute, runtime, schedulers, and interaction code. | Internal compute planning headers leak through public headers. |
-| `photospider_lib` | Shared backend library linked by CLI and embedded Host frontends. | Name and linkage do not match the desired static `libphotospider` target; operation plugins now use `register_photospider_ops_v1` plus a narrow shim instead of linking this backend for registry access. |
-| `photospider_cli_common` | Static CLI command/TUI/autocomplete code. | Publishes `src/` as a public include root and depends on broad kernel headers. |
+| `photospider` | Static installable backend product with archive name `libphotospider`. | Now matches the desired static product shape, but still folds legacy backend internals behind the public Host seam until later source-layout splits land. |
+| `photospider_cli_common` | Static CLI command/TUI/autocomplete code. | Still depends on broad kernel headers, but its `src/` include root is private to repository targets. |
 | `graph_cli` | CLI executable entry point. | Creates `Kernel` directly and has no daemon-client mode. |
 
 Remaining and recently resolved interface leaks:
@@ -38,7 +38,7 @@ Remaining and recently resolved interface leaks:
 - The legacy internal `Kernel` and `InteractionService` facades now live under
   `src/kernel/`. They include runtime, compute service, graph services, plugin
   manager, and dirty-control-lane implementation types, so they are not
-  supported headers for linked consumers of `photospider_lib`; repository
+  supported headers for linked consumers of `photospider`; repository
   targets that still include them must receive the private `src/` include root.
   Later phases should either keep them behind that private root or replace their
   frontend-facing role with a narrower Host-only public target.
@@ -248,16 +248,39 @@ CMake rules:
 - Installable targets expose only `include/photospider`.
 - Current phase-3 guardrails enforce that the installable header scan only
   walks `include/photospider/**`, that moved implementation headers are present
-  under `src/`, and that `photospider_lib` links internal implementation
-  targets privately.
-- `libphotospider` should be `STATIC` by default.
+  under `src/`, and that the `photospider` product keeps `src/` as a private
+  include root.
+- The phase-4 install/export pass makes `photospider` the installable `STATIC`
+  target with archive output `libphotospider.a`, installs only
+  `include/photospider/**`, and exports `Photospider::photospider` through
+  `PhotospiderConfig.cmake`.
+- Build-tree consumers of `photospider` receive a generated public include root
+  containing only the `photospider/` header tree. The source-tree `include/`
+  and `src/` roots remain private implementation include paths for repository
+  targets.
+- The static product archive folds the product implementation sources directly
+  into `photospider`. Repository-only static helper modules remain available
+  for local build organization but are not exported to package consumers.
 - A shared library can be added later as an explicit compatibility product, not
   as the primary backend.
 - Current phase-7 operation plugins export `register_photospider_ops_v1` and
   receive `OperationPluginRegistrar` from the host. They do not link
-  `photospider_lib` merely to share `OpRegistry`; standard operation plugins
+  `photospider` merely to share `OpRegistry`; standard operation plugins
   link `photospider_operation_plugin_shim` only for narrow runtime helper
   symbols used by plugin callback code.
+- OpenCV (`core`, `imgproc`, `imgcodecs`, `videoio`), `yaml-cpp`, `Threads`,
+  and POSIX dynamic-loader libraries are link-only implementation dependencies
+  for the static archive. `PhotospiderConfig.cmake` finds those dependencies so
+  embedded consumers can link the exported static target, but public Host/core
+  headers do not require OpenCV or `yaml-cpp` types.
+- On Apple, the static product carries system `Metal` and `Foundation` framework
+  link flags for Objective-C++ runtime sources. Metal operation plugins and
+  their `CoreImage`/`CoreVideo` dependencies remain optional runtime plugin
+  artifacts rather than public package requirements.
+- FTXUI and `photospider_cli_common` are CLI-only dependencies and are not part
+  of the embedded package export. Operation plugin shim libraries, operation
+  plugins, and scheduler plugins remain runtime extension artifacts rather than
+  dependencies of `Photospider::photospider`.
 - `graph_cli` should link `libphotospider` for local mode and
   `photospider_ipc_client` for daemon mode.
 - `photospiderd` should link `libphotospider` and own the IPC server.
@@ -413,7 +436,11 @@ Recommended order:
 For any implementation change following this document:
 
 - Run header dependency scans and save evidence under `tests/results/...`.
-- Build `libphotospider`, `graph_cli`, and `photospiderd`.
+- Build `libphotospider` and `graph_cli`; `photospiderd` remains a future
+  daemon target until the application split phase lands.
+- For static package work, run the phase-4 static product scan and package
+  consumer smoke test, then save summary, command logs, expected/actual JSON,
+  and compare output under the issue-specific `tests/results/...` path.
 - Run CTest for kernel, scheduler, plugin, interaction, and CLI tests.
 - Add an IPC integration test that starts `photospiderd`, sends requests, and
   checks response JSON against expected output.

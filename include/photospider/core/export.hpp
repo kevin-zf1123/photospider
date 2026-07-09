@@ -12,7 +12,19 @@
  *       value types that do not cross a dynamic-library ABI do not need it.
  */
 
-#if defined(PHOTOSPIDER_PLUGIN_BUILD)
+#if defined(PHOTOSPIDER_STATIC)
+/**
+ * @brief Leaves Photospider declarations unannotated for static-link builds.
+ *
+ * The installable `photospider` target defines this macro for itself and for
+ * consumers so public declarations remain ordinary C++ symbols when linked
+ * from `libphotospider.a`.
+ *
+ * @note Static consumers should receive this macro through the exported CMake
+ *       target instead of defining backend build/import macros manually.
+ */
+#define PHOTOSPIDER_API
+#elif defined(PHOTOSPIDER_PLUGIN_BUILD)
 /**
  * @brief Leaves Photospider declarations unannotated inside operation plugins.
  *
