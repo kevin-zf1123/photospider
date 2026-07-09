@@ -47,6 +47,7 @@ cmake --build build --target test_cli_dirty_snapshot_formatter -j \
 cat >"$OUT/repl_commands.txt" <<'CMDS'
 load phase2_cli_host util/testcases/propagation_linear_test.yaml
 compute all parallel nosave m
+inspect dirty
 exit
 n
 CMDS
@@ -88,6 +89,8 @@ actual = {
     "graph_cli_repl_returncode": repl_rc,
     "graph_cli_loaded_session": "Loaded session 'phase2_cli_host'" in clean_stdout,
     "graph_cli_compute_finished": "Computation finished." in clean_stdout,
+    "graph_cli_inspect_dirty_ran": "inspect dirty" in clean_stdout,
+    "graph_cli_inspect_dirty_no_snapshot": "(No dirty snapshot recorded.)" in clean_stdout,
     "graph_cli_stderr_warnings": [line for line in stderr.splitlines() if line.strip()],
 }
 expected = {
@@ -98,6 +101,8 @@ expected = {
     "graph_cli_repl_returncode": 0,
     "graph_cli_loaded_session": True,
     "graph_cli_compute_finished": True,
+    "graph_cli_inspect_dirty_ran": True,
+    "graph_cli_inspect_dirty_no_snapshot": True,
 }
 checks = {
     key: actual.get(key) == value for key, value in expected.items()
@@ -122,7 +127,8 @@ overall = all(checks.values())
             "",
             "Verify GitHub issue #30: graph_cli defaults to embedded Host mode,",
             "CLI/common boundaries avoid direct kernel implementation includes,",
-            "and the scriptable load/compute sanity path keeps existing behavior.",
+            "and the scriptable load/compute/inspect sanity path keeps existing",
+            "behavior.",
             "",
             "## Commands",
             "",
@@ -157,6 +163,9 @@ overall = all(checks.values())
             f"- REPL returned 0: {actual['graph_cli_repl_returncode'] == 0}",
             f"- Loaded session observed: {actual['graph_cli_loaded_session']}",
             f"- Compute finished observed: {actual['graph_cli_compute_finished']}",
+            f"- Inspect dirty command observed: {actual['graph_cli_inspect_dirty_ran']}",
+            "- Inspect dirty no-snapshot output observed: "
+            f"{actual['graph_cli_inspect_dirty_no_snapshot']}",
             f"- Overall: {'PASS' if overall else 'FAIL'}",
             "",
             "## Interpretation",
@@ -164,11 +173,11 @@ overall = all(checks.values())
             "The boundary scan proves the CLI entrypoint and common/frontend",
             "helpers no longer name InteractionService, Kernel request types,",
             "GraphModel, GraphRuntime, direct kernel includes, graph_model.hpp,",
-            "or old cmd_* calls. The REPL transcript proves `load ...` and",
-            "`compute all parallel nosave m` still complete through the default",
-            "embedded Host path. The Host adapter and formatter tests prove",
-            "`inspect dirty` can still display monolithic dirty-region and",
-            "edge-mapping diagnostics after the CLI Host migration.",
+            "or old cmd_* calls. The REPL transcript proves `load ...`,",
+            "`compute all parallel nosave m`, and `inspect dirty` still complete",
+            "through the default embedded Host path. The Host adapter and formatter",
+            "tests prove `inspect dirty` can still display monolithic dirty-region",
+            "and edge-mapping diagnostics after the CLI Host migration.",
         ]
     ) + "\n",
     encoding="utf-8",

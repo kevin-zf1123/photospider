@@ -122,6 +122,31 @@ void register_host_adapter_ops() {
         ForwardRoiPropFunc([](const Node&, const cv::Rect& roi,
                               const GraphModel&, const cv::Size&,
                               const cv::Size&) { return roi; }));
+    OpRegistry::instance().register_op_hp_monolithic(
+        "host_adapter_test", "offset_identity",
+        MonolithicOpFunc([](const Node& node,
+                            const std::vector<const NodeOutput*>& inputs) {
+          if (inputs.empty() || inputs.front() == nullptr) {
+            throw GraphError(GraphErrc::InvalidParameter,
+                             "host adapter offset_identity requires one input");
+          }
+          const NodeOutput& input = *inputs.front();
+          NodeOutput output;
+          output.image_buffer = make_aligned_cpu_image_buffer(
+              input.image_buffer.width, input.image_buffer.height,
+              input.image_buffer.channels, input.image_buffer.type);
+          toCvMat(input.image_buffer).copyTo(toCvMat(output.image_buffer));
+          output.space.absolute_roi = input.space.absolute_roi;
+          output.debug.compute_device = "host-adapter-offset-identity-test";
+          (void)node;
+          return output;
+        }));
+    OpRegistry::instance().register_dirty_propagator(
+        "host_adapter_test", "offset_identity",
+        DirtyRoiPropFunc(
+            [](const Node&, const cv::Rect& roi, const GraphModel&) {
+              return cv::Rect(roi.x + 64, roi.y, roi.width, roi.height);
+            }));
   });
 }
 
@@ -232,6 +257,34 @@ void write_host_adapter_roi_graph(const std::filesystem::path& path) {
       << "  name: roi_identity\n"
       << "  type: host_adapter_test\n"
       << "  subtype: identity\n"
+      << "  image_inputs:\n"
+      << "    - from_node_id: 1\n";
+}
+
+/**
+ * @brief Writes a two-node graph whose backward dirty ROI differs by edge side.
+ *
+ * @param path YAML file path to create.
+ * @throws std::filesystem::filesystem_error or std::ios_base::failure if file
+ *         creation fails.
+ * @note Node 2 uses a deterministic test-only dirty propagator that shifts the
+ *       upstream demand by one HP micro-tile, so Host conversion tests can
+ *       catch accidental swaps of `from_roi` and `to_roi`.
+ */
+void write_host_adapter_offset_roi_graph(const std::filesystem::path& path) {
+  std::filesystem::create_directories(path.parent_path());
+  std::ofstream out(path);
+  out << "- id: 1\n"
+      << "  name: roi_source\n"
+      << "  type: host_adapter_test\n"
+      << "  subtype: source\n"
+      << "  parameters:\n"
+      << "    width: 256\n"
+      << "    height: 128\n"
+      << "- id: 2\n"
+      << "  name: roi_offset_identity\n"
+      << "  type: host_adapter_test\n"
+      << "  subtype: offset_identity\n"
       << "  image_inputs:\n"
       << "    - from_node_id: 1\n";
 }
@@ -727,7 +780,7 @@ TEST(EmbeddedHostAdapter, DirtySnapshotPreservesMonolithicAndEdgeDetails) {
   ASSERT_NE(host, nullptr);
 
   const auto yaml_path = temp.root() / "source" / "dirty_roi_graph.yaml";
-  write_host_adapter_roi_graph(yaml_path);
+  write_host_adapter_offset_roi_graph(yaml_path);
 
   GraphLoadRequest request;
   request.session = GraphSessionId{"dirty_snapshot_details"};
@@ -747,7 +800,7 @@ TEST(EmbeddedHostAdapter, DirtySnapshotPreservesMonolithicAndEdgeDetails) {
 
   HostComputeRequest dirty_request = full_request;
   dirty_request.intent = ComputeIntent::GlobalHighPrecision;
-  dirty_request.dirty_roi = PixelRect{1, 1, 2, 2};
+  dirty_request.dirty_roi = PixelRect{70, 10, 20, 20};
   auto dirty_compute = host->compute(dirty_request);
   ASSERT_TRUE(dirty_compute.status.ok) << dirty_compute.status.message;
 
@@ -767,8 +820,8 @@ TEST(EmbeddedHostAdapter, DirtySnapshotPreservesMonolithicAndEdgeDetails) {
   EXPECT_TRUE(monolithic_node->whole_output);
   EXPECT_EQ(monolithic_node->pixel_roi.x, 0);
   EXPECT_EQ(monolithic_node->pixel_roi.y, 0);
-  EXPECT_EQ(monolithic_node->pixel_roi.width, 8);
-  EXPECT_EQ(monolithic_node->pixel_roi.height, 6);
+  EXPECT_EQ(monolithic_node->pixel_roi.width, 256);
+  EXPECT_EQ(monolithic_node->pixel_roi.height, 128);
 
   const auto edge_mapping = std::find_if(
       snapshot.value.edge_mappings.begin(), snapshot.value.edge_mappings.end(),
@@ -778,14 +831,14 @@ TEST(EmbeddedHostAdapter, DirtySnapshotPreservesMonolithicAndEdgeDetails) {
       });
   ASSERT_NE(edge_mapping, snapshot.value.edge_mappings.end());
   EXPECT_EQ(edge_mapping->direction, DirtyEdgeDirection::BackwardDemand);
-  EXPECT_EQ(edge_mapping->from_roi.x, 0);
+  EXPECT_EQ(edge_mapping->from_roi.x, 64);
   EXPECT_EQ(edge_mapping->from_roi.y, 0);
-  EXPECT_EQ(edge_mapping->from_roi.width, 8);
-  EXPECT_EQ(edge_mapping->from_roi.height, 6);
-  EXPECT_EQ(edge_mapping->to_roi.x, 0);
+  EXPECT_EQ(edge_mapping->from_roi.width, 128);
+  EXPECT_EQ(edge_mapping->from_roi.height, 64);
+  EXPECT_EQ(edge_mapping->to_roi.x, 64);
   EXPECT_EQ(edge_mapping->to_roi.y, 0);
-  EXPECT_EQ(edge_mapping->to_roi.width, 8);
-  EXPECT_EQ(edge_mapping->to_roi.height, 6);
+  EXPECT_EQ(edge_mapping->to_roi.width, 64);
+  EXPECT_EQ(edge_mapping->to_roi.height, 64);
 }
 
 TEST(EmbeddedHostAdapter, DirtySourceAndCacheControlsExposeFrontendStatus) {
