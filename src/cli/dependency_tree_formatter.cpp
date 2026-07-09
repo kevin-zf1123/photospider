@@ -4,6 +4,7 @@
 #include <map>
 #include <sstream>
 #include <string>
+#include <vector>
 
 namespace ps::cli {
 
@@ -58,6 +59,72 @@ void dump_matrix(std::ostream& os, const char* label,
      << "]\n";
   os << "      [" << matrix[6] << ", " << matrix[7] << ", " << matrix[8]
      << "]\n";
+}
+
+/**
+ * @brief Returns the CLI label for a public dirty-domain value.
+ *
+ * @param domain Public dirty domain from a Host snapshot.
+ * @return Stable short label used in `inspect dirty` output.
+ * @throws Nothing.
+ */
+const char* dirty_domain_name(DirtyDomain domain) {
+  switch (domain) {
+    case DirtyDomain::HighPrecision:
+      return "hp";
+    case DirtyDomain::RealTime:
+      return "rt";
+  }
+  return "unknown";
+}
+
+/**
+ * @brief Returns the CLI label for a dirty-source lifecycle value.
+ *
+ * @param lifecycle Public dirty-source lifecycle value.
+ * @return Stable lifecycle label used in `inspect dirty` output.
+ * @throws Nothing.
+ */
+const char* dirty_source_lifecycle_name(DirtySourceLifecycleState lifecycle) {
+  switch (lifecycle) {
+    case DirtySourceLifecycleState::Idle:
+      return "idle";
+    case DirtySourceLifecycleState::Updating:
+      return "updating";
+    case DirtySourceLifecycleState::Settled:
+      return "settled";
+  }
+  return "unknown";
+}
+
+/**
+ * @brief Returns the CLI label for a dirty edge mapping direction.
+ *
+ * @param direction Public dirty edge mapping direction.
+ * @return Stable direction label used in `inspect dirty` output.
+ * @throws Nothing.
+ */
+const char* dirty_edge_direction_name(DirtyEdgeDirection direction) {
+  switch (direction) {
+    case DirtyEdgeDirection::ForwardAffected:
+      return "forward-affected";
+    case DirtyEdgeDirection::BackwardDemand:
+      return "backward-demand";
+  }
+  return "unknown";
+}
+
+/**
+ * @brief Formats one public pixel rectangle for dirty inspection output.
+ *
+ * @param rect Pixel rectangle to format.
+ * @return Compact `x,y widthxheight` text.
+ * @throws std::bad_alloc if string construction allocates and fails.
+ */
+std::string rect_text(const PixelRect& rect) {
+  std::ostringstream out;
+  out << rect.x << "," << rect.y << " " << rect.width << "x" << rect.height;
+  return out.str();
 }
 }  // namespace
 
@@ -117,6 +184,73 @@ std::string format_graph_inspection(const GraphInspectionView& graph) {
     }
   }
   return os.str();
+}
+
+std::string format_dirty_snapshot(
+    const DirtyRegionInspectionSnapshot& snapshot) {
+  std::ostringstream out;
+  if (snapshot.graph_generation == 0 && snapshot.sources.empty() &&
+      snapshot.dirty_tiles.empty() && snapshot.dirty_monolithic_nodes.empty() &&
+      snapshot.actual_dirty_rois.empty() && snapshot.edge_mappings.empty()) {
+    out << "(No dirty snapshot recorded.)\n";
+    return out.str();
+  }
+
+  out << "Generation: " << snapshot.graph_generation << "\n";
+  out << "Dirty sources: " << snapshot.sources.size() << "\n";
+  for (const auto& source : snapshot.sources) {
+    out << "  node " << source.node.value << " "
+        << dirty_domain_name(source.domain) << " "
+        << dirty_source_lifecycle_name(source.lifecycle)
+        << " generation=" << source.generation;
+    for (const auto& roi : source.source_rois) {
+      out << " [" << rect_text(roi) << "]";
+    }
+    out << "\n";
+  }
+
+  out << "Dirty tiles: " << snapshot.dirty_tiles.size() << "\n";
+  for (const auto& tile : snapshot.dirty_tiles) {
+    out << "  node " << tile.node.value << " " << dirty_domain_name(tile.domain)
+        << " tile(" << tile.tile_x << "," << tile.tile_y
+        << ") size=" << tile.tile_size << " roi=" << rect_text(tile.pixel_roi)
+        << "\n";
+  }
+
+  out << "Monolithic dirty regions: " << snapshot.dirty_monolithic_nodes.size()
+      << "\n";
+  for (const auto& region : snapshot.dirty_monolithic_nodes) {
+    out << "  node " << region.node.value << " "
+        << dirty_domain_name(region.domain)
+        << " whole=" << (region.whole_output ? "true" : "false")
+        << " roi=" << rect_text(region.pixel_roi) << "\n";
+  }
+
+  out << "Per-node dirty ROIs: " << snapshot.actual_dirty_rois.size() << "\n";
+  std::vector<int> roi_node_ids;
+  roi_node_ids.reserve(snapshot.actual_dirty_rois.size());
+  for (const auto& [node_id, _] : snapshot.actual_dirty_rois) {
+    roi_node_ids.push_back(node_id);
+  }
+  std::sort(roi_node_ids.begin(), roi_node_ids.end());
+  for (int node_id : roi_node_ids) {
+    out << "  node " << node_id << ":";
+    for (const auto& roi : snapshot.actual_dirty_rois.at(node_id)) {
+      out << " [" << rect_text(roi) << "]";
+    }
+    out << "\n";
+  }
+
+  out << "Edge mappings: " << snapshot.edge_mappings.size() << "\n";
+  for (const auto& mapping : snapshot.edge_mappings) {
+    out << "  node " << mapping.from_node.value << " -> "
+        << mapping.to_node.value << " " << dirty_domain_name(mapping.domain)
+        << " " << dirty_edge_direction_name(mapping.direction) << " from=["
+        << rect_text(mapping.from_roi) << "]"
+        << " to=[" << rect_text(mapping.to_roi) << "]\n";
+  }
+
+  return out.str();
 }
 
 std::string format_dependency_tree(const HostDependencyTreeSnapshot& tree,

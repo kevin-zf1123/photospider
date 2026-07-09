@@ -484,6 +484,10 @@ if(BUILD_TESTING)
         PS_TEST_OP_PLUGIN_DIR="${TEST_OP_PLUGIN_DIR}"
     )
     add_dependencies(test_host_adapter lifecycle_op_plugin)
+    add_ps_test(test_cli_dirty_snapshot_formatter
+        tests/test_cli_dirty_snapshot_formatter.cpp)
+    target_link_libraries(test_cli_dirty_snapshot_formatter PRIVATE
+        photospider_cli_common)
     add_ps_test(test_compute_service_split tests/test_compute_service_split.cpp)
     add_ps_test(test_node_editor_layout tests/test_node_editor_layout.cpp)
     target_link_libraries(test_node_editor_layout PRIVATE ${FTXUI_TARGETS})
@@ -609,6 +613,7 @@ if(BUILD_TESTING)
     gtest_discover_tests(test_kernel_contracts WORKING_DIRECTORY ${PROJECT_SOURCE_DIR})
     gtest_discover_tests(test_image_buffer_contracts WORKING_DIRECTORY ${PROJECT_SOURCE_DIR})
     gtest_discover_tests(test_host_adapter WORKING_DIRECTORY ${PROJECT_SOURCE_DIR})
+    gtest_discover_tests(test_cli_dirty_snapshot_formatter WORKING_DIRECTORY ${PROJECT_SOURCE_DIR})
     gtest_discover_tests(test_compute_service_split WORKING_DIRECTORY ${PROJECT_SOURCE_DIR})
     gtest_discover_tests(test_node_editor_layout WORKING_DIRECTORY ${PROJECT_SOURCE_DIR})
     gtest_discover_tests(test_gpu_pipeline_scheduler WORKING_DIRECTORY ${PROJECT_SOURCE_DIR})
