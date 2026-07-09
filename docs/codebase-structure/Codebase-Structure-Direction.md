@@ -35,14 +35,13 @@ Remaining and recently resolved interface leaks:
   graph model state, dirty-region snapshots, planner summaries, full task graph
   cache handles, and runtime generation state are now internal to the private
   include root.
-- The legacy internal `include/kernel/kernel.hpp` still includes runtime,
-  compute service, graph services, plugin manager, and dirty-control-lane
-  implementation types. It remains outside the installable
-  `include/photospider/**` inventory and is not a supported header for linked
-  consumers of `photospider_lib`; repository targets that still include it must
-  receive the private `src/` include root. Later phases should move the
-  remaining `include/kernel/*` facade headers behind that private root or a
-  narrower public Host-only target.
+- The legacy internal `Kernel` and `InteractionService` facades now live under
+  `src/kernel/`. They include runtime, compute service, graph services, plugin
+  manager, and dirty-control-lane implementation types, so they are not
+  supported headers for linked consumers of `photospider_lib`; repository
+  targets that still include them must receive the private `src/` include root.
+  Later phases should either keep them behind that private root or replace their
+  frontend-facing role with a narrower Host-only public target.
 - `include/plugin_api.hpp` includes full `Node`, exposing node runtime/cache
   state to operation plugins instead of a smaller plugin contract.
 - CLI and benchmark headers live under the same public include root as kernel

@@ -18,9 +18,9 @@ FOCUSED_FILTER = (
 CONTROL_FILES = [
     "src/kernel/services/compute-service/dirty_control_lane.hpp",
     "src/kernel/services/compute-service/dirty_control_lane.cpp",
-    "include/kernel/kernel.hpp",
+    "src/kernel/kernel.hpp",
     "src/kernel/kernel_dirty_roi_facade.cpp",
-    "include/kernel/interaction.hpp",
+    "src/kernel/interaction.hpp",
     "tests/test_compute_service_split.cpp",
 ]
 
@@ -125,7 +125,7 @@ def main() -> int:
                 / "src/kernel/services/compute-service/dirty_control_lane.hpp"
             ).exists(),
             "kernel_control_api": file_contains(
-                repo, "include/kernel/kernel.hpp", "begin_dirty_source_control"
+                repo, "src/kernel/kernel.hpp", "begin_dirty_source_control"
             )
             and file_contains(
                 repo,
@@ -134,7 +134,7 @@ def main() -> int:
             ),
             "interaction_control_api": file_contains(
                 repo,
-                "include/kernel/interaction.hpp",
+                "src/kernel/interaction.hpp",
                 "cmd_begin_dirty_source_control",
             ),
             "focused_test_mentions_cutoff": file_contains(
@@ -189,7 +189,7 @@ def main() -> int:
     summary_lines = [
         "# DirtyControlLane Evidence",
         "",
-        "This evidence proves feedback issue 7 using public Kernel/InteractionService facade calls.",
+        "This evidence proves feedback issue 7 using internal Kernel/InteractionService facade calls.",
         "",
         f"- Focused tests: `{out / 'test_compute_service_split.log'}`",
         f"- API scan: `{out / 'control_lane_api_scan.log'}`",

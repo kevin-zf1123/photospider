@@ -31,11 +31,10 @@
 - 原先的 `include/graph_model.hpp` 已移到 `src/graph_model.hpp`；graph model state、
   dirty-region snapshot、planner summary、full task graph cache handle 和 runtime generation
   state 现在都归入私有 include root。
-- 遗留的内部 `include/kernel/kernel.hpp` 仍包含 runtime、compute service、图服务、插件管理器和
-  dirty-control-lane 实现类型。它不属于可安装的 `include/photospider/**` inventory，也不是
-  `photospider_lib` 链接消费者可依赖的受支持头；仍包含它的仓库内部 target 必须获得私有 `src/`
-  include root。后续阶段应把剩余的 `include/kernel/*` facade 头也移到该私有 root 后面，或收敛成更窄的
-  Host-only public target。
+- 遗留的内部 `Kernel` 和 `InteractionService` facade 现在位于 `src/kernel/`。它们包含 runtime、
+  compute service、图服务、插件管理器和 dirty-control-lane 实现类型，因此不是 `photospider_lib`
+  链接消费者可依赖的受支持头；仍包含它们的仓库内部 target 必须获得私有 `src/` include root。后续阶段应
+  继续把它们留在该私有 root 后面，或用更窄的 Host-only public target 取代其面向前端的职责。
 - `include/plugin_api.hpp` 包含完整 `Node`，把节点运行时/cache 状态暴露给操作插件，而不是暴露更小的插件契约。
 - CLI 和 benchmark 头与内核契约位于同一个 public include root 下，因此 install 规则会意外发布应用内部实现。
 

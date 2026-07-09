@@ -4,12 +4,12 @@
  * @file interaction.hpp
  * @brief Legacy source-tree interaction facade between CLI code and Kernel.
  *
- * This header is not part of the installable `include/photospider/**` public
- * interface. It includes `kernel/kernel.hpp`, which depends on private
- * implementation headers under `src/`; repository targets that still use
- * InteractionService must receive the private include roots. External
- * frontends should use `photospider/host/host.hpp` rather than linking
- * `photospider_lib` and including this migration-period facade.
+ * This header lives under the private `src/` include root and is not part of
+ * the installable `include/photospider/` public interface. It includes
+ * `kernel/kernel.hpp`, which depends on private implementation headers;
+ * repository targets that still use InteractionService must receive the private
+ * include roots. External frontends should use `photospider/host/host.hpp`
+ * rather than linking `photospider_lib` and including this source-tree facade.
  */
 
 #include <functional>

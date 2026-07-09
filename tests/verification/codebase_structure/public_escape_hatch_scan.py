@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Verify public kernel facades do not expose internal test escape hatches."""
+"""Verify public legacy facades are removed and internal facades stay closed."""
 
 from __future__ import annotations
 
@@ -10,9 +10,13 @@ from pathlib import Path
 from typing import Any, Optional
 
 
-SCAN_HEADERS = (
+PUBLIC_LEGACY_HEADERS = (
     "include/kernel/kernel.hpp",
     "include/kernel/interaction.hpp",
+)
+INTERNAL_SCAN_HEADERS = (
+    "src/kernel/kernel.hpp",
+    "src/kernel/interaction.hpp",
 )
 SCAN_CLASSES = ("Kernel", "InteractionService")
 RAW_INTERNAL_TYPES = (
@@ -117,7 +121,7 @@ def public_class_chunks(body: str, body_offset: int) -> list[tuple[str, int]]:
 
 
 def scan_header(repo: Path, path: Path) -> list[dict[str, Any]]:
-    """Scan one public facade header for forbidden escape-hatch signatures."""
+    """Scan one internal facade header for forbidden escape-hatch signatures."""
 
     raw = path.read_text(encoding="utf-8")
     code = strip_comments(raw)
@@ -240,7 +244,10 @@ def make_compare(actual: dict[str, Any], expected: dict[str, Any]) -> tuple[bool
 
     selftest = actual["detector_selftest"]
     checks = {
-        "public facade headers scanned": actual["scanned_header_count"]
+        "legacy public facade headers removed": not actual[
+            "public_legacy_headers_present"
+        ],
+        "internal facade headers scanned": actual["scanned_header_count"]
         == expected["scanned_header_count"],
         "no escape hatch signatures": actual["violation_count"]
         == expected["violation_count"],
@@ -280,9 +287,11 @@ def make_summary(out: Path, actual: dict[str, Any], passed: bool) -> str:
             "",
             "## Test objective",
             "",
-            "Verify public Kernel and InteractionService facade headers no longer",
-            "offer raw Kernel, GraphRuntime, GraphStateExecutor, GraphModel,",
-            "or templated graph-state submission escape hatches.",
+            "Verify legacy Kernel and InteractionService facade headers no",
+            "longer remain under `include/kernel/`, and their internal",
+            "`src/kernel/` replacements do not offer raw GraphRuntime,",
+            "GraphStateExecutor, GraphModel, or templated graph-state",
+            "submission escape hatches.",
             "",
             "## Evidence files",
             "",
@@ -292,15 +301,18 @@ def make_summary(out: Path, actual: dict[str, Any], passed: bool) -> str:
             "",
             "## Result",
             "",
-            f"- Headers scanned: {actual['scanned_headers']}",
+            f"- Removed public legacy headers: {actual['public_legacy_headers_absent']}",
+            f"- Internal headers scanned: {actual['scanned_headers']}",
             f"- Forbidden signature count: {actual['violation_count']}",
             f"- Overall: {'PASS' if passed else 'FAIL'}",
             "",
             "## Interpretation",
             "",
-            "A passing result proves raw internal Kernel, GraphRuntime,",
-            "GraphStateExecutor, GraphModel, and templated graph-state `post()`",
-            "escape hatches are absent from the public facade headers.",
+            "A passing result proves the legacy Kernel/InteractionService",
+            "facade headers are absent from the public include tree and that",
+            "raw internal GraphRuntime, GraphStateExecutor, GraphModel, and",
+            "templated graph-state `post()` escape hatches are absent from the",
+            "remaining internal facade headers.",
             "Internal tests may still include the `tests/support` helper",
             "explicitly; that helper is intentionally outside this public header",
             "scan.",
@@ -322,14 +334,20 @@ def main() -> int:
 
     scanned_headers: list[str] = []
     violations: list[dict[str, Any]] = []
-    for header in SCAN_HEADERS:
+    public_legacy_headers_present = [
+        header for header in PUBLIC_LEGACY_HEADERS if (repo / header).exists()
+    ]
+    for header in INTERNAL_SCAN_HEADERS:
         path = repo / header
         if path.is_file():
             scanned_headers.append(header)
             violations.extend(scan_header(repo, path))
 
     actual = {
-        "scan_headers": list(SCAN_HEADERS),
+        "public_legacy_headers": list(PUBLIC_LEGACY_HEADERS),
+        "public_legacy_headers_present": public_legacy_headers_present,
+        "public_legacy_headers_absent": not public_legacy_headers_present,
+        "scan_headers": list(INTERNAL_SCAN_HEADERS),
         "scanned_headers": scanned_headers,
         "scanned_header_count": len(scanned_headers),
         "violation_count": len(violations),
@@ -337,7 +355,8 @@ def main() -> int:
         "detector_selftest": detector_selftest(),
     }
     expected = {
-        "scanned_header_count": len(SCAN_HEADERS),
+        "public_legacy_headers_present": [],
+        "scanned_header_count": len(INTERNAL_SCAN_HEADERS),
         "violation_count": 0,
     }
     passed, compare = make_compare(actual, expected)
