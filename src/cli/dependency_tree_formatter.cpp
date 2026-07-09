@@ -246,8 +246,8 @@ std::string format_dirty_snapshot(
     out << "  node " << mapping.from_node.value << " -> "
         << mapping.to_node.value << " " << dirty_domain_name(mapping.domain)
         << " " << dirty_edge_direction_name(mapping.direction) << " from=["
-        << rect_text(mapping.from_roi) << "]"
-        << " to=[" << rect_text(mapping.to_roi) << "]\n";
+        << rect_text(mapping.from_roi) << "]";
+    out << " to=[" << rect_text(mapping.to_roi) << "]\n";
   }
 
   return out.str();
