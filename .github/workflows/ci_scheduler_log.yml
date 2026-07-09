@@ -65,7 +65,7 @@ jobs:
       - name: Run cpplint
         run: |
           set -e
-          files=$(git ls-files src/kernel/graph_runtime.hpp src/kernel/graph_runtime.mm src/kernel/services/compute_service.cpp tests/test_scheduler.cpp include/kernel/kernel.hpp)
+          files=$(git ls-files include/kernel/graph_runtime.hpp src/kernel/graph_runtime.mm src/kernel/services/compute_service.cpp tests/test_scheduler.cpp include/kernel/kernel.hpp)
           if [ -n "$files" ]; then
             python3 -m cpplint --extensions=mm,cpp,cxx,cc,h,hpp --quiet $files
           fi
