@@ -454,7 +454,7 @@ if(BUILD_TESTING)
     file(MAKE_DIRECTORY ${TEST_OUTPUT_DIR})
     
     include(GoogleTest)
-    find_package(Python3 3.10 REQUIRED COMPONENTS Interpreter)
+    find_package(Python3 3.9 REQUIRED COMPONENTS Interpreter)
     find_package(GTest REQUIRED)
     find_package(nlohmann_json REQUIRED)
 

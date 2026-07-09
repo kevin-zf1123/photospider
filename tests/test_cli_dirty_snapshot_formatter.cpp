@@ -247,5 +247,51 @@ TEST(CliDirtySnapshotFormatter,
             std::string::npos);
 }
 
+TEST(CliDirtySnapshotFormatter, InspectDirtyReportsHostFailures) {
+  auto host = create_embedded_host();
+  ASSERT_NE(host, nullptr);
+
+  std::istringstream args("dirty");
+  std::string current_graph = "missing_cli_graph";
+  bool modified = false;
+  CliConfig config;
+  std::ostringstream captured;
+  auto* original_buffer = std::cout.rdbuf(captured.rdbuf());
+  const bool handled =
+      ::handle_inspect(args, *host, current_graph, modified, config);
+  std::cout.rdbuf(original_buffer);
+
+  const std::string text = captured.str();
+  EXPECT_TRUE(handled);
+  EXPECT_NE(text.find("Unable to inspect dirty regions for graph "
+                      "'missing_cli_graph'."),
+            std::string::npos);
+  EXPECT_NE(text.find("Reason:"), std::string::npos);
+  EXPECT_EQ(text.find("(No dirty snapshot recorded.)"), std::string::npos);
+}
+
+TEST(CliSaveCommand, ReportsImageComputeFailures) {
+  auto host = create_embedded_host();
+  ASSERT_NE(host, nullptr);
+
+  std::istringstream args("1 /tmp/photospider_missing_output.png");
+  std::string current_graph = "missing_cli_graph";
+  bool modified = false;
+  CliConfig config;
+  std::ostringstream captured;
+  auto* original_buffer = std::cout.rdbuf(captured.rdbuf());
+  const bool handled =
+      ::handle_save(args, *host, current_graph, modified, config);
+  std::cout.rdbuf(original_buffer);
+
+  const std::string text = captured.str();
+  EXPECT_TRUE(handled);
+  EXPECT_NE(text.find("Failed to compute image for node 1."),
+            std::string::npos);
+  EXPECT_NE(text.find("Reason:"), std::string::npos);
+  EXPECT_EQ(text.find("No image to save (node produced no image)."),
+            std::string::npos);
+}
+
 }  // namespace
 }  // namespace ps::cli
