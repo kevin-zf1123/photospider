@@ -38,12 +38,18 @@ ctest --output-on-failure --test-dir build \
 
 cmake --build build --target test_host_adapter -j \
   >"$OUT/build_test_host_adapter.log" 2>&1
+set +e
 ./build/tests/test_host_adapter >"$OUT/test_host_adapter.log" 2>&1
+HOST_TEST_RC=$?
+set -e
 
 cmake --build build --target test_cli_dirty_snapshot_formatter -j \
   >"$OUT/build_test_cli_dirty_snapshot_formatter.log" 2>&1
+set +e
 ./build/tests/test_cli_dirty_snapshot_formatter \
   >"$OUT/test_cli_dirty_snapshot_formatter.log" 2>&1
+FORMATTER_TEST_RC=$?
+set -e
 
 cat >"$OUT/repl_commands.txt" <<'CMDS'
 load phase2_cli_host util/testcases/propagation_linear_test.yaml
@@ -63,7 +69,7 @@ HOME="$PWD/$OUT/home" "$GRAPH_CLI_BIN" --repl \
 REPL_RC=$?
 set -e
 
-python3 - "$OUT" "$BOUNDARY_OK" "$REPL_RC" <<'PY'
+python3 - "$OUT" "$BOUNDARY_OK" "$HOST_TEST_RC" "$FORMATTER_TEST_RC" "$REPL_RC" <<'PY'
 import json
 import re
 import sys
@@ -71,7 +77,9 @@ from pathlib import Path
 
 out = Path(sys.argv[1])
 boundary_ok = sys.argv[2] == "1"
-repl_rc = int(sys.argv[3])
+host_test_rc = int(sys.argv[3])
+formatter_test_rc = int(sys.argv[4])
+repl_rc = int(sys.argv[5])
 
 stdout = (out / "graph_cli_repl_stdout.log").read_text(encoding="utf-8", errors="replace")
 stderr = (out / "graph_cli_repl_stderr.log").read_text(encoding="utf-8", errors="replace")
@@ -88,13 +96,13 @@ clean_stdout = ansi_re.sub("", stdout).replace("\r", "")
 actual = {
     "cli_boundary_rg_passed": boundary_ok,
     "ctest_boundary_passed": "100% tests passed" in ctest,
-    "host_adapter_tests_passed": "[  PASSED  ] 12 tests." in host_test,
+    "host_adapter_tests_passed": host_test_rc == 0,
     "host_image_compute_status_test_passed": (
         "[       OK ] "
         "EmbeddedHostAdapter.ComputeImagePreservesBackendFailureStatus"
         in host_test
     ),
-    "dirty_snapshot_formatter_tests_passed": "[  PASSED  ] 3 tests." in formatter_test,
+    "dirty_snapshot_formatter_tests_passed": formatter_test_rc == 0,
     "cli_local_inverse_formatter_test_passed": (
         "[       OK ] CliNodeInspectionFormatter.RendersLocalInverseMatrix"
         in formatter_test
@@ -105,6 +113,8 @@ actual = {
         in formatter_test
     ),
     "graph_cli_repl_returncode": repl_rc,
+    "host_adapter_returncode": host_test_rc,
+    "dirty_snapshot_formatter_returncode": formatter_test_rc,
     "graph_cli_loaded_session": "Loaded session 'phase2_cli_host'" in clean_stdout,
     "graph_cli_compute_finished": "Computation finished." in clean_stdout,
     "graph_cli_inspect_all_local_inverse": "Inverse (Local)" in clean_stdout,
