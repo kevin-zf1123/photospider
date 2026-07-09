@@ -40,7 +40,7 @@ def main():
     out = Path(args.out).resolve()
     out.mkdir(parents=True, exist_ok=True)
 
-    header = repo / "include/kernel/services/compute_service.hpp"
+    header = repo / "src/kernel/services/compute_service.hpp"
     source = repo / "src/kernel/services/compute_service.cpp"
     header_text = header.read_text(encoding="utf-8")
     public_start = header_text.index(" public:")

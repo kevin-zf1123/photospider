@@ -8,7 +8,7 @@
 #include <unordered_map>
 #include <vector>
 
-#include "graph_model.hpp"
+#include "graph_model.hpp"  // NOLINT(build/include_subdir)
 
 namespace ps {
 

@@ -26,14 +26,14 @@
 | `photospider_cli_common` | 静态 CLI 命令、TUI、自动补全代码。 | 把 `src/` 作为 public include root，并依赖宽泛的内核头。 |
 | `graph_cli` | CLI 可执行入口。 | 直接创建 `Kernel`，还没有 daemon-client 模式。 |
 
-主要接口泄漏：
+仍遗留和刚完成修复的接口泄漏：
 
-- `include/graph_model.hpp` 包含
-  `kernel/services/compute-service/task_graph_planning.hpp`，而后者当前位于 `src/`。
-- `GraphModel` 公开存储 dirty-region snapshot、compute plan、full task graph cache handle
-  和运行时 generation 状态。
-- `include/kernel/kernel.hpp` 包含 `GraphRuntime`、`ComputeService`、图服务、插件管理器和
-  dirty-control-lane 实现类型。
+- 原先的 `include/graph_model.hpp` 已移到 `src/graph_model.hpp`；graph model state、
+  dirty-region snapshot、planner summary、full task graph cache handle 和 runtime generation
+  state 现在都归入私有 include root。
+- 遗留的内部 `include/kernel/kernel.hpp` 仍包含 runtime、compute service、图服务、插件管理器和
+  dirty-control-lane 实现类型。它不属于可安装的 `include/photospider/**` inventory；后续阶段应把剩余的
+  `include/kernel/*` facade 头也移到同一私有 root 后面，或收敛成更窄的 Host-only public target。
 - `include/plugin_api.hpp` 包含完整 `Node`，把节点运行时/cache 状态暴露给操作插件，而不是暴露更小的插件契约。
 - CLI 和 benchmark 头与内核契约位于同一个 public include root 下，因此 install 规则会意外发布应用内部实现。
 
@@ -43,6 +43,13 @@
   `InteractionService` facade 中移除。仍需要内部 runtime 或 graph-state 访问的测试现在必须显式包含
   internal-only 的 `tests/support/kernel_test_access.hpp` helper，并通过
   `ps::testing::KernelTestAccess` 进行这些访问。
+- phase-3 internal-header 阶段已经把 graph model、graph runtime、graph-state executor、
+  compute service、dirty-control lane 以及内置具体 scheduler 头从 `include/` 移到私有
+  `src/` include root。内部 target 仍通过该私有 root 构建，而可安装 public header inventory
+  继续限定在 `include/photospider/**`。
+- dirty-region 诊断、compute planning 诊断和 scheduler trace 诊断都通过 Host 的拷贝值
+  snapshot 暴露。公开头不再需要命名后端 graph/runtime/service/planning 类型或具体 scheduler
+  class，就能提供这些诊断。
 
 ## 外部接口规则
 
@@ -214,6 +221,8 @@ CMake 规则：
 
 - 内部 target 可以把 `src/` 作为 `PRIVATE` include root。
 - 可安装 target 只暴露 `include/photospider`。
+- 当前 phase-3 guardrail 会强制可安装头扫描只遍历 `include/photospider/**`，检查已移动的实现头
+  位于 `src/`，并确认 `photospider_lib` 以 private 方式链接内部实现 target。
 - `libphotospider` 默认应为 `STATIC`。
 - 后续可以作为显式兼容产品添加共享库，但不应让共享库继续充当主要后端。
 - `graph_cli` 本地模式链接 `libphotospider`，daemon 模式链接 `photospider_ipc_client`。

@@ -293,6 +293,34 @@ class Kernel {
       const std::string& name);
   std::optional<compute::DirtyRegionSnapshot> dirty_region_snapshot(
       const std::string& name);
+
+  /**
+   * @brief Returns the latest compute planning summary for a graph.
+   *
+   * @param name Loaded graph/session name.
+   * @return Latest backend planning summary, empty optional when the graph is
+   *         missing or no planning summary has been recorded.
+   * @throws std::bad_alloc if summary value copies allocate.
+   * @note This internal facade preserves backend summary types; public Host
+   *       APIs convert the result to value snapshots without exposing planner
+   *       structures.
+   */
+  std::optional<compute::ComputePlanSummary> compute_planning_snapshot(
+      const std::string& name);
+
+  /**
+   * @brief Returns bounded recent compute planning summaries for a graph.
+   *
+   * @param name Loaded graph/session name.
+   * @return Summary history for the graph, or nullopt when the graph is
+   *         missing.
+   * @throws std::bad_alloc if vector or summary copies allocate.
+   * @note The history is copied while graph-state serialization is held, then
+   *       returned by value to callers.
+   */
+  std::optional<std::vector<compute::ComputePlanSummary>>
+  recent_compute_planning_snapshots(const std::string& name);
+
   std::optional<compute::DirtyRegionSnapshot> begin_dirty_source(
       const std::string& name, int node_id, compute::DirtyDomain domain,
       const cv::Rect& source_roi);
