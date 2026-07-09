@@ -61,8 +61,14 @@ This split supports the static-host direction:
 
 Symbol visibility rules:
 
-- Operation plugins export only `register_photospider_ops_v1` through
-  `PLUGIN_API`.
+- Operation plugin registrar entries use `PLUGIN_API` and the loader only
+  treats `register_photospider_ops_v1` as the supported operation-plugin ABI
+  entry. Any other externally visible callback helper symbols are not loader
+  entry points or compatibility contracts.
+- Operation plugin targets define `PHOTOSPIDER_PLUGIN_BUILD`, which keeps
+  `PHOTOSPIDER_API` empty even on Windows. Plugin callback code must not import
+  backend library symbols through public value contracts such as
+  `ps::GraphError`; only the registrar entry is exported through `PLUGIN_API`.
 - The loader resolves the exact versioned symbol name.
 - The shim exports runtime adapter helper symbols needed by plugin callbacks;
   on Windows it uses `WINDOWS_EXPORT_ALL_SYMBOLS`.
