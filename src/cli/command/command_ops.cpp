@@ -4,6 +4,7 @@
 #include <iostream>
 #include <map>
 #include <sstream>
+#include <string>
 #include <vector>
 
 #include "cli/command/commands.hpp"

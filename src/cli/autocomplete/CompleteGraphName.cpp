@@ -1,3 +1,6 @@
+#include <string>
+#include <vector>
+
 #include "cli/cli_autocompleter.hpp"
 #include "photospider/host/host.hpp"
 

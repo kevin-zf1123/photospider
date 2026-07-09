@@ -4,6 +4,8 @@
 #include <filesystem>
 #include <iostream>
 #include <sstream>
+#include <string>
+#include <vector>
 
 #include "cli/path_complete.hpp"
 #include "photospider/host/host.hpp"
@@ -66,7 +68,7 @@ CompletionResult CliAutocompleter::Complete(const std::string& line,
       CompleteNodeId(prefix, result.options);
     } else if (cmd == "inspect") {
       CompleteNodeId(prefix, result.options);
-      for (const std::string& option : {"all", "dirty"}) {
+      for (const std::string option : {"all", "dirty"}) {
         if (option.rfind(prefix, 0) == 0) {
           result.options.push_back(option);
         }

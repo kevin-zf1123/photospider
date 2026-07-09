@@ -6,7 +6,10 @@
 #include <iostream>
 #include <map>
 #include <numeric>
+#include <string>
 #include <thread>
+#include <utility>
+#include <vector>
 
 #include "benchmark/benchmark_yaml_generator.hpp"
 

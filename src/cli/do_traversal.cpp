@@ -1,6 +1,7 @@
 #include "cli/do_traversal.hpp"
 
 #include <iostream>
+#include <string>
 #include <vector>
 
 void do_traversal(ps::Host& host, const std::string& graph_name, bool show_mem,

@@ -1,6 +1,7 @@
 // FILE: src/cli/run_repl.cpp
 #include "cli/run_repl.hpp"
 
+#include <algorithm>
 #include <functional>
 #include <iostream>
 #include <string>
@@ -10,7 +11,7 @@
 #include "cli/cli_history.hpp"
 #include "cli/process_command.hpp"
 #include "cli/terminal_input.hpp"
-#include "input_match_state.hpp"
+#include "input_match_state.hpp"  // NOLINT(build/include_subdir)
 
 void run_repl(ps::Host& svc, CliConfig& config,
               const std::string& initial_graph) {
@@ -55,9 +56,9 @@ void run_repl(ps::Host& svc, CliConfig& config,
                     completion_state.original_prefix.length();
       size_t left_len = std::min(start_idx, line_buffer.size());
       size_t mid_len =
-          (cursor_pos > (int)start_idx &&
-           (size_t)cursor_pos <= line_buffer.size())
-              ? (size_t)cursor_pos - start_idx
+          (cursor_pos > static_cast<int>(start_idx) &&
+           static_cast<size_t>(cursor_pos) <= line_buffer.size())
+              ? static_cast<size_t>(cursor_pos) - start_idx
               : (line_buffer.size() > start_idx ? line_buffer.size() - start_idx
                                                 : 0);
       std::cout << line_buffer.substr(0, left_len) << "\x1B[7m"
@@ -80,7 +81,6 @@ void run_repl(ps::Host& svc, CliConfig& config,
     if (key != ps::TAB) {
       completion_state.Reset();
     }
-    auto reset_history_match = [&]() { history_match_state.Reset(); };
     switch (key) {
       case ps::ENTER: {
         term_input.Restore();
@@ -131,7 +131,7 @@ void run_repl(ps::Host& svc, CliConfig& config,
         break;
       }
       case ps::DEL: {
-        if (cursor_pos < (int)line_buffer.length()) {
+        if (cursor_pos < static_cast<int>(line_buffer.length())) {
           line_buffer.erase(cursor_pos, 1);
           history_match_state.Reset();
           redraw_line();
@@ -169,7 +169,7 @@ void run_repl(ps::Host& svc, CliConfig& config,
         break;
       }
       case ps::RIGHT: {
-        if (cursor_pos < (int)line_buffer.length()) {
+        if (cursor_pos < static_cast<int>(line_buffer.length())) {
           cursor_pos++;
           history_match_state.Reset();
           redraw_line();
@@ -188,7 +188,7 @@ void run_repl(ps::Host& svc, CliConfig& config,
           const std::string& opt =
               completion_state.options[completion_state.current_index];
           line_buffer.insert(token_start, opt);
-          cursor_pos = (int)(token_start + opt.size());
+          cursor_pos = static_cast<int>(token_start + opt.size());
           redraw_line(completion_state.options);
         } else {
           auto result = completer.Complete(line_buffer, cursor_pos);
@@ -200,7 +200,7 @@ void run_repl(ps::Host& svc, CliConfig& config,
               line_buffer.find_last_of(" \t", cursor_pos ? cursor_pos - 1 : 0);
           start = (start == std::string::npos) ? 0 : start + 1;
           completion_state.original_prefix =
-              line_buffer.substr(start, cursor_pos - (int)start);
+              line_buffer.substr(start, cursor_pos - static_cast<int>(start));
           completion_state.original_cursor_pos = cursor_pos;
           line_buffer = result.new_line;
           cursor_pos = result.new_cursor_pos;

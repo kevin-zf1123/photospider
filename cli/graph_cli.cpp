@@ -4,14 +4,14 @@
 #include <filesystem>
 #include <iostream>
 #include <opencv2/core/ocl.hpp>
+#include <string>
 
 #include "cli/dependency_tree_formatter.hpp"
 #include "cli/print_cli_help.hpp"
 #include "cli/run_repl.hpp"
-#include "cli_config.hpp"
+#include "cli_config.hpp"  // NOLINT(build/include_subdir)
 #include "photospider/host/host.hpp"
 
-using namespace ps;
 namespace fs = std::filesystem;
 
 static void apply_scheduler_config(ps::Host& host, const CliConfig& config) {
@@ -99,8 +99,9 @@ int main(int argc, char** argv) {
               ps::GraphSessionId{"default"}, "sessions", optarg,
               config.loaded_config_path, config.cache_root_dir});
           if (result.status.ok) {
-            if (config.switch_after_load)
+            if (config.switch_after_load) {
               current_graph = result.value.value;
+            }
             config.loaded_config_path =
                 (fs::absolute(fs::path("sessions") / "default" / "config.yaml"))
                     .string();
@@ -136,8 +137,9 @@ int main(int argc, char** argv) {
             std::cout << ps::cli::format_dependency_tree(
                 tree.value, /*show_parameters*/ true);
             did_any_action = true;
-          } else
+          } else {
             std::cerr << "Failed to print tree.\n";
+          }
           break;
         }
         case 't': {

@@ -4,10 +4,11 @@
 #include <filesystem>
 #include <iostream>
 #include <sstream>
+#include <string>
 
 #include "cli/command/commands.hpp"
 #include "cli/print_repl_help.hpp"
-#include "cli_config.hpp"
+#include "cli_config.hpp"  // NOLINT(build/include_subdir)
 
 namespace fs = std::filesystem;
 

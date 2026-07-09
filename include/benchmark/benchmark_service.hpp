@@ -1,5 +1,8 @@
 #pragma once
 
+#include <string>
+#include <vector>
+
 #include "benchmark/benchmark_types.hpp"
 #include "photospider/host/host.hpp"
 

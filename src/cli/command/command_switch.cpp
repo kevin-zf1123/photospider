@@ -3,6 +3,7 @@
 #include <filesystem>
 #include <iostream>
 #include <sstream>
+#include <string>
 #include <vector>
 
 #include "cli/ask_yesno.hpp"

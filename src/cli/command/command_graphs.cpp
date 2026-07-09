@@ -1,6 +1,7 @@
 // FILE: src/cli/command/command_graphs.cpp
 #include <iostream>
 #include <sstream>
+#include <string>
 #include <vector>
 
 #include "cli/command/commands.hpp"

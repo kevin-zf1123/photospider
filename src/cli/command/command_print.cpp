@@ -2,6 +2,7 @@
 #include <iostream>
 #include <optional>
 #include <sstream>
+#include <string>
 
 #include "cli/command/commands.hpp"
 #include "cli/command/help_utils.hpp"

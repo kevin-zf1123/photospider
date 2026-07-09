@@ -2,7 +2,7 @@
 #pragma once
 #include <string>
 
-#include "cli_config.hpp"
+#include "cli_config.hpp"  // NOLINT(build/include_subdir)
 #include "photospider/host/host.hpp"
 
 void run_repl(ps::Host& svc, CliConfig& config,

@@ -2,6 +2,9 @@
 #include <filesystem>
 #include <fstream>
 #include <iostream>
+#include <sstream>
+#include <string>
+#include <vector>
 
 #include "benchmark/benchmark_service.hpp"
 #include "cli/command/commands.hpp"
@@ -36,8 +39,9 @@ void save_benchmark_results(const std::string& output_dir,
     oss.precision(3);
     oss << "[";
     for (size_t i = 0; i < v.size(); ++i) {
-      if (i)
+      if (i) {
         oss << ";";
+      }
       oss << v[i];
     }
     oss << "]";

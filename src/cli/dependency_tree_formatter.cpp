@@ -1,7 +1,9 @@
 #include "cli/dependency_tree_formatter.hpp"
 
 #include <algorithm>
+#include <map>
 #include <sstream>
+#include <string>
 
 namespace ps::cli {
 

@@ -5,6 +5,7 @@
 #include <iostream>
 #include <optional>
 #include <sstream>
+#include <string>
 #include <vector>
 
 #include "cli/ask_yesno.hpp"

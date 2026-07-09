@@ -3,9 +3,11 @@
 
 #include <algorithm>
 #include <cstdlib>
+#include <filesystem>
 #include <fstream>
 #include <iostream>
 #include <sstream>
+#include <string>
 #include <vector>
 
 #include "cli/dependency_tree_formatter.hpp"
@@ -15,7 +17,7 @@
 #include "ftxui/dom/elements.hpp"
 #include "photospider/host/host.hpp"
 
-using namespace ftxui;
+using namespace ftxui;  // NOLINT(build/namespaces)
 namespace node_layout = ps::cli::node_editor_layout;
 
 void run_node_editor_decoupled(ps::Host& svc, const std::string& graph_name,
@@ -43,7 +45,7 @@ void run_node_editor_decoupled(ps::Host& svc, const std::string& graph_name,
   if (initial_id) {
     auto it = std::find(ids.begin(), ids.end(), *initial_id);
     if (it != ids.end())
-      selected_index = int(it - ids.begin());
+      selected_index = static_cast<int>(it - ids.begin());
   }
 
   std::string editor_text;
@@ -86,8 +88,8 @@ void run_node_editor_decoupled(ps::Host& svc, const std::string& graph_name,
         if (containing_ends.empty())
           return std::optional<std::string>(
               "(no end trees contain this node)\n");
-        int end_id = containing_ends[std::min(containing_idx,
-                                              (int)containing_ends.size() - 1)];
+        int end_id = containing_ends[std::min(
+            containing_idx, static_cast<int>(containing_ends.size()) - 1)];
         auto tree = svc.dependency_tree(ps::GraphSessionId{graph_name},
                                         ps::NodeId{end_id});
         if (!tree.status.ok)
@@ -134,12 +136,13 @@ void run_node_editor_decoupled(ps::Host& svc, const std::string& graph_name,
     while (std::getline(iss, line))
       lines.push_back(line);
     std::string out;
-    for (int i = std::max(0, voff); i < (int)lines.size(); ++i) {
+    for (int i = std::max(0, voff); i < static_cast<int>(lines.size()); ++i) {
       std::string ln = lines[i];
-      if ((int)ln.size() > hoff)
+      if (static_cast<int>(ln.size()) > hoff) {
         ln = ln.substr(hoff);
-      else
+      } else {
         ln.clear();
+      }
       out += ln;
       out += "\n";
     }
@@ -160,8 +163,10 @@ void run_node_editor_decoupled(ps::Host& svc, const std::string& graph_name,
         (tree2_mode == Tree2Mode::ContainsNode ? "Tree (contains)"
                                                : "Tree (as end)");
     if (tree2_mode == Tree2Mode::ContainsNode && !containing_ends.empty())
-      title += " end=" + std::to_string(containing_ends[std::min(
-                             containing_idx, (int)containing_ends.size() - 1)]);
+      title +=
+          " end=" +
+          std::to_string(containing_ends[std::min(
+              containing_idx, static_cast<int>(containing_ends.size()) - 1)]);
     auto box =
         vbox({text(title) | bold, separator(),
               paragraph(text_with_offsets(tree2_text, tree2_v, tree2_h)) |
@@ -243,7 +248,8 @@ void run_node_editor_decoupled(ps::Host& svc, const std::string& graph_name,
     const char* editor = std::getenv("EDITOR");
     std::string cmd =
         std::string(editor ? editor : "vim") + " \"" + tmp_path + "\"";
-    std::system(cmd.c_str());
+    const int editor_status = std::system(cmd.c_str());
+    (void)editor_status;
     // read back
     std::ifstream fin(tmp_path);
     std::stringstream buffer;
@@ -302,7 +308,7 @@ void run_node_editor_decoupled(ps::Host& svc, const std::string& graph_name,
       return true;
     }
     if (e == Event::Character(']')) {
-      if (containing_idx + 1 < (int)containing_ends.size()) {
+      if (containing_idx + 1 < static_cast<int>(containing_ends.size())) {
         containing_idx++;
         load_current();
       }
