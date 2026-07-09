@@ -219,6 +219,34 @@ class InteractionService {
       const std::string& graph) {
     return kernel_.dirty_region_snapshot(graph);
   }
+
+  /**
+   * @brief Reads the latest backend planning summary through Kernel.
+   *
+   * @param graph Graph/session name.
+   * @return Latest summary, empty optional if unavailable.
+   * @throws std::bad_alloc if summary copies allocate.
+   * @note Public Host adapters convert this internal summary into stable value
+   *       snapshots before exposing it to frontends.
+   */
+  std::optional<compute::ComputePlanSummary> cmd_compute_planning_snapshot(
+      const std::string& graph) {
+    return kernel_.compute_planning_snapshot(graph);
+  }
+
+  /**
+   * @brief Reads bounded backend planning summary history through Kernel.
+   *
+   * @param graph Graph/session name.
+   * @return Summary history, or nullopt when graph lookup fails.
+   * @throws std::bad_alloc if vector or summary copies allocate.
+   * @note Empty history is valid for loaded graphs before compute.
+   */
+  std::optional<std::vector<compute::ComputePlanSummary>>
+  cmd_recent_compute_planning_snapshots(const std::string& graph) {
+    return kernel_.recent_compute_planning_snapshots(graph);
+  }
+
   std::optional<compute::DirtyRegionSnapshot> cmd_begin_dirty_source(
       const std::string& graph, int node_id, compute::DirtyDomain domain,
       const cv::Rect& source_roi) {

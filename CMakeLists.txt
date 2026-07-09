@@ -49,6 +49,10 @@ set(CMAKE_ARCHIVE_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/lib)
 set(CMAKE_LIBRARY_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/lib)
 set(CMAKE_RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin)
 set(PLUGIN_OUTPUT_DIR ${CMAKE_BINARY_DIR}/plugins)
+set(PHOTOSPIDER_PUBLIC_INCLUDE_DIR "${PROJECT_SOURCE_DIR}/include")
+set(PHOTOSPIDER_PRIVATE_INCLUDE_DIRS
+    "${PROJECT_SOURCE_DIR}/include"
+    "${PROJECT_SOURCE_DIR}/src")
 
 # --- Dependencies ---
 if(APPLE)
@@ -106,12 +110,11 @@ add_library(photospider_core_types STATIC
     src/ops.cpp
     src/kernel/node_module/node_yaml.cpp
 )
-target_include_directories(photospider_core_types PUBLIC
-    "${PROJECT_SOURCE_DIR}/include"
-    "${PROJECT_SOURCE_DIR}/src"
+target_include_directories(photospider_core_types PRIVATE
+    ${PHOTOSPIDER_PRIVATE_INCLUDE_DIRS}
     ${OpenCV_INCLUDE_DIRS}
 )
-target_link_libraries(photospider_core_types PUBLIC yaml-cpp::yaml-cpp)
+target_link_libraries(photospider_core_types PRIVATE yaml-cpp::yaml-cpp)
 
 # Module: Graph
 add_library(photospider_graph STATIC
@@ -123,14 +126,28 @@ add_library(photospider_graph STATIC
     src/kernel/services/graph_cache_service.cpp
     src/kernel/services/graph_inspect_service.cpp
 )
-target_link_libraries(photospider_graph PUBLIC photospider_core_types)
+target_include_directories(photospider_graph PRIVATE
+    ${PHOTOSPIDER_PRIVATE_INCLUDE_DIRS}
+    ${OpenCV_INCLUDE_DIRS}
+)
+target_link_libraries(photospider_graph PRIVATE
+    photospider_core_types
+    yaml-cpp::yaml-cpp
+)
 
 # Module: Plugins
 add_library(photospider_plugin STATIC
     src/kernel/plugin_manager.cpp
     src/kernel/plugin_manage_module/plugin_loader.cpp
 )
-target_link_libraries(photospider_plugin PUBLIC photospider_core_types)
+target_include_directories(photospider_plugin PRIVATE
+    ${PHOTOSPIDER_PRIVATE_INCLUDE_DIRS}
+    ${OpenCV_INCLUDE_DIRS}
+)
+target_link_libraries(photospider_plugin PRIVATE
+    photospider_core_types
+    yaml-cpp::yaml-cpp
+)
 
 # Module: Compute
 set(KERNEL_FACADE_SOURCES
@@ -188,7 +205,15 @@ else()
 endif()
 
 add_library(photospider_compute STATIC ${COMPUTE_SOURCES})
-target_link_libraries(photospider_compute PUBLIC photospider_graph photospider_plugin)
+target_include_directories(photospider_compute PRIVATE
+    ${PHOTOSPIDER_PRIVATE_INCLUDE_DIRS}
+    ${OpenCV_INCLUDE_DIRS}
+)
+target_link_libraries(photospider_compute PRIVATE
+    photospider_graph
+    photospider_plugin
+    yaml-cpp::yaml-cpp
+)
 
 # ==============================================================================
 # 2. Core Shared Library (The Backend)
@@ -201,11 +226,20 @@ add_library(photospider_lib SHARED ${PHOTOSPIDER_BENCHMARK_SOURCES}
 
 target_compile_definitions(photospider_lib PRIVATE PHOTOSPIDER_LIB_BUILD)
 
-target_link_libraries(photospider_lib PUBLIC
+target_include_directories(photospider_lib
+    PUBLIC
+        "$<BUILD_INTERFACE:${PHOTOSPIDER_PUBLIC_INCLUDE_DIR}>"
+    PRIVATE
+        ${PHOTOSPIDER_PRIVATE_INCLUDE_DIRS}
+        ${OpenCV_INCLUDE_DIRS}
+)
+
+target_link_libraries(photospider_lib PRIVATE
     photospider_compute
     photospider_plugin
     photospider_graph
     photospider_core_types
+    yaml-cpp::yaml-cpp
     ${OpenCV_LIBS}
 )
 
@@ -225,11 +259,16 @@ add_library(photospider_cli_common STATIC ${CLI_LOGIC_SOURCES})
 target_include_directories(photospider_cli_common PUBLIC
     "${PROJECT_SOURCE_DIR}/include"
     "${PROJECT_SOURCE_DIR}/src"
+    ${OpenCV_INCLUDE_DIRS}
 )
 
 target_link_libraries(photospider_cli_common PUBLIC
     photospider_lib
     ${FTXUI_TARGETS}
+)
+target_link_libraries(photospider_cli_common PRIVATE
+    yaml-cpp::yaml-cpp
+    ${OpenCV_LIBS}
 )
 
 # ==============================================================================
@@ -270,8 +309,16 @@ foreach(PLUGIN_SOURCE ${PLUGIN_SOURCES})
         BUILD_RPATH "${CMAKE_BINARY_DIR}/lib"
     )
     
-    target_include_directories(${PLUGIN_NAME} PRIVATE "${PROJECT_SOURCE_DIR}/include" "${PROJECT_SOURCE_DIR}/src")
-    target_link_libraries(${PLUGIN_NAME} PRIVATE photospider_lib)
+    target_include_directories(${PLUGIN_NAME} PRIVATE
+        "${PROJECT_SOURCE_DIR}/include"
+        "${PROJECT_SOURCE_DIR}/src"
+        ${OpenCV_INCLUDE_DIRS}
+    )
+    target_link_libraries(${PLUGIN_NAME} PRIVATE
+        photospider_lib
+        yaml-cpp::yaml-cpp
+        ${OpenCV_LIBS}
+    )
 endforeach()
 
 # ==============================================================================
@@ -323,8 +370,13 @@ foreach(SCHEDULER_SOURCE ${SCHEDULER_PLUGIN_SOURCES})
     target_include_directories(${SCHEDULER_NAME} PRIVATE 
         "${PROJECT_SOURCE_DIR}/include" 
         "${PROJECT_SOURCE_DIR}/src"
+        ${OpenCV_INCLUDE_DIRS}
     )
-    target_link_libraries(${SCHEDULER_NAME} PRIVATE photospider_lib)
+    target_link_libraries(${SCHEDULER_NAME} PRIVATE
+        photospider_lib
+        yaml-cpp::yaml-cpp
+        ${OpenCV_LIBS}
+    )
 endforeach()
 
 if(BUILD_TESTING)
@@ -350,8 +402,13 @@ if(BUILD_TESTING)
     target_include_directories(destroy_count_scheduler_plugin PRIVATE
         "${PROJECT_SOURCE_DIR}/include"
         "${PROJECT_SOURCE_DIR}/src"
+        ${OpenCV_INCLUDE_DIRS}
     )
-    target_link_libraries(destroy_count_scheduler_plugin PRIVATE photospider_lib)
+    target_link_libraries(destroy_count_scheduler_plugin PRIVATE
+        photospider_lib
+        yaml-cpp::yaml-cpp
+        ${OpenCV_LIBS}
+    )
 
     add_library(lifecycle_op_plugin SHARED
         tests/fixtures/ops/lifecycle_op_plugin.cpp
@@ -371,8 +428,13 @@ if(BUILD_TESTING)
     target_include_directories(lifecycle_op_plugin PRIVATE
         "${PROJECT_SOURCE_DIR}/include"
         "${PROJECT_SOURCE_DIR}/src"
+        ${OpenCV_INCLUDE_DIRS}
     )
-    target_link_libraries(lifecycle_op_plugin PRIVATE photospider_lib)
+    target_link_libraries(lifecycle_op_plugin PRIVATE
+        photospider_lib
+        yaml-cpp::yaml-cpp
+        ${OpenCV_LIBS}
+    )
 
     add_library(override_lifecycle_op_plugin SHARED
         tests/fixtures/ops/override_lifecycle_op_plugin.cpp
@@ -392,8 +454,13 @@ if(BUILD_TESTING)
     target_include_directories(override_lifecycle_op_plugin PRIVATE
         "${PROJECT_SOURCE_DIR}/include"
         "${PROJECT_SOURCE_DIR}/src"
+        ${OpenCV_INCLUDE_DIRS}
     )
-    target_link_libraries(override_lifecycle_op_plugin PRIVATE photospider_lib)
+    target_link_libraries(override_lifecycle_op_plugin PRIVATE
+        photospider_lib
+        yaml-cpp::yaml-cpp
+        ${OpenCV_LIBS}
+    )
 endif()
 
 # ==============================================================================
@@ -421,9 +488,15 @@ if(APPLE)
     )
     target_link_libraries(perlin_noise_metal PRIVATE
         photospider_lib
+        yaml-cpp::yaml-cpp
         ${METAL_FRAMEWORK} ${FOUNDATION_FRAMEWORK} ${COREIMAGE_FRAMEWORK} ${COREVIDEO_FRAMEWORK}
+        ${OpenCV_LIBS}
     )
-    target_include_directories(perlin_noise_metal PRIVATE "${PROJECT_SOURCE_DIR}/include")
+    target_include_directories(perlin_noise_metal PRIVATE
+        "${PROJECT_SOURCE_DIR}/include"
+        "${PROJECT_SOURCE_DIR}/src"
+        ${OpenCV_INCLUDE_DIRS}
+    )
 
     # 2. The Loader Plugin (registers the op with the Kernel)
     add_library(metal_ops_loader SHARED custom_ops/metal_ops_loader.cpp)
@@ -435,10 +508,18 @@ if(APPLE)
         MACOSX_RPATH ON
     )
 
+    target_include_directories(metal_ops_loader PRIVATE
+        "${PROJECT_SOURCE_DIR}/include"
+        "${PROJECT_SOURCE_DIR}/src"
+        ${OpenCV_INCLUDE_DIRS}
+    )
+
     # [修复关键点] 必须链接 perlin_noise_metal，否则 loader 运行时找不到符号
     target_link_libraries(metal_ops_loader PRIVATE 
         perlin_noise_metal
         photospider_lib
+        yaml-cpp::yaml-cpp
+        ${OpenCV_LIBS}
     )
 
     # Allow undefined symbols for dynamic lookup (useful for plugins in general)
@@ -467,8 +548,14 @@ if(BUILD_TESTING)
         target_include_directories(${TEST_NAME} PRIVATE
             "${PROJECT_SOURCE_DIR}/include"
             "${PROJECT_SOURCE_DIR}/src"
-            "${PROJECT_SOURCE_DIR}/tests")
-        target_link_libraries(${TEST_NAME} PRIVATE photospider_lib GTest::gtest GTest::gtest_main)
+            "${PROJECT_SOURCE_DIR}/tests"
+            ${OpenCV_INCLUDE_DIRS})
+        target_link_libraries(${TEST_NAME} PRIVATE
+            photospider_lib
+            GTest::gtest
+            GTest::gtest_main
+            yaml-cpp::yaml-cpp
+            ${OpenCV_LIBS})
     endmacro()
 
     add_ps_test(test_scheduler tests/test_scheduler.cpp)
@@ -503,8 +590,13 @@ if(BUILD_TESTING)
     target_include_directories(split_compute_service_trace PRIVATE
         "${PROJECT_SOURCE_DIR}/include"
         "${PROJECT_SOURCE_DIR}/src"
-        "${PROJECT_SOURCE_DIR}/tests")
-    target_link_libraries(split_compute_service_trace PRIVATE photospider_lib nlohmann_json::nlohmann_json)
+        "${PROJECT_SOURCE_DIR}/tests"
+        ${OpenCV_INCLUDE_DIRS})
+    target_link_libraries(split_compute_service_trace PRIVATE
+        photospider_lib
+        nlohmann_json::nlohmann_json
+        yaml-cpp::yaml-cpp
+        ${OpenCV_LIBS})
 
     # [M3.1] OpRegistry 多设备实现测试
     add_ps_test(test_op_registry_m31 tests/test_op_registry_m31.cpp)
@@ -605,6 +697,12 @@ if(BUILD_TESTING)
             "${PROJECT_SOURCE_DIR}/tests/verification/codebase_structure/public_escape_hatch_scan.py"
             --repo "${PROJECT_SOURCE_DIR}"
             --out "${CMAKE_BINARY_DIR}/tests/public_escape_hatch_scan"
+        WORKING_DIRECTORY ${PROJECT_SOURCE_DIR})
+    add_test(NAME Phase3InternalHeaderScan
+        COMMAND ${Python3_EXECUTABLE}
+            "${PROJECT_SOURCE_DIR}/tests/verification/codebase_structure/phase3_internal_header_scan.py"
+            --repo "${PROJECT_SOURCE_DIR}"
+            --out "${CMAKE_BINARY_DIR}/tests/phase3_internal_header_scan"
         WORKING_DIRECTORY ${PROJECT_SOURCE_DIR})
     add_test(NAME PublicHeaderSelfContainment
         COMMAND ${CMAKE_COMMAND} --build "${CMAKE_BINARY_DIR}"

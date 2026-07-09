@@ -16,8 +16,8 @@
  *
  * The snapshot values in this header are designed for frontend display and
  * future IPC serialization. They carry copied scalar/string/container data and
- * do not expose GraphModel, GraphRuntime, ComputeService, scheduler
- * implementations, or other mutable kernel-owned objects.
+ * do not expose mutable backend graph, runtime, planner, scheduler, or
+ * service objects.
  */
 
 namespace ps {
@@ -332,6 +332,123 @@ struct DirtyRegionInspectionSnapshot {
 
   /** @brief Edge-level ROI mappings produced by dirty propagation. */
   std::vector<DirtyEdgeMappingSnapshot> edge_mappings;
+};
+
+/**
+ * @brief Sample of one planned compute task copied for inspection.
+ *
+ * The sample describes the task shape, node, ROI, dirty-generation metadata,
+ * and dependency ids from a bounded planning summary. It intentionally omits
+ * runtime queues, task closures, and mutable node output ownership.
+ *
+ * @throws Nothing for value operations except vector allocation on mutation.
+ * @note Task ids are local to the planning snapshot that produced them.
+ */
+struct ComputePlanningTaskSnapshot {
+  /** @brief Dense task id inside the copied planning snapshot. */
+  int task_id = -1;
+
+  /** @brief Graph node represented by the sampled task. */
+  NodeId node;
+
+  /** @brief Human-readable task shape, such as node, tile, or monolithic. */
+  std::string kind;
+
+  /** @brief Compute domain represented by the task. */
+  DirtyDomain domain = DirtyDomain::HighPrecision;
+
+  /** @brief Output pixel ROI covered by the task. */
+  PixelRect output_roi;
+
+  /** @brief Tile x index for tile tasks, or -1 for non-tile tasks. */
+  int tile_x = -1;
+
+  /** @brief Tile y index for tile tasks, or -1 for non-tile tasks. */
+  int tile_y = -1;
+
+  /** @brief Tile side length for tile tasks, or 0 for non-tile tasks. */
+  int tile_size = 0;
+
+  /** @brief True when the task represents a full node output. */
+  bool whole_output = false;
+
+  /** @brief True when dirty planning selected the task for the generation. */
+  bool dirty_selected = false;
+
+  /** @brief Dirty generation associated with dirty_selected, if any. */
+  uint64_t dirty_generation = 0;
+
+  /** @brief Upstream task ids that must complete first in this snapshot. */
+  std::vector<int> dependency_task_ids;
+};
+
+/**
+ * @brief Bounded planning diagnostic copied for frontend inspection.
+ *
+ * The snapshot summarizes the most recent compute planning result or one entry
+ * from bounded history. It exposes counts, node samples, and task samples as
+ * values so UI, CLI, and future IPC clients can reason about planning without
+ * holding backend objects.
+ *
+ * @throws Nothing for value operations except string/vector allocation on
+ *         mutation.
+ * @note The cache key is diagnostic text only and must not be used as an
+ *       ownership handle.
+ */
+struct ComputePlanningInspectionSnapshot {
+  /** @brief Compute intent represented by the planning snapshot. */
+  ComputeIntent intent = ComputeIntent::GlobalHighPrecision;
+
+  /** @brief Target node requested by the caller. */
+  NodeId target_node;
+
+  /** @brief True when the caller requested scheduler-backed execution. */
+  bool parallel = false;
+
+  /** @brief Graph topology generation used for expansion reuse. */
+  uint64_t topology_generation = 0;
+
+  /** @brief Diagnostic cache key for the full expansion, when known. */
+  std::string expansion_cache_key;
+
+  /** @brief Number of planned nodes. */
+  size_t planned_node_count = 0;
+
+  /** @brief Number of executable tasks in the planning snapshot. */
+  size_t task_count = 0;
+
+  /** @brief Number of tile-shaped tasks. */
+  size_t tile_task_count = 0;
+
+  /** @brief Number of monolithic tasks. */
+  size_t monolithic_task_count = 0;
+
+  /** @brief Number of generic node-shaped tasks. */
+  size_t node_task_count = 0;
+
+  /** @brief Number of node-level dependency records. */
+  size_t dependency_count = 0;
+
+  /** @brief Number of initially ready tasks. */
+  size_t initial_task_count = 0;
+
+  /** @brief Number of active tasks after dirty selection, if any. */
+  size_t active_task_count = 0;
+
+  /** @brief Number of dirty-source tasks selected by the planner. */
+  size_t dirty_source_task_count = 0;
+
+  /** @brief Number of downstream dirty tasks selected by the planner. */
+  size_t downstream_task_count = 0;
+
+  /** @brief Number of initially ready downstream dirty tasks. */
+  size_t initial_downstream_task_count = 0;
+
+  /** @brief Prefix sample of planned node ids. */
+  std::vector<NodeId> planned_node_sample;
+
+  /** @brief Prefix sample of planned task diagnostics. */
+  std::vector<ComputePlanningTaskSnapshot> task_sample;
 };
 
 /**

@@ -41,7 +41,7 @@ DOC_PATTERNS = [
 ]
 
 LEGACY_SCAN_FILES = [
-    "include/kernel/graph_runtime.hpp",
+    "src/kernel/graph_runtime.hpp",
     "src/kernel/graph_runtime.mm",
 ]
 
@@ -134,9 +134,9 @@ def main() -> int:
         out / "test_compute_service_split.log",
     )
 
-    graph_state_header = repo / "include/kernel/graph_state_executor.hpp"
+    graph_state_header = repo / "src/kernel/graph_state_executor.hpp"
     graph_runtime_header = (
-        repo / "include/kernel/graph_runtime.hpp"
+        repo / "src/kernel/graph_runtime.hpp"
     ).read_text(encoding="utf-8")
     kernel_header = (repo / "include/kernel/kernel.hpp").read_text(
         encoding="utf-8"

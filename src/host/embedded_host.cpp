@@ -1115,6 +1115,109 @@ std::vector<SchedulerTraceEventSnapshot> to_public_scheduler_trace(
 }
 
 /**
+ * @brief Converts backend planned task shape into a public label.
+ *
+ * @param kind Backend task shape.
+ * @return Stable lowercase display label.
+ * @throws Nothing.
+ */
+std::string to_public_planning_task_kind(compute::PlannedTaskKind kind) {
+  switch (kind) {
+    case compute::PlannedTaskKind::Node:
+      return "node";
+    case compute::PlannedTaskKind::Tile:
+      return "tile";
+    case compute::PlannedTaskKind::Monolithic:
+      return "monolithic";
+  }
+  return "unknown";
+}
+
+/**
+ * @brief Converts one backend planned task sample into a public snapshot.
+ *
+ * @param task Backend planned task sample.
+ * @return Public task sample snapshot.
+ * @throws std::bad_alloc if dependency vector copying allocates.
+ * @note The result is diagnostic value data and carries no runtime task
+ *       closure, queue entry, or mutable graph object.
+ */
+ComputePlanningTaskSnapshot to_public_planning_task(
+    const compute::PlannedTask& task) {
+  ComputePlanningTaskSnapshot snapshot;
+  snapshot.task_id = task.task_id;
+  snapshot.node = NodeId{task.node_id};
+  snapshot.kind = to_public_planning_task_kind(task.kind);
+  snapshot.domain = to_public_dirty_domain(task.domain);
+  snapshot.output_roi = to_pixel_rect(task.output_roi);
+  snapshot.tile_x = task.tile_x;
+  snapshot.tile_y = task.tile_y;
+  snapshot.tile_size = task.tile_size;
+  snapshot.whole_output = task.whole_output;
+  snapshot.dirty_selected = task.dirty_selected;
+  snapshot.dirty_generation = task.dirty_generation;
+  snapshot.dependency_task_ids = task.dependency_task_ids;
+  return snapshot;
+}
+
+/**
+ * @brief Converts one backend planning summary into a public snapshot.
+ *
+ * @param summary Backend planning summary copied from graph state.
+ * @return Public planning inspection snapshot.
+ * @throws std::bad_alloc if string/vector allocation fails.
+ * @note Deep backend plan references are intentionally ignored; the Host seam
+ *       exposes bounded value summaries only.
+ */
+ComputePlanningInspectionSnapshot to_public_planning_snapshot(
+    const compute::ComputePlanSummary& summary) {
+  ComputePlanningInspectionSnapshot snapshot;
+  snapshot.intent = summary.intent;
+  snapshot.target_node = NodeId{summary.target_node_id};
+  snapshot.parallel = summary.parallel;
+  snapshot.topology_generation = summary.topology_generation;
+  snapshot.expansion_cache_key = summary.full_graph_cache_key;
+  snapshot.planned_node_count = summary.planned_node_count;
+  snapshot.task_count = summary.task_count;
+  snapshot.tile_task_count = summary.tile_task_count;
+  snapshot.monolithic_task_count = summary.monolithic_task_count;
+  snapshot.node_task_count = summary.node_task_count;
+  snapshot.dependency_count = summary.dependency_count;
+  snapshot.initial_task_count = summary.initial_task_count;
+  snapshot.active_task_count = summary.active_task_count;
+  snapshot.dirty_source_task_count = summary.dirty_source_task_count;
+  snapshot.downstream_task_count = summary.downstream_task_count;
+  snapshot.initial_downstream_task_count =
+      summary.initial_downstream_task_count;
+  snapshot.planned_node_sample.reserve(summary.planned_node_sample.size());
+  for (int node_id : summary.planned_node_sample) {
+    snapshot.planned_node_sample.push_back(NodeId{node_id});
+  }
+  snapshot.task_sample.reserve(summary.task_sample.size());
+  for (const auto& task : summary.task_sample) {
+    snapshot.task_sample.push_back(to_public_planning_task(task));
+  }
+  return snapshot;
+}
+
+/**
+ * @brief Converts backend planning summary history into public snapshots.
+ *
+ * @param summaries Backend bounded summary history.
+ * @return Public planning snapshot history.
+ * @throws std::bad_alloc if vector/string allocation fails.
+ */
+std::vector<ComputePlanningInspectionSnapshot> to_public_planning_snapshots(
+    const std::vector<compute::ComputePlanSummary>& summaries) {
+  std::vector<ComputePlanningInspectionSnapshot> out;
+  out.reserve(summaries.size());
+  for (const auto& summary : summaries) {
+    out.push_back(to_public_planning_snapshot(summary));
+  }
+  return out;
+}
+
+/**
  * @brief Converts backend dirty source state into a public snapshot.
  *
  * @param state Backend dirty source state.
@@ -2004,6 +2107,64 @@ class EmbeddedHost final : public Host {
                     session.value);
           }
           return success_result(to_public_dirty_snapshot(*snapshot));
+        });
+  }
+
+  /**
+   * @brief Reads the latest compute planning snapshot for a graph session.
+   *
+   * @param session Session to inspect.
+   * @return Public optional planning snapshot, or a failed status.
+   * @throws std::bad_alloc on allocation failure.
+   * @note Missing sessions fail with NotFound; loaded sessions without compute
+   *       history return an empty optional with success status.
+   */
+  Result<std::optional<ComputePlanningInspectionSnapshot>>
+  compute_planning_snapshot(const GraphSessionId& session) override {
+    return guarded_result<std::optional<ComputePlanningInspectionSnapshot>>(
+        "compute_planning_snapshot", GraphErrc::NotFound, [&] {
+          auto snapshot =
+              state_->interaction.cmd_compute_planning_snapshot(session.value);
+          if (!snapshot) {
+            if (session_exists(*state_, session)) {
+              return success_result(
+                  std::optional<ComputePlanningInspectionSnapshot>{});
+            }
+            return failure_result<
+                std::optional<ComputePlanningInspectionSnapshot>>(
+                GraphErrc::NotFound,
+                "compute planning snapshot not available for session: " +
+                    session.value);
+          }
+          return success_result(
+              std::optional<ComputePlanningInspectionSnapshot>(
+                  to_public_planning_snapshot(*snapshot)));
+        });
+  }
+
+  /**
+   * @brief Reads recent compute planning snapshots for a graph session.
+   *
+   * @param session Session to inspect.
+   * @return Public bounded planning snapshot history, or a failed status.
+   * @throws std::bad_alloc on allocation failure.
+   * @note Empty history is a successful loaded-session state before compute.
+   */
+  Result<std::vector<ComputePlanningInspectionSnapshot>>
+  recent_compute_planning_snapshots(const GraphSessionId& session) override {
+    return guarded_result<std::vector<ComputePlanningInspectionSnapshot>>(
+        "recent_compute_planning_snapshots", GraphErrc::NotFound, [&] {
+          auto snapshots =
+              state_->interaction.cmd_recent_compute_planning_snapshots(
+                  session.value);
+          if (!snapshots) {
+            return failure_result<
+                std::vector<ComputePlanningInspectionSnapshot>>(
+                GraphErrc::NotFound,
+                "compute planning history not available for session: " +
+                    session.value);
+          }
+          return success_result(to_public_planning_snapshots(*snapshots));
         });
   }
 

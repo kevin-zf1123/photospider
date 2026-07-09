@@ -4,8 +4,12 @@
  * graph-state snapshot facades.
  */
 #include <filesystem>
+#include <map>
 #include <sstream>
 #include <stdexcept>
+#include <string>
+#include <utility>
+#include <vector>
 
 #include "kernel/kernel.hpp"
 
@@ -201,6 +205,42 @@ std::optional<compute::DirtyRegionSnapshot> Kernel::dirty_region_snapshot(
     return std::nullopt;
   }
   return *result;
+}
+
+/**
+ * @brief Copies the latest backend planning summary for one graph.
+ *
+ * @param name Loaded graph/session name.
+ * @return Latest summary, or nullopt when the graph is missing or no summary
+ *         has been recorded.
+ * @throws std::bad_alloc if summary string/vector members allocate on copy.
+ * @note The copy is made through graph-state serialization so callers never
+ *       observe mutable graph-owned diagnostic storage directly.
+ */
+std::optional<compute::ComputePlanSummary> Kernel::compute_planning_snapshot(
+    const std::string& name) {
+  auto result = with_graph_state(
+      name, [](GraphModel& graph) { return graph.last_compute_plan_summary; });
+  if (!result) {
+    return std::nullopt;
+  }
+  return *result;
+}
+
+/**
+ * @brief Copies bounded backend planning summary history for one graph.
+ *
+ * @param name Loaded graph/session name.
+ * @return Summary history, or nullopt when the graph is missing.
+ * @throws std::bad_alloc if vector or summary copies allocate.
+ * @note Empty history is a successful loaded-graph state before compute has
+ *       produced any planning summary.
+ */
+std::optional<std::vector<compute::ComputePlanSummary>>
+Kernel::recent_compute_planning_snapshots(const std::string& name) {
+  return with_graph_state(name, [](GraphModel& graph) {
+    return graph.recent_compute_plan_summaries;
+  });
 }
 
 std::optional<double> Kernel::get_last_io_time(const std::string& name) {

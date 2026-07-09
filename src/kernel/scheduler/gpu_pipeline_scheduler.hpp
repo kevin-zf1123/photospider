@@ -13,6 +13,7 @@
 #include <queue>
 #include <string>
 #include <thread>
+#include <utility>
 #include <vector>
 
 #include "kernel/scheduler/i_scheduler.hpp"

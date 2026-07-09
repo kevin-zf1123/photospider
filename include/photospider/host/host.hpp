@@ -550,6 +550,31 @@ class PHOTOSPIDER_API Host {
       const GraphSessionId& session) = 0;
 
   /**
+   * @brief Returns the latest compute planning inspection snapshot.
+   *
+   * @param session Session to inspect.
+   * @return Optional copied planning snapshot, or a failure status.
+   * @throws Nothing directly.
+   * @note Loaded sessions that have not computed yet return an empty optional
+   *       with success status. Snapshot values exclude task closures,
+   *       scheduler queues, backend object references, and mutable graph state.
+   */
+  virtual Result<std::optional<ComputePlanningInspectionSnapshot>>
+  compute_planning_snapshot(const GraphSessionId& session) = 0;
+
+  /**
+   * @brief Returns bounded recent compute planning inspection snapshots.
+   *
+   * @param session Session to inspect.
+   * @return Copied planning snapshot history, or a failure status.
+   * @throws Nothing directly.
+   * @note The backend bounds history length and returns values suitable for
+   *       frontend display or future IPC serialization.
+   */
+  virtual Result<std::vector<ComputePlanningInspectionSnapshot>>
+  recent_compute_planning_snapshots(const GraphSessionId& session) = 0;
+
+  /**
    * @brief Begins a dirty source lifecycle event.
    *
    * @param session Session containing the graph.

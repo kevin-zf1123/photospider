@@ -29,15 +29,18 @@ Observed build targets in the current root `CMakeLists.txt`:
 | `photospider_cli_common` | Static CLI command/TUI/autocomplete code. | Publishes `src/` as a public include root and depends on broad kernel headers. |
 | `graph_cli` | CLI executable entry point. | Creates `Kernel` directly and has no daemon-client mode. |
 
-Main interface leaks:
+Remaining and recently resolved interface leaks:
 
-- `include/graph_model.hpp` includes
-  `kernel/services/compute-service/task_graph_planning.hpp`, which currently
-  lives under `src/`.
-- `GraphModel` publicly stores dirty-region snapshots, compute plans, full task
-  graph cache handles, and runtime generation state.
-- `include/kernel/kernel.hpp` includes `GraphRuntime`, `ComputeService`,
-  graph services, plugin manager, and dirty-control-lane implementation types.
+- The former `include/graph_model.hpp` has moved to `src/graph_model.hpp`;
+  graph model state, dirty-region snapshots, planner summaries, full task graph
+  cache handles, and runtime generation state are now internal to the private
+  include root.
+- The legacy internal `include/kernel/kernel.hpp` still includes runtime,
+  compute service, graph services, plugin manager, and dirty-control-lane
+  implementation types. It remains outside the installable
+  `include/photospider/**` inventory, and later phases should move the
+  remaining `include/kernel/*` facade headers behind the same private root or a
+  narrower public Host-only target.
 - `include/plugin_api.hpp` includes full `Node`, exposing node runtime/cache
   state to operation plugins instead of a smaller plugin contract.
 - CLI and benchmark headers live under the same public include root as kernel
@@ -50,6 +53,16 @@ Resolved seam tightening in the current branch:
   Tests that still need internal runtime or graph-state access now include the
   internal-only `tests/support/kernel_test_access.hpp` helper explicitly and
   route those calls through `ps::testing::KernelTestAccess`.
+- The phase-3 internal-header pass moves the graph model, graph runtime,
+  graph-state executor, compute service, dirty-control lane, and built-in
+  concrete scheduler headers out of `include/` and into the private `src/`
+  include root. Internal targets still compile with that private root, while
+  the installable public header inventory remains limited to
+  `include/photospider/**`.
+- Dirty-region diagnostics, compute planning diagnostics, and scheduler trace
+  diagnostics are available through copied Host value snapshots. Public headers
+  no longer need to name the backend graph/runtime/service/planning types or
+  concrete scheduler classes to expose those diagnostics.
 
 ## External Interface Rule
 
@@ -229,6 +242,10 @@ CMake rules:
 
 - Internal targets may use `src/` as a `PRIVATE` include root.
 - Installable targets expose only `include/photospider`.
+- Current phase-3 guardrails enforce that the installable header scan only
+  walks `include/photospider/**`, that moved implementation headers are present
+  under `src/`, and that `photospider_lib` links internal implementation
+  targets privately.
 - `libphotospider` should be `STATIC` by default.
 - A shared library can be added later as an explicit compatibility product, not
   as the primary backend.

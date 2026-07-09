@@ -624,6 +624,53 @@ TEST(EmbeddedHostAdapter,
             13.0);
 }
 
+TEST(EmbeddedHostAdapter, ComputePlanningSnapshotsUsePublicValues) {
+  register_host_adapter_ops();
+  ScopedTempDir temp("photospider_host_adapter_planning_snapshot_test");
+  auto host = create_embedded_host();
+  ASSERT_NE(host, nullptr);
+
+  const GraphSessionId session =
+      load_test_graph(*host, temp.root(), "planning_snapshot");
+
+  auto before_compute = host->compute_planning_snapshot(session);
+  ASSERT_TRUE(before_compute.status.ok) << before_compute.status.message;
+  EXPECT_FALSE(before_compute.value.has_value());
+
+  auto before_history = host->recent_compute_planning_snapshots(session);
+  ASSERT_TRUE(before_history.status.ok) << before_history.status.message;
+  EXPECT_TRUE(before_history.value.empty());
+
+  HostComputeRequest compute_request = make_compute_request(session);
+  compute_request.execution.parallel = true;
+  auto compute_status = host->compute(compute_request);
+  ASSERT_TRUE(compute_status.status.ok) << compute_status.status.message;
+
+  auto latest = host->compute_planning_snapshot(session);
+  ASSERT_TRUE(latest.status.ok) << latest.status.message;
+  ASSERT_TRUE(latest.value.has_value());
+  EXPECT_EQ(latest.value->intent, ComputeIntent::GlobalHighPrecision);
+  EXPECT_EQ(latest.value->target_node.value, 1);
+  EXPECT_TRUE(latest.value->parallel);
+  EXPECT_EQ(latest.value->planned_node_count, 1u);
+  EXPECT_GE(latest.value->task_count, 1u);
+  EXPECT_GE(latest.value->active_task_count, 1u);
+  ASSERT_FALSE(latest.value->planned_node_sample.empty());
+  EXPECT_EQ(latest.value->planned_node_sample.front().value, 1);
+  ASSERT_FALSE(latest.value->task_sample.empty());
+  EXPECT_EQ(latest.value->task_sample.front().node.value, 1);
+  EXPECT_FALSE(latest.value->task_sample.front().kind.empty());
+
+  auto history = host->recent_compute_planning_snapshots(session);
+  ASSERT_TRUE(history.status.ok) << history.status.message;
+  ASSERT_FALSE(history.value.empty());
+  EXPECT_EQ(history.value.back().target_node.value, 1);
+
+  auto missing = host->compute_planning_snapshot(GraphSessionId{"missing"});
+  EXPECT_FALSE(missing.status.ok);
+  EXPECT_EQ(missing.status.code, GraphErrc::NotFound);
+}
+
 TEST(EmbeddedHostAdapter, AsyncComputeCanFinishAfterCloseGraphRequest) {
   register_host_adapter_ops();
   ScopedTempDir temp("photospider_host_adapter_async_close_test");

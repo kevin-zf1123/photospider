@@ -16,10 +16,10 @@ FOCUSED_FILTER = (
 )
 
 CONTROL_FILES = [
-    "include/kernel/services/compute-service/dirty_control_lane.hpp",
+    "src/kernel/services/compute-service/dirty_control_lane.hpp",
     "src/kernel/services/compute-service/dirty_control_lane.cpp",
     "include/kernel/kernel.hpp",
-    "src/kernel/kernel.cpp",
+    "src/kernel/kernel_dirty_roi_facade.cpp",
     "include/kernel/interaction.hpp",
     "tests/test_compute_service_split.cpp",
 ]
@@ -122,13 +122,15 @@ def main() -> int:
         "control_lane_api": {
             "header_exists": (
                 repo
-                / "include/kernel/services/compute-service/dirty_control_lane.hpp"
+                / "src/kernel/services/compute-service/dirty_control_lane.hpp"
             ).exists(),
             "kernel_control_api": file_contains(
                 repo, "include/kernel/kernel.hpp", "begin_dirty_source_control"
             )
             and file_contains(
-                repo, "src/kernel/kernel.cpp", "compute::DirtyControlLane lane"
+                repo,
+                "src/kernel/kernel_dirty_roi_facade.cpp",
+                "compute::DirtyControlLane lane",
             ),
             "interaction_control_api": file_contains(
                 repo,
