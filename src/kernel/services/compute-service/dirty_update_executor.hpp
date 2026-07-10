@@ -24,16 +24,22 @@ class RealtimeProxyGraph;
  *
  * The struct groups the existing ComputeService dirty-update parameters so the
  * HP and RT executors can share a stable call shape without extending the
- * public ComputeService API. Some cache and timing fields are intentionally
- * carried through even though the current dirty ROI implementation does not
- * consume them, because they document the compatibility boundary with the
- * facade entry points.
+ * internal ComputeService member surface. Some cache and timing fields are
+ * intentionally carried through even though the current dirty ROI
+ * implementation does not consume them, because they document the
+ * compatibility boundary with the facade entry points.
+ *
+ * @throws std::bad_alloc when copying cache_precision storage exhausts memory.
+ * @note benchmark_events is borrowed for one synchronous execute call;
+ * sibling_commit_gate uses shared ownership for coordinated HP/RT lifetime.
+ * Copying scalar fields, the borrowed benchmark pointer, and an existing
+ * shared_ptr handle does not allocate request-owned storage.
  */
 struct DirtyUpdateRequest {
   /** @brief Target node id whose dirty ROI update should produce output. */
   int node_id = -1;
 
-  /** @brief Cache precision label from the public compute entry point. */
+  /** @brief Cache precision label from the internal service request. */
   std::string cache_precision;
 
   /**
@@ -118,6 +124,8 @@ class HighPrecisionDirtyExecutor {
    * @return Mutable high-precision target output stored in the graph.
    * @throws GraphError when planning, dependency resolution, operation
    * dispatch, scheduler submission, or target output validation fails.
+   * @throws std::bad_alloc unchanged when planning, task, cache, proxy, or
+   * output storage exhausts memory.
    * @note The method is phase-split: planning/reset and final validation are
    * serialized with graph_mutex_, but scheduler task execution is not wrapped
    * by the outer graph lock. Forced HP dirty requests must already have a valid
@@ -133,7 +141,10 @@ class HighPrecisionDirtyExecutor {
    *
    * @param graph Graph whose selected HP node state is reset.
    * @param plan HP dirty planner output for the active request.
+   * @return Nothing.
    * @throws GraphError when a planned node is missing.
+   * @throws std::bad_alloc if graph lookup diagnostic construction exhausts
+   * memory.
    * @note Only HP reusable cache, HP ROI, and HP version state are reset.
    */
   void reset_plan_cache(GraphModel& graph,
@@ -143,9 +154,10 @@ class HighPrecisionDirtyExecutor {
    * @brief Validates and returns the target HP output after dirty execution.
    *
    * @param graph Graph containing the target node cache.
-   * @param node_id Target node id requested by the public facade.
+   * @param node_id Target node id requested by the internal service caller.
    * @return Mutable high-precision output stored on the target node.
    * @throws GraphError when execution finishes without target HP output.
+   * @throws std::bad_alloc if failure diagnostic construction exhausts memory.
    * @note This preserves the previous dirty update failure mode.
    */
   NodeOutput& require_target_output(GraphModel& graph, int node_id) const;
@@ -192,6 +204,8 @@ class RealTimeDirtyExecutor {
    * @return Mutable real-time target output stored in the proxy graph.
    * @throws GraphError when planning, dependency resolution, operation
    * dispatch, scheduler submission, or target output validation fails.
+   * @throws std::bad_alloc unchanged when planning, task, proxy, or output
+   * storage exhausts memory.
    * @note The method is phase-split: planning/reset and final validation are
    * serialized with graph_mutex_, while dirty source-before-downstream task
    * execution runs outside the outer graph lock.
@@ -205,6 +219,7 @@ class RealTimeDirtyExecutor {
    *
    * @param proxy_graph Proxy graph whose selected RT node state is reset.
    * @param plan RT dirty planner output for the active request.
+   * @return Nothing.
    * @throws std::bad_alloc if reset bookkeeping grows.
    * @note Only proxy output, proxy ROI, proxy version, and RT dirty-source
    * generation metadata are reset.
@@ -216,9 +231,10 @@ class RealTimeDirtyExecutor {
    * @brief Validates and returns the target RT output after dirty execution.
    *
    * @param proxy_graph Proxy graph containing the target RT output.
-   * @param node_id Target node id requested by the public facade.
+   * @param node_id Target node id requested by the internal service caller.
    * @return Mutable real-time output stored on the proxy node.
    * @throws GraphError when execution finishes without target RT output.
+   * @throws std::bad_alloc if failure diagnostic construction exhausts memory.
    * @note RT output remains outside GraphModel and is validated separately from
    * HP cache authority.
    */

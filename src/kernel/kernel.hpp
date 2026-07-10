@@ -15,6 +15,7 @@
 #include <future>
 #include <map>
 #include <memory>
+#include <new>
 #include <opencv2/opencv.hpp>
 #include <optional>
 #include <stdexcept>
@@ -41,10 +42,10 @@ namespace testing {
  * @brief Test-only bridge that may inspect Kernel internals.
  *
  * KernelTestAccess is declared here only so Kernel can friend it. The
- * definition lives under tests/support and is not part of frontend or host
- * API. Production callers must use Kernel value facades such as inspect_graph,
- * scheduler_trace, compute, and compute_async instead of relying on runtime
- * ownership details.
+ * definition lives under tests/support and is not part of the Host API.
+ * Frontends use `ps::Host`; the embedded Host adapter alone may translate Host
+ * requests to Kernel operations such as inspect_graph, scheduler_trace,
+ * compute, and compute_async. Neither path exposes runtime ownership details.
  *
  * @note This forward declaration intentionally exposes no operations.
  */
@@ -53,26 +54,29 @@ class KernelTestAccess;
 }  // namespace testing
 
 /**
- * @brief Multi-graph facade for graph lifecycle, graph-state commands, compute,
- * scheduler access, and plugin management.
+ * @brief Internal multi-graph coordinator for lifecycle, graph-state commands,
+ * compute, scheduler access, and plugin management.
  *
- * Kernel owns one GraphRuntime per graph name and keeps frontend-facing APIs
- * stable while delegating graph IO, traversal, inspection, cache, ROI, dirty
- * control, and compute work to narrower services. Graph-state operations run
+ * Kernel owns one GraphRuntime per graph name and keeps its internal adapter
+ * contract stable while delegating graph IO, traversal, inspection, cache, ROI,
+ * dirty control, and compute work to narrower services. The embedded Host
+ * adapter maps public Host values to these internal operations; frontend code
+ * neither includes nor constructs Kernel types. Graph-state operations run
  * through each runtime's GraphStateExecutor so topology and runtime metadata
  * remain serialized with compute, including scheduler-backed parallel compute.
  * Schedulers receive ready task callbacks; they do not own graph-state
  * operation dispatch.
  *
- * @note Public methods return bool or std::optional for frontend-friendly
- * failure handling. Compute and ROI/dirty APIs additionally store per-graph
- * LastError details when their service boundary reports GraphError or
- * std::exception.
+ * @note Internal methods retain legacy bool or std::optional failure handling
+ * for the embedded adapter and backend callers. Public Host methods translate
+ * those results into copied status/value types. Compute and ROI/dirty APIs also
+ * store per-graph LastError details when their service boundary reports
+ * GraphError or std::exception.
  */
 class Kernel {
  public:
   /**
-   * @brief Last frontend-visible error recorded for one graph.
+   * @brief Last backend error recorded for one graph session.
    *
    * @note The value is best-effort diagnostic state. Missing graphs and helper
    * APIs that historically returned only false/nullopt do not always update it.
@@ -110,9 +114,10 @@ class Kernel {
   /**
    * @brief Execution-mode controls for one Kernel compute request.
    *
-   * ExecutionOptions separates scheduler and frontend quiet-mode choices from
-   * cache and telemetry options. It is copied into async futures, so callers
-   * should treat it as immutable once the request is submitted.
+   * ExecutionOptions separates scheduler and graph-output quiet-mode choices
+   * from cache and telemetry options. It is copied into async futures, so the
+   * embedded adapter and backend callers should treat it as immutable once the
+   * request is submitted.
    *
    * @note parallel selects scheduler-backed compute where supported. quiet is
    * applied to the graph model around the compute call.
@@ -143,13 +148,15 @@ class Kernel {
   };
 
   /**
-   * @brief Public compute request shared by sync, async, and image facades.
+   * @brief Internal compute request shared by sync, async, and image helpers.
    *
-   * ComputeRequest is the public Kernel compute contract. It preserves CLI and
-   * frontend behavior while preventing long positional parameter lists from
-   * spreading into Kernel and ComputeService. A missing intent selects the
-   * legacy high-precision path; a populated intent enables HP/RT coordination
-   * and forwards dirty_roi to ComputeService.
+   * ComputeRequest is the adapter-to-Kernel compute value. The embedded Host
+   * adapter creates it from a public `HostComputeRequest`; CLI/TUI/frontend
+   * code constructs only the Host request and never this type. The structure
+   * prevents long positional parameter lists from spreading into Kernel and
+   * ComputeService. A missing intent selects the legacy high-precision path; a
+   * populated intent enables HP/RT coordination and forwards dirty_roi to
+   * ComputeService.
    *
    * @note name identifies the graph runtime. benchmark_events is caller-owned
    * and must remain valid for the full synchronous call or async future.
@@ -177,6 +184,23 @@ class Kernel {
     std::optional<cv::Rect> dirty_roi;
   };
 
+  /**
+   * @brief Creates and transactionally loads one internal graph runtime.
+   *
+   * @param name Unique graph/session name.
+   * @param root_dir Root directory that owns the session folder.
+   * @param yaml_path Optional source YAML copied into the session before load.
+   * @param config_path Optional config file copied into the session.
+   * @param cache_root_dir Optional external cache-root directory.
+   * @return Loaded graph name, or nullopt for duplicate names and recoverable
+   * graph-load failures.
+   * @throws std::bad_alloc if path, runtime, scheduler, graph, or diagnostic
+   *         allocation exhausts memory.
+   * @throws std::exception for scheduler/runtime startup failures not
+   *         classified as recoverable graph-load errors.
+   * @note The runtime enters the owned graph map only after YAML loading
+   * succeeds, preserving the public Host no-partial-session contract.
+   */
   std::optional<std::string> load_graph(const std::string& name,
                                         const std::string& root_dir,
                                         const std::string& yaml_path,
@@ -205,9 +229,12 @@ class Kernel {
    * optional intent/dirty ROI controls.
    * @return true when compute completes; false when the graph is missing or
    * the compute boundary reports a handled failure.
-   * @throws Nothing; handled failures are recorded in last_error().
+   * @throws std::bad_alloc if compute execution or failure translation
+   *         exhausts memory.
    * @note The request object is not retained after the call. benchmark_events
-   * remains caller-owned for the duration of the call.
+   * remains caller-owned for the duration of the call. GraphError, ordinary
+   * std::exception, and unknown compute failures otherwise become false plus
+   * best-effort last_error() state.
    */
   bool compute(const ComputeRequest& request);
 
@@ -217,9 +244,14 @@ class Kernel {
    * @param request Graph name, target node, cache, execution, telemetry, and
    * optional intent/dirty ROI controls captured by value.
    * @return Future resolving to success, or nullopt when the graph is missing.
-   * @throws std::system_error if std::async cannot launch the parallel branch.
+   * @throws std::bad_alloc if request, task, queue, or future-state allocation
+   *         fails while scheduling the graph-state work.
+   * @throws std::system_error if runtime startup or graph-state asynchronous
+   *         execution cannot launch.
    * @note The future owns the request copy, but benchmark_events remains
-   * caller-owned and must outlive future completion.
+   * caller-owned and must outlive future completion. Calling get() on the
+   * returned future may rethrow std::bad_alloc from compute execution or
+   * failure-diagnostic allocation inside the async work item.
    */
   std::optional<std::future<bool>> compute_async(ComputeRequest request);
   std::optional<TimingCollector> get_timing(const std::string& name);
@@ -240,12 +272,12 @@ class Kernel {
    * @param yaml_path Source YAML file path.
    * @return true when reload succeeds; false when the graph is missing or the
    * reload fails with a handled IO/YAML error.
-   * @throws Nothing; GraphError/std::exception from the backend load path are
-   * converted to last_error() and false.
+   * @throws std::bad_alloc if reload execution or handled-failure LastError
+   *         construction exhausts memory.
    * @note Missing graph sessions preserve the legacy quiet false result without
    * updating LastError. For existing sessions, GraphIOService error categories
    * such as GraphErrc::Io and GraphErrc::InvalidYaml are retained in
-   * last_error().
+   * last_error(); other GraphError/std::exception failures become false.
    */
   bool reload_graph_yaml(const std::string& name, const std::string& yaml_path);
   bool save_graph_yaml(const std::string& name, const std::string& yaml_path);
@@ -355,9 +387,11 @@ class Kernel {
    * optional intent/dirty ROI controls.
    * @return Cloned output image, or nullopt when graph lookup, compute, or
    * image conversion fails.
-   * @throws Nothing; this facade preserves the historical quiet failure
-   * contract for preview/save helpers.
+   * @throws std::bad_alloc if compute/image execution or handled-failure
+   *         LastError construction exhausts memory.
    * @note The image is cloned out of graph-owned storage before returning.
+   *       Other compute and image-conversion exceptions preserve the historical
+   *       nullopt preview/save contract.
    */
   std::optional<cv::Mat> compute_and_get_image(const ComputeRequest& request);
 
@@ -427,7 +461,7 @@ class Kernel {
   bool has_node_disk_cache(const GraphModel& graph, const Node& node) const;
 
   /**
-   * @brief Builds frontend traversal metadata for one node id.
+   * @brief Builds backend traversal metadata for Host adapter conversion.
    *
    * @param graph Graph containing the requested node.
    * @param node_id Node identifier to inspect.
@@ -438,7 +472,7 @@ class Kernel {
    * traversal branch to preserve the historical facade behavior.
    * @note Memory-cache visibility reflects either high-precision or real-time
    * cached output; disk-cache visibility is derived from configured cache
-   * paths.
+   * paths. Frontends receive a copied Host snapshot, not this Kernel type.
    */
   TraversalNodeInfo build_traversal_node_info(const GraphModel& graph,
                                               int node_id) const;
@@ -449,9 +483,9 @@ class Kernel {
    * @param graph Graph whose traversal order should be inspected.
    * @param end_node_id Ending node used as the traversal root.
    * @return Node metadata in topological postorder, or nullopt when this
-   * traversal branch cannot be inspected.
-   * @throws Nothing; all branch-local failures are swallowed to preserve the
-   * previous traversal_details contract.
+   * traversal branch cannot be inspected after a recoverable failure.
+   * @throws std::bad_alloc if traversal or metadata collection exhausts
+   * memory.
    * @note The caller still receives details for other ending nodes when one
    * branch fails.
    */
@@ -486,9 +520,8 @@ class Kernel {
    * @param name Graph name to resolve.
    * @param op Callable invoked as op(GraphRuntime&).
    * @return Optional operation result, or nullopt when the graph is missing or
-   * the operation throws.
-   * @throws Nothing; all exceptions from op are converted to nullopt to match
-   * existing thin facade APIs.
+   * the operation throws a recoverable failure.
+   * @throws std::bad_alloc if the runtime operation exhausts memory.
    * @note This helper is for historically quiet runtime accessors. APIs that
    * must update LastError keep their explicit GraphError/std::exception
    * handling.
@@ -502,6 +535,8 @@ class Kernel {
     }
     try {
       return std::forward<Fn>(op)(*it->second);
+    } catch (const std::bad_alloc&) {
+      throw;
     } catch (...) {
       return std::nullopt;
     }
@@ -513,8 +548,8 @@ class Kernel {
    * @param name Graph name to resolve.
    * @param op Callable invoked as op(const GraphRuntime&).
    * @return Optional operation result, or nullopt when the graph is missing or
-   * the operation throws.
-   * @throws Nothing; all exceptions from op are converted to nullopt.
+   * the operation throws a recoverable failure.
+   * @throws std::bad_alloc if the const runtime operation exhausts memory.
    * @note Used by const inspection APIs such as scheduler metadata queries.
    */
   template <typename Fn>
@@ -525,6 +560,8 @@ class Kernel {
     }
     try {
       return std::forward<Fn>(op)(*it->second);
+    } catch (const std::bad_alloc&) {
+      throw;
     } catch (...) {
       return std::nullopt;
     }
@@ -536,10 +573,10 @@ class Kernel {
    *
    * @param name Graph name to resolve.
    * @param op Callable submitted as op(GraphModel&).
-   * @return Optional result from op, or nullopt when the graph is missing,
-   * submit/get fails, or op throws.
-   * @throws Nothing; submit, future get, and op exceptions are converted to
-   * nullopt.
+   * @return Optional result from op, or nullopt when the graph is missing or a
+   * recoverable submit/get/op failure occurs.
+   * @throws std::bad_alloc if submission, future consumption, or the operation
+   *         exhausts memory.
    * @note This helper preserves the facade contract for graph-state commands:
    * they remain serialized by GraphStateExecutor and are not routed through
    * scheduler task runtimes.
@@ -553,6 +590,8 @@ class Kernel {
     }
     try {
       return it->second->graph_state().submit(std::forward<Fn>(op)).get();
+    } catch (const std::bad_alloc&) {
+      throw;
     } catch (...) {
       return std::nullopt;
     }
@@ -568,11 +607,12 @@ class Kernel {
    * @param start_runtime Whether to start the owning runtime before submit.
    * @return Optional result from op, or nullopt when the graph is missing or
    * the operation reports a handled failure.
-   * @throws Nothing; GraphError and std::exception are converted to LastError
-   * and nullopt.
+   * @throws std::bad_alloc if runtime startup, submission, the operation, or
+   *         handled-failure LastError construction exhausts memory.
    * @note Use this helper for facade APIs whose existing contract exposes
    * best-effort LastError details. Historically quiet accessors should keep
    * using with_graph_state so they continue to hide diagnostic state.
+   * GraphError and other std::exception failures otherwise become nullopt.
    */
   template <typename Fn>
   auto with_graph_state_last_error(const std::string& name,
@@ -591,6 +631,8 @@ class Kernel {
           it->second->graph_state().submit(std::forward<Fn>(op)).get();
       last_error_.erase(name);
       return result;
+    } catch (const std::bad_alloc&) {
+      throw;
     } catch (const GraphError& ge) {
       last_error_[name] = {ge.code(), ge.what()};
       return std::nullopt;
@@ -602,29 +644,33 @@ class Kernel {
   }
 
   /**
-   * @brief Runs the public synchronous compute facade from a request object.
+   * @brief Runs internal synchronous compute from an adapter request object.
    *
-   * @param request Public compute request with graph, cache, execution, and
-   * telemetry options.
+   * @param request Internal Kernel request translated from Host values by the
+   * embedded adapter, or constructed by an internal test/backend caller.
    * @return true when ComputeService completes successfully; false when the
    * graph is missing or compute reports a handled failure.
-   * @throws Nothing; GraphError/std::exception/unknown exceptions are mapped to
-   * the existing LastError behavior and false.
+   * @throws std::bad_alloc if compute execution or construction of handled-
+   *         failure LastError state exhausts memory.
    * @note quiet and skip-save are applied only for the active request and are
-   * restored on every success or failure exit path.
+   * restored on every success or failure exit path. GraphError, ordinary
+   * std::exception, and unknown failures otherwise map to false plus LastError.
    */
   bool compute_request(const ComputeRequest& request);
 
   /**
-   * @brief Schedules the async compute facade from a request object.
+   * @brief Schedules internal async compute from an adapter request object.
    *
-   * @param request Public async compute request captured by value.
+   * @param request Internal async Kernel request captured by value.
    * @return Future that resolves to the compute status, or nullopt when the
    * graph is missing.
+   * @throws std::bad_alloc if request, task, queue, or future-state allocation
+   *         fails while submitting graph-state work.
    * @throws std::system_error if GraphStateExecutor cannot launch the async
    * graph-state work.
    * @note The returned future owns the request copy. benchmark_events remains
-   * caller-owned and must outlive future completion.
+   * caller-owned and must outlive future completion. Future get() may rethrow
+   * std::bad_alloc from compute execution or async LastError construction.
    */
   std::optional<std::future<bool>> compute_async_request(
       ComputeRequest request);
@@ -632,14 +678,14 @@ class Kernel {
   /**
    * @brief Runs compute and returns the target output as an OpenCV image.
    *
-   * @param request Compute request with image-returning facade arguments.
+   * @param request Internal compute request with image-returning arguments.
    * @return Cloned cv::Mat target image, or nullopt on missing graph, compute
    * failure, or empty output.
-   * @throws Nothing; handled compute failures are recorded in last_error() and
-   * converted to nullopt to preserve the save/preview facade contract.
+   * @throws std::bad_alloc if compute/image execution or handled-failure
+   *         LastError construction exhausts memory.
    * @note Missing graphs return nullopt before LastError state is touched.
    * Successful compute paths clear stale LastError state, including the
-   * no-image-output case.
+   * no-image-output case. Other compute/image exceptions become nullopt.
    */
   std::optional<cv::Mat> compute_and_get_image_request(
       const ComputeRequest& request);
@@ -652,7 +698,10 @@ class Kernel {
    * @param graph Visible graph model to compute against.
    * @param request Kernel compute request to translate into service options.
    * @return Mutable output owned by the graph node cache.
-   * @throws GraphError or std::exception from ComputeService.
+   * @throws GraphError if ComputeService rejects the graph request.
+   * @throws std::bad_alloc if request translation or ComputeService exhausts
+   *         memory.
+   * @throws std::exception for other failures propagated by ComputeService.
    * @note intent=nullopt selects legacy HP-only overloads; otherwise intent and
    * dirty_roi are forwarded to the intent-aware HP/RT path. Callers should
    * invoke this only from a GraphStateExecutor work item when the graph is a

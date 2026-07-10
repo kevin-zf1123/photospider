@@ -219,18 +219,25 @@ struct HostSchedulerConfig {
  * @brief Frontend-facing Photospider graph host.
  *
  * Host is the narrow API that local GUI/WebUI code and future IPC adapters
- * should call. Each method either returns a copied value snapshot or a
- * non-throwing status. Implementations may use embedded backend services
- * internally, but those implementation objects never appear in the public ABI.
+ * should call. Each non-destructor method returns a copied value snapshot or a
+ * status for recoverable failures. Resource exhaustion remains exceptional so
+ * callers can distinguish it from a domain/runtime failure status. Embedded
+ * backend objects never appear in the public ABI.
  *
- * @throws Nothing from the destructor.
+ * @throws std::bad_alloc from any non-destructor method when request handling,
+ *         backend execution, backend-to-status translation, or result
+ * construction exhausts memory.
  * @note Methods are not specified as thread-safe at the Host interface level.
  *       The embedded adapter delegates graph-state serialization to the same
  *       backend boundary used by the existing CLI path.
  */
 class PHOTOSPIDER_API Host {
  public:
-  /** @brief Destroys the Host implementation. */
+  /**
+   * @brief Destroys the Host implementation.
+   *
+   * @throws Nothing.
+   */
   virtual ~Host() = default;
 
   /**
@@ -238,8 +245,8 @@ class PHOTOSPIDER_API Host {
    *
    * @param request Session name, root, YAML, config, and cache-root values.
    * @return Loaded session id on success, or a failure status.
-   * @throws Nothing directly; implementations convert backend failures to
-   *         OperationStatus.
+   * @throws std::bad_alloc if request processing, backend-to-status
+   *         translation, or copied result construction exhausts memory.
    * @note The returned session is a value label, never a runtime pointer.
    */
   virtual Result<GraphSessionId> load_graph(
@@ -250,7 +257,8 @@ class PHOTOSPIDER_API Host {
    *
    * @param session Session to close.
    * @return Success or failure status.
-   * @throws Nothing directly.
+   * @throws std::bad_alloc if request processing, backend-to-status
+   *         translation, or copied result construction exhausts memory.
    * @note Closing releases backend resources owned by the implementation after
    *       Host-submitted async wrappers have captured their final status.
    */
@@ -260,7 +268,8 @@ class PHOTOSPIDER_API Host {
    * @brief Lists graph sessions known to the Host.
    *
    * @return Value list of session ids.
-   * @throws Nothing directly.
+   * @throws std::bad_alloc if request processing, backend-to-status
+   *         translation, or copied result construction exhausts memory.
    * @note Session ids are copied labels and do not imply the caller owns
    *       backend graph resources.
    */
@@ -274,7 +283,9 @@ class PHOTOSPIDER_API Host {
    * @return Success, `GraphErrc::NotFound` for missing sessions,
    *         `GraphErrc::Io` for unreadable input, or `GraphErrc::InvalidYaml`
    *         for rejected YAML content.
-   * @throws Nothing directly.
+   * @throws std::bad_alloc if request processing, reload execution, backend-
+   *         to-status translation, or copied result construction exhausts
+   * memory.
    * @note The embedded adapter checks session existence before invoking the
    *       backend reload path, preserves backend reload failure
    *       classification, and serializes mutation through the backend
@@ -289,7 +300,8 @@ class PHOTOSPIDER_API Host {
    * @param session Session to save.
    * @param yaml_path Destination YAML path.
    * @return Success or failure status.
-   * @throws Nothing directly.
+   * @throws std::bad_alloc if request processing, backend-to-status
+   *         translation, or copied result construction exhausts memory.
    * @note The Host returns only status; file ownership remains with the
    *       caller-provided path.
    */
@@ -301,7 +313,8 @@ class PHOTOSPIDER_API Host {
    *
    * @param session Session to clear.
    * @return Success or failure status.
-   * @throws Nothing directly.
+   * @throws std::bad_alloc if request processing, backend-to-status
+   *         translation, or copied result construction exhausts memory.
    * @note This mirrors the existing clear-graph frontend behavior.
    */
   virtual VoidResult clear_graph(const GraphSessionId& session) = 0;
@@ -312,7 +325,9 @@ class PHOTOSPIDER_API Host {
    * @param request Host compute request.
    * @return Success, NotFound when the graph session is missing or closed, or
    *         a compute failure status for existing sessions.
-   * @throws Nothing directly.
+   * @throws std::bad_alloc if request processing, compute execution, backend-
+   *         to-status translation, or copied result construction exhausts
+   * memory.
    * @note Backend LastError diagnostics are used only after the Host has
    *       established that the requested graph session exists.
    */
@@ -324,14 +339,16 @@ class PHOTOSPIDER_API Host {
    * @param request Host compute request captured by value.
    * @return Future resolving to the final operation status, or a failure status
    *         when scheduling cannot start.
-   * @throws Nothing directly except allocation failure while building the
-   *         result/future wrapper.
+   * @throws std::bad_alloc if request processing, async submission, backend-
+   *         to-status translation, or copied result construction exhausts
+   * memory.
    * @note The embedded adapter keeps its backend state alive until the returned
    *       future completes and waits for Host-submitted async status wrappers
    *       before graph close. It also serializes async scheduling/tracking with
    *       graph close: close either waits for adapter-submitted work to capture
    *       backend failure status or rejects new scheduling before that work can
-   *       capture a closing runtime.
+   *       capture a closing runtime. Consuming the returned future may rethrow
+   *       std::bad_alloc from backend compute or async result translation.
    */
   virtual Result<std::future<OperationStatus>> compute_async(
       HostComputeRequest request) = 0;
@@ -344,7 +361,9 @@ class PHOTOSPIDER_API Host {
    *         compute succeeds without image output, `GraphErrc::NotFound` when
    *         the graph session is missing or closed, or a compute failure status
    *         for existing sessions.
-   * @throws Nothing directly.
+   * @throws std::bad_alloc if request processing, compute/image execution,
+   *         backend-to-status translation, or copied result construction
+   * exhausts memory.
    * @note The embedded adapter checks session existence before dispatch and
    *       rechecks it before consulting LastError for an empty backend result,
    *       so closed-session failures take precedence over stale diagnostics and
@@ -361,7 +380,8 @@ class PHOTOSPIDER_API Host {
    *
    * @param session Session to inspect.
    * @return Copied timing rows and total, or a failure status.
-   * @throws Nothing directly.
+   * @throws std::bad_alloc if request processing, backend-to-status
+   *         translation, or copied result construction exhausts memory.
    * @note Timing data is populated only when a compute request enabled timing.
    */
   virtual Result<TimingSnapshot> timing(const GraphSessionId& session) = 0;
@@ -372,7 +392,8 @@ class PHOTOSPIDER_API Host {
    * @param session Session whose latest IO accumulator should be read.
    * @return IO time in milliseconds, or a failure status when the session is
    *         missing or has no readable timing state.
-   * @throws Nothing directly.
+   * @throws std::bad_alloc if request processing, backend-to-status
+   *         translation, or copied result construction exhausts memory.
    * @note The value is copied from backend diagnostic state after compute and
    *       is telemetry only; it does not synchronize with active computes.
    */
@@ -383,7 +404,8 @@ class PHOTOSPIDER_API Host {
    *
    * @param session Session to inspect.
    * @return Error status snapshot. When no error exists, status is ok.
-   * @throws Nothing directly.
+   * @throws std::bad_alloc if request processing, backend-to-status
+   *         translation, or copied result construction exhausts memory.
    * @note This is diagnostic state and should not be used for synchronization.
    */
   virtual OperationStatus last_error(const GraphSessionId& session) const = 0;
@@ -393,7 +415,8 @@ class PHOTOSPIDER_API Host {
    *
    * @param session Session to inspect.
    * @return Copied node id list, or a failure status.
-   * @throws Nothing directly.
+   * @throws std::bad_alloc if request processing, backend-to-status
+   *         translation, or copied result construction exhausts memory.
    * @note The ids are a snapshot and can become stale after graph reload/edit.
    */
   virtual Result<std::vector<NodeId>> list_node_ids(
@@ -404,7 +427,8 @@ class PHOTOSPIDER_API Host {
    *
    * @param session Session to inspect.
    * @return Copied ending node ids, or a failure status.
-   * @throws Nothing directly.
+   * @throws std::bad_alloc if request processing, backend-to-status
+   *         translation, or copied result construction exhausts memory.
    * @note Ending-node semantics match the backend topology service.
    */
   virtual Result<std::vector<NodeId>> ending_nodes(
@@ -416,7 +440,8 @@ class PHOTOSPIDER_API Host {
    * @param session Session containing the node.
    * @param node Node to read.
    * @return YAML text, or a failure status.
-   * @throws Nothing directly.
+   * @throws std::bad_alloc if request processing, backend-to-status
+   *         translation, or copied result construction exhausts memory.
    * @note YAML is exposed as text so host clients do not depend on yaml-cpp.
    */
   virtual Result<std::string> get_node_yaml(const GraphSessionId& session,
@@ -429,7 +454,8 @@ class PHOTOSPIDER_API Host {
    * @param node Node to replace.
    * @param yaml_text YAML text for the replacement node.
    * @return Success or failure status.
-   * @throws Nothing directly.
+   * @throws std::bad_alloc if request processing, backend-to-status
+   *         translation, or copied result construction exhausts memory.
    * @note The backend owns validation and topology rebuilding.
    */
   virtual VoidResult set_node_yaml(const GraphSessionId& session, NodeId node,
@@ -441,7 +467,8 @@ class PHOTOSPIDER_API Host {
    * @param session Session containing the node.
    * @param node Node to inspect.
    * @return Copied node inspection view, or a failure status.
-   * @throws Nothing directly.
+   * @throws std::bad_alloc if request processing, backend-to-status
+   *         translation, or copied result construction exhausts memory.
    * @note The result contains only public value snapshots.
    */
   virtual Result<NodeInspectionView> inspect_node(const GraphSessionId& session,
@@ -452,7 +479,8 @@ class PHOTOSPIDER_API Host {
    *
    * @param session Session to inspect.
    * @return Copied graph inspection view, or a failure status.
-   * @throws Nothing directly.
+   * @throws std::bad_alloc if request processing, backend-to-status
+   *         translation, or copied result construction exhausts memory.
    * @note The result does not expose backend model or node references.
    */
   virtual Result<GraphInspectionView> inspect_graph(
@@ -466,7 +494,8 @@ class PHOTOSPIDER_API Host {
    * @param include_metadata Whether node cache/spatial metadata should be
    *        included.
    * @return Copied dependency-tree snapshot, or a failure status.
-   * @throws Nothing directly.
+   * @throws std::bad_alloc if request processing, backend-to-status
+   *         translation, or copied result construction exhausts memory.
    * @note Tree entries are flattened so CLI, GUI, and IPC clients can render
    *       them without backend data structures.
    */
@@ -479,7 +508,8 @@ class PHOTOSPIDER_API Host {
    *
    * @param session Session to inspect.
    * @return Copied traversal orders, or a failure status.
-   * @throws Nothing directly.
+   * @throws std::bad_alloc if request processing, backend-to-status
+   *         translation, or copied result construction exhausts memory.
    * @note Keys and values are plain node ids.
    */
   virtual Result<std::map<int, std::vector<NodeId>>> traversal_orders(
@@ -490,7 +520,8 @@ class PHOTOSPIDER_API Host {
    *
    * @param session Session to inspect.
    * @return Copied traversal node metadata, or a failure status.
-   * @throws Nothing directly.
+   * @throws std::bad_alloc if request processing, backend-to-status
+   *         translation, or copied result construction exhausts memory.
    * @note Cache flags are observational snapshots.
    */
   virtual Result<std::map<int, std::vector<HostTraversalNodeSnapshot>>>
@@ -502,7 +533,8 @@ class PHOTOSPIDER_API Host {
    * @param session Session to inspect.
    * @param node Node to search for.
    * @return Copied ending-node ids, or a failure status.
-   * @throws Nothing directly.
+   * @throws std::bad_alloc if request processing, backend-to-status
+   *         translation, or copied result construction exhausts memory.
    * @note This mirrors the node editor's existing topology query.
    */
   virtual Result<std::vector<NodeId>> trees_containing_node(
@@ -516,7 +548,8 @@ class PHOTOSPIDER_API Host {
    * @param start_roi Source ROI.
    * @param target_node Target node.
    * @return Projected ROI, or a failure status.
-   * @throws Nothing directly.
+   * @throws std::bad_alloc if request processing, backend-to-status
+   *         translation, or copied result construction exhausts memory.
    * @note Pixel rectangles are public value copies.
    */
   virtual Result<PixelRect> project_roi(const GraphSessionId& session,
@@ -532,7 +565,8 @@ class PHOTOSPIDER_API Host {
    * @param target_roi Target ROI.
    * @param source_node Source node.
    * @return Projected ROI, or a failure status.
-   * @throws Nothing directly.
+   * @throws std::bad_alloc if request processing, backend-to-status
+   *         translation, or copied result construction exhausts memory.
    * @note This mirrors the current ROI projection facade.
    */
   virtual Result<PixelRect> project_roi_backward(const GraphSessionId& session,
@@ -545,7 +579,8 @@ class PHOTOSPIDER_API Host {
    *
    * @param session Session to inspect.
    * @return Copied dirty-region snapshot, or a failure status.
-   * @throws Nothing directly.
+   * @throws std::bad_alloc if request processing, backend-to-status
+   *         translation, or copied result construction exhausts memory.
    * @note Snapshot values exclude scheduler queues and task counters.
    */
   virtual Result<DirtyRegionInspectionSnapshot> dirty_region_snapshot(
@@ -556,7 +591,8 @@ class PHOTOSPIDER_API Host {
    *
    * @param session Session to inspect.
    * @return Optional copied planning snapshot, or a failure status.
-   * @throws Nothing directly.
+   * @throws std::bad_alloc if request processing, backend-to-status
+   *         translation, or copied result construction exhausts memory.
    * @note Loaded sessions that have not computed yet return an empty optional
    *       with success status. Snapshot values exclude task closures,
    *       scheduler queues, backend object references, and mutable graph state.
@@ -569,7 +605,8 @@ class PHOTOSPIDER_API Host {
    *
    * @param session Session to inspect.
    * @return Copied planning snapshot history, or a failure status.
-   * @throws Nothing directly.
+   * @throws std::bad_alloc if request processing, backend-to-status
+   *         translation, or copied result construction exhausts memory.
    * @note The backend bounds history length and returns values suitable for
    *       frontend display or future IPC serialization.
    */
@@ -584,7 +621,8 @@ class PHOTOSPIDER_API Host {
    * @param domain Dirty domain.
    * @param source_roi Source-local dirty ROI.
    * @return Updated dirty-region snapshot, or a failure status.
-   * @throws Nothing directly.
+   * @throws std::bad_alloc if request processing, backend-to-status
+   *         translation, or copied result construction exhausts memory.
    * @note The backend serializes dirty-source mutation through graph-state
    *       ownership.
    */
@@ -600,7 +638,8 @@ class PHOTOSPIDER_API Host {
    * @param domain Dirty domain.
    * @param source_roi Source-local dirty ROI.
    * @return Updated dirty-region snapshot, or a failure status.
-   * @throws Nothing directly.
+   * @throws std::bad_alloc if request processing, backend-to-status
+   *         translation, or copied result construction exhausts memory.
    * @note Repeated updates accumulate in backend dirty source state.
    */
   virtual Result<DirtyRegionInspectionSnapshot> update_dirty_source(
@@ -614,7 +653,8 @@ class PHOTOSPIDER_API Host {
    * @param node Source node.
    * @param domain Dirty domain.
    * @return Updated dirty-region snapshot, or a failure status.
-   * @throws Nothing directly.
+   * @throws std::bad_alloc if request processing, backend-to-status
+   *         translation, or copied result construction exhausts memory.
    * @note Ending the source marks it settled for the current generation.
    */
   virtual Result<DirtyRegionInspectionSnapshot> end_dirty_source(
@@ -625,7 +665,8 @@ class PHOTOSPIDER_API Host {
    *
    * @param session Session whose events should be drained.
    * @return Copied events, or a failure status.
-   * @throws Nothing directly.
+   * @throws std::bad_alloc if request processing, backend-to-status
+   *         translation, or copied result construction exhausts memory.
    * @note Draining removes the events from the backend event buffer.
    */
   virtual Result<std::vector<ComputeEventSnapshot>> drain_compute_events(
@@ -636,7 +677,8 @@ class PHOTOSPIDER_API Host {
    *
    * @param session Session to inspect.
    * @return Scheduler trace snapshot, or a failure status.
-   * @throws Nothing directly.
+   * @throws std::bad_alloc if request processing, backend-to-status
+   *         translation, or copied result construction exhausts memory.
    * @note Trace events are diagnostic and may be cleared by future backend
    *       controls outside this interface.
    */
@@ -648,7 +690,8 @@ class PHOTOSPIDER_API Host {
    *
    * @param session Session whose caches should be cleared.
    * @return Success or failure status.
-   * @throws Nothing directly.
+   * @throws std::bad_alloc if request processing, backend-to-status
+   *         translation, or copied result construction exhausts memory.
    * @note This mirrors the existing `clear-cache all` behavior.
    */
   virtual VoidResult clear_cache(const GraphSessionId& session) = 0;
@@ -658,7 +701,8 @@ class PHOTOSPIDER_API Host {
    *
    * @param session Session whose disk cache should be cleared.
    * @return Success or failure status.
-   * @throws Nothing directly.
+   * @throws std::bad_alloc if request processing, backend-to-status
+   *         translation, or copied result construction exhausts memory.
    * @note The first Host slice returns status only; detailed cache counts can
    *       be added as a follow-up value contract.
    */
@@ -669,7 +713,8 @@ class PHOTOSPIDER_API Host {
    *
    * @param session Session whose memory cache should be cleared.
    * @return Success or failure status.
-   * @throws Nothing directly.
+   * @throws std::bad_alloc if request processing, backend-to-status
+   *         translation, or copied result construction exhausts memory.
    * @note This does not clear graph topology.
    */
   virtual VoidResult clear_memory_cache(const GraphSessionId& session) = 0;
@@ -680,7 +725,8 @@ class PHOTOSPIDER_API Host {
    * @param session Session whose nodes should be cached.
    * @param precision Cache precision label.
    * @return Success or failure status.
-   * @throws Nothing directly.
+   * @throws std::bad_alloc if request processing, backend-to-status
+   *         translation, or copied result construction exhausts memory.
    * @note Precision semantics are backend-defined and match existing CLI
    *       behavior.
    */
@@ -692,7 +738,8 @@ class PHOTOSPIDER_API Host {
    *
    * @param session Session whose transient memory should be released.
    * @return Success or failure status.
-   * @throws Nothing directly.
+   * @throws std::bad_alloc if request processing, backend-to-status
+   *         translation, or copied result construction exhausts memory.
    * @note Persistent graph and disk-cache state remain owned by the backend.
    */
   virtual VoidResult free_transient_memory(const GraphSessionId& session) = 0;
@@ -703,7 +750,8 @@ class PHOTOSPIDER_API Host {
    * @param session Session whose cache should be synchronized.
    * @param precision Cache precision label.
    * @return Success or failure status.
-   * @throws Nothing directly.
+   * @throws std::bad_alloc if request processing, backend-to-status
+   *         translation, or copied result construction exhausts memory.
    * @note The first Host slice returns status only.
    */
   virtual VoidResult synchronize_disk_cache(const GraphSessionId& session,
@@ -714,7 +762,8 @@ class PHOTOSPIDER_API Host {
    *
    * @param dirs Directories or path patterns to scan.
    * @return Structured plugin load report.
-   * @throws Nothing directly.
+   * @throws std::bad_alloc if request processing, backend-to-status
+   *         translation, or copied result construction exhausts memory.
    * @note The Host owns successful plugin handles until unload.
    */
   virtual Result<HostPluginLoadReport> plugins_load_report(
@@ -725,7 +774,8 @@ class PHOTOSPIDER_API Host {
    *
    * @param dirs Directories or path patterns to scan.
    * @return Success or failure status.
-   * @throws Nothing directly.
+   * @throws std::bad_alloc if request processing, backend-to-status
+   *         translation, or copied result construction exhausts memory.
    * @note This mirrors the older status-only plugin helper.
    */
   virtual VoidResult plugins_load(const std::vector<std::string>& dirs) = 0;
@@ -734,7 +784,8 @@ class PHOTOSPIDER_API Host {
    * @brief Unloads operation plugins owned by the Host.
    *
    * @return Number of plugin handles unloaded, or a failure status.
-   * @throws Nothing directly.
+   * @throws std::bad_alloc if request processing, backend-to-status
+   *         translation, or copied result construction exhausts memory.
    * @note Built-in operation registrations remain available.
    */
   virtual Result<int> plugins_unload_all() = 0;
@@ -743,7 +794,8 @@ class PHOTOSPIDER_API Host {
    * @brief Seeds built-in operation sources into plugin inspection state.
    *
    * @return Success status.
-   * @throws Nothing directly.
+   * @throws std::bad_alloc if request processing, backend-to-status
+   *         translation, or copied result construction exhausts memory.
    * @note This is useful for frontend operation browsers that want built-in
    *       source labels without loading external plugins.
    */
@@ -753,7 +805,8 @@ class PHOTOSPIDER_API Host {
    * @brief Returns operation source labels keyed by operation key.
    *
    * @return Copied operation source map.
-   * @throws Nothing directly.
+   * @throws std::bad_alloc if request processing, backend-to-status
+   *         translation, or copied result construction exhausts memory.
    * @note Source labels are diagnostic strings such as paths or `built-in`.
    */
   virtual Result<std::map<std::string, std::string>> ops_sources() const = 0;
@@ -762,7 +815,8 @@ class PHOTOSPIDER_API Host {
    * @brief Returns combined operation keys for frontend operation lists.
    *
    * @return Copied operation keys.
-   * @throws Nothing directly.
+   * @throws std::bad_alloc if request processing, backend-to-status
+   *         translation, or copied result construction exhausts memory.
    * @note Combined keys collapse compatible HP/RT/tiled implementations.
    */
   virtual Result<std::vector<std::string>> ops_combined_keys() const = 0;
@@ -771,7 +825,8 @@ class PHOTOSPIDER_API Host {
    * @brief Returns combined operation source labels.
    *
    * @return Copied combined operation source map.
-   * @throws Nothing directly.
+   * @throws std::bad_alloc if request processing, backend-to-status
+   *         translation, or copied result construction exhausts memory.
    * @note This mirrors the existing frontend operation-source helper.
    */
   virtual Result<std::map<std::string, std::string>> ops_combined_sources()
@@ -781,7 +836,8 @@ class PHOTOSPIDER_API Host {
    * @brief Lists scheduler types available to the Host.
    *
    * @return Copied scheduler type names.
-   * @throws Nothing directly.
+   * @throws std::bad_alloc if request processing, backend-to-status
+   *         translation, or copied result construction exhausts memory.
    * @note Includes built-in scheduler types and any loaded scheduler plugins.
    */
   virtual Result<std::vector<std::string>> scheduler_available_types()
@@ -793,7 +849,8 @@ class PHOTOSPIDER_API Host {
    * @param type_name Scheduler type name.
    * @return Description text, or `GraphErrc::NotFound` when the scheduler type
    *         is not available to the Host.
-   * @throws Nothing directly.
+   * @throws std::bad_alloc if request processing, backend-to-status
+   *         translation, or copied result construction exhausts memory.
    * @note Descriptions are for display and must not drive behavior; callers can
    *       use the status code to distinguish typos from real descriptions.
    */
@@ -805,7 +862,8 @@ class PHOTOSPIDER_API Host {
    *
    * @param dirs Directories to scan.
    * @return Number of scheduler types loaded.
-   * @throws Nothing directly.
+   * @throws std::bad_alloc if request processing, backend-to-status
+   *         translation, or copied result construction exhausts memory.
    * @note Loaded scheduler plugin handles remain owned by the backend loader.
    */
   virtual Result<size_t> scheduler_scan(
@@ -816,7 +874,8 @@ class PHOTOSPIDER_API Host {
    *
    * @param path Plugin library path.
    * @return Success or failure status.
-   * @throws Nothing directly.
+   * @throws std::bad_alloc if request processing, backend-to-status
+   *         translation, or copied result construction exhausts memory.
    * @note Loading registers scheduler factory entries for later graph use.
    */
   virtual VoidResult scheduler_load(const std::string& path) = 0;
@@ -825,7 +884,8 @@ class PHOTOSPIDER_API Host {
    * @brief Lists loaded scheduler plugin labels.
    *
    * @return Copied plugin labels.
-   * @throws Nothing directly.
+   * @throws std::bad_alloc if request processing, backend-to-status
+   *         translation, or copied result construction exhausts memory.
    * @note Labels are diagnostic strings, not plugin handles.
    */
   virtual Result<std::vector<std::string>> scheduler_loaded_plugins() const = 0;
@@ -835,7 +895,8 @@ class PHOTOSPIDER_API Host {
    *
    * @param config Scheduler type names and worker count.
    * @return Success or failure status.
-   * @throws Nothing directly.
+   * @throws std::bad_alloc if request processing, backend-to-status
+   *         translation, or copied result construction exhausts memory.
    * @note Existing loaded graph sessions keep their current scheduler objects;
    *       callers can use replace_scheduler() to update them explicitly.
    */
@@ -848,7 +909,8 @@ class PHOTOSPIDER_API Host {
    * @param session Session to inspect.
    * @param intent Compute intent served by the scheduler.
    * @return Copied scheduler info, or a failure status.
-   * @throws Nothing directly.
+   * @throws std::bad_alloc if request processing, backend-to-status
+   *         translation, or copied result construction exhausts memory.
    * @note The Host returns value text instead of exposing scheduler objects.
    */
   virtual Result<SchedulerInfoSnapshot> scheduler_info(
@@ -862,7 +924,8 @@ class PHOTOSPIDER_API Host {
    * @param type Scheduler type name.
    * @return Success, `GraphErrc::NotFound` for missing/closed sessions, or
    *         `GraphErrc::InvalidParameter` for unavailable scheduler types.
-   * @throws Nothing directly.
+   * @throws std::bad_alloc if request processing, backend-to-status
+   *         translation, or copied result construction exhausts memory.
    * @note Replacement preserves backend lifecycle ordering. Session lifecycle
    *       failures are reported before scheduler type validation.
    */

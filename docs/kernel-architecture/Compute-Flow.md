@@ -9,6 +9,8 @@ Typical frontend flow:
 
 ```text
 CLI / TUI
+  -> ps::Host
+  -> embedded Host adapter
   -> InteractionService
   -> Kernel
   -> GraphRuntime
@@ -21,16 +23,20 @@ CLI / TUI
 per-graph `GraphStateExecutor`, event service, platform context, and scheduler
 instances.
 
-`InteractionService` is the frontend-facing facade for kernel interaction. Its
-overall role is to decouple CLI/TUI/frontend commands from kernel internals. In
-the dirty-region context, it should expose graph-scoped dirty snapshot queries
-and visualization hooks; it is not the authoritative source of dirty-region
+`ps::Host` is the public frontend-facing interface. The embedded Host adapter
+copies public request/result values and uses the internal `InteractionService`
+wrapper and `Kernel`; CLI/TUI code does not include or call those backend
+facades directly. In the dirty-region context, Host exposes graph-scoped dirty
+snapshot and lifecycle values, while `InteractionService` remains an internal
+translation boundary rather than the authoritative source of dirty-region
 generation or propagation.
 
-Frontend compute commands build a `Kernel::ComputeRequest` rather than passing
-positional boolean flags through the stack. `Kernel` owns graph lookup,
-runtime start, quiet-mode and skip-save side effects, async scheduling, image
-extraction, and LastError mapping. It then translates the request to
+Frontend compute commands build a public `ps::HostComputeRequest` rather than
+passing positional boolean flags or internal request types through the public
+seam. The embedded Host adapter translates that value to
+`Kernel::ComputeRequest`. `Kernel` owns graph lookup, runtime start, quiet-mode
+and skip-save side effects, async scheduling, image extraction, and LastError
+mapping. It then translates the internal request to
 `ComputeService::Request`, which carries only node target, cache, telemetry,
 intent, and dirty ROI data. Parallel/runtime selection is carried separately as
 `ComputeService::ExecutionStrategy`.
@@ -146,7 +152,7 @@ scheduler, and realtime and non-realtime modes may use different scheduler
 configuration.
 
 The in-place `ComputeService` split is documented in
-`Compute-Service-Split.md`. The current implementation keeps the public facade
+`Compute-Service-Split.md`. The current implementation keeps the internal facade
 and routes internal work through compute-service collaborators.
 
 ## Sequential Compute
@@ -204,11 +210,15 @@ interaction has finished.
 
 Dirty-node lifecycle updates enter a serialized `DirtyControlLane` that updates
 dirty source state in the graph-scoped dirty snapshot, runs propagation to
-refresh `actual_dirty_region`, and returns wakeup/cutoff decisions to the
-`Kernel` / `InteractionService` facade. The scheduler receives only ready task
-callbacks with epoch/generation metadata and optional scheduler-specific hints;
-it does not receive task graphs, own the dirty control lane, or own
-compute-service dirty queues.
+refresh `actual_dirty_region`, and returns wakeup/cutoff decisions to internal
+compute-service materialization. The snapshot stores `dirty_updating_count`;
+`DirtyControlLaneResult` copies that count and uniquely owns the wakeup/cutoff
+decisions. All remain internal evidence. The embedded Host adapter copies only
+the public `DirtyRegionInspectionSnapshot` returned by lifecycle methods, not
+those control fields. The scheduler receives only ready task callbacks with
+epoch/generation metadata and optional scheduler-specific hints; it does not
+receive task graphs, own the dirty control lane, or own compute-service dirty
+queues.
 
 ## Graph-State Access and Commit Policy
 
@@ -263,8 +273,9 @@ work-set materialization and interaction-facing inspection summaries.
 ## RealTimeUpdate
 
 `RealTimeUpdate` requires a dirty ROI. A request without `dirty_roi` is invalid
-and should return a clear error through kernel and interaction-facing APIs. It
-does not implicitly mean full-frame RT update.
+and returns a clear public `ps::Host` status/error value. The embedded adapter
+derives that value from internal Kernel and InteractionService diagnostics. The
+request does not implicitly mean full-frame RT update.
 
 With a valid dirty ROI, realtime compute enables both paths. RT is launched
 first and updates a low-resolution `RealtimeProxyGraph`; HP updates the
@@ -292,22 +303,22 @@ output commit as separate contracts so future task pools or modes can reuse the
 same boundaries with their own domain.
 
 The passed dirty ROI is converted into graph-scoped planner state for the
-current request. `Kernel` and `InteractionService` expose begin/update/end dirty
-source lifecycle methods so frontend or node-facing code can write source
-lifecycle state through the same graph-owned boundary. TODO: node-local dirty
-reports should become the origin source for future frontend-driven dirty-region
-updates.
+current request. Public `ps::Host` begin/update/end methods translate through the
+embedded adapter to internal `Kernel` / `InteractionService` dirty-source
+lifecycle methods, so frontend or node-facing code writes state through the same
+graph-owned boundary. TODO: node-local dirty reports should become the origin
+source for future frontend-driven dirty-region updates.
 
 RT task graph expansion is domain-aware. When an operation has distinct HP and
 RT metadata, the `RealTimeUpdate` plan uses RT metadata for tile size and
 dependency ROI planning, while the HP sibling uses HP metadata. This keeps RT
 Micro_16 planning independent from HP Macro_256 throughput defaults.
 
-TODO: design the node-to-`InteractionService` boundary for realtime dirty
-updates. The design must define how nodes emit realtime events, dirty regions,
-and update requests; which layer owns dirty-region generation; how the
-interaction facade stays separate from node and compute ownership; and how a
-future GUI consumes those events without turning the CLI into a realtime
+TODO: design the node-to-backend realtime dirty-report boundary. The design must
+define how nodes emit realtime events, dirty regions, and update requests; which
+layer owns dirty-region generation; how the internal `InteractionService` stays
+separate from node and compute ownership; and how public Host subscribers let a
+future GUI consume those events without turning the CLI into a realtime
 interaction surface.
 
 Current defaults:
@@ -332,5 +343,8 @@ and optional range checks.
 ## Error Handling
 
 Compute failures throw `GraphError` with `GraphErrc` categories where possible.
-`Kernel` catches these errors and stores a per-graph `LastError` for frontend
-inspection.
+Internal `Kernel` catches these errors and stores a per-graph `LastError` for
+the embedded Host adapter. The adapter maps that diagnostic to public
+`OperationStatus`, `Result<T>`, or `ps::Host::last_error()` values; frontends
+observe only the public Host status/error surface and never inspect Kernel or
+`InteractionService` directly.

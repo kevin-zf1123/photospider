@@ -50,10 +50,15 @@ void ComputeTaskDispatcher::clear_timing_results(GraphModel& graph) {
  * source completion and optional validation.
  * @param epoch Optional scheduler epoch passed through to task submission.
  * @param before_downstream Optional boundary validation callback.
+ * @return Nothing.
  * @throws Rethrows any task or callback exception after recording it in
  * task_runtime.
- * @note The public dispatcher API remains stable while the implementation
- * lives in compute_task_submission.cpp with other scheduler-submit helpers.
+ * @throws std::bad_alloc unchanged when task submission or callback storage
+ * exhausts memory.
+ * @note The dispatcher's internal C++ member surface remains stable while the
+ * implementation lives in compute_task_submission.cpp. C++ `public:` class
+ * access here is not the installable product Host API; frontends use
+ * `ps::Host`.
  */
 void ComputeTaskDispatcher::submit_dirty_ready_tasks_source_first(
     SchedulerTaskRuntime& task_runtime,
@@ -77,7 +82,10 @@ void ComputeTaskDispatcher::submit_dirty_ready_tasks_source_first(
  * @param downstream_task_count Total downstream tasks tracked by scheduler
  * completion.
  * @param before_downstream Optional boundary validation callback.
+ * @return Nothing.
  * @throws Rethrows task_runtime, task, or before_downstream exceptions.
+ * @throws std::bad_alloc unchanged when handle submission, dependency, or
+ * callback storage exhausts memory.
  * @note The helper centralizes production dirty source-first submission while
  * dirty executors retain their request-local TaskExecutor ownership.
  */
@@ -118,6 +126,8 @@ void ComputeTaskDispatcher::submit_dirty_ready_tasks_source_first(
  * @throws GraphError for missing targets, missing final output, compute
  * failures, or scheduling failures; may also propagate operation/cache
  * exceptions with added context.
+ * @throws std::bad_alloc unchanged when plan, task, operation, cache,
+ * telemetry, or result storage exhausts memory.
  * @note The function builds all worker closures before submission, waits for
  * completion, then commits temp outputs under graph_mutex_.
  */

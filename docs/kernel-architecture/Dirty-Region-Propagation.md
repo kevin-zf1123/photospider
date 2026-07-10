@@ -47,7 +47,9 @@ external compatibility promises.
 
 The target dirty-region state is a graph-scoped `DirtyRegionSnapshot`. It should
 be owned by the current graph/runtime dirty-state layer and consumed by
-`InteractionService`, dirty work-set materialization, tests, and debug tooling.
+the internal `InteractionService`, dirty work-set materialization, tests, and
+debug tooling. Frontends consume copied snapshot values through public
+`ps::Host` methods.
 
 The snapshot should contain three categories of state, but only dirty-source
 membership and lifecycle can be written directly from node lifecycle events:
@@ -56,10 +58,14 @@ membership and lifecycle can be written directly from node lifecycle events:
   current dirty generation. A node remains marked as dirty even after the event
   that caused it has been locally handled, because downstream work may keep
   being aborted or refreshed until the final dirty update settles.
-- `dirty_updating_count`: a derived count of dirty source nodes currently
-  inside a begin/end dirty-region lifecycle. When it reaches zero, the executor
-  may end the current compute request after the last relevant work finishes. It
-  is not a compute-task reference count.
+- `dirty_updating_count`: a derived count stored by the internal
+  `DirtyRegionSnapshot` and copied into `DirtyControlLaneResult`. It counts dirty
+  source nodes currently inside a begin/end dirty-region lifecycle. When it
+  reaches zero, the executor may end the current compute request after the last
+  relevant work finishes. It is not a compute-task reference count. The
+  `DirtyControlLane::build_result` step derives wakeup and cutoff decisions
+  from the completed snapshot plus lifecycle event and stores them only in
+  `DirtyControlLaneResult`; the propagator does not own those decisions.
 - `actual_dirty_region`: the propagated dirty regions, tiles, monolithic
   escalations, and edge mappings produced by the propagator from the dirty
   source set. It is refreshed incrementally or fully whenever the dirty source
@@ -80,20 +86,25 @@ The snapshot should avoid raw node or tile pointers. It should use stable ids an
 coordinate data so it remains inspectable across undo/redo, reload, and node
 replacement workflows.
 
-Dirty-node lifecycle events enter a serialized graph-scoped
-`DirtyControlLane` through the `Kernel` / `InteractionService` facade. The
-control lane updates dirty source membership and lifecycle state in
-`DirtyRegionSnapshot`; the propagator then derives `actual_dirty_region` from
-those sources and returns wakeup/cutoff decisions for work-set materialization.
-It is not a normal compute task queue owned by the scheduler, and it should not
-be delegated to node-local compute ownership.
+Dirty-node lifecycle events enter a serialized graph-scoped `DirtyControlLane`.
+Frontend callers use public Host lifecycle methods; the embedded adapter routes
+them through the internal `Kernel` / `InteractionService` boundary. The control
+lane updates dirty source membership and lifecycle state in
+`DirtyRegionSnapshot`; the propagator derives `actual_dirty_region` from those
+sources. `DirtyControlLane::build_result` then derives wakeup/cutoff decisions
+from that snapshot and the current lifecycle event for work-set
+materialization. It is not a normal compute task queue owned by the scheduler,
+and it should not be delegated to node-local compute ownership.
 
-TODO: define the node-to-`InteractionService` subscription/event transport for
-future GUI usage. Nodes remain the source of realtime update events and
-dirty-region records, while `InteractionService` exposes frontend-facing
-inspection and lifecycle/update-request hooks without becoming the dirty-region
-generator. The design must document event source, dirty-region generation
-responsibility, node/facade boundaries, and GUI consumption.
+TODO: define the node-to-backend subscription/event transport and its public
+Host delivery contract for future GUI usage. Nodes remain the source of
+realtime update events and dirty-region records; the internal
+`InteractionService` performs backend translation, while Host exposes copied
+dirty inspection snapshots plus lifecycle operation status without exposing
+the internal updating-source count or wakeup/cutoff decisions, and without
+becoming the dirty-region generator. The design must document event source,
+dirty-region generation responsibility, node/backend boundaries, and GUI
+consumption.
 
 Recommended internal keys:
 
@@ -325,10 +336,10 @@ domain: RT Micro_16 <-> RT Macro_64 and HP Micro_64 <-> HP Macro_256.
 
 ## 12. Validation and Visualization
 
-- `InteractionService` is the frontend-facing facade for kernel interaction. In
-  the dirty-region context, it should expose graph-scoped snapshot queries and
-  visualization hooks; it should not be treated as the authoritative source of
-  dirty-region generation or propagation.
+- Public `ps::Host` is the frontend-facing interface. Its embedded adapter uses
+  the internal `InteractionService` to copy graph-scoped snapshot/lifecycle
+  values for frontend visualization; neither boundary is the authoritative
+  source of dirty-region generation or propagation.
 - CLI/REPL commands are not a realtime dirty-update control surface. They must
   not expose RT intent commands, dirty ROI creation, or dirty source lifecycle
   commands such as `compute rt`, `--dirty-roi`, `dirty begin`, `dirty update`,

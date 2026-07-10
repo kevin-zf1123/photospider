@@ -5,6 +5,7 @@
  */
 #include <filesystem>
 #include <map>
+#include <new>
 #include <sstream>
 #include <stdexcept>
 #include <string>
@@ -117,6 +118,16 @@ Kernel::TraversalNodeInfo Kernel::build_traversal_node_info(
                                    has_node_disk_cache(graph, node)};
 }
 
+/**
+ * @brief Builds traversal diagnostics for one requested end node.
+ *
+ * @param graph Graph whose topological postorder and cache state are inspected.
+ * @param end_node_id End node that anchors the traversal.
+ * @return Ordered diagnostics, or nullopt for recoverable traversal failures.
+ * @throws std::bad_alloc if traversal or diagnostic storage exhausts memory.
+ * @note Non-resource traversal failures preserve the existing optional-result
+ * contract and are reduced to nullopt for the internal inspection facade.
+ */
 std::optional<std::vector<Kernel::TraversalNodeInfo>>
 Kernel::traversal_details_for_end(GraphModel& graph, int end_node_id) const {
   try {
@@ -127,6 +138,8 @@ Kernel::traversal_details_for_end(GraphModel& graph, int end_node_id) const {
       nodes.push_back(build_traversal_node_info(graph, node_id));
     }
     return nodes;
+  } catch (const std::bad_alloc&) {
+    throw;
   } catch (...) {
     return std::nullopt;
   }

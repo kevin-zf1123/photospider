@@ -30,8 +30,9 @@ namespace {
  * @param entry Base HP entry selected by dirty planning.
  * @param task Planned task whose ROI should bound execution.
  * @return Entry copy scoped to the task output ROI.
- * @throws Nothing directly.
+ * @throws Nothing; HpPlanEntry contains only scalar/POD ROI metadata.
  * @note Tile tasks execute one tile; monolithic/node tasks keep planner ROI.
+ * Copying and clipping this value performs no dynamic allocation.
  */
 HpPlanEntry entry_for_task(const HpPlanEntry& entry, const PlannedTask& task) {
   HpPlanEntry clipped = entry;
@@ -48,9 +49,10 @@ HpPlanEntry entry_for_task(const HpPlanEntry& entry, const PlannedTask& task) {
  * @param entry Base RT entry selected by dirty planning.
  * @param task Planned task whose domain-local ROI should bound execution.
  * @return Entry copy scoped to the task output ROI.
- * @throws Nothing directly.
+ * @throws Nothing; RtPlanEntry contains only scalar/POD ROI metadata.
  * @note RT task output_roi is already in RT execution coordinates; HP ROI is
- * kept in the base entry for commit and inspection metadata.
+ * kept in the base entry for commit and inspection metadata. Copying and
+ * clipping this value performs no dynamic allocation.
  */
 RtPlanEntry entry_for_task(const RtPlanEntry& entry, const PlannedTask& task) {
   RtPlanEntry clipped = entry;
@@ -72,6 +74,9 @@ RtPlanEntry entry_for_task(const RtPlanEntry& entry, const PlannedTask& task) {
  * @param compute_plan Dirty-pruned plan containing task metadata.
  * @param task_id Task id requested by source-first task dispatch.
  * @param execute_node Callable that runs the dirty executor for the task.
+ * @return Nothing.
+ * @throws std::bad_alloc unchanged from task lookup diagnostics or
+ * execute_node.
  * @throws Exceptions propagated by execute_node.
  * @note Missing plan entries remain no-ops for pruned or stale dirty work.
  */
@@ -124,8 +129,10 @@ DirtyNodeMutexMap make_dirty_node_mutexes(const ComputePlan& compute_plan) {
  * @param snapshot Dirty snapshot containing source node ids.
  * @param hp_write_buffer Request-local HP output buffer populated by source
  * tasks before downstream HP work is released.
+ * @return Nothing.
  * @throws GraphError when a source node is missing or has no staged/committed
  * HP output.
+ * @throws std::bad_alloc unchanged if diagnostic construction exhausts memory.
  * @note HP dirty source output may still be staged, so validation cannot read
  * only GraphModel HP cache.
  */
@@ -157,8 +164,10 @@ void validate_hp_source_boundaries_ready(
  * @param snapshot Dirty snapshot containing source node ids.
  * @param rt_write_buffer Request-local RT output buffer populated by source
  * tasks before downstream RT work is released.
+ * @return Nothing.
  * @throws GraphError when a source node is missing or has no staged/committed
  * RT proxy or HP fallback output.
+ * @throws std::bad_alloc unchanged if diagnostic construction exhausts memory.
  * @note RT dirty source output may still be staged, so validation checks the
  * request buffer before the committed proxy graph.
  */
@@ -194,6 +203,8 @@ void validate_rt_source_boundaries_ready(
  * for forced HP dirty updates.
  * @throws GraphError when a forced dirty update cannot derive a valid current
  * HP extent from the target node.
+ * @throws std::bad_alloc unchanged when extent or diagnostic storage exhausts
+ * memory.
  * @note Forced HP dirty updates do not seed existing HP output into the staging
  * buffer, so their dirty plan must cover the entire authoritative HP frame
  * before commit.
@@ -220,9 +231,8 @@ cv::Rect hp_planning_roi_for_request(const GraphModel& graph,
 
   GraphExtentResolver extent_resolver;
   std::unordered_map<int, cv::Size> extent_cache;
-  const cv::Size target_extent =
-      extent_resolver.resolve_output_extent(graph, request.node_id,
-                                            extent_cache);
+  const cv::Size target_extent = extent_resolver.resolve_output_extent(
+      graph, request.node_id, extent_cache);
   if (target_extent.width <= 0 || target_extent.height <= 0) {
     throw GraphError(GraphErrc::InvalidParameter,
                      "Cannot compute forced HP dirty update for node " +
@@ -234,10 +244,28 @@ cv::Rect hp_planning_roi_for_request(const GraphModel& graph,
 
 }  // namespace
 
+/**
+ * @brief Constructs the HP dirty executor from borrowed support services.
+ *
+ * @param traversal Traversal service used by dirty planning.
+ * @param events Event sink used by node execution and downsample refresh.
+ * @throws Nothing directly.
+ * @note Both services must outlive this request-scoped executor.
+ */
 HighPrecisionDirtyExecutor::HighPrecisionDirtyExecutor(
     GraphTraversalService& traversal, GraphEventService& events)
     : traversal_(traversal), events_(events) {}
 
+/**
+ * @brief Clears HP cache state selected by one dirty plan.
+ *
+ * @param graph Graph whose planned nodes are reset.
+ * @param plan HP dirty plan containing nodes to reset.
+ * @return Nothing.
+ * @throws GraphError if a planned node no longer exists.
+ * @throws std::bad_alloc unchanged if graph lookup diagnostics allocate.
+ * @note The caller owns graph-state serialization for the complete reset.
+ */
 void HighPrecisionDirtyExecutor::reset_plan_cache(
     GraphModel& graph, const HighPrecisionDirtyPlan& plan) const {
   for (const auto& [node_id, entry] : plan.entries) {
@@ -249,6 +277,16 @@ void HighPrecisionDirtyExecutor::reset_plan_cache(
   }
 }
 
+/**
+ * @brief Returns the committed HP target output after dirty execution.
+ *
+ * @param graph Graph owning the target HP cache.
+ * @param node_id Target node selected by the internal service request.
+ * @return Mutable committed HP output.
+ * @throws GraphError when execution did not commit target output.
+ * @throws std::bad_alloc unchanged if failure diagnostics allocate.
+ * @note The returned reference remains graph-owned.
+ */
 NodeOutput& HighPrecisionDirtyExecutor::require_target_output(
     GraphModel& graph, int node_id) const {
   Node& target = graph.mutable_node(node_id);
@@ -259,6 +297,21 @@ NodeOutput& HighPrecisionDirtyExecutor::require_target_output(
   return *target.cached_output_high_precision;
 }
 
+/**
+ * @brief Plans, executes, and commits one HP dirty request.
+ *
+ * @param graph Graph whose HP dirty state and cache are updated.
+ * @param proxy_graph RT proxy graph receiving optional downsample refresh.
+ * @param runtime Optional scheduler/trace owner; null executes work inline.
+ * @param request Dirty target, ROI, cache, telemetry, and sibling-gate options.
+ * @return Mutable target HP output owned by graph.
+ * @throws std::bad_alloc unchanged when planning, task, cache, staging,
+ * telemetry, or output storage exhausts memory.
+ * @throws GraphError for planning, dependency, operation, scheduler, commit, or
+ * target validation failures.
+ * @note Planning and commit hold graph_mutex_ while scheduler work runs outside
+ * that lock. All staging buffers and node mutexes are request-local.
+ */
 NodeOutput& HighPrecisionDirtyExecutor::execute(
     GraphModel& graph, RealtimeProxyGraph& proxy_graph, GraphRuntime* runtime,
     const DirtyUpdateRequest& request) {
@@ -325,10 +378,27 @@ NodeOutput& HighPrecisionDirtyExecutor::execute(
   return require_target_output(graph, request.node_id);
 }
 
+/**
+ * @brief Constructs the RT dirty executor from borrowed support services.
+ *
+ * @param traversal Traversal service used by dirty planning.
+ * @param events Event sink used by RT node execution.
+ * @throws Nothing directly.
+ * @note Both services must outlive this request-scoped executor.
+ */
 RealTimeDirtyExecutor::RealTimeDirtyExecutor(GraphTraversalService& traversal,
                                              GraphEventService& events)
     : traversal_(traversal), events_(events) {}
 
+/**
+ * @brief Clears proxy state selected by one RT dirty plan.
+ *
+ * @param proxy_graph RT proxy graph whose selected nodes are reset.
+ * @param plan RT dirty plan containing nodes to reset.
+ * @return Nothing.
+ * @throws std::bad_alloc unchanged if node-id bookkeeping exhausts memory.
+ * @note Proxy graph owns synchronization for the batched reset operation.
+ */
 void RealTimeDirtyExecutor::reset_plan_cache(
     RealtimeProxyGraph& proxy_graph, const RealTimeDirtyPlan& plan) const {
   std::vector<int> node_ids;
@@ -340,11 +410,36 @@ void RealTimeDirtyExecutor::reset_plan_cache(
   proxy_graph.reset_nodes(node_ids);
 }
 
+/**
+ * @brief Returns the committed RT target output after dirty execution.
+ *
+ * @param proxy_graph Proxy graph owning the RT output.
+ * @param node_id Target node selected by the internal service request.
+ * @return Mutable committed proxy output.
+ * @throws GraphError when execution did not commit target output.
+ * @throws std::bad_alloc unchanged if failure diagnostics allocate.
+ * @note The returned reference remains proxy-graph-owned.
+ */
 NodeOutput& RealTimeDirtyExecutor::require_target_output(
     RealtimeProxyGraph& proxy_graph, int node_id) const {
   return proxy_graph.require_output(node_id);
 }
 
+/**
+ * @brief Plans, executes, and commits one RT dirty request.
+ *
+ * @param graph Graph supplying topology, parameters, and HP fallback output.
+ * @param proxy_graph RT proxy graph receiving the staged result.
+ * @param runtime Optional scheduler/trace owner; null executes work inline.
+ * @param request Dirty target, ROI, cache, and telemetry options.
+ * @return Mutable target RT output owned by proxy_graph.
+ * @throws std::bad_alloc unchanged when planning, task, proxy, staging,
+ * telemetry, or output storage exhausts memory.
+ * @throws GraphError for planning, dependency, operation, scheduler, commit, or
+ * target validation failures.
+ * @note Planning and commit hold graph_mutex_ while scheduler work runs outside
+ * that lock. RT output never becomes formal reusable GraphModel cache.
+ */
 NodeOutput& RealTimeDirtyExecutor::execute(GraphModel& graph,
                                            RealtimeProxyGraph& proxy_graph,
                                            GraphRuntime* runtime,

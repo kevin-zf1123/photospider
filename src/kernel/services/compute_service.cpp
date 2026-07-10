@@ -3,10 +3,12 @@
  * @brief Implements the ComputeService facade for sequential, parallel, and
  * dirty update compute entry points.
  *
- * ComputeService keeps the public compute API and request orchestration. Node
- * execution, dirty ROI execution, HP-to-RT downsample refresh, task graph
- * dispatch, cache policy, input resolution, and metrics metadata are delegated
- * to the compute-service collaborators under
+ * ComputeService keeps its internal C++ member surface and request
+ * orchestration. That member surface is private backend API, not the
+ * installable product public API; frontends call `ps::Host`. Node execution,
+ * dirty ROI execution, HP-to-RT downsample refresh, task graph dispatch, cache
+ * policy, input resolution, and metrics metadata are delegated to the
+ * compute-service collaborators under
  * src/kernel/services/compute-service.
  */
 #include "kernel/services/compute_service.hpp"
@@ -18,6 +20,7 @@
 #include <optional>
 #include <string>
 #include <unordered_map>
+#include <utility>
 #include <vector>
 
 #include "benchmark/benchmark_types.hpp"
@@ -39,11 +42,26 @@
 
 namespace ps {
 
+/**
+ * @brief Constructs the internal compute orchestrator from borrowed services.
+ *
+ * @param traversal Traversal service used by planning and dirty execution.
+ * @param cache Cache service used by sequential and scheduler HP paths.
+ * @param events Event sink used by compute and dirty telemetry.
+ * @throws Nothing directly.
+ * @note All three services must outlive this ComputeService instance.
+ */
 ComputeService::ComputeService(GraphTraversalService& traversal,
                                GraphCacheService& cache,
                                GraphEventService& events)
     : traversal_(traversal), cache_(cache), events_(events) {}
 
+/**
+ * @brief Destroys service-owned inline RT proxy graph storage.
+ *
+ * @throws Nothing.
+ * @note Runtime-owned proxy graphs and all borrowed services remain untouched.
+ */
 ComputeService::~ComputeService() = default;
 
 namespace {
@@ -55,7 +73,10 @@ namespace {
  * @param inputs Image inputs used to derive debug and spatial metadata.
  * @param enable_timing Whether timing metadata should be attached.
  * @param execution_ms Measured node execution duration in milliseconds.
- * @throws Any exception propagated by ComputeMetricsRecorder.
+ * @return Nothing.
+ * @throws std::bad_alloc unchanged when metadata or debug storage exhausts
+ * memory.
+ * @throws Any other exception propagated by ComputeMetricsRecorder.
  * @note This helper keeps the recursive sequential path aligned with the
  * dispatcher metadata policy.
  */
@@ -96,7 +117,8 @@ void remember_facade_compute_plan(GraphModel& graph,
  * @return Requested intent, or GlobalHighPrecision when the legacy path was
  * selected.
  * @throws Nothing directly.
- * @note A missing intent is only a facade compatibility signal; planning still
+ * @note A missing intent is only an internal compatibility signal; planning
+ * still
  * needs an explicit single-domain compute intent.
  */
 ComputeIntent planning_intent_for_request(
@@ -150,6 +172,8 @@ compute::ComputeTaskDispatcher::ComputeDispatchRequest make_dispatch_request(
  * @param suppress_graph_downsample Whether HP dirty execution should skip
  * direct HP-to-RT graph downsample writes for this request.
  * @return DirtyUpdateRequest with the requested dirty ROI.
+ * @throws std::bad_alloc if copying request cache precision or gate storage
+ * exhausts memory.
  * @throws std::bad_optional_access if called before dirty_roi validation.
  * @note Intent-specific executor selection happens in ComputeService; this
  * request only carries the knobs shared by HP and RT dirty executors.
@@ -211,6 +235,8 @@ ComputeService::Request make_silent_dirty_request(
  * @param request Intent, target node, and optional dirty ROI for the request.
  * @param execution_order Topological execution order for the target cone.
  * @return Compute plan pruned to request target and cache availability.
+ * @throws std::bad_alloc unchanged when graph expansion or plan storage
+ * exhausts memory.
  * @throws GraphError from full task graph expansion or pruning.
  * @note Dirty update executors have their own same-boundary helper because
  * they also record dirty snapshots and materialized work sets.
@@ -240,6 +266,8 @@ compute::ComputePlan prune_facade_node_cache_task_graph(
  * @param context Request-wide cache, timing, disk-cache, benchmark, and cycle
  * detection state shared by all recursive calls.
  * @return Mutable HP output owned by the target node.
+ * @throws std::bad_alloc unchanged when dependency, operation, cache,
+ * telemetry, or result storage exhausts memory.
  * @throws GraphError when a cycle, missing dependency, missing operation, disk
  * cache failure, or compute failure occurs.
  * @note This method is used only by the sequential HP path and HP callbacks
@@ -373,11 +401,14 @@ NodeOutput& ComputeService::compute_internal(
  * @param sibling_commit_gate Optional RealTimeUpdate gate that delays HP graph
  * commit until RT proxy commit succeeds.
  * @return Mutable target HP output stored in the graph.
+ * @throws std::bad_alloc unchanged when dirty planning, task, cache, or output
+ * storage exhausts memory.
  * @throws GraphError from dirty planning, execution, scheduler dispatch, or
  * target output validation; std::bad_optional_access if dirty_roi is missing
  * before coordinator validation.
  * @note This method intentionally contains no node-level dirty execution logic;
- * ComputeService remains only the public orchestration boundary.
+ * ComputeService remains only the internal orchestration boundary; C++
+ * `public:` access on its backend members does not make them product Host API.
  */
 NodeOutput& ComputeService::compute_high_precision_update(
     GraphModel& graph, compute::RealtimeProxyGraph& proxy_graph,
@@ -397,6 +428,8 @@ NodeOutput& ComputeService::compute_high_precision_update(
  * @param strategy Execution strategy that may supply a scheduler runtime.
  * @param request Request carrying target, cache, telemetry, and dirty ROI.
  * @return Mutable target RT output stored in the proxy graph.
+ * @throws std::bad_alloc unchanged when dirty planning, task, proxy, or output
+ * storage exhausts memory.
  * @throws GraphError from dirty planning, execution, scheduler dispatch, or
  * target output validation; std::bad_optional_access if dirty_roi is missing
  * before coordinator validation.
@@ -411,6 +444,16 @@ NodeOutput& ComputeService::compute_real_time_update(
                           make_dirty_update_request(request));
 }
 
+/**
+ * @brief Resolves runtime-owned or service-owned RT proxy graph storage.
+ *
+ * @param graph Graph address used as the inline proxy map key.
+ * @param strategy Strategy that may provide GraphRuntime ownership.
+ * @return Runtime proxy when available, otherwise an inline service proxy.
+ * @throws std::bad_alloc unchanged if inline proxy map or object allocation
+ * exhausts memory.
+ * @note Inline map access is serialized by inline_rt_proxy_graphs_mutex_.
+ */
 compute::RealtimeProxyGraph& ComputeService::realtime_proxy_graph_for(
     GraphModel& graph, const ExecutionStrategy& strategy) {
   if (strategy.runtime) {
@@ -432,6 +475,8 @@ compute::RealtimeProxyGraph& ComputeService::realtime_proxy_graph_for(
  * @param request Service request carrying target, cache, telemetry, and
  * optional intent semantics.
  * @return Mutable target HP output stored in the graph.
+ * @throws std::bad_alloc unchanged when planning, task dispatch, operation,
+ * cache, telemetry, or result storage exhausts memory.
  * @throws GraphError from scheduler lookup, task dispatch, cache access, or
  * missing target output.
  * @note Legacy HP requests run the full-frame dispatcher directly. Requests
@@ -459,6 +504,8 @@ NodeOutput& ComputeService::compute_parallel(GraphModel& graph,
  * @param request Intent-aware request carrying target, cache, telemetry, and
  * optional dirty ROI.
  * @return Mutable output selected by IntentUpdateCoordinator.
+ * @throws std::bad_alloc unchanged when callback, scheduler, dirty, cache, or
+ * output storage exhausts memory.
  * @throws GraphError from intent validation, callback execution, scheduler
  * lookup, or missing target output.
  * @note The coordinator owns HP/RT dual-path semantics; ComputeService only
@@ -539,6 +586,8 @@ NodeOutput& ComputeService::compute_intent_update_impl(
  * @param request Intent-aware request carrying target, cache, telemetry, and
  * optional dirty ROI.
  * @return Mutable output selected by IntentUpdateCoordinator.
+ * @throws std::bad_alloc unchanged when coordination, dirty execution, cache,
+ * or output storage exhausts memory.
  * @throws GraphError from intent validation or execution.
  * @note Dirty HP and RT callbacks still use the dirty executors, but run node
  * work inline because no scheduler runtime is available.
@@ -549,12 +598,14 @@ NodeOutput& ComputeService::compute_with_intent_impl(GraphModel& graph,
 }
 
 /**
- * @brief Public non-parallel ComputeService entry point.
+ * @brief Internal non-parallel ComputeService entry point.
  *
  * @param graph Graph being computed.
  * @param request Service request carrying target, cache, telemetry, and
  * optional intent semantics.
  * @return Mutable output selected by the request.
+ * @throws std::bad_alloc unchanged when any Host-reachable compute stage
+ * exhausts memory.
  * @throws GraphError from validation, planning, recursive compute, or cache
  * operations.
  * @note A missing intent selects the legacy GlobalHighPrecision path.
@@ -572,6 +623,8 @@ NodeOutput& ComputeService::compute(GraphModel& graph, const Request& request) {
  * @param graph Graph being computed.
  * @param request Legacy HP request with target, cache, and telemetry options.
  * @return Mutable target HP output stored in the graph.
+ * @throws std::bad_alloc unchanged when planning, recursion, cache, telemetry,
+ * or result storage exhausts memory.
  * @throws GraphError when the target is missing, topology is invalid, planning
  * fails, recursive compute fails, or target output is unavailable.
  * @note The method records the same node/cache-pruned plan shape used by the
@@ -644,6 +697,7 @@ NodeOutput& ComputeService::compute_sequential_impl(GraphModel& graph,
  * @brief Clears timing results for one graph.
  *
  * @param graph Graph whose TimingCollector should be reset.
+ * @return Nothing.
  * @throws Nothing directly.
  * @note The method holds graph.timing_mutex_ while mutating timing fields.
  */

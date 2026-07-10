@@ -1,14 +1,17 @@
 /**
  * @file kernel_compute.cpp
- * @brief Implements Kernel compute facade entry points through normalized
- * request helpers.
+ * @brief Implements internal Kernel compute entry points through normalized
+ * adapter request helpers.
  *
- * The public Kernel compute API remains stable. This file collects the shared
- * runtime-start, ComputeService construction, execution-mode branching, and
- * LastError mapping that used to be duplicated across compute, compute_async,
- * and compute_and_get_image.
+ * The adapter-to-Kernel compute boundary remains stable behind `ps::Host`.
+ * This file collects the shared runtime-start, ComputeService construction,
+ * execution-mode branching, and LastError mapping that used to be duplicated
+ * across compute, compute_async, and compute_and_get_image. Frontends construct
+ * `HostComputeRequest`; the embedded adapter translates it to
+ * `Kernel::ComputeRequest` before these helpers run.
  */
 #include <future>
+#include <new>
 #include <sstream>
 #include <string>
 #include <utility>
@@ -22,10 +25,12 @@ namespace {
 /**
  * @brief Builds the legacy synchronous std::exception LastError message.
  *
- * @param request Compute request whose target node is being evaluated.
+ * @param node_id Target node being evaluated by the internal Kernel request.
  * @param error_message Exception text reported by the compute boundary.
  * @return Message compatible with the previous Kernel::compute behavior.
  * @throws std::bad_alloc if string formatting cannot allocate.
+ * @note The embedded Host adapter converts the stored LastError into a public
+ * Host status; frontend code never calls this helper.
  */
 std::string make_sync_exception_message(int node_id,
                                         const char* error_message) {
@@ -38,13 +43,15 @@ std::string make_sync_exception_message(int node_id,
 /**
  * @brief Builds the async std::exception LastError message for both overloads.
  *
- * @param request Async request being executed.
+ * @param intent_aware Whether the adapter supplied explicit compute intent.
+ * @param node_id Target node being evaluated by the internal Kernel request.
  * @param error_message Exception text reported by the compute boundary.
- * @return Message compatible with the selected public async overload.
+ * @return Message compatible with the selected internal async path and Host
+ * status translation.
  * @throws std::bad_alloc if string formatting cannot allocate.
  * @note The legacy overload used the "std::exception:" prefix, while the
  * intent-aware overload used the "Async compute failed:" prefix. The request
- * intent flag preserves that externally visible distinction.
+ * intent flag preserves the distinction translated by the Host adapter.
  */
 std::string make_async_exception_message(bool intent_aware, int node_id,
                                          const char* error_message) {
@@ -61,12 +68,13 @@ std::string make_async_exception_message(bool intent_aware, int node_id,
 /**
  * @brief Converts a Kernel request into the narrower ComputeService request.
  *
- * @param request Public Kernel compute request being dispatched.
+ * @param request Internal Kernel compute request produced by the embedded Host
+ * adapter or an internal backend/test caller.
  * @return Service request containing only target, cache, telemetry, intent, and
  * dirty ROI data.
  * @throws std::bad_alloc if copying the cache precision string allocates.
  * @note Graph name, quiet mode, skip-save, and scheduler selection stay in the
- * Kernel facade because they belong to GraphRuntime orchestration.
+ * internal Kernel boundary because they belong to GraphRuntime orchestration.
  */
 ComputeService::Request make_service_compute_request(
     const Kernel::ComputeRequest& request) {
@@ -136,10 +144,31 @@ class ScopedComputeRequestState {
 
 }  // namespace
 
+/**
+ * @brief Delegates the internal synchronous facade to compute_request().
+ *
+ * @param request Structured internal compute request.
+ * @return true on success; false on missing graph or handled compute failure.
+ * @throws std::bad_alloc if compute execution or handled-failure LastError
+ *         construction exhausts memory.
+ * @note Other GraphError, standard, and unknown failures are converted by
+ *       compute_request() to false plus best-effort LastError state.
+ */
 bool Kernel::compute(const ComputeRequest& request) {
   return compute_request(request);
 }
 
+/**
+ * @brief Executes one synchronous request under graph-state serialization.
+ *
+ * @param request Internal request captured into the graph-state work item.
+ * @return true when the service finishes; false for missing graphs or handled
+ *         failures.
+ * @throws std::bad_alloc if compute execution or catch-path LastError
+ *         construction exhausts memory.
+ * @note Request-state flags are restored by ScopedComputeRequestState on every
+ *       exit. Other compute exceptions are mapped to false and LastError.
+ */
 bool Kernel::compute_request(const ComputeRequest& request) {
   auto it = graphs_.find(request.name);
   if (it == graphs_.end()) {
@@ -164,6 +193,8 @@ bool Kernel::compute_request(const ComputeRequest& request) {
 
     last_error_.erase(request.name);
     return true;
+  } catch (const std::bad_alloc&) {
+    throw;
   } catch (const GraphError& ge) {
     last_error_[request.name] = {ge.code(), ge.what()};
     return false;
@@ -179,11 +210,31 @@ bool Kernel::compute_request(const ComputeRequest& request) {
   }
 }
 
+/**
+ * @brief Delegates image compute to compute_and_get_image_request().
+ *
+ * @param request Structured internal image compute request.
+ * @return Cloned image or nullopt under the internal preview/save contract.
+ * @throws std::bad_alloc if compute/image execution or handled-failure
+ *         LastError construction exhausts memory.
+ * @note Other compute and image-conversion failures become nullopt.
+ */
 std::optional<cv::Mat> Kernel::compute_and_get_image(
     const ComputeRequest& request) {
   return compute_and_get_image_request(request);
 }
 
+/**
+ * @brief Computes and clones one node image under graph-state serialization.
+ *
+ * @param request Internal image compute request captured into serialized work.
+ * @return Cloned image, or nullopt for missing graph, handled failure, or empty
+ *         output.
+ * @throws std::bad_alloc if compute/image execution or catch-path LastError
+ *         construction exhausts memory.
+ * @note Other compute, adapter, and clone exceptions become nullopt; successful
+ *       empty output clears stale LastError state.
+ */
 std::optional<cv::Mat> Kernel::compute_and_get_image_request(
     const ComputeRequest& request) {
   auto it = graphs_.find(request.name);
@@ -213,6 +264,8 @@ std::optional<cv::Mat> Kernel::compute_and_get_image_request(
     }
     last_error_.erase(request.name);
     return toCvMat(output.image_buffer).clone();
+  } catch (const std::bad_alloc&) {
+    throw;
   } catch (const GraphError& ge) {
     last_error_[request.name] = {ge.code(), ge.what()};
     return std::nullopt;
@@ -228,10 +281,33 @@ std::optional<cv::Mat> Kernel::compute_and_get_image_request(
   }
 }
 
+/**
+ * @brief Delegates asynchronous compute to compute_async_request().
+ *
+ * @param request Internal request transferred into asynchronous state.
+ * @return Future resolving to success, or nullopt for a missing graph.
+ * @throws std::bad_alloc if request, task, queue, or future-state allocation
+ *         fails during submission.
+ * @throws std::system_error if graph-state asynchronous work cannot launch.
+ * @note Future get() may rethrow std::bad_alloc from compute execution or
+ *       async LastError allocation.
+ */
 std::optional<std::future<bool>> Kernel::compute_async(ComputeRequest request) {
   return compute_async_request(std::move(request));
 }
 
+/**
+ * @brief Submits one compute request to the graph-state executor.
+ *
+ * @param request Internal request moved into the submitted work item.
+ * @return Future resolving to true/false, or nullopt for a missing graph.
+ * @throws std::bad_alloc if request, task, queue, or future-state allocation
+ *         fails during submission.
+ * @throws std::system_error if graph-state asynchronous work cannot launch.
+ * @note Recoverable compute exceptions resolve false after best-effort
+ *       LastError mapping; future get() rethrows std::bad_alloc from compute
+ *       execution or diagnostic allocation.
+ */
 std::optional<std::future<bool>> Kernel::compute_async_request(
     ComputeRequest request) {
   auto it = graphs_.find(request.name);
@@ -252,6 +328,8 @@ std::optional<std::future<bool>> Kernel::compute_async_request(
           (void)run_compute_request(service, *runtime_ptr, graph, request);
           last_error_.erase(request.name);
           return true;
+        } catch (const std::bad_alloc&) {
+          throw;
         } catch (const GraphError& ge) {
           last_error_[request.name] = {ge.code(), ge.what()};
           return false;
@@ -269,6 +347,20 @@ std::optional<std::future<bool>> Kernel::compute_async_request(
       });
 }
 
+/**
+ * @brief Translates and dispatches one request to ComputeService.
+ *
+ * @param compute_service Request-scoped compute collaborator.
+ * @param runtime Runtime supplying scheduler and event services.
+ * @param graph Visible graph model owned by serialized graph-state work.
+ * @param request Internal Kernel request to translate.
+ * @return Mutable output owned by the selected node cache.
+ * @throws GraphError if ComputeService rejects the graph request.
+ * @throws std::bad_alloc if request translation or ComputeService exhausts
+ *         memory.
+ * @throws std::exception for other failures propagated by ComputeService.
+ * @note Parallel selection changes dispatch policy, not request ownership.
+ */
 NodeOutput& Kernel::run_compute_request(ComputeService& compute_service,
                                         GraphRuntime& runtime,
                                         GraphModel& graph,

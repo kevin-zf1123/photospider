@@ -7,6 +7,7 @@
 #include <future>
 #include <memory>
 #include <mutex>
+#include <new>
 #include <sstream>
 #include <string>
 #include <system_error>
@@ -32,7 +33,9 @@ namespace {
  * @throws std::bad_alloc if registry storage allocation fails.
  * @note The operation is intentionally tiny and CPU-only so Host seam tests
  *       exercise frontend behavior without depending on external plugins or
- *       GPU availability.
+ *       GPU availability. The `resource_exhausted` operation deliberately
+ *       throws std::bad_alloc from real node execution so the public Host
+ *       exception contract is tested through the complete backend chain.
  */
 void register_host_adapter_ops() {
   static std::once_flag once;
@@ -105,6 +108,10 @@ void register_host_adapter_ops() {
             [](const Node&, const std::vector<const NodeOutput*>&) {
               return NodeOutput{};
             }));
+    OpRegistry::instance().register_op_hp_monolithic(
+        "host_adapter_test", "resource_exhausted",
+        MonolithicOpFunc([](const Node&, const std::vector<const NodeOutput*>&)
+                             -> NodeOutput { throw std::bad_alloc{}; }));
     OpRegistry::instance().register_op_hp_monolithic(
         "host_adapter_test", "identity",
         MonolithicOpFunc(
@@ -758,6 +765,47 @@ TEST(EmbeddedHostAdapter, AsyncComputeFailureStatusSurvivesCloseGraph) {
 
   auto closed_error = host->last_error(missing_op_load.session);
   EXPECT_TRUE(closed_error.ok) << closed_error.message;
+}
+
+TEST(EmbeddedHostAdapter, SyncComputePropagatesNodeExecutionBadAlloc) {
+  register_host_adapter_ops();
+  ScopedTempDir temp("photospider_host_bad_alloc_sync");
+  auto host = create_embedded_host();
+  ASSERT_NE(host, nullptr);
+
+  const GraphSessionId session = load_test_graph(
+      *host, temp.root(), "bad_alloc_sync", "resource_exhausted");
+  const HostComputeRequest request = make_compute_request(session);
+
+  try {
+    const VoidResult result = host->compute(request);
+    FAIL() << "std::bad_alloc was converted to Host status: code="
+           << static_cast<int>(result.status.code)
+           << " message=" << result.status.message;
+  } catch (const std::bad_alloc&) {
+    SUCCEED();
+  }
+}
+
+TEST(EmbeddedHostAdapter, AsyncComputeFuturePropagatesNodeExecutionBadAlloc) {
+  register_host_adapter_ops();
+  ScopedTempDir temp("photospider_host_bad_alloc_async");
+  auto host = create_embedded_host();
+  ASSERT_NE(host, nullptr);
+
+  const GraphSessionId session = load_test_graph(
+      *host, temp.root(), "bad_alloc_async", "resource_exhausted");
+  auto scheduled = host->compute_async(make_compute_request(session));
+  ASSERT_TRUE(scheduled.status.ok) << scheduled.status.message;
+  ASSERT_TRUE(scheduled.value.valid());
+
+  try {
+    const OperationStatus status = scheduled.value.get();
+    FAIL() << "std::bad_alloc was converted by async Host path: code="
+           << static_cast<int>(status.code) << " message=" << status.message;
+  } catch (const std::bad_alloc&) {
+    SUCCEED();
+  }
 }
 
 TEST(EmbeddedHostAdapter, ComputeReturnsNotFoundForMissingSession) {

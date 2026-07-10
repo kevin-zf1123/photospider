@@ -81,6 +81,8 @@ entries for reused ids.
 
 ## Error Surface
 
-Graph load, reload, and edit failures should be visible through kernel and
-interaction-facing APIs. Frontends should not need to infer failure from a
+Graph load, reload, and edit failures are visible to frontends through public
+`ps::Host` status and error values. In embedded mode, the Host adapter maps
+internal `Kernel` and `InteractionService` failure diagnostics into that public
+surface. Frontends neither call those internal facades nor infer failure from a
 partially changed graph.

@@ -63,8 +63,11 @@ class DownsampleExecutor {
    * @brief Executes all pending downsample requests in caller order.
    *
    * @param requests Pending node refreshes created by HP dirty execution.
+   * @return Nothing.
+   * @throws std::bad_alloc if proxy cloning or resize allocation exhausts
+   * memory.
    * @throws GraphError or OpenCV exceptions if image conversion or resize
-   * fails unexpectedly.
+   * otherwise fails unexpectedly.
    * @note Empty request vectors are valid and leave graph state unchanged.
    */
   void execute(const std::vector<Request>& requests);
@@ -74,7 +77,10 @@ class DownsampleExecutor {
    * @brief Applies one HP-to-RT refresh request.
    *
    * @param request Request describing the node, ROI, and HP version to copy.
-   * @throws GraphError or OpenCV exceptions from buffer conversion or resize.
+   * @return Nothing.
+   * @throws std::bad_alloc from proxy cloning or resize allocation.
+   * @throws GraphError or OpenCV exceptions from other buffer conversion or
+   * resize failures.
    * @note Missing nodes, missing HP outputs, and stale generations are skipped
    * to preserve the previous dirty update behavior.
    */

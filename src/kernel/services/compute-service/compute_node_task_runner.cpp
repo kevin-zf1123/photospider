@@ -4,6 +4,7 @@
 #include <atomic>
 #include <chrono>
 #include <memory>
+#include <new>
 #include <string>
 #include <utility>
 #include <variant>
@@ -152,10 +153,22 @@ NodeTaskRunner::NodeTaskRunner(NodeTaskRunnerContext context)
   }
 }  // NOLINT(whitespace/indent_namespace)
 
+/**
+ * @brief Executes one planned node and adds node context to recoverable errors.
+ *
+ * @param node_idx Dense index into the borrowed execution plan.
+ * @return Nothing.
+ * @throws std::bad_alloc when node execution exhausts memory.
+ * @throws GraphError wrapping other OpenCV, standard, and unknown failures.
+ * @note Resource exhaustion retains its type for scheduler/future transport;
+ * all other failures retain the existing node-context diagnostic contract.
+ */
 void NodeTaskRunner::run_node(int node_idx) {
   const int node_id = execution_order_.at(node_idx);
   try {
     compute_node(node_idx, node_id);
+  } catch (const std::bad_alloc&) {
+    throw;
   } catch (const cv::Exception& e) {
     std::rethrow_exception(compute_failure(graph_, node_id, e.what()));
   } catch (const std::exception& e) {
@@ -166,6 +179,18 @@ void NodeTaskRunner::run_node(int node_idx) {
   }
 }
 
+/**
+ * @brief Executes one planned task and adds task-node context to errors.
+ *
+ * @param task_id Dense id into the planned task graph.
+ * @return Nothing.
+ * @throws std::bad_alloc when task execution or dependency access exhausts
+ * memory.
+ * @throws GraphError wrapping other range, OpenCV, standard, and unknown
+ * failures.
+ * @note Tile tasks execute directly; node and monolithic tasks delegate to
+ * run_node(), while scheduler transport remains outside this runner.
+ */
 void NodeTaskRunner::run_task(int task_id) {
   const PlannedTask& task = task_graph_.tasks.at(task_id);
   try {
@@ -180,6 +205,8 @@ void NodeTaskRunner::run_task(int task_id) {
           "Task references unplanned node " + std::to_string(task.node_id));
     }
     run_node(idx_it->second);
+  } catch (const std::bad_alloc&) {
+    throw;
   } catch (const cv::Exception& e) {
     std::rethrow_exception(compute_failure(graph_, task.node_id, e.what()));
   } catch (const std::exception& e) {

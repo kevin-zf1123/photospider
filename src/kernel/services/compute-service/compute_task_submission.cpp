@@ -4,6 +4,7 @@
 #include <atomic>
 #include <future>
 #include <memory>
+#include <new>
 #include <string>
 #include <utility>
 #include <variant>
@@ -293,6 +294,19 @@ void TaskSubmissionPlan::resolve_operations() {
   }
 }
 
+/**
+ * @brief Releases and submits dependents made ready by one completed task.
+ *
+ * @param current_task_id Completed task whose dependency edges advance.
+ * @param current_node_id Completed node used in scheduling diagnostics.
+ * @param task_runtime Scheduler runtime receiving newly ready handles.
+ * @return Nothing.
+ * @throws std::bad_alloc if ready-id/handle collection or submission exhausts
+ * memory.
+ * @throws GraphError wrapping other dependency, range, or scheduler failures.
+ * @note The release fence publishes completed output before dependent handles
+ * become visible; resource exhaustion is never relabeled as scheduling error.
+ */
 void TaskSubmissionPlan::release_dependents(
     int current_task_id, int current_node_id,
     SchedulerTaskRuntime& task_runtime) {
@@ -307,6 +321,8 @@ void TaskSubmissionPlan::release_dependents(
     }
     task_runtime.submit_ready_task_handles_from_worker(
         std::move(ready_handles));
+  } catch (const std::bad_alloc&) {
+    throw;
   } catch (const std::out_of_range& e) {
     std::rethrow_exception(scheduling_failure(
         graph_, current_node_id, "out_of_range: " + std::string(e.what())));

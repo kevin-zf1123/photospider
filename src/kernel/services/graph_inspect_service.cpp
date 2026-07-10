@@ -1,6 +1,7 @@
 #include "kernel/services/graph_inspect_service.hpp"
 
 #include <algorithm>
+#include <new>
 #include <string>
 #include <unordered_set>
 #include <utility>
@@ -9,6 +10,35 @@
 namespace ps {
 
 namespace {
+
+#if defined(PHOTOSPIDER_INTERNAL_BAD_ALLOC_TESTING)
+/**
+ * @brief Injects resource exhaustion during real graph inspection traversal.
+ *
+ * @param node GraphModel node selected by the inspect_graph collection loop.
+ * @return Nothing.
+ * @throws std::bad_alloc when node carries the private traversal probe name.
+ * @note This BUILD_TESTING-only helper has internal linkage and immutable input
+ * matching, so concurrent inspection is safe and no public/internal callable
+ * seam is added to an installed header.
+ */
+void throw_if_graph_inspection_bad_alloc_probe(const Node& node) {
+  if (node.name == "__photospider_test_bad_alloc_inspect_traversal__") {
+    throw std::bad_alloc{};
+  }
+}
+#endif
+
+/**
+ * @brief Selects the formal HP cache exposed through inspection metadata.
+ *
+ * @param node Node whose formal cache is inspected.
+ * @param source_label Output label updated to describe the selected cache.
+ * @return Borrowed cache pointer, or null when no formal cache exists.
+ * @throws std::bad_alloc if source_label assignment exhausts memory.
+ * @note The returned pointer remains owned by node and is used only while the
+ * caller holds serialized graph inspection state.
+ */
 const NodeOutput* pick_cached_output(const Node& node,
                                      std::string& source_label) {
   if (node.cached_output_high_precision) {
@@ -19,6 +49,23 @@ const NodeOutput* pick_cached_output(const Node& node,
   return nullptr;
 }
 
+/**
+ * @brief Appends one upstream dependency branch to a flattened tree.
+ *
+ * @param graph Graph supplying node and upstream-edge snapshots.
+ * @param inspect_service Service used to copy each visited node.
+ * @param tree Destination tree owned by the caller.
+ * @param node_id Current node id to append.
+ * @param depth Display indentation depth for the current row.
+ * @param incoming_edge Optional edge that reached the current row.
+ * @param path Request-local recursion path used for cycle detection.
+ * @param include_metadata Whether copied nodes include cache metadata.
+ * @return Nothing.
+ * @throws std::bad_alloc if path, edge, node, or tree storage exhausts memory.
+ * @throws YAML::Exception if node parameter cloning fails.
+ * @note path membership is removed during unwind so sibling branches do not
+ * inherit one another's cycle state. All borrowed references remain call-local.
+ */
 void append_dependency_tree_entries(
     const GraphModel& graph, const GraphInspectService& inspect_service,
     DependencyTree& tree, int node_id, int depth,
@@ -88,6 +135,16 @@ NodeMetadataSummary metadata_summary_for(const Node& node) {
 }
 }  // namespace
 
+/**
+ * @brief Copies one Node into an inspection-safe value.
+ *
+ * @param node Node to inspect during serialized graph access.
+ * @param include_metadata Whether formal HP cache metadata is copied.
+ * @return Owned node inspection value.
+ * @throws std::bad_alloc if string, YAML, or metadata storage exhausts memory.
+ * @throws YAML::Exception if parameter cloning fails for another reason.
+ * @note The result owns all values and retains no Node or NodeOutput reference.
+ */
 GraphNodeInspectInfo GraphInspectService::inspect_node(
     const Node& node, bool include_metadata) const {
   GraphNodeInspectInfo info;
@@ -102,17 +159,46 @@ GraphNodeInspectInfo GraphInspectService::inspect_node(
   return info;
 }
 
+/**
+ * @brief Traverses graph ids and copies every node inspection value.
+ *
+ * @param graph Graph to inspect during serialized graph access.
+ * @param include_metadata Whether formal HP cache metadata is copied.
+ * @return Owned graph inspection snapshot in deterministic node-id order.
+ * @throws std::bad_alloc if id collection, node copying, or result storage
+ * exhausts memory.
+ * @throws GraphError if a node id disappears during caller-unsafe mutation.
+ * @throws YAML::Exception if parameter cloning fails for another reason.
+ * @note BUILD_TESTING may inject resource exhaustion inside the real
+ * collection loop based on immutable test input; production builds compile
+ * that branch out.
+ */
 GraphInspectionSnapshot GraphInspectService::inspect_graph(
     const GraphModel& graph, bool include_metadata) const {
   GraphInspectionSnapshot snapshot;
   std::vector<int> ids = graph.node_ids();
   snapshot.nodes.reserve(ids.size());
   for (int id : ids) {
-    snapshot.nodes.push_back(inspect_node(graph.node(id), include_metadata));
+    const Node& node = graph.node(id);
+#if defined(PHOTOSPIDER_INTERNAL_BAD_ALLOC_TESTING)
+    throw_if_graph_inspection_bad_alloc_probe(node);
+#endif
+    snapshot.nodes.push_back(inspect_node(node, include_metadata));
   }
   return snapshot;
 }
 
+/**
+ * @brief Builds a dependency tree rooted at every ending node.
+ *
+ * @param graph Graph whose upstream topology is traversed.
+ * @param include_metadata Whether copied nodes include cache metadata.
+ * @return Owned flattened dependency tree.
+ * @throws std::bad_alloc if root, path, edge, or entry storage exhausts memory.
+ * @throws YAML::Exception if parameter cloning fails for another reason.
+ * @note The caller owns graph-state serialization; recursion state is local to
+ * each root branch.
+ */
 DependencyTree GraphInspectService::dependency_tree(
     const GraphModel& graph, bool include_metadata) const {
   DependencyTree tree;
@@ -138,6 +224,17 @@ DependencyTree GraphInspectService::dependency_tree(
   return tree;
 }
 
+/**
+ * @brief Builds a dependency tree rooted at one requested node.
+ *
+ * @param graph Graph whose upstream topology is traversed.
+ * @param start_node_id Requested traversal root.
+ * @param include_metadata Whether copied nodes include cache metadata.
+ * @return Owned flattened tree, or a value with start_node_found=false.
+ * @throws std::bad_alloc if root, path, edge, or entry storage exhausts memory.
+ * @throws YAML::Exception if parameter cloning fails for another reason.
+ * @note The caller owns graph-state serialization; no graph reference escapes.
+ */
 DependencyTree GraphInspectService::dependency_tree(
     const GraphModel& graph, int start_node_id, bool include_metadata) const {
   DependencyTree tree;

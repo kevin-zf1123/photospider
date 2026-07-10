@@ -5,7 +5,7 @@
 #include <optional>
 #include <string>
 
-#include "ps_types.hpp"
+#include "ps_types.hpp"  // NOLINT(build/include_subdir)
 
 namespace ps {
 class GraphRuntime;
@@ -111,11 +111,14 @@ class IntentUpdateCoordinator {
    * @param dirty_roi Optional dirty ROI for dirty intents.
    * @param callbacks Callback bundle that performs actual compute work.
    * @return Output for the requested target after required paths complete.
-   * @throws GraphError for invalid inputs or missing callbacks; rethrows
+   * @throws std::bad_alloc when callback execution or async state exhausts
+   * memory, including a sibling HP failure observed during RT-failure cleanup.
+   * @throws GraphError for invalid inputs or missing callbacks; rethrows other
    * callback exceptions from the active sibling path.
    * @note The coordinator never owns scheduler dependency state. It records
    * sibling stages, while callbacks submit concrete dirty task batches to
-   * scheduler queues.
+   * scheduler queues. Resource exhaustion takes precedence over an already
+   * active recoverable sibling failure so it cannot be silently discarded.
    */
   static NodeOutput& coordinate_intent_update(
       ComputeIntent intent, SchedulerTaskRuntime* hp_task_runtime,

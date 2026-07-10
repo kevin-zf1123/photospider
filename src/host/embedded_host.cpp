@@ -9,6 +9,7 @@
 #include <map>
 #include <memory>
 #include <mutex>
+#include <new>
 #include <optional>
 #include <sstream>
 #include <string>
@@ -81,8 +82,7 @@ struct EmbeddedHostState {
   /** @brief Backend Kernel instance owned by the embedded adapter. */
   Kernel kernel;
 
-  /** @brief Interaction facade bound to kernel for existing frontend behavior.
-   */
+  /** @brief Internal interaction facade used only by this Host adapter. */
   InteractionService interaction;
 
   /** @brief Creates the interaction facade after constructing the Kernel. */
@@ -862,13 +862,37 @@ NodeInspectionView to_public_node(const GraphNodeInspectInfo& info) {
   return view;
 }
 
+#if defined(PHOTOSPIDER_INTERNAL_BAD_ALLOC_TESTING)
+/**
+ * @brief Injects resource exhaustion inside the graph-view adapter loop.
+ *
+ * @param info Backend inspection value already produced by
+ * GraphInspectService traversal.
+ * @return Nothing.
+ * @throws std::bad_alloc when info carries the private test probe name.
+ * @note This translation-unit-local BUILD_TESTING probe has no mutable state,
+ * is safe across concurrent inspections, and adds no installed/public Host
+ * seam. Production builds compile out both the check and sentinel behavior.
+ */
+void throw_if_graph_adapter_bad_alloc_probe(const GraphNodeInspectInfo& info) {
+  if (info.name == "__photospider_test_bad_alloc_inspect_adapter__") {
+    throw std::bad_alloc{};
+  }
+}
+#endif
+
 /**
  * @brief Converts backend graph inspection into a public graph view.
  *
  * @param session Session that was inspected.
  * @param snapshot Backend graph inspection snapshot.
  * @return Public graph inspection view.
- * @throws YAML::Exception/std::bad_alloc from node conversion.
+ * @throws std::bad_alloc when public node, parameter, or result storage
+ * exhausts memory.
+ * @throws YAML::Exception when backend YAML parameters cannot be converted.
+ * @note BUILD_TESTING may compile an immutable-name failpoint inside the real
+ * adapter loop. Production builds compile out the probe and expose no callable
+ * test seam.
  */
 GraphInspectionView to_public_graph_view(
     const GraphSessionId& session, const GraphInspectionSnapshot& snapshot) {
@@ -876,6 +900,9 @@ GraphInspectionView to_public_graph_view(
   view.session = session;
   view.nodes.reserve(snapshot.nodes.size());
   for (const auto& node : snapshot.nodes) {
+#if defined(PHOTOSPIDER_INTERNAL_BAD_ALLOC_TESTING)
+    throw_if_graph_adapter_bad_alloc_probe(node);
+#endif
     view.nodes.push_back(to_public_node(node));
   }
   return view;

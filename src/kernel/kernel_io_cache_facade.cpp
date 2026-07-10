@@ -21,12 +21,13 @@ std::optional<TimingCollector> Kernel::get_timing(const std::string& name) {
  * @param yaml_path Source YAML file path.
  * @return true when GraphIOService loads and replaces graph nodes; false when
  *         the graph is missing or reload fails.
- * @throws Nothing; backend GraphError/std::exception failures are captured by
- *         with_graph_state_last_error().
+ * @throws std::bad_alloc if reload execution or handled-failure LastError
+ *         construction exhausts memory.
  * @note Existing-session failures preserve GraphIOService classifications in
  *       Kernel::last_error(), allowing Host callers to distinguish unreadable
  *       input from malformed YAML. Missing sessions still return false without
- *       creating LastError state.
+ *       creating LastError state. Other GraphError/std::exception failures are
+ *       captured by with_graph_state_last_error().
  */
 bool Kernel::reload_graph_yaml(const std::string& name,
                                const std::string& yaml_path) {

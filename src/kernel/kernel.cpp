@@ -7,15 +7,17 @@
  * kernel_inspection_facade.cpp, kernel_dirty_roi_facade.cpp, and
  * kernel_scheduler_facade.cpp. This file keeps ownership setup for graph
  * runtimes, graph listing/closing, Metal device access, and scheduler
- * configuration so the public Kernel API remains unchanged while the
- * implementation no longer concentrates every thin wrapper in one translation
- * unit.
+ * configuration so the internal adapter-to-Kernel contract remains unchanged
+ * while the implementation no longer concentrates every backend wrapper in one
+ * translation unit. Public frontend calls enter through `ps::Host` and the
+ * embedded Host adapter.
  */
 #include "kernel/kernel.hpp"
 
 #include <filesystem>
 #include <iostream>
 #include <memory>
+#include <new>
 #include <sstream>
 #include <string>
 #include <utility>
@@ -33,6 +35,23 @@ id Kernel::get_metal_device(const std::string& name) {
   return it->second->get_metal_device();
 }
 
+/**
+ * @brief Creates and transactionally loads one internal graph runtime.
+ *
+ * @param name Unique graph/session name.
+ * @param root_dir Root directory that owns the session folder.
+ * @param yaml_path Optional source YAML copied into the session before load.
+ * @param config_path Optional config file copied into the session.
+ * @param cache_root_dir Optional external cache-root directory.
+ * @return Loaded graph name, or nullopt for duplicate names and recoverable
+ *         graph-load failures.
+ * @throws std::bad_alloc if path, runtime, scheduler, graph, or diagnostic
+ *         allocation exhausts memory.
+ * @throws std::exception for scheduler/runtime startup failures not classified
+ *         as recoverable graph-load errors.
+ * @note The runtime enters graphs_ only after YAML loading succeeds, so public
+ * Host callers cannot observe a partially loaded session.
+ */
 std::optional<std::string> Kernel::load_graph(
     const std::string& name, const std::string& root_dir,
     const std::string& yaml_path, const std::string& config_path,
@@ -73,6 +92,8 @@ std::optional<std::string> Kernel::load_graph(
           config_path, config_target,
           std::filesystem::copy_options::overwrite_existing);
     }
+  } catch (const std::bad_alloc&) {
+    throw;
   } catch (...) {
   }
 
@@ -88,6 +109,8 @@ std::optional<std::string> Kernel::load_graph(
             return 0;
           })
           .get();
+    } catch (const std::bad_alloc&) {
+      throw;
     } catch (const std::exception& e) {
       std::cerr << "Failed to load YAML for graph '" << name
                 << "': " << e.what() << std::endl;

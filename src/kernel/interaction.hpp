@@ -2,15 +2,16 @@
 
 /**
  * @file interaction.hpp
- * @brief Legacy source-tree interaction facade between CLI code and Kernel.
+ * @brief Private interaction facade between the embedded Host adapter and
+ * Kernel.
  *
  * This header lives under the private `src/` include root and is not part of
  * the installable `include/photospider/` public interface. It includes
  * `kernel/kernel.hpp`, which depends on private implementation headers;
- * repository targets that still use InteractionService must receive the private
- * include roots. External frontends should use `photospider/host/host.hpp`
- * rather than including this source-tree facade through the static
- * `photospider` product.
+ * repository targets that use InteractionService must receive the private
+ * include roots. CLI/TUI and external frontends use
+ * `photospider/host/host.hpp`; they do not include this source-tree facade
+ * through the static `photospider` product.
  */
 
 #include <functional>
@@ -28,13 +29,15 @@
 namespace ps {
 
 /**
- * @brief Command-oriented facade that keeps frontends on Kernel value APIs.
+ * @brief Command-oriented facade that keeps backend adapters on Kernel value
+ * APIs.
  *
- * InteractionService owns no graph state. It translates CLI/host-style command
- * calls to Kernel facades and deliberately does not expose the underlying
- * Kernel reference, runtime map, or graph-state executor. Tests that must
- * inspect internals use the internal-only helper under tests/support; frontend
- * code should use the cmd_* value accessors here.
+ * InteractionService owns no graph state. It translates embedded-Host/backend
+ * command calls to Kernel facades and deliberately does not expose the
+ * underlying Kernel reference, runtime map, or graph-state executor. Tests that
+ * must inspect internals use the internal-only helper under tests/support;
+ * frontend code calls public `ps::Host` methods, while the embedded adapter
+ * uses the `cmd_*` value accessors here.
  *
  * @note The referenced Kernel must outlive the InteractionService instance.
  */
@@ -71,14 +74,18 @@ class InteractionService {
   }
 
   /**
-   * @brief Runs a synchronous compute command from a Kernel request object.
+   * @brief Runs synchronous compute from an adapter-translated Kernel request.
    *
-   * @param request Graph, target node, cache, execution, telemetry, and
-   * optional dirty/intent controls supplied by the frontend.
+   * @param request Internal graph, target, cache, execution, telemetry, and
+   * optional dirty/intent controls produced by the embedded Host adapter from
+   * a public HostComputeRequest.
    * @return true when Kernel compute succeeds; false on missing graph or
    * handled compute failure.
-   * @throws Nothing directly; Kernel records handled errors in last_error().
-   * @note The request is forwarded without retaining borrowed benchmark sinks.
+   * @throws std::bad_alloc if Kernel compute execution or handled-failure
+   *         LastError construction exhausts memory.
+   * @note Frontends submit HostComputeRequest to ps::Host and never construct
+   * this Kernel::ComputeRequest directly. The request is forwarded without
+   * retaining borrowed benchmark sinks.
    */
   bool cmd_compute(const Kernel::ComputeRequest& request) {
     return kernel_.compute(request);
@@ -106,11 +113,29 @@ class InteractionService {
   std::map<std::string, std::string> cmd_ops_sources() const {
     return kernel_.plugins().op_sources();
   }
-  // Combined ops: collapse monolithic/tiled HP/RT under a single op key;
-  // frontends should use this
+  /**
+   * @brief Lists combined operation keys for embedded Host translation.
+   *
+   * @return Internal combined operation keys with compatible HP/RT/tiled
+   *         implementations collapsed.
+   * @throws std::bad_alloc if registry snapshot allocation fails.
+   * @note Only the embedded Host adapter consumes this internal facade method.
+   *       Frontends call `ps::Host::ops_combined_keys()` and receive copied
+   *       public values.
+   */
   std::vector<std::string> cmd_ops_combined_keys() const {
     return ps::OpRegistry::instance().get_combined_keys();
   }
+
+  /**
+   * @brief Maps combined operation keys to internal source labels.
+   *
+   * @return Copied source labels keyed by combined operation key.
+   * @throws std::bad_alloc if map or string allocation fails.
+   * @note The embedded Host adapter converts this internal value into the
+   *       result of `ps::Host::ops_combined_sources()`; frontend code never
+   *       calls InteractionService directly.
+   */
   std::map<std::string, std::string> cmd_ops_combined_sources() const {
     std::map<std::string, std::string> out;
     auto keys = ps::OpRegistry::instance().get_combined_keys();
@@ -138,6 +163,18 @@ class InteractionService {
   }
 
   // IO / cache / traversal / printing
+  /**
+   * @brief Reloads an existing graph from YAML through the Kernel facade.
+   *
+   * @param graph Existing graph/session name.
+   * @param yaml_path Source YAML file path.
+   * @return True on success; false for missing graphs or recoverable reload
+   * failures recorded in Kernel LastError.
+   * @throws std::bad_alloc if reload execution or LastError construction
+   * exhausts memory.
+   * @note This internal adapter method does not expose Kernel to frontends;
+   * public callers use `ps::Host::reload_graph()`.
+   */
   bool cmd_reload_yaml(const std::string& graph, const std::string& yaml_path) {
     return kernel_.reload_graph_yaml(graph, yaml_path);
   }
@@ -291,13 +328,17 @@ class InteractionService {
     return kernel_.end_dirty_source_control(graph, node_id, domain);
   }
   /**
-   * @brief Computes a node and returns an image from a Kernel request object.
+   * @brief Computes an image from an adapter-translated Kernel request.
    *
-   * @param request Graph, target node, cache, execution, telemetry, and
-   * optional dirty/intent controls supplied by the frontend.
+   * @param request Internal graph, target, cache, execution, telemetry, and
+   * optional dirty/intent controls produced by the embedded Host adapter from
+   * a public HostComputeRequest.
    * @return Cloned image, or nullopt when compute or image extraction fails.
-   * @throws Nothing directly; Kernel keeps the preview/save nullopt contract.
-   * @note The request is not retained after image extraction completes.
+   * @throws std::bad_alloc if Kernel compute/image execution or handled-
+   *         failure LastError construction exhausts memory.
+   * @note Frontends submit HostComputeRequest to ps::Host and never construct
+   * this Kernel::ComputeRequest directly. The request is not retained after
+   * image extraction completes.
    */
   std::optional<cv::Mat> cmd_compute_and_get_image(
       const Kernel::ComputeRequest& request) {
@@ -326,8 +367,13 @@ class InteractionService {
    * @param request Graph, target node, cache, execution, telemetry, and
    * optional dirty/intent controls captured by value.
    * @return Future resolving to success, or nullopt when the graph is missing.
-   * @throws std::system_error if Kernel cannot launch the async parallel path.
+   * @throws std::bad_alloc if request, task, queue, or future-state allocation
+   *         fails while Kernel schedules graph-state work.
+   * @throws std::system_error if Kernel cannot launch runtime or graph-state
+   *         asynchronous execution.
    * @note benchmark_events is still caller-owned and must outlive the future.
+   *       Future get() may rethrow std::bad_alloc from compute execution or
+   *       async LastError construction.
    */
   std::optional<std::future<bool>> cmd_compute_async(
       Kernel::ComputeRequest request) {

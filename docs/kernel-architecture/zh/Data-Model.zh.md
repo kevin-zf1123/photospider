@@ -19,7 +19,10 @@
 
 外部代码不得通过原始节点 map 改变图结构。读取使用 `node()`、`find_node()`、`node_ids()` 和受控遍历等 helper。结构变更使用 `add_node()`、`replace_node()`、`remove_node()` 和输入重连 API；这些 helper 会在返回前验证并刷新拓扑邻接。节点本地运行态缓存/状态更新可以使用 `mutable_node()`，但结构编辑仍属于模型变更 helper。
 
-内部服务通过模型边界协调锁、计时、缓存、拓扑和遍历行为。大多数前端代码应通过 `Kernel` 或 `InteractionService` 访问图状态。
+内部服务通过模型边界协调锁、计时、缓存、拓扑和遍历行为。frontend、CLI 与 TUI code
+通过 public `ps::Host` seam 访问图状态；embedded Host adapter 再委托给内部
+`InteractionService`/`Kernel` 边界。backend service 可以使用该内部边界，但不会把它暴露给
+frontend caller。
 
 对于 CLI 加载的 graph，`cache_root` 会从已加载配置中的 `cache_root_dir` 推导为
 `<cache_root_dir>/<graph_name>`；相对路径按进程当前工作目录解析。未提供 cache root 的底层

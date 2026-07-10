@@ -7,6 +7,7 @@
 #include <fstream>
 #include <future>
 #include <mutex>
+#include <new>
 #include <string>
 #include <system_error>
 #include <thread>
@@ -683,6 +684,34 @@ TEST(ComputeContracts, RealTimeUpdateWithoutDirtyRoiFailsClearly) {
   request.cache.disable_disk_cache = true;
   request.intent = ComputeIntent::RealTimeUpdate;
   EXPECT_THROW(compute.compute(graph, request), GraphError);
+}
+
+TEST(KernelExceptionContracts, BadAllocEscapesRuntimeAndGraphStateWrappers) {
+  const std::string graph_name = "contract_bad_alloc_wrappers";
+  const auto root = clean_temp_path("photospider-contract-bad-alloc-root");
+  const auto yaml_path = temp_path("photospider-contract-bad-alloc.yaml");
+  write_missing_op_graph(yaml_path);
+
+  Kernel kernel;
+  const auto loaded =
+      kernel.load_graph(graph_name, root.string(), yaml_path.string());
+  ASSERT_TRUE(loaded.has_value());
+
+  EXPECT_THROW(
+      (void)testing::KernelTestAccess::inject_bad_alloc_through_runtime(
+          kernel, graph_name),
+      std::bad_alloc);
+  EXPECT_THROW(
+      (void)testing::KernelTestAccess::inject_bad_alloc_through_graph_state(
+          kernel, graph_name),
+      std::bad_alloc);
+  EXPECT_THROW(
+      (void)testing::KernelTestAccess::
+          inject_bad_alloc_through_last_error_graph_state(kernel, graph_name),
+      std::bad_alloc);
+
+  kernel.close_graph(graph_name);
+  std::filesystem::remove_all(root);
 }
 
 TEST(ComputeContracts, SyncFailureRestoresRequestScopedGraphState) {
