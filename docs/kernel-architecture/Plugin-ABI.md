@@ -195,6 +195,27 @@ Required exports:
 | `destroy` | Required for ownership | Destroy plugin-created scheduler instance. |
 | `get_version` | No | Plugin version string. |
 
+## Scheduler Plugin Load Transaction
+
+Loading one scheduler plugin is a strong transaction over the scheduler type
+map, type metadata, retained-library map, and ordered load diagnostics. After
+opening the candidate and resolving its exports, the loader creates local
+shadow copies of all four containers. Results from version, count, name, and
+description callbacks, duplicate/conflict diagnostics, registered-type
+bookkeeping, and the candidate `PluginHandle` are recorded only in those
+shadows. No candidate type can therefore become visible before its metadata and
+retained library are ready.
+
+If any plugin callback, metadata copy, diagnostic construction, or container
+allocation throws, the shadow state is destroyed before the candidate shared
+library lifetime is released. The exact pre-call type, metadata, handle, and
+error prefixes remain active and the original exception propagates unchanged,
+so the same plugin path can be retried immediately. A complete candidate is
+published under the loader mutex by no-throw container swaps, with the retained
+handle swapped first. Library-open and missing-export failures still return
+false with one diagnostic, but that diagnostic append is itself staged and
+cannot partially alter the prior error sequence.
+
 ## Scheduler Instance Runtime Contract
 
 The current scheduler plugin instance is a C++ object returned as

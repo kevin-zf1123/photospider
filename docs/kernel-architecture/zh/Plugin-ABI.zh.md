@@ -150,6 +150,21 @@ ps_scheduler_plugin_get_version
 | `destroy` | 所有权所需 | 销毁插件创建的调度器实例。 |
 | `get_version` | 否 | 插件版本字符串。 |
 
+## 调度器插件加载事务
+
+加载单个 scheduler plugin 是覆盖 scheduler type map、type metadata、retained-library map 与有序
+load diagnostic 的强事务。打开 candidate 并解析导出后，loader 会为这四个容器创建局部 shadow copy。
+Version、count、name 与 description callback 的结果、duplicate/conflict diagnostic、registered-type
+bookkeeping 以及 candidate `PluginHandle` 都只记录在 shadow 中。因此，在 metadata 与 retained
+library 准备完成前，任何 candidate type 都不会变为可见。
+
+若任意 plugin callback、metadata copy、diagnostic construction 或 container allocation 抛出异常，
+shadow state 会先于 candidate shared-library lifetime 释放而销毁。调用前精确的 type、metadata、handle
+与 error prefix 会继续保持 active，原始异常 identity 原样传播，因此可以立即重试同一路径。完整 candidate
+会在 loader mutex 下通过不抛异常的 container swap 发布，并首先 swap retained handle。Library-open
+与缺少必需导出的失败仍返回 false 并产生一条 diagnostic，但该 diagnostic append 本身也经过 staging，
+不会局部改变此前的 error sequence。
+
 ## 调度器实例运行时契约
 
 当前调度器插件实例是以 `ps::IScheduler*` 返回的 C++ 对象，但 host 还要求同一个对象实现

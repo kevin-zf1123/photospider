@@ -44,9 +44,28 @@ class SchedulerPluginLoader {
   /// @return 成功加载的插件数量
   size_t scan_and_load(const std::string& dir_path);
 
-  /// @brief 加载单个插件文件
-  /// @param plugin_path 插件文件路径
-  /// @return 是否加载成功
+  /**
+   * @brief Loads one scheduler plugin as a strong registry transaction.
+   *
+   * The candidate library, discovered exports, type mappings, metadata,
+   * retained handle, and diagnostics are staged while `mutex_` excludes other
+   * registry operations. Successful staging is published with no-throw swaps.
+   *
+   * @param plugin_path Plugin library path normalized to an absolute key.
+   * @return True when the plugin was already loaded or its complete staged
+   * state committed; false when the library cannot open or required exports
+   * are missing and a diagnostic was committed.
+   * @throws std::bad_alloc unchanged when path normalization, metadata copy,
+   * shadow-state construction, diagnostic staging, or handle insertion cannot
+   * allocate.
+   * @throws Any exception propagated by a plugin discovery or metadata
+   * callback, preserving its original identity.
+   * @note Every exceptional exit leaves registered types, type metadata,
+   * retained handles, and the load-error prefix exactly as they were before
+   * the call. The candidate library remains mapped until all staged
+   * plugin-derived state has been destroyed, so the same path can be retried
+   * immediately.
+   */
   bool load_plugin(const fs::path& plugin_path);
 
   /// @brief 卸载指定路径的插件
@@ -134,23 +153,98 @@ class SchedulerPluginLoader {
   SchedulerPluginLoader(const SchedulerPluginLoader&) = delete;
   SchedulerPluginLoader& operator=(const SchedulerPluginLoader&) = delete;
 
-  // 内部加载方法（无锁版本）
+  /**
+   * @brief Implements one scheduler-plugin load while the caller holds mutex_.
+   * @param plugin_path Candidate path supplied by direct load or directory
+   * scan.
+   * @return The same committed/already-loaded or recoverable-failure result as
+   * `load_plugin()`.
+   * @throws std::bad_alloc or any plugin callback exception unchanged.
+   * @note All observable registry mutations use `RegistryState`; callers must
+   * hold `mutex_` for the complete call.
+   */
   bool load_plugin_internal_unlocked(const fs::path& plugin_path);
 
-  // 内部插件句柄
-  struct PluginHandle {
-    void* handle = nullptr;         // 动态库句柄
-    std::shared_ptr<void> library;  // Keeps library loaded for live instances
-    std::string path;               // 文件路径
-    std::vector<std::string> registered_types;  // 该插件注册的类型
+  /**
+   * @brief Appends one recoverable load diagnostic with a strong guarantee.
+   * @param error Fully constructed diagnostic to append.
+   * @return Nothing.
+   * @throws std::bad_alloc if error-vector shadow construction or growth fails.
+   * @note The caller must hold `mutex_`. Allocation failure leaves
+   * `load_errors_` unchanged.
+   */
+  void append_load_error_unlocked(std::string error);
 
-    // 函数指针
+  /**
+   * @brief Retains one loaded scheduler library and its resolved ABI exports.
+   * @note `library` is the authoritative RAII lifetime. `handle` is retained
+   * only for platform symbol lookup and is never closed independently.
+   */
+  struct PluginHandle {
+    /** @brief Native handle used for symbol lookup. */
+    void* handle = nullptr;
+    /**
+     * @brief Shared lifetime that closes the native handle on final release.
+     */
+    std::shared_ptr<void> library;
+    /** @brief Absolute registry key for the library. */
+    std::string path;
+    /** @brief Types successfully registered by this plugin. */
+    std::vector<std::string> registered_types;
+
+    /** @brief Required type-count export. */
     int (*get_count)() = nullptr;
+    /** @brief Required indexed type-name export. */
     const char* (*get_name)(int) = nullptr;
+    /** @brief Optional indexed description export. */
     const char* (*get_description)(int) = nullptr;
+    /** @brief Required scheduler creation export. */
     IScheduler* (*create)(const char*, unsigned int) = nullptr;
+    /** @brief Required scheduler destruction export. */
     void (*destroy)(IScheduler*) = nullptr;
+    /** @brief Optional plugin version export. */
     const char* (*get_version)() = nullptr;
+  };
+
+  /**
+   * @brief Allocation-owning shadow of every observable plugin registry.
+   *
+   * Construction copies the live state before candidate callbacks mutate any
+   * registry. `commit()` swaps all completed containers while `mutex_` remains
+   * held; standard allocator equality makes every swap non-throwing.
+   *
+   * @note The candidate `PluginHandle` is declared before this shadow in the
+   * load routine. Failed shadow state is therefore destroyed before the
+   * candidate shared-library lifetime is released.
+   */
+  struct RegistryState {
+    /**
+     * @brief Copies the loader's complete caller-visible plugin state.
+     * @param loader Locked loader whose state is staged.
+     * @throws std::bad_alloc if any container, key, metadata, or diagnostic
+     * copy cannot allocate.
+     */
+    explicit RegistryState(const SchedulerPluginLoader& loader);
+
+    /**
+     * @brief Publishes this complete shadow into a locked loader.
+     * @param loader Loader receiving the staged state.
+     * @return Nothing.
+     * @throws Nothing.
+     * @note The retained-handle map is swapped first. The enclosing mutex keeps
+     * the four swaps externally atomic, and no allocation or plugin callback
+     * occurs during commit.
+     */
+    void commit(SchedulerPluginLoader& loader) noexcept;
+
+    /** @brief Staged absolute-path to retained-handle registry. */
+    std::map<std::string, PluginHandle> loaded_plugins;
+    /** @brief Staged scheduler-type to plugin-path registry. */
+    std::map<std::string, std::string> type_to_plugin;
+    /** @brief Staged scheduler metadata registry. */
+    std::map<std::string, SchedulerPluginInfo> type_info;
+    /** @brief Staged recoverable diagnostic sequence. */
+    std::vector<std::string> load_errors;
   };
 
   // 内置调度器工厂
