@@ -146,8 +146,9 @@ element，它会比较 active revision 与 plugin publication token。匹配的 
 恢复，或 swap 进空 retirement storage；token 不同的后续 direct slot 继续保持 active。随后可以 erase
 空 registry value，而不会在 registry lock 内析构 plugin callback state。Retired plugin record 会在释放
 该 lock 后析构。该路径不临时收集 key、不复制 callback、不比较 callable，也不执行会分配的 rollback。
-因此，即使全局分配失败，`unload_all_plugins()` 仍是 `noexcept` 清理路径。进程 owner 在静态 teardown
-时有意不析构；显式 unload
+因此，即使全局分配失败，`unload_all_plugins()` 仍是 `noexcept` 清理路径。
+
+进程 owner 在静态 teardown 时有意不析构；显式 unload
 定义插件清理语义，并避开与 `OpRegistry` 的静态析构顺序问题。
 
 `unload_by_plugin_path()` 会先查找成功加载时记录的精确绝对 key。该 lookup 及后续清理不分配，

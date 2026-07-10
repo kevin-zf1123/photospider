@@ -202,6 +202,7 @@ retired plugin record is destroyed after that lock is released. There is no
 temporary key collection, callback copy, callable comparison, or allocating
 rollback, so `unload_all_plugins()` remains a `noexcept` cleanup path even when
 global allocation is failing.
+
 The process owner itself is intentionally not destroyed at static teardown;
 explicit unload defines plugin cleanup semantics and avoids static-destruction
 ordering against `OpRegistry`.
