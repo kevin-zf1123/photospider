@@ -503,6 +503,34 @@ SchedulerPluginLoader::~SchedulerPluginLoader() {
   loaded_plugins_.clear();
 }
 
+/** @copydoc SchedulerPluginLoader::RegistryState::RegistryState */
+SchedulerPluginLoader::RegistryState::RegistryState(
+    const SchedulerPluginLoader& loader)
+    : loaded_plugins(  // NOLINT(whitespace/indent_namespace)
+          loader.loaded_plugins_),
+      type_to_plugin(  // NOLINT(whitespace/indent_namespace)
+          loader.type_to_plugin_),
+      type_info(  // NOLINT(whitespace/indent_namespace)
+          loader.type_info_),
+      load_errors(  // NOLINT(whitespace/indent_namespace)
+          loader.load_errors_) {}
+
+/** @copydoc SchedulerPluginLoader::RegistryState::commit */
+void SchedulerPluginLoader::RegistryState::commit(
+    SchedulerPluginLoader& loader) noexcept {
+  loader.loaded_plugins_.swap(loaded_plugins);
+  loader.type_to_plugin_.swap(type_to_plugin);
+  loader.type_info_.swap(type_info);
+  loader.load_errors_.swap(load_errors);
+}
+
+/** @copydoc SchedulerPluginLoader::append_load_error_unlocked */
+void SchedulerPluginLoader::append_load_error_unlocked(std::string error) {
+  std::vector<std::string> staged_errors = load_errors_;
+  staged_errors.push_back(std::move(error));
+  load_errors_.swap(staged_errors);
+}
+
 size_t SchedulerPluginLoader::scan_and_load(const std::string& dir_path) {
   return scan_and_load(std::vector<std::string>{dir_path});
 }
@@ -571,11 +599,13 @@ size_t SchedulerPluginLoader::scan_and_load(
   return loaded_count;
 }
 
+/** @copydoc SchedulerPluginLoader::load_plugin */
 bool SchedulerPluginLoader::load_plugin(const fs::path& plugin_path) {
   std::lock_guard<std::mutex> lock(mutex_);
   return load_plugin_internal_unlocked(plugin_path);
 }
 
+/** @copydoc SchedulerPluginLoader::load_plugin_internal_unlocked */
 bool SchedulerPluginLoader::load_plugin_internal_unlocked(
     const fs::path& plugin_path) {
   std::string abs_path = fs::absolute(plugin_path).string();
@@ -591,8 +621,8 @@ bool SchedulerPluginLoader::load_plugin_internal_unlocked(
 #ifdef _WIN32
   handle.handle = LoadLibrary(abs_path.c_str());
   if (!handle.handle) {
-    load_errors_.push_back("Failed to load plugin: " + abs_path +
-                           " (LoadLibrary failed)");
+    append_load_error_unlocked("Failed to load plugin: " + abs_path +
+                               " (LoadLibrary failed)");
     return false;
   }
   handle.library = make_library_lifetime(handle.handle);
@@ -616,8 +646,8 @@ bool SchedulerPluginLoader::load_plugin_internal_unlocked(
   handle.handle = dlopen(abs_path.c_str(), RTLD_LAZY);
   if (!handle.handle) {
     const char* err = dlerror();
-    load_errors_.push_back("Failed to load plugin: " + abs_path + " (" +
-                           (err ? err : "unknown error") + ")");
+    append_load_error_unlocked("Failed to load plugin: " + abs_path + " (" +
+                               (err ? err : "unknown error") + ")");
     return false;
   }
   handle.library = make_library_lifetime(handle.handle);
@@ -642,11 +672,13 @@ bool SchedulerPluginLoader::load_plugin_internal_unlocked(
   // 验证必要的函数
   if (!handle.get_count || !handle.get_name || !handle.create ||
       !handle.destroy) {
-    load_errors_.push_back("Plugin missing required exports: " + abs_path +
-                           " (need " PS_SCHEDULER_PLUGIN_GET_COUNT
-                           ", " PS_SCHEDULER_PLUGIN_GET_NAME
-                           ", " PS_SCHEDULER_PLUGIN_CREATE
-                           ", " PS_SCHEDULER_PLUGIN_DESTROY ")");
+    RegistryState staged(*this);
+    staged.load_errors.push_back(
+        "Plugin missing required exports: " + abs_path +
+        " (need " PS_SCHEDULER_PLUGIN_GET_COUNT
+        ", " PS_SCHEDULER_PLUGIN_GET_NAME ", " PS_SCHEDULER_PLUGIN_CREATE
+        ", " PS_SCHEDULER_PLUGIN_DESTROY ")");
+    staged.commit(*this);
     return false;
   }
 
@@ -657,6 +689,8 @@ bool SchedulerPluginLoader::load_plugin_internal_unlocked(
     if (v)
       version = v;
   }
+
+  RegistryState staged(*this);
 
   // 注册所有调度器类型
   int count = handle.get_count();
@@ -669,19 +703,21 @@ bool SchedulerPluginLoader::load_plugin_internal_unlocked(
 
     // 检查是否与内置或其他插件冲突
     if (builtins_.count(type_name) > 0) {
-      load_errors_.push_back("Scheduler type '" + type_name +
-                             "' conflicts with builtin in plugin: " + abs_path);
+      staged.load_errors.push_back(
+          "Scheduler type '" + type_name +
+          "' conflicts with builtin in plugin: " + abs_path);
       continue;
     }
-    if (type_to_plugin_.count(type_name) > 0) {
-      load_errors_.push_back(
+    const auto existing_type = staged.type_to_plugin.find(type_name);
+    if (existing_type != staged.type_to_plugin.end()) {
+      staged.load_errors.push_back(
           "Scheduler type '" + type_name + "' already registered by plugin: " +
-          type_to_plugin_[type_name] + " (in " + abs_path + ")");
+          existing_type->second + " (in " + abs_path + ")");
       continue;
     }
 
     // 注册类型
-    type_to_plugin_[type_name] = abs_path;
+    staged.type_to_plugin[type_name] = abs_path;
     handle.registered_types.push_back(type_name);
 
     // 保存信息
@@ -697,11 +733,12 @@ bool SchedulerPluginLoader::load_plugin_internal_unlocked(
         info.description = desc;
     }
 
-    type_info_[type_name] = info;
+    staged.type_info[type_name] = std::move(info);
   }
 
   // 保存句柄
-  loaded_plugins_[abs_path] = std::move(handle);
+  staged.loaded_plugins[abs_path] = std::move(handle);
+  staged.commit(*this);
 
   return true;
 }

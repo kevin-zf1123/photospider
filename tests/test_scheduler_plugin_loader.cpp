@@ -28,7 +28,7 @@
 #include <dlfcn.h>
 #endif
 
-namespace scheduler_owner_allocation_probe {
+namespace scheduler_allocation_probe {
 
 /** @brief Disabled allocation countdown sentinel. */
 constexpr std::int64_t kDisabled = -1;
@@ -48,12 +48,20 @@ void arm(std::int64_t allocation_index) noexcept {
   fired = false;
 }
 
-/** @brief Disarms the current-thread allocation failure. */
+/**
+ * @brief Disarms the current-thread allocation failure.
+ * @return Nothing.
+ * @throws Nothing.
+ */
 void disarm() noexcept {
   countdown = kDisabled;
 }
 
-/** @brief Returns whether the most recently armed failure fired. */
+/**
+ * @brief Reports whether the most recently armed failure fired.
+ * @return True after `maybe_fail()` rejected the selected allocation.
+ * @throws Nothing.
+ */
 bool did_fire() noexcept {
   return fired;
 }
@@ -75,16 +83,16 @@ void maybe_fail() {
   --countdown;
 }
 
-}  // namespace scheduler_owner_allocation_probe
+}  // namespace scheduler_allocation_probe
 
 /**
- * @brief Test-executable allocation operator for scheduler-owner probes.
+ * @brief Test-executable allocation operator for scheduler failure probes.
  * @param size Requested allocation size.
  * @return malloc-backed storage.
  * @throws std::bad_alloc when injected or malloc fails.
  */
 void* operator new(std::size_t size) {
-  scheduler_owner_allocation_probe::maybe_fail();
+  scheduler_allocation_probe::maybe_fail();
   if (void* memory = std::malloc(size == 0 ? 1 : size)) {
     return memory;
   }
@@ -116,6 +124,8 @@ void operator delete[](void* memory, std::size_t) noexcept {
 namespace ps {
 namespace {
 
+/** @brief Short destroy-count fixture scheduler type. */
+constexpr const char* kDestroyCountSchedulerType = "destroy_count_test";
 constexpr const char* kLongDestroyCountSchedulerType =                 // NOLINT
     "destroy_count_scheduler_type_long_enough_to_force_owned_string_"  // NOLINT
     "storage";                                                         // NOLINT
@@ -125,6 +135,12 @@ constexpr const char* kDestroyCountTraceEnvironment =
 /** @brief Fixture environment key selecting injected lifecycle failures. */
 constexpr const char* kDestroyCountFailureEnvironment =
     "PS_DESTROY_COUNT_SCHEDULER_FAILURE";  // NOLINT
+/** @brief Fixture environment key enabling one duplicate discovery entry. */
+constexpr const char* kDestroyCountDuplicateTypeEnvironment =
+    "PS_DESTROY_COUNT_SCHEDULER_DUPLICATE_TYPE";  // NOLINT
+/** @brief Fixture environment key selecting a discovery callback exception. */
+constexpr const char* kDestroyCountLoadFailureEnvironment =
+    "PS_DESTROY_COUNT_SCHEDULER_LOAD_FAILURE";  // NOLINT
 
 /**
  * @brief Mirrors the destroy-count plugin's fixture-only forwarding counters.
@@ -146,6 +162,39 @@ enum class SchedulerForwardingProbe : int {
   AnyThreadHandles,
   /** @brief Closure submissions indicating an incorrect owner fallback. */
   ClosureFallback,
+};
+
+/**
+ * @brief Mirrors fixture-only scheduler discovery callback counters.
+ * @note Values form a private protocol consumed through
+ * `ps_test_scheduler_load_probe_count` while the fixture remains loaded.
+ */
+enum class SchedulerLoadProbe : int {
+  /** @brief Calls to the type-count export. */
+  GetCount = 0,
+  /** @brief Calls to the indexed type-name export. */
+  GetName,
+  /** @brief Calls to the optional indexed description export. */
+  GetDescription,
+  /** @brief Calls to the optional version export. */
+  GetVersion,
+};
+
+/**
+ * @brief Captures every caller-visible scheduler plugin registry container.
+ * @note Exact equality before and after an injected load failure detects
+ * phantom type mappings, partial metadata, leaked handles, and diagnostic
+ * prefix changes.
+ */
+struct SchedulerPluginRegistrySnapshot {
+  /** @brief Sorted built-in and plugin scheduler type names. */
+  std::vector<std::string> registered_types;
+  /** @brief Built-in and plugin metadata in loader iteration order. */
+  std::vector<SchedulerPluginInfo> type_info;
+  /** @brief Formatted retained-plugin handle records. */
+  std::vector<std::string> loaded_plugins;
+  /** @brief Recoverable load diagnostics in insertion order. */
+  std::vector<std::string> load_errors;
 };
 
 /**
@@ -199,6 +248,66 @@ class CountingTaskExecutor final : public TaskExecutor {
 int forwarding_probe_count(int (*read_count)(int),
                            SchedulerForwardingProbe probe) noexcept {
   return read_count(static_cast<int>(probe));
+}
+
+/**
+ * @brief Reads one fixture scheduler-discovery callback counter.
+ * @param read_count Resolved fixture counter export.
+ * @param probe Discovery callback slot to read.
+ * @return Current fixture call count for `probe`.
+ * @throws Nothing.
+ */
+int load_probe_count(int (*read_count)(int),
+                     SchedulerLoadProbe probe) noexcept {
+  return read_count(static_cast<int>(probe));
+}
+
+/**
+ * @brief Captures the loader's complete observable plugin registry state.
+ * @param loader Loader queried while no allocation failpoint is armed.
+ * @return Owned snapshot suitable for exact post-failure comparison.
+ * @throws std::bad_alloc if result vectors or copied metadata cannot allocate.
+ * @note Tests are single-threaded, so copying the diagnostic reference is safe
+ * within the fixture's exclusive use of the singleton.
+ */
+SchedulerPluginRegistrySnapshot capture_plugin_registry(
+    const SchedulerPluginLoader& loader) {
+  SchedulerPluginRegistrySnapshot snapshot;
+  snapshot.registered_types = loader.get_registered_types();
+  snapshot.type_info = loader.get_all_info();
+  snapshot.loaded_plugins = loader.list_loaded_plugins();
+  snapshot.load_errors = loader.get_load_errors();
+  return snapshot;
+}
+
+/**
+ * @brief Compares every field in two scheduler plugin registry snapshots.
+ * @param expected State captured before a transactional load attempt.
+ * @param actual State observed after that attempt.
+ * @return Nothing.
+ * @throws std::bad_alloc if GoogleTest diagnostic formatting cannot allocate.
+ * @note Metadata fields are compared individually because
+ * `SchedulerPluginInfo` intentionally has no public equality operator.
+ */
+void expect_plugin_registry_equal(
+    const SchedulerPluginRegistrySnapshot& expected,
+    const SchedulerPluginRegistrySnapshot& actual) {
+  EXPECT_EQ(actual.registered_types, expected.registered_types);
+  EXPECT_EQ(actual.loaded_plugins, expected.loaded_plugins);
+  EXPECT_EQ(actual.load_errors, expected.load_errors);
+  ASSERT_EQ(actual.type_info.size(), expected.type_info.size());
+  for (std::size_t index = 0; index < expected.type_info.size(); ++index) {
+    EXPECT_EQ(actual.type_info[index].type_name,
+              expected.type_info[index].type_name);
+    EXPECT_EQ(actual.type_info[index].description,
+              expected.type_info[index].description);
+    EXPECT_EQ(actual.type_info[index].plugin_path,
+              expected.type_info[index].plugin_path);
+    EXPECT_EQ(actual.type_info[index].version,
+              expected.type_info[index].version);
+    EXPECT_EQ(actual.type_info[index].is_builtin,
+              expected.type_info[index].is_builtin);
+  }
 }
 
 /**
@@ -323,27 +432,30 @@ std::vector<std::string> read_scheduler_owner_trace(
  * @brief RAII owner for one current-thread allocation failpoint.
  * @note Assertions run after destruction so GoogleTest allocation is normal.
  */
-class ScopedSchedulerOwnerAllocationFailure final {
+class ScopedSchedulerAllocationFailure final {
  public:
   /**
    * @brief Arms a zero-based allocation failure.
    * @param allocation_index Allocation to reject.
    * @throws Nothing.
    */
-  explicit ScopedSchedulerOwnerAllocationFailure(
+  explicit ScopedSchedulerAllocationFailure(
       std::int64_t allocation_index) noexcept {
-    scheduler_owner_allocation_probe::arm(allocation_index);
+    scheduler_allocation_probe::arm(allocation_index);
   }
 
-  /** @brief Disarms the current-thread failpoint. */
-  ~ScopedSchedulerOwnerAllocationFailure() {
-    scheduler_owner_allocation_probe::disarm();
+  /**
+   * @brief Disarms the current-thread failpoint before assertions allocate.
+   * @throws Nothing.
+   */
+  ~ScopedSchedulerAllocationFailure() noexcept {
+    scheduler_allocation_probe::disarm();
   }
 
-  ScopedSchedulerOwnerAllocationFailure(
-      const ScopedSchedulerOwnerAllocationFailure&) = delete;
-  ScopedSchedulerOwnerAllocationFailure& operator=(
-      const ScopedSchedulerOwnerAllocationFailure&) = delete;
+  ScopedSchedulerAllocationFailure(const ScopedSchedulerAllocationFailure&) =
+      delete;
+  ScopedSchedulerAllocationFailure& operator=(
+      const ScopedSchedulerAllocationFailure&) = delete;
 };
 
 #ifndef PS_SCHEDULER_PLUGIN_DIR
@@ -956,13 +1068,13 @@ TEST_F(SchedulerPluginLoaderTest,
   bool caught_bad_alloc = false;
   bool failpoint_fired = false;
   {
-    ScopedSchedulerOwnerAllocationFailure failure(0);
+    ScopedSchedulerAllocationFailure failure(0);
     try {
       (void)loader.create(type_name, 0);
     } catch (const std::bad_alloc&) {
       caught_bad_alloc = true;
     }
-    failpoint_fired = scheduler_owner_allocation_probe::did_fire();
+    failpoint_fired = scheduler_allocation_probe::did_fire();
   }
 
   EXPECT_TRUE(failpoint_fired);
@@ -1019,13 +1131,13 @@ TEST_F(SchedulerPluginLoaderTest,
   bool caught_bad_alloc = false;
   bool failpoint_fired = false;
   {
-    ScopedSchedulerOwnerAllocationFailure failure(0);
+    ScopedSchedulerAllocationFailure failure(0);
     try {
       (void)loader.create(type_name, 0);
     } catch (const std::bad_alloc&) {
       caught_bad_alloc = true;
     }
-    failpoint_fired = scheduler_owner_allocation_probe::did_fire();
+    failpoint_fired = scheduler_allocation_probe::did_fire();
   }
 
   EXPECT_TRUE(failpoint_fired);
@@ -1082,13 +1194,13 @@ TEST_F(SchedulerPluginLoaderTest,
   bool caught_bad_alloc = false;
   bool failpoint_fired = false;
   {
-    ScopedSchedulerOwnerAllocationFailure failure(1);
+    ScopedSchedulerAllocationFailure failure(1);
     try {
       (void)loader.create(type_name, 0);
     } catch (const std::bad_alloc&) {
       caught_bad_alloc = true;
     }
-    failpoint_fired = scheduler_owner_allocation_probe::did_fire();
+    failpoint_fired = scheduler_allocation_probe::did_fire();
   }
 
   EXPECT_TRUE(failpoint_fired);
@@ -1102,6 +1214,230 @@ TEST_F(SchedulerPluginLoaderTest,
 #else
   dlclose(test_handle);
 #endif
+}
+
+/**
+ * @brief Exhausts every allocation along one post-open plugin load path.
+ *
+ * Each injected `std::bad_alloc` must leave registered types, metadata,
+ * retained handles, and the pre-existing error prefix exactly unchanged. The
+ * same candidate is then retried immediately without the failpoint and must
+ * commit both real types plus its intentional duplicate-type diagnostic.
+ *
+ * @return Nothing.
+ * @throws Nothing when every allocation failure preserves the strong
+ * transaction guarantee and the first non-failing index completes the load.
+ * @note Fixture callback counters prove the sweep reaches shadow construction,
+ * type/metadata staging, conflict-error staging, and final handle bookkeeping
+ * after the candidate library has opened. A fixed upper bound prevents a
+ * broken allocation probe from hanging the test.
+ */
+TEST_F(SchedulerPluginLoaderTest,
+       LoadAllocationFailuresPreserveRegistryAndAllowImmediateRetry) {
+  auto& loader = SchedulerPluginLoader::instance();
+  const auto baseline_plugin_path =
+      scheduler_plugin_path("serial_debug_example_plugin");
+  const auto candidate_plugin_path =
+      scheduler_plugin_path("destroy_count_scheduler_plugin", true);
+  const auto missing_plugin_path =
+      scheduler_plugin_path("missing_load_transaction_plugin", true);
+  ASSERT_TRUE(std::filesystem::exists(baseline_plugin_path));
+  ASSERT_TRUE(std::filesystem::exists(candidate_plugin_path));
+  ASSERT_FALSE(std::filesystem::exists(missing_plugin_path));
+  ASSERT_TRUE(loader.load_plugin(baseline_plugin_path));
+
+#ifdef _WIN32
+  HMODULE test_handle = LoadLibrary(candidate_plugin_path.string().c_str());
+  ASSERT_NE(test_handle, nullptr);
+  auto reset_counts = reinterpret_cast<void (*)()>(
+      GetProcAddress(test_handle, "ps_test_scheduler_reset_counts"));
+  auto read_load_probe = reinterpret_cast<int (*)(int)>(
+      GetProcAddress(test_handle, "ps_test_scheduler_load_probe_count"));
+#else
+  void* test_handle = dlopen(candidate_plugin_path.string().c_str(), RTLD_LAZY);
+  ASSERT_NE(test_handle, nullptr) << dlerror();
+  auto reset_counts = reinterpret_cast<void (*)()>(
+      dlsym(test_handle, "ps_test_scheduler_reset_counts"));
+  auto read_load_probe = reinterpret_cast<int (*)(int)>(
+      dlsym(test_handle, "ps_test_scheduler_load_probe_count"));
+#endif
+  ASSERT_NE(reset_counts, nullptr);
+  ASSERT_NE(read_load_probe, nullptr);
+
+  ScopedSchedulerFixtureEnvironment duplicate_type(
+      kDestroyCountDuplicateTypeEnvironment, "1");
+  const std::string candidate_abs_path =
+      std::filesystem::absolute(candidate_plugin_path).string();
+  constexpr std::int64_t kMaximumAllocationIndex = 512;
+  int injected_failures = 0;
+  int failures_after_open = 0;
+  int failures_during_shadow_copy = 0;
+  int failures_during_type_staging = 0;
+  int failures_after_complete_metadata = 0;
+  int failures_after_duplicate_callback = 0;
+  bool completed_without_failure = false;
+
+  for (std::int64_t allocation_index = 0;
+       allocation_index < kMaximumAllocationIndex; ++allocation_index) {
+    SCOPED_TRACE(::testing::Message()
+                 << "allocation_index=" << allocation_index);
+    loader.clear_errors();
+    ASSERT_FALSE(loader.load_plugin(missing_plugin_path));
+    const SchedulerPluginRegistrySnapshot before =
+        capture_plugin_registry(loader);
+    ASSERT_EQ(before.load_errors.size(), 1u);
+    reset_counts();
+
+    bool load_result = false;
+    bool caught_bad_alloc = false;
+    bool failpoint_fired = false;
+    {
+      ScopedSchedulerAllocationFailure failure(allocation_index);
+      try {
+        load_result = loader.load_plugin(candidate_plugin_path);
+      } catch (const std::bad_alloc&) {
+        caught_bad_alloc = true;
+      }
+      failpoint_fired = scheduler_allocation_probe::did_fire();
+    }
+
+    const int count_calls =
+        load_probe_count(read_load_probe, SchedulerLoadProbe::GetCount);
+    const int name_calls =
+        load_probe_count(read_load_probe, SchedulerLoadProbe::GetName);
+    const int description_calls =
+        load_probe_count(read_load_probe, SchedulerLoadProbe::GetDescription);
+    const int version_calls =
+        load_probe_count(read_load_probe, SchedulerLoadProbe::GetVersion);
+
+    if (failpoint_fired) {
+      ++injected_failures;
+      failures_after_open += version_calls > 0 ? 1 : 0;
+      failures_during_shadow_copy +=
+          version_calls > 0 && count_calls == 0 ? 1 : 0;
+      failures_during_type_staging +=
+          count_calls > 0 && name_calls > 0 && description_calls < 2 ? 1 : 0;
+      failures_after_complete_metadata += description_calls >= 2 ? 1 : 0;
+      failures_after_duplicate_callback += name_calls >= 3 ? 1 : 0;
+
+      EXPECT_TRUE(caught_bad_alloc);
+      EXPECT_FALSE(load_result);
+      expect_plugin_registry_equal(before, capture_plugin_registry(loader));
+
+      ASSERT_TRUE(loader.load_plugin(candidate_plugin_path))
+          << "same-path retry failed after allocation index "
+          << allocation_index;
+    } else {
+      EXPECT_FALSE(caught_bad_alloc);
+      ASSERT_TRUE(load_result);
+      completed_without_failure = true;
+    }
+
+    const SchedulerPluginRegistrySnapshot committed =
+        capture_plugin_registry(loader);
+    EXPECT_EQ(committed.registered_types.size(),
+              before.registered_types.size() + 2);
+    EXPECT_TRUE(
+        contains_type(committed.registered_types, kDestroyCountSchedulerType));
+    EXPECT_TRUE(contains_type(committed.registered_types,
+                              kLongDestroyCountSchedulerType));
+    ASSERT_EQ(committed.loaded_plugins.size(),
+              before.loaded_plugins.size() + 1);
+    EXPECT_TRUE(std::any_of(
+        committed.loaded_plugins.begin(), committed.loaded_plugins.end(),
+        [&](const std::string& plugin) {
+          return plugin.find(candidate_abs_path) != std::string::npos;
+        }));
+    ASSERT_EQ(committed.load_errors.size(), before.load_errors.size() + 1);
+    EXPECT_TRUE(std::equal(before.load_errors.begin(), before.load_errors.end(),
+                           committed.load_errors.begin()));
+    EXPECT_NE(committed.load_errors.back().find("already registered by plugin"),
+              std::string::npos);
+
+    const auto short_info = loader.get_info(kDestroyCountSchedulerType);
+    const auto long_info = loader.get_info(kLongDestroyCountSchedulerType);
+    ASSERT_TRUE(short_info.has_value());
+    ASSERT_TRUE(long_info.has_value());
+    EXPECT_EQ(short_info->plugin_path, candidate_abs_path);
+    EXPECT_EQ(long_info->plugin_path, candidate_abs_path);
+    EXPECT_EQ(short_info->version, "test");
+    EXPECT_EQ(long_info->version, "test");
+
+    ASSERT_TRUE(loader.unload_plugin(candidate_plugin_path));
+    SchedulerPluginRegistrySnapshot expected_after_unload = before;
+    expected_after_unload.load_errors = committed.load_errors;
+    expect_plugin_registry_equal(expected_after_unload,
+                                 capture_plugin_registry(loader));
+
+    if (completed_without_failure) {
+      break;
+    }
+  }
+
+  EXPECT_TRUE(completed_without_failure);
+  EXPECT_GT(injected_failures, 0);
+  EXPECT_GT(failures_after_open, 0);
+  EXPECT_GT(failures_during_shadow_copy, 0);
+  EXPECT_GT(failures_during_type_staging, 0);
+  EXPECT_GT(failures_after_complete_metadata, 0);
+  EXPECT_GT(failures_after_duplicate_callback, 0);
+
+  loader.clear_plugins();
+  loader.clear_errors();
+#ifdef _WIN32
+  FreeLibrary(test_handle);
+#else
+  dlclose(test_handle);
+#endif
+}
+
+/**
+ * @brief A discovery callback exception rolls back partial candidate metadata.
+ * @return Nothing.
+ * @throws Nothing when the original callback diagnostic propagates, the live
+ * registry remains exact, and the same path succeeds immediately afterward.
+ * @note The fixture throws from the second description callback, after its
+ * first type has been fully staged but before any shadow state is committed.
+ */
+TEST_F(SchedulerPluginLoaderTest,
+       LoadCallbackExceptionPreservesRegistryAndAllowsImmediateRetry) {
+  auto& loader = SchedulerPluginLoader::instance();
+  const auto baseline_plugin_path =
+      scheduler_plugin_path("serial_debug_example_plugin");
+  const auto candidate_plugin_path =
+      scheduler_plugin_path("destroy_count_scheduler_plugin", true);
+  const auto missing_plugin_path =
+      scheduler_plugin_path("missing_callback_transaction_plugin", true);
+  ASSERT_TRUE(std::filesystem::exists(baseline_plugin_path));
+  ASSERT_TRUE(std::filesystem::exists(candidate_plugin_path));
+  ASSERT_FALSE(std::filesystem::exists(missing_plugin_path));
+  ASSERT_TRUE(loader.load_plugin(baseline_plugin_path));
+  ASSERT_FALSE(loader.load_plugin(missing_plugin_path));
+  const SchedulerPluginRegistrySnapshot before =
+      capture_plugin_registry(loader);
+
+  {
+    ScopedSchedulerFixtureEnvironment failure(
+        kDestroyCountLoadFailureEnvironment, "description_runtime_error");
+    try {
+      (void)loader.load_plugin(candidate_plugin_path);
+      FAIL() << "fixture metadata callback failure did not propagate";
+    } catch (const std::runtime_error& error) {
+      EXPECT_STREQ(error.what(), "fixture scheduler description failure");
+    }
+  }
+
+  expect_plugin_registry_equal(before, capture_plugin_registry(loader));
+  EXPECT_FALSE(loader.is_registered(kDestroyCountSchedulerType));
+  EXPECT_FALSE(loader.is_registered(kLongDestroyCountSchedulerType));
+
+  ASSERT_TRUE(loader.load_plugin(candidate_plugin_path));
+  EXPECT_TRUE(loader.is_registered(kDestroyCountSchedulerType));
+  EXPECT_TRUE(loader.is_registered(kLongDestroyCountSchedulerType));
+  ASSERT_TRUE(loader.unload_plugin(candidate_plugin_path));
+  expect_plugin_registry_equal(before, capture_plugin_registry(loader));
+  loader.clear_plugins();
+  loader.clear_errors();
 }
 
 }  // namespace ps

@@ -29,6 +29,12 @@ constexpr const char* kTraceEnvironment = "PS_DESTROY_COUNT_SCHEDULER_TRACE";
 /** @brief Environment key selecting one or all fixture exception modes. */
 constexpr const char* kFailureEnvironment =
     "PS_DESTROY_COUNT_SCHEDULER_FAILURE";  // NOLINT
+/** @brief Environment key enabling one duplicate discovery type entry. */
+constexpr const char* kDuplicateTypeEnvironment =
+    "PS_DESTROY_COUNT_SCHEDULER_DUPLICATE_TYPE";  // NOLINT
+/** @brief Environment key selecting a discovery-callback exception. */
+constexpr const char* kLoadFailureEnvironment =
+    "PS_DESTROY_COUNT_SCHEDULER_LOAD_FAILURE";  // NOLINT
 
 /** @brief Number of placement-created fixture instances still alive. */
 std::atomic<int> g_active_count{0};
@@ -67,6 +73,31 @@ using ForwardingCounters = std::array<std::atomic<int>, kProbeCount>;
 ForwardingCounters g_forwarding_counts = {0, 0, 0, 0, 0, 0, 0};
 
 /**
+ * @brief Stable counter slots for scheduler-plugin discovery callbacks.
+ * @note The numeric order is mirrored by the loader transaction regression
+ * through `ps_test_scheduler_load_probe_count`.
+ */
+enum class LoadProbe : std::size_t {
+  /** @brief Calls to the type-count export. */
+  GetCount = 0,
+  /** @brief Calls to the indexed type-name export. */
+  GetName,
+  /** @brief Calls to the optional indexed description export. */
+  GetDescription,
+  /** @brief Calls to the optional version export. */
+  GetVersion,
+  /** @brief Number of valid discovery callback counters. */
+  Count,
+};
+
+/** @brief Number of allocation-free discovery callback counters. */
+constexpr auto kLoadProbeCount = static_cast<std::size_t>(LoadProbe::Count);
+/** @brief Fixed counter storage for discovery callback probes. */
+using LoadProbeCounters = std::array<std::atomic<int>, kLoadProbeCount>;
+/** @brief Allocation-free counters for every discovery callback slot. */
+LoadProbeCounters g_load_probe_counts = {0, 0, 0, 0};
+
+/**
  * @brief Records one plugin runtime forwarding call.
  * @param probe Stable fixture slot associated with the called virtual method.
  * @return Nothing.
@@ -76,6 +107,19 @@ ForwardingCounters g_forwarding_counts = {0, 0, 0, 0, 0, 0, 0};
  */
 void record_forwarding_probe(ForwardingProbe probe) noexcept {
   g_forwarding_counts[static_cast<std::size_t>(probe)].fetch_add(
+      1, std::memory_order_relaxed);
+}
+
+/**
+ * @brief Records one scheduler-plugin discovery callback.
+ * @param probe Stable fixture slot associated with the invoked ABI export.
+ * @return Nothing.
+ * @throws Nothing.
+ * @note Relaxed atomics keep the probe allocation-free while the loader's
+ * deterministic `operator new` failpoint is armed.
+ */
+void record_load_probe(LoadProbe probe) noexcept {
+  g_load_probe_counts[static_cast<std::size_t>(probe)].fetch_add(
       1, std::memory_order_relaxed);
 }
 
@@ -115,6 +159,31 @@ bool failure_enabled(const char* mode) noexcept {
   const char* configured = std::getenv(kFailureEnvironment);
   return configured && (std::strcmp(configured, mode) == 0 ||
                         std::strcmp(configured, "all") == 0);
+}
+
+/**
+ * @brief Reports whether discovery should expose a duplicate third type.
+ * @return True when the dedicated environment value is non-empty and not zero.
+ * @throws Nothing.
+ * @note The extra entry duplicates `kShortSchedulerType`, forcing host-side
+ * conflict diagnostic staging without changing ordinary fixture behavior.
+ */
+bool duplicate_type_enabled() noexcept {
+  const char* configured = std::getenv(kDuplicateTypeEnvironment);
+  return configured && configured[0] != '\0' && configured[0] != '0';
+}
+
+/**
+ * @brief Checks whether one discovery-callback failure mode is enabled.
+ * @param mode Exact load-failure mode name to match.
+ * @return True when the dedicated load-failure environment selects `mode`.
+ * @throws Nothing.
+ * @note This key is separate from lifecycle failure injection so existing
+ * destructor tests may continue using their `all` lifecycle mode while loading.
+ */
+bool load_failure_enabled(const char* mode) noexcept {
+  const char* configured = std::getenv(kLoadFailureEnvironment);
+  return configured && std::strcmp(configured, mode) == 0;
 }
 
 /**
@@ -455,12 +524,14 @@ std::aligned_storage_t<sizeof(DestroyCountScheduler),   // NOLINT
 extern "C" {
 
 /**
- * @brief Reports both short-name and allocation-forcing scheduler entries.
- * @return Two scheduler types.
+ * @brief Reports ordinary types plus an optional duplicate conflict entry.
+ * @return Two scheduler types normally, or three while the duplicate-type
+ * fixture mode is enabled.
  * @throws Nothing.
  */
 int ps_scheduler_plugin_get_count() {
-  return 2;
+  record_load_probe(LoadProbe::GetCount);
+  return duplicate_type_enabled() ? 3 : 2;
 }
 
 /**
@@ -470,19 +541,30 @@ int ps_scheduler_plugin_get_count() {
  * @throws Nothing.
  */
 const char* ps_scheduler_plugin_get_name(int index) {
+  record_load_probe(LoadProbe::GetName);
   if (index == 0) {
     return kShortSchedulerType;
   }
-  return index == 1 ? kLongSchedulerType : nullptr;
+  if (index == 1) {
+    return kLongSchedulerType;
+  }
+  return index == 2 && duplicate_type_enabled() ? kShortSchedulerType : nullptr;
 }
 
 /**
  * @brief Returns the shared lifecycle-fixture description.
  * @param index Zero-based fixture entry.
  * @return Process-lifetime description, or nullptr when out of range.
- * @throws Nothing.
+ * @throws std::runtime_error for the second ordinary type when the
+ * `description_runtime_error` load-failure mode is enabled.
+ * @note The exception occurs after the first type has been fully staged, which
+ * exercises rollback of partial candidate metadata.
  */
 const char* ps_scheduler_plugin_get_description(int index) {
+  record_load_probe(LoadProbe::GetDescription);
+  if (index == 1 && load_failure_enabled("description_runtime_error")) {
+    throw std::runtime_error("fixture scheduler description failure");
+  }
   return index >= 0 && index < 2 ? "Destroy-count scheduler lifecycle test"
                                  : nullptr;
 }
@@ -536,6 +618,7 @@ void ps_scheduler_plugin_destroy(ps::IScheduler* scheduler) {
  * @throws Nothing.
  */
 const char* ps_scheduler_plugin_get_version() {
+  record_load_probe(LoadProbe::GetVersion);
   return "test";
 }
 
@@ -575,6 +658,23 @@ int ps_test_scheduler_forwarding_count(int probe) {
 }
 
 /**
+ * @brief Reads one scheduler-plugin discovery callback counter.
+ * @param probe Stable zero-based `LoadProbe` numeric value.
+ * @return Recorded call count, or -1 when `probe` is outside the fixture
+ * counter range.
+ * @throws Nothing.
+ * @note The export remains fixture-only and performs no allocation while the
+ * host failpoint is armed or immediately after it fires.
+ */
+int ps_test_scheduler_load_probe_count(int probe) {
+  if (probe < 0 || probe >= static_cast<int>(LoadProbe::Count)) {
+    return -1;
+  }
+  return g_load_probe_counts[static_cast<std::size_t>(probe)].load(
+      std::memory_order_relaxed);
+}
+
+/**
  * @brief Resets lifecycle counters before a test creates an instance.
  * @return Nothing.
  * @throws Nothing.
@@ -584,6 +684,9 @@ void ps_test_scheduler_reset_counts() {
   g_active_count.store(0);
   g_destroy_count.store(0);
   for (auto& count : g_forwarding_counts) {
+    count.store(0, std::memory_order_relaxed);
+  }
+  for (auto& count : g_load_probe_counts) {
     count.store(0, std::memory_order_relaxed);
   }
 }
