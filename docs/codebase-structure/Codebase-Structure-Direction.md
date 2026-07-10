@@ -1,8 +1,9 @@
 # Codebase Structure Direction
 
-This document records the target source layout, public header seam, build target
-shape, and daemon/IPC direction for Photospider. It is a design direction, not a
-claim that the current branch already has this shape.
+This document records Photospider's current public header/Host seam and static
+product together with the remaining source layout, internal-target, and
+daemon/IPC direction. Current-state claims and future work are distinguished
+explicitly below.
 
 The goals are:
 
@@ -14,20 +15,21 @@ The goals are:
 
 ## Current Friction
 
-The current repository already has useful internal static modules, but its
-external interface is not yet crisp enough for the goals above.
+The current repository now has the public Host seam and installable static
+product, while its source/application layout and transitional plugin SDK still
+need later migration phases.
 
 Observed build targets in the current root `CMakeLists.txt`:
 
 | Current target | Current role | Friction |
 | --- | --- | --- |
-| `photospider_core_types` | Static core data and operation registry source. | Publishes both `include/` and `src/` as include roots. |
-| `photospider_graph` | Static `GraphModel` and graph services. | Exposes `GraphModel` through public headers. |
-| `photospider_plugin` | Static plugin manager and loader. | Host-side plugin ownership still lives in the legacy target, but operation registration now goes through `OperationPluginRegistrar`. |
-| `photospider_compute` | Static compute, runtime, schedulers, and interaction code. | Internal compute planning headers leak through public headers. |
+| `photospider_core_types` | Build-only static core data and operation-registry helper. | Its implementation sources are also folded into the static product until the later source-layout split. |
+| `photospider_graph` | Build-only static `GraphModel` and graph-services helper. | `GraphModel` is private now, but the helper's implementation sources are also folded into the product. |
+| `photospider_plugin` | Build-only static plugin manager and loader helper. | It is not exported; the transitional plugin SDK still uses legacy top-level source-tree headers. |
+| `photospider_compute` | Build-only static compute, runtime, scheduler, and interaction helper. | Compute-planning headers are private now, but its implementation sources are also folded into the product. |
 | `photospider` | Static installable backend product with archive name `libphotospider`. | Now matches the desired static product shape, but still folds legacy backend internals behind the public Host seam until later source-layout splits land. |
-| `photospider_cli_common` | Static CLI command/TUI/autocomplete code. | Still depends on broad kernel headers, but its `src/` include root is private to repository targets. |
-| `graph_cli` | CLI executable entry point. | Creates `Kernel` directly and has no daemon-client mode. |
+| `photospider_cli_common` | Static CLI command/TUI/autocomplete code plus the reusable `run_graph_cli` boundary. | Uses repository-only CLI headers and remains a non-installable application helper. |
+| `graph_cli` | Process-policy-only CLI executable entry point. | Disables OpenCL, owns allocation-independent fatal exit policy, creates the embedded `Host` adapter, and has no daemon-client mode yet. |
 
 Remaining and recently resolved interface leaks:
 
@@ -40,22 +42,28 @@ Remaining and recently resolved interface leaks:
   manager, and dirty-control-lane implementation types, so they are not
   supported headers for linked consumers of `photospider`; repository
   targets that still include them must receive the private `src/` include root.
-  Later phases should either keep them behind that private root or replace their
-  frontend-facing role with a narrower Host-only public target.
+  `ps::Host` is already the only supported frontend public seam. The embedded
+  Host adapter translates `ps::HostComputeRequest` into the internal
+  `Kernel::ComputeRequest` and then delegates through
+  `InteractionService`/`Kernel`. Later phases preserve this ownership while
+  changing directories/internal targets or adding daemon/IPC adapters; they do
+  not introduce a second frontend facade.
 - `include/plugin_api.hpp` includes full `Node`, exposing node runtime/cache
   state to operation plugins instead of a smaller plugin contract. Issue #33
   narrows the registration path with `OperationPluginRegistrar`, but a future
   public plugin contract still needs a smaller node view.
-- CLI and benchmark headers live under the same public include root as kernel
-  contracts, so an install rule would accidentally publish application internals.
+- Legacy CLI and benchmark headers still live under the source-tree `include/`
+  root. The targeted install rule excludes them now, but the later application
+  layout phase must still move them out of the legacy include tree.
 
 Resolved seam tightening in the current branch:
 
 - The former direct graph-state submission and runtime access escape hatches
-  have been removed from the public `Kernel` and `InteractionService` facades.
-  Tests that still need internal runtime or graph-state access now include the
-  internal-only `tests/support/kernel_test_access.hpp` helper explicitly and
-  route those calls through `ps::testing::KernelTestAccess`.
+  have been removed from the frontend contract. `Kernel` and
+  `InteractionService` are internal facades, while tests that still need runtime
+  or graph-state access explicitly include the internal-only
+  `tests/support/kernel_test_access.hpp` helper and route those calls through
+  `ps::testing::KernelTestAccess`.
 - The phase-3 internal-header pass moves the graph model, graph runtime,
   graph-state executor, compute service, dirty-control lane, and built-in
   concrete scheduler headers out of `include/` and into the private `src/`
@@ -73,9 +81,10 @@ The external seam should be:
 
 ```text
 external frontend
-  -> Photospider host interface
-      -> Kernel Interaction Boundary
-          -> Kernel / GraphRuntime / GraphModel / ComputeService implementation
+  -> public ps::Host (the only frontend seam)
+      -> embedded Host adapter
+          -> internal InteractionService / Kernel boundary
+              -> GraphRuntime / GraphModel / ComputeService implementation
 ```
 
 External code should not include or name these implementation concepts:
@@ -101,9 +110,10 @@ External code may depend on stable value contracts:
 - image and tile buffer contracts
 - plugin operation registration contracts
 
-This makes `InteractionService` or its replacement a deeper module: frontends
-get graph lifecycle, compute, inspection, events, scheduler configuration, and
-plugin control without learning the implementation topology behind them.
+This keeps `InteractionService` as a deeper backend module behind the public
+`ps::Host` seam: frontends get graph lifecycle, compute, inspection, events,
+scheduler configuration, and plugin control without learning the implementation
+topology behind them.
 
 ## Target Public Headers
 
@@ -251,13 +261,17 @@ CMake rules:
   under `src/`, and that the `photospider` product keeps `src/` as a private
   include root.
 - The phase-4 install/export pass makes `photospider` the installable `STATIC`
-  target with archive output `libphotospider.a`, installs only
-  `include/photospider/**`, and exports `Photospider::photospider` through
-  `PhotospiderConfig.cmake`.
+  target, installs only `include/photospider/**`, and exports
+  `Photospider::photospider` through `PhotospiderConfig.cmake`. The archive is
+  named `libphotospider.a` on Unix-like toolchains and `photospider.lib` with
+  MSVC.
 - Build-tree consumers of `photospider` receive a generated public include root
-  containing only the `photospider/` header tree. The source-tree `include/`
-  and `src/` roots remain private implementation include paths for repository
-  targets.
+  containing only `photospider/` forwarding headers. The source-tree
+  `include/photospider/**` inventory is tracked with `CONFIGURE_DEPENDS`, so
+  additions and removals regenerate the forwarding tree without requiring
+  symbolic-link privileges; header content is read directly from the live
+  source file. The source-tree `include/` and `src/` roots remain private
+  implementation include paths for repository targets.
 - The static product archive folds the product implementation sources directly
   into `photospider`. Repository-only static helper modules remain available
   for local build organization but are not exported to package consumers.
@@ -268,15 +282,22 @@ CMake rules:
   `photospider` merely to share `OpRegistry`; standard operation plugins
   link `photospider_operation_plugin_shim` only for narrow runtime helper
   symbols used by plugin callback code.
-- OpenCV (`core`, `imgproc`, `imgcodecs`, `videoio`), `yaml-cpp`, `Threads`,
-  and POSIX dynamic-loader libraries are link-only implementation dependencies
-  for the static archive. `PhotospiderConfig.cmake` finds those dependencies so
-  embedded consumers can link the exported static target, but public Host/core
-  headers do not require OpenCV or `yaml-cpp` types.
+- OpenCV (`core`, `imgproc`, `imgcodecs`, `videoio`), `yaml-cpp`, and `Threads`
+  are link-only implementation dependencies for the static archive. The
+  installed `Photospider::photospider` target records them as
+  `$<LINK_ONLY:...>` entries in `INTERFACE_LINK_LIBRARIES`.
+  `PhotospiderConfig.cmake` finds them so embedded consumers can link the
+  exported target, but public Host/core headers do not require OpenCV or
+  `yaml-cpp` types. `${CMAKE_DL_LIBS}` adds the platform dynamic-loader library
+  only where CMake requires one.
 - On Apple, the static product carries system `Metal` and `Foundation` framework
   link flags for Objective-C++ runtime sources. Metal operation plugins and
   their `CoreImage`/`CoreVideo` dependencies remain optional runtime plugin
   artifacts rather than public package requirements.
+- On Windows, the exported target propagates `PHOTOSPIDER_STATIC`, so public
+  declarations do not acquire DLL import/export annotations when consumers link
+  the `.lib` archive. Dynamic operation-plugin exports remain governed by
+  `PLUGIN_API` and are separate from the static product boundary.
 - FTXUI and `photospider_cli_common` are CLI-only dependencies and are not part
   of the embedded package export. Operation plugin shim libraries, operation
   plugins, and scheduler plugins remain runtime extension artifacts rather than
@@ -394,11 +415,14 @@ Concurrency rule:
 - Long-running compute should return request ids that can be polled and later
   cancelled when the compute commit policy supports it.
 
-## Migration Order
+## Migration State and Remaining Order
 
-Recommended order:
+Frontend-boundary steps 1-4 are present in the current repository. The remaining
+frontend migration changes directory/internal-target organization and adds
+daemon/IPC adapters without changing `ps::Host` as the sole public seam. Plugin
+SDK tightening in step 7 is a separate extension-boundary change.
 
-1. Add public-header dependency scans.
+1. **Completed:** Add public-header dependency scans.
    - Fail when installable headers include `src/`, `kernel/services/...`, or
      implementation-only graph/runtime/compute planning headers.
    - Add one header self-containment compile test for public headers.
@@ -408,26 +432,26 @@ Recommended order:
    - `include/photospider/public_boundary.hpp` remains a marker header for the
      installable include root. Phase 1 adds the first stable value contracts
      under `include/photospider/core/`.
-2. Introduce `include/photospider/*`.
+2. **Completed:** Introduce `include/photospider/*`.
    - Move stable value contracts first: errors, result/status values,
      compute intent, OpenCV-free image/tile buffer values, and inspection
      snapshots.
    - Keep `GraphModel`, `GraphRuntime`, and compute planning headers internal.
-3. Create the host interface.
-   - Convert `InteractionService` into or behind a stable host-facing module.
+3. **Completed:** Create the host interface.
+   - Keep `InteractionService` behind the stable public `ps::Host` module.
    - Remove external escape hatches such as raw `Kernel&`, `GraphRuntime&`, and
      templated `GraphModel&` submission from public headers.
-4. Rename build output.
+4. **Completed:** Rename build output.
    - Make the installable static target `photospider`/`libphotospider`.
    - Keep internal static modules private.
-5. Split applications.
+5. **Future directory/target work:** Split applications.
    - Move `cli/graph_cli.cpp` to `apps/graph_cli/`.
    - Add `apps/photospiderd/` with process lifecycle only.
-6. Add IPC client and server.
+6. **Future IPC work:** Add IPC client and server.
    - Start with local socket, length-prefixed JSON request/response, and graph
      lifecycle/inspection methods.
    - Add compute, events, and cancellation after basic lifecycle is stable.
-7. Tighten plugin SDK.
+7. **Separate plugin-boundary work:** Tighten plugin SDK.
    - Replace direct plugin dependency on full `Node` and global registry symbols
      with a narrow operation contract and host-provided registration table.
 
@@ -435,13 +459,58 @@ Recommended order:
 
 For any implementation change following this document:
 
-- Run header dependency scans and save evidence under `tests/results/...`.
+- Run issue-specific header/layout migration scans only from the personal-
+  overlay `tests/results/...` evidence tree; do not register them with CTest or
+  CI.
 - Build `libphotospider` and `graph_cli`; `photospiderd` remains a future
   daemon target until the application split phase lands.
-- For static package work, run the phase-4 static product scan and package
-  consumer smoke test, then save summary, command logs, expected/actual JSON,
-  and compare output under the issue-specific `tests/results/...` path.
+- For static package work, keep the package consumer smoke test in CTest because
+  it executes the real install/find-package/runtime boundary. Run any phase-4
+  migration scan separately from the issue-specific personal-overlay evidence
+  tree, then save summary, command logs, expected/actual JSON, and compare
+  output under that `tests/results/...` path.
+  CMake 3.16 is a compatibility floor, not a fixed version gate for every PR.
+  Maintain it through the command/provider/context compatibility audit, the
+  current CI package consumer, and targeted real old-version validation when a
+  compatibility-sensitive change or release check requires it. Such a targeted
+  run still uses a fresh producer, real `photospider` build, install, and
+  external consumer; a producer tree configured earlier by a newer CMake is not
+  equivalent. If no native old-version runtime is available, record that it was
+  not run instead of using architecture emulation or claiming a PASS.
+  Cleanup must fail closed and persist filesystem-derived before/after/cache
+  observations for the producer build, install prefix, consumer source, and
+  consumer build directories. The companion static audit must keep root and
+  package-template command visibility separate, resolve module commands only
+  after their real 3.16 `include()` provider, and enumerate every maintained
+  `cmake_policy(SET CMPxxxx ...)` call against the real 3.16 policy list.
+  Command-name coverage comes from `--help-command-list`; existing-command
+  grammar coverage is limited to the sensitive subcommands/keywords explicitly
+  listed in evidence. Linux strict-fresh execution does not substitute for real
+  Apple or Windows runtime coverage.
+  Every formal producer, consumer, test, structural, and quality artifact in a
+  validation run must bind to one final source identity: base commit/tree,
+  content-addressed final snapshot tree, final patch hash, and ordinary
+  untracked source inventory. Personal-overlay inputs consumed by OpenSpec,
+  task, feedback, or evidence checks carry a separate overlay commit/tree,
+  snapshot, and patch identity; generated evidence outputs are excluded from
+  that self-reference. Each artifact records every identity it consumes from
+  the run that produced it, and the root comparison must fail unless all
+  consumed identities equal the final identities captured after the source is
+  frozen. A later source change invalidates the earlier artifact; matching an
+  older Review directory, build tree, or manually copied hash is not
+  provenance.
+- Derive CLI catch-order and Doxygen audit inputs from the real CMake target
+  closure and compilation database or CMake File API. The audit fails closed if
+  a source in `photospider_cli_common` or `graph_cli`, including root
+  translation units such as `src/cli_config.cpp`, `src/cli/run_graph_cli.cpp`,
+  and `cli/graph_cli.cpp`, is omitted or cannot be matched to a compile command.
+  This Doxygen/source-quality audit is a documented manual tool and is not a
+  CTest or CI entry.
 - Run CTest for kernel, scheduler, plugin, interaction, and CLI tests.
+- Use proportional focused checks during implementation. After the source is
+  frozen, perform at most one native clean configure/full build/CTest-JUnit
+  pass and reuse that build tree for formal evidence; do not add Docker or
+  local `linux/amd64` emulation as another local completion run.
 - Add an IPC integration test that starts `photospiderd`, sends requests, and
   checks response JSON against expected output.
 - For daemon lifecycle changes, save logs for startup, graph load, compute or
@@ -457,8 +526,6 @@ These are the decisions that should be resolved before implementation:
   auto-connect to `photospiderd` when a daemon socket exists.
 - Whether compute image results should initially be file-only, or whether an
   IPC binary side-channel is required for the first GUI frontend.
-- Whether operation plugin ABI cleanup should happen before or after the static
-  `libphotospider` target rename.
 
 ## Reference Repositories
 

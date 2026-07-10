@@ -29,13 +29,29 @@ When a pull request or push changes the CI image inputs (`Dockerfile.ci`, `.dock
 
 The image includes CMake, a C++ toolchain, OpenCV, yaml-cpp, CURL, OpenSSL, GTest, nlohmann-json, clang-format, Python, and cpplint.
 
+CMake 3.16 is the project's compatibility floor, not a workflow-pinned version
+for every pull request. The maintained command/provider/context audit checks
+the floor's command and policy inventory, while current integration exercises
+the fresh static package consumer on the supported CI toolchain. A targeted
+real old-version producer/install/consumer run is added when a compatibility-
+sensitive change or release check needs it; the regular integration workflow
+does not lock Ubuntu or CMake to a dedicated minimum-version job.
+
 ## Scripts
+
+CI and CTest execute only long-lived software behavior, compile, package-
+consumer, performance, concurrency, stability, error-handling, and runtime-
+boundary checks. Migration-residue scans, phase-completion checks, stale-term
+searches, Doxygen/source-quality audits, issue replay, and evidence/provenance
+orchestration are excluded. The latter belong to issue-specific personal-
+overlay evidence under `tests/results/...`, or to explicitly documented manual
+developer tools; a clean primary checkout never imports that content.
 
 - `ci/scripts/healthcheck.sh`: runs `git diff --check`, `clang-format --dry-run --Werror`, and `cpplint` on changed C++ files.
 - `ci/scripts/ci_image_changed.sh`: detects whether the current diff changes CI image inputs.
 - `ci/scripts/integration_suite.sh`: runs the integration checks sequentially for the local-image fallback path.
 - `ci/scripts/build_integrity.sh`: configures CMake, explicitly builds `graph_cli`, `test_propagation`, test plugins, scheduler plugins, then runs `ctest -N`.
-- `ci/scripts/ctest_full.sh`: builds all targets and runs CTest. It excludes `SplitComputeServiceRuntimeTrace` by default because that test writes personal-overlay evidence under `tests/results/`.
+- `ci/scripts/ctest_full.sh`: builds all targets and runs CTest. Its current default excludes the resource-intensive `SplitComputeServiceRuntimeTrace`; that runtime trace now writes only below the CMake build tree and has no personal-overlay dependency.
 - `ci/scripts/graph_cli_script_test.sh`: runs positive and negative scripted REPL checks.
 - `ci/scripts/propagation_script_test.sh`: builds `test_propagation` and runs `tiles all` on linear and complex propagation graphs.
 - `ci/scripts/plugin_load_test.sh`: checks plugin artifacts, plugin manager tests, scheduler plugin loader tests, and CLI scheduler plugin listing.
@@ -72,6 +88,18 @@ docker build -t photospider-ci:local -f Dockerfile.ci \
 ```
 
 Use `ubuntu-ports` for local arm64 builds. Use `http://mirrors.tuna.tsinghua.edu.cn/ubuntu/` for amd64.
+
+The local Docker commands above reproduce the maintained current-toolchain CI
+paths. They are not a claim that CMake 3.16 itself ran. If targeted old-version
+evidence is needed and no natively compatible executable exists locally, record
+that limitation rather than using architecture emulation to manufacture a
+minimum-version PASS.
+
+For issue #34 review 15, local validation does not use these Docker commands or
+`linux/amd64` emulation. Implementation iterations use affected targets and
+focused tests; after final source freeze, one native clean configure/full
+build/CTest-JUnit pass is reused by all formal local gates. Current-head GitHub
+Actions supplies the separate remote integration result.
 
 ## Local Artifact Download
 
