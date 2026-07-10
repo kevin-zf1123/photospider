@@ -1,8 +1,11 @@
 #include "plugin_loader.hpp"  // NOLINT(build/include_subdir)
 
+#include <algorithm>
 #include <exception>
+#include <limits>
 #include <map>
 #include <memory>
+#include <new>
 #include <optional>
 #include <stdexcept>
 #include <string>
@@ -12,6 +15,10 @@
 #include "plugin_api.hpp"  // NOLINT(build/include_subdir)
 #include "ps_types.hpp"    // NOLINT(build/include_subdir)
 
+#if defined(PHOTOSPIDER_INTERNAL_BAD_ALLOC_TESTING)
+#include "kernel/plugin_manage_module/plugin_loader_test_access.hpp"
+#endif
+
 #ifdef _WIN32
 #include <windows.h>
 #else
@@ -20,6 +27,55 @@
 
 namespace ps {
 namespace {
+
+/**
+ * @brief Selects the next unload-order sequence for a candidate plugin.
+ *
+ * @param loaded_plugins Current retained plugin records.
+ * @return One greater than the largest visible sequence, or one for the first
+ * plugin.
+ * @throws std::overflow_error if the sequence space is exhausted.
+ * @note The scan allocates nothing and runs before candidate publication.
+ */
+std::uint64_t next_plugin_load_sequence(
+    const LoadedOpPluginMap& loaded_plugins) {
+  std::uint64_t largest = 0;
+  for (const auto& [_, plugin] : loaded_plugins) {
+    largest = std::max(largest, plugin.load_sequence);
+  }
+  if (largest == std::numeric_limits<std::uint64_t>::max()) {
+    throw std::overflow_error("operation plugin load sequence exhausted");
+  }
+  return largest + 1;
+}
+
+#if defined(PHOTOSPIDER_INTERNAL_BAD_ALLOC_TESTING)
+/** @brief Thread-local post-registration failure selected by the current test.
+ */
+using LoadFailpoint = testing::OperationPluginLoadFailpoint;
+thread_local LoadFailpoint load_failpoint = LoadFailpoint::None;
+/** @brief Number of actual visits to the selected test-only failure site. */
+thread_local std::size_t operation_plugin_load_failpoint_hit_count = 0;
+
+/**
+ * @brief Throws at one selected post-registration bookkeeping boundary.
+ *
+ * @param failpoint Boundary currently being entered by the real loader.
+ * @return Nothing.
+ * @throws std::bad_alloc when `failpoint` is the armed boundary.
+ * @note This helper and its mutable state are omitted from BUILD_TESTING=OFF
+ * products. The hit count changes before throwing so tests can distinguish the
+ * intended failure from an unrelated allocation failure.
+ */
+void maybe_fail_operation_plugin_bookkeeping(
+    testing::OperationPluginLoadFailpoint failpoint) {
+  if (load_failpoint != failpoint) {
+    return;
+  }
+  ++operation_plugin_load_failpoint_hit_count;
+  throw std::bad_alloc();
+}
+#endif
 
 using RegisterOpsFunc = RegisterPhotospiderOpsV1;
 
@@ -363,8 +419,9 @@ class DynamicLibrary final {
       error_message = "LoadLibrary failed";
       return nullptr;
     }
-    return std::unique_ptr<DynamicLibrary>(
-        new DynamicLibrary(static_cast<void*>(handle)));
+    auto library_lifetime = make_library_lifetime(static_cast<void*>(handle));
+    return std::unique_ptr<DynamicLibrary>(new DynamicLibrary(
+        static_cast<void*>(handle), std::move(library_lifetime)));
 #else
     void* handle = dlopen(path.c_str(), RTLD_LAZY);
     if (!handle) {
@@ -372,7 +429,9 @@ class DynamicLibrary final {
       error_message = err ? err : "dlopen failed";
       return nullptr;
     }
-    return std::unique_ptr<DynamicLibrary>(new DynamicLibrary(handle));
+    auto library_lifetime = make_library_lifetime(handle);
+    return std::unique_ptr<DynamicLibrary>(
+        new DynamicLibrary(handle, std::move(library_lifetime)));
 #endif
   }
 
@@ -424,13 +483,14 @@ class DynamicLibrary final {
    * @brief Takes ownership of an already-opened native library handle.
    *
    * @param handle Native platform handle returned by `LoadLibrary` or `dlopen`.
-   * @throws std::bad_alloc if the shared lifetime control block cannot be
-   * allocated.
-   * @note Construction is private so callers cannot create wrappers around
-   * invalid handles.
+   * @param library_lifetime Prebuilt shared owner for handle.
+   * @throws Nothing; the shared owner is moved into place.
+   * @note The caller constructs library_lifetime before allocating this wrapper
+   * so wrapper allocation failure still releases the native handle.
    */
-  explicit DynamicLibrary(void* handle)
-      : handle_(handle), library_(make_library_lifetime(handle)) {}
+  explicit DynamicLibrary(void* handle,
+                          std::shared_ptr<void> library_lifetime) noexcept
+      : handle_(handle), library_(std::move(library_lifetime)) {}
 
   /** @brief Native dynamic-library handle used for symbol lookup. */
   void* handle_ = nullptr;
@@ -575,6 +635,238 @@ std::map<std::string, std::optional<std::string>> collect_previous_sources(
 }
 
 /**
+ * @brief Exchanges two structured plugin-load results without allocation.
+ *
+ * @param left First accumulated result.
+ * @param right Second accumulated result.
+ * @return Nothing.
+ * @throws Nothing.
+ * @note Integers and standard-allocator vectors are swapped independently so
+ * operation-plugin transaction publication has a mechanically auditable
+ * no-throw result step.
+ */
+void swap_plugin_load_result(PluginLoadResult& left,
+                             PluginLoadResult& right) noexcept {
+  static_assert(noexcept(left.errors.swap(right.errors)),
+                "PluginLoadError vector swap must be noexcept");
+  static_assert(noexcept(left.new_op_keys.swap(right.new_op_keys)),
+                "operation-key vector swap must be noexcept");
+  using std::swap;
+  swap(left.attempted, right.attempted);
+  swap(left.loaded, right.loaded);
+  left.errors.swap(right.errors);
+  left.new_op_keys.swap(right.new_op_keys);
+}
+
+/**
+ * @brief Owns all unpublished state for one operation-plugin load attempt.
+ *
+ * Construction copies the current registry, source map, retained-handle map,
+ * and accumulated result before the registrar runs. Registration and every
+ * later allocating bookkeeping stage mutate only these shadow values. After
+ * all staging succeeds, `commit_all` publishes them through no-throw swaps.
+ *
+ * Member declaration order is part of the safety proof: `library_lifetime_`
+ * is declared first and therefore destroyed last. On every exceptional exit,
+ * captured snapshots, staged results, copied/ candidate handles, source
+ * strings, and plugin callbacks in `staged_registry_` are destroyed while the
+ * candidate library is still mapped.
+ *
+ * @note The transaction never invokes a throwing registry rollback. Failed
+ * attempts leave caller-owned state byte-for-byte semantically unchanged;
+ * ordinary registrar errors may commit only their structured result row after
+ * staged callbacks have become cleanup-owned by this object.
+ */
+class OperationPluginLoadTransaction final {
+ public:
+  /**
+   * @brief Copies all caller-owned state before entering plugin code.
+   *
+   * @param library_lifetime Candidate library lifetime retained through
+   * rollback destruction.
+   * @param registry Current host registry copied into the shadow registry.
+   * @param op_sources Current frontend-visible source map.
+   * @param loaded_plugins Existing retained plugin records and handles.
+   * @param result Accumulated scan result, including the staged attempt count.
+   * @throws std::bad_alloc if any shadow copy cannot allocate.
+   * @note No plugin callback has run when construction throws, and the caller's
+   * live registry/source/result/handle state remains unchanged.
+   */
+  OperationPluginLoadTransaction(
+      std::shared_ptr<void> library_lifetime, const OpRegistry& registry,
+      const std::map<std::string, std::string>& op_sources,
+      const LoadedOpPluginMap& loaded_plugins, const PluginLoadResult& result)
+      : library_lifetime_(std::move(library_lifetime)),
+        staged_registry_(registry),
+        staged_op_sources_(op_sources),
+        staged_loaded_plugins_(loaded_plugins),
+        staged_result_(result) {}
+
+  OperationPluginLoadTransaction(const OperationPluginLoadTransaction&) =
+      delete;
+  OperationPluginLoadTransaction& operator=(
+      const OperationPluginLoadTransaction&) = delete;
+
+  /**
+   * @brief Destroys unpublished state while retaining the library until last.
+   *
+   * @throws Nothing.
+   * @note Default member destruction follows reverse declaration order, which
+   * is the transaction rollback ordering documented on the class.
+   */
+  ~OperationPluginLoadTransaction() = default;
+
+  /**
+   * @brief Returns the shadow registry passed to the host registrar.
+   *
+   * @return Mutable unpublished registry.
+   * @throws Nothing.
+   * @note Callbacks stored here cannot be resolved through the singleton until
+   * the final commit swaps complete.
+   */
+  OpRegistry& registry() noexcept { return staged_registry_; }
+
+  /**
+   * @brief Returns the mutable registration capture for unload snapshots.
+   *
+   * @return Transaction-owned capture.
+   * @throws Nothing.
+   * @note Its allocations and plugin callable copies are destroyed before the
+   * retained candidate library on failure.
+   */
+  OpRegistry::RegistrationCapture& registration_capture() noexcept {
+    return registration_capture_;
+  }
+
+  /**
+   * @brief Returns the shadow operation source map.
+   *
+   * @return Mutable unpublished source map.
+   * @throws Nothing.
+   */
+  std::map<std::string, std::string>& op_sources() noexcept {
+    return staged_op_sources_;
+  }
+
+  /**
+   * @brief Returns the shadow retained-handle map.
+   *
+   * @return Mutable unpublished handle/snapshot map.
+   * @throws Nothing.
+   */
+  LoadedOpPluginMap& loaded_plugins() noexcept {
+    return staged_loaded_plugins_;
+  }
+
+  /**
+   * @brief Returns the shadow accumulated scan result.
+   *
+   * @return Mutable unpublished result.
+   * @throws Nothing.
+   */
+  PluginLoadResult& result() noexcept { return staged_result_; }
+
+  /**
+   * @brief Returns a shared candidate-library lifetime for the handle record.
+   *
+   * @return Shared owner whose copy operation cannot allocate.
+   * @throws Nothing.
+   * @note The returned copy shares the control block created before registrar
+   * execution.
+   */
+  std::shared_ptr<void> library_lifetime() const noexcept {
+    return library_lifetime_;
+  }
+
+  /**
+   * @brief Publishes only a recoverable registrar error result.
+   *
+   * @param result Caller-owned accumulated scan result.
+   * @return Nothing.
+   * @throws Nothing.
+   * @note Registry, sources, and handles remain unchanged. The transaction
+   * destructor then removes unpublished plugin callbacks before the library is
+   * released.
+   */
+  void commit_result_only(PluginLoadResult& result) noexcept {
+    swap_plugin_load_result(result, staged_result_);
+  }
+
+  /**
+   * @brief Atomically-by-noexcept-phase publishes every staged state surface.
+   *
+   * @param registry Live singleton registry.
+   * @param op_sources Live frontend-visible source map.
+   * @param loaded_plugins Live retained plugin map.
+   * @param result Live accumulated scan result.
+   * @return Nothing.
+   * @throws Nothing.
+   * @note The handle map is published before the registry, while the local
+   * `DynamicLibrary` and this transaction still retain the candidate handle.
+   * No observer can see a plugin callback whose library lacks an owner after
+   * the final registry swap.
+   */
+  void commit_all(OpRegistry& registry,
+                  std::map<std::string, std::string>& op_sources,
+                  LoadedOpPluginMap& loaded_plugins,
+                  PluginLoadResult& result) noexcept {
+    static_assert(noexcept(loaded_plugins.swap(staged_loaded_plugins_)),
+                  "loaded plugin map swap must be noexcept");
+    static_assert(noexcept(op_sources.swap(staged_op_sources_)),
+                  "operation source map swap must be noexcept");
+    loaded_plugins.swap(staged_loaded_plugins_);
+    op_sources.swap(staged_op_sources_);
+    swap_plugin_load_result(result, staged_result_);
+    registry.swap_state(staged_registry_);
+  }
+
+ private:
+  /** @brief Candidate handle declared first so it is destroyed last. */
+  std::shared_ptr<void> library_lifetime_;
+  /** @brief Registry copy receiving every registrar mutation. */
+  OpRegistry staged_registry_;
+  /** @brief Source-map copy receiving candidate ownership labels. */
+  std::map<std::string, std::string> staged_op_sources_;
+  /** @brief Existing plus candidate retained-handle records. */
+  LoadedOpPluginMap staged_loaded_plugins_;
+  /** @brief Result copy receiving attempt/error/key/load bookkeeping. */
+  PluginLoadResult staged_result_;
+  /** @brief Prior registry snapshots captured inside the shadow registry. */
+  OpRegistry::RegistrationCapture registration_capture_;
+};
+
+/**
+ * @brief Captures plugin registration inside an unpublished shadow registry.
+ *
+ * @param registry Host registry that owns the transactional capture.
+ * @param register_ops Resolved canonical plugin registration entry.
+ * @param registration_capture Destination snapshot populated by the registry.
+ * @return Nothing.
+ * @throws std::bad_alloc unchanged from registrar construction, plugin
+ * registration, or capture storage.
+ * @throws Any other exception thrown by the plugin registrar unchanged.
+ * @note No catch/restore step is needed: `registry` is transaction-owned and
+ * unpublished. Its callbacks and capture are destroyed before the candidate
+ * library lifetime if any exception exits this function. Registrar/context
+ * references remain stack-bounded and are not retained.
+ */
+void capture_plugin_registration(
+    OpRegistry& registry, RegisterOpsFunc register_ops,
+    OpRegistry::RegistrationCapture& registration_capture) {
+  try {
+    registry.capture_registration(
+        [&]() {
+          HostRegistrarContext context{&registry};
+          auto registrar = make_operation_plugin_registrar(context);
+          register_ops(&registrar);
+        },
+        registration_capture);
+  } catch (...) {
+    throw;
+  }
+}
+
+/**
  * @brief Loads one operation plugin file and retains its dynamic library.
  *
  * @param path Candidate shared library path.
@@ -582,11 +874,16 @@ std::map<std::string, std::optional<std::string>> collect_previous_sources(
  * keys.
  * @param loaded_plugins Caller-owned handle map keyed by absolute plugin path.
  * @param result Accumulated load result.
+ * @return Nothing.
  * @throws std::filesystem_error from `fs::absolute`.
- * @throws std::bad_alloc from result, map, vector, or library owner allocation.
- * @note The handle is stored only after `register_photospider_ops_v1`
- * completes. Failure paths close the library and restore keys touched before
- * an exception to their previous registry state.
+ * @throws std::bad_alloc from result, shadow registry/source/handle copies,
+ * registrar execution, or post-registration staging. The original resource
+ * exhaustion identity propagates unchanged.
+ * @note The live singleton, source map, accumulated result, and handle map are
+ * changed only by a final no-throw swap phase. On failure the transaction's
+ * shadow callback state is destroyed before its candidate handle, so no
+ * throwing rollback, leaked handle, dangling callback, or partial result is
+ * exposed.
  */
 void load_one_plugin(const fs::path& path,
                      std::map<std::string, std::string>& op_sources,
@@ -596,58 +893,88 @@ void load_one_plugin(const fs::path& path,
   if (loaded_plugins.count(absolute_path) > 0) {
     return;
   }
+  const std::uint64_t load_sequence = next_plugin_load_sequence(loaded_plugins);
 
-  ++result.attempted;
+  PluginLoadResult staged_result = result;
+  ++staged_result.attempted;
 
   std::string error_message;
   auto library = DynamicLibrary::open(path, error_message);
   if (!library) {
-    result.errors.push_back(
+    staged_result.errors.push_back(
         {absolute_path, GraphErrc::Io, std::move(error_message)});
+    swap_plugin_load_result(result, staged_result);
     return;
   }
 
   auto register_ops = library->resolve<RegisterOpsFunc>(
       kOperationPluginRegisterSymbolV1, error_message);
   if (!register_ops) {
-    result.errors.push_back(
+    staged_result.errors.push_back(
         {absolute_path, GraphErrc::InvalidParameter, error_message});
+    swap_plugin_load_result(result, staged_result);
     return;
   }
 
   auto& registry = OpRegistry::instance();
-  OpRegistry::RegistrationCapture registration_capture;
+  OperationPluginLoadTransaction transaction(
+      library->lifetime(), registry, op_sources, loaded_plugins, staged_result);
+  auto& registration_capture = transaction.registration_capture();
   try {
-    registry.capture_registration(
-        [&]() {
-          HostRegistrarContext context{&registry};
-          auto registrar = make_operation_plugin_registrar(context);
-          register_ops(&registrar);
-        },
-        registration_capture);
+    capture_plugin_registration(transaction.registry(), register_ops,
+                                registration_capture);
+  } catch (const std::bad_alloc&) {
+    throw;
   } catch (const std::exception& e) {
-    registry.restore_registration_capture(registration_capture);
-    result.errors.push_back({absolute_path, GraphErrc::Unknown, e.what()});
+    transaction.result().errors.push_back(
+        {absolute_path, GraphErrc::Unknown, e.what()});
+    transaction.commit_result_only(result);
     return;
   } catch (...) {
-    registry.restore_registration_capture(registration_capture);
-    result.errors.push_back({absolute_path, GraphErrc::Unknown,
-                             "register_photospider_ops_v1 threw"});
+    transaction.result().errors.push_back(
+        {absolute_path, GraphErrc::Unknown,
+         "register_photospider_ops_v1 threw"});
+    transaction.commit_result_only(result);
     return;
   }
 
-  const auto previous_sources = collect_previous_sources(
-      registration_capture.registered_keys, op_sources);
+#if defined(PHOTOSPIDER_INTERNAL_BAD_ALLOC_TESTING)
+  maybe_fail_operation_plugin_bookkeeping(
+      testing::OperationPluginLoadFailpoint::PreviousSource);
+#endif
+  auto previous_sources = collect_previous_sources(
+      registration_capture.registered_keys, transaction.op_sources());
+#if defined(PHOTOSPIDER_INTERNAL_BAD_ALLOC_TESTING)
+  maybe_fail_operation_plugin_bookkeeping(
+      testing::OperationPluginLoadFailpoint::SourceAndResult);
+#endif
   record_registered_operation_sources(
-      absolute_path, registration_capture.registered_keys, op_sources, result);
+      absolute_path, registration_capture.registered_keys,
+      transaction.op_sources(), transaction.result());
 
+#if defined(PHOTOSPIDER_INTERNAL_BAD_ALLOC_TESTING)
+  maybe_fail_operation_plugin_bookkeeping(
+      testing::OperationPluginLoadFailpoint::Snapshot);
+#endif
   LoadedOpPlugin loaded;
-  loaded.library = library->lifetime();
-  loaded.registered_keys = registration_capture.registered_keys;
-  loaded.previous_registry_entries = registration_capture.previous_entries;
-  loaded.previous_sources = previous_sources;
-  loaded_plugins[absolute_path] = std::move(loaded);
-  ++result.loaded;
+  loaded.library = transaction.library_lifetime();
+  loaded.load_sequence = load_sequence;
+  loaded.registered_keys = std::move(registration_capture.registered_keys);
+  loaded.previous_registry_entries =
+      std::move(registration_capture.previous_entries);
+  loaded.previous_sources = std::move(previous_sources);
+#if defined(PHOTOSPIDER_INTERNAL_BAD_ALLOC_TESTING)
+  maybe_fail_operation_plugin_bookkeeping(
+      testing::OperationPluginLoadFailpoint::HandleCommit);
+#endif
+  const bool inserted = transaction.loaded_plugins()
+                            .emplace(absolute_path, std::move(loaded))
+                            .second;
+  if (!inserted) {
+    throw std::logic_error("operation plugin transaction path already loaded");
+  }
+  ++transaction.result().loaded;
+  transaction.commit_all(registry, op_sources, loaded_plugins, result);
 }
 
 /**
@@ -665,6 +992,7 @@ LoadedOpPluginMap& process_resident_op_plugins() {
 
 }  // namespace
 
+/** @copydoc load_plugins */
 PluginLoadResult load_plugins(const std::vector<std::string>& plugin_dir_paths,
                               std::map<std::string, std::string>& op_sources) {
   auto& loaded_plugins = process_resident_op_plugins();
@@ -672,6 +1000,7 @@ PluginLoadResult load_plugins(const std::vector<std::string>& plugin_dir_paths,
                                         loaded_plugins);
 }
 
+/** @copydoc load_plugins_retaining_handles */
 PluginLoadResult load_plugins_retaining_handles(
     const std::vector<std::string>& plugin_dir_paths,
     std::map<std::string, std::string>& op_sources,
@@ -688,5 +1017,31 @@ PluginLoadResult load_plugins_retaining_handles(
   }
   return result;
 }
+
+#if defined(PHOTOSPIDER_INTERNAL_BAD_ALLOC_TESTING)
+namespace testing {
+
+/** @copydoc set_operation_plugin_load_failpoint */
+void set_operation_plugin_load_failpoint(
+    OperationPluginLoadFailpoint failpoint) noexcept {
+  load_failpoint = failpoint;
+  operation_plugin_load_failpoint_hit_count = 0;
+}
+
+/** @copydoc operation_plugin_load_failpoint_hits */
+std::size_t operation_plugin_load_failpoint_hits() noexcept {
+  return operation_plugin_load_failpoint_hit_count;
+}
+
+/** @copydoc load_one_operation_plugin_for_testing */
+void load_one_operation_plugin_for_testing(
+    const std::filesystem::path& path,
+    std::map<std::string, std::string>& op_sources,
+    LoadedOpPluginMap& loaded_plugins, PluginLoadResult& result) {
+  load_one_plugin(path, op_sources, loaded_plugins, result);
+}
+
+}  // namespace testing
+#endif
 
 }  // namespace ps

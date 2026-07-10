@@ -1,15 +1,106 @@
 #include <gtest/gtest.h>
 
 #include <algorithm>
+#include <atomic>
+#include <cstdint>
+#include <cstdlib>
 #include <filesystem>
+#include <fstream>
+#include <iostream>
+#include <map>
+#include <memory>
+#include <optional>
 #include <sstream>
 #include <string>
+#include <utility>
 #include <variant>
 #include <vector>
 
 #include "kernel/plugin_manager.hpp"
+#if defined(PHOTOSPIDER_INTERNAL_BAD_ALLOC_TESTING)
+#include "kernel/plugin_manage_module/plugin_loader_test_access.hpp"
+#endif
 #include "node.hpp"      // NOLINT(build/include_subdir)
 #include "ps_types.hpp"  // NOLINT(build/include_subdir)
+
+namespace plugin_cleanup_allocation_probe {
+
+/** @brief Disabled current-thread allocation failure sentinel. */
+constexpr std::int64_t kDisabled = -1;
+/** @brief Zero-based allocation countdown for the current test thread. */
+thread_local std::int64_t countdown = kDisabled;
+/** @brief Whether an allocation was rejected after the most recent arm. */
+thread_local bool fired = false;
+
+/** @brief Arms one allocation failure at `allocation_index`. */
+void arm(std::int64_t allocation_index) noexcept {
+  countdown = allocation_index;
+  fired = false;
+}
+
+/** @brief Disarms current-thread allocation injection. */
+void disarm() noexcept {
+  countdown = kDisabled;
+}
+
+/** @brief Returns whether the armed failure has fired. */
+bool did_fire() noexcept {
+  return fired;
+}
+
+/**
+ * @brief Rejects the selected allocation.
+ * @return Nothing when allocation may continue.
+ * @throws std::bad_alloc at the armed allocation index.
+ */
+void maybe_fail() {
+  if (countdown < 0) {
+    return;
+  }
+  if (countdown == 0) {
+    countdown = kDisabled;
+    fired = true;
+    throw std::bad_alloc{};
+  }
+  --countdown;
+}
+
+}  // namespace plugin_cleanup_allocation_probe
+
+/**
+ * @brief Test-executable allocator used to audit no-allocation plugin cleanup.
+ * @param size Requested allocation size.
+ * @return malloc-backed storage.
+ * @throws std::bad_alloc when injected or malloc fails.
+ */
+void* operator new(std::size_t size) {
+  plugin_cleanup_allocation_probe::maybe_fail();
+  if (void* memory = std::malloc(size == 0 ? 1 : size)) {
+    return memory;
+  }
+  throw std::bad_alloc{};
+}
+
+/** @copydoc operator new(std::size_t) */
+void* operator new[](std::size_t size) {
+  return ::operator new(size);
+}
+/** @brief Releases scalar storage allocated by the test allocator. */
+void operator delete(void* memory) noexcept {
+  std::free(memory);
+}
+/** @brief Releases array storage allocated by the test allocator. */
+void operator delete[](void* memory) noexcept {
+  std::free(memory);
+}
+/** @brief Releases sized scalar storage allocated by the test allocator. */
+void operator delete(void* memory, std::size_t) noexcept {
+  std::free(memory);
+}
+/** @brief Releases sized array storage allocated by the test allocator. */
+void operator delete[](void* memory, std::size_t) noexcept {
+  std::free(memory);
+}
 
 namespace ps {
 namespace {
@@ -17,6 +108,9 @@ namespace {
 constexpr const char* kLifecycleType = "plugin_lifecycle";
 constexpr const char* kLifecycleSubtype = "op";
 constexpr const char* kLifecycleKey = "plugin_lifecycle:op";
+constexpr const char* kLifecycleTraceEnvironment = "PS_LIFECYCLE_PLUGIN_TRACE";
+constexpr const char* kLifecycleThrowEnvironment =
+    "PS_LIFECYCLE_PLUGIN_REGISTRAR_THROW";  // NOLINT(whitespace/indent_namespace)
 
 #ifndef PS_STANDARD_OP_PLUGIN_DIR
 #define PS_STANDARD_OP_PLUGIN_DIR "build/plugins"
@@ -122,6 +216,213 @@ std::string describe_errors(const std::vector<PluginLoadError>& errors) {
 bool result_contains_lifecycle_key(const PluginLoadResult& result) {
   return std::find(result.new_op_keys.begin(), result.new_op_keys.end(),
                    kLifecycleKey) != result.new_op_keys.end();
+}
+
+/**
+ * @brief Sets one process environment variable for a bounded fixture load.
+ *
+ * @note Destruction restores the prior value or removes the key. Tests are
+ * process-serial because environment variables are process-global.
+ */
+class ScopedEnvironmentVariable final {
+ public:
+  /**
+   * @brief Installs a process environment value and preserves its predecessor.
+   * @param name Environment key copied for the guard lifetime.
+   * @param value New value visible to the dynamic plugin.
+   * @throws std::runtime_error if the platform environment update fails.
+   * @throws std::bad_alloc if key or previous-value storage cannot allocate.
+   * @note Construction completes only after the replacement is installed.
+   */
+  ScopedEnvironmentVariable(const char* name, const std::string& value)
+      : name_(name) {
+    if (const char* previous = std::getenv(name)) {
+      previous_ = std::string(previous);
+    }
+    set(value);
+  }
+
+  /**
+   * @brief Restores the prior process environment without throwing.
+   * @throws Nothing; platform restoration failures are suppressed.
+   * @note The destructor never changes plugin/registry ownership state.
+   */
+  ~ScopedEnvironmentVariable() {
+    try {
+      if (previous_) {
+        set(*previous_);
+      } else {
+        clear();
+      }
+    } catch (...) {
+      // Test cleanup cannot safely surface an environment restoration failure.
+    }
+  }
+
+  ScopedEnvironmentVariable(const ScopedEnvironmentVariable&) = delete;
+  ScopedEnvironmentVariable& operator=(const ScopedEnvironmentVariable&) =
+      delete;
+
+ private:
+  /**
+   * @brief Replaces the owned environment key.
+   *
+   * @param value New value.
+   * @return Nothing.
+   * @throws std::runtime_error when the platform call fails.
+   * @note The process-global key is the one copied during construction.
+   */
+  void set(const std::string& value) {
+#if defined(_WIN32)
+    if (_putenv_s(name_.c_str(), value.c_str()) != 0) {
+      throw std::runtime_error("_putenv_s failed");
+    }
+#else
+    if (setenv(name_.c_str(), value.c_str(), 1) != 0) {
+      throw std::runtime_error("setenv failed");
+    }
+#endif
+  }
+
+  /**
+   * @brief Removes the owned environment key.
+   *
+   * @return Nothing.
+   * @throws std::runtime_error when the platform call fails.
+   * @note Removal affects process-global state and is used only by this guard.
+   */
+  void clear() {
+#if defined(_WIN32)
+    if (_putenv_s(name_.c_str(), "") != 0) {
+      throw std::runtime_error("_putenv_s clear failed");
+    }
+#else
+    if (unsetenv(name_.c_str()) != 0) {
+      throw std::runtime_error("unsetenv failed");
+    }
+#endif
+  }
+
+  /** @brief Environment key owned for the guard lifetime. */
+  std::string name_;
+  /** @brief Previous value, or nullopt when the key was absent. */
+  std::optional<std::string> previous_;
+};
+
+/**
+ * @brief RAII owner for one current-thread plugin-cleanup allocation failure.
+ * @note The scope owns no heap storage and always disarms before assertions.
+ */
+class ScopedPluginCleanupAllocationFailure final {
+ public:
+  /**
+   * @brief Arms a zero-based allocation failure.
+   * @param allocation_index Allocation to reject.
+   * @throws Nothing.
+   */
+  explicit ScopedPluginCleanupAllocationFailure(
+      std::int64_t allocation_index) noexcept {
+    plugin_cleanup_allocation_probe::arm(allocation_index);
+  }
+
+  /** @brief Disarms allocation injection. */
+  ~ScopedPluginCleanupAllocationFailure() {
+    plugin_cleanup_allocation_probe::disarm();
+  }
+
+  ScopedPluginCleanupAllocationFailure(
+      const ScopedPluginCleanupAllocationFailure&) = delete;
+  ScopedPluginCleanupAllocationFailure& operator=(
+      const ScopedPluginCleanupAllocationFailure&) = delete;
+};
+
+/**
+ * @brief Returns a unique trace path for one lifecycle transaction scenario.
+ *
+ * @param label Stable scenario label used in the filename.
+ * @return Path in GTest's temporary directory.
+ * @throws std::bad_alloc from path/string construction.
+ * @note Existing files are removed by the caller before installing the path in
+ * the dynamic plugin's environment.
+ */
+std::filesystem::path lifecycle_trace_path(const std::string& label) {
+  static std::atomic<unsigned int> sequence{0};
+  return std::filesystem::path(::testing::TempDir()) /
+         ("photospider-lifecycle-" + label + "-" +
+          std::to_string(sequence.fetch_add(1, std::memory_order_relaxed)) +
+          ".log");
+}
+
+/**
+ * @brief Reads newline-delimited lifecycle events emitted by the real plugin.
+ *
+ * @param path Trace file selected through the fixture environment.
+ * @return Events in actual destructor/registrar order.
+ * @throws std::bad_alloc if line/vector storage cannot allocate.
+ * @note A missing file yields an empty vector so the caller reports a focused
+ * assertion rather than an unrelated stream exception.
+ */
+std::vector<std::string> read_lifecycle_trace(
+    const std::filesystem::path& path) {
+  std::vector<std::string> events;
+  std::ifstream input(path);
+  std::string line;
+  while (std::getline(input, line)) {
+    events.push_back(line);
+  }
+  return events;
+}
+
+/**
+ * @brief Checks global registry key presence without copying plugin callbacks.
+ *
+ * @return True when the lifecycle key remains in the canonical key inventory.
+ * @throws std::bad_alloc if registry key enumeration allocation fails.
+ * @note Avoiding `resolve_for_intent` is intentional: a defective loader may
+ * already have unloaded the library behind the stale callable.
+ */
+bool lifecycle_key_is_registered() {
+  const auto keys = OpRegistry::instance().get_combined_keys();
+  return std::find(keys.begin(), keys.end(), kLifecycleKey) != keys.end();
+}
+
+/**
+ * @brief Consumes the currently armed allocation failure after cleanup.
+ *
+ * @return True when the probe still rejected this explicit allocation.
+ * @throws Nothing; `std::bad_alloc` is converted to the boolean result.
+ * @note A true result proves the preceding cleanup performed no C++ dynamic
+ * allocation and therefore did not consume the zero-count failpoint.
+ */
+bool consume_armed_cleanup_allocation_failure() noexcept {
+  try {
+    void* memory = ::operator new(1);
+    ::operator delete(memory);
+  } catch (const std::bad_alloc&) {
+    return true;
+  }
+  return false;
+}
+
+/**
+ * @brief Installs a host-owned callback at the lifecycle plugin's target key.
+ *
+ * @return Nothing.
+ * @throws std::bad_alloc if registry callback or metadata storage cannot grow.
+ * @note A failed candidate load must preserve this exact active callback,
+ * proving strong guarantee for replacement as well as insertion registration.
+ */
+void register_host_lifecycle_sentinel() {
+  OpMetadata metadata;
+  metadata.cost_score = 99;
+  OpRegistry::instance().register_op_hp_monolithic(
+      kLifecycleType, kLifecycleSubtype,
+      [](const Node&, const std::vector<const NodeOutput*>&) {
+        NodeOutput output;
+        output.debug.compute_device = "HOST_LIFECYCLE_SENTINEL";
+        return output;
+      },
+      metadata);
 }
 
 /**
@@ -331,6 +632,220 @@ TEST_F(PluginManagerLifecycleTest,
                    .has_value());
 }
 
+/**
+ * @brief Proves unload-all unwinds a two-plugin override chain in load order.
+ * @throws Nothing when the built-in callback/source are restored exactly.
+ * @note Plugin filenames intentionally sort differently from dependency order.
+ */
+TEST_F(PluginManagerLifecycleTest,
+       UnloadAllRestoresBuiltinThroughReverseLoadOrder) {
+  const auto plugin_path = lifecycle_plugin_path();
+  const auto override_path = override_lifecycle_plugin_path();
+  ASSERT_TRUE(std::filesystem::exists(plugin_path));
+  ASSERT_TRUE(std::filesystem::exists(override_path));
+
+  register_host_lifecycle_sentinel();
+  PluginManager manager;
+  manager.seed_builtins_from_registry();
+
+  const auto first_result =
+      manager.load_from_dirs_report({plugin_path.parent_path().string()});
+  ASSERT_EQ(first_result.loaded, 1) << describe_errors(first_result.errors);
+  ASSERT_EQ(current_lifecycle_compute_device(), "PLUGIN_LIFECYCLE_TEST");
+
+  const auto second_result =
+      manager.load_from_dirs_report({override_path.parent_path().string()});
+  ASSERT_EQ(second_result.loaded, 1) << describe_errors(second_result.errors);
+  ASSERT_EQ(current_lifecycle_compute_device(), "PLUGIN_OVERRIDE_TEST");
+
+  EXPECT_EQ(manager.unload_all_plugins(), 2);
+  EXPECT_EQ(manager.loaded_plugin_count(), 0u);
+  ASSERT_EQ(manager.op_sources().at(kLifecycleKey), "built-in");
+  EXPECT_EQ(current_lifecycle_compute_device(), "HOST_LIFECYCLE_SENTINEL");
+}
+
+/**
+ * @brief Proves explicit unload performs no allocation and preserves lifetime.
+ * @throws Nothing when the armed allocation remains unconsumed.
+ * @note The trace must destroy plugin callable state before library unload.
+ */
+TEST_F(PluginManagerLifecycleTest,
+       UnloadAllAllocatesNothingAndDestroysCallbacksBeforeLibrary) {
+  const auto plugin_path = lifecycle_plugin_path();
+  ASSERT_TRUE(std::filesystem::exists(plugin_path));
+  const auto trace_path = lifecycle_trace_path("unload-all-no-allocation");
+  std::filesystem::remove(trace_path);
+  ScopedEnvironmentVariable trace_environment(kLifecycleTraceEnvironment,
+                                              trace_path.string());
+  PluginManager manager;
+  const auto result =
+      manager.load_from_dirs_report({plugin_path.parent_path().string()});
+  ASSERT_EQ(result.loaded, 1) << describe_errors(result.errors);
+
+  int removed = -1;
+  bool fired_during_cleanup = false;
+  bool failure_remained_armed = false;
+  {
+    ScopedPluginCleanupAllocationFailure failure(0);
+    removed = manager.unload_all_plugins();
+    fired_during_cleanup = plugin_cleanup_allocation_probe::did_fire();
+    failure_remained_armed = consume_armed_cleanup_allocation_failure();
+  }
+
+  EXPECT_EQ(removed, 1);
+  EXPECT_FALSE(fired_during_cleanup);
+  EXPECT_TRUE(failure_remained_armed);
+  EXPECT_EQ(manager.loaded_plugin_count(), 0u);
+  EXPECT_FALSE(lifecycle_key_is_registered());
+  EXPECT_EQ(read_lifecycle_trace(trace_path),
+            (std::vector<std::string>{"registrar_return", "callback_destroy",
+                                      "library_unload"}));
+  std::filesystem::remove(trace_path);
+}
+
+/**
+ * @brief Proves exact-key single-plugin unload is allocation-independent.
+ * @throws Nothing when cleanup leaves the allocation failpoint armed.
+ * @note The exact absolute key is computed before injection and the lifecycle
+ * trace must destroy callable state before releasing the dynamic library.
+ */
+TEST_F(PluginManagerLifecycleTest,
+       ExactKeyUnloadAllocatesNothingAndDestroysCallbacksBeforeLibrary) {
+  const auto plugin_path = lifecycle_plugin_path();
+  ASSERT_TRUE(std::filesystem::exists(plugin_path));
+  const std::string load_key = std::filesystem::absolute(plugin_path).string();
+  const auto trace_path = lifecycle_trace_path("exact-key-no-allocation");
+  std::filesystem::remove(trace_path);
+  ScopedEnvironmentVariable trace_environment(kLifecycleTraceEnvironment,
+                                              trace_path.string());
+  PluginManager manager;
+  const auto result =
+      manager.load_from_dirs_report({plugin_path.parent_path().string()});
+  ASSERT_EQ(result.loaded, 1) << describe_errors(result.errors);
+
+  int removed = -1;
+  bool fired_during_cleanup = false;
+  bool failure_remained_armed = false;
+  {
+    ScopedPluginCleanupAllocationFailure failure(0);
+    removed = manager.unload_by_plugin_path(load_key);
+    fired_during_cleanup = plugin_cleanup_allocation_probe::did_fire();
+    failure_remained_armed = consume_armed_cleanup_allocation_failure();
+  }
+
+  EXPECT_EQ(removed, 1);
+  EXPECT_FALSE(fired_during_cleanup);
+  EXPECT_TRUE(failure_remained_armed);
+  EXPECT_EQ(manager.loaded_plugin_count(), 0u);
+  EXPECT_FALSE(lifecycle_key_is_registered());
+  EXPECT_EQ(read_lifecycle_trace(trace_path),
+            (std::vector<std::string>{"registrar_return", "callback_destroy",
+                                      "library_unload"}));
+  std::filesystem::remove(trace_path);
+}
+
+/**
+ * @brief Proves relative-path normalization failure has a strong guarantee.
+ * @throws Nothing when the injected allocation failure is propagated exactly.
+ * @note The allocation is injected before normalization; registry, source,
+ * result, and retained handle state must remain unchanged.
+ */
+TEST_F(PluginManagerLifecycleTest,
+       RelativePathNormalizationBadAllocLeavesPluginStateUnchanged) {
+  const auto plugin_path = lifecycle_plugin_path();
+  ASSERT_TRUE(std::filesystem::exists(plugin_path));
+  const std::string load_key = std::filesystem::absolute(plugin_path).string();
+  const std::string relative_path =
+      std::filesystem::relative(plugin_path).string();
+  ASSERT_NE(relative_path, load_key);
+  PluginManager manager;
+  const auto result =
+      manager.load_from_dirs_report({plugin_path.parent_path().string()});
+  ASSERT_EQ(result.loaded, 1) << describe_errors(result.errors);
+  ASSERT_EQ(manager.op_sources().at(kLifecycleKey), load_key);
+
+  bool caught_bad_alloc = false;
+  bool allocation_failed = false;
+  {
+    ScopedPluginCleanupAllocationFailure failure(0);
+    try {
+      (void)manager.unload_by_plugin_path(relative_path);
+    } catch (const std::bad_alloc&) {
+      caught_bad_alloc = true;
+    }
+    allocation_failed = plugin_cleanup_allocation_probe::did_fire();
+  }
+
+  EXPECT_TRUE(caught_bad_alloc);
+  EXPECT_TRUE(allocation_failed);
+  EXPECT_EQ(manager.loaded_plugin_count(), 1u);
+  ASSERT_EQ(manager.op_sources().at(kLifecycleKey), load_key);
+  EXPECT_EQ(current_lifecycle_compute_device(), "PLUGIN_LIFECYCLE_TEST");
+  EXPECT_EQ(manager.unload_by_plugin_path(load_key), 1);
+  EXPECT_EQ(manager.loaded_plugin_count(), 0u);
+  EXPECT_FALSE(lifecycle_key_is_registered());
+}
+
+/**
+ * @brief Proves manager destruction is allocation-independent and ordered.
+ * @throws Nothing when cleanup leaves the failpoint armed.
+ * @note This exercises the real `PluginManager` noexcept destructor.
+ */
+TEST_F(PluginManagerLifecycleTest,
+       DestructorAllocatesNothingAndDestroysCallbacksBeforeLibrary) {
+  const auto plugin_path = lifecycle_plugin_path();
+  ASSERT_TRUE(std::filesystem::exists(plugin_path));
+  const auto trace_path = lifecycle_trace_path("destructor-no-allocation");
+  std::filesystem::remove(trace_path);
+  ScopedEnvironmentVariable trace_environment(kLifecycleTraceEnvironment,
+                                              trace_path.string());
+  auto manager = std::make_unique<PluginManager>();
+  const auto result =
+      manager->load_from_dirs_report({plugin_path.parent_path().string()});
+  ASSERT_EQ(result.loaded, 1) << describe_errors(result.errors);
+
+  bool fired_during_cleanup = false;
+  bool failure_remained_armed = false;
+  {
+    ScopedPluginCleanupAllocationFailure failure(0);
+    manager.reset();
+    fired_during_cleanup = plugin_cleanup_allocation_probe::did_fire();
+    failure_remained_armed = consume_armed_cleanup_allocation_failure();
+  }
+
+  EXPECT_FALSE(fired_during_cleanup);
+  EXPECT_TRUE(failure_remained_armed);
+  EXPECT_FALSE(lifecycle_key_is_registered());
+  EXPECT_EQ(read_lifecycle_trace(trace_path),
+            (std::vector<std::string>{"registrar_return", "callback_destroy",
+                                      "library_unload"}));
+  std::filesystem::remove(trace_path);
+}
+
+/**
+ * @brief Reuses one manager across repeated real dynamic load/unload cycles.
+ * @throws Nothing when registry/source/handle state returns to baseline.
+ * @note Twenty iterations expose retained-handle and stale-source leakage.
+ */
+TEST_F(PluginManagerLifecycleTest, RepeatedLoadUnloadPreservesLifecycleState) {
+  constexpr int kIterations = 20;
+  const auto plugin_path = lifecycle_plugin_path();
+  ASSERT_TRUE(std::filesystem::exists(plugin_path));
+  PluginManager manager;
+
+  for (int iteration = 0; iteration < kIterations; ++iteration) {
+    SCOPED_TRACE(iteration);
+    const auto result =
+        manager.load_from_dirs_report({plugin_path.parent_path().string()});
+    ASSERT_EQ(result.loaded, 1) << describe_errors(result.errors);
+    EXPECT_EQ(manager.loaded_plugin_count(), 1u);
+    EXPECT_EQ(current_lifecycle_compute_device(), "PLUGIN_LIFECYCLE_TEST");
+    EXPECT_EQ(manager.unload_all_plugins(), 1);
+    EXPECT_EQ(manager.loaded_plugin_count(), 0u);
+    EXPECT_FALSE(lifecycle_key_is_registered());
+  }
+}
+
 TEST_F(PluginManagerLifecycleTest,
        UnloadShadowedPluginDropsDependentRestorationSnapshot) {
   const auto plugin_path = lifecycle_plugin_path();
@@ -413,5 +928,173 @@ TEST_F(PluginManagerLifecycleTest,
                 "image_process", "invert"),
             PropagationContractStatus::LegacyIdentityFallback);
 }
+
+#if defined(PHOTOSPIDER_INTERNAL_BAD_ALLOC_TESTING)
+TEST_F(PluginManagerLifecycleTest,
+       PostRegistrationBadAllocHasStrongTransactionGuarantee) {
+  using Failpoint = testing::OperationPluginLoadFailpoint;
+  const std::vector<std::pair<Failpoint, std::string>> cases = {
+      {Failpoint::PreviousSource, "previous-source"},
+      {Failpoint::SourceAndResult, "source-result"},
+      {Failpoint::Snapshot, "snapshot"},
+      {Failpoint::HandleCommit, "handle-commit"},
+  };
+  const auto plugin_path = lifecycle_plugin_path();
+  ASSERT_TRUE(std::filesystem::exists(plugin_path));
+
+  for (const auto& [failpoint, label] : cases) {
+    SCOPED_TRACE(label);
+    OpRegistry::instance().unregister_key(kLifecycleKey);
+    register_host_lifecycle_sentinel();
+    std::map<std::string, std::string> op_sources = {
+        {"sentinel:key", "sentinel-source"}};
+    LoadedOpPluginMap loaded_plugins;
+    LoadedOpPlugin sentinel_plugin;
+    sentinel_plugin.registered_keys.push_back("sentinel:key");
+    loaded_plugins.emplace("sentinel-plugin", std::move(sentinel_plugin));
+    PluginLoadResult result;
+    result.attempted = 7;
+    result.loaded = 3;
+    result.errors.push_back(
+        {"sentinel-path", GraphErrc::Unknown, "sentinel-error"});
+    result.new_op_keys.push_back("sentinel:key");
+
+    const auto trace_path = lifecycle_trace_path(label);
+    std::filesystem::remove(trace_path);
+    ScopedEnvironmentVariable trace_environment(kLifecycleTraceEnvironment,
+                                                trace_path.string());
+    testing::set_operation_plugin_load_failpoint(failpoint);
+
+    bool caught_bad_alloc = false;
+    try {
+      testing::load_one_operation_plugin_for_testing(plugin_path, op_sources,
+                                                     loaded_plugins, result);
+    } catch (const std::bad_alloc&) {
+      caught_bad_alloc = true;
+    }
+    const auto failpoint_hits = testing::operation_plugin_load_failpoint_hits();
+    testing::set_operation_plugin_load_failpoint(Failpoint::None);
+
+    const auto trace = read_lifecycle_trace(trace_path);
+    EXPECT_TRUE(caught_bad_alloc);
+    EXPECT_EQ(failpoint_hits, 1u);
+    EXPECT_EQ(op_sources, (std::map<std::string, std::string>{
+                              {"sentinel:key", "sentinel-source"}}));
+    ASSERT_EQ(loaded_plugins.size(), 1u);
+    ASSERT_EQ(loaded_plugins.count("sentinel-plugin"), 1u);
+    EXPECT_EQ(loaded_plugins.at("sentinel-plugin").registered_keys,
+              (std::vector<std::string>{"sentinel:key"}));
+    EXPECT_EQ(result.attempted, 7);
+    EXPECT_EQ(result.loaded, 3);
+    ASSERT_EQ(result.errors.size(), 1u);
+    EXPECT_EQ(result.errors[0].path, "sentinel-path");
+    EXPECT_EQ(result.errors[0].message, "sentinel-error");
+    EXPECT_EQ(result.new_op_keys, (std::vector<std::string>{"sentinel:key"}));
+    EXPECT_TRUE(lifecycle_key_is_registered());
+    EXPECT_EQ(current_lifecycle_compute_device(), "HOST_LIFECYCLE_SENTINEL");
+    EXPECT_EQ(trace,
+              (std::vector<std::string>{"registrar_return", "callback_destroy",
+                                        "library_unload"}));
+    std::cout << "plugin_transaction_trace failpoint=" << label
+              << " bad_alloc=" << caught_bad_alloc << " hits=" << failpoint_hits
+              << " attempted=" << result.attempted
+              << " sources=" << op_sources.size()
+              << " handles=" << loaded_plugins.size()
+              << " active_callback=" << current_lifecycle_compute_device()
+              << " lifecycle=";
+    for (const auto& event : trace) {
+      std::cout << event << ',';
+    }
+    std::cout << '\n';
+    std::filesystem::remove(trace_path);
+    OpRegistry::instance().unregister_key(kLifecycleKey);
+  }
+}
+
+TEST_F(PluginManagerLifecycleTest,
+       ManagerBadAllocDoesNotRetainOrPublishCandidatePlugin) {
+  using Failpoint = testing::OperationPluginLoadFailpoint;
+  const auto plugin_path = lifecycle_plugin_path();
+  ASSERT_TRUE(std::filesystem::exists(plugin_path));
+  const auto trace_path = lifecycle_trace_path("manager-handle-commit");
+  std::filesystem::remove(trace_path);
+  ScopedEnvironmentVariable trace_environment(kLifecycleTraceEnvironment,
+                                              trace_path.string());
+  testing::set_operation_plugin_load_failpoint(Failpoint::HandleCommit);
+
+  PluginManager manager;
+  EXPECT_THROW(
+      manager.load_from_dirs_report({plugin_path.parent_path().string()}),
+      std::bad_alloc);
+  const auto hits = testing::operation_plugin_load_failpoint_hits();
+  testing::set_operation_plugin_load_failpoint(Failpoint::None);
+
+  EXPECT_EQ(hits, 1u);
+  EXPECT_EQ(manager.loaded_plugin_count(), 0u);
+  EXPECT_EQ(manager.op_sources().count(kLifecycleKey), 0u);
+  EXPECT_FALSE(lifecycle_key_is_registered());
+  EXPECT_EQ(read_lifecycle_trace(trace_path),
+            (std::vector<std::string>{"registrar_return", "callback_destroy",
+                                      "library_unload"}));
+  std::cout << "plugin_manager_transaction_trace failpoint=handle-commit"
+            << " hits=" << hits
+            << " retained_handles=" << manager.loaded_plugin_count()
+            << " active_key=" << lifecycle_key_is_registered() << '\n';
+  std::filesystem::remove(trace_path);
+}
+
+TEST_F(PluginManagerLifecycleTest,
+       RegistrarFailuresPreserveOriginalPolicyAndSafeUnloadOrder) {
+  const auto plugin_path = lifecycle_plugin_path();
+  ASSERT_TRUE(std::filesystem::exists(plugin_path));
+
+  {
+    const auto trace_path = lifecycle_trace_path("registrar-runtime");
+    std::filesystem::remove(trace_path);
+    ScopedEnvironmentVariable trace_environment(kLifecycleTraceEnvironment,
+                                                trace_path.string());
+    ScopedEnvironmentVariable throw_environment(kLifecycleThrowEnvironment,
+                                                "runtime_error");
+    PluginManager manager;
+    const auto result =
+        manager.load_from_dirs_report({plugin_path.parent_path().string()});
+    ASSERT_EQ(result.errors.size(), 1u);
+    EXPECT_EQ(result.errors[0].message, "lifecycle registrar runtime failure");
+    EXPECT_EQ(result.loaded, 0);
+    EXPECT_EQ(manager.loaded_plugin_count(), 0u);
+    EXPECT_FALSE(lifecycle_key_is_registered());
+    EXPECT_EQ(read_lifecycle_trace(trace_path),
+              (std::vector<std::string>{"registrar_throw_runtime_error",
+                                        "callback_destroy", "library_unload"}));
+    std::cout << "plugin_registrar_failure_trace mode=runtime_error"
+              << " errors=" << result.errors.size()
+              << " retained_handles=" << manager.loaded_plugin_count()
+              << " active_key=" << lifecycle_key_is_registered() << '\n';
+    std::filesystem::remove(trace_path);
+  }
+
+  {
+    const auto trace_path = lifecycle_trace_path("registrar-bad-alloc");
+    std::filesystem::remove(trace_path);
+    ScopedEnvironmentVariable trace_environment(kLifecycleTraceEnvironment,
+                                                trace_path.string());
+    ScopedEnvironmentVariable throw_environment(kLifecycleThrowEnvironment,
+                                                "bad_alloc");
+    PluginManager manager;
+    EXPECT_THROW(
+        manager.load_from_dirs_report({plugin_path.parent_path().string()}),
+        std::bad_alloc);
+    EXPECT_EQ(manager.loaded_plugin_count(), 0u);
+    EXPECT_FALSE(lifecycle_key_is_registered());
+    EXPECT_EQ(read_lifecycle_trace(trace_path),
+              (std::vector<std::string>{"registrar_throw_bad_alloc",
+                                        "callback_destroy", "library_unload"}));
+    std::cout << "plugin_registrar_failure_trace mode=bad_alloc"
+              << " retained_handles=" << manager.loaded_plugin_count()
+              << " active_key=" << lifecycle_key_is_registered() << '\n';
+    std::filesystem::remove(trace_path);
+  }
+}
+#endif
 
 }  // namespace ps

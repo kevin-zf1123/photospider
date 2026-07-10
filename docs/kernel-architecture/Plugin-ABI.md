@@ -94,6 +94,39 @@ The standard example plugins follow this rule:
 | `io:save` | HP monolithic side-effect sink | Explicit pass-through planning metadata; execution rewrites the full file. |
 | `image_generator:perlin_noise_metal` | HP monolithic Metal generator | Explicit generator-local pass-through ROI metadata; tiled Metal execution is not enabled. |
 
+## Operation Plugin Load Transaction
+
+Loading one operation plugin is a strong transaction over all observable
+loader state. Before invoking `register_photospider_ops_v1`, the loader creates
+staged copies of the target `OpRegistry`, operation-source map, structured load
+result, and retained-handle map. The host-provided registrar points at the
+staged registry, so plugin callbacks never mutate the active registry during
+registration. Registration capture, previous-source calculation, restoration
+snapshots, result aggregation, and handle insertion also mutate only staged
+state.
+
+The transaction has three outcomes:
+
+- If the registrar or any later staging step throws `std::bad_alloc`, the
+  exact exception propagates. Registry callbacks, sources, diagnostics, and
+  retained handles remain byte-for-byte logically equivalent to their
+  pre-candidate state.
+- If the registrar throws another standard exception, the loader commits only
+  the structured diagnostic for that candidate. No callback, source,
+  restoration snapshot, or handle becomes active.
+- After every staging allocation succeeds, commit first swaps the candidate
+  library into the retained-handle map, then swaps source/result state, and
+  publishes the full registry last. These operations are required to be
+  `noexcept`; there is no allocating rollback path.
+
+The candidate library is the transaction object's first-owned member and is
+therefore destroyed last. On any failed registration, staged registry callback
+objects and their captured plugin-owned state are destroyed before the dynamic
+library is unmapped. On success, the retained handle is visible before the
+registry containing plugin callbacks becomes active. These two ordering rules
+prevent both failure-path destructor calls into an unloaded library and
+success-path callbacks without a live handle.
+
 ## Operation Plugin Library Lifetime
 
 Operation callbacks registered by a plugin may point to code or callable
@@ -104,11 +137,29 @@ can be resolved from `OpRegistry`.
 `PluginManager` owns operation plugin handles. A successful load records the
 absolute plugin path, the operation keys registered or replaced through the
 host-provided registrar, the previous registry/source state for those keys, and
-a retained RAII library handle. Unload first removes the plugin's callbacks
-from `OpRegistry`, restores any previous implementation that the plugin
-replaced, then releases the retained handle. This ordering prevents the
-registry from exposing callbacks whose code has already been unmapped while
-still allowing overriding plugins to be unloaded cleanly.
+a retained RAII library handle. It also records a monotonic successful-load
+sequence. Unload consumes only those preallocated keys and snapshots: existing
+registry callbacks and source strings are swapped in place or erased, with no
+temporary key collection, callback copy, or allocating rollback. The manager's
+destructor and `unload_all_plugins()` are therefore `noexcept` cleanup paths
+even when global allocation is failing.
+
+`unload_by_plugin_path()` first tries the exact absolute key recorded by the
+successful load. That lookup and the following cleanup are allocation-free, so
+callers that retain the reported source key get the same cleanup guarantee as
+unload-all and destruction. Relative or otherwise non-normalized input remains
+a convenience API: `std::filesystem::absolute` and string construction may
+allocate before cleanup begins. If that normalization fails, the original
+exception propagates before registry, source, result, or retained-handle state
+changes.
+
+Unload first removes or restores every callback and source record, destroys the
+removed plugin callable state while the library is still mapped, and only then
+releases the retained handle. `unload_all_plugins()` walks successful loads in
+strict reverse sequence so a built-in-to-old-plugin-to-new-plugin override
+chain unwinds as new plugin, old plugin, then built-in. Path sorting is not a
+valid unload order because each newer snapshot depends on the immediately
+preceding implementation.
 
 If an older plugin has already been shadowed by a newer plugin, unloading the
 older plugin may remove no active operation keys. `PluginManager` still clears
@@ -153,6 +204,13 @@ creation. A plugin that exports valid C symbols and returns an `IScheduler`
 which does not also implement `SchedulerTaskRuntime` can be discovered, but it
 will be rejected when the host tries to instantiate that scheduler type.
 
+The host lifetime owner is a transparent runtime wrapper. It forwards
+`available_devices()` plus every current callback and borrowed-`TaskHandle`
+single/batch submission method directly to the plugin instance. It must not
+fall back to `SchedulerTaskRuntime` base implementations, because doing so can
+replace a plugin's CPU/Metal device inventory, split an atomic batch into
+per-item submissions, change task ordering, or alter exception identity.
+
 This is part of the current transitional C++ ABI. Plugin authors should inherit
 both interfaces in the concrete scheduler class until the long-term pure C ABI
 replaces this requirement.
@@ -164,6 +222,32 @@ destroy function. The loader must not rely on default C++ deletion for
 plugin-created instances.
 
 This rule avoids allocator, runtime, and dynamic-library boundary problems.
+
+Immediately after a non-null create result, the loader installs a non-allocating
+stack guard containing the raw instance, destroy function, and shared library
+lifetime. The guard remains active through `SchedulerTaskRuntime` validation,
+heap allocation of the host owner, and copied type-name construction. If owner
+allocation or string copy throws `std::bad_alloc` (or any other construction
+exception), the guard calls plugin destroy exactly once and keeps the library
+mapped until that call returns. Ownership transfers only after the complete
+host owner has been constructed.
+
+The completed host owner has a `noexcept` destructor. Destruction first clears
+its host-side raw/runtime pointers, then attempts `shutdown()` and `detach()`
+behind two independent catch-all fences. Failure in either lifecycle call,
+including `std::bad_alloc`, cannot skip the later stage. The owner then calls
+the plugin destroy export exactly once behind a third no-throw ABI fence. A
+throwing destroy export is not retried because the host cannot know whether the
+plugin already ended or partially ended the object lifetime. The shared library
+lifetime is released only after that single destroy attempt returns, so
+`shutdown`, `detach`, destroy, and any plugin-side destructor code all execute
+while the library remains mapped.
+
+These fences apply only to destructor fallback and raw-owner construction
+cleanup. Explicit `attach`, `start`, `shutdown`, and `detach` calls preserve and
+propagate plugin exceptions to their caller. This distinction keeps the public
+lifecycle contract observable while preventing a hostile plugin from
+terminating the process during host destruction.
 
 The scheduler plugin library must remain loaded while any scheduler instance
 created by that plugin may still exist.

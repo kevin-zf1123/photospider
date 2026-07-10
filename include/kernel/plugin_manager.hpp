@@ -31,18 +31,23 @@ class PluginManager {
   /**
    * @brief Unregisters plugin operations and releases handles at destruction.
    *
-   * @throws Nothing; unload failures are reduced to best-effort registry
-   * removal counts.
-   * @note This keeps plugin callbacks from outliving their dynamic libraries
-   * when a `Kernel` or test fixture tears down without explicit unload.
+   * @throws Nothing. Cleanup uses only load-time keys/snapshots, in-place
+   * callback/source swaps, erasure, and reverse-sequence traversal.
+   * @note Every callback and metadata record is removed or restored before its
+   * dynamic-library handle is released, even if global allocation is failing
+   * while a `Kernel` or test fixture tears down.
    */
-  ~PluginManager();
+  ~PluginManager() noexcept;
 
   /**
    * @brief Loads operation plugins from directory patterns.
    *
    * @param dir_patterns Directories or trailing-star patterns to scan for
    * platform shared libraries.
+   * @return Nothing.
+   * @throws std::bad_alloc if path, result, registry, or plugin handle storage
+   *         exhausts memory.
+   * @throws std::overflow_error if successful-load sequence space is exhausted.
    * @throws std::filesystem_error when iteration fails for an existing
    * directory.
    * @note Errors are discarded by this convenience wrapper; callers needing
@@ -56,10 +61,16 @@ class PluginManager {
    * @param dir_patterns Directories or trailing-star patterns to scan.
    * @return Load result containing attempted files, successful libraries,
    * keys registered or replaced by plugins, and per-plugin errors.
+   * @throws std::bad_alloc if path, result, registry, or plugin handle storage
+   *         exhausts memory.
+   * @throws std::overflow_error if successful-load sequence space is exhausted.
    * @throws std::filesystem_error when iteration fails for an existing
    * directory.
    * @note Successful plugin handles are retained by this manager until the
-   * plugin is unloaded or the manager is destroyed.
+   * plugin is unloaded or the manager is destroyed. A candidate allocation
+   * failure leaves registry, source map, report prefix, and handle map
+   * unchanged for that candidate; previously committed candidates remain
+   * loaded.
    */
   PluginLoadResult load_from_dirs_report(
       const std::vector<std::string>& dir_patterns);
@@ -67,9 +78,11 @@ class PluginManager {
   /**
    * @brief Records current built-in operation keys as `"built-in"` sources.
    *
-   * @throws Exceptions from built-in registration or registry allocation may
-   * propagate except for duplicate registration failures intentionally ignored
-   * by the implementation.
+   * @return Nothing.
+   * @throws std::bad_alloc if built-in registration or source-map population
+   *         exhausts memory.
+   * @throws Exceptions from source-map population after best-effort built-in
+   *         registration; non-resource registration failures are ignored.
    * @note This method does not load dynamic libraries and does not overwrite
    * existing plugin source entries.
    */
@@ -81,12 +94,17 @@ class PluginManager {
    * @param absolute_plugin_path Plugin path to unload. Relative inputs are
    * normalized with `std::filesystem::absolute` for convenience.
    * @return Number of operation keys removed from `OpRegistry`.
+   * @throws std::bad_alloc if a relative or non-normalized path requires
+   * convenience normalization and that normalization cannot allocate. No
+   * manager state has changed when this exception propagates.
    * @throws std::filesystem_error when path normalization fails.
-   * @note The retained dynamic library handle is released only after registry
-   * callbacks from that plugin have been removed and previous callbacks, if
-   * any, have been restored. If the plugin was already shadowed by a later
-   * plugin and owns no active keys, dependent restoration snapshots are still
-   * cleared before releasing the handle.
+   * @note Passing the exact absolute key recorded at load time takes a direct,
+   * allocation-free lookup and cleanup path. The retained dynamic library
+   * handle is released only after registry callbacks from that plugin have
+   * been removed and previous callbacks, if any, have been restored. If the
+   * plugin was already shadowed by a later plugin and owns no active keys,
+   * dependent restoration snapshots are still cleared before releasing the
+   * handle.
    */
   int unload_by_plugin_path(const std::string& absolute_plugin_path);
 
@@ -94,11 +112,13 @@ class PluginManager {
    * @brief Unloads all dynamic operation plugins while preserving built-ins.
    *
    * @return Number of operation keys removed from `OpRegistry`.
-   * @throws Nothing under current path and registry behavior.
-   * @note The method clears both source mappings and retained library handles
-   * for plugin paths.
+   * @throws Nothing. Unload consumes keys, source snapshots, registry
+   * snapshots, and load sequences allocated during successful load.
+   * @note Plugins are unwound in reverse successful-load order. Each plugin's
+   * callbacks and metadata are removed or restored before its retained handle
+   * is released, including during global allocation failure and destruction.
    */
-  int unload_all_plugins();
+  int unload_all_plugins() noexcept;
 
   /**
    * @brief Returns registered operation keys and their source labels.

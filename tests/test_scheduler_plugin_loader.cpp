@@ -4,14 +4,23 @@
 #include <gtest/gtest.h>
 
 #include <algorithm>
+#include <atomic>
+#include <cstdint>
+#include <cstdlib>
 #include <filesystem>
+#include <fstream>
 #include <iostream>
+#include <new>
+#include <optional>
+#include <stdexcept>
 #include <string>
+#include <utility>
 #include <vector>
 
 #include "kernel/scheduler/scheduler_factory.hpp"
 #include "kernel/scheduler/scheduler_plugin_api.hpp"
 #include "kernel/scheduler/scheduler_plugin_loader.hpp"
+#include "kernel/scheduler/scheduler_task_runtime.hpp"
 
 #ifdef _WIN32
 #include <windows.h>
@@ -19,8 +28,323 @@
 #include <dlfcn.h>
 #endif
 
+namespace scheduler_owner_allocation_probe {
+
+/** @brief Disabled allocation countdown sentinel. */
+constexpr std::int64_t kDisabled = -1;
+/** @brief Per-thread zero-based allocation countdown. */
+thread_local std::int64_t countdown = kDisabled;
+/** @brief Whether the armed one-shot allocation failure fired. */
+thread_local bool fired = false;
+
+/**
+ * @brief Arms one deterministic allocation failure on the current thread.
+ * @param allocation_index Zero-based allocation to reject.
+ * @return Nothing.
+ * @throws Nothing.
+ */
+void arm(std::int64_t allocation_index) noexcept {
+  countdown = allocation_index;
+  fired = false;
+}
+
+/** @brief Disarms the current-thread allocation failure. */
+void disarm() noexcept {
+  countdown = kDisabled;
+}
+
+/** @brief Returns whether the most recently armed failure fired. */
+bool did_fire() noexcept {
+  return fired;
+}
+
+/**
+ * @brief Applies the current allocation failure decision.
+ * @return Nothing when allocation may continue.
+ * @throws std::bad_alloc at the selected allocation index.
+ */
+void maybe_fail() {
+  if (countdown < 0) {
+    return;
+  }
+  if (countdown == 0) {
+    countdown = kDisabled;
+    fired = true;
+    throw std::bad_alloc{};
+  }
+  --countdown;
+}
+
+}  // namespace scheduler_owner_allocation_probe
+
+/**
+ * @brief Test-executable allocation operator for scheduler-owner probes.
+ * @param size Requested allocation size.
+ * @return malloc-backed storage.
+ * @throws std::bad_alloc when injected or malloc fails.
+ */
+void* operator new(std::size_t size) {
+  scheduler_owner_allocation_probe::maybe_fail();
+  if (void* memory = std::malloc(size == 0 ? 1 : size)) {
+    return memory;
+  }
+  throw std::bad_alloc{};
+}
+
+/** @copydoc operator new(std::size_t) */
+void* operator new[](std::size_t size) {
+  return ::operator new(size);
+}
+
+/** @brief Releases scalar storage allocated by the test operator. */
+void operator delete(void* memory) noexcept {
+  std::free(memory);
+}
+/** @brief Releases array storage allocated by the test operator. */
+void operator delete[](void* memory) noexcept {
+  std::free(memory);
+}
+/** @brief Releases sized scalar storage allocated by the test operator. */
+void operator delete(void* memory, std::size_t) noexcept {
+  std::free(memory);
+}
+/** @brief Releases sized array storage allocated by the test operator. */
+void operator delete[](void* memory, std::size_t) noexcept {
+  std::free(memory);
+}
+
 namespace ps {
 namespace {
+
+constexpr const char* kLongDestroyCountSchedulerType =                 // NOLINT
+    "destroy_count_scheduler_type_long_enough_to_force_owned_string_"  // NOLINT
+    "storage";                                                         // NOLINT
+/** @brief Fixture environment key selecting lifecycle trace output. */
+constexpr const char* kDestroyCountTraceEnvironment =
+    "PS_DESTROY_COUNT_SCHEDULER_TRACE";  // NOLINT
+/** @brief Fixture environment key selecting injected lifecycle failures. */
+constexpr const char* kDestroyCountFailureEnvironment =
+    "PS_DESTROY_COUNT_SCHEDULER_FAILURE";  // NOLINT
+
+/**
+ * @brief Mirrors the destroy-count plugin's fixture-only forwarding counters.
+ * @note Values form a private test protocol consumed only through
+ * `ps_test_scheduler_forwarding_count` while the fixture library is loaded.
+ */
+enum class SchedulerForwardingProbe : int {
+  /** @brief Plugin runtime device-inventory calls. */
+  AvailableDevices = 0,
+  /** @brief Plugin runtime initial handle-batch calls. */
+  InitialHandles,
+  /** @brief Plugin runtime single worker-handle calls. */
+  WorkerHandle,
+  /** @brief Plugin runtime worker handle-batch calls. */
+  WorkerHandles,
+  /** @brief Plugin runtime single any-thread handle calls. */
+  AnyThreadHandle,
+  /** @brief Plugin runtime any-thread handle-batch calls. */
+  AnyThreadHandles,
+  /** @brief Closure submissions indicating an incorrect owner fallback. */
+  ClosureFallback,
+};
+
+/**
+ * @brief Counts real TaskHandle callbacks executed by the plugin fixture.
+ * @note The synchronous fixture invokes this executor on the calling test
+ * thread, so plain integer fields are sufficient.
+ */
+class CountingTaskExecutor final : public TaskExecutor {
+ public:
+  /**
+   * @brief Records one executed dense task id.
+   * @param task_id Dense id forwarded by `TaskHandle::run()`.
+   * @return Nothing.
+   * @throws Nothing.
+   * @note Count and sum together detect missing, duplicate, or unexpected test
+   * callbacks without allocating trace storage.
+   */
+  void run_task(int task_id) override {
+    ++callback_count_;
+    task_id_sum_ += task_id;
+  }
+
+  /**
+   * @brief Returns the number of callbacks observed so far.
+   * @return Synchronous callback count.
+   * @throws Nothing.
+   */
+  int callback_count() const noexcept { return callback_count_; }
+
+  /**
+   * @brief Returns the sum of executed dense task ids.
+   * @return Accumulated task-id sum.
+   * @throws Nothing.
+   */
+  int task_id_sum() const noexcept { return task_id_sum_; }
+
+ private:
+  /** @brief Number of real `run_task` calls. */
+  int callback_count_ = 0;
+  /** @brief Sum of real task ids used to detect duplicates or omissions. */
+  int task_id_sum_ = 0;
+};
+
+/**
+ * @brief Reads one named forwarding counter through the fixture C export.
+ * @param read_count Resolved fixture counter function.
+ * @param probe Counter slot to read.
+ * @return Current fixture call count for `probe`.
+ * @throws Nothing.
+ */
+int forwarding_probe_count(int (*read_count)(int),
+                           SchedulerForwardingProbe probe) noexcept {
+  return read_count(static_cast<int>(probe));
+}
+
+/**
+ * @brief Sets one process environment value for a bounded fixture scenario.
+ *
+ * @note Destruction restores the prior value or removes the key. Tests using
+ * this guard are process-serial because environment variables are global.
+ */
+class ScopedSchedulerFixtureEnvironment final {
+ public:
+  /**
+   * @brief Installs one fixture environment value and saves its predecessor.
+   * @param name Environment key copied for the guard lifetime.
+   * @param value New value visible to the dynamic scheduler plugin.
+   * @throws std::runtime_error when the platform environment update fails.
+   * @throws std::bad_alloc if owned key or previous-value storage cannot grow.
+   */
+  ScopedSchedulerFixtureEnvironment(const char* name, const std::string& value)
+      : name_(name) {
+    if (const char* previous = std::getenv(name)) {
+      previous_ = std::string(previous);
+    }
+    set(value);
+  }
+
+  /**
+   * @brief Restores the predecessor without throwing from test cleanup.
+   * @throws Nothing; restoration failures are intentionally suppressed.
+   */
+  ~ScopedSchedulerFixtureEnvironment() noexcept {
+    try {
+      if (previous_) {
+        set(*previous_);
+      } else {
+        clear();
+      }
+    } catch (...) {
+      // Process-global test cleanup cannot safely surface restoration failure.
+    }
+  }
+
+  ScopedSchedulerFixtureEnvironment(const ScopedSchedulerFixtureEnvironment&) =
+      delete;
+  ScopedSchedulerFixtureEnvironment& operator=(
+      const ScopedSchedulerFixtureEnvironment&) = delete;
+
+ private:
+  /**
+   * @brief Replaces the owned environment key with `value`.
+   * @param value New process-global value.
+   * @return Nothing.
+   * @throws std::runtime_error when the platform update fails.
+   */
+  void set(const std::string& value) {
+#if defined(_WIN32)
+    if (_putenv_s(name_.c_str(), value.c_str()) != 0) {
+      throw std::runtime_error("_putenv_s failed");
+    }
+#else
+    if (setenv(name_.c_str(), value.c_str(), 1) != 0) {
+      throw std::runtime_error("setenv failed");
+    }
+#endif
+  }
+
+  /**
+   * @brief Removes the owned environment key.
+   * @return Nothing.
+   * @throws std::runtime_error when the platform update fails.
+   */
+  void clear() {
+#if defined(_WIN32)
+    if (_putenv_s(name_.c_str(), "") != 0) {
+      throw std::runtime_error("_putenv_s clear failed");
+    }
+#else
+    if (unsetenv(name_.c_str()) != 0) {
+      throw std::runtime_error("unsetenv failed");
+    }
+#endif
+  }
+
+  /** @brief Environment key retained for restoration. */
+  std::string name_;
+  /** @brief Previous value, or nullopt when the key was initially absent. */
+  std::optional<std::string> previous_;
+};
+
+/**
+ * @brief Returns a unique path for one scheduler-owner lifecycle trace.
+ * @param label Stable scenario label included in the filename.
+ * @return Path in GoogleTest's temporary directory.
+ * @throws std::bad_alloc from path/string construction.
+ */
+std::filesystem::path scheduler_owner_trace_path(const std::string& label) {
+  static std::atomic<unsigned int> sequence{0};
+  return std::filesystem::path(::testing::TempDir()) /
+         ("photospider-scheduler-owner-" + label + "-" +
+          std::to_string(sequence.fetch_add(1, std::memory_order_relaxed)) +
+          ".log");
+}
+
+/**
+ * @brief Reads newline-delimited events emitted by the real scheduler fixture.
+ * @param path Trace file selected through the fixture environment.
+ * @return Events in actual lifecycle and final-unload order.
+ * @throws std::bad_alloc if line/vector storage cannot allocate.
+ * @note A missing trace returns an empty vector for a focused assertion.
+ */
+std::vector<std::string> read_scheduler_owner_trace(
+    const std::filesystem::path& path) {
+  std::vector<std::string> events;
+  std::ifstream input(path);
+  std::string line;
+  while (std::getline(input, line)) {
+    events.push_back(line);
+  }
+  return events;
+}
+
+/**
+ * @brief RAII owner for one current-thread allocation failpoint.
+ * @note Assertions run after destruction so GoogleTest allocation is normal.
+ */
+class ScopedSchedulerOwnerAllocationFailure final {
+ public:
+  /**
+   * @brief Arms a zero-based allocation failure.
+   * @param allocation_index Allocation to reject.
+   * @throws Nothing.
+   */
+  explicit ScopedSchedulerOwnerAllocationFailure(
+      std::int64_t allocation_index) noexcept {
+    scheduler_owner_allocation_probe::arm(allocation_index);
+  }
+
+  /** @brief Disarms the current-thread failpoint. */
+  ~ScopedSchedulerOwnerAllocationFailure() {
+    scheduler_owner_allocation_probe::disarm();
+  }
+
+  ScopedSchedulerOwnerAllocationFailure(
+      const ScopedSchedulerOwnerAllocationFailure&) = delete;
+  ScopedSchedulerOwnerAllocationFailure& operator=(
+      const ScopedSchedulerOwnerAllocationFailure&) = delete;
+};
 
 #ifndef PS_SCHEDULER_PLUGIN_DIR
 #define PS_SCHEDULER_PLUGIN_DIR "build/schedulers"
@@ -325,6 +649,453 @@ TEST_F(SchedulerPluginLoaderTest, PluginSchedulerUsesPluginDestroyAfterClear) {
   scheduler.reset();
   EXPECT_EQ(active_count(), 0);
   EXPECT_EQ(destroy_count(), 1);
+
+#ifdef _WIN32
+  FreeLibrary(test_handle);
+#else
+  dlclose(test_handle);
+#endif
+}
+
+/**
+ * @brief Verifies the host owner forwards every current non-pure runtime API.
+ * @return Nothing.
+ * @throws Nothing when device discovery and all native TaskHandle calls reach
+ * the real plugin overrides without closure fallback.
+ * @note Fixture counters prove which dynamic virtual functions ran; callback
+ * count and task-id sum prove the supplied handles executed exactly once.
+ */
+TEST_F(SchedulerPluginLoaderTest,
+       OwnerForwardsDevicesAndEveryTaskHandleOverride) {
+  auto& loader = SchedulerPluginLoader::instance();
+  const auto plugin_path =
+      scheduler_plugin_path("destroy_count_scheduler_plugin", true);
+  ASSERT_TRUE(std::filesystem::exists(plugin_path));
+
+#ifdef _WIN32
+  HMODULE test_handle = LoadLibrary(plugin_path.string().c_str());
+  ASSERT_NE(test_handle, nullptr);
+  auto reset_counts = reinterpret_cast<void (*)()>(
+      GetProcAddress(test_handle, "ps_test_scheduler_reset_counts"));
+  auto read_forwarding_count = reinterpret_cast<int (*)(int)>(
+      GetProcAddress(test_handle, "ps_test_scheduler_forwarding_count"));
+#else
+  void* test_handle = dlopen(plugin_path.string().c_str(), RTLD_LAZY);
+  ASSERT_NE(test_handle, nullptr) << dlerror();
+  auto reset_counts = reinterpret_cast<void (*)()>(
+      dlsym(test_handle, "ps_test_scheduler_reset_counts"));
+  auto read_forwarding_count = reinterpret_cast<int (*)(int)>(
+      dlsym(test_handle, "ps_test_scheduler_forwarding_count"));
+#endif
+  ASSERT_NE(reset_counts, nullptr);
+  ASSERT_NE(read_forwarding_count, nullptr);
+  ASSERT_TRUE(loader.load_plugin(plugin_path));
+  reset_counts();
+
+  auto scheduler = loader.create("destroy_count_test", 0);
+  ASSERT_NE(scheduler, nullptr);
+  auto* runtime = dynamic_cast<SchedulerTaskRuntime*>(scheduler.get());
+  ASSERT_NE(runtime, nullptr);
+
+  EXPECT_EQ(runtime->available_devices(),
+            (std::vector<Device>{Device::CPU, Device::GPU_METAL}));
+
+  CountingTaskExecutor executor;
+  std::vector<TaskHandle> initial_handles{TaskHandle{&executor, 1, 101},
+                                          TaskHandle{&executor, 2, 102}};
+  runtime->submit_initial_task_handles(std::move(initial_handles), 2,
+                                       SchedulerTaskPriority::High);
+  runtime->submit_ready_task_handle_from_worker(TaskHandle{&executor, 3, 103},
+                                                SchedulerTaskPriority::Normal);
+
+  std::vector<TaskHandle> worker_handles{TaskHandle{&executor, 4, 104},
+                                         TaskHandle{&executor, 5, 105}};
+  runtime->submit_ready_task_handles_from_worker(std::move(worker_handles),
+                                                 SchedulerTaskPriority::High);
+  runtime->submit_ready_task_handle_any_thread(TaskHandle{&executor, 6, 106},
+                                               SchedulerTaskPriority::Normal,
+                                               std::uint64_t{41});
+
+  std::vector<TaskHandle> any_thread_handles{TaskHandle{&executor, 7, 107},
+                                             TaskHandle{&executor, 8, 108}};
+  runtime->submit_ready_task_handles_any_thread(std::move(any_thread_handles),
+                                                SchedulerTaskPriority::High,
+                                                std::uint64_t{42});
+
+  EXPECT_EQ(executor.callback_count(), 8);
+  EXPECT_EQ(executor.task_id_sum(), 36);
+  EXPECT_EQ(forwarding_probe_count(read_forwarding_count,
+                                   SchedulerForwardingProbe::AvailableDevices),
+            1);
+  EXPECT_EQ(forwarding_probe_count(read_forwarding_count,
+                                   SchedulerForwardingProbe::InitialHandles),
+            1);
+  EXPECT_EQ(forwarding_probe_count(read_forwarding_count,
+                                   SchedulerForwardingProbe::WorkerHandle),
+            1);
+  EXPECT_EQ(forwarding_probe_count(read_forwarding_count,
+                                   SchedulerForwardingProbe::WorkerHandles),
+            1);
+  EXPECT_EQ(forwarding_probe_count(read_forwarding_count,
+                                   SchedulerForwardingProbe::AnyThreadHandle),
+            1);
+  EXPECT_EQ(forwarding_probe_count(read_forwarding_count,
+                                   SchedulerForwardingProbe::AnyThreadHandles),
+            1);
+  EXPECT_EQ(forwarding_probe_count(read_forwarding_count,
+                                   SchedulerForwardingProbe::ClosureFallback),
+            0);
+
+  scheduler.reset();
+  loader.clear_plugins();
+#ifdef _WIN32
+  FreeLibrary(test_handle);
+#else
+  dlclose(test_handle);
+#endif
+}
+
+/**
+ * @brief Verifies plugin batch bad_alloc crosses the owner before callbacks.
+ * @return Nothing.
+ * @throws Nothing when every native handle-batch override propagates
+ * `std::bad_alloc` and executes zero borrowed handles.
+ * @note Per-method fixture counters distinguish direct batch forwarding from
+ * the base class's repeated single-handle fallback.
+ */
+TEST_F(SchedulerPluginLoaderTest,
+       OwnerPreservesBatchBadAllocBeforeAnyTaskHandleCallback) {
+  auto& loader = SchedulerPluginLoader::instance();
+  const auto plugin_path =
+      scheduler_plugin_path("destroy_count_scheduler_plugin", true);
+  ASSERT_TRUE(std::filesystem::exists(plugin_path));
+
+#ifdef _WIN32
+  HMODULE test_handle = LoadLibrary(plugin_path.string().c_str());
+  ASSERT_NE(test_handle, nullptr);
+  auto reset_counts = reinterpret_cast<void (*)()>(
+      GetProcAddress(test_handle, "ps_test_scheduler_reset_counts"));
+  auto read_forwarding_count = reinterpret_cast<int (*)(int)>(
+      GetProcAddress(test_handle, "ps_test_scheduler_forwarding_count"));
+#else
+  void* test_handle = dlopen(plugin_path.string().c_str(), RTLD_LAZY);
+  ASSERT_NE(test_handle, nullptr) << dlerror();
+  auto reset_counts = reinterpret_cast<void (*)()>(
+      dlsym(test_handle, "ps_test_scheduler_reset_counts"));
+  auto read_forwarding_count = reinterpret_cast<int (*)(int)>(
+      dlsym(test_handle, "ps_test_scheduler_forwarding_count"));
+#endif
+  ASSERT_NE(reset_counts, nullptr);
+  ASSERT_NE(read_forwarding_count, nullptr);
+  ASSERT_TRUE(loader.load_plugin(plugin_path));
+  reset_counts();
+
+  auto scheduler = loader.create("destroy_count_test", 0);
+  ASSERT_NE(scheduler, nullptr);
+  auto* runtime = dynamic_cast<SchedulerTaskRuntime*>(scheduler.get());
+  ASSERT_NE(runtime, nullptr);
+  CountingTaskExecutor executor;
+
+  {
+    ScopedSchedulerFixtureEnvironment failures(kDestroyCountFailureEnvironment,
+                                               "handle_batch_bad_alloc");
+    std::vector<TaskHandle> initial_handles{TaskHandle{&executor, 1, 101},
+                                            TaskHandle{&executor, 2, 102}};
+    EXPECT_THROW(
+        runtime->submit_initial_task_handles(std::move(initial_handles), 2,
+                                             SchedulerTaskPriority::High),
+        std::bad_alloc);
+
+    std::vector<TaskHandle> worker_handles{TaskHandle{&executor, 3, 103},
+                                           TaskHandle{&executor, 4, 104}};
+    EXPECT_THROW(runtime->submit_ready_task_handles_from_worker(
+                     std::move(worker_handles), SchedulerTaskPriority::Normal),
+                 std::bad_alloc);
+
+    std::vector<TaskHandle> any_thread_handles{TaskHandle{&executor, 5, 105},
+                                               TaskHandle{&executor, 6, 106}};
+    EXPECT_THROW(runtime->submit_ready_task_handles_any_thread(
+                     std::move(any_thread_handles), SchedulerTaskPriority::High,
+                     std::uint64_t{43}),
+                 std::bad_alloc);
+  }
+
+  EXPECT_EQ(executor.callback_count(), 0);
+  EXPECT_EQ(executor.task_id_sum(), 0);
+  EXPECT_EQ(forwarding_probe_count(read_forwarding_count,
+                                   SchedulerForwardingProbe::InitialHandles),
+            1);
+  EXPECT_EQ(forwarding_probe_count(read_forwarding_count,
+                                   SchedulerForwardingProbe::WorkerHandles),
+            1);
+  EXPECT_EQ(forwarding_probe_count(read_forwarding_count,
+                                   SchedulerForwardingProbe::AnyThreadHandles),
+            1);
+  EXPECT_EQ(forwarding_probe_count(read_forwarding_count,
+                                   SchedulerForwardingProbe::WorkerHandle),
+            0);
+  EXPECT_EQ(forwarding_probe_count(read_forwarding_count,
+                                   SchedulerForwardingProbe::AnyThreadHandle),
+            0);
+  EXPECT_EQ(forwarding_probe_count(read_forwarding_count,
+                                   SchedulerForwardingProbe::ClosureFallback),
+            0);
+
+  scheduler.reset();
+  loader.clear_plugins();
+#ifdef _WIN32
+  FreeLibrary(test_handle);
+#else
+  dlclose(test_handle);
+#endif
+}
+
+/**
+ * @brief Verifies explicit lifecycle calls preserve plugin exception identity.
+ * @throws Nothing when the owner delegates without applying destructor fences.
+ * @note The failure environment is restored before owner destruction so this
+ * test isolates the ordinary caller-visible API path from fallback cleanup.
+ */
+TEST_F(SchedulerPluginLoaderTest,
+       ExplicitLifecycleCallsPropagatePluginExceptions) {
+  auto& loader = SchedulerPluginLoader::instance();
+  const auto plugin_path =
+      scheduler_plugin_path("destroy_count_scheduler_plugin", true);
+  ASSERT_TRUE(std::filesystem::exists(plugin_path));
+  ASSERT_TRUE(loader.load_plugin(plugin_path));
+  auto scheduler = loader.create("destroy_count_test", 0);
+  ASSERT_NE(scheduler, nullptr);
+
+  {
+    ScopedSchedulerFixtureEnvironment failures(kDestroyCountFailureEnvironment,
+                                               "all");
+    EXPECT_THROW(scheduler->shutdown(), std::runtime_error);
+    EXPECT_THROW(scheduler->detach(), std::bad_alloc);
+  }
+
+  scheduler.reset();
+  loader.clear_plugins();
+}
+
+/**
+ * @brief Exercises hostile lifecycle and destroy exceptions during destruction.
+ * @throws Nothing when fallback cleanup fences every plugin call independently.
+ * @note The real library-unload probe must run only after shutdown, detach, and
+ * exactly one destroy call, with no extra test-owned dynamic-library handle.
+ */
+TEST_F(SchedulerPluginLoaderTest,
+       DestructorFallbackFencesEachExceptionAndUnloadsAfterDestroy) {
+  auto& loader = SchedulerPluginLoader::instance();
+  const auto plugin_path =
+      scheduler_plugin_path("destroy_count_scheduler_plugin", true);
+  ASSERT_TRUE(std::filesystem::exists(plugin_path));
+  const auto trace_path = scheduler_owner_trace_path("fallback-exceptions");
+  std::filesystem::remove(trace_path);
+
+  {
+    ScopedSchedulerFixtureEnvironment trace(kDestroyCountTraceEnvironment,
+                                            trace_path.string());
+    ScopedSchedulerFixtureEnvironment failures(kDestroyCountFailureEnvironment,
+                                               "all");
+    ASSERT_TRUE(loader.load_plugin(plugin_path));
+    auto scheduler = loader.create("destroy_count_test", 0);
+    ASSERT_NE(scheduler, nullptr);
+
+    loader.clear_plugins();
+    scheduler.reset();
+
+    EXPECT_EQ(read_scheduler_owner_trace(trace_path),
+              (std::vector<std::string>{"shutdown", "detach", "destroy",
+                                        "library_unload"}));
+  }
+
+  std::filesystem::remove(trace_path);
+}
+
+/**
+ * @brief Combines owner allocation failure with a throwing destroy export.
+ * @throws Nothing when the raw guard preserves the original `std::bad_alloc`.
+ * @note Active/destroy counts are read while the test-owned library handle is
+ * still mapped; destroy must end the raw object exactly once before throwing.
+ */
+TEST_F(SchedulerPluginLoaderTest,
+       OwnerAllocationFailureFencesDestroyAndPreservesBadAlloc) {
+  auto& loader = SchedulerPluginLoader::instance();
+  const auto plugin_path =
+      scheduler_plugin_path("destroy_count_scheduler_plugin", true);
+  ASSERT_TRUE(std::filesystem::exists(plugin_path));
+
+#ifdef _WIN32
+  HMODULE test_handle = LoadLibrary(plugin_path.string().c_str());
+  ASSERT_NE(test_handle, nullptr);
+  auto reset_counts = reinterpret_cast<void (*)()>(
+      GetProcAddress(test_handle, "ps_test_scheduler_reset_counts"));
+  auto active_count = reinterpret_cast<int (*)()>(
+      GetProcAddress(test_handle, "ps_test_scheduler_active_count"));
+  auto destroy_count = reinterpret_cast<int (*)()>(
+      GetProcAddress(test_handle, "ps_test_scheduler_destroy_count"));
+#else
+  void* test_handle = dlopen(plugin_path.string().c_str(), RTLD_LAZY);
+  ASSERT_NE(test_handle, nullptr) << dlerror();
+  auto reset_counts = reinterpret_cast<void (*)()>(
+      dlsym(test_handle, "ps_test_scheduler_reset_counts"));
+  auto active_count = reinterpret_cast<int (*)()>(
+      dlsym(test_handle, "ps_test_scheduler_active_count"));
+  auto destroy_count = reinterpret_cast<int (*)()>(
+      dlsym(test_handle, "ps_test_scheduler_destroy_count"));
+#endif
+  ASSERT_NE(reset_counts, nullptr);
+  ASSERT_NE(active_count, nullptr);
+  ASSERT_NE(destroy_count, nullptr);
+  ASSERT_TRUE(loader.load_plugin(plugin_path));
+  reset_counts();
+  const std::string type_name = kLongDestroyCountSchedulerType;
+  ScopedSchedulerFixtureEnvironment failures(kDestroyCountFailureEnvironment,
+                                             "destroy_runtime_error");
+
+  bool caught_bad_alloc = false;
+  bool failpoint_fired = false;
+  {
+    ScopedSchedulerOwnerAllocationFailure failure(0);
+    try {
+      (void)loader.create(type_name, 0);
+    } catch (const std::bad_alloc&) {
+      caught_bad_alloc = true;
+    }
+    failpoint_fired = scheduler_owner_allocation_probe::did_fire();
+  }
+
+  EXPECT_TRUE(failpoint_fired);
+  EXPECT_TRUE(caught_bad_alloc);
+  EXPECT_EQ(active_count(), 0);
+  EXPECT_EQ(destroy_count(), 1);
+  loader.clear_plugins();
+
+#ifdef _WIN32
+  FreeLibrary(test_handle);
+#else
+  dlclose(test_handle);
+#endif
+}
+
+/**
+ * @brief Injects failure into host owner allocation after plugin creation.
+ * @throws Nothing when the raw guard propagates bad_alloc and destroys once.
+ * @note The fixture create export itself performs no heap allocation.
+ */
+TEST_F(SchedulerPluginLoaderTest,
+       OwnerAllocationFailureDestroysRawPluginInstanceExactlyOnce) {
+  auto& loader = SchedulerPluginLoader::instance();
+  const auto plugin_path =
+      scheduler_plugin_path("destroy_count_scheduler_plugin", true);
+  ASSERT_TRUE(std::filesystem::exists(plugin_path));
+
+#ifdef _WIN32
+  HMODULE test_handle = LoadLibrary(plugin_path.string().c_str());
+  ASSERT_NE(test_handle, nullptr);
+  auto reset_counts = reinterpret_cast<void (*)()>(
+      GetProcAddress(test_handle, "ps_test_scheduler_reset_counts"));
+  auto active_count = reinterpret_cast<int (*)()>(
+      GetProcAddress(test_handle, "ps_test_scheduler_active_count"));
+  auto destroy_count = reinterpret_cast<int (*)()>(
+      GetProcAddress(test_handle, "ps_test_scheduler_destroy_count"));
+#else
+  void* test_handle = dlopen(plugin_path.string().c_str(), RTLD_LAZY);
+  ASSERT_NE(test_handle, nullptr) << dlerror();
+  auto reset_counts = reinterpret_cast<void (*)()>(
+      dlsym(test_handle, "ps_test_scheduler_reset_counts"));
+  auto active_count = reinterpret_cast<int (*)()>(
+      dlsym(test_handle, "ps_test_scheduler_active_count"));
+  auto destroy_count = reinterpret_cast<int (*)()>(
+      dlsym(test_handle, "ps_test_scheduler_destroy_count"));
+#endif
+  ASSERT_NE(reset_counts, nullptr);
+  ASSERT_NE(active_count, nullptr);
+  ASSERT_NE(destroy_count, nullptr);
+  ASSERT_TRUE(loader.load_plugin(plugin_path));
+  reset_counts();
+  const std::string type_name = kLongDestroyCountSchedulerType;
+
+  bool caught_bad_alloc = false;
+  bool failpoint_fired = false;
+  {
+    ScopedSchedulerOwnerAllocationFailure failure(0);
+    try {
+      (void)loader.create(type_name, 0);
+    } catch (const std::bad_alloc&) {
+      caught_bad_alloc = true;
+    }
+    failpoint_fired = scheduler_owner_allocation_probe::did_fire();
+  }
+
+  EXPECT_TRUE(failpoint_fired);
+  EXPECT_TRUE(caught_bad_alloc);
+  EXPECT_EQ(active_count(), 0);
+  EXPECT_EQ(destroy_count(), 1);
+  loader.clear_plugins();
+
+#ifdef _WIN32
+  FreeLibrary(test_handle);
+#else
+  dlclose(test_handle);
+#endif
+}
+
+/**
+ * @brief Injects failure into the host owner's long type-name copy.
+ * @throws Nothing when the raw guard destroys the instance exactly once.
+ * @note Allocation index one follows successful owner storage allocation.
+ */
+TEST_F(SchedulerPluginLoaderTest,
+       TypeNameCopyFailureDestroysRawPluginInstanceExactlyOnce) {
+  auto& loader = SchedulerPluginLoader::instance();
+  const auto plugin_path =
+      scheduler_plugin_path("destroy_count_scheduler_plugin", true);
+  ASSERT_TRUE(std::filesystem::exists(plugin_path));
+
+#ifdef _WIN32
+  HMODULE test_handle = LoadLibrary(plugin_path.string().c_str());
+  ASSERT_NE(test_handle, nullptr);
+  auto reset_counts = reinterpret_cast<void (*)()>(
+      GetProcAddress(test_handle, "ps_test_scheduler_reset_counts"));
+  auto active_count = reinterpret_cast<int (*)()>(
+      GetProcAddress(test_handle, "ps_test_scheduler_active_count"));
+  auto destroy_count = reinterpret_cast<int (*)()>(
+      GetProcAddress(test_handle, "ps_test_scheduler_destroy_count"));
+#else
+  void* test_handle = dlopen(plugin_path.string().c_str(), RTLD_LAZY);
+  ASSERT_NE(test_handle, nullptr) << dlerror();
+  auto reset_counts = reinterpret_cast<void (*)()>(
+      dlsym(test_handle, "ps_test_scheduler_reset_counts"));
+  auto active_count = reinterpret_cast<int (*)()>(
+      dlsym(test_handle, "ps_test_scheduler_active_count"));
+  auto destroy_count = reinterpret_cast<int (*)()>(
+      dlsym(test_handle, "ps_test_scheduler_destroy_count"));
+#endif
+  ASSERT_NE(reset_counts, nullptr);
+  ASSERT_NE(active_count, nullptr);
+  ASSERT_NE(destroy_count, nullptr);
+  ASSERT_TRUE(loader.load_plugin(plugin_path));
+  reset_counts();
+  const std::string type_name = kLongDestroyCountSchedulerType;
+
+  bool caught_bad_alloc = false;
+  bool failpoint_fired = false;
+  {
+    ScopedSchedulerOwnerAllocationFailure failure(1);
+    try {
+      (void)loader.create(type_name, 0);
+    } catch (const std::bad_alloc&) {
+      caught_bad_alloc = true;
+    }
+    failpoint_fired = scheduler_owner_allocation_probe::did_fire();
+  }
+
+  EXPECT_TRUE(failpoint_fired);
+  EXPECT_TRUE(caught_bad_alloc);
+  EXPECT_EQ(active_count(), 0);
+  EXPECT_EQ(destroy_count(), 1);
+  loader.clear_plugins();
 
 #ifdef _WIN32
   FreeLibrary(test_handle);

@@ -780,6 +780,7 @@ if(BUILD_TESTING)
     target_compile_definitions(test_plugin_manager PRIVATE
         PS_STANDARD_OP_PLUGIN_DIR="${PLUGIN_OUTPUT_DIR}"
         PS_TEST_OP_PLUGIN_DIR="${TEST_OP_PLUGIN_DIR}"
+        PHOTOSPIDER_INTERNAL_BAD_ALLOC_TESTING
     )
     add_dependencies(test_plugin_manager lifecycle_op_plugin
         override_lifecycle_op_plugin ${OP_PLUGIN_TARGETS})
