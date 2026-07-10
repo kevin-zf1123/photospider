@@ -1,6 +1,6 @@
 // FILE: src/metal/perlin_noise_metal.mm
 
-#include "perlin_noise_metal.hpp"
+#include "metal/perlin_noise_metal.hpp"
 
 #import <CoreImage/CoreImage.h>
 #import <CoreVideo/CoreVideo.h>
@@ -9,7 +9,7 @@
 #include "adapter/buffer_adapter_opencv.hpp"
 #include "kernel/param_utils.hpp"
 #include "metal/metal_exception_boundary.hpp"
-#include "node.hpp"
+#include "node.hpp"  // NOLINT(build/include_subdir)
 
 // This specific OpenCV header is required for the interop function
 #include <opencv2/core/core_c.h>
