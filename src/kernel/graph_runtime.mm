@@ -7,6 +7,7 @@
 #include <filesystem>
 #include <memory>
 #include <utility>
+#include <vector>
 
 #include "kernel/services/compute-service/realtime_proxy_graph.hpp"
 
@@ -15,6 +16,42 @@
 #endif
 
 namespace ps {
+namespace {
+
+/**
+ * @brief Runs explicit scheduler shutdown and detach as a best-effort sweep.
+ *
+ * Shutdown is attempted before detach. Each stage has an independent exception
+ * fence so a hostile shutdown cannot prevent detach.
+ *
+ * @param scheduler Scheduler whose lifecycle ownership is being rolled back or
+ * released; null is accepted as an already-clean owner.
+ * @return The exact first lifecycle exception, or an empty pointer on success.
+ * @throws Nothing; lifecycle failures are returned to the caller.
+ * @note The helper neither destroys nor publishes the scheduler owner.
+ */
+std::exception_ptr cleanup_scheduler_lifecycle(IScheduler* scheduler) noexcept {
+  if (!scheduler) {
+    return nullptr;
+  }
+
+  std::exception_ptr first_error;
+  try {
+    scheduler->shutdown();
+  } catch (...) {
+    first_error = std::current_exception();
+  }
+  try {
+    scheduler->detach();
+  } catch (...) {
+    if (!first_error) {
+      first_error = std::current_exception();
+    }
+  }
+  return first_error;
+}
+
+}  // namespace
 
 thread_local int GraphRuntime::tls_worker_id_ = -1;
 thread_local int GraphRuntime::tls_scheduler_log_worker_id_ = -1;
@@ -124,21 +161,36 @@ void GraphRuntime::start() {
 void GraphRuntime::stop() {
   std::lock_guard<std::mutex> lock(schedulers_mutex_);
   running_.store(false, std::memory_order_release);
-  std::exception_ptr first_shutdown_error;
+  std::exception_ptr first_stop_error;
   for (auto& [intent, scheduler] : schedulers_) {
     (void)intent;
+    if (!scheduler) {
+      continue;
+    }
+
+    bool shutdown_required = true;
     try {
-      if (scheduler && scheduler->is_running()) {
-        scheduler->shutdown();
-      }
+      shutdown_required = scheduler->is_running();
     } catch (...) {
-      if (!first_shutdown_error) {
-        first_shutdown_error = std::current_exception();
+      if (!first_stop_error) {
+        first_stop_error = std::current_exception();
+      }
+    }
+
+    if (!shutdown_required) {
+      continue;
+    }
+
+    try {
+      scheduler->shutdown();
+    } catch (...) {
+      if (!first_stop_error) {
+        first_stop_error = std::current_exception();
       }
     }
   }
-  if (first_shutdown_error) {
-    std::rethrow_exception(first_shutdown_error);
+  if (first_stop_error) {
+    std::rethrow_exception(first_stop_error);
   }
 }
 
@@ -173,7 +225,7 @@ void GraphRuntime::log_event(SchedulerEvent::Action action, int node_id,
 }
 
 std::vector<GraphRuntime::SchedulerEvent> GraphRuntime::get_scheduler_log()
-    const {
+    const {  // NOLINT(whitespace/indent_namespace)
   std::lock_guard<std::mutex> lock(log_mutex_);
   return scheduler_log_;
 }
@@ -189,24 +241,7 @@ void GraphRuntime::clear_scheduler_log() {
 
 void GraphRuntime::set_scheduler(ComputeIntent intent,
                                  std::unique_ptr<IScheduler> scheduler) {
-  std::lock_guard<std::mutex> lock(schedulers_mutex_);
-
-  // 如果已有调度器，先 detach
-  auto it = schedulers_.find(intent);
-  if (it != schedulers_.end() && it->second) {
-    it->second->detach();
-  }
-
-  // 设置新调度器
-  schedulers_[intent] = std::move(scheduler);
-
-  // attach 到当前 runtime
-  if (schedulers_[intent]) {
-    schedulers_[intent]->attach(this);
-    if (running_.load(std::memory_order_acquire)) {
-      schedulers_[intent]->start();
-    }
-  }
+  replace_scheduler(intent, std::move(scheduler));
 }
 
 IScheduler* GraphRuntime::get_scheduler(ComputeIntent intent) {
@@ -225,22 +260,34 @@ void GraphRuntime::replace_scheduler(ComputeIntent intent,
                                      std::unique_ptr<IScheduler> scheduler) {
   std::lock_guard<std::mutex> lock(schedulers_mutex_);
 
-  auto it = schedulers_.find(intent);
-  if (it != schedulers_.end() && it->second) {
-    // 停止旧调度器
-    it->second->shutdown();
-    it->second->detach();
+  // Reserve any new map node before candidate lifecycle calls. Once this
+  // succeeds, publication into the existing unique_ptr slot cannot allocate.
+  auto [slot, inserted] = schedulers_.try_emplace(intent, nullptr);
+  try {
+    if (scheduler) {
+      scheduler->attach(this);
+      if (running_.load(std::memory_order_acquire)) {
+        scheduler->start();
+      }
+    }
+  } catch (...) {
+    const std::exception_ptr candidate_error = std::current_exception();
+    (void)cleanup_scheduler_lifecycle(scheduler.get());
+    if (inserted) {
+      schedulers_.erase(slot);
+    }
+    std::rethrow_exception(candidate_error);
   }
 
-  // 设置新调度器
-  schedulers_[intent] = std::move(scheduler);
+  // Candidate preparation is complete. Swap publishes it without allocation
+  // or ownership destruction; scheduler now owns the previous map value.
+  slot->second.swap(scheduler);
 
-  if (schedulers_[intent]) {
-    // attach 并启动新调度器
-    schedulers_[intent]->attach(this);
-    if (running_) {
-      schedulers_[intent]->start();
-    }
+  const std::exception_ptr old_cleanup_error =
+      cleanup_scheduler_lifecycle(scheduler.get());
+  scheduler.reset();
+  if (old_cleanup_error) {
+    std::rethrow_exception(old_cleanup_error);
   }
 }
 

@@ -50,9 +50,22 @@ the failing scheduler and all earlier schedulers started by the call are shut
 down in reverse order. Secondary rollback errors are suppressed so the first
 start error survives, and `GraphRuntime::running()` becomes true only after all
 schedulers start successfully.
+`GraphRuntime::set_scheduler()` and `replace_scheduler()` use the same owner
+transaction. They reserve any new map node before candidate lifecycle work, keep
+the old owner published and alive while the candidate attaches and, for a
+running runtime, starts, then publish the prepared candidate with a
+non-allocating `unique_ptr` swap. Candidate attach/start failure triggers
+independently fenced shutdown and detach; secondary cleanup errors are
+suppressed and the exact preparation exception survives. After successful
+publication, the displaced owner is shut down, detached, and destroyed in that
+order. A displaced-owner cleanup error is reported after both stages without
+rolling the new owner or the runtime running state back.
 `GraphRuntime::stop()` publishes stopped state under the same lifecycle mutex,
-attempts every scheduler shutdown even when an earlier plugin throws, and
-rethrows the first failure only after completing that sweep. Its `noexcept`
+treats each scheduler's `is_running()` query and `shutdown()` call as separate
+best-effort lifecycle steps, and rethrows the first failure only after
+completing the sweep. If the state query throws, the runtime records that error
+but still attempts the same scheduler's shutdown because its state is unknown;
+later schedulers are swept regardless of either failure. Its `noexcept`
 destructor suppresses an explicit plugin lifecycle failure while scheduler
 owners retain their own final cleanup fences.
 

@@ -368,6 +368,243 @@ class ThrowingShutdownMockScheduler final : public MockScheduler {
 };
 
 /**
+ * @brief Mock whose running-state query rethrows one stable exception object.
+ *
+ * The failure is disabled while `GraphRuntime::start()` performs its state
+ * query, then enabled immediately before `GraphRuntime::stop()`. Its inherited
+ * shutdown remains successful so the test can prove a failed query does not
+ * suppress cleanup of the same scheduler.
+ *
+ * @note The stored `std::exception_ptr` lets the test compare exception object
+ * identity after the runtime completes its best-effort scheduler sweep.
+ */
+class ThrowingRunningQueryMockScheduler final : public MockScheduler {
+ public:
+  /**
+   * @brief Creates the stable running-query failure used by the regression.
+   * @throws std::bad_alloc if exception payload allocation fails.
+   */
+  ThrowingRunningQueryMockScheduler()
+      : running_query_error_(std::make_exception_ptr(
+            std::runtime_error("tracked running query failure"))) {}
+
+  /**
+   * @brief Reports local running state or rethrows the configured query error.
+   * @return The inherited scheduler state while failure injection is disabled.
+   * @throws std::runtime_error with the exact stored exception identity while
+   * failure injection is enabled.
+   * @note Query failure does not mutate local state; inherited `shutdown()`
+   * remains available for the runtime's best-effort cleanup attempt.
+   */
+  bool is_running() const override {
+    if (throw_on_running_query_) {
+      std::rethrow_exception(running_query_error_);
+    }
+    return MockScheduler::is_running();
+  }
+
+  /**
+   * @brief Enables or disables deterministic running-query failure.
+   * @param enabled True to rethrow from subsequent `is_running()` calls.
+   * @return Nothing.
+   * @throws Nothing.
+   */
+  void set_throw_on_running_query(bool enabled) noexcept {
+    throw_on_running_query_ = enabled;
+  }
+
+  /**
+   * @brief Returns the stable exception identity used by `is_running()`.
+   * @return Borrowed reference valid for this scheduler's lifetime.
+   * @throws Nothing.
+   */
+  const std::exception_ptr& running_query_error() const noexcept {
+    return running_query_error_;
+  }
+
+ private:
+  /** @brief Whether `is_running()` currently rethrows the stored failure. */
+  bool throw_on_running_query_ = false;
+  /** @brief Stable exception object used to verify first-error identity. */
+  std::exception_ptr running_query_error_;
+};
+
+/**
+ * @brief Candidate lifecycle phase that deterministically fails in replacement.
+ */
+enum class ReplacementFailureStage {
+  /** @brief Candidate preparation succeeds. */
+  None,
+  /** @brief Candidate attach publishes local attachment, then fails. */
+  Attach,
+  /** @brief Candidate start publishes local running state, then fails. */
+  Start,
+};
+
+/**
+ * @brief External observations retained after a failed candidate is destroyed.
+ *
+ * @note Tests use this state to verify lifecycle order and exception identity
+ * without dereferencing the candidate after ownership rollback.
+ */
+struct ReplacementCandidateState {
+  /**
+   * @brief Creates stable preparation and cleanup exception objects.
+   * @param stage Candidate preparation phase that should fail.
+   * @param fail_shutdown Whether rollback shutdown should throw.
+   * @param fail_detach Whether rollback detach should throw.
+   * @throws std::bad_alloc If exception payload construction cannot allocate.
+   */
+  ReplacementCandidateState(ReplacementFailureStage stage, bool fail_shutdown,
+                            bool fail_detach)
+      : failure_stage(stage),
+        shutdown_fails(fail_shutdown),
+        detach_fails(fail_detach),
+        preparation_error(std::make_exception_ptr(
+            std::runtime_error("replacement candidate preparation failure"))),
+        shutdown_error(std::make_exception_ptr(
+            std::runtime_error("replacement candidate shutdown failure"))),
+        detach_error(std::make_exception_ptr(
+            std::runtime_error("replacement candidate detach failure"))) {}
+
+  /** @brief Preparation phase selected for deterministic failure. */
+  ReplacementFailureStage failure_stage;
+  /** @brief Whether rollback shutdown rethrows its stable exception. */
+  bool shutdown_fails;
+  /** @brief Whether rollback detach rethrows its stable exception. */
+  bool detach_fails;
+  /** @brief Number of candidate attach calls. */
+  int attach_calls = 0;
+  /** @brief Number of candidate start calls. */
+  int start_calls = 0;
+  /** @brief Number of candidate shutdown calls. */
+  int shutdown_calls = 0;
+  /** @brief Number of candidate detach calls. */
+  int detach_calls = 0;
+  /** @brief Number of candidate destructor calls. */
+  int destructor_calls = 0;
+  /** @brief Whether the old scheduler was observable during candidate attach.
+   */
+  bool old_observed_during_attach = false;
+  /** @brief Whether the old scheduler remained running during candidate attach.
+   */
+  bool old_running_during_attach = false;
+  /** @brief Whether the old scheduler was observable during candidate start. */
+  bool old_observed_during_start = false;
+  /** @brief Whether the old scheduler remained running during candidate start.
+   */
+  bool old_running_during_start = false;
+  /** @brief Candidate running state after rollback shutdown. */
+  bool running_after_shutdown = true;
+  /** @brief Whether rollback detach cleared the candidate runtime pointer. */
+  bool detached_after_cleanup = false;
+  /** @brief Exact candidate preparation failure. */
+  std::exception_ptr preparation_error;
+  /** @brief Exact secondary rollback shutdown failure. */
+  std::exception_ptr shutdown_error;
+  /** @brief Exact secondary rollback detach failure. */
+  std::exception_ptr detach_error;
+};
+
+/**
+ * @brief Scheduler candidate with observable attach/start rollback behavior.
+ *
+ * @note Preparation failures occur after inherited state publication so the
+ * runtime must run both rollback stages before destroying the candidate.
+ */
+class TransactionalReplacementCandidate final : public MockScheduler {
+ public:
+  /**
+   * @brief Binds external observations and the expected old scheduler.
+   * @param state Shared state retained by the test after candidate destruction.
+   * @param expected_old Old scheduler that must survive preparation.
+   * @throws Nothing.
+   */
+  TransactionalReplacementCandidate(
+      std::shared_ptr<ReplacementCandidateState> state,
+      const MockScheduler* expected_old) noexcept
+      : state_(std::move(state)), expected_old_(expected_old) {}
+
+  /**
+   * @brief Records destruction after rollback or displaced-owner cleanup.
+   * @throws Nothing.
+   */
+  ~TransactionalReplacementCandidate() noexcept override {
+    ++state_->destructor_calls;
+  }
+
+  /**
+   * @brief Attaches locally, then optionally rethrows the stable preparation
+   * error.
+   * @param runtime Runtime supplied by the replacement transaction.
+   * @return Nothing.
+   * @throws std::runtime_error With exact stored identity for attach injection.
+   */
+  void attach(GraphRuntime* runtime) override {
+    ++state_->attach_calls;
+    state_->old_observed_during_attach = expected_old_ != nullptr;
+    state_->old_running_during_attach =
+        expected_old_ && expected_old_->is_running();
+    MockScheduler::attach(runtime);
+    if (state_->failure_stage == ReplacementFailureStage::Attach) {
+      std::rethrow_exception(state_->preparation_error);
+    }
+  }
+
+  /**
+   * @brief Starts locally, then optionally rethrows the stable preparation
+   * error.
+   * @return Nothing.
+   * @throws std::runtime_error With exact stored identity for start injection.
+   */
+  void start() override {
+    ++state_->start_calls;
+    state_->old_observed_during_start = expected_old_ != nullptr;
+    state_->old_running_during_start =
+        expected_old_ && expected_old_->is_running();
+    MockScheduler::start();
+    if (state_->failure_stage == ReplacementFailureStage::Start) {
+      std::rethrow_exception(state_->preparation_error);
+    }
+  }
+
+  /**
+   * @brief Stops locally, then optionally reports a secondary rollback failure.
+   * @return Nothing.
+   * @throws std::runtime_error With exact stored cleanup identity when enabled.
+   */
+  void shutdown() override {
+    ++state_->shutdown_calls;
+    MockScheduler::shutdown();
+    state_->running_after_shutdown = MockScheduler::is_running();
+    if (state_->shutdown_fails) {
+      std::rethrow_exception(state_->shutdown_error);
+    }
+  }
+
+  /**
+   * @brief Detaches locally, then optionally reports a secondary rollback
+   * failure.
+   * @return Nothing.
+   * @throws std::runtime_error With exact stored cleanup identity when enabled.
+   */
+  void detach() override {
+    ++state_->detach_calls;
+    MockScheduler::detach();
+    state_->detached_after_cleanup = attached_runtime() == nullptr;
+    if (state_->detach_fails) {
+      std::rethrow_exception(state_->detach_error);
+    }
+  }
+
+ private:
+  /** @brief External observation state owned jointly with the test. */
+  std::shared_ptr<ReplacementCandidateState> state_;
+  /** @brief Non-owning old scheduler pointer valid throughout preparation. */
+  const MockScheduler* expected_old_;
+};
+
+/**
  * @brief GraphRuntime rolls back earlier schedulers when a later start fails.
  */
 TEST_F(GraphRuntimeSchedulerTest, StartFailureRollsBackAndRetrySucceeds) {
@@ -432,6 +669,202 @@ TEST_F(GraphRuntimeSchedulerTest,
   EXPECT_FALSE(hp_ptr->is_running());
   EXPECT_FALSE(rt_ptr->is_running());
   EXPECT_TRUE(rt_ptr->was_shutdown_called());
+}
+
+/**
+ * @brief A failed running-state query cannot skip any scheduler shutdown.
+ * @return Nothing.
+ * @throws Nothing when the runtime stops both schedulers, publishes stopped
+ * state, and rethrows the exact first query exception after the sweep.
+ * @note The later scheduler also throws after its own shutdown, proving that
+ * the earlier query error retains both identity and diagnostic message.
+ */
+TEST_F(GraphRuntimeSchedulerTest,
+       StopRunningQueryFailureStillSweepsAndPreservesFirstError) {
+  GraphRuntime::Info info{"scheduler_stop_query_failure",
+                          "sessions/scheduler_test_session", "", ""};
+  GraphRuntime runtime(info);
+
+  auto hp_scheduler = std::make_unique<ThrowingRunningQueryMockScheduler>();
+  ThrowingRunningQueryMockScheduler* hp_ptr = hp_scheduler.get();
+  runtime.set_scheduler(ComputeIntent::GlobalHighPrecision,
+                        std::move(hp_scheduler));
+  auto rt_scheduler = std::make_unique<ThrowingShutdownMockScheduler>();
+  ThrowingShutdownMockScheduler* rt_ptr = rt_scheduler.get();
+  runtime.set_scheduler(ComputeIntent::RealTimeUpdate, std::move(rt_scheduler));
+  runtime.start();
+  hp_ptr->set_throw_on_running_query(true);
+
+  try {
+    runtime.stop();
+    FAIL() << "running-state query failure did not propagate";
+  } catch (const std::runtime_error& error) {
+    EXPECT_EQ(std::current_exception(), hp_ptr->running_query_error());
+    EXPECT_STREQ(error.what(), "tracked running query failure");
+  }
+
+  EXPECT_FALSE(runtime.running());
+  EXPECT_TRUE(hp_ptr->was_shutdown_called());
+  EXPECT_FALSE(hp_ptr->task_runtime_running());
+  EXPECT_TRUE(rt_ptr->was_shutdown_called());
+  EXPECT_FALSE(rt_ptr->is_running());
+}
+
+/**
+ * @brief Attach failure preserves a running old scheduler and cleans candidate.
+ * @return Nothing.
+ * @throws Nothing when the transaction retains old ownership and exact error.
+ */
+TEST_F(GraphRuntimeSchedulerTest,
+       ReplaceAttachFailurePreservesRunningOldScheduler) {
+  GraphRuntime::Info info{"scheduler_replace_attach_failure",
+                          "sessions/scheduler_test_session", "", ""};
+  GraphRuntime runtime(info);
+  auto old_scheduler = std::make_unique<MockScheduler>();
+  MockScheduler* old_ptr = old_scheduler.get();
+  runtime.set_scheduler(ComputeIntent::GlobalHighPrecision,
+                        std::move(old_scheduler));
+  runtime.start();
+
+  auto state = std::make_shared<ReplacementCandidateState>(
+      ReplacementFailureStage::Attach, false, false);
+  auto candidate =
+      std::make_unique<TransactionalReplacementCandidate>(state, old_ptr);
+  try {
+    runtime.replace_scheduler(ComputeIntent::GlobalHighPrecision,
+                              std::move(candidate));
+    FAIL() << "replacement attach failure did not propagate";
+  } catch (const std::runtime_error& error) {
+    EXPECT_EQ(std::current_exception(), state->preparation_error);
+    EXPECT_STREQ(error.what(), "replacement candidate preparation failure");
+  }
+
+  EXPECT_TRUE(runtime.running());
+  EXPECT_EQ(runtime.get_scheduler(ComputeIntent::GlobalHighPrecision), old_ptr);
+  EXPECT_TRUE(old_ptr->is_running());
+  EXPECT_TRUE(state->old_observed_during_attach);
+  EXPECT_TRUE(state->old_running_during_attach);
+  EXPECT_EQ(state->attach_calls, 1);
+  EXPECT_EQ(state->start_calls, 0);
+  EXPECT_EQ(state->shutdown_calls, 1);
+  EXPECT_EQ(state->detach_calls, 1);
+  EXPECT_EQ(state->destructor_calls, 1);
+  EXPECT_FALSE(state->running_after_shutdown);
+  EXPECT_TRUE(state->detached_after_cleanup);
+  runtime.stop();
+}
+
+/**
+ * @brief Partial candidate start failure survives hostile rollback cleanup.
+ * @return Nothing.
+ * @throws Nothing when shutdown/detach are both attempted and the exact
+ * preparation exception wins over both secondary failures.
+ */
+TEST_F(GraphRuntimeSchedulerTest,
+       ReplaceStartFailurePreservesOriginalAcrossCleanupFailures) {
+  GraphRuntime::Info info{"scheduler_replace_start_failure",
+                          "sessions/scheduler_test_session", "", ""};
+  GraphRuntime runtime(info);
+  auto old_scheduler = std::make_unique<MockScheduler>();
+  MockScheduler* old_ptr = old_scheduler.get();
+  runtime.set_scheduler(ComputeIntent::RealTimeUpdate,
+                        std::move(old_scheduler));
+  runtime.start();
+
+  auto state = std::make_shared<ReplacementCandidateState>(
+      ReplacementFailureStage::Start, true, true);
+  auto candidate =
+      std::make_unique<TransactionalReplacementCandidate>(state, old_ptr);
+  try {
+    runtime.replace_scheduler(ComputeIntent::RealTimeUpdate,
+                              std::move(candidate));
+    FAIL() << "replacement start failure did not propagate";
+  } catch (const std::runtime_error& error) {
+    EXPECT_EQ(std::current_exception(), state->preparation_error);
+    EXPECT_NE(std::current_exception(), state->shutdown_error);
+    EXPECT_NE(std::current_exception(), state->detach_error);
+    EXPECT_STREQ(error.what(), "replacement candidate preparation failure");
+  }
+
+  EXPECT_TRUE(runtime.running());
+  EXPECT_EQ(runtime.get_scheduler(ComputeIntent::RealTimeUpdate), old_ptr);
+  EXPECT_TRUE(old_ptr->is_running());
+  EXPECT_TRUE(state->old_observed_during_attach);
+  EXPECT_TRUE(state->old_running_during_attach);
+  EXPECT_TRUE(state->old_observed_during_start);
+  EXPECT_TRUE(state->old_running_during_start);
+  EXPECT_EQ(state->attach_calls, 1);
+  EXPECT_EQ(state->start_calls, 1);
+  EXPECT_EQ(state->shutdown_calls, 1);
+  EXPECT_EQ(state->detach_calls, 1);
+  EXPECT_EQ(state->destructor_calls, 1);
+  EXPECT_FALSE(state->running_after_shutdown);
+  EXPECT_TRUE(state->detached_after_cleanup);
+  runtime.stop();
+}
+
+/**
+ * @brief set_scheduler shares replacement rollback for an existing owner.
+ * @return Nothing.
+ * @throws Nothing when attach failure keeps the stopped old owner published.
+ */
+TEST_F(GraphRuntimeSchedulerTest,
+       SetSchedulerReplacementFailurePreservesStoppedOldScheduler) {
+  GraphRuntime::Info info{"scheduler_set_replacement_failure",
+                          "sessions/scheduler_test_session", "", ""};
+  GraphRuntime runtime(info);
+  auto old_scheduler = std::make_unique<MockScheduler>();
+  MockScheduler* old_ptr = old_scheduler.get();
+  runtime.set_scheduler(ComputeIntent::GlobalHighPrecision,
+                        std::move(old_scheduler));
+
+  auto state = std::make_shared<ReplacementCandidateState>(
+      ReplacementFailureStage::Attach, false, false);
+  auto candidate =
+      std::make_unique<TransactionalReplacementCandidate>(state, old_ptr);
+  EXPECT_THROW(runtime.set_scheduler(ComputeIntent::GlobalHighPrecision,
+                                     std::move(candidate)),
+               std::runtime_error);
+
+  EXPECT_FALSE(runtime.running());
+  EXPECT_EQ(runtime.get_scheduler(ComputeIntent::GlobalHighPrecision), old_ptr);
+  EXPECT_EQ(old_ptr->attached_runtime(), &runtime);
+  EXPECT_FALSE(old_ptr->is_running());
+  EXPECT_TRUE(state->old_observed_during_attach);
+  EXPECT_FALSE(state->old_running_during_attach);
+  EXPECT_EQ(state->shutdown_calls, 1);
+  EXPECT_EQ(state->detach_calls, 1);
+  EXPECT_EQ(state->destructor_calls, 1);
+}
+
+/**
+ * @brief Successful replacement on a stopped runtime publishes without start.
+ * @return Nothing.
+ * @throws Nothing when the old owner is shut down then detached after publish.
+ */
+TEST_F(GraphRuntimeSchedulerTest,
+       ReplaceOnStoppedRuntimePublishesAttachedUnstartedCandidate) {
+  GraphRuntime::Info info{"scheduler_replace_stopped",
+                          "sessions/scheduler_test_session", "", ""};
+  GraphRuntime runtime(info);
+  SchedulerLifecycleTracker::reset();
+
+  auto old_scheduler = std::make_unique<TrackedMockScheduler>();
+  runtime.set_scheduler(ComputeIntent::GlobalHighPrecision,
+                        std::move(old_scheduler));
+  auto candidate = std::make_unique<MockScheduler>();
+  MockScheduler* candidate_ptr = candidate.get();
+  runtime.replace_scheduler(ComputeIntent::GlobalHighPrecision,
+                            std::move(candidate));
+
+  EXPECT_FALSE(runtime.running());
+  EXPECT_EQ(runtime.get_scheduler(ComputeIntent::GlobalHighPrecision),
+            candidate_ptr);
+  EXPECT_TRUE(candidate_ptr->was_attach_called());
+  EXPECT_FALSE(candidate_ptr->was_start_called());
+  EXPECT_FALSE(candidate_ptr->is_running());
+  EXPECT_EQ(SchedulerLifecycleTracker::shutdown_count.load(), 1);
+  EXPECT_EQ(SchedulerLifecycleTracker::detach_count.load(), 1);
 }
 
 TEST_F(GraphRuntimeSchedulerTest, ReplaceScheduler) {

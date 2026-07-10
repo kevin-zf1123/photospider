@@ -97,11 +97,15 @@ class GraphRuntime {
   /**
    * @brief Stops all running schedulers owned by this graph runtime.
    * @return Nothing.
-   * @throws The first exception propagated by an explicit scheduler shutdown.
+   * @throws The first exception propagated by a scheduler running-state query
+   * or explicit shutdown.
    * @note The runtime publishes its stopped state under `schedulers_mutex_`,
-   * then attempts every scheduler shutdown before rethrowing the first error.
-   * Graph/cache ownership remains unchanged and repeated calls are lifecycle-
-   * idempotent for built-ins.
+   * then queries each scheduler and attempts shutdown whenever it reports
+   * running or its state cannot be determined. A query failure therefore does
+   * not skip that scheduler's cleanup, later schedulers are still swept, and
+   * the first lifecycle error is rethrown only after the sweep. Graph/cache
+   * ownership remains unchanged and repeated calls are lifecycle-idempotent
+   * for built-ins.
    */
   void stop();
   /**
@@ -151,11 +155,25 @@ class GraphRuntime {
   // [M3.2 新增] 调度器管理 API
   // =========================================================================
 
-  /// @brief 设置指定意图的调度器
-  /// @param intent 计算意图（RT 或 HP）
-  /// @param scheduler 调度器实例的唯一指针
-  /// @note 如果已有调度器，会先 detach 旧调度器再设置新的
-  /// @note 如果 runtime 已运行，新调度器会先 attach 到 runtime 再 start
+  /**
+   * @brief Transactionally installs a scheduler for one compute intent.
+   *
+   * The method reserves the map slot, prepares the candidate with attach and,
+   * when the runtime is running, start, then publishes ownership with a
+   * non-allocating unique_ptr swap. An existing owner remains published and
+   * alive until candidate preparation succeeds.
+   *
+   * @param intent Compute intent whose scheduler owner is installed.
+   * @param scheduler Candidate owner; null removes an existing scheduler.
+   * @return Nothing.
+   * @throws std::bad_alloc If reserving a previously absent map slot fails.
+   * @throws Any candidate attach/start exception unchanged after best-effort
+   * shutdown and detach of that candidate.
+   * @throws The first old-owner shutdown/detach exception after the candidate
+   * has been published and both cleanup stages have been attempted.
+   * @note Candidate failure leaves the prior map value and runtime running
+   * state unchanged. This method shares the replacement transaction.
+   */
   void set_scheduler(ComputeIntent intent,
                      std::unique_ptr<IScheduler> scheduler);
 
@@ -165,10 +183,25 @@ class GraphRuntime {
   IScheduler* get_scheduler(ComputeIntent intent);
   const IScheduler* get_scheduler(ComputeIntent intent) const;
 
-  /// @brief 替换指定意图的调度器（动态切换）
-  /// @param intent 计算意图
-  /// @param scheduler 新的调度器实例
-  /// @note 此方法会先停止旧调度器，然后启动新调度器
+  /**
+   * @brief Transactionally replaces the scheduler for one compute intent.
+   *
+   * Candidate attach/start completes before publication. If preparation fails,
+   * candidate shutdown and detach are attempted independently and the exact
+   * preparation exception is rethrown. On success, ownership is published by a
+   * non-allocating swap; the displaced owner is then shut down, detached, and
+   * destroyed in that order.
+   *
+   * @param intent Compute intent whose scheduler owner is replaced.
+   * @param scheduler Candidate owner; null removes an existing scheduler.
+   * @return Nothing.
+   * @throws std::bad_alloc If reserving a previously absent map slot fails.
+   * @throws Any candidate attach/start exception unchanged after rollback.
+   * @throws The first displaced-owner shutdown/detach exception after
+   * successful publication and completion of the cleanup sweep.
+   * @note A displaced-owner cleanup error does not roll publication back. The
+   * runtime running flag is never changed by this transaction.
+   */
   void replace_scheduler(ComputeIntent intent,
                          std::unique_ptr<IScheduler> scheduler);
 
