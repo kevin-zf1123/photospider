@@ -34,10 +34,9 @@ The declared CMake 3.16 minimum is a compatibility floor for the installable
 static product's producer path and downstream package consumption; it is not a
 fixed toolchain that every pull request must run. Any policy introduced after
 that floor, such as `CMP0135`, must be guarded with `if(POLICY <policy>)`.
-Compatibility is maintained through the command/provider/context audit against
-the 3.16 command and policy inventory, the current GitHub integration package
-consumer, and a targeted real old-version run when a compatibility-sensitive
-change or release check warrants one.
+Compatibility is maintained by that policy guard, the current GitHub
+integration package consumer, and a targeted native old-version run only when
+a compatibility-sensitive change or release check warrants one.
 
 When a targeted minimum-version run is performed, it starts from a fresh producer
 build tree, configures the top-level project with CMake 3.16 and
@@ -61,12 +60,12 @@ uses that same generator for producer and consumer, checks each
 consumer executable from the configuration-specific `$<TARGET_FILE:...>`
 manifest.
 
-The CMake 3.16 command/provider/context audit is a manual compatibility tool,
-not a CTest or CI gate. Migration residue, phase completion, stale-term, and
-source-layout checks are likewise temporary development checks. They must not
-be registered with CTest or CI or retained as issue-specific orchestration in
-the primary repository. Long-lived runtime, public-header, and package-consumer
-tests own the durable product boundaries.
+Migration residue, phase completion, stale-term, and source-layout checks are
+temporary development checks. They must not be registered with CTest or CI.
+Issue-specific replay, provenance, helper, and output artifacts must neither
+enter the primary repository nor remain as long-lived personal-overlay
+content. Long-lived runtime, public-header, and package-consumer tests own the
+durable product boundaries.
 
 ## Validation Ownership
 
@@ -100,9 +99,10 @@ python3 tests/verification/codebase_structure/scheduler_doxygen_ast.py \
 
 Their files may remain in the primary repository because this document defines
 their lasting manual role. They must remain absent from CTest and GitHub CI.
-Issue-specific replay and migration helpers are temporary and must not enter
-the primary repository. A clean primary clone, CMake configuration, CTest
-inventory, and CI script must not depend on personal development content.
+Issue-specific replay, provenance, helper, and output artifacts must neither
+enter the primary repository nor be retained as long-lived personal-overlay
+content. A clean primary clone, CMake configuration, CTest inventory, and CI
+script must not depend on personal development content.
 
 Validation is proportional. During implementation, run scoped static checks,
 affected build targets, and focused regressions. A native clean configure, full

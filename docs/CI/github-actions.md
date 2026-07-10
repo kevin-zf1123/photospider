@@ -30,12 +30,12 @@ When a pull request or push changes the CI image inputs (`Dockerfile.ci`, `.dock
 The image includes CMake, a C++ toolchain, OpenCV, yaml-cpp, CURL, OpenSSL, GTest, nlohmann-json, clang-format, Python, and cpplint.
 
 CMake 3.16 is the project's compatibility floor, not a workflow-pinned version
-for every pull request. The maintained command/provider/context audit checks
-the floor's command and policy inventory, while current integration exercises
-the fresh static package consumer on the supported CI toolchain. A targeted
-real old-version producer/install/consumer run is added when a compatibility-
-sensitive change or release check needs it; the regular integration workflow
-does not lock Ubuntu or CMake to a dedicated minimum-version job.
+for every pull request. Build logic guards policies introduced after that floor,
+while current integration exercises the fresh static package consumer on the
+supported CI toolchain. A targeted native old-version
+producer/install/consumer run is added only when a compatibility-sensitive
+change or release check needs it; the regular integration workflow does not
+lock Ubuntu or CMake to a dedicated minimum-version job.
 
 ## Scripts
 
@@ -43,9 +43,11 @@ CI and CTest execute only long-lived software behavior, compile, package-
 consumer, performance, concurrency, stability, error-handling, and runtime-
 boundary checks. Migration-residue scans, phase-completion checks, stale-term
 searches, Doxygen/source-quality audits, issue replay, and evidence/provenance
-orchestration are excluded. The latter belong to issue-specific personal-
-overlay evidence under `tests/results/...`, or to explicitly documented manual
-developer tools; a clean primary checkout never imports that content.
+orchestration are excluded. Issue-specific replay, provenance, helper, and
+output artifacts do not enter the primary repository and are not retained as
+long-lived personal-overlay content. Explicitly documented general-purpose
+manual developer tools are separate; a clean primary checkout never imports
+personal development content.
 
 - `ci/scripts/healthcheck.sh`: runs `git diff --check`, `clang-format --dry-run --Werror`, and `cpplint` on changed C++ files.
 - `ci/scripts/ci_image_changed.sh`: detects whether the current diff changes CI image inputs.
@@ -94,12 +96,6 @@ paths. They are not a claim that CMake 3.16 itself ran. If targeted old-version
 evidence is needed and no natively compatible executable exists locally, record
 that limitation rather than using architecture emulation to manufacture a
 minimum-version PASS.
-
-For issue #34 review 15, local validation does not use these Docker commands or
-`linux/amd64` emulation. Implementation iterations use affected targets and
-focused tests; after final source freeze, one native clean configure/full
-build/CTest-JUnit pass is reused by all formal local gates. Current-head GitHub
-Actions supplies the separate remote integration result.
 
 ## Local Artifact Download
 

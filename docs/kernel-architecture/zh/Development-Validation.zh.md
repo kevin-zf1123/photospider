@@ -24,9 +24,9 @@
 
 声明的 CMake 3.16 最低版本是可安装静态产品 producer 路径与下游 package consumption 的
 兼容性下限，不是每个 pull request 都必须运行的固定 toolchain。任何晚于该下限引入的 policy
-（例如 `CMP0135`）都必须用 `if(POLICY <policy>)` 保护。兼容性由针对 3.16 command/policy
-inventory 的 command/provider/context audit、当前 GitHub integration package consumer，以及在
-compatibility-sensitive change 或 release check 确有需要时执行的针对性真实旧版本运行共同维护。
+（例如 `CMP0135`）都必须用 `if(POLICY <policy>)` 保护。兼容性由这项 policy 保护、当前 GitHub
+integration package consumer，以及只在 compatibility-sensitive change 或 release check 确有需要时
+执行的针对性原生旧版本运行共同维护。
 
 执行针对性最低版本运行时，必须从 fresh producer build tree 开始：使用 CMake 3.16 与
 `BUILD_TESTING=OFF` 配置顶层项目，构建真实 `photospider` target，安装到 fresh prefix，然后才
@@ -43,10 +43,10 @@ consumer build 目录。它在内存中检查观察到的 producer/install/consu
 generator，检查两侧的 `CMAKE_GENERATOR` 和 `CMAKE_CONFIGURATION_TYPES` cache 值，并从
 configuration-specific `$<TARGET_FILE:...>` manifest 解析 consumer 可执行文件。
 
-CMake 3.16 command/provider/context audit 是手工兼容性工具，不是 CTest 或 CI 门禁。迁移 residue、
-phase 完成度、陈旧术语与源码布局检查同样是临时开发检查。不得把它们注册到 CTest 或 CI，也不得
-在 primary repository 中长期保留 issue 专属编排。长期 runtime、public-header 与
-package-consumer 测试负责维持产品边界。
+迁移 residue、phase 完成度、陈旧术语与源码布局检查是临时开发检查，不得注册到 CTest 或 CI。
+Issue 专属 replay、provenance、helper 和 output artifact 既不得进入 primary repository，也不得
+作为 personal overlay 的长期内容保留。长期 runtime、public-header 与 package-consumer 测试负责
+维持产品边界。
 
 ## 验证归属
 
@@ -73,9 +73,9 @@ python3 tests/verification/codebase_structure/scheduler_doxygen_ast.py \
 ```
 
 这些文件可以留在 primary repository，因为本文定义了它们的长期手工职责；它们必须始终不进入
-CTest 与 GitHub CI。Issue 专属 replay 与 migration helper 是临时内容，不得进入 primary
-repository。Clean primary clone、CMake 配置、CTest inventory 和 CI script 都不能依赖个人开发
-内容。
+CTest 与 GitHub CI。Issue 专属 replay、provenance、helper 和 output artifact 既不得进入 primary
+repository，也不得作为 personal overlay 的长期内容保留。Clean primary clone、CMake 配置、
+CTest inventory 和 CI script 都不能依赖个人开发内容。
 
 验证应与风险成比例。实现期间只运行 scoped static check、受影响 build target 和 focused
 regression。是否运行本机原生 clean configure、full build 或完整 CTest/JUnit，应只根据改动风险
