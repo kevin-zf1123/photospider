@@ -849,14 +849,15 @@ if(BUILD_TESTING)
     add_dependencies(public_header_self_containment
         public_header_self_containment_objects)
     # CTest is reserved for long-lived runtime, package-consumer, compile, and
-    # error-boundary behavior. Issue-specific migration/residue scanners and
-    # Doxygen audits are manual evidence tools and are intentionally absent.
+    # error-boundary behavior. Migration/residue scanners and source-quality
+    # audits are intentionally absent from the test inventory.
     add_test(NAME StaticProductConsumerSmoke
         COMMAND ${Python3_EXECUTABLE}
-            "${PROJECT_SOURCE_DIR}/tests/verification/codebase_structure/phase4_static_product_consumer_smoke.py"
+            "${PROJECT_SOURCE_DIR}/tests/verification/codebase_structure/static_product_consumer_smoke.py"
             --repo "${PROJECT_SOURCE_DIR}"
             --build "${CMAKE_BINARY_DIR}"
-            --out "${CMAKE_BINARY_DIR}/tests/phase4_static_product_consumer_smoke"
+            --work "${CMAKE_BINARY_DIR}/tests/static_product_consumer_smoke"
+            --cmake-executable "${CMAKE_COMMAND}"
             --config $<CONFIG>
         WORKING_DIRECTORY ${PROJECT_SOURCE_DIR})
     set_tests_properties(StaticProductConsumerSmoke PROPERTIES

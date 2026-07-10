@@ -45,90 +45,47 @@ build tree, configures the top-level project with CMake 3.16 and
 prefix, and only then configures, builds, and runs an external
 `find_package(Photospider)` consumer. It must not reuse a producer tree
 configured by a newer CMake or substitute an internal helper target. If no
-natively compatible old CMake runtime is available locally, the review records
-that the targeted run was not performed and makes no CMake 3.16 runtime PASS
-claim; architecture emulation is not required.
+natively compatible old CMake runtime is available locally, skip that targeted
+local run; architecture emulation is not required.
 
-Freshness verification is fail-closed. The producer build tree, installation
-prefix, consumer source tree, and consumer build tree must be removed without
-suppressing errors; evidence must record whether each path existed before
-cleanup, prove that it and any pre-configure `CMakeCache.txt` were absent after
-cleanup, and derive `freshness_verified` from those filesystem observations.
-Copying a command-line "fresh" flag is not evidence.
+The package-consumer smoke recreates its transient install, consumer source,
+and consumer build directories without suppressing cleanup failures. It checks
+the observed producer/install/consumer behavior in memory and streams commands,
+child output, and assertion diagnostics to stdout/stderr for CTest to capture.
+All generated files remain in its transient work directory and are discarded
+after the run; the repository does not retain per-run reports for this test.
 
-Every producer/consumer evidence run must generate `environment.md` from that
-same run's `actual` observations and process invocation. It records ordered UTC
-start/finish times, the source HEAD plus staged and unstaged patch hashes, an
-ordinary-untracked source path/content-hash inventory, the requested and
-resolved CMake executable/version, producer/install/consumer paths, and the
-exact in-environment replay command. The comparison must verify
-those fields against `actual.json`, command-log headers, producer freshness, and
-the producer `CMakeCache.txt`; a manually retained environment description from
-an older run is not valid evidence. The maintained-command/provider audit is a
-separate run and keeps its own command and time window rather than being folded
-into the producer/consumer timestamps.
+When the selected CMake generator exposes multiple configurations, the smoke
+uses that same generator for producer and consumer, checks each
+`CMAKE_GENERATOR` and `CMAKE_CONFIGURATION_TYPES` cache value, and resolves the
+consumer executable from the configuration-specific `$<TARGET_FILE:...>`
+manifest.
 
-A formal validation root must freeze one content-addressed final source
-identity before any consumed producer, consumer, test, structural, or quality
-run begins. Every child artifact records the same base commit/tree, final
-snapshot tree, final patch hash, and ordinary-untracked source inventory from
-its own invocation. Checks that consume personal-overlay inputs additionally
-record a separate overlay commit/tree, snapshot, and patch identity, excluding
-generated evidence outputs from the identity to avoid self-reference. The root
-`compare.log` recomputes both applicable identities after all runs and fails
-unless every child identity and recomputed identity are equal. Source edits
-after the freeze invalidate the run; artifact timestamps, directory names, and
-hashes copied from an earlier review are not substitutes for this equality
-proof.
+The CMake 3.16 command/provider/context audit is a manual compatibility tool,
+not a CTest or CI gate. Migration residue, phase completion, stale-term, and
+source-layout checks are likewise temporary development checks. They must not
+be registered with CTest or CI or retained as issue-specific orchestration in
+the primary repository. Long-lived runtime, public-header, and package-consumer
+tests own the durable product boundaries.
 
-When the selected CMake generator exposes multiple configurations, package
-evidence must select that same generator for both producer and consumer,
-record each `CMAKE_GENERATOR` and `CMAKE_CONFIGURATION_TYPES` cache value, and
-build/install/run `RelWithDebInfo` plus another available configuration. The
-consumer executable must still be resolved from the configuration-specific
-`$<TARGET_FILE:...>` manifest; a synthetic path-layout check alone is not
-multi-configuration runtime evidence.
-
-The CMake 3.16 command/provider/context audit treats the root producer and package-config template
-as separate execution contexts. A project command is available only after its
-local declaration or after an `include()` whose real CMake 3.16 module source
-provides it; `@PACKAGE_INIT@` and `CMakeFindDependencyMacro` are explicit,
-position-sensitive providers. Every maintained
-`cmake_policy(SET CMPxxxx value)` call is compared with the real 3.16 policy
-list, and every unknown policy use requires an exact enclosing
-`if(POLICY <same-id>)`. The real `--help-command-list` proves command-name
-existence, while subcommand/keyword compatibility is claimed only for the
-finite sensitive-token inventory recorded in evidence, not for complete CMake
-grammar. The audit and the current GitHub CI package consumer together guard
-the maintained path without pinning every PR to one Ubuntu or CMake release.
-Targeted old-version evidence adds a strict-fresh active-path run when needed.
-Apple and Windows branches have command/policy/context and recorded sensitive-
-token static coverage only until real runners execute them.
-
-Issue-specific phase and residue guards protect the landed public-boundary
-semantics only as personal-overlay evidence. Their review-15 copies live under
-`tests/results/codebase-refactor/phase-4-static-product/review15/migration_gates/`
-and are not primary-repository CTest or CI inputs. They may inspect the
-authoritative OpenSpec and Chinese mirrors, architecture documents, utility
-diagrams, Kernel/embedded-adapter sources, and CLI sources to prove one
-migration snapshot. That evidence keeps frontend flow behind `ps::Host`,
-classifies Kernel and InteractionService as internal, confines
-`Kernel::ComputeRequest` construction to the adapter, and rejects an obsolete
-general worker queue in GraphRuntime. Long-lived runtime tests, public-header
-compilation, and package-consumer tests own the durable product boundary after
-the issue-specific scans are archived.
-
-## Validation and Evidence Ownership
+## Validation Ownership
 
 Primary-repository CTest and CI entries are reserved for long-lived software
 behavior: correctness, performance, stability, multithreaded execution, error
 handling, compile boundaries, package consumption, and runtime API boundaries.
 `StaticProductConsumerSmoke`, `GraphCliOptionBadAlloc`, GoogleTest discovery,
 `PublicHeaderSelfContainment`, and `SplitComputeServiceRuntimeTrace` satisfy
-that rule because they execute or compile the maintained product. A phase name,
-migration-residue search, stale-term detector, source-layout completion check,
-issue replay, or evidence/provenance report is not a software behavior test and
-must not be registered with CTest or invoked by CI.
+that rule because they execute or compile the maintained product.
+`StaticProductConsumerSmoke` is limited to producer configure/build/install,
+external `find_package`, public-header compile/link/run, installed export and
+dependency boundaries, platform archive/link behavior, and multi-configuration
+target discovery. Its behavior verdict must not include Git identity, staged or
+unstaged patch hashes, invocation replay, environment fingerprints, or
+synthetic verifier self-tests. It uses a transient work directory and emits
+commands plus assertion diagnostics directly to CTest's captured streams. A
+phase name, migration-residue search, stale-term detector, source-layout
+completion check, or issue replay is not a software behavior test and must not
+be registered with CTest or invoked by CI.
 
 The CLI/Host and scheduler Doxygen AST tools are long-lived manual developer tools,
 not tests. Run them explicitly when the corresponding declarations,
@@ -143,19 +100,16 @@ python3 tests/verification/codebase_structure/scheduler_doxygen_ast.py \
 
 Their files may remain in the primary repository because this document defines
 their lasting manual role. They must remain absent from CTest and GitHub CI.
-Issue-specific replay, migration, formal-report, source-identity, provenance,
-and evidence helpers belong under `tests/results/<change-or-feature>/...` in
-the personal overlay. A clean primary clone, CMake configuration, CTest
-inventory, and CI script must not read or import that overlay content.
+Issue-specific replay and migration helpers are temporary and must not enter
+the primary repository. A clean primary clone, CMake configuration, CTest
+inventory, and CI script must not depend on personal development content.
 
 Validation is proportional. During implementation, run scoped static checks,
-affected build targets, and focused regressions. After source and documentation
-are frozen, perform at most one native clean configure, one full build, and one
-complete CTest run with JUnit output. Formal local evidence reuses that same
-build tree for focused stress and manual inspection; it does not create a build
-tree per gate. Do not use Docker or local `linux/amd64` emulation for this final
-local pass. Current-head GitHub Actions remains the authoritative remote
-integration environment.
+affected build targets, and focused regressions. A native clean configure, full
+build, or complete CTest/JUnit pass is optional and should be chosen only when
+the change's risk warrants it. Do not use Docker or local `linux/amd64`
+emulation as a routine local preflight. Current-head GitHub Actions remains the
+authoritative remote integration environment.
 
 ## CTest Registration
 
@@ -174,14 +128,14 @@ assertions.
 
 `test_propagation` is different: it is a scriptable REPL/tool target, not a
 GoogleTest binary. CMake keeps it buildable for manual scripts and ad hoc
-validation, but CTest does not discover or run it. Do not cite `ctest` evidence
-as covering `test_propagation`; cite the specific manual command transcript if
-that target is used.
+validation, but CTest does not discover or run it. Do not claim that CTest
+covers `test_propagation`; run the exact manual command separately when needed.
 
 The default CTest inventory intentionally contains no phase-completion scan,
-migration-residue check, stale-term search, Doxygen audit, or personal-overlay
-helper. The static package-consumer smoke and graph CLI allocation-failure
-driver remain registered because they exercise real installed/runtime behavior.
+migration-residue check, stale-term search, Doxygen audit, or issue-specific
+orchestration. The static package-consumer smoke and graph CLI
+allocation-failure driver remain registered because they exercise real
+installed/runtime behavior.
 
 ## Known Test Quality Caveat
 
@@ -192,122 +146,6 @@ are visible, then upgraded later into clearer, higher-confidence tests.
 `test_propagation` remains a manual tool target until it is either converted
 into a proper GoogleTest binary or replaced with narrower CTest-registered
 fixtures.
-
-## Issue #34 Review-15 Local Validation
-
-Review 15 evidence lives under
-`tests/results/codebase-refactor/phase-4-static-product/review15/`. Its formal
-driver freezes separate primary and personal-overlay content identities, creates
-one native clean `BUILD_TESTING=ON` tree, performs one full build and one full
-CTest/JUnit run, and reuses that tree for focused scheduler/plugin/CLI/runtime
-stress plus manual AST and migration evidence. It intentionally omits the prior
-second `BUILD_TESTING=OFF` producer, multi-configuration rebuilds, Docker, and
-local `linux/amd64` emulation.
-
-The durable CTest inventory contains real package consumption, CLI process
-error handling, public-header compilation, runtime trace behavior, and all
-GoogleTest binaries. Review-specific phase/residue/replay tools live only under
-`review15/migration_gates/`; the formal driver invokes selected tools directly,
-while clean CMake, CTest, and CI contain no personal-overlay dependency. The
-machine-readable classification and rationale are in
-`review15/script_ownership_inventory.json` and its Markdown companion.
-
-Focused coverage adds exact CPU/GPU exception-state rollback, cross-epoch
-publication gating, two-stage scheduler running publication, complete scheduler
-plugin owner forwarding, GraphRuntime shutdown sweeping, and reusable CLI
-startup/option exception handling. Formal local PASS still leaves intentional
-dual-repository commit/push, current-head GitHub Actions and artifact review,
-fresh Codex/Copilot review with zero unresolved threads, and any genuinely
-required real Windows/MSVC run as external gates. Issue #34 and the active CLI
-layout change remain incomplete locally.
-
-## Issue #34 Review-14 Local Validation
-
-Review 14 evidence lives under
-`tests/results/codebase-refactor/phase-4-static-product/review14/` and is
-generated by one fail-closed orchestration over a frozen, content-addressed
-source snapshot. Its root comparison consumes child identities rather than
-trusting directory names or an earlier review's hashes.
-
-The focused behavior gates cover allocation-independent exact-key operation-
-plugin unload, unload-all, destruction, relative-path normalization failure,
-reverse successful-load restoration, scheduler-plugin raw
-instance ownership during host owner allocation/type-name failure, CPU/GPU
-batch exception fencing, immediate clean reuse, and the GPU HP-CPU idle-wait
-handshake. They also cover the active benchmark/CLI `std::bad_alloc` path.
-Phase-4 differential fixtures follow reference, pointer/dereference, chained,
-conditional, and mutator-call aliases and require the same unpolluted
-`exception_ptr` to be transported and rethrown; the CLI Clang AST audit checks
-every maintained Host-facing declaration/definition and every inner broad
-catch.
-
-Formal product gates use `current_consumer/`, one Ninja Multi-Config producer
-for `multiconfig/relwithdebinfo/` and `multiconfig/debug/`, a clean
-`BUILD_TESTING=OFF` product/ABI inspection, and a clean `BUILD_TESTING=ON`
-all-target build plus CTest/JUnit. Structural and quality gates include the
-phase-4/phase-7 scans, Host/member/dirty/GraphRuntime guards, OpenSpec/task
-audits, formatting/lint, Python static checks, Doxygen AST, whole-authorized-
-tree `__pycache__`/artifact inspection, both Git repositories' structured
-diffs, a flat/pair/invalid structure-argument schema differential, and a native
-real/missing CMake provider-resolution differential. A missing optional provider
-is reported as not applicable without importing definitions; a missing required
-provider is a structured failure rather than an exception traceback.
-
-Every child result must carry the applicable primary and overlay identities
-frozen in `source_identity/`. `provenance/` and the root formal report
-re-evaluate all identities after the run; one missing or unequal identity
-invalidates the complete local result.
-
-At the user's direction, a local `linux/amd64` replay of the same CI container
-is not a Review-14 completion gate. Native local gates run first; current-head
-GitHub Actions is the authoritative integration environment, and any failing
-artifact must be inspected and repaired there. This does not replace earlier
-CMake 3.16 minimum-version evidence or claim a new local CMake 3.16 run.
-Local PASS still cannot close Issue #34 or archive the active change:
-intentional commit/push, authoritative GitHub CI and artifact review,
-review-bot/thread resolution, and a real Windows runner remain external
-completion gates.
-
-## Issue #34 Review-13 Local Validation
-
-Review 13 closes the locally reproducible findings against the content-addressed
-pre-fix source recorded under
-`tests/results/codebase-refactor/phase-4-static-product/review13/pre_fix/`.
-The saved failing binaries, runtime transcripts, parser fixtures, patch hash,
-and derived comparison reproduce all six reviewed defects without rebuilding
-the historical source in the current worktree.
-
-The corresponding post-fix evidence is split by behavior rather than by a
-single pass/fail claim:
-
-- `post_fix/` repeats the operation-plugin transaction regressions ten times
-  and the CPU/GPU exception-publication regressions fifty times. It proves that
-  every post-registrar allocation failure leaves the live registry, source map,
-  result map, and retained handle set unchanged; failed callbacks are destroyed
-  before library unload; ordinary registrar errors remain result records;
-  `std::bad_alloc` is rethrown unchanged; the first scheduler publisher makes
-  its exact `exception_ptr` visible before the flag; and both schedulers remain
-  reusable after worker and concurrent-publisher stress.
-- `phase4_static_product_scan/`, `phase7_plugin_registration/`, and
-  `cli_host_doxygen_ast/` preserve the `std::bad_alloc` control-flow boundary,
-  the versioned operation-plugin ABI plus transaction language, and complete
-  Clang-AST-verified Host-facing CLI Doxygen contracts.
-- `consumer_smoke_current/`, both `multiconfig_*` directories,
-  `binary_abi_checks/`, and `product_off/` cover a clean `BUILD_TESTING=OFF`
-  static product, public-header consumption, runtime package use, two
-  configurations from one multi-config producer, and the absence of test seams
-  from the installed product.
-- `final_clean/` records a clean `BUILD_TESTING=ON` all-target build and the
-  complete CTest JUnit result. `quality/` records formatting, lint, Python
-  compilation/static analysis, Doxygen AST, diff-integrity, and structured
-  evidence checks. `tasks_audit/` proves that English and Chinese task
-  checkboxes remain synchronized and that Issue #34 remains open locally.
-
-These artifacts establish local source and runtime closure only. They do not
-authorize checking the Issue #34 tracking item or archiving its active OpenSpec
-change. The same-CI-container run, commit/push, remote CI and review-bot gates,
-review-thread resolution, and a real Windows runner remain external completion
-gates.
 
 ## GitHub/CI Integration Status
 
@@ -330,18 +168,16 @@ The maintained entry points are:
 - `ci/scripts/build_integrity.sh` for configure, required-target and full builds,
   plus CTest discovery.
 - `ci/scripts/ctest_full.sh` for the main CTest suite.
-- `ci/scripts/integration_suite.sh` for sequential local-container reproduction,
-  including CLI, propagation, plugin, and scheduler checks.
+- `ci/scripts/integration_suite.sh` for sequential integration behavior checks,
+  including CLI, propagation, plugin, and scheduler coverage.
 
 `SplitComputeServiceRuntimeTrace` writes its transient output below the CMake
-build tree, never below personal-overlay `tests/results`. The current
-`ctest_full.sh` exclusion is a CI runtime-policy choice rather than an overlay
-dependency; focused or complete native CTest evidence may run it directly.
-GitHub job status and
-downloaded artifacts supplement, rather than replace, focused tests and
-task-specific `tests/results/...` expected/actual/compare evidence. The complete
-workflow, Docker reproduction commands, and artifact download boundary are
-documented in `docs/CI/github-actions.md`.
+build tree and leaves no repository-owned per-run output. The current
+`ctest_full.sh` exclusion is a CI runtime-policy choice rather than a dependency
+on personal development content; developers may run the test directly when its
+behavior is relevant to a change. GitHub job status and downloadable artifacts
+report remote integration behavior. The complete workflow and artifact download
+boundary are documented in `docs/CI/github-actions.md`.
 
 ## Refactor Boundaries
 
@@ -366,5 +202,5 @@ split is implemented behind internal modules under
 
 The `GraphTraversalService` topology/ROI split has landed. Boundary coverage
 lives in `tests/test_graph_topology_boundaries.cpp`,
-`tests/test_propagation_contracts.cpp`, and the reproducible evidence under
-`tests/results/split-graph-traversal-service/`.
+`tests/test_propagation_contracts.cpp`, and the maintained runtime behavior
+tests that consume those boundaries.
