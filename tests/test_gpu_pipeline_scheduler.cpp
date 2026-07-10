@@ -293,7 +293,7 @@ TEST_F(GpuPipelineSchedulerTest, HPPrefersGPU) {
   auto best = registry.select_best_implementation(
       "gpu_test", "mock_op", available, ComputeIntent::GlobalHighPrecision);
 
-  ASSERT_NE(best, nullptr);
+  ASSERT_TRUE(best.has_value());
   EXPECT_EQ(best->metadata.device_preference, Device::GPU_METAL);
 }
 
@@ -306,7 +306,7 @@ TEST_F(GpuPipelineSchedulerTest, RTPreferstiledCPU) {
   auto best = registry.select_best_implementation(
       "gpu_test", "mock_op_rt", available, ComputeIntent::RealTimeUpdate);
 
-  ASSERT_NE(best, nullptr);
+  ASSERT_TRUE(best.has_value());
   EXPECT_EQ(best->metadata.device_preference, Device::CPU);
   EXPECT_TRUE(best->is_tiled());
 }
@@ -321,7 +321,7 @@ TEST_F(GpuPipelineSchedulerTest, HPFallbackToCPU) {
   auto best = registry.select_best_implementation(
       "gpu_test", "mock_op", available, ComputeIntent::GlobalHighPrecision);
 
-  ASSERT_NE(best, nullptr);
+  ASSERT_TRUE(best.has_value());
   EXPECT_EQ(best->metadata.device_preference, Device::CPU);
 }
 

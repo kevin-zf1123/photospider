@@ -180,7 +180,8 @@ struct HostPluginLoadError {
  *
  * @throws Nothing for value operations except vector/string allocation.
  * @note `new_op_keys` lists operation keys registered or replaced by the load
- *       operation. The Host owns plugin handles until unload.
+ *       operation. Successful handles belong to the process-wide operation
+ *       plugin owner, not to the Host that initiated the load.
  */
 struct HostPluginLoadReport {
   /** @brief Number of plugin candidates considered. */
@@ -764,7 +765,9 @@ class PHOTOSPIDER_API Host {
    * @return Structured plugin load report.
    * @throws std::bad_alloc if request processing, backend-to-status
    *         translation, or copied result construction exhausts memory.
-   * @note The Host owns successful plugin handles until unload.
+   * @note All Host instances share one process plugin owner. Destroying this
+   *       Host does not unload successful plugins; another Host may inspect and
+   *       use them until an explicit process-global unload.
    */
   virtual Result<HostPluginLoadReport> plugins_load_report(
       const std::vector<std::string>& dirs) = 0;
@@ -776,17 +779,21 @@ class PHOTOSPIDER_API Host {
    * @return Success or failure status.
    * @throws std::bad_alloc if request processing, backend-to-status
    *         translation, or copied result construction exhausts memory.
-   * @note This mirrors the older status-only plugin helper.
+   * @note This mutates the same process-global owner as plugins_load_report();
+   *       Host destruction does not reverse a successful load.
    */
   virtual VoidResult plugins_load(const std::vector<std::string>& dirs) = 0;
 
   /**
-   * @brief Unloads operation plugins owned by the Host.
+   * @brief Explicitly unloads all process-global operation plugins.
    *
-   * @return Number of plugin handles unloaded, or a failure status.
+   * @return Number of active operation keys removed or restored, or a failure
+   *         status.
    * @throws std::bad_alloc if request processing, backend-to-status
    *         translation, or copied result construction exhausts memory.
-   * @note Built-in operation registrations remain available.
+   * @note The mutation is visible to every Host. Built-in registrations remain
+   *       available. Already copied callbacks and plugin-derived return values
+   *       retain their library lease until their own destruction completes.
    */
   virtual Result<int> plugins_unload_all() = 0;
 
@@ -796,8 +803,9 @@ class PHOTOSPIDER_API Host {
    * @return Success status.
    * @throws std::bad_alloc if request processing, backend-to-status
    *         translation, or copied result construction exhausts memory.
-   * @note This is useful for frontend operation browsers that want built-in
-   *       source labels without loading external plugins.
+   * @note Built-in registration runs at most once through the process owner;
+   *       repeated calls only reconcile labels and cannot overwrite an active
+   *       plugin replacement.
    */
   virtual VoidResult seed_builtin_ops() = 0;
 
@@ -807,7 +815,8 @@ class PHOTOSPIDER_API Host {
    * @return Copied operation source map.
    * @throws std::bad_alloc if request processing, backend-to-status
    *         translation, or copied result construction exhausts memory.
-   * @note Source labels are diagnostic strings such as paths or `built-in`.
+   * @note Source labels are process-global copied diagnostics such as paths or
+   *       `built-in`; the result borrows no manager storage.
    */
   virtual Result<std::map<std::string, std::string>> ops_sources() const = 0;
 
@@ -817,7 +826,8 @@ class PHOTOSPIDER_API Host {
    * @return Copied operation keys.
    * @throws std::bad_alloc if request processing, backend-to-status
    *         translation, or copied result construction exhausts memory.
-   * @note Combined keys collapse compatible HP/RT/tiled implementations.
+   * @note The process-global snapshot collapses compatible HP/RT/tiled
+   *       implementations and remains independent of later Host mutations.
    */
   virtual Result<std::vector<std::string>> ops_combined_keys() const = 0;
 
@@ -827,7 +837,8 @@ class PHOTOSPIDER_API Host {
    * @return Copied combined operation source map.
    * @throws std::bad_alloc if request processing, backend-to-status
    *         translation, or copied result construction exhausts memory.
-   * @note This mirrors the existing frontend operation-source helper.
+   * @note The copied map and registry keys come from one serialized
+   *       process-owner snapshot.
    */
   virtual Result<std::map<std::string, std::string>> ops_combined_sources()
       const = 0;
@@ -942,7 +953,9 @@ class PHOTOSPIDER_API Host {
  * @throws std::bad_alloc if allocation of adapter state fails.
  * @note graph_cli uses this Host-backed embedded path for local operation.
  *       The adapter preserves in-process behavior while keeping the CLI
- *       boundary compatible with future IPC-backed Host implementations.
+ *       boundary compatible with future IPC-backed Host implementations. Each
+ *       adapter owns its graph backend state but shares the process operation
+ *       plugin owner; adapter destruction never performs plugin unload.
  */
 PHOTOSPIDER_API std::unique_ptr<Host> create_embedded_host();
 

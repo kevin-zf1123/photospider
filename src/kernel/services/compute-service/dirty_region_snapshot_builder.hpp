@@ -113,6 +113,9 @@ class DirtyRegionSnapshotBuilder {
    * @param snapshot Snapshot whose derived dirty regions are replaced.
    * @param domain Dirty domain to refresh.
    * @throws GraphError from extent lookup when graph metadata is invalid.
+   * @throws std::bad_alloc if cache, snapshot, implementation, or callback
+   *         snapshot storage cannot be copied or grown.
+   * @throws Any exception raised while copying a registered callback target.
    * @note Source membership, lifecycle state, and source ROI records are
    * preserved. Only actual ROIs, tile keys, monolithic records, and edge
    * mappings are cleared and rebuilt.
@@ -127,7 +130,9 @@ class DirtyRegionSnapshotBuilder {
    * @param node Node whose registered implementations are inspected.
    * @return True when the node has a monolithic HP implementation and no tiled
    * HP implementation.
-   * @throws Nothing directly.
+   * @throws std::bad_alloc if the implementation snapshot or its callbacks
+   *         cannot be copied.
+   * @throws Any exception raised while copying a registered callback target.
    * @note This is a local snapshot escalation. Propagation may still narrow
    * downstream ROIs after this boundary.
    */
@@ -138,7 +143,9 @@ class DirtyRegionSnapshotBuilder {
    *
    * @param snapshot Snapshot receiving tile or monolithic records.
    * @param record Domain-local node work record to append.
-   * @throws std::bad_alloc if snapshot storage grows and allocation fails.
+   * @throws std::bad_alloc if snapshot or implementation snapshot storage
+   *         allocation fails.
+   * @throws Any exception raised while copying a registered callback target.
    * @note Empty work ROIs are ignored. Monolithic nodes receive a single
    * whole-output record; tiled nodes receive aligned micro tile keys.
    */

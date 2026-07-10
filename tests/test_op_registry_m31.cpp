@@ -11,7 +11,7 @@
 
 #include <vector>
 
-#include "ps_types.hpp"
+#include "ps_types.hpp"  // NOLINT(build/include_subdir)
 
 namespace ps {
 namespace {
@@ -108,17 +108,17 @@ TEST_F(OpRegistryM31Test, GetImplementationsByDevice) {
   auto cpu_impls =
       registry.get_implementations_by_device("m31_test", "invert", Device::CPU);
   ASSERT_EQ(cpu_impls.size(), 1);
-  EXPECT_EQ(cpu_impls[0]->metadata.device_preference, Device::CPU);
+  EXPECT_EQ(cpu_impls[0].metadata.device_preference, Device::CPU);
 
   auto metal_impls = registry.get_implementations_by_device(
       "m31_test", "invert", Device::GPU_METAL);
   ASSERT_EQ(metal_impls.size(), 1);
-  EXPECT_EQ(metal_impls[0]->metadata.device_preference, Device::GPU_METAL);
+  EXPECT_EQ(metal_impls[0].metadata.device_preference, Device::GPU_METAL);
 
   auto cuda_impls = registry.get_implementations_by_device("m31_test", "invert",
                                                            Device::GPU_CUDA);
   ASSERT_EQ(cuda_impls.size(), 1);
-  EXPECT_EQ(cuda_impls[0]->metadata.device_preference, Device::GPU_CUDA);
+  EXPECT_EQ(cuda_impls[0].metadata.device_preference, Device::GPU_CUDA);
 
   // 检索不存在的设备
   auto npu_impls = registry.get_implementations_by_device("m31_test", "invert",
@@ -141,8 +141,8 @@ TEST_F(OpRegistryM31Test, GetMetadataWithCostScore) {
   auto impls = registry.get_implementations_by_device("m31_test", "contrast",
                                                       Device::CPU);
   ASSERT_EQ(impls.size(), 1);
-  EXPECT_EQ(impls[0]->metadata.cost_score, 150);
-  EXPECT_EQ(impls[0]->metadata.tile_preference, TileSizePreference::MACRO);
+  EXPECT_EQ(impls[0].metadata.cost_score, 150);
+  EXPECT_EQ(impls[0].metadata.tile_preference, TileSizePreference::MACRO);
 }
 
 // 测试：选择最优实现（HP 模式：GPU 优先）
@@ -168,7 +168,7 @@ TEST_F(OpRegistryM31Test, SelectBestImplementationForHP) {
       "m31_test", "sharpen", available_devices,
       ComputeIntent::GlobalHighPrecision);
 
-  ASSERT_NE(best, nullptr);
+  ASSERT_TRUE(best.has_value());
   EXPECT_EQ(best->metadata.device_preference, Device::GPU_METAL);
 }
 
@@ -195,7 +195,7 @@ TEST_F(OpRegistryM31Test, SelectBestImplementationHPCpuOnly) {
       "m31_test", "denoise", available_devices,
       ComputeIntent::GlobalHighPrecision);
 
-  ASSERT_NE(best, nullptr);
+  ASSERT_TRUE(best.has_value());
   EXPECT_EQ(best->metadata.device_preference, Device::CPU);
 }
 
@@ -222,7 +222,7 @@ TEST_F(OpRegistryM31Test, SelectBestImplementationForRT) {
   auto best = registry.select_best_implementation(
       "m31_test", "levels", available_devices, ComputeIntent::RealTimeUpdate);
 
-  ASSERT_NE(best, nullptr);
+  ASSERT_TRUE(best.has_value());
   // RT 模式优先选择 Tiled CPU
   EXPECT_EQ(best->metadata.device_preference, Device::CPU);
   EXPECT_TRUE(best->is_tiled());
@@ -248,14 +248,14 @@ TEST_F(OpRegistryM31Test, OpImplementationHelperMethods) {
   auto mono_impls = registry.get_implementations_by_device(
       "m31_test", "mono_op", Device::CPU);
   ASSERT_EQ(mono_impls.size(), 1);
-  EXPECT_TRUE(mono_impls[0]->is_monolithic());
-  EXPECT_FALSE(mono_impls[0]->is_tiled());
+  EXPECT_TRUE(mono_impls[0].is_monolithic());
+  EXPECT_FALSE(mono_impls[0].is_tiled());
 
   auto tiled_impls = registry.get_implementations_by_device(
       "m31_test", "tiled_op", Device::GPU_METAL);
   ASSERT_EQ(tiled_impls.size(), 1);
-  EXPECT_FALSE(tiled_impls[0]->is_monolithic());
-  EXPECT_TRUE(tiled_impls[0]->is_tiled());
+  EXPECT_FALSE(tiled_impls[0].is_monolithic());
+  EXPECT_TRUE(tiled_impls[0].is_tiled());
 }
 
 // 测试：不存在的算子返回空
@@ -271,7 +271,7 @@ TEST_F(OpRegistryM31Test, NonExistentOpReturnsEmpty) {
 
   auto best = registry.select_best_implementation(
       "nonexistent", "op", {Device::CPU}, ComputeIntent::GlobalHighPrecision);
-  EXPECT_EQ(best, nullptr);
+  EXPECT_FALSE(best.has_value());
 }
 
 // 测试：同一设备上的多个实现按 cost_score 排序
@@ -297,7 +297,7 @@ TEST_F(OpRegistryM31Test, MultipleSameDeviceImplsSortedByCost) {
       "m31_test", "multi_cpu", available_devices,
       ComputeIntent::GlobalHighPrecision);
 
-  ASSERT_NE(best, nullptr);
+  ASSERT_TRUE(best.has_value());
   EXPECT_EQ(best->metadata.cost_score, 50);
 }
 
@@ -329,11 +329,11 @@ TEST_F(OpRegistryM31Test, FilteredSelectionKeepsHpDevicePriority) {
 
   const std::vector<Device> available_devices = {Device::CPU,
                                                  Device::GPU_METAL};
-  const OpImplementation* best = registry.select_best_implementation(
+  const auto best = registry.select_best_implementation(
       kType, kSubtype, available_devices, ComputeIntent::GlobalHighPrecision,
       [](const OpImplementation& impl) { return impl.is_tiled(); });
 
-  ASSERT_NE(best, nullptr);
+  ASSERT_TRUE(best.has_value());
   EXPECT_EQ(best->metadata.device_preference, Device::GPU_METAL);
   EXPECT_TRUE(best->is_tiled());
   EXPECT_EQ(best->metadata.cost_score, 100);
@@ -352,12 +352,42 @@ TEST_F(OpRegistryM31Test, FilteredSelectionReturnsNullWhenAllRejected) {
   cpu_meta.cost_score = 10;
   registry.register_impl(kType, kSubtype, Device::CPU, dummy_cpu_op, cpu_meta);
 
-  const OpImplementation* best = registry.select_best_implementation(
+  const auto best = registry.select_best_implementation(
       kType, kSubtype, {Device::CPU}, ComputeIntent::GlobalHighPrecision,
       [](const OpImplementation&) { return false; });
 
-  EXPECT_EQ(best, nullptr);
+  EXPECT_FALSE(best.has_value());
 
+  registry.unregister_key(make_key(kType, kSubtype));
+}
+
+/**
+ * @brief Allows a selection filter to inspect the same registry safely.
+ * @throws Nothing when the copied candidate snapshot is filtered outside the
+ * registry state lock.
+ * @note The caller-provided filter runs outside the state lock so it cannot
+ * extend the critical section or re-enter mutation during locked iteration.
+ */
+TEST_F(OpRegistryM31Test, CandidateFilterCanInspectRegistrySnapshot) {
+  constexpr const char* kType = "m31_filter_inspection";
+  constexpr const char* kSubtype = "cpu";
+  auto& registry = OpRegistry::instance();
+  registry.unregister_key(make_key(kType, kSubtype));
+
+  OpMetadata metadata;
+  metadata.cost_score = 7;
+  registry.register_impl(kType, kSubtype, Device::CPU, dummy_cpu_op, metadata);
+
+  const auto best = registry.select_best_implementation(
+      kType, kSubtype, {Device::CPU}, ComputeIntent::GlobalHighPrecision,
+      [&](const OpImplementation& candidate) {
+        const auto observed = registry.get_metadata(kType, kSubtype);
+        return observed.has_value() &&
+               observed->cost_score == candidate.metadata.cost_score;
+      });
+
+  ASSERT_TRUE(best.has_value());
+  EXPECT_EQ(best->metadata.cost_score, 7);
   registry.unregister_key(make_key(kType, kSubtype));
 }
 

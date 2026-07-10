@@ -87,7 +87,7 @@ std::optional<OpRegistry::OpVariant> select_device_aware_hp_op(
     const Node& node, const std::vector<Device>& available_devices,
     bool require_tiled) {
   const OpRegistry& registry = OpRegistry::instance();
-  const OpImplementation* best = registry.select_best_implementation(
+  const auto best = registry.select_best_implementation(
       node.type, node.subtype, available_devices,
       ComputeIntent::GlobalHighPrecision,
       [require_tiled](const OpImplementation& impl) {
@@ -277,7 +277,7 @@ void TaskSubmissionPlan::resolve_operations() {
         resolved_ops_[i] = std::move(*device_op);
         continue;
       }
-      const auto* impls =
+      const auto impls =
           OpRegistry::instance().get_implementations(node.type, node.subtype);
       if (impls && impls->tiled_hp) {
         resolved_ops_[i] = OpRegistry::OpVariant{*impls->tiled_hp};

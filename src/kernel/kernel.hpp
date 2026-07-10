@@ -404,7 +404,15 @@ class Kernel {
   std::optional<std::vector<int>> trees_containing_node(const std::string& name,
                                                         int node_id);
 
-  PluginManager& plugins() { return plugin_mgr_; }
+  /**
+   * @brief Returns the process-global operation plugin owner.
+   *
+   * @return Shared manager used by every Kernel and embedded Host instance.
+   * @throws std::bad_alloc if first-use process-manager allocation fails.
+   * @note Kernel destruction does not unload operation plugins. Explicit Host
+   *       or internal unload affects every Host consistently.
+   */
+  PluginManager& plugins() { return PluginManager::process_instance(); }
   std::optional<double> get_last_io_time(const std::string& name);
 
   // [新增] 暴露 Metal 设备访问器
@@ -715,7 +723,6 @@ class Kernel {
                                     GraphRuntime& runtime);
 
   std::map<std::string, std::unique_ptr<GraphRuntime>> graphs_;
-  PluginManager plugin_mgr_;
   std::map<std::string, LastError> last_error_;
   GraphTraversalService traversal_service_;
   GraphInspectService inspect_service_;

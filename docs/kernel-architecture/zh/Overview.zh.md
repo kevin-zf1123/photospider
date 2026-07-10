@@ -65,6 +65,7 @@ graph TD
     Frontend["Embedded frontend"] --> Host["ps::Host"]
     Host --> EmbeddedHost["embedded Host adapter"]
     EmbeddedHost --> InteractionService
+    EmbeddedHost --> PluginManager["进程级 PluginManager"]
     InteractionService --> Kernel
 
     Kernel --> GraphRuntime
@@ -92,13 +93,18 @@ graph TD
     PluginManager --> OpRegistry
 ```
 
+每个 embedded Host 都拥有自己的 Kernel、graph runtime 和异步协调状态，但 operation plugin 不同：
+所有 Host 与 Kernel 都访问同一个进程寿命 `PluginManager` 和 `OpRegistry`。Host 析构绝不会卸载
+operation plugin。任意 Host 执行 load 或显式 unload，所有 Host 都会观察到相同的进程级 operation view；
+callback 与返回值 lease 会在 registry 移除后继续保持插件代码映射，直到在途状态完成销毁。
+
 ## 主要组件
 
 | 组件 | 角色 |
 | --- | --- |
 | `Kernel` | 多图 facade、服务 owner、运行时 bootstrapper、顶层图/缓存/计算 API。 |
 | `ps::Host` | `include/photospider/host` 下的 public frontend interface；返回复制的 request/result/snapshot value，并隐藏 Kernel、GraphModel 和 GraphRuntime。 |
-| `embedded Host adapter` | 由 `Kernel` 和 `InteractionService` 支撑的 in-process Host 实现，供本地前端使用，同时保持 CLI 行为不变。 |
+| `embedded Host adapter` | 由每 adapter 独立的 `Kernel` 和 `InteractionService` 状态支撑的 in-process Host 实现；所有 adapter 共享进程级 operation plugin owner。 |
 | `GraphRuntime` | 每图资源容器，包含模型、graph-state executor、事件、调度器和平台 context。 |
 | `GraphModel` | 图状态持有者：私有节点存储、拓扑邻接索引、缓存根目录、计时数据、quiet/skip-save 标志。 |
 | `InteractionService` | 由 embedded Host adapter 和 backend code 使用的内部 `Kernel` wrapper；包括 CLI 在内的 frontend 都使用 public Host seam。 |
@@ -109,8 +115,8 @@ graph TD
 | `GraphCacheService` | 内存/磁盘缓存操作和缓存同步。 |
 | `GraphInspectService` | 基于图拓扑构建结构化缓存/空间元数据 inspect 和 dependency-tree snapshot。 |
 | `GraphEventService` | 每节点计算事件收集。 |
-| `PluginManager` | 加载操作插件、传入 host-provided registrar、记录操作来源，并在卸载前持有动态库句柄。 |
-| `OpRegistry` | 全局操作实现 registry，包括 HP/RT、tiled/monolithic、设备元数据和 ROI propagator。 |
+| `PluginManager` | 唯一的进程寿命 operation plugin owner；串行化 load/seed/unload/inspection 并拥有 source/restoration/handle 状态。Load 会注册并记录动态插件，seed 会初始化或对齐 built-in，只有显式全局 unload 才会移除动态插件。 |
+| `OpRegistry` | 进程级 operation implementation registry，返回一致的 callback copy snapshot，包括 HP/RT、tiled/monolithic、设备元数据和 ROI propagator。 |
 
 ## 维护中文档
 

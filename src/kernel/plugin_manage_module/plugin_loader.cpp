@@ -2,6 +2,7 @@
 
 #include <algorithm>
 #include <exception>
+#include <functional>
 #include <limits>
 #include <map>
 #include <memory>
@@ -9,6 +10,8 @@
 #include <optional>
 #include <stdexcept>
 #include <string>
+#include <type_traits>
+#include <unordered_map>
 #include <utility>
 #include <vector>
 
@@ -82,7 +85,7 @@ using RegisterOpsFunc = RegisterPhotospiderOpsV1;
 /**
  * @brief Host context passed through the operation plugin registrar.
  *
- * The context points at the host-owned registry that should receive all
+ * The context points at the transaction-local registry that receives all
  * registration calls made by a plugin. It has stack lifetime inside
  * `load_one_plugin` and is valid only while the plugin registration entry
  * point is executing.
@@ -91,9 +94,67 @@ using RegisterOpsFunc = RegisterPhotospiderOpsV1;
  * `OperationPluginRegistrar`; they must not retain it after registration.
  */
 struct HostRegistrarContext {
-  /** @brief Host registry that owns all operation callbacks and metadata. */
+  /** @brief Staged registry that temporarily owns callbacks and metadata. */
   OpRegistry* registry = nullptr;
+
+  /**
+   * @brief Candidate library lease captured by every registered callback.
+   *
+   * The lease prevents explicit process-global unload from unmapping plugin
+   * code while an already copied callback is still executing.
+   */
+  std::shared_ptr<void> library_lifetime;
 };
+
+/**
+ * @brief Wraps a plugin callback with a shared dynamic-library lifetime lease.
+ *
+ * @tparam Return Callback return type.
+ * @tparam Args Callback parameter types, including reference qualifiers.
+ * @param library_lifetime Shared owner for the candidate dynamic library.
+ * @param callback Plugin-provided callback to invoke.
+ * @return Host-code wrapper sharing callback state and the library lease.
+ * @throws std::bad_alloc if shared state or std::function storage allocation
+ *         fails.
+ * @note State declares the lease before the callback, so reverse member
+ *       destruction destroys plugin-owned callable state before releasing the
+ *       last possible dynamic-library handle. Copied wrappers share the state,
+ *       allowing explicit unload to remove registry visibility immediately
+ *       while an in-flight invocation safely finishes. A returned `NodeOutput`
+ *       also receives a lease so plugin-instantiated YAML/control-block state
+ * is destroyed before final unmapping.
+ */
+template <typename Return, typename... Args>
+std::function<Return(Args...)> retain_plugin_library(
+    std::shared_ptr<void> library_lifetime,
+    std::function<Return(Args...)> callback) {
+  /**
+   * @brief Shared callback and handle state owned by host wrapper copies.
+   * @throws Nothing directly; member destruction follows reverse declaration
+   *         order.
+   */
+  struct RetainedCallbackState {
+    /** @brief Library lease declared first so it is destroyed last. */
+    std::shared_ptr<void> library_lifetime;
+    /** @brief Plugin callback destroyed before the library lease. */
+    std::function<Return(Args...)> callback;
+  };
+
+  auto state = std::make_shared<RetainedCallbackState>(
+      RetainedCallbackState{std::move(library_lifetime), std::move(callback)});
+  return [state = std::move(state)](Args... args) -> Return {
+    if constexpr (std::is_void_v<Return>) {
+      state->callback(std::forward<Args>(args)...);
+      return;
+    } else {
+      Return result = state->callback(std::forward<Args>(args)...);
+      if constexpr (std::is_same_v<std::remove_cv_t<Return>, NodeOutput>) {
+        result.plugin_library_lifetime = state->library_lifetime;
+      }
+      return result;
+    }
+  };
+}
 
 /**
  * @brief Returns the host registrar context or reports ABI misuse.
@@ -109,8 +170,9 @@ HostRegistrarContext& require_registrar_context(void* user_data) {
     throw std::invalid_argument("Operation plugin registrar has no context.");
   }
   auto& context = *static_cast<HostRegistrarContext*>(user_data);
-  if (!context.registry) {
-    throw std::invalid_argument("Operation plugin registrar has no registry.");
+  if (!context.registry || !context.library_lifetime) {
+    throw std::invalid_argument(
+        "Operation plugin registrar has incomplete host lifetime context.");
   }
   return context;
 }
@@ -153,7 +215,8 @@ void registrar_register_hp_monolithic(void* user_data, const char* type,
   auto& context = require_registrar_context(user_data);
   context.registry->register_op_hp_monolithic(
       require_name_segment(type, "operation type"),
-      require_name_segment(subtype, "operation subtype"), std::move(fn), meta);
+      require_name_segment(subtype, "operation subtype"),
+      retain_plugin_library(context.library_lifetime, std::move(fn)), meta);
 }
 
 /**
@@ -175,7 +238,8 @@ void registrar_register_hp_tiled(void* user_data, const char* type,
   auto& context = require_registrar_context(user_data);
   context.registry->register_op_hp_tiled(
       require_name_segment(type, "operation type"),
-      require_name_segment(subtype, "operation subtype"), std::move(fn), meta);
+      require_name_segment(subtype, "operation subtype"),
+      retain_plugin_library(context.library_lifetime, std::move(fn)), meta);
 }
 
 /**
@@ -197,7 +261,8 @@ void registrar_register_rt_tiled(void* user_data, const char* type,
   auto& context = require_registrar_context(user_data);
   context.registry->register_op_rt_tiled(
       require_name_segment(type, "operation type"),
-      require_name_segment(subtype, "operation subtype"), std::move(fn), meta);
+      require_name_segment(subtype, "operation subtype"),
+      retain_plugin_library(context.library_lifetime, std::move(fn)), meta);
 }
 
 /**
@@ -217,7 +282,8 @@ void registrar_register_dirty_propagator(void* user_data, const char* type,
   auto& context = require_registrar_context(user_data);
   context.registry->register_dirty_propagator(
       require_name_segment(type, "operation type"),
-      require_name_segment(subtype, "operation subtype"), std::move(fn));
+      require_name_segment(subtype, "operation subtype"),
+      retain_plugin_library(context.library_lifetime, std::move(fn)));
 }
 
 /**
@@ -237,7 +303,8 @@ void registrar_register_forward_propagator(void* user_data, const char* type,
   auto& context = require_registrar_context(user_data);
   context.registry->register_forward_propagator(
       require_name_segment(type, "operation type"),
-      require_name_segment(subtype, "operation subtype"), std::move(fn));
+      require_name_segment(subtype, "operation subtype"),
+      retain_plugin_library(context.library_lifetime, std::move(fn)));
 }
 
 /**
@@ -259,7 +326,8 @@ void registrar_register_dependency_builder(void* user_data, const char* type,
   auto& context = require_registrar_context(user_data);
   context.registry->register_dependency_builder(
       require_name_segment(type, "operation type"),
-      require_name_segment(subtype, "operation subtype"), std::move(fn),
+      require_name_segment(subtype, "operation subtype"),
+      retain_plugin_library(context.library_lifetime, std::move(fn)),
       mark_data_dependent);
 }
 
@@ -283,8 +351,8 @@ void registrar_register_device_monolithic(void* user_data, const char* type,
   auto& context = require_registrar_context(user_data);
   context.registry->register_impl(
       require_name_segment(type, "operation type"),
-      require_name_segment(subtype, "operation subtype"), device, std::move(fn),
-      meta);
+      require_name_segment(subtype, "operation subtype"), device,
+      retain_plugin_library(context.library_lifetime, std::move(fn)), meta);
 }
 
 /**
@@ -306,8 +374,8 @@ void registrar_register_device_tiled(void* user_data, const char* type,
   auto& context = require_registrar_context(user_data);
   context.registry->register_impl(
       require_name_segment(type, "operation type"),
-      require_name_segment(subtype, "operation subtype"), device, std::move(fn),
-      meta);
+      require_name_segment(subtype, "operation subtype"), device,
+      retain_plugin_library(context.library_lifetime, std::move(fn)), meta);
 }
 
 /**
@@ -559,7 +627,7 @@ bool is_operation_plugin_path(const fs::path& path) {
  * @param pattern Parsed directory and recursion mode.
  * @param callback Invoked for each regular file with the platform plugin
  * extension.
- * @throws std::filesystem_error when directory iteration fails.
+ * @throws std::filesystem::filesystem_error when directory iteration fails.
  * @note Non-existent and non-directory paths are ignored to preserve legacy
  * plugin-dir behavior.
  */
@@ -632,6 +700,49 @@ std::map<std::string, std::optional<std::string>> collect_previous_sources(
     previous_sources.emplace(key, source_it->second);
   }
   return previous_sources;
+}
+
+/**
+ * @brief Preallocates callback retirement slots for one plugin publication.
+ *
+ * @param owned_entries Final per-key slot revisions written by the registrar.
+ * @return Snapshot map containing empty callable placeholders and one default
+ *         device implementation per plugin-owned appended element.
+ * @throws std::bad_alloc if map, key, or device-placeholder storage allocation
+ *         fails.
+ * @note The returned storage contains no plugin callback yet. Allocation-free
+ *       unload swaps live or dependent plugin callback state into it before
+ *       releasing the registry lock.
+ */
+std::unordered_map<std::string, OpRegistry::RegistryEntrySnapshot>
+make_retirement_registry_entries(
+    const std::unordered_map<std::string, OpRegistry::RegistryEntryOwnership>&
+        owned_entries) {
+  std::unordered_map<std::string, OpRegistry::RegistryEntrySnapshot>
+      retirement_entries;
+  retirement_entries.reserve(owned_entries.size());
+  for (const auto& [key, owned] : owned_entries) {
+    OpRegistry::RegistryEntrySnapshot retirement;
+    if (owned.legacy_op != 0) {
+      retirement.legacy_op.emplace(MonolithicOpFunc{});
+    }
+    if (owned.metadata != 0) {
+      retirement.metadata.emplace();
+    }
+    const bool owns_implementation_slot =
+        owned.monolithic_hp != 0 || owned.tiled_hp != 0 ||
+        owned.tiled_rt != 0 || owned.meta_hp != 0 || owned.meta_rt != 0 ||
+        owned.dirty_propagator != 0 || owned.forward_propagator != 0 ||
+        owned.dependency_builder != 0 || owned.data_dependent != 0 ||
+        !owned.device_impls.empty();
+    if (owns_implementation_slot) {
+      retirement.implementations.emplace();
+      retirement.implementations->device_impls.resize(
+          owned.device_impls.size());
+    }
+    retirement_entries.emplace(key, std::move(retirement));
+  }
+  return retirement_entries;
 }
 
 /**
@@ -840,6 +951,7 @@ class OperationPluginLoadTransaction final {
  *
  * @param registry Host registry that owns the transactional capture.
  * @param register_ops Resolved canonical plugin registration entry.
+ * @param library_lifetime Candidate library lease captured by every callback.
  * @param registration_capture Destination snapshot populated by the registry.
  * @return Nothing.
  * @throws std::bad_alloc unchanged from registrar construction, plugin
@@ -852,11 +964,12 @@ class OperationPluginLoadTransaction final {
  */
 void capture_plugin_registration(
     OpRegistry& registry, RegisterOpsFunc register_ops,
+    std::shared_ptr<void> library_lifetime,
     OpRegistry::RegistrationCapture& registration_capture) {
   try {
     registry.capture_registration(
         [&]() {
-          HostRegistrarContext context{&registry};
+          HostRegistrarContext context{&registry, std::move(library_lifetime)};
           auto registrar = make_operation_plugin_registrar(context);
           register_ops(&registrar);
         },
@@ -875,7 +988,7 @@ void capture_plugin_registration(
  * @param loaded_plugins Caller-owned handle map keyed by absolute plugin path.
  * @param result Accumulated load result.
  * @return Nothing.
- * @throws std::filesystem_error from `fs::absolute`.
+ * @throws std::filesystem::filesystem_error from `fs::absolute`.
  * @throws std::bad_alloc from result, shadow registry/source/handle copies,
  * registrar execution, or post-registration staging. The original resource
  * exhaustion identity propagates unchanged.
@@ -922,6 +1035,7 @@ void load_one_plugin(const fs::path& path,
   auto& registration_capture = transaction.registration_capture();
   try {
     capture_plugin_registration(transaction.registry(), register_ops,
+                                transaction.library_lifetime(),
                                 registration_capture);
   } catch (const std::bad_alloc&) {
     throw;
@@ -944,6 +1058,8 @@ void load_one_plugin(const fs::path& path,
 #endif
   auto previous_sources = collect_previous_sources(
       registration_capture.registered_keys, transaction.op_sources());
+  auto retirement_entries =
+      make_retirement_registry_entries(registration_capture.owned_entries);
 #if defined(PHOTOSPIDER_INTERNAL_BAD_ALLOC_TESTING)
   maybe_fail_operation_plugin_bookkeeping(
       testing::OperationPluginLoadFailpoint::SourceAndResult);
@@ -962,6 +1078,8 @@ void load_one_plugin(const fs::path& path,
   loaded.registered_keys = std::move(registration_capture.registered_keys);
   loaded.previous_registry_entries =
       std::move(registration_capture.previous_entries);
+  loaded.owned_registry_entries = std::move(registration_capture.owned_entries);
+  loaded.retirement_registry_entries = std::move(retirement_entries);
   loaded.previous_sources = std::move(previous_sources);
 #if defined(PHOTOSPIDER_INTERNAL_BAD_ALLOC_TESTING)
   maybe_fail_operation_plugin_bookkeeping(
@@ -977,34 +1095,15 @@ void load_one_plugin(const fs::path& path,
   transaction.commit_all(registry, op_sources, loaded_plugins, result);
 }
 
-/**
- * @brief Process-lifetime handle store for legacy `load_plugins` callers.
- *
- * @return Mutable map retaining successful plugin handles until process exit.
- * @throws Nothing after static initialization succeeds.
- * @note `PluginManager` does not use this store; it passes its own map so
- * unload operations can release handles explicitly.
- */
-LoadedOpPluginMap& process_resident_op_plugins() {
-  static LoadedOpPluginMap loaded_plugins;
-  return loaded_plugins;
-}
-
 }  // namespace
 
-/** @copydoc load_plugins */
-PluginLoadResult load_plugins(const std::vector<std::string>& plugin_dir_paths,
-                              std::map<std::string, std::string>& op_sources) {
-  auto& loaded_plugins = process_resident_op_plugins();
-  return load_plugins_retaining_handles(plugin_dir_paths, op_sources,
-                                        loaded_plugins);
-}
-
-/** @copydoc load_plugins_retaining_handles */
-PluginLoadResult load_plugins_retaining_handles(
+/** @copydoc load_plugins_for_process_owner */
+PluginLoadResult load_plugins_for_process_owner(
+    ProcessPluginOwnerToken owner_token,
     const std::vector<std::string>& plugin_dir_paths,
     std::map<std::string, std::string>& op_sources,
     LoadedOpPluginMap& loaded_plugins) {
+  (void)owner_token;
   PluginLoadResult result;
   for (const auto& raw_path : plugin_dir_paths) {
     if (raw_path.empty()) {

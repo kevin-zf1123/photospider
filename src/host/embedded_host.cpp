@@ -1456,7 +1456,8 @@ HostPluginLoadReport to_public_plugin_report(const PluginLoadResult& report) {
  * @throws std::bad_alloc if adapter state allocation fails.
  * @note Public methods translate values to InteractionService and Kernel calls
  *       while keeping all implementation-only objects inside this translation
- *       unit.
+ *       unit. Per-adapter graph state is independent, while operation plugin
+ *       state comes from the one process owner shared by every adapter.
  */
 class EmbeddedHost final : public Host {
  public:
@@ -1464,8 +1465,9 @@ class EmbeddedHost final : public Host {
    * @brief Creates a Host with a fresh embedded backend state.
    *
    * @throws std::bad_alloc if backend state allocation fails.
-   * @note The state owns all implementation objects and outlives adapter
-   *       futures captured by compute_async().
+   * @note The state owns per-Host implementation objects and outlives adapter
+   *       futures captured by compute_async(). It does not own or unload the
+   *       process operation plugin manager.
    */
   EmbeddedHost() : state_(std::make_shared<EmbeddedHostState>()) {}
 
@@ -2500,7 +2502,8 @@ class EmbeddedHost final : public Host {
    * @param dirs Directories or glob-like inputs to scan.
    * @return Public plugin load report, or a failed status.
    * @throws std::bad_alloc on allocation failure.
-   * @note Plugin handles stay owned by the backend loader.
+   * @note Successful handles stay in the process-global plugin owner and remain
+   *       visible after this adapter is destroyed.
    */
   Result<HostPluginLoadReport> plugins_load_report(
       const std::vector<std::string>& dirs) override {
@@ -2517,7 +2520,8 @@ class EmbeddedHost final : public Host {
    * @param dirs Directories or glob-like inputs to scan.
    * @return Success or first plugin-load failure status.
    * @throws std::bad_alloc on allocation failure.
-   * @note This method preserves the status-only frontend contract.
+   * @note This method preserves the status-only frontend contract while
+   *       mutating the same process owner as every other Host.
    */
   VoidResult plugins_load(const std::vector<std::string>& dirs) override {
     return guarded_void("plugins_load", GraphErrc::Io, [&] {
@@ -2531,11 +2535,13 @@ class EmbeddedHost final : public Host {
   }
 
   /**
-   * @brief Unloads operation plugins owned by the backend loader.
+   * @brief Unloads all process-global operation plugins.
    *
-   * @return Number of unloaded plugin handles, or a failed status.
+   * @return Number of active operation keys removed or restored, or a failed
+   *         status.
    * @throws std::bad_alloc on allocation failure.
-   * @note Built-in operation registrations remain available.
+   * @note Every Host observes the registry/source mutation. Copied callbacks
+   *       and returned values retain their library lease until destruction.
    */
   Result<int> plugins_unload_all() override {
     return guarded_result<int>("plugins_unload_all", GraphErrc::Io, [&] {
@@ -2548,7 +2554,8 @@ class EmbeddedHost final : public Host {
    *
    * @return Success or failure status.
    * @throws std::bad_alloc on allocation failure.
-   * @note The operation mutates diagnostic plugin source metadata only.
+   * @note Built-in callback registration runs once process-wide; later calls
+   *       reconcile source metadata without replaying over plugin overrides.
    */
   VoidResult seed_builtin_ops() override {
     return guarded_void("seed_builtin_ops", GraphErrc::Unknown, [&] {

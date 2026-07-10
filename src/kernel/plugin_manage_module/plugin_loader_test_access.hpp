@@ -64,7 +64,8 @@ std::size_t operation_plugin_load_failpoint_hits() noexcept;
  * @param result Mutable accumulated result whose strong guarantee is audited.
  * @return Nothing.
  * @throws std::bad_alloc from the selected failpoint or real allocation.
- * @throws std::filesystem_error if absolute-path normalization fails.
+ * @throws std::filesystem::filesystem_error if absolute-path normalization
+ *         fails.
  * @note This is a BUILD_TESTING-only internal seam over the same
  * `load_one_plugin` implementation used by `PluginManager`; it does not alter
  * the public or plugin ABI.
