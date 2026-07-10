@@ -104,7 +104,7 @@ class DomainTaskShapeStrategy {
   /** @brief Returns true when node has a tiled implementation for the domain.
    */
   bool has_tiled_impl(const Node& node) const {
-    const auto* impls =
+    const auto impls =
         OpRegistry::instance().get_implementations(node.type, node.subtype);
     if (!impls) {
       return false;
@@ -116,7 +116,7 @@ class DomainTaskShapeStrategy {
 
   /** @brief Returns the task kind used for non-tiled graph-backed execution. */
   PlannedTaskKind scalar_task_kind(const Node& node) const {
-    const auto* impls =
+    const auto impls =
         OpRegistry::instance().get_implementations(node.type, node.subtype);
     if (!impls) {
       return PlannedTaskKind::Node;

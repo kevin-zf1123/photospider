@@ -94,21 +94,58 @@ class InteractionService {
   }
 
   // Plugins
+  /**
+   * @brief Loads operation plugins into the process-global owner.
+   * @param dirs Directory patterns to scan.
+   * @return Nothing.
+   * @throws Exceptions from PluginManager::load_from_dirs unchanged.
+   * @note Mutation is serialized with every Host plugin mutation/inspection.
+   */
   void cmd_plugins_load(const std::vector<std::string>& dirs) {
     kernel_.plugins().load_from_dirs(dirs);
   }
+
+  /**
+   * @brief Loads operation plugins and returns process-global diagnostics.
+   * @param dirs Directory patterns to scan.
+   * @return Structured report for candidates processed by this call.
+   * @throws Exceptions from PluginManager::load_from_dirs_report unchanged.
+   * @note Successful handles, source labels, restoration snapshots, and load
+   *       order belong to the shared process owner.
+   */
   PluginLoadResult cmd_plugins_load_report(
       const std::vector<std::string>& dirs) {
     return kernel_.plugins().load_from_dirs_report(dirs);
   }
+
+  /**
+   * @brief Explicitly unloads every process-global operation plugin.
+   * @return Number of active registry keys removed or restored.
+   * @throws Nothing.
+   * @note All Hosts observe the mutation. Callback snapshots already executing
+   *       retain their library lease until invocation storage is destroyed.
+   */
   int cmd_plugins_unload_all() {
     return kernel_.plugins().unload_all_plugins();
   }
+
+  /**
+   * @brief Seeds process-global built-in operation source labels.
+   * @return Nothing.
+   * @throws std::bad_alloc if registry/source storage allocation fails.
+   * @note Seeding is serialized with plugin mutation and inspection.
+   */
   void cmd_seed_builtin_ops() {
     kernel_.plugins().seed_builtins_from_registry();
   }
 
   // Ops overview (type:subtype -> source path or "built-in")
+  /**
+   * @brief Copies process-global operation source labels.
+   * @return Coherent operation-key to source snapshot.
+   * @throws std::bad_alloc if copying exhausts memory.
+   * @note The result never borrows manager storage.
+   */
   std::map<std::string, std::string> cmd_ops_sources() const {
     return kernel_.plugins().op_sources();
   }
@@ -123,7 +160,7 @@ class InteractionService {
    *       public values.
    */
   std::vector<std::string> cmd_ops_combined_keys() const {
-    return ps::OpRegistry::instance().get_combined_keys();
+    return kernel_.plugins().combined_keys();
   }
 
   /**
@@ -136,29 +173,7 @@ class InteractionService {
    *       calls InteractionService directly.
    */
   std::map<std::string, std::string> cmd_ops_combined_sources() const {
-    std::map<std::string, std::string> out;
-    auto keys = ps::OpRegistry::instance().get_combined_keys();
-    const auto& sources = kernel_.plugins().op_sources();
-    for (const auto& k : keys) {
-      auto it = sources.find(k);
-      if (it != sources.end()) {
-        out[k] = it->second;
-        continue;
-      }
-      // Fallback: if an alias "*_tiled" exists in sources, use its source
-      auto pos = k.rfind(':');
-      if (pos != std::string::npos) {
-        std::string base = k.substr(0, pos + 1);
-        std::string tiled = base + (k.substr(pos + 1) + std::string("_tiled"));
-        auto it2 = sources.find(tiled);
-        if (it2 != sources.end()) {
-          out[k] = it2->second;
-          continue;
-        }
-      }
-      out[k] = "built-in";  // default when unknown
-    }
-    return out;
+    return kernel_.plugins().combined_sources();
   }
 
   // IO / cache / traversal / printing

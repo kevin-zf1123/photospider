@@ -78,6 +78,7 @@ graph TD
     Frontend["Embedded frontend"] --> Host["ps::Host"]
     Host --> EmbeddedHost["embedded Host adapter"]
     EmbeddedHost --> InteractionService
+    EmbeddedHost --> PluginManager["process PluginManager"]
     InteractionService --> Kernel
 
     Kernel --> GraphRuntime
@@ -105,13 +106,21 @@ graph TD
     PluginManager --> OpRegistry
 ```
 
+Each embedded Host owns its Kernel, graph runtimes, and async coordination, but
+operation plugins are different: every Host and Kernel reaches the same
+process-lifetime `PluginManager` and `OpRegistry`. Host destruction never
+unloads operation plugins. A load or explicit unload through any Host changes
+the process-global operation view seen by all Hosts; callback and returned-value
+leases keep plugin code mapped after registry removal until in-flight state is
+destroyed.
+
 ## Main Components
 
 | Component | Role |
 | --- | --- |
 | `Kernel` | Multi-graph facade, service owner, runtime bootstrapper, top-level graph/cache/compute API. |
 | `ps::Host` | Public frontend interface under `include/photospider/host`; returns copied request/result/snapshot values and hides Kernel, GraphModel, and GraphRuntime. |
-| `embedded Host adapter` | In-process Host implementation backed by `Kernel` and `InteractionService`, used by local frontends while CLI behavior remains unchanged. |
+| `embedded Host adapter` | In-process Host implementation backed by per-adapter `Kernel` and `InteractionService` state; all adapters share the process operation plugin owner. |
 | `GraphRuntime` | Per-graph resource container with model, graph-state executor, events, schedulers, and platform context. |
 | `GraphModel` | Graph state holder: private node storage, topology adjacency index, cache root, timing data, quiet/skip-save flags. |
 | `InteractionService` | Internal wrapper around `Kernel` used by the embedded Host adapter and backend code; frontends, including the CLI, use the public Host seam. |
@@ -122,8 +131,8 @@ graph TD
 | `GraphCacheService` | Memory/disk cache operations and cache synchronization. |
 | `GraphInspectService` | Structured cache/spatial metadata inspection and dependency-tree snapshots built from graph topology. |
 | `GraphEventService` | Per-node compute event collection. |
-| `PluginManager` | Loads operation plugins, passes the host-provided registrar, records operation sources, and owns dynamic library handles until unload. |
-| `OpRegistry` | Global operation implementation registry, including HP/RT, tiled/monolithic, device metadata, and ROI propagators. |
+| `PluginManager` | Unique process-lifetime operation plugin owner; serializes load/seed/unload/inspection and owns source/restoration/handle state. Load registers and records dynamic plugins, seed initializes or reconciles built-ins, and only explicit global unload removes dynamic plugins. |
+| `OpRegistry` | Process-global operation implementation registry with coherent copied callback snapshots, including HP/RT, tiled/monolithic, device metadata, and ROI propagators. |
 
 ## Maintained Documents
 

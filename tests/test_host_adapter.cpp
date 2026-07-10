@@ -9,6 +9,7 @@
 #include <mutex>
 #include <new>
 #include <sstream>
+#include <stdexcept>
 #include <string>
 #include <system_error>
 #include <thread>
@@ -341,6 +342,131 @@ void write_host_adapter_offset_roi_graph(const std::filesystem::path& path) {
 std::filesystem::path lifecycle_plugin_dir() {
   return std::filesystem::path(PS_TEST_OP_PLUGIN_DIR) / "lifecycle";
 }
+
+/**
+ * @brief Returns the replacement lifecycle plugin fixture directory.
+ *
+ * @return Directory containing the platform-specific override plugin library.
+ * @throws std::bad_alloc if path construction allocates and fails.
+ * @note The fixture replaces the same canonical operation key as the lifecycle
+ *       plugin so multiple Host instances can exercise one restoration chain.
+ */
+std::filesystem::path override_lifecycle_plugin_dir() {
+  return std::filesystem::path(PS_TEST_OP_PLUGIN_DIR) / "override";
+}
+
+/**
+ * @brief Writes a graph backed by the dynamically loaded lifecycle operation.
+ *
+ * @param path YAML file path to create.
+ * @return Nothing.
+ * @throws std::filesystem::filesystem_error if parent directory creation fails.
+ * @throws std::ios_base::failure if opening or writing the graph file fails.
+ * @note The operation returns debug metadata without requiring image inputs, so
+ *       Host inspection can distinguish original and replacement callbacks.
+ */
+void write_lifecycle_plugin_graph(const std::filesystem::path& path) {
+  std::filesystem::create_directories(path.parent_path());
+  std::ofstream out;
+  out.exceptions(std::ios::failbit | std::ios::badbit);
+  out.open(path);
+  out << "- id: 1\n"
+      << "  name: lifecycle_plugin_node\n"
+      << "  type: plugin_lifecycle\n"
+      << "  subtype: op\n";
+}
+
+/**
+ * @brief Cleans process-global operation plugins through one public Host.
+ *
+ * Construction removes stale plugins and converts a non-OK public status into
+ * `std::runtime_error`. Destruction retries global cleanup but suppresses all
+ * exceptions so assertion unwinding remains visible.
+ *
+ * @throws std::bad_alloc when construction cannot copy Host status storage.
+ * @throws std::runtime_error when initial public cleanup reports failure.
+ * @note The referenced Host must outlive this guard. Cleanup deliberately uses
+ *       the public global-unload surface exercised by the test; every Host sees
+ *       the same process-owner state.
+ */
+class ScopedHostPluginCleanup final {
+ public:
+  /**
+   * @brief Removes stale process plugins before a multi-Host scenario.
+   *
+   * @param host Long-lived Host used for cleanup.
+   * @throws std::bad_alloc if the Host boundary cannot construct a status.
+   * @throws std::runtime_error if the public cleanup status is not OK; the
+   *         exception copies that status message for test diagnostics.
+   * @note The borrowed Host is retained by reference and must remain alive
+   * until this guard's destructor has finished.
+   */
+  explicit ScopedHostPluginCleanup(Host& host) : host_(host) {
+    const auto cleanup = host_.plugins_unload_all();
+    if (!cleanup.status.ok) {
+      throw std::runtime_error(cleanup.status.message);
+    }
+  }
+
+  /**
+   * @brief Performs best-effort public global cleanup after assertions.
+   *
+   * @throws Nothing; Host exceptions are caught and suppressed.
+   * @note Cleanup runs while `host_` is still alive and does not replace an
+   *       exception already unwinding from the test body.
+   */
+  ~ScopedHostPluginCleanup() noexcept {
+    try {
+      (void)host_.plugins_unload_all();
+    } catch (...) {
+      // Test teardown must not hide the assertion that triggered unwinding.
+    }
+  }
+
+  /**
+   * @brief Prevents duplicating cleanup ownership for one borrowed Host.
+   *
+   * @param other Guard that remains the sole cleanup owner.
+   * @note Deletion prevents two destructors from racing global cleanup.
+   */
+  ScopedHostPluginCleanup(const ScopedHostPluginCleanup& other) = delete;
+
+  /**
+   * @brief Prevents retargeting an active cleanup guard.
+   *
+   * @param other Guard whose borrowed Host must remain unchanged.
+   * @return No value because this operation is deleted.
+   * @note Lexical lifetime remains paired with the Host supplied at
+   *       construction.
+   */
+  ScopedHostPluginCleanup& operator=(const ScopedHostPluginCleanup& other) =
+      delete;
+
+  /**
+   * @brief Prevents transferring cleanup ownership away from its lexical Host.
+   *
+   * @param other Guard that remains paired with its borrowed Host.
+   * @note Deletion keeps one deterministic destructor cleanup point.
+   */
+  ScopedHostPluginCleanup(ScopedHostPluginCleanup&& other) = delete;
+
+  /**
+   * @brief Prevents replacing cleanup ownership through move assignment.
+   *
+   * @param other Guard whose borrowed Host remains unchanged.
+   * @return No value because this operation is deleted.
+   * @note Neither guard can become responsible for a different Host.
+   */
+  ScopedHostPluginCleanup& operator=(ScopedHostPluginCleanup&& other) = delete;
+
+ private:
+  /**
+   * @brief Public Host borrowed for initial and final process-global cleanup.
+   * @note The surrounding test owns the Host and keeps it alive past this
+   * guard.
+   */
+  Host& host_;
+};
 
 /**
  * @brief Returns YAML text for replacing the single Host test node.
@@ -1349,6 +1475,107 @@ TEST(EmbeddedHostAdapter, SchedulerScanLoadAndPluginUnloadUseStatusValues) {
       host->plugins_load({(temp.root() / "missing_plugins").string()});
   EXPECT_TRUE(empty_scan_plugins.status.ok)
       << empty_scan_plugins.status.message;
+}
+
+/**
+ * @brief Proves every embedded Host shares one process plugin owner.
+ *
+ * @throws Nothing when public Host status mapping and fixture IO succeed.
+ * @note One Host loads P1, another loads P2 and executes it, both loading Hosts
+ *       are destroyed, and a third Host performs the global unload. The
+ *       surviving and newly created Hosts must observe the same state.
+ */
+TEST(EmbeddedHostAdapter,
+     OperationPluginsAreProcessGlobalAcrossHostDestructionAndUnload) {
+  ScopedTempDir temp("photospider_host_process_plugin_owner_test");
+  auto observer = create_embedded_host();
+  ASSERT_NE(observer, nullptr);
+  ScopedHostPluginCleanup cleanup(*observer);
+
+  const auto original_dir = lifecycle_plugin_dir();
+  const auto replacement_dir = override_lifecycle_plugin_dir();
+  ASSERT_TRUE(std::filesystem::exists(original_dir));
+  ASSERT_TRUE(std::filesystem::exists(replacement_dir));
+
+  auto original_loader = create_embedded_host();
+  ASSERT_NE(original_loader, nullptr);
+  const auto original_report =
+      original_loader->plugins_load_report({original_dir.string()});
+  ASSERT_TRUE(original_report.status.ok) << original_report.status.message;
+  ASSERT_EQ(original_report.value.loaded, 1);
+
+  auto observer_sources = observer->ops_sources();
+  ASSERT_TRUE(observer_sources.status.ok) << observer_sources.status.message;
+  ASSERT_EQ(observer_sources.value.count("plugin_lifecycle:op"), 1u);
+
+  GraphLoadRequest load_request;
+  load_request.session = GraphSessionId{"process_plugin_graph"};
+  load_request.root_dir = (temp.root() / "sessions").string();
+  load_request.yaml_path = (temp.root() / "source" / "plugin.yaml").string();
+  load_request.cache_root_dir = (temp.root() / "cache").string();
+  write_lifecycle_plugin_graph(load_request.yaml_path);
+  const auto loaded = observer->load_graph(load_request);
+  ASSERT_TRUE(loaded.status.ok) << loaded.status.message;
+
+  HostComputeRequest request = make_compute_request(load_request.session);
+  request.cache.force_recache = true;
+  auto computed = observer->compute(request);
+  ASSERT_TRUE(computed.status.ok) << computed.status.message;
+  auto original_view = observer->inspect_node(load_request.session, NodeId{1});
+  ASSERT_TRUE(original_view.status.ok) << original_view.status.message;
+  ASSERT_TRUE(original_view.value.space.has_value());
+  EXPECT_EQ(original_view.value.space->absolute_roi.width, 11);
+  EXPECT_EQ(original_view.value.space->absolute_roi.height, 7);
+
+  auto replacement_loader = create_embedded_host();
+  ASSERT_NE(replacement_loader, nullptr);
+  const auto replacement_report =
+      replacement_loader->plugins_load_report({replacement_dir.string()});
+  ASSERT_TRUE(replacement_report.status.ok)
+      << replacement_report.status.message;
+  ASSERT_EQ(replacement_report.value.loaded, 1);
+
+  const auto repeated_seed = observer->seed_builtin_ops();
+  ASSERT_TRUE(repeated_seed.status.ok) << repeated_seed.status.message;
+  computed = observer->compute(request);
+  ASSERT_TRUE(computed.status.ok) << computed.status.message;
+  auto replacement_view =
+      observer->inspect_node(load_request.session, NodeId{1});
+  ASSERT_TRUE(replacement_view.status.ok) << replacement_view.status.message;
+  ASSERT_TRUE(replacement_view.value.space.has_value());
+  EXPECT_EQ(replacement_view.value.space->absolute_roi.width, 22);
+  EXPECT_EQ(replacement_view.value.space->absolute_roi.height, 9);
+
+  original_loader.reset();
+  replacement_loader.reset();
+  computed = observer->compute(request);
+  ASSERT_TRUE(computed.status.ok) << computed.status.message;
+  auto after_loader_destruction =
+      observer->inspect_node(load_request.session, NodeId{1});
+  ASSERT_TRUE(after_loader_destruction.status.ok)
+      << after_loader_destruction.status.message;
+  ASSERT_TRUE(after_loader_destruction.value.space.has_value());
+  EXPECT_EQ(after_loader_destruction.value.space->absolute_roi.width, 22);
+  EXPECT_EQ(after_loader_destruction.value.space->absolute_roi.height, 9);
+
+  auto unloading_host = create_embedded_host();
+  ASSERT_NE(unloading_host, nullptr);
+  const auto unloaded = unloading_host->plugins_unload_all();
+  ASSERT_TRUE(unloaded.status.ok) << unloaded.status.message;
+  EXPECT_EQ(unloaded.value, 2);
+
+  observer_sources = observer->ops_sources();
+  ASSERT_TRUE(observer_sources.status.ok) << observer_sources.status.message;
+  EXPECT_EQ(observer_sources.value.count("plugin_lifecycle:op"), 0u);
+  const auto unloading_sources = unloading_host->ops_sources();
+  ASSERT_TRUE(unloading_sources.status.ok) << unloading_sources.status.message;
+  EXPECT_EQ(unloading_sources.value.count("plugin_lifecycle:op"), 0u);
+
+  auto fresh_host = create_embedded_host();
+  ASSERT_NE(fresh_host, nullptr);
+  const auto fresh_sources = fresh_host->ops_sources();
+  ASSERT_TRUE(fresh_sources.status.ok) << fresh_sources.status.message;
+  EXPECT_EQ(fresh_sources.value.count("plugin_lifecycle:op"), 0u);
 }
 
 }  // namespace

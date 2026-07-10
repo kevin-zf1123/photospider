@@ -14,14 +14,17 @@
  *
  * Operation plugins export one C symbol,
  * `register_photospider_ops_v1(ps::OperationPluginRegistrar*)`. The host
- * creates the registrar, owns the real `OpRegistry`, and forwards each
- * registration call into the host process. Plugins therefore do not need to
+ * creates the registrar, reaches the process-owned `OpRegistry`, and forwards
+ * each registration call into that one host process. Plugins therefore do not
  * locate or share the registry singleton across static-library and
  * dynamic-library boundaries.
  *
  * @note The callable signatures still use Photospider C++ value contracts such
- * as `NodeOutput`, `OpMetadata`, and `std::function`. This is a narrow
- * host-provided registration ABI, not a long-term pure C plugin ABI.
+ * as `NodeOutput`, `OpMetadata`, and `std::function`. The host wraps every
+ * callback with a shared library lease and attaches that lease to returned
+ * `NodeOutput` values, so plugin-instantiated value internals are destroyed
+ * before unmapping. This remains a narrow transitional C++ registration ABI,
+ * not a long-term pure C plugin ABI.
  */
 /**
  * @brief Marks the operation plugin registration entry for export.
@@ -50,7 +53,7 @@ namespace ps {
 /**
  * @brief Host-provided operation registration callback table.
  *
- * The loader fills this table with callbacks that mutate the host-owned
+ * The loader fills this table with callbacks that mutate the process-owned
  * `OpRegistry`. Plugin code receives a pointer to the registrar and calls its
  * member helpers instead of calling `OpRegistry::instance()` directly. The
  * helper methods validate that the expected host callback is present, forward
@@ -61,7 +64,8 @@ namespace ps {
  * incomplete registrar table.
  * @note The registrar is borrowed and valid only during the
  * `register_photospider_ops_v1` call. Plugins must not store the registrar or
- * its `user_data` pointer for later use.
+ * its `user_data` pointer for later use. Registered callback wrappers, rather
+ * than the plugin, own the dynamic-library lease.
  */
 struct OperationPluginRegistrar {
   /**

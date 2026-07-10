@@ -726,7 +726,8 @@ if(BUILD_TESTING)
     target_compile_definitions(test_host_adapter PRIVATE
         PS_TEST_OP_PLUGIN_DIR="${TEST_OP_PLUGIN_DIR}"
     )
-    add_dependencies(test_host_adapter lifecycle_op_plugin)
+    add_dependencies(test_host_adapter lifecycle_op_plugin
+        override_lifecycle_op_plugin)
     add_ps_test(test_bad_alloc_boundaries
         tests/test_bad_alloc_boundaries.cpp)
     target_sources(test_bad_alloc_boundaries PRIVATE

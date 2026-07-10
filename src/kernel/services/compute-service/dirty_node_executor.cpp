@@ -87,7 +87,7 @@ void HighPrecisionDirtyNodeExecutor::execute(Node& node,
     resolved_inputs = resolve_inputs(node_for_exec);
   }
 
-  const auto* impls = OpRegistry::instance().get_implementations(
+  const auto impls = OpRegistry::instance().get_implementations(
       node_for_exec.type, node_for_exec.subtype);
   const TileOpFunc* hp_tile_fn =
       (impls && impls->tiled_hp) ? &*impls->tiled_hp : nullptr;
@@ -159,7 +159,7 @@ ResolvedNodeInputs HighPrecisionDirtyNodeExecutor::resolve_inputs(
 void HighPrecisionDirtyNodeExecutor::execute_operation(
     Node& node, const HpPlanEntry& entry,
     const std::vector<const NodeOutput*>& image_inputs_ready) const {
-  const auto* impls =
+  const auto impls =
       OpRegistry::instance().get_implementations(node.type, node.subtype);
   const TileOpFunc* hp_tile_fn =
       (impls && impls->tiled_hp) ? &*impls->tiled_hp : nullptr;

@@ -1,8 +1,8 @@
 # Plugin ABI
 
 Photospider supports operation plugins and scheduler plugins. Operation plugins
-extend the host-owned `OpRegistry` through a host-provided registrar. Scheduler
-plugins provide `IScheduler` implementations.
+extend the process-owned `OpRegistry` through a host-provided registrar.
+Scheduler plugins provide `IScheduler` implementations.
 
 ## Operation Plugin ABI
 
@@ -15,9 +15,9 @@ extern "C" PLUGIN_API void register_photospider_ops_v1(
 
 The loader calls this function after loading the dynamic library. The host
 creates an `OperationPluginRegistrar`, passes it to the plugin, and forwards
-each registration into the host-owned `OpRegistry`. Operation plugins must not
-call `OpRegistry::instance()` during registration, because a dynamic plugin and
-a static host can otherwise observe different registry singletons.
+each registration into the one process-owned `OpRegistry`. Operation plugins
+must not call `OpRegistry::instance()` during registration, because a dynamic
+plugin and a static host can otherwise observe different registry singletons.
 
 The old no-argument `register_photospider_ops()` entry is not a supported
 compatibility ABI. It used the same C symbol shape without a signature marker,
@@ -51,13 +51,15 @@ plugin loader, graph, scheduler, or compute-service code.
 
 This split supports the static-host direction:
 
-- The host may own `OpRegistry` inside a static Photospider link.
+- The static Photospider process owns one `OpRegistry` and one operation
+  `PluginManager`, shared by every embedded Host.
 - Dynamic operation plugins receive registration callbacks from the host, so
-  registry mutation stays in that host-owned instance.
+  registry mutation stays in that process-owned instance.
 - `photospider_operation_plugin_shim` is only a shared runtime helper boundary
   for plugin callback code that needs buffer adapter functions.
-- Plugin callback objects may still point into plugin code, so the host must
-  retain plugin libraries while registered keys are active.
+- Plugin callback objects and plugin-instantiated return-value internals may
+  still point into plugin code, so the process owner and copied value leases
+  retain libraries until all such state has been destroyed.
 
 Symbol visibility rules:
 
@@ -105,6 +107,35 @@ registration. Registration capture, previous-source calculation, restoration
 snapshots, result aggregation, and handle insertion also mutate only staged
 state.
 
+The process manager serializes the complete registry snapshot-to-publication
+interval. Direct registry registration therefore cannot land between a
+transactional copy and its final swap and then be lost. Registry reads return
+independent callback snapshots rather than borrowed pointers; candidate filters
+run after the registry lock has been released. A direct mutation that starts
+while a registrar is staging waits for publication, then applies to the newly
+published registry state; both operations complete without overwriting the
+direct update or deadlocking.
+
+Ownership is tracked below the operation-key level. Every successful write to a
+legacy callback, metadata, HP/RT callback, propagation callback, dependency
+builder, aggregate dependency flag, or device implementation element receives a
+stable revision token. Plugin registration capture records only the final tokens
+that the registrar actually wrote and prunes predecessor snapshots to those
+replaced slots; append-only device predecessors remain live instead of being
+duplicated in restoration state. A same-key direct mutation after publication
+receives new tokens for its changed slots. Source inspection reports `mixed`
+while direct and plugin-owned slots coexist instead of attributing the complete
+key to the plugin.
+
+Direct replacement uses the same retirement discipline outside manager-driven
+unload. A replacement callback is prepared before locking and swapped with the
+active slot; the displaced callable remains in the parameter-local retirement
+value until the registry guard has exited. Whole-key unregister extracts the
+legacy, metadata, implementation, and ownership map nodes together, then
+destroys the extracted values outside the guard. Device implementation values
+and their revision vector therefore remain parallel, and a direct device
+registration after whole-key unregister cannot inherit a stale plugin token.
+
 The transaction has three outcomes:
 
 - If the registrar or any later staging step throws `std::bad_alloc`, the
@@ -130,46 +161,84 @@ success-path callbacks without a live handle.
 ## Operation Plugin Library Lifetime
 
 Operation callbacks registered by a plugin may point to code or callable
-objects inside that plugin's dynamic library. The host must therefore retain
-the library handle for as long as any registered operation key from that plugin
-can be resolved from `OpRegistry`.
+objects inside that plugin's dynamic library. `PluginManager::process_instance`
+is the unique process-lifetime owner for operation-plugin source labels,
+handles, restoration snapshots, and successful-load ordering. Every Kernel and
+embedded Host reaches this same owner. Destroying a Host or Kernel never unloads
+operation plugins; explicit unload through any Host changes registry/source
+visibility for every Host.
 
-`PluginManager` owns operation plugin handles. A successful load records the
-absolute plugin path, the operation keys registered or replaced through the
-host-provided registrar, the previous registry/source state for those keys, and
-a retained RAII library handle. It also records a monotonic successful-load
-sequence. Unload consumes only those preallocated keys and snapshots: existing
-registry callbacks and source strings are swapped in place or erased, with no
-temporary key collection, callback copy, or allocating rollback. The manager's
-destructor and `unload_all_plugins()` are therefore `noexcept` cleanup paths
-even when global allocation is failing.
+A successful load records the absolute plugin path, operation keys registered
+or replaced through the host-provided registrar, the exact per-slot revisions
+owned by that plugin, pruned previous registry/source state, preallocated empty
+callback-retirement slots, and a retained RAII library handle. It also records a
+monotonic successful-load sequence. The production low-level loader requires an
+unforgeable process-owner token, so a caller cannot publish into the global
+registry with a second source/handle/restoration map. `PluginManager` is the
+only production loading surface; there is no legacy wrapper that accepts a
+caller source map or copies manager state after a completed load transaction.
+
+Every registrar callback is wrapped with a shared dynamic-library lease. A
+resolved callback snapshot therefore remains callable after explicit global
+unload removes its registry entry. Monolithic callback results also attach the
+same lease to `NodeOutput`. The lease is the first-declared and last-destroyed
+member. Copy construction retains it before copying payload state; move
+construction transfers the complete state through a no-throw swap. Copy and move
+assignment first stage a complete replacement, swap it into place, and let the
+temporary retire the old image/YAML/data/spatial/debug state before releasing
+the old lease. A failed copy leaves the destination unchanged. Consequently,
+plugin-defined image/context deleters remain mapped even when a cached output is
+copied, moved, or overwritten after explicit global unload. These leases contain
+no reference back to the manager or registry and therefore form no ownership
+cycle.
+
+Unload consumes only preallocated keys, ownership tokens, snapshots, and
+retirement slots. For each scalar or device element, it compares the active
+revision with the plugin's publication token. Matching slots are restored from
+their pruned predecessor or swapped into empty retirement storage; later direct
+slots have different tokens and remain active. Empty registry values can then be
+erased without destroying plugin callback state under the registry lock. The
+retired plugin record is destroyed after that lock is released. There is no
+temporary key collection, callback copy, callable comparison, or allocating
+rollback, so `unload_all_plugins()` remains a `noexcept` cleanup path even when
+global allocation is failing.
+The process owner itself is intentionally not destroyed at static teardown;
+explicit unload defines plugin cleanup semantics and avoids static-destruction
+ordering against `OpRegistry`.
 
 `unload_by_plugin_path()` first tries the exact absolute key recorded by the
 successful load. That lookup and the following cleanup are allocation-free, so
 callers that retain the reported source key get the same cleanup guarantee as
-unload-all and destruction. Relative or otherwise non-normalized input remains
+unload-all. Relative or otherwise non-normalized input remains
 a convenience API: `std::filesystem::absolute` and string construction may
 allocate before cleanup begins. If that normalization fails, the original
 exception propagates before registry, source, result, or retained-handle state
 changes.
 
-Unload first removes or restores every callback and source record, destroys the
-removed plugin callable state while the library is still mapped, and only then
-releases the retained handle. `unload_all_plugins()` walks successful loads in
+Unload first removes or restores every callback and source record. Retired
+callback state is then destroyed after releasing the registry lock and while
+the manager lock remains same-thread reentrant; plugin callback or DSO
+destructors can perform diagnostic registry/manager reads without self-deadlock.
+Only afterward is the retained handle released. `unload_all_plugins()` walks
+successful loads in
 strict reverse sequence so a built-in-to-old-plugin-to-new-plugin override
 chain unwinds as new plugin, old plugin, then built-in. Path sorting is not a
 valid unload order because each newer snapshot depends on the immediately
 preceding implementation.
 
 If an older plugin has already been shadowed by a newer plugin, unloading the
-older plugin may remove no active operation keys. `PluginManager` still clears
-dependent restoration snapshots before releasing the older handle so the newer
-plugin cannot later restore callbacks into an unmapped library.
+older plugin may remove no active operation keys. `PluginManager` uses the same
+slot tokens to splice only the older plugin-owned predecessor values into the
+newer plugin snapshot before retiring the middle callback. The newer plugin can
+later restore the real predecessor, but can never restore code from the unmapped
+middle library. This applies to a real built-in or host-registered sentinel
+predecessor as well as to an absent key; each retired plugin callback is
+destroyed before its own library is unmapped.
 
-The legacy `load_plugins` helper keeps successful operation plugin libraries
-resident for process lifetime. Callers that need explicit unload semantics
-should use `PluginManager` or the handle-retaining loader API rather than
-dropping the library immediately after registration.
+Built-in callback registration also belongs to the process owner. It runs at
+most once, before process-owner plugin publication; later Host seed calls only
+reconcile source labels and cannot replay built-ins over an active plugin
+replacement.
 
 ## Scheduler Plugin ABI
 

@@ -64,11 +64,10 @@ Resolved seam tightening in the current branch:
   or graph-state access explicitly include the internal-only
   `tests/support/kernel_test_access.hpp` helper and route those calls through
   `ps::testing::KernelTestAccess`.
-- The phase-3 internal-header pass moves the graph model, graph runtime,
-  graph-state executor, compute service, dirty-control lane, and built-in
-  concrete scheduler headers out of `include/` and into the private `src/`
-  include root. Internal targets still compile with that private root, while
-  the installable public header inventory remains limited to
+- The graph model, graph runtime, graph-state executor, compute service,
+  dirty-control lane, and built-in concrete scheduler headers now live under
+  the private `src/` include root. Internal targets compile with that private
+  root, while the installable public header inventory remains limited to
   `include/photospider/**`.
 - Dirty-region diagnostics, compute planning diagnostics, and scheduler trace
   diagnostics are available through copied Host value snapshots. Public headers
@@ -256,12 +255,12 @@ CMake rules:
 
 - Internal targets may use `src/` as a `PRIVATE` include root.
 - Installable targets expose only `include/photospider`.
-- Current phase-3 guardrails enforce that the installable header scan only
-  walks `include/photospider/**`, that moved implementation headers are present
-  under `src/`, and that the `photospider` product keeps `src/` as a private
-  include root.
-- The phase-4 install/export pass makes `photospider` the installable `STATIC`
-  target, installs only `include/photospider/**`, and exports
+- The installation boundary copies headers only from
+  `include/photospider/**`. Implementation headers under `src/` are excluded
+  from the installed package, and the `photospider` product keeps `src/` as a
+  private include root.
+- The install/export configuration makes `photospider` the installable
+  `STATIC` target, installs only `include/photospider/**`, and exports
   `Photospider::photospider` through `PhotospiderConfig.cmake`. The archive is
   named `libphotospider.a` on Unix-like toolchains and `photospider.lib` with
   MSVC.
@@ -387,7 +386,7 @@ Initial method groups:
 | compute | `compute.run`, `compute.run_async`, `compute.cancel`, `compute.status` | Async can start as polling before streaming. |
 | inspect | `inspect.graph`, `inspect.node`, `inspect.dependency_tree`, `inspect.dirty` | Returns value snapshots. |
 | scheduler | `scheduler.types`, `scheduler.get`, `scheduler.set`, `scheduler.trace` | Mirrors current CLI scheduler features. |
-| plugins | `plugins.scan`, `plugins.load`, `plugins.unload_all`, `plugins.list` | Host retains plugin handles. |
+| plugins | `plugins.scan`, `plugins.load`, `plugins.unload_all`, `plugins.list` | The unique process `PluginManager` retains operation-plugin handles; Hosts expose the control surface without owning a second lifetime map. |
 | events | `events.next`, `events.drain` | Polling first; subscription later. |
 
 Image payload rule:
@@ -422,16 +421,18 @@ frontend migration changes directory/internal-target organization and adds
 daemon/IPC adapters without changing `ps::Host` as the sole public seam. Plugin
 SDK tightening in step 7 is a separate extension-boundary change.
 
-1. **Completed:** Add public-header dependency scans.
-   - Fail when installable headers include `src/`, `kernel/services/...`, or
-     implementation-only graph/runtime/compute planning headers.
-   - Add one header self-containment compile test for public headers.
-   - Phase 0 establishes a replayable public-header scan and the
-     `public_header_self_containment` CMake target as the independent compile
-     guard for each header under `include/photospider/`.
+1. **Completed:** Establish public-header installation and self-containment
+   boundaries.
+   - Install only headers under `include/photospider/**`; implementation
+     headers under `src/` remain outside the package.
+   - `PublicHeaderSelfContainment` builds the
+     `public_header_self_containment` target through CTest. CMake generates one
+     translation unit per header under `include/photospider/`, and the target
+     compiles each header independently through the public include root with
+     C++17.
    - `include/photospider/public_boundary.hpp` remains a marker header for the
-     installable include root. Phase 1 adds the first stable value contracts
-     under `include/photospider/core/`.
+     installable include root. Stable value contracts live under
+     `include/photospider/core/`.
 2. **Completed:** Introduce `include/photospider/*`.
    - Move stable value contracts first: errors, result/status values,
      compute intent, OpenCV-free image/tile buffer values, and inspection
@@ -476,6 +477,10 @@ For any implementation change following this document:
   tree. It does not produce expected/actual/compare/summary reports and must not
   depend on Git identity, patch hashes, replay, provenance, or migration
   completion.
+- Keep `PublicHeaderSelfContainment` in CTest as a long-lived compile-boundary
+  check. It generates one translation unit per installable public header and
+  compiles each through the public include root with C++17, failing when a
+  header cannot compile independently.
 - Treat CMake 3.16 as a compatibility floor, not a fixed version gate for every
   pull request. Guard newer policies, rely on the current CI package consumer,
   and run a targeted native old-version producer/install/consumer path only for

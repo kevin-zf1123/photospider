@@ -90,7 +90,7 @@ void DirtyRegionSnapshotBuilder::refresh_actual_dirty_regions(
 // aligned with the operator implementation selected elsewhere in compute.
 bool DirtyRegionSnapshotBuilder::is_monolithic_boundary(
     const Node& node) const {
-  const auto* impls =
+  const auto impls =
       OpRegistry::instance().get_implementations(node.type, node.subtype);
   return impls && impls->monolithic_hp && !impls->tiled_hp;
 }

@@ -22,15 +22,16 @@ namespace ps::compute {
  * @param domain Compute domain whose implementation metadata is requested.
  * @return Domain-specific metadata when present, otherwise the legacy metadata
  * fallback or nullopt when no metadata is registered.
- * @throws Nothing directly.
+ * @throws std::bad_alloc if implementation or metadata snapshot copying cannot
+ *         allocate.
+ * @throws Any exception raised while copying a registered callback target.
  * @note This helper does not resolve the executable operation. It only selects
  * metadata used for tile shape, dependency ROI, and tiled execution config.
  */
 inline std::optional<OpMetadata> metadata_for_domain(const std::string& type,
                                                      const std::string& subtype,
                                                      DirtyDomain domain) {
-  const OpRegistry::OpImplementations* impls =
-      OpRegistry::instance().get_implementations(type, subtype);
+  const auto impls = OpRegistry::instance().get_implementations(type, subtype);
   if (impls) {
     if (domain == DirtyDomain::RealTime && impls->meta_rt) {
       return impls->meta_rt;
