@@ -456,11 +456,13 @@ class OpRegistry {
    * @brief Runs a registration callback while capturing touched keys.
    *
    * @param registration Callback that calls one or more OpRegistry register
-   * APIs, usually a plugin's `register_photospider_ops` entry point.
+   * APIs, usually a plugin's `register_photospider_ops_v1` entry point.
    * @param capture Output capture receiving touched keys and prior table state.
    * @throws Any exception propagated by `registration`.
    * @note The capture is populated before each key mutation, so callers can
-   * restore overwritten entries if registration fails or when a plugin unloads.
+   * restore overwritten entries when a plugin unloads. The operation-plugin
+   * loader performs registration in a shadow registry, so load failure discards
+   * the shadow instead of invoking an allocating restore path.
    */
   void capture_registration(const std::function<void()>& registration,
                             RegistrationCapture& capture);
@@ -470,10 +472,46 @@ class OpRegistry {
    *
    * @param capture Capture whose previous entries should be restored.
    * @throws std::bad_alloc if restoring copied callbacks or metadata allocates.
-   * @note Used by plugin load rollback and unload. Keys absent before the
-   * capture are erased from all registry tables.
+   * @note Used by plugin unload and explicit restoration callers, not the
+   * transactional plugin-load failure path. Keys absent before the capture are
+   * erased from all registry tables.
    */
   void restore_registration_capture(const RegistrationCapture& capture);
+
+  /**
+   * @brief Replaces one active key with a preallocated prior snapshot.
+   *
+   * Existing mapped values are exchanged with the snapshot in place. Tables
+   * that had no prior value erase the active entry. If an expected active table
+   * entry is already absent, the prior callable remains in `snapshot` and is
+   * discarded by its owner instead of using an allocating insertion path.
+   *
+   * @param key Canonical operation key whose active plugin callback is being
+   * removed.
+   * @param snapshot Mutable pre-registration state retained when the plugin was
+   * loaded; it receives the removed plugin-owned callback objects.
+   * @return True when at least one active registry table entry was removed or
+   * exchanged.
+   * @throws Nothing; lookup, swap, and erase do not allocate.
+   * @note The snapshot owner must keep the plugin library loaded until the
+   * swapped-out plugin callbacks in `snapshot` have been destroyed.
+   */
+  bool restore_entry_noexcept(const std::string& key,
+                              RegistryEntrySnapshot& snapshot) noexcept;
+
+  /**
+   * @brief Exchanges complete registry state without allocation.
+   *
+   * @param other Host-owned shadow registry prepared by a plugin-load
+   * transaction.
+   * @return Nothing.
+   * @throws Nothing.
+   * @note Operation-plugin loading calls this only after registry, source,
+   * result, snapshot, and handle staging all succeed. Standard container swap
+   * makes publication non-throwing; callers retain both registries' plugin
+   * libraries until swapped-out callable destruction completes.
+   */
+  void swap_state(OpRegistry& other) noexcept;
 
  private:
   /**

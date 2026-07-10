@@ -1,7 +1,11 @@
-#include "ps_types.hpp"
+#include "ps_types.hpp"  // NOLINT(build/include_subdir)
 
 #include <algorithm>
 #include <stdexcept>
+#include <string>
+#include <type_traits>
+#include <utility>
+#include <vector>
 
 namespace ps {
 
@@ -15,7 +19,7 @@ namespace {
  * allowing nested callers to restore the previous capture.
  */
 thread_local OpRegistry::RegistrationCapture* active_registration_capture =
-    nullptr;
+    nullptr;  // NOLINT(whitespace/indent_namespace)
 
 /**
  * @brief Sorts and deduplicates captured canonical operation keys.
@@ -172,6 +176,51 @@ void OpRegistry::restore_registration_capture(
       restore_entry(key, snapshot_it->second);
     }
   }
+}
+
+/** @copydoc OpRegistry::restore_entry_noexcept */
+bool OpRegistry::restore_entry_noexcept(
+    const std::string& key, RegistryEntrySnapshot& snapshot) noexcept {
+  static_assert(std::is_nothrow_swappable_v<OpVariant>);
+  static_assert(std::is_nothrow_swappable_v<OpMetadata>);
+  static_assert(std::is_nothrow_swappable_v<OpImplementations>);
+
+  bool changed = false;
+  const auto restore_table = [&key, &changed](auto& table,
+                                              auto& previous) noexcept {
+    auto active = table.find(key);
+    if (previous) {
+      if (active != table.end()) {
+        using std::swap;
+        swap(active->second, *previous);
+        changed = true;
+      }
+      return;
+    }
+    if (active != table.end()) {
+      table.erase(active);
+      changed = true;
+    }
+  };
+
+  restore_table(table_, snapshot.legacy_op);
+  restore_table(metadata_table_, snapshot.metadata);
+  restore_table(impl_table_, snapshot.implementations);
+  return changed;
+}
+
+/**
+ * @brief Publishes a prepared registry through allocation-free table swaps.
+ * @param other Host-owned shadow registry whose complete state is exchanged.
+ * @return Nothing.
+ * @throws Nothing; all member containers provide noexcept swap here.
+ * @note Plugin-load commit retains both relevant library lifetimes until
+ * callable objects in the swapped-out registry have been destroyed.
+ */
+void OpRegistry::swap_state(OpRegistry& other) noexcept {
+  table_.swap(other.table_);
+  metadata_table_.swap(other.metadata_table_);
+  impl_table_.swap(other.impl_table_);
 }
 
 // --- 修改: 实现新的 register_op 和 get_metadata ---
@@ -571,7 +620,7 @@ const OpImplementation* OpRegistry::select_best_implementation(
     const std::string& type, const std::string& subtype,
     const std::vector<Device>& available_devices, ComputeIntent intent,
     const std::function<bool(const OpImplementation&)>& candidate_filter)
-    const {
+    const {  // NOLINT(whitespace/indent_namespace)
   auto key = make_key(type, subtype);
   auto it = impl_table_.find(key);
   if (it == impl_table_.end()) {

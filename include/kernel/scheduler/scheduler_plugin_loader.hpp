@@ -18,11 +18,11 @@ namespace fs = std::filesystem;
 // SchedulerPluginInfo: 调度器插件信息
 // =============================================================================
 struct SchedulerPluginInfo {
-  std::string type_name;       // 调度器类型名称
-  std::string description;     // 描述
-  std::string plugin_path;     // 插件文件路径
-  std::string version;         // 插件版本
-  bool is_builtin = false;     // 是否为内置调度器
+  std::string type_name;    // 调度器类型名称
+  std::string description;  // 描述
+  std::string plugin_path;  // 插件文件路径
+  std::string version;      // 插件版本
+  bool is_builtin = false;  // 是否为内置调度器
 };
 
 // =============================================================================
@@ -38,7 +38,7 @@ class SchedulerPluginLoader {
   /// @param dir_paths 目录路径列表，支持 "path/**" 递归扫描
   /// @return 成功加载的插件数量
   size_t scan_and_load(const std::vector<std::string>& dir_paths);
-  
+
   /// @brief 扫描单个目录加载调度器插件
   /// @param dir_path 目录路径
   /// @return 成功加载的插件数量
@@ -66,7 +66,8 @@ class SchedulerPluginLoader {
   /// @brief 获取指定类型的调度器信息
   /// @param type_name 调度器类型名称
   /// @return 调度器信息，如果不存在则返回 nullopt
-  std::optional<SchedulerPluginInfo> get_info(const std::string& type_name) const;
+  std::optional<SchedulerPluginInfo> get_info(
+      const std::string& type_name) const;
 
   /// @brief 获取所有已加载的调度器信息
   /// @return 调度器信息列表
@@ -77,10 +78,30 @@ class SchedulerPluginLoader {
   /// @return 描述字符串
   std::string get_description(const std::string& type_name) const;
 
-  /// @brief 创建指定类型的调度器实例
-  /// @param type_name 调度器类型名称
-  /// @param num_workers 工作线程数（0 表示自动）
-  /// @return 调度器实例，如果类型不存在则返回 nullptr
+  /**
+   * @brief Creates one built-in or plugin-provided scheduler instance.
+   *
+   * Plugin creation establishes a stack RAII guard immediately after the raw
+   * create export returns. The guard spans runtime-interface validation,
+   * wrapper allocation, and copied type-name construction, then transfers
+   * destruction only after the complete owner exists.
+   *
+   * @param type_name Registered scheduler type name.
+   * @param num_workers Requested worker count; zero selects implementation
+   * defaults.
+   * @return Owning scheduler pointer, or nullptr for an unknown type, a null
+   * plugin result, or an instance lacking `SchedulerTaskRuntime`.
+   * @throws std::bad_alloc unchanged if built-in creation, wrapper allocation,
+   * or type-name copy exhausts memory.
+   * @throws Any exception thrown by a built-in/plugin create function or owner
+   * construction, preserving its original identity.
+   * @note Every plugin raw instance created before an exceptional exit is
+   * destroyed exactly once through its plugin destroy export while the library
+   * remains loaded. Exceptions from that cleanup destroy export are suppressed
+   * so they cannot replace an owner-construction exception. Once returned,
+   * explicit scheduler lifecycle calls continue to propagate plugin exceptions;
+   * only the owner's destructor uses best-effort no-throw fallback cleanup.
+   */
   std::unique_ptr<IScheduler> create(const std::string& type_name,
                                      unsigned int num_workers = 0);
 
@@ -118,11 +139,11 @@ class SchedulerPluginLoader {
 
   // 内部插件句柄
   struct PluginHandle {
-    void* handle = nullptr;                    // 动态库句柄
-    std::shared_ptr<void> library;             // Keeps library loaded for live instances
-    std::string path;                          // 文件路径
-    std::vector<std::string> registered_types; // 该插件注册的类型
-    
+    void* handle = nullptr;         // 动态库句柄
+    std::shared_ptr<void> library;  // Keeps library loaded for live instances
+    std::string path;               // 文件路径
+    std::vector<std::string> registered_types;  // 该插件注册的类型
+
     // 函数指针
     int (*get_count)() = nullptr;
     const char* (*get_name)(int) = nullptr;
@@ -140,19 +161,19 @@ class SchedulerPluginLoader {
 
   // 已加载的插件
   std::map<std::string, PluginHandle> loaded_plugins_;  // path -> handle
-  
+
   // 类型到插件路径的映射
   std::map<std::string, std::string> type_to_plugin_;
-  
+
   // 类型到信息的映射
   std::map<std::string, SchedulerPluginInfo> type_info_;
-  
+
   // 内置调度器
   std::map<std::string, BuiltinScheduler> builtins_;
-  
+
   // 加载错误
   std::vector<std::string> load_errors_;
-  
+
   // 互斥锁
   mutable std::mutex mutex_;
 };

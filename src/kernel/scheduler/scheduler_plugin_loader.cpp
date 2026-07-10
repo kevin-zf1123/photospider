@@ -3,8 +3,12 @@
 
 #include <algorithm>
 #include <iostream>
+#include <memory>
 #include <sstream>
 #include <stdexcept>
+#include <string>
+#include <utility>
+#include <vector>
 
 #include "kernel/scheduler/scheduler_plugin_api.hpp"
 #include "kernel/scheduler/scheduler_task_runtime.hpp"
@@ -19,6 +23,15 @@ namespace ps {
 
 namespace {
 
+/**
+ * @brief Wraps one native dynamic-library handle in shared lifetime ownership.
+ *
+ * @param handle Non-null handle returned by `LoadLibrary` or `dlopen`.
+ * @return Shared lifetime whose final release unloads `handle`.
+ * @throws std::bad_alloc if the shared ownership control block cannot allocate.
+ * @note Scheduler owners retain a copy through their plugin destroy call; the
+ * platform unload function is invoked only when the final copy is released.
+ */
 std::shared_ptr<void> make_library_lifetime(void* handle) {
 #ifdef _WIN32
   return std::shared_ptr<void>(handle, [](void* ptr) {
@@ -35,9 +48,81 @@ std::shared_ptr<void> make_library_lifetime(void* handle) {
 #endif
 }
 
+/**
+ * @brief Invokes one plugin destroy export behind a no-throw ABI fence.
+ *
+ * @param scheduler Raw plugin scheduler whose ownership is being released.
+ * @param destroy Plugin export paired with `scheduler`.
+ * @return Nothing.
+ * @throws Nothing; every plugin exception, including `std::bad_alloc`, is
+ * suppressed because cleanup callers are `noexcept`.
+ * @note The export is invoked exactly once. A hostile export that throws before
+ * ending the object lifetime is not retried because a second ABI call could
+ * double-destroy partially released plugin state. The caller must retain the
+ * dynamic-library lifetime until this function returns.
+ */
+void destroy_plugin_scheduler_noexcept(IScheduler* scheduler,
+                                       void (*destroy)(IScheduler*)) noexcept {
+  try {
+    destroy(scheduler);
+  } catch (...) {
+    // Plugin exceptions cannot cross a host cleanup/destructor boundary.
+  }
+}
+
+/**
+ * @brief Runs best-effort scheduler lifecycle fallback during owner
+ * destruction.
+ *
+ * The fallback first attempts `shutdown()` and then independently attempts
+ * `detach()`. Each call has its own exception fence so failure in one stage
+ * cannot prevent the next stage or the subsequent plugin destroy export.
+ *
+ * @param scheduler Live plugin scheduler retained by the host owner.
+ * @return Nothing.
+ * @throws Nothing; ordinary and resource-exhaustion exceptions are suppressed.
+ * @note This helper is only for `noexcept` destruction. Explicit public owner
+ * calls delegate directly and preserve the plugin exception identity.
+ */
+void run_scheduler_destructor_fallback_noexcept(
+    IScheduler* scheduler) noexcept {
+  try {
+    scheduler->shutdown();
+  } catch (...) {
+    // Continue to detach and destroy even when shutdown is hostile.
+  }
+  try {
+    scheduler->detach();
+  } catch (...) {
+    // Continue to destroy even when detach is hostile.
+  }
+}
+
+/**
+ * @brief Host-side owner/delegator for one plugin-created scheduler.
+ *
+ * The wrapper delegates both required C++ runtime interfaces, destroys the raw
+ * scheduler through the plugin ABI, and retains the dynamic library until that
+ * destroy call has completed.
+ *
+ * @note `library_` is declared after the raw pointers and therefore remains
+ * alive throughout the destructor body. Construction may allocate for the
+ * wrapper and copied type name; `RawPluginSchedulerGuard` owns the raw instance
+ * until construction succeeds.
+ */
 class PluginSchedulerOwner final : public IScheduler,
                                    public SchedulerTaskRuntime {
  public:
+  /**
+   * @brief Takes ownership of a validated plugin scheduler.
+   * @param scheduler Raw instance implementing both scheduler interfaces.
+   * @param destroy Plugin ABI destroy function paired with `scheduler`.
+   * @param library Shared library lifetime retained through destruction.
+   * @param type_name Registered scheduler type copied for `name()`.
+   * @throws std::bad_alloc if `type_name` copy allocation fails.
+   * @note The caller retains a temporary raw-instance guard until this
+   * constructor and owner allocation both succeed.
+   */
   PluginSchedulerOwner(IScheduler* scheduler, void (*destroy)(IScheduler*),
                        std::shared_ptr<void> library, std::string type_name)
       : type_name_(std::move(type_name)),
@@ -46,28 +131,105 @@ class PluginSchedulerOwner final : public IScheduler,
         destroy_(destroy),
         library_(std::move(library)) {}
 
-  ~PluginSchedulerOwner() override {
-    if (scheduler_) {
-      scheduler_->shutdown();
-      scheduler_->detach();
-      destroy_(scheduler_);
-      scheduler_ = nullptr;
+  /**
+   * @brief Best-effort stops, detaches, and plugin-destroys the owned instance.
+   *
+   * Lifecycle fallback stages are fenced independently. Ownership is cleared
+   * before plugin calls begin, and the destroy export is invoked exactly once
+   * even when shutdown or detach fails.
+   *
+   * @throws Nothing; all plugin lifecycle and destroy exceptions are
+   * suppressed.
+   * @note `library_` remains alive throughout this destructor body and is
+   * released only after the single destroy attempt returns.
+   */
+  ~PluginSchedulerOwner() noexcept override {
+    IScheduler* scheduler = std::exchange(scheduler_, nullptr);
+    task_runtime_ = nullptr;
+    if (scheduler) {
+      run_scheduler_destructor_fallback_noexcept(scheduler);
+      destroy_plugin_scheduler_noexcept(scheduler, destroy_);
     }
   }
 
+  /**
+   * @brief Explicitly attaches the plugin scheduler to a graph runtime.
+   * @param runtime Borrowed graph runtime forwarded unchanged.
+   * @return Nothing.
+   * @throws Any plugin exception unchanged.
+   * @note This caller-visible path intentionally does not use destructor
+   * fences.
+   */
   void attach(GraphRuntime* runtime) override { scheduler_->attach(runtime); }
+  /**
+   * @brief Explicitly detaches the plugin scheduler.
+   * @return Nothing.
+   * @throws Any plugin exception, including `std::bad_alloc`, unchanged.
+   * @note Destruction uses an independent no-throw fallback instead.
+   */
   void detach() override { scheduler_->detach(); }
+  /**
+   * @brief Explicitly starts the plugin scheduler.
+   * @return Nothing.
+   * @throws Any plugin exception unchanged.
+   */
   void start() override { scheduler_->start(); }
+  /**
+   * @brief Explicitly shuts down the plugin scheduler.
+   * @return Nothing.
+   * @throws Any plugin exception, including resource exhaustion, unchanged.
+   * @note Destruction uses an independent no-throw fallback instead.
+   */
   void shutdown() override { scheduler_->shutdown(); }
 
+  /**
+   * @brief Returns the host-owned registered scheduler type.
+   * @return Copied type name retained independently of plugin metadata storage.
+   * @throws std::bad_alloc if return-value construction cannot allocate.
+   */
   std::string name() const override { return type_name_; }
+  /**
+   * @brief Delegates runtime statistics to the plugin scheduler.
+   * @return Plugin-provided statistics string.
+   * @throws Any plugin exception unchanged.
+   */
   std::string get_stats() const override { return scheduler_->get_stats(); }
+  /**
+   * @brief Queries the plugin scheduler lifecycle state.
+   * @return Plugin-reported running flag.
+   * @throws Any plugin exception unchanged.
+   */
   bool is_running() const override { return scheduler_->is_running(); }
 
+  /**
+   * @brief Queries the validated plugin task-runtime state.
+   * @return Plugin-reported task-runtime running flag.
+   * @throws Any plugin exception unchanged.
+   */
   bool task_runtime_running() const override {
     return require_task_runtime().task_runtime_running();
   }
 
+  /**
+   * @brief Delegates runtime device discovery to the plugin scheduler.
+   * @return Plugin-provided device list in its native preference order.
+   * @throws Any plugin exception, including allocation failure, unchanged.
+   * @note Forwarding is required because the base implementation reports CPU
+   * only and would otherwise hide accelerator capabilities from compute
+   * planning.
+   */
+  std::vector<Device> available_devices() const override {
+    return require_task_runtime().available_devices();
+  }
+
+  /**
+   * @brief Delegates one initial callback batch to the plugin task runtime.
+   * @param tasks Initial ready callbacks transferred to the plugin.
+   * @param total_task_count Total completion count for the batch.
+   * @param priority Scheduler-supported priority hint.
+   * @return Nothing.
+   * @throws Any plugin exception unchanged.
+   */
   void submit_initial_tasks(
       std::vector<Task>&& tasks, int total_task_count,
       SchedulerTaskPriority priority = SchedulerTaskPriority::Normal) override {
@@ -75,6 +237,30 @@ class PluginSchedulerOwner final : public IScheduler,
                                                 total_task_count, priority);
   }
 
+  /**
+   * @brief Delegates one initial borrowed-handle batch to the plugin runtime.
+   * @param handles Initial ready task handles transferred to the plugin.
+   * @param total_task_count Total completion count for the new batch.
+   * @param priority Scheduler-supported priority hint.
+   * @return Nothing.
+   * @throws Any plugin exception unchanged.
+   * @note Direct delegation preserves the plugin runtime's transactional batch
+   * semantics instead of using the base closure-conversion fallback.
+   */
+  void submit_initial_task_handles(
+      std::vector<TaskHandle>&& handles, int total_task_count,
+      SchedulerTaskPriority priority = SchedulerTaskPriority::Normal) override {
+    require_task_runtime().submit_initial_task_handles(
+        std::move(handles), total_task_count, priority);
+  }
+
+  /**
+   * @brief Delegates one worker-origin ready callback to the plugin runtime.
+   * @param task Ready callback transferred to the plugin.
+   * @param priority Scheduler-supported priority hint.
+   * @return Nothing.
+   * @throws Any plugin exception unchanged.
+   */
   void submit_ready_task_from_worker(
       Task&& task,
       SchedulerTaskPriority priority = SchedulerTaskPriority::Normal) override {
@@ -82,6 +268,46 @@ class PluginSchedulerOwner final : public IScheduler,
                                                          priority);
   }
 
+  /**
+   * @brief Delegates one worker-origin borrowed task handle to the plugin.
+   * @param handle Ready task handle borrowed from the active dispatcher.
+   * @param priority Scheduler-supported priority hint.
+   * @return Nothing.
+   * @throws Any plugin exception unchanged.
+   * @note The plugin receives the native handle API without an allocating
+   * closure wrapper.
+   */
+  void submit_ready_task_handle_from_worker(
+      TaskHandle handle,
+      SchedulerTaskPriority priority = SchedulerTaskPriority::Normal) override {
+    require_task_runtime().submit_ready_task_handle_from_worker(handle,
+                                                                priority);
+  }
+
+  /**
+   * @brief Delegates a worker-origin borrowed-handle batch to the plugin.
+   * @param handles Ready task handles transferred as one batch.
+   * @param priority Scheduler-supported priority hint.
+   * @return Nothing.
+   * @throws Any plugin exception unchanged.
+   * @note Direct delegation prevents the base implementation from publishing a
+   * prefix through repeated single-handle submissions.
+   */
+  void submit_ready_task_handles_from_worker(
+      std::vector<TaskHandle>&& handles,
+      SchedulerTaskPriority priority = SchedulerTaskPriority::Normal) override {
+    require_task_runtime().submit_ready_task_handles_from_worker(
+        std::move(handles), priority);
+  }
+
+  /**
+   * @brief Delegates one caller-thread ready callback to the plugin runtime.
+   * @param task Ready callback transferred to the plugin.
+   * @param priority Scheduler-supported priority hint.
+   * @param epoch Optional plugin batch epoch.
+   * @return Nothing.
+   * @throws Any plugin exception unchanged.
+   */
   void submit_ready_task_any_thread(
       Task&& task,
       SchedulerTaskPriority priority = SchedulerTaskPriority::Normal,
@@ -90,27 +316,98 @@ class PluginSchedulerOwner final : public IScheduler,
                                                         priority, epoch);
   }
 
+  /**
+   * @brief Delegates one caller-thread borrowed task handle to the plugin.
+   * @param handle Ready task handle borrowed from the active dispatcher.
+   * @param priority Scheduler-supported priority hint.
+   * @param epoch Optional plugin batch epoch.
+   * @return Nothing.
+   * @throws Any plugin exception unchanged.
+   * @note The plugin's native handle overload remains the exception boundary.
+   */
+  void submit_ready_task_handle_any_thread(
+      TaskHandle handle,
+      SchedulerTaskPriority priority = SchedulerTaskPriority::Normal,
+      std::optional<uint64_t> epoch = std::nullopt) override {
+    require_task_runtime().submit_ready_task_handle_any_thread(handle, priority,
+                                                               epoch);
+  }
+
+  /**
+   * @brief Delegates a caller-thread borrowed-handle batch to the plugin.
+   * @param handles Ready task handles transferred as one batch.
+   * @param priority Scheduler-supported priority hint.
+   * @param epoch Optional plugin batch epoch shared by every handle.
+   * @return Nothing.
+   * @throws Any plugin exception unchanged.
+   * @note Direct delegation preserves the plugin runtime's all-or-nothing queue
+   * publication and original exception identity.
+   */
+  void submit_ready_task_handles_any_thread(
+      std::vector<TaskHandle>&& handles,
+      SchedulerTaskPriority priority = SchedulerTaskPriority::Normal,
+      std::optional<uint64_t> epoch = std::nullopt) override {
+    require_task_runtime().submit_ready_task_handles_any_thread(
+        std::move(handles), priority, epoch);
+  }
+
+  /**
+   * @brief Waits for the plugin task runtime to complete its active batch.
+   * @return Nothing.
+   * @throws Any plugin exception unchanged.
+   */
   void wait_for_completion() override {
     require_task_runtime().wait_for_completion();
   }
 
+  /**
+   * @brief Publishes one task exception to the plugin runtime.
+   * @param e Original exception identity forwarded unchanged.
+   * @return Nothing.
+   * @throws Any plugin exception unchanged.
+   */
   void set_exception(std::exception_ptr e) override {
     require_task_runtime().set_exception(e);
   }
 
+  /**
+   * @brief Increases plugin runtime completion accounting.
+   * @param delta Count forwarded unchanged.
+   * @return Nothing.
+   * @throws Any plugin exception unchanged.
+   */
   void inc_tasks_to_complete(int delta) override {
     require_task_runtime().inc_tasks_to_complete(delta);
   }
 
+  /**
+   * @brief Decrements plugin runtime completion accounting once.
+   * @return Nothing.
+   * @throws Any plugin exception unchanged.
+   */
   void dec_tasks_to_complete() override {
     require_task_runtime().dec_tasks_to_complete();
   }
 
+  /**
+   * @brief Forwards one scheduler trace event to the plugin runtime.
+   * @param action Scheduler trace action.
+   * @param node_id Associated graph node id.
+   * @return Nothing.
+   * @throws Any plugin exception unchanged.
+   */
   void log_event(SchedulerTraceAction action, int node_id) override {
     require_task_runtime().log_event(action, node_id);
   }
 
  private:
+  /**
+   * @brief Returns the validated task-runtime side of the plugin instance.
+   * @return Borrowed runtime reference valid for this owner lifetime.
+   * @throws std::runtime_error only if construction invariants were violated.
+   * @note Creation rejects an instance without this interface before ownership
+   * transfer, so production calls do not normally throw here.
+   */
   SchedulerTaskRuntime& require_task_runtime() const {
     if (!task_runtime_) {
       throw std::runtime_error(
@@ -123,6 +420,75 @@ class PluginSchedulerOwner final : public IScheduler,
   IScheduler* scheduler_ = nullptr;
   SchedulerTaskRuntime* task_runtime_ = nullptr;
   void (*destroy_)(IScheduler*) = nullptr;
+  std::shared_ptr<void> library_;
+};
+
+/**
+ * @brief Stack owner for a raw scheduler returned by plugin create.
+ *
+ * The guard is established immediately after a non-null plugin instance is
+ * returned and remains active through runtime-interface validation, heap
+ * allocation of `PluginSchedulerOwner`, and its copied type-name construction.
+ * It performs no dynamic allocation of its own.
+ *
+ * @note `library_` retains the plugin until after `destroy_` completes. Calling
+ * `release()` transfers instance destruction to the fully constructed owner;
+ * every exceptional exit before that point destroys the raw instance exactly
+ * once through the plugin ABI.
+ */
+class RawPluginSchedulerGuard final {
+ public:
+  /**
+   * @brief Starts guarding one plugin-created scheduler instance.
+   *
+   * @param scheduler Raw instance returned by the plugin create export.
+   * @param destroy Plugin destroy export paired with `scheduler`.
+   * @param library Shared dynamic-library lifetime already allocated at load.
+   * @throws Nothing; copying `std::shared_ptr` only increments its control
+   * block reference count.
+   * @note `scheduler` and `destroy` must both be non-null.
+   */
+  RawPluginSchedulerGuard(IScheduler* scheduler, void (*destroy)(IScheduler*),
+                          const std::shared_ptr<void>& library) noexcept
+      : scheduler_(scheduler), destroy_(destroy), library_(library) {}
+
+  /**
+   * @brief Destroys an untransferred instance while its library is mapped.
+   *
+   * @throws Nothing; a hostile destroy-export exception is suppressed so the
+   * original owner-construction exception continues unchanged.
+   * @note The destroy export is attempted exactly once. The `library_` member
+   * is released only after this destructor body and the fenced call complete.
+   */
+  ~RawPluginSchedulerGuard() noexcept {
+    IScheduler* scheduler = std::exchange(scheduler_, nullptr);
+    if (scheduler) {
+      destroy_plugin_scheduler_noexcept(scheduler, destroy_);
+    }
+  }
+
+  RawPluginSchedulerGuard(const RawPluginSchedulerGuard&) = delete;
+  RawPluginSchedulerGuard& operator=(const RawPluginSchedulerGuard&) = delete;
+
+  /**
+   * @brief Transfers instance destruction to a completed owner.
+   *
+   * @return The guarded raw pointer.
+   * @throws Nothing.
+   * @note Call only after `PluginSchedulerOwner` construction succeeds.
+   */
+  IScheduler* release() noexcept {
+    IScheduler* released = scheduler_;
+    scheduler_ = nullptr;
+    return released;
+  }
+
+ private:
+  /** @brief Plugin instance destroyed unless ownership is released. */
+  IScheduler* scheduler_ = nullptr;
+  /** @brief Plugin ABI destroy function paired with `scheduler_`. */
+  void (*destroy_)(IScheduler*) = nullptr;
+  /** @brief Library lifetime retained through instance destruction. */
   std::shared_ptr<void> library_;
 };
 
@@ -438,6 +804,7 @@ std::string SchedulerPluginLoader::get_description(
   return info ? info->description : "Unknown scheduler type";
 }
 
+/** @copydoc SchedulerPluginLoader::create */
 std::unique_ptr<IScheduler> SchedulerPluginLoader::create(
     const std::string& type_name, unsigned int num_workers) {
   std::lock_guard<std::mutex> lock(mutex_);
@@ -469,13 +836,15 @@ std::unique_ptr<IScheduler> SchedulerPluginLoader::create(
   if (!raw_ptr) {
     return nullptr;
   }
+  RawPluginSchedulerGuard raw_owner(raw_ptr, handle.destroy, handle.library);
   if (!dynamic_cast<SchedulerTaskRuntime*>(raw_ptr)) {
-    handle.destroy(raw_ptr);
     return nullptr;
   }
 
-  return std::make_unique<PluginSchedulerOwner>(raw_ptr, handle.destroy,
-                                                handle.library, type_name);
+  auto owner = std::make_unique<PluginSchedulerOwner>(
+      raw_ptr, handle.destroy, handle.library, type_name);
+  (void)raw_owner.release();
+  return owner;
 }
 
 void SchedulerPluginLoader::register_builtin(

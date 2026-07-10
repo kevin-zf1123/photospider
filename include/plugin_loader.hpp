@@ -1,5 +1,6 @@
 #pragma once
 
+#include <cstdint>
 #include <map>
 #include <memory>
 #include <optional>
@@ -27,6 +28,14 @@ namespace ps {
 struct LoadedOpPlugin {
   /** @brief Shared dynamic library lifetime retained while callbacks exist. */
   std::shared_ptr<void> library;
+  /**
+   * @brief Monotonic order assigned when this plugin became visible.
+   *
+   * Higher values represent later successful loads. `PluginManager` consumes
+   * this value in descending order so an override chain is unwound from newest
+   * callback to oldest callback and finally to the built-in implementation.
+   */
+  std::uint64_t load_sequence = 0;
   /** @brief Operation keys registered or replaced by this plugin. */
   std::vector<std::string> registered_keys;
   /**
@@ -73,10 +82,15 @@ using LoadedOpPluginMap = std::map<std::string, LoadedOpPlugin>;
  * the same key.
  * @return Structured load result with attempted file count, successful library
  * count, registered or replaced operation keys, and per-plugin errors.
+ * @throws std::bad_alloc unchanged if candidate staging cannot allocate. The
+ * failing candidate leaves registry/source/result state unchanged.
+ * @throws std::overflow_error if successful-load sequence space is exhausted.
  * @throws std::filesystem_error when directory iteration fails for an existing
  * plugin directory.
  * @note The kernel loader performs no console I/O. Frontends should report
- * `PluginLoadResult` to users when needed.
+ * `PluginLoadResult` to users when needed. Each candidate registers against a
+ * shadow registry and becomes visible only through a no-throw commit after its
+ * process-lifetime handle is secured.
  */
 PluginLoadResult load_plugins(const std::vector<std::string>& plugin_dir_paths,
                               std::map<std::string, std::string>& op_sources);
@@ -96,11 +110,17 @@ PluginLoadResult load_plugins(const std::vector<std::string>& plugin_dir_paths,
  * @param loaded_plugins Absolute plugin path to retained handle map owned by
  * the caller. Already-loaded paths in this map are skipped.
  * @return Structured load result for the scan.
+ * @throws std::bad_alloc unchanged if candidate staging cannot allocate. The
+ * failing candidate leaves registry, sources, result, and handles unchanged.
+ * @throws std::overflow_error if successful-load sequence space is exhausted.
  * @throws std::filesystem_error when directory iteration fails for an existing
  * plugin directory.
- * @note Callers must unregister each plugin's `registered_keys`, restore any
- * captured previous entries, and only then erase the corresponding entry from
- * `loaded_plugins`.
+ * @note Callers must use the precomputed `registered_keys`, restoration
+ * snapshots, source snapshots, and `load_sequence` to remove or restore
+ * registry state without allocating, and only then erase the corresponding
+ * entry from `loaded_plugins`. Successful candidate commit installs that
+ * retained handle before publishing the staged registry; failed staged
+ * callbacks are destroyed before the candidate library is released.
  */
 PluginLoadResult load_plugins_retaining_handles(
     const std::vector<std::string>& plugin_dir_paths,
