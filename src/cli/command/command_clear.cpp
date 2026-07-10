@@ -6,6 +6,7 @@
 #include "cli/command/commands.hpp"
 #include "cli/command/help_utils.hpp"
 
+/** @copydoc handle_clear */
 bool handle_clear(std::istringstream& /*iss*/, ps::Host& /*svc*/,
                   std::string& /*current_graph*/, bool& /*modified*/,
                   CliConfig& /*config*/) {
@@ -13,6 +14,7 @@ bool handle_clear(std::istringstream& /*iss*/, ps::Host& /*svc*/,
   return true;
 }
 
+/** @copydoc print_help_clear */
 void print_help_clear(const CliConfig& /*config*/) {
   print_help_from_file("help_clear.txt");
 }

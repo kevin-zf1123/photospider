@@ -8,6 +8,7 @@
 #include "cli/command/help_utils.hpp"
 #include "cli/dependency_tree_formatter.hpp"
 
+/** @copydoc handle_traversal */
 bool handle_traversal(std::istringstream& iss, ps::Host& svc,
                       std::string& current_graph, bool& /*modified*/,
                       CliConfig& config) {
@@ -130,6 +131,7 @@ bool handle_traversal(std::istringstream& iss, ps::Host& svc,
   return true;
 }
 
+/** @copydoc print_help_traversal */
 void print_help_traversal(const CliConfig& /*config*/) {
   print_help_from_file("help_traversal.txt");
 }

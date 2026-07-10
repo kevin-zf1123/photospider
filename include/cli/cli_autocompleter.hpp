@@ -57,8 +57,16 @@ class CliAutocompleter {
                          std::vector<std::string>& options) const;
   void CompleteOpsMode(const std::string& prefix,
                        std::vector<std::string>& options) const;
-  // Complete session/graph names by scanning the `sessions` directory for
-  // subdirectories.
+  /**
+   * @brief Completes session names by scanning local session directories.
+   * @param prefix Required name prefix.
+   * @param options Mutable destination receiving matching directory names.
+   * @return Nothing.
+   * @throws std::bad_alloc if path, directory-entry, or result storage cannot
+   * allocate.
+   * @note Ordinary filesystem failures are ignored because completion is
+   * best-effort; no Host or graph state is accessed.
+   */
   void CompleteSessionName(const std::string& prefix,
                            std::vector<std::string>& options) const;
 

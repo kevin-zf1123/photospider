@@ -1,3 +1,4 @@
+#include <new>
 #include <string>
 #include <vector>
 
@@ -6,48 +7,94 @@
 
 namespace {
 
+#if defined(PHOTOSPIDER_THRESHOLD_BAD_ALLOC_TESTING)
+/**
+ * @brief Injects deterministic resource exhaustion at a parameter conversion.
+ *
+ * @param parameter Real YAML scalar selected by the threshold callback.
+ * @param probe_tag Test-only YAML tag that arms this exact conversion point.
+ * @return Nothing.
+ * @throws std::bad_alloc when parameter carries probe_tag.
+ * @note This helper is compiled only into test_bad_alloc_boundaries. It has
+ * internal linkage, adds no plugin ABI, and runs inside the real registered
+ * operation callback immediately before yaml-cpp conversion.
+ */
+void throw_if_threshold_parameter_probe(const YAML::Node& parameter,
+                                        const char* probe_tag) {
+  if (parameter.Tag() == probe_tag) {
+    throw std::bad_alloc{};
+  }
+}
+#endif
+
 /**
  * @brief Reads a numeric YAML parameter with a fallback value.
  *
- * @param n Parameter map to read.
+ * @param parameters Parameter map to read.
  * @param key Parameter key.
- * @param defv Fallback value used for missing, non-scalar, or invalid input.
- * @return Parsed double value or `defv`.
- * @throws Nothing; parse failures are reduced to the fallback value.
+ * @param fallback Fallback value used for missing, non-scalar, or invalid
+ * input.
+ * @return Parsed double value or fallback.
+ * @throws std::bad_alloc if YAML lookup or conversion exhausts memory.
  * @note The plugin keeps this helper local so invalid optional parameters do
  * not fail loading or planning.
  */
-double as_double_flexible(const YAML::Node& n, const std::string& key,
-                          double defv) {
-  if (!n || !n[key])
-    return defv;
+double threshold_parameter_as_double(const YAML::Node& parameters,
+                                     const std::string& key, double fallback) {
   try {
-    if (n[key].IsScalar())
-      return n[key].as<double>();
-    return defv;
+    if (!parameters) {
+      return fallback;
+    }
+    const YAML::Node parameter = parameters[key];
+    if (!parameter) {
+      return fallback;
+    }
+#if defined(PHOTOSPIDER_THRESHOLD_BAD_ALLOC_TESTING)
+    throw_if_threshold_parameter_probe(parameter,
+                                       "!photospider-test-numeric-bad-alloc");
+#endif
+    if (parameter.IsScalar()) {
+      return parameter.as<double>();
+    }
+    return fallback;
+  } catch (const std::bad_alloc&) {
+    throw;
   } catch (...) {
-    return defv;
+    return fallback;
   }
 }
 
 /**
  * @brief Reads a string YAML parameter with a fallback value.
  *
- * @param n Parameter map to read.
+ * @param parameters Parameter map to read.
  * @param key Parameter key.
- * @param defv Fallback value used for missing or invalid input.
- * @return Parsed string value or `defv`.
- * @throws Nothing; parse failures are reduced to the fallback value.
+ * @param fallback Fallback value used for missing or invalid input.
+ * @return Parsed string value or fallback.
+ * @throws std::bad_alloc if YAML lookup, conversion, or result storage exhausts
+ * memory.
  * @note Threshold mode parsing is intentionally permissive for plugin examples.
  */
-std::string as_str(const YAML::Node& n, const std::string& key,
-                   const std::string& defv) {
-  if (!n || !n[key])
-    return defv;
+std::string threshold_parameter_as_string(const YAML::Node& parameters,
+                                          const std::string& key,
+                                          const std::string& fallback) {
   try {
-    return n[key].as<std::string>();
+    if (!parameters) {
+      return fallback;
+    }
+    const YAML::Node parameter = parameters[key];
+    if (!parameter) {
+      return fallback;
+    }
+#if defined(PHOTOSPIDER_THRESHOLD_BAD_ALLOC_TESTING)
+    throw_if_threshold_parameter_probe(parameter,
+                                       "!photospider-test-string-bad-alloc");
+#endif
+    return parameter.as<std::string>();
+  } catch (const std::bad_alloc&) {
+    throw;
   } catch (...) {
-    return defv;
+    return fallback;
   }
 }
 
@@ -97,8 +144,6 @@ cv::Rect threshold_forward_roi(const ps::Node& node, const cv::Rect& roi,
   return roi;
 }
 
-}  // namespace
-
 /**
  * @brief Executes a pointwise threshold operation over one input image.
  *
@@ -107,6 +152,8 @@ cv::Rect threshold_forward_roi(const ps::Node& node, const cv::Rect& roi,
  * @param inputs Borrowed upstream outputs; the first input must contain a valid
  * image buffer.
  * @return NodeOutput containing the thresholded image buffer.
+ * @throws std::bad_alloc if parameter parsing, OpenCV, or output allocation
+ * exhausts memory.
  * @throws ps::GraphError when the required input image is missing.
  * @throws cv::Exception if OpenCV thresholding or buffer conversion fails.
  * @note The plugin is monolithic HP work. It does not mutate graph state and
@@ -119,12 +166,12 @@ ps::NodeOutput op_threshold(const ps::Node& node,
                          "Threshold op requires one valid input image.");
   }
 
-  const cv::UMat& u_input = ps::toCvUMat(inputs[0]->image_buffer);
-
   const auto& P = node.runtime_parameters;
-  double thresh = as_double_flexible(P, "thresh", 0.5);
-  double maxval = as_double_flexible(P, "maxval", 1.0);
-  std::string type_str = as_str(P, "type", "binary");
+  double thresh = threshold_parameter_as_double(P, "thresh", 0.5);
+  double maxval = threshold_parameter_as_double(P, "maxval", 1.0);
+  std::string type_str = threshold_parameter_as_string(P, "type", "binary");
+
+  const cv::UMat& u_input = ps::toCvUMat(inputs[0]->image_buffer);
 
   int threshold_type = cv::THRESH_BINARY;
   if (type_str == "binary_inv")
@@ -138,6 +185,8 @@ ps::NodeOutput op_threshold(const ps::Node& node,
   return result;
 }
 
+}  // namespace
+
 /**
  * @brief Registers the threshold operation and its explicit ROI contracts.
  *
@@ -146,6 +195,8 @@ ps::NodeOutput op_threshold(const ps::Node& node,
  * during this call.
  * @throws std::invalid_argument when the loader passes a null registrar.
  * @throws std::logic_error if the host registrar is incomplete.
+ * @throws std::bad_alloc if operation names or callback storage exhausts
+ * memory.
  * @throws Exceptions from host registry allocation or callback storage may
  * propagate to the plugin loader.
  * @note The plugin uses the host-provided registrar, not

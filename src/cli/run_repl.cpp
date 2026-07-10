@@ -13,6 +13,7 @@
 #include "cli/terminal_input.hpp"
 #include "input_match_state.hpp"  // NOLINT(build/include_subdir)
 
+/** @copydoc run_repl */
 void run_repl(ps::Host& svc, CliConfig& config,
               const std::string& initial_graph) {
   bool modified = false;
@@ -24,15 +25,36 @@ void run_repl(ps::Host& svc, CliConfig& config,
   if (!current_graph.empty())
     completer.SetCurrentGraph(current_graph);
 
+  /**
+   * @brief Owns one tab-completion cycle's candidate and cursor state.
+   * @note State is local to one run_repl invocation and never outlives Host.
+   */
   struct CompletionState {
+    /** @brief Candidate replacements in display/cycle order. */
     std::vector<std::string> options;
+    /** @brief Selected candidate index, or -1 while completion is inactive. */
     int current_index = -1;
+    /** @brief Cursor position captured when the cycle began. */
     size_t original_cursor_pos = 0;
+    /** @brief Token prefix captured when the cycle began. */
     std::string original_prefix;
+
+    /**
+     * @brief Clears candidates and marks the completion cycle inactive.
+     * @return Nothing.
+     * @throws Nothing.
+     * @note Existing string/vector capacity may remain owned by this state.
+     */
     void Reset() {
       options.clear();
       current_index = -1;
     }
+
+    /**
+     * @brief Reports whether a candidate is currently selected.
+     * @return True when current_index identifies an active cycle.
+     * @throws Nothing.
+     */
     bool IsActive() const { return current_index != -1; }
   } completion_state;
 

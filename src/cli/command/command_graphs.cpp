@@ -7,6 +7,7 @@
 #include "cli/command/commands.hpp"
 #include "cli/command/help_utils.hpp"
 
+/** @copydoc handle_graphs */
 bool handle_graphs(std::istringstream& /*iss*/, ps::Host& svc,
                    std::string& current_graph, bool& /*modified*/,
                    CliConfig& /*config*/) {
@@ -26,6 +27,7 @@ bool handle_graphs(std::istringstream& /*iss*/, ps::Host& svc,
   return true;
 }
 
+/** @copydoc print_help_graphs */
 void print_help_graphs(const CliConfig& /*config*/) {
   print_help_from_file("help_graphs.txt");
 }

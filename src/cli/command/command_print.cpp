@@ -1,5 +1,6 @@
 // FILE: src/cli/command/command_print.cpp
 #include <iostream>
+#include <new>
 #include <optional>
 #include <sstream>
 #include <string>
@@ -8,6 +9,7 @@
 #include "cli/command/help_utils.hpp"
 #include "cli/dependency_tree_formatter.hpp"
 
+/** @copydoc handle_print */
 bool handle_print(std::istringstream& iss, ps::Host& svc,
                   std::string& current_graph, bool& /*modified*/,
                   CliConfig& config) {
@@ -42,6 +44,8 @@ bool handle_print(std::istringstream& iss, ps::Host& svc,
   if (target_str != "all") {
     try {
       target_node = std::stoi(target_str);
+    } catch (const std::bad_alloc&) {
+      throw;
     } catch (const std::exception&) {
       std::cout << "Error: Invalid target '" << target_str
                 << "'. Must be an integer ID or 'all'." << std::endl;
@@ -63,6 +67,7 @@ bool handle_print(std::istringstream& iss, ps::Host& svc,
   return true;
 }
 
+/** @copydoc print_help_print */
 void print_help_print(const CliConfig& /*config*/) {
   print_help_from_file("help_print.txt");
 }

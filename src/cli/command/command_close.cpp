@@ -6,6 +6,7 @@
 #include "cli/command/commands.hpp"
 #include "cli/command/help_utils.hpp"
 
+/** @copydoc handle_close */
 bool handle_close(std::istringstream& iss, ps::Host& svc,
                   std::string& current_graph, bool& /*modified*/,
                   CliConfig& /*config*/) {
@@ -25,6 +26,7 @@ bool handle_close(std::istringstream& iss, ps::Host& svc,
   return true;
 }
 
+/** @copydoc print_help_close */
 void print_help_close(const CliConfig& /*config*/) {
   print_help_from_file("help_close.txt");
 }

@@ -22,7 +22,6 @@
 #include <utility>
 #include <vector>
 
-#include "benchmark/benchmark_types.hpp"
 #include "kernel/kernel.hpp"
 #include "kernel/plugin_result.hpp"
 
@@ -396,16 +395,6 @@ class InteractionService {
   std::optional<double> cmd_get_last_io_time(const std::string& graph) {
     return kernel_.get_last_io_time(graph);
   }
-
-  // Benchmark orchestration helpers
-  BenchmarkResult cmd_run_benchmark(const std::string& benchmark_dir,
-                                    const BenchmarkSessionConfig& session,
-                                    int runs = 10);
-  std::vector<BenchmarkResult> cmd_run_all_benchmarks(
-      const std::string& benchmark_dir);
-  std::vector<BenchmarkSessionConfig> cmd_load_benchmark_configs(
-      const std::string& benchmark_dir);
-  void cmd_cleanup_benchmark_artifacts(const std::string& benchmark_dir);
 
   // [新增] GPU 上下文访问器
   id cmd_get_metal_device(const std::string& graph) {

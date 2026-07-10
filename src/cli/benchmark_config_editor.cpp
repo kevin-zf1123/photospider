@@ -21,7 +21,8 @@
  *   - 运行入口：run_benchmark_config_editor()
  *
  * 使用方式：
- *   run_benchmark_config_editor(interaction_service, "/path/to/benchmark_dir");
+ *   ps::Host& host = acquire_application_host();
+ *   run_benchmark_config_editor(host, "/path/to/benchmark_dir");
  *
  * 支持配置项：
  *   - Generator
@@ -40,6 +41,7 @@
 #include <fstream>
 #include <iostream>
 #include <map>
+#include <new>
 #include <regex>
 #include <string>
 #include <vector>
@@ -159,6 +161,10 @@ static Element form(std::vector<std::pair<Element, Element>> pairs) {
  *
  * @param path 要加载的配置文件路径
  * @return std::vector<BenchmarkSessionConfig> 已加载的基准会话配置列表
+ * @throws std::bad_alloc if YAML, path, string, or result storage cannot
+ * allocate.
+ * @note Ordinary YAML and filesystem errors are reported and converted to an
+ * empty/partial list; resource exhaustion retains its exception identity.
  */
 static std::vector<BenchmarkSessionConfig> load_benchmark_configs_from_file(
     const fs::path& path) {
@@ -203,6 +209,8 @@ static std::vector<BenchmarkSessionConfig> load_benchmark_configs_from_file(
       }
       configs.push_back(cfg);
     }
+  } catch (const std::bad_alloc&) {
+    throw;
   } catch (const std::exception& e) {
     std::cerr << "Error loading benchmark config: " << e.what() << std::endl;
   }
@@ -491,6 +499,14 @@ class BenchmarkConfigEditor {
   }
 
   // --- 关键修改点 2: 完善 RebuildDetailsPane ---
+  /**
+   * @brief Rebuilds editable controls for the selected benchmark session.
+   * @return Nothing.
+   * @throws std::bad_alloc if input text, callback, or component storage cannot
+   * allocate.
+   * @note Invalid numeric text leaves the last valid model value unchanged;
+   * every numeric callback rethrows resource exhaustion explicitly.
+   */
   void RebuildDetailsPane() {
     if (selected_session_ < 0 ||
         selected_session_ >= static_cast<int>(configs_.size())) {
@@ -540,6 +556,8 @@ class BenchmarkConfigEditor {
       try {
         configs_[selected_session_].generator_config.width =
             std::stoi(width_input_str_);
+      } catch (const std::bad_alloc&) {
+        throw;
       } catch (...) {
       }
     };
@@ -551,6 +569,8 @@ class BenchmarkConfigEditor {
       try {
         configs_[selected_session_].generator_config.height =
             std::stoi(height_input_str_);
+      } catch (const std::bad_alloc&) {
+        throw;
       } catch (...) {
       }
     };
@@ -563,6 +583,8 @@ class BenchmarkConfigEditor {
       try {
         configs_[selected_session_].generator_config.chain_length =
             std::stoi(chain_input_str_);
+      } catch (const std::bad_alloc&) {
+        throw;
       } catch (...) {
       }
     };
@@ -575,6 +597,8 @@ class BenchmarkConfigEditor {
       try {
         configs_[selected_session_].generator_config.num_outputs =
             std::stoi(outputs_input_str_);
+      } catch (const std::bad_alloc&) {
+        throw;
       } catch (...) {
       }
     };
@@ -589,6 +613,8 @@ class BenchmarkConfigEditor {
     runs_opt.on_change = [this] {
       try {
         configs_[selected_session_].execution.runs = std::stoi(runs_input_str_);
+      } catch (const std::bad_alloc&) {
+        throw;
       } catch (...) {
       }
     };
@@ -601,6 +627,8 @@ class BenchmarkConfigEditor {
       try {
         configs_[selected_session_].execution.threads =
             std::stoi(threads_input_str_);
+      } catch (const std::bad_alloc&) {
+        throw;
       } catch (...) {
       }
     };
@@ -748,8 +776,14 @@ class BenchmarkConfigEditor {
  * 编辑器以全屏模式运行，通过 BenchmarkConfigEditor 提供交互式界面
  * 允许用户查看、修改并保存基准测试配置。
  *
- * @param svc 引用交互服务对象，用于处理用户输入/输出交互
+ * @param svc Product Host used to enumerate available operation types.
  * @param benchmark_dir 基准测试配置保存的目录路径
+ * @return Nothing.
+ * @throws std::bad_alloc if filesystem paths, YAML values, Host results, or
+ * TUI state cannot allocate.
+ * @throws std::filesystem::filesystem_error if directory creation fails.
+ * @note The editor borrows svc for the synchronous TUI lifetime. It owns its
+ * screen and configuration models and does not retain the Host afterwards.
  */
 void run_benchmark_config_editor(ps::Host& svc,
                                  const std::string& benchmark_dir) {

@@ -8,6 +8,7 @@
 #include "cli/command/help_utils.hpp"
 #include "cli/process_command.hpp"
 
+/** @copydoc handle_source */
 bool handle_source(std::istringstream& iss, ps::Host& svc,
                    std::string& current_graph, bool& modified,
                    CliConfig& config) {
@@ -35,6 +36,7 @@ bool handle_source(std::istringstream& iss, ps::Host& svc,
   return true;
 }
 
+/** @copydoc print_help_source */
 void print_help_source(const CliConfig& /*config*/) {
   print_help_from_file("help_source.txt");
 }

@@ -280,7 +280,6 @@ set(COMPUTE_SOURCES
     src/kernel/services/compute_service.cpp
     src/kernel/services/graph_event_service.cpp
     src/kernel/interaction.cpp
-    src/kernel/interaction_benchmark.cpp
     src/kernel/graph_runtime.mm
     src/kernel/scheduler/cpu_work_stealing_scheduler.cpp
     src/kernel/scheduler/gpu_pipeline_scheduler.cpp
@@ -728,6 +727,26 @@ if(BUILD_TESTING)
         PS_TEST_OP_PLUGIN_DIR="${TEST_OP_PLUGIN_DIR}"
     )
     add_dependencies(test_host_adapter lifecycle_op_plugin)
+    add_ps_test(test_bad_alloc_boundaries
+        tests/test_bad_alloc_boundaries.cpp)
+    target_sources(test_bad_alloc_boundaries PRIVATE
+        custom_ops/threshold_op.cpp)
+    target_include_directories(test_bad_alloc_boundaries PRIVATE
+        "${PROJECT_SOURCE_DIR}")
+    target_compile_definitions(test_bad_alloc_boundaries PRIVATE
+        PHOTOSPIDER_PLUGIN_BUILD
+        PHOTOSPIDER_THRESHOLD_BAD_ALLOC_TESTING)
+    target_link_libraries(test_bad_alloc_boundaries PRIVATE
+        photospider_cli_common)
+    if(APPLE)
+        target_sources(test_bad_alloc_boundaries PRIVATE
+            src/metal/perlin_noise_metal.mm)
+        target_link_libraries(test_bad_alloc_boundaries PRIVATE
+            ${METAL_FRAMEWORK}
+            ${FOUNDATION_FRAMEWORK}
+            ${COREIMAGE_FRAMEWORK}
+            ${COREVIDEO_FRAMEWORK})
+    endif()
     add_ps_test(test_cli_dirty_snapshot_formatter
         tests/test_cli_dirty_snapshot_formatter.cpp)
     target_link_libraries(test_cli_dirty_snapshot_formatter PRIVATE
@@ -874,12 +893,14 @@ if(BUILD_TESTING)
         WORKING_DIRECTORY ${PROJECT_SOURCE_DIR})
     set_tests_properties(Phase4StaticProductConsumerSmoke PROPERTIES
         RUN_SERIAL TRUE)
-    add_test(NAME Phase7PluginRegistrationScan
+    add_test(NAME GraphCliOptionBadAlloc
         COMMAND ${Python3_EXECUTABLE}
-            "${PROJECT_SOURCE_DIR}/tests/verification/codebase_structure/phase7_plugin_registration_scan.py"
+            "${PROJECT_SOURCE_DIR}/tests/verify_graph_cli_option_bad_alloc.py"
             --repo "${PROJECT_SOURCE_DIR}"
-            --out "${CMAKE_BINARY_DIR}/tests/phase7_plugin_registration_scan"
+            --binary "$<TARGET_FILE:graph_cli>"
+            --out "${CMAKE_BINARY_DIR}/tests/graph_cli_option_bad_alloc"
         WORKING_DIRECTORY ${PROJECT_SOURCE_DIR})
+    set_tests_properties(GraphCliOptionBadAlloc PROPERTIES RUN_SERIAL TRUE)
     add_test(NAME PublicHeaderSelfContainment
         COMMAND ${CMAKE_COMMAND} --build "${CMAKE_BINARY_DIR}"
             --target public_header_self_containment --config $<CONFIG>
@@ -899,6 +920,8 @@ if(BUILD_TESTING)
     gtest_discover_tests(test_kernel_contracts WORKING_DIRECTORY ${PROJECT_SOURCE_DIR})
     gtest_discover_tests(test_image_buffer_contracts WORKING_DIRECTORY ${PROJECT_SOURCE_DIR})
     gtest_discover_tests(test_host_adapter WORKING_DIRECTORY ${PROJECT_SOURCE_DIR})
+    gtest_discover_tests(test_bad_alloc_boundaries
+        WORKING_DIRECTORY ${PROJECT_SOURCE_DIR})
     gtest_discover_tests(test_cli_dirty_snapshot_formatter WORKING_DIRECTORY ${PROJECT_SOURCE_DIR})
     gtest_discover_tests(test_compute_service_split WORKING_DIRECTORY ${PROJECT_SOURCE_DIR})
     gtest_discover_tests(test_node_editor_layout WORKING_DIRECTORY ${PROJECT_SOURCE_DIR})

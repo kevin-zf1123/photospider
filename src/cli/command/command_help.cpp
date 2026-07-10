@@ -8,7 +8,14 @@
 #include "cli/command/help_utils.hpp"
 #include "cli/print_repl_help.hpp"
 
-// Helper to canonicalize command names and aliases
+/**
+ * @brief Canonicalizes supported command aliases for help dispatch.
+ * @param cmd Command or alias read from the help argument.
+ * @return Canonical command name, or cmd unchanged when no alias exists.
+ * @throws std::bad_alloc if static alias-map initialization or result copying
+ * cannot allocate.
+ * @note The immutable alias table has process lifetime and no Host state.
+ */
 static std::string canonicalize(const std::string& cmd) {
   static const std::unordered_map<std::string, std::string> alias = {
       {"cls", "clear"},
@@ -19,7 +26,14 @@ static std::string canonicalize(const std::string& cmd) {
   return (it == alias.end()) ? cmd : it->second;
 }
 
-// Dispatcher for printing specific command help
+/**
+ * @brief Dispatches one canonical command name to its help renderer.
+ * @param name Command name or supported alias.
+ * @param config Borrowed CLI configuration forwarded to the renderer.
+ * @return True when a matching help renderer ran; false otherwise.
+ * @throws std::bad_alloc if canonicalization or help rendering cannot allocate.
+ * @note Dispatch is synchronous and does not access Host or graph/cache state.
+ */
 static bool dispatch_print(const std::string& name, const CliConfig& config) {
   const std::string cmd = canonicalize(name);
   if (cmd == "help") {
@@ -92,6 +106,7 @@ static bool dispatch_print(const std::string& name, const CliConfig& config) {
   return false;
 }
 
+/** @copydoc handle_help */
 bool handle_help(std::istringstream& iss, ps::Host& /*svc*/,
                  std::string& /*current_graph*/, bool& /*modified*/,
                  CliConfig& config) {
@@ -107,6 +122,7 @@ bool handle_help(std::istringstream& iss, ps::Host& /*svc*/,
   return true;
 }
 
+/** @copydoc print_help_help */
 void print_help_help(const CliConfig& /*config*/) {
   print_help_from_file("help_help.txt");
 }

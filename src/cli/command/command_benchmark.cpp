@@ -6,8 +6,8 @@
 #include "cli/command/commands.hpp"
 #include "cli/command/help_utils.hpp"
 
-bool handle_benchmark(std::istringstream& iss,
-                      ps::Host& svc,  // <-- svc is already here
+/** @copydoc handle_benchmark */
+bool handle_benchmark(std::istringstream& iss, ps::Host& svc,
                       std::string& /*current_graph*/, bool& /*modified*/,
                       CliConfig& /*config*/) {
   std::string benchmark_dir;
@@ -17,12 +17,12 @@ bool handle_benchmark(std::istringstream& iss,
     return true;
   }
 
-  // FIX: Pass the interaction service to the editor
   ps::run_benchmark_config_editor(svc, benchmark_dir);
 
   return true;
 }
 
+/** @copydoc print_help_benchmark */
 void print_help_benchmark(const CliConfig& /*config*/) {
   print_help_from_file("help_benchmark.txt");
 }

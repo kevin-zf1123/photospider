@@ -18,9 +18,10 @@ namespace {
 /**
  * @brief CLI-local request for scheduling compute and polling status.
  *
- * The struct keeps frontend polling/logging switches separate from the Kernel
+ * The struct keeps CLI polling/logging switches separate from the public Host
  * compute request so execute_and_wait receives one stable object instead of a
- * sequence of booleans.
+ * sequence of booleans. The CLI never constructs an internal
+ * `Kernel::ComputeRequest`.
  *
  * @note compute.telemetry.enable_timing is derived from timer_console or
  * timer_log before the request is passed to this helper.
@@ -45,12 +46,14 @@ struct ComputeWaitRequest {
 /**
  * @brief Schedules one async compute request and waits for completion.
  *
- * @param svc Interaction facade used by the CLI command.
+ * @param svc Public Host seam used by the CLI command.
  * @param request Host compute request plus CLI polling/logging controls.
  * @return true when the future completes successfully, false on schedule or
  *         compute failure.
- * @throws Nothing directly; future exceptions are converted by Kernel into the
- * returned status and last_error message.
+ * @throws std::bad_alloc if Host scheduling, copied event/diagnostic values, or
+ *         async status mapping cannot allocate. Recoverable backend failures
+ *         are converted by the embedded Host adapter into OperationStatus and
+ *         last_error values.
  * @note Progress events are drained before and during the wait loop to keep the
  * CLI output behavior unchanged.
  */
@@ -110,6 +113,7 @@ bool execute_and_wait(ps::Host& svc, const ComputeWaitRequest& request) {
 
 }  // namespace
 
+/** @copydoc handle_compute */
 bool handle_compute(std::istringstream& iss, ps::Host& svc,
                     std::string& current_graph, bool& /*modified*/,
                     CliConfig& config) {
@@ -294,6 +298,7 @@ bool handle_compute(std::istringstream& iss, ps::Host& svc,
   return true;
 }
 
+/** @copydoc print_help_compute */
 void print_help_compute(const CliConfig& /*config*/) {
   print_help_from_file("help_compute.txt");
 }

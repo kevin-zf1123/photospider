@@ -83,6 +83,7 @@ std::vector<std::string> available_scheduler_types(ps::Host& svc) {
 
 }  // namespace
 
+/** @copydoc handle_scheduler */
 bool handle_scheduler(std::istringstream& iss, ps::Host& svc,
                       std::string& current_graph, bool& /*modified*/,
                       CliConfig& config) {
@@ -284,6 +285,7 @@ bool handle_scheduler(std::istringstream& iss, ps::Host& svc,
   return true;
 }
 
+/** @copydoc print_help_scheduler */
 void print_help_scheduler(const CliConfig& /*config*/) {
   print_help_from_file("help_scheduler.txt");
 }

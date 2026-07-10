@@ -2,6 +2,7 @@
 #include <algorithm>
 #include <filesystem>
 #include <iostream>
+#include <new>
 #include <sstream>
 #include <string>
 #include <vector>
@@ -12,6 +13,7 @@
 
 namespace fs = std::filesystem;
 
+/** @copydoc handle_switch */
 bool handle_switch(std::istringstream& iss, ps::Host& svc,
                    std::string& current_graph, bool& /*modified*/,
                    CliConfig& config) {
@@ -61,6 +63,8 @@ bool handle_switch(std::istringstream& iss, ps::Host& svc,
         fs::copy_file(src_yaml, dst_yaml, fs::copy_options::overwrite_existing);
       if (fs::exists(src_cfg))
         fs::copy_file(src_cfg, dst_cfg, fs::copy_options::overwrite_existing);
+    } catch (const std::bad_alloc&) {
+      throw;
     } catch (const std::exception& e) {
       std::cout << "Error: failed to copy session files: " << e.what() << "\n";
       return true;
@@ -131,6 +135,8 @@ bool handle_switch(std::istringstream& iss, ps::Host& svc,
       if (!fs::exists(dst_cfg)) {
         write_config_to_file(config, dst_cfg.string());
       }
+    } catch (const std::bad_alloc&) {
+      throw;
     } catch (const std::exception& e) {
       std::cout << "Warning: could not prepare session config: " << e.what()
                 << "\n";
@@ -144,6 +150,7 @@ bool handle_switch(std::istringstream& iss, ps::Host& svc,
   return true;
 }
 
+/** @copydoc print_help_switch */
 void print_help_switch(const CliConfig& /*config*/) {
   print_help_from_file("help_switch.txt");
 }
