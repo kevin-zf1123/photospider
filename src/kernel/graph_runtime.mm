@@ -239,6 +239,7 @@ void GraphRuntime::clear_scheduler_log() {
 // [M3.2 新增] 调度器管理实现
 // =============================================================================
 
+/** @copydoc GraphRuntime::set_scheduler */
 void GraphRuntime::set_scheduler(ComputeIntent intent,
                                  std::unique_ptr<IScheduler> scheduler) {
   replace_scheduler(intent, std::move(scheduler));
@@ -256,6 +257,7 @@ const IScheduler* GraphRuntime::get_scheduler(ComputeIntent intent) const {
   return (it != schedulers_.end()) ? it->second.get() : nullptr;
 }
 
+/** @copydoc GraphRuntime::replace_scheduler */
 void GraphRuntime::replace_scheduler(ComputeIntent intent,
                                      std::unique_ptr<IScheduler> scheduler) {
   std::lock_guard<std::mutex> lock(schedulers_mutex_);
