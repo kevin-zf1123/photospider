@@ -788,6 +788,12 @@ if(BUILD_TESTING)
     # [M3.5] GPU Pipeline 调度器测试
     add_ps_test(test_gpu_pipeline_scheduler tests/test_gpu_pipeline_scheduler.cpp)
 
+    # Deterministic CPU/GPU exception-publication race and reuse coverage.
+    add_ps_test(test_scheduler_exception_publication
+        tests/test_scheduler_exception_publication.cpp)
+    target_compile_definitions(test_scheduler_exception_publication PRIVATE
+        PHOTOSPIDER_INTERNAL_BAD_ALLOC_TESTING)
+
     # [M3.5] 调度器插件加载器测试
     add_ps_test(test_scheduler_plugin_loader tests/test_scheduler_plugin_loader.cpp)
     target_link_libraries(test_scheduler_plugin_loader PRIVATE ${CMAKE_DL_LIBS})
@@ -927,6 +933,8 @@ if(BUILD_TESTING)
     gtest_discover_tests(test_compute_service_split WORKING_DIRECTORY ${PROJECT_SOURCE_DIR})
     gtest_discover_tests(test_node_editor_layout WORKING_DIRECTORY ${PROJECT_SOURCE_DIR})
     gtest_discover_tests(test_gpu_pipeline_scheduler WORKING_DIRECTORY ${PROJECT_SOURCE_DIR})
+    gtest_discover_tests(test_scheduler_exception_publication
+        WORKING_DIRECTORY ${PROJECT_SOURCE_DIR})
     gtest_discover_tests(test_scheduler_plugin_loader WORKING_DIRECTORY ${PROJECT_SOURCE_DIR})
     add_test(NAME SplitComputeServiceRuntimeTrace
         COMMAND split_compute_service_trace "${PROJECT_SOURCE_DIR}/tests/results/split-compute-service"

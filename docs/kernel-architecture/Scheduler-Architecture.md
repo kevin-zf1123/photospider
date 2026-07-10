@@ -27,6 +27,104 @@ used by idle worker waits and completion waits before notifying those waiters.
 This prevents shutdown from missing a worker that is transitioning into
 condition-variable sleep after the final task in a batch has completed.
 
+### Transactional start and runtime publication
+
+`CpuWorkStealingScheduler::start()` and `GpuPipelineScheduler::start()` provide
+the strong exception guarantee. Queue arrays, mutex ownership, and worker
+vectors are staged before lifecycle publication. If resource allocation or any
+CPU/GPU thread construction throws, the scheduler publishes `running=false`,
+notifies every worker/completion wait, joins every thread already created by
+that attempt, and clears staged arrays, queues, counters, and exception state.
+The original `std::bad_alloc`, `std::system_error`, or plugin exception is then
+rethrown unchanged. Repeated `shutdown()` remains safe after failure, and the
+same scheduler object can retry `start()` and execute a later batch.
+Even after staged threads exist, `is_running()` remains false until the complete
+worker vector, queue arrays, mutex ownership, counters, and exception state have
+been installed in member storage. Observers therefore cannot treat a partially
+installed worker set as a running scheduler.
+
+`GraphRuntime::start()` is the outer lifecycle transaction. It reserves a
+rollback ledger and records each stopped scheduler before invoking that
+scheduler's `start()`. If any start call fails after partial local publication,
+the failing scheduler and all earlier schedulers started by the call are shut
+down in reverse order. Secondary rollback errors are suppressed so the first
+start error survives, and `GraphRuntime::running()` becomes true only after all
+schedulers start successfully.
+`GraphRuntime::stop()` publishes stopped state under the same lifecycle mutex,
+attempts every scheduler shutdown even when an earlier plugin throws, and
+rethrows the first failure only after completing that sweep. Its `noexcept`
+destructor suppresses an explicit plugin lifecycle failure while scheduler
+owners retain their own final cleanup fences.
+
+Deterministic allocation and thread-creation hooks exist only in
+`BUILD_TESTING=ON` objects. A `BUILD_TESTING=OFF` product contains no hook
+storage, exported test seam, or forced GPU route.
+
+### Transactional batch enqueue and borrowed handles
+
+Every multi-task enqueue is a queue transaction. CPU high-priority/global-ready
+and local work-stealing routes, plus GPU RT, HP-CPU, and GPU routes, retain the
+relevant queue locks while recording original deque lengths and appending the
+whole batch. If any insertion throws, appended entries are removed from the
+back without allocation. Epoch, ready/completion/stat counters, exception
+claim/pointer/epoch/cleanup/visible state, and condition-variable notifications
+are published only after the complete batch commits. If an insertion fails,
+all of those exception and epoch fields retain their exact pre-call values. No
+worker can observe a prefix and the original exception identity propagates.
+
+`TaskHandle` is a borrowed pair of executor pointer and task id. Its
+`TaskExecutor` must outlive every successfully committed callback through
+`wait_for_completion()`. A failed batch commits no handle and executes zero
+callbacks, so request-local dirty executors may unwind immediately without
+leaving a queue entry that points into destroyed stack storage. The scheduler
+can accept the next batch on the same object after rollback. Exception
+publication uses the same queue transaction gate before choosing its epoch,
+so a concurrent batch is observed either wholly committed or wholly absent.
+
+### Batch exception publication and reuse
+
+The CPU work-stealing and GPU-pipeline runtimes publish one exact worker
+exception per batch. A separate first-publisher latch is reset only when a new
+batch starts. The winning publisher first verifies its executing task epoch
+matches the active batch, stores the exact `first_exception_` and exception
+epoch, rejects further ready submissions for that batch, and drains every
+queued callback. Only after queue cleanup completes does it release-store the
+consumer-visible `has_exception_` flag. The publisher retains the same initial-
+submission queue gate through claim, pointer, cleanup, epoch, and visible-flag
+publication. A new initial batch therefore cannot reset exception state between
+the old pointer store and old flag store, eliminating cross-epoch publication.
+
+Dequeued callbacks carry their scheduler batch epoch and increment an in-flight
+count before becoming invisible to queue cleanup. Completion, completion-count
+growth, and exception publication from a stale epoch are ignored. A completion
+waiter does not return success until both the completion count and in-flight
+count reach zero. It does not rethrow failure until queue cleanup is complete
+and every old callback has settled. The waiter then reads and clears the exact
+pointer/flag under the exception mutex. This settle-before-return policy makes
+immediate next-batch submission safe: no old publisher remains able to drain a
+new queue, decrement its count, or publish a late exception into it.
+
+For CPU work stealing, a local-queue enqueue and its ready-predicate increment
+hold the global predicate mutex before the target local mutex. A local dequeue
+decrements the predicate before releasing that local mutex. Exception cleanup
+uses the same global-to-local order, retains the global mutex across every
+queue drain, and resets the ready predicate only after all local queues have
+been visited. This makes queue visibility and the numeric wait predicate one
+publication unit: neither a late increment after cleanup nor a decrement below
+the reset value can leak into the next batch.
+
+This ordering is part of scheduler reuse: an observed exception flag always
+has a non-null matching pointer, the exact exception identity reaches the
+waiting caller, and the next batch explicitly resets both publication state
+and the first-publisher latch. GPU pipeline CPU workers use one shared mutex and
+one `rt_cv_` predicate handshake for both the RT queue and HP-CPU fallback
+queue; every publisher changes either ready predicate under that same mutex
+before notifying. There is no separate unwaited `hp_cpu_cv_`, so HP submission
+cannot be lost between predicate evaluation and condition-variable sleep.
+Shutdown remains a separate lifecycle transition; the GPU pipeline publishes
+its stop state while holding the CPU idle-queue, GPU idle-queue, and
+completion-wait mutexes before notifying and joining workers.
+
 Compute routes by `ComputeIntent`:
 
 | Intent | Expected scheduler role |

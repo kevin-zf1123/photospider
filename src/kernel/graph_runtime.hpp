@@ -62,14 +62,57 @@ class GraphRuntime {
   };
 
   explicit GraphRuntime(const Info& info);
-  ~GraphRuntime();
+  /**
+   * @brief Releases every scheduler and graph-owned runtime resource.
+   * @throws Nothing.
+   * @note Destructor cleanup attempts `stop()` but suppresses plugin lifecycle
+   * exceptions; scheduler owners then retain their own no-throw fallback and
+   * plugin-destroy ordering.
+   */
+  ~GraphRuntime() noexcept;
 
   GraphRuntime(const GraphRuntime&) = delete;
   GraphRuntime& operator=(const GraphRuntime&) = delete;
 
+  /**
+   * @brief Starts every attached scheduler as one runtime lifecycle
+   * transaction.
+   *
+   * The runtime stages rollback tracking before invoking scheduler lifecycle
+   * code. It publishes `running()==true` only after every previously stopped
+   * scheduler starts successfully. On failure, schedulers started by this call
+   * are shut down in reverse order and the original exception is rethrown.
+   *
+   * @return Nothing.
+   * @throws std::bad_alloc if rollback tracking or a scheduler start exhausts
+   * memory.
+   * @throws std::system_error if a scheduler cannot create worker resources.
+   * @throws Any exception propagated by a plugin scheduler's explicit start.
+   * @note Rollback cleanup suppresses secondary shutdown failures to preserve
+   * the original start exception. Scheduler objects and GraphModel remain owned
+   * by this runtime; no graph cache or compute state is committed here.
+   */
   void start();
+
+  /**
+   * @brief Stops all running schedulers owned by this graph runtime.
+   * @return Nothing.
+   * @throws The first exception propagated by an explicit scheduler shutdown.
+   * @note The runtime publishes its stopped state under `schedulers_mutex_`,
+   * then attempts every scheduler shutdown before rethrowing the first error.
+   * Graph/cache ownership remains unchanged and repeated calls are lifecycle-
+   * idempotent for built-ins.
+   */
   void stop();
-  bool running() const { return running_; }
+  /**
+   * @brief Reports whether the complete scheduler set is running.
+   * @return True only after the outer start transaction commits.
+   * @throws Nothing.
+   * @note The acquire load never exposes a partially started scheduler set.
+   */
+  bool running() const noexcept {
+    return running_.load(std::memory_order_acquire);
+  }
 
   std::vector<GraphEventService::ComputeEvent> drain_compute_events_now() {
     return event_service_.drain();

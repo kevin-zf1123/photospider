@@ -3,6 +3,7 @@
 
 #include <chrono>
 #include <cstdio>
+#include <exception>
 #include <filesystem>
 #include <memory>
 #include <utility>
@@ -49,8 +50,13 @@ GraphRuntime::GraphRuntime(const Info& info)
 #endif
 }
 
-GraphRuntime::~GraphRuntime() {
-  stop();
+GraphRuntime::~GraphRuntime() noexcept {
+  try {
+    stop();
+  } catch (...) {
+    // Scheduler owners and built-in destructors retain no-throw fallback
+    // cleanup; a hostile explicit plugin lifecycle call cannot escape here.
+  }
 }
 
 int GraphRuntime::this_worker_id() {
@@ -80,25 +86,59 @@ compute::RealtimeProxyGraph& GraphRuntime::realtime_proxy_graph() {
   return *realtime_proxy_graph_;
 }
 
+/** @copydoc GraphRuntime::start */
 void GraphRuntime::start() {
-  running_.store(true, std::memory_order_release);
   std::lock_guard<std::mutex> lock(schedulers_mutex_);
-  for (auto& [intent, scheduler] : schedulers_) {
-    (void)intent;
-    if (scheduler && !scheduler->is_running()) {
-      scheduler->start();
-    }
+  if (running_.load(std::memory_order_acquire)) {
+    return;
   }
+
+  std::vector<IScheduler*> started_schedulers;
+  started_schedulers.reserve(schedulers_.size());
+  try {
+    for (auto& [intent, scheduler] : schedulers_) {
+      (void)intent;
+      if (scheduler && !scheduler->is_running()) {
+        started_schedulers.push_back(scheduler.get());
+        scheduler->start();
+      }
+    }
+  } catch (...) {
+    const std::exception_ptr start_error = std::current_exception();
+    for (auto it = started_schedulers.rbegin(); it != started_schedulers.rend();
+         ++it) {
+      try {
+        if (*it) {
+          (*it)->shutdown();
+        }
+      } catch (...) {
+      }
+    }
+    running_.store(false, std::memory_order_release);
+    std::rethrow_exception(start_error);
+  }
+  running_.store(true, std::memory_order_release);
 }
 
+/** @copydoc GraphRuntime::stop */
 void GraphRuntime::stop() {
-  running_.store(false, std::memory_order_release);
   std::lock_guard<std::mutex> lock(schedulers_mutex_);
+  running_.store(false, std::memory_order_release);
+  std::exception_ptr first_shutdown_error;
   for (auto& [intent, scheduler] : schedulers_) {
     (void)intent;
-    if (scheduler && scheduler->is_running()) {
-      scheduler->shutdown();
+    try {
+      if (scheduler && scheduler->is_running()) {
+        scheduler->shutdown();
+      }
+    } catch (...) {
+      if (!first_shutdown_error) {
+        first_shutdown_error = std::current_exception();
+      }
     }
+  }
+  if (first_shutdown_error) {
+    std::rethrow_exception(first_shutdown_error);
   }
 }
 
