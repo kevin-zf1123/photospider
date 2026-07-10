@@ -27,7 +27,17 @@ CI workflow changes must therefore be developed on a `CI/**` branch. The guard a
 
 When a pull request or push changes the CI image inputs (`Dockerfile.ci`, `.dockerignore`, or `.github/workflows/build-ci-image.yml`), the healthcheck and integration workflows build `photospider-ci:local` inside the workflow and run the same scripts there. This avoids racing another workflow that may still be publishing the new `latest` image.
 
-The image includes CMake, a C++ toolchain, OpenCV, yaml-cpp, CURL, OpenSSL, GTest, nlohmann-json, clang-format, Python, and cpplint.
+The image includes CMake, a C++ toolchain, OpenCV, yaml-cpp, CURL, OpenSSL,
+GTest, nlohmann-json, Python, cpplint, and clang-format. The formatter is
+installed from the PyPI wheel at version 21.1.5 so CI and developer formatting
+do not drift merely because different formatter releases choose different line
+breaks. The maintainer machine currently uses 21.1.3; its formatted output was
+verified byte-for-byte equal to 21.1.5 for the changed C++ inventory covered by
+this alignment. Developer environments should adopt 21.1.5 going forward.
+
+clang-format is the only tool version aligned by this change. This is not a
+version-detection gate and adds no dedicated CI job or new Ubuntu/CMake version
+lock; the existing Ubuntu base and apt-provided CMake setup remain unchanged.
 
 ## Scripts
 
