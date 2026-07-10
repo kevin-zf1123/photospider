@@ -394,45 +394,30 @@ plugin SDK 收紧属于独立的 extension boundary 变更。
 
 任何根据本文档推进的实现变更，都应：
 
-- 只从 personal-overlay `tests/results/...` evidence tree 运行 issue 专属 header/layout migration
-  scan；不得把它们注册到 CTest 或 CI。
-- 构建 `libphotospider` 和 `graph_cli`；`photospiderd` 在应用拆分阶段落地之前仍是未来 daemon target。
-- 对静态 package 工作，package consumer smoke test 应保留在 CTest 中，因为它执行真实
-  install/find-package/runtime 边界。Phase-4 migration scan 应从 issue 专属 personal-overlay
-  evidence tree 单独运行，并把 summary、命令日志、expected/actual JSON 和 compare 输出保存到
-  对应 `tests/results/...` 路径。
-  CMake 3.16 是兼容性下限，不是每个 PR 的固定版本门禁。应通过 command/provider/context
-  compatibility audit、当前 CI package consumer，以及 compatibility-sensitive change 或 release
-  check 确有需要时的针对性真实旧版本验证来维护。针对性运行仍必须使用 fresh producer、真实
-  `photospider` build、install 与外部 consumer；先由更新版 CMake 配置 producer tree 并不等价。
-  若没有原生旧版本 runtime，应记录未运行，而不是使用架构模拟或声称 PASS。
-  清理必须 fail-closed，并为 producer build、安装 prefix、consumer source 与 consumer
-  build 目录保存从文件系统派生的清理前/清理后/cache 观察。配套静态审计必须隔离 root 与
-  package-template 的命令可见性，仅在真实 3.16 `include()` provider 出现后解析 module
-  command，并把每个维护中的 `cmake_policy(SET CMPxxxx ...)` 调用与真实 3.16 policy
-  list 对照。command name 覆盖来自 `--help-command-list`；既有 command 的 grammar
-  覆盖只限于证据中明确列出的敏感 subcommand/keyword。Linux strict-fresh 实际执行不能
-  替代真实 Apple 或 Windows runtime 覆盖。
-  同一次正式验证中的每个 producer、consumer、test、structural 与 quality artifact 都必须
-  绑定到唯一的最终源码身份：base commit/tree、内容寻址的 final snapshot tree、final patch
-  hash，以及普通未跟踪源码 inventory。OpenSpec、task、feedback 或 evidence 检查所消费的
-  personal-overlay 输入还要携带独立的 overlay commit/tree、snapshot 与 patch identity；生成的
-  evidence output 本身不进入这项自引用。每个 artifact 都必须从生成它的同一次运行记录自己消费
-  的全部 identity；根 compare 必须逐项断言它们都等于源码冻结后捕获的最终身份，否则
-  fail-closed。后续任何源码变化都会使早先 artifact 失效；命中旧 Review 目录、旧 build tree
-  或手工复制的 hash 都不构成 provenance。
+- 本地验证范围应匹配改动边界：实现期间运行 scoped static check、受影响 build target 与
+  focused regression。本地 full build 或完整 CTest/JUnit 不是常设要求。GitHub Actions 是远程
+  integration 环境；不要把 Docker 或本地 `linux/amd64` 模拟作为常规 preflight。
+- 改动影响 `libphotospider` 或 `graph_cli` 时才构建对应 target；`photospiderd` 在应用拆分阶段
+  落地之前仍是未来 daemon target。
+- 对静态 package 工作，package consumer smoke test 应保留在 CTest 中，因为它执行真实 producer
+  build/install、外部 find-package、public-header compile/link/run、安装后的 export/dependency、
+  平台与 multi-configuration 边界。脚本在内存中检查这些不变量，把命令和失败详情直接输出到
+  stdout/stderr 供 CTest 捕获，并且只在 build tree 下使用正常的临时 install/consumer 工作目录。
+  它不生成 expected/actual/compare/summary 报告，也不得依赖 Git identity、patch hash、replay、
+  provenance 或迁移完成度。
+- CMake 3.16 是兼容性下限，不是每个 pull request 的固定版本门禁。应保护较新的 policy，依靠
+  当前 CI package consumer，并且只在 compatibility-sensitive change 或 release check 确有需要时
+  运行针对性的原生旧版本 producer/install/consumer 路径；不得用架构模拟替代原生 runtime。
+- 迁移 residue、phase 完成度、陈旧术语和源码布局检查是临时开发检查，不是软件行为测试。
+  不得把它们注册到 CTest 或 CI，也不得在 primary repository 中长期保留其 issue 专属编排。
 - CLI catch-order 与 Doxygen audit 输入必须从真实 CMake target closure 与 compilation database
   或 CMake File API 派生。若 `photospider_cli_common` 或 `graph_cli` 的任一 source（包括
   `src/cli_config.cpp`、`src/cli/run_graph_cli.cpp` 与 `cli/graph_cli.cpp` 等 root translation
   unit）遗漏，或无法匹配 compile command，audit 应 fail-closed。该 Doxygen/source-quality audit
   是有文档记录的手工工具，不属于 CTest 或 CI entry。
-- 运行 kernel、scheduler、plugin、interaction 和 CLI 相关 CTest。
-- 实现期间按风险比例运行 focused check。源码冻结后，最多执行一次本机原生 clean
-  configure/full build/CTest-JUnit，并让正式证据复用该 build tree；不得增加 Docker 或本地
-  `linux/amd64` 模拟作为另一轮本地完成运行。
 - 增加 IPC 集成测试：启动 `photospiderd`，发送请求，并将响应 JSON 与 expected output 对比。
-- 对 daemon lifecycle 变更，保存 startup、graph load、compute 或 inspect、client disconnect、signal shutdown
-  和 socket cleanup 日志。
+- 对 daemon lifecycle 变更，覆盖 startup、graph load、compute 或 inspect、client disconnect、
+  signal shutdown 和 socket cleanup 行为。
 
 ## 待决问题
 

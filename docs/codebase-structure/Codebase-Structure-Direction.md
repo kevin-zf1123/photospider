@@ -459,46 +459,32 @@ SDK tightening in step 7 is a separate extension-boundary change.
 
 For any implementation change following this document:
 
-- Run issue-specific header/layout migration scans only from the personal-
-  overlay `tests/results/...` evidence tree; do not register them with CTest or
-  CI.
-- Build `libphotospider` and `graph_cli`; `photospiderd` remains a future
-  daemon target until the application split phase lands.
+- Match local validation to the changed boundary: use scoped static checks,
+  affected build targets, and focused regressions during implementation. A
+  local full build or complete CTest/JUnit pass is not a standing requirement.
+  GitHub Actions is the remote integration environment; do not add Docker or
+  local `linux/amd64` emulation as a routine preflight.
+- Build `libphotospider` or `graph_cli` when the change affects that target;
+  `photospiderd` remains a future daemon target until the application split
+  phase lands.
 - For static package work, keep the package consumer smoke test in CTest because
-  it executes the real install/find-package/runtime boundary. Run any phase-4
-  migration scan separately from the issue-specific personal-overlay evidence
-  tree, then save summary, command logs, expected/actual JSON, and compare
-  output under that `tests/results/...` path.
-  CMake 3.16 is a compatibility floor, not a fixed version gate for every PR.
-  Maintain it through the command/provider/context compatibility audit, the
-  current CI package consumer, and targeted real old-version validation when a
-  compatibility-sensitive change or release check requires it. Such a targeted
-  run still uses a fresh producer, real `photospider` build, install, and
-  external consumer; a producer tree configured earlier by a newer CMake is not
-  equivalent. If no native old-version runtime is available, record that it was
-  not run instead of using architecture emulation or claiming a PASS.
-  Cleanup must fail closed and persist filesystem-derived before/after/cache
-  observations for the producer build, install prefix, consumer source, and
-  consumer build directories. The companion static audit must keep root and
-  package-template command visibility separate, resolve module commands only
-  after their real 3.16 `include()` provider, and enumerate every maintained
-  `cmake_policy(SET CMPxxxx ...)` call against the real 3.16 policy list.
-  Command-name coverage comes from `--help-command-list`; existing-command
-  grammar coverage is limited to the sensitive subcommands/keywords explicitly
-  listed in evidence. Linux strict-fresh execution does not substitute for real
-  Apple or Windows runtime coverage.
-  Every formal producer, consumer, test, structural, and quality artifact in a
-  validation run must bind to one final source identity: base commit/tree,
-  content-addressed final snapshot tree, final patch hash, and ordinary
-  untracked source inventory. Personal-overlay inputs consumed by OpenSpec,
-  task, feedback, or evidence checks carry a separate overlay commit/tree,
-  snapshot, and patch identity; generated evidence outputs are excluded from
-  that self-reference. Each artifact records every identity it consumes from
-  the run that produced it, and the root comparison must fail unless all
-  consumed identities equal the final identities captured after the source is
-  frozen. A later source change invalidates the earlier artifact; matching an
-  older Review directory, build tree, or manually copied hash is not
-  provenance.
+  it executes the real producer build/install, external find-package,
+  public-header compile/link/run, installed export/dependency, platform, and
+  multi-configuration boundaries. It evaluates those invariants in memory,
+  streams commands and failure details to stdout/stderr for CTest to capture,
+  and uses only transient install and consumer work directories below the build
+  tree. It does not produce expected/actual/compare/summary reports and must not
+  depend on Git identity, patch hashes, replay, provenance, or migration
+  completion.
+- Treat CMake 3.16 as a compatibility floor, not a fixed version gate for every
+  pull request. Guard newer policies, rely on the current CI package consumer,
+  and run a targeted native old-version producer/install/consumer path only for
+  a compatibility-sensitive change or release check. Do not substitute
+  architecture emulation for a native runtime.
+- Migration residue, phase completion, stale-term, and source-layout checks are
+  temporary development checks, not software behavior tests. Do not register
+  them with CTest or CI, and do not retain their issue-specific orchestration in
+  the primary repository.
 - Derive CLI catch-order and Doxygen audit inputs from the real CMake target
   closure and compilation database or CMake File API. The audit fails closed if
   a source in `photospider_cli_common` or `graph_cli`, including root
@@ -506,15 +492,10 @@ For any implementation change following this document:
   and `cli/graph_cli.cpp`, is omitted or cannot be matched to a compile command.
   This Doxygen/source-quality audit is a documented manual tool and is not a
   CTest or CI entry.
-- Run CTest for kernel, scheduler, plugin, interaction, and CLI tests.
-- Use proportional focused checks during implementation. After the source is
-  frozen, perform at most one native clean configure/full build/CTest-JUnit
-  pass and reuse that build tree for formal evidence; do not add Docker or
-  local `linux/amd64` emulation as another local completion run.
 - Add an IPC integration test that starts `photospiderd`, sends requests, and
   checks response JSON against expected output.
-- For daemon lifecycle changes, save logs for startup, graph load, compute or
-  inspection, client disconnect, signal shutdown, and socket cleanup.
+- For daemon lifecycle changes, cover startup, graph load, compute or
+  inspection, client disconnect, signal shutdown, and socket cleanup behavior.
 
 ## Open Decisions
 
