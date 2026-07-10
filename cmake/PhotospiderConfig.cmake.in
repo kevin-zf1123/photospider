@@ -7,8 +7,15 @@ find_dependency(OpenCV COMPONENTS core imgproc imgcodecs videoio)
 find_dependency(yaml-cpp)
 
 if(APPLE)
-  find_library(PHOTOSPIDER_METAL_FRAMEWORK Metal REQUIRED)
-  find_library(PHOTOSPIDER_FOUNDATION_FRAMEWORK Foundation REQUIRED)
+  find_library(PHOTOSPIDER_METAL_FRAMEWORK NAMES Metal)
+  find_library(PHOTOSPIDER_FOUNDATION_FRAMEWORK NAMES Foundation)
+  if(NOT PHOTOSPIDER_METAL_FRAMEWORK OR
+     NOT PHOTOSPIDER_FOUNDATION_FRAMEWORK)
+    set(Photospider_FOUND FALSE)
+    set(Photospider_NOT_FOUND_MESSAGE
+        "Photospider requires the Metal and Foundation frameworks on Apple platforms")
+    return()
+  endif()
 endif()
 
 include("${CMAKE_CURRENT_LIST_DIR}/PhotospiderTargets.cmake")

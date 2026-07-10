@@ -32,7 +32,7 @@ The root `CMakeLists.txt` builds these internal modules:
 | `photospider_operation_plugin_shim` | Narrow shared helper library for dynamic operation callback code that needs `ImageBuffer`/OpenCV adapter symbols without registry state. |
 | `photospider_graph` | `GraphModel` plus graph IO, traversal, cache, and inspect services. |
 | `photospider_plugin` | Dynamic operation plugin manager and loader. |
-| `photospider_compute` | Kernel facade, interaction runtime, schedulers, compute service, events. |
+| `photospider_compute` | Build-only interaction runtime, schedulers, compute service, and events helper. |
 | `photospider` | Static installable backend product, archived as `libphotospider`, linked by CLI and embedded Host frontends. It installs only `include/photospider/**` and exports `Photospider::photospider`; operation plugins register through `OperationPluginRegistrar` and `register_photospider_ops_v1` instead of linking this product for registry state. |
 | `photospider_cli_common` | REPL commands, TUI editors, autocomplete, CLI config. |
 | `graph_cli` | End-user executable. |
@@ -51,15 +51,21 @@ Package boundary:
 
 - `cmake --install` installs the static `photospider` archive, the
   `include/photospider/**` public header tree, `PhotospiderTargets.cmake`, and
-  `PhotospiderConfig.cmake`.
+  `PhotospiderConfig.cmake`. The archive is `libphotospider.a` on Unix-like
+  toolchains and `photospider.lib` with MSVC.
 - `Photospider::photospider` carries `PHOTOSPIDER_STATIC` for consumers and
   keeps `src/` include roots private to repository builds. In the build tree,
-  the target's public include root is generated and contains only the
-  `photospider/` header tree.
+  the target's generated public include root contains only `photospider/`
+  forwarding headers. CMake tracks additions and removals and the wrappers read
+  live source headers without directory symlinks.
 - OpenCV (`core`, `imgproc`, `imgcodecs`, `videoio`), `yaml-cpp`, `Threads`,
-  POSIX dynamic-loader libraries, and Apple `Metal`/`Foundation` framework
-  flags are implementation link dependencies of the static archive. Public
-  Host/core headers avoid OpenCV and `yaml-cpp` types.
+  platform dynamic-loader libraries, and Apple `Metal`/`Foundation` framework
+  flags are implementation link dependencies of the static archive. Library
+  dependencies appear as `$<LINK_ONLY:...>` entries on the installed target;
+  Apple framework flags are propagated from a private Apple-only product link
+  block. Public Host/core headers avoid OpenCV and `yaml-cpp` types; Windows
+  consumers receive `PHOTOSPIDER_STATIC` so declarations do not use DLL
+  import/export attributes.
 - FTXUI, `photospider_cli_common`, operation plugin shim libraries, operation
   plugins, and scheduler plugins are not exported as dependencies of the
   embedded static package.
