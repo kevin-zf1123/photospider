@@ -1,6 +1,10 @@
 # Minimum CMake version required
 cmake_minimum_required(VERSION 3.16)
-cmake_policy(SET CMP0135 NEW) 
+# CMP0135 was introduced after the supported CMake 3.16 minimum. Older CMake
+# versions do not recognize its name, so opt in only when the policy exists.
+if(POLICY CMP0135)
+  cmake_policy(SET CMP0135 NEW)
+endif()
 # Define the project
 project(Photospider VERSION 0.1.0 LANGUAGES CXX)
 # 开启 LTO (Link Time Optimization)
@@ -55,12 +59,51 @@ set(PLUGIN_OUTPUT_DIR ${CMAKE_BINARY_DIR}/plugins)
 set(PHOTOSPIDER_PUBLIC_INCLUDE_DIR "${PROJECT_SOURCE_DIR}/include")
 set(PHOTOSPIDER_BUILD_PUBLIC_INCLUDE_DIR
     "${CMAKE_BINARY_DIR}/generated/photospider_public_include")
-file(MAKE_DIRECTORY "${PHOTOSPIDER_BUILD_PUBLIC_INCLUDE_DIR}")
-file(REMOVE_RECURSE "${PHOTOSPIDER_BUILD_PUBLIC_INCLUDE_DIR}/photospider")
-file(CREATE_LINK
-    "${PROJECT_SOURCE_DIR}/include/photospider"
-    "${PHOTOSPIDER_BUILD_PUBLIC_INCLUDE_DIR}/photospider"
-    SYMBOLIC COPY_ON_ERROR)
+set(PHOTOSPIDER_BUILD_PUBLIC_TREE
+    "${PHOTOSPIDER_BUILD_PUBLIC_INCLUDE_DIR}/photospider")
+set(PHOTOSPIDER_SOURCE_PUBLIC_INCLUDE_DIR
+    "${PROJECT_SOURCE_DIR}/include/photospider")
+# Phase-4 replaced the old build-tree directory symlink with generated
+# forwarding headers. Remove that exact legacy symlink before inventorying or
+# writing forwarders so an incremental configure cannot write through the link
+# and truncate source headers.
+if(IS_SYMLINK "${PHOTOSPIDER_BUILD_PUBLIC_TREE}")
+    file(REMOVE "${PHOTOSPIDER_BUILD_PUBLIC_TREE}")
+endif()
+file(GLOB_RECURSE PHOTOSPIDER_BUILD_PUBLIC_HEADERS
+    CONFIGURE_DEPENDS
+    "${PHOTOSPIDER_SOURCE_PUBLIC_INCLUDE_DIR}/*.h"
+    "${PHOTOSPIDER_SOURCE_PUBLIC_INCLUDE_DIR}/*.hpp"
+    "${PHOTOSPIDER_SOURCE_PUBLIC_INCLUDE_DIR}/*.hh"
+    "${PHOTOSPIDER_SOURCE_PUBLIC_INCLUDE_DIR}/*.hxx"
+)
+file(GLOB_RECURSE PHOTOSPIDER_EXISTING_BUILD_PUBLIC_HEADERS
+    "${PHOTOSPIDER_BUILD_PUBLIC_TREE}/*.h"
+    "${PHOTOSPIDER_BUILD_PUBLIC_TREE}/*.hpp"
+    "${PHOTOSPIDER_BUILD_PUBLIC_TREE}/*.hh"
+    "${PHOTOSPIDER_BUILD_PUBLIC_TREE}/*.hxx"
+)
+set(PHOTOSPIDER_EXPECTED_BUILD_PUBLIC_HEADERS "")
+foreach(PUBLIC_HEADER ${PHOTOSPIDER_BUILD_PUBLIC_HEADERS})
+    file(RELATIVE_PATH PUBLIC_HEADER_RELATIVE_PATH
+        "${PHOTOSPIDER_SOURCE_PUBLIC_INCLUDE_DIR}" "${PUBLIC_HEADER}")
+    set(PUBLIC_HEADER_COPY
+        "${PHOTOSPIDER_BUILD_PUBLIC_TREE}/${PUBLIC_HEADER_RELATIVE_PATH}")
+    get_filename_component(PUBLIC_HEADER_COPY_DIR
+        "${PUBLIC_HEADER_COPY}" DIRECTORY)
+    file(MAKE_DIRECTORY "${PUBLIC_HEADER_COPY_DIR}")
+    list(APPEND PHOTOSPIDER_EXPECTED_BUILD_PUBLIC_HEADERS
+        "${PUBLIC_HEADER_COPY}")
+    file(TO_CMAKE_PATH "${PUBLIC_HEADER}" PUBLIC_HEADER_INCLUDE_PATH)
+    file(GENERATE
+        OUTPUT "${PUBLIC_HEADER_COPY}"
+        CONTENT "#pragma once\n#include \"${PUBLIC_HEADER_INCLUDE_PATH}\"\n")
+endforeach()
+foreach(EXISTING_PUBLIC_HEADER ${PHOTOSPIDER_EXISTING_BUILD_PUBLIC_HEADERS})
+    if(NOT EXISTING_PUBLIC_HEADER IN_LIST PHOTOSPIDER_EXPECTED_BUILD_PUBLIC_HEADERS)
+        file(REMOVE "${EXISTING_PUBLIC_HEADER}")
+    endif()
+endforeach()
 # Linked consumers receive only the public include root. Kernel/Interaction
 # facades live under src/ as source-tree internals: repository targets that
 # include them must use the private roots below, and the installable
@@ -298,10 +341,6 @@ target_link_libraries(photospider PRIVATE
     ${OpenCV_LIBS}
     ${CMAKE_DL_LIBS}
 )
-
-if(WIN32)
-    set_target_properties(photospider PROPERTIES WINDOWS_EXPORT_ALL_SYMBOLS ON)
-endif()
 
 install(TARGETS photospider
     EXPORT PhotospiderTargets
@@ -576,10 +615,15 @@ if(APPLE)
     file(MAKE_DIRECTORY ${METAL_ROOT_DIR})
     file(MAKE_DIRECTORY ${METAL_OPS_DIR})
 
-    find_library(METAL_FRAMEWORK Metal REQUIRED)
-    find_library(FOUNDATION_FRAMEWORK Foundation REQUIRED)
-    find_library(COREIMAGE_FRAMEWORK CoreImage REQUIRED)
-    find_library(COREVIDEO_FRAMEWORK CoreVideo REQUIRED)
+    find_library(METAL_FRAMEWORK NAMES Metal)
+    find_library(FOUNDATION_FRAMEWORK NAMES Foundation)
+    find_library(COREIMAGE_FRAMEWORK NAMES CoreImage)
+    find_library(COREVIDEO_FRAMEWORK NAMES CoreVideo)
+    if(NOT METAL_FRAMEWORK OR NOT FOUNDATION_FRAMEWORK OR
+       NOT COREIMAGE_FRAMEWORK OR NOT COREVIDEO_FRAMEWORK)
+        message(FATAL_ERROR
+            "Photospider requires Metal, Foundation, CoreImage, and CoreVideo on Apple platforms")
+    endif()
 
     # Core product needs Metal framework for Objective-C++ runtime sources.
     target_link_libraries(photospider PRIVATE
