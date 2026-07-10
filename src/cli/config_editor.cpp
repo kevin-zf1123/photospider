@@ -5,6 +5,7 @@
 #include <filesystem>
 #include <functional>
 #include <iostream>
+#include <new>
 #include <string>
 #include <utility>
 #include <vector>
@@ -267,12 +268,22 @@ class ConfigEditor : public TuiEditor {
       }
     }
   }
+  /**
+   * @brief Applies editable TUI values to the owned configuration snapshot.
+   * @return Nothing.
+   * @throws std::bad_alloc if string, vector, or stream storage cannot
+   * allocate.
+   * @note Invalid numeric text retains the previous numeric value; resource
+   * exhaustion propagates to the Host-facing command boundary.
+   */
   void SyncUiStateToModel() {
     original_config_.plugin_dirs = plugin_dirs_str_;
     original_config_.scheduler_dirs = scheduler_dirs_str_;
     original_config_.loaded_config_path = active_config_path_buffer_;
     try {
       original_config_.history_size = std::stoi(history_size_buffer_);
+    } catch (const std::bad_alloc&) {
+      throw;
     } catch (...) {
     }
     original_config_.cache_precision =
@@ -297,6 +308,8 @@ class ConfigEditor : public TuiEditor {
       if (original_config_.scheduler_worker_count < 0) {
         original_config_.scheduler_worker_count = 0;
       }
+    } catch (const std::bad_alloc&) {
+      throw;
     } catch (...) {
     }
 

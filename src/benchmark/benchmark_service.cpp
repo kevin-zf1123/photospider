@@ -5,6 +5,7 @@
 #include <fstream>
 #include <iostream>
 #include <map>
+#include <new>
 #include <numeric>
 #include <string>
 #include <thread>
@@ -22,11 +23,13 @@ namespace ps {
  *
  * @param benchmark_dir Directory that owns benchmark_config.yaml and generated
  *        sessions.
- * @throws Nothing directly; filesystem failures are reported to stderr and the
- *         remaining cleanup continues.
+ * @return Nothing.
+ * @throws std::bad_alloc if path or diagnostic storage exhausts memory.
+ * @throws std::filesystem::filesystem_error when directory inspection fails.
  * @note Only the reserved `__benchmark_temp` session directory and generated
  *       `__generated_*` YAML files are removed. User-authored benchmark inputs
- *       in the same directory are left untouched.
+ *       in the same directory are left untouched. Individual remove failures
+ *       are reported to stderr and cleanup continues.
  */
 static void cleanup_generated_files(const std::string& benchmark_dir) {
   fs::path dir(benchmark_dir);
@@ -102,8 +105,34 @@ static std::map<int, std::string> benchmark_op_names_by_node(
   return op_names;
 }
 
+/**
+ * @brief Binds benchmark orchestration to a borrowed Host.
+ *
+ * @param svc Host used for graph lifecycle, compute, inspection, and telemetry.
+ * @throws Nothing directly.
+ * @note The Host must outlive this service. No backend object is retained.
+ */
 BenchmarkService::BenchmarkService(ps::Host& svc) : svc_(svc) {}
 
+/**
+ * @brief Runs and aggregates one benchmark configuration through Host.
+ *
+ * The method generates or loads the graph YAML, creates a temporary Host
+ * session for every repetition, computes the target node, copies timing and IO
+ * telemetry, closes successful sessions, and aggregates all completed runs.
+ *
+ * @param benchmark_dir Directory containing benchmark inputs and temporary
+ * session storage.
+ * @param config Enabled session configuration to execute.
+ * @param runs Number of repetitions used by result aggregation.
+ * @return Aggregated result for the requested session.
+ * @throws std::bad_alloc if Host execution or local result storage exhausts
+ * memory.
+ * @throws std::runtime_error when graph input, loading, or compute fails.
+ * @throws YAML::Exception when generated or user-provided YAML is malformed.
+ * @note Temporary sessions are closed after successful runs. Host owns graph
+ * state and preserves the documented resource-exhaustion exception boundary.
+ */
 BenchmarkResult BenchmarkService::Run(const std::string& benchmark_dir,
                                       const BenchmarkSessionConfig& config,
                                       int runs) {
@@ -236,6 +265,11 @@ BenchmarkResult BenchmarkService::Run(const std::string& benchmark_dir,
  * @param[out] final_result 用于存放汇总后的基准测试结果
  * @param[in]  all_runs
  * 包含多次运行详细结果的向量，每个元素包含总耗时、事件列表和 IO 耗时等信息
+ * @return Nothing.
+ * @throws std::bad_alloc if aggregation vector or environment string storage
+ * exhausts memory.
+ * @note Only events matching final_result.op_name with source `computed`
+ * contribute to the typical execution-time distribution.
  */
 void BenchmarkService::analyze_results(
     BenchmarkResult& final_result,
@@ -298,6 +332,22 @@ void BenchmarkService::analyze_results(
   final_result.compiler_info = "Unknown Compiler";
 }
 
+/**
+ * @brief Runs every enabled benchmark configuration through the active Host.
+ *
+ * @param benchmark_dir Directory containing benchmark_config.yaml and graph
+ * fixtures.
+ * @return Results for enabled sessions that completed successfully.
+ * @throws std::bad_alloc if configuration, Host execution, or result storage
+ * exhausts memory.
+ * @throws std::runtime_error or YAML::Exception when configuration loading
+ * fails before per-session execution begins.
+ * @throws std::filesystem::filesystem_error when pre-run artifact directory
+ * inspection fails.
+ * @note Recoverable per-session standard exceptions are logged and skipped so
+ * later sessions can run. Resource exhaustion is never reduced to a skipped
+ * benchmark because callers must be able to apply process-level recovery.
+ */
 std::vector<BenchmarkResult> BenchmarkService::RunAll(
     const std::string& benchmark_dir) {
   // [修复] 在所有测试开始前，执行清理操作
@@ -314,6 +364,8 @@ std::vector<BenchmarkResult> BenchmarkService::RunAll(
       try {
         // [修复] 将 benchmark_dir 和 runs 次数传递给 Run 函数
         results.push_back(Run(benchmark_dir, config, config.execution.runs));
+      } catch (const std::bad_alloc&) {
+        throw;
       } catch (const std::exception& e) {
         std::cerr << "Error running benchmark '" << config.name
                   << "': " << e.what() << std::endl;
@@ -323,6 +375,17 @@ std::vector<BenchmarkResult> BenchmarkService::RunAll(
   return results;
 }
 
+/**
+ * @brief Parses benchmark_config.yaml into executable session configs.
+ *
+ * @param benchmark_dir Directory containing benchmark_config.yaml.
+ * @return Parsed configurations in file order.
+ * @throws std::bad_alloc if YAML, path, string, or vector storage exhausts
+ * memory.
+ * @throws std::runtime_error when benchmark_config.yaml does not exist.
+ * @throws YAML::Exception when configuration values are malformed.
+ * @note Relative custom YAML paths are resolved against benchmark_dir.
+ */
 std::vector<BenchmarkSessionConfig> BenchmarkService::load_configs_internal(
     const std::string& benchmark_dir) {
   fs::path config_path = fs::path(benchmark_dir) / "benchmark_config.yaml";
@@ -369,11 +432,33 @@ std::vector<BenchmarkSessionConfig> BenchmarkService::load_configs_internal(
   return configs;
 }
 
+/**
+ * @brief Loads benchmark configurations without executing them.
+ *
+ * @param benchmark_dir Directory containing benchmark_config.yaml.
+ * @return Parsed configurations in file order.
+ * @throws std::bad_alloc if parsing storage exhausts memory.
+ * @throws std::runtime_error or YAML::Exception when input is unavailable or
+ * malformed.
+ * @note This is the editor-facing counterpart to RunAll.
+ */
 std::vector<BenchmarkSessionConfig> BenchmarkService::LoadConfigs(
     const std::string& benchmark_dir) {
   return load_configs_internal(benchmark_dir);
 }
 
+/**
+ * @brief Removes transient benchmark sessions and generated YAML files.
+ *
+ * @param benchmark_dir Directory whose reserved benchmark artifacts are
+ * removed.
+ * @return Nothing.
+ * @throws std::bad_alloc if path or diagnostic string construction exhausts
+ * memory.
+ * @throws std::filesystem::filesystem_error when directory inspection fails.
+ * @note Individual file-removal errors are reported to stderr and cleanup
+ * continues; user-authored graph inputs are not removed.
+ */
 void BenchmarkService::CleanupArtifacts(const std::string& benchmark_dir) {
   cleanup_generated_files(benchmark_dir);
 }

@@ -7,6 +7,7 @@
 #include "cli/command/commands.hpp"
 #include "cli/command/help_utils.hpp"
 
+/** @copydoc handle_exit */
 bool handle_exit(std::istringstream& /*iss*/, ps::Host& svc,
                  std::string& current_graph, bool& /*modified*/,
                  CliConfig& config) {
@@ -19,6 +20,7 @@ bool handle_exit(std::istringstream& /*iss*/, ps::Host& svc,
   return false;  // signal REPL exit
 }
 
+/** @copydoc print_help_exit */
 void print_help_exit(const CliConfig& /*config*/) {
   print_help_from_file("help_exit.txt");
 }

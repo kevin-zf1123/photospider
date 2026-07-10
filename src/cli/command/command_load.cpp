@@ -14,6 +14,7 @@
 
 namespace fs = std::filesystem;
 
+/** @copydoc handle_load */
 bool handle_load(std::istringstream& iss, ps::Host& svc,
                  std::string& current_graph, bool& modified,
                  CliConfig& config) {
@@ -138,6 +139,7 @@ bool handle_load(std::istringstream& iss, ps::Host& svc,
   return true;
 }
 
+/** @copydoc print_help_load */
 void print_help_load(const CliConfig& /*config*/) {
   print_help_from_file("help_load.txt");
 }

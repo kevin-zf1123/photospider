@@ -2,8 +2,13 @@
 #pragma once
 #include <string>
 
-#include "cli_config.hpp"
-
-// Print help text from src/cli/command/help/<filename>.
-// If the file cannot be opened, prints a default message.
+/**
+ * @brief Prints maintained command help from the CLI help directory.
+ * @param filename Basename of the help file to render.
+ * @return Nothing.
+ * @throws std::bad_alloc if path, stream, line, or output storage cannot
+ * allocate.
+ * @note Missing files and ordinary I/O failures render a fallback message;
+ * resource exhaustion is never converted into presentation output.
+ */
 void print_help_from_file(const std::string& filename);

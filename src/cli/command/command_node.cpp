@@ -1,5 +1,6 @@
 // FILE: src/cli/command/command_node.cpp
 #include <iostream>
+#include <new>
 #include <optional>
 #include <sstream>
 #include <string>
@@ -8,6 +9,7 @@
 #include "cli/command/help_utils.hpp"
 #include "cli/node_editor_full.hpp"
 
+/** @copydoc handle_node */
 bool handle_node(std::istringstream& iss, ps::Host& svc,
                  std::string& current_graph, bool& /*modified*/,
                  CliConfig& /*config*/) {
@@ -20,6 +22,8 @@ bool handle_node(std::istringstream& iss, ps::Host& svc,
   if (iss >> word) {
     try {
       maybe_id = std::stoi(word);
+    } catch (const std::bad_alloc&) {
+      throw;
     } catch (...) {
       maybe_id.reset();
     }
@@ -29,6 +33,7 @@ bool handle_node(std::istringstream& iss, ps::Host& svc,
   return true;
 }
 
+/** @copydoc print_help_node */
 void print_help_node(const CliConfig& /*config*/) {
   print_help_from_file("help_node.txt");
 }

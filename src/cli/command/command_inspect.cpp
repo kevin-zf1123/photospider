@@ -1,5 +1,6 @@
 // FILE: src/cli/command/command_inspect.cpp
 #include <iostream>
+#include <new>
 #include <sstream>
 #include <string>
 
@@ -7,18 +8,7 @@
 #include "cli/command/help_utils.hpp"
 #include "cli/dependency_tree_formatter.hpp"
 
-/**
- * @brief Handles graph, node, and dirty-region inspection commands.
- *
- * @param iss Parsed command stream containing `all`, `dirty`, or a node id.
- * @param svc Host boundary used to read inspection snapshots.
- * @param current_graph Current graph session label.
- * @return Always true so the REPL continues after command handling.
- * @throws Nothing directly; Host failures are reported as user-facing CLI text.
- * @note Dirty-region failures are printed as errors with Host status messages,
- *       while successful empty dirty snapshots are still rendered by
- *       `format_dirty_snapshot()` as the existing no-snapshot diagnostic.
- */
+/** @copydoc handle_inspect */
 bool handle_inspect(std::istringstream& iss, ps::Host& svc,
                     std::string& current_graph, bool& /*modified*/,
                     CliConfig& /*config*/) {
@@ -63,6 +53,8 @@ bool handle_inspect(std::istringstream& iss, ps::Host& svc,
   int node_id = -1;
   try {
     node_id = std::stoi(target);
+  } catch (const std::bad_alloc&) {
+    throw;
   } catch (const std::exception&) {
     std::cout << "Invalid node id '" << target << "'.\n";
     return true;
@@ -80,6 +72,7 @@ bool handle_inspect(std::istringstream& iss, ps::Host& svc,
   return true;
 }
 
+/** @copydoc print_help_inspect */
 void print_help_inspect(const CliConfig& /*config*/) {
   print_help_from_file("help_inspect.txt");
 }

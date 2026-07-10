@@ -2,6 +2,7 @@
 #include <filesystem>
 #include <fstream>
 #include <iostream>
+#include <new>
 #include <sstream>
 #include <string>
 #include <vector>
@@ -11,8 +12,46 @@
 #include "cli/command/help_utils.hpp"
 
 namespace fs = std::filesystem;
+namespace {
 
-// [修改] 辅助函数：将结果保存到文件
+/**
+ * @brief Serializes benchmark duration samples into one CSV-safe field.
+ *
+ * @param values Duration samples to serialize in stable input order.
+ * @return Bracketed semicolon-separated values at three-decimal precision.
+ * @throws std::bad_alloc if stream or result string storage exhausts memory.
+ * @note The returned string contains no comma, so the caller may quote it as a
+ * single CSV cell without changing the benchmark data model.
+ */
+std::string serialize_benchmark_samples(const std::vector<double>& values) {
+  std::ostringstream output;
+  output.setf(std::ios::fixed);
+  output.precision(3);
+  output << "[";
+  for (size_t index = 0; index < values.size(); ++index) {
+    if (index != 0) {
+      output << ";";
+    }
+    output << values[index];
+  }
+  output << "]";
+  return output.str();
+}
+
+/**
+ * @brief Writes benchmark summary and raw CSV result files.
+ *
+ * @param output_dir Directory created for benchmark result artifacts.
+ * @param results Completed benchmark results to serialize.
+ * @return Nothing.
+ * @throws std::bad_alloc if path, stream, or serialization storage exhausts
+ * memory.
+ * @throws std::filesystem::filesystem_error when output directory creation
+ * fails.
+ * @note The local std::ofstream objects do not enable exceptions and their
+ * states are not returned, so open/write failures are not observable by the
+ * caller. This helper does not reinterpret Host-side compute failures.
+ */
 void save_benchmark_results(const std::string& output_dir,
                             const std::vector<ps::BenchmarkResult>& results) {
   fs::create_directories(output_dir);
@@ -33,21 +72,6 @@ void save_benchmark_results(const std::string& output_dir,
   summary_file.close();
 
   // 2. 保存 CSV 原始数据
-  auto serialize_vec = [](const std::vector<double>& v) {
-    std::ostringstream oss;
-    oss.setf(std::ios::fixed);
-    oss.precision(3);
-    oss << "[";
-    for (size_t i = 0; i < v.size(); ++i) {
-      if (i) {
-        oss << ";";
-      }
-      oss << v[i];
-    }
-    oss << "]";
-    return oss.str();
-  };
-
   std::ofstream csv_file(fs::path(output_dir) / "raw_data.csv");
   csv_file
       << "benchmark_name,op_name,width,height,num_threads,total_duration_ms,"
@@ -57,14 +81,34 @@ void save_benchmark_results(const std::string& output_dir,
              << "," << res.height << "," << res.num_threads << ","
              << res.total_duration_ms << "," << res.typical_execution_time_ms
              << "," << res.io_duration_ms << "," << '"'
-             << serialize_vec(res.exec_times_main_op_ms) << '"' << "\n";
+             << serialize_benchmark_samples(res.exec_times_main_op_ms) << '"'
+             << "\n";
   }
   csv_file.close();
 }
 
+}  // namespace
+
+/**
+ * @brief Executes the CLI `bench` command through BenchmarkService and Host.
+ *
+ * @param iss Command arguments containing benchmark and output directories.
+ * @param svc Product Host boundary used by BenchmarkService.
+ * @param current_graph Unused current-session compatibility argument.
+ * @param modified Unused graph-modification compatibility argument.
+ * @param config Unused CLI configuration compatibility argument.
+ * @return True after command handling, including recoverable failures.
+ * @throws std::bad_alloc if argument, benchmark, Host, or result storage
+ * exhausts memory.
+ * @note Recoverable standard exceptions are printed as CLI failures. Resource
+ * exhaustion remains exceptional across the Host-facing CLI call chain.
+ */
 bool handle_bench(std::istringstream& iss, ps::Host& svc,
-                  std::string& /*current_graph*/, bool& /*modified*/,
-                  CliConfig& /*config*/) {
+                  std::string& current_graph, bool& modified,
+                  CliConfig& config) {
+  (void)current_graph;
+  (void)modified;
+  (void)config;
   std::string benchmark_dir, output_dir;
   iss >> benchmark_dir >> output_dir;
 
@@ -87,6 +131,8 @@ bool handle_bench(std::istringstream& iss, ps::Host& svc,
     save_benchmark_results(output_dir, results);
     std::cout << "Benchmark finished. Results saved to '" << output_dir << "'."
               << std::endl;
+  } catch (const std::bad_alloc&) {
+    throw;
   } catch (const std::exception& e) {
     std::cerr << "Benchmark failed: " << e.what() << std::endl;
   }
@@ -94,6 +140,15 @@ bool handle_bench(std::istringstream& iss, ps::Host& svc,
   return true;
 }
 
-void print_help_bench(const CliConfig& /*config*/) {
+/**
+ * @brief Prints the maintained help text for the `bench` command.
+ *
+ * @param config Unused CLI configuration compatibility argument.
+ * @return Nothing.
+ * @throws std::bad_alloc if help path or output storage exhausts memory.
+ * @note Help content is loaded by the shared CLI help utility.
+ */
+void print_help_bench(const CliConfig& config) {
+  (void)config;
   print_help_from_file("help_bench.txt");
 }

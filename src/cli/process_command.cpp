@@ -3,6 +3,7 @@
 
 #include <filesystem>
 #include <iostream>
+#include <new>
 #include <sstream>
 #include <string>
 
@@ -12,6 +13,25 @@
 
 namespace fs = std::filesystem;
 
+/**
+ * @brief Dispatches one command line while preserving resource exhaustion.
+ *
+ * Execution first parses the leading token, then invokes exactly one matching
+ * handler with borrowed CLI state, and finally translates ordinary standard
+ * failures into a terminal diagnostic while preserving std::bad_alloc.
+ *
+ * @param line Complete command line supplied by the REPL or a script.
+ * @param svc Product Host used by command handlers.
+ * @param current_graph Mutable current-session label maintained by the CLI.
+ * @param modified Mutable graph-modification flag maintained by the CLI.
+ * @param config Mutable CLI configuration shared by command handlers.
+ * @return True to continue the REPL, or false after an exit command.
+ * @throws std::bad_alloc unchanged when parsing, dispatch, Host work, or
+ * diagnostic output exhausts memory.
+ * @note Recoverable standard exceptions are printed and reduced to a continue
+ * result. Resource exhaustion remains exceptional so callers cannot mistake
+ * it for a handled command failure.
+ */
 bool process_command(const std::string& line, ps::Host& svc,
                      std::string& current_graph, bool& modified,
                      CliConfig& config) {
@@ -73,6 +93,8 @@ bool process_command(const std::string& line, ps::Host& svc,
       std::cout << "Unknown command: " << cmd
                 << ". Type 'help' for a list of commands.\n";
     }
+  } catch (const std::bad_alloc&) {
+    throw;
   } catch (const std::exception& e) {
     std::cout << "Error: " << e.what() << "\n";
   }

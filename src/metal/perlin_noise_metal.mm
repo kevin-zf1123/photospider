@@ -1,26 +1,36 @@
 // FILE: src/metal/perlin_noise_metal.mm
 
 #include "perlin_noise_metal.hpp"
-#include "node.hpp"
-#include "adapter/buffer_adapter_opencv.hpp"
-#include "kernel/param_utils.hpp"
 
-#import <Metal/Metal.h>
 #import <CoreImage/CoreImage.h>
 #import <CoreVideo/CoreVideo.h>
+#import <Metal/Metal.h>
+
+#include "adapter/buffer_adapter_opencv.hpp"
+#include "kernel/param_utils.hpp"
+#include "metal/metal_exception_boundary.hpp"
+#include "node.hpp"
 
 // This specific OpenCV header is required for the interop function
-#include <opencv2/videoio/registry.hpp>
-#import <vector>
-#include <numeric>
-#include <algorithm>
-#include <random>
-#include <mutex>
-
 #include <opencv2/core/core_c.h>
-#include <opencv2/core/ocl.hpp>
 
-// --- Metal Shaders (Unchanged) ---
+#include <algorithm>
+#include <memory>
+#include <mutex>
+#include <numeric>
+#include <opencv2/core/ocl.hpp>
+#include <opencv2/videoio/registry.hpp>
+#include <random>
+#include <stdexcept>
+#include <string>
+#include <vector>
+
+/**
+ * @brief Metal Shading Language source for the Perlin compute kernel.
+ *
+ * @note The process-wide MetalState compiles this immutable source once. The
+ * pointer refers to static storage for the lifetime of the process.
+ */
 const char* perlin_shader_source = R"(
     #include <metal_stdlib>
     using namespace metal;
@@ -60,189 +70,281 @@ const char* perlin_shader_source = R"(
     }
 )";
 
-namespace ps { namespace ops {
+namespace ps {
+namespace ops {
 
-// static int as_int_flexible_metal(const YAML::Node& n, const std::string& key, int defv) {
-//     if (!n || !n[key]) return defv;
-//     try { return n[key].as<int>(); } catch (...) { return defv; }
-// }
-// static double as_double_flexible_metal(const YAML::Node& n, const std::string& key, double defv) {
-//     if (!n || !n[key]) return defv;
-//     try { if (n[key].IsScalar()) return n[key].as<double>(); return defv; } catch (...) { return defv; }
-// }
-
-// --- Metal & CoreImage State Management (Unchanged) ---
+/**
+ * @brief Process-wide Metal objects required by the Perlin source operation.
+ *
+ * @note Objective-C references retain their objects for the lifetime of this
+ * state. Construction happens once through GetMetalState and calls are
+ * serialized separately by g_metal_perlin_mutex.
+ */
 struct MetalState {
-    id<MTLDevice> device;
-    id<MTLCommandQueue> commandQueue;
-    id<MTLComputePipelineState> pipelineState;
+  /** @brief Default Metal device retained by the process-wide state. */
+  id<MTLDevice> device;
+  /** @brief Command queue used for serialized Perlin dispatches. */
+  id<MTLCommandQueue> commandQueue;
+  /** @brief Compiled Perlin compute pipeline. */
+  id<MTLComputePipelineState> pipelineState;
 
-    MetalState() {
-        NSLog(@"Initializing MetalState...");
-        device = MTLCreateSystemDefaultDevice();
-        if (!device) throw std::runtime_error("Failed to create Metal device.");
-        
-        commandQueue = [device newCommandQueue];
-        if (!commandQueue) throw std::runtime_error("Failed to create Metal command queue.");
+  /**
+   * @brief Creates the device, command queue, shader library, and pipeline.
+   *
+   * @throws std::bad_alloc if C++ or Objective-C bridge allocation exhausts
+   * memory.
+   * @throws std::runtime_error if any required Metal object cannot be
+   * created.
+   * @note Construction is invoked once. A failed std::call_once attempt may
+   * be retried by a later caller according to the standard once-flag rules.
+   */
+  MetalState() {
+    NSLog(@"Initializing MetalState...");
+    device = MTLCreateSystemDefaultDevice();
+    if (!device)
+      throw std::runtime_error("Failed to create Metal device.");
 
-        NSError* error = nil;
-        NSString* sourceString = [NSString stringWithUTF8String:perlin_shader_source];
-        id<MTLLibrary> library = [device newLibraryWithSource:sourceString options:nil error:&error];
-        if (!library) {
-            NSLog(@"FATAL: Metal library creation failed. Error: %@", error);
-            throw std::runtime_error("Failed to compile Metal shader.");
-        }
-        
-        NSString* kernelName = @"perlin_noise_kernel";
-        id<MTLFunction> kernelFunction = [library newFunctionWithName:kernelName];
-        if (!kernelFunction) {
-            NSLog(@"FATAL: Failed to find Metal function named '%@' in the library.", kernelName);
-            throw std::runtime_error("Failed to find Metal kernel function.");
-        }
-        
-        pipelineState = [device newComputePipelineStateWithFunction:kernelFunction error:&error];
-        if (!pipelineState) {
-            NSLog(@"FATAL: Metal pipeline state creation failed. Error: %@", error);
-            throw std::runtime_error("Failed to create Metal pipeline state.");
-        }
-        NSLog(@"MetalState initialized successfully.");
+    commandQueue = [device newCommandQueue];
+    if (!commandQueue)
+      throw std::runtime_error("Failed to create Metal command queue.");
+
+    NSError* error = nil;
+    NSString* sourceString =
+        [NSString stringWithUTF8String:perlin_shader_source];
+    id<MTLLibrary> library = [device newLibraryWithSource:sourceString
+                                                  options:nil
+                                                    error:&error];
+    if (!library) {
+      NSLog(@"FATAL: Metal library creation failed. Error: %@", error);
+      throw std::runtime_error("Failed to compile Metal shader.");
     }
+
+    NSString* kernelName = @"perlin_noise_kernel";
+    id<MTLFunction> kernelFunction = [library newFunctionWithName:kernelName];
+    if (!kernelFunction) {
+      NSLog(@"FATAL: Failed to find Metal function named '%@' in the library.",
+            kernelName);
+      throw std::runtime_error("Failed to find Metal kernel function.");
+    }
+
+    pipelineState = [device newComputePipelineStateWithFunction:kernelFunction
+                                                          error:&error];
+    if (!pipelineState) {
+      NSLog(@"FATAL: Metal pipeline state creation failed. Error: %@", error);
+      throw std::runtime_error("Failed to create Metal pipeline state.");
+    }
+    NSLog(@"MetalState initialized successfully.");
+  }
 };
 
+/**
+ * @brief Owns the process-wide lazily initialized Metal state.
+ *
+ * @note g_metal_state is populated exactly once through g_metal_state_flag
+ * after successful construction. Its unique_ptr exclusively owns MetalState,
+ * whose Objective-C fields retain the Metal objects. Static teardown destroys
+ * the state and releases those objects; no caller may retain a reference past
+ * that teardown.
+ */
 static std::unique_ptr<MetalState> g_metal_state;
+
+/**
+ * @brief Synchronizes process-wide Metal state initialization.
+ *
+ * @note The flag has static lifetime and guards only construction/publication
+ * of g_metal_state. A failed initialization attempt leaves it unset so a later
+ * caller may retry; command encoding is synchronized separately.
+ */
 static std::once_flag g_metal_state_flag;
+
+/**
+ * @brief Returns the process-wide initialized Metal state.
+ *
+ * @return Borrowed reference valid until g_metal_state static teardown.
+ * @throws std::bad_alloc unchanged if state allocation exhausts memory.
+ * @throws std::system_error when std::call_once cannot coordinate state
+ * initialization.
+ * @throws std::runtime_error when MetalState construction fails.
+ * @note std::call_once serializes construction. The returned reference remains
+ * owned by g_metal_state and is valid only until static teardown; callers must
+ * separately serialize command encoding through g_metal_perlin_mutex.
+ */
 static MetalState& GetMetalState() {
-    std::call_once(g_metal_state_flag, [](){ g_metal_state = std::make_unique<MetalState>(); });
-    return *g_metal_state;
+  std::call_once(g_metal_state_flag,
+                 []() { g_metal_state = std::make_unique<MetalState>(); });
+  return *g_metal_state;
 }
 
-// Eager init API (for optional prewarm by plugin loader)
+/**
+ * @brief Prewarms the process-wide Metal state for the loader.
+ *
+ * @return Nothing.
+ * @throws std::bad_alloc unchanged if state allocation exhausts memory.
+ * @throws std::system_error when std::call_once cannot coordinate state
+ * initialization.
+ * @throws std::runtime_error when Metal initialization fails.
+ * @note The function is idempotent after successful std::call_once completion.
+ */
 extern "C" void perlin_noise_metal_eager_init() {
-    (void)GetMetalState();
+  (void)GetMetalState();
 }
 
-// --- START: MODIFIED FUNCTION ---
-// Serialize Metal Perlin executions to avoid driver/CIContext concurrency crashes
+/**
+ * @brief Serializes process-wide Metal Perlin command encoding and readback.
+ *
+ * @note The mutex has static lifetime and owns no Metal object. Each operation
+ * holds it from entry into the serialized boundary through CPU readback; the
+ * independent g_metal_state_flag remains responsible for state initialization.
+ */
 static std::mutex g_metal_perlin_mutex;
 
-NodeOutput op_perlin_noise_metal(const Node& node, const std::vector<const NodeOutput*>&) {
-    @autoreleasepool {
+/**
+ * @brief Executes the Metal Perlin source operation with contextual errors.
+ *
+ * @param node Runtime parameters controlling width, height, grid size, and
+ * random seed.
+ * @param inputs Unused source-operation input list.
+ * @return NodeOutput owning a CPU copy of the generated floating-point image.
+ * @throws std::bad_alloc unchanged from parameter parsing, working buffers, or
+ * output conversion; also propagates diagnostic-construction exhaustion.
+ * @throws std::runtime_error with the current stage for other standard or
+ * unknown failures.
+ * @note Calls acquire g_metal_perlin_mutex inside the portable contextual
+ * boundary and use an autorelease pool. Returned storage does not retain Metal
+ * resources.
+ */
+NodeOutput op_perlin_noise_metal(const Node& node,
+                                 const std::vector<const NodeOutput*>& inputs) {
+  (void)inputs;
+  @autoreleasepool {
     const char* dbg_stage = "start";
-    std::lock_guard<std::mutex> metal_lock(g_metal_perlin_mutex);
-    try {
-    // FIX: 关闭 OpenCV 的 OpenCL（只需做一次；放在这里最省事）
-    static std::once_flag ocl_once;
-    std::call_once(ocl_once, []{
-        cv::ocl::setUseOpenCL(false);
-    });
+    return detail::run_serialized_metal_exception_boundary(
+        "perlin_noise_metal", dbg_stage, g_metal_perlin_mutex,
+        [&]() -> NodeOutput {
+          // FIX: 关闭 OpenCV 的 OpenCL（只需做一次；放在这里最省事）
+          static std::once_flag ocl_once;
+          std::call_once(ocl_once, [] { cv::ocl::setUseOpenCL(false); });
 
-    const auto& P = node.runtime_parameters;
-    int width  = as_int_flexible(P, "width", 256);
-    int height = as_int_flexible(P, "height", 256);
-    float scale = as_double_flexible(P, "grid_size", 1.0);
-    int seed = as_int_flexible(P, "seed", -1);
+          const auto& P = node.runtime_parameters;
+          int width = as_int_flexible(P, "width", 256);
+          int height = as_int_flexible(P, "height", 256);
+          float scale = as_double_flexible(P, "grid_size", 1.0);
+          int seed = as_int_flexible(P, "seed", -1);
+          dbg_stage = "validate_parameters";
+          if (width <= 0 || height <= 0) {
+            throw std::invalid_argument(
+                "width and height must both be positive");
+          }
 
-    dbg_stage = "metal_state";
-    MetalState& metal = GetMetalState();
-    id<MTLDevice> device = metal.device;
-    id<MTLCommandQueue> commandQueue = metal.commandQueue;
-    id<MTLComputePipelineState> pipelineState = metal.pipelineState;
+          dbg_stage = "metal_state";
+          MetalState& metal = GetMetalState();
+          id<MTLDevice> device = metal.device;
+          id<MTLCommandQueue> commandQueue = metal.commandQueue;
+          id<MTLComputePipelineState> pipelineState = metal.pipelineState;
 
-    // FIX: 设备上限保护（大尺寸时给出清晰报错）
-    // NSUInteger maxDim = device.maxTextureDimension2D;
-    // if (width > (int)maxDim || height > (int)maxDim) {
-    //     throw std::runtime_error("Requested texture size exceeds device.maxTextureDimension2D");
-    // }
+          // FIX: 设备上限保护（大尺寸时给出清晰报错）
+          // NSUInteger maxDim = device.maxTextureDimension2D;
+          // if (width > (int)maxDim || height > (int)maxDim) {
+          //     throw std::runtime_error("Requested texture size exceeds
+          //     device.maxTextureDimension2D");
+          // }
 
-    // 输出纹理：单通道 32F（与 CV/CI 链路一致）
-    dbg_stage = "create_texture";
-    MTLTextureDescriptor* texDesc =
-        [MTLTextureDescriptor texture2DDescriptorWithPixelFormat:MTLPixelFormatR32Float
-                                                           width:width
-                                                          height:height
-                                                       mipmapped:NO];
-    texDesc.usage = MTLTextureUsageShaderWrite | MTLTextureUsageShaderRead;
-    id<MTLTexture> outTexture = [device newTextureWithDescriptor:texDesc];
-    if (!outTexture) {
-        throw std::runtime_error("Failed to create output MTLTexture.");
-    }
+          // 输出纹理：单通道 32F（与 CV/CI 链路一致）
+          dbg_stage = "create_texture";
+          MTLTextureDescriptor* texDesc = [MTLTextureDescriptor
+              texture2DDescriptorWithPixelFormat:MTLPixelFormatR32Float
+                                           width:width
+                                          height:height
+                                       mipmapped:NO];
+          texDesc.usage =
+              MTLTextureUsageShaderWrite | MTLTextureUsageShaderRead;
+          id<MTLTexture> outTexture = [device newTextureWithDescriptor:texDesc];
+          if (!outTexture) {
+            throw std::runtime_error("Failed to create output MTLTexture.");
+          }
 
-    // Perlin permutation/参数缓冲
-    dbg_stage = "alloc_permutation";
-    std::vector<int> p_vec(512);
-    std::iota(p_vec.begin(), p_vec.begin() + 256, 0);
-    /*std::mt19937 g(std::random_device{}());*/std::mt19937 g;
-    if (seed == -1) {
-        g.seed(std::random_device{}());
-    } else {
-        g.seed(seed);
-    }
-    std::shuffle(p_vec.begin(), p_vec.begin() + 256, g);
-    std::copy(p_vec.begin(), p_vec.begin() + 256, p_vec.begin() + 256);
+          // Perlin permutation/参数缓冲
+          dbg_stage = "alloc_permutation";
+          std::vector<int> p_vec(512);
+          std::iota(p_vec.begin(), p_vec.begin() + 256, 0);
+          /*std::mt19937 g(std::random_device{}());*/ std::mt19937 g;
+          if (seed == -1) {
+            g.seed(std::random_device{}());
+          } else {
+            g.seed(seed);
+          }
+          std::shuffle(p_vec.begin(), p_vec.begin() + 256, g);
+          std::copy(p_vec.begin(), p_vec.begin() + 256, p_vec.begin() + 256);
 
-    dbg_stage = "create_buffers";
-    id<MTLBuffer> p_buffer     = [device newBufferWithBytes:p_vec.data()
-                                                     length:512 * sizeof(int)
-                                                    options:MTLResourceStorageModeShared];
-    id<MTLBuffer> scale_buffer = [device newBufferWithBytes:&scale
-                                                     length:sizeof(float)
-                                                    options:MTLResourceStorageModeShared];
-    if (!p_buffer || !scale_buffer) {
-        throw std::runtime_error("Failed to create Metal buffers.");
-    }
+          dbg_stage = "create_buffers";
+          id<MTLBuffer> p_buffer =
+              [device newBufferWithBytes:p_vec.data()
+                                  length:512 * sizeof(int)
+                                 options:MTLResourceStorageModeShared];
+          id<MTLBuffer> scale_buffer =
+              [device newBufferWithBytes:&scale
+                                  length:sizeof(float)
+                                 options:MTLResourceStorageModeShared];
+          if (!p_buffer || !scale_buffer) {
+            throw std::runtime_error("Failed to create Metal buffers.");
+          }
 
-    // 编码与调度
-    dbg_stage = "encode";
-    id<MTLCommandBuffer> commandBuffer = [commandQueue commandBuffer];
-    if (!commandBuffer) {
-        throw std::runtime_error("Failed to create command buffer.");
-    }
+          // 编码与调度
+          dbg_stage = "encode";
+          id<MTLCommandBuffer> commandBuffer = [commandQueue commandBuffer];
+          if (!commandBuffer) {
+            throw std::runtime_error("Failed to create command buffer.");
+          }
 
-    id<MTLComputeCommandEncoder> encoder = [commandBuffer computeCommandEncoder];
-    if (!encoder) {
-        throw std::runtime_error("Failed to create compute encoder.");
-    }
+          id<MTLComputeCommandEncoder> encoder =
+              [commandBuffer computeCommandEncoder];
+          if (!encoder) {
+            throw std::runtime_error("Failed to create compute encoder.");
+          }
 
-    [encoder setComputePipelineState:pipelineState];
-    [encoder setTexture:outTexture atIndex:0];
-    [encoder setBuffer:p_buffer offset:0 atIndex:0];
-    [encoder setBuffer:scale_buffer offset:0 atIndex:1];
+          [encoder setComputePipelineState:pipelineState];
+          [encoder setTexture:outTexture atIndex:0];
+          [encoder setBuffer:p_buffer offset:0 atIndex:0];
+          [encoder setBuffer:scale_buffer offset:0 atIndex:1];
 
-    // FIX: 使用 dispatchThreads 并计算健壮的 threadgroupSize
-    MTLSize threadsPerGrid = MTLSizeMake(width, height, 1);
-    NSUInteger w = pipelineState.threadExecutionWidth;
-    NSUInteger h = std::max<NSUInteger>(1, pipelineState.maxTotalThreadsPerThreadgroup / w);
-    MTLSize threadsPerThreadgroup = MTLSizeMake(w, h, 1);
+          // FIX: 使用 dispatchThreads 并计算健壮的 threadgroupSize
+          MTLSize threadsPerGrid = MTLSizeMake(width, height, 1);
+          NSUInteger w = pipelineState.threadExecutionWidth;
+          NSUInteger h = std::max<NSUInteger>(
+              1, pipelineState.maxTotalThreadsPerThreadgroup / w);
+          MTLSize threadsPerThreadgroup = MTLSizeMake(w, h, 1);
 
-    [encoder dispatchThreads:threadsPerGrid threadsPerThreadgroup:threadsPerThreadgroup];
-    [encoder endEncoding];
+          [encoder dispatchThreads:threadsPerGrid
+              threadsPerThreadgroup:threadsPerThreadgroup];
+          [encoder endEncoding];
 
-    // FIX: 提交并等待 GPU 完成，防止 CPU 过早读取
-    dbg_stage = "submit_wait";
-    [commandBuffer commit];
-    [commandBuffer waitUntilCompleted];
+          // FIX: 提交并等待 GPU 完成，防止 CPU 过早读取
+          dbg_stage = "submit_wait";
+          [commandBuffer commit];
+          [commandBuffer waitUntilCompleted];
 
-    // 直接拷贝纹理数据回 CPU：避免 CoreImage/CVPixelBuffer 并发不稳定
-    dbg_stage = "readback_texture";
-    MTLRegion region = MTLRegionMake2D(0, 0, width, height);
-    const size_t bytesPerRow = sizeof(float) * static_cast<size_t>(width);
-    std::vector<float> host_buffer(static_cast<size_t>(width) * static_cast<size_t>(height));
-    [outTexture getBytes:host_buffer.data() bytesPerRow:bytesPerRow fromRegion:region mipmapLevel:0];
+          // 直接拷贝纹理数据回 CPU：避免 CoreImage/CVPixelBuffer 并发不稳定
+          dbg_stage = "readback_texture";
+          MTLRegion region = MTLRegionMake2D(0, 0, width, height);
+          const size_t bytesPerRow = sizeof(float) * static_cast<size_t>(width);
+          std::vector<float> host_buffer(static_cast<size_t>(width) *
+                                         static_cast<size_t>(height));
+          [outTexture getBytes:host_buffer.data()
+                   bytesPerRow:bytesPerRow
+                    fromRegion:region
+                   mipmapLevel:0];
 
-    cv::Mat mat_view(height, width, CV_32FC1, host_buffer.data(), bytesPerRow);
-    cv::Mat mat_copy = mat_view.clone();
+          cv::Mat mat_view(height, width, CV_32FC1, host_buffer.data(),
+                           bytesPerRow);
+          cv::Mat mat_copy = mat_view.clone();
 
-    dbg_stage = "wrap_result";
-    NodeOutput result;
-    result.image_buffer = fromCvMat(mat_copy);
-    return result;
-    } catch (const std::exception& e) {
-        throw std::runtime_error(std::string("perlin_noise_metal[") + dbg_stage + "]: " + e.what());
-    } catch (...) {
-        throw std::runtime_error(std::string("perlin_noise_metal[") + dbg_stage + "]: unknown exception");
-    }
-    }
+          dbg_stage = "wrap_result";
+          NodeOutput result;
+          result.image_buffer = fromCvMat(mat_copy);
+          return result;
+        });
+  }
 }
 
-
-}} // namespace ps::ops
+}  // namespace ops
+}  // namespace ps

@@ -12,6 +12,7 @@
 
 namespace fs = std::filesystem;
 
+/** @copydoc handle_ops */
 bool handle_ops(std::istringstream& iss, ps::Host& svc,
                 std::string& /*current_graph*/, bool& /*modified*/,
                 CliConfig& config) {
@@ -99,6 +100,7 @@ bool handle_ops(std::istringstream& iss, ps::Host& svc,
   return true;
 }
 
+/** @copydoc print_help_ops */
 void print_help_ops(const CliConfig& /*config*/) {
   print_help_from_file("help_ops.txt");
 }
