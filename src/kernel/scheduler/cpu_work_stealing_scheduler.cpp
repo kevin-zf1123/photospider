@@ -5,6 +5,8 @@
 
 #include <algorithm>
 #include <chrono>
+#include <deque>
+#include <exception>
 #include <iostream>
 #include <random>
 #include <sstream>
@@ -15,12 +17,202 @@
 
 #include "kernel/graph_runtime.hpp"
 
+#if defined(PHOTOSPIDER_INTERNAL_BAD_ALLOC_TESTING)
+#include "kernel/scheduler/scheduler_exception_test_hooks.hpp"
+#endif
+
 namespace ps {
+
+#if defined(PHOTOSPIDER_INTERNAL_BAD_ALLOC_TESTING)
+namespace {
+
+/** @brief Borrowed immutable CPU exception-publication hook for one test. */
+using CpuExceptionHook = testing::SchedulerExceptionPublicationHook;
+/** @brief Atomically published borrowed CPU exception hook. */
+std::atomic<const CpuExceptionHook*> cpu_exception_publication_hook{nullptr};
+/** @brief Borrowed CPU local-ready publication hook for one test. */
+using CpuLocalReadyHook = testing::SchedulerCpuLocalReadyHook;
+/** @brief Atomically published borrowed CPU local-ready hook. */
+std::atomic<const CpuLocalReadyHook*> cpu_local_ready_hook{nullptr};
+/** @brief Borrowed deterministic CPU failure injection hook for one test. */
+using CpuFailureHook = testing::SchedulerFailureInjectionHook;
+/** @brief Atomically published borrowed CPU failure hook. */
+std::atomic<const CpuFailureHook*> cpu_failure_injection_hook{nullptr};
+/** @brief Borrowed CPU start-publication hook for one deterministic test. */
+using CpuStartHook = testing::SchedulerStartPublicationHook;
+/** @brief Atomically published borrowed CPU start-publication hook. */
+std::atomic<const CpuStartHook*> cpu_start_publication_hook{nullptr};
+
+/**
+ * @brief Invokes the installed CPU publication barrier without allocation.
+ *
+ * @return Nothing.
+ * @throws Nothing; the callback contract is noexcept.
+ * @note The hook is reached only by the first exception publisher after the
+ * consumer-visible flag changes state.
+ */
+void invoke_cpu_exception_publication_hook() noexcept {
+  const auto* hook =
+      cpu_exception_publication_hook.load(std::memory_order_acquire);
+  if (hook && hook->after_flag_visible) {
+    hook->after_flag_visible(hook->context);
+  }
+}
+
+/**
+ * @brief Invokes the pre-visibility CPU exception barrier without allocation.
+ * @return Nothing.
+ * @throws Nothing; the callback contract is noexcept.
+ * @note The caller holds `global_queues_mutex_`, so a new initial batch cannot
+ * reset exception state until the current publisher completes all state stores.
+ */
+void invoke_cpu_exception_before_visibility_hook() noexcept {
+  const auto* hook =
+      cpu_exception_publication_hook.load(std::memory_order_acquire);
+  if (hook && hook->before_flag_visible) {
+    hook->before_flag_visible(hook->context);
+  }
+}
+
+/**
+ * @brief Invokes the CPU start-publication barrier without allocation.
+ * @return Nothing.
+ * @throws Nothing; the callback contract is noexcept.
+ * @note The complete member worker vector is installed while public running
+ * state is still false when this callback runs.
+ */
+void invoke_cpu_start_publication_hook() noexcept {
+  const auto* hook = cpu_start_publication_hook.load(std::memory_order_acquire);
+  if (hook && hook->before_running_visible) {
+    hook->before_running_visible(hook->context);
+  }
+}
+
+/**
+ * @brief Invokes the installed local enqueue/ready barrier without allocation.
+ * @return Nothing.
+ * @throws Nothing; the callback contract is noexcept.
+ * @note The caller holds global_queues_mutex_ and one local queue mutex.
+ */
+void invoke_cpu_local_ready_hook() noexcept {
+  const auto* hook = cpu_local_ready_hook.load(std::memory_order_acquire);
+  if (hook && hook->between_enqueue_and_ready) {
+    hook->between_enqueue_and_ready(hook->context);
+  }
+}
+
+/**
+ * @brief Invokes one deterministic CPU failure point.
+ * @param point Lifecycle or queue mutation about to execute.
+ * @param attempt One-based attempt number within the current operation.
+ * @return Nothing when the operation should continue.
+ * @throws Any exception selected by the installed BUILD_TESTING hook.
+ */
+void invoke_cpu_failure_hook(testing::SchedulerFailurePoint point,
+                             std::size_t attempt) {
+  const auto* hook = cpu_failure_injection_hook.load(std::memory_order_acquire);
+  if (hook && hook->before) {
+    hook->before(hook->context, point, attempt);
+  }
+}
+
+}  // namespace
+
+namespace testing {
+
+/** @copydoc set_cpu_scheduler_exception_publication_hook */
+void set_cpu_scheduler_exception_publication_hook(
+    const SchedulerExceptionPublicationHook* hook) noexcept {
+  cpu_exception_publication_hook.store(hook, std::memory_order_release);
+}
+
+/** @copydoc set_cpu_scheduler_start_publication_hook */
+void set_cpu_scheduler_start_publication_hook(
+    const SchedulerStartPublicationHook* hook) noexcept {
+  cpu_start_publication_hook.store(hook, std::memory_order_release);
+}
+
+/** @copydoc set_cpu_scheduler_local_ready_hook */
+void set_cpu_scheduler_local_ready_hook(
+    const SchedulerCpuLocalReadyHook* hook) noexcept {
+  cpu_local_ready_hook.store(hook, std::memory_order_release);
+}
+
+/** @copydoc set_cpu_scheduler_failure_injection_hook */
+void set_cpu_scheduler_failure_injection_hook(
+    const SchedulerFailureInjectionHook* hook) noexcept {
+  cpu_failure_injection_hook.store(hook, std::memory_order_release);
+}
+
+/** @copydoc cpu_scheduler_transactional_snapshot */
+SchedulerTransactionalStateSnapshot cpu_scheduler_transactional_snapshot(
+    void* scheduler) noexcept {
+  auto* concrete = static_cast<CpuWorkStealingScheduler*>(scheduler);
+  if (!concrete) {
+    return {};
+  }
+  std::lock_guard<std::mutex> global_lock(concrete->global_queues_mutex_);
+  std::size_t queued = concrete->high_priority_queue_.size() +
+                       concrete->normal_priority_queue_.size();
+  for (std::size_t index = 0; index < concrete->local_task_queues_.size();
+       ++index) {
+    if (index < concrete->local_queue_mutexes_.size() &&
+        concrete->local_queue_mutexes_[index]) {
+      std::lock_guard<std::mutex> local_lock(
+          *concrete->local_queue_mutexes_[index]);
+      queued += concrete->local_task_queues_[index].size();
+    }
+  }
+  std::lock_guard<std::mutex> exception_lock(concrete->exception_mutex_);
+  return {
+      concrete->running_.load(std::memory_order_acquire),
+      concrete->worker_loop_active_.load(std::memory_order_acquire),
+      queued,
+      concrete->ready_task_count_.load(std::memory_order_acquire),
+      concrete->tasks_to_complete_.load(std::memory_order_acquire),
+      static_cast<std::size_t>(
+          concrete->in_flight_tasks_.load(std::memory_order_acquire)),
+      concrete->active_epoch_.load(std::memory_order_acquire),
+      concrete->epoch_counter_.load(std::memory_order_acquire),
+      concrete->workers_.size(),
+      concrete->local_task_queues_.size(),
+      concrete->exception_claimed_.load(std::memory_order_acquire),
+      concrete->has_exception_.load(std::memory_order_acquire),
+      static_cast<bool>(concrete->first_exception_),
+      concrete->exception_epoch_.load(std::memory_order_acquire),
+      concrete->exception_cleanup_complete_.load(std::memory_order_acquire),
+  };
+}
+
+/** @copydoc cpu_scheduler_exception_publication_snapshot */
+SchedulerExceptionPublicationSnapshot
+cpu_scheduler_exception_publication_snapshot(void* scheduler) noexcept {
+  auto* concrete = static_cast<CpuWorkStealingScheduler*>(scheduler);
+  if (!concrete) {
+    return {};
+  }
+  std::lock_guard<std::mutex> lock(concrete->exception_mutex_);
+  return {
+      concrete->has_exception_.load(std::memory_order_acquire),
+      static_cast<bool>(concrete->first_exception_),
+      concrete->exception_cleanup_complete_.load(std::memory_order_acquire),
+      static_cast<std::size_t>(
+          concrete->in_flight_tasks_.load(std::memory_order_acquire)),
+      static_cast<std::uint64_t>(
+          concrete->exception_epoch_.load(std::memory_order_acquire)),
+      static_cast<std::int64_t>(
+          concrete->ready_task_count_.load(std::memory_order_acquire)),
+  };
+}
+
+}  // namespace testing
+#endif
 
 // Thread-local storage for worker ID and epoch tracking
 thread_local int CpuWorkStealingScheduler::tls_worker_id_ = -1;
 thread_local uint64_t CpuWorkStealingScheduler::tls_active_epoch_ = 0;
 
+/** @copydoc CpuWorkStealingScheduler::CpuWorkStealingScheduler */
 CpuWorkStealingScheduler::CpuWorkStealingScheduler(unsigned int num_workers)
     : configured_workers_(num_workers) {
   if (configured_workers_ == 0) {
@@ -28,58 +220,137 @@ CpuWorkStealingScheduler::CpuWorkStealingScheduler(unsigned int num_workers)
   }
 }
 
+/** @copydoc CpuWorkStealingScheduler::~CpuWorkStealingScheduler */
 CpuWorkStealingScheduler::~CpuWorkStealingScheduler() {
   shutdown();
 }
 
+/** @copydoc CpuWorkStealingScheduler::attach */
 void CpuWorkStealingScheduler::attach(GraphRuntime* runtime) {
   runtime_ = runtime;
 }
 
+/** @copydoc CpuWorkStealingScheduler::detach */
 void CpuWorkStealingScheduler::detach() {
   runtime_ = nullptr;
 }
 
+/** @copydoc CpuWorkStealingScheduler::start */
 void CpuWorkStealingScheduler::start() {
   if (running_.load(std::memory_order_acquire)) {
     return;
   }
 
-  // Reset counters
-  has_exception_.store(false, std::memory_order_relaxed);
-  first_exception_ = nullptr;
+  const unsigned int staged_worker_count = configured_workers_;
+  std::vector<std::deque<ScheduledTask>> staged_local_queues;
+  std::vector<std::unique_ptr<std::mutex>> staged_local_mutexes;
+  std::vector<std::thread> staged_workers;
+#if defined(PHOTOSPIDER_INTERNAL_BAD_ALLOC_TESTING)
+  std::size_t resource_attempt = 0;
+  invoke_cpu_failure_hook(
+      testing::SchedulerFailurePoint::StartResourceAllocation,
+      ++resource_attempt);
+#endif
+  staged_local_queues.resize(staged_worker_count);
+#if defined(PHOTOSPIDER_INTERNAL_BAD_ALLOC_TESTING)
+  invoke_cpu_failure_hook(
+      testing::SchedulerFailurePoint::StartResourceAllocation,
+      ++resource_attempt);
+#endif
+  staged_local_mutexes.reserve(staged_worker_count);
+  for (unsigned int index = 0; index < staged_worker_count; ++index) {
+#if defined(PHOTOSPIDER_INTERNAL_BAD_ALLOC_TESTING)
+    invoke_cpu_failure_hook(
+        testing::SchedulerFailurePoint::StartResourceAllocation,
+        ++resource_attempt);
+#endif
+    staged_local_mutexes.push_back(std::make_unique<std::mutex>());
+  }
+#if defined(PHOTOSPIDER_INTERNAL_BAD_ALLOC_TESTING)
+  invoke_cpu_failure_hook(
+      testing::SchedulerFailurePoint::StartResourceAllocation,
+      ++resource_attempt);
+#endif
+  staged_workers.reserve(staged_worker_count);
+
+  reset_exception_state();
   ready_task_count_.store(0, std::memory_order_relaxed);
   sleeping_thread_count_.store(0, std::memory_order_relaxed);
   tasks_to_complete_.store(0, std::memory_order_relaxed);
+  in_flight_tasks_.store(0, std::memory_order_relaxed);
   high_enqueued_.store(0, std::memory_order_relaxed);
   normal_enqueued_.store(0, std::memory_order_relaxed);
   high_executed_.store(0, std::memory_order_relaxed);
   normal_executed_.store(0, std::memory_order_relaxed);
+  total_tasks_scheduled_.store(0, std::memory_order_relaxed);
 
+  num_workers_ = staged_worker_count;
+  local_task_queues_.swap(staged_local_queues);
+  local_queue_mutexes_.swap(staged_local_mutexes);
+  worker_loop_active_.store(true, std::memory_order_release);
+
+  try {
+    for (unsigned int index = 0; index < num_workers_; ++index) {
+#if defined(PHOTOSPIDER_INTERNAL_BAD_ALLOC_TESTING)
+      invoke_cpu_failure_hook(testing::SchedulerFailurePoint::CpuThreadCreate,
+                              index + 1);
+#endif
+      staged_workers.emplace_back(&CpuWorkStealingScheduler::run_loop, this,
+                                  static_cast<int>(index));
+    }
+  } catch (...) {
+    const std::exception_ptr start_error = std::current_exception();
+    {
+      std::scoped_lock<std::mutex, std::mutex> lock(global_queues_mutex_,
+                                                    completion_mutex_);
+      worker_loop_active_.store(false, std::memory_order_release);
+      running_.store(false, std::memory_order_release);
+    }
+    cv_task_available_.notify_all();
+    cv_completion_.notify_all();
+    for (auto& worker : staged_workers) {
+      if (worker.joinable()) {
+        worker.join();
+      }
+    }
+    {
+      std::lock_guard<std::mutex> lock(global_queues_mutex_);
+      high_priority_queue_.clear();
+      normal_priority_queue_.clear();
+    }
+    local_task_queues_.clear();
+    local_queue_mutexes_.clear();
+    num_workers_ = 0;
+    ready_task_count_.store(0, std::memory_order_relaxed);
+    sleeping_thread_count_.store(0, std::memory_order_relaxed);
+    tasks_to_complete_.store(0, std::memory_order_relaxed);
+    in_flight_tasks_.store(0, std::memory_order_relaxed);
+    high_enqueued_.store(0, std::memory_order_relaxed);
+    normal_enqueued_.store(0, std::memory_order_relaxed);
+    high_executed_.store(0, std::memory_order_relaxed);
+    normal_executed_.store(0, std::memory_order_relaxed);
+    total_tasks_scheduled_.store(0, std::memory_order_relaxed);
+    reset_exception_state();
+    std::rethrow_exception(start_error);
+  }
+  workers_.swap(staged_workers);
+#if defined(PHOTOSPIDER_INTERNAL_BAD_ALLOC_TESTING)
+  invoke_cpu_start_publication_hook();
+#endif
   running_.store(true, std::memory_order_release);
-
-  num_workers_ = configured_workers_;
-  local_task_queues_.resize(num_workers_);
-  local_queue_mutexes_.reserve(num_workers_);
-  for (unsigned int i = 0; i < num_workers_; ++i) {
-    local_queue_mutexes_.push_back(std::make_unique<std::mutex>());
-  }
-
-  workers_.reserve(num_workers_);
-  for (unsigned int i = 0; i < num_workers_; ++i) {
-    workers_.emplace_back(&CpuWorkStealingScheduler::run_loop, this,
-                          static_cast<int>(i));
-  }
 }
 
+/** @copydoc CpuWorkStealingScheduler::shutdown */
 void CpuWorkStealingScheduler::shutdown() {
   {
     std::scoped_lock<std::mutex, std::mutex> lock(global_queues_mutex_,
                                                   completion_mutex_);
-    if (!running_.load(std::memory_order_acquire)) {
+    if (!running_.load(std::memory_order_acquire) &&
+        !worker_loop_active_.load(std::memory_order_acquire)) {
       return;
     }
     running_.store(false, std::memory_order_release);
+    worker_loop_active_.store(false, std::memory_order_release);
   }
 
   cv_task_available_.notify_all();
@@ -93,23 +364,30 @@ void CpuWorkStealingScheduler::shutdown() {
   workers_.clear();
   local_task_queues_.clear();
   local_queue_mutexes_.clear();
+  num_workers_ = 0;
 
   // Drain pending tasks
   {
     std::lock_guard<std::mutex> lock(global_queues_mutex_);
     while (!high_priority_queue_.empty()) {
-      high_priority_queue_.pop();
+      high_priority_queue_.pop_front();
     }
     while (!normal_priority_queue_.empty()) {
-      normal_priority_queue_.pop();
+      normal_priority_queue_.pop_front();
     }
   }
+  ready_task_count_.store(0, std::memory_order_relaxed);
+  sleeping_thread_count_.store(0, std::memory_order_relaxed);
+  tasks_to_complete_.store(0, std::memory_order_relaxed);
+  in_flight_tasks_.store(0, std::memory_order_relaxed);
 }
 
+/** @copydoc CpuWorkStealingScheduler::name */
 std::string CpuWorkStealingScheduler::name() const {
   return "CpuWorkStealingScheduler";
 }
 
+/** @copydoc CpuWorkStealingScheduler::get_stats */
 std::string CpuWorkStealingScheduler::get_stats() const {
   std::ostringstream oss;
   oss << "Workers: " << num_workers_
@@ -127,14 +405,17 @@ std::string CpuWorkStealingScheduler::get_stats() const {
   return oss.str();
 }
 
+/** @copydoc CpuWorkStealingScheduler::is_running */
 bool CpuWorkStealingScheduler::is_running() const {
   return running_.load(std::memory_order_acquire);
 }
 
+/** @copydoc CpuWorkStealingScheduler::task_runtime_running */
 bool CpuWorkStealingScheduler::task_runtime_running() const {
   return is_running();
 }
 
+/** @copydoc CpuWorkStealingScheduler::log_event */
 void CpuWorkStealingScheduler::log_event(SchedulerTraceAction action,
                                          int node_id) {
   if (!runtime_) {
@@ -175,24 +456,29 @@ void CpuWorkStealingScheduler::log_event(SchedulerTraceAction action,
                       this_task_epoch());
 }
 
+/** @copydoc CpuWorkStealingScheduler::this_worker_id */
 int CpuWorkStealingScheduler::this_worker_id() {
   return tls_worker_id_;
 }
 
+/** @copydoc CpuWorkStealingScheduler::this_task_epoch */
 uint64_t CpuWorkStealingScheduler::this_task_epoch() {
   return tls_active_epoch_;
 }
 
+/** @copydoc CpuWorkStealingScheduler::active_epoch */
 uint64_t CpuWorkStealingScheduler::active_epoch() const {
   return active_epoch_.load(std::memory_order_acquire);
 }
 
+/** @copydoc CpuWorkStealingScheduler::begin_new_epoch */
 uint64_t CpuWorkStealingScheduler::begin_new_epoch() {
   uint64_t next = epoch_counter_.fetch_add(1, std::memory_order_acq_rel) + 1;
   active_epoch_.store(next, std::memory_order_release);
   return next;
 }
 
+/** @copydoc CpuWorkStealingScheduler::should_cancel_epoch */
 bool CpuWorkStealingScheduler::should_cancel_epoch(uint64_t epoch) const {
   if (epoch == 0) {
     return false;
@@ -200,12 +486,15 @@ bool CpuWorkStealingScheduler::should_cancel_epoch(uint64_t epoch) const {
   return epoch < active_epoch();
 }
 
+/** @copydoc CpuWorkStealingScheduler::steal_task */
 std::optional<CpuWorkStealingScheduler::ScheduledTask>
 CpuWorkStealingScheduler::steal_task(int stealer_id) {
   int n = static_cast<int>(num_workers_);
   if (n <= 1) {
     return std::nullopt;
   }
+
+  std::lock_guard<std::mutex> global_lock(global_queues_mutex_);
 
   static thread_local std::mt19937 rng(std::random_device{}() + stealer_id);
   int start = std::uniform_int_distribution<int>(0, n - 2)(rng);
@@ -227,39 +516,25 @@ CpuWorkStealingScheduler::steal_task(int stealer_id) {
       ScheduledTask stolen_task =
           std::move(local_task_queues_[victim_id].front());
       local_task_queues_[victim_id].pop_front();
+      ready_task_count_.fetch_sub(1, std::memory_order_release);
+      in_flight_tasks_.fetch_add(1, std::memory_order_acq_rel);
       return stolen_task;
     }
   }
   return std::nullopt;
 }
 
-void CpuWorkStealingScheduler::publish_ready_tasks(int count, bool wake_all) {
-  if (count <= 0) {
-    return;
-  }
-
-  {
-    std::lock_guard<std::mutex> lock(global_queues_mutex_);
-    ready_task_count_.fetch_add(count, std::memory_order_release);
-  }
-
-  if (wake_all) {
-    cv_task_available_.notify_all();
-  } else {
-    cv_task_available_.notify_one();
-  }
-}
-
+/** @copydoc CpuWorkStealingScheduler::run_loop */
 void CpuWorkStealingScheduler::run_loop(int thread_id) {
   tls_worker_id_ = thread_id;
 
-  while (running_.load(std::memory_order_acquire)) {
+  while (worker_loop_active_.load(std::memory_order_acquire)) {
     // If an exception was raised, park until cleared
     if (has_exception_.load(std::memory_order_acquire)) {
       std::unique_lock<std::mutex> lock(global_queues_mutex_);
       cv_task_available_.wait(lock, [&] {
         return !has_exception_.load(std::memory_order_acquire) ||
-               !running_.load(std::memory_order_acquire);
+               !worker_loop_active_.load(std::memory_order_acquire);
       });
       continue;
     }
@@ -272,7 +547,9 @@ void CpuWorkStealingScheduler::run_loop(int thread_id) {
       std::lock_guard<std::mutex> lock(global_queues_mutex_);
       if (!high_priority_queue_.empty()) {
         scheduled = std::move(high_priority_queue_.front());
-        high_priority_queue_.pop();
+        high_priority_queue_.pop_front();
+        ready_task_count_.fetch_sub(1, std::memory_order_release);
+        in_flight_tasks_.fetch_add(1, std::memory_order_acq_rel);
         found_task = true;
         high_executed_.fetch_add(1, std::memory_order_relaxed);
       }
@@ -282,11 +559,14 @@ void CpuWorkStealingScheduler::run_loop(int thread_id) {
     if (!found_task) {
       if (thread_id >= 0 &&
           thread_id < static_cast<int>(local_queue_mutexes_.size())) {
+        std::lock_guard<std::mutex> global_lock(global_queues_mutex_);
         std::lock_guard<std::mutex> lock(*local_queue_mutexes_[thread_id]);
         if (thread_id < static_cast<int>(local_task_queues_.size()) &&
             !local_task_queues_[thread_id].empty()) {
           scheduled = std::move(local_task_queues_[thread_id].back());
           local_task_queues_[thread_id].pop_back();
+          ready_task_count_.fetch_sub(1, std::memory_order_release);
+          in_flight_tasks_.fetch_add(1, std::memory_order_acq_rel);
           found_task = true;
           normal_executed_.fetch_add(1, std::memory_order_relaxed);
         }
@@ -298,7 +578,9 @@ void CpuWorkStealingScheduler::run_loop(int thread_id) {
       std::lock_guard<std::mutex> lock(global_queues_mutex_);
       if (!normal_priority_queue_.empty()) {
         scheduled = std::move(normal_priority_queue_.front());
-        normal_priority_queue_.pop();
+        normal_priority_queue_.pop_front();
+        ready_task_count_.fetch_sub(1, std::memory_order_release);
+        in_flight_tasks_.fetch_add(1, std::memory_order_acq_rel);
         found_task = true;
         normal_executed_.fetch_add(1, std::memory_order_relaxed);
       }
@@ -315,8 +597,8 @@ void CpuWorkStealingScheduler::run_loop(int thread_id) {
     }
 
     if (found_task) {
-      ready_task_count_.fetch_sub(1, std::memory_order_release);
       if (should_cancel_epoch(scheduled.epoch)) {
+        finish_in_flight_task();
         continue;
       }
       try {
@@ -343,6 +625,7 @@ void CpuWorkStealingScheduler::run_loop(int thread_id) {
       } catch (...) {
         set_exception(std::current_exception());
       }
+      finish_in_flight_task();
     } else {
       sleeping_thread_count_.fetch_add(1, std::memory_order_release);
 
@@ -355,7 +638,7 @@ void CpuWorkStealingScheduler::run_loop(int thread_id) {
 
       cv_task_available_.wait(lock, [&] {
         return ready_task_count_.load(std::memory_order_acquire) > 0 ||
-               !running_.load(std::memory_order_acquire) ||
+               !worker_loop_active_.load(std::memory_order_acquire) ||
                has_exception_.load(std::memory_order_acquire);
       });
 
@@ -364,120 +647,248 @@ void CpuWorkStealingScheduler::run_loop(int thread_id) {
   }
 }
 
+/** @copydoc CpuWorkStealingScheduler::submit_initial_tasks */
 void CpuWorkStealingScheduler::submit_initial_tasks(std::vector<Task>&& tasks,
                                                     int total_task_count,
                                                     TaskPriority priority) {
-  has_exception_.store(false, std::memory_order_relaxed);
-  first_exception_ = nullptr;
-
-  uint64_t epoch = begin_new_epoch();
-  tasks_to_complete_.store(total_task_count, std::memory_order_relaxed);
-
-  if (tasks_to_complete_.load() == 0) {
-    std::lock_guard<std::mutex> lk(completion_mutex_);
-    cv_completion_.notify_one();
-    return;
-  }
-
-  int num_threads = static_cast<int>(num_workers_);
-  if (num_threads == 0 || tasks.empty()) {
-    if (tasks_to_complete_.load(std::memory_order_relaxed) != 0) {
-      tasks_to_complete_.store(0, std::memory_order_relaxed);
-      std::lock_guard<std::mutex> lk(completion_mutex_);
+  if (total_task_count == 0 || tasks.empty() || num_workers_ == 0) {
+    {
+      std::lock_guard<std::mutex> gate(global_queues_mutex_);
+      reset_exception_state();
+      begin_new_epoch();
+      tasks_to_complete_.store(0, std::memory_order_release);
+    }
+    cv_task_available_.notify_all();
+    {
+      std::lock_guard<std::mutex> lock(completion_mutex_);
       cv_completion_.notify_one();
     }
     return;
   }
 
-  auto wrap_task = [&](Task&& task) -> ScheduledTask {
-    return ScheduledTask(epoch, std::move(task));
-  };
-
-  size_t task_count = tasks.size();
+  const int num_threads = static_cast<int>(num_workers_);
+  uint64_t epoch = 0;
+  int submitted = 0;
   if (priority == TaskPriority::High) {
-    std::lock_guard<std::mutex> lock(global_queues_mutex_);
-    for (auto& t : tasks) {
-      high_priority_queue_.push(wrap_task(std::move(t)));
-      high_enqueued_.fetch_add(1, std::memory_order_relaxed);
+    {
+      std::lock_guard<std::mutex> lock(global_queues_mutex_);
+      epoch = epoch_counter_.load(std::memory_order_acquire) + 1;
+      const std::size_t original_size = high_priority_queue_.size();
+      [[maybe_unused]] std::size_t push_attempt = 0;
+      try {
+        for (auto& task : tasks) {
+#if defined(PHOTOSPIDER_INTERNAL_BAD_ALLOC_TESTING)
+          invoke_cpu_failure_hook(
+              testing::SchedulerFailurePoint::BatchQueuePush, ++push_attempt);
+#endif
+          high_priority_queue_.push_back(ScheduledTask(epoch, std::move(task)));
+          ++submitted;
+        }
+        reset_exception_state();
+      } catch (...) {
+        while (high_priority_queue_.size() > original_size) {
+          high_priority_queue_.pop_back();
+        }
+        throw;
+      }
+      epoch_counter_.store(epoch, std::memory_order_release);
+      active_epoch_.store(epoch, std::memory_order_release);
+      tasks_to_complete_.store(submitted > 0 ? total_task_count : 0,
+                               std::memory_order_release);
+      ready_task_count_.fetch_add(submitted, std::memory_order_release);
+      high_enqueued_.fetch_add(static_cast<std::uint64_t>(submitted),
+                               std::memory_order_relaxed);
     }
-    ready_task_count_.fetch_add(static_cast<int>(task_count),
-                                std::memory_order_release);
-    cv_task_available_.notify_all();
+    if (submitted > 0) {
+      cv_task_available_.notify_all();
+    } else {
+      std::lock_guard<std::mutex> completion_lock(completion_mutex_);
+      cv_completion_.notify_one();
+    }
   } else {
     static thread_local std::mt19937 rng(std::random_device{}());
-    for (size_t i = 0; i < tasks.size(); ++i) {
-      int target_thread =
-          std::uniform_int_distribution<int>(0, num_threads - 1)(rng);
-      std::lock_guard<std::mutex> lock(*local_queue_mutexes_[target_thread]);
-      local_task_queues_[target_thread].push_back(
-          wrap_task(std::move(tasks[i])));
-      normal_enqueued_.fetch_add(1, std::memory_order_relaxed);
+    std::vector<std::size_t> original_sizes(
+        static_cast<std::size_t>(num_threads));
+    {
+      std::lock_guard<std::mutex> global_lock(global_queues_mutex_);
+      epoch = epoch_counter_.load(std::memory_order_acquire) + 1;
+      for (int index = 0; index < num_threads; ++index) {
+        std::lock_guard<std::mutex> local_lock(
+            *local_queue_mutexes_[static_cast<std::size_t>(index)]);
+        original_sizes[static_cast<std::size_t>(index)] =
+            local_task_queues_[static_cast<std::size_t>(index)].size();
+      }
+      [[maybe_unused]] std::size_t push_attempt = 0;
+      try {
+        for (auto& task : tasks) {
+          const int target_thread =
+              std::uniform_int_distribution<int>(0, num_threads - 1)(rng);
+          std::lock_guard<std::mutex> local_lock(
+              *local_queue_mutexes_[static_cast<std::size_t>(target_thread)]);
+#if defined(PHOTOSPIDER_INTERNAL_BAD_ALLOC_TESTING)
+          invoke_cpu_failure_hook(
+              testing::SchedulerFailurePoint::BatchQueuePush, ++push_attempt);
+#endif
+          local_task_queues_[static_cast<std::size_t>(target_thread)].push_back(
+              ScheduledTask(epoch, std::move(task)));
+#if defined(PHOTOSPIDER_INTERNAL_BAD_ALLOC_TESTING)
+          invoke_cpu_local_ready_hook();
+#endif
+          ++submitted;
+        }
+        reset_exception_state();
+      } catch (...) {
+        for (int index = 0; index < num_threads; ++index) {
+          const std::size_t queue_index = static_cast<std::size_t>(index);
+          std::lock_guard<std::mutex> local_lock(
+              *local_queue_mutexes_[queue_index]);
+          while (local_task_queues_[queue_index].size() >
+                 original_sizes[queue_index]) {
+            local_task_queues_[queue_index].pop_back();
+          }
+        }
+        throw;
+      }
+      epoch_counter_.store(epoch, std::memory_order_release);
+      active_epoch_.store(epoch, std::memory_order_release);
+      tasks_to_complete_.store(submitted > 0 ? total_task_count : 0,
+                               std::memory_order_release);
+      ready_task_count_.fetch_add(submitted, std::memory_order_release);
+      normal_enqueued_.fetch_add(static_cast<std::uint64_t>(submitted),
+                                 std::memory_order_relaxed);
     }
-    publish_ready_tasks(static_cast<int>(task_count), true);
+    if (submitted > 0) {
+      cv_task_available_.notify_all();
+    } else {
+      std::lock_guard<std::mutex> completion_lock(completion_mutex_);
+      cv_completion_.notify_one();
+    }
   }
 }
 
+/** @copydoc CpuWorkStealingScheduler::submit_initial_task_handles */
 void CpuWorkStealingScheduler::submit_initial_task_handles(
     std::vector<TaskHandle>&& handles, int total_task_count,
     TaskPriority priority) {
-  has_exception_.store(false, std::memory_order_relaxed);
-  first_exception_ = nullptr;
-
-  uint64_t epoch = begin_new_epoch();
-  tasks_to_complete_.store(total_task_count, std::memory_order_relaxed);
-
-  if (tasks_to_complete_.load() == 0) {
-    std::lock_guard<std::mutex> lk(completion_mutex_);
-    cv_completion_.notify_one();
-    return;
-  }
-
-  int num_threads = static_cast<int>(num_workers_);
-  if (num_threads == 0 || handles.empty()) {
-    if (tasks_to_complete_.load(std::memory_order_relaxed) != 0) {
-      tasks_to_complete_.store(0, std::memory_order_relaxed);
-      std::lock_guard<std::mutex> lk(completion_mutex_);
+  if (total_task_count == 0 || handles.empty() || num_workers_ == 0) {
+    {
+      std::lock_guard<std::mutex> gate(global_queues_mutex_);
+      reset_exception_state();
+      begin_new_epoch();
+      tasks_to_complete_.store(0, std::memory_order_release);
+    }
+    cv_task_available_.notify_all();
+    {
+      std::lock_guard<std::mutex> lock(completion_mutex_);
       cv_completion_.notify_one();
     }
     return;
   }
-
-  auto wrap_handle = [&](TaskHandle handle) -> ScheduledTask {
-    return ScheduledTask(epoch, handle);
-  };
-
+  const int num_threads = static_cast<int>(num_workers_);
+  uint64_t epoch = 0;
+  int submitted = 0;
   if (priority == TaskPriority::High) {
-    int submitted = 0;
-    std::lock_guard<std::mutex> lock(global_queues_mutex_);
-    for (TaskHandle handle : handles) {
-      if (!handle)
-        continue;
-      high_priority_queue_.push(wrap_handle(handle));
-      high_enqueued_.fetch_add(1, std::memory_order_relaxed);
-      ++submitted;
+    {
+      std::lock_guard<std::mutex> lock(global_queues_mutex_);
+      epoch = epoch_counter_.load(std::memory_order_acquire) + 1;
+      const std::size_t original_size = high_priority_queue_.size();
+      [[maybe_unused]] std::size_t push_attempt = 0;
+      try {
+        for (TaskHandle handle : handles) {
+          if (!handle) {
+            continue;
+          }
+#if defined(PHOTOSPIDER_INTERNAL_BAD_ALLOC_TESTING)
+          invoke_cpu_failure_hook(
+              testing::SchedulerFailurePoint::BatchQueuePush, ++push_attempt);
+#endif
+          high_priority_queue_.push_back(ScheduledTask(epoch, handle));
+          ++submitted;
+        }
+        reset_exception_state();
+      } catch (...) {
+        while (high_priority_queue_.size() > original_size) {
+          high_priority_queue_.pop_back();
+        }
+        throw;
+      }
+      epoch_counter_.store(epoch, std::memory_order_release);
+      active_epoch_.store(epoch, std::memory_order_release);
+      tasks_to_complete_.store(submitted > 0 ? total_task_count : 0,
+                               std::memory_order_release);
+      ready_task_count_.fetch_add(submitted, std::memory_order_release);
+      high_enqueued_.fetch_add(static_cast<std::uint64_t>(submitted),
+                               std::memory_order_relaxed);
     }
-    ready_task_count_.fetch_add(submitted, std::memory_order_release);
     if (submitted > 0) {
       cv_task_available_.notify_all();
+    } else {
+      std::lock_guard<std::mutex> completion_lock(completion_mutex_);
+      cv_completion_.notify_one();
     }
     return;
   }
 
   static thread_local std::mt19937 rng(std::random_device{}());
-  int submitted = 0;
-  for (TaskHandle handle : handles) {
-    if (!handle)
-      continue;
-    int target_thread =
-        std::uniform_int_distribution<int>(0, num_threads - 1)(rng);
-    std::lock_guard<std::mutex> lock(*local_queue_mutexes_[target_thread]);
-    local_task_queues_[target_thread].push_back(wrap_handle(handle));
-    normal_enqueued_.fetch_add(1, std::memory_order_relaxed);
-    ++submitted;
+  std::vector<std::size_t> original_sizes(
+      static_cast<std::size_t>(num_threads));
+  {
+    std::lock_guard<std::mutex> global_lock(global_queues_mutex_);
+    epoch = epoch_counter_.load(std::memory_order_acquire) + 1;
+    for (int index = 0; index < num_threads; ++index) {
+      std::lock_guard<std::mutex> local_lock(
+          *local_queue_mutexes_[static_cast<std::size_t>(index)]);
+      original_sizes[static_cast<std::size_t>(index)] =
+          local_task_queues_[static_cast<std::size_t>(index)].size();
+    }
+    [[maybe_unused]] std::size_t push_attempt = 0;
+    try {
+      for (TaskHandle handle : handles) {
+        if (!handle) {
+          continue;
+        }
+        const int target_thread =
+            std::uniform_int_distribution<int>(0, num_threads - 1)(rng);
+        std::lock_guard<std::mutex> local_lock(
+            *local_queue_mutexes_[static_cast<std::size_t>(target_thread)]);
+#if defined(PHOTOSPIDER_INTERNAL_BAD_ALLOC_TESTING)
+        invoke_cpu_failure_hook(testing::SchedulerFailurePoint::BatchQueuePush,
+                                ++push_attempt);
+#endif
+        local_task_queues_[static_cast<std::size_t>(target_thread)].push_back(
+            ScheduledTask(epoch, handle));
+        ++submitted;
+      }
+      reset_exception_state();
+    } catch (...) {
+      for (int index = 0; index < num_threads; ++index) {
+        const std::size_t queue_index = static_cast<std::size_t>(index);
+        std::lock_guard<std::mutex> local_lock(
+            *local_queue_mutexes_[queue_index]);
+        while (local_task_queues_[queue_index].size() >
+               original_sizes[queue_index]) {
+          local_task_queues_[queue_index].pop_back();
+        }
+      }
+      throw;
+    }
+    epoch_counter_.store(epoch, std::memory_order_release);
+    active_epoch_.store(epoch, std::memory_order_release);
+    tasks_to_complete_.store(submitted > 0 ? total_task_count : 0,
+                             std::memory_order_release);
+    ready_task_count_.fetch_add(submitted, std::memory_order_release);
+    normal_enqueued_.fetch_add(static_cast<std::uint64_t>(submitted),
+                               std::memory_order_relaxed);
   }
-  publish_ready_tasks(submitted, true);
+  if (submitted > 0) {
+    cv_task_available_.notify_all();
+  } else {
+    std::lock_guard<std::mutex> completion_lock(completion_mutex_);
+    cv_completion_.notify_one();
+  }
 }
 
+/** @copydoc CpuWorkStealingScheduler::submit_ready_task_any_thread */
 void CpuWorkStealingScheduler::submit_ready_task_any_thread(
     Task&& task, TaskPriority priority, std::optional<uint64_t> epoch) {
   if (!task) {
@@ -490,11 +901,15 @@ void CpuWorkStealingScheduler::submit_ready_task_any_thread(
   ScheduledTask scheduled(resolved_epoch, std::move(task));
   {
     std::lock_guard<std::mutex> lock(global_queues_mutex_);
+    if (exception_claimed_.load(std::memory_order_acquire) ||
+        should_cancel_epoch(resolved_epoch)) {
+      return;
+    }
     if (priority == TaskPriority::High) {
-      high_priority_queue_.push(std::move(scheduled));
+      high_priority_queue_.push_back(std::move(scheduled));
       high_enqueued_.fetch_add(1, std::memory_order_relaxed);
     } else {
-      normal_priority_queue_.push(std::move(scheduled));
+      normal_priority_queue_.push_back(std::move(scheduled));
       normal_enqueued_.fetch_add(1, std::memory_order_relaxed);
     }
     ready_task_count_.fetch_add(1, std::memory_order_relaxed);
@@ -502,6 +917,7 @@ void CpuWorkStealingScheduler::submit_ready_task_any_thread(
   cv_task_available_.notify_one();
 }
 
+/** @copydoc CpuWorkStealingScheduler::submit_ready_task_handle_any_thread */
 void CpuWorkStealingScheduler::submit_ready_task_handle_any_thread(
     TaskHandle handle, TaskPriority priority, std::optional<uint64_t> epoch) {
   if (!handle) {
@@ -514,11 +930,15 @@ void CpuWorkStealingScheduler::submit_ready_task_handle_any_thread(
   ScheduledTask scheduled(resolved_epoch, handle);
   {
     std::lock_guard<std::mutex> lock(global_queues_mutex_);
+    if (exception_claimed_.load(std::memory_order_acquire) ||
+        should_cancel_epoch(resolved_epoch)) {
+      return;
+    }
     if (priority == TaskPriority::High) {
-      high_priority_queue_.push(std::move(scheduled));
+      high_priority_queue_.push_back(std::move(scheduled));
       high_enqueued_.fetch_add(1, std::memory_order_relaxed);
     } else {
-      normal_priority_queue_.push(std::move(scheduled));
+      normal_priority_queue_.push_back(std::move(scheduled));
       normal_enqueued_.fetch_add(1, std::memory_order_relaxed);
     }
     ready_task_count_.fetch_add(1, std::memory_order_relaxed);
@@ -526,6 +946,7 @@ void CpuWorkStealingScheduler::submit_ready_task_handle_any_thread(
   cv_task_available_.notify_one();
 }
 
+/** @copydoc CpuWorkStealingScheduler::submit_ready_task_handles_any_thread */
 void CpuWorkStealingScheduler::submit_ready_task_handles_any_thread(
     std::vector<TaskHandle>&& handles, TaskPriority priority,
     std::optional<uint64_t> epoch) {
@@ -540,21 +961,42 @@ void CpuWorkStealingScheduler::submit_ready_task_handles_any_thread(
   int submitted = 0;
   {
     std::lock_guard<std::mutex> lock(global_queues_mutex_);
-    for (TaskHandle handle : handles) {
-      if (!handle)
-        continue;
-      ScheduledTask scheduled(resolved_epoch, handle);
-      if (priority == TaskPriority::High) {
-        high_priority_queue_.push(std::move(scheduled));
-        high_enqueued_.fetch_add(1, std::memory_order_relaxed);
-      } else {
-        normal_priority_queue_.push(std::move(scheduled));
-        normal_enqueued_.fetch_add(1, std::memory_order_relaxed);
+    if (exception_claimed_.load(std::memory_order_acquire) ||
+        should_cancel_epoch(resolved_epoch)) {
+      return;
+    }
+    std::deque<ScheduledTask>& target_queue = priority == TaskPriority::High
+                                                  ? high_priority_queue_
+                                                  : normal_priority_queue_;
+    const std::size_t original_size = target_queue.size();
+    [[maybe_unused]] std::size_t push_attempt = 0;
+    try {
+      for (TaskHandle handle : handles) {
+        if (!handle) {
+          continue;
+        }
+#if defined(PHOTOSPIDER_INTERNAL_BAD_ALLOC_TESTING)
+        invoke_cpu_failure_hook(testing::SchedulerFailurePoint::BatchQueuePush,
+                                ++push_attempt);
+#endif
+        target_queue.push_back(ScheduledTask(resolved_epoch, handle));
+        ++submitted;
       }
-      ++submitted;
+    } catch (...) {
+      while (target_queue.size() > original_size) {
+        target_queue.pop_back();
+      }
+      throw;
     }
     if (submitted > 0) {
       ready_task_count_.fetch_add(submitted, std::memory_order_relaxed);
+      if (priority == TaskPriority::High) {
+        high_enqueued_.fetch_add(static_cast<std::uint64_t>(submitted),
+                                 std::memory_order_relaxed);
+      } else {
+        normal_enqueued_.fetch_add(static_cast<std::uint64_t>(submitted),
+                                   std::memory_order_relaxed);
+      }
     }
   }
   if (submitted > 1) {
@@ -564,6 +1006,7 @@ void CpuWorkStealingScheduler::submit_ready_task_handles_any_thread(
   }
 }
 
+/** @copydoc CpuWorkStealingScheduler::submit_ready_task_from_worker */
 void CpuWorkStealingScheduler::submit_ready_task_from_worker(
     Task&& task, TaskPriority priority) {
   int worker_id = this_worker_id();
@@ -588,14 +1031,21 @@ void CpuWorkStealingScheduler::submit_ready_task_from_worker(
                                  epoch);
   } else {
     {
-      std::lock_guard<std::mutex> lock(*local_queue_mutexes_[worker_id]);
+      std::lock_guard<std::mutex> global_lock(global_queues_mutex_);
+      if (exception_claimed_.load(std::memory_order_acquire) ||
+          should_cancel_epoch(epoch)) {
+        return;
+      }
+      std::lock_guard<std::mutex> local_lock(*local_queue_mutexes_[worker_id]);
       local_task_queues_[worker_id].push_back(std::move(scheduled));
       normal_enqueued_.fetch_add(1, std::memory_order_relaxed);
+      ready_task_count_.fetch_add(1, std::memory_order_release);
     }
-    publish_ready_tasks(1, false);
+    cv_task_available_.notify_one();
   }
 }
 
+/** @copydoc CpuWorkStealingScheduler::submit_ready_task_handle_from_worker */
 void CpuWorkStealingScheduler::submit_ready_task_handle_from_worker(
     TaskHandle handle, TaskPriority priority) {
   int worker_id = this_worker_id();
@@ -619,14 +1069,21 @@ void CpuWorkStealingScheduler::submit_ready_task_handle_from_worker(
     submit_ready_task_handle_any_thread(handle, TaskPriority::High, epoch);
   } else {
     {
-      std::lock_guard<std::mutex> lock(*local_queue_mutexes_[worker_id]);
+      std::lock_guard<std::mutex> global_lock(global_queues_mutex_);
+      if (exception_claimed_.load(std::memory_order_acquire) ||
+          should_cancel_epoch(epoch)) {
+        return;
+      }
+      std::lock_guard<std::mutex> local_lock(*local_queue_mutexes_[worker_id]);
       local_task_queues_[worker_id].push_back(std::move(scheduled));
       normal_enqueued_.fetch_add(1, std::memory_order_relaxed);
+      ready_task_count_.fetch_add(1, std::memory_order_release);
     }
-    publish_ready_tasks(1, false);
+    cv_task_available_.notify_one();
   }
 }
 
+/** @copydoc CpuWorkStealingScheduler::submit_ready_task_handles_from_worker */
 void CpuWorkStealingScheduler::submit_ready_task_handles_from_worker(
     std::vector<TaskHandle>&& handles, TaskPriority priority) {
   if (handles.empty()) {
@@ -651,21 +1108,51 @@ void CpuWorkStealingScheduler::submit_ready_task_handles_from_worker(
 
   int submitted = 0;
   {
-    std::lock_guard<std::mutex> lock(*local_queue_mutexes_[worker_id]);
-    for (TaskHandle handle : handles) {
-      if (!handle)
-        continue;
-      local_task_queues_[worker_id].push_back(ScheduledTask(epoch, handle));
-      normal_enqueued_.fetch_add(1, std::memory_order_relaxed);
-      ++submitted;
+    std::lock_guard<std::mutex> global_lock(global_queues_mutex_);
+    if (exception_claimed_.load(std::memory_order_acquire) ||
+        should_cancel_epoch(epoch)) {
+      return;
     }
+    std::lock_guard<std::mutex> local_lock(*local_queue_mutexes_[worker_id]);
+    const std::size_t original_size =
+        local_task_queues_[static_cast<std::size_t>(worker_id)].size();
+    [[maybe_unused]] std::size_t push_attempt = 0;
+    try {
+      for (TaskHandle handle : handles) {
+        if (!handle) {
+          continue;
+        }
+#if defined(PHOTOSPIDER_INTERNAL_BAD_ALLOC_TESTING)
+        invoke_cpu_failure_hook(testing::SchedulerFailurePoint::BatchQueuePush,
+                                ++push_attempt);
+#endif
+        local_task_queues_[static_cast<std::size_t>(worker_id)].push_back(
+            ScheduledTask(epoch, handle));
+        ++submitted;
+      }
+    } catch (...) {
+      auto& target_queue =
+          local_task_queues_[static_cast<std::size_t>(worker_id)];
+      while (target_queue.size() > original_size) {
+        target_queue.pop_back();
+      }
+      throw;
+    }
+    ready_task_count_.fetch_add(submitted, std::memory_order_release);
+    normal_enqueued_.fetch_add(static_cast<std::uint64_t>(submitted),
+                               std::memory_order_relaxed);
   }
-  publish_ready_tasks(submitted, submitted > 1);
+  if (submitted > 1) {
+    cv_task_available_.notify_all();
+  } else if (submitted == 1) {
+    cv_task_available_.notify_one();
+  }
 }
 
+/** @copydoc CpuWorkStealingScheduler::dec_tasks_to_complete */
 void CpuWorkStealingScheduler::dec_tasks_to_complete() {
   uint64_t epoch = tls_active_epoch_;
-  if (epoch != 0 && should_cancel_epoch(epoch)) {
+  if (epoch != 0 && epoch != active_epoch()) {
     return;
   }
   if (tasks_to_complete_.fetch_sub(1, std::memory_order_acq_rel) == 1) {
@@ -674,65 +1161,148 @@ void CpuWorkStealingScheduler::dec_tasks_to_complete() {
   }
 }
 
+/** @copydoc CpuWorkStealingScheduler::inc_tasks_to_complete */
 void CpuWorkStealingScheduler::inc_tasks_to_complete(int delta) {
   if (delta <= 0) {
     return;
   }
   uint64_t epoch = tls_active_epoch_;
-  if (epoch != 0 && should_cancel_epoch(epoch)) {
+  if (epoch != 0 && epoch != active_epoch()) {
     return;
   }
   tasks_to_complete_.fetch_add(delta, std::memory_order_relaxed);
 }
 
+/** @copydoc CpuWorkStealingScheduler::finish_in_flight_task */
+void CpuWorkStealingScheduler::finish_in_flight_task() noexcept {
+  std::lock_guard<std::mutex> lock(completion_mutex_);
+  const int previous = in_flight_tasks_.fetch_sub(1, std::memory_order_acq_rel);
+  if (previous <= 0) {
+    std::terminate();
+  }
+  cv_completion_.notify_all();
+}
+
+/**
+ * @brief Resets the synchronized first-exception publication state.
+ *
+ * @return Nothing.
+ * @throws std::system_error only if locking a valid mutex fails.
+ * @note New batches call this before publishing work. The caller owns the
+ * scheduler lifecycle and must not overlap batch reset with previous work.
+ */
+void CpuWorkStealingScheduler::reset_exception_state() {
+  std::lock_guard<std::mutex> lock(exception_mutex_);
+  first_exception_ = nullptr;
+  has_exception_.store(false, std::memory_order_release);
+  exception_claimed_.store(false, std::memory_order_release);
+  exception_epoch_.store(0, std::memory_order_release);
+  exception_cleanup_complete_.store(false, std::memory_order_release);
+}
+
+/**
+ * @brief Waits for task completion and rethrows an atomically published error.
+ *
+ * @return Nothing for a completed/stopped batch.
+ * @throws The exact first worker exception when one was published.
+ * @note The captured epoch cannot complete until its queue cleanup and every
+ * dequeued callback have settled. Pointer and flag are then read/cleared
+ * together under `exception_mutex_`; a null pointer is never rethrown.
+ */
 void CpuWorkStealingScheduler::wait_for_completion() {
+  const uint64_t wait_epoch = active_epoch();
   {
     std::unique_lock<std::mutex> lock(completion_mutex_);
     cv_completion_.wait(lock, [&] {
-      return tasks_to_complete_.load(std::memory_order_acquire) == 0 ||
-             has_exception_.load(std::memory_order_acquire) ||
-             !running_.load(std::memory_order_acquire);
+      const bool settled =
+          in_flight_tasks_.load(std::memory_order_acquire) == 0;
+      const bool completed =
+          tasks_to_complete_.load(std::memory_order_acquire) == 0 && settled;
+      const bool failed =
+          has_exception_.load(std::memory_order_acquire) &&
+          exception_cleanup_complete_.load(std::memory_order_acquire) &&
+          exception_epoch_.load(std::memory_order_acquire) == wait_epoch &&
+          settled;
+      return completed || failed || !running_.load(std::memory_order_acquire);
     });
   }
 
-  if (has_exception_.load(std::memory_order_relaxed)) {
-    std::exception_ptr e;
-    {
-      std::lock_guard<std::mutex> lock(exception_mutex_);
+  std::exception_ptr e;
+  {
+    std::lock_guard<std::mutex> lock(exception_mutex_);
+    if (has_exception_.load(std::memory_order_acquire) &&
+        exception_epoch_.load(std::memory_order_acquire) == wait_epoch) {
       e = first_exception_;
       first_exception_ = nullptr;
       has_exception_.store(false, std::memory_order_release);
     }
+  }
+  if (e) {
+    tasks_to_complete_.store(0, std::memory_order_release);
     cv_task_available_.notify_all();
     std::rethrow_exception(e);
   }
 }
 
+/**
+ * @brief Selects and safely publishes the first exception of one batch.
+ *
+ * @param e Non-null exception captured at a worker boundary.
+ * @return Nothing.
+ * @throws Nothing under valid mutex state.
+ * @note `global_queues_mutex_` is the transaction gate shared with every
+ * global/local queue commit. The publisher acquires it before choosing the
+ * batch epoch and claiming the exception, so a concurrent initial batch is
+ * observed either wholly before or wholly after publication. The pointer and
+ * epoch are then stored, new ready work is rejected, and the same gate remains
+ * held while global/local queues are drained and the ready predicate is reset.
+ * Cleanup is marked complete before `has_exception_` is release-published.
+ */
 void CpuWorkStealingScheduler::set_exception(std::exception_ptr e) {
-  if (!has_exception_.exchange(true, std::memory_order_acq_rel)) {
-    std::lock_guard<std::mutex> lock(exception_mutex_);
-    first_exception_ = e;
+  {
+    std::lock_guard<std::mutex> global_lock(global_queues_mutex_);
+    const uint64_t publisher_epoch =
+        tls_active_epoch_ != 0 ? tls_active_epoch_ : active_epoch();
+    if (publisher_epoch != active_epoch()) {
+      return;
+    }
+    bool expected = false;
+    if (!exception_claimed_.compare_exchange_strong(
+            expected, true, std::memory_order_acq_rel,
+            std::memory_order_acquire)) {
+      return;
+    }
     {
-      std::lock_guard<std::mutex> ql(global_queues_mutex_);
-      while (!high_priority_queue_.empty()) {
-        high_priority_queue_.pop();
-      }
-      while (!normal_priority_queue_.empty()) {
-        normal_priority_queue_.pop();
-      }
-      ready_task_count_.store(0, std::memory_order_relaxed);
+      std::lock_guard<std::mutex> lock(exception_mutex_);
+      first_exception_ = e;
+      exception_epoch_.store(publisher_epoch, std::memory_order_release);
+    }
+    while (!high_priority_queue_.empty()) {
+      high_priority_queue_.pop_front();
+    }
+    while (!normal_priority_queue_.empty()) {
+      normal_priority_queue_.pop_front();
     }
     for (size_t i = 0; i < local_task_queues_.size(); ++i) {
       if (i < local_queue_mutexes_.size() && local_queue_mutexes_[i]) {
-        std::lock_guard<std::mutex> lk(*local_queue_mutexes_[i]);
+        std::lock_guard<std::mutex> local_lock(*local_queue_mutexes_[i]);
         local_task_queues_[i].clear();
       }
     }
-    cv_task_available_.notify_all();
-    {
-      std::lock_guard<std::mutex> lk_comp(completion_mutex_);
-      cv_completion_.notify_all();
-    }
+    ready_task_count_.store(0, std::memory_order_relaxed);
+    exception_cleanup_complete_.store(true, std::memory_order_release);
+#if defined(PHOTOSPIDER_INTERNAL_BAD_ALLOC_TESTING)
+    invoke_cpu_exception_before_visibility_hook();
+#endif
+    has_exception_.store(true, std::memory_order_release);
+  }
+#if defined(PHOTOSPIDER_INTERNAL_BAD_ALLOC_TESTING)
+  invoke_cpu_exception_publication_hook();
+#endif
+  cv_task_available_.notify_all();
+  {
+    std::lock_guard<std::mutex> lock(completion_mutex_);
+    cv_completion_.notify_all();
   }
 }
 

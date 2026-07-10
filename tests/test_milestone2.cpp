@@ -7,6 +7,8 @@
 #include <atomic>
 #include <exception>
 #include <filesystem>
+#include <memory>
+#include <new>
 #include <optional>
 #include <stdexcept>
 #include <string>
@@ -310,6 +312,127 @@ class TrackedMockScheduler : public MockScheduler {
     SchedulerLifecycleTracker::detach_count.fetch_add(1);
   }
 };
+
+/**
+ * @brief Mock scheduler whose start can fail once with resource exhaustion.
+ *
+ * @note The object remains owned by GraphRuntime across the failed call so the
+ * test can disable injection and prove a clean retry.
+ */
+class RetryableStartMockScheduler final : public MockScheduler {
+ public:
+  /**
+   * @brief Starts normally or fails after publishing scheduler-local running.
+   * @throws std::bad_alloc while failure injection is enabled.
+   * @note The intentionally hostile ordering proves GraphRuntime tracks the
+   * candidate before invoking start and rolls it back even when start throws
+   * after a partial lifecycle publication.
+   */
+  void start() override {
+    if (fail_start_) {
+      MockScheduler::start();
+      throw std::bad_alloc();
+    }
+    MockScheduler::start();
+  }
+
+  /**
+   * @brief Enables or disables deterministic start failure.
+   * @param fail True to throw from the next start attempt.
+   * @throws Nothing.
+   */
+  void set_fail_start(bool fail) noexcept { fail_start_ = fail; }
+
+ private:
+  /** @brief Whether start currently injects resource exhaustion. */
+  bool fail_start_ = true;
+};
+
+/**
+ * @brief Mock that stops its local state before surfacing a lifecycle error.
+ * @note GraphRuntime uses it to prove one hostile plugin-like scheduler cannot
+ * skip cleanup of the remaining registered scheduler set.
+ */
+class ThrowingShutdownMockScheduler final : public MockScheduler {
+ public:
+  /**
+   * @brief Stops normally and then reports one deterministic failure.
+   * @throws std::runtime_error after local running state becomes false.
+   * @note The post-transition throw models a hostile explicit plugin
+   * lifecycle call while keeping destructor cleanup repeatable.
+   */
+  void shutdown() override {
+    MockScheduler::shutdown();
+    throw std::runtime_error("tracked shutdown failure");
+  }
+};
+
+/**
+ * @brief GraphRuntime rolls back earlier schedulers when a later start fails.
+ */
+TEST_F(GraphRuntimeSchedulerTest, StartFailureRollsBackAndRetrySucceeds) {
+  GraphRuntime::Info info{"scheduler_start_rollback",
+                          "sessions/scheduler_test_session", "", ""};
+  GraphRuntime runtime(info);
+
+  auto hp_scheduler = std::make_unique<MockScheduler>();
+  MockScheduler* hp_ptr = hp_scheduler.get();
+  runtime.set_scheduler(ComputeIntent::GlobalHighPrecision,
+                        std::move(hp_scheduler));
+  auto rt_scheduler = std::make_unique<RetryableStartMockScheduler>();
+  RetryableStartMockScheduler* rt_ptr = rt_scheduler.get();
+  runtime.set_scheduler(ComputeIntent::RealTimeUpdate, std::move(rt_scheduler));
+
+  EXPECT_THROW(runtime.start(), std::bad_alloc);
+  EXPECT_FALSE(runtime.running());
+  EXPECT_TRUE(hp_ptr->was_start_called());
+  EXPECT_TRUE(hp_ptr->was_shutdown_called());
+  EXPECT_FALSE(hp_ptr->is_running());
+  EXPECT_FALSE(rt_ptr->is_running());
+  EXPECT_TRUE(rt_ptr->was_shutdown_called());
+  EXPECT_NO_THROW(runtime.stop());
+
+  rt_ptr->set_fail_start(false);
+  EXPECT_NO_THROW(runtime.start());
+  EXPECT_TRUE(runtime.running());
+  EXPECT_TRUE(hp_ptr->is_running());
+  EXPECT_TRUE(rt_ptr->is_running());
+  runtime.stop();
+  EXPECT_FALSE(runtime.running());
+}
+
+/**
+ * @brief GraphRuntime stops every scheduler before rethrowing the first error.
+ * @throws Nothing when the stopped publication and best-effort sweep hold.
+ * @note The runtime remains reusable for destruction after this explicit
+ * failure because the throwing scheduler transitions to stopped first.
+ */
+TEST_F(GraphRuntimeSchedulerTest,
+       StopSweepsRemainingSchedulersAndPreservesFirstFailure) {
+  GraphRuntime::Info info{"scheduler_stop_sweep",
+                          "sessions/scheduler_test_session", "", ""};
+  GraphRuntime runtime(info);
+
+  auto hp_scheduler = std::make_unique<ThrowingShutdownMockScheduler>();
+  ThrowingShutdownMockScheduler* hp_ptr = hp_scheduler.get();
+  runtime.set_scheduler(ComputeIntent::GlobalHighPrecision,
+                        std::move(hp_scheduler));
+  auto rt_scheduler = std::make_unique<MockScheduler>();
+  MockScheduler* rt_ptr = rt_scheduler.get();
+  runtime.set_scheduler(ComputeIntent::RealTimeUpdate, std::move(rt_scheduler));
+  runtime.start();
+
+  try {
+    runtime.stop();
+    FAIL() << "hostile shutdown did not propagate";
+  } catch (const std::runtime_error& error) {
+    EXPECT_STREQ(error.what(), "tracked shutdown failure");
+  }
+  EXPECT_FALSE(runtime.running());
+  EXPECT_FALSE(hp_ptr->is_running());
+  EXPECT_FALSE(rt_ptr->is_running());
+  EXPECT_TRUE(rt_ptr->was_shutdown_called());
+}
 
 TEST_F(GraphRuntimeSchedulerTest, ReplaceScheduler) {
   GraphRuntime::Info info{"scheduler_test", "sessions/scheduler_test_session",
