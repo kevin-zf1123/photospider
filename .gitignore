@@ -35,6 +35,7 @@ feedback/
 !.clang-format
 !CPPLINT.cfg
 !CMakeLists.txt
+!CONTEXT.md
 !cmake/
 !cmake/**/
 !cmake/*.cmake.in
