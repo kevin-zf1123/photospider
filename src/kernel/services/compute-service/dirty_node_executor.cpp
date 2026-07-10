@@ -1,5 +1,6 @@
 #include "kernel/services/compute-service/dirty_node_executor.hpp"
 
+#include <new>
 #include <optional>
 #include <string>
 #include <utility>
@@ -141,6 +142,20 @@ ResolvedNodeInputs HighPrecisionDirtyNodeExecutor::resolve_inputs(
       "HP update");
 }
 
+/**
+ * @brief Executes the preferred HP implementation for one dirty node.
+ *
+ * @param node Node being computed.
+ * @param entry HP dirty ROI and extent metadata.
+ * @param image_inputs_ready Resolved HP image inputs.
+ * @return Nothing.
+ * @throws std::bad_alloc when staging or selected operation execution exhausts
+ * memory.
+ * @throws GraphError when no HP implementation exists or execution otherwise
+ * fails.
+ * @note Tiled HP remains preferred over monolithic HP, and output stays staged
+ * until the dirty write buffer commits.
+ */
 void HighPrecisionDirtyNodeExecutor::execute_operation(
     Node& node, const HpPlanEntry& entry,
     const std::vector<const NodeOutput*>& image_inputs_ready) const {
@@ -354,6 +369,21 @@ ImageBuffer& RealTimeDirtyNodeExecutor::ensure_rt_buffer(
   return rt_buffer;
 }
 
+/**
+ * @brief Executes the selected RT or HP-fallback implementation.
+ *
+ * @param node Node being computed.
+ * @param entry RT dirty ROI and extent metadata.
+ * @param image_inputs_ready Resolved RT image inputs.
+ * @param rt_buffer Staged destination proxy buffer.
+ * @param op_variant Selected monolithic or tiled operation.
+ * @return Nothing.
+ * @throws std::bad_alloc when operation execution or staging exhausts memory.
+ * @throws GraphError preserving operation errors and wrapping other OpenCV or
+ * standard failures with node context.
+ * @note Resource exhaustion retains its type through dirty execution and the
+ * public Host boundary; ordinary failures retain RT diagnostic wrapping.
+ */
 void RealTimeDirtyNodeExecutor::execute_operation(
     Node& node, const RtPlanEntry& entry,
     const std::vector<const NodeOutput*>& image_inputs_ready,
@@ -366,6 +396,8 @@ void RealTimeDirtyNodeExecutor::execute_operation(
     }
     execute_tiled(node, std::get<TileOpFunc>(op_variant), entry,
                   image_inputs_ready, rt_buffer);
+  } catch (const std::bad_alloc&) {
+    throw;
   } catch (const cv::Exception& e) {
     throw GraphError(GraphErrc::ComputeError, "RT compute failed at node " +
                                                   std::to_string(node.id) +

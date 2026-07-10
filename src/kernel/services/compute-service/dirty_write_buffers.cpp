@@ -1,7 +1,9 @@
 #include "kernel/services/compute-service/dirty_write_buffers.hpp"
 
+#include <new>
 #include <string>
 #include <utility>
+#include <vector>
 
 #include "adapter/buffer_adapter_opencv.hpp"
 #include "kernel/services/compute-service/compute_geometry.hpp"
@@ -31,6 +33,8 @@ ImageBuffer clone_image_buffer(const ImageBuffer& source,
 
   try {
     cloned = fromCvMat(toCvMat(source).clone());
+  } catch (const std::bad_alloc&) {
+    throw;
   } catch (const std::exception& e) {
     throw GraphError(GraphErrc::ComputeError,
                      "Failed to clone " + label +
@@ -45,7 +49,8 @@ ImageBuffer clone_image_buffer(const ImageBuffer& source,
  * @param source Source output owned by graph or proxy state.
  * @param label Human-readable buffer domain used in error messages.
  * @return Independent output with cloned image payload and copied metadata.
- * @throws GraphError when image payload cloning fails.
+ * @throws std::bad_alloc when output or metadata copying exhausts memory.
+ * @throws GraphError when image payload cloning otherwise fails.
  * @note YAML payload, spatial context, and debug metadata are value-copied.
  */
 NodeOutput clone_node_output(const NodeOutput& source,
@@ -160,7 +165,7 @@ HighPrecisionDirtyWriteBuffer::ensure_entry_locked(const Node& node) {
 RealtimeProxyWriteBuffer::RealtimeProxyWriteBuffer(
     RealtimeProxyGraph& proxy_graph, bool seed_existing_outputs)
     : proxy_graph_(proxy_graph),
-      seed_existing_outputs_(seed_existing_outputs) {}
+      seed_existing_outputs_(seed_existing_outputs) {}  // NOLINT
 
 const NodeOutput* RealtimeProxyWriteBuffer::find_output(int node_id) const {
   std::lock_guard<std::mutex> lock(mutex_);

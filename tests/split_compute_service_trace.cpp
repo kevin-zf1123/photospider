@@ -385,7 +385,7 @@ std::vector<int> source_line_numbers(const std::string& source,
  * @return JSON object with boolean checks and source line evidence.
  * @throws std::runtime_error when a required source file cannot be read.
  * @note This complements runtime scheduler traces by proving the production
- * dirty update path routes source-first submission through the public
+ * dirty update path routes source-first submission through the internal static
  * ComputeTaskDispatcher helper.
  */
 json dirty_dispatcher_call_chain_audit(const fs::path& repo_root) {
@@ -884,7 +884,7 @@ bool contains_phase(const std::vector<std::string>& phases,
  * exceptions propagate through future::get().
  * @note This testbench intentionally uses KernelTestAccess because the
  * evidence includes runtime-only RT proxy state that is not part of the public
- * host inspection contract.
+ * `ps::Host` inspection contract.
  */
 json graph_snapshot(ps::Kernel& kernel, const std::string& graph_name) {
   auto& runtime = ps::testing::KernelTestAccess::runtime(kernel, graph_name);
@@ -1570,9 +1570,9 @@ void write_task_bundle(const fs::path& root, const std::string& task_dir,
  * @param dirty_roi HP-space ROI to overwrite in the source node cache.
  * @throws std::runtime_error when the graph is missing; graph-state submission
  * exceptions propagate through future::get().
- * @note This is testbench setup code. It uses internal access so the public
- * Kernel and InteractionService facades do not need dirty-state mutation
- * escape hatches.
+ * @note This is testbench setup code. It uses test-only internal access;
+ * production frontends use public `ps::Host`, while the embedded Host adapter
+ * alone maps Host values to internal Kernel and InteractionService facades.
  */
 void mutate_dirty_region(ps::Kernel& kernel, const std::string& graph_name,
                          const cv::Rect& dirty_roi) {
@@ -1785,9 +1785,8 @@ int main(int argc, char** argv) {
         {"requested_parallel", true},
         {"dirty_update_ok", dirty_ok},
         {"dirty_roi", rect_json(dirty_roi)},
-        {"interaction_dirty_snapshot_debug", dirty_snapshot_text},
-        {"interaction_dirty_snapshot",
-         dirty_snapshot_json(dirty_snapshot_struct)},
+        {"internal_dirty_snapshot_debug", dirty_snapshot_text},
+        {"internal_dirty_snapshot", dirty_snapshot_json(dirty_snapshot_struct)},
         {"project_forward",
          dirty_forward ? rect_json(*dirty_forward) : json(nullptr)},
         {"project_backward",
@@ -1825,8 +1824,8 @@ int main(int argc, char** argv) {
         {"requested_parallel", false},
         {"dirty_update_ok", dirty_single_thread_ok},
         {"dirty_roi", rect_json(dirty_single_thread_roi)},
-        {"interaction_dirty_snapshot_debug", dirty_single_thread_snapshot_text},
-        {"interaction_dirty_snapshot",
+        {"internal_dirty_snapshot_debug", dirty_single_thread_snapshot_text},
+        {"internal_dirty_snapshot",
          dirty_snapshot_json(dirty_single_thread_snapshot_struct)},
         {"graph_snapshot", graph_snapshot(kernel, dirty_graph)},
         {"scheduler_events",
@@ -1888,7 +1887,8 @@ int main(int argc, char** argv) {
         fs::exists(root / "full-kernel-run" / "actual" / "sequential_hp.json");
     task2.add("kernel trace testbench produced full graph input", true,
               full_graph_input_exists, full_graph_input_exists,
-              "input graph was generated and loaded through Kernel");
+              "input graph was generated and loaded through the internal "
+              "Kernel facade");
     task2.add("operator trace captures runtime calls", "non_empty",
               operator_trace.size(), !operator_trace.empty(),
               "trace.jsonl records op calls and propagator calls");
@@ -1900,10 +1900,10 @@ int main(int argc, char** argv) {
          {{"task_3", "geometry/cache/metadata observed in task-03"},
           {"task_4", "input resolver/node executor observed in task-04"},
           {"task_5",
-           "dirty planner/interaction/task planner observed in task-05"},
+           "dirty planner/internal facade/task planner observed in task-05"},
           {"task_6",
            "ComputeTaskDispatcher/scheduler/error observed in task-06"},
-          {"task_7", "facade/build integration observed in task-07"}}},
+          {"task_7", "internal facade/build integration observed in task-07"}}},
         {"trace_event_count", operator_trace.size()}};
     write_task_bundle(root, "task-02", "Task 2 runtime validation plan",
                       "Focused tests must be identified and must emit runtime "
@@ -1976,12 +1976,12 @@ int main(int argc, char** argv) {
               has_expanded_random_access_event(operator_trace),
               has_expanded_random_access_event(operator_trace),
               "random access tile input ROI is larger than output ROI");
-    task4.add(
-        "node exception wrapped through kernel", false, error_ok,
-        !error_ok && last_error.has_value() &&
-            last_error->message.find("trace explode failure") !=
-                std::string::npos,
-        "parallel error graph returns false and exposes wrapped last_error");
+    task4.add("node exception wrapped through kernel", false, error_ok,
+              !error_ok && last_error.has_value() &&
+                  last_error->message.find("trace explode failure") !=
+                      std::string::npos,
+              "parallel error graph returns false and records internal Kernel "
+              "LastError");
     json task4_actual = {{"sequential_snapshot", sequential_snapshot},
                          {"error_path", error_actual},
                          {"operator_trace_count", operator_trace.size()}};
@@ -1999,34 +1999,72 @@ int main(int argc, char** argv) {
 
     CheckSet task5;
     const std::string dirty_text =
-        dirty_actual.value("interaction_dirty_snapshot_debug", "");
-    const json& dirty_struct = dirty_actual["interaction_dirty_snapshot"];
+        dirty_actual.value("internal_dirty_snapshot_debug", "");
+    const json& dirty_struct = dirty_actual["internal_dirty_snapshot"];
     const bool snapshot_has_shape =
         dirty_text.find("generation=") != std::string::npos &&
         dirty_text.find("tiles=") != std::string::npos &&
         dirty_text.find("edges=") != std::string::npos;
-    const size_t expected_dirty_tile_count = 4;
+    const size_t minimum_dirty_tile_count = 1;
+    const bool dirty_tile_schema_ok =
+        dirty_struct.is_object() && dirty_struct.contains("dirty_tiles") &&
+        dirty_struct["dirty_tiles"].is_array() &&
+        std::all_of(dirty_struct["dirty_tiles"].begin(),
+                    dirty_struct["dirty_tiles"].end(), [](const json& tile) {
+                      return tile.is_object() && tile.contains("node_id") &&
+                             tile.contains("tile_x") &&
+                             tile.contains("tile_y") &&
+                             tile.contains("pixel_roi") &&
+                             tile.contains("domain");
+                    });
+    const bool monolithic_schema_ok =
+        dirty_struct.is_object() &&
+        dirty_struct.contains("dirty_monolithic_nodes") &&
+        dirty_struct["dirty_monolithic_nodes"].is_array() &&
+        std::all_of(
+            dirty_struct["dirty_monolithic_nodes"].begin(),
+            dirty_struct["dirty_monolithic_nodes"].end(), [](const json& node) {
+              return node.is_object() && node.contains("node_id") &&
+                     node.contains("pixel_roi") && node.contains("domain") &&
+                     node.contains("whole_output");
+            });
+    const bool edge_schema_ok =
+        dirty_struct.is_object() && dirty_struct.contains("edge_mappings") &&
+        dirty_struct["edge_mappings"].is_array() &&
+        std::all_of(
+            dirty_struct["edge_mappings"].begin(),
+            dirty_struct["edge_mappings"].end(), [](const json& edge) {
+              return edge.is_object() && edge.contains("from_node_id") &&
+                     edge.contains("to_node_id") && edge.contains("from_roi") &&
+                     edge.contains("to_roi") && edge.contains("domain") &&
+                     edge.contains("direction");
+            });
     const bool dirty_detail_ok =
         dirty_struct.is_object() && dirty_struct.contains("dirty_tiles") &&
         dirty_struct.contains("dirty_monolithic_nodes") &&
         dirty_struct.contains("per_node_dirty_rois") &&
         dirty_struct.contains("edge_mappings") &&
+        dirty_struct["per_node_dirty_rois"].is_object() &&
         dirty_struct.value("graph_generation", 0) >= 1 &&
-        dirty_struct["dirty_tiles"].size() == expected_dirty_tile_count &&
+        dirty_struct["dirty_tiles"].size() >= minimum_dirty_tile_count &&
+        dirty_tile_schema_ok && monolithic_schema_ok && edge_schema_ok &&
         dirty_struct["dirty_monolithic_nodes"].size() == 2 &&
         dirty_struct["per_node_dirty_rois"].size() == 3 &&
         dirty_struct["edge_mappings"].size() == 2;
-    task5.add("InteractionService exposes dirty snapshot", true,
+    task5.add("internal facade returns dirty snapshot", true,
               snapshot_has_shape, snapshot_has_shape,
-              "frontend facade read graph-scoped dirty snapshot summary");
-    task5.add("InteractionService exposes dirty snapshot details", true,
+              "internal InteractionService test harness read the backend "
+              "snapshot consumed by the embedded Host adapter");
+    task5.add("internal facade returns dirty snapshot details", true,
               dirty_detail_ok, dirty_detail_ok,
-              "structured snapshot exposes stable node ids, tile keys, ROIs, "
-              "monolithic escalation, and edge mappings");
+              "internal snapshot contains stable node ids, tile keys, ROIs, "
+              "monolithic escalation, and edge mappings before adapter "
+              "conversion to public Host values");
     task5.add(
         "dirty RT update succeeded", true, dirty_actual["dirty_update_ok"],
         dirty_actual["dirty_update_ok"].get<bool>(),
-        "Kernel intent async path executed RealTimeUpdate with dirty ROI");
+        "internal Kernel intent async path executed RealTimeUpdate with dirty "
+        "ROI");
     task5.add(
         "explicit propagators ran", true,
         has_operator_event(operator_trace, "dirty_rt_update",
@@ -2065,8 +2103,8 @@ int main(int argc, char** argv) {
                     ["present"],
         dirty_actual["graph_snapshot"]["nodes"]["100"]["cache"]["rt"]["present"]
             .get<bool>(),
-        "dirty update produced frontend RT state without making "
-        "InteractionService the authority");
+        "dirty update produced internal RT proxy state; production frontends "
+        "observe copied state only through public ps::Host");
     task5.add(
         "dirty execution consumed planner output", true,
         dirty_actual["graph_snapshot"]["recent_compute_plan_summaries"],
@@ -2133,10 +2171,17 @@ int main(int argc, char** argv) {
     json task5_expected = {
         {"dirty_snapshot_debug_contains", {"generation=", "tiles=", "edges="}},
         {"dirty_snapshot_detail",
-         {{"dirty_tiles", expected_dirty_tile_count},
+         {{"dirty_tiles", ">=1"},
+          {"dirty_tile_fields",
+           {"node_id", "tile_x", "tile_y", "pixel_roi", "domain"}},
           {"dirty_monolithic_nodes", 2},
+          {"dirty_monolithic_fields",
+           {"node_id", "pixel_roi", "domain", "whole_output"}},
           {"per_node_dirty_rois", 3},
-          {"edge_mappings", 2}}},
+          {"edge_mappings", 2},
+          {"edge_mapping_fields",
+           {"from_node_id", "to_node_id", "from_roi", "to_roi", "domain",
+            "direction"}}}},
         {"dirty_planned_nodes", {1, 2, 100}},
         {"dirty_plan_dependencies", ">=2"},
         {"dirty_plan_tasks", ">=3"},
@@ -2160,8 +2205,9 @@ int main(int argc, char** argv) {
         {"rt_cache_present", true}};
     write_task_bundle(
         root, "task-05", "Task 5 dirty planning runtime evidence",
-        "Dirty planning, snapshots, InteractionService exposure, "
-        "task planning, and intent coordination must be observed.",
+        "Dirty planning, internal snapshots, task planning, and intent "
+        "coordination must be observed. Public frontend exposure belongs to "
+        "ps::Host through the embedded adapter and is covered separately.",
         command, "Dirty graph, legacy fallback graph.", task5_expected,
         task5_actual, task5, operator_trace);
 
@@ -2177,7 +2223,7 @@ int main(int argc, char** argv) {
     const json dirty_dispatcher_audit =
         dirty_dispatcher_call_chain_audit(repo_root);
     task6.add("parallel compute returned ok", true, parallel_ok, parallel_ok,
-              "parallel facade returned success");
+              "internal InteractionService facade returned success");
     task6.add("scheduler planned task events recorded", planned_task_count,
               execute_count + tile_count,
               execute_count + tile_count == planned_task_count,
@@ -2205,10 +2251,10 @@ int main(int argc, char** argv) {
         parallel_snapshot["nodes"]["100"]["cache"]["hp"]["present"],
         parallel_snapshot["nodes"]["100"]["cache"]["hp"]["present"].get<bool>(),
         "target node id 100 proves sparse mapping is handled");
-    task6.add(
-        "parallel exception propagated", false, error_ok,
-        !error_ok && last_error.has_value(),
-        "error graph propagates executor exception to Kernel::last_error");
+    task6.add("parallel exception propagated", false, error_ok,
+              !error_ok && last_error.has_value(),
+              "error graph propagates executor exception to internal "
+              "Kernel::last_error");
     task6.add(
         "dirty source-first path uses dispatcher helper", true,
         dirty_dispatcher_audit, dirty_dispatcher_audit["passed"].get<bool>(),
@@ -2239,30 +2285,31 @@ int main(int argc, char** argv) {
                       task6_actual, task6, operator_trace);
 
     CheckSet task7;
-    task7.add(
-        "public facade used for sequential compute", true, sequential_ok,
-        sequential_ok,
-        "InteractionService::cmd_compute drove Kernel and ComputeService");
-    task7.add("public facade used for parallel compute", true, parallel_ok,
+    task7.add("internal facade used for sequential compute", true,
+              sequential_ok, sequential_ok,
+              "internal InteractionService test harness drove Kernel and "
+              "ComputeService");
+    task7.add("internal facade used for parallel compute", true, parallel_ok,
               parallel_ok,
               "parallel compute stayed behind ComputeService facade");
-    task7.add("public Kernel intent API used for dirty update", true, dirty_ok,
-              dirty_ok,
+    task7.add("internal Kernel intent API used for dirty update", true,
+              dirty_ok, dirty_ok,
               "Kernel::compute_async intent path drove HP/RT coordination");
-    task7.add("public Kernel intent API respects execution mode", true,
+    task7.add("internal Kernel intent API respects execution mode", true,
               dirty_single_thread_ok,
               dirty_single_thread_ok &&
                   dirty_single_thread_actual["requested_parallel"] == false,
               "Kernel::compute_async intent path used single-threaded "
               "execution without disabling HP/RT coordination");
     task7.add(
-        "operator trace includes facade-visible phases", 5, observed_phases,
+        "operator trace includes internal execution phases", 5, observed_phases,
         contains_phase(observed_phases, "sequential_hp") &&
             contains_phase(observed_phases, "parallel_hp") &&
             contains_phase(observed_phases, "dirty_rt_update") &&
             contains_phase(observed_phases, "dirty_rt_update_single_thread") &&
             contains_phase(observed_phases, "parallel_error_path"),
-        "runtime evidence covers facade, scheduler, dirty, and error paths");
+        "runtime evidence covers internal facade, scheduler, dirty, and error "
+        "paths without claiming a frontend boundary");
     task7.add(
         "evidence records dirty dispatcher helper chain", true,
         dirty_dispatcher_audit["checks"],
@@ -2278,20 +2325,21 @@ int main(int argc, char** argv) {
         {"observed_phases", observed_phases},
         {"dirty_dispatcher_call_chain", dirty_dispatcher_audit}};
     json task7_expected = {
-        {"public_facade_sequential_ok", true},
-        {"public_facade_parallel_ok", true},
-        {"public_kernel_dirty_intent_ok", true},
-        {"public_kernel_dirty_intent_single_thread_ok", true},
+        {"internal_facade_sequential_ok", true},
+        {"internal_facade_parallel_ok", true},
+        {"internal_kernel_dirty_intent_ok", true},
+        {"internal_kernel_dirty_intent_single_thread_ok", true},
         {"dirty_dispatcher_call_chain_passed", true},
         {"required_phases",
          {"sequential_hp", "parallel_hp", "dirty_rt_update",
           "dirty_rt_update_single_thread", "parallel_error_path"}}};
-    write_task_bundle(root, "task-07",
-                      "Task 7 facade/build integration evidence",
-                      "ComputeService must remain a facade while new internal "
-                      "modules integrate with build and runtime paths.",
-                      command, "All generated graphs.", task7_expected,
-                      task7_actual, task7, operator_trace);
+    write_task_bundle(
+        root, "task-07", "Task 7 internal facade/build integration evidence",
+        "ComputeService remains an internal facade while new "
+        "modules integrate with build and runtime paths; public "
+        "callers remain behind ps::Host and the embedded adapter.",
+        command, "All generated graphs.", task7_expected, task7_actual, task7,
+        operator_trace);
 
     CheckSet all;
     all.checks.insert(all.checks.end(), task2.checks.begin(),

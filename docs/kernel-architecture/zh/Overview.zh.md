@@ -61,7 +61,7 @@ Package 边界：
 
 ```mermaid
 graph TD
-    CLI["CLI / REPL / TUI"] --> InteractionService
+    CLI["CLI / REPL / TUI"] --> Host["ps::Host"]
     Frontend["Embedded frontend"] --> Host["ps::Host"]
     Host --> EmbeddedHost["embedded Host adapter"]
     EmbeddedHost --> InteractionService
@@ -101,7 +101,7 @@ graph TD
 | `embedded Host adapter` | 由 `Kernel` 和 `InteractionService` 支撑的 in-process Host 实现，供本地前端使用，同时保持 CLI 行为不变。 |
 | `GraphRuntime` | 每图资源容器，包含模型、graph-state executor、事件、调度器和平台 context。 |
 | `GraphModel` | 图状态持有者：私有节点存储、拓扑邻接索引、缓存根目录、计时数据、quiet/skip-save 标志。 |
-| `InteractionService` | 面向 CLI 和 embedded adapter 的 `Kernel` wrapper，使命令代码保持较薄，同时 Host 成为稳定的可安装 frontend seam。 |
+| `InteractionService` | 由 embedded Host adapter 和 backend code 使用的内部 `Kernel` wrapper；包括 CLI 在内的 frontend 都使用 public Host seam。 |
 | `ComputeService` | 解析依赖、检查缓存、执行 op，协调 RT/HP/tiled 路径和计时事件。 |
 | `GraphTraversalService` | 只负责拓扑：基于 `GraphModel` 邻接索引提供遍历顺序、结束节点发现、祖先检查、上游依赖查询和下游依赖查询。 |
 | `RoiPropagationService` | ROI/空间传播边界，负责单节点上游 ROI 计算以及图级 forward/backward ROI 投影。 |
@@ -133,8 +133,8 @@ graph TD
 
 典型 REPL 计算流程：
 
-1. REPL 命令调用 `InteractionService`。
-2. `InteractionService` 调用 `Kernel`。
+1. REPL 命令调用 public `ps::Host` interface。
+2. embedded Host adapter 将 public value 转换为内部 `InteractionService` / `Kernel` request。
 3. `Kernel` 解析活跃的 `GraphRuntime`。
 4. `Kernel` 创建或使用 `ComputeService` 所需服务。
 5. `ComputeService` 通过 `GraphTraversalService` 解析拓扑顺序。
@@ -143,7 +143,7 @@ graph TD
 8. `ComputeService` 从 `OpRegistry` 选择操作实现。
 9. 工作通过递归或配置的调度器路径执行。
 10. `GraphEventService` 记录每节点事件和计时数据。
-11. 结果通过 `Kernel` 和 `InteractionService` 暴露回去。
+11. embedded Host adapter 将结果复制为 public Host value snapshot，CLI 再渲染这些 value。
 
 典型 embedded Host 计算流程：
 
@@ -159,6 +159,8 @@ graph TD
 6. 对 Host 提交的 async compute，`close_graph()` 会等待 Host wrapper 已经把 backend completion
    转换成 `OperationStatus`。这样失败的 async request 可以在 graph close 清理 runtime diagnostic
    之前读取 backend `LastError` 分类。
+7. 可恢复 backend failure 会转换成 Host status/result value，而资源耗尽保持异常语义：非析构
+   Host method 和被消费的 async future 可以按可安装接口的文档传播 `std::bad_alloc`。
 
 ## 调度器模型
 
@@ -242,7 +244,9 @@ ROI 传播通过 `RoiPropagationService` 处理，它使用 registry 提供的 p
 
 `ComputeService` 拆分现在由 `split-compute-service` OpenSpec change 和维护文档
 `Compute-Service-Split.md` 跟踪。`GraphTraversalService` 拓扑/ROI 拆分已经落地：
-traversal 现在只负责拓扑，ROI 传播是独立服务，范围解析显式化，dependency-tree data 由 inspect 边界结构化，通过 `InteractionService` 暴露，并由 CLI/TUI/frontend code 渲染。
+traversal 现在只负责拓扑，ROI 传播是独立服务，范围解析显式化；dependency-tree data 由 inspect
+边界结构化，经内部 `InteractionService` 交给 embedded Host adapter，复制为 public Host snapshot，
+再由 CLI/TUI/frontend code 渲染。
 
 ## 维护文档边界
 

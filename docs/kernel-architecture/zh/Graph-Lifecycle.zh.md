@@ -61,4 +61,6 @@ Clear 应重置：
 
 ## 错误表面
 
-图加载、reload 和编辑失败应通过内核和交互层 API 可见。前端不应需要从部分变化的图中推断失败。
+图加载、reload 和编辑失败通过 public `ps::Host` status/error value 对 frontend 可见。在
+embedded 模式下，Host adapter 会把内部 `Kernel` 与 `InteractionService` 的失败诊断映射到该
+public surface。Frontend 既不会调用这些内部 facade，也不需要从部分变化的图中推断失败。

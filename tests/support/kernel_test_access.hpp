@@ -1,6 +1,8 @@
 #pragma once
 
 #include <future>
+#include <new>
+#include <optional>
 #include <stdexcept>
 #include <string>
 #include <type_traits>
@@ -15,9 +17,10 @@ namespace ps::testing {
  * @brief Internal-only access bridge for tests that must inspect Kernel state.
  *
  * KernelTestAccess centralizes test-only runtime and graph-state access after
- * Kernel removed its public runtime/post escape hatches. Production callers
- * must use Kernel and InteractionService value facades instead; this header is
- * only included by test targets through the tests/support include path.
+ * Kernel removed its runtime/post escape hatches. Production frontends call
+ * public `ps::Host`; only the embedded Host adapter may translate those calls
+ * to internal Kernel and InteractionService value facades. This header is only
+ * included by test targets through the tests/support include path.
  *
  * @note Methods throw std::runtime_error for missing graphs so tests fail
  * loudly instead of silently treating a missing internal runtime as success.
@@ -25,14 +28,68 @@ namespace ps::testing {
 class KernelTestAccess {
  public:
   /**
+   * @brief Injects resource exhaustion through Kernel::with_runtime().
+   *
+   * @param kernel Kernel whose mutable runtime helper is exercised.
+   * @param name Loaded graph name used to resolve the runtime.
+   * @return The helper result if the injected exception is incorrectly
+   *         converted; the correct contract propagates std::bad_alloc.
+   * @throws std::bad_alloc unconditionally after a loaded runtime is resolved.
+   * @note This test-only seam exercises the real private wrapper without
+   *       exposing it to production callers or frontends.
+   */
+  static std::optional<int> inject_bad_alloc_through_runtime(
+      Kernel& kernel, const std::string& name) {
+    return kernel.with_runtime(
+        name, [](GraphRuntime&) -> int { throw std::bad_alloc{}; });
+  }
+
+  /**
+   * @brief Injects resource exhaustion through Kernel::with_graph_state().
+   *
+   * @param kernel Kernel whose serialized graph-state helper is exercised.
+   * @param name Loaded graph name used to resolve the executor.
+   * @return The helper result if the injected exception is incorrectly
+   *         converted; the correct contract propagates std::bad_alloc.
+   * @throws std::bad_alloc through the GraphStateExecutor future.
+   * @note The callable runs on the real graph-state executor rather than a
+   *       mocked future or exception translator.
+   */
+  static std::optional<int> inject_bad_alloc_through_graph_state(
+      Kernel& kernel, const std::string& name) {
+    return kernel.with_graph_state(
+        name, [](GraphModel&) -> int { throw std::bad_alloc{}; });
+  }
+
+  /**
+   * @brief Injects resource exhaustion through the reload LastError wrapper.
+   *
+   * @param kernel Kernel whose LastError-producing graph-state helper runs.
+   * @param name Loaded graph name used to resolve the executor.
+   * @return The helper result if resource exhaustion is incorrectly recorded
+   *         as LastError; the correct contract propagates std::bad_alloc.
+   * @throws std::bad_alloc through the submitted graph-state future.
+   * @note `reload_graph_yaml()` uses this exact private wrapper; the injection
+   *       isolates its catch ordering without adding a production debug hook.
+   */
+  static std::optional<int> inject_bad_alloc_through_last_error_graph_state(
+      Kernel& kernel, const std::string& name) {
+    return kernel.with_graph_state_last_error(
+        name, "injected reload failure: ", [](GraphModel&) -> int {
+          throw std::bad_alloc{};
+        });
+  }
+
+  /**
    * @brief Resolves a mutable runtime owned by a Kernel test fixture.
    *
    * @param kernel Kernel whose private graph map should be inspected.
    * @param name Graph name to resolve.
    * @return Mutable runtime for the named graph.
    * @throws std::runtime_error when the graph is not loaded.
-   * @note This is a test-only boundary. Prefer public Kernel inspection values
-   * when a test does not need runtime-only collaborators.
+   * @note This is a test-only internal boundary. Prefer copied public
+   * `ps::Host` inspection values when a test validates frontend-visible
+   * behavior and does not need runtime-only collaborators.
    */
   static GraphRuntime& runtime(Kernel& kernel, const std::string& name) {
     auto it = kernel.graphs_.find(name);
@@ -84,8 +141,9 @@ class KernelTestAccess {
    * @param fn Callable forwarded to GraphStateExecutor::submit().
    * @return Future for the callable result.
    * @throws std::runtime_error when the graph is not loaded.
-   * @note This replaces the removed public Kernel::post() escape hatch for
-   * tests that must assert graph-state serialization behavior directly.
+   * @note This replaces the removed Kernel::post() test escape hatch for tests
+   * that must assert graph-state serialization behavior directly. It is not a
+   * production or public Host operation.
    */
   template <typename Fn>
   static auto submit_graph_state(Kernel& kernel, const std::string& name,
@@ -100,8 +158,8 @@ class KernelTestAccess {
    * @param kernel Kernel whose runtime trace should be reset.
    * @param name Graph name to resolve.
    * @throws std::runtime_error when the graph is not loaded.
-   * @note Public callers can read scheduler_trace(); clearing trace remains a
-   * test-only setup operation.
+   * @note Production callers can read copied scheduler trace values through
+   * public `ps::Host`; clearing trace remains a test-only setup operation.
    */
   static void clear_scheduler_trace(Kernel& kernel, const std::string& name) {
     runtime(kernel, name).clear_scheduler_log();
@@ -114,9 +172,9 @@ class KernelTestAccess {
    * @param name Graph name to resolve.
    * @return Scheduler events captured by the runtime.
    * @throws std::runtime_error when the graph is not loaded.
-   * @note Prefer Kernel::scheduler_trace() for value-level assertions. This
-   * helper exists for tests that compare public facade output with internal
-   * runtime state.
+   * @note Prefer `ps::Host::scheduler_trace()` for frontend-visible value-level
+   * assertions. This helper exists only for tests that compare the Host-copied
+   * snapshot with internal runtime state.
    */
   static std::vector<GraphRuntime::SchedulerEvent> scheduler_trace(
       Kernel& kernel, const std::string& name) {

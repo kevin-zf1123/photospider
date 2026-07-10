@@ -1,10 +1,12 @@
 // in: src/ops.cpp (REPLACE WITH THIS FINAL VERSION)
 #include "kernel/ops.hpp"
 
+#include <algorithm>
 #include <array>
 #include <cmath>
 #include <initializer_list>
 #include <mutex>
+#include <new>
 #include <numeric>
 #include <opencv2/core/ocl.hpp>
 #include <opencv2/imgcodecs.hpp>
@@ -15,7 +17,7 @@
 #include <vector>
 
 #include "adapter/buffer_adapter_opencv.hpp"
-#include "graph_model.hpp"
+#include "graph_model.hpp"  // NOLINT(build/include_subdir)
 #include "kernel/param_utils.hpp"
 
 namespace ps {
@@ -60,11 +62,23 @@ static std::array<double, 9> make_translation_matrix(double tx, double ty) {
   return {1.0, 0.0, tx, 0.0, 1.0, ty, 0.0, 0.0, 1.0};
 }
 
+/**
+ * @brief Reads an optional integer parameter without hiding memory exhaustion.
+ *
+ * @param node Node whose runtime parameters take precedence over static YAML.
+ * @param key Parameter key to resolve.
+ * @return Parsed integer, or nullopt for a missing/invalid parameter.
+ * @throws std::bad_alloc if YAML lookup or conversion exhausts memory.
+ * @note Other conversion failures preserve the built-in operation fallback
+ * semantics and are converted to nullopt.
+ */
 static std::optional<int> node_param_int(const Node& node,
                                          const std::string& key) {
   if (node.runtime_parameters && node.runtime_parameters[key]) {
     try {
       return node.runtime_parameters[key].as<int>();
+    } catch (const std::bad_alloc&) {
+      throw;
     } catch (...) {
       return std::nullopt;
     }
@@ -72,6 +86,8 @@ static std::optional<int> node_param_int(const Node& node,
   if (node.parameters && node.parameters[key]) {
     try {
       return node.parameters[key].as<int>();
+    } catch (const std::bad_alloc&) {
+      throw;
     } catch (...) {
       return std::nullopt;
     }
@@ -79,11 +95,23 @@ static std::optional<int> node_param_int(const Node& node,
   return std::nullopt;
 }
 
+/**
+ * @brief Reads an optional floating-point parameter without hiding exhaustion.
+ *
+ * @param node Node whose runtime parameters take precedence over static YAML.
+ * @param key Parameter key to resolve.
+ * @return Parsed value, or nullopt for a missing/invalid parameter.
+ * @throws std::bad_alloc if YAML lookup or conversion exhausts memory.
+ * @note Other conversion failures preserve the built-in operation fallback
+ * semantics and are converted to nullopt.
+ */
 static std::optional<double> node_param_double(const Node& node,
                                                const std::string& key) {
   if (node.runtime_parameters && node.runtime_parameters[key]) {
     try {
       return node.runtime_parameters[key].as<double>();
+    } catch (const std::bad_alloc&) {
+      throw;
     } catch (...) {
       return std::nullopt;
     }
@@ -91,6 +119,8 @@ static std::optional<double> node_param_double(const Node& node,
   if (node.parameters && node.parameters[key]) {
     try {
       return node.parameters[key].as<double>();
+    } catch (const std::bad_alloc&) {
+      throw;
     } catch (...) {
       return std::nullopt;
     }
@@ -98,11 +128,24 @@ static std::optional<double> node_param_double(const Node& node,
   return std::nullopt;
 }
 
+/**
+ * @brief Reads an optional string parameter without hiding memory exhaustion.
+ *
+ * @param node Node whose runtime parameters take precedence over static YAML.
+ * @param key Parameter key to resolve.
+ * @return Parsed string, or nullopt for a missing/invalid parameter.
+ * @throws std::bad_alloc if YAML lookup, conversion, or copying exhausts
+ * memory.
+ * @note Other conversion failures preserve the built-in operation fallback
+ * semantics and are converted to nullopt.
+ */
 static std::optional<std::string> node_param_string(const Node& node,
                                                     const std::string& key) {
   if (node.runtime_parameters && node.runtime_parameters[key]) {
     try {
       return node.runtime_parameters[key].as<std::string>();
+    } catch (const std::bad_alloc&) {
+      throw;
     } catch (...) {
       return std::nullopt;
     }
@@ -110,6 +153,8 @@ static std::optional<std::string> node_param_string(const Node& node,
   if (node.parameters && node.parameters[key]) {
     try {
       return node.parameters[key].as<std::string>();
+    } catch (const std::bad_alloc&) {
+      throw;
     } catch (...) {
       return std::nullopt;
     }
@@ -929,6 +974,20 @@ static NodeOutput op_gaussian_blur_monolithic(
   return result;
 }
 
+/**
+ * @brief Blends two input tiles with optional per-channel YAML mappings.
+ *
+ * @param node Operation node providing weights, mapping, and alpha strategy.
+ * @param output_tile Writable output tile.
+ * @param input_tiles Two normalized input tiles.
+ * @return Nothing.
+ * @throws std::bad_alloc if YAML conversion or temporary channel storage
+ * exhausts memory.
+ * @throws GraphError for missing/mismatched inputs or invalid strategy data.
+ * @throws cv::Exception for OpenCV blending/channel failures.
+ * @note Invalid individual channel-map entries are skipped, while memory
+ * exhaustion remains exceptional for the public Host compute boundary.
+ */
 static void op_add_weighted_tiled(const Node& node,
                                   const OutputTile& output_tile,
                                   const std::vector<InputTile>& input_tiles) {
@@ -982,6 +1041,8 @@ static void op_add_weighted_tiled(const Node& node,
         for (size_t i = 0; i < dsts.size(); ++i) {
           try {
             m = std::max(m, dsts[i].as<int>());
+          } catch (const std::bad_alloc&) {
+            throw;
           } catch (...) {
           }
         }
@@ -1005,9 +1066,9 @@ static void op_add_weighted_tiled(const Node& node,
   cv::split(input_a, A);
   cv::split(input_b, B);
   // Ensure plane count
-  if ((int)A.size() < out_ch)
+  if (static_cast<int>(A.size()) < out_ch)
     A.resize(out_ch, cv::Mat::zeros(input_a.rows, input_a.cols, CV_32FC1));
-  if ((int)B.size() < out_ch)
+  if (static_cast<int>(B.size()) < out_ch)
     B.resize(out_ch, cv::Mat::zeros(input_b.rows, input_b.cols, CV_32FC1));
 
   // Init out planes: default weighted result; mapped destinations will be
@@ -1036,6 +1097,8 @@ static void op_add_weighted_tiled(const Node& node,
         int d = -1;
         try {
           d = dsts[i].as<int>();
+        } catch (const std::bad_alloc&) {
+          throw;
         } catch (...) {
           continue;
         }
@@ -1063,6 +1126,8 @@ static void op_add_weighted_tiled(const Node& node,
       int src = -1;
       try {
         src = it->first.as<int>();
+      } catch (const std::bad_alloc&) {
+        throw;
       } catch (...) {
         continue;
       }
@@ -1073,12 +1138,14 @@ static void op_add_weighted_tiled(const Node& node,
         int d = -1;
         try {
           d = dsts[i].as<int>();
+        } catch (const std::bad_alloc&) {
+          throw;
         } catch (...) {
           continue;
         }
-        if (src < 0 || src >= (int)src_planes.size())
+        if (src < 0 || src >= static_cast<int>(src_planes.size()))
           continue;
-        if (d < 0 || d >= (int)O.size())
+        if (d < 0 || d >= static_cast<int>(O.size()))
           continue;
         // O[d] := O[d] + w*src
         cv::add(O[d], src_planes[src] * w, O[d]);
@@ -1097,10 +1164,10 @@ static void op_add_weighted_tiled(const Node& node,
       O[aidx] =
           cv::max(A.size() > 3 ? A[3] : O[aidx], B.size() > 3 ? B[3] : O[aidx]);
     } else if (alpha_strategy == "copy0") {
-      if ((int)A.size() > 3)
+      if (static_cast<int>(A.size()) > 3)
         O[aidx] = A[3].clone();
     } else if (alpha_strategy == "copy1") {
-      if ((int)B.size() > 3)
+      if (static_cast<int>(B.size()) > 3)
         O[aidx] = B[3].clone();
     } else if (alpha_strategy == "set1") {
       O[aidx] = cv::Mat(input_a.rows, input_a.cols, CV_32FC1, cv::Scalar(1.0));
@@ -1247,6 +1314,20 @@ static void normalize_to_base(cv::Mat& current_mat, const cv::Mat& base_mat,
   }
 }
 
+/**
+ * @brief Blends two full images with optional per-channel YAML mappings.
+ *
+ * @param node Operation node providing weights, mapping, and alpha strategy.
+ * @param inputs Two resolved full-image inputs.
+ * @return Blended NodeOutput with an owned image buffer.
+ * @throws std::bad_alloc if YAML conversion, channel storage, or result
+ * allocation exhausts memory.
+ * @throws GraphError for missing/empty/mismatched inputs or invalid strategy
+ * data.
+ * @throws cv::Exception for OpenCV blending/channel failures.
+ * @note Invalid individual channel-map entries are skipped, while memory
+ * exhaustion remains exceptional for the public Host compute boundary.
+ */
 static NodeOutput op_add_weighted_monolithic(
     const Node& node, const std::vector<const NodeOutput*>& inputs) {
   std::lock_guard<std::mutex> lock(g_opencv_op_mutex);
@@ -1290,6 +1371,8 @@ static NodeOutput op_add_weighted_monolithic(
         for (size_t i = 0; i < dsts.size(); ++i) {
           try {
             m = std::max(m, dsts[i].as<int>());
+          } catch (const std::bad_alloc&) {
+            throw;
           } catch (...) {
           }
         }
@@ -1305,9 +1388,9 @@ static NodeOutput op_add_weighted_monolithic(
     std::vector<cv::Mat> A, B;
     cv::split(input_a, A);
     cv::split(input_b, B);
-    if ((int)A.size() < out_ch)
+    if (static_cast<int>(A.size()) < out_ch)
       A.resize(out_ch, cv::Mat::zeros(input_a.rows, input_a.cols, CV_32FC1));
-    if ((int)B.size() < out_ch)
+    if (static_cast<int>(B.size()) < out_ch)
       B.resize(out_ch, cv::Mat::zeros(input_b.rows, input_b.cols, CV_32FC1));
     std::vector<cv::Mat> O(out_ch);
     for (int c = 0; c < out_ch; ++c) {
@@ -1329,6 +1412,8 @@ static NodeOutput op_add_weighted_monolithic(
           int d = -1;
           try {
             d = dsts[i].as<int>();
+          } catch (const std::bad_alloc&) {
+            throw;
           } catch (...) {
             continue;
           }
@@ -1353,6 +1438,8 @@ static NodeOutput op_add_weighted_monolithic(
         int src = -1;
         try {
           src = it->first.as<int>();
+        } catch (const std::bad_alloc&) {
+          throw;
         } catch (...) {
           continue;
         }
@@ -1363,12 +1450,14 @@ static NodeOutput op_add_weighted_monolithic(
           int d = -1;
           try {
             d = dsts[i].as<int>();
+          } catch (const std::bad_alloc&) {
+            throw;
           } catch (...) {
             continue;
           }
-          if (src < 0 || src >= (int)src_planes.size())
+          if (src < 0 || src >= static_cast<int>(src_planes.size()))
             continue;
-          if (d < 0 || d >= (int)O.size())
+          if (d < 0 || d >= static_cast<int>(O.size()))
             continue;
           cv::add(O[d], src_planes[src] * w, O[d]);
         }
@@ -1379,20 +1468,21 @@ static NodeOutput op_add_weighted_monolithic(
     std::string alpha_strategy = as_str(P, "alpha_strategy", "weighted");
     if ((alpha_strategy != "weighted") && out_ch >= 4) {
       int aidx = 3;
-      if (alpha_strategy == "max")
+      if (alpha_strategy == "max") {
         O[aidx] = cv::max(A.size() > 3 ? A[3] : O[aidx],
                           B.size() > 3 ? B[3] : O[aidx]);
-      else if (alpha_strategy == "copy0") {
-        if ((int)A.size() > 3)
+      } else if (alpha_strategy == "copy0") {
+        if (static_cast<int>(A.size()) > 3)
           O[aidx] = A[3].clone();
       } else if (alpha_strategy == "copy1") {
-        if ((int)B.size() > 3)
+        if (static_cast<int>(B.size()) > 3)
           O[aidx] = B[3].clone();
-      } else if (alpha_strategy == "set1")
+      } else if (alpha_strategy == "set1") {
         O[aidx] =
             cv::Mat(input_a.rows, input_a.cols, CV_32FC1, cv::Scalar(1.0));
-      else if (alpha_strategy == "set0")
+      } else if (alpha_strategy == "set0") {
         O[aidx] = cv::Mat::zeros(input_a.rows, input_a.cols, CV_32FC1);
+      }
     }
     cv::merge(O, output);
   }

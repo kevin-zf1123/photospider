@@ -36,6 +36,7 @@
 #include "kernel/services/graph_event_service.hpp"
 #include "kernel/services/graph_traversal_service.hpp"
 #include "kernel/services/roi_propagation_service.hpp"
+#include "photospider/host/host.hpp"
 
 namespace ps {
 namespace {
@@ -1644,44 +1645,49 @@ TEST(RealTimeDirtyUpdate, ForceRecacheHpSiblingCommitsCompleteHpOutput) {
             cv::Rect(0, 0, 128, 128));
 }
 
-TEST(DirtySourceLifecycleFacade, UsesInteractionServicePublicBoundary) {
-  Kernel kernel;
-  InteractionService svc(kernel);
-  svc.cmd_seed_builtin_ops();
+TEST(DirtySourceLifecycleFacade, UsesHostPublicBoundary) {
+  auto host = create_embedded_host();
+  ASSERT_NE(host, nullptr);
 
-  auto loaded = svc.cmd_load_graph("dirty_facade", "sessions",
-                                   "util/testcases/dirty_region_test.yaml");
-  ASSERT_TRUE(loaded.has_value());
+  const auto seed = host->seed_builtin_ops();
+  ASSERT_TRUE(seed.status.ok) << seed.status.message;
 
-  auto begin = svc.cmd_begin_dirty_source(
-      *loaded, 1, compute::DirtyDomain::HighPrecision, cv::Rect(0, 0, 32, 32));
-  ASSERT_TRUE(begin.has_value());
-  EXPECT_EQ(begin->graph_generation, 1u);
-  EXPECT_EQ(begin->dirty_updating_count, 1u);
-  ASSERT_TRUE(begin->dirty_source_state.count(1));
-  EXPECT_EQ(begin->dirty_source_state.at(1).lifecycle,
-            compute::DirtySourceLifecycleState::Updating);
+  GraphLoadRequest load_request;
+  load_request.session = GraphSessionId{"dirty_facade"};
+  load_request.root_dir = "sessions";
+  load_request.yaml_path = "util/testcases/dirty_region_test.yaml";
+  const auto loaded = host->load_graph(load_request);
+  ASSERT_TRUE(loaded.status.ok) << loaded.status.message;
 
-  auto update = svc.cmd_update_dirty_source(*loaded, 1,
-                                            compute::DirtyDomain::HighPrecision,
-                                            cv::Rect(16, 16, 16, 16));
-  ASSERT_TRUE(update.has_value());
-  EXPECT_EQ(update->graph_generation, begin->graph_generation);
-  ASSERT_TRUE(update->source_roi_records.count(1));
-  EXPECT_EQ(update->source_roi_records.at(1).size(), 2u);
+  const auto begin = host->begin_dirty_source(loaded.value, NodeId{1},
+                                              DirtyDomain::HighPrecision,
+                                              PixelRect{0, 0, 32, 32});
+  ASSERT_TRUE(begin.status.ok) << begin.status.message;
+  EXPECT_EQ(begin.value.graph_generation, 1u);
+  ASSERT_EQ(begin.value.sources.size(), 1u);
+  EXPECT_EQ(begin.value.sources.front().node.value, 1);
+  EXPECT_EQ(begin.value.sources.front().lifecycle,
+            DirtySourceLifecycleState::Updating);
 
-  auto snapshot = svc.cmd_dirty_region_snapshot(*loaded);
-  ASSERT_TRUE(snapshot.has_value());
-  EXPECT_EQ(snapshot->graph_generation, update->graph_generation);
-  EXPECT_TRUE(snapshot->actual_dirty_rois.count(1));
+  const auto update = host->update_dirty_source(loaded.value, NodeId{1},
+                                                DirtyDomain::HighPrecision,
+                                                PixelRect{16, 16, 16, 16});
+  ASSERT_TRUE(update.status.ok) << update.status.message;
+  EXPECT_EQ(update.value.graph_generation, begin.value.graph_generation);
+  ASSERT_EQ(update.value.sources.size(), 1u);
+  EXPECT_EQ(update.value.sources.front().source_rois.size(), 2u);
 
-  auto end =
-      svc.cmd_end_dirty_source(*loaded, 1, compute::DirtyDomain::HighPrecision);
-  ASSERT_TRUE(end.has_value());
-  EXPECT_EQ(end->dirty_updating_count, 0u);
-  ASSERT_TRUE(end->dirty_source_state.count(1));
-  EXPECT_EQ(end->dirty_source_state.at(1).lifecycle,
-            compute::DirtySourceLifecycleState::Settled);
+  const auto snapshot = host->dirty_region_snapshot(loaded.value);
+  ASSERT_TRUE(snapshot.status.ok) << snapshot.status.message;
+  EXPECT_EQ(snapshot.value.graph_generation, update.value.graph_generation);
+  EXPECT_TRUE(snapshot.value.actual_dirty_rois.count(1));
+
+  const auto end = host->end_dirty_source(loaded.value, NodeId{1},
+                                          DirtyDomain::HighPrecision);
+  ASSERT_TRUE(end.status.ok) << end.status.message;
+  ASSERT_EQ(end.value.sources.size(), 1u);
+  EXPECT_EQ(end.value.sources.front().lifecycle,
+            DirtySourceLifecycleState::Settled);
 }
 
 TEST(DirtyControlLaneFacade, ExposesWakeupAndCutoffThroughInteractionService) {

@@ -110,8 +110,10 @@ class NodeTaskRunner {
    *
    * @param node_idx Dense index into execution_order_, temp_results_, and
    * resolved_ops_.
-   * @throws GraphError with compute-stage context for OpenCV, standard, and
-   * unknown operation failures.
+   * @return Nothing.
+   * @throws std::bad_alloc when node execution exhausts memory.
+   * @throws GraphError with compute-stage context for other OpenCV, standard,
+   * and unknown operation failures.
    * @note This method is called from scheduler worker closures and therefore
    * must leave exception transport to SchedulerTaskRuntime.
    */
@@ -121,7 +123,10 @@ class NodeTaskRunner {
    * @brief Runs one planned task by task id.
    *
    * @param task_id Dense id into task_graph.tasks.
-   * @throws GraphError with compute-stage context for operation failures.
+   * @return Nothing.
+   * @throws std::bad_alloc when task execution exhausts memory.
+   * @throws GraphError with compute-stage context for other operation
+   * failures.
    * @note Tile tasks execute only their PlannedTask::output_roi. Node and
    * monolithic tasks delegate to run_node().
    */

@@ -4,9 +4,9 @@
 #include <optional>
 #include <vector>
 
-#include "graph_model.hpp"
+#include "graph_model.hpp"  // NOLINT(build/include_subdir)
 #include "kernel/services/compute-service/tiled_input_normalizer.hpp"
-#include "ps_types.hpp"
+#include "ps_types.hpp"  // NOLINT(build/include_subdir)
 
 namespace ps::compute {
 
@@ -69,7 +69,9 @@ class NodeExecutor {
    * @param inputs Resolved upstream image outputs in graph input order.
    * @param config Optional tiled execution controls.
    * @return NodeOutput produced by the operator.
-   * @throws GraphError for dependency, parameter, or compute failures.
+   * @throws std::bad_alloc if input normalization, output allocation, or the
+   *         selected operation exhausts memory.
+   * @throws GraphError for other dependency, parameter, or compute failures.
    * @note Monolithic operators receive the original inputs. Tiled operators
    * receive normalized input views when image_mixing requires
    * resize/crop/channel conversion.
@@ -88,8 +90,11 @@ class NodeExecutor {
    * @param inputs Resolved upstream image outputs in graph input order.
    * @param output_buffer Destination buffer that receives tiled output.
    * @param config Optional tiled execution controls.
+   * @return Nothing.
+   * @throws std::bad_alloc if normalization, allocation, or tile execution
+   *         exhausts memory.
    * @throws GraphError when required inputs are missing or tile execution
-   * fails.
+   *         otherwise fails.
    * @note Used by dirty HP/RT paths that already own their destination buffers.
    */
   static void execute_tiled_into(GraphModel& graph, Node& node,

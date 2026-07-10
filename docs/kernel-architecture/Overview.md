@@ -74,7 +74,7 @@ Package boundary:
 
 ```mermaid
 graph TD
-    CLI["CLI / REPL / TUI"] --> InteractionService
+    CLI["CLI / REPL / TUI"] --> Host["ps::Host"]
     Frontend["Embedded frontend"] --> Host["ps::Host"]
     Host --> EmbeddedHost["embedded Host adapter"]
     EmbeddedHost --> InteractionService
@@ -114,7 +114,7 @@ graph TD
 | `embedded Host adapter` | In-process Host implementation backed by `Kernel` and `InteractionService`, used by local frontends while CLI behavior remains unchanged. |
 | `GraphRuntime` | Per-graph resource container with model, graph-state executor, events, schedulers, and platform context. |
 | `GraphModel` | Graph state holder: private node storage, topology adjacency index, cache root, timing data, quiet/skip-save flags. |
-| `InteractionService` | CLI-facing and embedded-adapter wrapper around `Kernel`; keeps command code thin while Host becomes the stable installable frontend seam. |
+| `InteractionService` | Internal wrapper around `Kernel` used by the embedded Host adapter and backend code; frontends, including the CLI, use the public Host seam. |
 | `ComputeService` | Resolves dependencies, checks caches, executes ops, coordinates RT/HP/tiled paths and timing events. |
 | `GraphTraversalService` | Topology-only traversal orders, ending-node discovery, ancestor checks, upstream dependency queries, and downstream dependent queries backed by `GraphModel` adjacency. |
 | `RoiPropagationService` | ROI/spatial propagation boundary for upstream ROI computation and graph-level forward/backward ROI projection. |
@@ -146,8 +146,9 @@ graph TD
 
 Typical REPL compute flow:
 
-1. A REPL command calls `InteractionService`.
-2. `InteractionService` calls `Kernel`.
+1. A REPL command calls the public `ps::Host` interface.
+2. The embedded Host adapter translates public values to internal
+   `InteractionService` / `Kernel` requests.
 3. `Kernel` resolves the active `GraphRuntime`.
 4. `Kernel` creates or uses services needed by `ComputeService`.
 5. `ComputeService` resolves topology order with `GraphTraversalService`.
@@ -157,7 +158,8 @@ Typical REPL compute flow:
 8. `ComputeService` selects operation implementations from `OpRegistry`.
 9. Work executes recursively or through the configured scheduler path.
 10. `GraphEventService` records per-node events and timing data.
-11. Results are exposed back through `Kernel` and `InteractionService`.
+11. The embedded Host adapter copies results into public Host value snapshots,
+    and the CLI renders those values.
 
 Typical embedded Host compute flow:
 
@@ -177,6 +179,10 @@ Typical embedded Host compute flow:
    wrapper has converted backend completion into `OperationStatus`. This keeps
    backend `LastError` classifications available to failed async requests before
    graph close clears runtime diagnostics.
+7. Recoverable backend failures become Host status/result values, while
+   resource exhaustion remains exceptional: non-destructor Host methods and
+   consumed async futures may propagate `std::bad_alloc` as documented by the
+   installable interface.
 
 ## Scheduler Model
 
@@ -289,7 +295,8 @@ OpenSpec change and the maintained `Compute-Service-Split.md` plan. The
 `GraphTraversalService` topology/ROI split has landed: traversal is topology
 only, ROI propagation is a separate service, extent resolution is explicit, and
 dependency-tree data is structured by the inspection boundary, exposed through
-`InteractionService`, and rendered by CLI/TUI/frontend code.
+the internal `InteractionService` to the embedded Host adapter, copied into
+public Host snapshots, and rendered by CLI/TUI/frontend code.
 
 ## Maintained Documentation Boundary
 

@@ -6,7 +6,7 @@
 #include <vector>
 
 #include "benchmark/benchmark_types.hpp"
-#include "graph_model.hpp"
+#include "graph_model.hpp"  // NOLINT(build/include_subdir)
 #include "kernel/scheduler/scheduler_task_runtime.hpp"
 
 namespace ps {
@@ -32,6 +32,10 @@ namespace ps::compute {
  * of the supplied SchedulerTaskRuntime. It also does not implement the
  * real-time dirty-region planner; dirty update callers only reuse the static
  * source-first submission helper below.
+ *
+ * Its C++ `public:` members are callable only inside the private backend source
+ * tree. That language-access label does not make them product Host API,
+ * frontend seam, or plugin ABI; external callers use `ps::Host`.
  *
  * @note Instances borrow traversal, cache, and event services. Those services
  * must outlive the dispatcher and must refer to the same graph runtime context
@@ -104,6 +108,8 @@ class ComputeTaskDispatcher {
    * dependency is unavailable, scheduling fails, or dispatch finishes without
    * target output. It may also rethrow operation, OpenCV, or cache exceptions
    * wrapped with compute-stage context.
+   * @throws std::bad_alloc unchanged when plan, task, operation, cache,
+   * telemetry, or result storage exhausts memory.
    * @note Worker tasks do not mutate GraphModel caches directly. They publish
    * temporary results, and execute() serializes final cache ownership after the
    * scheduler drains.
@@ -126,8 +132,11 @@ class ComputeTaskDispatcher {
    * all sources and the optional boundary check complete.
    * @param epoch Optional scheduler epoch forwarded to submitted tasks.
    * @param before_downstream Optional callback for source-boundary validation.
+   * @return Nothing.
    * @throws Rethrows any task or callback exception after recording it in the
    * scheduler runtime.
+   * @throws std::bad_alloc unchanged when task submission or callback storage
+   * exhausts memory.
    * @note This helper is shared by high-precision dirty ROI and real-time dirty
    * update paths; it does not build or prune the dirty task graph itself.
    */
@@ -155,7 +164,10 @@ class ComputeTaskDispatcher {
    * @param downstream_task_count Total downstream dirty task count tracked by
    * the scheduler.
    * @param before_downstream Optional callback for source-boundary validation.
+   * @return Nothing.
    * @throws Rethrows any scheduler, task, or callback exception.
+   * @throws std::bad_alloc unchanged when handle submission, dependency, or
+   * callback storage exhausts memory.
    * @note Production HP and RT dirty executors use this overload so
    * source-first scheduler submission remains a ComputeTaskDispatcher boundary
    * while dirty executors own only plan-specific TaskExecutor construction.

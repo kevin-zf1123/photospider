@@ -29,8 +29,10 @@ use `mutable_node()` for node-local runtime fields, but structural edits still
 belong to the model mutation helpers.
 
 Internal services coordinate locking, timing, cache, topology, and traversal
-behavior through the model boundary. Most frontend code should reach graph
-state through `Kernel` or `InteractionService`.
+behavior through the model boundary. Frontend, CLI, and TUI code reaches graph
+state through the public `ps::Host` seam. The embedded Host adapter delegates
+to the internal `InteractionService`/`Kernel` boundary; backend services may
+use that internal boundary but do not expose it to frontend callers.
 
 For CLI-loaded graphs, `cache_root` is derived from the loaded
 `cache_root_dir` config as `<cache_root_dir>/<graph_name>`, with relative paths

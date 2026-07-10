@@ -240,7 +240,8 @@ struct DirtyTaskSelectionOverlay {
  *
  * ComputeRequest is the planning-layer description of intent, target node,
  * parallel execution preference, and optional dirty ROI. It is narrower than
- * public ComputeService options and contains only data needed to produce a
+ * internal ComputeService request options and contains only data needed to
+ * produce a
  * ComputePlan.
  *
  * @note RealTimeUpdate requests are still planned as a single domain per call;

@@ -121,6 +121,9 @@ class HighPrecisionDirtyNodeExecutor {
    * @param node Node being computed.
    * @param entry HP ROI and extent metadata.
    * @param image_inputs_ready Resolved HP image inputs.
+   * @return Nothing.
+   * @throws std::bad_alloc when operation execution or staging exhausts
+   * memory.
    * @throws GraphError when no HP tiled/monolithic operation exists or an
    * operation returns no output.
    * @note Tiled HP implementations remain preferred over monolithic HP
@@ -321,8 +324,10 @@ class RealTimeDirtyNodeExecutor {
    * @param image_inputs_ready Resolved RT image inputs.
    * @param rt_buffer Destination RT proxy buffer.
    * @param op_variant Selected monolithic or tiled operation.
-   * @throws GraphError wrapping OpenCV and standard exceptions with node id
-   * context, preserving previous RT dirty error reporting.
+   * @return Nothing.
+   * @throws std::bad_alloc when RT operation execution exhausts memory.
+   * @throws GraphError wrapping other OpenCV and standard exceptions with node
+   * id context, preserving previous RT dirty error reporting.
    * @note GraphError exceptions from the operation are rethrown unchanged.
    */
   void execute_operation(

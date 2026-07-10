@@ -1,7 +1,11 @@
 #include "kernel/services/compute-service/node_executor.hpp"
 
 #include <algorithm>
+#include <new>
+#include <string>
 #include <type_traits>
+#include <utility>
+#include <vector>
 
 #include "kernel/param_utils.hpp"
 #include "kernel/services/compute-service/compute_geometry.hpp"
@@ -246,6 +250,22 @@ void execute_tiled_context_into(GraphModel& graph, Node& node,
 
 }  // namespace
 
+/**
+ * @brief Executes one monolithic or tiled operation variant for a node.
+ *
+ * @param graph Graph used for random-access ROI propagation.
+ * @param node Node whose runtime parameters and identity drive execution.
+ * @param op Selected operation implementation.
+ * @param inputs Resolved upstream outputs in graph input order.
+ * @param config Tiled execution controls and optional dirty clipping.
+ * @return Output produced by the selected implementation.
+ * @throws std::bad_alloc if normalization, allocation, or operation execution
+ * exhausts memory.
+ * @throws GraphError preserving graph failures and wrapping other operation
+ * failures with node context.
+ * @note Monolithic calls receive original inputs; tiled calls normalize input
+ * views and stage output before returning it.
+ */
 NodeOutput NodeExecutor::execute(GraphModel& graph, Node& node,
                                  const OpRegistry::OpVariant& op,
                                  const std::vector<const NodeOutput*>& inputs,
@@ -274,6 +294,8 @@ NodeOutput NodeExecutor::execute(GraphModel& graph, Node& node,
           }
         },
         op);
+  } catch (const std::bad_alloc&) {
+    throw;
   } catch (const GraphError&) {
     throw;
   } catch (const cv::Exception& e) {

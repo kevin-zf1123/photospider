@@ -1,27 +1,28 @@
 # ComputeService Split Plan
 
 This document records the in-place split of `ComputeService`. The first split
-has landed behind the existing public facade. Items still marked TODO are
-intentionally deferred to later scheduler, traversal, cache-migration, or
-planner-plugin changes.
+has landed inside the backend, behind the installable public `ps::Host` facade.
+Items still marked TODO are intentionally deferred to later scheduler,
+traversal, cache-migration, or planner-plugin changes.
 
 ## Current Problem
 
-`ComputeService` is the public compute entry point, but its implementation also
-contains dependency resolution, cache policy, monolithic and tiled dispatch,
-dirty-region state planning, compute task derivation, scheduler task-runtime
-dispatch coordination, timing, benchmark events, and output debug metadata.
+`ComputeService` is the internal compute facade reached after the public Host
+boundary, but its implementation also contains dependency resolution, cache
+policy, monolithic and tiled dispatch, dirty-region state planning, compute
+task derivation, scheduler task-runtime dispatch coordination, timing,
+benchmark events, and output debug metadata.
 
 The split should preserve behavior first. It is not a rewrite of the graph
 engine and it is not a plugin ABI change.
 
-The compute facade now uses structured request objects at both public and
-service boundaries. `Kernel::ComputeRequest` carries graph name, cache,
-execution, telemetry, intent, and dirty ROI controls from frontends.
-`ComputeService::Request` receives only target node, cache, telemetry, intent,
-and dirty ROI data, while `ComputeService::ExecutionStrategy` carries the
-runtime and scheduler-backed execution policy. This keeps CLI behavior stable
-without extending long positional boolean parameter lists.
+The compute path now uses structured request objects at each boundary.
+Frontends submit a public `ps::HostComputeRequest` to `ps::Host`; the embedded
+Host adapter translates that value into an internal `Kernel::ComputeRequest`.
+`ComputeService::Request` then receives only target node, cache, telemetry,
+intent, and dirty ROI data, while `ComputeService::ExecutionStrategy` carries
+the runtime and scheduler-backed execution policy. This keeps CLI behavior
+stable without extending long positional boolean parameter lists.
 
 ## Target Shape
 
@@ -97,8 +98,9 @@ operators.
 `DirtyRegionPlanner` owns graph-scoped dirty-region state for the current HP and
 RT dirty update paths. It exposes a `DirtyRegionSnapshot` using stable node ids,
 tile coordinates, pixel ROIs, graph generation metadata, and edge mappings.
-`ComputeService` stores an inspection summary on the graph, and
-`InteractionService` exposes that summary for frontend/debug queries.
+`ComputeService` stores an inspection summary on the graph. The internal
+`InteractionService` returns it to the embedded Host adapter, which copies it
+into public Host values for frontend/debug queries.
 
 `DirtyRegionSnapshot` is graph-scoped state alongside graph topology, not a
 scheduler graph. It records the current dirty facts used to activate or clip
@@ -120,12 +122,18 @@ derived from that lifecycle state, and the propagator derives the propagated
 It should not be modeled as a scheduler-owned compute task queue or as
 node-local compute ownership.
 
-Current production-facing lifecycle writes are exposed through `Kernel` and
-`InteractionService` begin/update/end dirty source methods. They serialize graph
-state mutation through `GraphStateExecutor` and route node/frontend lifecycle
-events through `DirtyControlLane`. The lane reuses `DirtyRegionPlanner` for
-membership, lifecycle, and actual dirty ROI refresh, and returns wakeup/cutoff
-decisions to the facade. Frontend event subscription and reusable request-plan
+Current production-facing lifecycle writes enter through public `ps::Host`
+begin/update/end dirty-source methods. The embedded adapter translates them to
+internal `Kernel` / `InteractionService` methods, which serialize graph-state
+mutation through `GraphStateExecutor` and route node/frontend lifecycle events
+through `DirtyControlLane`. The lane reuses `DirtyRegionPlanner` for membership,
+lifecycle, and actual dirty ROI refresh. `dirty_updating_count` is stored in the
+internal `DirtyRegionSnapshot` and copied into `DirtyControlLaneResult`; the
+wakeup/cutoff decisions exist only in `DirtyControlLaneResult`. All three remain
+internal evidence consumed by compute-service work-set materialization. The
+embedded adapter calls the
+snapshot-returning internal lifecycle methods and copies only the public dirty
+snapshot fields. Frontend event subscription and reusable request-plan
 coalescing remain follow-up work.
 
 Current constraint: `DirtyControlLane` does not own or cache a
@@ -219,12 +227,15 @@ sequential fallback.
 
 For dirty updates, production HP and RT executors build request-local dirty
 `TaskExecutor` handles from the request plan and dirty snapshot, then call the
-public static `ComputeTaskDispatcher::submit_dirty_ready_tasks_source_first`
-helper as the source-first submission boundary. Runtime dependency counters,
-task reference counts, and ready queues are owned inside compute-service
-dispatcher state during that materialization. The scheduler receives concrete
-ready task handles with scheduler priority and completion accounting; it does
-not receive task graphs, own dirty-state lookup, or derive task graphs.
+internal class's public C++ static
+`ComputeTaskDispatcher::submit_dirty_ready_tasks_source_first` helper as the
+source-first submission boundary. Public C++ access here only permits calls
+across private backend translation units; it is not product public API. Runtime
+dependency counters, task reference counts, and ready queues are owned inside
+compute-service dispatcher state during that materialization. The scheduler
+receives concrete ready task handles with scheduler priority and completion
+accounting; it does not receive task graphs, own dirty-state lookup, or derive
+task graphs.
 
 Realtime materialization must consider both current running work and the dirty
 node lifecycle. If a node is still creating dirty regions, an empty ready queue
@@ -277,22 +288,37 @@ computation, dependency-tree formatting, or compatibility wrappers for removed
 APIs.
 
 Dependency-tree inspection is structured: `GraphInspectService` builds
-dependency-tree snapshots from topology adjacency, `Kernel`/`InteractionService`
-return those snapshots, and CLI/TUI/frontend code renders human-readable text.
+dependency-tree snapshots from topology adjacency, the internal
+`Kernel`/`InteractionService` returns them to the embedded Host adapter, and the
+adapter copies public Host snapshots that CLI/TUI/frontend code renders.
 
-## Interaction Boundary
+## Host and Internal Interaction Boundary
 
-`InteractionService` is the frontend-facing facade between CLI/TUI/frontends and
-the kernel. In the dirty-region context, it should expose graph-scoped dirty
-snapshot inspection and visualization APIs. It is not the authoritative source
-of dirty-region generation or propagation.
+`ps::Host` is the frontend-facing interface used by CLI/TUI and embedded
+frontends. `InteractionService` is an internal wrapper between the embedded Host
+adapter and `Kernel`; frontend code neither includes nor calls it directly. The
+dirty-region boundary exposes copied graph-scoped inspection and lifecycle
+values through Host, while neither Host nor `InteractionService` is the
+authoritative source of dirty-region generation or propagation.
 
-`InteractionService` now exposes dirty snapshot inspection plus dirty source
-begin/update/end control results. The control result includes generation,
-updating source count, dispatcher wakeup intent, and whether the latest source
-settle event should cut off only after downstream dirty work is complete. It
-also exposes structured dependency-tree and graph-inspection snapshots so
-frontends can parse graph structure before choosing a presentation format.
+Internally, `DirtyRegionSnapshot` retains `dirty_updating_count`, and
+`DirtyControlLaneResult` copies that count while adding dispatcher wakeup intent
+and downstream-completion cutoff decisions. Only those two decisions are
+specific to the control result. None of these internal fields crosses the
+public boundary. `InteractionService` returns the current dirty snapshot to the
+embedded adapter for public lifecycle methods; Host copies only fields present
+in `DirtyRegionInspectionSnapshot`: generation, source lifecycle/ROIs, dirty
+tiles, monolithic regions, propagated ROIs, and edge mappings. Host also returns
+structured dependency-tree and graph-inspection snapshots so frontends can
+parse graph structure before choosing a presentation format.
+
+The public Host exception boundary converts recoverable graph, parser,
+filesystem, standard, and unknown backend failures into `OperationStatus` or
+`Result<T>` failures. Resource exhaustion is deliberately different:
+`std::bad_alloc` may propagate from every non-destructor Host method, and an
+async compute future may rethrow it when consumed. The installable Doxygen
+contract records this behavior method-by-method; callers must not treat Host as
+unconditionally non-throwing.
 
 The CLI/REPL frontend is a permanent batch-oriented surface. It does not expose
 RT intent commands, dirty ROI creation, or dirty source lifecycle commands such
@@ -300,11 +326,11 @@ as `compute rt`, `--dirty-roi`, `dirty begin`, `dirty update`, or `dirty end`.
 `RealTimeUpdate` and dirty source lifecycle APIs remain kernel/test and future
 GUI/WebUI-style frontend contracts.
 
-TODO: design the missing node-to-`InteractionService` interface for realtime
-dirty updates. The interface must let nodes provide dirty-region lifecycle
-events, realtime update events, and update requests while keeping
-`InteractionService` as a facade for frontend consumption rather than the owner
-of dirty-region generation or compute scheduling.
+TODO: design the missing node-to-backend interface for realtime dirty updates.
+The interface must let nodes provide dirty-region lifecycle events, realtime
+update events, and update requests while keeping the internal
+`InteractionService` separate from dirty-region generation and compute
+scheduling ownership; frontend delivery remains a public Host responsibility.
 
 TODO: add richer visualization APIs after the graph-scoped dirty state has a
 frontend display contract.

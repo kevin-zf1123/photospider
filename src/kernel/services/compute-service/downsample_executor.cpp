@@ -1,6 +1,7 @@
 #include "kernel/services/compute-service/downsample_executor.hpp"
 
 #include <algorithm>
+#include <new>
 #include <string>
 #include <utility>
 #include <vector>
@@ -32,6 +33,8 @@ ImageBuffer clone_image_buffer(const ImageBuffer& source) {
   }
   try {
     return fromCvMat(toCvMat(source).clone());
+  } catch (const std::bad_alloc&) {
+    throw;
   } catch (const std::exception& e) {
     throw GraphError(
         GraphErrc::ComputeError,
@@ -44,7 +47,8 @@ ImageBuffer clone_image_buffer(const ImageBuffer& source) {
  *
  * @param state Committed proxy state to copy.
  * @return Independent proxy state safe for ROI mutation before commit.
- * @throws GraphError when image payload cloning fails.
+ * @throws std::bad_alloc when image or metadata copying exhausts memory.
+ * @throws GraphError when image payload cloning otherwise fails.
  */
 RealtimeProxyGraph::NodeState clone_proxy_state(
     const RealtimeProxyGraph::NodeState& state) {
@@ -72,7 +76,7 @@ DownsampleExecutor::DownsampleExecutor(GraphModel& graph,
     : graph_(graph),
       proxy_graph_(proxy_graph),
       runtime_(runtime),
-      events_(events) {}
+      events_(events) {}  // NOLINT
 
 void DownsampleExecutor::execute(const std::vector<Request>& requests) {
   for (const auto& request : requests) {

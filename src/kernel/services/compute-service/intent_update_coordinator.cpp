@@ -1,6 +1,8 @@
 #include "kernel/services/compute-service/intent_update_coordinator.hpp"
 
 #include <future>
+#include <new>
+#include <string>
 
 #include "kernel/scheduler/scheduler_task_runtime.hpp"
 #include "kernel/services/compute-service/dirty_sibling_commit_gate.hpp"
@@ -53,6 +55,22 @@ void IntentUpdateCoordinator::validate(
   }
 }
 
+/**
+ * @brief Executes the callback set required by one compute intent.
+ *
+ * @param intent Requested global-HP or realtime intent.
+ * @param hp_task_runtime Optional HP runtime used for concurrency capability.
+ * @param rt_task_runtime Optional RT runtime used for concurrency capability.
+ * @param dirty_roi Optional dirty ROI validated for realtime requests.
+ * @param callbacks Borrowed compute, output, trace, and commit-gate callbacks.
+ * @return Target output after the selected intent paths complete.
+ * @throws std::bad_alloc when callback execution or async state exhausts
+ * memory, including an HP sibling failure observed while handling RT failure.
+ * @throws GraphError for invalid requests or missing callbacks.
+ * @throws std::exception for other callback or future failures.
+ * @note Concurrent failure aborts staged HP commit, drains the HP future, and
+ * preserves resource-exhaustion identity before rethrowing the primary error.
+ */
 NodeOutput& IntentUpdateCoordinator::coordinate_intent_update(
     ComputeIntent intent, SchedulerTaskRuntime* hp_task_runtime,
     SchedulerTaskRuntime* rt_task_runtime,
@@ -115,6 +133,8 @@ NodeOutput& IntentUpdateCoordinator::coordinate_intent_update(
           }
           try {
             hp_future.get();
+          } catch (const std::bad_alloc&) {
+            throw;
           } catch (...) {
           }
           throw;

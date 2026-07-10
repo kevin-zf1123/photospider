@@ -324,6 +324,10 @@ set(PHOTOSPIDER_PRODUCT_SOURCES
 add_library(photospider STATIC ${PHOTOSPIDER_PRODUCT_SOURCES})
 
 target_compile_definitions(photospider PUBLIC PHOTOSPIDER_STATIC)
+if(BUILD_TESTING)
+    target_compile_definitions(photospider PRIVATE
+        PHOTOSPIDER_INTERNAL_BAD_ALLOC_TESTING)
+endif()
 target_compile_features(photospider PUBLIC cxx_std_17)
 
 target_include_directories(photospider

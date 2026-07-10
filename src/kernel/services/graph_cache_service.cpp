@@ -4,7 +4,10 @@
 
 #include <chrono>
 #include <fstream>
+#include <new>
+#include <string>
 #include <unordered_set>
+#include <utility>
 
 #include "adapter/buffer_adapter_opencv.hpp"
 #include "kernel/services/graph_traversal_service.hpp"
@@ -258,6 +261,8 @@ DiskCacheReadAttempt read_cache_entry(const GraphModel& graph, const Node& node,
                          DiskCacheLoadStatus::Hit, GraphErrc::Unknown,
                          "Loaded disk cache entry.");
     return attempt;
+  } catch (const std::bad_alloc&) {
+    throw;
   } catch (const cv::Exception& e) {
     return make_error_attempt(
         node.id, cache_entry, cache_file, metadata_file, GraphErrc::Io,

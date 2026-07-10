@@ -6,7 +6,7 @@
 #include <unordered_set>
 #include <vector>
 
-#include "graph_model.hpp"
+#include "graph_model.hpp"  // NOLINT(build/include_subdir)
 #include "kernel/services/compute-service/compute_node_task_runner.hpp"
 #include "kernel/services/compute-service/compute_task_dependency_state.hpp"
 
@@ -170,7 +170,20 @@ class TaskSubmissionPlan : public TaskExecutor {
    */
   void resolve_operations();
 
-  /** @brief Releases dependent tasks whose upstream counters reached zero. */
+  /**
+   * @brief Releases dependent tasks whose upstream counters reached zero.
+   *
+   * @param current_task_id Completed task whose dependent counters advance.
+   * @param current_node_id Completed node used in scheduling diagnostics.
+   * @param task_runtime Scheduler runtime receiving newly ready handles.
+   * @return Nothing.
+   * @throws std::bad_alloc if ready-handle collection or scheduler submission
+   *         exhausts memory.
+   * @throws GraphError with scheduling-stage context for other dependency-map,
+   *         range, or scheduler submission failures.
+   * @note Resource exhaustion keeps its exception identity; recoverable
+   * scheduling failures receive node context before worker-thread transport.
+   */
   void release_dependents(int current_task_id, int current_node_id,
                           SchedulerTaskRuntime& task_runtime);
 
