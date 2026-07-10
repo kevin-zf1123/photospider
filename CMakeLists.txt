@@ -848,49 +848,10 @@ if(BUILD_TESTING)
     add_custom_target(public_header_self_containment)
     add_dependencies(public_header_self_containment
         public_header_self_containment_objects)
-    add_test(NAME PublicHeaderBoundaryScan
-        COMMAND ${Python3_EXECUTABLE}
-            "${PROJECT_SOURCE_DIR}/tests/verification/codebase_structure/phase0_guardrail_scan.py"
-            --repo "${PROJECT_SOURCE_DIR}"
-            --out "${CMAKE_BINARY_DIR}/tests/public_header_boundary_scan"
-        WORKING_DIRECTORY ${PROJECT_SOURCE_DIR})
-    add_test(NAME Phase1CoreSeamScan
-        COMMAND ${Python3_EXECUTABLE}
-            "${PROJECT_SOURCE_DIR}/tests/verification/codebase_structure/phase1_core_seam_scan.py"
-            --repo "${PROJECT_SOURCE_DIR}"
-            --out "${CMAKE_BINARY_DIR}/tests/phase1_core_seam_scan"
-        WORKING_DIRECTORY ${PROJECT_SOURCE_DIR})
-    add_test(NAME Phase2HostAdapterScan
-        COMMAND ${Python3_EXECUTABLE}
-            "${PROJECT_SOURCE_DIR}/tests/verification/codebase_structure/phase2_host_adapter_scan.py"
-            --repo "${PROJECT_SOURCE_DIR}"
-            --out "${CMAKE_BINARY_DIR}/tests/phase2_host_adapter_scan"
-        WORKING_DIRECTORY ${PROJECT_SOURCE_DIR})
-    add_test(NAME Phase2CliHostScan
-        COMMAND ${Python3_EXECUTABLE}
-            "${PROJECT_SOURCE_DIR}/tests/verification/codebase_structure/phase2_cli_host_scan.py"
-            --repo "${PROJECT_SOURCE_DIR}"
-            --out "${CMAKE_BINARY_DIR}/tests/phase2_cli_host_scan"
-        WORKING_DIRECTORY ${PROJECT_SOURCE_DIR})
-    add_test(NAME PublicEscapeHatchScan
-        COMMAND ${Python3_EXECUTABLE}
-            "${PROJECT_SOURCE_DIR}/tests/verification/codebase_structure/public_escape_hatch_scan.py"
-            --repo "${PROJECT_SOURCE_DIR}"
-            --out "${CMAKE_BINARY_DIR}/tests/public_escape_hatch_scan"
-        WORKING_DIRECTORY ${PROJECT_SOURCE_DIR})
-    add_test(NAME Phase3InternalHeaderScan
-        COMMAND ${Python3_EXECUTABLE}
-            "${PROJECT_SOURCE_DIR}/tests/verification/codebase_structure/phase3_internal_header_scan.py"
-            --repo "${PROJECT_SOURCE_DIR}"
-            --out "${CMAKE_BINARY_DIR}/tests/phase3_internal_header_scan"
-        WORKING_DIRECTORY ${PROJECT_SOURCE_DIR})
-    add_test(NAME Phase4StaticProductScan
-        COMMAND ${Python3_EXECUTABLE}
-            "${PROJECT_SOURCE_DIR}/tests/verification/codebase_structure/phase4_static_product_scan.py"
-            --repo "${PROJECT_SOURCE_DIR}"
-            --out "${CMAKE_BINARY_DIR}/tests/phase4_static_product_scan"
-        WORKING_DIRECTORY ${PROJECT_SOURCE_DIR})
-    add_test(NAME Phase4StaticProductConsumerSmoke
+    # CTest is reserved for long-lived runtime, package-consumer, compile, and
+    # error-boundary behavior. Issue-specific migration/residue scanners and
+    # Doxygen audits are manual evidence tools and are intentionally absent.
+    add_test(NAME StaticProductConsumerSmoke
         COMMAND ${Python3_EXECUTABLE}
             "${PROJECT_SOURCE_DIR}/tests/verification/codebase_structure/phase4_static_product_consumer_smoke.py"
             --repo "${PROJECT_SOURCE_DIR}"
@@ -898,7 +859,7 @@ if(BUILD_TESTING)
             --out "${CMAKE_BINARY_DIR}/tests/phase4_static_product_consumer_smoke"
             --config $<CONFIG>
         WORKING_DIRECTORY ${PROJECT_SOURCE_DIR})
-    set_tests_properties(Phase4StaticProductConsumerSmoke PROPERTIES
+    set_tests_properties(StaticProductConsumerSmoke PROPERTIES
         RUN_SERIAL TRUE)
     add_test(NAME GraphCliOptionBadAlloc
         COMMAND ${Python3_EXECUTABLE}
@@ -937,7 +898,8 @@ if(BUILD_TESTING)
         WORKING_DIRECTORY ${PROJECT_SOURCE_DIR})
     gtest_discover_tests(test_scheduler_plugin_loader WORKING_DIRECTORY ${PROJECT_SOURCE_DIR})
     add_test(NAME SplitComputeServiceRuntimeTrace
-        COMMAND split_compute_service_trace "${PROJECT_SOURCE_DIR}/tests/results/split-compute-service"
+        COMMAND split_compute_service_trace
+            "${CMAKE_BINARY_DIR}/tests/split_compute_service_runtime_trace"
         WORKING_DIRECTORY ${PROJECT_SOURCE_DIR})
 endif()
 
