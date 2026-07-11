@@ -42,13 +42,22 @@ COMMAND_SUFFIXES = (
 COMMAND_FUNCTIONS = tuple(f"handle_{suffix}" for suffix in COMMAND_SUFFIXES)
 HELP_FUNCTIONS = tuple(f"print_help_{suffix}" for suffix in COMMAND_SUFFIXES)
 OTHER_HOST_FUNCTIONS = ("run_repl", "run_benchmark_config_editor")
+ROOT_CLI_FUNCTIONS = (
+    "handle_interactive_save",
+    "print_cli_help",
+    "print_repl_help",
+)
 CONFIG_AND_RUN_FUNCTIONS = (
     "write_config_to_file",
     "load_or_create_config",
     "run_graph_cli",
 )
 EXPECTED_FUNCTIONS = (
-    COMMAND_FUNCTIONS + HELP_FUNCTIONS + OTHER_HOST_FUNCTIONS + CONFIG_AND_RUN_FUNCTIONS
+    COMMAND_FUNCTIONS
+    + HELP_FUNCTIONS
+    + OTHER_HOST_FUNCTIONS
+    + ROOT_CLI_FUNCTIONS
+    + CONFIG_AND_RUN_FUNCTIONS
 )
 REQUIRED_BLOCK_COMMANDS = {"brief", "return", "throws", "note"}
 CALLABLE_DECL_KINDS = {"FunctionDecl", "CXXMethodDecl"}
@@ -685,8 +694,9 @@ def inspect_declarations(repo: Path, compile_commands: Path) -> dict[str, Any]:
     @return Per-function structured comments and compiler-filter outcomes.
     @throws OSError If headers, compilation data, or temporary storage fail.
     @throws subprocess.CalledProcessError If Clang cannot parse the declarations.
-    @note A temporary translation unit includes command, REPL, and benchmark
-      editor headers; no source or configured build output is modified.
+    @note A temporary translation unit includes command, REPL, top-level help,
+      interactive-save, configuration, and benchmark-editor headers; no source
+      or configured build output is modified.
     """
 
     base_arguments = compile_database_arguments(compile_commands, repo)
@@ -696,6 +706,9 @@ def inspect_declarations(repo: Path, compile_commands: Path) -> dict[str, Any]:
             '#include "graph_cli/command/commands.hpp"\n'
             '#include "graph_cli/run_repl.hpp"\n'
             '#include "graph_cli/benchmark_config_editor.hpp"\n'
+            '#include "graph_cli/handle_interactive_save.hpp"\n'
+            '#include "graph_cli/print_cli_help.hpp"\n'
+            '#include "graph_cli/print_repl_help.hpp"\n'
             '#include "graph_cli/cli_config.hpp"\n',
             encoding="utf-8",
         )
@@ -704,6 +717,8 @@ def inspect_declarations(repo: Path, compile_commands: Path) -> dict[str, Any]:
         for name_filter in (
             "handle_",
             "print_help_",
+            "print_cli_help",
+            "print_repl_help",
             "run_repl",
             "run_benchmark_config_editor",
             "write_config_to_file",
@@ -744,10 +759,11 @@ def definition_path(repo: Path, function_name: str) -> Path:
     """@brief Resolve one audited function to its implementation source.
 
     @param repo Repository root containing CLI implementations.
-    @param function_name Audited command/help/REPL/editor function name.
+    @param function_name Audited command/help/REPL/editor/root function name.
     @return Expected source path for the definition.
     @throws ValueError If the function does not belong to the audited inventory.
-    @note Command and help functions share ``command_<suffix>.cpp`` files.
+    @note Command and help functions share ``command_<suffix>.cpp`` files;
+      root helpers use a source file matching their function name.
     """
 
     if function_name == "run_repl":
@@ -758,6 +774,8 @@ def definition_path(repo: Path, function_name: str) -> Path:
         return repo / "apps/graph_cli/src/cli_config.cpp"
     if function_name == "run_graph_cli":
         return repo / "apps/graph_cli/src/run_graph_cli.cpp"
+    if function_name in ROOT_CLI_FUNCTIONS:
+        return repo / f"apps/graph_cli/src/{function_name}.cpp"
     for prefix in ("handle_", "print_help_"):
         if function_name.startswith(prefix):
             suffix = function_name.removeprefix(prefix)
@@ -859,7 +877,14 @@ def inspect_definitions(repo: Path, compile_commands: Path) -> dict[str, Any]:
                 == path.resolve()
             ]
             comment = preceding_definition_comment(source, function_name)
-            copydoc = f"@copydoc {function_name}" in comment
+            copydoc = (
+                re.search(
+                    rf"@copydoc\s+(?:::)?{re.escape(function_name)}"
+                    r"(?:\([^)]*\))?(?=\s|\*/)",
+                    comment,
+                )
+                is not None
+            )
             full = all(
                 command_name in comment
                 for command_name in ("@brief", "@return", "@throws", "@note")
@@ -1407,15 +1432,15 @@ def make_expected() -> dict[str, Any]:
 
     return {
         "declarations": {
-            "expected_count": 53,
-            "observed_count": 53,
+            "expected_count": 56,
+            "observed_count": 56,
             "missing": [],
             "incomplete": [],
             "compiler_queries_pass": True,
         },
         "definitions": {
-            "expected_count": 53,
-            "observed_count": 53,
+            "expected_count": 56,
+            "observed_count": 56,
             "missing": [],
             "missing_bodies": [],
             "missing_compiler_comments": [],

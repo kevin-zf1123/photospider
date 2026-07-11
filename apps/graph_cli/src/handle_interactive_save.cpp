@@ -8,6 +8,7 @@
 #include "graph_cli/ask_yesno.hpp"
 #include "graph_cli/cli_config.hpp"
 
+/** @copydoc handle_interactive_save(CliConfig&) */
 void handle_interactive_save(CliConfig& config) {
   if (config.editor_save_behavior == "ask") {
     if (ask_yesno("Save configuration changes?", true)) {

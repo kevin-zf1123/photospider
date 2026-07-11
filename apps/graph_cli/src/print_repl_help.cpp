@@ -3,6 +3,7 @@
 
 #include <iostream>
 
+/** @copydoc print_repl_help(const CliConfig&) */
 void print_repl_help(const CliConfig& config) {
   std::cout
       << "Available REPL (interactive shell) commands:\n\n"

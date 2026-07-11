@@ -3,6 +3,7 @@
 
 #include <iostream>
 
+/** @copydoc print_cli_help() */
 void print_cli_help() {
   std::cout
       << "Usage: graph_cli [options]\n\n"
