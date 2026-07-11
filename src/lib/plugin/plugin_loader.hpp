@@ -8,7 +8,7 @@
 #include <unordered_map>
 #include <vector>
 
-#include "kernel/plugin_result.hpp"
+#include "plugin/plugin_result.hpp"
 
 namespace ps {
 

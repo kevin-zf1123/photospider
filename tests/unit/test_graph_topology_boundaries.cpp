@@ -2,12 +2,14 @@
 
 #include <filesystem>
 #include <fstream>
+#include <string>
 #include <type_traits>
 #include <utility>
+#include <vector>
 
-#include "graph_model.hpp"
-#include "kernel/services/graph_io_service.hpp"
-#include "kernel/services/graph_traversal_service.hpp"
+#include "graph/graph_io_service.hpp"
+#include "graph/graph_model.hpp"
+#include "graph/graph_traversal_service.hpp"
 
 namespace ps {
 namespace {
@@ -59,16 +61,17 @@ struct HasPublicMutableNode : std::false_type {};
 
 template <typename T>
 struct HasPublicMutableNode<
-    T, std::void_t<decltype(std::declval<T&>().mutable_node(1))>>
-    : std::true_type {};
+    T, std::void_t<decltype(std::declval<T&>().mutable_node(1))>>  // NOLINT
+    : std::true_type {};  // NOLINT(whitespace/indent_namespace)
 
 template <typename T, typename = void>
 struct HasPublicFindNodeMutable : std::false_type {};
 
 template <typename T>
 struct HasPublicFindNodeMutable<
-    T, std::void_t<decltype(std::declval<T&>().find_node_mutable(1))>>
-    : std::true_type {};
+    T,
+    std::void_t<decltype(std::declval<T&>().find_node_mutable(1))>>  // NOLINT
+    : std::true_type {};  // NOLINT(whitespace/indent_namespace)
 
 static_assert(!HasPublicMutableNode<GraphModel>::value,
               "GraphModel::mutable_node must not be public.");

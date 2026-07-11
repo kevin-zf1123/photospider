@@ -1,10 +1,12 @@
-#include "kernel/services/compute-service/compute_metrics_recorder.hpp"
+#include "compute/compute_metrics_recorder.hpp"
 
 #include <chrono>
 #include <cmath>
+#include <string>
+#include <vector>
 
 #include "adapter/buffer_adapter_opencv.hpp"
-#include "kernel/graph_runtime.hpp"
+#include "runtime/graph_runtime.hpp"
 
 namespace ps::compute {
 namespace {

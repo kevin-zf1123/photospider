@@ -1,5 +1,7 @@
 #include "benchmark/benchmark_yaml_generator.hpp"
 
+#include <string>
+
 #include "benchmark/benchmark_types.hpp"
 
 namespace ps {

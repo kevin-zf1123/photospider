@@ -1,5 +1,6 @@
 #include "adapter/buffer_adapter_opencv.hpp"
 
+#include <memory>
 #include <stdexcept>
 
 namespace ps {

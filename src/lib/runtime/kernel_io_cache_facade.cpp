@@ -5,7 +5,7 @@
 #include <filesystem>
 #include <string>
 
-#include "kernel/kernel.hpp"
+#include "runtime/kernel.hpp"
 
 namespace ps {
 

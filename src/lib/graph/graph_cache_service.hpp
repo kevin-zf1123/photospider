@@ -3,7 +3,7 @@
 #include <filesystem>
 #include <string>
 
-#include "graph_model.hpp"
+#include "graph/graph_model.hpp"
 
 namespace ps {
 

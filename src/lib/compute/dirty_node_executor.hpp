@@ -7,10 +7,10 @@
 #include <unordered_map>
 #include <vector>
 
-#include "kernel/services/compute-service/dirty_region_planner.hpp"
-#include "kernel/services/compute-service/dirty_write_buffers.hpp"
-#include "kernel/services/compute-service/downsample_executor.hpp"
-#include "kernel/services/compute-service/node_input_resolver.hpp"
+#include "compute/dirty_region_planner.hpp"
+#include "compute/dirty_write_buffers.hpp"
+#include "compute/downsample_executor.hpp"
+#include "compute/node_input_resolver.hpp"
 
 namespace ps {
 class GraphEventService;

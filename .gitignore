@@ -61,10 +61,13 @@ feedback/
 # ============================
 # 4. 源代码 (Source Code)
 # ============================
-# CLI entry points
-!cli/
-!cli/**/
-!cli/**/*.cpp
+# Application source trees
+!apps/
+!apps/**/
+!apps/**/*.cpp
+!apps/**/*.hpp
+!apps/**/*.h
+!apps/**/*.txt
 
 # Core implementation (C++, Obj-C++)
 !src/
@@ -74,14 +77,13 @@ feedback/
 !src/**/*.hpp
 !src/**/*.txt
 
-# Custom Operations (Plugins)
-!custom_ops/
-!custom_ops/**/
-!custom_ops/**/*.cpp
-
-# Scheduler plugins
-!scheduler_plugins/
-!scheduler_plugins/*_example_plugin.cpp
+# Repository-owned plugins
+!plugins/
+!plugins/**/
+!plugins/ops/**/*.cpp
+!plugins/ops/**/*.hpp
+!plugins/ops/**/*.mm
+!plugins/schedulers/*_example_plugin.cpp
 
 # External libraries (FTXUI etc.)
 !extern/
@@ -111,6 +113,7 @@ tests/results/
 !util/**/*.txt
 !util/**/*.json
 util/change.txt
+util/99-filed/architecture.md
 
 # ============================
 # 6. 文档 (Documentation)

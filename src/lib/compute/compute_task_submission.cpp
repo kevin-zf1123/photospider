@@ -1,4 +1,4 @@
-#include "kernel/services/compute-service/compute_task_submission.hpp"
+#include "compute/compute_task_submission.hpp"
 
 #include <algorithm>
 #include <atomic>
@@ -10,8 +10,8 @@
 #include <variant>
 #include <vector>
 
-#include "kernel/services/compute-service/compute_dispatch_plan_builder.hpp"
-#include "kernel/services/graph_traversal_service.hpp"
+#include "compute/compute_dispatch_plan_builder.hpp"
+#include "graph/graph_traversal_service.hpp"
 
 namespace ps::compute {
 namespace {

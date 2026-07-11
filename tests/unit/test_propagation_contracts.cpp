@@ -2,11 +2,12 @@
 
 #include <filesystem>
 #include <optional>
+#include <string>
 
 #include "adapter/buffer_adapter_opencv.hpp"
-#include "graph_model.hpp"
-#include "kernel/ops.hpp"
-#include "kernel/services/roi_propagation_service.hpp"
+#include "core/ops.hpp"
+#include "graph/graph_model.hpp"
+#include "graph/roi_propagation_service.hpp"
 
 namespace ps {
 namespace {

@@ -1,6 +1,8 @@
-#include "kernel/services/graph_extent_resolver.hpp"
+#include "graph/graph_extent_resolver.hpp"
 
-#include "kernel/param_utils.hpp"
+#include <unordered_map>
+
+#include "core/param_utils.hpp"
 
 namespace ps {
 

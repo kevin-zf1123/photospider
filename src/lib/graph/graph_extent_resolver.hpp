@@ -3,7 +3,7 @@
 #include <opencv2/core.hpp>
 #include <unordered_map>
 
-#include "graph_model.hpp"
+#include "graph/graph_model.hpp"
 
 namespace ps {
 

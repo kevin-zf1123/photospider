@@ -1,7 +1,7 @@
 // Photospider kernel: CpuWorkStealingScheduler implementation
 // M3.3: 将现有的 run_loop 和队列逻辑迁移至可插拔调度器
 
-#include "kernel/scheduler/cpu_work_stealing_scheduler.hpp"
+#include "scheduler/cpu_work_stealing_scheduler.hpp"
 
 #include <algorithm>
 #include <chrono>
@@ -15,10 +15,10 @@
 #include <utility>
 #include <vector>
 
-#include "kernel/graph_runtime.hpp"
+#include "runtime/graph_runtime.hpp"
 
 #if defined(PHOTOSPIDER_INTERNAL_BAD_ALLOC_TESTING)
-#include "kernel/scheduler/scheduler_exception_test_hooks.hpp"
+#include "scheduler/scheduler_exception_test_hooks.hpp"
 #endif
 
 namespace ps {

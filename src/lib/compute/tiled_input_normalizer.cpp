@@ -1,14 +1,15 @@
-#include "kernel/services/compute-service/tiled_input_normalizer.hpp"
+#include "compute/tiled_input_normalizer.hpp"
 
 #include <algorithm>
 #include <opencv2/imgproc.hpp>
 #include <optional>
 #include <string>
+#include <utility>
 #include <vector>
 
 #include "adapter/buffer_adapter_opencv.hpp"
-#include "kernel/param_utils.hpp"
-#include "node.hpp"
+#include "core/param_utils.hpp"
+#include "node.hpp"  // NOLINT(build/include_subdir)
 
 namespace ps::compute {
 namespace {

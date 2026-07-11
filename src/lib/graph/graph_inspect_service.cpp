@@ -1,4 +1,4 @@
-#include "kernel/services/graph_inspect_service.hpp"
+#include "graph/graph_inspect_service.hpp"
 
 #include <algorithm>
 #include <new>

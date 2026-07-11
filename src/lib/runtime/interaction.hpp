@@ -5,8 +5,8 @@
  * @brief Private interaction facade between the embedded Host adapter and
  * Kernel.
  *
- * This header lives under the private `src/` include root and is not part of
- * the installable `include/photospider/` public interface. It includes
+ * This header lives under the private `src/lib/` include root and is not part
+ * of the installable `include/photospider/` public interface. It includes
  * `kernel/kernel.hpp`, which depends on private implementation headers;
  * repository targets that use InteractionService must receive the private
  * include roots. CLI/TUI and external frontends use
@@ -22,8 +22,8 @@
 #include <utility>
 #include <vector>
 
-#include "kernel/kernel.hpp"
-#include "kernel/plugin_result.hpp"
+#include "plugin/plugin_result.hpp"
+#include "runtime/kernel.hpp"
 
 namespace ps {
 

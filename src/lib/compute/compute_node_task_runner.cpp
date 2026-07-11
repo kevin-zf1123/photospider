@@ -1,4 +1,4 @@
-#include "kernel/services/compute-service/compute_node_task_runner.hpp"
+#include "compute/compute_node_task_runner.hpp"
 
 #include <algorithm>
 #include <atomic>
@@ -10,11 +10,11 @@
 #include <variant>
 #include <vector>
 
-#include "kernel/param_utils.hpp"
-#include "kernel/services/compute-service/compute_metrics_recorder.hpp"
-#include "kernel/services/compute-service/node_executor.hpp"
-#include "kernel/services/graph_cache_service.hpp"
-#include "kernel/services/graph_event_service.hpp"
+#include "compute/compute_metrics_recorder.hpp"
+#include "compute/node_executor.hpp"
+#include "core/param_utils.hpp"
+#include "graph/graph_cache_service.hpp"
+#include "runtime/graph_event_service.hpp"
 
 namespace ps::compute {
 namespace {

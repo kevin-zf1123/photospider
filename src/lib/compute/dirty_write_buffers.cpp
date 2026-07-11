@@ -1,4 +1,4 @@
-#include "kernel/services/compute-service/dirty_write_buffers.hpp"
+#include "compute/dirty_write_buffers.hpp"
 
 #include <new>
 #include <string>
@@ -6,7 +6,7 @@
 #include <vector>
 
 #include "adapter/buffer_adapter_opencv.hpp"
-#include "kernel/services/compute-service/compute_geometry.hpp"
+#include "compute/compute_geometry.hpp"
 
 namespace ps::compute {
 namespace {

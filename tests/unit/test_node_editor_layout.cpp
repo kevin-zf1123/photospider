@@ -3,14 +3,14 @@
 #include <string>
 #include <vector>
 
-#include "cli/node_editor_layout.hpp"
 #include "ftxui/dom/elements.hpp"
 #include "ftxui/dom/node.hpp"
 #include "ftxui/screen/screen.hpp"
+#include "graph_cli/node_editor_layout.hpp"
 
 namespace {
 
-using namespace ftxui;
+using namespace ftxui;  // NOLINT(build/namespaces): concise FTXUI test DSL.
 namespace layout = ps::cli::node_editor_layout;
 
 bool contains(const std::string& text, const std::string& needle) {

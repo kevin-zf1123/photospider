@@ -2,17 +2,21 @@
 // M3.4: 根据配置字符串创建对应的调度器实例
 // M3.5: 支持从插件动态创建调度器
 
-#include "kernel/scheduler/scheduler_factory.hpp"
+#include "scheduler/scheduler_factory.hpp"
 
-#include "kernel/scheduler/cpu_work_stealing_scheduler.hpp"
-#include "kernel/scheduler/gpu_pipeline_scheduler.hpp"
-#include "kernel/scheduler/scheduler_plugin_loader.hpp"
-#include "kernel/scheduler/serial_debug_scheduler.hpp"
+#include <memory>
+#include <string>
+#include <vector>
+
+#include "scheduler/cpu_work_stealing_scheduler.hpp"
+#include "scheduler/gpu_pipeline_scheduler.hpp"
+#include "scheduler/scheduler_plugin_loader.hpp"
+#include "scheduler/serial_debug_scheduler.hpp"
 
 namespace ps {
 
-std::unique_ptr<IScheduler> SchedulerFactory::create(const std::string& type_name,
-                                                     unsigned int num_workers) {
+std::unique_ptr<IScheduler> SchedulerFactory::create(
+    const std::string& type_name, unsigned int num_workers) {
   // 先尝试内置类型
   if (type_name == "cpu_work_stealing") {
     return std::make_unique<CpuWorkStealingScheduler>(num_workers);
@@ -30,24 +34,19 @@ std::unique_ptr<IScheduler> SchedulerFactory::create(const std::string& type_nam
     config.prefer_gpu_for_hp = true;
     return std::make_unique<GpuPipelineScheduler>(config);
   }
-  
+
   // 尝试从插件加载器创建
   auto& loader = SchedulerPluginLoader::instance();
   if (loader.is_registered(type_name)) {
     return loader.create(type_name, num_workers);
   }
-  
+
   // 类型不支持
   return nullptr;
 }
 
 std::vector<std::string> SchedulerFactory::supported_types() {
-  return {
-    "cpu_work_stealing",
-    "serial_debug",
-    "gpu_pipeline",
-    "heterogeneous"
-  };
+  return {"cpu_work_stealing", "serial_debug", "gpu_pipeline", "heterogeneous"};
 }
 
 bool SchedulerFactory::is_supported(const std::string& type_name) {
@@ -62,7 +61,8 @@ bool SchedulerFactory::is_supported(const std::string& type_name) {
 
 std::string SchedulerFactory::description(const std::string& type_name) {
   if (type_name == "cpu_work_stealing") {
-    return "Multi-threaded CPU scheduler with work stealing for load balancing. "
+    return "Multi-threaded CPU scheduler with work stealing for load "
+           "balancing. "
            "Optimal for parallel computation on multi-core systems.";
   } else if (type_name == "serial_debug") {
     return "Single-threaded serial scheduler for debugging. "
@@ -73,14 +73,14 @@ std::string SchedulerFactory::description(const std::string& type_name) {
            "available, RT tasks use a high-priority CPU queue, "
            "Supports concurrent RT and HP scheduling with RT priority.";
   }
-  
+
   // 检查插件描述
   auto& loader = SchedulerPluginLoader::instance();
   auto desc = loader.get_description(type_name);
   if (!desc.empty()) {
     return desc;
   }
-  
+
   return "Unknown scheduler type";
 }
 

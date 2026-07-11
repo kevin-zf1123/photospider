@@ -4,12 +4,12 @@
  * @file kernel.hpp
  * @brief Legacy source-tree Kernel facade for repository internals.
  *
- * This header lives under the private `src/` include root and is not part of
- * the installable `include/photospider/` public interface. Repository targets
- * that still need Kernel must receive `PHOTOSPIDER_PRIVATE_INCLUDE_DIRS`.
- * External frontends should use `photospider/host/host.hpp` and copied Host
- * value snapshots instead of depending on Kernel, GraphRuntime, or
- * compute-service ownership.
+ * This header lives under the private `src/lib/` include root and is not part
+ * of the installable `include/photospider/` public interface. Repository
+ * targets that still need Kernel must receive
+ * `PHOTOSPIDER_PRIVATE_INCLUDE_DIRS`. External frontends should use
+ * `photospider/host/host.hpp` and copied Host value snapshots instead of
+ * depending on Kernel, GraphRuntime, or compute-service ownership.
  */
 
 #include <future>
@@ -24,15 +24,15 @@
 #include <utility>
 #include <vector>
 
-#include "kernel/graph_runtime.hpp"
-#include "kernel/plugin_manager.hpp"
-#include "kernel/services/compute-service/dirty_control_lane.hpp"
-#include "kernel/services/compute_service.hpp"
-#include "kernel/services/graph_cache_service.hpp"
-#include "kernel/services/graph_inspect_service.hpp"
-#include "kernel/services/graph_io_service.hpp"
-#include "kernel/services/graph_traversal_service.hpp"
-#include "kernel/services/roi_propagation_service.hpp"
+#include "compute/compute_service.hpp"
+#include "compute/dirty_control_lane.hpp"
+#include "graph/graph_cache_service.hpp"
+#include "graph/graph_inspect_service.hpp"
+#include "graph/graph_io_service.hpp"
+#include "graph/graph_traversal_service.hpp"
+#include "graph/roi_propagation_service.hpp"
+#include "plugin/plugin_manager.hpp"
+#include "runtime/graph_runtime.hpp"
 
 namespace ps {
 

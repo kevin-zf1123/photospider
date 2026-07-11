@@ -18,18 +18,18 @@
 
 #include "adapter/buffer_adapter_opencv.hpp"
 #include "benchmark/benchmark_service.hpp"
-#include "cli/command/commands.hpp"
-#include "cli/process_command.hpp"
-#include "cli_config.hpp"   // NOLINT(build/include_subdir)
-#include "graph_model.hpp"  // NOLINT(build/include_subdir)
-#include "kernel/services/compute-service/dirty_update_executor.hpp"
-#include "kernel/services/compute-service/realtime_proxy_graph.hpp"
-#include "kernel/services/graph_event_service.hpp"
-#include "kernel/services/graph_traversal_service.hpp"
+#include "compute/dirty_update_executor.hpp"
+#include "compute/realtime_proxy_graph.hpp"
+#include "graph/graph_model.hpp"  // NOLINT(build/include_subdir)
+#include "graph/graph_traversal_service.hpp"
+#include "graph_cli/cli_config.hpp"  // NOLINT(build/include_subdir)
+#include "graph_cli/command/commands.hpp"
+#include "graph_cli/process_command.hpp"
 #include "metal/metal_exception_boundary.hpp"
 #include "node.hpp"  // NOLINT(build/include_subdir)
 #include "photospider/host/host.hpp"
 #include "plugin_api.hpp"  // NOLINT(build/include_subdir)
+#include "runtime/graph_event_service.hpp"
 
 #if defined(__APPLE__)
 #include "metal/perlin_noise_metal.hpp"

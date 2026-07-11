@@ -9,7 +9,7 @@
 #include <map>
 #include <string>
 
-#include "plugin_loader.hpp"  // NOLINT(build/include_subdir)
+#include "plugin/plugin_loader.hpp"  // NOLINT(build/include_subdir)
 
 namespace ps::testing {
 

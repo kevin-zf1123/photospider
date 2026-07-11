@@ -8,11 +8,11 @@
 #include <string>
 #include <vector>
 
-#include "graph_model.hpp"  // NOLINT(build/include_subdir)
-#include "kernel/interaction.hpp"
-#include "kernel/kernel.hpp"
-#include "kernel/services/graph_event_service.hpp"  // 为了事件结构
-#include "ps_types.hpp"  // NOLINT(build/include_subdir)
+#include "graph/graph_model.hpp"            // NOLINT(build/include_subdir)
+#include "ps_types.hpp"                     // NOLINT(build/include_subdir)
+#include "runtime/graph_event_service.hpp"  // 为了事件结构
+#include "runtime/interaction.hpp"
+#include "runtime/kernel.hpp"
 #include "support/kernel_test_access.hpp"
 
 /** @brief Micro-tile fallback edge length used by the scriptable test tool. */

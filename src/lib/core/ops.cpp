@@ -1,5 +1,5 @@
-// in: src/ops.cpp (REPLACE WITH THIS FINAL VERSION)
-#include "kernel/ops.hpp"
+// FILE: src/lib/core/ops.cpp
+#include "core/ops.hpp"
 
 #include <algorithm>
 #include <array>
@@ -17,8 +17,8 @@
 #include <vector>
 
 #include "adapter/buffer_adapter_opencv.hpp"
-#include "graph_model.hpp"  // NOLINT(build/include_subdir)
-#include "kernel/param_utils.hpp"
+#include "core/param_utils.hpp"
+#include "graph/graph_model.hpp"  // NOLINT(build/include_subdir)
 
 namespace ps {
 namespace ops {

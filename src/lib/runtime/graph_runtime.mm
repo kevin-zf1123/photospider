@@ -1,5 +1,5 @@
 // Photospider kernel: GraphRuntime implementation (Objective-C++)
-#include "kernel/graph_runtime.hpp"
+#include "runtime/graph_runtime.hpp"
 
 #include <chrono>
 #include <cstdio>
@@ -9,7 +9,7 @@
 #include <utility>
 #include <vector>
 
-#include "kernel/services/compute-service/realtime_proxy_graph.hpp"
+#include "compute/realtime_proxy_graph.hpp"
 
 #ifdef __APPLE__
 #import <Metal/Metal.h>

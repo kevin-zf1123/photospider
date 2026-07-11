@@ -15,16 +15,16 @@
 #include <vector>
 
 #include "adapter/buffer_adapter_opencv.hpp"  // <--- 修正点: 添加缺失的头文件
-#include "graph_model.hpp"                    // NOLINT(build/include_subdir)
-#include "kernel/interaction.hpp"
-#include "kernel/kernel.hpp"
-#include "kernel/scheduler/cpu_work_stealing_scheduler.hpp"  // M3.3: 新调度器
-#include "kernel/scheduler/serial_debug_scheduler.hpp"
-#include "kernel/services/compute-service/compute_task_dispatcher.hpp"
-#include "kernel/services/compute-service/realtime_proxy_graph.hpp"
-#include "kernel/services/compute_service.hpp"  // <--- 修正点: 添加缺失的头文件
-#include "kernel/services/graph_cache_service.hpp"  // <--- 修正点: 添加缺失的头文件
-#include "kernel/services/graph_traversal_service.hpp"  // <--- 修正点: 添加缺失的头文件
+#include "compute/compute_service.hpp"        // <--- 修正点: 添加缺失的头文件
+#include "compute/compute_task_dispatcher.hpp"
+#include "compute/realtime_proxy_graph.hpp"
+#include "graph/graph_cache_service.hpp"      // <--- 修正点: 添加缺失的头文件
+#include "graph/graph_model.hpp"              // NOLINT(build/include_subdir)
+#include "graph/graph_traversal_service.hpp"  // <--- 修正点: 添加缺失的头文件
+#include "runtime/interaction.hpp"
+#include "runtime/kernel.hpp"
+#include "scheduler/cpu_work_stealing_scheduler.hpp"  // M3.3: 新调度器
+#include "scheduler/serial_debug_scheduler.hpp"
 #include "support/kernel_test_access.hpp"
 
 namespace {

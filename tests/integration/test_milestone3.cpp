@@ -14,8 +14,8 @@
 #include <utility>
 #include <vector>
 
-#include "kernel/graph_runtime.hpp"
-#include "kernel/scheduler/cpu_work_stealing_scheduler.hpp"
+#include "runtime/graph_runtime.hpp"
+#include "scheduler/cpu_work_stealing_scheduler.hpp"
 
 namespace ps {
 namespace {

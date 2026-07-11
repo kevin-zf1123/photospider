@@ -60,8 +60,8 @@ EXPECTED_CLI_TARGET_SOURCE_COUNTS = {
 EXPECTED_CLI_TARGET_CLOSURE_SOURCE_COUNT = 58
 EXPECTED_AUDITED_SOURCE_COUNT = 60
 REQUIRED_ROOT_CLI_TRANSLATION_UNITS = (
-    "cli/graph_cli.cpp",
-    "src/cli_config.cpp",
+    "apps/graph_cli/main.cpp",
+    "apps/graph_cli/src/cli_config.cpp",
 )
 BROAD_CATCH_SOURCE_PATTERN = re.compile(
     r"catch\s*\(\s*(?:\.\.\.|(?:const\s+)?std::exception(?:\s+const)?\s*&?"
@@ -70,34 +70,34 @@ BROAD_CATCH_SOURCE_PATTERN = re.compile(
 )
 
 GUARD_DEFINITIONS = (
-    ("src/benchmark/benchmark_service.cpp", "RunAll", 1),
+    ("src/lib/benchmark/benchmark_service.cpp", "RunAll", 1),
     (
-        "src/cli/autocomplete/CompleteSessionName.cpp",
+        "apps/graph_cli/src/autocomplete/CompleteSessionName.cpp",
         "CompleteSessionName",
         1,
     ),
     (
-        "src/cli/benchmark_config_editor.cpp",
+        "apps/graph_cli/src/benchmark_config_editor.cpp",
         "load_benchmark_configs_from_file",
         1,
     ),
     (
-        "src/cli/benchmark_config_editor.cpp",
+        "apps/graph_cli/src/benchmark_config_editor.cpp",
         "RebuildDetailsPane",
         6,
     ),
-    ("src/cli/command/command_bench.cpp", "handle_bench", 1),
-    ("src/cli/command/command_inspect.cpp", "handle_inspect", 1),
-    ("src/cli/command/command_node.cpp", "handle_node", 1),
-    ("src/cli/command/command_print.cpp", "handle_print", 1),
-    ("src/cli/command/command_switch.cpp", "handle_switch", 2),
-    ("src/cli/command/help_utils.cpp", "print_help_from_file", 1),
-    ("src/cli/config_editor.cpp", "SyncUiStateToModel", 2),
-    ("src/cli/process_command.cpp", "process_command", 1),
-    ("src/cli_config.cpp", "write_config_to_file", 1),
-    ("src/cli_config.cpp", "load_or_create_config", 1),
-    ("src/cli/run_graph_cli.cpp", "run_graph_cli", 1),
-    ("cli/graph_cli.cpp", "main", 1),
+    ("apps/graph_cli/src/command/command_bench.cpp", "handle_bench", 1),
+    ("apps/graph_cli/src/command/command_inspect.cpp", "handle_inspect", 1),
+    ("apps/graph_cli/src/command/command_node.cpp", "handle_node", 1),
+    ("apps/graph_cli/src/command/command_print.cpp", "handle_print", 1),
+    ("apps/graph_cli/src/command/command_switch.cpp", "handle_switch", 2),
+    ("apps/graph_cli/src/command/help_utils.cpp", "print_help_from_file", 1),
+    ("apps/graph_cli/src/config_editor.cpp", "SyncUiStateToModel", 2),
+    ("apps/graph_cli/src/process_command.cpp", "process_command", 1),
+    ("apps/graph_cli/src/cli_config.cpp", "write_config_to_file", 1),
+    ("apps/graph_cli/src/cli_config.cpp", "load_or_create_config", 1),
+    ("apps/graph_cli/src/run_graph_cli.cpp", "run_graph_cli", 1),
+    ("apps/graph_cli/main.cpp", "main", 1),
 )
 
 
@@ -394,7 +394,7 @@ def compile_database_arguments(compile_commands: Path, repo: Path) -> list[str]:
     """@brief Extract reusable CLI declaration-AST compilation arguments.
 
     @param compile_commands Configured build's compilation database.
-    @param repo Repository root containing ``src/cli/process_command.cpp``.
+    @param repo Repository root containing ``apps/graph_cli/src/process_command.cpp``.
     @return Compiler argv without source, output, or compile-only switches.
     @throws OSError If the compilation database cannot be read.
     @throws ValueError If the CLI command translation-unit entry is absent.
@@ -403,7 +403,7 @@ def compile_database_arguments(compile_commands: Path, repo: Path) -> list[str]:
     """
 
     return compile_database_arguments_for_source(
-        compile_commands, repo / "src/cli/process_command.cpp"
+        compile_commands, repo / "apps/graph_cli/src/process_command.cpp"
     )
 
 
@@ -532,12 +532,10 @@ def inspect_cli_target_source_closure(
         {
             path.relative_to(repo).as_posix()
             for path in (
-                list((repo / "cli").glob("*.cpp"))
-                + list((repo / "cli").glob("*.cc"))
-                + list((repo / "cli").glob("*.cxx"))
-                + list((repo / "src").glob("*cli*.cpp"))
-                + list((repo / "src").glob("*cli*.cc"))
-                + list((repo / "src").glob("*cli*.cxx"))
+                list((repo / "apps/graph_cli").glob("*.cpp"))
+                + list((repo / "apps/graph_cli").glob("*.cc"))
+                + list((repo / "apps/graph_cli").glob("*.cxx"))
+                + [repo / "apps/graph_cli/src/cli_config.cpp"]
             )
             if path.is_file()
         }
@@ -548,7 +546,9 @@ def inspect_cli_target_source_closure(
     cmake_text = (repo / "CMakeLists.txt").read_text(encoding="utf-8")
     graph_cli_declared = bool(
         re.search(
-            r"add_executable\s*\(\s*graph_cli\s+cli/graph_cli\.cpp\s*\)", cmake_text
+            r"add_executable\s*\(\s*graph_cli\s+"
+            r"apps/graph_cli/main\.cpp\s*\)",
+            cmake_text,
         )
     )
     cli_common_linked = bool(
@@ -693,10 +693,10 @@ def inspect_declarations(repo: Path, compile_commands: Path) -> dict[str, Any]:
     with tempfile.TemporaryDirectory(prefix="photospider-cli-doxygen-") as temp:
         translation_unit = Path(temp) / "cli_host_doxygen.cpp"
         translation_unit.write_text(
-            '#include "cli/command/commands.hpp"\n'
-            '#include "cli/run_repl.hpp"\n'
-            '#include "cli/benchmark_config_editor.hpp"\n'
-            '#include "cli_config.hpp"\n',
+            '#include "graph_cli/command/commands.hpp"\n'
+            '#include "graph_cli/run_repl.hpp"\n'
+            '#include "graph_cli/benchmark_config_editor.hpp"\n'
+            '#include "graph_cli/cli_config.hpp"\n',
             encoding="utf-8",
         )
         roots: list[Any] = []
@@ -751,17 +751,17 @@ def definition_path(repo: Path, function_name: str) -> Path:
     """
 
     if function_name == "run_repl":
-        return repo / "src/cli/run_repl.cpp"
+        return repo / "apps/graph_cli/src/run_repl.cpp"
     if function_name == "run_benchmark_config_editor":
-        return repo / "src/cli/benchmark_config_editor.cpp"
+        return repo / "apps/graph_cli/src/benchmark_config_editor.cpp"
     if function_name in {"write_config_to_file", "load_or_create_config"}:
-        return repo / "src/cli_config.cpp"
+        return repo / "apps/graph_cli/src/cli_config.cpp"
     if function_name == "run_graph_cli":
-        return repo / "src/cli/run_graph_cli.cpp"
+        return repo / "apps/graph_cli/src/run_graph_cli.cpp"
     for prefix in ("handle_", "print_help_"):
         if function_name.startswith(prefix):
             suffix = function_name.removeprefix(prefix)
-            return repo / f"src/cli/command/command_{suffix}.cpp"
+            return repo / f"apps/graph_cli/src/command/command_{suffix}.cpp"
     raise ValueError(f"unknown audited CLI function: {function_name}")
 
 
@@ -1013,7 +1013,7 @@ def inspect_guard_definitions(
     invalid = sorted(key for key, row in rows.items() if not row["passes"])
     benchmark_sources = sorted(
         path.relative_to(repo).as_posix()
-        for path in (repo / "src/benchmark").glob("*.cpp")
+        for path in (repo / "src/lib/benchmark").glob("*.cpp")
         if path.is_file()
     )
     audited_sources = sorted(set(target_closure["sources"] + benchmark_sources))
@@ -1198,7 +1198,7 @@ def inspect_ast_detector_contract() -> dict[str, bool]:
                         EXPECTED_CLI_TARGET_CLOSURE_SOURCE_COUNT - 1
                     ),
                     "missing_targets": ["graph_cli"],
-                    "missing_roots_from_closure": ["cli/graph_cli.cpp"],
+                    "missing_roots_from_closure": ["apps/graph_cli/main.cpp"],
                 }
             )
         ),
@@ -1208,7 +1208,7 @@ def inspect_ast_detector_contract() -> dict[str, bool]:
                     **complete_closure,
                     "root_cli_translation_units": [
                         *REQUIRED_ROOT_CLI_TRANSLATION_UNITS,
-                        "cli/unlisted_cli.cpp",
+                        "apps/graph_cli/unlisted_cli.cpp",
                     ],
                 }
             )
@@ -1240,36 +1240,32 @@ def inspect_ast_detector_contract() -> dict[str, bool]:
 
 
 def inspect_semantics(repo: Path) -> dict[str, Any]:
-    """@brief Audit migration-specific terminology and exception semantics.
+    """@brief Audit maintained CLI terminology and exception semantics.
 
     @param repo Repository root containing maintained CLI headers and sources.
-    @return Stale-term hits and explicit Host/bad-alloc/lifetime checks.
+    @return Unsupported-frontend terminology hits and explicit
+      Host/bad-alloc/lifetime checks.
     @throws OSError If a maintained CLI file cannot be read.
     @note These focused human-review proxies complement, but do not replace, the
-      compiler AST's structural Doxygen validation.
+      compiler AST's structural Doxygen validation. ``InteractionService`` is
+      a permanently unsupported frontend dependency, so this terminology guard
+      remains useful after the application-layout migration is complete.
     """
 
-    files = sorted((repo / "include/cli").rglob("*.hpp")) + sorted(
-        (repo / "src/cli").rglob("*.cpp")
+    files = sorted((repo / "apps/graph_cli/include").rglob("*.hpp")) + sorted(
+        (repo / "apps/graph_cli/src").rglob("*.cpp")
     )
-    files.extend(
-        [
-            repo / "include/cli_config.hpp",
-            repo / "src/cli_config.cpp",
-            repo / "src/cli/run_graph_cli.cpp",
-            repo / "cli/graph_cli.cpp",
-        ]
-    )
-    stale_hits: list[dict[str, Any]] = []
-    stale_pattern = re.compile(
+    files.append(repo / "apps/graph_cli/main.cpp")
+    unsupported_terms: list[dict[str, Any]] = []
+    unsupported_pattern = re.compile(
         r"\bInteractionService\b|\binteraction_service\b|\binteraction service\b",
         re.IGNORECASE,
     )
     for path in files:
         text = path.read_text(encoding="utf-8")
         for line_number, line in enumerate(text.splitlines(), start=1):
-            if stale_pattern.search(line):
-                stale_hits.append(
+            if unsupported_pattern.search(line):
+                unsupported_terms.append(
                     {
                         "file": path.relative_to(repo).as_posix(),
                         "line": line_number,
@@ -1277,17 +1273,25 @@ def inspect_semantics(repo: Path) -> dict[str, Any]:
                     }
                 )
 
-    commands_header = (repo / "include/cli/command/commands.hpp").read_text(
+    commands_header = (
+        repo / "apps/graph_cli/include/graph_cli/command/commands.hpp"
+    ).read_text(encoding="utf-8")
+    repl_header = (
+        repo / "apps/graph_cli/include/graph_cli/run_repl.hpp"
+    ).read_text(encoding="utf-8")
+    benchmark_source = (
+        repo / "apps/graph_cli/src/benchmark_config_editor.cpp"
+    ).read_text(encoding="utf-8")
+    process_source = (repo / "apps/graph_cli/src/process_command.cpp").read_text(
         encoding="utf-8"
     )
-    repl_header = (repo / "include/cli/run_repl.hpp").read_text(encoding="utf-8")
-    benchmark_source = (repo / "src/cli/benchmark_config_editor.cpp").read_text(
+    cli_config_source = (repo / "apps/graph_cli/src/cli_config.cpp").read_text(
         encoding="utf-8"
     )
-    process_source = (repo / "src/cli/process_command.cpp").read_text(encoding="utf-8")
-    cli_config_source = (repo / "src/cli_config.cpp").read_text(encoding="utf-8")
-    cli_run_source = (repo / "src/cli/run_graph_cli.cpp").read_text(encoding="utf-8")
-    graph_cli_source = (repo / "cli/graph_cli.cpp").read_text(encoding="utf-8")
+    cli_run_source = (repo / "apps/graph_cli/src/run_graph_cli.cpp").read_text(
+        encoding="utf-8"
+    )
+    graph_cli_source = (repo / "apps/graph_cli/main.cpp").read_text(encoding="utf-8")
     bad_alloc_catch = process_source.find("catch (const std::bad_alloc&)")
     standard_catch = process_source.find("catch (const std::exception&")
     run_start = cli_run_source.find("int run_graph_cli(")
@@ -1311,7 +1315,7 @@ def inspect_semantics(repo: Path) -> dict[str, Any]:
         return all(tag in comment for tag in ("@brief", "@return", "@throws", "@note"))
 
     return {
-        "stale_interaction_terms": stale_hits,
+        "unsupported_frontend_terms": unsupported_terms,
         "inspect_documents_bad_alloc": (
             "handle_inspect" in commands_header
             and "@throws std::bad_alloc"
@@ -1378,7 +1382,7 @@ def inspect_semantics(repo: Path) -> dict[str, Any]:
 
 
 def write_json(path: Path, payload: dict[str, Any]) -> None:
-    """@brief Write deterministic JSON evidence.
+    """@brief Write one deterministic temporary JSON audit observation.
 
     @param path Destination whose parent directory already exists.
     @param payload JSON-serializable observation or expectation object.
@@ -1426,10 +1430,10 @@ def make_expected() -> dict[str, Any]:
             "missing": [],
             "invalid": [],
             "target_source_counts": EXPECTED_CLI_TARGET_SOURCE_COUNTS,
-            "target_closure_source_count": 58,
+            "target_closure_source_count": EXPECTED_CLI_TARGET_CLOSURE_SOURCE_COUNT,
             "root_cli_translation_units": list(REQUIRED_ROOT_CLI_TRANSLATION_UNITS),
-            "expected_audited_source_count": 60,
-            "audited_source_count": 60,
+            "expected_audited_source_count": EXPECTED_AUDITED_SOURCE_COUNT,
+            "audited_source_count": EXPECTED_AUDITED_SOURCE_COUNT,
             "catalog_paths_outside_closure": [],
             "uncatalogued_broad_catch_sources": [],
             "target_source_closure_pass": True,
@@ -1449,7 +1453,7 @@ def make_expected() -> dict[str, Any]:
             "rejects_uncatalogued_guard_source_broad_catch": True,
         },
         "semantics": {
-            "stale_interaction_terms": [],
+            "unsupported_frontend_terms": [],
             "inspect_documents_bad_alloc": True,
             "save_documents_bad_alloc": True,
             "process_command_preserves_bad_alloc_first": True,
@@ -1470,7 +1474,7 @@ def make_compare(actual: dict[str, Any], expected: dict[str, Any]) -> tuple[bool
     @param expected Fixed contract returned by :func:`make_expected`.
     @return Aggregate result and reader-facing invariant lines.
     @throws KeyError If either object omits a required schema field.
-    @note Comparison is pure and does not repair source or evidence.
+    @note Comparison is pure and does not repair source or audit observations.
     """
 
     declaration_summary = {
@@ -1549,7 +1553,7 @@ def make_compare(actual: dict[str, Any], expected: dict[str, Any]) -> tuple[bool
         "definition and guard AST predicates reject differential fakes": (
             actual["detector_contract"] == expected["detector_contract"]
         ),
-        "Host migration terminology and exception semantics are current": (
+        "Host terminology and exception semantics are current": (
             actual["semantics"] == expected["semantics"]
         ),
     }
@@ -1572,6 +1576,7 @@ def write_summary(path: Path, passed: bool, actual: dict[str, Any]) -> None:
     """
 
     declarations = actual["declarations"]
+    target_closure = actual["guard_definitions"]["target_source_closure"]
     body = [
         "# CLI Host Doxygen AST Audit",
         "",
@@ -1586,13 +1591,13 @@ def write_summary(path: Path, passed: bool, actual: dict[str, Any]) -> None:
         f"{actual['guard_definitions']['actual_broad_catch_count']}/"
         f"{actual['guard_definitions']['expected_broad_catch_count']}",
         "- Configured graph CLI target sources covered: "
-        f"{actual['guard_definitions']['target_source_closure']['closure_source_count']}/"
-        f"{actual['guard_definitions']['target_source_closure']['expected_closure_source_count']}",
+        f"{target_closure['closure_source_count']}/"
+        f"{target_closure['expected_closure_source_count']}",
         "- CLI/benchmark translation units checked for inventory completeness: "
         f"{actual['guard_definitions']['audited_source_count']}/"
         f"{actual['guard_definitions']['expected_audited_source_count']}",
-        "- Stale InteractionService terminology hits: "
-        f"{len(actual['semantics']['stale_interaction_terms'])}",
+        "- Unsupported frontend terminology hits: "
+        f"{len(actual['semantics']['unsupported_frontend_terms'])}",
         "",
         "The compiler AST validates brief/parameter/return/throws/note structure, "
         "real definition bodies, and same-chain bad_alloc guards; source checks "
@@ -1606,9 +1611,10 @@ def main() -> int:
     """@brief Run the CLI Host Doxygen compiler-AST audit.
 
     @return Zero when every structural and semantic contract passes; one otherwise.
-    @throws OSError If configured inputs or evidence outputs are inaccessible.
+    @throws OSError If configured inputs or temporary audit outputs are inaccessible.
     @note Creates/replaces only files under ``--out`` plus an auto-removed
-      temporary translation unit; source, build products, and Git state remain unchanged.
+      temporary translation unit; source, build products, and Git state remain
+      unchanged.
     """
 
     parser = argparse.ArgumentParser()

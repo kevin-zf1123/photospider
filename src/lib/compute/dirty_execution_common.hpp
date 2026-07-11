@@ -7,12 +7,12 @@
 #include <utility>
 #include <vector>
 
-#include "graph_model.hpp"  // NOLINT(build/include_subdir)
+#include "compute/compute_task_dependency_state.hpp"
+#include "compute/compute_task_dispatcher.hpp"
+#include "compute/dirty_region_planner.hpp"
+#include "compute/task_graph_planning.hpp"
+#include "graph/graph_model.hpp"  // NOLINT(build/include_subdir)
 #include "kernel/scheduler/scheduler_task_runtime.hpp"
-#include "kernel/services/compute-service/compute_task_dependency_state.hpp"
-#include "kernel/services/compute-service/compute_task_dispatcher.hpp"
-#include "kernel/services/compute-service/dirty_region_planner.hpp"
-#include "kernel/services/compute-service/task_graph_planning.hpp"
 #include "ps_types.hpp"  // NOLINT(build/include_subdir)
 
 namespace ps {

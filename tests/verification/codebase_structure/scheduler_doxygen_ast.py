@@ -22,8 +22,8 @@ CALLABLE_KINDS = {
 
 SCHEDULERS = {
     "CpuWorkStealingScheduler": {
-        "header": "src/kernel/scheduler/cpu_work_stealing_scheduler.hpp",
-        "source": "src/kernel/scheduler/cpu_work_stealing_scheduler.cpp",
+        "header": "src/lib/scheduler/cpu_work_stealing_scheduler.hpp",
+        "source": "src/lib/scheduler/cpu_work_stealing_scheduler.cpp",
         "methods": {
             "CpuWorkStealingScheduler",
             "~CpuWorkStealingScheduler",
@@ -89,8 +89,8 @@ SCHEDULERS = {
         },
     },
     "GpuPipelineScheduler": {
-        "header": "src/kernel/scheduler/gpu_pipeline_scheduler.hpp",
-        "source": "src/kernel/scheduler/gpu_pipeline_scheduler.cpp",
+        "header": "src/lib/scheduler/gpu_pipeline_scheduler.hpp",
+        "source": "src/lib/scheduler/gpu_pipeline_scheduler.cpp",
         "methods": {
             "GpuPipelineScheduler",
             "~GpuPipelineScheduler",
@@ -509,14 +509,14 @@ def inspect_hooks(repo: Path, database: Path) -> dict[str, Any]:
     """Audit BUILD_TESTING hook types/functions through real Clang AST roots."""
 
     source = repo / SCHEDULERS["CpuWorkStealingScheduler"]["source"]
-    header = repo / "src/kernel/scheduler/scheduler_exception_test_hooks.hpp"
+    header = repo / "src/lib/scheduler/scheduler_exception_test_hooks.hpp"
     arguments = compile_arguments(database, source)
     roots: list[Any] = []
     queries: list[dict[str, Any]] = []
     with tempfile.TemporaryDirectory(prefix="photospider-scheduler-doc-") as temp:
         translation_unit = Path(temp) / "hooks.cpp"
         translation_unit.write_text(
-            '#include "kernel/scheduler/scheduler_exception_test_hooks.hpp"\n',
+            '#include "scheduler/scheduler_exception_test_hooks.hpp"\n',
             encoding="utf-8",
         )
         for name_filter in (

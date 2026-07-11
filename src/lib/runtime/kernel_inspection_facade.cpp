@@ -12,7 +12,7 @@
 #include <utility>
 #include <vector>
 
-#include "kernel/kernel.hpp"
+#include "runtime/kernel.hpp"
 
 namespace ps {
 

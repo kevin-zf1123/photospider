@@ -2,7 +2,7 @@
 // M3.5: 异构调度器 - 支持 HP GPU 队列和 RT CPU 高优先级队列
 // Scheduler dispatches already-planned HP/RT tasks.
 
-#include "kernel/scheduler/gpu_pipeline_scheduler.hpp"
+#include "scheduler/gpu_pipeline_scheduler.hpp"
 
 #include <algorithm>
 #include <chrono>
@@ -16,10 +16,10 @@
 #include <utility>
 #include <vector>
 
-#include "kernel/graph_runtime.hpp"
+#include "runtime/graph_runtime.hpp"
 
 #if defined(PHOTOSPIDER_INTERNAL_BAD_ALLOC_TESTING)
-#include "kernel/scheduler/scheduler_exception_test_hooks.hpp"
+#include "scheduler/scheduler_exception_test_hooks.hpp"
 #endif
 
 namespace ps {

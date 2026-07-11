@@ -9,10 +9,10 @@
 #include <vector>
 
 #include "benchmark/benchmark_types.hpp"
-#include "graph_model.hpp"  // NOLINT(build/include_subdir)
+#include "compute/node_executor.hpp"
+#include "compute/task_graph_planning.hpp"
+#include "graph/graph_model.hpp"  // NOLINT(build/include_subdir)
 #include "kernel/scheduler/scheduler_task_runtime.hpp"
-#include "kernel/services/compute-service/node_executor.hpp"
-#include "kernel/services/compute-service/task_graph_planning.hpp"
 
 namespace ps {
 class GraphCacheService;

@@ -1,6 +1,8 @@
-#include "kernel/services/compute-service/node_input_resolver.hpp"
+#include "compute/node_input_resolver.hpp"
 
-#include "ps_types.hpp"
+#include <string>
+
+#include "ps_types.hpp"  // NOLINT(build/include_subdir)
 
 namespace ps::compute {
 

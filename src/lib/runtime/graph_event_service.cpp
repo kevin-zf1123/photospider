@@ -1,4 +1,7 @@
-#include "kernel/services/graph_event_service.hpp"
+#include "runtime/graph_event_service.hpp"
+
+#include <string>
+#include <vector>
 
 namespace ps {
 

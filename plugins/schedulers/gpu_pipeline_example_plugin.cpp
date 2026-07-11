@@ -4,8 +4,8 @@
 
 #include <string>
 
-#include "kernel/scheduler/gpu_pipeline_scheduler.hpp"
 #include "kernel/scheduler/scheduler_plugin_api.hpp"
+#include "scheduler/gpu_pipeline_scheduler.hpp"
 
 // GPU Pipeline 调度器示例插件，使用带 _example 后缀的类型名
 extern "C" {

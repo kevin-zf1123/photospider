@@ -1,7 +1,9 @@
-#include "kernel/services/compute-service/realtime_proxy_graph.hpp"
+#include "compute/realtime_proxy_graph.hpp"
 
 #include <set>
 #include <string>
+#include <utility>
+#include <vector>
 
 namespace ps::compute {
 

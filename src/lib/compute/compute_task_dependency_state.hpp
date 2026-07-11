@@ -6,7 +6,7 @@
 #include <unordered_set>
 #include <vector>
 
-#include "kernel/services/compute-service/task_graph_planning.hpp"
+#include "compute/task_graph_planning.hpp"
 
 namespace ps::compute {
 

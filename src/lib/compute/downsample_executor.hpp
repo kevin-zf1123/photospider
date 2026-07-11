@@ -2,8 +2,8 @@
 
 #include <vector>
 
-#include "graph_model.hpp"  // NOLINT(build/include_subdir)
-#include "kernel/services/compute-service/realtime_proxy_graph.hpp"
+#include "compute/realtime_proxy_graph.hpp"
+#include "graph/graph_model.hpp"  // NOLINT(build/include_subdir)
 
 namespace ps {
 class GraphEventService;

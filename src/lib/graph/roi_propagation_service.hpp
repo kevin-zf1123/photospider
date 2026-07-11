@@ -4,8 +4,8 @@
 #include <optional>
 #include <unordered_map>
 
-#include "graph_model.hpp"  // NOLINT(build/include_subdir)
-#include "kernel/services/graph_extent_resolver.hpp"
+#include "graph/graph_extent_resolver.hpp"
+#include "graph/graph_model.hpp"  // NOLINT(build/include_subdir)
 
 namespace ps {
 

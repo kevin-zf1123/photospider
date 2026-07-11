@@ -12,7 +12,7 @@
  * translation unit. Public frontend calls enter through `ps::Host` and the
  * embedded Host adapter.
  */
-#include "kernel/kernel.hpp"
+#include "runtime/kernel.hpp"
 
 #include <filesystem>
 #include <iostream>
@@ -23,7 +23,7 @@
 #include <utility>
 #include <vector>
 
-#include "kernel/scheduler/scheduler_factory.hpp"
+#include "scheduler/scheduler_factory.hpp"
 
 namespace ps {
 

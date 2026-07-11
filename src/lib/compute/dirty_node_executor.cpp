@@ -1,4 +1,4 @@
-#include "kernel/services/compute-service/dirty_node_executor.hpp"
+#include "compute/dirty_node_executor.hpp"
 
 #include <new>
 #include <optional>
@@ -8,13 +8,13 @@
 #include <vector>
 
 #include "adapter/buffer_adapter_opencv.hpp"
-#include "kernel/graph_runtime.hpp"
-#include "kernel/services/compute-service/compute_cache_policy.hpp"
-#include "kernel/services/compute-service/compute_geometry.hpp"
-#include "kernel/services/compute-service/dirty_execution_common.hpp"
-#include "kernel/services/compute-service/domain_op_metadata.hpp"
-#include "kernel/services/compute-service/node_executor.hpp"
-#include "kernel/services/graph_event_service.hpp"
+#include "compute/compute_cache_policy.hpp"
+#include "compute/compute_geometry.hpp"
+#include "compute/dirty_execution_common.hpp"
+#include "compute/domain_op_metadata.hpp"
+#include "compute/node_executor.hpp"
+#include "runtime/graph_event_service.hpp"
+#include "runtime/graph_runtime.hpp"
 
 namespace ps::compute {
 namespace {

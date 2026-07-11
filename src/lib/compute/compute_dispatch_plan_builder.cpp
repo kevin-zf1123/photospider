@@ -1,11 +1,11 @@
-#include "kernel/services/compute-service/compute_dispatch_plan_builder.hpp"
+#include "compute/compute_dispatch_plan_builder.hpp"
 
 #include <memory>
 #include <optional>
 #include <vector>
 
-#include "graph_model.hpp"  // NOLINT(build/include_subdir)
-#include "kernel/services/graph_traversal_service.hpp"
+#include "graph/graph_model.hpp"  // NOLINT(build/include_subdir)
+#include "graph/graph_traversal_service.hpp"
 
 namespace ps::compute {
 namespace {

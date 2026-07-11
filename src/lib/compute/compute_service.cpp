@@ -9,9 +9,9 @@
  * dirty ROI execution, HP-to-RT downsample refresh, task graph dispatch, cache
  * policy, input resolution, and metrics metadata are delegated to the
  * compute-service collaborators under
- * src/kernel/services/compute-service.
+ * src/lib/compute/.
  */
-#include "kernel/services/compute_service.hpp"
+#include "compute/compute_service.hpp"
 
 #include <chrono>
 #include <functional>
@@ -24,21 +24,21 @@
 #include <vector>
 
 #include "benchmark/benchmark_types.hpp"
-#include "kernel/graph_runtime.hpp"
-#include "kernel/param_utils.hpp"
-#include "kernel/services/compute-service/compute_cache_policy.hpp"
-#include "kernel/services/compute-service/compute_metrics_recorder.hpp"
-#include "kernel/services/compute-service/compute_task_dispatcher.hpp"
-#include "kernel/services/compute-service/dirty_sibling_commit_gate.hpp"
-#include "kernel/services/compute-service/dirty_update_executor.hpp"
-#include "kernel/services/compute-service/intent_update_coordinator.hpp"
-#include "kernel/services/compute-service/node_executor.hpp"
-#include "kernel/services/compute-service/node_input_resolver.hpp"
-#include "kernel/services/compute-service/realtime_proxy_graph.hpp"
-#include "kernel/services/compute-service/task_graph_planning.hpp"
-#include "kernel/services/graph_cache_service.hpp"
-#include "kernel/services/graph_event_service.hpp"
-#include "kernel/services/graph_traversal_service.hpp"
+#include "compute/compute_cache_policy.hpp"
+#include "compute/compute_metrics_recorder.hpp"
+#include "compute/compute_task_dispatcher.hpp"
+#include "compute/dirty_sibling_commit_gate.hpp"
+#include "compute/dirty_update_executor.hpp"
+#include "compute/intent_update_coordinator.hpp"
+#include "compute/node_executor.hpp"
+#include "compute/node_input_resolver.hpp"
+#include "compute/realtime_proxy_graph.hpp"
+#include "compute/task_graph_planning.hpp"
+#include "core/param_utils.hpp"
+#include "graph/graph_cache_service.hpp"
+#include "graph/graph_traversal_service.hpp"
+#include "runtime/graph_event_service.hpp"
+#include "runtime/graph_runtime.hpp"
 
 namespace ps {
 

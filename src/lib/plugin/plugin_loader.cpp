@@ -1,4 +1,4 @@
-#include "plugin_loader.hpp"  // NOLINT(build/include_subdir)
+#include "plugin/plugin_loader.hpp"  // NOLINT(build/include_subdir)
 
 #include <algorithm>
 #include <exception>
@@ -19,8 +19,8 @@
 #include "ps_types.hpp"    // NOLINT(build/include_subdir)
 
 #if defined(PHOTOSPIDER_INTERNAL_BAD_ALLOC_TESTING)
-#include "kernel/op_registry_test_access.hpp"
-#include "kernel/plugin_manage_module/plugin_loader_test_access.hpp"
+#include "core/op_registry_test_access.hpp"
+#include "plugin/plugin_loader_test_access.hpp"
 #endif
 
 #ifdef _WIN32

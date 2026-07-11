@@ -11,8 +11,9 @@
 #include <vector>
 
 #include "adapter/buffer_adapter_opencv.hpp"
-#include "cli/command/commands.hpp"
-#include "cli/dependency_tree_formatter.hpp"
+#include "graph_cli/command/commands.hpp"
+#include "graph_cli/command/help_utils.hpp"
+#include "graph_cli/dependency_tree_formatter.hpp"
 #include "node.hpp"      // NOLINT(build/include_subdir)
 #include "ps_types.hpp"  // NOLINT(build/include_subdir)
 
@@ -131,6 +132,61 @@ class ScopedTempDir {
 };
 
 /**
+ * @brief Temporarily changes the process working directory for one test scope.
+ *
+ * @throws std::filesystem::filesystem_error if the current path cannot be read
+ *         or changed during construction.
+ * @note Destruction restores the original directory with an error-code
+ *       overload so cleanup never hides the test's primary failure.
+ */
+class ScopedCurrentPath {
+ public:
+  /**
+   * @brief Saves the current directory and enters the requested directory.
+   *
+   * @param next Directory that should become current for the scope.
+   * @throws std::filesystem::filesystem_error if either filesystem operation
+   *         fails.
+   */
+  explicit ScopedCurrentPath(const std::filesystem::path& next)
+      : original_(std::filesystem::current_path()) {
+    std::filesystem::current_path(next);
+  }
+
+  /**
+   * @brief Prevents duplicate ownership of one process-global path restore.
+   *
+   * @param other Source scope that cannot be copied.
+   * @throws Nothing; this operation is deleted.
+   */
+  ScopedCurrentPath(const ScopedCurrentPath& other) = delete;
+
+  /**
+   * @brief Prevents replacing one process-global path restore obligation.
+   *
+   * @param other Source scope that cannot be assigned.
+   * @return This object is never returned because the operation is deleted.
+   * @throws Nothing; this operation is deleted.
+   */
+  ScopedCurrentPath& operator=(const ScopedCurrentPath& other) = delete;
+
+  /**
+   * @brief Restores the process working directory captured at construction.
+   *
+   * @throws Nothing.
+   * @note Restore errors are intentionally ignored during test cleanup.
+   */
+  ~ScopedCurrentPath() noexcept {
+    std::error_code error;
+    std::filesystem::current_path(original_, error);
+  }
+
+ private:
+  /** @brief Original directory restored when this scope ends. */
+  std::filesystem::path original_;
+};
+
+/**
  * @brief Writes a two-node graph that emits non-empty dirty diagnostics.
  *
  * @param path YAML file path to create.
@@ -194,6 +250,18 @@ TEST(CliDirtySnapshotFormatter, RendersMonolithicAndEdgeMappings) {
   EXPECT_NE(text.find("node 1 -> 2 hp backward-demand "
                       "from=[0,0 8x6] to=[1,1 2x2]"),
             std::string::npos);
+}
+
+TEST(CliHelpResources, LoadsConfiguredHelpOutsideRepositoryCwd) {
+  ScopedTempDir temp("photospider_cli_help_resource_test");
+  ScopedCurrentPath current_path(temp.root());
+
+  testing::internal::CaptureStdout();
+  ::print_help_from_file("help_compute.txt");
+  const std::string output = testing::internal::GetCapturedStdout();
+
+  EXPECT_NE(output.find("compute <id|all> [flags]"), std::string::npos);
+  EXPECT_EQ(output.find("Help not available"), std::string::npos);
 }
 
 TEST(CliNodeInspectionFormatter, RendersLocalInverseMatrix) {

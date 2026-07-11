@@ -1,4 +1,4 @@
-#include "kernel/services/roi_propagation_service.hpp"
+#include "graph/roi_propagation_service.hpp"
 
 #include <algorithm>
 #include <array>
@@ -7,7 +7,7 @@
 #include <unordered_map>
 #include <utility>
 
-#include "kernel/ops.hpp"
+#include "core/ops.hpp"
 
 namespace ps {
 
