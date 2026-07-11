@@ -3,6 +3,7 @@
 #include <algorithm>
 #include <cstddef>
 #include <cstdint>
+#include <limits>
 #include <set>
 #include <stdexcept>
 #include <string>
@@ -13,6 +14,190 @@
 #include "ipc/codec.hpp"
 
 namespace ps::ipc::internal {
+namespace {
+
+/**
+ * @brief Builds the stable missing-session status used by lifecycle admission.
+ *
+ * @return Graph-domain NotFound without exposing a private Host identifier.
+ * @throws std::bad_alloc if diagnostic storage cannot be allocated.
+ * @note Closing rows and globally stopped admission intentionally look absent
+ *       to new session-scoped callers.
+ */
+OperationStatus session_not_found_status() {
+  return failure_status(OperationErrorDomain::Graph,
+                        static_cast<std::int32_t>(GraphErrc::NotFound),
+                        "not_found", "opaque graph session was not found");
+}
+
+}  // namespace
+
+/** @copydoc SessionRegistry::HostCallAdmission::HostCallAdmission */
+SessionRegistry::HostCallAdmission::HostCallAdmission(
+    SessionRegistry* owner, std::string token, GraphSessionId host_session)
+    : owner_(owner),                             // NOLINT
+      token_(std::move(token)),                  // NOLINT
+      host_session_(std::move(host_session)) {}  // NOLINT
+
+/** @copydoc SessionRegistry::HostCallAdmission::~HostCallAdmission */
+SessionRegistry::HostCallAdmission::~HostCallAdmission() noexcept {
+  reset();
+}
+
+/** @copydoc SessionRegistry::HostCallAdmission::HostCallAdmission */
+SessionRegistry::HostCallAdmission::HostCallAdmission(
+    HostCallAdmission&& other) noexcept
+    : owner_(std::exchange(other.owner_, nullptr)),     // NOLINT
+      token_(std::move(other.token_)),                  // NOLINT
+      host_session_(std::move(other.host_session_)) {}  // NOLINT
+
+/** @copydoc SessionRegistry::HostCallAdmission::operator= */
+SessionRegistry::HostCallAdmission&
+SessionRegistry::HostCallAdmission::operator=(
+    HostCallAdmission&& other) noexcept {
+  if (this != &other) {
+    reset();
+    owner_ = std::exchange(other.owner_, nullptr);
+    token_ = std::move(other.token_);
+    host_session_ = std::move(other.host_session_);
+  }
+  return *this;
+}
+
+/** @copydoc SessionRegistry::HostCallAdmission::host_session */
+const GraphSessionId& SessionRegistry::HostCallAdmission::host_session()
+    const noexcept {  // NOLINT
+  return host_session_;
+}
+
+/** @copydoc SessionRegistry::HostCallAdmission::active */
+bool SessionRegistry::HostCallAdmission::active() const noexcept {
+  return owner_ != nullptr;
+}
+
+/** @copydoc SessionRegistry::HostCallAdmission::reset */
+void SessionRegistry::HostCallAdmission::reset() noexcept {
+  SessionRegistry* owner = std::exchange(owner_, nullptr);
+  if (owner != nullptr) {
+    owner->release_admission(token_, AdmissionKind::HostCall);
+  }
+  token_.clear();
+  host_session_.value.clear();
+}
+
+/** @copydoc SessionRegistry::JobAdmission::JobAdmission */
+SessionRegistry::JobAdmission::JobAdmission(SessionRegistry* owner,
+                                            std::string token,
+                                            GraphSessionId host_session)
+    : owner_(owner),                             // NOLINT
+      token_(std::move(token)),                  // NOLINT
+      host_session_(std::move(host_session)) {}  // NOLINT
+
+/** @copydoc SessionRegistry::JobAdmission::~JobAdmission */
+SessionRegistry::JobAdmission::~JobAdmission() noexcept {
+  reset();
+}
+
+/** @copydoc SessionRegistry::JobAdmission::JobAdmission */
+SessionRegistry::JobAdmission::JobAdmission(JobAdmission&& other) noexcept
+    : owner_(std::exchange(other.owner_, nullptr)),     // NOLINT
+      token_(std::move(other.token_)),                  // NOLINT
+      host_session_(std::move(other.host_session_)) {}  // NOLINT
+
+/** @copydoc SessionRegistry::JobAdmission::operator= */
+SessionRegistry::JobAdmission& SessionRegistry::JobAdmission::operator=(
+    JobAdmission&& other) noexcept {
+  if (this != &other) {
+    reset();
+    owner_ = std::exchange(other.owner_, nullptr);
+    token_ = std::move(other.token_);
+    host_session_ = std::move(other.host_session_);
+  }
+  return *this;
+}
+
+/** @copydoc SessionRegistry::JobAdmission::host_session */
+const GraphSessionId& SessionRegistry::JobAdmission::host_session()
+    const noexcept {  // NOLINT
+  return host_session_;
+}
+
+/** @copydoc SessionRegistry::JobAdmission::active */
+bool SessionRegistry::JobAdmission::active() const noexcept {
+  return owner_ != nullptr;
+}
+
+/** @copydoc SessionRegistry::JobAdmission::reset */
+void SessionRegistry::JobAdmission::reset() noexcept {
+  SessionRegistry* owner = std::exchange(owner_, nullptr);
+  if (owner != nullptr) {
+    owner->release_admission(token_, AdmissionKind::Job);
+  }
+  token_.clear();
+  host_session_.value.clear();
+}
+
+/** @copydoc SessionRegistry::CloseClaim::CloseClaim */
+SessionRegistry::CloseClaim::CloseClaim(SessionRegistry* owner,
+                                        std::string token,
+                                        GraphSessionId host_session)
+    : owner_(owner),                             // NOLINT
+      token_(std::move(token)),                  // NOLINT
+      host_session_(std::move(host_session)) {}  // NOLINT
+
+/** @copydoc SessionRegistry::CloseClaim::~CloseClaim */
+SessionRegistry::CloseClaim::~CloseClaim() noexcept {
+  reopen();
+}
+
+/** @copydoc SessionRegistry::CloseClaim::CloseClaim */
+SessionRegistry::CloseClaim::CloseClaim(CloseClaim&& other) noexcept
+    : owner_(std::exchange(other.owner_, nullptr)),     // NOLINT
+      token_(std::move(other.token_)),                  // NOLINT
+      host_session_(std::move(other.host_session_)) {}  // NOLINT
+
+/** @copydoc SessionRegistry::CloseClaim::operator= */
+SessionRegistry::CloseClaim& SessionRegistry::CloseClaim::operator=(
+    CloseClaim&& other) noexcept {
+  if (this != &other) {
+    reopen();
+    owner_ = std::exchange(other.owner_, nullptr);
+    token_ = std::move(other.token_);
+    host_session_ = std::move(other.host_session_);
+  }
+  return *this;
+}
+
+/** @copydoc SessionRegistry::CloseClaim::host_session */
+const GraphSessionId& SessionRegistry::CloseClaim::host_session()
+    const noexcept {  // NOLINT
+  return host_session_;
+}
+
+/** @copydoc SessionRegistry::CloseClaim::erase */
+void SessionRegistry::CloseClaim::erase() noexcept {
+  SessionRegistry* owner = std::exchange(owner_, nullptr);
+  if (owner != nullptr) {
+    owner->complete_close(token_, true);
+  }
+  token_.clear();
+  host_session_.value.clear();
+}
+
+/** @copydoc SessionRegistry::CloseClaim::reopen */
+void SessionRegistry::CloseClaim::reopen() noexcept {
+  SessionRegistry* owner = std::exchange(owner_, nullptr);
+  if (owner != nullptr) {
+    owner->complete_close(token_, false);
+  }
+  token_.clear();
+  host_session_.value.clear();
+}
+
+/** @copydoc SessionRegistry::CloseClaim::active */
+bool SessionRegistry::CloseClaim::active() const noexcept {
+  return owner_ != nullptr;
+}
 
 /** @copydoc SessionRegistry::SessionRegistry() */
 SessionRegistry::SessionRegistry() : SessionRegistry(generate_opaque_id) {}
@@ -29,6 +214,9 @@ SessionRegistry::SessionRegistry(TokenGenerator generator)
 IpcResult<IpcSessionId> SessionRegistry::reserve(
     const std::string& session_name) {
   std::lock_guard<std::mutex> lock(mutex_);
+  if (!accepting_) {
+    return {session_not_found_status(), {}};
+  }
   if (pending_by_name_.count(session_name) != 0 ||
       active_by_name_.count(session_name) != 0) {
     return {
@@ -133,27 +321,92 @@ void SessionRegistry::rollback(const IpcSessionId& session_id) noexcept {
   pending_by_token_.erase(pending);
 }
 
-/** @copydoc SessionRegistry::resolve */
-std::optional<GraphSessionId> SessionRegistry::resolve(
-    const IpcSessionId& session_id) const {
+/** @copydoc SessionRegistry::admit_host_call */
+IpcResult<SessionRegistry::HostCallAdmission> SessionRegistry::admit_host_call(
+    const IpcSessionId& session_id) {
   std::lock_guard<std::mutex> lock(mutex_);
   const auto found = active_by_token_.find(session_id.value);
-  if (found == active_by_token_.end()) {
-    return std::nullopt;
+  if (!accepting_ || found == active_by_token_.end() ||
+      found->second.lifecycle != LifecycleState::Active) {
+    return {session_not_found_status(), {}};
   }
-  return found->second.host_session;
+  if (found->second.admitted_host_calls ==
+      std::numeric_limits<std::size_t>::max()) {
+    return {failure_status(OperationErrorDomain::Daemon, kInternalErrorCode,
+                           "internal_error",
+                           "session Host-call admission count exhausted"),
+            {}};
+  }
+  HostCallAdmission admission(this, found->first, found->second.host_session);
+  ++found->second.admitted_host_calls;
+  return {ok_status(), std::move(admission)};
 }
 
-/** @copydoc SessionRegistry::erase */
-void SessionRegistry::erase(const IpcSessionId& session_id) noexcept {
+/** @copydoc SessionRegistry::admit_job */
+IpcResult<SessionRegistry::JobAdmission> SessionRegistry::admit_job(
+    const IpcSessionId& session_id) {
   std::lock_guard<std::mutex> lock(mutex_);
   const auto found = active_by_token_.find(session_id.value);
-  if (found == active_by_token_.end()) {
-    return;
+  if (!accepting_ || found == active_by_token_.end() ||
+      found->second.lifecycle != LifecycleState::Active) {
+    return {session_not_found_status(), {}};
   }
-  active_by_name_.erase(found->second.session_name);
-  active_by_host_.erase(found->second.host_session.value);
-  active_by_token_.erase(found);
+  if (found->second.admitted_jobs == std::numeric_limits<std::size_t>::max()) {
+    return {failure_status(OperationErrorDomain::Daemon, kInternalErrorCode,
+                           "internal_error",
+                           "session job admission count exhausted"),
+            {}};
+  }
+  JobAdmission admission(this, found->first, found->second.host_session);
+  ++found->second.admitted_jobs;
+  return {ok_status(), std::move(admission)};
+}
+
+/** @copydoc SessionRegistry::begin_close */
+IpcResult<SessionRegistry::CloseClaim> SessionRegistry::begin_close(
+    const IpcSessionId& session_id) {
+  std::unique_lock<std::mutex> lock(mutex_);
+  auto found = active_by_token_.find(session_id.value);
+  if (!accepting_ || found == active_by_token_.end() ||
+      found->second.lifecycle != LifecycleState::Active) {
+    return {session_not_found_status(), {}};
+  }
+  std::string token = found->first;
+  GraphSessionId host_session = found->second.host_session;
+  found->second.lifecycle = LifecycleState::Closing;
+  try {
+    lifecycle_cv_.wait(lock, [this, &session_id] {
+      const auto current = active_by_token_.find(session_id.value);
+      return current == active_by_token_.end() ||
+             (current->second.admitted_host_calls == 0 &&
+              current->second.admitted_jobs == 0);
+    });
+  } catch (...) {
+    found = active_by_token_.find(session_id.value);
+    if (found != active_by_token_.end() &&
+        found->second.lifecycle == LifecycleState::Closing) {
+      found->second.lifecycle = LifecycleState::Active;
+    }
+    throw;
+  }
+  found = active_by_token_.find(session_id.value);
+  if (found == active_by_token_.end()) {
+    return {session_not_found_status(), {}};
+  }
+  CloseClaim claim(this, std::move(token), std::move(host_session));
+  return {ok_status(), std::move(claim)};
+}
+
+/** @copydoc SessionRegistry::start_admission */
+void SessionRegistry::start_admission() noexcept {
+  std::lock_guard<std::mutex> lock(mutex_);
+  accepting_ = true;
+}
+
+/** @copydoc SessionRegistry::stop_admission */
+void SessionRegistry::stop_admission() noexcept {
+  std::lock_guard<std::mutex> lock(mutex_);
+  accepting_ = false;
 }
 
 /** @copydoc SessionRegistry::reconcile */
@@ -190,6 +443,9 @@ IpcResult<std::vector<GraphSessionSummary>> SessionRegistry::reconcile(
   std::vector<GraphSessionSummary> summaries;
   summaries.reserve(active_by_token_.size());
   for (const auto& row : active_by_token_) {
+    if (row.second.lifecycle != LifecycleState::Active) {
+      continue;
+    }
     summaries.push_back({{row.first}, row.second.session_name});
   }
   std::sort(
@@ -215,12 +471,59 @@ SessionRegistry::active_sessions() const {
 
 /** @copydoc SessionRegistry::clear */
 void SessionRegistry::clear() noexcept {
+  {
+    std::lock_guard<std::mutex> lock(mutex_);
+    pending_by_token_.clear();
+    pending_by_name_.clear();
+    active_by_token_.clear();
+    active_by_host_.clear();
+    active_by_name_.clear();
+  }
+  lifecycle_cv_.notify_all();
+}
+
+/** @copydoc SessionRegistry::release_admission */
+void SessionRegistry::release_admission(const std::string& token,
+                                        AdmissionKind kind) noexcept {
+  bool wake_close = false;
+  {
+    std::lock_guard<std::mutex> lock(mutex_);
+    const auto found = active_by_token_.find(token);
+    if (found == active_by_token_.end()) {
+      return;
+    }
+    std::size_t* count = kind == AdmissionKind::HostCall
+                             ? &found->second.admitted_host_calls
+                             : &found->second.admitted_jobs;
+    if (*count == 0) {
+      return;
+    }
+    --(*count);
+    wake_close = found->second.lifecycle == LifecycleState::Closing &&
+                 found->second.admitted_host_calls == 0 &&
+                 found->second.admitted_jobs == 0;
+  }
+  if (wake_close) {
+    lifecycle_cv_.notify_all();
+  }
+}
+
+/** @copydoc SessionRegistry::complete_close */
+void SessionRegistry::complete_close(const std::string& token,
+                                     bool erase_mapping) noexcept {
   std::lock_guard<std::mutex> lock(mutex_);
-  pending_by_token_.clear();
-  pending_by_name_.clear();
-  active_by_token_.clear();
-  active_by_host_.clear();
-  active_by_name_.clear();
+  const auto found = active_by_token_.find(token);
+  if (found == active_by_token_.end() ||
+      found->second.lifecycle != LifecycleState::Closing) {
+    return;
+  }
+  if (!erase_mapping) {
+    found->second.lifecycle = LifecycleState::Active;
+    return;
+  }
+  active_by_name_.erase(found->second.session_name);
+  active_by_host_.erase(found->second.host_session.value);
+  active_by_token_.erase(found);
 }
 
 }  // namespace ps::ipc::internal

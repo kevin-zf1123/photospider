@@ -1,9 +1,10 @@
 #pragma once
 
+#include <condition_variable>
+#include <cstddef>
 #include <functional>
 #include <map>
 #include <mutex>
-#include <optional>
 #include <set>
 #include <string>
 #include <vector>
@@ -22,8 +23,11 @@ namespace ps::ipc::internal {
  * session id. Failed Host loads or commit failures roll back the reservation.
  *
  * @throws std::bad_alloc when registry storage allocation fails.
- * @note The registry mutex is independent of the daemon Host mutex. Callers
- *       serialize multi-step Host/registry transactions with the Host mutex.
+ * @note The registry mutex is independent of the daemon Host mutex. Admission
+ *       captures and counts a row without retaining this mutex across Host;
+ *       close marks/waits admission before it acquires the Host mutex. Host
+ *       transactions may update registry indexes while holding only Host plus
+ *       a short registry critical section.
  */
 class SessionRegistry {
  public:
@@ -36,6 +40,288 @@ class SessionRegistry {
    *       inject a generator without changing the public IPC boundary.
    */
   using TokenGenerator = std::function<std::string()>;
+
+  /**
+   * @brief Move-only admission for one ordinary session-scoped Host call.
+   *
+   * @throws std::bad_alloc when moved string ownership cannot be represented.
+   * @note Destruction releases exactly one admitted-call count. The admission
+   *       owns no Host object and must be destroyed before its registry.
+   */
+  class HostCallAdmission {
+   public:
+    /**
+     * @brief Creates an inactive admission used by failed result values.
+     * @throws Nothing.
+     */
+    HostCallAdmission() = default;
+
+    /**
+     * @brief Releases one active admitted-call count when present.
+     * @throws Nothing.
+     */
+    ~HostCallAdmission() noexcept;
+
+    /**
+     * @brief Prevents duplicating one admitted-call count.
+     * @throws Nothing because construction is unavailable.
+     */
+    HostCallAdmission(const HostCallAdmission&) = delete;
+
+    /**
+     * @brief Prevents duplicating one admitted-call count by assignment.
+     * @return No value because copying is unavailable.
+     */
+    HostCallAdmission& operator=(const HostCallAdmission&) = delete;
+
+    /**
+     * @brief Transfers one admitted-call count from another owner.
+     * @param other Admission that becomes inactive.
+     * @throws Nothing.
+     */
+    HostCallAdmission(HostCallAdmission&& other) noexcept;
+
+    /**
+     * @brief Releases any current count and transfers another admission.
+     * @param other Admission that becomes inactive.
+     * @return This admission after transfer.
+     * @throws Nothing.
+     */
+    HostCallAdmission& operator=(HostCallAdmission&& other) noexcept;
+
+    /**
+     * @brief Returns the private Host session captured at admission time.
+     * @return Stable reference valid for this admission's active lifetime.
+     * @throws Nothing.
+     */
+    const GraphSessionId& host_session() const noexcept;
+
+    /**
+     * @brief Reports whether this object owns an admitted-call count.
+     * @return True only before release or move.
+     * @throws Nothing.
+     */
+    bool active() const noexcept;
+
+   private:
+    friend class SessionRegistry;
+
+    /**
+     * @brief Creates one active admitted-call owner.
+     * @param owner Registry that owns the counted row.
+     * @param token Opaque session token used to release the count.
+     * @param host_session Private Host session captured under the registry
+     * lock.
+     * @throws std::bad_alloc if owned strings cannot be moved or copied.
+     */
+    HostCallAdmission(SessionRegistry* owner, std::string token,
+                      GraphSessionId host_session);
+
+    /**
+     * @brief Releases the owned count when active.
+     * @throws Nothing.
+     */
+    void reset() noexcept;
+
+    /** @brief Registry whose row owns the count, or null when inactive. */
+    SessionRegistry* owner_ = nullptr;
+
+    /** @brief Opaque row key retained independently of map node addresses. */
+    std::string token_;
+
+    /** @brief Private Host value captured before external serialization. */
+    GraphSessionId host_session_;
+  };
+
+  /**
+   * @brief Move-only admission retained by one queued or running compute job.
+   *
+   * @throws std::bad_alloc when moved string ownership cannot be represented.
+   * @note The compute registry keeps this token through complete terminal
+   *       publication, then destroys it outside the compute-registry lock.
+   */
+  class JobAdmission {
+   public:
+    /**
+     * @brief Creates an inactive admission used by failed result values.
+     * @throws Nothing.
+     */
+    JobAdmission() = default;
+
+    /**
+     * @brief Releases one queued/running-job count when present.
+     * @throws Nothing.
+     */
+    ~JobAdmission() noexcept;
+
+    /**
+     * @brief Prevents duplicating one queued/running-job count.
+     * @throws Nothing because construction is unavailable.
+     */
+    JobAdmission(const JobAdmission&) = delete;
+
+    /**
+     * @brief Prevents duplicating one job count by assignment.
+     * @return No value because copying is unavailable.
+     */
+    JobAdmission& operator=(const JobAdmission&) = delete;
+
+    /**
+     * @brief Transfers one queued/running-job count from another owner.
+     * @param other Admission that becomes inactive.
+     * @throws Nothing.
+     */
+    JobAdmission(JobAdmission&& other) noexcept;
+
+    /**
+     * @brief Releases any current count and transfers another admission.
+     * @param other Admission that becomes inactive.
+     * @return This admission after transfer.
+     * @throws Nothing.
+     */
+    JobAdmission& operator=(JobAdmission&& other) noexcept;
+
+    /**
+     * @brief Returns the private Host session captured at admission time.
+     * @return Stable reference valid for this admission's active lifetime.
+     * @throws Nothing.
+     */
+    const GraphSessionId& host_session() const noexcept;
+
+    /**
+     * @brief Reports whether this object owns a queued/running-job count.
+     * @return True only before release or move.
+     * @throws Nothing.
+     */
+    bool active() const noexcept;
+
+   private:
+    friend class SessionRegistry;
+
+    /**
+     * @brief Creates one active queued/running-job owner.
+     * @param owner Registry that owns the counted row.
+     * @param token Opaque session token used to release the count.
+     * @param host_session Private Host session captured under the registry
+     * lock.
+     * @throws std::bad_alloc if owned strings cannot be moved or copied.
+     */
+    JobAdmission(SessionRegistry* owner, std::string token,
+                 GraphSessionId host_session);
+
+    /**
+     * @brief Releases the owned count when active.
+     * @throws Nothing.
+     */
+    void reset() noexcept;
+
+    /** @brief Registry whose row owns the count, or null when inactive. */
+    SessionRegistry* owner_ = nullptr;
+
+    /** @brief Opaque row key retained independently of map node addresses. */
+    std::string token_;
+
+    /** @brief Private Host value captured before external execution. */
+    GraphSessionId host_session_;
+  };
+
+  /**
+   * @brief Exclusive move-only claim for one graph-close lifecycle.
+   *
+   * @throws std::bad_alloc when moved string ownership cannot be represented.
+   * @note `begin_close()` marks the row Closing and waits admitted work before
+   *       publishing this claim. Destruction without `erase()` reopens the row.
+   */
+  class CloseClaim {
+   public:
+    /**
+     * @brief Creates an inactive claim used by failed result values.
+     * @throws Nothing.
+     */
+    CloseClaim() = default;
+
+    /**
+     * @brief Reopens an unresolved close claim best-effort.
+     * @throws Nothing.
+     */
+    ~CloseClaim() noexcept;
+
+    /**
+     * @brief Prevents duplicating exclusive close ownership.
+     * @throws Nothing because construction is unavailable.
+     */
+    CloseClaim(const CloseClaim&) = delete;
+
+    /**
+     * @brief Prevents duplicating exclusive close ownership by assignment.
+     * @return No value because copying is unavailable.
+     */
+    CloseClaim& operator=(const CloseClaim&) = delete;
+
+    /**
+     * @brief Transfers exclusive close ownership from another claim.
+     * @param other Claim that becomes inactive.
+     * @throws Nothing.
+     */
+    CloseClaim(CloseClaim&& other) noexcept;
+
+    /**
+     * @brief Reopens any current claim and transfers another claim.
+     * @param other Claim that becomes inactive.
+     * @return This claim after transfer.
+     * @throws Nothing.
+     */
+    CloseClaim& operator=(CloseClaim&& other) noexcept;
+
+    /**
+     * @brief Returns the private Host session safe to close.
+     * @return Stable reference valid until this claim is completed or moved.
+     * @throws Nothing.
+     */
+    const GraphSessionId& host_session() const noexcept;
+
+    /**
+     * @brief Removes the closed or Host-missing session mapping.
+     * @throws Nothing.
+     * @note Call only after Host close success or Graph NotFound.
+     */
+    void erase() noexcept;
+
+    /**
+     * @brief Reopens session admission after a retryable Host close failure.
+     * @throws Nothing.
+     */
+    void reopen() noexcept;
+
+    /**
+     * @brief Reports whether this object owns an unresolved close claim.
+     * @return True only before erase, reopen, or move.
+     * @throws Nothing.
+     */
+    bool active() const noexcept;
+
+   private:
+    friend class SessionRegistry;
+
+    /**
+     * @brief Creates one exclusive claim after admitted work reaches zero.
+     * @param owner Registry that owns the Closing row.
+     * @param token Opaque row key.
+     * @param host_session Private Host session safe for the caller to close.
+     * @throws std::bad_alloc if owned strings cannot be moved or copied.
+     */
+    CloseClaim(SessionRegistry* owner, std::string token,
+               GraphSessionId host_session);
+
+    /** @brief Registry whose row is Closing, or null when resolved. */
+    SessionRegistry* owner_ = nullptr;
+
+    /** @brief Opaque row key retained independently of map node addresses. */
+    std::string token_;
+
+    /** @brief Private Host session captured before the wait completed. */
+    GraphSessionId host_session_;
+  };
 
   /**
    * @brief Creates a registry using operating-system entropy.
@@ -106,22 +392,55 @@ class SessionRegistry {
   void rollback(const IpcSessionId& session_id) noexcept;
 
   /**
-   * @brief Resolves one active opaque id to its private Host session.
+   * @brief Atomically admits one ordinary session-scoped Host call.
    *
-   * @param session_id Opaque daemon session identifier.
-   * @return Copied Host session id, or nullopt when unknown/loading.
-   * @throws std::bad_alloc if the returned string copy cannot be allocated.
+   * @param session_id Opaque active session identifier.
+   * @return Move-only admission with the private Host session, or Graph
+   *         NotFound when absent, Closing, or global admission is stopped.
+   * @throws std::bad_alloc if result ownership cannot be allocated.
+   * @note No registry mutex remains held when the caller later enters Host.
    */
-  std::optional<GraphSessionId> resolve(const IpcSessionId& session_id) const;
+  IpcResult<HostCallAdmission> admit_host_call(const IpcSessionId& session_id);
 
   /**
-   * @brief Removes one active mapping from all three indexes.
+   * @brief Atomically admits one queued/running compute job for a session.
    *
-   * @param session_id Opaque daemon session identifier.
-   * @throws Nothing.
-   * @note Call only after successful Host close or Host `NotFound`.
+   * @param session_id Opaque active session identifier.
+   * @return Move-only admission with the private Host session, or Graph
+   *         NotFound when absent, Closing, or global admission is stopped.
+   * @throws std::bad_alloc if result ownership cannot be allocated.
+   * @note The caller must retain the token until terminal state is completely
+   *       published; lookup/status operations need no live-session admission.
    */
-  void erase(const IpcSessionId& session_id) noexcept;
+  IpcResult<JobAdmission> admit_job(const IpcSessionId& session_id);
+
+  /**
+   * @brief Claims one session close and waits all admitted work to finish.
+   *
+   * @param session_id Opaque active session identifier.
+   * @return Exclusive close claim, or Graph NotFound when absent, already
+   *         Closing, or global admission is stopped.
+   * @throws std::bad_alloc if claim ownership cannot be allocated.
+   * @note The row becomes Closing before waiting. The condition-variable wait
+   *       releases the registry mutex, and the caller receives no held lock.
+   */
+  IpcResult<CloseClaim> begin_close(const IpcSessionId& session_id);
+
+  /**
+   * @brief Enables new load, Host-call, job, and close admission.
+   * @throws Nothing.
+   * @note Intended for a new daemon run after prior runtime cleanup. Existing
+   *       Closing rows are not implicitly reopened.
+   */
+  void start_admission() noexcept;
+
+  /**
+   * @brief Rejects every new load, Host-call, job, and close admission.
+   * @throws Nothing.
+   * @note Already admitted work and existing mappings remain owned until their
+   *       normal completion and shutdown cleanup.
+   */
+  void stop_admission() noexcept;
 
   /**
    * @brief Reconciles active mappings with one Host list snapshot.
@@ -155,6 +474,28 @@ class SessionRegistry {
 
  private:
   /**
+   * @brief Lifecycle state of one committed session row.
+   * @throws Nothing.
+   */
+  enum class LifecycleState {
+    /** @brief New session-scoped work may be admitted. */
+    Active,
+    /** @brief Close owns the row and new admission is rejected. */
+    Closing,
+  };
+
+  /**
+   * @brief Counter category released by one move-only admission.
+   * @throws Nothing.
+   */
+  enum class AdmissionKind {
+    /** @brief Ordinary session-scoped Host call. */
+    HostCall,
+    /** @brief Queued or running compute request. */
+    Job,
+  };
+
+  /**
    * @brief Committed registry row containing private and display identities.
    *
    * @throws std::bad_alloc when copied strings cannot be allocated.
@@ -165,10 +506,41 @@ class SessionRegistry {
 
     /** @brief Original caller-provided display/session name. */
     std::string session_name;
+
+    /** @brief Whether this row accepts work or is exclusively Closing. */
+    LifecycleState lifecycle = LifecycleState::Active;
+
+    /** @brief Ordinary Host calls admitted but not yet released. */
+    std::size_t admitted_host_calls = 0;
+
+    /** @brief Compute jobs queued/running before terminal publication. */
+    std::size_t admitted_jobs = 0;
   };
+
+  /**
+   * @brief Releases one counted admission and wakes a waiting close.
+   * @param token Opaque active-row key.
+   * @param kind Counter category to decrement.
+   * @throws Nothing; missing/cleared rows are tolerated during shutdown.
+   */
+  void release_admission(const std::string& token, AdmissionKind kind) noexcept;
+
+  /**
+   * @brief Resolves one close claim by erasing or reopening its row.
+   * @param token Opaque Closing-row key.
+   * @param erase_mapping True to remove all indexes; false to reopen.
+   * @throws Nothing.
+   */
+  void complete_close(const std::string& token, bool erase_mapping) noexcept;
 
   /** @brief Serializes all registry indexes and reservations. */
   mutable std::mutex mutex_;
+
+  /** @brief Wakes close waiters after admitted call/job release. */
+  std::condition_variable lifecycle_cv_;
+
+  /** @brief Whether new load/session/job/close admission is enabled. */
+  bool accepting_ = true;
 
   /** @brief Candidate generator, using OS entropy in production. */
   TokenGenerator token_generator_;
