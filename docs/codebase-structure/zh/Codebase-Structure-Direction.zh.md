@@ -1,7 +1,7 @@
 # 代码库结构方向
 
-本文档同时记录 Photospider 当前已经具备的公开头/Host seam 与静态产品，以及剩余的源码布局、
-内部 target 和 daemon/IPC 方向。下文会明确区分当前状态与未来工作。
+本文档同时记录 Photospider 当前已经具备的公开头/Host seam、静态产品和按角色归属的源码布局，
+以及剩余的内部 target 与 daemon/IPC 方向。下文会明确区分当前状态与未来工作。
 
 目标如下：
 
@@ -12,37 +12,43 @@
 
 ## 当前摩擦
 
-当前仓库已经具备 public Host seam 和可安装静态产品，但源码/application 布局与过渡性 plugin SDK
-仍需要后续迁移阶段完成。
+当前仓库已经具备 public Host seam、可安装静态产品、迁移后的 CLI application tree、按角色归属的
+backend source tree、明确的 production plugin 目录，以及 unit/integration 测试归属。Daemon/IPC
+application、最终 internal target 形态与过渡性 plugin SDK 仍需要后续迁移阶段完成。
 
 当前根 `CMakeLists.txt` 中观察到的构建目标：
 
 | 当前 target | 当前角色 | 摩擦 |
 | --- | --- | --- |
-| `photospider_core_types` | 仅用于构建的静态核心数据与 operation-registry helper。 | 在后续 source-layout 拆分前，它的实现源码也会折叠进静态产品。 |
-| `photospider_graph` | 仅用于构建的静态 `GraphModel` 与 graph-services helper。 | `GraphModel` 现在已经私有，但该 helper 的实现源码也会折叠进产品。 |
+| `photospider_core_types` | 仅用于构建的静态核心数据与 operation-registry helper。 | 按角色归属的源码也会折叠进静态产品；target decomposition 与已经完成的物理迁移彼此独立。 |
+| `photospider_graph` | 仅用于构建的静态 `GraphModel` 与 graph-services helper。 | `GraphModel` 现在位于私有的 `src/lib/graph`，但这些源码也会折叠进产品。 |
 | `photospider_plugin` | 仅用于构建的静态 plugin manager 与 loader helper。 | 它不会被导出；过渡性 plugin SDK 仍使用 source tree 中遗留的顶层头。 |
-| `photospider_compute` | 仅用于构建的静态 compute、runtime、scheduler 与 interaction helper。 | Compute-planning 头现在已经私有，但其实现源码也会折叠进产品。 |
-| `photospider` | 静态可安装后端产品，归档文件名为 `libphotospider`。 | 现在已经符合目标中的静态产品形态，但在后续源码布局拆分落地前，仍把遗留后端内部实现折叠在公开 Host seam 背后。 |
-| `photospider_cli_common` | 静态 CLI 命令、TUI、自动补全代码，以及可复用 `run_graph_cli` 边界。 | 使用仅供仓库内部使用的 CLI 头，仍是不可安装的 application helper。 |
-| `graph_cli` | 只负责 process policy 的 CLI 可执行入口。 | 禁用 OpenCL，拥有不依赖分配的 fatal exit policy，创建 embedded `Host` adapter，尚无 daemon-client 模式。 |
+| `photospider_compute` | 仅用于构建的静态 compute、runtime、scheduler 与 interaction helper。 | 实现已经按物理角色归属；后续 target decomposition 可以进一步收窄链接所有权。 |
+| `photospider` | 静态可安装后端产品，归档文件名为 `libphotospider`。 | 已符合目标静态产品和 public Host 形态，同时把按角色归属的后端源码折叠进单一归档。 |
+| `photospider_cli_common` | `apps/graph_cli/` 下的静态 CLI 命令、TUI、自动补全代码，以及可复用 `run_graph_cli` 边界。 | 使用 application-private 头，仍是不可安装的 helper。 |
+| `graph_cli` | 位于 `apps/graph_cli/main.cpp`、只负责 process policy 的入口。 | 禁用 OpenCL，拥有不依赖分配的 fatal exit policy，创建 embedded `Host` adapter，尚无 daemon-client 模式。 |
 
 仍遗留和刚完成修复的接口泄漏：
 
-- 原先的 `include/graph_model.hpp` 已移到 `src/graph_model.hpp`；graph model state、
+- 原先的 `include/graph_model.hpp` 已移到 `src/lib/graph/graph_model.hpp`；graph model state、
   dirty-region snapshot、planner summary、full task graph cache handle 和 runtime generation
   state 现在都归入私有 include root。
-- 遗留的内部 `Kernel` 和 `InteractionService` facade 现在位于 `src/kernel/`。它们包含 runtime、
+- 内部 `Kernel` 和 `InteractionService` facade 现在位于 `src/lib/runtime/`。它们包含 runtime、
   compute service、图服务、插件管理器和 dirty-control-lane 实现类型，因此不是 `photospider`
-  链接消费者可依赖的受支持头；仍包含它们的仓库内部 target 必须获得私有 `src/` include root。
+  链接消费者可依赖的受支持头；仍包含它们的仓库内部 target 必须获得私有 `src/lib/` include root。
   `ps::Host` 现在已经是唯一受支持的 frontend public seam。Embedded Host adapter 会把
   `ps::HostComputeRequest` 转换为内部 `Kernel::ComputeRequest`，再通过
-  `InteractionService`/`Kernel` 委托执行。后续阶段只会在保持这一所有权的前提下调整目录/内部 target
+  `InteractionService`/`Kernel` 委托执行。后续阶段只会在保持这一所有权的前提下调整内部 target
   或增加 daemon/IPC adapter，不会再引入第二套 frontend facade。
 - `include/plugin_api.hpp` 包含完整 `Node`，把节点运行时/cache 状态暴露给操作插件，而不是暴露更小的插件契约。Issue #33
   已通过 `OperationPluginRegistrar` 收窄注册路径，但后续 public plugin contract 仍需要更小的 node view。
-- 遗留 CLI 与 benchmark 头仍位于 source tree 的 `include/` root 下。当前定向 install 规则已经排除这些头，
-  但后续 application layout 阶段仍需把它们移出遗留 include tree。
+- Benchmark 与实现私有 backend 头现在都随所属角色位于 `src/lib/**`；CLI 头位于
+  application-private 的 `apps/graph_cli/include/graph_cli/` 树中。只有八个过渡性 source-tree
+  extension header 明确保留给 issue #38：
+  `include/{plugin_api,node,ps_types,image_buffer}.hpp`、
+  `include/adapter/buffer_adapter_opencv.hpp`，以及
+  `include/kernel/scheduler/{i_scheduler,scheduler_task_runtime,scheduler_plugin_api}.hpp`。
+  它们是仅供构建的兼容契约，不是已安装的 Host header。
 
 当前分支已经完成的 seam 收紧：
 
@@ -50,12 +56,19 @@
   `Kernel` 和 `InteractionService` 是内部 facade；仍需要 runtime 或 graph-state 访问的测试现在必须
   显式包含 internal-only 的 `tests/support/kernel_test_access.hpp` helper，并通过
   `ps::testing::KernelTestAccess` 进行这些访问。
-- graph model、graph runtime、graph-state executor、compute service、dirty-control lane 以及
-  内置具体 scheduler 头现在位于私有 `src/` include root 下。内部 target 通过该私有 root 构建，
-  而可安装 public header inventory 继续限定在 `include/photospider/**`。
+- Graph、compute、runtime、Host、plugin、scheduler、benchmark 与 adapter 的实现文件和私有头
+  现在都位于按角色归属的 `src/lib/**` 目录。内部 target 通过私有 `src/lib/` root 构建，
+  可安装 public header inventory 则继续限定在 `include/photospider/**`。
 - dirty-region 诊断、compute planning 诊断和 scheduler trace 诊断都通过 Host 的拷贝值
   snapshot 暴露。公开头不再需要命名后端 graph/runtime/service/planning 类型或具体 scheduler
   class，就能提供这些诊断。
+- 完整配置后的 CLI closure 现在位于 `apps/graph_cli/`：其中包含 `main.cpp`、private header、
+  implementation source、command help resource、root configuration code、REPL/TUI、自动补全和
+  terminal helper。旧的顶层 CLI 归属位置不作为兼容 surface 保留。
+- 仓库自有 operation 与 scheduler plugin 现在位于 `plugins/ops/` 和
+  `plugins/schedulers/`；仅用于测试的 DSO 仍是 fixture。维护中的测试翻译单元归类到
+  `tests/unit/` 与 `tests/integration/`，fixture、support 与手工 verification 各有明确角色；
+  过时的 issue replay/result orchestration 已删除。
 
 ## 外部接口规则
 
@@ -97,8 +110,9 @@ external frontend
 
 ## 目标公开头
 
-只安装 `include/photospider/` 下的头。迁移期间只有在变更明确允许兼容 wrapper 时，才保留旧的顶层头；
-否则仓库当前的 rename discipline 更倾向一次性完成修正。
+只安装 `include/photospider/` 下的头。上文列出的八个 source-tree extension header 仅作为明确的
+issue-#38 例外保留；它们是原始契约，不是 compatibility wrapper 或重复的新旧 surface。其他私有头
+遵守一次性完整 rename。
 
 目标布局：
 
@@ -142,7 +156,7 @@ include/photospider/ipc/
   除非某个方法明确接受 YAML 文本，否则 host/IPC client 不应被迫依赖 YAML node parsing。
 - CLI、benchmark 和 test-only 头不是 public install header。
 
-## 目标源码布局
+## 当前与目标源码布局
 
 源码树应在读任何文件前就能看出所有权：
 
@@ -159,8 +173,10 @@ src/lib/
   graph/
   compute/
   runtime/
+  host/
   plugin/
   scheduler/
+  benchmark/
   adapters/
     opencv/
     metal/
@@ -168,6 +184,12 @@ src/lib/
 
 apps/
   graph_cli/
+    main.cpp
+    include/graph_cli/
+    src/
+      autocomplete/
+      command/
+    resources/help/
   photospiderd/
 
 plugins/
@@ -177,8 +199,15 @@ plugins/
 tests/
   unit/
   integration/
-  evidence/
+  fixtures/
+  support/
+  verification/
 ```
+
+所有现有 backend、plugin 与维护中的测试代码都已采用该布局中非 IPC 的部分。Issue #36 负责在
+实现真实 daemon 行为时创建 `src/lib/ipc/` 与 `apps/photospiderd/`。Issue #38 负责最终的
+`include/photospider/{plugin,scheduler}/` 契约并移除八个过渡性 extension header；本次物理迁移
+不会新增 shim，也不会复制这些头。
 
 命名规则：
 
@@ -227,10 +256,10 @@ graph TD
 
 CMake 规则：
 
-- 内部 target 可以把 `src/` 作为 `PRIVATE` include root。
+- 内部 target 可以把 `src/lib/` 作为 `PRIVATE` include root。
 - 可安装 target 只暴露 `include/photospider`。
-- 安装边界只复制 `include/photospider/**` 下的头文件。`src/` 下的实现头不会进入安装包，
-  `photospider` 产品仍把 `src/` 保持为 private include root。
+- 安装边界只复制 `include/photospider/**` 下的头文件。`src/lib/` 下的实现头不会进入安装包，
+  `photospider` 产品仍把 `src/lib/` 保持为 private include root。
 - install/export 配置将 `photospider` 设为可安装的 `STATIC` target，只安装
   `include/photospider/**`，并通过 `PhotospiderConfig.cmake` 导出
   `Photospider::photospider`。Unix-like 工具链生成 `libphotospider.a`，MSVC 生成
@@ -238,8 +267,8 @@ CMake 规则：
 - `photospider` 的 build-tree consumer 会获得一个生成的 public include root，其中只包含
   `photospider/` forwarding header。源码树 `include/photospider/**` inventory 通过
   `CONFIGURE_DEPENDS` 跟踪，因此新增或删除 header 会重新生成 forwarding tree，不依赖 symlink
-  权限；header 内容直接来自实时 source file。源码树的 `include/` 和 `src/` root 仍是仓库内部
-  target 的私有实现 include path。
+  权限；header 内容直接来自实时 source file。源码树的 `include/` 和 `src/lib/` root 仍是仓库
+  target 的私有实现 include path，而八个过渡性 extension header 留待 issue #38 处理。
 - 静态产品归档会把产品实现源码直接折叠进 `photospider`。仓库内部的静态 helper 模块仍可用于本地构建组织，
   但不会导出给 package consumer。
 - 后续可以作为显式兼容产品添加共享库，但不应让共享库继续充当主要后端。
@@ -262,6 +291,9 @@ CMake 规则：
 - FTXUI 和 `photospider_cli_common` 是 CLI-only 依赖，不属于 embedded package export。
   Operation plugin shim、operation plugin 和 scheduler plugin 仍是 runtime extension artifact，
   不是 `Photospider::photospider` 的依赖。
+- `apps/graph_cli/include/graph_cli/**` 是 private application include tree。CMake 只把它暴露给
+  `photospider_cli_common`、`graph_cli` 和聚焦 CLI 测试；install rule 仍只复制
+  `include/photospider/**`。
 - `graph_cli` 本地模式链接 `libphotospider`，daemon 模式链接 `photospider_ipc_client`。
 - `photospiderd` 链接 `libphotospider` 并拥有 IPC server。
 - Operation plugin 不应仅为了访问 registry 符号而链接宽泛共享后端。当前实现使用 host-provided
@@ -358,12 +390,12 @@ graph TD
 
 ## 迁移状态与剩余顺序
 
-Frontend boundary 的第 1-4 步已经在当前仓库落地。剩余 frontend 迁移只调整目录/内部 target
-组织并增加 daemon/IPC adapter，不会改变 `ps::Host` 作为唯一 public seam 的地位。第 7 步的
-plugin SDK 收紧属于独立的 extension boundary 变更。
+Frontend boundary 与现有物理布局的第 1-5 步已经在当前仓库落地。剩余 frontend 迁移只增加
+daemon/IPC adapter，不会改变 `ps::Host` 作为唯一 public seam 的地位。Plugin SDK 收紧属于
+独立的 extension boundary 变更。
 
 1. **已完成：** 建立 public header 安装与 self-containment 边界。
-   - 只安装 `include/photospider/**` 下的头文件；`src/` 下的实现头保持在 package 之外。
+   - 只安装 `include/photospider/**` 下的头文件；`src/lib/` 下的实现头保持在 package 之外。
    - `PublicHeaderSelfContainment` 通过 CTest 构建
      `public_header_self_containment` target。CMake 为 `include/photospider/` 下的每个头文件生成
      一个 translation unit，该 target 通过 public include root 以 C++17 独立编译每个头文件。
@@ -379,13 +411,18 @@ plugin SDK 收紧属于独立的 extension boundary 变更。
 4. **已完成：** 重命名构建输出。
    - 将可安装静态目标设为 `photospider`/`libphotospider`。
    - 内部静态模块保持 private。
-5. **未来目录/target 工作：** 拆分应用。
-   - 将 `cli/graph_cli.cpp` 移到 `apps/graph_cli/`。
-   - 新增 `apps/photospiderd/`，其中只放进程生命周期。
-6. **未来 IPC 工作：** 增加 IPC client 和 server。
+5. **现有代码已完成：** 拆分 application、backend、plugin 与 test 所有权。
+   - 完整 `graph_cli`/`photospider_cli_common` source、private-header、configuration 和
+     resource closure 现在位于 `apps/graph_cli/`。
+   - 现有 backend 实现/私有头位于按角色归属的 `src/lib/**`；production plugin 位于
+     `plugins/**`；维护中的测试位于明确的 unit/integration/fixture/support/verification 角色。
+   - 物理迁移保持现有 target 与 test 身份，不隐含内部 target rename 或重新设计。
+6. **未来 daemon 工作：** 在 issue #36 中新增 `apps/photospiderd/`，同时实现进程生命周期与
+   真实 server 边界。
+7. **未来 IPC 工作：** 增加 IPC client 和 server。
    - 从本地 socket、长度前缀 JSON request/response，以及 graph lifecycle/inspect 方法开始。
    - 基础生命周期稳定后再添加 compute、events 和 cancellation。
-7. **独立 plugin boundary 工作：** 收紧插件 SDK。
+8. **独立 plugin boundary 工作：** 在 issue #38 中收紧插件 SDK。
    - 用窄 operation contract 和 host-provided registration table，替换插件对完整 `Node` 和全局 registry 符号的直接依赖。
 
 ## 验证期望
@@ -395,7 +432,7 @@ plugin SDK 收紧属于独立的 extension boundary 变更。
 - 本地验证范围应匹配改动边界：实现期间运行 scoped static check、受影响 build target 与
   focused regression。本地 full build 或完整 CTest/JUnit 不是常设要求。GitHub Actions 是远程
   integration 环境；不要把 Docker 或本地 `linux/amd64` 模拟作为常规 preflight。
-- 改动影响 `libphotospider` 或 `graph_cli` 时才构建对应 target；`photospiderd` 在应用拆分阶段
+- 改动影响 `libphotospider` 或 `graph_cli` 时才构建对应 target；`photospiderd` 在 daemon slice
   落地之前仍是未来 daemon target。
 - 对静态 package 工作，package consumer smoke test 应保留在 CTest 中，因为它执行真实 producer
   build/install、外部 find-package、public-header compile/link/run、安装后的 export/dependency、
@@ -413,8 +450,9 @@ plugin SDK 收紧属于独立的 extension boundary 变更。
   不得把它们注册到 CTest 或 CI，也不得在 primary repository 中长期保留其 issue 专属编排。
 - CLI catch-order 与 Doxygen audit 输入必须从真实 CMake target closure 与 compilation database
   或 CMake File API 派生。若 `photospider_cli_common` 或 `graph_cli` 的任一 source（包括
-  `src/cli_config.cpp`、`src/cli/run_graph_cli.cpp` 与 `cli/graph_cli.cpp` 等 root translation
-  unit）遗漏，或无法匹配 compile command，audit 应 fail-closed。该 Doxygen/source-quality audit
+  `apps/graph_cli/src/cli_config.cpp`、`apps/graph_cli/src/run_graph_cli.cpp` 与
+  `apps/graph_cli/main.cpp` 等 root translation unit）遗漏，或无法匹配 compile command，audit 应
+  fail-closed。该 Doxygen/source-quality audit
   是有文档记录的手工工具，不属于 CTest 或 CI entry。
 - 增加 IPC 集成测试：启动 `photospiderd`，发送请求，并将响应 JSON 与 expected output 对比。
 - 对 daemon lifecycle 变更，覆盖 startup、graph load、compute 或 inspect、client disconnect、

@@ -53,7 +53,10 @@ personal development content.
 - `ci/scripts/ci_image_changed.sh`: detects whether the current diff changes CI image inputs.
 - `ci/scripts/integration_suite.sh`: runs the integration checks sequentially for the local-image fallback path.
 - `ci/scripts/build_integrity.sh`: configures CMake, explicitly builds `graph_cli`, `test_propagation`, test plugins, scheduler plugins, then runs `ctest -N`.
-- `ci/scripts/ctest_full.sh`: builds all targets and runs CTest. Its current default excludes the resource-intensive `SplitComputeServiceRuntimeTrace`; that runtime trace now writes only below the CMake build tree and has no personal-overlay dependency.
+- `ci/scripts/ctest_full.sh`: builds all targets and runs CTest. Its protected
+  script still contains a no-op exclusion for the removed
+  `SplitComputeServiceRuntimeTrace`; a follow-up `CI/**` branch from main must
+  remove that token after the source-layout change lands.
 - `ci/scripts/graph_cli_script_test.sh`: runs positive and negative scripted REPL checks.
 - `ci/scripts/propagation_script_test.sh`: builds `test_propagation` and runs `tiles all` on linear and complex propagation graphs.
 - `ci/scripts/plugin_load_test.sh`: checks plugin artifacts, plugin manager tests, scheduler plugin loader tests, and CLI scheduler plugin listing.

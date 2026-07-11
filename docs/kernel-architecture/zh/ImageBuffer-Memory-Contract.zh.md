@@ -76,10 +76,10 @@ OpenCV 适配器必须通过使用提供的 `step` 构造 `cv::Mat` 来保持步
 
 ## Metal 缓冲区
 
-Metal buffer adapter 已在 `include/adapter/buffer_adapter_metal.hpp` 和
-`src/adapter/buffer_adapter_metal.mm` 中实现，但当前未在核心库构建中启用，也未接入生产
-compute 路径。`CMakeLists.txt` 通过 `src/metal/perlin_noise_metal.mm` 和
-`custom_ops/metal_ops_loader.cpp` 单独构建当前 Metal operation 路径；只有当 loader
+Metal buffer adapter 已在 `src/lib/adapters/metal/buffer_adapter_metal.{hpp,mm}` 中实现，
+但当前未在核心库构建中启用，也未接入生产
+compute 路径。`CMakeLists.txt` 通过 `plugins/ops/metal/perlin_noise_metal.mm` 和
+`plugins/ops/metal/metal_ops_loader.cpp` 单独构建当前 Metal operation 路径；只有当 loader
 目录被手动加入 `plugin_dirs` 后，该 op 路径才会注册
 `image_generator:perlin_noise_metal`。
 

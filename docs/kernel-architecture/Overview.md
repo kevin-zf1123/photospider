@@ -34,8 +34,15 @@ The root `CMakeLists.txt` builds these internal modules:
 | `photospider_plugin` | Dynamic operation plugin manager and loader. |
 | `photospider_compute` | Build-only interaction runtime, schedulers, compute service, and events helper. |
 | `photospider` | Static installable backend product, archived as `libphotospider`, linked by CLI and embedded Host frontends. It installs only `include/photospider/**` and exports `Photospider::photospider`; operation plugins register through `OperationPluginRegistrar` and `register_photospider_ops_v1` instead of linking this product for registry state. |
-| `photospider_cli_common` | REPL commands, TUI editors, autocomplete, CLI config. |
-| `graph_cli` | End-user executable. |
+| `photospider_cli_common` | Non-installable application helper built from `apps/graph_cli/src/`: REPL commands, TUI editors, autocomplete, and CLI config. |
+| `graph_cli` | End-user executable whose process entry point is `apps/graph_cli/main.cpp`. |
+
+The complete CLI application closure is private to `apps/graph_cli/`, including
+its `include/graph_cli/` headers and `resources/help/` text. Backend graph,
+compute, runtime, scheduler, plugin, cache, and Host implementations remain in
+role-owned `src/lib/**` library/internal modules rather than being copied into
+the application. Repository-owned plugins live under `plugins/{ops,schedulers}`;
+maintained test translation units are classified under `tests/{unit,integration}`.
 
 Output directories:
 
@@ -54,7 +61,7 @@ Package boundary:
   `PhotospiderConfig.cmake`. The archive is `libphotospider.a` on Unix-like
   toolchains and `photospider.lib` with MSVC.
 - `Photospider::photospider` carries `PHOTOSPIDER_STATIC` for consumers and
-  keeps `src/` include roots private to repository builds. In the build tree,
+  keeps the `src/lib/` include root private to repository builds. In the build tree,
   the target's generated public include root contains only `photospider/`
   forwarding headers. CMake tracks additions and removals and the wrappers read
   live source headers without directory symlinks.
@@ -69,6 +76,13 @@ Package boundary:
 - FTXUI, `photospider_cli_common`, operation plugin shim libraries, operation
   plugins, and scheduler plugins are not exported as dependencies of the
   embedded static package.
+- CLI headers under `apps/graph_cli/include/graph_cli/**` are private build
+  inputs and are not installed; the public install inventory remains exactly
+  `include/photospider/**`.
+- Eight transitional extension headers remain source-tree-only until issue
+  #38: `include/{plugin_api,node,ps_types,image_buffer}.hpp`, the OpenCV adapter
+  header, and the three scheduler extension headers. They are not installed and
+  have no duplicate `src/lib` forwarders.
 
 ## Runtime Ownership
 
@@ -239,8 +253,9 @@ Operations are keyed by `type:subtype`. The registry supports:
 - forward ROI propagators
 - dependency builders
 
-Built-in operations are registered in `src/ops.cpp`. Runtime plugin examples
-live in `custom_ops/`.
+Built-in operations are registered in `src/lib/core/ops.cpp`. Runtime plugin
+examples live in `plugins/ops/`; the Metal operation implementation is private
+to `plugins/ops/metal/`.
 
 ## Cache Model
 

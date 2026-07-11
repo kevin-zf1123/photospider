@@ -26,8 +26,14 @@ scheduler runtime 执行 ready task callback。
 | `photospider_plugin` | 动态操作插件管理器和加载器。 |
 | `photospider_compute` | 仅用于构建的交互运行时、调度器、计算服务与事件 helper。 |
 | `photospider` | 静态可安装后端产品，归档文件名为 `libphotospider`，由 CLI 和 embedded Host 前端链接。它只安装 `include/photospider/**`，并导出 `Photospider::photospider`；operation plugin 通过 `OperationPluginRegistrar` 和 `register_photospider_ops_v1` 注册，而不是为了 registry 状态链接该产品。 |
-| `photospider_cli_common` | REPL 命令、TUI 编辑器、自动补全、CLI 配置。 |
-| `graph_cli` | 终端用户可执行文件。 |
+| `photospider_cli_common` | 从 `apps/graph_cli/src/` 构建、不可安装的 application helper：REPL 命令、TUI 编辑器、自动补全和 CLI 配置。 |
+| `graph_cli` | 进程入口位于 `apps/graph_cli/main.cpp` 的终端用户可执行文件。 |
+
+完整 CLI application closure 对 `apps/graph_cli/` 私有，包括其中的 `include/graph_cli/` header 和
+`resources/help/` 文本。Backend graph、compute、runtime、scheduler、plugin、cache 与 Host 实现
+仍留在按角色归属的 `src/lib/**` library/internal module 中，不复制进 application。仓库自有
+plugin 位于 `plugins/{ops,schedulers}`；维护中的测试翻译单元归类到
+`tests/{unit,integration}`。
 
 输出目录：
 
@@ -44,7 +50,7 @@ Package 边界：
 - `cmake --install` 会安装静态 `photospider` 归档、`include/photospider/**` public header tree、
   `PhotospiderTargets.cmake` 和 `PhotospiderConfig.cmake`。Unix-like 工具链中的归档名为
   `libphotospider.a`，MSVC 中为 `photospider.lib`。
-- `Photospider::photospider` 为 consumer 携带 `PHOTOSPIDER_STATIC`，并让 `src/` include root
+- `Photospider::photospider` 为 consumer 携带 `PHOTOSPIDER_STATIC`，并让 `src/lib/` include root
   只对仓库内部构建私有。在 build tree 中，该 target 的 generated public include root 只包含
   `photospider/` forwarding header。CMake 会跟踪 header 的新增和删除，wrapper 直接读取实时
   source header，不需要目录 symlink。
@@ -56,6 +62,11 @@ Package 边界：
   import/export 标注。
 - FTXUI、`photospider_cli_common`、operation plugin shim、operation plugin 和 scheduler plugin
   都不会作为 embedded static package 的依赖导出。
+- `apps/graph_cli/include/graph_cli/**` 下的 CLI header 是 private build input，不会安装；public
+  install inventory 仍严格限定为 `include/photospider/**`。
+- 八个过渡性 extension header 会作为 source-tree-only 契约保留到 issue #38：
+  `include/{plugin_api,node,ps_types,image_buffer}.hpp`、OpenCV adapter header，以及三个 scheduler
+  extension header。它们不会安装，也不存在重复的 `src/lib` forwarder。
 
 ## 运行时所有权
 
@@ -209,7 +220,8 @@ planned parallel work 的 dispatch 契约。`GraphStateExecutor` 是 graph-state
 - forward ROI propagator
 - dependency builder
 
-内置操作在 `src/ops.cpp` 中注册。运行时插件示例位于 `custom_ops/`。
+内置操作在 `src/lib/core/ops.cpp` 中注册。运行时插件示例位于 `plugins/ops/`；Metal operation
+实现仅属于 `plugins/ops/metal/`。
 
 ## 缓存模型
 
