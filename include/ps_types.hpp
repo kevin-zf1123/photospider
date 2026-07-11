@@ -382,6 +382,19 @@ struct OpMetadata {
   bool data_dependent = false;
 };
 
+/**
+ * @brief Full-output operator callback signature.
+ *
+ * A callback may be reached through a device implementation snapshot and,
+ * for the first CPU candidate, the HP compatibility bridge that retains the
+ * same stable implementation owner.
+ *
+ * @throws Any exception emitted by the callback provider propagates through
+ *         invocation.
+ * @note Registry locking does not serialize callback execution. Providers must
+ *       make shared callback state reentrant or synchronize that state because
+ *       schedulers and independent snapshots may invoke it concurrently.
+ */
 using MonolithicOpFunc = std::function<NodeOutput(
     const Node&, const std::vector<const NodeOutput*>&)>;
 
@@ -393,10 +406,15 @@ using MonolithicOpFunc = std::function<NodeOutput(
  * callback owns no buffers; all tile views are borrowed from NodeExecutor for
  * the duration of the call.
  *
+ * @throws Any exception emitted by the callback provider propagates through
+ *         invocation.
  * @note InputTile carries const ImageBuffer pointers so tiled operators cannot
  * replace or mutate upstream ImageBuffer metadata through the tile API. Pixel
  * data returned by adapter views must still be treated as read-only by
- * convention when sourced from InputTile.
+ * convention when sourced from InputTile. Registry locking does not serialize
+ * callback execution; providers must make shared callback state reentrant or
+ * synchronize it because schedulers and independent snapshots may invoke the
+ * same logical target concurrently.
  */
 using TileOpFunc = std::function<void(const Node&, const OutputTile&,
                                       const std::vector<InputTile>&)>;
@@ -436,6 +454,10 @@ enum class PropagationContractStatus {
  * @throws Any exception raised while copying the callable target.
  * @note Returned instances never borrow registry container storage and remain
  *       valid across later registry mutation or explicit plugin unload.
+ *       Multiple instances and a CPU HP compatibility bridge may reach the
+ *       same logical callback target concurrently. Providers must make that
+ *       target reentrant or synchronize its shared state; registry ownership
+ *       locking never serializes invocation.
  */
 struct OpImplementation {
   /**
@@ -494,7 +516,8 @@ struct OpImplementation {
  *       own unlocked lock state. Direct replacement swaps displaced callables
  *       into parameter-local retirement values, and whole-key unregister
  *       extracts map nodes, so callable destruction occurs after the registry
- *       guard exits.
+ *       guard exits. State locking covers ownership, snapshot capture,
+ *       publication, and unload only; it never serializes callback execution.
  */
 class OpRegistry {
  public:
@@ -555,7 +578,9 @@ class OpRegistry {
    * @throws std::bad_alloc when copied callback/vector storage cannot allocate.
    * @throws Any exception raised while copying a callback target.
    * @note Plugin callback copies retain library leases and must be destroyed
-   *       before the matching plugin handle can be released.
+   *       before the matching plugin handle can be released. A snapshot may
+   *       share a logical callback target with another snapshot or an HP
+   *       compatibility bridge; invocation is not serialized by the registry.
    */
   struct OpImplementations {
     /**
@@ -625,9 +650,30 @@ class OpRegistry {
     /**
      * @brief Device-specific implementation candidates in registration order.
      *
-     * @note Selection returns copies, never pointers into this vector.
+     * This value vector is populated only for reader snapshots returned by
+     * `get_implementations()`. Live registry state keeps it empty and uses
+     * `device_impl_slots` so registry vector growth never relocates callback
+     * targets while the state lock is held.
+     *
+     * @note Selection returns independent values, never pointers into live
+     *       registry storage.
      */
     std::vector<OpImplementation> device_impls;
+
+    /**
+     * @brief Stable internal owners for live device implementation callbacks.
+     *
+     * Each immutable `OpImplementation` is constructed before registry-lock
+     * acquisition. Live state, registration captures, and unload retirement
+     * then copy or swap only `shared_ptr` owners. Reader APIs retain these
+     * owners under the lock and copy their callback targets after releasing
+     * it; unload swaps removed owners into preallocated retirement slots and
+     * releases the final owner after the lock guard exits.
+     *
+     * @note This vector is internal registry representation. Reader snapshots
+     *       materialize `device_impls` and clear these owners before return.
+     */
+    std::vector<std::shared_ptr<const OpImplementation>> device_impl_slots;
   };
 
   /**
@@ -683,9 +729,11 @@ class OpRegistry {
    * not replace. Empty optionals therefore mean either that the predecessor was
    * absent or that the slot needs no restoration for this plugin.
    *
-   * @throws std::bad_alloc when copied callback or metadata storage cannot
-   *         allocate.
-   * @throws Any exception raised while copying a callback target.
+   * @throws std::bad_alloc when copied callback, metadata, or stable-owner
+   *         storage cannot allocate.
+   * @throws Any exception raised while copying a scalar callback target.
+   * @note Device callback targets are retained indirectly; snapshot copying
+   *       never copies, moves, or destroys those targets under registry lock.
    */
   struct RegistryEntrySnapshot {
     /** @brief Legacy callback value present before the captured mutation. */
@@ -956,6 +1004,10 @@ class OpRegistry {
    * @throws Any exception raised while copying the selected callback target.
    * @note Selection and copying occur under one registry lock; the returned
    *       callback remains valid across later plugin unload through its lease.
+   *       The lock is released before invocation and does not serialize the
+   *       returned callback against device snapshots or other callers. The
+   *       provider must make shared target state reentrant or provide its own
+   *       synchronization.
    */
   std::optional<OpVariant> resolve_for_intent(const std::string& type,
                                               const std::string& subtype,
@@ -1051,6 +1103,11 @@ class OpRegistry {
    * @throws Any exception raised while copying a callback target.
    * @note Returned callbacks are independent of later registry mutation and
    *       retain any operation-plugin library lease captured at registration.
+   *       Device owners are retained under the state lock, then callback
+   *       targets are copied after lock release; internal owner slots are not
+   *       exposed in the returned snapshot. Registry locking ends before
+   *       callback invocation; providers must support or internally serialize
+   *       concurrent calls through snapshots that share logical target state.
    */
   std::optional<OpImplementations> get_implementations(
       const std::string& type, const std::string& subtype) const;
@@ -1069,9 +1126,13 @@ class OpRegistry {
    *         allocate.
    * @throws Any exception raised while copying metadata or captured callbacks.
    * @note The first CPU monolithic candidate also initializes the HP monolithic
-   *       compatibility slot without replacing an existing slot. Existing
-   *       device callables are moved during vector growth by a no-throw move;
-   *       their callable targets are not destroyed under the registry lock.
+   *       compatibility slot without replacing an existing slot. That bridge
+   *       forwards through the same stable owner instead of copying the
+   *       original target. The immutable device value and bridge are
+   *       constructed before lock acquisition; vector growth moves only stable
+   *       shared owners, never callback targets. The device path and HP bridge
+   *       may invoke the same target concurrently, so `fn` must be reentrant or
+   *       synchronize its shared state; the registry does not serialize calls.
    */
   void register_impl(const std::string& type, const std::string& subtype,
                      Device device, MonolithicOpFunc fn, OpMetadata meta = {});
@@ -1090,9 +1151,14 @@ class OpRegistry {
    *         allocate.
    * @throws Any exception raised while copying metadata or captured callbacks.
    * @note The first CPU tiled candidate also initializes the HP tiled
-   *       compatibility slot without replacing an existing slot. Device values
-   *       and ownership revisions are reserved before either append and remain
-   *       parallel on every successful mutation.
+   *       compatibility slot without replacing an existing slot. That bridge
+   *       forwards through the same stable owner instead of copying the
+   *       original target. Device-owner and revision vectors are reserved
+   *       before either append and remain parallel on every successful
+   *       mutation; callback targets and bridges are built before lock
+   *       acquisition. The device path and HP bridge may invoke the same target
+   *       concurrently, so `fn` must be reentrant or synchronize its shared
+   *       state; the registry does not serialize calls.
    */
   void register_impl(const std::string& type, const std::string& subtype,
                      Device device, TileOpFunc fn, OpMetadata meta);
@@ -1107,7 +1173,11 @@ class OpRegistry {
    * @throws std::bad_alloc if result or callback copying exhausts memory.
    * @throws Any exception raised while copying a callback target.
    * @note Copies remain callable after a concurrent explicit plugin unload;
-   *       plugin callbacks retain their dynamic-library lifetime lease.
+   *       plugin callbacks retain their dynamic-library lifetime lease. Stable
+   *       owners are copied under the state lock and callback targets only
+   *       after that lock has been released. Invocation is not serialized with
+   *       other snapshots or an HP bridge; providers own target
+   *       synchronization.
    */
   std::vector<OpImplementation> get_implementations_by_device(
       const std::string& type, const std::string& subtype, Device device) const;
@@ -1120,7 +1190,11 @@ class OpRegistry {
    * @return Coherent copied implementations across all devices.
    * @throws std::bad_alloc if result or callback copying exhausts memory.
    * @throws Any exception raised while copying a callback target.
-   * @note The returned vector never borrows registry container storage.
+   * @note The returned vector never borrows registry container storage. Stable
+   *       owners are copied under the state lock and callback targets only
+   *       after that lock has been released. Invocation is not serialized with
+   *       other snapshots or an HP bridge; providers own target
+   *       synchronization.
    */
   std::vector<OpImplementation> get_all_implementations(
       const std::string& type, const std::string& subtype) const;
@@ -1142,7 +1216,10 @@ class OpRegistry {
    * @throws std::bad_alloc if temporary candidate storage allocation fails.
    * @throws Any exception raised while copying a candidate callback target.
    * @note The returned callback snapshot remains valid across later registry
-   *       mutation and retains a plugin library lease when applicable.
+   *       mutation and retains a plugin library lease when applicable. The
+   *       registry does not serialize invocation against other selected or
+   *       resolved callbacks; providers own synchronization of shared target
+   *       state.
    */
   std::optional<OpImplementation> select_best_implementation(
       const std::string& type, const std::string& subtype,
@@ -1171,7 +1248,9 @@ class OpRegistry {
    * lock, and only then invokes the filter. The filter may perform read-only
    * registry inspection, but must not retain candidate references beyond the
    * call. Concurrent mutation does not change the already-copied selection
-   * snapshot. Sorting policy remains centralized in OpRegistry.
+   * snapshot. Sorting policy remains centralized in OpRegistry. Callback
+   * invocation is outside registry locking and may overlap calls through other
+   * snapshots or a CPU HP bridge; providers own shared-state synchronization.
    */
   std::optional<OpImplementation> select_best_implementation(
       const std::string& type, const std::string& subtype,
@@ -1438,7 +1517,9 @@ class OpRegistry {
    * @throws Nothing; the path uses lookup, swap, reset, erase, and preallocated
    *         vector compaction only.
    * @note Slots whose active revisions changed after publication are preserved.
-   *       Removed callback objects leave the registry in `retirement` and are
+   *       Removed device owners leave the registry through preallocated
+   *       retirement slots; compaction swaps surviving owners only into empty
+   *       slots. Callback targets and final library leases are therefore
    *       destroyed only after the caller releases the registry lock.
    */
   bool retire_owned_entry_noexcept(const std::string& key,

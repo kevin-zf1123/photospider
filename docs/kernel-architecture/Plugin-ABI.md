@@ -127,6 +127,32 @@ receives new tokens for its changed slots. Source inspection reports `mixed`
 while direct and plugin-owned slots coexist instead of attributing the complete
 key to the plugin.
 
+Live device implementation elements use stable immutable owners rather than
+storing `std::function` targets directly in the growing registry vector. A new
+monolithic or tiled device value, including its plugin lease wrapper, is fully
+constructed before the registry lock is acquired. Under the lock, registration
+grows and publishes only shared owners and the parallel revision tokens.
+Readers retain a coherent owner list under the lock and copy callback targets
+only after releasing it. The legacy HP compatibility slot for a first CPU
+candidate is a forwarding bridge that retains the same stable owner instead of
+copying the original target. During mixed plugin/direct unload, plugin-owned
+owners are swapped into preallocated retirement slots and later direct owners
+are swapped only into gaps already made empty; tail removal therefore destroys
+only empty owners. No existing or removed device callback target is copied,
+moved, destroyed, or allowed to release its final library lease under the
+registry lock. Failure to construct the new stable value or compatibility
+bridge occurs before key, callback, or ownership publication and leaves the
+registry unchanged.
+
+Stable ownership is not an execution mutex. The first CPU device value and its
+HP compatibility bridge retain the same callback target, and scheduler or
+reader snapshots may retain that same logical target as well. These paths may
+invoke it concurrently. The callback provider must therefore make the target
+reentrant or synchronize its shared mutable state. The registry serializes only
+ownership mutation, coherent snapshot capture, publication, and unload; it never
+holds its state lock to serialize callback execution. Callers must not infer
+single-threaded execution from a shared operation key, device, or intent.
+
 Direct replacement uses the same retirement discipline outside manager-driven
 unload. A replacement callback is prepared before locking and swapped with the
 active slot; the displaced callable remains in the parameter-local retirement
@@ -196,12 +222,14 @@ Unload consumes only preallocated keys, ownership tokens, snapshots, and
 retirement slots. For each scalar or device element, it compares the active
 revision with the plugin's publication token. Matching slots are restored from
 their pruned predecessor or swapped into empty retirement storage; later direct
-slots have different tokens and remain active. Empty registry values can then be
-erased without destroying plugin callback state under the registry lock. The
-retired plugin record is destroyed after that lock is released. There is no
-temporary key collection, callback copy, callable comparison, or allocating
-rollback, so `unload_all_plugins()` remains a `noexcept` cleanup path even when
-global allocation is failing.
+slots have different tokens and remain active. Device compaction swaps stable
+owners through already-empty gaps and shrinks only an empty-owner tail, so it
+does not rely on any `std::function` move implementation. Empty registry values
+can then be erased without destroying plugin callback state under the registry
+lock. The retired plugin record is destroyed after that lock is released. There
+is no temporary key collection, callback copy, callable comparison, or
+allocating rollback, so `unload_all_plugins()` remains a `noexcept` cleanup path
+even when global allocation is failing.
 
 The process owner itself is intentionally not destroyed at static teardown;
 explicit unload defines plugin cleanup semantics and avoids static-destruction

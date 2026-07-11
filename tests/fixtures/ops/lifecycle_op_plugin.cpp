@@ -23,6 +23,8 @@ constexpr const char* kResultProbeEnvironment =
     "PS_LIFECYCLE_PLUGIN_RESULT_PROBE";  // NOLINT(whitespace/indent_namespace)
 constexpr const char* kDeviceRegistrarEnvironment =
     "PS_LIFECYCLE_PLUGIN_REGISTER_DEVICES";  // NOLINT(whitespace/indent_namespace)
+constexpr const char* kCpuDeviceRegistrarEnvironment =
+    "PS_LIFECYCLE_PLUGIN_REGISTER_CPU_DEVICE";  // NOLINT(whitespace/indent_namespace)
 
 /**
  * @brief Appends one real lifecycle event to the test-selected trace file.
@@ -83,6 +85,38 @@ struct CallbackLifetimeProbe {
    * @note This destructor must execute while plugin code is still mapped.
    */
   ~CallbackLifetimeProbe() { append_lifecycle_trace("callback_destroy"); }
+};
+
+/**
+ * @brief Plugin-defined state whose final owner traces device-target
+ * retirement.
+ *
+ * @throws Nothing directly; construction stores a borrowed static event label
+ *         and destruction suppresses trace I/O failures.
+ * @note Host wrappers may copy shared ownership of this state, but its
+ *       destructor runs exactly once inside the mapped plugin after the final
+ *       callback target is released.
+ */
+struct DeviceCallbackLifetimeProbe {
+  /**
+   * @brief Selects the trace event emitted at final target retirement.
+   * @param event Stable static event label borrowed for this probe's lifetime.
+   * @throws Nothing.
+   * @note Fixture callers pass string literals, so the pointer never dangles.
+   */
+  explicit DeviceCallbackLifetimeProbe(const char* event) noexcept
+      : destruction_event(event) {}
+
+  /**
+   * @brief Records final destruction of the plugin-defined callback state.
+   * @throws Nothing; trace I/O failures are suppressed by the helper.
+   * @note The event must precede `library_unload` because host wrappers retain
+   *       the matching dynamic-library lease through callback destruction.
+   */
+  ~DeviceCallbackLifetimeProbe() { append_lifecycle_trace(destruction_event); }
+
+  /** @brief Static trace label emitted by the final state destructor. */
+  const char* destruction_event;
 };
 
 /**
@@ -224,6 +258,146 @@ void lifecycle_device_tiled(const ps::Node& node, const ps::OutputTile& output,
 }
 
 /**
+ * @brief Creates the plugin-owned monolithic device target with final-state
+ * trace.
+ *
+ * @return Callback that delegates to `lifecycle_device_monolithic`.
+ * @throws std::bad_alloc if probe or callback storage cannot allocate.
+ * @note The shared probe emits only after all host wrapper and reader copies
+ *       release the original plugin-defined target state.
+ */
+ps::MonolithicOpFunc make_lifecycle_device_monolithic() {
+  auto probe = std::make_shared<DeviceCallbackLifetimeProbe>(
+      "device_monolithic_target_destroy");
+  return [probe = std::move(probe)](
+             const ps::Node& node,
+             const std::vector<const ps::NodeOutput*>& inputs) {
+    (void)probe;
+    return lifecycle_device_monolithic(node, inputs);
+  };
+}
+
+/**
+ * @brief Creates the plugin-owned tiled device target with final-state trace.
+ *
+ * @return Callback that delegates to `lifecycle_device_tiled`.
+ * @throws std::bad_alloc if probe or callback storage cannot allocate.
+ * @note Its final probe event distinguishes tiled target retirement from the
+ *       scalar HP callback and monolithic device target.
+ */
+ps::TileOpFunc make_lifecycle_device_tiled() {
+  auto probe = std::make_shared<DeviceCallbackLifetimeProbe>(
+      "device_tiled_target_destroy");
+  return [probe = std::move(probe)](const ps::Node& node,
+                                    const ps::OutputTile& output,
+                                    const std::vector<ps::InputTile>& inputs) {
+    (void)probe;
+    lifecycle_device_tiled(node, output, inputs);
+  };
+}
+
+/**
+ * @brief Stateful CPU device candidate used to audit the stable-owner HP
+ * bridge.
+ *
+ * Copies emit a trace event, while one shared lifetime probe emits the final
+ * target-destruction event. Tests record the copy count after registration and
+ * require reader snapshots, bridge copies, and unload to leave it unchanged.
+ *
+ * @throws std::bad_alloc when callback invocation constructs diagnostic output.
+ * @note Construction, copying, and moving the target itself do not throw.
+ */
+class CpuDeviceMonolithicCallback final {
+ public:
+  /**
+   * @brief Creates one callback around the final-target lifetime probe.
+   * @param probe Shared plugin-defined state retained by every genuine copy.
+   * @throws Nothing; ownership is moved into this callback.
+   * @note The caller provides the sole initial probe owner.
+   */
+  explicit CpuDeviceMonolithicCallback(
+      std::shared_ptr<DeviceCallbackLifetimeProbe> probe) noexcept
+      : probe_(std::move(probe)) {}
+
+  /**
+   * @brief Copies the original plugin target and records that operation.
+   * @param other Live plugin target whose shared state is retained.
+   * @throws Nothing; shared-owner copying is noexcept.
+   * @note Host stable-owner readers and HP bridge copies must not invoke this
+   *       constructor after registration has completed.
+   */
+  CpuDeviceMonolithicCallback(const CpuDeviceMonolithicCallback& other) noexcept
+      : probe_(other.probe_) {
+    append_lifecycle_trace("cpu_device_target_copy");
+  }
+
+  /**
+   * @brief Transfers plugin target state without creating another owner.
+   * @param other Target relinquishing its shared probe reference.
+   * @throws Nothing.
+   * @note Registration may move this target while constructing std::function.
+   */
+  CpuDeviceMonolithicCallback(CpuDeviceMonolithicCallback&& other) noexcept
+      : probe_(std::move(other.probe_)) {}
+
+  /**
+   * @brief Prevents replacing a live plugin target through copy assignment.
+   * @param other Target that retains its existing shared state.
+   * @return No value because this operation is deleted.
+   * @throws Nothing; operation is deleted.
+   * @note The callback is immutable after std::function construction.
+   */
+  CpuDeviceMonolithicCallback& operator=(
+      const CpuDeviceMonolithicCallback& other) = delete;
+
+  /**
+   * @brief Prevents replacing a live plugin target through move assignment.
+   * @param other Target that retains its existing shared state.
+   * @return No value because this operation is deleted.
+   * @throws Nothing; operation is deleted.
+   * @note Stable-owner publication moves the surrounding std::function instead.
+   */
+  CpuDeviceMonolithicCallback& operator=(CpuDeviceMonolithicCallback&& other) =
+      delete;
+
+  /**
+   * @brief Produces the deterministic CPU device marker.
+   * @param node Borrowed operation node; unused.
+   * @param inputs Borrowed upstream outputs; unused.
+   * @return Output matching both device-reader and HP-bridge invocation paths.
+   * @throws std::bad_alloc if diagnostic string storage cannot allocate.
+   * @note Invocation does not mutate or replace the retained target state.
+   */
+  ps::NodeOutput operator()(
+      const ps::Node& node,
+      const std::vector<const ps::NodeOutput*>& inputs) const {
+    (void)node;
+    (void)inputs;
+    ps::NodeOutput output;
+    output.debug.compute_device = "PLUGIN_CPU_DEVICE_MONOLITHIC";
+    return output;
+  }
+
+ private:
+  /** @brief Shared state whose final destructor traces target retirement. */
+  std::shared_ptr<DeviceCallbackLifetimeProbe> probe_;
+};
+
+/**
+ * @brief Creates the stateful CPU candidate used by stable-owner bridge tests.
+ *
+ * @return Monolithic callback containing one plugin-defined stateful target.
+ * @throws std::bad_alloc if probe or std::function storage cannot allocate.
+ * @note Registration-time target copies are traced before the test records its
+ *       baseline; later host readers must share the retained wrapper instead.
+ */
+ps::MonolithicOpFunc make_lifecycle_cpu_device_monolithic() {
+  return CpuDeviceMonolithicCallback(
+      std::make_shared<DeviceCallbackLifetimeProbe>(
+          "cpu_device_target_destroy"));
+}
+
+/**
  * @brief Propagates lifecycle-fixture dirty demand unchanged.
  *
  * @param node Borrowed operation node; unused by the pointwise fixture.
@@ -301,13 +475,22 @@ extern "C" PLUGIN_API void register_photospider_ops_v1(
     ps::OpMetadata device_monolithic_metadata;
     device_monolithic_metadata.cost_score = 3;
     registrar->register_impl("plugin_lifecycle", "op", ps::Device::GPU_METAL,
-                             lifecycle_device_monolithic,
+                             make_lifecycle_device_monolithic(),
                              device_monolithic_metadata);
     ps::OpMetadata device_tiled_metadata;
     device_tiled_metadata.cost_score = 4;
     device_tiled_metadata.tile_preference = ps::TileSizePreference::MICRO;
     registrar->register_impl("plugin_lifecycle", "op", ps::Device::GPU_CUDA,
-                             lifecycle_device_tiled, device_tiled_metadata);
+                             make_lifecycle_device_tiled(),
+                             device_tiled_metadata);
+  }
+  const char* register_cpu_device = std::getenv(kCpuDeviceRegistrarEnvironment);
+  if (register_cpu_device && register_cpu_device[0] != '\0') {
+    ps::OpMetadata cpu_device_metadata;
+    cpu_device_metadata.cost_score = 5;
+    registrar->register_impl("plugin_lifecycle", "cpu_device", ps::Device::CPU,
+                             make_lifecycle_cpu_device_monolithic(),
+                             cpu_device_metadata);
   }
 
   const char* throw_mode = std::getenv(kThrowEnvironment);

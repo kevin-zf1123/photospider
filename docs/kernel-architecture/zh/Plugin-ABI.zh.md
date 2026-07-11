@@ -112,6 +112,22 @@ state，而不会复制进 restoration state。publication 后的 same-key direc
 取得新 token。Direct 与 plugin-owned slot 共存期间，source inspection 报告 `mixed`，不会继续把完整
 key 归因于 plugin。
 
+Live device implementation element 使用稳定、不可变的 owner，而不是把 `std::function` target 直接存进
+会增长的 registry vector。新的 monolithic 或 tiled device value（包括其 plugin lease wrapper）会在获取
+registry lock 前完整构造。加锁后，registration 只增长并发布 shared owner 及其平行 revision token。
+Reader 在锁内保留一份一致的 owner 列表，只在释放 lock 后复制 callback target。第一个 CPU candidate 的
+legacy HP compatibility slot 是持有同一 stable owner 的 forwarding bridge，不会复制原始 target。混合
+plugin/direct 卸载期间，plugin-owned owner 会 swap 进预分配 retirement slot，后续 direct owner 则只会
+swap 进已经清空的 gap；移除尾部时因此只会析构空 owner。任何已有或被移除的 device callback target
+都不会在 registry lock 内被复制、移动、析构，也不会在锁内释放最后一个 library lease。新的稳定 value
+或 compatibility bridge 构造失败发生在 key、callback 或 ownership 发布之前，并保持 registry 不变。
+
+稳定所有权不等于执行 mutex。第一个 CPU device value 与其 HP compatibility bridge 会保留同一个 callback
+target，scheduler 或 reader snapshot 也可能保留同一个逻辑 target。这些路径可以并发调用它。因此，callback
+provider 必须保证 target 可重入，或自行同步其共享可变 state。Registry 只串行化 ownership mutation、
+coherent snapshot capture、publication 与 unload；它绝不会持有 state lock 来串行化 callback execution。
+Caller 不得因为 operation key、device 或 intent 相同，就推断 callback 只会单线程执行。
+
 Direct replacement 同样遵循 manager-driven unload 之外的 retirement 规则。Replacement callback 会在
 加锁前准备好，并与 active slot 交换；被替换的 callable 会留在参数局部 retirement value 中，直到
 registry guard 已退出才析构。Whole-key unregister 会一起 extract legacy、metadata、implementation 与
@@ -143,10 +159,12 @@ image/YAML/data/spatial/debug state；copy 失败时 destination 保持不变。
 
 卸载只消费预先分配的 key、ownership token、snapshot 与 retirement slot。对于每个 scalar 或 device
 element，它会比较 active revision 与 plugin publication token。匹配的 slot 从裁剪后的 predecessor
-恢复，或 swap 进空 retirement storage；token 不同的后续 direct slot 继续保持 active。随后可以 erase
-空 registry value，而不会在 registry lock 内析构 plugin callback state。Retired plugin record 会在释放
-该 lock 后析构。该路径不临时收集 key、不复制 callback、不比较 callable，也不执行会分配的 rollback。
-因此，即使全局分配失败，`unload_all_plugins()` 仍是 `noexcept` 清理路径。
+恢复，或 swap 进空 retirement storage；token 不同的后续 direct slot 继续保持 active。Device compaction
+会让稳定 owner 只经过已经清空的 gap 进行 swap，并且只缩短由空 owner 构成的尾部，因此不依赖任何
+`std::function` move 实现。随后可以 erase 空 registry value，而不会在 registry lock 内析构 plugin
+callback state。Retired plugin record 会在释放该 lock 后析构。该路径不临时收集 key、不复制 callback、
+不比较 callable，也不执行会分配的 rollback。因此，即使全局分配失败，`unload_all_plugins()` 仍是
+`noexcept` 清理路径。
 
 进程 owner 在静态 teardown 时有意不析构；显式 unload
 定义插件清理语义，并避开与 `OpRegistry` 的静态析构顺序问题。

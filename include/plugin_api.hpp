@@ -24,7 +24,10 @@
  * callback with a shared library lease and attaches that lease to returned
  * `NodeOutput` values, so plugin-instantiated value internals are destroyed
  * before unmapping. This remains a narrow transitional C++ registration ABI,
- * not a long-term pure C plugin ABI.
+ * not a long-term pure C plugin ABI. The host does not serialize callback
+ * execution: device snapshots and a first CPU candidate's HP compatibility
+ * bridge may invoke the same retained plugin target concurrently. Plugin
+ * providers must make callback targets reentrant or synchronize shared state.
  */
 /**
  * @brief Marks the operation plugin registration entry for export.
@@ -188,10 +191,13 @@ struct OperationPluginRegistrar {
    * @param device Device capability label for the implementation.
    * @param fn Monolithic implementation to move into the host registry.
    * @param meta Metadata used by registry selection policy.
+   * @return Nothing.
    * @throws Exceptions from the host registry or callback storage may
    * propagate through the plugin registration entry point.
    * @note This extends the same operation key with a device-specific
-   * implementation rather than creating a separate registry singleton.
+   * implementation rather than creating a separate registry singleton. The
+   * provider must support or internally serialize concurrent invocation through
+   * device snapshots and the CPU HP compatibility bridge.
    */
   using RegisterDeviceMonolithicFn = void (*)(void* user_data, const char* type,
                                               const char* subtype,
@@ -209,10 +215,13 @@ struct OperationPluginRegistrar {
    * @param device Device capability label for the implementation.
    * @param fn Tiled implementation to move into the host registry.
    * @param meta Metadata used by registry selection policy.
+   * @return Nothing.
    * @throws Exceptions from the host registry or callback storage may
    * propagate through the plugin registration entry point.
    * @note This extends the same operation key with a device-specific
-   * implementation rather than creating a separate registry singleton.
+   * implementation rather than creating a separate registry singleton. The
+   * provider must support or internally serialize concurrent invocation through
+   * device snapshots and the CPU HP compatibility bridge.
    */
   using RegisterDeviceTiledFn = void (*)(void* user_data, const char* type,
                                          const char* subtype, Device device,
@@ -392,12 +401,15 @@ struct OperationPluginRegistrar {
    * @param device Device capability label used by selection policy.
    * @param fn Monolithic implementation callback.
    * @param meta Metadata used by scheduler and registry selection policy.
+   * @return Nothing.
    * @throws std::logic_error when the registrar lacks the required host
    * callback.
    * @throws Exceptions from the host registry or callback storage may
    * propagate.
    * @note The host registry owns implementation ordering and unload
-   * restoration.
+   * restoration, but never serializes callback execution. Device snapshots and
+   * the CPU HP bridge may invoke the same retained target concurrently; the
+   * provider must make it reentrant or synchronize its shared state.
    */
   void register_impl(const std::string& type, const std::string& subtype,
                      Device device, MonolithicOpFunc fn,
@@ -418,12 +430,15 @@ struct OperationPluginRegistrar {
    * @param device Device capability label used by selection policy.
    * @param fn Tiled implementation callback.
    * @param meta Metadata used by scheduler and registry selection policy.
+   * @return Nothing.
    * @throws std::logic_error when the registrar lacks the required host
    * callback.
    * @throws Exceptions from the host registry or callback storage may
    * propagate.
    * @note The host registry owns implementation ordering and unload
-   * restoration.
+   * restoration, but never serializes callback execution. Device snapshots and
+   * the CPU HP bridge may invoke the same retained target concurrently; the
+   * provider must make it reentrant or synchronize its shared state.
    */
   void register_impl(const std::string& type, const std::string& subtype,
                      Device device, TileOpFunc fn, OpMetadata meta) const {
