@@ -21,6 +21,7 @@
 #include <optional>
 #include <stdexcept>
 #include <string>
+#include <string_view>
 #include <thread>
 #include <utility>
 #include <vector>
@@ -442,6 +443,41 @@ Json parse_response(const std::string& payload) {
   return std::move(parsed.value);
 }
 
+/**
+ * @brief Verifies one complete internal enum label table transactionally.
+ *
+ * @tparam Enum Public enum type handled by the overloaded codec.
+ * @tparam Count Number of stable version 1 labels.
+ * @param mappings Expected enum/label pairs.
+ * @throws std::bad_alloc if test JSON or diagnostics cannot allocate.
+ * @note Invalid memory enum values and malformed JSON must leave outputs
+ *       unchanged; this helper does not establish any future enum vocabulary.
+ */
+template <typename Enum, std::size_t Count>
+void expect_enum_codec(
+    const std::array<std::pair<Enum, const char*>, Count>& mappings) {
+  for (const auto& mapping : mappings) {
+    Json encoded = "sentinel";
+    ASSERT_TRUE(encode_enum(mapping.first, &encoded));
+    EXPECT_EQ(encoded, mapping.second);
+    Enum decoded = mappings.front().first;
+    ASSERT_TRUE(decode_enum(encoded, &decoded));
+    EXPECT_EQ(decoded, mapping.first);
+  }
+
+  Json unchanged = "sentinel";
+  EXPECT_FALSE(encode_enum(static_cast<Enum>(999), &unchanged));
+  EXPECT_EQ(unchanged, "sentinel");
+  const std::vector<Json> malformed = {Json("future_value"), Json(""),
+                                       Json("UPPERCASE"),    Json(1),
+                                       Json(true),           Json(nullptr)};
+  for (const Json& value : malformed) {
+    Enum output = mappings.front().first;
+    EXPECT_FALSE(decode_enum(value, &output));
+    EXPECT_EQ(output, mappings.front().first);
+  }
+}
+
 TEST(FrameCodec, PrefixUsesBigEndian) {
   int descriptors[2] = {-1, -1};
   ASSERT_EQ(::socketpair(AF_UNIX, SOCK_STREAM, 0, descriptors), 0);
@@ -621,6 +657,494 @@ TEST(IntegerCodec, PreservesExactSignedAndUnsignedBoundaries) {
   EXPECT_EQ(signed_value, std::numeric_limits<std::int64_t>::max());
 }
 
+TEST(IntegerCodec, RejectsEveryNonIntegerCategoryTransactionally) {
+  const std::vector<Json> malformed = {
+      Json(1.0),
+      Json(1.5),
+      Json(true),
+      Json("1"),
+      Json(nullptr),
+      Json(std::numeric_limits<double>::infinity()),
+      Json(std::numeric_limits<double>::quiet_NaN())};
+  for (const Json& value : malformed) {
+    std::uint32_t output = 37;
+    EXPECT_FALSE(decode_integer(value, &output));
+    EXPECT_EQ(output, 37U);
+  }
+
+  std::int32_t signed_output = 41;
+  EXPECT_TRUE(decode_integer(Json(std::numeric_limits<std::int32_t>::min()),
+                             &signed_output));
+  EXPECT_EQ(signed_output, std::numeric_limits<std::int32_t>::min());
+  EXPECT_TRUE(decode_integer(Json(std::numeric_limits<std::int32_t>::max()),
+                             &signed_output));
+  EXPECT_EQ(signed_output, std::numeric_limits<std::int32_t>::max());
+  EXPECT_FALSE(
+      decode_integer(Json(std::uint64_t{2147483648ULL}), &signed_output));
+  EXPECT_EQ(signed_output, std::numeric_limits<std::int32_t>::max());
+
+  std::uint32_t unsigned_output = 43;
+  EXPECT_TRUE(decode_integer(Json(std::numeric_limits<std::uint32_t>::max()),
+                             &unsigned_output));
+  EXPECT_EQ(unsigned_output, std::numeric_limits<std::uint32_t>::max());
+  EXPECT_FALSE(decode_integer(Json(-1), &unsigned_output));
+  EXPECT_EQ(unsigned_output, std::numeric_limits<std::uint32_t>::max());
+  EXPECT_FALSE(
+      decode_integer(Json(std::uint64_t{4294967296ULL}), &unsigned_output));
+  EXPECT_EQ(unsigned_output, std::numeric_limits<std::uint32_t>::max());
+}
+
+TEST(OpaqueIdCodec, ValidatesOneExactSharedVersionOneShape) {
+  const std::vector<std::pair<std::string, bool>> cases = {
+      {"0123456789abcdef0123456789abcdef", true},
+      {std::string(32, '0'), true},
+      {std::string(32, 'f'), true},
+      {std::string(31, 'a'), false},
+      {std::string(33, 'a'), false},
+      {std::string(32, 'A'), false},
+      {std::string(31, 'a') + "g", false},
+      {std::string(31, 'a') + "-", false},
+      {std::string(15, 'a') + std::string(1, '\0') + std::string(16, 'a'),
+       false}};
+  for (const auto& test_case : cases) {
+    EXPECT_EQ(valid_opaque_id(test_case.first), test_case.second)
+        << test_case.first.size();
+  }
+  EXPECT_EQ(generate_opaque_id().size(), kOpaqueIdHexCharacters);
+  EXPECT_TRUE(valid_opaque_id(generate_opaque_id()));
+
+  std::string decoded = "sentinel";
+  EXPECT_TRUE(
+      decode_opaque_id(Json("0123456789abcdef0123456789abcdef"), &decoded));
+  EXPECT_EQ(decoded, "0123456789abcdef0123456789abcdef");
+  const std::vector<Json> malformed = {Json(std::string(31, 'a')),
+                                       Json(std::string(33, 'a')),
+                                       Json(std::string(32, 'A')),
+                                       Json(std::string(31, 'a') + "g"),
+                                       Json(7),
+                                       Json(true),
+                                       Json(nullptr),
+                                       Json::array(),
+                                       Json::object()};
+  for (const Json& value : malformed) {
+    decoded = "sentinel";
+    EXPECT_FALSE(decode_opaque_id(value, &decoded));
+    EXPECT_EQ(decoded, "sentinel");
+  }
+}
+
+TEST(StringCodec, ValidatesTheSharedSessionDisplayNameShape) {
+  const std::vector<std::pair<std::string, bool>> cases = {
+      {"session", true},
+      {std::string(kShortTextMaxBytes, 's'), true},
+      {std::string(kShortTextMaxBytes + 1, 's'), false},
+      {"", false},
+      {".", false},
+      {"..", false},
+      {"parent/child", false},
+      {"parent\\child", false},
+      {std::string("safe\0tail", 9), false},
+      {std::string("\xc0\xaf", 2), false}};
+  for (const auto& test_case : cases) {
+    EXPECT_EQ(valid_session_name(test_case.first), test_case.second);
+  }
+}
+
+TEST(StringCodec, EnforcesUtf8ByteBoundsAndTransactionalArrays) {
+  const std::array<std::size_t, 4> limits = {
+      kRequestTextMaxBytes, kShortTextMaxBytes, kPathTextMaxBytes,
+      kLargeTextMaxBytes};
+  for (std::size_t limit : limits) {
+    std::string output = "sentinel";
+    EXPECT_TRUE(
+        decode_bounded_string(Json(std::string(limit, 'a')), limit, &output));
+    EXPECT_EQ(output.size(), limit);
+    output = "sentinel";
+    EXPECT_FALSE(decode_bounded_string(Json(std::string(limit + 1, 'a')), limit,
+                                       &output));
+    EXPECT_EQ(output, "sentinel");
+  }
+
+  const std::string exact_multibyte = std::string(126, 'a') + "\xc3\xa9";
+  std::string decoded;
+  EXPECT_TRUE(decode_bounded_string(Json(exact_multibyte), kRequestTextMaxBytes,
+                                    &decoded));
+  EXPECT_EQ(decoded, exact_multibyte);
+  const JsonParseResult escaped = parse_json(R"("\u00e9")");
+  ASSERT_TRUE(escaped.ok) << escaped.message;
+  EXPECT_TRUE(decode_bounded_string(escaped.value, 2, &decoded));
+  EXPECT_EQ(decoded, "\xc3\xa9");
+  decoded = "unchanged";
+  EXPECT_FALSE(decode_bounded_string(escaped.value, 1, &decoded));
+  EXPECT_EQ(decoded, "unchanged");
+  const std::vector<std::string> invalid_utf8 = {
+      std::string("\xc0\xaf", 2), std::string("\xed\xa0\x80", 3),
+      std::string("\xf4\x90\x80\x80", 4), std::string("\xe2\x82", 2)};
+  for (const std::string& malformed : invalid_utf8) {
+    decoded = "unchanged";
+    EXPECT_FALSE(
+        decode_bounded_string(Json(malformed), kShortTextMaxBytes, &decoded));
+    EXPECT_EQ(decoded, "unchanged");
+    EXPECT_FALSE(valid_utf8(malformed));
+  }
+
+  Json paths = Json::array();
+  for (std::size_t index = 0; index < kPathArrayMaxEntries; ++index) {
+    paths.push_back("/path");
+  }
+  std::vector<std::string> decoded_paths = {"sentinel"};
+  EXPECT_TRUE(decode_bounded_string_array(paths, kPathArrayMaxEntries,
+                                          kPathTextMaxBytes, &decoded_paths));
+  EXPECT_EQ(decoded_paths.size(), kPathArrayMaxEntries);
+  paths.push_back("/overflow");
+  decoded_paths = {"sentinel"};
+  EXPECT_FALSE(decode_bounded_string_array(paths, kPathArrayMaxEntries,
+                                           kPathTextMaxBytes, &decoded_paths));
+  EXPECT_EQ(decoded_paths, std::vector<std::string>({"sentinel"}));
+
+  for (std::size_t malformed_index = 0; malformed_index < 3;
+       ++malformed_index) {
+    Json malformed_element = Json::array({"first", "middle", "last"});
+    malformed_element[malformed_index] = 7;
+    decoded_paths = {"sentinel"};
+    EXPECT_FALSE(
+        decode_bounded_string_array(malformed_element, kGeneralPageMaxEntries,
+                                    kShortTextMaxBytes, &decoded_paths));
+    EXPECT_EQ(decoded_paths, std::vector<std::string>({"sentinel"}));
+  }
+
+  Json page = Json::array();
+  for (std::size_t index = 0; index < kGeneralPageMaxEntries; ++index) {
+    page.push_back(nullptr);
+  }
+  EXPECT_TRUE(valid_bounded_array(page, kGeneralPageMaxEntries));
+  page.push_back(nullptr);
+  EXPECT_FALSE(valid_bounded_array(page, kGeneralPageMaxEntries));
+  EXPECT_FALSE(valid_bounded_array(Json::object(), kGeneralPageMaxEntries));
+}
+
+TEST(PageCodec, ValidatesLimitsAndOverflowWithoutPublishingPartialValues) {
+  const std::array<std::pair<std::size_t, std::size_t>, 2> ranges = {{
+      {kComputeEventDrainMinLimit, kComputeEventDrainMaxLimit},
+      {kSchedulerTraceMinLimit, kSchedulerTraceMaxLimit},
+  }};
+  for (const auto& range : ranges) {
+    std::size_t output = 17;
+    EXPECT_TRUE(decode_page_limit(Json(range.first), range.first, range.second,
+                                  &output));
+    EXPECT_EQ(output, range.first);
+    EXPECT_TRUE(decode_page_limit(Json(range.second), range.first, range.second,
+                                  &output));
+    EXPECT_EQ(output, range.second);
+    output = 17;
+    EXPECT_FALSE(decode_page_limit(Json(range.first - 1), range.first,
+                                   range.second, &output));
+    EXPECT_EQ(output, 17U);
+    EXPECT_FALSE(decode_page_limit(Json(range.second + 1), range.first,
+                                   range.second, &output));
+    EXPECT_EQ(output, 17U);
+  }
+
+  std::size_t offset = 23;
+  std::size_t limit = 29;
+  EXPECT_TRUE(
+      decode_page_window(Json(std::numeric_limits<std::size_t>::max() - 1),
+                         Json(1), kGeneralPageMaxEntries, &offset, &limit));
+  EXPECT_EQ(offset, std::numeric_limits<std::size_t>::max() - 1);
+  EXPECT_EQ(limit, 1U);
+  offset = 23;
+  limit = 29;
+  EXPECT_FALSE(decode_page_window(Json(std::numeric_limits<std::size_t>::max()),
+                                  Json(1), kGeneralPageMaxEntries, &offset,
+                                  &limit));
+  EXPECT_EQ(offset, 23U);
+  EXPECT_EQ(limit, 29U);
+  EXPECT_FALSE(decode_page_window(Json(-1), Json(1), kGeneralPageMaxEntries,
+                                  &offset, &limit));
+  EXPECT_FALSE(decode_page_window(Json(0), Json(0), kGeneralPageMaxEntries,
+                                  &offset, &limit));
+  EXPECT_FALSE(decode_page_window(Json(0), Json(1.5), kGeneralPageMaxEntries,
+                                  &offset, &limit));
+}
+
+/**
+ * @brief Proves the reusable graph-session page boundary and row schema.
+ *
+ * The exact 4,096-row page must round-trip while preserving order, and an
+ * unknown row member must be ignored. Both outbound and inbound 4,097-row
+ * pages are rejected, and malformed rows leave a previously published result
+ * unchanged.
+ */
+TEST(PageCodec, BoundsGraphSessionSummariesAndDecodesTransactionally) {
+  const GraphSessionSummary summary{
+      IpcSessionId{"0123456789abcdef0123456789abcdef"}, "session"};
+  const std::vector<GraphSessionSummary> exact_page(kGeneralPageMaxEntries,
+                                                    summary);
+  Json encoded = encode_session_summaries(exact_page);
+  ASSERT_EQ(encoded.size(), kGeneralPageMaxEntries);
+  encoded.front()["future_member"] = Json{{"nested", true}};
+
+  std::vector<GraphSessionSummary> decoded;
+  std::string message = "stale";
+  ASSERT_TRUE(decode_session_summaries(encoded, &decoded, &message)) << message;
+  ASSERT_EQ(decoded.size(), kGeneralPageMaxEntries);
+  EXPECT_EQ(decoded.front().session_id.value, summary.session_id.value);
+  EXPECT_EQ(decoded.front().session_name, summary.session_name);
+
+  std::vector<GraphSessionSummary> oversized = exact_page;
+  oversized.push_back(summary);
+  EXPECT_THROW((void)encode_session_summaries(oversized), std::length_error);
+
+  encoded.push_back(encoded.front());
+  std::vector<GraphSessionSummary> unchanged = {
+      {IpcSessionId{"ffffffffffffffffffffffffffffffff"}, "sentinel"}};
+  message = "stale";
+  EXPECT_FALSE(decode_session_summaries(encoded, &unchanged, &message));
+  ASSERT_EQ(unchanged.size(), 1U);
+  EXPECT_EQ(unchanged.front().session_name, "sentinel");
+
+  const std::vector<Json> malformed_rows = {
+      Json::object(), Json::array({Json{{"session_name", "missing-id"}}}),
+      Json::array({Json{{"session_id", std::string(32, 'A')},
+                        {"session_name", "uppercase-id"}}}),
+      Json::array({Json{{"session_id", summary.session_id.value},
+                        {"session_name", "unsafe/name"}}}),
+      Json::array({Json{{"session_id", summary.session_id.value},
+                        {"session_name", 7}}})};
+  for (const Json& malformed : malformed_rows) {
+    unchanged = {
+        {IpcSessionId{"ffffffffffffffffffffffffffffffff"}, "sentinel"}};
+    message = "stale";
+    EXPECT_FALSE(decode_session_summaries(malformed, &unchanged, &message));
+    ASSERT_EQ(unchanged.size(), 1U);
+    EXPECT_EQ(unchanged.front().session_id.value,
+              "ffffffffffffffffffffffffffffffff");
+    EXPECT_EQ(unchanged.front().session_name, "sentinel");
+    EXPECT_FALSE(message.empty());
+  }
+
+  const std::vector<GraphSessionSummary> invalid_rows = {
+      {IpcSessionId{std::string(31, 'a')}, "session"},
+      {IpcSessionId{summary.session_id.value}, "unsafe/name"}};
+  for (const GraphSessionSummary& invalid : invalid_rows) {
+    EXPECT_THROW((void)encode_session_summaries({invalid}),
+                 std::invalid_argument);
+  }
+}
+
+TEST(PixelRectCodec, PreservesEveryIntBoundaryAndIgnoresUnknownFields) {
+  PixelRect original{std::numeric_limits<int>::min(),
+                     std::numeric_limits<int>::max(), -7, 0};
+  Json encoded = encode_pixel_rect(original);
+  encoded["future_field"] = true;
+  PixelRect decoded{1, 2, 3, 4};
+  ASSERT_TRUE(decode_pixel_rect(encoded, &decoded));
+  EXPECT_EQ(decoded.x, original.x);
+  EXPECT_EQ(decoded.y, original.y);
+  EXPECT_EQ(decoded.width, original.width);
+  EXPECT_EQ(decoded.height, original.height);
+
+  const std::vector<Json> malformed = [&] {
+    std::vector<Json> values;
+    Json missing = encoded;
+    missing.erase("width");
+    values.push_back(std::move(missing));
+    Json fractional = encoded;
+    fractional["x"] = 1.5;
+    values.push_back(std::move(fractional));
+    Json overflow = encoded;
+    overflow["height"] = std::uint64_t{4294967296ULL};
+    values.push_back(std::move(overflow));
+    Json wrong_type = encoded;
+    wrong_type["y"] = "zero";
+    values.push_back(std::move(wrong_type));
+    return values;
+  }();
+  for (const Json& value : malformed) {
+    PixelRect unchanged{11, 12, 13, 14};
+    EXPECT_FALSE(decode_pixel_rect(value, &unchanged));
+    EXPECT_EQ(unchanged.x, 11);
+    EXPECT_EQ(unchanged.y, 12);
+    EXPECT_EQ(unchanged.width, 13);
+    EXPECT_EQ(unchanged.height, 14);
+  }
+}
+
+TEST(EnumCodec, RoundTripsEveryDefinedVersionOneLabel) {
+  expect_enum_codec(std::array<std::pair<ComputeIntent, const char*>, 2>{{
+      {ComputeIntent::GlobalHighPrecision, "global_high_precision"},
+      {ComputeIntent::RealTimeUpdate, "real_time_update"},
+  }});
+  expect_enum_codec(std::array<std::pair<DirtyDomain, const char*>, 2>{{
+      {DirtyDomain::HighPrecision, "high_precision"},
+      {DirtyDomain::RealTime, "real_time"},
+  }});
+  expect_enum_codec(
+      std::array<std::pair<DirtySourceLifecycleState, const char*>, 3>{{
+          {DirtySourceLifecycleState::Idle, "idle"},
+          {DirtySourceLifecycleState::Updating, "updating"},
+          {DirtySourceLifecycleState::Settled, "settled"},
+      }});
+  expect_enum_codec(std::array<std::pair<DirtyEdgeDirection, const char*>, 2>{{
+      {DirtyEdgeDirection::ForwardAffected, "forward_affected"},
+      {DirtyEdgeDirection::BackwardDemand, "backward_demand"},
+  }});
+  expect_enum_codec(std::array<std::pair<HostGraphEdgeKind, const char*>, 2>{{
+      {HostGraphEdgeKind::ImageInput, "image_input"},
+      {HostGraphEdgeKind::ParameterInput, "parameter_input"},
+  }});
+  expect_enum_codec(
+      std::array<std::pair<HostDependencyTreeScope, const char*>, 2>{{
+          {HostDependencyTreeScope::EndingNodes, "ending_nodes"},
+          {HostDependencyTreeScope::StartNode, "start_node"},
+      }});
+  expect_enum_codec(std::array<std::pair<HostSchedulerTraceAction, const char*>,
+                               9>{{
+      {HostSchedulerTraceAction::AssignInitial, "assign_initial"},
+      {HostSchedulerTraceAction::Execute, "execute"},
+      {HostSchedulerTraceAction::ExecuteTile, "execute_tile"},
+      {HostSchedulerTraceAction::ExecuteDirtySource, "execute_dirty_source"},
+      {HostSchedulerTraceAction::ExecuteDirtyDownstreamNode,
+       "execute_dirty_downstream_node"},
+      {HostSchedulerTraceAction::ExecuteDirtyDownstreamTile,
+       "execute_dirty_downstream_tile"},
+      {HostSchedulerTraceAction::SkipStaleGeneration, "skip_stale_generation"},
+      {HostSchedulerTraceAction::RethrowException, "rethrow_exception"},
+      {HostSchedulerTraceAction::Unknown, "unknown"},
+  }});
+  expect_enum_codec(std::array<std::pair<DataType, const char*>, 6>{{
+      {DataType::UINT8, "uint8"},
+      {DataType::INT8, "int8"},
+      {DataType::UINT16, "uint16"},
+      {DataType::INT16, "int16"},
+      {DataType::FLOAT32, "float32"},
+      {DataType::FLOAT64, "float64"},
+  }});
+  expect_enum_codec(std::array<std::pair<Device, const char*>, 4>{{
+      {Device::CPU, "cpu"},
+      {Device::GPU_METAL, "gpu_metal"},
+      {Device::GPU_CUDA, "gpu_cuda"},
+      {Device::ASIC_NPU, "asic_npu"},
+  }});
+}
+
+TEST(ProtocolEnvelope, EnforcesRequestAndMethodUtf8ByteBounds) {
+  std::unique_ptr<Host> host = create_embedded_host();
+  ASSERT_NE(host, nullptr);
+  RequestRouter router(*host, "0.1.0");
+
+  const std::string exact_id(kRequestTextMaxBytes, 'i');
+  const Json exact_id_response = parse_response(router.route(Json{
+      {"protocol_version", 1},
+      {"id", exact_id},
+      {"method", "unknown"},
+      {"params", Json::object()}}.dump()));
+  EXPECT_EQ(exact_id_response["id"], exact_id);
+  EXPECT_EQ(exact_id_response["error"]["name"], "method_not_found");
+
+  const Json long_id_response = parse_response(router.route(Json{
+      {"protocol_version", 1},
+      {"id", std::string(kRequestTextMaxBytes + 1, 'i')},
+      {"method", "unknown"},
+      {"params", Json::object()}}.dump()));
+  EXPECT_TRUE(long_id_response["id"].is_null());
+  EXPECT_EQ(long_id_response["error"]["name"], "invalid_request");
+
+  const Json exact_method_response = parse_response(router.route(Json{
+      {"protocol_version", 1},
+      {"id", "method-exact"},
+      {"method", std::string(kRequestTextMaxBytes, 'm')},
+      {"params", Json::object()}}.dump()));
+  EXPECT_EQ(exact_method_response["error"]["name"], "method_not_found");
+  const Json long_method_response = parse_response(router.route(Json{
+      {"protocol_version", 1},
+      {"id", "method-long"},
+      {"method", std::string(kRequestTextMaxBytes + 1, 'm')},
+      {"params", Json::object()}}.dump()));
+  EXPECT_EQ(long_method_response["id"], "method-long");
+  EXPECT_EQ(long_method_response["error"]["name"], "invalid_request");
+}
+
+TEST(ProtocolParams, IgnoresUnknownFieldsButStillValidatesKnownFields) {
+  std::unique_ptr<Host> host = create_embedded_host();
+  ASSERT_NE(host, nullptr);
+  RequestRouter router(*host, "0.1.0");
+  for (const std::string& method :
+       {std::string("daemon.ping"), std::string("daemon.version"),
+        std::string("graph.list")}) {
+    const Json response = parse_response(router.route(Json{
+        {"protocol_version", 1},
+        {"id", method},
+        {"method", method},
+        {"future_envelope", Json{{"nested", true}}},
+        {"params",
+         Json{{"future_field", Json{{"nested", true}}}}}}.dump()));
+    EXPECT_TRUE(response.contains("result")) << response.dump();
+  }
+  const Json malformed_known = parse_response(router.route(Json{
+      {"protocol_version", 1},
+      {"id", "known"},
+      {"method", "inspect.node"},
+      {"params", Json{{"session_id", std::string(32, 'a')},
+                      {"node_id", "wrong"},
+                      {"future_field", true}}}}.dump()));
+  EXPECT_EQ(malformed_known["error"]["name"], "invalid_params");
+}
+
+TEST(ProtocolParams, EnforcesSessionAndFilesystemPathByteBounds) {
+  ScopedTempDirectory temp("ps-ipc-text-bounds");
+  std::unique_ptr<Host> host = create_embedded_host();
+  ASSERT_NE(host, nullptr);
+  RequestRouter router(*host, "0.1.0");
+
+  const Json exact_session = parse_response(router.route(Json{
+      {"protocol_version", 1},
+      {"id", "session-exact"},
+      {"method", "graph.load"},
+      {"params", Json{{"session_name", std::string(kShortTextMaxBytes, 's')},
+                      {"root_dir", temp.path().string()}}}}.dump()));
+  EXPECT_TRUE(exact_session.contains("result") ||
+              exact_session["error"]["name"] != "invalid_params")
+      << exact_session.dump();
+
+  const Json long_session = parse_response(router.route(Json{
+      {"protocol_version", 1},
+      {"id", "session-long"},
+      {"method", "graph.load"},
+      {"params",
+       Json{{"session_name", std::string(kShortTextMaxBytes + 1, 's')},
+            {"root_dir", temp.path().string()}}}}.dump()));
+  EXPECT_EQ(long_session["error"]["name"], "invalid_params");
+
+  const std::string exact_path = "/" + std::string(kPathTextMaxBytes - 1, 'p');
+  const Json accepted_path = parse_response(router.route(Json{
+      {"protocol_version", 1},
+      {"id", "path-exact"},
+      {"method", "graph.load"},
+      {"params", Json{{"session_name", "path_exact"},
+                      {"root_dir", exact_path}}}}.dump()));
+  EXPECT_TRUE(accepted_path.contains("result") ||
+              accepted_path["error"]["name"] != "invalid_params")
+      << accepted_path.dump();
+
+  const Json long_path = parse_response(router.route(Json{
+      {"protocol_version", 1},
+      {"id", "path-long"},
+      {"method", "graph.load"},
+      {"params", Json{{"session_name", "path_long"},
+                      {"root_dir", exact_path + "p"}}}}.dump()));
+  EXPECT_EQ(long_path["error"]["name"], "invalid_params");
+
+  const Json nul_session = parse_response(router.route(Json{
+      {"protocol_version", 1},
+      {"id", "session-nul"},
+      {"method", "graph.load"},
+      {"params", Json{{"session_name", std::string("safe\0tail", 9)},
+                      {"root_dir", temp.path().string()}}}}.dump()));
+  EXPECT_EQ(nul_session["error"]["name"], "invalid_params");
+  router.close_all_sessions();
+}
+
 TEST(ProtocolParams, RejectsInvalidValuesWithoutHostMutation) {
   ScopedTempDirectory temp("photospider-ipc-invalid-params");
   std::unique_ptr<Host> host = create_embedded_host();
@@ -629,14 +1153,6 @@ TEST(ProtocolParams, RejectsInvalidValuesWithoutHostMutation) {
   const std::string valid_session_id(32, 'a');
   const std::filesystem::path untouched_root = temp.path() / "untouched";
   const std::vector<Json> requests = {
-      Json{{"protocol_version", 1},
-           {"id", "ping-params"},
-           {"method", "daemon.ping"},
-           {"params", Json{{"unexpected", true}}}},
-      Json{{"protocol_version", 1},
-           {"id", "version-params"},
-           {"method", "daemon.version"},
-           {"params", Json{{"unexpected", true}}}},
       Json{{"protocol_version", 1},
            {"id", "unsafe-name"},
            {"method", "graph.load"},
@@ -886,6 +1402,288 @@ TEST(OperationStatusModel, ErrorCodecPreservesProtocolGraphAndDaemonValues) {
   }
 }
 
+TEST(OperationStatusModel, EnforcesEveryKnownCodeNamePairTransactionally) {
+  /** @brief One expected stable version 1 error identity. */
+  struct Mapping {
+    /** @brief Public failure domain represented by the mapping. */
+    OperationErrorDomain domain;
+    /** @brief Lowercase wire spelling of `domain`. */
+    const char* domain_name;
+    /** @brief Stable signed numeric code. */
+    std::int32_t code;
+    /** @brief Stable lowercase name paired with `code`. */
+    const char* name;
+  };
+  const std::array<Mapping, 22> mappings{{
+      {OperationErrorDomain::Protocol, "protocol", kParseErrorCode,
+       "parse_error"},
+      {OperationErrorDomain::Protocol, "protocol", kInvalidRequestCode,
+       "invalid_request"},
+      {OperationErrorDomain::Protocol, "protocol", kMethodNotFoundCode,
+       "method_not_found"},
+      {OperationErrorDomain::Protocol, "protocol", kInvalidParamsCode,
+       "invalid_params"},
+      {OperationErrorDomain::Protocol, "protocol", kUnsupportedProtocolCode,
+       "unsupported_protocol"},
+      {OperationErrorDomain::Protocol, "protocol", kResponseTooLargeCode,
+       "response_too_large"},
+      {OperationErrorDomain::Graph, "graph", 1, "unknown"},
+      {OperationErrorDomain::Graph, "graph", 2, "not_found"},
+      {OperationErrorDomain::Graph, "graph", 3, "cycle"},
+      {OperationErrorDomain::Graph, "graph", 4, "io"},
+      {OperationErrorDomain::Graph, "graph", 5, "invalid_yaml"},
+      {OperationErrorDomain::Graph, "graph", 6, "missing_dependency"},
+      {OperationErrorDomain::Graph, "graph", 7, "no_operation"},
+      {OperationErrorDomain::Graph, "graph", 8, "invalid_parameter"},
+      {OperationErrorDomain::Graph, "graph", 9, "compute_error"},
+      {OperationErrorDomain::Daemon, "daemon", kInternalErrorCode,
+       "internal_error"},
+      {OperationErrorDomain::Daemon, "daemon", kJobNotFoundCode,
+       "job_not_found"},
+      {OperationErrorDomain::Daemon, "daemon", kJobNotReadyCode,
+       "job_not_ready"},
+      {OperationErrorDomain::Daemon, "daemon", kCapacityExceededCode,
+       "capacity_exceeded"},
+      {OperationErrorDomain::Daemon, "daemon", kArtifactNotFoundCode,
+       "artifact_not_found"},
+      {OperationErrorDomain::Daemon, "daemon", kArtifactLimitExceededCode,
+       "artifact_limit_exceeded"},
+      {OperationErrorDomain::Daemon, "daemon", kCursorNotFoundCode,
+       "cursor_not_found"},
+  }};
+  for (const Mapping& mapping : mappings) {
+    const Json encoded = encode_error(failure_status(
+        mapping.domain, mapping.code, "wrong_input_name", "diagnostic"));
+    EXPECT_EQ(encoded["name"], mapping.name);
+    OperationStatus decoded;
+    std::string message;
+    ASSERT_TRUE(decode_error(Json{{"domain", mapping.domain_name},
+                                  {"code", mapping.code},
+                                  {"name", mapping.name},
+                                  {"message", "diagnostic"},
+                                  {"future_field", true}},
+                             &decoded, &message))
+        << message;
+    EXPECT_EQ(decoded.domain, mapping.domain);
+    EXPECT_EQ(decoded.code, mapping.code);
+    EXPECT_EQ(decoded.name, mapping.name);
+
+    OperationStatus unchanged = failure_status(OperationErrorDomain::Daemon, 77,
+                                               "sentinel", "unchanged");
+    EXPECT_FALSE(decode_error(Json{{"domain", mapping.domain_name},
+                                   {"code", mapping.code},
+                                   {"name", "wrong_name"},
+                                   {"message", "diagnostic"}},
+                              &unchanged, &message));
+    EXPECT_EQ(unchanged.code, 77);
+    EXPECT_EQ(unchanged.name, "sentinel");
+
+    unchanged = failure_status(OperationErrorDomain::Daemon, 79, "sentinel",
+                               "unchanged");
+    EXPECT_FALSE(decode_error(Json{{"domain", mapping.domain_name},
+                                   {"code", mapping.code + 1000},
+                                   {"name", mapping.name},
+                                   {"message", "diagnostic"}},
+                              &unchanged, &message));
+    EXPECT_EQ(unchanged.code, 79);
+    EXPECT_EQ(unchanged.name, "sentinel");
+  }
+
+  OperationStatus future;
+  std::string message;
+  ASSERT_TRUE(decode_error(Json{{"domain", "daemon"},
+                                {"code", -32199},
+                                {"name", "future_daemon"},
+                                {"message", "future diagnostic"}},
+                           &future, &message));
+  EXPECT_EQ(future.code, -32199);
+  EXPECT_EQ(future.name, "future_daemon");
+}
+
+TEST(OperationStatusModel, NestedCodecRequiresCanonicalTransactionalStatus) {
+  const std::array<OperationStatus, 4> statuses = {
+      ok_status(),
+      failure_status(OperationErrorDomain::Protocol, kInvalidParamsCode,
+                     "invalid_params", "protocol diagnostic"),
+      failure_status(OperationErrorDomain::Graph, 4, "io", "graph diagnostic"),
+      failure_status(OperationErrorDomain::Daemon, kCapacityExceededCode,
+                     "capacity_exceeded", "daemon diagnostic")};
+  for (const OperationStatus& status : statuses) {
+    Json encoded = encode_operation_status(status);
+    encoded["future_field"] = Json{{"nested", true}};
+    OperationStatus decoded = failure_status(OperationErrorDomain::Daemon, 91,
+                                             "sentinel", "unchanged");
+    std::string message;
+    ASSERT_TRUE(decode_operation_status(encoded, &decoded, &message))
+        << message;
+    EXPECT_EQ(decoded.ok, status.ok);
+    EXPECT_EQ(decoded.domain, status.domain);
+    EXPECT_EQ(decoded.code, status.code);
+    EXPECT_EQ(decoded.name, status.name);
+    EXPECT_EQ(decoded.message, status.message);
+  }
+
+  const std::vector<Json> malformed = {Json{{"ok", true},
+                                            {"domain", "graph"},
+                                            {"code", 0},
+                                            {"name", ""},
+                                            {"message", ""}},
+                                       Json{{"ok", true},
+                                            {"domain", "none"},
+                                            {"code", 0},
+                                            {"name", "stale"},
+                                            {"message", ""}},
+                                       Json{{"ok", false},
+                                            {"domain", "transport"},
+                                            {"code", 1},
+                                            {"name", "connect_failed"},
+                                            {"message", "diagnostic"}},
+                                       Json{{"ok", false},
+                                            {"domain", "daemon"},
+                                            {"code", kJobNotFoundCode},
+                                            {"name", "job_not_ready"},
+                                            {"message", "diagnostic"}},
+                                       Json{{"ok", "false"},
+                                            {"domain", "daemon"},
+                                            {"code", kJobNotFoundCode},
+                                            {"name", "job_not_found"},
+                                            {"message", "diagnostic"}}};
+  for (const Json& value : malformed) {
+    OperationStatus unchanged = failure_status(OperationErrorDomain::Daemon, 93,
+                                               "sentinel", "unchanged");
+    std::string message;
+    EXPECT_FALSE(decode_operation_status(value, &unchanged, &message));
+    EXPECT_EQ(unchanged.code, 93);
+    EXPECT_EQ(unchanged.name, "sentinel");
+  }
+}
+
+TEST(OperationStatusModel, BoundsDiagnosticsAtCompleteUtf8Scalars) {
+  const std::string long_multibyte =
+      std::string(kDiagnosticTextMaxBytes - 1, 'a') + "\xc3\xa9";
+  const std::string bounded = bounded_diagnostic(long_multibyte);
+  EXPECT_LE(bounded.size(), kDiagnosticTextMaxBytes);
+  EXPECT_TRUE(valid_utf8(bounded));
+  EXPECT_NE(bounded.find("[truncated]"), std::string::npos);
+
+  const std::string invalid =
+      std::string("prefix-") + std::string("\xf0\x28\x8c\x28", 4) + "-suffix";
+  const std::string repaired = bounded_diagnostic(invalid);
+  EXPECT_LE(repaired.size(), kDiagnosticTextMaxBytes);
+  EXPECT_TRUE(valid_utf8(repaired));
+
+  const Json encoded = encode_error(failure_status(
+      OperationErrorDomain::Daemon, kInternalErrorCode, "internal_error",
+      std::string(kDiagnosticTextMaxBytes + 1, 'd')));
+  EXPECT_LE(encoded["message"].get_ref<const std::string&>().size(),
+            kDiagnosticTextMaxBytes);
+  OperationStatus unchanged =
+      failure_status(OperationErrorDomain::Daemon, 95, "sentinel", "unchanged");
+  std::string message;
+  EXPECT_FALSE(decode_error(
+      Json{{"domain", "daemon"},
+           {"code", kInternalErrorCode},
+           {"name", "internal_error"},
+           {"message", std::string(kDiagnosticTextMaxBytes + 1, 'd')}},
+      &unchanged, &message));
+  EXPECT_EQ(unchanged.code, 95);
+  EXPECT_EQ(unchanged.name, "sentinel");
+}
+
+TEST(OperationStatusModel, RejectsInvalidEncodedFailureStatuses) {
+  EXPECT_THROW((void)encode_error(ok_status()), std::invalid_argument);
+  EXPECT_NO_THROW((void)encode_operation_status(ok_status()));
+  const std::vector<OperationStatus> invalid_argument_statuses = {
+      failure_status(OperationErrorDomain::None, 1, "failure", "diagnostic"),
+      failure_status(OperationErrorDomain::Transport, 1, "connect_failed",
+                     "diagnostic"),
+      failure_status(static_cast<OperationErrorDomain>(999), 1, "failure",
+                     "diagnostic"),
+      failure_status(OperationErrorDomain::Daemon, -32199, "", "diagnostic"),
+      failure_status(OperationErrorDomain::Daemon, -32199,
+                     std::string("\xc0\xaf", 2), "diagnostic"),
+      failure_status(OperationErrorDomain::Daemon, -32199, "job_not_found",
+                     "diagnostic")};
+  for (const OperationStatus& status : invalid_argument_statuses) {
+    EXPECT_THROW((void)encode_error(status), std::invalid_argument);
+    EXPECT_THROW((void)encode_operation_status(status), std::invalid_argument);
+  }
+  const OperationStatus oversized =
+      failure_status(OperationErrorDomain::Daemon, -32199,
+                     std::string(kShortTextMaxBytes + 1, 'n'), "diagnostic");
+  EXPECT_THROW((void)encode_error(oversized), std::length_error);
+  EXPECT_THROW((void)encode_operation_status(oversized), std::length_error);
+}
+
+/**
+ * @brief Verifies real router mapping for rejected Host inspection values.
+ *
+ * @throws Nothing when graph loading and both routed inspections retain their
+ *         version 1 error contracts; GoogleTest records any mismatch.
+ * @note The loaded YAML deliberately preserves one 1,025-byte node name and
+ *       one negative node id. `inspect.node` therefore reaches the outbound
+ *       text bound, while `inspect.graph` reaches malformed-value validation,
+ *       without exposing a production test hook or substituting a fake Host.
+ */
+TEST(ProtocolErrors, MapsRealInspectionCodecFailuresToStableErrors) {
+  ScopedTempDirectory temp("ps-ipc-codec-errors");
+  const std::filesystem::path yaml_path = temp.path() / "graph.yaml";
+  {
+    std::ofstream output(yaml_path);
+    output.exceptions(std::ios::badbit | std::ios::failbit);
+    output << "- id: 1\n"
+              "  name: "
+           << std::string(kShortTextMaxBytes + 1, 'n')
+           << "\n"
+              "  type: ipc_fixture\n"
+              "  subtype: source\n"
+              "- id: -1\n"
+              "  name: invalid_id\n"
+              "  type: ipc_fixture\n"
+              "  subtype: source\n";
+  }
+
+  std::unique_ptr<Host> host = create_embedded_host();
+  ASSERT_NE(host, nullptr);
+  RequestRouter router(*host, "0.1.0");
+  const Json loaded = parse_response(router.route(Json{
+      {"protocol_version", kProtocolVersion},
+      {"id", "load-codec-errors"},
+      {"method", "graph.load"},
+      {"params",
+       Json{{"session_name", "codec_error_routes"},
+            {"root_dir", (temp.path() / "sessions").string()},
+            {"yaml_path", yaml_path.string()}}}}.dump()));
+  ASSERT_TRUE(loaded.contains("result")) << loaded.dump();
+  ASSERT_TRUE(loaded["result"].value("session_id", Json()).is_string());
+  const std::string session_id =
+      loaded["result"]["session_id"].get<std::string>();
+  ASSERT_TRUE(valid_opaque_id(session_id));
+
+  const Json oversized_node = parse_response(router.route(Json{
+      {"protocol_version", kProtocolVersion},
+      {"id", "inspect-oversized-node"},
+      {"method", "inspect.node"},
+      {"params",
+       Json{{"session_id", session_id}, {"node_id", 1}}}}.dump()));
+  ASSERT_TRUE(oversized_node.contains("error")) << oversized_node.dump();
+  EXPECT_EQ(oversized_node["error"]["domain"], "protocol");
+  EXPECT_EQ(oversized_node["error"]["code"], kResponseTooLargeCode);
+  EXPECT_EQ(oversized_node["error"]["name"], "response_too_large");
+
+  const Json invalid_graph = parse_response(router.route(Json{
+      {"protocol_version", kProtocolVersion},
+      {"id", "inspect-invalid-graph"},
+      {"method", "inspect.graph"},
+      {"params", Json{{"session_id", session_id}}}}.dump()));
+  ASSERT_TRUE(invalid_graph.contains("error")) << invalid_graph.dump();
+  EXPECT_EQ(invalid_graph["error"]["domain"], "daemon");
+  EXPECT_EQ(invalid_graph["error"]["code"], kInternalErrorCode);
+  EXPECT_EQ(invalid_graph["error"]["name"], "internal_error");
+
+  router.close_all_sessions();
+}
+
 TEST(InspectionJson, RoundTripsNullAndNonFiniteSnapshots) {
   NodeInspectionView node;
   node.id = NodeId{7};
@@ -924,6 +1722,87 @@ TEST(InspectionJson, RoundTripsNullAndNonFiniteSnapshots) {
   ASSERT_EQ(decoded_tree.entries.size(), 1U);
   EXPECT_EQ(decoded_tree.scope, HostDependencyTreeScope::StartNode);
   EXPECT_EQ(decoded_tree.start_node->value, 7);
+}
+
+TEST(InspectionJson, EnforcesValueBoundsAndTransactionalNestedShapes) {
+  NodeInspectionView node;
+  node.id = NodeId{7};
+  node.name = std::string(kShortTextMaxBytes, 'n');
+  node.type = "fixture";
+  node.subtype = "source";
+  node.parameters = {{"answer", "42"}};
+  node.space = SpatialSnapshot{};
+  Json encoded = encode_node(node);
+  encoded["future_field"] = true;
+  NodeInspectionView decoded;
+  std::string message;
+  ASSERT_TRUE(decode_node(encoded, &decoded, &message)) << message;
+  EXPECT_EQ(decoded.name.size(), kShortTextMaxBytes);
+
+  NodeInspectionView oversized = node;
+  oversized.name.push_back('n');
+  EXPECT_THROW((void)encode_node(oversized), std::length_error);
+  Json oversized_json = encoded;
+  oversized_json["name"] = oversized.name;
+  decoded.id = NodeId{31};
+  EXPECT_FALSE(decode_node(oversized_json, &decoded, &message));
+  EXPECT_EQ(decoded.id.value, 31);
+
+  for (std::size_t matrix_size : {std::size_t{8}, std::size_t{10}}) {
+    Json malformed_matrix = encoded;
+    malformed_matrix["space"]["transform_matrix"] = Json::array();
+    for (std::size_t index = 0; index < matrix_size; ++index) {
+      malformed_matrix["space"]["transform_matrix"].push_back(0.0);
+    }
+    decoded.id = NodeId{33};
+    EXPECT_FALSE(decode_node(malformed_matrix, &decoded, &message));
+    EXPECT_EQ(decoded.id.value, 33);
+  }
+
+  Json too_many_parameters = encoded;
+  too_many_parameters["parameters"] = Json::object();
+  for (std::size_t index = 0; index <= kGeneralPageMaxEntries; ++index) {
+    too_many_parameters["parameters"][std::to_string(index)] = "value";
+  }
+  decoded.id = NodeId{35};
+  EXPECT_FALSE(decode_node(too_many_parameters, &decoded, &message));
+  EXPECT_EQ(decoded.id.value, 35);
+
+  const IpcSessionId session_id{"0123456789abcdef0123456789abcdef"};
+  Json oversized_graph{{"session_id", session_id.value},
+                       {"nodes", Json::array()}};
+  for (std::size_t index = 0; index <= kGeneralPageMaxEntries; ++index) {
+    oversized_graph["nodes"].push_back(nullptr);
+  }
+  GraphInspectionView graph;
+  graph.session.value = "sentinel";
+  EXPECT_FALSE(decode_graph(oversized_graph, &graph, &message));
+  EXPECT_EQ(graph.session.value, "sentinel");
+  GraphInspectionView too_many_nodes;
+  too_many_nodes.nodes.resize(kGeneralPageMaxEntries + 1, node);
+  EXPECT_THROW((void)encode_graph(session_id, too_many_nodes),
+               std::length_error);
+  EXPECT_THROW((void)encode_graph(IpcSessionId{"malformed"}, {}),
+               std::invalid_argument);
+
+  HostDependencyTreeSnapshot tree;
+  tree.root_nodes.resize(kGeneralPageMaxEntries + 1, NodeId{7});
+  EXPECT_THROW((void)encode_dependency_tree(session_id, tree),
+               std::length_error);
+  Json oversized_tree{
+      {"session_id", session_id.value}, {"scope", "ending_nodes"},
+      {"start_node_id", nullptr},       {"graph_empty", false},
+      {"start_node_found", true},       {"no_ending_nodes", false},
+      {"root_node_ids", Json::array()}, {"entries", Json::array()}};
+  for (std::size_t index = 0; index <= kGeneralPageMaxEntries; ++index) {
+    oversized_tree["root_node_ids"].push_back(7);
+  }
+  HostDependencyTreeSnapshot unchanged_tree;
+  unchanged_tree.start_node = NodeId{37};
+  EXPECT_FALSE(
+      decode_dependency_tree(oversized_tree, &unchanged_tree, &message));
+  ASSERT_TRUE(unchanged_tree.start_node.has_value());
+  EXPECT_EQ(unchanged_tree.start_node->value, 37);
 }
 
 TEST(InspectionJson, RejectsEveryOutOfRangeTypedInteger) {
@@ -1145,6 +2024,48 @@ TEST(ClientResultValidation, RejectsOverflowedVersionWithoutDesynchronizing) {
   EXPECT_EQ(version.status.domain, OperationErrorDomain::Protocol);
   EXPECT_EQ(version.status.code, kInvalidRequestCode);
   EXPECT_TRUE(client.connected());
+}
+
+TEST(ClientResultValidation, RejectsEveryInexactMethodInventory) {
+  Json exact_methods = Json::array();
+  for (std::string_view method : kVersionOneMethodNames) {
+    exact_methods.push_back(std::string(method));
+  }
+  std::vector<Json> malformed_methods;
+  Json missing = exact_methods;
+  missing.erase(missing.size() - 1);
+  malformed_methods.push_back(std::move(missing));
+  Json replaced = exact_methods;
+  replaced[replaced.size() - 1] = "inspect.replacement";
+  malformed_methods.push_back(std::move(replaced));
+  Json duplicated = exact_methods;
+  duplicated[duplicated.size() - 1] = duplicated[duplicated.size() - 2];
+  malformed_methods.push_back(std::move(duplicated));
+
+  for (const Json& methods : malformed_methods) {
+    ScopedTempDirectory temp("ps-ipc-method-inventory");
+    const std::string socket_path = (temp.path() / "server.sock").string();
+    UniqueFd listener = create_test_listener(socket_path);
+    Client client;
+    ASSERT_TRUE(client.connect(socket_path).ok);
+    const Json result{
+        {"protocol_version", kProtocolVersion},
+        {"service_name", "photospiderd"},
+        {"service_version", "0.1.0"},
+        {"server_instance_id", "0123456789abcdef0123456789abcdef"},
+        {"transport", "unix"},
+        {"methods", methods}};
+    bool served = false;
+    std::thread peer(
+        [&] { served = serve_correlated_result(listener.get(), result); });
+    const IpcResult<DaemonVersion> version = client.version();
+    peer.join();
+    EXPECT_TRUE(served);
+    EXPECT_FALSE(version.status.ok);
+    EXPECT_EQ(version.status.domain, OperationErrorDomain::Protocol);
+    EXPECT_EQ(version.status.code, kInvalidRequestCode);
+    EXPECT_TRUE(client.connected());
+  }
 }
 
 TEST(ClientResultValidation, RejectsInspectionOverflowWithoutDesynchronizing) {

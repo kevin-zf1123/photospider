@@ -4,6 +4,7 @@
 #include <cstdint>
 #include <memory>
 #include <string>
+#include <string_view>
 #include <tuple>
 #include <utility>
 #include <vector>
@@ -40,24 +41,6 @@ OperationStatus invalid_response(std::string message) {
   return internal::failure_status(OperationErrorDomain::Protocol,
                                   internal::kInvalidRequestCode,
                                   "invalid_request", std::move(message));
-}
-
-/**
- * @brief Validates a daemon-generated opaque identifier.
- *
- * @param value Candidate session or server instance identifier.
- * @return True for exactly 32 lowercase hexadecimal characters.
- * @throws Nothing.
- * @note This shared result validator prevents typed metadata and lifecycle
- *       calls from publishing names, uppercase tokens, or malformed wire
- *       identifiers as opaque public values.
- */
-bool valid_opaque_id(const std::string& value) noexcept {
-  return value.size() == 32 &&
-         std::all_of(value.begin(), value.end(), [](char character) {
-           return (character >= '0' && character <= '9') ||
-                  (character >= 'a' && character <= 'f');
-         });
 }
 
 /**
@@ -126,10 +109,11 @@ class Client::Impl {
    * @param params Typed method parameters already encoded as an object.
    * @return Owned result object or categorized local/remote failure.
    * @throws std::bad_alloc if request/response storage cannot be allocated.
-   * @note The call performs no retry. Frame, JSON, envelope, correlation, and
-   *       error-object protocol violations close the connection because message
-   *       synchronization is no longer trustworthy. After this function
-   *       returns a correlated result object, a typed payload-shape failure
+   * @note The method must be nonempty valid UTF-8 within 128 bytes and params
+   *       must be an object. The call performs no retry. Frame, JSON, envelope,
+   * correlation, and error-object protocol violations close the connection
+   * because message synchronization is no longer trustworthy. After this
+   * function returns a correlated result object, a typed payload-shape failure
    *       becomes a local Protocol error and leaves the connection open.
    */
   RawCallResult call(const std::string& method, const internal::Json& params) {
@@ -137,6 +121,14 @@ class Client::Impl {
       return {internal::failure_status(OperationErrorDomain::Transport, 2,
                                        "not_connected",
                                        "IPC client is not connected"),
+              {}};
+    }
+    if (method.empty() || method.size() > internal::kRequestTextMaxBytes ||
+        !internal::valid_utf8(method) || !params.is_object()) {
+      return {internal::failure_status(
+                  OperationErrorDomain::Protocol, internal::kInvalidParamsCode,
+                  "invalid_params",
+                  "client method or params violate version 1 bounds"),
               {}};
     }
     const std::string id = "client-" + std::to_string(++request_sequence_);
@@ -294,9 +286,9 @@ IpcResult<DaemonPing> Client::ping() {
     return failed_result<DaemonPing>(
         invalid_response("daemon.ping result has an invalid shape"));
   }
-  const std::string server_instance_id =
-      call.result["server_instance_id"].get<std::string>();
-  if (!valid_opaque_id(server_instance_id)) {
+  std::string server_instance_id;
+  if (!internal::decode_opaque_id(call.result["server_instance_id"],
+                                  &server_instance_id)) {
     return failed_result<DaemonPing>(
         invalid_response("daemon.ping returned an invalid instance id"));
   }
@@ -330,24 +322,34 @@ IpcResult<DaemonVersion> Client::version() {
     return failed_result<DaemonVersion>(
         invalid_response("daemon.version protocol_version is out of range"));
   }
-  try {
-    result.service_name = call.result["service_name"].get<std::string>();
-    result.service_version = call.result["service_version"].get<std::string>();
-    result.server_instance_id =
-        call.result["server_instance_id"].get<std::string>();
-    result.transport = call.result["transport"].get<std::string>();
-    result.methods = call.result["methods"].get<std::vector<std::string>>();
-  } catch (const internal::Json::exception&) {
+  if (!internal::decode_bounded_string(call.result["service_name"],
+                                       internal::kShortTextMaxBytes,
+                                       &result.service_name) ||
+      !internal::decode_bounded_string(call.result["service_version"],
+                                       internal::kShortTextMaxBytes,
+                                       &result.service_version) ||
+      !internal::decode_opaque_id(call.result["server_instance_id"],
+                                  &result.server_instance_id) ||
+      !internal::decode_bounded_string(call.result["transport"],
+                                       internal::kShortTextMaxBytes,
+                                       &result.transport) ||
+      !internal::decode_bounded_string_array(
+          call.result["methods"], internal::kGeneralPageMaxEntries,
+          internal::kRequestTextMaxBytes, &result.methods)) {
     return failed_result<DaemonVersion>(invalid_response(
-        "daemon.version contains an out-of-range or non-string value"));
+        "daemon.version contains an invalid or over-limit string/array"));
   }
   if (result.protocol_version != kProtocolVersion ||
       result.service_name != "photospiderd" || result.service_version.empty() ||
-      !valid_opaque_id(result.server_instance_id) ||
       result.transport != "unix" ||
-      !std::is_sorted(result.methods.begin(), result.methods.end())) {
+      result.methods.size() != internal::kVersionOneMethodNames.size() ||
+      !std::equal(result.methods.begin(), result.methods.end(),
+                  internal::kVersionOneMethodNames.begin(),
+                  [](const std::string& actual, std::string_view expected) {
+                    return actual == expected;
+                  })) {
     return failed_result<DaemonVersion>(invalid_response(
-        "daemon.version metadata or method ordering is invalid"));
+        "daemon.version metadata or exact method inventory is invalid"));
   }
   return {internal::ok_status(), std::move(result)};
 }
@@ -381,9 +383,12 @@ IpcResult<GraphSessionSummary> Client::load_graph(
         invalid_response("graph.load result has an invalid shape"));
   }
   GraphSessionSummary summary;
-  summary.session_id.value = call.result["session_id"].get<std::string>();
-  summary.session_name = call.result["session_name"].get<std::string>();
-  if (!valid_opaque_id(summary.session_id.value) ||
+  if (!internal::decode_opaque_id(call.result["session_id"],
+                                  &summary.session_id.value) ||
+      !internal::decode_bounded_string(call.result["session_name"],
+                                       internal::kShortTextMaxBytes,
+                                       &summary.session_name) ||
+      !internal::valid_session_name(summary.session_name) ||
       summary.session_name != request.session.value) {
     return failed_result<GraphSessionSummary>(invalid_response(
         "graph.load result has an invalid session id or session name"));
@@ -423,25 +428,16 @@ IpcResult<std::vector<GraphSessionSummary>> Client::list_graphs() {
     return failed_result<std::vector<GraphSessionSummary>>(
         std::move(call.status));
   }
-  if (!call.result.value("sessions", internal::Json()).is_array()) {
+  if (!call.result.contains("sessions")) {
     return failed_result<std::vector<GraphSessionSummary>>(
         invalid_response("graph.list result requires a sessions array"));
   }
   std::vector<GraphSessionSummary> sessions;
-  for (const internal::Json& value : call.result["sessions"]) {
-    if (!value.is_object() ||
-        !value.value("session_id", internal::Json()).is_string() ||
-        !value.value("session_name", internal::Json()).is_string()) {
-      return failed_result<std::vector<GraphSessionSummary>>(
-          invalid_response("graph.list session row is invalid"));
-    }
-    GraphSessionSummary summary{{value["session_id"].get<std::string>()},
-                                value["session_name"].get<std::string>()};
-    if (!valid_opaque_id(summary.session_id.value)) {
-      return failed_result<std::vector<GraphSessionSummary>>(invalid_response(
-          "graph.list session row has an invalid opaque session id"));
-    }
-    sessions.push_back(std::move(summary));
+  std::string message;
+  if (!internal::decode_session_summaries(call.result["sessions"], &sessions,
+                                          &message)) {
+    return failed_result<std::vector<GraphSessionSummary>>(
+        invalid_response(std::move(message)));
   }
   if (!std::is_sorted(
           sessions.begin(), sessions.end(),
@@ -496,8 +492,11 @@ IpcResult<NodeInspectionView> Client::inspect_node(
   if (!call.status.ok) {
     return failed_result<NodeInspectionView>(std::move(call.status));
   }
-  if (!call.result.value("session_id", internal::Json()).is_string() ||
-      call.result["session_id"].get<std::string>() != session_id.value ||
+  std::string returned_session_id;
+  if (!call.result.contains("session_id") ||
+      !internal::decode_opaque_id(call.result["session_id"],
+                                  &returned_session_id) ||
+      returned_session_id != session_id.value ||
       !call.result.contains("node")) {
     return failed_result<NodeInspectionView>(
         invalid_response("inspect.node result has an invalid session or node"));
@@ -529,8 +528,11 @@ IpcResult<HostDependencyTreeSnapshot> Client::inspect_dependency_tree(
   if (!call.status.ok) {
     return failed_result<HostDependencyTreeSnapshot>(std::move(call.status));
   }
-  if (!call.result.value("session_id", internal::Json()).is_string() ||
-      call.result["session_id"].get<std::string>() != session_id.value) {
+  std::string returned_session_id;
+  if (!call.result.contains("session_id") ||
+      !internal::decode_opaque_id(call.result["session_id"],
+                                  &returned_session_id) ||
+      returned_session_id != session_id.value) {
     return failed_result<HostDependencyTreeSnapshot>(invalid_response(
         "inspect.dependency_tree returned a different opaque session id"));
   }

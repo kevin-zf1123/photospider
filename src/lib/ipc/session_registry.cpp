@@ -1,8 +1,6 @@
 #include "ipc/session_registry.hpp"
 
 #include <algorithm>
-#include <array>
-#include <cerrno>
 #include <cstddef>
 #include <cstdint>
 #include <set>
@@ -12,75 +10,9 @@
 #include <utility>
 #include <vector>
 
-#if defined(__linux__)
-#include <sys/random.h>
-#else
-#include <stdlib.h>
-#endif
-
 #include "ipc/codec.hpp"
 
 namespace ps::ipc::internal {
-namespace {
-
-/**
- * @brief Fills a fixed buffer from the platform operating-system RNG.
- *
- * @param bytes Sixteen-byte destination.
- * @throws std::runtime_error if Linux `getrandom` fails without `EINTR` or
- *         returns EOF.
- * @note macOS/BSD `arc4random_buf` has no recoverable failure result and uses
- *       the operating system random subsystem.
- */
-void fill_entropy(std::array<unsigned char, 16>* bytes) {
-#if defined(__linux__)
-  std::size_t offset = 0;
-  while (offset < bytes->size()) {
-    const ssize_t count =
-        ::getrandom(bytes->data() + offset, bytes->size() - offset, 0);
-    if (count > 0) {
-      offset += static_cast<std::size_t>(count);
-      continue;
-    }
-    if (count < 0 && errno == EINTR) {
-      continue;
-    }
-    throw std::runtime_error("operating-system entropy source failed");
-  }
-#else
-  ::arc4random_buf(bytes->data(), bytes->size());
-#endif
-}
-
-/**
- * @brief Validates the fixed public token representation.
- *
- * @param token Candidate token text.
- * @return True for exactly 32 lowercase hexadecimal characters.
- * @throws Nothing.
- */
-bool valid_token_shape(const std::string& token) noexcept {
-  return token.size() == 32 &&
-         std::all_of(token.begin(), token.end(), [](char value) {
-           return (value >= '0' && value <= '9') ||
-                  (value >= 'a' && value <= 'f');
-         });
-}
-
-}  // namespace
-
-/** @copydoc generate_opaque_id */
-std::string generate_opaque_id() {
-  std::array<unsigned char, 16> bytes{};
-  fill_entropy(&bytes);
-  static constexpr char kHex[] = "0123456789abcdef";
-  std::string result(bytes.size() * 2, '0');
-  for (std::size_t index = 0; index < bytes.size(); ++index) {
-    result[index * 2] = kHex[bytes[index] >> 4U];
-    result[index * 2 + 1] = kHex[bytes[index] & 0x0fU];
-  }
-  return result;
-}
 
 /** @copydoc SessionRegistry::SessionRegistry() */
 SessionRegistry::SessionRegistry() : SessionRegistry(generate_opaque_id) {}
@@ -108,7 +40,7 @@ IpcResult<IpcSessionId> SessionRegistry::reserve(
   }
   for (std::size_t attempt = 0; attempt < 128; ++attempt) {
     std::string token = token_generator_();
-    if (!valid_token_shape(token)) {
+    if (!valid_opaque_id(token)) {
       return {failure_status(OperationErrorDomain::Daemon, kInternalErrorCode,
                              "internal_error",
                              "opaque token generator returned invalid data"),

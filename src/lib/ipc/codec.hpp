@@ -1,10 +1,14 @@
 #pragma once
 
+#include <array>
+#include <cstddef>
 #include <cstdint>
 #include <limits>
 #include <nlohmann/json.hpp>
 #include <string>
+#include <string_view>
 #include <type_traits>
+#include <vector>
 
 #include "photospider/core/result_types.hpp"
 #include "photospider/host/host.hpp"
@@ -20,6 +24,108 @@ namespace ps::ipc::internal {
  *       ABI; values own their parser and object storage.
  */
 using Json = nlohmann::json;
+
+/**
+ * @brief Exact hexadecimal character count of every version 1 opaque id.
+ *
+ * @throws Nothing; this is an immutable compile-time value.
+ * @note The bound applies uniformly to server, session, compute, output,
+ *       delivery, and cursor identities without defining their ownership.
+ */
+inline constexpr std::size_t kOpaqueIdHexCharacters = 32;
+
+/**
+ * @brief Maximum UTF-8 byte length of a request id or method name.
+ *
+ * @throws Nothing; this is an immutable compile-time value.
+ * @note The decoded UTF-8 bytes are counted after JSON escape processing.
+ */
+inline constexpr std::size_t kRequestTextMaxBytes = 128;
+
+/**
+ * @brief Maximum UTF-8 byte length of a short public label.
+ *
+ * @throws Nothing; this is an immutable compile-time value.
+ * @note Version 1 uses this for session names, scheduler/precision labels,
+ *       operation/plugin keys, stable enum/error names, and event text.
+ */
+inline constexpr std::size_t kShortTextMaxBytes = 1024;
+
+/**
+ * @brief Maximum UTF-8 byte length of a filesystem path.
+ *
+ * @throws Nothing; this is an immutable compile-time value.
+ * @note Path syntax, absoluteness, ownership, and NUL rules are validated in
+ *       addition to this decoded-byte bound.
+ */
+inline constexpr std::size_t kPathTextMaxBytes = 4096;
+
+/**
+ * @brief Maximum UTF-8 byte length of a wire diagnostic.
+ *
+ * @throws Nothing; this is an immutable compile-time value.
+ * @note Diagnostics are repaired and truncated at UTF-8 scalar boundaries;
+ *       programmatic domain/code/name fields are never truncated.
+ */
+inline constexpr std::size_t kDiagnosticTextMaxBytes = 4096;
+
+/**
+ * @brief Maximum UTF-8 byte length of YAML or one copied source value.
+ *
+ * @throws Nothing; this is an immutable compile-time value.
+ * @note The limit applies independently to each decoded YAML, parameter, or
+ *       source string and remains below the 16 MiB frame maximum.
+ */
+inline constexpr std::size_t kLargeTextMaxBytes = 8U * 1024U * 1024U;
+
+/**
+ * @brief Maximum number of directories or paths in one input array.
+ *
+ * @throws Nothing; this is an immutable compile-time value.
+ * @note Every element must also satisfy its field-specific path/text bound
+ *       before a plugin, scheduler, graph, or filesystem mutation begins.
+ */
+inline constexpr std::size_t kPathArrayMaxEntries = 256;
+
+/**
+ * @brief Maximum number of elements in one general version 1 wire page.
+ *
+ * @throws Nothing; this is an immutable compile-time value.
+ * @note Event drain has the smaller public 1,024 limit; this value applies to
+ *       scheduler traces and other general wire pages.
+ */
+inline constexpr std::size_t kGeneralPageMaxEntries = 4096;
+
+/**
+ * @brief Maximum number of elements retained by one collection snapshot.
+ *
+ * @throws Nothing; this is an immutable compile-time value.
+ * @note The bounded snapshot registry enforces this after one full Host value
+ *       is measured and before any cursor or page is published.
+ */
+inline constexpr std::size_t kSnapshotMaxEntries = 262144;
+
+/**
+ * @brief Maximum encoded byte size retained by one collection snapshot.
+ *
+ * @throws Nothing; this is an immutable compile-time value.
+ * @note The bounded snapshot registry reserves and enforces this byte quota;
+ *       the constant does not bound Host-internal construction peaks.
+ */
+inline constexpr std::size_t kSnapshotMaxBytes = 64U * 1024U * 1024U;
+
+/**
+ * @brief Exact sorted method inventory implemented by the current v1 slice.
+ *
+ * @throws Nothing; this is immutable compile-time metadata.
+ * @note The table lists only implemented routes. Adding or removing a route
+ *       requires one atomic update to router dispatch, typed client behavior,
+ *       this inventory, and the version contract tests.
+ */
+inline constexpr std::array<std::string_view, 8> kVersionOneMethodNames = {
+    "daemon.ping",   "daemon.version", "graph.close",
+    "graph.list",    "graph.load",     "inspect.dependency_tree",
+    "inspect.graph", "inspect.node"};  // NOLINT(whitespace/indent_namespace)
 
 /**
  * @brief Decodes one JSON integer without signedness loss or narrowing.
@@ -142,6 +248,412 @@ inline constexpr std::int32_t kUnsupportedProtocolCode = -32001;
 inline constexpr std::int32_t kResponseTooLargeCode = -32002;
 
 /**
+ * @brief Unknown, expired, released, or evicted compute-job code.
+ *
+ * @throws Nothing; this is an immutable compile-time value.
+ * @note The numeric wire value is stable for protocol version 1.
+ */
+inline constexpr std::int32_t kJobNotFoundCode = -32010;
+
+/**
+ * @brief Nonterminal compute-job result or release code.
+ *
+ * @throws Nothing; this is an immutable compile-time value.
+ * @note The numeric wire value is stable for protocol version 1.
+ */
+inline constexpr std::int32_t kJobNotReadyCode = -32011;
+
+/**
+ * @brief Bounded daemon-registry admission failure code.
+ *
+ * @throws Nothing; this is an immutable compile-time value.
+ * @note The numeric wire value is stable for protocol version 1.
+ */
+inline constexpr std::int32_t kCapacityExceededCode = -32012;
+
+/**
+ * @brief Missing or identity-mismatched output artifact code.
+ *
+ * @throws Nothing; this is an immutable compile-time value.
+ * @note The numeric wire value is stable for protocol version 1.
+ */
+inline constexpr std::int32_t kArtifactNotFoundCode = -32013;
+
+/**
+ * @brief Output-store count or byte quota failure code.
+ *
+ * @throws Nothing; this is an immutable compile-time value.
+ * @note The numeric wire value is stable for protocol version 1.
+ */
+inline constexpr std::int32_t kArtifactLimitExceededCode = -32014;
+
+/**
+ * @brief Unknown, expired, or identity-mismatched snapshot cursor code.
+ *
+ * @throws Nothing; this is an immutable compile-time value.
+ * @note The numeric wire value is stable for protocol version 1.
+ */
+inline constexpr std::int32_t kCursorNotFoundCode = -32015;
+
+/**
+ * @brief Validates one complete UTF-8 byte sequence.
+ *
+ * @param value Candidate decoded JSON string bytes.
+ * @return True only when `value` contains canonical Unicode scalar encodings.
+ * @throws Nothing.
+ * @note The check rejects truncated, overlong, surrogate, and out-of-range
+ *       sequences. Embedded NUL is valid UTF-8 and is governed separately by
+ *       field-specific path or identifier validation.
+ */
+bool valid_utf8(std::string_view value) noexcept;
+
+/**
+ * @brief Validates the exact version 1 opaque identifier representation.
+ *
+ * @param value Candidate identifier bytes.
+ * @return True only for 32 lowercase hexadecimal ASCII characters.
+ * @throws Nothing.
+ * @note The same shape applies to server, session, compute, output, delivery,
+ *       and cursor ids; the helper does not assign ownership semantics.
+ */
+bool valid_opaque_id(std::string_view value) noexcept;
+
+/**
+ * @brief Decodes one exact version 1 opaque identifier transactionally.
+ *
+ * @param value Candidate JSON string.
+ * @param output Receives the 32-character lowercase hexadecimal id only after
+ *        type, UTF-8, length, and alphabet validation.
+ * @return True on success; false without modifying `output` otherwise.
+ * @throws std::bad_alloc if the validated identifier copy cannot be allocated.
+ * @note The helper validates shape only and does not resolve registry
+ * ownership.
+ */
+bool decode_opaque_id(const Json& value, std::string* output);
+
+/**
+ * @brief Validates one version 1 graph session display name.
+ *
+ * @param value Candidate decoded UTF-8 bytes.
+ * @return True only for a nonempty, at-most-1,024-byte UTF-8 path component
+ *         other than dot/dot-dot and without slash, backslash, or NUL.
+ * @throws Nothing.
+ * @note This validates the public display-name shape only; it neither resolves
+ *       a daemon opaque id nor accesses the filesystem.
+ */
+bool valid_session_name(std::string_view value) noexcept;
+
+/**
+ * @brief Generates a 128-bit operating-system-entropy opaque identifier.
+ *
+ * @return Exactly 32 lowercase hexadecimal characters.
+ * @throws std::runtime_error if the operating-system entropy source fails.
+ * @throws std::bad_alloc if result storage cannot be allocated.
+ * @note Values contain no pointer, path, session name, or process-address data.
+ */
+std::string generate_opaque_id();
+
+/**
+ * @brief Decodes one bounded UTF-8 JSON string transactionally.
+ *
+ * @param value Candidate JSON string.
+ * @param maximum_bytes Inclusive decoded UTF-8 byte limit.
+ * @param output Receives a copy only after type, UTF-8, and size validation.
+ * @return True on success; false without modifying `output` otherwise.
+ * @throws std::bad_alloc if the validated string copy cannot be allocated.
+ * @note JSON escapes are already decoded by the parser, so limits apply to the
+ *       resulting UTF-8 bytes rather than source escape spelling.
+ */
+bool decode_bounded_string(const Json& value, std::size_t maximum_bytes,
+                           std::string* output);
+
+/**
+ * @brief Decodes one bounded array of bounded UTF-8 strings transactionally.
+ *
+ * @param value Candidate JSON array.
+ * @param maximum_entries Inclusive element-count limit.
+ * @param maximum_element_bytes Inclusive decoded byte limit for each element.
+ * @param output Receives the complete array only after every element validates.
+ * @return True on success; false without modifying `output` otherwise.
+ * @throws std::bad_alloc if temporary or output storage cannot be allocated.
+ */
+bool decode_bounded_string_array(const Json& value, std::size_t maximum_entries,
+                                 std::size_t maximum_element_bytes,
+                                 std::vector<std::string>* output);
+
+/**
+ * @brief Validates one JSON array against an inclusive entry limit.
+ *
+ * @param value Candidate JSON array.
+ * @param maximum_entries Inclusive maximum element count.
+ * @return True only when `value` is an array within the bound.
+ * @throws Nothing.
+ * @note Element schemas remain the responsibility of the typed value codec;
+ *       this primitive defines no public page or cursor envelope.
+ */
+bool valid_bounded_array(const Json& value,
+                         std::size_t maximum_entries) noexcept;
+
+/**
+ * @brief Encodes one bounded page of graph-session summary rows.
+ *
+ * @param summaries Public session rows returned by the daemon registry.
+ * @return JSON array containing `session_id` and `session_name` per row.
+ * @throws std::bad_alloc if validation diagnostics or JSON storage cannot be
+ *         allocated.
+ * @throws std::length_error if the page exceeds
+ *         `kGeneralPageMaxEntries`.
+ * @throws std::invalid_argument if a row contains a malformed opaque id or
+ *         session display name.
+ * @note The complete page validates before any response or cursor is
+ *       published. Row order is preserved and unknown fields are not emitted.
+ */
+Json encode_session_summaries(
+    const std::vector<GraphSessionSummary>& summaries);
+
+/**
+ * @brief Decodes one bounded graph-session summary page transactionally.
+ *
+ * @param value Candidate JSON array; unknown members of each row are ignored.
+ * @param summaries Receives all decoded rows only after the complete page
+ *        validates.
+ * @param message Receives an owned validation diagnostic on failure.
+ * @return True when the page and every required row field are valid; false
+ *         without modifying `summaries` otherwise.
+ * @throws std::bad_alloc if temporary rows, strings, or diagnostics cannot be
+ *         allocated.
+ * @note The codec validates shape, the general page bound, opaque ids, and
+ *       session display names. Callers retain method-specific ordering rules.
+ */
+bool decode_session_summaries(const Json& value,
+                              std::vector<GraphSessionSummary>* summaries,
+                              std::string* message);
+
+/**
+ * @brief Bounds and repairs an untrusted diagnostic for a JSON response.
+ *
+ * @param message Arbitrary bytes from Host, parser, or exception boundaries.
+ * @return Valid UTF-8 no longer than `kDiagnosticTextMaxBytes`.
+ * @throws std::bad_alloc if result storage cannot be allocated.
+ * @note Invalid sequences are replaced with U+FFFD. Truncation occurs only at
+ *       code-point boundaries and includes a suffix within the same limit.
+ */
+std::string bounded_diagnostic(std::string_view message);
+
+/**
+ * @brief Decodes a bounded page limit with exact integer semantics.
+ *
+ * @param value Candidate signed or unsigned JSON integer.
+ * @param minimum Inclusive minimum accepted limit.
+ * @param maximum Inclusive maximum accepted limit.
+ * @param output Receives the exact limit only after all checks succeed.
+ * @return True on success; false without modifying `output` otherwise.
+ * @throws Nothing.
+ */
+bool decode_page_limit(const Json& value, std::size_t minimum,
+                       std::size_t maximum, std::size_t* output) noexcept;
+
+/**
+ * @brief Decodes an offset/limit window without arithmetic overflow.
+ *
+ * @param offset_value Candidate zero-based unsigned offset.
+ * @param limit_value Candidate bounded positive limit.
+ * @param maximum_limit Inclusive method-specific page limit.
+ * @param offset Receives the exact offset only after both values validate.
+ * @param limit Receives the exact limit only after both values validate.
+ * @return True when both integers fit and `offset + limit` is representable;
+ *         false without modifying either output otherwise.
+ * @throws Nothing.
+ * @note This primitive does not define a public page envelope or cursor shape.
+ */
+bool decode_page_window(const Json& offset_value, const Json& limit_value,
+                        std::size_t maximum_limit, std::size_t* offset,
+                        std::size_t* limit) noexcept;
+
+/**
+ * @brief Encodes one public pixel rectangle.
+ *
+ * @param rect Rectangle to serialize without changing empty-ROI semantics.
+ * @return Object containing exact x, y, width, and height integers.
+ * @throws std::bad_alloc if JSON storage cannot be allocated.
+ */
+Json encode_pixel_rect(const PixelRect& rect);
+
+/**
+ * @brief Decodes one public pixel rectangle transactionally.
+ *
+ * @param value Candidate object; unknown members are ignored.
+ * @param rect Receives all four exact `int` values only after validation.
+ * @return True on success; false without modifying `rect` otherwise.
+ * @throws Nothing.
+ * @note Non-positive width or height remains representable as documented by
+ *       `PixelRect`; this codec validates shape and range only.
+ */
+bool decode_pixel_rect(const Json& value, PixelRect* rect) noexcept;
+
+/**
+ * @brief Encodes one compute intent as its stable lowercase label.
+ * @param value Public enum value.
+ * @param output Receives the label only for a recognized enum value.
+ * @return True on success; false without modifying `output` otherwise.
+ * @throws std::bad_alloc if JSON string storage cannot be allocated.
+ */
+bool encode_enum(ComputeIntent value, Json* output);
+
+/**
+ * @brief Decodes one stable compute-intent label.
+ * @param value Candidate JSON string.
+ * @param output Receives the enum only after exact label validation.
+ * @return True on success; false without modifying `output` otherwise.
+ * @throws Nothing.
+ */
+bool decode_enum(const Json& value, ComputeIntent* output) noexcept;
+
+/**
+ * @brief Encodes one dirty compute domain as its stable lowercase label.
+ * @param value Public enum value.
+ * @param output Receives the label only for a recognized enum value.
+ * @return True on success; false without modifying `output` otherwise.
+ * @throws std::bad_alloc if JSON string storage cannot be allocated.
+ */
+bool encode_enum(DirtyDomain value, Json* output);
+
+/**
+ * @brief Decodes one stable dirty-domain label.
+ * @param value Candidate JSON string.
+ * @param output Receives the enum only after exact label validation.
+ * @return True on success; false without modifying `output` otherwise.
+ * @throws Nothing.
+ */
+bool decode_enum(const Json& value, DirtyDomain* output) noexcept;
+
+/**
+ * @brief Encodes one dirty-source lifecycle as its stable lowercase label.
+ * @param value Public enum value.
+ * @param output Receives the label only for a recognized enum value.
+ * @return True on success; false without modifying `output` otherwise.
+ * @throws std::bad_alloc if JSON string storage cannot be allocated.
+ */
+bool encode_enum(DirtySourceLifecycleState value, Json* output);
+
+/**
+ * @brief Decodes one stable dirty-source lifecycle label.
+ * @param value Candidate JSON string.
+ * @param output Receives the enum only after exact label validation.
+ * @return True on success; false without modifying `output` otherwise.
+ * @throws Nothing.
+ */
+bool decode_enum(const Json& value, DirtySourceLifecycleState* output) noexcept;
+
+/**
+ * @brief Encodes one dirty-edge direction as its stable lowercase label.
+ * @param value Public enum value.
+ * @param output Receives the label only for a recognized enum value.
+ * @return True on success; false without modifying `output` otherwise.
+ * @throws std::bad_alloc if JSON string storage cannot be allocated.
+ */
+bool encode_enum(DirtyEdgeDirection value, Json* output);
+
+/**
+ * @brief Decodes one stable dirty-edge direction label.
+ * @param value Candidate JSON string.
+ * @param output Receives the enum only after exact label validation.
+ * @return True on success; false without modifying `output` otherwise.
+ * @throws Nothing.
+ */
+bool decode_enum(const Json& value, DirtyEdgeDirection* output) noexcept;
+
+/**
+ * @brief Encodes one graph edge kind as its stable lowercase label.
+ * @param value Public enum value.
+ * @param output Receives the label only for a recognized enum value.
+ * @return True on success; false without modifying `output` otherwise.
+ * @throws std::bad_alloc if JSON string storage cannot be allocated.
+ */
+bool encode_enum(HostGraphEdgeKind value, Json* output);
+
+/**
+ * @brief Decodes one stable graph-edge-kind label.
+ * @param value Candidate JSON string.
+ * @param output Receives the enum only after exact label validation.
+ * @return True on success; false without modifying `output` otherwise.
+ * @throws Nothing.
+ */
+bool decode_enum(const Json& value, HostGraphEdgeKind* output) noexcept;
+
+/**
+ * @brief Encodes one dependency-tree scope as its stable lowercase label.
+ * @param value Public enum value.
+ * @param output Receives the label only for a recognized enum value.
+ * @return True on success; false without modifying `output` otherwise.
+ * @throws std::bad_alloc if JSON string storage cannot be allocated.
+ */
+bool encode_enum(HostDependencyTreeScope value, Json* output);
+
+/**
+ * @brief Decodes one stable dependency-tree-scope label.
+ * @param value Candidate JSON string.
+ * @param output Receives the enum only after exact label validation.
+ * @return True on success; false without modifying `output` otherwise.
+ * @throws Nothing.
+ */
+bool decode_enum(const Json& value, HostDependencyTreeScope* output) noexcept;
+
+/**
+ * @brief Encodes one scheduler trace action as its stable lowercase label.
+ * @param value Public enum value.
+ * @param output Receives the label only for a recognized enum value.
+ * @return True on success; false without modifying `output` otherwise.
+ * @throws std::bad_alloc if JSON string storage cannot be allocated.
+ */
+bool encode_enum(HostSchedulerTraceAction value, Json* output);
+
+/**
+ * @brief Decodes one stable scheduler-trace-action label.
+ * @param value Candidate JSON string.
+ * @param output Receives the enum only after exact label validation.
+ * @return True on success; false without modifying `output` otherwise.
+ * @throws Nothing.
+ */
+bool decode_enum(const Json& value, HostSchedulerTraceAction* output) noexcept;
+
+/**
+ * @brief Encodes one image channel data type as its stable lowercase label.
+ * @param value Public enum value.
+ * @param output Receives the label only for a recognized enum value.
+ * @return True on success; false without modifying `output` otherwise.
+ * @throws std::bad_alloc if JSON string storage cannot be allocated.
+ */
+bool encode_enum(DataType value, Json* output);
+
+/**
+ * @brief Decodes one stable image data-type label.
+ * @param value Candidate JSON string.
+ * @param output Receives the enum only after exact label validation.
+ * @return True on success; false without modifying `output` otherwise.
+ * @throws Nothing.
+ */
+bool decode_enum(const Json& value, DataType* output) noexcept;
+
+/**
+ * @brief Encodes one image device as its stable lowercase label.
+ * @param value Public enum value.
+ * @param output Receives the label only for a recognized enum value.
+ * @return True on success; false without modifying `output` otherwise.
+ * @throws std::bad_alloc if JSON string storage cannot be allocated.
+ */
+bool encode_enum(Device value, Json* output);
+
+/**
+ * @brief Decodes one stable image-device label.
+ * @param value Candidate JSON string.
+ * @param output Receives the enum only after exact label validation.
+ * @return True on success; false without modifying `output` otherwise.
+ * @throws Nothing.
+ */
+bool decode_enum(const Json& value, Device* output) noexcept;
+
+/**
  * @brief Result of parsing one JSON payload with duplicate-key rejection.
  *
  * @throws std::bad_alloc when parsed storage or diagnostics cannot be
@@ -224,6 +736,13 @@ OperationStatus graph_status(const OperationStatus& status);
  * @param status Failed status to encode.
  * @return Object containing domain, code, name, and message.
  * @throws std::bad_alloc if JSON storage cannot be allocated.
+ * @throws std::length_error if an unknown future name exceeds its wire bound.
+ * @throws std::invalid_argument if the status is successful, uses a non-wire
+ *         domain, has an invalid UTF-8 or empty unknown name, or pairs an
+ *         unknown code with a currently known name.
+ * @note Recognized codes are canonicalized to their stable name regardless of
+ *       the supplied name. Unknown future code/name pairs are preserved
+ *       without interpreting diagnostic text.
  */
 Json encode_error(const OperationStatus& status);
 
@@ -233,12 +752,47 @@ Json encode_error(const OperationStatus& status);
  * @param value Candidate error object.
  * @param status Receives the owned decoded status.
  * @param message Receives a validation diagnostic on failure.
- * @return True when all required fields and the domain are valid.
+ * @return True when all required fields, bounds, domain, and stable known
+ *         code/name pairing are valid without modifying output on failure.
  * @throws std::bad_alloc if copied strings cannot be allocated.
- * @note Unknown future numeric codes and names are preserved verbatim.
+ * @note Unknown object fields and future numeric code/name pairs are preserved
+ *       for forward compatibility. Wire `none` and local-only `transport`
+ *       domains are rejected.
  */
 bool decode_error(const Json& value, OperationStatus* status,
                   std::string* message);
+
+/**
+ * @brief Encodes one canonical nested operation status value.
+ *
+ * @param status Successful or failed public operation status.
+ * @return Object containing `ok`, domain, signed code, stable name, and a
+ *         bounded UTF-8 diagnostic.
+ * @throws std::bad_alloc if JSON or bounded diagnostic storage cannot allocate.
+ * @throws std::length_error if an unknown future name exceeds its wire bound.
+ * @throws std::invalid_argument if a failed status cannot be represented by
+ *         the version 1 remote error schema.
+ * @note Success is canonicalized to none/zero/empty fields. Recognized failure
+ *       codes are encoded with their stable name; unknown future pairs are
+ *       preserved without interpreting diagnostic text.
+ */
+Json encode_operation_status(const OperationStatus& status);
+
+/**
+ * @brief Decodes one canonical nested operation status transactionally.
+ *
+ * @param value Candidate status object; unknown members are ignored.
+ * @param status Receives the fully owned status only after validation.
+ * @param message Receives an owned validation diagnostic on failure.
+ * @return True for canonical success or a valid remote failure; false without
+ *         modifying `status` otherwise.
+ * @throws std::bad_alloc if copied strings cannot be allocated.
+ * @note Known code/name pairs are strict in both directions. Unknown future
+ *       pairs are preserved. Local-only Transport failures are not accepted
+ *       from a daemon wire value.
+ */
+bool decode_operation_status(const Json& value, OperationStatus* status,
+                             std::string* message);
 
 /**
  * @brief Serializes one bounded version 1 success response.
@@ -259,6 +813,10 @@ std::string encode_success_response(const std::string& id, Json result);
  * @param node Public value to serialize.
  * @return Snake-case JSON object with explicit nullable metadata.
  * @throws std::bad_alloc if JSON storage cannot be allocated.
+ * @throws std::length_error if a returned string or collection exceeds its
+ *         version 1 bound.
+ * @throws std::invalid_argument if a string is invalid UTF-8 or the snapshot
+ *         contains a negative node id.
  * @note Non-finite floating-point fields are encoded as JSON null.
  */
 Json encode_node(const NodeInspectionView& node);
@@ -283,6 +841,9 @@ bool decode_node(const Json& value, NodeInspectionView* node,
  * @param graph Host graph snapshot whose private Host session is not exposed.
  * @return Object containing opaque `session_id` and copied nodes.
  * @throws std::bad_alloc if JSON storage cannot be allocated.
+ * @throws std::length_error if the node page exceeds its current wire bound.
+ * @throws std::invalid_argument if the opaque id, UTF-8, or a nested value is
+ *         invalid.
  */
 Json encode_graph(const IpcSessionId& session_id,
                   const GraphInspectionView& graph);
@@ -306,6 +867,10 @@ bool decode_graph(const Json& value, GraphInspectionView* graph,
  * @param tree Host dependency tree to serialize.
  * @return Snake-case flattened dependency-tree result object.
  * @throws std::bad_alloc if JSON storage cannot be allocated.
+ * @throws std::length_error if a returned string or collection exceeds its
+ *         current version 1 wire bound.
+ * @throws std::invalid_argument if an id, depth, UTF-8 string, or public enum
+ *         is invalid.
  */
 Json encode_dependency_tree(const IpcSessionId& session_id,
                             const HostDependencyTreeSnapshot& tree);

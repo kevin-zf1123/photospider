@@ -1,17 +1,434 @@
 #include "ipc/codec.hpp"
 
+#include <algorithm>
+#include <array>
+#include <cerrno>
 #include <cmath>
 #include <cstddef>
 #include <cstdint>
 #include <limits>
 #include <map>
 #include <set>
+#include <stdexcept>
 #include <string>
+#include <string_view>
 #include <utility>
 #include <vector>
 
+#if defined(__linux__)
+#include <sys/random.h>
+#else
+#include <stdlib.h>
+#endif
+
 namespace ps::ipc::internal {
 namespace {
+
+/**
+ * @brief Returns the length of one strict UTF-8 scalar at an input offset.
+ *
+ * @param value Complete byte sequence being inspected.
+ * @param offset Byte offset of the candidate leading byte.
+ * @return Scalar length from one through four, or zero for invalid input.
+ * @throws Nothing.
+ * @note The check rejects overlong encodings, surrogate code points, truncated
+ *       sequences, stray continuations, and values above U+10FFFF.
+ */
+std::size_t utf8_scalar_bytes(std::string_view value,
+                              std::size_t offset) noexcept {
+  if (offset >= value.size()) {
+    return 0;
+  }
+  const auto byte = [&value](std::size_t index) {
+    return static_cast<unsigned char>(value[index]);
+  };
+  const unsigned char first = byte(offset);
+  if (first <= 0x7fU) {
+    return 1;
+  }
+  if (first >= 0xc2U && first <= 0xdfU) {
+    return offset + 1 < value.size() && byte(offset + 1) >= 0x80U &&
+                   byte(offset + 1) <= 0xbfU
+               ? 2U
+               : 0U;
+  }
+  if (first >= 0xe0U && first <= 0xefU) {
+    if (offset + 2 >= value.size()) {
+      return 0;
+    }
+    const unsigned char second = byte(offset + 1);
+    const unsigned char third = byte(offset + 2);
+    const bool second_valid =
+        first == 0xe0U   ? second >= 0xa0U && second <= 0xbfU
+        : first == 0xedU ? second >= 0x80U && second <= 0x9fU
+                         : second >= 0x80U && second <= 0xbfU;
+    return second_valid && third >= 0x80U && third <= 0xbfU ? 3U : 0U;
+  }
+  if (first >= 0xf0U && first <= 0xf4U) {
+    if (offset + 3 >= value.size()) {
+      return 0;
+    }
+    const unsigned char second = byte(offset + 1);
+    const unsigned char third = byte(offset + 2);
+    const unsigned char fourth = byte(offset + 3);
+    const bool second_valid =
+        first == 0xf0U   ? second >= 0x90U && second <= 0xbfU
+        : first == 0xf4U ? second >= 0x80U && second <= 0x8fU
+                         : second >= 0x80U && second <= 0xbfU;
+    return second_valid && third >= 0x80U && third <= 0xbfU &&
+                   fourth >= 0x80U && fourth <= 0xbfU
+               ? 4U
+               : 0U;
+  }
+  return 0;
+}
+
+/**
+ * @brief Fills a fixed buffer from the platform operating-system RNG.
+ *
+ * @param bytes Sixteen-byte destination.
+ * @throws std::runtime_error if Linux `getrandom` fails without `EINTR` or
+ *         returns EOF.
+ * @note macOS/BSD `arc4random_buf` has no recoverable failure result and uses
+ *       the operating-system random subsystem.
+ */
+void fill_entropy(std::array<unsigned char, 16>* bytes) {
+#if defined(__linux__)
+  std::size_t offset = 0;
+  while (offset < bytes->size()) {
+    const ssize_t count =
+        ::getrandom(bytes->data() + offset, bytes->size() - offset, 0);
+    if (count > 0) {
+      offset += static_cast<std::size_t>(count);
+      continue;
+    }
+    if (count < 0 && errno == EINTR) {
+      continue;
+    }
+    throw std::runtime_error("operating-system entropy source failed");
+  }
+#else
+  ::arc4random_buf(bytes->data(), bytes->size());
+#endif
+}
+
+/**
+ * @brief One stable version 1 failure code/name mapping.
+ *
+ * @throws Nothing.
+ * @note Domains are part of the identity because numeric codes overlap.
+ */
+struct KnownErrorMapping {
+  /** @brief Owning public failure domain. */
+  OperationErrorDomain domain;
+  /** @brief Stable signed version 1 numeric code. */
+  std::int32_t code;
+  /** @brief Stable lowercase version 1 name. */
+  std::string_view name;
+};
+
+/**
+ * @brief Complete current version 1 protocol, graph, and daemon mappings.
+ *
+ * @throws Nothing; this is immutable compile-time metadata.
+ * @note Both numeric codes and stable names are strict within their domain.
+ *       Adding a known mapping requires encoder, decoder, and tests together.
+ */
+constexpr std::array<KnownErrorMapping, 22> kKnownErrorMappings{{
+    {OperationErrorDomain::Protocol, kParseErrorCode, "parse_error"},
+    {OperationErrorDomain::Protocol, kInvalidRequestCode, "invalid_request"},
+    {OperationErrorDomain::Protocol, kMethodNotFoundCode, "method_not_found"},
+    {OperationErrorDomain::Protocol, kInvalidParamsCode, "invalid_params"},
+    {OperationErrorDomain::Protocol, kUnsupportedProtocolCode,
+     "unsupported_protocol"},
+    {OperationErrorDomain::Protocol, kResponseTooLargeCode,
+     "response_too_large"},
+    {OperationErrorDomain::Graph, 1, "unknown"},
+    {OperationErrorDomain::Graph, 2, "not_found"},
+    {OperationErrorDomain::Graph, 3, "cycle"},
+    {OperationErrorDomain::Graph, 4, "io"},
+    {OperationErrorDomain::Graph, 5, "invalid_yaml"},
+    {OperationErrorDomain::Graph, 6, "missing_dependency"},
+    {OperationErrorDomain::Graph, 7, "no_operation"},
+    {OperationErrorDomain::Graph, 8, "invalid_parameter"},
+    {OperationErrorDomain::Graph, 9, "compute_error"},
+    {OperationErrorDomain::Daemon, kInternalErrorCode, "internal_error"},
+    {OperationErrorDomain::Daemon, kJobNotFoundCode, "job_not_found"},
+    {OperationErrorDomain::Daemon, kJobNotReadyCode, "job_not_ready"},
+    {OperationErrorDomain::Daemon, kCapacityExceededCode, "capacity_exceeded"},
+    {OperationErrorDomain::Daemon, kArtifactNotFoundCode, "artifact_not_found"},
+    {OperationErrorDomain::Daemon, kArtifactLimitExceededCode,
+     "artifact_limit_exceeded"},
+    {OperationErrorDomain::Daemon, kCursorNotFoundCode, "cursor_not_found"},
+}};
+
+/**
+ * @brief Finds a stable mapping by domain and code.
+ *
+ * @param domain Owning failure domain.
+ * @param code Candidate signed code.
+ * @return Mapping pointer, or null for an unknown future code.
+ * @throws Nothing.
+ */
+const KnownErrorMapping* known_error_by_code(OperationErrorDomain domain,
+                                             std::int32_t code) noexcept {
+  const auto found =
+      std::find_if(kKnownErrorMappings.begin(), kKnownErrorMappings.end(),
+                   [domain, code](const KnownErrorMapping& mapping) {
+                     return mapping.domain == domain && mapping.code == code;
+                   });
+  return found == kKnownErrorMappings.end() ? nullptr : &*found;
+}
+
+/**
+ * @brief Finds a stable mapping by domain and name.
+ *
+ * @param domain Owning failure domain.
+ * @param name Candidate lowercase name.
+ * @return Mapping pointer, or null for an unknown future name.
+ * @throws Nothing.
+ */
+const KnownErrorMapping* known_error_by_name(OperationErrorDomain domain,
+                                             std::string_view name) noexcept {
+  const auto found =
+      std::find_if(kKnownErrorMappings.begin(), kKnownErrorMappings.end(),
+                   [domain, name](const KnownErrorMapping& mapping) {
+                     return mapping.domain == domain && mapping.name == name;
+                   });
+  return found == kKnownErrorMappings.end() ? nullptr : &*found;
+}
+
+/**
+ * @brief Encodes one enum through a complete stable label table.
+ *
+ * @tparam Enum Public enum type.
+ * @tparam Count Number of exact mappings.
+ * @param value Candidate enum value.
+ * @param mappings Complete current mapping table.
+ * @param output Receives the label only for a recognized value.
+ * @return True on success; false without modifying `output` otherwise.
+ * @throws std::bad_alloc if JSON string allocation fails.
+ */
+template <typename Enum, std::size_t Count>
+bool encode_enum_from_table(
+    Enum value,
+    const std::array<std::pair<Enum, std::string_view>, Count>& mappings,
+    Json* output) {
+  if (output == nullptr) {
+    return false;
+  }
+  for (const auto& mapping : mappings) {
+    if (mapping.first == value) {
+      Json decoded(std::string(mapping.second));
+      *output = std::move(decoded);
+      return true;
+    }
+  }
+  return false;
+}
+
+/**
+ * @brief Decodes one enum through a complete stable label table.
+ *
+ * @tparam Enum Public enum type.
+ * @tparam Count Number of exact mappings.
+ * @param value Candidate JSON string.
+ * @param mappings Complete current mapping table.
+ * @param output Receives the enum only for an exact known label.
+ * @return True on success; false without modifying `output` otherwise.
+ * @throws Nothing.
+ */
+template <typename Enum, std::size_t Count>
+bool decode_enum_from_table(
+    const Json& value,
+    const std::array<std::pair<Enum, std::string_view>, Count>& mappings,
+    Enum* output) noexcept {
+  if (output == nullptr || !value.is_string()) {
+    return false;
+  }
+  const std::string& label = value.get_ref<const std::string&>();
+  for (const auto& mapping : mappings) {
+    if (mapping.second == label) {
+      *output = mapping.first;
+      return true;
+    }
+  }
+  return false;
+}
+
+/**
+ * @brief Complete current compute-intent label table.
+ *
+ * @throws Nothing; this is immutable compile-time metadata.
+ * @note New public enum values require an atomic codec and contract-test
+ * update.
+ */
+constexpr std::array<std::pair<ComputeIntent, std::string_view>, 2>
+    kComputeIntentLabels{{
+        {ComputeIntent::GlobalHighPrecision, "global_high_precision"},
+        {ComputeIntent::RealTimeUpdate, "real_time_update"},
+    }};  // NOLINT(whitespace/indent_namespace)
+
+/**
+ * @brief Complete current dirty-domain label table.
+ *
+ * @throws Nothing; this is immutable compile-time metadata.
+ * @note New public enum values require an atomic codec and contract-test
+ * update.
+ */
+constexpr std::array<std::pair<DirtyDomain, std::string_view>, 2>
+    kDirtyDomainLabels{{
+        {DirtyDomain::HighPrecision, "high_precision"},
+        {DirtyDomain::RealTime, "real_time"},
+    }};  // NOLINT(whitespace/indent_namespace)
+
+/**
+ * @brief Complete current dirty-source-lifecycle label table.
+ *
+ * @throws Nothing; this is immutable compile-time metadata.
+ * @note New public enum values require an atomic codec and contract-test
+ * update.
+ */
+constexpr std::array<std::pair<DirtySourceLifecycleState, std::string_view>, 3>
+    kDirtyLifecycleLabels{{
+        {DirtySourceLifecycleState::Idle, "idle"},
+        {DirtySourceLifecycleState::Updating, "updating"},
+        {DirtySourceLifecycleState::Settled, "settled"},
+    }};  // NOLINT(whitespace/indent_namespace)
+
+/**
+ * @brief Complete current dirty-edge-direction label table.
+ *
+ * @throws Nothing; this is immutable compile-time metadata.
+ * @note New public enum values require an atomic codec and contract-test
+ * update.
+ */
+constexpr std::array<std::pair<DirtyEdgeDirection, std::string_view>, 2>
+    kDirtyDirectionLabels{{
+        {DirtyEdgeDirection::ForwardAffected, "forward_affected"},
+        {DirtyEdgeDirection::BackwardDemand, "backward_demand"},
+    }};  // NOLINT(whitespace/indent_namespace)
+
+/**
+ * @brief Complete current graph-edge-kind label table.
+ *
+ * @throws Nothing; this is immutable compile-time metadata.
+ * @note New public enum values require an atomic codec and contract-test
+ * update.
+ */
+constexpr std::array<std::pair<HostGraphEdgeKind, std::string_view>, 2>
+    kGraphEdgeKindLabels{{
+        {HostGraphEdgeKind::ImageInput, "image_input"},
+        {HostGraphEdgeKind::ParameterInput, "parameter_input"},
+    }};  // NOLINT(whitespace/indent_namespace)
+
+/**
+ * @brief Complete current dependency-tree-scope label table.
+ *
+ * @throws Nothing; this is immutable compile-time metadata.
+ * @note New public enum values require an atomic codec and contract-test
+ * update.
+ */
+constexpr std::array<std::pair<HostDependencyTreeScope, std::string_view>, 2>
+    kDependencyTreeScopeLabels{{
+        {HostDependencyTreeScope::EndingNodes, "ending_nodes"},
+        {HostDependencyTreeScope::StartNode, "start_node"},
+    }};  // NOLINT(whitespace/indent_namespace)
+
+/**
+ * @brief Complete current scheduler-trace-action label table.
+ *
+ * @throws Nothing; this is immutable compile-time metadata.
+ * @note New public enum values require an atomic codec and contract-test
+ * update.
+ */
+constexpr std::array<std::pair<HostSchedulerTraceAction, std::string_view>, 9>
+    kSchedulerTraceActionLabels{{
+        {HostSchedulerTraceAction::AssignInitial, "assign_initial"},
+        {HostSchedulerTraceAction::Execute, "execute"},
+        {HostSchedulerTraceAction::ExecuteTile, "execute_tile"},
+        {HostSchedulerTraceAction::ExecuteDirtySource, "execute_dirty_source"},
+        {HostSchedulerTraceAction::ExecuteDirtyDownstreamNode,
+         "execute_dirty_downstream_node"},
+        {HostSchedulerTraceAction::ExecuteDirtyDownstreamTile,
+         "execute_dirty_downstream_tile"},
+        {HostSchedulerTraceAction::SkipStaleGeneration,
+         "skip_stale_generation"},
+        {HostSchedulerTraceAction::RethrowException, "rethrow_exception"},
+        {HostSchedulerTraceAction::Unknown, "unknown"},
+    }};  // NOLINT(whitespace/indent_namespace)
+
+/**
+ * @brief Complete current image data-type label table.
+ *
+ * @throws Nothing; this is immutable compile-time metadata.
+ * @note New public enum values require an atomic codec and contract-test
+ * update.
+ */
+constexpr std::array<std::pair<DataType, std::string_view>, 6> kDataTypeLabels{{
+    {DataType::UINT8, "uint8"},
+    {DataType::INT8, "int8"},
+    {DataType::UINT16, "uint16"},
+    {DataType::INT16, "int16"},
+    {DataType::FLOAT32, "float32"},
+    {DataType::FLOAT64, "float64"},
+}};
+
+/**
+ * @brief Complete current image-device label table.
+ *
+ * @throws Nothing; this is immutable compile-time metadata.
+ * @note New public enum values require an atomic codec and contract-test
+ * update.
+ */
+constexpr std::array<std::pair<Device, std::string_view>, 4> kDeviceLabels{{
+    {Device::CPU, "cpu"},
+    {Device::GPU_METAL, "gpu_metal"},
+    {Device::GPU_CUDA, "gpu_cuda"},
+    {Device::ASIC_NPU, "asic_npu"},
+}};
+
+/**
+ * @brief Rejects a returned string that cannot enter a version 1 value.
+ *
+ * @param value Public value bytes to validate before JSON construction.
+ * @param maximum_bytes Inclusive field-specific UTF-8 byte limit.
+ * @param field Stable field name used only in the thrown diagnostic.
+ * @throws std::bad_alloc if a rejection diagnostic cannot be allocated.
+ * @throws std::length_error when the value is over limit.
+ * @throws std::invalid_argument when the value is not valid UTF-8.
+ * @note Returning values are rejected whole; unlike diagnostics, they are never
+ *       repaired or truncated because that would change software behavior.
+ */
+void require_bounded_text(std::string_view value, std::size_t maximum_bytes,
+                          const char* field) {
+  if (value.size() > maximum_bytes) {
+    throw std::length_error(std::string(field) +
+                            " exceeds its version 1 UTF-8 bound");
+  }
+  if (!valid_utf8(value)) {
+    throw std::invalid_argument(std::string(field) + " is not valid UTF-8");
+  }
+}
+
+/**
+ * @brief Rejects a returned collection that cannot fit one current wire page.
+ *
+ * @param size Public collection element count.
+ * @param maximum_entries Inclusive field-specific element limit.
+ * @param field Stable field name used only in the thrown diagnostic.
+ * @throws std::bad_alloc if a rejection diagnostic cannot be allocated.
+ * @throws std::length_error when `size` exceeds `maximum_entries`.
+ * @note Stable multi-page snapshots use separate bounded registry ownership;
+ *       this helper does not publish or freeze a cursor/page envelope.
+ */
+void require_bounded_entries(std::size_t size, std::size_t maximum_entries,
+                             const char* field) {
+  if (size > maximum_entries) {
+    throw std::length_error(std::string(field) +
+                            " exceeds its version 1 entry bound");
+  }
+}
 
 /**
  * @brief Encodes one finite double or the version 1 null sentinel.
@@ -68,7 +485,7 @@ Json encode_size(const PixelSize& size) {
  * @throws Nothing.
  */
 bool decode_size(const Json& value, PixelSize* size) {
-  if (!value.is_object() || !value.contains("width") ||
+  if (size == nullptr || !value.is_object() || !value.contains("width") ||
       !value.contains("height")) {
     return false;
   }
@@ -78,49 +495,6 @@ bool decode_size(const Json& value, PixelSize* size) {
     return false;
   }
   *size = decoded;
-  return true;
-}
-
-/**
- * @brief Encodes a public pixel rectangle.
- *
- * @param rect Rectangle to serialize.
- * @return Object with integer x, y, width, and height.
- * @throws std::bad_alloc if JSON storage cannot be allocated.
- */
-Json encode_rect(const PixelRect& rect) {
-  return Json{{"x", rect.x},
-              {"y", rect.y},
-              {"width", rect.width},
-              {"height", rect.height}};
-}
-
-/**
- * @brief Decodes a public pixel rectangle.
- *
- * @param value Candidate object.
- * @param rect Receives decoded integer coordinates and dimensions.
- * @return True when all four required integers fit `int`.
- * @throws Nothing.
- */
-bool decode_rect(const Json& value, PixelRect* rect) {
-  static constexpr const char* kFields[] = {"x", "y", "width", "height"};
-  if (!value.is_object()) {
-    return false;
-  }
-  for (const char* field : kFields) {
-    if (!value.contains(field)) {
-      return false;
-    }
-  }
-  PixelRect decoded;
-  if (!decode_integer(value["x"], &decoded.x) ||
-      !decode_integer(value["y"], &decoded.y) ||
-      !decode_integer(value["width"], &decoded.width) ||
-      !decode_integer(value["height"], &decoded.height)) {
-    return false;
-  }
-  *rect = decoded;
   return true;
 }
 
@@ -165,8 +539,12 @@ bool decode_matrix(const Json& value, double (&matrix)[9]) {
  * @param debug Metadata snapshot to serialize.
  * @return Snake-case debug object.
  * @throws std::bad_alloc if JSON storage cannot be allocated.
+ * @throws std::length_error if the device label exceeds its wire bound.
+ * @throws std::invalid_argument if the device label is not valid UTF-8.
  */
 Json encode_debug(const DebugMetadataSnapshot& debug) {
+  require_bounded_text(debug.compute_device, kShortTextMaxBytes,
+                       "node.debug.compute_device");
   return Json{{"computed_by_worker_id", debug.computed_by_worker_id},
               {"timestamp_us", debug.timestamp_us},
               {"execution_time_ms", debug.execution_time_ms},
@@ -185,7 +563,7 @@ Json encode_debug(const DebugMetadataSnapshot& debug) {
  * @throws std::bad_alloc if the device string cannot be copied.
  */
 bool decode_debug(const Json& value, DebugMetadataSnapshot* debug) {
-  if (!value.is_object() ||
+  if (debug == nullptr || !value.is_object() ||
       !value.value("compute_device", Json()).is_string() ||
       !value.value("has_nan", Json()).is_boolean() ||
       !value.contains("computed_by_worker_id") ||
@@ -203,7 +581,10 @@ bool decode_debug(const Json& value, DebugMetadataSnapshot* debug) {
     return false;
   }
   decoded.has_nan = value["has_nan"].get<bool>();
-  decoded.compute_device = value["compute_device"].get<std::string>();
+  if (!decode_bounded_string(value["compute_device"], kShortTextMaxBytes,
+                             &decoded.compute_device)) {
+    return false;
+  }
   *debug = std::move(decoded);
   return true;
 }
@@ -218,7 +599,7 @@ bool decode_debug(const Json& value, DebugMetadataSnapshot* debug) {
 Json encode_space(const SpatialSnapshot& space) {
   return Json{
       {"extent", encode_size(space.extent)},
-      {"absolute_roi", encode_rect(space.absolute_roi)},
+      {"absolute_roi", encode_pixel_rect(space.absolute_roi)},
       {"global_scale_x", encode_double(space.global_scale_x)},
       {"global_scale_y", encode_double(space.global_scale_y)},
       {"transform_matrix", encode_matrix(space.transform_matrix)},
@@ -235,7 +616,7 @@ Json encode_space(const SpatialSnapshot& space) {
  * @throws Nothing.
  */
 bool decode_space(const Json& value, SpatialSnapshot* space) {
-  if (!value.is_object() || !value.contains("extent") ||
+  if (space == nullptr || !value.is_object() || !value.contains("extent") ||
       !value.contains("absolute_roi") || !value.contains("global_scale_x") ||
       !value.contains("global_scale_y") ||
       !value.contains("transform_matrix") ||
@@ -243,14 +624,19 @@ bool decode_space(const Json& value, SpatialSnapshot* space) {
       !value.contains("local_inverse_matrix")) {
     return false;
   }
-  return decode_size(value["extent"], &space->extent) &&
-         decode_rect(value["absolute_roi"], &space->absolute_roi) &&
-         decode_double(value["global_scale_x"], &space->global_scale_x) &&
-         decode_double(value["global_scale_y"], &space->global_scale_y) &&
-         decode_matrix(value["transform_matrix"], space->transform_matrix) &&
-         decode_matrix(value["inverse_matrix"], space->inverse_matrix) &&
-         decode_matrix(value["local_inverse_matrix"],
-                       space->local_inverse_matrix);
+  SpatialSnapshot decoded;
+  if (!decode_size(value["extent"], &decoded.extent) ||
+      !decode_pixel_rect(value["absolute_roi"], &decoded.absolute_roi) ||
+      !decode_double(value["global_scale_x"], &decoded.global_scale_x) ||
+      !decode_double(value["global_scale_y"], &decoded.global_scale_y) ||
+      !decode_matrix(value["transform_matrix"], decoded.transform_matrix) ||
+      !decode_matrix(value["inverse_matrix"], decoded.inverse_matrix) ||
+      !decode_matrix(value["local_inverse_matrix"],
+                     decoded.local_inverse_matrix)) {
+    return false;
+  }
+  *space = decoded;
+  return true;
 }
 
 /**
@@ -259,14 +645,25 @@ bool decode_space(const Json& value, SpatialSnapshot* space) {
  * @param edge Edge snapshot to serialize.
  * @return Snake-case JSON edge object.
  * @throws std::bad_alloc if JSON storage cannot be allocated.
+ * @throws std::length_error if an edge label exceeds its wire bound.
+ * @throws std::invalid_argument if an id, label, or enum has no valid wire
+ *         value.
  */
 Json encode_edge(const HostGraphEdgeSnapshot& edge) {
-  const char* kind = edge.kind == HostGraphEdgeKind::ImageInput
-                         ? "image_input"
-                         : "parameter_input";
+  if (edge.from_node.value < 0 || edge.to_node.value < 0) {
+    throw std::invalid_argument("graph edge contains a negative node id");
+  }
+  require_bounded_text(edge.from_output_name, kShortTextMaxBytes,
+                       "edge.from_output_name");
+  require_bounded_text(edge.to_input_name, kShortTextMaxBytes,
+                       "edge.to_input_name");
+  Json kind;
+  if (!encode_enum(edge.kind, &kind)) {
+    throw std::invalid_argument("graph edge kind has no version 1 label");
+  }
   return Json{{"from_node_id", edge.from_node.value},
               {"to_node_id", edge.to_node.value},
-              {"kind", kind},
+              {"kind", std::move(kind)},
               {"from_output_name", edge.from_output_name},
               {"to_input_name", edge.to_input_name},
               {"input_index", edge.input_index}};
@@ -281,8 +678,8 @@ Json encode_edge(const HostGraphEdgeSnapshot& edge) {
  * @throws std::bad_alloc if copied names cannot be allocated.
  */
 bool decode_edge(const Json& value, HostGraphEdgeSnapshot* edge) {
-  if (!value.is_object() || !value.contains("from_node_id") ||
-      !value.contains("to_node_id") ||
+  if (edge == nullptr || !value.is_object() ||
+      !value.contains("from_node_id") || !value.contains("to_node_id") ||
       !value.value("kind", Json()).is_string() ||
       !value.value("from_output_name", Json()).is_string() ||
       !value.value("to_input_name", Json()).is_string() ||
@@ -292,19 +689,15 @@ bool decode_edge(const Json& value, HostGraphEdgeSnapshot* edge) {
   HostGraphEdgeSnapshot decoded;
   if (!decode_integer(value["from_node_id"], &decoded.from_node.value) ||
       !decode_integer(value["to_node_id"], &decoded.to_node.value) ||
-      !decode_integer(value["input_index"], &decoded.input_index)) {
+      !decode_integer(value["input_index"], &decoded.input_index) ||
+      decoded.from_node.value < 0 || decoded.to_node.value < 0 ||
+      !decode_enum(value["kind"], &decoded.kind) ||
+      !decode_bounded_string(value["from_output_name"], kShortTextMaxBytes,
+                             &decoded.from_output_name) ||
+      !decode_bounded_string(value["to_input_name"], kShortTextMaxBytes,
+                             &decoded.to_input_name)) {
     return false;
   }
-  const std::string kind = value["kind"].get<std::string>();
-  if (kind == "image_input") {
-    decoded.kind = HostGraphEdgeKind::ImageInput;
-  } else if (kind == "parameter_input") {
-    decoded.kind = HostGraphEdgeKind::ParameterInput;
-  } else {
-    return false;
-  }
-  decoded.from_output_name = value["from_output_name"].get<std::string>();
-  decoded.to_input_name = value["to_input_name"].get<std::string>();
   *edge = std::move(decoded);
   return true;
 }
@@ -314,14 +707,16 @@ bool decode_edge(const Json& value, HostGraphEdgeSnapshot* edge) {
  *
  * @param name Lowercase public failure-domain spelling.
  * @param domain Receives the public domain.
- * @return True for the four recognized public failure-domain spellings.
+ * @return True for the five recognized public failure-domain spellings.
  * @throws Nothing.
  * @note Wire `decode_error()` separately rejects the local-only `Transport`
  *       domain even though its public spelling is recognized here.
  */
 bool decode_domain(const std::string& name,
                    OperationErrorDomain* domain) noexcept {
-  if (name == "transport") {
+  if (name == "none") {
+    *domain = OperationErrorDomain::None;
+  } else if (name == "transport") {
     *domain = OperationErrorDomain::Transport;
   } else if (name == "protocol") {
     *domain = OperationErrorDomain::Protocol;
@@ -359,6 +754,355 @@ const char* encode_domain(OperationErrorDomain domain) noexcept {
 }
 
 }  // namespace
+
+/** @copydoc valid_utf8 */
+bool valid_utf8(std::string_view value) noexcept {
+  std::size_t offset = 0;
+  while (offset < value.size()) {
+    const std::size_t scalar_bytes = utf8_scalar_bytes(value, offset);
+    if (scalar_bytes == 0) {
+      return false;
+    }
+    offset += scalar_bytes;
+  }
+  return true;
+}
+
+/** @copydoc valid_opaque_id */
+bool valid_opaque_id(std::string_view value) noexcept {
+  return value.size() == kOpaqueIdHexCharacters &&
+         std::all_of(value.begin(), value.end(), [](char character) {
+           return (character >= '0' && character <= '9') ||
+                  (character >= 'a' && character <= 'f');
+         });
+}
+
+/** @copydoc decode_opaque_id */
+bool decode_opaque_id(const Json& value, std::string* output) {
+  std::string decoded;
+  if (output == nullptr ||
+      !decode_bounded_string(value, kOpaqueIdHexCharacters, &decoded) ||
+      !valid_opaque_id(decoded)) {
+    return false;
+  }
+  *output = std::move(decoded);
+  return true;
+}
+
+/** @copydoc valid_session_name */
+bool valid_session_name(std::string_view value) noexcept {
+  return !value.empty() && value.size() <= kShortTextMaxBytes &&
+         valid_utf8(value) && value != "." && value != ".." &&
+         value.find('/') == std::string_view::npos &&
+         value.find('\\') == std::string_view::npos &&
+         value.find('\0') == std::string_view::npos;
+}
+
+/** @copydoc generate_opaque_id */
+std::string generate_opaque_id() {
+  std::array<unsigned char, 16> bytes{};
+  fill_entropy(&bytes);
+  static constexpr char kHex[] = "0123456789abcdef";
+  std::string result(bytes.size() * 2, '0');
+  for (std::size_t index = 0; index < bytes.size(); ++index) {
+    result[index * 2] = kHex[bytes[index] >> 4U];
+    result[index * 2 + 1] = kHex[bytes[index] & 0x0fU];
+  }
+  return result;
+}
+
+/** @copydoc decode_bounded_string */
+bool decode_bounded_string(const Json& value, std::size_t maximum_bytes,
+                           std::string* output) {
+  if (output == nullptr || !value.is_string()) {
+    return false;
+  }
+  const std::string& candidate = value.get_ref<const std::string&>();
+  if (candidate.size() > maximum_bytes || !valid_utf8(candidate)) {
+    return false;
+  }
+  std::string decoded = candidate;
+  *output = std::move(decoded);
+  return true;
+}
+
+/** @copydoc decode_bounded_string_array */
+bool decode_bounded_string_array(const Json& value, std::size_t maximum_entries,
+                                 std::size_t maximum_element_bytes,
+                                 std::vector<std::string>* output) {
+  if (output == nullptr || !valid_bounded_array(value, maximum_entries)) {
+    return false;
+  }
+  std::vector<std::string> decoded;
+  decoded.reserve(value.size());
+  for (const Json& element : value) {
+    std::string text;
+    if (!decode_bounded_string(element, maximum_element_bytes, &text)) {
+      return false;
+    }
+    decoded.push_back(std::move(text));
+  }
+  *output = std::move(decoded);
+  return true;
+}
+
+/** @copydoc valid_bounded_array */
+bool valid_bounded_array(const Json& value,
+                         std::size_t maximum_entries) noexcept {
+  return value.is_array() && value.size() <= maximum_entries;
+}
+
+/** @copydoc encode_session_summaries */
+Json encode_session_summaries(
+    const std::vector<GraphSessionSummary>& summaries) {
+  require_bounded_entries(summaries.size(), kGeneralPageMaxEntries,
+                          "graph.list sessions");
+  for (const GraphSessionSummary& summary : summaries) {
+    if (!valid_opaque_id(summary.session_id.value) ||
+        !valid_session_name(summary.session_name)) {
+      throw std::invalid_argument(
+          "graph session summary has an invalid id or display name");
+    }
+  }
+
+  Json encoded = Json::array();
+  for (const GraphSessionSummary& summary : summaries) {
+    encoded.push_back(Json{{"session_id", summary.session_id.value},
+                           {"session_name", summary.session_name}});
+  }
+  return encoded;
+}
+
+/** @copydoc decode_session_summaries */
+bool decode_session_summaries(const Json& value,
+                              std::vector<GraphSessionSummary>* summaries,
+                              std::string* message) {
+  if (summaries == nullptr || message == nullptr ||
+      !valid_bounded_array(value, kGeneralPageMaxEntries)) {
+    if (message != nullptr) {
+      *message = "graph session summaries require one bounded array";
+    }
+    return false;
+  }
+
+  std::vector<GraphSessionSummary> decoded;
+  decoded.reserve(value.size());
+  for (const Json& row : value) {
+    if (!row.is_object() || !row.contains("session_id") ||
+        !row.contains("session_name")) {
+      *message = "graph session summary has invalid required fields";
+      return false;
+    }
+    GraphSessionSummary summary;
+    if (!decode_opaque_id(row["session_id"], &summary.session_id.value) ||
+        !decode_bounded_string(row["session_name"], kShortTextMaxBytes,
+                               &summary.session_name) ||
+        !valid_session_name(summary.session_name)) {
+      *message = "graph session summary has an invalid id or display name";
+      return false;
+    }
+    decoded.push_back(std::move(summary));
+  }
+  *summaries = std::move(decoded);
+  return true;
+}
+
+/** @copydoc bounded_diagnostic */
+std::string bounded_diagnostic(std::string_view message) {
+  constexpr std::string_view kTruncatedSuffix = " [truncated]";
+  constexpr std::string_view kReplacement = "\xef\xbf\xbd";
+  std::string result;
+  result.reserve(std::min(message.size(), kDiagnosticTextMaxBytes));
+  std::size_t offset = 0;
+  bool truncated = false;
+  while (offset < message.size()) {
+    const std::size_t scalar_bytes = utf8_scalar_bytes(message, offset);
+    const std::string_view scalar =
+        scalar_bytes == 0 ? kReplacement : message.substr(offset, scalar_bytes);
+    const std::size_t consumed = scalar_bytes == 0 ? 1U : scalar_bytes;
+    if (result.size() + scalar.size() > kDiagnosticTextMaxBytes) {
+      truncated = true;
+      break;
+    }
+    result.append(scalar.data(), scalar.size());
+    offset += consumed;
+  }
+  if (offset < message.size()) {
+    truncated = true;
+  }
+  if (!truncated) {
+    return result;
+  }
+  const std::size_t prefix_limit =
+      kDiagnosticTextMaxBytes - kTruncatedSuffix.size();
+  while (result.size() > prefix_limit) {
+    std::size_t scalar_start = result.size() - 1;
+    while (scalar_start > 0 &&
+           (static_cast<unsigned char>(result[scalar_start]) & 0xc0U) ==
+               0x80U) {
+      --scalar_start;
+    }
+    result.resize(scalar_start);
+  }
+  result.append(kTruncatedSuffix.data(), kTruncatedSuffix.size());
+  return result;
+}
+
+/** @copydoc decode_page_limit */
+bool decode_page_limit(const Json& value, std::size_t minimum,
+                       std::size_t maximum, std::size_t* output) noexcept {
+  if (output == nullptr || minimum > maximum) {
+    return false;
+  }
+  std::size_t decoded = 0;
+  if (!decode_integer(value, &decoded) || decoded < minimum ||
+      decoded > maximum) {
+    return false;
+  }
+  *output = decoded;
+  return true;
+}
+
+/** @copydoc decode_page_window */
+bool decode_page_window(const Json& offset_value, const Json& limit_value,
+                        std::size_t maximum_limit, std::size_t* offset,
+                        std::size_t* limit) noexcept {
+  if (offset == nullptr || limit == nullptr) {
+    return false;
+  }
+  std::size_t decoded_offset = 0;
+  std::size_t decoded_limit = 0;
+  if (!decode_integer(offset_value, &decoded_offset) ||
+      !decode_page_limit(limit_value, 1, maximum_limit, &decoded_limit) ||
+      decoded_offset >
+          std::numeric_limits<std::size_t>::max() - decoded_limit) {
+    return false;
+  }
+  *offset = decoded_offset;
+  *limit = decoded_limit;
+  return true;
+}
+
+/** @copydoc encode_pixel_rect */
+Json encode_pixel_rect(const PixelRect& rect) {
+  return Json{{"x", rect.x},
+              {"y", rect.y},
+              {"width", rect.width},
+              {"height", rect.height}};
+}
+
+/** @copydoc decode_pixel_rect */
+bool decode_pixel_rect(const Json& value, PixelRect* rect) noexcept {
+  static constexpr const char* kFields[] = {"x", "y", "width", "height"};
+  if (rect == nullptr || !value.is_object()) {
+    return false;
+  }
+  for (const char* field : kFields) {
+    if (!value.contains(field)) {
+      return false;
+    }
+  }
+  PixelRect decoded;
+  if (!decode_integer(value["x"], &decoded.x) ||
+      !decode_integer(value["y"], &decoded.y) ||
+      !decode_integer(value["width"], &decoded.width) ||
+      !decode_integer(value["height"], &decoded.height)) {
+    return false;
+  }
+  *rect = decoded;
+  return true;
+}
+
+/** @copydoc encode_enum(ComputeIntent,Json*) */
+bool encode_enum(ComputeIntent value, Json* output) {
+  return encode_enum_from_table(value, kComputeIntentLabels, output);
+}
+
+/** @copydoc decode_enum(const Json&,ComputeIntent*) */
+bool decode_enum(const Json& value, ComputeIntent* output) noexcept {
+  return decode_enum_from_table(value, kComputeIntentLabels, output);
+}
+
+/** @copydoc encode_enum(DirtyDomain,Json*) */
+bool encode_enum(DirtyDomain value, Json* output) {
+  return encode_enum_from_table(value, kDirtyDomainLabels, output);
+}
+
+/** @copydoc decode_enum(const Json&,DirtyDomain*) */
+bool decode_enum(const Json& value, DirtyDomain* output) noexcept {
+  return decode_enum_from_table(value, kDirtyDomainLabels, output);
+}
+
+/** @copydoc encode_enum(DirtySourceLifecycleState,Json*) */
+bool encode_enum(DirtySourceLifecycleState value, Json* output) {
+  return encode_enum_from_table(value, kDirtyLifecycleLabels, output);
+}
+
+/** @copydoc decode_enum(const Json&,DirtySourceLifecycleState*) */
+bool decode_enum(const Json& value,
+                 DirtySourceLifecycleState* output) noexcept {
+  return decode_enum_from_table(value, kDirtyLifecycleLabels, output);
+}
+
+/** @copydoc encode_enum(DirtyEdgeDirection,Json*) */
+bool encode_enum(DirtyEdgeDirection value, Json* output) {
+  return encode_enum_from_table(value, kDirtyDirectionLabels, output);
+}
+
+/** @copydoc decode_enum(const Json&,DirtyEdgeDirection*) */
+bool decode_enum(const Json& value, DirtyEdgeDirection* output) noexcept {
+  return decode_enum_from_table(value, kDirtyDirectionLabels, output);
+}
+
+/** @copydoc encode_enum(HostGraphEdgeKind,Json*) */
+bool encode_enum(HostGraphEdgeKind value, Json* output) {
+  return encode_enum_from_table(value, kGraphEdgeKindLabels, output);
+}
+
+/** @copydoc decode_enum(const Json&,HostGraphEdgeKind*) */
+bool decode_enum(const Json& value, HostGraphEdgeKind* output) noexcept {
+  return decode_enum_from_table(value, kGraphEdgeKindLabels, output);
+}
+
+/** @copydoc encode_enum(HostDependencyTreeScope,Json*) */
+bool encode_enum(HostDependencyTreeScope value, Json* output) {
+  return encode_enum_from_table(value, kDependencyTreeScopeLabels, output);
+}
+
+/** @copydoc decode_enum(const Json&,HostDependencyTreeScope*) */
+bool decode_enum(const Json& value, HostDependencyTreeScope* output) noexcept {
+  return decode_enum_from_table(value, kDependencyTreeScopeLabels, output);
+}
+
+/** @copydoc encode_enum(HostSchedulerTraceAction,Json*) */
+bool encode_enum(HostSchedulerTraceAction value, Json* output) {
+  return encode_enum_from_table(value, kSchedulerTraceActionLabels, output);
+}
+
+/** @copydoc decode_enum(const Json&,HostSchedulerTraceAction*) */
+bool decode_enum(const Json& value, HostSchedulerTraceAction* output) noexcept {
+  return decode_enum_from_table(value, kSchedulerTraceActionLabels, output);
+}
+
+/** @copydoc encode_enum(DataType,Json*) */
+bool encode_enum(DataType value, Json* output) {
+  return encode_enum_from_table(value, kDataTypeLabels, output);
+}
+
+/** @copydoc decode_enum(const Json&,DataType*) */
+bool decode_enum(const Json& value, DataType* output) noexcept {
+  return decode_enum_from_table(value, kDataTypeLabels, output);
+}
+
+/** @copydoc encode_enum(Device,Json*) */
+bool encode_enum(Device value, Json* output) {
+  return encode_enum_from_table(value, kDeviceLabels, output);
+}
+
+/** @copydoc decode_enum(const Json&,Device*) */
+bool decode_enum(const Json& value, Device* output) noexcept {
+  return decode_enum_from_table(value, kDeviceLabels, output);
+}
 
 /** @copydoc parse_json */
 JsonParseResult parse_json(const std::string& payload) {
@@ -429,27 +1173,61 @@ OperationStatus graph_status(const OperationStatus& status) {
 
 /** @copydoc encode_error */
 Json encode_error(const OperationStatus& status) {
+  if (status.ok || (status.domain != OperationErrorDomain::Protocol &&
+                    status.domain != OperationErrorDomain::Graph &&
+                    status.domain != OperationErrorDomain::Daemon)) {
+    throw std::invalid_argument(
+        "wire error requires a remote failed operation status");
+  }
+  const KnownErrorMapping* mapping =
+      known_error_by_code(status.domain, status.code);
+  const KnownErrorMapping* supplied_name =
+      known_error_by_name(status.domain, status.name);
+  if (mapping == nullptr && supplied_name != nullptr &&
+      supplied_name->code != status.code) {
+    throw std::invalid_argument(
+        "wire error name conflicts with its stable numeric code");
+  }
+  const std::string name =
+      mapping == nullptr ? status.name : std::string(mapping->name);
+  if (name.empty()) {
+    throw std::invalid_argument("wire error name must be nonempty");
+  }
+  require_bounded_text(name, kShortTextMaxBytes, "error.name");
   return Json{{"domain", encode_domain(status.domain)},
               {"code", status.code},
-              {"name", status.name},
-              {"message", status.message}};
+              {"name", name},
+              {"message", bounded_diagnostic(status.message)}};
 }
 
 /** @copydoc decode_error */
 bool decode_error(const Json& value, OperationStatus* status,
                   std::string* message) {
-  if (!value.is_object() || !value.value("domain", Json()).is_string() ||
-      !value.value("code", Json()).is_number_integer() ||
-      !value.value("name", Json()).is_string() ||
-      !value.value("message", Json()).is_string()) {
-    *message = "error object requires domain/code/name/message";
+  if (status == nullptr || message == nullptr || !value.is_object() ||
+      !value.contains("domain") || !value.contains("code") ||
+      !value.contains("name") || !value.contains("message")) {
+    if (message != nullptr) {
+      *message = "error object requires domain/code/name/message";
+    }
+    return false;
+  }
+  std::string domain_name;
+  std::string name;
+  std::string diagnostic;
+  if (!decode_bounded_string(value["domain"], kShortTextMaxBytes,
+                             &domain_name) ||
+      !decode_bounded_string(value["name"], kShortTextMaxBytes, &name) ||
+      name.empty() ||
+      !decode_bounded_string(value["message"], kDiagnosticTextMaxBytes,
+                             &diagnostic)) {
+    *message = "error strings have an invalid type, UTF-8 value, or bound";
     return false;
   }
   OperationErrorDomain domain = OperationErrorDomain::None;
-  const std::string domain_name = value["domain"].get<std::string>();
   if (!decode_domain(domain_name, &domain) ||
+      domain == OperationErrorDomain::None ||
       domain == OperationErrorDomain::Transport) {
-    *message = "error object has unknown domain";
+    *message = "error object has an invalid remote failure domain";
     return false;
   }
   std::int32_t code = 0;
@@ -457,8 +1235,64 @@ bool decode_error(const Json& value, OperationStatus* status,
     *message = "error code is outside signed 32-bit range";
     return false;
   }
-  *status = failure_status(domain, code, value["name"].get<std::string>(),
-                           value["message"].get<std::string>());
+  const KnownErrorMapping* code_mapping = known_error_by_code(domain, code);
+  const KnownErrorMapping* name_mapping = known_error_by_name(domain, name);
+  if ((code_mapping != nullptr && code_mapping->name != name) ||
+      (name_mapping != nullptr && name_mapping->code != code)) {
+    *message = "error code and name do not match the stable mapping";
+    return false;
+  }
+  OperationStatus decoded =
+      failure_status(domain, code, std::move(name), std::move(diagnostic));
+  *status = std::move(decoded);
+  return true;
+}
+
+/** @copydoc encode_operation_status */
+Json encode_operation_status(const OperationStatus& status) {
+  if (status.ok) {
+    return Json{{"ok", true},
+                {"domain", "none"},
+                {"code", 0},
+                {"name", ""},
+                {"message", ""}};
+  }
+  Json encoded = encode_error(status);
+  encoded["ok"] = false;
+  return encoded;
+}
+
+/** @copydoc decode_operation_status */
+bool decode_operation_status(const Json& value, OperationStatus* status,
+                             std::string* message) {
+  if (status == nullptr || message == nullptr || !value.is_object() ||
+      !value.value("ok", Json()).is_boolean()) {
+    if (message != nullptr) {
+      *message = "operation status requires boolean ok";
+    }
+    return false;
+  }
+  if (!value["ok"].get<bool>()) {
+    return decode_error(value, status, message);
+  }
+
+  std::string domain;
+  std::string name;
+  std::string diagnostic;
+  std::int32_t code = 1;
+  if (!value.contains("domain") || !value.contains("code") ||
+      !value.contains("name") || !value.contains("message") ||
+      !decode_bounded_string(value["domain"], kShortTextMaxBytes, &domain) ||
+      !decode_integer(value["code"], &code) ||
+      !decode_bounded_string(value["name"], kShortTextMaxBytes, &name) ||
+      !decode_bounded_string(value["message"], kDiagnosticTextMaxBytes,
+                             &diagnostic) ||
+      domain != "none" || code != 0 || !name.empty() || !diagnostic.empty()) {
+    *message = "successful operation status is not canonical";
+    return false;
+  }
+  OperationStatus decoded = ok_status();
+  *status = std::move(decoded);
   return true;
 }
 
@@ -482,6 +1316,24 @@ std::string encode_success_response(const std::string& id, Json result) {
 
 /** @copydoc encode_node */
 Json encode_node(const NodeInspectionView& node) {
+  if (node.id.value < 0) {
+    throw std::invalid_argument("node snapshot contains a negative node id");
+  }
+  require_bounded_text(node.name, kShortTextMaxBytes, "node.name");
+  require_bounded_text(node.type, kShortTextMaxBytes, "node.type");
+  require_bounded_text(node.subtype, kShortTextMaxBytes, "node.subtype");
+  require_bounded_entries(node.parameters.size(), kGeneralPageMaxEntries,
+                          "node.parameters");
+  for (const auto& parameter : node.parameters) {
+    require_bounded_text(parameter.first, kShortTextMaxBytes,
+                         "node.parameters key");
+    require_bounded_text(parameter.second, kLargeTextMaxBytes,
+                         "node.parameters value");
+  }
+  if (node.source_label) {
+    require_bounded_text(*node.source_label, kLargeTextMaxBytes,
+                         "node.source_label");
+  }
   Json source_label =
       node.source_label ? Json(*node.source_label) : Json(nullptr);
   Json debug = node.debug ? encode_debug(*node.debug) : Json(nullptr);
@@ -500,7 +1352,8 @@ Json encode_node(const NodeInspectionView& node) {
 /** @copydoc decode_node */
 bool decode_node(const Json& value, NodeInspectionView* node,
                  std::string* message) {
-  if (!value.is_object() || !value.value("id", Json()).is_number_integer() ||
+  if (node == nullptr || message == nullptr || !value.is_object() ||
+      !value.value("id", Json()).is_number_integer() ||
       !value.value("name", Json()).is_string() ||
       !value.value("type", Json()).is_string() ||
       !value.value("subtype", Json()).is_string() ||
@@ -508,29 +1361,52 @@ bool decode_node(const Json& value, NodeInspectionView* node,
       !value.value("has_cached_output", Json()).is_boolean() ||
       !value.contains("source_label") || !value.contains("debug") ||
       !value.contains("space")) {
-    *message = "node snapshot has invalid required fields";
+    if (message != nullptr) {
+      *message = "node snapshot has invalid required fields";
+    }
     return false;
   }
 
   NodeInspectionView decoded;
-  if (!decode_integer(value["id"], &decoded.id.value)) {
+  if (!decode_integer(value["id"], &decoded.id.value) || decoded.id.value < 0) {
     *message = "node id is outside the supported integer range";
     return false;
   }
-  try {
-    decoded.name = value["name"].get<std::string>();
-    decoded.type = value["type"].get<std::string>();
-    decoded.subtype = value["subtype"].get<std::string>();
-    decoded.parameters =
-        value["parameters"].get<std::map<std::string, std::string>>();
-    decoded.has_cached_output = value["has_cached_output"].get<bool>();
-  } catch (const Json::exception&) {
-    *message = "node snapshot contains an out-of-range or non-string value";
+  if (!decode_bounded_string(value["name"], kShortTextMaxBytes,
+                             &decoded.name) ||
+      !decode_bounded_string(value["type"], kShortTextMaxBytes,
+                             &decoded.type) ||
+      !decode_bounded_string(value["subtype"], kShortTextMaxBytes,
+                             &decoded.subtype) ||
+      value["parameters"].size() > kGeneralPageMaxEntries) {
+    *message = "node snapshot contains an invalid or over-limit label";
     return false;
   }
+  for (auto parameter = value["parameters"].begin();
+       parameter != value["parameters"].end(); ++parameter) {
+    if (parameter.key().size() > kShortTextMaxBytes ||
+        !valid_utf8(parameter.key())) {
+      *message = "node parameter key exceeds the version 1 bound";
+      return false;
+    }
+    std::string parameter_value;
+    if (!decode_bounded_string(parameter.value(), kLargeTextMaxBytes,
+                               &parameter_value)) {
+      *message = "node parameter value exceeds the version 1 bound";
+      return false;
+    }
+    decoded.parameters.emplace(parameter.key(), std::move(parameter_value));
+  }
+  decoded.has_cached_output = value["has_cached_output"].get<bool>();
 
   if (value["source_label"].is_string()) {
-    decoded.source_label = value["source_label"].get<std::string>();
+    std::string source_label;
+    if (!decode_bounded_string(value["source_label"], kLargeTextMaxBytes,
+                               &source_label)) {
+      *message = "node source_label exceeds the version 1 bound";
+      return false;
+    }
+    decoded.source_label = std::move(source_label);
   } else if (!value["source_label"].is_null()) {
     *message = "node source_label must be string or null";
     return false;
@@ -558,6 +1434,11 @@ bool decode_node(const Json& value, NodeInspectionView* node,
 /** @copydoc encode_graph */
 Json encode_graph(const IpcSessionId& session_id,
                   const GraphInspectionView& graph) {
+  if (!valid_opaque_id(session_id.value)) {
+    throw std::invalid_argument("graph snapshot has an invalid opaque id");
+  }
+  require_bounded_entries(graph.nodes.size(), kGeneralPageMaxEntries,
+                          "graph.nodes");
   Json nodes = Json::array();
   for (const NodeInspectionView& node : graph.nodes) {
     nodes.push_back(encode_node(node));
@@ -568,13 +1449,21 @@ Json encode_graph(const IpcSessionId& session_id,
 /** @copydoc decode_graph */
 bool decode_graph(const Json& value, GraphInspectionView* graph,
                   std::string* message) {
-  if (!value.is_object() || !value.value("session_id", Json()).is_string() ||
+  if (graph == nullptr || message == nullptr || !value.is_object() ||
+      !value.value("session_id", Json()).is_string() ||
       !value.value("nodes", Json()).is_array()) {
-    *message = "graph snapshot requires session_id and nodes";
+    if (message != nullptr) {
+      *message = "graph snapshot requires session_id and nodes";
+    }
     return false;
   }
   GraphInspectionView decoded;
-  decoded.session.value = value["session_id"].get<std::string>();
+  if (!decode_opaque_id(value["session_id"], &decoded.session.value) ||
+      !valid_bounded_array(value["nodes"], kGeneralPageMaxEntries)) {
+    *message = "graph snapshot identity or node page is invalid";
+    return false;
+  }
+  decoded.nodes.reserve(value["nodes"].size());
   for (const Json& node_json : value["nodes"]) {
     NodeInspectionView node;
     if (!decode_node(node_json, &node, message)) {
@@ -589,6 +1478,28 @@ bool decode_graph(const Json& value, GraphInspectionView* graph,
 /** @copydoc encode_dependency_tree */
 Json encode_dependency_tree(const IpcSessionId& session_id,
                             const HostDependencyTreeSnapshot& tree) {
+  if (!valid_opaque_id(session_id.value)) {
+    throw std::invalid_argument(
+        "dependency tree has an invalid opaque session id");
+  }
+  require_bounded_entries(tree.root_nodes.size(), kGeneralPageMaxEntries,
+                          "dependency_tree.root_node_ids");
+  require_bounded_entries(tree.entries.size(), kGeneralPageMaxEntries,
+                          "dependency_tree.entries");
+  if ((tree.start_node && tree.start_node->value < 0) ||
+      std::any_of(tree.root_nodes.begin(), tree.root_nodes.end(),
+                  [](NodeId node) { return node.value < 0; }) ||
+      std::any_of(tree.entries.begin(), tree.entries.end(),
+                  [](const HostDependencyTreeEntry& entry) {
+                    return entry.depth < 0;
+                  })) {
+    throw std::invalid_argument(
+        "dependency tree contains a negative node id or depth");
+  }
+  Json scope;
+  if (!encode_enum(tree.scope, &scope)) {
+    throw std::invalid_argument("dependency-tree scope has no version 1 label");
+  }
   Json roots = Json::array();
   for (NodeId node : tree.root_nodes) {
     roots.push_back(node.value);
@@ -604,9 +1515,7 @@ Json encode_dependency_tree(const IpcSessionId& session_id,
              {"cycle", entry.cycle}});
   }
   return Json{{"session_id", session_id.value},
-              {"scope", tree.scope == HostDependencyTreeScope::EndingNodes
-                            ? "ending_nodes"
-                            : "start_node"},
+              {"scope", std::move(scope)},
               {"start_node_id",
                tree.start_node ? Json(tree.start_node->value) : Json(nullptr)},
               {"graph_empty", tree.graph_empty},
@@ -619,23 +1528,29 @@ Json encode_dependency_tree(const IpcSessionId& session_id,
 /** @copydoc decode_dependency_tree */
 bool decode_dependency_tree(const Json& value, HostDependencyTreeSnapshot* tree,
                             std::string* message) {
-  if (!value.is_object() || !value.value("scope", Json()).is_string() ||
+  if (tree == nullptr || message == nullptr || !value.is_object() ||
+      !value.value("session_id", Json()).is_string() ||
+      !value.value("scope", Json()).is_string() ||
       !value.contains("start_node_id") ||
       !value.value("graph_empty", Json()).is_boolean() ||
       !value.value("start_node_found", Json()).is_boolean() ||
       !value.value("no_ending_nodes", Json()).is_boolean() ||
       !value.value("root_node_ids", Json()).is_array() ||
       !value.value("entries", Json()).is_array()) {
-    *message = "dependency tree has invalid required fields";
+    if (message != nullptr) {
+      *message = "dependency tree has invalid required fields";
+    }
+    return false;
+  }
+  std::string session_id;
+  if (!decode_opaque_id(value["session_id"], &session_id) ||
+      !valid_bounded_array(value["root_node_ids"], kGeneralPageMaxEntries) ||
+      !valid_bounded_array(value["entries"], kGeneralPageMaxEntries)) {
+    *message = "dependency tree identity or arrays exceed version 1 bounds";
     return false;
   }
   HostDependencyTreeSnapshot decoded;
-  const std::string scope = value["scope"].get<std::string>();
-  if (scope == "ending_nodes") {
-    decoded.scope = HostDependencyTreeScope::EndingNodes;
-  } else if (scope == "start_node") {
-    decoded.scope = HostDependencyTreeScope::StartNode;
-  } else {
+  if (!decode_enum(value["scope"], &decoded.scope)) {
     *message = "dependency tree has unknown scope";
     return false;
   }
@@ -646,6 +1561,10 @@ bool decode_dependency_tree(const Json& value, HostDependencyTreeSnapshot* tree,
       return false;
     }
     decoded.start_node = NodeId{start_node};
+    if (decoded.start_node->value < 0) {
+      *message = "dependency tree start_node_id must be nonnegative";
+      return false;
+    }
   } else if (!value["start_node_id"].is_null()) {
     *message = "dependency tree start_node_id must be integer or null";
     return false;
@@ -661,6 +1580,10 @@ bool decode_dependency_tree(const Json& value, HostDependencyTreeSnapshot* tree,
     }
     if (!decode_integer(root, &root_node)) {
       *message = "dependency tree root id is out of range";
+      return false;
+    }
+    if (root_node < 0) {
+      *message = "dependency tree root id must be nonnegative";
       return false;
     }
     decoded.root_nodes.push_back(NodeId{root_node});
