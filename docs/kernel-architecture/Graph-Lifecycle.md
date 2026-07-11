@@ -119,8 +119,10 @@ internal `Kernel` and `InteractionService` failure diagnostics into that public
 surface. Frontends neither call those internal facades nor infer failure from a
 partially changed graph.
 
-In daemon mode, version 1 maps the same `OperationStatus` into the `graph`
-error domain with explicit `GraphErrc` number/name pairs. Framing, envelope,
-and parameter errors remain in the `protocol` domain; local socket failures
-remain `IpcErrorDomain::Transport`. Diagnostic text is not a branching
-contract, and no transport failure is rewritten as graph IO.
+In daemon mode, the same `OperationStatus` preserves its domain-complete
+`OperationErrorDomain`, signed code, stable name, and diagnostic message.
+Host failures use the `graph` domain with explicit `GraphErrc` number/name
+pairs. Framing, envelope, and parameter errors remain in the `protocol`
+domain; local socket failures remain `OperationErrorDomain::Transport`.
+Diagnostic text is not a branching contract, and no transport failure is
+rewritten as graph IO.

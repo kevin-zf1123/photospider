@@ -103,8 +103,8 @@ class SessionRegistry {
    *       insertions are removed before the exception propagates so the caller
    *       can close Host and rollback.
    */
-  IpcStatus commit(const IpcSessionId& session_id,
-                   const GraphSessionId& host_session);
+  OperationStatus commit(const IpcSessionId& session_id,
+                         const GraphSessionId& host_session);
 
   /**
    * @brief Removes one uncommitted loading reservation.

@@ -189,7 +189,7 @@ JsonParseResult parse_json(const std::string& payload);
  * @return Status with `ok=true`, domain `None`, zero code, and empty text.
  * @throws Nothing.
  */
-IpcStatus ok_status();
+OperationStatus ok_status();
 
 /**
  * @brief Creates one owned failure status.
@@ -201,19 +201,22 @@ IpcStatus ok_status();
  * @return Owned failure status.
  * @throws std::bad_alloc if strings cannot be copied.
  */
-IpcStatus failure_status(IpcErrorDomain domain, std::int32_t code,
-                         std::string name, std::string message);
+OperationStatus failure_status(OperationErrorDomain domain, std::int32_t code,
+                               std::string name, std::string message);
 
 /**
- * @brief Maps every current graph error explicitly into an IPC status.
+ * @brief Canonicalizes one host graph operation status for IPC.
  *
- * @param status Host operation status to map.
- * @return Success or graph-domain status with stable numeric/name mapping.
+ * @param status Host operation status to canonicalize.
+ * @return Canonical success when `status.ok` is true; a graph-domain failure
+ *         with the stable name for a recognized `GraphErrc` code; otherwise an
+ *         unchanged copy of `status`.
  * @throws std::bad_alloc if diagnostics cannot be copied.
- * @note The implementation uses a complete switch and does not rely on enum
- *       contiguity for future values.
+ * @note Recognized graph failures preserve their numeric code and message but
+ *       replace any supplied name with the stable `GraphErrc` name. Non-graph
+ *       failures and unrecognized graph codes are preserved verbatim.
  */
-IpcStatus graph_status(const OperationStatus& status);
+OperationStatus graph_status(const OperationStatus& status);
 
 /**
  * @brief Encodes a failure status into the exact version 1 error schema.
@@ -222,7 +225,7 @@ IpcStatus graph_status(const OperationStatus& status);
  * @return Object containing domain, code, name, and message.
  * @throws std::bad_alloc if JSON storage cannot be allocated.
  */
-Json encode_error(const IpcStatus& status);
+Json encode_error(const OperationStatus& status);
 
 /**
  * @brief Decodes and validates the exact required version 1 error fields.
@@ -234,7 +237,8 @@ Json encode_error(const IpcStatus& status);
  * @throws std::bad_alloc if copied strings cannot be allocated.
  * @note Unknown future numeric codes and names are preserved verbatim.
  */
-bool decode_error(const Json& value, IpcStatus* status, std::string* message);
+bool decode_error(const Json& value, OperationStatus* status,
+                  std::string* message);
 
 /**
  * @brief Serializes one bounded version 1 success response.

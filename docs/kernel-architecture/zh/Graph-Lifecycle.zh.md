@@ -90,7 +90,8 @@ Clear 应重置：
 embedded 模式下，Host adapter 会把内部 `Kernel` 与 `InteractionService` 的失败诊断映射到该
 public surface。Frontend 既不会调用这些内部 facade，也不需要从部分变化的图中推断失败。
 
-在 daemon mode 下，version 1 会把同一 `OperationStatus` 映射到 `graph` error domain，并使用
-显式 `GraphErrc` number/name pair。Framing、envelope 与 parameter error 保持在 `protocol`
-domain；本地 socket failure 保持为 `IpcErrorDomain::Transport`。Diagnostic text 不是 branching
+在 daemon mode 下，同一 `OperationStatus` 会保留完整 domain 的 `OperationErrorDomain`、
+signed code、stable name 与 diagnostic message。Host failure 使用 `graph` domain 与显式
+`GraphErrc` number/name pair。Framing、envelope 与 parameter error 保持在 `protocol` domain；
+本地 socket failure 保持为 `OperationErrorDomain::Transport`。Diagnostic text 不是 branching
 contract，transport failure 也不会被改写为 graph IO。

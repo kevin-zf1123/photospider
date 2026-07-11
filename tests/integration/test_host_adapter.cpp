@@ -681,7 +681,10 @@ TEST(EmbeddedHostAdapter,
   auto missing_description =
       host->scheduler_description("missing_scheduler_type");
   EXPECT_FALSE(missing_description.status.ok);
-  EXPECT_EQ(missing_description.status.code, GraphErrc::NotFound);
+  EXPECT_EQ(missing_description.status.domain, OperationErrorDomain::Graph);
+  EXPECT_EQ(checked_graph_error_code(missing_description.status),
+            GraphErrc::NotFound);
+  EXPECT_EQ(missing_description.status.name, "not_found");
 
   auto plugins = host->plugins_load_report({});
   ASSERT_TRUE(plugins.status.ok) << plugins.status.message;
@@ -801,7 +804,7 @@ TEST(EmbeddedHostAdapter, ComputePlanningSnapshotsUsePublicValues) {
 
   auto missing = host->compute_planning_snapshot(GraphSessionId{"missing"});
   EXPECT_FALSE(missing.status.ok);
-  EXPECT_EQ(missing.status.code, GraphErrc::NotFound);
+  EXPECT_EQ(checked_graph_error_code(missing.status), GraphErrc::NotFound);
 }
 
 TEST(EmbeddedHostAdapter, AsyncComputeCanFinishAfterCloseGraphRequest) {
@@ -826,7 +829,8 @@ TEST(EmbeddedHostAdapter, AsyncComputeCanFinishAfterCloseGraphRequest) {
 
   auto ids_after_close = host->list_node_ids(session);
   EXPECT_FALSE(ids_after_close.status.ok);
-  EXPECT_EQ(ids_after_close.status.code, GraphErrc::NotFound);
+  EXPECT_EQ(checked_graph_error_code(ids_after_close.status),
+            GraphErrc::NotFound);
 }
 
 TEST(EmbeddedHostAdapter, AsyncComputeRejectsNewWorkWhileCloseIsWaiting) {
@@ -852,7 +856,8 @@ TEST(EmbeddedHostAdapter, AsyncComputeRejectsNewWorkWhileCloseIsWaiting) {
 
   auto rejected_async = host->compute_async(request);
   EXPECT_FALSE(rejected_async.status.ok);
-  EXPECT_EQ(rejected_async.status.code, GraphErrc::NotFound);
+  EXPECT_EQ(checked_graph_error_code(rejected_async.status),
+            GraphErrc::NotFound);
 
   OperationStatus initial_status = initial_async.value.get();
   EXPECT_TRUE(initial_status.ok) << initial_status.message;
@@ -886,7 +891,7 @@ TEST(EmbeddedHostAdapter, AsyncComputeFailureStatusSurvivesCloseGraph) {
 
   OperationStatus async_status = async_compute.value.get();
   EXPECT_FALSE(async_status.ok);
-  EXPECT_EQ(async_status.code, GraphErrc::NoOperation);
+  EXPECT_EQ(checked_graph_error_code(async_status), GraphErrc::NoOperation);
   EXPECT_NE(async_status.message.find("No op"), std::string::npos);
 
   auto closed_error = host->last_error(missing_op_load.session);
@@ -944,10 +949,11 @@ TEST(EmbeddedHostAdapter, ComputeReturnsNotFoundForMissingSession) {
       make_compute_request(GraphSessionId{"missing_compute_graph"});
   auto missing = host->compute(missing_request);
   EXPECT_FALSE(missing.status.ok);
-  EXPECT_EQ(missing.status.code, GraphErrc::NotFound);
+  EXPECT_EQ(checked_graph_error_code(missing.status), GraphErrc::NotFound);
   auto missing_image = host->compute_and_get_image(missing_request);
   EXPECT_FALSE(missing_image.status.ok);
-  EXPECT_EQ(missing_image.status.code, GraphErrc::NotFound);
+  EXPECT_EQ(checked_graph_error_code(missing_image.status),
+            GraphErrc::NotFound);
 
   const GraphSessionId session =
       load_test_graph(*host, temp.root(), "closed_compute_graph");
@@ -960,10 +966,10 @@ TEST(EmbeddedHostAdapter, ComputeReturnsNotFoundForMissingSession) {
 
   auto closed = host->compute(closed_request);
   EXPECT_FALSE(closed.status.ok);
-  EXPECT_EQ(closed.status.code, GraphErrc::NotFound);
+  EXPECT_EQ(checked_graph_error_code(closed.status), GraphErrc::NotFound);
   auto closed_image = host->compute_and_get_image(closed_request);
   EXPECT_FALSE(closed_image.status.ok);
-  EXPECT_EQ(closed_image.status.code, GraphErrc::NotFound);
+  EXPECT_EQ(checked_graph_error_code(closed_image.status), GraphErrc::NotFound);
 }
 
 TEST(EmbeddedHostAdapter, CloseGraphClearsStaleLastErrorBeforeImageCompute) {
@@ -979,11 +985,12 @@ TEST(EmbeddedHostAdapter, CloseGraphClearsStaleLastErrorBeforeImageCompute) {
 
   auto missing_node_image = host->compute_and_get_image(missing_node_request);
   ASSERT_FALSE(missing_node_image.status.ok);
-  ASSERT_EQ(missing_node_image.status.code, GraphErrc::NotFound);
+  ASSERT_EQ(checked_graph_error_code(missing_node_image.status),
+            GraphErrc::NotFound);
 
   auto stale_error = host->last_error(session);
   ASSERT_FALSE(stale_error.ok);
-  ASSERT_EQ(stale_error.code, GraphErrc::NotFound);
+  ASSERT_EQ(checked_graph_error_code(stale_error), GraphErrc::NotFound);
 
   auto close = host->close_graph(session);
   ASSERT_TRUE(close.status.ok) << close.status.message;
@@ -994,7 +1001,7 @@ TEST(EmbeddedHostAdapter, CloseGraphClearsStaleLastErrorBeforeImageCompute) {
   auto closed_image =
       host->compute_and_get_image(make_compute_request(session));
   EXPECT_FALSE(closed_image.status.ok);
-  EXPECT_EQ(closed_image.status.code, GraphErrc::NotFound);
+  EXPECT_EQ(checked_graph_error_code(closed_image.status), GraphErrc::NotFound);
 }
 
 TEST(EmbeddedHostAdapter, ComputeImagePreservesBackendFailureStatus) {
@@ -1010,12 +1017,13 @@ TEST(EmbeddedHostAdapter, ComputeImagePreservesBackendFailureStatus) {
 
   auto missing_node_image = host->compute_and_get_image(missing_node_request);
   EXPECT_FALSE(missing_node_image.status.ok);
-  EXPECT_EQ(missing_node_image.status.code, GraphErrc::NotFound);
+  EXPECT_EQ(checked_graph_error_code(missing_node_image.status),
+            GraphErrc::NotFound);
   EXPECT_FALSE(missing_node_image.status.message.empty());
 
   auto missing_node_error = host->last_error(session);
   EXPECT_FALSE(missing_node_error.ok);
-  EXPECT_EQ(missing_node_error.code, GraphErrc::NotFound);
+  EXPECT_EQ(checked_graph_error_code(missing_node_error), GraphErrc::NotFound);
   EXPECT_FALSE(missing_node_error.message.empty());
 
   auto recovered_image =
@@ -1037,12 +1045,13 @@ TEST(EmbeddedHostAdapter, ComputeImagePreservesBackendFailureStatus) {
   auto missing_op_image = host->compute_and_get_image(
       make_compute_request(missing_op_load.session));
   EXPECT_FALSE(missing_op_image.status.ok);
-  EXPECT_EQ(missing_op_image.status.code, GraphErrc::NoOperation);
+  EXPECT_EQ(checked_graph_error_code(missing_op_image.status),
+            GraphErrc::NoOperation);
   EXPECT_NE(missing_op_image.status.message.find("No op"), std::string::npos);
 
   auto missing_op_error = host->last_error(missing_op_load.session);
   EXPECT_FALSE(missing_op_error.ok);
-  EXPECT_EQ(missing_op_error.code, GraphErrc::NoOperation);
+  EXPECT_EQ(checked_graph_error_code(missing_op_error), GraphErrc::NoOperation);
   EXPECT_NE(missing_op_error.message.find("No op"), std::string::npos);
 }
 
@@ -1058,7 +1067,8 @@ TEST(EmbeddedHostAdapter, ComputeImagePreservesSuccessfulEmptyOutput) {
   missing_node_request.node = NodeId{99};
   auto missing_node_image = host->compute_and_get_image(missing_node_request);
   ASSERT_FALSE(missing_node_image.status.ok);
-  ASSERT_EQ(missing_node_image.status.code, GraphErrc::NotFound);
+  ASSERT_EQ(checked_graph_error_code(missing_node_image.status),
+            GraphErrc::NotFound);
 
   auto empty_image = host->compute_and_get_image(make_compute_request(session));
   ASSERT_TRUE(empty_image.status.ok) << empty_image.status.message;
@@ -1075,7 +1085,7 @@ TEST(EmbeddedHostAdapter, ComputeImagePreservesSuccessfulEmptyOutput) {
   auto closed_image =
       host->compute_and_get_image(make_compute_request(session));
   EXPECT_FALSE(closed_image.status.ok);
-  EXPECT_EQ(closed_image.status.code, GraphErrc::NotFound);
+  EXPECT_EQ(checked_graph_error_code(closed_image.status), GraphErrc::NotFound);
 }
 
 TEST(EmbeddedHostAdapter, ReplaceSchedulerReturnsNotFoundForMissingSession) {
@@ -1088,14 +1098,15 @@ TEST(EmbeddedHostAdapter, ReplaceSchedulerReturnsNotFoundForMissingSession) {
       GraphSessionId{"missing_scheduler_graph"},
       ComputeIntent::GlobalHighPrecision, "serial_debug");
   EXPECT_FALSE(missing.status.ok);
-  EXPECT_EQ(missing.status.code, GraphErrc::NotFound);
+  EXPECT_EQ(checked_graph_error_code(missing.status), GraphErrc::NotFound);
 
   const GraphSessionId session =
       load_test_graph(*host, temp.root(), "closed_scheduler_graph");
   auto invalid_type = host->replace_scheduler(
       session, ComputeIntent::GlobalHighPrecision, "missing_scheduler_type");
   EXPECT_FALSE(invalid_type.status.ok);
-  EXPECT_EQ(invalid_type.status.code, GraphErrc::InvalidParameter);
+  EXPECT_EQ(checked_graph_error_code(invalid_type.status),
+            GraphErrc::InvalidParameter);
 
   auto close = host->close_graph(session);
   ASSERT_TRUE(close.status.ok) << close.status.message;
@@ -1103,7 +1114,7 @@ TEST(EmbeddedHostAdapter, ReplaceSchedulerReturnsNotFoundForMissingSession) {
   auto closed = host->replace_scheduler(
       session, ComputeIntent::GlobalHighPrecision, "serial_debug");
   EXPECT_FALSE(closed.status.ok);
-  EXPECT_EQ(closed.status.code, GraphErrc::NotFound);
+  EXPECT_EQ(checked_graph_error_code(closed.status), GraphErrc::NotFound);
 }
 
 TEST(EmbeddedHostAdapter, ReloadSaveSetNodeAndClearGraphReturnStatuses) {
@@ -1142,13 +1153,14 @@ TEST(EmbeddedHostAdapter, ReloadSaveSetNodeAndClearGraphReturnStatuses) {
   auto missing_reload =
       host->reload_graph(GraphSessionId{"missing_graph"}, reload_path.string());
   EXPECT_FALSE(missing_reload.status.ok);
-  EXPECT_EQ(missing_reload.status.code, GraphErrc::NotFound);
+  EXPECT_EQ(checked_graph_error_code(missing_reload.status),
+            GraphErrc::NotFound);
 
   const auto missing_file_path =
       temp.root() / "source" / "missing_reload_graph.yaml";
   auto io_reload = host->reload_graph(session, missing_file_path.string());
   EXPECT_FALSE(io_reload.status.ok);
-  EXPECT_EQ(io_reload.status.code, GraphErrc::Io);
+  EXPECT_EQ(checked_graph_error_code(io_reload.status), GraphErrc::Io);
 
   auto after_io_reload = host->inspect_node(session, NodeId{1});
   ASSERT_TRUE(after_io_reload.status.ok) << after_io_reload.status.message;
@@ -1162,7 +1174,8 @@ TEST(EmbeddedHostAdapter, ReloadSaveSetNodeAndClearGraphReturnStatuses) {
   }
   auto invalid_reload = host->reload_graph(session, invalid_yaml_path.string());
   EXPECT_FALSE(invalid_reload.status.ok);
-  EXPECT_EQ(invalid_reload.status.code, GraphErrc::InvalidYaml);
+  EXPECT_EQ(checked_graph_error_code(invalid_reload.status),
+            GraphErrc::InvalidYaml);
 
   auto after_invalid_reload = host->inspect_node(session, NodeId{1});
   ASSERT_TRUE(after_invalid_reload.status.ok)
@@ -1215,7 +1228,8 @@ TEST(EmbeddedHostAdapter, RoiProjectionUsesPublicPixelRectValues) {
   auto missing_target =
       host->project_roi(request.session, NodeId{1}, roi, NodeId{99});
   EXPECT_FALSE(missing_target.status.ok);
-  EXPECT_EQ(missing_target.status.code, GraphErrc::InvalidParameter);
+  EXPECT_EQ(checked_graph_error_code(missing_target.status),
+            GraphErrc::InvalidParameter);
 }
 
 TEST(EmbeddedHostAdapter, DirtySnapshotPreservesMonolithicAndEdgeDetails) {
@@ -1353,69 +1367,82 @@ TEST(EmbeddedHostAdapter, DirtySourceFailuresPreserveStatusCodes) {
       host->begin_dirty_source(GraphSessionId{"missing_dirty_session"},
                                NodeId{1}, DirtyDomain::HighPrecision, roi);
   EXPECT_FALSE(missing_session_begin.status.ok);
-  EXPECT_EQ(missing_session_begin.status.code, GraphErrc::NotFound);
+  EXPECT_EQ(checked_graph_error_code(missing_session_begin.status),
+            GraphErrc::NotFound);
 
   auto missing_session_update =
       host->update_dirty_source(GraphSessionId{"missing_dirty_session"},
                                 NodeId{1}, DirtyDomain::HighPrecision, roi);
   EXPECT_FALSE(missing_session_update.status.ok);
-  EXPECT_EQ(missing_session_update.status.code, GraphErrc::NotFound);
+  EXPECT_EQ(checked_graph_error_code(missing_session_update.status),
+            GraphErrc::NotFound);
 
   auto missing_session_end =
       host->end_dirty_source(GraphSessionId{"missing_dirty_session"}, NodeId{1},
                              DirtyDomain::HighPrecision);
   EXPECT_FALSE(missing_session_end.status.ok);
-  EXPECT_EQ(missing_session_end.status.code, GraphErrc::NotFound);
+  EXPECT_EQ(checked_graph_error_code(missing_session_end.status),
+            GraphErrc::NotFound);
 
   auto missing_node_begin = host->begin_dirty_source(
       session, NodeId{99}, DirtyDomain::HighPrecision, roi);
   EXPECT_FALSE(missing_node_begin.status.ok);
-  EXPECT_EQ(missing_node_begin.status.code, GraphErrc::NotFound);
+  EXPECT_EQ(checked_graph_error_code(missing_node_begin.status),
+            GraphErrc::NotFound);
   EXPECT_NE(missing_node_begin.status.message.find("Dirty source node 99"),
             std::string::npos);
   auto missing_node_begin_error = host->last_error(session);
   EXPECT_FALSE(missing_node_begin_error.ok);
-  EXPECT_EQ(missing_node_begin_error.code, GraphErrc::NotFound);
+  EXPECT_EQ(checked_graph_error_code(missing_node_begin_error),
+            GraphErrc::NotFound);
 
   auto missing_node_update = host->update_dirty_source(
       session, NodeId{99}, DirtyDomain::HighPrecision, roi);
   EXPECT_FALSE(missing_node_update.status.ok);
-  EXPECT_EQ(missing_node_update.status.code, GraphErrc::NotFound);
+  EXPECT_EQ(checked_graph_error_code(missing_node_update.status),
+            GraphErrc::NotFound);
   EXPECT_NE(missing_node_update.status.message.find("Dirty source node 99"),
             std::string::npos);
   auto missing_node_update_error = host->last_error(session);
   EXPECT_FALSE(missing_node_update_error.ok);
-  EXPECT_EQ(missing_node_update_error.code, GraphErrc::NotFound);
+  EXPECT_EQ(checked_graph_error_code(missing_node_update_error),
+            GraphErrc::NotFound);
 
   auto missing_node_end =
       host->end_dirty_source(session, NodeId{99}, DirtyDomain::HighPrecision);
   EXPECT_FALSE(missing_node_end.status.ok);
-  EXPECT_EQ(missing_node_end.status.code, GraphErrc::NotFound);
+  EXPECT_EQ(checked_graph_error_code(missing_node_end.status),
+            GraphErrc::NotFound);
   EXPECT_NE(missing_node_end.status.message.find("Dirty source node 99"),
             std::string::npos);
   auto missing_node_end_error = host->last_error(session);
   EXPECT_FALSE(missing_node_end_error.ok);
-  EXPECT_EQ(missing_node_end_error.code, GraphErrc::NotFound);
+  EXPECT_EQ(checked_graph_error_code(missing_node_end_error),
+            GraphErrc::NotFound);
 
   auto invalid_begin = host->begin_dirty_source(
       session, NodeId{1}, DirtyDomain::HighPrecision, empty_roi);
   EXPECT_FALSE(invalid_begin.status.ok);
-  EXPECT_EQ(invalid_begin.status.code, GraphErrc::InvalidParameter);
+  EXPECT_EQ(checked_graph_error_code(invalid_begin.status),
+            GraphErrc::InvalidParameter);
   EXPECT_NE(invalid_begin.status.message.find("Dirty source ROI is empty"),
             std::string::npos);
   auto invalid_begin_error = host->last_error(session);
   EXPECT_FALSE(invalid_begin_error.ok);
-  EXPECT_EQ(invalid_begin_error.code, GraphErrc::InvalidParameter);
+  EXPECT_EQ(checked_graph_error_code(invalid_begin_error),
+            GraphErrc::InvalidParameter);
 
   auto invalid_update = host->update_dirty_source(
       session, NodeId{1}, DirtyDomain::HighPrecision, empty_roi);
   EXPECT_FALSE(invalid_update.status.ok);
-  EXPECT_EQ(invalid_update.status.code, GraphErrc::InvalidParameter);
+  EXPECT_EQ(checked_graph_error_code(invalid_update.status),
+            GraphErrc::InvalidParameter);
   EXPECT_NE(invalid_update.status.message.find("Dirty source ROI is empty"),
             std::string::npos);
   auto invalid_update_error = host->last_error(session);
   EXPECT_FALSE(invalid_update_error.ok);
-  EXPECT_EQ(invalid_update_error.code, GraphErrc::InvalidParameter);
+  EXPECT_EQ(checked_graph_error_code(invalid_update_error),
+            GraphErrc::InvalidParameter);
 }
 
 TEST(EmbeddedHostAdapter, SchedulerScanLoadAndPluginUnloadUseStatusValues) {
@@ -1433,7 +1460,7 @@ TEST(EmbeddedHostAdapter, SchedulerScanLoadAndPluginUnloadUseStatusValues) {
   auto bad_load =
       host->scheduler_load((temp.root() / "missing_scheduler.so").string());
   EXPECT_FALSE(bad_load.status.ok);
-  EXPECT_EQ(bad_load.status.code, GraphErrc::Io);
+  EXPECT_EQ(checked_graph_error_code(bad_load.status), GraphErrc::Io);
 
   auto loaded = host->scheduler_loaded_plugins();
   ASSERT_TRUE(loaded.status.ok) << loaded.status.message;

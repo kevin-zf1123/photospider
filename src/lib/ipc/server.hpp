@@ -101,7 +101,7 @@ class Server {
    * @note Shutdown closes the listener, wakes and joins clients, closes Host
    *       sessions, then removes only the socket inode created by this run.
    */
-  IpcStatus run(const ServerOptions& options, int stop_fd);
+  OperationStatus run(const ServerOptions& options, int stop_fd);
 
  private:
   /** @brief Opaque listener/worker/socket-lifecycle implementation. */

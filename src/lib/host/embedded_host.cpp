@@ -359,8 +359,8 @@ class AsyncComputeCompletionGuard {
  *
  * @return Status with ok=true and no diagnostic text.
  * @throws Nothing.
- * @note Success uses GraphErrc::Unknown by convention because callers should
- *       branch on ok first.
+ * @note Success uses the canonical None/zero/empty representation shared by
+ *       embedded and IPC products.
  */
 OperationStatus success_status() {
   return OperationStatus{};
@@ -371,14 +371,17 @@ OperationStatus success_status() {
  *
  * @param code Stable error code for the failure.
  * @param message Human-readable diagnostic text.
- * @return Status with ok=false.
+ * @return Graph-domain status with ok=false, the exact numeric code, and its
+ *         stable lowercase name.
  * @throws std::bad_alloc if copying message allocates and fails.
  * @note The message is diagnostic and should not be parsed for control flow.
  */
 OperationStatus failure_status(GraphErrc code, std::string message) {
   OperationStatus status;
   status.ok = false;
-  status.code = code;
+  status.domain = OperationErrorDomain::Graph;
+  status.code = static_cast<std::int32_t>(code);
+  status.name = graph_error_stable_name(code);
   status.message = std::move(message);
   return status;
 }

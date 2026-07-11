@@ -23,7 +23,7 @@ namespace {
  */
 struct RawCallResult {
   /** @brief Transport/protocol/remote completion status. */
-  IpcStatus status;
+  OperationStatus status;
 
   /** @brief Owned successful result object. */
   internal::Json result;
@@ -36,8 +36,8 @@ struct RawCallResult {
  * @return Protocol-domain invalid-request failure.
  * @throws std::bad_alloc if diagnostic allocation fails.
  */
-IpcStatus invalid_response(std::string message) {
-  return internal::failure_status(IpcErrorDomain::Protocol,
+OperationStatus invalid_response(std::string message) {
+  return internal::failure_status(OperationErrorDomain::Protocol,
                                   internal::kInvalidRequestCode,
                                   "invalid_request", std::move(message));
 }
@@ -66,10 +66,10 @@ bool valid_opaque_id(const std::string& value) noexcept {
  * @tparam Value Default-constructible public result type.
  * @param status Failure status to move into the result.
  * @return Failed typed result with default payload.
- * @throws Whatever moving `IpcStatus` or constructing `Value` throws.
+ * @throws Whatever moving `OperationStatus` or constructing `Value` throws.
  */
 template <typename Value>
-IpcResult<Value> failed_result(IpcStatus status) {
+IpcResult<Value> failed_result(OperationStatus status) {
   return {std::move(status), {}};
 }
 
@@ -91,13 +91,13 @@ class Client::Impl {
    * @throws std::bad_alloc if path or diagnostic storage cannot be allocated.
    * @note Any current connection is closed before the one-shot connect.
    */
-  IpcStatus connect(const std::string& socket_path) {
+  OperationStatus connect(const std::string& socket_path) {
     socket_.reset();
     std::string message;
     internal::UniqueFd connected =
         internal::connect_unix_socket(socket_path, &message);
     if (!connected) {
-      return internal::failure_status(IpcErrorDomain::Transport, 1,
+      return internal::failure_status(OperationErrorDomain::Transport, 1,
                                       "connect_failed", std::move(message));
     }
     socket_ = std::move(connected);
@@ -134,7 +134,7 @@ class Client::Impl {
    */
   RawCallResult call(const std::string& method, const internal::Json& params) {
     if (!socket_) {
-      return {internal::failure_status(IpcErrorDomain::Transport, 2,
+      return {internal::failure_status(OperationErrorDomain::Transport, 2,
                                        "not_connected",
                                        "IPC client is not connected"),
               {}};
@@ -148,14 +148,14 @@ class Client::Impl {
     try {
       payload = request.dump();
     } catch (const internal::Json::type_error& error) {
-      return {internal::failure_status(IpcErrorDomain::Protocol,
+      return {internal::failure_status(OperationErrorDomain::Protocol,
                                        internal::kInvalidParamsCode,
                                        "invalid_params", error.what()),
               {}};
     }
     if (payload.empty() || payload.size() > kMaximumFramePayloadBytes) {
       return {internal::failure_status(
-                  IpcErrorDomain::Protocol, internal::kInvalidParamsCode,
+                  OperationErrorDomain::Protocol, internal::kInvalidParamsCode,
                   "invalid_params",
                   "serialized request exceeds the version 1 frame limit"),
               {}};
@@ -164,7 +164,7 @@ class Client::Impl {
         internal::write_frame(socket_.get(), payload);
     if (!written.ok) {
       socket_.reset();
-      return {internal::failure_status(IpcErrorDomain::Transport, 3,
+      return {internal::failure_status(OperationErrorDomain::Transport, 3,
                                        "write_failed", written.message),
               {}};
     }
@@ -178,7 +178,7 @@ class Client::Impl {
                                       ? "daemon closed the IPC connection"
                                       : frame.message;
       return {internal::failure_status(
-                  IpcErrorDomain::Transport, 4,
+                  OperationErrorDomain::Transport, 4,
                   frame.state == internal::FrameReadState::Truncated
                       ? "truncated_frame"
                       : "read_failed",
@@ -191,7 +191,7 @@ class Client::Impl {
     if (!parsed.ok) {
       socket_.reset();
       return {internal::failure_status(
-                  IpcErrorDomain::Protocol,
+                  OperationErrorDomain::Protocol,
                   parsed.duplicate_key ? internal::kInvalidRequestCode
                                        : internal::kParseErrorCode,
                   parsed.duplicate_key ? "invalid_request" : "parse_error",
@@ -226,7 +226,7 @@ class Client::Impl {
               {}};
     }
     if (has_error) {
-      IpcStatus status;
+      OperationStatus status;
       std::string message;
       if (!internal::decode_error(response["error"], &status, &message)) {
         socket_.reset();
@@ -258,7 +258,7 @@ Client::Client(Client&& other) noexcept = default;
 Client& Client::operator=(Client&& other) noexcept = default;
 
 /** @copydoc Client::connect */
-IpcStatus Client::connect(const std::string& socket_path) {
+OperationStatus Client::connect(const std::string& socket_path) {
   if (!impl_) {
     impl_ = std::make_unique<Impl>();
   }
@@ -280,9 +280,9 @@ bool Client::connected() const noexcept {
 /** @copydoc Client::ping */
 IpcResult<DaemonPing> Client::ping() {
   if (!impl_) {
-    return failed_result<DaemonPing>(
-        internal::failure_status(IpcErrorDomain::Transport, 2, "not_connected",
-                                 "IPC client is not connected"));
+    return failed_result<DaemonPing>(internal::failure_status(
+        OperationErrorDomain::Transport, 2, "not_connected",
+        "IPC client is not connected"));
   }
   RawCallResult call = impl_->call("daemon.ping", internal::Json::object());
   if (!call.status.ok) {
@@ -306,9 +306,9 @@ IpcResult<DaemonPing> Client::ping() {
 /** @copydoc Client::version */
 IpcResult<DaemonVersion> Client::version() {
   if (!impl_) {
-    return failed_result<DaemonVersion>(
-        internal::failure_status(IpcErrorDomain::Transport, 2, "not_connected",
-                                 "IPC client is not connected"));
+    return failed_result<DaemonVersion>(internal::failure_status(
+        OperationErrorDomain::Transport, 2, "not_connected",
+        "IPC client is not connected"));
   }
   RawCallResult call = impl_->call("daemon.version", internal::Json::object());
   if (!call.status.ok) {
@@ -356,9 +356,9 @@ IpcResult<DaemonVersion> Client::version() {
 IpcResult<GraphSessionSummary> Client::load_graph(
     const GraphLoadRequest& request) {
   if (!impl_) {
-    return failed_result<GraphSessionSummary>(
-        internal::failure_status(IpcErrorDomain::Transport, 2, "not_connected",
-                                 "IPC client is not connected"));
+    return failed_result<GraphSessionSummary>(internal::failure_status(
+        OperationErrorDomain::Transport, 2, "not_connected",
+        "IPC client is not connected"));
   }
   internal::Json params{{"session_name", request.session.value},
                         {"root_dir", request.root_dir}};
@@ -392,9 +392,9 @@ IpcResult<GraphSessionSummary> Client::load_graph(
 }
 
 /** @copydoc Client::close_graph */
-IpcVoidResult Client::close_graph(const IpcSessionId& session_id) {
+VoidResult Client::close_graph(const IpcSessionId& session_id) {
   if (!impl_) {
-    return {internal::failure_status(IpcErrorDomain::Transport, 2,
+    return {internal::failure_status(OperationErrorDomain::Transport, 2,
                                      "not_connected",
                                      "IPC client is not connected")};
   }
@@ -414,7 +414,8 @@ IpcVoidResult Client::close_graph(const IpcSessionId& session_id) {
 IpcResult<std::vector<GraphSessionSummary>> Client::list_graphs() {
   if (!impl_) {
     return failed_result<std::vector<GraphSessionSummary>>(
-        internal::failure_status(IpcErrorDomain::Transport, 2, "not_connected",
+        internal::failure_status(OperationErrorDomain::Transport, 2,
+                                 "not_connected",
                                  "IPC client is not connected"));
   }
   RawCallResult call = impl_->call("graph.list", internal::Json::object());
@@ -459,9 +460,9 @@ IpcResult<std::vector<GraphSessionSummary>> Client::list_graphs() {
 IpcResult<GraphInspectionView> Client::inspect_graph(
     const IpcSessionId& session_id) {
   if (!impl_) {
-    return failed_result<GraphInspectionView>(
-        internal::failure_status(IpcErrorDomain::Transport, 2, "not_connected",
-                                 "IPC client is not connected"));
+    return failed_result<GraphInspectionView>(internal::failure_status(
+        OperationErrorDomain::Transport, 2, "not_connected",
+        "IPC client is not connected"));
   }
   RawCallResult call = impl_->call(
       "inspect.graph", internal::Json{{"session_id", session_id.value}});
@@ -485,9 +486,9 @@ IpcResult<GraphInspectionView> Client::inspect_graph(
 IpcResult<NodeInspectionView> Client::inspect_node(
     const IpcSessionId& session_id, NodeId node) {
   if (!impl_) {
-    return failed_result<NodeInspectionView>(
-        internal::failure_status(IpcErrorDomain::Transport, 2, "not_connected",
-                                 "IPC client is not connected"));
+    return failed_result<NodeInspectionView>(internal::failure_status(
+        OperationErrorDomain::Transport, 2, "not_connected",
+        "IPC client is not connected"));
   }
   RawCallResult call = impl_->call(
       "inspect.node", internal::Json{{"session_id", session_id.value},
@@ -515,9 +516,9 @@ IpcResult<HostDependencyTreeSnapshot> Client::inspect_dependency_tree(
     const IpcSessionId& session_id, std::optional<NodeId> node,
     bool include_metadata) {
   if (!impl_) {
-    return failed_result<HostDependencyTreeSnapshot>(
-        internal::failure_status(IpcErrorDomain::Transport, 2, "not_connected",
-                                 "IPC client is not connected"));
+    return failed_result<HostDependencyTreeSnapshot>(internal::failure_status(
+        OperationErrorDomain::Transport, 2, "not_connected",
+        "IPC client is not connected"));
   }
   internal::Json params{{"session_id", session_id.value},
                         {"include_metadata", include_metadata}};

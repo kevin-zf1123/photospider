@@ -891,13 +891,13 @@ TEST(IpcDaemonGraphLifecycle, PersistsAcrossClientsAndInspectsCopiedSnapshots) {
   const IpcSessionId missing{"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"};
   const auto missing_graph = second.inspect_graph(missing);
   EXPECT_FALSE(missing_graph.status.ok);
-  EXPECT_EQ(missing_graph.status.domain, IpcErrorDomain::Graph);
+  EXPECT_EQ(missing_graph.status.domain, OperationErrorDomain::Graph);
   EXPECT_EQ(missing_graph.status.code,
             static_cast<std::int32_t>(GraphErrc::NotFound));
   const auto missing_node =
       second.inspect_node(loaded.value.session_id, NodeId{999});
   EXPECT_FALSE(missing_node.status.ok);
-  EXPECT_EQ(missing_node.status.domain, IpcErrorDomain::Graph);
+  EXPECT_EQ(missing_node.status.domain, OperationErrorDomain::Graph);
   EXPECT_EQ(missing_node.status.code,
             static_cast<std::int32_t>(GraphErrc::NotFound));
 

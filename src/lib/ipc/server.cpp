@@ -703,7 +703,7 @@ class Server::Impl {
    *         Unix-socket address or another startup invariant fails.
    * @throws std::system_error if a worker thread cannot be created.
    */
-  IpcStatus run(const ServerOptions& options, int stop_fd) {
+  OperationStatus run(const ServerOptions& options, int stop_fd) {
     stop();
     socket_path_ = options.socket_path.empty() ? default_socket_path()
                                                : options.socket_path;
@@ -712,11 +712,11 @@ class Server::Impl {
                                 &message);
     if (!listener_) {
       socket_cleanup_.reset();
-      return failure_status(IpcErrorDomain::Daemon, kInternalErrorCode,
+      return failure_status(OperationErrorDomain::Daemon, kInternalErrorCode,
                             "internal_error", std::move(message));
     }
     running_ = true;
-    IpcStatus outcome = ok_status();
+    OperationStatus outcome = ok_status();
     while (running_) {
       reap_finished_workers();
       pollfd descriptors[2] = {{listener_.get(), POLLIN, 0},
@@ -728,7 +728,7 @@ class Server::Impl {
           continue;
         }
         outcome = failure_status(
-            IpcErrorDomain::Daemon, kInternalErrorCode, "internal_error",
+            OperationErrorDomain::Daemon, kInternalErrorCode, "internal_error",
             std::string("daemon poll failed: ") + std::strerror(errno));
         break;
       }
@@ -737,15 +737,16 @@ class Server::Impl {
         break;
       }
       if ((descriptors[0].revents & (POLLERR | POLLHUP | POLLNVAL)) != 0) {
-        outcome = failure_status(IpcErrorDomain::Daemon, kInternalErrorCode,
-                                 "internal_error",
+        outcome = failure_status(OperationErrorDomain::Daemon,
+                                 kInternalErrorCode, "internal_error",
                                  "daemon listener became unavailable");
         break;
       }
       if ((descriptors[0].revents & POLLIN) != 0) {
         if (!accept_one(&message)) {
-          outcome = failure_status(IpcErrorDomain::Daemon, kInternalErrorCode,
-                                   "internal_error", std::move(message));
+          outcome =
+              failure_status(OperationErrorDomain::Daemon, kInternalErrorCode,
+                             "internal_error", std::move(message));
           break;
         }
       }
@@ -924,7 +925,7 @@ Server::Server(Host& host, std::string service_version)
 Server::~Server() = default;
 
 /** @copydoc Server::run */
-IpcStatus Server::run(const ServerOptions& options, int stop_fd) {
+OperationStatus Server::run(const ServerOptions& options, int stop_fd) {
   return impl_->run(options, stop_fd);
 }
 
