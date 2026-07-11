@@ -21,7 +21,7 @@ STATIC_PRODUCT_ARCHIVE_NAMES = {
     "photospider.lib",
 }
 EXPORTED_TARGET = "Photospider::photospider"
-TARGET_MANIFEST_GLOB = "photospider_consumer_target_*.txt"
+IPC_EXPORTED_TARGET = "Photospider::photospider_ipc_client"
 REQUIRED_OPENCV_COMPONENTS = (
     "opencv_core",
     "opencv_imgproc",
@@ -171,9 +171,15 @@ def write_consumer_project(repo: Path, source_dir: Path) -> list[str]:
                 "add_executable(photospider_consumer main.cpp)",
                 "target_link_libraries(photospider_consumer",
                 "    PRIVATE Photospider::photospider)",
+                "add_executable(photospider_ipc_consumer ipc_main.cpp)",
+                "target_link_libraries(photospider_ipc_consumer",
+                "    PRIVATE Photospider::photospider_ipc_client)",
                 "file(GENERATE",
                 '    OUTPUT "${CMAKE_BINARY_DIR}/photospider_consumer_target_$<CONFIG>.txt"',
                 '    CONTENT "$<TARGET_FILE:photospider_consumer>\\n")',
+                "file(GENERATE",
+                '    OUTPUT "${CMAKE_BINARY_DIR}/photospider_ipc_consumer_target_$<CONFIG>.txt"',
+                '    CONTENT "$<TARGET_FILE:photospider_ipc_consumer>\\n")',
                 "",
             ]
         ),
@@ -197,6 +203,26 @@ def write_consumer_project(repo: Path, source_dir: Path) -> list[str]:
                 "  auto image = ps::make_aligned_cpu_image_buffer(",
                 "      2, 2, 4, ps::DataType::FLOAT32);",
                 "  return step == 128 && image.data ? 0 : 2;",
+                "}",
+                "",
+            ]
+        ),
+        encoding="utf-8",
+    )
+    (source_dir / "ipc_main.cpp").write_text(
+        "\n".join(
+            [
+                "#include <photospider/ipc/client.hpp>",
+                "#include <photospider/ipc/protocol.hpp>",
+                "",
+                "int main() {",
+                "  ps::ipc::Client client;",
+                "  const ps::ipc::IpcStatus status = client.connect(\"\");",
+                "  client.disconnect();",
+                "  return !status.ok &&",
+                "                 status.domain == ps::ipc::IpcErrorDomain::Transport",
+                "             ? 0",
+                "             : 1;",
                 "}",
                 "",
             ]
@@ -471,7 +497,7 @@ def classify_export_link_interface(
 
 
 def find_consumer_executable(
-    consumer_build: Path, requested_config: str
+    consumer_build: Path, requested_config: str, executable_name: str
 ) -> dict[str, Any]:
     """@brief Locate the built consumer using CMake target-file manifests.
 
@@ -482,15 +508,18 @@ def find_consumer_executable(
 
     @param consumer_build Configured consumer build directory.
     @param requested_config Optional configuration passed to ``cmake --build``.
+    @param executable_name Exact generated CMake executable target name.
     @return Manifest inventory, declared/fallback candidates, and selected file.
     @throws OSError If an existing manifest or build tree cannot be read.
     @note The function is read-only and accepts only regular existing files as
       runnable candidates. Fresh consumer builds prevent stale-config selection.
     """
 
-    manifests = sorted(consumer_build.glob(TARGET_MANIFEST_GLOB))
+    manifests = sorted(
+        consumer_build.glob(f"{executable_name}_target_*.txt")
+    )
     if requested_config:
-        preferred_name = f"photospider_consumer_target_{requested_config}.txt"
+        preferred_name = f"{executable_name}_target_{requested_config}.txt"
         manifests.sort(key=lambda path: path.name != preferred_name)
     declared_paths: list[Path] = []
     for manifest in manifests:
@@ -500,7 +529,7 @@ def find_consumer_executable(
 
     fallback_paths = sorted(
         path
-        for name in ("photospider_consumer", "photospider_consumer.exe")
+        for name in (executable_name, f"{executable_name}.exe")
         for path in consumer_build.rglob(name)
         if "CMakeFiles" not in path.parts
     )
@@ -558,6 +587,9 @@ def inspect_install_tree(
         target_text, EXPORTED_TARGET, "INTERFACE_LINK_LIBRARIES"
     )
     interface_link_entries = split_cmake_list(interface_link_raw)
+    ipc_interface_link_raw = exported_target_property(
+        target_text, IPC_EXPORTED_TARGET, "INTERFACE_LINK_LIBRARIES"
+    )
     return {
         "headers": headers,
         "unexpected_headers": unexpected_headers,
@@ -570,6 +602,43 @@ def inspect_install_tree(
             re.search(
                 rf"add_library\s*\(\s*{re.escape(EXPORTED_TARGET)}\s+STATIC\s+IMPORTED",
                 target_text,
+            )
+        ),
+        "export_mentions_ipc_namespace_target": bool(
+            re.search(
+                rf"add_library\s*\(\s*{re.escape(IPC_EXPORTED_TARGET)}\s+STATIC\s+IMPORTED",
+                target_text,
+            )
+        ),
+        "ipc_export_has_static_compile_definition": exported_target_property(
+            target_text, IPC_EXPORTED_TARGET, "INTERFACE_COMPILE_DEFINITIONS"
+        )
+        == "PHOTOSPIDER_STATIC",
+        "ipc_export_has_install_include_dir": "${_IMPORT_PREFIX}/include"
+        in exported_target_property(
+            target_text, IPC_EXPORTED_TARGET, "INTERFACE_INCLUDE_DIRECTORIES"
+        ),
+        "ipc_export_omits_internal_dependencies": (
+            "nlohmann_json" not in ipc_interface_link_raw
+            and "photospider_ipc_server_internal" not in ipc_interface_link_raw
+            and "photospider_ipc_client_objects" not in ipc_interface_link_raw
+            and "Photospider::photospider" not in ipc_interface_link_raw
+        ),
+        "ipc_client_archive_exists": any(
+            path.name.lower()
+            in {
+                "libphotospider_ipc_client.a",
+                "libphotospider_ipc_client.lib",
+                "photospider_ipc_client.lib",
+            }
+            for path in (prefix / install_libdir).rglob("*")
+            if path.is_file()
+        ),
+        "daemon_executable_exists": any(
+            path.is_file()
+            for path in (
+                prefix / "bin" / "photospiderd",
+                prefix / "bin" / "photospiderd.exe",
             )
         ),
         "export_has_static_compile_definition": exported_target_property(
@@ -629,6 +698,24 @@ def evaluate_behavior(observations: dict[str, Any]) -> bool:
         "consumer compiles every installed public header": compiled_headers
         == install["headers"],
         "exported namespace target exists": install["export_mentions_namespace_target"],
+        "exported IPC namespace target exists": install[
+            "export_mentions_ipc_namespace_target"
+        ],
+        "exported IPC target carries PHOTOSPIDER_STATIC": install[
+            "ipc_export_has_static_compile_definition"
+        ],
+        "exported IPC target uses install include root": install[
+            "ipc_export_has_install_include_dir"
+        ],
+        "exported IPC target omits internal dependencies": install[
+            "ipc_export_omits_internal_dependencies"
+        ],
+        "installed IPC client archive exists": install[
+            "ipc_client_archive_exists"
+        ],
+        "installed photospiderd executable exists": install[
+            "daemon_executable_exists"
+        ],
         "exported target carries PHOTOSPIDER_STATIC": install[
             "export_has_static_compile_definition"
         ],
@@ -678,7 +765,14 @@ def evaluate_behavior(observations: dict[str, Any]) -> bool:
         "CMake target manifest resolves consumer executable": observations[
             "consumer"
         ]["executable_discovery"]["selected_from_manifest"],
+        "CMake target manifest resolves IPC consumer executable": observations[
+            "consumer"
+        ]["ipc_executable_discovery"]["selected_from_manifest"],
         "consumer executable ran successfully": commands["consumer_run"] == 0,
+        "IPC-only consumer executable ran successfully": commands[
+            "ipc_consumer_run"
+        ]
+        == 0,
     }
     passed = all(checks.values())
     print("static_product_consumer_smoke")
@@ -771,6 +865,8 @@ def main() -> int:
         str(build),
         "--target",
         "photospider",
+        "photospider_ipc_client",
+        "photospiderd",
     ]
     if args.config:
         build_product_command.extend(["--config", args.config])
@@ -812,7 +908,12 @@ def main() -> int:
         build_command.extend(["--config", args.config])
     build_code = run_command(build_command, repo)
 
-    executable_discovery = find_consumer_executable(consumer_build, args.config)
+    executable_discovery = find_consumer_executable(
+        consumer_build, args.config, "photospider_consumer"
+    )
+    ipc_executable_discovery = find_consumer_executable(
+        consumer_build, args.config, "photospider_ipc_consumer"
+    )
     consumer_generator = cmake_cache_value(consumer_build, "CMAKE_GENERATOR")
     consumer_configuration_types = cmake_cache_value(
         consumer_build, "CMAKE_CONFIGURATION_TYPES"
@@ -829,6 +930,21 @@ def main() -> int:
         print(
             "consumer executable not found; discovery="
             + json.dumps(executable_discovery, sort_keys=True),
+            file=sys.stderr,
+            flush=True,
+        )
+    ipc_executable = (
+        Path(ipc_executable_discovery["selected"])
+        if ipc_executable_discovery["selected"]
+        else None
+    )
+    ipc_run_code = 127
+    if ipc_executable is not None and ipc_executable.is_file():
+        ipc_run_code = run_command([str(ipc_executable)], repo)
+    else:
+        print(
+            "IPC consumer executable not found; discovery="
+            + json.dumps(ipc_executable_discovery, sort_keys=True),
             file=sys.stderr,
             flush=True,
         )
@@ -850,6 +966,7 @@ def main() -> int:
             "consumer_configure": configure_code,
             "consumer_build": build_code,
             "consumer_run": run_code,
+            "ipc_consumer_run": ipc_run_code,
         },
         "install_tree": install_tree,
         "paths": {
@@ -864,6 +981,7 @@ def main() -> int:
             "generator": consumer_generator,
             "configuration_types": consumer_configuration_types,
             "executable_discovery": executable_discovery,
+            "ipc_executable_discovery": ipc_executable_discovery,
         },
         "producer": {
             "configured_by_smoke": args.configure_fresh_producer,
