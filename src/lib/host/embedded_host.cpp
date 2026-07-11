@@ -1478,7 +1478,10 @@ class EmbeddedHost final : public Host {
    * @return Loaded session id, or a failed status.
    * @throws std::bad_alloc on allocation failure.
    * @note Recoverable backend and filesystem failures are converted to
-   *       OperationStatus.
+   *       OperationStatus. The backend preallocates its return label before
+   *       publishing a runtime, and this adapter moves that label into the
+   *       result, so an allocation exception leaves no newly published
+   *       session.
    */
   Result<GraphSessionId> load_graph(const GraphLoadRequest& request) override {
     return guarded_result<GraphSessionId>(
@@ -1491,7 +1494,7 @@ class EmbeddedHost final : public Host {
                 GraphErrc::InvalidParameter,
                 "failed to load graph session '" + request.session.value + "'");
           }
-          return success_result(GraphSessionId{*loaded});
+          return success_result(GraphSessionId{std::move(*loaded)});
         });
   }
 

@@ -198,8 +198,9 @@ class Kernel {
    *         allocation exhausts memory.
    * @throws std::exception for scheduler/runtime startup failures not
    *         classified as recoverable graph-load errors.
-   * @note The runtime enters the owned graph map only after YAML loading
-   * succeeds, preserving the public Host no-partial-session contract.
+   * @note The return label is allocated before the runtime enters the owned
+   *       graph map. After insertion, returning it uses only noexcept moves,
+   *       so a propagated exception never leaves a newly published session.
    */
   std::optional<std::string> load_graph(const std::string& name,
                                         const std::string& root_dir,
