@@ -558,12 +558,60 @@ TEST(ProtocolErrors, PreservesEveryGraphErrcCodeAndName) {
       {GraphErrc::ComputeError, "compute_error"},
   };
   for (std::size_t index = 0; index < expected.size(); ++index) {
-    const IpcStatus status = graph_status(
-        OperationStatus{false, expected[index].first, "diagnostic"});
-    EXPECT_EQ(status.domain, IpcErrorDomain::Graph);
+    const OperationStatus status = graph_status(
+        OperationStatus{false, OperationErrorDomain::Graph,
+                        static_cast<std::int32_t>(expected[index].first),
+                        "ignored", "diagnostic"});
+    EXPECT_EQ(status.domain, OperationErrorDomain::Graph);
     EXPECT_EQ(status.code, static_cast<std::int32_t>(index + 1));
     EXPECT_EQ(status.name, expected[index].second);
     EXPECT_EQ(status.message, "diagnostic");
+  }
+}
+
+TEST(OperationStatusModel, CanonicalizesSuccessAndPreservesOtherDomains) {
+  const OperationStatus success = ok_status();
+  EXPECT_TRUE(success.ok);
+  EXPECT_EQ(success.domain, OperationErrorDomain::None);
+  EXPECT_EQ(success.code, 0);
+  EXPECT_TRUE(success.name.empty());
+  EXPECT_TRUE(success.message.empty());
+  EXPECT_FALSE(checked_graph_error_code(success).has_value());
+
+  const std::array<OperationErrorDomain, 3> domains = {
+      OperationErrorDomain::Transport, OperationErrorDomain::Protocol,
+      OperationErrorDomain::Daemon};
+  for (const OperationErrorDomain domain : domains) {
+    const OperationStatus original =
+        failure_status(domain, -17, "future_name", "diagnostic");
+    const OperationStatus preserved = graph_status(original);
+    EXPECT_FALSE(preserved.ok);
+    EXPECT_EQ(preserved.domain, domain);
+    EXPECT_EQ(preserved.code, -17);
+    EXPECT_EQ(preserved.name, "future_name");
+    EXPECT_EQ(preserved.message, "diagnostic");
+    EXPECT_FALSE(checked_graph_error_code(preserved).has_value());
+  }
+}
+
+TEST(OperationStatusModel, ErrorCodecPreservesProtocolGraphAndDaemonValues) {
+  const std::array<OperationStatus, 3> statuses = {
+      failure_status(OperationErrorDomain::Protocol, -32099, "future_protocol",
+                     "protocol diagnostic"),
+      failure_status(OperationErrorDomain::Graph, 9, "compute_error",
+                     "graph diagnostic"),
+      failure_status(OperationErrorDomain::Daemon, -32100, "future_daemon",
+                     "daemon diagnostic")};
+  for (const OperationStatus& original : statuses) {
+    OperationStatus decoded;
+    std::string message;
+    ASSERT_TRUE(decode_error(encode_error(original), &decoded, &message))
+        << message;
+    EXPECT_EQ(decoded.ok, original.ok);
+    EXPECT_EQ(decoded.domain, original.domain);
+    EXPECT_EQ(decoded.code, original.code);
+    EXPECT_EQ(decoded.name, original.name);
+    EXPECT_EQ(decoded.message, original.message);
   }
 }
 
@@ -728,7 +776,7 @@ TEST(SessionRegistry, HandlesCollisionsRollbackReconciliationAndSorting) {
   const auto disagreement =
       registry.reconcile({GraphSessionId{"private-alpha"}});
   EXPECT_FALSE(disagreement.status.ok);
-  EXPECT_EQ(disagreement.status.domain, IpcErrorDomain::Daemon);
+  EXPECT_EQ(disagreement.status.domain, OperationErrorDomain::Daemon);
 }
 
 TEST(SessionRegistry, ProductionOpaqueIdHasStableWireShape) {
@@ -765,13 +813,13 @@ TEST(ClientLifecycle, RejectsUncorrelatedResponseAndClosesIdempotently) {
                                            response.second);
     });
     Client client;
-    const IpcStatus connected = client.connect(socket_path);
+    const OperationStatus connected = client.connect(socket_path);
     const IpcResult<DaemonPing> ping = client.ping();
     peer.join();
     ASSERT_TRUE(connected.ok);
     EXPECT_TRUE(served);
     EXPECT_FALSE(ping.status.ok);
-    EXPECT_EQ(ping.status.domain, IpcErrorDomain::Protocol);
+    EXPECT_EQ(ping.status.domain, OperationErrorDomain::Protocol);
     EXPECT_FALSE(client.connected());
     client.disconnect();
     client.disconnect();
@@ -796,7 +844,7 @@ TEST(ClientLifecycle, RejectsOverflowedEnvelopeVersionAndErrorCode) {
     peer.join();
     EXPECT_TRUE(served);
     EXPECT_FALSE(ping.status.ok);
-    EXPECT_EQ(ping.status.domain, IpcErrorDomain::Protocol);
+    EXPECT_EQ(ping.status.domain, OperationErrorDomain::Protocol);
     EXPECT_EQ(ping.status.code, kInvalidRequestCode);
     EXPECT_FALSE(client.connected());
   }
@@ -823,7 +871,7 @@ TEST(ClientResultValidation, RejectsOverflowedVersionWithoutDesynchronizing) {
   peer.join();
   EXPECT_TRUE(served);
   EXPECT_FALSE(version.status.ok);
-  EXPECT_EQ(version.status.domain, IpcErrorDomain::Protocol);
+  EXPECT_EQ(version.status.domain, OperationErrorDomain::Protocol);
   EXPECT_EQ(version.status.code, kInvalidRequestCode);
   EXPECT_TRUE(client.connected());
 }
@@ -853,7 +901,7 @@ TEST(ClientResultValidation, RejectsInspectionOverflowWithoutDesynchronizing) {
   peer.join();
   EXPECT_TRUE(served);
   EXPECT_FALSE(graph.status.ok);
-  EXPECT_EQ(graph.status.domain, IpcErrorDomain::Protocol);
+  EXPECT_EQ(graph.status.domain, OperationErrorDomain::Protocol);
   EXPECT_EQ(graph.status.code, kInvalidRequestCode);
   EXPECT_TRUE(graph.value.nodes.empty());
   EXPECT_TRUE(client.connected());
@@ -882,14 +930,14 @@ TEST(ClientResultValidation, RejectsMalformedLoadIdentityFromLocalPeer) {
     peer.join();
     EXPECT_TRUE(served);
     EXPECT_FALSE(loaded.status.ok);
-    EXPECT_EQ(loaded.status.domain, IpcErrorDomain::Protocol);
+    EXPECT_EQ(loaded.status.domain, OperationErrorDomain::Protocol);
     EXPECT_EQ(loaded.status.code, kInvalidRequestCode);
     EXPECT_TRUE(client.connected());
   }
 }
 
 TEST(ClientResultValidation, RejectsMalformedListIdentityFromLocalPeer) {
-  ScopedTempDirectory temp("photospider-ipc-client-list-result");
+  ScopedTempDirectory temp("ps-ipc-list-result");
   const std::string socket_path = (temp.path() / "server.sock").string();
   UniqueFd listener = create_test_listener(socket_path);
   Client client;
@@ -906,13 +954,13 @@ TEST(ClientResultValidation, RejectsMalformedListIdentityFromLocalPeer) {
   peer.join();
   EXPECT_TRUE(served);
   EXPECT_FALSE(listed.status.ok);
-  EXPECT_EQ(listed.status.domain, IpcErrorDomain::Protocol);
+  EXPECT_EQ(listed.status.domain, OperationErrorDomain::Protocol);
   EXPECT_EQ(listed.status.code, kInvalidRequestCode);
   EXPECT_TRUE(client.connected());
 }
 
 TEST(ClientResultValidation, RejectsMalformedDaemonIdentityFromLocalPeer) {
-  ScopedTempDirectory temp("photospider-ipc-client-ping-result");
+  ScopedTempDirectory temp("ps-ipc-ping-result");
   const std::string socket_path = (temp.path() / "server.sock").string();
   UniqueFd listener = create_test_listener(socket_path);
   Client client;
@@ -927,7 +975,7 @@ TEST(ClientResultValidation, RejectsMalformedDaemonIdentityFromLocalPeer) {
   peer.join();
   EXPECT_TRUE(served);
   EXPECT_FALSE(ping.status.ok);
-  EXPECT_EQ(ping.status.domain, IpcErrorDomain::Protocol);
+  EXPECT_EQ(ping.status.domain, OperationErrorDomain::Protocol);
   EXPECT_EQ(ping.status.code, kInvalidRequestCode);
   EXPECT_TRUE(client.connected());
 }
@@ -947,7 +995,7 @@ TEST(ClientResultValidation, ClassifiesDuplicateResponseAsInvalidRequest) {
   peer.join();
   EXPECT_TRUE(served);
   EXPECT_FALSE(ping.status.ok);
-  EXPECT_EQ(ping.status.domain, IpcErrorDomain::Protocol);
+  EXPECT_EQ(ping.status.domain, OperationErrorDomain::Protocol);
   EXPECT_EQ(ping.status.code, kInvalidRequestCode);
   EXPECT_EQ(ping.status.name, "invalid_request");
 }

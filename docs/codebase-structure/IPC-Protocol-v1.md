@@ -121,7 +121,10 @@ local Protocol status while leaving the synchronized connection open.
 
 ## Stable Errors
 
-`IpcErrorDomain` is the stable top-level category. Error origins are:
+`OperationStatus` is the sole public status representation shared by embedded
+Host and IPC products, and `OperationErrorDomain` is its stable top-level
+category. Canonical success is `ok=true`, `domain=None`, `code=0`, and empty
+`name`/`message`. Error origins are:
 
 | Domain | Origin |
 | --- | --- |
@@ -159,13 +162,14 @@ Host failures use the graph domain and an explicit `GraphErrc` mapping:
 | 8 | `invalid_parameter` |
 | 9 | `compute_error` |
 
-Local connect/read/write/peer failures use `IpcErrorDomain::Transport` and are
-never converted to graph IO errors. A daemon cannot send the transport domain.
-The Transport domain is programmatically stable, but its local numeric code and
-name are diagnostic classifications; clients must not persist or branch on a
-promised long-term Transport code/name mapping. Unknown future remote numeric
-codes and names remain available in `IpcStatus`. Allocation failure may
-propagate `std::bad_alloc`; other recoverable failures are returned as statuses.
+Local connect/read/write/peer failures use
+`OperationErrorDomain::Transport` and are never converted to graph IO errors.
+A daemon cannot send the transport domain. The Transport domain is
+programmatically stable, but its local numeric code and name are diagnostic
+classifications; clients must not persist or branch on a promised long-term
+Transport code/name mapping. Unknown future remote numeric codes and names
+remain available in `OperationStatus`. Allocation failure may propagate
+`std::bad_alloc`; other recoverable failures are returned as statuses.
 
 ## Daemon Metadata
 

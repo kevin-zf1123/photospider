@@ -54,9 +54,9 @@ std::string bounded_message(const std::string& message) {
  * @return Error response object with exactly one error branch.
  * @throws std::bad_alloc if JSON allocation fails.
  */
-Json error_envelope(const Json& id, const IpcStatus& status,
+Json error_envelope(const Json& id, const OperationStatus& status,
                     bool supported_versions = false) {
-  IpcStatus bounded = status;
+  OperationStatus bounded = status;
   bounded.message = bounded_message(status.message);
   Json error = encode_error(bounded);
   if (supported_versions) {
@@ -76,7 +76,7 @@ Json error_envelope(const Json& id, const IpcStatus& status,
  * @return Payload smaller than the version 1 frame limit.
  * @throws std::bad_alloc if serialization cannot allocate.
  */
-std::string bounded_error(const Json& id, const IpcStatus& status,
+std::string bounded_error(const Json& id, const OperationStatus& status,
                           bool supported_versions = false) {
   return error_envelope(id, status, supported_versions).dump();
 }
@@ -88,8 +88,8 @@ std::string bounded_error(const Json& id, const IpcStatus& status,
  * @return Stable version 1 invalid-params status.
  * @throws std::bad_alloc if message storage cannot be allocated.
  */
-IpcStatus invalid_params(std::string message) {
-  return failure_status(IpcErrorDomain::Protocol, kInvalidParamsCode,
+OperationStatus invalid_params(std::string message) {
+  return failure_status(OperationErrorDomain::Protocol, kInvalidParamsCode,
                         "invalid_params", std::move(message));
 }
 
@@ -99,8 +99,8 @@ IpcStatus invalid_params(std::string message) {
  * @return Stable `GraphErrc::NotFound` failure.
  * @throws std::bad_alloc if diagnostic storage cannot be allocated.
  */
-IpcStatus unknown_session() {
-  return failure_status(IpcErrorDomain::Graph,
+OperationStatus unknown_session() {
+  return failure_status(OperationErrorDomain::Graph,
                         static_cast<std::int32_t>(GraphErrc::NotFound),
                         "not_found", "opaque graph session was not found");
 }
@@ -226,7 +226,7 @@ void close_graph_best_effort(Host& host,
 Json route_daemon_method(const std::string& method, const Json& params,
                          const std::string& service_version,
                          const std::string& instance_id, bool* handled,
-                         IpcStatus* status) {
+                         OperationStatus* status) {
   if (method != "daemon.ping" && method != "daemon.version") {
     *handled = false;
     return {};
@@ -272,16 +272,16 @@ std::string RequestRouter::route(const std::string& payload) {
     return bounded_error(
         response_id,
         failure_status(
-            IpcErrorDomain::Protocol,
+            OperationErrorDomain::Protocol,
             parsed.duplicate_key ? kInvalidRequestCode : kParseErrorCode,
             parsed.duplicate_key ? "invalid_request" : "parse_error",
             parsed.message));
   }
   if (!parsed.value.is_object()) {
-    return bounded_error(
-        nullptr, failure_status(IpcErrorDomain::Protocol, kInvalidRequestCode,
-                                "invalid_request",
-                                "request envelope must be an object"));
+    return bounded_error(nullptr,
+                         failure_status(OperationErrorDomain::Protocol,
+                                        kInvalidRequestCode, "invalid_request",
+                                        "request envelope must be an object"));
   }
   const Json& request = parsed.value;
   Json response_id = nullptr;
@@ -298,7 +298,7 @@ std::string RequestRouter::route(const std::string& payload) {
       !request.value("params", Json()).is_object()) {
     return bounded_error(
         response_id,
-        failure_status(IpcErrorDomain::Protocol, kInvalidRequestCode,
+        failure_status(OperationErrorDomain::Protocol, kInvalidRequestCode,
                        "invalid_request",
                        "request requires integer protocol_version, valid id, "
                        "nonempty method, and object params"));
@@ -309,7 +309,7 @@ std::string RequestRouter::route(const std::string& payload) {
       request_version != kProtocolVersion) {
     return bounded_error(
         id,
-        failure_status(IpcErrorDomain::Protocol, kUnsupportedProtocolCode,
+        failure_status(OperationErrorDomain::Protocol, kUnsupportedProtocolCode,
                        "unsupported_protocol",
                        "requested protocol version is not supported"),
         true);
@@ -319,7 +319,7 @@ std::string RequestRouter::route(const std::string& payload) {
 
   try {
     bool handled = false;
-    IpcStatus status = ok_status();
+    OperationStatus status = ok_status();
     Json result = route_daemon_method(method, params, service_version_,
                                       server_instance_id_, &handled, &status);
     if (handled) {
@@ -396,7 +396,8 @@ std::string RequestRouter::route(const std::string& payload) {
         return bounded_error(id, unknown_session());
       }
       const VoidResult closed = host_.close_graph(*host_session);
-      if (closed.status.ok || closed.status.code == GraphErrc::NotFound) {
+      if (closed.status.ok ||
+          checked_graph_error_code(closed.status) == GraphErrc::NotFound) {
         registry_.erase(session_id);
       }
       if (!closed.status.ok) {
@@ -512,18 +513,18 @@ std::string RequestRouter::route(const std::string& payload) {
     }
 
     return bounded_error(
-        id, failure_status(IpcErrorDomain::Protocol, kMethodNotFoundCode,
+        id, failure_status(OperationErrorDomain::Protocol, kMethodNotFoundCode,
                            "method_not_found",
                            "method is not implemented by protocol version 1"));
   } catch (const std::bad_alloc&) {
     throw;
   } catch (const std::exception& error) {
     return bounded_error(
-        id, failure_status(IpcErrorDomain::Daemon, kInternalErrorCode,
+        id, failure_status(OperationErrorDomain::Daemon, kInternalErrorCode,
                            "internal_error", error.what()));
   } catch (...) {
     return bounded_error(
-        id, failure_status(IpcErrorDomain::Daemon, kInternalErrorCode,
+        id, failure_status(OperationErrorDomain::Daemon, kInternalErrorCode,
                            "internal_error",
                            "unexpected non-standard request failure"));
   }

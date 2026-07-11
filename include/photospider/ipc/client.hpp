@@ -98,7 +98,7 @@ class PHOTOSPIDER_API Client {
    * @note An existing connection is closed first. The operation does not
    *       discover, start, retry, or authenticate a daemon.
    */
-  IpcStatus connect(const std::string& socket_path);
+  OperationStatus connect(const std::string& socket_path);
 
   /**
    * @brief Closes this client's transport connection idempotently.
@@ -154,7 +154,7 @@ class PHOTOSPIDER_API Client {
    * @note This is a daemon graph-lifecycle operation, distinct from
    *       `disconnect()`.
    */
-  IpcVoidResult close_graph(const IpcSessionId& session_id);
+  VoidResult close_graph(const IpcSessionId& session_id);
 
   /**
    * @brief Calls `graph.list`.

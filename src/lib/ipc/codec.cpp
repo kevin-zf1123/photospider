@@ -310,54 +310,25 @@ bool decode_edge(const Json& value, HostGraphEdgeSnapshot* edge) {
 }
 
 /**
- * @brief Returns the stable wire name for one graph error code.
+ * @brief Converts one recognized public failure-domain spelling to its enum.
  *
- * @param code Current or future public graph error value.
- * @return Stable name for every current value, otherwise `unknown`.
- * @throws Nothing.
- * @note The switch is intentionally explicit rather than arithmetic.
- */
-const char* graph_error_name(GraphErrc code) noexcept {
-  switch (code) {
-    case GraphErrc::Unknown:
-      return "unknown";
-    case GraphErrc::NotFound:
-      return "not_found";
-    case GraphErrc::Cycle:
-      return "cycle";
-    case GraphErrc::Io:
-      return "io";
-    case GraphErrc::InvalidYaml:
-      return "invalid_yaml";
-    case GraphErrc::MissingDependency:
-      return "missing_dependency";
-    case GraphErrc::NoOperation:
-      return "no_operation";
-    case GraphErrc::InvalidParameter:
-      return "invalid_parameter";
-    case GraphErrc::ComputeError:
-      return "compute_error";
-  }
-  return "unknown";
-}
-
-/**
- * @brief Converts one wire-domain string into the public enum.
- *
- * @param name Lowercase version 1 domain name.
+ * @param name Lowercase public failure-domain spelling.
  * @param domain Receives the public domain.
- * @return True for the four remote failure domains.
+ * @return True for the four recognized public failure-domain spellings.
  * @throws Nothing.
+ * @note Wire `decode_error()` separately rejects the local-only `Transport`
+ *       domain even though its public spelling is recognized here.
  */
-bool decode_domain(const std::string& name, IpcErrorDomain* domain) noexcept {
+bool decode_domain(const std::string& name,
+                   OperationErrorDomain* domain) noexcept {
   if (name == "transport") {
-    *domain = IpcErrorDomain::Transport;
+    *domain = OperationErrorDomain::Transport;
   } else if (name == "protocol") {
-    *domain = IpcErrorDomain::Protocol;
+    *domain = OperationErrorDomain::Protocol;
   } else if (name == "graph") {
-    *domain = IpcErrorDomain::Graph;
+    *domain = OperationErrorDomain::Graph;
   } else if (name == "daemon") {
-    *domain = IpcErrorDomain::Daemon;
+    *domain = OperationErrorDomain::Daemon;
   } else {
     return false;
   }
@@ -371,17 +342,17 @@ bool decode_domain(const std::string& name, IpcErrorDomain* domain) noexcept {
  * @return Stable lowercase name; `none` is used only defensively.
  * @throws Nothing.
  */
-const char* encode_domain(IpcErrorDomain domain) noexcept {
+const char* encode_domain(OperationErrorDomain domain) noexcept {
   switch (domain) {
-    case IpcErrorDomain::None:
+    case OperationErrorDomain::None:
       return "none";
-    case IpcErrorDomain::Transport:
+    case OperationErrorDomain::Transport:
       return "transport";
-    case IpcErrorDomain::Protocol:
+    case OperationErrorDomain::Protocol:
       return "protocol";
-    case IpcErrorDomain::Graph:
+    case OperationErrorDomain::Graph:
       return "graph";
-    case IpcErrorDomain::Daemon:
+    case OperationErrorDomain::Daemon:
       return "daemon";
   }
   return "none";
@@ -433,28 +404,31 @@ JsonParseResult parse_json(const std::string& payload) {
 }
 
 /** @copydoc ok_status */
-IpcStatus ok_status() {
+OperationStatus ok_status() {
   return {};
 }
 
 /** @copydoc failure_status */
-IpcStatus failure_status(IpcErrorDomain domain, std::int32_t code,
-                         std::string name, std::string message) {
+OperationStatus failure_status(OperationErrorDomain domain, std::int32_t code,
+                               std::string name, std::string message) {
   return {false, domain, code, std::move(name), std::move(message)};
 }
 
 /** @copydoc graph_status */
-IpcStatus graph_status(const OperationStatus& status) {
+OperationStatus graph_status(const OperationStatus& status) {
   if (status.ok) {
     return ok_status();
   }
-  return failure_status(IpcErrorDomain::Graph,
-                        static_cast<std::int32_t>(status.code),
-                        graph_error_name(status.code), status.message);
+  const std::optional<GraphErrc> code = checked_graph_error_code(status);
+  if (!code) {
+    return status;
+  }
+  return failure_status(OperationErrorDomain::Graph, status.code,
+                        graph_error_stable_name(*code), status.message);
 }
 
 /** @copydoc encode_error */
-Json encode_error(const IpcStatus& status) {
+Json encode_error(const OperationStatus& status) {
   return Json{{"domain", encode_domain(status.domain)},
               {"code", status.code},
               {"name", status.name},
@@ -462,7 +436,8 @@ Json encode_error(const IpcStatus& status) {
 }
 
 /** @copydoc decode_error */
-bool decode_error(const Json& value, IpcStatus* status, std::string* message) {
+bool decode_error(const Json& value, OperationStatus* status,
+                  std::string* message) {
   if (!value.is_object() || !value.value("domain", Json()).is_string() ||
       !value.value("code", Json()).is_number_integer() ||
       !value.value("name", Json()).is_string() ||
@@ -470,10 +445,10 @@ bool decode_error(const Json& value, IpcStatus* status, std::string* message) {
     *message = "error object requires domain/code/name/message";
     return false;
   }
-  IpcErrorDomain domain = IpcErrorDomain::None;
+  OperationErrorDomain domain = OperationErrorDomain::None;
   const std::string domain_name = value["domain"].get<std::string>();
   if (!decode_domain(domain_name, &domain) ||
-      domain == IpcErrorDomain::Transport) {
+      domain == OperationErrorDomain::Transport) {
     *message = "error object has unknown domain";
     return false;
   }
@@ -496,9 +471,9 @@ std::string encode_success_response(const std::string& id, Json result) {
   if (payload.size() <= kMaximumFramePayloadBytes) {
     return payload;
   }
-  const IpcStatus status = failure_status(
-      IpcErrorDomain::Protocol, kResponseTooLargeCode, "response_too_large",
-      "serialized response exceeds 16777216 bytes");
+  const OperationStatus status = failure_status(
+      OperationErrorDomain::Protocol, kResponseTooLargeCode,
+      "response_too_large", "serialized response exceeds 16777216 bytes");
   return Json{{"protocol_version", kProtocolVersion},
               {"id", id},
               {"error", encode_error(status)}}

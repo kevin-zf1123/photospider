@@ -100,7 +100,7 @@ IpcResult<IpcSessionId> SessionRegistry::reserve(
   if (pending_by_name_.count(session_name) != 0 ||
       active_by_name_.count(session_name) != 0) {
     return {
-        failure_status(IpcErrorDomain::Graph,
+        failure_status(OperationErrorDomain::Graph,
                        static_cast<std::int32_t>(GraphErrc::InvalidParameter),
                        "invalid_parameter",
                        "session name is already loading or active"),
@@ -109,7 +109,7 @@ IpcResult<IpcSessionId> SessionRegistry::reserve(
   for (std::size_t attempt = 0; attempt < 128; ++attempt) {
     std::string token = token_generator_();
     if (!valid_token_shape(token)) {
-      return {failure_status(IpcErrorDomain::Daemon, kInternalErrorCode,
+      return {failure_status(OperationErrorDomain::Daemon, kInternalErrorCode,
                              "internal_error",
                              "opaque token generator returned invalid data"),
               {}};
@@ -127,21 +127,21 @@ IpcResult<IpcSessionId> SessionRegistry::reserve(
     }
     return {ok_status(), {std::move(token)}};
   }
-  return {failure_status(IpcErrorDomain::Daemon, kInternalErrorCode,
+  return {failure_status(OperationErrorDomain::Daemon, kInternalErrorCode,
                          "internal_error",
                          "opaque session id collision limit reached"),
           {}};
 }
 
 /** @copydoc SessionRegistry::commit */
-IpcStatus SessionRegistry::commit(const IpcSessionId& session_id,
-                                  const GraphSessionId& host_session) {
+OperationStatus SessionRegistry::commit(const IpcSessionId& session_id,
+                                        const GraphSessionId& host_session) {
   std::lock_guard<std::mutex> lock(mutex_);
   const auto pending = pending_by_token_.find(session_id.value);
   if (pending == pending_by_token_.end() || host_session.value.empty() ||
       active_by_host_.count(host_session.value) != 0 ||
       active_by_name_.count(pending->second) != 0) {
-    return failure_status(IpcErrorDomain::Daemon, kInternalErrorCode,
+    return failure_status(OperationErrorDomain::Daemon, kInternalErrorCode,
                           "internal_error",
                           "session registry commit invariant failed");
   }
@@ -149,7 +149,7 @@ IpcStatus SessionRegistry::commit(const IpcSessionId& session_id,
   const auto token_inserted = active_by_token_.emplace(
       session_id.value, ActiveEntry{host_session, session_name});
   if (!token_inserted.second) {
-    return failure_status(IpcErrorDomain::Daemon, kInternalErrorCode,
+    return failure_status(OperationErrorDomain::Daemon, kInternalErrorCode,
                           "internal_error",
                           "opaque session id was already active");
   }
@@ -160,7 +160,7 @@ IpcStatus SessionRegistry::commit(const IpcSessionId& session_id,
         active_by_host_.emplace(host_session.value, session_id.value);
     if (!host_inserted.second) {
       active_by_token_.erase(session_id.value);
-      return failure_status(IpcErrorDomain::Daemon, kInternalErrorCode,
+      return failure_status(OperationErrorDomain::Daemon, kInternalErrorCode,
                             "internal_error",
                             "Host session was already mapped");
     }
@@ -170,7 +170,7 @@ IpcStatus SessionRegistry::commit(const IpcSessionId& session_id,
     if (!name_inserted.second) {
       active_by_host_.erase(host_session.value);
       active_by_token_.erase(session_id.value);
-      return failure_status(IpcErrorDomain::Daemon, kInternalErrorCode,
+      return failure_status(OperationErrorDomain::Daemon, kInternalErrorCode,
                             "internal_error",
                             "session display name was already active");
     }
@@ -230,7 +230,7 @@ IpcResult<std::vector<GraphSessionSummary>> SessionRegistry::reconcile(
   std::set<std::string> host_values;
   for (const GraphSessionId& session : host_sessions) {
     if (!host_values.insert(session.value).second) {
-      return {failure_status(IpcErrorDomain::Daemon, kInternalErrorCode,
+      return {failure_status(OperationErrorDomain::Daemon, kInternalErrorCode,
                              "internal_error",
                              "Host list contains duplicate session ids"),
               {}};
@@ -241,14 +241,14 @@ IpcResult<std::vector<GraphSessionSummary>> SessionRegistry::reconcile(
   if (active_by_token_.size() != active_by_host_.size() ||
       active_by_token_.size() != active_by_name_.size() ||
       host_values.size() != active_by_host_.size()) {
-    return {failure_status(IpcErrorDomain::Daemon, kInternalErrorCode,
+    return {failure_status(OperationErrorDomain::Daemon, kInternalErrorCode,
                            "internal_error",
                            "Host and daemon session registry disagree"),
             {}};
   }
   for (const std::string& host_value : host_values) {
     if (active_by_host_.count(host_value) == 0) {
-      return {failure_status(IpcErrorDomain::Daemon, kInternalErrorCode,
+      return {failure_status(OperationErrorDomain::Daemon, kInternalErrorCode,
                              "internal_error",
                              "Host and daemon session registry disagree"),
               {}};

@@ -329,7 +329,7 @@ int main(int argc, char** argv) {
       return 1;
     }
     ps::ipc::internal::Server server(*host, ps::ipc::internal::kServiceVersion);
-    const ps::ipc::IpcStatus status =
+    const ps::OperationStatus status =
         server.run(ps::ipc::internal::ServerOptions{options.socket_path},
                    self_pipe.read_fd());
     if (!status.ok) {
