@@ -19,6 +19,10 @@ Kernel
 caller-visible async status publication。随后 Kernel 会通过 compute、scheduler information/
 replacement 共用的 per-graph `GraphStateExecutor` 提交 runtime stop，再删除 map entry。该顺序
 保证每个已接受 operation 完成之前，runtime 及其 scheduler owner 都保持存活。
+并发 close caller 会逐个独占 close marker：先前 attempt 完成后，每个 waiter 都重新检查，
+再执行自己的存在性/关闭尝试。runtime stop failure 会保留 runtime 与 diagnostic state、清除
+marker 并重新开放 admission，因此仍可 inspect 或稍后重试 close；只有 map entry 确实不存在
+时才返回 `NotFound`。
 
 ## Daemon-Owned Session Identity
 

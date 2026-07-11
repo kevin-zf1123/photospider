@@ -23,7 +23,12 @@ waits accepted synchronous calls and caller-visible async status publication.
 Kernel then submits runtime stop through the same per-graph
 `GraphStateExecutor` as compute and scheduler information/replacement before it
 erases the map entry. This ordering keeps both the runtime and its scheduler
-owners alive for every already-admitted operation.
+owners alive for every already-admitted operation. Concurrent close callers
+claim the close marker one at a time: after an earlier attempt completes, each
+waiter rechecks and performs its own existence/close attempt. A runtime-stop
+failure retains the runtime and diagnostic state, clears the marker, and
+reopens admission so inspection or a later close retry remains possible;
+`NotFound` is reserved for an actually absent map entry.
 
 ## Daemon-Owned Session Identity
 

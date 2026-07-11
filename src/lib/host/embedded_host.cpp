@@ -24,6 +24,53 @@
 #include "yaml-cpp/yaml.h"
 
 namespace ps {
+
+#if defined(PHOTOSPIDER_INTERNAL_BAD_ALLOC_TESTING)
+/**
+ * @brief BUILD_TESTING close-coordination events exposed to Host regressions.
+ */
+enum class EmbeddedCloseTestEvent {
+  /** @brief One caller has claimed the session close marker. */
+  MarkerClaimed,
+  /** @brief A duplicate caller is about to wait for the marker to clear. */
+  DuplicateAboutToWait,
+};
+
+/**
+ * @brief Non-allocating callback installed by deterministic close tests.
+ */
+struct EmbeddedCloseTestHook {
+  /** @brief Borrowed test context that outlives the installed hook. */
+  void* context = nullptr;
+  /**
+   * @brief Publishes one close event while lifecycle_mutex_ remains held.
+   * @param context Borrowed context supplied by the test.
+   * @param event Coordination point that has just been reached.
+   * @return Nothing.
+   * @throws Nothing; throwing from a test callback terminates the process.
+   */
+  void (*notify)(void* context,
+                 EmbeddedCloseTestEvent event) noexcept = nullptr;
+};
+
+/** @brief Process-local borrowed close hook; tests are process-serial. */
+std::atomic<const EmbeddedCloseTestHook*> g_embedded_close_test_hook{nullptr};
+
+/**
+ * @brief Publishes one close event to the currently installed test hook.
+ * @param event Coordination point reached by the Host close gate.
+ * @return Nothing.
+ * @throws Nothing.
+ */
+void notify_embedded_close_test_hook(EmbeddedCloseTestEvent event) noexcept {
+  const EmbeddedCloseTestHook* hook =
+      g_embedded_close_test_hook.load(std::memory_order_acquire);
+  if (hook != nullptr && hook->notify != nullptr) {
+    hook->notify(hook->context, event);
+  }
+}
+#endif
+
 namespace {
 
 /**
@@ -416,28 +463,33 @@ struct EmbeddedHostState {
   }
 
   /**
-   * @brief Marks a session closing and waits for tracked async compute users.
+   * @brief Claims a session close marker and waits for admitted session users.
    *
    * @param session Session about to be closed.
-   * @return True when this caller owns the close marker; false after a prior
-   * concurrent close for the same session has finished.
+   * @return Nothing after this caller exclusively owns the close marker.
    * @throws std::bad_alloc if recording the closing marker allocates.
-   * @note The closing marker is inserted while holding lifecycle_mutex_ before
-   *       waiting for Host wrapper status mapping. New compute_async calls for
-   *       the same session are rejected until finish_session_close() removes
-   *       the marker.
+   * @note A caller arriving during another close waits until that attempt
+   *       clears its marker, then claims a fresh marker and performs its own
+   *       backend existence/close attempt. New admitted operations remain
+   *       rejected until finish_session_close() removes this caller's marker.
    */
-  bool begin_session_close_and_wait(const GraphSessionId& session) {
+  void begin_session_close_and_wait(const GraphSessionId& session) {
     bool marked_closing = false;
     try {
       std::unique_lock<std::mutex> lock(lifecycle_mutex_);
-      if (session_close_in_progress_locked(session)) {
+      while (session_close_in_progress_locked(session)) {
+#if defined(PHOTOSPIDER_INTERNAL_BAD_ALLOC_TESTING)
+        notify_embedded_close_test_hook(
+            EmbeddedCloseTestEvent::DuplicateAboutToWait);
+#endif
         lifecycle_cv_.wait(
             lock, [&] { return !session_close_in_progress_locked(session); });
-        return false;
       }
       mark_session_closing_locked(session);
       marked_closing = true;
+#if defined(PHOTOSPIDER_INTERNAL_BAD_ALLOC_TESTING)
+      notify_embedded_close_test_hook(EmbeddedCloseTestEvent::MarkerClaimed);
+#endif
       lifecycle_cv_.wait(lock, [&] {
         return !has_outstanding_async_compute_locked(session) &&
                !has_active_session_admission_locked(session);
@@ -462,7 +514,7 @@ struct EmbeddedHostState {
         }
         lock.lock();
       }
-      return true;
+      return;
     } catch (...) {
       if (marked_closing) {
         finish_session_close(session);
@@ -939,6 +991,45 @@ VoidResult guarded_void(const char* operation, GraphErrc fallback_code,
     return VoidResult{status_from_exception(operation, fallback_code, error)};
   } catch (...) {
     return VoidResult{status_from_unknown_exception(operation, fallback_code)};
+  }
+}
+
+/**
+ * @brief Executes graph close while reserving NotFound for an absent session.
+ *
+ * @tparam Fn Callable returning VoidResult and explicitly producing NotFound
+ *         only when Kernel reports that no graph map entry exists.
+ * @param fn Close body to execute after Host admission coordination.
+ * @return Callable result, the exact recoverable Graph/YAML/filesystem
+ *         category, or Graph Unknown for scheduler NotFound and otherwise
+ *         unclassified exceptions raised while stopping an existing runtime.
+ * @throws std::bad_alloc when backend execution or status construction exhausts
+ *         memory.
+ * @note Unlike generic guards, this boundary deliberately remaps even a caught
+ *       GraphError::NotFound because scheduler shutdown cannot prove absence.
+ */
+template <typename Fn>
+VoidResult guarded_graph_close(Fn&& fn) {
+  try {
+    return std::forward<Fn>(fn)();
+  } catch (const std::bad_alloc&) {
+    throw;
+  } catch (const GraphError& error) {
+    if (error.code() == GraphErrc::NotFound) {
+      return VoidResult{
+          status_from_exception("close_graph", GraphErrc::Unknown, error)};
+    }
+    return VoidResult{status_from_exception("close_graph", error)};
+  } catch (const YAML::Exception& error) {
+    return VoidResult{status_from_exception("close_graph", error)};
+  } catch (const std::filesystem::filesystem_error& error) {
+    return VoidResult{status_from_exception("close_graph", error)};
+  } catch (const std::exception& error) {
+    return VoidResult{
+        status_from_exception("close_graph", GraphErrc::Unknown, error)};
+  } catch (...) {
+    return VoidResult{
+        status_from_unknown_exception("close_graph", GraphErrc::Unknown)};
   }
 }
 
@@ -1831,21 +1922,20 @@ class EmbeddedHost final : public Host {
    * completes.
    *
    * @param session Session to close.
-   * @return Success or NotFound when the graph session does not exist.
+   * @return Success, NotFound only when the graph session does not exist, or a
+   *         non-NotFound failure when runtime shutdown fails before removal.
    * @throws std::bad_alloc on diagnostic allocation failure.
    * @note The adapter first marks the session closing, rejects new admitted
    *       compute/scheduler work, waits synchronous admissions, and waits until
    *       each accepted async promise is ready and its worker joined. Backend
    *       close then shares graph-state serialization with compute and
-   * scheduler lifecycle operations.
+   *       scheduler lifecycle operations. Any failed backend close clears the
+   *       closing marker so the still-loaded session remains admitted and may
+   *       be retried.
    */
   VoidResult close_graph(const GraphSessionId& session) override {
-    return guarded_void("close_graph", GraphErrc::NotFound, [&] {
-      if (!state_->begin_session_close_and_wait(session)) {
-        return failure_void(
-            GraphErrc::NotFound,
-            "graph session close already completed: " + session.value);
-      }
+    return guarded_graph_close([&] {
+      state_->begin_session_close_and_wait(session);
       bool closed = false;
       try {
         closed = state_->interaction.cmd_close_graph(session.value);
@@ -3156,6 +3246,21 @@ class EmbeddedHost final : public Host {
 };
 
 }  // namespace
+
+#if defined(PHOTOSPIDER_INTERNAL_BAD_ALLOC_TESTING)
+/**
+ * @brief Installs or clears the borrowed deterministic close-coordination hook.
+ * @param hook Hook that outlives all concurrent close calls, or nullptr.
+ * @return Nothing.
+ * @throws Nothing.
+ * @note Tests must serialize installation and clear the hook before its context
+ *       is destroyed. Production builds contain no hook storage or calls.
+ */
+void set_embedded_host_close_test_hook(
+    const EmbeddedCloseTestHook* hook) noexcept {
+  g_embedded_close_test_hook.store(hook, std::memory_order_release);
+}
+#endif
 
 std::unique_ptr<Host> create_embedded_host() {
   return std::make_unique<EmbeddedHost>();

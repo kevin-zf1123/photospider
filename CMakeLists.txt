@@ -842,6 +842,8 @@ if(BUILD_TESTING)
             "${PROJECT_SOURCE_DIR}/src/lib"
             "${PROJECT_SOURCE_DIR}/tests"
             ${OpenCV_INCLUDE_DIRS})
+        target_compile_definitions(test_ipc_protocol PRIVATE
+            PS_TEST_SCHEDULER_PLUGIN_PATH="$<TARGET_FILE:destroy_count_scheduler_plugin>")
         target_link_libraries(test_ipc_protocol PRIVATE
             photospider_ipc_server_internal
             photospider_ipc_client
@@ -849,7 +851,9 @@ if(BUILD_TESTING)
             GTest::gtest
             GTest::gtest_main
             nlohmann_json::nlohmann_json
-            Threads::Threads)
+            Threads::Threads
+            ${CMAKE_DL_LIBS})
+        add_dependencies(test_ipc_protocol destroy_count_scheduler_plugin)
 
         add_executable(test_ipc_daemon
             tests/integration/test_ipc_daemon.cpp)
@@ -889,11 +893,14 @@ if(BUILD_TESTING)
     target_include_directories(test_cli_compute_event_paging PRIVATE
         "${PROJECT_SOURCE_DIR}/apps/graph_cli/include")
     add_ps_test(test_host_adapter tests/integration/test_host_adapter.cpp)
+    target_link_libraries(test_host_adapter PRIVATE ${CMAKE_DL_LIBS})
     target_compile_definitions(test_host_adapter PRIVATE
         PS_TEST_OP_PLUGIN_DIR="${TEST_OP_PLUGIN_DIR}"
+        PS_TEST_SCHEDULER_PLUGIN_PATH="$<TARGET_FILE:destroy_count_scheduler_plugin>"
+        PHOTOSPIDER_INTERNAL_BAD_ALLOC_TESTING
     )
     add_dependencies(test_host_adapter lifecycle_op_plugin
-        override_lifecycle_op_plugin)
+        override_lifecycle_op_plugin destroy_count_scheduler_plugin)
     add_ps_test(test_bad_alloc_boundaries
         tests/integration/test_bad_alloc_boundaries.cpp)
     target_sources(test_bad_alloc_boundaries PRIVATE
