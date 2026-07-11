@@ -19,6 +19,7 @@
 #include "ps_types.hpp"    // NOLINT(build/include_subdir)
 
 #if defined(PHOTOSPIDER_INTERNAL_BAD_ALLOC_TESTING)
+#include "kernel/op_registry_test_access.hpp"
 #include "kernel/plugin_manage_module/plugin_loader_test_access.hpp"
 #endif
 
@@ -113,6 +114,8 @@ struct HostRegistrarContext {
  * @tparam Args Callback parameter types, including reference qualifiers.
  * @param library_lifetime Shared owner for the candidate dynamic library.
  * @param callback Plugin-provided callback to invoke.
+ * @param observe_device_retirement Whether BUILD_TESTING should observe final
+ *        device-wrapper retirement against the real registry lock token.
  * @return Host-code wrapper sharing callback state and the library lease.
  * @throws std::bad_alloc if shared state or std::function storage allocation
  *         fails.
@@ -122,26 +125,78 @@ struct HostRegistrarContext {
  *       allowing explicit unload to remove registry visibility immediately
  *       while an in-flight invocation safely finishes. A returned `NodeOutput`
  *       also receives a lease so plugin-instantiated YAML/control-block state
- * is destroyed before final unmapping.
+ *       is destroyed before final unmapping. In test builds, a true
+ *       `observe_device_retirement` uses a borrowed process-global observer;
+ *       its owner must outlive every wrapper copy and serialize clearing the
+ *       observer with final wrapper retirement. Because wrapper copies share
+ *       one plugin callback state and registry locking does not serialize
+ *       invocation, the plugin target must be reentrant or internally
+ *       synchronized.
  */
 template <typename Return, typename... Args>
 std::function<Return(Args...)> retain_plugin_library(
     std::shared_ptr<void> library_lifetime,
-    std::function<Return(Args...)> callback) {
+    std::function<Return(Args...)> callback,
+    bool observe_device_retirement = false) {
   /**
    * @brief Shared callback and handle state owned by host wrapper copies.
    * @throws Nothing directly; member destruction follows reverse declaration
    *         order.
+   * @note Copies of the returned wrapper share one instance of this state.
    */
   struct RetainedCallbackState {
+    /**
+     * @brief Takes ownership of one plugin callback and its library lease.
+     * @param retained_library Library lease destroyed after the callback.
+     * @param retained_callback Plugin target moved into host-owned state.
+     * @param observe_retirement Whether test builds report final device-wrapper
+     *        retirement.
+     * @throws Nothing when the two ownership values are moved successfully.
+     * @note Construction itself does not invoke or copy the plugin target.
+     */
+    RetainedCallbackState(std::shared_ptr<void> retained_library,
+                          std::function<Return(Args...)> retained_callback,
+                          bool observe_retirement)
+        : library_lifetime(std::move(retained_library)),
+          callback(std::move(retained_callback))
+#if defined(PHOTOSPIDER_INTERNAL_BAD_ALLOC_TESTING)
+          ,
+          observe_device_retirement(observe_retirement)
+#endif
+    {
+#if !defined(PHOTOSPIDER_INTERNAL_BAD_ALLOC_TESTING)
+      (void)observe_retirement;
+#endif
+    }
+
     /** @brief Library lease declared first so it is destroyed last. */
     std::shared_ptr<void> library_lifetime;
     /** @brief Plugin callback destroyed before the library lease. */
     std::function<Return(Args...)> callback;
+#if defined(PHOTOSPIDER_INTERNAL_BAD_ALLOC_TESTING)
+    /** @brief Whether final destruction reports one device-wrapper retirement.
+     */
+    bool observe_device_retirement = false;
+
+    /**
+     * @brief Reports final device-wrapper retirement before member destruction.
+     * @throws Nothing; the internal observer uses atomic operations only.
+     * @note The callback target and library lease are still alive in this
+     *       destructor body, so the observed lock state also governs their
+     *       immediately following reverse-order member destruction.
+     */
+    ~RetainedCallbackState() {
+      if (observe_device_retirement) {
+        testing::report_op_registry_device_callback_retirement_for_testing(
+            OpRegistry::instance());
+      }
+    }
+#endif
   };
 
   auto state = std::make_shared<RetainedCallbackState>(
-      RetainedCallbackState{std::move(library_lifetime), std::move(callback)});
+      std::move(library_lifetime), std::move(callback),
+      observe_device_retirement);
   return [state = std::move(state)](Args... args) -> Return {
     if constexpr (std::is_void_v<Return>) {
       state->callback(std::forward<Args>(args)...);
@@ -340,9 +395,13 @@ void registrar_register_dependency_builder(void* user_data, const char* type,
  * @param device Device capability label for the implementation.
  * @param fn Monolithic callback moved from the plugin into the registry.
  * @param meta Metadata associated with the device implementation.
+ * @return Nothing.
  * @throws std::invalid_argument for invalid registrar context or names.
  * @throws Exceptions from `OpRegistry` callback storage may propagate.
  * @note This callback preserves the host-owned implementation selection policy.
+ *       BUILD_TESTING retirement observation is borrowed and process-global;
+ *       the installing test must keep it alive until every retained wrapper
+ *       copy is destroyed and serialize observer clearing with that retirement.
  */
 void registrar_register_device_monolithic(void* user_data, const char* type,
                                           const char* subtype, Device device,
@@ -352,7 +411,8 @@ void registrar_register_device_monolithic(void* user_data, const char* type,
   context.registry->register_impl(
       require_name_segment(type, "operation type"),
       require_name_segment(subtype, "operation subtype"), device,
-      retain_plugin_library(context.library_lifetime, std::move(fn)), meta);
+      retain_plugin_library(context.library_lifetime, std::move(fn), true),
+      meta);
 }
 
 /**
@@ -364,9 +424,13 @@ void registrar_register_device_monolithic(void* user_data, const char* type,
  * @param device Device capability label for the implementation.
  * @param fn Tiled callback moved from the plugin into the registry.
  * @param meta Metadata associated with the device implementation.
+ * @return Nothing.
  * @throws std::invalid_argument for invalid registrar context or names.
  * @throws Exceptions from `OpRegistry` callback storage may propagate.
  * @note This callback preserves the host-owned implementation selection policy.
+ *       BUILD_TESTING retirement observation is borrowed and process-global;
+ *       the installing test must keep it alive until every retained wrapper
+ *       copy is destroyed and serialize observer clearing with that retirement.
  */
 void registrar_register_device_tiled(void* user_data, const char* type,
                                      const char* subtype, Device device,
@@ -375,7 +439,8 @@ void registrar_register_device_tiled(void* user_data, const char* type,
   context.registry->register_impl(
       require_name_segment(type, "operation type"),
       require_name_segment(subtype, "operation subtype"), device,
-      retain_plugin_library(context.library_lifetime, std::move(fn)), meta);
+      retain_plugin_library(context.library_lifetime, std::move(fn), true),
+      meta);
 }
 
 /**
@@ -707,7 +772,7 @@ std::map<std::string, std::optional<std::string>> collect_previous_sources(
  *
  * @param owned_entries Final per-key slot revisions written by the registrar.
  * @return Snapshot map containing empty callable placeholders and one default
- *         device implementation per plugin-owned appended element.
+ *         stable device-owner slot per plugin-owned appended element.
  * @throws std::bad_alloc if map, key, or device-placeholder storage allocation
  *         fails.
  * @note The returned storage contains no plugin callback yet. Allocation-free
@@ -737,7 +802,7 @@ make_retirement_registry_entries(
         !owned.device_impls.empty();
     if (owns_implementation_slot) {
       retirement.implementations.emplace();
-      retirement.implementations->device_impls.resize(
+      retirement.implementations->device_impl_slots.resize(
           owned.device_impls.size());
     }
     retirement_entries.emplace(key, std::move(retirement));

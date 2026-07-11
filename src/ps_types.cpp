@@ -1,6 +1,8 @@
 #include "ps_types.hpp"  // NOLINT(build/include_subdir)
 
 #include <algorithm>
+#include <memory>
+#include <new>
 #include <stdexcept>
 #include <string>
 #include <thread>
@@ -43,6 +45,40 @@ thread_local const unsigned char registry_state_lock_token = 0;
  *       the lock path.
  */
 std::atomic<std::atomic<std::uint64_t>*> registry_contention_counter{nullptr};
+
+/** @brief Short internal name for the precise registration failpoint enum. */
+using RegistrationFailpoint = testing::OpRegistryDeviceRegistrationFailpoint;
+
+/** @brief Thread-local precise device-registration boundary selected by tests.
+ */
+thread_local RegistrationFailpoint device_registration_failpoint{};
+
+/** @brief Visits to the currently armed device-registration failpoint. */
+thread_local std::size_t device_registration_failpoint_hit_count = 0;
+
+/** @brief Short internal name for device-wrapper retirement counters. */
+using RetirementProbe = testing::OpRegistryDeviceCallbackRetirementInspection;
+
+/** @brief Optional counters observing final host device-wrapper retirement. */
+std::atomic<RetirementProbe*> device_callback_retirement_inspection{};
+
+/**
+ * @brief Throws at one exact device-registration construction boundary.
+ *
+ * @param failpoint Boundary entered by the real registration implementation.
+ * @return Nothing.
+ * @throws std::bad_alloc when `failpoint` is currently armed.
+ * @note The hit count advances before throwing so tests cannot mistake an
+ *       unrelated allocator failure for the requested boundary.
+ */
+void maybe_fail_device_registration_for_testing(
+    testing::OpRegistryDeviceRegistrationFailpoint failpoint) {
+  if (device_registration_failpoint != failpoint) {
+    return;
+  }
+  ++device_registration_failpoint_hit_count;
+  throw std::bad_alloc{};
+}
 
 /**
  * @brief Reports one lock attempt entering the genuine contention slow path.
@@ -142,7 +178,7 @@ bool implementation_less_for_intent(const OpImplementation* lhs,
  *
  * @param implementations Group to inspect after slot-wise retirement.
  * @return True when every callback/metadata slot is empty, the dependency flag
- *         is false, and the device implementation list is empty.
+ *         is false, and both device snapshot/storage lists are empty.
  * @throws Nothing.
  * @note This helper lets unload erase an empty map node without destroying a
  *       plugin callback under the registry lock.
@@ -155,7 +191,77 @@ bool implementation_group_is_empty(
          !implementations.forward_propagator &&
          !implementations.dependency_builder &&
          !implementations.data_dependent &&
-         implementations.device_impls.empty();
+         implementations.device_impls.empty() &&
+         implementations.device_impl_slots.empty();
+}
+
+/**
+ * @brief Materializes immutable device slots into independent callback values.
+ *
+ * @param slots Stable implementation owners retained from one coherent
+ *        registry snapshot.
+ * @return Device implementation values in registration order.
+ * @throws std::bad_alloc if result or callback-target copying allocates.
+ * @throws Any exception raised while copying a callback target.
+ * @note Callers invoke this only after releasing the registry state lock. The
+ *       retained owners also keep plugin libraries mapped through every copy
+ *       and exceptional cleanup path.
+ */
+std::vector<OpImplementation> materialize_device_implementations(
+    const std::vector<std::shared_ptr<const OpImplementation>>& slots) {
+  std::vector<OpImplementation> result;
+  result.reserve(slots.size());
+  for (const auto& slot : slots) {
+    if (slot) {
+      result.push_back(*slot);
+    }
+  }
+  return result;
+}
+
+/**
+ * @brief Builds the legacy HP bridge for one stable monolithic CPU device slot.
+ *
+ * @param slot Immutable device implementation owner retained by the bridge.
+ * @return Monolithic callback forwarding to the stable device value.
+ * @throws std::bad_alloc if `std::function` target storage cannot allocate.
+ * @note Construction occurs before registry-lock acquisition. Copying the
+ *       bridge later copies only a shared owner; it never copies or moves the
+ *       original stateful device callback target under the lock. Invoking the
+ *       returned callback propagates the original target's exception or
+ *       `std::bad_variant_access` if `slot` violates its shape precondition.
+ *       The bridge does not serialize invocation against device snapshots; the
+ *       callback provider owns shared-target synchronization.
+ */
+MonolithicOpFunc make_monolithic_device_compatibility_bridge(
+    std::shared_ptr<const OpImplementation> slot) {
+  return [slot = std::move(slot)](
+             const Node& node,
+             const std::vector<const NodeOutput*>& inputs) -> NodeOutput {
+    return std::get<MonolithicOpFunc>(slot->func)(node, inputs);
+  };
+}
+
+/**
+ * @brief Builds the legacy HP bridge for one stable tiled CPU device slot.
+ *
+ * @param slot Immutable device implementation owner retained by the bridge.
+ * @return Tiled callback forwarding to the stable device value.
+ * @throws std::bad_alloc if `std::function` target storage cannot allocate.
+ * @note Construction occurs before registry-lock acquisition. Copying the
+ *       bridge later copies only a shared owner; it never copies or moves the
+ *       original stateful device callback target under the lock. Invoking the
+ *       returned callback propagates the original target's exception or
+ *       `std::bad_variant_access` if `slot` violates its shape precondition.
+ *       The bridge does not serialize invocation against device snapshots; the
+ *       callback provider owns shared-target synchronization.
+ */
+TileOpFunc make_tiled_device_compatibility_bridge(
+    std::shared_ptr<const OpImplementation> slot) {
+  return [slot = std::move(slot)](const Node& node, const OutputTile& output,
+                                  const std::vector<InputTile>& inputs) {
+    std::get<TileOpFunc>(slot->func)(node, output, inputs);
+  };
 }
 
 /**
@@ -225,6 +331,25 @@ void OpRegistry::unlock_state() const noexcept {
 #if defined(PHOTOSPIDER_INTERNAL_BAD_ALLOC_TESTING)
 namespace testing {
 
+/** @copydoc set_op_registry_device_registration_failpoint */
+void set_op_registry_device_registration_failpoint(
+    OpRegistryDeviceRegistrationFailpoint failpoint) noexcept {
+  device_registration_failpoint = failpoint;
+  device_registration_failpoint_hit_count = 0;
+}
+
+/** @copydoc op_registry_device_registration_failpoint_hits */
+std::size_t op_registry_device_registration_failpoint_hits() noexcept {
+  return device_registration_failpoint_hit_count;
+}
+
+/** @copydoc set_op_registry_device_callback_retirement_inspection */
+void set_op_registry_device_callback_retirement_inspection(
+    OpRegistryDeviceCallbackRetirementInspection* inspection) noexcept {
+  device_callback_retirement_inspection.store(inspection,
+                                              std::memory_order_release);
+}
+
 /** @copydoc set_op_registry_contention_counter */
 void set_op_registry_contention_counter(
     std::atomic<std::uint64_t>* counter) noexcept {
@@ -238,6 +363,20 @@ bool op_registry_lock_held_by_current_thread_for_testing(
          &registry_state_lock_token;
 }
 
+/** @copydoc report_op_registry_device_callback_retirement_for_testing */
+void report_op_registry_device_callback_retirement_for_testing(
+    const OpRegistry& registry) noexcept {
+  auto* inspection =
+      device_callback_retirement_inspection.load(std::memory_order_acquire);
+  if (!inspection) {
+    return;
+  }
+  inspection->destructions.fetch_add(1, std::memory_order_relaxed);
+  if (op_registry_lock_held_by_current_thread_for_testing(registry)) {
+    inspection->destructions_under_lock.fetch_add(1, std::memory_order_release);
+  }
+}
+
 /** @copydoc inspect_op_registry_device_ownership_for_testing */
 OpRegistryDeviceOwnershipInspection
 inspect_op_registry_device_ownership_for_testing(
@@ -246,16 +385,24 @@ inspect_op_registry_device_ownership_for_testing(
   OpRegistry::StateLockGuard lock(registry);
   const auto implementations = registry.impl_table_.find(key);
   if (implementations != registry.impl_table_.end()) {
+    inspection.implementation_entry_present = true;
     inspection.implementation_count =
-        implementations->second.device_impls.size();
+        implementations->second.device_impl_slots.size();
   }
   const auto ownership = registry.ownership_table_.find(key);
   if (ownership != registry.ownership_table_.end()) {
+    inspection.ownership_entry_present = true;
     inspection.revision_count = ownership->second.device_impls.size();
     inspection.all_revisions_nonzero =
         std::all_of(ownership->second.device_impls.begin(),
                     ownership->second.device_impls.end(),
                     [](std::uint64_t revision) { return revision != 0; });
+    if (!ownership->second.device_impls.empty()) {
+      inspection.first_device_revision = ownership->second.device_impls.front();
+    }
+    inspection.monolithic_hp_revision = ownership->second.monolithic_hp;
+    inspection.tiled_hp_revision = ownership->second.tiled_hp;
+    inspection.meta_hp_revision = ownership->second.meta_hp;
   }
   return inspection;
 }
@@ -513,6 +660,7 @@ void OpRegistry::prune_registration_capture(
       // Device registration appends instead of replacing. The live vector
       // already retains every predecessor element, so no callback copy is
       // needed in the restoration snapshot.
+      implementations.device_impl_slots.clear();
       implementations.device_impls.clear();
       previous.ownership.device_impls.clear();
       if (implementation_group_is_empty(implementations)) {
@@ -635,8 +783,8 @@ OpRegistry::OwnershipMatch OpRegistry::classify_active_ownership(
     classify(implementations.data_dependent, active_ownership.data_dependent,
              owned.data_dependent);
 
-    for (std::size_t index = 0; index < implementations.device_impls.size();
-         ++index) {
+    for (std::size_t index = 0;
+         index < implementations.device_impl_slots.size(); ++index) {
       const std::uint64_t active = index < active_ownership.device_impls.size()
                                        ? active_ownership.device_impls[index]
                                        : 0;
@@ -768,10 +916,10 @@ bool OpRegistry::retire_owned_entry_noexcept(
     changed = true;
   }
 
-  static_assert(std::is_nothrow_move_assignable_v<OpImplementation>);
-  static_assert(std::is_nothrow_swappable_v<OpImplementation>);
+  static_assert(
+      std::is_nothrow_swappable_v<std::shared_ptr<const OpImplementation>>);
   std::size_t write_index = 0;
-  for (std::size_t read_index = 0; read_index < active.device_impls.size();
+  for (std::size_t read_index = 0; read_index < active.device_impl_slots.size();
        ++read_index) {
     const std::uint64_t revision =
         read_index < active_ownership.device_impls.size()
@@ -783,21 +931,27 @@ bool OpRegistry::retire_owned_entry_noexcept(
       const std::size_t retirement_index = static_cast<std::size_t>(
           std::distance(owned.device_impls.begin(), owned_token));
       using std::swap;
-      swap(active.device_impls[read_index],
-           retired.device_impls[retirement_index]);
+      swap(active.device_impl_slots[read_index],
+           retired.device_impl_slots[retirement_index]);
       changed = true;
       continue;
     }
     if (write_index != read_index) {
-      active.device_impls[write_index] =
-          std::move(active.device_impls[read_index]);
+      // Every gap was created by swapping an owned slot into retirement, so
+      // the destination is empty. Swapping transfers only a shared owner and
+      // cannot release or relocate either callback target under this lock.
+      using std::swap;
+      swap(active.device_impl_slots[write_index],
+           active.device_impl_slots[read_index]);
     }
     if (write_index < active_ownership.device_impls.size()) {
       active_ownership.device_impls[write_index] = revision;
     }
     ++write_index;
   }
-  active.device_impls.resize(write_index);
+  // Compaction leaves only empty owners in the tail, so resize cannot release
+  // a callback target or its final plugin lease while the lock is held.
+  active.device_impl_slots.resize(write_index);
   active_ownership.device_impls.resize(write_index);
 
   if (implementation_group_is_empty(active)) {
@@ -1370,13 +1524,21 @@ bool OpRegistry::is_data_dependent(const std::string& type,
 /** @copydoc OpRegistry::get_implementations */
 std::optional<OpRegistry::OpImplementations> OpRegistry::get_implementations(
     const std::string& type, const std::string& subtype) const {
-  StateLockGuard lock(*this);
-  auto key = make_key(type, subtype);
-  auto it = impl_table_.find(key);
-  if (it == impl_table_.end()) {
-    return std::nullopt;
+  std::optional<OpImplementations> result;
+  {
+    StateLockGuard lock(*this);
+    auto key = make_key(type, subtype);
+    auto it = impl_table_.find(key);
+    if (it == impl_table_.end()) {
+      return std::nullopt;
+    }
+    result = it->second;
   }
-  return it->second;
+
+  result->device_impls =
+      materialize_device_implementations(result->device_impl_slots);
+  result->device_impl_slots.clear();
+  return result;
 }
 
 // =============================================================================
@@ -1387,24 +1549,34 @@ std::optional<OpRegistry::OpImplementations> OpRegistry::get_implementations(
 void OpRegistry::register_impl(const std::string& type,
                                const std::string& subtype, Device device,
                                MonolithicOpFunc fn, OpMetadata meta) {
-  auto key = make_key(type, subtype);
   // 设置元数据中的设备偏好
   meta.device_preference = device;
-  std::optional<MonolithicOpFunc> cpu_compatibility;
-  if (device == Device::CPU) {
-    cpu_compatibility.emplace(fn);
-  }
   OpImplementation impl;
   impl.func = std::move(fn);
   impl.metadata = meta;
+#if defined(PHOTOSPIDER_INTERNAL_BAD_ALLOC_TESTING)
+  maybe_fail_device_registration_for_testing(
+      testing::OpRegistryDeviceRegistrationFailpoint::StableOwner);
+#endif
+  std::shared_ptr<const OpImplementation> device_slot =
+      std::make_shared<OpImplementation>(std::move(impl));
+  std::optional<MonolithicOpFunc> cpu_compatibility;
+  if (device == Device::CPU) {
+#if defined(PHOTOSPIDER_INTERNAL_BAD_ALLOC_TESTING)
+    maybe_fail_device_registration_for_testing(
+        testing::OpRegistryDeviceRegistrationFailpoint::CpuCompatibilityBridge);
+#endif
+    cpu_compatibility.emplace(
+        make_monolithic_device_compatibility_bridge(device_slot));
+  }
+  auto key = make_key(type, subtype);
   {
     StateLockGuard lock(*this);
     capture_key_before_mutation(key);
     RegistryEntryOwnership& ownership = ownership_table_[key];
     OpImplementations& implementations = impl_table_[key];
-    static_assert(std::is_nothrow_move_constructible_v<OpImplementation>);
-    implementations.device_impls.reserve(implementations.device_impls.size() +
-                                         1);
+    implementations.device_impl_slots.reserve(
+        implementations.device_impl_slots.size() + 1);
     ownership.device_impls.reserve(ownership.device_impls.size() + 1);
     if (active_registration_capture) {
       auto& captured = active_registration_capture->owned_entries[key];
@@ -1412,7 +1584,7 @@ void OpRegistry::register_impl(const std::string& type,
     }
     const std::uint64_t revision = next_ownership_revision();
 
-    implementations.device_impls.push_back(std::move(impl));
+    implementations.device_impl_slots.push_back(std::move(device_slot));
     record_device_ownership(key, ownership, revision);
     if (meta.data_dependent) {
       implementations.data_dependent = true;
@@ -1435,24 +1607,34 @@ void OpRegistry::register_impl(const std::string& type,
 void OpRegistry::register_impl(const std::string& type,
                                const std::string& subtype, Device device,
                                TileOpFunc fn, OpMetadata meta) {
-  auto key = make_key(type, subtype);
   // 设置元数据中的设备偏好
   meta.device_preference = device;
-  std::optional<TileOpFunc> cpu_compatibility;
-  if (device == Device::CPU) {
-    cpu_compatibility.emplace(fn);
-  }
   OpImplementation impl;
   impl.func = std::move(fn);
   impl.metadata = meta;
+#if defined(PHOTOSPIDER_INTERNAL_BAD_ALLOC_TESTING)
+  maybe_fail_device_registration_for_testing(
+      testing::OpRegistryDeviceRegistrationFailpoint::StableOwner);
+#endif
+  std::shared_ptr<const OpImplementation> device_slot =
+      std::make_shared<OpImplementation>(std::move(impl));
+  std::optional<TileOpFunc> cpu_compatibility;
+  if (device == Device::CPU) {
+#if defined(PHOTOSPIDER_INTERNAL_BAD_ALLOC_TESTING)
+    maybe_fail_device_registration_for_testing(
+        testing::OpRegistryDeviceRegistrationFailpoint::CpuCompatibilityBridge);
+#endif
+    cpu_compatibility.emplace(
+        make_tiled_device_compatibility_bridge(device_slot));
+  }
+  auto key = make_key(type, subtype);
   {
     StateLockGuard lock(*this);
     capture_key_before_mutation(key);
     RegistryEntryOwnership& ownership = ownership_table_[key];
     OpImplementations& implementations = impl_table_[key];
-    static_assert(std::is_nothrow_move_constructible_v<OpImplementation>);
-    implementations.device_impls.reserve(implementations.device_impls.size() +
-                                         1);
+    implementations.device_impl_slots.reserve(
+        implementations.device_impl_slots.size() + 1);
     ownership.device_impls.reserve(ownership.device_impls.size() + 1);
     if (active_registration_capture) {
       auto& captured = active_registration_capture->owned_entries[key];
@@ -1460,7 +1642,7 @@ void OpRegistry::register_impl(const std::string& type,
     }
     const std::uint64_t revision = next_ownership_revision();
 
-    implementations.device_impls.push_back(std::move(impl));
+    implementations.device_impl_slots.push_back(std::move(device_slot));
     record_device_ownership(key, ownership, revision);
     if (meta.data_dependent) {
       implementations.data_dependent = true;
@@ -1481,15 +1663,24 @@ void OpRegistry::register_impl(const std::string& type,
 /** @copydoc OpRegistry::get_implementations_by_device */
 std::vector<OpImplementation> OpRegistry::get_implementations_by_device(
     const std::string& type, const std::string& subtype, Device device) const {
-  StateLockGuard lock(*this);
-  std::vector<OpImplementation> result;
-  auto key = make_key(type, subtype);
-  auto it = impl_table_.find(key);
-  if (it == impl_table_.end()) {
-    return result;
+  std::vector<std::shared_ptr<const OpImplementation>> slots;
+  {
+    StateLockGuard lock(*this);
+    auto key = make_key(type, subtype);
+    auto it = impl_table_.find(key);
+    if (it == impl_table_.end()) {
+      return {};
+    }
+    slots = it->second.device_impl_slots;
   }
 
-  for (const auto& impl : it->second.device_impls) {
+  std::vector<OpImplementation> result;
+  result.reserve(slots.size());
+  for (const auto& slot : slots) {
+    if (!slot) {
+      continue;
+    }
+    const OpImplementation& impl = *slot;
     if (impl.metadata.device_preference == device) {
       result.push_back(impl);
     }
@@ -1500,18 +1691,17 @@ std::vector<OpImplementation> OpRegistry::get_implementations_by_device(
 /** @copydoc OpRegistry::get_all_implementations */
 std::vector<OpImplementation> OpRegistry::get_all_implementations(
     const std::string& type, const std::string& subtype) const {
-  StateLockGuard lock(*this);
-  std::vector<OpImplementation> result;
-  auto key = make_key(type, subtype);
-  auto it = impl_table_.find(key);
-  if (it == impl_table_.end()) {
-    return result;
+  std::vector<std::shared_ptr<const OpImplementation>> slots;
+  {
+    StateLockGuard lock(*this);
+    auto key = make_key(type, subtype);
+    auto it = impl_table_.find(key);
+    if (it == impl_table_.end()) {
+      return {};
+    }
+    slots = it->second.device_impl_slots;
   }
-
-  for (const auto& impl : it->second.device_impls) {
-    result.push_back(impl);
-  }
-  return result;
+  return materialize_device_implementations(slots);
 }
 
 /** @copydoc OpRegistry::select_best_implementation */

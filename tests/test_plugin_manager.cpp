@@ -113,6 +113,14 @@ namespace {
 constexpr const char* kLifecycleType = "plugin_lifecycle";
 constexpr const char* kLifecycleSubtype = "op";
 constexpr const char* kLifecycleKey = "plugin_lifecycle:op";
+constexpr const char* kLifecycleCpuDeviceSubtype = "cpu_device";
+constexpr const char* kLifecycleCpuDeviceKey = "plugin_lifecycle:cpu_device";
+constexpr const char* kDirectCpuOwnerType = "direct_cpu_stable_owner";
+constexpr const char* kDirectCpuMonolithicSubtype = "monolithic";
+constexpr const char* kDirectCpuMonolithicKey =
+    "direct_cpu_stable_owner:monolithic";  // NOLINT(whitespace/indent_namespace)
+constexpr const char* kDirectCpuTiledSubtype = "tiled";
+constexpr const char* kDirectCpuTiledKey = "direct_cpu_stable_owner:tiled";
 constexpr const char* kLifecycleTraceEnvironment = "PS_LIFECYCLE_PLUGIN_TRACE";
 constexpr const char* kLifecycleThrowEnvironment =
     "PS_LIFECYCLE_PLUGIN_REGISTRAR_THROW";  // NOLINT(whitespace/indent_namespace)
@@ -124,6 +132,8 @@ constexpr const char* kLifecycleResultProbeEnvironment =
     "PS_LIFECYCLE_PLUGIN_RESULT_PROBE";  // NOLINT(whitespace/indent_namespace)
 constexpr const char* kLifecycleDeviceRegistrarEnvironment =
     "PS_LIFECYCLE_PLUGIN_REGISTER_DEVICES";  // NOLINT(whitespace/indent_namespace)
+constexpr const char* kLifecycleCpuDeviceRegistrarEnvironment =
+    "PS_LIFECYCLE_PLUGIN_REGISTER_CPU_DEVICE";  // NOLINT(whitespace/indent_namespace)
 
 #ifndef PS_STANDARD_OP_PLUGIN_DIR
 #define PS_STANDARD_OP_PLUGIN_DIR "build/plugins"
@@ -272,8 +282,22 @@ class ScopedEnvironmentVariable final {
     }
   }
 
-  ScopedEnvironmentVariable(const ScopedEnvironmentVariable&) = delete;
-  ScopedEnvironmentVariable& operator=(const ScopedEnvironmentVariable&) =
+  /**
+   * @brief Prevents two guards from restoring the same environment key.
+   * @param other Guard that remains responsible for its installed value.
+   * @throws Nothing; operation is deleted.
+   * @note Unique lexical ownership preserves one deterministic restoration.
+   */
+  ScopedEnvironmentVariable(const ScopedEnvironmentVariable& other) = delete;
+
+  /**
+   * @brief Prevents replacing one active environment guard by assignment.
+   * @param other Guard that retains responsibility for its installed value.
+   * @return No value because this operation is deleted.
+   * @throws Nothing; operation is deleted.
+   * @note Assignment cannot transfer process-global restoration ownership.
+   */
+  ScopedEnvironmentVariable& operator=(const ScopedEnvironmentVariable& other) =
       delete;
 
  private:
@@ -343,10 +367,24 @@ class ScopedPluginCleanupAllocationFailure final {
     plugin_cleanup_allocation_probe::disarm();
   }
 
+  /**
+   * @brief Prevents duplicating ownership of one armed allocation failpoint.
+   * @param other Scope that remains responsible for disarming the failpoint.
+   * @throws Nothing; operation is deleted.
+   * @note Exactly one lexical owner must disarm the thread-local probe.
+   */
   ScopedPluginCleanupAllocationFailure(
-      const ScopedPluginCleanupAllocationFailure&) = delete;
+      const ScopedPluginCleanupAllocationFailure& other) = delete;
+
+  /**
+   * @brief Prevents replacing an active allocation-failure scope.
+   * @param other Scope retaining responsibility for its armed failpoint.
+   * @return No value because this operation is deleted.
+   * @throws Nothing; operation is deleted.
+   * @note Assignment cannot transfer the thread-local disarm obligation.
+   */
   ScopedPluginCleanupAllocationFailure& operator=(
-      const ScopedPluginCleanupAllocationFailure&) = delete;
+      const ScopedPluginCleanupAllocationFailure& other) = delete;
 };
 
 /**
@@ -386,6 +424,7 @@ class ScopedOpRegistryContentionCounter final {
    * @brief Prevents two scopes from claiming one installed counter lifetime.
    *
    * @param other Scope that remains the unique installed observer.
+   * @throws Nothing; operation is deleted.
    * @note Deletion prevents either destructor from clearing another counter.
    */
   ScopedOpRegistryContentionCounter(
@@ -396,6 +435,7 @@ class ScopedOpRegistryContentionCounter final {
    *
    * @param other Scope that must retain its own counter lifetime.
    * @return No value because this operation is deleted.
+   * @throws Nothing; operation is deleted.
    * @note The installed pointer remains paired with lexical scope lifetime.
    */
   ScopedOpRegistryContentionCounter& operator=(
@@ -405,6 +445,7 @@ class ScopedOpRegistryContentionCounter final {
    * @brief Prevents moving the installed counter to a different address.
    *
    * @param other Scope whose inline counter address remains installed.
+   * @throws Nothing; operation is deleted.
    * @note Deletion keeps the published observer pointer stable.
    */
   ScopedOpRegistryContentionCounter(ScopedOpRegistryContentionCounter&& other) =
@@ -415,6 +456,7 @@ class ScopedOpRegistryContentionCounter final {
    *
    * @param other Scope that retains its own observer lifetime.
    * @return No value because this operation is deleted.
+   * @throws Nothing; operation is deleted.
    * @note The active pointer cannot be retargeted through move assignment.
    */
   ScopedOpRegistryContentionCounter& operator=(
@@ -457,6 +499,201 @@ class ScopedOpRegistryContentionCounter final {
 };
 
 /**
+ * @brief Owns one BUILD_TESTING observer for final device-wrapper retirement.
+ *
+ * @throws Nothing.
+ * @note The inline counters outlive the installed observer pointer, and the
+ *       destructor clears that pointer before their storage leaves scope.
+ */
+class ScopedDeviceCallbackRetirementInspection final {
+ public:
+  /**
+   * @brief Installs this scope's inline retirement counters.
+   * @throws Nothing.
+   * @note A test must not overlap two instances because the observer is
+   *       process-global while plugin unload is process-serialized.
+   */
+  ScopedDeviceCallbackRetirementInspection() noexcept {
+    testing::set_op_registry_device_callback_retirement_inspection(
+        &inspection_);
+  }
+
+  /**
+   * @brief Clears the observer before inline counter destruction.
+   * @throws Nothing.
+   * @note Every callback expected to report must already have retired.
+   */
+  ~ScopedDeviceCallbackRetirementInspection() noexcept {
+    testing::set_op_registry_device_callback_retirement_inspection(nullptr);
+  }
+
+  /**
+   * @brief Prevents two scopes from sharing one installed observer lifetime.
+   * @param other Scope that remains the unique observer owner.
+   * @throws Nothing; operation is deleted.
+   * @note Deletion prevents either destructor from clearing another observer.
+   */
+  ScopedDeviceCallbackRetirementInspection(
+      const ScopedDeviceCallbackRetirementInspection& other) = delete;
+
+  /**
+   * @brief Prevents retargeting a live retirement observer by copy assignment.
+   * @param other Scope retaining its own inline counters.
+   * @return No value because this operation is deleted.
+   * @throws Nothing; operation is deleted.
+   * @note The installed pointer remains paired with lexical scope lifetime.
+   */
+  ScopedDeviceCallbackRetirementInspection& operator=(
+      const ScopedDeviceCallbackRetirementInspection& other) = delete;
+
+  /**
+   * @brief Prevents moving installed counters to a different address.
+   * @param other Scope whose inline counter address remains installed.
+   * @throws Nothing; operation is deleted.
+   * @note Deletion keeps the observer pointer stable.
+   */
+  ScopedDeviceCallbackRetirementInspection(
+      ScopedDeviceCallbackRetirementInspection&& other) = delete;
+
+  /**
+   * @brief Prevents transferring an installed observer by move assignment.
+   * @param other Scope retaining its own observer lifetime.
+   * @return No value because this operation is deleted.
+   * @throws Nothing; operation is deleted.
+   * @note The active pointer cannot be rebound after construction.
+   */
+  ScopedDeviceCallbackRetirementInspection& operator=(
+      ScopedDeviceCallbackRetirementInspection&& other) = delete;
+
+  /**
+   * @brief Returns final host device-wrapper destructions observed so far.
+   * @return Monotonic destruction count.
+   * @throws Nothing.
+   * @note Reader copies share wrapper state and therefore do not increment this
+   *       value until the last retained state is released.
+   */
+  std::uint64_t destructions() const noexcept {
+    return inspection_.destructions.load(std::memory_order_acquire);
+  }
+
+  /**
+   * @brief Returns wrapper destructions that began under the registry lock.
+   * @return Monotonic lock-violation count.
+   * @throws Nothing.
+   * @note Correct retirement keeps this value at zero.
+   */
+  std::uint64_t destructions_under_lock() const noexcept {
+    return inspection_.destructions_under_lock.load(std::memory_order_acquire);
+  }
+
+ private:
+  /** @brief Inline counters published only for this lexical scope. */
+  testing::OpRegistryDeviceCallbackRetirementInspection inspection_;
+};
+
+/**
+ * @brief Removes one registry key before its borrowed callback state expires.
+ *
+ * @throws std::bad_alloc if canonical key construction cannot allocate.
+ * @note Declare this guard immediately after the stack state borrowed by a
+ *       registered callback. Reverse destruction then unregisters the callback
+ *       before that state expires on fatal assertions or exceptions. Registry
+ *       lookup and node extraction do not allocate, but retired callback
+ *       destructors may execute allocating user code and must remain noexcept.
+ */
+class ScopedOpRegistryKeyCleanup final {
+ public:
+  /**
+   * @brief Prepares noexcept cleanup for one operation type and subtype.
+   * @param registry Registry whose key may receive a borrowed callback.
+   * @param type Operation type used to build the canonical key.
+   * @param subtype Operation subtype used to build the canonical key.
+   * @throws std::bad_alloc if canonical key construction cannot allocate.
+   * @note Canonical-key allocation completes before registration.
+   *       `OpRegistry::unregister_key` lookup and node extraction do not
+   *       allocate; retired callback destructors may execute allocating user
+   *       code, but they must honor noexcept destruction.
+   */
+  ScopedOpRegistryKeyCleanup(OpRegistry& registry, const std::string& type,
+                             const std::string& subtype)
+      : registry_(registry), key_(make_key(type, subtype)) {}
+
+  /**
+   * @brief Removes the guarded key while borrowed callback state is alive.
+   * @throws Nothing; the destructor is noexcept and cannot propagate an
+   *         exception.
+   * @note `OpRegistry::unregister_key` is idempotent; its documented lookup
+   *       and node-extraction path does not allocate or throw, and callback
+   *       retirement occurs outside the state lock. Retired callback
+   *       destructors may allocate while running user code but must be
+   *       noexcept; a violation terminates instead of escaping this guard.
+   *       The guard therefore does not promise allocation-free teardown. A
+   *       disarmed guard performs no operation.
+   */
+  ~ScopedOpRegistryKeyCleanup() noexcept {
+    if (armed_) {
+      (void)registry_.unregister_key(key_);
+    }
+  }
+
+  /**
+   * @brief Prevents two guards from cleaning the same borrowed callback.
+   * @param other Guard that remains responsible for its registry key.
+   * @throws Nothing; operation is deleted.
+   * @note Unique lexical ownership fixes cleanup ordering relative to the
+   *       callback's borrowed state.
+   */
+  ScopedOpRegistryKeyCleanup(const ScopedOpRegistryKeyCleanup& other) = delete;
+
+  /**
+   * @brief Prevents replacing one active cleanup obligation by assignment.
+   * @param other Guard retaining responsibility for its registry key.
+   * @return No value because this operation is deleted.
+   * @throws Nothing; operation is deleted.
+   * @note Assignment cannot preserve both guards' declaration ordering.
+   */
+  ScopedOpRegistryKeyCleanup& operator=(
+      const ScopedOpRegistryKeyCleanup& other) = delete;
+
+  /**
+   * @brief Prevents moving cleanup past the borrowed state it protects.
+   * @param other Guard whose lexical position remains authoritative.
+   * @throws Nothing; operation is deleted.
+   * @note Stable scope placement guarantees cleanup precedes tracker expiry.
+   */
+  ScopedOpRegistryKeyCleanup(ScopedOpRegistryKeyCleanup&& other) = delete;
+
+  /**
+   * @brief Prevents move assignment from changing cleanup order.
+   * @param other Guard retaining its original lexical lifetime.
+   * @return No value because this operation is deleted.
+   * @throws Nothing; operation is deleted.
+   * @note Cleanup ownership cannot move after callback registration.
+   */
+  ScopedOpRegistryKeyCleanup& operator=(ScopedOpRegistryKeyCleanup&& other) =
+      delete;
+
+  /**
+   * @brief Disarms cleanup after explicit whole-key unregister succeeds.
+   * @return Nothing.
+   * @throws Nothing.
+   * @note Call only after `unregister_key` has returned; retained callback
+   *       snapshots still destruct before the tracker by lexical ordering.
+   */
+  void disarm() noexcept { armed_ = false; }
+
+ private:
+  /** @brief Registry that outlives this test-local cleanup guard. */
+  OpRegistry& registry_;
+  /** @brief Preallocated canonical key used by noexcept destruction. */
+  std::string key_;
+  /**
+   * @brief True until normal-path unregister transfers cleanup responsibility.
+   */
+  bool armed_ = true;
+};
+
+/**
  * @brief Returns a unique trace path for one lifecycle transaction scenario.
  *
  * @param label Stable scenario label used in the filename.
@@ -489,6 +726,47 @@ std::vector<std::string> read_lifecycle_trace(
   std::string line;
   while (std::getline(input, line)) {
     events.push_back(line);
+  }
+  return events;
+}
+
+/**
+ * @brief Counts one exact event in a parsed lifecycle trace.
+ *
+ * @param events Ordered fixture events to inspect.
+ * @param expected Exact event label to count.
+ * @return Number of matching entries.
+ * @throws Nothing.
+ * @note CPU bridge tests compare counts before and after reader copies so
+ *       registration-time target copies remain distinguishable from
+ *       regressions.
+ */
+std::size_t count_lifecycle_event(const std::vector<std::string>& events,
+                                  const std::string& expected) noexcept {
+  return static_cast<std::size_t>(
+      std::count(events.begin(), events.end(), expected));
+}
+
+/**
+ * @brief Canonicalizes the unspecified destruction order of two vector
+ * elements.
+ *
+ * @param events Ordered lifecycle trace copied for comparison.
+ * @return Trace with each adjacent monolithic/tiled device-destruction pair in
+ *         tiled-then-monolithic order.
+ * @throws Nothing beyond the already completed input-vector move.
+ * @note C++ does not make tests depend on one standard library's vector element
+ *       destruction direction; all ordering relative to callback/library
+ *       retirement remains unchanged and is still asserted exactly.
+ */
+std::vector<std::string> normalize_device_target_trace(
+    std::vector<std::string> events) noexcept {
+  for (std::size_t index = 0; index + 1 < events.size(); ++index) {
+    if (events[index] == "device_monolithic_target_destroy" &&
+        events[index + 1] == "device_tiled_target_destroy") {
+      events[index].swap(events[index + 1]);
+      ++index;
+    }
   }
   return events;
 }
@@ -653,6 +931,33 @@ void expect_lifecycle_device_ownership_alignment(std::size_t expected_count) {
 }
 
 /**
+ * @brief Asserts exact equality of one key's internal ownership inspection.
+ *
+ * @param before Coherent baseline captured before one precise failpoint.
+ * @param after Coherent state captured after the injected exception.
+ * @return Nothing.
+ * @throws GTest assertion failures when key presence, values, or revisions
+ * vary.
+ * @note Failpoint tests use a single baseline device slot, so equality of its
+ *       exact first revision plus count proves the complete device token vector
+ *       remains unchanged.
+ */
+void expect_device_ownership_inspection_equal(
+    const testing::OpRegistryDeviceOwnershipInspection& before,
+    const testing::OpRegistryDeviceOwnershipInspection& after) {
+  EXPECT_EQ(after.implementation_entry_present,
+            before.implementation_entry_present);
+  EXPECT_EQ(after.ownership_entry_present, before.ownership_entry_present);
+  EXPECT_EQ(after.implementation_count, before.implementation_count);
+  EXPECT_EQ(after.revision_count, before.revision_count);
+  EXPECT_EQ(after.all_revisions_nonzero, before.all_revisions_nonzero);
+  EXPECT_EQ(after.first_device_revision, before.first_device_revision);
+  EXPECT_EQ(after.monolithic_hp_revision, before.monolithic_hp_revision);
+  EXPECT_EQ(after.tiled_hp_revision, before.tiled_hp_revision);
+  EXPECT_EQ(after.meta_hp_revision, before.meta_hp_revision);
+}
+
+/**
  * @brief Records whether callback-state destruction occurs under registry lock.
  *
  * @throws Nothing; read failures during the reentrant probe are converted to a
@@ -716,6 +1021,213 @@ MonolithicOpFunc make_reentrant_registry_callback(
     return NodeOutput{};
   };
 }
+
+/**
+ * @brief Aggregates lifecycle observations for stateful device callback
+ * targets.
+ *
+ * Each target construction, copy, move, and destruction inspects the actual
+ * current-thread registry lock token and performs one reentrant registry read.
+ * The test can therefore distinguish a genuine lock-bound target operation
+ * from mere absence of deadlock.
+ *
+ * @throws Nothing directly; construction and destruction operate only on
+ *         atomics and borrowed pointers.
+ * @note The tracker has stack lifetime spanning every callback snapshot and
+ *       registry retirement in its test. Atomic fields keep observations safe
+ *       if implementation details later move snapshot copying to another
+ *       thread.
+ */
+struct ReentrantDeviceCallbackTracker {
+  /** @brief Registry inspected and re-entered by every target operation. */
+  OpRegistry* registry = nullptr;
+  /** @brief Number of currently live functor target objects. */
+  std::atomic<int> live_targets{0};
+  /** @brief Number of directly constructed original target objects. */
+  std::atomic<int> constructions{0};
+  /** @brief Number of original-target copy-constructor calls. */
+  std::atomic<int> copies{0};
+  /** @brief Number of original-target move-constructor calls. */
+  std::atomic<int> moves{0};
+  /** @brief Total observed construction/copy/move/destruction operations. */
+  std::atomic<int> observations{0};
+  /** @brief Number of target destructors that completed. */
+  std::atomic<int> destructions{0};
+  /** @brief Number of callback invocations through any copied path. */
+  std::atomic<int> invocations{0};
+  /** @brief Last deterministic tiled-callback result observed by the test. */
+  std::atomic<int> last_tiled_result{-1};
+  /** @brief Sticky signal that any target operation held the registry lock. */
+  std::atomic<bool> observed_under_lock{false};
+  /** @brief Sticky signal that any reentrant registry read failed. */
+  std::atomic<bool> reentry_failed{false};
+
+  /**
+   * @brief Inspects lock ownership and performs a real registry re-entry.
+   *
+   * @return Nothing.
+   * @throws Nothing; registry read failures become `reentry_failed`.
+   * @note The owner-token inspection occurs before the read, so same-thread
+   *       recursive lock support cannot hide a lock-bound target operation.
+   */
+  void observe() noexcept {
+    observations.fetch_add(1, std::memory_order_relaxed);
+    if (testing::op_registry_lock_held_by_current_thread_for_testing(
+            *registry)) {
+      observed_under_lock.store(true, std::memory_order_release);
+    }
+    try {
+      (void)registry->get_keys();
+    } catch (...) {
+      reentry_failed.store(true, std::memory_order_release);
+    }
+  }
+};
+
+/**
+ * @brief Common state whose special members audit callback-target relocation.
+ *
+ * @throws Nothing after construction; all observations suppress registry read
+ *         failures.
+ * @note Move transfers the tracker identity without changing the live-target
+ *       count. A moved-from destructor is inert.
+ */
+struct ReentrantDeviceCallbackState {
+  /** @brief Tracker owned by the surrounding deterministic test. */
+  ReentrantDeviceCallbackTracker* tracker = nullptr;
+
+  /**
+   * @brief Creates one observed callback target.
+   * @param target_tracker Tracker that outlives this target.
+   * @throws Nothing.
+   */
+  explicit ReentrantDeviceCallbackState(
+      ReentrantDeviceCallbackTracker& target_tracker) noexcept
+      : tracker(&target_tracker) {
+    tracker->constructions.fetch_add(1, std::memory_order_relaxed);
+    tracker->live_targets.fetch_add(1, std::memory_order_relaxed);
+    tracker->observe();
+  }
+
+  /**
+   * @brief Copies one callback target and records the copy context.
+   * @param other Live target whose tracker is shared.
+   * @throws Nothing.
+   */
+  ReentrantDeviceCallbackState(
+      const ReentrantDeviceCallbackState& other) noexcept
+      : tracker(other.tracker) {
+    if (tracker) {
+      tracker->copies.fetch_add(1, std::memory_order_relaxed);
+      tracker->live_targets.fetch_add(1, std::memory_order_relaxed);
+      tracker->observe();
+    }
+  }
+
+  /**
+   * @brief Transfers one callback target and records the move context.
+   * @param other Target relinquishing its tracker identity.
+   * @throws Nothing.
+   */
+  ReentrantDeviceCallbackState(ReentrantDeviceCallbackState&& other) noexcept
+      : tracker(std::exchange(other.tracker, nullptr)) {
+    if (tracker) {
+      tracker->moves.fetch_add(1, std::memory_order_relaxed);
+      tracker->observe();
+    }
+  }
+
+  /**
+   * @brief Prevents replacing an observed callback target by copy assignment.
+   * @param other Target that retains its existing tracker identity.
+   * @return No value because this operation is deleted.
+   * @throws Nothing; operation is deleted.
+   * @note Immutable target identity keeps live/destruction counts balanced.
+   */
+  ReentrantDeviceCallbackState& operator=(
+      const ReentrantDeviceCallbackState& other) = delete;
+
+  /**
+   * @brief Prevents replacing an observed callback target by move assignment.
+   * @param other Target that retains its existing tracker identity.
+   * @return No value because this operation is deleted.
+   * @throws Nothing; operation is deleted.
+   * @note Stable-owner publication moves the surrounding callback value
+   * instead.
+   */
+  ReentrantDeviceCallbackState& operator=(
+      ReentrantDeviceCallbackState&& other) = delete;
+
+  /**
+   * @brief Records target destruction and releases one live-target count.
+   * @throws Nothing.
+   * @note The observation includes the final target destruction after registry
+   *       unregister, which must re-enter only after lock release.
+   */
+  ~ReentrantDeviceCallbackState() noexcept {
+    if (tracker) {
+      tracker->observe();
+      tracker->destructions.fetch_add(1, std::memory_order_relaxed);
+      tracker->live_targets.fetch_sub(1, std::memory_order_release);
+    }
+  }
+};
+
+/**
+ * @brief Stateful monolithic device callback used by relocation tests.
+ * @throws Nothing after construction.
+ * @note Every copied target reports through the inherited tracker; the tracker
+ *       must outlive all callback snapshots.
+ */
+struct ReentrantDeviceMonolithicCallback : ReentrantDeviceCallbackState {
+  using ReentrantDeviceCallbackState::ReentrantDeviceCallbackState;
+
+  /**
+   * @brief Produces one deterministic result and records invocation.
+   * @param node Borrowed operation node; unused.
+   * @param inputs Borrowed input results; unused.
+   * @return Result carrying the direct CPU monolithic marker.
+   * @throws std::bad_alloc if diagnostic string storage cannot allocate.
+   * @note Device snapshots and the HP bridge must produce the same marker.
+   */
+  NodeOutput operator()(const Node& node,
+                        const std::vector<const NodeOutput*>& inputs) const {
+    (void)node;
+    (void)inputs;
+    tracker->invocations.fetch_add(1, std::memory_order_relaxed);
+    NodeOutput output;
+    output.debug.compute_device = "DIRECT_STATEFUL_CPU_MONOLITHIC";
+    return output;
+  }
+};
+
+/**
+ * @brief Stateful tiled device callback used by relocation tests.
+ * @throws Nothing after construction.
+ * @note Every copied target reports through the inherited tracker; the tracker
+ *       must outlive all callback snapshots.
+ */
+struct ReentrantDeviceTiledCallback : ReentrantDeviceCallbackState {
+  using ReentrantDeviceCallbackState::ReentrantDeviceCallbackState;
+
+  /**
+   * @brief Computes one deterministic observation from borrowed tile views.
+   * @param node Borrowed operation node; unused.
+   * @param output Borrowed output tile; unused.
+   * @param inputs Borrowed input tiles; unused.
+   * @return Nothing.
+   * @throws Nothing.
+   * @note Device snapshots and the HP bridge must publish the same observation.
+   */
+  void operator()(const Node& node, const OutputTile& output,
+                  const std::vector<InputTile>& inputs) const {
+    const int result = node.id + output.roi.x + output.roi.y +
+                       output.roi.width + output.roi.height +
+                       static_cast<int>(inputs.size());
+    tracker->last_tiled_result.store(result, std::memory_order_release);
+    tracker->invocations.fetch_add(1, std::memory_order_relaxed);
+  }
+};
 
 /**
  * @brief Executes the currently registered lifecycle operation marker.
@@ -826,6 +1338,9 @@ class PluginManagerLifecycleTest : public ::testing::Test {
   void SetUp() override {
     (void)PluginManager::process_instance().unload_all_plugins();
     OpRegistry::instance().unregister_key(kLifecycleKey);
+    OpRegistry::instance().unregister_key(kLifecycleCpuDeviceKey);
+    OpRegistry::instance().unregister_key(kDirectCpuMonolithicKey);
+    OpRegistry::instance().unregister_key(kDirectCpuTiledKey);
   }
 
   /**
@@ -839,6 +1354,9 @@ class PluginManagerLifecycleTest : public ::testing::Test {
   void TearDown() override {
     (void)PluginManager::process_instance().unload_all_plugins();
     OpRegistry::instance().unregister_key(kLifecycleKey);
+    OpRegistry::instance().unregister_key(kLifecycleCpuDeviceKey);
+    OpRegistry::instance().unregister_key(kDirectCpuMonolithicKey);
+    OpRegistry::instance().unregister_key(kDirectCpuTiledKey);
   }
 };
 
@@ -901,6 +1419,7 @@ TEST_F(PluginManagerLifecycleTest,
   ScopedEnvironmentVariable device_environment(
       kLifecycleDeviceRegistrarEnvironment, "1");
   auto& manager = PluginManager::process_instance();
+  ScopedDeviceCallbackRetirementInspection retirement_inspection;
 
   register_direct_lifecycle_device();
   expect_lifecycle_device_ownership_alignment(1);
@@ -921,6 +1440,9 @@ TEST_F(PluginManagerLifecycleTest,
     EXPECT_TRUE(has_lifecycle_device_implementation(Device::GPU_CUDA, true, 4));
 
     EXPECT_EQ(manager.unload_all_plugins(), 1);
+    EXPECT_EQ(retirement_inspection.destructions(),
+              static_cast<std::uint64_t>((cycle + 1) * 2));
+    EXPECT_EQ(retirement_inspection.destructions_under_lock(), 0u);
     EXPECT_EQ(manager.loaded_plugin_count(), 0u);
     EXPECT_EQ(manager.op_sources().at(kLifecycleKey), "built-in");
     expect_lifecycle_device_ownership_alignment(1);
@@ -932,11 +1454,999 @@ TEST_F(PluginManagerLifecycleTest,
         has_lifecycle_device_implementation(Device::GPU_CUDA, true, 4));
   }
 
-  EXPECT_EQ(read_lifecycle_trace(trace_path),
-            (std::vector<std::string>{"registrar_return", "callback_destroy",
-                                      "library_unload", "registrar_return",
-                                      "callback_destroy", "library_unload"}));
+  EXPECT_EQ(
+      normalize_device_target_trace(read_lifecycle_trace(trace_path)),
+      (std::vector<std::string>{
+          "registrar_return", "device_tiled_target_destroy",
+          "device_monolithic_target_destroy", "callback_destroy",
+          "library_unload", "registrar_return", "device_tiled_target_destroy",
+          "device_monolithic_target_destroy", "callback_destroy",
+          "library_unload"}));
   std::filesystem::remove(trace_path);
+}
+
+/**
+ * @brief Forces repeated stable-slot growth and mixed plugin/direct compaction.
+ *
+ * @throws Nothing when monolithic and tiled stateful targets observe every
+ *         move/copy/destruction outside the registry lock.
+ * @note The real lifecycle plugin contributes two leading device slots and a
+ *       retained library. Twenty-four later direct slots force several vector
+ *       growth steps; unloading the plugin then compacts those direct survivors
+ *       across the removed prefix while preserving source and revision state.
+ */
+TEST_F(PluginManagerLifecycleTest,
+       StatefulDeviceTargetsRetireOutsideLockAcrossGrowthAndCompaction) {
+  constexpr int kCallbacksPerShape = 12;
+  const auto plugin_path = lifecycle_plugin_path();
+  ASSERT_TRUE(std::filesystem::exists(plugin_path));
+  const auto trace_path = lifecycle_trace_path("stateful-device-slots");
+  std::filesystem::remove(trace_path);
+  ScopedEnvironmentVariable trace_environment(kLifecycleTraceEnvironment,
+                                              trace_path.string());
+  ScopedEnvironmentVariable device_environment(
+      kLifecycleDeviceRegistrarEnvironment, "1");
+  auto& manager = PluginManager::process_instance();
+  auto& registry = OpRegistry::instance();
+
+  const auto result =
+      manager.load_from_dirs_report({plugin_path.parent_path().string()});
+  ASSERT_EQ(result.loaded, 1) << describe_errors(result.errors);
+  ASSERT_TRUE(result.errors.empty()) << describe_errors(result.errors);
+  expect_lifecycle_device_ownership_alignment(2);
+
+  ReentrantDeviceCallbackTracker monolithic_tracker;
+  monolithic_tracker.registry = &registry;
+  ScopedOpRegistryKeyCleanup monolithic_callback_cleanup(
+      registry, kLifecycleType, kLifecycleSubtype);
+  ReentrantDeviceCallbackTracker tiled_tracker;
+  tiled_tracker.registry = &registry;
+  ScopedOpRegistryKeyCleanup tiled_callback_cleanup(registry, kLifecycleType,
+                                                    kLifecycleSubtype);
+  for (int index = 0; index < kCallbacksPerShape; ++index) {
+    OpMetadata monolithic_metadata;
+    monolithic_metadata.cost_score = 100 + index;
+    MonolithicOpFunc monolithic =
+        ReentrantDeviceMonolithicCallback(monolithic_tracker);
+    registry.register_impl(kLifecycleType, kLifecycleSubtype, Device::ASIC_NPU,
+                           std::move(monolithic), monolithic_metadata);
+
+    OpMetadata tiled_metadata;
+    tiled_metadata.cost_score = 200 + index;
+    tiled_metadata.tile_preference = TileSizePreference::MICRO;
+    TileOpFunc tiled = ReentrantDeviceTiledCallback(tiled_tracker);
+    registry.register_impl(kLifecycleType, kLifecycleSubtype, Device::GPU_CUDA,
+                           std::move(tiled), tiled_metadata);
+  }
+
+  expect_lifecycle_device_ownership_alignment(2 + 2 * kCallbacksPerShape);
+  EXPECT_EQ(monolithic_tracker.live_targets.load(std::memory_order_acquire),
+            kCallbacksPerShape);
+  EXPECT_EQ(tiled_tracker.live_targets.load(std::memory_order_acquire),
+            kCallbacksPerShape);
+  EXPECT_FALSE(
+      monolithic_tracker.observed_under_lock.load(std::memory_order_acquire));
+  EXPECT_FALSE(
+      tiled_tracker.observed_under_lock.load(std::memory_order_acquire));
+  EXPECT_FALSE(
+      monolithic_tracker.reentry_failed.load(std::memory_order_acquire));
+  EXPECT_FALSE(tiled_tracker.reentry_failed.load(std::memory_order_acquire));
+  EXPECT_EQ(manager.op_sources().at(kLifecycleKey), "mixed");
+
+  EXPECT_EQ(manager.unload_all_plugins(), 1);
+  EXPECT_EQ(manager.loaded_plugin_count(), 0u);
+  EXPECT_EQ(manager.op_sources().at(kLifecycleKey), "built-in");
+  expect_lifecycle_device_ownership_alignment(2 * kCallbacksPerShape);
+  EXPECT_EQ(normalize_device_target_trace(read_lifecycle_trace(trace_path)),
+            (std::vector<std::string>{"registrar_return",
+                                      "device_tiled_target_destroy",
+                                      "device_monolithic_target_destroy",
+                                      "callback_destroy", "library_unload"}));
+
+  {
+    const auto implementations =
+        registry.get_all_implementations(kLifecycleType, kLifecycleSubtype);
+    EXPECT_EQ(implementations.size(), 2u * kCallbacksPerShape);
+    EXPECT_EQ(std::count_if(implementations.begin(), implementations.end(),
+                            [](const OpImplementation& implementation) {
+                              return implementation.is_monolithic();
+                            }),
+              kCallbacksPerShape);
+    EXPECT_EQ(std::count_if(implementations.begin(), implementations.end(),
+                            [](const OpImplementation& implementation) {
+                              return implementation.is_tiled();
+                            }),
+              kCallbacksPerShape);
+  }
+  EXPECT_EQ(monolithic_tracker.live_targets.load(std::memory_order_acquire),
+            kCallbacksPerShape);
+  EXPECT_EQ(tiled_tracker.live_targets.load(std::memory_order_acquire),
+            kCallbacksPerShape);
+
+  const bool callbacks_removed = registry.unregister_key(kLifecycleKey);
+  if (callbacks_removed) {
+    monolithic_callback_cleanup.disarm();
+    tiled_callback_cleanup.disarm();
+  }
+  EXPECT_TRUE(callbacks_removed);
+  EXPECT_EQ(monolithic_tracker.live_targets.load(std::memory_order_acquire), 0);
+  EXPECT_EQ(tiled_tracker.live_targets.load(std::memory_order_acquire), 0);
+  EXPECT_GE(monolithic_tracker.destructions.load(std::memory_order_acquire),
+            kCallbacksPerShape);
+  EXPECT_GE(tiled_tracker.destructions.load(std::memory_order_acquire),
+            kCallbacksPerShape);
+  EXPECT_FALSE(
+      monolithic_tracker.observed_under_lock.load(std::memory_order_acquire));
+  EXPECT_FALSE(
+      tiled_tracker.observed_under_lock.load(std::memory_order_acquire));
+  EXPECT_FALSE(
+      monolithic_tracker.reentry_failed.load(std::memory_order_acquire));
+  EXPECT_FALSE(tiled_tracker.reentry_failed.load(std::memory_order_acquire));
+  std::filesystem::remove(trace_path);
+}
+
+/**
+ * @brief Proves direct stateful CPU monolithic registration shares one owner.
+ *
+ * @throws Nothing when CPU registration adds no target transfer beyond the
+ *         same-shape non-CPU baseline and device snapshots copy outside lock.
+ * @note This path calls `OpRegistry::register_impl` directly and therefore
+ *       exercises no plugin-retained wrapper. The transfer baseline makes the
+ *       proof independent of `std::function` move internals; the final bridge
+ *       release retires the original owner after whole-key unregister and
+ *       outside the registry lock.
+ */
+TEST_F(PluginManagerLifecycleTest,
+       DirectCpuMonolithicBridgeDoesNotCopyOriginalTarget) {
+  auto& registry = OpRegistry::instance();
+  constexpr const char* kTransferControlSubtype = "monolithic_transfer_control";
+  const std::string transfer_control_key =
+      make_key(kDirectCpuOwnerType, kTransferControlSubtype);
+  (void)registry.unregister_key(transfer_control_key);
+  ReentrantDeviceCallbackTracker transfer_control;
+  transfer_control.registry = &registry;
+  ScopedOpRegistryKeyCleanup transfer_control_cleanup(
+      registry, kDirectCpuOwnerType, kTransferControlSubtype);
+  MonolithicOpFunc transfer_control_candidate =
+      ReentrantDeviceMonolithicCallback(transfer_control);
+  const int control_copies_before =
+      transfer_control.copies.load(std::memory_order_acquire);
+  const int control_moves_before =
+      transfer_control.moves.load(std::memory_order_acquire);
+  const int control_live_before =
+      transfer_control.live_targets.load(std::memory_order_acquire);
+  registry.register_impl(kDirectCpuOwnerType, kTransferControlSubtype,
+                         Device::GPU_METAL,
+                         std::move(transfer_control_candidate), OpMetadata{});
+  const int control_copy_delta =
+      transfer_control.copies.load(std::memory_order_acquire) -
+      control_copies_before;
+  const int control_move_delta =
+      transfer_control.moves.load(std::memory_order_acquire) -
+      control_moves_before;
+  const int control_live_delta =
+      transfer_control.live_targets.load(std::memory_order_acquire) -
+      control_live_before;
+  transfer_control_candidate = MonolithicOpFunc{};
+  const bool transfer_control_removed =
+      registry.unregister_key(transfer_control_key);
+  if (transfer_control_removed) {
+    transfer_control_cleanup.disarm();
+  }
+  EXPECT_TRUE(transfer_control_removed);
+  EXPECT_EQ(transfer_control.live_targets.load(std::memory_order_acquire), 0);
+  EXPECT_FALSE(
+      transfer_control.observed_under_lock.load(std::memory_order_acquire));
+  EXPECT_FALSE(transfer_control.reentry_failed.load(std::memory_order_acquire));
+
+  ReentrantDeviceCallbackTracker tracker;
+  tracker.registry = &registry;
+  ScopedOpRegistryKeyCleanup registered_callback_cleanup(
+      registry, kDirectCpuOwnerType, kDirectCpuMonolithicSubtype);
+
+  MonolithicOpFunc candidate = ReentrantDeviceMonolithicCallback(tracker);
+  ASSERT_EQ(tracker.constructions.load(std::memory_order_acquire), 1);
+  ASSERT_EQ(tracker.copies.load(std::memory_order_acquire), 0);
+  ASSERT_EQ(tracker.live_targets.load(std::memory_order_acquire), 1);
+  const int copies_before_registration =
+      tracker.copies.load(std::memory_order_acquire);
+  const int moves_before_registration =
+      tracker.moves.load(std::memory_order_acquire);
+  const int live_before_registration =
+      tracker.live_targets.load(std::memory_order_acquire);
+
+  registry.register_impl(kDirectCpuOwnerType, kDirectCpuMonolithicSubtype,
+                         Device::CPU, std::move(candidate), OpMetadata{});
+  const int copies_after_registration =
+      tracker.copies.load(std::memory_order_acquire);
+  const int moves_after_registration =
+      tracker.moves.load(std::memory_order_acquire);
+  const int live_after_registration =
+      tracker.live_targets.load(std::memory_order_acquire);
+  EXPECT_EQ(copies_after_registration - copies_before_registration,
+            control_copy_delta);
+  EXPECT_EQ(moves_after_registration - moves_before_registration,
+            control_move_delta);
+  EXPECT_EQ(live_after_registration - live_before_registration,
+            control_live_delta);
+  candidate = MonolithicOpFunc{};
+  EXPECT_FALSE(candidate);
+  EXPECT_EQ(tracker.live_targets.load(std::memory_order_acquire), 1);
+  const int destructions_before_snapshots =
+      tracker.destructions.load(std::memory_order_acquire);
+
+  const auto ownership =
+      testing::inspect_op_registry_device_ownership_for_testing(
+          registry, kDirectCpuMonolithicKey);
+  ASSERT_TRUE(ownership.implementation_entry_present);
+  ASSERT_TRUE(ownership.ownership_entry_present);
+  ASSERT_EQ(ownership.implementation_count, 1u);
+  ASSERT_EQ(ownership.revision_count, 1u);
+  ASSERT_NE(ownership.first_device_revision, 0u);
+  EXPECT_EQ(ownership.monolithic_hp_revision, ownership.first_device_revision);
+  EXPECT_EQ(ownership.meta_hp_revision, ownership.first_device_revision);
+
+  auto hp_bridge = registry.resolve_for_intent(
+      kDirectCpuOwnerType, kDirectCpuMonolithicSubtype,
+      ComputeIntent::GlobalHighPrecision);
+  ASSERT_TRUE(hp_bridge.has_value());
+  ASSERT_TRUE(std::holds_alternative<MonolithicOpFunc>(*hp_bridge));
+  EXPECT_EQ(tracker.copies.load(std::memory_order_acquire),
+            copies_after_registration);
+  std::optional<OpRegistry::OpVariant> hp_bridge_copy;
+  hp_bridge_copy.emplace(*hp_bridge);
+  EXPECT_EQ(tracker.copies.load(std::memory_order_acquire),
+            copies_after_registration);
+
+  auto device_snapshots = registry.get_implementations_by_device(
+      kDirectCpuOwnerType, kDirectCpuMonolithicSubtype, Device::CPU);
+  ASSERT_EQ(device_snapshots.size(), 1u);
+  ASSERT_TRUE(device_snapshots.front().is_monolithic());
+  EXPECT_EQ(tracker.copies.load(std::memory_order_acquire),
+            copies_after_registration + 1);
+  std::optional<OpImplementation> device_snapshot_copy;
+  device_snapshot_copy.emplace(device_snapshots.front());
+  EXPECT_EQ(tracker.copies.load(std::memory_order_acquire),
+            copies_after_registration + 2);
+  EXPECT_EQ(tracker.live_targets.load(std::memory_order_acquire), 3);
+
+  Node node;
+  node.id = 17;
+  node.type = kDirectCpuOwnerType;
+  node.subtype = kDirectCpuMonolithicSubtype;
+  const NodeOutput device_output =
+      std::get<MonolithicOpFunc>(device_snapshot_copy->func)(node, {});
+  const NodeOutput bridge_output =
+      std::get<MonolithicOpFunc>(*hp_bridge_copy)(node, {});
+  EXPECT_EQ(device_output.debug.compute_device,
+            "DIRECT_STATEFUL_CPU_MONOLITHIC");
+  EXPECT_EQ(bridge_output.debug.compute_device,
+            device_output.debug.compute_device);
+  EXPECT_EQ(tracker.invocations.load(std::memory_order_acquire), 2);
+
+  const bool registered_callback_removed =
+      registry.unregister_key(kDirectCpuMonolithicKey);
+  if (registered_callback_removed) {
+    registered_callback_cleanup.disarm();
+  }
+  EXPECT_TRUE(registered_callback_removed);
+  const auto removed =
+      testing::inspect_op_registry_device_ownership_for_testing(
+          registry, kDirectCpuMonolithicKey);
+  EXPECT_FALSE(removed.implementation_entry_present);
+  EXPECT_FALSE(removed.ownership_entry_present);
+  EXPECT_EQ(removed.implementation_count, 0u);
+  EXPECT_EQ(removed.revision_count, 0u);
+  EXPECT_EQ(tracker.live_targets.load(std::memory_order_acquire), 3);
+
+  device_snapshot_copy.reset();
+  EXPECT_EQ(tracker.live_targets.load(std::memory_order_acquire), 2);
+  device_snapshots.clear();
+  EXPECT_EQ(tracker.live_targets.load(std::memory_order_acquire), 1);
+  hp_bridge_copy.reset();
+  EXPECT_EQ(tracker.live_targets.load(std::memory_order_acquire), 1);
+  hp_bridge.reset();
+  EXPECT_EQ(tracker.live_targets.load(std::memory_order_acquire), 0);
+  EXPECT_EQ(tracker.destructions.load(std::memory_order_acquire),
+            destructions_before_snapshots + 3);
+  EXPECT_EQ(tracker.copies.load(std::memory_order_acquire),
+            copies_after_registration + 2);
+  EXPECT_FALSE(tracker.observed_under_lock.load(std::memory_order_acquire));
+  EXPECT_FALSE(tracker.reentry_failed.load(std::memory_order_acquire));
+}
+
+/**
+ * @brief Proves direct stateful CPU tiled registration shares one owner.
+ *
+ * @throws Nothing when CPU registration adds no target transfer beyond the
+ *         same-shape non-CPU baseline and device snapshots copy outside lock.
+ * @note The device snapshot and HP tiled bridge receive identical borrowed
+ *       views and must report the same deterministic observation. A non-CPU
+ *       transfer control isolates standard-library move behavior before final
+ *       bridge release retires the original target outside lock.
+ */
+TEST_F(PluginManagerLifecycleTest,
+       DirectCpuTiledBridgeDoesNotCopyOriginalTarget) {
+  auto& registry = OpRegistry::instance();
+  constexpr const char* kTransferControlSubtype = "tiled_transfer_control";
+  const std::string transfer_control_key =
+      make_key(kDirectCpuOwnerType, kTransferControlSubtype);
+  (void)registry.unregister_key(transfer_control_key);
+  ReentrantDeviceCallbackTracker transfer_control;
+  transfer_control.registry = &registry;
+  ScopedOpRegistryKeyCleanup transfer_control_cleanup(
+      registry, kDirectCpuOwnerType, kTransferControlSubtype);
+  TileOpFunc transfer_control_candidate =
+      ReentrantDeviceTiledCallback(transfer_control);
+  const int control_copies_before =
+      transfer_control.copies.load(std::memory_order_acquire);
+  const int control_moves_before =
+      transfer_control.moves.load(std::memory_order_acquire);
+  const int control_live_before =
+      transfer_control.live_targets.load(std::memory_order_acquire);
+  registry.register_impl(kDirectCpuOwnerType, kTransferControlSubtype,
+                         Device::GPU_METAL,
+                         std::move(transfer_control_candidate), OpMetadata{});
+  const int control_copy_delta =
+      transfer_control.copies.load(std::memory_order_acquire) -
+      control_copies_before;
+  const int control_move_delta =
+      transfer_control.moves.load(std::memory_order_acquire) -
+      control_moves_before;
+  const int control_live_delta =
+      transfer_control.live_targets.load(std::memory_order_acquire) -
+      control_live_before;
+  transfer_control_candidate = TileOpFunc{};
+  const bool transfer_control_removed =
+      registry.unregister_key(transfer_control_key);
+  if (transfer_control_removed) {
+    transfer_control_cleanup.disarm();
+  }
+  EXPECT_TRUE(transfer_control_removed);
+  EXPECT_EQ(transfer_control.live_targets.load(std::memory_order_acquire), 0);
+  EXPECT_FALSE(
+      transfer_control.observed_under_lock.load(std::memory_order_acquire));
+  EXPECT_FALSE(transfer_control.reentry_failed.load(std::memory_order_acquire));
+
+  ReentrantDeviceCallbackTracker tracker;
+  tracker.registry = &registry;
+  ScopedOpRegistryKeyCleanup registered_callback_cleanup(
+      registry, kDirectCpuOwnerType, kDirectCpuTiledSubtype);
+
+  TileOpFunc candidate = ReentrantDeviceTiledCallback(tracker);
+  ASSERT_EQ(tracker.constructions.load(std::memory_order_acquire), 1);
+  ASSERT_EQ(tracker.copies.load(std::memory_order_acquire), 0);
+  ASSERT_EQ(tracker.live_targets.load(std::memory_order_acquire), 1);
+  const int copies_before_registration =
+      tracker.copies.load(std::memory_order_acquire);
+  const int moves_before_registration =
+      tracker.moves.load(std::memory_order_acquire);
+  const int live_before_registration =
+      tracker.live_targets.load(std::memory_order_acquire);
+
+  OpMetadata metadata;
+  metadata.tile_preference = TileSizePreference::MICRO;
+  registry.register_impl(kDirectCpuOwnerType, kDirectCpuTiledSubtype,
+                         Device::CPU, std::move(candidate), metadata);
+  const int copies_after_registration =
+      tracker.copies.load(std::memory_order_acquire);
+  const int moves_after_registration =
+      tracker.moves.load(std::memory_order_acquire);
+  const int live_after_registration =
+      tracker.live_targets.load(std::memory_order_acquire);
+  EXPECT_EQ(copies_after_registration - copies_before_registration,
+            control_copy_delta);
+  EXPECT_EQ(moves_after_registration - moves_before_registration,
+            control_move_delta);
+  EXPECT_EQ(live_after_registration - live_before_registration,
+            control_live_delta);
+  candidate = TileOpFunc{};
+  EXPECT_FALSE(candidate);
+  EXPECT_EQ(tracker.live_targets.load(std::memory_order_acquire), 1);
+  const int destructions_before_snapshots =
+      tracker.destructions.load(std::memory_order_acquire);
+
+  const auto ownership =
+      testing::inspect_op_registry_device_ownership_for_testing(
+          registry, kDirectCpuTiledKey);
+  ASSERT_TRUE(ownership.implementation_entry_present);
+  ASSERT_TRUE(ownership.ownership_entry_present);
+  ASSERT_EQ(ownership.implementation_count, 1u);
+  ASSERT_EQ(ownership.revision_count, 1u);
+  ASSERT_NE(ownership.first_device_revision, 0u);
+  EXPECT_EQ(ownership.tiled_hp_revision, ownership.first_device_revision);
+  EXPECT_EQ(ownership.meta_hp_revision, ownership.first_device_revision);
+
+  auto hp_bridge =
+      registry.resolve_for_intent(kDirectCpuOwnerType, kDirectCpuTiledSubtype,
+                                  ComputeIntent::GlobalHighPrecision);
+  ASSERT_TRUE(hp_bridge.has_value());
+  ASSERT_TRUE(std::holds_alternative<TileOpFunc>(*hp_bridge));
+  EXPECT_EQ(tracker.copies.load(std::memory_order_acquire),
+            copies_after_registration);
+  std::optional<OpRegistry::OpVariant> hp_bridge_copy;
+  hp_bridge_copy.emplace(*hp_bridge);
+  EXPECT_EQ(tracker.copies.load(std::memory_order_acquire),
+            copies_after_registration);
+
+  auto device_snapshots = registry.get_implementations_by_device(
+      kDirectCpuOwnerType, kDirectCpuTiledSubtype, Device::CPU);
+  ASSERT_EQ(device_snapshots.size(), 1u);
+  ASSERT_TRUE(device_snapshots.front().is_tiled());
+  EXPECT_EQ(tracker.copies.load(std::memory_order_acquire),
+            copies_after_registration + 1);
+  std::optional<OpImplementation> device_snapshot_copy;
+  device_snapshot_copy.emplace(device_snapshots.front());
+  EXPECT_EQ(tracker.copies.load(std::memory_order_acquire),
+            copies_after_registration + 2);
+  EXPECT_EQ(tracker.live_targets.load(std::memory_order_acquire), 3);
+
+  Node node;
+  node.id = 29;
+  node.type = kDirectCpuOwnerType;
+  node.subtype = kDirectCpuTiledSubtype;
+  OutputTile output;
+  output.roi = cv::Rect(2, 3, 5, 7);
+  const std::vector<InputTile> inputs(4);
+  tracker.last_tiled_result.store(-1, std::memory_order_release);
+  std::get<TileOpFunc>(device_snapshot_copy->func)(node, output, inputs);
+  const int device_result =
+      tracker.last_tiled_result.load(std::memory_order_acquire);
+  tracker.last_tiled_result.store(-1, std::memory_order_release);
+  std::get<TileOpFunc> (*hp_bridge_copy)(node, output, inputs);
+  const int bridge_result =
+      tracker.last_tiled_result.load(std::memory_order_acquire);
+  EXPECT_EQ(device_result, 50);
+  EXPECT_EQ(bridge_result, device_result);
+  EXPECT_EQ(tracker.invocations.load(std::memory_order_acquire), 2);
+
+  const bool registered_callback_removed =
+      registry.unregister_key(kDirectCpuTiledKey);
+  if (registered_callback_removed) {
+    registered_callback_cleanup.disarm();
+  }
+  EXPECT_TRUE(registered_callback_removed);
+  const auto removed =
+      testing::inspect_op_registry_device_ownership_for_testing(
+          registry, kDirectCpuTiledKey);
+  EXPECT_FALSE(removed.implementation_entry_present);
+  EXPECT_FALSE(removed.ownership_entry_present);
+  EXPECT_EQ(removed.implementation_count, 0u);
+  EXPECT_EQ(removed.revision_count, 0u);
+  EXPECT_EQ(tracker.live_targets.load(std::memory_order_acquire), 3);
+
+  device_snapshot_copy.reset();
+  EXPECT_EQ(tracker.live_targets.load(std::memory_order_acquire), 2);
+  device_snapshots.clear();
+  EXPECT_EQ(tracker.live_targets.load(std::memory_order_acquire), 1);
+  hp_bridge_copy.reset();
+  EXPECT_EQ(tracker.live_targets.load(std::memory_order_acquire), 1);
+  hp_bridge.reset();
+  EXPECT_EQ(tracker.live_targets.load(std::memory_order_acquire), 0);
+  EXPECT_EQ(tracker.destructions.load(std::memory_order_acquire),
+            destructions_before_snapshots + 3);
+  EXPECT_EQ(tracker.copies.load(std::memory_order_acquire),
+            copies_after_registration + 2);
+  EXPECT_FALSE(tracker.observed_under_lock.load(std::memory_order_acquire));
+  EXPECT_FALSE(tracker.reentry_failed.load(std::memory_order_acquire));
+}
+
+/**
+ * @brief Retains one stateful CPU device reader and its HP bridge across
+ * unload.
+ *
+ * @throws Nothing when both copied paths remain callable and share one original
+ *         plugin target until the final bridge owner is released.
+ * @note The fixture traces every genuine original-target copy. Reader
+ * snapshots, bridge copying, unload, and post-unload invocation must not
+ * increase that count. The host observer proves final target retirement begins
+ * outside the registry lock, and the DSO trace proves it precedes library
+ * unload.
+ */
+TEST_F(PluginManagerLifecycleTest,
+       CpuDeviceBridgeSharesStableOwnerAcrossReaderCopyAndUnload) {
+  const auto plugin_path = lifecycle_plugin_path();
+  ASSERT_TRUE(std::filesystem::exists(plugin_path));
+  const auto trace_path = lifecycle_trace_path("cpu-device-stable-owner");
+  std::filesystem::remove(trace_path);
+  ScopedEnvironmentVariable trace_environment(kLifecycleTraceEnvironment,
+                                              trace_path.string());
+  ScopedEnvironmentVariable cpu_device_environment(
+      kLifecycleCpuDeviceRegistrarEnvironment, "1");
+  auto& manager = PluginManager::process_instance();
+  auto& registry = OpRegistry::instance();
+  ScopedDeviceCallbackRetirementInspection retirement_inspection;
+
+  const auto result =
+      manager.load_from_dirs_report({plugin_path.parent_path().string()});
+  ASSERT_EQ(result.loaded, 1) << describe_errors(result.errors);
+  ASSERT_TRUE(result.errors.empty()) << describe_errors(result.errors);
+  EXPECT_NE(std::find(result.new_op_keys.begin(), result.new_op_keys.end(),
+                      kLifecycleCpuDeviceKey),
+            result.new_op_keys.end());
+  const std::string absolute_path =
+      std::filesystem::absolute(plugin_path).string();
+  ASSERT_EQ(manager.op_sources().at(kLifecycleCpuDeviceKey), absolute_path);
+
+  const auto ownership =
+      testing::inspect_op_registry_device_ownership_for_testing(
+          registry, kLifecycleCpuDeviceKey);
+  ASSERT_TRUE(ownership.implementation_entry_present);
+  ASSERT_TRUE(ownership.ownership_entry_present);
+  ASSERT_EQ(ownership.implementation_count, 1u);
+  ASSERT_EQ(ownership.revision_count, 1u);
+  ASSERT_NE(ownership.first_device_revision, 0u);
+  EXPECT_EQ(ownership.monolithic_hp_revision, ownership.first_device_revision);
+  EXPECT_EQ(ownership.meta_hp_revision, ownership.first_device_revision);
+
+  const std::size_t registration_target_copies = count_lifecycle_event(
+      read_lifecycle_trace(trace_path), "cpu_device_target_copy");
+  std::optional<OpImplementation> device_reader;
+  std::optional<OpRegistry::OpVariant> hp_bridge_reader;
+  {
+    auto implementations = registry.get_implementations_by_device(
+        kLifecycleType, kLifecycleCpuDeviceSubtype, Device::CPU);
+    ASSERT_EQ(implementations.size(), 1u);
+    ASSERT_TRUE(implementations.front().is_monolithic());
+    device_reader = implementations.front();
+
+    auto resolved =
+        registry.resolve_for_intent(kLifecycleType, kLifecycleCpuDeviceSubtype,
+                                    ComputeIntent::GlobalHighPrecision);
+    ASSERT_TRUE(resolved.has_value());
+    ASSERT_TRUE(std::holds_alternative<MonolithicOpFunc>(*resolved));
+    hp_bridge_reader = *resolved;
+  }
+  EXPECT_EQ(count_lifecycle_event(read_lifecycle_trace(trace_path),
+                                  "cpu_device_target_copy"),
+            registration_target_copies);
+
+  Node node;
+  node.type = kLifecycleType;
+  node.subtype = kLifecycleCpuDeviceSubtype;
+  {
+    NodeOutput device_output =
+        std::get<MonolithicOpFunc>(device_reader->func)(node, {});
+    NodeOutput bridge_output =
+        std::get<MonolithicOpFunc>(*hp_bridge_reader)(node, {});
+    EXPECT_EQ(device_output.debug.compute_device,
+              "PLUGIN_CPU_DEVICE_MONOLITHIC");
+    EXPECT_EQ(bridge_output.debug.compute_device,
+              device_output.debug.compute_device);
+  }
+
+  EXPECT_EQ(manager.unload_all_plugins(), 2);
+  EXPECT_EQ(manager.loaded_plugin_count(), 0u);
+  EXPECT_EQ(manager.op_sources().count(kLifecycleCpuDeviceKey), 0u);
+  EXPECT_FALSE(
+      registry.get_implementations(kLifecycleType, kLifecycleCpuDeviceSubtype));
+  EXPECT_EQ(retirement_inspection.destructions(), 0u);
+  EXPECT_EQ(retirement_inspection.destructions_under_lock(), 0u);
+  EXPECT_EQ(count_lifecycle_event(read_lifecycle_trace(trace_path),
+                                  "cpu_device_target_destroy"),
+            0u);
+  EXPECT_EQ(
+      count_lifecycle_event(read_lifecycle_trace(trace_path), "library_unload"),
+      0u);
+
+  {
+    NodeOutput device_output =
+        std::get<MonolithicOpFunc>(device_reader->func)(node, {});
+    NodeOutput bridge_output =
+        std::get<MonolithicOpFunc>(*hp_bridge_reader)(node, {});
+    EXPECT_EQ(device_output.debug.compute_device,
+              "PLUGIN_CPU_DEVICE_MONOLITHIC");
+    EXPECT_EQ(bridge_output.debug.compute_device,
+              device_output.debug.compute_device);
+  }
+  EXPECT_EQ(count_lifecycle_event(read_lifecycle_trace(trace_path),
+                                  "cpu_device_target_copy"),
+            registration_target_copies);
+
+  device_reader.reset();
+  EXPECT_EQ(retirement_inspection.destructions(), 0u);
+  EXPECT_EQ(count_lifecycle_event(read_lifecycle_trace(trace_path),
+                                  "cpu_device_target_destroy"),
+            0u);
+  hp_bridge_reader.reset();
+
+  EXPECT_EQ(retirement_inspection.destructions(), 1u);
+  EXPECT_EQ(retirement_inspection.destructions_under_lock(), 0u);
+  const auto final_trace = read_lifecycle_trace(trace_path);
+  EXPECT_EQ(count_lifecycle_event(final_trace, "cpu_device_target_copy"),
+            registration_target_copies);
+  EXPECT_EQ(count_lifecycle_event(final_trace, "cpu_device_target_destroy"),
+            1u);
+  EXPECT_EQ(count_lifecycle_event(final_trace, "library_unload"), 1u);
+  const auto target_destroy = std::find(final_trace.begin(), final_trace.end(),
+                                        "cpu_device_target_destroy");
+  const auto library_unload =
+      std::find(final_trace.begin(), final_trace.end(), "library_unload");
+  ASSERT_NE(target_destroy, final_trace.end());
+  ASSERT_NE(library_unload, final_trace.end());
+  EXPECT_LT(target_destroy, library_unload);
+  std::filesystem::remove(trace_path);
+}
+
+/**
+ * @brief Injects exact stable-owner and CPU-bridge construction failures.
+ *
+ * @throws Nothing when all four deterministic failures preserve registry state.
+ * @note Monolithic and tiled baseline keys each retain one callable value, one
+ *       exact device revision, built-in source attribution, and the complete
+ *       process registry inventory. Each failpoint must report one real hit;
+ *       this test never relies on the test executable's global `operator new`.
+ */
+TEST_F(PluginManagerLifecycleTest,
+       DeviceRegistrationFailpointsPreserveValuesRevisionsAndSources) {
+  using Failpoint = testing::OpRegistryDeviceRegistrationFailpoint;
+  auto& registry = OpRegistry::instance();
+  auto& manager = PluginManager::process_instance();
+  constexpr const char* kType = "device_registration_failure";
+  constexpr const char* kMonolithicSubtype = "monolithic";
+  constexpr const char* kTiledSubtype = "tiled";
+  const std::string monolithic_key = make_key(kType, kMonolithicSubtype);
+  const std::string tiled_key = make_key(kType, kTiledSubtype);
+  registry.unregister_key(monolithic_key);
+  ScopedOpRegistryKeyCleanup monolithic_callback_cleanup(registry, kType,
+                                                         kMonolithicSubtype);
+  registry.unregister_key(tiled_key);
+
+  OpMetadata monolithic_metadata;
+  monolithic_metadata.cost_score = 101;
+  registry.register_impl(
+      kType, kMonolithicSubtype, Device::ASIC_NPU,
+      [](const Node&, const std::vector<const NodeOutput*>&) {
+        NodeOutput output;
+        output.debug.compute_device = "BASELINE_DEVICE_MONOLITHIC";
+        return output;
+      },
+      monolithic_metadata);
+
+  std::atomic<int> tiled_invocations{0};
+  ScopedOpRegistryKeyCleanup tiled_callback_cleanup(registry, kType,
+                                                    kTiledSubtype);
+  OpMetadata tiled_metadata;
+  tiled_metadata.cost_score = 202;
+  tiled_metadata.tile_preference = TileSizePreference::MICRO;
+  registry.register_impl(
+      kType, kTiledSubtype, Device::GPU_CUDA,
+      [&tiled_invocations](const Node&, const OutputTile&,
+                           const std::vector<InputTile>&) {
+        tiled_invocations.fetch_add(1, std::memory_order_relaxed);
+      },
+      tiled_metadata);
+  manager.seed_builtins_from_registry();
+
+  const auto baseline_keys = registry.get_combined_keys();
+  const auto baseline_sources = manager.op_sources();
+  const auto baseline_monolithic =
+      testing::inspect_op_registry_device_ownership_for_testing(registry,
+                                                                monolithic_key);
+  const auto baseline_tiled =
+      testing::inspect_op_registry_device_ownership_for_testing(registry,
+                                                                tiled_key);
+  ASSERT_TRUE(baseline_monolithic.implementation_entry_present);
+  ASSERT_TRUE(baseline_monolithic.ownership_entry_present);
+  ASSERT_EQ(baseline_monolithic.implementation_count, 1u);
+  ASSERT_EQ(baseline_monolithic.revision_count, 1u);
+  ASSERT_NE(baseline_monolithic.first_device_revision, 0u);
+  ASSERT_TRUE(baseline_tiled.implementation_entry_present);
+  ASSERT_TRUE(baseline_tiled.ownership_entry_present);
+  ASSERT_EQ(baseline_tiled.implementation_count, 1u);
+  ASSERT_EQ(baseline_tiled.revision_count, 1u);
+  ASSERT_NE(baseline_tiled.first_device_revision, 0u);
+  ASSERT_EQ(baseline_sources.at(monolithic_key), "built-in");
+  ASSERT_EQ(baseline_sources.at(tiled_key), "built-in");
+
+  testing::set_op_registry_device_registration_failpoint(
+      Failpoint::StableOwner);
+  EXPECT_THROW(registry.register_impl(
+                   kType, kMonolithicSubtype, Device::GPU_METAL,
+                   [](const Node&, const std::vector<const NodeOutput*>&) {
+                     return NodeOutput{};
+                   }),
+               std::bad_alloc);
+  EXPECT_EQ(testing::op_registry_device_registration_failpoint_hits(), 1u);
+  testing::set_op_registry_device_registration_failpoint(Failpoint::None);
+  EXPECT_EQ(registry.get_combined_keys(), baseline_keys);
+  EXPECT_EQ(manager.op_sources(), baseline_sources);
+  expect_device_ownership_inspection_equal(
+      baseline_monolithic,
+      testing::inspect_op_registry_device_ownership_for_testing(
+          registry, monolithic_key));
+
+  testing::set_op_registry_device_registration_failpoint(
+      Failpoint::CpuCompatibilityBridge);
+  EXPECT_THROW(registry.register_impl(
+                   kType, kMonolithicSubtype, Device::CPU,
+                   [](const Node&, const std::vector<const NodeOutput*>&) {
+                     return NodeOutput{};
+                   }),
+               std::bad_alloc);
+  EXPECT_EQ(testing::op_registry_device_registration_failpoint_hits(), 1u);
+  testing::set_op_registry_device_registration_failpoint(Failpoint::None);
+  EXPECT_EQ(registry.get_combined_keys(), baseline_keys);
+  EXPECT_EQ(manager.op_sources(), baseline_sources);
+  expect_device_ownership_inspection_equal(
+      baseline_monolithic,
+      testing::inspect_op_registry_device_ownership_for_testing(
+          registry, monolithic_key));
+
+  auto monolithic_values =
+      registry.get_all_implementations(kType, kMonolithicSubtype);
+  ASSERT_EQ(monolithic_values.size(), 1u);
+  EXPECT_TRUE(monolithic_values.front().is_monolithic());
+  EXPECT_EQ(monolithic_values.front().metadata.device_preference,
+            Device::ASIC_NPU);
+  EXPECT_EQ(monolithic_values.front().metadata.cost_score, 101);
+  Node monolithic_node;
+  const auto monolithic_output = std::get<MonolithicOpFunc>(
+      monolithic_values.front().func)(monolithic_node, {});
+  EXPECT_EQ(monolithic_output.debug.compute_device,
+            "BASELINE_DEVICE_MONOLITHIC");
+  EXPECT_FALSE(registry.resolve_for_intent(kType, kMonolithicSubtype,
+                                           ComputeIntent::GlobalHighPrecision));
+
+  testing::set_op_registry_device_registration_failpoint(
+      Failpoint::StableOwner);
+  EXPECT_THROW(
+      registry.register_impl(
+          kType, kTiledSubtype, Device::GPU_METAL,
+          [](const Node&, const OutputTile&, const std::vector<InputTile>&) {},
+          OpMetadata{}),
+      std::bad_alloc);
+  EXPECT_EQ(testing::op_registry_device_registration_failpoint_hits(), 1u);
+  testing::set_op_registry_device_registration_failpoint(Failpoint::None);
+  EXPECT_EQ(registry.get_combined_keys(), baseline_keys);
+  EXPECT_EQ(manager.op_sources(), baseline_sources);
+  expect_device_ownership_inspection_equal(
+      baseline_tiled, testing::inspect_op_registry_device_ownership_for_testing(
+                          registry, tiled_key));
+
+  testing::set_op_registry_device_registration_failpoint(
+      Failpoint::CpuCompatibilityBridge);
+  EXPECT_THROW(
+      registry.register_impl(
+          kType, kTiledSubtype, Device::CPU,
+          [](const Node&, const OutputTile&, const std::vector<InputTile>&) {},
+          OpMetadata{}),
+      std::bad_alloc);
+  EXPECT_EQ(testing::op_registry_device_registration_failpoint_hits(), 1u);
+  testing::set_op_registry_device_registration_failpoint(Failpoint::None);
+  EXPECT_EQ(registry.get_combined_keys(), baseline_keys);
+  EXPECT_EQ(manager.op_sources(), baseline_sources);
+  expect_device_ownership_inspection_equal(
+      baseline_tiled, testing::inspect_op_registry_device_ownership_for_testing(
+                          registry, tiled_key));
+
+  auto tiled_values = registry.get_all_implementations(kType, kTiledSubtype);
+  ASSERT_EQ(tiled_values.size(), 1u);
+  EXPECT_TRUE(tiled_values.front().is_tiled());
+  EXPECT_EQ(tiled_values.front().metadata.device_preference, Device::GPU_CUDA);
+  EXPECT_EQ(tiled_values.front().metadata.cost_score, 202);
+  Node tiled_node;
+  std::get<TileOpFunc>(tiled_values.front().func)(tiled_node, OutputTile{}, {});
+  EXPECT_EQ(tiled_invocations.load(std::memory_order_acquire), 1);
+  EXPECT_FALSE(registry.resolve_for_intent(kType, kTiledSubtype,
+                                           ComputeIntent::GlobalHighPrecision));
+
+  monolithic_values.clear();
+  tiled_values.clear();
+  const bool monolithic_removed = registry.unregister_key(monolithic_key);
+  if (monolithic_removed) {
+    monolithic_callback_cleanup.disarm();
+  }
+  EXPECT_TRUE(monolithic_removed);
+  const bool tiled_removed = registry.unregister_key(tiled_key);
+  if (tiled_removed) {
+    tiled_callback_cleanup.disarm();
+  }
+  EXPECT_TRUE(tiled_removed);
+}
+
+/**
+ * @brief Exercises every device-registration failpoint against a fresh key.
+ *
+ * @throws Nothing when no failed candidate publishes a value, ownership row,
+ *         key, source, or count and the identical key remains reusable.
+ * @note The 2x2 matrix covers monolithic and tiled candidates at both stable
+ *       owner and CPU compatibility-bridge construction. Every retry invokes
+ *       both the device snapshot and its HP forwarding bridge before cleanup.
+ */
+TEST_F(PluginManagerLifecycleTest,
+       DeviceRegistrationFailpointsDoNotPublishFreshKeysAndAllowRetry) {
+  using Failpoint = testing::OpRegistryDeviceRegistrationFailpoint;
+  auto& registry = OpRegistry::instance();
+  auto& manager = PluginManager::process_instance();
+  constexpr const char* kType = "fresh_device_registration_failure";
+
+  const auto expect_failed_key_absent =
+      [&](const std::string& key,
+          const std::vector<std::string>& baseline_raw_keys,
+          const std::vector<std::string>& baseline_combined_keys,
+          const std::map<std::string, std::string>& baseline_sources,
+          std::size_t baseline_loaded_plugins) {
+        const auto inspection =
+            testing::inspect_op_registry_device_ownership_for_testing(registry,
+                                                                      key);
+        EXPECT_FALSE(inspection.implementation_entry_present);
+        EXPECT_FALSE(inspection.ownership_entry_present);
+        EXPECT_EQ(inspection.implementation_count, 0u);
+        EXPECT_EQ(inspection.revision_count, 0u);
+        EXPECT_EQ(inspection.first_device_revision, 0u);
+        EXPECT_EQ(inspection.monolithic_hp_revision, 0u);
+        EXPECT_EQ(inspection.tiled_hp_revision, 0u);
+        EXPECT_EQ(inspection.meta_hp_revision, 0u);
+        EXPECT_EQ(registry.get_keys(), baseline_raw_keys);
+        EXPECT_EQ(registry.get_keys().size(), baseline_raw_keys.size());
+        EXPECT_EQ(registry.get_combined_keys(), baseline_combined_keys);
+        EXPECT_EQ(registry.get_combined_keys().size(),
+                  baseline_combined_keys.size());
+        EXPECT_EQ(manager.op_sources(), baseline_sources);
+        EXPECT_EQ(manager.op_sources().size(), baseline_sources.size());
+        EXPECT_EQ(manager.loaded_plugin_count(), baseline_loaded_plugins);
+      };
+
+  const auto exercise_monolithic = [&](const std::string& subtype,
+                                       Failpoint failpoint) {
+    SCOPED_TRACE(subtype);
+    const std::string key = make_key(kType, subtype);
+    (void)registry.unregister_key(key);
+    ScopedOpRegistryKeyCleanup registered_callback_cleanup(registry, kType,
+                                                           subtype);
+    const auto baseline_raw_keys = registry.get_keys();
+    const auto baseline_combined_keys = registry.get_combined_keys();
+    const auto baseline_sources = manager.op_sources();
+    const std::size_t baseline_loaded_plugins = manager.loaded_plugin_count();
+    ASSERT_EQ(
+        std::count(baseline_raw_keys.begin(), baseline_raw_keys.end(), key), 0);
+    ASSERT_EQ(baseline_sources.count(key), 0u);
+
+    testing::set_op_registry_device_registration_failpoint(failpoint);
+    EXPECT_THROW(registry.register_impl(
+                     kType, subtype, Device::CPU,
+                     [](const Node&, const std::vector<const NodeOutput*>&) {
+                       NodeOutput output;
+                       output.debug.compute_device =
+                           "UNPUBLISHED_FRESH_MONOLITHIC";
+                       return output;
+                     }),
+                 std::bad_alloc);
+    EXPECT_EQ(testing::op_registry_device_registration_failpoint_hits(), 1u);
+    testing::set_op_registry_device_registration_failpoint(Failpoint::None);
+    expect_failed_key_absent(key, baseline_raw_keys, baseline_combined_keys,
+                             baseline_sources, baseline_loaded_plugins);
+    EXPECT_FALSE(registry.get_implementations(kType, subtype).has_value());
+
+    registry.register_impl(
+        kType, subtype, Device::CPU,
+        [](const Node&, const std::vector<const NodeOutput*>&) {
+          NodeOutput output;
+          output.debug.compute_device = "RETRIED_FRESH_MONOLITHIC";
+          return output;
+        });
+    const auto ownership =
+        testing::inspect_op_registry_device_ownership_for_testing(registry,
+                                                                  key);
+    ASSERT_TRUE(ownership.implementation_entry_present);
+    ASSERT_TRUE(ownership.ownership_entry_present);
+    ASSERT_EQ(ownership.implementation_count, 1u);
+    ASSERT_EQ(ownership.revision_count, 1u);
+    ASSERT_NE(ownership.first_device_revision, 0u);
+    EXPECT_EQ(ownership.monolithic_hp_revision,
+              ownership.first_device_revision);
+    EXPECT_EQ(ownership.meta_hp_revision, ownership.first_device_revision);
+
+    auto device =
+        registry.get_implementations_by_device(kType, subtype, Device::CPU);
+    ASSERT_EQ(device.size(), 1u);
+    ASSERT_TRUE(device.front().is_monolithic());
+    auto bridge = registry.resolve_for_intent(
+        kType, subtype, ComputeIntent::GlobalHighPrecision);
+    ASSERT_TRUE(bridge.has_value());
+    ASSERT_TRUE(std::holds_alternative<MonolithicOpFunc>(*bridge));
+    Node node;
+    node.type = kType;
+    node.subtype = subtype;
+    const auto device_output =
+        std::get<MonolithicOpFunc>(device.front().func)(node, {});
+    const auto bridge_output = std::get<MonolithicOpFunc>(*bridge)(node, {});
+    EXPECT_EQ(device_output.debug.compute_device, "RETRIED_FRESH_MONOLITHIC");
+    EXPECT_EQ(bridge_output.debug.compute_device,
+              device_output.debug.compute_device);
+
+    device.clear();
+    bridge.reset();
+    const bool key_removed = registry.unregister_key(key);
+    if (key_removed) {
+      registered_callback_cleanup.disarm();
+    }
+    EXPECT_TRUE(key_removed);
+    expect_failed_key_absent(key, baseline_raw_keys, baseline_combined_keys,
+                             baseline_sources, baseline_loaded_plugins);
+  };
+
+  const auto exercise_tiled = [&](const std::string& subtype,
+                                  Failpoint failpoint) {
+    SCOPED_TRACE(subtype);
+    const std::string key = make_key(kType, subtype);
+    (void)registry.unregister_key(key);
+    std::atomic<int> invocations{0};
+    ScopedOpRegistryKeyCleanup registered_callback_cleanup(registry, kType,
+                                                           subtype);
+    const auto baseline_raw_keys = registry.get_keys();
+    const auto baseline_combined_keys = registry.get_combined_keys();
+    const auto baseline_sources = manager.op_sources();
+    const std::size_t baseline_loaded_plugins = manager.loaded_plugin_count();
+    ASSERT_EQ(
+        std::count(baseline_raw_keys.begin(), baseline_raw_keys.end(), key), 0);
+    ASSERT_EQ(baseline_sources.count(key), 0u);
+
+    testing::set_op_registry_device_registration_failpoint(failpoint);
+    EXPECT_THROW(registry.register_impl(
+                     kType, subtype, Device::CPU,
+                     [](const Node&, const OutputTile&,
+                        const std::vector<InputTile>&) {},
+                     OpMetadata{}),
+                 std::bad_alloc);
+    EXPECT_EQ(testing::op_registry_device_registration_failpoint_hits(), 1u);
+    testing::set_op_registry_device_registration_failpoint(Failpoint::None);
+    expect_failed_key_absent(key, baseline_raw_keys, baseline_combined_keys,
+                             baseline_sources, baseline_loaded_plugins);
+    EXPECT_FALSE(registry.get_implementations(kType, subtype).has_value());
+
+    registry.register_impl(
+        kType, subtype, Device::CPU,
+        [&invocations](const Node&, const OutputTile&,
+                       const std::vector<InputTile>&) {
+          invocations.fetch_add(1, std::memory_order_relaxed);
+        },
+        OpMetadata{});
+    const auto ownership =
+        testing::inspect_op_registry_device_ownership_for_testing(registry,
+                                                                  key);
+    ASSERT_TRUE(ownership.implementation_entry_present);
+    ASSERT_TRUE(ownership.ownership_entry_present);
+    ASSERT_EQ(ownership.implementation_count, 1u);
+    ASSERT_EQ(ownership.revision_count, 1u);
+    ASSERT_NE(ownership.first_device_revision, 0u);
+    EXPECT_EQ(ownership.tiled_hp_revision, ownership.first_device_revision);
+    EXPECT_EQ(ownership.meta_hp_revision, ownership.first_device_revision);
+
+    auto device =
+        registry.get_implementations_by_device(kType, subtype, Device::CPU);
+    ASSERT_EQ(device.size(), 1u);
+    ASSERT_TRUE(device.front().is_tiled());
+    auto bridge = registry.resolve_for_intent(
+        kType, subtype, ComputeIntent::GlobalHighPrecision);
+    ASSERT_TRUE(bridge.has_value());
+    ASSERT_TRUE(std::holds_alternative<TileOpFunc>(*bridge));
+    Node node;
+    node.type = kType;
+    node.subtype = subtype;
+    const OutputTile output;
+    const std::vector<InputTile> inputs;
+    std::get<TileOpFunc>(device.front().func)(node, output, inputs);
+    std::get<TileOpFunc> (*bridge)(node, output, inputs);
+    EXPECT_EQ(invocations.load(std::memory_order_acquire), 2);
+
+    device.clear();
+    bridge.reset();
+    const bool key_removed = registry.unregister_key(key);
+    if (key_removed) {
+      registered_callback_cleanup.disarm();
+    }
+    EXPECT_TRUE(key_removed);
+    expect_failed_key_absent(key, baseline_raw_keys, baseline_combined_keys,
+                             baseline_sources, baseline_loaded_plugins);
+  };
+
+  exercise_monolithic("monolithic_stable_owner", Failpoint::StableOwner);
+  exercise_monolithic("monolithic_cpu_bridge",
+                      Failpoint::CpuCompatibilityBridge);
+  exercise_tiled("tiled_stable_owner", Failpoint::StableOwner);
+  exercise_tiled("tiled_cpu_bridge", Failpoint::CpuCompatibilityBridge);
 }
 
 /**
@@ -965,8 +2475,10 @@ TEST_F(PluginManagerLifecycleTest,
 
   EXPECT_TRUE(OpRegistry::instance().unregister_key(kLifecycleKey));
   expect_lifecycle_device_ownership_alignment(0);
-  EXPECT_EQ(read_lifecycle_trace(trace_path),
-            (std::vector<std::string>{"registrar_return", "callback_destroy"}));
+  EXPECT_EQ(normalize_device_target_trace(read_lifecycle_trace(trace_path)),
+            (std::vector<std::string>{
+                "registrar_return", "device_tiled_target_destroy",
+                "device_monolithic_target_destroy", "callback_destroy"}));
 
   register_direct_lifecycle_device();
   expect_lifecycle_device_ownership_alignment(1);
@@ -979,9 +2491,11 @@ TEST_F(PluginManagerLifecycleTest,
   EXPECT_FALSE(
       has_lifecycle_device_implementation(Device::GPU_METAL, false, 3));
   EXPECT_FALSE(has_lifecycle_device_implementation(Device::GPU_CUDA, true, 4));
-  EXPECT_EQ(read_lifecycle_trace(trace_path),
-            (std::vector<std::string>{"registrar_return", "callback_destroy",
-                                      "library_unload"}));
+  EXPECT_EQ(normalize_device_target_trace(read_lifecycle_trace(trace_path)),
+            (std::vector<std::string>{"registrar_return",
+                                      "device_tiled_target_destroy",
+                                      "device_monolithic_target_destroy",
+                                      "callback_destroy", "library_unload"}));
   std::filesystem::remove(trace_path);
 }
 
