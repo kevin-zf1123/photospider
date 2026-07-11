@@ -17,10 +17,10 @@
 #include <utility>
 #include <vector>
 
-#include "kernel/scheduler/scheduler_factory.hpp"
 #include "kernel/scheduler/scheduler_plugin_api.hpp"
-#include "kernel/scheduler/scheduler_plugin_loader.hpp"
 #include "kernel/scheduler/scheduler_task_runtime.hpp"
+#include "scheduler/scheduler_factory.hpp"
+#include "scheduler/scheduler_plugin_loader.hpp"
 
 #ifdef _WIN32
 #include <windows.h>

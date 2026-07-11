@@ -5,7 +5,7 @@
 #include <string>
 
 #include "kernel/scheduler/scheduler_plugin_api.hpp"
-#include "kernel/scheduler/serial_debug_scheduler.hpp"
+#include "scheduler/serial_debug_scheduler.hpp"
 
 // 使用宏简化单一调度器插件的实现
 PS_IMPLEMENT_SINGLE_SCHEDULER_PLUGIN(

@@ -6,9 +6,9 @@
 #include <unordered_set>
 #include <vector>
 
-#include "graph_model.hpp"  // NOLINT(build/include_subdir)
-#include "kernel/services/compute-service/compute_node_task_runner.hpp"
-#include "kernel/services/compute-service/compute_task_dependency_state.hpp"
+#include "compute/compute_node_task_runner.hpp"
+#include "compute/compute_task_dependency_state.hpp"
+#include "graph/graph_model.hpp"  // NOLINT(build/include_subdir)
 
 namespace ps {
 class GraphTraversalService;

@@ -1,4 +1,4 @@
-#include "kernel/services/compute-service/dirty_execution_common.hpp"
+#include "compute/dirty_execution_common.hpp"
 
 #include <algorithm>
 #include <memory>
@@ -7,9 +7,9 @@
 #include <utility>
 #include <vector>
 
-#include "kernel/graph_runtime.hpp"
-#include "kernel/services/compute-service/compute_cache_policy.hpp"
-#include "kernel/services/compute-service/compute_geometry.hpp"
+#include "compute/compute_cache_policy.hpp"
+#include "compute/compute_geometry.hpp"
+#include "runtime/graph_runtime.hpp"
 
 namespace ps::compute {
 

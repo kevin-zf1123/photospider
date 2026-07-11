@@ -12,10 +12,10 @@
 #include <string>
 #include <vector>
 
-#include "graph_model.hpp"  // NOLINT(build/include_subdir)
-#include "kernel/graph_state_executor.hpp"
+#include "graph/graph_model.hpp"  // NOLINT(build/include_subdir)
+#include "graph/graph_state_executor.hpp"
 #include "kernel/scheduler/i_scheduler.hpp"  // M3.2: IScheduler 接口
-#include "kernel/services/graph_event_service.hpp"
+#include "runtime/graph_event_service.hpp"
 
 // [修改] 使用预处理器宏和前向声明来隔离平台特定的 Metal API
 #ifdef __OBJC__

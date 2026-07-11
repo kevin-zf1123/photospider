@@ -6,7 +6,7 @@
 #include <vector>
 
 #include "benchmark/benchmark_types.hpp"
-#include "graph_model.hpp"  // NOLINT(build/include_subdir)
+#include "graph/graph_model.hpp"  // NOLINT(build/include_subdir)
 #include "kernel/scheduler/scheduler_task_runtime.hpp"
 
 namespace ps {

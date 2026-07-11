@@ -4,8 +4,8 @@
 
 #include <string>
 
-#include "kernel/scheduler/cpu_work_stealing_scheduler.hpp"
 #include "kernel/scheduler/scheduler_plugin_api.hpp"
+#include "scheduler/cpu_work_stealing_scheduler.hpp"
 
 // 使用宏简化单一调度器插件的实现
 PS_IMPLEMENT_SINGLE_SCHEDULER_PLUGIN(

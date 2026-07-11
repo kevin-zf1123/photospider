@@ -105,12 +105,12 @@ foreach(EXISTING_PUBLIC_HEADER ${PHOTOSPIDER_EXISTING_BUILD_PUBLIC_HEADERS})
     endif()
 endforeach()
 # Linked consumers receive only the public include root. Kernel/Interaction
-# facades live under src/ as source-tree internals: repository targets that
+# facades live under src/lib/ as source-tree internals: repository targets that
 # include them must use the private roots below, and the installable
-# photospider product must not publish src/ to external consumers.
+# photospider product must not publish src/lib/ to external consumers.
 set(PHOTOSPIDER_PRIVATE_INCLUDE_DIRS
     "${PROJECT_SOURCE_DIR}/include"
-    "${PROJECT_SOURCE_DIR}/src")
+    "${PROJECT_SOURCE_DIR}/src/lib")
 set(PHOTOSPIDER_INSTALL_CMAKEDIR
     "${CMAKE_INSTALL_LIBDIR}/cmake/Photospider"
     CACHE STRING "Install directory for Photospider CMake package files")
@@ -165,11 +165,11 @@ endif()
 
 # Module: Core Types
 set(PHOTOSPIDER_CORE_TYPE_SOURCES
-    src/image_buffer.cpp
-    src/ps_types.cpp
-    src/adapter/buffer_adapter_opencv.cpp
-    src/ops.cpp
-    src/kernel/node_module/node_yaml.cpp
+    src/lib/core/image_buffer.cpp
+    src/lib/core/ps_types.cpp
+    src/lib/adapters/opencv/buffer_adapter_opencv.cpp
+    src/lib/core/ops.cpp
+    src/lib/graph/node_yaml.cpp
 )
 
 add_library(photospider_core_types STATIC ${PHOTOSPIDER_CORE_TYPE_SOURCES})
@@ -181,8 +181,8 @@ target_link_libraries(photospider_core_types PRIVATE yaml-cpp::yaml-cpp)
 
 # Module: Operation Plugin Runtime Shim
 add_library(photospider_operation_plugin_shim SHARED
-    src/image_buffer.cpp
-    src/adapter/buffer_adapter_opencv.cpp
+    src/lib/core/image_buffer.cpp
+    src/lib/adapters/opencv/buffer_adapter_opencv.cpp
 )
 target_include_directories(photospider_operation_plugin_shim
     PUBLIC
@@ -205,13 +205,13 @@ endif()
 
 # Module: Graph
 set(PHOTOSPIDER_GRAPH_SOURCES
-    src/kernel/graph_model.cpp
-    src/kernel/services/graph_extent_resolver.cpp
-    src/kernel/services/graph_traversal_service.cpp
-    src/kernel/services/roi_propagation_service.cpp
-    src/kernel/services/graph_io_service.cpp
-    src/kernel/services/graph_cache_service.cpp
-    src/kernel/services/graph_inspect_service.cpp
+    src/lib/graph/graph_model.cpp
+    src/lib/graph/graph_extent_resolver.cpp
+    src/lib/graph/graph_traversal_service.cpp
+    src/lib/graph/roi_propagation_service.cpp
+    src/lib/graph/graph_io_service.cpp
+    src/lib/graph/graph_cache_service.cpp
+    src/lib/graph/graph_inspect_service.cpp
 )
 
 add_library(photospider_graph STATIC ${PHOTOSPIDER_GRAPH_SOURCES})
@@ -226,8 +226,8 @@ target_link_libraries(photospider_graph PRIVATE
 
 # Module: Plugins
 set(PHOTOSPIDER_PLUGIN_SOURCES
-    src/kernel/plugin_manager.cpp
-    src/kernel/plugin_manage_module/plugin_loader.cpp
+    src/lib/plugin/plugin_manager.cpp
+    src/lib/plugin/plugin_loader.cpp
 )
 
 add_library(photospider_plugin STATIC ${PHOTOSPIDER_PLUGIN_SOURCES})
@@ -242,56 +242,56 @@ target_link_libraries(photospider_plugin PRIVATE
 
 # Module: Compute
 set(KERNEL_FACADE_SOURCES
-    src/host/embedded_host.cpp
-    src/kernel/kernel.cpp
-    src/kernel/kernel_compute.cpp
-    src/kernel/kernel_dirty_roi_facade.cpp
-    src/kernel/kernel_inspection_facade.cpp
-    src/kernel/kernel_io_cache_facade.cpp
-    src/kernel/kernel_scheduler_facade.cpp
+    src/lib/host/embedded_host.cpp
+    src/lib/runtime/kernel.cpp
+    src/lib/runtime/kernel_compute.cpp
+    src/lib/runtime/kernel_dirty_roi_facade.cpp
+    src/lib/runtime/kernel_inspection_facade.cpp
+    src/lib/runtime/kernel_io_cache_facade.cpp
+    src/lib/runtime/kernel_scheduler_facade.cpp
 )
 
 set(COMPUTE_SOURCES
-    src/kernel/services/compute-service/compute_cache_policy.cpp
-    src/kernel/services/compute-service/compute_dispatch_plan_builder.cpp
-    src/kernel/services/compute-service/compute_geometry.cpp
-    src/kernel/services/compute-service/compute_metrics_recorder.cpp
-    src/kernel/services/compute-service/compute_node_task_runner.cpp
-    src/kernel/services/compute-service/compute_result_committer.cpp
-    src/kernel/services/compute-service/compute_task_dependency_state.cpp
-    src/kernel/services/compute-service/compute_task_submission.cpp
-    src/kernel/services/compute-service/task_graph_planning.cpp
-    src/kernel/services/compute-service/task_population_strategy.cpp
-    src/kernel/services/compute-service/tiled_input_normalizer.cpp
-    src/kernel/services/compute-service/dirty_control_lane.cpp
-    src/kernel/services/compute-service/dirty_execution_common.cpp
-    src/kernel/services/compute-service/dirty_node_executor.cpp
-    src/kernel/services/compute-service/dirty_region_planner.cpp
-    src/kernel/services/compute-service/dirty_region_snapshot_builder.cpp
-    src/kernel/services/compute-service/dirty_sibling_commit_gate.cpp
-    src/kernel/services/compute-service/dirty_update_executor.cpp
-    src/kernel/services/compute-service/dirty_write_buffers.cpp
-    src/kernel/services/compute-service/downsample_executor.cpp
-    src/kernel/services/compute-service/intent_update_coordinator.cpp
-    src/kernel/services/compute-service/node_executor.cpp
-    src/kernel/services/compute-service/node_input_resolver.cpp
-    src/kernel/services/compute-service/realtime_proxy_graph.cpp
-    src/kernel/services/compute-service/compute_task_dispatcher.cpp
-    src/kernel/services/compute_service.cpp
-    src/kernel/services/graph_event_service.cpp
-    src/kernel/interaction.cpp
-    src/kernel/graph_runtime.mm
-    src/kernel/scheduler/cpu_work_stealing_scheduler.cpp
-    src/kernel/scheduler/gpu_pipeline_scheduler.cpp
-    src/kernel/scheduler/serial_debug_scheduler.cpp
-    src/kernel/scheduler/scheduler_factory.cpp
-    src/kernel/scheduler/scheduler_plugin_loader.cpp
+    src/lib/compute/compute_cache_policy.cpp
+    src/lib/compute/compute_dispatch_plan_builder.cpp
+    src/lib/compute/compute_geometry.cpp
+    src/lib/compute/compute_metrics_recorder.cpp
+    src/lib/compute/compute_node_task_runner.cpp
+    src/lib/compute/compute_result_committer.cpp
+    src/lib/compute/compute_task_dependency_state.cpp
+    src/lib/compute/compute_task_submission.cpp
+    src/lib/compute/task_graph_planning.cpp
+    src/lib/compute/task_population_strategy.cpp
+    src/lib/compute/tiled_input_normalizer.cpp
+    src/lib/compute/dirty_control_lane.cpp
+    src/lib/compute/dirty_execution_common.cpp
+    src/lib/compute/dirty_node_executor.cpp
+    src/lib/compute/dirty_region_planner.cpp
+    src/lib/compute/dirty_region_snapshot_builder.cpp
+    src/lib/compute/dirty_sibling_commit_gate.cpp
+    src/lib/compute/dirty_update_executor.cpp
+    src/lib/compute/dirty_write_buffers.cpp
+    src/lib/compute/downsample_executor.cpp
+    src/lib/compute/intent_update_coordinator.cpp
+    src/lib/compute/node_executor.cpp
+    src/lib/compute/node_input_resolver.cpp
+    src/lib/compute/realtime_proxy_graph.cpp
+    src/lib/compute/compute_task_dispatcher.cpp
+    src/lib/compute/compute_service.cpp
+    src/lib/runtime/graph_event_service.cpp
+    src/lib/runtime/interaction.cpp
+    src/lib/runtime/graph_runtime.mm
+    src/lib/scheduler/cpu_work_stealing_scheduler.cpp
+    src/lib/scheduler/gpu_pipeline_scheduler.cpp
+    src/lib/scheduler/serial_debug_scheduler.cpp
+    src/lib/scheduler/scheduler_factory.cpp
+    src/lib/scheduler/scheduler_plugin_loader.cpp
 )
 
 if(APPLE)
     enable_language(OBJCXX)
 else()
-    set_source_files_properties(src/kernel/graph_runtime.mm PROPERTIES LANGUAGE CXX COMPILE_FLAGS "-x c++")
+    set_source_files_properties(src/lib/runtime/graph_runtime.mm PROPERTIES LANGUAGE CXX COMPILE_FLAGS "-x c++")
 endif()
 
 add_library(photospider_compute STATIC ${COMPUTE_SOURCES})
@@ -309,7 +309,7 @@ target_link_libraries(photospider_compute PRIVATE
 # 2. Installable Static Library (The Embedded Frontend Product)
 # ==============================================================================
 
-file(GLOB PHOTOSPIDER_BENCHMARK_SOURCES "src/benchmark/*.cpp")
+file(GLOB PHOTOSPIDER_BENCHMARK_SOURCES "src/lib/benchmark/*.cpp")
 
 set(PHOTOSPIDER_PRODUCT_SOURCES
     ${PHOTOSPIDER_CORE_TYPE_SOURCES}
@@ -389,16 +389,19 @@ install(FILES
 # 3. CLI Static Library (The Frontend Logic)
 # ==============================================================================
 
-file(GLOB_RECURSE CLI_LOGIC_SOURCES "src/cli/*.cpp" "src/cli_config.cpp")
-list(REMOVE_ITEM CLI_LOGIC_SOURCES "${PROJECT_SOURCE_DIR}/cli/graph_cli.cpp") 
+file(GLOB_RECURSE CLI_LOGIC_SOURCES CONFIGURE_DEPENDS
+    "apps/graph_cli/src/*.cpp")
 
 add_library(photospider_cli_common STATIC ${CLI_LOGIC_SOURCES})
 
 target_include_directories(photospider_cli_common PRIVATE
+    "${PROJECT_SOURCE_DIR}/apps/graph_cli/include"
     "${PROJECT_SOURCE_DIR}/include"
-    "${PROJECT_SOURCE_DIR}/src"
+    "${PROJECT_SOURCE_DIR}/src/lib"
     ${OpenCV_INCLUDE_DIRS}
 )
+target_compile_definitions(photospider_cli_common PRIVATE
+    PHOTOSPIDER_GRAPH_CLI_HELP_DIR=\"${PROJECT_SOURCE_DIR}/apps/graph_cli/resources/help\")
 
 target_link_libraries(photospider_cli_common PUBLIC
     photospider
@@ -413,10 +416,11 @@ target_link_libraries(photospider_cli_common PRIVATE
 # 4. Main Executable
 # ==============================================================================
 
-add_executable(graph_cli cli/graph_cli.cpp)
+add_executable(graph_cli apps/graph_cli/main.cpp)
 target_include_directories(graph_cli PRIVATE
+    "${PROJECT_SOURCE_DIR}/apps/graph_cli/include"
     "${PROJECT_SOURCE_DIR}/include"
-    "${PROJECT_SOURCE_DIR}/src"
+    "${PROJECT_SOURCE_DIR}/src/lib"
     ${OpenCV_INCLUDE_DIRS}
 )
 target_link_libraries(graph_cli PRIVATE photospider_cli_common)
@@ -431,15 +435,12 @@ set_target_properties(graph_cli PROPERTIES
 )
 
 # ==============================================================================
-# 5. Standard Plugins (custom_ops)
+# 5. Standard Operation Plugins
 # ==============================================================================
-# Build everything in custom_ops/ EXCEPT the metal loader (which is special)
+# Build everything in plugins/ops/ except the special Metal loader.
 
 file(MAKE_DIRECTORY ${PLUGIN_OUTPUT_DIR})
-file(GLOB PLUGIN_SOURCES "custom_ops/*.cpp")
-
-# Exclude the Metal loader from the generic loop; it's handled in the APPLE block
-list(REMOVE_ITEM PLUGIN_SOURCES "${CMAKE_CURRENT_SOURCE_DIR}/custom_ops/metal_ops_loader.cpp")
+file(GLOB PLUGIN_SOURCES "plugins/ops/*.cpp")
 
 set(OP_PLUGIN_TARGETS "")
 foreach(PLUGIN_SOURCE ${PLUGIN_SOURCES})
@@ -456,7 +457,7 @@ foreach(PLUGIN_SOURCE ${PLUGIN_SOURCES})
     
     target_include_directories(${PLUGIN_NAME} PRIVATE
         "${PROJECT_SOURCE_DIR}/include"
-        "${PROJECT_SOURCE_DIR}/src"
+        "${PROJECT_SOURCE_DIR}/src/lib"
         ${OpenCV_INCLUDE_DIRS}
     )
     target_link_libraries(${PLUGIN_NAME} PRIVATE
@@ -475,7 +476,8 @@ file(MAKE_DIRECTORY ${SCHEDULER_PLUGIN_DIR})
 # Production/demo scheduler plugins. Test-only fixtures are built into a
 # separate directory below so config.yaml's default scheduler_dirs does not
 # expose lifecycle test schedulers to users.
-file(GLOB SCHEDULER_PLUGIN_SOURCES "scheduler_plugins/*_example_plugin.cpp")
+file(GLOB SCHEDULER_PLUGIN_SOURCES
+    "plugins/schedulers/*_example_plugin.cpp")
 
 # Remove stale lifecycle fixture outputs left by older build trees.
 file(REMOVE
@@ -513,7 +515,7 @@ foreach(SCHEDULER_SOURCE ${SCHEDULER_PLUGIN_SOURCES})
     
     target_include_directories(${SCHEDULER_NAME} PRIVATE 
         "${PROJECT_SOURCE_DIR}/include" 
-        "${PROJECT_SOURCE_DIR}/src"
+        "${PROJECT_SOURCE_DIR}/src/lib"
         ${OpenCV_INCLUDE_DIRS}
     )
     target_link_libraries(${SCHEDULER_NAME} PRIVATE
@@ -545,7 +547,7 @@ if(BUILD_TESTING)
     endif()
     target_include_directories(destroy_count_scheduler_plugin PRIVATE
         "${PROJECT_SOURCE_DIR}/include"
-        "${PROJECT_SOURCE_DIR}/src"
+        "${PROJECT_SOURCE_DIR}/src/lib"
         ${OpenCV_INCLUDE_DIRS}
     )
     target_link_libraries(destroy_count_scheduler_plugin PRIVATE
@@ -573,7 +575,7 @@ if(BUILD_TESTING)
     endif()
     target_include_directories(lifecycle_op_plugin PRIVATE
         "${PROJECT_SOURCE_DIR}/include"
-        "${PROJECT_SOURCE_DIR}/src"
+        "${PROJECT_SOURCE_DIR}/src/lib"
         ${OpenCV_INCLUDE_DIRS}
     )
     target_link_libraries(lifecycle_op_plugin PRIVATE
@@ -600,7 +602,7 @@ if(BUILD_TESTING)
     endif()
     target_include_directories(override_lifecycle_op_plugin PRIVATE
         "${PROJECT_SOURCE_DIR}/include"
-        "${PROJECT_SOURCE_DIR}/src"
+        "${PROJECT_SOURCE_DIR}/src/lib"
         ${OpenCV_INCLUDE_DIRS}
     )
     target_link_libraries(override_lifecycle_op_plugin PRIVATE
@@ -635,7 +637,8 @@ if(APPLE)
     )
 
     # 1. The Implementation Library (the actual op logic)
-    add_library(perlin_noise_metal SHARED src/metal/perlin_noise_metal.mm)
+    add_library(perlin_noise_metal SHARED
+        plugins/ops/metal/perlin_noise_metal.mm)
     set_target_properties(perlin_noise_metal PROPERTIES
         LIBRARY_OUTPUT_DIRECTORY "${METAL_OPS_DIR}"
         MACOSX_RPATH ON
@@ -647,12 +650,14 @@ if(APPLE)
     )
     target_include_directories(perlin_noise_metal PRIVATE
         "${PROJECT_SOURCE_DIR}/include"
-        "${PROJECT_SOURCE_DIR}/src"
+        "${PROJECT_SOURCE_DIR}/src/lib"
+        "${PROJECT_SOURCE_DIR}/plugins/ops"
         ${OpenCV_INCLUDE_DIRS}
     )
 
     # 2. The Loader Plugin (registers the op with the Kernel)
-    add_library(metal_ops_loader SHARED custom_ops/metal_ops_loader.cpp)
+    add_library(metal_ops_loader SHARED
+        plugins/ops/metal/metal_ops_loader.cpp)
     target_compile_definitions(metal_ops_loader PRIVATE
         PHOTOSPIDER_PLUGIN_BUILD)
     set_target_properties(metal_ops_loader PROPERTIES
@@ -665,7 +670,8 @@ if(APPLE)
 
     target_include_directories(metal_ops_loader PRIVATE
         "${PROJECT_SOURCE_DIR}/include"
-        "${PROJECT_SOURCE_DIR}/src"
+        "${PROJECT_SOURCE_DIR}/src/lib"
+        "${PROJECT_SOURCE_DIR}/plugins/ops"
         ${OpenCV_INCLUDE_DIRS}
     )
 
@@ -700,7 +706,7 @@ if(BUILD_TESTING)
         )
         target_include_directories(${TEST_NAME} PRIVATE
             "${PROJECT_SOURCE_DIR}/include"
-            "${PROJECT_SOURCE_DIR}/src"
+            "${PROJECT_SOURCE_DIR}/src/lib"
             "${PROJECT_SOURCE_DIR}/tests"
             ${OpenCV_INCLUDE_DIRS})
         target_link_libraries(${TEST_NAME} PRIVATE
@@ -711,28 +717,34 @@ if(BUILD_TESTING)
             ${OpenCV_LIBS})
     endmacro()
 
-    add_ps_test(test_scheduler tests/test_scheduler.cpp)
+    add_ps_test(test_scheduler tests/integration/test_scheduler.cpp)
     target_link_libraries(test_scheduler PRIVATE nlohmann_json::nlohmann_json)
     
-    add_ps_test(test_milestone2 tests/test_milestone2.cpp)
-    add_ps_test(test_milestone3 tests/test_milestone3.cpp)
-    add_ps_test(test_milestone34 tests/test_milestone34.cpp)
-    add_ps_test(test_propagation tests/test_propagation.cpp)
-    add_ps_test(test_propagation_contracts tests/test_propagation_contracts.cpp)
-    add_ps_test(test_graph_topology_boundaries tests/test_graph_topology_boundaries.cpp)
-    add_ps_test(test_kernel_contracts tests/test_kernel_contracts.cpp)
-    add_ps_test(test_image_buffer_contracts tests/test_image_buffer_contracts.cpp)
-    add_ps_test(test_host_adapter tests/test_host_adapter.cpp)
+    add_ps_test(test_milestone2 tests/integration/test_milestone2.cpp)
+    add_ps_test(test_milestone3 tests/integration/test_milestone3.cpp)
+    add_ps_test(test_milestone34 tests/integration/test_milestone34.cpp)
+    add_ps_test(test_propagation tests/integration/test_propagation.cpp)
+    add_ps_test(test_propagation_contracts
+        tests/unit/test_propagation_contracts.cpp)
+    add_ps_test(test_graph_topology_boundaries
+        tests/unit/test_graph_topology_boundaries.cpp)
+    add_ps_test(test_kernel_contracts
+        tests/integration/test_kernel_contracts.cpp)
+    add_ps_test(test_image_buffer_contracts
+        tests/unit/test_image_buffer_contracts.cpp)
+    add_ps_test(test_host_adapter tests/integration/test_host_adapter.cpp)
     target_compile_definitions(test_host_adapter PRIVATE
         PS_TEST_OP_PLUGIN_DIR="${TEST_OP_PLUGIN_DIR}"
     )
     add_dependencies(test_host_adapter lifecycle_op_plugin
         override_lifecycle_op_plugin)
     add_ps_test(test_bad_alloc_boundaries
-        tests/test_bad_alloc_boundaries.cpp)
+        tests/integration/test_bad_alloc_boundaries.cpp)
     target_sources(test_bad_alloc_boundaries PRIVATE
-        custom_ops/threshold_op.cpp)
+        plugins/ops/threshold_op.cpp)
     target_include_directories(test_bad_alloc_boundaries PRIVATE
+        "${PROJECT_SOURCE_DIR}/apps/graph_cli/include"
+        "${PROJECT_SOURCE_DIR}/plugins/ops"
         "${PROJECT_SOURCE_DIR}")
     target_compile_definitions(test_bad_alloc_boundaries PRIVATE
         PHOTOSPIDER_PLUGIN_BUILD
@@ -741,7 +753,7 @@ if(BUILD_TESTING)
         photospider_cli_common)
     if(APPLE)
         target_sources(test_bad_alloc_boundaries PRIVATE
-            src/metal/perlin_noise_metal.mm)
+            plugins/ops/metal/perlin_noise_metal.mm)
         target_link_libraries(test_bad_alloc_boundaries PRIVATE
             ${METAL_FRAMEWORK}
             ${FOUNDATION_FRAMEWORK}
@@ -749,34 +761,25 @@ if(BUILD_TESTING)
             ${COREVIDEO_FRAMEWORK})
     endif()
     add_ps_test(test_cli_dirty_snapshot_formatter
-        tests/test_cli_dirty_snapshot_formatter.cpp)
+        tests/integration/test_cli_dirty_snapshot_formatter.cpp)
+    target_include_directories(test_cli_dirty_snapshot_formatter PRIVATE
+        "${PROJECT_SOURCE_DIR}/apps/graph_cli/include")
     target_link_libraries(test_cli_dirty_snapshot_formatter PRIVATE
         photospider_cli_common)
-    add_ps_test(test_compute_service_split tests/test_compute_service_split.cpp)
-    add_ps_test(test_node_editor_layout tests/test_node_editor_layout.cpp)
+    add_ps_test(test_compute_service_split
+        tests/integration/test_compute_service_split.cpp)
+    add_ps_test(test_node_editor_layout
+        tests/unit/test_node_editor_layout.cpp)
+    target_include_directories(test_node_editor_layout PRIVATE
+        "${PROJECT_SOURCE_DIR}/apps/graph_cli/include")
     target_link_libraries(test_node_editor_layout PRIVATE ${FTXUI_TARGETS})
 
-    add_executable(split_compute_service_trace tests/split_compute_service_trace.cpp)
-    set_target_properties(split_compute_service_trace PROPERTIES
-        RUNTIME_OUTPUT_DIRECTORY "${TEST_OUTPUT_DIR}"
-        BUILD_RPATH "${CMAKE_BINARY_DIR}/lib"
-    )
-    target_include_directories(split_compute_service_trace PRIVATE
-        "${PROJECT_SOURCE_DIR}/include"
-        "${PROJECT_SOURCE_DIR}/src"
-        "${PROJECT_SOURCE_DIR}/tests"
-        ${OpenCV_INCLUDE_DIRS})
-    target_link_libraries(split_compute_service_trace PRIVATE
-        photospider
-        nlohmann_json::nlohmann_json
-        yaml-cpp::yaml-cpp
-        ${OpenCV_LIBS})
-
     # [M3.1] OpRegistry 多设备实现测试
-    add_ps_test(test_op_registry_m31 tests/test_op_registry_m31.cpp)
+    add_ps_test(test_op_registry_m31 tests/unit/test_op_registry_m31.cpp)
 
     # Operation plugin manager handle lifetime tests
-    add_ps_test(test_plugin_manager tests/test_plugin_manager.cpp)
+    add_ps_test(test_plugin_manager
+        tests/integration/test_plugin_manager.cpp)
     target_link_libraries(test_plugin_manager PRIVATE ${CMAKE_DL_LIBS})
     target_compile_definitions(test_plugin_manager PRIVATE
         PS_STANDARD_OP_PLUGIN_DIR="${PLUGIN_OUTPUT_DIR}"
@@ -787,16 +790,18 @@ if(BUILD_TESTING)
         override_lifecycle_op_plugin ${OP_PLUGIN_TARGETS})
 
     # [M3.5] GPU Pipeline 调度器测试
-    add_ps_test(test_gpu_pipeline_scheduler tests/test_gpu_pipeline_scheduler.cpp)
+    add_ps_test(test_gpu_pipeline_scheduler
+        tests/integration/test_gpu_pipeline_scheduler.cpp)
 
     # Deterministic CPU/GPU exception-publication race and reuse coverage.
     add_ps_test(test_scheduler_exception_publication
-        tests/test_scheduler_exception_publication.cpp)
+        tests/unit/test_scheduler_exception_publication.cpp)
     target_compile_definitions(test_scheduler_exception_publication PRIVATE
         PHOTOSPIDER_INTERNAL_BAD_ALLOC_TESTING)
 
     # [M3.5] 调度器插件加载器测试
-    add_ps_test(test_scheduler_plugin_loader tests/test_scheduler_plugin_loader.cpp)
+    add_ps_test(test_scheduler_plugin_loader
+        tests/integration/test_scheduler_plugin_loader.cpp)
     target_link_libraries(test_scheduler_plugin_loader PRIVATE ${CMAKE_DL_LIBS})
     target_compile_definitions(test_scheduler_plugin_loader PRIVATE
         PS_SCHEDULER_PLUGIN_DIR="${SCHEDULER_PLUGIN_DIR}"
@@ -854,7 +859,7 @@ if(BUILD_TESTING)
     # audits are intentionally absent from the test inventory.
     add_test(NAME StaticProductConsumerSmoke
         COMMAND ${Python3_EXECUTABLE}
-            "${PROJECT_SOURCE_DIR}/tests/verification/codebase_structure/static_product_consumer_smoke.py"
+            "${PROJECT_SOURCE_DIR}/tests/integration/static_product_consumer_smoke.py"
             --repo "${PROJECT_SOURCE_DIR}"
             --build "${CMAKE_BINARY_DIR}"
             --work "${CMAKE_BINARY_DIR}/tests/static_product_consumer_smoke"
@@ -865,7 +870,7 @@ if(BUILD_TESTING)
         RUN_SERIAL TRUE)
     add_test(NAME GraphCliOptionBadAlloc
         COMMAND ${Python3_EXECUTABLE}
-            "${PROJECT_SOURCE_DIR}/tests/verify_graph_cli_option_bad_alloc.py"
+            "${PROJECT_SOURCE_DIR}/tests/integration/verify_graph_cli_option_bad_alloc.py"
             --repo "${PROJECT_SOURCE_DIR}"
             --binary "$<TARGET_FILE:graph_cli>"
             --out "${CMAKE_BINARY_DIR}/tests/graph_cli_option_bad_alloc"
@@ -899,10 +904,6 @@ if(BUILD_TESTING)
     gtest_discover_tests(test_scheduler_exception_publication
         WORKING_DIRECTORY ${PROJECT_SOURCE_DIR})
     gtest_discover_tests(test_scheduler_plugin_loader WORKING_DIRECTORY ${PROJECT_SOURCE_DIR})
-    add_test(NAME SplitComputeServiceRuntimeTrace
-        COMMAND split_compute_service_trace
-            "${CMAKE_BINARY_DIR}/tests/split_compute_service_runtime_trace"
-        WORKING_DIRECTORY ${PROJECT_SOURCE_DIR})
 endif()
 
 # --- Summary ---

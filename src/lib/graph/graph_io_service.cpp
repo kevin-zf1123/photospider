@@ -1,4 +1,4 @@
-#include "kernel/services/graph_io_service.hpp"
+#include "graph/graph_io_service.hpp"
 
 #include <yaml-cpp/yaml.h>
 
@@ -8,7 +8,7 @@
 #include <string>
 #include <utility>
 
-#include "graph_model.hpp"  // NOLINT(build/include_subdir)
+#include "graph/graph_model.hpp"  // NOLINT(build/include_subdir)
 
 namespace ps {
 namespace {

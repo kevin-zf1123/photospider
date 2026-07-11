@@ -1,5 +1,5 @@
 // Photospider kernel: Scheduler Plugin Loader implementation
-#include "kernel/scheduler/scheduler_plugin_loader.hpp"
+#include "scheduler/scheduler_plugin_loader.hpp"
 
 #include <algorithm>
 #include <iostream>

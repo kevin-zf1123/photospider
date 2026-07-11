@@ -4,8 +4,8 @@
 #include <string>
 #include <vector>
 
-#include "graph_model.hpp"
-#include "kernel/services/compute-service/compute_cache_policy.hpp"
+#include "compute/compute_cache_policy.hpp"
+#include "graph/graph_model.hpp"
 
 namespace ps::compute {
 

@@ -19,11 +19,11 @@
 #include <variant>
 #include <vector>
 
-#include "kernel/ops.hpp"
-#include "kernel/plugin_manager.hpp"
+#include "core/ops.hpp"
+#include "plugin/plugin_manager.hpp"
 #if defined(PHOTOSPIDER_INTERNAL_BAD_ALLOC_TESTING)
-#include "kernel/op_registry_test_access.hpp"
-#include "kernel/plugin_manage_module/plugin_loader_test_access.hpp"
+#include "core/op_registry_test_access.hpp"
+#include "plugin/plugin_loader_test_access.hpp"
 #endif
 #include "node.hpp"      // NOLINT(build/include_subdir)
 #include "ps_types.hpp"  // NOLINT(build/include_subdir)

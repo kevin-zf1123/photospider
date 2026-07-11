@@ -2,8 +2,8 @@
 
 #include <optional>
 
-#include "node.hpp"
-#include "ps_types.hpp"
+#include "node.hpp"      // NOLINT(build/include_subdir)
+#include "ps_types.hpp"  // NOLINT(build/include_subdir)
 
 namespace ps::compute {
 

@@ -2,7 +2,7 @@
 
 #include <vector>
 
-#include "ps_types.hpp"
+#include "ps_types.hpp"  // NOLINT(build/include_subdir)
 
 namespace ps::compute {
 

@@ -17,10 +17,10 @@
 #include <vector>
 
 #include "adapter/buffer_adapter_opencv.hpp"
-#include "kernel/interaction.hpp"
-#include "kernel/kernel.hpp"
-#include "kernel/services/compute-service/dirty_region_snapshot.hpp"
+#include "compute/dirty_region_snapshot.hpp"
 #include "photospider/host/host.hpp"
+#include "runtime/interaction.hpp"
+#include "runtime/kernel.hpp"
 #include "yaml-cpp/yaml.h"
 
 namespace ps {

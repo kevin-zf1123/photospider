@@ -6,7 +6,7 @@
 #include <type_traits>
 #include <utility>
 
-#include "graph_model.hpp"  // NOLINT(build/include_subdir)
+#include "graph/graph_model.hpp"  // NOLINT(build/include_subdir)
 
 namespace ps {
 

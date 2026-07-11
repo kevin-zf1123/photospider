@@ -11,7 +11,7 @@
 #include <vector>
 
 #if defined(PHOTOSPIDER_INTERNAL_BAD_ALLOC_TESTING)
-#include "kernel/op_registry_test_access.hpp"
+#include "core/op_registry_test_access.hpp"
 #endif
 
 namespace ps {

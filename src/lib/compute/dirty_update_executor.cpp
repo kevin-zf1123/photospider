@@ -1,4 +1,4 @@
-#include "kernel/services/compute-service/dirty_update_executor.hpp"
+#include "compute/dirty_update_executor.hpp"
 
 #include <memory>
 #include <mutex>
@@ -6,20 +6,20 @@
 #include <utility>
 #include <vector>
 
-#include "kernel/graph_runtime.hpp"
-#include "kernel/services/compute-service/compute_cache_policy.hpp"
-#include "kernel/services/compute-service/compute_geometry.hpp"
-#include "kernel/services/compute-service/dirty_execution_common.hpp"
-#include "kernel/services/compute-service/dirty_node_executor.hpp"
-#include "kernel/services/compute-service/dirty_region_planner.hpp"
-#include "kernel/services/compute-service/dirty_sibling_commit_gate.hpp"
-#include "kernel/services/compute-service/dirty_write_buffers.hpp"
-#include "kernel/services/compute-service/downsample_executor.hpp"
-#include "kernel/services/compute-service/realtime_proxy_graph.hpp"
-#include "kernel/services/graph_event_service.hpp"
-#include "kernel/services/graph_extent_resolver.hpp"
-#include "kernel/services/graph_traversal_service.hpp"
-#include "kernel/services/roi_propagation_service.hpp"
+#include "compute/compute_cache_policy.hpp"
+#include "compute/compute_geometry.hpp"
+#include "compute/dirty_execution_common.hpp"
+#include "compute/dirty_node_executor.hpp"
+#include "compute/dirty_region_planner.hpp"
+#include "compute/dirty_sibling_commit_gate.hpp"
+#include "compute/dirty_write_buffers.hpp"
+#include "compute/downsample_executor.hpp"
+#include "compute/realtime_proxy_graph.hpp"
+#include "graph/graph_extent_resolver.hpp"
+#include "graph/graph_traversal_service.hpp"
+#include "graph/roi_propagation_service.hpp"
+#include "runtime/graph_event_service.hpp"
+#include "runtime/graph_runtime.hpp"
 
 namespace ps::compute {
 namespace {

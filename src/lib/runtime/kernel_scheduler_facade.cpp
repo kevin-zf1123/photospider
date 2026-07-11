@@ -3,8 +3,11 @@
  * @brief Implements Kernel scheduler replacement and scheduler inspection
  * facades.
  */
-#include "kernel/kernel.hpp"
-#include "kernel/scheduler/scheduler_factory.hpp"
+#include <string>
+#include <utility>
+
+#include "runtime/kernel.hpp"
+#include "scheduler/scheduler_factory.hpp"
 
 namespace ps {
 

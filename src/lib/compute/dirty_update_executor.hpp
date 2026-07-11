@@ -6,8 +6,8 @@
 #include <vector>
 
 #include "benchmark/benchmark_types.hpp"
-#include "graph_model.hpp"  // NOLINT(build/include_subdir)
-#include "kernel/services/compute-service/dirty_execution_common.hpp"
+#include "compute/dirty_execution_common.hpp"
+#include "graph/graph_model.hpp"  // NOLINT(build/include_subdir)
 
 namespace ps {
 class GraphEventService;

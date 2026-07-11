@@ -1,4 +1,4 @@
-#include "kernel/services/compute-service/dirty_region_planner.hpp"
+#include "compute/dirty_region_planner.hpp"
 
 #include <algorithm>
 #include <sstream>
@@ -7,11 +7,11 @@
 #include <unordered_set>
 #include <vector>
 
-#include "kernel/param_utils.hpp"
-#include "kernel/services/compute-service/compute_geometry.hpp"
-#include "kernel/services/compute-service/dirty_region_planning_policy.hpp"
-#include "kernel/services/graph_traversal_service.hpp"
-#include "kernel/services/roi_propagation_service.hpp"
+#include "compute/compute_geometry.hpp"
+#include "compute/dirty_region_planning_policy.hpp"
+#include "core/param_utils.hpp"
+#include "graph/graph_traversal_service.hpp"
+#include "graph/roi_propagation_service.hpp"
 
 namespace ps::compute {
 using detail::has_valid_size;

@@ -7,11 +7,11 @@
 #include <string>
 #include <thread>
 
-#include "kernel/interaction.hpp"
-#include "kernel/kernel.hpp"
-#include "kernel/scheduler/cpu_work_stealing_scheduler.hpp"
-#include "kernel/scheduler/scheduler_factory.hpp"
-#include "kernel/scheduler/serial_debug_scheduler.hpp"
+#include "runtime/interaction.hpp"
+#include "runtime/kernel.hpp"
+#include "scheduler/cpu_work_stealing_scheduler.hpp"
+#include "scheduler/scheduler_factory.hpp"
+#include "scheduler/serial_debug_scheduler.hpp"
 #include "support/kernel_test_access.hpp"
 
 // =============================================================================

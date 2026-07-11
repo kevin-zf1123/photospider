@@ -1,11 +1,13 @@
 // Photospider kernel: SerialDebugScheduler implementation
 // M3.4: 串行调试调度器，用于调试和单线程执行场景
 
-#include "kernel/scheduler/serial_debug_scheduler.hpp"
+#include "scheduler/serial_debug_scheduler.hpp"
 
 #include <sstream>
+#include <string>
+#include <utility>
 
-#include "kernel/graph_runtime.hpp"
+#include "runtime/graph_runtime.hpp"
 
 namespace ps {
 

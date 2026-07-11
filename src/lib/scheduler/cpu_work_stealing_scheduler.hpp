@@ -18,7 +18,7 @@
 #include "kernel/scheduler/scheduler_task_runtime.hpp"
 
 #if defined(PHOTOSPIDER_INTERNAL_BAD_ALLOC_TESTING)
-#include "kernel/scheduler/scheduler_exception_test_hooks.hpp"
+#include "scheduler/scheduler_exception_test_hooks.hpp"
 #endif
 
 namespace ps {

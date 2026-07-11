@@ -1,4 +1,4 @@
-// FILE: src/metal/perlin_noise_metal.mm
+// FILE: plugins/ops/metal/perlin_noise_metal.mm
 
 #include "metal/perlin_noise_metal.hpp"
 
@@ -7,7 +7,7 @@
 #import <Metal/Metal.h>
 
 #include "adapter/buffer_adapter_opencv.hpp"
-#include "kernel/param_utils.hpp"
+#include "core/param_utils.hpp"
 #include "metal/metal_exception_boundary.hpp"
 #include "node.hpp"  // NOLINT(build/include_subdir)
 

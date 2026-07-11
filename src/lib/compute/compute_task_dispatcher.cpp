@@ -1,4 +1,4 @@
-#include "kernel/services/compute-service/compute_task_dispatcher.hpp"
+#include "compute/compute_task_dispatcher.hpp"
 
 #include <exception>
 #include <mutex>
@@ -6,9 +6,9 @@
 #include <utility>
 #include <vector>
 
-#include "kernel/services/compute-service/compute_node_task_runner.hpp"
-#include "kernel/services/compute-service/compute_result_committer.hpp"
-#include "kernel/services/compute-service/compute_task_submission.hpp"
+#include "compute/compute_node_task_runner.hpp"
+#include "compute/compute_result_committer.hpp"
+#include "compute/compute_task_submission.hpp"
 
 namespace ps::compute {
 

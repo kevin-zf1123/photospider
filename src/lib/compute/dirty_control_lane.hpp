@@ -4,7 +4,7 @@
 #include <opencv2/core.hpp>
 #include <optional>
 
-#include "kernel/services/compute-service/dirty_region_snapshot.hpp"
+#include "compute/dirty_region_snapshot.hpp"
 
 namespace ps {
 

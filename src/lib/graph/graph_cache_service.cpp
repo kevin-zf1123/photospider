@@ -1,4 +1,4 @@
-#include "kernel/services/graph_cache_service.hpp"
+#include "graph/graph_cache_service.hpp"
 
 #include <yaml-cpp/yaml.h>
 
@@ -10,7 +10,7 @@
 #include <utility>
 
 #include "adapter/buffer_adapter_opencv.hpp"
-#include "kernel/services/graph_traversal_service.hpp"
+#include "graph/graph_traversal_service.hpp"
 
 namespace ps {
 

@@ -3,7 +3,7 @@
 #include <unordered_set>
 #include <vector>
 
-#include "graph_model.hpp"
+#include "graph/graph_model.hpp"
 
 namespace ps {
 

@@ -3,9 +3,9 @@
 #include <opencv2/core.hpp>
 #include <unordered_map>
 
-#include "graph_model.hpp"  // NOLINT(build/include_subdir)
-#include "kernel/services/compute-service/dirty_region_snapshot.hpp"
-#include "kernel/services/graph_extent_resolver.hpp"
+#include "compute/dirty_region_snapshot.hpp"
+#include "graph/graph_extent_resolver.hpp"
+#include "graph/graph_model.hpp"  // NOLINT(build/include_subdir)
 
 namespace ps::compute {
 

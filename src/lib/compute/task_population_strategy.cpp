@@ -1,12 +1,12 @@
-#include "kernel/services/compute-service/task_population_strategy.hpp"
+#include "compute/task_population_strategy.hpp"
 
 #include <algorithm>
 #include <unordered_map>
 #include <utility>
 
-#include "graph_model.hpp"  // NOLINT(build/include_subdir)
-#include "kernel/services/compute-service/domain_op_metadata.hpp"
-#include "kernel/services/graph_extent_resolver.hpp"
+#include "compute/domain_op_metadata.hpp"
+#include "graph/graph_extent_resolver.hpp"
+#include "graph/graph_model.hpp"  // NOLINT(build/include_subdir)
 
 namespace ps::compute {
 namespace {

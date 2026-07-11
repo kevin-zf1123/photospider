@@ -2,8 +2,8 @@
 
 #include <opencv2/core.hpp>
 
-#include "kernel/services/compute-service/compute_geometry.hpp"
-#include "kernel/services/compute-service/dirty_region_planner.hpp"
+#include "compute/compute_geometry.hpp"
+#include "compute/dirty_region_planner.hpp"
 
 namespace ps::compute::detail {
 

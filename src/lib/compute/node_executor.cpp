@@ -1,4 +1,4 @@
-#include "kernel/services/compute-service/node_executor.hpp"
+#include "compute/node_executor.hpp"
 
 #include <algorithm>
 #include <new>
@@ -7,8 +7,8 @@
 #include <utility>
 #include <vector>
 
-#include "kernel/param_utils.hpp"
-#include "kernel/services/compute-service/compute_geometry.hpp"
+#include "compute/compute_geometry.hpp"
+#include "core/param_utils.hpp"
 
 namespace ps::compute {
 namespace {

@@ -1,7 +1,10 @@
-#include "kernel/services/graph_traversal_service.hpp"
+#include "graph/graph_traversal_service.hpp"
 
 #include <algorithm>
 #include <unordered_map>
+#include <unordered_set>
+#include <utility>
+#include <vector>
 
 namespace ps {
 

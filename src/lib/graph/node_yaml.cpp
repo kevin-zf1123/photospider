@@ -1,5 +1,9 @@
 // Node YAML (de)serialization moved to kernel node_module
-#include "node.hpp"
+#include <string>
+#include <utility>
+#include <vector>
+
+#include "node.hpp"  // NOLINT(build/include_subdir)
 
 namespace ps {
 

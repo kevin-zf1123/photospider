@@ -1,11 +1,11 @@
-#include "kernel/services/compute-service/dirty_region_snapshot_builder.hpp"
+#include "compute/dirty_region_snapshot_builder.hpp"
 
 #include <algorithm>
 #include <string>
 #include <unordered_map>
 
-#include "kernel/ops.hpp"
-#include "kernel/services/compute-service/compute_geometry.hpp"
+#include "compute/compute_geometry.hpp"
+#include "core/ops.hpp"
 
 namespace ps::compute {
 

@@ -1,6 +1,6 @@
-#include "kernel/services/compute-service/dirty_control_lane.hpp"
+#include "compute/dirty_control_lane.hpp"
 
-#include "kernel/services/compute-service/dirty_region_planner.hpp"
+#include "compute/dirty_region_planner.hpp"
 
 namespace ps::compute {
 

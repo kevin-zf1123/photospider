@@ -1,9 +1,12 @@
-#include "graph_model.hpp"
+#include "graph/graph_model.hpp"
 
 #include <algorithm>
 #include <filesystem>
+#include <memory>
+#include <string>
 #include <unordered_set>
 #include <utility>
+#include <vector>
 
 namespace ps {
 

@@ -1,4 +1,4 @@
-#include "kernel/services/compute-service/downsample_executor.hpp"
+#include "compute/downsample_executor.hpp"
 
 #include <algorithm>
 #include <new>
@@ -7,9 +7,9 @@
 #include <vector>
 
 #include "adapter/buffer_adapter_opencv.hpp"
-#include "kernel/graph_runtime.hpp"
-#include "kernel/services/compute-service/compute_geometry.hpp"
-#include "kernel/services/graph_event_service.hpp"
+#include "compute/compute_geometry.hpp"
+#include "runtime/graph_event_service.hpp"
+#include "runtime/graph_runtime.hpp"
 
 namespace ps::compute {
 namespace {

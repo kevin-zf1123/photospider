@@ -1,4 +1,4 @@
-#include "kernel/services/compute-service/task_graph_planning.hpp"
+#include "compute/task_graph_planning.hpp"
 
 #include <algorithm>
 #include <cstddef>
@@ -10,13 +10,13 @@
 #include <utility>
 #include <vector>
 
-#include "graph_model.hpp"  // NOLINT(build/include_subdir)
-#include "kernel/services/compute-service/compute_cache_policy.hpp"
-#include "kernel/services/compute-service/compute_geometry.hpp"
-#include "kernel/services/compute-service/domain_op_metadata.hpp"
-#include "kernel/services/compute-service/node_executor.hpp"
-#include "kernel/services/compute-service/task_population_strategy.hpp"
-#include "kernel/services/graph_extent_resolver.hpp"
+#include "compute/compute_cache_policy.hpp"
+#include "compute/compute_geometry.hpp"
+#include "compute/domain_op_metadata.hpp"
+#include "compute/node_executor.hpp"
+#include "compute/task_population_strategy.hpp"
+#include "graph/graph_extent_resolver.hpp"
+#include "graph/graph_model.hpp"  // NOLINT(build/include_subdir)
 
 namespace ps::compute {
 namespace {

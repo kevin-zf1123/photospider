@@ -3,7 +3,7 @@
 #include <optional>
 #include <string>
 
-#include "kernel/services/compute-service/dirty_region_snapshot.hpp"
+#include "compute/dirty_region_snapshot.hpp"
 #include "ps_types.hpp"  // NOLINT(build/include_subdir)
 
 namespace ps::compute {

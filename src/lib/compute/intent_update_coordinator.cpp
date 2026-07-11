@@ -1,11 +1,11 @@
-#include "kernel/services/compute-service/intent_update_coordinator.hpp"
+#include "compute/intent_update_coordinator.hpp"
 
 #include <future>
 #include <new>
 #include <string>
 
+#include "compute/dirty_sibling_commit_gate.hpp"
 #include "kernel/scheduler/scheduler_task_runtime.hpp"
-#include "kernel/services/compute-service/dirty_sibling_commit_gate.hpp"
 
 namespace ps::compute {
 namespace {

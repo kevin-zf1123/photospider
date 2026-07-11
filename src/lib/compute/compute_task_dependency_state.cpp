@@ -1,5 +1,6 @@
-#include "kernel/services/compute-service/compute_task_dependency_state.hpp"
+#include "compute/compute_task_dependency_state.hpp"
 
+#include <unordered_set>
 #include <vector>
 
 namespace ps::compute {

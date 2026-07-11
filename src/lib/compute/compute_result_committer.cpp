@@ -1,10 +1,10 @@
-#include "kernel/services/compute-service/compute_result_committer.hpp"
+#include "compute/compute_result_committer.hpp"
 
 #include <string>
 #include <utility>
 #include <vector>
 
-#include "kernel/services/graph_cache_service.hpp"
+#include "graph/graph_cache_service.hpp"
 
 namespace ps::compute {
 

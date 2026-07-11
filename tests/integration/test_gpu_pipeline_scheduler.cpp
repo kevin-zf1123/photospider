@@ -21,17 +21,17 @@
 #include <vector>
 
 #include "adapter/buffer_adapter_opencv.hpp"
-#include "kernel/graph_runtime.hpp"
-#include "kernel/interaction.hpp"
-#include "kernel/kernel.hpp"
-#include "kernel/scheduler/cpu_work_stealing_scheduler.hpp"
-#include "kernel/scheduler/gpu_pipeline_scheduler.hpp"
-#include "kernel/scheduler/scheduler_factory.hpp"
-#include "kernel/scheduler/serial_debug_scheduler.hpp"
-#include "kernel/services/compute_service.hpp"
-#include "kernel/services/graph_cache_service.hpp"
-#include "kernel/services/graph_traversal_service.hpp"
+#include "compute/compute_service.hpp"
+#include "graph/graph_cache_service.hpp"
+#include "graph/graph_traversal_service.hpp"
 #include "ps_types.hpp"  // NOLINT(build/include_subdir)
+#include "runtime/graph_runtime.hpp"
+#include "runtime/interaction.hpp"
+#include "runtime/kernel.hpp"
+#include "scheduler/cpu_work_stealing_scheduler.hpp"
+#include "scheduler/gpu_pipeline_scheduler.hpp"
+#include "scheduler/scheduler_factory.hpp"
+#include "scheduler/serial_debug_scheduler.hpp"
 #include "support/kernel_test_access.hpp"
 
 namespace ps {

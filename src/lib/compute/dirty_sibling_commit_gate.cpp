@@ -1,4 +1,4 @@
-#include "kernel/services/compute-service/dirty_sibling_commit_gate.hpp"
+#include "compute/dirty_sibling_commit_gate.hpp"
 
 namespace ps::compute {
 

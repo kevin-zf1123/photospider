@@ -12,9 +12,9 @@
 #include <utility>
 #include <vector>
 
-#include "kernel/scheduler/cpu_work_stealing_scheduler.hpp"
-#include "kernel/scheduler/gpu_pipeline_scheduler.hpp"
-#include "kernel/scheduler/scheduler_exception_test_hooks.hpp"
+#include "scheduler/cpu_work_stealing_scheduler.hpp"
+#include "scheduler/gpu_pipeline_scheduler.hpp"
+#include "scheduler/scheduler_exception_test_hooks.hpp"
 
 namespace ps::testing {
 namespace {

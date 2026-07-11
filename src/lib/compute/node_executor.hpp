@@ -4,9 +4,9 @@
 #include <optional>
 #include <vector>
 
-#include "graph_model.hpp"  // NOLINT(build/include_subdir)
-#include "kernel/services/compute-service/tiled_input_normalizer.hpp"
-#include "ps_types.hpp"  // NOLINT(build/include_subdir)
+#include "compute/tiled_input_normalizer.hpp"
+#include "graph/graph_model.hpp"  // NOLINT(build/include_subdir)
+#include "ps_types.hpp"           // NOLINT(build/include_subdir)
 
 namespace ps::compute {
 

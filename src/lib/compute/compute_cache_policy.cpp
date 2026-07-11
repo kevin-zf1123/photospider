@@ -1,4 +1,4 @@
-#include "kernel/services/compute-service/compute_cache_policy.hpp"
+#include "compute/compute_cache_policy.hpp"
 
 namespace ps::compute {
 

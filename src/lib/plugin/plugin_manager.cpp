@@ -1,4 +1,4 @@
-#include "kernel/plugin_manager.hpp"
+#include "plugin/plugin_manager.hpp"
 
 #include <algorithm>
 #include <exception>
@@ -11,7 +11,7 @@
 #include <utility>
 #include <vector>
 
-#include "kernel/ops.hpp"
+#include "core/ops.hpp"
 #include "ps_types.hpp"  // NOLINT(build/include_subdir)
 
 namespace ps {

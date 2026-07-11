@@ -15,9 +15,9 @@
 #include <utility>
 #include <vector>
 
-#include "kernel/graph_runtime.hpp"
 #include "kernel/scheduler/i_scheduler.hpp"
 #include "kernel/scheduler/scheduler_task_runtime.hpp"
+#include "runtime/graph_runtime.hpp"
 
 namespace ps {
 namespace {

@@ -1,4 +1,4 @@
-#include "kernel/services/compute-service/compute_geometry.hpp"
+#include "compute/compute_geometry.hpp"
 
 #include <algorithm>
 
