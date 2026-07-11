@@ -1779,10 +1779,28 @@ TEST(KernelComputeRuntimeSplit, SequentialAndParallelHpProduceIdenticalPixels) {
   request.intent = ComputeIntent::GlobalHighPrecision;
   auto sequential = interaction.cmd_compute_and_get_image(request);
   ASSERT_TRUE(sequential.has_value());
+  const uint64_t sequential_hp_version = graph.node(2).hp_version;
+  EXPECT_GT(sequential_hp_version, 0u);
 
+  testing::KernelTestAccess::clear_scheduler_trace(kernel, kGraphName);
   request.execution.parallel = true;
   auto parallel = interaction.cmd_compute_and_get_image(request);
   ASSERT_TRUE(parallel.has_value());
+  ASSERT_TRUE(graph.last_compute_plan_summary.has_value());
+  const auto& parallel_summary = *graph.last_compute_plan_summary;
+  EXPECT_EQ(parallel_summary.intent, ComputeIntent::GlobalHighPrecision);
+  EXPECT_EQ(parallel_summary.target_node_id, 2);
+  EXPECT_TRUE(parallel_summary.parallel);
+  EXPECT_GT(parallel_summary.task_count, 0u);
+  EXPECT_GT(parallel_summary.tile_task_count, 0u);
+  EXPECT_LE(parallel_summary.tile_task_count, parallel_summary.task_count);
+  const auto scheduler_events =
+      testing::KernelTestAccess::scheduler_trace(kernel, kGraphName);
+  EXPECT_TRUE(std::any_of(
+      scheduler_events.begin(), scheduler_events.end(), [](const auto& event) {
+        return event.action == GraphRuntime::SchedulerEvent::EXECUTE_TILE;
+      }));
+  EXPECT_GT(graph.node(2).hp_version, sequential_hp_version);
   ASSERT_EQ(sequential->size(), parallel->size());
   ASSERT_EQ(sequential->type(), parallel->type());
   EXPECT_DOUBLE_EQ(cv::sum(*sequential)[0], cv::sum(*parallel)[0]);
