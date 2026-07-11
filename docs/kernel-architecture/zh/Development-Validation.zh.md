@@ -53,8 +53,8 @@ Issue 专属 replay、provenance、helper 和 output artifact 既不得进入 pr
 Primary repository 中的 CTest 与 CI entry 只用于长期软件行为：正确性、性能、稳定性、多线程
 执行、错误处理、编译边界、package consumption 和运行时 API 边界。
 `StaticProductConsumerSmoke`、`GraphCliOptionBadAlloc`、GoogleTest discovery、
-`PublicHeaderSelfContainment` 与 `SplitComputeServiceRuntimeTrace` 满足这一规则，因为它们会执行
-或编译维护中的产品。`StaticProductConsumerSmoke` 仅覆盖 producer configure/build/install、
+`PublicHeaderSelfContainment` 满足这一规则，因为它们会执行或编译维护中的产品。
+`StaticProductConsumerSmoke` 仅覆盖 producer configure/build/install、
 外部 `find_package`、public header compile/link/run、安装后的 export 与依赖边界、平台 archive/
 link 行为和 multi-configuration target discovery；它的行为判定不得包含 Git identity、staged 或
 unstaged patch hash、invocation replay、environment fingerprint 或 synthetic verifier self-test。
@@ -67,13 +67,16 @@ CLI/Host 与 scheduler Doxygen AST 工具是长期手工开发工具，不是测
 
 ```bash
 python3 tests/verification/codebase_structure/cli_host_doxygen_ast.py \
-  --repo . --compile-commands build/compile_commands.json --out <out>
+  --repo . --compile-commands build/compile_commands.json \
+  --out /tmp/photospider-cli-host-doxygen
 python3 tests/verification/codebase_structure/scheduler_doxygen_ast.py \
-  --repo . --compile-commands build/compile_commands.json --out <out>
+  --repo . --compile-commands build/compile_commands.json \
+  --out /tmp/photospider-scheduler-doxygen
 ```
 
 这些文件可以留在 primary repository，因为本文定义了它们的长期手工职责；它们必须始终不进入
-CTest 与 GitHub CI。Issue 专属 replay、provenance、helper 和 output artifact 既不得进入 primary
+CTest 与 GitHub CI。其 `--out` 目录是仓库外、可丢弃的临时工作目录，不得成为长期 result tree。
+Issue 专属 replay、provenance、helper 和 output artifact 既不得进入 primary
 repository，也不得作为 personal overlay 的长期内容保留。Clean primary clone、CMake 配置、
 CTest inventory 和 CI script 都不能依赖个人开发内容。
 
@@ -123,10 +126,12 @@ GTest、nlohmann-json、clang-format、Python 和 cpplint。
 - `ci/scripts/integration_suite.sh`：顺序执行 integration 行为检查，包括 CLI、propagation、plugin
   和 scheduler 覆盖。
 
-`SplitComputeServiceRuntimeTrace` 会把临时输出写入 CMake build tree，不留下仓库持有的逐次运行
-输出。当前 `ctest_full.sh` 的排除属于 CI 运行时间策略，不依赖个人开发内容；当其行为与改动相关
-时，开发者可以直接运行该测试。GitHub job 状态和可下载 artifact 用于报告远程 integration 行为。
-完整 workflow 和 artifact 下载边界记录在 `docs/CI/zh/github-actions.zh.md`。
+过时的 `SplitComputeServiceRuntimeTrace` source/provenance harness 已从产品测试 inventory 移除。
+受保护的 `ci/scripts/ctest_full.sh` 仍包含目前无实际作用的 exclusion token，
+`.github/workflows/ci_scheduler_log.yml` 也仍清点旧源码路径。仓库政策禁止在本 feature branch 修改
+这些文件；待本布局进入 main 后，必须从 main 创建后续 `CI/**` branch，移除 no-op exclusion 并更新
+workflow inventory。GitHub job 状态和可下载 artifact 用于报告远程 integration 行为。完整 workflow
+和 artifact 下载边界记录在 `docs/CI/zh/github-actions.zh.md`。
 
 ## 重构边界
 
@@ -139,11 +144,12 @@ GTest、nlohmann-json、clang-format、Python 和 cpplint。
 
 `ComputeService` 拆分现在已有专门的 `split-compute-service` OpenSpec change，
 并在维护文档 `Compute-Service-Split.md` 中记录计划。第一轮拆分已经通过
-`src/kernel/services/compute-service/` 下的内部模块实现。边界覆盖位于
-`tests/test_compute_service_split.cpp`，并保留 `test_kernel_contracts`、
+`src/lib/compute/` 下的内部模块实现。边界覆盖位于
+`tests/integration/test_compute_service_split.cpp`，并保留 `test_kernel_contracts`、
 `test_propagation_contracts`、`test_scheduler`、`test_milestone34` 和
 `test_gpu_pipeline_scheduler` 的回归覆盖。
 
 `GraphTraversalService` 拓扑/ROI 拆分已经落地。边界覆盖位于
-`tests/test_graph_topology_boundaries.cpp`、`tests/test_propagation_contracts.cpp`，以及消费这些边界的
+`tests/unit/test_graph_topology_boundaries.cpp`、
+`tests/unit/test_propagation_contracts.cpp`，以及消费这些边界的
 长期运行时行为测试。

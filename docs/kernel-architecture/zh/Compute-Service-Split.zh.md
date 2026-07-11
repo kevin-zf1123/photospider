@@ -47,20 +47,20 @@ ComputeService facade
 | 边界 | 职责 | 状态 |
 | --- | --- | --- |
 | `ComputeService` facade | 接收结构化 compute request，保留既有行为，并构造内部协作者。 | 已实现 |
-| `ComputeCachePolicy` | 集中 HP/RT 缓存选择。 | 已在 `src/kernel/services/compute-service/compute_cache_policy.*` 实现 |
-| `NodeInputResolver` | 构建运行时参数并收集已就绪图像输入。 | 已在 `src/kernel/services/compute-service/node_input_resolver.*` 实现 |
-| `NodeExecutor` | 一致地执行 monolithic 与 tiled 算子。 | 已在 `src/kernel/services/compute-service/node_executor.*` 实现 |
-| `DirtyRegionPlanner` | 基于 node-local dirty report 和算子 propagation 构建图级脏区状态。 | 已在 `src/kernel/services/compute-service/dirty_region_planner.*` 实现 |
+| `ComputeCachePolicy` | 集中 HP/RT 缓存选择。 | 已在 `src/lib/compute/compute_cache_policy.*` 实现 |
+| `NodeInputResolver` | 构建运行时参数并收集已就绪图像输入。 | 已在 `src/lib/compute/node_input_resolver.*` 实现 |
+| `NodeExecutor` | 一致地执行 monolithic 与 tiled 算子。 | 已在 `src/lib/compute/node_executor.*` 实现 |
+| `DirtyRegionPlanner` | 基于 node-local dirty report 和算子 propagation 构建图级脏区状态。 | 已在 `src/lib/compute/dirty_region_planner.*` 实现 |
 | `DirtyRegionSnapshot` | 使用稳定 id 而不是原始指针枚举 dirty tiles、dirty monolithic nodes、per-node dirty ROI 和 per-edge ROI mapping。 | 已作为内部 snapshot model 实现 |
-| `FullTaskGraphExpander` | 将原始 graph 展开为一个 compute domain 的完整 node/tile `FullTaskGraph`，不使用请求目标、cache 状态或 dirty snapshot。 | 已在 `src/kernel/services/compute-service/task_graph_planning.*` 实现 |
-| `NodeCacheTaskGraphPruner` | 将 `FullTaskGraph` 裁剪到请求目标/依赖锥，并记录所选节点的 cache 可用性。 | 已在 `src/kernel/services/compute-service/task_graph_planning.*` 实现 |
-| `ComputeDispatchPlanBuilder` | 构建并记录 scheduler-backed dispatcher execution 使用的 cache-pruned high-precision plan。 | 已在 `src/kernel/services/compute-service/compute_dispatch_plan_builder.*` 实现 |
-| `TaskPopulationStrategy` 和 task population helpers | 填充 graph-backed 或 graphless planned task record 以及 task dependency；dirty snapshot 不得用来创建新的 task shape。 | 已在 `src/kernel/services/compute-service/task_population_strategy.*` 和 `task_graph_planning.*` 实现 |
-| `DirtySnapshotTaskGraphPruner` | 将 `DirtyRegionSnapshot` 应用于 node/cache-pruned `ComputeTaskGraph`，并 materialize 活跃的 `DirtyUpdateWorkSet`。 | 已在 `src/kernel/services/compute-service/task_graph_planning.*` 实现；plugin ABI 仍是 TODO |
-| `IntentUpdateCoordinator` | 协调 `GlobalHighPrecision` 与 `RealTimeUpdate` intent 语义，包括与执行模式无关的 realtime HP/RT 双路径行为。 | 已在 `src/kernel/services/compute-service/intent_update_coordinator.*` 实现 |
-| `ComputeTaskDispatcher` | 执行 node/cache-pruned task graph 语义：收集 source task、检查 task-graph readiness、通过 `SchedulerTaskRuntime` dispatch ready task，并提交结果。 | 已在 `src/kernel/services/compute-service/compute_task_dispatcher.*` 实现 |
-| `TaskSubmissionPlan` 和 `dispatch_planned_tasks` | 将 cache-pruned plan 转为一次 dispatcher 调用所需的 scheduler closure、dependency counter、ready handle 和 empty-plan validation。 | 已在 `src/kernel/services/compute-service/compute_task_submission.*` 实现 |
-| `ComputeMetricsRecorder` | 集中事件、计时、benchmark 事件和 debug 元数据。 | 已在 `src/kernel/services/compute-service/compute_metrics_recorder.*` 实现 |
+| `FullTaskGraphExpander` | 将原始 graph 展开为一个 compute domain 的完整 node/tile `FullTaskGraph`，不使用请求目标、cache 状态或 dirty snapshot。 | 已在 `src/lib/compute/task_graph_planning.*` 实现 |
+| `NodeCacheTaskGraphPruner` | 将 `FullTaskGraph` 裁剪到请求目标/依赖锥，并记录所选节点的 cache 可用性。 | 已在 `src/lib/compute/task_graph_planning.*` 实现 |
+| `ComputeDispatchPlanBuilder` | 构建并记录 scheduler-backed dispatcher execution 使用的 cache-pruned high-precision plan。 | 已在 `src/lib/compute/compute_dispatch_plan_builder.*` 实现 |
+| `TaskPopulationStrategy` 和 task population helpers | 填充 graph-backed 或 graphless planned task record 以及 task dependency；dirty snapshot 不得用来创建新的 task shape。 | 已在 `src/lib/compute/task_population_strategy.*` 和 `task_graph_planning.*` 实现 |
+| `DirtySnapshotTaskGraphPruner` | 将 `DirtyRegionSnapshot` 应用于 node/cache-pruned `ComputeTaskGraph`，并 materialize 活跃的 `DirtyUpdateWorkSet`。 | 已在 `src/lib/compute/task_graph_planning.*` 实现；plugin ABI 仍是 TODO |
+| `IntentUpdateCoordinator` | 协调 `GlobalHighPrecision` 与 `RealTimeUpdate` intent 语义，包括与执行模式无关的 realtime HP/RT 双路径行为。 | 已在 `src/lib/compute/intent_update_coordinator.*` 实现 |
+| `ComputeTaskDispatcher` | 执行 node/cache-pruned task graph 语义：收集 source task、检查 task-graph readiness、通过 `SchedulerTaskRuntime` dispatch ready task，并提交结果。 | 已在 `src/lib/compute/compute_task_dispatcher.*` 实现 |
+| `TaskSubmissionPlan` 和 `dispatch_planned_tasks` | 将 cache-pruned plan 转为一次 dispatcher 调用所需的 scheduler closure、dependency counter、ready handle 和 empty-plan validation。 | 已在 `src/lib/compute/compute_task_submission.*` 实现 |
+| `ComputeMetricsRecorder` | 集中事件、计时、benchmark 事件和 debug 元数据。 | 已在 `src/lib/compute/compute_metrics_recorder.*` 实现 |
 
 `NodeExecutor` 将 tiled 输入准备保持在 per-tile 循环之外。`TiledInputNormalizer`
 helper 会在每次节点调用时一次性 materialize image_mixing secondary 输入的 resize/crop

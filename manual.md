@@ -280,7 +280,7 @@ plugin_dirs:
 
 ## 11. Built-In Operations
 
-Built-ins are registered in `src/ops.cpp`.
+Built-ins are registered in `src/lib/core/ops.cpp`.
 
 | Type | Subtype | Description |
 | --- | --- | --- |
@@ -300,7 +300,7 @@ Built-ins are registered in `src/ops.cpp`.
 | `image_mixing` | `diff` | Absolute difference of two images. |
 | `image_mixing` | `multiply` | Pixel-wise multiplication. |
 
-Plugin examples from `custom_ops/` add `image_process:invert`,
+Plugin examples from `plugins/ops/` add `image_process:invert`,
 `image_process:threshold`, and `io:save`. On macOS, Metal builds also produce
 `image_generator:perlin_noise_metal`, but it is only scanned when
 `build/high_performance/metal` is manually present in `plugin_dirs`.

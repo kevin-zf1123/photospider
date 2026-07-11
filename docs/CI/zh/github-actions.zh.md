@@ -48,7 +48,9 @@ helper 和 output artifact 不得进入 primary repository，也不得作为 per
 - `ci/scripts/ci_image_changed.sh`：检测当前 diff 是否修改 CI 镜像输入。
 - `ci/scripts/integration_suite.sh`：为本地镜像 fallback 路径顺序运行 integration 检查。
 - `ci/scripts/build_integrity.sh`：配置 CMake，显式构建 `graph_cli`、`test_propagation`、测试插件和 scheduler 插件，然后运行 `ctest -N`。
-- `ci/scripts/ctest_full.sh`：构建全部目标并运行 CTest。当前默认排除资源开销较大的 `SplitComputeServiceRuntimeTrace`；该运行时 trace 现在只写入 CMake build tree，不依赖 personal overlay。
+- `ci/scripts/ctest_full.sh`：构建全部目标并运行 CTest。受保护脚本仍包含已移除
+  `SplitComputeServiceRuntimeTrace` 的 no-op exclusion；source-layout 变更落地主线后，必须从 main
+  创建后续 `CI/**` branch 删除该 token。
 - `ci/scripts/graph_cli_script_test.sh`：运行正路径和负路径 REPL 脚本检查。
 - `ci/scripts/propagation_script_test.sh`：构建 `test_propagation`，并对线性和复杂 propagation 图运行 `tiles all`。
 - `ci/scripts/plugin_load_test.sh`：检查插件产物、plugin manager 测试、scheduler plugin loader 测试和 CLI scheduler 插件列表。

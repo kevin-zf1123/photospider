@@ -85,11 +85,12 @@ object stored in `context` is backend-specific.
 
 ## Metal Buffers
 
-The Metal buffer adapter is implemented in `include/adapter/buffer_adapter_metal.hpp`
-and `src/adapter/buffer_adapter_metal.mm`, but it is not currently enabled in
+The Metal buffer adapter is implemented in
+`src/lib/adapters/metal/buffer_adapter_metal.{hpp,mm}`, but it is not currently enabled in
 the core library build and is not connected to the production compute path.
 `CMakeLists.txt` builds the current Metal operation path separately through
-`src/metal/perlin_noise_metal.mm` and `custom_ops/metal_ops_loader.cpp`; that op
+`plugins/ops/metal/perlin_noise_metal.mm` and
+`plugins/ops/metal/metal_ops_loader.cpp`; that op
 path registers `image_generator:perlin_noise_metal` when the loader directory is
 manually present in `plugin_dirs`.
 

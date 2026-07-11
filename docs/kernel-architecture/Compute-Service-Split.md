@@ -52,20 +52,20 @@ ComputeService facade
 | Boundary | Responsibility | Status |
 | --- | --- | --- |
 | `ComputeService` facade | Accept structured compute requests, preserve existing behavior, and construct internal collaborators. | Implemented |
-| `ComputeCachePolicy` | Centralize HP/RT cache selection. | Implemented in `src/kernel/services/compute-service/compute_cache_policy.*` |
-| `NodeInputResolver` | Build runtime parameters and collect ready image inputs. | Implemented in `src/kernel/services/compute-service/node_input_resolver.*` |
-| `NodeExecutor` | Execute monolithic and tiled operators consistently. | Implemented in `src/kernel/services/compute-service/node_executor.*` |
-| `DirtyRegionPlanner` | Build graph-scoped dirty-region state from node-local dirty reports and operator propagation. | Implemented in `src/kernel/services/compute-service/dirty_region_planner.*` |
+| `ComputeCachePolicy` | Centralize HP/RT cache selection. | Implemented in `src/lib/compute/compute_cache_policy.*` |
+| `NodeInputResolver` | Build runtime parameters and collect ready image inputs. | Implemented in `src/lib/compute/node_input_resolver.*` |
+| `NodeExecutor` | Execute monolithic and tiled operators consistently. | Implemented in `src/lib/compute/node_executor.*` |
+| `DirtyRegionPlanner` | Build graph-scoped dirty-region state from node-local dirty reports and operator propagation. | Implemented in `src/lib/compute/dirty_region_planner.*` |
 | `DirtyRegionSnapshot` | Enumerate dirty tiles, dirty monolithic nodes, per-node dirty ROIs, and per-edge ROI mappings using stable ids instead of raw pointers. | Implemented as an internal snapshot model |
-| `FullTaskGraphExpander` | Expand the raw graph into a full node/tile `FullTaskGraph` for one compute domain without using request target, cache state, or dirty snapshot. | Implemented in `src/kernel/services/compute-service/task_graph_planning.*` |
-| `NodeCacheTaskGraphPruner` | Prune a `FullTaskGraph` to the request target/dependency cone and record selected node cache availability. | Implemented in `src/kernel/services/compute-service/task_graph_planning.*` |
-| `ComputeDispatchPlanBuilder` | Build and record the cache-pruned high-precision plan used by scheduler-backed dispatcher execution. | Implemented in `src/kernel/services/compute-service/compute_dispatch_plan_builder.*` |
-| `TaskPopulationStrategy` and task population helpers | Populate graph-backed or graphless planned task records and task dependencies without using dirty snapshots to create new task shapes. | Implemented in `src/kernel/services/compute-service/task_population_strategy.*` and `task_graph_planning.*` |
-| `DirtySnapshotTaskGraphPruner` | Apply a `DirtyRegionSnapshot` to a node/cache-pruned `ComputeTaskGraph` and materialize the active `DirtyUpdateWorkSet`. | Implemented in `src/kernel/services/compute-service/task_graph_planning.*`; plugin ABI remains TODO |
-| `IntentUpdateCoordinator` | Coordinate `GlobalHighPrecision` and `RealTimeUpdate` intent semantics, including realtime HP/RT dual path behavior independent from execution mode. | Implemented in `src/kernel/services/compute-service/intent_update_coordinator.*` |
-| `ComputeTaskDispatcher` | Execute node/cache-pruned task graph semantics by collecting source tasks, checking task-graph readiness, dispatching ready tasks through `SchedulerTaskRuntime`, and committing results. | Implemented in `src/kernel/services/compute-service/compute_task_dispatcher.*` |
-| `TaskSubmissionPlan` and `dispatch_planned_tasks` | Convert a cache-pruned plan into scheduler closures, dependency counters, ready handles, and empty-plan validation for one dispatcher call. | Implemented in `src/kernel/services/compute-service/compute_task_submission.*` |
-| `ComputeMetricsRecorder` | Centralize events, timings, benchmark events, and debug metadata. | Implemented in `src/kernel/services/compute-service/compute_metrics_recorder.*` |
+| `FullTaskGraphExpander` | Expand the raw graph into a full node/tile `FullTaskGraph` for one compute domain without using request target, cache state, or dirty snapshot. | Implemented in `src/lib/compute/task_graph_planning.*` |
+| `NodeCacheTaskGraphPruner` | Prune a `FullTaskGraph` to the request target/dependency cone and record selected node cache availability. | Implemented in `src/lib/compute/task_graph_planning.*` |
+| `ComputeDispatchPlanBuilder` | Build and record the cache-pruned high-precision plan used by scheduler-backed dispatcher execution. | Implemented in `src/lib/compute/compute_dispatch_plan_builder.*` |
+| `TaskPopulationStrategy` and task population helpers | Populate graph-backed or graphless planned task records and task dependencies without using dirty snapshots to create new task shapes. | Implemented in `src/lib/compute/task_population_strategy.*` and `task_graph_planning.*` |
+| `DirtySnapshotTaskGraphPruner` | Apply a `DirtyRegionSnapshot` to a node/cache-pruned `ComputeTaskGraph` and materialize the active `DirtyUpdateWorkSet`. | Implemented in `src/lib/compute/task_graph_planning.*`; plugin ABI remains TODO |
+| `IntentUpdateCoordinator` | Coordinate `GlobalHighPrecision` and `RealTimeUpdate` intent semantics, including realtime HP/RT dual path behavior independent from execution mode. | Implemented in `src/lib/compute/intent_update_coordinator.*` |
+| `ComputeTaskDispatcher` | Execute node/cache-pruned task graph semantics by collecting source tasks, checking task-graph readiness, dispatching ready tasks through `SchedulerTaskRuntime`, and committing results. | Implemented in `src/lib/compute/compute_task_dispatcher.*` |
+| `TaskSubmissionPlan` and `dispatch_planned_tasks` | Convert a cache-pruned plan into scheduler closures, dependency counters, ready handles, and empty-plan validation for one dispatcher call. | Implemented in `src/lib/compute/compute_task_submission.*` |
+| `ComputeMetricsRecorder` | Centralize events, timings, benchmark events, and debug metadata. | Implemented in `src/lib/compute/compute_metrics_recorder.*` |
 
 `NodeExecutor` keeps tiled input preparation outside the per-tile loop. The
 `TiledInputNormalizer` helper materializes image_mixing secondary resize/crop

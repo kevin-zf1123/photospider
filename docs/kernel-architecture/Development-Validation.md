@@ -73,8 +73,8 @@ Primary-repository CTest and CI entries are reserved for long-lived software
 behavior: correctness, performance, stability, multithreaded execution, error
 handling, compile boundaries, package consumption, and runtime API boundaries.
 `StaticProductConsumerSmoke`, `GraphCliOptionBadAlloc`, GoogleTest discovery,
-`PublicHeaderSelfContainment`, and `SplitComputeServiceRuntimeTrace` satisfy
-that rule because they execute or compile the maintained product.
+and `PublicHeaderSelfContainment` satisfy that rule because they execute or
+compile the maintained product.
 `StaticProductConsumerSmoke` is limited to producer configure/build/install,
 external `find_package`, public-header compile/link/run, installed export and
 dependency boundaries, platform archive/link behavior, and multi-configuration
@@ -92,13 +92,17 @@ definitions, exception contracts, or target source closures change:
 
 ```bash
 python3 tests/verification/codebase_structure/cli_host_doxygen_ast.py \
-  --repo . --compile-commands build/compile_commands.json --out <out>
+  --repo . --compile-commands build/compile_commands.json \
+  --out /tmp/photospider-cli-host-doxygen
 python3 tests/verification/codebase_structure/scheduler_doxygen_ast.py \
-  --repo . --compile-commands build/compile_commands.json --out <out>
+  --repo . --compile-commands build/compile_commands.json \
+  --out /tmp/photospider-scheduler-doxygen
 ```
 
 Their files may remain in the primary repository because this document defines
 their lasting manual role. They must remain absent from CTest and GitHub CI.
+Their `--out` directories are disposable temporary working directories outside
+the repository and must not become a retained result tree.
 Issue-specific replay, provenance, helper, and output artifacts must neither
 enter the primary repository nor be retained as long-lived personal-overlay
 content. A clean primary clone, CMake configuration, CTest inventory, and CI
@@ -171,13 +175,16 @@ The maintained entry points are:
 - `ci/scripts/integration_suite.sh` for sequential integration behavior checks,
   including CLI, propagation, plugin, and scheduler coverage.
 
-`SplitComputeServiceRuntimeTrace` writes its transient output below the CMake
-build tree and leaves no repository-owned per-run output. The current
-`ctest_full.sh` exclusion is a CI runtime-policy choice rather than a dependency
-on personal development content; developers may run the test directly when its
-behavior is relevant to a change. GitHub job status and downloadable artifacts
-report remote integration behavior. The complete workflow and artifact download
-boundary are documented in `docs/CI/github-actions.md`.
+The obsolete `SplitComputeServiceRuntimeTrace` source/provenance harness has
+been removed from the product test inventory. The protected
+`ci/scripts/ctest_full.sh` still contains a now-inert exclusion token, and
+`.github/workflows/ci_scheduler_log.yml` still inventories old source paths.
+Repository policy forbids changing those files on this feature branch; a
+follow-up `CI/**` branch created from main must remove the no-op exclusion and
+update the workflow inventory after this layout reaches main. GitHub job status
+and downloadable artifacts report remote integration behavior. The complete
+workflow and artifact download boundary are documented in
+`docs/CI/github-actions.md`.
 
 ## Refactor Boundaries
 
@@ -195,12 +202,13 @@ kernel-contract cleanup:
 The `ComputeService` split now has a dedicated `split-compute-service`
 OpenSpec change and a maintained plan in `Compute-Service-Split.md`. The first
 split is implemented behind internal modules under
-`src/kernel/services/compute-service/`. Boundary coverage lives in
-`tests/test_compute_service_split.cpp`, with retained regression coverage from
+`src/lib/compute/`. Boundary coverage lives in
+`tests/integration/test_compute_service_split.cpp`, with retained regression
+coverage from
 `test_kernel_contracts`, `test_propagation_contracts`, `test_scheduler`,
 `test_milestone34`, and `test_gpu_pipeline_scheduler`.
 
 The `GraphTraversalService` topology/ROI split has landed. Boundary coverage
-lives in `tests/test_graph_topology_boundaries.cpp`,
-`tests/test_propagation_contracts.cpp`, and the maintained runtime behavior
+lives in `tests/unit/test_graph_topology_boundaries.cpp`,
+`tests/unit/test_propagation_contracts.cpp`, and the maintained runtime behavior
 tests that consume those boundaries.

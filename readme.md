@@ -14,15 +14,14 @@ and Metal hooks all coexist. For architecture details, start with
 
 | Path | Purpose |
 | --- | --- |
-| `cli/` | `graph_cli` executable entry point. |
-| `src/cli/` | REPL commands, command help, TUI editors, autocomplete. |
-| `src/kernel/` | Kernel facade, graph runtime, schedulers, services. |
-| `src/adapter/` | OpenCV buffer adapter plus currently unenabled Metal adapter source. |
-| `src/benchmark/` | Benchmark configuration and execution support. |
-| `src/metal/` | Apple Metal-backed operation code. |
-| `include/` | Public headers mirroring the runtime and CLI modules. |
-| `custom_ops/` | Shared operation plugins built into `build/plugins`. |
-| `tests/` | GoogleTest sources. |
+| `apps/graph_cli/` | Private `graph_cli` application tree: entry point, commands, REPL/TUI, autocomplete, configuration, headers, and help resources. |
+| `src/lib/` | Role-owned backend implementation and private headers: core, graph, compute, runtime, Host, plugin, scheduler, benchmark, and adapters. |
+| `include/photospider/` | The only installable header tree, containing public Host and core contracts. |
+| `plugins/ops/` | Repository-owned operation plugins, including the private Metal operation implementation. |
+| `plugins/schedulers/` | Repository-owned scheduler plugins. |
+| `tests/unit/` | Isolated contract tests. |
+| `tests/integration/` | Cross-component, runtime, plugin, scheduler, CLI, process, and package behavior tests. |
+| `tests/{fixtures,support,verification}/` | Test DSOs, shared internal support, and documented long-lived manual tools. |
 | `docs/` | Maintained documentation. Older phase docs live in `docs/outdated`. |
 | `util/` | Scratch graphs, examples, and local test inputs. |
 | `extern/ftxui/` | Vendored FTXUI source when the submodule is present. |
@@ -110,8 +109,10 @@ cmake --build build --target test_gpu_pipeline_scheduler -j
 ./build/tests/test_gpu_pipeline_scheduler
 ```
 
-Note: the current `CMakeLists.txt` builds every `tests/test_*.cpp` executable,
-but only selected targets are registered with `gtest_discover_tests`.
+The current `CMakeLists.txt` keeps stable test target and CTest names while
+owning maintained translation units under `tests/unit/` and
+`tests/integration/`. `test_propagation` remains a buildable script-driven tool;
+the other GoogleTest targets are registered with `gtest_discover_tests`.
 
 ## Run
 
@@ -146,7 +147,9 @@ Graph computation and image saving are REPL commands, not top-level CLI flags.
 ## REPL Commands
 
 Type `help` in the REPL for the full command list, or `help <command>` for the
-text stored in `src/cli/command/help/`.
+text stored in `apps/graph_cli/resources/help/`. CMake configures this resource
+root into the build-tree application, so command help does not depend on the
+process working directory.
 
 Common commands:
 
@@ -245,7 +248,7 @@ plugin_dirs:
 
 ## Built-In Operations
 
-Built-in operations are registered in `src/ops.cpp`.
+Built-in operations are registered in `src/lib/core/ops.cpp`.
 
 | Type | Subtype | Notes |
 | --- | --- | --- |
@@ -265,8 +268,9 @@ Built-in operations are registered in `src/ops.cpp`.
 | `image_mixing` | `diff` | Absolute difference between two images. |
 | `image_mixing` | `multiply` | Pixel-wise multiplication. |
 
-`custom_ops/` currently builds example plugins for `image_process:invert`,
-`image_process:threshold`, and `io:save`. On macOS, Metal builds also produce
+`plugins/ops/` currently builds example plugins for `image_process:invert`,
+`image_process:threshold`, and `io:save`. On macOS, its private `metal/`
+implementation also produces
 `image_generator:perlin_noise_metal`, but it is only scanned when
 `build/high_performance/metal` is manually present in `plugin_dirs`.
 
