@@ -303,17 +303,10 @@ std::string RequestRouter::route(const std::string& payload) {
                        "request requires integer protocol_version, valid id, "
                        "nonempty method, and object params"));
   }
-  std::int32_t request_version = 0;
-  try {
-    request_version = request["protocol_version"].get<std::int32_t>();
-  } catch (const Json::exception&) {
-    return bounded_error(
-        response_id,
-        failure_status(IpcErrorDomain::Protocol, kInvalidRequestCode,
-                       "invalid_request", "protocol_version is out of range"));
-  }
   const std::string id = response_id.get<std::string>();
-  if (request_version != kProtocolVersion) {
+  std::int32_t request_version = 0;
+  if (!decode_integer(request["protocol_version"], &request_version) ||
+      request_version != kProtocolVersion) {
     return bounded_error(
         id,
         failure_status(IpcErrorDomain::Protocol, kUnsupportedProtocolCode,
@@ -450,11 +443,11 @@ std::string RequestRouter::route(const std::string& payload) {
           return bounded_error(
               id, invalid_params("inspect.node requires integer node_id"));
         }
-        try {
-          node = NodeId{params["node_id"].get<int>()};
-        } catch (const Json::exception&) {
+        int node_id = 0;
+        if (!decode_integer(params["node_id"], &node_id)) {
           return bounded_error(id, invalid_params("node_id is out of range"));
         }
+        node = NodeId{node_id};
         if (node->value < 0) {
           return bounded_error(id,
                                invalid_params("node_id must be nonnegative"));
@@ -465,11 +458,11 @@ std::string RequestRouter::route(const std::string& payload) {
             return bounded_error(
                 id, invalid_params("node_id must be integer or null"));
           }
-          try {
-            node = NodeId{params["node_id"].get<int>()};
-          } catch (const Json::exception&) {
+          int node_id = 0;
+          if (!decode_integer(params["node_id"], &node_id)) {
             return bounded_error(id, invalid_params("node_id is out of range"));
           }
+          node = NodeId{node_id};
           if (node->value < 0) {
             return bounded_error(id,
                                  invalid_params("node_id must be nonnegative"));

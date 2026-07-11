@@ -112,10 +112,28 @@ session name. It never automatically retries or reconnects,
 especially for `graph.load`. `disconnect()` is idempotent and never closes a
 daemon-owned graph.
 
+Every integer is decoded according to its signed or unsigned JSON storage and
+must fit the exact public destination type before a value is published. Frame,
+JSON, envelope, correlation, and error-object violations close the connection
+because message synchronization is no longer trustworthy. Once a correlated
+result object has been consumed, a typed result-shape or range failure returns a
+local Protocol status while leaving the synchronized connection open.
+
 ## Stable Errors
 
-Every remote failure has string `domain`, signed integer `code`, string `name`,
-and diagnostic `message`. Messages are not a branching contract.
+`IpcErrorDomain` is the stable top-level category. Error origins are:
+
+| Domain | Origin |
+| --- | --- |
+| Transport | always produced locally by the client |
+| Protocol | produced by local client validation or a daemon response |
+| Graph | decoded from a daemon response |
+| Daemon | decoded from a daemon response |
+
+Every remote Protocol, Graph, or Daemon failure has string `domain`, signed
+integer `code`, string `name`, and diagnostic `message`. Its `code`/`name`
+mapping is stable for version 1. Locally produced Protocol statuses use the
+same version 1 validation categories; messages are not a branching contract.
 
 | Domain | Code | Name |
 | --- | ---: | --- |
@@ -143,9 +161,11 @@ Host failures use the graph domain and an explicit `GraphErrc` mapping:
 
 Local connect/read/write/peer failures use `IpcErrorDomain::Transport` and are
 never converted to graph IO errors. A daemon cannot send the transport domain.
-Unknown future remote numeric codes and names remain available in `IpcStatus`.
-Allocation failure may propagate `std::bad_alloc`; other recoverable failures
-are returned as statuses.
+The Transport domain is programmatically stable, but its local numeric code and
+name are diagnostic classifications; clients must not persist or branch on a
+promised long-term Transport code/name mapping. Unknown future remote numeric
+codes and names remain available in `IpcStatus`. Allocation failure may
+propagate `std::bad_alloc`; other recoverable failures are returned as statuses.
 
 ## Daemon Metadata
 
@@ -202,11 +222,12 @@ joining connection workers.
 Inspection resolves the opaque id and calls only `ps::Host`:
 
 - `inspect.graph` returns `{session_id, nodes}`;
-- `inspect.node` requires integer `node_id` and returns
+- `inspect.node` requires a nonnegative integer `node_id` representable by the
+  public `int`-backed `NodeId` and returns
   `{session_id, node}`;
-- `inspect.dependency_tree` accepts optional integer/null `node_id` and optional
-  boolean `include_metadata`, then returns `{session_id, ...flattened tree
-  fields}`.
+- `inspect.dependency_tree` accepts an optional nonnegative integer/null
+  `node_id` with the same range and optional boolean `include_metadata`, then
+  returns `{session_id, ...flattened tree fields}`.
 
 Node JSON mirrors `NodeInspectionView` with snake-case fields: integer `id`,
 `name`, `type`, `subtype`, a string-valued JSON object `parameters`,
@@ -216,6 +237,11 @@ integer `from_node_id`/`to_node_id`, `kind` (`image_input` or
 `parameter_input`), output/input names, and nonnegative `input_index`. Optional
 values use JSON null. Non-finite public doubles encode as null and the typed
 client restores quiet NaN.
+
+The typed client range-checks every node id, tree depth, edge input index,
+debug timestamp/duration, worker id, and spatial extent/rectangle component
+before publishing graph, node, or dependency-tree snapshots. Signed/unsigned
+overflow is a local Protocol result-shape failure; it is never narrowed.
 
 No backend class, address, pointer, cache handle, service object, closure, or
 mutable reference enters a payload.
@@ -265,7 +291,7 @@ cmake --build build --target photospider_ipc_client \
   photospider_ipc_server_internal photospiderd test_ipc_protocol \
   test_ipc_daemon public_header_self_containment -j
 ctest --test-dir build --output-on-failure \
-  -R '^(FrameCodec|ProtocolEnvelope|ProtocolErrors|ProtocolParams|ProtocolGraphLoad|InspectionJson|SessionRegistry|ClientLifecycle|ClientResultValidation|IpcDaemon|StaticProductConsumerSmoke|IpcDisabledInstallSmoke|PublicHeaderSelfContainment)'
+  -R '^(FrameCodec|ProtocolEnvelope|IntegerCodec|ProtocolErrors|ProtocolParams|ProtocolGraphLoad|InspectionJson|SessionRegistry|ClientLifecycle|ClientResultValidation|IpcDaemon|StaticProductConsumerSmoke|IpcDisabledInstallSmoke|PublicHeaderSelfContainment)'
 ```
 
 `StaticProductConsumerSmoke` verifies the installed backend plus a second

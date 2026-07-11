@@ -69,16 +69,15 @@ Json encode_size(const PixelSize& size) {
  */
 bool decode_size(const Json& value, PixelSize* size) {
   if (!value.is_object() || !value.contains("width") ||
-      !value.contains("height") || !value["width"].is_number_integer() ||
-      !value["height"].is_number_integer()) {
+      !value.contains("height")) {
     return false;
   }
-  try {
-    size->width = value["width"].get<int>();
-    size->height = value["height"].get<int>();
-  } catch (const Json::exception&) {
+  PixelSize decoded;
+  if (!decode_integer(value["width"], &decoded.width) ||
+      !decode_integer(value["height"], &decoded.height)) {
     return false;
   }
+  *size = decoded;
   return true;
 }
 
@@ -110,18 +109,18 @@ bool decode_rect(const Json& value, PixelRect* rect) {
     return false;
   }
   for (const char* field : kFields) {
-    if (!value.contains(field) || !value[field].is_number_integer()) {
+    if (!value.contains(field)) {
       return false;
     }
   }
-  try {
-    rect->x = value["x"].get<int>();
-    rect->y = value["y"].get<int>();
-    rect->width = value["width"].get<int>();
-    rect->height = value["height"].get<int>();
-  } catch (const Json::exception&) {
+  PixelRect decoded;
+  if (!decode_integer(value["x"], &decoded.x) ||
+      !decode_integer(value["y"], &decoded.y) ||
+      !decode_integer(value["width"], &decoded.width) ||
+      !decode_integer(value["height"], &decoded.height)) {
     return false;
   }
+  *rect = decoded;
   return true;
 }
 
@@ -189,25 +188,24 @@ bool decode_debug(const Json& value, DebugMetadataSnapshot* debug) {
   if (!value.is_object() ||
       !value.value("compute_device", Json()).is_string() ||
       !value.value("has_nan", Json()).is_boolean() ||
-      !value.value("computed_by_worker_id", Json()).is_number_integer() ||
-      !value.contains("timestamp_us") ||
-      !value["timestamp_us"].is_number_unsigned() ||
-      !value.contains("execution_time_ms") ||
-      !value["execution_time_ms"].is_number_unsigned() ||
+      !value.contains("computed_by_worker_id") ||
+      !value.contains("timestamp_us") || !value.contains("execution_time_ms") ||
       !value.contains("min_val") || !value.contains("max_val")) {
     return false;
   }
-  try {
-    debug->computed_by_worker_id = value["computed_by_worker_id"].get<int>();
-    debug->timestamp_us = value["timestamp_us"].get<std::uint64_t>();
-    debug->execution_time_ms = value["execution_time_ms"].get<std::uint64_t>();
-    debug->has_nan = value["has_nan"].get<bool>();
-    debug->compute_device = value["compute_device"].get<std::string>();
-  } catch (const Json::exception&) {
+  DebugMetadataSnapshot decoded;
+  if (!decode_integer(value["computed_by_worker_id"],
+                      &decoded.computed_by_worker_id) ||
+      !decode_integer(value["timestamp_us"], &decoded.timestamp_us) ||
+      !decode_integer(value["execution_time_ms"], &decoded.execution_time_ms) ||
+      !decode_double(value["min_val"], &decoded.min_val) ||
+      !decode_double(value["max_val"], &decoded.max_val)) {
     return false;
   }
-  return decode_double(value["min_val"], &debug->min_val) &&
-         decode_double(value["max_val"], &debug->max_val);
+  decoded.has_nan = value["has_nan"].get<bool>();
+  decoded.compute_device = value["compute_device"].get<std::string>();
+  *debug = std::move(decoded);
+  return true;
 }
 
 /**
@@ -283,33 +281,31 @@ Json encode_edge(const HostGraphEdgeSnapshot& edge) {
  * @throws std::bad_alloc if copied names cannot be allocated.
  */
 bool decode_edge(const Json& value, HostGraphEdgeSnapshot* edge) {
-  if (!value.is_object() ||
-      !value.value("from_node_id", Json()).is_number_integer() ||
-      !value.value("to_node_id", Json()).is_number_integer() ||
+  if (!value.is_object() || !value.contains("from_node_id") ||
+      !value.contains("to_node_id") ||
       !value.value("kind", Json()).is_string() ||
       !value.value("from_output_name", Json()).is_string() ||
       !value.value("to_input_name", Json()).is_string() ||
-      !value.contains("input_index") ||
-      !value["input_index"].is_number_unsigned()) {
+      !value.contains("input_index")) {
     return false;
   }
-  try {
-    edge->from_node.value = value["from_node_id"].get<int>();
-    edge->to_node.value = value["to_node_id"].get<int>();
-    edge->from_output_name = value["from_output_name"].get<std::string>();
-    edge->to_input_name = value["to_input_name"].get<std::string>();
-    edge->input_index = value["input_index"].get<std::size_t>();
-  } catch (const Json::exception&) {
+  HostGraphEdgeSnapshot decoded;
+  if (!decode_integer(value["from_node_id"], &decoded.from_node.value) ||
+      !decode_integer(value["to_node_id"], &decoded.to_node.value) ||
+      !decode_integer(value["input_index"], &decoded.input_index)) {
     return false;
   }
   const std::string kind = value["kind"].get<std::string>();
   if (kind == "image_input") {
-    edge->kind = HostGraphEdgeKind::ImageInput;
+    decoded.kind = HostGraphEdgeKind::ImageInput;
   } else if (kind == "parameter_input") {
-    edge->kind = HostGraphEdgeKind::ParameterInput;
+    decoded.kind = HostGraphEdgeKind::ParameterInput;
   } else {
     return false;
   }
+  decoded.from_output_name = value["from_output_name"].get<std::string>();
+  decoded.to_input_name = value["to_input_name"].get<std::string>();
+  *edge = std::move(decoded);
   return true;
 }
 
@@ -481,14 +477,13 @@ bool decode_error(const Json& value, IpcStatus* status, std::string* message) {
     *message = "error object has unknown domain";
     return false;
   }
-  try {
-    *status = failure_status(domain, value["code"].get<std::int32_t>(),
-                             value["name"].get<std::string>(),
-                             value["message"].get<std::string>());
-  } catch (const Json::exception&) {
+  std::int32_t code = 0;
+  if (!decode_integer(value["code"], &code)) {
     *message = "error code is outside signed 32-bit range";
     return false;
   }
+  *status = failure_status(domain, code, value["name"].get<std::string>(),
+                           value["message"].get<std::string>());
   return true;
 }
 
@@ -543,8 +538,11 @@ bool decode_node(const Json& value, NodeInspectionView* node,
   }
 
   NodeInspectionView decoded;
+  if (!decode_integer(value["id"], &decoded.id.value)) {
+    *message = "node id is outside the supported integer range";
+    return false;
+  }
   try {
-    decoded.id.value = value["id"].get<int>();
     decoded.name = value["name"].get<std::string>();
     decoded.type = value["type"].get<std::string>();
     decoded.subtype = value["subtype"].get<std::string>();
@@ -667,12 +665,12 @@ bool decode_dependency_tree(const Json& value, HostDependencyTreeSnapshot* tree,
     return false;
   }
   if (value["start_node_id"].is_number_integer()) {
-    try {
-      decoded.start_node = NodeId{value["start_node_id"].get<int>()};
-    } catch (const Json::exception&) {
+    int start_node = 0;
+    if (!decode_integer(value["start_node_id"], &start_node)) {
       *message = "dependency tree start_node_id is out of range";
       return false;
     }
+    decoded.start_node = NodeId{start_node};
   } else if (!value["start_node_id"].is_null()) {
     *message = "dependency tree start_node_id must be integer or null";
     return false;
@@ -680,17 +678,17 @@ bool decode_dependency_tree(const Json& value, HostDependencyTreeSnapshot* tree,
   decoded.graph_empty = value["graph_empty"].get<bool>();
   decoded.start_node_found = value["start_node_found"].get<bool>();
   decoded.no_ending_nodes = value["no_ending_nodes"].get<bool>();
-  try {
-    for (const Json& root : value["root_node_ids"]) {
-      if (!root.is_number_integer()) {
-        *message = "dependency tree root id must be an integer";
-        return false;
-      }
-      decoded.root_nodes.push_back(NodeId{root.get<int>()});
+  for (const Json& root : value["root_node_ids"]) {
+    int root_node = 0;
+    if (!root.is_number_integer()) {
+      *message = "dependency tree root id must be an integer";
+      return false;
     }
-  } catch (const Json::exception&) {
-    *message = "dependency tree root id is out of range";
-    return false;
+    if (!decode_integer(root, &root_node)) {
+      *message = "dependency tree root id is out of range";
+      return false;
+    }
+    decoded.root_nodes.push_back(NodeId{root_node});
   }
   for (const Json& entry_json : value["entries"]) {
     if (!entry_json.is_object() ||
@@ -701,9 +699,7 @@ bool decode_dependency_tree(const Json& value, HostDependencyTreeSnapshot* tree,
       return false;
     }
     HostDependencyTreeEntry entry;
-    try {
-      entry.depth = entry_json["depth"].get<int>();
-    } catch (const Json::exception&) {
+    if (!decode_integer(entry_json["depth"], &entry.depth)) {
       *message = "dependency tree depth is out of range";
       return false;
     }

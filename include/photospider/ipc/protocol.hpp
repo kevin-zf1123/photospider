@@ -36,8 +36,9 @@ inline constexpr std::size_t kMaximumFramePayloadBytes = 16U * 1024U * 1024U;
  * @brief Stable domain for an IPC operation status.
  *
  * @throws Nothing.
- * @note Transport failures originate locally; the other failure domains are
- *       decoded from a correlated daemon response.
+ * @note Transport failures are always produced locally. Protocol failures may
+ *       be produced by local response validation or decoded from a correlated
+ *       daemon response; Graph and Daemon failures are remote.
  */
 enum class IpcErrorDomain {
   /** @brief No failure occurred. */
@@ -46,13 +47,13 @@ enum class IpcErrorDomain {
   /** @brief Local connect, read, write, or peer-lifecycle failure. */
   Transport,
 
-  /** @brief Version 1 framing, envelope, method, or parameter failure. */
+  /** @brief Local or remote version 1 protocol-contract failure. */
   Protocol,
 
-  /** @brief Failure reported by the public graph Host boundary. */
+  /** @brief Remote failure reported by the public graph Host boundary. */
   Graph,
 
-  /** @brief Daemon invariant or unexpected request-processing failure. */
+  /** @brief Remote daemon invariant or request-processing failure. */
   Daemon,
 };
 
@@ -60,8 +61,11 @@ enum class IpcErrorDomain {
  * @brief Owned status returned by public IPC client operations.
  *
  * @throws std::bad_alloc when copied diagnostics cannot be allocated.
- * @note Callers branch on `domain`, `code`, and `name`; `message` is diagnostic
- *       text and may change without a protocol-version change.
+ * @note Callers can always branch on `domain`. Remote Protocol, Graph, and
+ *       Daemon `code`/`name` mappings are stable for version 1; local Protocol
+ *       statuses use version 1 validation categories. Local Transport
+ *       `code`/`name` values are diagnostic categories, not a promised durable
+ *       mapping. `message` is always diagnostic text.
  */
 struct IpcStatus {
   /** @brief True when the requested operation completed successfully. */
@@ -70,10 +74,10 @@ struct IpcStatus {
   /** @brief Stable failure domain, or `None` on success. */
   IpcErrorDomain domain = IpcErrorDomain::None;
 
-  /** @brief Stable signed wire or local transport code. */
+  /** @brief Version 1 Protocol/remote code or diagnostic Transport code. */
   std::int32_t code = 0;
 
-  /** @brief Stable lowercase programmatic failure name. */
+  /** @brief Version 1 Protocol/remote name or diagnostic Transport name. */
   std::string name;
 
   /** @brief Human-readable diagnostic owned by this value. */

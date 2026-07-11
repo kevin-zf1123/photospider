@@ -1,8 +1,10 @@
 #pragma once
 
 #include <cstdint>
+#include <limits>
 #include <nlohmann/json.hpp>
 #include <string>
+#include <type_traits>
 
 #include "photospider/core/result_types.hpp"
 #include "photospider/host/host.hpp"
@@ -18,6 +20,70 @@ namespace ps::ipc::internal {
  *       ABI; values own their parser and object storage.
  */
 using Json = nlohmann::json;
+
+/**
+ * @brief Decodes one JSON integer without signedness loss or narrowing.
+ *
+ * @tparam Integer Non-boolean integral destination type no wider than the JSON
+ *         library's unsigned integer storage.
+ * @param value Candidate signed or unsigned JSON integer.
+ * @param output Receives the exact value only after range validation succeeds.
+ * @return True when `value` is an integer representable by `Integer` and
+ *         `output` is nonnull; otherwise false without modifying `output`.
+ * @throws Nothing.
+ * @note The JSON storage category is inspected before conversion. This avoids
+ *       implementation-defined signed/unsigned wraparound and prevents
+ *       `nlohmann::json::get<Integer>()` from silently narrowing a wire value.
+ */
+template <typename Integer>
+bool decode_integer(const Json& value, Integer* output) noexcept {
+  using Target = std::remove_cv_t<Integer>;
+  static_assert(std::is_integral_v<Target>,
+                "IPC integer destination must be integral");
+  static_assert(!std::is_same_v<Target, bool>,
+                "IPC booleans require explicit boolean decoding");
+  static_assert(std::numeric_limits<Target>::digits <=
+                    std::numeric_limits<Json::number_unsigned_t>::digits,
+                "IPC integer destination exceeds JSON integer storage");
+  if (output == nullptr) {
+    return false;
+  }
+
+  if (value.is_number_unsigned()) {
+    const Json::number_unsigned_t decoded =
+        value.template get_ref<const Json::number_unsigned_t&>();
+    const Json::number_unsigned_t maximum =
+        static_cast<Json::number_unsigned_t>(
+            std::numeric_limits<Target>::max());
+    if (decoded > maximum) {
+      return false;
+    }
+    *output = static_cast<Target>(decoded);
+    return true;
+  }
+  if (!value.is_number_integer()) {
+    return false;
+  }
+
+  const Json::number_integer_t decoded =
+      value.template get_ref<const Json::number_integer_t&>();
+  if constexpr (std::numeric_limits<Target>::is_signed) {
+    if (decoded < static_cast<Json::number_integer_t>(
+                      std::numeric_limits<Target>::min()) ||
+        decoded > static_cast<Json::number_integer_t>(
+                      std::numeric_limits<Target>::max())) {
+      return false;
+    }
+  } else {
+    if (decoded < 0 || static_cast<Json::number_unsigned_t>(decoded) >
+                           static_cast<Json::number_unsigned_t>(
+                               std::numeric_limits<Target>::max())) {
+      return false;
+    }
+  }
+  *output = static_cast<Target>(decoded);
+  return true;
+}
 
 /**
  * @brief JSON-RPC-compatible parse failure code used by version 1.
@@ -128,9 +194,9 @@ IpcStatus ok_status();
 /**
  * @brief Creates one owned failure status.
  *
- * @param domain Stable local or remote error domain.
- * @param code Stable signed numeric code.
- * @param name Stable lowercase programmatic name.
+ * @param domain Local or remote error domain.
+ * @param code Versioned wire code or local diagnostic code.
+ * @param name Versioned wire name or local diagnostic category.
  * @param message Human-readable diagnostic.
  * @return Owned failure status.
  * @throws std::bad_alloc if strings cannot be copied.
