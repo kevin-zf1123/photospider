@@ -3,6 +3,7 @@
 #include <mutex>
 #include <string>
 
+#include "ipc/compute_request_registry.hpp"
 #include "ipc/session_registry.hpp"
 #include "photospider/host/host.hpp"
 
@@ -20,8 +21,9 @@ namespace ps::ipc::internal {
  *         allocated.
  * @throws std::runtime_error if the operating-system instance-id entropy
  *         source fails.
- * @note The router owns session mappings but borrows Host for a lifetime that
- *       must exceed the router and server.
+ * @note The router owns session mappings and the private joined compute
+ *       registry but borrows Host for a lifetime that must exceed the router
+ *       and server. Compute starts only through `start_runtime()`.
  */
 class RequestRouter {
  public:
@@ -32,6 +34,8 @@ class RequestRouter {
    * @param service_version Reproducible CMake project version string.
    * @throws std::bad_alloc if metadata allocation fails.
    * @throws std::runtime_error if instance-id entropy fails.
+   * @note The compute registry is constructed stopped; the current method
+   *       inventory remains the exact eight names defined by protocol v1.
    */
   RequestRouter(Host& host, std::string service_version);
 
@@ -63,23 +67,43 @@ class RequestRouter {
    * @note No Host call occurs for malformed envelopes, unsupported methods, or
    *       invalid params. A `graph.load` reservation is removed before any
    *       compensating Host close, including when Host load or registry
-   *       publication throws. The `graph.list` and inspection result codecs
-   *       locally map `std::length_error` to `response_too_large`; malformed
-   *       returned values and other standard request failures become daemon
-   *       `internal_error`. Resource exhaustion is rethrown. The function
-   *       performs no socket IO.
+   *       publication throws. Session-scoped calls retain a counted admission;
+   *       `graph.close` marks Closing and waits admissions before Host locking.
+   *       The `graph.list` and inspection result codecs locally map
+   *       `std::length_error` to `response_too_large`; malformed returned
+   *       values and other standard request failures become daemon
+   *       `internal_error`.
+   *       Resource exhaustion is rethrown. The function performs no socket IO.
    */
   std::string route(const std::string& payload);
 
   /**
-   * @brief Closes every active Host session during daemon shutdown.
+   * @brief Starts the joined compute worker and enables session admission.
    *
-   * @throws Nothing; individual Host exceptions/failures are contained so the
-   *         process can complete deterministic descriptor/socket cleanup.
-   * @note The function holds the Host mutex around each close and clears all
-   *       registry state after every close has been attempted.
+   * @return Success or daemon lifecycle failure.
+   * @throws std::system_error if worker creation fails.
+   * @throws std::bad_alloc if failure diagnostic construction cannot allocate.
+   * @note The server calls this only after socket ownership is established and
+   *       before any client worker can route a request.
    */
-  void close_all_sessions() noexcept;
+  OperationStatus start_runtime();
+
+  /**
+   * @brief Atomically rejects new session and compute admission for shutdown.
+   * @throws Nothing.
+   * @note Already admitted calls and jobs retain their exact completion rules.
+   */
+  void begin_shutdown() noexcept;
+
+  /**
+   * @brief Drains compute, joins its worker, then closes every Host session.
+   *
+   * @throws Nothing; job cleanup, Host failures, and Host exceptions are
+   *         contained so socket lifecycle cleanup can continue.
+   * @note Call after accepted client workers have stopped. Output ownership is
+   *       released before Host sessions and registry rows are cleared.
+   */
+  void finish_shutdown() noexcept;
 
   /**
    * @brief Returns the immutable daemon instance id.
@@ -98,6 +122,9 @@ class RequestRouter {
 
   /** @brief Loading/active opaque-to-Host session registry. */
   SessionRegistry registry_;
+
+  /** @brief Bounded private compute lifecycle with one joined worker. */
+  ComputeRequestRegistry compute_registry_;
 
   /** @brief Reproducible CMake project version. */
   std::string service_version_;

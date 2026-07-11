@@ -285,15 +285,56 @@ Host session. A successful result exposes only:
 mappings. A disagreement is a daemon invariant error and leaks no untracked
 Host name. Returned rows are sorted by `session_name`, then `session_id`.
 
-`graph.close` resolves only the opaque id. Successful Host close removes all
-three active indexes. Host `NotFound` also removes the stale mapping while preserving the
-failure response; other Host failures retain it. Disconnecting a client does
-not close sessions. Shutdown attempts to close every active Host session after
-joining connection workers.
+`graph.close` resolves only the opaque id through the session lifecycle gate.
+It first marks the mapping closing, rejects every new session-scoped Host or
+compute admission with Graph `not_found`, and waits for already-admitted Host
+calls plus queued/running jobs without holding the Host mutex. It then acquires
+the Host mutex and calls `Host::close_graph`. Successful Host close removes all
+three active indexes. Host `NotFound` also removes the stale mapping while
+preserving the failure response; any other Host failure atomically reopens the
+mapping. Closing rows are omitted from `graph.list` results while remaining
+part of Host/registry invariant reconciliation. Disconnecting a client does
+not close sessions.
+
+## Private Compute Lifecycle
+
+The current eight-method wire inventory still exposes no compute method. The
+server nevertheless owns the private lifecycle boundary used by compute
+routing: one explicitly started, joinable `ComputeRequestRegistry` worker and
+one shared session-admission gate. This infrastructure is not a second public
+Host or wire API.
+
+Before a queue commit, submission admits the active session, enforces a global
+maximum of 64 queued/running records, validates and collision-checks a
+daemon-generated 32-lowercase-hex compute id, and reserves all queue/terminal
+bookkeeping. A successful commit snapshot is always `queued` with
+`cancellable: false`. The sole FIFO worker advances a record to `running`,
+invokes exactly one matching synchronous Host callback for `status` or `image`
+mode, and publishes exactly one immutable `succeeded` or `failed` terminal
+status. Host calls use the same daemon Host mutex; image publication occurs
+after that callback releases the Host mutex.
+
+Status reads are non-destructive and do not acquire the Host mutex. Result and
+release accept terminal records only. A well-formed absent, expired, released,
+or evicted id maps to daemon `job_not_found`; a queued/running result or release
+maps to daemon `job_not_ready`. Host failures remain exact nested terminal
+statuses. Any exception after queue commit, including allocation or output
+publication failure, uses a fallback daemon `internal_error` status allocated
+before commit, so the worker continues to later jobs.
+
+At most 256 terminal records are retained. Publishing another terminal record
+evicts only the oldest terminal publication; active work is never evicted.
+Terminal age starts at complete publication, uses a monotonic injected clock,
+expires at 15 minutes, and is not refreshed by lookup. Output ownership is a
+private move-only reference with exact-once cleanup outside the registry mutex;
+the wire-visible protected output store is not part of the current method
+inventory.
 
 ## Inspection Values
 
-Inspection resolves the opaque id and calls only `ps::Host`:
+Inspection atomically admits the opaque session before acquiring the Host mutex
+and calls only `ps::Host`. A concurrent close marks the session first, rejects
+new inspection admission, and waits any already-admitted inspection:
 
 - `inspect.graph` returns `{session_id, nodes}`;
 - `inspect.node` requires a nonnegative integer `node_id` representable by the
@@ -347,10 +388,13 @@ the lifecycle lock.
 The listener tracks at most 32 joinable client workers. Requests are sequential
 per connection; frame/JSON work may occur across clients. Because public Host
 does not promise thread safety, every Host call uses one daemon mutex. Socket
-reads and writes never hold it. Shutdown closes the listener, shuts down
-tracked client descriptors to wake reads, joins all workers, closes sessions,
-removes its socket while the lifecycle lock remains held, releases the lock,
-and then destroys Host state. The persistent lock file intentionally remains.
+reads and writes never hold it. Shutdown first stops all session and compute
+admission, closes the listener, shuts down tracked client descriptors to wake
+reads, and joins all connection workers. It then drains every accepted compute
+job, joins the sole compute worker, releases terminal output ownership, closes
+Host sessions, and clears session mappings. Finally it removes its socket while
+the lifecycle lock remains held, releases the lock, and destroys Host state.
+The persistent lock file intentionally remains.
 
 Before installing SIGINT/SIGTERM handlers, `photospiderd` creates a nonblocking
 close-on-exec self-pipe. The handler only preserves `errno`, writes one byte,
@@ -366,9 +410,10 @@ Focused local commands are:
 cmake -S . -B build -DPHOTOSPIDER_BUILD_IPC=ON -DBUILD_TESTING=ON
 cmake --build build --target photospider_ipc_client \
   photospider_ipc_server_internal photospiderd test_ipc_protocol \
-  test_ipc_daemon public_header_self_containment -j
+  test_compute_request_registry test_ipc_daemon \
+  public_header_self_containment -j
 ctest --test-dir build --output-on-failure \
-  -R '^(FrameCodec|ProtocolEnvelope|IntegerCodec|ProtocolErrors|ProtocolParams|ProtocolGraphLoad|InspectionJson|SessionRegistry|ClientLifecycle|ClientResultValidation|IpcDaemon|StaticProductConsumerSmoke|IpcDisabledInstallSmoke|PublicHeaderSelfContainment)'
+  -R '^(FrameCodec|ProtocolEnvelope|IntegerCodec|ProtocolErrors|ProtocolParams|ProtocolGraphLoad|ProtocolGraphClose|InspectionJson|SessionRegistry|ComputeRequestRegistry|ClientLifecycle|ClientResultValidation|IpcDaemon|StaticProductConsumerSmoke|IpcDisabledInstallSmoke|PublicHeaderSelfContainment)'
 ```
 
 `StaticProductConsumerSmoke` verifies the installed backend plus a second

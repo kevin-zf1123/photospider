@@ -401,6 +401,7 @@ if(PHOTOSPIDER_BUILD_IPC)
     )
 
     add_library(photospider_ipc_server_internal STATIC
+        src/lib/ipc/compute_request_registry.cpp
         src/lib/ipc/session_registry.cpp
         src/lib/ipc/request_router.cpp
         src/lib/ipc/server.cpp
@@ -855,6 +856,24 @@ if(BUILD_TESTING)
             ${CMAKE_DL_LIBS})
         add_dependencies(test_ipc_protocol destroy_count_scheduler_plugin)
 
+        add_executable(test_compute_request_registry
+            tests/unit/test_compute_request_registry.cpp)
+        set_target_properties(test_compute_request_registry PROPERTIES
+            RUNTIME_OUTPUT_DIRECTORY "${TEST_OUTPUT_DIR}"
+            BUILD_RPATH "${CMAKE_BINARY_DIR}/lib")
+        target_compile_features(test_compute_request_registry PRIVATE cxx_std_17)
+        target_include_directories(test_compute_request_registry PRIVATE
+            "${PROJECT_SOURCE_DIR}/include"
+            "${PROJECT_SOURCE_DIR}/src/lib"
+            "${PROJECT_SOURCE_DIR}/tests")
+        target_link_libraries(test_compute_request_registry PRIVATE
+            photospider_ipc_server_internal
+            photospider_ipc_client
+            photospider
+            GTest::gtest
+            GTest::gtest_main
+            Threads::Threads)
+
         add_executable(test_ipc_daemon
             tests/integration/test_ipc_daemon.cpp)
         set_target_properties(test_ipc_daemon PROPERTIES
@@ -1063,6 +1082,9 @@ if(BUILD_TESTING)
     gtest_discover_tests(test_scheduler WORKING_DIRECTORY ${PROJECT_SOURCE_DIR})
     if(PHOTOSPIDER_BUILD_IPC)
         gtest_discover_tests(test_ipc_protocol
+            WORKING_DIRECTORY ${PROJECT_SOURCE_DIR}
+            PROPERTIES TIMEOUT 30)
+        gtest_discover_tests(test_compute_request_registry
             WORKING_DIRECTORY ${PROJECT_SOURCE_DIR}
             PROPERTIES TIMEOUT 30)
         gtest_discover_tests(test_ipc_daemon

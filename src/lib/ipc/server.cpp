@@ -715,6 +715,14 @@ class Server::Impl {
       return failure_status(OperationErrorDomain::Daemon, kInternalErrorCode,
                             "internal_error", std::move(message));
     }
+    OperationStatus runtime_started = router_.start_runtime();
+    if (!runtime_started.ok) {
+      listener_.reset();
+      socket_cleanup_.reset();
+      instance_lock_.reset();
+      socket_path_.clear();
+      return runtime_started;
+    }
     running_ = true;
     OperationStatus outcome = ok_status();
     while (running_) {
@@ -756,12 +764,15 @@ class Server::Impl {
   }
 
   /**
-   * @brief Executes deterministic listener/client/session/socket shutdown.
+   * @brief Executes deterministic admission/client/compute/session shutdown.
    *
    * @throws Nothing.
+   * @note Admission stops before descriptors are woken; accepted compute drains
+   *       and joins before Host sessions and socket ownership are released.
    */
   void stop() noexcept {
     running_ = false;
+    router_.begin_shutdown();
     listener_.reset();
     for (const std::shared_ptr<Worker>& worker : workers_) {
       std::lock_guard<std::mutex> lock(worker->fd_mutex);
@@ -775,7 +786,7 @@ class Server::Impl {
       }
     }
     workers_.clear();
-    router_.close_all_sessions();
+    router_.finish_shutdown();
     socket_cleanup_.reset();
     instance_lock_.reset();
     socket_path_.clear();

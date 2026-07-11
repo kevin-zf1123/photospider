@@ -1142,7 +1142,8 @@ TEST(ProtocolParams, EnforcesSessionAndFilesystemPathByteBounds) {
       {"params", Json{{"session_name", std::string("safe\0tail", 9)},
                       {"root_dir", temp.path().string()}}}}.dump()));
   EXPECT_EQ(nul_session["error"]["name"], "invalid_params");
-  router.close_all_sessions();
+  router.begin_shutdown();
+  router.finish_shutdown();
 }
 
 TEST(ProtocolParams, RejectsInvalidValuesWithoutHostMutation) {
@@ -1235,7 +1236,8 @@ TEST(ProtocolGraphLoad, FailedHostLoadReleasesNameForRetry) {
       {"params", params}}.dump()));
   ASSERT_TRUE(second.contains("result"));
   EXPECT_EQ(second["result"]["session_name"], "retry_session");
-  router.close_all_sessions();
+  router.begin_shutdown();
+  router.finish_shutdown();
 }
 
 /**
@@ -1681,7 +1683,8 @@ TEST(ProtocolErrors, MapsRealInspectionCodecFailuresToStableErrors) {
   EXPECT_EQ(invalid_graph["error"]["code"], kInternalErrorCode);
   EXPECT_EQ(invalid_graph["error"]["name"], "internal_error");
 
-  router.close_all_sessions();
+  router.begin_shutdown();
+  router.finish_shutdown();
 }
 
 TEST(InspectionJson, RoundTripsNullAndNonFiniteSnapshots) {
@@ -1897,24 +1900,22 @@ TEST(SessionRegistry, HandlesCollisionsRollbackReconciliationAndSorting) {
   const auto beta = registry.reserve("beta");
   ASSERT_TRUE(beta.status.ok);
   ASSERT_TRUE(registry.commit(beta.value, GraphSessionId{"private-beta"}).ok);
-  const std::optional<GraphSessionId> resolved_beta =
-      registry.resolve(beta.value);
-  ASSERT_TRUE(resolved_beta.has_value());
-  EXPECT_EQ(resolved_beta->value, "private-beta");
+  const auto resolved_beta = registry.admit_host_call(beta.value);
+  ASSERT_TRUE(resolved_beta.status.ok);
+  EXPECT_EQ(resolved_beta.value.host_session().value, "private-beta");
   EXPECT_FALSE(registry.reserve("beta").status.ok);
   const auto alpha = registry.reserve("alpha");
   ASSERT_TRUE(alpha.status.ok);
   EXPECT_EQ(alpha.value.value, std::string(32, 'b'));
   ASSERT_TRUE(registry.commit(alpha.value, GraphSessionId{"private-alpha"}).ok);
-  const std::optional<GraphSessionId> resolved_alpha =
-      registry.resolve(alpha.value);
-  ASSERT_TRUE(resolved_alpha.has_value());
-  EXPECT_EQ(resolved_alpha->value, "private-alpha");
+  const auto resolved_alpha = registry.admit_host_call(alpha.value);
+  ASSERT_TRUE(resolved_alpha.status.ok);
+  EXPECT_EQ(resolved_alpha.value.host_session().value, "private-alpha");
 
   const auto pending = registry.reserve("pending");
   ASSERT_TRUE(pending.status.ok);
   registry.rollback(pending.value);
-  EXPECT_FALSE(registry.resolve(pending.value).has_value());
+  EXPECT_FALSE(registry.admit_host_call(pending.value).status.ok);
 
   const auto listed = registry.reconcile(
       {GraphSessionId{"private-beta"}, GraphSessionId{"private-alpha"}});

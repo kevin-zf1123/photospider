@@ -251,13 +251,45 @@ Host load failure 或异常会删除 reservation；registry publication failure 
 daemon invariant error，不泄漏 untracked Host name。返回 row 按 `session_name`、再按
 `session_id` 排序。
 
-`graph.close` 只解析 opaque id。Host close 成功会删除三个 active index；Host `NotFound` 也会删除
-stale mapping，但保留 failure response；其他 Host failure 保留 mapping。Client disconnect 不会
-关闭 session。Shutdown 会在 join connection worker 后尝试关闭所有 active Host session。
+`graph.close` 只通过 session lifecycle gate 解析 opaque id。它会先把 mapping 标记为 closing，
+让所有新的 session-scoped Host 或 compute admission 返回 Graph `not_found`，并且在不持有 Host
+mutex 的情况下等待已经 admitted 的 Host call 与 queued/running job。随后它才获取 Host mutex 并
+调用 `Host::close_graph`。Host close 成功会删除三个 active index；Host `NotFound` 也会删除 stale
+mapping，但保留 failure response；其他 Host failure 会原子地重新开放 mapping。Closing row 不会
+出现在 `graph.list` 结果中，但仍参与 Host/registry invariant reconciliation。Client disconnect 不会
+关闭 session。
+
+## Private Compute Lifecycle
+
+当前八方法 wire inventory 仍不暴露 compute method。不过 server 已经拥有 compute routing 使用的
+private lifecycle boundary：一个显式启动且 joinable 的 `ComputeRequestRegistry` worker，以及一套
+共享 session-admission gate。这些基础设施不是第二套 public Host 或 wire API。
+
+Queue commit 之前，submission 会 admit active session，执行全局最多 64 个 queued/running record
+的限制，验证并 collision-check 一个 daemon-generated 32-lowercase-hex compute id，并预留全部
+queue/terminal bookkeeping。成功 commit 的 snapshot 始终是 `queued` 且
+`cancellable: false`。唯一 FIFO worker 会把 record 推进到 `running`，按 `status` 或 `image`
+mode 精确调用一次匹配的 synchronous Host callback，然后发布恰好一个 immutable
+`succeeded` 或 `failed` terminal status。Host call 使用同一个 daemon Host mutex；image
+publication 在 callback 释放 Host mutex 后执行。
+
+Status read 是 non-destructive，且不获取 Host mutex。Result 与 release 只接受 terminal record。
+格式正确但 absent、expired、released 或 evicted 的 id 映射为 daemon `job_not_found`；对
+queued/running job 执行 result 或 release 则映射为 daemon `job_not_ready`。Host failure 保留为精确
+nested terminal status。Queue commit 之后的任何异常，包括 allocation 或 output publication
+failure，都会使用 commit 前已分配的 daemon `internal_error` fallback status，因此 worker 可以继续
+执行后续 job。
+
+最多保留 256 个 terminal record。发布新的 terminal record 时只 evict 最早的 terminal
+publication；active work 永不 evict。Terminal age 从完整 publication 开始，使用 injectable
+monotonic clock，在 15 分钟时 expire，并且 lookup 不刷新 age。Output ownership 是 private
+move-only reference，其 exact-once cleanup 在 registry mutex 外执行；wire-visible protected output
+store 不属于当前 method inventory。
 
 ## Inspection Value
 
-Inspection 解析 opaque id，并且只调用 `ps::Host`：
+Inspection 会在获取 Host mutex 前原子地 admit opaque session，并且只调用 `ps::Host`。并发 close
+会先标记 session，拒绝新的 inspection admission，并等待已经 admitted 的 inspection：
 
 - `inspect.graph` 返回 `{session_id, nodes}`；
 - `inspect.node` 要求能由 public `int`-backed `NodeId` 表示的 nonnegative integer
@@ -301,9 +333,11 @@ lifecycle lock 前只 unlink 精确匹配的 socket。
 
 Listener 最多跟踪 32 个 joinable client worker。每个 connection 内 request 顺序执行，不同
 client 的 frame/JSON 工作可以并发。Public Host 不承诺 thread-safe，因此每个 Host call 都使用
-一个 daemon mutex；socket read/write 绝不持有它。Shutdown 会关闭 listener、shutdown tracked
-client descriptor 以唤醒 read、join 全部 worker、关闭 session，在 lifecycle lock 仍持有时移除
-socket，随后释放 lock，再销毁 Host state；持久 lock file 会有意保留。
+一个 daemon mutex；socket read/write 绝不持有它。Shutdown 会先停止所有 session 与 compute
+admission，关闭 listener，shutdown tracked client descriptor 以唤醒 read，并 join 全部 connection
+worker。随后它会 drain 所有 accepted compute job，join 唯一 compute worker，释放 terminal output
+ownership，关闭 Host session，并清空 session mapping。最后在 lifecycle lock 仍持有时移除 socket，
+释放 lock，再销毁 Host state；持久 lock file 会有意保留。
 
 安装 SIGINT/SIGTERM handler 前，`photospiderd` 会创建 nonblocking close-on-exec self-pipe。
 Handler 只保存 `errno`、写一个 byte，再恢复 `errno`；正常 control flow 执行 cleanup。正常 signal
@@ -318,9 +352,10 @@ Focused local command：
 cmake -S . -B build -DPHOTOSPIDER_BUILD_IPC=ON -DBUILD_TESTING=ON
 cmake --build build --target photospider_ipc_client \
   photospider_ipc_server_internal photospiderd test_ipc_protocol \
-  test_ipc_daemon public_header_self_containment -j
+  test_compute_request_registry test_ipc_daemon \
+  public_header_self_containment -j
 ctest --test-dir build --output-on-failure \
-  -R '^(FrameCodec|ProtocolEnvelope|IntegerCodec|ProtocolErrors|ProtocolParams|ProtocolGraphLoad|InspectionJson|SessionRegistry|ClientLifecycle|ClientResultValidation|IpcDaemon|StaticProductConsumerSmoke|IpcDisabledInstallSmoke|PublicHeaderSelfContainment)'
+  -R '^(FrameCodec|ProtocolEnvelope|IntegerCodec|ProtocolErrors|ProtocolParams|ProtocolGraphLoad|ProtocolGraphClose|InspectionJson|SessionRegistry|ComputeRequestRegistry|ClientLifecycle|ClientResultValidation|IpcDaemon|StaticProductConsumerSmoke|IpcDisabledInstallSmoke|PublicHeaderSelfContainment)'
 ```
 
 `StaticProductConsumerSmoke` 验证 installed backend 与第二个 client-only consumer；

@@ -109,18 +109,6 @@ OperationStatus invalid_params(std::string message) {
 }
 
 /**
- * @brief Creates a graph-domain not-found status for an opaque id.
- *
- * @return Stable `GraphErrc::NotFound` failure.
- * @throws std::bad_alloc if diagnostic storage cannot be allocated.
- */
-OperationStatus unknown_session() {
-  return failure_status(OperationErrorDomain::Graph,
-                        static_cast<std::int32_t>(GraphErrc::NotFound),
-                        "not_found", "opaque graph session was not found");
-}
-
-/**
  * @brief Validates a required or optional absolute path parameter.
  *
  * @param path UTF-8 path text.
@@ -210,6 +198,26 @@ void close_graph_best_effort(Host& host,
 }
 
 /**
+ * @brief Handles image publication until the dedicated OutputStore is bound.
+ *
+ * @param image Exact image returned by the single matching Host call.
+ * @return Success without ownership for an empty image; otherwise a nested
+ *         daemon internal failure retained by the accepted job.
+ * @throws std::bad_alloc if diagnostic storage cannot be allocated.
+ * @note No current version-one route can submit jobs. Nonempty output remains
+ *       a contained nested failure unless protected output ownership is bound.
+ */
+ComputeOutputPublication publish_without_output_store(ImageBuffer image) {
+  if (image.data == nullptr) {
+    return {ok_status(), {}};
+  }
+  return {
+      failure_status(OperationErrorDomain::Daemon, kInternalErrorCode,
+                     "internal_error", "compute output store is not available"),
+      {}};
+}
+
+/**
  * @brief Dispatches one structurally valid request to daemon metadata methods.
  *
  * @param method Exact method name.
@@ -246,9 +254,22 @@ Json route_daemon_method(const std::string& method, const Json& params,
 /** @copydoc RequestRouter::RequestRouter */
 RequestRouter::RequestRouter(Host& host, std::string service_version)
     : host_(host),
-      service_version_(std::move(service_version)),
-      server_instance_id_(  // NOLINT(whitespace/indent_namespace)
-          generate_opaque_id()) {}
+      compute_registry_(
+          registry_,
+          [this](const HostComputeRequest& request) {
+            std::lock_guard<std::mutex> host_lock(host_mutex_);
+            return graph_status(host_.compute(request).status);
+          },                                           // NOLINT
+          [this](const HostComputeRequest& request) {  // NOLINT
+            std::lock_guard<std::mutex> host_lock(host_mutex_);
+            Result<ImageBuffer> result = host_.compute_and_get_image(request);
+            result.status = graph_status(result.status);
+            return result;
+          },                                         // NOLINT
+          publish_without_output_store),             // NOLINT
+      service_version_(std::move(service_version)),  // NOLINT
+      server_instance_id_(          // NOLINT(whitespace/indent_namespace)
+          generate_opaque_id()) {}  // NOLINT
 
 /** @copydoc RequestRouter::route */
 std::string RequestRouter::route(const std::string& payload) {
@@ -392,16 +413,21 @@ std::string RequestRouter::route(const std::string& payload) {
         return bounded_error(
             id, invalid_params("graph.close requires a valid session_id"));
       }
-      std::lock_guard<std::mutex> host_lock(host_mutex_);
-      const std::optional<GraphSessionId> host_session =
-          registry_.resolve(session_id);
-      if (!host_session) {
-        return bounded_error(id, unknown_session());
+      IpcResult<SessionRegistry::CloseClaim> claim =
+          registry_.begin_close(session_id);
+      if (!claim.status.ok) {
+        return bounded_error(id, claim.status);
       }
-      const VoidResult closed = host_.close_graph(*host_session);
-      if (closed.status.ok ||
-          checked_graph_error_code(closed.status) == GraphErrc::NotFound) {
-        registry_.erase(session_id);
+      VoidResult closed;
+      {
+        std::lock_guard<std::mutex> host_lock(host_mutex_);
+        closed = host_.close_graph(claim.value.host_session());
+        if (closed.status.ok ||
+            checked_graph_error_code(closed.status) == GraphErrc::NotFound) {
+          claim.value.erase();
+        } else {
+          claim.value.reopen();
+        }
       }
       if (!closed.status.ok) {
         return bounded_error(id, graph_status(closed.status));
@@ -473,15 +499,15 @@ std::string RequestRouter::route(const std::string& payload) {
         }
       }
 
-      std::lock_guard<std::mutex> host_lock(host_mutex_);
-      const std::optional<GraphSessionId> host_session =
-          registry_.resolve(session_id);
-      if (!host_session) {
-        return bounded_error(id, unknown_session());
+      IpcResult<SessionRegistry::HostCallAdmission> admission =
+          registry_.admit_host_call(session_id);
+      if (!admission.status.ok) {
+        return bounded_error(id, admission.status);
       }
+      std::lock_guard<std::mutex> host_lock(host_mutex_);
       if (method == "inspect.graph") {
         const Result<GraphInspectionView> inspected =
-            host_.inspect_graph(*host_session);
+            host_.inspect_graph(admission.value.host_session());
         if (!inspected.status.ok) {
           return bounded_error(id, graph_status(inspected.status));
         }
@@ -491,7 +517,7 @@ std::string RequestRouter::route(const std::string& payload) {
       }
       if (method == "inspect.node") {
         const Result<NodeInspectionView> inspected =
-            host_.inspect_node(*host_session, *node);
+            host_.inspect_node(admission.value.host_session(), *node);
         if (!inspected.status.ok) {
           return bounded_error(id, graph_status(inspected.status));
         }
@@ -501,7 +527,8 @@ std::string RequestRouter::route(const std::string& payload) {
         });
       }
       const Result<HostDependencyTreeSnapshot> inspected =
-          host_.dependency_tree(*host_session, node, include_metadata);
+          host_.dependency_tree(admission.value.host_session(), node,
+                                include_metadata);
       if (!inspected.status.ok) {
         return bounded_error(id, graph_status(inspected.status));
       }
@@ -528,8 +555,25 @@ std::string RequestRouter::route(const std::string& payload) {
   }
 }
 
-/** @copydoc RequestRouter::close_all_sessions */
-void RequestRouter::close_all_sessions() noexcept {
+/** @copydoc RequestRouter::start_runtime */
+OperationStatus RequestRouter::start_runtime() {
+  registry_.stop_admission();
+  OperationStatus started = compute_registry_.start();
+  if (started.ok) {
+    registry_.start_admission();
+  }
+  return started;
+}
+
+/** @copydoc RequestRouter::begin_shutdown */
+void RequestRouter::begin_shutdown() noexcept {
+  registry_.stop_admission();
+  compute_registry_.stop_admission();
+}
+
+/** @copydoc RequestRouter::finish_shutdown */
+void RequestRouter::finish_shutdown() noexcept {
+  compute_registry_.shutdown();
   try {
     const auto sessions = registry_.active_sessions();
     for (const auto& session : sessions) {

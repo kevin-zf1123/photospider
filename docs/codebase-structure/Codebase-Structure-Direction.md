@@ -272,7 +272,7 @@ Recommended final targets:
 | `photospider_ipc_client` | Static | Yes | Client-side IPC adapter for daemon frontends. |
 | `photospider_cli_common` | Static | No | CLI command parser, REPL, TUI, autocomplete. |
 | `graph_cli` | Executable | Yes | Basic interactive frontend. |
-| `photospider_ipc_server_internal` | Static | No | Version 1 router, session registry, protected listener, and worker lifecycle. |
+| `photospider_ipc_server_internal` | Static | No | Version 1 router, session/admission registry, joined compute-request registry, protected listener, and worker lifecycle. |
 | `photospiderd` | Executable | Yes | Foreground daemon that owns one embedded `ps::Host` and the IPC server. |
 | operation plugins | Shared | Optional | Dynamically loaded operation extensions. |
 | scheduler plugins | Shared | Optional | Dynamically loaded scheduler extensions. |
@@ -433,25 +433,27 @@ multi-line diagnostics, and future binary metadata make framing ambiguous.
 Avoid gRPC as the first step unless the project intentionally accepts generated
 code, a larger dependency surface, and a more complex plugin/build story.
 
-Implemented and deferred method groups:
+Method groups and current wire availability:
 
 | Group | Example methods | Notes |
 | --- | --- | --- |
 | daemon | `daemon.ping`, `daemon.version` | Implemented without Host locking. No `daemon.shutdown`. |
 | graph | `graph.load`, `graph.close`, `graph.list` | Implemented with preserved Host names plus daemon-generated opaque ids. |
 | inspect | `inspect.graph`, `inspect.node`, `inspect.dependency_tree` | Implemented through copied Host snapshots. |
-| compute | polling, cancellation, image result transport | Deferred to issue #37. |
+| compute | polling jobs and image result transport | No compute method is advertised in the current eight-method wire inventory. The private joined FIFO registry, bounded active/terminal retention, exact nested status, session admission, TTL, and shutdown behavior are implemented behind the router. |
 | scheduler | `scheduler.types`, `scheduler.get`, `scheduler.set`, `scheduler.trace` | Mirrors current CLI scheduler features. |
 | plugins | `plugins.scan`, `plugins.load`, `plugins.unload_all`, `plugins.list` | The unique process `PluginManager` retains operation-plugin handles; Hosts expose the control surface without owning a second lifetime map. |
 | events | `events.next`, `events.drain` | Polling first; subscription later. |
 
 Image payload rule:
 
-- Do not put large images in JSON by default.
-- First implementation can return image metadata plus a cache/output path, or
-  write a requested output file.
-- Later IPC can add shared-memory handles, memory-mapped files, or a binary
-  side-channel for preview frames.
+- Image bytes do not enter JSON.
+- The private compute registry can retain one abstract move-only output
+  reference whose exact-once cleanup runs outside the registry mutex on
+  release, eviction, TTL expiry, or shutdown.
+- The current eight-method wire inventory exposes no image result, output
+  artifact, delivery identity, lease, cache path, or caller-selected result
+  path.
 
 Error rule:
 
@@ -467,8 +469,12 @@ Concurrency rule:
 - Because Host does not promise thread safety, every Host call uses one
   daemon-owned mutex; socket IO never holds it.
 - Ping/version and protocol validation do not acquire the Host mutex.
-- Long-running compute should return request ids that can be polled and later
-  cancelled when the compute commit policy supports it.
+- A compute job is noncancellable, runs through the sole joined FIFO worker,
+  and invokes exactly one matching synchronous Host compute call.
+- Session close marks the row closing before it waits admitted Host calls and
+  queued/running jobs; only then may it acquire the Host mutex.
+- Process shutdown stops admission, drains jobs, joins compute, releases
+  terminal output ownership, and only then closes Host sessions.
 
 ## Migration State and Remaining Order
 

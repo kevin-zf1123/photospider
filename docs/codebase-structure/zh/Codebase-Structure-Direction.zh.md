@@ -241,7 +241,7 @@ Issue #38 负责最终的
 | `photospider_ipc_client` | Static | 是 | 面向 daemon 前端的客户端 IPC adapter。 |
 | `photospider_cli_common` | Static | 否 | CLI 命令解析、REPL、TUI、自动补全。 |
 | `graph_cli` | Executable | 是 | 基础交互式前端。 |
-| `photospider_ipc_server_internal` | Static | 否 | Version 1 router、session registry、protected listener 与 worker lifecycle。 |
+| `photospider_ipc_server_internal` | Static | 否 | Version 1 router、session/admission registry、joined compute-request registry、protected listener 与 worker lifecycle。 |
 | `photospiderd` | Executable | 是 | 拥有一个 embedded `ps::Host` 与 IPC server 的 foreground daemon。 |
 | operation plugins | Shared | 可选 | 动态加载的操作扩展。 |
 | scheduler plugins | Shared | 可选 | 动态加载的调度器扩展。 |
@@ -374,23 +374,25 @@ graph TD
 不建议第一版使用 newline-delimited JSON，因为日志、多行诊断和未来二进制元数据会让 frame 解析变得含糊。
 除非项目明确接受生成代码、更大的依赖面和更复杂的插件/构建故事，否则第一步不建议使用 gRPC。
 
-已实现与 deferred method group：
+Method group 与当前 wire availability：
 
 | Group | 示例方法 | 说明 |
 | --- | --- | --- |
 | daemon | `daemon.ping`, `daemon.version` | 已实现，且不获取 Host lock；没有 `daemon.shutdown`。 |
 | graph | `graph.load`, `graph.close`, `graph.list` | 已实现，保留 Host name 并另用 daemon-generated opaque id。 |
 | inspect | `inspect.graph`, `inspect.node`, `inspect.dependency_tree` | 已通过 copied Host snapshot 实现。 |
-| compute | polling、cancellation、image result transport | Deferred 到 issue #37。 |
+| compute | polling job 与 image result transport | 当前八方法 wire inventory 不广告 compute method。Router 背后已经实现 private joined FIFO registry、bounded active/terminal retention、精确 nested status、session admission、TTL 与 shutdown 行为。 |
 | scheduler | `scheduler.types`, `scheduler.get`, `scheduler.set`, `scheduler.trace` | 映射当前 CLI scheduler 功能。 |
 | plugins | `plugins.scan`, `plugins.load`, `plugins.unload_all`, `plugins.list` | 唯一的进程级 `PluginManager` 保留 operation-plugin handle；Host 只暴露控制面，不拥有第二套 lifetime map。 |
 | events | `events.next`, `events.drain` | 先轮询，后订阅。 |
 
 图像 payload 规则：
 
-- 默认不要把大图像放入 JSON。
-- 第一版可以返回图像元数据加 cache/output path，或写入调用方请求的输出文件。
-- 后续 IPC 可增加 shared-memory handle、memory-mapped file 或 preview frame 的二进制 side-channel。
+- Image byte 不进入 JSON。
+- Private compute registry 可以保留一个 abstract move-only output reference；release、eviction、
+  TTL expiry 或 shutdown 时，其 exact-once cleanup 会在 registry mutex 外执行。
+- 当前八方法 wire inventory 不暴露 image result、output artifact、delivery identity、lease、
+  cache path 或 caller-selected result path。
 
 错误规则：
 
@@ -405,7 +407,12 @@ graph TD
 - Host 不承诺 thread safety，因此每个 Host call 都使用一个 daemon-owned mutex；socket IO 绝不
   持有它。
 - Ping/version 与 protocol validation 不获取 Host mutex。
-- 长时间 compute 应返回 request id；client 可以轮询，等 compute commit policy 支持后再取消。
+- Compute job 不可取消，通过唯一 joined FIFO worker 执行，并且精确调用一次匹配的 synchronous
+  Host compute call。
+- Session close 会先把 row 标记为 closing，再等待 admitted Host call 与 queued/running job；只有
+  此后才可以获取 Host mutex。
+- Process shutdown 会停止 admission、drain job、join compute、释放 terminal output ownership，
+  最后才关闭 Host session。
 
 ## 迁移状态与剩余顺序
 

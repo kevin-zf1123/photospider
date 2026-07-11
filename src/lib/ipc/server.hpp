@@ -98,7 +98,8 @@ class Server {
    * @throws std::runtime_error if the default path cannot fit the platform
    *         Unix-socket address or another startup invariant fails.
    * @throws std::system_error if a worker thread cannot be created.
-   * @note Shutdown closes the listener, wakes and joins clients, closes Host
+   * @note Shutdown stops admission, closes the listener, wakes and joins
+   *       clients, drains/joins compute, releases terminal outputs, closes Host
    *       sessions, then removes only the socket inode created by this run.
    */
   OperationStatus run(const ServerOptions& options, int stop_fd);
