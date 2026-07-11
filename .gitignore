@@ -99,7 +99,6 @@ feedback/
 !tests/**/
 !tests/**/*.cpp
 !tests/**/*.py
-!tests/run_phase2_cli_host_revalidation.sh
 tests/results/
 
 # Utilities (Python scripts, YAML configs, Testcases)
