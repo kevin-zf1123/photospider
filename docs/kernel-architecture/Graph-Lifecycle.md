@@ -17,6 +17,38 @@ Kernel
 
 Graph and runtime should be treated as a one-to-one ownership unit.
 
+## Daemon-Owned Session Identity
+
+`photospiderd` owns one embedded `ps::Host`; clients never own its
+`GraphRuntime` lifetimes. The version 1 router preserves the caller's safe
+`session_name` in `GraphLoadRequest.session`, so the existing
+`<root>/<session>` and cache-directory semantics remain unchanged. It returns a
+separate 128-bit opaque IPC session id and keeps a private bidirectional mapping
+to the exact Host-returned `GraphSessionId`.
+
+Loading is transactional across the registry and Host boundary: reserve an
+opaque id, call Host, and publish the opaque, exact Host-id, and display-name
+indexes only after Host success. A Host exception removes the reservation; a
+publication failure removes it before a best-effort compensating Host close.
+The Host contract requires that a thrown load leave no newly published
+session. The embedded Kernel/Host satisfies this contract by preallocating
+result identity before publication and committing it with a `noexcept` move.
+`graph.list` reconciles committed mappings with `Host::list_graphs()` and
+reports an invariant error instead of exposing an untracked Host name. A
+client disconnect never calls `close_graph`; another client can list and
+inspect the daemon-owned session.
+
+The public Host contract does not promise thread safety. The daemon therefore
+uses one dedicated mutex around every Host call, including read-only listing
+and inspection. Protocol validation plus `daemon.ping`/`daemon.version` do not
+take that mutex, and socket IO never occurs while it is held. Signal shutdown
+stops accept, wakes and joins client workers, then attempts to close every
+active Host session, removes the exact socket while its persistent lifecycle
+lock remains held, releases that lock, and only then reaches Host destruction.
+The lock file remains for stable cross-process synchronization. The complete
+wire and socket contract is maintained in
+`docs/codebase-structure/IPC-Protocol-v1.md`.
+
 ## New Graph Load
 
 Loading a new graph should create a new `GraphRuntime` and expose it through
@@ -86,3 +118,9 @@ Graph load, reload, and edit failures are visible to frontends through public
 internal `Kernel` and `InteractionService` failure diagnostics into that public
 surface. Frontends neither call those internal facades nor infer failure from a
 partially changed graph.
+
+In daemon mode, version 1 maps the same `OperationStatus` into the `graph`
+error domain with explicit `GraphErrc` number/name pairs. Framing, envelope,
+and parameter errors remain in the `protocol` domain; local socket failures
+remain `IpcErrorDomain::Transport`. Diagnostic text is not a branching
+contract, and no transport failure is rewritten as graph IO.

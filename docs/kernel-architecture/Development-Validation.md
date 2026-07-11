@@ -54,6 +54,16 @@ child output, and assertion diagnostics to stdout/stderr for CTest to capture.
 All generated files remain in its transient work directory and are discarded
 after the run; the repository does not retain per-run reports for this test.
 
+When IPC is enabled, the package smoke builds and installs `photospider`,
+`photospider_ipc_client`, and `photospiderd`. It builds one external consumer
+of `Photospider::photospider` and a separate consumer that links only
+`Photospider::photospider_ipc_client`, constructs the non-inline client, and
+does not inherit the backend or JSON implementation target. The durable
+`IpcDisabledInstallSmoke` configures a separate clean producer with
+`PHOTOSPIDER_BUILD_IPC=OFF` and `BUILD_TESTING=OFF`; it verifies that no IPC
+build forwarder, installed header, archive, executable, or exported target is
+advertised while an external embedded Host consumer still links and runs.
+
 When the selected CMake generator exposes multiple configurations, the smoke
 uses that same generator for producer and consumer, checks each
 `CMAKE_GENERATOR` and `CMAKE_CONFIGURATION_TYPES` cache value, and resolves the
@@ -75,6 +85,12 @@ handling, compile boundaries, package consumption, and runtime API boundaries.
 `StaticProductConsumerSmoke`, `GraphCliOptionBadAlloc`, GoogleTest discovery,
 and `PublicHeaderSelfContainment` satisfy that rule because they execute or
 compile the maintained product.
+`IpcDisabledInstallSmoke`, focused `test_ipc_protocol` cases, and real-process
+`test_ipc_daemon` cases follow the same rule: they exercise package, framing,
+typed client, daemon lifecycle, Host routing, concurrency, and cleanup
+behavior. Daemon tests use CTest timeouts plus bounded
+SIGTERM-to-SIGKILL-to-waitpid cleanup; they do not depend on fixed readiness
+sleeps.
 `StaticProductConsumerSmoke` is limited to producer configure/build/install,
 external `find_package`, public-header compile/link/run, installed export and
 dependency boundaries, platform archive/link behavior, and multi-configuration
@@ -140,6 +156,24 @@ migration-residue check, stale-term search, Doxygen audit, or issue-specific
 orchestration. The static package-consumer smoke and graph CLI
 allocation-failure driver remain registered because they exercise real
 installed/runtime behavior.
+
+For IPC changes, focused local product validation is:
+
+```bash
+cmake --build build --target photospider_ipc_client \
+  photospider_ipc_server_internal photospiderd test_ipc_protocol \
+  test_ipc_daemon public_header_self_containment -j
+ctest --test-dir build --output-on-failure \
+  -R '^(FrameCodec|ProtocolEnvelope|ProtocolErrors|ProtocolParams|ProtocolGraphLoad|InspectionJson|SessionRegistry|ClientLifecycle|ClientResultValidation|IpcDaemon|StaticProductConsumerSmoke|IpcDisabledInstallSmoke|PublicHeaderSelfContainment)'
+```
+
+Temporary daemon processes, sockets, graph sessions, package prefixes, and
+consumer trees must be absent after these tests. The mode-`0600` persistent
+`${socket}.lock` inode is an intentional product synchronization artifact; a
+test-owned temporary root removes it with that root, while the real default
+runtime location preserves it. CTest output/JUnit and remote CI artifacts are
+the evidence; do not create `tests/results` or an issue-specific replay/
+provenance helper.
 
 ## Known Test Quality Caveat
 

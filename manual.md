@@ -13,7 +13,7 @@ vendored FTXUI source:
 ```bash
 git submodule update --init --recursive
 cmake -S . -B build -DCMAKE_BUILD_TYPE=RelWithDebInfo
-cmake --build build --target graph_cli -j
+cmake --build build --target graph_cli photospiderd -j
 ```
 
 The main executable is:
@@ -27,6 +27,7 @@ Plugin and runtime outputs:
 | Output | Path |
 | --- | --- |
 | executable | `build/bin/graph_cli` |
+| local daemon | `build/bin/photospiderd` |
 | backend libraries | `build/lib` |
 | operation plugins | `build/plugins` |
 | scheduler plugins | `build/schedulers` |
@@ -63,6 +64,42 @@ Examples:
 
 Top-level CLI mode does not expose `--compute` or `--save`. Use the REPL
 commands `compute` and `save` for execution and image output.
+
+### Local daemon and typed IPC client
+
+On macOS/Linux, `PHOTOSPIDER_BUILD_IPC` defaults to `ON`. Start the foreground
+daemon on its protected per-user socket:
+
+```bash
+./build/bin/photospiderd
+```
+
+An explicit socket must be absolute and live in a uid-owned protected
+directory:
+
+```bash
+mkdir -m 700 /tmp/photospider-demo
+./build/bin/photospiderd --socket /tmp/photospider-demo/daemon.sock
+```
+
+The daemon creates a persistent mode-`0600` `${socket}.lock`, holds an
+exclusive nonblocking lifecycle lock while inspecting/reclaiming and serving
+the socket, and releases it only after socket cleanup. The lock file remains
+after shutdown so concurrent or later instances always synchronize on one
+stable inode.
+
+The installed C++17 target `Photospider::photospider_ipc_client` exposes the
+move-only `ps::ipc::Client`. It performs typed `ping`, `version`, graph
+load/close/list, and graph/node/dependency-tree inspection calls. Graph loads
+retain the caller's safe Host session name but return a separate opaque daemon
+session id; disconnecting the client does not close that session.
+
+This first protocol slice does not provide compute/image transfer,
+poll/cancel, scheduler/plugin/event APIs, `daemon.shutdown`, TCP, Windows
+transport, or `graph_cli --connect`. The CLI options and REPL commands in this
+manual remain local embedded-Host behavior and do not auto-connect to a daemon.
+See `docs/codebase-structure/IPC-Protocol-v1.md` for framing, errors, socket
+selection, and lifecycle details.
 
 ## 3. REPL Mode
 
@@ -311,6 +348,16 @@ Build the CLI:
 
 ```bash
 cmake --build build --target graph_cli -j
+```
+
+Build and run focused IPC product tests on macOS/Linux:
+
+```bash
+cmake --build build --target photospider_ipc_client \
+  photospider_ipc_server_internal photospiderd test_ipc_protocol \
+  test_ipc_daemon public_header_self_containment -j
+ctest --test-dir build --output-on-failure \
+  -R '^(FrameCodec|ProtocolEnvelope|ProtocolErrors|ProtocolParams|ProtocolGraphLoad|InspectionJson|SessionRegistry|ClientLifecycle|ClientResultValidation|IpcDaemon|StaticProductConsumerSmoke|IpcDisabledInstallSmoke|PublicHeaderSelfContainment)'
 ```
 
 Run registered CTest tests:
