@@ -5,6 +5,7 @@
 #include <chrono>
 #include <condition_variable>
 #include <filesystem>
+#include <initializer_list>
 #include <memory>
 #include <mutex>
 #include <set>
@@ -37,6 +38,7 @@
 #include "runtime/interaction.hpp"
 #include "scheduler/cpu_work_stealing_scheduler.hpp"
 #include "scheduler/serial_debug_scheduler.hpp"
+#include "support/kernel_test_access.hpp"
 
 namespace ps {
 namespace {
@@ -49,6 +51,62 @@ namespace {
  * cache hit should have satisfied the node.
  */
 std::atomic_int g_disk_cache_guard_tile_calls{0};
+
+/**
+ * @brief Original operation failure text used by the LastError integration
+ * contract.
+ *
+ * @note The sentinel is intentionally stable so the test can distinguish the
+ * operator's message from scheduler and Kernel context added around it.
+ */
+constexpr auto kOpFailureMessage = "split runtime parallel operation failure";
+
+/**
+ * @brief Removes one test-owned runtime directory at scope exit.
+ *
+ * @note The guard suppresses cleanup errors because test assertions, rather
+ * than temporary-directory cleanup, own the behavioral result.
+ */
+class ScopedTestDirectory {
+ public:
+  /**
+   * @brief Prepares a clean temporary directory path for one runtime test.
+   *
+   * @param path Unique path assigned to the current GoogleTest case.
+   * @throws Nothing; stale-path removal uses the error-code overload.
+   * @note GraphRuntime creates the directory lazily when the test loads or
+   * constructs its graph.
+   */
+  explicit ScopedTestDirectory(std::filesystem::path path)
+      : path_(std::move(path)) {
+    std::error_code ignored;
+    std::filesystem::remove_all(path_, ignored);
+  }
+
+  /**
+   * @brief Removes runtime directories created during the test.
+   *
+   * @throws Nothing.
+   * @note Cleanup is best effort and never masks an earlier test failure.
+   */
+  ~ScopedTestDirectory() noexcept {
+    std::error_code ignored;
+    std::filesystem::remove_all(path_, ignored);
+  }
+
+  /**
+   * @brief Returns the test-owned runtime root.
+   *
+   * @return Immutable filesystem path borrowed from this guard.
+   * @throws Nothing.
+   * @note The reference remains valid for the guard's lifetime.
+   */
+  const std::filesystem::path& path() const noexcept { return path_; }
+
+ private:
+  /** @brief Runtime root removed when the guard leaves scope. */
+  std::filesystem::path path_;
+};
 
 Node make_node(int id, std::string type, std::string subtype) {
   Node node;
@@ -69,6 +127,20 @@ NodeOutput make_image_output(int width, int height, int channels = 1,
   return output;
 }
 
+/**
+ * @brief Registers deterministic split-test operations once per process.
+ *
+ * The registration set supplies HP/RT source, tiled, random-access, cache,
+ * and deliberate-failure behaviors used by planning and runtime integration
+ * tests in this target.
+ *
+ * @return Nothing.
+ * @throws std::bad_alloc when registry or callback storage cannot allocate.
+ * @throws Any registry exception unchanged; std::call_once retries a later
+ * invocation when registration does not complete.
+ * @note OpRegistry is process-global, so callbacks and metadata remain valid
+ * until process shutdown and must use stable operation keys.
+ */
 void register_split_ops() {
   static std::once_flag once;
   std::call_once(once, [] {
@@ -163,6 +235,12 @@ void register_split_ops() {
           toCvMat(output_tile).setTo(11.0f);
         }),
         micro_meta);
+    registry.register_op_hp_tiled("split_plan", "parallel_failure",
+                                  TileOpFunc([](const Node&, const OutputTile&,
+                                                const std::vector<InputTile>&) {
+                                    throw std::runtime_error(kOpFailureMessage);
+                                  }),
+                                  micro_meta);
     registry.register_dirty_propagator(
         "split_plan", "random_tile",
         DirtyRoiPropFunc(
@@ -178,6 +256,29 @@ void register_split_ops() {
               return compute::expand_rect(roi, radius);
             }));
   });
+}
+
+/**
+ * @brief Verifies that a compute event stream contains every required source.
+ *
+ * @param events Runtime event snapshot drained through InteractionService.
+ * @param required_sources Stable source labels expected from the production
+ * coordinator and node executors.
+ * @return True when each required source occurs at least once.
+ * @throws Nothing directly; string comparison does not allocate.
+ * @note Event ordering is asserted separately by tests whose contract depends
+ * on RT-before-HP inline coordination.
+ */
+bool contains_event_sources(
+    const std::vector<GraphEventService::ComputeEvent>& events,
+    std::initializer_list<const char*> required_sources) {
+  return std::all_of(
+      required_sources.begin(), required_sources.end(),
+      [&](const char* required_source) {
+        return std::any_of(
+            events.begin(), events.end(),
+            [&](const auto& event) { return event.source == required_source; });
+      });
 }
 
 compute::FullTaskGraph expand_full_task_graph(GraphModel& graph,
@@ -1643,6 +1744,227 @@ TEST(RealTimeDirtyUpdate, ForceRecacheHpSiblingCommitsCompleteHpOutput) {
   ASSERT_TRUE(graph.last_dirty_region_snapshot->actual_dirty_rois.count(2));
   EXPECT_EQ(graph.last_dirty_region_snapshot->actual_dirty_rois.at(2).front(),
             cv::Rect(0, 0, 128, 128));
+}
+
+TEST(KernelComputeRuntimeSplit, SequentialAndParallelHpProduceIdenticalPixels) {
+  register_split_ops();
+  ScopedTestDirectory root(std::filesystem::temp_directory_path() /
+                           "photospider-split-hp-parity");
+  Kernel kernel;
+  Kernel::SchedulerConfig scheduler_config;
+  scheduler_config.worker_count = 2;
+  kernel.set_scheduler_config(scheduler_config);
+  InteractionService interaction(kernel);
+  constexpr char kGraphName[] = "split_hp_parity";
+  ASSERT_TRUE(interaction.cmd_load_graph(kGraphName, root.path().string(), "")
+                  .has_value());
+
+  GraphModel& graph = testing::KernelTestAccess::model(kernel, kGraphName);
+  Node source = make_node(1, "split_plan", "source");
+  source.parameters["width"] = 32;
+  source.parameters["height"] = 16;
+  Node target = make_node(2, "split_plan", "tile");
+  target.image_inputs.push_back({1, "image"});
+  graph.add_node(source);
+  graph.add_node(target);
+  graph.validate_topology();
+
+  Kernel::ComputeRequest request;
+  request.name = kGraphName;
+  request.node_id = 2;
+  request.cache.precision = "float32";
+  request.cache.force_recache = true;
+  request.cache.disable_disk_cache = true;
+  request.cache.nosave = true;
+  request.intent = ComputeIntent::GlobalHighPrecision;
+  auto sequential = interaction.cmd_compute_and_get_image(request);
+  ASSERT_TRUE(sequential.has_value());
+
+  request.execution.parallel = true;
+  auto parallel = interaction.cmd_compute_and_get_image(request);
+  ASSERT_TRUE(parallel.has_value());
+  ASSERT_EQ(sequential->size(), parallel->size());
+  ASSERT_EQ(sequential->type(), parallel->type());
+  EXPECT_DOUBLE_EQ(cv::sum(*sequential)[0], cv::sum(*parallel)[0]);
+  EXPECT_DOUBLE_EQ(cv::norm(*sequential, *parallel, cv::NORM_INF), 0.0);
+}
+
+TEST(KernelComputeRuntimeSplit,
+     AsyncHpThenInlineRtDirtyExposesFullEventChainAndState) {
+  register_split_ops();
+  ScopedTestDirectory root(std::filesystem::temp_directory_path() /
+                           "photospider-split-async-inline-dirty");
+  Kernel kernel;
+  Kernel::SchedulerConfig scheduler_config;
+  scheduler_config.worker_count = 2;
+  kernel.set_scheduler_config(scheduler_config);
+  InteractionService interaction(kernel);
+  constexpr char kGraphName[] = "split_async_inline_dirty";
+  ASSERT_TRUE(interaction.cmd_load_graph(kGraphName, root.path().string(), "")
+                  .has_value());
+
+  GraphModel& graph = testing::KernelTestAccess::model(kernel, kGraphName);
+  Node source = make_node(1, "split_plan", "source");
+  source.parameters["width"] = 64;
+  source.parameters["height"] = 64;
+  Node target = make_node(2, "split_plan", "tile");
+  target.image_inputs.push_back({1, "image"});
+  graph.add_node(source);
+  graph.add_node(target);
+  graph.validate_topology();
+
+  Kernel::ComputeRequest hp_request;
+  hp_request.name = kGraphName;
+  hp_request.node_id = 2;
+  hp_request.cache.precision = "float32";
+  hp_request.cache.force_recache = true;
+  hp_request.cache.disable_disk_cache = true;
+  hp_request.cache.nosave = true;
+  hp_request.execution.parallel = true;
+  hp_request.intent = ComputeIntent::GlobalHighPrecision;
+  auto hp_future = interaction.cmd_compute_async(hp_request);
+  ASSERT_TRUE(hp_future.has_value());
+  ASSERT_TRUE(hp_future->get());
+  auto hp_events = interaction.cmd_drain_compute_events(kGraphName);
+  ASSERT_TRUE(hp_events.has_value());
+  EXPECT_TRUE(contains_event_sources(
+      *hp_events, {"intent_coordinator_global_high_precision", "computed"}));
+  ASSERT_TRUE(graph.node(2).cached_output_high_precision.has_value());
+
+  Kernel::ComputeRequest rt_request = hp_request;
+  rt_request.cache.force_recache = false;
+  rt_request.execution.parallel = false;
+  rt_request.intent = ComputeIntent::RealTimeUpdate;
+  rt_request.dirty_roi = cv::Rect(8, 8, 16, 16);
+  auto rt_image = interaction.cmd_compute_and_get_image(rt_request);
+  ASSERT_TRUE(rt_image.has_value());
+  EXPECT_GT(rt_image->cols, 0);
+  EXPECT_GT(rt_image->rows, 0);
+
+  auto rt_events = interaction.cmd_drain_compute_events(kGraphName);
+  ASSERT_TRUE(rt_events.has_value());
+  EXPECT_TRUE(contains_event_sources(
+      *rt_events,
+      {"intent_coordinator_decision_inline", "intent_coordinator_inline_rt",
+       "rt_update", "intent_coordinator_inline_hp", "hp_update"}));
+  std::vector<std::string> event_sources;
+  event_sources.reserve(rt_events->size());
+  std::transform(rt_events->begin(), rt_events->end(),
+                 std::back_inserter(event_sources),
+                 [](const auto& event) { return event.source; });
+  const auto inline_rt = std::find(event_sources.begin(), event_sources.end(),
+                                   "intent_coordinator_inline_rt");
+  const auto rt_update =
+      std::find(event_sources.begin(), event_sources.end(), "rt_update");
+  const auto inline_hp = std::find(event_sources.begin(), event_sources.end(),
+                                   "intent_coordinator_inline_hp");
+  const auto hp_update =
+      std::find(event_sources.begin(), event_sources.end(), "hp_update");
+  ASSERT_NE(inline_rt, event_sources.end());
+  ASSERT_NE(rt_update, event_sources.end());
+  ASSERT_NE(inline_hp, event_sources.end());
+  ASSERT_NE(hp_update, event_sources.end());
+  EXPECT_LT(inline_rt, rt_update);
+  EXPECT_LT(rt_update, inline_hp);
+  EXPECT_LT(inline_hp, hp_update);
+
+  ASSERT_TRUE(graph.node(2).cached_output_high_precision.has_value());
+  EXPECT_GT(graph.node(2).hp_version, 0);
+  ASSERT_TRUE(graph.last_dirty_region_snapshot.has_value());
+  EXPECT_TRUE(graph.last_dirty_region_snapshot->actual_dirty_rois.count(2));
+  EXPECT_TRUE(std::any_of(
+      graph.recent_compute_plan_summaries.begin(),
+      graph.recent_compute_plan_summaries.end(), [](const auto& summary) {
+        return summary.intent == ComputeIntent::GlobalHighPrecision;
+      }));
+  EXPECT_TRUE(std::any_of(
+      graph.recent_compute_plan_summaries.begin(),
+      graph.recent_compute_plan_summaries.end(), [](const auto& summary) {
+        return summary.intent == ComputeIntent::RealTimeUpdate;
+      }));
+}
+
+TEST(KernelComputeRuntimeSplit,
+     ParallelOperationFailureMessageSurvivesInteractionLastError) {
+  register_split_ops();
+  ScopedTestDirectory root(std::filesystem::temp_directory_path() /
+                           "photospider-split-parallel-error");
+  Kernel kernel;
+  Kernel::SchedulerConfig scheduler_config;
+  scheduler_config.worker_count = 2;
+  kernel.set_scheduler_config(scheduler_config);
+  InteractionService interaction(kernel);
+  constexpr char kGraphName[] = "split_parallel_error";
+  ASSERT_TRUE(interaction.cmd_load_graph(kGraphName, root.path().string(), "")
+                  .has_value());
+
+  GraphModel& graph = testing::KernelTestAccess::model(kernel, kGraphName);
+  Node source = make_node(1, "split_plan", "source");
+  source.parameters["width"] = 16;
+  source.parameters["height"] = 16;
+  Node target = make_node(2, "split_plan", "parallel_failure");
+  target.image_inputs.push_back({1, "image"});
+  graph.add_node(source);
+  graph.add_node(target);
+  graph.validate_topology();
+
+  Kernel::ComputeRequest request;
+  request.name = kGraphName;
+  request.node_id = 2;
+  request.cache.precision = "float32";
+  request.cache.force_recache = true;
+  request.cache.disable_disk_cache = true;
+  request.cache.nosave = true;
+  request.execution.parallel = true;
+  EXPECT_FALSE(interaction.cmd_compute(request));
+  const auto error = interaction.cmd_last_error(kGraphName);
+  ASSERT_TRUE(error.has_value());
+  EXPECT_NE(error->message.find(kOpFailureMessage), std::string::npos);
+  const auto scheduler_events =
+      testing::KernelTestAccess::scheduler_trace(kernel, kGraphName);
+  EXPECT_TRUE(std::any_of(
+      scheduler_events.begin(), scheduler_events.end(), [](const auto& event) {
+        return event.action == GraphRuntime::SchedulerEvent::RETHROW_EXCEPTION;
+      }));
+}
+
+TEST(KernelComputeRuntimeSplit,
+     MissingPropagatorsProjectDirtyRoiThroughIdentityFallback) {
+  register_split_ops();
+  ScopedTestDirectory root(std::filesystem::temp_directory_path() /
+                           "photospider-split-identity-projection");
+  Kernel kernel;
+  InteractionService interaction(kernel);
+  constexpr char kGraphName[] = "split_identity_projection";
+  ASSERT_TRUE(interaction.cmd_load_graph(kGraphName, root.path().string(), "")
+                  .has_value());
+
+  GraphModel& graph = testing::KernelTestAccess::model(kernel, kGraphName);
+  Node source = make_node(1, "split_plan", "source");
+  source.parameters["width"] = 40;
+  source.parameters["height"] = 30;
+  Node target = make_node(2, "split_plan", "tile");
+  target.parameters["width"] = 40;
+  target.parameters["height"] = 30;
+  target.image_inputs.push_back({1, "image"});
+  graph.add_node(source);
+  graph.add_node(target);
+  graph.validate_topology();
+
+  const cv::Rect dirty_roi(3, 4, 5, 6);
+  const auto forward = interaction.cmd_project_roi(kGraphName, 1, dirty_roi, 2);
+  const auto backward =
+      interaction.cmd_project_roi_backward(kGraphName, 2, dirty_roi, 1);
+  ASSERT_TRUE(forward.has_value());
+  ASSERT_TRUE(backward.has_value());
+  EXPECT_EQ(*forward, dirty_roi);
+  EXPECT_EQ(*backward, dirty_roi);
+  EXPECT_EQ(OpRegistry::instance().dirty_propagation_contract_status(
+                "split_plan", "tile"),
+            PropagationContractStatus::LegacyIdentityFallback);
+  EXPECT_EQ(OpRegistry::instance().forward_propagation_contract_status(
+                "split_plan", "tile"),
+            PropagationContractStatus::LegacyIdentityFallback);
 }
 
 TEST(DirtySourceLifecycleFacade, UsesHostPublicBoundary) {
