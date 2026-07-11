@@ -650,8 +650,23 @@ TEST(EmbeddedHostAdapter,
   ASSERT_TRUE(io_time.status.ok) << io_time.status.message;
   EXPECT_GE(io_time.value, 0.0);
 
-  auto events = host->drain_compute_events(session);
+  auto invalid_event_limit = host->drain_compute_events(session, 0);
+  EXPECT_FALSE(invalid_event_limit.status.ok);
+  EXPECT_EQ(checked_graph_error_code(invalid_event_limit.status),
+            GraphErrc::InvalidParameter);
+
+  auto missing_events = host->drain_compute_events(
+      GraphSessionId{"missing-event-session"}, kComputeEventDrainMaxLimit);
+  EXPECT_FALSE(missing_events.status.ok);
+  EXPECT_EQ(missing_events.status.domain, OperationErrorDomain::Graph);
+  EXPECT_EQ(checked_graph_error_code(missing_events.status),
+            GraphErrc::NotFound);
+
+  auto events = host->drain_compute_events(session, kComputeEventDrainMaxLimit);
   ASSERT_TRUE(events.status.ok) << events.status.message;
+  ASSERT_FALSE(events.value.events.empty());
+  EXPECT_GT(events.value.events.front().sequence, 0u);
+  EXPECT_LT(events.value.events.back().sequence, kObservationSequenceExhausted);
 
   auto dirty = host->dirty_region_snapshot(session);
   ASSERT_TRUE(dirty.status.ok) << dirty.status.message;
@@ -671,8 +686,56 @@ TEST(EmbeddedHostAdapter,
   EXPECT_NE(scheduler_info.value.stats.find("SerialDebugScheduler"),
             std::string::npos);
 
-  auto scheduler_trace = host->scheduler_trace(session);
+  HostComputeRequest trace_request = make_compute_request(session);
+  trace_request.cache.force_recache = true;
+  trace_request.execution.parallel = true;
+  trace_request.telemetry.enable_timing = false;
+  auto trace_compute = host->compute(trace_request);
+  ASSERT_TRUE(trace_compute.status.ok) << trace_compute.status.message;
+
+  auto invalid_trace_limit = host->scheduler_trace(session, 0, 0);
+  EXPECT_FALSE(invalid_trace_limit.status.ok);
+  EXPECT_EQ(checked_graph_error_code(invalid_trace_limit.status),
+            GraphErrc::InvalidParameter);
+
+  auto missing_trace = host->scheduler_trace(
+      GraphSessionId{"missing-trace-session"}, 0, kSchedulerTraceMaxLimit);
+  EXPECT_FALSE(missing_trace.status.ok);
+  EXPECT_EQ(missing_trace.status.domain, OperationErrorDomain::Graph);
+  EXPECT_EQ(checked_graph_error_code(missing_trace.status),
+            GraphErrc::NotFound);
+
+  auto scheduler_trace =
+      host->scheduler_trace(session, 0, kSchedulerTraceMaxLimit);
   ASSERT_TRUE(scheduler_trace.status.ok) << scheduler_trace.status.message;
+  ASSERT_FALSE(scheduler_trace.value.events.empty());
+  EXPECT_GT(scheduler_trace.value.events.front().sequence, 0u);
+  EXPECT_LT(scheduler_trace.value.events.back().sequence,
+            kObservationSequenceExhausted);
+
+  auto repeated_scheduler_trace =
+      host->scheduler_trace(session, 0, kSchedulerTraceMaxLimit);
+  ASSERT_TRUE(repeated_scheduler_trace.status.ok)
+      << repeated_scheduler_trace.status.message;
+  ASSERT_EQ(repeated_scheduler_trace.value.events.size(),
+            scheduler_trace.value.events.size());
+  EXPECT_EQ(repeated_scheduler_trace.value.events.front().sequence,
+            scheduler_trace.value.events.front().sequence);
+
+  auto future_trace = host->scheduler_trace(
+      session, kObservationSequenceExhausted - 1, kSchedulerTraceMaxLimit);
+  EXPECT_FALSE(future_trace.status.ok);
+  EXPECT_EQ(future_trace.status.domain, OperationErrorDomain::Graph);
+  EXPECT_EQ(checked_graph_error_code(future_trace.status),
+            GraphErrc::InvalidParameter);
+
+  auto premature_terminal_trace = host->scheduler_trace(
+      session, kObservationSequenceExhausted, kSchedulerTraceMaxLimit);
+  EXPECT_FALSE(premature_terminal_trace.status.ok);
+  EXPECT_EQ(premature_terminal_trace.status.domain,
+            OperationErrorDomain::Graph);
+  EXPECT_EQ(checked_graph_error_code(premature_terminal_trace.status),
+            GraphErrc::InvalidParameter);
 
   auto description = host->scheduler_description("serial_debug");
   ASSERT_TRUE(description.status.ok) << description.status.message;

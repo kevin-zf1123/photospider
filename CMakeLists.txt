@@ -882,6 +882,12 @@ if(BUILD_TESTING)
         tests/integration/test_kernel_contracts.cpp)
     add_ps_test(test_image_buffer_contracts
         tests/unit/test_image_buffer_contracts.cpp)
+    add_ps_test(test_event_stream_boundaries
+        tests/unit/test_event_stream_boundaries.cpp)
+    add_ps_test(test_cli_compute_event_paging
+        tests/unit/test_cli_compute_event_paging.cpp)
+    target_include_directories(test_cli_compute_event_paging PRIVATE
+        "${PROJECT_SOURCE_DIR}/apps/graph_cli/include")
     add_ps_test(test_host_adapter tests/integration/test_host_adapter.cpp)
     target_compile_definitions(test_host_adapter PRIVATE
         PS_TEST_OP_PLUGIN_DIR="${TEST_OP_PLUGIN_DIR}"
@@ -1068,6 +1074,10 @@ if(BUILD_TESTING)
     gtest_discover_tests(test_graph_topology_boundaries WORKING_DIRECTORY ${PROJECT_SOURCE_DIR})
     gtest_discover_tests(test_kernel_contracts WORKING_DIRECTORY ${PROJECT_SOURCE_DIR})
     gtest_discover_tests(test_image_buffer_contracts WORKING_DIRECTORY ${PROJECT_SOURCE_DIR})
+    gtest_discover_tests(test_event_stream_boundaries
+        WORKING_DIRECTORY ${PROJECT_SOURCE_DIR})
+    gtest_discover_tests(test_cli_compute_event_paging
+        WORKING_DIRECTORY ${PROJECT_SOURCE_DIR})
     gtest_discover_tests(test_host_adapter WORKING_DIRECTORY ${PROJECT_SOURCE_DIR})
     gtest_discover_tests(test_bad_alloc_boundaries
         WORKING_DIRECTORY ${PROJECT_SOURCE_DIR})

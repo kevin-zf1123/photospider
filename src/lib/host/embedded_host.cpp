@@ -1079,28 +1079,6 @@ TimingSnapshot to_public_timing(const TimingCollector& timing) {
 }
 
 /**
- * @brief Converts backend compute events into public snapshots.
- *
- * @param events Backend events drained from the graph.
- * @return Public compute event snapshots.
- * @throws std::bad_alloc if container/string allocation fails.
- */
-std::vector<ComputeEventSnapshot> to_public_compute_events(
-    const std::vector<GraphEventService::ComputeEvent>& events) {
-  std::vector<ComputeEventSnapshot> out;
-  out.reserve(events.size());
-  for (const auto& event : events) {
-    ComputeEventSnapshot snapshot;
-    snapshot.node = NodeId{event.id};
-    snapshot.name = event.name;
-    snapshot.source = event.source;
-    snapshot.elapsed_ms = event.elapsed_ms;
-    out.push_back(std::move(snapshot));
-  }
-  return out;
-}
-
-/**
  * @brief Converts backend scheduler action into a public action label.
  *
  * @param action Backend scheduler action.
@@ -1131,18 +1109,21 @@ HostSchedulerTraceAction to_public_scheduler_action(
 }
 
 /**
- * @brief Converts backend scheduler trace events into public snapshots.
+ * @brief Converts one bounded backend scheduler page into public snapshots.
  *
- * @param events Backend scheduler events.
- * @return Public scheduler trace event snapshots.
+ * @param backend_page Backend scheduler events and locked metadata.
+ * @return Public scheduler trace page preserving sequence metadata.
  * @throws std::bad_alloc if vector allocation fails.
+ * @note The conversion is non-destructive and cannot exceed the already
+ *       validated backend page bound.
  */
-std::vector<SchedulerTraceEventSnapshot> to_public_scheduler_trace(
-    const std::vector<GraphRuntime::SchedulerEvent>& events) {
-  std::vector<SchedulerTraceEventSnapshot> out;
-  out.reserve(events.size());
-  for (const auto& event : events) {
+SchedulerTracePage to_public_scheduler_trace_page(
+    const GraphRuntime::SchedulerEventPage& backend_page) {
+  SchedulerTracePage page;
+  page.events.reserve(backend_page.events.size());
+  for (const auto& event : backend_page.events) {
     SchedulerTraceEventSnapshot snapshot;
+    snapshot.sequence = event.sequence;
     snapshot.epoch = event.epoch;
     snapshot.node = NodeId{event.node_id};
     snapshot.worker_id = event.worker_id;
@@ -1151,9 +1132,12 @@ std::vector<SchedulerTraceEventSnapshot> to_public_scheduler_trace(
         std::chrono::duration_cast<std::chrono::microseconds>(
             event.timestamp.time_since_epoch())
             .count());
-    out.push_back(snapshot);
+    page.events.push_back(snapshot);
   }
-  return out;
+  page.next_sequence = backend_page.next_sequence;
+  page.has_more = backend_page.has_more;
+  page.dropped_count = backend_page.dropped_count;
+  return page;
 }
 
 /**
@@ -2342,22 +2326,33 @@ class EmbeddedHost final : public Host {
    * @brief Drains compute events for a graph session.
    *
    * @param session Session whose event buffer should be drained.
-   * @return Public event snapshots, or a failed status.
+   * @param limit Maximum number of oldest retained events to remove.
+   * @return Public bounded event batch, or a failed status.
    * @throws std::bad_alloc on allocation failure.
-   * @note Draining mutates only backend diagnostic event storage.
+   * @note Invalid limits fail before graph lookup or backend mutation. A
+   *       successful call removes only the returned page and resets the shared
+   *       drop count at the same locked observation point.
    */
-  Result<std::vector<ComputeEventSnapshot>> drain_compute_events(
-      const GraphSessionId& session) override {
-    return guarded_result<std::vector<ComputeEventSnapshot>>(
-        "drain_compute_events", GraphErrc::NotFound, [&] {
-          auto events =
-              state_->interaction.cmd_drain_compute_events(session.value);
-          if (!events) {
-            return failure_result<std::vector<ComputeEventSnapshot>>(
+  Result<ComputeEventBatch> drain_compute_events(const GraphSessionId& session,
+                                                 std::size_t limit) override {
+    return guarded_result<ComputeEventBatch>(
+        "drain_compute_events", GraphErrc::InvalidParameter, [&] {
+          if (limit < kComputeEventDrainMinLimit ||
+              limit > kComputeEventDrainMaxLimit) {
+            return failure_result<ComputeEventBatch>(
+                GraphErrc::InvalidParameter,
+                "compute-event drain limit must be between " +
+                    std::to_string(kComputeEventDrainMinLimit) + " and " +
+                    std::to_string(kComputeEventDrainMaxLimit));
+          }
+          auto batch = state_->interaction.cmd_drain_compute_events(
+              session.value, limit);
+          if (!batch) {
+            return failure_result<ComputeEventBatch>(
                 GraphErrc::NotFound,
                 "compute events not available for session: " + session.value);
           }
-          return success_result(to_public_compute_events(*events));
+          return success_result(std::move(*batch));
         });
   }
 
@@ -2365,21 +2360,34 @@ class EmbeddedHost final : public Host {
    * @brief Reads scheduler trace events for a graph session.
    *
    * @param session Session to inspect.
-   * @return Public scheduler trace snapshots, or a failed status.
+   * @param after_sequence Exclusive sequence cursor.
+   * @param limit Maximum number of trace entries to copy.
+   * @return Public bounded scheduler trace page, or a failed status.
    * @throws std::bad_alloc on allocation failure.
-   * @note Trace events are copied and do not expose scheduler queues.
+   * @note Invalid bounds fail before graph lookup. Trace events are copied
+   *       non-destructively and do not expose scheduler queues.
    */
-  Result<std::vector<SchedulerTraceEventSnapshot>> scheduler_trace(
-      const GraphSessionId& session) override {
-    return guarded_result<std::vector<SchedulerTraceEventSnapshot>>(
-        "scheduler_trace", GraphErrc::NotFound, [&] {
-          auto events = state_->interaction.cmd_scheduler_trace(session.value);
-          if (!events) {
-            return failure_result<std::vector<SchedulerTraceEventSnapshot>>(
+  Result<SchedulerTracePage> scheduler_trace(const GraphSessionId& session,
+                                             uint64_t after_sequence,
+                                             std::size_t limit) override {
+    return guarded_result<SchedulerTracePage>(
+        "scheduler_trace", GraphErrc::InvalidParameter, [&] {
+          if (limit < kSchedulerTraceMinLimit ||
+              limit > kSchedulerTraceMaxLimit) {
+            return failure_result<SchedulerTracePage>(
+                GraphErrc::InvalidParameter,
+                "scheduler-trace limit must be between " +
+                    std::to_string(kSchedulerTraceMinLimit) + " and " +
+                    std::to_string(kSchedulerTraceMaxLimit));
+          }
+          auto page = state_->interaction.cmd_scheduler_trace(
+              session.value, after_sequence, limit);
+          if (!page) {
+            return failure_result<SchedulerTracePage>(
                 GraphErrc::NotFound,
                 "scheduler trace not available for session: " + session.value);
           }
-          return success_result(to_public_scheduler_trace(*events));
+          return success_result(to_public_scheduler_trace_page(*page));
         });
   }
 

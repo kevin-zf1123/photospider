@@ -270,7 +270,7 @@ void register_split_ops() {
  * on RT-before-HP inline coordination.
  */
 bool contains_event_sources(
-    const std::vector<GraphEventService::ComputeEvent>& events,
+    const std::vector<ComputeEventSnapshot>& events,
     std::initializer_list<const char*> required_sources) {
   return std::all_of(
       required_sources.begin(), required_sources.end(),
@@ -1617,14 +1617,15 @@ TEST(GlobalHighPrecisionDirtyUpdate, UsesDirtyPlanningForGlobalHpDirtyRoi) {
   EXPECT_LE(graph.last_compute_plan_summary->active_task_count,
             graph.last_compute_plan_summary->task_count);
 
-  auto recorded_events = events.drain();
-  EXPECT_TRUE(std::any_of(recorded_events.begin(), recorded_events.end(),
-                          [](const GraphEventService::ComputeEvent& event) {
-                            return event.source ==
-                                   "intent_coordinator_global_dirty_update";
-                          }));
-  EXPECT_TRUE(std::any_of(recorded_events.begin(), recorded_events.end(),
-                          [](const GraphEventService::ComputeEvent& event) {
+  auto recorded_events = events.drain(kComputeEventDrainMaxLimit);
+  EXPECT_TRUE(std::any_of(
+      recorded_events.events.begin(), recorded_events.events.end(),
+      [](const ComputeEventSnapshot& event) {
+        return event.source == "intent_coordinator_global_dirty_update";
+      }));
+  EXPECT_TRUE(std::any_of(recorded_events.events.begin(),
+                          recorded_events.events.end(),
+                          [](const ComputeEventSnapshot& event) {
                             return event.source == "hp_update";
                           }));
 }
@@ -1796,10 +1797,11 @@ TEST(KernelComputeRuntimeSplit, SequentialAndParallelHpProduceIdenticalPixels) {
   EXPECT_LE(parallel_summary.tile_task_count, parallel_summary.task_count);
   const auto scheduler_events =
       testing::KernelTestAccess::scheduler_trace(kernel, kGraphName);
-  EXPECT_TRUE(std::any_of(
-      scheduler_events.begin(), scheduler_events.end(), [](const auto& event) {
-        return event.action == GraphRuntime::SchedulerEvent::EXECUTE_TILE;
-      }));
+  EXPECT_TRUE(std::any_of(scheduler_events.events.begin(),
+                          scheduler_events.events.end(), [](const auto& event) {
+                            return event.action ==
+                                   GraphRuntime::SchedulerEvent::EXECUTE_TILE;
+                          }));
   EXPECT_GT(graph.node(2).hp_version, sequential_hp_version);
   ASSERT_EQ(sequential->size(), parallel->size());
   ASSERT_EQ(sequential->type(), parallel->type());
@@ -1843,10 +1845,12 @@ TEST(KernelComputeRuntimeSplit,
   auto hp_future = interaction.cmd_compute_async(hp_request);
   ASSERT_TRUE(hp_future.has_value());
   ASSERT_TRUE(hp_future->get());
-  auto hp_events = interaction.cmd_drain_compute_events(kGraphName);
+  auto hp_events = interaction.cmd_drain_compute_events(
+      kGraphName, kComputeEventDrainMaxLimit);
   ASSERT_TRUE(hp_events.has_value());
   EXPECT_TRUE(contains_event_sources(
-      *hp_events, {"intent_coordinator_global_high_precision", "computed"}));
+      hp_events->events,
+      {"intent_coordinator_global_high_precision", "computed"}));
   ASSERT_TRUE(graph.node(2).cached_output_high_precision.has_value());
 
   Kernel::ComputeRequest rt_request = hp_request;
@@ -1859,15 +1863,16 @@ TEST(KernelComputeRuntimeSplit,
   EXPECT_GT(rt_image->cols, 0);
   EXPECT_GT(rt_image->rows, 0);
 
-  auto rt_events = interaction.cmd_drain_compute_events(kGraphName);
+  auto rt_events = interaction.cmd_drain_compute_events(
+      kGraphName, kComputeEventDrainMaxLimit);
   ASSERT_TRUE(rt_events.has_value());
   EXPECT_TRUE(contains_event_sources(
-      *rt_events,
+      rt_events->events,
       {"intent_coordinator_decision_inline", "intent_coordinator_inline_rt",
        "rt_update", "intent_coordinator_inline_hp", "hp_update"}));
   std::vector<std::string> event_sources;
-  event_sources.reserve(rt_events->size());
-  std::transform(rt_events->begin(), rt_events->end(),
+  event_sources.reserve(rt_events->events.size());
+  std::transform(rt_events->events.begin(), rt_events->events.end(),
                  std::back_inserter(event_sources),
                  [](const auto& event) { return event.source; });
   const auto inline_rt = std::find(event_sources.begin(), event_sources.end(),
@@ -1941,7 +1946,8 @@ TEST(KernelComputeRuntimeSplit,
   const auto scheduler_events =
       testing::KernelTestAccess::scheduler_trace(kernel, kGraphName);
   EXPECT_TRUE(std::any_of(
-      scheduler_events.begin(), scheduler_events.end(), [](const auto& event) {
+      scheduler_events.events.begin(), scheduler_events.events.end(),
+      [](const auto& event) {
         return event.action == GraphRuntime::SchedulerEvent::RETHROW_EXCEPTION;
       }));
 }

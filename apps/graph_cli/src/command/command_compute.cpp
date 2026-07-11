@@ -12,6 +12,7 @@
 
 #include "graph_cli/command/commands.hpp"
 #include "graph_cli/command/help_utils.hpp"
+#include "graph_cli/compute_event_paging.hpp"
 
 namespace {
 
@@ -44,6 +45,39 @@ struct ComputeWaitRequest {
 };
 
 /**
+ * @brief Runs one fixed-budget compute-event polling pass.
+ *
+ * @param svc Public Host seam used by the CLI.
+ * @param session Session whose diagnostic events are drained.
+ * @param print_events Whether returned events should be printed.
+ * @return true when every attempted page succeeds, false on Host failure.
+ * @throws std::bad_alloc if a bounded Host result or diagnostic string cannot
+ *         allocate.
+ * @note Each Host call remains bounded by `kComputeEventDrainMaxLimit`. A pass
+ *       stops early when `has_more` is false and otherwise consumes at most the
+ *       eight pages needed to cover the fixed production ring. A future poll
+ *       rechecks any concurrently published or budget-deferred events.
+ */
+bool drain_compute_event_polling_pass(ps::Host& svc,
+                                      const ps::GraphSessionId& session,
+                                      bool print_events) {
+  return graph_cli::run_compute_event_polling_pass(
+      [&] {
+        return svc.drain_compute_events(session,
+                                        ps::kComputeEventDrainMaxLimit);
+      },
+      [print_events](const ps::ComputeEventBatch& batch) {
+        if (!print_events) {
+          return;
+        }
+        for (const auto& event : batch.events) {
+          std::cout << "  - Node " << event.node.value << " (" << event.name
+                    << ") completed [" << event.source << "]" << std::endl;
+        }
+      });
+}
+
+/**
  * @brief Schedules one async compute request and waits for completion.
  *
  * @param svc Public Host seam used by the CLI command.
@@ -58,7 +92,7 @@ struct ComputeWaitRequest {
  * CLI output behavior unchanged.
  */
 bool execute_and_wait(ps::Host& svc, const ComputeWaitRequest& request) {
-  (void)svc.drain_compute_events(request.compute.session);
+  (void)drain_compute_event_polling_pass(svc, request.compute.session, false);
 
   auto future_result = svc.compute_async(request.compute);
 
@@ -77,24 +111,13 @@ bool execute_and_wait(ps::Host& svc, const ComputeWaitRequest& request) {
   while (future.wait_for(std::chrono::milliseconds(50)) ==
          std::future_status::timeout) {
     if (!request.mute) {
-      auto events = svc.drain_compute_events(request.compute.session);
-      if (events.status.ok) {
-        for (const auto& event : events.value) {
-          std::cout << "  - Node " << event.node.value << " (" << event.name
-                    << ") completed [" << event.source << "]" << std::endl;
-        }
-      }
+      (void)drain_compute_event_polling_pass(svc, request.compute.session,
+                                             true);
     }
   }
 
   if (!request.mute) {
-    auto tail_events = svc.drain_compute_events(request.compute.session);
-    if (tail_events.status.ok) {
-      for (const auto& event : tail_events.value) {
-        std::cout << "  - Node " << event.node.value << " (" << event.name
-                  << ") completed [" << event.source << "]" << std::endl;
-      }
-    }
+    (void)drain_compute_event_polling_pass(svc, request.compute.session, true);
   }
 
   auto status = future.get();

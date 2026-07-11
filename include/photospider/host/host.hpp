@@ -667,26 +667,37 @@ class PHOTOSPIDER_API Host {
    * @brief Drains compute progress events for a session.
    *
    * @param session Session whose events should be drained.
-   * @return Copied events, or a failure status.
+   * @param limit Maximum events to remove; must be in
+   *        `kComputeEventDrainMinLimit..kComputeEventDrainMaxLimit`.
+   * @return Bounded sequenced event batch, or a failure status.
    * @throws std::bad_alloc if request processing, backend-to-status
    *         translation, or copied result construction exhausts memory.
-   * @note Draining removes the events from the backend event buffer.
+   * @note A successful call removes only returned events and atomically resets
+   *       the shared drop counter. Invalid limits return
+   *       `GraphErrc::InvalidParameter` without draining or resetting state.
    */
-  virtual Result<std::vector<ComputeEventSnapshot>> drain_compute_events(
-      const GraphSessionId& session) = 0;
+  virtual Result<ComputeEventBatch> drain_compute_events(
+      const GraphSessionId& session, std::size_t limit) = 0;
 
   /**
    * @brief Returns copied scheduler trace events for a session.
    *
    * @param session Session to inspect.
-   * @return Scheduler trace snapshot, or a failure status.
+   * @param after_sequence Exclusive sequence cursor; zero starts at the oldest
+   *        retained trace and `kObservationSequenceExhausted` observes a
+   *        terminal empty page.
+   * @param limit Maximum events to copy; must be in
+   *        `kSchedulerTraceMinLimit..kSchedulerTraceMaxLimit`.
+   * @return Bounded non-destructive scheduler trace page, or a failure status.
    * @throws std::bad_alloc if request processing, backend-to-status
    *         translation, or copied result construction exhausts memory.
-   * @note Trace events are diagnostic and may be cleared by future backend
-   *       controls outside this interface.
+   * @note Trace reads never remove events. Invalid limits, future cursors, or
+   *       an exhausted sentinel used before actual exhaustion return
+   *       `GraphErrc::InvalidParameter` without copying a page.
    */
-  virtual Result<std::vector<SchedulerTraceEventSnapshot>> scheduler_trace(
-      const GraphSessionId& session) = 0;
+  virtual Result<SchedulerTracePage> scheduler_trace(
+      const GraphSessionId& session, uint64_t after_sequence,
+      std::size_t limit) = 0;
 
   /**
    * @brief Clears all cache layers for a session.

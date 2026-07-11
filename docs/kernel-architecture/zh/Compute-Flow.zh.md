@@ -257,7 +257,28 @@ event、dirty region 和 update request；哪一层负责 dirty-region generatio
 
 ## 事件和计时
 
-`GraphEventService` 收集每节点计算事件。启用计时时，`TimingCollector` 存储节点计时和总计算耗时。`NodeOutput` 中的调试元数据记录 worker id、时间戳、执行时间、设备和可选范围检查。
+`GraphEventService` 把每节点计算事件发布到线程安全、固定容量的 ring。Production 容量是每图
+8,192 个事件。每条被接纳的 publication 都会获得 `1..UINT64_MAX-1` 范围内单调递增的
+unsigned 64-bit sequence；`UINT64_MAX` 是 exhaustion sentinel，绝不会分配给事件。Ring 满时
+只淘汰恰好一条最旧 retained event，并通过饱和 drop counter 记录这次淘汰。
+
+事件 name 与 source 在复制进 retained storage 前通过 `std::string::size()` 测量，因此 public
+1,024-byte 上限是 UTF-8 byte 上限。任一字段超过上限时，整条 publication 会被丢弃且不截断；
+该 attempt 仍消耗一个有效 sequence，并增加一次 drop。Sequence 耗尽后，每次 publication
+attempt 只增加一次 exhaustion drop，sequence 与 drop counter 都不会回绕。
+
+`Host::drain_compute_events(session, limit)` 接受 1 至 1,024 的 limit，并返回
+`ComputeEventBatch`：带 sequence 的 `events`、`next_sequence`、`has_more` 与
+`dropped_count`。成功调用只移除返回的最旧 page，并原子重置 shared drop counter；空 page
+也遵循该规则。Invalid limit 会在移除或重置前返回 `GraphErrc::InvalidParameter`。Event service
+在移动事件前预留 result capacity，因此 `std::bad_alloc` 不会移除 caller 未收到的事件。CLI
+consumer 只在 `has_more` 为 true 时继续请求最大 bounded page，但每轮 polling pass 都有按
+`ceil(8192 / 1024)` 推导出的固定 8-page 预算。无并发 producer 时，该预算足以覆盖完整的
+production retained ring；有活跃 producer 时，它可防止单轮无限追页，并把预算后剩余或新发布
+的事件留给未来 polling pass 重新检查。Host 不存在无上限 vector drain。
+
+`TimingCollector` 独立地在启用 timing 时存储节点计时与总计算耗时。`NodeOutput` 中的 debug
+metadata 记录 worker id、时间戳、执行时间、设备和可选范围检查。
 
 ## 错误处理
 
