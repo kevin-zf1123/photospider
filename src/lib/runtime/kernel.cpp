@@ -49,8 +49,9 @@ id Kernel::get_metal_device(const std::string& name) {
  *         allocation exhausts memory.
  * @throws std::exception for scheduler/runtime startup failures not classified
  *         as recoverable graph-load errors.
- * @note The runtime enters graphs_ only after YAML loading succeeds, so public
- * Host callers cannot observe a partially loaded session.
+ * @note The return label is allocated before the runtime enters `graphs_`.
+ * After insertion, returning it uses only noexcept moves, so a propagated
+ * exception never leaves a newly published session.
  */
 std::optional<std::string> Kernel::load_graph(
     const std::string& name, const std::string& root_dir,
@@ -121,8 +122,12 @@ std::optional<std::string> Kernel::load_graph(
               << "': " << yaml_path << std::endl;
   }
 
-  graphs_[name] = std::move(runtime);
-  return name;
+  std::optional<std::string> loaded_name(std::in_place, name);
+  const auto inserted = graphs_.emplace(name, std::move(runtime));
+  if (!inserted.second) {
+    return std::nullopt;
+  }
+  return loaded_name;
 }
 
 bool Kernel::close_graph(const std::string& name) {

@@ -248,7 +248,9 @@ class PHOTOSPIDER_API Host {
    * @return Loaded session id on success, or a failure status.
    * @throws std::bad_alloc if request processing, backend-to-status
    *         translation, or copied result construction exhausts memory.
-   * @note The returned session is a value label, never a runtime pointer.
+   * @note The returned session is a value label, never a runtime pointer. A
+   *       conforming implementation must not leave a newly published session
+   *       when an exception propagates instead of returning success.
    */
   virtual Result<GraphSessionId> load_graph(
       const GraphLoadRequest& request) = 0;
