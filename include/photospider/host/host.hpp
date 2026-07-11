@@ -259,13 +259,16 @@ class PHOTOSPIDER_API Host {
    * @brief Closes a loaded graph session.
    *
    * @param session Session to close.
-   * @return Success or failure status.
+   * @return Success, `GraphErrc::NotFound` only when the session is absent, or
+   *         another failure code when shutdown fails while the session remains
+   *         loaded.
    * @throws std::bad_alloc if request processing, backend-to-status
    *         translation, or copied result construction exhausts memory.
    * @note The embedded implementation rejects new admitted compute/scheduler
    *       work after close begins, waits accepted synchronous calls, and waits
    *       until every accepted async status future is observable as ready
-   * before releasing backend resources.
+   *       before releasing backend resources. A failed close reopens admission
+   *       for the still-loaded session so callers may inspect or retry it.
    */
   virtual VoidResult close_graph(const GraphSessionId& session) = 0;
 

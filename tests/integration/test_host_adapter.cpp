@@ -1,8 +1,15 @@
 #include <gtest/gtest.h>
 
+#if defined(_WIN32)
+#include <windows.h>
+#else
+#include <dlfcn.h>
+#endif
+
 #include <algorithm>
 #include <atomic>
 #include <chrono>
+#include <cstdlib>
 #include <filesystem>
 #include <fstream>
 #include <future>
@@ -22,12 +29,48 @@
 #include "node.hpp"  // NOLINT(build/include_subdir)
 #include "photospider/host/host.hpp"
 #include "ps_types.hpp"  // NOLINT(build/include_subdir)
+#include "scheduler/scheduler_plugin_loader.hpp"  // NOLINT(build/include_subdir)
 
 #ifndef PS_TEST_OP_PLUGIN_DIR
 #define PS_TEST_OP_PLUGIN_DIR "build/test_plugins"
 #endif
 
+#ifndef PS_TEST_SCHEDULER_PLUGIN_PATH
+#define PS_TEST_SCHEDULER_PLUGIN_PATH \
+  "build/test_schedulers/libdestroy_count_scheduler_plugin.dylib"
+#endif
+
 namespace ps {
+
+#if defined(PHOTOSPIDER_INTERNAL_BAD_ALLOC_TESTING)
+/** @brief BUILD_TESTING close-coordination events mirrored from the Host. */
+enum class EmbeddedCloseTestEvent {
+  /** @brief One close caller has claimed the session marker. */
+  MarkerClaimed,
+  /** @brief A duplicate close caller is about to wait for marker release. */
+  DuplicateAboutToWait,
+};
+
+/** @brief Borrowed callback installed for deterministic close synchronization.
+ */
+struct EmbeddedCloseTestHook {
+  /** @brief Borrowed test context. */
+  void* context = nullptr;
+  /** @brief Non-throwing event callback. */
+  void (*notify)(void* context,
+                 EmbeddedCloseTestEvent event) noexcept = nullptr;
+};
+
+/**
+ * @brief Installs or clears the embedded Host close test hook.
+ * @param hook Hook that outlives concurrent close calls, or nullptr.
+ * @return Nothing.
+ * @throws Nothing.
+ */
+void set_embedded_host_close_test_hook(
+    const EmbeddedCloseTestHook* hook) noexcept;
+#endif
+
 namespace {
 
 /** @brief Serializes access to the Host blocking-operation release future. */
@@ -38,6 +81,104 @@ std::shared_future<void> g_host_blocking_source_release;
 
 /** @brief Publishes entry into the blocking Host operation callback. */
 std::atomic<bool> g_host_blocking_source_started{false};
+
+#if defined(PHOTOSPIDER_INTERNAL_BAD_ALLOC_TESTING)
+/** @brief Events published by the current embedded close coordination hook. */
+struct EmbeddedCloseEventState {
+  /** @brief Number of callers that have claimed the marker. */
+  std::atomic<std::uint64_t> marker_claimed{0};
+  /** @brief Number of duplicate callers that reached a condition wait. */
+  std::atomic<std::uint64_t> duplicate_about_to_wait{0};
+};
+
+/**
+ * @brief Records one embedded close event without allocating or blocking.
+ * @param context Borrowed EmbeddedCloseEventState pointer.
+ * @param event Coordination point reached by the Host.
+ * @return Nothing.
+ * @throws Nothing.
+ */
+void record_embedded_close_event(void* context,
+                                 EmbeddedCloseTestEvent event) noexcept {
+  auto* state = static_cast<EmbeddedCloseEventState*>(context);
+  if (event == EmbeddedCloseTestEvent::MarkerClaimed) {
+    state->marker_claimed.fetch_add(1, std::memory_order_release);
+  } else {
+    state->duplicate_about_to_wait.fetch_add(1, std::memory_order_release);
+  }
+}
+
+/**
+ * @brief Installs and assertion-safely clears one embedded close test hook.
+ */
+class ScopedEmbeddedCloseTestHook final {
+ public:
+  /**
+   * @brief Installs a hook backed by the supplied event state.
+   * @param state State that outlives this guard.
+   * @throws Nothing.
+   */
+  explicit ScopedEmbeddedCloseTestHook(EmbeddedCloseEventState& state) noexcept
+      : hook_{&state, &record_embedded_close_event} {
+    set_embedded_host_close_test_hook(&hook_);
+  }
+
+  /** @brief Clears the borrowed hook before its state can be destroyed. */
+  ~ScopedEmbeddedCloseTestHook() noexcept {
+    set_embedded_host_close_test_hook(nullptr);
+  }
+
+  /**
+   * @brief Prevents duplicate hook-installation ownership.
+   * @param other Guard that remains installed.
+   * @throws Nothing because construction is unavailable.
+   */
+  ScopedEmbeddedCloseTestHook(const ScopedEmbeddedCloseTestHook& other) =
+      delete;
+
+  /**
+   * @brief Prevents replacing one installed hook.
+   * @param other Guard whose hook remains installed.
+   * @return No value because assignment is unavailable.
+   * @throws Nothing because assignment is unavailable.
+   */
+  ScopedEmbeddedCloseTestHook& operator=(
+      const ScopedEmbeddedCloseTestHook& other) = delete;
+
+ private:
+  /** @brief Hook object whose address remains stable while installed. */
+  EmbeddedCloseTestHook hook_;
+};
+
+/**
+ * @brief Waits until an atomic close event reaches one occurrence count.
+ * @param event Event counter to observe.
+ * @param expected Minimum count required for success.
+ * @param timeout Maximum monotonic wait duration.
+ * @return True when the count becomes visible before the deadline.
+ * @throws Nothing.
+ */
+bool wait_for_embedded_close_event(const std::atomic<std::uint64_t>& event,
+                                   std::uint64_t expected,
+                                   std::chrono::milliseconds timeout) {
+  const auto deadline = std::chrono::steady_clock::now() + timeout;
+  while (std::chrono::steady_clock::now() < deadline) {
+    if (event.load(std::memory_order_acquire) >= expected) {
+      return true;
+    }
+    std::this_thread::yield();
+  }
+  return event.load(std::memory_order_acquire) >= expected;
+}
+#endif
+
+/** @brief Environment key selecting scheduler fixture lifecycle failures. */
+constexpr const char* kSchedulerFailureEnvironment =  // NOLINT
+    "PS_DESTROY_COUNT_SCHEDULER_FAILURE";             // NOLINT
+
+/** @brief Scheduler type exported by the deterministic close-failure fixture.
+ */
+constexpr const char* kDestroyCountSchedulerType = "destroy_count_test";
 
 /**
  * @brief Configures one deterministic blocking Host operation invocation.
@@ -281,8 +422,20 @@ class ScopedTempDir {
     std::filesystem::create_directories(root_);
   }
 
-  ScopedTempDir(const ScopedTempDir&) = delete;
-  ScopedTempDir& operator=(const ScopedTempDir&) = delete;
+  /**
+   * @brief Prevents two owners from deleting the same temporary directory.
+   * @param other Owner that retains cleanup responsibility.
+   * @throws Nothing because construction is unavailable.
+   */
+  ScopedTempDir(const ScopedTempDir& other) = delete;
+
+  /**
+   * @brief Prevents replacing temporary-directory cleanup ownership.
+   * @param other Owner whose root remains unchanged.
+   * @return No value because assignment is unavailable.
+   * @throws Nothing because assignment is unavailable.
+   */
+  ScopedTempDir& operator=(const ScopedTempDir& other) = delete;
 
   /**
    * @brief Removes the temporary directory.
@@ -301,11 +454,109 @@ class ScopedTempDir {
    * @return Temporary root path.
    * @throws Nothing.
    */
-  const std::filesystem::path& root() const { return root_; }
+  const std::filesystem::path& root() const noexcept { return root_; }
 
  private:
   /** @brief Temporary directory root owned by this helper. */
   std::filesystem::path root_;
+};
+
+/**
+ * @brief Temporarily sets one scheduler-fixture environment value.
+ *
+ * @throws std::bad_alloc if the key or previous value cannot be copied.
+ * @throws std::runtime_error if the platform environment update fails.
+ * @note Tests using this helper are process-serial because environment values
+ *       are global. Destruction restores the exact prior value best-effort.
+ */
+class ScopedEnvironmentValue final {
+ public:
+  /**
+   * @brief Saves the current value and installs one fixture selection.
+   * @param name Environment key copied for this guard's lifetime.
+   * @param value New value visible to the scheduler plugin.
+   * @throws std::bad_alloc if owned strings cannot be allocated.
+   * @throws std::runtime_error if the environment cannot be updated.
+   */
+  ScopedEnvironmentValue(const char* name, const std::string& value)
+      : name_(name) {
+    if (const char* previous = std::getenv(name)) {
+      previous_ = std::string(previous);
+    }
+    set(value);
+  }
+
+  /**
+   * @brief Restores the saved environment state without hiding test failures.
+   * @throws Nothing; platform restoration failures are suppressed.
+   */
+  ~ScopedEnvironmentValue() noexcept {
+    try {
+      if (previous_) {
+        set(*previous_);
+      } else {
+        clear();
+      }
+    } catch (...) {
+    }
+  }
+
+  /**
+   * @brief Prevents duplicate restoration ownership.
+   * @param other Guard that remains the sole restoration owner.
+   * @throws Nothing because construction is unavailable.
+   */
+  ScopedEnvironmentValue(const ScopedEnvironmentValue& other) = delete;
+
+  /**
+   * @brief Prevents replacing one active environment guard.
+   * @param other Guard whose environment key remains unchanged.
+   * @return No value because assignment is unavailable.
+   * @throws Nothing because assignment is unavailable.
+   */
+  ScopedEnvironmentValue& operator=(const ScopedEnvironmentValue& other) =
+      delete;
+
+ private:
+  /**
+   * @brief Installs a new value for the owned key.
+   * @param value Value to publish process-wide.
+   * @return Nothing.
+   * @throws std::runtime_error if the platform call fails.
+   */
+  void set(const std::string& value) {
+#if defined(_WIN32)
+    if (_putenv_s(name_.c_str(), value.c_str()) != 0) {
+      throw std::runtime_error("_putenv_s failed");
+    }
+#else
+    if (setenv(name_.c_str(), value.c_str(), 1) != 0) {
+      throw std::runtime_error("setenv failed");
+    }
+#endif
+  }
+
+  /**
+   * @brief Removes the owned environment key.
+   * @return Nothing.
+   * @throws std::runtime_error if the platform call fails.
+   */
+  void clear() {
+#if defined(_WIN32)
+    if (_putenv_s(name_.c_str(), "") != 0) {
+      throw std::runtime_error("_putenv_s clear failed");
+    }
+#else
+    if (unsetenv(name_.c_str()) != 0) {
+      throw std::runtime_error("unsetenv failed");
+    }
+#endif
+  }
+
+  /** @brief Environment key retained through restoration. */
+  std::string name_;
+  /** @brief Previous value, or nullopt when the key was absent. */
+  std::optional<std::string> previous_;
 };
 
 /**
@@ -440,6 +691,170 @@ std::filesystem::path lifecycle_plugin_dir() {
 std::filesystem::path override_lifecycle_plugin_dir() {
   return std::filesystem::path(PS_TEST_OP_PLUGIN_DIR) / "override";
 }
+
+/**
+ * @brief Returns the deterministic scheduler lifecycle fixture library path.
+ *
+ * @return Platform-specific path below the CMake test scheduler directory.
+ * @throws std::bad_alloc if path or filename construction cannot allocate.
+ * @note The existing fixture can throw from real scheduler shutdown while
+ *       retaining running state, allowing a later close retry to prove that
+ *       shutdown is attempted again.
+ */
+std::filesystem::path destroy_count_scheduler_plugin_path() {
+  return std::filesystem::path(PS_TEST_SCHEDULER_PLUGIN_PATH);
+}
+
+/**
+ * @brief Owns fixture lifecycle exports resolved from the exact plugin path.
+ *
+ * @throws std::runtime_error when the library or a required export cannot be
+ *         opened.
+ * @note The diagnostic handle remains open while the Host loader owns its own
+ *       mapping, then closes independently after all counter reads finish.
+ */
+class SchedulerFixtureExports final {
+ public:
+  /**
+   * @brief Opens one scheduler fixture and resolves reset/shutdown counters.
+   * @param path Complete platform-specific library path injected by CMake.
+   * @throws std::runtime_error when opening or symbol lookup fails.
+   */
+  explicit SchedulerFixtureExports(const std::filesystem::path& path) {
+#if defined(_WIN32)
+    handle_ = LoadLibrary(path.string().c_str());
+    if (handle_ != nullptr) {
+      reset_counts_ = reinterpret_cast<void (*)()>(
+          GetProcAddress(handle_, "ps_test_scheduler_reset_counts"));
+      shutdown_count_ = reinterpret_cast<int (*)()>(
+          GetProcAddress(handle_, "ps_test_scheduler_shutdown_count"));
+    }
+#else
+    handle_ = dlopen(path.string().c_str(), RTLD_LAZY);
+    if (handle_ != nullptr) {
+      reset_counts_ = reinterpret_cast<void (*)()>(
+          dlsym(handle_, "ps_test_scheduler_reset_counts"));
+      shutdown_count_ = reinterpret_cast<int (*)()>(
+          dlsym(handle_, "ps_test_scheduler_shutdown_count"));
+    }
+#endif
+    if (handle_ == nullptr || reset_counts_ == nullptr ||
+        shutdown_count_ == nullptr) {
+      close();
+      throw std::runtime_error(
+          "failed to resolve scheduler lifecycle fixture exports: " +
+          path.string());
+    }
+  }
+
+  /** @brief Closes the diagnostic library handle. @throws Nothing. */
+  ~SchedulerFixtureExports() noexcept { close(); }
+
+  /**
+   * @brief Prevents two owners from closing the same diagnostic handle.
+   * @param other Owner that retains the native library handle.
+   * @throws Nothing because construction is unavailable.
+   */
+  SchedulerFixtureExports(const SchedulerFixtureExports& other) = delete;
+
+  /**
+   * @brief Prevents replacing diagnostic-handle ownership.
+   * @param other Owner whose handle remains unchanged.
+   * @return No value because assignment is unavailable.
+   * @throws Nothing because assignment is unavailable.
+   */
+  SchedulerFixtureExports& operator=(const SchedulerFixtureExports& other) =
+      delete;
+
+  /**
+   * @brief Resets fixture counters while no scheduler instance is active.
+   * @return Nothing.
+   * @throws Nothing.
+   */
+  void reset_counts() const noexcept { reset_counts_(); }
+
+  /**
+   * @brief Returns the number of explicit scheduler shutdown calls.
+   * @return Current fixture shutdown count.
+   * @throws Nothing.
+   */
+  int shutdown_count() const noexcept { return shutdown_count_(); }
+
+ private:
+  /** @brief Releases the native diagnostic handle when present. */
+  void close() noexcept {
+#if defined(_WIN32)
+    if (handle_ != nullptr) {
+      FreeLibrary(handle_);
+      handle_ = nullptr;
+    }
+#else
+    if (handle_ != nullptr) {
+      dlclose(handle_);
+      handle_ = nullptr;
+    }
+#endif
+  }
+
+#if defined(_WIN32)
+  /** @brief Native Windows dynamic-library handle. */
+  HMODULE handle_ = nullptr;
+#else
+  /** @brief Native POSIX dynamic-library handle. */
+  void* handle_ = nullptr;
+#endif
+  /** @brief Fixture counter reset export. */
+  void (*reset_counts_)() = nullptr;
+  /** @brief Fixture shutdown counter export. */
+  int (*shutdown_count_)() = nullptr;
+};
+
+/**
+ * @brief Clears process-global scheduler plugins on every test exit.
+ *
+ * @throws Nothing.
+ * @note Declare this guard before the Host owner. Reverse destruction then
+ *       destroys Host graph runtimes first and clears loader mappings second.
+ */
+class ScopedSchedulerPluginCleanup final {
+ public:
+  /**
+   * @brief Clears stale scheduler plugin state before a fixture test begins.
+   * @throws Nothing; cleanup failures are suppressed for assertion safety.
+   */
+  ScopedSchedulerPluginCleanup() noexcept { clear(); }
+
+  /** @brief Clears scheduler state after later-declared Host destruction. */
+  ~ScopedSchedulerPluginCleanup() noexcept { clear(); }
+
+ private:
+  /** @brief Clears plugin mappings and diagnostics behind a no-throw fence. */
+  static void clear() noexcept {
+    try {
+      SchedulerPluginLoader::instance().clear_plugins();
+      SchedulerPluginLoader::instance().clear_errors();
+    } catch (...) {
+    }
+  }
+
+ public:
+  /**
+   * @brief Prevents duplicate process-global cleanup ownership.
+   * @param other Guard that remains responsible for cleanup.
+   * @throws Nothing because construction is unavailable.
+   */
+  ScopedSchedulerPluginCleanup(const ScopedSchedulerPluginCleanup& other) =
+      delete;
+
+  /**
+   * @brief Prevents replacing process-global cleanup ownership.
+   * @param other Guard whose cleanup responsibility remains unchanged.
+   * @return No value because assignment is unavailable.
+   * @throws Nothing because assignment is unavailable.
+   */
+  ScopedSchedulerPluginCleanup& operator=(
+      const ScopedSchedulerPluginCleanup& other) = delete;
+};
 
 /**
  * @brief Writes a graph backed by the dynamically loaded lifecycle operation.
@@ -857,6 +1272,162 @@ TEST(EmbeddedHostAdapter,
   EXPECT_TRUE(close.status.ok) << close.status.message;
 }
 
+/**
+ * @brief Verifies scheduler shutdown failure preserves a retryable Host
+ * session.
+ *
+ * @throws Nothing when the fixture, Host status mapping, and cleanup behave as
+ *         specified; GoogleTest records any mismatch.
+ * @note The first close throws while the fixture remains running. The Host must
+ *       return Unknown, reopen admission, retain the graph, and invoke shutdown
+ *       again when closing the same session after injection is removed.
+ */
+TEST(EmbeddedHostAdapter, CloseShutdownFailureRetainsSessionAndAllowsRetry) {
+  register_host_adapter_ops();
+  ScopedTempDir temp("photospider_host_adapter_close_failure_test");
+  ScopedSchedulerPluginCleanup scheduler_cleanup;
+  auto host = create_embedded_host();
+  ASSERT_NE(host, nullptr);
+
+  const std::filesystem::path plugin_path =
+      destroy_count_scheduler_plugin_path();
+  ASSERT_TRUE(std::filesystem::exists(plugin_path))
+      << "scheduler close-failure fixture was not built: " << plugin_path;
+  SchedulerFixtureExports fixture(plugin_path);
+  fixture.reset_counts();
+  const VoidResult plugin_load = host->scheduler_load(plugin_path.string());
+  ASSERT_TRUE(plugin_load.status.ok) << plugin_load.status.message;
+
+  HostSchedulerConfig scheduler_config;
+  scheduler_config.hp_type = kDestroyCountSchedulerType;
+  scheduler_config.rt_type = "serial_debug";
+  const VoidResult configured =
+      host->configure_scheduler_defaults(scheduler_config);
+  ASSERT_TRUE(configured.status.ok) << configured.status.message;
+
+  const GraphSessionId session =
+      load_test_graph(*host, temp.root(), "close_failure_retry_graph");
+  HostComputeRequest stale_error_request = make_compute_request(session);
+  stale_error_request.node = NodeId{99};
+  const Result<ImageBuffer> stale_compute =
+      host->compute_and_get_image(stale_error_request);
+  ASSERT_FALSE(stale_compute.status.ok);
+  const OperationStatus last_error_before_failure = host->last_error(session);
+  ASSERT_FALSE(last_error_before_failure.ok);
+
+  {
+    ScopedEnvironmentValue failure(kSchedulerFailureEnvironment,
+                                   "shutdown_runtime_error");
+    const VoidResult failed_close = host->close_graph(session);
+    EXPECT_FALSE(failed_close.status.ok);
+    EXPECT_EQ(failed_close.status.domain, OperationErrorDomain::Graph);
+    EXPECT_EQ(checked_graph_error_code(failed_close.status),
+              GraphErrc::Unknown);
+    EXPECT_EQ(failed_close.status.name, "unknown");
+    EXPECT_NE(failed_close.status.message.find("fixture shutdown failure"),
+              std::string::npos);
+    EXPECT_EQ(fixture.shutdown_count(), 1);
+  }
+
+  const Result<std::vector<GraphSessionId>> after_failure = host->list_graphs();
+  ASSERT_TRUE(after_failure.status.ok) << after_failure.status.message;
+  ASSERT_EQ(after_failure.value.size(), 1u);
+  EXPECT_EQ(after_failure.value.front().value, session.value);
+
+  const Result<SchedulerInfoSnapshot> admitted_after_failure =
+      host->scheduler_info(session, ComputeIntent::GlobalHighPrecision);
+  ASSERT_TRUE(admitted_after_failure.status.ok)
+      << admitted_after_failure.status.message;
+  EXPECT_EQ(admitted_after_failure.value.scheduler_name,
+            kDestroyCountSchedulerType);
+  const OperationStatus last_error_after_failure = host->last_error(session);
+  EXPECT_EQ(last_error_after_failure.ok, last_error_before_failure.ok);
+  EXPECT_EQ(last_error_after_failure.domain, last_error_before_failure.domain);
+  EXPECT_EQ(last_error_after_failure.code, last_error_before_failure.code);
+  EXPECT_EQ(last_error_after_failure.name, last_error_before_failure.name);
+  EXPECT_EQ(last_error_after_failure.message,
+            last_error_before_failure.message);
+
+  const VoidResult retry_close = host->close_graph(session);
+  EXPECT_TRUE(retry_close.status.ok) << retry_close.status.message;
+  EXPECT_EQ(fixture.shutdown_count(), 2);
+
+  const Result<std::vector<GraphSessionId>> after_retry = host->list_graphs();
+  ASSERT_TRUE(after_retry.status.ok) << after_retry.status.message;
+  EXPECT_TRUE(after_retry.value.empty());
+  const OperationStatus last_error_after_retry = host->last_error(session);
+  EXPECT_TRUE(last_error_after_retry.ok) << last_error_after_retry.message;
+
+  const VoidResult missing_close = host->close_graph(session);
+  EXPECT_FALSE(missing_close.status.ok);
+  EXPECT_EQ(checked_graph_error_code(missing_close.status),
+            GraphErrc::NotFound);
+}
+
+/**
+ * @brief Verifies a shutdown GraphError::NotFound cannot masquerade as absence.
+ *
+ * @throws Nothing when close remapping, graph retention, and retry hold;
+ *         GoogleTest records any mismatch.
+ * @note Only Kernel's explicit false result denotes an absent graph. A
+ * scheduler GraphError::NotFound is remapped to Unknown and keeps the session
+ * loaded.
+ */
+TEST(EmbeddedHostAdapter,
+     CloseShutdownGraphNotFoundMapsUnknownAndRetainsGraph) {
+  register_host_adapter_ops();
+  ScopedTempDir temp("photospider_host_adapter_close_graph_error_test");
+  ScopedSchedulerPluginCleanup scheduler_cleanup;
+  auto host = create_embedded_host();
+  ASSERT_NE(host, nullptr);
+
+  const std::filesystem::path plugin_path =
+      destroy_count_scheduler_plugin_path();
+  ASSERT_TRUE(std::filesystem::exists(plugin_path))
+      << "scheduler close-failure fixture was not built: " << plugin_path;
+  SchedulerFixtureExports fixture(plugin_path);
+  fixture.reset_counts();
+  const VoidResult plugin_load = host->scheduler_load(plugin_path.string());
+  ASSERT_TRUE(plugin_load.status.ok) << plugin_load.status.message;
+
+  HostSchedulerConfig scheduler_config;
+  scheduler_config.hp_type = kDestroyCountSchedulerType;
+  scheduler_config.rt_type = "serial_debug";
+  const VoidResult configured =
+      host->configure_scheduler_defaults(scheduler_config);
+  ASSERT_TRUE(configured.status.ok) << configured.status.message;
+
+  const GraphSessionId session =
+      load_test_graph(*host, temp.root(), "close_graph_error_retry_graph");
+  {
+    ScopedEnvironmentValue failure(kSchedulerFailureEnvironment,
+                                   "shutdown_graph_not_found");
+    const VoidResult failed_close = host->close_graph(session);
+    EXPECT_FALSE(failed_close.status.ok);
+    EXPECT_EQ(checked_graph_error_code(failed_close.status),
+              GraphErrc::Unknown);
+    EXPECT_EQ(failed_close.status.name, "unknown");
+    EXPECT_NE(failed_close.status.message.find(
+                  "fixture shutdown graph-not-found failure"),
+              std::string::npos);
+    EXPECT_EQ(fixture.shutdown_count(), 1);
+  }
+
+  const Result<std::vector<GraphSessionId>> retained = host->list_graphs();
+  ASSERT_TRUE(retained.status.ok) << retained.status.message;
+  ASSERT_EQ(retained.value.size(), 1u);
+  EXPECT_EQ(retained.value.front().value, session.value);
+
+  const Result<SchedulerInfoSnapshot> admitted =
+      host->scheduler_info(session, ComputeIntent::GlobalHighPrecision);
+  ASSERT_TRUE(admitted.status.ok) << admitted.status.message;
+  EXPECT_EQ(admitted.value.scheduler_name, kDestroyCountSchedulerType);
+
+  const VoidResult retry = host->close_graph(session);
+  EXPECT_TRUE(retry.status.ok) << retry.status.message;
+  EXPECT_EQ(fixture.shutdown_count(), 2);
+}
+
 TEST(EmbeddedHostAdapter,
      SpatialSnapshotPreservesOutputExtentSeparatelyFromRoi) {
   register_host_adapter_ops();
@@ -1101,6 +1672,255 @@ TEST(EmbeddedHostAdapter, CloseWaitsForAdmittedSynchronousCompute) {
   const VoidResult close = close_future.get();
   EXPECT_TRUE(close.status.ok) << close.status.message;
 
+  reset_host_blocking_source();
+}
+
+/**
+ * @brief Verifies concurrent closes settle as owner success then waiter absent.
+ *
+ * @throws Nothing when deterministic admission ordering and close results hold;
+ *         GoogleTest records any mismatch.
+ * @note A blocking admitted compute keeps the first close pending after it has
+ *       claimed the close marker. A BUILD_TESTING callback proves the second
+ *       close reaches duplicate-marker wait before the compute is released.
+ */
+TEST(EmbeddedHostAdapter, ConcurrentCloseOwnerSuccessMakesWaiterNotFound) {
+  register_host_adapter_ops();
+  ScopedTempDir temp("photospider_host_adapter_concurrent_close_success_test");
+  auto host = create_embedded_host();
+  ASSERT_NE(host, nullptr);
+  const GraphSessionId session = load_test_graph(
+      *host, temp.root(), "concurrent_close_success_graph", "blocking_source");
+
+  std::promise<void> release_compute;
+  configure_host_blocking_source(release_compute.get_future().share());
+  HostComputeRequest request = make_compute_request(session);
+  request.execution.parallel = true;
+  request.cache.force_recache = true;
+  auto compute_future = std::async(
+      std::launch::async, [&host, request] { return host->compute(request); });
+
+  if (!wait_for_host_blocking_source(std::chrono::seconds(2))) {
+    release_compute.set_value();
+    (void)compute_future.get();
+    reset_host_blocking_source();
+    (void)host->close_graph(session);
+    FAIL() << "blocking synchronous Host compute did not start";
+  }
+
+#if defined(PHOTOSPIDER_INTERNAL_BAD_ALLOC_TESTING)
+  EmbeddedCloseEventState close_events;
+  ScopedEmbeddedCloseTestHook close_hook(close_events);
+#endif
+  auto owner = std::async(std::launch::async, [&host, session] {
+    return host->close_graph(session);
+  });
+#if defined(PHOTOSPIDER_INTERNAL_BAD_ALLOC_TESTING)
+  if (!wait_for_embedded_close_event(close_events.marker_claimed, 1,
+                                     std::chrono::seconds(2))) {
+    release_compute.set_value();
+    (void)compute_future.get();
+    (void)owner.get();
+    reset_host_blocking_source();
+    FAIL() << "owner close did not claim the session marker";
+  }
+#endif
+
+  auto waiter = std::async(std::launch::async,
+                           [&] { return host->close_graph(session); });
+#if defined(PHOTOSPIDER_INTERNAL_BAD_ALLOC_TESTING)
+  if (!wait_for_embedded_close_event(close_events.duplicate_about_to_wait, 1,
+                                     std::chrono::seconds(2))) {
+    release_compute.set_value();
+    (void)compute_future.get();
+    (void)owner.get();
+    (void)waiter.get();
+    reset_host_blocking_source();
+    FAIL() << "second close did not enter duplicate-marker wait";
+  }
+#endif
+
+  release_compute.set_value();
+  const VoidResult compute = compute_future.get();
+  EXPECT_TRUE(compute.status.ok) << compute.status.message;
+  const VoidResult owner_result = owner.get();
+  EXPECT_TRUE(owner_result.status.ok) << owner_result.status.message;
+  const VoidResult waiter_result = waiter.get();
+  EXPECT_FALSE(waiter_result.status.ok);
+  EXPECT_EQ(checked_graph_error_code(waiter_result.status),
+            GraphErrc::NotFound);
+  reset_host_blocking_source();
+}
+
+/**
+ * @brief Verifies every duplicate close waiter claims the marker exclusively.
+ *
+ * @throws Nothing when one owner succeeds and two waiters serialize to
+ *         NotFound; GoogleTest records any mismatch.
+ * @note Both waiters are observed inside the marker wait before compute is
+ *       released. This catches a single-check implementation that wakes both
+ *       waiters and lets them enter Kernel close concurrently.
+ */
+TEST(EmbeddedHostAdapter, ThreeConcurrentClosesSerializeEveryWaiter) {
+  register_host_adapter_ops();
+  ScopedTempDir temp("photospider_host_adapter_three_close_test");
+  auto host = create_embedded_host();
+  ASSERT_NE(host, nullptr);
+  const GraphSessionId session = load_test_graph(
+      *host, temp.root(), "three_close_graph", "blocking_source");
+
+  std::promise<void> release_compute;
+  configure_host_blocking_source(release_compute.get_future().share());
+  HostComputeRequest request = make_compute_request(session);
+  request.execution.parallel = true;
+  request.cache.force_recache = true;
+  auto compute_future = std::async(
+      std::launch::async, [&host, request] { return host->compute(request); });
+  if (!wait_for_host_blocking_source(std::chrono::seconds(2))) {
+    release_compute.set_value();
+    (void)compute_future.get();
+    reset_host_blocking_source();
+    (void)host->close_graph(session);
+    FAIL() << "blocking synchronous Host compute did not start";
+  }
+
+#if defined(PHOTOSPIDER_INTERNAL_BAD_ALLOC_TESTING)
+  EmbeddedCloseEventState close_events;
+  ScopedEmbeddedCloseTestHook close_hook(close_events);
+#endif
+  auto owner = std::async(std::launch::async, [&host, session] {
+    return host->close_graph(session);
+  });
+#if defined(PHOTOSPIDER_INTERNAL_BAD_ALLOC_TESTING)
+  if (!wait_for_embedded_close_event(close_events.marker_claimed, 1,
+                                     std::chrono::seconds(2))) {
+    release_compute.set_value();
+    (void)compute_future.get();
+    (void)owner.get();
+    reset_host_blocking_source();
+    FAIL() << "owner close did not claim the session marker";
+  }
+#endif
+
+  auto first_waiter = std::async(std::launch::async, [&host, session] {
+    return host->close_graph(session);
+  });
+  auto second_waiter = std::async(std::launch::async, [&host, session] {
+    return host->close_graph(session);
+  });
+#if defined(PHOTOSPIDER_INTERNAL_BAD_ALLOC_TESTING)
+  if (!wait_for_embedded_close_event(close_events.duplicate_about_to_wait, 2,
+                                     std::chrono::seconds(2))) {
+    release_compute.set_value();
+    (void)compute_future.get();
+    (void)owner.get();
+    (void)first_waiter.get();
+    (void)second_waiter.get();
+    reset_host_blocking_source();
+    FAIL() << "both duplicate closes did not enter marker waits";
+  }
+#endif
+
+  release_compute.set_value();
+  EXPECT_TRUE(compute_future.get().status.ok);
+  const VoidResult owner_result = owner.get();
+  EXPECT_TRUE(owner_result.status.ok) << owner_result.status.message;
+  const VoidResult first_result = first_waiter.get();
+  const VoidResult second_result = second_waiter.get();
+  EXPECT_FALSE(first_result.status.ok);
+  EXPECT_EQ(checked_graph_error_code(first_result.status), GraphErrc::NotFound);
+  EXPECT_FALSE(second_result.status.ok);
+  EXPECT_EQ(checked_graph_error_code(second_result.status),
+            GraphErrc::NotFound);
+  reset_host_blocking_source();
+}
+
+/**
+ * @brief Verifies a waiter retries after the owner consumes a one-shot failure.
+ *
+ * @throws Nothing when the owner returns Unknown and the waiter closes the
+ *         retained graph; GoogleTest records any mismatch.
+ * @note The process-scoped fixture fails only its first shutdown invocation, so
+ *       no environment mutation races the two close attempts.
+ */
+TEST(EmbeddedHostAdapter, ConcurrentCloseRetriesAfterEarlierShutdownFailure) {
+  register_host_adapter_ops();
+  ScopedTempDir temp("photospider_host_adapter_concurrent_close_failure_test");
+  ScopedSchedulerPluginCleanup scheduler_cleanup;
+  auto host = create_embedded_host();
+  ASSERT_NE(host, nullptr);
+
+  const std::filesystem::path plugin_path =
+      destroy_count_scheduler_plugin_path();
+  ASSERT_TRUE(std::filesystem::exists(plugin_path));
+  SchedulerFixtureExports fixture(plugin_path);
+  fixture.reset_counts();
+  const VoidResult plugin_load = host->scheduler_load(plugin_path.string());
+  ASSERT_TRUE(plugin_load.status.ok) << plugin_load.status.message;
+
+  HostSchedulerConfig scheduler_config;
+  scheduler_config.hp_type = kDestroyCountSchedulerType;
+  scheduler_config.rt_type = "serial_debug";
+  ASSERT_TRUE(host->configure_scheduler_defaults(scheduler_config).status.ok);
+
+  const GraphSessionId session = load_test_graph(
+      *host, temp.root(), "concurrent_close_failure_graph", "blocking_source");
+  std::promise<void> release_compute;
+  configure_host_blocking_source(release_compute.get_future().share());
+  HostComputeRequest request = make_compute_request(session);
+  request.execution.parallel = true;
+  request.cache.force_recache = true;
+  auto compute_future = std::async(
+      std::launch::async, [&host, request] { return host->compute(request); });
+  if (!wait_for_host_blocking_source(std::chrono::seconds(2))) {
+    release_compute.set_value();
+    (void)compute_future.get();
+    reset_host_blocking_source();
+    FAIL() << "blocking synchronous Host compute did not start";
+  }
+
+  ScopedEnvironmentValue failure(kSchedulerFailureEnvironment,
+                                 "shutdown_runtime_error_once");
+#if defined(PHOTOSPIDER_INTERNAL_BAD_ALLOC_TESTING)
+  EmbeddedCloseEventState close_events;
+  ScopedEmbeddedCloseTestHook close_hook(close_events);
+#endif
+  auto owner = std::async(std::launch::async, [&host, session] {
+    return host->close_graph(session);
+  });
+#if defined(PHOTOSPIDER_INTERNAL_BAD_ALLOC_TESTING)
+  if (!wait_for_embedded_close_event(close_events.marker_claimed, 1,
+                                     std::chrono::seconds(2))) {
+    release_compute.set_value();
+    (void)compute_future.get();
+    (void)owner.get();
+    reset_host_blocking_source();
+    FAIL() << "owner close did not claim the session marker";
+  }
+#endif
+
+  auto waiter = std::async(std::launch::async,
+                           [&] { return host->close_graph(session); });
+#if defined(PHOTOSPIDER_INTERNAL_BAD_ALLOC_TESTING)
+  if (!wait_for_embedded_close_event(close_events.duplicate_about_to_wait, 1,
+                                     std::chrono::seconds(2))) {
+    release_compute.set_value();
+    (void)compute_future.get();
+    (void)owner.get();
+    (void)waiter.get();
+    reset_host_blocking_source();
+    FAIL() << "second close did not enter duplicate-marker wait";
+  }
+#endif
+
+  release_compute.set_value();
+  EXPECT_TRUE(compute_future.get().status.ok);
+  const VoidResult owner_result = owner.get();
+  EXPECT_FALSE(owner_result.status.ok);
+  EXPECT_EQ(checked_graph_error_code(owner_result.status), GraphErrc::Unknown);
+  const VoidResult waiter_result = waiter.get();
+  EXPECT_TRUE(waiter_result.status.ok) << waiter_result.status.message;
+  EXPECT_EQ(fixture.shutdown_count(), 2);
   reset_host_blocking_source();
 }
 

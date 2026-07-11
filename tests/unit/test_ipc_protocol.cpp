@@ -11,6 +11,7 @@
 #include <cmath>
 #include <cstddef>
 #include <cstdint>
+#include <cstdlib>
 #include <cstring>
 #include <filesystem>
 #include <fstream>
@@ -31,9 +32,27 @@
 #include "ipc/unix_socket.hpp"
 #include "photospider/host/host.hpp"
 #include "photospider/ipc/client.hpp"
+#include "scheduler/scheduler_plugin_loader.hpp"  // NOLINT(build/include_subdir)
+
+#ifndef PS_TEST_SCHEDULER_PLUGIN_PATH
+#define PS_TEST_SCHEDULER_PLUGIN_PATH \
+  "build/test_schedulers/libdestroy_count_scheduler_plugin.dylib"
+#endif
 
 namespace ps::ipc::internal {
 namespace {
+
+/** @brief Environment key selecting scheduler fixture lifecycle failures. */
+constexpr const char* kSchedulerFailureEnvironment =  // NOLINT
+    "PS_DESTROY_COUNT_SCHEDULER_FAILURE";             // NOLINT
+
+/** @brief Scheduler type exported by the deterministic close-failure fixture.
+ */
+constexpr const char* kDestroyCountSchedulerType = "destroy_count_test";
+
+/** @brief Maximum diagnostic label bytes retained in a socket test directory.
+ */
+constexpr std::size_t kTempDirectoryLabelBytes = 12;
 
 /**
  * @brief Owns one unique protected temporary directory for IPC unit tests.
@@ -46,12 +65,15 @@ class ScopedTempDirectory {
   /**
    * @brief Creates one empty mode-0700 directory.
    *
-   * @param label Stable test-specific directory prefix.
+   * @param label Stable test-specific directory prefix; only its first 12 bytes
+   *        are retained to preserve a conservative Unix socket path budget.
+   * @throws std::bad_alloc if bounded path construction cannot allocate.
    * @throws std::filesystem::filesystem_error if setup fails.
    */
   explicit ScopedTempDirectory(const std::string& label)
       : path_(std::filesystem::temp_directory_path() /
-              (label + "-" + std::to_string(::getpid()) + "-" +
+              (label.substr(0, kTempDirectoryLabelBytes) + "-" +
+               std::to_string(::getpid()) + "-" +
                std::to_string(sequence_++))) {
     std::filesystem::remove_all(path_);
     std::filesystem::create_directories(path_);
@@ -63,20 +85,20 @@ class ScopedTempDirectory {
 
   /**
    * @brief Prevents two test owners from deleting one temporary tree.
-   *
+   * @param other Owner that retains cleanup responsibility.
    * @throws Nothing because this operation is unavailable.
    * @note Each test creates its own unique directory.
    */
-  ScopedTempDirectory(const ScopedTempDirectory&) = delete;
+  ScopedTempDirectory(const ScopedTempDirectory& other) = delete;
 
   /**
    * @brief Prevents replacing temporary-tree cleanup ownership by copy.
-   *
+   * @param other Owner whose temporary path remains unchanged.
    * @return No value because this operation is unavailable.
    * @throws Nothing because this operation is unavailable.
    * @note The owned path remains fixed for the helper lifetime.
    */
-  ScopedTempDirectory& operator=(const ScopedTempDirectory&) = delete;
+  ScopedTempDirectory& operator=(const ScopedTempDirectory& other) = delete;
 
   /**
    * @brief Removes the temporary tree best-effort.
@@ -105,6 +127,161 @@ class ScopedTempDirectory {
 };
 
 std::uint64_t ScopedTempDirectory::sequence_ = 0;
+
+/**
+ * @brief Temporarily sets one scheduler-fixture environment value.
+ *
+ * @throws std::bad_alloc if the key or previous value cannot be copied.
+ * @throws std::runtime_error if the platform environment update fails.
+ * @note Tests using this helper are process-serial because environment values
+ *       are global. Destruction restores the exact prior value best-effort.
+ */
+class ScopedEnvironmentValue final {
+ public:
+  /**
+   * @brief Saves the current value and installs one fixture selection.
+   * @param name Environment key copied for this guard's lifetime.
+   * @param value New value visible to the scheduler plugin.
+   * @throws std::bad_alloc if owned strings cannot be allocated.
+   * @throws std::runtime_error if the environment cannot be updated.
+   */
+  ScopedEnvironmentValue(const char* name, const std::string& value)
+      : name_(name) {
+    if (const char* previous = std::getenv(name)) {
+      previous_ = std::string(previous);
+    }
+    set(value);
+  }
+
+  /**
+   * @brief Restores the saved environment state without hiding test failures.
+   * @throws Nothing; platform restoration failures are suppressed.
+   */
+  ~ScopedEnvironmentValue() noexcept {
+    try {
+      if (previous_) {
+        set(*previous_);
+      } else {
+        clear();
+      }
+    } catch (...) {
+    }
+  }
+
+  /**
+   * @brief Prevents duplicate restoration ownership.
+   * @param other Guard that remains the sole restoration owner.
+   * @throws Nothing because construction is unavailable.
+   */
+  ScopedEnvironmentValue(const ScopedEnvironmentValue& other) = delete;
+
+  /**
+   * @brief Prevents replacing one active environment guard.
+   * @param other Guard whose environment key remains unchanged.
+   * @return No value because assignment is unavailable.
+   * @throws Nothing because assignment is unavailable.
+   */
+  ScopedEnvironmentValue& operator=(const ScopedEnvironmentValue& other) =
+      delete;
+
+ private:
+  /**
+   * @brief Installs a new value for the owned key.
+   * @param value Value to publish process-wide.
+   * @return Nothing.
+   * @throws std::runtime_error if the platform call fails.
+   */
+  void set(const std::string& value) {
+#if defined(_WIN32)
+    if (_putenv_s(name_.c_str(), value.c_str()) != 0) {
+      throw std::runtime_error("_putenv_s failed");
+    }
+#else
+    if (setenv(name_.c_str(), value.c_str(), 1) != 0) {
+      throw std::runtime_error("setenv failed");
+    }
+#endif
+  }
+
+  /**
+   * @brief Removes the owned environment key.
+   * @return Nothing.
+   * @throws std::runtime_error if the platform call fails.
+   */
+  void clear() {
+#if defined(_WIN32)
+    if (_putenv_s(name_.c_str(), "") != 0) {
+      throw std::runtime_error("_putenv_s clear failed");
+    }
+#else
+    if (unsetenv(name_.c_str()) != 0) {
+      throw std::runtime_error("unsetenv failed");
+    }
+#endif
+  }
+
+  /** @brief Environment key retained through restoration. */
+  std::string name_;
+  /** @brief Previous value, or nullopt when the key was absent. */
+  std::optional<std::string> previous_;
+};
+
+/**
+ * @brief Returns the deterministic scheduler lifecycle fixture library path.
+ *
+ * @return Platform-specific path below the CMake test scheduler directory.
+ * @throws std::bad_alloc if path or filename construction cannot allocate.
+ */
+std::filesystem::path destroy_count_scheduler_plugin_path() {
+  return std::filesystem::path(PS_TEST_SCHEDULER_PLUGIN_PATH);
+}
+
+/**
+ * @brief Clears process-global scheduler plugins on every router-test exit.
+ *
+ * @throws Nothing.
+ * @note Declare before the Host owner so reverse destruction destroys all graph
+ *       runtimes before the loader releases its final plugin mapping.
+ */
+class ScopedSchedulerPluginCleanup final {
+ public:
+  /**
+   * @brief Clears stale scheduler plugin state before a fixture test begins.
+   * @throws Nothing; cleanup failures are suppressed for assertion safety.
+   */
+  ScopedSchedulerPluginCleanup() noexcept { clear(); }
+
+  /** @brief Clears scheduler state after later-declared Host destruction. */
+  ~ScopedSchedulerPluginCleanup() noexcept { clear(); }
+
+ private:
+  /** @brief Clears plugin mappings and diagnostics behind a no-throw fence. */
+  static void clear() noexcept {
+    try {
+      SchedulerPluginLoader::instance().clear_plugins();
+      SchedulerPluginLoader::instance().clear_errors();
+    } catch (...) {
+    }
+  }
+
+ public:
+  /**
+   * @brief Prevents duplicate process-global cleanup ownership.
+   * @param other Guard that retains cleanup responsibility.
+   * @throws Nothing because construction is unavailable.
+   */
+  ScopedSchedulerPluginCleanup(const ScopedSchedulerPluginCleanup& other) =
+      delete;
+
+  /**
+   * @brief Prevents replacing process-global cleanup ownership.
+   * @param other Guard whose cleanup responsibility remains unchanged.
+   * @return No value because assignment is unavailable.
+   * @throws Nothing because assignment is unavailable.
+   */
+  ScopedSchedulerPluginCleanup& operator=(
+      const ScopedSchedulerPluginCleanup& other) = delete;
+};
 
 /**
  * @brief Sends every byte in one test buffer.
@@ -543,6 +720,100 @@ TEST(ProtocolGraphLoad, FailedHostLoadReleasesNameForRetry) {
   ASSERT_TRUE(second.contains("result"));
   EXPECT_EQ(second["result"]["session_name"], "retry_session");
   router.close_all_sessions();
+}
+
+/**
+ * @brief Verifies non-NotFound close failure retains graph and opaque mapping.
+ *
+ * @throws Nothing when real Host, router, and scheduler fixture behavior holds;
+ *         GoogleTest records any mismatch.
+ * @note The fixture throws GraphError::Io from scheduler shutdown. The close
+ *       boundary must preserve that exact category while the same opaque id is
+ *       listed and remains usable until a later successful close removes the
+ *       mapping.
+ */
+TEST(ProtocolGraphClose, ShutdownFailureRetainsMappingAndAllowsRetry) {
+  ScopedTempDirectory temp("photospider-ipc-close-failure");
+  ScopedSchedulerPluginCleanup scheduler_cleanup;
+  std::unique_ptr<Host> host = create_embedded_host();
+  ASSERT_NE(host, nullptr);
+
+  const std::filesystem::path plugin_path =
+      destroy_count_scheduler_plugin_path();
+  ASSERT_TRUE(std::filesystem::exists(plugin_path))
+      << "scheduler close-failure fixture was not built: " << plugin_path;
+  const VoidResult plugin_load = host->scheduler_load(plugin_path.string());
+  ASSERT_TRUE(plugin_load.status.ok) << plugin_load.status.message;
+
+  HostSchedulerConfig scheduler_config;
+  scheduler_config.hp_type = kDestroyCountSchedulerType;
+  scheduler_config.rt_type = "serial_debug";
+  const VoidResult configured =
+      host->configure_scheduler_defaults(scheduler_config);
+  ASSERT_TRUE(configured.status.ok) << configured.status.message;
+
+  RequestRouter router(*host, "0.1.0");
+  const Json load_response = parse_response(router.route(
+      Json{{"protocol_version", 1},
+           {"id", "load"},
+           {"method", "graph.load"},
+           {"params", Json{{"session_name", "close_failure_retry"},
+                           {"root_dir", (temp.path() / "sessions").string()}}}}
+          .dump()));
+  ASSERT_TRUE(load_response.contains("result")) << load_response.dump();
+  const std::string session_id =
+      load_response["result"]["session_id"].get<std::string>();
+
+  {
+    ScopedEnvironmentValue failure(kSchedulerFailureEnvironment,
+                                   "shutdown_graph_io");
+    const Json failed_close = parse_response(router.route(Json{
+        {"protocol_version", 1},
+        {"id", "close-failed"},
+        {"method", "graph.close"},
+        {"params", Json{{"session_id", session_id}}}}.dump()));
+    ASSERT_TRUE(failed_close.contains("error")) << failed_close.dump();
+    EXPECT_EQ(failed_close["error"]["domain"], "graph");
+    EXPECT_EQ(failed_close["error"]["code"],
+              static_cast<std::int32_t>(GraphErrc::Io));
+    EXPECT_EQ(failed_close["error"]["name"], "io");
+    EXPECT_NE(failed_close["error"]["message"].get<std::string>().find(
+                  "fixture shutdown graph-io failure"),
+              std::string::npos);
+  }
+
+  const Result<GraphInspectionView> inspected_after_failure =
+      host->inspect_graph(GraphSessionId{"close_failure_retry"});
+  ASSERT_TRUE(inspected_after_failure.status.ok)
+      << inspected_after_failure.status.message;
+
+  const Json listed = parse_response(router.route(Json{
+      {"protocol_version", 1},
+      {"id", "list-after-failure"},
+      {"method", "graph.list"},
+      {"params", Json::object()}}.dump()));
+  ASSERT_TRUE(listed.contains("result")) << listed.dump();
+  ASSERT_EQ(listed["result"]["sessions"].size(), 1u);
+  EXPECT_EQ(listed["result"]["sessions"][0]["session_id"], session_id);
+  EXPECT_EQ(listed["result"]["sessions"][0]["session_name"],
+            "close_failure_retry");
+
+  const Json retry_close = parse_response(router.route(Json{
+      {"protocol_version", 1},
+      {"id", "close-retry"},
+      {"method", "graph.close"},
+      {"params", Json{{"session_id", session_id}}}}.dump()));
+  ASSERT_TRUE(retry_close.contains("result")) << retry_close.dump();
+  EXPECT_TRUE(retry_close["result"]["closed"].get<bool>());
+
+  const Json missing_retry = parse_response(router.route(Json{
+      {"protocol_version", 1},
+      {"id", "close-missing"},
+      {"method", "graph.close"},
+      {"params", Json{{"session_id", session_id}}}}.dump()));
+  ASSERT_TRUE(missing_retry.contains("error")) << missing_retry.dump();
+  EXPECT_EQ(missing_retry["error"]["domain"], "graph");
+  EXPECT_EQ(missing_retry["error"]["name"], "not_found");
 }
 
 TEST(ProtocolErrors, PreservesEveryGraphErrcCodeAndName) {

@@ -238,8 +238,10 @@ class Kernel {
    *         is thrown when the graph name is unknown.
    * @note Runtime stop is submitted through the same GraphStateExecutor used by
    *       compute and scheduler inspection/replacement. Closing therefore waits
-   *       prior serialized work before erasing the runtime and its mutex-
-   *       protected LastError snapshot.
+   *       prior serialized work. The graph map entry and its mutex-protected
+   *       LastError snapshot are erased only after stop succeeds; if stop
+   *       throws, both remain owned by Kernel so callers can inspect or retry
+   *       the session.
    */
   bool close_graph(const std::string& name);
   std::vector<std::string> list_graphs() const;

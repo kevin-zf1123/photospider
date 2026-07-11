@@ -15,6 +15,7 @@
 
 #include "kernel/scheduler/scheduler_plugin_api.hpp"
 #include "kernel/scheduler/scheduler_task_runtime.hpp"
+#include "photospider/core/graph_error.hpp"
 
 namespace {
 
@@ -40,6 +41,10 @@ constexpr const char* kLoadFailureEnvironment =
 std::atomic<int> g_active_count{0};
 /** @brief Number of calls that reached the plugin destroy export. */
 std::atomic<int> g_destroy_count{0};
+/** @brief Number of shutdown attempts made while a fixture was running. */
+std::atomic<int> g_shutdown_count{0};
+/** @brief Whether the process-scoped one-shot shutdown failure was consumed. */
+std::atomic<bool> g_shutdown_failure_once_consumed{false};
 
 /**
  * @brief Stable counter slots for host-owner runtime forwarding probes.
@@ -247,18 +252,42 @@ class DestroyCountScheduler final : public ps::IScheduler,
   /** @brief Marks the fixture running; returns nothing and does not throw. */
   void start() override { running_ = true; }
   /**
-   * @brief Stops the fixture and optionally injects an ordinary failure.
+   * @brief Stops the fixture and optionally injects a retryable lifecycle
+   * error.
    * @return Nothing.
-   * @throws std::runtime_error when `shutdown_runtime_error` or `all` is
-   * active.
-   * @note The state transition and trace precede the configured exception.
+   * @throws ps::GraphError when `shutdown_graph_not_found` or
+   *         `shutdown_graph_io` is active.
+   * @throws std::runtime_error when `shutdown_runtime_error`,
+   * `shutdown_runtime_error_once`, or `all` is active.
+   * @note The counter and trace precede failure injection. Failed attempts keep
+   *       the scheduler running so a later close must execute shutdown again.
    */
   void shutdown() override {
-    running_ = false;
+    if (!running_) {
+      return;
+    }
+    g_shutdown_count.fetch_add(1, std::memory_order_relaxed);
     append_lifecycle_trace("shutdown");
+    const char* failure_mode = std::getenv(kFailureEnvironment);
+    if (failure_mode != nullptr &&
+        std::strcmp(failure_mode, "shutdown_graph_not_found") == 0) {
+      throw ps::GraphError(ps::GraphErrc::NotFound,
+                           "fixture shutdown graph-not-found failure");
+    }
+    if (failure_mode != nullptr &&
+        std::strcmp(failure_mode, "shutdown_graph_io") == 0) {
+      throw ps::GraphError(ps::GraphErrc::Io,
+                           "fixture shutdown graph-io failure");
+    }
     if (failure_enabled("shutdown_runtime_error")) {
       throw std::runtime_error("fixture shutdown failure");
     }
+    if (failure_enabled("shutdown_runtime_error_once") &&
+        !g_shutdown_failure_once_consumed.exchange(true,
+                                                   std::memory_order_relaxed)) {
+      throw std::runtime_error("fixture shutdown failure");
+    }
+    running_ = false;
   }
 
   /**
@@ -641,6 +670,17 @@ int ps_test_scheduler_destroy_count() {
 }
 
 /**
+ * @brief Reads the number of shutdown attempts made while running.
+ * @return Counted shutdown attempts since the last fixture reset.
+ * @throws Nothing.
+ * @note The count advances before failure injection, allowing retry tests to
+ *       prove that a later close reached the scheduler again.
+ */
+int ps_test_scheduler_shutdown_count() {
+  return g_shutdown_count.load(std::memory_order_relaxed);
+}
+
+/**
  * @brief Reads one host-owner runtime forwarding counter.
  * @param probe Stable zero-based `ForwardingProbe` numeric value.
  * @return Recorded call count, or -1 when `probe` is outside the fixture
@@ -683,6 +723,8 @@ int ps_test_scheduler_load_probe_count(int probe) {
 void ps_test_scheduler_reset_counts() {
   g_active_count.store(0);
   g_destroy_count.store(0);
+  g_shutdown_count.store(0, std::memory_order_relaxed);
+  g_shutdown_failure_once_consumed.store(false, std::memory_order_relaxed);
   for (auto& count : g_forwarding_counts) {
     count.store(0, std::memory_order_relaxed);
   }
