@@ -166,8 +166,9 @@ bool Kernel::compute(const ComputeRequest& request) {
  *         failures.
  * @throws std::bad_alloc if compute execution or catch-path LastError
  *         construction exhausts memory.
- * @note Request-state flags are restored by ScopedComputeRequestState on every
- *       exit. Other compute exceptions are mapped to false and LastError.
+ * @note Runtime start, request-state mutation, and compute all occur inside one
+ *       GraphStateExecutor work item. The request-state guard restores flags on
+ *       every exit; other compute exceptions map to false and LastError.
  */
 bool Kernel::compute_request(const ComputeRequest& request) {
   auto it = graphs_.find(request.name);
@@ -177,12 +178,11 @@ bool Kernel::compute_request(const ComputeRequest& request) {
 
   try {
     auto& runtime = *it->second;
-    if (!runtime.running()) {
-      runtime.start();
-    }
-
     runtime.graph_state()
         .submit([this, &runtime, request](GraphModel& graph) {
+          if (!runtime.running()) {
+            runtime.start();
+          }
           ScopedComputeRequestState request_state(graph, request);
           ComputeService service(traversal_service_, cache_service_,
                                  runtime.event_service());
@@ -191,21 +191,21 @@ bool Kernel::compute_request(const ComputeRequest& request) {
         })
         .get();
 
-    last_error_.erase(request.name);
+    clear_last_error(request.name);
     return true;
   } catch (const std::bad_alloc&) {
     throw;
   } catch (const GraphError& ge) {
-    last_error_[request.name] = {ge.code(), ge.what()};
+    store_last_error(request.name, LastError{ge.code(), ge.what()});
     return false;
   } catch (const std::exception& e) {
-    last_error_[request.name] = {
-        GraphErrc::Unknown,
-        make_sync_exception_message(request.node_id, e.what())};
+    store_last_error(request.name, LastError{GraphErrc::Unknown,
+                                             make_sync_exception_message(
+                                                 request.node_id, e.what())});
     return false;
   } catch (...) {
-    last_error_[request.name] = {GraphErrc::Unknown,
-                                 std::string("unknown error")};
+    store_last_error(request.name, LastError{GraphErrc::Unknown,
+                                             std::string("unknown error")});
     return false;
   }
 }
@@ -232,8 +232,9 @@ std::optional<cv::Mat> Kernel::compute_and_get_image(
  *         output.
  * @throws std::bad_alloc if compute/image execution or catch-path LastError
  *         construction exhausts memory.
- * @note Other compute, adapter, and clone exceptions become nullopt; successful
- *       empty output clears stale LastError state.
+ * @note Runtime start and compute share one graph-state work item. Other
+ *       compute, adapter, and clone exceptions become nullopt; successful empty
+ *       output clears stale LastError state.
  */
 std::optional<cv::Mat> Kernel::compute_and_get_image_request(
     const ComputeRequest& request) {
@@ -245,12 +246,11 @@ std::optional<cv::Mat> Kernel::compute_and_get_image_request(
   try {
     NodeOutput output;
     auto& runtime = *it->second;
-    if (!runtime.running()) {
-      runtime.start();
-    }
-
     output = runtime.graph_state()
                  .submit([this, &runtime, request](GraphModel& graph) {
+                   if (!runtime.running()) {
+                     runtime.start();
+                   }
                    ScopedComputeRequestState request_state(graph, request);
                    ComputeService service(traversal_service_, cache_service_,
                                           runtime.event_service());
@@ -259,24 +259,24 @@ std::optional<cv::Mat> Kernel::compute_and_get_image_request(
                  .get();
 
     if (output.image_buffer.width == 0) {
-      last_error_.erase(request.name);
+      clear_last_error(request.name);
       return std::nullopt;
     }
-    last_error_.erase(request.name);
+    clear_last_error(request.name);
     return toCvMat(output.image_buffer).clone();
   } catch (const std::bad_alloc&) {
     throw;
   } catch (const GraphError& ge) {
-    last_error_[request.name] = {ge.code(), ge.what()};
+    store_last_error(request.name, LastError{ge.code(), ge.what()});
     return std::nullopt;
   } catch (const std::exception& e) {
-    last_error_[request.name] = {
-        GraphErrc::Unknown,
-        make_sync_exception_message(request.node_id, e.what())};
+    store_last_error(request.name, LastError{GraphErrc::Unknown,
+                                             make_sync_exception_message(
+                                                 request.node_id, e.what())});
     return std::nullopt;
   } catch (...) {
-    last_error_[request.name] = {GraphErrc::Unknown,
-                                 std::string("unknown error")};
+    store_last_error(request.name, LastError{GraphErrc::Unknown,
+                                             std::string("unknown error")});
     return std::nullopt;
   }
 }
@@ -285,14 +285,16 @@ std::optional<cv::Mat> Kernel::compute_and_get_image_request(
  * @brief Delegates asynchronous compute to compute_async_request().
  *
  * @param request Internal request transferred into asynchronous state.
- * @return Future resolving to success, or nullopt for a missing graph.
+ * @return Future resolving to the work item's owned exact result, or nullopt
+ *         for a missing graph.
  * @throws std::bad_alloc if request, task, queue, or future-state allocation
  *         fails during submission.
  * @throws std::system_error if graph-state asynchronous work cannot launch.
  * @note Future get() may rethrow std::bad_alloc from compute execution or
- *       async LastError allocation.
+ *       exact diagnostic allocation.
  */
-std::optional<std::future<bool>> Kernel::compute_async(ComputeRequest request) {
+std::optional<std::future<Kernel::AsyncComputeResult>> Kernel::compute_async(
+    ComputeRequest request) {
   return compute_async_request(std::move(request));
 }
 
@@ -300,49 +302,52 @@ std::optional<std::future<bool>> Kernel::compute_async(ComputeRequest request) {
  * @brief Submits one compute request to the graph-state executor.
  *
  * @param request Internal request moved into the submitted work item.
- * @return Future resolving to true/false, or nullopt for a missing graph.
+ * @return Future resolving to the work item's immutable success or exact owned
+ *         error, or nullopt for a missing graph.
  * @throws std::bad_alloc if request, task, queue, or future-state allocation
  *         fails during submission.
  * @throws std::system_error if graph-state asynchronous work cannot launch.
- * @note Recoverable compute exceptions resolve false after best-effort
- *       LastError mapping; future get() rethrows std::bad_alloc from compute
- *       execution or diagnostic allocation.
+ * @note Runtime start and compute execute inside the submitted graph-state work
+ *       item. Recoverable exceptions are captured in the returned result and
+ *       mirrored into LastError for diagnostics; future get() rethrows
+ *       std::bad_alloc from compute execution or diagnostic allocation.
  */
-std::optional<std::future<bool>> Kernel::compute_async_request(
-    ComputeRequest request) {
+std::optional<std::future<Kernel::AsyncComputeResult>>
+Kernel::compute_async_request(ComputeRequest request) {
   auto it = graphs_.find(request.name);
   if (it == graphs_.end()) {
     return std::nullopt;
   }
 
   GraphRuntime* const runtime_ptr = it->second.get();
-  if (!runtime_ptr->running()) {
-    runtime_ptr->start();
-  }
   return runtime_ptr->graph_state().submit(
       [this, runtime_ptr, request = std::move(request)](GraphModel& graph) {
         try {
+          if (!runtime_ptr->running()) {
+            runtime_ptr->start();
+          }
           ScopedComputeRequestState request_state(graph, request);
           ComputeService service(traversal_service_, cache_service_,
                                  runtime_ptr->event_service());
           (void)run_compute_request(service, *runtime_ptr, graph, request);
-          last_error_.erase(request.name);
-          return true;
+          clear_last_error(request.name);
+          return AsyncComputeResult{true, std::nullopt};
         } catch (const std::bad_alloc&) {
           throw;
         } catch (const GraphError& ge) {
-          last_error_[request.name] = {ge.code(), ge.what()};
-          return false;
+          LastError error{ge.code(), ge.what()};
+          store_last_error(request.name, error);
+          return AsyncComputeResult{false, std::move(error)};
         } catch (const std::exception& e) {
-          last_error_[request.name] = {
-              GraphErrc::Unknown,
-              make_async_exception_message(request.intent.has_value(),
-                                           request.node_id, e.what())};
-          return false;
+          LastError error{GraphErrc::Unknown, make_async_exception_message(
+                                                  request.intent.has_value(),
+                                                  request.node_id, e.what())};
+          store_last_error(request.name, error);
+          return AsyncComputeResult{false, std::move(error)};
         } catch (...) {
-          last_error_[request.name] = {GraphErrc::Unknown,
-                                       std::string("unknown error")};
-          return false;
+          LastError error{GraphErrc::Unknown, std::string("unknown error")};
+          store_last_error(request.name, error);
+          return AsyncComputeResult{false, std::move(error)};
         }
       });
 }

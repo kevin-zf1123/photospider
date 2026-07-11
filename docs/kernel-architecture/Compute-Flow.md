@@ -235,6 +235,14 @@ the scheduler runtime inside that boundary. This keeps graph topology, cache
 fields, dirty snapshots, timing, and node runtime state coherent without
 routing non-compute commands through scheduler queues.
 
+Scheduler lifetime follows the same boundary. Runtime start, synchronous and
+asynchronous compute, scheduler information, scheduler replacement, and runtime
+stop during close are serialized by the per-graph executor. The embedded Host
+also admits the complete synchronous compute/image/scheduler call against close,
+so close cannot erase the runtime between a session lookup and graph-state
+submission. Scheduler information copies name/statistics before leaving the
+boundary; no raw scheduler pointer survives it.
+
 Future work may add a `ComputeCommitPolicy` separate from `ComputeIntent`.
 The current dirty update implementation already uses staged output commits for
 HP/RT sibling safety: HP dirty workers write `HighPrecisionDirtyWriteBuffer`
@@ -370,8 +378,11 @@ timestamp, execution time, device, and optional range checks.
 ## Error Handling
 
 Compute failures throw `GraphError` with `GraphErrc` categories where possible.
-Internal `Kernel` catches these errors and stores a per-graph `LastError` for
-the embedded Host adapter. The adapter maps that diagnostic to public
-`OperationStatus`, `Result<T>`, or `ps::Host::last_error()` values; frontends
-observe only the public Host status/error surface and never inspect Kernel or
+Synchronous Kernel paths store a mutex-protected per-graph `LastError` for
+best-effort observation. An asynchronous work item instead returns its own
+`AsyncComputeResult` containing the exact failure code/message and only mirrors
+that value into `LastError`; its Host future never reconstructs status from the
+mutable mirror. The embedded adapter maps these values to public
+`OperationStatus`, `Result<T>`, or `ps::Host::last_error()` values. Frontends
+observe only the public Host surface and never inspect Kernel or
 `InteractionService` directly.

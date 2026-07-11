@@ -193,7 +193,8 @@ void handle_tiles(ps::Kernel& kernel, ps::InteractionService& svc,
  * @throws std::runtime_error if the graph is unexpectedly missing from Kernel.
  * @note This scriptable helper validates the propagation path through public
  * InteractionService commands while limiting direct model access to internal
- * test setup and diagnostic traversal.
+ * test setup and diagnostic traversal. Async failure output comes from the
+ * work-item-owned AsyncComputeResult rather than mutable Kernel LastError.
  */
 void handle_dirty(ps::Kernel& kernel, ps::InteractionService& svc,
                   const std::string& graph_name, int start_node_id,
@@ -320,12 +321,13 @@ void handle_dirty(ps::Kernel& kernel, ps::InteractionService& svc,
     std::cerr << "Failed to start compute task." << std::endl;
     return;
   }
-  bool success = future_opt->get();  // 等待计算完成
-  if (!success) {
+  const ps::Kernel::AsyncComputeResult outcome =
+      future_opt->get();  // 等待计算完成
+  if (!outcome.ok) {
     std::cerr << "Compute task failed for node " << target_end_node << ".";
-    if (auto err = svc.cmd_last_error(graph_name)) {
-      std::cerr << " Reason: [" << static_cast<int>(err->code) << "] "
-                << err->message;
+    if (outcome.error) {
+      std::cerr << " Reason: [" << static_cast<int>(outcome.error->code) << "] "
+                << outcome.error->message;
     }
     std::cerr << std::endl;
     return;

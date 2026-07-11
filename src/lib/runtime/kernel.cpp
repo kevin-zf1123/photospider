@@ -27,6 +27,35 @@
 
 namespace ps {
 
+/**
+ * @copydoc Kernel::clear_last_error
+ */
+void Kernel::clear_last_error(const std::string& name) {
+  std::lock_guard<std::mutex> lock(last_error_mutex_);
+  last_error_.erase(name);
+}
+
+/**
+ * @copydoc Kernel::store_last_error
+ */
+void Kernel::store_last_error(const std::string& name, LastError error) {
+  std::lock_guard<std::mutex> lock(last_error_mutex_);
+  last_error_.insert_or_assign(name, std::move(error));
+}
+
+/**
+ * @copydoc Kernel::copy_last_error
+ */
+std::optional<Kernel::LastError> Kernel::copy_last_error(
+    const std::string& name) const {
+  std::lock_guard<std::mutex> lock(last_error_mutex_);
+  auto it = last_error_.find(name);
+  if (it == last_error_.end()) {
+    return std::nullopt;
+  }
+  return it->second;
+}
+
 id Kernel::get_metal_device(const std::string& name) {
   auto it = graphs_.find(name);
   if (it == graphs_.end()) {
@@ -130,14 +159,22 @@ std::optional<std::string> Kernel::load_graph(
   return loaded_name;
 }
 
+/** @copydoc Kernel::close_graph */
 bool Kernel::close_graph(const std::string& name) {
   auto it = graphs_.find(name);
   if (it == graphs_.end()) {
     return false;
   }
-  it->second->stop();
+
+  GraphRuntime& runtime = *it->second;
+  runtime.graph_state()
+      .submit([&runtime](GraphModel&) {
+        runtime.stop();
+        return 0;
+      })
+      .get();
   graphs_.erase(it);
-  last_error_.erase(name);
+  clear_last_error(name);
   return true;
 }
 
@@ -195,9 +232,10 @@ void Kernel::setup_schedulers_for_runtime(const std::string& name,
     }
     message << ". Check scheduler_dirs startup scanning and scheduler plugin "
                "ABI requirements.";
-    last_error_[name] = {GraphErrc::InvalidParameter, message.str()};
+    store_last_error(name,
+                     LastError{GraphErrc::InvalidParameter, message.str()});
   } else {
-    last_error_.erase(name);
+    clear_last_error(name);
   }
 }
 

@@ -173,10 +173,14 @@ callback 与返回值 lease 会在 registry 移除后继续保持插件代码映
 5. 结果会复制回 `OperationStatus`、`GraphInspectionView`、`DirtyRegionInspectionSnapshot`、
    timing/event snapshot、scheduler info 或其他 Host value snapshot。Host caller 不会收到
    `Kernel`、`GraphModel`、`GraphRuntime`、OpenCV rectangle 或 YAML node。
-6. 对 Host 提交的 async compute，`close_graph()` 会等待 Host wrapper 已经把 backend completion
-   转换成 `OperationStatus`。这样失败的 async request 可以在 graph close 清理 runtime diagnostic
-   之前读取 backend `LastError` 分类。
-7. 可恢复 backend failure 会转换成 Host status/result value，而资源耗尽保持异常语义：非析构
+6. 对 Host 提交的 async compute，Kernel work item 会返回自身拥有的精确 outcome。一个 joined
+   adapter worker 不读取共享 `LastError`，而是直接映射该 outcome，先兑现 caller-visible
+   `OperationStatus` promise，再通知 `close_graph()` status publication 已完成。
+7. Embedded close admission 会拒绝新的 compute/scheduler work，等待已接受的同步调用与已 ready
+   的 async status promise，随后通过 compute、scheduler information 和 scheduler replacement
+   共用的 `GraphStateExecutor` 停止 runtime。Active work 使用 scheduler 期间，该 scheduler
+   不能被替换或销毁。
+8. 可恢复 backend failure 会转换成 Host status/result value，而资源耗尽保持异常语义：非析构
    Host method 和被消费的 async future 可以按可安装接口的文档传播 `std::bad_alloc`。
 
 ## 有界 Event 与 Trace 观察

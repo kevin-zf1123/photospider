@@ -1844,7 +1844,9 @@ TEST(KernelComputeRuntimeSplit,
   hp_request.intent = ComputeIntent::GlobalHighPrecision;
   auto hp_future = interaction.cmd_compute_async(hp_request);
   ASSERT_TRUE(hp_future.has_value());
-  ASSERT_TRUE(hp_future->get());
+  const Kernel::AsyncComputeResult hp_outcome = hp_future->get();
+  ASSERT_TRUE(hp_outcome.ok);
+  EXPECT_FALSE(hp_outcome.error.has_value());
   auto hp_events = interaction.cmd_drain_compute_events(
       kGraphName, kComputeEventDrainMaxLimit);
   ASSERT_TRUE(hp_events.has_value());

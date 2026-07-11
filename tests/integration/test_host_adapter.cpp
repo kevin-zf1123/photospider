@@ -1,6 +1,7 @@
 #include <gtest/gtest.h>
 
 #include <algorithm>
+#include <atomic>
 #include <chrono>
 #include <filesystem>
 #include <fstream>
@@ -13,6 +14,7 @@
 #include <string>
 #include <system_error>
 #include <thread>
+#include <utility>
 #include <vector>
 
 #include "adapter/buffer_adapter_opencv.hpp"
@@ -27,6 +29,64 @@
 
 namespace ps {
 namespace {
+
+/** @brief Serializes access to the Host blocking-operation release future. */
+std::mutex g_host_blocking_source_mutex;
+
+/** @brief Test-controlled release observed by the blocking Host operation. */
+std::shared_future<void> g_host_blocking_source_release;
+
+/** @brief Publishes entry into the blocking Host operation callback. */
+std::atomic<bool> g_host_blocking_source_started{false};
+
+/**
+ * @brief Configures one deterministic blocking Host operation invocation.
+ *
+ * @param release Shared future whose readiness releases the operation.
+ * @return Nothing.
+ * @throws Nothing except implementation-defined mutex system errors.
+ * @note The operation copies this future while holding the same mutex and then
+ * waits without the mutex, so test cleanup can always release it.
+ */
+void configure_host_blocking_source(std::shared_future<void> release) {
+  std::lock_guard<std::mutex> lock(g_host_blocking_source_mutex);
+  g_host_blocking_source_started.store(false, std::memory_order_release);
+  g_host_blocking_source_release = std::move(release);
+}
+
+/**
+ * @brief Clears the deterministic blocking Host operation state.
+ *
+ * @return Nothing.
+ * @throws Nothing except implementation-defined mutex system errors.
+ * @note Tests call this only after every operation using the prior future has
+ * completed.
+ */
+void reset_host_blocking_source() {
+  std::lock_guard<std::mutex> lock(g_host_blocking_source_mutex);
+  g_host_blocking_source_release = std::shared_future<void>();
+  g_host_blocking_source_started.store(false, std::memory_order_release);
+}
+
+/**
+ * @brief Waits for the blocking Host operation to enter its callback.
+ *
+ * @param timeout Maximum monotonic duration to poll.
+ * @return True when callback entry is observed before the deadline.
+ * @throws Nothing.
+ * @note Five-millisecond polling bounds test latency without imposing a fixed
+ * callback execution sleep.
+ */
+bool wait_for_host_blocking_source(std::chrono::milliseconds timeout) {
+  const auto deadline = std::chrono::steady_clock::now() + timeout;
+  while (std::chrono::steady_clock::now() < deadline) {
+    if (g_host_blocking_source_started.load(std::memory_order_acquire)) {
+      return true;
+    }
+    std::this_thread::sleep_for(std::chrono::milliseconds(5));
+  }
+  return g_host_blocking_source_started.load(std::memory_order_acquire);
+}
 
 /**
  * @brief Registers deterministic operations used by embedded Host tests.
@@ -79,6 +139,32 @@ void register_host_adapter_ops() {
               output.debug.compute_device = "host-adapter-slow-test";
               return output;
             }));
+    OpRegistry::instance().register_op_hp_monolithic(
+        "host_adapter_test", "blocking_source",
+        MonolithicOpFunc([](const Node& node,
+                            const std::vector<const NodeOutput*>&) {
+          std::shared_future<void> release;
+          {
+            std::lock_guard<std::mutex> lock(g_host_blocking_source_mutex);
+            release = g_host_blocking_source_release;
+          }
+          g_host_blocking_source_started.store(true, std::memory_order_release);
+          if (release.valid()) {
+            release.wait();
+          }
+          const YAML::Node& params = node.runtime_parameters
+                                         ? node.runtime_parameters
+                                         : node.parameters;
+          const int width = params["width"].as<int>(5);
+          const int height = params["height"].as<int>(3);
+          NodeOutput output;
+          output.image_buffer = make_aligned_cpu_image_buffer(
+              width, height, 1, DataType::FLOAT32);
+          toCvMat(output.image_buffer).setTo(4.0f);
+          output.space.absolute_roi = cv::Rect(0, 0, width, height);
+          output.debug.compute_device = "host-adapter-blocking-test";
+          return output;
+        }));
     OpRegistry::instance().register_op_hp_monolithic(
         "host_adapter_test", "resized_extent",
         MonolithicOpFunc(
@@ -886,6 +972,8 @@ TEST(EmbeddedHostAdapter, AsyncComputeCanFinishAfterCloseGraphRequest) {
 
   auto close = host->close_graph(session);
   EXPECT_TRUE(close.status.ok) << close.status.message;
+  EXPECT_EQ(async_compute.value.wait_for(std::chrono::milliseconds(0)),
+            std::future_status::ready);
 
   OperationStatus async_status = async_compute.value.get();
   EXPECT_TRUE(async_status.ok) << async_status.message;
@@ -951,6 +1039,8 @@ TEST(EmbeddedHostAdapter, AsyncComputeFailureStatusSurvivesCloseGraph) {
 
   auto close = host->close_graph(missing_op_load.session);
   ASSERT_TRUE(close.status.ok) << close.status.message;
+  EXPECT_EQ(async_compute.value.wait_for(std::chrono::milliseconds(0)),
+            std::future_status::ready);
 
   OperationStatus async_status = async_compute.value.get();
   EXPECT_FALSE(async_status.ok);
@@ -959,6 +1049,116 @@ TEST(EmbeddedHostAdapter, AsyncComputeFailureStatusSurvivesCloseGraph) {
 
   auto closed_error = host->last_error(missing_op_load.session);
   EXPECT_TRUE(closed_error.ok) << closed_error.message;
+}
+
+/**
+ * @brief Verifies close waits for an admitted synchronous Host compute.
+ *
+ * @throws Nothing when close remains pending while the deterministic operation
+ * holds graph-state execution, then both calls finish without runtime lifetime
+ * overlap.
+ * @note This exercises the embedded admission gate and Kernel close
+ * serialization through public Host methods rather than direct runtime access.
+ */
+TEST(EmbeddedHostAdapter, CloseWaitsForAdmittedSynchronousCompute) {
+  register_host_adapter_ops();
+  ScopedTempDir temp("photospider_host_adapter_sync_close_gate_test");
+  auto host = create_embedded_host();
+  ASSERT_NE(host, nullptr);
+  const GraphSessionId session = load_test_graph(
+      *host, temp.root(), "sync_close_gate_graph", "blocking_source");
+
+  std::promise<void> release_compute;
+  configure_host_blocking_source(release_compute.get_future().share());
+  HostComputeRequest request = make_compute_request(session);
+  request.execution.parallel = true;
+  request.cache.force_recache = true;
+  auto compute_future = std::async(
+      std::launch::async, [&host, request] { return host->compute(request); });
+
+  if (!wait_for_host_blocking_source(std::chrono::seconds(2))) {
+    release_compute.set_value();
+    (void)compute_future.get();
+    reset_host_blocking_source();
+    (void)host->close_graph(session);
+    FAIL() << "blocking synchronous Host compute did not start";
+  }
+
+  std::promise<void> close_entered;
+  auto close_entered_future = close_entered.get_future();
+  auto close_future = std::async(std::launch::async, [&] {
+    close_entered.set_value();
+    return host->close_graph(session);
+  });
+  EXPECT_EQ(close_entered_future.wait_for(std::chrono::seconds(2)),
+            std::future_status::ready);
+  EXPECT_EQ(close_future.wait_for(std::chrono::milliseconds(100)),
+            std::future_status::timeout);
+
+  release_compute.set_value();
+  const VoidResult compute = compute_future.get();
+  EXPECT_TRUE(compute.status.ok) << compute.status.message;
+  const VoidResult close = close_future.get();
+  EXPECT_TRUE(close.status.ok) << close.status.message;
+
+  reset_host_blocking_source();
+}
+
+/**
+ * @brief Verifies overlapping failures for one session keep distinct statuses.
+ *
+ * @throws Nothing when both public futures preserve their work-item-owned
+ * status after the shared Kernel diagnostic has changed.
+ * @note Both requests are accepted before either future is consumed. They use
+ * one graph-state executor but fail with different stable GraphErrc values, so
+ * reconstructing either result from the final shared LastError is invalid.
+ */
+TEST(EmbeddedHostAdapter, OverlappingAsyncFailuresOwnTheirExactStatus) {
+  register_host_adapter_ops();
+  ScopedTempDir temp("photospider_host_adapter_async_exact_status_test");
+  auto host = create_embedded_host();
+  ASSERT_NE(host, nullptr);
+
+  GraphLoadRequest load;
+  load.session = GraphSessionId{"async_exact_status_graph"};
+  load.root_dir = (temp.root() / "sessions").string();
+  load.yaml_path =
+      (temp.root() / "source" / "async_exact_status_graph.yaml").string();
+  load.cache_root_dir = (temp.root() / "cache").string();
+  write_host_adapter_unregistered_op_graph(load.yaml_path);
+  auto loaded = host->load_graph(load);
+  ASSERT_TRUE(loaded.status.ok) << loaded.status.message;
+
+  HostComputeRequest missing_op_request = make_compute_request(load.session);
+  HostComputeRequest missing_node_request = missing_op_request;
+  missing_node_request.node = NodeId{99};
+
+  auto missing_op = host->compute_async(missing_op_request);
+  auto missing_node = host->compute_async(missing_node_request);
+  ASSERT_TRUE(missing_op.status.ok) << missing_op.status.message;
+  ASSERT_TRUE(missing_node.status.ok) << missing_node.status.message;
+  ASSERT_EQ(missing_op.value.wait_for(std::chrono::seconds(2)),
+            std::future_status::ready);
+  ASSERT_EQ(missing_node.value.wait_for(std::chrono::seconds(2)),
+            std::future_status::ready);
+
+  const OperationStatus missing_op_status = missing_op.value.get();
+  const OperationStatus missing_node_status = missing_node.value.get();
+  EXPECT_FALSE(missing_op_status.ok);
+  EXPECT_EQ(missing_op_status.domain, OperationErrorDomain::Graph);
+  EXPECT_EQ(checked_graph_error_code(missing_op_status),
+            GraphErrc::NoOperation);
+  EXPECT_EQ(missing_op_status.name, "no_operation");
+  EXPECT_FALSE(missing_op_status.message.empty());
+  EXPECT_FALSE(missing_node_status.ok);
+  EXPECT_EQ(missing_node_status.domain, OperationErrorDomain::Graph);
+  EXPECT_EQ(checked_graph_error_code(missing_node_status), GraphErrc::NotFound);
+  EXPECT_EQ(missing_node_status.name, "not_found");
+  EXPECT_FALSE(missing_node_status.message.empty());
+  EXPECT_NE(missing_op_status.message, missing_node_status.message);
+
+  auto close = host->close_graph(load.session);
+  EXPECT_TRUE(close.status.ok) << close.status.message;
 }
 
 TEST(EmbeddedHostAdapter, SyncComputePropagatesNodeExecutionBadAlloc) {

@@ -220,7 +220,9 @@ TEST(SchedulerTest, ParallelLogToJson) {
   request.execution.parallel = true;
   auto ok = svc.cmd_compute_async(request);
   ASSERT_TRUE(ok.has_value());
-  ASSERT_TRUE(ok->get());
+  const Kernel::AsyncComputeResult outcome = ok->get();
+  ASSERT_TRUE(outcome.ok);
+  EXPECT_FALSE(outcome.error.has_value());
 
   auto events_page =
       ps::testing::KernelTestAccess::scheduler_trace(kernel, graph_name);

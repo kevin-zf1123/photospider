@@ -17,6 +17,14 @@ Kernel
 
 Graph and runtime should be treated as a one-to-one ownership unit.
 
+For embedded Host concurrency, a close admission gate marks one session closing
+before backend removal. New compute and scheduler admissions fail, while close
+waits accepted synchronous calls and caller-visible async status publication.
+Kernel then submits runtime stop through the same per-graph
+`GraphStateExecutor` as compute and scheduler information/replacement before it
+erases the map entry. This ordering keeps both the runtime and its scheduler
+owners alive for every already-admitted operation.
+
 ## Daemon-Owned Session Identity
 
 `photospiderd` owns one embedded `ps::Host`; clients never own its

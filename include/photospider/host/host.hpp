@@ -262,8 +262,10 @@ class PHOTOSPIDER_API Host {
    * @return Success or failure status.
    * @throws std::bad_alloc if request processing, backend-to-status
    *         translation, or copied result construction exhausts memory.
-   * @note Closing releases backend resources owned by the implementation after
-   *       Host-submitted async wrappers have captured their final status.
+   * @note The embedded implementation rejects new admitted compute/scheduler
+   *       work after close begins, waits accepted synchronous calls, and waits
+   *       until every accepted async status future is observable as ready
+   * before releasing backend resources.
    */
   virtual VoidResult close_graph(const GraphSessionId& session) = 0;
 
@@ -331,8 +333,9 @@ class PHOTOSPIDER_API Host {
    * @throws std::bad_alloc if request processing, compute execution, backend-
    *         to-status translation, or copied result construction exhausts
    * memory.
-   * @note Backend LastError diagnostics are used only after the Host has
-   *       established that the requested graph session exists.
+   * @note The embedded adapter admits the complete Kernel call/status mapping
+   *       against concurrent close. Backend LastError diagnostics are used only
+   *       after it has established that the requested graph session exists.
    */
   virtual VoidResult compute(const HostComputeRequest& request) = 0;
 
@@ -345,12 +348,11 @@ class PHOTOSPIDER_API Host {
    * @throws std::bad_alloc if request processing, async submission, backend-
    *         to-status translation, or copied result construction exhausts
    * memory.
-   * @note The embedded adapter keeps its backend state alive until the returned
-   *       future completes and waits for Host-submitted async status wrappers
-   *       before graph close. It also serializes async scheduling/tracking with
-   *       graph close: close either waits for adapter-submitted work to capture
-   *       backend failure status or rejects new scheduling before that work can
-   *       capture a closing runtime. Consuming the returned future may rethrow
+   * @note The embedded backend work item owns its exact failure category and
+   *       message; the wrapper never reconstructs the result from mutable
+   *       LastError state. Async scheduling/tracking is serialized with graph
+   *       close, and close waits until the caller-visible promise is ready
+   * before releasing the runtime. Consuming the returned future may rethrow
    *       std::bad_alloc from backend compute or async result translation.
    */
   virtual Result<std::future<OperationStatus>> compute_async(
@@ -367,10 +369,10 @@ class PHOTOSPIDER_API Host {
    * @throws std::bad_alloc if request processing, compute/image execution,
    *         backend-to-status translation, or copied result construction
    * exhausts memory.
-   * @note The embedded adapter checks session existence before dispatch and
-   *       rechecks it before consulting LastError for an empty backend result,
-   *       so closed-session failures take precedence over stale diagnostics and
-   *       over successful no-image interpretation.
+   * @note The embedded adapter admits the complete image compute and result
+   *       mapping against concurrent close, checks session existence before
+   *       dispatch, and consults LastError only to distinguish handled failure
+   *       from successful empty output.
    * @note Backend GraphError classifications such as `GraphErrc::NoOperation`
    *       are preserved when image compute fails after session validation, and
    *       successful backend image memory is cloned into the public descriptor.
@@ -936,6 +938,8 @@ class PHOTOSPIDER_API Host {
    * @throws std::bad_alloc if request processing, backend-to-status
    *         translation, or copied result construction exhausts memory.
    * @note The Host returns value text instead of exposing scheduler objects.
+   *       Embedded inspection shares graph-state serialization with compute,
+   *       replacement, and close so no borrowed scheduler outlives its owner.
    */
   virtual Result<SchedulerInfoSnapshot> scheduler_info(
       const GraphSessionId& session, ComputeIntent intent) const = 0;
@@ -950,8 +954,10 @@ class PHOTOSPIDER_API Host {
    *         `GraphErrc::InvalidParameter` for unavailable scheduler types.
    * @throws std::bad_alloc if request processing, backend-to-status
    *         translation, or copied result construction exhausts memory.
-   * @note Replacement preserves backend lifecycle ordering. Session lifecycle
-   *       failures are reported before scheduler type validation.
+   * @note Replacement shares graph-state serialization with compute,
+   *       scheduler inspection, and close. Session lifecycle failures are
+   *       reported before scheduler type validation, and the displaced owner is
+   *       not destroyed while active compute retains it.
    */
   virtual VoidResult replace_scheduler(const GraphSessionId& session,
                                        ComputeIntent intent,
