@@ -14,16 +14,6 @@
 namespace ps::ipc::internal {
 
 /**
- * @brief Generates a 128-bit operating-system-entropy opaque identifier.
- *
- * @return Exactly 32 lowercase hexadecimal characters.
- * @throws std::runtime_error if the operating-system entropy source fails.
- * @throws std::bad_alloc if result storage cannot be allocated.
- * @note Values contain no pointer, path, session name, or process-address data.
- */
-std::string generate_opaque_id();
-
-/**
  * @brief Thread-safe loading/active mapping across opaque, Host, and display
  * identities.
  *

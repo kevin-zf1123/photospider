@@ -71,10 +71,13 @@ A valid request is:
 }
 ```
 
-`protocol_version` is an integer. `id` is a nonempty UTF-8 string no longer
-than 128 bytes. `method` is a nonempty string and `params` is an object.
-Unknown top-level fields are ignored for forward compatibility. Request ids
-correlate one response; they are not idempotency keys.
+`protocol_version` is an exact integer. `id` and `method` are nonempty UTF-8
+strings no longer than 128 bytes each, and `params` is an object. Byte limits
+are measured after JSON escape decoding. After parsing, unknown members of any
+typed object are ignored for forward compatibility. Missing, wrong-type,
+non-finite, overflowing, or over-limit known request members are rejected
+before session resolution or Host access. Request ids correlate one response;
+they are not idempotency keys.
 
 A successful response contains exactly one result branch:
 
@@ -106,9 +109,9 @@ Responses larger than the frame bound are replaced with a correlated bounded
 The typed move-only `ps::ipc::Client` allows one outstanding call and is not
 concurrently callable. Independent clients may run concurrently. It validates
 frame size, JSON uniqueness, response version, response shape, and id before
-publishing an owned value. Daemon/session opaque ids must be exactly 32
-lowercase hexadecimal characters; `graph.load` must echo the requested display
-session name. It never automatically retries or reconnects,
+publishing an owned value. Every daemon-generated opaque id follows the shared
+32-lowercase-hexadecimal representation defined below; `graph.load` must echo
+the requested display session name. It never automatically retries or reconnects,
 especially for `graph.load`. `disconnect()` is idempotent and never closes a
 daemon-owned graph.
 
@@ -118,6 +121,46 @@ JSON, envelope, correlation, and error-object violations close the connection
 because message synchronization is no longer trustworthy. Once a correlated
 result object has been consumed, a typed result-shape or range failure returns a
 local Protocol status while leaving the synchronized connection open.
+
+## Typed Values and Pre-framing Bounds
+
+All integer fields are decoded from their signed or unsigned JSON integer
+storage and must fit the exact destination width. Negative unsigned values,
+fractional numbers, non-finite numbers, and overflow are rejected. Values are
+never routed through floating point, wrapped, truncated, or clamped.
+
+Enums use exact lowercase snake-case strings; integer spellings, case folding,
+and unknown values are invalid for a known enum field. A pixel ROI is an object
+with exact integer `x`, `y`, `width`, and `height` members, each representable
+by the public `int`-backed `PixelRect`. Composite value codecs validate into
+temporary owned values and publish no partial result on failure.
+
+Opaque server-instance, session, compute, output, delivery, and cursor
+identifiers use exactly 32 lowercase hexadecimal characters. They are semantic
+tokens, never paths, pointers, display names, or backend handles. A malformed
+opaque id in a request is invalid input; one in a daemon result is a local
+Protocol result-shape failure.
+
+| Value | Limit |
+| --- | ---: |
+| Request id or method name | 128 UTF-8 bytes each |
+| Session display name, scheduler type, precision, operation/plugin key, event name/source | 1,024 UTF-8 bytes each |
+| Filesystem path or scheduler/plugin description | 4,096 UTF-8 bytes each |
+| Diagnostic message | 4,096 UTF-8 bytes after bounded truncation |
+| Node YAML text or one copied parameter/source string | 8 MiB (8,388,608 UTF-8 bytes) each |
+| Directory/path input array | 256 entries |
+| General wire page | 4,096 entries |
+
+String limits apply after JSON decoding and to every known string member.
+Known inbound array and page counts are checked before session resolution or
+Host access; unknown members are ignored only after the JSON parser has
+materialized them. Host-returned strings, arrays, pages, and composite rows are
+validated before a cursor is published or a response value is constructed.
+Parser and temporary container allocation can therefore precede typed field
+validation. A page limit must be a positive exact integer no greater than its
+schema-specific maximum; zero, negative, fractional, or overflowing offsets
+and limits are invalid. The 16 MiB frame bound remains authoritative, so a
+component-valid indivisible response can still become `response_too_large`.
 
 ## Stable Errors
 
@@ -138,6 +181,16 @@ integer `code`, string `name`, and diagnostic `message`. Its `code`/`name`
 mapping is stable for version 1. Locally produced Protocol statuses use the
 same version 1 validation categories; messages are not a branching contract.
 
+An envelope error contains `domain`, `code`, `name`, and `message` and never
+represents success. A nested `OperationStatus` value additionally contains
+`ok`. Its only canonical success is
+`{ok:true, domain:"none", code:0, name:"", message:""}`. Failure uses
+`ok:false`, a non-`none` domain, one signed code, a stable name, and a bounded
+diagnostic. Top-level envelope errors and nested operation outcomes are
+distinct shapes but share the same domain/code/name mapping. Unknown object
+members remain forward-compatible, while malformed known members reject the
+whole value.
+
 | Domain | Code | Name |
 | --- | ---: | --- |
 | protocol | -32700 | `parse_error` |
@@ -147,6 +200,12 @@ same version 1 validation categories; messages are not a branching contract.
 | daemon | -32603 | `internal_error` |
 | protocol | -32001 | `unsupported_protocol` |
 | protocol | -32002 | `response_too_large` |
+| daemon | -32010 | `job_not_found` |
+| daemon | -32011 | `job_not_ready` |
+| daemon | -32012 | `capacity_exceeded` |
+| daemon | -32013 | `artifact_not_found` |
+| daemon | -32014 | `artifact_limit_exceeded` |
+| daemon | -32015 | `cursor_not_found` |
 
 Host failures use the graph domain and an explicit `GraphErrc` mapping:
 
@@ -168,30 +227,41 @@ A daemon cannot send the transport domain. The Transport domain is
 programmatically stable, but its local numeric code and name are diagnostic
 classifications; clients must not persist or branch on a promised long-term
 Transport code/name mapping. Unknown future remote numeric codes and names
-remain available in `OperationStatus`. Allocation failure may propagate
-`std::bad_alloc`; other recoverable failures are returned as statuses.
+remain available in `OperationStatus`. For every currently known wire code,
+the name must be its canonical version 1 name; a known code/name mismatch is
+malformed. A currently known name likewise appears only with its canonical
+code. A numeric code and nonempty name that are both outside the current table
+are preserved together for forward compatibility rather than collapsed or
+guessed. Future Graph values are not coerced to `GraphErrc`; checked conversion
+succeeds only for the explicit current 1..9 mapping. A wire diagnostic,
+including any truncation marker, is valid UTF-8 and at most 4,096 bytes.
+Allocation failure may propagate `std::bad_alloc`; other recoverable failures
+are returned as statuses. Clients never branch on `message`.
 
 ## Daemon Metadata
 
 At process start, the daemon generates one 128-bit lowercase hexadecimal
-`server_instance_id` from operating-system entropy. `daemon.ping` takes `{}`
-and returns:
+`server_instance_id` from operating-system entropy. `daemon.ping` takes an
+object with no currently known members, ignores unknown members, and returns:
 
 ```json
 {"pong":true,"server_instance_id":"32-lowercase-hex"}
 ```
 
-`daemon.version` takes `{}` and returns protocol version 1, service name
-`photospiderd`, the CMake project version, the same instance id, transport
-`unix`, and the sorted exact eight-method list. These metadata calls do not
-acquire the Host mutex.
+`daemon.version` applies the same params rule and returns protocol version 1,
+service name `photospiderd`, the CMake project version, the same instance id,
+transport `unix`, and the sorted exact eight-method list. These metadata calls
+do not acquire the Host mutex.
 
 ## Opaque Graph Sessions
 
-`graph.load` requires a safe `session_name` and absolute `root_dir`. The name is
-one nonempty path component other than `.` or `..`; slash, backslash, and NUL
-are forbidden. Optional `yaml_path`, `config_path`, and `cache_root_dir` must be
-absolute when nonempty; absence maps to empty Host strings.
+`graph.load` requires a safe `session_name` of at most 1,024 UTF-8 bytes and an
+absolute `root_dir` of at most 4,096 UTF-8 bytes. The name is one nonempty path
+component other than `.` or `..`; slash, backslash, and NUL are forbidden.
+Optional `yaml_path`, `config_path`, and `cache_root_dir` must be absolute and
+at most 4,096 UTF-8 bytes when nonempty; absence maps to empty Host strings.
+An over-limit value returns `invalid_params` before reservation, session
+resolution, or Host access.
 
 The daemon passes the caller name unchanged as `GraphLoadRequest.session`, so
 existing `<root>/<session>` and cache paths do not change. Separately it
@@ -246,6 +316,9 @@ The typed client range-checks every node id, tree depth, edge input index,
 debug timestamp/duration, worker id, and spatial extent/rectangle component
 before publishing graph, node, or dependency-tree snapshots. Signed/unsigned
 overflow is a local Protocol result-shape failure; it is never narrowed.
+The same reusable enum, `PixelRect`, bounded-string, array, page, opaque-id,
+and nested-status codecs apply recursively to composite values. A failed decode
+leaves the caller-visible destination unpublished.
 
 No backend class, address, pointer, cache handle, service object, closure, or
 mutable reference enters a payload.

@@ -63,7 +63,11 @@ class RequestRouter {
    * @note No Host call occurs for malformed envelopes, unsupported methods, or
    *       invalid params. A `graph.load` reservation is removed before any
    *       compensating Host close, including when Host load or registry
-   *       publication throws. The function performs no socket IO.
+   *       publication throws. The `graph.list` and inspection result codecs
+   *       locally map `std::length_error` to `response_too_large`; malformed
+   *       returned values and other standard request failures become daemon
+   *       `internal_error`. Resource exhaustion is rethrown. The function
+   *       performs no socket IO.
    */
   std::string route(const std::string& payload);
 
