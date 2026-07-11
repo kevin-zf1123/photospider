@@ -126,8 +126,11 @@ class Client::Impl {
    * @param params Typed method parameters already encoded as an object.
    * @return Owned result object or categorized local/remote failure.
    * @throws std::bad_alloc if request/response storage cannot be allocated.
-   * @note The call performs no retry. Socket IO completes before any result is
-   *       exposed and malformed peer responses close this client connection.
+   * @note The call performs no retry. Frame, JSON, envelope, correlation, and
+   *       error-object protocol violations close the connection because message
+   *       synchronization is no longer trustworthy. After this function
+   *       returns a correlated result object, a typed payload-shape failure
+   *       becomes a local Protocol error and leaves the connection open.
    */
   RawCallResult call(const std::string& method, const internal::Json& params) {
     if (!socket_) {
@@ -209,9 +212,8 @@ class Client::Impl {
       return {invalid_response("response envelope has an invalid shape"), {}};
     }
     std::int32_t response_version = 0;
-    try {
-      response_version = response["protocol_version"].get<std::int32_t>();
-    } catch (const internal::Json::exception&) {
+    if (!internal::decode_integer(response["protocol_version"],
+                                  &response_version)) {
       socket_.reset();
       return {invalid_response("response protocol_version is out of range"),
               {}};
@@ -323,9 +325,12 @@ IpcResult<DaemonVersion> Client::version() {
         invalid_response("daemon.version result has an invalid shape"));
   }
   DaemonVersion result;
+  if (!internal::decode_integer(call.result["protocol_version"],
+                                &result.protocol_version)) {
+    return failed_result<DaemonVersion>(
+        invalid_response("daemon.version protocol_version is out of range"));
+  }
   try {
-    result.protocol_version =
-        call.result["protocol_version"].get<std::int32_t>();
     result.service_name = call.result["service_name"].get<std::string>();
     result.service_version = call.result["service_version"].get<std::string>();
     result.server_instance_id =

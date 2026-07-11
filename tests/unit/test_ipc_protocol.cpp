@@ -398,6 +398,52 @@ TEST(ProtocolEnvelope, NegotiatesVersionAndRejectsUnknownMethodAndSession) {
   EXPECT_EQ(missing["error"]["name"], "not_found");
 }
 
+TEST(ProtocolEnvelope, TreatsEveryNonV1IntegerAsUnsupported) {
+  std::unique_ptr<Host> host = create_embedded_host();
+  ASSERT_NE(host, nullptr);
+  RequestRouter router(*host, "0.1.0");
+  const std::vector<Json> unsupported_versions = {
+      Json(std::uint64_t{4294967297ULL}),
+      Json(std::numeric_limits<std::uint64_t>::max()),
+      Json(std::numeric_limits<std::int64_t>::min())};
+  for (const Json& version : unsupported_versions) {
+    const Json response = parse_response(router.route(Json{
+        {"protocol_version", version},
+        {"id", "unsupported"},
+        {"method", "daemon.ping"},
+        {"params", Json::object()}}.dump()));
+    EXPECT_EQ(response["error"]["domain"], "protocol");
+    EXPECT_EQ(response["error"]["name"], "unsupported_protocol");
+    EXPECT_EQ(response["error"]["supported_versions"], Json::array({1}));
+  }
+}
+
+TEST(IntegerCodec, PreservesExactSignedAndUnsignedBoundaries) {
+  std::int64_t signed_value = 17;
+  EXPECT_TRUE(decode_integer(Json(std::numeric_limits<std::int64_t>::min()),
+                             &signed_value));
+  EXPECT_EQ(signed_value, std::numeric_limits<std::int64_t>::min());
+  EXPECT_TRUE(decode_integer(Json(std::numeric_limits<std::int64_t>::max()),
+                             &signed_value));
+  EXPECT_EQ(signed_value, std::numeric_limits<std::int64_t>::max());
+
+  std::uint64_t unsigned_value = 19;
+  EXPECT_TRUE(decode_integer(Json(std::numeric_limits<std::uint64_t>::max()),
+                             &unsigned_value));
+  EXPECT_EQ(unsigned_value, std::numeric_limits<std::uint64_t>::max());
+  EXPECT_FALSE(decode_integer(Json(std::numeric_limits<std::int64_t>::min()),
+                              &unsigned_value));
+  EXPECT_EQ(unsigned_value, std::numeric_limits<std::uint64_t>::max());
+
+  int narrow_value = 23;
+  EXPECT_FALSE(
+      decode_integer(Json(std::uint64_t{4294967296ULL}), &narrow_value));
+  EXPECT_EQ(narrow_value, 23);
+  EXPECT_FALSE(decode_integer(Json(std::numeric_limits<std::uint64_t>::max()),
+                              &signed_value));
+  EXPECT_EQ(signed_value, std::numeric_limits<std::int64_t>::max());
+}
+
 TEST(ProtocolParams, RejectsInvalidValuesWithoutHostMutation) {
   ScopedTempDirectory temp("photospider-ipc-invalid-params");
   std::unique_ptr<Host> host = create_embedded_host();
@@ -432,7 +478,17 @@ TEST(ProtocolParams, RejectsInvalidValuesWithoutHostMutation) {
            {"id", "wrong-node-type"},
            {"method", "inspect.node"},
            {"params",
-            Json{{"session_id", valid_session_id}, {"node_id", "one"}}}}};
+            Json{{"session_id", valid_session_id}, {"node_id", "one"}}}},
+      Json{{"protocol_version", 1},
+           {"id", "overflow-node"},
+           {"method", "inspect.node"},
+           {"params", Json{{"session_id", valid_session_id},
+                           {"node_id", std::uint64_t{4294967296ULL}}}}},
+      Json{{"protocol_version", 1},
+           {"id", "overflow-tree-node"},
+           {"method", "inspect.dependency_tree"},
+           {"params", Json{{"session_id", valid_session_id},
+                           {"node_id", std::uint64_t{4294967296ULL}}}}}};
   for (const Json& request : requests) {
     const Json response = parse_response(router.route(request.dump()));
     EXPECT_EQ(response["error"]["domain"], "protocol");
@@ -551,6 +607,89 @@ TEST(InspectionJson, RoundTripsNullAndNonFiniteSnapshots) {
   EXPECT_EQ(decoded_tree.start_node->value, 7);
 }
 
+TEST(InspectionJson, RejectsEveryOutOfRangeTypedInteger) {
+  NodeInspectionView node;
+  node.id = NodeId{7};
+  node.name = "node";
+  node.type = "fixture";
+  node.subtype = "source";
+  node.parameters = {{"answer", "42"}};
+  node.debug = DebugMetadataSnapshot{};
+  node.space = SpatialSnapshot{};
+  const Json valid_node = encode_node(node);
+  std::string message;
+
+  const std::vector<Json> malformed_nodes = [&] {
+    std::vector<Json> values;
+    Json id_overflow = valid_node;
+    id_overflow["id"] = std::uint64_t{4294967296ULL};
+    values.push_back(std::move(id_overflow));
+    Json worker_overflow = valid_node;
+    worker_overflow["debug"]["computed_by_worker_id"] =
+        std::numeric_limits<std::uint64_t>::max();
+    values.push_back(std::move(worker_overflow));
+    Json timestamp_underflow = valid_node;
+    timestamp_underflow["debug"]["timestamp_us"] =
+        std::numeric_limits<std::int64_t>::min();
+    values.push_back(std::move(timestamp_underflow));
+    Json extent_overflow = valid_node;
+    extent_overflow["space"]["extent"]["width"] = std::uint64_t{4294967296ULL};
+    values.push_back(std::move(extent_overflow));
+    Json rectangle_underflow = valid_node;
+    rectangle_underflow["space"]["absolute_roi"]["x"] =
+        std::numeric_limits<std::int64_t>::min();
+    values.push_back(std::move(rectangle_underflow));
+    return values;
+  }();
+  for (const Json& malformed : malformed_nodes) {
+    NodeInspectionView decoded;
+    decoded.id = NodeId{31};
+    EXPECT_FALSE(decode_node(malformed, &decoded, &message));
+    EXPECT_EQ(decoded.id.value, 31);
+  }
+
+  HostDependencyTreeSnapshot tree;
+  tree.scope = HostDependencyTreeScope::StartNode;
+  tree.start_node = NodeId{7};
+  tree.root_nodes = {NodeId{7}};
+  HostGraphEdgeSnapshot edge;
+  edge.from_node = NodeId{3};
+  edge.to_node = NodeId{7};
+  edge.input_index = 0;
+  tree.entries.push_back(HostDependencyTreeEntry{0, edge, node, false});
+  const Json valid_tree = encode_dependency_tree(
+      IpcSessionId{"0123456789abcdef0123456789abcdef"}, tree);
+  const std::vector<Json> malformed_trees = [&] {
+    std::vector<Json> values;
+    Json start_overflow = valid_tree;
+    start_overflow["start_node_id"] = std::uint64_t{4294967296ULL};
+    values.push_back(std::move(start_overflow));
+    Json root_underflow = valid_tree;
+    root_underflow["root_node_ids"][0] =
+        std::numeric_limits<std::int64_t>::min();
+    values.push_back(std::move(root_underflow));
+    Json depth_overflow = valid_tree;
+    depth_overflow["entries"][0]["depth"] =
+        std::numeric_limits<std::uint64_t>::max();
+    values.push_back(std::move(depth_overflow));
+    Json from_node_overflow = valid_tree;
+    from_node_overflow["entries"][0]["incoming_edge"]["from_node_id"] =
+        std::numeric_limits<std::uint64_t>::max();
+    values.push_back(std::move(from_node_overflow));
+    Json input_index_underflow = valid_tree;
+    input_index_underflow["entries"][0]["incoming_edge"]["input_index"] = -1;
+    values.push_back(std::move(input_index_underflow));
+    return values;
+  }();
+  for (const Json& malformed : malformed_trees) {
+    HostDependencyTreeSnapshot decoded;
+    decoded.start_node = NodeId{31};
+    EXPECT_FALSE(decode_dependency_tree(malformed, &decoded, &message));
+    ASSERT_TRUE(decoded.start_node.has_value());
+    EXPECT_EQ(decoded.start_node->value, 31);
+  }
+}
+
 TEST(SessionRegistry, HandlesCollisionsRollbackReconciliationAndSorting) {
   std::vector<std::string> candidates = {
       std::string(32, 'a'), std::string(32, 'a'), std::string(32, 'b'),
@@ -640,6 +779,86 @@ TEST(ClientLifecycle, RejectsUncorrelatedResponseAndClosesIdempotently) {
   }
 }
 
+TEST(ClientLifecycle, RejectsOverflowedEnvelopeVersionAndErrorCode) {
+  const std::vector<std::string> responses = {
+      R"({"protocol_version":4294967297,"id":"client-1","result":{"pong":true,"server_instance_id":"0123456789abcdef0123456789abcdef"}})",
+      R"({"protocol_version":1,"id":"client-1","error":{"domain":"protocol","code":18446744073709551615,"name":"future","message":"diagnostic"}})"};
+  for (const std::string& response : responses) {
+    ScopedTempDirectory temp("ps-ipc-overflow-envelope");
+    const std::string socket_path = (temp.path() / "server.sock").string();
+    UniqueFd listener = create_test_listener(socket_path);
+    Client client;
+    ASSERT_TRUE(client.connect(socket_path).ok);
+    bool served = false;
+    std::thread peer(
+        [&] { served = serve_raw_response(listener.get(), response); });
+    const IpcResult<DaemonPing> ping = client.ping();
+    peer.join();
+    EXPECT_TRUE(served);
+    EXPECT_FALSE(ping.status.ok);
+    EXPECT_EQ(ping.status.domain, IpcErrorDomain::Protocol);
+    EXPECT_EQ(ping.status.code, kInvalidRequestCode);
+    EXPECT_FALSE(client.connected());
+  }
+}
+
+TEST(ClientResultValidation, RejectsOverflowedVersionWithoutDesynchronizing) {
+  ScopedTempDirectory temp("ps-ipc-overflow-version-result");
+  const std::string socket_path = (temp.path() / "server.sock").string();
+  UniqueFd listener = create_test_listener(socket_path);
+  Client client;
+  ASSERT_TRUE(client.connect(socket_path).ok);
+  const Json malformed_result{
+      {"protocol_version", std::uint64_t{4294967297ULL}},
+      {"service_name", "photospiderd"},
+      {"service_version", "0.1.0"},
+      {"server_instance_id", "0123456789abcdef0123456789abcdef"},
+      {"transport", "unix"},
+      {"methods", Json::array({"daemon.ping"})}};
+  bool served = false;
+  std::thread peer([&] {
+    served = serve_correlated_result(listener.get(), malformed_result);
+  });
+  const IpcResult<DaemonVersion> version = client.version();
+  peer.join();
+  EXPECT_TRUE(served);
+  EXPECT_FALSE(version.status.ok);
+  EXPECT_EQ(version.status.domain, IpcErrorDomain::Protocol);
+  EXPECT_EQ(version.status.code, kInvalidRequestCode);
+  EXPECT_TRUE(client.connected());
+}
+
+TEST(ClientResultValidation, RejectsInspectionOverflowWithoutDesynchronizing) {
+  ScopedTempDirectory temp("ps-ipc-overflow-inspection-result");
+  const std::string socket_path = (temp.path() / "server.sock").string();
+  UniqueFd listener = create_test_listener(socket_path);
+  Client client;
+  ASSERT_TRUE(client.connect(socket_path).ok);
+  const IpcSessionId session_id{"0123456789abcdef0123456789abcdef"};
+  NodeInspectionView node;
+  node.id = NodeId{7};
+  node.name = "node";
+  node.type = "fixture";
+  node.subtype = "source";
+  Json malformed_node = encode_node(node);
+  malformed_node["id"] = std::uint64_t{4294967296ULL};
+  const Json malformed_result{
+      {"session_id", session_id.value},
+      {"nodes", Json::array({std::move(malformed_node)})}};
+  bool served = false;
+  std::thread peer([&] {
+    served = serve_correlated_result(listener.get(), malformed_result);
+  });
+  const IpcResult<GraphInspectionView> graph = client.inspect_graph(session_id);
+  peer.join();
+  EXPECT_TRUE(served);
+  EXPECT_FALSE(graph.status.ok);
+  EXPECT_EQ(graph.status.domain, IpcErrorDomain::Protocol);
+  EXPECT_EQ(graph.status.code, kInvalidRequestCode);
+  EXPECT_TRUE(graph.value.nodes.empty());
+  EXPECT_TRUE(client.connected());
+}
+
 TEST(ClientResultValidation, RejectsMalformedLoadIdentityFromLocalPeer) {
   const std::vector<Json> malformed_results = {
       Json{{"session_id", "ABCDEF0123456789ABCDEF0123456789"},
@@ -665,6 +884,7 @@ TEST(ClientResultValidation, RejectsMalformedLoadIdentityFromLocalPeer) {
     EXPECT_FALSE(loaded.status.ok);
     EXPECT_EQ(loaded.status.domain, IpcErrorDomain::Protocol);
     EXPECT_EQ(loaded.status.code, kInvalidRequestCode);
+    EXPECT_TRUE(client.connected());
   }
 }
 
@@ -688,6 +908,7 @@ TEST(ClientResultValidation, RejectsMalformedListIdentityFromLocalPeer) {
   EXPECT_FALSE(listed.status.ok);
   EXPECT_EQ(listed.status.domain, IpcErrorDomain::Protocol);
   EXPECT_EQ(listed.status.code, kInvalidRequestCode);
+  EXPECT_TRUE(client.connected());
 }
 
 TEST(ClientResultValidation, RejectsMalformedDaemonIdentityFromLocalPeer) {
@@ -708,6 +929,7 @@ TEST(ClientResultValidation, RejectsMalformedDaemonIdentityFromLocalPeer) {
   EXPECT_FALSE(ping.status.ok);
   EXPECT_EQ(ping.status.domain, IpcErrorDomain::Protocol);
   EXPECT_EQ(ping.status.code, kInvalidRequestCode);
+  EXPECT_TRUE(client.connected());
 }
 
 TEST(ClientResultValidation, ClassifiesDuplicateResponseAsInvalidRequest) {

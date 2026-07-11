@@ -13,7 +13,7 @@ vendored FTXUI source:
 ```bash
 git submodule update --init --recursive
 cmake -S . -B build -DCMAKE_BUILD_TYPE=RelWithDebInfo
-cmake --build build --target graph_cli photospiderd -j
+cmake --build build --target graph_cli -j
 ```
 
 The main executable is:
@@ -22,16 +22,23 @@ The main executable is:
 build/bin/graph_cli
 ```
 
+On macOS/Linux, when `PHOTOSPIDER_BUILD_IPC=ON`, build the local daemon
+separately:
+
+```bash
+cmake --build build --target photospiderd -j
+```
+
 Plugin and runtime outputs:
 
-| Output | Path |
-| --- | --- |
-| executable | `build/bin/graph_cli` |
-| local daemon | `build/bin/photospiderd` |
-| backend libraries | `build/lib` |
-| operation plugins | `build/plugins` |
-| scheduler plugins | `build/schedulers` |
-| test binaries | `build/tests` |
+| Output | Path | Availability |
+| --- | --- | --- |
+| executable | `build/bin/graph_cli` | base build |
+| local daemon | `build/bin/photospiderd` | macOS/Linux with `PHOTOSPIDER_BUILD_IPC=ON` |
+| backend libraries | `build/lib` | base build |
+| operation plugins | `build/plugins` | when their targets are built |
+| scheduler plugins | `build/schedulers` | when their targets are built |
+| test binaries | `build/tests` | with `BUILD_TESTING=ON` |
 
 ## 2. Command-Line Mode
 
@@ -357,7 +364,7 @@ cmake --build build --target photospider_ipc_client \
   photospider_ipc_server_internal photospiderd test_ipc_protocol \
   test_ipc_daemon public_header_self_containment -j
 ctest --test-dir build --output-on-failure \
-  -R '^(FrameCodec|ProtocolEnvelope|ProtocolErrors|ProtocolParams|ProtocolGraphLoad|InspectionJson|SessionRegistry|ClientLifecycle|ClientResultValidation|IpcDaemon|StaticProductConsumerSmoke|IpcDisabledInstallSmoke|PublicHeaderSelfContainment)'
+  -R '^(FrameCodec|ProtocolEnvelope|IntegerCodec|ProtocolErrors|ProtocolParams|ProtocolGraphLoad|InspectionJson|SessionRegistry|ClientLifecycle|ClientResultValidation|IpcDaemon|StaticProductConsumerSmoke|IpcDisabledInstallSmoke|PublicHeaderSelfContainment)'
 ```
 
 Run registered CTest tests:
