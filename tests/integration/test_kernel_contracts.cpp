@@ -29,8 +29,13 @@
 namespace ps {
 namespace {
 
+/** @brief Serializes the blocking contract operation's release future. */
 std::mutex g_blocking_source_mutex;
+
+/** @brief Test-controlled release copied by the blocking contract operation. */
 std::shared_future<void> g_blocking_source_release;
+
+/** @brief Publishes entry into the blocking contract operation callback. */
 std::atomic<bool> g_blocking_source_started{false};
 
 /**
@@ -81,6 +86,15 @@ bool wait_for_blocking_contract_source(std::chrono::milliseconds timeout) {
   return g_blocking_source_started.load(std::memory_order_acquire);
 }
 
+/**
+ * @brief Registers deterministic operations used by Kernel contract tests.
+ *
+ * @return Nothing.
+ * @throws std::bad_alloc if registry keys, callbacks, or metadata cannot be
+ * allocated during the one-time registration.
+ * @note Registration is process-wide and idempotent through std::call_once.
+ * The blocking operation borrows only the separately synchronized test future.
+ */
 void register_contract_ops() {
   static std::once_flag once;
   std::call_once(once, [] {
@@ -787,7 +801,11 @@ TEST(ComputeContracts, AsyncParallelFailureRestoresRequestScopedGraphState) {
 
   auto future = kernel.compute_async(request);
   ASSERT_TRUE(future.has_value());
-  EXPECT_FALSE(future->get());
+  const Kernel::AsyncComputeResult outcome = future->get();
+  EXPECT_FALSE(outcome.ok);
+  ASSERT_TRUE(outcome.error.has_value());
+  EXPECT_EQ(outcome.error->code, GraphErrc::ComputeError);
+  EXPECT_FALSE(outcome.error->message.empty());
   auto restored =
       testing::KernelTestAccess::submit_graph_state(
           kernel, graph_name,
@@ -798,6 +816,67 @@ TEST(ComputeContracts, AsyncParallelFailureRestoresRequestScopedGraphState) {
   EXPECT_FALSE(restored.first);
   EXPECT_TRUE(restored.second);
   kernel.close_graph(graph_name);
+  std::filesystem::remove_all(root);
+}
+
+/**
+ * @brief Proves queued asynchronous failures retain work-item-owned errors.
+ *
+ * @throws Nothing when each future carries the exact request failure after both
+ * work items have completed and the shared LastError has changed.
+ * @note The two requests target one session and are submitted before either
+ * result is consumed. One reaches operation lookup and the other fails node
+ * lookup, making their GraphErrc values observably distinct.
+ */
+TEST(ComputeContracts, OverlappingAsyncFailuresOwnExactKernelResults) {
+  register_contract_ops();
+  const std::string graph_name = "contract_async_exact_errors";
+  const auto root = clean_temp_path("photospider-contract-async-exact-root");
+  const auto yaml_path = temp_path("photospider-contract-async-exact.yaml");
+  write_missing_op_graph(yaml_path);
+
+  Kernel kernel;
+  auto loaded =
+      kernel.load_graph(graph_name, root.string(), yaml_path.string());
+  ASSERT_TRUE(loaded.has_value());
+
+  Kernel::ComputeRequest missing_op_request;
+  missing_op_request.name = graph_name;
+  missing_op_request.node_id = 1;
+  missing_op_request.cache.precision = "int8";
+  missing_op_request.cache.force_recache = true;
+  missing_op_request.cache.disable_disk_cache = true;
+  missing_op_request.execution.parallel = true;
+  Kernel::ComputeRequest missing_node_request = missing_op_request;
+  missing_node_request.node_id = 99;
+
+  auto missing_op_future = kernel.compute_async(missing_op_request);
+  auto missing_node_future = kernel.compute_async(missing_node_request);
+  ASSERT_TRUE(missing_op_future.has_value());
+  ASSERT_TRUE(missing_node_future.has_value());
+  ASSERT_EQ(missing_op_future->wait_for(std::chrono::seconds(2)),
+            std::future_status::ready);
+  ASSERT_EQ(missing_node_future->wait_for(std::chrono::seconds(2)),
+            std::future_status::ready);
+
+  const Kernel::AsyncComputeResult missing_op = missing_op_future->get();
+  const Kernel::AsyncComputeResult missing_node = missing_node_future->get();
+  EXPECT_FALSE(missing_op.ok);
+  ASSERT_TRUE(missing_op.error.has_value());
+  EXPECT_EQ(missing_op.error->code, GraphErrc::ComputeError);
+  EXPECT_FALSE(missing_op.error->message.empty());
+  EXPECT_FALSE(missing_node.ok);
+  ASSERT_TRUE(missing_node.error.has_value());
+  EXPECT_EQ(missing_node.error->code, GraphErrc::NotFound);
+  EXPECT_FALSE(missing_node.error->message.empty());
+  EXPECT_NE(missing_op.error->message, missing_node.error->message);
+
+  const auto shared_error = kernel.last_error(graph_name);
+  ASSERT_TRUE(shared_error.has_value());
+  EXPECT_TRUE(shared_error->code == GraphErrc::NoOperation ||
+              shared_error->code == GraphErrc::NotFound);
+
+  EXPECT_TRUE(kernel.close_graph(graph_name));
   std::filesystem::remove_all(root);
 }
 
@@ -841,7 +920,9 @@ TEST(ComputeContracts, ParallelComputeSerializesGraphStateOperations) {
   EXPECT_FALSE(post_ran.load(std::memory_order_acquire));
 
   release_compute.set_value();
-  EXPECT_TRUE(compute_future->get());
+  const Kernel::AsyncComputeResult outcome = compute_future->get();
+  EXPECT_TRUE(outcome.ok);
+  EXPECT_FALSE(outcome.error.has_value());
   EXPECT_EQ(post_future.wait_for(std::chrono::milliseconds(2000)),
             std::future_status::ready);
   EXPECT_EQ(post_future.get(), 1u);
@@ -849,6 +930,239 @@ TEST(ComputeContracts, ParallelComputeSerializesGraphStateOperations) {
 
   reset_blocking_contract_source();
   kernel.close_graph(graph_name);
+  std::filesystem::remove_all(root);
+}
+
+/**
+ * @brief Verifies scheduler info and replacement wait for active compute.
+ *
+ * @throws Nothing when both scheduler calls remain pending until the blocking
+ * compute releases the graph-state serialization boundary.
+ * @note SerialDebugScheduler executes the blocking operation on its caller.
+ * Without graph-state serialization, replacement could destroy that scheduler
+ * while one of its member calls is still on the stack.
+ */
+TEST(ComputeContracts, SchedulerObservationAndReplacementWaitForCompute) {
+  register_contract_ops();
+  const std::string graph_name = "contract_scheduler_lifetime";
+  const auto root = clean_temp_path("photospider-contract-scheduler-life-root");
+  const auto yaml_path = temp_path("photospider-contract-scheduler-life.yaml");
+  write_blocking_source_graph(yaml_path);
+
+  Kernel kernel;
+  auto loaded =
+      kernel.load_graph(graph_name, root.string(), yaml_path.string());
+  ASSERT_TRUE(loaded.has_value());
+  ASSERT_TRUE(kernel.replace_scheduler(
+      graph_name, ComputeIntent::GlobalHighPrecision, "serial_debug"));
+
+  std::promise<void> release_compute;
+  configure_blocking_contract_source(release_compute.get_future().share());
+
+  Kernel::ComputeRequest request;
+  request.name = graph_name;
+  request.node_id = 1;
+  request.cache.precision = "int8";
+  request.cache.force_recache = true;
+  request.cache.disable_disk_cache = true;
+  request.execution.parallel = true;
+  auto compute_future = kernel.compute_async(request);
+  ASSERT_TRUE(compute_future.has_value());
+
+  if (!wait_for_blocking_contract_source(std::chrono::seconds(2))) {
+    release_compute.set_value();
+    (void)compute_future->get();
+    reset_blocking_contract_source();
+    (void)kernel.close_graph(graph_name);
+    std::filesystem::remove_all(root);
+    FAIL() << "blocking scheduler compute did not start";
+  }
+
+  std::promise<void> info_entered;
+  auto info_entered_future = info_entered.get_future();
+  auto info_future = std::async(std::launch::async, [&] {
+    info_entered.set_value();
+    return kernel.get_scheduler_info(graph_name,
+                                     ComputeIntent::GlobalHighPrecision);
+  });
+  std::promise<void> replace_entered;
+  auto replace_entered_future = replace_entered.get_future();
+  auto replace_future = std::async(std::launch::async, [&] {
+    replace_entered.set_value();
+    return kernel.replace_scheduler(
+        graph_name, ComputeIntent::GlobalHighPrecision, "cpu_work_stealing");
+  });
+
+  EXPECT_EQ(info_entered_future.wait_for(std::chrono::seconds(2)),
+            std::future_status::ready);
+  EXPECT_EQ(replace_entered_future.wait_for(std::chrono::seconds(2)),
+            std::future_status::ready);
+  EXPECT_EQ(info_future.wait_for(std::chrono::milliseconds(100)),
+            std::future_status::timeout);
+  EXPECT_EQ(replace_future.wait_for(std::chrono::milliseconds(100)),
+            std::future_status::timeout);
+
+  release_compute.set_value();
+  const Kernel::AsyncComputeResult compute_outcome = compute_future->get();
+  EXPECT_TRUE(compute_outcome.ok);
+  EXPECT_FALSE(compute_outcome.error.has_value());
+
+  const auto observed_info = info_future.get();
+  ASSERT_TRUE(observed_info.has_value());
+  EXPECT_TRUE(observed_info->first == "serial_debug" ||
+              observed_info->first == "CpuWorkStealingScheduler");
+  EXPECT_FALSE(observed_info->second.empty());
+  EXPECT_TRUE(replace_future.get());
+
+  const auto final_info =
+      kernel.get_scheduler_info(graph_name, ComputeIntent::GlobalHighPrecision);
+  ASSERT_TRUE(final_info.has_value());
+  EXPECT_EQ(final_info->first, "CpuWorkStealingScheduler");
+
+  reset_blocking_contract_source();
+  EXPECT_TRUE(kernel.close_graph(graph_name));
+  std::filesystem::remove_all(root);
+}
+
+/**
+ * @brief Verifies graph close waits behind accepted asynchronous compute.
+ *
+ * @throws Nothing when close remains pending until the graph-state work item
+ * completes, then removes the runtime without invalidating its owned outcome.
+ * @note The blocking operation creates a deterministic close/compute race and
+ * avoids relying on a fixed operation sleep duration.
+ */
+TEST(ComputeContracts, CloseWaitsForAcceptedAsyncGraphStateWork) {
+  register_contract_ops();
+  const std::string graph_name = "contract_close_async_lifetime";
+  const auto root = clean_temp_path("photospider-contract-close-life-root");
+  const auto yaml_path = temp_path("photospider-contract-close-life.yaml");
+  write_blocking_source_graph(yaml_path);
+
+  Kernel kernel;
+  auto loaded =
+      kernel.load_graph(graph_name, root.string(), yaml_path.string());
+  ASSERT_TRUE(loaded.has_value());
+
+  std::promise<void> release_compute;
+  configure_blocking_contract_source(release_compute.get_future().share());
+
+  Kernel::ComputeRequest request;
+  request.name = graph_name;
+  request.node_id = 1;
+  request.cache.precision = "int8";
+  request.cache.force_recache = true;
+  request.cache.disable_disk_cache = true;
+  request.execution.parallel = true;
+  auto compute_future = kernel.compute_async(request);
+  ASSERT_TRUE(compute_future.has_value());
+
+  if (!wait_for_blocking_contract_source(std::chrono::seconds(2))) {
+    release_compute.set_value();
+    (void)compute_future->get();
+    reset_blocking_contract_source();
+    (void)kernel.close_graph(graph_name);
+    std::filesystem::remove_all(root);
+    FAIL() << "blocking compute did not start before close";
+  }
+
+  std::promise<void> close_entered;
+  auto close_entered_future = close_entered.get_future();
+  auto close_future = std::async(std::launch::async, [&] {
+    close_entered.set_value();
+    return kernel.close_graph(graph_name);
+  });
+  EXPECT_EQ(close_entered_future.wait_for(std::chrono::seconds(2)),
+            std::future_status::ready);
+  EXPECT_EQ(close_future.wait_for(std::chrono::milliseconds(100)),
+            std::future_status::timeout);
+
+  release_compute.set_value();
+  const Kernel::AsyncComputeResult outcome = compute_future->get();
+  EXPECT_TRUE(outcome.ok);
+  EXPECT_FALSE(outcome.error.has_value());
+  EXPECT_TRUE(close_future.get());
+  EXPECT_FALSE(kernel.last_error(graph_name).has_value());
+
+  reset_blocking_contract_source();
+  std::filesystem::remove_all(root);
+}
+
+/**
+ * @brief Verifies a stopped runtime restarts only inside graph-state execution.
+ *
+ * @throws Nothing when an accepted compute stays queued with the runtime
+ * stopped until the preceding graph-state task releases, then starts and
+ * completes normally.
+ * @note This directly guards the scheduler start/info/replace/close lifetime
+ * rule: compute submission itself must not call GraphRuntime::start() outside
+ * the serialization boundary.
+ */
+TEST(ComputeContracts, RuntimeRestartWaitsForGraphStateSerialization) {
+  register_contract_ops();
+  const std::string graph_name = "contract_serialized_runtime_restart";
+  const auto root =
+      clean_temp_path("photospider-contract-serialized-restart-root");
+  const auto yaml_path =
+      temp_path("photospider-contract-serialized-restart.yaml");
+  write_blocking_source_graph(yaml_path);
+
+  Kernel kernel;
+  auto loaded =
+      kernel.load_graph(graph_name, root.string(), yaml_path.string());
+  ASSERT_TRUE(loaded.has_value());
+  GraphRuntime& runtime =
+      testing::KernelTestAccess::runtime(kernel, graph_name);
+  runtime.stop();
+  ASSERT_FALSE(runtime.running());
+
+  std::promise<void> release_blocker;
+  const std::shared_future<void> blocker_release =
+      release_blocker.get_future().share();
+  std::promise<void> blocker_entered;
+  auto blocker_entered_future = blocker_entered.get_future();
+  auto blocker = testing::KernelTestAccess::submit_graph_state(
+      kernel, graph_name, [&blocker_entered, blocker_release](GraphModel&) {
+        blocker_entered.set_value();
+        blocker_release.wait();
+        return 0;
+      });
+  if (blocker_entered_future.wait_for(std::chrono::seconds(2)) !=
+      std::future_status::ready) {
+    release_blocker.set_value();
+    (void)blocker.get();
+    (void)kernel.close_graph(graph_name);
+    std::filesystem::remove_all(root);
+    FAIL() << "graph-state blocker did not start";
+  }
+
+  Kernel::ComputeRequest request;
+  request.name = graph_name;
+  request.node_id = 1;
+  request.cache.precision = "int8";
+  request.cache.force_recache = true;
+  request.cache.disable_disk_cache = true;
+  request.execution.parallel = true;
+  auto compute_future = kernel.compute_async(request);
+  if (!compute_future) {
+    release_blocker.set_value();
+    (void)blocker.get();
+    (void)kernel.close_graph(graph_name);
+    std::filesystem::remove_all(root);
+    FAIL() << "serialized restart compute was not accepted";
+  }
+  EXPECT_FALSE(runtime.running());
+  EXPECT_EQ(compute_future->wait_for(std::chrono::milliseconds(100)),
+            std::future_status::timeout);
+
+  release_blocker.set_value();
+  EXPECT_EQ(blocker.get(), 0);
+  const Kernel::AsyncComputeResult outcome = compute_future->get();
+  EXPECT_TRUE(outcome.ok);
+  EXPECT_FALSE(outcome.error.has_value());
+  EXPECT_TRUE(runtime.running());
+
+  EXPECT_TRUE(kernel.close_graph(graph_name));
   std::filesystem::remove_all(root);
 }
 

@@ -182,6 +182,13 @@ scheduler-facing design should extend `IScheduler` and
 `SchedulerTaskRuntime`; it should not bypass graph-state access by taking
 direct ownership of the runtime model.
 
+The same executor is the scheduler-owner lifetime boundary. Runtime start,
+compute, scheduler name/statistics copying, scheduler replacement, and runtime
+stop during graph close cannot overlap for one session. `get_scheduler()` may
+return a raw pointer internally, but its caller finishes all use while the
+graph-state callback is active; replacement cannot publish and destroy the old
+owner until active compute has released it.
+
 ## Built-in Schedulers
 
 | Type | Meaning |

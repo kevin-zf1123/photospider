@@ -14,6 +14,12 @@ Kernel
 
 图和运行时应被视为一对一的所有权单元。
 
+对于 embedded Host concurrency，close admission gate 会在 backend removal 之前把一个 session
+标记为 closing。新的 compute 与 scheduler admission 会失败；close 则等待已接受的同步调用和
+caller-visible async status publication。随后 Kernel 会通过 compute、scheduler information/
+replacement 共用的 per-graph `GraphStateExecutor` 提交 runtime stop，再删除 map entry。该顺序
+保证每个已接受 operation 完成之前，runtime 及其 scheduler owner 都保持存活。
+
 ## Daemon-Owned Session Identity
 
 `photospiderd` 拥有一个 embedded `ps::Host`；client 从不拥有其 `GraphRuntime` lifetime。

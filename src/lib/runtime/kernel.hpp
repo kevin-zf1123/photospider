@@ -15,6 +15,7 @@
 #include <future>
 #include <map>
 #include <memory>
+#include <mutex>
 #include <new>
 #include <opencv2/opencv.hpp>
 #include <optional>
@@ -82,8 +83,27 @@ class Kernel {
    * APIs that historically returned only false/nullopt do not always update it.
    */
   struct LastError {
+    /** @brief Exact graph-domain category captured at the failure boundary. */
     GraphErrc code = GraphErrc::Unknown;
+
+    /** @brief Owned diagnostic text captured by the same failed operation. */
     std::string message;
+  };
+
+  /**
+   * @brief Immutable outcome produced by one asynchronous compute work item.
+   *
+   * @throws Nothing for destruction; constructing the owned diagnostic may
+   *         throw std::bad_alloc inside the asynchronous work item.
+   * @note A failed value owns the exact error captured by that work item. It is
+   *       never reconstructed from the mutable per-session LastError map.
+   */
+  struct AsyncComputeResult {
+    /** @brief True only when the associated compute completed successfully. */
+    bool ok = false;
+
+    /** @brief Exact failure, absent for a successful compute. */
+    std::optional<LastError> error;
   };
 
   /**
@@ -216,9 +236,10 @@ class Kernel {
    *         name is unknown.
    * @throws Any exception propagated while stopping the runtime; no exception
    *         is thrown when the graph name is unknown.
-   * @note Closing first stops the runtime, then erases the owned runtime and
-   *       stored LastError for the same graph name. Clearing the diagnostic
-   *       prevents stale compute errors after the session is closed.
+   * @note Runtime stop is submitted through the same GraphStateExecutor used by
+   *       compute and scheduler inspection/replacement. Closing therefore waits
+   *       prior serialized work before erasing the runtime and its mutex-
+   *       protected LastError snapshot.
    */
   bool close_graph(const std::string& name);
   std::vector<std::string> list_graphs() const;
@@ -235,7 +256,8 @@ class Kernel {
    * @note The request object is not retained after the call. benchmark_events
    * remains caller-owned for the duration of the call. GraphError, ordinary
    * std::exception, and unknown compute failures otherwise become false plus
-   * best-effort last_error() state.
+   * best-effort last_error() state. Runtime start and compute both execute
+   * inside the graph-state boundary shared with scheduler lifecycle methods.
    */
   bool compute(const ComputeRequest& request);
 
@@ -244,7 +266,8 @@ class Kernel {
    *
    * @param request Graph name, target node, cache, execution, telemetry, and
    * optional intent/dirty ROI controls captured by value.
-   * @return Future resolving to success, or nullopt when the graph is missing.
+   * @return Future resolving to an owned exact outcome, or nullopt when the
+   *         graph is missing.
    * @throws std::bad_alloc if request, task, queue, or future-state allocation
    *         fails while scheduling the graph-state work.
    * @throws std::system_error if runtime startup or graph-state asynchronous
@@ -252,9 +275,13 @@ class Kernel {
    * @note The future owns the request copy, but benchmark_events remains
    * caller-owned and must outlive future completion. Calling get() on the
    * returned future may rethrow std::bad_alloc from compute execution or
-   * failure-diagnostic allocation inside the async work item.
+   * failure-diagnostic allocation inside the async work item. Recoverable
+   * failures are captured in AsyncComputeResult by that same work item. Runtime
+   * start occurs inside the submitted graph-state closure rather than during
+   * admission.
    */
-  std::optional<std::future<bool>> compute_async(ComputeRequest request);
+  std::optional<std::future<AsyncComputeResult>> compute_async(
+      ComputeRequest request);
   std::optional<TimingCollector> get_timing(const std::string& name);
   std::optional<cv::Rect> project_roi_forward(const std::string& name,
                                               int start_node_id,
@@ -309,6 +336,16 @@ class Kernel {
   std::optional<GraphNodeInspectInfo> inspect_node(const std::string& name,
                                                    int node_id);
   std::optional<GraphInspectionSnapshot> inspect_graph(const std::string& name);
+  /**
+   * @brief Copies the latest best-effort diagnostic for one graph session.
+   *
+   * @param name Graph/session name whose diagnostic is observed.
+   * @return Owned LastError snapshot, or nullopt when none is recorded.
+   * @throws std::bad_alloc if copying the diagnostic text fails.
+   * @throws std::system_error if the diagnostic mutex cannot be locked.
+   * @note All map access is serialized by last_error_mutex_. Async compute
+   * futures never derive their result from this mutable snapshot.
+   */
   std::optional<LastError> last_error(const std::string& name) const;
   std::optional<std::vector<int>> ending_nodes(const std::string& name);
   std::optional<std::vector<int>> topo_postorder_from(const std::string& name,
@@ -462,20 +499,34 @@ class Kernel {
   /// @brief 获取当前调度器配置
   const SchedulerConfig& get_scheduler_config() const;
 
-  /// @brief 为指定图替换调度器
-  /// @param name 图名称
-  /// @param intent 计算意图 (HP/RT)
-  /// @param type 调度器类型名称
-  /// @return true 如果替换成功
+  /**
+   * @brief Replaces one session scheduler through graph-state serialization.
+   * @param name Graph session name.
+   * @param intent Compute intent whose scheduler is replaced.
+   * @param type Registered scheduler type name.
+   * @return True when the graph and scheduler type exist and replacement
+   *         succeeds; false for a handled lookup or lifecycle failure.
+   * @throws std::bad_alloc if scheduler creation or graph-state submission
+   *         exhausts memory.
+   * @note The graph-state boundary is held until active compute has released
+   *       every scheduler reference, so replacement cannot destroy a retained
+   *       scheduler object.
+   */
   bool replace_scheduler(const std::string& name, ComputeIntent intent,
                          const std::string& type);
 
-  /// @brief 获取指定图的调度器信息
-  /// @param name 图名称
-  /// @param intent 计算意图 (HP/RT)
-  /// @return 调度器名称和统计信息，如果图不存在则返回 nullopt
+  /**
+   * @brief Copies one coherent scheduler information snapshot.
+   * @param name Graph session name.
+   * @param intent Compute intent whose scheduler is inspected.
+   * @return Owned scheduler name/statistics, or nullopt when unavailable.
+   * @throws std::bad_alloc if graph-state submission or copied text allocation
+   *         fails.
+   * @note Inspection uses the same graph-state serialization boundary as
+   *       compute and replacement; no scheduler pointer escapes the callback.
+   */
   std::optional<std::pair<std::string, std::string>> get_scheduler_info(
-      const std::string& name, ComputeIntent intent) const;
+      const std::string& name, ComputeIntent intent);
 
  private:
   friend class testing::KernelTestAccess;
@@ -663,19 +714,56 @@ class Kernel {
       }
       auto result =
           it->second->graph_state().submit(std::forward<Fn>(op)).get();
-      last_error_.erase(name);
+      clear_last_error(name);
       return result;
     } catch (const std::bad_alloc&) {
       throw;
     } catch (const GraphError& ge) {
-      last_error_[name] = {ge.code(), ge.what()};
+      store_last_error(name, LastError{ge.code(), ge.what()});
       return std::nullopt;
     } catch (const std::exception& e) {
-      last_error_[name] = {GraphErrc::Unknown,
-                           std::string(exception_prefix) + e.what()};
+      store_last_error(name,
+                       LastError{GraphErrc::Unknown,
+                                 std::string(exception_prefix) + e.what()});
       return std::nullopt;
     }
   }
+
+  /**
+   * @brief Removes one graph's best-effort diagnostic snapshot.
+   *
+   * @param name Graph/session name whose diagnostic is cleared.
+   * @return Nothing.
+   * @throws std::system_error if locking the diagnostic mutex fails.
+   * @note Every access to `last_error_`, including accesses from independent
+   *       graph-state executors, uses the same mutex through these helpers.
+   */
+  void clear_last_error(const std::string& name);
+
+  /**
+   * @brief Publishes one owned best-effort diagnostic snapshot.
+   *
+   * @param name Graph/session name whose diagnostic is replaced.
+   * @param error Fully constructed diagnostic moved into the shared map.
+   * @return Nothing.
+   * @throws std::bad_alloc if the graph key or map node cannot be allocated.
+   * @throws std::system_error if locking the diagnostic mutex fails.
+   * @note Async callers retain a separate owned result; this mirror exists only
+   *       for the legacy `last_error()` observation surface.
+   */
+  void store_last_error(const std::string& name, LastError error);
+
+  /**
+   * @brief Copies one graph's best-effort diagnostic snapshot.
+   *
+   * @param name Graph/session name to inspect.
+   * @return Copied diagnostic, or nullopt when no failure is recorded.
+   * @throws std::bad_alloc if copying the diagnostic text fails.
+   * @throws std::system_error if locking the diagnostic mutex fails.
+   * @note The copy is completed while holding `last_error_mutex_`; no map
+   *       iterator or borrowed string escapes the protected region.
+   */
+  std::optional<LastError> copy_last_error(const std::string& name) const;
 
   /**
    * @brief Runs internal synchronous compute from an adapter request object.
@@ -696,17 +784,17 @@ class Kernel {
    * @brief Schedules internal async compute from an adapter request object.
    *
    * @param request Internal async Kernel request captured by value.
-   * @return Future that resolves to the compute status, or nullopt when the
-   * graph is missing.
+   * @return Future that resolves to the work item's owned exact result, or
+   *         nullopt when the graph is missing.
    * @throws std::bad_alloc if request, task, queue, or future-state allocation
    *         fails while submitting graph-state work.
    * @throws std::system_error if GraphStateExecutor cannot launch the async
    * graph-state work.
    * @note The returned future owns the request copy. benchmark_events remains
    * caller-owned and must outlive future completion. Future get() may rethrow
-   * std::bad_alloc from compute execution or async LastError construction.
+   * std::bad_alloc from compute execution or exact diagnostic construction.
    */
-  std::optional<std::future<bool>> compute_async_request(
+  std::optional<std::future<AsyncComputeResult>> compute_async_request(
       ComputeRequest request);
 
   /**
@@ -749,6 +837,25 @@ class Kernel {
                                     GraphRuntime& runtime);
 
   std::map<std::string, std::unique_ptr<GraphRuntime>> graphs_;
+
+  /**
+   * @brief Serializes all reads, writes, and erases of `last_error_`.
+   *
+   * @note The mutex is independent of per-graph GraphStateExecutor instances
+   *       because asynchronous computes for different sessions may publish
+   *       diagnostics concurrently. It is never held while graph-state or
+   *       scheduler work executes.
+   */
+  mutable std::mutex last_error_mutex_;
+
+  /**
+   * @brief Best-effort per-session diagnostic mirror for legacy inspection.
+   *
+   * @note Access is permitted only through clear_last_error(),
+   *       store_last_error(), and copy_last_error() while
+   *       `last_error_mutex_` is held. Async operation results never derive
+   *       their final status from this map.
+   */
   std::map<std::string, LastError> last_error_;
   GraphTraversalService traversal_service_;
   GraphInspectService inspect_service_;

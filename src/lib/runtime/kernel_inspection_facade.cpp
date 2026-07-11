@@ -48,13 +48,10 @@ std::optional<GraphInspectionSnapshot> Kernel::inspect_graph(
   });
 }
 
+/** @copydoc Kernel::last_error */
 std::optional<Kernel::LastError> Kernel::last_error(
     const std::string& name) const {
-  auto it = last_error_.find(name);
-  if (it == last_error_.end()) {
-    return std::nullopt;
-  }
-  return it->second;
+  return copy_last_error(name);
 }
 
 std::optional<std::vector<int>> Kernel::ending_nodes(const std::string& name) {

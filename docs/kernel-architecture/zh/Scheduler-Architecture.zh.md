@@ -137,6 +137,11 @@ worker queue、task graph 或 completion-counter API。Graph-state operation 和
 `GraphModel` 的 compute request 都使用 `GraphStateExecutor`，包括 scheduler-backed parallel
 compute。新的 scheduler-facing 设计应扩展 `IScheduler` 与 `SchedulerTaskRuntime`；它不应通过 runtime model direct access 绕过 graph-state access。
 
+同一 executor 也是 scheduler owner 的 lifetime boundary。对于一个 session，runtime start、
+compute、scheduler name/statistics copy、scheduler replacement 与 graph close 时的 runtime stop
+不能重叠。`get_scheduler()` 在内部可以返回 raw pointer，但 caller 必须在 graph-state callback
+有效期间完成全部使用；active compute 释放该 owner 之前，replacement 不能发布新 owner 并销毁旧 owner。
+
 ## 内置调度器
 
 | 类型 | 含义 |

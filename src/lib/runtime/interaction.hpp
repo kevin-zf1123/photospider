@@ -401,16 +401,17 @@ class InteractionService {
    *
    * @param request Graph, target node, cache, execution, telemetry, and
    * optional dirty/intent controls captured by value.
-   * @return Future resolving to success, or nullopt when the graph is missing.
+   * @return Future resolving to the work item's owned exact result, or nullopt
+   *         when the graph is missing.
    * @throws std::bad_alloc if request, task, queue, or future-state allocation
    *         fails while Kernel schedules graph-state work.
    * @throws std::system_error if Kernel cannot launch runtime or graph-state
    *         asynchronous execution.
    * @note benchmark_events is still caller-owned and must outlive the future.
    *       Future get() may rethrow std::bad_alloc from compute execution or
-   *       async LastError construction.
+   *       exact diagnostic construction.
    */
-  std::optional<std::future<bool>> cmd_compute_async(
+  std::optional<std::future<Kernel::AsyncComputeResult>> cmd_compute_async(
       Kernel::ComputeRequest request) {
     return kernel_.compute_async(std::move(request));
   }

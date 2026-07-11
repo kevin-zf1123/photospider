@@ -198,11 +198,16 @@ Typical embedded Host compute flow:
    `DirtyRegionInspectionSnapshot`, timing/event snapshots, scheduler info, or
    other Host value snapshots. Host callers never receive `Kernel`,
    `GraphModel`, `GraphRuntime`, OpenCV rectangles, or YAML nodes.
-6. For Host-submitted async compute, `close_graph()` waits until the Host
-   wrapper has converted backend completion into `OperationStatus`. This keeps
-   backend `LastError` classifications available to failed async requests before
-   graph close clears runtime diagnostics.
-7. Recoverable backend failures become Host status/result values, while
+6. For Host-submitted async compute, the Kernel work item returns an owned exact
+   outcome. A joined adapter worker maps that outcome without consulting shared
+   `LastError`, fulfills the caller-visible `OperationStatus` promise, and only
+   then notifies `close_graph()` that status publication is complete.
+7. Embedded close admission rejects new compute/scheduler work, waits accepted
+   synchronous calls and ready async status promises, and then stops the runtime
+   through the same `GraphStateExecutor` used by compute, scheduler information,
+   and scheduler replacement. A retained scheduler cannot be replaced or
+   destroyed while active work uses it.
+8. Recoverable backend failures become Host status/result values, while
    resource exhaustion remains exceptional: non-destructor Host methods and
    consumed async futures may propagate `std::bad_alloc` as documented by the
    installable interface.
