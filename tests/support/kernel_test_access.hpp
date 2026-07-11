@@ -170,15 +170,19 @@ class KernelTestAccess {
    *
    * @param kernel Kernel whose runtime trace should be read.
    * @param name Graph name to resolve.
-   * @return Scheduler events captured by the runtime.
+   * @param after_sequence Exclusive sequence cursor.
+   * @param limit Maximum events to copy.
+   * @return One bounded non-destructive internal trace page.
    * @throws std::runtime_error when the graph is not loaded.
+   * @throws std::invalid_argument for invalid bounds or a future cursor.
+   * @throws std::bad_alloc if bounded page allocation fails.
    * @note Prefer `ps::Host::scheduler_trace()` for frontend-visible value-level
-   * assertions. This helper exists only for tests that compare the Host-copied
-   * snapshot with internal runtime state.
+   * assertions. This helper exposes no unbounded production getter.
    */
-  static std::vector<GraphRuntime::SchedulerEvent> scheduler_trace(
-      Kernel& kernel, const std::string& name) {
-    return runtime(kernel, name).get_scheduler_log();
+  static GraphRuntime::SchedulerEventPage scheduler_trace(
+      Kernel& kernel, const std::string& name, uint64_t after_sequence = 0,
+      std::size_t limit = kSchedulerTraceMaxLimit) {
+    return runtime(kernel, name).scheduler_trace_page(after_sequence, limit);
   }
 };
 

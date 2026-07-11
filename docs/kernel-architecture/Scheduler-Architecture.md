@@ -268,8 +268,30 @@ real epochs so obsolete RT work can be dropped.
 
 ## Observability
 
-`GraphRuntime::SchedulerEvent` records assignment, node execution, and tile
-execution events. This is useful for validating scheduler behavior.
+`GraphRuntime::SchedulerEvent` records assignment, node execution, tile
+execution, dirty-path, stale-generation, and exception-rethrow actions in a
+thread-safe fixed-capacity ring. Each graph preallocates 65,536 production
+slots. Valid publication sequences are `1..UINT64_MAX-1`; `UINT64_MAX` is the
+terminal exhaustion sentinel and is never assigned. Full-ring eviction removes
+exactly the oldest trace. Once the last valid sequence is consumed, later
+publication attempts are dropped and counted with saturating arithmetic.
+
+`Host::scheduler_trace(session, after_sequence, limit)` is a non-destructive
+sequence-page read. Zero starts at the oldest retained event, and a valid limit
+is 1 through 4,096. The returned `SchedulerTracePage` contains only events with
+sequences greater than the cursor plus `next_sequence`, `has_more`, and an exact
+saturating `dropped_count` for unavailable retained history and exhausted
+publication attempts after that cursor. Page contents and metadata observe one
+ring-lock point. Repeating a cursor does not remove or reorder trace events;
+later publications may appear on a later read before exhaustion.
+
+The page advances to the last returned sequence, retains the input cursor for
+an empty pre-exhaustion page, and returns `UINT64_MAX` after the final valid
+sequence is observed or exhausted storage has no later retained event. A
+sentinel cursor is valid only after exhaustion. Invalid limits and future or
+premature-sentinel cursors fail with `GraphErrc::InvalidParameter` before a page
+is copied. Internal tests may clear retained trace slots, but production code
+has no unbounded trace getter or public clear control.
 
 ## Development Direction
 

@@ -80,7 +80,8 @@ nlohmann::json scheduler_trace_json(
   nlohmann::json j = nlohmann::json::array();
   for (const auto& e : events) {
     j.push_back(
-        {{"epoch", e.epoch},
+        {{"sequence", e.sequence},
+         {"epoch", e.epoch},
          {"node_id", e.node_id},
          {"worker_id", e.worker_id},
          {"action", scheduler_action_name(e.action)},
@@ -221,14 +222,15 @@ TEST(SchedulerTest, ParallelLogToJson) {
   ASSERT_TRUE(ok.has_value());
   ASSERT_TRUE(ok->get());
 
-  auto events =
+  auto events_page =
       ps::testing::KernelTestAccess::scheduler_trace(kernel, graph_name);
-  ASSERT_FALSE(events.empty());
-  auto facade_events = svc.cmd_scheduler_trace(graph_name);
+  ASSERT_FALSE(events_page.events.empty());
+  auto facade_events =
+      svc.cmd_scheduler_trace(graph_name, 0, ps::kSchedulerTraceMaxLimit);
   ASSERT_TRUE(facade_events.has_value());
-  EXPECT_EQ(facade_events->size(), events.size());
+  EXPECT_EQ(facade_events->events.size(), events_page.events.size());
 
-  write_scheduler_trace_json("scheduler_log.json", events);
+  write_scheduler_trace_json("scheduler_log.json", events_page.events);
 
   std::ifstream ifs("scheduler_log.json");
   ASSERT_TRUE(static_cast<bool>(ifs));
@@ -266,7 +268,8 @@ TEST(Scheduler, DirtyRegionTiledComputation) {
   bool success_full = svc.cmd_compute(full_request);
   ASSERT_TRUE(success_full);
 
-  auto log_full_compute = runtime.get_scheduler_log();
+  auto log_full_compute =
+      runtime.scheduler_trace_page(0, ps::kSchedulerTraceMaxLimit).events;
   ASSERT_FALSE(log_full_compute.empty());
 
   size_t full_compute_task_count = 0;
@@ -359,7 +362,8 @@ TEST(Scheduler, DirtyRegionTiledComputation) {
   EXPECT_NE(dirty_snapshot->find("tiles="), std::string::npos);
   EXPECT_NE(dirty_snapshot->find("edges="), std::string::npos);
 
-  auto log_incremental_compute = runtime.get_scheduler_log();
+  auto log_incremental_compute =
+      runtime.scheduler_trace_page(0, ps::kSchedulerTraceMaxLimit).events;
   ASSERT_FALSE(log_incremental_compute.empty());
 
   size_t incremental_compute_task_count = 0;
@@ -410,9 +414,11 @@ TEST(Scheduler, DirtyRegionTiledComputation) {
   ASSERT_TRUE(first_dirty_source.has_value());
   ASSERT_TRUE(first_dirty_downstream.has_value());
   EXPECT_LT(*first_dirty_source, *first_dirty_downstream);
-  auto facade_scheduler_trace = svc.cmd_scheduler_trace(graph_name);
+  auto facade_scheduler_trace =
+      svc.cmd_scheduler_trace(graph_name, 0, ps::kSchedulerTraceMaxLimit);
   ASSERT_TRUE(facade_scheduler_trace.has_value());
-  EXPECT_EQ(facade_scheduler_trace->size(), log_incremental_compute.size());
+  EXPECT_EQ(facade_scheduler_trace->events.size(),
+            log_incremental_compute.size());
   if (std::thread::hardware_concurrency() > 1) {
     ASSERT_GT(workers_used.size(),
               0);  // 在任务很少时，可能只用到1个worker，所以改为>0
@@ -473,7 +479,8 @@ TEST(Scheduler,
         return compute_svc.compute_parallel(g, stale_runtime, request);
       });
   EXPECT_NO_THROW(stale_future.get());
-  const auto stale_log = stale_runtime.get_scheduler_log();
+  const auto stale_log =
+      stale_runtime.scheduler_trace_page(0, ps::kSchedulerTraceMaxLimit).events;
   EXPECT_TRUE(
       first_trace_index(stale_log,
                         ps::GraphRuntime::SchedulerEvent::SKIP_STALE_GENERATION)
@@ -520,7 +527,9 @@ TEST(Scheduler,
         return compute_svc.compute_parallel(g, exception_runtime, request);
       });
   EXPECT_THROW(exception_future.get(), ps::GraphError);
-  const auto exception_log = exception_runtime.get_scheduler_log();
+  const auto exception_log =
+      exception_runtime.scheduler_trace_page(0, ps::kSchedulerTraceMaxLimit)
+          .events;
   EXPECT_TRUE(
       first_trace_index(exception_log,
                         ps::GraphRuntime::SchedulerEvent::RETHROW_EXCEPTION)

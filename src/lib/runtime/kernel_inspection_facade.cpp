@@ -186,17 +186,24 @@ bool Kernel::set_node_yaml(const std::string& name, int node_id,
       .value_or(false);
 }
 
-std::optional<std::vector<GraphEventService::ComputeEvent>>
-Kernel::drain_compute_events(const std::string& name) {
-  return with_runtime(name, [](GraphRuntime& runtime) {
-    return runtime.drain_compute_events_now();
-  });
+/** @copydoc Kernel::drain_compute_events */
+std::optional<ComputeEventBatch> Kernel::drain_compute_events(
+    const std::string& name, std::size_t limit) {
+  auto it = graphs_.find(name);
+  if (it == graphs_.end()) {
+    return std::nullopt;
+  }
+  return it->second->drain_compute_events_now(limit);
 }
 
-std::optional<std::vector<GraphRuntime::SchedulerEvent>>
-Kernel::scheduler_trace(const std::string& name) {
-  return with_runtime(
-      name, [](GraphRuntime& runtime) { return runtime.get_scheduler_log(); });
+/** @copydoc Kernel::scheduler_trace */
+std::optional<GraphRuntime::SchedulerEventPage> Kernel::scheduler_trace(
+    const std::string& name, uint64_t after_sequence, std::size_t limit) {
+  auto it = graphs_.find(name);
+  if (it == graphs_.end()) {
+    return std::nullopt;
+  }
+  return it->second->scheduler_trace_page(after_sequence, limit);
 }
 
 std::optional<std::string> Kernel::dirty_region_snapshot_debug(

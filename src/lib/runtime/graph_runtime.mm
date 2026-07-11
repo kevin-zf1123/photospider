@@ -1,11 +1,14 @@
 // Photospider kernel: GraphRuntime implementation (Objective-C++)
 #include "runtime/graph_runtime.hpp"
 
+#include <algorithm>
 #include <chrono>
 #include <cstdio>
 #include <exception>
 #include <filesystem>
 #include <memory>
+#include <stdexcept>
+#include <type_traits>
 #include <utility>
 #include <vector>
 
@@ -17,6 +20,62 @@
 
 namespace ps {
 namespace {
+
+/**
+ * @brief Increments an unsigned trace counter without wrapping.
+ * @param value Counter to update.
+ * @return Nothing.
+ * @throws Nothing.
+ */
+void saturating_increment(uint64_t& value) noexcept {
+  if (value != kObservationSequenceExhausted) {
+    ++value;
+  }
+}
+
+/**
+ * @brief Adds two unsigned trace gap counts without wrapping.
+ * @param lhs First count.
+ * @param rhs Second count.
+ * @return Saturating sum.
+ * @throws Nothing.
+ */
+uint64_t saturating_add(uint64_t lhs, uint64_t rhs) noexcept {
+  if (kObservationSequenceExhausted - lhs < rhs) {
+    return kObservationSequenceExhausted;
+  }
+  return lhs + rhs;
+}
+
+/**
+ * @brief Advances a valid trace sequence to its successor or sentinel.
+ * @param sequence Valid publication sequence.
+ * @return Next sequence or `kObservationSequenceExhausted`.
+ * @throws Nothing.
+ */
+uint64_t sequence_successor(uint64_t sequence) noexcept {
+  if (sequence >= kObservationSequenceExhausted - 1) {
+    return kObservationSequenceExhausted;
+  }
+  return sequence + 1;
+}
+
+/**
+ * @brief Counts unavailable valid sequences between a cursor and boundary.
+ * @param after_sequence Exclusive caller cursor.
+ * @param first_available First retained/next sequence after missing history.
+ * @return Exact gap, or zero when the boundary immediately follows the cursor.
+ * @throws Nothing.
+ */
+uint64_t sequence_gap(uint64_t after_sequence,
+                      uint64_t first_available) noexcept {
+  if (after_sequence == kObservationSequenceExhausted ||
+      first_available <= after_sequence) {
+    return 0;
+  }
+  const uint64_t distance = first_available - after_sequence;
+  return distance > 1 ? distance - 1 : 0;
+}
 
 /**
  * @brief Runs explicit scheduler shutdown and detach as a best-effort sweep.
@@ -64,11 +123,30 @@ struct GraphRuntime::GpuContext {
 #endif
 };
 
+/** @copydoc GraphRuntime::GraphRuntime */
 GraphRuntime::GraphRuntime(const Info& info)
     : info_(info),
       model_(info.cache_root.empty() ? info.root / "cache" : info.cache_root),
       graph_state_(model_),
-      realtime_proxy_graph_(std::make_unique<compute::RealtimeProxyGraph>()) {
+      event_service_(info.compute_event_capacity,
+                     info.compute_event_initial_sequence,
+                     info.compute_event_initial_dropped_count),
+      realtime_proxy_graph_(std::make_unique<compute::RealtimeProxyGraph>()),
+      scheduler_trace_slots_(info.scheduler_trace_capacity),
+      scheduler_trace_next_sequence_(info.scheduler_trace_initial_sequence),
+      scheduler_trace_unsequenced_drops_(
+          info.scheduler_trace_initial_dropped_count) {
+  if (info.scheduler_trace_capacity == 0) {
+    throw std::invalid_argument(
+        "scheduler-trace ring capacity must be nonzero");
+  }
+  if (info.scheduler_trace_initial_sequence == 0) {
+    throw std::invalid_argument(
+        "scheduler-trace initial sequence must be nonzero");
+  }
+  static_assert(std::is_nothrow_move_constructible_v<SchedulerEvent>);
+  static_assert(std::is_nothrow_move_assignable_v<SchedulerEvent>);
+
   std::filesystem::create_directories(info_.root);
   if (!model_.cache_root.empty()) {
     std::filesystem::create_directories(model_.cache_root);
@@ -208,6 +286,7 @@ void GraphRuntime::clear_scheduler_log_context() {
   tls_scheduler_log_epoch_ = 0;
 }
 
+/** @copydoc GraphRuntime::log_event(SchedulerEvent::Action,int) */
 void GraphRuntime::log_event(SchedulerEvent::Action action, int node_id) {
   uint64_t epoch = this_task_epoch();
   int worker_id = this_worker_id();
@@ -217,22 +296,111 @@ void GraphRuntime::log_event(SchedulerEvent::Action action, int node_id) {
   log_event(action, node_id, worker_id, epoch);
 }
 
+/** @copydoc GraphRuntime::log_event(SchedulerEvent::Action,int,int,uint64_t)
+ */
 void GraphRuntime::log_event(SchedulerEvent::Action action, int node_id,
                              int worker_id, uint64_t epoch) {
   std::lock_guard<std::mutex> lock(log_mutex_);
-  scheduler_log_.push_back({epoch, node_id, worker_id, action,
-                            std::chrono::high_resolution_clock::now()});
+  if (scheduler_trace_next_sequence_ == kObservationSequenceExhausted) {
+    saturating_increment(scheduler_trace_unsequenced_drops_);
+    return;
+  }
+
+  const uint64_t sequence = scheduler_trace_next_sequence_;
+  SchedulerEvent event{sequence, epoch,
+                       node_id,  worker_id,
+                       action,   std::chrono::high_resolution_clock::now()};
+  scheduler_trace_next_sequence_ = sequence_successor(sequence);
+
+  if (scheduler_trace_size_ == scheduler_trace_slots_.size()) {
+    scheduler_trace_slots_[scheduler_trace_head_] = std::move(event);
+    scheduler_trace_head_ =
+        (scheduler_trace_head_ + 1) % scheduler_trace_slots_.size();
+    return;
+  }
+
+  const std::size_t insertion =
+      (scheduler_trace_head_ + scheduler_trace_size_) %
+      scheduler_trace_slots_.size();
+  scheduler_trace_slots_[insertion].emplace(std::move(event));
+  ++scheduler_trace_size_;
 }
 
-std::vector<GraphRuntime::SchedulerEvent> GraphRuntime::get_scheduler_log()
-    const {  // NOLINT(whitespace/indent_namespace)
+/** @copydoc GraphRuntime::scheduler_trace_page */
+GraphRuntime::SchedulerEventPage GraphRuntime::scheduler_trace_page(
+    uint64_t after_sequence,
+    std::size_t limit) const {  // NOLINT(whitespace/indent_namespace)
+  if (limit < kSchedulerTraceMinLimit || limit > kSchedulerTraceMaxLimit) {
+    throw std::invalid_argument("scheduler-trace limit is out of range");
+  }
+
   std::lock_guard<std::mutex> lock(log_mutex_);
-  return scheduler_log_;
+  SchedulerEventPage page;
+  if (after_sequence == kObservationSequenceExhausted) {
+    if (scheduler_trace_next_sequence_ != kObservationSequenceExhausted) {
+      throw std::invalid_argument(
+          "scheduler-trace exhausted cursor precedes exhaustion");
+    }
+    page.next_sequence = kObservationSequenceExhausted;
+    return page;
+  }
+
+  const uint64_t last_published =
+      scheduler_trace_next_sequence_ == kObservationSequenceExhausted
+          ? kObservationSequenceExhausted - 1
+          : scheduler_trace_next_sequence_ - 1;
+  if (after_sequence > last_published) {
+    throw std::invalid_argument("scheduler-trace cursor is in the future");
+  }
+
+  page.events.reserve(std::min(limit, scheduler_trace_size_));
+  std::size_t matching_count = 0;
+  uint64_t first_later_sequence = scheduler_trace_next_sequence_;
+  for (std::size_t offset = 0; offset < scheduler_trace_size_; ++offset) {
+    const std::size_t index =
+        (scheduler_trace_head_ + offset) % scheduler_trace_slots_.size();
+    const SchedulerEvent& event = *scheduler_trace_slots_[index];
+    if (event.sequence <= after_sequence) {
+      continue;
+    }
+    if (matching_count == 0) {
+      first_later_sequence = event.sequence;
+    }
+    if (page.events.size() < limit) {
+      page.events.push_back(event);
+    }
+    ++matching_count;
+  }
+
+  page.has_more = matching_count > page.events.size();
+  page.dropped_count =
+      saturating_add(sequence_gap(after_sequence, first_later_sequence),
+                     scheduler_trace_unsequenced_drops_);
+
+  if (!page.events.empty()) {
+    const uint64_t last_returned = page.events.back().sequence;
+    const bool terminal_page =
+        scheduler_trace_next_sequence_ == kObservationSequenceExhausted &&
+        !page.has_more && last_returned == kObservationSequenceExhausted - 1;
+    page.next_sequence =
+        terminal_page ? kObservationSequenceExhausted : last_returned;
+  } else if (scheduler_trace_next_sequence_ == kObservationSequenceExhausted) {
+    page.next_sequence = kObservationSequenceExhausted;
+    page.has_more = false;
+  } else {
+    page.next_sequence = after_sequence;
+  }
+  return page;
 }
 
+/** @copydoc GraphRuntime::clear_scheduler_log */
 void GraphRuntime::clear_scheduler_log() {
   std::lock_guard<std::mutex> lock(log_mutex_);
-  scheduler_log_.clear();
+  for (auto& slot : scheduler_trace_slots_) {
+    slot.reset();
+  }
+  scheduler_trace_head_ = 0;
+  scheduler_trace_size_ = 0;
 }
 
 // =============================================================================

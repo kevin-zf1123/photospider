@@ -329,10 +329,35 @@ class Kernel {
   };
   std::optional<std::map<int, std::vector<TraversalNodeInfo>>>
   traversal_details(const std::string& name);
-  std::optional<std::vector<GraphEventService::ComputeEvent>>
-  drain_compute_events(const std::string& name);
-  std::optional<std::vector<GraphRuntime::SchedulerEvent>> scheduler_trace(
-      const std::string& name);
+  /**
+   * @brief Drains one bounded page of compute events for a loaded graph.
+   * @param name Loaded graph/session name.
+   * @param limit Maximum events to remove.
+   * @return Sequenced batch, or nullopt when the graph is missing.
+   * @throws std::invalid_argument for an invalid limit without mutation.
+   * @throws std::bad_alloc if bounded result allocation fails without
+   *         mutation.
+   * @note Removal and shared drop reset occur inside the graph event-service
+   *       lock. Runtime exceptions propagate unchanged; only a missing graph
+   *       is represented by `std::nullopt`.
+   */
+  std::optional<ComputeEventBatch> drain_compute_events(const std::string& name,
+                                                        std::size_t limit);
+
+  /**
+   * @brief Reads one bounded non-destructive scheduler-trace page.
+   * @param name Loaded graph/session name.
+   * @param after_sequence Exclusive sequence cursor.
+   * @param limit Maximum trace entries to copy.
+   * @return Internal sequenced page, or nullopt when the graph is missing.
+   * @throws std::invalid_argument for an invalid limit or future cursor.
+   * @throws std::bad_alloc if bounded page allocation fails.
+   * @note The runtime computes entries and metadata under one trace lock.
+   *       Runtime exceptions propagate unchanged; only a missing graph is
+   *       represented by `std::nullopt`.
+   */
+  std::optional<GraphRuntime::SchedulerEventPage> scheduler_trace(
+      const std::string& name, uint64_t after_sequence, std::size_t limit);
   std::optional<std::string> dirty_region_snapshot_debug(
       const std::string& name);
   std::optional<compute::DirtyRegionSnapshot> dirty_region_snapshot(

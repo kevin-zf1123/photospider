@@ -1,4 +1,5 @@
 #include <algorithm>
+#include <cstddef>
 #include <functional>
 #include <iostream>
 #include <map>
@@ -20,6 +21,55 @@ const int TILE_SIZE_MICRO = 64;
 
 /** @brief Macro-tile fallback edge length used by the scriptable test tool. */
 const int TILE_SIZE_MACRO = 256;
+
+/**
+ * @brief Maximum compute-event pages consumed by one manual-tool pass.
+ *
+ * @note The ceiling formula covers one complete fixed production ring in the
+ *       absence of concurrent publication and prevents a producer from making
+ *       this scriptable tool chase pages forever.
+ */
+constexpr std::size_t kComputeEventDrainPageBudget =
+    (ps::kComputeEventRingCapacity + ps::kComputeEventDrainMaxLimit - 1) /
+    ps::kComputeEventDrainMaxLimit;
+
+static_assert(kComputeEventDrainPageBudget == 8);
+
+/**
+ * @brief Drains one fixed-budget pass of compute-event pages.
+ *
+ * @tparam ConsumeBatch Callable accepting each available batch by const
+ *         reference.
+ * @param svc Interaction facade owning the bounded drain operation.
+ * @param graph_name Loaded graph whose event ring is drained.
+ * @param consume_batch Callback invoked once for every successful page.
+ * @return true when every attempted backend call returns a batch, false when
+ *         the graph or event service is unavailable.
+ * @throws Any exception from bounded result construction or the callback,
+ *         including `std::bad_alloc`.
+ * @note The helper stops early when `has_more` is false and otherwise performs
+ *       at most `kComputeEventDrainPageBudget` calls. It never restores an
+ *       unbounded event-drain API.
+ */
+template <typename ConsumeBatch>
+bool drain_compute_event_pages(ps::InteractionService& svc,
+                               const std::string& graph_name,
+                               ConsumeBatch&& consume_batch) {
+  for (std::size_t page_index = 0; page_index < kComputeEventDrainPageBudget;
+       ++page_index) {
+    auto batch = svc.cmd_drain_compute_events(graph_name,
+                                              ps::kComputeEventDrainMaxLimit);
+    if (!batch) {
+      return false;
+    }
+    const bool has_more = batch->has_more;
+    consume_batch(*batch);
+    if (!has_more) {
+      return true;
+    }
+  }
+  return true;
+}
 
 /**
  * @brief Resolves the tile edge length implied by a node operation metadata.
@@ -250,8 +300,9 @@ void handle_dirty(ps::Kernel& kernel, ps::InteractionService& svc,
   trace_backward(target_end_node, target_roi, 0);
   std::cout << "---------------------------------------------\n" << std::endl;
 
-  // 清空事件队列以捕获本次计算的事件
-  svc.cmd_drain_compute_events(graph_name);
+  // 清空当前固定 ring，以捕获本次计算的事件。
+  (void)drain_compute_event_pages(svc, graph_name,
+                                  [](const ps::ComputeEventBatch&) {});
 
   std::cout << "--- Triggering Actual Kernel Compute ---" << std::endl;
   ps::Kernel::ComputeRequest request;
@@ -280,26 +331,26 @@ void handle_dirty(ps::Kernel& kernel, ps::InteractionService& svc,
     return;
   }
 
-  // **分析结果：从事件服务中获取真正被重新计算的节点**
-  auto events = svc.cmd_drain_compute_events(graph_name);
-  if (!events || events->empty()) {
+  // **分析结果：逐页处理事件服务中真正被重新计算的节点**
+  std::map<int, std::string> recomputed_nodes;
+  const bool events_available = drain_compute_event_pages(
+      svc, graph_name, [&](const ps::ComputeEventBatch& batch) {
+        for (const auto& event : batch.events) {
+          if (event.source == "rt_update" || event.source == "hp_update" ||
+              event.source == "computed") {
+            recomputed_nodes.emplace(event.node.value, event.name);
+          }
+        }
+      });
+  if (!events_available || recomputed_nodes.empty()) {
     std::cout << "(No nodes were re-computed)" << std::endl;
     return;
   }
 
-  std::map<int, std::vector<ps::GraphEventService::ComputeEvent>>
-      events_by_node;
-  for (const auto& event : *events) {
-    if (event.source == "rt_update" || event.source == "hp_update" ||
-        event.source == "computed") {
-      events_by_node[event.id].push_back(event);
-    }
-  }
-
   // 由于事件不包含像素区域，我们无法直接打印。
   // 我们将打印被触发的节点，这是一个更真实的集成测试结果。
-  for (const auto& pair : events_by_node) {
-    std::cout << "Node " << pair.first << " (" << pair.second[0].name
+  for (const auto& pair : recomputed_nodes) {
+    std::cout << "Node " << pair.first << " (" << pair.second
               << ") was recomputed." << std::endl;
   }
 }

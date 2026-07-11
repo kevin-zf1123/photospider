@@ -335,10 +335,37 @@ These constants are not permanent ABI.
 
 ## Events and Timing
 
-`GraphEventService` collects per-node compute events. `TimingCollector` stores
-node timings and total elapsed compute time when timing is enabled. Debug
-metadata in `NodeOutput` records worker id, timestamp, execution time, device,
-and optional range checks.
+`GraphEventService` publishes per-node compute events into a thread-safe,
+fixed-capacity ring. The production capacity is 8,192 events per graph. Each
+accepted publication receives a monotonically increasing unsigned 64-bit
+sequence in `1..UINT64_MAX-1`; `UINT64_MAX` is an exhaustion sentinel and is
+never assigned to an event. The ring evicts exactly its oldest retained event
+when full and accounts for that eviction with a saturating drop counter.
+
+Event names and sources are measured with `std::string::size()` before they are
+copied into retained storage, so the public 1,024-byte bound is a UTF-8 byte
+bound. If either field exceeds that bound, the complete publication is dropped
+without truncation. The attempt still consumes one valid sequence and adds one
+drop. After sequence exhaustion, each publication attempt adds only the single
+exhaustion drop and cannot wrap either the sequence or drop counter.
+
+`Host::drain_compute_events(session, limit)` accepts limits from 1 through
+1,024 and returns `ComputeEventBatch`: sequenced `events`, `next_sequence`,
+`has_more`, and `dropped_count`. A successful call removes only the returned
+oldest page and atomically resets the shared drop counter, including for an
+empty page. Invalid limits return `GraphErrc::InvalidParameter` before any
+removal or reset. The event service reserves result capacity before moving an
+event, so `std::bad_alloc` cannot remove an event that the caller did not
+receive. CLI consumers repeatedly request the maximum bounded page only while
+`has_more` is true, but one polling pass has a fixed eight-page budget derived
+as `ceil(8192 / 1024)`. This covers a complete retained production ring when no
+producer races the pass, prevents a live producer from extending one pass
+indefinitely, and leaves deferred or newly published events for a future poll.
+No unbounded Host vector drain exists.
+
+`TimingCollector` separately stores node timings and total elapsed compute time
+when timing is enabled. Debug metadata in `NodeOutput` records worker id,
+timestamp, execution time, device, and optional range checks.
 
 ## Error Handling
 

@@ -266,13 +266,34 @@ class InteractionService {
   cmd_traversal_details(const std::string& graph) {
     return kernel_.traversal_details(graph);
   }
-  std::optional<std::vector<GraphEventService::ComputeEvent>>
-  cmd_drain_compute_events(const std::string& graph) {
-    return kernel_.drain_compute_events(graph);
+  /**
+   * @brief Drains one bounded compute-event batch through Kernel.
+   * @param graph Loaded graph/session name.
+   * @param limit Maximum events to remove.
+   * @return Sequenced batch, or nullopt when the graph is missing.
+   * @throws std::invalid_argument for an invalid limit without mutation.
+   * @throws std::bad_alloc if output allocation fails without mutation.
+   * @note This facade does not add a second buffer or destructive step.
+   */
+  std::optional<ComputeEventBatch> cmd_drain_compute_events(
+      const std::string& graph, std::size_t limit) {
+    return kernel_.drain_compute_events(graph, limit);
   }
-  std::optional<std::vector<GraphRuntime::SchedulerEvent>> cmd_scheduler_trace(
-      const std::string& graph) {
-    return kernel_.scheduler_trace(graph);
+
+  /**
+   * @brief Reads one bounded non-destructive scheduler-trace page.
+   * @param graph Loaded graph/session name.
+   * @param after_sequence Exclusive sequence cursor.
+   * @param limit Maximum trace entries to copy.
+   * @return Internal trace page, or nullopt when the graph is missing.
+   * @throws std::invalid_argument for an invalid limit or future cursor.
+   * @throws std::bad_alloc if bounded output allocation fails.
+   * @note All page metadata comes from the runtime's single locked
+   *       observation point.
+   */
+  std::optional<GraphRuntime::SchedulerEventPage> cmd_scheduler_trace(
+      const std::string& graph, uint64_t after_sequence, std::size_t limit) {
+    return kernel_.scheduler_trace(graph, after_sequence, limit);
   }
   std::optional<std::string> cmd_dirty_region_snapshot_debug(
       const std::string& graph) {

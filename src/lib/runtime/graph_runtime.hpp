@@ -3,6 +3,7 @@
 
 #include <atomic>
 #include <chrono>
+#include <cstddef>
 #include <cstdint>
 #include <filesystem>
 #include <map>
@@ -35,32 +36,145 @@ class RealtimeProxyGraph;
 
 class GraphRuntime {
  public:
+  /**
+   * @brief Internal construction inputs for one graph-owned runtime.
+   *
+   * @throws std::bad_alloc when string or filesystem-path value operations
+   *         allocate.
+   * @note Observation capacities, sequences, and drop counts are injectable
+   *       deterministic-test seams. They do not expand public Host
+   *       configuration ABI. This caller-owned value has no internal lock;
+   *       configure it before construction. `GraphRuntime` copies the value
+   *       and owns that copy for the complete runtime lifetime.
+   */
   struct Info {
+    /** @brief Loaded graph/session name. */
     std::string name;
+
+    /** @brief Session filesystem root. */
     std::filesystem::path root;
+
+    /** @brief Source graph YAML path. */
     std::filesystem::path yaml;
+
+    /** @brief Session configuration path. */
     std::filesystem::path config;
+
+    /** @brief Effective cache root, or empty to derive it from `root`. */
     std::filesystem::path cache_root;
+
+    /** @brief Fixed compute-event capacity for this runtime. */
+    std::size_t compute_event_capacity = kComputeEventRingCapacity;
+
+    /** @brief First compute-event sequence, or the exhausted sentinel. */
+    uint64_t compute_event_initial_sequence = 1;
+
+    /** @brief Initial compute-event shared drop count test seam. */
+    uint64_t compute_event_initial_dropped_count = 0;
+
+    /** @brief Fixed scheduler-trace capacity for this runtime. */
+    std::size_t scheduler_trace_capacity = kSchedulerTraceRingCapacity;
+
+    /** @brief First scheduler-trace sequence, or the exhausted sentinel. */
+    uint64_t scheduler_trace_initial_sequence = 1;
+
+    /** @brief Initial unsequenced scheduler drop count test seam. */
+    uint64_t scheduler_trace_initial_dropped_count = 0;
   };
 
+  /**
+   * @brief Internal allocation-free scheduler trace publication value.
+   *
+   * @throws Nothing for construction, copy, move, and scalar access.
+   * @note `GraphRuntime` owns retained instances in its fixed ring and guards
+   *       them with `log_mutex_`. Returned pages own independent copies whose
+   *       lifetime and access no longer require the runtime lock.
+   */
   struct SchedulerEvent {
+    /** @brief Scheduler action recorded by a compute path. */
     enum Action {
+      /** @brief Initial ready-task assignment. */
       ASSIGN_INITIAL,
+
+      /** @brief Monolithic node execution. */
       EXECUTE,
+
+      /** @brief Tiled node execution. */
       EXECUTE_TILE,
+
+      /** @brief Dirty source execution. */
       EXECUTE_DIRTY_SOURCE,
+
+      /** @brief Dirty downstream monolithic execution. */
       EXECUTE_DIRTY_DOWNSTREAM_NODE,
+
+      /** @brief Dirty downstream tile execution. */
       EXECUTE_DIRTY_DOWNSTREAM_TILE,
+
+      /** @brief Stale dirty generation skipped before execution. */
       SKIP_STALE_GENERATION,
+
+      /** @brief Captured scheduler task exception rethrown to the caller. */
       RETHROW_EXCEPTION,
     };
+
+    /** @brief Per-runtime trace publication sequence. */
+    uint64_t sequence;
+
+    /** @brief Scheduler task epoch. */
     uint64_t epoch;
+
+    /** @brief Backend node id. */
     int node_id;
+
+    /** @brief Worker id, or -1 when unavailable. */
     int worker_id;
+
+    /** @brief Recorded scheduler action. */
     Action action;
+
+    /** @brief Backend high-resolution observation time. */
     std::chrono::time_point<std::chrono::high_resolution_clock> timestamp;
   };
 
+  /**
+   * @brief Internal bounded non-destructive scheduler-trace page.
+   *
+   * @throws std::bad_alloc when event-vector construction, copy, or mutation
+   *         allocates.
+   * @note Metadata is computed with the event copy at one `log_mutex_` locked
+   *       observation point. The returned value owns its event copies, needs
+   *       no lock after return, and remains valid independently of later ring
+   *       publication, eviction, clearing, or runtime destruction.
+   */
+  struct SchedulerEventPage {
+    /** @brief Retained internal events whose sequence exceeds the cursor. */
+    std::vector<SchedulerEvent> events;
+
+    /** @brief Last event cursor, input cursor, or exhausted sentinel. */
+    uint64_t next_sequence = 0;
+
+    /** @brief Whether another matching retained event follows this page. */
+    bool has_more = false;
+
+    /** @brief Saturating exact history/exhaustion gap after the cursor. */
+    uint64_t dropped_count = 0;
+  };
+
+  /**
+   * @brief Creates all graph-owned model, observation, and platform resources.
+   * @param info Filesystem inputs and internal observation-ring test seams.
+   * @throws std::invalid_argument if an observation capacity or initial
+   *         sequence is zero.
+   * @throws std::bad_alloc if model, proxy graph, or preallocated ring storage
+   *         cannot be created.
+   * @throws std::filesystem::filesystem_error if session/cache directories
+   *         cannot be created.
+   * @note Compute-event and scheduler-trace slots are fully allocated before
+   *       publication begins. Construction consumes `info` before concurrent
+   *       access begins; the runtime then retains exclusive ownership of its
+   *       copied configuration and rings for its complete graph lifetime.
+   */
   explicit GraphRuntime(const Info& info);
   /**
    * @brief Releases every scheduler and graph-owned runtime resource.
@@ -118,8 +232,17 @@ class GraphRuntime {
     return running_.load(std::memory_order_acquire);
   }
 
-  std::vector<GraphEventService::ComputeEvent> drain_compute_events_now() {
-    return event_service_.drain();
+  /**
+   * @brief Destructively drains one bounded compute-event batch.
+   * @param limit Maximum events to remove.
+   * @return Public sequenced event batch.
+   * @throws std::invalid_argument for an invalid limit without mutation.
+   * @throws std::bad_alloc if output allocation fails without mutation.
+   * @note Delegates all locking and drop-reset semantics to the graph-owned
+   *       event service.
+   */
+  ComputeEventBatch drain_compute_events_now(std::size_t limit) {
+    return event_service_.drain(limit);
   }
 
   const Info& info() const { return info_; }
@@ -137,10 +260,53 @@ class GraphRuntime {
    */
   compute::RealtimeProxyGraph& realtime_proxy_graph();
 
+  /**
+   * @brief Publishes a scheduler trace with the current thread-local context.
+   * @param action Scheduler action to record.
+   * @param node_id Backend node id.
+   * @return Nothing.
+   * @throws Nothing.
+   * @note Publication is sequenced and admitted to the fixed ring under the
+   *       trace lock.
+   */
   void log_event(SchedulerEvent::Action action, int node_id);
+
+  /**
+   * @brief Publishes a scheduler trace with explicit worker and epoch values.
+   * @param action Scheduler action to record.
+   * @param node_id Backend node id.
+   * @param worker_id Worker id, or -1 when unavailable.
+   * @param epoch Scheduler task epoch.
+   * @return Nothing.
+   * @throws Nothing.
+   * @note Full-ring eviction and terminal exhaustion increment drop accounting
+   *       with saturating arithmetic.
+   */
   void log_event(SchedulerEvent::Action action, int node_id, int worker_id,
                  uint64_t epoch);
-  std::vector<SchedulerEvent> get_scheduler_log() const;
+
+  /**
+   * @brief Copies one bounded scheduler-trace page without removing entries.
+   * @param after_sequence Exclusive cursor; zero starts at the oldest retained
+   *        entry and the exhausted sentinel requests a terminal empty page.
+   * @param limit Maximum entries to copy.
+   * @return Bounded internal page with cursor-specific drop metadata.
+   * @throws std::invalid_argument for an invalid limit, future cursor, or an
+   *         exhausted sentinel supplied before actual exhaustion.
+   * @throws std::bad_alloc if bounded output allocation fails.
+   * @note Copying, `has_more`, cursor advancement, and gap calculation observe
+   *       one locked ring state.
+   */
+  SchedulerEventPage scheduler_trace_page(uint64_t after_sequence,
+                                          std::size_t limit) const;
+
+  /**
+   * @brief Removes all retained scheduler traces for deterministic tests.
+   * @return Nothing.
+   * @throws Nothing.
+   * @note Sequence state is preserved, so later bounded reads report cleared
+   *       history as a cursor gap. Production frontends have no clear method.
+   */
   void clear_scheduler_log();
 
   static int this_worker_id();
@@ -212,6 +378,7 @@ class GraphRuntime {
   Info info_;
   GraphModel model_;
   GraphStateExecutor graph_state_;
+  /** @brief Fixed-capacity graph compute-event service. */
   GraphEventService event_service_;
   std::unique_ptr<compute::RealtimeProxyGraph> realtime_proxy_graph_;
 
@@ -229,8 +396,23 @@ class GraphRuntime {
   struct GpuContext;
   std::unique_ptr<GpuContext> gpu_context_;
 
+  /** @brief Serializes scheduler-trace publication and page observation. */
   mutable std::mutex log_mutex_;
-  std::vector<SchedulerEvent> scheduler_log_;
+
+  /** @brief Fixed, constructor-allocated optional scheduler trace slots. */
+  std::vector<std::optional<SchedulerEvent>> scheduler_trace_slots_;
+
+  /** @brief Index of the oldest retained scheduler trace. */
+  std::size_t scheduler_trace_head_ = 0;
+
+  /** @brief Number of occupied scheduler trace slots. */
+  std::size_t scheduler_trace_size_ = 0;
+
+  /** @brief Next assignable trace sequence or exhausted sentinel. */
+  uint64_t scheduler_trace_next_sequence_ = 1;
+
+  /** @brief Saturating unsequenced exhausted-attempt test/accounting count. */
+  uint64_t scheduler_trace_unsequenced_drops_ = 0;
 };
 
 }  // namespace ps

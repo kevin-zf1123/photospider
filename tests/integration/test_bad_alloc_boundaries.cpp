@@ -288,6 +288,26 @@ AllocationFailureObservation observe_allocation_failure(
   return observation;
 }
 
+TEST(GraphEventDrainBadAllocBoundary,
+     ReserveFailurePreservesEveryRetainedEventAndDropCount) {
+  GraphEventService events(2);
+  events.push(1, "one", "bad_alloc", 1.0);
+  events.push(2, "two", "bad_alloc", 2.0);
+  events.push(3, "three", "bad_alloc", 3.0);
+
+  const AllocationFailureObservation failed =
+      observe_allocation_failure(0, [&] { (void)events.drain(2); });
+  EXPECT_TRUE(failed.fired);
+  EXPECT_TRUE(failed.propagated);
+
+  const ComputeEventBatch recovered = events.drain(2);
+  ASSERT_EQ(recovered.events.size(), 2u);
+  EXPECT_EQ(recovered.events[0].sequence, 2u);
+  EXPECT_EQ(recovered.events[1].sequence, 3u);
+  EXPECT_EQ(recovered.dropped_count, 1u);
+  EXPECT_FALSE(recovered.has_more);
+}
+
 /**
  * @brief Captured callbacks from the real threshold registration entry.
  *
@@ -807,11 +827,11 @@ HostComputeRequest make_parallel_host_request(const GraphSessionId& session) {
  */
 void expect_scheduler_worker_rethrow_trace(Host& host,
                                            const GraphSessionId& session) {
-  const Result<std::vector<SchedulerTraceEventSnapshot>> trace =
-      host.scheduler_trace(session);
+  const Result<SchedulerTracePage> trace =
+      host.scheduler_trace(session, 0, kSchedulerTraceMaxLimit);
   ASSERT_TRUE(trace.status.ok) << trace.status.message;
   EXPECT_TRUE(std::any_of(
-      trace.value.begin(), trace.value.end(),
+      trace.value.events.begin(), trace.value.events.end(),
       [](const SchedulerTraceEventSnapshot& event) {
         return event.node.value == 1 &&
                event.action == HostSchedulerTraceAction::RethrowException;

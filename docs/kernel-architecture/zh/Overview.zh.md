@@ -116,7 +116,7 @@ callback 与返回值 lease 会在 registry 移除后继续保持插件代码映
 | `Kernel` | 多图 facade、服务 owner、运行时 bootstrapper、顶层图/缓存/计算 API。 |
 | `ps::Host` | `include/photospider/host` 下的 public frontend interface；返回复制的 request/result/snapshot value，并隐藏 Kernel、GraphModel 和 GraphRuntime。 |
 | `embedded Host adapter` | 由每 adapter 独立的 `Kernel` 和 `InteractionService` 状态支撑的 in-process Host 实现；所有 adapter 共享进程级 operation plugin owner。 |
-| `GraphRuntime` | 每图资源容器，包含模型、graph-state executor、事件、调度器和平台 context。 |
+| `GraphRuntime` | 每图资源容器，包含模型、graph-state executor、固定容量 scheduler trace ring、调度器和平台 context。 |
 | `GraphModel` | 图状态持有者：私有节点存储、拓扑邻接索引、缓存根目录、计时数据、quiet/skip-save 标志。 |
 | `InteractionService` | 由 embedded Host adapter 和 backend code 使用的内部 `Kernel` wrapper；包括 CLI 在内的 frontend 都使用 public Host seam。 |
 | `ComputeService` | 解析依赖、检查缓存、执行 op，协调 RT/HP/tiled 路径和计时事件。 |
@@ -125,7 +125,7 @@ callback 与返回值 lease 会在 registry 移除后继续保持插件代码映
 | `GraphExtentResolver` | HP 权威的输出范围解析器，供 ROI 传播和脏区规划使用。 |
 | `GraphCacheService` | 内存/磁盘缓存操作和缓存同步。 |
 | `GraphInspectService` | 基于图拓扑构建结构化缓存/空间元数据 inspect 和 dependency-tree snapshot。 |
-| `GraphEventService` | 每节点计算事件收集。 |
+| `GraphEventService` | 线程安全、固定容量的每节点 compute-event ring，提供带 sequence 的破坏性 batch 与饱和 drop accounting。 |
 | `PluginManager` | 唯一的进程寿命 operation plugin owner；串行化 load/seed/unload/inspection 并拥有 source/restoration/handle 状态。Load 会注册并记录动态插件，seed 会初始化或对齐 built-in，只有显式全局 unload 才会移除动态插件。 |
 | `OpRegistry` | 进程级 operation implementation registry，返回一致的 callback copy snapshot，包括 HP/RT、tiled/monolithic、设备元数据和 ROI propagator。 |
 
@@ -178,6 +178,24 @@ callback 与返回值 lease 会在 registry 移除后继续保持插件代码映
    之前读取 backend `LastError` 分类。
 7. 可恢复 backend failure 会转换成 Host status/result value，而资源耗尽保持异常语义：非析构
    Host method 和被消费的 async future 可以按可安装接口的文档传播 `std::bad_alloc`。
+
+## 有界 Event 与 Trace 观察
+
+Public Host observation boundary 绝不会返回无上限的 compute-event 或 scheduler-trace vector。
+`ComputeEventSnapshot` 与 `SchedulerTraceEventSnapshot` 都携带 per-session `sequence`；
+`ComputeEventBatch` 与 `SchedulerTracePage` 都携带 bounded `events`、`next_sequence`、
+`has_more` 与 `dropped_count` value。
+
+Compute event 使用 8,192-entry production ring，以及包含 1 至 1,024 个 entry 的破坏性 Host
+page。Scheduler trace 使用 65,536-entry production ring，以及包含 1 至 4,096 个 entry 的
+非破坏性 cursor page。有效 publication sequence 为 `1..UINT64_MAX-1`；`UINT64_MAX` 专门
+保留给 terminal exhaustion。两个 ring 都能在 backend construction 内注入更小 capacity 与
+initial sequence state，用于 deterministic test，而不会增加 public Host configuration。
+
+Compute-event name 与 source 在 retention 前限制为 1,024 UTF-8 byte。Oversized publication
+会整条丢弃；所有 overflow、oversize 与 exhaustion accounting 都会饱和而不回绕。Invalid Host
+limit 与 trace cursor 返回 `GraphErrc::InvalidParameter`，且不修改 retained observation；对于
+valid request，缺失 session 仍返回 `GraphErrc::NotFound`。
 
 ## 调度器模型
 

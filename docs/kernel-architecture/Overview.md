@@ -135,7 +135,7 @@ destroyed.
 | `Kernel` | Multi-graph facade, service owner, runtime bootstrapper, top-level graph/cache/compute API. |
 | `ps::Host` | Public frontend interface under `include/photospider/host`; returns copied request/result/snapshot values and hides Kernel, GraphModel, and GraphRuntime. |
 | `embedded Host adapter` | In-process Host implementation backed by per-adapter `Kernel` and `InteractionService` state; all adapters share the process operation plugin owner. |
-| `GraphRuntime` | Per-graph resource container with model, graph-state executor, events, schedulers, and platform context. |
+| `GraphRuntime` | Per-graph resource container with model, graph-state executor, fixed-capacity scheduler trace ring, schedulers, and platform context. |
 | `GraphModel` | Graph state holder: private node storage, topology adjacency index, cache root, timing data, quiet/skip-save flags. |
 | `InteractionService` | Internal wrapper around `Kernel` used by the embedded Host adapter and backend code; frontends, including the CLI, use the public Host seam. |
 | `ComputeService` | Resolves dependencies, checks caches, executes ops, coordinates RT/HP/tiled paths and timing events. |
@@ -144,7 +144,7 @@ destroyed.
 | `GraphExtentResolver` | HP-authoritative output extent resolver used by ROI propagation and dirty-region planning. |
 | `GraphCacheService` | Memory/disk cache operations and cache synchronization. |
 | `GraphInspectService` | Structured cache/spatial metadata inspection and dependency-tree snapshots built from graph topology. |
-| `GraphEventService` | Per-node compute event collection. |
+| `GraphEventService` | Thread-safe, fixed-capacity per-node compute-event ring with sequenced destructive batches and saturating drop accounting. |
 | `PluginManager` | Unique process-lifetime operation plugin owner; serializes load/seed/unload/inspection and owns source/restoration/handle state. Load registers and records dynamic plugins, seed initializes or reconciles built-ins, and only explicit global unload removes dynamic plugins. |
 | `OpRegistry` | Process-global operation implementation registry with coherent copied callback snapshots, including HP/RT, tiled/monolithic, device metadata, and ROI propagators. |
 
@@ -206,6 +206,29 @@ Typical embedded Host compute flow:
    resource exhaustion remains exceptional: non-destructor Host methods and
    consumed async futures may propagate `std::bad_alloc` as documented by the
    installable interface.
+
+## Bounded Event and Trace Observation
+
+The public Host observation boundary never returns an unbounded compute-event
+or scheduler-trace vector. `ComputeEventSnapshot` and
+`SchedulerTraceEventSnapshot` each carry a per-session `sequence`.
+`ComputeEventBatch` and `SchedulerTracePage` each carry bounded `events`,
+`next_sequence`, `has_more`, and `dropped_count` values.
+
+Compute events use an 8,192-entry production ring and destructive Host pages of
+1 through 1,024 entries. Scheduler traces use a 65,536-entry production ring
+and non-destructive cursor pages of 1 through 4,096 entries. Valid publication
+sequences are `1..UINT64_MAX-1`; `UINT64_MAX` is reserved for terminal
+exhaustion. Both rings have injectable smaller capacities and initial sequence
+state inside backend construction for deterministic tests, without adding
+public Host configuration.
+
+Compute-event names and sources are limited to 1,024 UTF-8 bytes before
+retention. Oversized publications are dropped whole, and all overflow,
+oversize, and exhaustion accounting saturates instead of wrapping. Invalid
+Host limits and trace cursors return `GraphErrc::InvalidParameter` without
+mutating retained observations; a missing session remains
+`GraphErrc::NotFound` for a valid request.
 
 ## Scheduler Model
 
