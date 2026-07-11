@@ -1,25 +1,28 @@
 # Codebase Structure Direction
 
 This document records Photospider's current public header/Host seam, static
-product, role-owned source layout, and remaining internal-target and daemon/IPC
-direction. Current-state claims and future work are distinguished explicitly
-below.
+product, role-owned source layout, implemented version 1 daemon/IPC slice, and
+remaining internal-target direction. Current-state claims and future work are
+distinguished explicitly below.
 
 The goals are:
 
 - `libphotospider` is the stable static-link target for embedded frontends.
-- `photospiderd` can run as a background daemon that owns graph runtimes.
+- `photospiderd` runs as a foreground local daemon that owns graph sessions
+  through one embedded `ps::Host`.
 - `graph_cli` remains the basic interactive command-line frontend.
-- Future frontends can either link `libphotospider` in-process or talk to
+- Frontends can either link `libphotospider` in-process or use the typed client
+  to talk to
   `photospiderd` through IPC.
 
 ## Current Friction
 
 The current repository now has the public Host seam, installable static
 product, migrated CLI application tree, role-owned backend source tree,
-explicit production-plugin homes, and unit/integration test ownership. The
-daemon/IPC application, final internal-target shape, and transitional plugin
-SDK still need later migration phases.
+explicit production-plugin homes, unit/integration test ownership, and the
+macOS/Linux version 1 daemon/IPC graph-inspection slice. Compute/result IPC,
+the final internal-target shape, and the transitional plugin SDK still need
+later migration phases.
 
 Observed build targets in the current root `CMakeLists.txt`:
 
@@ -32,6 +35,9 @@ Observed build targets in the current root `CMakeLists.txt`:
 | `photospider` | Static installable backend product with archive name `libphotospider`. | Matches the desired static product and public Host shape while folding role-owned backend sources into one archive. |
 | `photospider_cli_common` | Static CLI command/TUI/autocomplete code plus the reusable `run_graph_cli` boundary under `apps/graph_cli/`. | Uses application-private headers and remains a non-installable helper. |
 | `graph_cli` | Process-policy-only entry point at `apps/graph_cli/main.cpp`. | Disables OpenCL, owns allocation-independent fatal exit policy, creates the embedded `Host` adapter, and has no daemon-client mode yet. |
+| `photospider_ipc_client` | Installable static typed Unix IPC client. | Implements only the eight version 1 graph/inspection methods; it does not link the backend or expose JSON/POSIX types. |
+| `photospider_ipc_server_internal` | Non-installable router, registry, and bounded Unix listener. | Serializes every Host call and intentionally remains outside the package export. |
+| `photospiderd` | Installed foreground process shell under `apps/photospiderd/`. | Owns one embedded Host, self-pipe signal policy, protected socket, and deterministic cleanup. |
 
 Remaining and recently resolved interface leaks:
 
@@ -232,8 +238,8 @@ tests/
   verification/
 ```
 
-All existing backend, plugin, and maintained test code now uses the non-IPC
-parts of this layout. Issue #36 owns creation of `src/lib/ipc/` and
+All existing backend, plugin, maintained test, and version 1 IPC code now uses
+this layout. Issue #36 created `src/lib/ipc/`, `include/photospider/ipc/`, and
 `apps/photospiderd/` together with real daemon behavior. Issue #38 owns the
 final `include/photospider/{plugin,scheduler}/` contracts and removal of the
 eight transitional extension headers; this physical move does not add a shim
@@ -266,7 +272,8 @@ Recommended final targets:
 | `photospider_ipc_client` | Static | Yes | Client-side IPC adapter for daemon frontends. |
 | `photospider_cli_common` | Static | No | CLI command parser, REPL, TUI, autocomplete. |
 | `graph_cli` | Executable | Yes | Basic interactive frontend. |
-| `photospiderd` | Executable | Yes | Background daemon that owns `Kernel` and IPC server. |
+| `photospider_ipc_server_internal` | Static | No | Version 1 router, session registry, protected listener, and worker lifecycle. |
+| `photospiderd` | Executable | Yes | Foreground daemon that owns one embedded `ps::Host` and the IPC server. |
 | operation plugins | Shared | Optional | Dynamically loaded operation extensions. |
 | scheduler plugins | Shared | Optional | Dynamically loaded scheduler extensions. |
 
@@ -280,7 +287,7 @@ graph TD
     compute["photospider_compute_internal"] --> libphotospider
     plugin_host["photospider_plugin_host_internal"] --> libphotospider
     scheduler["photospider_scheduler_internal"] --> libphotospider
-    ipc_client["photospider_ipc_client STATIC"] --> graph_cli
+    ipc_client["photospider_ipc_client STATIC"] --> future_frontend["future daemon frontend"]
     libphotospider --> graph_cli
     libphotospider --> photospiderd
     ipc_server["daemon IPC server implementation"] --> photospiderd
@@ -340,9 +347,12 @@ CMake rules:
 - `apps/graph_cli/include/graph_cli/**` is a private application include tree.
   CMake exposes it only to `photospider_cli_common`, `graph_cli`, and focused
   CLI tests; install rules continue to copy only `include/photospider/**`.
-- `graph_cli` should link `libphotospider` for local mode and
-  `photospider_ipc_client` for daemon mode.
-- `photospiderd` should link `libphotospider` and own the IPC server.
+- `graph_cli` currently links only `libphotospider` and remains local/embedded;
+  remote CLI mode is later work.
+- `photospiderd` links `libphotospider` plus the non-installed IPC server and
+  owns one embedded `ps::Host`. The installed client target contains its codec
+  objects directly and exports no dependency on the backend, JSON target, or
+  server-internal target.
 - Operation plugins should not link to a broad shared backend merely to reach
   registry symbols. The current implementation uses host-provided
   `OperationPluginRegistrar` callbacks and the versioned
@@ -352,19 +362,19 @@ CMake rules:
 
 ## Daemon Shape
 
-`photospiderd` should be an executable with a small process shell and a deep
-host module behind it.
+`photospiderd` is an executable with a small process shell and a deep Host-only
+server module behind it.
 
 Process responsibilities:
 
-- load configuration
-- create and own one `Kernel`
-- initialize plugin directories and scheduler plugin discovery
-- expose graph lifecycle, compute, inspection, scheduler, event, and plugin
-  control through IPC
-- enforce per-user socket permissions
-- handle shutdown signals and graceful graph/runtime stop
-- write logs, pid files, and runtime metadata outside graph cache directories
+- create and own one embedded `ps::Host`
+- expose ping/version, graph load/close/list, and graph/node/dependency-tree
+  inspection through typed version 1 IPC
+- enforce per-user directory/socket permissions and safe live/stale handling
+- translate SIGINT/SIGTERM through a self-pipe and perform deterministic worker,
+  session, Host, and socket cleanup
+- remain foreground-only, without a protocol shutdown method, pid file, TCP
+  listener, or daemonizing fork
 
 It should not duplicate graph or compute logic. All graph-state operations still
 flow through the same host interface used by in-process frontends.
@@ -393,20 +403,27 @@ graph and compute semantics.
 
 ## IPC Protocol Direction
 
-Recommended first transport:
+The exact maintained version 1 wire, typed client, opaque-session, socket, and
+shutdown contract is `IPC-Protocol-v1.md`; this section places that implemented
+slice in the longer migration direction.
+
+Implemented version 1 transport:
 
 - Unix domain socket on macOS/Linux.
-- Named pipe or local TCP loopback can be added later for Windows.
+- IPC is disabled outside macOS/Linux; named pipes remain later Windows work.
 - No remote TCP listener by default.
-- Socket path should be per-user, for example under `$XDG_RUNTIME_DIR` when
-  available or a macOS user cache/runtime directory.
-- Socket permissions should be user-only.
+- Socket path is per-user under a valid `$XDG_RUNTIME_DIR`, otherwise under
+  `/tmp/photospider-<uid>`.
+- Daemon-created directories are `0700`; the socket is `0600`.
+- A persistent mode-`0600` `${socket}.lock` is opened without following
+  symlinks and held with nonblocking exclusive `flock` from stale-path
+  inspection through exact socket cleanup; the lock inode is never removed.
 
-Recommended first protocol:
+Implemented version 1 protocol:
 
-- Length-prefixed JSON-RPC-style request/response frames.
-- Every request has an id, method name, params object, and optional client
-  capability version.
+- Four-byte big-endian bounded length followed by UTF-8 JSON object text.
+- Every request has required integer `protocol_version`, nonempty bounded id,
+  method name, and params object; duplicate keys are rejected.
 - Every response has the same id, either a result object or an error object.
 - Notifications can be added for event streams after request/response methods
   are stable.
@@ -416,14 +433,14 @@ multi-line diagnostics, and future binary metadata make framing ambiguous.
 Avoid gRPC as the first step unless the project intentionally accepts generated
 code, a larger dependency surface, and a more complex plugin/build story.
 
-Initial method groups:
+Implemented and deferred method groups:
 
 | Group | Example methods | Notes |
 | --- | --- | --- |
-| daemon | `daemon.ping`, `daemon.shutdown`, `daemon.version` | No graph required. |
-| graph | `graph.load`, `graph.close`, `graph.list`, `graph.reload`, `graph.save` | Uses graph names or opaque session ids, never pointers. |
-| compute | `compute.run`, `compute.run_async`, `compute.cancel`, `compute.status` | Async can start as polling before streaming. |
-| inspect | `inspect.graph`, `inspect.node`, `inspect.dependency_tree`, `inspect.dirty` | Returns value snapshots. |
+| daemon | `daemon.ping`, `daemon.version` | Implemented without Host locking. No `daemon.shutdown`. |
+| graph | `graph.load`, `graph.close`, `graph.list` | Implemented with preserved Host names plus daemon-generated opaque ids. |
+| inspect | `inspect.graph`, `inspect.node`, `inspect.dependency_tree` | Implemented through copied Host snapshots. |
+| compute | polling, cancellation, image result transport | Deferred to issue #37. |
 | scheduler | `scheduler.types`, `scheduler.get`, `scheduler.set`, `scheduler.trace` | Mirrors current CLI scheduler features. |
 | plugins | `plugins.scan`, `plugins.load`, `plugins.unload_all`, `plugins.list` | The unique process `PluginManager` retains operation-plugin handles; Hosts expose the control surface without owning a second lifetime map. |
 | events | `events.next`, `events.drain` | Polling first; subscription later. |
@@ -446,10 +463,10 @@ Error rule:
 
 Concurrency rule:
 
-- The daemon request router may accept concurrent clients.
-- Per-graph graph-state mutation remains serialized by `GraphStateExecutor`.
-- Read-only inspection can still use the host interface rather than direct
-  access to `GraphModel`.
+- The daemon accepts at most 32 tracked client workers.
+- Because Host does not promise thread safety, every Host call uses one
+  daemon-owned mutex; socket IO never holds it.
+- Ping/version and protocol validation do not acquire the Host mutex.
 - Long-running compute should return request ids that can be polled and later
   cancelled when the compute commit policy supports it.
 
@@ -493,12 +510,13 @@ separate extension-boundary change.
      live under explicit unit/integration/fixture/support/verification roles.
    - Physical movement preserves existing target and test identity. Internal
      target renames or redesign are not implied.
-6. **Future daemon work:** Add `apps/photospiderd/` with process lifecycle and
-   the actual server boundary in issue #36.
-7. **Future IPC work:** Add IPC client and server.
-   - Start with local socket, length-prefixed JSON request/response, and graph
-     lifecycle/inspection methods.
-   - Add compute, events, and cancellation after basic lifecycle is stable.
+6. **Completed daemon slice:** `apps/photospiderd/` now owns foreground process,
+   self-pipe signal, protected socket, bounded workers, and deterministic
+   cleanup behavior.
+7. **Completed IPC version 1 graph slice:** The installable typed client and
+   non-installed server implement bounded/correlated graph lifecycle and
+   inspection. Compute, events, image results, and cancellation remain issue
+   #37.
 8. **Separate plugin-boundary work:** Tighten plugin SDK in issue #38.
    - Replace direct plugin dependency on full `Node` and global registry symbols
      with a narrow operation contract and host-provided registration table.
@@ -512,8 +530,9 @@ For any implementation change following this document:
   local full build or complete CTest/JUnit pass is not a standing requirement.
   GitHub Actions is the remote integration environment; do not add Docker or
   local `linux/amd64` emulation as a routine preflight.
-- Build `libphotospider` or `graph_cli` when the change affects that target;
-  `photospiderd` remains a future daemon target until the daemon slice lands.
+- Build `photospider_ipc_client`, `photospider_ipc_server_internal`,
+  `photospiderd`, and focused IPC tests when the daemon boundary changes;
+  `graph_cli` remains an embedded/local regression target.
 - For static package work, keep the package consumer smoke test in CTest because
   it executes the real producer build/install, external find-package,
   public-header compile/link/run, installed export/dependency, platform, and
@@ -544,17 +563,14 @@ For any implementation change following this document:
   omitted or cannot be matched to a compile command.
   This Doxygen/source-quality audit is a documented manual tool and is not a
   CTest or CI entry.
-- Add an IPC integration test that starts `photospiderd`, sends requests, and
-  checks response JSON against expected output.
+- Maintain the real-process IPC integration test that starts `photospiderd`
+  and exercises the public typed client plus malformed raw frames.
 - For daemon lifecycle changes, cover startup, graph load, compute or
   inspection, client disconnect, signal shutdown, and socket cleanup behavior.
 
 ## Open Decisions
 
-These are the decisions that should be resolved before implementation:
-
-- Whether the first daemon transport is Unix domain socket only, or whether
-  Windows named-pipe support is required in the same change.
+These decisions remain for later protocol slices:
 - Whether `graph_cli` should default to local in-process mode forever, or should
   auto-connect to `photospiderd` when a daemon socket exists.
 - Whether compute image results should initially be file-only, or whether an

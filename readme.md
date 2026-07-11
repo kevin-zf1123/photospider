@@ -15,8 +15,9 @@ and Metal hooks all coexist. For architecture details, start with
 | Path | Purpose |
 | --- | --- |
 | `apps/graph_cli/` | Private `graph_cli` application tree: entry point, commands, REPL/TUI, autocomplete, configuration, headers, and help resources. |
-| `src/lib/` | Role-owned backend implementation and private headers: core, graph, compute, runtime, Host, plugin, scheduler, benchmark, and adapters. |
-| `include/photospider/` | The only installable header tree, containing public Host and core contracts. |
+| `apps/photospiderd/` | Foreground macOS/Linux daemon process shell and self-pipe signal policy. |
+| `src/lib/` | Role-owned backend implementation and private headers: core, graph, compute, runtime, Host, plugin, scheduler, benchmark, adapters, and the internal IPC server/router. |
+| `include/photospider/` | The only installable header tree, containing public Host/core contracts and the conditional typed IPC client. |
 | `plugins/ops/` | Repository-owned operation plugins, including the private Metal operation implementation. |
 | `plugins/schedulers/` | Repository-owned scheduler plugins. |
 | `tests/unit/` | Isolated contract tests. |
@@ -39,6 +40,8 @@ Required for the main build:
 - `yaml-cpp`
 - Threads
 - FTXUI, either from `extern/ftxui` or an installed CMake package
+- `nlohmann_json` 3.9+ when `PHOTOSPIDER_BUILD_IPC=ON` (the default on
+  macOS/Linux); it remains private to IPC implementation
 
 Optional or test-only dependencies:
 
@@ -76,6 +79,12 @@ Build the CLI and backend:
 cmake --build build --target graph_cli -j
 ```
 
+On macOS/Linux, build the typed IPC client and foreground daemon with:
+
+```bash
+cmake --build build --target photospider_ipc_client photospiderd -j
+```
+
 The executable is written to:
 
 ```text
@@ -92,7 +101,12 @@ Useful build options:
 cmake -S . -B build -DBUILD_TESTING=ON
 cmake -S . -B build -DUSE_ASAN=ON
 cmake -S . -B build -DUSE_TSAN=ON
+cmake -S . -B build -DPHOTOSPIDER_BUILD_IPC=OFF
 ```
+
+`PHOTOSPIDER_BUILD_IPC` defaults to `ON` on macOS/Linux and `OFF` elsewhere.
+Forcing it on on an unsupported platform fails configuration. With it off, the
+package installs neither IPC headers nor the IPC client/daemon targets.
 
 ## Test
 
@@ -139,6 +153,32 @@ Start the REPL with no preloaded graph:
 ```bash
 ./build/bin/graph_cli
 ```
+
+Start the local version 1 daemon on its protected per-user socket:
+
+```bash
+./build/bin/photospiderd
+```
+
+Or choose an explicit absolute socket path in an already protected directory:
+
+```bash
+mkdir -m 700 /tmp/photospider-demo
+./build/bin/photospiderd --socket /tmp/photospider-demo/daemon.sock
+```
+
+`photospiderd` stays in the foreground and shuts down cleanly on SIGINT or
+SIGTERM. It serializes same-socket startup with a persistent mode-`0600`
+`${socket}.lock` file; the file intentionally remains after shutdown so later
+instances synchronize on the same inode. Its typed installable client is
+`Photospider::photospider_ipc_client`, with headers under
+`photospider/ipc/`. Version 1 covers ping/version, graph load/close/list, and
+graph/node/dependency-tree inspection only. Compute, images, polling,
+cancellation, scheduler/plugin/event calls, `daemon.shutdown`, and
+`graph_cli --connect` are not implemented in this slice. `graph_cli` therefore
+continues to use its embedded Host and all local commands below retain their
+existing meaning. See `docs/codebase-structure/IPC-Protocol-v1.md` for the wire,
+opaque-session, permission, and error contracts.
 
 The command-line parser currently supports graph loading, YAML output, tree
 printing, traversal display, cache clearing, config selection, and REPL entry.

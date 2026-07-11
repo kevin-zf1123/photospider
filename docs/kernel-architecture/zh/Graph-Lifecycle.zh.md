@@ -14,6 +14,31 @@ Kernel
 
 图和运行时应被视为一对一的所有权单元。
 
+## Daemon-Owned Session Identity
+
+`photospiderd` 拥有一个 embedded `ps::Host`；client 从不拥有其 `GraphRuntime` lifetime。
+Version 1 router 会在 `GraphLoadRequest.session` 中保留 caller 的 safe `session_name`，因此既有
+`<root>/<session>` 与 cache-directory 语义不变。它返回另一个 128-bit opaque IPC session id，
+并在 private bidirectional mapping 中保存 Host 返回的精确 `GraphSessionId`。
+
+Load 在 registry 与 Host boundary 之间保持 transactional：先 reserve opaque id，再调用 Host，
+仅在 Host success 后发布 opaque、精确 Host-id 与 display-name 三个 index。Host exception 会
+删除 reservation；publication failure 会先删除 reservation，再 best-effort 补偿性关闭 Host
+session。Host 契约要求 load 抛出异常时不留下新发布的 session。Embedded
+Kernel/Host 通过在发布前预分配 result identity，再使用 `noexcept` move 提交，
+来满足该契约。`graph.list` 会把 committed mapping 与 `Host::list_graphs()`
+reconcile；发现差异时返回 invariant error，而不是暴露 untracked Host name。
+Client disconnect 从不调用 `close_graph`；另一个 client 仍可 list/inspect
+daemon-owned session。
+
+Public Host contract 不承诺 thread safety，因此 daemon 使用一个 dedicated mutex 包围每个 Host
+call，包括 read-only list 与 inspection。Protocol validation 以及 `daemon.ping`/
+`daemon.version` 不获取该 mutex；socket IO 期间绝不持有它。Signal shutdown 会停止 accept、
+唤醒并 join client worker，随后尝试关闭所有 active Host session，在 persistent lifecycle lock 仍
+持有时移除精确 socket，释放该 lock，最后才进入 Host destruction。Lock file 会保留以提供稳定的
+跨进程同步。完整 wire/socket contract 维护在
+`docs/codebase-structure/zh/IPC-Protocol-v1.zh.md`。
+
 ## 新图加载
 
 加载新图应创建新的 `GraphRuntime`，并且只有 YAML 验证成功后才通过 `Kernel` 暴露它。
@@ -64,3 +89,8 @@ Clear 应重置：
 图加载、reload 和编辑失败通过 public `ps::Host` status/error value 对 frontend 可见。在
 embedded 模式下，Host adapter 会把内部 `Kernel` 与 `InteractionService` 的失败诊断映射到该
 public surface。Frontend 既不会调用这些内部 facade，也不需要从部分变化的图中推断失败。
+
+在 daemon mode 下，version 1 会把同一 `OperationStatus` 映射到 `graph` error domain，并使用
+显式 `GraphErrc` number/name pair。Framing、envelope 与 parameter error 保持在 `protocol`
+domain；本地 socket failure 保持为 `IpcErrorDomain::Transport`。Diagnostic text 不是 branching
+contract，transport failure 也不会被改写为 graph IO。
