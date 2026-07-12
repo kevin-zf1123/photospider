@@ -124,7 +124,21 @@ owned async workers are stopped, woken, interrupted, completed as Transport
 performs strict same-user artifact validation while the delivery lease is
 active, creates a shared read-only mapping, and then releases the matching
 job/lease. The final image reference unmaps and closes the retained descriptor
-exactly once. Compute cancellation,
+exactly once.
+
+Every accepted compute reports `cancellable:false` and advances only through
+`queued`, `running`, `succeeded`, or `failed`. A terminal failure is a normal
+successful polling response containing an immutable exact Graph- or
+Daemon-domain `OperationStatus`; RPC/admission/lookup failures remain separate.
+Across embedded and IPC calls, the sole status vocabulary distinguishes
+`none`, `transport`, `protocol`, `graph`, and `daemon`, and callers must branch
+on domain/code/name rather than diagnostic text. The
+daemon retains at most 64 active jobs, 256 terminal jobs, 64 image artifacts,
+one GiB of artifact bytes with a 512-MiB per-artifact ceiling, 8,192 compute
+events per session, and 65,536 scheduler-trace entries per session. Event
+drains are destructive pages of at most 1,024 entries; trace pages are
+non-destructive pages of at most 4,096 entries, and every frame is capped at
+16 MiB. Compute cancellation,
 `daemon.shutdown`, TCP, Windows transport, and `graph_cli --connect` remain
 unavailable. The CLI options and REPL commands in this manual remain local
 embedded-Host behavior and do not auto-connect to a daemon. See
@@ -385,9 +399,11 @@ Build and run focused IPC product tests on macOS/Linux:
 ```bash
 cmake --build build --target photospider_ipc_client \
   photospider_ipc_server_internal photospiderd test_ipc_protocol test_ipc_host \
-  test_ipc_daemon public_header_self_containment -j
+  test_compute_request_registry test_collection_snapshot_registry \
+  test_output_store test_event_stream_boundaries test_ipc_daemon \
+  public_header_self_containment -j
 ctest --test-dir build --output-on-failure \
-  -R '^(FrameCodec|ProtocolEnvelope|IntegerCodec|ProtocolErrors|ProtocolParams|ProtocolGraphLoad|InspectionJson|SessionRegistry|ClientLifecycle|ClientResultValidation|IpcHost|IpcDaemon|StaticProductConsumerSmoke|IpcDisabledInstallSmoke|PublicHeaderSelfContainment)'
+  -R '^(FrameCodec|ProtocolEnvelope|IntegerCodec|ProtocolErrors|ProtocolParams|ProtocolGraphLoad|ProtocolGraphClose|ProtocolOperationPlugins|HostRoutedGraphStateProtocolTest|StableInspectionPagingProtocolTest|InspectionJson|SessionRegistry|ComputeRequestRegistry|CollectionSnapshotRegistry|OutputStore|ComputeEventRing|SchedulerTraceRing|UnixSocketConnect|ClientLifecycle|ClientSurface|ClientCollectionAggregation|ClientJobValidation|ClientRetryPolicy|ClientResultValidation|IpcHost|IpcDaemon|IpcDaemonOperationPlugins|IpcDaemonSchedulers|IpcObservationFixtureDaemon|StaticProductConsumerSmoke|IpcDisabledInstallSmoke|PublicHeaderSelfContainment)'
 ```
 
 Run registered CTest tests:

@@ -186,7 +186,16 @@ the retained descriptor exactly once. An IPC-only installed CMake consumer uses
 `Photospider::photospider_ipc_client`; that component resolves only Threads.
 Omitting components keeps the embedded package default and its OpenCV,
 `yaml-cpp`, Threads, and applicable Apple framework dependencies. Compute
-cancellation, `daemon.shutdown`, TCP, Windows
+jobs publish only `queued`, `running`, `succeeded`, or `failed`; every
+submission reports `cancellable:false`. Accepted failures remain immutable
+terminal values with exact nested Graph or Daemon status instead of being
+mistaken for failed polling RPCs. The sole public `OperationStatus` separately
+keeps `none`/`transport`/`protocol`/`graph`/`daemon` domains distinguishable.
+Production
+limits include 64 active jobs, 256 retained terminal jobs, 64 artifacts, one
+GiB of retained artifact bytes, 512 MiB per artifact, 8,192 compute events,
+65,536 scheduler traces, and a 16-MiB maximum frame. Compute cancellation,
+`daemon.shutdown`, TCP, Windows
 transport, and `graph_cli --connect` remain unavailable. `graph_cli` therefore
 continues to use its embedded Host and all local commands below retain their
 existing meaning. See `docs/codebase-structure/IPC-Protocol-v1.md` for the wire,

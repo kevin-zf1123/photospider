@@ -12,6 +12,12 @@ Host seam。Parallel planned work 现在会通过 scheduler-owned task runtime d
 scheduler dispatch 路径。Scheduler-backed parallel compute 会在该 graph-state 边界内使用
 scheduler runtime 执行 ready task callback。
 
+在 macOS/Linux 上，同一个 public Host seam 也具有完整的 installed IPC adapter。
+`create_ipc_host(socket_path)` 通过精确的 typed 55-method 本地协议实现当前全部 53 个非析构
+virtual；`photospiderd` 拥有另一个 embedded Host，并让每项 backend operation 经由该 Host
+进入。这个 remote path 增加 polling job、bounded registry 与 protected output artifact，但不
+暴露 backend ownership。`graph_cli` 仍构造 embedded adapter，不会自动连接 daemon。
+
 代码可用且可测试，但部分边界尚未最终稳定。尤其是 `Kernel` 和 `ComputeService` 仍协调大量行为，未来可能移动到更窄的服务中。
 
 ## 构建模块
@@ -26,6 +32,9 @@ scheduler runtime 执行 ready task callback。
 | `photospider_plugin` | 动态操作插件管理器和加载器。 |
 | `photospider_compute` | 仅用于构建的交互运行时、调度器、计算服务与事件 helper。 |
 | `photospider` | 静态可安装后端产品，归档文件名为 `libphotospider`，由 CLI 和 embedded Host 前端链接。它只安装 `include/photospider/**`，并导出 `Photospider::photospider`；operation plugin 通过 `OperationPluginRegistrar` 和 `register_photospider_ops_v1` 注册，而不是为了 registry 状态链接该产品。 |
+| `photospider_ipc_client` | 已安装的 static typed Unix IPC client 与完整 IPC Host adapter。它导出 `Photospider::photospider_ipc_client`，实现全部 55 个 direct Client method 和当前全部 53 个 Host virtual，且不链接 backend，也不暴露 JSON/POSIX implementation type。 |
+| `photospider_ipc_server_internal` | 不安装的 bounded Unix listener、typed router，以及 private session/job/snapshot/output registry。它让所有 backend access 经由一个 daemon-owned Host 串行执行。 |
+| `photospiderd` | 已安装的 foreground macOS/Linux daemon，拥有一个 embedded Host、protected per-user socket/output store 与确定性的 joined shutdown。 |
 | `photospider_cli_common` | 从 `apps/graph_cli/src/` 构建、不可安装的 application helper：REPL 命令、TUI 编辑器、自动补全和 CLI 配置。 |
 | `graph_cli` | 进程入口位于 `apps/graph_cli/main.cpp` 的终端用户可执行文件。 |
 
@@ -50,6 +59,11 @@ Package 边界：
 - `cmake --install` 会安装静态 `photospider` 归档、`include/photospider/**` public header tree、
   `PhotospiderTargets.cmake` 和 `PhotospiderConfig.cmake`。Unix-like 工具链中的归档名为
   `libphotospider.a`，MSVC 中为 `photospider.lib`。
+- 在 macOS/Linux 且 `PHOTOSPIDER_BUILD_IPC=ON` 时，安装还会导出
+  `Photospider::photospider_ipc_client`，安装精确三个 `include/photospider/ipc/` header 与
+  `photospiderd`，同时让 server library 保持 private。IPC-only consumer 请求
+  `COMPONENTS ipc_client` 时只解析 `Threads`；省略 component 则保留 embedded 默认行为及其
+  backend dependency。
 - `Photospider::photospider` 为 consumer 携带 `PHOTOSPIDER_STATIC`，并让 `src/lib/` include root
   只对仓库内部构建私有。在 build tree 中，该 target 的 generated public include root 只包含
   `photospider/` forwarding header。CMake 会跟踪 header 的新增和删除，wrapper 直接读取实时
@@ -72,10 +86,17 @@ Package 边界：
 
 ```mermaid
 graph TD
-    CLI["CLI / REPL / TUI"] --> Host["ps::Host"]
-    Frontend["Embedded frontend"] --> Host["ps::Host"]
-    Host --> EmbeddedHost["embedded Host adapter"]
+    CLI["CLI / REPL / TUI"] --> EmbeddedHost["embedded Host adapter"]
+    Frontend["Embedded frontend"] --> Host["ps::Host seam"]
+    RemoteFrontend["显式 IPC frontend"] --> Host
+    Host --> EmbeddedHost
+    Host --> IpcHost["完整 IPC Host adapter"]
+    IpcHost --> Client["typed 55-method Client"]
+    Client --> Socket["protected Unix socket"]
+    Socket --> Daemon["photospiderd"]
+    Daemon --> DaemonHost["daemon-owned embedded Host"]
     EmbeddedHost --> InteractionService
+    DaemonHost --> InteractionService
     EmbeddedHost --> PluginManager["进程级 PluginManager"]
     InteractionService --> Kernel
 
@@ -109,6 +130,12 @@ graph TD
 operation plugin。任意 Host 执行 load 或显式 unload，所有 Host 都会观察到相同的进程级 operation view；
 callback 与返回值 lease 会在 registry 移除后继续保持插件代码映射，直到在途状态完成销毁。
 
+IPC Host 只拥有 client-side connection、interruptible polling worker 与 mapped image lifetime。
+Daemon session、accepted job、snapshot、output lease 与 backend Host 仍归 daemon 所有。销毁
+adapter 会唤醒并 join 自有 poller，但不会关闭 session、卸载 plugin 或重复 mutation。精确的
+socket、protocol、status、quota 与 artifact lifecycle 定义在
+`../../codebase-structure/zh/IPC-Protocol-v1.zh.md`。
+
 ## 主要组件
 
 | 组件 | 角色 |
@@ -116,6 +143,10 @@ callback 与返回值 lease 会在 registry 移除后继续保持插件代码映
 | `Kernel` | 多图 facade、服务 owner、运行时 bootstrapper、顶层图/缓存/计算 API。 |
 | `ps::Host` | `include/photospider/host` 下的 public frontend interface；返回复制的 request/result/snapshot value，并隐藏 Kernel、GraphModel 和 GraphRuntime。 |
 | `embedded Host adapter` | 由每 adapter 独立的 `Kernel` 和 `InteractionService` 状态支撑的 in-process Host 实现；所有 adapter 共享进程级 operation plugin owner。 |
+| `IPC Host adapter` | 完整的 installed Host 实现，只由 typed short-lived Client call 支撑。它组合 polling compute、join async worker、保留精确 status domain，并把 protected image artifact 映射为只读。 |
+| `ps::ipc::Client` | Move-only direct client，为精确排序的 55-method version 1 inventory 提供 owned value；它验证 correlated result shape，且不暴露 raw JSON call。 |
+| `photospiderd` | Foreground local service，拥有一个 embedded Host 并串行化全部 Host call，同时独立服务 metadata 与 job polling。 |
+| daemon registry | 对 opaque session、compute job、stable collection snapshot、protected output 与 delivery lease 的 private bounded ownership；它们都不是 public backend handle。 |
 | `GraphRuntime` | 每图资源容器，包含模型、graph-state executor、固定容量 scheduler trace ring、调度器和平台 context。 |
 | `GraphModel` | 图状态持有者：私有节点存储、拓扑邻接索引、缓存根目录、计时数据、quiet/skip-save 标志。 |
 | `InteractionService` | 由 embedded Host adapter 和 backend code 使用的内部 `Kernel` wrapper；包括 CLI 在内的 frontend 都使用 public Host seam。 |
@@ -182,6 +213,30 @@ callback 与返回值 lease 会在 registry 移除后继续保持插件代码映
    不能被替换或销毁。
 8. 可恢复 backend failure 会转换成 Host status/result value，而资源耗尽保持异常语义：非析构
    Host method 和被消费的 async future 可以按可安装接口的文档传播 `std::bad_alloc`。
+
+典型 IPC Host 计算流程：
+
+1. 显式 daemon frontend 通过 `create_ipc_host(socket_path)` 创建 `ps::Host`；构造过程不会连接或
+   启动 daemon。
+2. Compute call 打开 short-lived typed Client，只 submit 一次，并收到带
+   `cancellable:false` 的 `queued`。唯一 daemon worker 在恰好一次 embedded Host compute call
+   后，让 job 经由 `running` 进入 immutable `succeeded` 或 `failed`。
+3. Adapter 立即执行首次 poll，随后按 10/20/40/80/160/320/500 ms 等待，并重复 500-ms 上限，
+   不设置同步总超时。每次 status RPC 只尝试一次；terminal state、首次精确 RPC failure 或
+   adapter stop 会结束 polling。
+4. Terminal Host/output failure 是正常 correlated job value；其中 nested `OperationStatus` 会
+   保留精确 Graph 或 Daemon 语义，RPC、admission 与 lookup failure 则保持独立。在 public Host
+   boundary 上，唯一 status vocabulary 能区分 `none`、`transport`、`protocol`、`graph` 与
+   `daemon`，transport 绝不会变成 graph IO。
+5. Image mode 在 delivery lease 下验证 same-user mode-`0600` artifact，把 tight row 映射为只读，
+   随后尝试匹配的 job/lease release。最后一个 shared image owner 恰好 unmap/close 一次。
+6. Async adapter destruction 会发出 stop、唤醒 wait、interrupt active descriptor、用 Transport
+   `client_stopped` (5) 完成 unfinished future，并 join worker；它不会 resubmit，也不会关闭
+   daemon-owned session。
+
+Production bound 包括 64 个 active 与 256 个 retained terminal compute job；64 个 artifact、
+总计一 GiB retained byte、每 artifact 512 MiB；8,192 个 compute event；以及 65,536 个
+scheduler-trace entry。完整 method 映射与全部 string/page/snapshot/frame limit 维护在协议文档中。
 
 ## 有界 Event 与 Trace 观察
 

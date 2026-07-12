@@ -41,12 +41,23 @@ reconcile；发现差异时返回 invariant error，而不是暴露 untracked Ho
 Client disconnect 从不调用 `close_graph`；另一个 client 仍可 list/inspect
 daemon-owned session。
 
+`graph.close` 会使用 compute admission 共用的 daemon lifecycle gate。它会原子地把 mapping
+标记为 closing，以 Graph `not_found` 拒绝每个新的 session-scoped Host/compute admission，并
+等待该 session 已 admitted 的 Host call 与全部 queued/running job。已接受 job 的
+status/result/release 仍可使用，因为它们是 job-scoped，且不进入 Host。只有这些计数归零后，
+daemon 才获取 Host mutex 并调用 `Host::close_graph()`。Success 会移除 mapping；Host
+`NotFound` 会在保留 failure 的同时移除 stale mapping；其他 Host failure 会原子地重新开放
+admission 并保留 mapping。
+
 Public Host contract 不承诺 thread safety，因此 daemon 使用一个 dedicated mutex 包围每个 Host
 call，包括 read-only list 与 inspection。Protocol validation 以及 `daemon.ping`/
 `daemon.version` 不获取该 mutex；socket IO 期间绝不持有它。Signal shutdown 会停止 accept、
-唤醒并 join client worker，随后尝试关闭所有 active Host session，在 persistent lifecycle lock 仍
-持有时移除精确 socket，释放该 lock，最后才进入 Host destruction。Lock file 会保留以提供稳定的
-跨进程同步。完整 wire/socket contract 维护在
+停止 session/compute/snapshot admission 与新 output lease，关闭 listener，唤醒并 join client
+worker，drain 已接受 job，并 join 唯一 compute worker。随后它会移除 terminal job ownership、
+清空 stable collection snapshot、停止 output publication、等待 active delivery lease release 或
+expire，并在尝试关闭 active Host session 之前 identity-clean/close OutputStore。只有 registry 与
+Host cleanup 完成后，它才会在 persistent lifecycle lock 仍持有时移除精确 socket，释放该 lock，
+最后 destroy Host state。Lock file 会保留以提供稳定的跨进程同步。完整 wire/socket contract 维护在
 `docs/codebase-structure/zh/IPC-Protocol-v1.zh.md`。
 
 ## 新图加载
