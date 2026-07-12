@@ -25,6 +25,23 @@ def run(command: list[str], cwd: Path) -> None:
     subprocess.run(command, cwd=cwd, check=True)
 
 
+def run_expect_failure(command: list[str], cwd: Path) -> None:
+    """@brief Require one product configuration command to fail.
+
+    @param command Executable and arguments passed without a shell.
+    @param cwd Working directory for the child process.
+    @return None after a nonzero child status.
+    @throws OSError If the command cannot start.
+    @throws RuntimeError If the child unexpectedly succeeds.
+    @note Inherited streams preserve the package component diagnostic in CTest.
+    """
+
+    print("$ " + " ".join(command), flush=True)
+    completed = subprocess.run(command, cwd=cwd, check=False)
+    if completed.returncode == 0:
+        raise RuntimeError("expected package component configure to fail")
+
+
 def remove_tree(path: Path, repo: Path) -> None:
     """@brief Remove one validated transient build/install tree.
 
@@ -67,6 +84,10 @@ def main() -> int:
     prefix = work / "install"
     consumer_source = work / "consumer"
     consumer_build = work / "consumer-build"
+    missing_ipc_source = work / "missing-ipc-component"
+    missing_ipc_build = work / "missing-ipc-component-build"
+    optional_ipc_source = work / "optional-ipc-component"
+    optional_ipc_build = work / "optional-ipc-component-build"
     try:
         run(
             [
@@ -109,11 +130,7 @@ def main() -> int:
         )
 
         forwarder = (
-            build
-            / "generated"
-            / "photospider_public_include"
-            / "photospider"
-            / "ipc"
+            build / "generated" / "photospider_public_include" / "photospider" / "ipc"
         )
         forbidden_names = {
             "libphotospider_ipc_client.a",
@@ -138,6 +155,66 @@ def main() -> int:
         )
         if "photospider_ipc" in target_text or "photospiderd" in target_text:
             raise RuntimeError("IPC-disabled export advertises IPC targets")
+
+        optional_ipc_source.mkdir(parents=True)
+        (optional_ipc_source / "CMakeLists.txt").write_text(
+            "\n".join(
+                [
+                    "cmake_minimum_required(VERSION 3.16)",
+                    "project(optional_ipc_component LANGUAGES CXX)",
+                    "find_package(Photospider CONFIG",
+                    "  OPTIONAL_COMPONENTS ipc_client unknown_optional)",
+                    "if(NOT Photospider_FOUND)",
+                    '  message(FATAL_ERROR "optional IPC lookup failed package")',
+                    "endif()",
+                    "if(Photospider_ipc_client_FOUND OR",
+                    "   TARGET Photospider::photospider_ipc_client)",
+                    '  message(FATAL_ERROR "disabled optional IPC was advertised")',
+                    "endif()",
+                    "if(Photospider_unknown_optional_FOUND)",
+                    '  message(FATAL_ERROR "unknown optional component was found")',
+                    "endif()",
+                    "",
+                ]
+            ),
+            encoding="utf-8",
+        )
+        run(
+            [
+                args.cmake_executable,
+                "-S",
+                str(optional_ipc_source),
+                "-B",
+                str(optional_ipc_build),
+                f"-DCMAKE_PREFIX_PATH={prefix}",
+            ],
+            repo,
+        )
+
+        missing_ipc_source.mkdir(parents=True)
+        (missing_ipc_source / "CMakeLists.txt").write_text(
+            "\n".join(
+                [
+                    "cmake_minimum_required(VERSION 3.16)",
+                    "project(missing_ipc_component LANGUAGES CXX)",
+                    "find_package(Photospider CONFIG REQUIRED",
+                    "  COMPONENTS ipc_client)",
+                    "",
+                ]
+            ),
+            encoding="utf-8",
+        )
+        run_expect_failure(
+            [
+                args.cmake_executable,
+                "-S",
+                str(missing_ipc_source),
+                "-B",
+                str(missing_ipc_build),
+                f"-DCMAKE_PREFIX_PATH={prefix}",
+            ],
+            repo,
+        )
 
         consumer_source.mkdir(parents=True)
         (consumer_source / "CMakeLists.txt").write_text(

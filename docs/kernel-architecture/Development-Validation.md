@@ -55,22 +55,29 @@ All generated files remain in its transient work directory and are discarded
 after the run; the repository does not retain per-run reports for this test.
 
 When IPC is enabled, the package smoke builds and installs `photospider`,
-`photospider_ipc_client`, and `photospiderd`. It builds one external consumer
-of `Photospider::photospider` and a separate consumer that links only
-`Photospider::photospider_ipc_client`, constructs the non-inline client, and
-does not inherit the backend or JSON implementation target. That IPC-only
-consumer includes the installed protocol, Client, and Host-adapter headers,
+`photospider_ipc_client`, and `photospiderd`. It independently configures a
+default embedded consumer of `Photospider::photospider` and an IPC-only project
+that requests `COMPONENTS ipc_client`, disables OpenCV/`yaml-cpp` discovery,
+and links only `Photospider::photospider_ipc_client`. The latter therefore
+resolves only Threads and does not inherit the backend or JSON implementation
+target. That IPC-only consumer includes the installed protocol, Client, and Host-adapter headers,
 constructs `create_ipc_host()` without contacting a daemon, executes every
 safe public Client lifecycle symbol, and links a reference-only branch for all
-55 typed Client calls plus all 53 non-destructor Host virtuals. Package
+exact unique inventories of 55 typed Client calls plus all 53 non-destructor Host virtuals. Package
 inspection also requires the IPC archive and exact three-header surface,
-permits only `Threads::Threads` in the exported IPC link interface, and rejects
-backend, object, server-internal, JSON, source-tree, and POSIX-private leakage.
+permits only `Threads::Threads` in the exported IPC link interface, positively
+allows only the current C++ standard-library and installed `photospider/`
+public includes, and rejects raw JSON, socket-address/descriptor, file-identity,
+file-mapping, and backend declarations. This is the gate's exact boundary, not
+an exhaustive promise about every possible POSIX spelling.
 The durable
 `IpcDisabledInstallSmoke` configures a separate clean producer with
 `PHOTOSPIDER_BUILD_IPC=OFF` and `BUILD_TESTING=OFF`; it verifies that no IPC
 build forwarder, installed header, archive, executable, or exported target is
-advertised while an external embedded Host consumer still links and runs.
+advertised, a required `ipc_client` component fails discovery, and an external
+default embedded Host consumer still links and runs. Required unknown package
+components fail as well; omitting components or requesting `embedded` retains
+the existing backend dependency resolution.
 
 When the selected CMake generator exposes multiple configurations, the smoke
 uses that same generator for producer and consumer, checks each
