@@ -260,9 +260,11 @@ ownership token. The full wire schemas and bounds are maintained in
 `../codebase-structure/IPC-Protocol-v1.md`.
 
 `scheduler.trace` remains a separate bounded non-destructive observation
-route. The installed typed IPC Client still exposes only its original eight
-methods, while `scheduler.trace` and the eight scheduler control routes are
-members of the exact sorted 55-method `daemon.version.methods` inventory.
+route. The installed typed IPC Client exposes all nine scheduler routes,
+aggregates the two frozen collection views with exact cursor/offset validation,
+and performs each direct mutation or trace/status observation RPC once. All
+nine routes remain members of the exact sorted 55-method
+`daemon.version.methods` inventory.
 
 ## Scheduler Dispatch Boundary
 

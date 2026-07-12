@@ -22,9 +22,12 @@ product, migrated CLI application tree, role-owned backend source tree,
 explicit production-plugin homes, unit/integration test ownership, and the
 macOS/Linux version 1 daemon/IPC graph, inspection, polling-compute, protected
 image-output, bounded event/trace observation, and process-global operation-
-plugin router behavior. The installed typed IPC Client currently exposes the
-eight-method subset, scheduler-control routes are unavailable, and the plugin
-SDK follows the extension contracts documented below.
+plugin router behavior. The installed typed IPC Client now exposes owned calls
+for the exact 55-method surface, validates every typed result, and aggregates
+stable cursor pages into complete Host-shaped values. The complete IPC-backed
+Host, client-side artifact mapping, and final package-consumer contract remain
+in progress, while the plugin SDK follows the extension contracts documented
+below.
 
 Observed build targets in the current root `CMakeLists.txt`:
 
@@ -37,7 +40,7 @@ Observed build targets in the current root `CMakeLists.txt`:
 | `photospider` | Static installable backend product with archive name `libphotospider`. | Matches the desired static product and public Host shape while folding role-owned backend sources into one archive. |
 | `photospider_cli_common` | Static CLI command/TUI/autocomplete code plus the reusable `run_graph_cli` boundary under `apps/graph_cli/`. | Uses application-private headers and remains a non-installable helper. |
 | `graph_cli` | Process-policy-only entry point at `apps/graph_cli/main.cpp`. | Disables OpenCL, owns allocation-independent fatal exit policy, creates the embedded `Host` adapter, and has no daemon-client mode yet. |
-| `photospider_ipc_client` | Installable static typed Unix IPC client. | Implements only the eight version 1 graph/inspection methods; it does not link the backend or expose JSON/POSIX types. |
+| `photospider_ipc_client` | Installable static typed Unix IPC client. | Implements typed owned calls for all 55 version 1 methods, including strict job/output/page validation and stable collection aggregation; it does not link the backend or expose JSON/POSIX types. |
 | `photospider_ipc_server_internal` | Non-installable router, registry, and bounded Unix listener. | Serializes every Host call and intentionally remains outside the package export. |
 | `photospiderd` | Installed foreground process shell under `apps/photospiderd/`. | Owns one embedded Host, self-pipe signal policy, protected socket, and deterministic cleanup. |
 
@@ -446,15 +449,15 @@ Method groups and current wire availability:
 
 | Group | Example methods | Notes |
 | --- | --- | --- |
-| daemon | `daemon.ping`, `daemon.version` | Implemented without Host locking. `daemon.version.methods` returns the exact sorted 55-method inventory. The installed typed Client currently exposes only its original eight methods and has no raw-JSON call. |
+| daemon | `daemon.ping`, `daemon.version` | Implemented without Host locking. `daemon.version.methods` returns the exact sorted 55-method inventory. The installed typed Client exposes owned calls for every advertised method and has no raw-JSON call. |
 | graph | `graph.load`, `graph.close`, `graph.list`, `graph.reload`, `graph.save`, `graph.clear`, `graph.node_yaml.get`, `graph.node_yaml.set` | Implemented through Host. Status-only mutations use `result:{}`; clearing model state preserves the opaque session mapping. |
 | inspect | `inspect.graph`, `inspect.node`, `inspect.dependency_tree`, `inspect.node_ids`, `inspect.ending_nodes`, `inspect.roi_forward`, `inspect.roi_backward`, `inspect.dirty_region`, `inspect.compute_planning`, `inspect.recent_compute_planning`, `inspect.traversal_orders`, `inspect.traversal_details`, `inspect.trees_containing_node` | Implemented through copied Host values. Full-value collections use stable bounded cursor pages; node/ROI/dirty/current-planning values remain indivisible direct results. Host order and duplicates are preserved. |
 | dirty | `dirty.begin`, `dirty.update`, `dirty.end` | Implemented through one matching Host lifecycle mutation and return the copied dirty-region snapshot; the complete compact response size is preflighted before result-DOM allocation. |
 | cache | `cache.clear_all`, `cache.clear_drive`, `cache.clear_memory`, `cache.cache_all_nodes`, `cache.free_transient`, `cache.synchronize_disk` | Implemented as status-only Host calls; no backend cache handle or path enters a result. |
 | compute | `compute.submit`, `compute.status`, `compute.result`, `compute.release`, `compute.timing`, `compute.last_io_time`, `compute.last_error` | Polling jobs and diagnostics are routed. Submit/status/result use stable `{compute_id,session_id,state,cancellable,status,output}` values. Submit, status, status-mode result, empty-image result, and failed result keep `output` null. A terminal nonempty image result revalidates the protected artifact, refreshes one stable 60-second delivery lease, and returns the specified metadata object. Terminal release atomically returns `{compute_id,released:true}`, accepts an optional exact `delivery_id`, and can release its matching orphaned lease after normal job removal. Timing preflights its aggregate compact response size; last error is nested diagnostic data. |
-| scheduler | `scheduler.types`, `scheduler.description`, `scheduler.scan`, `scheduler.load`, `scheduler.loaded_plugins`, `scheduler.configure_defaults`, `scheduler.info`, `scheduler.replace`, `scheduler.trace` | Implemented only through matching Host calls and advertised in the exact 55-method inventory. Discovery/default control is process-global; info/replacement uses opaque session admission and shares graph-state serialization with compute/close. Type/plugin views are sorted stable cursor snapshots, trace paging remains bounded and non-destructive, and no scheduler/plugin ownership enters JSON. The installed typed Client does not yet expose these routes. |
-| plugins | `plugins.load_report`, `plugins.unload_all`, `plugins.seed_builtins`, `plugins.ops_sources`, `plugins.ops_combined_keys`, `plugins.ops_combined_sources` | Implemented only through matching Host calls and advertised in the exact 55-method inventory. Control is process-global, views are key-sorted stable cursor snapshots, and client disconnect or Host-adapter destruction does not unload a successful DSO. The installed typed Client does not yet expose these routes. |
-| events | `events.drain` | Bounded destructive event draining is routed through Host and advertised in the exact 55-method inventory. The installed typed Client does not yet expose this route. |
+| scheduler | `scheduler.types`, `scheduler.description`, `scheduler.scan`, `scheduler.load`, `scheduler.loaded_plugins`, `scheduler.configure_defaults`, `scheduler.info`, `scheduler.replace`, `scheduler.trace` | Implemented only through matching Host calls and advertised in the exact 55-method inventory. Discovery/default control is process-global; info/replacement uses opaque session admission and shares graph-state serialization with compute/close. The installed typed Client exposes every route, aggregates type/plugin snapshots, and validates bounded non-destructive trace pages without retaining scheduler/plugin ownership. |
+| plugins | `plugins.load_report`, `plugins.unload_all`, `plugins.seed_builtins`, `plugins.ops_sources`, `plugins.ops_combined_keys`, `plugins.ops_combined_sources` | Implemented only through matching Host calls and advertised in the exact 55-method inventory. The installed typed Client exposes every route, decodes exact reports, and aggregates key-sorted stable views; disconnecting a Client does not unload a successful process-owned DSO. |
+| events | `events.drain` | Bounded destructive event draining is routed through Host and exposed by the installed typed Client as one strictly validated, non-retried Host event batch. |
 
 Image payload rule:
 
@@ -586,14 +589,12 @@ separate extension-boundary change.
    self-pipe signal, protected socket, bounded workers, and deterministic
    cleanup behavior.
 7. **In-progress IPC version 1 complete-Host slice:** The installable typed
-   client still exposes the original bounded graph/inspection subset. The
-   non-installed server additionally implements graph mutation, remaining
-   inspection, polling compute, protected metadata-only image results with
-   stable delivery leases, bounded destructive compute events, and bounded
-   non-destructive scheduler traces. Process-global operation-plugin control,
-   exact reports, builtin seeding, and sorted stable views are also routed
-   through Host. Scheduler-control routes and a complete installed IPC Host are
-   unavailable; cancellation is also unavailable.
+   client exposes owned calls for all 55 methods, strictly validates common and
+   method-specific result shapes, performs each status or mutation RPC once,
+   aggregates all private stable cursor pages, and preserves output/delivery
+   lease metadata. The complete installed IPC Host, secure client-side artifact
+   mapping, and final package-consumer surface remain unavailable;
+   cancellation is also unavailable.
 8. **Separate plugin-boundary work:** Tighten plugin SDK in issue #38.
    - Replace direct plugin dependency on full `Node` and global registry symbols
      with a narrow operation contract and host-provided registration table.
