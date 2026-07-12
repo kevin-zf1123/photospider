@@ -1,4 +1,5 @@
 #include <arpa/inet.h>
+#include <fcntl.h>
 #include <gtest/gtest.h>
 #include <sys/socket.h>
 #include <sys/stat.h>
@@ -19,6 +20,7 @@
 #include <fstream>
 #include <functional>
 #include <limits>
+#include <map>
 #include <memory>
 #include <mutex>
 #include <optional>
@@ -132,6 +134,66 @@ class ScopedTempDirectory {
 };
 
 std::uint64_t ScopedTempDirectory::sequence_ = 0;
+
+/**
+ * @brief Starts and stops one router runtime below a protected test directory.
+ *
+ * @throws std::runtime_error if the lifecycle file or runtime cannot start.
+ * @note The helper owns only the lock descriptor. The borrowed router and
+ *       directory must outlive it, and destruction drains all private runtime
+ *       registries before their owners are destroyed.
+ */
+class ScopedRequestRouterRuntime final {
+ public:
+  /**
+   * @brief Creates a private lifecycle file and starts router admission.
+   * @param router Router whose output/snapshot/compute/session runtime starts.
+   * @param directory Protected directory owning socket-related paths.
+   * @throws std::runtime_error on descriptor, mode, or runtime failure.
+   */
+  ScopedRequestRouterRuntime(RequestRouter& router,
+                             const ScopedTempDirectory& directory)
+      : router_(router),
+        lock_fd_(::open((directory.path() / "router.sock.lock").c_str(),
+                        O_CREAT | O_RDWR | O_CLOEXEC | O_NOFOLLOW, 0600)) {
+    if (!lock_fd_ || ::fchmod(lock_fd_.get(), 0600) != 0) {
+      throw std::runtime_error("cannot create router lifecycle test lock");
+    }
+    const OperationStatus started = router_.start_runtime(
+        (directory.path() / "router.sock").string(), lock_fd_.get());
+    if (!started.ok) {
+      throw std::runtime_error(started.message);
+    }
+  }
+
+  /** @brief Drains and stops the borrowed router. @throws Nothing. */
+  ~ScopedRequestRouterRuntime() noexcept {
+    router_.begin_shutdown();
+    router_.finish_shutdown();
+  }
+
+  /**
+   * @brief Prevents duplicate shutdown ownership.
+   * @param other Runtime guard that remains the owner.
+   * @throws Nothing because construction is unavailable.
+   */
+  ScopedRequestRouterRuntime(const ScopedRequestRouterRuntime& other) = delete;
+
+  /**
+   * @brief Prevents replacement of active runtime ownership.
+   * @param other Guard that remains unchanged.
+   * @return No value because assignment is unavailable.
+   * @throws Nothing because assignment is unavailable.
+   */
+  ScopedRequestRouterRuntime& operator=(
+      const ScopedRequestRouterRuntime& other) = delete;
+
+ private:
+  /** @brief Borrowed router stopped during destruction. */
+  RequestRouter& router_;
+  /** @brief Owned exact-mode lifecycle descriptor. */
+  UniqueFd lock_fd_;
+};
 
 /**
  * @brief Temporarily sets one scheduler-fixture environment value.
@@ -492,6 +554,108 @@ DirtyRegionInspectionSnapshot make_protocol_dirty_snapshot() {
 }
 
 /**
+ * @brief Builds one nontrivial compute-planning inspection value.
+ * @return Snapshot containing public enums, counts, ROI, and nested samples.
+ * @throws std::bad_alloc if copied strings or vectors cannot allocate.
+ */
+ComputePlanningInspectionSnapshot make_protocol_planning_snapshot() {
+  ComputePlanningInspectionSnapshot snapshot;
+  snapshot.intent = ComputeIntent::RealTimeUpdate;
+  snapshot.target_node = NodeId{12};
+  snapshot.parallel = true;
+  snapshot.topology_generation = 44;
+  snapshot.expansion_cache_key = "rt:12:44";
+  snapshot.planned_node_count = 2;
+  snapshot.task_count = 2;
+  snapshot.tile_task_count = 1;
+  snapshot.monolithic_task_count = 0;
+  snapshot.node_task_count = 1;
+  snapshot.dependency_count = 1;
+  snapshot.initial_task_count = 1;
+  snapshot.active_task_count = 2;
+  snapshot.dirty_source_task_count = 1;
+  snapshot.downstream_task_count = 1;
+  snapshot.initial_downstream_task_count = 1;
+  snapshot.planned_node_sample = {NodeId{11}, NodeId{12}};
+  ComputePlanningTaskSnapshot task;
+  task.task_id = 1;
+  task.node = NodeId{12};
+  task.kind = "tile";
+  task.domain = DirtyDomain::RealTime;
+  task.output_roi = PixelRect{1, 2, 3, 4};
+  task.tile_x = 5;
+  task.tile_y = 6;
+  task.tile_size = 64;
+  task.whole_output = false;
+  task.dirty_selected = true;
+  task.dirty_generation = 45;
+  task.dependency_task_ids = {0};
+  snapshot.task_sample.push_back(std::move(task));
+  return snapshot;
+}
+
+/**
+ * @brief Builds a dense but component-valid current-planning fixture.
+ * @param task_count Number of sampled planning tasks.
+ * @param dependencies_per_task Number of zero-valued dependency ids per task.
+ * @param kind_bytes UTF-8 bytes in every task kind.
+ * @param cache_key_bytes UTF-8 bytes in the expansion cache key.
+ * @return Planning value with valid ids, enums, rectangles, and requested
+ *         collection dimensions.
+ * @throws std::length_error when `task_count` cannot be represented by test
+ *         task ids.
+ * @throws std::bad_alloc if fixture storage cannot be allocated.
+ */
+ComputePlanningInspectionSnapshot make_dense_protocol_planning_snapshot(
+    std::size_t task_count, std::size_t dependencies_per_task,
+    std::size_t kind_bytes = 4, std::size_t cache_key_bytes = 0) {
+  if (task_count > static_cast<std::size_t>(std::numeric_limits<int>::max())) {
+    throw std::length_error("planning fixture task count exceeds int ids");
+  }
+  ComputePlanningInspectionSnapshot snapshot;
+  snapshot.intent = ComputeIntent::RealTimeUpdate;
+  snapshot.target_node = NodeId{1};
+  snapshot.expansion_cache_key.assign(cache_key_bytes, 'k');
+  snapshot.task_sample.reserve(task_count);
+  for (std::size_t index = 0; index < task_count; ++index) {
+    ComputePlanningTaskSnapshot task;
+    task.task_id = static_cast<int>(index);
+    task.node = NodeId{1};
+    task.kind.assign(kind_bytes, 't');
+    task.domain = DirtyDomain::RealTime;
+    task.dependency_task_ids.assign(dependencies_per_task, 0);
+    snapshot.task_sample.push_back(std::move(task));
+  }
+  return snapshot;
+}
+
+/**
+ * @brief Builds deterministic traversal branches for recursive count bounds.
+ * @param branch_count Number of ending-node map entries.
+ * @param nodes_per_branch Nested node-id entries in every branch.
+ * @param first_branch_extra Additional nested entries in the first branch.
+ * @return Ordered traversal map with nonnegative keys and ids.
+ * @throws std::bad_alloc if map or vector storage cannot allocate.
+ * @throws std::length_error if requested test dimensions overflow `size_t`.
+ */
+std::map<int, std::vector<NodeId>> make_dense_traversal_orders(
+    std::size_t branch_count, std::size_t nodes_per_branch,
+    std::size_t first_branch_extra = 0) {
+  if (nodes_per_branch >
+      std::numeric_limits<std::size_t>::max() - first_branch_extra) {
+    throw std::length_error("traversal fixture dimensions overflow");
+  }
+  std::map<int, std::vector<NodeId>> orders;
+  for (std::size_t branch = 0; branch < branch_count; ++branch) {
+    const std::size_t nodes =
+        nodes_per_branch + (branch == 0 ? first_branch_extra : 0U);
+    orders.emplace(static_cast<int>(branch),
+                   std::vector<NodeId>(nodes, NodeId{1}));
+  }
+  return orders;
+}
+
+/**
  * @brief Builds the independent expected JSON for the dirty snapshot fixture.
  *
  * @param session_id Opaque daemon session returned by graph load.
@@ -708,17 +872,25 @@ class HostRoutedGraphStateProtocolTest : public ::testing::Test {
    * @brief Routes one typed request through the real request envelope.
    * @param method Exact wire method.
    * @param params Complete params object.
+   * @param id Optional correlated id used for frame-budget edge cases.
    * @return Parsed correlated response object.
    * @throws std::bad_alloc or std::runtime_error on unexpected construction or
    *         parse failure.
    */
-  Json route(const std::string& method, Json params) {
+  Json route(const std::string& method, Json params,
+             std::string id = std::string()) {
+    if (id.empty()) {
+      id = method;
+    }
     return parse_response(router_.route(Json{
         {"protocol_version", kProtocolVersion},
-        {"id", method},
+        {"id", std::move(id)},
         {"method", method},
         {"params", std::move(params)}}.dump()));
   }
+
+  /** @brief Protected runtime path owner declared before router runtime. */
+  ScopedTempDirectory runtime_directory_{"ps-ipc-route"};
 
   /** @brief Complete configurable Host test double. */
   ::ps::testing::IpcHostSpy host_;
@@ -726,9 +898,911 @@ class HostRoutedGraphStateProtocolTest : public ::testing::Test {
   /** @brief Router under test, borrowing `host_`. */
   RequestRouter router_{host_, "host-routed-test"};
 
+  /** @brief Active snapshot/output/compute runtime for routed calls. */
+  ScopedRequestRouterRuntime runtime_{router_, runtime_directory_};
+
   /** @brief Opaque daemon id mapped to the spy's private Host session. */
   std::string session_id_;
 };
+
+/**
+ * @brief Monotonic clock controlled by stable paging protocol tests.
+ *
+ * @throws Nothing.
+ * @note The router invokes `now()` synchronously; tests advance only between
+ *       complete requests, so no additional synchronization is required.
+ */
+class ManualCollectionClock final {
+ public:
+  /** @brief Returns the current injected time. @throws Nothing. */
+  std::chrono::steady_clock::time_point now() const noexcept { return now_; }
+
+  /**
+   * @brief Advances injected monotonic time.
+   * @param duration Positive duration to add.
+   * @return Nothing.
+   * @throws Nothing for the small deterministic test durations used here.
+   */
+  void advance(std::chrono::steady_clock::duration duration) noexcept {
+    now_ += duration;
+  }
+
+ private:
+  /** @brief Current deterministic monotonic sample. */
+  std::chrono::steady_clock::time_point now_{};
+};
+
+/**
+ * @brief Returns a small injectable paging policy for router behavior tests.
+ * @return One cursor, 16 recursive entries, 8 KiB, and one-second TTL limits.
+ * @throws Nothing.
+ */
+CollectionSnapshotLimits small_protocol_snapshot_limits() noexcept {
+  CollectionSnapshotLimits limits;
+  limits.records = 1;
+  limits.total_bytes = 8192;
+  limits.reservation_bytes = 8192;
+  limits.snapshot_entries = 16;
+  limits.snapshot_bytes = 8192;
+  limits.page_entries = kGeneralPageMaxEntries;
+  limits.ttl = std::chrono::seconds(1);
+  return limits;
+}
+
+/**
+ * @brief Fixture for stable cursor identity, lifetime, and quota behavior.
+ *
+ * @throws std::bad_alloc or std::runtime_error if deterministic runtime setup
+ *         cannot allocate or start.
+ * @note Every test owns a fresh router, Host spy, cursor source, and runtime;
+ *       no cursor or quota state crosses test boundaries.
+ */
+class StableInspectionPagingProtocolTest : public ::testing::Test {
+ protected:
+  /**
+   * @brief Loads one deterministic Host session and clears load bookkeeping.
+   * @return Nothing.
+   * @throws std::bad_alloc or std::runtime_error on request construction or
+   *         response parsing failure.
+   */
+  void SetUp() override {
+    const Json loaded =
+        route("graph.load",
+              Json{{"session_name", "stable_paging"}, {"root_dir", "/tmp"}});
+    ASSERT_TRUE(loaded.contains("result")) << loaded.dump();
+    session_id_ = loaded["result"]["session_id"].get<std::string>();
+    ASSERT_TRUE(valid_opaque_id(session_id_));
+    host_.reset_invocations();
+  }
+
+  /**
+   * @brief Routes one typed request through a complete protocol envelope.
+   * @param method Exact wire method.
+   * @param params Complete typed params.
+   * @param id Optional correlated id used for frame-budget edge cases.
+   * @return Parsed response object.
+   * @throws std::bad_alloc or std::runtime_error on construction/parse failure.
+   */
+  Json route(const std::string& method, Json params,
+             std::string id = "stable-page") {
+    return parse_response(router_.route(Json{
+        {"protocol_version", kProtocolVersion},
+        {"id", std::move(id)},
+        {"method", method},
+        {"params", std::move(params)}}.dump()));
+  }
+
+  /**
+   * @brief Returns the next deterministic valid opaque cursor.
+   * @return Unique 32-lowercase-hex token for this fixture.
+   * @throws Nothing while the bounded test sequence remains below 256.
+   */
+  std::string next_cursor() noexcept {
+    static constexpr char kHex[] = "0123456789abcdef";
+    const std::size_t value = cursor_sequence_++;
+    std::string cursor(32, '0');
+    cursor[30] = kHex[(value >> 4U) & 0x0fU];
+    cursor[31] = kHex[value & 0x0fU];
+    return cursor;
+  }
+
+  /** @brief Deterministic cursor-expiry clock. */
+  ManualCollectionClock clock_;
+  /** @brief Cursor uniqueness source. */
+  std::size_t cursor_sequence_ = 1;
+  /** @brief Protected output/runtime path owner. */
+  ScopedTempDirectory runtime_directory_{"ps-ipc-pages"};
+  /** @brief Complete configurable Host test double. */
+  ::ps::testing::IpcHostSpy host_;
+  /** @brief Router with small deterministic snapshot limits and callbacks. */
+  RequestRouter router_{
+      host_, "stable-paging-test", small_protocol_snapshot_limits(),
+      [this] { return clock_.now(); }, [this] { return next_cursor(); }};
+  /** @brief Active daemon-private runtime. */
+  ScopedRequestRouterRuntime runtime_{router_, runtime_directory_};
+  /** @brief Opaque daemon session mapped to the spy Host session. */
+  std::string session_id_;
+};
+
+TEST_F(HostRoutedGraphStateProtocolTest,
+       RoutesRemainingInspectionFamiliesWithCopiedPublicValues) {
+  NodeInspectionView node;
+  node.id = NodeId{7};
+  node.name = "copied-node";
+  node.type = "fixture";
+  node.subtype = "source";
+  node.parameters = {{"mode", "exact"}};
+  node.source_label = std::nullopt;
+  node.debug = DebugMetadataSnapshot{};
+  node.debug->min_val = std::numeric_limits<double>::quiet_NaN();
+  node.debug->max_val = std::numeric_limits<double>::infinity();
+
+  GraphInspectionView graph;
+  graph.nodes = {node, node};
+  graph.nodes.back().id = NodeId{8};
+  host_.set_inspected_graph(graph);
+  host_.set_inspected_node(node);
+
+  HostDependencyTreeSnapshot tree;
+  tree.scope = HostDependencyTreeScope::StartNode;
+  tree.start_node = NodeId{7};
+  tree.root_nodes = {NodeId{7}};
+  tree.entries.push_back(HostDependencyTreeEntry{0, std::nullopt, node, false});
+  host_.set_dependency_tree(tree);
+  host_.set_traversal_orders(
+      {{7, {NodeId{1}, NodeId{7}}}, {8, {NodeId{2}, NodeId{8}}}});
+  host_.set_traversal_details(
+      {{7,
+        {HostTraversalNodeSnapshot{NodeId{1}, "source", true, false},
+         HostTraversalNodeSnapshot{NodeId{7}, "ending", false, true}}}});
+  host_.set_trees_containing_node({NodeId{7}, NodeId{8}});
+  host_.set_dirty_region(make_protocol_dirty_snapshot());
+  const ComputePlanningInspectionSnapshot planning =
+      make_protocol_planning_snapshot();
+  host_.set_compute_planning(planning);
+  ComputePlanningInspectionSnapshot scalar_only_planning = planning;
+  scalar_only_planning.planned_node_sample.clear();
+  scalar_only_planning.task_sample.clear();
+  host_.set_recent_compute_planning({planning, scalar_only_planning});
+
+  host_.reset_invocations();
+  Json response = route("inspect.graph", Json{{"session_id", session_id_}});
+  ASSERT_TRUE(response.contains("result")) << response.dump();
+  ASSERT_EQ(response["result"]["nodes"].size(), 2u);
+  EXPECT_TRUE(response["result"]["cursor"].is_null());
+  EXPECT_FALSE(response["result"]["has_more"].get<bool>());
+  EXPECT_TRUE(response["result"]["nodes"][0]["source_label"].is_null());
+  EXPECT_TRUE(response["result"]["nodes"][0]["debug"]["min_val"].is_null());
+  EXPECT_TRUE(response["result"]["nodes"][0]["debug"]["max_val"].is_null());
+  EXPECT_EQ(host_.call_count("inspect.graph"), 1u);
+
+  host_.reset_invocations();
+  response = route("inspect.dependency_tree", Json{{"session_id", session_id_},
+                                                   {"node_id", 7},
+                                                   {"include_metadata", true}});
+  ASSERT_TRUE(response.contains("result")) << response.dump();
+  EXPECT_EQ(response["result"]["scope"], "start_node");
+  EXPECT_EQ(response["result"]["start_node_id"], 7);
+  ASSERT_EQ(response["result"]["entries"].size(), 1u);
+  EXPECT_TRUE(response["result"]["entries"][0]["incoming_edge"].is_null());
+  ASSERT_EQ(host_.call_count("inspect.dependency_tree"), 1u);
+  ASSERT_EQ(host_.invocations().size(), 1u);
+  EXPECT_EQ(host_.invocations().front().optional_node->value, 7);
+  EXPECT_TRUE(host_.invocations().front().flag);
+
+  host_.reset_invocations();
+  response =
+      route("inspect.traversal_orders", Json{{"session_id", session_id_}});
+  ASSERT_TRUE(response.contains("result")) << response.dump();
+  ASSERT_EQ(response["result"]["orders"].size(), 2u);
+  EXPECT_EQ(response["result"]["orders"][0]["ending_node_id"], 7);
+  EXPECT_EQ(response["result"]["orders"][1]["node_ids"], Json::array({2, 8}));
+  EXPECT_EQ(host_.call_count("inspect.traversal_orders"), 1u);
+
+  host_.reset_invocations();
+  response =
+      route("inspect.traversal_details", Json{{"session_id", session_id_}});
+  ASSERT_TRUE(response.contains("result")) << response.dump();
+  ASSERT_EQ(response["result"]["branches"].size(), 1u);
+  EXPECT_TRUE(response["result"]["branches"][0]["nodes"][0]["has_memory_cache"]
+                  .get<bool>());
+  EXPECT_TRUE(response["result"]["branches"][0]["nodes"][1]["has_disk_cache"]
+                  .get<bool>());
+  EXPECT_EQ(host_.call_count("inspect.traversal_details"), 1u);
+
+  host_.reset_invocations();
+  response = route("inspect.trees_containing_node",
+                   Json{{"session_id", session_id_}, {"node_id", 7}});
+  ASSERT_TRUE(response.contains("result")) << response.dump();
+  EXPECT_EQ(response["result"]["ending_node_ids"], Json::array({7, 8}));
+  ASSERT_EQ(host_.call_count("inspect.trees_containing_node"), 1u);
+  EXPECT_EQ(host_.invocations().front().first_node.value, 7);
+
+  host_.reset_invocations();
+  response = route("inspect.dirty_region", Json{{"session_id", session_id_}});
+  ASSERT_TRUE(response.contains("result")) << response.dump();
+  EXPECT_EQ(response["result"], expected_protocol_dirty_snapshot(session_id_));
+  EXPECT_EQ(host_.call_count("inspect.dirty_region"), 1u);
+
+  host_.reset_invocations();
+  response =
+      route("inspect.compute_planning", Json{{"session_id", session_id_}});
+  ASSERT_TRUE(response.contains("result")) << response.dump();
+  EXPECT_EQ(response["result"]["planning"]["intent"], "real_time_update");
+  EXPECT_EQ(response["result"]["planning"]["task_sample"][0]["domain"],
+            "real_time");
+  EXPECT_EQ(response["result"]["planning"]["task_sample"][0]["output_roi"],
+            expected_rect(PixelRect{1, 2, 3, 4}));
+  EXPECT_EQ(host_.call_count("inspect.compute_planning"), 1u);
+
+  host_.set_compute_planning(std::nullopt);
+  host_.reset_invocations();
+  response =
+      route("inspect.compute_planning", Json{{"session_id", session_id_}});
+  ASSERT_TRUE(response.contains("result")) << response.dump();
+  EXPECT_TRUE(response["result"]["planning"].is_null());
+  EXPECT_EQ(host_.call_count("inspect.compute_planning"), 1u);
+
+  host_.reset_invocations();
+  response = route("inspect.recent_compute_planning",
+                   Json{{"session_id", session_id_}});
+  ASSERT_TRUE(response.contains("result")) << response.dump();
+  ASSERT_EQ(response["result"]["snapshots"].size(), 2u);
+  EXPECT_TRUE(response["result"]["cursor"].is_null());
+  EXPECT_EQ(host_.call_count("inspect.recent_compute_planning"), 1u);
+}
+
+TEST_F(StableInspectionPagingProtocolTest,
+       AggregatesStablePagesWithoutLossDuplicationOrRepeatedHostCalls) {
+  host_.set_node_ids({NodeId{3}, NodeId{1}, NodeId{3}, NodeId{5}, NodeId{8}});
+  Json params{{"session_id", session_id_}, {"limit", 2}};
+  Json response = route("inspect.node_ids", params);
+  ASSERT_TRUE(response.contains("result")) << response.dump();
+  std::vector<int> aggregate;
+  std::string cursor;
+  std::size_t offset = 0;
+  while (true) {
+    const Json& result = response["result"];
+    EXPECT_EQ(result["offset"], offset);
+    for (const Json& node : result["node_ids"]) {
+      aggregate.push_back(node.get<int>());
+    }
+    offset += result["node_ids"].size();
+    if (!result["has_more"].get<bool>()) {
+      EXPECT_TRUE(result["cursor"].is_null());
+      break;
+    }
+    ASSERT_TRUE(result["cursor"].is_string());
+    if (cursor.empty()) {
+      cursor = result["cursor"].get<std::string>();
+    } else {
+      EXPECT_EQ(result["cursor"], cursor);
+    }
+    response = route("inspect.node_ids",
+                     Json{{"session_id", session_id_},
+                          {"cursor", cursor},
+                          {"offset", offset},
+                          {"limit", 2}},
+                     std::string(kRequestTextMaxBytes, '\x01'));
+    ASSERT_TRUE(response.contains("result")) << response.dump();
+  }
+  EXPECT_EQ(aggregate, (std::vector<int>{3, 1, 3, 5, 8}));
+  EXPECT_EQ(host_.call_count("inspect.node_ids"), 1u);
+
+  const Json released =
+      route("inspect.node_ids", Json{{"session_id", session_id_},
+                                     {"cursor", cursor},
+                                     {"offset", offset},
+                                     {"limit", 1}});
+  ASSERT_TRUE(released.contains("error")) << released.dump();
+  EXPECT_EQ(released["error"]["name"], "cursor_not_found");
+
+  host_.set_traversal_orders({{2, {NodeId{1}, NodeId{2}}},
+                              {4, {NodeId{3}, NodeId{4}}},
+                              {6, {NodeId{5}, NodeId{6}}}});
+  host_.reset_invocations();
+  const Json branches = route("inspect.traversal_orders",
+                              Json{{"session_id", session_id_}, {"limit", 2}});
+  ASSERT_TRUE(branches.contains("result")) << branches.dump();
+  ASSERT_EQ(branches["result"]["orders"].size(), 2u);
+  const std::string branch_cursor =
+      branches["result"]["cursor"].get<std::string>();
+  const Json branch_final =
+      route("inspect.traversal_orders", Json{{"session_id", session_id_},
+                                             {"cursor", branch_cursor},
+                                             {"offset", 2},
+                                             {"limit", 2}});
+  ASSERT_TRUE(branch_final.contains("result")) << branch_final.dump();
+  ASSERT_EQ(branch_final["result"]["orders"].size(), 1u);
+  EXPECT_EQ(branch_final["result"]["orders"][0]["ending_node_id"], 6);
+  EXPECT_EQ(branch_final["result"]["orders"][0]["node_ids"],
+            Json::array({5, 6}));
+  EXPECT_EQ(host_.call_count("inspect.traversal_orders"), 1u);
+}
+
+TEST_F(StableInspectionPagingProtocolTest,
+       RejectsMalformedMismatchedAndExpiredCursorsWithoutHostAccess) {
+  host_.set_trees_containing_node({NodeId{1}, NodeId{2}, NodeId{3}});
+  const Json first =
+      route("inspect.trees_containing_node",
+            Json{{"session_id", session_id_}, {"node_id", 7}, {"limit", 1}});
+  ASSERT_TRUE(first.contains("result")) << first.dump();
+  const std::string cursor = first["result"]["cursor"].get<std::string>();
+
+  Json response = route("inspect.trees_containing_node",
+                        Json{{"session_id", session_id_},
+                             {"node_id", 7},
+                             {"cursor", std::string(32, 'A')},
+                             {"offset", 1},
+                             {"limit", 1}});
+  ASSERT_TRUE(response.contains("error")) << response.dump();
+  EXPECT_EQ(response["error"]["name"], "invalid_params");
+
+  response =
+      route("inspect.trees_containing_node", Json{{"session_id", session_id_},
+                                                  {"node_id", 8},
+                                                  {"cursor", cursor},
+                                                  {"offset", 1},
+                                                  {"limit", 1}});
+  ASSERT_TRUE(response.contains("error")) << response.dump();
+  EXPECT_EQ(response["error"]["name"], "cursor_not_found");
+
+  response = route("inspect.ending_nodes", Json{{"session_id", session_id_},
+                                                {"cursor", cursor},
+                                                {"offset", 1},
+                                                {"limit", 1}});
+  ASSERT_TRUE(response.contains("error")) << response.dump();
+  EXPECT_EQ(response["error"]["name"], "cursor_not_found");
+
+  response = route("inspect.trees_containing_node",
+                   Json{{"session_id", std::string(32, 'e')},
+                        {"node_id", 7},
+                        {"cursor", cursor},
+                        {"offset", 1},
+                        {"limit", 1}});
+  ASSERT_TRUE(response.contains("error")) << response.dump();
+  EXPECT_EQ(response["error"]["name"], "cursor_not_found");
+
+  response =
+      route("inspect.trees_containing_node", Json{{"session_id", session_id_},
+                                                  {"node_id", 7},
+                                                  {"cursor", cursor},
+                                                  {"offset", 2},
+                                                  {"limit", 1}});
+  ASSERT_TRUE(response.contains("error")) << response.dump();
+  EXPECT_EQ(response["error"]["name"], "cursor_not_found");
+
+  clock_.advance(std::chrono::seconds(2));
+  response =
+      route("inspect.trees_containing_node", Json{{"session_id", session_id_},
+                                                  {"node_id", 7},
+                                                  {"cursor", cursor},
+                                                  {"offset", 1},
+                                                  {"limit", 1}});
+  ASSERT_TRUE(response.contains("error")) << response.dump();
+  EXPECT_EQ(response["error"]["name"], "cursor_not_found");
+  EXPECT_EQ(host_.call_count("inspect.trees_containing_node"), 1u);
+  EXPECT_EQ(host_.call_count("inspect.ending_nodes"), 0u);
+}
+
+TEST_F(StableInspectionPagingProtocolTest,
+       RejectsMalformedKnownInspectionParamsBeforeAnyHostAccess) {
+  const std::vector<std::pair<std::string, Json>> malformed = {
+      {"inspect.traversal_orders", Json{{"session_id", std::string(31, 'a')}}},
+      {"inspect.trees_containing_node", Json{{"session_id", session_id_}}},
+      {"inspect.trees_containing_node",
+       Json{{"session_id", session_id_}, {"node_id", 1.5}}},
+      {"inspect.dependency_tree",
+       Json{{"session_id", session_id_}, {"include_metadata", "yes"}}},
+      {"inspect.node_ids", Json{{"session_id", session_id_}, {"limit", 0}}},
+      {"inspect.node_ids", Json{{"session_id", session_id_}, {"limit", 1.5}}},
+      {"inspect.node_ids",
+       Json{{"session_id", session_id_}, {"offset", 0}, {"limit", 1}}},
+      {"inspect.node_ids", Json{{"session_id", session_id_},
+                                {"cursor", std::string(32, 'a')},
+                                {"limit", 1}}},
+      {"inspect.recent_compute_planning",
+       Json{{"session_id", session_id_},
+            {"cursor", std::string(32, 'a')},
+            {"offset", std::numeric_limits<std::uint64_t>::max()},
+            {"limit", 1}}},
+  };
+  for (const auto& test_case : malformed) {
+    const Json response = route(test_case.first, test_case.second);
+    ASSERT_TRUE(response.contains("error"))
+        << test_case.first << response.dump();
+    EXPECT_EQ(response["error"]["domain"], "protocol") << test_case.first;
+    EXPECT_EQ(response["error"]["name"], "invalid_params") << test_case.first;
+  }
+  EXPECT_TRUE(host_.invocations().empty());
+}
+
+TEST_F(StableInspectionPagingProtocolTest,
+       PublishedSnapshotSurvivesGraphCloseUntilItsFinalPage) {
+  host_.set_node_ids({NodeId{4}, NodeId{5}, NodeId{6}});
+  const Json first = route("inspect.node_ids",
+                           Json{{"session_id", session_id_}, {"limit", 1}});
+  ASSERT_TRUE(first.contains("result")) << first.dump();
+  const std::string cursor = first["result"]["cursor"].get<std::string>();
+
+  const Json closed = route("graph.close", Json{{"session_id", session_id_}});
+  ASSERT_TRUE(closed.contains("result")) << closed.dump();
+
+  const Json second =
+      route("inspect.node_ids", Json{{"session_id", session_id_},
+                                     {"cursor", cursor},
+                                     {"offset", 1},
+                                     {"limit", 1}});
+  ASSERT_TRUE(second.contains("result")) << second.dump();
+  EXPECT_EQ(second["result"]["node_ids"], Json::array({5}));
+  ASSERT_TRUE(second["result"]["has_more"].get<bool>());
+
+  const Json final = route("inspect.node_ids", Json{{"session_id", session_id_},
+                                                    {"cursor", cursor},
+                                                    {"offset", 2},
+                                                    {"limit", 1}});
+  ASSERT_TRUE(final.contains("result")) << final.dump();
+  EXPECT_EQ(final["result"]["node_ids"], Json::array({6}));
+  EXPECT_FALSE(final["result"]["has_more"].get<bool>());
+  EXPECT_EQ(host_.call_count("inspect.node_ids"), 1u);
+  EXPECT_EQ(host_.call_count("graph.close"), 1u);
+}
+
+TEST_F(StableInspectionPagingProtocolTest,
+       RejectsCapacityExhaustionBeforeAnySecondHostCall) {
+  host_.set_node_ids({NodeId{1}, NodeId{2}, NodeId{3}});
+  const Json held = route("inspect.node_ids",
+                          Json{{"session_id", session_id_}, {"limit", 1}});
+  ASSERT_TRUE(held.contains("result")) << held.dump();
+  ASSERT_TRUE(held["result"]["has_more"].get<bool>());
+
+  host_.set_ending_nodes({NodeId{9}});
+  Json response =
+      route("inspect.ending_nodes", Json{{"session_id", session_id_}});
+  ASSERT_TRUE(response.contains("error")) << response.dump();
+  EXPECT_EQ(response["error"]["name"], "capacity_exceeded");
+  EXPECT_EQ(host_.call_count("inspect.ending_nodes"), 0u);
+}
+
+TEST_F(StableInspectionPagingProtocolTest,
+       RejectsEntryAndByteOversizeWithoutPublishingCursorOrLeakingQuota) {
+  host_.set_node_ids(std::vector<NodeId>(17, NodeId{7}));
+  Json response = route("inspect.node_ids", Json{{"session_id", session_id_}});
+  ASSERT_TRUE(response.contains("error")) << response.dump();
+  EXPECT_EQ(response["error"]["name"], "response_too_large");
+  EXPECT_EQ(host_.call_count("inspect.node_ids"), 1u);
+
+  GraphInspectionView graph;
+  NodeInspectionView node;
+  node.id = NodeId{1};
+  node.name = "large-public-node";
+  node.type = "fixture";
+  node.subtype = "source";
+  node.source_label = std::string(8100, 's');
+  graph.nodes.push_back(std::move(node));
+  host_.set_inspected_graph(std::move(graph));
+  response = route("inspect.graph", Json{{"session_id", session_id_}});
+  ASSERT_TRUE(response.contains("error")) << response.dump();
+  EXPECT_EQ(response["error"]["name"], "response_too_large");
+  EXPECT_EQ(host_.call_count("inspect.graph"), 1u);
+
+  host_.set_ending_nodes({NodeId{9}});
+  response = route("inspect.ending_nodes", Json{{"session_id", session_id_}});
+  ASSERT_TRUE(response.contains("result")) << response.dump();
+  EXPECT_EQ(response["result"]["ending_node_ids"], Json::array({9}));
+  EXPECT_TRUE(response["result"]["cursor"].is_null());
+  EXPECT_EQ(host_.call_count("inspect.ending_nodes"), 1u);
+}
+
+TEST_F(StableInspectionPagingProtocolTest,
+       DependencyByteAccountingAcceptsExactLimitAndRejectsLimitPlusOne) {
+  HostDependencyTreeSnapshot tree;
+  tree.root_nodes = {NodeId{1}};
+  HostDependencyTreeEntry entry;
+  entry.node.id = NodeId{1};
+  entry.node.name = "byte-boundary";
+  entry.node.type = "fixture";
+  entry.node.subtype = "source";
+  entry.node.source_label = std::string();
+  tree.entries.push_back(std::move(entry));
+
+  const std::size_t base_bytes =
+      encode_dependency_tree(IpcSessionId{session_id_}, tree).dump().size();
+  ASSERT_LT(base_bytes, small_protocol_snapshot_limits().snapshot_bytes);
+  tree.entries.front().node.source_label = std::string(
+      small_protocol_snapshot_limits().snapshot_bytes - base_bytes, 'x');
+  ASSERT_EQ(
+      encode_dependency_tree(IpcSessionId{session_id_}, tree).dump().size(),
+      small_protocol_snapshot_limits().snapshot_bytes);
+
+  host_.set_dependency_tree(tree);
+  Json response =
+      route("inspect.dependency_tree", Json{{"session_id", session_id_}});
+  ASSERT_TRUE(response.contains("result")) << response.dump();
+  ASSERT_EQ(response["result"]["entries"].size(), 1u);
+  EXPECT_EQ(host_.call_count("inspect.dependency_tree"), 1u);
+
+  tree.entries.front().node.source_label->push_back('y');
+  ASSERT_EQ(
+      encode_dependency_tree(IpcSessionId{session_id_}, tree).dump().size(),
+      small_protocol_snapshot_limits().snapshot_bytes + 1U);
+  host_.set_dependency_tree(std::move(tree));
+  host_.reset_invocations();
+  response =
+      route("inspect.dependency_tree", Json{{"session_id", session_id_}});
+  ASSERT_TRUE(response.contains("error")) << response.dump();
+  EXPECT_EQ(response["error"]["domain"], "protocol");
+  EXPECT_EQ(response["error"]["name"], "response_too_large");
+  EXPECT_EQ(host_.call_count("inspect.dependency_tree"), 1u);
+
+  host_.set_ending_nodes({NodeId{9}});
+  host_.reset_invocations();
+  response = route("inspect.ending_nodes", Json{{"session_id", session_id_}});
+  ASSERT_TRUE(response.contains("result")) << response.dump();
+  EXPECT_EQ(response["result"]["ending_node_ids"], Json::array({9}));
+  EXPECT_EQ(host_.call_count("inspect.ending_nodes"), 1u);
+}
+
+TEST_F(StableInspectionPagingProtocolTest,
+       OversizedDependencyRootsRejectWithoutSnapshotQuotaLeak) {
+  HostDependencyTreeSnapshot tree;
+  tree.root_nodes.assign(kGeneralPageMaxEntries + 1U, NodeId{1});
+  host_.set_dependency_tree(std::move(tree));
+
+  Json response =
+      route("inspect.dependency_tree", Json{{"session_id", session_id_}});
+  ASSERT_TRUE(response.contains("error")) << response.dump();
+  EXPECT_EQ(response["error"]["domain"], "protocol");
+  EXPECT_EQ(response["error"]["name"], "response_too_large");
+  EXPECT_EQ(host_.call_count("inspect.dependency_tree"), 1u);
+
+  host_.set_ending_nodes({NodeId{11}});
+  host_.reset_invocations();
+  response = route("inspect.ending_nodes", Json{{"session_id", session_id_}});
+  ASSERT_TRUE(response.contains("result")) << response.dump();
+  EXPECT_EQ(response["result"]["ending_node_ids"], Json::array({11}));
+  EXPECT_EQ(host_.call_count("inspect.ending_nodes"), 1u);
+}
+
+TEST_F(StableInspectionPagingProtocolTest,
+       RecursiveEntryAccountingCoversEveryNestedInspectionFamily) {
+  GraphInspectionView graph;
+  NodeInspectionView node;
+  node.id = NodeId{1};
+  node.name = "parameter-count";
+  node.type = "fixture";
+  node.subtype = "source";
+  for (int index = 0; index < 16; ++index) {
+    node.parameters.emplace("key-" + std::to_string(index), "value");
+  }
+  graph.nodes = {node};
+  host_.set_inspected_graph(std::move(graph));
+  Json response = route("inspect.graph", Json{{"session_id", session_id_}});
+  ASSERT_TRUE(response.contains("error")) << response.dump();
+  EXPECT_EQ(response["error"]["name"], "response_too_large");
+  EXPECT_EQ(host_.call_count("inspect.graph"), 1u);
+
+  node.parameters.clear();
+  node.space = SpatialSnapshot{};
+  GraphInspectionView spatial_graph;
+  spatial_graph.nodes = {node};
+  host_.set_inspected_graph(std::move(spatial_graph));
+  host_.reset_invocations();
+  response = route("inspect.graph", Json{{"session_id", session_id_}});
+  ASSERT_TRUE(response.contains("error")) << response.dump();
+  EXPECT_EQ(response["error"]["name"], "response_too_large");
+  EXPECT_EQ(host_.call_count("inspect.graph"), 1u);
+
+  node.space.reset();
+  for (int index = 0; index < 15; ++index) {
+    node.parameters.emplace("dependency-" + std::to_string(index), "value");
+  }
+  HostDependencyTreeSnapshot tree;
+  tree.root_nodes = {NodeId{1}};
+  tree.entries.push_back(
+      HostDependencyTreeEntry{0, std::nullopt, std::move(node), false});
+  host_.set_dependency_tree(std::move(tree));
+  host_.reset_invocations();
+  response =
+      route("inspect.dependency_tree", Json{{"session_id", session_id_}});
+  ASSERT_TRUE(response.contains("error")) << response.dump();
+  EXPECT_EQ(response["error"]["name"], "response_too_large");
+  EXPECT_EQ(host_.call_count("inspect.dependency_tree"), 1u);
+
+  host_.set_traversal_details(
+      {{1,
+        std::vector<HostTraversalNodeSnapshot>(
+            16, HostTraversalNodeSnapshot{NodeId{1}, "node", false, false})}});
+  host_.reset_invocations();
+  response =
+      route("inspect.traversal_details", Json{{"session_id", session_id_}});
+  ASSERT_TRUE(response.contains("error")) << response.dump();
+  EXPECT_EQ(response["error"]["name"], "response_too_large");
+  EXPECT_EQ(host_.call_count("inspect.traversal_details"), 1u);
+
+  ComputePlanningInspectionSnapshot planning;
+  planning.target_node = NodeId{1};
+  planning.planned_node_sample.assign(16, NodeId{1});
+  host_.set_recent_compute_planning({planning});
+  host_.reset_invocations();
+  response = route("inspect.recent_compute_planning",
+                   Json{{"session_id", session_id_}});
+  ASSERT_TRUE(response.contains("error")) << response.dump();
+  EXPECT_EQ(response["error"]["name"], "response_too_large");
+  EXPECT_EQ(host_.call_count("inspect.recent_compute_planning"), 1u);
+
+  host_.set_node_ids({NodeId{21}});
+  host_.reset_invocations();
+  response = route("inspect.node_ids", Json{{"session_id", session_id_}});
+  ASSERT_TRUE(response.contains("result")) << response.dump();
+  EXPECT_EQ(response["result"]["node_ids"], Json::array({21}));
+  EXPECT_EQ(host_.call_count("inspect.node_ids"), 1u);
+}
+
+TEST_F(HostRoutedGraphStateProtocolTest,
+       TraversalRecursiveEntryBoundaryIsInclusiveAndPreScanned) {
+  static constexpr std::size_t kBranches = 64;
+  static constexpr std::size_t kNodesAtExactLimit = 4095;
+  static_assert(
+      kBranches + kBranches * kNodesAtExactLimit == kSnapshotMaxEntries,
+      "fixture must exercise the exact recursive entry limit");
+
+  host_.set_traversal_orders(
+      make_dense_traversal_orders(kBranches, kNodesAtExactLimit));
+  Json response =
+      route("inspect.traversal_orders", Json{{"session_id", session_id_}});
+  ASSERT_TRUE(response.contains("result")) << response.dump();
+  EXPECT_EQ(response["result"]["orders"].size(), kBranches);
+  EXPECT_TRUE(response["result"]["cursor"].is_null());
+  EXPECT_EQ(host_.call_count("inspect.traversal_orders"), 1u);
+
+  host_.set_traversal_orders(
+      make_dense_traversal_orders(kBranches, kNodesAtExactLimit, 1));
+  host_.reset_invocations();
+  response =
+      route("inspect.traversal_orders", Json{{"session_id", session_id_}});
+  ASSERT_TRUE(response.contains("error")) << response.dump();
+  EXPECT_EQ(response["error"]["name"], "response_too_large");
+  EXPECT_EQ(host_.call_count("inspect.traversal_orders"), 1u);
+
+  host_.set_traversal_orders(make_dense_traversal_orders(kBranches, 4096));
+  host_.reset_invocations();
+  response =
+      route("inspect.traversal_orders", Json{{"session_id", session_id_}});
+  ASSERT_TRUE(response.contains("error")) << response.dump();
+  EXPECT_EQ(response["error"]["name"], "response_too_large");
+  EXPECT_EQ(host_.call_count("inspect.traversal_orders"), 1u);
+
+  host_.set_node_ids({NodeId{17}});
+  host_.reset_invocations();
+  response = route("inspect.node_ids", Json{{"session_id", session_id_}});
+  ASSERT_TRUE(response.contains("result")) << response.dump();
+  EXPECT_EQ(response["result"]["node_ids"], Json::array({17}));
+  EXPECT_EQ(host_.call_count("inspect.node_ids"), 1u);
+}
+
+TEST_F(HostRoutedGraphStateProtocolTest,
+       DynamicGraphPagesKeepAggregateFramesBoundedAndStable) {
+  static constexpr std::size_t kLargeLabelBytes = 6U * 1024U * 1024U;
+  GraphInspectionView graph;
+  for (int index = 0; index < 3; ++index) {
+    NodeInspectionView node;
+    node.id = NodeId{index + 1};
+    node.name = "large-row-" + std::to_string(index);
+    node.type = "fixture";
+    node.subtype = "source";
+    node.source_label =
+        std::string(kLargeLabelBytes, static_cast<char>('a' + index));
+    graph.nodes.push_back(std::move(node));
+  }
+  host_.set_inspected_graph(std::move(graph));
+  host_.reset_invocations();
+
+  const std::string worst_id(kRequestTextMaxBytes, '\x01');
+  Json response = route(
+      "inspect.graph",
+      Json{{"session_id", session_id_}, {"limit", kGeneralPageMaxEntries}},
+      worst_id);
+  ASSERT_TRUE(response.contains("result")) << response.dump();
+  ASSERT_TRUE(response["result"]["has_more"].get<bool>());
+  ASSERT_EQ(response["result"]["nodes"].size(), 2u);
+
+  std::vector<int> node_ids;
+  std::vector<std::size_t> page_sizes;
+  std::string cursor;
+  std::size_t offset = 0;
+  while (true) {
+    ASSERT_TRUE(response.contains("result")) << response.dump();
+    EXPECT_LE(response.dump().size(), kMaximumFramePayloadBytes);
+    const Json& result = response["result"];
+    EXPECT_EQ(result["offset"], offset);
+    ASSERT_FALSE(result["nodes"].empty());
+    page_sizes.push_back(result["nodes"].size());
+    for (const Json& node : result["nodes"]) {
+      node_ids.push_back(node["id"].get<int>());
+      const std::string& label =
+          node["source_label"].get_ref<const std::string&>();
+      EXPECT_EQ(label.size(), kLargeLabelBytes);
+      EXPECT_EQ(label.front(),
+                static_cast<char>('a' + node["id"].get<int>() - 1));
+    }
+    offset += result["nodes"].size();
+    if (!result["has_more"].get<bool>()) {
+      EXPECT_TRUE(result["cursor"].is_null());
+      break;
+    }
+    ASSERT_TRUE(result["cursor"].is_string());
+    if (cursor.empty()) {
+      cursor = result["cursor"].get<std::string>();
+    } else {
+      EXPECT_EQ(result["cursor"], cursor);
+    }
+    response = route("inspect.graph",
+                     Json{{"session_id", session_id_},
+                          {"cursor", cursor},
+                          {"offset", offset},
+                          {"limit", kGeneralPageMaxEntries}},
+                     worst_id);
+  }
+  EXPECT_EQ(node_ids, (std::vector<int>{1, 2, 3}));
+  EXPECT_EQ(page_sizes, (std::vector<std::size_t>{2, 1}));
+  EXPECT_EQ(offset, 3U);
+  EXPECT_EQ(host_.call_count("inspect.graph"), 1u);
+}
+
+TEST_F(HostRoutedGraphStateProtocolTest,
+       DirectPlanningIgnoresStableSnapshotEntryQuotaWithinFrame) {
+  static constexpr std::size_t kTaskCount = 65;
+  static constexpr std::size_t kDependenciesPerTask = 4096;
+  static_assert(
+      kTaskCount + kTaskCount * kDependenciesPerTask > kSnapshotMaxEntries,
+      "fixture must exceed the stable snapshot recursive quota");
+  host_.set_compute_planning(
+      make_dense_protocol_planning_snapshot(kTaskCount, kDependenciesPerTask));
+  host_.reset_invocations();
+
+  const Json response =
+      route("inspect.compute_planning", Json{{"session_id", session_id_}});
+  ASSERT_TRUE(response.contains("result")) << response.dump();
+  ASSERT_TRUE(response["result"]["planning"].is_object());
+  EXPECT_EQ(response["result"]["planning"]["task_sample"].size(), kTaskCount);
+  EXPECT_LE(response.dump().size(), kMaximumFramePayloadBytes);
+  EXPECT_EQ(host_.call_count("inspect.compute_planning"), 1u);
+}
+
+TEST_F(HostRoutedGraphStateProtocolTest,
+       DirectNodePreflightAcceptsAnExactFrameBoundary) {
+  static constexpr std::string_view kRequestId = "tight-node";
+  NodeInspectionView node;
+  node.id = NodeId{1};
+  node.name = "boundary";
+  node.type = "fixture";
+  node.subtype = "source";
+  node.parameters.emplace("payload", std::string(kLargeTextMaxBytes, 'p'));
+  node.source_label = std::string();
+
+  const auto payload_size = [&](const NodeInspectionView& value) {
+    return Json{{"protocol_version", kProtocolVersion},
+                {"id", kRequestId},
+                {"result", Json{{"session_id", session_id_},
+                                {"node", encode_node(value)}}}}
+        .dump()
+        .size();
+  };
+  const std::size_t base_size = payload_size(node);
+  ASSERT_LT(base_size, kMaximumFramePayloadBytes);
+  const std::size_t remaining = kMaximumFramePayloadBytes - base_size;
+  ASSERT_LE(remaining, kLargeTextMaxBytes);
+  node.source_label->assign(remaining, 's');
+  ASSERT_EQ(payload_size(node), kMaximumFramePayloadBytes);
+  host_.set_inspected_node(node);
+  host_.reset_invocations();
+
+  const Json response =
+      route("inspect.node", Json{{"session_id", session_id_}, {"node_id", 1}},
+            std::string(kRequestId));
+  ASSERT_TRUE(response.contains("result")) << response.dump();
+  EXPECT_EQ(response.dump().size(), kMaximumFramePayloadBytes);
+  EXPECT_EQ(host_.call_count("inspect.node"), 1u);
+}
+
+TEST_F(HostRoutedGraphStateProtocolTest,
+       DirectPreflightRejectsClearlyOversizedNodeAndPlanningValues) {
+  NodeInspectionView node;
+  node.id = NodeId{1};
+  node.name = "oversized";
+  node.type = "fixture";
+  node.subtype = "source";
+  node.parameters.emplace("payload", std::string(kLargeTextMaxBytes, 'p'));
+  node.source_label = std::string(kLargeTextMaxBytes, 's');
+  host_.set_inspected_node(std::move(node));
+  host_.reset_invocations();
+
+  Json response =
+      route("inspect.node", Json{{"session_id", session_id_}, {"node_id", 1}});
+  ASSERT_TRUE(response.contains("error")) << response.dump();
+  EXPECT_EQ(response["error"]["domain"], "protocol");
+  EXPECT_EQ(response["error"]["name"], "response_too_large");
+  EXPECT_EQ(host_.call_count("inspect.node"), 1u);
+
+  host_.set_compute_planning(make_dense_protocol_planning_snapshot(
+      kGeneralPageMaxEntries, 512, kShortTextMaxBytes, kLargeTextMaxBytes));
+  host_.reset_invocations();
+  response =
+      route("inspect.compute_planning", Json{{"session_id", session_id_}});
+  ASSERT_TRUE(response.contains("error")) << response.dump();
+  EXPECT_EQ(response["error"]["domain"], "protocol");
+  EXPECT_EQ(response["error"]["name"], "response_too_large");
+  EXPECT_EQ(host_.call_count("inspect.compute_planning"), 1u);
+}
+
+TEST_F(HostRoutedGraphStateProtocolTest,
+       RejectsOneIndivisibleInspectionValueBeforeCursorPublication) {
+  GraphInspectionView graph;
+  NodeInspectionView node;
+  node.id = NodeId{1};
+  node.name = "indivisible";
+  node.type = "fixture";
+  node.subtype = "source";
+  node.parameters.emplace("first", std::string(kLargeTextMaxBytes, 'a'));
+  node.parameters.emplace("second", std::string(kLargeTextMaxBytes, 'b'));
+  graph.nodes.push_back(std::move(node));
+  host_.set_inspected_graph(std::move(graph));
+  host_.reset_invocations();
+
+  const Json response =
+      route("inspect.graph", Json{{"session_id", session_id_}});
+  ASSERT_TRUE(response.contains("error")) << response.dump();
+  EXPECT_EQ(response["error"]["domain"], "protocol");
+  EXPECT_EQ(response["error"]["name"], "response_too_large");
+  EXPECT_EQ(host_.call_count("inspect.graph"), 1u);
+
+  host_.set_node_ids({NodeId{2}});
+  host_.reset_invocations();
+  const Json retry =
+      route("inspect.node_ids", Json{{"session_id", session_id_}});
+  ASSERT_TRUE(retry.contains("result")) << retry.dump();
+  EXPECT_TRUE(retry["result"]["cursor"].is_null());
+  EXPECT_EQ(host_.call_count("inspect.node_ids"), 1u);
+}
+
+TEST_F(HostRoutedGraphStateProtocolTest,
+       SeparatesReturnedInspectionBoundsFromMalformedPublicValues) {
+  ComputePlanningInspectionSnapshot planning =
+      make_protocol_planning_snapshot();
+  planning.intent = static_cast<ComputeIntent>(99);
+  host_.set_compute_planning(planning);
+  host_.reset_invocations();
+  Json response =
+      route("inspect.compute_planning", Json{{"session_id", session_id_}});
+  ASSERT_TRUE(response.contains("error")) << response.dump();
+  EXPECT_EQ(response["error"]["domain"], "daemon");
+  EXPECT_EQ(response["error"]["name"], "internal_error");
+  EXPECT_EQ(host_.call_count("inspect.compute_planning"), 1u);
+
+  planning = make_protocol_planning_snapshot();
+  planning.expansion_cache_key = std::string(kLargeTextMaxBytes + 1, 'k');
+  host_.set_compute_planning(std::move(planning));
+  host_.reset_invocations();
+  response =
+      route("inspect.compute_planning", Json{{"session_id", session_id_}});
+  ASSERT_TRUE(response.contains("error")) << response.dump();
+  EXPECT_EQ(response["error"]["domain"], "protocol");
+  EXPECT_EQ(response["error"]["name"], "response_too_large");
+  EXPECT_EQ(host_.call_count("inspect.compute_planning"), 1u);
+
+  host_.set_traversal_details(
+      {{7,
+        {HostTraversalNodeSnapshot{NodeId{7}, std::string("bad\xff", 4), false,
+                                   false}}}});
+  host_.reset_invocations();
+  response =
+      route("inspect.traversal_details", Json{{"session_id", session_id_}});
+  ASSERT_TRUE(response.contains("error")) << response.dump();
+  EXPECT_EQ(response["error"]["domain"], "daemon");
+  EXPECT_EQ(response["error"]["name"], "internal_error");
+  EXPECT_EQ(host_.call_count("inspect.traversal_details"), 1u);
+}
 
 TEST_F(HostRoutedGraphStateProtocolTest,
        RoutesTenVoidMutatorsOnceWithExactHostSessionAndArguments) {
@@ -834,10 +1908,16 @@ TEST_F(HostRoutedGraphStateProtocolTest,
       {"graph.node_yaml.get", Json{{"session_id", session_id_},
                                    {"node_id", 17},
                                    {"yaml_text", "id: 17\nname: copied\n"}}},
-      {"inspect.node_ids",
-       Json{{"session_id", session_id_}, {"node_ids", Json::array({4, 2, 4})}}},
+      {"inspect.node_ids", Json{{"session_id", session_id_},
+                                {"node_ids", Json::array({4, 2, 4})},
+                                {"offset", 0},
+                                {"has_more", false},
+                                {"cursor", nullptr}}},
       {"inspect.ending_nodes", Json{{"session_id", session_id_},
-                                    {"ending_node_ids", Json::array({9})}}},
+                                    {"ending_node_ids", Json::array({9})},
+                                    {"offset", 0},
+                                    {"has_more", false},
+                                    {"cursor", nullptr}}},
       {"inspect.roi_forward",
        Json{{"session_id", session_id_},
             {"roi", expected_rect(PixelRect{-7, 8, 9, 10})}}},
@@ -1330,7 +2410,7 @@ TEST_F(HostRoutedGraphStateProtocolTest,
 }
 
 TEST_F(HostRoutedGraphStateProtocolTest,
-       NodeListRoutesPreserveZeroOneAnd4096EntriesAndReject4097) {
+       NodeListRoutesPreserveSingleAndMultipleStablePages) {
   static constexpr std::array<std::string_view, 2> kMethods = {
       "inspect.node_ids", "inspect.ending_nodes"};
   for (std::string_view method : kMethods) {
@@ -1367,11 +2447,23 @@ TEST_F(HostRoutedGraphStateProtocolTest,
       host_.set_ending_nodes(std::move(oversized));
     }
     host_.reset_invocations();
-    const Json response = route(std::string(method),
-                                valid_host_routed_params(method, session_id_));
-    ASSERT_TRUE(response.contains("error")) << method << response.dump();
-    EXPECT_EQ(response["error"]["domain"], "protocol") << method;
-    EXPECT_EQ(response["error"]["name"], "response_too_large") << method;
+    const Json first = route(std::string(method),
+                             valid_host_routed_params(method, session_id_));
+    ASSERT_TRUE(first.contains("result")) << method << first.dump();
+    const char* field =
+        method == "inspect.node_ids" ? "node_ids" : "ending_node_ids";
+    ASSERT_EQ(first["result"][field].size(), kGeneralPageMaxEntries);
+    ASSERT_TRUE(first["result"]["has_more"].get<bool>());
+    ASSERT_TRUE(first["result"]["cursor"].is_string());
+    Json continuation = valid_host_routed_params(method, session_id_);
+    continuation["cursor"] = first["result"]["cursor"];
+    continuation["offset"] = kGeneralPageMaxEntries;
+    continuation["limit"] = kGeneralPageMaxEntries;
+    const Json final = route(std::string(method), std::move(continuation));
+    ASSERT_TRUE(final.contains("result")) << method << final.dump();
+    ASSERT_EQ(final["result"][field], Json::array({7}));
+    EXPECT_FALSE(final["result"]["has_more"].get<bool>());
+    EXPECT_TRUE(final["result"]["cursor"].is_null());
     EXPECT_EQ(host_.call_count(method), 1u) << method;
   }
 }
@@ -2484,9 +3576,11 @@ TEST(ProtocolEnvelope, EnforcesRequestAndMethodUtf8ByteBounds) {
 }
 
 TEST(ProtocolParams, IgnoresUnknownFieldsButStillValidatesKnownFields) {
+  ScopedTempDirectory temp("ps-ipc-params");
   std::unique_ptr<Host> host = create_embedded_host();
   ASSERT_NE(host, nullptr);
   RequestRouter router(*host, "0.1.0");
+  ScopedRequestRouterRuntime runtime(router, temp);
   for (const std::string& method :
        {std::string("daemon.ping"), std::string("daemon.version"),
         std::string("graph.list")}) {
@@ -2689,6 +3783,7 @@ TEST(ProtocolGraphClose, ShutdownFailureRetainsMappingAndAllowsRetry) {
   ASSERT_TRUE(configured.status.ok) << configured.status.message;
 
   RequestRouter router(*host, "0.1.0");
+  ScopedRequestRouterRuntime runtime(router, temp);
   const Json load_response = parse_response(router.route(
       Json{{"protocol_version", 1},
            {"id", "load"},
@@ -3066,6 +4161,7 @@ TEST(ProtocolErrors, MapsRealInspectionCodecFailuresToStableErrors) {
   std::unique_ptr<Host> host = create_embedded_host();
   ASSERT_NE(host, nullptr);
   RequestRouter router(*host, "0.1.0");
+  ScopedRequestRouterRuntime runtime(router, temp);
   const Json loaded = parse_response(router.route(Json{
       {"protocol_version", kProtocolVersion},
       {"id", "load-codec-errors"},
@@ -3100,9 +4196,6 @@ TEST(ProtocolErrors, MapsRealInspectionCodecFailuresToStableErrors) {
   EXPECT_EQ(invalid_graph["error"]["domain"], "daemon");
   EXPECT_EQ(invalid_graph["error"]["code"], kInternalErrorCode);
   EXPECT_EQ(invalid_graph["error"]["name"], "internal_error");
-
-  router.begin_shutdown();
-  router.finish_shutdown();
 }
 
 TEST(InspectionJson, RoundTripsNullAndNonFiniteSnapshots) {

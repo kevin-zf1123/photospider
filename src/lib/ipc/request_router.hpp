@@ -45,6 +45,26 @@ class RequestRouter {
   RequestRouter(Host& host, std::string service_version);
 
   /**
+   * @brief Creates a router with an injectable collection-snapshot policy.
+   *
+   * @param host Sole daemon Host instance borrowed by this router.
+   * @param service_version Reproducible CMake project version string.
+   * @param snapshot_limits Count, byte, page, and TTL policy.
+   * @param snapshot_clock Monotonic clock used for cursor expiry.
+   * @param snapshot_id_generator Stable opaque cursor source.
+   * @throws std::bad_alloc if callback or metadata allocation fails.
+   * @throws std::invalid_argument if the snapshot policy is inconsistent.
+   * @throws std::runtime_error if instance-id entropy fails.
+   * @note Production uses the two-argument overload. Tests may inject smaller
+   *       limits and deterministic time/ids, but runtime admission still begins
+   *       only through `start_runtime()`.
+   */
+  RequestRouter(Host& host, std::string service_version,
+                CollectionSnapshotLimits snapshot_limits,
+                CollectionSnapshotRegistry::Clock snapshot_clock,
+                CollectionSnapshotRegistry::IdGenerator snapshot_id_generator);
+
+  /**
    * @brief Prevents copying Host, mutex, and registry ownership.
    *
    * @throws Nothing because this operation is unavailable.
@@ -74,10 +94,10 @@ class RequestRouter {
    *       compensating Host close, including when Host load or registry
    *       publication throws. Session-scoped calls retain a counted admission;
    *       `graph.close` marks Closing and waits admissions before Host locking.
-   *       Direct graph-list, node-list, YAML, timing, dirty, and inspection
-   *       result codecs locally map `std::length_error` to
-   *       `response_too_large`; malformed returned values and other standard
-   *       request failures become daemon `internal_error`.
+   *       Stable graph-list/inspection pages and direct YAML, timing, dirty,
+   *       node, and current-planning codecs locally map returned byte/count
+   *       bounds to `response_too_large`; malformed returned values and other
+   *       standard request failures become daemon `internal_error`.
    *       Resource exhaustion is rethrown. The function performs no socket IO.
    */
   std::string route(const std::string& payload);
@@ -162,6 +182,33 @@ class RequestRouter {
    *       a successful envelope.
    */
   std::optional<std::string> route_session_control_method(
+      const std::string& id, const std::string& method,
+      const RoutedParams& routed_params);
+
+  /**
+   * @brief Routes stable collection and remaining inspection methods.
+   *
+   * @param id Valid request id correlated with the response.
+   * @param method Exact version 1 method name.
+   * @param routed_params Cpp-only adapter borrowing the structurally valid
+   *        params object.
+   * @return Complete response when this family recognizes `method`, or
+   *         `std::nullopt` for another router family.
+   * @throws std::bad_alloc if validation, snapshot ownership, or response
+   *         construction cannot allocate.
+   * @throws std::invalid_argument if Host returns a malformed public value.
+   * @throws Whatever the matching Host method propagates; `route()` preserves
+   *         resource exhaustion and maps other standard exceptions.
+   * @note Initial collection calls reserve one slot and 64 MiB before exactly
+   *       one Host call under `host_mutex_`. Continuations validate only their
+   *       frozen cursor identity and never resolve a live session or call Host.
+   *       Returned collection limits count outer and nested public vector/map
+   *       entries recursively; dependency/traversal results are pre-scanned
+   *       before router-owned header or row transformation allocations.
+   *       Indivisible node, dirty-region, and current-planning values remain
+   *       direct results and are rejected whole when they cannot fit a frame.
+   */
+  std::optional<std::string> route_inspection_method(
       const std::string& id, const std::string& method,
       const RoutedParams& routed_params);
 

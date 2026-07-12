@@ -79,7 +79,7 @@ struct CollectionSnapshotLimits {
   /** @brief Exact byte amount reserved before every full-value Host call. */
   std::size_t reservation_bytes = kSnapshotMaxBytes;
 
-  /** @brief Maximum entries accepted from one measured Host result. */
+  /** @brief Maximum recursive public entries in one measured Host result. */
   std::size_t snapshot_entries = kSnapshotMaxEntries;
 
   /** @brief Maximum bytes accepted from one measured Host result. */
@@ -97,8 +97,9 @@ struct CollectionSnapshotLimits {
  *
  * A caller reserves one slot and the configured worst-case bytes before its
  * one existing full-value Host call. Publication then measures through caller
- * supplied exact entry/byte counts, moves the public collection into private
- * storage, adjusts quota to actual retained bytes, and emits ordered pages.
+ * supplied exact recursive-entry/byte counts, moves the public collection into
+ * private storage, adjusts quota to actual retained bytes, and emits ordered
+ * pages.
  * Later pages use only frozen record state and never resolve a live session.
  *
  * @throws std::bad_alloc when callbacks or registry storage cannot allocate.
@@ -288,8 +289,15 @@ class CollectionSnapshotRegistry {
    * @param reservation Active quota reserved before the Host call.
    * @param binding Frozen method/session/original-params identity.
    * @param entries Complete Host-returned public collection moved on success.
+   * @param measured_entries Exact recursive public vector/map/fixed-array entry
+   *        count from the value codec. This may exceed `entries.size()` because
+   *        retained rows can contain nested public collections, but it must
+   *        never be smaller than that top-level row count.
    * @param measured_bytes Exact retained byte accounting from the value codec.
    * @param page_limit Requested first-page size in `1..page_entries`.
+   * @param retained_page_limit Optional stricter frame-safe ceiling retained
+   *        for every continuation; the default preserves caller-selected page
+   *        sizes up to the registry policy.
    * @return First page, or transactional expected rejection.
    * @throws std::bad_alloc if cursor, page, or record storage cannot allocate.
    * @throws std::runtime_error if the id source returns malformed data or its
@@ -297,13 +305,16 @@ class CollectionSnapshotRegistry {
    * @throws Whatever the injected id/clock callbacks or copying `T` into the
    *         response page throws.
    * @note Oversize and every exception roll back reservation quota without a
-   *       published cursor or retained snapshot copy.
+   *       published cursor or retained snapshot copy. The first page uses the
+   *       smaller of requested and retained frame-safe limits.
    */
   template <typename T>
   PageResult<T> publish(Reservation reservation,
                         CollectionSnapshotBinding binding,
-                        std::vector<T>&& entries, std::size_t measured_bytes,
-                        std::size_t page_limit);
+                        std::vector<T>&& entries, std::size_t measured_entries,
+                        std::size_t measured_bytes, std::size_t page_limit,
+                        std::size_t retained_page_limit =
+                            std::numeric_limits<std::size_t>::max());
 
   /**
    * @brief Reads exactly the next ordered page from frozen snapshot state.
@@ -317,7 +328,9 @@ class CollectionSnapshotRegistry {
    * @throws std::bad_alloc or whatever the injected clock/copying `T` throws;
    *         failure leaves the record and offset unchanged.
    * @note The fixed publication TTL is never refreshed. No session lookup or
-   *       Host call occurs.
+   *       Host call occurs. A publication-time frame-safe ceiling may return
+   *       fewer than the requested entries; callers advance by the returned
+   *       page size and may request a smaller later limit.
    */
   template <typename T>
   PageResult<T> page(const std::string& cursor,
@@ -375,10 +388,12 @@ class CollectionSnapshotRegistry {
     std::any entries;
     /** @brief Exact concrete vector type used to reject mismatched reads. */
     std::type_index type = typeid(void);
-    /** @brief Complete collection entry count. */
+    /** @brief Actual top-level row count used only for paging invariants. */
     std::size_t entry_count = 0;
     /** @brief Exact measured retained byte accounting. */
     std::size_t measured_bytes = 0;
+    /** @brief Publication-time frame-safe ceiling for every later page. */
+    std::size_t page_entry_limit = 1;
     /** @brief Next ordered offset accepted by `page()`. */
     std::size_t next_offset = 0;
     /** @brief Fixed expiry set once at cursor publication. */
@@ -489,22 +504,31 @@ class CollectionSnapshotRegistry {
 template <typename T>
 CollectionSnapshotRegistry::PageResult<T> CollectionSnapshotRegistry::publish(
     Reservation reservation, CollectionSnapshotBinding binding,
-    std::vector<T>&& entries, std::size_t measured_bytes,
-    std::size_t page_limit) {
+    std::vector<T>&& entries, std::size_t measured_entries,
+    std::size_t measured_bytes, std::size_t page_limit,
+    std::size_t retained_page_limit) {
   static_assert(std::is_copy_constructible<T>::value,
                 "snapshot page entries must be copy constructible");
   PageResult<T> result;
-  if (page_limit == 0 || page_limit > limits_.page_entries) {
+  if (page_limit == 0 || page_limit > limits_.page_entries ||
+      retained_page_limit == 0) {
     result.error = CollectionSnapshotError::InvalidParams;
     return result;
   }
-  if (entries.size() > limits_.snapshot_entries ||
+  if (measured_entries < entries.size()) {
+    result.error = CollectionSnapshotError::InvalidParams;
+    return result;
+  }
+  if (measured_entries > limits_.snapshot_entries ||
       measured_bytes > limits_.snapshot_bytes) {
     result.error = CollectionSnapshotError::ResponseTooLarge;
     return result;
   }
 
-  const std::size_t first_count = std::min(entries.size(), page_limit);
+  const std::size_t stored_page_limit =
+      std::min(retained_page_limit, limits_.page_entries);
+  const std::size_t first_count =
+      std::min(entries.size(), std::min(page_limit, stored_page_limit));
   result.entries.reserve(first_count);
   result.entries.insert(
       result.entries.end(), entries.begin(),
@@ -551,6 +575,7 @@ CollectionSnapshotRegistry::PageResult<T> CollectionSnapshotRegistry::publish(
                 std::type_index(typeid(std::vector<T>)),
                 entry_count,
                 measured_bytes,
+                stored_page_limit,
                 first_count,
                 expiration_at(now)};
 
@@ -609,7 +634,9 @@ CollectionSnapshotRegistry::PageResult<T> CollectionSnapshotRegistry::page(
     return result;
   }
 
-  const std::size_t end = std::min(entries->size(), offset + page_limit);
+  const std::size_t effective_limit =
+      std::min(page_limit, record.page_entry_limit);
+  const std::size_t end = std::min(entries->size(), offset + effective_limit);
   result.entries.reserve(end - offset);
   result.entries.insert(result.entries.end(),
                         entries->begin() + static_cast<std::ptrdiff_t>(offset),

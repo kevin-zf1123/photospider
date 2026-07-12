@@ -30,7 +30,7 @@ header；在其他任何 CMake system name 下强制开启 IPC 会使 configure 
 7. `inspect.node`
 8. `inspect.dependency_tree`
 
-Request router 还接受以下 21 个 Host-backed typed method：
+Request router 还接受以下 27 个 Host-backed typed method：
 
 1. `cache.cache_all_nodes`
 2. `cache.clear_all`
@@ -53,9 +53,15 @@ Request router 还接受以下 21 个 Host-backed typed method：
 19. `inspect.node_ids`
 20. `inspect.roi_backward`
 21. `inspect.roi_forward`
+22. `inspect.compute_planning`
+23. `inspect.dirty_region`
+24. `inspect.recent_compute_planning`
+25. `inspect.traversal_details`
+26. `inspect.traversal_orders`
+27. `inspect.trees_containing_node`
 
 已安装 typed `ps::ipc::Client` 只暴露八名称 metadata 子集的 call，且没有 public raw-JSON
-escape hatch。新增 21 个 schema 属 daemon request-router behavior。
+escape hatch。新增 27 个 schema 属 daemon request-router behavior。
 
 版本 1 不暴露 compute-job submit/polling、cancellation、image result、scheduler/plugin/event
 route、`daemon.shutdown`、TCP、Windows named pipe 或 `graph_cli --connect`。现有
@@ -325,8 +331,9 @@ schema，因此由 protocol 验证。
 
 返回 YAML 必须是合法 UTF-8 且最多 8 MiB，绝不 truncate。`inspect.node_ids` 与
 `inspect.ending_nodes` 只要求 `session_id`，分别返回 `{session_id,node_ids}` 与
-`{session_id,ending_node_ids}`。这些 direct array 最多包含 4,096 个非负精确 `int` value；
-Host order 与 duplicate id 都会保留，router 不排序、不去重，也不截断。
+`{session_id,ending_node_ids}`。这些 array 使用下文的 stable collection-page metadata；每页最多
+4,096 个非负精确 `int` value，admitted snapshot 最多 262,144 个。Host order 与 duplicate id
+都会保留，router 不排序、不去重，也不截断。
 
 `inspect.roi_forward` 要求 `start_node_id`、`start_roi`、`target_node_id`；
 `inspect.roi_backward` 要求 `target_node_id`、`target_roi`、`source_node_id`。Node id 是非负
@@ -466,26 +473,61 @@ source 均可注入，以执行 deterministic filesystem/race test。
 ## Private Stable Collection Snapshot
 
 Router 拥有一个 private、type-erased 的 `CollectionSnapshotRegistry`，并随 daemon runtime
-lifecycle 启动、停止和清空它。Wire surface 不广告 collection cursor page 或 cursor-release
-method。已路由的 graph/node/tree inspection 与 node-list method 保持 direct result shape，不会
-reserve、publish 或 page registry record。Public Host collection API 保持 full-value API；该
-registry 不新增 Host page API、public ABI type 或 JSON response envelope。
+lifecycle 启动、停止和清空它。Public Host collection API 保持 full-value API；分页属于 daemon
+拥有的 wire 行为，不新增 Host page API 或 public ABI type。`graph.list`、
+`inspect.node_ids`、`inspect.ending_nodes`、`inspect.graph`、
+`inspect.dependency_tree`、`inspect.traversal_orders`、
+`inspect.traversal_details`、`inspect.trees_containing_node` 与
+`inspect.recent_compute_planning` 使用该 registry。Wire 不广告独立 page method 或
+cursor-release method。
+
+首个 request 可带 `1..4096` 的 optional integer `limit`；缺省为 4,096，且不得包含
+`cursor` 或 `offset`。Continuation 会调用同一 method，携带原始 typed non-page parameter，
+再加 required 32-lowercase-hex `cursor`、精确的下一个 nonnegative `offset`，以及
+`1..4096` 的 integer `limit`。Unknown field 保持 forward-compatible。Result 保留 method
+原有 collection field，并新增 integer `offset`、boolean `has_more` 和 `cursor`；仍有后续 row
+时 cursor 是 stable string，only/final page 时为 JSON null。Host order 与 duplicate 都会保留。
 
 Private `reserve()` operation 会原子预留一个 record 和完整的 64 MiB per-snapshot allowance。
 Production admission 最多保留 64 records 与总计 256 MiB；quota 不可用时报告 private
-`CapacityExceeded`。`publish()` 接受 caller 的完整 collection、精确 measured byte count、binding
-与 page limit。超过 262,144 entries 或 64 MiB 会报告 private `ResponseTooLarge`，回滚
-reservation，并且不发布 cursor 或 retained snapshot。合法的 multi-page value 会 move 进
-registry；worst-case reservation 会以事务方式替换成精确 measured byte count，另一次 admission
-随后才会观察该 quota。Empty 与 single-page value 会直接返回，不保留 record。
+`CapacityExceeded`。`publish()` 接受 caller 的完整 collection、精确 recursive public-entry
+count、精确 measured byte count、binding、requested page limit 与 frame-safe page ceiling。超过
+262,144 entries 或 64 MiB 会报告 protocol `response_too_large`，回滚 reservation，并且不发布
+cursor 或 retained snapshot；
+admission 耗尽会在 Host access 前报告 daemon `capacity_exceeded`。合法的 multi-page value 会
+move 进 registry；worst-case reservation 会以事务方式替换成 measured byte count，另一次
+admission 随后才会观察该 quota。Empty 与 single-page value 会直接返回，不保留 record。
+
+Entry count 是递归计数，并非 page row 数量。它会计算 outer session、node-id、node、dependency、
+traversal 或 planning-history vector/map 的每个 element；每个 node-parameter map entry；存在
+spatial metadata 时三个 public 3x3 spatial matrix 的 27 个 element；dependency root 与 flattened
+entry 及其 nested node 内的 collection；每个 traversal branch 的 nested node vector；以及每个
+recent-planning `planned_node_sample`、`task_sample` 和 task `dependency_task_ids` element。
+Scalar/object member 与 optional value 是否存在不额外计数。Registry 会另行保留真实 top-level
+row count 作为 paging/type invariant，并拒绝小于该 row count 的 recursive count；注入的 test
+limit 同样生效。
+
+完成唯一一次 Host call 后，router 会在分配 shared header、复制 root 或建立 row vector 前预扫描
+dependency root/entry，并在 map-to-vector transformation 前预扫描 traversal map。因此 recursive
+over-count 会稳定返回 `response_too_large`，且不产生 cursor 或 quota leak。Snapshot-byte
+measurement 会把每个 retained variable-width public collection 精确计量一次。Dependency root 与
+scalar tree field 组成 shared page header，因此 dependency 计量会以 measured complete entries
+array 替换该 encoded header 中的 empty `entries` token（`[]`）。公式为
+`header_bytes - 2 + entries_array_bytes`，不会重复计算 empty token。
 
 Multi-page publication 会获得一个经过 collision-check 的 32-lowercase-hex cursor，并冻结精确
-method、optional opaque session id，以及 original non-page parameter 的 canonical identity。Page
-包含 1 至 4,096 个有序 entry。Continuation lookup 必须提供 frozen identity 与精确 next offset；
-binding/type/offset mismatch 会报告 private `CursorNotFound`，且不会推进 record。Malformed
-cursor、zero/over-limit page 或 offset arithmetic overflow 会报告 private `InvalidParams`，同样
-不会破坏状态。Continuation page 只读取 retained value，不执行 Host call 或 live-session lookup，
-因此不依赖当前 graph-session mapping；copy/allocation failure 也不会改变 next offset。
+method、optional opaque session id，以及 original non-page parameter 的 canonical identity。
+发布前，router 会逐 row 测量且不构造完整 JSON DOM，并计算一个最大的 fixed page ceiling，确保
+每个连续 page 都能放入 16 MiB frame。计算包含 maximally escaped 的合法 128-byte request id、
+32-byte cursor、maximum offset text 与 method-specific header。Caller 可在 continuation 请求更少
+row，但不能越过冻结的 safe ceiling。任何无法单独装入 frame 的 indivisible row 都会在 cursor
+publication 前报告 `response_too_large`。
+
+Continuation lookup 必须提供 frozen identity 与精确 next offset。Binding/type/offset mismatch，
+以及 unknown/expired well-formed cursor，会报告 daemon `cursor_not_found`，且不会推进 record。
+Malformed cursor、zero/over-limit page 或 offset arithmetic overflow 会报告 protocol
+`invalid_params`，同样不会破坏状态。Continuation page 只读取 retained value，不执行 Host call
+或 live-session lookup，因此在 `graph.close` 后仍可读取；copy failure 也不会改变 next offset。
 
 Final page 会原子删除 record 并释放 measured quota。否则，由 cursor publication 时刻开始计算、
 且不会因 paging 刷新的固定 15-minute monotonic TTL 会完成释放。Daemon 开始 shutdown 时停止新
@@ -493,6 +535,23 @@ reservation，同时保留 active reservation 与已经 published 的 record；c
 final snapshot shutdown 会在关闭 Host session 前清空全部 record 与 reservation。下一次 runtime
 start 会在 empty registry 上启用 admission。Limit、clock 与 id source 均可注入，用于
 deterministic capacity、final-page、expiry 与 shutdown race test。
+
+Collection field 如下：
+
+- `graph.list` 使用 `sessions` row；
+- `inspect.node_ids` 使用 `node_ids`；`inspect.ending_nodes` 与
+  `inspect.trees_containing_node` 使用 `ending_node_ids`；
+- `inspect.graph` 使用 `nodes`；
+- `inspect.dependency_tree` 会在每页重复 scalar tree header 与完整 bounded
+  `root_node_ids`，并分页 flattened `entries`；
+- `inspect.traversal_orders` 使用 `{ending_node_id,node_ids}` 形状的 `orders` row；
+- `inspect.traversal_details` 使用 `{ending_node_id,nodes}` 形状的 `branches` row，其中每个
+  node 含 `node_id`、`name`、`has_memory_cache` 与 `has_disk_cache`；
+- `inspect.recent_compute_planning` 使用 `snapshots`。
+
+Installed typed Client 会把新增 page metadata 作为 unknown field 接受，并为 small single-page
+graph/tree value 返回完整结果；它目前不会发出 cursor continuation。需要 multi-page router value
+的 caller 必须直接使用 typed wire schema。
 
 ## Inspection Value
 
@@ -504,7 +563,14 @@ Inspection 会在获取 Host mutex 前原子地 admit opaque session，并且只
   `node_id`，返回 `{session_id, node}`；
 - `inspect.dependency_tree` 接受相同范围的 optional nonnegative integer/null `node_id` 与
   optional boolean `include_metadata`，然后返回
-  `{session_id, ...flattened tree fields}`。
+  `{session_id, ...flattened tree fields}`；
+- `inspect.traversal_orders` 与 `inspect.traversal_details` 通过上述 page row 返回 Host 中以
+  ending node 为 key 的 copied map；
+- `inspect.trees_containing_node` 要求 nonnegative `node_id` 并返回 copied ending-node id；
+- `inspect.dirty_region` 返回当前 copied dirty-region snapshot；
+- `inspect.compute_planning` 返回 `{session_id,planning}`；尚无 planning result 时
+  `planning` 为 null，否则为一个 indivisible copied planning object；
+- `inspect.recent_compute_planning` 返回 copied planning snapshot 的 stable page。
 
 Node JSON 以 snake-case field 镜像 `NodeInspectionView`：integer `id`、`name`、
 `type`、`subtype`、由字符串值组成的 JSON object `parameters`、
@@ -517,10 +583,12 @@ output/input name 与 nonnegative `input_index`。Optional value 使用 JSON nul
 Typed client 会在发布 graph、node 或 dependency-tree snapshot 前，对每个 node id、tree depth、
 edge input index、debug timestamp/duration、worker id 与 spatial extent/rectangle component
 执行范围检查。Signed/unsigned overflow 属本地 Protocol result-shape failure，绝不窄化。
-这些已路由的 inspection method 与 node-list/ROI method 返回 direct result shape，且不使用
-private collection snapshot registry 或 collection cursor。
-同一组 reusable enum、`PixelRect`、bounded-string、array、page、opaque-id 与 nested-status codec
-会递归应用于 composite value；decode 失败时 caller-visible destination 保持未发布。
+Direct `inspect.node`、ROI、dirty-region 与 current-planning result 不发布 cursor。Collection
+method 使用上述 stable metadata，不改变其 copied Host contract。Planning value 会把
+`ComputeIntent` 与 `DirtyDomain` 编码为 stable lowercase snake-case label，把 nested optional
+value 编码为 null，并把所有 count 编码为精确 nonnegative integer。同一组 reusable enum、
+`PixelRect`、bounded-string、array、page、opaque-id 与 nested-status codec 会递归应用于
+composite value；decode 失败时 caller-visible state 保持未发布。
 
 Payload 中不会出现 backend class、address、pointer、cache handle、service object、closure 或
 mutable reference。

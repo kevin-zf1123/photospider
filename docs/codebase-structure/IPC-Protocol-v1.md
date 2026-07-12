@@ -32,7 +32,7 @@ Forcing IPC on for any other CMake system name fails configuration.
 7. `inspect.node`
 8. `inspect.dependency_tree`
 
-The request router also accepts these 21 Host-backed typed methods:
+The request router also accepts these 27 Host-backed typed methods:
 
 1. `cache.cache_all_nodes`
 2. `cache.clear_all`
@@ -55,9 +55,15 @@ The request router also accepts these 21 Host-backed typed methods:
 19. `inspect.node_ids`
 20. `inspect.roi_backward`
 21. `inspect.roi_forward`
+22. `inspect.compute_planning`
+23. `inspect.dirty_region`
+24. `inspect.recent_compute_planning`
+25. `inspect.traversal_details`
+26. `inspect.traversal_orders`
+27. `inspect.trees_containing_node`
 
 The installed typed `ps::ipc::Client` exposes calls only for the eight-name
-metadata subset and has no public raw-JSON escape hatch. The 21 additional
+metadata subset and has no public raw-JSON escape hatch. The 27 additional
 schemas are daemon request-router behavior.
 
 Version 1 exposes no compute-job submission/polling, cancellation, image
@@ -368,9 +374,10 @@ Success returns:
 The returned YAML must be valid UTF-8 and at most 8 MiB; it is never truncated.
 `inspect.node_ids` and `inspect.ending_nodes` require only `session_id` and
 return `{session_id,node_ids}` or `{session_id,ending_node_ids}` respectively.
-These are direct arrays of at most 4,096 nonnegative exact `int` values. Host
-order and duplicate ids are preserved; the router neither sorts, deduplicates,
-nor truncates them.
+Their arrays use the stable collection-page metadata described below, with at
+most 4,096 nonnegative exact `int` values per page and up to 262,144 in the
+admitted snapshot. Host order and duplicate ids are preserved; the router
+neither sorts, deduplicates, nor truncates them.
 
 `inspect.roi_forward` requires `start_node_id`, `start_roi`, and
 `target_node_id`. `inspect.roi_backward` requires `target_node_id`,
@@ -547,35 +554,80 @@ source are injectable for deterministic filesystem and race tests.
 ## Private Stable Collection Snapshots
 
 The router owns a private type-erased `CollectionSnapshotRegistry` and starts,
-stops, and clears it with daemon runtime lifecycle. The wire surface advertises
-no collection cursor page or cursor-release method. Routed graph/node/tree
-inspection and node-list methods keep their direct result shapes and do not
-reserve, publish, or page registry records. Public Host collection APIs remain
-full-value APIs; the registry adds no Host page API, public ABI type, or JSON
-response envelope.
+stops, and clears it with daemon runtime lifecycle. Public Host collection APIs
+remain full-value APIs; paging is a daemon-owned wire concern and adds no Host
+page API or public ABI type. `graph.list`, `inspect.node_ids`,
+`inspect.ending_nodes`, `inspect.graph`, `inspect.dependency_tree`,
+`inspect.traversal_orders`, `inspect.traversal_details`,
+`inspect.trees_containing_node`, and `inspect.recent_compute_planning` use this
+registry. No separate page or cursor-release method is advertised.
+
+A first request accepts optional integer `limit` in `1..4096`; absence means
+4,096. It must not contain `cursor` or `offset`. A continuation calls the same
+method with its original typed non-page parameters plus required 32-lowercase-
+hex `cursor`, exact next nonnegative `offset`, and integer `limit` in
+`1..4096`. Unknown fields remain forward-compatible. The result retains the
+method's collection field and adds integer `offset`, boolean `has_more`, and
+`cursor`, which is the stable string while more rows remain and JSON null on
+the only or final page. Host order and duplicates are preserved.
 
 The private `reserve()` operation atomically reserves one record and the
 complete 64 MiB per-snapshot allowance. Production admission retains at most
 64 records and 256 MiB total, and reports private `CapacityExceeded` when that
 quota is unavailable. `publish()` accepts the caller's complete collection,
-exact measured byte count, binding, and page limit. More than 262,144 entries
-or 64 MiB reports private `ResponseTooLarge`; the reservation is rolled back
-and no cursor or retained snapshot is published. An admitted multi-page value
-is moved into the registry, and the worst-case reservation is transactionally
-replaced by its exact measured byte count before another admission observes the
-quota. Empty and single-page values return directly and retain no record.
+exact recursive public-entry count, exact measured byte count, binding,
+requested page limit, and a frame-safe page ceiling. More than 262,144 entries
+or 64 MiB reports protocol `response_too_large`; the reservation is rolled back
+and no cursor or retained snapshot is published. Admission exhaustion reports
+daemon
+`capacity_exceeded` before Host access. An admitted multi-page value is moved
+into the registry, and the worst-case reservation is transactionally replaced
+by its measured byte count before another admission observes the quota. Empty
+and single-page values return directly and retain no record.
+
+The entry count is recursive rather than the number of page rows. It counts
+every element of the outer session, node-id, node, dependency, traversal, or
+planning-history vector/map; every node-parameter map entry; the 27 elements
+of the three public 3x3 spatial matrices when spatial metadata is present;
+dependency roots and flattened entries plus collections in their nested nodes;
+each traversal branch's nested node vector; and every recent-planning
+`planned_node_sample`, `task_sample`, and task `dependency_task_ids` element.
+Scalar/object members and the presence of an optional value do not add an
+entry. The registry separately retains the actual top-level row count for
+paging/type invariants and rejects a reported recursive count smaller than
+that row count, including under injected test limits.
+
+After the one Host call, dependency roots/entries are pre-scanned before a
+shared header, root copy, or row vector is allocated, and traversal maps are
+pre-scanned before map-to-vector transformation. A recursive over-count is
+therefore `response_too_large` with no cursor or quota leak. Snapshot-byte
+measurement counts each retained variable-width public collection exactly
+once. In particular, dependency roots and scalar tree fields form the shared
+page header, so dependency measurement replaces that encoded header's empty
+`entries` token (`[]`) with the measured complete entries array. Its
+calculation is
+`header_bytes - 2 + entries_array_bytes` rather than counting the empty token
+twice.
 
 A multi-page publication receives one collision-checked 32-lowercase-hex
 cursor and freezes the exact method, optional opaque session id, and canonical
-identity of the original non-page parameters. Pages contain 1 through 4,096
-ordered entries. A continuation lookup must provide the frozen identity and
-the exact next offset; binding/type/offset mismatch reports private
-`CursorNotFound` without advancing the record. A malformed cursor,
-zero/over-limit page, or offset arithmetic overflow reports private
-`InvalidParams` and is likewise non-destructive. Continuation pages read only
+identity of the original non-page parameters. Before publication the router
+measures rows one at a time without building a complete JSON DOM and computes
+the largest fixed page ceiling whose every contiguous page fits the 16 MiB
+frame. The calculation includes a maximally escaped legal 128-byte request id,
+the 32-byte cursor, maximum offset text, and the method-specific header. A
+caller may request fewer rows on a continuation but cannot exceed that frozen
+safe ceiling. One indivisible row that cannot fit reports
+`response_too_large` before cursor publication.
+
+A continuation lookup must provide the frozen identity and exact next offset.
+Binding/type/offset mismatch and unknown or expired well-formed cursors report
+daemon `cursor_not_found` without advancing the record. A malformed cursor,
+zero/over-limit page, or offset arithmetic overflow reports protocol
+`invalid_params` and is likewise non-destructive. Continuation pages read only
 the retained value, perform no Host call or live-session lookup, and therefore
-do not depend on the current graph-session mapping. Copy/allocation failure
-also leaves the next offset unchanged.
+remain readable after `graph.close`. Copy failure also leaves the next offset
+unchanged.
 
 The final page atomically erases the record and releases its measured quota.
 Otherwise the fixed 15-minute monotonic TTL, measured from cursor publication,
@@ -585,6 +637,26 @@ after client workers join, final snapshot shutdown clears all records and
 reservations before Host sessions are closed. A subsequent runtime start
 enables admission on the empty registry. Limits, clock, and id source are
 injectable for deterministic capacity, final-page, expiry, and shutdown races.
+
+Collection fields are:
+
+- `graph.list`: `sessions` rows;
+- `inspect.node_ids`: `node_ids`; `inspect.ending_nodes` and
+  `inspect.trees_containing_node`: `ending_node_ids`;
+- `inspect.graph`: `nodes`;
+- `inspect.dependency_tree`: the scalar tree header and complete bounded
+  `root_node_ids` are repeated, while flattened `entries` are paged;
+- `inspect.traversal_orders`: `orders` rows shaped as
+  `{ending_node_id,node_ids}`;
+- `inspect.traversal_details`: `branches` rows shaped as
+  `{ending_node_id,nodes}`, where each node contains `node_id`, `name`,
+  `has_memory_cache`, and `has_disk_cache`;
+- `inspect.recent_compute_planning`: `snapshots`.
+
+The installed typed Client accepts the additional page metadata as unknown
+fields and returns complete small single-page graph/tree values. It does not
+currently issue cursor continuations; callers that need multi-page router
+values must use the typed wire schema directly.
 
 ## Inspection Values
 
@@ -598,7 +670,17 @@ new inspection admission, and waits any already-admitted inspection:
   `{session_id, node}`;
 - `inspect.dependency_tree` accepts an optional nonnegative integer/null
   `node_id` with the same range and optional boolean `include_metadata`, then
-  returns `{session_id, ...flattened tree fields}`.
+  returns `{session_id, ...flattened tree fields}`;
+- `inspect.traversal_orders` and `inspect.traversal_details` return the copied
+  ending-node keyed Host maps through the page rows defined above;
+- `inspect.trees_containing_node` requires a nonnegative `node_id` and returns
+  copied ending-node ids;
+- `inspect.dirty_region` returns the current copied dirty-region snapshot;
+- `inspect.compute_planning` returns `{session_id,planning}`, where `planning`
+  is null before a planning result exists or an indivisible copied planning
+  object;
+- `inspect.recent_compute_planning` returns stable pages of copied planning
+  snapshots.
 
 Node JSON mirrors `NodeInspectionView` with snake-case fields: integer `id`,
 `name`, `type`, `subtype`, a string-valued JSON object `parameters`,
@@ -613,11 +695,14 @@ The typed client range-checks every node id, tree depth, edge input index,
 debug timestamp/duration, worker id, and spatial extent/rectangle component
 before publishing graph, node, or dependency-tree snapshots. Signed/unsigned
 overflow is a local Protocol result-shape failure; it is never narrowed.
-These routed inspection methods and node-list/ROI methods return direct result
-shapes and do not use the private collection snapshot registry or collection
-cursors. The same reusable enum, `PixelRect`, bounded-string, array, page,
-opaque-id, and nested-status codecs apply recursively to composite values. A
-failed decode leaves the caller-visible destination unpublished.
+Direct `inspect.node`, ROI, dirty-region, and current-planning results do not
+publish cursors. Collection methods use the stable metadata above without
+changing their copied Host contracts. Planning values encode `ComputeIntent`
+and `DirtyDomain` as stable lowercase snake-case labels, nested optional values
+as null, and all counts as exact nonnegative integers. The same reusable enum,
+`PixelRect`, bounded-string, array, page, opaque-id, and nested-status codecs
+apply recursively to composite values. A failed decode leaves caller-visible
+state unpublished.
 
 No backend class, address, pointer, cache handle, service object, closure, or
 mutable reference enters a payload.
