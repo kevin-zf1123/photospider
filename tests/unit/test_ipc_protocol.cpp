@@ -31,6 +31,7 @@
 #include <utility>
 #include <vector>
 
+#include "ipc/client_collection_budget.hpp"
 #include "ipc/codec.hpp"
 #include "ipc/frame.hpp"
 #include "ipc/request_router.hpp"
@@ -544,6 +545,123 @@ struct ScriptedClientReply {
   /** @brief Whether payload belongs to the error response branch. */
   bool error = false;
 };
+
+/**
+ * @brief Builds one canonical traversal-order stable-page result.
+ * @param session_id Exact opaque session echo.
+ * @param first_key First globally sorted ending-node key on the page.
+ * @param nested_counts Node-id count for each indivisible branch row.
+ * @param offset Exact zero-based outer-row offset.
+ * @param has_more Whether another scripted page follows.
+ * @param cursor Stable continuation cursor used while `has_more` is true.
+ * @return Complete known-field page result for the direct Client.
+ * @throws std::bad_alloc if nested arrays or result storage cannot allocate.
+ * @note Repeated zero node ids are intentional public values. Only branch keys
+ *       require strict cross-page ordering in this test surface.
+ */
+Json traversal_order_page_result(const IpcSessionId& session_id, int first_key,
+                                 const std::vector<std::size_t>& nested_counts,
+                                 std::size_t offset, bool has_more,
+                                 const std::string& cursor) {
+  Json orders = Json::array();
+  int key = first_key;
+  for (const std::size_t nested_count : nested_counts) {
+    orders.push_back(Json{{"ending_node_id", key++},
+                          {"node_ids", std::vector<int>(nested_count, 0)}});
+  }
+  return Json{{"session_id", session_id.value},
+              {"orders", std::move(orders)},
+              {"offset", offset},
+              {"has_more", has_more},
+              {"cursor", has_more ? Json(cursor) : Json(nullptr)}};
+}
+
+/**
+ * @brief Script and exact canonical/raw byte totals for source paging tests.
+ *
+ * @throws Nothing for default construction; vector mutation may allocate.
+ * @note Canonical bytes count only decoded public key/source rows. Raw bytes
+ *       additionally include caller-selected forward-compatible members.
+ */
+struct StableSourceReplyScript {
+  /** @brief One correlated reply per indivisible source row. */
+  std::vector<ScriptedClientReply> replies;
+
+  /** @brief Complete canonical array bytes across every scripted page. */
+  std::size_t canonical_bytes = 2;
+
+  /** @brief Complete raw array bytes including unknown row members. */
+  std::size_t raw_bytes = 2;
+};
+
+/**
+ * @brief Builds eight source pages with one exact canonical aggregate size.
+ * @param target_bytes Required complete canonical row-array byte total.
+ * @param add_unknown_fields Whether each raw row carries an ignored member.
+ * @return Script whose canonical total equals `target_bytes` exactly.
+ * @throws std::invalid_argument if the target cannot be represented by eight
+ *         individually bounded source rows.
+ * @throws std::bad_alloc if strings, JSON, or reply storage cannot allocate.
+ * @note Seven rows use the maximum 8 MiB source and the final row absorbs the
+ *       exact remainder. Every individual response remains below 16 MiB.
+ */
+StableSourceReplyScript stable_source_reply_script(std::size_t target_bytes,
+                                                   bool add_unknown_fields) {
+  static constexpr std::size_t kPageCount = 8;
+  const std::string cursor(32, 'e');
+  if (target_bytes < 2U + (kPageCount - 1U)) {
+    throw std::invalid_argument("stable source target is too small");
+  }
+
+  StableSourceReplyScript script;
+  script.replies.reserve(kPageCount);
+  std::size_t remaining_row_bytes = target_bytes - 2U - (kPageCount - 1U);
+  for (std::size_t index = 0; index < kPageCount; ++index) {
+    const std::string key = "source-" + std::to_string(1000U + index);
+    const std::size_t empty_row_bytes =
+        encode_plugin_source_row(key, "").dump().size();
+    std::size_t source_bytes = kLargeTextMaxBytes;
+    if (index + 1U == kPageCount) {
+      if (remaining_row_bytes < empty_row_bytes) {
+        throw std::invalid_argument("stable source target underflows last row");
+      }
+      source_bytes = remaining_row_bytes - empty_row_bytes;
+    }
+    if (source_bytes > kLargeTextMaxBytes) {
+      throw std::invalid_argument("stable source target exceeds row bound");
+    }
+
+    Json row = encode_plugin_source_row(key, std::string(source_bytes, 's'));
+    const std::size_t canonical_row_bytes = row.dump().size();
+    if (canonical_row_bytes > remaining_row_bytes) {
+      throw std::invalid_argument("stable source target arithmetic failed");
+    }
+    remaining_row_bytes -= canonical_row_bytes;
+    script.canonical_bytes += canonical_row_bytes;
+    if (index != 0) {
+      ++script.canonical_bytes;
+      ++script.raw_bytes;
+    }
+    if (add_unknown_fields) {
+      row["future_member"] = "ignored by this protocol version";
+    }
+    script.raw_bytes += row.dump().size();
+
+    Json rows = Json::array();
+    rows.push_back(std::move(row));
+    const bool has_more = index + 1U != kPageCount;
+    Json payload{{"sources", std::move(rows)},
+                 {"offset", index},
+                 {"has_more", has_more},
+                 {"cursor", has_more ? Json(cursor) : Json(nullptr)}};
+    script.replies.push_back(
+        ScriptedClientReply{"plugins.ops_sources", std::move(payload)});
+  }
+  if (remaining_row_bytes != 0 || script.canonical_bytes != target_bytes) {
+    throw std::invalid_argument("stable source target was not exact");
+  }
+  return script;
+}
 
 /**
  * @brief Serves a sequence of correlated replies over one Client connection.
@@ -6770,6 +6888,43 @@ TEST(ClientSurface, ExposesAndDispatchesExactTypedVersionOneMethodsOnce) {
   EXPECT_TRUE(client.connected());
 }
 
+/**
+ * @brief Verifies aggregate-budget arithmetic at tiny and `size_t` ceilings.
+ * @return Nothing; GoogleTest assertions report every failed invariant.
+ * @throws std::bad_alloc if a rejection diagnostic cannot allocate.
+ * @note The test allocates no page-sized buffer. It proves initial array
+ *       brackets, entry overflow, byte overflow, and failed-admission
+ *       transactionality directly through the private production budget.
+ */
+TEST(CollectionAggregateBudget,
+     RejectsInitialAndSizeMaxOverflowWithoutMutatingCounters) {
+  std::string message;
+  CollectionAggregateBudget too_small(1, 1);
+  EXPECT_FALSE(too_small.admit(CollectionPageMeasurement{}, &message));
+  EXPECT_EQ(too_small.entries(), 0U);
+  EXPECT_EQ(too_small.rows(), 0U);
+  EXPECT_EQ(too_small.encoded_bytes(), 2U);
+
+  const std::size_t maximum = std::numeric_limits<std::size_t>::max();
+  CollectionAggregateBudget entry_budget(maximum, maximum);
+  EXPECT_TRUE(entry_budget.admit(CollectionPageMeasurement{maximum, 0, 0, 0},
+                                 &message));
+  EXPECT_FALSE(
+      entry_budget.admit(CollectionPageMeasurement{1, 0, 0, 0}, &message));
+  EXPECT_EQ(entry_budget.entries(), maximum);
+  EXPECT_EQ(entry_budget.rows(), 0U);
+  EXPECT_EQ(entry_budget.encoded_bytes(), 2U);
+
+  CollectionAggregateBudget byte_budget(maximum, maximum);
+  EXPECT_TRUE(byte_budget.admit(
+      CollectionPageMeasurement{1, 1, maximum - 2U, 0}, &message));
+  EXPECT_FALSE(
+      byte_budget.admit(CollectionPageMeasurement{1, 1, 1, 0}, &message));
+  EXPECT_EQ(byte_budget.entries(), 1U);
+  EXPECT_EQ(byte_budget.rows(), 1U);
+  EXPECT_EQ(byte_budget.encoded_bytes(), maximum);
+}
+
 TEST(ClientCollectionAggregation, UsesStableCursorAndActualPageLength) {
   ScopedTempDirectory temp("ps-ipc-pages");
   const std::string socket_path = (temp.path() / "server.sock").string();
@@ -6847,6 +7002,174 @@ TEST(ClientCollectionAggregation, RejectsUnstableCursorWithoutPartialValue) {
   EXPECT_EQ(result.status.code, kInvalidRequestCode);
   EXPECT_TRUE(result.value.empty());
   EXPECT_EQ(requests.size(), 2U);
+  EXPECT_TRUE(client.connected());
+}
+
+/**
+ * @brief Accepts exactly 262,144 recursive traversal entries across two pages.
+ * @return Nothing; GoogleTest assertions report protocol or value mismatch.
+ * @throws std::bad_alloc or std::runtime_error if socket/test data setup fails.
+ * @note Only 64 outer branches are returned. Nested node-id vectors supply the
+ *       remaining entries, proving outer row count is not the quota proxy.
+ */
+TEST(ClientCollectionAggregation,
+     AcceptsExactRecursiveEntryBoundaryAcrossPages) {
+  ScopedTempDirectory temp("ps-ipc-entry");
+  const std::string socket_path = (temp.path() / "server.sock").string();
+  UniqueFd listener = create_test_listener(socket_path);
+  const IpcSessionId session_id{std::string(32, 'a')};
+  const std::string cursor(32, 'f');
+  std::vector<std::size_t> first_counts(32, kGeneralPageMaxEntries);
+  std::vector<std::size_t> final_counts(32, kGeneralPageMaxEntries);
+  final_counts.back() = 4032;
+  const std::vector<ScriptedClientReply> replies = {
+      {"inspect.traversal_orders",
+       traversal_order_page_result(session_id, 0, first_counts, 0, true,
+                                   cursor)},
+      {"inspect.traversal_orders",
+       traversal_order_page_result(session_id, 32, final_counts, 32, false,
+                                   cursor)}};
+  std::vector<Json> requests;
+  bool served = false;
+  std::thread peer([&] {
+    served = serve_scripted_client_replies(listener.get(), replies, &requests);
+  });
+  Client client;
+  ASSERT_TRUE(client.connect(socket_path).ok);
+  const IpcResult<std::map<int, std::vector<NodeId>>> result =
+      client.traversal_orders(session_id);
+  peer.join();
+
+  ASSERT_TRUE(served);
+  ASSERT_TRUE(result.status.ok) << result.status.message;
+  ASSERT_EQ(result.value.size(), 64U);
+  std::size_t recursive_entries = result.value.size();
+  for (const auto& branch : result.value) {
+    recursive_entries += branch.second.size();
+  }
+  EXPECT_EQ(recursive_entries, kSnapshotMaxEntries);
+  ASSERT_EQ(requests.size(), 2U);
+  EXPECT_EQ(requests[0]["params"]["limit"], kGeneralPageMaxEntries);
+  EXPECT_EQ(requests[1]["params"]["limit"], 32);
+  EXPECT_TRUE(client.connected());
+}
+
+/**
+ * @brief Rejects one recursive entry after 64 sustained one-row pages.
+ * @return Nothing; GoogleTest assertions report protocol or call mismatch.
+ * @throws std::bad_alloc or std::runtime_error if socket/test data setup fails.
+ * @note The first 64 pages total exactly 262,144 recursive entries. The final
+ *       outer row exceeds by one, is not appended, returns no partial map, and
+ *       is attempted exactly once without retry.
+ */
+TEST(ClientCollectionAggregation,
+     RejectsOneRecursiveEntryAfterSustainedPagesWithoutPartialValue) {
+  ScopedTempDirectory temp("ps-ipc-small");
+  const std::string socket_path = (temp.path() / "server.sock").string();
+  UniqueFd listener = create_test_listener(socket_path);
+  const IpcSessionId session_id{std::string(32, 'a')};
+  const std::string cursor(32, 'b');
+  std::vector<ScriptedClientReply> replies;
+  replies.reserve(65);
+  for (std::size_t index = 0; index < 65; ++index) {
+    const bool has_more = index + 1U != 65U;
+    const std::size_t nested_count = index < 64U ? 4095U : 0U;
+    replies.push_back(ScriptedClientReply{
+        "inspect.traversal_orders",
+        traversal_order_page_result(session_id, static_cast<int>(index),
+                                    {nested_count}, index, has_more, cursor)});
+  }
+  std::vector<Json> requests;
+  bool served = false;
+  std::thread peer([&] {
+    served = serve_scripted_client_replies(listener.get(), replies, &requests);
+  });
+  Client client;
+  ASSERT_TRUE(client.connect(socket_path).ok);
+  const IpcResult<std::map<int, std::vector<NodeId>>> result =
+      client.traversal_orders(session_id);
+  peer.join();
+
+  ASSERT_TRUE(served);
+  EXPECT_FALSE(result.status.ok);
+  EXPECT_EQ(result.status.domain, OperationErrorDomain::Protocol);
+  EXPECT_EQ(result.status.code, kInvalidRequestCode);
+  EXPECT_TRUE(result.value.empty());
+  EXPECT_EQ(requests.size(), 65U);
+  EXPECT_TRUE(client.connected());
+}
+
+/**
+ * @brief Accepts exactly 64 MiB of canonical rows despite unknown row fields.
+ * @return Nothing; GoogleTest assertions report protocol or value mismatch.
+ * @throws std::bad_alloc, std::invalid_argument, or std::runtime_error when
+ *         deterministic socket or boundary-data setup fails.
+ * @note Raw scripted rows exceed 64 MiB because every row has a future member.
+ *       Decoding drops those members and canonical public measurement remains
+ *       exactly at the inclusive version 1 byte boundary.
+ */
+TEST(ClientCollectionAggregation,
+     AcceptsExactCanonicalByteBoundaryAndIgnoresUnknownMembers) {
+  ScopedTempDirectory temp("ps-ipc-bytes");
+  const std::string socket_path = (temp.path() / "server.sock").string();
+  UniqueFd listener = create_test_listener(socket_path);
+  const StableSourceReplyScript script =
+      stable_source_reply_script(kSnapshotMaxBytes, true);
+  ASSERT_EQ(script.canonical_bytes, kSnapshotMaxBytes);
+  ASSERT_GT(script.raw_bytes, kSnapshotMaxBytes);
+  std::vector<Json> requests;
+  bool served = false;
+  std::thread peer([&] {
+    served = serve_scripted_client_replies(listener.get(), script.replies,
+                                           &requests);
+  });
+  Client client;
+  ASSERT_TRUE(client.connect(socket_path).ok);
+  const IpcResult<std::map<std::string, std::string>> result =
+      client.ops_sources();
+  peer.join();
+
+  ASSERT_TRUE(served);
+  ASSERT_TRUE(result.status.ok) << result.status.message;
+  EXPECT_EQ(result.value.size(), 8U);
+  EXPECT_EQ(requests.size(), 8U);
+  EXPECT_TRUE(client.connected());
+}
+
+/**
+ * @brief Rejects canonical stable rows that exceed 64 MiB by one byte.
+ * @return Nothing; GoogleTest assertions report protocol or call mismatch.
+ * @throws std::bad_alloc, std::invalid_argument, or std::runtime_error when
+ *         deterministic socket or boundary-data setup fails.
+ * @note The final page is decoded and measured once, rejected before append,
+ *       and the failed result publishes no sources from prior accepted pages.
+ */
+TEST(ClientCollectionAggregation,
+     RejectsOneCanonicalByteBeyondBoundaryWithoutPartialValueOrRetry) {
+  ScopedTempDirectory temp("ps-ipc-over");
+  const std::string socket_path = (temp.path() / "server.sock").string();
+  UniqueFd listener = create_test_listener(socket_path);
+  const StableSourceReplyScript script =
+      stable_source_reply_script(kSnapshotMaxBytes + 1U, false);
+  ASSERT_EQ(script.canonical_bytes, kSnapshotMaxBytes + 1U);
+  std::vector<Json> requests;
+  bool served = false;
+  std::thread peer([&] {
+    served = serve_scripted_client_replies(listener.get(), script.replies,
+                                           &requests);
+  });
+  Client client;
+  ASSERT_TRUE(client.connect(socket_path).ok);
+  const IpcResult<std::map<std::string, std::string>> result =
+      client.ops_sources();
+  peer.join();
+
+  ASSERT_TRUE(served);
+  EXPECT_FALSE(result.status.ok);
+  EXPECT_EQ(result.status.domain, OperationErrorDomain::Protocol);
+  EXPECT_EQ(result.status.code, kInvalidRequestCode);
+  EXPECT_TRUE(result.value.empty());
+  EXPECT_EQ(requests.size(), 8U);
   EXPECT_TRUE(client.connected());
 }
 
