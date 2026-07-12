@@ -1206,7 +1206,13 @@ ctest --test-dir build --output-on-failure \
 ```
 
 `StaticProductConsumerSmoke` verifies the installed backend plus a second
-client-only consumer. `IpcDisabledInstallSmoke` verifies an IPC-disabled clean
+client-only consumer that links only `Photospider::photospider_ipc_client`.
+The latter executes safe Client/factory lifecycle behavior without a daemon,
+links all 55 typed Client calls and 53 Host virtual references, and requires an
+exact IPC archive/target/header export whose sole public link dependency is
+`Threads::Threads`; backend, JSON, server-internal, object, source-tree, and
+POSIX-private dependencies or headers fail the gate. `IpcDisabledInstallSmoke`
+verifies an IPC-disabled clean
 install has no IPC forwarder, header, target, archive, or daemon while the
 embedded consumer remains usable. Real-process tests have CTest timeouts and
 bounded SIGTERM/SIGKILL/waitpid cleanup. `test_ipc_daemon` starts the product

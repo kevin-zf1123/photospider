@@ -29,6 +29,8 @@ namespace ps::ipc {
  * @return Unique complete IPC Host implementation.
  * @throws std::bad_alloc if adapter state, path, polling policy, or worker
  *         tracking allocation fails.
+ * @throws std::system_error if production polling synchronization primitives
+ *         cannot be initialized.
  * @note Construction does not connect, start a daemon, load a graph, or
  *       validate daemon availability. Adapter destruction stops and joins its
  *       polling workers but never closes daemon graph sessions, unloads

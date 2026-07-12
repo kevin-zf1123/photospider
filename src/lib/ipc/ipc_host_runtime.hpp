@@ -93,7 +93,8 @@ struct IpcHostRuntimeDependencies {
    * @param should_stop Borrowed stop predicate valid only for the call.
    * @return True when adapter stop became observable; false on normal expiry.
    * @throws Whatever the injected waiter or predicate throws; production
-   *         propagates predicate exceptions only.
+   *         additionally propagates `std::system_error` from mutex locking or
+   *         condition-variable waiting.
    * @note Calls may block concurrently and must be interruptible by
    *       `wake_waiters`.
    */
@@ -105,10 +106,13 @@ struct IpcHostRuntimeDependencies {
    * @brief Wakes every wait currently blocked in `wait_until`.
    *
    * Destruction invokes this callback after publishing stop. Implementations
-   * must not throw; any unexpected exception is contained by adapter cleanup.
+   * Adapter destruction contains callback exceptions so cleanup remains
+   * nonthrowing.
    *
    * @return Nothing.
-   * @throws Nothing by contract; adapter destruction contains violations.
+   * @throws Whatever an injected wake callback throws; production may throw
+   *         `std::system_error` when locking its waiter mutex. Adapter
+   *         destruction contains either source.
    * @note The callback may run concurrently with every blocked `wait_until`.
    */
   std::function<void()> wake_waiters;
@@ -133,7 +137,8 @@ struct IpcHostRuntimeDependencies {
    * @param metadata Strictly decoded daemon artifact metadata.
    * @return Read-only mapped image or an exact local Transport/Protocol
    *         failure.
-   * @throws std::bad_alloc if shared mapping ownership cannot allocate.
+   * @throws std::bad_alloc if failure-status diagnostics or shared mapping
+   *         ownership cannot allocate.
    * @note The callback runs while the delivery lease still protects
    *       result-to-open. Production validates same-user file identity and
    *       returns a shared mapping whose final owner unmaps and closes once.
@@ -147,7 +152,8 @@ struct IpcHostRuntimeDependencies {
  * @param metadata Strictly decoded daemon artifact metadata.
  * @param operations Complete nonthrowing POSIX mapping operation table.
  * @return Shared mapped CPU image or an exact local Transport/Protocol failure.
- * @throws std::bad_alloc if shared mapping ownership cannot allocate.
+ * @throws std::bad_alloc if failure-status diagnostics or shared mapping
+ *         ownership cannot allocate.
  * @note This source-tree-private seam exists so lifetime tests can count exact
  *       final-owner `munmap`/`close` calls without exposing POSIX details in an
  *       installed header. The caller must retain the delivery lease until this

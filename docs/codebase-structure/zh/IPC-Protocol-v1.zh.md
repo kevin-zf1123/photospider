@@ -1018,7 +1018,12 @@ ctest --test-dir build --output-on-failure \
   -R '^(FrameCodec|ProtocolEnvelope|IntegerCodec|ProtocolErrors|ProtocolParams|ProtocolGraphLoad|ProtocolGraphClose|ProtocolOperationPlugins|HostRoutedGraphStateProtocolTest|StableInspectionPagingProtocolTest|InspectionJson|SessionRegistry|ComputeRequestRegistry|CollectionSnapshotRegistry|OutputStore|ComputeEventRing|SchedulerTraceRing|UnixSocketConnect|ClientLifecycle|ClientSurface|ClientCollectionAggregation|ClientJobValidation|ClientRetryPolicy|ClientResultValidation|IpcHost|IpcDaemon|IpcDaemonOperationPlugins|IpcDaemonSchedulers|IpcObservationFixtureDaemon|StaticProductConsumerSmoke|IpcDisabledInstallSmoke|PublicHeaderSelfContainment)'
 ```
 
-`StaticProductConsumerSmoke` 验证 installed backend 与第二个 client-only consumer；
+`StaticProductConsumerSmoke` 验证 installed backend 与第二个只链接
+`Photospider::photospider_ipc_client` 的 client-only consumer。后者会在没有 daemon 的情况下
+执行安全 Client/factory lifecycle 行为，链接全部 55 个 typed Client call 与 53 个 Host virtual
+引用，并要求精确的 IPC archive/target/header export；其唯一 public link dependency 是
+`Threads::Threads`，出现 backend、JSON、server-internal、object、source-tree 或 POSIX-private
+dependency/header 时门禁失败。
 `IpcDisabledInstallSmoke` 验证 IPC-disabled clean install 不含 IPC forwarder、header、target、archive
 或 daemon，同时 embedded consumer 仍可用。Real-process test 有 CTest timeout 与 bounded
 SIGTERM/SIGKILL/waitpid cleanup。`test_ipc_daemon` 会启动产品 `photospiderd` 以验证 embedded-Host

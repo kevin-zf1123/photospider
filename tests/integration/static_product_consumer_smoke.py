@@ -22,6 +22,35 @@ STATIC_PRODUCT_ARCHIVE_NAMES = {
 }
 EXPORTED_TARGET = "Photospider::photospider"
 IPC_EXPORTED_TARGET = "Photospider::photospider_ipc_client"
+REQUIRED_IPC_PUBLIC_HEADERS = {
+    "include/photospider/ipc/client.hpp",
+    "include/photospider/ipc/host.hpp",
+    "include/photospider/ipc/protocol.hpp",
+}
+FORBIDDEN_IPC_HEADER_PATTERNS = {
+    "backend implementation type": (
+        r"\b(?:Kernel|GraphModel|InteractionService|ComputeService|"
+        r"PluginManager|SchedulerPluginLoader)\b"
+    ),
+    "nlohmann JSON type or header": r"nlohmann(?:::|/)",
+    "POSIX implementation header": (
+        r"#include\s*[<\"][^>\"]*(?:arpa/inet|sys/(?:socket|un|mman|random|stat)|"
+        r"fcntl|poll|unistd)\.h[>\"]"
+    ),
+    "raw Unix socket type": r"\bsockaddr_un\b",
+    "raw descriptor declaration": r"\bint\s+(?:[A-Za-z_]\w*_)?fd\b",
+    "source-tree IPC include": (
+        r"#include\s*[<\"][^>\"]*(?:src/lib|ipc/(?:codec|frame|server|"
+        r"unix_socket|request_router|output_store|client_collection_budget|"
+        r"client_interrupt_access|ipc_host_runtime))[^>\"]*[>\"]"
+    ),
+}
+FORBIDDEN_IPC_TARGET_PARTS = (
+    "Photospider::photospider",
+    "nlohmann_json",
+    "photospider_ipc_client_objects",
+    "photospider_ipc_server_internal",
+)
 REQUIRED_OPENCV_COMPONENTS = (
     "opencv_core",
     "opencv_imgproc",
@@ -145,6 +174,205 @@ def public_header_includes(repo: Path) -> list[str]:
     return [f"#include <{header}>" for header in headers]
 
 
+def ipc_consumer_source() -> str:
+    """@brief Build the complete installed IPC symbol-consumer source.
+
+    @return C++17 source that executes safe lifecycle calls and references the
+      complete typed Client and Host operation surfaces in the non-smoke branch.
+    @throws None The source is one immutable in-memory string.
+    @note The normal no-argument run requires no daemon. Passing an argument is
+      intentionally outside the smoke contract and exists only to force link
+      references for every current operation symbol.
+    """
+
+    return """#include <photospider/ipc/client.hpp>
+#include <photospider/ipc/host.hpp>
+#include <photospider/ipc/protocol.hpp>
+
+#include <optional>
+#include <string>
+#include <utility>
+#include <vector>
+
+namespace {
+
+/**
+ * @brief References every typed Client call and non-destructor Host virtual.
+ * @param client Disconnected direct client used only for link references.
+ * @param host Complete IPC Host used only for virtual dispatch references.
+ * @return Zero after all calls; the package smoke never executes this branch.
+ * @throws Whatever the referenced operations throw if a caller deliberately
+ *         executes the reference-only branch.
+ * @note Keeping calls in one runtime branch forces the external executable to
+ *       resolve all current installed IPC client and adapter symbols.
+ */
+int reference_complete_surface(ps::ipc::Client& client, ps::Host& host) {
+  const ps::ipc::IpcSessionId ipc_session{};
+  const ps::ipc::ComputeRequestId compute_id{};
+  const ps::GraphSessionId host_session{};
+  const ps::GraphLoadRequest load_request{};
+  const ps::ipc::ComputeSubmitRequest submit_request{};
+  const ps::HostComputeRequest compute_request{};
+  const ps::PixelRect roi{};
+  const ps::HostSchedulerConfig scheduler_config{};
+  const std::vector<std::string> paths{};
+  const std::string text;
+  constexpr ps::NodeId node{0};
+  constexpr ps::ComputeIntent intent =
+      ps::ComputeIntent::GlobalHighPrecision;
+  constexpr ps::DirtyDomain dirty_domain = ps::DirtyDomain::HighPrecision;
+
+  (void)client.ping();
+  (void)client.version();
+  (void)client.load_graph(load_request);
+  (void)client.close_graph(ipc_session);
+  (void)client.list_graphs();
+  (void)client.inspect_graph(ipc_session);
+  (void)client.inspect_node(ipc_session, node);
+  (void)client.inspect_dependency_tree(ipc_session, std::nullopt, false);
+  (void)client.reload_graph(ipc_session, text);
+  (void)client.save_graph(ipc_session, text);
+  (void)client.clear_graph(ipc_session);
+  (void)client.get_node_yaml(ipc_session, node);
+  (void)client.set_node_yaml(ipc_session, node, text);
+  (void)client.list_node_ids(ipc_session);
+  (void)client.ending_nodes(ipc_session);
+  (void)client.traversal_orders(ipc_session);
+  (void)client.traversal_details(ipc_session);
+  (void)client.trees_containing_node(ipc_session, node);
+  (void)client.project_roi(ipc_session, node, roi, node);
+  (void)client.project_roi_backward(ipc_session, node, roi, node);
+  (void)client.dirty_region_snapshot(ipc_session);
+  (void)client.compute_planning_snapshot(ipc_session);
+  (void)client.recent_compute_planning_snapshots(ipc_session);
+  (void)client.submit_compute(submit_request);
+  (void)client.compute_status(compute_id);
+  (void)client.compute_result(compute_id);
+  (void)client.release_compute(compute_id);
+  (void)client.timing(ipc_session);
+  (void)client.last_io_time(ipc_session);
+  (void)client.last_error(ipc_session);
+  (void)client.begin_dirty_source(ipc_session, node, dirty_domain, roi);
+  (void)client.update_dirty_source(ipc_session, node, dirty_domain, roi);
+  (void)client.end_dirty_source(ipc_session, node, dirty_domain);
+  (void)client.drain_compute_events(ipc_session, 1);
+  (void)client.clear_cache(ipc_session);
+  (void)client.clear_drive_cache(ipc_session);
+  (void)client.clear_memory_cache(ipc_session);
+  (void)client.cache_all_nodes(ipc_session, text);
+  (void)client.free_transient_memory(ipc_session);
+  (void)client.synchronize_disk_cache(ipc_session, text);
+  (void)client.plugins_load_report(paths);
+  (void)client.plugins_unload_all();
+  (void)client.seed_builtin_ops();
+  (void)client.ops_sources();
+  (void)client.ops_combined_keys();
+  (void)client.ops_combined_sources();
+  (void)client.scheduler_available_types();
+  (void)client.scheduler_description(text);
+  (void)client.scheduler_scan(paths);
+  (void)client.scheduler_load(text);
+  (void)client.scheduler_loaded_plugins();
+  (void)client.configure_scheduler_defaults(scheduler_config);
+  (void)client.scheduler_info(ipc_session, intent);
+  (void)client.replace_scheduler(ipc_session, intent, text);
+  (void)client.scheduler_trace(ipc_session, 0, 1);
+
+  (void)host.load_graph(load_request);
+  (void)host.close_graph(host_session);
+  (void)host.list_graphs();
+  (void)host.reload_graph(host_session, text);
+  (void)host.save_graph(host_session, text);
+  (void)host.clear_graph(host_session);
+  (void)host.compute(compute_request);
+  (void)host.compute_async(compute_request);
+  (void)host.compute_and_get_image(compute_request);
+  (void)host.timing(host_session);
+  (void)host.last_io_time(host_session);
+  (void)host.last_error(host_session);
+  (void)host.list_node_ids(host_session);
+  (void)host.ending_nodes(host_session);
+  (void)host.get_node_yaml(host_session, node);
+  (void)host.set_node_yaml(host_session, node, text);
+  (void)host.inspect_node(host_session, node);
+  (void)host.inspect_graph(host_session);
+  (void)host.dependency_tree(host_session, std::nullopt, false);
+  (void)host.traversal_orders(host_session);
+  (void)host.traversal_details(host_session);
+  (void)host.trees_containing_node(host_session, node);
+  (void)host.project_roi(host_session, node, roi, node);
+  (void)host.project_roi_backward(host_session, node, roi, node);
+  (void)host.dirty_region_snapshot(host_session);
+  (void)host.compute_planning_snapshot(host_session);
+  (void)host.recent_compute_planning_snapshots(host_session);
+  (void)host.begin_dirty_source(host_session, node, dirty_domain, roi);
+  (void)host.update_dirty_source(host_session, node, dirty_domain, roi);
+  (void)host.end_dirty_source(host_session, node, dirty_domain);
+  (void)host.drain_compute_events(host_session, 1);
+  (void)host.scheduler_trace(host_session, 0, 1);
+  (void)host.clear_cache(host_session);
+  (void)host.clear_drive_cache(host_session);
+  (void)host.clear_memory_cache(host_session);
+  (void)host.cache_all_nodes(host_session, text);
+  (void)host.free_transient_memory(host_session);
+  (void)host.synchronize_disk_cache(host_session, text);
+  (void)host.plugins_load_report(paths);
+  (void)host.plugins_load(paths);
+  (void)host.plugins_unload_all();
+  (void)host.seed_builtin_ops();
+  (void)host.ops_sources();
+  (void)host.ops_combined_keys();
+  (void)host.ops_combined_sources();
+  (void)host.scheduler_available_types();
+  (void)host.scheduler_description(text);
+  (void)host.scheduler_scan(paths);
+  (void)host.scheduler_load(text);
+  (void)host.scheduler_loaded_plugins();
+  (void)host.configure_scheduler_defaults(scheduler_config);
+  (void)host.scheduler_info(host_session, intent);
+  (void)host.replace_scheduler(host_session, intent, text);
+  return 0;
+}
+
+}  // namespace
+
+/**
+ * @brief Exercises safe no-daemon lifecycle behavior for the installed target.
+ * @param argc Process argument count; extra arguments select reference-only
+ *        calls and are never supplied by the smoke test.
+ * @param argv Process argument vector, unused by the no-argument smoke path.
+ * @return Zero only when lifecycle and factory behavior match the contract.
+ * @throws std::bad_alloc if Client or IPC Host construction exhausts memory.
+ * @throws std::system_error if Host polling synchronization initialization
+ *         fails.
+ */
+int main(int argc, char** argv) {
+  (void)argv;
+  ps::ipc::Client initial;
+  ps::ipc::Client moved(std::move(initial));
+  ps::ipc::Client client;
+  client = std::move(moved);
+  const ps::OperationStatus status = client.connect("");
+  client.disconnect();
+  client.disconnect();
+  const bool disconnected = !client.connected();
+
+  std::unique_ptr<ps::Host> host = ps::ipc::create_ipc_host("");
+  if (!host) {
+    return 2;
+  }
+  if (argc > 1) {
+    return reference_complete_surface(client, *host);
+  }
+  return !status.ok &&
+                 status.domain == ps::OperationErrorDomain::Transport &&
+                 disconnected
+             ? 0
+             : 1;
+}
+"""
+
+
 def write_consumer_project(repo: Path, source_dir: Path) -> list[str]:
     """@brief Create an isolated installed-package consumer project.
 
@@ -210,24 +438,7 @@ def write_consumer_project(repo: Path, source_dir: Path) -> list[str]:
         encoding="utf-8",
     )
     (source_dir / "ipc_main.cpp").write_text(
-        "\n".join(
-            [
-                "#include <photospider/ipc/client.hpp>",
-                "#include <photospider/ipc/protocol.hpp>",
-                "",
-                "int main() {",
-                "  ps::ipc::Client client;",
-                "  const ps::OperationStatus status = client.connect(\"\");",
-                "  client.disconnect();",
-                "  return !status.ok &&",
-                "                 status.domain == ps::OperationErrorDomain::Transport",
-                "             ? 0",
-                "             : 1;",
-                "}",
-                "",
-            ]
-        ),
-        encoding="utf-8",
+        ipc_consumer_source(), encoding="utf-8"
     )
     return include_lines
 
@@ -590,6 +801,29 @@ def inspect_install_tree(
     ipc_interface_link_raw = exported_target_property(
         target_text, IPC_EXPORTED_TARGET, "INTERFACE_LINK_LIBRARIES"
     )
+    ipc_interface_link_entries = split_cmake_list(ipc_interface_link_raw)
+    installed_ipc_headers = {
+        header
+        for header in headers
+        if header.startswith("include/photospider/ipc/")
+    }
+    ipc_header_text = "\n".join(
+        (prefix / header).read_text(encoding="utf-8")
+        for header in sorted(installed_ipc_headers)
+    ).lower()
+    forbidden_ipc_header_parts = sorted(
+        label
+        for label, pattern in FORBIDDEN_IPC_HEADER_PATTERNS.items()
+        if re.search(pattern, ipc_header_text, re.IGNORECASE)
+    )
+    exported_private_ipc_targets = sorted(
+        part
+        for part in FORBIDDEN_IPC_TARGET_PARTS[1:]
+        if re.search(
+            rf"add_library\s*\(\s*(?:Photospider::)?{re.escape(part)}\b",
+            target_text,
+        )
+    )
     return {
         "headers": headers,
         "unexpected_headers": unexpected_headers,
@@ -618,12 +852,27 @@ def inspect_install_tree(
         in exported_target_property(
             target_text, IPC_EXPORTED_TARGET, "INTERFACE_INCLUDE_DIRECTORIES"
         ),
-        "ipc_export_omits_internal_dependencies": (
-            "nlohmann_json" not in ipc_interface_link_raw
-            and "photospider_ipc_server_internal" not in ipc_interface_link_raw
-            and "photospider_ipc_client_objects" not in ipc_interface_link_raw
-            and "Photospider::photospider" not in ipc_interface_link_raw
+        "installed_ipc_headers": sorted(installed_ipc_headers),
+        "ipc_install_headers_are_exact": (
+            installed_ipc_headers == REQUIRED_IPC_PUBLIC_HEADERS
         ),
+        "ipc_headers_forbidden_private_parts": forbidden_ipc_header_parts,
+        "ipc_headers_omit_private_implementation": (
+            forbidden_ipc_header_parts == []
+        ),
+        "ipc_export_link_interface": {
+            "raw": ipc_interface_link_raw,
+            "entries": ipc_interface_link_entries,
+        },
+        "ipc_export_links_only_threads": (
+            ipc_interface_link_entries == ["Threads::Threads"]
+        ),
+        "ipc_export_omits_backend_dependency": all(
+            part not in ipc_interface_link_raw
+            for part in FORBIDDEN_IPC_TARGET_PARTS
+        ),
+        "exported_private_ipc_targets": exported_private_ipc_targets,
+        "export_omits_private_ipc_targets": exported_private_ipc_targets == [],
         "ipc_client_archive_exists": any(
             path.name.lower()
             in {
@@ -707,8 +956,20 @@ def evaluate_behavior(observations: dict[str, Any]) -> bool:
         "exported IPC target uses install include root": install[
             "ipc_export_has_install_include_dir"
         ],
-        "exported IPC target omits internal dependencies": install[
-            "ipc_export_omits_internal_dependencies"
+        "installed IPC public headers are exact": install[
+            "ipc_install_headers_are_exact"
+        ],
+        "installed IPC headers omit private implementation": install[
+            "ipc_headers_omit_private_implementation"
+        ],
+        "exported IPC target links only Threads": install[
+            "ipc_export_links_only_threads"
+        ],
+        "exported IPC target omits backend dependencies": install[
+            "ipc_export_omits_backend_dependency"
+        ],
+        "package export omits private IPC targets": install[
+            "export_omits_private_ipc_targets"
         ],
         "installed IPC client archive exists": install[
             "ipc_client_archive_exists"
@@ -1001,7 +1262,6 @@ def main() -> int:
     passed = evaluate_behavior(observations)
     strict_remove_tree(work)
     return 0 if passed else 1
-
 
 
 if __name__ == "__main__":

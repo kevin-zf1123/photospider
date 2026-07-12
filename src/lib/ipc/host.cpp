@@ -452,7 +452,11 @@ struct TerminalPollResult {
  * @param runtime Shared adapter runtime.
  * @param submitted Accepted queued job returned by submit.
  * @return Terminal snapshot or first exact RPC/lifecycle/protocol failure.
- * @throws std::bad_alloc if Client, status, or callback allocation fails.
+ * @throws std::bad_alloc if Client, failure-status diagnostic, or callback
+ *         allocation fails.
+ * @throws std::system_error if the production waiter cannot lock or wait on
+ *         its synchronization primitives.
+ * @throws Whatever an injected clock, waiter, or stop predicate throws.
  * @note The first status RPC is immediate. Each successful nonterminal status
  *       waits 10 ms, then 20, 40, 80, 160, 320, and at most 500 ms thereafter.
  *       Every status uses one fresh Client and one attempt; no total timeout or
@@ -1564,7 +1568,7 @@ Result<ImageBuffer> IpcHost::compute_and_get_image(
 
 /**
  * @brief Production condition-variable waiter for steady-clock deadlines.
- * @throws Nothing for construction; waiting may propagate predicate failures.
+ * @throws std::system_error if synchronization primitive initialization fails.
  * @note One shared instance wakes every adapter polling worker on destruction.
  */
 class DefaultPollingWaiter {
@@ -1574,6 +1578,8 @@ class DefaultPollingWaiter {
    * @param deadline Absolute steady-clock deadline.
    * @param should_stop Predicate reading shared adapter stop.
    * @return True when stop became observable; false on normal deadline.
+   * @throws std::system_error if mutex locking or condition-variable waiting
+   *         fails.
    * @throws Whatever the supplied predicate throws.
    * @note Spurious wakes recheck both stop and the same absolute deadline.
    */
@@ -1590,9 +1596,9 @@ class DefaultPollingWaiter {
 
   /**
    * @brief Wakes all current deadline waits after stop publication.
-   * @throws Nothing.
+   * @throws std::system_error if mutex locking fails.
    */
-  void wake_all() noexcept {
+  void wake_all() {
     std::lock_guard<std::mutex> lock(mutex_);
     changed_.notify_all();
   }
@@ -1752,7 +1758,8 @@ class ArtifactMappingDeleter {
  * @param metadata Daemon output metadata already validated by typed Client.
  * @param operations Complete nonthrowing mapping operation table.
  * @return Shared read-only mapped CPU ImageBuffer or exact local failure.
- * @throws std::bad_alloc if shared mapping ownership cannot allocate.
+ * @throws std::bad_alloc if failure-status diagnostics or shared mapping
+ *         ownership cannot allocate.
  * @note `O_NONBLOCK` prevents a same-uid path replacement with a FIFO from
  *       blocking before `fstat`; non-regular descriptors are then rejected.
  *       The delivery lease remains active throughout open, validation, mmap,
@@ -1850,6 +1857,8 @@ Result<ImageBuffer> consume_artifact_readonly_mapping_impl(
  * @brief Creates the production steady-clock/waiter/artifact callback bundle.
  * @return Complete private runtime dependencies.
  * @throws std::bad_alloc if shared waiter or callback allocation fails.
+ * @throws std::system_error if production waiter synchronization primitives
+ *         cannot be initialized.
  */
 internal::IpcHostRuntimeDependencies default_runtime_dependencies() {
   auto waiter = std::make_shared<DefaultPollingWaiter>();
