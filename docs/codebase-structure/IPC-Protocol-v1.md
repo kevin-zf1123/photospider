@@ -83,11 +83,11 @@ sorted 55-method inventory:
 55. `scheduler.types`
 
 Any method outside this table is rejected as `method_not_found` before a route
-family can handle it. The installed typed `ps::ipc::Client` currently exposes
-calls only for the original eight methods (`daemon.ping`, `daemon.version`,
-`graph.load`, `graph.close`, `graph.list`, `inspect.graph`, `inspect.node`, and
-`inspect.dependency_tree`) and has no public raw-JSON escape hatch. The other
-47 schemas remain daemon request-router behavior. Of those methods,
+family can handle it. The installed typed `ps::ipc::Client` exposes owned calls
+for all 55 methods and has no public raw-JSON escape hatch. It validates the
+common correlated envelope plus every method-specific result before publishing
+public values, performs no automatic mutation or status retry, and aggregates
+private stable collection pages. Of those methods,
 `compute.status`, `compute.result`, and `compute.release` operate only on the
 daemon job registry. `compute.submit` admits a registry job whose worker later
 performs exactly one matching Host compute call. The other 43 methods route
@@ -101,14 +101,12 @@ result returns only the specified artifact metadata under one stable delivery
 lease. Version 1 exposes no compute cancellation, `daemon.shutdown`, TCP,
 Windows named pipe, or `graph_cli --connect`.
 Process-global operation-plugin control and sorted views are available at the
-daemon router boundary. The installed typed Client currently does not expose
-these plugin methods.
+daemon router boundary and through the installed typed Client.
 Scheduler-plugin discovery/defaults and per-session scheduler
-inspection/replacement are likewise available only at the daemon router
-boundary; the installed typed Client does not expose them. The bounded
-`events.drain` and `scheduler.trace` observation routes remain daemon-router
-only. The existing `graph_cli` continues to create an embedded Host and keeps
-its local command semantics.
+inspection/replacement are likewise available through matching typed Client
+calls. The bounded `events.drain` and `scheduler.trace` observation routes use
+the existing owned Host batch/page values. The existing `graph_cli` continues
+to create an embedded Host and keeps its local command semantics.
 
 ## Transport and Frame
 
@@ -572,9 +570,10 @@ a stable collection snapshot or create a daemon cursor.
 
 The request router exposes `compute.submit`, `compute.status`,
 `compute.result`, and `compute.release` over the daemon-owned lifecycle. The
-installed direct Client does not yet wrap these methods and exposes no raw JSON
-call; that public typed API is a later slice. The server owns one explicitly
-started, joinable `ComputeRequestRegistry` worker and one shared
+installed direct Client wraps these methods with owned submit/job/output/
+delivery/release values and exposes no raw JSON call. Each explicit status call
+performs one RPC attempt; submission and release are never retried. The server
+owns one explicitly started, joinable `ComputeRequestRegistry` worker and one shared
 session-admission gate. This infrastructure remains private implementation of
 the typed wire methods rather than a second public Host.
 
@@ -877,10 +876,12 @@ Collection fields are:
 - `scheduler.types`: sorted string `types`;
 - `scheduler.loaded_plugins`: sorted diagnostic string `plugins`.
 
-The installed typed Client accepts the additional page metadata as unknown
-fields and returns complete small single-page graph/tree values. It does not
-currently issue cursor continuations; callers that need multi-page router
-values must use the typed wire schema directly.
+The installed typed Client validates `offset`, `has_more`, and nullable opaque
+`cursor`, advances continuations by the actual outer row count rather than the
+requested limit, preserves the same frozen non-page parameters, and aggregates
+all pages into the existing full-value public result. It publishes no cursor or
+partial aggregate to callers. The private cursor value therefore does not add a
+second public paging API.
 
 ## Operation Plugin Control and Views
 
@@ -961,11 +962,12 @@ returned-value library leases.
 
 ## Scheduler Plugin Discovery and Session Control
 
-Eight scheduler methods complement the existing `scheduler.trace` observation
-route. They are daemon request-router schemas only: the installed typed Client
-does not yet expose them, while all nine scheduler route names are members of
-the exact 55-method `daemon.version.methods` inventory. Unknown members of
-every params object are ignored for forward compatibility.
+Eight scheduler control/discovery methods complement the existing
+`scheduler.trace` observation route. The installed typed Client exposes all
+nine scheduler routes, aggregates the two stable collection views, and keeps
+trace as one bounded non-destructive sequence-page call. All nine names remain
+members of the exact 55-method `daemon.version.methods` inventory. Unknown
+members of every params object are ignored for forward compatibility.
 
 The six process-global methods do not define, read, or resolve `session_id`:
 
@@ -1149,7 +1151,7 @@ cmake --build build --target photospider_ipc_client \
   test_output_store test_event_stream_boundaries test_ipc_daemon \
   public_header_self_containment -j
 ctest --test-dir build --output-on-failure \
-  -R '^(FrameCodec|ProtocolEnvelope|IntegerCodec|ProtocolErrors|ProtocolParams|ProtocolGraphLoad|ProtocolGraphClose|ProtocolOperationPlugins|HostRoutedGraphStateProtocolTest|StableInspectionPagingProtocolTest|InspectionJson|SessionRegistry|ComputeRequestRegistry|CollectionSnapshotRegistry|OutputStore|ComputeEventRing|SchedulerTraceRing|ClientLifecycle|ClientResultValidation|IpcDaemon|IpcDaemonOperationPlugins|IpcDaemonSchedulers|IpcObservationFixtureDaemon|StaticProductConsumerSmoke|IpcDisabledInstallSmoke|PublicHeaderSelfContainment)'
+  -R '^(FrameCodec|ProtocolEnvelope|IntegerCodec|ProtocolErrors|ProtocolParams|ProtocolGraphLoad|ProtocolGraphClose|ProtocolOperationPlugins|HostRoutedGraphStateProtocolTest|StableInspectionPagingProtocolTest|InspectionJson|SessionRegistry|ComputeRequestRegistry|CollectionSnapshotRegistry|OutputStore|ComputeEventRing|SchedulerTraceRing|ClientLifecycle|ClientSurface|ClientCollectionAggregation|ClientJobValidation|ClientRetryPolicy|ClientResultValidation|IpcDaemon|IpcDaemonOperationPlugins|IpcDaemonSchedulers|IpcObservationFixtureDaemon|StaticProductConsumerSmoke|IpcDisabledInstallSmoke|PublicHeaderSelfContainment)'
 ```
 
 `StaticProductConsumerSmoke` verifies the installed backend plus a second

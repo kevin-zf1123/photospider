@@ -528,6 +528,102 @@ bool serve_correlated_result(int listener, const Json& result) noexcept {
 }
 
 /**
+ * @brief One expected Client request and correlated scripted reply.
+ *
+ * @throws std::bad_alloc when copied method or JSON storage cannot allocate.
+ * @note `error=false` publishes `payload` under `result`; `error=true`
+ *       publishes it under `error`. The helper owns no production Client hook.
+ */
+struct ScriptedClientReply {
+  /** @brief Exact wire method expected from the next Client call. */
+  std::string method;
+
+  /** @brief Caller-selected typed result or structured error object. */
+  Json payload;
+
+  /** @brief Whether payload belongs to the error response branch. */
+  bool error = false;
+};
+
+/**
+ * @brief Serves a sequence of correlated replies over one Client connection.
+ * @param listener Bound local listener descriptor.
+ * @param replies Exact expected method/reply script.
+ * @param requests Receives every parsed request after its method validates.
+ * @return True only after every scripted request and reply completes.
+ * @throws Nothing; parsing, framing, method, or allocation failures become
+ *         false and close the accepted peer descriptor.
+ * @note The real local socket exercises request serialization, one-attempt
+ *       behavior, correlation, and multi-page sequencing without exposing raw
+ *       JSON through production Client APIs.
+ */
+bool serve_scripted_client_replies(
+    int listener, const std::vector<ScriptedClientReply>& replies,
+    std::vector<Json>* requests) noexcept {
+  UniqueFd peer(::accept(listener, nullptr, nullptr));
+  if (!peer || requests == nullptr) {
+    return false;
+  }
+  try {
+    for (const ScriptedClientReply& reply : replies) {
+      const FrameReadResult frame = read_frame(peer.get());
+      if (frame.state != FrameReadState::Complete) {
+        return false;
+      }
+      JsonParseResult parsed = parse_json(frame.payload);
+      if (!parsed.ok || !parsed.value.is_object() ||
+          !parsed.value.value("id", Json()).is_string() ||
+          !parsed.value.value("method", Json()).is_string() ||
+          parsed.value["method"].get<std::string>() != reply.method) {
+        return false;
+      }
+      requests->push_back(parsed.value);
+      Json response{{"protocol_version", kProtocolVersion},
+                    {"id", parsed.value["id"]}};
+      response[reply.error ? "error" : "result"] = reply.payload;
+      if (!write_frame(peer.get(), response.dump()).ok) {
+        return false;
+      }
+    }
+    return true;
+  } catch (...) {
+    return false;
+  }
+}
+
+/**
+ * @brief Reads exactly one complete Client request and closes without replying.
+ * @param listener Bound local listener descriptor.
+ * @param request Receives the parsed request object.
+ * @return True when one complete valid object was received.
+ * @throws Nothing; accept, frame, parse, or allocation failures become false.
+ * @note Closing after the request models ambiguous transport loss after a
+ *       mutation may already have reached the peer. A conforming Client must
+ *       return that read failure without sending another request.
+ */
+bool receive_one_client_request_then_close(int listener,
+                                           Json* request) noexcept {
+  UniqueFd peer(::accept(listener, nullptr, nullptr));
+  if (!peer || request == nullptr) {
+    return false;
+  }
+  try {
+    const FrameReadResult frame = read_frame(peer.get());
+    if (frame.state != FrameReadState::Complete) {
+      return false;
+    }
+    JsonParseResult parsed = parse_json(frame.payload);
+    if (!parsed.ok || !parsed.value.is_object()) {
+      return false;
+    }
+    *request = std::move(parsed.value);
+    return true;
+  } catch (...) {
+    return false;
+  }
+}
+
+/**
  * @brief Serves one caller-provided raw response after reading a client frame.
  *
  * @param listener Bound local listener descriptor.
@@ -6549,6 +6645,390 @@ TEST(ClientLifecycle, RejectsOverflowedEnvelopeVersionAndErrorCode) {
     EXPECT_EQ(ping.status.code, kInvalidRequestCode);
     EXPECT_FALSE(client.connected());
   }
+}
+
+TEST(ClientSurface, ExposesAndDispatchesExactTypedVersionOneMethodsOnce) {
+  ScopedTempDirectory temp("ps-ipc-surface");
+  const std::string socket_path = (temp.path() / "server.sock").string();
+  UniqueFd listener = create_test_listener(socket_path);
+  const Json scripted_error{{"domain", "daemon"},
+                            {"code", kJobNotFoundCode},
+                            {"name", "job_not_found"},
+                            {"message", "scripted typed-call failure"}};
+  std::vector<ScriptedClientReply> replies;
+  replies.reserve(kVersionOneMethodNames.size());
+  for (std::string_view method : kVersionOneMethodNames) {
+    replies.push_back(
+        ScriptedClientReply{std::string(method), scripted_error, true});
+  }
+  std::vector<Json> requests;
+  bool served = false;
+  std::thread peer([&] {
+    served = serve_scripted_client_replies(listener.get(), replies, &requests);
+  });
+
+  Client client;
+  ASSERT_TRUE(client.connect(socket_path).ok);
+  const IpcSessionId session_id{std::string(32, 'a')};
+  const ps::ipc::ComputeRequestId compute_id{std::string(32, 'b')};
+  const DeliveryLeaseId delivery_id{std::string(32, 'c')};
+  const PixelRect roi{-1, 2, 3, 4};
+  const std::vector<std::string> directories{"/tmp/plugins"};
+  HostSchedulerConfig scheduler_config;
+  scheduler_config.hp_type = "cpu_work_stealing";
+  scheduler_config.rt_type = "serial_debug";
+  scheduler_config.worker_count = 3;
+  ComputeSubmitRequest compute_request;
+  compute_request.session_id = session_id;
+  compute_request.node = NodeId{7};
+  compute_request.cache.precision = "float32";
+  compute_request.intent = ComputeIntent::GlobalHighPrecision;
+  compute_request.dirty_roi = roi;
+  GraphLoadRequest graph_request;
+  graph_request.session = GraphSessionId{"surface"};
+  graph_request.root_dir = "/tmp";
+
+  (void)client.cache_all_nodes(session_id, "float32");
+  (void)client.clear_cache(session_id);
+  (void)client.clear_drive_cache(session_id);
+  (void)client.clear_memory_cache(session_id);
+  (void)client.free_transient_memory(session_id);
+  (void)client.synchronize_disk_cache(session_id, "float32");
+  (void)client.last_error(session_id);
+  (void)client.last_io_time(session_id);
+  (void)client.release_compute(compute_id, delivery_id);
+  (void)client.compute_result(compute_id);
+  (void)client.compute_status(compute_id);
+  (void)client.submit_compute(compute_request);
+  (void)client.timing(session_id);
+  (void)client.ping();
+  (void)client.version();
+  (void)client.begin_dirty_source(session_id, NodeId{7},
+                                  DirtyDomain::HighPrecision, roi);
+  (void)client.end_dirty_source(session_id, NodeId{7},
+                                DirtyDomain::HighPrecision);
+  (void)client.update_dirty_source(session_id, NodeId{7},
+                                   DirtyDomain::HighPrecision, roi);
+  (void)client.drain_compute_events(session_id, 1);
+  (void)client.clear_graph(session_id);
+  (void)client.close_graph(session_id);
+  (void)client.list_graphs();
+  (void)client.load_graph(graph_request);
+  (void)client.get_node_yaml(session_id, NodeId{7});
+  (void)client.set_node_yaml(session_id, NodeId{7}, "id: 7");
+  (void)client.reload_graph(session_id, "/tmp/reload.yaml");
+  (void)client.save_graph(session_id, "/tmp/save.yaml");
+  (void)client.compute_planning_snapshot(session_id);
+  (void)client.inspect_dependency_tree(session_id, NodeId{7}, true);
+  (void)client.dirty_region_snapshot(session_id);
+  (void)client.ending_nodes(session_id);
+  (void)client.inspect_graph(session_id);
+  (void)client.inspect_node(session_id, NodeId{7});
+  (void)client.list_node_ids(session_id);
+  (void)client.recent_compute_planning_snapshots(session_id);
+  (void)client.project_roi_backward(session_id, NodeId{7}, roi, NodeId{3});
+  (void)client.project_roi(session_id, NodeId{3}, roi, NodeId{7});
+  (void)client.traversal_details(session_id);
+  (void)client.traversal_orders(session_id);
+  (void)client.trees_containing_node(session_id, NodeId{7});
+  (void)client.plugins_load_report(directories);
+  (void)client.ops_combined_keys();
+  (void)client.ops_combined_sources();
+  (void)client.ops_sources();
+  (void)client.seed_builtin_ops();
+  (void)client.plugins_unload_all();
+  (void)client.configure_scheduler_defaults(scheduler_config);
+  (void)client.scheduler_description("serial_debug");
+  (void)client.scheduler_info(session_id, ComputeIntent::GlobalHighPrecision);
+  (void)client.scheduler_load("/tmp/scheduler.so");
+  (void)client.scheduler_loaded_plugins();
+  (void)client.replace_scheduler(session_id, ComputeIntent::GlobalHighPrecision,
+                                 "serial_debug");
+  (void)client.scheduler_scan(directories);
+  (void)client.scheduler_trace(session_id, 0, 1);
+  (void)client.scheduler_available_types();
+  peer.join();
+
+  ASSERT_TRUE(served);
+  ASSERT_EQ(requests.size(), kVersionOneMethodNames.size());
+  for (std::size_t index = 0; index < requests.size(); ++index) {
+    EXPECT_EQ(requests[index]["method"], kVersionOneMethodNames[index]);
+    EXPECT_EQ(requests[index]["protocol_version"], kProtocolVersion);
+    EXPECT_TRUE(requests[index]["params"].is_object());
+  }
+  const Json& release_params = requests[8]["params"];
+  EXPECT_EQ(release_params["compute_id"], compute_id.value);
+  EXPECT_EQ(release_params["delivery_id"], delivery_id.value);
+  const Json& submit_params = requests[11]["params"];
+  EXPECT_EQ(submit_params["session_id"], session_id.value);
+  EXPECT_EQ(submit_params["node_id"], 7);
+  EXPECT_EQ(submit_params["result_mode"], "status");
+  EXPECT_TRUE(submit_params["cache"].is_object());
+  EXPECT_TRUE(submit_params["execution"].is_object());
+  EXPECT_TRUE(submit_params["telemetry"].is_object());
+  EXPECT_EQ(requests[24]["params"]["yaml_text"], "id: 7");
+  EXPECT_TRUE(client.connected());
+}
+
+TEST(ClientCollectionAggregation, UsesStableCursorAndActualPageLength) {
+  ScopedTempDirectory temp("ps-ipc-pages");
+  const std::string socket_path = (temp.path() / "server.sock").string();
+  UniqueFd listener = create_test_listener(socket_path);
+  const std::string cursor(32, 'd');
+  const std::vector<ScriptedClientReply> replies = {
+      {"graph.list",
+       Json{{"sessions", Json::array({Json{{"session_id", std::string(32, 'a')},
+                                           {"session_name", "alpha"}}})},
+            {"offset", 0},
+            {"has_more", true},
+            {"cursor", cursor}}},
+      {"graph.list",
+       Json{{"sessions", Json::array({Json{{"session_id", std::string(32, 'b')},
+                                           {"session_name", "beta"}}})},
+            {"offset", 1},
+            {"has_more", false},
+            {"cursor", nullptr}}}};
+  std::vector<Json> requests;
+  bool served = false;
+  std::thread peer([&] {
+    served = serve_scripted_client_replies(listener.get(), replies, &requests);
+  });
+  Client client;
+  ASSERT_TRUE(client.connect(socket_path).ok);
+  const IpcResult<std::vector<GraphSessionSummary>> result =
+      client.list_graphs();
+  peer.join();
+
+  ASSERT_TRUE(served);
+  ASSERT_TRUE(result.status.ok) << result.status.message;
+  ASSERT_EQ(result.value.size(), 2U);
+  EXPECT_EQ(result.value[0].session_name, "alpha");
+  EXPECT_EQ(result.value[1].session_name, "beta");
+  ASSERT_EQ(requests.size(), 2U);
+  EXPECT_EQ(requests[0]["params"]["limit"], kGeneralPageMaxEntries);
+  EXPECT_FALSE(requests[0]["params"].contains("cursor"));
+  EXPECT_FALSE(requests[0]["params"].contains("offset"));
+  EXPECT_EQ(requests[1]["params"]["cursor"], cursor);
+  EXPECT_EQ(requests[1]["params"]["offset"], 1);
+  EXPECT_EQ(requests[1]["params"]["limit"], 1);
+}
+
+TEST(ClientCollectionAggregation, RejectsUnstableCursorWithoutPartialValue) {
+  ScopedTempDirectory temp("ps-ipc-badpage");
+  const std::string socket_path = (temp.path() / "server.sock").string();
+  UniqueFd listener = create_test_listener(socket_path);
+  const std::vector<ScriptedClientReply> replies = {
+      {"graph.list",
+       Json{{"sessions", Json::array({Json{{"session_id", std::string(32, 'a')},
+                                           {"session_name", "alpha"}}})},
+            {"offset", 0},
+            {"has_more", true},
+            {"cursor", std::string(32, 'c')}}},
+      {"graph.list",
+       Json{{"sessions", Json::array({Json{{"session_id", std::string(32, 'b')},
+                                           {"session_name", "beta"}}})},
+            {"offset", 1},
+            {"has_more", true},
+            {"cursor", std::string(32, 'd')}}}};
+  std::vector<Json> requests;
+  bool served = false;
+  std::thread peer([&] {
+    served = serve_scripted_client_replies(listener.get(), replies, &requests);
+  });
+  Client client;
+  ASSERT_TRUE(client.connect(socket_path).ok);
+  const IpcResult<std::vector<GraphSessionSummary>> result =
+      client.list_graphs();
+  peer.join();
+
+  ASSERT_TRUE(served);
+  EXPECT_FALSE(result.status.ok);
+  EXPECT_EQ(result.status.domain, OperationErrorDomain::Protocol);
+  EXPECT_EQ(result.status.code, kInvalidRequestCode);
+  EXPECT_TRUE(result.value.empty());
+  EXPECT_EQ(requests.size(), 2U);
+  EXPECT_TRUE(client.connected());
+}
+
+TEST(ClientJobValidation, RejectsMalformedStateCouplingWithOneStatusAttempt) {
+  const ps::ipc::ComputeRequestId compute_id{std::string(32, 'b')};
+  const IpcSessionId session_id{std::string(32, 'a')};
+  const Json success_status = encode_operation_status(ok_status());
+  const Json failed_status = encode_operation_status(failure_status(
+      OperationErrorDomain::Graph, static_cast<std::int32_t>(GraphErrc::Io),
+      "io", "scripted failure"));
+  std::vector<Json> malformed;
+  malformed.push_back(Json{{"compute_id", compute_id.value},
+                           {"session_id", session_id.value},
+                           {"state", "running"},
+                           {"cancellable", false},
+                           {"status", success_status},
+                           {"output", nullptr}});
+  malformed.push_back(Json{{"compute_id", compute_id.value},
+                           {"session_id", session_id.value},
+                           {"state", "succeeded"},
+                           {"cancellable", false},
+                           {"status", failed_status},
+                           {"output", nullptr}});
+  malformed.push_back(Json{{"compute_id", compute_id.value},
+                           {"session_id", session_id.value},
+                           {"state", "succeeded"},
+                           {"cancellable", false},
+                           {"status", success_status},
+                           {"output", Json::object()}});
+
+  for (const Json& result_value : malformed) {
+    ScopedTempDirectory temp("ps-ipc-badjob");
+    const std::string socket_path = (temp.path() / "server.sock").string();
+    UniqueFd listener = create_test_listener(socket_path);
+    std::vector<Json> requests;
+    bool served = false;
+    const std::vector<ScriptedClientReply> replies = {
+        {"compute.status", result_value}};
+    std::thread peer([&] {
+      served =
+          serve_scripted_client_replies(listener.get(), replies, &requests);
+    });
+    Client client;
+    ASSERT_TRUE(client.connect(socket_path).ok);
+    const IpcResult<ComputeJobSnapshot> observed =
+        client.compute_status(compute_id);
+    peer.join();
+    ASSERT_TRUE(served);
+    EXPECT_FALSE(observed.status.ok);
+    EXPECT_EQ(observed.status.domain, OperationErrorDomain::Protocol);
+    EXPECT_EQ(observed.status.code, kInvalidRequestCode);
+    EXPECT_EQ(requests.size(), 1U);
+    EXPECT_TRUE(client.connected());
+  }
+}
+
+TEST(ClientJobValidation, DecodesOutputAndReleasesMatchingLeaseOnce) {
+  ScopedTempDirectory temp("ps-ipc-lease");
+  const std::string socket_path = (temp.path() / "server.sock").string();
+  UniqueFd listener = create_test_listener(socket_path);
+  const ps::ipc::ComputeRequestId compute_id{std::string(32, 'b')};
+  const IpcSessionId session_id{std::string(32, 'a')};
+  const std::string output_id(32, 'c');
+  const std::string delivery_id(32, 'd');
+  const Json output{{"output_id", output_id},
+                    {"delivery_id", delivery_id},
+                    {"path", "/tmp/protected-output.bin"},
+                    {"width", 2},
+                    {"height", 2},
+                    {"channels", 1},
+                    {"data_type", "uint8"},
+                    {"device", "cpu"},
+                    {"row_step", 2},
+                    {"byte_size", 4},
+                    {"filesystem_device", 17},
+                    {"inode", 23}};
+  const Json job{{"compute_id", compute_id.value},
+                 {"session_id", session_id.value},
+                 {"state", "succeeded"},
+                 {"cancellable", false},
+                 {"status", encode_operation_status(ok_status())},
+                 {"output", output}};
+  const std::vector<ScriptedClientReply> replies = {
+      {"compute.result", job},
+      {"compute.release",
+       Json{{"compute_id", compute_id.value}, {"released", true}}}};
+  std::vector<Json> requests;
+  bool served = false;
+  std::thread peer([&] {
+    served = serve_scripted_client_replies(listener.get(), replies, &requests);
+  });
+  Client client;
+  ASSERT_TRUE(client.connect(socket_path).ok);
+  const IpcResult<ComputeJobSnapshot> result =
+      client.compute_result(compute_id);
+  ASSERT_TRUE(result.status.ok) << result.status.message;
+  ASSERT_TRUE(result.value.output.has_value());
+  EXPECT_EQ(result.value.output->metadata.output_id.value, output_id);
+  EXPECT_EQ(result.value.output->delivery_id.value, delivery_id);
+  EXPECT_EQ(result.value.output->metadata.row_step, 2U);
+  EXPECT_EQ(result.value.output->metadata.byte_size, 4U);
+  const IpcResult<ComputeReleaseResult> released =
+      client.release_compute(compute_id, result.value.output->delivery_id);
+  peer.join();
+
+  ASSERT_TRUE(served);
+  ASSERT_TRUE(released.status.ok) << released.status.message;
+  EXPECT_TRUE(released.value.released);
+  ASSERT_EQ(requests.size(), 2U);
+  EXPECT_EQ(requests[1]["params"]["compute_id"], compute_id.value);
+  EXPECT_EQ(requests[1]["params"]["delivery_id"], delivery_id);
+}
+
+TEST(ClientJobValidation, RejectsMalformedOutputByteLayout) {
+  ScopedTempDirectory temp("ps-ipc-badout");
+  const std::string socket_path = (temp.path() / "server.sock").string();
+  UniqueFd listener = create_test_listener(socket_path);
+  const ps::ipc::ComputeRequestId compute_id{std::string(32, 'b')};
+  const Json malformed_job{
+      {"compute_id", compute_id.value},
+      {"session_id", std::string(32, 'a')},
+      {"state", "succeeded"},
+      {"cancellable", false},
+      {"status", encode_operation_status(ok_status())},
+      {"output", Json{{"output_id", std::string(32, 'c')},
+                      {"delivery_id", std::string(32, 'd')},
+                      {"path", "/tmp/protected-output.bin"},
+                      {"width", 2},
+                      {"height", 2},
+                      {"channels", 1},
+                      {"data_type", "uint8"},
+                      {"device", "cpu"},
+                      {"row_step", 3},
+                      {"byte_size", 6},
+                      {"filesystem_device", 17},
+                      {"inode", 23}}}};
+  std::vector<Json> requests;
+  bool served = false;
+  const std::vector<ScriptedClientReply> replies = {
+      {"compute.result", malformed_job}};
+  std::thread peer([&] {
+    served = serve_scripted_client_replies(listener.get(), replies, &requests);
+  });
+  Client client;
+  ASSERT_TRUE(client.connect(socket_path).ok);
+  const IpcResult<ComputeJobSnapshot> result =
+      client.compute_result(compute_id);
+  peer.join();
+
+  ASSERT_TRUE(served);
+  EXPECT_FALSE(result.status.ok);
+  EXPECT_EQ(result.status.domain, OperationErrorDomain::Protocol);
+  EXPECT_EQ(result.status.code, kInvalidRequestCode);
+  EXPECT_FALSE(result.value.output.has_value());
+  EXPECT_EQ(requests.size(), 1U);
+  EXPECT_TRUE(client.connected());
+}
+
+TEST(ClientRetryPolicy, DoesNotRetryMutationAfterAmbiguousTransportLoss) {
+  ScopedTempDirectory temp("ps-ipc-noretry");
+  const std::string socket_path = (temp.path() / "server.sock").string();
+  UniqueFd listener = create_test_listener(socket_path);
+  Json request;
+  bool received = false;
+  std::thread peer([&] {
+    received = receive_one_client_request_then_close(listener.get(), &request);
+  });
+  Client client;
+  ASSERT_TRUE(client.connect(socket_path).ok);
+  const IpcSessionId session_id{std::string(32, 'a')};
+  const VoidResult result =
+      client.set_node_yaml(session_id, NodeId{7}, "id: 7\nname: changed");
+  peer.join();
+
+  ASSERT_TRUE(received);
+  EXPECT_FALSE(result.status.ok);
+  EXPECT_EQ(result.status.domain, OperationErrorDomain::Transport);
+  EXPECT_EQ(result.status.code, 4);
+  EXPECT_EQ(request["method"], "graph.node_yaml.set");
+  EXPECT_EQ(request["params"]["session_id"], session_id.value);
+  EXPECT_EQ(request["params"]["node_id"], 7);
+  EXPECT_FALSE(client.connected());
 }
 
 TEST(ClientResultValidation, RejectsOverflowedVersionWithoutDesynchronizing) {
