@@ -445,7 +445,7 @@ Method groups and current wire availability:
 | inspect | `inspect.graph`, `inspect.node`, `inspect.dependency_tree`, `inspect.node_ids`, `inspect.ending_nodes`, `inspect.roi_forward`, `inspect.roi_backward`, `inspect.dirty_region`, `inspect.compute_planning`, `inspect.recent_compute_planning`, `inspect.traversal_orders`, `inspect.traversal_details`, `inspect.trees_containing_node` | Implemented through copied Host values. Full-value collections use stable bounded cursor pages; node/ROI/dirty/current-planning values remain indivisible direct results. Host order and duplicates are preserved. |
 | dirty | `dirty.begin`, `dirty.update`, `dirty.end` | Implemented through one matching Host lifecycle mutation and return the copied dirty-region snapshot; the complete compact response size is preflighted before result-DOM allocation. |
 | cache | `cache.clear_all`, `cache.clear_drive`, `cache.clear_memory`, `cache.cache_all_nodes`, `cache.free_transient`, `cache.synchronize_disk` | Implemented as status-only Host calls; no backend cache handle or path enters a result. |
-| compute | `compute.timing`, `compute.last_io_time`, `compute.last_error` | Diagnostic routes are implemented. Timing preflights its aggregate compact response size before result-DOM allocation; last error is nested `OperationStatus` data in a successful envelope. No compute-job method is exposed; the private joined FIFO registry and protected OutputStore remain lifecycle-owned behind the router. |
+| compute | `compute.submit`, `compute.status`, `compute.result`, `compute.release`, `compute.timing`, `compute.last_io_time`, `compute.last_error` | Polling jobs and diagnostics are routed. Submit/status/result use stable `{compute_id,session_id,state,cancellable,status,output}` values; terminal release atomically returns `{compute_id,released:true}`. The current output field is always null. Task 3.3 does not interpret or use `delivery_id`; when supplied, it is ignored as an unknown forward-compatible field. Task 3.4 assigns that field lease-aware semantics. Timing preflights its aggregate compact response size; last error is nested diagnostic data. |
 | scheduler | scheduler control and trace names | No scheduler method is routed or advertised. |
 | plugins | operation-plugin control and views | No plugin method is routed or advertised; process ownership remains with Host. |
 | events | bounded compute-event drain | No event method is routed or advertised. |
@@ -462,8 +462,9 @@ Image payload rule:
   exact-once cleanup runs outside the registry mutex on optional lease-aware
   release, eviction, TTL expiry, or shutdown. A stable delivery id protects at
   most one refreshed 60-second lease after successful private result access.
-- The wire surface exposes no image result, output artifact, delivery
-  identity, lease, cache path, or caller-selected result path.
+- The wire surface accepts `result_mode: image`, but this slice returns its
+  stable nullable `output` field as null and exposes no output artifact,
+  delivery identity, lease, cache path, or caller-selected result path.
 
 Collection snapshot rule:
 

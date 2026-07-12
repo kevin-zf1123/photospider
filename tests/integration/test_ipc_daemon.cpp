@@ -1,6 +1,7 @@
 #include <arpa/inet.h>
 #include <fcntl.h>
 #include <gtest/gtest.h>
+#include <poll.h>
 #include <sys/file.h>
 #include <sys/socket.h>
 #include <sys/stat.h>
@@ -13,6 +14,7 @@
 #include <atomic>
 #include <cerrno>
 #include <chrono>
+#include <condition_variable>
 #include <csignal>
 #include <cstddef>
 #include <cstdint>
@@ -20,14 +22,18 @@
 #include <filesystem>
 #include <fstream>
 #include <ios>
+#include <limits>
 #include <memory>
+#include <mutex>
 #include <optional>
 #include <stdexcept>
 #include <string>
+#include <string_view>
 #include <thread>
 #include <utility>
 #include <vector>
 
+#include "ipc/codec.hpp"
 #include "ipc/frame.hpp"
 #include "ipc/unix_socket.hpp"
 #include "photospider/ipc/client.hpp"
@@ -357,6 +363,48 @@ class DaemonProcess {
   }
 
   /**
+   * @brief Requests graceful signal-driven shutdown without waiting for exit.
+   *
+   * @return True when no child remains or SIGTERM was delivered successfully.
+   * @throws Nothing.
+   * @note Tests use this split phase to observe that active Host work keeps
+   *       shutdown incomplete until its deterministic input gate is released.
+   */
+  bool request_stop() noexcept {
+    if (pid_ < 0) {
+      return true;
+    }
+    return ::kill(pid_, SIGTERM) == 0;
+  }
+
+  /**
+   * @brief Performs one nonblocking child-exit observation.
+   *
+   * @return True when the child is absent or has just been reaped.
+   * @throws Nothing.
+   * @note A running child leaves process ownership unchanged.
+   */
+  bool poll_exit() noexcept {
+    if (pid_ < 0) {
+      return true;
+    }
+    int status = 0;
+    const pid_t waited = ::waitpid(pid_, &status, WNOHANG);
+    if (waited == pid_) {
+      record_exit(status);
+      return true;
+    }
+    if (waited < 0 && errno != EINTR) {
+      pid_ = -1;
+      exited_ = true;
+      normal_exit_ = false;
+      exit_code_ = -1;
+      return true;
+    }
+    return false;
+  }
+
+  /**
    * @brief Sends SIGTERM and enforces bounded reap, escalating to SIGKILL.
    *
    * @throws Nothing.
@@ -502,6 +550,738 @@ bool wait_for_connection_capacity(const std::string& socket_path,
       return true;
     }
     std::this_thread::sleep_for(std::chrono::milliseconds(10));
+  }
+  return false;
+}
+
+/**
+ * @brief Converts one absolute monotonic deadline to a bounded poll timeout.
+ *
+ * @param deadline Absolute operation deadline.
+ * @return Zero after expiry, otherwise at least one millisecond and at most
+ *         `INT_MAX` milliseconds.
+ * @throws Nothing.
+ */
+int remaining_poll_timeout(
+    std::chrono::steady_clock::time_point deadline) noexcept {
+  const auto now = std::chrono::steady_clock::now();
+  if (now >= deadline) {
+    return 0;
+  }
+  const auto remaining = deadline - now;
+  const auto milliseconds =
+      std::chrono::duration_cast<std::chrono::milliseconds>(remaining).count();
+  if (milliseconds <= 0) {
+    return 1;
+  }
+  return static_cast<int>(
+      std::min<std::int64_t>(milliseconds, std::numeric_limits<int>::max()));
+}
+
+/**
+ * @brief Waits for one descriptor readiness event before an absolute deadline.
+ *
+ * @param fd Nonblocking descriptor to observe.
+ * @param events Requested poll readiness mask.
+ * @param deadline Absolute deadline shared by the complete RPC.
+ * @param message Receives a timeout or poll diagnostic.
+ * @return True when requested, hangup, or error state is observable and the
+ *         caller should attempt its next syscall.
+ * @throws std::bad_alloc if diagnostic construction cannot allocate.
+ */
+bool wait_for_descriptor(int fd, std::int16_t events,
+                         std::chrono::steady_clock::time_point deadline,
+                         std::string* message) {
+  while (true) {
+    const int timeout = remaining_poll_timeout(deadline);
+    if (timeout == 0) {
+      *message = "real daemon RPC exceeded its hard deadline";
+      return false;
+    }
+    pollfd descriptor{fd, events, 0};
+    const int ready = ::poll(&descriptor, 1, timeout);
+    if (ready > 0) {
+      if ((descriptor.revents & POLLNVAL) != 0) {
+        *message = "real daemon RPC descriptor became invalid";
+        return false;
+      }
+      if ((descriptor.revents & (events | POLLERR | POLLHUP)) != 0) {
+        return true;
+      }
+      continue;
+    }
+    if (ready == 0) {
+      *message = "real daemon RPC exceeded its hard deadline";
+      return false;
+    }
+    if (errno != EINTR) {
+      *message =
+          std::string("real daemon RPC poll failed: ") + std::strerror(errno);
+      return false;
+    }
+  }
+}
+
+/**
+ * @brief Opens one nonblocking Unix connection before an absolute deadline.
+ *
+ * @param socket_path Running daemon socket path.
+ * @param deadline Absolute deadline shared by connect, send, and receive.
+ * @param message Receives validation or socket diagnostics.
+ * @return Owned connected nonblocking descriptor, or empty on failure.
+ * @throws std::bad_alloc if diagnostics cannot allocate.
+ * @note This helper performs one connect attempt and never retries an RPC.
+ */
+internal::UniqueFd connect_before_deadline(
+    const std::string& socket_path,
+    std::chrono::steady_clock::time_point deadline, std::string* message) {
+  if (socket_path.empty() || socket_path.front() != '/' ||
+      socket_path.size() >= sizeof(sockaddr_un::sun_path)) {
+    *message = "real daemon RPC socket path is invalid";
+    return {};
+  }
+  internal::UniqueFd connection(::socket(AF_UNIX, SOCK_STREAM, 0));
+  if (!connection) {
+    *message =
+        std::string("real daemon RPC socket failed: ") + std::strerror(errno);
+    return {};
+  }
+  const int descriptor_flags = ::fcntl(connection.get(), F_GETFD, 0);
+  const int status_flags = ::fcntl(connection.get(), F_GETFL, 0);
+  if (descriptor_flags < 0 || status_flags < 0 ||
+      ::fcntl(connection.get(), F_SETFD, descriptor_flags | FD_CLOEXEC) != 0 ||
+      ::fcntl(connection.get(), F_SETFL, status_flags | O_NONBLOCK) != 0 ||
+      !internal::configure_no_sigpipe(connection.get(), message)) {
+    if (message->empty()) {
+      *message =
+          std::string("real daemon RPC fcntl failed: ") + std::strerror(errno);
+    }
+    return {};
+  }
+
+  sockaddr_un address{};
+  address.sun_family = AF_UNIX;
+  std::memcpy(address.sun_path, socket_path.c_str(), socket_path.size() + 1);
+  const socklen_t address_length = static_cast<socklen_t>(
+      offsetof(sockaddr_un, sun_path) + socket_path.size() + 1);
+  int connected = -1;
+  do {
+    connected =
+        ::connect(connection.get(), reinterpret_cast<sockaddr*>(&address),
+                  address_length);
+  } while (connected < 0 && errno == EINTR &&
+           std::chrono::steady_clock::now() < deadline);
+  if (connected == 0) {
+    return connection;
+  }
+  if (errno != EINPROGRESS && errno != EAGAIN && errno != EWOULDBLOCK) {
+    *message =
+        std::string("real daemon RPC connect failed: ") + std::strerror(errno);
+    return {};
+  }
+  if (!wait_for_descriptor(connection.get(), POLLOUT, deadline, message)) {
+    return {};
+  }
+  int socket_error = 0;
+  socklen_t error_size = sizeof(socket_error);
+  if (::getsockopt(connection.get(), SOL_SOCKET, SO_ERROR, &socket_error,
+                   &error_size) != 0 ||
+      socket_error != 0) {
+    const int failure = socket_error != 0 ? socket_error : errno;
+    *message = std::string("real daemon RPC connect failed: ") +
+               std::strerror(failure);
+    return {};
+  }
+  return connection;
+}
+
+/**
+ * @brief Sends one exact byte range before the shared RPC deadline.
+ *
+ * @param fd Connected nonblocking socket.
+ * @param data Bytes to send.
+ * @param size Exact byte count.
+ * @param deadline Absolute RPC deadline.
+ * @param message Receives timeout or IO diagnostics.
+ * @return True only after every byte is sent.
+ * @throws std::bad_alloc if diagnostics cannot allocate.
+ */
+bool send_before_deadline(int fd, const void* data, std::size_t size,
+                          std::chrono::steady_clock::time_point deadline,
+                          std::string* message) {
+  const auto* bytes = static_cast<const unsigned char*>(data);
+  std::size_t offset = 0;
+  while (offset < size) {
+    if (!wait_for_descriptor(fd, POLLOUT, deadline, message)) {
+      return false;
+    }
+#ifdef MSG_NOSIGNAL
+    constexpr int kSendFlags = MSG_NOSIGNAL;
+#else
+    constexpr int kSendFlags = 0;
+#endif
+    const ssize_t written =
+        ::send(fd, bytes + offset, size - offset, kSendFlags);
+    if (written > 0) {
+      offset += static_cast<std::size_t>(written);
+      continue;
+    }
+    if (written < 0 &&
+        (errno == EINTR || errno == EAGAIN || errno == EWOULDBLOCK)) {
+      continue;
+    }
+    *message = std::string("real daemon RPC send failed: ") +
+               (written == 0 ? "zero-byte progress" : std::strerror(errno));
+    return false;
+  }
+  return true;
+}
+
+/**
+ * @brief Receives one exact byte range before the shared RPC deadline.
+ *
+ * @param fd Connected nonblocking socket.
+ * @param data Destination byte range.
+ * @param size Exact byte count.
+ * @param deadline Absolute RPC deadline.
+ * @param message Receives timeout, EOF, or IO diagnostics.
+ * @return True only after every byte is received.
+ * @throws std::bad_alloc if diagnostics cannot allocate.
+ */
+bool receive_before_deadline(int fd, void* data, std::size_t size,
+                             std::chrono::steady_clock::time_point deadline,
+                             std::string* message) {
+  auto* bytes = static_cast<unsigned char*>(data);
+  std::size_t offset = 0;
+  while (offset < size) {
+    if (!wait_for_descriptor(fd, POLLIN, deadline, message)) {
+      return false;
+    }
+    const ssize_t received = ::recv(fd, bytes + offset, size - offset, 0);
+    if (received > 0) {
+      offset += static_cast<std::size_t>(received);
+      continue;
+    }
+    if (received < 0 &&
+        (errno == EINTR || errno == EAGAIN || errno == EWOULDBLOCK)) {
+      continue;
+    }
+    *message = received == 0
+                   ? "real daemon RPC peer closed before a complete frame"
+                   : std::string("real daemon RPC receive failed: ") +
+                         std::strerror(errno);
+    return false;
+  }
+  return true;
+}
+
+/**
+ * @brief Performs one short-lived typed-envelope call without public Client
+ *        compute helpers.
+ *
+ * @param socket_path Running daemon Unix socket.
+ * @param method Exact version 1 method.
+ * @param params Complete typed params object.
+ * @param id Correlated request identity.
+ * @param timeout Hard deadline shared across connect, frame send, and frame
+ *        receive.
+ * @param report_failure Whether transport/framing failures are test failures.
+ * @return Parsed complete response object, or an empty object after a test
+ *         assertion records enabled transport/framing/parsing failure.
+ * @throws std::bad_alloc if request or response storage cannot allocate.
+ * @note The currently installed direct Client has no compute helpers. Each
+ *       invocation therefore creates and closes one real connection, which
+ *       also verifies that compute ownership is daemon-scoped.
+ */
+internal::Json raw_daemon_call(
+    const std::string& socket_path, const std::string& method,
+    internal::Json params, std::string id = "raw-daemon-call",
+    std::chrono::milliseconds timeout = std::chrono::seconds(3),
+    bool report_failure = true) {
+  const auto deadline = std::chrono::steady_clock::now() + timeout;
+  std::string message;
+  internal::UniqueFd connection =
+      connect_before_deadline(socket_path, deadline, &message);
+  if (!connection) {
+    if (report_failure) {
+      ADD_FAILURE() << message;
+    }
+    return internal::Json::object();
+  }
+  const std::string request = internal::Json{
+      {"protocol_version", kProtocolVersion},
+      {"id", std::move(id)},
+      {"method", method},
+      {"params",
+       std::move(params)}}.dump();
+  if (request.empty() || request.size() > 16U * 1024U * 1024U) {
+    if (report_failure) {
+      ADD_FAILURE() << "real daemon RPC request exceeds frame bounds";
+    }
+    return internal::Json::object();
+  }
+  const std::uint32_t network_size =
+      htonl(static_cast<std::uint32_t>(request.size()));
+  if (!send_before_deadline(connection.get(), &network_size,
+                            sizeof(network_size), deadline, &message) ||
+      !send_before_deadline(connection.get(), request.data(), request.size(),
+                            deadline, &message)) {
+    if (report_failure) {
+      ADD_FAILURE() << message;
+    }
+    return internal::Json::object();
+  }
+
+  std::uint32_t response_network_size = 0;
+  if (!receive_before_deadline(connection.get(), &response_network_size,
+                               sizeof(response_network_size), deadline,
+                               &message)) {
+    if (report_failure) {
+      ADD_FAILURE() << message;
+    }
+    return internal::Json::object();
+  }
+  const std::uint32_t response_size = ntohl(response_network_size);
+  if (response_size == 0 || response_size > 16U * 1024U * 1024U) {
+    if (report_failure) {
+      ADD_FAILURE() << "real daemon returned an invalid frame length";
+    }
+    return internal::Json::object();
+  }
+  std::string response(response_size, '\0');
+  if (!receive_before_deadline(connection.get(), response.data(),
+                               response.size(), deadline, &message)) {
+    if (report_failure) {
+      ADD_FAILURE() << message;
+    }
+    return internal::Json::object();
+  }
+  const internal::JsonParseResult parsed = internal::parse_json(response);
+  if (!parsed.ok || !parsed.value.is_object()) {
+    if (report_failure) {
+      ADD_FAILURE() << "real daemon returned malformed JSON: "
+                    << parsed.message;
+    }
+    return internal::Json::object();
+  }
+  return parsed.value;
+}
+
+/**
+ * @brief Runs one hard-deadline raw daemon call on an owned joinable thread.
+ *
+ * @throws std::bad_alloc or std::system_error if state/thread creation fails.
+ * @note Tests explicitly stop/release daemon work before joining failure paths;
+ *       the worker itself also has a hard transport deadline, so destruction
+ *       cannot inherit the unbounded `std::future` join behavior this helper
+ *       replaces.
+ */
+class RawDaemonCallTask final {
+ public:
+  /**
+   * @brief Starts one exact RPC operation.
+   *
+   * @param socket_path Running daemon socket.
+   * @param method Exact protocol method.
+   * @param params Complete typed params.
+   * @param id Correlated request id.
+   * @param timeout Hard end-to-end RPC deadline.
+   * @param report_failure Whether expected transport closure records failure.
+   * @throws std::bad_alloc or std::system_error on setup failure.
+   */
+  RawDaemonCallTask(std::string socket_path, std::string method,
+                    internal::Json params, std::string id,
+                    std::chrono::milliseconds timeout,
+                    bool report_failure = true)
+      : state_(std::make_shared<State>()),
+        worker_([state = state_, socket_path = std::move(socket_path),
+                 method = std::move(method), params = std::move(params),
+                 id = std::move(id), timeout, report_failure]() mutable {
+          internal::Json response =
+              raw_daemon_call(socket_path, method, std::move(params),
+                              std::move(id), timeout, report_failure);
+          {
+            std::lock_guard<std::mutex> lock(state->mutex);
+            state->response = std::move(response);
+            state->complete = true;
+          }
+          state->changed.notify_all();
+        }) {}
+
+  /**
+   * @brief Prevents two helpers from owning one RPC thread.
+   * @param other Existing owner.
+   * @throws Nothing because construction is unavailable.
+   */
+  RawDaemonCallTask(const RawDaemonCallTask& other) = delete;
+
+  /**
+   * @brief Prevents replacing one RPC thread owner.
+   * @param other Existing owner.
+   * @return No value because assignment is unavailable.
+   * @throws Nothing because assignment is unavailable.
+   */
+  RawDaemonCallTask& operator=(const RawDaemonCallTask& other) = delete;
+
+  /**
+   * @brief Joins the bounded worker when explicit test cleanup was skipped.
+   * @throws Nothing.
+   */
+  ~RawDaemonCallTask() {
+    if (worker_.joinable()) {
+      worker_.join();
+    }
+  }
+
+  /**
+   * @brief Observes completion without waiting.
+   * @return True after the worker published its response.
+   * @throws Nothing.
+   */
+  bool complete() const noexcept {
+    std::lock_guard<std::mutex> lock(state_->mutex);
+    return state_->complete;
+  }
+
+  /**
+   * @brief Waits for response publication up to a bounded observation window.
+   * @param timeout Maximum observation duration.
+   * @return True when the call completed.
+   * @throws Nothing.
+   */
+  bool wait_for(std::chrono::milliseconds timeout) const noexcept {
+    std::unique_lock<std::mutex> lock(state_->mutex);
+    return state_->changed.wait_for(lock, timeout,
+                                    [this] { return state_->complete; });
+  }
+
+  /**
+   * @brief Joins the worker and transfers its response.
+   * @return Complete parsed response, or an empty object after contained IO
+   *         failure.
+   * @throws std::system_error if thread joining fails.
+   * @note Call once after `wait_for()` or after deterministic daemon cleanup.
+   */
+  internal::Json join() {
+    if (worker_.joinable()) {
+      worker_.join();
+    }
+    std::lock_guard<std::mutex> lock(state_->mutex);
+    return std::move(state_->response);
+  }
+
+ private:
+  /** @brief Shared completion state published by the worker. */
+  struct State {
+    /** @brief Mutex protecting response publication. */
+    mutable std::mutex mutex;
+
+    /** @brief Condition variable signaled exactly once on completion. */
+    mutable std::condition_variable changed;
+
+    /** @brief Whether the response has been published. */
+    bool complete = false;
+
+    /** @brief Parsed response or contained-failure empty object. */
+    internal::Json response = internal::Json::object();
+  };
+
+  /** @brief Heap-owned state safe across the worker lifetime. */
+  std::shared_ptr<State> state_;
+
+  /** @brief Sole joined RPC worker. */
+  std::thread worker_;
+};
+
+/**
+ * @brief Owns one FIFO used to block a real Host graph reload
+ * deterministically.
+ *
+ * @throws std::runtime_error if FIFO creation or permission setup fails.
+ * @note A successful nonblocking writer-only open proves the daemon already
+ *       has a reader. The helper then keeps an `O_RDWR` descriptor open so an
+ *       assertion cleanup can close the gate without risking SIGPIPE.
+ */
+class BlockingReloadFifo final {
+ public:
+  /**
+   * @brief Creates one exact mode-0600 FIFO.
+   * @param path Unique FIFO path below a protected test directory.
+   * @throws std::runtime_error if creation or chmod fails.
+   */
+  explicit BlockingReloadFifo(std::filesystem::path path)
+      : path_(std::move(path)) {
+    if (::mkfifo(path_.c_str(), 0600) != 0 ||
+        ::chmod(path_.c_str(), 0600) != 0) {
+      throw std::runtime_error(std::string("failed to create reload FIFO: ") +
+                               std::strerror(errno));
+    }
+  }
+
+  /**
+   * @brief Prevents duplicate ownership of one FIFO gate.
+   * @param other Existing owner.
+   * @throws Nothing because construction is unavailable.
+   */
+  BlockingReloadFifo(const BlockingReloadFifo& other) = delete;
+
+  /**
+   * @brief Prevents replacement of one FIFO gate.
+   * @param other Existing owner.
+   * @return No value because assignment is unavailable.
+   * @throws Nothing because assignment is unavailable.
+   */
+  BlockingReloadFifo& operator=(const BlockingReloadFifo& other) = delete;
+
+  /**
+   * @brief Closes an unreleased writer so a blocked reader observes EOF.
+   * @throws Nothing.
+   */
+  ~BlockingReloadFifo() = default;
+
+  /**
+   * @brief Waits until the daemon has opened the FIFO for reading.
+   * @param timeout Hard reader-observation deadline.
+   * @return True after a nonblocking writer-only open proves reader presence.
+   * @throws std::bad_alloc if an error diagnostic cannot allocate.
+   * @note `ENXIO` is the expected not-yet-reading state; no fixed sleep is a
+   *       correctness condition.
+   */
+  bool wait_for_reader(std::chrono::milliseconds timeout) {
+    const auto deadline = std::chrono::steady_clock::now() + timeout;
+    while (std::chrono::steady_clock::now() < deadline) {
+      internal::UniqueFd proof(
+          ::open(path_.c_str(), O_WRONLY | O_NONBLOCK | O_CLOEXEC));
+      if (proof) {
+        internal::UniqueFd stable(
+            ::open(path_.c_str(), O_RDWR | O_NONBLOCK | O_CLOEXEC));
+        if (!stable) {
+          message_ = std::string("failed to stabilize reload FIFO: ") +
+                     std::strerror(errno);
+          return false;
+        }
+        writer_ = std::move(stable);
+        return true;
+      }
+      if (errno != ENXIO && errno != EINTR) {
+        message_ = std::string("failed to observe reload FIFO reader: ") +
+                   std::strerror(errno);
+        return false;
+      }
+      std::this_thread::yield();
+    }
+    message_ = "reload FIFO reader was not observed before deadline";
+    return false;
+  }
+
+  /**
+   * @brief Writes one valid graph and closes the FIFO to release reload.
+   * @return True after the complete YAML payload and EOF are published.
+   * @throws std::bad_alloc if diagnostics cannot allocate.
+   * @note The payload is smaller than `PIPE_BUF`; the `O_RDWR` ownership keeps
+   *       the write safe even if the daemon has already closed its reader.
+   */
+  bool release() {
+    if (!writer_) {
+      message_ = "reload FIFO has no confirmed reader";
+      return false;
+    }
+    static constexpr std::string_view kGraph =
+        "- id: 1\n"
+        "  name: ipc_source\n"
+        "  type: ipc_fixture\n"
+        "  subtype: source\n"
+        "  parameters:\n"
+        "    width: 6\n"
+        "    height: 4\n";
+    std::size_t offset = 0;
+    while (offset < kGraph.size()) {
+      const ssize_t written = ::write(writer_.get(), kGraph.data() + offset,
+                                      kGraph.size() - offset);
+      if (written > 0) {
+        offset += static_cast<std::size_t>(written);
+        continue;
+      }
+      if (written < 0 && errno == EINTR) {
+        continue;
+      }
+      message_ = std::string("failed to release reload FIFO: ") +
+                 (written == 0 ? "zero-byte progress" : std::strerror(errno));
+      writer_.reset();
+      return false;
+    }
+    writer_.reset();
+    return true;
+  }
+
+  /**
+   * @brief Returns the last FIFO setup or release diagnostic.
+   * @return Stable borrowed message until the next helper operation.
+   * @throws Nothing.
+   */
+  const std::string& message() const noexcept { return message_; }
+
+ private:
+  /** @brief Owned FIFO path removed with the surrounding test directory. */
+  std::filesystem::path path_;
+
+  /** @brief Stable read/write gate descriptor held until release. */
+  internal::UniqueFd writer_;
+
+  /** @brief Last contained setup/release failure. */
+  std::string message_;
+};
+
+/**
+ * @brief Bounds one RPC or polling wait by an aggregate monotonic deadline.
+ *
+ * @param deadline Absolute aggregate deadline measured by `steady_clock`.
+ * @param cap Maximum duration for the individual operation.
+ * @return Positive whole-millisecond timeout no greater than either bound, or
+ *         zero when no whole millisecond remains or the cap is nonpositive.
+ * @throws Nothing.
+ * @note Callers must not start an RPC or sleep when this helper returns zero.
+ */
+std::chrono::milliseconds timeout_before_deadline(
+    std::chrono::steady_clock::time_point deadline,
+    std::chrono::milliseconds cap) noexcept {
+  const auto now = std::chrono::steady_clock::now();
+  if (now >= deadline || cap <= std::chrono::milliseconds::zero()) {
+    return std::chrono::milliseconds::zero();
+  }
+  const auto remaining =
+      std::chrono::duration_cast<std::chrono::milliseconds>(deadline - now);
+  return std::min(cap, remaining);
+}
+
+/**
+ * @brief Polls one real-daemon job to a terminal state with a hard watchdog.
+ * @param socket_path Running daemon socket.
+ * @param compute_id Opaque accepted job identity.
+ * @param timeout Maximum observation duration.
+ * @return Last complete response, terminal on success.
+ * @throws std::bad_alloc if raw request/response storage cannot allocate.
+ * @note Every poll uses a fresh connection and a unique id. The 10 ms wait
+ *       reduces process-test spin; correctness is determined by state, not a
+ *       fixed completion sleep.
+ */
+internal::Json wait_for_real_compute_terminal(
+    const std::string& socket_path, const std::string& compute_id,
+    std::chrono::milliseconds timeout) {
+  const auto deadline = std::chrono::steady_clock::now() + timeout;
+  std::size_t sequence = 0;
+  internal::Json response;
+  while (true) {
+    const auto rpc_timeout = timeout_before_deadline(
+        deadline, std::chrono::duration_cast<std::chrono::milliseconds>(
+                      std::chrono::seconds(3)));
+    if (rpc_timeout <= std::chrono::milliseconds::zero()) {
+      break;
+    }
+    response = raw_daemon_call(socket_path, "compute.status",
+                               internal::Json{{"compute_id", compute_id}},
+                               "terminal-poll-" + std::to_string(sequence++),
+                               rpc_timeout);
+    if (!response.contains("result")) {
+      return response;
+    }
+    const std::string state = response["result"]["state"].get<std::string>();
+    if (state == "succeeded" || state == "failed") {
+      return response;
+    }
+    const auto sleep_timeout =
+        timeout_before_deadline(deadline, std::chrono::milliseconds(10));
+    if (sleep_timeout <= std::chrono::milliseconds::zero()) {
+      break;
+    }
+    std::this_thread::sleep_for(sleep_timeout);
+  }
+  ADD_FAILURE() << "real daemon compute did not terminate before deadline";
+  return response;
+}
+
+/**
+ * @brief Builds the smallest valid task-3.3 compute submission.
+ *
+ * @param session Active opaque daemon session id.
+ * @param node Target public node id.
+ * @return Params containing only required fields and status result mode.
+ * @throws std::bad_alloc if JSON storage cannot allocate.
+ * @note Missing option objects, intent, and dirty ROI exercise public Host
+ *       defaults rather than spelling those defaults into process tests.
+ */
+internal::Json minimal_compute_submit_params(const IpcSessionId& session,
+                                             std::int64_t node = 1) {
+  return internal::Json{{"session_id", session.value},
+                        {"node_id", node},
+                        {"result_mode", "status"}};
+}
+
+/**
+ * @brief Polls one real-daemon job until an exact nonterminal state appears.
+ *
+ * @param socket_path Running daemon socket.
+ * @param compute_id Accepted opaque job id.
+ * @param expected Exact state to observe.
+ * @param timeout Hard aggregate observation deadline.
+ * @return Last complete response, with the expected state on success.
+ * @throws std::bad_alloc if request/response storage cannot allocate.
+ */
+internal::Json wait_for_real_compute_state(const std::string& socket_path,
+                                           const std::string& compute_id,
+                                           std::string_view expected,
+                                           std::chrono::milliseconds timeout) {
+  const auto deadline = std::chrono::steady_clock::now() + timeout;
+  std::size_t sequence = 0;
+  internal::Json response;
+  while (true) {
+    const auto rpc_timeout =
+        timeout_before_deadline(deadline, std::chrono::milliseconds(500));
+    if (rpc_timeout <= std::chrono::milliseconds::zero()) {
+      break;
+    }
+    response = raw_daemon_call(socket_path, "compute.status",
+                               internal::Json{{"compute_id", compute_id}},
+                               "state-poll-" + std::to_string(sequence++),
+                               rpc_timeout);
+    if (!response.contains("result") ||
+        response["result"]["state"] == expected) {
+      return response;
+    }
+    std::this_thread::yield();
+  }
+  ADD_FAILURE() << "real daemon compute did not reach state " << expected
+                << " before deadline";
+  return response;
+}
+
+/**
+ * @brief Waits until signal shutdown has closed real-daemon admission.
+ *
+ * @param socket_path Daemon socket being shut down.
+ * @param timeout Hard aggregate observation deadline.
+ * @return True when a one-attempt ping can no longer complete.
+ * @throws std::bad_alloc if probe storage cannot allocate.
+ * @note Expected connect/EOF failures are contained and do not record test
+ *       failures; successful pings are fresh state observations, not sleeps.
+ */
+bool wait_for_listener_shutdown(const std::string& socket_path,
+                                std::chrono::milliseconds timeout) {
+  const auto deadline = std::chrono::steady_clock::now() + timeout;
+  std::size_t sequence = 0;
+  while (true) {
+    const auto rpc_timeout =
+        timeout_before_deadline(deadline, std::chrono::milliseconds(100));
+    if (rpc_timeout <= std::chrono::milliseconds::zero()) {
+      break;
+    }
+    const internal::Json response = raw_daemon_call(
+        socket_path, "daemon.ping", internal::Json::object(),
+        "shutdown-probe-" + std::to_string(sequence++), rpc_timeout, false);
+    if (!response.contains("result")) {
+      return true;
+    }
+    std::this_thread::yield();
   }
   return false;
 }
@@ -910,6 +1690,301 @@ TEST(IpcDaemonGraphLifecycle, PersistsAcrossClientsAndInspectsCopiedSnapshots) {
   ASSERT_TRUE(reloaded.status.ok) << reloaded.status.message;
   second.disconnect();
   daemon.stop();
+  EXPECT_TRUE(daemon.exited_successfully());
+  EXPECT_FALSE(std::filesystem::exists(socket_path));
+}
+
+TEST(IpcDaemonComputeLifecycle,
+     DisconnectAndIndependentClientsPreserveOneTerminalJob) {
+  ScopedDaemonDirectory temp("photospider-ipc-daemon-compute");
+  const std::string socket_path = (temp.path() / "compute.sock").string();
+  const std::filesystem::path yaml_path = temp.path() / "source.yaml";
+  write_ipc_graph(yaml_path);
+  DaemonProcess daemon;
+  daemon.start(socket_path);
+  ASSERT_TRUE(daemon.wait_ready(std::chrono::seconds(5)));
+
+  Client loader;
+  ASSERT_TRUE(loader.connect(socket_path).ok);
+  GraphLoadRequest load;
+  load.session = GraphSessionId{"compute_lifecycle"};
+  load.root_dir = (temp.path() / "sessions").string();
+  load.yaml_path = yaml_path.string();
+  load.cache_root_dir = (temp.path() / "cache").string();
+  const IpcResult<GraphSessionSummary> loaded = loader.load_graph(load);
+  ASSERT_TRUE(loaded.status.ok) << loaded.status.message;
+
+  internal::Json submitted =
+      raw_daemon_call(socket_path, "compute.submit",
+                      minimal_compute_submit_params(loaded.value.session_id),
+                      "disconnect-submit");
+  ASSERT_TRUE(submitted.contains("result")) << submitted.dump();
+  ASSERT_EQ(submitted["result"].size(), 6U);
+  EXPECT_EQ(submitted["result"]["state"], "queued");
+  EXPECT_FALSE(submitted["result"]["cancellable"].get<bool>());
+  EXPECT_TRUE(submitted["result"]["status"].is_null());
+  EXPECT_TRUE(submitted["result"]["output"].is_null());
+  const std::string compute_id =
+      submitted["result"]["compute_id"].get<std::string>();
+
+  std::string partial_error;
+  internal::UniqueFd partial =
+      internal::connect_unix_socket(socket_path, &partial_error);
+  ASSERT_TRUE(partial) << partial_error;
+  const unsigned char partial_header[] = {0, 0};
+  ASSERT_EQ(::send(partial.get(), partial_header, sizeof(partial_header), 0),
+            static_cast<ssize_t>(sizeof(partial_header)));
+  partial.reset();
+
+  RawDaemonCallTask first_poll(socket_path, "compute.status",
+                               internal::Json{{"compute_id", compute_id}},
+                               "multiclient-left", std::chrono::seconds(3));
+  RawDaemonCallTask second_poll(socket_path, "compute.status",
+                                internal::Json{{"compute_id", compute_id}},
+                                "multiclient-right", std::chrono::seconds(3));
+  const internal::Json first_status = first_poll.join();
+  const internal::Json second_status = second_poll.join();
+  ASSERT_TRUE(first_status.contains("result")) << first_status.dump();
+  ASSERT_TRUE(second_status.contains("result")) << second_status.dump();
+  EXPECT_EQ(first_status["result"]["compute_id"], compute_id);
+  EXPECT_EQ(second_status["result"]["compute_id"], compute_id);
+
+  internal::Json terminal = wait_for_real_compute_terminal(
+      socket_path, compute_id, std::chrono::seconds(3));
+  ASSERT_TRUE(terminal.contains("result")) << terminal.dump();
+  EXPECT_EQ(terminal["result"]["state"], "failed");
+  EXPECT_EQ(terminal["result"]["status"]["domain"], "graph");
+  EXPECT_FALSE(terminal["result"]["status"]["ok"].get<bool>());
+  EXPECT_TRUE(terminal["result"]["output"].is_null());
+  const internal::Json result = raw_daemon_call(
+      socket_path, "compute.result", internal::Json{{"compute_id", compute_id}},
+      "terminal-result");
+  ASSERT_TRUE(result.contains("result")) << result.dump();
+  EXPECT_EQ(result["result"], terminal["result"]);
+  const internal::Json released = raw_daemon_call(
+      socket_path, "compute.release",
+      internal::Json{{"compute_id", compute_id}}, "terminal-release");
+  EXPECT_EQ(released["result"],
+            (internal::Json{{"compute_id", compute_id}, {"released", true}}));
+
+  ASSERT_TRUE(loader.close_graph(loaded.value.session_id).status.ok);
+  loader.disconnect();
+  daemon.stop();
+  EXPECT_TRUE(daemon.exited_successfully());
+  EXPECT_FALSE(std::filesystem::exists(socket_path));
+}
+
+TEST(IpcDaemonComputeLifecycle,
+     ActiveReloadAndQueuedJobsHoldGraphCloseUntilFifoRelease) {
+  ScopedDaemonDirectory temp("psac", true);
+  const std::string socket_path = (temp.path() / "active-close.sock").string();
+  const std::filesystem::path yaml_path = temp.path() / "source.yaml";
+  write_ipc_graph(yaml_path);
+  BlockingReloadFifo reload_fifo(temp.path() / "reload.yaml.fifo");
+  DaemonProcess daemon;
+  daemon.start(socket_path);
+  ASSERT_TRUE(daemon.wait_ready(std::chrono::seconds(5)));
+
+  Client loader;
+  ASSERT_TRUE(loader.connect(socket_path).ok);
+  GraphLoadRequest load;
+  load.session = GraphSessionId{"active_close"};
+  load.root_dir = (temp.path() / "sessions").string();
+  load.yaml_path = yaml_path.string();
+  load.cache_root_dir = (temp.path() / "cache").string();
+  const IpcResult<GraphSessionSummary> loaded = loader.load_graph(load);
+  ASSERT_TRUE(loaded.status.ok) << loaded.status.message;
+
+  RawDaemonCallTask reloading(
+      socket_path, "graph.reload",
+      internal::Json{
+          {"session_id", loaded.value.session_id.value},
+          {"yaml_path", (temp.path() / "reload.yaml.fifo").string()}},
+      "active-close-reload", std::chrono::seconds(12));
+  if (!reload_fifo.wait_for_reader(std::chrono::seconds(3))) {
+    daemon.stop();
+    (void)reloading.join();
+    FAIL() << reload_fifo.message();
+    return;
+  }
+
+  std::vector<std::string> compute_ids;
+  for (std::int64_t node : {1, 2}) {
+    const internal::Json submitted = raw_daemon_call(
+        socket_path, "compute.submit",
+        minimal_compute_submit_params(loaded.value.session_id, node),
+        "active-close-submit-" + std::to_string(node));
+    if (!submitted.contains("result")) {
+      (void)reload_fifo.release();
+      daemon.stop();
+      (void)reloading.join();
+      FAIL() << "active close compute submission failed: " << submitted.dump();
+      return;
+    }
+    compute_ids.push_back(submitted["result"]["compute_id"].get<std::string>());
+  }
+  const internal::Json queued = wait_for_real_compute_state(
+      socket_path, compute_ids.back(), "queued", std::chrono::seconds(3));
+  if (!queued.contains("result") || queued["result"]["state"] != "queued") {
+    (void)reload_fifo.release();
+    daemon.stop();
+    (void)reloading.join();
+    FAIL() << "second active close job was not queued: " << queued.dump();
+    return;
+  }
+
+  RawDaemonCallTask closing(
+      socket_path, "graph.close",
+      internal::Json{{"session_id", loaded.value.session_id.value}},
+      "active-close", std::chrono::seconds(12));
+  bool closing_observed = false;
+  const auto closing_deadline =
+      std::chrono::steady_clock::now() + std::chrono::seconds(3);
+  std::size_t probe_sequence = 0;
+  while (std::chrono::steady_clock::now() < closing_deadline) {
+    const internal::Json probe = raw_daemon_call(
+        socket_path, "compute.submit",
+        minimal_compute_submit_params(loaded.value.session_id),
+        "active-close-admission-" + std::to_string(probe_sequence++),
+        std::chrono::milliseconds(500));
+    if (probe.contains("error") && probe["error"]["domain"] == "graph" &&
+        probe["error"]["name"] == "not_found") {
+      closing_observed = true;
+      break;
+    }
+    if (probe.contains("result")) {
+      compute_ids.push_back(probe["result"]["compute_id"].get<std::string>());
+    }
+    std::this_thread::yield();
+  }
+  if (!closing_observed || closing.complete()) {
+    (void)reload_fifo.release();
+    daemon.stop();
+    (void)closing.join();
+    (void)reloading.join();
+    FAIL() << "graph close did not enter its blocked closing state";
+    return;
+  }
+
+  if (!reload_fifo.release()) {
+    daemon.stop();
+    (void)closing.join();
+    (void)reloading.join();
+    FAIL() << reload_fifo.message();
+    return;
+  }
+  if (!reloading.wait_for(std::chrono::seconds(5)) ||
+      !closing.wait_for(std::chrono::seconds(8))) {
+    daemon.stop();
+    (void)closing.join();
+    (void)reloading.join();
+    FAIL() << "reload or close did not finish after FIFO release";
+    return;
+  }
+  const internal::Json reloaded = reloading.join();
+  const internal::Json closed = closing.join();
+  ASSERT_TRUE(reloaded.contains("result")) << reloaded.dump();
+  ASSERT_TRUE(closed.contains("result")) << closed.dump();
+  EXPECT_TRUE(closed["result"]["closed"].get<bool>());
+
+  for (const std::string& compute_id : compute_ids) {
+    const internal::Json terminal = wait_for_real_compute_terminal(
+        socket_path, compute_id, std::chrono::seconds(3));
+    ASSERT_TRUE(terminal.contains("result")) << terminal.dump();
+    EXPECT_TRUE(terminal["result"]["state"] == "succeeded" ||
+                terminal["result"]["state"] == "failed");
+    ASSERT_TRUE(raw_daemon_call(socket_path, "compute.release",
+                                internal::Json{{"compute_id", compute_id}},
+                                "active-close-release")
+                    .contains("result"));
+  }
+  loader.disconnect();
+  daemon.stop();
+  EXPECT_TRUE(daemon.exited_successfully());
+  EXPECT_FALSE(std::filesystem::exists(socket_path));
+}
+
+TEST(IpcDaemonComputeLifecycle,
+     ActiveReloadAndQueuedJobHoldSignalShutdownUntilFifoRelease) {
+  ScopedDaemonDirectory temp("psas", true);
+  const std::string socket_path =
+      (temp.path() / "active-shutdown.sock").string();
+  const std::filesystem::path yaml_path = temp.path() / "source.yaml";
+  write_ipc_graph(yaml_path);
+  BlockingReloadFifo reload_fifo(temp.path() / "reload.yaml.fifo");
+  DaemonProcess daemon;
+  daemon.start(socket_path);
+  ASSERT_TRUE(daemon.wait_ready(std::chrono::seconds(5)));
+
+  Client loader;
+  ASSERT_TRUE(loader.connect(socket_path).ok);
+  GraphLoadRequest load;
+  load.session = GraphSessionId{"active_shutdown"};
+  load.root_dir = (temp.path() / "sessions").string();
+  load.yaml_path = yaml_path.string();
+  load.cache_root_dir = (temp.path() / "cache").string();
+  const IpcResult<GraphSessionSummary> loaded = loader.load_graph(load);
+  ASSERT_TRUE(loaded.status.ok) << loaded.status.message;
+
+  RawDaemonCallTask reloading(
+      socket_path, "graph.reload",
+      internal::Json{
+          {"session_id", loaded.value.session_id.value},
+          {"yaml_path", (temp.path() / "reload.yaml.fifo").string()}},
+      "active-shutdown-reload", std::chrono::seconds(12), false);
+  if (!reload_fifo.wait_for_reader(std::chrono::seconds(3))) {
+    daemon.stop();
+    (void)reloading.join();
+    FAIL() << reload_fifo.message();
+    return;
+  }
+
+  std::vector<std::string> compute_ids;
+  for (std::int64_t node : {1, 2}) {
+    const internal::Json submitted = raw_daemon_call(
+        socket_path, "compute.submit",
+        minimal_compute_submit_params(loaded.value.session_id, node),
+        "active-shutdown-submit-" + std::to_string(node));
+    if (!submitted.contains("result")) {
+      (void)reload_fifo.release();
+      daemon.stop();
+      (void)reloading.join();
+      FAIL() << "active shutdown compute submission failed: "
+             << submitted.dump();
+      return;
+    }
+    compute_ids.push_back(submitted["result"]["compute_id"].get<std::string>());
+  }
+  const internal::Json queued = wait_for_real_compute_state(
+      socket_path, compute_ids.back(), "queued", std::chrono::seconds(3));
+  if (!queued.contains("result") || queued["result"]["state"] != "queued") {
+    (void)reload_fifo.release();
+    daemon.stop();
+    (void)reloading.join();
+    FAIL() << "second active shutdown job was not queued: " << queued.dump();
+    return;
+  }
+
+  if (!daemon.request_stop() ||
+      !wait_for_listener_shutdown(socket_path, std::chrono::seconds(3))) {
+    (void)reload_fifo.release();
+    daemon.stop();
+    (void)reloading.join();
+    FAIL() << "signal shutdown did not stop listener admission";
+    return;
+  }
+  const bool exited_before_release = daemon.poll_exit();
+  if (!reload_fifo.release()) {
+    daemon.stop();
+    (void)reloading.join();
+    FAIL() << reload_fifo.message();
+    return;
+  }
+  const bool exited_after_release =
+      daemon.wait_for_exit(std::chrono::seconds(8));
+  (void)reloading.join();
+  EXPECT_FALSE(exited_before_release);
+  ASSERT_TRUE(exited_after_release);
   EXPECT_TRUE(daemon.exited_successfully());
   EXPECT_FALSE(std::filesystem::exists(socket_path));
 }

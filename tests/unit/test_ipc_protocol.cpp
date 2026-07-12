@@ -753,6 +753,32 @@ Json valid_host_routed_params(std::string_view method,
 }
 
 /**
+ * @brief Builds one complete nontrivial compute-submit params object.
+ * @param session_id Valid opaque daemon session identity.
+ * @param result_mode Exact `status` or `image` selection.
+ * @return Nested public Host request values plus one ignored future field.
+ * @throws std::bad_alloc if JSON or string storage cannot allocate.
+ * @note Values exercise every task-3.3 known field while demonstrating that
+ *       unknown members remain forward-compatible.
+ */
+Json valid_compute_submit_params(const std::string& session_id,
+                                 std::string result_mode = "status") {
+  return Json{{"session_id", session_id},
+              {"node_id", 37},
+              {"cache", Json{{"precision", "float16"},
+                             {"force_recache", true},
+                             {"disable_disk_cache", true},
+                             {"nosave", true},
+                             {"future_cache_field", "ignored"}}},
+              {"execution", Json{{"parallel", true}, {"quiet", true}}},
+              {"telemetry", Json{{"enable_timing", true}}},
+              {"intent", "real_time_update"},
+              {"dirty_roi", expected_rect(PixelRect{-4, 5, 6, 7})},
+              {"result_mode", std::move(result_mode)},
+              {"future_submit_field", true}};
+}
+
+/**
  * @brief Creates one exact Graph-domain failure used by no-retry tests.
  *
  * @return Graph IO status with deliberately noncanonical input name so router
@@ -766,12 +792,34 @@ OperationStatus host_routed_graph_failure() {
 }
 
 /**
+ * @brief Shared heap-owned state for one blocking protocol Host hook.
+ *
+ * @throws Nothing for default construction.
+ * @note The hook captures this state by value so an assertion return cannot
+ *       leave it borrowing test-stack storage while the router worker joins.
+ */
+struct ProtocolGateState {
+  /** @brief Mutex serializing entry observation and gate release. */
+  std::mutex mutex;
+
+  /** @brief Condition variable waking entry observers and the blocked hook. */
+  std::condition_variable changed;
+
+  /** @brief Whether the blocking Host hook has reached the gate. */
+  bool entered = false;
+
+  /** @brief Whether the blocking Host hook may leave the gate. */
+  bool released = false;
+};
+
+/**
  * @brief Failure-safe owner that opens one condition-variable test gate.
  *
  * @throws Nothing.
- * @note Construct this guard after every future that could otherwise wait on
- *       the gate. Reverse destruction then opens the gate before any future
- *       destructor can join its asynchronous operation.
+ * @note Establish this guard before any assertion or call that can leave the
+ *       Host hook blocked. When a local future owns the waiting operation,
+ *       declare the guard after that future so reverse destruction opens the
+ *       gate before the future joins.
  */
 class ScopedProtocolGateRelease final {
  public:
@@ -889,6 +937,33 @@ class HostRoutedGraphStateProtocolTest : public ::testing::Test {
         {"params", std::move(params)}}.dump()));
   }
 
+  /**
+   * @brief Polls one accepted job until a terminal snapshot is observed.
+   * @param compute_id Valid opaque job identity returned by submit.
+   * @return Last correlated status response, terminal on success.
+   * @throws std::bad_alloc or std::runtime_error on request/response failure.
+   * @note The two-second deadline is only a deadlock watchdog. Polling yields
+   *       instead of sleeping for correctness or relying on fixed timing.
+   */
+  Json wait_for_compute_terminal(const std::string& compute_id) {
+    const auto deadline =
+        std::chrono::steady_clock::now() + std::chrono::seconds(2);
+    Json response;
+    while (std::chrono::steady_clock::now() < deadline) {
+      response = route("compute.status", Json{{"compute_id", compute_id}});
+      if (!response.contains("result")) {
+        return response;
+      }
+      const std::string state = response["result"]["state"].get<std::string>();
+      if (state == "succeeded" || state == "failed") {
+        return response;
+      }
+      std::this_thread::yield();
+    }
+    ADD_FAILURE() << "compute job did not become terminal before deadline";
+    return response;
+  }
+
   /** @brief Protected runtime path owner declared before router runtime. */
   ScopedTempDirectory runtime_directory_{"ps-ipc-route"};
 
@@ -904,6 +979,456 @@ class HostRoutedGraphStateProtocolTest : public ::testing::Test {
   /** @brief Opaque daemon id mapped to the spy's private Host session. */
   std::string session_id_;
 };
+
+TEST_F(HostRoutedGraphStateProtocolTest,
+       ComputeLifecyclePreservesEveryTypedHostRequestFieldAndStableShapes) {
+  const Json submitted =
+      route("compute.submit", valid_compute_submit_params(session_id_));
+  ASSERT_TRUE(submitted.contains("result")) << submitted.dump();
+  const Json& queued = submitted["result"];
+  ASSERT_EQ(queued.size(), 6U);
+  ASSERT_TRUE(queued["compute_id"].is_string());
+  const std::string compute_id = queued["compute_id"].get<std::string>();
+  EXPECT_TRUE(valid_opaque_id(compute_id));
+  EXPECT_EQ(queued["session_id"], session_id_);
+  EXPECT_EQ(queued["state"], "queued");
+  EXPECT_FALSE(queued["cancellable"].get<bool>());
+  EXPECT_TRUE(queued["status"].is_null());
+  EXPECT_TRUE(queued["output"].is_null());
+
+  const Json terminal = wait_for_compute_terminal(compute_id);
+  ASSERT_TRUE(terminal.contains("result")) << terminal.dump();
+  EXPECT_EQ(terminal["result"]["state"], "succeeded");
+  EXPECT_EQ(terminal["result"]["session_id"], session_id_);
+  EXPECT_FALSE(terminal["result"]["cancellable"].get<bool>());
+  EXPECT_EQ(terminal["result"]["status"], (Json{{"ok", true},
+                                                {"domain", "none"},
+                                                {"code", 0},
+                                                {"name", ""},
+                                                {"message", ""}}));
+  EXPECT_TRUE(terminal["result"]["output"].is_null());
+
+  const std::vector<::ps::testing::IpcHostInvocation> calls =
+      host_.invocations();
+  ASSERT_EQ(calls.size(), 1U);
+  ASSERT_EQ(calls.front().method, "compute.submit");
+  ASSERT_TRUE(calls.front().compute_request.has_value());
+  EXPECT_FALSE(calls.front().image_compute);
+  const HostComputeRequest& request = *calls.front().compute_request;
+  EXPECT_EQ(request.session.value, "ipc-host-spy-session");
+  EXPECT_EQ(request.node.value, 37);
+  EXPECT_EQ(request.cache.precision, "float16");
+  EXPECT_TRUE(request.cache.force_recache);
+  EXPECT_TRUE(request.cache.disable_disk_cache);
+  EXPECT_TRUE(request.cache.nosave);
+  EXPECT_TRUE(request.execution.parallel);
+  EXPECT_TRUE(request.execution.quiet);
+  EXPECT_TRUE(request.telemetry.enable_timing);
+  ASSERT_TRUE(request.intent.has_value());
+  EXPECT_EQ(*request.intent, ComputeIntent::RealTimeUpdate);
+  ASSERT_TRUE(request.dirty_roi.has_value());
+  EXPECT_EQ(request.dirty_roi->x, -4);
+  EXPECT_EQ(request.dirty_roi->y, 5);
+  EXPECT_EQ(request.dirty_roi->width, 6);
+  EXPECT_EQ(request.dirty_roi->height, 7);
+
+  const Json result = route("compute.result", Json{{"compute_id", compute_id}});
+  ASSERT_TRUE(result.contains("result")) << result.dump();
+  EXPECT_EQ(result["result"], terminal["result"]);
+  const Json repeated =
+      route("compute.result",
+            Json{{"compute_id", compute_id}, {"future_query_field", true}});
+  ASSERT_TRUE(repeated.contains("result")) << repeated.dump();
+  EXPECT_EQ(repeated["result"], result["result"]);
+  EXPECT_EQ(host_.call_count("compute.submit"), 1U);
+
+  const Json released =
+      route("compute.release", Json{{"compute_id", compute_id}});
+  ASSERT_TRUE(released.contains("result")) << released.dump();
+  EXPECT_EQ(released["result"],
+            (Json{{"compute_id", compute_id}, {"released", true}}));
+  const Json absent = route("compute.status", Json{{"compute_id", compute_id}});
+  ASSERT_TRUE(absent.contains("error")) << absent.dump();
+  EXPECT_EQ(absent["error"]["domain"], "daemon");
+  EXPECT_EQ(absent["error"]["name"], "job_not_found");
+}
+
+TEST_F(HostRoutedGraphStateProtocolTest,
+       ComputeSubmitPreservesEveryDefaultForMinimalAndNullableRequests) {
+  std::vector<Json> requests{Json{{"session_id", session_id_},
+                                  {"node_id", 41},
+                                  {"result_mode", "status"}},
+                             Json{{"session_id", session_id_},
+                                  {"node_id", 42},
+                                  {"intent", nullptr},
+                                  {"dirty_roi", nullptr},
+                                  {"result_mode", "status"}}};
+
+  for (std::size_t index = 0; index < requests.size(); ++index) {
+    SCOPED_TRACE(index);
+    host_.reset_invocations();
+    const Json submitted = route("compute.submit", std::move(requests[index]),
+                                 "minimal-compute-" + std::to_string(index));
+    ASSERT_TRUE(submitted.contains("result")) << submitted.dump();
+    const std::string compute_id =
+        submitted["result"]["compute_id"].get<std::string>();
+    const Json terminal = wait_for_compute_terminal(compute_id);
+    ASSERT_TRUE(terminal.contains("result")) << terminal.dump();
+    EXPECT_EQ(terminal["result"]["state"], "succeeded");
+
+    const std::vector<::ps::testing::IpcHostInvocation> calls =
+        host_.invocations();
+    ASSERT_EQ(calls.size(), 1U);
+    ASSERT_EQ(calls.front().method, "compute.submit");
+    ASSERT_TRUE(calls.front().compute_request.has_value());
+    EXPECT_FALSE(calls.front().image_compute);
+    const HostComputeRequest& request = *calls.front().compute_request;
+    EXPECT_EQ(request.session.value, "ipc-host-spy-session");
+    EXPECT_EQ(request.node.value, 41 + static_cast<std::int64_t>(index));
+    EXPECT_TRUE(request.cache.precision.empty());
+    EXPECT_FALSE(request.cache.force_recache);
+    EXPECT_FALSE(request.cache.disable_disk_cache);
+    EXPECT_FALSE(request.cache.nosave);
+    EXPECT_FALSE(request.execution.parallel);
+    EXPECT_FALSE(request.execution.quiet);
+    EXPECT_FALSE(request.telemetry.enable_timing);
+    EXPECT_FALSE(request.intent.has_value());
+    EXPECT_FALSE(request.dirty_roi.has_value());
+
+    const Json released =
+        route("compute.release", Json{{"compute_id", compute_id}},
+              "minimal-release-" + std::to_string(index));
+    ASSERT_TRUE(released.contains("result")) << released.dump();
+  }
+}
+
+TEST_F(HostRoutedGraphStateProtocolTest,
+       ComputeSubmitValidatesAllKnownFieldsBeforeSessionOrHostAccess) {
+  const std::string unknown_session(32, 'a');
+  const Json valid = valid_compute_submit_params(unknown_session);
+  std::vector<std::pair<std::string, Json>> malformed;
+
+  Json missing_session = valid;
+  missing_session.erase("session_id");
+  malformed.emplace_back("missing session", std::move(missing_session));
+  Json malformed_session = valid;
+  malformed_session["session_id"] = "not-an-opaque-id";
+  malformed.emplace_back("malformed session", std::move(malformed_session));
+  Json negative_node = valid;
+  negative_node["node_id"] = -1;
+  malformed.emplace_back("negative node", std::move(negative_node));
+  Json wide_node = valid;
+  wide_node["node_id"] = std::uint64_t{4294967296ULL};
+  malformed.emplace_back("wide node", std::move(wide_node));
+  Json cache_scalar = valid;
+  cache_scalar["cache"] = true;
+  malformed.emplace_back("cache scalar", std::move(cache_scalar));
+  Json precision_type = valid;
+  precision_type["cache"]["precision"] = 1;
+  malformed.emplace_back("precision type", std::move(precision_type));
+  Json precision_bound = valid;
+  precision_bound["cache"]["precision"] =
+      std::string(kShortTextMaxBytes + 1, 'p');
+  malformed.emplace_back("precision bound", std::move(precision_bound));
+  Json cache_flag = valid;
+  cache_flag["cache"]["nosave"] = 1;
+  malformed.emplace_back("cache flag", std::move(cache_flag));
+  Json execution_object = valid;
+  execution_object["execution"] = Json::array();
+  malformed.emplace_back("execution object", std::move(execution_object));
+  Json execution_flag = valid;
+  execution_flag["execution"]["parallel"] = "true";
+  malformed.emplace_back("execution flag", std::move(execution_flag));
+  Json telemetry_flag = valid;
+  telemetry_flag["telemetry"]["enable_timing"] = nullptr;
+  malformed.emplace_back("telemetry flag", std::move(telemetry_flag));
+  Json intent = valid;
+  intent["intent"] = "future_intent";
+  malformed.emplace_back("intent", std::move(intent));
+  Json dirty_roi = valid;
+  dirty_roi["dirty_roi"]["width"] = 1.5;
+  malformed.emplace_back("dirty roi", std::move(dirty_roi));
+  Json missing_mode = valid;
+  missing_mode.erase("result_mode");
+  malformed.emplace_back("missing result mode", std::move(missing_mode));
+  Json unknown_mode = valid;
+  unknown_mode["result_mode"] = "stream";
+  malformed.emplace_back("unknown result mode", std::move(unknown_mode));
+
+  for (auto& test_case : malformed) {
+    const Json response =
+        route("compute.submit", std::move(test_case.second), test_case.first);
+    ASSERT_TRUE(response.contains("error"))
+        << test_case.first << ": " << response.dump();
+    EXPECT_EQ(response["error"]["domain"], "protocol") << test_case.first;
+    EXPECT_EQ(response["error"]["name"], "invalid_params") << test_case.first;
+  }
+  EXPECT_EQ(host_.call_count("compute.submit"), 0U);
+
+  Json nullable = valid_compute_submit_params(unknown_session);
+  nullable["intent"] = nullptr;
+  nullable["dirty_roi"] = nullptr;
+  const Json admitted = route("compute.submit", std::move(nullable));
+  ASSERT_TRUE(admitted.contains("error")) << admitted.dump();
+  EXPECT_EQ(admitted["error"]["domain"], "graph");
+  EXPECT_EQ(admitted["error"]["name"], "not_found");
+  EXPECT_EQ(host_.call_count("compute.submit"), 0U);
+
+  for (std::string_view method :
+       {"compute.status", "compute.result", "compute.release"}) {
+    for (const Json& params :
+         {Json::object(), Json{{"compute_id", 1}}, Json{{"compute_id", "abc"}},
+          Json{{"compute_id", std::string(32, 'A')}}}) {
+      const Json response = route(std::string(method), params);
+      ASSERT_TRUE(response.contains("error")) << response.dump();
+      EXPECT_EQ(response["error"]["domain"], "protocol");
+      EXPECT_EQ(response["error"]["name"], "invalid_params");
+    }
+  }
+}
+
+TEST_F(HostRoutedGraphStateProtocolTest,
+       AcceptedHostAndImageFailuresRemainImmutableNestedResults) {
+  host_.set_status(
+      "compute.submit",
+      failure_status(OperationErrorDomain::Graph,
+                     static_cast<std::int32_t>(GraphErrc::ComputeError),
+                     "ignored", "exact accepted Host failure"));
+  Json submitted =
+      route("compute.submit", valid_compute_submit_params(session_id_));
+  ASSERT_TRUE(submitted.contains("result")) << submitted.dump();
+  const std::string failed_id =
+      submitted["result"]["compute_id"].get<std::string>();
+  Json failed = wait_for_compute_terminal(failed_id);
+  ASSERT_TRUE(failed.contains("result")) << failed.dump();
+  EXPECT_EQ(failed["result"]["state"], "failed");
+  EXPECT_EQ(failed["result"]["status"]["domain"], "graph");
+  EXPECT_EQ(failed["result"]["status"]["code"],
+            static_cast<std::int32_t>(GraphErrc::ComputeError));
+  EXPECT_EQ(failed["result"]["status"]["name"], "compute_error");
+  EXPECT_EQ(failed["result"]["status"]["message"],
+            "exact accepted Host failure");
+  EXPECT_TRUE(failed["result"]["output"].is_null());
+
+  host_.set_status("compute.submit", ok_status());
+  const Json immutable =
+      route("compute.result", Json{{"compute_id", failed_id}});
+  ASSERT_TRUE(immutable.contains("result")) << immutable.dump();
+  EXPECT_EQ(immutable["result"], failed["result"]);
+  EXPECT_EQ(host_.call_count("compute.submit"), 1U);
+  ASSERT_TRUE(route("compute.release", Json{{"compute_id", failed_id}})
+                  .contains("result"));
+
+  ImageBuffer invalid_image;
+  invalid_image.width = 1;
+  host_.set_compute_image(std::move(invalid_image));
+  host_.reset_invocations();
+  submitted = route("compute.submit",
+                    valid_compute_submit_params(session_id_, "image"));
+  ASSERT_TRUE(submitted.contains("result")) << submitted.dump();
+  const std::string image_id =
+      submitted["result"]["compute_id"].get<std::string>();
+  Json image_failed = wait_for_compute_terminal(image_id);
+  ASSERT_TRUE(image_failed.contains("result")) << image_failed.dump();
+  EXPECT_EQ(image_failed["result"]["state"], "failed");
+  EXPECT_EQ(image_failed["result"]["status"]["domain"], "daemon");
+  EXPECT_EQ(image_failed["result"]["status"]["name"], "internal_error");
+  EXPECT_TRUE(image_failed["result"]["output"].is_null());
+  const auto image_calls = host_.invocations();
+  ASSERT_EQ(image_calls.size(), 1U);
+  EXPECT_TRUE(image_calls.front().image_compute);
+  EXPECT_EQ(host_.call_count("compute.submit"), 1U);
+  const Json image_result =
+      route("compute.result", Json{{"compute_id", image_id}});
+  ASSERT_TRUE(image_result.contains("result")) << image_result.dump();
+  EXPECT_EQ(image_result["result"], image_failed["result"]);
+  ASSERT_TRUE(route("compute.release", Json{{"compute_id", image_id}})
+                  .contains("result"));
+
+  ImageBuffer valid_image =
+      make_aligned_cpu_image_buffer(2, 2, 1, DataType::UINT8);
+  ASSERT_NE(valid_image.data, nullptr);
+  host_.set_compute_image(std::move(valid_image));
+  host_.reset_invocations();
+  submitted = route("compute.submit",
+                    valid_compute_submit_params(session_id_, "image"));
+  ASSERT_TRUE(submitted.contains("result")) << submitted.dump();
+  const std::string successful_image_id =
+      submitted["result"]["compute_id"].get<std::string>();
+  const Json image_succeeded = wait_for_compute_terminal(successful_image_id);
+  ASSERT_TRUE(image_succeeded.contains("result")) << image_succeeded.dump();
+  EXPECT_EQ(image_succeeded["result"]["state"], "succeeded");
+  EXPECT_TRUE(image_succeeded["result"]["status"]["ok"].get<bool>());
+  EXPECT_TRUE(image_succeeded["result"]["output"].is_null());
+  const auto successful_image_calls = host_.invocations();
+  ASSERT_EQ(successful_image_calls.size(), 1U);
+  EXPECT_TRUE(successful_image_calls.front().image_compute);
+  ASSERT_TRUE(
+      route("compute.release", Json{{"compute_id", successful_image_id}})
+          .contains("result"));
+}
+
+TEST_F(HostRoutedGraphStateProtocolTest,
+       ComputePollingReleaseAndCloseRemainAvailableWithoutHostLock) {
+  const auto gate = std::make_shared<ProtocolGateState>();
+  std::future<Json> closing;
+  ScopedProtocolGateRelease release_guard(gate->mutex, gate->changed,
+                                          gate->released);
+  host_.set_call_hook([gate](std::string_view method) {
+    if (method != "compute.submit") {
+      return;
+    }
+    std::unique_lock<std::mutex> lock(gate->mutex);
+    gate->entered = true;
+    gate->changed.notify_all();
+    gate->changed.wait(lock, [gate] { return gate->released; });
+  });
+
+  const Json submitted =
+      route("compute.submit", valid_compute_submit_params(session_id_));
+  ASSERT_TRUE(submitted.contains("result")) << submitted.dump();
+  const std::string compute_id =
+      submitted["result"]["compute_id"].get<std::string>();
+  {
+    std::unique_lock<std::mutex> lock(gate->mutex);
+    ASSERT_TRUE(gate->changed.wait_for(lock, std::chrono::seconds(2),
+                                       [gate] { return gate->entered; }));
+  }
+
+  const Json running =
+      route("compute.status", Json{{"compute_id", compute_id}});
+  ASSERT_TRUE(running.contains("result")) << running.dump();
+  EXPECT_EQ(running["result"]["state"], "running");
+  EXPECT_TRUE(running["result"]["status"].is_null());
+  EXPECT_TRUE(route("daemon.ping", Json::object()).contains("result"));
+  for (std::string_view method : {"compute.result", "compute.release"}) {
+    const Json premature =
+        route(std::string(method), Json{{"compute_id", compute_id}});
+    ASSERT_TRUE(premature.contains("error")) << premature.dump();
+    EXPECT_EQ(premature["error"]["domain"], "daemon");
+    EXPECT_EQ(premature["error"]["name"], "job_not_ready");
+  }
+
+  closing = std::async(std::launch::async, [&] {
+    return route("graph.close", Json{{"session_id", session_id_}});
+  });
+  const auto closing_deadline =
+      std::chrono::steady_clock::now() + std::chrono::seconds(2);
+  Json rejected;
+  while (std::chrono::steady_clock::now() < closing_deadline) {
+    rejected =
+        route("compute.submit", valid_compute_submit_params(session_id_));
+    if (rejected.contains("error") && rejected["error"]["domain"] == "graph") {
+      break;
+    }
+    std::this_thread::yield();
+  }
+  ASSERT_TRUE(rejected.contains("error")) << rejected.dump();
+  EXPECT_EQ(rejected["error"]["name"], "not_found");
+  EXPECT_EQ(closing.wait_for(std::chrono::milliseconds(0)),
+            std::future_status::timeout);
+
+  release_guard.release();
+  ASSERT_EQ(closing.wait_for(std::chrono::seconds(2)),
+            std::future_status::ready);
+  const Json closed = closing.get();
+  ASSERT_TRUE(closed.contains("result")) << closed.dump();
+  EXPECT_TRUE(closed["result"]["closed"].get<bool>());
+  const Json terminal = wait_for_compute_terminal(compute_id);
+  ASSERT_TRUE(terminal.contains("result")) << terminal.dump();
+  EXPECT_EQ(terminal["result"]["state"], "succeeded");
+
+  const Json released =
+      route("compute.release", Json{{"compute_id", compute_id}});
+  ASSERT_TRUE(released.contains("result")) << released.dump();
+  EXPECT_EQ(released["result"],
+            (Json{{"compute_id", compute_id}, {"released", true}}));
+  host_.set_call_hook({});
+}
+
+TEST_F(HostRoutedGraphStateProtocolTest,
+       ConcurrentTerminalReleaseHasOneAtomicStableAcknowledgement) {
+  const Json submitted =
+      route("compute.submit", valid_compute_submit_params(session_id_));
+  ASSERT_TRUE(submitted.contains("result")) << submitted.dump();
+  const std::string compute_id =
+      submitted["result"]["compute_id"].get<std::string>();
+  ASSERT_TRUE(wait_for_compute_terminal(compute_id).contains("result"));
+
+  auto left = std::async(std::launch::async, [&] {
+    return route("compute.release", Json{{"compute_id", compute_id}}, "left");
+  });
+  auto right = std::async(std::launch::async, [&] {
+    return route("compute.release", Json{{"compute_id", compute_id}}, "right");
+  });
+  const Json left_result = left.get();
+  const Json right_result = right.get();
+  const int success_count = static_cast<int>(left_result.contains("result")) +
+                            static_cast<int>(right_result.contains("result"));
+  EXPECT_EQ(success_count, 1);
+  const Json& success =
+      left_result.contains("result") ? left_result : right_result;
+  const Json& absent =
+      left_result.contains("error") ? left_result : right_result;
+  EXPECT_EQ(success["result"],
+            (Json{{"compute_id", compute_id}, {"released", true}}));
+  EXPECT_EQ(absent["error"]["domain"], "daemon");
+  EXPECT_EQ(absent["error"]["name"], "job_not_found");
+}
+
+TEST_F(HostRoutedGraphStateProtocolTest,
+       ComputeActiveCapacityRejectsBeforeAnyAdditionalHostAccess) {
+  const auto gate = std::make_shared<ProtocolGateState>();
+  ScopedProtocolGateRelease release_guard(gate->mutex, gate->changed,
+                                          gate->released);
+  host_.set_call_hook([gate](std::string_view method) {
+    if (method != "compute.submit") {
+      return;
+    }
+    std::unique_lock<std::mutex> lock(gate->mutex);
+    gate->entered = true;
+    gate->changed.notify_all();
+    gate->changed.wait(lock, [gate] { return gate->released; });
+  });
+
+  std::vector<std::string> compute_ids;
+  Json first =
+      route("compute.submit", valid_compute_submit_params(session_id_));
+  ASSERT_TRUE(first.contains("result")) << first.dump();
+  compute_ids.push_back(first["result"]["compute_id"].get<std::string>());
+  {
+    std::unique_lock<std::mutex> lock(gate->mutex);
+    ASSERT_TRUE(gate->changed.wait_for(lock, std::chrono::seconds(2),
+                                       [gate] { return gate->entered; }));
+  }
+
+  for (int index = 1; index < 64; ++index) {
+    Json params = valid_compute_submit_params(session_id_);
+    params["node_id"] = index;
+    Json queued = route("compute.submit", std::move(params),
+                        "capacity-" + std::to_string(index));
+    ASSERT_TRUE(queued.contains("result")) << queued.dump();
+    EXPECT_EQ(queued["result"]["state"], "queued");
+    compute_ids.push_back(queued["result"]["compute_id"].get<std::string>());
+  }
+  Json rejected =
+      route("compute.submit", valid_compute_submit_params(session_id_),
+            "capacity-rejected");
+  ASSERT_TRUE(rejected.contains("error")) << rejected.dump();
+  EXPECT_EQ(rejected["error"]["domain"], "daemon");
+  EXPECT_EQ(rejected["error"]["name"], "capacity_exceeded");
+  EXPECT_EQ(host_.call_count("compute.submit"), 1U);
+
+  release_guard.release();
+  for (const std::string& compute_id : compute_ids) {
+    const Json terminal = wait_for_compute_terminal(compute_id);
+    ASSERT_TRUE(terminal.contains("result")) << terminal.dump();
+    ASSERT_TRUE(route("compute.release", Json{{"compute_id", compute_id}})
+                    .contains("result"));
+  }
+  EXPECT_EQ(host_.call_count("compute.submit"), 64U);
+  host_.set_call_hook({});
+}
 
 /**
  * @brief Monotonic clock controlled by stable paging protocol tests.
@@ -3110,8 +3635,11 @@ TEST(ProtocolEnvelope, NegotiatesVersionAndRejectsUnknownMethodAndSession) {
   EXPECT_EQ(unsupported["error"]["name"], "unsupported_protocol");
   EXPECT_EQ(unsupported["error"]["supported_versions"], Json::array({1}));
 
-  Json unknown = parse_response(router.route(
+  Json compute_without_params = parse_response(router.route(
       R"({"protocol_version":1,"id":"m","method":"compute.submit","params":{}})"));
+  EXPECT_EQ(compute_without_params["error"]["name"], "invalid_params");
+  Json unknown = parse_response(router.route(
+      R"({"protocol_version":1,"id":"u","method":"compute.cancel","params":{}})"));
   EXPECT_EQ(unknown["error"]["name"], "method_not_found");
 
   Json missing = parse_response(router.route(
