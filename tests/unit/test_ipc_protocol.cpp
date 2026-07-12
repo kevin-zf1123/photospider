@@ -42,8 +42,7 @@
 #include "support/ipc_host_spy.hpp"
 
 #ifndef PS_TEST_SCHEDULER_PLUGIN_PATH
-#define PS_TEST_SCHEDULER_PLUGIN_PATH \
-  "build/test_schedulers/libdestroy_count_scheduler_plugin.dylib"
+#error "PS_TEST_SCHEDULER_PLUGIN_PATH must name the active-build scheduler DSO"
 #endif
 
 #ifndef PS_TEST_OP_PLUGIN_DIR
@@ -1103,6 +1102,194 @@ TEST_F(HostRoutedGraphStateProtocolTest,
   ASSERT_TRUE(unloaded.contains("result")) << unloaded.dump();
   EXPECT_EQ(unloaded["result"], (Json{{"unloaded", 3}}));
   EXPECT_EQ(host_.call_count("plugins.unload_all"), 1U);
+}
+
+TEST_F(HostRoutedGraphStateProtocolTest,
+       SchedulerGlobalControlRoutesExactHostValuesWithoutSessionIdentity) {
+  host_.set_scheduler_description("deterministic scheduler");
+  Json response = route("scheduler.description",
+                        Json{{"type", "serial_debug"},
+                             {"session_id", "ignored-global-forward-field"},
+                             {"future", true}});
+  ASSERT_TRUE(response.contains("result")) << response.dump();
+  EXPECT_EQ(response["result"],
+            (Json{{"type", "serial_debug"},
+                  {"description", "deterministic scheduler"}}));
+  ASSERT_EQ(host_.invocations().size(), 1U);
+  EXPECT_EQ(host_.invocations()[0].method, "scheduler.description");
+  EXPECT_EQ(host_.invocations()[0].text, "serial_debug");
+  EXPECT_TRUE(host_.invocations()[0].session.value.empty());
+
+  host_.reset_invocations();
+  host_.set_scheduler_scan_count(7);
+  response = route(
+      "scheduler.scan",
+      Json{{"directories", Json::array({"relative/schedulers", "/tmp/*"})},
+           {"future", "ignored"}});
+  ASSERT_TRUE(response.contains("result")) << response.dump();
+  EXPECT_EQ(response["result"], (Json{{"loaded", 7}}));
+  ASSERT_EQ(host_.invocations().size(), 1U);
+  EXPECT_EQ(host_.invocations()[0].texts,
+            (std::vector<std::string>{"relative/schedulers", "/tmp/*"}));
+
+  host_.reset_invocations();
+  response = route("scheduler.load",
+                   Json{{"path", "relative/plugin.dylib"}, {"future", 1}});
+  ASSERT_TRUE(response.contains("result")) << response.dump();
+  EXPECT_EQ(response["result"], Json::object());
+  ASSERT_EQ(host_.invocations().size(), 1U);
+  EXPECT_EQ(host_.invocations()[0].text, "relative/plugin.dylib");
+
+  host_.reset_invocations();
+  response =
+      route("scheduler.configure_defaults",
+            Json{{"hp_type", "cpu_work_stealing"},
+                 {"rt_type", "serial_debug"},
+                 {"worker_count", std::numeric_limits<unsigned int>::max()},
+                 {"future", Json::object()}});
+  ASSERT_TRUE(response.contains("result")) << response.dump();
+  EXPECT_EQ(response["result"], Json::object());
+  ASSERT_EQ(host_.invocations().size(), 1U);
+  EXPECT_EQ(host_.invocations()[0].text, "cpu_work_stealing\nserial_debug");
+  EXPECT_EQ(host_.invocations()[0].worker_count,
+            std::numeric_limits<unsigned int>::max());
+}
+
+TEST_F(HostRoutedGraphStateProtocolTest,
+       SchedulerSessionRoutesPreserveOpaqueAdmissionAndCopiedValues) {
+  SchedulerInfoSnapshot info;
+  info.intent = ComputeIntent::RealTimeUpdate;
+  info.scheduler_name = "destroy_count_test";
+  info.stats = "workers=3;running=true";
+  host_.set_scheduler_info(info);
+
+  Json response = route("scheduler.info", Json{{"session_id", session_id_},
+                                               {"intent", "real_time_update"},
+                                               {"future", true}});
+  ASSERT_TRUE(response.contains("result")) << response.dump();
+  EXPECT_EQ(response["result"], (Json{{"session_id", session_id_},
+                                      {"intent", "real_time_update"},
+                                      {"scheduler_name", "destroy_count_test"},
+                                      {"stats", "workers=3;running=true"}}));
+  ASSERT_EQ(host_.invocations().size(), 1U);
+  EXPECT_EQ(host_.invocations()[0].method, "scheduler.info");
+  EXPECT_EQ(host_.invocations()[0].session.value, "ipc-host-spy-session");
+  EXPECT_EQ(host_.invocations()[0].intent, ComputeIntent::RealTimeUpdate);
+
+  host_.reset_invocations();
+  response =
+      route("scheduler.replace", Json{{"session_id", session_id_},
+                                      {"intent", "global_high_precision"},
+                                      {"type", "serial_debug"},
+                                      {"future", Json::array()}});
+  ASSERT_TRUE(response.contains("result")) << response.dump();
+  EXPECT_EQ(response["result"], Json::object());
+  ASSERT_EQ(host_.invocations().size(), 1U);
+  EXPECT_EQ(host_.invocations()[0].method, "scheduler.replace");
+  EXPECT_EQ(host_.invocations()[0].session.value, "ipc-host-spy-session");
+  EXPECT_EQ(host_.invocations()[0].intent, ComputeIntent::GlobalHighPrecision);
+  EXPECT_EQ(host_.invocations()[0].text, "serial_debug");
+}
+
+TEST_F(HostRoutedGraphStateProtocolTest,
+       SchedulerRoutesRejectMalformedKnownValuesBeforeHostAccess) {
+  std::vector<std::pair<std::string, Json>> malformed = {
+      {"scheduler.description", Json::object()},
+      {"scheduler.description", Json{{"type", ""}}},
+      {"scheduler.description",
+       Json{{"type", std::string(kShortTextMaxBytes + 1, 't')}}},
+      {"scheduler.scan", Json{{"directories", "not-an-array"}}},
+      {"scheduler.scan", Json{{"directories", Json::array({""})}}},
+      {"scheduler.load", Json{{"path", std::string("bad\0path", 8)}}},
+      {"scheduler.configure_defaults", Json{{"hp_type", "cpu_work_stealing"},
+                                            {"rt_type", "serial_debug"},
+                                            {"worker_count", -1}}},
+      {"scheduler.configure_defaults",
+       Json{{"hp_type", "cpu_work_stealing"},
+            {"rt_type", "serial_debug"},
+            {"worker_count", static_cast<std::uint64_t>(
+                                 std::numeric_limits<unsigned int>::max()) +
+                                 1U}}},
+      {"scheduler.info",
+       Json{{"session_id", session_id_}, {"intent", "future_intent"}}},
+      {"scheduler.replace", Json{{"session_id", session_id_},
+                                 {"intent", "real_time_update"},
+                                 {"type", ""}}},
+  };
+  Json too_many_directories = Json::array();
+  for (std::size_t index = 0; index < kPathArrayMaxEntries + 1; ++index) {
+    too_many_directories.push_back("scheduler-dir");
+  }
+  malformed.push_back(
+      {"scheduler.scan", Json{{"directories", too_many_directories}}});
+
+  for (std::size_t index = 0; index < malformed.size(); ++index) {
+    const Json response = route(malformed[index].first, malformed[index].second,
+                                "malformed-scheduler-" + std::to_string(index));
+    ASSERT_TRUE(response.contains("error")) << response.dump();
+    EXPECT_EQ(response["error"]["domain"], "protocol");
+    EXPECT_EQ(response["error"]["name"], "invalid_params");
+  }
+  EXPECT_TRUE(host_.invocations().empty());
+
+  std::string unknown_session(32, 'a');
+  if (unknown_session == session_id_) {
+    unknown_session.front() = 'b';
+  }
+  const Json invalid_before_session =
+      route("scheduler.replace", Json{{"session_id", unknown_session},
+                                      {"intent", "future_intent"},
+                                      {"type", "serial_debug"}});
+  EXPECT_EQ(invalid_before_session["error"]["domain"], "protocol");
+  EXPECT_TRUE(host_.invocations().empty());
+
+  const Json unknown = route(
+      "scheduler.info",
+      Json{{"session_id", unknown_session}, {"intent", "real_time_update"}});
+  EXPECT_EQ(unknown["error"]["domain"], "graph");
+  EXPECT_EQ(unknown["error"]["name"], "not_found");
+  EXPECT_TRUE(host_.invocations().empty());
+}
+
+TEST_F(HostRoutedGraphStateProtocolTest,
+       SchedulerRoutesPreserveHostFailuresAndRejectMalformedCopiedValues) {
+  host_.set_status("scheduler.load", host_routed_graph_failure());
+  Json response =
+      route("scheduler.load", Json{{"path", "failed-plugin.dylib"}});
+  ASSERT_TRUE(response.contains("error")) << response.dump();
+  EXPECT_EQ(response["error"]["domain"], "graph");
+  EXPECT_EQ(response["error"]["name"], "io");
+  EXPECT_EQ(host_.call_count("scheduler.load"), 1U);
+
+  host_.reset_invocations();
+  host_.set_status("scheduler.load", OperationStatus{});
+  host_.set_scheduler_description(std::string(kPathTextMaxBytes + 1, 'd'));
+  response = route("scheduler.description", Json{{"type", "serial_debug"}});
+  ASSERT_TRUE(response.contains("error")) << response.dump();
+  EXPECT_EQ(response["error"]["domain"], "protocol");
+  EXPECT_EQ(response["error"]["name"], "response_too_large");
+  EXPECT_EQ(host_.call_count("scheduler.description"), 1U);
+
+  host_.reset_invocations();
+  host_.set_scheduler_description(std::string("invalid\xc3\x28", 9));
+  response = route("scheduler.description", Json{{"type", "serial_debug"}});
+  ASSERT_TRUE(response.contains("error")) << response.dump();
+  EXPECT_EQ(response["error"]["domain"], "daemon");
+  EXPECT_EQ(response["error"]["name"], "internal_error");
+  EXPECT_EQ(host_.call_count("scheduler.description"), 1U);
+
+  host_.reset_invocations();
+  SchedulerInfoSnapshot mismatched;
+  mismatched.intent = ComputeIntent::GlobalHighPrecision;
+  mismatched.scheduler_name = "serial_debug";
+  mismatched.stats = "idle";
+  host_.set_scheduler_info(mismatched);
+  response = route("scheduler.info", Json{{"session_id", session_id_},
+                                          {"intent", "real_time_update"}});
+  ASSERT_TRUE(response.contains("error")) << response.dump();
+  EXPECT_EQ(response["error"]["domain"], "daemon");
+  EXPECT_EQ(response["error"]["name"], "internal_error");
+  EXPECT_EQ(host_.call_count("scheduler.info"), 1U);
 }
 
 TEST_F(HostRoutedGraphStateProtocolTest,
@@ -2201,6 +2388,137 @@ TEST_F(StableInspectionPagingProtocolTest,
   EXPECT_EQ(response["error"]["domain"], "protocol");
   EXPECT_EQ(response["error"]["name"], "response_too_large");
   EXPECT_EQ(host_.call_count("plugins.ops_sources"), 1U);
+}
+
+TEST_F(StableInspectionPagingProtocolTest,
+       SchedulerListsSortFreezeAndBindPagesWithoutSecondHostCall) {
+  host_.set_scheduler_types({"zeta", "alpha", "middle"});
+  Json first =
+      route("scheduler.types", Json{{"limit", 2}, {"session_id", "ignored"}});
+  ASSERT_TRUE(first.contains("result")) << first.dump();
+  EXPECT_EQ(first["result"]["types"], Json::array({"alpha", "middle"}));
+  ASSERT_TRUE(first["result"]["cursor"].is_string());
+  EXPECT_TRUE(first["result"]["has_more"].get<bool>());
+  EXPECT_EQ(first["result"]["offset"], 0);
+  EXPECT_EQ(host_.call_count("scheduler.types"), 1U);
+
+  host_.set_scheduler_types({"changed-after-publication"});
+  Json response = route(
+      "scheduler.loaded_plugins",
+      Json{{"cursor", first["result"]["cursor"]}, {"offset", 2}, {"limit", 1}});
+  ASSERT_TRUE(response.contains("error")) << response.dump();
+  EXPECT_EQ(response["error"]["name"], "cursor_not_found");
+  EXPECT_EQ(host_.call_count("scheduler.loaded_plugins"), 0U);
+
+  response = route(
+      "scheduler.types",
+      Json{{"cursor", first["result"]["cursor"]}, {"offset", 1}, {"limit", 1}});
+  ASSERT_TRUE(response.contains("error")) << response.dump();
+  EXPECT_EQ(response["error"]["name"], "cursor_not_found");
+  EXPECT_EQ(host_.call_count("scheduler.types"), 1U);
+
+  response =
+      route("scheduler.types", Json{{"cursor", first["result"]["cursor"]},
+                                    {"offset", 2},
+                                    {"limit", 2},
+                                    {"future", true}});
+  ASSERT_TRUE(response.contains("result")) << response.dump();
+  EXPECT_EQ(response["result"]["types"], Json::array({"zeta"}));
+  EXPECT_FALSE(response["result"]["has_more"].get<bool>());
+  EXPECT_TRUE(response["result"]["cursor"].is_null());
+  EXPECT_EQ(response["result"]["offset"], 2);
+  EXPECT_EQ(host_.call_count("scheduler.types"), 1U);
+
+  host_.set_scheduler_loaded_plugins(
+      {"/plugins/zeta.dylib", "/plugins/alpha.dylib"});
+  response = route("scheduler.loaded_plugins", Json{{"limit", 8}});
+  ASSERT_TRUE(response.contains("result")) << response.dump();
+  EXPECT_EQ(response["result"]["plugins"],
+            Json::array({"/plugins/alpha.dylib", "/plugins/zeta.dylib"}));
+  EXPECT_TRUE(response["result"]["cursor"].is_null());
+  EXPECT_FALSE(response["result"]["has_more"].get<bool>());
+  EXPECT_EQ(host_.call_count("scheduler.loaded_plugins"), 1U);
+}
+
+TEST_F(StableInspectionPagingProtocolTest,
+       SchedulerListsReserveBeforeHostAndEnforceQuotaExpiryAndSize) {
+  host_.set_scheduler_types({"alpha", "beta"});
+  const Json held = route("scheduler.types", Json{{"limit", 1}});
+  ASSERT_TRUE(held.contains("result")) << held.dump();
+  ASSERT_TRUE(held["result"]["cursor"].is_string());
+
+  host_.set_scheduler_loaded_plugins({"/plugins/one.dylib"});
+  Json response = route("scheduler.loaded_plugins", Json{{"limit", 1}});
+  ASSERT_TRUE(response.contains("error")) << response.dump();
+  EXPECT_EQ(response["error"]["domain"], "daemon");
+  EXPECT_EQ(response["error"]["name"], "capacity_exceeded");
+  EXPECT_EQ(host_.call_count("scheduler.loaded_plugins"), 0U);
+
+  clock_.advance(std::chrono::seconds(2));
+  response = route(
+      "scheduler.types",
+      Json{{"cursor", held["result"]["cursor"]}, {"offset", 1}, {"limit", 1}});
+  ASSERT_TRUE(response.contains("error")) << response.dump();
+  EXPECT_EQ(response["error"]["name"], "cursor_not_found");
+  EXPECT_EQ(host_.call_count("scheduler.types"), 1U);
+
+  std::vector<std::string> oversized(
+      small_protocol_snapshot_limits().snapshot_entries + 1,
+      "/plugins/repeated.dylib");
+  host_.set_scheduler_loaded_plugins(std::move(oversized));
+  host_.reset_invocations();
+  response = route("scheduler.loaded_plugins", Json{{"limit", 4}});
+  ASSERT_TRUE(response.contains("error")) << response.dump();
+  EXPECT_EQ(response["error"]["domain"], "protocol");
+  EXPECT_EQ(response["error"]["name"], "response_too_large");
+  EXPECT_EQ(host_.call_count("scheduler.loaded_plugins"), 1U);
+}
+
+TEST_F(StableInspectionPagingProtocolTest,
+       SchedulerListsRejectMalformedControlsAndReturnedLabelsWithoutRetry) {
+  const std::vector<Json> malformed = {
+      Json{{"limit", 0}},
+      Json{{"limit", kGeneralPageMaxEntries + 1}},
+      Json{{"offset", 0}, {"limit", 1}},
+      Json{{"cursor", "malformed"}, {"offset", 0}, {"limit", 1}},
+  };
+  for (const Json& params : malformed) {
+    const Json response = route("scheduler.types", params);
+    ASSERT_TRUE(response.contains("error")) << response.dump();
+    EXPECT_EQ(response["error"]["name"], "invalid_params");
+  }
+  EXPECT_EQ(host_.call_count("scheduler.types"), 0U);
+
+  host_.set_scheduler_types({""});
+  Json response = route("scheduler.types", Json{{"limit", 1}});
+  ASSERT_TRUE(response.contains("error")) << response.dump();
+  EXPECT_EQ(response["error"]["domain"], "daemon");
+  EXPECT_EQ(response["error"]["name"], "internal_error");
+  EXPECT_EQ(host_.call_count("scheduler.types"), 1U);
+
+  host_.reset_invocations();
+  host_.set_scheduler_types({std::string(kShortTextMaxBytes + 1, 't')});
+  response = route("scheduler.types", Json{{"limit", 1}});
+  ASSERT_TRUE(response.contains("error")) << response.dump();
+  EXPECT_EQ(response["error"]["domain"], "protocol");
+  EXPECT_EQ(response["error"]["name"], "response_too_large");
+  EXPECT_EQ(host_.call_count("scheduler.types"), 1U);
+
+  host_.reset_invocations();
+  host_.set_scheduler_loaded_plugins({std::string("invalid\xc3\x28", 9)});
+  response = route("scheduler.loaded_plugins", Json{{"limit", 1}});
+  ASSERT_TRUE(response.contains("error")) << response.dump();
+  EXPECT_EQ(response["error"]["domain"], "daemon");
+  EXPECT_EQ(response["error"]["name"], "internal_error");
+  EXPECT_EQ(host_.call_count("scheduler.loaded_plugins"), 1U);
+
+  host_.reset_invocations();
+  host_.set_scheduler_loaded_plugins({std::string(kPathTextMaxBytes + 1, 'p')});
+  response = route("scheduler.loaded_plugins", Json{{"limit", 1}});
+  ASSERT_TRUE(response.contains("error")) << response.dump();
+  EXPECT_EQ(response["error"]["domain"], "protocol");
+  EXPECT_EQ(response["error"]["name"], "response_too_large");
+  EXPECT_EQ(host_.call_count("scheduler.loaded_plugins"), 1U);
 }
 
 TEST(ProtocolOperationPlugins,

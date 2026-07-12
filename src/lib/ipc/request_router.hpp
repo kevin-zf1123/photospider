@@ -166,7 +166,11 @@ class RequestRouter {
    *       Process-global plugin mutations likewise use one serialized Host
    *       call, while plugin views reserve, sort, measure, and freeze one
    *       stable snapshot before their first Host call result is published;
-   *       continuations never resolve a session or reenter Host.
+   *       continuations never resolve a session or reenter Host. Global
+   *       scheduler discovery/control follows the same Host-only boundary;
+   *       scheduler type/plugin lists use stable sorted snapshots, while
+   *       per-session information/replacement uses opaque admission and the
+   *       common Host mutex shared with compute execution.
    *       Resource exhaustion is rethrown. The function performs no socket IO.
    */
   std::string route(const std::string& payload);
@@ -351,6 +355,33 @@ class RequestRouter {
    *       change the separately maintained eight-method advertisement.
    */
   std::optional<std::string> route_plugin_method(
+      const std::string& id, const std::string& method,
+      const RoutedParams& routed_params);
+
+  /**
+   * @brief Routes scheduler discovery, configuration, and session control.
+   *
+   * @param id Valid request id correlated with the response.
+   * @param method Exact version 1 scheduler method name other than trace.
+   * @param routed_params Cpp-only adapter borrowing structurally valid params.
+   * @return Complete response for this family, or `std::nullopt` when another
+   *         route family must handle the method.
+   * @throws std::bad_alloc if validation, Host copying, snapshot ownership, or
+   *         response construction cannot allocate.
+   * @throws std::invalid_argument if a successful Host returns malformed
+   *         counts, descriptions, labels, type names, intent, or info text.
+   * @throws Whatever the matching Host method propagates; `route()` preserves
+   *         resource exhaustion and maps other standard exceptions.
+   * @note Discovery/default methods are process-global and never resolve a
+   *       graph session. Type/plugin first pages reserve quota before exactly
+   *       one Host call, sort copied labels, and freeze a stable snapshot;
+   *       continuations call no Host method. Information and replacement
+   *       validate all known values before opaque-session admission and then
+   *       invoke exactly one Host method under `host_mutex_`. Mutations are
+   *       never retried. `scheduler.trace` remains in the bounded observation
+   *       route and retains its existing non-destructive sequence semantics.
+   */
+  std::optional<std::string> route_scheduler_method(
       const std::string& id, const std::string& method,
       const RoutedParams& routed_params);
 

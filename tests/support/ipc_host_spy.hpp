@@ -62,6 +62,9 @@ struct IpcHostInvocation {
   /** @brief Compute intent argument, when present. */
   ComputeIntent intent = ComputeIntent::GlobalHighPrecision;
 
+  /** @brief Exact scheduler worker-count argument, when present. */
+  unsigned int worker_count = 0;
+
   /** @brief Exact graph-load request, when the method is `graph.load`. */
   GraphLoadRequest load_request;
 
@@ -331,6 +334,63 @@ class IpcHostSpy final : public Host {
   void set_ops_combined_sources(std::map<std::string, std::string> sources) {
     std::lock_guard<std::mutex> lock(mutex_);
     ops_combined_sources_ = std::move(sources);
+  }
+
+  /**
+   * @brief Configures the copied `scheduler.types` Host result.
+   * @param types Complete Host-returned scheduler type list.
+   * @return Nothing.
+   * @throws std::bad_alloc if copied type storage cannot allocate.
+   * @note Router tests may provide arbitrary order to verify stable sorting.
+   */
+  void set_scheduler_types(std::vector<std::string> types) {
+    std::lock_guard<std::mutex> lock(mutex_);
+    scheduler_types_ = std::move(types);
+  }
+
+  /**
+   * @brief Configures the copied `scheduler.description` Host result.
+   * @param description Complete description returned on success.
+   * @return Nothing.
+   * @throws std::bad_alloc if copied text storage cannot allocate.
+   */
+  void set_scheduler_description(std::string description) {
+    std::lock_guard<std::mutex> lock(mutex_);
+    scheduler_description_ = std::move(description);
+  }
+
+  /**
+   * @brief Configures the exact `scheduler.scan` loaded-type count.
+   * @param count Public Host count returned on success.
+   * @return Nothing.
+   * @throws Nothing.
+   */
+  void set_scheduler_scan_count(std::size_t count) noexcept {
+    std::lock_guard<std::mutex> lock(mutex_);
+    scheduler_scan_count_ = count;
+  }
+
+  /**
+   * @brief Configures the copied `scheduler.loaded_plugins` Host result.
+   * @param labels Complete Host-returned diagnostic label list.
+   * @return Nothing.
+   * @throws std::bad_alloc if copied label storage cannot allocate.
+   * @note Router tests may provide arbitrary order to verify stable sorting.
+   */
+  void set_scheduler_loaded_plugins(std::vector<std::string> labels) {
+    std::lock_guard<std::mutex> lock(mutex_);
+    scheduler_loaded_plugins_ = std::move(labels);
+  }
+
+  /**
+   * @brief Configures the copied `scheduler.info` Host result.
+   * @param info Complete public scheduler information snapshot.
+   * @return Nothing.
+   * @throws std::bad_alloc if copied text storage cannot allocate.
+   */
+  void set_scheduler_info(SchedulerInfoSnapshot info) {
+    std::lock_guard<std::mutex> lock(mutex_);
+    scheduler_info_ = std::move(info);
   }
 
   /**
@@ -864,7 +924,7 @@ class IpcHostSpy final : public Host {
   /** @copydoc Host::scheduler_available_types */
   Result<std::vector<std::string>> scheduler_available_types() const override {
     record(method_invocation("scheduler.types"));
-    return {status_for("scheduler.types"), {}};
+    return configured_result("scheduler.types", scheduler_types_);
   }
 
   /** @copydoc Host::scheduler_description */
@@ -873,15 +933,15 @@ class IpcHostSpy final : public Host {
     IpcHostInvocation invocation = method_invocation("scheduler.description");
     invocation.text = type_name;
     record(std::move(invocation));
-    return {status_for("scheduler.description"), {}};
+    return configured_result("scheduler.description", scheduler_description_);
   }
 
   /** @copydoc Host::scheduler_scan */
   Result<size_t> scheduler_scan(const std::vector<std::string>& dirs) override {
     IpcHostInvocation invocation = method_invocation("scheduler.scan");
-    invocation.text = dirs.empty() ? std::string{} : dirs.front();
+    invocation.texts = dirs;
     record(std::move(invocation));
-    return {status_for("scheduler.scan"), 0};
+    return configured_result("scheduler.scan", scheduler_scan_count_);
   }
 
   /** @copydoc Host::scheduler_load */
@@ -895,7 +955,8 @@ class IpcHostSpy final : public Host {
   /** @copydoc Host::scheduler_loaded_plugins */
   Result<std::vector<std::string>> scheduler_loaded_plugins() const override {
     record(method_invocation("scheduler.loaded_plugins"));
-    return {status_for("scheduler.loaded_plugins"), {}};
+    return configured_result("scheduler.loaded_plugins",
+                             scheduler_loaded_plugins_);
   }
 
   /** @copydoc Host::configure_scheduler_defaults */
@@ -904,7 +965,7 @@ class IpcHostSpy final : public Host {
     IpcHostInvocation invocation =
         method_invocation("scheduler.configure_defaults");
     invocation.text = config.hp_type + "\n" + config.rt_type;
-    invocation.first_node.value = static_cast<int>(config.worker_count);
+    invocation.worker_count = config.worker_count;
     record(std::move(invocation));
     return {status_for("scheduler.configure_defaults")};
   }
@@ -916,7 +977,7 @@ class IpcHostSpy final : public Host {
         session_invocation("scheduler.info", session);
     invocation.intent = intent;
     record(std::move(invocation));
-    return {status_for("scheduler.info"), SchedulerInfoSnapshot{}};
+    return configured_result("scheduler.info", scheduler_info_);
   }
 
   /** @copydoc Host::replace_scheduler */
@@ -1130,6 +1191,21 @@ class IpcHostSpy final : public Host {
 
   /** @brief Configured combined operation source map. */
   std::map<std::string, std::string> ops_combined_sources_;
+
+  /** @brief Configured scheduler type discovery list. */
+  std::vector<std::string> scheduler_types_;
+
+  /** @brief Configured scheduler description text. */
+  std::string scheduler_description_;
+
+  /** @brief Configured scheduler scan loaded-type count. */
+  std::size_t scheduler_scan_count_ = 0;
+
+  /** @brief Configured loaded scheduler-plugin labels. */
+  std::vector<std::string> scheduler_loaded_plugins_;
+
+  /** @brief Configured copied scheduler information value. */
+  SchedulerInfoSnapshot scheduler_info_;
 
   /** @brief Configured bounded compute-event drain result. */
   ComputeEventBatch compute_event_batch_;

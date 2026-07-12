@@ -530,6 +530,60 @@ Json encode_plugin_key(std::string_view key);
 Json encode_plugin_source_row(std::string_view key, std::string_view source);
 
 /**
+ * @brief Encodes one scheduler type name for discovery paging.
+ * @param type Complete copied public scheduler type.
+ * @return JSON string containing the exact type name.
+ * @throws std::bad_alloc if JSON string storage cannot allocate.
+ * @throws std::length_error if the type exceeds 1,024 UTF-8 bytes.
+ * @throws std::invalid_argument if the type is empty or invalid UTF-8.
+ * @note The router sorts and freezes the complete type list before invoking
+ *       this row encoder; no factory or scheduler ownership enters the value.
+ */
+Json encode_scheduler_type(std::string_view type);
+
+/**
+ * @brief Encodes one loaded scheduler-plugin diagnostic label.
+ * @param label Complete copied Host label.
+ * @return JSON string containing the exact label.
+ * @throws std::bad_alloc if JSON string storage cannot allocate.
+ * @throws std::length_error if the label exceeds 4,096 UTF-8 bytes.
+ * @throws std::invalid_argument if the label is empty or invalid UTF-8.
+ * @note Labels are copied diagnostics only; they are never interpreted as a
+ *       loader handle, registry key, or mutable ownership token.
+ */
+Json encode_scheduler_plugin_label(std::string_view label);
+
+/**
+ * @brief Encodes one scheduler type description result.
+ * @param type Exact validated request type passed to Host.
+ * @param description Complete copied Host description.
+ * @return Object containing `type` and `description`.
+ * @throws std::bad_alloc if validation or JSON storage cannot allocate.
+ * @throws std::length_error if type or description exceeds its wire bound.
+ * @throws std::invalid_argument if either value is invalid UTF-8 or the type
+ *         is empty.
+ * @note An empty description is a valid copied display value and does not
+ *       imply that the scheduler type is absent.
+ */
+Json encode_scheduler_description(std::string_view type,
+                                  std::string_view description);
+
+/**
+ * @brief Encodes one copied per-session scheduler information snapshot.
+ * @param session_id Opaque daemon session visible to the caller.
+ * @param snapshot Complete public Host scheduler value.
+ * @return Object containing session, intent, scheduler name, and statistics.
+ * @throws std::bad_alloc if validation or JSON storage cannot allocate.
+ * @throws std::length_error if scheduler name or statistics exceeds its bound.
+ * @throws std::invalid_argument if the opaque id, intent, or returned text is
+ *         malformed.
+ * @note The value contains no scheduler pointer, runtime, factory, loader, or
+ *       dynamic-library ownership. Statistics remain display-only text.
+ */
+Json encode_scheduler_info(const IpcSessionId& session_id,
+                           const SchedulerInfoSnapshot& snapshot);
+
+/**
  * @brief Encodes one bounded node-YAML result.
  *
  * @param session_id Opaque daemon session id visible to the caller.
