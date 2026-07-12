@@ -21,7 +21,7 @@ backend ownership. The client library does not link the `photospider` backend.
 When IPC is disabled, neither its target nor its public headers are installed.
 Forcing IPC on for any other CMake system name fails configuration.
 
-Version 1 implements exactly eight methods:
+`daemon.version.methods` reports this exact eight-name metadata subset:
 
 1. `daemon.ping`
 2. `daemon.version`
@@ -32,11 +32,38 @@ Version 1 implements exactly eight methods:
 7. `inspect.node`
 8. `inspect.dependency_tree`
 
-It does not implement compute, polling, cancellation, images, scheduler,
-plugins, events, dirty inspection, graph reload/save, `daemon.shutdown`, TCP,
-Windows named pipes, or `graph_cli --connect`. Those remain later work. The
-existing `graph_cli` continues to create an embedded Host and keeps its local
-command semantics.
+The request router also accepts these 21 Host-backed typed methods:
+
+1. `cache.cache_all_nodes`
+2. `cache.clear_all`
+3. `cache.clear_drive`
+4. `cache.clear_memory`
+5. `cache.free_transient`
+6. `cache.synchronize_disk`
+7. `compute.last_error`
+8. `compute.last_io_time`
+9. `compute.timing`
+10. `dirty.begin`
+11. `dirty.end`
+12. `dirty.update`
+13. `graph.clear`
+14. `graph.node_yaml.get`
+15. `graph.node_yaml.set`
+16. `graph.reload`
+17. `graph.save`
+18. `inspect.ending_nodes`
+19. `inspect.node_ids`
+20. `inspect.roi_backward`
+21. `inspect.roi_forward`
+
+The installed typed `ps::ipc::Client` exposes calls only for the eight-name
+metadata subset and has no public raw-JSON escape hatch. The 21 additional
+schemas are daemon request-router behavior.
+
+Version 1 exposes no compute-job submission/polling, cancellation, image
+result, scheduler/plugin/event route, `daemon.shutdown`, TCP, Windows named
+pipe, or `graph_cli --connect`. The existing `graph_cli` continues to create an
+embedded Host and keeps its local command semantics.
 
 ## Transport and Frame
 
@@ -252,8 +279,8 @@ object with no currently known members, ignores unknown members, and returns:
 
 `daemon.version` applies the same params rule and returns protocol version 1,
 service name `photospiderd`, the CMake project version, the same instance id,
-transport `unix`, and the sorted exact eight-method list. These metadata calls
-do not acquire the Host mutex.
+transport `unix`, and the sorted exact eight-name metadata subset listed under
+Products and Scope. These metadata calls do not acquire the Host mutex.
 
 ## Opaque Graph Sessions
 
@@ -298,13 +325,124 @@ mapping. Closing rows are omitted from `graph.list` results while remaining
 part of Host/registry invariant reconciliation. Disconnecting a client does
 not close sessions.
 
+## Host-Routed Graph State and Diagnostics
+
+Every method in this section validates all known parameters before resolving
+the opaque `session_id`. A malformed known field returns
+`protocol/-32602/invalid_params` without Host access. A well-formed unknown or
+closing session returns Graph `not_found`. Unknown object members are ignored.
+After admission, the daemon holds the common Host mutex for exactly one
+matching `ps::Host` call and releases it before response encoding. No mutation
+is automatically retried, including when the Host mutation completed but its
+copied result cannot be encoded.
+
+The following status-only methods return the unique success value `result:{}`:
+
+- `graph.reload` and `graph.save` require `session_id` plus a nonempty absolute
+  `yaml_path` of at most 4,096 UTF-8 bytes with no NUL;
+- `graph.clear` requires only `session_id` and preserves the active opaque
+  session mapping after clearing graph model state;
+- `graph.node_yaml.set` requires `session_id`, a nonnegative exact `int`
+  `node_id`, and string `yaml_text` of at most 8 MiB;
+- `cache.clear_all`, `cache.clear_drive`, `cache.clear_memory`, and
+  `cache.free_transient` require only `session_id`;
+- `cache.cache_all_nodes` and `cache.synchronize_disk` additionally require a
+  string `precision` of at most 1,024 UTF-8 bytes.
+
+Empty `yaml_text` and `precision` strings are valid protocol values. Their
+semantic validity belongs to the matching Host method, whose exact Graph
+failure is returned. A path is validated by the protocol because its absolute,
+nonempty, NUL-free shape is part of the wire schema.
+
+`graph.node_yaml.get` requires `session_id` and nonnegative exact `node_id`.
+Success returns:
+
+```json
+{
+  "session_id": "32-lowercase-hex",
+  "node_id": 7,
+  "yaml_text": "complete Host-returned YAML"
+}
+```
+
+The returned YAML must be valid UTF-8 and at most 8 MiB; it is never truncated.
+`inspect.node_ids` and `inspect.ending_nodes` require only `session_id` and
+return `{session_id,node_ids}` or `{session_id,ending_node_ids}` respectively.
+These are direct arrays of at most 4,096 nonnegative exact `int` values. Host
+order and duplicate ids are preserved; the router neither sorts, deduplicates,
+nor truncates them.
+
+`inspect.roi_forward` requires `start_node_id`, `start_roi`, and
+`target_node_id`. `inspect.roi_backward` requires `target_node_id`,
+`target_roi`, and `source_node_id`. Node ids are nonnegative exact `int` values;
+each ROI has exact `int` `x`, `y`, `width`, and `height` members. Non-positive
+width or height remains representable. Success returns `{session_id,roi}` and
+preserves the Host rectangle without swapping nodes or axes.
+
+`dirty.begin` and `dirty.update` require `session_id`, nonnegative exact
+`node_id`, `domain`, and `source_roi`; `dirty.end` requires the same fields
+except `source_roi`. `domain` is exactly `high_precision` or `real_time`.
+Success returns the copied dirty snapshot as:
+
+```text
+{
+  session_id, graph_generation,
+  sources: [{node_id, domain, lifecycle, generation, source_rois}],
+  dirty_tiles: [{node_id, domain, tile_x, tile_y, tile_size, pixel_roi}],
+  dirty_monolithic_nodes:
+      [{node_id, domain, pixel_roi, whole_output}],
+  actual_dirty_rois: [{node_id, rois}],
+  edge_mappings:
+      [{from_node_id, to_node_id, domain, from_roi, to_roi, direction}]
+}
+```
+
+Every top-level dirty array and every nested ROI array contains at most 4,096
+entries. Vector order is preserved; `actual_dirty_rois` follows ascending
+integer map-key order. Dirty lifecycle labels are `idle`, `updating`, and
+`settled`; edge directions are `forward_affected` and `backward_demand`.
+
+`compute.timing` requires only `session_id` and returns
+`{session_id,node_timings,total_ms}`. Each ordered timing row contains
+`node_id`, `name`, `elapsed_ms`, and `source`; at most 4,096 rows are returned.
+Names are at most 1,024 UTF-8 bytes and sources at most 8 MiB each.
+`compute.last_io_time` returns `{session_id,last_io_time_ms}`. Non-finite timing
+or IO doubles encode as JSON null.
+
+After the single Host call returns and the Host mutex is released, the timing
+and dirty codecs validate every component bound and then preflight one
+overflow-safe compact-byte budget for the complete success response before
+allocating result JSON arrays or objects. The budget includes the actual
+request and session ids, fixed envelope/schema bytes, exact JSON string
+escaping, exact integer decimal widths, and exact boolean/null widths. Finite
+timing doubles contribute a one-byte lower bound instead of a worst-case width.
+Every addition checks remaining capacity before arithmetic. A proven size over
+16 MiB throws `std::length_error`, which the router maps to correlated protocol
+`response_too_large`; an uncertain near-boundary value proceeds to the final
+serializer, so preflight cannot reject a response that would actually fit.
+
+`compute.last_error` returns `{session_id,status}` in a successful response.
+The nested value uses the canonical `OperationStatus` schema. An observed Host
+failure is diagnostic data for this method and is not converted into a
+top-level request failure; an unknown or closing session still fails at the
+top level before Host access.
+
+A failed Host result from every other method becomes the exact top-level Graph
+error. Returned YAML, rows, or collections above their byte/count limits
+become `response_too_large` after the single Host call. A negative returned
+node id, unknown returned enum, or invalid returned UTF-8 is a daemon
+`internal_error`. These failures publish no partial result and never cause a
+second Host invocation. Resource exhaustion remains exceptional and is not
+rewritten into a status.
+
 ## Private Compute Lifecycle
 
-The current eight-method wire inventory still exposes no compute method. The
-server nevertheless owns the private lifecycle boundary used by compute
-routing: one explicitly started, joinable `ComputeRequestRegistry` worker and
-one shared session-admission gate. This infrastructure is not a second public
-Host or wire API.
+The metadata method subset exposes no compute-job submit, status, result, or
+release method. The request router accepts only the timing, last-IO, and
+last-error compute diagnostics described above. The server also owns the
+private lifecycle boundary used by compute execution: one explicitly started,
+joinable `ComputeRequestRegistry` worker and one shared session-admission gate.
+This infrastructure is not a second public Host or wire API.
 
 Before a queue commit, submission admits the active session, enforces a global
 maximum of 64 queued/running records, validates and collision-checks a
@@ -335,11 +473,11 @@ method inventory.
 
 ## Private Protected Output Store
 
-The current eight-method wire inventory exposes no image result or delivery
-operation. Behind the router, one private `OutputStore` is nevertheless bound
-to the joined compute publisher and socket lifecycle. It starts after the Unix
-socket and persistent lifecycle lock are owned but before session, compute, or
-client admission. A startup failure therefore admits no request.
+The wire surface exposes no image result or delivery operation. Behind the
+router, one private `OutputStore` is bound to the joined compute publisher and
+socket lifecycle. It starts after the Unix socket and persistent lifecycle
+lock are owned but before session, compute, or client admission. A startup
+failure therefore admits no request.
 
 A canonical empty CPU image publishes no artifact. A nonempty result must be a
 valid CPU `ImageBuffer` with a defined data type, positive dimensions and
@@ -409,9 +547,9 @@ source are injectable for deterministic filesystem and race tests.
 ## Private Stable Collection Snapshots
 
 The router owns a private type-erased `CollectionSnapshotRegistry` and starts,
-stops, and clears it with daemon runtime lifecycle. The current eight-method
-wire inventory advertises no collection cursor page or cursor-release method.
-The three routed inspection methods keep their direct result shapes and do not
+stops, and clears it with daemon runtime lifecycle. The wire surface advertises
+no collection cursor page or cursor-release method. Routed graph/node/tree
+inspection and node-list methods keep their direct result shapes and do not
 reserve, publish, or page registry records. Public Host collection APIs remain
 full-value APIs; the registry adds no Host page API, public ABI type, or JSON
 response envelope.
@@ -475,11 +613,11 @@ The typed client range-checks every node id, tree depth, edge input index,
 debug timestamp/duration, worker id, and spatial extent/rectangle component
 before publishing graph, node, or dependency-tree snapshots. Signed/unsigned
 overflow is a local Protocol result-shape failure; it is never narrowed.
-The three routed inspection methods return their existing direct result shapes
-and do not use the private collection snapshot registry or collection cursors.
-The same reusable enum, `PixelRect`, bounded-string, array, page, opaque-id,
-and nested-status codecs apply recursively to composite values. A failed decode
-leaves the caller-visible destination unpublished.
+These routed inspection methods and node-list/ROI methods return direct result
+shapes and do not use the private collection snapshot registry or collection
+cursors. The same reusable enum, `PixelRect`, bounded-string, array, page,
+opaque-id, and nested-status codecs apply recursively to composite values. A
+failed decode leaves the caller-visible destination unpublished.
 
 No backend class, address, pointer, cache handle, service object, closure, or
 mutable reference enters a payload.

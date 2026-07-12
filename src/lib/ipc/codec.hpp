@@ -89,12 +89,13 @@ inline constexpr std::size_t kLargeTextMaxBytes = 8U * 1024U * 1024U;
 inline constexpr std::size_t kPathArrayMaxEntries = 256;
 
 /**
- * @brief Exact sorted method inventory implemented by the current v1 slice.
+ * @brief Exact sorted method subset advertised by current version 1 metadata.
  *
  * @throws Nothing; this is immutable compile-time metadata.
- * @note The table lists only implemented routes. Adding or removing a route
- *       requires one atomic update to router dispatch, typed client behavior,
- *       this inventory, and the version contract tests.
+ * @note `daemon.version` and the installed typed Client use this exact subset.
+ *       The request router additionally accepts the documented Host-backed
+ *       graph-state and diagnostic schemas without a public raw-JSON client
+ *       escape hatch.
  */
 inline constexpr std::array<std::string_view, 8> kVersionOneMethodNames = {
     "daemon.ping",   "daemon.version", "graph.close",
@@ -466,6 +467,100 @@ Json encode_pixel_rect(const PixelRect& rect);
 bool decode_pixel_rect(const Json& value, PixelRect* rect) noexcept;
 
 /**
+ * @brief Encodes one direct bounded page of public node identifiers.
+ *
+ * @param nodes Complete Host-returned node-id value for the current direct
+ *        result shape.
+ * @return JSON array preserving Host order and exact nonnegative ids.
+ * @throws std::bad_alloc if JSON storage cannot be allocated.
+ * @throws std::length_error if the direct page exceeds
+ *         `kGeneralPageMaxEntries`.
+ * @throws std::invalid_argument if any Host-returned node id is negative.
+ * @note This direct encoder neither publishes nor consumes a stable
+ *       collection cursor. Its 4,096-entry integer-only bound is structurally
+ *       below the frame limit, so it cannot create an aggregate JSON peak.
+ */
+Json encode_node_ids(const std::vector<NodeId>& nodes);
+
+/**
+ * @brief Encodes one bounded node-YAML result.
+ *
+ * @param session_id Opaque daemon session id visible to the caller.
+ * @param node Exact nonnegative node id supplied to Host.
+ * @param yaml_text Complete YAML text returned by Host.
+ * @return Object containing `session_id`, `node_id`, and `yaml_text`.
+ * @throws std::bad_alloc if validation diagnostics or JSON storage cannot be
+ *         allocated.
+ * @throws std::length_error if YAML exceeds `kLargeTextMaxBytes`.
+ * @throws std::invalid_argument if the opaque id, node id, or UTF-8 text is
+ *         malformed.
+ * @note YAML is rejected whole rather than truncated or repaired.
+ *       One raw string is capped at 8 MiB; any escape expansion that exceeds
+ *       the frame is mapped by final response serialization rather than by an
+ *       unbounded multi-value aggregate.
+ */
+Json encode_node_yaml(const IpcSessionId& session_id, NodeId node,
+                      const std::string& yaml_text);
+
+/**
+ * @brief Encodes one copied Host timing snapshot.
+ *
+ * @param request_id Valid nonempty correlated id for response-size preflight.
+ * @param session_id Opaque daemon session id visible to the caller.
+ * @param timing Complete timing value returned by Host.
+ * @return Object containing `session_id`, ordered `node_timings`, and
+ *         `total_ms`.
+ * @throws std::bad_alloc if validation diagnostics or JSON storage cannot be
+ *         allocated.
+ * @throws std::length_error if rows/strings exceed their version 1 bounds or
+ *         an overflow-safe serialized-size lower bound proves that the actual
+ *         success frame cannot fit in 16 MiB.
+ * @throws std::invalid_argument if the request id, opaque id, a node id, or
+ *         UTF-8 text is malformed.
+ * @note Before result JSON allocation, fixed schema, actual request/session
+ *       ids, exact string escaping, and exact integer sizes are aggregated.
+ *       Finite doubles use a one-byte lower bound so a potentially encodable
+ *       near-limit value is never rejected by preflight. Non-finite values
+ *       encode as JSON null without changing row order.
+ */
+Json encode_timing(std::string_view request_id, const IpcSessionId& session_id,
+                   const TimingSnapshot& timing);
+
+/**
+ * @brief Encodes one copied dirty-region snapshot.
+ *
+ * @param request_id Valid nonempty correlated id for response-size preflight.
+ * @param session_id Opaque daemon session id visible to the caller.
+ * @param snapshot Complete public Host snapshot.
+ * @return Object containing the opaque session plus all copied dirty fields.
+ * @throws std::bad_alloc if validation diagnostics or JSON storage cannot be
+ *         allocated.
+ * @throws std::length_error if any direct collection exceeds its current page
+ *         bound or exact overflow-safe aggregate response size exceeds 16 MiB.
+ * @throws std::invalid_argument if the request id, opaque id, node id, or
+ *         public enum is malformed.
+ * @note Every top-level and nested ROI collection is measured in one exact
+ *       compact serialized-size budget before result arrays are allocated.
+ *       `actual_dirty_rois` is encoded as ordered `{node_id, rois}` rows so
+ *       integer node identity never depends on JSON object-key parsing.
+ */
+Json encode_dirty_region(std::string_view request_id,
+                         const IpcSessionId& session_id,
+                         const DirtyRegionInspectionSnapshot& snapshot);
+
+/**
+ * @brief Encodes one copied last-IO diagnostic value.
+ *
+ * @param session_id Opaque daemon session id visible to the caller.
+ * @param milliseconds Host-returned last IO duration in milliseconds.
+ * @return Object containing `session_id` and `last_io_time_ms`.
+ * @throws std::bad_alloc if JSON storage cannot be allocated.
+ * @throws std::invalid_argument if the opaque id is malformed.
+ * @note A non-finite public diagnostic encodes as JSON null.
+ */
+Json encode_last_io_time(const IpcSessionId& session_id, double milliseconds);
+
+/**
  * @brief Encodes one compute intent as its stable lowercase label.
  * @param value Public enum value.
  * @param output Receives the label only for a recognized enum value.
@@ -748,7 +843,9 @@ bool decode_error(const Json& value, OperationStatus* status,
  *         the version 1 remote error schema.
  * @note Success is canonicalized to none/zero/empty fields. Recognized failure
  *       codes are encoded with their stable name; unknown future pairs are
- *       preserved without interpreting diagnostic text.
+ *       preserved without interpreting diagnostic text. The 1,024-byte name
+ *       and 4,096-byte bounded diagnostic limits keep this indivisible value
+ *       structurally below the frame without an aggregate preflight.
  */
 Json encode_operation_status(const OperationStatus& status);
 

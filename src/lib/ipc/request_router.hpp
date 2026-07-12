@@ -1,6 +1,7 @@
 #pragma once
 
 #include <mutex>
+#include <optional>
 #include <string>
 
 #include "ipc/collection_snapshot_registry.hpp"
@@ -12,7 +13,7 @@
 namespace ps::ipc::internal {
 
 /**
- * @brief Routes the eight version 1 methods through one daemon-owned Host.
+ * @brief Routes version 1 requests through one daemon-owned Host.
  *
  * Envelope/parameter validation and immutable daemon metadata do not acquire
  * the Host mutex. Every actual Host method call is serialized through the one
@@ -38,8 +39,8 @@ class RequestRouter {
    * @throws std::bad_alloc if metadata allocation fails.
    * @throws std::runtime_error if instance-id entropy fails.
    * @note Collection snapshot registry, OutputStore, and compute registry are
-   *       constructed stopped; the current wire inventory remains the exact
-   *       eight names defined by protocol v1.
+   *       constructed stopped. Capability advertisement remains owned by the
+   *       exact table in the private protocol codec.
    */
   RequestRouter(Host& host, std::string service_version);
 
@@ -73,10 +74,10 @@ class RequestRouter {
    *       compensating Host close, including when Host load or registry
    *       publication throws. Session-scoped calls retain a counted admission;
    *       `graph.close` marks Closing and waits admissions before Host locking.
-   *       The `graph.list` and inspection result codecs locally map
-   *       `std::length_error` to `response_too_large`; malformed returned
-   *       values and other standard request failures become daemon
-   *       `internal_error`.
+   *       Direct graph-list, node-list, YAML, timing, dirty, and inspection
+   *       result codecs locally map `std::length_error` to
+   *       `response_too_large`; malformed returned values and other standard
+   *       request failures become daemon `internal_error`.
    *       Resource exhaustion is rethrown. The function performs no socket IO.
    */
   std::string route(const std::string& payload);
@@ -127,6 +128,43 @@ class RequestRouter {
   const std::string& server_instance_id() const noexcept;
 
  private:
+  /**
+   * @brief Opaque cpp-owned adapter over one borrowed parsed params object.
+   *
+   * @throws Nothing for declaration and reference binding.
+   * @note The complete type remains in `request_router.cpp` so this private
+   *       server header does not expose or require the JSON implementation.
+   *       Its borrowed value never outlives the active `route()` call.
+   */
+  struct RoutedParams;
+
+  /**
+   * @brief Routes one graph-state control or diagnostic Host method.
+   *
+   * @param id Valid request id correlated with the response.
+   * @param method Exact version 1 method name.
+   * @param routed_params Cpp-only adapter borrowing the structurally valid
+   *        params object whose known fields have not yet been method-validated.
+   * @return Complete response payload when `method` belongs to this family, or
+   *         `std::nullopt` when another router family must handle it.
+   * @throws std::bad_alloc if validation, Host result copying, or response
+   *         construction cannot allocate.
+   * @throws std::invalid_argument if a successful Host returns a malformed
+   *         public value that cannot be represented on version 1.
+   * @throws Whatever the matching Host method propagates; `route()` preserves
+   *         resource exhaustion and maps other standard exceptions to daemon
+   *         `internal_error`.
+   * @note Every known parameter is validated before session resolution. Each
+   *       handled call obtains one session admission, invokes exactly one
+   *       matching Host method under `host_mutex_`, and never retries a
+   *       mutation. Host-returned status failures become top-level errors,
+   *       except `compute.last_error`, whose observed status is nested data in
+   *       a successful envelope.
+   */
+  std::optional<std::string> route_session_control_method(
+      const std::string& id, const std::string& method,
+      const RoutedParams& routed_params);
+
   /** @brief Sole daemon Host borrowed from `photospiderd`. */
   Host& host_;
 

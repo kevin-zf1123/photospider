@@ -101,6 +101,7 @@ feedback/
 !tests/
 !tests/**/
 !tests/**/*.cpp
+!tests/**/*.hpp
 !tests/**/*.py
 tests/results/
 

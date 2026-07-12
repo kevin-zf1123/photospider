@@ -8,7 +8,9 @@
 #include <algorithm>
 #include <array>
 #include <cerrno>
+#include <chrono>
 #include <cmath>
+#include <condition_variable>
 #include <cstddef>
 #include <cstdint>
 #include <cstdlib>
@@ -18,6 +20,7 @@
 #include <functional>
 #include <limits>
 #include <memory>
+#include <mutex>
 #include <optional>
 #include <stdexcept>
 #include <string>
@@ -34,6 +37,7 @@
 #include "photospider/host/host.hpp"
 #include "photospider/ipc/client.hpp"
 #include "scheduler/scheduler_plugin_loader.hpp"  // NOLINT(build/include_subdir)
+#include "support/ipc_host_spy.hpp"
 
 #ifndef PS_TEST_SCHEDULER_PLUGIN_PATH
 #define PS_TEST_SCHEDULER_PLUGIN_PATH \
@@ -441,6 +445,1420 @@ Json parse_response(const std::string& payload) {
     throw std::runtime_error(parsed.message);
   }
   return std::move(parsed.value);
+}
+
+/**
+ * @brief Returns the exact JSON representation of one public pixel rectangle.
+ *
+ * @param rect Rectangle to copy.
+ * @return Object with signed x, y, width, and height fields.
+ * @throws std::bad_alloc if JSON storage cannot allocate.
+ * @note This expectation helper is intentionally independent of the production
+ *       `encode_pixel_rect()` implementation.
+ */
+Json expected_rect(const PixelRect& rect) {
+  return Json{{"x", rect.x},
+              {"y", rect.y},
+              {"width", rect.width},
+              {"height", rect.height}};
+}
+
+/**
+ * @brief Builds one nontrivial dirty-region value for router schema tests.
+ *
+ * @return Snapshot containing every nested dirty collection and public enum.
+ * @throws std::bad_alloc if copied strings or containers cannot allocate.
+ */
+DirtyRegionInspectionSnapshot make_protocol_dirty_snapshot() {
+  DirtyRegionInspectionSnapshot snapshot;
+  snapshot.graph_generation = 91;
+  snapshot.sources.push_back(
+      DirtySourceSnapshot{NodeId{7},
+                          DirtyDomain::RealTime,
+                          DirtySourceLifecycleState::Updating,
+                          13,
+                          {PixelRect{1, 2, 3, 4}}});
+  snapshot.dirty_tiles.push_back(
+      DirtyTileSnapshot{NodeId{8}, DirtyDomain::HighPrecision, -2, 5, 64,
+                        PixelRect{-10, 20, 30, 40}});
+  snapshot.dirty_monolithic_nodes.push_back(DirtyMonolithicRegionSnapshot{
+      NodeId{9}, DirtyDomain::RealTime, PixelRect{6, 7, 8, 9}, false});
+  snapshot.actual_dirty_rois.emplace(
+      10, std::vector<PixelRect>{PixelRect{11, 12, 13, 14}});
+  snapshot.edge_mappings.push_back(DirtyEdgeMappingSnapshot{
+      NodeId{7}, NodeId{8}, DirtyDomain::RealTime, PixelRect{1, 1, 2, 2},
+      PixelRect{3, 3, 4, 4}, DirtyEdgeDirection::ForwardAffected});
+  return snapshot;
+}
+
+/**
+ * @brief Builds the independent expected JSON for the dirty snapshot fixture.
+ *
+ * @param session_id Opaque daemon session returned by graph load.
+ * @return Exact dirty-region result object.
+ * @throws std::bad_alloc if JSON storage cannot allocate.
+ */
+Json expected_protocol_dirty_snapshot(const std::string& session_id) {
+  return Json{
+      {"session_id", session_id},
+      {"graph_generation", 91},
+      {"sources", Json::array({Json{
+                      {"node_id", 7},
+                      {"domain", "real_time"},
+                      {"lifecycle", "updating"},
+                      {"generation", 13},
+                      {"source_rois",
+                       Json::array({expected_rect(PixelRect{1, 2, 3, 4})})}}})},
+      {"dirty_tiles",
+       Json::array(
+           {Json{{"node_id", 8},
+                 {"domain", "high_precision"},
+                 {"tile_x", -2},
+                 {"tile_y", 5},
+                 {"tile_size", 64},
+                 {"pixel_roi", expected_rect(PixelRect{-10, 20, 30, 40})}}})},
+      {"dirty_monolithic_nodes",
+       Json::array({Json{{"node_id", 9},
+                         {"domain", "real_time"},
+                         {"pixel_roi", expected_rect(PixelRect{6, 7, 8, 9})},
+                         {"whole_output", false}}})},
+      {"actual_dirty_rois",
+       Json::array({Json{{"node_id", 10},
+                         {"rois", Json::array({expected_rect(
+                                      PixelRect{11, 12, 13, 14})})}}})},
+      {"edge_mappings",
+       Json::array({Json{{"from_node_id", 7},
+                         {"to_node_id", 8},
+                         {"domain", "real_time"},
+                         {"from_roi", expected_rect(PixelRect{1, 1, 2, 2})},
+                         {"to_roi", expected_rect(PixelRect{3, 3, 4, 4})},
+                         {"direction", "forward_affected"}}})}};
+}
+
+/**
+ * @brief Returns valid params for one Host-routed session-control method.
+ *
+ * @param method Exact one of the 21 Host-routed session-control method names.
+ * @param session_id Valid opaque daemon session id.
+ * @return Complete params object with deterministic nontrivial values.
+ * @throws std::bad_alloc if JSON or string construction cannot allocate.
+ * @throws std::invalid_argument if `method` is outside the supported family.
+ */
+Json valid_host_routed_params(std::string_view method,
+                              const std::string& session_id) {
+  Json params{{"session_id", session_id}};
+  if (method == "graph.reload" || method == "graph.save") {
+    params["yaml_path"] = "/tmp/host-routed-graph.yaml";
+  } else if (method == "graph.node_yaml.get") {
+    params["node_id"] = 17;
+  } else if (method == "graph.node_yaml.set") {
+    params["node_id"] = 18;
+    params["yaml_text"] = "id: 18\nname: host_routed\n";
+  } else if (method == "cache.cache_all_nodes" ||
+             method == "cache.synchronize_disk") {
+    params["precision"] = "float32";
+  } else if (method == "dirty.begin" || method == "dirty.update") {
+    params["node_id"] = 19;
+    params["domain"] = "real_time";
+    params["source_roi"] = expected_rect(PixelRect{-1, 2, 3, 4});
+  } else if (method == "dirty.end") {
+    params["node_id"] = 20;
+    params["domain"] = "high_precision";
+  } else if (method == "inspect.roi_forward") {
+    params["start_node_id"] = 21;
+    params["target_node_id"] = 22;
+    params["start_roi"] = expected_rect(PixelRect{5, 6, 7, 8});
+  } else if (method == "inspect.roi_backward") {
+    params["target_node_id"] = 23;
+    params["source_node_id"] = 24;
+    params["target_roi"] = expected_rect(PixelRect{9, 10, 11, 12});
+  } else {
+    static constexpr std::array<std::string_view, 9> kSessionOnlyMethods = {
+        "cache.clear_all",      "cache.clear_drive",  "cache.clear_memory",
+        "cache.free_transient", "compute.last_error", "compute.last_io_time",
+        "compute.timing",       "graph.clear",        "inspect.ending_nodes"};
+    const bool session_only =
+        method == "inspect.node_ids" ||
+        std::find(kSessionOnlyMethods.begin(), kSessionOnlyMethods.end(),
+                  method) != kSessionOnlyMethods.end();
+    if (!session_only) {
+      throw std::invalid_argument("unknown Host-routed session-control method");
+    }
+  }
+  return params;
+}
+
+/**
+ * @brief Creates one exact Graph-domain failure used by no-retry tests.
+ *
+ * @return Graph IO status with deliberately noncanonical input name so router
+ *         canonicalization is observable.
+ * @throws std::bad_alloc if diagnostic storage cannot allocate.
+ */
+OperationStatus host_routed_graph_failure() {
+  return OperationStatus{false, OperationErrorDomain::Graph,
+                         static_cast<std::int32_t>(GraphErrc::Io), "ignored",
+                         "host-routed Host failure"};
+}
+
+/**
+ * @brief Failure-safe owner that opens one condition-variable test gate.
+ *
+ * @throws Nothing.
+ * @note Construct this guard after every future that could otherwise wait on
+ *       the gate. Reverse destruction then opens the gate before any future
+ *       destructor can join its asynchronous operation.
+ */
+class ScopedProtocolGateRelease final {
+ public:
+  /**
+   * @brief Borrows one mutex, condition variable, and release flag.
+   * @param mutex Mutex protecting `released`.
+   * @param changed Condition variable observed by the blocked Host hook.
+   * @param released Flag that opens the test gate when true.
+   * @throws Nothing.
+   * @note The borrowed mutex, condition variable, and flag must outlive this
+   *       guard.
+   */
+  ScopedProtocolGateRelease(std::mutex& mutex, std::condition_variable& changed,
+                            bool& released) noexcept
+      : mutex_(mutex), changed_(changed), released_(released) {}
+
+  /**
+   * @brief Opens the gate before dependent futures are destroyed.
+   * @throws Nothing.
+   * @note The guard must not be destroyed while its thread already owns the
+   *       borrowed mutex, because release deliberately acquires that mutex.
+   */
+  ~ScopedProtocolGateRelease() noexcept { release(); }
+
+  /**
+   * @brief Prevents duplicate release ownership.
+   * @param other Guard that retains release responsibility.
+   * @throws Nothing because construction is unavailable.
+   */
+  ScopedProtocolGateRelease(const ScopedProtocolGateRelease& other) = delete;
+
+  /**
+   * @brief Prevents replacing one active release owner.
+   * @param other Guard that retains release responsibility.
+   * @return No value because assignment is unavailable.
+   * @throws Nothing because assignment is unavailable.
+   */
+  ScopedProtocolGateRelease& operator=(const ScopedProtocolGateRelease& other) =
+      delete;
+
+  /**
+   * @brief Idempotently opens the borrowed gate and wakes every waiter.
+   * @return Nothing.
+   * @throws Nothing.
+   * @note The caller must not already own the borrowed mutex.
+   */
+  void release() noexcept {
+    {
+      std::lock_guard<std::mutex> lock(mutex_);
+      released_ = true;
+    }
+    changed_.notify_all();
+  }
+
+ private:
+  /** @brief Mutex protecting the borrowed release flag. */
+  std::mutex& mutex_;
+
+  /** @brief Condition variable used to wake the blocked Host hook. */
+  std::condition_variable& changed_;
+
+  /** @brief Borrowed flag controlling the Host hook gate. */
+  bool& released_;
+};
+
+/**
+ * @brief Fixture owning one loaded spy-backed router session.
+ *
+ * @throws std::bad_alloc or std::runtime_error if router setup cannot allocate
+ *         metadata or generate its opaque ids.
+ * @note `SetUp()` routes the real `graph.load` protocol path, captures its
+ *       daemon id, and then clears load bookkeeping from the spy.
+ */
+class HostRoutedGraphStateProtocolTest : public ::testing::Test {
+ protected:
+  /**
+   * @brief Loads one deterministic private Host session through the router.
+   * @return Nothing.
+   * @throws std::bad_alloc if request, response, registry, or spy storage
+   *         cannot allocate.
+   * @throws std::runtime_error if response parsing unexpectedly fails.
+   * @note The real `graph.load` path creates the opaque mapping. Load
+   *       bookkeeping is cleared before each test body so call counts describe
+   *       only the Host-routed graph-state method under test.
+   */
+  void SetUp() override {
+    const Json loaded = route(
+        "graph.load",
+        Json{{"session_name", "host_routed_session"}, {"root_dir", "/tmp"}});
+    ASSERT_TRUE(loaded.contains("result")) << loaded.dump();
+    ASSERT_TRUE(loaded["result"].value("session_id", Json()).is_string());
+    session_id_ = loaded["result"]["session_id"].get<std::string>();
+    ASSERT_TRUE(valid_opaque_id(session_id_));
+    host_.reset_invocations();
+  }
+
+  /**
+   * @brief Routes one typed request through the real request envelope.
+   * @param method Exact wire method.
+   * @param params Complete params object.
+   * @return Parsed correlated response object.
+   * @throws std::bad_alloc or std::runtime_error on unexpected construction or
+   *         parse failure.
+   */
+  Json route(const std::string& method, Json params) {
+    return parse_response(router_.route(Json{
+        {"protocol_version", kProtocolVersion},
+        {"id", method},
+        {"method", method},
+        {"params", std::move(params)}}.dump()));
+  }
+
+  /** @brief Complete configurable Host test double. */
+  ::ps::testing::IpcHostSpy host_;
+
+  /** @brief Router under test, borrowing `host_`. */
+  RequestRouter router_{host_, "host-routed-test"};
+
+  /** @brief Opaque daemon id mapped to the spy's private Host session. */
+  std::string session_id_;
+};
+
+TEST_F(HostRoutedGraphStateProtocolTest,
+       RoutesTenVoidMutatorsOnceWithExactHostSessionAndArguments) {
+  static constexpr std::array<std::string_view, 10> kMethods = {
+      "graph.reload",         "graph.save",
+      "graph.clear",          "graph.node_yaml.set",
+      "cache.clear_all",      "cache.clear_drive",
+      "cache.clear_memory",   "cache.cache_all_nodes",
+      "cache.free_transient", "cache.synchronize_disk",
+  };
+
+  for (std::string_view method : kMethods) {
+    host_.reset_invocations();
+    const Json params = valid_host_routed_params(method, session_id_);
+    const Json response = route(std::string(method), params);
+    ASSERT_TRUE(response.contains("result")) << method << response.dump();
+    EXPECT_EQ(response["result"], Json::object()) << method;
+
+    const std::vector<::ps::testing::IpcHostInvocation> calls =
+        host_.invocations();
+    ASSERT_EQ(calls.size(), 1u) << method;
+    EXPECT_EQ(calls.front().method, method);
+    EXPECT_EQ(calls.front().session.value, "ipc-host-spy-session");
+    if (method == "graph.reload" || method == "graph.save") {
+      EXPECT_EQ(calls.front().text, "/tmp/host-routed-graph.yaml");
+    } else if (method == "graph.node_yaml.set") {
+      EXPECT_EQ(calls.front().first_node.value, 18);
+      EXPECT_EQ(calls.front().text, "id: 18\nname: host_routed\n");
+    } else if (method == "cache.cache_all_nodes" ||
+               method == "cache.synchronize_disk") {
+      EXPECT_EQ(calls.front().text, "float32");
+    }
+  }
+}
+
+TEST_F(HostRoutedGraphStateProtocolTest,
+       RoutesThreeDirtyMutatorsOnceAndPreservesNestedResultAndArguments) {
+  host_.set_dirty_region(make_protocol_dirty_snapshot());
+  static constexpr std::array<std::string_view, 3> kMethods = {
+      "dirty.begin", "dirty.update", "dirty.end"};
+
+  for (std::string_view method : kMethods) {
+    host_.reset_invocations();
+    const Json response = route(std::string(method),
+                                valid_host_routed_params(method, session_id_));
+    ASSERT_TRUE(response.contains("result")) << method << response.dump();
+    EXPECT_EQ(response["result"],
+              expected_protocol_dirty_snapshot(session_id_));
+
+    const std::vector<::ps::testing::IpcHostInvocation> calls =
+        host_.invocations();
+    ASSERT_EQ(calls.size(), 1u) << method;
+    EXPECT_EQ(calls.front().method, method);
+    EXPECT_EQ(calls.front().session.value, "ipc-host-spy-session");
+    if (method == "dirty.end") {
+      EXPECT_EQ(calls.front().first_node.value, 20);
+      EXPECT_EQ(calls.front().dirty_domain, DirtyDomain::HighPrecision);
+      EXPECT_EQ(calls.front().roi.x, 0);
+      EXPECT_EQ(calls.front().roi.y, 0);
+      EXPECT_EQ(calls.front().roi.width, 0);
+      EXPECT_EQ(calls.front().roi.height, 0);
+    } else {
+      EXPECT_EQ(calls.front().first_node.value, 19);
+      EXPECT_EQ(calls.front().dirty_domain, DirtyDomain::RealTime);
+      EXPECT_EQ(calls.front().roi.x, -1);
+      EXPECT_EQ(calls.front().roi.y, 2);
+      EXPECT_EQ(calls.front().roi.width, 3);
+      EXPECT_EQ(calls.front().roi.height, 4);
+    }
+  }
+}
+
+TEST_F(HostRoutedGraphStateProtocolTest,
+       RoutesEightQueriesOnceWithExactArgumentsAndResultSchemas) {
+  host_.set_node_yaml("id: 17\nname: copied\n");
+  host_.set_node_ids({NodeId{4}, NodeId{2}, NodeId{4}});
+  host_.set_ending_nodes({NodeId{9}});
+  host_.set_forward_roi(PixelRect{-7, 8, 9, 10});
+  host_.set_backward_roi(PixelRect{11, -12, 13, 14});
+  TimingSnapshot timing;
+  timing.node_timings = {NodeTimingSnapshot{NodeId{3}, "first", 1.25, "cpu"},
+                         NodeTimingSnapshot{NodeId{5}, "second", 2.5, "cache"}};
+  timing.total_ms = 3.75;
+  host_.set_timing(timing);
+  host_.set_last_io_time(17.5);
+  host_.set_last_error(
+      OperationStatus{false, OperationErrorDomain::Graph,
+                      static_cast<std::int32_t>(GraphErrc::ComputeError),
+                      "ignored", "copied diagnostic"});
+
+  /**
+   * @brief One exact query route and independently constructed result shape.
+   * @throws std::bad_alloc when owned JSON construction cannot allocate.
+   * @note Values are immutable after the test matrix is assembled.
+   */
+  struct QueryExpectation {
+    /** @brief Exact wire method. */
+    std::string_view method;
+    /** @brief Exact result object expected from the router. */
+    Json result;
+  };
+  const std::vector<QueryExpectation> cases = {
+      {"graph.node_yaml.get", Json{{"session_id", session_id_},
+                                   {"node_id", 17},
+                                   {"yaml_text", "id: 17\nname: copied\n"}}},
+      {"inspect.node_ids",
+       Json{{"session_id", session_id_}, {"node_ids", Json::array({4, 2, 4})}}},
+      {"inspect.ending_nodes", Json{{"session_id", session_id_},
+                                    {"ending_node_ids", Json::array({9})}}},
+      {"inspect.roi_forward",
+       Json{{"session_id", session_id_},
+            {"roi", expected_rect(PixelRect{-7, 8, 9, 10})}}},
+      {"inspect.roi_backward",
+       Json{{"session_id", session_id_},
+            {"roi", expected_rect(PixelRect{11, -12, 13, 14})}}},
+      {"compute.timing",
+       Json{{"session_id", session_id_},
+            {"node_timings", Json::array({Json{{"node_id", 3},
+                                               {"name", "first"},
+                                               {"elapsed_ms", 1.25},
+                                               {"source", "cpu"}},
+                                          Json{{"node_id", 5},
+                                               {"name", "second"},
+                                               {"elapsed_ms", 2.5},
+                                               {"source", "cache"}}})},
+            {"total_ms", 3.75}}},
+      {"compute.last_io_time",
+       Json{{"session_id", session_id_}, {"last_io_time_ms", 17.5}}},
+      {"compute.last_error",
+       Json{{"session_id", session_id_},
+            {"status",
+             Json{{"ok", false},
+                  {"domain", "graph"},
+                  {"code", static_cast<std::int32_t>(GraphErrc::ComputeError)},
+                  {"name", "compute_error"},
+                  {"message", "copied diagnostic"}}}}},
+  };
+
+  for (const QueryExpectation& test_case : cases) {
+    host_.reset_invocations();
+    const Json response =
+        route(std::string(test_case.method),
+              valid_host_routed_params(test_case.method, session_id_));
+    ASSERT_TRUE(response.contains("result"))
+        << test_case.method << response.dump();
+    EXPECT_EQ(response["result"], test_case.result) << test_case.method;
+
+    const std::vector<::ps::testing::IpcHostInvocation> calls =
+        host_.invocations();
+    ASSERT_EQ(calls.size(), 1u) << test_case.method;
+    EXPECT_EQ(calls.front().method, test_case.method);
+    EXPECT_EQ(calls.front().session.value, "ipc-host-spy-session");
+    if (test_case.method == "graph.node_yaml.get") {
+      EXPECT_EQ(calls.front().first_node.value, 17);
+    } else if (test_case.method == "inspect.roi_forward") {
+      EXPECT_EQ(calls.front().first_node.value, 21);
+      EXPECT_EQ(calls.front().second_node.value, 22);
+      EXPECT_EQ(calls.front().roi.x, 5);
+      EXPECT_EQ(calls.front().roi.y, 6);
+      EXPECT_EQ(calls.front().roi.width, 7);
+      EXPECT_EQ(calls.front().roi.height, 8);
+    } else if (test_case.method == "inspect.roi_backward") {
+      EXPECT_EQ(calls.front().first_node.value, 23);
+      EXPECT_EQ(calls.front().second_node.value, 24);
+      EXPECT_EQ(calls.front().roi.x, 9);
+      EXPECT_EQ(calls.front().roi.y, 10);
+      EXPECT_EQ(calls.front().roi.width, 11);
+      EXPECT_EQ(calls.front().roi.height, 12);
+    }
+  }
+}
+
+TEST_F(HostRoutedGraphStateProtocolTest,
+       EveryMutatorPropagatesOneGraphFailureWithoutRetry) {
+  static constexpr std::array<std::string_view, 13> kMutators = {
+      "graph.reload",
+      "graph.save",
+      "graph.clear",
+      "graph.node_yaml.set",
+      "cache.clear_all",
+      "cache.clear_drive",
+      "cache.clear_memory",
+      "cache.cache_all_nodes",
+      "cache.free_transient",
+      "cache.synchronize_disk",
+      "dirty.begin",
+      "dirty.update",
+      "dirty.end",
+  };
+
+  for (std::string_view method : kMutators) {
+    host_.set_status(std::string(method), host_routed_graph_failure());
+    host_.reset_invocations();
+    const Json response = route(std::string(method),
+                                valid_host_routed_params(method, session_id_));
+    ASSERT_TRUE(response.contains("error")) << method << response.dump();
+    EXPECT_EQ(response["error"]["domain"], "graph") << method;
+    EXPECT_EQ(response["error"]["code"],
+              static_cast<std::int32_t>(GraphErrc::Io))
+        << method;
+    EXPECT_EQ(response["error"]["name"], "io") << method;
+    EXPECT_EQ(response["error"]["message"], "host-routed Host failure")
+        << method;
+    EXPECT_EQ(host_.call_count(method), 1u) << method;
+  }
+}
+
+TEST_F(HostRoutedGraphStateProtocolTest,
+       SevenValueRoutesPropagateOneGraphFailureWithoutRetry) {
+  static constexpr std::array<std::string_view, 7> kMethods = {
+      "graph.node_yaml.get", "inspect.node_ids",     "inspect.ending_nodes",
+      "inspect.roi_forward", "inspect.roi_backward", "compute.timing",
+      "compute.last_io_time"};
+
+  for (std::string_view method : kMethods) {
+    host_.set_status(std::string(method), host_routed_graph_failure());
+    host_.reset_invocations();
+    const Json response = route(std::string(method),
+                                valid_host_routed_params(method, session_id_));
+    ASSERT_TRUE(response.contains("error")) << method << response.dump();
+    EXPECT_EQ(response["error"]["domain"], "graph") << method;
+    EXPECT_EQ(response["error"]["code"],
+              static_cast<std::int32_t>(GraphErrc::Io))
+        << method;
+    EXPECT_EQ(response["error"]["name"], "io") << method;
+    EXPECT_EQ(response["error"]["message"], "host-routed Host failure")
+        << method;
+    EXPECT_EQ(host_.call_count(method), 1u) << method;
+  }
+}
+
+TEST_F(HostRoutedGraphStateProtocolTest,
+       LastErrorNestsFutureProtocolAndDaemonStatusesWithoutTopLevelFailure) {
+  /**
+   * @brief One future status vocabulary pair preserved as diagnostic data.
+   * @throws std::bad_alloc when copied status strings cannot allocate.
+   * @note The router must not reinterpret these unknown code/name pairs.
+   */
+  struct StatusCase {
+    /** @brief Host diagnostic status to expose as data. */
+    OperationStatus status;
+    /** @brief Stable expected wire-domain label. */
+    std::string domain;
+  };
+  const std::vector<StatusCase> cases = {
+      {OperationStatus{false, OperationErrorDomain::Protocol, -32122,
+                       "future_protocol_failure", "protocol diagnostic"},
+       "protocol"},
+      {OperationStatus{false, OperationErrorDomain::Daemon, -32123,
+                       "future_daemon_failure", "daemon diagnostic"},
+       "daemon"},
+  };
+
+  for (const StatusCase& test_case : cases) {
+    host_.set_last_error(test_case.status);
+    host_.reset_invocations();
+    const Json response =
+        route("compute.last_error",
+              valid_host_routed_params("compute.last_error", session_id_));
+    ASSERT_TRUE(response.contains("result")) << response.dump();
+    EXPECT_FALSE(response.contains("error"));
+    const Json& status = response["result"]["status"];
+    EXPECT_FALSE(status["ok"].get<bool>());
+    EXPECT_EQ(status["domain"], test_case.domain);
+    EXPECT_EQ(status["code"], test_case.status.code);
+    EXPECT_EQ(status["name"], test_case.status.name);
+    EXPECT_EQ(status["message"], test_case.status.message);
+    EXPECT_EQ(host_.call_count("compute.last_error"), 1u);
+  }
+
+  host_.set_last_error(OperationStatus{
+      false, OperationErrorDomain::Daemon, -32124, "future_long_failure",
+      std::string(kDiagnosticTextMaxBytes + 1, 'd')});
+  host_.reset_invocations();
+  const Json bounded =
+      route("compute.last_error",
+            valid_host_routed_params("compute.last_error", session_id_));
+  ASSERT_TRUE(bounded.contains("result")) << bounded.dump();
+  const std::string message =
+      bounded["result"]["status"]["message"].get<std::string>();
+  EXPECT_LE(message.size(), kDiagnosticTextMaxBytes);
+  EXPECT_NE(message.find("[truncated]"), std::string::npos);
+  EXPECT_EQ(host_.call_count("compute.last_error"), 1u);
+}
+
+TEST_F(HostRoutedGraphStateProtocolTest,
+       MutatorEncodingFailureBecomesInternalErrorWithoutRetry) {
+  host_.set_status("graph.clear",
+                   OperationStatus{false, OperationErrorDomain::Graph, 999, "",
+                                   "malformed Host status after mutation"});
+  const Json response = route(
+      "graph.clear", valid_host_routed_params("graph.clear", session_id_));
+  ASSERT_TRUE(response.contains("error")) << response.dump();
+  EXPECT_EQ(response["error"]["domain"], "daemon");
+  EXPECT_EQ(response["error"]["name"], "internal_error");
+  EXPECT_EQ(host_.call_count("graph.clear"), 1u);
+}
+
+TEST_F(HostRoutedGraphStateProtocolTest,
+       EveryRouteRejectsMalformedSessionWithoutHostAccess) {
+  static constexpr std::array<std::string_view, 21> kMethods = {
+      "cache.cache_all_nodes",
+      "cache.clear_all",
+      "cache.clear_drive",
+      "cache.clear_memory",
+      "cache.free_transient",
+      "cache.synchronize_disk",
+      "compute.last_error",
+      "compute.last_io_time",
+      "compute.timing",
+      "dirty.begin",
+      "dirty.end",
+      "dirty.update",
+      "graph.clear",
+      "graph.node_yaml.get",
+      "graph.node_yaml.set",
+      "graph.reload",
+      "graph.save",
+      "inspect.ending_nodes",
+      "inspect.node_ids",
+      "inspect.roi_backward",
+      "inspect.roi_forward",
+  };
+
+  for (std::string_view method : kMethods) {
+    Json params = valid_host_routed_params(method, session_id_);
+    params["session_id"] = std::string(kOpaqueIdHexCharacters - 1, 'a');
+    host_.reset_invocations();
+    const Json response = route(std::string(method), std::move(params));
+    ASSERT_TRUE(response.contains("error")) << method << response.dump();
+    EXPECT_EQ(response["error"]["domain"], "protocol") << method;
+    EXPECT_EQ(response["error"]["name"], "invalid_params") << method;
+    EXPECT_TRUE(host_.invocations().empty()) << method;
+  }
+}
+
+TEST_F(HostRoutedGraphStateProtocolTest,
+       EveryRouteRejectsUnknownSessionWithoutHostAccess) {
+  static constexpr std::array<std::string_view, 21> kMethods = {
+      "cache.cache_all_nodes",
+      "cache.clear_all",
+      "cache.clear_drive",
+      "cache.clear_memory",
+      "cache.free_transient",
+      "cache.synchronize_disk",
+      "compute.last_error",
+      "compute.last_io_time",
+      "compute.timing",
+      "dirty.begin",
+      "dirty.end",
+      "dirty.update",
+      "graph.clear",
+      "graph.node_yaml.get",
+      "graph.node_yaml.set",
+      "graph.reload",
+      "graph.save",
+      "inspect.ending_nodes",
+      "inspect.node_ids",
+      "inspect.roi_backward",
+      "inspect.roi_forward",
+  };
+  std::string unknown_session(kOpaqueIdHexCharacters, 'a');
+  if (unknown_session == session_id_) {
+    unknown_session.front() = 'b';
+  }
+
+  for (std::string_view method : kMethods) {
+    host_.reset_invocations();
+    const Json response = route(
+        std::string(method), valid_host_routed_params(method, unknown_session));
+    ASSERT_TRUE(response.contains("error")) << method << response.dump();
+    EXPECT_EQ(response["error"]["domain"], "graph") << method;
+    EXPECT_EQ(response["error"]["name"], "not_found") << method;
+    EXPECT_TRUE(host_.invocations().empty()) << method;
+  }
+}
+
+TEST_F(HostRoutedGraphStateProtocolTest,
+       ValidatesEveryAdditionalKnownParamBeforeUnknownSessionAdmission) {
+  std::string unknown_session(kOpaqueIdHexCharacters, 'b');
+  if (unknown_session == session_id_) {
+    unknown_session.front() = 'c';
+  }
+  /**
+   * @brief One request proving known-field validation precedes admission.
+   * @throws std::bad_alloc when owned method or JSON storage cannot allocate.
+   * @note Each case carries a well-formed but absent opaque session id.
+   */
+  struct MalformedCase {
+    /** @brief Wire method under test. */
+    std::string method;
+    /** @brief Params with one malformed known field. */
+    Json params;
+  };
+  std::vector<MalformedCase> cases;
+
+  Json reload = valid_host_routed_params("graph.reload", unknown_session);
+  reload["yaml_path"] = "relative.yaml";
+  cases.push_back({"graph.reload", std::move(reload)});
+  Json save = valid_host_routed_params("graph.save", unknown_session);
+  save["yaml_path"] = Json::array();
+  cases.push_back({"graph.save", std::move(save)});
+  Json get_yaml =
+      valid_host_routed_params("graph.node_yaml.get", unknown_session);
+  get_yaml["node_id"] = -1;
+  cases.push_back({"graph.node_yaml.get", std::move(get_yaml)});
+  Json set_yaml =
+      valid_host_routed_params("graph.node_yaml.set", unknown_session);
+  set_yaml["yaml_text"] = Json::object();
+  cases.push_back({"graph.node_yaml.set", std::move(set_yaml)});
+  Json cache =
+      valid_host_routed_params("cache.cache_all_nodes", unknown_session);
+  cache["precision"] = std::string(kShortTextMaxBytes + 1, 'p');
+  cases.push_back({"cache.cache_all_nodes", std::move(cache)});
+  Json sync =
+      valid_host_routed_params("cache.synchronize_disk", unknown_session);
+  sync["precision"] = Json::array({"bad", "precision"});
+  cases.push_back({"cache.synchronize_disk", std::move(sync)});
+  Json dirty_begin = valid_host_routed_params("dirty.begin", unknown_session);
+  dirty_begin["node_id"] = std::uint64_t{2147483648ULL};
+  cases.push_back({"dirty.begin", std::move(dirty_begin)});
+  Json dirty_update = valid_host_routed_params("dirty.update", unknown_session);
+  dirty_update["domain"] = "future_domain";
+  cases.push_back({"dirty.update", std::move(dirty_update)});
+  Json dirty_end = valid_host_routed_params("dirty.end", unknown_session);
+  dirty_end["domain"] = 1;
+  cases.push_back({"dirty.end", std::move(dirty_end)});
+  Json forward =
+      valid_host_routed_params("inspect.roi_forward", unknown_session);
+  forward["target_node_id"] = -1;
+  cases.push_back({"inspect.roi_forward", std::move(forward)});
+  Json backward =
+      valid_host_routed_params("inspect.roi_backward", unknown_session);
+  backward["target_roi"].erase("height");
+  cases.push_back({"inspect.roi_backward", std::move(backward)});
+
+  for (const MalformedCase& test_case : cases) {
+    host_.reset_invocations();
+    const Json response = route(test_case.method, test_case.params);
+    ASSERT_TRUE(response.contains("error"))
+        << test_case.method << response.dump();
+    EXPECT_EQ(response["error"]["domain"], "protocol") << test_case.method;
+    EXPECT_EQ(response["error"]["name"], "invalid_params") << test_case.method;
+    EXPECT_TRUE(host_.invocations().empty()) << test_case.method;
+  }
+}
+
+TEST_F(HostRoutedGraphStateProtocolTest,
+       UnknownParamsFieldsAreForwardCompatibleForAllRoutes) {
+  static constexpr std::array<std::string_view, 21> kMethods = {
+      "cache.cache_all_nodes",
+      "cache.clear_all",
+      "cache.clear_drive",
+      "cache.clear_memory",
+      "cache.free_transient",
+      "cache.synchronize_disk",
+      "compute.last_error",
+      "compute.last_io_time",
+      "compute.timing",
+      "dirty.begin",
+      "dirty.end",
+      "dirty.update",
+      "graph.clear",
+      "graph.node_yaml.get",
+      "graph.node_yaml.set",
+      "graph.reload",
+      "graph.save",
+      "inspect.ending_nodes",
+      "inspect.node_ids",
+      "inspect.roi_backward",
+      "inspect.roi_forward",
+  };
+
+  for (std::string_view method : kMethods) {
+    Json params = valid_host_routed_params(method, session_id_);
+    params["future_field"] = Json{{"nested", Json::array({1, 2, 3})}};
+    host_.reset_invocations();
+    const Json response = route(std::string(method), std::move(params));
+    ASSERT_TRUE(response.contains("result")) << method << response.dump();
+    EXPECT_EQ(host_.call_count(method), 1u) << method;
+  }
+}
+
+TEST_F(HostRoutedGraphStateProtocolTest,
+       PreservesInclusivePathYamlPrecisionNodeDomainAndRoiBounds) {
+  const std::string exact_path = "/" + std::string(kPathTextMaxBytes - 1, 'p');
+  Json reload = valid_host_routed_params("graph.reload", session_id_);
+  reload["yaml_path"] = exact_path;
+  Json response = route("graph.reload", reload);
+  ASSERT_TRUE(response.contains("result")) << response.dump();
+  ASSERT_EQ(host_.call_count("graph.reload"), 1u);
+  EXPECT_EQ(host_.invocations().front().text, exact_path);
+
+  host_.reset_invocations();
+  reload["yaml_path"] = exact_path + "p";
+  response = route("graph.reload", reload);
+  EXPECT_EQ(response["error"]["name"], "invalid_params");
+  EXPECT_TRUE(host_.invocations().empty());
+
+  const std::string exact_yaml(kLargeTextMaxBytes, 'y');
+  Json set_yaml = valid_host_routed_params("graph.node_yaml.set", session_id_);
+  set_yaml["yaml_text"] = exact_yaml;
+  response = route("graph.node_yaml.set", set_yaml);
+  ASSERT_TRUE(response.contains("result")) << response.dump();
+  ASSERT_EQ(host_.call_count("graph.node_yaml.set"), 1u);
+  EXPECT_EQ(host_.invocations().front().text.size(), kLargeTextMaxBytes);
+
+  host_.reset_invocations();
+  set_yaml["yaml_text"] = exact_yaml + "y";
+  response = route("graph.node_yaml.set", set_yaml);
+  EXPECT_EQ(response["error"]["name"], "invalid_params");
+  EXPECT_TRUE(host_.invocations().empty());
+
+  host_.reset_invocations();
+  set_yaml["yaml_text"] = "";
+  response = route("graph.node_yaml.set", set_yaml);
+  ASSERT_TRUE(response.contains("result")) << response.dump();
+  ASSERT_EQ(host_.call_count("graph.node_yaml.set"), 1u);
+  EXPECT_TRUE(host_.invocations().front().text.empty());
+
+  host_.reset_invocations();
+  const std::string nul_yaml("id:\0exact", 9);
+  set_yaml["yaml_text"] = nul_yaml;
+  response = route("graph.node_yaml.set", set_yaml);
+  ASSERT_TRUE(response.contains("result")) << response.dump();
+  ASSERT_EQ(host_.call_count("graph.node_yaml.set"), 1u);
+  EXPECT_EQ(host_.invocations().front().text, nul_yaml);
+
+  host_.reset_invocations();
+  const std::string exact_precision(kShortTextMaxBytes, 'f');
+  Json cache = valid_host_routed_params("cache.cache_all_nodes", session_id_);
+  cache["precision"] = exact_precision;
+  response = route("cache.cache_all_nodes", cache);
+  ASSERT_TRUE(response.contains("result")) << response.dump();
+  ASSERT_EQ(host_.call_count("cache.cache_all_nodes"), 1u);
+  EXPECT_EQ(host_.invocations().front().text, exact_precision);
+
+  host_.reset_invocations();
+  cache["precision"] = exact_precision + "f";
+  response = route("cache.cache_all_nodes", cache);
+  EXPECT_EQ(response["error"]["name"], "invalid_params");
+  EXPECT_TRUE(host_.invocations().empty());
+
+  host_.reset_invocations();
+  Json sync = valid_host_routed_params("cache.synchronize_disk", session_id_);
+  sync["precision"] = "";
+  response = route("cache.synchronize_disk", sync);
+  ASSERT_TRUE(response.contains("result")) << response.dump();
+  ASSERT_EQ(host_.call_count("cache.synchronize_disk"), 1u);
+  EXPECT_TRUE(host_.invocations().front().text.empty());
+
+  host_.reset_invocations();
+  const std::string nul_precision("fp\0exact", 8);
+  sync["precision"] = nul_precision;
+  response = route("cache.synchronize_disk", sync);
+  ASSERT_TRUE(response.contains("result")) << response.dump();
+  ASSERT_EQ(host_.call_count("cache.synchronize_disk"), 1u);
+  EXPECT_EQ(host_.invocations().front().text, nul_precision);
+
+  host_.reset_invocations();
+  Json node = valid_host_routed_params("graph.node_yaml.get", session_id_);
+  node["node_id"] = std::numeric_limits<int>::max();
+  response = route("graph.node_yaml.get", node);
+  ASSERT_TRUE(response.contains("result")) << response.dump();
+  ASSERT_EQ(host_.call_count("graph.node_yaml.get"), 1u);
+  EXPECT_EQ(host_.invocations().front().first_node.value,
+            std::numeric_limits<int>::max());
+
+  host_.reset_invocations();
+  node["node_id"] = std::uint64_t{2147483648ULL};
+  response = route("graph.node_yaml.get", node);
+  EXPECT_EQ(response["error"]["name"], "invalid_params");
+  EXPECT_TRUE(host_.invocations().empty());
+
+  host_.reset_invocations();
+  Json dirty = valid_host_routed_params("dirty.begin", session_id_);
+  dirty["node_id"] = 0;
+  dirty["domain"] = "high_precision";
+  dirty["source_roi"] = expected_rect(PixelRect{
+      std::numeric_limits<int>::min(), std::numeric_limits<int>::max(),
+      std::numeric_limits<int>::min(), std::numeric_limits<int>::max()});
+  response = route("dirty.begin", dirty);
+  ASSERT_TRUE(response.contains("result")) << response.dump();
+  ASSERT_EQ(host_.call_count("dirty.begin"), 1u);
+  const auto dirty_call = host_.invocations().front();
+  EXPECT_EQ(dirty_call.first_node.value, 0);
+  EXPECT_EQ(dirty_call.dirty_domain, DirtyDomain::HighPrecision);
+  EXPECT_EQ(dirty_call.roi.x, std::numeric_limits<int>::min());
+  EXPECT_EQ(dirty_call.roi.y, std::numeric_limits<int>::max());
+  EXPECT_EQ(dirty_call.roi.width, std::numeric_limits<int>::min());
+  EXPECT_EQ(dirty_call.roi.height, std::numeric_limits<int>::max());
+
+  host_.reset_invocations();
+  Json backward = valid_host_routed_params("inspect.roi_backward", session_id_);
+  backward["target_roi"]["x"] = std::uint64_t{2147483648ULL};
+  response = route("inspect.roi_backward", backward);
+  EXPECT_EQ(response["error"]["name"], "invalid_params");
+  EXPECT_TRUE(host_.invocations().empty());
+}
+
+TEST_F(HostRoutedGraphStateProtocolTest,
+       NodeListRoutesPreserveZeroOneAnd4096EntriesAndReject4097) {
+  static constexpr std::array<std::string_view, 2> kMethods = {
+      "inspect.node_ids", "inspect.ending_nodes"};
+  for (std::string_view method : kMethods) {
+    for (std::size_t count :
+         {std::size_t{0}, std::size_t{1}, kGeneralPageMaxEntries}) {
+      std::vector<NodeId> nodes;
+      nodes.reserve(count);
+      for (std::size_t index = 0; index < count; ++index) {
+        nodes.push_back(NodeId{static_cast<int>((index * 7) % 19)});
+      }
+      if (method == "inspect.node_ids") {
+        host_.set_node_ids(nodes);
+      } else {
+        host_.set_ending_nodes(nodes);
+      }
+      host_.reset_invocations();
+      const Json response = route(
+          std::string(method), valid_host_routed_params(method, session_id_));
+      ASSERT_TRUE(response.contains("result")) << method << response.dump();
+      const char* field =
+          method == "inspect.node_ids" ? "node_ids" : "ending_node_ids";
+      ASSERT_EQ(response["result"][field].size(), count) << method;
+      for (std::size_t index = 0; index < count; ++index) {
+        EXPECT_EQ(response["result"][field][index], nodes[index].value)
+            << method << index;
+      }
+      EXPECT_EQ(host_.call_count(method), 1u) << method;
+    }
+
+    std::vector<NodeId> oversized(kGeneralPageMaxEntries + 1, NodeId{7});
+    if (method == "inspect.node_ids") {
+      host_.set_node_ids(std::move(oversized));
+    } else {
+      host_.set_ending_nodes(std::move(oversized));
+    }
+    host_.reset_invocations();
+    const Json response = route(std::string(method),
+                                valid_host_routed_params(method, session_id_));
+    ASSERT_TRUE(response.contains("error")) << method << response.dump();
+    EXPECT_EQ(response["error"]["domain"], "protocol") << method;
+    EXPECT_EQ(response["error"]["name"], "response_too_large") << method;
+    EXPECT_EQ(host_.call_count(method), 1u) << method;
+  }
+}
+
+TEST_F(HostRoutedGraphStateProtocolTest,
+       RejectsMalformedHostNodeListsAfterOneHostCall) {
+  host_.set_node_ids({NodeId{1}, NodeId{-1}, NodeId{2}});
+  Json response =
+      route("inspect.node_ids",
+            valid_host_routed_params("inspect.node_ids", session_id_));
+  ASSERT_TRUE(response.contains("error")) << response.dump();
+  EXPECT_EQ(response["error"]["domain"], "daemon");
+  EXPECT_EQ(response["error"]["name"], "internal_error");
+  EXPECT_EQ(host_.call_count("inspect.node_ids"), 1u);
+
+  host_.reset_invocations();
+  host_.set_ending_nodes({NodeId{-2}});
+  response =
+      route("inspect.ending_nodes",
+            valid_host_routed_params("inspect.ending_nodes", session_id_));
+  ASSERT_TRUE(response.contains("error")) << response.dump();
+  EXPECT_EQ(response["error"]["domain"], "daemon");
+  EXPECT_EQ(response["error"]["name"], "internal_error");
+  EXPECT_EQ(host_.call_count("inspect.ending_nodes"), 1u);
+}
+
+TEST_F(HostRoutedGraphStateProtocolTest,
+       TimingRoutesBoundNestedRowsAndRejectMalformedHostValues) {
+  TimingSnapshot exact;
+  exact.node_timings.reserve(kGeneralPageMaxEntries);
+  for (std::size_t index = 0; index < kGeneralPageMaxEntries; ++index) {
+    exact.node_timings.push_back(NodeTimingSnapshot{
+        NodeId{static_cast<int>(index)}, "node", static_cast<double>(index),
+        index % 2 == 0 ? "cpu" : "cache"});
+  }
+  exact.total_ms = 4096.5;
+  host_.set_timing(exact);
+  Json response = route("compute.timing", valid_host_routed_params(
+                                              "compute.timing", session_id_));
+  ASSERT_TRUE(response.contains("result")) << response.dump();
+  ASSERT_EQ(response["result"]["node_timings"].size(), kGeneralPageMaxEntries);
+  EXPECT_EQ(response["result"]["node_timings"].front()["node_id"], 0);
+  EXPECT_EQ(response["result"]["node_timings"].back()["node_id"], 4095);
+  EXPECT_EQ(response["result"]["total_ms"], 4096.5);
+  EXPECT_EQ(host_.call_count("compute.timing"), 1u);
+
+  exact.node_timings.push_back(
+      NodeTimingSnapshot{NodeId{4096}, "last", 1.0, "cpu"});
+  host_.set_timing(exact);
+  host_.reset_invocations();
+  response = route("compute.timing",
+                   valid_host_routed_params("compute.timing", session_id_));
+  ASSERT_TRUE(response.contains("error")) << response.dump();
+  EXPECT_EQ(response["error"]["domain"], "protocol");
+  EXPECT_EQ(response["error"]["name"], "response_too_large");
+  EXPECT_EQ(host_.call_count("compute.timing"), 1u);
+
+  TimingSnapshot negative_node;
+  negative_node.node_timings.push_back(
+      NodeTimingSnapshot{NodeId{-1}, "bad", 1.0, "cpu"});
+  host_.set_timing(negative_node);
+  host_.reset_invocations();
+  response = route("compute.timing",
+                   valid_host_routed_params("compute.timing", session_id_));
+  EXPECT_EQ(response["error"]["domain"], "daemon");
+  EXPECT_EQ(response["error"]["name"], "internal_error");
+  EXPECT_EQ(host_.call_count("compute.timing"), 1u);
+
+  TimingSnapshot invalid_utf8;
+  invalid_utf8.node_timings.push_back(
+      NodeTimingSnapshot{NodeId{1}, std::string("\xc3\x28", 2), 1.0, "cpu"});
+  host_.set_timing(invalid_utf8);
+  host_.reset_invocations();
+  response = route("compute.timing",
+                   valid_host_routed_params("compute.timing", session_id_));
+  EXPECT_EQ(response["error"]["domain"], "daemon");
+  EXPECT_EQ(response["error"]["name"], "internal_error");
+  EXPECT_EQ(host_.call_count("compute.timing"), 1u);
+
+  TimingSnapshot oversized_text;
+  oversized_text.node_timings.push_back(NodeTimingSnapshot{
+      NodeId{1}, std::string(kShortTextMaxBytes + 1, 'n'), 1.0, "cpu"});
+  host_.set_timing(oversized_text);
+  host_.reset_invocations();
+  response = route("compute.timing",
+                   valid_host_routed_params("compute.timing", session_id_));
+  EXPECT_EQ(response["error"]["domain"], "protocol");
+  EXPECT_EQ(response["error"]["name"], "response_too_large");
+  EXPECT_EQ(host_.call_count("compute.timing"), 1u);
+}
+
+TEST_F(HostRoutedGraphStateProtocolTest,
+       NonfiniteTimingAndLastIoValuesEncodeAsNull) {
+  TimingSnapshot timing;
+  timing.node_timings.push_back(NodeTimingSnapshot{
+      NodeId{1}, "nan", std::numeric_limits<double>::quiet_NaN(), "cpu"});
+  timing.node_timings.push_back(NodeTimingSnapshot{
+      NodeId{2}, "infinity", std::numeric_limits<double>::infinity(), "cpu"});
+  timing.total_ms = -std::numeric_limits<double>::infinity();
+  host_.set_timing(timing);
+  Json response = route("compute.timing", valid_host_routed_params(
+                                              "compute.timing", session_id_));
+  ASSERT_TRUE(response.contains("result")) << response.dump();
+  EXPECT_TRUE(response["result"]["node_timings"][0]["elapsed_ms"].is_null());
+  EXPECT_TRUE(response["result"]["node_timings"][1]["elapsed_ms"].is_null());
+  EXPECT_TRUE(response["result"]["total_ms"].is_null());
+
+  host_.set_last_io_time(std::numeric_limits<double>::quiet_NaN());
+  host_.reset_invocations();
+  response =
+      route("compute.last_io_time",
+            valid_host_routed_params("compute.last_io_time", session_id_));
+  ASSERT_TRUE(response.contains("result")) << response.dump();
+  EXPECT_TRUE(response["result"]["last_io_time_ms"].is_null());
+  EXPECT_EQ(host_.call_count("compute.last_io_time"), 1u);
+}
+
+TEST_F(HostRoutedGraphStateProtocolTest,
+       TimingFramePreflightAcceptsFitAndRejectsEscapedAggregateOnce) {
+  TimingSnapshot near_frame;
+  const std::size_t source_bytes = kLargeTextMaxBytes - 8192U;
+  near_frame.node_timings.push_back(NodeTimingSnapshot{
+      NodeId{1}, "first", 1.0, std::string(source_bytes, 's')});
+  near_frame.node_timings.push_back(NodeTimingSnapshot{
+      NodeId{2}, "second", 2.0, std::string(source_bytes, 's')});
+  host_.set_timing(std::move(near_frame));
+
+  Json response = route("compute.timing", valid_host_routed_params(
+                                              "compute.timing", session_id_));
+  ASSERT_TRUE(response.contains("result")) << response.dump();
+  EXPECT_FALSE(response.contains("error"));
+  EXPECT_EQ(host_.call_count("compute.timing"), 1u);
+
+  TimingSnapshot escaped_aggregate;
+  constexpr std::size_t kEscapedSourceBytes = 3U * 1024U * 1024U;
+  for (int node = 0; node < 3; ++node) {
+    escaped_aggregate.node_timings.push_back(NodeTimingSnapshot{
+        NodeId{node}, "escaped", 1.0, std::string(kEscapedSourceBytes, '\n')});
+  }
+  host_.set_timing(std::move(escaped_aggregate));
+  host_.reset_invocations();
+
+  response = route("compute.timing",
+                   valid_host_routed_params("compute.timing", session_id_));
+  ASSERT_TRUE(response.contains("error")) << response.dump();
+  EXPECT_FALSE(response.contains("result"));
+  EXPECT_EQ(response["error"]["domain"], "protocol");
+  EXPECT_EQ(response["error"]["name"], "response_too_large");
+  EXPECT_EQ(host_.call_count("compute.timing"), 1u);
+}
+
+TEST_F(HostRoutedGraphStateProtocolTest,
+       DirtyRoutesBoundTopLevelAndNestedCollections) {
+  DirtyRegionInspectionSnapshot exact;
+  exact.sources.reserve(kGeneralPageMaxEntries);
+  for (std::size_t index = 0; index < kGeneralPageMaxEntries; ++index) {
+    exact.sources.push_back(DirtySourceSnapshot{NodeId{static_cast<int>(index)},
+                                                DirtyDomain::HighPrecision,
+                                                DirtySourceLifecycleState::Idle,
+                                                index,
+                                                {}});
+  }
+  host_.set_dirty_region(exact);
+  Json response = route("dirty.begin",
+                        valid_host_routed_params("dirty.begin", session_id_));
+  ASSERT_TRUE(response.contains("result")) << response.dump();
+  EXPECT_EQ(response["result"]["sources"].size(), kGeneralPageMaxEntries);
+  EXPECT_EQ(host_.call_count("dirty.begin"), 1u);
+
+  exact.sources.push_back(DirtySourceSnapshot{NodeId{4096},
+                                              DirtyDomain::HighPrecision,
+                                              DirtySourceLifecycleState::Idle,
+                                              4096,
+                                              {}});
+  host_.set_dirty_region(exact);
+  host_.reset_invocations();
+  response = route("dirty.update",
+                   valid_host_routed_params("dirty.update", session_id_));
+  ASSERT_TRUE(response.contains("error")) << response.dump();
+  EXPECT_EQ(response["error"]["domain"], "protocol");
+  EXPECT_EQ(response["error"]["name"], "response_too_large");
+  EXPECT_EQ(host_.call_count("dirty.update"), 1u);
+
+  DirtyRegionInspectionSnapshot nested;
+  nested.sources.push_back(DirtySourceSnapshot{
+      NodeId{1}, DirtyDomain::RealTime, DirtySourceLifecycleState::Updating, 1,
+      std::vector<PixelRect>(kGeneralPageMaxEntries, PixelRect{1, 2, 3, 4})});
+  host_.set_dirty_region(nested);
+  host_.reset_invocations();
+  response =
+      route("dirty.end", valid_host_routed_params("dirty.end", session_id_));
+  ASSERT_TRUE(response.contains("result")) << response.dump();
+  EXPECT_EQ(response["result"]["sources"][0]["source_rois"].size(),
+            kGeneralPageMaxEntries);
+  EXPECT_EQ(host_.call_count("dirty.end"), 1u);
+
+  nested.sources.front().source_rois.push_back(PixelRect{5, 6, 7, 8});
+  host_.set_dirty_region(nested);
+  host_.reset_invocations();
+  response = route("dirty.begin",
+                   valid_host_routed_params("dirty.begin", session_id_));
+  ASSERT_TRUE(response.contains("error")) << response.dump();
+  EXPECT_EQ(response["error"]["domain"], "protocol");
+  EXPECT_EQ(response["error"]["name"], "response_too_large");
+  EXPECT_EQ(host_.call_count("dirty.begin"), 1u);
+}
+
+TEST_F(HostRoutedGraphStateProtocolTest,
+       DirtyFramePreflightAggregatesNestedRoisAcrossCollectionsOnce) {
+  constexpr std::size_t kRows = 2048;
+  const std::vector<PixelRect> rois(128, PixelRect{1, 2, 3, 4});
+  DirtyRegionInspectionSnapshot aggregate;
+  aggregate.sources.reserve(kRows);
+  for (std::size_t index = 0; index < kRows; ++index) {
+    aggregate.sources.push_back(DirtySourceSnapshot{
+        NodeId{static_cast<int>(index)}, DirtyDomain::HighPrecision,
+        DirtySourceLifecycleState::Settled, index, rois});
+    aggregate.actual_dirty_rois.emplace(static_cast<int>(kRows + index), rois);
+  }
+  aggregate.dirty_tiles.push_back(DirtyTileSnapshot{
+      NodeId{5000}, DirtyDomain::RealTime, 1, 2, 64, PixelRect{1, 2, 3, 4}});
+  aggregate.dirty_monolithic_nodes.push_back(DirtyMonolithicRegionSnapshot{
+      NodeId{5001}, DirtyDomain::RealTime, PixelRect{1, 2, 3, 4}, false});
+  aggregate.edge_mappings.push_back(DirtyEdgeMappingSnapshot{
+      NodeId{5000}, NodeId{5001}, DirtyDomain::RealTime, PixelRect{1, 2, 3, 4},
+      PixelRect{5, 6, 7, 8}, DirtyEdgeDirection::ForwardAffected});
+  host_.set_dirty_region(std::move(aggregate));
+
+  const Json response = route(
+      "dirty.begin", valid_host_routed_params("dirty.begin", session_id_));
+  ASSERT_TRUE(response.contains("error")) << response.dump();
+  EXPECT_FALSE(response.contains("result"));
+  EXPECT_EQ(response["error"]["domain"], "protocol");
+  EXPECT_EQ(response["error"]["name"], "response_too_large");
+  EXPECT_EQ(host_.call_count("dirty.begin"), 1u);
+}
+
+TEST_F(HostRoutedGraphStateProtocolTest,
+       EveryDirtyCollectionRejects4097EntriesAfterOneHostCall) {
+  /**
+   * @brief Verifies one oversized Host snapshot is rejected without retry.
+   * @param snapshot Complete configured Host value.
+   * @param label Diagnostic collection label for assertion output.
+   * @throws std::bad_alloc if snapshot or response handling cannot allocate.
+   */
+  const auto expect_response_too_large =
+      [&](DirtyRegionInspectionSnapshot snapshot, std::string_view label) {
+        host_.set_dirty_region(std::move(snapshot));
+        host_.reset_invocations();
+        const Json response =
+            route("dirty.begin",
+                  valid_host_routed_params("dirty.begin", session_id_));
+        ASSERT_TRUE(response.contains("error")) << label << response.dump();
+        EXPECT_EQ(response["error"]["domain"], "protocol") << label;
+        EXPECT_EQ(response["error"]["name"], "response_too_large") << label;
+        EXPECT_EQ(host_.call_count("dirty.begin"), 1u) << label;
+      };
+
+  DirtyRegionInspectionSnapshot tiles;
+  tiles.dirty_tiles.resize(kGeneralPageMaxEntries + 1);
+  for (std::size_t index = 0; index < tiles.dirty_tiles.size(); ++index) {
+    tiles.dirty_tiles[index].node = NodeId{static_cast<int>(index)};
+  }
+  expect_response_too_large(std::move(tiles), "dirty_tiles");
+
+  DirtyRegionInspectionSnapshot monolithic;
+  monolithic.dirty_monolithic_nodes.resize(kGeneralPageMaxEntries + 1);
+  for (std::size_t index = 0; index < monolithic.dirty_monolithic_nodes.size();
+       ++index) {
+    monolithic.dirty_monolithic_nodes[index].node =
+        NodeId{static_cast<int>(index)};
+  }
+  expect_response_too_large(std::move(monolithic), "dirty_monolithic_nodes");
+
+  DirtyRegionInspectionSnapshot actual_rows;
+  for (std::size_t index = 0; index < kGeneralPageMaxEntries + 1; ++index) {
+    actual_rows.actual_dirty_rois.emplace(static_cast<int>(index),
+                                          std::vector<PixelRect>{});
+  }
+  expect_response_too_large(std::move(actual_rows), "actual_dirty_rois");
+
+  DirtyRegionInspectionSnapshot edges;
+  edges.edge_mappings.resize(kGeneralPageMaxEntries + 1);
+  for (std::size_t index = 0; index < edges.edge_mappings.size(); ++index) {
+    edges.edge_mappings[index].from_node = NodeId{static_cast<int>(index)};
+    edges.edge_mappings[index].to_node = NodeId{static_cast<int>(index)};
+  }
+  expect_response_too_large(std::move(edges), "edge_mappings");
+
+  DirtyRegionInspectionSnapshot nested_actual;
+  nested_actual.actual_dirty_rois.emplace(
+      1, std::vector<PixelRect>(kGeneralPageMaxEntries + 1,
+                                PixelRect{1, 2, 3, 4}));
+  expect_response_too_large(std::move(nested_actual), "actual_dirty_rois.rois");
+}
+
+TEST_F(HostRoutedGraphStateProtocolTest,
+       DirtyMutatorSuccessEncodingFailuresDoNotRetryHost) {
+  DirtyRegionInspectionSnapshot invalid_enum;
+  invalid_enum.sources.push_back(
+      DirtySourceSnapshot{NodeId{1},
+                          static_cast<DirtyDomain>(999),
+                          DirtySourceLifecycleState::Idle,
+                          1,
+                          {}});
+  host_.set_dirty_region(invalid_enum);
+  Json response = route("dirty.begin",
+                        valid_host_routed_params("dirty.begin", session_id_));
+  ASSERT_TRUE(response.contains("error")) << response.dump();
+  EXPECT_EQ(response["error"]["domain"], "daemon");
+  EXPECT_EQ(response["error"]["name"], "internal_error");
+  EXPECT_EQ(host_.call_count("dirty.begin"), 1u);
+
+  DirtyRegionInspectionSnapshot invalid_node;
+  invalid_node.dirty_tiles.push_back(
+      DirtyTileSnapshot{NodeId{-1}, DirtyDomain::HighPrecision, 0, 0, 64,
+                        PixelRect{0, 0, 64, 64}});
+  host_.set_dirty_region(invalid_node);
+  host_.reset_invocations();
+  response = route("dirty.update",
+                   valid_host_routed_params("dirty.update", session_id_));
+  ASSERT_TRUE(response.contains("error")) << response.dump();
+  EXPECT_EQ(response["error"]["domain"], "daemon");
+  EXPECT_EQ(response["error"]["name"], "internal_error");
+  EXPECT_EQ(host_.call_count("dirty.update"), 1u);
+
+  DirtyRegionInspectionSnapshot oversized;
+  oversized.sources.resize(kGeneralPageMaxEntries + 1);
+  for (std::size_t index = 0; index < oversized.sources.size(); ++index) {
+    oversized.sources[index].node = NodeId{static_cast<int>(index)};
+  }
+  host_.set_dirty_region(std::move(oversized));
+  host_.reset_invocations();
+  response =
+      route("dirty.end", valid_host_routed_params("dirty.end", session_id_));
+  ASSERT_TRUE(response.contains("error")) << response.dump();
+  EXPECT_EQ(response["error"]["domain"], "protocol");
+  EXPECT_EQ(response["error"]["name"], "response_too_large");
+  EXPECT_EQ(host_.call_count("dirty.end"), 1u);
+}
+
+TEST_F(HostRoutedGraphStateProtocolTest,
+       ReturnedYamlHonorsInclusiveBoundAndRejectsOversizeAfterHost) {
+  host_.set_node_yaml(std::string(kLargeTextMaxBytes, 'y'));
+  Json response =
+      route("graph.node_yaml.get",
+            valid_host_routed_params("graph.node_yaml.get", session_id_));
+  ASSERT_TRUE(response.contains("result")) << response.dump();
+  EXPECT_EQ(
+      response["result"]["yaml_text"].get_ref<const std::string&>().size(),
+      kLargeTextMaxBytes);
+  EXPECT_EQ(host_.call_count("graph.node_yaml.get"), 1u);
+
+  host_.set_node_yaml(std::string(kLargeTextMaxBytes + 1, 'y'));
+  host_.reset_invocations();
+  response =
+      route("graph.node_yaml.get",
+            valid_host_routed_params("graph.node_yaml.get", session_id_));
+  ASSERT_TRUE(response.contains("error")) << response.dump();
+  EXPECT_EQ(response["error"]["domain"], "protocol");
+  EXPECT_EQ(response["error"]["name"], "response_too_large");
+  EXPECT_EQ(host_.call_count("graph.node_yaml.get"), 1u);
+}
+
+TEST_F(HostRoutedGraphStateProtocolTest,
+       HostMutexSerializesCallsAndCloseWaitsForAdmittedCall) {
+  std::mutex gate_mutex;
+  std::condition_variable gate_changed;
+  bool reload_entered = false;
+  bool release_reload = false;
+  host_.set_call_hook([&](std::string_view method) {
+    if (method != "graph.reload") {
+      return;
+    }
+    std::unique_lock<std::mutex> lock(gate_mutex);
+    reload_entered = true;
+    gate_changed.notify_all();
+    gate_changed.wait(lock, [&] { return release_reload; });
+  });
+
+  {
+    auto reload_future = std::async(std::launch::async, [&] {
+      return route("graph.reload",
+                   valid_host_routed_params("graph.reload", session_id_));
+    });
+    std::future<Json> timing_future;
+    ScopedProtocolGateRelease release_guard(gate_mutex, gate_changed,
+                                            release_reload);
+    bool observed_reload = false;
+    {
+      std::unique_lock<std::mutex> lock(gate_mutex);
+      observed_reload = gate_changed.wait_for(lock, std::chrono::seconds(2),
+                                              [&] { return reload_entered; });
+    }
+    if (!observed_reload) {
+      ADD_FAILURE() << "reload Host hook was not entered before deadline";
+      return;
+    }
+
+    std::promise<void> timing_started;
+    std::future<void> timing_entered = timing_started.get_future();
+    timing_future = std::async(std::launch::async, [&] {
+      timing_started.set_value();
+      return route("compute.timing",
+                   valid_host_routed_params("compute.timing", session_id_));
+    });
+    timing_entered.wait();
+    EXPECT_EQ(timing_future.wait_for(std::chrono::milliseconds(25)),
+              std::future_status::timeout);
+    EXPECT_EQ(host_.call_count("compute.timing"), 0u);
+
+    const Json ping_response = route("daemon.ping", Json::object());
+    EXPECT_TRUE(ping_response.contains("result")) << ping_response.dump();
+    if (ping_response.contains("result")) {
+      EXPECT_TRUE(ping_response["result"]["pong"].get<bool>());
+    }
+
+    release_guard.release();
+    const Json reload_response = reload_future.get();
+    const Json timing_response = timing_future.get();
+    ASSERT_TRUE(reload_response.contains("result")) << reload_response.dump();
+    ASSERT_TRUE(timing_response.contains("result")) << timing_response.dump();
+
+    const std::vector<::ps::testing::IpcHostInvocation> serialized_calls =
+        host_.invocations();
+    ASSERT_EQ(serialized_calls.size(), 2u);
+    EXPECT_EQ(serialized_calls[0].method, "graph.reload");
+    EXPECT_EQ(serialized_calls[1].method, "compute.timing");
+  }
+
+  {
+    std::lock_guard<std::mutex> lock(gate_mutex);
+    reload_entered = false;
+    release_reload = false;
+  }
+  host_.reset_invocations();
+
+  {
+    auto reload_future = std::async(std::launch::async, [&] {
+      return route("graph.reload",
+                   valid_host_routed_params("graph.reload", session_id_));
+    });
+    std::future<Json> close_future;
+    ScopedProtocolGateRelease release_guard(gate_mutex, gate_changed,
+                                            release_reload);
+    bool observed_reload = false;
+    {
+      std::unique_lock<std::mutex> lock(gate_mutex);
+      observed_reload = gate_changed.wait_for(lock, std::chrono::seconds(2),
+                                              [&] { return reload_entered; });
+    }
+    if (!observed_reload) {
+      ADD_FAILURE()
+          << "second reload Host hook was not entered before deadline";
+      return;
+    }
+
+    close_future = std::async(std::launch::async, [&] {
+      return route("graph.close", Json{{"session_id", session_id_}});
+    });
+    EXPECT_EQ(close_future.wait_for(std::chrono::milliseconds(25)),
+              std::future_status::timeout);
+    EXPECT_EQ(host_.call_count("graph.close"), 0u);
+
+    release_guard.release();
+    const Json reload_response = reload_future.get();
+    const Json close_response = close_future.get();
+    ASSERT_TRUE(reload_response.contains("result")) << reload_response.dump();
+    ASSERT_TRUE(close_response.contains("result")) << close_response.dump();
+    EXPECT_TRUE(close_response["result"]["closed"].get<bool>());
+
+    const std::vector<::ps::testing::IpcHostInvocation> close_calls =
+        host_.invocations();
+    ASSERT_EQ(close_calls.size(), 2u);
+    EXPECT_EQ(close_calls[0].method, "graph.reload");
+    EXPECT_EQ(close_calls[1].method, "graph.close");
+  }
+
+  host_.set_call_hook({});
+  host_.reset_invocations();
+  const Json after_close =
+      route("compute.timing",
+            valid_host_routed_params("compute.timing", session_id_));
+  ASSERT_TRUE(after_close.contains("error")) << after_close.dump();
+  EXPECT_EQ(after_close["error"]["domain"], "graph");
+  EXPECT_EQ(after_close["error"]["name"], "not_found");
+  EXPECT_TRUE(host_.invocations().empty());
 }
 
 /**
