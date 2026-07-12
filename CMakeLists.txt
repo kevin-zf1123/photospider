@@ -846,7 +846,8 @@ if(BUILD_TESTING)
             "${PROJECT_SOURCE_DIR}/tests"
             ${OpenCV_INCLUDE_DIRS})
         target_compile_definitions(test_ipc_protocol PRIVATE
-            PS_TEST_SCHEDULER_PLUGIN_PATH="$<TARGET_FILE:destroy_count_scheduler_plugin>")
+            PS_TEST_SCHEDULER_PLUGIN_PATH="$<TARGET_FILE:destroy_count_scheduler_plugin>"
+            PS_TEST_OP_PLUGIN_DIR="$<TARGET_FILE_DIR:lifecycle_op_plugin>")
         target_link_libraries(test_ipc_protocol PRIVATE
             photospider_ipc_server_internal
             photospider_ipc_client
@@ -856,7 +857,8 @@ if(BUILD_TESTING)
             nlohmann_json::nlohmann_json
             Threads::Threads
             ${CMAKE_DL_LIBS})
-        add_dependencies(test_ipc_protocol destroy_count_scheduler_plugin)
+        add_dependencies(test_ipc_protocol destroy_count_scheduler_plugin
+            lifecycle_op_plugin)
 
         add_executable(test_compute_request_registry
             tests/unit/test_compute_request_registry.cpp)
@@ -938,7 +940,8 @@ if(BUILD_TESTING)
         target_compile_features(test_ipc_daemon PRIVATE cxx_std_17)
         target_compile_definitions(test_ipc_daemon PRIVATE
             PS_PHOTOSPIDERD_PATH="$<TARGET_FILE:photospiderd>"
-            PS_IPC_OUTPUT_FIXTURE_DAEMON_PATH="$<TARGET_FILE:ipc_output_fixture_daemon>")
+            PS_IPC_OUTPUT_FIXTURE_DAEMON_PATH="$<TARGET_FILE:ipc_output_fixture_daemon>"
+            PS_TEST_OP_PLUGIN_DIR="$<TARGET_FILE_DIR:lifecycle_op_plugin>")
         target_include_directories(test_ipc_daemon PRIVATE
             "${PROJECT_SOURCE_DIR}/include"
             "${PROJECT_SOURCE_DIR}/src/lib")
@@ -948,7 +951,7 @@ if(BUILD_TESTING)
             GTest::gtest_main
             Threads::Threads)
         add_dependencies(test_ipc_daemon
-            photospiderd ipc_output_fixture_daemon)
+            photospiderd ipc_output_fixture_daemon lifecycle_op_plugin)
     endif()
 
     add_ps_test(test_milestone2 tests/integration/test_milestone2.cpp)

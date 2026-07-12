@@ -1541,6 +1541,73 @@ Json encode_node_ids(const std::vector<NodeId>& nodes) {
   return encoded;
 }
 
+/** @copydoc encode_plugin_load_report */
+Json encode_plugin_load_report(const HostPluginLoadReport& report) {
+  if (report.attempted < 0 || report.loaded < 0 ||
+      report.loaded > report.attempted ||
+      report.errors.size() > static_cast<std::size_t>(report.attempted) ||
+      static_cast<std::size_t>(report.loaded) + report.errors.size() !=
+          static_cast<std::size_t>(report.attempted)) {
+    throw std::invalid_argument(
+        "plugin load report has inconsistent attempted/loaded/error counts");
+  }
+  require_bounded_entries(report.errors.size(), kGeneralPageMaxEntries,
+                          "plugin load report errors");
+  require_bounded_entries(report.new_op_keys.size(), kGeneralPageMaxEntries,
+                          "plugin load report new_op_keys");
+
+  Json errors = Json::array();
+  for (const HostPluginLoadError& error : report.errors) {
+    const std::int32_t numeric_code = static_cast<std::int32_t>(error.code);
+    switch (error.code) {
+      case GraphErrc::Unknown:
+      case GraphErrc::NotFound:
+      case GraphErrc::Cycle:
+      case GraphErrc::Io:
+      case GraphErrc::InvalidYaml:
+      case GraphErrc::MissingDependency:
+      case GraphErrc::NoOperation:
+      case GraphErrc::InvalidParameter:
+      case GraphErrc::ComputeError:
+        break;
+      default:
+        throw std::invalid_argument(
+            "plugin load report contains an unknown GraphErrc value");
+    }
+    require_bounded_text(error.path, kPathTextMaxBytes,
+                         "plugin load error.path");
+    errors.push_back(Json{{"path", error.path},
+                          {"code", numeric_code},
+                          {"name", graph_error_stable_name(error.code)},
+                          {"message", bounded_diagnostic(error.message)}});
+  }
+
+  Json new_op_keys = Json::array();
+  for (const std::string& key : report.new_op_keys) {
+    new_op_keys.push_back(encode_plugin_key(key));
+  }
+  return Json{{"attempted", report.attempted},
+              {"loaded", report.loaded},
+              {"errors", std::move(errors)},
+              {"new_op_keys", std::move(new_op_keys)}};
+}
+
+/** @copydoc encode_plugin_key */
+Json encode_plugin_key(std::string_view key) {
+  require_bounded_text(key, kShortTextMaxBytes, "operation plugin key");
+  if (key.empty()) {
+    throw std::invalid_argument("operation plugin key must be nonempty");
+  }
+  return Json(std::string(key));
+}
+
+/** @copydoc encode_plugin_source_row */
+Json encode_plugin_source_row(std::string_view key, std::string_view source) {
+  Json encoded_key = encode_plugin_key(key);
+  require_bounded_text(source, kLargeTextMaxBytes, "operation plugin source");
+  return Json{{"key", std::move(encoded_key)}, {"source", std::string(source)}};
+}
+
 /** @copydoc encode_node_yaml */
 Json encode_node_yaml(const IpcSessionId& session_id, NodeId node,
                       const std::string& yaml_text) {

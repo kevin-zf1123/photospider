@@ -163,6 +163,10 @@ class RequestRouter {
    *       available after concurrent terminal-record removal. Event drains
    *       and scheduler trace pages validate their exact bounds before one
    *       serialized Host call; they never use collection snapshot storage.
+   *       Process-global plugin mutations likewise use one serialized Host
+   *       call, while plugin views reserve, sort, measure, and freeze one
+   *       stable snapshot before their first Host call result is published;
+   *       continuations never resolve a session or reenter Host.
    *       Resource exhaustion is rethrown. The function performs no socket IO.
    */
   std::string route(const std::string& payload);
@@ -321,6 +325,32 @@ class RequestRouter {
    *       `internal_error`.
    */
   std::optional<std::string> route_compute_method(
+      const std::string& id, const std::string& method,
+      const RoutedParams& routed_params);
+
+  /**
+   * @brief Routes process-global operation-plugin control and copied views.
+   *
+   * @param id Valid request id correlated with the response.
+   * @param method Exact version 1 operation-plugin method name.
+   * @param routed_params Cpp-only adapter borrowing structurally valid params.
+   * @return Complete response for this family, or `std::nullopt` when another
+   *         route family must handle the method.
+   * @throws std::bad_alloc if validation, Host copying, snapshot ownership, or
+   *         response construction cannot allocate.
+   * @throws std::invalid_argument if a successful Host returns malformed
+   *         counts, GraphErrc values, UTF-8, keys, or source labels.
+   * @throws Whatever the matching Host method propagates; `route()` preserves
+   *         resource exhaustion and maps other standard exceptions.
+   * @note These methods are process-global and never resolve a graph session.
+   *       Every mutation invokes exactly one matching Host method under
+   *       `host_mutex_` and is never retried. Each first view request reserves
+   *       bounded snapshot quota before exactly one Host call, sorts by public
+   *       key, and freezes the copied result. Continuations use only that
+   *       frozen cursor record and never call Host. This private route does not
+   *       change the separately maintained eight-method advertisement.
+   */
+  std::optional<std::string> route_plugin_method(
       const std::string& id, const std::string& method,
       const RoutedParams& routed_params);
 

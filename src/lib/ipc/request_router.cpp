@@ -223,6 +223,22 @@ bool is_compute_method(std::string_view method) noexcept {
 }
 
 /**
+ * @brief Matches process-global operation-plugin routes.
+ * @param method Exact decoded request method.
+ * @return True only for report/load composition, global mutations, or views.
+ * @throws Nothing.
+ * @note This private matcher does not alter `daemon.version.methods`, which is
+ *       maintained by an independent advertised-method table.
+ */
+bool is_plugin_method(std::string_view method) noexcept {
+  static constexpr std::array<std::string_view, 6> kMethods = {
+      "plugins.load_report",          "plugins.ops_combined_keys",
+      "plugins.ops_combined_sources", "plugins.ops_sources",
+      "plugins.seed_builtins",        "plugins.unload_all"};
+  return std::find(kMethods.begin(), kMethods.end(), method) != kMethods.end();
+}
+
+/**
  * @brief Matches bounded Host observation methods routed by task 3.5.
  * @param method Exact decoded request method.
  * @return True only for compute-event drain or scheduler-trace paging.
@@ -680,6 +696,21 @@ struct TraversalDetailRow {
   int ending_node_id = -1;
   /** @brief Ordered copied traversal metadata for the branch. */
   std::vector<HostTraversalNodeSnapshot> nodes;
+};
+
+/**
+ * @brief One sorted operation-plugin source-map row retained by stable paging.
+ *
+ * @throws std::bad_alloc when copied key or source storage allocates.
+ * @note Both fields are copied Host values. The row contains no loader,
+ *       callback, registry, factory, or dynamic-library ownership state.
+ */
+struct PluginSourceRow {
+  /** @brief Nonempty public operation key used as the deterministic sort key.
+   */
+  std::string key;
+  /** @brief Copied source label or plugin path. */
+  std::string source;
 };
 
 /**
@@ -2347,6 +2378,200 @@ std::optional<std::string> RequestRouter::route_session_control_method(
                          "session-control dispatch invariant failed"));
 }
 
+/** @copydoc RequestRouter::route_plugin_method */
+std::optional<std::string> RequestRouter::route_plugin_method(
+    const std::string& id, const std::string& method,
+    const RoutedParams& routed_params) {
+  if (!is_plugin_method(method)) {
+    return std::nullopt;
+  }
+  const Json& params = routed_params.value;
+
+  if (method == "plugins.load_report") {
+    std::vector<std::string> directories;
+    if (!params.contains("directories") ||
+        !decode_bounded_string_array(params["directories"],
+                                     kPathArrayMaxEntries, kPathTextMaxBytes,
+                                     &directories) ||
+        std::any_of(directories.begin(), directories.end(),
+                    [](const std::string& directory) {
+                      return directory.empty() ||
+                             directory.find('\0') != std::string::npos;
+                    })) {
+      return bounded_error(
+          id, invalid_params(
+                  "plugins.load_report requires up to 256 nonempty bounded "
+                  "directory strings"));
+    }
+    Result<HostPluginLoadReport> report;
+    {
+      std::lock_guard<std::mutex> host_lock(host_mutex_);
+      report = host_.plugins_load_report(directories);
+    }
+    if (!report.status.ok) {
+      return bounded_error(id, graph_status(report.status));
+    }
+    return encode_routed_value(
+        id, [&] { return encode_plugin_load_report(report.value); });
+  }
+
+  if (method == "plugins.unload_all") {
+    Result<int> unloaded;
+    {
+      std::lock_guard<std::mutex> host_lock(host_mutex_);
+      unloaded = host_.plugins_unload_all();
+    }
+    if (!unloaded.status.ok) {
+      return bounded_error(id, graph_status(unloaded.status));
+    }
+    if (unloaded.value < 0) {
+      throw std::invalid_argument(
+          "plugins.unload_all returned a negative removed-key count");
+    }
+    return encode_success_response(id, Json{{"unloaded", unloaded.value}});
+  }
+
+  if (method == "plugins.seed_builtins") {
+    VoidResult seeded;
+    {
+      std::lock_guard<std::mutex> host_lock(host_mutex_);
+      seeded = host_.seed_builtin_ops();
+    }
+    if (!seeded.status.ok) {
+      return bounded_error(id, graph_status(seeded.status));
+    }
+    return encode_success_response(id, Json::object());
+  }
+
+  CollectionPageRequest page_request;
+  std::string page_message;
+  if (!read_collection_page(params, &page_request, &page_message)) {
+    return bounded_error(id, invalid_params(std::move(page_message)));
+  }
+  CollectionSnapshotBinding binding{method, {}, {}};
+
+  if (page_request.cursor) {
+    if (method == "plugins.ops_combined_keys") {
+      auto page = collection_snapshots_.page<std::string>(
+          *page_request.cursor, binding, page_request.offset,
+          page_request.limit);
+      if (page.error != CollectionSnapshotError::None) {
+        return bounded_error(id, collection_error_status(page.error));
+      }
+      return encode_routed_value(id, [&] {
+        Json keys = Json::array();
+        for (const std::string& key : page.entries) {
+          keys.push_back(encode_plugin_key(key));
+        }
+        Json result{{"keys", std::move(keys)}};
+        add_collection_page_metadata(&result, page);
+        return result;
+      });
+    }
+    auto page = collection_snapshots_.page<PluginSourceRow>(
+        *page_request.cursor, binding, page_request.offset, page_request.limit);
+    if (page.error != CollectionSnapshotError::None) {
+      return bounded_error(id, collection_error_status(page.error));
+    }
+    return encode_routed_value(id, [&] {
+      Json sources = Json::array();
+      for (const PluginSourceRow& row : page.entries) {
+        sources.push_back(encode_plugin_source_row(row.key, row.source));
+      }
+      Json result{{"sources", std::move(sources)}};
+      add_collection_page_metadata(&result, page);
+      return result;
+    });
+  }
+
+  auto reserved = collection_snapshots_.reserve();
+  if (reserved.error != CollectionSnapshotError::None) {
+    return bounded_error(id, collection_error_status(reserved.error));
+  }
+
+  if (method == "plugins.ops_combined_keys") {
+    Result<std::vector<std::string>> viewed;
+    {
+      std::lock_guard<std::mutex> host_lock(host_mutex_);
+      viewed = host_.ops_combined_keys();
+    }
+    if (!viewed.status.ok) {
+      return bounded_error(id, graph_status(viewed.status));
+    }
+    try {
+      std::sort(viewed.value.begin(), viewed.value.end());
+      Json empty_page{{"keys", Json::array()}};
+      add_worst_collection_page_metadata(&empty_page);
+      const CollectionMeasurement measured = measure_collection_rows(
+          viewed.value,
+          [](const std::string& key) { return encode_plugin_key(key); },
+          empty_page, page_request.limit, viewed.value.size());
+      auto page = collection_snapshots_.publish(
+          std::move(reserved.reservation), std::move(binding),
+          std::move(viewed.value), measured.entries, measured.bytes,
+          page_request.limit, measured.page_limit);
+      if (page.error != CollectionSnapshotError::None) {
+        return bounded_error(id, collection_error_status(page.error));
+      }
+      Json keys = Json::array();
+      for (const std::string& key : page.entries) {
+        keys.push_back(encode_plugin_key(key));
+      }
+      Json result{{"keys", std::move(keys)}};
+      add_collection_page_metadata(&result, page);
+      return encode_success_response(id, std::move(result));
+    } catch (const std::length_error& error) {
+      return collection_too_large(id, error.what());
+    }
+  }
+
+  Result<std::map<std::string, std::string>> viewed;
+  {
+    std::lock_guard<std::mutex> host_lock(host_mutex_);
+    viewed = method == "plugins.ops_sources" ? host_.ops_sources()
+                                             : host_.ops_combined_sources();
+  }
+  if (!viewed.status.ok) {
+    return bounded_error(id, graph_status(viewed.status));
+  }
+  try {
+    std::vector<PluginSourceRow> rows;
+    rows.reserve(viewed.value.size());
+    for (auto& entry : viewed.value) {
+      rows.push_back(
+          PluginSourceRow{std::move(entry.first), std::move(entry.second)});
+    }
+    std::sort(rows.begin(), rows.end(),
+              [](const PluginSourceRow& left, const PluginSourceRow& right) {
+                return left.key < right.key;
+              });
+    Json empty_page{{"sources", Json::array()}};
+    add_worst_collection_page_metadata(&empty_page);
+    const CollectionMeasurement measured = measure_collection_rows(
+        rows,
+        [](const PluginSourceRow& row) {
+          return encode_plugin_source_row(row.key, row.source);
+        },
+        empty_page, page_request.limit, rows.size());
+    auto page = collection_snapshots_.publish(
+        std::move(reserved.reservation), std::move(binding), std::move(rows),
+        measured.entries, measured.bytes, page_request.limit,
+        measured.page_limit);
+    if (page.error != CollectionSnapshotError::None) {
+      return bounded_error(id, collection_error_status(page.error));
+    }
+    Json sources = Json::array();
+    for (const PluginSourceRow& row : page.entries) {
+      sources.push_back(encode_plugin_source_row(row.key, row.source));
+    }
+    Json result{{"sources", std::move(sources)}};
+    add_collection_page_metadata(&result, page);
+    return encode_success_response(id, std::move(result));
+  } catch (const std::length_error& error) {
+    return collection_too_large(id, error.what());
+  }
+}
+
 /** @copydoc RequestRouter::route_observation_method */
 std::optional<std::string> RequestRouter::route_observation_method(
     const std::string& id, const std::string& method,
@@ -2670,6 +2895,11 @@ std::string RequestRouter::route(const std::string& payload) {
 
     if (std::optional<std::string> routed =
             route_observation_method(id, method, RoutedParams{params})) {
+      return std::move(*routed);
+    }
+
+    if (std::optional<std::string> routed =
+            route_plugin_method(id, method, RoutedParams{params})) {
       return std::move(*routed);
     }
 

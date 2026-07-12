@@ -50,6 +50,9 @@ struct IpcHostInvocation {
   /** @brief Path, YAML, precision, type, or description argument. */
   std::string text;
 
+  /** @brief Complete directory/path array when a Host call accepts one. */
+  std::vector<std::string> texts;
+
   /** @brief Optional node argument used by dependency-tree inspection. */
   std::optional<NodeId> optional_node;
 
@@ -273,6 +276,61 @@ class IpcHostSpy final : public Host {
   void set_last_error(OperationStatus status) {
     std::lock_guard<std::mutex> lock(mutex_);
     last_error_ = std::move(status);
+  }
+
+  /**
+   * @brief Configures the copied `plugins.load_report` Host result.
+   * @param report Complete report returned on a successful configured status.
+   * @return Nothing.
+   * @throws std::bad_alloc if copied report storage cannot allocate.
+   */
+  void set_plugin_load_report(HostPluginLoadReport report) {
+    std::lock_guard<std::mutex> lock(mutex_);
+    plugin_load_report_ = std::move(report);
+  }
+
+  /**
+   * @brief Configures the copied `plugins.unload_all` removed-key count.
+   * @param count Exact integer value returned with the configured status.
+   * @return Nothing.
+   * @throws Nothing.
+   */
+  void set_plugins_unload_count(int count) noexcept {
+    std::lock_guard<std::mutex> lock(mutex_);
+    plugins_unload_count_ = count;
+  }
+
+  /**
+   * @brief Configures the copied `plugins.ops_sources` map.
+   * @param sources Complete operation-key/source snapshot.
+   * @return Nothing.
+   * @throws std::bad_alloc if copied keys or sources cannot allocate.
+   */
+  void set_ops_sources(std::map<std::string, std::string> sources) {
+    std::lock_guard<std::mutex> lock(mutex_);
+    ops_sources_ = std::move(sources);
+  }
+
+  /**
+   * @brief Configures the copied `plugins.ops_combined_keys` list.
+   * @param keys Complete Host-returned key list in arbitrary order.
+   * @return Nothing.
+   * @throws std::bad_alloc if copied key storage cannot allocate.
+   */
+  void set_ops_combined_keys(std::vector<std::string> keys) {
+    std::lock_guard<std::mutex> lock(mutex_);
+    ops_combined_keys_ = std::move(keys);
+  }
+
+  /**
+   * @brief Configures the copied `plugins.ops_combined_sources` map.
+   * @param sources Complete combined-key/source snapshot.
+   * @return Nothing.
+   * @throws std::bad_alloc if copied keys or sources cannot allocate.
+   */
+  void set_ops_combined_sources(std::map<std::string, std::string> sources) {
+    std::lock_guard<std::mutex> lock(mutex_);
+    ops_combined_sources_ = std::move(sources);
   }
 
   /**
@@ -758,8 +816,9 @@ class IpcHostSpy final : public Host {
       const std::vector<std::string>& dirs) override {
     IpcHostInvocation invocation = method_invocation("plugins.load_report");
     invocation.text = dirs.empty() ? std::string{} : dirs.front();
+    invocation.texts = dirs;
     record(std::move(invocation));
-    return {status_for("plugins.load_report"), HostPluginLoadReport{}};
+    return configured_result("plugins.load_report", plugin_load_report_);
   }
 
   /** @copydoc Host::plugins_load */
@@ -773,7 +832,7 @@ class IpcHostSpy final : public Host {
   /** @copydoc Host::plugins_unload_all */
   Result<int> plugins_unload_all() override {
     record(method_invocation("plugins.unload_all"));
-    return {status_for("plugins.unload_all"), 0};
+    return configured_result("plugins.unload_all", plugins_unload_count_);
   }
 
   /** @copydoc Host::seed_builtin_ops */
@@ -785,20 +844,21 @@ class IpcHostSpy final : public Host {
   /** @copydoc Host::ops_sources */
   Result<std::map<std::string, std::string>> ops_sources() const override {
     record(method_invocation("plugins.ops_sources"));
-    return {status_for("plugins.ops_sources"), {}};
+    return configured_result("plugins.ops_sources", ops_sources_);
   }
 
   /** @copydoc Host::ops_combined_keys */
   Result<std::vector<std::string>> ops_combined_keys() const override {
     record(method_invocation("plugins.ops_combined_keys"));
-    return {status_for("plugins.ops_combined_keys"), {}};
+    return configured_result("plugins.ops_combined_keys", ops_combined_keys_);
   }
 
   /** @copydoc Host::ops_combined_sources */
   Result<std::map<std::string, std::string>> ops_combined_sources()
       const override {
     record(method_invocation("plugins.ops_combined_sources"));
-    return {status_for("plugins.ops_combined_sources"), {}};
+    return configured_result("plugins.ops_combined_sources",
+                             ops_combined_sources_);
   }
 
   /** @copydoc Host::scheduler_available_types */
@@ -1055,6 +1115,21 @@ class IpcHostSpy final : public Host {
 
   /** @brief Configured nested last-error diagnostic output. */
   OperationStatus last_error_;
+
+  /** @brief Configured operation-plugin load report. */
+  HostPluginLoadReport plugin_load_report_;
+
+  /** @brief Configured process-global plugin unload count. */
+  int plugins_unload_count_ = 0;
+
+  /** @brief Configured operation source map. */
+  std::map<std::string, std::string> ops_sources_;
+
+  /** @brief Configured combined operation key list. */
+  std::vector<std::string> ops_combined_keys_;
+
+  /** @brief Configured combined operation source map. */
+  std::map<std::string, std::string> ops_combined_sources_;
 
   /** @brief Configured bounded compute-event drain result. */
   ComputeEventBatch compute_event_batch_;
