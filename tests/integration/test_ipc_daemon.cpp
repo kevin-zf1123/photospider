@@ -19,6 +19,7 @@
 #include <csignal>
 #include <cstddef>
 #include <cstdint>
+#include <cstdlib>
 #include <cstring>
 #include <exception>
 #include <filesystem>
@@ -53,8 +54,24 @@
     "PS_TEST_OP_PLUGIN_DIR must name the lifecycle operation plugin directory"
 #endif
 
+#ifndef PS_TEST_SCHEDULER_PLUGIN_PATH
+#error "PS_TEST_SCHEDULER_PLUGIN_PATH must name the active-build scheduler DSO"
+#endif
+
 namespace ps::ipc {
 namespace {
+
+/** @brief Short type exported by the real scheduler lifecycle fixture. */
+constexpr const char* kDestroyCountSchedulerType = "destroy_count_test";
+
+/** @brief Fixture environment key selecting lifecycle trace output. */
+constexpr const char* kSchedulerTraceEnvironment =
+    "PS_DESTROY_COUNT_SCHEDULER_TRACE";  // NOLINT
+
+/** @brief Fixture environment key selecting one compute synchronization FIFO.
+ */
+constexpr const char* kSchedulerComputeGateEnvironment =
+    "PS_DESTROY_COUNT_SCHEDULER_COMPUTE_GATE";  // NOLINT
 
 /**
  * @brief Owns one protected unique temporary directory for daemon tests.
@@ -248,6 +265,114 @@ std::uint64_t ScopedDaemonDirectory::sequence_ = 0;
  */
 std::filesystem::path lifecycle_operation_plugin_dir() {
   return std::filesystem::path(PS_TEST_OP_PLUGIN_DIR);
+}
+
+/**
+ * @brief Returns the active-build scheduler lifecycle fixture DSO path.
+ * @return CMake-provided absolute target file path.
+ * @throws std::bad_alloc if path storage cannot allocate.
+ * @note `TARGET_FILE` keeps multi-config and non-default build trees free of
+ *       hard-coded library names or output directories.
+ */
+std::filesystem::path scheduler_fixture_plugin_path() {
+  return std::filesystem::path(PS_TEST_SCHEDULER_PLUGIN_PATH);
+}
+
+/**
+ * @brief Temporarily publishes one environment value inherited by a child.
+ *
+ * @throws std::bad_alloc if key or previous-value storage cannot allocate.
+ * @throws std::runtime_error if `setenv` cannot publish the requested value.
+ * @note Destruction restores the exact parent-process state best-effort. The
+ *       helper configures only the test fixture DSO before `fork`/`exec`; it
+ *       does not add a product daemon option or wire method.
+ */
+class ScopedChildEnvironment final {
+ public:
+  /**
+   * @brief Saves the current value and installs one child-inherited value.
+   * @param name Environment key copied for the guard lifetime.
+   * @param value Exact value to publish.
+   * @throws std::bad_alloc if owned strings cannot allocate.
+   * @throws std::runtime_error if the environment update fails.
+   */
+  ScopedChildEnvironment(const char* name, std::string value) : name_(name) {
+    if (const char* previous = std::getenv(name)) {
+      previous_ = std::string(previous);
+    }
+    if (::setenv(name_.c_str(), value.c_str(), 1) != 0) {
+      throw std::runtime_error(
+          "cannot configure scheduler fixture environment");
+    }
+  }
+
+  /**
+   * @brief Restores the exact prior environment state best-effort.
+   * @throws Nothing; restoration failures are contained.
+   */
+  ~ScopedChildEnvironment() noexcept {
+    if (previous_) {
+      (void)::setenv(name_.c_str(), previous_->c_str(), 1);
+    } else {
+      (void)::unsetenv(name_.c_str());
+    }
+  }
+
+  /**
+   * @brief Prevents duplicate restoration ownership.
+   * @param other Existing guard.
+   * @throws Nothing because construction is unavailable.
+   */
+  ScopedChildEnvironment(const ScopedChildEnvironment& other) = delete;
+
+  /**
+   * @brief Prevents replacement of active restoration ownership.
+   * @param other Existing guard.
+   * @return No value because assignment is unavailable.
+   * @throws Nothing because assignment is unavailable.
+   */
+  ScopedChildEnvironment& operator=(const ScopedChildEnvironment& other) =
+      delete;
+
+ private:
+  /** @brief Owned environment key. */
+  std::string name_;
+
+  /** @brief Previous value, or nullopt when originally absent. */
+  std::optional<std::string> previous_;
+};
+
+/**
+ * @brief Reads newline-delimited scheduler fixture lifecycle events.
+ * @param path Trace file selected before daemon start.
+ * @return Ordered nonempty event labels; an absent file yields an empty list.
+ * @throws std::filesystem::filesystem_error if trace-path existence inspection
+ *         fails.
+ * @throws std::ios_base::failure if an existing file cannot be opened or read
+ *         fully.
+ * @throws std::bad_alloc if line storage cannot allocate.
+ * @note The helper reads only after the relevant RPC or daemon lifetime stage
+ *       completed, so no concurrent stream coordination is required.
+ */
+std::vector<std::string> read_scheduler_trace(
+    const std::filesystem::path& path) {
+  if (!std::filesystem::exists(path)) {
+    return {};
+  }
+  std::ifstream input(path);
+  if (!input.is_open()) {
+    throw std::ios_base::failure("cannot open scheduler fixture trace: " +
+                                 path.string());
+  }
+  input.exceptions(std::ios::badbit);
+  std::vector<std::string> events;
+  std::string event;
+  while (std::getline(input, event)) {
+    if (!event.empty()) {
+      events.push_back(std::move(event));
+    }
+  }
+  return events;
 }
 
 /**
@@ -740,6 +865,28 @@ void write_ipc_graph(const std::filesystem::path& path) {
             "  parameters:\n"
             "    width: 6\n"
             "    height: 4\n";
+}
+
+/**
+ * @brief Writes a deterministic graph backed by the built-in constant op.
+ *
+ * @param path YAML source path to create.
+ * @return Nothing.
+ * @throws std::filesystem::filesystem_error or std::ios_base::failure on IO
+ *         failure.
+ * @note The daemon must seed built-in operations before computing this graph.
+ *       The small image keeps the scheduler-serialization test focused on Host
+ *       ownership rather than operation cost.
+ */
+void write_scheduler_compute_graph(const std::filesystem::path& path) {
+  std::filesystem::create_directories(path.parent_path());
+  std::ofstream output(path);
+  output.exceptions(std::ios::badbit | std::ios::failbit);
+  output << "- id: 1\n"
+            "  name: scheduler_source\n"
+            "  type: image_generator\n"
+            "  subtype: constant\n"
+            "  parameters: {width: 2, height: 2, value: 1, channels: 1}\n";
 }
 
 /**
@@ -1328,26 +1475,25 @@ class RawDaemonCallTask final {
 };
 
 /**
- * @brief Owns one FIFO used to block a real Host graph reload
- * deterministically.
+ * @brief Owns one FIFO used to block a real Host call deterministically.
  *
  * @throws std::runtime_error if FIFO creation or permission setup fails.
  * @note A successful nonblocking writer-only open proves the daemon already
  *       has a reader. The helper then keeps an `O_RDWR` descriptor open so an
  *       assertion cleanup can close the gate without risking SIGPIPE.
  */
-class BlockingReloadFifo final {
+class BlockingHostFifo final {
  public:
   /**
    * @brief Creates one exact mode-0600 FIFO.
    * @param path Unique FIFO path below a protected test directory.
    * @throws std::runtime_error if creation or chmod fails.
    */
-  explicit BlockingReloadFifo(std::filesystem::path path)
+  explicit BlockingHostFifo(std::filesystem::path path)
       : path_(std::move(path)) {
     if (::mkfifo(path_.c_str(), 0600) != 0 ||
         ::chmod(path_.c_str(), 0600) != 0) {
-      throw std::runtime_error(std::string("failed to create reload FIFO: ") +
+      throw std::runtime_error(std::string("failed to create Host FIFO: ") +
                                std::strerror(errno));
     }
   }
@@ -1357,7 +1503,7 @@ class BlockingReloadFifo final {
    * @param other Existing owner.
    * @throws Nothing because construction is unavailable.
    */
-  BlockingReloadFifo(const BlockingReloadFifo& other) = delete;
+  BlockingHostFifo(const BlockingHostFifo& other) = delete;
 
   /**
    * @brief Prevents replacement of one FIFO gate.
@@ -1365,13 +1511,13 @@ class BlockingReloadFifo final {
    * @return No value because assignment is unavailable.
    * @throws Nothing because assignment is unavailable.
    */
-  BlockingReloadFifo& operator=(const BlockingReloadFifo& other) = delete;
+  BlockingHostFifo& operator=(const BlockingHostFifo& other) = delete;
 
   /**
    * @brief Closes an unreleased writer so a blocked reader observes EOF.
    * @throws Nothing.
    */
-  ~BlockingReloadFifo() = default;
+  ~BlockingHostFifo() = default;
 
   /**
    * @brief Waits until the daemon has opened the FIFO for reading.
@@ -1390,7 +1536,7 @@ class BlockingReloadFifo final {
         internal::UniqueFd stable(
             ::open(path_.c_str(), O_RDWR | O_NONBLOCK | O_CLOEXEC));
         if (!stable) {
-          message_ = std::string("failed to stabilize reload FIFO: ") +
+          message_ = std::string("failed to stabilize Host FIFO: ") +
                      std::strerror(errno);
           return false;
         }
@@ -1398,13 +1544,13 @@ class BlockingReloadFifo final {
         return true;
       }
       if (errno != ENXIO && errno != EINTR) {
-        message_ = std::string("failed to observe reload FIFO reader: ") +
+        message_ = std::string("failed to observe Host FIFO reader: ") +
                    std::strerror(errno);
         return false;
       }
       std::this_thread::yield();
     }
-    message_ = "reload FIFO reader was not observed before deadline";
+    message_ = "Host FIFO reader was not observed before deadline";
     return false;
   }
 
@@ -1416,10 +1562,6 @@ class BlockingReloadFifo final {
    *       the write safe even if the daemon has already closed its reader.
    */
   bool release() {
-    if (!writer_) {
-      message_ = "reload FIFO has no confirmed reader";
-      return false;
-    }
     static constexpr std::string_view kGraph =
         "- id: 1\n"
         "  name: ipc_source\n"
@@ -1428,24 +1570,18 @@ class BlockingReloadFifo final {
         "  parameters:\n"
         "    width: 6\n"
         "    height: 4\n";
-    std::size_t offset = 0;
-    while (offset < kGraph.size()) {
-      const ssize_t written = ::write(writer_.get(), kGraph.data() + offset,
-                                      kGraph.size() - offset);
-      if (written > 0) {
-        offset += static_cast<std::size_t>(written);
-        continue;
-      }
-      if (written < 0 && errno == EINTR) {
-        continue;
-      }
-      message_ = std::string("failed to release reload FIFO: ") +
-                 (written == 0 ? "zero-byte progress" : std::strerror(errno));
-      writer_.reset();
-      return false;
-    }
-    writer_.reset();
-    return true;
+    return write_and_close(kGraph, "reload");
+  }
+
+  /**
+   * @brief Writes one synchronization byte and closes the compute gate.
+   * @return True after the fixture scheduler can resume its blocked batch.
+   * @throws std::bad_alloc if a failure diagnostic cannot allocate.
+   * @note The payload is intentionally content-free; the real scheduler
+   *       fixture consumes exactly one byte and does not interpret a command.
+   */
+  bool release_compute() {
+    return write_and_close(std::string_view("c", 1), "scheduler compute");
   }
 
   /**
@@ -1456,6 +1592,40 @@ class BlockingReloadFifo final {
   const std::string& message() const noexcept { return message_; }
 
  private:
+  /**
+   * @brief Writes one bounded payload and closes the stable FIFO writer.
+   * @param payload Complete bytes consumed by the blocked Host-side reader.
+   * @param purpose Diagnostic operation label.
+   * @return True after every byte and EOF are published.
+   * @throws std::bad_alloc if a failure diagnostic cannot allocate.
+   * @note The retained `O_RDWR` descriptor prevents SIGPIPE if the reader
+   *       consumes only a prefix and closes before this helper finishes.
+   */
+  bool write_and_close(std::string_view payload, const char* purpose) {
+    if (!writer_) {
+      message_ = std::string(purpose) + " FIFO has no confirmed reader";
+      return false;
+    }
+    std::size_t offset = 0;
+    while (offset < payload.size()) {
+      const ssize_t written = ::write(writer_.get(), payload.data() + offset,
+                                      payload.size() - offset);
+      if (written > 0) {
+        offset += static_cast<std::size_t>(written);
+        continue;
+      }
+      if (written < 0 && errno == EINTR) {
+        continue;
+      }
+      message_ = std::string("failed to release ") + purpose + " FIFO: " +
+                 (written == 0 ? "zero-byte progress" : std::strerror(errno));
+      writer_.reset();
+      return false;
+    }
+    writer_.reset();
+    return true;
+  }
+
   /** @brief Owned FIFO path removed with the surrounding test directory. */
   std::filesystem::path path_;
 
@@ -1464,6 +1634,64 @@ class BlockingReloadFifo final {
 
   /** @brief Last contained setup/release failure. */
   std::string message_;
+};
+
+/**
+ * @brief Releases a blocked fixture-scheduler compute during stack unwinding.
+ *
+ * @throws Nothing after construction.
+ * @note Tests construct this guard after their concurrent RPC tasks so its
+ *       destructor runs first. This ordering prevents a fatal assertion from
+ *       joining a Host-blocked RPC before the scheduler FIFO is released.
+ */
+class ScopedComputeGateRelease final {
+ public:
+  /**
+   * @brief Arms cleanup for one live compute gate.
+   * @param gate Gate whose fixture scheduler may be blocked in compute.
+   * @throws Nothing.
+   */
+  explicit ScopedComputeGateRelease(BlockingHostFifo& gate) noexcept
+      : gate_(&gate) {}
+
+  /**
+   * @brief Prevents duplicate ownership of one cleanup obligation.
+   * @param other Existing guard.
+   * @throws Nothing because construction is unavailable.
+   */
+  ScopedComputeGateRelease(const ScopedComputeGateRelease& other) = delete;
+
+  /**
+   * @brief Prevents replacing one cleanup obligation.
+   * @param other Existing guard.
+   * @return No value because assignment is unavailable.
+   * @throws Nothing because assignment is unavailable.
+   */
+  ScopedComputeGateRelease& operator=(const ScopedComputeGateRelease& other) =
+      delete;
+
+  /**
+   * @brief Best-effort releases an armed gate before RPC task destruction.
+   * @throws Nothing; allocation or IO diagnostics are contained.
+   */
+  ~ScopedComputeGateRelease() noexcept {
+    try {
+      if (gate_ != nullptr) {
+        (void)gate_->release_compute();
+      }
+    } catch (...) {
+    }
+  }
+
+  /**
+   * @brief Disarms cleanup after an explicit successful release.
+   * @throws Nothing.
+   */
+  void dismiss() noexcept { gate_ = nullptr; }
+
+ private:
+  /** @brief Borrowed gate, or null after explicit release. */
+  BlockingHostFifo* gate_;
 };
 
 /**
@@ -1535,7 +1763,7 @@ internal::Json wait_for_real_compute_terminal(
 }
 
 /**
- * @brief Builds the smallest valid task-3.3 compute submission.
+ * @brief Builds the smallest valid status-mode compute submission.
  *
  * @param session Active opaque daemon session id.
  * @param node Target public node id.
@@ -1549,6 +1777,25 @@ internal::Json minimal_compute_submit_params(const IpcSessionId& session,
   return internal::Json{{"session_id", session.value},
                         {"node_id", node},
                         {"result_mode", "status"}};
+}
+
+/**
+ * @brief Builds one HP submission that must use the session scheduler.
+ *
+ * @param session Active opaque daemon session id.
+ * @param node Target public node id.
+ * @return Status-mode params with explicit HP intent and parallel execution.
+ * @throws std::bad_alloc if JSON storage cannot allocate.
+ * @note Explicit scheduler-backed execution is required for the real plugin
+ *       FIFO gate; the ordinary compute helper intentionally defaults to the
+ *       sequential path.
+ */
+internal::Json scheduler_compute_submit_params(const IpcSessionId& session,
+                                               std::int64_t node = 1) {
+  internal::Json params = minimal_compute_submit_params(session, node);
+  params["execution"] = internal::Json{{"parallel", true}};
+  params["intent"] = "global_high_precision";
+  return params;
 }
 
 /**
@@ -2560,6 +2807,358 @@ TEST(IpcDaemonOperationPlugins,
   EXPECT_FALSE(std::filesystem::exists(socket_path));
 }
 
+TEST(IpcDaemonSchedulers,
+     RealFixtureRoutesDiscoveryControlSessionValuesAndLifetime) {
+  ScopedDaemonDirectory temp("ps-scheduler-daemon", true);
+  const std::filesystem::path plugin_path = scheduler_fixture_plugin_path();
+  ASSERT_TRUE(std::filesystem::is_regular_file(plugin_path))
+      << "scheduler fixture was not built at " << plugin_path;
+  const std::filesystem::path trace_path = temp.path() / "scheduler.trace";
+  ScopedChildEnvironment trace_environment(kSchedulerTraceEnvironment,
+                                           trace_path.string());
+
+  const std::string load_socket = (temp.path() / "load.sock").string();
+  DaemonProcess daemon;
+  daemon.start(load_socket);
+  ASSERT_TRUE(daemon.wait_ready(std::chrono::seconds(5)));
+
+  internal::Json response = raw_daemon_call(
+      load_socket, "scheduler.load",
+      internal::Json{{"path", (temp.path() / "missing.dylib").string()}},
+      "scheduler-missing-load");
+  ASSERT_TRUE(response.contains("error")) << response.dump();
+  EXPECT_EQ(response["error"]["domain"], "graph");
+  EXPECT_EQ(response["error"]["name"], "io");
+
+  response = raw_daemon_call(
+      load_socket, "scheduler.load",
+      internal::Json{{"path", plugin_path.string()}, {"future", true}},
+      "scheduler-real-load");
+  ASSERT_TRUE(response.contains("result")) << response.dump();
+  EXPECT_EQ(response["result"], internal::Json::object());
+
+  response =
+      raw_daemon_call(load_socket, "scheduler.types",
+                      internal::Json{{"limit", 4096}}, "scheduler-real-types");
+  ASSERT_TRUE(response.contains("result")) << response.dump();
+  ASSERT_TRUE(response["result"]["types"].is_array());
+  EXPECT_TRUE(std::is_sorted(response["result"]["types"].begin(),
+                             response["result"]["types"].end()));
+  EXPECT_NE(std::find(response["result"]["types"].begin(),
+                      response["result"]["types"].end(),
+                      internal::Json(kDestroyCountSchedulerType)),
+            response["result"]["types"].end());
+
+  response =
+      raw_daemon_call(load_socket, "scheduler.description",
+                      internal::Json{{"type", kDestroyCountSchedulerType}},
+                      "scheduler-real-description");
+  ASSERT_TRUE(response.contains("result")) << response.dump();
+  EXPECT_EQ(response["result"]["type"], kDestroyCountSchedulerType);
+  EXPECT_EQ(response["result"]["description"],
+            "Destroy-count scheduler lifecycle test");
+
+  const internal::Json missing_description =
+      raw_daemon_call(load_socket, "scheduler.description",
+                      internal::Json{{"type", "missing_scheduler_type"}},
+                      "scheduler-missing-description");
+  ASSERT_TRUE(missing_description.contains("error"))
+      << missing_description.dump();
+  EXPECT_EQ(missing_description["error"]["domain"], "graph");
+  EXPECT_EQ(missing_description["error"]["name"], "not_found");
+
+  response = raw_daemon_call(load_socket, "scheduler.loaded_plugins",
+                             internal::Json{{"limit", 4096}},
+                             "scheduler-real-loaded-plugins");
+  ASSERT_TRUE(response.contains("result")) << response.dump();
+  ASSERT_TRUE(response["result"]["plugins"].is_array());
+  ASSERT_EQ(response["result"]["plugins"].size(), 1U);
+  const std::string plugin_label =
+      response["result"]["plugins"][0].get<std::string>();
+  EXPECT_NE(plugin_label.find(std::filesystem::absolute(plugin_path).string()),
+            std::string::npos);
+  EXPECT_NE(plugin_label.find(kDestroyCountSchedulerType), std::string::npos);
+  EXPECT_NE(plugin_label.find("vtest"), std::string::npos);
+
+  response =
+      raw_daemon_call(load_socket, "scheduler.configure_defaults",
+                      internal::Json{{"hp_type", kDestroyCountSchedulerType},
+                                     {"rt_type", "serial_debug"},
+                                     {"worker_count", 1}},
+                      "scheduler-real-defaults");
+  ASSERT_TRUE(response.contains("result")) << response.dump();
+
+  const std::filesystem::path yaml_path = temp.path() / "scheduler.yaml";
+  write_ipc_graph(yaml_path);
+  Client client;
+  ASSERT_TRUE(client.connect(load_socket).ok);
+  GraphLoadRequest load;
+  load.session = GraphSessionId{"scheduler_fixture_graph"};
+  load.root_dir = (temp.path() / "sessions").string();
+  load.yaml_path = yaml_path.string();
+  load.cache_root_dir = (temp.path() / "cache").string();
+  const IpcResult<GraphSessionSummary> loaded = client.load_graph(load);
+  ASSERT_TRUE(loaded.status.ok) << loaded.status.message;
+
+  response = raw_daemon_call(
+      load_socket, "scheduler.info",
+      internal::Json{{"session_id", loaded.value.session_id.value},
+                     {"intent", "global_high_precision"}},
+      "scheduler-real-info");
+  ASSERT_TRUE(response.contains("result")) << response.dump();
+  EXPECT_EQ(response["result"]["session_id"], loaded.value.session_id.value);
+  EXPECT_EQ(response["result"]["intent"], "global_high_precision");
+  EXPECT_EQ(response["result"]["scheduler_name"], kDestroyCountSchedulerType);
+  EXPECT_EQ(response["result"]["stats"], "destroy-count-test");
+
+  response = raw_daemon_call(
+      load_socket, "scheduler.replace",
+      internal::Json{{"session_id", loaded.value.session_id.value},
+                     {"intent", "global_high_precision"},
+                     {"type", "missing_scheduler_type"}},
+      "scheduler-real-invalid-replace");
+  ASSERT_TRUE(response.contains("error")) << response.dump();
+  EXPECT_EQ(response["error"]["domain"], "graph");
+  EXPECT_EQ(response["error"]["name"], "invalid_parameter");
+
+  response = raw_daemon_call(
+      load_socket, "scheduler.replace",
+      internal::Json{{"session_id", loaded.value.session_id.value},
+                     {"intent", "global_high_precision"},
+                     {"type", "serial_debug"}},
+      "scheduler-real-replace");
+  ASSERT_TRUE(response.contains("result")) << response.dump();
+  const std::vector<std::string> after_replace =
+      read_scheduler_trace(trace_path);
+  EXPECT_NE(std::find(after_replace.begin(), after_replace.end(), "destroy"),
+            after_replace.end());
+
+  response = raw_daemon_call(
+      load_socket, "scheduler.info",
+      internal::Json{{"session_id", loaded.value.session_id.value},
+                     {"intent", "global_high_precision"}},
+      "scheduler-info-after-replace");
+  ASSERT_TRUE(response.contains("result")) << response.dump();
+  EXPECT_EQ(response["result"]["scheduler_name"], "serial_debug");
+
+  client.disconnect();
+  response = raw_daemon_call(load_socket, "scheduler.types",
+                             internal::Json{{"limit", 4096}},
+                             "scheduler-types-after-client-close");
+  ASSERT_TRUE(response.contains("result")) << response.dump();
+  EXPECT_NE(std::find(response["result"]["types"].begin(),
+                      response["result"]["types"].end(),
+                      internal::Json(kDestroyCountSchedulerType)),
+            response["result"]["types"].end());
+
+  daemon.stop();
+  EXPECT_TRUE(daemon.exited_successfully());
+  const std::vector<std::string> final_trace = read_scheduler_trace(trace_path);
+  const auto destroyed =
+      std::find(final_trace.begin(), final_trace.end(), "destroy");
+  const auto unloaded =
+      std::find(final_trace.begin(), final_trace.end(), "library_unload");
+  ASSERT_NE(destroyed, final_trace.end());
+  ASSERT_NE(unloaded, final_trace.end());
+  EXPECT_LT(std::distance(final_trace.begin(), destroyed),
+            std::distance(final_trace.begin(), unloaded));
+
+  const std::string scan_socket = (temp.path() / "scan.sock").string();
+  daemon.start(scan_socket);
+  ASSERT_TRUE(daemon.wait_ready(std::chrono::seconds(5)));
+  response = raw_daemon_call(
+      scan_socket, "scheduler.scan",
+      internal::Json{
+          {"directories",
+           internal::Json::array({plugin_path.parent_path().string()})}},
+      "scheduler-real-scan");
+  ASSERT_TRUE(response.contains("result")) << response.dump();
+  EXPECT_GE(response["result"]["loaded"].get<std::size_t>(), 1U);
+  response = raw_daemon_call(scan_socket, "scheduler.types",
+                             internal::Json{{"limit", 4096}},
+                             "scheduler-types-after-scan");
+  ASSERT_TRUE(response.contains("result")) << response.dump();
+  EXPECT_NE(std::find(response["result"]["types"].begin(),
+                      response["result"]["types"].end(),
+                      internal::Json(kDestroyCountSchedulerType)),
+            response["result"]["types"].end());
+  daemon.stop();
+  EXPECT_TRUE(daemon.exited_successfully());
+}
+
+TEST(IpcDaemonSchedulers,
+     RealFixtureComputeSerializesInformationAndReplacement) {
+  ScopedDaemonDirectory temp("ps-scheduler-serialize", true);
+  const std::filesystem::path plugin_path = scheduler_fixture_plugin_path();
+  ASSERT_TRUE(std::filesystem::is_regular_file(plugin_path));
+  const std::filesystem::path trace_path = temp.path() / "scheduler.trace";
+  const std::filesystem::path gate_path = temp.path() / "compute.fifo";
+
+  DaemonProcess daemon;
+  BlockingHostFifo compute_gate(gate_path);
+  ScopedChildEnvironment trace_environment(kSchedulerTraceEnvironment,
+                                           trace_path.string());
+  ScopedChildEnvironment compute_gate_environment(
+      kSchedulerComputeGateEnvironment, gate_path.string());
+
+  const std::string socket_path = (temp.path() / "serialize.sock").string();
+  daemon.start(socket_path);
+  ASSERT_TRUE(daemon.wait_ready(std::chrono::seconds(5)));
+
+  internal::Json response = raw_daemon_call(
+      socket_path, "plugins.seed_builtins", internal::Json::object(),
+      "scheduler-serialize-seed-builtins");
+  ASSERT_TRUE(response.contains("result")) << response.dump();
+  response = raw_daemon_call(socket_path, "scheduler.load",
+                             internal::Json{{"path", plugin_path.string()}},
+                             "scheduler-serialize-load");
+  ASSERT_TRUE(response.contains("result")) << response.dump();
+  response =
+      raw_daemon_call(socket_path, "scheduler.configure_defaults",
+                      internal::Json{{"hp_type", kDestroyCountSchedulerType},
+                                     {"rt_type", "serial_debug"},
+                                     {"worker_count", 1}},
+                      "scheduler-serialize-defaults");
+  ASSERT_TRUE(response.contains("result")) << response.dump();
+
+  const std::filesystem::path yaml_path = temp.path() / "compute.yaml";
+  write_scheduler_compute_graph(yaml_path);
+  Client client;
+  ASSERT_TRUE(client.connect(socket_path).ok);
+  GraphLoadRequest load;
+  load.session = GraphSessionId{"scheduler_serialization"};
+  load.root_dir = (temp.path() / "sessions").string();
+  load.yaml_path = yaml_path.string();
+  load.cache_root_dir = (temp.path() / "cache").string();
+  const IpcResult<GraphSessionSummary> loaded = client.load_graph(load);
+  ASSERT_TRUE(loaded.status.ok) << loaded.status.message;
+
+  const internal::Json submitted =
+      raw_daemon_call(socket_path, "compute.submit",
+                      scheduler_compute_submit_params(loaded.value.session_id),
+                      "scheduler-serialize-submit");
+  ASSERT_TRUE(submitted.contains("result")) << submitted.dump();
+  const std::string compute_id =
+      submitted["result"]["compute_id"].get<std::string>();
+  ScopedFixtureJobRelease release_guard(socket_path, compute_id);
+
+  if (!compute_gate.wait_for_reader(std::chrono::seconds(3))) {
+    const internal::Json failed_status =
+        raw_daemon_call(socket_path, "compute.status",
+                        internal::Json{{"compute_id", compute_id}},
+                        "scheduler-serialize-gate-failure-status",
+                        std::chrono::seconds(1), false);
+    const std::vector<std::string> failed_trace =
+        read_scheduler_trace(trace_path);
+    (void)compute_gate.wait_for_reader(std::chrono::milliseconds(100));
+    (void)compute_gate.release_compute();
+    daemon.stop();
+    FAIL() << "real scheduler compute did not reach its FIFO gate: "
+           << compute_gate.message() << "; status=" << failed_status.dump()
+           << "; trace_entries=" << failed_trace.size();
+    return;
+  }
+
+  const internal::Json running = raw_daemon_call(
+      socket_path, "compute.status", internal::Json{{"compute_id", compute_id}},
+      "scheduler-serialize-running");
+  ASSERT_TRUE(running.contains("result")) << running.dump();
+  EXPECT_EQ(running["result"]["state"], "running");
+
+  auto start_gate = std::make_shared<ConcurrentCallGate>();
+  RawDaemonCallTask information(
+      socket_path, "scheduler.info",
+      internal::Json{{"session_id", loaded.value.session_id.value},
+                     {"intent", "global_high_precision"}},
+      "scheduler-info-during-compute", std::chrono::seconds(5), true,
+      start_gate);
+  RawDaemonCallTask replacement(
+      socket_path, "scheduler.replace",
+      internal::Json{{"session_id", loaded.value.session_id.value},
+                     {"intent", "global_high_precision"},
+                     {"type", "serial_debug"}},
+      "scheduler-replace-during-compute", std::chrono::seconds(5), true,
+      start_gate);
+  ScopedComputeGateRelease compute_gate_release_guard(compute_gate);
+  if (!start_gate->wait_ready(2, std::chrono::seconds(2))) {
+    start_gate->release();
+    (void)compute_gate.release_compute();
+    daemon.stop();
+    (void)information.join();
+    (void)replacement.join();
+    FAIL() << "scheduler concurrency callers did not reach their start gate";
+    return;
+  }
+  start_gate->release();
+
+  EXPECT_FALSE(information.wait_for(std::chrono::milliseconds(150)));
+  EXPECT_FALSE(replacement.wait_for(std::chrono::milliseconds(150)));
+  const internal::Json ping =
+      raw_daemon_call(socket_path, "daemon.ping", internal::Json::object(),
+                      "scheduler-serialize-ping", std::chrono::seconds(1));
+  ASSERT_TRUE(ping.contains("result")) << ping.dump();
+
+  if (!compute_gate.release_compute()) {
+    daemon.stop();
+    (void)information.join();
+    (void)replacement.join();
+    FAIL() << compute_gate.message();
+    return;
+  }
+  compute_gate_release_guard.dismiss();
+
+  const internal::Json terminal = wait_for_real_compute_terminal(
+      socket_path, compute_id, std::chrono::seconds(3));
+  ASSERT_TRUE(terminal.contains("result")) << terminal.dump();
+  EXPECT_EQ(terminal["result"]["state"], "succeeded") << terminal.dump();
+  EXPECT_TRUE(terminal["result"]["status"]["ok"].get<bool>());
+  ASSERT_TRUE(information.wait_for(std::chrono::seconds(3)));
+  ASSERT_TRUE(replacement.wait_for(std::chrono::seconds(3)));
+  const internal::Json information_response = information.join();
+  const internal::Json replacement_response = replacement.join();
+  ASSERT_TRUE(information_response.contains("result"))
+      << information_response.dump();
+  ASSERT_TRUE(replacement_response.contains("result"))
+      << replacement_response.dump();
+  const std::string observed_name =
+      information_response["result"]["scheduler_name"].get<std::string>();
+  EXPECT_TRUE(observed_name == kDestroyCountSchedulerType ||
+              observed_name == "serial_debug");
+
+  response = raw_daemon_call(
+      socket_path, "scheduler.info",
+      internal::Json{{"session_id", loaded.value.session_id.value},
+                     {"intent", "global_high_precision"}},
+      "scheduler-info-after-serialized-replace");
+  ASSERT_TRUE(response.contains("result")) << response.dump();
+  EXPECT_EQ(response["result"]["scheduler_name"], "serial_debug");
+
+  const internal::Json released =
+      raw_daemon_call(socket_path, "compute.release",
+                      internal::Json{{"compute_id", compute_id}},
+                      "scheduler-serialize-release");
+  ASSERT_TRUE(released.contains("result")) << released.dump();
+  release_guard.dismiss();
+
+  const std::vector<std::string> trace = read_scheduler_trace(trace_path);
+  const auto wait_event =
+      std::find(trace.begin(), trace.end(), "compute_gate_wait");
+  const auto release_event =
+      std::find(trace.begin(), trace.end(), "compute_gate_release");
+  const auto destroy_event = std::find(trace.begin(), trace.end(), "destroy");
+  ASSERT_NE(wait_event, trace.end());
+  ASSERT_NE(release_event, trace.end());
+  ASSERT_NE(destroy_event, trace.end());
+  EXPECT_LT(std::distance(trace.begin(), wait_event),
+            std::distance(trace.begin(), release_event));
+  EXPECT_LT(std::distance(trace.begin(), release_event),
+            std::distance(trace.begin(), destroy_event));
+
+  client.disconnect();
+  daemon.stop();
+  EXPECT_TRUE(daemon.exited_successfully());
+}
+
 TEST(IpcOutputFixtureDaemon,
      EmptyImageSucceedsWithoutArtifactOrDeliveryMetadata) {
   ScopedDaemonDirectory temp("ps-output-empty", true);
@@ -3316,7 +3915,7 @@ TEST(IpcDaemonComputeLifecycle,
   const std::string socket_path = (temp.path() / "active-close.sock").string();
   const std::filesystem::path yaml_path = temp.path() / "source.yaml";
   write_ipc_graph(yaml_path);
-  BlockingReloadFifo reload_fifo(temp.path() / "reload.yaml.fifo");
+  BlockingHostFifo reload_fifo(temp.path() / "reload.yaml.fifo");
   DaemonProcess daemon;
   daemon.start(socket_path);
   ASSERT_TRUE(daemon.wait_ready(std::chrono::seconds(5)));
@@ -3447,7 +4046,7 @@ TEST(IpcDaemonComputeLifecycle,
       (temp.path() / "active-shutdown.sock").string();
   const std::filesystem::path yaml_path = temp.path() / "source.yaml";
   write_ipc_graph(yaml_path);
-  BlockingReloadFifo reload_fifo(temp.path() / "reload.yaml.fifo");
+  BlockingHostFifo reload_fifo(temp.path() / "reload.yaml.fifo");
   DaemonProcess daemon;
   daemon.start(socket_path);
   ASSERT_TRUE(daemon.wait_ready(std::chrono::seconds(5)));

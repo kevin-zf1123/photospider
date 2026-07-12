@@ -239,7 +239,7 @@ bool is_plugin_method(std::string_view method) noexcept {
 }
 
 /**
- * @brief Matches bounded Host observation methods routed by task 3.5.
+ * @brief Matches bounded Host observation methods.
  * @param method Exact decoded request method.
  * @return True only for compute-event drain or scheduler-trace paging.
  * @throws Nothing.
@@ -248,6 +248,28 @@ bool is_plugin_method(std::string_view method) noexcept {
  */
 bool is_observation_method(std::string_view method) noexcept {
   return method == "events.drain" || method == "scheduler.trace";
+}
+
+/**
+ * @brief Matches scheduler discovery, configuration, and session routes.
+ * @param method Exact decoded request method.
+ * @return True only for scheduler methods other than bounded trace paging.
+ * @throws Nothing.
+ * @note The trace method remains owned by `is_observation_method()`. This
+ *       private matcher does not change the independent eight-method version
+ *       advertisement table.
+ */
+bool is_scheduler_method(std::string_view method) noexcept {
+  static constexpr std::array<std::string_view, 8> kMethods = {
+      "scheduler.configure_defaults",
+      "scheduler.description",
+      "scheduler.info",
+      "scheduler.load",
+      "scheduler.loaded_plugins",
+      "scheduler.replace",
+      "scheduler.scan",
+      "scheduler.types"};
+  return std::find(kMethods.begin(), kMethods.end(), method) != kMethods.end();
 }
 
 /**
@@ -2572,6 +2594,232 @@ std::optional<std::string> RequestRouter::route_plugin_method(
   }
 }
 
+/** @copydoc RequestRouter::route_scheduler_method */
+std::optional<std::string> RequestRouter::route_scheduler_method(
+    const std::string& id, const std::string& method,
+    const RoutedParams& routed_params) {
+  if (!is_scheduler_method(method)) {
+    return std::nullopt;
+  }
+  const Json& params = routed_params.value;
+
+  if (method == "scheduler.description") {
+    std::string type;
+    if (!read_required_text(params, "type", kShortTextMaxBytes, &type) ||
+        type.empty() || type.find('\0') != std::string::npos) {
+      return bounded_error(
+          id, invalid_params(
+                  "scheduler.description requires a nonempty bounded type"));
+    }
+    Result<std::string> described;
+    {
+      std::lock_guard<std::mutex> host_lock(host_mutex_);
+      described = host_.scheduler_description(type);
+    }
+    if (!described.status.ok) {
+      return bounded_error(id, graph_status(described.status));
+    }
+    return encode_routed_value(id, [&] {
+      return encode_scheduler_description(type, described.value);
+    });
+  }
+
+  if (method == "scheduler.scan") {
+    std::vector<std::string> directories;
+    if (!params.contains("directories") ||
+        !decode_bounded_string_array(params["directories"],
+                                     kPathArrayMaxEntries, kPathTextMaxBytes,
+                                     &directories) ||
+        std::any_of(directories.begin(), directories.end(),
+                    [](const std::string& directory) {
+                      return directory.empty() ||
+                             directory.find('\0') != std::string::npos;
+                    })) {
+      return bounded_error(
+          id,
+          invalid_params("scheduler.scan requires up to 256 nonempty bounded "
+                         "directory strings"));
+    }
+    Result<std::size_t> scanned;
+    {
+      std::lock_guard<std::mutex> host_lock(host_mutex_);
+      scanned = host_.scheduler_scan(directories);
+    }
+    if (!scanned.status.ok) {
+      return bounded_error(id, graph_status(scanned.status));
+    }
+    return encode_success_response(id, Json{{"loaded", scanned.value}});
+  }
+
+  if (method == "scheduler.load") {
+    std::string path;
+    if (!read_required_text(params, "path", kPathTextMaxBytes, &path) ||
+        path.empty() || path.find('\0') != std::string::npos) {
+      return bounded_error(
+          id,
+          invalid_params("scheduler.load requires a nonempty bounded path"));
+    }
+    VoidResult loaded;
+    {
+      std::lock_guard<std::mutex> host_lock(host_mutex_);
+      loaded = host_.scheduler_load(path);
+    }
+    if (!loaded.status.ok) {
+      return bounded_error(id, graph_status(loaded.status));
+    }
+    return encode_success_response(id, Json::object());
+  }
+
+  if (method == "scheduler.configure_defaults") {
+    HostSchedulerConfig config;
+    if (!read_required_text(params, "hp_type", kShortTextMaxBytes,
+                            &config.hp_type) ||
+        !read_required_text(params, "rt_type", kShortTextMaxBytes,
+                            &config.rt_type) ||
+        config.hp_type.empty() || config.rt_type.empty() ||
+        config.hp_type.find('\0') != std::string::npos ||
+        config.rt_type.find('\0') != std::string::npos ||
+        !params.contains("worker_count") ||
+        !decode_integer(params["worker_count"], &config.worker_count)) {
+      return bounded_error(
+          id, invalid_params(
+                  "scheduler.configure_defaults requires bounded hp_type, "
+                  "rt_type, and exact worker_count"));
+    }
+    VoidResult configured;
+    {
+      std::lock_guard<std::mutex> host_lock(host_mutex_);
+      configured = host_.configure_scheduler_defaults(config);
+    }
+    if (!configured.status.ok) {
+      return bounded_error(id, graph_status(configured.status));
+    }
+    return encode_success_response(id, Json::object());
+  }
+
+  if (method == "scheduler.info" || method == "scheduler.replace") {
+    IpcSessionId session_id;
+    ComputeIntent intent = ComputeIntent::GlobalHighPrecision;
+    std::string type;
+    if (!read_session_id(params, &session_id) || !params.contains("intent") ||
+        !decode_enum(params["intent"], &intent)) {
+      return bounded_error(
+          id,
+          invalid_params(method + " requires a valid session_id and intent"));
+    }
+    if (method == "scheduler.replace" &&
+        (!read_required_text(params, "type", kShortTextMaxBytes, &type) ||
+         type.empty() || type.find('\0') != std::string::npos)) {
+      return bounded_error(
+          id,
+          invalid_params("scheduler.replace requires a nonempty bounded type"));
+    }
+
+    IpcResult<SessionRegistry::HostCallAdmission> admission =
+        registry_.admit_host_call(session_id);
+    if (!admission.status.ok) {
+      return bounded_error(id, admission.status);
+    }
+    const GraphSessionId& host_session = admission.value.host_session();
+    if (method == "scheduler.info") {
+      Result<SchedulerInfoSnapshot> info;
+      {
+        std::lock_guard<std::mutex> host_lock(host_mutex_);
+        info = host_.scheduler_info(host_session, intent);
+      }
+      if (!info.status.ok) {
+        return bounded_error(id, graph_status(info.status));
+      }
+      if (info.value.intent != intent) {
+        throw std::invalid_argument(
+            "scheduler.info returned a mismatched compute intent");
+      }
+      return encode_routed_value(
+          id, [&] { return encode_scheduler_info(session_id, info.value); });
+    }
+
+    VoidResult replaced;
+    {
+      std::lock_guard<std::mutex> host_lock(host_mutex_);
+      replaced = host_.replace_scheduler(host_session, intent, type);
+    }
+    if (!replaced.status.ok) {
+      return bounded_error(id, graph_status(replaced.status));
+    }
+    return encode_success_response(id, Json::object());
+  }
+
+  CollectionPageRequest page_request;
+  std::string page_message;
+  if (!read_collection_page(params, &page_request, &page_message)) {
+    return bounded_error(id, invalid_params(std::move(page_message)));
+  }
+  CollectionSnapshotBinding binding{method, {}, {}};
+  const bool type_list = method == "scheduler.types";
+
+  if (page_request.cursor) {
+    auto page = collection_snapshots_.page<std::string>(
+        *page_request.cursor, binding, page_request.offset, page_request.limit);
+    if (page.error != CollectionSnapshotError::None) {
+      return bounded_error(id, collection_error_status(page.error));
+    }
+    return encode_routed_value(id, [&] {
+      Json rows = Json::array();
+      for (const std::string& row : page.entries) {
+        rows.push_back(type_list ? encode_scheduler_type(row)
+                                 : encode_scheduler_plugin_label(row));
+      }
+      Json result{{type_list ? "types" : "plugins", std::move(rows)}};
+      add_collection_page_metadata(&result, page);
+      return result;
+    });
+  }
+
+  auto reserved = collection_snapshots_.reserve();
+  if (reserved.error != CollectionSnapshotError::None) {
+    return bounded_error(id, collection_error_status(reserved.error));
+  }
+
+  Result<std::vector<std::string>> listed;
+  {
+    std::lock_guard<std::mutex> host_lock(host_mutex_);
+    listed = type_list ? host_.scheduler_available_types()
+                       : host_.scheduler_loaded_plugins();
+  }
+  if (!listed.status.ok) {
+    return bounded_error(id, graph_status(listed.status));
+  }
+  try {
+    std::sort(listed.value.begin(), listed.value.end());
+    Json empty_page{{type_list ? "types" : "plugins", Json::array()}};
+    add_worst_collection_page_metadata(&empty_page);
+    const CollectionMeasurement measured = measure_collection_rows(
+        listed.value,
+        [type_list](const std::string& row) {
+          return type_list ? encode_scheduler_type(row)
+                           : encode_scheduler_plugin_label(row);
+        },
+        empty_page, page_request.limit, listed.value.size());
+    auto page = collection_snapshots_.publish(
+        std::move(reserved.reservation), std::move(binding),
+        std::move(listed.value), measured.entries, measured.bytes,
+        page_request.limit, measured.page_limit);
+    if (page.error != CollectionSnapshotError::None) {
+      return bounded_error(id, collection_error_status(page.error));
+    }
+    Json rows = Json::array();
+    for (const std::string& row : page.entries) {
+      rows.push_back(type_list ? encode_scheduler_type(row)
+                               : encode_scheduler_plugin_label(row));
+    }
+    Json result{{type_list ? "types" : "plugins", std::move(rows)}};
+    add_collection_page_metadata(&result, page);
+    return encode_success_response(id, std::move(result));
+  } catch (const std::length_error& error) {
+    return collection_too_large(id, error.what());
+  }
+}
+
 /** @copydoc RequestRouter::route_observation_method */
 std::optional<std::string> RequestRouter::route_observation_method(
     const std::string& id, const std::string& method,
@@ -2895,6 +3143,11 @@ std::string RequestRouter::route(const std::string& payload) {
 
     if (std::optional<std::string> routed =
             route_observation_method(id, method, RoutedParams{params})) {
+      return std::move(*routed);
+    }
+
+    if (std::optional<std::string> routed =
+            route_scheduler_method(id, method, RoutedParams{params})) {
       return std::move(*routed);
     }
 

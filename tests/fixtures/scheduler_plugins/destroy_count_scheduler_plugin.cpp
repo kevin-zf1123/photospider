@@ -13,6 +13,13 @@
 #include <utility>
 #include <vector>
 
+#if !defined(_WIN32)
+#include <fcntl.h>
+#include <unistd.h>
+
+#include <cerrno>
+#endif
+
 #include "kernel/scheduler/scheduler_plugin_api.hpp"
 #include "kernel/scheduler/scheduler_task_runtime.hpp"
 #include "photospider/core/graph_error.hpp"
@@ -36,6 +43,9 @@ constexpr const char* kDuplicateTypeEnvironment =
 /** @brief Environment key selecting a discovery-callback exception. */
 constexpr const char* kLoadFailureEnvironment =
     "PS_DESTROY_COUNT_SCHEDULER_LOAD_FAILURE";  // NOLINT
+/** @brief Environment key naming one fixture-only compute FIFO gate. */
+constexpr const char* kComputeGateEnvironment =
+    "PS_DESTROY_COUNT_SCHEDULER_COMPUTE_GATE";  // NOLINT
 
 /** @brief Number of placement-created fixture instances still alive. */
 std::atomic<int> g_active_count{0};
@@ -45,6 +55,8 @@ std::atomic<int> g_destroy_count{0};
 std::atomic<int> g_shutdown_count{0};
 /** @brief Whether the process-scoped one-shot shutdown failure was consumed. */
 std::atomic<bool> g_shutdown_failure_once_consumed{false};
+/** @brief Whether the process-scoped compute synchronization gate was used. */
+std::atomic<bool> g_compute_gate_consumed{false};
 
 /**
  * @brief Stable counter slots for host-owner runtime forwarding probes.
@@ -149,6 +161,47 @@ void append_lifecycle_trace(const char* event) noexcept {
   (void)std::fputs(event, output);
   (void)std::fputc('\n', output);
   (void)std::fclose(output);
+}
+
+/**
+ * @brief Waits once on the optional fixture-only compute synchronization FIFO.
+ *
+ * @return Nothing after one byte is received or when no gate is configured.
+ * @throws std::runtime_error if a configured POSIX gate cannot be opened or
+ *         does not deliver one byte.
+ * @note This test-fixture control runs inside the real plugin scheduler after
+ *       daemon Host admission. It is not compiled into a product scheduler,
+ *       exposed as a daemon flag, or represented on the IPC wire. A one-shot
+ *       atomic prevents later batches and graph cleanup from waiting again.
+ */
+void wait_for_compute_gate() {
+  const char* path = std::getenv(kComputeGateEnvironment);
+  if (path == nullptr || path[0] == '\0' ||
+      g_compute_gate_consumed.exchange(true, std::memory_order_relaxed)) {
+    return;
+  }
+#if defined(_WIN32)
+  (void)path;
+#else
+  append_lifecycle_trace("compute_gate_wait");
+  int descriptor = -1;
+  do {
+    descriptor = ::open(path, O_RDONLY | O_CLOEXEC);
+  } while (descriptor < 0 && errno == EINTR);
+  if (descriptor < 0) {
+    throw std::runtime_error("fixture compute gate open failed");
+  }
+  char token = 0;
+  ssize_t received = -1;
+  do {
+    received = ::read(descriptor, &token, 1);
+  } while (received < 0 && errno == EINTR);
+  const int close_result = ::close(descriptor);
+  if (received != 1 || close_result != 0) {
+    throw std::runtime_error("fixture compute gate read failed");
+  }
+  append_lifecycle_trace("compute_gate_release");
+#endif
 }
 
 /**
@@ -325,6 +378,8 @@ class DestroyCountScheduler final : public ps::IScheduler,
    * @param total_task_count Completion count recorded by the fixture.
    * @param priority Ignored scheduling hint.
    * @return Nothing.
+   * @throws std::runtime_error before any callback if the configured fixture
+   *         compute gate cannot be opened, read, or closed.
    * @throws Any exception produced by a submitted task unchanged.
    */
   void submit_initial_tasks(std::vector<Task>&& tasks, int total_task_count,
@@ -332,6 +387,7 @@ class DestroyCountScheduler final : public ps::IScheduler,
                                 ps::SchedulerTaskPriority::Normal) override {
     record_forwarding_probe(ForwardingProbe::ClosureFallback);
     (void)priority;
+    wait_for_compute_gate();
     tasks_to_complete_ = total_task_count;
     for (auto& task : tasks) {
       if (task) {
@@ -348,6 +404,9 @@ class DestroyCountScheduler final : public ps::IScheduler,
    * @return Nothing.
    * @throws std::bad_alloc before any callback when the
    * `handle_batch_bad_alloc` mode is active.
+   * @throws std::runtime_error after the bad-allocation failpoint and before
+   *         any callback if the configured fixture compute gate cannot be
+   *         opened, read, or closed.
    * @throws Any task-executor exception unchanged.
    * @note The call counter advances before failure so tests prove the host
    * reached this override rather than a base closure fallback.
@@ -361,6 +420,7 @@ class DestroyCountScheduler final : public ps::IScheduler,
     if (failure_enabled("handle_batch_bad_alloc")) {
       throw std::bad_alloc{};
     }
+    wait_for_compute_gate();
     tasks_to_complete_ = total_task_count;
     for (const auto& handle : handles) {
       if (handle) {
@@ -725,6 +785,7 @@ void ps_test_scheduler_reset_counts() {
   g_destroy_count.store(0);
   g_shutdown_count.store(0, std::memory_order_relaxed);
   g_shutdown_failure_once_consumed.store(false, std::memory_order_relaxed);
+  g_compute_gate_consumed.store(false, std::memory_order_relaxed);
   for (auto& count : g_forwarding_counts) {
     count.store(0, std::memory_order_relaxed);
   }

@@ -34,7 +34,7 @@ metadata subset:
 7. `inspect.node`
 8. `inspect.dependency_tree`
 
-The request router also accepts these 39 additional daemon-routed typed
+The request router also accepts these 47 additional daemon-routed typed
 methods:
 
 1. `cache.cache_all_nodes`
@@ -75,14 +75,22 @@ methods:
 36. `plugins.ops_sources`
 37. `plugins.seed_builtins`
 38. `plugins.unload_all`
-39. `scheduler.trace`
+39. `scheduler.configure_defaults`
+40. `scheduler.description`
+41. `scheduler.info`
+42. `scheduler.load`
+43. `scheduler.loaded_plugins`
+44. `scheduler.replace`
+45. `scheduler.scan`
+46. `scheduler.trace`
+47. `scheduler.types`
 
 The installed typed `ps::ipc::Client` exposes calls only for the eight-name
-metadata subset and has no public raw-JSON escape hatch. The 39 additional
+metadata subset and has no public raw-JSON escape hatch. The 47 additional
 schemas are daemon request-router behavior. Of those methods,
 `compute.status`, `compute.result`, and `compute.release` operate only on the
 daemon job registry. `compute.submit` admits a registry job whose worker later
-performs exactly one matching Host compute call. The other 35 methods route
+performs exactly one matching Host compute call. The other 43 methods route
 their direct or first-page request through matching Host operations; a stable
 collection continuation reads only its frozen snapshot registry record.
 
@@ -90,14 +98,17 @@ Version 1 now exposes daemon-owned compute-job submission, polling, terminal
 result, release, and protected metadata-only image delivery at the router
 boundary. Image bytes stay in private artifacts; a terminal nonempty image
 result returns only the specified artifact metadata under one stable delivery
-lease. Version 1 exposes no compute cancellation, scheduler control,
-`daemon.shutdown`, TCP, Windows named pipe, or `graph_cli --connect`.
+lease. Version 1 exposes no compute cancellation, `daemon.shutdown`, TCP,
+Windows named pipe, or `graph_cli --connect`.
 Process-global operation-plugin control and sorted views are available at the
 daemon router boundary. The installed typed Client currently does not expose
 these plugin methods.
-The bounded `events.drain` and `scheduler.trace` observation routes are
-available only at the daemon router boundary. The existing `graph_cli`
-continues to create an embedded Host and keeps its local command semantics.
+Scheduler-plugin discovery/defaults and per-session scheduler
+inspection/replacement are likewise available only at the daemon router
+boundary; the installed typed Client does not expose them. The bounded
+`events.drain` and `scheduler.trace` observation routes remain daemon-router
+only. The existing `graph_cli` continues to create an embedded Host and keeps
+its local command semantics.
 
 ## Transport and Frame
 
@@ -863,6 +874,8 @@ Collection fields are:
 - `plugins.ops_combined_keys`: sorted string `keys`;
 - `plugins.ops_sources` and `plugins.ops_combined_sources`: sorted `sources`
   rows shaped as `{key,source}`.
+- `scheduler.types`: sorted string `types`;
+- `scheduler.loaded_plugins`: sorted diagnostic string `plugins`.
 
 The installed typed Client accepts the additional page metadata as unknown
 fields and returns complete small single-page graph/tree values. It does not
@@ -945,6 +958,95 @@ Host adapter does not unload it. Only explicit process-global
 `plugins.unload_all` removes/restores active plugin keys; all three later views
 then observe the same state. The router does not expose or shorten callback or
 returned-value library leases.
+
+## Scheduler Plugin Discovery and Session Control
+
+Eight scheduler methods complement the existing `scheduler.trace` observation
+route. They are daemon request-router schemas only: the installed typed Client
+and the exact eight-name `daemon.version.methods` advertisement remain
+unchanged. Unknown members of every params object are ignored for forward
+compatibility.
+
+The six process-global methods do not define, read, or resolve `session_id`:
+
+- `scheduler.types` uses the common first-page/continuation controls and
+  returns sorted scheduler type strings in `types`;
+- `scheduler.description` requires `{"type":"scheduler_type"}` and returns
+  `{"type":"scheduler_type","description":"display text"}`;
+- `scheduler.scan` requires
+  `{"directories":["scheduler/plugin/directory"]}` and returns
+  `{"loaded":N}` with the exact nonnegative Host count;
+- `scheduler.load` requires `{"path":"scheduler/plugin/library"}` and
+  returns `{}`;
+- `scheduler.loaded_plugins` uses the common page controls and returns sorted
+  copied diagnostic strings in `plugins`;
+- `scheduler.configure_defaults` requires
+  `{"hp_type":"hp","rt_type":"rt","worker_count":N}` and returns `{}`.
+
+A scan directory array is required, may be empty, and contains at most 256
+nonempty NUL-free valid UTF-8 strings of at most 4,096 bytes each. A load path
+has the same per-string rules. Scheduler type inputs and Host-returned type
+names are nonempty valid UTF-8 of at most 1,024 bytes. Descriptions and loaded
+plugin labels are valid UTF-8 of at most 4,096 bytes; a description may be
+empty, while a plugin label may not. `worker_count` is an exact integer in
+`0..UINT_MAX`; zero retains the public automatic-worker selection meaning.
+Configuration changes the defaults for subsequently loaded graph sessions
+only; existing sessions retain their scheduler objects until explicit
+replacement.
+
+The two session methods require a valid opaque daemon `session_id` and an
+`intent` equal to `global_high_precision` or `real_time_update`:
+
+```json
+{"session_id":"0123456789abcdef0123456789abcdef","intent":"global_high_precision"}
+```
+
+`scheduler.info` returns:
+
+```json
+{
+  "session_id":"0123456789abcdef0123456789abcdef",
+  "intent":"global_high_precision",
+  "scheduler_name":"cpu_work_stealing",
+  "stats":"backend-defined display text"
+}
+```
+
+The returned scheduler name is nonempty valid UTF-8 of at most 1,024 bytes;
+statistics are display-only valid UTF-8 of at most 4,096 bytes and may be
+empty. The returned intent must equal the request intent. A Host value that
+violates these invariants is a daemon `internal_error`, never a partial value.
+`scheduler.replace` additionally requires a nonempty bounded `type`:
+
+```json
+{
+  "session_id":"0123456789abcdef0123456789abcdef",
+  "intent":"global_high_precision",
+  "type":"serial_debug"
+}
+```
+
+Successful replacement returns `{}`. Every known value is validated before
+opaque-session admission. Missing or closing sessions retain the common daemon
+session-status mapping; unavailable scheduler types and other Host failures
+retain their exact Graph-domain mapping.
+
+Each `scheduler.types` or `scheduler.loaded_plugins` first page reserves the
+common bounded snapshot quota before exactly one Host call, validates and
+sorts the complete copied list, preserves duplicates, measures it, and freezes
+it in the collection registry. Continuations bind to the exact global method
+and offset, read only that frozen value, and never call Host. All general page,
+entry/byte quota, cursor, TTL, and shutdown rules apply unchanged.
+
+Every direct scheduler request and every first-page Host access uses the same
+daemon Host mutex as compute and the other routed families. Per-session info
+and replacement additionally remain admitted through the opaque session while
+the embedded Host serializes scheduler copy/replacement with compute and graph
+close. Mutations are invoked once and are never retried. Successful scheduler
+DSOs remain process-owned across client disconnects and graph sessions; JSON
+never exposes a scheduler, factory, registry, loader, callback, DSO handle, or
+mutable ownership token. `scheduler.trace` retains its independent bounded,
+non-destructive sequence-page contract.
 
 ## Inspection Values
 
@@ -1047,7 +1149,7 @@ cmake --build build --target photospider_ipc_client \
   test_output_store test_event_stream_boundaries test_ipc_daemon \
   public_header_self_containment -j
 ctest --test-dir build --output-on-failure \
-  -R '^(FrameCodec|ProtocolEnvelope|IntegerCodec|ProtocolErrors|ProtocolParams|ProtocolGraphLoad|ProtocolGraphClose|ProtocolOperationPlugins|InspectionJson|SessionRegistry|ComputeRequestRegistry|CollectionSnapshotRegistry|OutputStore|ComputeEventRing|SchedulerTraceRing|ClientLifecycle|ClientResultValidation|IpcDaemon|IpcDaemonOperationPlugins|IpcObservationFixtureDaemon|StaticProductConsumerSmoke|IpcDisabledInstallSmoke|PublicHeaderSelfContainment)'
+  -R '^(FrameCodec|ProtocolEnvelope|IntegerCodec|ProtocolErrors|ProtocolParams|ProtocolGraphLoad|ProtocolGraphClose|ProtocolOperationPlugins|HostRoutedGraphStateProtocolTest|StableInspectionPagingProtocolTest|InspectionJson|SessionRegistry|ComputeRequestRegistry|CollectionSnapshotRegistry|OutputStore|ComputeEventRing|SchedulerTraceRing|ClientLifecycle|ClientResultValidation|IpcDaemon|IpcDaemonOperationPlugins|IpcDaemonSchedulers|IpcObservationFixtureDaemon|StaticProductConsumerSmoke|IpcDisabledInstallSmoke|PublicHeaderSelfContainment)'
 ```
 
 `StaticProductConsumerSmoke` verifies the installed backend plus a second

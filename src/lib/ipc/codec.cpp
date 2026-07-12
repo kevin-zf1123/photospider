@@ -1608,6 +1608,53 @@ Json encode_plugin_source_row(std::string_view key, std::string_view source) {
   return Json{{"key", std::move(encoded_key)}, {"source", std::string(source)}};
 }
 
+/** @copydoc encode_scheduler_type */
+Json encode_scheduler_type(std::string_view type) {
+  require_bounded_text(type, kShortTextMaxBytes, "scheduler type");
+  if (type.empty()) {
+    throw std::invalid_argument("scheduler type must be nonempty");
+  }
+  return Json(std::string(type));
+}
+
+/** @copydoc encode_scheduler_plugin_label */
+Json encode_scheduler_plugin_label(std::string_view label) {
+  require_bounded_text(label, kPathTextMaxBytes, "scheduler plugin label");
+  if (label.empty()) {
+    throw std::invalid_argument("scheduler plugin label must be nonempty");
+  }
+  return Json(std::string(label));
+}
+
+/** @copydoc encode_scheduler_description */
+Json encode_scheduler_description(std::string_view type,
+                                  std::string_view description) {
+  Json encoded_type = encode_scheduler_type(type);
+  require_bounded_text(description, kPathTextMaxBytes, "scheduler description");
+  return Json{{"type", std::move(encoded_type)},
+              {"description", std::string(description)}};
+}
+
+/** @copydoc encode_scheduler_info */
+Json encode_scheduler_info(const IpcSessionId& session_id,
+                           const SchedulerInfoSnapshot& snapshot) {
+  if (!valid_opaque_id(session_id.value)) {
+    throw std::invalid_argument(
+        "scheduler info has an invalid opaque session id");
+  }
+  Json intent;
+  if (!encode_enum(snapshot.intent, &intent)) {
+    throw std::invalid_argument("scheduler info has an unknown intent");
+  }
+  Json scheduler_name = encode_scheduler_type(snapshot.scheduler_name);
+  require_bounded_text(snapshot.stats, kPathTextMaxBytes,
+                       "scheduler statistics");
+  return Json{{"session_id", session_id.value},
+              {"intent", std::move(intent)},
+              {"scheduler_name", std::move(scheduler_name)},
+              {"stats", snapshot.stats}};
+}
+
 /** @copydoc encode_node_yaml */
 Json encode_node_yaml(const IpcSessionId& session_id, NodeId node,
                       const std::string& yaml_text) {

@@ -222,6 +222,48 @@ or when the user later runs `scheduler set <hp|rt> <type>` for the current
 graph. `scheduler plugins` reports discovery state; `scheduler get all` reports
 the actual HP/RT scheduler instances attached to the current graph.
 
+## Daemon Host-Only Scheduler Boundary
+
+`photospiderd` routes scheduler discovery and control only through copied
+public `Host` values. The process-global methods are `scheduler.types`,
+`scheduler.description`, `scheduler.scan`, `scheduler.load`,
+`scheduler.loaded_plugins`, and `scheduler.configure_defaults`. None resolves
+a graph session. The first five inspect or mutate the process-owned scheduler
+factory/loader state; configuration changes only the defaults used for graph
+sessions loaded later. Existing sessions keep their scheduler objects until an
+explicit replacement.
+
+`scheduler.info` and `scheduler.replace` first validate the opaque daemon
+session id, `ComputeIntent`, and replacement type where applicable, then retain
+one session admission through exactly one matching Host call. The embedded
+Host executes scheduler name/statistics copying and replacement inside the
+same per-graph `GraphStateExecutor` boundary as compute and graph close. A
+running compute therefore cannot overlap scheduler inspection or replacement
+for that graph, and replacement cannot destroy the displaced scheduler until
+the active compute releases it.
+
+Every direct request and every first-page access uses the daemon's common Host
+mutex. Scheduler mutation is never retried. `scheduler.types` and
+`scheduler.loaded_plugins` reserve bounded collection quota before their one
+Host call, validate and sort the complete copied list while preserving
+duplicates, and freeze it for stable cursor paging. A continuation reads only
+that frozen process-global value and performs no Host call or session lookup.
+This keeps socket IO outside Host locking while serializing scheduler access
+with every other Host-routed family.
+
+Successful scheduler plugin libraries remain owned by the process loader
+across client disconnects and graph sessions. Wire values expose only type
+names, descriptions, diagnostic plugin labels, configuration values, and
+copied scheduler name/statistics. They never expose a scheduler pointer,
+factory, registry, loader, callback, dynamic-library handle, or mutable
+ownership token. The full wire schemas and bounds are maintained in
+`../codebase-structure/IPC-Protocol-v1.md`.
+
+`scheduler.trace` remains a separate bounded non-destructive observation
+route. The installed typed IPC Client still exposes only its original eight
+methods, and the exact eight-name `daemon.version.methods` metadata inventory
+is unchanged.
+
 ## Scheduler Dispatch Boundary
 
 `IScheduler` no longer exposes compute-planning helpers. Removed planning
