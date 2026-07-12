@@ -2214,15 +2214,17 @@ class Client::Impl {
   }
 
   /**
-   * @brief Aggregates one globally sorted stable string collection.
+   * @brief Aggregates one globally non-decreasing stable string collection.
    * @param method Exact plugin or scheduler wire method.
    * @param field Result array field.
    * @param maximum_bytes Field-specific per-string UTF-8 byte ceiling.
-   * @return Complete strictly sorted owned string list or a failure.
+   * @return Complete non-decreasing owned string list or a failure.
    * @throws std::bad_alloc if requests, pages, strings, or diagnostics
    * allocate.
-   * @note Empty rows, duplicate rows, and cross-page ordering regressions are
-   *       local Protocol failures. No continuation is retried.
+   * @note Empty rows and cross-page ordering regressions are local Protocol
+   *       failures. Equal adjacent rows are preserved in their original page
+   *       order because sorted Host string collections may contain duplicate
+   *       public values. No continuation is retried.
    */
   IpcResult<std::vector<std::string>> sorted_string_collection(
       const std::string& method, const char* field, std::size_t maximum_bytes) {
@@ -2257,9 +2259,8 @@ class Client::Impl {
         [](std::vector<std::string>* aggregate, std::vector<std::string> page,
            std::string* message) {
           for (std::string& row : page) {
-            if (!aggregate->empty() && !(aggregate->back() < row)) {
-              *message =
-                  "string collection is duplicated or unsorted across pages";
+            if (!aggregate->empty() && row < aggregate->back()) {
+              *message = "string collection is not globally non-decreasing";
               return false;
             }
             aggregate->push_back(std::move(row));
