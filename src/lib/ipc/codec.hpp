@@ -483,6 +483,53 @@ bool decode_pixel_rect(const Json& value, PixelRect* rect) noexcept;
 Json encode_node_ids(const std::vector<NodeId>& nodes);
 
 /**
+ * @brief Encodes one indivisible operation-plugin load report.
+ *
+ * @param report Complete copied report returned by `Host::plugins_load_report`.
+ * @return Object containing attempted/loaded counts, ordered errors, and
+ *         ordered newly registered operation keys.
+ * @throws std::bad_alloc if validation diagnostics or JSON storage cannot be
+ *         allocated.
+ * @throws std::length_error if either report array or a returned string exceeds
+ *         its version 1 bound.
+ * @throws std::invalid_argument if counts, GraphErrc values, or returned UTF-8
+ *         values violate the public report contract.
+ * @note Error messages are bounded diagnostics and are therefore repaired and
+ *       truncated with the same policy as top-level operation diagnostics.
+ *       Report order is preserved; only the separate source/key views are
+ *       sorted before stable paging.
+ */
+Json encode_plugin_load_report(const HostPluginLoadReport& report);
+
+/**
+ * @brief Encodes one operation-plugin key for a sorted key view page.
+ * @param key Complete copied public operation key.
+ * @return JSON string containing the exact key.
+ * @throws std::bad_alloc if validation diagnostics or JSON storage cannot be
+ *         allocated.
+ * @throws std::length_error if the key exceeds 1,024 UTF-8 bytes.
+ * @throws std::invalid_argument if the key is empty or invalid UTF-8.
+ * @note This helper owns no cursor and does not sort; the router freezes the
+ *       complete sorted snapshot before requesting individual page encodings.
+ */
+Json encode_plugin_key(std::string_view key);
+
+/**
+ * @brief Encodes one operation-plugin source-map row.
+ * @param key Complete copied public operation key.
+ * @param source Complete copied source label or plugin path.
+ * @return Object with exact `key` and `source` strings.
+ * @throws std::bad_alloc if validation diagnostics or JSON storage cannot be
+ *         allocated.
+ * @throws std::length_error if the key or source exceeds its version 1 bound.
+ * @throws std::invalid_argument if the key is empty or either string is
+ *         invalid UTF-8.
+ * @note Source strings use the 8 MiB copied-source bound. They are never
+ *       repaired, truncated, or interpreted as loader ownership handles.
+ */
+Json encode_plugin_source_row(std::string_view key, std::string_view source);
+
+/**
  * @brief Encodes one bounded node-YAML result.
  *
  * @param session_id Opaque daemon session id visible to the caller.

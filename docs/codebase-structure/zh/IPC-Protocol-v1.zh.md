@@ -19,7 +19,8 @@ descriptor、`sockaddr_un`、backend model、runtime service 或 mutable backend
 Client library 不链接 `photospider` backend。IPC disabled 时，不安装该 target 与 public
 header；在其他任何 CMake system name 下强制开启 IPC 会使 configure 明确失败。
 
-`daemon.version.methods` 报告以下精确八名称 metadata 子集：
+`daemon.version.methods` 来自独立于 route dispatch matcher 的统一 advertisement table，
+并报告以下精确八名称 metadata 子集：
 
 1. `daemon.ping`
 2. `daemon.version`
@@ -30,7 +31,7 @@ header；在其他任何 CMake system name 下强制开启 IPC 会使 configure 
 7. `inspect.node`
 8. `inspect.dependency_tree`
 
-Request router 还接受以下 33 个额外的 daemon-routed typed method：
+Request router 还接受以下 39 个额外的 daemon-routed typed method：
 
 1. `cache.cache_all_nodes`
 2. `cache.clear_all`
@@ -64,22 +65,30 @@ Request router 还接受以下 33 个额外的 daemon-routed typed method：
 30. `inspect.traversal_details`
 31. `inspect.traversal_orders`
 32. `inspect.trees_containing_node`
-33. `scheduler.trace`
+33. `plugins.load_report`
+34. `plugins.ops_combined_keys`
+35. `plugins.ops_combined_sources`
+36. `plugins.ops_sources`
+37. `plugins.seed_builtins`
+38. `plugins.unload_all`
+39. `scheduler.trace`
 
 已安装 typed `ps::ipc::Client` 只暴露八名称 metadata 子集的 call，且没有 public raw-JSON
-escape hatch。新增 33 个 schema 属 daemon request-router behavior。其中
+escape hatch。新增 39 个 schema 属 daemon request-router behavior。其中
 `compute.status`、`compute.result` 与 `compute.release` 只操作 daemon job registry；
 `compute.submit` 会接纳一个 registry job，随后由其 worker 恰好执行一次匹配的 Host compute
-call。另外 29 个 method 会让 direct request 或 first-page request 经由匹配的 Host operation；
+call。另外 35 个 method 会让 direct request 或 first-page request 经由匹配的 Host operation；
 stable collection continuation 只读取其 frozen snapshot registry record。
 
 版本 1 现在会在 router boundary 暴露 daemon-owned compute-job submit、polling、terminal
 result、release 与 protected metadata-only image delivery。Image byte 会保留在 private
 artifact 中；terminal nonempty image result 只会在一个 stable delivery lease 下返回规定的
-artifact metadata。版本 1 不暴露 compute cancellation、scheduler control、plugin route、
-`daemon.shutdown`、TCP、Windows named pipe 或 `graph_cli --connect`。本切片中的 bounded
-`events.drain` 与 `scheduler.trace` observation route 只在 daemon router boundary 可用。
-现有 `graph_cli` 继续创建 embedded Host，本地命令语义不变。
+artifact metadata。版本 1 不暴露 compute cancellation、scheduler control、
+`daemon.shutdown`、TCP、Windows named pipe 或 `graph_cli --connect`。Process-global
+operation-plugin control 与有序 view 已在 daemon router boundary 可用。Installed typed
+Client 当前不暴露这些 plugin method。Bounded `events.drain` 与 `scheduler.trace`
+observation route 只在 daemon router boundary 可用。现有 `graph_cli` 继续创建 embedded
+Host，本地命令语义不变。
 
 ## Transport 与 Frame
 
@@ -648,15 +657,17 @@ lifecycle 启动、停止和清空它。Public Host collection API 保持 full-v
 `inspect.node_ids`、`inspect.ending_nodes`、`inspect.graph`、
 `inspect.dependency_tree`、`inspect.traversal_orders`、
 `inspect.traversal_details`、`inspect.trees_containing_node` 与
-`inspect.recent_compute_planning` 使用该 registry。Wire 不广告独立 page method 或
-cursor-release method。
+`inspect.recent_compute_planning`、`plugins.ops_sources`、
+`plugins.ops_combined_keys` 与 `plugins.ops_combined_sources` 使用该 registry。
+Wire 不广告独立 page method 或 cursor-release method。
 
 首个 request 可带 `1..4096` 的 optional integer `limit`；缺省为 4,096，且不得包含
 `cursor` 或 `offset`。Continuation 会调用同一 method，携带原始 typed non-page parameter，
 再加 required 32-lowercase-hex `cursor`、精确的下一个 nonnegative `offset`，以及
 `1..4096` 的 integer `limit`。Unknown field 保持 forward-compatible。Result 保留 method
 原有 collection field，并新增 integer `offset`、boolean `has_more` 和 `cursor`；仍有后续 row
-时 cursor 是 stable string，only/final page 时为 JSON null。Host order 与 duplicate 都会保留。
+时 cursor 是 stable string，only/final page 时为 JSON null。Inspection collection 保留 Host order
+与 duplicate。Operation-plugin view 会在发布前按 public key 排序，并在排序后保留 duplicate key。
 
 Private `reserve()` operation 会原子预留一个 record 和完整的 64 MiB per-snapshot allowance。
 Production admission 最多保留 64 records 与总计 256 MiB；quota 不可用时报告 private
@@ -718,10 +729,79 @@ Collection field 如下：
 - `inspect.traversal_details` 使用 `{ending_node_id,nodes}` 形状的 `branches` row，其中每个
   node 含 `node_id`、`name`、`has_memory_cache` 与 `has_disk_cache`；
 - `inspect.recent_compute_planning` 使用 `snapshots`。
+- `plugins.ops_combined_keys` 使用有序 string `keys`；
+- `plugins.ops_sources` 与 `plugins.ops_combined_sources` 使用
+  `{key,source}` 形状的有序 `sources` row。
 
 Installed typed Client 会把新增 page metadata 作为 unknown field 接受，并为 small single-page
 graph/tree value 返回完整结果；它目前不会发出 cursor continuation。需要 multi-page router value
 的 caller 必须直接使用 typed wire schema。
+
+## Operation Plugin Control 与 View
+
+六个 operation-plugin method 都是 process-global，不定义、不读取、也不解析 `session_id`；
+如果传入该字段，它只是会被忽略的 unknown member。Unknown object member 保持
+forward-compatible。每个首页 view request 都会在获取公共 Host mutex
+并恰好调用一次匹配的 `ps::Host` method 前预留 stable-snapshot quota。每个
+mutation 也只会在该 mutex 下恰好调用一次匹配 Host method，且绝不自动 retry。
+JSON 中不会出现 loader、registry、factory、callback、DSO handle 或 mutable ownership value。
+
+`plugins.load_report` 要求：
+
+```json
+{"directories":["relative/or/absolute/plugin/path-or-pattern"]}
+```
+
+Required array 最多包含 256 个 entry，也可为空。每个 entry 必须是 nonempty、不含
+NUL、有效 UTF-8 且最多 4,096-byte 的 string；router 保留 relative path 与 Host
+支持的 pattern，不会自行重写。成功时返回精确复制的 Host report：
+
+```json
+{
+  "attempted": 2,
+  "loaded": 1,
+  "errors": [
+    {"path":"","code":4,"name":"io","message":"bounded diagnostic"}
+  ],
+  "new_op_keys": ["namespace:operation"]
+}
+```
+
+`attempted` 与 `loaded` 是非负的精确 Host integer；
+`loaded + errors.size()` 等于 `attempted`。`errors` 与 `new_op_keys` 各至多包含
+4,096 个 entry。Error path 可为空，否则必须是最多 4,096-byte 的精确有效 UTF-8
+value。Error `code` 必须是当前九个 `GraphErrc` numeric value 之一，`name` 为对应的
+canonical lowercase name；该 row 是 report data，不是 nested 或 top-level
+`OperationStatus`。Error message 使用公共的 UTF-8 repair/截断到 4,096-byte diagnostic
+policy。每个 new operation key 必须 nonempty、有效 UTF-8 且最多 1,024 byte。Error 与 key
+order 会精确保留；无法放入 16 MiB frame 的 aggregate 会以 `response_too_large`
+拒绝。Status-only `Host::plugins_load()` IPC mapping 会调用这一匹配 method，校验完整的
+successful report，之后才丢弃它；不存在第二个 wire alias。
+
+`plugins.unload_all` 不定义 known param，并以 `{"unloaded":N}` 返回精确的非负 Host
+count。`plugins.seed_builtins` 同样不定义 known param，并返回 `{}`。两者 params object 中的
+unknown member 均会被忽略。重复 seed 保留 Host 的幂等 process-owner 行为，不会替换
+活跃的 plugin override。任一 mutation 的 Host failure 都保留其精确 Graph-domain mapping。
+
+三个 copied view 使用公共的首页与 continuation control：
+
+- `plugins.ops_combined_keys` 返回有序 string `keys`；
+- `plugins.ops_sources` 与 `plugins.ops_combined_sources` 返回
+  `{key,source}` 形状的有序 `sources` row。
+
+Key 必须 nonempty、有效 UTF-8 且最多 1,024 byte。Copied source 必须是最多 8 MiB
+的有效 UTF-8，且绝不会被解释成 path 或 ownership token。Router 在唯一一次 Host call
+前预留一个 snapshot slot 和 64 MiB；该 call 返回后，router 校验每个 row，按 key
+排序，测量完整 value，并将其 move 进 stable snapshot registry。Continuation 精确绑定
+global method 与 offset，只读取 frozen copy，不调用 Host。上文的一般 4,096-row page、
+262,144-entry/64-MiB snapshot、64-record/256-MiB aggregate、15-minute TTL、cursor
+mismatch、expiry 与 shutdown 规则保持不变。
+
+成功的 plugin library 仍归 Host 的唯一 process-global plugin owner 所有。Load 结果对独立
+socket client、graph session 与 Host adapter lifetime 可见。Client 断开或销毁某个 Host
+adapter 都不会 unload。只有显式的 process-global `plugins.unload_all` 才会移除/恢复
+活跃 plugin key；之后三个 view 都会观察到一致状态。Router 不暴露也不缩短
+callback 或 returned-value library lease。
 
 ## Inspection Value
 
@@ -806,7 +886,7 @@ cmake --build build --target photospider_ipc_client \
   test_output_store test_event_stream_boundaries test_ipc_daemon \
   public_header_self_containment -j
 ctest --test-dir build --output-on-failure \
-  -R '^(FrameCodec|ProtocolEnvelope|IntegerCodec|ProtocolErrors|ProtocolParams|ProtocolGraphLoad|ProtocolGraphClose|InspectionJson|SessionRegistry|ComputeRequestRegistry|CollectionSnapshotRegistry|OutputStore|ComputeEventRing|SchedulerTraceRing|ClientLifecycle|ClientResultValidation|IpcDaemon|IpcObservationFixtureDaemon|StaticProductConsumerSmoke|IpcDisabledInstallSmoke|PublicHeaderSelfContainment)'
+  -R '^(FrameCodec|ProtocolEnvelope|IntegerCodec|ProtocolErrors|ProtocolParams|ProtocolGraphLoad|ProtocolGraphClose|ProtocolOperationPlugins|InspectionJson|SessionRegistry|ComputeRequestRegistry|CollectionSnapshotRegistry|OutputStore|ComputeEventRing|SchedulerTraceRing|ClientLifecycle|ClientResultValidation|IpcDaemon|IpcDaemonOperationPlugins|IpcObservationFixtureDaemon|StaticProductConsumerSmoke|IpcDisabledInstallSmoke|PublicHeaderSelfContainment)'
 ```
 
 `StaticProductConsumerSmoke` 验证 installed backend 与第二个 client-only consumer；

@@ -46,6 +46,10 @@
   "build/test_schedulers/libdestroy_count_scheduler_plugin.dylib"
 #endif
 
+#ifndef PS_TEST_OP_PLUGIN_DIR
+#define PS_TEST_OP_PLUGIN_DIR "build/test_plugins/lifecycle"
+#endif
+
 namespace ps::ipc::internal {
 namespace {
 
@@ -351,6 +355,62 @@ class ScopedSchedulerPluginCleanup final {
 };
 
 /**
+ * @brief Returns the active-build directory for the lifecycle operation DSO.
+ * @return CMake-provided repository fixture output directory.
+ * @throws std::bad_alloc if path storage cannot allocate.
+ * @note The compile definition uses `TARGET_FILE_DIR`, so multi-config and
+ *       non-default build trees never depend on a hard-coded repository path.
+ */
+std::filesystem::path lifecycle_operation_plugin_dir() {
+  return std::filesystem::path(PS_TEST_OP_PLUGIN_DIR);
+}
+
+/**
+ * @brief Clears process-global operation plugins around a lifecycle test.
+ *
+ * @throws std::runtime_error when initial cleanup cannot create a Host or
+ *         report a successful unload.
+ * @note Destruction creates a fresh Host and retries explicit global unload
+ *       behind a no-throw fence. Host destruction itself is never treated as
+ *       plugin cleanup, which is the ownership behavior under test.
+ */
+class ScopedOperationPluginCleanup final {
+ public:
+  /** @brief Performs required initial explicit process-global cleanup. */
+  ScopedOperationPluginCleanup() {
+    std::unique_ptr<Host> host = create_embedded_host();
+    if (!host) {
+      throw std::runtime_error("cannot create operation plugin cleanup Host");
+    }
+    const Result<int> unloaded = host->plugins_unload_all();
+    if (!unloaded.status.ok) {
+      throw std::runtime_error(unloaded.status.message);
+    }
+  }
+
+  /** @brief Explicitly unloads any fixture left after an assertion. */
+  ~ScopedOperationPluginCleanup() noexcept {
+    try {
+      std::unique_ptr<Host> host = create_embedded_host();
+      if (host) {
+        (void)host->plugins_unload_all();
+      }
+    } catch (...) {
+    }
+  }
+
+  /** @brief Prevents duplicate global cleanup ownership. */
+  ScopedOperationPluginCleanup(const ScopedOperationPluginCleanup&) = delete;
+
+  /**
+   * @brief Prevents replacing global cleanup ownership.
+   * @return No value because assignment is unavailable.
+   */
+  ScopedOperationPluginCleanup& operator=(const ScopedOperationPluginCleanup&) =
+      delete;
+};
+
+/**
  * @brief Sends every byte in one test buffer.
  *
  * @param fd Connected socket descriptor.
@@ -507,6 +567,27 @@ Json parse_response(const std::string& payload) {
     throw std::runtime_error(parsed.message);
   }
   return std::move(parsed.value);
+}
+
+/**
+ * @brief Routes one complete typed request through a borrowed router.
+ * @param router Active router whose runtime has already started.
+ * @param method Exact version 1 method name.
+ * @param params Complete method params object.
+ * @param id Correlated request id.
+ * @return Parsed correlated response.
+ * @throws std::bad_alloc or std::runtime_error on construction/parse failure.
+ * @note The helper is used by tests that intentionally replace the complete
+ *       Host/router lifetime between calls and therefore cannot use one
+ *       fixture-owned router member.
+ */
+Json route_test_request(RequestRouter& router, const std::string& method,
+                        Json params, std::string id) {
+  return parse_response(router.route(Json{
+      {"protocol_version", kProtocolVersion},
+      {"id", std::move(id)},
+      {"method", method},
+      {"params", std::move(params)}}.dump()));
 }
 
 /**
@@ -979,6 +1060,195 @@ class HostRoutedGraphStateProtocolTest : public ::testing::Test {
   /** @brief Opaque daemon id mapped to the spy's private Host session. */
   std::string session_id_;
 };
+
+TEST_F(HostRoutedGraphStateProtocolTest,
+       PluginControlRoutesExactHostValuesWithoutSessionIdentity) {
+  HostPluginLoadReport report;
+  report.attempted = 2;
+  report.loaded = 1;
+  report.errors.push_back(
+      HostPluginLoadError{"", GraphErrc::Io, "fixture load failure"});
+  report.new_op_keys = {"zeta:op", "alpha:op"};
+  host_.set_plugin_load_report(report);
+
+  const Json loaded = route(
+      "plugins.load_report",
+      Json{{"directories", Json::array({"relative/plugins", "/tmp/ops/*"})},
+           {"session_id", "ignored-forward-field"}});
+  ASSERT_TRUE(loaded.contains("result")) << loaded.dump();
+  const Json& value = loaded["result"];
+  EXPECT_EQ(value["attempted"], 2);
+  EXPECT_EQ(value["loaded"], 1);
+  ASSERT_EQ(value["errors"].size(), 1U);
+  EXPECT_EQ(value["errors"][0]["path"], "");
+  EXPECT_EQ(value["errors"][0]["code"], static_cast<int>(GraphErrc::Io));
+  EXPECT_EQ(value["errors"][0]["name"], "io");
+  EXPECT_EQ(value["errors"][0]["message"], "fixture load failure");
+  EXPECT_EQ(value["new_op_keys"], Json::array({"zeta:op", "alpha:op"}));
+  ASSERT_EQ(host_.invocations().size(), 1U);
+  EXPECT_EQ(host_.invocations()[0].texts,
+            (std::vector<std::string>{"relative/plugins", "/tmp/ops/*"}));
+  EXPECT_TRUE(host_.invocations()[0].session.value.empty());
+
+  host_.reset_invocations();
+  EXPECT_EQ(route("plugins.seed_builtins", Json{{"future", true}})["result"],
+            Json::object());
+  EXPECT_EQ(route("plugins.seed_builtins", Json::object())["result"],
+            Json::object());
+  EXPECT_EQ(host_.call_count("plugins.seed_builtins"), 2U);
+
+  host_.reset_invocations();
+  host_.set_plugins_unload_count(3);
+  const Json unloaded = route("plugins.unload_all", Json{{"future", 1}});
+  ASSERT_TRUE(unloaded.contains("result")) << unloaded.dump();
+  EXPECT_EQ(unloaded["result"], (Json{{"unloaded", 3}}));
+  EXPECT_EQ(host_.call_count("plugins.unload_all"), 1U);
+}
+
+TEST_F(HostRoutedGraphStateProtocolTest,
+       PluginLoadValidatesEveryKnownDirectoryBeforeMutation) {
+  std::vector<Json> malformed = {
+      Json::object(),
+      Json{{"directories", "not-an-array"}},
+      Json{{"directories", Json::array({""})}},
+      Json{{"directories", Json::array({std::string("bad\0path", 8)})}},
+      Json{{"directories",
+            Json::array({std::string(kPathTextMaxBytes + 1, 'x')})}},
+      Json{{"directories", Json::array()}},
+  };
+  malformed.back()["directories"] = Json::array();
+  for (std::size_t index = 0; index < kPathArrayMaxEntries + 1; ++index) {
+    malformed.back()["directories"].push_back("path");
+  }
+
+  for (std::size_t index = 0; index < malformed.size(); ++index) {
+    const Json response = route("plugins.load_report", malformed[index],
+                                "malformed-plugin-" + std::to_string(index));
+    ASSERT_TRUE(response.contains("error")) << response.dump();
+    EXPECT_EQ(response["error"]["domain"], "protocol");
+    EXPECT_EQ(response["error"]["name"], "invalid_params");
+  }
+  EXPECT_EQ(host_.call_count("plugins.load_report"), 0U);
+
+  const Json accepted =
+      route("plugins.load_report",
+            Json{{"directories", Json::array()}, {"future_option", "ignored"}});
+  ASSERT_TRUE(accepted.contains("result")) << accepted.dump();
+  EXPECT_EQ(host_.call_count("plugins.load_report"), 1U);
+}
+
+TEST_F(HostRoutedGraphStateProtocolTest,
+       PluginControlPreservesHostFailureAndRejectsMalformedReturnedValues) {
+  host_.set_status(
+      "plugins.load_report",
+      OperationStatus{false, OperationErrorDomain::Graph,
+                      static_cast<std::int32_t>(GraphErrc::NoOperation),
+                      "wrong-name", "no registrar"});
+  Json response =
+      route("plugins.load_report", Json{{"directories", Json::array()}});
+  ASSERT_TRUE(response.contains("error")) << response.dump();
+  EXPECT_EQ(response["error"]["domain"], "graph");
+  EXPECT_EQ(response["error"]["code"],
+            static_cast<int>(GraphErrc::NoOperation));
+  EXPECT_EQ(response["error"]["name"], "no_operation");
+  EXPECT_EQ(host_.call_count("plugins.load_report"), 1U);
+
+  host_.reset_invocations();
+  host_.set_status("plugins.load_report", OperationStatus{});
+  HostPluginLoadReport malformed;
+  malformed.attempted = 1;
+  malformed.loaded = 1;
+  malformed.errors.push_back(
+      HostPluginLoadError{"plugin", GraphErrc::Io, "inconsistent"});
+  host_.set_plugin_load_report(malformed);
+  response = route("plugins.load_report", Json{{"directories", Json::array()}});
+  ASSERT_TRUE(response.contains("error")) << response.dump();
+  EXPECT_EQ(response["error"]["domain"], "daemon");
+  EXPECT_EQ(response["error"]["name"], "internal_error");
+  EXPECT_EQ(host_.call_count("plugins.load_report"), 1U);
+
+  host_.reset_invocations();
+  malformed.loaded = 0;
+  malformed.errors.front().code = static_cast<GraphErrc>(1000);
+  host_.set_plugin_load_report(malformed);
+  response = route("plugins.load_report", Json{{"directories", Json::array()}});
+  ASSERT_TRUE(response.contains("error")) << response.dump();
+  EXPECT_EQ(response["error"]["name"], "internal_error");
+  EXPECT_EQ(host_.call_count("plugins.load_report"), 1U);
+
+  host_.reset_invocations();
+  host_.set_plugins_unload_count(-1);
+  response = route("plugins.unload_all", Json::object());
+  ASSERT_TRUE(response.contains("error")) << response.dump();
+  EXPECT_EQ(response["error"]["name"], "internal_error");
+  EXPECT_EQ(host_.call_count("plugins.unload_all"), 1U);
+}
+
+TEST_F(HostRoutedGraphStateProtocolTest,
+       PluginReportValidatesAllGraphCodesTextBoundsAndAggregateFrame) {
+  const std::array<GraphErrc, 9> codes = {
+      GraphErrc::Unknown,     GraphErrc::NotFound,
+      GraphErrc::Cycle,       GraphErrc::Io,
+      GraphErrc::InvalidYaml, GraphErrc::MissingDependency,
+      GraphErrc::NoOperation, GraphErrc::InvalidParameter,
+      GraphErrc::ComputeError};
+  HostPluginLoadReport report;
+  report.attempted = static_cast<int>(codes.size());
+  for (GraphErrc code : codes) {
+    report.errors.push_back(
+        HostPluginLoadError{"", code, std::string("diagnostic\xff", 11)});
+  }
+  host_.set_plugin_load_report(report);
+  Json response =
+      route("plugins.load_report", Json{{"directories", Json::array()}});
+  ASSERT_TRUE(response.contains("result")) << response.dump();
+  ASSERT_EQ(response["result"]["errors"].size(), codes.size());
+  for (std::size_t index = 0; index < codes.size(); ++index) {
+    EXPECT_EQ(response["result"]["errors"][index]["code"],
+              static_cast<int>(codes[index]));
+    EXPECT_EQ(response["result"]["errors"][index]["name"],
+              graph_error_stable_name(codes[index]));
+    EXPECT_TRUE(response["result"]["errors"][index]["message"].is_string());
+  }
+  EXPECT_EQ(host_.call_count("plugins.load_report"), 1U);
+
+  host_.reset_invocations();
+  report.attempted = 1;
+  report.errors.resize(1);
+  report.errors.front() = HostPluginLoadError{std::string("invalid\xc3\x28", 9),
+                                              GraphErrc::Io, "diagnostic"};
+  host_.set_plugin_load_report(report);
+  response = route("plugins.load_report", Json{{"directories", Json::array()}});
+  ASSERT_TRUE(response.contains("error")) << response.dump();
+  EXPECT_EQ(response["error"]["domain"], "daemon");
+  EXPECT_EQ(response["error"]["name"], "internal_error");
+  EXPECT_EQ(host_.call_count("plugins.load_report"), 1U);
+
+  host_.reset_invocations();
+  report.errors.front().path.clear();
+  report.new_op_keys = {std::string(kShortTextMaxBytes + 1, 'k')};
+  host_.set_plugin_load_report(report);
+  response = route("plugins.load_report", Json{{"directories", Json::array()}});
+  ASSERT_TRUE(response.contains("error")) << response.dump();
+  EXPECT_EQ(response["error"]["domain"], "protocol");
+  EXPECT_EQ(response["error"]["name"], "response_too_large");
+  EXPECT_EQ(host_.call_count("plugins.load_report"), 1U);
+
+  host_.reset_invocations();
+  report.new_op_keys.clear();
+  report.attempted = 2048;
+  report.errors.assign(
+      2048,
+      HostPluginLoadError{std::string(kPathTextMaxBytes, 'p'), GraphErrc::Io,
+                          std::string(kDiagnosticTextMaxBytes, 'm')});
+  host_.set_plugin_load_report(std::move(report));
+  response = route("plugins.load_report", Json{{"directories", Json::array()}},
+                   std::string(kRequestTextMaxBytes, 'r'));
+  ASSERT_TRUE(response.contains("error")) << response.dump();
+  EXPECT_EQ(response["error"]["domain"], "protocol");
+  EXPECT_EQ(response["error"]["name"], "response_too_large");
+  EXPECT_EQ(host_.call_count("plugins.load_report"), 1U);
+}
 
 TEST_F(HostRoutedGraphStateProtocolTest,
        ComputeLifecyclePreservesEveryTypedHostRequestFieldAndStableShapes) {
@@ -1803,6 +2073,228 @@ class StableInspectionPagingProtocolTest : public ::testing::Test {
   /** @brief Opaque daemon session mapped to the spy Host session. */
   std::string session_id_;
 };
+
+TEST_F(StableInspectionPagingProtocolTest,
+       PluginKeyViewSortsBeforeFrozenPagingAndCallsHostOnce) {
+  host_.set_ops_combined_keys({"zeta:op", "alpha:op", "middle:op"});
+  const Json first = route("plugins.ops_combined_keys", Json{{"limit", 2}});
+  ASSERT_TRUE(first.contains("result")) << first.dump();
+  EXPECT_EQ(first["result"]["keys"], Json::array({"alpha:op", "middle:op"}));
+  ASSERT_TRUE(first["result"]["cursor"].is_string());
+  EXPECT_TRUE(first["result"]["has_more"].get<bool>());
+  EXPECT_EQ(first["result"]["offset"], 0);
+
+  const Json final = route("plugins.ops_combined_keys",
+                           Json{{"cursor", first["result"]["cursor"]},
+                                {"offset", 2},
+                                {"limit", 2},
+                                {"session_id", "ignored"}});
+  ASSERT_TRUE(final.contains("result")) << final.dump();
+  EXPECT_EQ(final["result"]["keys"], Json::array({"zeta:op"}));
+  EXPECT_FALSE(final["result"]["has_more"].get<bool>());
+  EXPECT_TRUE(final["result"]["cursor"].is_null());
+  EXPECT_EQ(final["result"]["offset"], 2);
+  EXPECT_EQ(host_.call_count("plugins.ops_combined_keys"), 1U);
+}
+
+TEST_F(StableInspectionPagingProtocolTest,
+       PluginSourceViewsUseSortedRowsAndCursorBinding) {
+  host_.set_ops_sources(
+      {{"zeta:op", "/plugins/zeta"}, {"alpha:op", "built-in"}});
+  host_.set_ops_combined_sources(
+      {{"middle:op", "mixed"}, {"beta:op", "/plugins/beta"}});
+
+  const Json first = route("plugins.ops_sources", Json{{"limit", 1}});
+  ASSERT_TRUE(first.contains("result")) << first.dump();
+  ASSERT_EQ(first["result"]["sources"].size(), 1U);
+  EXPECT_EQ(first["result"]["sources"][0],
+            Json({{"key", "alpha:op"}, {"source", "built-in"}}));
+  ASSERT_TRUE(first["result"]["cursor"].is_string());
+
+  const Json mismatched = route(
+      "plugins.ops_combined_sources",
+      Json{{"cursor", first["result"]["cursor"]}, {"offset", 1}, {"limit", 1}});
+  ASSERT_TRUE(mismatched.contains("error")) << mismatched.dump();
+  EXPECT_EQ(mismatched["error"]["domain"], "daemon");
+  EXPECT_EQ(mismatched["error"]["name"], "cursor_not_found");
+  EXPECT_EQ(host_.call_count("plugins.ops_combined_sources"), 0U);
+
+  const Json final = route(
+      "plugins.ops_sources",
+      Json{{"cursor", first["result"]["cursor"]}, {"offset", 1}, {"limit", 1}});
+  ASSERT_TRUE(final.contains("result")) << final.dump();
+  EXPECT_EQ(
+      final["result"]["sources"],
+      Json::array({Json{{"key", "zeta:op"}, {"source", "/plugins/zeta"}}}));
+  EXPECT_EQ(host_.call_count("plugins.ops_sources"), 1U);
+
+  const Json combined =
+      route("plugins.ops_combined_sources", Json{{"limit", 4}});
+  ASSERT_TRUE(combined.contains("result")) << combined.dump();
+  EXPECT_EQ(combined["result"]["sources"],
+            Json::array({Json{{"key", "beta:op"}, {"source", "/plugins/beta"}},
+                         Json{{"key", "middle:op"}, {"source", "mixed"}}}));
+  EXPECT_EQ(host_.call_count("plugins.ops_combined_sources"), 1U);
+}
+
+TEST_F(StableInspectionPagingProtocolTest,
+       PluginViewsReserveBeforeHostAndEnforceSnapshotBounds) {
+  host_.set_ops_combined_keys({"a", "b"});
+  const Json held = route("plugins.ops_combined_keys", Json{{"limit", 1}});
+  ASSERT_TRUE(held.contains("result")) << held.dump();
+  ASSERT_TRUE(held["result"]["cursor"].is_string());
+
+  host_.set_ops_sources({{"source:key", "built-in"}});
+  Json response = route("plugins.ops_sources", Json{{"limit", 1}});
+  ASSERT_TRUE(response.contains("error")) << response.dump();
+  EXPECT_EQ(response["error"]["name"], "capacity_exceeded");
+  EXPECT_EQ(host_.call_count("plugins.ops_sources"), 0U);
+
+  clock_.advance(std::chrono::seconds(2));
+  response = route(
+      "plugins.ops_combined_keys",
+      Json{{"cursor", held["result"]["cursor"]}, {"offset", 1}, {"limit", 1}});
+  ASSERT_TRUE(response.contains("error")) << response.dump();
+  EXPECT_EQ(response["error"]["name"], "cursor_not_found");
+
+  std::vector<std::string> oversized;
+  for (std::size_t index = 0;
+       index < small_protocol_snapshot_limits().snapshot_entries + 1; ++index) {
+    oversized.push_back("key:" + std::to_string(index));
+  }
+  host_.set_ops_combined_keys(std::move(oversized));
+  host_.reset_invocations();
+  response = route("plugins.ops_combined_keys", Json{{"limit", 4}});
+  ASSERT_TRUE(response.contains("error")) << response.dump();
+  EXPECT_EQ(response["error"]["domain"], "protocol");
+  EXPECT_EQ(response["error"]["name"], "response_too_large");
+  EXPECT_EQ(host_.call_count("plugins.ops_combined_keys"), 1U);
+}
+
+TEST_F(StableInspectionPagingProtocolTest,
+       PluginViewsRejectMalformedControlsAndReturnedTextWithoutMutation) {
+  const std::vector<Json> malformed = {
+      Json{{"limit", 0}},
+      Json{{"limit", kGeneralPageMaxEntries + 1}},
+      Json{{"offset", 0}, {"limit", 1}},
+      Json{{"cursor", "malformed"}, {"offset", 0}, {"limit", 1}},
+  };
+  for (const Json& params : malformed) {
+    const Json response = route("plugins.ops_sources", params);
+    ASSERT_TRUE(response.contains("error")) << response.dump();
+    EXPECT_EQ(response["error"]["name"], "invalid_params");
+  }
+  EXPECT_EQ(host_.call_count("plugins.ops_sources"), 0U);
+
+  host_.set_ops_sources({{"", "built-in"}});
+  Json response = route("plugins.ops_sources", Json{{"limit", 1}});
+  ASSERT_TRUE(response.contains("error")) << response.dump();
+  EXPECT_EQ(response["error"]["domain"], "daemon");
+  EXPECT_EQ(response["error"]["name"], "internal_error");
+  EXPECT_EQ(host_.call_count("plugins.ops_sources"), 1U);
+
+  host_.reset_invocations();
+  host_.set_ops_sources(
+      {{"valid:key", std::string(kLargeTextMaxBytes + 1, 's')}});
+  response = route("plugins.ops_sources", Json{{"limit", 1}});
+  ASSERT_TRUE(response.contains("error")) << response.dump();
+  EXPECT_EQ(response["error"]["domain"], "protocol");
+  EXPECT_EQ(response["error"]["name"], "response_too_large");
+  EXPECT_EQ(host_.call_count("plugins.ops_sources"), 1U);
+}
+
+TEST(ProtocolOperationPlugins,
+     RealFixtureRemainsProcessOwnedAcrossHostAndRouterLifetimes) {
+  ScopedOperationPluginCleanup cleanup;
+  const std::filesystem::path plugin_dir = lifecycle_operation_plugin_dir();
+  ASSERT_TRUE(std::filesystem::exists(plugin_dir))
+      << "lifecycle operation plugin directory was not built: " << plugin_dir;
+
+  {
+    ScopedTempDirectory runtime_directory{"ps-plugin-one"};
+    std::unique_ptr<Host> loader = create_embedded_host();
+    ASSERT_NE(loader, nullptr);
+    RequestRouter router(*loader, "plugin-lifecycle-loader");
+    ScopedRequestRouterRuntime runtime(router, runtime_directory);
+    const Json loaded = route_test_request(
+        router, "plugins.load_report",
+        Json{{"directories", Json::array({plugin_dir.string()})}},
+        "plugin-load");
+    ASSERT_TRUE(loaded.contains("result")) << loaded.dump();
+    EXPECT_EQ(loaded["result"]["attempted"], 1);
+    EXPECT_EQ(loaded["result"]["loaded"], 1);
+    EXPECT_TRUE(loaded["result"]["errors"].empty());
+    EXPECT_NE(std::find(loaded["result"]["new_op_keys"].begin(),
+                        loaded["result"]["new_op_keys"].end(),
+                        Json("plugin_lifecycle:op")),
+              loaded["result"]["new_op_keys"].end());
+  }
+
+  {
+    ScopedTempDirectory runtime_directory{"ps-plugin-two"};
+    std::unique_ptr<Host> observer = create_embedded_host();
+    ASSERT_NE(observer, nullptr);
+    RequestRouter router(*observer, "plugin-lifecycle-observer");
+    ScopedRequestRouterRuntime runtime(router, runtime_directory);
+    const Json sources =
+        route_test_request(router, "plugins.ops_sources", Json{{"limit", 4096}},
+                           "plugin-sources-after-host-destruction");
+    ASSERT_TRUE(sources.contains("result")) << sources.dump();
+    const auto found =
+        std::find_if(sources["result"]["sources"].begin(),
+                     sources["result"]["sources"].end(), [](const Json& row) {
+                       return row.value("key", "") == "plugin_lifecycle:op";
+                     });
+    ASSERT_NE(found, sources["result"]["sources"].end());
+    EXPECT_EQ((*found)["source"],
+              std::filesystem::absolute(plugin_dir).string() + "/" +
+                  std::filesystem::path((*found)["source"].get<std::string>())
+                      .filename()
+                      .string());
+
+    const Json seeded_once = route_test_request(router, "plugins.seed_builtins",
+                                                Json::object(), "seed-once");
+    const Json seeded_twice = route_test_request(
+        router, "plugins.seed_builtins", Json::object(), "seed-twice");
+    ASSERT_TRUE(seeded_once.contains("result")) << seeded_once.dump();
+    ASSERT_TRUE(seeded_twice.contains("result")) << seeded_twice.dump();
+
+    const Json unloaded = route_test_request(router, "plugins.unload_all",
+                                             Json::object(), "plugin-unload");
+    ASSERT_TRUE(unloaded.contains("result")) << unloaded.dump();
+    EXPECT_GE(unloaded["result"]["unloaded"].get<int>(), 1);
+    const Json after_unload =
+        route_test_request(router, "plugins.ops_sources", Json{{"limit", 4096}},
+                           "plugin-sources-after-unload");
+    ASSERT_TRUE(after_unload.contains("result")) << after_unload.dump();
+    EXPECT_EQ(std::count_if(after_unload["result"]["sources"].begin(),
+                            after_unload["result"]["sources"].end(),
+                            [](const Json& row) {
+                              return row.value("key", "") ==
+                                     "plugin_lifecycle:op";
+                            }),
+              0);
+  }
+
+  {
+    ScopedTempDirectory runtime_directory{"ps-plugin-three"};
+    std::unique_ptr<Host> fresh = create_embedded_host();
+    ASSERT_NE(fresh, nullptr);
+    RequestRouter router(*fresh, "plugin-lifecycle-fresh");
+    ScopedRequestRouterRuntime runtime(router, runtime_directory);
+    const Json sources =
+        route_test_request(router, "plugins.ops_sources", Json{{"limit", 4096}},
+                           "plugin-sources-fresh-host");
+    ASSERT_TRUE(sources.contains("result")) << sources.dump();
+    EXPECT_EQ(std::count_if(sources["result"]["sources"].begin(),
+                            sources["result"]["sources"].end(),
+                            [](const Json& row) {
+                              return row.value("key", "") ==
+                                     "plugin_lifecycle:op";
+                            }),
+              0);
+  }
+}
 
 TEST_F(HostRoutedGraphStateProtocolTest,
        RoutesRemainingInspectionFamiliesWithCopiedPublicValues) {

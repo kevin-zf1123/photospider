@@ -21,7 +21,9 @@ backend ownership. The client library does not link the `photospider` backend.
 When IPC is disabled, neither its target nor its public headers are installed.
 Forcing IPC on for any other CMake system name fails configuration.
 
-`daemon.version.methods` reports this exact eight-name metadata subset:
+`daemon.version.methods` is sourced from one centralized advertisement table,
+independent of route dispatch matchers, and reports this exact eight-name
+metadata subset:
 
 1. `daemon.ping`
 2. `daemon.version`
@@ -32,7 +34,7 @@ Forcing IPC on for any other CMake system name fails configuration.
 7. `inspect.node`
 8. `inspect.dependency_tree`
 
-The request router also accepts these 33 additional daemon-routed typed
+The request router also accepts these 39 additional daemon-routed typed
 methods:
 
 1. `cache.cache_all_nodes`
@@ -67,14 +69,20 @@ methods:
 30. `inspect.traversal_details`
 31. `inspect.traversal_orders`
 32. `inspect.trees_containing_node`
-33. `scheduler.trace`
+33. `plugins.load_report`
+34. `plugins.ops_combined_keys`
+35. `plugins.ops_combined_sources`
+36. `plugins.ops_sources`
+37. `plugins.seed_builtins`
+38. `plugins.unload_all`
+39. `scheduler.trace`
 
 The installed typed `ps::ipc::Client` exposes calls only for the eight-name
-metadata subset and has no public raw-JSON escape hatch. The 33 additional
+metadata subset and has no public raw-JSON escape hatch. The 39 additional
 schemas are daemon request-router behavior. Of those methods,
 `compute.status`, `compute.result`, and `compute.release` operate only on the
 daemon job registry. `compute.submit` admits a registry job whose worker later
-performs exactly one matching Host compute call. The other 29 methods route
+performs exactly one matching Host compute call. The other 35 methods route
 their direct or first-page request through matching Host operations; a stable
 collection continuation reads only its frozen snapshot registry record.
 
@@ -82,12 +90,14 @@ Version 1 now exposes daemon-owned compute-job submission, polling, terminal
 result, release, and protected metadata-only image delivery at the router
 boundary. Image bytes stay in private artifacts; a terminal nonempty image
 result returns only the specified artifact metadata under one stable delivery
-lease. Version 1 exposes no compute cancellation, scheduler control, plugin
-route, `daemon.shutdown`, TCP, Windows named pipe, or `graph_cli --connect`.
+lease. Version 1 exposes no compute cancellation, scheduler control,
+`daemon.shutdown`, TCP, Windows named pipe, or `graph_cli --connect`.
+Process-global operation-plugin control and sorted views are available at the
+daemon router boundary. The installed typed Client currently does not expose
+these plugin methods.
 The bounded `events.drain` and `scheduler.trace` observation routes are
-available only at the daemon router boundary in this slice. The existing
-`graph_cli` continues to create an embedded Host and keeps its local command
-semantics.
+available only at the daemon router boundary. The existing `graph_cli`
+continues to create an embedded Host and keeps its local command semantics.
 
 ## Transport and Frame
 
@@ -753,8 +763,10 @@ remain full-value APIs; paging is a daemon-owned wire concern and adds no Host
 page API or public ABI type. `graph.list`, `inspect.node_ids`,
 `inspect.ending_nodes`, `inspect.graph`, `inspect.dependency_tree`,
 `inspect.traversal_orders`, `inspect.traversal_details`,
-`inspect.trees_containing_node`, and `inspect.recent_compute_planning` use this
-registry. No separate page or cursor-release method is advertised.
+`inspect.trees_containing_node`, `inspect.recent_compute_planning`,
+`plugins.ops_sources`, `plugins.ops_combined_keys`, and
+`plugins.ops_combined_sources` use this registry. No separate page or
+cursor-release method is advertised.
 
 A first request accepts optional integer `limit` in `1..4096`; absence means
 4,096. It must not contain `cursor` or `offset`. A continuation calls the same
@@ -763,7 +775,9 @@ hex `cursor`, exact next nonnegative `offset`, and integer `limit` in
 `1..4096`. Unknown fields remain forward-compatible. The result retains the
 method's collection field and adds integer `offset`, boolean `has_more`, and
 `cursor`, which is the stable string while more rows remain and JSON null on
-the only or final page. Host order and duplicates are preserved.
+the only or final page. Inspection collections preserve Host order and
+duplicates. Operation-plugin views sort by public key before publication and
+preserve duplicate keys in that sorted order.
 
 The private `reserve()` operation atomically reserves one record and the
 complete 64 MiB per-snapshot allowance. Production admission retains at most
@@ -846,11 +860,91 @@ Collection fields are:
   `{ending_node_id,nodes}`, where each node contains `node_id`, `name`,
   `has_memory_cache`, and `has_disk_cache`;
 - `inspect.recent_compute_planning`: `snapshots`.
+- `plugins.ops_combined_keys`: sorted string `keys`;
+- `plugins.ops_sources` and `plugins.ops_combined_sources`: sorted `sources`
+  rows shaped as `{key,source}`.
 
 The installed typed Client accepts the additional page metadata as unknown
 fields and returns complete small single-page graph/tree values. It does not
 currently issue cursor continuations; callers that need multi-page router
 values must use the typed wire schema directly.
+
+## Operation Plugin Control and Views
+
+The six operation-plugin methods are process-global and do not define, read, or
+resolve `session_id`; a supplied `session_id` is only an unknown member and is
+ignored. Unknown object members remain forward-compatible. Every first view
+request reserves stable-snapshot quota before acquiring the common Host mutex
+and invoking exactly one matching `ps::Host` method. Every mutation also
+invokes exactly one matching Host method under that mutex and is never
+automatically retried. No loader, registry, factory, callback, DSO handle, or
+mutable ownership value enters JSON.
+
+`plugins.load_report` requires:
+
+```json
+{"directories":["relative/or/absolute/plugin/path-or-pattern"]}
+```
+
+The required array contains at most 256 entries and may be empty. Each entry
+must be a nonempty, NUL-free valid UTF-8 string of at most 4,096 bytes;
+relative paths and Host-supported patterns are preserved rather than rewritten
+by the router. Success returns the exact copied Host report:
+
+```json
+{
+  "attempted": 2,
+  "loaded": 1,
+  "errors": [
+    {"path":"","code":4,"name":"io","message":"bounded diagnostic"}
+  ],
+  "new_op_keys": ["namespace:operation"]
+}
+```
+
+`attempted` and `loaded` are nonnegative exact Host integers;
+`loaded + errors.size()` equals `attempted`. `errors` and `new_op_keys` each
+contain at most 4,096 entries. An error path may be empty, otherwise remains an
+exact valid UTF-8 value of at most 4,096 bytes. Error `code` is one of the nine
+current `GraphErrc` numeric values and `name` is its canonical lowercase name;
+this row is report data, not a nested or top-level `OperationStatus`. Error
+messages use the common repair/truncate-to-4,096-byte diagnostic policy. Every
+new operation key is nonempty valid UTF-8 of at most 1,024 bytes. Error and key
+order are preserved exactly; an aggregate that cannot fit the 16 MiB frame is
+rejected as `response_too_large`. The status-only `Host::plugins_load()` IPC
+mapping calls this same method, validates the complete successful report, and
+only then discards it; there is no second wire alias.
+
+`plugins.unload_all` defines no known params and returns `{"unloaded":N}` with
+the exact nonnegative Host count. `plugins.seed_builtins` likewise defines no
+known params and returns `{}`. Unknown members of either params object are
+ignored. Repeated seeding preserves the Host's idempotent process-owner
+behavior; it cannot replace a live plugin override. Host failures from either
+mutation retain their exact Graph-domain mapping.
+
+The three copied views use the common first-page and continuation controls:
+
+- `plugins.ops_combined_keys` returns sorted string `keys`;
+- `plugins.ops_sources` and `plugins.ops_combined_sources` return sorted
+  `sources` rows shaped as `{key,source}`.
+
+Keys are nonempty valid UTF-8 of at most 1,024 bytes. A copied source is valid
+UTF-8 of at most 8 MiB and is never interpreted as a path or ownership token.
+Before the one Host call the router reserves one snapshot slot and 64 MiB;
+after that call it validates every row, sorts by key, measures the complete
+value, and moves it into the stable snapshot registry. Continuations bind to
+the exact global method and offset, read only the frozen copy, and do not call
+Host. The general 4,096-row page, 262,144-entry/64-MiB snapshot,
+64-record/256-MiB aggregate, 15-minute TTL, cursor mismatch, expiry, and
+shutdown rules above apply unchanged.
+
+Successful plugin libraries remain owned by the Host's unique process-global
+plugin owner. The load is visible across independent socket clients, graph
+sessions, and Host adapter lifetimes. Disconnecting a client or destroying one
+Host adapter does not unload it. Only explicit process-global
+`plugins.unload_all` removes/restores active plugin keys; all three later views
+then observe the same state. The router does not expose or shorten callback or
+returned-value library leases.
 
 ## Inspection Values
 
@@ -953,7 +1047,7 @@ cmake --build build --target photospider_ipc_client \
   test_output_store test_event_stream_boundaries test_ipc_daemon \
   public_header_self_containment -j
 ctest --test-dir build --output-on-failure \
-  -R '^(FrameCodec|ProtocolEnvelope|IntegerCodec|ProtocolErrors|ProtocolParams|ProtocolGraphLoad|ProtocolGraphClose|InspectionJson|SessionRegistry|ComputeRequestRegistry|CollectionSnapshotRegistry|OutputStore|ComputeEventRing|SchedulerTraceRing|ClientLifecycle|ClientResultValidation|IpcDaemon|IpcObservationFixtureDaemon|StaticProductConsumerSmoke|IpcDisabledInstallSmoke|PublicHeaderSelfContainment)'
+  -R '^(FrameCodec|ProtocolEnvelope|IntegerCodec|ProtocolErrors|ProtocolParams|ProtocolGraphLoad|ProtocolGraphClose|ProtocolOperationPlugins|InspectionJson|SessionRegistry|ComputeRequestRegistry|CollectionSnapshotRegistry|OutputStore|ComputeEventRing|SchedulerTraceRing|ClientLifecycle|ClientResultValidation|IpcDaemon|IpcDaemonOperationPlugins|IpcObservationFixtureDaemon|StaticProductConsumerSmoke|IpcDisabledInstallSmoke|PublicHeaderSelfContainment)'
 ```
 
 `StaticProductConsumerSmoke` verifies the installed backend plus a second

@@ -48,6 +48,11 @@
 #error "PS_IPC_OUTPUT_FIXTURE_DAEMON_PATH must name the output fixture"
 #endif
 
+#ifndef PS_TEST_OP_PLUGIN_DIR
+#error \
+    "PS_TEST_OP_PLUGIN_DIR must name the lifecycle operation plugin directory"
+#endif
+
 namespace ps::ipc {
 namespace {
 
@@ -233,6 +238,17 @@ class ManualProcessClock final {
 };
 
 std::uint64_t ScopedDaemonDirectory::sequence_ = 0;
+
+/**
+ * @brief Returns the active-build lifecycle operation plugin directory.
+ * @return CMake-provided target output directory.
+ * @throws std::bad_alloc if path storage cannot allocate.
+ * @note `TARGET_FILE_DIR` keeps the real-process test independent of build-tree
+ *       names and multi-config output layout.
+ */
+std::filesystem::path lifecycle_operation_plugin_dir() {
+  return std::filesystem::path(PS_TEST_OP_PLUGIN_DIR);
+}
 
 /**
  * @brief Releases multiple forked daemon children from one shared start gate.
@@ -2369,6 +2385,176 @@ TEST(IpcDaemonGraphLifecycle, PersistsAcrossClientsAndInspectsCopiedSnapshots) {
   const auto reloaded = second.load_graph(request);
   ASSERT_TRUE(reloaded.status.ok) << reloaded.status.message;
   second.disconnect();
+  daemon.stop();
+  EXPECT_TRUE(daemon.exited_successfully());
+  EXPECT_FALSE(std::filesystem::exists(socket_path));
+}
+
+TEST(IpcDaemonOperationPlugins,
+     RealFixtureIsProcessGlobalAcrossShortLivedClientsUntilExplicitUnload) {
+  ScopedDaemonDirectory temp("ps-plugin-daemon", true);
+  const std::string socket_path = (temp.path() / "plugin.sock").string();
+  const std::filesystem::path plugin_dir = lifecycle_operation_plugin_dir();
+  ASSERT_TRUE(std::filesystem::exists(plugin_dir))
+      << "lifecycle operation plugin directory was not built: " << plugin_dir;
+
+  DaemonProcess daemon;
+  daemon.start(socket_path);
+  ASSERT_TRUE(daemon.wait_ready(std::chrono::seconds(5)));
+
+  const internal::Json baseline_unload =
+      raw_daemon_call(socket_path, "plugins.unload_all",
+                      internal::Json::object(), "plugin-baseline-unload");
+  ASSERT_TRUE(baseline_unload.contains("result")) << baseline_unload.dump();
+  EXPECT_GE(baseline_unload["result"]["unloaded"].get<int>(), 0);
+
+  for (const char* id : {"plugin-seed-first", "plugin-seed-second"}) {
+    const internal::Json seeded =
+        raw_daemon_call(socket_path, "plugins.seed_builtins",
+                        internal::Json{{"future", true}}, id);
+    ASSERT_TRUE(seeded.contains("result")) << seeded.dump();
+    EXPECT_EQ(seeded["result"], internal::Json::object());
+  }
+
+  const internal::Json loaded = raw_daemon_call(
+      socket_path, "plugins.load_report",
+      internal::Json{
+          {"directories", internal::Json::array({plugin_dir.string()})},
+          {"session_id", "not-a-plugin-session"}},
+      "plugin-real-load");
+  ASSERT_TRUE(loaded.contains("result")) << loaded.dump();
+  EXPECT_EQ(loaded["result"]["attempted"], 1);
+  EXPECT_EQ(loaded["result"]["loaded"], 1);
+  EXPECT_TRUE(loaded["result"]["errors"].empty());
+  EXPECT_NE(std::find(loaded["result"]["new_op_keys"].begin(),
+                      loaded["result"]["new_op_keys"].end(),
+                      internal::Json("plugin_lifecycle:op")),
+            loaded["result"]["new_op_keys"].end());
+
+  std::vector<internal::Json> source_rows;
+  std::optional<std::string> cursor;
+  std::size_t offset = 0;
+  constexpr std::size_t kMaxSourcePages = 128;
+  std::size_t source_page_count = 0;
+  const auto source_page_deadline =
+      std::chrono::steady_clock::now() + std::chrono::seconds(5);
+  do {
+    ASSERT_LT(source_page_count, kMaxSourcePages)
+        << "plugin source pagination exceeded its page budget";
+    const std::chrono::milliseconds rpc_timeout =
+        timeout_before_deadline(source_page_deadline, std::chrono::seconds(1));
+    ASSERT_NE(rpc_timeout, std::chrono::milliseconds::zero())
+        << "plugin source pagination exceeded its aggregate deadline";
+    ++source_page_count;
+
+    const std::size_t requested_offset = offset;
+    internal::Json params{{"limit", 1}};
+    if (cursor) {
+      params["cursor"] = *cursor;
+      params["offset"] = requested_offset;
+    }
+    const internal::Json page = raw_daemon_call(
+        socket_path, "plugins.ops_sources", std::move(params),
+        "plugin-source-page-" + std::to_string(requested_offset), rpc_timeout);
+    ASSERT_TRUE(page.contains("result")) << page.dump();
+    const internal::Json& result = page["result"];
+    ASSERT_TRUE(result.is_object()) << page.dump();
+    ASSERT_TRUE(result.contains("offset"));
+    ASSERT_TRUE(result["offset"].is_number_unsigned());
+    const std::size_t server_offset = result["offset"].get<std::size_t>();
+    ASSERT_EQ(server_offset, requested_offset);
+    ASSERT_TRUE(result.contains("sources"));
+    ASSERT_TRUE(result["sources"].is_array());
+    ASSERT_LE(result["sources"].size(), 1U);
+    ASSERT_TRUE(result.contains("has_more"));
+    ASSERT_TRUE(result["has_more"].is_boolean());
+    ASSERT_TRUE(result.contains("cursor"));
+    ASSERT_TRUE(result["cursor"].is_null() || result["cursor"].is_string());
+    const bool has_more = result["has_more"].get<bool>();
+    ASSERT_EQ(has_more, result["cursor"].is_string());
+
+    for (const internal::Json& row : result["sources"]) {
+      source_rows.push_back(row);
+    }
+    ASSERT_LE(result["sources"].size(),
+              std::numeric_limits<std::size_t>::max() - server_offset);
+    const std::size_t next_offset = server_offset + result["sources"].size();
+    if (has_more) {
+      ASSERT_FALSE(result["sources"].empty());
+      ASSERT_GT(next_offset, server_offset);
+      cursor = result["cursor"].get<std::string>();
+    } else {
+      cursor.reset();
+    }
+    offset = next_offset;
+  } while (cursor);
+
+  ASSERT_FALSE(source_rows.empty());
+  EXPECT_TRUE(std::is_sorted(
+      source_rows.begin(), source_rows.end(),
+      [](const internal::Json& left, const internal::Json& right) {
+        return left["key"].get<std::string>() < right["key"].get<std::string>();
+      }));
+  const auto loaded_source = std::find_if(
+      source_rows.begin(), source_rows.end(), [](const internal::Json& row) {
+        return row.value("key", "") == "plugin_lifecycle:op";
+      });
+  ASSERT_NE(loaded_source, source_rows.end());
+  const std::filesystem::path source_path =
+      (*loaded_source)["source"].get<std::string>();
+  EXPECT_TRUE(source_path.is_absolute());
+  EXPECT_EQ(source_path.parent_path(), std::filesystem::absolute(plugin_dir));
+
+  const internal::Json combined_keys = raw_daemon_call(
+      socket_path, "plugins.ops_combined_keys", internal::Json{{"limit", 4096}},
+      "plugin-combined-keys-other-client");
+  ASSERT_TRUE(combined_keys.contains("result")) << combined_keys.dump();
+  EXPECT_TRUE(std::is_sorted(combined_keys["result"]["keys"].begin(),
+                             combined_keys["result"]["keys"].end()));
+  EXPECT_NE(std::find(combined_keys["result"]["keys"].begin(),
+                      combined_keys["result"]["keys"].end(),
+                      internal::Json("plugin_lifecycle:op")),
+            combined_keys["result"]["keys"].end());
+
+  const internal::Json combined_sources = raw_daemon_call(
+      socket_path, "plugins.ops_combined_sources",
+      internal::Json{{"limit", 4096}}, "plugin-combined-sources-other-client");
+  ASSERT_TRUE(combined_sources.contains("result")) << combined_sources.dump();
+  EXPECT_NE(std::find_if(combined_sources["result"]["sources"].begin(),
+                         combined_sources["result"]["sources"].end(),
+                         [](const internal::Json& row) {
+                           return row.value("key", "") == "plugin_lifecycle:op";
+                         }),
+            combined_sources["result"]["sources"].end());
+
+  const internal::Json repeated_load = raw_daemon_call(
+      socket_path, "plugins.load_report",
+      internal::Json{
+          {"directories", internal::Json::array({plugin_dir.string()})}},
+      "plugin-repeated-load-other-client");
+  ASSERT_TRUE(repeated_load.contains("result")) << repeated_load.dump();
+  EXPECT_EQ(repeated_load["result"]["attempted"], 0);
+  EXPECT_EQ(repeated_load["result"]["loaded"], 0);
+  EXPECT_TRUE(repeated_load["result"]["errors"].empty());
+
+  const internal::Json unloaded =
+      raw_daemon_call(socket_path, "plugins.unload_all",
+                      internal::Json::object(), "plugin-explicit-unload");
+  ASSERT_TRUE(unloaded.contains("result")) << unloaded.dump();
+  EXPECT_GE(unloaded["result"]["unloaded"].get<int>(), 1);
+
+  const internal::Json after_unload = raw_daemon_call(
+      socket_path, "plugins.ops_sources", internal::Json{{"limit", 4096}},
+      "plugin-sources-after-explicit-unload");
+  ASSERT_TRUE(after_unload.contains("result")) << after_unload.dump();
+  EXPECT_EQ(std::count_if(after_unload["result"]["sources"].begin(),
+                          after_unload["result"]["sources"].end(),
+                          [](const internal::Json& row) {
+                            return row.value("key", "") ==
+                                   "plugin_lifecycle:op";
+                          }),
+            0);
+
   daemon.stop();
   EXPECT_TRUE(daemon.exited_successfully());
   EXPECT_FALSE(std::filesystem::exists(socket_path));
