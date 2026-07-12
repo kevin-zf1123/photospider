@@ -77,12 +77,13 @@ their direct or first-page request through matching Host operations; a stable
 collection continuation reads only its frozen snapshot registry record.
 
 Version 1 now exposes daemon-owned compute-job submission, polling, terminal
-result, and release at the router boundary. The current image-mode job keeps
-its output artifact private and returns nullable `output` as JSON null; output
-metadata and delivery leases are not yet routed. Version 1 exposes no compute
-cancellation, scheduler/plugin/event route, `daemon.shutdown`, TCP, Windows
-named pipe, or `graph_cli --connect`. The existing `graph_cli` continues to
-create an embedded Host and keeps its local command semantics.
+result, release, and protected metadata-only image delivery at the router
+boundary. Image bytes stay in private artifacts; a terminal nonempty image
+result returns only the specified artifact metadata under one stable delivery
+lease. Version 1 exposes no compute cancellation, scheduler/plugin/event route,
+`daemon.shutdown`, TCP, Windows named pipe, or `graph_cli --connect`. The
+existing `graph_cli` continues to create an embedded Host and keeps its local
+command semantics.
 
 ## Transport and Frame
 
@@ -517,12 +518,36 @@ Submit, status, and result use one stable result schema:
 ```
 
 `status` is null while queued/running and is the canonical exact nested
-`OperationStatus` after terminal publication. `output` is always null in this
-slice, including image-mode success; private output references and filesystem
-identity never enter JSON. Successful terminal release has the separate stable
-acknowledgement `{"compute_id":"...","released":true}`. Task 3.3 does not
-interpret or use `delivery_id`; when supplied, it is ignored as an unknown
-forward-compatible field. Task 3.4 assigns that field lease-aware semantics.
+`OperationStatus` after terminal publication. Submit, status, status-mode
+result, empty-image result, and failed result keep `output` null. Only
+`compute.result` for a terminal successful nonempty image returns this exact
+object in `output`:
+
+```json
+{
+  "output_id": "32-lowercase-hex",
+  "delivery_id": "32-lowercase-hex",
+  "path": "/protected/socket.outputs/instance-id/output-id.bin",
+  "width": 2,
+  "height": 2,
+  "channels": 1,
+  "data_type": "uint8",
+  "device": "cpu",
+  "row_step": 2,
+  "byte_size": 4,
+  "filesystem_device": 16777234,
+  "inode": 12345
+}
+```
+
+The path is the protected absolute artifact path, not a backend cache path or
+caller-selected output. The registry's opaque reference is published only as
+the normalized `output.output_id`; no extra `output_reference` field or backend
+handle enters JSON.
+Successful terminal release has the separate stable acknowledgement
+`{"compute_id":"...","released":true}`. `compute.release` accepts an optional
+`delivery_id`; when present it must use the exact opaque-id shape before any
+mutation. Unknown other fields remain forward-compatible.
 
 Status reads are non-destructive and do not acquire the Host mutex. Result and
 release accept terminal records only, and release checks/removes the record in
@@ -533,10 +558,12 @@ Every accepted Host failure, invalid image, output quota denial, or publication
 failure remains an immutable failed job in successful status/result envelopes;
 quota denial is nested daemon `artifact_limit_exceeded`, while unexpected
 worker/publication failure is nested daemon `internal_error`. Only malformed
-params, submit/admission failure, absent jobs, and premature result/release are
-top-level failures in this slice. Any exception after queue commit uses a
-fallback `internal_error` allocated before commit, so the worker continues to
-later jobs.
+params, submit/admission failure, absent jobs, premature result/release, and
+result-time missing or identity-mismatched artifacts are top-level failures.
+The last case is exactly daemon `artifact_not_found`; it does not change the
+immutable terminal job, which remains releasable. Any exception after queue
+commit uses a fallback `internal_error` allocated before commit, so the worker
+continues to later jobs.
 
 At most 256 terminal records are retained. Publishing another terminal record
 evicts only the oldest terminal publication; active work is never evicted.
@@ -544,18 +571,20 @@ Terminal age starts at complete publication, uses a monotonic injected clock,
 expires at 15 minutes, and is not refreshed by lookup. Output ownership is a
 private move-only reference with optional lease-aware exact-once cleanup outside
 the registry mutex. It is backed by the private protected store described
-below. Current wire results deliberately hide its metadata, and current release
-removes job ownership without interpreting `delivery_id`; a supplied field is
-ignored until task 3.4 assigns its lease-aware semantics.
+below. Result exposes its reference only as the revalidated delivery's
+normalized `output_id`, never as an extra field or backend handle. Release
+without a matching delivery removes job ownership only; release with a
+matching id removes job ownership and its active lease in the same OutputStore
+critical section.
 
-## Private Protected Output Store
+## Protected Output Store and Image Result
 
-The wire surface accepts image-mode compute but exposes no output metadata or
-delivery operation yet: its stable nullable `output` field remains null. Behind
-the router, one private `OutputStore` is bound to the joined compute publisher
-and socket lifecycle. It starts after the Unix socket and persistent lifecycle
-lock are owned but before session, compute, or client admission. A startup
-failure therefore admits no request.
+The wire surface exposes image metadata only from terminal `compute.result` and
+uses optional lease-aware `compute.release`; it adds no separate delivery
+method. Behind the router, one private `OutputStore` is bound to the joined
+compute publisher and socket lifecycle. It starts after the Unix socket and
+persistent lifecycle lock are owned but before session, compute, or client
+admission. A startup failure therefore admits no request.
 
 A canonical empty CPU image publishes no artifact. A nonempty result must be a
 valid CPU `ImageBuffer` with a defined data type, positive dimensions and
@@ -582,15 +611,18 @@ Metadata retains only output id, absolute path, dimensions, data type, CPU
 device, tight row step, byte size, filesystem device, and inode. Live access
 revalidates base/instance ancestry plus file owner, type, exact mode, link
 count, device, inode, and size through held directory descriptors. A missing or
-mismatched record/file returns daemon `artifact_not_found` from this private
-result boundary while leaving the terminal compute record releasable; an unsafe
-replacement is never followed or removed.
+mismatched record/file returns top-level daemon `artifact_not_found` from
+`compute.result` while leaving the terminal compute record releasable; an
+unsafe replacement is never followed or removed.
 
-Each published artifact owns one stable 32-hex delivery id. Successful private
-result access validates the artifact and, in the same store critical section,
+Each published artifact owns one stable 32-hex delivery id. Successful
+`compute.result` validates the artifact and, in the same store critical section,
 creates, reuses, or reactivates its sole lease with expiry set to that
 operation's monotonic `now + 60 seconds`. Repeated access returns the same id
-and refreshes that deadline. Compute release accepts an internal optional
+and refreshes that deadline. If response allocation or encoding later fails,
+the router does not blindly revoke that stable lease because an earlier
+successful result may still rely on it; explicit release or the bounded lease
+TTL remains responsible for cleanup. Compute release accepts an optional wire
 delivery id: matching release atomically removes job ownership and the lease;
 eviction, the 15-minute compute/job TTL, or release without a match removes only
 job ownership. Quota and the file remain while an active lease survives. A
@@ -837,5 +869,16 @@ ctest --test-dir build --output-on-failure \
 client-only consumer. `IpcDisabledInstallSmoke` verifies an IPC-disabled clean
 install has no IPC forwarder, header, target, archive, or daemon while the
 embedded consumer remains usable. Real-process tests have CTest timeouts and
-bounded SIGTERM/SIGKILL/waitpid cleanup. These are long-lived product tests;
-they create no retained `tests/results`, replay, provenance, or migration gate.
+bounded SIGTERM/SIGKILL/waitpid cleanup. `test_ipc_daemon` starts the product
+`photospiderd` for embedded-Host behavior and also starts the non-installed
+`ipc_output_fixture_daemon` as a separate process for deterministic image
+outcomes. The fixture still uses the production internal
+Server/router/OutputStore/Unix-socket/worker stack; it is only a build
+dependency of the test, has no independent CTest entry, and does not change
+product startup or seed plugins early. A fixture-only protected fixed-width
+control file supplies a cross-process manual monotonic clock, while the private
+internal Server composition overload receives small versions of the existing
+snapshot, compute-registry, and OutputStore policies plus deterministic id
+sources. These controls are not `photospiderd` flags, environment failpoints,
+or wire methods. These are long-lived product-behavior tests; they create no
+retained `tests/results`, replay, provenance, or migration gate.

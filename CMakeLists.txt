@@ -911,6 +911,25 @@ if(BUILD_TESTING)
             GTest::gtest_main
             Threads::Threads)
 
+        # Long-lived integration fixture: a separate process with the real
+        # internal Server/router/socket/output stack and a deterministic Host.
+        # The helper itself is intentionally not registered with CTest.
+        add_executable(ipc_output_fixture_daemon
+            tests/support/ipc_output_fixture_daemon.cpp)
+        set_target_properties(ipc_output_fixture_daemon PROPERTIES
+            RUNTIME_OUTPUT_DIRECTORY "${TEST_OUTPUT_DIR}"
+            BUILD_RPATH "${CMAKE_BINARY_DIR}/lib")
+        target_compile_features(ipc_output_fixture_daemon PRIVATE cxx_std_17)
+        target_include_directories(ipc_output_fixture_daemon PRIVATE
+            "${PROJECT_SOURCE_DIR}/include"
+            "${PROJECT_SOURCE_DIR}/src/lib"
+            "${PROJECT_SOURCE_DIR}/tests")
+        target_link_libraries(ipc_output_fixture_daemon PRIVATE
+            photospider_ipc_server_internal
+            photospider_ipc_client
+            photospider
+            Threads::Threads)
+
         add_executable(test_ipc_daemon
             tests/integration/test_ipc_daemon.cpp)
         set_target_properties(test_ipc_daemon PROPERTIES
@@ -918,7 +937,8 @@ if(BUILD_TESTING)
             BUILD_RPATH "${CMAKE_BINARY_DIR}/lib")
         target_compile_features(test_ipc_daemon PRIVATE cxx_std_17)
         target_compile_definitions(test_ipc_daemon PRIVATE
-            PS_PHOTOSPIDERD_PATH="$<TARGET_FILE:photospiderd>")
+            PS_PHOTOSPIDERD_PATH="$<TARGET_FILE:photospiderd>"
+            PS_IPC_OUTPUT_FIXTURE_DAEMON_PATH="$<TARGET_FILE:ipc_output_fixture_daemon>")
         target_include_directories(test_ipc_daemon PRIVATE
             "${PROJECT_SOURCE_DIR}/include"
             "${PROJECT_SOURCE_DIR}/src/lib")
@@ -927,7 +947,8 @@ if(BUILD_TESTING)
             GTest::gtest
             GTest::gtest_main
             Threads::Threads)
-        add_dependencies(test_ipc_daemon photospiderd)
+        add_dependencies(test_ipc_daemon
+            photospiderd ipc_output_fixture_daemon)
     endif()
 
     add_ps_test(test_milestone2 tests/integration/test_milestone2.cpp)

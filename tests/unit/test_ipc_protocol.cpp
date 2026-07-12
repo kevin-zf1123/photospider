@@ -1263,9 +1263,250 @@ TEST_F(HostRoutedGraphStateProtocolTest,
   const auto successful_image_calls = host_.invocations();
   ASSERT_EQ(successful_image_calls.size(), 1U);
   EXPECT_TRUE(successful_image_calls.front().image_compute);
-  ASSERT_TRUE(
-      route("compute.release", Json{{"compute_id", successful_image_id}})
-          .contains("result"));
+
+  const Json delivered =
+      route("compute.result", Json{{"compute_id", successful_image_id}});
+  ASSERT_TRUE(delivered.contains("result")) << delivered.dump();
+  ASSERT_TRUE(delivered["result"]["output"].is_object());
+  const Json& output = delivered["result"]["output"];
+  ASSERT_EQ(output.size(), 12U);
+  ASSERT_TRUE(output["output_id"].is_string());
+  ASSERT_TRUE(output["delivery_id"].is_string());
+  EXPECT_TRUE(valid_opaque_id(output["output_id"].get<std::string>()));
+  EXPECT_TRUE(valid_opaque_id(output["delivery_id"].get<std::string>()));
+  EXPECT_TRUE(
+      std::filesystem::path(output["path"].get<std::string>()).is_absolute());
+  EXPECT_EQ(output["width"], 2);
+  EXPECT_EQ(output["height"], 2);
+  EXPECT_EQ(output["channels"], 1);
+  EXPECT_EQ(output["data_type"], "uint8");
+  EXPECT_EQ(output["device"], "cpu");
+  EXPECT_EQ(output["row_step"], 2);
+  EXPECT_EQ(output["byte_size"], 4);
+  EXPECT_TRUE(output["filesystem_device"].is_number_unsigned());
+  EXPECT_TRUE(output["inode"].is_number_unsigned());
+  EXPECT_FALSE(output.contains("output_reference"));
+  EXPECT_TRUE(
+      std::filesystem::is_regular_file(output["path"].get<std::string>()));
+
+  const Json repeated =
+      route("compute.result", Json{{"compute_id", successful_image_id}});
+  ASSERT_TRUE(repeated.contains("result")) << repeated.dump();
+  EXPECT_EQ(repeated["result"]["output"], output);
+  EXPECT_EQ(host_.call_count("compute.submit"), 1U);
+
+  const Json released =
+      route("compute.release", Json{{"compute_id", successful_image_id},
+                                    {"delivery_id", output["delivery_id"]}});
+  ASSERT_TRUE(released.contains("result")) << released.dump();
+  EXPECT_FALSE(std::filesystem::exists(output["path"].get<std::string>()));
+}
+
+TEST_F(HostRoutedGraphStateProtocolTest,
+       EmptyImageAndArtifactQuotaRemainNormalTerminalOutcomes) {
+  host_.set_compute_image(ImageBuffer{});
+  Json submitted = route("compute.submit",
+                         valid_compute_submit_params(session_id_, "image"));
+  ASSERT_TRUE(submitted.contains("result")) << submitted.dump();
+  const std::string empty_id =
+      submitted["result"]["compute_id"].get<std::string>();
+  const Json empty_terminal = wait_for_compute_terminal(empty_id);
+  ASSERT_TRUE(empty_terminal.contains("result")) << empty_terminal.dump();
+  EXPECT_EQ(empty_terminal["result"]["state"], "succeeded");
+  EXPECT_TRUE(empty_terminal["result"]["output"].is_null());
+  const Json empty_result =
+      route("compute.result", Json{{"compute_id", empty_id}});
+  ASSERT_TRUE(empty_result.contains("result")) << empty_result.dump();
+  EXPECT_TRUE(empty_result["result"]["output"].is_null());
+  ASSERT_TRUE(route("compute.release", Json{{"compute_id", empty_id}})
+                  .contains("result"));
+
+  auto byte = std::make_shared<std::uint8_t>(0x5a);
+  ImageBuffer oversized;
+  oversized.width = 512 * 1024 * 1024 + 1;
+  oversized.height = 1;
+  oversized.channels = 1;
+  oversized.type = DataType::UINT8;
+  oversized.device = Device::CPU;
+  oversized.step = static_cast<std::size_t>(oversized.width);
+  oversized.data = std::shared_ptr<void>(byte, byte.get());
+  host_.set_compute_image(std::move(oversized));
+  submitted = route("compute.submit",
+                    valid_compute_submit_params(session_id_, "image"));
+  ASSERT_TRUE(submitted.contains("result")) << submitted.dump();
+  const std::string quota_id =
+      submitted["result"]["compute_id"].get<std::string>();
+  const Json quota_terminal = wait_for_compute_terminal(quota_id);
+  ASSERT_TRUE(quota_terminal.contains("result")) << quota_terminal.dump();
+  EXPECT_EQ(quota_terminal["result"]["state"], "failed");
+  EXPECT_EQ(quota_terminal["result"]["status"]["domain"], "daemon");
+  EXPECT_EQ(quota_terminal["result"]["status"]["name"],
+            "artifact_limit_exceeded");
+  EXPECT_TRUE(quota_terminal["result"]["output"].is_null());
+  const Json quota_result =
+      route("compute.result", Json{{"compute_id", quota_id}});
+  ASSERT_TRUE(quota_result.contains("result")) << quota_result.dump();
+  EXPECT_EQ(quota_result["result"], quota_terminal["result"]);
+  ASSERT_TRUE(route("compute.release", Json{{"compute_id", quota_id}})
+                  .contains("result"));
+}
+
+TEST_F(HostRoutedGraphStateProtocolTest,
+       ResultTimeTamperIsTopLevelAndLeavesTerminalJobReleasable) {
+  ImageBuffer image = make_aligned_cpu_image_buffer(2, 1, 1, DataType::UINT8);
+  ASSERT_NE(image.data, nullptr);
+  host_.set_compute_image(std::move(image));
+  const Json submitted = route(
+      "compute.submit", valid_compute_submit_params(session_id_, "image"));
+  ASSERT_TRUE(submitted.contains("result")) << submitted.dump();
+  const std::string compute_id =
+      submitted["result"]["compute_id"].get<std::string>();
+  ASSERT_TRUE(wait_for_compute_terminal(compute_id).contains("result"));
+
+  const Json delivered =
+      route("compute.result", Json{{"compute_id", compute_id}});
+  ASSERT_TRUE(delivered.contains("result")) << delivered.dump();
+  const Json metadata = delivered["result"]["output"];
+  ASSERT_TRUE(metadata.is_object());
+  const std::string artifact_path = metadata["path"].get<std::string>();
+  const std::string delivery_id = metadata["delivery_id"].get<std::string>();
+  const std::filesystem::path victim =
+      runtime_directory_.path() / "output-tamper-victim.bin";
+  {
+    std::ofstream stream(victim, std::ios::binary);
+    stream.exceptions(std::ios::badbit | std::ios::failbit);
+    stream.put('v');
+  }
+  ASSERT_EQ(::chmod(victim.c_str(), 0600), 0);
+  ASSERT_EQ(::unlink(artifact_path.c_str()), 0);
+  ASSERT_EQ(::symlink(victim.c_str(), artifact_path.c_str()), 0);
+
+  const Json missing =
+      route("compute.result", Json{{"compute_id", compute_id}});
+  ASSERT_TRUE(missing.contains("error")) << missing.dump();
+  EXPECT_EQ(missing["error"]["domain"], "daemon");
+  EXPECT_EQ(missing["error"]["name"], "artifact_not_found");
+  const Json released =
+      route("compute.release",
+            Json{{"compute_id", compute_id}, {"delivery_id", delivery_id}});
+  ASSERT_TRUE(released.contains("result")) << released.dump();
+  EXPECT_TRUE(std::filesystem::exists(victim));
+  struct stat replacement{};
+  ASSERT_EQ(::lstat(artifact_path.c_str(), &replacement), 0);
+  EXPECT_TRUE(S_ISLNK(replacement.st_mode));
+}
+
+TEST_F(HostRoutedGraphStateProtocolTest,
+       MatchingDeliveryCanReleaseLeaseAfterNormalJobRemoval) {
+  ImageBuffer image = make_aligned_cpu_image_buffer(1, 1, 1, DataType::UINT8);
+  ASSERT_NE(image.data, nullptr);
+  host_.set_compute_image(std::move(image));
+  const Json submitted = route(
+      "compute.submit", valid_compute_submit_params(session_id_, "image"));
+  ASSERT_TRUE(submitted.contains("result")) << submitted.dump();
+  const std::string compute_id =
+      submitted["result"]["compute_id"].get<std::string>();
+  ASSERT_TRUE(wait_for_compute_terminal(compute_id).contains("result"));
+  const Json delivered =
+      route("compute.result", Json{{"compute_id", compute_id}});
+  ASSERT_TRUE(delivered.contains("result")) << delivered.dump();
+  const Json metadata = delivered["result"]["output"];
+  const std::string artifact_path = metadata["path"].get<std::string>();
+  const std::string delivery_id = metadata["delivery_id"].get<std::string>();
+
+  const Json removed =
+      route("compute.release", Json{{"compute_id", compute_id}});
+  ASSERT_TRUE(removed.contains("result")) << removed.dump();
+  EXPECT_TRUE(std::filesystem::exists(artifact_path));
+  const Json absent = route("compute.status", Json{{"compute_id", compute_id}});
+  ASSERT_TRUE(absent.contains("error")) << absent.dump();
+  EXPECT_EQ(absent["error"]["name"], "job_not_found");
+
+  const Json orphan_released =
+      route("compute.release", Json{{"compute_id", compute_id},
+                                    {"delivery_id", delivery_id},
+                                    {"future_release_field", true}});
+  ASSERT_TRUE(orphan_released.contains("result")) << orphan_released.dump();
+  EXPECT_EQ(orphan_released["result"],
+            (Json{{"compute_id", compute_id}, {"released", true}}));
+  EXPECT_FALSE(std::filesystem::exists(artifact_path));
+  const Json repeated =
+      route("compute.release",
+            Json{{"compute_id", compute_id}, {"delivery_id", delivery_id}});
+  ASSERT_TRUE(repeated.contains("error")) << repeated.dump();
+  EXPECT_EQ(repeated["error"]["name"], "job_not_found");
+}
+
+TEST_F(HostRoutedGraphStateProtocolTest,
+       MalformedDeliveryIdDoesNotRemoveTerminalJob) {
+  const Json submitted =
+      route("compute.submit", valid_compute_submit_params(session_id_));
+  ASSERT_TRUE(submitted.contains("result")) << submitted.dump();
+  const std::string compute_id =
+      submitted["result"]["compute_id"].get<std::string>();
+  ASSERT_TRUE(wait_for_compute_terminal(compute_id).contains("result"));
+
+  for (const Json& delivery_id :
+       {Json(nullptr), Json(1), Json("abc"), Json(std::string(32, 'A'))}) {
+    const Json rejected =
+        route("compute.release",
+              Json{{"compute_id", compute_id}, {"delivery_id", delivery_id}});
+    ASSERT_TRUE(rejected.contains("error")) << rejected.dump();
+    EXPECT_EQ(rejected["error"]["domain"], "protocol");
+    EXPECT_EQ(rejected["error"]["name"], "invalid_params");
+    EXPECT_TRUE(route("compute.status", Json{{"compute_id", compute_id}})
+                    .contains("result"));
+  }
+  EXPECT_TRUE(route("compute.release", Json{{"compute_id", compute_id}})
+                  .contains("result"));
+}
+
+TEST(IpcOutputDeliveryValidation,
+     BindsPrivateReferenceAndRequiresExactScalarLayout) {
+  OutputArtifactDelivery delivery;
+  delivery.metadata.output_id = "11111111111111111111111111111111";
+  delivery.metadata.path = "/tmp/output-validation.bin";
+  delivery.metadata.width = 2;
+  delivery.metadata.height = 3;
+  delivery.metadata.channels = 2;
+  delivery.metadata.device = Device::CPU;
+  delivery.delivery_id = "22222222222222222222222222222222";
+
+  const std::vector<std::pair<DataType, std::size_t>> scalar_cases = {
+      {DataType::UINT8, 1}, {DataType::INT8, 1},    {DataType::UINT16, 2},
+      {DataType::INT16, 2}, {DataType::FLOAT32, 4}, {DataType::FLOAT64, 8}};
+  for (const auto& scalar_case : scalar_cases) {
+    delivery.metadata.data_type = scalar_case.first;
+    delivery.metadata.row_step = 4 * scalar_case.second;
+    delivery.metadata.byte_size = 12 * scalar_case.second;
+    EXPECT_TRUE(
+        valid_output_delivery_for_wire(delivery, delivery.metadata.output_id));
+  }
+
+  delivery.metadata.data_type = DataType::UINT16;
+  delivery.metadata.row_step = 8;
+  delivery.metadata.byte_size = 24;
+  EXPECT_FALSE(valid_output_delivery_for_wire(
+      delivery, "33333333333333333333333333333333"));
+  ++delivery.metadata.row_step;
+  EXPECT_FALSE(
+      valid_output_delivery_for_wire(delivery, delivery.metadata.output_id));
+  --delivery.metadata.row_step;
+  ++delivery.metadata.byte_size;
+  EXPECT_FALSE(
+      valid_output_delivery_for_wire(delivery, delivery.metadata.output_id));
+  --delivery.metadata.byte_size;
+  delivery.metadata.data_type = static_cast<DataType>(999);
+  EXPECT_FALSE(
+      valid_output_delivery_for_wire(delivery, delivery.metadata.output_id));
+
+  delivery.metadata.data_type = DataType::FLOAT64;
+  delivery.metadata.width = std::numeric_limits<int>::max();
+  delivery.metadata.channels = std::numeric_limits<int>::max();
+  delivery.metadata.row_step = std::numeric_limits<std::size_t>::max();
+  delivery.metadata.byte_size = std::numeric_limits<std::size_t>::max();
+  EXPECT_FALSE(
+      valid_output_delivery_for_wire(delivery, delivery.metadata.output_id));
 }
 
 TEST_F(HostRoutedGraphStateProtocolTest,
@@ -1531,6 +1772,22 @@ class StableInspectionPagingProtocolTest : public ::testing::Test {
     return cursor;
   }
 
+  /**
+   * @brief Builds complete router dependencies with a focused snapshot policy.
+   * @return Default compute/output policy plus deterministic snapshot inputs.
+   * @throws std::bad_alloc if callback storage cannot allocate.
+   * @note Only the snapshot component differs from production in this fixture;
+   *       the generic private dependency value prevents a snapshot-only router
+   *       constructor from becoming a parallel composition seam.
+   */
+  RequestRouterRuntimeDependencies runtime_dependencies() {
+    RequestRouterRuntimeDependencies dependencies;
+    dependencies.snapshot_limits = small_protocol_snapshot_limits();
+    dependencies.snapshot_clock = [this] { return clock_.now(); };
+    dependencies.snapshot_id_generator = [this] { return next_cursor(); };
+    return dependencies;
+  }
+
   /** @brief Deterministic cursor-expiry clock. */
   ManualCollectionClock clock_;
   /** @brief Cursor uniqueness source. */
@@ -1540,9 +1797,7 @@ class StableInspectionPagingProtocolTest : public ::testing::Test {
   /** @brief Complete configurable Host test double. */
   ::ps::testing::IpcHostSpy host_;
   /** @brief Router with small deterministic snapshot limits and callbacks. */
-  RequestRouter router_{
-      host_, "stable-paging-test", small_protocol_snapshot_limits(),
-      [this] { return clock_.now(); }, [this] { return next_cursor(); }};
+  RequestRouter router_{host_, "stable-paging-test", runtime_dependencies()};
   /** @brief Active daemon-private runtime. */
   ScopedRequestRouterRuntime runtime_{router_, runtime_directory_};
   /** @brief Opaque daemon session mapped to the spy Host session. */

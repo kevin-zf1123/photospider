@@ -62,6 +62,23 @@ class Server {
   Server(Host& host, std::string service_version);
 
   /**
+   * @brief Creates an internal server with injected router runtime policy.
+   *
+   * @param host Sole Host instance borrowed by this server.
+   * @param service_version Reproducible CMake project version.
+   * @param dependencies Complete snapshot/compute/output runtime policy.
+   * @throws std::bad_alloc if metadata or callback storage cannot allocate.
+   * @throws std::invalid_argument if an injected policy is inconsistent.
+   * @throws std::runtime_error if daemon instance entropy fails.
+   * @note This overload belongs only to the non-installed internal server
+   *       surface. The product uses the two-argument constructor; deterministic
+   *       process fixtures can inject clocks and small limits without changing
+   *       `photospiderd` flags, environment, advertised methods, or wire data.
+   */
+  Server(Host& host, std::string service_version,
+         RequestRouterRuntimeDependencies dependencies);
+
+  /**
    * @brief Stops and releases any remaining listener/worker resources.
    *
    * @throws Nothing.

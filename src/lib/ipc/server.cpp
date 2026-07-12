@@ -651,15 +651,19 @@ std::string default_socket_path() {
 class Server::Impl {
  public:
   /**
-   * @brief Creates runtime state and the Host-only request router.
-   *
+   * @brief Creates runtime state with an injected private router policy.
    * @param host Sole daemon Host instance.
    * @param service_version Reproducible project version.
-   * @throws std::bad_alloc if metadata allocation fails.
+   * @param dependencies Snapshot, compute, and output runtime dependencies.
+   * @throws std::bad_alloc if metadata or callback storage cannot allocate.
+   * @throws std::invalid_argument if an injected policy is inconsistent.
    * @throws std::runtime_error if OS entropy fails.
+   * @note Product construction uses the two-argument overload; this internal
+   *       seam exists for deterministic separate-process fixtures only.
    */
-  Impl(Host& host, std::string service_version)
-      : router_(host, std::move(service_version)) {}
+  Impl(Host& host, std::string service_version,
+       RequestRouterRuntimeDependencies dependencies)
+      : router_(host, std::move(service_version), std::move(dependencies)) {}
 
   /**
    * @brief Stops any remaining runtime state.
@@ -940,7 +944,16 @@ class Server::Impl {
 
 /** @copydoc Server::Server */
 Server::Server(Host& host, std::string service_version)
-    : impl_(std::make_unique<Impl>(host, std::move(service_version))) {}
+    : Server(host, std::move(service_version),
+             RequestRouterRuntimeDependencies{}) {  // NOLINT
+}  // NOLINT(whitespace/indent_namespace)
+
+/** @copydoc Server::Server */
+Server::Server(Host& host, std::string service_version,
+               RequestRouterRuntimeDependencies dependencies)
+    : impl_(std::make_unique<Impl>(host, std::move(service_version),
+                                   std::move(dependencies))) {  // NOLINT
+}  // NOLINT(whitespace/indent_namespace)
 
 /** @copydoc Server::~Server */
 Server::~Server() = default;
