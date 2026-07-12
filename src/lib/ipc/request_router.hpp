@@ -3,6 +3,7 @@
 #include <mutex>
 #include <string>
 
+#include "ipc/collection_snapshot_registry.hpp"
 #include "ipc/compute_request_registry.hpp"
 #include "ipc/output_store.hpp"
 #include "ipc/session_registry.hpp"
@@ -22,10 +23,10 @@ namespace ps::ipc::internal {
  *         allocated.
  * @throws std::runtime_error if the operating-system instance-id entropy
  *         source fails.
- * @note The router owns session mappings, the protected OutputStore, and the
- *       private joined compute registry, but borrows Host for a lifetime that
- *       must exceed the router and server. Runtime state starts only through
- *       `start_runtime()`.
+ * @note The router owns session mappings, bounded stable collection snapshots,
+ *       the protected OutputStore, and the private joined compute registry,
+ *       but borrows Host for a lifetime that must exceed the router and server.
+ *       Runtime state starts only through `start_runtime()`.
  */
 class RequestRouter {
  public:
@@ -36,8 +37,9 @@ class RequestRouter {
    * @param service_version Reproducible CMake project version string.
    * @throws std::bad_alloc if metadata allocation fails.
    * @throws std::runtime_error if instance-id entropy fails.
-   * @note OutputStore and compute registry are constructed stopped; the current
-   *       wire inventory remains the exact eight names defined by protocol v1.
+   * @note Collection snapshot registry, OutputStore, and compute registry are
+   *       constructed stopped; the current wire inventory remains the exact
+   *       eight names defined by protocol v1.
    */
   RequestRouter(Host& host, std::string service_version);
 
@@ -80,7 +82,7 @@ class RequestRouter {
   std::string route(const std::string& payload);
 
   /**
-   * @brief Starts the secure output store, compute worker, and admission.
+   * @brief Starts the output, snapshot, compute, and session runtime layers.
    *
    * @param socket_path Absolute bound socket path naming the output-store base.
    * @param lifecycle_lock_fd Open matching lifecycle lock held by Server.
@@ -89,27 +91,30 @@ class RequestRouter {
    * @throws std::bad_alloc if failure diagnostic construction cannot allocate.
    * @note The server calls this only after socket ownership is established,
    *       while retaining its lifecycle lock, and before any client worker can
-   *       route a request. Output-store failure prevents all admission.
+   *       route a request. Output-store failure prevents all admission;
+   *       compute-start failure rolls the snapshot registry back to empty.
    */
   OperationStatus start_runtime(const std::string& socket_path,
                                 int lifecycle_lock_fd);
 
   /**
-   * @brief Rejects new sessions, compute work, and output delivery leases.
+   * @brief Rejects new sessions, snapshots, compute work, and output leases.
    * @throws Nothing.
-   * @note Already admitted calls/jobs retain their completion rules and the
-   *       draining worker may still publish an output before final shutdown.
+   * @note Already reserved collection calls and admitted compute jobs retain
+   *       their publication rules; the draining worker may still publish an
+   *       output before final shutdown.
    */
   void begin_shutdown() noexcept;
 
   /**
-   * @brief Drains compute, joins its worker, then closes every Host session.
+   * @brief Drains compute/snapshots/output, then closes every Host session.
    *
    * @throws Nothing; job cleanup, Host failures, and Host exceptions are
    *         contained so socket lifecycle cleanup can continue.
    * @note Call after accepted client workers have stopped. Compute shutdown
-   *       releases job ownership first; OutputStore then waits active leases
-   *       before Host sessions and registry rows are cleared.
+   *       releases job ownership first; snapshot records/reservations are then
+   *       cleared, and OutputStore waits active leases before Host sessions and
+   *       registry rows are cleared.
    */
   void finish_shutdown() noexcept;
 
@@ -130,6 +135,13 @@ class RequestRouter {
 
   /** @brief Loading/active opaque-to-Host session registry. */
   SessionRegistry registry_;
+
+  /**
+   * @brief Bounded stable full-value collection snapshot ownership.
+   * @note Declaration order makes compute/output owners destruct before this
+   *       registry, which itself destructs before session mappings.
+   */
+  CollectionSnapshotRegistry collection_snapshots_;
 
   /** @brief Socket-specific private image artifact and delivery lease store. */
   OutputStore output_store_;

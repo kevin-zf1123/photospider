@@ -380,7 +380,7 @@ Method group 与当前 wire availability：
 | --- | --- | --- |
 | daemon | `daemon.ping`, `daemon.version` | 已实现，且不获取 Host lock；没有 `daemon.shutdown`。 |
 | graph | `graph.load`, `graph.close`, `graph.list` | 已实现，保留 Host name 并另用 daemon-generated opaque id。 |
-| inspect | `inspect.graph`, `inspect.node`, `inspect.dependency_tree` | 已通过 copied Host snapshot 实现。 |
+| inspect | `inspect.graph`, `inspect.node`, `inspect.dependency_tree` | 已通过 copied Host snapshot 实现。Private bounded cursor registry 参与 daemon lifecycle，而这些 route 保持 direct response shape，且不使用 collection cursor。 |
 | compute | polling job 与 image result transport | 当前八方法 wire inventory 不广告 compute method。Router 背后已经实现 private joined FIFO registry 与 socket-specific protected OutputStore，包括 bounded job/artifact retention、精确 nested status、delivery lease、session admission、TTL 与 joined shutdown 行为。 |
 | scheduler | `scheduler.types`, `scheduler.get`, `scheduler.set`, `scheduler.trace` | 映射当前 CLI scheduler 功能。 |
 | plugins | `plugins.scan`, `plugins.load`, `plugins.unload_all`, `plugins.list` | 唯一的进程级 `PluginManager` 保留 operation-plugin handle；Host 只暴露控制面，不拥有第二套 lifetime map。 |
@@ -398,6 +398,24 @@ Method group 与当前 wire availability：
   Private result access 成功后，一个 stable delivery id 最多保护一个会被刷新为 60 秒的 lease。
 - 当前八方法 wire inventory 不暴露 image result、output artifact、delivery identity、lease、
   cache path 或 caller-selected result path。
+
+Collection snapshot 规则：
+
+- Router 拥有一个 private type-erased `CollectionSnapshotRegistry`；它不新增 Host page API、
+  public ABI type、JSON envelope、wire route 或 cursor release method。Runtime start 会启用 registry
+  admission，shutdown 开始时停止 admission，final shutdown 会清空其 record 与 reservation。
+- Private admission API 会预留一个 slot 与 64 MiB。Production 最多保留 64 records/256 MiB。
+  Publication 接受由 caller 测量且不超过 262,144 entries/64 MiB 的 value，把 multi-page value
+  move 进 stable storage，并把 worst-case reservation 换成精确 measured byte；被拒绝的
+  publication 不产生 cursor 或 retained copy。
+- 32-hex cursor 会冻结精确 method/session/original-parameter identity。每个 1..4096-entry
+  continuation page 只使用精确 next offset 与 retained value，无需 live-session lookup，paging
+  不刷新 15-minute TTL，final page 会原子释放 record。
+- Binding/type/offset mismatch 与 unknown well-formed cursor 会返回 private `CursorNotFound`，且
+  不会推进 retained record；malformed cursor/page arithmetic 会返回 private `InvalidParams`，且
+  不改变 record。TTL expiry 会删除 record 并释放其 measured quota。Injected limit、clock 与 id
+  支持 deterministic race test。当前已路由的 inspection method 不会 reserve、publish 或 page
+  这些 record。
 
 错误规则：
 

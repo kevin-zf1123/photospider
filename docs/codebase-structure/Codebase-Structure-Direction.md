@@ -439,7 +439,7 @@ Method groups and current wire availability:
 | --- | --- | --- |
 | daemon | `daemon.ping`, `daemon.version` | Implemented without Host locking. No `daemon.shutdown`. |
 | graph | `graph.load`, `graph.close`, `graph.list` | Implemented with preserved Host names plus daemon-generated opaque ids. |
-| inspect | `inspect.graph`, `inspect.node`, `inspect.dependency_tree` | Implemented through copied Host snapshots. |
+| inspect | `inspect.graph`, `inspect.node`, `inspect.dependency_tree` | Implemented through copied Host snapshots. The private bounded cursor registry participates in daemon lifecycle, while these routes keep their direct response shapes and do not use collection cursors. |
 | compute | polling jobs and image result transport | No compute method is advertised in the current eight-method wire inventory. The private joined FIFO registry and socket-specific protected OutputStore are implemented behind the router, including bounded job/artifact retention, exact nested status, delivery leases, session admission, TTL, and joined shutdown behavior. |
 | scheduler | `scheduler.types`, `scheduler.get`, `scheduler.set`, `scheduler.trace` | Mirrors current CLI scheduler features. |
 | plugins | `plugins.scan`, `plugins.load`, `plugins.unload_all`, `plugins.list` | The unique process `PluginManager` retains operation-plugin handles; Hosts expose the control surface without owning a second lifetime map. |
@@ -460,6 +460,28 @@ Image payload rule:
 - The current eight-method wire inventory exposes no image result, output
   artifact, delivery identity, lease, cache path, or caller-selected result
   path.
+
+Collection snapshot rule:
+
+- The router owns one private type-erased `CollectionSnapshotRegistry`; it does
+  not add a Host page API, public ABI type, JSON envelope, wire route, or cursor
+  release method. Runtime start enables registry admission, shutdown begins by
+  stopping admission, and final shutdown clears its records and reservations.
+- The private admission API reserves one slot plus 64 MiB. Production retains
+  at most 64 records/256 MiB. Publication accepts a caller-measured value of at
+  most 262,144 entries/64 MiB, moves a multi-page value into stable storage,
+  and converts the worst-case reservation to exact measured bytes. Rejection
+  publishes no cursor or retained copy.
+- A 32-hex cursor freezes exact method/session/original-parameter identity.
+  Continuation pages of 1..4096 entries use the exact next offset and retained
+  value only, require no live-session lookup, never refresh their
+  15-minute TTL, and atomically release the record on the final page.
+- Binding/type/offset mismatches and unknown well-formed cursors return
+  private `CursorNotFound` without advancing a retained record. Malformed
+  cursor/page arithmetic returns private `InvalidParams` without changing the
+  record. TTL expiry erases the record and releases its measured quota.
+  Injected limits, clock, and ids support deterministic race tests. Current
+  routed inspection methods do not reserve, publish, or page these records.
 
 Error rule:
 

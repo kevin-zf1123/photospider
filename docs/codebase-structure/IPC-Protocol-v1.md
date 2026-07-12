@@ -150,6 +150,8 @@ Protocol result-shape failure.
 | Node YAML text or one copied parameter/source string | 8 MiB (8,388,608 UTF-8 bytes) each |
 | Directory/path input array | 256 entries |
 | General wire page | 4,096 entries |
+| One stable collection snapshot | 262,144 entries and 64 MiB |
+| Active collection snapshots | 64 records and 256 MiB total |
 
 String limits apply after JSON decoding and to every known string member.
 Known inbound array and page counts are checked before session resolution or
@@ -404,6 +406,48 @@ injected monotonic TTL, identity-cleans unowned artifacts, and closes its
 directories before Host sessions are closed. Quotas, both TTLs, clock, and id
 source are injectable for deterministic filesystem and race tests.
 
+## Private Stable Collection Snapshots
+
+The router owns a private type-erased `CollectionSnapshotRegistry` and starts,
+stops, and clears it with daemon runtime lifecycle. The current eight-method
+wire inventory advertises no collection cursor page or cursor-release method.
+The three routed inspection methods keep their direct result shapes and do not
+reserve, publish, or page registry records. Public Host collection APIs remain
+full-value APIs; the registry adds no Host page API, public ABI type, or JSON
+response envelope.
+
+The private `reserve()` operation atomically reserves one record and the
+complete 64 MiB per-snapshot allowance. Production admission retains at most
+64 records and 256 MiB total, and reports private `CapacityExceeded` when that
+quota is unavailable. `publish()` accepts the caller's complete collection,
+exact measured byte count, binding, and page limit. More than 262,144 entries
+or 64 MiB reports private `ResponseTooLarge`; the reservation is rolled back
+and no cursor or retained snapshot is published. An admitted multi-page value
+is moved into the registry, and the worst-case reservation is transactionally
+replaced by its exact measured byte count before another admission observes the
+quota. Empty and single-page values return directly and retain no record.
+
+A multi-page publication receives one collision-checked 32-lowercase-hex
+cursor and freezes the exact method, optional opaque session id, and canonical
+identity of the original non-page parameters. Pages contain 1 through 4,096
+ordered entries. A continuation lookup must provide the frozen identity and
+the exact next offset; binding/type/offset mismatch reports private
+`CursorNotFound` without advancing the record. A malformed cursor,
+zero/over-limit page, or offset arithmetic overflow reports private
+`InvalidParams` and is likewise non-destructive. Continuation pages read only
+the retained value, perform no Host call or live-session lookup, and therefore
+do not depend on the current graph-session mapping. Copy/allocation failure
+also leaves the next offset unchanged.
+
+The final page atomically erases the record and releases its measured quota.
+Otherwise the fixed 15-minute monotonic TTL, measured from cursor publication,
+releases it and is never refreshed by paging. Beginning daemon shutdown stops
+new reservations while preserving active reservations and published records;
+after client workers join, final snapshot shutdown clears all records and
+reservations before Host sessions are closed. A subsequent runtime start
+enables admission on the empty registry. Limits, clock, and id source are
+injectable for deterministic capacity, final-page, expiry, and shutdown races.
+
 ## Inspection Values
 
 Inspection atomically admits the opaque session before acquiring the Host mutex
@@ -431,6 +475,8 @@ The typed client range-checks every node id, tree depth, edge input index,
 debug timestamp/duration, worker id, and spatial extent/rectangle component
 before publishing graph, node, or dependency-tree snapshots. Signed/unsigned
 overflow is a local Protocol result-shape failure; it is never narrowed.
+The three routed inspection methods return their existing direct result shapes
+and do not use the private collection snapshot registry or collection cursors.
 The same reusable enum, `PixelRect`, bounded-string, array, page, opaque-id,
 and nested-status codecs apply recursively to composite values. A failed decode
 leaves the caller-visible destination unpublished.
@@ -462,14 +508,15 @@ the lifecycle lock.
 The listener tracks at most 32 joinable client workers. Requests are sequential
 per connection; frame/JSON work may occur across clients. Because public Host
 does not promise thread safety, every Host call uses one daemon mutex. Socket
-reads and writes never hold it. Shutdown first stops all session and compute
-admission plus new output leases, closes the listener, shuts down tracked client
-descriptors to wake reads, and joins all connection workers. It then drains
-every accepted compute job, joins the sole compute worker, releases terminal
-job ownership, waits active delivery leases through explicit release or TTL,
-and closes the OutputStore before Host sessions and session mappings. Finally
-it removes its socket while the lifecycle lock remains held, releases the lock,
-and destroys Host state. The persistent lock file intentionally remains.
+reads and writes never hold it. Shutdown first stops all session, snapshot, and
+compute admission plus new output leases, closes the listener, shuts down
+tracked client descriptors to wake reads, and joins all connection workers. It
+then drains every accepted compute job, joins the sole compute worker, releases
+terminal job ownership, clears retained collection snapshots, waits active
+delivery leases through explicit release or TTL, and closes the OutputStore
+before Host sessions and session mappings. Finally it removes its socket while
+the lifecycle lock remains held, releases the lock, and destroys Host state.
+The persistent lock file intentionally remains.
 
 Before installing SIGINT/SIGTERM handlers, `photospiderd` creates a nonblocking
 close-on-exec self-pipe. The handler only preserves `errno`, writes one byte,
@@ -485,10 +532,11 @@ Focused local commands are:
 cmake -S . -B build -DPHOTOSPIDER_BUILD_IPC=ON -DBUILD_TESTING=ON
 cmake --build build --target photospider_ipc_client \
   photospider_ipc_server_internal photospiderd test_ipc_protocol \
-  test_compute_request_registry test_output_store test_ipc_daemon \
+  test_compute_request_registry test_collection_snapshot_registry \
+  test_output_store test_ipc_daemon \
   public_header_self_containment -j
 ctest --test-dir build --output-on-failure \
-  -R '^(FrameCodec|ProtocolEnvelope|IntegerCodec|ProtocolErrors|ProtocolParams|ProtocolGraphLoad|ProtocolGraphClose|InspectionJson|SessionRegistry|ComputeRequestRegistry|OutputStore|ClientLifecycle|ClientResultValidation|IpcDaemon|StaticProductConsumerSmoke|IpcDisabledInstallSmoke|PublicHeaderSelfContainment)'
+  -R '^(FrameCodec|ProtocolEnvelope|IntegerCodec|ProtocolErrors|ProtocolParams|ProtocolGraphLoad|ProtocolGraphClose|InspectionJson|SessionRegistry|ComputeRequestRegistry|CollectionSnapshotRegistry|OutputStore|ClientLifecycle|ClientResultValidation|IpcDaemon|StaticProductConsumerSmoke|IpcDisabledInstallSmoke|PublicHeaderSelfContainment)'
 ```
 
 `StaticProductConsumerSmoke` verifies the installed backend plus a second
