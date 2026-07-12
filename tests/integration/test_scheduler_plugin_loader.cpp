@@ -977,6 +977,7 @@ TEST_F(SchedulerPluginLoaderTest,
   ASSERT_TRUE(loader.load_plugin(plugin_path));
   auto scheduler = loader.create("destroy_count_test", 0);
   ASSERT_NE(scheduler, nullptr);
+  scheduler->start();
 
   {
     ScopedSchedulerFixtureEnvironment failures(kDestroyCountFailureEnvironment,
@@ -1012,6 +1013,7 @@ TEST_F(SchedulerPluginLoaderTest,
     ASSERT_TRUE(loader.load_plugin(plugin_path));
     auto scheduler = loader.create("destroy_count_test", 0);
     ASSERT_NE(scheduler, nullptr);
+    scheduler->start();
 
     loader.clear_plugins();
     scheduler.reset();
