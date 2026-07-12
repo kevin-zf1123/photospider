@@ -13,6 +13,66 @@
 namespace ps::ipc::internal {
 
 /**
+ * @brief Complete private runtime policy injected into one request router.
+ *
+ * The value groups the existing bounded snapshot, compute-job, and output
+ * store policies with their monotonic clocks and opaque-id sources. Empty
+ * callbacks retain each component's production default. This is a private
+ * composition contract for the daemon server and deterministic process
+ * fixtures; it is not installed or represented on the version 1 wire.
+ *
+ * @throws std::bad_alloc when copied callback storage cannot be allocated.
+ * @note Callbacks must satisfy the thread-safety and non-throwing constraints
+ *       documented by their owning registry/store. Production constructs the
+ *       default value; tests may inject coherent small policies without adding
+ *       a product flag, environment failpoint, or protocol method.
+ */
+struct RequestRouterRuntimeDependencies {
+  /** @brief Stable collection snapshot capacity and retention policy. */
+  CollectionSnapshotLimits snapshot_limits;
+
+  /** @brief Monotonic clock used only by the snapshot registry. */
+  CollectionSnapshotRegistry::Clock snapshot_clock;
+
+  /** @brief Opaque cursor candidate source used by the snapshot registry. */
+  CollectionSnapshotRegistry::IdGenerator snapshot_id_generator;
+
+  /** @brief Active/terminal compute capacity and terminal retention policy. */
+  ComputeRequestRegistryLimits compute_limits;
+
+  /** @brief Monotonic clock used only by the compute registry. */
+  ComputeRequestRegistry::Clock compute_clock;
+
+  /** @brief Opaque compute-id candidate source used by the job registry. */
+  ComputeRequestRegistry::IdGenerator compute_id_generator;
+
+  /** @brief Artifact quota plus job-owner and delivery-lease policy. */
+  OutputStoreLimits output_limits;
+
+  /** @brief Monotonic clock used only by the output store. */
+  OutputStore::Clock output_clock;
+
+  /** @brief Opaque output/delivery/stage id source used by the output store. */
+  OutputStore::IdGenerator output_id_generator;
+};
+
+/**
+ * @brief Validates one OutputStore delivery for version 1 encoding.
+ * @param delivery Revalidated metadata and lease candidate.
+ * @param expected_output_reference Private job reference that selected the
+ *        OutputStore record.
+ * @return True only when ids, path, enum values, and exact tight-row byte
+ *         layout are internally consistent.
+ * @throws Nothing.
+ * @note This pure internal validator performs no filesystem access and does
+ *       not duplicate OutputStore ancestry or identity checks. It exists as a
+ *       narrow malformed-delivery unit seam and never publishes JSON itself.
+ */
+bool valid_output_delivery_for_wire(
+    const OutputArtifactDelivery& delivery,
+    const std::string& expected_output_reference) noexcept;
+
+/**
  * @brief Routes version 1 requests through one daemon-owned Host.
  *
  * Envelope/parameter validation and immutable daemon metadata do not acquire
@@ -45,24 +105,21 @@ class RequestRouter {
   RequestRouter(Host& host, std::string service_version);
 
   /**
-   * @brief Creates a router with an injectable collection-snapshot policy.
+   * @brief Creates a router with complete private runtime dependencies.
    *
    * @param host Sole daemon Host instance borrowed by this router.
    * @param service_version Reproducible CMake project version string.
-   * @param snapshot_limits Count, byte, page, and TTL policy.
-   * @param snapshot_clock Monotonic clock used for cursor expiry.
-   * @param snapshot_id_generator Stable opaque cursor source.
+   * @param dependencies Snapshot, compute, and output policies/callbacks.
    * @throws std::bad_alloc if callback or metadata allocation fails.
-   * @throws std::invalid_argument if the snapshot policy is inconsistent.
+   * @throws std::invalid_argument if any injected policy is inconsistent.
    * @throws std::runtime_error if instance-id entropy fails.
    * @note Production uses the two-argument overload. Tests may inject smaller
-   *       limits and deterministic time/ids, but runtime admission still begins
-   *       only through `start_runtime()`.
+   *       coherent limits and deterministic time/ids, but runtime admission
+   *       still begins only through `start_runtime()`. This overload is private
+   *       to the non-installed daemon implementation surface.
    */
   RequestRouter(Host& host, std::string service_version,
-                CollectionSnapshotLimits snapshot_limits,
-                CollectionSnapshotRegistry::Clock snapshot_clock,
-                CollectionSnapshotRegistry::IdGenerator snapshot_id_generator);
+                RequestRouterRuntimeDependencies dependencies);
 
   /**
    * @brief Prevents copying Host, mutex, and registry ownership.
@@ -100,7 +157,10 @@ class RequestRouter {
    *       standard request failures become daemon `internal_error`. Compute
    *       submission validates its complete nested request before admission;
    *       job polling/release needs no live session or Host lock, and accepted
-   *       execution/publication failures remain nested terminal statuses.
+   *       execution/publication failures remain nested terminal statuses;
+   *       only result-time missing or identity-mismatched artifacts become the
+   *       top-level `artifact_not_found` error. Lease-aware release remains
+   *       available after concurrent terminal-record removal.
    *       Resource exhaustion is rethrown. The function performs no socket IO.
    */
   std::string route(const std::string& payload);
@@ -226,16 +286,37 @@ class RequestRouter {
    *         `std::nullopt` for another router family.
    * @throws std::bad_alloc if validation, registry lookup, or response
    *         construction cannot allocate.
+   * @throws std::invalid_argument if the registry returns a noncanonical job
+   *         snapshot or OutputStore returns metadata inconsistent with the
+   *         job's private reference or exact tight-row wire layout.
    * @throws Whatever pre-commit registry admission propagates; accepted worker
    *         and output-publication failures are retained as nested terminal
    *         statuses instead.
    * @note Submit validates the complete public Host request before one
    *       registry admission. Status, result, and release resolve only the
    *       opaque compute id and never acquire `host_mutex_` or require a live
-   *       session. Submit/status/result use one stable snapshot schema; release
-   *       atomically returns `{compute_id,released:true}`. The current final
-   *       nullable `output` field remains null; protected metadata delivery is
-   *       owned by the separate image-result routing boundary.
+   *       session. Submit/status/result use one stable snapshot schema;
+   *       terminal image result revalidates OutputStore metadata and refreshes
+   *       its stable lease before encoding the non-null `output`. Release
+   *       atomically returns `{compute_id,released:true}`, optionally removes a
+   *       matching lease, and can release that lease after concurrent normal
+   *       job removal. The registry reference is exposed only as the
+   *       revalidated `output.output_id`, never as an extra
+   *       `output_reference` field or backend handle.
+   *       If response allocation/encoding fails after lease acquisition, the
+   *       stable lease is left to explicit release or its bounded TTL because
+   *       it may already protect metadata returned by an earlier result call.
+   *       `compute.submit`, `compute.status`, and `compute.result` delegate to
+   *       the matching `ComputeRequestRegistry` operation; result additionally
+   *       calls `OutputStore::acquire_delivery` only for a private output
+   *       reference. `compute.release` first calls the registry release and,
+   *       only for a well-formed matching pair after `job_not_found`, may call
+   *       `OutputStore::release_orphaned_delivery`. Invalid/admission/lookup/
+   *       premature-result failures use their established top-level mapping,
+   *       while accepted compute/publication failures remain nested. A lease
+   *       acquired before an encoding exception is intentionally not rolled
+   *       back blindly; `route()` maps that standard exception to daemon
+   *       `internal_error`.
    */
   std::optional<std::string> route_compute_method(
       const std::string& id, const std::string& method,

@@ -243,6 +243,36 @@ bool read_compute_id(const Json& params, ComputeRequestId* compute_id) {
 }
 
 /**
+ * @brief Decodes the optional stable delivery lease identity on release.
+ * @param params Typed compute.release params object.
+ * @param delivery_id Receives nullopt when absent or the validated identity.
+ * @return True when absent or exactly 32 lowercase hexadecimal characters;
+ *         false without publishing a malformed value.
+ * @throws std::bad_alloc if copied identity storage cannot be allocated.
+ * @note Unknown release members remain forward-compatible. A present known
+ *       delivery_id is validated before any job or OutputStore mutation.
+ */
+bool read_optional_delivery_id(const Json& params,
+                               std::optional<std::string>* delivery_id) {
+  if (delivery_id == nullptr) {
+    return false;
+  }
+  if (!params.contains("delivery_id")) {
+    delivery_id->reset();
+    return true;
+  }
+  if (!params["delivery_id"].is_string()) {
+    return false;
+  }
+  std::string decoded;
+  if (!decode_opaque_id(params["delivery_id"], &decoded)) {
+    return false;
+  }
+  *delivery_id = std::move(decoded);
+  return true;
+}
+
+/**
  * @brief Decodes one optional object of boolean compute controls.
  * @param params Submit params containing the optional object.
  * @param object_name Known object member name.
@@ -390,18 +420,20 @@ std::string_view compute_state_label(ComputeRequestState state) {
 }
 
 /**
- * @brief Encodes one immutable polling-job snapshot using final stable fields.
+ * @brief Encodes one immutable polling-job snapshot using stable common fields.
  * @param snapshot Complete registry snapshot at one lookup instant.
+ * @param output Nullable protected image metadata supplied only by result.
  * @return Owned JSON value containing nullable nested status and output.
  * @throws std::bad_alloc if JSON or copied status storage cannot allocate.
  * @throws std::invalid_argument for an invalid state or noncanonical terminal
  *         snapshot.
- * @note `output` intentionally remains null at the current routing boundary,
- *       even when private output ownership exists. Protected result-time
- *       metadata delivery is a separate boundary; no private output reference
- *       is serialized here.
+ * @note Submit and status pass JSON null. Result may pass one already
+ *       revalidated metadata delivery. The private reference is never exposed
+ *       as an extra `output_reference` field; its opaque value appears only as
+ *       the normalized `output.output_id` metadata member after revalidation.
  */
-Json encode_compute_snapshot(const ComputeRequestSnapshot& snapshot) {
+Json encode_compute_snapshot(const ComputeRequestSnapshot& snapshot,
+                             Json output = nullptr) {
   const bool terminal = snapshot.state == ComputeRequestState::Succeeded ||
                         snapshot.state == ComputeRequestState::Failed;
   if (terminal != snapshot.terminal_status.has_value() ||
@@ -421,7 +453,44 @@ Json encode_compute_snapshot(const ComputeRequestSnapshot& snapshot) {
               {"state", compute_state_label(snapshot.state)},
               {"cancellable", snapshot.cancellable},
               {"status", std::move(status)},
-              {"output", nullptr}};
+              {"output", std::move(output)}};
+}
+
+/**
+ * @brief Encodes one revalidated protected output delivery for compute.result.
+ * @param delivery Metadata and stable lease returned atomically by OutputStore.
+ * @param expected_output_reference Private job reference used for lookup.
+ * @return Exact version 1 metadata object without pixel bytes or private
+ *         registry references.
+ * @throws std::bad_alloc if JSON or enum string storage cannot allocate.
+ * @throws std::invalid_argument if trusted store metadata violates the wire
+ *         invariant.
+ * @note The absolute path is the protected daemon artifact path required by
+ *       version 1. It is not a backend cache path or caller-selected path.
+ */
+Json encode_output_delivery(const OutputArtifactDelivery& delivery,
+                            const std::string& expected_output_reference) {
+  const OutputArtifactMetadata& metadata = delivery.metadata;
+  Json data_type;
+  Json device;
+  if (!valid_output_delivery_for_wire(delivery, expected_output_reference) ||
+      !encode_enum(metadata.data_type, &data_type) ||
+      !encode_enum(metadata.device, &device)) {
+    throw std::invalid_argument(
+        "output store returned malformed delivery metadata");
+  }
+  return Json{{"output_id", metadata.output_id},
+              {"delivery_id", delivery.delivery_id},
+              {"path", metadata.path},
+              {"width", metadata.width},
+              {"height", metadata.height},
+              {"channels", metadata.channels},
+              {"data_type", std::move(data_type)},
+              {"device", std::move(device)},
+              {"row_step", metadata.row_step},
+              {"byte_size", metadata.byte_size},
+              {"filesystem_device", metadata.filesystem_device},
+              {"inode", metadata.inode}};
 }
 
 /**
@@ -1359,6 +1428,51 @@ Json encode_compute_planning(
 
 }  // namespace
 
+/** @copydoc valid_output_delivery_for_wire */
+bool valid_output_delivery_for_wire(
+    const OutputArtifactDelivery& delivery,
+    const std::string& expected_output_reference) noexcept {
+  const OutputArtifactMetadata& metadata = delivery.metadata;
+  std::size_t scalar_bytes = 0;
+  switch (metadata.data_type) {
+    case DataType::UINT8:
+    case DataType::INT8:
+      scalar_bytes = 1;
+      break;
+    case DataType::UINT16:
+    case DataType::INT16:
+      scalar_bytes = 2;
+      break;
+    case DataType::FLOAT32:
+      scalar_bytes = 4;
+      break;
+    case DataType::FLOAT64:
+      scalar_bytes = 8;
+      break;
+    default:
+      return false;
+  }
+  if (!valid_opaque_id(metadata.output_id) ||
+      metadata.output_id != expected_output_reference ||
+      !valid_opaque_id(delivery.delivery_id) ||
+      !valid_absolute_path(metadata.path, false) ||
+      metadata.device != Device::CPU || metadata.width <= 0 ||
+      metadata.height <= 0 || metadata.channels <= 0) {
+    return false;
+  }
+  const std::size_t width = static_cast<std::size_t>(metadata.width);
+  const std::size_t height = static_cast<std::size_t>(metadata.height);
+  const std::size_t channels = static_cast<std::size_t>(metadata.channels);
+  const std::size_t maximum = std::numeric_limits<std::size_t>::max();
+  if (width > maximum / channels || width * channels > maximum / scalar_bytes) {
+    return false;
+  }
+  const std::size_t expected_row_step = width * channels * scalar_bytes;
+  return metadata.row_step == expected_row_step &&
+         height <= maximum / expected_row_step &&
+         metadata.byte_size == expected_row_step * height;
+}
+
 /**
  * @brief Complete cpp-only parsed-params adapter.
  *
@@ -1374,18 +1488,20 @@ struct RequestRouter::RoutedParams {
 
 /** @copydoc RequestRouter::RequestRouter */
 RequestRouter::RequestRouter(Host& host, std::string service_version)
-    : RequestRouter(host, std::move(service_version), {}, {}, {}) {
+    : RequestRouter(host, std::move(service_version),
+                    RequestRouterRuntimeDependencies{}) {
 }  // NOLINT(whitespace/indent_namespace)
 
 /** @copydoc RequestRouter::RequestRouter */
-RequestRouter::RequestRouter(
-    Host& host, std::string service_version,
-    CollectionSnapshotLimits snapshot_limits,
-    CollectionSnapshotRegistry::Clock snapshot_clock,
-    CollectionSnapshotRegistry::IdGenerator snapshot_id_generator)
+RequestRouter::RequestRouter(Host& host, std::string service_version,
+                             RequestRouterRuntimeDependencies dependencies)
     : host_(host),
-      collection_snapshots_(snapshot_limits, std::move(snapshot_clock),
-                            std::move(snapshot_id_generator)),
+      collection_snapshots_(dependencies.snapshot_limits,
+                            std::move(dependencies.snapshot_clock),
+                            std::move(dependencies.snapshot_id_generator)),
+      output_store_(dependencies.output_limits,
+                    std::move(dependencies.output_clock),
+                    std::move(dependencies.output_id_generator)),
       compute_registry_(
           registry_,
           [this](const HostComputeRequest& request) {
@@ -1401,8 +1517,10 @@ RequestRouter::RequestRouter(
           [this](const ComputeRequestId& compute_id,  // NOLINT
                  ImageBuffer image) {
             return output_store_.publish(compute_id, std::move(image));
-          }),                                        // NOLINT
-      service_version_(std::move(service_version)),  // NOLINT
+          },  // NOLINT
+          dependencies.compute_limits, std::move(dependencies.compute_clock),
+          std::move(dependencies.compute_id_generator)),  // NOLINT
+      service_version_(std::move(service_version)),       // NOLINT
       server_instance_id_(          // NOLINT(whitespace/indent_namespace)
           generate_opaque_id()) {}  // NOLINT
 
@@ -2266,11 +2384,35 @@ std::optional<std::string> RequestRouter::route_compute_method(
     if (!result.status.ok) {
       return bounded_error(id, result.status);
     }
+    if (result.value.output_reference.has_value()) {
+      IpcResult<OutputArtifactDelivery> delivery =
+          output_store_.acquire_delivery(*result.value.output_reference);
+      if (!delivery.status.ok) {
+        return bounded_error(id, delivery.status);
+      }
+      return encode_routed_value(id, [&] {
+        return encode_compute_snapshot(
+            result.value, encode_output_delivery(
+                              delivery.value, *result.value.output_reference));
+      });
+    }
     return encode_routed_value(
         id, [&] { return encode_compute_snapshot(result.value); });
   }
 
-  OperationStatus released = compute_registry_.release(compute_id);
+  std::optional<std::string> delivery_id;
+  if (!read_optional_delivery_id(params, &delivery_id)) {
+    return bounded_error(
+        id, invalid_params(
+                "compute.release delivery_id must be a valid opaque id"));
+  }
+  OperationStatus released = compute_registry_.release(compute_id, delivery_id);
+  if (!released.ok && delivery_id.has_value() &&
+      released.domain == OperationErrorDomain::Daemon &&
+      released.code == kJobNotFoundCode &&
+      output_store_.release_orphaned_delivery(compute_id, *delivery_id)) {
+    released = ok_status();
+  }
   if (!released.ok) {
     return bounded_error(id, released);
   }

@@ -11,6 +11,7 @@
 #include <unistd.h>
 
 #include <algorithm>
+#include <array>
 #include <atomic>
 #include <cerrno>
 #include <chrono>
@@ -19,6 +20,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <cstring>
+#include <exception>
 #include <filesystem>
 #include <fstream>
 #include <ios>
@@ -40,6 +42,10 @@
 
 #ifndef PS_PHOTOSPIDERD_PATH
 #error "PS_PHOTOSPIDERD_PATH must name the real daemon executable"
+#endif
+
+#ifndef PS_IPC_OUTPUT_FIXTURE_DAEMON_PATH
+#error "PS_IPC_OUTPUT_FIXTURE_DAEMON_PATH must name the output fixture"
 #endif
 
 namespace ps::ipc {
@@ -115,6 +121,115 @@ class ScopedDaemonDirectory {
 
   /** @brief Process-local uniqueness sequence. */
   static std::uint64_t sequence_;
+};
+
+/**
+ * @brief Parent-side owner of one cross-process monotonic clock control file.
+ *
+ * @throws std::runtime_error if fixed-width file creation or update fails.
+ * @note The file contains exactly one host-local `uint64_t` nanosecond value.
+ *       Each update holds an exclusive advisory lock around one offset-zero
+ *       `pwrite`; the fixture takes a shared lock around one matching `pread`.
+ *       No environment variable, product flag, wire method, or real TTL sleep
+ *       is used.
+ */
+class ManualProcessClock final {
+ public:
+  /**
+   * @brief Creates a new mode-0600 eight-byte clock initialized to zero.
+   * @param path Test-owned absolute control-file path.
+   * @throws std::runtime_error if secure creation or initialization fails.
+   */
+  explicit ManualProcessClock(std::filesystem::path path)
+      : path_(std::move(path)) {
+    fd_ = ::open(path_.c_str(),
+                 O_RDWR | O_CREAT | O_EXCL | O_CLOEXEC | O_NOFOLLOW, 0600);
+    if (fd_ < 0 || ::fchmod(fd_, 0600) != 0) {
+      if (fd_ >= 0) {
+        (void)::close(fd_);
+        fd_ = -1;
+      }
+      throw std::runtime_error("cannot create fixture clock control file");
+    }
+    try {
+      write_current();
+    } catch (...) {
+      (void)::close(fd_);
+      fd_ = -1;
+      (void)::unlink(path_.c_str());
+      throw;
+    }
+  }
+
+  /** @brief Closes the owned control descriptor. @throws Nothing. */
+  ~ManualProcessClock() noexcept {
+    if (fd_ >= 0) {
+      (void)::close(fd_);
+    }
+  }
+
+  /** @brief Prevents duplicate control-file ownership. */
+  ManualProcessClock(const ManualProcessClock&) = delete;
+
+  /**
+   * @brief Prevents replacing control-file ownership by assignment.
+   * @return No value because assignment is unavailable.
+   */
+  ManualProcessClock& operator=(const ManualProcessClock&) = delete;
+
+  /** @brief Returns the stable absolute control-file path. */
+  const std::filesystem::path& path() const noexcept { return path_; }
+
+  /**
+   * @brief Advances monotonic fixture time and atomically publishes it.
+   * @param duration Nonnegative interval to add.
+   * @throws std::invalid_argument for negative or overflowing durations.
+   * @throws std::runtime_error if the locked fixed-width write fails.
+   */
+  void advance(std::chrono::nanoseconds duration) {
+    if (duration.count() < 0 ||
+        static_cast<std::uint64_t>(duration.count()) >
+            std::numeric_limits<std::uint64_t>::max() - nanoseconds_) {
+      throw std::invalid_argument("manual process clock advance overflowed");
+    }
+    nanoseconds_ += static_cast<std::uint64_t>(duration.count());
+    write_current();
+  }
+
+ private:
+  /**
+   * @brief Publishes the current exact-width value under an exclusive lock.
+   * @throws std::runtime_error if lock, write, or unlock coordination fails.
+   */
+  void write_current() {
+    int lock_result = -1;
+    do {
+      lock_result = ::flock(fd_, LOCK_EX);
+    } while (lock_result != 0 && errno == EINTR);
+    if (lock_result != 0) {
+      throw std::runtime_error("cannot lock fixture clock control file");
+    }
+    const ssize_t count = ::pwrite(fd_, &nanoseconds_, sizeof(nanoseconds_), 0);
+    const int write_error = errno;
+    int unlock_result = -1;
+    do {
+      unlock_result = ::flock(fd_, LOCK_UN);
+    } while (unlock_result != 0 && errno == EINTR);
+    if (count != static_cast<ssize_t>(sizeof(nanoseconds_)) ||
+        unlock_result != 0) {
+      errno = write_error;
+      throw std::runtime_error("cannot update fixture clock control file");
+    }
+  }
+
+  /** @brief Absolute path passed only to the test fixture CLI. */
+  std::filesystem::path path_;
+
+  /** @brief Owned control-file descriptor. */
+  int fd_ = -1;
+
+  /** @brief Current monotonic value in nanoseconds. */
+  std::uint64_t nanoseconds_ = 0;
 };
 
 std::uint64_t ScopedDaemonDirectory::sequence_ = 0;
@@ -210,13 +325,18 @@ class ConcurrentStartGate {
 };
 
 /**
- * @brief RAII owner for one real photospiderd child process.
+ * @brief RAII owner for one real daemon or output-fixture child process.
  *
- * The destructor enforces a bounded SIGTERM-to-SIGKILL-to-waitpid sequence, so
- * an assertion or daemon bug cannot leak a child or hang CTest indefinitely.
+ * The destructor performs finite SIGTERM and SIGKILL phases using only
+ * nonblocking `waitpid` observations, so an assertion or daemon bug cannot
+ * make CTest wait indefinitely. Explicit `stop()` calls retain a child pid
+ * after a timeout or inconclusive wait error so the same owner can retry.
  *
- * @throws std::runtime_error if fork fails.
+ * @throws std::runtime_error from `start()` when prior ownership cannot be
+ *         reclaimed or fork fails.
  * @note Readiness is established by typed `daemon.ping`, never fixed sleep.
+ *       An empty fixture mode executes the product `photospiderd`; a known
+ *       mode executes the non-installed deterministic output fixture.
  */
 class DaemonProcess {
  public:
@@ -245,14 +365,18 @@ class DaemonProcess {
   DaemonProcess& operator=(const DaemonProcess&) = delete;
 
   /**
-   * @brief Terminates and reaps a remaining child within a hard deadline.
+   * @brief Makes one bounded best-effort attempt to terminate and reap a child.
    *
    * @throws Nothing.
+   * @note No blocking wait is performed and no cleanup failure escapes the
+   *       destructor. Under an exceptional OS wait failure or both finite
+   *       deadline expirations, process ownership cannot be retried after the
+   *       owner itself is destroyed.
    */
-  ~DaemonProcess() { stop(); }
+  ~DaemonProcess() noexcept { stop(); }
 
   /**
-   * @brief Starts the real foreground daemon.
+   * @brief Starts the real product daemon or deterministic output fixture.
    *
    * @param socket_path Expected socket path; passed through `--socket` when
    *        `explicit_socket` is true.
@@ -261,14 +385,25 @@ class DaemonProcess {
    *        environment for default-path tests.
    * @param start_gate_fd Optional descriptor from which the child must consume
    *        one byte before exec.
+   * @param fixture_image_mode Empty for `photospiderd`, otherwise one of the
+   *        deterministic fixture modes `empty`, `nonempty`, or `invalid`.
+   * @param fixture_clock_control Absolute fixed-width manual-clock file passed
+   *        only to the output fixture; ignored for the product daemon.
    * @throws std::bad_alloc if copied path/environment storage cannot be
    *         allocated.
-   * @throws std::runtime_error if fork fails.
+   * @throws std::runtime_error if the previous child remains owned after the
+   *         bounded stop preflight or if fork fails.
    * @note The child uses `execl` and never initializes Host before exec.
    */
   void start(std::string socket_path, bool explicit_socket = true,
-             std::string xdg_runtime = {}, int start_gate_fd = -1) {
+             std::string xdg_runtime = {}, int start_gate_fd = -1,
+             std::string fixture_image_mode = {},
+             std::string fixture_clock_control = {}) {
     stop();
+    if (pid_ >= 0) {
+      throw std::runtime_error(
+          "previous daemon child could not be reaped before restart");
+    }
     exited_ = false;
     normal_exit_ = false;
     exit_code_ = -1;
@@ -294,6 +429,14 @@ class DaemonProcess {
           ::_exit(126);
         }
       }
+      if (!fixture_image_mode.empty()) {
+        ::execl(PS_IPC_OUTPUT_FIXTURE_DAEMON_PATH,
+                PS_IPC_OUTPUT_FIXTURE_DAEMON_PATH, "--socket",
+                socket_path_.c_str(), "--image-mode",
+                fixture_image_mode.c_str(), "--clock-control",
+                fixture_clock_control.c_str(), static_cast<char*>(nullptr));
+        ::_exit(127);
+      }
       if (explicit_socket) {
         ::execl(PS_PHOTOSPIDERD_PATH, PS_PHOTOSPIDERD_PATH, "--socket",
                 socket_path_.c_str(), static_cast<char*>(nullptr));
@@ -315,10 +458,7 @@ class DaemonProcess {
   bool wait_ready(std::chrono::milliseconds timeout) {
     const auto deadline = std::chrono::steady_clock::now() + timeout;
     while (std::chrono::steady_clock::now() < deadline) {
-      int status = 0;
-      const pid_t waited = ::waitpid(pid_, &status, WNOHANG);
-      if (waited == pid_) {
-        record_exit(status);
+      if (poll_exit()) {
         return false;
       }
       Client client;
@@ -335,31 +475,58 @@ class DaemonProcess {
   }
 
   /**
-   * @brief Waits for natural child exit within a hard deadline.
+   * @brief Waits for child exit using finite nonblocking observations.
    *
    * @param timeout Maximum wait duration.
-   * @return True if the child was reaped.
+   * @return True if a terminal status was reaped or `ECHILD` proved that no
+   *         waitable child remains; false while it is running, after the
+   *         deadline, or after another wait error.
    * @throws Nothing.
+   * @note A terminal status is recorded only when `waitpid` returns the owned
+   *       pid. `ECHILD` clears stale ownership and records an unknown failure.
+   *       Zero, timeout, `EINTR` at the deadline, and every other error retain
+   *       the pid so `stop()` or its caller can retry. All observations use
+   *       `WNOHANG`; even a zero timeout performs one observation.
    */
   bool wait_for_exit(std::chrono::milliseconds timeout) noexcept {
     if (pid_ < 0) {
       return true;
     }
     const auto deadline = std::chrono::steady_clock::now() + timeout;
-    while (std::chrono::steady_clock::now() < deadline) {
+    for (;;) {
       int status = 0;
       const pid_t waited = ::waitpid(pid_, &status, WNOHANG);
       if (waited == pid_) {
         record_exit(status);
         return true;
       }
-      if (waited < 0 && errno != EINTR) {
-        pid_ = -1;
-        return true;
+      if (waited < 0) {
+        const int wait_error = errno;
+        if (wait_error == ECHILD) {
+          record_unknown_exit();
+          return true;
+        }
+        if (wait_error != EINTR) {
+          return false;
+        }
+        if (std::chrono::steady_clock::now() >= deadline) {
+          return false;
+        }
+        continue;
       }
-      std::this_thread::sleep_for(std::chrono::milliseconds(10));
+      const auto now = std::chrono::steady_clock::now();
+      if (now >= deadline) {
+        return false;
+      }
+      if (waited == 0) {
+        std::this_thread::sleep_until(
+            std::min(deadline, now + kExitPollInterval));
+      } else {
+        // A positive pid other than the uniquely owned child is impossible
+        // for waitpid(pid_, ...), so preserve ownership and report failure.
+        return false;
+      }
     }
-    return false;
   }
 
   /**
@@ -374,7 +541,23 @@ class DaemonProcess {
     if (pid_ < 0) {
       return true;
     }
-    return ::kill(pid_, SIGTERM) == 0;
+    if (::kill(pid_, SIGTERM) == 0) {
+      return true;
+    }
+    return errno == ESRCH && wait_for_exit(std::chrono::milliseconds::zero());
+  }
+
+  /**
+   * @brief Simulates abrupt process death and reaps it within one deadline.
+   * @param timeout Maximum wait after successful SIGKILL delivery.
+   * @return True after the child is conclusively absent, false on signal
+   *         failure, wait failure, or timeout.
+   * @throws Nothing.
+   * @note This is used only to leave a genuine stale socket/output instance
+   *       for restart cleanup. Normal lifecycle tests use graceful stop.
+   */
+  bool crash_and_wait(std::chrono::milliseconds timeout) noexcept {
+    return signal_and_wait(SIGKILL, timeout);
   }
 
   /**
@@ -382,47 +565,30 @@ class DaemonProcess {
    *
    * @return True when the child is absent or has just been reaped.
    * @throws Nothing.
-   * @note A running child leaves process ownership unchanged.
+   * @note This reuses the exact wait classification in `wait_for_exit()`. A
+   *       running child or inconclusive wait error leaves ownership unchanged;
+   *       `ECHILD` records an unknown failure and clears stale ownership.
    */
   bool poll_exit() noexcept {
-    if (pid_ < 0) {
-      return true;
-    }
-    int status = 0;
-    const pid_t waited = ::waitpid(pid_, &status, WNOHANG);
-    if (waited == pid_) {
-      record_exit(status);
-      return true;
-    }
-    if (waited < 0 && errno != EINTR) {
-      pid_ = -1;
-      exited_ = true;
-      normal_exit_ = false;
-      exit_code_ = -1;
-      return true;
-    }
-    return false;
+    return wait_for_exit(std::chrono::milliseconds::zero());
   }
 
   /**
-   * @brief Sends SIGTERM and enforces bounded reap, escalating to SIGKILL.
+   * @brief Attempts graceful shutdown, then one independently bounded kill.
    *
    * @throws Nothing.
-   * @note Normal daemon shutdown is allowed five seconds before escalation.
+   * @note Normal daemon shutdown receives a five-second WNOHANG polling
+   *       deadline. If that phase cannot reap the child, SIGKILL receives a
+   *       separate two-second WNOHANG polling deadline. A timeout or
+   *       inconclusive non-`ECHILD` wait error after the final phase retains
+   *       `pid_`, allowing a later explicit `stop()` or `start()` preflight to
+   *       retry without overwriting ownership.
    */
   void stop() noexcept {
-    if (pid_ < 0) {
+    if (signal_and_wait(SIGTERM, kGracefulStopTimeout)) {
       return;
     }
-    (void)::kill(pid_, SIGTERM);
-    if (wait_for_exit(std::chrono::seconds(5))) {
-      return;
-    }
-    (void)::kill(pid_, SIGKILL);
-    int status = 0;
-    while (::waitpid(pid_, &status, 0) < 0 && errno == EINTR) {
-    }
-    record_exit(status);
+    (void)signal_and_wait(SIGKILL, kForcedReapTimeout);
   }
 
   /**
@@ -436,7 +602,7 @@ class DaemonProcess {
   }
 
   /**
-   * @brief Reports whether a reaped child had a nonzero/abnormal exit.
+   * @brief Reports a nonzero, abnormal, or unknown-absence child outcome.
    *
    * @return True after any non-successful terminal state.
    * @throws Nothing.
@@ -457,14 +623,45 @@ class DaemonProcess {
   }
 
   /**
-   * @brief Reports whether this process has already been reaped.
+   * @brief Reports whether a terminal or unknown-absence outcome was recorded.
    *
-   * @return True after any terminal status has been recorded.
+   * @return True after a terminal wait status or `ECHILD` absence was recorded.
    * @throws Nothing.
    */
   bool has_exited() const noexcept { return exited_; }
 
  private:
+  /** @brief Interval between nonblocking child-exit observations. */
+  static constexpr std::chrono::milliseconds kExitPollInterval{10};
+
+  /** @brief Grace period allowed after SIGTERM delivery. */
+  static constexpr std::chrono::milliseconds kGracefulStopTimeout{5000};
+
+  /** @brief Independent reap deadline after SIGKILL delivery. */
+  static constexpr std::chrono::milliseconds kForcedReapTimeout{2000};
+
+  /**
+   * @brief Sends one signal and performs a finite nonblocking reap phase.
+   * @param signal_number Signal to deliver to the currently owned child.
+   * @param timeout Maximum WNOHANG polling duration after delivery or ESRCH.
+   * @return True when no child was owned or the child became conclusively
+   *         absent; false on signal failure, wait error, or timeout.
+   * @throws Nothing.
+   * @note `ESRCH` still enters `wait_for_exit()` so a zombie can be reaped or
+   *       `ECHILD` can clear stale ownership. Every other signal failure and
+   *       every inconclusive wait preserve `pid_` for a later retry.
+   */
+  bool signal_and_wait(int signal_number,
+                       std::chrono::milliseconds timeout) noexcept {
+    if (pid_ < 0) {
+      return true;
+    }
+    if (::kill(pid_, signal_number) != 0 && errno != ESRCH) {
+      return false;
+    }
+    return wait_for_exit(timeout);
+  }
+
   /**
    * @brief Stores one waitpid terminal status and clears child ownership.
    *
@@ -478,19 +675,32 @@ class DaemonProcess {
     pid_ = -1;
   }
 
-  /** @brief Owned child pid, or -1 once absent/reaped. */
+  /**
+   * @brief Records that no waitable child remains without a terminal status.
+   * @throws Nothing.
+   * @note Used only for `ECHILD`; the absence is exposed as an unknown failure
+   *       rather than fabricating a successful or signal-derived exit status.
+   */
+  void record_unknown_exit() noexcept {
+    exited_ = true;
+    normal_exit_ = false;
+    exit_code_ = -1;
+    pid_ = -1;
+  }
+
+  /** @brief Owned child pid, or -1 once reaped/absent/unknown via `ECHILD`. */
   pid_t pid_ = -1;
 
   /** @brief Socket path used for readiness probes. */
   std::string socket_path_;
 
-  /** @brief Whether a terminal child state has been recorded. */
+  /** @brief Whether a terminal status or `ECHILD` absence was recorded. */
   bool exited_ = false;
 
   /** @brief Whether the terminal state was a normal process exit. */
   bool normal_exit_ = false;
 
-  /** @brief Normal exit code, or -1 for a signal termination. */
+  /** @brief Normal exit code, or -1 for signal/unknown-absence outcomes. */
   int exit_code_ = -1;
 };
 
@@ -868,13 +1078,80 @@ internal::Json raw_daemon_call(
 }
 
 /**
+ * @brief Reusable deterministic release gate for concurrent raw RPC starts.
+ *
+ * @throws Nothing.
+ * @note The coordinator observes readiness before releasing all participants,
+ *       so the test covers overlapping server requests rather than two merely
+ *       sequential client calls.
+ */
+class ConcurrentCallGate final {
+ public:
+  /**
+   * @brief Records one ready caller and waits boundedly for release.
+   * @param timeout Hard upper bound for coordinator release.
+   * @return True after release; false when the gate deadline expires.
+   * @throws Nothing.
+   * @note Timeout prevents a failed second task construction from stranding a
+   *       successfully started first participant indefinitely.
+   */
+  bool arrive_and_wait(std::chrono::milliseconds timeout) noexcept {
+    std::unique_lock<std::mutex> lock(mutex_);
+    ++ready_;
+    changed_.notify_all();
+    return changed_.wait_for(lock, timeout, [this] { return released_; });
+  }
+
+  /**
+   * @brief Waits until at least the requested number of callers are ready.
+   * @param count Minimum participant count.
+   * @param timeout Bounded observation duration.
+   * @return True when the participant count was reached.
+   * @throws Nothing.
+   */
+  bool wait_ready(std::size_t count,
+                  std::chrono::milliseconds timeout) noexcept {
+    std::unique_lock<std::mutex> lock(mutex_);
+    return changed_.wait_for(lock, timeout,
+                             [this, count] { return ready_ >= count; });
+  }
+
+  /**
+   * @brief Releases every current and future participant.
+   * @throws Nothing.
+   */
+  void release() noexcept {
+    {
+      std::lock_guard<std::mutex> lock(mutex_);
+      released_ = true;
+    }
+    changed_.notify_all();
+  }
+
+ private:
+  /** @brief Serializes readiness and release state. */
+  std::mutex mutex_;
+
+  /** @brief Signals readiness changes and the single release transition. */
+  std::condition_variable changed_;
+
+  /** @brief Number of callers waiting at the gate. */
+  std::size_t ready_ = 0;
+
+  /** @brief Whether participants may enter their raw RPC call. */
+  bool released_ = false;
+};
+
+/**
  * @brief Runs one hard-deadline raw daemon call on an owned joinable thread.
  *
  * @throws std::bad_alloc or std::system_error if state/thread creation fails.
  * @note Tests explicitly stop/release daemon work before joining failure paths;
  *       the worker itself also has a hard transport deadline, so destruction
  *       cannot inherit the unbounded `std::future` join behavior this helper
- *       replaces.
+ *       replaces. The task retains its optional start gate and releases it
+ *       before every join/destruction path; a failed peer construction can
+ *       therefore unwind the first task without stranding its worker.
  */
 class RawDaemonCallTask final {
  public:
@@ -887,22 +1164,36 @@ class RawDaemonCallTask final {
    * @param id Correlated request id.
    * @param timeout Hard end-to-end RPC deadline.
    * @param report_failure Whether expected transport closure records failure.
+   * @param start_gate Optional shared gate entered immediately before RPC.
    * @throws std::bad_alloc or std::system_error on setup failure.
    */
   RawDaemonCallTask(std::string socket_path, std::string method,
                     internal::Json params, std::string id,
                     std::chrono::milliseconds timeout,
-                    bool report_failure = true)
+                    bool report_failure = true,
+                    std::shared_ptr<ConcurrentCallGate> start_gate = {})
       : state_(std::make_shared<State>()),
+        start_gate_(std::move(start_gate)),
         worker_([state = state_, socket_path = std::move(socket_path),
                  method = std::move(method), params = std::move(params),
-                 id = std::move(id), timeout, report_failure]() mutable {
-          internal::Json response =
-              raw_daemon_call(socket_path, method, std::move(params),
-                              std::move(id), timeout, report_failure);
-          {
+                 id = std::move(id), timeout, report_failure,
+                 start_gate = start_gate_]() mutable {
+          try {
+            if (start_gate && !start_gate->arrive_and_wait(timeout)) {
+              throw std::runtime_error(
+                  "concurrent raw RPC start gate timed out");
+            }
+            internal::Json response =
+                raw_daemon_call(socket_path, method, std::move(params),
+                                std::move(id), timeout, report_failure);
             std::lock_guard<std::mutex> lock(state->mutex);
             state->response = std::move(response);
+          } catch (...) {
+            std::lock_guard<std::mutex> lock(state->mutex);
+            state->exception = std::current_exception();
+          }
+          {
+            std::lock_guard<std::mutex> lock(state->mutex);
             state->complete = true;
           }
           state->changed.notify_all();
@@ -927,9 +1218,13 @@ class RawDaemonCallTask final {
    * @brief Joins the bounded worker when explicit test cleanup was skipped.
    * @throws Nothing.
    */
-  ~RawDaemonCallTask() {
-    if (worker_.joinable()) {
-      worker_.join();
+  ~RawDaemonCallTask() noexcept {
+    release_gate();
+    try {
+      if (worker_.joinable()) {
+        worker_.join();
+      }
+    } catch (...) {
     }
   }
 
@@ -960,17 +1255,33 @@ class RawDaemonCallTask final {
    * @return Complete parsed response, or an empty object after contained IO
    *         failure.
    * @throws std::system_error if thread joining fails.
+   * @throws Whatever exception the worker captured while starting/running the
+   *         operation, after the thread has been reclaimed.
    * @note Call once after `wait_for()` or after deterministic daemon cleanup.
    */
   internal::Json join() {
+    release_gate();
     if (worker_.joinable()) {
       worker_.join();
     }
     std::lock_guard<std::mutex> lock(state_->mutex);
+    if (state_->exception) {
+      std::rethrow_exception(state_->exception);
+    }
     return std::move(state_->response);
   }
 
  private:
+  /**
+   * @brief Idempotently releases a held start gate before any blocking join.
+   * @throws Nothing.
+   */
+  void release_gate() noexcept {
+    if (start_gate_) {
+      start_gate_->release();
+    }
+  }
+
   /** @brief Shared completion state published by the worker. */
   struct State {
     /** @brief Mutex protecting response publication. */
@@ -984,10 +1295,17 @@ class RawDaemonCallTask final {
 
     /** @brief Parsed response or contained-failure empty object. */
     internal::Json response = internal::Json::object();
+
+    /** @brief Worker failure rethrown only after explicit join/reclamation. */
+    std::exception_ptr exception;
   };
 
   /** @brief Heap-owned state safe across the worker lifetime. */
   std::shared_ptr<State> state_;
+
+  /** @brief Optional gate retained so destruction/join can always release it.
+   */
+  std::shared_ptr<ConcurrentCallGate> start_gate_;
 
   /** @brief Sole joined RPC worker. */
   std::thread worker_;
@@ -1215,6 +1533,368 @@ internal::Json minimal_compute_submit_params(const IpcSessionId& session,
   return internal::Json{{"session_id", session.value},
                         {"node_id", node},
                         {"result_mode", "status"}};
+}
+
+/**
+ * @brief Builds the smallest valid image-mode compute submission.
+ * @param session Active opaque daemon session id.
+ * @param node Target public node id recorded by the deterministic Host.
+ * @return Params containing only required fields and image result mode.
+ * @throws std::bad_alloc if JSON storage cannot allocate.
+ */
+internal::Json image_compute_submit_params(const IpcSessionId& session,
+                                           std::int64_t node = 1) {
+  return internal::Json{{"session_id", session.value},
+                        {"node_id", node},
+                        {"result_mode", "image"}};
+}
+
+/**
+ * @brief Temporarily changes one real directory's permission bits.
+ *
+ * @throws std::runtime_error when the path is not a real directory or its
+ *         mode cannot be observed or changed.
+ * @note The original mode is restored best-effort during destruction. Tests
+ *       call `restore()` explicitly before depending on the restored access.
+ */
+class ScopedDirectoryMode final {
+ public:
+  /**
+   * @brief Installs one temporary directory mode without changing identity.
+   * @param path Existing test-owned directory that must not be a symlink.
+   * @param temporary_mode Permission bits active until `restore()`.
+   * @throws std::runtime_error when validation or chmod fails.
+   */
+  ScopedDirectoryMode(std::filesystem::path path, mode_t temporary_mode)
+      : path_(std::move(path)) {
+    struct stat metadata{};
+    if (::lstat(path_.c_str(), &metadata) != 0 || !S_ISDIR(metadata.st_mode)) {
+      throw std::runtime_error("output fixture instance is not a directory");
+    }
+    original_mode_ = metadata.st_mode & 07777;
+    if (::chmod(path_.c_str(), temporary_mode) != 0) {
+      throw std::runtime_error(
+          "cannot install temporary output directory mode");
+    }
+    active_ = true;
+  }
+
+  /** @brief Restores the original mode best-effort when still active. */
+  ~ScopedDirectoryMode() noexcept {
+    if (active_) {
+      (void)::chmod(path_.c_str(), original_mode_);
+    }
+  }
+
+  /** @brief Prevents duplicate restoration ownership. */
+  ScopedDirectoryMode(const ScopedDirectoryMode&) = delete;
+
+  /**
+   * @brief Prevents replacing restoration ownership by assignment.
+   * @return No value because assignment is unavailable.
+   */
+  ScopedDirectoryMode& operator=(const ScopedDirectoryMode&) = delete;
+
+  /**
+   * @brief Restores the original mode and disarms destructor cleanup.
+   * @throws std::runtime_error when chmod fails.
+   */
+  void restore() {
+    if (!active_) {
+      return;
+    }
+    if (::chmod(path_.c_str(), original_mode_) != 0) {
+      throw std::runtime_error("cannot restore output directory mode");
+    }
+    active_ = false;
+  }
+
+ private:
+  /** @brief Stable test-owned directory path. */
+  std::filesystem::path path_;
+
+  /** @brief Permission bits captured before the temporary change. */
+  mode_t original_mode_ = 0;
+
+  /** @brief Whether destruction must still attempt restoration. */
+  bool active_ = false;
+};
+
+/**
+ * @brief Finds the sole live output-store instance below one fixture socket.
+ * @param socket_path Running fixture socket whose store has completed start.
+ * @return Absolute path of the one valid `instance-<opaque-id>` directory.
+ * @throws std::runtime_error unless exactly one real instance directory exists.
+ * @throws std::filesystem::filesystem_error when enumeration fails.
+ */
+std::filesystem::path find_output_instance_directory(
+    const std::string& socket_path) {
+  const std::filesystem::path base(socket_path + ".outputs");
+  std::optional<std::filesystem::path> instance;
+  for (const std::filesystem::directory_entry& entry :
+       std::filesystem::directory_iterator(base)) {
+    const std::string name = entry.path().filename().string();
+    constexpr std::string_view prefix = "instance-";
+    struct stat metadata{};
+    if (name.rfind(prefix, 0) != 0 ||
+        !internal::valid_opaque_id(name.substr(prefix.size())) ||
+        ::lstat(entry.path().c_str(), &metadata) != 0 ||
+        !S_ISDIR(metadata.st_mode) || instance.has_value()) {
+      throw std::runtime_error(
+          "output fixture does not own exactly one safe instance");
+    }
+    instance = entry.path();
+  }
+  if (!instance.has_value()) {
+    throw std::runtime_error("output fixture has no live output instance");
+  }
+  return *instance;
+}
+
+/**
+ * @brief Reads one complete small artifact through a no-follow descriptor.
+ * @param path Protected absolute artifact path returned by compute.result.
+ * @return Exact bytes read to EOF.
+ * @throws std::runtime_error if open or read fails.
+ * @throws std::bad_alloc if byte storage cannot grow.
+ */
+std::vector<std::uint8_t> read_artifact_bytes(const std::string& path) {
+  internal::UniqueFd descriptor(
+      ::open(path.c_str(), O_RDONLY | O_NOFOLLOW | O_CLOEXEC));
+  if (!descriptor) {
+    throw std::runtime_error("cannot open fixture output artifact");
+  }
+  std::vector<std::uint8_t> bytes;
+  std::array<std::uint8_t, 256> buffer{};
+  while (true) {
+    const ssize_t count =
+        ::read(descriptor.get(), buffer.data(), buffer.size());
+    if (count > 0) {
+      bytes.insert(bytes.end(), buffer.begin(), buffer.begin() + count);
+      continue;
+    }
+    if (count == 0) {
+      return bytes;
+    }
+    if (errno != EINTR) {
+      throw std::runtime_error("cannot read fixture output artifact");
+    }
+  }
+}
+
+/**
+ * @brief Loads one opaque session through the public typed Client.
+ * @param socket_path Running product or fixture daemon socket.
+ * @param root_dir Absolute test-owned graph root.
+ * @param session_name Safe display name copied into the Host request.
+ * @return Loaded opaque session summary or exact connect/load failure.
+ * @throws std::bad_alloc if request or result storage cannot allocate.
+ * @note The deterministic Host does not inspect a YAML file; this helper still
+ *       traverses the real Client/frame/router/session-registry stack.
+ */
+IpcResult<GraphSessionSummary> load_fixture_session(
+    const std::string& socket_path, const std::filesystem::path& root_dir,
+    std::string session_name) {
+  Client client;
+  OperationStatus connected = client.connect(socket_path);
+  if (!connected.ok) {
+    return {std::move(connected), {}};
+  }
+  GraphLoadRequest request;
+  request.session = GraphSessionId{std::move(session_name)};
+  request.root_dir = root_dir.string();
+  IpcResult<GraphSessionSummary> loaded = client.load_graph(request);
+  client.disconnect();
+  return loaded;
+}
+
+/**
+ * @brief Failure-safe best-effort release for one fixture compute job.
+ * @throws std::bad_alloc when copied identities cannot allocate.
+ * @note Destruction performs one bounded raw release without recording a new
+ *       assertion. Tests dismiss the guard after their explicit release.
+ */
+class ScopedFixtureJobRelease final {
+ public:
+  /**
+   * @brief Arms cleanup for one accepted job.
+   * @param socket_path Running fixture socket.
+   * @param compute_id Accepted opaque compute identity.
+   * @throws std::bad_alloc if identity storage cannot allocate.
+   */
+  ScopedFixtureJobRelease(std::string socket_path, std::string compute_id)
+      : socket_path_(std::move(socket_path)),
+        compute_id_(std::move(compute_id)) {}
+
+  /** @brief Performs bounded best-effort cleanup when still armed. */
+  ~ScopedFixtureJobRelease() noexcept {
+    if (!armed_) {
+      return;
+    }
+    try {
+      internal::Json params{{"compute_id", compute_id_}};
+      if (delivery_id_.has_value()) {
+        params["delivery_id"] = *delivery_id_;
+      }
+      (void)raw_daemon_call(socket_path_, "compute.release", std::move(params),
+                            "fixture-guard-release",
+                            std::chrono::milliseconds(500), false);
+    } catch (...) {
+    }
+  }
+
+  /** @brief Prevents duplicate job-cleanup ownership. */
+  ScopedFixtureJobRelease(const ScopedFixtureJobRelease&) = delete;
+
+  /**
+   * @brief Prevents replacing job-cleanup ownership by assignment.
+   * @return No value because copying is unavailable.
+   */
+  ScopedFixtureJobRelease& operator=(const ScopedFixtureJobRelease&) = delete;
+
+  /**
+   * @brief Adds the stable lease identity to failure cleanup.
+   * @param delivery_id Valid delivery id returned by compute.result.
+   * @throws std::bad_alloc if copied identity storage cannot allocate.
+   */
+  void protect_delivery(std::string delivery_id) {
+    delivery_id_ = std::move(delivery_id);
+  }
+
+  /** @brief Disarms cleanup after explicit successful release. */
+  void dismiss() noexcept { armed_ = false; }
+
+ private:
+  /** @brief Running fixture socket path. */
+  std::string socket_path_;
+
+  /** @brief Accepted job identity. */
+  std::string compute_id_;
+
+  /** @brief Optional matching delivery identity. */
+  std::optional<std::string> delivery_id_;
+
+  /** @brief Whether destruction must attempt cleanup. */
+  bool armed_ = true;
+};
+
+/**
+ * @brief Terminal nonempty image job plus its first protected delivery.
+ * @throws std::bad_alloc when owned JSON or identity storage cannot allocate.
+ */
+struct FixtureImageDelivery {
+  /** @brief Accepted opaque compute identity. */
+  std::string compute_id;
+
+  /** @brief Exact non-null output object returned by compute.result. */
+  internal::Json output;
+};
+
+/**
+ * @brief Submits, awaits, and obtains one nonempty fixture image delivery.
+ * @param socket_path Running nonempty output fixture socket.
+ * @param session Active opaque fixture session.
+ * @param label Unique request-id prefix.
+ * @return Terminal job id and first protected metadata delivery.
+ * @throws std::runtime_error if any correlated stage is not successful.
+ * @throws std::bad_alloc if request/response storage cannot allocate.
+ */
+FixtureImageDelivery deliver_fixture_image(const std::string& socket_path,
+                                           const IpcSessionId& session,
+                                           const std::string& label) {
+  const internal::Json submitted =
+      raw_daemon_call(socket_path, "compute.submit",
+                      image_compute_submit_params(session), label + "-submit");
+  if (!submitted.contains("result") ||
+      !submitted["result"].value("compute_id", internal::Json()).is_string()) {
+    throw std::runtime_error("fixture image submission failed: " +
+                             submitted.dump());
+  }
+  FixtureImageDelivery delivery;
+  delivery.compute_id = submitted["result"]["compute_id"].get<std::string>();
+  const internal::Json terminal = wait_for_real_compute_terminal(
+      socket_path, delivery.compute_id, std::chrono::seconds(3));
+  if (!terminal.contains("result") ||
+      terminal["result"].value("state", "") != "succeeded") {
+    throw std::runtime_error("fixture image did not succeed: " +
+                             terminal.dump());
+  }
+  const internal::Json result = raw_daemon_call(
+      socket_path, "compute.result",
+      internal::Json{{"compute_id", delivery.compute_id}}, label + "-result");
+  if (!result.contains("result") ||
+      !result["result"].value("output", internal::Json()).is_object()) {
+    throw std::runtime_error("fixture image delivery failed: " + result.dump());
+  }
+  delivery.output = result["result"]["output"];
+  return delivery;
+}
+
+/**
+ * @brief Opens one fixture artifact without following a replacement symlink.
+ * @param path Protected output path from a successful delivery.
+ * @return Owned read-only descriptor.
+ * @throws std::runtime_error if open fails.
+ */
+internal::UniqueFd open_fixture_artifact(const std::string& path) {
+  internal::UniqueFd descriptor(
+      ::open(path.c_str(), O_RDONLY | O_NOFOLLOW | O_CLOEXEC));
+  if (!descriptor) {
+    throw std::runtime_error("cannot retain fixture artifact descriptor");
+  }
+  return descriptor;
+}
+
+/**
+ * @brief Reads one already-open fixture artifact by descriptor identity.
+ * @param fd Descriptor retained before pathname cleanup.
+ * @return Exact complete bytes, including after the pathname is unlinked.
+ * @throws std::runtime_error if metadata or exact-offset reading fails.
+ * @throws std::bad_alloc if byte storage cannot allocate.
+ */
+std::vector<std::uint8_t> read_open_fixture_artifact(int fd) {
+  struct stat metadata{};
+  if (::fstat(fd, &metadata) != 0 || !S_ISREG(metadata.st_mode) ||
+      metadata.st_size < 0 || metadata.st_size > 256) {
+    throw std::runtime_error("open fixture artifact metadata is invalid");
+  }
+  std::vector<std::uint8_t> bytes(static_cast<std::size_t>(metadata.st_size));
+  std::size_t offset = 0;
+  while (offset < bytes.size()) {
+    const ssize_t count =
+        ::pread(fd, bytes.data() + offset, bytes.size() - offset,
+                static_cast<off_t>(offset));
+    if (count > 0) {
+      offset += static_cast<std::size_t>(count);
+    } else if (count < 0 && errno == EINTR) {
+      continue;
+    } else {
+      throw std::runtime_error("open fixture artifact read failed");
+    }
+  }
+  return bytes;
+}
+
+/**
+ * @brief Triggers lazy compute/output expiry without addressing a live job.
+ * @param socket_path Running fixture socket.
+ * @param label Unique request id.
+ * @throws std::bad_alloc if request/response storage cannot allocate.
+ * @note The well-formed absent job/delivery pair returns job_not_found after
+ *       both registries observe the shared manual clock. It is not a test wire
+ *       method or product failpoint.
+ */
+void trigger_fixture_cleanup(const std::string& socket_path,
+                             const std::string& label) {
+  const internal::Json response = raw_daemon_call(
+      socket_path, "compute.release",
+      internal::Json{{"compute_id", "ffffffffffffffffffffffffffffffff"},
+                     {"delivery_id", "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee"}},
+      label);
+  EXPECT_TRUE(response.contains("error")) << response.dump();
+  if (response.contains("error")) {
+    EXPECT_EQ(response["error"]["name"], "job_not_found");
+  }
 }
 
 /**
@@ -1692,6 +2372,608 @@ TEST(IpcDaemonGraphLifecycle, PersistsAcrossClientsAndInspectsCopiedSnapshots) {
   daemon.stop();
   EXPECT_TRUE(daemon.exited_successfully());
   EXPECT_FALSE(std::filesystem::exists(socket_path));
+}
+
+TEST(IpcOutputFixtureDaemon,
+     EmptyImageSucceedsWithoutArtifactOrDeliveryMetadata) {
+  ScopedDaemonDirectory temp("ps-output-empty", true);
+  const std::string socket_path = (temp.path() / "empty.sock").string();
+  ManualProcessClock clock(temp.path() / "clock.bin");
+  DaemonProcess daemon;
+  daemon.start(socket_path, true, {}, -1, "empty", clock.path().string());
+  ASSERT_TRUE(daemon.wait_ready(std::chrono::seconds(5)));
+  const IpcResult<GraphSessionSummary> loaded = load_fixture_session(
+      socket_path, temp.path() / "sessions", "empty_output");
+  ASSERT_TRUE(loaded.status.ok) << loaded.status.message;
+
+  const internal::Json submitted = raw_daemon_call(
+      socket_path, "compute.submit",
+      image_compute_submit_params(loaded.value.session_id), "empty-submit");
+  ASSERT_TRUE(submitted.contains("result")) << submitted.dump();
+  ASSERT_EQ(submitted["result"].size(), 6U);
+  EXPECT_TRUE(submitted["result"]["output"].is_null());
+  const std::string compute_id =
+      submitted["result"]["compute_id"].get<std::string>();
+  ScopedFixtureJobRelease release_guard(socket_path, compute_id);
+  const internal::Json terminal = wait_for_real_compute_terminal(
+      socket_path, compute_id, std::chrono::seconds(3));
+  ASSERT_TRUE(terminal.contains("result")) << terminal.dump();
+  EXPECT_EQ(terminal["result"]["state"], "succeeded");
+  EXPECT_TRUE(terminal["result"]["status"]["ok"].get<bool>());
+  EXPECT_TRUE(terminal["result"]["output"].is_null());
+  const internal::Json result = raw_daemon_call(
+      socket_path, "compute.result", internal::Json{{"compute_id", compute_id}},
+      "empty-result");
+  ASSERT_TRUE(result.contains("result")) << result.dump();
+  EXPECT_TRUE(result["result"]["output"].is_null());
+  const internal::Json released = raw_daemon_call(
+      socket_path, "compute.release",
+      internal::Json{{"compute_id", compute_id}}, "empty-release");
+  ASSERT_TRUE(released.contains("result")) << released.dump();
+  release_guard.dismiss();
+
+  daemon.stop();
+  EXPECT_TRUE(daemon.exited_successfully());
+  EXPECT_FALSE(std::filesystem::exists(socket_path));
+  const std::filesystem::path output_base(socket_path + ".outputs");
+  EXPECT_TRUE(std::filesystem::exists(output_base));
+  EXPECT_TRUE(std::filesystem::is_empty(output_base));
+}
+
+TEST(IpcOutputFixtureDaemon,
+     NonemptyImageReturnsExactProtectedMetadataAndStableLease) {
+  ScopedDaemonDirectory temp("ps-output-value", true);
+  const std::string socket_path = (temp.path() / "value.sock").string();
+  ManualProcessClock clock(temp.path() / "clock.bin");
+  DaemonProcess daemon;
+  daemon.start(socket_path, true, {}, -1, "nonempty", clock.path().string());
+  ASSERT_TRUE(daemon.wait_ready(std::chrono::seconds(5)));
+  const IpcResult<GraphSessionSummary> loaded = load_fixture_session(
+      socket_path, temp.path() / "sessions", "nonempty_output");
+  ASSERT_TRUE(loaded.status.ok) << loaded.status.message;
+
+  const internal::Json submitted = raw_daemon_call(
+      socket_path, "compute.submit",
+      image_compute_submit_params(loaded.value.session_id), "image-submit");
+  ASSERT_TRUE(submitted.contains("result")) << submitted.dump();
+  EXPECT_TRUE(submitted["result"]["output"].is_null());
+  const std::string compute_id =
+      submitted["result"]["compute_id"].get<std::string>();
+  ScopedFixtureJobRelease release_guard(socket_path, compute_id);
+  const internal::Json terminal = wait_for_real_compute_terminal(
+      socket_path, compute_id, std::chrono::seconds(3));
+  ASSERT_TRUE(terminal.contains("result")) << terminal.dump();
+  EXPECT_EQ(terminal["result"]["state"], "succeeded");
+  EXPECT_TRUE(terminal["result"]["output"].is_null());
+
+  const internal::Json result = raw_daemon_call(
+      socket_path, "compute.result", internal::Json{{"compute_id", compute_id}},
+      "image-result");
+  ASSERT_TRUE(result.contains("result")) << result.dump();
+  ASSERT_EQ(result["result"].size(), 6U);
+  const internal::Json output = result["result"]["output"];
+  if (output.is_object() &&
+      output.value("delivery_id", internal::Json()).is_string()) {
+    release_guard.protect_delivery(output["delivery_id"].get<std::string>());
+  }
+  ASSERT_TRUE(output.is_object()) << result.dump();
+  ASSERT_EQ(output.size(), 12U);
+  EXPECT_TRUE(
+      internal::valid_opaque_id(output["output_id"].get<std::string>()));
+  EXPECT_TRUE(
+      internal::valid_opaque_id(output["delivery_id"].get<std::string>()));
+  EXPECT_FALSE(output.contains("output_reference"));
+  EXPECT_EQ(output["width"], 2);
+  EXPECT_EQ(output["height"], 2);
+  EXPECT_EQ(output["channels"], 1);
+  EXPECT_EQ(output["data_type"], "uint8");
+  EXPECT_EQ(output["device"], "cpu");
+  EXPECT_EQ(output["row_step"], 2);
+  EXPECT_EQ(output["byte_size"], 4);
+  const std::string artifact_path = output["path"].get<std::string>();
+  EXPECT_TRUE(std::filesystem::path(artifact_path).is_absolute());
+  EXPECT_EQ(read_artifact_bytes(artifact_path),
+            (std::vector<std::uint8_t>{1, 2, 3, 4}));
+  struct stat artifact{};
+  ASSERT_EQ(::lstat(artifact_path.c_str(), &artifact), 0);
+  EXPECT_TRUE(S_ISREG(artifact.st_mode));
+  EXPECT_EQ(artifact.st_mode & 07777, 0600);
+  EXPECT_EQ(artifact.st_uid, ::geteuid());
+  EXPECT_EQ(artifact.st_nlink, 1);
+  EXPECT_EQ(static_cast<std::uint64_t>(artifact.st_dev),
+            output["filesystem_device"].get<std::uint64_t>());
+  EXPECT_EQ(static_cast<std::uint64_t>(artifact.st_ino),
+            output["inode"].get<std::uint64_t>());
+
+  const internal::Json repeated = raw_daemon_call(
+      socket_path, "compute.result", internal::Json{{"compute_id", compute_id}},
+      "image-result-repeated");
+  ASSERT_TRUE(repeated.contains("result")) << repeated.dump();
+  EXPECT_EQ(repeated["result"]["output"], output);
+  const internal::Json released =
+      raw_daemon_call(socket_path, "compute.release",
+                      internal::Json{{"compute_id", compute_id},
+                                     {"delivery_id", output["delivery_id"]}},
+                      "image-release");
+  ASSERT_TRUE(released.contains("result")) << released.dump();
+  release_guard.dismiss();
+  EXPECT_FALSE(std::filesystem::exists(artifact_path));
+
+  daemon.stop();
+  EXPECT_TRUE(daemon.exited_successfully());
+  EXPECT_FALSE(std::filesystem::exists(socket_path));
+  EXPECT_TRUE(std::filesystem::is_empty(socket_path + ".outputs"));
+}
+
+TEST(IpcOutputFixtureDaemon,
+     ManualClockRefreshesOldLeaseAndReactivatesStableIdentity) {
+  ScopedDaemonDirectory temp("ps-output-clock", true);
+  const std::string socket_path = (temp.path() / "clock.sock").string();
+  ManualProcessClock clock(temp.path() / "clock.bin");
+  DaemonProcess daemon;
+  daemon.start(socket_path, true, {}, -1, "nonempty", clock.path().string());
+  ASSERT_TRUE(daemon.wait_ready(std::chrono::seconds(5)));
+  const IpcResult<GraphSessionSummary> loaded = load_fixture_session(
+      socket_path, temp.path() / "sessions", "manual_clock_output");
+  ASSERT_TRUE(loaded.status.ok) << loaded.status.message;
+
+  FixtureImageDelivery refreshed = deliver_fixture_image(
+      socket_path, loaded.value.session_id, "near-expiry");
+  ScopedFixtureJobRelease refreshed_guard(socket_path, refreshed.compute_id);
+  refreshed_guard.protect_delivery(
+      refreshed.output["delivery_id"].get<std::string>());
+  const std::string refreshed_path =
+      refreshed.output["path"].get<std::string>();
+  clock.advance(std::chrono::milliseconds(900));
+  const internal::Json repeated =
+      raw_daemon_call(socket_path, "compute.result",
+                      internal::Json{{"compute_id", refreshed.compute_id}},
+                      "near-expiry-refresh");
+  ASSERT_TRUE(repeated.contains("result")) << repeated.dump();
+  ASSERT_TRUE(repeated["result"]["output"].is_object()) << repeated.dump();
+  EXPECT_EQ(repeated["result"]["output"]["delivery_id"],
+            refreshed.output["delivery_id"]);
+  EXPECT_EQ(repeated["result"]["output"]["output_id"],
+            refreshed.output["output_id"]);
+
+  const internal::Json owner_removed =
+      raw_daemon_call(socket_path, "compute.release",
+                      internal::Json{{"compute_id", refreshed.compute_id}},
+                      "near-expiry-remove-owner");
+  ASSERT_TRUE(owner_removed.contains("result")) << owner_removed.dump();
+  clock.advance(std::chrono::milliseconds(200));
+  trigger_fixture_cleanup(socket_path, "near-expiry-cleanup");
+  EXPECT_TRUE(std::filesystem::exists(refreshed_path));
+  EXPECT_EQ(read_artifact_bytes(refreshed_path),
+            (std::vector<std::uint8_t>{1, 2, 3, 4}));
+  const internal::Json orphan_released = raw_daemon_call(
+      socket_path, "compute.release",
+      internal::Json{{"compute_id", refreshed.compute_id},
+                     {"delivery_id", refreshed.output["delivery_id"]}},
+      "near-expiry-release-orphan");
+  ASSERT_TRUE(orphan_released.contains("result")) << orphan_released.dump();
+  refreshed_guard.dismiss();
+  EXPECT_FALSE(std::filesystem::exists(refreshed_path));
+
+  FixtureImageDelivery reactivated =
+      deliver_fixture_image(socket_path, loaded.value.session_id, "reactivate");
+  ScopedFixtureJobRelease reactivated_guard(socket_path,
+                                            reactivated.compute_id);
+  reactivated_guard.protect_delivery(
+      reactivated.output["delivery_id"].get<std::string>());
+  const std::string stable_delivery =
+      reactivated.output["delivery_id"].get<std::string>();
+  clock.advance(std::chrono::milliseconds(1100));
+  const internal::Json after_expiry =
+      raw_daemon_call(socket_path, "compute.result",
+                      internal::Json{{"compute_id", reactivated.compute_id}},
+                      "reactivate-after-expiry");
+  ASSERT_TRUE(after_expiry.contains("result")) << after_expiry.dump();
+  ASSERT_TRUE(after_expiry["result"]["output"].is_object())
+      << after_expiry.dump();
+  EXPECT_EQ(after_expiry["result"]["output"]["delivery_id"], stable_delivery);
+  EXPECT_EQ(after_expiry["result"]["output"]["output_id"],
+            reactivated.output["output_id"]);
+  const internal::Json reactivated_released =
+      raw_daemon_call(socket_path, "compute.release",
+                      internal::Json{{"compute_id", reactivated.compute_id},
+                                     {"delivery_id", stable_delivery}},
+                      "reactivate-release");
+  ASSERT_TRUE(reactivated_released.contains("result"))
+      << reactivated_released.dump();
+  reactivated_guard.dismiss();
+
+  daemon.stop();
+  EXPECT_TRUE(daemon.exited_successfully());
+  EXPECT_TRUE(std::filesystem::is_empty(socket_path + ".outputs"));
+}
+
+TEST(IpcOutputFixtureDaemon,
+     OpenDescriptorsSurviveReleaseEvictionAndRegistryExpiry) {
+  ScopedDaemonDirectory temp("ps-output-retention", true);
+  const std::string socket_path = (temp.path() / "retention.sock").string();
+  ManualProcessClock clock(temp.path() / "clock.bin");
+  DaemonProcess daemon;
+  daemon.start(socket_path, true, {}, -1, "nonempty", clock.path().string());
+  ASSERT_TRUE(daemon.wait_ready(std::chrono::seconds(5)));
+  const IpcResult<GraphSessionSummary> loaded = load_fixture_session(
+      socket_path, temp.path() / "sessions", "retention_output");
+  ASSERT_TRUE(loaded.status.ok) << loaded.status.message;
+  const std::vector<std::uint8_t> expected{1, 2, 3, 4};
+
+  FixtureImageDelivery normal =
+      deliver_fixture_image(socket_path, loaded.value.session_id, "fd-normal");
+  internal::UniqueFd normal_fd =
+      open_fixture_artifact(normal.output["path"].get<std::string>());
+  const internal::Json normal_released = raw_daemon_call(
+      socket_path, "compute.release",
+      internal::Json{{"compute_id", normal.compute_id},
+                     {"delivery_id", normal.output["delivery_id"]}},
+      "fd-normal-release");
+  ASSERT_TRUE(normal_released.contains("result")) << normal_released.dump();
+  EXPECT_FALSE(
+      std::filesystem::exists(normal.output["path"].get<std::string>()));
+  EXPECT_EQ(read_open_fixture_artifact(normal_fd.get()), expected);
+
+  FixtureImageDelivery evicted = deliver_fixture_image(
+      socket_path, loaded.value.session_id, "fd-eviction");
+  ScopedFixtureJobRelease eviction_guard(socket_path, evicted.compute_id);
+  eviction_guard.protect_delivery(
+      evicted.output["delivery_id"].get<std::string>());
+  internal::UniqueFd eviction_fd =
+      open_fixture_artifact(evicted.output["path"].get<std::string>());
+  clock.advance(std::chrono::milliseconds(1100));
+  trigger_fixture_cleanup(socket_path, "expire-eviction-lease");
+  for (std::size_t index = 0; index < 3; ++index) {
+    const internal::Json submitted =
+        raw_daemon_call(socket_path, "compute.submit",
+                        minimal_compute_submit_params(loaded.value.session_id),
+                        "capacity-submit-" + std::to_string(index));
+    ASSERT_TRUE(submitted.contains("result")) << submitted.dump();
+    const std::string compute_id =
+        submitted["result"]["compute_id"].get<std::string>();
+    const internal::Json terminal = wait_for_real_compute_terminal(
+        socket_path, compute_id, std::chrono::seconds(3));
+    ASSERT_TRUE(terminal.contains("result")) << terminal.dump();
+  }
+  const internal::Json evicted_status =
+      raw_daemon_call(socket_path, "compute.status",
+                      internal::Json{{"compute_id", evicted.compute_id}},
+                      "capacity-evicted-status");
+  ASSERT_TRUE(evicted_status.contains("error")) << evicted_status.dump();
+  EXPECT_EQ(evicted_status["error"]["name"], "job_not_found");
+  EXPECT_FALSE(
+      std::filesystem::exists(evicted.output["path"].get<std::string>()));
+  EXPECT_EQ(read_open_fixture_artifact(eviction_fd.get()), expected);
+  eviction_guard.dismiss();
+
+  FixtureImageDelivery expired =
+      deliver_fixture_image(socket_path, loaded.value.session_id, "fd-expiry");
+  ScopedFixtureJobRelease expiry_guard(socket_path, expired.compute_id);
+  expiry_guard.protect_delivery(
+      expired.output["delivery_id"].get<std::string>());
+  internal::UniqueFd expiry_fd =
+      open_fixture_artifact(expired.output["path"].get<std::string>());
+  clock.advance(std::chrono::milliseconds(1100));
+  trigger_fixture_cleanup(socket_path, "expire-ttl-lease");
+  clock.advance(std::chrono::seconds(9));
+  const internal::Json expired_status =
+      raw_daemon_call(socket_path, "compute.status",
+                      internal::Json{{"compute_id", expired.compute_id}},
+                      "registry-ttl-status");
+  ASSERT_TRUE(expired_status.contains("error")) << expired_status.dump();
+  EXPECT_EQ(expired_status["error"]["name"], "job_not_found");
+  EXPECT_FALSE(
+      std::filesystem::exists(expired.output["path"].get<std::string>()));
+  EXPECT_EQ(read_open_fixture_artifact(expiry_fd.get()), expected);
+  expiry_guard.dismiss();
+
+  daemon.stop();
+  EXPECT_TRUE(daemon.exited_successfully());
+  EXPECT_TRUE(std::filesystem::is_empty(socket_path + ".outputs"));
+}
+
+TEST(IpcOutputFixtureDaemon,
+     ActiveLeaseBlocksSignalShutdownUntilManualClockExpiry) {
+  ScopedDaemonDirectory temp("ps-output-shutdown-lease", true);
+  const std::string socket_path = (temp.path() / "shutdown.sock").string();
+  ManualProcessClock clock(temp.path() / "clock.bin");
+  DaemonProcess daemon;
+  daemon.start(socket_path, true, {}, -1, "nonempty", clock.path().string());
+  ASSERT_TRUE(daemon.wait_ready(std::chrono::seconds(5)));
+  const IpcResult<GraphSessionSummary> loaded = load_fixture_session(
+      socket_path, temp.path() / "sessions", "shutdown_lease_output");
+  ASSERT_TRUE(loaded.status.ok) << loaded.status.message;
+  FixtureImageDelivery delivery = deliver_fixture_image(
+      socket_path, loaded.value.session_id, "shutdown-lease");
+  const std::string path = delivery.output["path"].get<std::string>();
+  internal::UniqueFd descriptor = open_fixture_artifact(path);
+
+  clock.advance(std::chrono::milliseconds(900));
+  ASSERT_TRUE(daemon.request_stop());
+  ASSERT_TRUE(wait_for_listener_shutdown(socket_path, std::chrono::seconds(1)));
+  EXPECT_FALSE(daemon.wait_for_exit(std::chrono::milliseconds(40)));
+  clock.advance(std::chrono::milliseconds(200));
+  ASSERT_TRUE(daemon.wait_for_exit(std::chrono::seconds(2)));
+  EXPECT_TRUE(daemon.exited_successfully());
+  EXPECT_FALSE(std::filesystem::exists(path));
+  EXPECT_EQ(read_open_fixture_artifact(descriptor.get()),
+            (std::vector<std::uint8_t>{1, 2, 3, 4}));
+  EXPECT_TRUE(std::filesystem::is_empty(socket_path + ".outputs"));
+}
+
+TEST(IpcOutputFixtureDaemon,
+     InvalidImageFilesystemPublicationAndArtifactCountQuotaStayNested) {
+  ScopedDaemonDirectory temp("ps-output-fail", true);
+  ManualProcessClock clock(temp.path() / "clock.bin");
+  const std::string invalid_socket = (temp.path() / "invalid.sock").string();
+  DaemonProcess invalid_daemon;
+  invalid_daemon.start(invalid_socket, true, {}, -1, "invalid",
+                       clock.path().string());
+  ASSERT_TRUE(invalid_daemon.wait_ready(std::chrono::seconds(5)));
+  const IpcResult<GraphSessionSummary> invalid_session = load_fixture_session(
+      invalid_socket, temp.path() / "invalid-sessions", "invalid_output");
+  ASSERT_TRUE(invalid_session.status.ok) << invalid_session.status.message;
+  internal::Json submitted = raw_daemon_call(
+      invalid_socket, "compute.submit",
+      image_compute_submit_params(invalid_session.value.session_id),
+      "invalid-image-submit");
+  ASSERT_TRUE(submitted.contains("result")) << submitted.dump();
+  const std::string invalid_id =
+      submitted["result"]["compute_id"].get<std::string>();
+  internal::Json terminal = wait_for_real_compute_terminal(
+      invalid_socket, invalid_id, std::chrono::seconds(3));
+  ASSERT_TRUE(terminal.contains("result")) << terminal.dump();
+  EXPECT_EQ(terminal["result"]["state"], "failed");
+  EXPECT_EQ(terminal["result"]["status"]["domain"], "daemon");
+  EXPECT_EQ(terminal["result"]["status"]["name"], "internal_error");
+  EXPECT_TRUE(terminal["result"]["output"].is_null());
+  EXPECT_TRUE(raw_daemon_call(invalid_socket, "compute.release",
+                              internal::Json{{"compute_id", invalid_id}},
+                              "invalid-image-release")
+                  .contains("result"));
+  invalid_daemon.stop();
+  ASSERT_TRUE(invalid_daemon.exited_successfully());
+
+  const std::string quota_socket = (temp.path() / "quota.sock").string();
+  DaemonProcess quota_daemon;
+  quota_daemon.start(quota_socket, true, {}, -1, "nonempty",
+                     clock.path().string());
+  ASSERT_TRUE(quota_daemon.wait_ready(std::chrono::seconds(5)));
+  const IpcResult<GraphSessionSummary> quota_session = load_fixture_session(
+      quota_socket, temp.path() / "quota-sessions", "quota_output");
+  ASSERT_TRUE(quota_session.status.ok) << quota_session.status.message;
+
+  const std::filesystem::path quota_instance =
+      find_output_instance_directory(quota_socket);
+  {
+    ScopedDirectoryMode block_publication(quota_instance, 0500);
+    submitted = raw_daemon_call(
+        quota_socket, "compute.submit",
+        image_compute_submit_params(quota_session.value.session_id),
+        "filesystem-publication-submit");
+    ASSERT_TRUE(submitted.contains("result")) << submitted.dump();
+    const std::string publication_failure_id =
+        submitted["result"]["compute_id"].get<std::string>();
+    terminal = wait_for_real_compute_terminal(
+        quota_socket, publication_failure_id, std::chrono::seconds(3));
+    ASSERT_TRUE(terminal.contains("result")) << terminal.dump();
+    EXPECT_EQ(terminal["result"]["state"], "failed");
+    EXPECT_EQ(terminal["result"]["status"]["domain"], "daemon");
+    EXPECT_EQ(terminal["result"]["status"]["name"], "internal_error");
+    EXPECT_TRUE(terminal["result"]["output"].is_null());
+    const internal::Json publication_result =
+        raw_daemon_call(quota_socket, "compute.result",
+                        internal::Json{{"compute_id", publication_failure_id}},
+                        "filesystem-publication-result");
+    ASSERT_TRUE(publication_result.contains("result"))
+        << publication_result.dump();
+    EXPECT_EQ(publication_result["result"]["state"], "failed");
+    EXPECT_EQ(publication_result["result"]["status"]["domain"], "daemon");
+    EXPECT_EQ(publication_result["result"]["status"]["name"], "internal_error");
+    EXPECT_TRUE(publication_result["result"]["output"].is_null());
+    EXPECT_TRUE(
+        raw_daemon_call(quota_socket, "compute.release",
+                        internal::Json{{"compute_id", publication_failure_id}},
+                        "filesystem-publication-release")
+            .contains("result"));
+    EXPECT_TRUE(std::filesystem::is_empty(quota_instance));
+    block_publication.restore();
+  }
+
+  std::vector<std::string> compute_ids;
+  compute_ids.reserve(3);
+  for (std::size_t index = 0; index < 3; ++index) {
+    submitted = raw_daemon_call(
+        quota_socket, "compute.submit",
+        image_compute_submit_params(quota_session.value.session_id),
+        "quota-submit-" + std::to_string(index));
+    ASSERT_TRUE(submitted.contains("result")) << submitted.dump();
+    const std::string compute_id =
+        submitted["result"]["compute_id"].get<std::string>();
+    compute_ids.push_back(compute_id);
+    terminal = wait_for_real_compute_terminal(quota_socket, compute_id,
+                                              std::chrono::seconds(3));
+    ASSERT_TRUE(terminal.contains("result")) << terminal.dump();
+    if (index < 2) {
+      EXPECT_EQ(terminal["result"]["state"], "succeeded") << index;
+    } else {
+      EXPECT_EQ(terminal["result"]["state"], "failed");
+      EXPECT_EQ(terminal["result"]["status"]["domain"], "daemon");
+      EXPECT_EQ(terminal["result"]["status"]["name"],
+                "artifact_limit_exceeded");
+      EXPECT_TRUE(terminal["result"]["output"].is_null());
+    }
+  }
+  for (std::size_t index = 0; index < compute_ids.size(); ++index) {
+    const internal::Json released =
+        raw_daemon_call(quota_socket, "compute.release",
+                        internal::Json{{"compute_id", compute_ids[index]}},
+                        "quota-release-" + std::to_string(index));
+    EXPECT_TRUE(released.contains("result")) << released.dump();
+  }
+  quota_daemon.stop();
+  EXPECT_TRUE(quota_daemon.exited_successfully());
+  EXPECT_TRUE(std::filesystem::is_empty(quota_socket + ".outputs"));
+}
+
+TEST(IpcOutputFixtureDaemon,
+     TamperIsTopLevelAndOrphanLeaseSurvivesNormalJobRemoval) {
+  ScopedDaemonDirectory temp("ps-output-race", true);
+  const std::string socket_path = (temp.path() / "race.sock").string();
+  ManualProcessClock clock(temp.path() / "clock.bin");
+  DaemonProcess daemon;
+  daemon.start(socket_path, true, {}, -1, "nonempty", clock.path().string());
+  ASSERT_TRUE(daemon.wait_ready(std::chrono::seconds(5)));
+  const IpcResult<GraphSessionSummary> loaded = load_fixture_session(
+      socket_path, temp.path() / "sessions", "output_races");
+  ASSERT_TRUE(loaded.status.ok) << loaded.status.message;
+
+  internal::Json submitted = raw_daemon_call(
+      socket_path, "compute.submit",
+      image_compute_submit_params(loaded.value.session_id), "tamper-submit");
+  ASSERT_TRUE(submitted.contains("result")) << submitted.dump();
+  const std::string tamper_id =
+      submitted["result"]["compute_id"].get<std::string>();
+  ScopedFixtureJobRelease tamper_guard(socket_path, tamper_id);
+  ASSERT_TRUE(wait_for_real_compute_terminal(socket_path, tamper_id,
+                                             std::chrono::seconds(3))
+                  .contains("result"));
+  internal::Json result = raw_daemon_call(
+      socket_path, "compute.result", internal::Json{{"compute_id", tamper_id}},
+      "tamper-result");
+  ASSERT_TRUE(result.contains("result")) << result.dump();
+  internal::Json tamper_output = result["result"]["output"];
+  if (tamper_output.is_object() &&
+      tamper_output.value("delivery_id", internal::Json()).is_string()) {
+    tamper_guard.protect_delivery(
+        tamper_output["delivery_id"].get<std::string>());
+  }
+  ASSERT_TRUE(tamper_output.is_object()) << result.dump();
+  const std::string tamper_path = tamper_output["path"].get<std::string>();
+  const std::filesystem::path victim = temp.path() / "victim.bin";
+  {
+    std::ofstream stream(victim, std::ios::binary);
+    stream.exceptions(std::ios::badbit | std::ios::failbit);
+    stream.put('v');
+  }
+  ASSERT_EQ(::chmod(victim.c_str(), 0600), 0);
+  ASSERT_EQ(::unlink(tamper_path.c_str()), 0);
+  ASSERT_EQ(::symlink(victim.c_str(), tamper_path.c_str()), 0);
+  const internal::Json missing = raw_daemon_call(
+      socket_path, "compute.result", internal::Json{{"compute_id", tamper_id}},
+      "tamper-result-missing");
+  ASSERT_TRUE(missing.contains("error")) << missing.dump();
+  EXPECT_EQ(missing["error"]["domain"], "daemon");
+  EXPECT_EQ(missing["error"]["name"], "artifact_not_found");
+  const internal::Json tamper_released = raw_daemon_call(
+      socket_path, "compute.release",
+      internal::Json{{"compute_id", tamper_id},
+                     {"delivery_id", tamper_output["delivery_id"]}},
+      "tamper-release");
+  ASSERT_TRUE(tamper_released.contains("result")) << tamper_released.dump();
+  tamper_guard.dismiss();
+  struct stat replacement{};
+  ASSERT_EQ(::lstat(tamper_path.c_str(), &replacement), 0);
+  EXPECT_TRUE(S_ISLNK(replacement.st_mode));
+  EXPECT_TRUE(std::filesystem::exists(victim));
+
+  submitted = raw_daemon_call(
+      socket_path, "compute.submit",
+      image_compute_submit_params(loaded.value.session_id), "orphan-submit");
+  ASSERT_TRUE(submitted.contains("result")) << submitted.dump();
+  const std::string orphan_id =
+      submitted["result"]["compute_id"].get<std::string>();
+  ScopedFixtureJobRelease orphan_guard(socket_path, orphan_id);
+  ASSERT_TRUE(wait_for_real_compute_terminal(socket_path, orphan_id,
+                                             std::chrono::seconds(3))
+                  .contains("result"));
+  result = raw_daemon_call(socket_path, "compute.result",
+                           internal::Json{{"compute_id", orphan_id}},
+                           "orphan-result");
+  ASSERT_TRUE(result.contains("result")) << result.dump();
+  const internal::Json orphan_output = result["result"]["output"];
+  if (orphan_output.is_object() &&
+      orphan_output.value("delivery_id", internal::Json()).is_string()) {
+    orphan_guard.protect_delivery(
+        orphan_output["delivery_id"].get<std::string>());
+  }
+  ASSERT_TRUE(orphan_output.is_object()) << result.dump();
+  const std::string orphan_path = orphan_output["path"].get<std::string>();
+  auto release_gate = std::make_shared<ConcurrentCallGate>();
+  RawDaemonCallTask normal_release(
+      socket_path, "compute.release", internal::Json{{"compute_id", orphan_id}},
+      "orphan-remove-job", std::chrono::seconds(3), true, release_gate);
+  RawDaemonCallTask paired_release(
+      socket_path, "compute.release",
+      internal::Json{{"compute_id", orphan_id},
+                     {"delivery_id", orphan_output["delivery_id"]}},
+      "orphan-release-lease", std::chrono::seconds(3), true, release_gate);
+  const bool release_calls_ready =
+      release_gate->wait_ready(2, std::chrono::seconds(2));
+  release_gate->release();
+  const bool normal_release_complete =
+      normal_release.wait_for(std::chrono::seconds(3));
+  const bool paired_release_complete =
+      paired_release.wait_for(std::chrono::seconds(3));
+  const internal::Json job_removed = normal_release.join();
+  const internal::Json lease_released = paired_release.join();
+  ASSERT_TRUE(release_calls_ready);
+  ASSERT_TRUE(normal_release_complete) << job_removed.dump();
+  ASSERT_TRUE(paired_release_complete) << lease_released.dump();
+  ASSERT_TRUE(lease_released.contains("result")) << lease_released.dump();
+  if (job_removed.contains("error")) {
+    EXPECT_EQ(job_removed["error"]["domain"], "daemon");
+    EXPECT_EQ(job_removed["error"]["name"], "job_not_found");
+  } else {
+    EXPECT_TRUE(job_removed.contains("result")) << job_removed.dump();
+  }
+  orphan_guard.dismiss();
+  EXPECT_FALSE(std::filesystem::exists(orphan_path));
+
+  daemon.stop();
+  EXPECT_TRUE(daemon.exited_successfully());
+}
+
+TEST(IpcOutputFixtureDaemon,
+     AbruptDeathLeavesSafeArtifactForRestartAndFinalCleanup) {
+  ScopedDaemonDirectory temp("ps-output-restart", true);
+  const std::string socket_path = (temp.path() / "restart.sock").string();
+  ManualProcessClock clock(temp.path() / "clock.bin");
+  DaemonProcess daemon;
+  daemon.start(socket_path, true, {}, -1, "nonempty", clock.path().string());
+  ASSERT_TRUE(daemon.wait_ready(std::chrono::seconds(5)));
+  const IpcResult<GraphSessionSummary> loaded = load_fixture_session(
+      socket_path, temp.path() / "sessions", "restart_output");
+  ASSERT_TRUE(loaded.status.ok) << loaded.status.message;
+  const internal::Json submitted = raw_daemon_call(
+      socket_path, "compute.submit",
+      image_compute_submit_params(loaded.value.session_id), "restart-submit");
+  ASSERT_TRUE(submitted.contains("result")) << submitted.dump();
+  const std::string compute_id =
+      submitted["result"]["compute_id"].get<std::string>();
+  ASSERT_TRUE(wait_for_real_compute_terminal(socket_path, compute_id,
+                                             std::chrono::seconds(3))
+                  .contains("result"));
+  const internal::Json result = raw_daemon_call(
+      socket_path, "compute.result", internal::Json{{"compute_id", compute_id}},
+      "restart-result");
+  ASSERT_TRUE(result.contains("result")) << result.dump();
+  ASSERT_TRUE(result["result"]["output"].is_object()) << result.dump();
+  const std::string stale_path =
+      result["result"]["output"]["path"].get<std::string>();
+  ASSERT_TRUE(std::filesystem::exists(stale_path));
+  ASSERT_TRUE(daemon.crash_and_wait(std::chrono::seconds(3)));
+  EXPECT_TRUE(std::filesystem::exists(stale_path));
+
+  daemon.start(socket_path, true, {}, -1, "empty", clock.path().string());
+  ASSERT_TRUE(daemon.wait_ready(std::chrono::seconds(5)));
+  EXPECT_FALSE(std::filesystem::exists(stale_path));
+  daemon.stop();
+  EXPECT_TRUE(daemon.exited_successfully());
+  EXPECT_FALSE(std::filesystem::exists(socket_path));
+  EXPECT_TRUE(std::filesystem::exists(socket_path + ".lock"));
+  EXPECT_TRUE(std::filesystem::is_empty(socket_path + ".outputs"));
 }
 
 TEST(IpcDaemonComputeLifecycle,
