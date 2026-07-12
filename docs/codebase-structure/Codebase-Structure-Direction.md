@@ -28,9 +28,10 @@ stable cursor pages into complete Host-shaped values. The installed IPC-backed
 Host now implements all 53 current non-destructor Host virtuals through typed
 short-lived connections, joined asynchronous polling, and deterministic stop
 ordering. Image mode currently performs strict same-user regular-file
-revalidation and `pread`s an independent heap copy before lease-aware release;
-this task-4.2 transition is replaced by read-only mmap/shared-deleter ownership
-in task 4.3. The final package-consumer contract remains in progress, while the
+revalidation while its delivery lease protects result-to-open, creates a
+shared read-only mapping, and then releases the matching job/lease. The final
+mapping owner unmaps and closes exactly once. The final package-consumer
+contract remains in progress, while the
 plugin SDK follows the extension contracts documented below.
 
 Observed build targets in the current root `CMakeLists.txt`:
@@ -592,7 +593,7 @@ separate extension-boundary change.
 6. **Completed daemon slice:** `apps/photospiderd/` now owns foreground process,
    self-pipe signal, protected socket, bounded workers, and deterministic
    cleanup behavior.
-7. **Completed task-4.2 IPC Host adapter slice:** The installable typed client
+7. **Completed task-4.3 IPC Host adapter and artifact-ownership slices:** The installable typed client
    exposes owned calls for all 55 methods, strictly validates common and
    method-specific result shapes, performs each status or mutation RPC once,
    aggregates all private stable cursor pages, and preserves output/delivery
@@ -603,10 +604,12 @@ separate extension-boundary change.
    timeout. Destruction publishes stop, wakes waiters, shuts down active worker
    descriptors, resolves unfinished futures as Transport code 5
    `client_stopped`, and joins every worker without resubmission, session close,
-   plugin unload, or embedded fallback. The current image consumer securely
-   validates and `pread`s an owned copy before lease-aware release; read-only
-   mmap/shared-deleter ownership and final installed package-consumer coverage
-   remain tasks 4.3/4.4. Cancellation remains unavailable.
+   plugin unload, or embedded fallback. The image consumer opens the artifact
+   without following symlinks while its delivery lease is active, validates
+   same-user regular type, exact mode, one link, device/inode/size, and tight
+   layout, then creates a shared read-only mapping before matching lease-aware
+   release. Its final owner unmaps and closes exactly once. Final installed
+   package-consumer coverage remains task 4.4. Cancellation remains unavailable.
 8. **Separate plugin-boundary work:** Tighten plugin SDK in issue #38.
    - Replace direct plugin dependency on full `Node` and global registry symbols
      with a narrow operation contract and host-provided registration table.

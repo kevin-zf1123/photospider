@@ -178,9 +178,10 @@ bounded events/traces, cache, operation-plugin, and scheduler calls. The
 installed `create_ipc_host(socket_path)` adapter implements all 53 current
 non-destructor Host virtuals with short-lived typed calls, joined async polling,
 exact status propagation, and deterministic `client_stopped` teardown. Its
-current secure image consumer strictly validates the artifact and `pread`s an
-independent CPU copy before lease-aware release; read-only mmap ownership is the
-next migration slice. Compute cancellation, `daemon.shutdown`, TCP, Windows
+secure image consumer strictly validates the same-user artifact while its
+delivery lease remains active, maps it read-only into a shared CPU image, then
+releases the matching job/lease. The final image reference unmaps and closes
+the retained descriptor exactly once. Compute cancellation, `daemon.shutdown`, TCP, Windows
 transport, and `graph_cli --connect` remain unavailable. `graph_cli` therefore
 continues to use its embedded Host and all local commands below retain their
 existing meaning. See `docs/codebase-structure/IPC-Protocol-v1.md` for the wire,

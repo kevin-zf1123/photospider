@@ -41,6 +41,16 @@ address(row y) % 64 == 0
 
 因此，内核拥有的分配必须对 `step` 做 padding，使行起点即使在紧凑行大小不是 64 的倍数时仍保持对齐。
 
+这些对齐和可变性规则只适用于由内核分配并拥有的 CPU buffer。`ImageBuffer::data` 是共享生命周期
+handle，而不是通用的可写内存承诺。Producer 可以返回只读 CPU snapshot，但必须记录这一边界。
+
+Installed IPC Host 的 `compute_and_get_image` 结果就是这类 snapshot。它会在 delivery lease 保护
+result-to-open 的期间校验同用户 private artifact，再使用 `PROT_READ|MAP_PRIVATE` 映射精确的
+tight-row 文件。Mapping base 具备平台 page alignment，但 `step` 是 packed row width，因此后续
+row start 不承诺满足 64 字节对齐。Descriptor 副本共享同一个 mapping；最后一个引用会且只会
+unmap 并 close 其保留的 descriptor。通过该 mapping 写入不属于契约，且可能触发 fault。需要可写
+storage 或内核所有的逐行对齐时，consumer 必须分配适当的 CPU buffer，并使用 `step` 逐行复制。
+
 ## ARM Mac 对齐
 
 64 字节行对齐是可移植最低要求。ARM Mac 高性能路径可能需要或受益于 128 字节对齐。这是优化目标，应在成为更严格默认值前做基准。

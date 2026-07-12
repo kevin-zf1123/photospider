@@ -878,6 +878,59 @@ TEST(OutputStore, OrphanLeaseReleaseRequiresOriginalJobAndStableDelivery) {
   EXPECT_EQ(store.artifact_count(), 0U);
 }
 
+/**
+ * @brief Releases one matching lease while its job owner is removed.
+ *
+ * Both operations start at one deterministic gate. Regardless of lock order,
+ * matching lease release must succeed: it either clears the lease before job
+ * removal or uses the orphaned-delivery path immediately afterward.
+ *
+ * @return Nothing; GoogleTest assertions report gate, release, file, or quota
+ *         mismatch.
+ * @throws std::bad_alloc, std::filesystem::filesystem_error, or
+ *         std::system_error if store, artifact, gate, or thread setup fails.
+ */
+TEST(OutputStore, ConcurrentJobRemovalAndMatchingLeaseReleaseCleanArtifact) {
+  StoreEnvironment environment;
+  SequentialIds ids;
+  OutputStore store({}, {}, [&] { return ids.next(); });
+  ASSERT_TRUE(store
+                  .start(environment.socket_path(), opaque_id(21),
+                         environment.lock_fd())
+                  .ok);
+  const ComputeRequestId compute_id{opaque_id(210)};
+  ComputeOutputPublication publication =
+      store.publish(compute_id, make_u8_image(1, 1, 1, 1, {4}));
+  ASSERT_TRUE(publication.status.ok);
+  IpcResult<OutputArtifactDelivery> delivery =
+      store.acquire_delivery(publication.output.reference());
+  ASSERT_TRUE(delivery.status.ok);
+  const std::string path = delivery.value.metadata.path;
+  ComputeOutputOwnership ownership = std::move(publication.output);
+
+  StartGate gate;
+  bool lease_released = false;
+  std::thread job_remover([&] {
+    gate.arrive_and_wait();
+    ownership.reset();
+  });
+  std::thread lease_releaser([&] {
+    gate.arrive_and_wait();
+    lease_released =
+        store.release_orphaned_delivery(compute_id, delivery.value.delivery_id);
+  });
+  const bool participants_ready = gate.wait_ready(2);
+  gate.release();
+  job_remover.join();
+  lease_releaser.join();
+
+  ASSERT_TRUE(participants_ready);
+  EXPECT_TRUE(lease_released);
+  EXPECT_FALSE(std::filesystem::exists(path));
+  EXPECT_EQ(store.artifact_count(), 0U);
+  EXPECT_EQ(store.retained_bytes(), 0U);
+}
+
 TEST(OutputStore, OpenDescriptorSurvivesLeaseAwareUnlink) {
   StoreEnvironment environment;
   SequentialIds ids;

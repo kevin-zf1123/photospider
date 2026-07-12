@@ -67,7 +67,11 @@ enum class Device {
  *         callers create or replace the shared handles.
  * @note `data` and `context` lifetimes are managed by their `shared_ptr`
  *       deleters. The descriptor itself does not impose thread synchronization
- *       on mutable pixel access.
+ *       or grant mutable pixel access. Payload permissions are producer-owned:
+ *       callers must treat data as read-only unless the producing API
+ *       explicitly promises writable storage. An IPC Host image is a shared
+ *       `PROT_READ|MAP_PRIVATE` mapping with a page-aligned base and tight
+ * rows; it does not promise the kernel-owned 64-byte alignment of every row.
  */
 struct ImageBuffer {
   /** @brief Width in pixels. */
@@ -88,7 +92,10 @@ struct ImageBuffer {
   /** @brief Bytes between the start of consecutive rows. */
   size_t step = 0;
 
-  /** @brief Shared pixel payload with a deleter appropriate to its origin. */
+  /**
+   * @brief Shared pixel payload with origin-defined access permissions and
+   *        cleanup.
+   */
   std::shared_ptr<void> data = nullptr;
 
   /** @brief Optional backend-specific resource handle or adapter context. */

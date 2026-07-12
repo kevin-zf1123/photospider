@@ -108,9 +108,10 @@ short-lived typed connections. Compute submits once, polls immediately and then
 at a 10/20/40/80/160/320/500-ms cadence without a synchronous total timeout;
 owned async workers are stopped, woken, interrupted, completed as Transport
 `client_stopped` (5), and joined during adapter destruction. Image mode
-currently performs strict same-user artifact validation and `pread`s an
-independent CPU copy before lease-aware release; a later slice replaces that
-consumer with read-only mmap ownership. Compute cancellation,
+performs strict same-user artifact validation while the delivery lease is
+active, creates a shared read-only mapping, and then releases the matching
+job/lease. The final image reference unmaps and closes the retained descriptor
+exactly once. Compute cancellation,
 `daemon.shutdown`, TCP, Windows transport, and `graph_cli --connect` remain
 unavailable. The CLI options and REPL commands in this manual remain local
 embedded-Host behavior and do not auto-connect to a daemon. See

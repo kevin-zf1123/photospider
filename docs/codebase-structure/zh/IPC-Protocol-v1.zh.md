@@ -527,11 +527,12 @@ status；通过校验的 terminal nested status 会原样返回，不改写 doma
 一旦已知 terminal status，即使 result 获取或 cross-RPC validation 失败，cleanup 也会尽力尝试
 一次 `compute.release`。只有成功校验的 image result 才会提供 delivery id。Cleanup failure 绝不
 替换已经取得的 status 或 image。在 terminal publication 前发生 status poll failure，或者
-adapter stop 时，不会 release 未完成 daemon job。Task 4.2 的 production image consumer 使用
-`O_NOFOLLOW|O_CLOEXEC|O_NONBLOCK` 打开文件，在 `pread` 前后校验相同 uid、regular type、精确
-`0600`、单链接、device/inode/size 与 tight layout，并在 lease-aware release 前返回独立的
-heap-backed CPU image。Metadata 的 512-MiB 上限会在分配前强制执行。Task 4.3 会把这一安全的
-owned-copy consumer 替换为 read-only mmap/shared-deleter ownership。
+adapter stop 时，不会 release 未完成 daemon job。Production image consumer 会在 delivery lease
+保护 result-to-open 的期间使用 `O_NOFOLLOW|O_CLOEXEC|O_NONBLOCK` 打开文件，校验相同 uid、
+regular type、精确 `0600`、单链接、device/inode/size 与 tight layout，以
+`PROT_READ|MAP_PRIVATE` 映射完整文件，并在暴露字节前再次校验 descriptor。Metadata 的
+512-MiB 上限会在 mapping 前强制执行。Adapter 随后发送 lease-aware release；复制出来的
+`ImageBuffer` 会共享 mapping，最后一个引用会且只会调用一次 `munmap` 与 `close`。
 
 `compute_async` 会在远端 submission 前创建其 joined worker。Adapter 析构会发布 stop、唤醒全部
 waiter、shutdown 活动 worker descriptor、以 local Transport code 5 `client_stopped` 完成每个

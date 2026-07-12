@@ -21,9 +21,9 @@
  * factory.
  *
  * Host is the stable local frontend boundary. Implementations translate these
- * request and snapshot values into an embedded backend stack or a future IPC
- * transport without exposing backend runtime, model, execution, compute,
- * scheduler-queue, image-library, or parser object ownership through
+ * request and snapshot values into an embedded backend stack or the installed
+ * typed IPC transport without exposing backend runtime, model, execution,
+ * compute, scheduler-queue, image-library, or parser object ownership through
  * installable headers.
  */
 
@@ -219,8 +219,8 @@ struct HostSchedulerConfig {
 /**
  * @brief Frontend-facing Photospider graph host.
  *
- * Host is the narrow API that local GUI/WebUI code and future IPC adapters
- * should call. Each non-destructor method returns a copied value snapshot or a
+ * Host is the narrow API that local GUI/WebUI code and the installed typed IPC
+ * adapter call. Each non-destructor method returns a copied value snapshot or a
  * status for recoverable failures. Resource exhaustion remains exceptional so
  * callers can distinguish it from a domain/runtime failure status. Embedded
  * backend objects never appear in the public ABI.
@@ -383,6 +383,12 @@ class PHOTOSPIDER_API Host {
    * @note Backend GraphError classifications such as `GraphErrc::NoOperation`
    *       are preserved when image compute fails after session validation, and
    *       successful backend image memory is cloned into the public descriptor.
+   * @note Callers must treat the returned payload as a read-only snapshot
+   *       unless they own an adapter-specific writable contract. The IPC Host
+   *       returns tight rows over a page-aligned-base
+   *       `PROT_READ|MAP_PRIVATE` mapping; only its base is page aligned, so
+   *       later row starts need not satisfy the kernel-owned 64-byte alignment
+   *       contract. Copies share that mapping until the final reference.
    */
   virtual Result<ImageBuffer> compute_and_get_image(
       const HostComputeRequest& request) = 0;
@@ -620,7 +626,7 @@ class PHOTOSPIDER_API Host {
    * @throws std::bad_alloc if request processing, backend-to-status
    *         translation, or copied result construction exhausts memory.
    * @note The backend bounds history length and returns values suitable for
-   *       frontend display or future IPC serialization.
+   *       frontend display or typed IPC serialization.
    */
   virtual Result<std::vector<ComputePlanningInspectionSnapshot>>
   recent_compute_planning_snapshots(const GraphSessionId& session) = 0;
@@ -981,7 +987,7 @@ class PHOTOSPIDER_API Host {
  * @throws std::bad_alloc if allocation of adapter state fails.
  * @note graph_cli uses this Host-backed embedded path for local operation.
  *       The adapter preserves in-process behavior while keeping the CLI
- *       boundary compatible with future IPC-backed Host implementations. Each
+ *       boundary shared with the installed IPC-backed Host implementation. Each
  *       adapter owns its graph backend state but shares the process operation
  *       plugin owner; adapter destruction never performs plugin unload.
  */

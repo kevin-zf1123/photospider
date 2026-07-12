@@ -6796,6 +6796,125 @@ TEST(UnixSocketConnect, RetriesBacklogEagainOnSameFdUntilSuccess) {
 }
 
 /**
+ * @brief Re-enters a real Linux AF_UNIX connect after backlog `EAGAIN`.
+ *
+ * A backlog-zero listener retains one filler connection. A raw nonblocking
+ * connect on the target descriptor must then return Linux's real `EAGAIN`.
+ * The production helper receives that same descriptor, enters its bounded
+ * zero-descriptor poll slice, and retries only after the test accepts the
+ * filler connection.
+ *
+ * @return Nothing; GoogleTest assertions report kernel errno, retry-wait
+ *         entry, same-descriptor completion, peer state, or flag mismatch.
+ * @throws std::bad_alloc, std::runtime_error, or std::system_error if socket,
+ *         path, callback, or thread setup cannot complete.
+ * @note Non-Linux platforms skip this kernel-specific regression because
+ *       their AF_UNIX backlog-full classification is not `EAGAIN`.
+ */
+TEST(UnixSocketConnect, LinuxRealBacklogEagainReentersConnectOnSameDescriptor) {
+#if !defined(__linux__)
+  GTEST_SKIP() << "Linux AF_UNIX backlog EAGAIN semantics required";
+#else
+  ScopedTempDirectory temp("ps-ipc-backlog");
+  const std::string socket_path = (temp.path() / "server.sock").string();
+  UniqueFd listener = create_test_listener(socket_path);
+  ASSERT_EQ(::listen(listener.get(), 0), 0);
+
+  sockaddr_un address{};
+  address.sun_family = AF_UNIX;
+  std::memcpy(address.sun_path, socket_path.c_str(), socket_path.size() + 1);
+  const socklen_t address_length = static_cast<socklen_t>(
+      offsetof(sockaddr_un, sun_path) + socket_path.size() + 1);
+
+  std::string creation_message;
+  UniqueFd filler = create_unix_stream_socket(&creation_message);
+  ASSERT_TRUE(filler) << creation_message;
+  ASSERT_EQ(::connect(filler.get(), reinterpret_cast<sockaddr*>(&address),
+                      address_length),
+            0);
+
+  UniqueFd target = create_unix_stream_socket(&creation_message);
+  ASSERT_TRUE(target) << creation_message;
+  const int target_fd = target.get();
+  const int original_flags = ::fcntl(target_fd, F_GETFL, 0);
+  ASSERT_GE(original_flags, 0);
+  ASSERT_EQ(::fcntl(target_fd, F_SETFL, original_flags | O_NONBLOCK), 0);
+  ASSERT_EQ(::connect(target_fd, reinterpret_cast<sockaddr*>(&address),
+                      address_length),
+            -1);
+  ASSERT_EQ(errno, EAGAIN);
+  ASSERT_EQ(::fcntl(target_fd, F_SETFL, original_flags), 0);
+
+  std::mutex retry_mutex;
+  std::condition_variable retry_changed;
+  std::size_t predicate_calls = 0;
+  bool connector_done = false;
+  std::atomic<bool> stop{false};
+  bool connected = false;
+  std::string message;
+  std::thread connector([&] {
+    connected = connect_prepared_unix_socket(
+        target_fd, socket_path,
+        [&] {
+          std::lock_guard<std::mutex> lock(retry_mutex);
+          ++predicate_calls;
+          retry_changed.notify_all();
+          return stop.load();
+        },
+        &message);
+    {
+      std::lock_guard<std::mutex> lock(retry_mutex);
+      connector_done = true;
+    }
+    retry_changed.notify_all();
+  });
+
+  bool retry_wait_entered = false;
+  {
+    std::unique_lock<std::mutex> lock(retry_mutex);
+    retry_wait_entered = retry_changed.wait_for(
+        lock, std::chrono::seconds(2), [&] { return predicate_calls >= 2U; });
+  }
+  UniqueFd accepted_filler(::accept(listener.get(), nullptr, nullptr));
+  bool completed_in_time = false;
+  {
+    std::unique_lock<std::mutex> lock(retry_mutex);
+    completed_in_time = retry_changed.wait_for(lock, std::chrono::seconds(2),
+                                               [&] { return connector_done; });
+  }
+  if (!completed_in_time) {
+    stop.store(true);
+    (void)::shutdown(target_fd, SHUT_RDWR);
+    (void)::shutdown(listener.get(), SHUT_RDWR);
+  }
+  connector.join();
+
+  UniqueFd accepted_target;
+  if (connected) {
+    pollfd pending{listener.get(), POLLIN, 0};
+    if (::poll(&pending, 1, 500) == 1 && (pending.revents & POLLIN) != 0) {
+      accepted_target.reset(::accept(listener.get(), nullptr, nullptr));
+    }
+  }
+
+  ASSERT_TRUE(retry_wait_entered);
+  ASSERT_TRUE(accepted_filler);
+  ASSERT_TRUE(completed_in_time);
+  EXPECT_TRUE(connected) << message;
+  ASSERT_TRUE(accepted_target);
+  EXPECT_EQ(target.get(), target_fd);
+  sockaddr_un peer{};
+  socklen_t peer_size = sizeof(peer);
+  EXPECT_EQ(
+      ::getpeername(target_fd, reinterpret_cast<sockaddr*>(&peer), &peer_size),
+      0);
+  const int restored_flags = ::fcntl(target_fd, F_GETFL, 0);
+  ASSERT_GE(restored_flags, 0);
+  EXPECT_EQ(restored_flags, original_flags);
+#endif
+}
+
+/**
  * @brief Accepts `EISCONN` after a same-fd backlog transient.
  *
  * @return Nothing; GoogleTest assertions report logical completion, attempt
