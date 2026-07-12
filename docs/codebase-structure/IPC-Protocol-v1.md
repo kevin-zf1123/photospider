@@ -31,7 +31,10 @@ That component resolves only `Threads`. Omitting `COMPONENTS`, or requesting
 Threads, OpenCV, `yaml-cpp`, and the Apple Metal/Foundation frameworks when
 applicable. A required unknown component fails package discovery; a required
 `ipc_client` component also fails when the producer was built with IPC disabled.
-When IPC is disabled, neither its target nor its public headers are installed.
+An optional component that is unavailable or unknown remains not-found without
+invalidating an otherwise satisfied package request; in particular, a required
+IPC-only request may name optional `embedded` while backend discovery is
+disabled. When IPC is disabled, neither its target nor its public headers are installed.
 Forcing IPC on for any other CMake system name fails configuration.
 
 `daemon.version.methods` is sourced from one centralized table shared by
@@ -103,7 +106,7 @@ public values, performs no automatic mutation or status retry, and aggregates
 private stable collection pages. Of those methods,
 `compute.status`, `compute.result`, and `compute.release` operate only on the
 daemon job registry. `compute.submit` admits a registry job whose worker later
-performs exactly one matching Host compute call. The other 43 methods route
+performs exactly one matching Host compute call. The other 49 methods route
 their direct or first-page request through matching Host operations; a stable
 collection continuation reads only its frozen snapshot registry record.
 
@@ -120,6 +123,76 @@ inspection/replacement are likewise available through matching typed Client
 calls. The bounded `events.drain` and `scheduler.trace` observation routes use
 the existing owned Host batch/page values. The existing `graph_cli` continues
 to create an embedded Host and keeps its local command semantics.
+
+### Complete IPC Host mapping
+
+`create_ipc_host(socket_path)` implements every current non-destructor Host
+virtual through the following typed Client composition. The three compute
+convenience operations deliberately share four job methods, and
+`plugins_load()` deliberately validates then discards the successful load
+report; neither composition adds another wire method.
+
+| # | `ps::Host` virtual | Typed Client composition | Version 1 method(s) |
+| ---: | --- | --- | --- |
+| 1 | `load_graph` | `Client::load_graph` | `graph.load` |
+| 2 | `close_graph` | `Client::close_graph` | `graph.close` |
+| 3 | `list_graphs` | `Client::list_graphs` | `graph.list` |
+| 4 | `reload_graph` | `Client::reload_graph` | `graph.reload` |
+| 5 | `save_graph` | `Client::save_graph` | `graph.save` |
+| 6 | `clear_graph` | `Client::clear_graph` | `graph.clear` |
+| 7 | `compute` | submit, poll, result, best-effort release in status mode | `compute.submit`, `compute.status`, `compute.result`, `compute.release` |
+| 8 | `compute_async` | joined worker performs the status-mode composition | `compute.submit`, `compute.status`, `compute.result`, `compute.release` |
+| 9 | `compute_and_get_image` | image-mode composition, protected map, lease-aware release | `compute.submit`, `compute.status`, `compute.result`, `compute.release` |
+| 10 | `timing` | `Client::timing` | `compute.timing` |
+| 11 | `last_io_time` | `Client::last_io_time` | `compute.last_io_time` |
+| 12 | `last_error` | `Client::last_error` | `compute.last_error` |
+| 13 | `list_node_ids` | `Client::list_node_ids` | `inspect.node_ids` |
+| 14 | `ending_nodes` | `Client::ending_nodes` | `inspect.ending_nodes` |
+| 15 | `get_node_yaml` | `Client::get_node_yaml` | `graph.node_yaml.get` |
+| 16 | `set_node_yaml` | `Client::set_node_yaml` | `graph.node_yaml.set` |
+| 17 | `inspect_node` | `Client::inspect_node` | `inspect.node` |
+| 18 | `inspect_graph` | `Client::inspect_graph` | `inspect.graph` |
+| 19 | `dependency_tree` | `Client::inspect_dependency_tree` | `inspect.dependency_tree` |
+| 20 | `traversal_orders` | `Client::traversal_orders` | `inspect.traversal_orders` |
+| 21 | `traversal_details` | `Client::traversal_details` | `inspect.traversal_details` |
+| 22 | `trees_containing_node` | `Client::trees_containing_node` | `inspect.trees_containing_node` |
+| 23 | `project_roi` | `Client::project_roi` | `inspect.roi_forward` |
+| 24 | `project_roi_backward` | `Client::project_roi_backward` | `inspect.roi_backward` |
+| 25 | `dirty_region_snapshot` | `Client::dirty_region_snapshot` | `inspect.dirty_region` |
+| 26 | `compute_planning_snapshot` | `Client::compute_planning_snapshot` | `inspect.compute_planning` |
+| 27 | `recent_compute_planning_snapshots` | `Client::recent_compute_planning_snapshots` | `inspect.recent_compute_planning` |
+| 28 | `begin_dirty_source` | `Client::begin_dirty_source` | `dirty.begin` |
+| 29 | `update_dirty_source` | `Client::update_dirty_source` | `dirty.update` |
+| 30 | `end_dirty_source` | `Client::end_dirty_source` | `dirty.end` |
+| 31 | `drain_compute_events` | `Client::drain_compute_events` | `events.drain` |
+| 32 | `scheduler_trace` | `Client::scheduler_trace` | `scheduler.trace` |
+| 33 | `clear_cache` | `Client::clear_cache` | `cache.clear_all` |
+| 34 | `clear_drive_cache` | `Client::clear_drive_cache` | `cache.clear_drive` |
+| 35 | `clear_memory_cache` | `Client::clear_memory_cache` | `cache.clear_memory` |
+| 36 | `cache_all_nodes` | `Client::cache_all_nodes` | `cache.cache_all_nodes` |
+| 37 | `free_transient_memory` | `Client::free_transient_memory` | `cache.free_transient` |
+| 38 | `synchronize_disk_cache` | `Client::synchronize_disk_cache` | `cache.synchronize_disk` |
+| 39 | `plugins_load_report` | `Client::plugins_load_report` | `plugins.load_report` |
+| 40 | `plugins_load` | validate `Client::plugins_load_report`, then discard the report | `plugins.load_report` |
+| 41 | `plugins_unload_all` | `Client::plugins_unload_all` | `plugins.unload_all` |
+| 42 | `seed_builtin_ops` | `Client::seed_builtin_ops` | `plugins.seed_builtins` |
+| 43 | `ops_sources` | `Client::ops_sources` | `plugins.ops_sources` |
+| 44 | `ops_combined_keys` | `Client::ops_combined_keys` | `plugins.ops_combined_keys` |
+| 45 | `ops_combined_sources` | `Client::ops_combined_sources` | `plugins.ops_combined_sources` |
+| 46 | `scheduler_available_types` | `Client::scheduler_available_types` | `scheduler.types` |
+| 47 | `scheduler_description` | `Client::scheduler_description` | `scheduler.description` |
+| 48 | `scheduler_scan` | `Client::scheduler_scan` | `scheduler.scan` |
+| 49 | `scheduler_load` | `Client::scheduler_load` | `scheduler.load` |
+| 50 | `scheduler_loaded_plugins` | `Client::scheduler_loaded_plugins` | `scheduler.loaded_plugins` |
+| 51 | `configure_scheduler_defaults` | `Client::configure_scheduler_defaults` | `scheduler.configure_defaults` |
+| 52 | `scheduler_info` | `Client::scheduler_info` | `scheduler.info` |
+| 53 | `replace_scheduler` | `Client::replace_scheduler` | `scheduler.replace` |
+
+The installed package smoke keeps this table executable as an exact unique
+53-symbol reference inventory. Construction does not contact the daemon.
+Ordinary calls use short-lived connections, asynchronous work owns joined
+pollers, and adapter destruction stops only those pollers; it never closes a
+daemon session, unloads process-owned plugins, or falls back to embedded work.
 
 ## Transport and Frame
 

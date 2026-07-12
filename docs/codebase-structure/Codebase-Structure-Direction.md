@@ -404,10 +404,14 @@ flow through the same host interface used by in-process frontends.
 
 Recommended runtime diagram:
 
+The GUI branch is an available future consumer shape. The dashed CLI branch is
+direction only: version 1 does not implement `graph_cli --connect`, and current
+CLI construction remains embedded.
+
 ```mermaid
 graph TD
     gui["future GUI frontend"] --> ipc_client["photospider_ipc_client"]
-    cli_remote["graph_cli --connect"] --> ipc_client
+    cli_remote["future graph_cli --connect (unavailable)"] -.-> ipc_client
     cli_local["graph_cli local mode"] --> host_adapter["in-process host adapter"]
     ipc_client --> socket["local IPC transport"]
     socket --> daemon["photospiderd"]
@@ -465,7 +469,7 @@ Method groups and current wire availability:
 | inspect | `inspect.graph`, `inspect.node`, `inspect.dependency_tree`, `inspect.node_ids`, `inspect.ending_nodes`, `inspect.roi_forward`, `inspect.roi_backward`, `inspect.dirty_region`, `inspect.compute_planning`, `inspect.recent_compute_planning`, `inspect.traversal_orders`, `inspect.traversal_details`, `inspect.trees_containing_node` | Implemented through copied Host values. Full-value collections use stable bounded cursor pages; node/ROI/dirty/current-planning values remain indivisible direct results. Host order and duplicates are preserved. |
 | dirty | `dirty.begin`, `dirty.update`, `dirty.end` | Implemented through one matching Host lifecycle mutation and return the copied dirty-region snapshot; the complete compact response size is preflighted before result-DOM allocation. |
 | cache | `cache.clear_all`, `cache.clear_drive`, `cache.clear_memory`, `cache.cache_all_nodes`, `cache.free_transient`, `cache.synchronize_disk` | Implemented as status-only Host calls; no backend cache handle or path enters a result. |
-| compute | `compute.submit`, `compute.status`, `compute.result`, `compute.release`, `compute.timing`, `compute.last_io_time`, `compute.last_error` | Polling jobs and diagnostics are routed. Submit/status/result use stable `{compute_id,session_id,state,cancellable,status,output}` values. Submit, status, status-mode result, empty-image result, and failed result keep `output` null. A terminal nonempty image result revalidates the protected artifact, refreshes one stable 60-second delivery lease, and returns the specified metadata object. Terminal release atomically returns `{compute_id,released:true}`, accepts an optional exact `delivery_id`, and can release its matching orphaned lease after normal job removal. Timing preflights its aggregate compact response size; last error is nested diagnostic data. |
+| compute | `compute.submit`, `compute.status`, `compute.result`, `compute.release`, `compute.timing`, `compute.last_io_time`, `compute.last_error` | Polling jobs and diagnostics are routed. Submit/status/result use stable `{compute_id,session_id,state,cancellable,status,output}` values; states are exactly `queued`, `running`, `succeeded`, and `failed`, and every job reports `cancellable:false`. Submit, status, status-mode result, empty-image result, and failed result keep `output` null. A terminal nonempty image result revalidates the protected artifact, refreshes one stable 60-second delivery lease, and returns the specified metadata object. Terminal release atomically returns `{compute_id,released:true}`, accepts an optional exact `delivery_id`, and can release its matching orphaned lease after normal job removal. Timing preflights its aggregate compact response size; last error is nested diagnostic data. |
 | scheduler | `scheduler.types`, `scheduler.description`, `scheduler.scan`, `scheduler.load`, `scheduler.loaded_plugins`, `scheduler.configure_defaults`, `scheduler.info`, `scheduler.replace`, `scheduler.trace` | Implemented only through matching Host calls and advertised in the exact 55-method inventory. Discovery/default control is process-global; info/replacement uses opaque session admission and shares graph-state serialization with compute/close. The installed typed Client exposes every route, aggregates type/plugin snapshots, and validates bounded non-destructive trace pages without retaining scheduler/plugin ownership. |
 | plugins | `plugins.load_report`, `plugins.unload_all`, `plugins.seed_builtins`, `plugins.ops_sources`, `plugins.ops_combined_keys`, `plugins.ops_combined_sources` | Implemented only through matching Host calls and advertised in the exact 55-method inventory. The installed typed Client exposes every route, decodes exact reports, and aggregates key-sorted stable views; disconnecting a Client does not unload a successful process-owned DSO. |
 | events | `events.drain` | Bounded destructive event draining is routed through Host and exposed by the installed typed Client as one strictly validated, non-retried Host event batch. |
@@ -536,11 +540,15 @@ Collection snapshot rule:
 
 Error rule:
 
-- Transport errors describe IPC failure.
-- Host errors describe graph/load/compute/plugin/scheduler failures.
-- Graph errors should carry stable error codes aligned with `GraphErrc`.
-- Methods should not require clients to parse human-readable strings to decide
-  behavior.
+- `OperationStatus` and `OperationErrorDomain` are the sole public status
+  vocabulary for embedded and IPC Hosts. Canonical success is domain `none`,
+  signed code zero, and empty name/message.
+- Recoverable failures preserve exactly one of `transport`, `protocol`,
+  `graph`, or `daemon`, together with one signed code and stable name. Current
+  Graph codes use the explicit `GraphErrc` 1..9 mapping; transport is never
+  rewritten as Graph IO.
+- Diagnostic `message` remains bounded human-readable context only. Client
+  behavior branches on domain/code/name, never by parsing that text.
 
 Concurrency rule:
 
@@ -548,8 +556,9 @@ Concurrency rule:
 - Because Host does not promise thread safety, every Host call uses one
   daemon-owned mutex; socket IO never holds it.
 - Ping/version and protocol validation do not acquire the Host mutex.
-- A compute job is noncancellable, runs through the sole joined FIFO worker,
-  and invokes exactly one matching synchronous Host compute call.
+- A compute job reports literal `cancellable:false`, advances only through
+  `queued`, `running`, `succeeded`, or `failed`, runs through the sole joined
+  FIFO worker, and invokes exactly one matching synchronous Host compute call.
 - Session close marks the row closing before it waits admitted Host calls and
   queued/running jobs; only then may it acquire the Host mutex.
 - Process shutdown stops session/compute admission and new delivery leases,
@@ -558,10 +567,10 @@ Concurrency rule:
 
 ## Migration State and Remaining Order
 
-Frontend-boundary and existing physical-layout steps 1-5 are present in the
-current repository. The remaining frontend migration adds daemon/IPC adapters
-without changing `ps::Host` as the sole public seam. Plugin SDK tightening is a
-separate extension-boundary change.
+Frontend-boundary, physical-layout, daemon, typed Client, and complete IPC Host
+steps 1-7 are present in the current repository without changing `ps::Host` as
+the sole public seam. The remaining architecture migration is the issue #38
+extension SDK tightening described by step 8.
 
 1. **Completed:** Establish public-header installation and self-containment
    boundaries.
@@ -692,7 +701,8 @@ For any implementation change following this document:
 
 ## Open Decisions
 
-This decision remains for a later protocol slice:
+This decision remains future work outside version 1; current `graph_cli`
+construction is always embedded and does not probe or auto-connect to a daemon:
 - Whether `graph_cli` should default to local in-process mode forever, or should
   auto-connect to `photospiderd` when a daemon socket exists.
 

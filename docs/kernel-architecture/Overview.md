@@ -18,6 +18,15 @@ an explicit per-graph `GraphStateExecutor` boundary instead of the scheduler
 dispatch path. Scheduler-backed parallel compute uses the scheduler runtime for
 ready task callbacks inside that graph-state boundary.
 
+On macOS/Linux the same public Host seam also has a complete installed IPC
+adapter. `create_ipc_host(socket_path)` implements all 53 current
+non-destructor virtuals through the exact typed 55-method local protocol;
+`photospiderd` owns a separate embedded Host and admits every backend operation
+through it. This remote path adds polling jobs, bounded registries, and
+protected output artifacts without exposing backend ownership. `graph_cli`
+continues to construct the embedded adapter and does not auto-connect to the
+daemon.
+
 The code is useful and testable, but some boundaries are not final. In
 particular, `Kernel` and `ComputeService` still coordinate a large amount of
 behavior that may eventually move into narrower services.
@@ -34,6 +43,9 @@ The root `CMakeLists.txt` builds these internal modules:
 | `photospider_plugin` | Dynamic operation plugin manager and loader. |
 | `photospider_compute` | Build-only interaction runtime, schedulers, compute service, and events helper. |
 | `photospider` | Static installable backend product, archived as `libphotospider`, linked by CLI and embedded Host frontends. It installs only `include/photospider/**` and exports `Photospider::photospider`; operation plugins register through `OperationPluginRegistrar` and `register_photospider_ops_v1` instead of linking this product for registry state. |
+| `photospider_ipc_client` | Installed static typed Unix IPC client plus the complete IPC Host adapter. It exports `Photospider::photospider_ipc_client`, implements all 55 direct Client methods and all 53 current Host virtuals, and does not link the backend or expose JSON/POSIX implementation types. |
+| `photospider_ipc_server_internal` | Non-installed bounded Unix listener, typed router, and private session/job/snapshot/output registries. It serializes all backend access through one daemon-owned Host. |
+| `photospiderd` | Installed foreground macOS/Linux daemon that owns one embedded Host, a protected per-user socket and output store, and deterministic joined shutdown. |
 | `photospider_cli_common` | Non-installable application helper built from `apps/graph_cli/src/`: REPL commands, TUI editors, autocomplete, and CLI config. |
 | `graph_cli` | End-user executable whose process entry point is `apps/graph_cli/main.cpp`. |
 
@@ -60,6 +72,12 @@ Package boundary:
   `include/photospider/**` public header tree, `PhotospiderTargets.cmake`, and
   `PhotospiderConfig.cmake`. The archive is `libphotospider.a` on Unix-like
   toolchains and `photospider.lib` with MSVC.
+- On macOS/Linux with `PHOTOSPIDER_BUILD_IPC=ON`, installation also exports
+  `Photospider::photospider_ipc_client`, installs exactly the three
+  `include/photospider/ipc/` headers and `photospiderd`, and keeps the server
+  library private. An IPC-only consumer requests `COMPONENTS ipc_client` and
+  resolves only `Threads`; component-less discovery preserves the embedded
+  default and its backend dependencies.
 - `Photospider::photospider` carries `PHOTOSPIDER_STATIC` for consumers and
   keeps the `src/lib/` include root private to repository builds. In the build tree,
   the target's generated public include root contains only `photospider/`
@@ -88,10 +106,17 @@ Package boundary:
 
 ```mermaid
 graph TD
-    CLI["CLI / REPL / TUI"] --> Host["ps::Host"]
-    Frontend["Embedded frontend"] --> Host["ps::Host"]
-    Host --> EmbeddedHost["embedded Host adapter"]
+    CLI["CLI / REPL / TUI"] --> EmbeddedHost["embedded Host adapter"]
+    Frontend["Embedded frontend"] --> Host["ps::Host seam"]
+    RemoteFrontend["Explicit IPC frontend"] --> Host
+    Host --> EmbeddedHost
+    Host --> IpcHost["complete IPC Host adapter"]
+    IpcHost --> Client["typed 55-method Client"]
+    Client --> Socket["protected Unix socket"]
+    Socket --> Daemon["photospiderd"]
+    Daemon --> DaemonHost["daemon-owned embedded Host"]
     EmbeddedHost --> InteractionService
+    DaemonHost --> InteractionService
     EmbeddedHost --> PluginManager["process PluginManager"]
     InteractionService --> Kernel
 
@@ -128,6 +153,13 @@ the process-global operation view seen by all Hosts; callback and returned-value
 leases keep plugin code mapped after registry removal until in-flight state is
 destroyed.
 
+The IPC Host owns only client-side connections, interruptible polling workers,
+and mapped image lifetimes. Daemon sessions, accepted jobs, snapshots, output
+leases, and the backend Host remain daemon-owned. Destroying the adapter wakes
+and joins its pollers but does not close sessions, unload plugins, or repeat a
+mutation. The exact socket, protocol, status, quota, and artifact lifecycle is
+defined in `../codebase-structure/IPC-Protocol-v1.md`.
+
 ## Main Components
 
 | Component | Role |
@@ -135,6 +167,10 @@ destroyed.
 | `Kernel` | Multi-graph facade, service owner, runtime bootstrapper, top-level graph/cache/compute API. |
 | `ps::Host` | Public frontend interface under `include/photospider/host`; returns copied request/result/snapshot values and hides Kernel, GraphModel, and GraphRuntime. |
 | `embedded Host adapter` | In-process Host implementation backed by per-adapter `Kernel` and `InteractionService` state; all adapters share the process operation plugin owner. |
+| `IPC Host adapter` | Complete installed Host implementation backed only by typed short-lived Client calls. It composes polling compute, joins async workers, preserves exact status domains, and maps protected image artifacts read-only. |
+| `ps::ipc::Client` | Move-only direct client with owned values for the exact sorted 55-method version 1 inventory; it validates correlated result shapes and exposes no raw JSON call. |
+| `photospiderd` | Foreground local service that owns one embedded Host and serializes all Host calls while independently serving metadata and job polling. |
+| daemon registries | Private bounded ownership for opaque sessions, compute jobs, stable collection snapshots, protected outputs, and delivery leases; none are public backend handles. |
 | `GraphRuntime` | Per-graph resource container with model, graph-state executor, fixed-capacity scheduler trace ring, schedulers, and platform context. |
 | `GraphModel` | Graph state holder: private node storage, topology adjacency index, cache root, timing data, quiet/skip-save flags. |
 | `InteractionService` | Internal wrapper around `Kernel` used by the embedded Host adapter and backend code; frontends, including the CLI, use the public Host seam. |
@@ -211,6 +247,38 @@ Typical embedded Host compute flow:
    resource exhaustion remains exceptional: non-destructor Host methods and
    consumed async futures may propagate `std::bad_alloc` as documented by the
    installable interface.
+
+Typical IPC Host compute flow:
+
+1. An explicit daemon frontend creates `ps::Host` through
+   `create_ipc_host(socket_path)`; construction does not contact or start a
+   daemon.
+2. A compute call opens a short-lived typed Client, submits once, and receives
+   `queued` with `cancellable:false`. The sole daemon worker advances the job
+   through `running` to immutable `succeeded` or `failed` after exactly one
+   embedded Host compute call.
+3. The adapter polls immediately and then waits
+   10/20/40/80/160/320/500 ms, repeating the 500-ms cap without a synchronous
+   total timeout. Each status RPC is attempted once; terminal state, the first
+   exact RPC failure, or adapter stop ends polling.
+4. Terminal Host/output failure is a normal correlated job value whose nested
+   `OperationStatus` preserves exact Graph or Daemon semantics; RPC,
+   admission, and lookup failures remain separate. Across the public Host
+   boundary the sole status vocabulary distinguishes `none`, `transport`,
+   `protocol`, `graph`, and `daemon`, and transport never becomes graph IO.
+5. Image mode validates a same-user mode-`0600` artifact under its delivery
+   lease, maps its tight rows read-only, and then attempts matching
+   job/lease release. The final shared image owner unmaps and closes exactly
+   once.
+6. Async adapter destruction signals stop, wakes waits, interrupts active
+   descriptors, completes unfinished futures as Transport
+   `client_stopped` (5), and joins workers without resubmitting or closing
+   daemon-owned sessions.
+
+Production bounds include 64 active and 256 retained terminal compute jobs;
+64 artifacts, one GiB total retained bytes, and 512 MiB per artifact; 8,192
+compute events; and 65,536 scheduler-trace entries. The full method mapping and
+all string/page/snapshot/frame limits live in the maintained protocol document.
 
 ## Bounded Event and Trace Observation
 

@@ -16,8 +16,8 @@
 Public client header 是 `photospider/ipc/protocol.hpp`、`photospider/ipc/client.hpp` 与
 `photospider/ipc/host.hpp`。它们只暴露 typed owned value 和完整 Host factory，不暴露 JSON
 type、socket descriptor、`sockaddr_un`、backend model、runtime service 或 mutable backend ownership。
-Client library 不链接 `photospider` backend。IPC disabled 时，不安装该 target 与 public
-header。Installed IPC-only consumer 必须显式选择 component：
+Client library 不链接 `photospider` backend。Installed IPC-only consumer 必须显式选择
+component：
 
 ```cmake
 find_package(Photospider CONFIG REQUIRED COMPONENTS ipc_client)
@@ -27,7 +27,10 @@ target_link_libraries(app PRIVATE Photospider::photospider_ipc_client)
 该 component 只解析 `Threads`。省略 `COMPONENTS`，或显式请求 `COMPONENTS embedded`，
 会保留 embedded package 行为，并按适用平台解析 Threads、OpenCV、`yaml-cpp` 以及 Apple
 Metal/Foundation framework。Required unknown component 会使 package discovery 失败；producer
-禁用 IPC 时，required `ipc_client` component 也会失败。在其他任何 CMake system name 下强制
+禁用 IPC 时，required `ipc_client` component 也会失败。不可用或 unknown optional component
+会保持 not-found，而不会使其他要求已满足的 package request 失效；特别是 required IPC-only
+request 可以在禁用 backend discovery 时把 `embedded` 列为 optional。IPC disabled 时，不安装
+该 target 与 public header。在其他任何 CMake system name 下强制
 开启 IPC 会使 configure 明确失败。
 
 `daemon.version.methods` 来自 metadata 与 dispatch 前 admission 共用的一张统一表。
@@ -96,7 +99,7 @@ Metal/Foundation framework。Required unknown component 会使 package discovery
 自动重试 mutation 或 status，并聚合 private stable collection page。其中
 `compute.status`、`compute.result` 与 `compute.release` 只操作 daemon job registry；
 `compute.submit` 会接纳一个 registry job，随后由其 worker 恰好执行一次匹配的 Host compute
-call。另外 43 个 method 会让 direct request 或 first-page request 经由匹配的 Host operation；
+call。另外 49 个 method 会让 direct request 或 first-page request 经由匹配的 Host operation；
 stable collection continuation 只读取其 frozen snapshot registry record。
 
 版本 1 现在会在 router boundary 暴露 daemon-owned compute-job submit、polling、terminal
@@ -108,6 +111,73 @@ operation-plugin control 与有序 view 已可通过 daemon router boundary 和 
 使用。Scheduler-plugin discovery/default 与 per-session scheduler inspection/replacement 同样
 通过匹配 typed Client call 提供。Bounded `events.drain` 与 `scheduler.trace` observation route
 复用现有 owned Host batch/page value。现有 `graph_cli` 继续创建 embedded Host，本地命令语义不变。
+
+### 完整 IPC Host 映射
+
+`create_ipc_host(socket_path)` 通过以下 typed Client 组合实现当前全部非析构 Host virtual。
+三个 compute convenience operation 有意复用四个 job method；`plugins_load()` 则会验证成功的
+load report 后再丢弃它。这两种组合都不会增加额外 wire method。
+
+| # | `ps::Host` virtual | Typed Client 组合 | Version 1 method |
+| ---: | --- | --- | --- |
+| 1 | `load_graph` | `Client::load_graph` | `graph.load` |
+| 2 | `close_graph` | `Client::close_graph` | `graph.close` |
+| 3 | `list_graphs` | `Client::list_graphs` | `graph.list` |
+| 4 | `reload_graph` | `Client::reload_graph` | `graph.reload` |
+| 5 | `save_graph` | `Client::save_graph` | `graph.save` |
+| 6 | `clear_graph` | `Client::clear_graph` | `graph.clear` |
+| 7 | `compute` | status mode 下 submit、poll、result、best-effort release | `compute.submit`、`compute.status`、`compute.result`、`compute.release` |
+| 8 | `compute_async` | joined worker 执行 status-mode 组合 | `compute.submit`、`compute.status`、`compute.result`、`compute.release` |
+| 9 | `compute_and_get_image` | image-mode 组合、protected mapping、lease-aware release | `compute.submit`、`compute.status`、`compute.result`、`compute.release` |
+| 10 | `timing` | `Client::timing` | `compute.timing` |
+| 11 | `last_io_time` | `Client::last_io_time` | `compute.last_io_time` |
+| 12 | `last_error` | `Client::last_error` | `compute.last_error` |
+| 13 | `list_node_ids` | `Client::list_node_ids` | `inspect.node_ids` |
+| 14 | `ending_nodes` | `Client::ending_nodes` | `inspect.ending_nodes` |
+| 15 | `get_node_yaml` | `Client::get_node_yaml` | `graph.node_yaml.get` |
+| 16 | `set_node_yaml` | `Client::set_node_yaml` | `graph.node_yaml.set` |
+| 17 | `inspect_node` | `Client::inspect_node` | `inspect.node` |
+| 18 | `inspect_graph` | `Client::inspect_graph` | `inspect.graph` |
+| 19 | `dependency_tree` | `Client::inspect_dependency_tree` | `inspect.dependency_tree` |
+| 20 | `traversal_orders` | `Client::traversal_orders` | `inspect.traversal_orders` |
+| 21 | `traversal_details` | `Client::traversal_details` | `inspect.traversal_details` |
+| 22 | `trees_containing_node` | `Client::trees_containing_node` | `inspect.trees_containing_node` |
+| 23 | `project_roi` | `Client::project_roi` | `inspect.roi_forward` |
+| 24 | `project_roi_backward` | `Client::project_roi_backward` | `inspect.roi_backward` |
+| 25 | `dirty_region_snapshot` | `Client::dirty_region_snapshot` | `inspect.dirty_region` |
+| 26 | `compute_planning_snapshot` | `Client::compute_planning_snapshot` | `inspect.compute_planning` |
+| 27 | `recent_compute_planning_snapshots` | `Client::recent_compute_planning_snapshots` | `inspect.recent_compute_planning` |
+| 28 | `begin_dirty_source` | `Client::begin_dirty_source` | `dirty.begin` |
+| 29 | `update_dirty_source` | `Client::update_dirty_source` | `dirty.update` |
+| 30 | `end_dirty_source` | `Client::end_dirty_source` | `dirty.end` |
+| 31 | `drain_compute_events` | `Client::drain_compute_events` | `events.drain` |
+| 32 | `scheduler_trace` | `Client::scheduler_trace` | `scheduler.trace` |
+| 33 | `clear_cache` | `Client::clear_cache` | `cache.clear_all` |
+| 34 | `clear_drive_cache` | `Client::clear_drive_cache` | `cache.clear_drive` |
+| 35 | `clear_memory_cache` | `Client::clear_memory_cache` | `cache.clear_memory` |
+| 36 | `cache_all_nodes` | `Client::cache_all_nodes` | `cache.cache_all_nodes` |
+| 37 | `free_transient_memory` | `Client::free_transient_memory` | `cache.free_transient` |
+| 38 | `synchronize_disk_cache` | `Client::synchronize_disk_cache` | `cache.synchronize_disk` |
+| 39 | `plugins_load_report` | `Client::plugins_load_report` | `plugins.load_report` |
+| 40 | `plugins_load` | 验证 `Client::plugins_load_report` 后丢弃 report | `plugins.load_report` |
+| 41 | `plugins_unload_all` | `Client::plugins_unload_all` | `plugins.unload_all` |
+| 42 | `seed_builtin_ops` | `Client::seed_builtin_ops` | `plugins.seed_builtins` |
+| 43 | `ops_sources` | `Client::ops_sources` | `plugins.ops_sources` |
+| 44 | `ops_combined_keys` | `Client::ops_combined_keys` | `plugins.ops_combined_keys` |
+| 45 | `ops_combined_sources` | `Client::ops_combined_sources` | `plugins.ops_combined_sources` |
+| 46 | `scheduler_available_types` | `Client::scheduler_available_types` | `scheduler.types` |
+| 47 | `scheduler_description` | `Client::scheduler_description` | `scheduler.description` |
+| 48 | `scheduler_scan` | `Client::scheduler_scan` | `scheduler.scan` |
+| 49 | `scheduler_load` | `Client::scheduler_load` | `scheduler.load` |
+| 50 | `scheduler_loaded_plugins` | `Client::scheduler_loaded_plugins` | `scheduler.loaded_plugins` |
+| 51 | `configure_scheduler_defaults` | `Client::configure_scheduler_defaults` | `scheduler.configure_defaults` |
+| 52 | `scheduler_info` | `Client::scheduler_info` | `scheduler.info` |
+| 53 | `replace_scheduler` | `Client::replace_scheduler` | `scheduler.replace` |
+
+Installed package smoke 会把这张表维持为精确、唯一的 53-symbol reference inventory，使其保持
+可执行。构造 adapter 时不会连接 daemon。普通调用使用 short-lived connection，async work
+拥有 joined poller；adapter destruction 只停止这些 poller，不会关闭 daemon session、卸载
+process-owned plugin，也不会 fallback 到 embedded work。
 
 ## Transport 与 Frame
 

@@ -51,12 +51,15 @@ Client lifecycle symbol，并链接一个仅用于引用的分支，以精确且
 IPC link interface 只允许 `Threads::Threads`；header 正向只允许当前 C++ standard-library include
 与已安装的 `photospider/` public include，并拒绝 raw JSON、socket address/descriptor、file
 identity、file mapping 与 backend declaration。这是门禁实际保证的精确边界，不声称穷举全部
-可能的 POSIX 拼写。长期 `IpcDisabledInstallSmoke` 会用
+可能的 POSIX 拼写。在禁用 backend discovery 时，
+`COMPONENTS ipc_client OPTIONAL_COMPONENTS embedded` 会只找到 `ipc_client` 并成功；unknown
+optional component 会保持 not-found，而不会使 package 无效。长期 `IpcDisabledInstallSmoke` 会用
 `PHOTOSPIDER_BUILD_IPC=OFF` 与 `BUILD_TESTING=OFF` 配置另一个 clean producer；它验证不会
 advertise IPC build forwarder、installed header、archive、executable 或 exported target，required
 `ipc_client` component discovery 会失败，同时 external default embedded Host consumer 仍能
-link/run。Required unknown component 也会失败；省略 component 或请求 `embedded` 时继续解析
-既有 backend dependency。
+link/run。Required unknown component 也会失败；optional disabled `ipc_client` 与 unknown
+component 会保持 not-found 而不使 discovery 失败；省略 component 或请求 `embedded` 时继续
+解析既有 backend dependency。
 
 当所选 CMake generator 提供多个 configuration 时，smoke 会为 producer 与 consumer 使用同一个
 generator，检查两侧的 `CMAKE_GENERATOR` 和 `CMAKE_CONFIGURATION_TYPES` cache 值，并从
@@ -128,9 +131,11 @@ IPC change 的 focused local product validation 为：
 ```bash
 cmake --build build --target photospider_ipc_client \
   photospider_ipc_server_internal photospiderd test_ipc_protocol test_ipc_host \
-  test_ipc_daemon public_header_self_containment -j
+  test_compute_request_registry test_collection_snapshot_registry \
+  test_output_store test_event_stream_boundaries test_ipc_daemon \
+  public_header_self_containment -j
 ctest --test-dir build --output-on-failure \
-  -R '^(FrameCodec|ProtocolEnvelope|IntegerCodec|ProtocolErrors|ProtocolParams|ProtocolGraphLoad|InspectionJson|SessionRegistry|ClientLifecycle|ClientSurface|ClientCollectionAggregation|ClientJobValidation|ClientRetryPolicy|ClientResultValidation|IpcHost|IpcDaemon|StaticProductConsumerSmoke|IpcDisabledInstallSmoke|PublicHeaderSelfContainment)'
+  -R '^(FrameCodec|ProtocolEnvelope|IntegerCodec|ProtocolErrors|ProtocolParams|ProtocolGraphLoad|ProtocolGraphClose|ProtocolOperationPlugins|HostRoutedGraphStateProtocolTest|StableInspectionPagingProtocolTest|InspectionJson|SessionRegistry|ComputeRequestRegistry|CollectionSnapshotRegistry|OutputStore|ComputeEventRing|SchedulerTraceRing|UnixSocketConnect|ClientLifecycle|ClientSurface|ClientCollectionAggregation|ClientJobValidation|ClientRetryPolicy|ClientResultValidation|IpcHost|IpcDaemon|IpcDaemonOperationPlugins|IpcDaemonSchedulers|IpcObservationFixtureDaemon|StaticProductConsumerSmoke|IpcDisabledInstallSmoke|PublicHeaderSelfContainment)'
 ```
 
 这些测试结束后，不得遗留 temporary daemon process、socket、graph session、package prefix 或

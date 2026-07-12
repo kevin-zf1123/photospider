@@ -51,15 +51,30 @@ reports an invariant error instead of exposing an untracked Host name. A
 client disconnect never calls `close_graph`; another client can list and
 inspect the daemon-owned session.
 
+`graph.close` uses the same daemon lifecycle gate as compute admission. It
+atomically marks the mapping closing, rejects every new session-scoped Host or
+compute admission with Graph `not_found`, and waits for already admitted Host
+calls plus every queued/running job for that session. Status/result/release for
+an already accepted job remain available because they are job-scoped and do
+not enter Host. Only after those counts reach zero does the daemon acquire its
+Host mutex and invoke `Host::close_graph()`. Success removes the mapping; Host
+`NotFound` removes a stale mapping while preserving the failure; any other Host
+failure atomically reopens admission and retains the mapping.
+
 The public Host contract does not promise thread safety. The daemon therefore
 uses one dedicated mutex around every Host call, including read-only listing
 and inspection. Protocol validation plus `daemon.ping`/`daemon.version` do not
 take that mutex, and socket IO never occurs while it is held. Signal shutdown
-stops accept, wakes and joins client workers, then attempts to close every
-active Host session, removes the exact socket while its persistent lifecycle
-lock remains held, releases that lock, and only then reaches Host destruction.
-The lock file remains for stable cross-process synchronization. The complete
-wire and socket contract is maintained in
+stops session, compute, and snapshot admission plus new output leases; closes
+the listener; wakes and joins client workers; drains accepted jobs; and joins
+the sole compute worker. It then removes terminal job ownership, clears stable
+collection snapshots, stops output publication, waits for active delivery
+leases to release or expire, and identity-cleans/closes the OutputStore before
+attempting to close active Host sessions. Only after registry and Host cleanup
+does it remove the exact socket while the persistent lifecycle lock remains
+held, release that lock, and destroy Host state. The lock file remains for
+stable cross-process synchronization. The complete wire and socket contract is
+maintained in
 `docs/codebase-structure/IPC-Protocol-v1.md`.
 
 ## New Graph Load

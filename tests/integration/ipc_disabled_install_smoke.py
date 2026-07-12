@@ -62,10 +62,15 @@ def remove_tree(path: Path, repo: Path) -> None:
 def main() -> int:
     """@brief Configure, build, install, and inspect an IPC-disabled package.
 
-    @return Zero only when embedded install remains usable and no IPC header,
-      archive, executable, or exported target is advertised.
+    @return Zero only when the embedded install remains usable; no IPC header,
+      archive, executable, or exported target is advertised; optional disabled
+      or unknown components remain absent without failing discovery; and a
+      required ``ipc_client`` component fails discovery.
     @throws OSError For filesystem or process-start failures.
     @throws subprocess.CalledProcessError For configure/build/install failures.
+    @throws ValueError If the requested work path could remove the repository.
+    @throws RuntimeError If an artifact, export, component, or consumer
+      condition contradicts the IPC-disabled package contract.
     @note This durable product gate creates only a transient normal CMake tree;
       it writes no result/provenance report.
     """

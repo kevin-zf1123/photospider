@@ -69,15 +69,19 @@ permits only `Threads::Threads` in the exported IPC link interface, positively
 allows only the current C++ standard-library and installed `photospider/`
 public includes, and rejects raw JSON, socket-address/descriptor, file-identity,
 file-mapping, and backend declarations. This is the gate's exact boundary, not
-an exhaustive promise about every possible POSIX spelling.
+an exhaustive promise about every possible POSIX spelling. With backend
+discovery disabled, `COMPONENTS ipc_client OPTIONAL_COMPONENTS embedded`
+succeeds with only `ipc_client` found, and an unknown optional component
+remains not-found without invalidating the package.
 The durable
 `IpcDisabledInstallSmoke` configures a separate clean producer with
 `PHOTOSPIDER_BUILD_IPC=OFF` and `BUILD_TESTING=OFF`; it verifies that no IPC
 build forwarder, installed header, archive, executable, or exported target is
 advertised, a required `ipc_client` component fails discovery, and an external
 default embedded Host consumer still links and runs. Required unknown package
-components fail as well; omitting components or requesting `embedded` retains
-the existing backend dependency resolution.
+components fail as well; optional disabled `ipc_client` and unknown components
+remain not-found without failing discovery; omitting components or requesting
+`embedded` retains the existing backend dependency resolution.
 
 When the selected CMake generator exposes multiple configurations, the smoke
 uses that same generator for producer and consumer, checks each
@@ -178,9 +182,11 @@ For IPC changes, focused local product validation is:
 ```bash
 cmake --build build --target photospider_ipc_client \
   photospider_ipc_server_internal photospiderd test_ipc_protocol test_ipc_host \
-  test_ipc_daemon public_header_self_containment -j
+  test_compute_request_registry test_collection_snapshot_registry \
+  test_output_store test_event_stream_boundaries test_ipc_daemon \
+  public_header_self_containment -j
 ctest --test-dir build --output-on-failure \
-  -R '^(FrameCodec|ProtocolEnvelope|IntegerCodec|ProtocolErrors|ProtocolParams|ProtocolGraphLoad|InspectionJson|SessionRegistry|ClientLifecycle|ClientSurface|ClientCollectionAggregation|ClientJobValidation|ClientRetryPolicy|ClientResultValidation|IpcHost|IpcDaemon|StaticProductConsumerSmoke|IpcDisabledInstallSmoke|PublicHeaderSelfContainment)'
+  -R '^(FrameCodec|ProtocolEnvelope|IntegerCodec|ProtocolErrors|ProtocolParams|ProtocolGraphLoad|ProtocolGraphClose|ProtocolOperationPlugins|HostRoutedGraphStateProtocolTest|StableInspectionPagingProtocolTest|InspectionJson|SessionRegistry|ComputeRequestRegistry|CollectionSnapshotRegistry|OutputStore|ComputeEventRing|SchedulerTraceRing|UnixSocketConnect|ClientLifecycle|ClientSurface|ClientCollectionAggregation|ClientJobValidation|ClientRetryPolicy|ClientResultValidation|IpcHost|IpcDaemon|IpcDaemonOperationPlugins|IpcDaemonSchedulers|IpcObservationFixtureDaemon|StaticProductConsumerSmoke|IpcDisabledInstallSmoke|PublicHeaderSelfContainment)'
 ```
 
 Temporary daemon processes, sockets, graph sessions, package prefixes, and
