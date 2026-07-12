@@ -97,7 +97,10 @@ class RequestRouter {
    *       Stable graph-list/inspection pages and direct YAML, timing, dirty,
    *       node, and current-planning codecs locally map returned byte/count
    *       bounds to `response_too_large`; malformed returned values and other
-   *       standard request failures become daemon `internal_error`.
+   *       standard request failures become daemon `internal_error`. Compute
+   *       submission validates its complete nested request before admission;
+   *       job polling/release needs no live session or Host lock, and accepted
+   *       execution/publication failures remain nested terminal statuses.
    *       Resource exhaustion is rethrown. The function performs no socket IO.
    */
   std::string route(const std::string& payload);
@@ -209,6 +212,32 @@ class RequestRouter {
    *       direct results and are rejected whole when they cannot fit a frame.
    */
   std::optional<std::string> route_inspection_method(
+      const std::string& id, const std::string& method,
+      const RoutedParams& routed_params);
+
+  /**
+   * @brief Routes bounded polling compute-job lifecycle methods.
+   *
+   * @param id Valid request id correlated with the response.
+   * @param method Exact version 1 compute-job method name.
+   * @param routed_params Cpp-only adapter borrowing the structurally valid
+   *        params object.
+   * @return Complete response when this family recognizes `method`, or
+   *         `std::nullopt` for another router family.
+   * @throws std::bad_alloc if validation, registry lookup, or response
+   *         construction cannot allocate.
+   * @throws Whatever pre-commit registry admission propagates; accepted worker
+   *         and output-publication failures are retained as nested terminal
+   *         statuses instead.
+   * @note Submit validates the complete public Host request before one
+   *       registry admission. Status, result, and release resolve only the
+   *       opaque compute id and never acquire `host_mutex_` or require a live
+   *       session. Submit/status/result use one stable snapshot schema; release
+   *       atomically returns `{compute_id,released:true}`. The current final
+   *       nullable `output` field remains null; protected metadata delivery is
+   *       owned by the separate image-result routing boundary.
+   */
+  std::optional<std::string> route_compute_method(
       const std::string& id, const std::string& method,
       const RoutedParams& routed_params);
 

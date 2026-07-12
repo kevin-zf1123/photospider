@@ -61,6 +61,13 @@ struct IpcHostInvocation {
 
   /** @brief Exact graph-load request, when the method is `graph.load`. */
   GraphLoadRequest load_request;
+
+  /** @brief Exact public compute request, when the method is `compute.submit`.
+   */
+  std::optional<HostComputeRequest> compute_request;
+
+  /** @brief Whether `compute.submit` selected the image-returning Host call. */
+  bool image_compute = false;
 };
 
 /**
@@ -269,6 +276,20 @@ class IpcHostSpy final : public Host {
   }
 
   /**
+   * @brief Configures the copied image returned by image-mode compute.
+   * @param image Exact public image value returned on Host success.
+   * @return Nothing.
+   * @throws std::bad_alloc if shared ownership or copied metadata allocates.
+   * @note The configured `compute.submit` status remains authoritative; tests
+   *       may provide an intentionally invalid image to exercise nested output
+   *       publication failures after an accepted submit.
+   */
+  void set_compute_image(ImageBuffer image) {
+    std::lock_guard<std::mutex> lock(mutex_);
+    compute_image_ = std::move(image);
+  }
+
+  /**
    * @brief Configures `inspect.node` copied output.
    * @param node Complete public node value returned on success.
    * @return Nothing.
@@ -425,7 +446,11 @@ class IpcHostSpy final : public Host {
 
   /** @copydoc Host::compute */
   VoidResult compute(const HostComputeRequest& request) override {
-    record(session_invocation("compute.submit", request.session));
+    IpcHostInvocation invocation =
+        session_invocation("compute.submit", request.session);
+    invocation.compute_request = request;
+    invocation.image_compute = false;
+    record(std::move(invocation));
     return {status_for("compute.submit")};
   }
 
@@ -442,8 +467,12 @@ class IpcHostSpy final : public Host {
   /** @copydoc Host::compute_and_get_image */
   Result<ImageBuffer> compute_and_get_image(
       const HostComputeRequest& request) override {
-    record(session_invocation("compute.submit", request.session));
-    return {status_for("compute.submit"), ImageBuffer{}};
+    IpcHostInvocation invocation =
+        session_invocation("compute.submit", request.session);
+    invocation.compute_request = request;
+    invocation.image_compute = true;
+    record(std::move(invocation));
+    return configured_result("compute.submit", compute_image_);
   }
 
   /** @copydoc Host::timing */
@@ -974,6 +1003,9 @@ class IpcHostSpy final : public Host {
 
   /** @brief Configured nested last-error diagnostic output. */
   OperationStatus last_error_;
+
+  /** @brief Configured image-mode compute output. */
+  ImageBuffer compute_image_;
 
   /** @brief Configured single-node inspection output. */
   NodeInspectionView inspected_node_;

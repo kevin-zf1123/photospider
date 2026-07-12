@@ -386,7 +386,7 @@ Method group 与当前 wire availability：
 | inspect | `inspect.graph`, `inspect.node`, `inspect.dependency_tree`, `inspect.node_ids`, `inspect.ending_nodes`, `inspect.roi_forward`, `inspect.roi_backward`, `inspect.dirty_region`, `inspect.compute_planning`, `inspect.recent_compute_planning`, `inspect.traversal_orders`, `inspect.traversal_details`, `inspect.trees_containing_node` | 已通过 copied Host value 实现。Full-value collection 使用 stable bounded cursor page；node/ROI/dirty/current-planning value 保持 indivisible direct result。Host order 与 duplicate 均保留。 |
 | dirty | `dirty.begin`, `dirty.update`, `dirty.end` | 已通过一次匹配的 Host lifecycle mutation 实现，并返回 copied dirty-region snapshot；完整 compact response size 会在 result-DOM 分配前完成 preflight。 |
 | cache | `cache.clear_all`, `cache.clear_drive`, `cache.clear_memory`, `cache.cache_all_nodes`, `cache.free_transient`, `cache.synchronize_disk` | 已作为 status-only Host call 实现；result 不包含 backend cache handle 或 path。 |
-| compute | `compute.timing`, `compute.last_io_time`, `compute.last_error` | Diagnostic route 已实现；timing 会在 result-DOM 分配前对 aggregate compact response size 做 preflight，last error 是 successful envelope 中的 nested `OperationStatus` data。Wire 不暴露 compute-job method；private joined FIFO registry 与 protected OutputStore 仍由 router lifecycle 拥有。 |
+| compute | `compute.submit`, `compute.status`, `compute.result`, `compute.release`, `compute.timing`, `compute.last_io_time`, `compute.last_error` | Polling job 与 diagnostic 已路由。Submit/status/result 使用 stable `{compute_id,session_id,state,cancellable,status,output}` value；terminal release 原子返回 `{compute_id,released:true}`。当前 output field 始终为 null。Task 3.3 不解释、也不使用 `delivery_id`；即使提供该字段，也会把它当作未知的 forward-compatible field 忽略。Task 3.4 才会为该字段赋予 lease-aware semantics。Timing 会对 aggregate compact response size 做 preflight；last error 是 nested diagnostic data。 |
 | scheduler | scheduler control 与 trace name | 不路由、也不广告 scheduler method。 |
 | plugins | operation-plugin control 与 view | 不路由、也不广告 plugin method；process ownership 仍属于 Host。 |
 | events | bounded compute-event drain | 不路由、也不广告 event method。 |
@@ -401,8 +401,9 @@ Method group 与当前 wire availability：
 - Private compute registry 保留 move-only OutputStore ownership；optional lease-aware release、
   eviction、TTL expiry 或 shutdown 时，其 exact-once cleanup 会在 registry mutex 外执行。
   Private result access 成功后，一个 stable delivery id 最多保护一个会被刷新为 60 秒的 lease。
-- Wire surface 不暴露 image result、output artifact、delivery identity、lease、cache path 或
-  caller-selected result path。
+- Wire surface 接受 `result_mode: image`，但本切片会让 stable nullable `output` field 返回
+  null，并且不暴露 output artifact、delivery identity、lease、cache path 或 caller-selected
+  result path。
 
 Collection snapshot 规则：
 

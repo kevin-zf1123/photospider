@@ -32,7 +32,8 @@ Forcing IPC on for any other CMake system name fails configuration.
 7. `inspect.node`
 8. `inspect.dependency_tree`
 
-The request router also accepts these 27 Host-backed typed methods:
+The request router also accepts these 31 additional daemon-routed typed
+methods:
 
 1. `cache.cache_all_nodes`
 2. `cache.clear_all`
@@ -42,34 +43,46 @@ The request router also accepts these 27 Host-backed typed methods:
 6. `cache.synchronize_disk`
 7. `compute.last_error`
 8. `compute.last_io_time`
-9. `compute.timing`
-10. `dirty.begin`
-11. `dirty.end`
-12. `dirty.update`
-13. `graph.clear`
-14. `graph.node_yaml.get`
-15. `graph.node_yaml.set`
-16. `graph.reload`
-17. `graph.save`
-18. `inspect.ending_nodes`
-19. `inspect.node_ids`
-20. `inspect.roi_backward`
-21. `inspect.roi_forward`
-22. `inspect.compute_planning`
-23. `inspect.dirty_region`
-24. `inspect.recent_compute_planning`
-25. `inspect.traversal_details`
-26. `inspect.traversal_orders`
-27. `inspect.trees_containing_node`
+9. `compute.release`
+10. `compute.result`
+11. `compute.status`
+12. `compute.submit`
+13. `compute.timing`
+14. `dirty.begin`
+15. `dirty.end`
+16. `dirty.update`
+17. `graph.clear`
+18. `graph.node_yaml.get`
+19. `graph.node_yaml.set`
+20. `graph.reload`
+21. `graph.save`
+22. `inspect.ending_nodes`
+23. `inspect.node_ids`
+24. `inspect.roi_backward`
+25. `inspect.roi_forward`
+26. `inspect.compute_planning`
+27. `inspect.dirty_region`
+28. `inspect.recent_compute_planning`
+29. `inspect.traversal_details`
+30. `inspect.traversal_orders`
+31. `inspect.trees_containing_node`
 
 The installed typed `ps::ipc::Client` exposes calls only for the eight-name
-metadata subset and has no public raw-JSON escape hatch. The 27 additional
-schemas are daemon request-router behavior.
+metadata subset and has no public raw-JSON escape hatch. The 31 additional
+schemas are daemon request-router behavior. Of those methods,
+`compute.status`, `compute.result`, and `compute.release` operate only on the
+daemon job registry. `compute.submit` admits a registry job whose worker later
+performs exactly one matching Host compute call. The other 27 methods route
+their direct or first-page request through matching Host operations; a stable
+collection continuation reads only its frozen snapshot registry record.
 
-Version 1 exposes no compute-job submission/polling, cancellation, image
-result, scheduler/plugin/event route, `daemon.shutdown`, TCP, Windows named
-pipe, or `graph_cli --connect`. The existing `graph_cli` continues to create an
-embedded Host and keeps its local command semantics.
+Version 1 now exposes daemon-owned compute-job submission, polling, terminal
+result, and release at the router boundary. The current image-mode job keeps
+its output artifact private and returns nullable `output` as JSON null; output
+metadata and delivery leases are not yet routed. Version 1 exposes no compute
+cancellation, scheduler/plugin/event route, `daemon.shutdown`, TCP, Windows
+named pipe, or `graph_cli --connect`. The existing `graph_cli` continues to
+create an embedded Host and keeps its local command semantics.
 
 ## Transport and Frame
 
@@ -442,14 +455,43 @@ node id, unknown returned enum, or invalid returned UTF-8 is a daemon
 second Host invocation. Resource exhaustion remains exceptional and is not
 rewritten into a status.
 
-## Private Compute Lifecycle
+## Compute Job Lifecycle
 
-The metadata method subset exposes no compute-job submit, status, result, or
-release method. The request router accepts only the timing, last-IO, and
-last-error compute diagnostics described above. The server also owns the
-private lifecycle boundary used by compute execution: one explicitly started,
-joinable `ComputeRequestRegistry` worker and one shared session-admission gate.
-This infrastructure is not a second public Host or wire API.
+The request router exposes `compute.submit`, `compute.status`,
+`compute.result`, and `compute.release` over the daemon-owned lifecycle. The
+installed direct Client does not yet wrap these methods and exposes no raw JSON
+call; that public typed API is a later slice. The server owns one explicitly
+started, joinable `ComputeRequestRegistry` worker and one shared
+session-admission gate. This infrastructure remains private implementation of
+the typed wire methods rather than a second public Host.
+
+`compute.submit` requires `session_id`, nonnegative `node_id`, and
+`result_mode` equal to `status` or `image`. It accepts the existing Host request
+as nested values:
+
+```json
+{
+  "session_id": "32-lowercase-hex",
+  "node_id": 37,
+  "cache": {
+    "precision": "float16",
+    "force_recache": true,
+    "disable_disk_cache": true,
+    "nosave": true
+  },
+  "execution": {"parallel": true, "quiet": true},
+  "telemetry": {"enable_timing": true},
+  "intent": "real_time_update",
+  "dirty_roi": {"x": -4, "y": 5, "width": 6, "height": 7},
+  "result_mode": "status"
+}
+```
+
+The three nested option objects and their known members are optional and retain
+the public `HostComputeRequest` defaults when absent. `intent` and `dirty_roi`
+may be absent or JSON null. Every present known value is type-, range-, UTF-8-,
+and byte-bound-checked before session lookup or registry admission; unknown
+members are ignored for forward compatibility.
 
 Before a queue commit, submission admits the active session, enforces a global
 maximum of 64 queued/running records, validates and collision-checks a
@@ -461,28 +503,57 @@ mode, and publishes exactly one immutable `succeeded` or `failed` terminal
 status. Host calls use the same daemon Host mutex; image publication occurs
 after that callback releases the Host mutex.
 
+Submit, status, and result use one stable result schema:
+
+```json
+{
+  "compute_id": "32-lowercase-hex",
+  "session_id": "32-lowercase-hex",
+  "state": "queued|running|succeeded|failed",
+  "cancellable": false,
+  "status": null,
+  "output": null
+}
+```
+
+`status` is null while queued/running and is the canonical exact nested
+`OperationStatus` after terminal publication. `output` is always null in this
+slice, including image-mode success; private output references and filesystem
+identity never enter JSON. Successful terminal release has the separate stable
+acknowledgement `{"compute_id":"...","released":true}`. Task 3.3 does not
+interpret or use `delivery_id`; when supplied, it is ignored as an unknown
+forward-compatible field. Task 3.4 assigns that field lease-aware semantics.
+
 Status reads are non-destructive and do not acquire the Host mutex. Result and
-release accept terminal records only. A well-formed absent, expired, released,
-or evicted id maps to daemon `job_not_found`; a queued/running result or release
-maps to daemon `job_not_ready`. Host failures remain exact nested terminal
-statuses. Any exception after queue commit, including allocation or output
-publication failure, uses a fallback daemon `internal_error` status allocated
-before commit, so the worker continues to later jobs.
+release accept terminal records only, and release checks/removes the record in
+one registry operation. A well-formed absent, expired, released, or evicted id
+maps to daemon `job_not_found`; a queued/running result or release maps to
+daemon `job_not_ready`. Host failures remain exact nested terminal statuses.
+Every accepted Host failure, invalid image, output quota denial, or publication
+failure remains an immutable failed job in successful status/result envelopes;
+quota denial is nested daemon `artifact_limit_exceeded`, while unexpected
+worker/publication failure is nested daemon `internal_error`. Only malformed
+params, submit/admission failure, absent jobs, and premature result/release are
+top-level failures in this slice. Any exception after queue commit uses a
+fallback `internal_error` allocated before commit, so the worker continues to
+later jobs.
 
 At most 256 terminal records are retained. Publishing another terminal record
 evicts only the oldest terminal publication; active work is never evicted.
 Terminal age starts at complete publication, uses a monotonic injected clock,
 expires at 15 minutes, and is not refreshed by lookup. Output ownership is a
 private move-only reference with optional lease-aware exact-once cleanup outside
-the registry mutex. It is backed by the private protected store described below;
-neither its result metadata nor its release arguments are part of the current
-method inventory.
+the registry mutex. It is backed by the private protected store described
+below. Current wire results deliberately hide its metadata, and current release
+removes job ownership without interpreting `delivery_id`; a supplied field is
+ignored until task 3.4 assigns its lease-aware semantics.
 
 ## Private Protected Output Store
 
-The wire surface exposes no image result or delivery operation. Behind the
-router, one private `OutputStore` is bound to the joined compute publisher and
-socket lifecycle. It starts after the Unix socket and persistent lifecycle
+The wire surface accepts image-mode compute but exposes no output metadata or
+delivery operation yet: its stable nullable `output` field remains null. Behind
+the router, one private `OutputStore` is bound to the joined compute publisher
+and socket lifecycle. It starts after the Unix socket and persistent lifecycle
 lock are owned but before session, compute, or client admission. A startup
 failure therefore admits no request.
 

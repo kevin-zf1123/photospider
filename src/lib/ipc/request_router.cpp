@@ -186,6 +186,245 @@ bool read_session_id(const Json& params, IpcSessionId* session_id) {
 }
 
 /**
+ * @brief Decodes one required nonnegative public node id.
+ *
+ * @param params Typed method params object.
+ * @param field Required integer field name.
+ * @param node Receives the exact public node id after validation.
+ * @return True when the field is an exact `int` value greater than or equal to
+ *         zero; false without modifying `node` otherwise.
+ * @throws std::bad_alloc if JSON object lookup requires temporary storage and
+ *         allocation fails.
+ */
+bool read_node_id(const Json& params, const char* field, NodeId* node) {
+  if (node == nullptr || !params.contains(field)) {
+    return false;
+  }
+  int decoded = 0;
+  if (!decode_integer(params[field], &decoded) || decoded < 0) {
+    return false;
+  }
+  node->value = decoded;
+  return true;
+}
+
+/**
+ * @brief Matches the four daemon-owned polling compute lifecycle methods.
+ * @param method Exact decoded request method.
+ * @return True only for submit, status, result, or release.
+ * @throws Nothing.
+ * @note Capability advertisement remains owned by the separate exact version
+ *       table and is not changed by this private dispatch matcher.
+ */
+bool is_compute_method(std::string_view method) noexcept {
+  static constexpr std::array<std::string_view, 4> kMethods = {
+      "compute.release", "compute.result", "compute.status", "compute.submit"};
+  return std::find(kMethods.begin(), kMethods.end(), method) != kMethods.end();
+}
+
+/**
+ * @brief Decodes one required opaque compute-job identity.
+ * @param params Typed method params object.
+ * @param compute_id Receives the validated daemon job identity.
+ * @return True only when `compute_id` has the exact 32-lowercase-hex shape.
+ * @throws std::bad_alloc if copied identity storage cannot be allocated.
+ */
+bool read_compute_id(const Json& params, ComputeRequestId* compute_id) {
+  if (compute_id == nullptr ||
+      !params.value("compute_id", Json()).is_string()) {
+    return false;
+  }
+  std::string decoded;
+  if (!decode_opaque_id(params["compute_id"], &decoded)) {
+    return false;
+  }
+  compute_id->value = std::move(decoded);
+  return true;
+}
+
+/**
+ * @brief Decodes one optional object of boolean compute controls.
+ * @param params Submit params containing the optional object.
+ * @param object_name Known object member name.
+ * @param fields Known boolean field names and destination pointers.
+ * @return True when the object is absent or every present known field is
+ *         boolean; false without accessing Host or session state otherwise.
+ * @throws std::bad_alloc if JSON object lookup or diagnostics allocate.
+ * @note Unknown members are ignored for forward compatibility. Destinations
+ *       retain their public default values when known members are absent.
+ */
+bool read_compute_boolean_object(
+    const Json& params, const char* object_name,
+    const std::vector<std::pair<const char*, bool*>>& fields) {
+  if (!params.contains(object_name)) {
+    return true;
+  }
+  const Json& object = params[object_name];
+  if (!object.is_object()) {
+    return false;
+  }
+  for (const auto& field : fields) {
+    if (!object.contains(field.first)) {
+      continue;
+    }
+    if (!object[field.first].is_boolean()) {
+      return false;
+    }
+    *field.second = object[field.first].get<bool>();
+  }
+  return true;
+}
+
+/**
+ * @brief Decodes the complete final compute-submit request schema.
+ *
+ * @param params Structurally valid submit params object.
+ * @param session_id Receives the opaque session identity.
+ * @param request Receives the public Host compute value with its private
+ *        session left empty for registry admission to overwrite.
+ * @param mode Receives the exact status or image executor selection.
+ * @param message Receives one stable validation diagnostic on failure.
+ * @return True only after every known submit member validates completely.
+ * @throws std::bad_alloc if owned request strings or diagnostics allocate.
+ * @note Optional cache/execution/telemetry objects preserve public defaults;
+ *       optional intent/dirty ROI accept absence or JSON null. Unknown fields
+ *       at every object level are forward-compatible. No registry or Host
+ *       access occurs in this helper.
+ */
+bool decode_compute_submit(const Json& params, IpcSessionId* session_id,
+                           HostComputeRequest* request, ComputeResultMode* mode,
+                           std::string* message) {
+  if (session_id == nullptr || request == nullptr || mode == nullptr ||
+      message == nullptr || !read_session_id(params, session_id) ||
+      !read_node_id(params, "node_id", &request->node)) {
+    if (message != nullptr) {
+      *message =
+          "compute.submit requires valid session_id and nonnegative "
+          "node_id";
+    }
+    return false;
+  }
+
+  std::string result_mode;
+  if (!params.contains("result_mode") ||
+      !decode_bounded_string(params["result_mode"], kShortTextMaxBytes,
+                             &result_mode) ||
+      (result_mode != "status" && result_mode != "image")) {
+    *message = "compute.submit result_mode must be status or image";
+    return false;
+  }
+  *mode = result_mode == "status" ? ComputeResultMode::Status
+                                  : ComputeResultMode::Image;
+
+  if (params.contains("cache")) {
+    const Json& cache = params["cache"];
+    if (!cache.is_object()) {
+      *message = "compute.submit cache must be an object";
+      return false;
+    }
+    if (cache.contains("precision") &&
+        !decode_bounded_string(cache["precision"], kShortTextMaxBytes,
+                               &request->cache.precision)) {
+      *message = "compute.submit cache precision must be bounded UTF-8";
+      return false;
+    }
+  }
+  if (!read_compute_boolean_object(
+          params, "cache",
+          {{"force_recache", &request->cache.force_recache},
+           {"disable_disk_cache", &request->cache.disable_disk_cache},
+           {"nosave", &request->cache.nosave}})) {
+    *message = "compute.submit cache controls must be boolean";
+    return false;
+  }
+  if (!read_compute_boolean_object(params, "execution",
+                                   {{"parallel", &request->execution.parallel},
+                                    {"quiet", &request->execution.quiet}})) {
+    *message = "compute.submit execution controls must be boolean";
+    return false;
+  }
+  if (!read_compute_boolean_object(
+          params, "telemetry",
+          {{"enable_timing", &request->telemetry.enable_timing}})) {
+    *message = "compute.submit telemetry controls must be boolean";
+    return false;
+  }
+
+  if (params.contains("intent") && !params["intent"].is_null()) {
+    ComputeIntent intent = ComputeIntent::GlobalHighPrecision;
+    if (!decode_enum(params["intent"], &intent)) {
+      *message = "compute.submit intent must be null or a valid enum";
+      return false;
+    }
+    request->intent = intent;
+  }
+  if (params.contains("dirty_roi") && !params["dirty_roi"].is_null()) {
+    PixelRect dirty_roi;
+    if (!decode_pixel_rect(params["dirty_roi"], &dirty_roi)) {
+      *message = "compute.submit dirty_roi must be null or an exact ROI";
+      return false;
+    }
+    request->dirty_roi = dirty_roi;
+  }
+  return true;
+}
+
+/**
+ * @brief Returns the stable lowercase lifecycle label for one registry state.
+ * @param state Private forward-only job state.
+ * @return Exact version 1 state label.
+ * @throws std::invalid_argument if an invalid future enum value is observed.
+ */
+std::string_view compute_state_label(ComputeRequestState state) {
+  switch (state) {
+    case ComputeRequestState::Queued:
+      return "queued";
+    case ComputeRequestState::Running:
+      return "running";
+    case ComputeRequestState::Succeeded:
+      return "succeeded";
+    case ComputeRequestState::Failed:
+      return "failed";
+  }
+  throw std::invalid_argument("compute registry returned an invalid state");
+}
+
+/**
+ * @brief Encodes one immutable polling-job snapshot using final stable fields.
+ * @param snapshot Complete registry snapshot at one lookup instant.
+ * @return Owned JSON value containing nullable nested status and output.
+ * @throws std::bad_alloc if JSON or copied status storage cannot allocate.
+ * @throws std::invalid_argument for an invalid state or noncanonical terminal
+ *         snapshot.
+ * @note `output` intentionally remains null at the current routing boundary,
+ *       even when private output ownership exists. Protected result-time
+ *       metadata delivery is a separate boundary; no private output reference
+ *       is serialized here.
+ */
+Json encode_compute_snapshot(const ComputeRequestSnapshot& snapshot) {
+  const bool terminal = snapshot.state == ComputeRequestState::Succeeded ||
+                        snapshot.state == ComputeRequestState::Failed;
+  if (terminal != snapshot.terminal_status.has_value() ||
+      (snapshot.state == ComputeRequestState::Succeeded &&
+       !snapshot.terminal_status->ok) ||
+      (snapshot.state == ComputeRequestState::Failed &&
+       snapshot.terminal_status->ok)) {
+    throw std::invalid_argument(
+        "compute registry returned an inconsistent terminal snapshot");
+  }
+  Json status = nullptr;
+  if (snapshot.terminal_status) {
+    status = encode_operation_status(*snapshot.terminal_status);
+  }
+  return Json{{"compute_id", snapshot.compute_id.value},
+              {"session_id", snapshot.session_id.value},
+              {"state", compute_state_label(snapshot.state)},
+              {"cancellable", snapshot.cancellable},
+              {"status", std::move(status)},
+              {"output", nullptr}};
+}
+
+/**
  * @brief Matches the session-control methods implemented by one route family.
  *
  * @param method Exact decoded request method.
@@ -218,29 +457,6 @@ bool is_session_control_method(std::string_view method) noexcept {
       "inspect.roi_forward",
   };
   return std::find(kMethods.begin(), kMethods.end(), method) != kMethods.end();
-}
-
-/**
- * @brief Decodes one required nonnegative public node id.
- *
- * @param params Typed method params object.
- * @param field Required integer field name.
- * @param node Receives the exact public node id after validation.
- * @return True when the field is an exact `int` value greater than or equal to
- *         zero; false without modifying `node` otherwise.
- * @throws std::bad_alloc if JSON object lookup requires temporary storage and
- *         allocation fails.
- */
-bool read_node_id(const Json& params, const char* field, NodeId* node) {
-  if (node == nullptr || !params.contains(field)) {
-    return false;
-  }
-  int decoded = 0;
-  if (!decode_integer(params[field], &decoded) || decoded < 0) {
-    return false;
-  }
-  node->value = decoded;
-  return true;
 }
 
 /**
@@ -2001,6 +2217,67 @@ std::optional<std::string> RequestRouter::route_session_control_method(
                          "session-control dispatch invariant failed"));
 }
 
+/** @copydoc RequestRouter::route_compute_method */
+std::optional<std::string> RequestRouter::route_compute_method(
+    const std::string& id, const std::string& method,
+    const RoutedParams& routed_params) {
+  if (!is_compute_method(method)) {
+    return std::nullopt;
+  }
+  const Json& params = routed_params.value;
+
+  if (method == "compute.submit") {
+    IpcSessionId session_id;
+    HostComputeRequest request;
+    ComputeResultMode mode = ComputeResultMode::Status;
+    std::string message;
+    if (!decode_compute_submit(params, &session_id, &request, &mode,
+                               &message)) {
+      return bounded_error(id, invalid_params(std::move(message)));
+    }
+    IpcResult<ComputeRequestSnapshot> submitted =
+        compute_registry_.submit(session_id, std::move(request), mode);
+    if (!submitted.status.ok) {
+      return bounded_error(id, submitted.status);
+    }
+    return encode_routed_value(
+        id, [&] { return encode_compute_snapshot(submitted.value); });
+  }
+
+  ComputeRequestId compute_id;
+  if (!read_compute_id(params, &compute_id)) {
+    return bounded_error(
+        id, invalid_params(method + " requires a valid compute_id"));
+  }
+
+  if (method == "compute.status") {
+    IpcResult<ComputeRequestSnapshot> status =
+        compute_registry_.status(compute_id);
+    if (!status.status.ok) {
+      return bounded_error(id, status.status);
+    }
+    return encode_routed_value(
+        id, [&] { return encode_compute_snapshot(status.value); });
+  }
+
+  if (method == "compute.result") {
+    IpcResult<ComputeRequestSnapshot> result =
+        compute_registry_.result(compute_id);
+    if (!result.status.ok) {
+      return bounded_error(id, result.status);
+    }
+    return encode_routed_value(
+        id, [&] { return encode_compute_snapshot(result.value); });
+  }
+
+  OperationStatus released = compute_registry_.release(compute_id);
+  if (!released.ok) {
+    return bounded_error(id, released);
+  }
+  return encode_success_response(
+      id, Json{{"compute_id", compute_id.value}, {"released", true}});
+}
+
 /** @copydoc RequestRouter::route */
 std::string RequestRouter::route(const std::string& payload) {
   const JsonParseResult parsed = parse_json(payload);
@@ -2163,6 +2440,11 @@ std::string RequestRouter::route(const std::string& payload) {
         return bounded_error(id, graph_status(closed.status));
       }
       return encode_success_response(id, Json{{"closed", true}});
+    }
+
+    if (std::optional<std::string> routed =
+            route_compute_method(id, method, RoutedParams{params})) {
+      return std::move(*routed);
     }
 
     if (std::optional<std::string> routed =
