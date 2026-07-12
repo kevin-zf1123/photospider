@@ -65,19 +65,27 @@ struct ComputeRequestId {
 };
 
 /**
- * @brief Move-only ownership of one abstract published output.
+ * @brief Move-only ownership of one private OutputStore job reference.
  *
- * The registry needs only a stable private reference and exact-once cleanup.
- * OutputStore supplies the filesystem-backed implementation in its own slice.
+ * The registry retains only a stable private output id and exact-once cleanup;
+ * filesystem metadata and delivery leases remain owned by OutputStore.
  *
  * @throws std::bad_alloc when reference or callback storage is constructed.
- * @note Cleanup executes outside the compute-registry mutex on release,
- *       eviction, TTL expiry, failed publication cleanup, or shutdown.
+ * @note Cleanup executes outside the compute-registry mutex on optional
+ *       lease-aware release, eviction, TTL expiry, failed publication cleanup,
+ *       or shutdown.
  */
 class ComputeOutputOwnership {
  public:
-  /** @brief Cleanup callback for one successfully published output. */
-  using Cleanup = std::function<void()>;
+  /**
+   * @brief Cleanup callback for one successfully published output.
+   *
+   * @param delivery_id Optional stable lease identity to release atomically
+   *        with job ownership.
+   * @throws Nothing; implementations must contain filesystem failures.
+   */
+  using Cleanup =
+      std::function<void(const std::optional<std::string>& delivery_id)>;
 
   /**
    * @brief Creates inactive ownership for a successful empty image.
@@ -144,9 +152,12 @@ class ComputeOutputOwnership {
 
   /**
    * @brief Runs pending cleanup and makes this value inactive.
+   * @param delivery_id Optional matching delivery lease to release in the same
+   *        output-store critical section as job ownership.
    * @throws Nothing; callback failures are contained.
    */
-  void reset() noexcept;
+  void reset(
+      const std::optional<std::string>& delivery_id = std::nullopt) noexcept;
 
  private:
   /** @brief Stable output reference, empty while inactive. */
@@ -254,7 +265,8 @@ class ComputeRequestRegistry {
       std::function<Result<ImageBuffer>(const HostComputeRequest&)>;
 
   /** @brief Post-Host image validation/materialization callback. */
-  using OutputPublisher = std::function<ComputeOutputPublication(ImageBuffer)>;
+  using OutputPublisher = std::function<ComputeOutputPublication(
+      const ComputeRequestId&, ImageBuffer)>;
 
   /**
    * @brief Creates a stopped registry with injected lifecycle dependencies.
@@ -356,11 +368,15 @@ class ComputeRequestRegistry {
   /**
    * @brief Removes one terminal record and its output ownership.
    * @param compute_id Well-formed opaque compute identity.
+   * @param delivery_id Optional stable output lease identity released with
+   *        output job ownership when it matches.
    * @return Success, `job_not_ready`, or `job_not_found`.
    * @throws std::bad_alloc if failure diagnostic construction cannot allocate;
    *         output cleanup callback failures are contained.
    */
-  OperationStatus release(const ComputeRequestId& compute_id);
+  OperationStatus release(
+      const ComputeRequestId& compute_id,
+      const std::optional<std::string>& delivery_id = std::nullopt);
 
   /**
    * @brief Removes all records whose terminal age reached the injected TTL.

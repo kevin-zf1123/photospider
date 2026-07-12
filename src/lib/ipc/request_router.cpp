@@ -198,26 +198,6 @@ void close_graph_best_effort(Host& host,
 }
 
 /**
- * @brief Handles image publication until the dedicated OutputStore is bound.
- *
- * @param image Exact image returned by the single matching Host call.
- * @return Success without ownership for an empty image; otherwise a nested
- *         daemon internal failure retained by the accepted job.
- * @throws std::bad_alloc if diagnostic storage cannot be allocated.
- * @note No current version-one route can submit jobs. Nonempty output remains
- *       a contained nested failure unless protected output ownership is bound.
- */
-ComputeOutputPublication publish_without_output_store(ImageBuffer image) {
-  if (image.data == nullptr) {
-    return {ok_status(), {}};
-  }
-  return {
-      failure_status(OperationErrorDomain::Daemon, kInternalErrorCode,
-                     "internal_error", "compute output store is not available"),
-      {}};
-}
-
-/**
  * @brief Dispatches one structurally valid request to daemon metadata methods.
  *
  * @param method Exact method name.
@@ -265,8 +245,11 @@ RequestRouter::RequestRouter(Host& host, std::string service_version)
             Result<ImageBuffer> result = host_.compute_and_get_image(request);
             result.status = graph_status(result.status);
             return result;
-          },                                         // NOLINT
-          publish_without_output_store),             // NOLINT
+          },                                          // NOLINT
+          [this](const ComputeRequestId& compute_id,  // NOLINT
+                 ImageBuffer image) {
+            return output_store_.publish(compute_id, std::move(image));
+          }),                                        // NOLINT
       service_version_(std::move(service_version)),  // NOLINT
       server_instance_id_(          // NOLINT(whitespace/indent_namespace)
           generate_opaque_id()) {}  // NOLINT
@@ -556,11 +539,25 @@ std::string RequestRouter::route(const std::string& payload) {
 }
 
 /** @copydoc RequestRouter::start_runtime */
-OperationStatus RequestRouter::start_runtime() {
+OperationStatus RequestRouter::start_runtime(const std::string& socket_path,
+                                             int lifecycle_lock_fd) {
   registry_.stop_admission();
-  OperationStatus started = compute_registry_.start();
+  OperationStatus output_started =
+      output_store_.start(socket_path, server_instance_id_, lifecycle_lock_fd);
+  if (!output_started.ok) {
+    return output_started;
+  }
+  OperationStatus started;
+  try {
+    started = compute_registry_.start();
+  } catch (...) {
+    output_store_.shutdown();
+    throw;
+  }
   if (started.ok) {
     registry_.start_admission();
+  } else {
+    output_store_.shutdown();
   }
   return started;
 }
@@ -569,11 +566,13 @@ OperationStatus RequestRouter::start_runtime() {
 void RequestRouter::begin_shutdown() noexcept {
   registry_.stop_admission();
   compute_registry_.stop_admission();
+  output_store_.stop_leases();
 }
 
 /** @copydoc RequestRouter::finish_shutdown */
 void RequestRouter::finish_shutdown() noexcept {
   compute_registry_.shutdown();
+  output_store_.shutdown();
   try {
     const auto sessions = registry_.active_sessions();
     for (const auto& session : sessions) {

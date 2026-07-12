@@ -440,7 +440,7 @@ Method groups and current wire availability:
 | daemon | `daemon.ping`, `daemon.version` | Implemented without Host locking. No `daemon.shutdown`. |
 | graph | `graph.load`, `graph.close`, `graph.list` | Implemented with preserved Host names plus daemon-generated opaque ids. |
 | inspect | `inspect.graph`, `inspect.node`, `inspect.dependency_tree` | Implemented through copied Host snapshots. |
-| compute | polling jobs and image result transport | No compute method is advertised in the current eight-method wire inventory. The private joined FIFO registry, bounded active/terminal retention, exact nested status, session admission, TTL, and shutdown behavior are implemented behind the router. |
+| compute | polling jobs and image result transport | No compute method is advertised in the current eight-method wire inventory. The private joined FIFO registry and socket-specific protected OutputStore are implemented behind the router, including bounded job/artifact retention, exact nested status, delivery leases, session admission, TTL, and joined shutdown behavior. |
 | scheduler | `scheduler.types`, `scheduler.get`, `scheduler.set`, `scheduler.trace` | Mirrors current CLI scheduler features. |
 | plugins | `plugins.scan`, `plugins.load`, `plugins.unload_all`, `plugins.list` | The unique process `PluginManager` retains operation-plugin handles; Hosts expose the control surface without owning a second lifetime map. |
 | events | `events.next`, `events.drain` | Polling first; subscription later. |
@@ -448,9 +448,15 @@ Method groups and current wire availability:
 Image payload rule:
 
 - Image bytes do not enter JSON.
-- The private compute registry can retain one abstract move-only output
-  reference whose exact-once cleanup runs outside the registry mutex on
-  release, eviction, TTL expiry, or shutdown.
+- The private OutputStore materializes validated CPU images as exact tight-row
+  mode-`0600` artifacts below a same-owner mode-`0700`
+  `<socket>.outputs/instance-<server_instance_id>` directory. Publication is
+  quota-bounded and atomic; live access and cleanup revalidate filesystem
+  identity without following symlinks.
+- The private compute registry retains move-only OutputStore ownership whose
+  exact-once cleanup runs outside the registry mutex on optional lease-aware
+  release, eviction, TTL expiry, or shutdown. A stable delivery id protects at
+  most one refreshed 60-second lease after successful private result access.
 - The current eight-method wire inventory exposes no image result, output
   artifact, delivery identity, lease, cache path, or caller-selected result
   path.
@@ -473,8 +479,9 @@ Concurrency rule:
   and invokes exactly one matching synchronous Host compute call.
 - Session close marks the row closing before it waits admitted Host calls and
   queued/running jobs; only then may it acquire the Host mutex.
-- Process shutdown stops admission, drains jobs, joins compute, releases
-  terminal output ownership, and only then closes Host sessions.
+- Process shutdown stops session/compute admission and new delivery leases,
+  drains and joins compute, releases terminal job ownership, waits active
+  leases to release or expire, and only then closes Host sessions.
 
 ## Migration State and Remaining Order
 

@@ -381,7 +381,7 @@ Method group 与当前 wire availability：
 | daemon | `daemon.ping`, `daemon.version` | 已实现，且不获取 Host lock；没有 `daemon.shutdown`。 |
 | graph | `graph.load`, `graph.close`, `graph.list` | 已实现，保留 Host name 并另用 daemon-generated opaque id。 |
 | inspect | `inspect.graph`, `inspect.node`, `inspect.dependency_tree` | 已通过 copied Host snapshot 实现。 |
-| compute | polling job 与 image result transport | 当前八方法 wire inventory 不广告 compute method。Router 背后已经实现 private joined FIFO registry、bounded active/terminal retention、精确 nested status、session admission、TTL 与 shutdown 行为。 |
+| compute | polling job 与 image result transport | 当前八方法 wire inventory 不广告 compute method。Router 背后已经实现 private joined FIFO registry 与 socket-specific protected OutputStore，包括 bounded job/artifact retention、精确 nested status、delivery lease、session admission、TTL 与 joined shutdown 行为。 |
 | scheduler | `scheduler.types`, `scheduler.get`, `scheduler.set`, `scheduler.trace` | 映射当前 CLI scheduler 功能。 |
 | plugins | `plugins.scan`, `plugins.load`, `plugins.unload_all`, `plugins.list` | 唯一的进程级 `PluginManager` 保留 operation-plugin handle；Host 只暴露控制面，不拥有第二套 lifetime map。 |
 | events | `events.next`, `events.drain` | 先轮询，后订阅。 |
@@ -389,8 +389,13 @@ Method group 与当前 wire availability：
 图像 payload 规则：
 
 - Image byte 不进入 JSON。
-- Private compute registry 可以保留一个 abstract move-only output reference；release、eviction、
-  TTL expiry 或 shutdown 时，其 exact-once cleanup 会在 registry mutex 外执行。
+- Private OutputStore 会把通过验证的 CPU image materialize 为 exact tight-row mode-`0600`
+  artifact，存放在 same-owner mode-`0700`
+  `<socket>.outputs/instance-<server_instance_id>` directory 下。Publication 受 quota 限制且
+  atomic；live access 与 cleanup 会在不跟随 symlink 的前提下重新验证 filesystem identity。
+- Private compute registry 保留 move-only OutputStore ownership；optional lease-aware release、
+  eviction、TTL expiry 或 shutdown 时，其 exact-once cleanup 会在 registry mutex 外执行。
+  Private result access 成功后，一个 stable delivery id 最多保护一个会被刷新为 60 秒的 lease。
 - 当前八方法 wire inventory 不暴露 image result、output artifact、delivery identity、lease、
   cache path 或 caller-selected result path。
 
@@ -411,8 +416,8 @@ Method group 与当前 wire availability：
   Host compute call。
 - Session close 会先把 row 标记为 closing，再等待 admitted Host call 与 queued/running job；只有
   此后才可以获取 Host mutex。
-- Process shutdown 会停止 admission、drain job、join compute、释放 terminal output ownership，
-  最后才关闭 Host session。
+- Process shutdown 会停止 session/compute admission 与新 delivery lease，drain 并 join compute，
+  释放 terminal job ownership，等待 active lease 被释放或过期，最后才关闭 Host session。
 
 ## 迁移状态与剩余顺序
 
