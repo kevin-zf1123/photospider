@@ -19,6 +19,18 @@ The public client headers are `photospider/ipc/protocol.hpp`,
 owned values plus the complete Host factory and no JSON type, socket descriptor,
 `sockaddr_un`, backend model, runtime service, or mutable backend ownership. The
 client library does not link the `photospider` backend.
+An installed IPC-only consumer selects the component explicitly:
+
+```cmake
+find_package(Photospider CONFIG REQUIRED COMPONENTS ipc_client)
+target_link_libraries(app PRIVATE Photospider::photospider_ipc_client)
+```
+
+That component resolves only `Threads`. Omitting `COMPONENTS`, or requesting
+`COMPONENTS embedded`, preserves the embedded package behavior and resolves
+Threads, OpenCV, `yaml-cpp`, and the Apple Metal/Foundation frameworks when
+applicable. A required unknown component fails package discovery; a required
+`ipc_client` component also fails when the producer was built with IPC disabled.
 When IPC is disabled, neither its target nor its public headers are installed.
 Forcing IPC on for any other CMake system name fails configuration.
 
@@ -1205,16 +1217,23 @@ ctest --test-dir build --output-on-failure \
   -R '^(FrameCodec|ProtocolEnvelope|IntegerCodec|ProtocolErrors|ProtocolParams|ProtocolGraphLoad|ProtocolGraphClose|ProtocolOperationPlugins|HostRoutedGraphStateProtocolTest|StableInspectionPagingProtocolTest|InspectionJson|SessionRegistry|ComputeRequestRegistry|CollectionSnapshotRegistry|OutputStore|ComputeEventRing|SchedulerTraceRing|UnixSocketConnect|ClientLifecycle|ClientSurface|ClientCollectionAggregation|ClientJobValidation|ClientRetryPolicy|ClientResultValidation|IpcHost|IpcDaemon|IpcDaemonOperationPlugins|IpcDaemonSchedulers|IpcObservationFixtureDaemon|StaticProductConsumerSmoke|IpcDisabledInstallSmoke|PublicHeaderSelfContainment)'
 ```
 
-`StaticProductConsumerSmoke` verifies the installed backend plus a second
-client-only consumer that links only `Photospider::photospider_ipc_client`.
+`StaticProductConsumerSmoke` verifies the installed backend and an independently
+configured client-only project that explicitly requests `COMPONENTS ipc_client`,
+disables OpenCV/`yaml-cpp` package discovery, and links only
+`Photospider::photospider_ipc_client`.
 The latter executes safe Client/factory lifecycle behavior without a daemon,
-links all 55 typed Client calls and 53 Host virtual references, and requires an
+links exact unique inventories of all 55 typed Client calls and 53 Host virtual
+references, and requires an
 exact IPC archive/target/header export whose sole public link dependency is
-`Threads::Threads`; backend, JSON, server-internal, object, source-tree, and
-POSIX-private dependencies or headers fail the gate. `IpcDisabledInstallSmoke`
-verifies an IPC-disabled clean
+`Threads::Threads`. Its installed IPC-header gate positively allows only the
+current C++ standard-library include set and installed `photospider/` public
+includes, and separately rejects raw JSON, socket-address/descriptor,
+file-identity, and file-mapping declarations plus backend types. This is the
+precise tested public-header boundary, not an exhaustive classification of all
+possible POSIX spellings. `IpcDisabledInstallSmoke` verifies an IPC-disabled clean
 install has no IPC forwarder, header, target, archive, or daemon while the
-embedded consumer remains usable. Real-process tests have CTest timeouts and
+required `ipc_client` component is unavailable and the default embedded consumer
+remains usable. Real-process tests have CTest timeouts and
 bounded SIGTERM/SIGKILL/waitpid cleanup. `test_ipc_daemon` starts the product
 `photospiderd` for embedded-Host behavior and also starts the non-installed
 `ipc_output_fixture_daemon` as a separate process for deterministic image and

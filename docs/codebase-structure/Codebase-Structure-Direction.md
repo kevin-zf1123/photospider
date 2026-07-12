@@ -342,6 +342,12 @@ CMake rules:
   exported target, but public Host/core headers do not require OpenCV or
   `yaml-cpp` types. `${CMAKE_DL_LIBS}` adds the platform dynamic-loader library
   only where CMake requires one.
+- Package components are `embedded` and `ipc_client`. Omitting components uses
+  `embedded` and preserves the dependency behavior above. An explicit required
+  `ipc_client` component resolves only Threads; an optional `embedded`
+  component becomes not-found when its backend dependencies are unavailable
+  without invalidating a required IPC component. Unknown required components,
+  and required IPC from an IPC-disabled install, fail discovery.
 - On Apple, the static product carries system `Metal` and `Foundation` framework
   link flags for Objective-C++ runtime sources. Metal operation plugins and
   their `CoreImage`/`CoreVideo` dependencies remain optional runtime plugin
@@ -610,12 +616,17 @@ separate extension-boundary change.
    same-user regular type, exact mode, one link, device/inode/size, and tight
    layout, then creates a shared read-only mapping before matching lease-aware
    release. Its final owner unmaps and closes exactly once. The installed
-   package gate compiles every public header, then links an IPC-only external
-   consumer against the exported adapter archive. That consumer covers every
-   Client lifecycle symbol, all 55 typed Client calls, `create_ipc_host`, and
-   all 53 Host virtual references; the export admits only `Threads::Threads`
-   and rejects backend, JSON, server-internal, object, source-tree, or
-   POSIX-private leakage. Cancellation remains unavailable.
+   package gate compiles every public header, then independently configures an
+   IPC-only external consumer with `COMPONENTS ipc_client` and backend package
+   discovery disabled. That consumer covers every Client lifecycle symbol,
+   exact unique inventories of all 55 typed Client calls, `create_ipc_host`,
+   and all 53 Host virtual references; the export admits only
+   `Threads::Threads`. Its installed IPC-header gate positively permits only
+   the current C++ standard-library include set and installed `photospider/`
+   public includes, and explicitly rejects raw JSON, socket-address/descriptor,
+   file-identity, file-mapping, and backend declarations. This is a precise
+   tested boundary rather than an exhaustive POSIX vocabulary claim.
+   Cancellation remains unavailable.
 8. **Separate plugin-boundary work:** Tighten plugin SDK in issue #38.
    - Replace direct plugin dependency on full `Node` and global registry symbols
      with a narrow operation contract and host-provided registration table.

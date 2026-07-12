@@ -1596,7 +1596,11 @@ class DefaultPollingWaiter {
 
   /**
    * @brief Wakes all current deadline waits after stop publication.
+   * @return Nothing.
    * @throws std::system_error if mutex locking fails.
+   * @note The adapter may call this method concurrently with any number of
+   *       `wait_until` calls. The mutex orders notification with waiter setup;
+   *       each awakened worker rechecks its shared stop predicate.
    */
   void wake_all() {
     std::lock_guard<std::mutex> lock(mutex_);

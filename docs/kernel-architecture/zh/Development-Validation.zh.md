@@ -40,18 +40,23 @@ consumer build 目录。它在内存中检查观察到的 producer/install/consu
 并在运行后丢弃；仓库不会为该测试保留逐次运行报告。
 
 IPC enabled 时，package smoke 会构建并安装 `photospider`、
-`photospider_ipc_client` 与 `photospiderd`。它会构建一个使用
-`Photospider::photospider` 的 external consumer，以及另一个只链接
-`Photospider::photospider_ipc_client`、构造 non-inline client、且不继承 backend 或 JSON
-implementation target 的 consumer。该 IPC-only consumer 会 include 已安装的 protocol、Client
+`photospider_ipc_client` 与 `photospiderd`。它会独立 configure 一个默认使用
+`Photospider::photospider` 的 embedded consumer，以及一个请求 `COMPONENTS ipc_client`、禁用
+OpenCV/`yaml-cpp` discovery、且只链接 `Photospider::photospider_ipc_client` 的 IPC-only project。
+后者因此只解析 Threads，不继承 backend 或 JSON implementation target。该 IPC-only consumer
+会 include 已安装的 protocol、Client
 与 Host-adapter header，在不连接 daemon 的情况下构造 `create_ipc_host()`，执行全部安全 public
-Client lifecycle symbol，并链接一个仅用于引用的分支，覆盖全部 55 个 typed Client call 与全部
+Client lifecycle symbol，并链接一个仅用于引用的分支，以精确且唯一的 inventory 覆盖全部 55 个 typed Client call 与全部
 53 个非析构 Host virtual。Package 检查还要求 IPC archive 与精确的三个 header surface，导出的
-IPC link interface 只允许 `Threads::Threads`，并拒绝 backend、object、server-internal、JSON、
-source-tree 与 POSIX-private 泄漏。长期 `IpcDisabledInstallSmoke` 会用
+IPC link interface 只允许 `Threads::Threads`；header 正向只允许当前 C++ standard-library include
+与已安装的 `photospider/` public include，并拒绝 raw JSON、socket address/descriptor、file
+identity、file mapping 与 backend declaration。这是门禁实际保证的精确边界，不声称穷举全部
+可能的 POSIX 拼写。长期 `IpcDisabledInstallSmoke` 会用
 `PHOTOSPIDER_BUILD_IPC=OFF` 与 `BUILD_TESTING=OFF` 配置另一个 clean producer；它验证不会
-advertise IPC build forwarder、installed header、archive、executable 或 exported target，同时
-external embedded Host consumer 仍能 link/run。
+advertise IPC build forwarder、installed header、archive、executable 或 exported target，required
+`ipc_client` component discovery 会失败，同时 external default embedded Host consumer 仍能
+link/run。Required unknown component 也会失败；省略 component 或请求 `embedded` 时继续解析
+既有 backend dependency。
 
 当所选 CMake generator 提供多个 configuration 时，smoke 会为 producer 与 consumer 使用同一个
 generator，检查两侧的 `CMAKE_GENERATOR` 和 `CMAKE_CONFIGURATION_TYPES` cache 值，并从

@@ -103,6 +103,19 @@ events/traces, cache, operation plugins, and schedulers. Graph loads retain the
 caller's safe Host session name as request metadata but return a separate opaque
 daemon session id; disconnecting the client does not close that session.
 
+An IPC-only CMake consumer selects the installed component explicitly:
+
+```cmake
+find_package(Photospider CONFIG REQUIRED COMPONENTS ipc_client)
+target_link_libraries(app PRIVATE Photospider::photospider_ipc_client)
+```
+
+This lookup resolves only Threads. The default component-less lookup and
+`COMPONENTS embedded` retain the embedded target's OpenCV, `yaml-cpp`, Threads,
+and applicable Apple framework dependency resolution. Unknown required
+components, or required `ipc_client` against an IPC-disabled install, fail
+package discovery.
+
 The IPC Host implements all 53 current non-destructor Host virtuals through
 short-lived typed connections. Compute submits once, polls immediately and then
 at a 10/20/40/80/160/320/500-ms cadence without a synchronous total timeout;

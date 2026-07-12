@@ -27,24 +27,171 @@ REQUIRED_IPC_PUBLIC_HEADERS = {
     "include/photospider/ipc/host.hpp",
     "include/photospider/ipc/protocol.hpp",
 }
-FORBIDDEN_IPC_HEADER_PATTERNS = {
+ALLOWED_IPC_STANDARD_INCLUDES = {
+    "cstddef",
+    "cstdint",
+    "map",
+    "memory",
+    "optional",
+    "string",
+    "utility",
+    "vector",
+}
+EXPECTED_IPC_DIRECT_INCLUDES = {
+    "include/photospider/ipc/client.hpp": (
+        "cstddef",
+        "cstdint",
+        "map",
+        "memory",
+        "optional",
+        "string",
+        "vector",
+        "photospider/core/export.hpp",
+        "photospider/host/graph_session.hpp",
+        "photospider/host/host.hpp",
+        "photospider/ipc/protocol.hpp",
+    ),
+    "include/photospider/ipc/host.hpp": (
+        "memory",
+        "string",
+        "photospider/core/export.hpp",
+        "photospider/host/host.hpp",
+    ),
+    "include/photospider/ipc/protocol.hpp": (
+        "cstddef",
+        "cstdint",
+        "optional",
+        "string",
+        "utility",
+        "vector",
+        "photospider/core/image_buffer.hpp",
+        "photospider/core/result_types.hpp",
+        "photospider/host/compute_request.hpp",
+    ),
+}
+FORBIDDEN_IPC_DECLARATION_PATTERNS = {
     "backend implementation type": (
         r"\b(?:Kernel|GraphModel|InteractionService|ComputeService|"
         r"PluginManager|SchedulerPluginLoader)\b"
     ),
     "nlohmann JSON type or header": r"nlohmann(?:::|/)",
-    "POSIX implementation header": (
-        r"#include\s*[<\"][^>\"]*(?:arpa/inet|sys/(?:socket|un|mman|random|stat)|"
-        r"fcntl|poll|unistd)\.h[>\"]"
-    ),
-    "raw Unix socket type": r"\bsockaddr_un\b",
-    "raw descriptor declaration": r"\bint\s+(?:[A-Za-z_]\w*_)?fd\b",
-    "source-tree IPC include": (
-        r"#include\s*[<\"][^>\"]*(?:src/lib|ipc/(?:codec|frame|server|"
-        r"unix_socket|request_router|output_store|client_collection_budget|"
-        r"client_interrupt_access|ipc_host_runtime))[^>\"]*[>\"]"
-    ),
+    "raw Unix socket type": r"\b(?:sockaddr|sockaddr_un|sa_family_t)\b",
+    "raw descriptor declaration": r"\b(?:int|long)\s+(?:[A-Za-z_]\w*_)?fd\b",
+    "raw file identity type": r"\b(?:dev_t|ino_t|mode_t|off_t)\b",
+    "raw file mapping symbol": r"\b(?:mmap|munmap|MAP_FAILED|MAP_PRIVATE|PROT_READ)\b",
 }
+EXPECTED_CLIENT_METHODS = (
+    "ping",
+    "version",
+    "load_graph",
+    "close_graph",
+    "list_graphs",
+    "inspect_graph",
+    "inspect_node",
+    "inspect_dependency_tree",
+    "reload_graph",
+    "save_graph",
+    "clear_graph",
+    "get_node_yaml",
+    "set_node_yaml",
+    "list_node_ids",
+    "ending_nodes",
+    "traversal_orders",
+    "traversal_details",
+    "trees_containing_node",
+    "project_roi",
+    "project_roi_backward",
+    "dirty_region_snapshot",
+    "compute_planning_snapshot",
+    "recent_compute_planning_snapshots",
+    "submit_compute",
+    "compute_status",
+    "compute_result",
+    "release_compute",
+    "timing",
+    "last_io_time",
+    "last_error",
+    "begin_dirty_source",
+    "update_dirty_source",
+    "end_dirty_source",
+    "drain_compute_events",
+    "clear_cache",
+    "clear_drive_cache",
+    "clear_memory_cache",
+    "cache_all_nodes",
+    "free_transient_memory",
+    "synchronize_disk_cache",
+    "plugins_load_report",
+    "plugins_unload_all",
+    "seed_builtin_ops",
+    "ops_sources",
+    "ops_combined_keys",
+    "ops_combined_sources",
+    "scheduler_available_types",
+    "scheduler_description",
+    "scheduler_scan",
+    "scheduler_load",
+    "scheduler_loaded_plugins",
+    "configure_scheduler_defaults",
+    "scheduler_info",
+    "replace_scheduler",
+    "scheduler_trace",
+)
+EXPECTED_HOST_METHODS = (
+    "load_graph",
+    "close_graph",
+    "list_graphs",
+    "reload_graph",
+    "save_graph",
+    "clear_graph",
+    "compute",
+    "compute_async",
+    "compute_and_get_image",
+    "timing",
+    "last_io_time",
+    "last_error",
+    "list_node_ids",
+    "ending_nodes",
+    "get_node_yaml",
+    "set_node_yaml",
+    "inspect_node",
+    "inspect_graph",
+    "dependency_tree",
+    "traversal_orders",
+    "traversal_details",
+    "trees_containing_node",
+    "project_roi",
+    "project_roi_backward",
+    "dirty_region_snapshot",
+    "compute_planning_snapshot",
+    "recent_compute_planning_snapshots",
+    "begin_dirty_source",
+    "update_dirty_source",
+    "end_dirty_source",
+    "drain_compute_events",
+    "scheduler_trace",
+    "clear_cache",
+    "clear_drive_cache",
+    "clear_memory_cache",
+    "cache_all_nodes",
+    "free_transient_memory",
+    "synchronize_disk_cache",
+    "plugins_load_report",
+    "plugins_load",
+    "plugins_unload_all",
+    "seed_builtin_ops",
+    "ops_sources",
+    "ops_combined_keys",
+    "ops_combined_sources",
+    "scheduler_available_types",
+    "scheduler_description",
+    "scheduler_scan",
+    "scheduler_load",
+    "scheduler_loaded_plugins",
+    "configure_scheduler_defaults",
+    "scheduler_info",
+    "replace_scheduler",
+)
 FORBIDDEN_IPC_TARGET_PARTS = (
     "Photospider::photospider",
     "nlohmann_json",
@@ -101,8 +248,7 @@ def run_command(
     )
     if proc.returncode != 0:
         print(
-            f"command failed with exit code {proc.returncode}: "
-            + shlex.join(command),
+            f"command failed with exit code {proc.returncode}: " + shlex.join(command),
             file=sys.stderr,
             flush=True,
         )
@@ -373,47 +519,108 @@ int main(int argc, char** argv) {
 """
 
 
-def write_consumer_project(repo: Path, source_dir: Path) -> list[str]:
-    """@brief Create an isolated installed-package consumer project.
+def complete_surface_inventory(source: str) -> dict[str, list[str]]:
+    """@brief Extract the exact Client and Host call names from the harness.
 
-    The generated CMake project links the exported target, compiles every public
-    header, and uses ``file(GENERATE)`` with ``$<TARGET_FILE:...>`` so the test can
-    locate executables for single- and multi-configuration generators.
-
-    @param repo Repository root used only to inventory public headers.
-    @param source_dir Transient consumer source directory to create or update.
-    @return Include directives compiled by the generated ``main.cpp``.
-    @throws OSError If directories or generated source files cannot be written.
-    @note Replaces ``CMakeLists.txt`` and ``main.cpp`` under ``source_dir`` only;
-      :func:`main` recreates the surrounding work directory on each invocation.
+    @param source Generated external IPC consumer translation unit.
+    @return Ordered ``client`` and ``host`` method-name observations.
+    @throws RuntimeError If the reference-only function cannot be isolated.
+    @note The extraction is deliberately independent from the expected tuples,
+      so deleting, duplicating, or replacing one harness call changes the
+      observed count/set and fails the package behavior gate.
     """
 
-    source_dir.mkdir(parents=True, exist_ok=True)
+    marker = "int reference_complete_surface"
+    end_marker = "\n}\n\n}  // namespace"
+    if marker not in source or end_marker not in source:
+        raise RuntimeError("complete IPC surface function markers are missing")
+    body = source.split(marker, 1)[1].split(end_marker, 1)[0]
+    return {
+        name: re.findall(rf"\b{name}\.([A-Za-z_]\w*)\s*\(", body)
+        for name in ("client", "host")
+    }
+
+
+def validate_complete_surface_inventory(source: str) -> dict[str, list[str]]:
+    """@brief Enforce exact durable Client/Host symbol-reference inventories.
+
+    @param source Generated external IPC consumer translation unit.
+    @return Extracted inventories after all exact count/set/uniqueness checks.
+    @throws RuntimeError If any expected call is omitted, duplicated, or
+      replaced, or if the normative expected inventories are themselves not
+      exactly 55 unique Client and 53 unique Host names.
+    @note This validates maintained product symbols rather than source-migration
+      residue and remains part of the existing package-consumer behavior test.
+    """
+
+    expected = {
+        "client": (55, EXPECTED_CLIENT_METHODS),
+        "host": (53, EXPECTED_HOST_METHODS),
+    }
+    observed = complete_surface_inventory(source)
+    failures: list[str] = []
+    for label, (count, names) in expected.items():
+        if len(names) != count or len(set(names)) != count:
+            failures.append(f"invalid normative {label} inventory")
+        if len(observed[label]) != count:
+            failures.append(f"{label} call count {len(observed[label])} != {count}")
+        if len(set(observed[label])) != len(observed[label]):
+            failures.append(f"duplicate {label} call reference")
+        if set(observed[label]) != set(names):
+            missing = sorted(set(names) - set(observed[label]))
+            extra = sorted(set(observed[label]) - set(names))
+            failures.append(
+                f"{label} call set mismatch: missing={missing}, extra={extra}"
+            )
+    if failures:
+        raise RuntimeError("; ".join(failures))
+    return observed
+
+
+def write_consumer_projects(
+    repo: Path, embedded_source_dir: Path, ipc_source_dir: Path
+) -> tuple[list[str], dict[str, list[str]]]:
+    """@brief Create independent embedded and IPC installed consumers.
+
+    The embedded project uses default package semantics and compiles every
+    installed public header. The IPC project explicitly requests only the
+    ``ipc_client`` component and links only its exported target. Each project
+    generates its own target manifest for single- and multi-config generators.
+
+    @param repo Repository root used only to inventory public headers.
+    @param embedded_source_dir Transient embedded consumer source directory.
+    @param ipc_source_dir Transient IPC-only consumer source directory.
+    @return Embedded include directives and verified IPC call inventories.
+    @throws OSError If directories or generated source files cannot be written.
+    @throws RuntimeError If the IPC harness does not reference the exact 55
+      Client and 53 Host operation names once each.
+    @note :func:`main` recreates the surrounding work directory on every run.
+    """
+
+    embedded_source_dir.mkdir(parents=True, exist_ok=True)
+    ipc_source_dir.mkdir(parents=True, exist_ok=True)
     include_lines = public_header_includes(repo)
-    (source_dir / "CMakeLists.txt").write_text(
+    (embedded_source_dir / "CMakeLists.txt").write_text(
         "\n".join(
             [
                 "cmake_minimum_required(VERSION 3.16)",
-                "project(photospider_consumer_smoke LANGUAGES CXX)",
+                "project(photospider_embedded_consumer LANGUAGES CXX)",
                 "find_package(Photospider CONFIG REQUIRED)",
+                "if(NOT Photospider_embedded_FOUND)",
+                '  message(FATAL_ERROR "default embedded component is absent")',
+                "endif()",
                 "add_executable(photospider_consumer main.cpp)",
                 "target_link_libraries(photospider_consumer",
                 "    PRIVATE Photospider::photospider)",
-                "add_executable(photospider_ipc_consumer ipc_main.cpp)",
-                "target_link_libraries(photospider_ipc_consumer",
-                "    PRIVATE Photospider::photospider_ipc_client)",
                 "file(GENERATE",
                 '    OUTPUT "${CMAKE_BINARY_DIR}/photospider_consumer_target_$<CONFIG>.txt"',
                 '    CONTENT "$<TARGET_FILE:photospider_consumer>\\n")',
-                "file(GENERATE",
-                '    OUTPUT "${CMAKE_BINARY_DIR}/photospider_ipc_consumer_target_$<CONFIG>.txt"',
-                '    CONTENT "$<TARGET_FILE:photospider_ipc_consumer>\\n")',
                 "",
             ]
         ),
         encoding="utf-8",
     )
-    (source_dir / "main.cpp").write_text(
+    (embedded_source_dir / "main.cpp").write_text(
         "\n".join(
             [
                 "#include <cstddef>",
@@ -437,10 +644,59 @@ def write_consumer_project(repo: Path, source_dir: Path) -> list[str]:
         ),
         encoding="utf-8",
     )
-    (source_dir / "ipc_main.cpp").write_text(
-        ipc_consumer_source(), encoding="utf-8"
+    ipc_source = ipc_consumer_source()
+    inventories = validate_complete_surface_inventory(ipc_source)
+    (ipc_source_dir / "CMakeLists.txt").write_text(
+        "\n".join(
+            [
+                "cmake_minimum_required(VERSION 3.16)",
+                "project(photospider_ipc_consumer LANGUAGES CXX)",
+                "find_package(Photospider CONFIG",
+                "    COMPONENTS ipc_client",
+                "    OPTIONAL_COMPONENTS unknown_optional)",
+                "if(NOT Photospider_FOUND)",
+                '  message(FATAL_ERROR "ipc_client package lookup failed")',
+                "endif()",
+                "if(NOT Photospider_ipc_client_FOUND)",
+                '  message(FATAL_ERROR "required ipc_client component is absent")',
+                "endif()",
+                "if(NOT TARGET Photospider::photospider_ipc_client)",
+                '  message(FATAL_ERROR "required ipc_client target is absent")',
+                "endif()",
+                "if(Photospider_unknown_optional_FOUND)",
+                '  message(FATAL_ERROR "unknown optional component was reported found")',
+                "endif()",
+                "if(DEFINED OpenCV_FOUND OR TARGET yaml-cpp::yaml-cpp)",
+                '  message(FATAL_ERROR "IPC lookup discovered backend packages")',
+                "endif()",
+                "if(DEFINED PHOTOSPIDER_METAL_FRAMEWORK OR",
+                "   DEFINED PHOTOSPIDER_FOUNDATION_FRAMEWORK)",
+                '  message(FATAL_ERROR "IPC lookup discovered Apple backend frameworks")',
+                "endif()",
+                "if(NOT TARGET Threads::Threads)",
+                '  message(FATAL_ERROR "IPC lookup did not resolve Threads")',
+                "endif()",
+                "find_package(Photospider CONFIG",
+                "    COMPONENTS ipc_client OPTIONAL_COMPONENTS embedded)",
+                "if(NOT Photospider_FOUND OR NOT Photospider_ipc_client_FOUND)",
+                '  message(FATAL_ERROR "optional embedded probe broke IPC lookup")',
+                "endif()",
+                "if(Photospider_embedded_FOUND)",
+                '  message(FATAL_ERROR "disabled optional embedded dependency was found")',
+                "endif()",
+                "add_executable(photospider_ipc_consumer main.cpp)",
+                "target_link_libraries(photospider_ipc_consumer",
+                "    PRIVATE Photospider::photospider_ipc_client)",
+                "file(GENERATE",
+                '    OUTPUT "${CMAKE_BINARY_DIR}/photospider_ipc_consumer_target_$<CONFIG>.txt"',
+                '    CONTENT "$<TARGET_FILE:photospider_ipc_consumer>\\n")',
+                "",
+            ]
+        ),
+        encoding="utf-8",
     )
-    return include_lines
+    (ipc_source_dir / "main.cpp").write_text(ipc_source, encoding="utf-8")
+    return include_lines, inventories
 
 
 def cmake_cache_value(build: Path, key: str) -> str:
@@ -726,9 +982,7 @@ def find_consumer_executable(
       runnable candidates. Fresh consumer builds prevent stale-config selection.
     """
 
-    manifests = sorted(
-        consumer_build.glob(f"{executable_name}_target_*.txt")
-    )
+    manifests = sorted(consumer_build.glob(f"{executable_name}_target_*.txt"))
     if requested_config:
         preferred_name = f"{executable_name}_target_{requested_config}.txt"
         manifests.sort(key=lambda path: path.name != preferred_name)
@@ -803,17 +1057,41 @@ def inspect_install_tree(
     )
     ipc_interface_link_entries = split_cmake_list(ipc_interface_link_raw)
     installed_ipc_headers = {
-        header
-        for header in headers
-        if header.startswith("include/photospider/ipc/")
+        header for header in headers if header.startswith("include/photospider/ipc/")
     }
-    ipc_header_text = "\n".join(
-        (prefix / header).read_text(encoding="utf-8")
+    ipc_header_texts = {
+        header: (prefix / header).read_text(encoding="utf-8")
         for header in sorted(installed_ipc_headers)
-    ).lower()
-    forbidden_ipc_header_parts = sorted(
+    }
+    ipc_header_text = "\n".join(ipc_header_texts.values())
+    ipc_include_directives = {
+        header: re.findall(r"^\s*#\s*include\b[^\n]*", text, re.MULTILINE)
+        for header, text in ipc_header_texts.items()
+    }
+    ipc_direct_includes = {
+        header: re.findall(r"^\s*#\s*include\s*[<\"]([^>\"]+)[>\"]", text, re.MULTILINE)
+        for header, text in ipc_header_texts.items()
+    }
+    ipc_include_targets = [
+        target
+        for header in sorted(ipc_direct_includes)
+        for target in ipc_direct_includes[header]
+    ]
+    unparsed_ipc_include_directives = sorted(
+        directive
+        for header, directives in ipc_include_directives.items()
+        if len(directives) != len(ipc_direct_includes[header])
+        for directive in directives
+    )
+    unexpected_ipc_includes = sorted(
+        target
+        for target in ipc_include_targets
+        if target not in ALLOWED_IPC_STANDARD_INCLUDES
+        and not (target.startswith("photospider/") and f"include/{target}" in headers)
+    )
+    forbidden_ipc_declarations = sorted(
         label
-        for label, pattern in FORBIDDEN_IPC_HEADER_PATTERNS.items()
+        for label, pattern in FORBIDDEN_IPC_DECLARATION_PATTERNS.items()
         if re.search(pattern, ipc_header_text, re.IGNORECASE)
     )
     exported_private_ipc_targets = sorted(
@@ -856,10 +1134,21 @@ def inspect_install_tree(
         "ipc_install_headers_are_exact": (
             installed_ipc_headers == REQUIRED_IPC_PUBLIC_HEADERS
         ),
-        "ipc_headers_forbidden_private_parts": forbidden_ipc_header_parts,
-        "ipc_headers_omit_private_implementation": (
-            forbidden_ipc_header_parts == []
+        "ipc_header_include_targets": ipc_include_targets,
+        "ipc_header_direct_includes": ipc_direct_includes,
+        "ipc_header_unexpected_includes": unexpected_ipc_includes,
+        "ipc_header_unparsed_include_directives": unparsed_ipc_include_directives,
+        "ipc_headers_use_exact_public_includes": (
+            unexpected_ipc_includes == []
+            and unparsed_ipc_include_directives == []
+            and ipc_direct_includes
+            == {
+                header: list(includes)
+                for header, includes in EXPECTED_IPC_DIRECT_INCLUDES.items()
+            }
         ),
+        "ipc_headers_forbidden_raw_declarations": forbidden_ipc_declarations,
+        "ipc_headers_omit_raw_implementation_types": (forbidden_ipc_declarations == []),
         "ipc_export_link_interface": {
             "raw": ipc_interface_link_raw,
             "entries": ipc_interface_link_entries,
@@ -868,8 +1157,7 @@ def inspect_install_tree(
             ipc_interface_link_entries == ["Threads::Threads"]
         ),
         "ipc_export_omits_backend_dependency": all(
-            part not in ipc_interface_link_raw
-            for part in FORBIDDEN_IPC_TARGET_PARTS
+            part not in ipc_interface_link_raw for part in FORBIDDEN_IPC_TARGET_PARTS
         ),
         "exported_private_ipc_targets": exported_private_ipc_targets,
         "export_omits_private_ipc_targets": exported_private_ipc_targets == [],
@@ -911,6 +1199,12 @@ def inspect_install_tree(
         "config_finds_opencv": "find_dependency(OpenCV" in config_text,
         "config_finds_yaml_cpp": "find_dependency(yaml-cpp)" in config_text,
         "config_finds_threads": "find_dependency(Threads)" in config_text,
+        "config_defines_embedded_component": (
+            "Photospider_embedded_FOUND TRUE" in config_text
+        ),
+        "config_defines_ipc_client_component": (
+            "Photospider_ipc_client_FOUND ON" in config_text
+        ),
     }
 
 
@@ -959,8 +1253,11 @@ def evaluate_behavior(observations: dict[str, Any]) -> bool:
         "installed IPC public headers are exact": install[
             "ipc_install_headers_are_exact"
         ],
-        "installed IPC headers omit private implementation": install[
-            "ipc_headers_omit_private_implementation"
+        "installed IPC headers use exact allowed public includes": install[
+            "ipc_headers_use_exact_public_includes"
+        ],
+        "installed IPC headers omit raw implementation types": install[
+            "ipc_headers_omit_raw_implementation_types"
         ],
         "exported IPC target links only Threads": install[
             "ipc_export_links_only_threads"
@@ -971,12 +1268,8 @@ def evaluate_behavior(observations: dict[str, Any]) -> bool:
         "package export omits private IPC targets": install[
             "export_omits_private_ipc_targets"
         ],
-        "installed IPC client archive exists": install[
-            "ipc_client_archive_exists"
-        ],
-        "installed photospiderd executable exists": install[
-            "daemon_executable_exists"
-        ],
+        "installed IPC client archive exists": install["ipc_client_archive_exists"],
+        "installed photospiderd executable exists": install["daemon_executable_exists"],
         "exported target carries PHOTOSPIDER_STATIC": install[
             "export_has_static_compile_definition"
         ],
@@ -999,13 +1292,27 @@ def evaluate_behavior(observations: dict[str, Any]) -> bool:
         "package config finds dependencies": install["config_finds_opencv"]
         and install["config_finds_yaml_cpp"]
         and install["config_finds_threads"],
-        "consumer configure succeeded": commands["consumer_configure"] == 0,
-        "requested generator configured producer and consumer": (
+        "package config defines embedded and IPC components": install[
+            "config_defines_embedded_component"
+        ]
+        and install["config_defines_ipc_client_component"],
+        "embedded consumer configure succeeded": commands["embedded_consumer_configure"]
+        == 0,
+        "IPC-only component configure succeeds with backend discovery disabled": (
+            commands["ipc_consumer_configure"] == 0
+        ),
+        "unknown required component configure fails": commands[
+            "unknown_component_configure"
+        ]
+        != 0,
+        "requested generator configured producer and both consumers": (
             not observations["producer"]["requested_generator"]
             or (
                 observations["producer_cache"]["generator"]
                 == observations["producer"]["requested_generator"]
                 and observations["consumer"]["generator"]
+                == observations["producer"]["requested_generator"]
+                and observations["consumer"]["ipc_generator"]
                 == observations["producer"]["requested_generator"]
             )
         ),
@@ -1014,25 +1321,35 @@ def evaluate_behavior(observations: dict[str, Any]) -> bool:
             or (
                 not observations["producer_cache"]["configuration_types"]
                 and not observations["consumer"]["configuration_types"]
+                and not observations["consumer"]["ipc_configuration_types"]
             )
             or (
                 observations["producer"]["requested_config"]
                 in observations["producer_cache"]["configuration_types"].split(";")
                 and observations["producer"]["requested_config"]
                 in observations["consumer"]["configuration_types"].split(";")
+                and observations["producer"]["requested_config"]
+                in observations["consumer"]["ipc_configuration_types"].split(";")
             )
         ),
-        "consumer build succeeded": commands["consumer_build"] == 0,
-        "CMake target manifest resolves consumer executable": observations[
-            "consumer"
-        ]["executable_discovery"]["selected_from_manifest"],
+        "embedded consumer build succeeded": commands["embedded_consumer_build"] == 0,
+        "IPC-only consumer build succeeded": commands["ipc_consumer_build"] == 0,
+        "complete Client inventory is exact and unique": observations["consumer"][
+            "surface_inventory"
+        ]["client"]
+        == list(EXPECTED_CLIENT_METHODS),
+        "complete Host inventory is exact and unique": observations["consumer"][
+            "surface_inventory"
+        ]["host"]
+        == list(EXPECTED_HOST_METHODS),
+        "CMake target manifest resolves consumer executable": observations["consumer"][
+            "executable_discovery"
+        ]["selected_from_manifest"],
         "CMake target manifest resolves IPC consumer executable": observations[
             "consumer"
         ]["ipc_executable_discovery"]["selected_from_manifest"],
         "consumer executable ran successfully": commands["consumer_run"] == 0,
-        "IPC-only consumer executable ran successfully": commands[
-            "ipc_consumer_run"
-        ]
+        "IPC-only consumer executable ran successfully": commands["ipc_consumer_run"]
         == 0,
     }
     passed = all(checks.values())
@@ -1100,9 +1417,28 @@ def main() -> int:
     work.mkdir(parents=True, exist_ok=True)
 
     prefix = work / "install-prefix"
-    consumer_src = work / "consumer-src"
-    consumer_build = work / "consumer-build"
-    compiled_public_headers = write_consumer_project(repo, consumer_src)
+    embedded_consumer_src = work / "embedded-consumer-src"
+    embedded_consumer_build = work / "embedded-consumer-build"
+    ipc_consumer_src = work / "ipc-consumer-src"
+    ipc_consumer_build = work / "ipc-consumer-build"
+    unknown_component_src = work / "unknown-component-src"
+    unknown_component_build = work / "unknown-component-build"
+    compiled_public_headers, surface_inventory = write_consumer_projects(
+        repo, embedded_consumer_src, ipc_consumer_src
+    )
+    unknown_component_src.mkdir(parents=True)
+    (unknown_component_src / "CMakeLists.txt").write_text(
+        "\n".join(
+            [
+                "cmake_minimum_required(VERSION 3.16)",
+                "project(photospider_unknown_component LANGUAGES CXX)",
+                "find_package(Photospider CONFIG REQUIRED",
+                "    COMPONENTS unknown_component)",
+                "",
+            ]
+        ),
+        encoding="utf-8",
+    )
 
     producer_configure_code: int | None = None
     if args.configure_fresh_producer:
@@ -1144,16 +1480,39 @@ def main() -> int:
         install_command.extend(["--config", args.config])
     install_code = run_command(install_command, repo)
 
-    configure_command = [
+    embedded_configure_command = [
         args.cmake_executable,
         "-S",
-        str(consumer_src),
+        str(embedded_consumer_src),
         "-B",
-        str(consumer_build),
+        str(embedded_consumer_build),
+        f"-DCMAKE_PREFIX_PATH={prefix}",
+    ]
+    ipc_configure_command = [
+        args.cmake_executable,
+        "-S",
+        str(ipc_consumer_src),
+        "-B",
+        str(ipc_consumer_build),
+        f"-DCMAKE_PREFIX_PATH={prefix}",
+        "-DCMAKE_DISABLE_FIND_PACKAGE_OpenCV=TRUE",
+        "-DCMAKE_DISABLE_FIND_PACKAGE_yaml-cpp=TRUE",
+    ]
+    unknown_component_configure_command = [
+        args.cmake_executable,
+        "-S",
+        str(unknown_component_src),
+        "-B",
+        str(unknown_component_build),
         f"-DCMAKE_PREFIX_PATH={prefix}",
     ]
     if args.generator:
-        configure_command.extend(["-G", args.generator])
+        for command in (
+            embedded_configure_command,
+            ipc_configure_command,
+            unknown_component_configure_command,
+        ):
+            command.extend(["-G", args.generator])
     osx_architectures = cmake_cache_value(build, "CMAKE_OSX_ARCHITECTURES")
     install_libdir = cmake_cache_value(build, "CMAKE_INSTALL_LIBDIR") or "lib"
     package_cmake_dir = (
@@ -1161,23 +1520,43 @@ def main() -> int:
         or f"{install_libdir}/cmake/Photospider"
     )
     if osx_architectures:
-        configure_command.append(f"-DCMAKE_OSX_ARCHITECTURES={osx_architectures}")
-    configure_code = run_command(configure_command, repo)
+        for command in (embedded_configure_command, ipc_configure_command):
+            command.append(f"-DCMAKE_OSX_ARCHITECTURES={osx_architectures}")
+    embedded_configure_code = run_command(embedded_configure_command, repo)
+    ipc_configure_code = run_command(ipc_configure_command, repo)
+    unknown_component_configure_code = run_command(
+        unknown_component_configure_command, repo
+    )
 
-    build_command = [args.cmake_executable, "--build", str(consumer_build)]
+    embedded_build_command = [
+        args.cmake_executable,
+        "--build",
+        str(embedded_consumer_build),
+    ]
+    ipc_build_command = [
+        args.cmake_executable,
+        "--build",
+        str(ipc_consumer_build),
+    ]
     if args.config:
-        build_command.extend(["--config", args.config])
-    build_code = run_command(build_command, repo)
+        embedded_build_command.extend(["--config", args.config])
+        ipc_build_command.extend(["--config", args.config])
+    embedded_build_code = run_command(embedded_build_command, repo)
+    ipc_build_code = run_command(ipc_build_command, repo)
 
     executable_discovery = find_consumer_executable(
-        consumer_build, args.config, "photospider_consumer"
+        embedded_consumer_build, args.config, "photospider_consumer"
     )
     ipc_executable_discovery = find_consumer_executable(
-        consumer_build, args.config, "photospider_ipc_consumer"
+        ipc_consumer_build, args.config, "photospider_ipc_consumer"
     )
-    consumer_generator = cmake_cache_value(consumer_build, "CMAKE_GENERATOR")
+    consumer_generator = cmake_cache_value(embedded_consumer_build, "CMAKE_GENERATOR")
     consumer_configuration_types = cmake_cache_value(
-        consumer_build, "CMAKE_CONFIGURATION_TYPES"
+        embedded_consumer_build, "CMAKE_CONFIGURATION_TYPES"
+    )
+    ipc_consumer_generator = cmake_cache_value(ipc_consumer_build, "CMAKE_GENERATOR")
+    ipc_consumer_configuration_types = cmake_cache_value(
+        ipc_consumer_build, "CMAKE_CONFIGURATION_TYPES"
     )
     executable = (
         Path(executable_discovery["selected"])
@@ -1224,8 +1603,11 @@ def main() -> int:
             "producer_configure": producer_configure_code,
             "build_photospider": build_product_code,
             "install": install_code,
-            "consumer_configure": configure_code,
-            "consumer_build": build_code,
+            "embedded_consumer_configure": embedded_configure_code,
+            "embedded_consumer_build": embedded_build_code,
+            "ipc_consumer_configure": ipc_configure_code,
+            "ipc_consumer_build": ipc_build_code,
+            "unknown_component_configure": unknown_component_configure_code,
             "consumer_run": run_code,
             "ipc_consumer_run": ipc_run_code,
         },
@@ -1241,8 +1623,11 @@ def main() -> int:
             "compiled_public_headers": compiled_public_headers,
             "generator": consumer_generator,
             "configuration_types": consumer_configuration_types,
+            "ipc_generator": ipc_consumer_generator,
+            "ipc_configuration_types": ipc_consumer_configuration_types,
             "executable_discovery": executable_discovery,
             "ipc_executable_discovery": ipc_executable_discovery,
+            "surface_inventory": surface_inventory,
         },
         "producer": {
             "configured_by_smoke": args.configure_fresh_producer,

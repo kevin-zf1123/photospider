@@ -17,7 +17,18 @@ Public client header 是 `photospider/ipc/protocol.hpp`、`photospider/ipc/clien
 `photospider/ipc/host.hpp`。它们只暴露 typed owned value 和完整 Host factory，不暴露 JSON
 type、socket descriptor、`sockaddr_un`、backend model、runtime service 或 mutable backend ownership。
 Client library 不链接 `photospider` backend。IPC disabled 时，不安装该 target 与 public
-header；在其他任何 CMake system name 下强制开启 IPC 会使 configure 明确失败。
+header。Installed IPC-only consumer 必须显式选择 component：
+
+```cmake
+find_package(Photospider CONFIG REQUIRED COMPONENTS ipc_client)
+target_link_libraries(app PRIVATE Photospider::photospider_ipc_client)
+```
+
+该 component 只解析 `Threads`。省略 `COMPONENTS`，或显式请求 `COMPONENTS embedded`，
+会保留 embedded package 行为，并按适用平台解析 Threads、OpenCV、`yaml-cpp` 以及 Apple
+Metal/Foundation framework。Required unknown component 会使 package discovery 失败；producer
+禁用 IPC 时，required `ipc_client` component 也会失败。在其他任何 CMake system name 下强制
+开启 IPC 会使 configure 明确失败。
 
 `daemon.version.methods` 来自 metadata 与 dispatch 前 admission 共用的一张统一表。
 独立的 route-family matcher 能让已 advertisement 但未支持的 route 保持可检测。该表报告
@@ -1018,14 +1029,18 @@ ctest --test-dir build --output-on-failure \
   -R '^(FrameCodec|ProtocolEnvelope|IntegerCodec|ProtocolErrors|ProtocolParams|ProtocolGraphLoad|ProtocolGraphClose|ProtocolOperationPlugins|HostRoutedGraphStateProtocolTest|StableInspectionPagingProtocolTest|InspectionJson|SessionRegistry|ComputeRequestRegistry|CollectionSnapshotRegistry|OutputStore|ComputeEventRing|SchedulerTraceRing|UnixSocketConnect|ClientLifecycle|ClientSurface|ClientCollectionAggregation|ClientJobValidation|ClientRetryPolicy|ClientResultValidation|IpcHost|IpcDaemon|IpcDaemonOperationPlugins|IpcDaemonSchedulers|IpcObservationFixtureDaemon|StaticProductConsumerSmoke|IpcDisabledInstallSmoke|PublicHeaderSelfContainment)'
 ```
 
-`StaticProductConsumerSmoke` 验证 installed backend 与第二个只链接
-`Photospider::photospider_ipc_client` 的 client-only consumer。后者会在没有 daemon 的情况下
-执行安全 Client/factory lifecycle 行为，链接全部 55 个 typed Client call 与 53 个 Host virtual
+`StaticProductConsumerSmoke` 验证 installed backend 与一个独立 configure 的 client-only project；
+后者显式请求 `COMPONENTS ipc_client`、禁用 OpenCV/`yaml-cpp` package discovery，并且只链接
+`Photospider::photospider_ipc_client`。它会在没有 daemon 的情况下执行安全 Client/factory
+lifecycle 行为，以精确且唯一的 inventory 链接全部 55 个 typed Client call 与 53 个 Host virtual
 引用，并要求精确的 IPC archive/target/header export；其唯一 public link dependency 是
-`Threads::Threads`，出现 backend、JSON、server-internal、object、source-tree 或 POSIX-private
-dependency/header 时门禁失败。
+`Threads::Threads`。Installed IPC-header gate 采用正向边界：只允许当前 C++ standard-library
+include set 与已安装的 `photospider/` public include；同时明确拒绝 raw JSON、socket address/
+descriptor、file identity、file mapping declaration 与 backend type。这是门禁实际验证的精确
+public-header 边界，并不声称穷举所有可能的 POSIX 拼写。
 `IpcDisabledInstallSmoke` 验证 IPC-disabled clean install 不含 IPC forwarder、header、target、archive
-或 daemon，同时 embedded consumer 仍可用。Real-process test 有 CTest timeout 与 bounded
+或 daemon、required `ipc_client` component 不可用，同时 default embedded consumer 仍可用。
+Real-process test 有 CTest timeout 与 bounded
 SIGTERM/SIGKILL/waitpid cleanup。`test_ipc_daemon` 会启动产品 `photospiderd` 以验证 embedded-Host
 行为，也会把 non-installed `ipc_output_fixture_daemon` 作为独立进程启动，以提供 deterministic
 image 与 bounded-observation outcome。该 fixture 仍使用 production internal

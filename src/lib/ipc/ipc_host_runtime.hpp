@@ -105,9 +105,8 @@ struct IpcHostRuntimeDependencies {
   /**
    * @brief Wakes every wait currently blocked in `wait_until`.
    *
-   * Destruction invokes this callback after publishing stop. Implementations
-   * Adapter destruction contains callback exceptions so cleanup remains
-   * nonthrowing.
+   * Adapter destruction invokes this callback after publishing stop and
+   * contains callback exceptions so cleanup remains nonthrowing.
    *
    * @return Nothing.
    * @throws Whatever an injected wake callback throws; production may throw

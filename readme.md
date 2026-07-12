@@ -181,7 +181,12 @@ exact status propagation, and deterministic `client_stopped` teardown. Its
 secure image consumer strictly validates the same-user artifact while its
 delivery lease remains active, maps it read-only into a shared CPU image, then
 releases the matching job/lease. The final image reference unmaps and closes
-the retained descriptor exactly once. Compute cancellation, `daemon.shutdown`, TCP, Windows
+the retained descriptor exactly once. An IPC-only installed CMake consumer uses
+`find_package(Photospider CONFIG REQUIRED COMPONENTS ipc_client)` and links
+`Photospider::photospider_ipc_client`; that component resolves only Threads.
+Omitting components keeps the embedded package default and its OpenCV,
+`yaml-cpp`, Threads, and applicable Apple framework dependencies. Compute
+cancellation, `daemon.shutdown`, TCP, Windows
 transport, and `graph_cli --connect` remain unavailable. `graph_cli` therefore
 continues to use its embedded Host and all local commands below retain their
 existing meaning. See `docs/codebase-structure/IPC-Protocol-v1.md` for the wire,
