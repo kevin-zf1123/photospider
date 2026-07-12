@@ -6765,6 +6765,21 @@ TEST(ClientLifecycle, RejectsOverflowedEnvelopeVersionAndErrorCode) {
   }
 }
 
+/**
+ * @brief Dispatches the exact typed version 1 Client surface once per method.
+ *
+ * A scripted local peer expects all 55 normative methods in canonical order
+ * and returns one recoverable daemon error for each call. The test invokes
+ * every public typed Client operation with representative values, then checks
+ * request envelopes and selected nested parameters at the wire boundary.
+ *
+ * @return Nothing; GoogleTest assertions report dispatch or schema mismatch.
+ * @throws std::bad_alloc, std::runtime_error, or std::system_error if socket,
+ *         script, request capture, or peer-thread setup cannot complete.
+ * @note Scripted errors intentionally bypass success-result decoding so this
+ *       test isolates symbol coverage, exact method mapping, and no-retry
+ *       dispatch from the method-specific codec tests.
+ */
 TEST(ClientSurface, ExposesAndDispatchesExactTypedVersionOneMethodsOnce) {
   ScopedTempDirectory temp("ps-ipc-surface");
   const std::string socket_path = (temp.path() / "server.sock").string();
@@ -6925,6 +6940,19 @@ TEST(CollectionAggregateBudget,
   EXPECT_EQ(byte_budget.encoded_bytes(), maximum);
 }
 
+/**
+ * @brief Advances stable graph-list paging by the actual decoded row count.
+ *
+ * The first scripted page contains one row despite the Client requesting the
+ * general 4,096-row limit. The second request must carry the frozen cursor,
+ * offset one, and limit one before both pages are published as one owned list.
+ *
+ * @return Nothing; GoogleTest assertions report paging or value mismatch.
+ * @throws std::bad_alloc, std::runtime_error, or std::system_error if socket,
+ *         script, aggregate, or peer-thread setup cannot complete.
+ * @note The first request must contain no continuation fields. This directly
+ *       guards frame-safe short first pages without exposing a public cursor.
+ */
 TEST(ClientCollectionAggregation, UsesStableCursorAndActualPageLength) {
   ScopedTempDirectory temp("ps-ipc-pages");
   const std::string socket_path = (temp.path() / "server.sock").string();
@@ -6968,6 +6996,19 @@ TEST(ClientCollectionAggregation, UsesStableCursorAndActualPageLength) {
   EXPECT_EQ(requests[1]["params"]["limit"], 1);
 }
 
+/**
+ * @brief Rejects a changed continuation cursor transactionally.
+ *
+ * The scripted peer returns one accepted graph-list page and then changes the
+ * frozen cursor while claiming another page remains. The Client must classify
+ * the second response as a Protocol failure and discard the local aggregate.
+ *
+ * @return Nothing; GoogleTest assertions report status or request mismatch.
+ * @throws std::bad_alloc, std::runtime_error, or std::system_error if socket,
+ *         script, aggregate, or peer-thread setup cannot complete.
+ * @note Both page attempts occur exactly once, no partial session list escapes,
+ *       and the response-validation failure does not close the connection.
+ */
 TEST(ClientCollectionAggregation, RejectsUnstableCursorWithoutPartialValue) {
   ScopedTempDirectory temp("ps-ipc-badpage");
   const std::string socket_path = (temp.path() / "server.sock").string();
@@ -7002,6 +7043,146 @@ TEST(ClientCollectionAggregation, RejectsUnstableCursorWithoutPartialValue) {
   EXPECT_EQ(result.status.code, kInvalidRequestCode);
   EXPECT_TRUE(result.value.empty());
   EXPECT_EQ(requests.size(), 2U);
+  EXPECT_TRUE(client.connected());
+}
+
+/**
+ * @brief Preserves duplicate sorted strings within one stable result page.
+ *
+ * The scripted peer returns one non-decreasing scheduler-type page containing
+ * two equal adjacent values. The direct Client must decode and aggregate that
+ * page once, preserve every original row, and stop at its final-page marker.
+ *
+ * @return Nothing; GoogleTest assertions report value or request mismatch.
+ * @throws std::bad_alloc, std::runtime_error, or std::system_error if
+ *         deterministic socket, scripted response, or peer-thread setup fails.
+ * @note Duplicate public string values are legal collection elements; this
+ *       does not relax unique-key validation for map-backed collections.
+ */
+TEST(ClientCollectionAggregation,
+     PreservesSinglePageDuplicateSortedStringsWithoutExtraRequest) {
+  ScopedTempDirectory temp("ps-ipc-dup-page");
+  const std::string socket_path = (temp.path() / "server.sock").string();
+  UniqueFd listener = create_test_listener(socket_path);
+  const std::vector<ScriptedClientReply> replies = {
+      {"scheduler.types",
+       Json{{"types", Json::array({"alpha", "alpha", "beta"})},
+            {"offset", 0},
+            {"has_more", false},
+            {"cursor", nullptr}}}};
+  std::vector<Json> requests;
+  bool served = false;
+  std::thread peer([&] {
+    served = serve_scripted_client_replies(listener.get(), replies, &requests);
+  });
+  Client client;
+  ASSERT_TRUE(client.connect(socket_path).ok);
+  const IpcResult<std::vector<std::string>> result =
+      client.scheduler_available_types();
+  peer.join();
+
+  ASSERT_TRUE(served);
+  ASSERT_TRUE(result.status.ok) << result.status.message;
+  EXPECT_EQ(result.value, (std::vector<std::string>{"alpha", "alpha", "beta"}));
+  ASSERT_EQ(requests.size(), 1U);
+  EXPECT_EQ(requests[0]["params"]["limit"], kGeneralPageMaxEntries);
+  EXPECT_FALSE(requests[0]["params"].contains("cursor"));
+  EXPECT_FALSE(requests[0]["params"].contains("offset"));
+  EXPECT_TRUE(client.connected());
+}
+
+/**
+ * @brief Preserves one duplicate spanning adjacent stable string pages.
+ *
+ * The scripted peer freezes a two-page scheduler-type collection whose final
+ * first-page value equals the next page's first value. The Client must retain
+ * both rows in order, advance by the actual first-page length, and perform
+ * exactly the two scripted RPC attempts.
+ *
+ * @return Nothing; GoogleTest assertions report value or request mismatch.
+ * @throws std::bad_alloc, std::runtime_error, or std::system_error if
+ *         deterministic socket, scripted response, or peer-thread setup fails.
+ * @note Equality is legal at a page boundary because global sortedness is
+ *       non-decreasing; a true ordering regression remains invalid.
+ */
+TEST(ClientCollectionAggregation,
+     PreservesCrossPageDuplicateSortedStringsWithoutLossOrExtraRequest) {
+  ScopedTempDirectory temp("ps-ipc-dup-edge");
+  const std::string socket_path = (temp.path() / "server.sock").string();
+  UniqueFd listener = create_test_listener(socket_path);
+  const std::string cursor(32, 'e');
+  const std::vector<ScriptedClientReply> replies = {
+      {"scheduler.types", Json{{"types", Json::array({"alpha", "beta"})},
+                               {"offset", 0},
+                               {"has_more", true},
+                               {"cursor", cursor}}},
+      {"scheduler.types", Json{{"types", Json::array({"beta", "gamma"})},
+                               {"offset", 2},
+                               {"has_more", false},
+                               {"cursor", nullptr}}}};
+  std::vector<Json> requests;
+  bool served = false;
+  std::thread peer([&] {
+    served = serve_scripted_client_replies(listener.get(), replies, &requests);
+  });
+  Client client;
+  ASSERT_TRUE(client.connect(socket_path).ok);
+  const IpcResult<std::vector<std::string>> result =
+      client.scheduler_available_types();
+  peer.join();
+
+  ASSERT_TRUE(served);
+  ASSERT_TRUE(result.status.ok) << result.status.message;
+  EXPECT_EQ(result.value,
+            (std::vector<std::string>{"alpha", "beta", "beta", "gamma"}));
+  ASSERT_EQ(requests.size(), 2U);
+  EXPECT_EQ(requests[1]["params"]["cursor"], cursor);
+  EXPECT_EQ(requests[1]["params"]["offset"], 2);
+  EXPECT_EQ(requests[1]["params"]["limit"], 2);
+  EXPECT_TRUE(client.connected());
+}
+
+/**
+ * @brief Rejects a genuine ordering regression in one sorted string page.
+ *
+ * The scripted peer returns a final page whose last value compares below the
+ * preceding value. The Client must reject the response transactionally,
+ * publish no partial vector, and make no request beyond that malformed page.
+ *
+ * @return Nothing; GoogleTest assertions report status or request mismatch.
+ * @throws std::bad_alloc, std::runtime_error, or std::system_error if
+ *         deterministic socket, scripted response, or peer-thread setup fails.
+ * @note This guards the strict distinction between legal equality and illegal
+ *       descending order without changing map-key uniqueness rules.
+ */
+TEST(ClientCollectionAggregation,
+     RejectsDescendingSortedStringsWithoutPartialValueOrExtraRequest) {
+  ScopedTempDirectory temp("ps-ipc-descend");
+  const std::string socket_path = (temp.path() / "server.sock").string();
+  UniqueFd listener = create_test_listener(socket_path);
+  const std::vector<ScriptedClientReply> replies = {
+      {"scheduler.types",
+       Json{{"types", Json::array({"alpha", "gamma", "beta"})},
+            {"offset", 0},
+            {"has_more", false},
+            {"cursor", nullptr}}}};
+  std::vector<Json> requests;
+  bool served = false;
+  std::thread peer([&] {
+    served = serve_scripted_client_replies(listener.get(), replies, &requests);
+  });
+  Client client;
+  ASSERT_TRUE(client.connect(socket_path).ok);
+  const IpcResult<std::vector<std::string>> result =
+      client.scheduler_available_types();
+  peer.join();
+
+  ASSERT_TRUE(served);
+  EXPECT_FALSE(result.status.ok);
+  EXPECT_EQ(result.status.domain, OperationErrorDomain::Protocol);
+  EXPECT_EQ(result.status.code, kInvalidRequestCode);
+  EXPECT_TRUE(result.value.empty());
+  EXPECT_EQ(requests.size(), 1U);
   EXPECT_TRUE(client.connected());
 }
 
@@ -7173,6 +7354,20 @@ TEST(ClientCollectionAggregation,
   EXPECT_TRUE(client.connected());
 }
 
+/**
+ * @brief Rejects every malformed compute-state/status/output coupling.
+ *
+ * Independent scripted peers return a nonterminal job with terminal success,
+ * a succeeded job with failed status, and a succeeded status-only poll with
+ * unexpected output metadata. Each response must fail typed validation before
+ * any malformed snapshot is published.
+ *
+ * @return Nothing; GoogleTest assertions report status or attempt mismatch.
+ * @throws std::bad_alloc, std::runtime_error, or std::system_error if scripted
+ *         job values, sockets, or peer threads cannot be created.
+ * @note Each case performs exactly one `compute.status` RPC. A malformed typed
+ *       result is recoverable Protocol input and leaves the Client connected.
+ */
 TEST(ClientJobValidation, RejectsMalformedStateCouplingWithOneStatusAttempt) {
   const ps::ipc::ComputeRequestId compute_id{std::string(32, 'b')};
   const IpcSessionId session_id{std::string(32, 'a')};
@@ -7226,6 +7421,21 @@ TEST(ClientJobValidation, RejectsMalformedStateCouplingWithOneStatusAttempt) {
   }
 }
 
+/**
+ * @brief Decodes image-output metadata and releases its matching lease once.
+ *
+ * The peer returns one terminal image job with opaque output and delivery ids,
+ * tight CPU layout metadata, and filesystem identity. The Client publishes the
+ * owned typed values, then sends exactly one lease-aware release containing the
+ * same compute and delivery ids.
+ *
+ * @return Nothing; GoogleTest assertions report decode or request mismatch.
+ * @throws std::bad_alloc, std::runtime_error, or std::system_error if socket,
+ *         JSON, result storage, or peer-thread setup cannot complete.
+ * @note This direct-Client test validates typed wire ownership only. Artifact
+ *       opening, mmap lifetime, and identity revalidation belong to the
+ *       installed IPC Host adapter boundary.
+ */
 TEST(ClientJobValidation, DecodesOutputAndReleasesMatchingLeaseOnce) {
   ScopedTempDirectory temp("ps-ipc-lease");
   const std::string socket_path = (temp.path() / "server.sock").string();
@@ -7283,6 +7493,20 @@ TEST(ClientJobValidation, DecodesOutputAndReleasesMatchingLeaseOnce) {
   EXPECT_EQ(requests[1]["params"]["delivery_id"], delivery_id);
 }
 
+/**
+ * @brief Rejects terminal image output with a non-tight row layout.
+ *
+ * The scripted result advertises a two-byte logical row but a three-byte row
+ * step and corresponding padded total size. The direct Client must reject the
+ * entire terminal snapshot as malformed rather than publishing output metadata
+ * that violates the version 1 tight-row artifact contract.
+ *
+ * @return Nothing; GoogleTest assertions report status or attempt mismatch.
+ * @throws std::bad_alloc, std::runtime_error, or std::system_error if socket,
+ *         malformed JSON, or peer-thread setup cannot complete.
+ * @note Validation performs one `compute.result` attempt, publishes no output,
+ *       and keeps the connection available for later independent calls.
+ */
 TEST(ClientJobValidation, RejectsMalformedOutputByteLayout) {
   ScopedTempDirectory temp("ps-ipc-badout");
   const std::string socket_path = (temp.path() / "server.sock").string();
@@ -7328,6 +7552,20 @@ TEST(ClientJobValidation, RejectsMalformedOutputByteLayout) {
   EXPECT_TRUE(client.connected());
 }
 
+/**
+ * @brief Returns ambiguous mutation transport loss without retrying the call.
+ *
+ * The peer records one complete `graph.node_yaml.set` request and closes the
+ * socket without a response, modelling a mutation that may already have taken
+ * effect remotely. The Client must return the first read failure and preserve
+ * the exact one-attempt request arguments.
+ *
+ * @return Nothing; GoogleTest assertions report status or request mismatch.
+ * @throws std::bad_alloc, std::runtime_error, or std::system_error if socket,
+ *         request capture, or peer-thread setup cannot complete.
+ * @note The expected Transport code is the established read/truncated-frame
+ *       classification. The Client disconnects and never resends the mutation.
+ */
 TEST(ClientRetryPolicy, DoesNotRetryMutationAfterAmbiguousTransportLoss) {
   ScopedTempDirectory temp("ps-ipc-noretry");
   const std::string socket_path = (temp.path() / "server.sock").string();
