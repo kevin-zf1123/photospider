@@ -1,5 +1,7 @@
 #pragma once
 
+#include <cstddef>
+#include <functional>
 #include <string>
 
 namespace ps::ipc::internal {
@@ -118,6 +120,65 @@ class UniqueFd {
 bool configure_no_sigpipe(int fd, std::string* message);
 
 /**
+ * @brief Creates one configured but unconnected Unix stream socket.
+ *
+ * @param message Receives a bounded socket/fcntl diagnostic on failure.
+ * @return Owned `FD_CLOEXEC` descriptor or an empty owner.
+ * @throws std::bad_alloc if diagnostic construction fails.
+ * @note Separating creation from connect lets lifecycle owners publish the
+ *       descriptor before an interruptible nonblocking connect begins.
+ */
+UniqueFd create_unix_stream_socket(std::string* message);
+
+/**
+ * @brief Connects one already-owned socket with interruptible nonblocking IO.
+ *
+ * @param fd Configured Unix stream socket descriptor.
+ * @param socket_path Absolute filesystem path fitting `sun_path`.
+ * @param should_stop Stop predicate checked before connect and between bounded
+ *        backlog-retry/writable-wait slices.
+ * @param message Receives validation, connect, interruption, or socket
+ *        diagnostics.
+ * @return True after connection and restoration of blocking mode.
+ * @throws std::bad_alloc if diagnostic construction fails, or whatever the
+ *         supplied stop predicate throws.
+ * @note The function performs one logical nonblocking connection. It completes
+ *       `EINPROGRESS`/`EALREADY` through writable poll plus `SO_ERROR`; Linux
+ *       AF_UNIX `EAGAIN` means no connection began, so it waits one bounded
+ *       slice and re-enters connect on the same fd; `EISCONN` after such a
+ *       transient is successful logical completion. It never closes,
+ *       transfers ownership, writes a frame, or imposes a total timeout.
+ */
+bool connect_prepared_unix_socket(int fd, const std::string& socket_path,
+                                  const std::function<bool()>& should_stop,
+                                  std::string* message);
+
+/**
+ * @brief Connects through one injected attempt and the production wait logic.
+ *
+ * @param fd Configured Unix stream socket descriptor.
+ * @param socket_path Absolute filesystem path fitting `sun_path`.
+ * @param should_stop Stop predicate checked before attempt and while pending.
+ * @param connect_attempt Callable receiving descriptor, sockaddr bytes, and
+ *        address length; it must follow connect's return/errno contract.
+ * @param message Receives validation, connect, interruption, or socket
+ *        diagnostics.
+ * @return True after the logical connection completes and original blocking
+ *         flags are restored.
+ * @throws std::bad_alloc if diagnostic construction fails, or whatever either
+ *         injected callable throws.
+ * @note This source-tree-private seam makes pending completion and Linux
+ *       backlog-`EAGAIN` retries deterministic in tests. Re-entry is limited to
+ *       a same-fd local connection that has not begun; no frame/RPC is retried.
+ *       The helper never owns or closes `fd`.
+ */
+bool connect_prepared_unix_socket_with_attempt(
+    int fd, const std::string& socket_path,
+    const std::function<bool()>& should_stop,
+    const std::function<int(int, const void*, std::size_t)>& connect_attempt,
+    std::string* message);
+
+/**
  * @brief Connects one owned stream socket to an absolute Unix path.
  *
  * @param socket_path Absolute filesystem path that fits `sun_path` including
@@ -125,8 +186,9 @@ bool configure_no_sigpipe(int fd, std::string* message);
  * @param message Receives a local validation, socket, or connect diagnostic.
  * @return Owned connected descriptor, or an empty owner on failure.
  * @throws std::bad_alloc if diagnostic construction fails.
- * @note The function performs one connect attempt and never retries a
- *       potentially mutating protocol operation.
+ * @note The function performs one logical connection. Linux backlog `EAGAIN`
+ *       may re-enter local connect on the same unconnected fd; it never retries
+ *       a frame or potentially mutating protocol operation.
  */
 UniqueFd connect_unix_socket(const std::string& socket_path,
                              std::string* message);

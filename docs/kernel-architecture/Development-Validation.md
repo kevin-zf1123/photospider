@@ -85,10 +85,11 @@ handling, compile boundaries, package consumption, and runtime API boundaries.
 `StaticProductConsumerSmoke`, `GraphCliOptionBadAlloc`, GoogleTest discovery,
 and `PublicHeaderSelfContainment` satisfy that rule because they execute or
 compile the maintained product.
-`IpcDisabledInstallSmoke`, focused `test_ipc_protocol` cases, and real-process
-`test_ipc_daemon` cases follow the same rule: they exercise package, framing,
-typed client, daemon lifecycle, Host routing, concurrency, and cleanup
-behavior. Daemon tests use CTest timeouts plus bounded
+`IpcDisabledInstallSmoke`, focused `test_ipc_protocol`/`test_ipc_host` cases,
+and real-process `test_ipc_daemon` cases follow the same rule: they exercise
+package, framing, typed client, complete IPC Host dispatch/polling/stop/artifact
+ownership, daemon lifecycle, concurrency, and cleanup behavior. Daemon tests
+use CTest timeouts plus bounded
 SIGTERM-to-SIGKILL-to-waitpid cleanup; they do not depend on fixed readiness
 sleeps.
 `StaticProductConsumerSmoke` is limited to producer configure/build/install,
@@ -161,10 +162,10 @@ For IPC changes, focused local product validation is:
 
 ```bash
 cmake --build build --target photospider_ipc_client \
-  photospider_ipc_server_internal photospiderd test_ipc_protocol \
+  photospider_ipc_server_internal photospiderd test_ipc_protocol test_ipc_host \
   test_ipc_daemon public_header_self_containment -j
 ctest --test-dir build --output-on-failure \
-  -R '^(FrameCodec|ProtocolEnvelope|IntegerCodec|ProtocolErrors|ProtocolParams|ProtocolGraphLoad|InspectionJson|SessionRegistry|ClientLifecycle|ClientSurface|ClientCollectionAggregation|ClientJobValidation|ClientRetryPolicy|ClientResultValidation|IpcDaemon|StaticProductConsumerSmoke|IpcDisabledInstallSmoke|PublicHeaderSelfContainment)'
+  -R '^(FrameCodec|ProtocolEnvelope|IntegerCodec|ProtocolErrors|ProtocolParams|ProtocolGraphLoad|InspectionJson|SessionRegistry|ClientLifecycle|ClientSurface|ClientCollectionAggregation|ClientJobValidation|ClientRetryPolicy|ClientResultValidation|IpcHost|IpcDaemon|StaticProductConsumerSmoke|IpcDisabledInstallSmoke|PublicHeaderSelfContainment)'
 ```
 
 Temporary daemon processes, sockets, graph sessions, package prefixes, and

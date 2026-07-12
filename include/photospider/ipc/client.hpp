@@ -25,6 +25,10 @@
 
 namespace ps::ipc {
 
+namespace internal {
+class ClientInterruptAccess;
+}  // namespace internal
+
 /**
  * @brief Move-only client for one sequential Unix IPC connection.
  *
@@ -99,8 +103,11 @@ class PHOTOSPIDER_API Client {
    * @param socket_path Absolute daemon socket path.
    * @return Success, or a local transport status with copied diagnostics.
    * @throws std::bad_alloc if private path or diagnostic storage is exhausted.
-   * @note An existing connection is closed first. The operation does not
-   *       discover, start, retry, or authenticate a daemon.
+   * @note An existing connection is closed first. Linux backlog `EAGAIN` may
+   *       wait and continue the same logical connection on one unconnected fd
+   *       before any frame exists. Terminal connection failure and every
+   *       frame/RPC outcome are never reconnected or retried. The operation
+   *       does not discover, start, or authenticate a daemon.
    */
   OperationStatus connect(const std::string& socket_path);
 
@@ -385,8 +392,8 @@ class PHOTOSPIDER_API Client {
    * @param compute_id Opaque accepted compute-job identifier.
    * @return Current validated job snapshot or a categorized lookup failure.
    * @throws std::bad_alloc if request or result allocation fails.
-   * @note This primitive performs one RPC attempt; polling policy belongs to
-   *       the later IPC Host adapter and cannot trigger an implicit retry here.
+   * @note This primitive performs one RPC attempt. The IPC Host owns polling
+   *       cadence and stop policy and cannot trigger an implicit retry here.
    */
   IpcResult<ComputeJobSnapshot> compute_status(
       const ComputeRequestId& compute_id);
@@ -396,7 +403,8 @@ class PHOTOSPIDER_API Client {
    * @param compute_id Opaque accepted compute-job identifier.
    * @return Terminal job plus optional leased output metadata or a failure.
    * @throws std::bad_alloc if request or result allocation fails.
-   * @note The Client copies metadata only; mapping the artifact is task 4.3.
+   * @note The Client copies and validates metadata only. The IPC Host owns
+   *       artifact opening, identity revalidation, and returned image lifetime.
    */
   IpcResult<ComputeJobSnapshot> compute_result(
       const ComputeRequestId& compute_id);
@@ -591,7 +599,8 @@ class PHOTOSPIDER_API Client {
    * @brief Calls `plugins.ops_combined_keys` and aggregates all sorted pages.
    * @return Complete combined operation-key list or a categorized failure.
    * @throws std::bad_alloc if request, page, or aggregate allocation fails.
-   * @note Strict lexical ordering is validated across page boundaries.
+   * @note Global non-decreasing lexical order is validated across page
+   *       boundaries, and duplicate values are preserved.
    */
   IpcResult<std::vector<std::string>> ops_combined_keys();
 
@@ -607,7 +616,8 @@ class PHOTOSPIDER_API Client {
    * @brief Calls `scheduler.types` and aggregates every sorted stable page.
    * @return Complete available scheduler type list or a categorized failure.
    * @throws std::bad_alloc if request, page, or aggregate allocation fails.
-   * @note Strict lexical ordering is validated across page boundaries.
+   * @note Global non-decreasing lexical order is validated across page
+   *       boundaries, and duplicate values are preserved.
    */
   IpcResult<std::vector<std::string>> scheduler_available_types();
 
@@ -643,7 +653,8 @@ class PHOTOSPIDER_API Client {
    * @brief Calls `scheduler.loaded_plugins` and aggregates sorted pages.
    * @return Complete loaded plugin-label list or a categorized failure.
    * @throws std::bad_alloc if request, page, or aggregate allocation fails.
-   * @note Strict lexical ordering is validated across page boundaries.
+   * @note Global non-decreasing lexical order is validated across page
+   *       boundaries, and duplicate values are preserved.
    */
   IpcResult<std::vector<std::string>> scheduler_loaded_plugins();
 
@@ -693,6 +704,20 @@ class PHOTOSPIDER_API Client {
                                                 std::size_t limit);
 
  private:
+  /** @brief Allows the private IPC Host to interrupt one blocking RPC. */
+  friend class internal::ClientInterruptAccess;
+
+  /**
+   * @brief Shuts down the active transport to interrupt blocking IO.
+   *
+   * @throws Nothing.
+   * @note This internal lifecycle hook latches interruption even before
+   *       descriptor publication and retains descriptor ownership. The active
+   *       call observes failure and its Client closes the descriptor exactly
+   *       once during normal worker cleanup.
+   */
+  void interrupt() noexcept;
+
   /** @brief Private transport/envelope implementation. */
   class Impl;
 

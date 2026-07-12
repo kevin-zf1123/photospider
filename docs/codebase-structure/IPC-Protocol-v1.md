@@ -14,10 +14,11 @@ When `CMAKE_SYSTEM_NAME` is exactly `Darwin` or `Linux`,
 - `photospider_ipc_server_internal`, a non-installed server/router library;
 - `photospiderd`, an installed foreground executable.
 
-The public client headers are `photospider/ipc/protocol.hpp` and
-`photospider/ipc/client.hpp`. They expose typed owned values and no JSON type,
-socket descriptor, `sockaddr_un`, backend model, runtime service, or mutable
-backend ownership. The client library does not link the `photospider` backend.
+The public client headers are `photospider/ipc/protocol.hpp`,
+`photospider/ipc/client.hpp`, and `photospider/ipc/host.hpp`. They expose typed
+owned values plus the complete Host factory and no JSON type, socket descriptor,
+`sockaddr_un`, backend model, runtime service, or mutable backend ownership. The
+client library does not link the `photospider` backend.
 When IPC is disabled, neither its target nor its public headers are installed.
 Forcing IPC on for any other CMake system name fails configuration.
 
@@ -124,6 +125,16 @@ ends that client normally. EOF inside a header or body, zero length, and an
 oversized length close only that connection without reading an untrusted body
 or inventing an uncorrelated response. Linux sends use `MSG_NOSIGNAL`; macOS
 uses socket-local `SO_NOSIGPIPE`. No process-global SIGPIPE policy changes.
+
+Client connection setup publishes one `FD_CLOEXEC` descriptor, performs one
+logical nonblocking connection, and restores the descriptor's original blocking
+flags on every outcome. `EINPROGRESS`/`EALREADY` complete through interruptible
+10-ms poll slices plus `SO_ERROR`. Linux AF_UNIX backlog `EAGAIN` means no
+connection began, so the Client waits one stop-aware 10-ms slice and re-enters
+connect on the same unconnected fd. There is no total connect timeout; no frame,
+RPC, or submit is retried. IPC Host stop is latched even before descriptor
+publication, is checked before and after writable completion, and prevents any
+request write while the worker retains sole close ownership.
 
 JSON object keys must be unique after escape decoding. Duplicate keys are an
 invalid request; they are never resolved with last-value-wins behavior.
@@ -576,6 +587,44 @@ performs one RPC attempt; submission and release are never retried. The server
 owns one explicitly started, joinable `ComputeRequestRegistry` worker and one shared
 session-admission gate. This infrastructure remains private implementation of
 the typed wire methods rather than a second public Host.
+
+The installed `create_ipc_host(socket_path)` adapter implements all 53 current
+non-destructor `ps::Host` virtuals. Each ordinary Host call creates one typed
+short-lived Client connection and attempts its matching RPC once; there is no
+embedded fallback, implicit session close, plugin unload, or mutation retry.
+The GraphSessionId returned by load stores the daemon's opaque session id, while
+the caller's display name remains request metadata.
+
+Synchronous compute and each async worker submit exactly once, issue the first
+`compute.status` immediately, and use one fresh Client per later status/result/
+release RPC. Every successful nonterminal status is followed by waits of
+10/20/40/80/160/320/500 ms, with 500 ms repeated thereafter. The waiter and
+monotonic clock are injectable and interruptible. Synchronous compute has no
+total timeout and waits until a terminal state, the first RPC/protocol failure,
+or adapter stop. The adapter rejects session mismatches, running-to-queued
+regression, changed terminal state/status, and unexpected status-mode output.
+Top-level RPC failures remain top-level statuses; a validated terminal nested
+status is returned without rewriting its domain, signed code, stable name, or
+message.
+
+After a terminal status is known, cleanup attempts one best-effort
+`compute.release` even when result retrieval or cross-RPC validation fails.
+Only a successfully validated image result contributes its delivery id.
+Cleanup failure never replaces the already obtained status or image. A status
+poll failure before terminal publication and adapter stop do not release an
+unfinished daemon job. The task-4.2 production image consumer opens with
+`O_NOFOLLOW|O_CLOEXEC|O_NONBLOCK`, verifies same uid, regular type, exact
+`0600`, one link, device/inode/size and tight layout before and after `pread`,
+and returns an independent heap-backed CPU image before lease-aware release.
+The 512-MiB metadata limit is enforced before allocation. Task 4.3 replaces
+this safe owned-copy consumer with read-only mmap/shared-deleter ownership.
+
+`compute_async` creates its joined worker before remote submission. Adapter
+destruction publishes stop, wakes all waiters, shuts down active worker
+descriptors, completes every unfinished future with local Transport code 5
+`client_stopped`, and then joins all workers. A worker result racing after stop
+is discarded. Destruction never resubmits, releases unfinished jobs, closes
+daemon sessions, unloads plugins, or starts embedded execution.
 
 `compute.submit` requires `session_id`, nonnegative `node_id`, and
 `result_mode` equal to `status` or `image`. It accepts the existing Host request
@@ -1146,12 +1195,12 @@ Focused local commands are:
 ```bash
 cmake -S . -B build -DPHOTOSPIDER_BUILD_IPC=ON -DBUILD_TESTING=ON
 cmake --build build --target photospider_ipc_client \
-  photospider_ipc_server_internal photospiderd test_ipc_protocol \
+  photospider_ipc_server_internal photospiderd test_ipc_protocol test_ipc_host \
   test_compute_request_registry test_collection_snapshot_registry \
   test_output_store test_event_stream_boundaries test_ipc_daemon \
   public_header_self_containment -j
 ctest --test-dir build --output-on-failure \
-  -R '^(FrameCodec|ProtocolEnvelope|IntegerCodec|ProtocolErrors|ProtocolParams|ProtocolGraphLoad|ProtocolGraphClose|ProtocolOperationPlugins|HostRoutedGraphStateProtocolTest|StableInspectionPagingProtocolTest|InspectionJson|SessionRegistry|ComputeRequestRegistry|CollectionSnapshotRegistry|OutputStore|ComputeEventRing|SchedulerTraceRing|ClientLifecycle|ClientSurface|ClientCollectionAggregation|ClientJobValidation|ClientRetryPolicy|ClientResultValidation|IpcDaemon|IpcDaemonOperationPlugins|IpcDaemonSchedulers|IpcObservationFixtureDaemon|StaticProductConsumerSmoke|IpcDisabledInstallSmoke|PublicHeaderSelfContainment)'
+  -R '^(FrameCodec|ProtocolEnvelope|IntegerCodec|ProtocolErrors|ProtocolParams|ProtocolGraphLoad|ProtocolGraphClose|ProtocolOperationPlugins|HostRoutedGraphStateProtocolTest|StableInspectionPagingProtocolTest|InspectionJson|SessionRegistry|ComputeRequestRegistry|CollectionSnapshotRegistry|OutputStore|ComputeEventRing|SchedulerTraceRing|UnixSocketConnect|ClientLifecycle|ClientSurface|ClientCollectionAggregation|ClientJobValidation|ClientRetryPolicy|ClientResultValidation|IpcHost|IpcDaemon|IpcDaemonOperationPlugins|IpcDaemonSchedulers|IpcObservationFixtureDaemon|StaticProductConsumerSmoke|IpcDisabledInstallSmoke|PublicHeaderSelfContainment)'
 ```
 
 `StaticProductConsumerSmoke` verifies the installed backend plus a second

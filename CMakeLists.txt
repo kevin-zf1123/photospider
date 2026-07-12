@@ -381,6 +381,7 @@ if(PHOTOSPIDER_BUILD_IPC)
         src/lib/ipc/unix_socket.cpp
         src/lib/ipc/codec.cpp
         src/lib/ipc/client.cpp
+        src/lib/ipc/host.cpp
     )
     target_compile_features(photospider_ipc_client_objects PRIVATE cxx_std_17)
     target_include_directories(photospider_ipc_client_objects PRIVATE
@@ -388,7 +389,8 @@ if(PHOTOSPIDER_BUILD_IPC)
         "${PROJECT_SOURCE_DIR}/src/lib"
     )
     target_link_libraries(photospider_ipc_client_objects PRIVATE
-        nlohmann_json::nlohmann_json)
+        nlohmann_json::nlohmann_json
+        Threads::Threads)
 
     add_library(photospider_ipc_client STATIC
         $<TARGET_OBJECTS:photospider_ipc_client_objects>)
@@ -399,6 +401,7 @@ if(PHOTOSPIDER_BUILD_IPC)
             "$<BUILD_INTERFACE:${PHOTOSPIDER_BUILD_PUBLIC_INCLUDE_DIR}>"
             "$<INSTALL_INTERFACE:${CMAKE_INSTALL_INCLUDEDIR}>"
     )
+    target_link_libraries(photospider_ipc_client PUBLIC Threads::Threads)
 
     add_library(photospider_ipc_server_internal STATIC
         src/lib/ipc/collection_snapshot_registry.cpp
@@ -860,6 +863,24 @@ if(BUILD_TESTING)
         add_dependencies(test_ipc_protocol destroy_count_scheduler_plugin
             lifecycle_op_plugin)
 
+        add_executable(test_ipc_host tests/unit/test_ipc_host.cpp)
+        set_target_properties(test_ipc_host PROPERTIES
+            RUNTIME_OUTPUT_DIRECTORY "${TEST_OUTPUT_DIR}"
+            BUILD_RPATH "${CMAKE_BINARY_DIR}/lib")
+        target_compile_features(test_ipc_host PRIVATE cxx_std_17)
+        target_include_directories(test_ipc_host PRIVATE
+            "${PROJECT_SOURCE_DIR}/include"
+            "${PROJECT_SOURCE_DIR}/src/lib"
+            "${PROJECT_SOURCE_DIR}/tests")
+        target_link_libraries(test_ipc_host PRIVATE
+            photospider_ipc_server_internal
+            photospider_ipc_client
+            photospider
+            GTest::gtest
+            GTest::gtest_main
+            nlohmann_json::nlohmann_json
+            Threads::Threads)
+
         add_executable(test_compute_request_registry
             tests/unit/test_compute_request_registry.cpp)
         set_target_properties(test_compute_request_registry PROPERTIES
@@ -1147,6 +1168,9 @@ if(BUILD_TESTING)
         gtest_discover_tests(test_ipc_protocol
             WORKING_DIRECTORY ${PROJECT_SOURCE_DIR}
             PROPERTIES TIMEOUT 30)
+        gtest_discover_tests(test_ipc_host
+            WORKING_DIRECTORY ${PROJECT_SOURCE_DIR}
+            PROPERTIES TIMEOUT 60)
         gtest_discover_tests(test_compute_request_registry
             WORKING_DIRECTORY ${PROJECT_SOURCE_DIR}
             PROPERTIES TIMEOUT 30)

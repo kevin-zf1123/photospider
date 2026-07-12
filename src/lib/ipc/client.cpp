@@ -1,7 +1,10 @@
 #include "photospider/ipc/client.hpp"
 
+#include <sys/socket.h>
+
 #include <algorithm>
 #include <array>
+#include <atomic>
 #include <cmath>
 #include <cstddef>
 #include <cstdint>
@@ -9,6 +12,7 @@
 #include <limits>
 #include <map>
 #include <memory>
+#include <mutex>
 #include <optional>
 #include <set>
 #include <string>
@@ -102,6 +106,7 @@ struct CollectionPageMetadata {
  *
  * @param result Method-specific result object containing common metadata.
  * @param expected_offset Exact continuation offset sent by the Client.
+ * @param request_limit Exact maximum row count sent for this page.
  * @param page_rows Number of indivisible outer rows decoded from this page.
  * @param stable_cursor Cursor established by an earlier page, when present.
  * @param metadata Receives complete metadata only after all checks succeed.
@@ -115,13 +120,15 @@ struct CollectionPageMetadata {
  */
 bool decode_collection_page_metadata(
     const internal::Json& result, std::size_t expected_offset,
-    std::size_t page_rows, const std::optional<std::string>& stable_cursor,
+    std::size_t request_limit, std::size_t page_rows,
+    const std::optional<std::string>& stable_cursor,
     CollectionPageMetadata* metadata, std::string* message) {
   if (metadata == nullptr || message == nullptr || !result.is_object() ||
       !result.contains("offset") ||
       !result.value("has_more", internal::Json()).is_boolean() ||
-      !result.contains("cursor") ||
-      page_rows > internal::kGeneralPageMaxEntries) {
+      !result.contains("cursor") || request_limit == 0 ||
+      request_limit > internal::kGeneralPageMaxEntries ||
+      page_rows > request_limit) {
     if (message != nullptr) {
       *message = "collection result has invalid page metadata";
     }
@@ -267,8 +274,8 @@ IpcResult<A> aggregate_collection(C call_page, D decode_page, M measure_page,
     }
     CollectionPageMetadata metadata;
     if (!decode_collection_page_metadata(call.result, expected_offset,
-                                         page_rows, stable_cursor, &metadata,
-                                         &message)) {
+                                         request_limit, page_rows,
+                                         stable_cursor, &metadata, &message)) {
       return failed_result<A>(invalid_response(std::move(message)));
     }
     internal::CollectionPageMeasurement measurement;
@@ -1766,8 +1773,8 @@ std::size_t channel_bytes(DataType data_type) noexcept {
  * @return True when identities, path, image layout, and filesystem values are
  *         exact and overflow-safe.
  * @throws std::bad_alloc if copied ids, path, or diagnostics allocate.
- * @note This validates metadata only. Opening, identity revalidation, mmap,
- *       and mapping ownership remain task 4.3 responsibilities.
+ * @note This direct Client validates metadata only. The IPC Host consumer owns
+ *       protected opening, identity revalidation, and image memory lifetime.
  */
 bool decode_output_delivery(const internal::Json& value,
                             OutputArtifactDelivery* delivery,
@@ -1804,6 +1811,7 @@ bool decode_output_delivery(const internal::Json& value,
       metadata.device != Device::CPU ||
       !internal::decode_integer(value["row_step"], &metadata.row_step) ||
       !internal::decode_integer(value["byte_size"], &metadata.byte_size) ||
+      metadata.byte_size > internal::kOutputArtifactMaxBytes ||
       !internal::decode_integer(value["filesystem_device"],
                                 &metadata.filesystem_device) ||
       !internal::decode_integer(value["inode"], &metadata.inode)) {
@@ -1981,7 +1989,10 @@ bool decode_compute_release(const internal::Json& value,
  * @brief Private connection, sequence, and correlated-envelope implementation.
  *
  * @throws std::bad_alloc when request/response storage cannot be allocated.
- * @note The object is called only by one public `Client` operation at a time.
+ * @note The object is called by one public `Client` operation at a time. The
+ *       sole concurrency exception is the private shutdown-only `interrupt()`;
+ *       descriptor observation is mutex-serialized with connect, reset, and
+ *       close while the active call retains logical IO ownership.
  */
 class Client::Impl {
  public:
@@ -1991,18 +2002,42 @@ class Client::Impl {
    * @param socket_path Absolute Unix socket path.
    * @return Success or local transport diagnostic.
    * @throws std::bad_alloc if path or diagnostic storage cannot be allocated.
-   * @note Any current connection is closed before the one-shot connect.
+   * @note Any current connection is closed before one logical connection.
+   *       Linux backlog `EAGAIN` may wait and re-enter connect on the same fd
+   *       before any frame exists. A terminal connect failure and every later
+   *       frame/RPC outcome are never reconnected or retried.
    */
   OperationStatus connect(const std::string& socket_path) {
-    socket_.reset();
+    disconnect();
     std::string message;
-    internal::UniqueFd connected =
-        internal::connect_unix_socket(socket_path, &message);
-    if (!connected) {
+    internal::UniqueFd prepared = internal::create_unix_stream_socket(&message);
+    if (!prepared) {
       return internal::failure_status(OperationErrorDomain::Transport, 1,
                                       "connect_failed", std::move(message));
     }
-    socket_ = std::move(connected);
+    int socket_fd = -1;
+    {
+      std::lock_guard<std::mutex> lock(socket_mutex_);
+      socket_ = std::move(prepared);
+      socket_fd = socket_.get();
+    }
+    bool connected = false;
+    try {
+      connected = internal::connect_prepared_unix_socket(
+          socket_fd, socket_path,
+          [this] { return interrupt_requested_.load(); }, &message);
+    } catch (...) {
+      disconnect();
+      throw;
+    }
+    if (!connected || interrupt_requested_.load()) {
+      disconnect();
+      if (message.empty()) {
+        message = "connect interrupted";
+      }
+      return internal::failure_status(OperationErrorDomain::Transport, 1,
+                                      "connect_failed", std::move(message));
+    }
     return internal::ok_status();
   }
 
@@ -2011,7 +2046,28 @@ class Client::Impl {
    *
    * @throws Nothing.
    */
-  void disconnect() noexcept { socket_.reset(); }
+  void disconnect() noexcept {
+    std::lock_guard<std::mutex> lock(socket_mutex_);
+    socket_.reset();
+  }
+
+  /**
+   * @brief Interrupts blocking IO without releasing descriptor ownership.
+   *
+   * @throws Nothing.
+   * @note The stop request is latched before descriptor locking, so an
+   *       interrupt that wins before fd publication prevents a later pending
+   *       connect from blocking. `shutdown` is serialized with descriptor
+   *       reset so a recycled fd is never targeted. The worker performs the
+   *       sole close after connect/read/write returns.
+   */
+  void interrupt() noexcept {
+    interrupt_requested_.store(true);
+    std::lock_guard<std::mutex> lock(socket_mutex_);
+    if (socket_) {
+      (void)::shutdown(socket_.get(), SHUT_RDWR);
+    }
+  }
 
   /**
    * @brief Reports whether this implementation owns a descriptor.
@@ -2019,7 +2075,10 @@ class Client::Impl {
    * @return True when connected or until a peer failure is observed.
    * @throws Nothing.
    */
-  bool connected() const noexcept { return static_cast<bool>(socket_); }
+  bool connected() const noexcept {
+    std::lock_guard<std::mutex> lock(socket_mutex_);
+    return static_cast<bool>(socket_);
+  }
 
   /**
    * @brief Sends one request and validates its correlated response envelope.
@@ -2036,7 +2095,12 @@ class Client::Impl {
    *       becomes a local Protocol error and leaves the connection open.
    */
   RawCallResult call(const std::string& method, const internal::Json& params) {
-    if (!socket_) {
+    int socket_fd = -1;
+    {
+      std::lock_guard<std::mutex> lock(socket_mutex_);
+      socket_fd = socket_.get();
+    }
+    if (socket_fd < 0) {
       return {internal::failure_status(OperationErrorDomain::Transport, 2,
                                        "not_connected",
                                        "IPC client is not connected"),
@@ -2072,16 +2136,16 @@ class Client::Impl {
               {}};
     }
     const internal::FrameWriteResult written =
-        internal::write_frame(socket_.get(), payload);
+        internal::write_frame(socket_fd, payload);
     if (!written.ok) {
-      socket_.reset();
+      disconnect();
       return {internal::failure_status(OperationErrorDomain::Transport, 3,
                                        "write_failed", written.message),
               {}};
     }
-    const internal::FrameReadResult frame = internal::read_frame(socket_.get());
+    const internal::FrameReadResult frame = internal::read_frame(socket_fd);
     if (frame.state != internal::FrameReadState::Complete) {
-      socket_.reset();
+      disconnect();
       if (frame.state == internal::FrameReadState::InvalidLength) {
         return {invalid_response(frame.message), {}};
       }
@@ -2100,7 +2164,7 @@ class Client::Impl {
     const internal::JsonParseResult parsed =
         internal::parse_json(frame.payload);
     if (!parsed.ok) {
-      socket_.reset();
+      disconnect();
       return {internal::failure_status(
                   OperationErrorDomain::Protocol,
                   parsed.duplicate_key ? internal::kInvalidRequestCode
@@ -2119,19 +2183,19 @@ class Client::Impl {
         has_result == has_error ||
         (has_result && !response["result"].is_object()) ||
         (has_error && !response["error"].is_object())) {
-      socket_.reset();
+      disconnect();
       return {invalid_response("response envelope has an invalid shape"), {}};
     }
     std::int32_t response_version = 0;
     if (!internal::decode_integer(response["protocol_version"],
                                   &response_version)) {
-      socket_.reset();
+      disconnect();
       return {invalid_response("response protocol_version is out of range"),
               {}};
     }
     if (response_version != kProtocolVersion ||
         response["id"].get<std::string>() != id) {
-      socket_.reset();
+      disconnect();
       return {invalid_response(
                   "response protocol version or request id does not correlate"),
               {}};
@@ -2140,7 +2204,7 @@ class Client::Impl {
       OperationStatus status;
       std::string message;
       if (!internal::decode_error(response["error"], &status, &message)) {
-        socket_.reset();
+        disconnect();
         return {invalid_response(std::move(message)), {}};
       }
       return {std::move(status), {}};
@@ -2322,6 +2386,20 @@ class Client::Impl {
   }
 
  private:
+  /**
+   * @brief Serializes descriptor publication, observation, shutdown, and reset.
+   * @note The mutex is intentionally not held across connect waits or framed
+   *       IO. Private interruption never closes the stable worker-owned fd.
+   */
+  mutable std::mutex socket_mutex_;
+
+  /**
+   * @brief Atomic private stop latch spanning the no-fd publication window.
+   * @note Only private `interrupt()` sets this value. IPC Host workers use a
+   *       fresh Client per RPC and never reuse an interrupted instance.
+   */
+  std::atomic<bool> interrupt_requested_{false};
+
   /** @brief Sole owner of the connected Unix descriptor. */
   internal::UniqueFd socket_;
 
@@ -2359,6 +2437,13 @@ void Client::disconnect() noexcept {
 /** @copydoc Client::connected */
 bool Client::connected() const noexcept {
   return impl_ != nullptr && impl_->connected();
+}
+
+/** @copydoc Client::interrupt */
+void Client::interrupt() noexcept {
+  if (impl_) {
+    impl_->interrupt();
+  }
 }
 
 /** @copydoc Client::ping */
@@ -2627,6 +2712,10 @@ IpcResult<NodeInspectionView> Client::inspect_node(
     return failed_result<NodeInspectionView>(
         invalid_response(std::move(message)));
   }
+  if (result.id.value != node.value) {
+    return failed_result<NodeInspectionView>(
+        invalid_response("inspect.node result returned a mismatched node id"));
+  }
   return {internal::ok_status(), std::move(result)};
 }
 
@@ -2649,14 +2738,25 @@ IpcResult<HostDependencyTreeSnapshot> Client::inspect_dependency_tree(
         return impl_->call("inspect.dependency_tree",
                            collection_page_params(base, cursor, offset, limit));
       },
-      [&session_id](const internal::Json& result,
-                    HostDependencyTreeSnapshot* page, std::size_t* rows,
-                    std::string* message) {
+      [&session_id, node](const internal::Json& result,
+                          HostDependencyTreeSnapshot* page, std::size_t* rows,
+                          std::string* message) {
         if (!decode_session_echo(result, session_id, message) ||
             !internal::decode_dependency_tree(result, page, message)) {
           if (message->empty()) {
             *message = "inspect.dependency_tree returned an invalid page";
           }
+          return false;
+        }
+        const bool matches_node_scope =
+            node && page->scope == HostDependencyTreeScope::StartNode &&
+            page->start_node && page->start_node->value == node->value;
+        const bool matches_graph_scope =
+            !node && page->scope == HostDependencyTreeScope::EndingNodes &&
+            !page->start_node;
+        if (!matches_node_scope && !matches_graph_scope) {
+          *message =
+              "inspect.dependency_tree returned a mismatched request scope";
           return false;
         }
         *rows = page->entries.size();

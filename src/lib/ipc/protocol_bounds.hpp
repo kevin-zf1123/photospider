@@ -31,4 +31,13 @@ inline constexpr std::size_t kSnapshotMaxEntries = 262144;
  */
 inline constexpr std::size_t kSnapshotMaxBytes = 64U * 1024U * 1024U;
 
+/**
+ * @brief Maximum byte size of one version 1 output artifact.
+ *
+ * @throws Nothing; this is an immutable compile-time value.
+ * @note Both daemon admission and direct Client metadata decoding enforce the
+ *       512 MiB ceiling before publication or local allocation.
+ */
+inline constexpr std::size_t kOutputArtifactMaxBytes = 512U * 1024U * 1024U;
+
 }  // namespace ps::ipc::internal

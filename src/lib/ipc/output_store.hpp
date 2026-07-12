@@ -9,6 +9,7 @@
 #include <string>
 
 #include "ipc/compute_request_registry.hpp"
+#include "ipc/protocol_bounds.hpp"
 #include "photospider/core/image_buffer.hpp"
 #include "photospider/ipc/protocol.hpp"
 
@@ -87,7 +88,7 @@ struct OutputStoreLimits {
   std::size_t total_bytes = 1024ULL * 1024ULL * 1024ULL;
 
   /** @brief Maximum byte size admitted for one artifact. */
-  std::size_t artifact_bytes = 512ULL * 1024ULL * 1024ULL;
+  std::size_t artifact_bytes = kOutputArtifactMaxBytes;
 
   /** @brief Defensive lifetime of store-side job ownership. */
   std::chrono::steady_clock::duration job_ttl = std::chrono::minutes(15);

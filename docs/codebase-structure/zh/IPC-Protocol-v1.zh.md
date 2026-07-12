@@ -13,9 +13,9 @@
 - `photospider_ipc_server_internal`：不安装的 server/router library；
 - `photospiderd`：已安装的 foreground executable。
 
-Public client header 是 `photospider/ipc/protocol.hpp` 与
-`photospider/ipc/client.hpp`。它们只暴露 typed owned value，不暴露 JSON type、socket
-descriptor、`sockaddr_un`、backend model、runtime service 或 mutable backend ownership。
+Public client header 是 `photospider/ipc/protocol.hpp`、`photospider/ipc/client.hpp` 与
+`photospider/ipc/host.hpp`。它们只暴露 typed owned value 和完整 Host factory，不暴露 JSON
+type、socket descriptor、`sockaddr_un`、backend model、runtime service 或 mutable backend ownership。
 Client library 不链接 `photospider` backend。IPC disabled 时，不安装该 target 与 public
 header；在其他任何 CMake system name 下强制开启 IPC 会使 configure 明确失败。
 
@@ -112,6 +112,14 @@ header，循环处理 partial read/write，并重试 `EINTR`。任何 header byt
 EOF 会正常结束该 client；header/body 中途 EOF、zero length 或 oversized length 只关闭该
 connection，不读取不可信 body，也不伪造无关联 response。Linux send 使用 `MSG_NOSIGNAL`，
 macOS 使用 socket-local `SO_NOSIGPIPE`，不会修改 process-global SIGPIPE policy。
+
+Client connection setup 会发布一个 `FD_CLOEXEC` descriptor，执行一次逻辑 nonblocking
+connection，并在每条结果路径恢复 descriptor 原本的 blocking flag。`EINPROGRESS`/`EALREADY`
+通过可中断的 10-ms poll slice 加 `SO_ERROR` 完成。Linux AF_UNIX backlog `EAGAIN` 表示连接尚未
+开始，因此 Client 会等待一个 stop-aware 10-ms slice，再在同一个未连接 fd 上重新进入 connect。
+不存在 connect 总超时；任何 frame、RPC 或 submit 都不会重试。IPC Host stop 即使先于 descriptor
+publication 也会被锁存，并在 writable completion 前后检查；它会阻止任何 request write，同时
+由 worker 保留唯一 close ownership。
 
 JSON object key 在 escape decoding 后必须唯一。Duplicate key 属 invalid request，绝不采用
 last-value-wins。
@@ -501,6 +509,34 @@ delivery/release value 封装这些 method，且不暴露 raw JSON call。每次
 一次 RPC；submission 与 release 永不重试。Server 拥有一个显式启动且 joinable 的
 `ComputeRequestRegistry` worker，以及一套共享 session-admission gate。这些基础设施仍是 typed
 wire method 的 private implementation，而不是第二套 public Host。
+
+Installed `create_ipc_host(socket_path)` adapter 实现当前全部 53 个非析构 `ps::Host` virtual。
+每个普通 Host call 都会创建一个 typed short-lived Client connection，并且只尝试一次匹配 RPC；
+不会 embedded fallback、隐式关闭 session、卸载 plugin 或重试 mutation。Load 返回的
+GraphSessionId 保存 daemon opaque session id，而 caller display name 仍只是 request metadata。
+
+同步 compute 与每个 async worker 都只 submit 一次，立即发出第一次 `compute.status`，并为之后的
+每个 status/result/release RPC 使用新的 Client。每次 successful nonterminal status 后，依次等待
+10/20/40/80/160/320/500 ms，此后重复 500 ms。Waiter 与 monotonic clock 可注入且可中断。
+同步 compute 没有总超时，会一直等待 terminal state、第一次 RPC/protocol failure 或 adapter
+stop。Adapter 会拒绝 session mismatch、running-to-queued regression、发生变化的 terminal
+state/status，以及 status mode 中意外出现的 output。Top-level RPC failure 保持为 top-level
+status；通过校验的 terminal nested status 会原样返回，不改写 domain、signed code、stable name
+或 message。
+
+一旦已知 terminal status，即使 result 获取或 cross-RPC validation 失败，cleanup 也会尽力尝试
+一次 `compute.release`。只有成功校验的 image result 才会提供 delivery id。Cleanup failure 绝不
+替换已经取得的 status 或 image。在 terminal publication 前发生 status poll failure，或者
+adapter stop 时，不会 release 未完成 daemon job。Task 4.2 的 production image consumer 使用
+`O_NOFOLLOW|O_CLOEXEC|O_NONBLOCK` 打开文件，在 `pread` 前后校验相同 uid、regular type、精确
+`0600`、单链接、device/inode/size 与 tight layout，并在 lease-aware release 前返回独立的
+heap-backed CPU image。Metadata 的 512-MiB 上限会在分配前强制执行。Task 4.3 会把这一安全的
+owned-copy consumer 替换为 read-only mmap/shared-deleter ownership。
+
+`compute_async` 会在远端 submission 前创建其 joined worker。Adapter 析构会发布 stop、唤醒全部
+waiter、shutdown 活动 worker descriptor、以 local Transport code 5 `client_stopped` 完成每个
+未完成 future，然后 join 全部 worker。Stop 后竞态到达的 worker result 会被丢弃。析构绝不重新
+提交、release 未完成 job、关闭 daemon session、卸载 plugin 或启动 embedded execution。
 
 `compute.submit` 要求 `session_id`、非负 `node_id`，以及值为 `status` 或 `image` 的
 `result_mode`。它通过以下 nested value 接收现有 Host request：
@@ -973,12 +1009,12 @@ Focused local command：
 ```bash
 cmake -S . -B build -DPHOTOSPIDER_BUILD_IPC=ON -DBUILD_TESTING=ON
 cmake --build build --target photospider_ipc_client \
-  photospider_ipc_server_internal photospiderd test_ipc_protocol \
+  photospider_ipc_server_internal photospiderd test_ipc_protocol test_ipc_host \
   test_compute_request_registry test_collection_snapshot_registry \
   test_output_store test_event_stream_boundaries test_ipc_daemon \
   public_header_self_containment -j
 ctest --test-dir build --output-on-failure \
-  -R '^(FrameCodec|ProtocolEnvelope|IntegerCodec|ProtocolErrors|ProtocolParams|ProtocolGraphLoad|ProtocolGraphClose|ProtocolOperationPlugins|HostRoutedGraphStateProtocolTest|StableInspectionPagingProtocolTest|InspectionJson|SessionRegistry|ComputeRequestRegistry|CollectionSnapshotRegistry|OutputStore|ComputeEventRing|SchedulerTraceRing|ClientLifecycle|ClientSurface|ClientCollectionAggregation|ClientJobValidation|ClientRetryPolicy|ClientResultValidation|IpcDaemon|IpcDaemonOperationPlugins|IpcDaemonSchedulers|IpcObservationFixtureDaemon|StaticProductConsumerSmoke|IpcDisabledInstallSmoke|PublicHeaderSelfContainment)'
+  -R '^(FrameCodec|ProtocolEnvelope|IntegerCodec|ProtocolErrors|ProtocolParams|ProtocolGraphLoad|ProtocolGraphClose|ProtocolOperationPlugins|HostRoutedGraphStateProtocolTest|StableInspectionPagingProtocolTest|InspectionJson|SessionRegistry|ComputeRequestRegistry|CollectionSnapshotRegistry|OutputStore|ComputeEventRing|SchedulerTraceRing|UnixSocketConnect|ClientLifecycle|ClientSurface|ClientCollectionAggregation|ClientJobValidation|ClientRetryPolicy|ClientResultValidation|IpcHost|IpcDaemon|IpcDaemonOperationPlugins|IpcDaemonSchedulers|IpcObservationFixtureDaemon|StaticProductConsumerSmoke|IpcDisabledInstallSmoke|PublicHeaderSelfContainment)'
 ```
 
 `StaticProductConsumerSmoke` 验证 installed backend 与第二个 client-only consumer；

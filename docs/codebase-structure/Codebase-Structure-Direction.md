@@ -24,10 +24,14 @@ macOS/Linux version 1 daemon/IPC graph, inspection, polling-compute, protected
 image-output, bounded event/trace observation, and process-global operation-
 plugin router behavior. The installed typed IPC Client now exposes owned calls
 for the exact 55-method surface, validates every typed result, and aggregates
-stable cursor pages into complete Host-shaped values. The complete IPC-backed
-Host, client-side artifact mapping, and final package-consumer contract remain
-in progress, while the plugin SDK follows the extension contracts documented
-below.
+stable cursor pages into complete Host-shaped values. The installed IPC-backed
+Host now implements all 53 current non-destructor Host virtuals through typed
+short-lived connections, joined asynchronous polling, and deterministic stop
+ordering. Image mode currently performs strict same-user regular-file
+revalidation and `pread`s an independent heap copy before lease-aware release;
+this task-4.2 transition is replaced by read-only mmap/shared-deleter ownership
+in task 4.3. The final package-consumer contract remains in progress, while the
+plugin SDK follows the extension contracts documented below.
 
 Observed build targets in the current root `CMakeLists.txt`:
 
@@ -40,7 +44,7 @@ Observed build targets in the current root `CMakeLists.txt`:
 | `photospider` | Static installable backend product with archive name `libphotospider`. | Matches the desired static product and public Host shape while folding role-owned backend sources into one archive. |
 | `photospider_cli_common` | Static CLI command/TUI/autocomplete code plus the reusable `run_graph_cli` boundary under `apps/graph_cli/`. | Uses application-private headers and remains a non-installable helper. |
 | `graph_cli` | Process-policy-only entry point at `apps/graph_cli/main.cpp`. | Disables OpenCL, owns allocation-independent fatal exit policy, creates the embedded `Host` adapter, and has no daemon-client mode yet. |
-| `photospider_ipc_client` | Installable static typed Unix IPC client. | Implements typed owned calls for all 55 version 1 methods, including strict job/output/page validation and stable collection aggregation; it does not link the backend or expose JSON/POSIX types. |
+| `photospider_ipc_client` | Installable static typed Unix IPC client and complete Host adapter. | Implements typed owned calls for all 55 version 1 methods plus `create_ipc_host` for all 53 current non-destructor Host virtuals; it does not link the backend or expose JSON/POSIX types. |
 | `photospider_ipc_server_internal` | Non-installable router, registry, and bounded Unix listener. | Serializes every Host call and intentionally remains outside the package export. |
 | `photospiderd` | Installed foreground process shell under `apps/photospiderd/`. | Owns one embedded Host, self-pipe signal policy, protected socket, and deterministic cleanup. |
 
@@ -588,13 +592,21 @@ separate extension-boundary change.
 6. **Completed daemon slice:** `apps/photospiderd/` now owns foreground process,
    self-pipe signal, protected socket, bounded workers, and deterministic
    cleanup behavior.
-7. **In-progress IPC version 1 complete-Host slice:** The installable typed
-   client exposes owned calls for all 55 methods, strictly validates common and
+7. **Completed task-4.2 IPC Host adapter slice:** The installable typed client
+   exposes owned calls for all 55 methods, strictly validates common and
    method-specific result shapes, performs each status or mutation RPC once,
    aggregates all private stable cursor pages, and preserves output/delivery
-   lease metadata. The complete installed IPC Host, secure client-side artifact
-   mapping, and final package-consumer surface remain unavailable;
-   cancellation is also unavailable.
+   lease metadata. `create_ipc_host(socket_path)` implements all 53 current
+   non-destructor Host virtuals with fresh typed connections for ordinary calls
+   and joined workers for async compute. Polling starts immediately, then waits
+   10/20/40/80/160/320/500 ms with a 500-ms cap and no synchronous total
+   timeout. Destruction publishes stop, wakes waiters, shuts down active worker
+   descriptors, resolves unfinished futures as Transport code 5
+   `client_stopped`, and joins every worker without resubmission, session close,
+   plugin unload, or embedded fallback. The current image consumer securely
+   validates and `pread`s an owned copy before lease-aware release; read-only
+   mmap/shared-deleter ownership and final installed package-consumer coverage
+   remain tasks 4.3/4.4. Cancellation remains unavailable.
 8. **Separate plugin-boundary work:** Tighten plugin SDK in issue #38.
    - Replace direct plugin dependency on full `Node` and global registry symbols
      with a narrow operation contract and host-provided registration table.
