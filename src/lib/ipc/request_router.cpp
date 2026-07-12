@@ -1,5 +1,7 @@
 #include "ipc/request_router.hpp"
 
+#include <algorithm>
+#include <array>
 #include <cstdint>
 #include <exception>
 #include <filesystem>
@@ -181,6 +183,116 @@ bool read_session_id(const Json& params, IpcSessionId* session_id) {
 }
 
 /**
+ * @brief Matches the session-control methods implemented by one route family.
+ *
+ * @param method Exact decoded request method.
+ * @return True for graph mutation, node-list/YAML, cache, dirty, ROI, timing,
+ *         last-IO, or last-error routing.
+ * @throws Nothing.
+ * @note This dispatch matcher is not the daemon capability-advertisement
+ *       table and does not change `daemon.version` metadata.
+ */
+bool is_session_control_method(std::string_view method) noexcept {
+  static constexpr std::array<std::string_view, 21> kMethods = {
+      "cache.cache_all_nodes",
+      "cache.clear_all",
+      "cache.clear_drive",
+      "cache.clear_memory",
+      "cache.free_transient",
+      "cache.synchronize_disk",
+      "compute.last_error",
+      "compute.last_io_time",
+      "compute.timing",
+      "dirty.begin",
+      "dirty.end",
+      "dirty.update",
+      "graph.clear",
+      "graph.node_yaml.get",
+      "graph.node_yaml.set",
+      "graph.reload",
+      "graph.save",
+      "inspect.ending_nodes",
+      "inspect.node_ids",
+      "inspect.roi_backward",
+      "inspect.roi_forward",
+  };
+  return std::find(kMethods.begin(), kMethods.end(), method) != kMethods.end();
+}
+
+/**
+ * @brief Decodes one required nonnegative public node id.
+ *
+ * @param params Typed method params object.
+ * @param field Required integer field name.
+ * @param node Receives the exact public node id after validation.
+ * @return True when the field is an exact `int` value greater than or equal to
+ *         zero; false without modifying `node` otherwise.
+ * @throws std::bad_alloc if JSON object lookup requires temporary storage and
+ *         allocation fails.
+ */
+bool read_node_id(const Json& params, const char* field, NodeId* node) {
+  if (node == nullptr || !params.contains(field)) {
+    return false;
+  }
+  int decoded = 0;
+  if (!decode_integer(params[field], &decoded) || decoded < 0) {
+    return false;
+  }
+  node->value = decoded;
+  return true;
+}
+
+/**
+ * @brief Decodes one required nonempty absolute path.
+ *
+ * @param params Typed method params object.
+ * @param field Required path field name.
+ * @param path Receives the validated path after all checks succeed.
+ * @return True for valid UTF-8, NUL-free absolute text no longer than 4,096
+ *         bytes; false without modifying `path` otherwise.
+ * @throws std::bad_alloc if copied path storage cannot be allocated.
+ */
+bool read_required_path(const Json& params, const char* field,
+                        std::string* path) {
+  if (path == nullptr || !params.contains(field)) {
+    return false;
+  }
+  std::string decoded;
+  if (!decode_bounded_string(params[field], kPathTextMaxBytes, &decoded) ||
+      !valid_absolute_path(decoded, false)) {
+    return false;
+  }
+  *path = std::move(decoded);
+  return true;
+}
+
+/**
+ * @brief Decodes one required bounded UTF-8 string.
+ *
+ * @param params Typed method params object.
+ * @param field Required string field name.
+ * @param maximum_bytes Inclusive field-specific byte bound.
+ * @param text Receives the validated string after all checks succeed.
+ * @return True for valid UTF-8 within the bound; false without modifying
+ *         `text` otherwise. Empty text remains a Host-visible value.
+ * @throws std::bad_alloc if copied text storage cannot be allocated.
+ * @note This helper deliberately adds no semantic nonempty or NUL rule to
+ *       precision/YAML values; matching Host methods retain that validation.
+ */
+bool read_required_text(const Json& params, const char* field,
+                        std::size_t maximum_bytes, std::string* text) {
+  if (text == nullptr || !params.contains(field)) {
+    return false;
+  }
+  std::string decoded;
+  if (!decode_bounded_string(params[field], maximum_bytes, &decoded)) {
+    return false;
+  }
+  *text = std::move(decoded);
+  return true;
+}
+
+/**
  * @brief Best-effort closes a Host session during failed registry publication.
  *
  * @param host Daemon-owned Host whose successful load must be compensated.
@@ -231,6 +343,19 @@ Json route_daemon_method(const std::string& method, const Json& params,
 
 }  // namespace
 
+/**
+ * @brief Complete cpp-only parsed-params adapter.
+ *
+ * @throws Nothing for reference binding.
+ * @note The adapter owns no JSON storage. `route()` constructs it only while
+ *       its parsed request object remains alive and never stores it in router
+ *       state.
+ */
+struct RequestRouter::RoutedParams {
+  /** @brief Structurally valid params object borrowed from the active route. */
+  const Json& value;
+};
+
 /** @copydoc RequestRouter::RequestRouter */
 RequestRouter::RequestRouter(Host& host, std::string service_version)
     : host_(host),
@@ -253,6 +378,246 @@ RequestRouter::RequestRouter(Host& host, std::string service_version)
       service_version_(std::move(service_version)),  // NOLINT
       server_instance_id_(          // NOLINT(whitespace/indent_namespace)
           generate_opaque_id()) {}  // NOLINT
+
+/** @copydoc RequestRouter::route_session_control_method */
+std::optional<std::string> RequestRouter::route_session_control_method(
+    const std::string& id, const std::string& method,
+    const RoutedParams& routed_params) {
+  const Json& params = routed_params.value;
+  if (!is_session_control_method(method)) {
+    return std::nullopt;
+  }
+
+  IpcSessionId session_id;
+  if (!read_session_id(params, &session_id)) {
+    return bounded_error(
+        id, invalid_params(method + " requires a valid session_id"));
+  }
+
+  std::string text;
+  NodeId first_node;
+  NodeId second_node;
+  PixelRect roi;
+  DirtyDomain dirty_domain = DirtyDomain::HighPrecision;
+  if (method == "graph.reload" || method == "graph.save") {
+    if (!read_required_path(params, "yaml_path", &text)) {
+      return bounded_error(
+          id,
+          invalid_params(method + " requires a nonempty absolute yaml_path"));
+    }
+  } else if (method == "graph.node_yaml.get" ||
+             method == "graph.node_yaml.set") {
+    if (!read_node_id(params, "node_id", &first_node)) {
+      return bounded_error(
+          id, invalid_params(method + " requires a nonnegative node_id"));
+    }
+    if (method == "graph.node_yaml.set" &&
+        !read_required_text(params, "yaml_text", kLargeTextMaxBytes, &text)) {
+      return bounded_error(
+          id, invalid_params(
+                  "graph.node_yaml.set requires bounded string yaml_text"));
+    }
+  } else if (method == "cache.cache_all_nodes" ||
+             method == "cache.synchronize_disk") {
+    if (!read_required_text(params, "precision", kShortTextMaxBytes, &text)) {
+      return bounded_error(
+          id, invalid_params(method + " requires bounded string precision"));
+    }
+  } else if (method == "dirty.begin" || method == "dirty.update" ||
+             method == "dirty.end") {
+    if (!read_node_id(params, "node_id", &first_node) ||
+        !params.contains("domain") ||
+        !decode_enum(params["domain"], &dirty_domain)) {
+      return bounded_error(
+          id, invalid_params(method +
+                             " requires nonnegative node_id and valid domain"));
+    }
+    if (method != "dirty.end" &&
+        (!params.contains("source_roi") ||
+         !decode_pixel_rect(params["source_roi"], &roi))) {
+      return bounded_error(
+          id, invalid_params(method + " requires an exact source_roi"));
+    }
+  } else if (method == "inspect.roi_forward") {
+    if (!read_node_id(params, "start_node_id", &first_node) ||
+        !read_node_id(params, "target_node_id", &second_node) ||
+        !params.contains("start_roi") ||
+        !decode_pixel_rect(params["start_roi"], &roi)) {
+      return bounded_error(
+          id, invalid_params(
+                  "inspect.roi_forward requires start_node_id, start_roi, "
+                  "and target_node_id"));
+    }
+  } else if (method == "inspect.roi_backward") {
+    if (!read_node_id(params, "target_node_id", &first_node) ||
+        !read_node_id(params, "source_node_id", &second_node) ||
+        !params.contains("target_roi") ||
+        !decode_pixel_rect(params["target_roi"], &roi)) {
+      return bounded_error(
+          id, invalid_params(
+                  "inspect.roi_backward requires target_node_id, target_roi, "
+                  "and source_node_id"));
+    }
+  }
+
+  IpcResult<SessionRegistry::HostCallAdmission> admission =
+      registry_.admit_host_call(session_id);
+  if (!admission.status.ok) {
+    return bounded_error(id, admission.status);
+  }
+  const GraphSessionId& host_session = admission.value.host_session();
+
+  if (method == "graph.reload" || method == "graph.save" ||
+      method == "graph.clear" || method == "graph.node_yaml.set" ||
+      method == "cache.clear_all" || method == "cache.clear_drive" ||
+      method == "cache.clear_memory" || method == "cache.cache_all_nodes" ||
+      method == "cache.free_transient" || method == "cache.synchronize_disk") {
+    VoidResult routed;
+    {
+      std::lock_guard<std::mutex> host_lock(host_mutex_);
+      if (method == "graph.reload") {
+        routed = host_.reload_graph(host_session, text);
+      } else if (method == "graph.save") {
+        routed = host_.save_graph(host_session, text);
+      } else if (method == "graph.clear") {
+        routed = host_.clear_graph(host_session);
+      } else if (method == "graph.node_yaml.set") {
+        routed = host_.set_node_yaml(host_session, first_node, text);
+      } else if (method == "cache.clear_all") {
+        routed = host_.clear_cache(host_session);
+      } else if (method == "cache.clear_drive") {
+        routed = host_.clear_drive_cache(host_session);
+      } else if (method == "cache.clear_memory") {
+        routed = host_.clear_memory_cache(host_session);
+      } else if (method == "cache.cache_all_nodes") {
+        routed = host_.cache_all_nodes(host_session, text);
+      } else if (method == "cache.free_transient") {
+        routed = host_.free_transient_memory(host_session);
+      } else {
+        routed = host_.synchronize_disk_cache(host_session, text);
+      }
+    }
+    if (!routed.status.ok) {
+      return bounded_error(id, graph_status(routed.status));
+    }
+    return encode_success_response(id, Json::object());
+  }
+
+  if (method == "graph.node_yaml.get") {
+    Result<std::string> routed;
+    {
+      std::lock_guard<std::mutex> host_lock(host_mutex_);
+      routed = host_.get_node_yaml(host_session, first_node);
+    }
+    if (!routed.status.ok) {
+      return bounded_error(id, graph_status(routed.status));
+    }
+    return encode_routed_value(id, [&] {
+      return encode_node_yaml(session_id, first_node, routed.value);
+    });
+  }
+
+  if (method == "inspect.node_ids" || method == "inspect.ending_nodes") {
+    Result<std::vector<NodeId>> routed;
+    {
+      std::lock_guard<std::mutex> host_lock(host_mutex_);
+      routed = method == "inspect.node_ids" ? host_.list_node_ids(host_session)
+                                            : host_.ending_nodes(host_session);
+    }
+    if (!routed.status.ok) {
+      return bounded_error(id, graph_status(routed.status));
+    }
+    return encode_routed_value(id, [&] {
+      const char* field =
+          method == "inspect.node_ids" ? "node_ids" : "ending_node_ids";
+      return Json{{"session_id", session_id.value},
+                  {field, encode_node_ids(routed.value)}};
+    });
+  }
+
+  if (method == "dirty.begin" || method == "dirty.update" ||
+      method == "dirty.end") {
+    Result<DirtyRegionInspectionSnapshot> routed;
+    {
+      std::lock_guard<std::mutex> host_lock(host_mutex_);
+      if (method == "dirty.begin") {
+        routed = host_.begin_dirty_source(host_session, first_node,
+                                          dirty_domain, roi);
+      } else if (method == "dirty.update") {
+        routed = host_.update_dirty_source(host_session, first_node,
+                                           dirty_domain, roi);
+      } else {
+        routed = host_.end_dirty_source(host_session, first_node, dirty_domain);
+      }
+    }
+    if (!routed.status.ok) {
+      return bounded_error(id, graph_status(routed.status));
+    }
+    return encode_routed_value(
+        id, [&] { return encode_dirty_region(id, session_id, routed.value); });
+  }
+
+  if (method == "inspect.roi_forward" || method == "inspect.roi_backward") {
+    Result<PixelRect> routed;
+    {
+      std::lock_guard<std::mutex> host_lock(host_mutex_);
+      routed =
+          method == "inspect.roi_forward"
+              ? host_.project_roi(host_session, first_node, roi, second_node)
+              : host_.project_roi_backward(host_session, first_node, roi,
+                                           second_node);
+    }
+    if (!routed.status.ok) {
+      return bounded_error(id, graph_status(routed.status));
+    }
+    return encode_success_response(
+        id, Json{{"session_id", session_id.value},
+                 {"roi", encode_pixel_rect(routed.value)}});
+  }
+
+  if (method == "compute.timing") {
+    Result<TimingSnapshot> routed;
+    {
+      std::lock_guard<std::mutex> host_lock(host_mutex_);
+      routed = host_.timing(host_session);
+    }
+    if (!routed.status.ok) {
+      return bounded_error(id, graph_status(routed.status));
+    }
+    return encode_routed_value(
+        id, [&] { return encode_timing(id, session_id, routed.value); });
+  }
+
+  if (method == "compute.last_io_time") {
+    Result<double> routed;
+    {
+      std::lock_guard<std::mutex> host_lock(host_mutex_);
+      routed = host_.last_io_time(host_session);
+    }
+    if (!routed.status.ok) {
+      return bounded_error(id, graph_status(routed.status));
+    }
+    return encode_routed_value(
+        id, [&] { return encode_last_io_time(session_id, routed.value); });
+  }
+
+  if (method == "compute.last_error") {
+    OperationStatus observed;
+    {
+      std::lock_guard<std::mutex> host_lock(host_mutex_);
+      observed = graph_status(host_.last_error(host_session));
+    }
+    return encode_routed_value(id, [&] {
+      return Json{{"session_id", session_id.value},
+                  {"status", encode_operation_status(observed)}};
+    });
+  }
+
+  return bounded_error(
+      id, failure_status(OperationErrorDomain::Daemon, kInternalErrorCode,
+                         "internal_error",
+                         "session-control dispatch invariant failed"));
+}
 
 /** @copydoc RequestRouter::route */
 std::string RequestRouter::route(const std::string& payload) {
@@ -432,6 +797,11 @@ std::string RequestRouter::route(const std::string& payload) {
       return encode_routed_value(id, [&reconciled] {
         return Json{{"sessions", encode_session_summaries(reconciled.value)}};
       });
+    }
+
+    if (std::optional<std::string> routed =
+            route_session_control_method(id, method, RoutedParams{params})) {
+      return std::move(*routed);
     }
 
     if (method == "inspect.graph" || method == "inspect.node" ||

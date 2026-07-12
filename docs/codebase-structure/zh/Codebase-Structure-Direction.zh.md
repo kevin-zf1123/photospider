@@ -317,8 +317,11 @@ CMake 规则：
 进程职责：
 
 - 创建并拥有一个 embedded `ps::Host`
-- 通过 typed version 1 IPC 暴露 ping/version、graph load/close/list 与 graph/node/
+- 通过已安装 typed version 1 client 暴露 ping/version、graph load/close/list 与 graph/node/
   dependency-tree inspection
+- 接受文档定义的 typed graph reload/save/clear、node YAML、node-list、cache、dirty
+  lifecycle、ROI、timing、last-IO 与 last-error request，并把每个 request 路由到恰好一次匹配的
+  Host call
 - 强制 per-user directory/socket permission 与安全 live/stale handling
 - 通过 self-pipe 转换 SIGINT/SIGTERM，并执行 deterministic worker、session、Host 与 socket
   cleanup
@@ -378,13 +381,15 @@ Method group 与当前 wire availability：
 
 | Group | 示例方法 | 说明 |
 | --- | --- | --- |
-| daemon | `daemon.ping`, `daemon.version` | 已实现，且不获取 Host lock；没有 `daemon.shutdown`。 |
-| graph | `graph.load`, `graph.close`, `graph.list` | 已实现，保留 Host name 并另用 daemon-generated opaque id。 |
-| inspect | `inspect.graph`, `inspect.node`, `inspect.dependency_tree` | 已通过 copied Host snapshot 实现。Private bounded cursor registry 参与 daemon lifecycle，而这些 route 保持 direct response shape，且不使用 collection cursor。 |
-| compute | polling job 与 image result transport | 当前八方法 wire inventory 不广告 compute method。Router 背后已经实现 private joined FIFO registry 与 socket-specific protected OutputStore，包括 bounded job/artifact retention、精确 nested status、delivery lease、session admission、TTL 与 joined shutdown 行为。 |
-| scheduler | `scheduler.types`, `scheduler.get`, `scheduler.set`, `scheduler.trace` | 映射当前 CLI scheduler 功能。 |
-| plugins | `plugins.scan`, `plugins.load`, `plugins.unload_all`, `plugins.list` | 唯一的进程级 `PluginManager` 保留 operation-plugin handle；Host 只暴露控制面，不拥有第二套 lifetime map。 |
-| events | `events.next`, `events.drain` | 先轮询，后订阅。 |
+| daemon | `daemon.ping`, `daemon.version` | 已实现，且不获取 Host lock。`daemon.version.methods` 返回精确八名称 metadata 子集；installed typed Client 只暴露该子集，且没有 raw-JSON call。 |
+| graph | `graph.load`, `graph.close`, `graph.list`, `graph.reload`, `graph.save`, `graph.clear`, `graph.node_yaml.get`, `graph.node_yaml.set` | 已通过 Host 实现。Status-only mutation 使用 `result:{}`；清空 model state 后保留 opaque session mapping。 |
+| inspect | `inspect.graph`, `inspect.node`, `inspect.dependency_tree`, `inspect.node_ids`, `inspect.ending_nodes`, `inspect.roi_forward`, `inspect.roi_backward` | 已通过 copied Host value 实现。这些 route 保持 direct response shape，不使用 collection cursor；node-list order 与 duplicate 均保留。 |
+| dirty | `dirty.begin`, `dirty.update`, `dirty.end` | 已通过一次匹配的 Host lifecycle mutation 实现，并返回 copied dirty-region snapshot；完整 compact response size 会在 result-DOM 分配前完成 preflight。 |
+| cache | `cache.clear_all`, `cache.clear_drive`, `cache.clear_memory`, `cache.cache_all_nodes`, `cache.free_transient`, `cache.synchronize_disk` | 已作为 status-only Host call 实现；result 不包含 backend cache handle 或 path。 |
+| compute | `compute.timing`, `compute.last_io_time`, `compute.last_error` | Diagnostic route 已实现；timing 会在 result-DOM 分配前对 aggregate compact response size 做 preflight，last error 是 successful envelope 中的 nested `OperationStatus` data。Wire 不暴露 compute-job method；private joined FIFO registry 与 protected OutputStore 仍由 router lifecycle 拥有。 |
+| scheduler | scheduler control 与 trace name | 不路由、也不广告 scheduler method。 |
+| plugins | operation-plugin control 与 view | 不路由、也不广告 plugin method；process ownership 仍属于 Host。 |
+| events | bounded compute-event drain | 不路由、也不广告 event method。 |
 
 图像 payload 规则：
 
@@ -396,8 +401,8 @@ Method group 与当前 wire availability：
 - Private compute registry 保留 move-only OutputStore ownership；optional lease-aware release、
   eviction、TTL expiry 或 shutdown 时，其 exact-once cleanup 会在 registry mutex 外执行。
   Private result access 成功后，一个 stable delivery id 最多保护一个会被刷新为 60 秒的 lease。
-- 当前八方法 wire inventory 不暴露 image result、output artifact、delivery identity、lease、
-  cache path 或 caller-selected result path。
+- Wire surface 不暴露 image result、output artifact、delivery identity、lease、cache path 或
+  caller-selected result path。
 
 Collection snapshot 规则：
 
@@ -414,8 +419,8 @@ Collection snapshot 规则：
 - Binding/type/offset mismatch 与 unknown well-formed cursor 会返回 private `CursorNotFound`，且
   不会推进 retained record；malformed cursor/page arithmetic 会返回 private `InvalidParams`，且
   不改变 record。TTL expiry 会删除 record 并释放其 measured quota。Injected limit、clock 与 id
-  支持 deterministic race test。当前已路由的 inspection method 不会 reserve、publish 或 page
-  这些 record。
+  支持 deterministic race test。已路由的 graph/node/tree inspection 与 node-list method 不会
+  reserve、publish 或 page 这些 record。
 
 错误规则：
 

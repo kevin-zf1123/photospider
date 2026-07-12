@@ -369,7 +369,10 @@ Process responsibilities:
 
 - create and own one embedded `ps::Host`
 - expose ping/version, graph load/close/list, and graph/node/dependency-tree
-  inspection through typed version 1 IPC
+  inspection through the installed typed version 1 client
+- accept the documented typed graph reload/save/clear, node YAML, node-list,
+  cache, dirty lifecycle, ROI, timing, last-IO, and last-error requests and
+  route each through exactly one matching Host call
 - enforce per-user directory/socket permissions and safe live/stale handling
 - translate SIGINT/SIGTERM through a self-pipe and perform deterministic worker,
   session, Host, and socket cleanup
@@ -437,13 +440,15 @@ Method groups and current wire availability:
 
 | Group | Example methods | Notes |
 | --- | --- | --- |
-| daemon | `daemon.ping`, `daemon.version` | Implemented without Host locking. No `daemon.shutdown`. |
-| graph | `graph.load`, `graph.close`, `graph.list` | Implemented with preserved Host names plus daemon-generated opaque ids. |
-| inspect | `inspect.graph`, `inspect.node`, `inspect.dependency_tree` | Implemented through copied Host snapshots. The private bounded cursor registry participates in daemon lifecycle, while these routes keep their direct response shapes and do not use collection cursors. |
-| compute | polling jobs and image result transport | No compute method is advertised in the current eight-method wire inventory. The private joined FIFO registry and socket-specific protected OutputStore are implemented behind the router, including bounded job/artifact retention, exact nested status, delivery leases, session admission, TTL, and joined shutdown behavior. |
-| scheduler | `scheduler.types`, `scheduler.get`, `scheduler.set`, `scheduler.trace` | Mirrors current CLI scheduler features. |
-| plugins | `plugins.scan`, `plugins.load`, `plugins.unload_all`, `plugins.list` | The unique process `PluginManager` retains operation-plugin handles; Hosts expose the control surface without owning a second lifetime map. |
-| events | `events.next`, `events.drain` | Polling first; subscription later. |
+| daemon | `daemon.ping`, `daemon.version` | Implemented without Host locking. `daemon.version.methods` returns the exact eight-name metadata subset; the installed typed Client exposes only that subset and has no raw-JSON call. |
+| graph | `graph.load`, `graph.close`, `graph.list`, `graph.reload`, `graph.save`, `graph.clear`, `graph.node_yaml.get`, `graph.node_yaml.set` | Implemented through Host. Status-only mutations use `result:{}`; clearing model state preserves the opaque session mapping. |
+| inspect | `inspect.graph`, `inspect.node`, `inspect.dependency_tree`, `inspect.node_ids`, `inspect.ending_nodes`, `inspect.roi_forward`, `inspect.roi_backward` | Implemented through copied Host values. These routes keep direct response shapes and do not use collection cursors. Node-list order and duplicates are preserved. |
+| dirty | `dirty.begin`, `dirty.update`, `dirty.end` | Implemented through one matching Host lifecycle mutation and return the copied dirty-region snapshot; the complete compact response size is preflighted before result-DOM allocation. |
+| cache | `cache.clear_all`, `cache.clear_drive`, `cache.clear_memory`, `cache.cache_all_nodes`, `cache.free_transient`, `cache.synchronize_disk` | Implemented as status-only Host calls; no backend cache handle or path enters a result. |
+| compute | `compute.timing`, `compute.last_io_time`, `compute.last_error` | Diagnostic routes are implemented. Timing preflights its aggregate compact response size before result-DOM allocation; last error is nested `OperationStatus` data in a successful envelope. No compute-job method is exposed; the private joined FIFO registry and protected OutputStore remain lifecycle-owned behind the router. |
+| scheduler | scheduler control and trace names | No scheduler method is routed or advertised. |
+| plugins | operation-plugin control and views | No plugin method is routed or advertised; process ownership remains with Host. |
+| events | bounded compute-event drain | No event method is routed or advertised. |
 
 Image payload rule:
 
@@ -457,9 +462,8 @@ Image payload rule:
   exact-once cleanup runs outside the registry mutex on optional lease-aware
   release, eviction, TTL expiry, or shutdown. A stable delivery id protects at
   most one refreshed 60-second lease after successful private result access.
-- The current eight-method wire inventory exposes no image result, output
-  artifact, delivery identity, lease, cache path, or caller-selected result
-  path.
+- The wire surface exposes no image result, output artifact, delivery
+  identity, lease, cache path, or caller-selected result path.
 
 Collection snapshot rule:
 
@@ -480,8 +484,9 @@ Collection snapshot rule:
   private `CursorNotFound` without advancing a retained record. Malformed
   cursor/page arithmetic returns private `InvalidParams` without changing the
   record. TTL expiry erases the record and releases its measured quota.
-  Injected limits, clock, and ids support deterministic race tests. Current
-  routed inspection methods do not reserve, publish, or page these records.
+  Injected limits, clock, and ids support deterministic race tests. Routed
+  graph/node/tree inspection and node-list methods do not reserve, publish, or
+  page these records.
 
 Error rule:
 

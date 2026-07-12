@@ -19,7 +19,7 @@ descriptor、`sockaddr_un`、backend model、runtime service 或 mutable backend
 Client library 不链接 `photospider` backend。IPC disabled 时，不安装该 target 与 public
 header；在其他任何 CMake system name 下强制开启 IPC 会使 configure 明确失败。
 
-版本 1 精确实现八个方法：
+`daemon.version.methods` 报告以下精确八名称 metadata 子集：
 
 1. `daemon.ping`
 2. `daemon.version`
@@ -30,10 +30,36 @@ header；在其他任何 CMake system name 下强制开启 IPC 会使 configure 
 7. `inspect.node`
 8. `inspect.dependency_tree`
 
-它不实现 compute、polling、cancellation、image、scheduler、plugin、event、dirty
-inspection、graph reload/save、`daemon.shutdown`、TCP、Windows named pipe 或
-`graph_cli --connect`；这些仍属于后续工作。现有 `graph_cli` 继续创建 embedded Host，
-本地命令语义不变。
+Request router 还接受以下 21 个 Host-backed typed method：
+
+1. `cache.cache_all_nodes`
+2. `cache.clear_all`
+3. `cache.clear_drive`
+4. `cache.clear_memory`
+5. `cache.free_transient`
+6. `cache.synchronize_disk`
+7. `compute.last_error`
+8. `compute.last_io_time`
+9. `compute.timing`
+10. `dirty.begin`
+11. `dirty.end`
+12. `dirty.update`
+13. `graph.clear`
+14. `graph.node_yaml.get`
+15. `graph.node_yaml.set`
+16. `graph.reload`
+17. `graph.save`
+18. `inspect.ending_nodes`
+19. `inspect.node_ids`
+20. `inspect.roi_backward`
+21. `inspect.roi_forward`
+
+已安装 typed `ps::ipc::Client` 只暴露八名称 metadata 子集的 call，且没有 public raw-JSON
+escape hatch。新增 21 个 schema 属 daemon request-router behavior。
+
+版本 1 不暴露 compute-job submit/polling、cancellation、image result、scheduler/plugin/event
+route、`daemon.shutdown`、TCP、Windows named pipe 或 `graph_cli --connect`。现有
+`graph_cli` 继续创建 embedded Host，本地命令语义不变。
 
 ## Transport 与 Frame
 
@@ -223,8 +249,8 @@ member，并返回：
 ```
 
 `daemon.version` 应用相同的 params 规则，返回 protocol version 1、service name
-`photospiderd`、CMake project version、同一 instance id、transport `unix` 与精确排序后的
-八方法列表。Metadata call 不获取 Host mutex。
+`photospiderd`、CMake project version、同一 instance id、transport `unix`，以及“产品与范围”
+中列出的精确排序八名称 metadata 子集。Metadata call 不获取 Host mutex。
 
 ## Opaque Graph Session
 
@@ -261,11 +287,104 @@ mapping，但保留 failure response；其他 Host failure 会原子地重新开
 出现在 `graph.list` 结果中，但仍参与 Host/registry invariant reconciliation。Client disconnect 不会
 关闭 session。
 
+## Host-Routed Graph State 与 Diagnostic
+
+本节每个 method 都会在解析 opaque `session_id` 前验证全部 known parameter。Malformed known
+field 会在 Host access 前返回 `protocol/-32602/invalid_params`；格式正确但 unknown 或 closing
+的 session 返回 Graph `not_found`。Unknown object member 会被忽略。Admission 成功后，daemon
+只会在公共 Host mutex 下调用恰好一次匹配的 `ps::Host` method，并在 response encoding 前释放
+该 mutex。任何 mutation 都不会自动 retry，包括 Host mutation 已完成但其 copied result 无法编码
+的情形。
+
+以下 status-only method 的唯一 success value 是 `result:{}`：
+
+- `graph.reload` 与 `graph.save` 要求 `session_id`，以及非空、absolute、无 NUL、最多
+  4,096 UTF-8 bytes 的 `yaml_path`；
+- `graph.clear` 只要求 `session_id`，清空 graph model state 后仍保留 active opaque session
+  mapping；
+- `graph.node_yaml.set` 要求 `session_id`、非负且精确落入 `int` 的 `node_id`，以及最多
+  8 MiB 的 string `yaml_text`；
+- `cache.clear_all`、`cache.clear_drive`、`cache.clear_memory` 与
+  `cache.free_transient` 只要求 `session_id`；
+- `cache.cache_all_nodes` 与 `cache.synchronize_disk` 还要求最多 1,024 UTF-8 bytes 的
+  string `precision`。
+
+空 `yaml_text` 与 `precision` 是合法 protocol value；其语义合法性属于匹配的 Host method，
+router 会返回 Host 的精确 Graph failure。Path 的 absolute、非空、NUL-free shape 属 wire
+schema，因此由 protocol 验证。
+
+`graph.node_yaml.get` 要求 `session_id` 与非负精确 `node_id`。成功返回：
+
+```json
+{
+  "session_id": "32-lowercase-hex",
+  "node_id": 7,
+  "yaml_text": "complete Host-returned YAML"
+}
+```
+
+返回 YAML 必须是合法 UTF-8 且最多 8 MiB，绝不 truncate。`inspect.node_ids` 与
+`inspect.ending_nodes` 只要求 `session_id`，分别返回 `{session_id,node_ids}` 与
+`{session_id,ending_node_ids}`。这些 direct array 最多包含 4,096 个非负精确 `int` value；
+Host order 与 duplicate id 都会保留，router 不排序、不去重，也不截断。
+
+`inspect.roi_forward` 要求 `start_node_id`、`start_roi`、`target_node_id`；
+`inspect.roi_backward` 要求 `target_node_id`、`target_roi`、`source_node_id`。Node id 是非负
+精确 `int`；每个 ROI 都含精确 `int` 的 `x`、`y`、`width`、`height` member。非正 width 或
+height 仍可表示。成功返回 `{session_id,roi}`，并原样保留 Host rectangle，不交换 node 或 axis。
+
+`dirty.begin` 与 `dirty.update` 要求 `session_id`、非负精确 `node_id`、`domain`、
+`source_roi`；`dirty.end` 要求除 `source_roi` 外的相同字段。`domain` 只能精确为
+`high_precision` 或 `real_time`。成功返回以下 copied dirty snapshot：
+
+```text
+{
+  session_id, graph_generation,
+  sources: [{node_id, domain, lifecycle, generation, source_rois}],
+  dirty_tiles: [{node_id, domain, tile_x, tile_y, tile_size, pixel_roi}],
+  dirty_monolithic_nodes:
+      [{node_id, domain, pixel_roi, whole_output}],
+  actual_dirty_rois: [{node_id, rois}],
+  edge_mappings:
+      [{from_node_id, to_node_id, domain, from_roi, to_roi, direction}]
+}
+```
+
+每个顶层 dirty array 与每个 nested ROI array 最多 4,096 entries。Vector order 保留；
+`actual_dirty_rois` 使用 ascending integer map-key order。Dirty lifecycle label 是 `idle`、
+`updating`、`settled`；edge direction 是 `forward_affected` 与 `backward_demand`。
+
+`compute.timing` 只要求 `session_id`，返回 `{session_id,node_timings,total_ms}`。每个 ordered
+timing row 包含 `node_id`、`name`、`elapsed_ms`、`source`，最多返回 4,096 rows；name 最多
+1,024 UTF-8 bytes，source 最多 8 MiB。`compute.last_io_time` 返回
+`{session_id,last_io_time_ms}`。Non-finite timing 或 IO double 编码为 JSON null。
+
+单次 Host call 返回且 Host mutex 释放后，timing 与 dirty codec 会先验证每个 component bound，
+再在分配 result JSON array/object 前，对完整 success response 执行一次 overflow-safe compact-byte
+budget preflight。该 budget 包含实际 request/session id、固定 envelope/schema byte、精确 JSON
+string escape 长度、精确 integer decimal width，以及精确 boolean/null width。Finite timing double
+只贡献一字节下界，而不是 worst-case width；每次累加都会在算术前检查 remaining capacity。若已能
+证明总大小超过 16 MiB，则抛出 `std::length_error`，由 router 映射为同一 id 的 protocol
+`response_too_large`；若 near-boundary 下界仍可能容纳，则交给最终 serializer 判定，因此 preflight
+不会拒绝实际可放入 frame 的 response。
+
+`compute.last_error` 在成功 response 中返回 `{session_id,status}`。Nested value 使用
+canonical `OperationStatus` schema。被观察到的 Host failure 是该 method 的 diagnostic data，
+不会转换成顶层 request failure；unknown 或 closing session 仍会在 Host access 前于顶层失败。
+
+其他 method 的 Host failed result 会成为精确顶层 Graph error。Host 返回的 YAML、row 或
+collection 超出 byte/count limit 时，会在单次 Host call 后成为 `response_too_large`。Host 返回
+negative node id、unknown enum 或 invalid UTF-8 时成为 daemon `internal_error`。这些 failure
+不发布 partial result，也不会触发第二次 Host invocation。Resource exhaustion 保持 exceptional，
+不会重写成 status。
+
 ## Private Compute Lifecycle
 
-当前八方法 wire inventory 仍不暴露 compute method。不过 server 已经拥有 compute routing 使用的
-private lifecycle boundary：一个显式启动且 joinable 的 `ComputeRequestRegistry` worker，以及一套
-共享 session-admission gate。这些基础设施不是第二套 public Host 或 wire API。
+Metadata method 子集不暴露 compute-job submit、status、result 或 release method。Request
+router 只接受上文所述 timing、last-IO、last-error compute diagnostic。Server 还拥有 compute
+execution 使用的 private lifecycle boundary：一个显式启动且 joinable 的
+`ComputeRequestRegistry` worker，以及一套共享 session-admission gate。这些基础设施不是第二套
+public Host 或 wire API。
 
 Queue commit 之前，submission 会 admit active session，执行全局最多 64 个 queued/running record
 的限制，验证并 collision-check 一个 daemon-generated 32-lowercase-hex compute id，并预留全部
@@ -291,10 +410,10 @@ inventory。
 
 ## Private Protected Output Store
 
-当前八方法 wire inventory 不暴露 image result 或 delivery operation。不过 router 背后已有一个
-private `OutputStore`，并与 joined compute publisher 和 socket lifecycle 绑定。它会在 Unix socket
-与持久 lifecycle lock 已归属之后、session/compute/client admission 之前启动；因此 startup
-failure 不会放入任何 request。
+Wire surface 不暴露 image result 或 delivery operation。Router 背后有一个 private
+`OutputStore`，并与 joined compute publisher 和 socket lifecycle 绑定。它会在 Unix socket 与
+持久 lifecycle lock 已归属之后、session/compute/client admission 之前启动；因此 startup failure
+不会放入任何 request。
 
 Canonical empty CPU image 不发布 artifact。Nonempty result 必须是合法 CPU `ImageBuffer`：具有
 defined data type、正 dimensions/channels、non-null data、至少等于 checked tight row 的 source
@@ -347,10 +466,10 @@ source 均可注入，以执行 deterministic filesystem/race test。
 ## Private Stable Collection Snapshot
 
 Router 拥有一个 private、type-erased 的 `CollectionSnapshotRegistry`，并随 daemon runtime
-lifecycle 启动、停止和清空它。当前八方法 wire inventory 不广告 collection cursor page 或
-cursor-release method。三个已路由的 inspection method 保持 direct result shape，不会 reserve、
-publish 或 page registry record。Public Host collection API 保持 full-value API；该 registry 不新增
-Host page API、public ABI type 或 JSON response envelope。
+lifecycle 启动、停止和清空它。Wire surface 不广告 collection cursor page 或 cursor-release
+method。已路由的 graph/node/tree inspection 与 node-list method 保持 direct result shape，不会
+reserve、publish 或 page registry record。Public Host collection API 保持 full-value API；该
+registry 不新增 Host page API、public ABI type 或 JSON response envelope。
 
 Private `reserve()` operation 会原子预留一个 record 和完整的 64 MiB per-snapshot allowance。
 Production admission 最多保留 64 records 与总计 256 MiB；quota 不可用时报告 private
@@ -398,8 +517,8 @@ output/input name 与 nonnegative `input_index`。Optional value 使用 JSON nul
 Typed client 会在发布 graph、node 或 dependency-tree snapshot 前，对每个 node id、tree depth、
 edge input index、debug timestamp/duration、worker id 与 spatial extent/rectangle component
 执行范围检查。Signed/unsigned overflow 属本地 Protocol result-shape failure，绝不窄化。
-当前已路由的三个 inspection method 返回现有 direct result shape，且不使用 private collection
-snapshot registry 或 collection cursor。
+这些已路由的 inspection method 与 node-list/ROI method 返回 direct result shape，且不使用
+private collection snapshot registry 或 collection cursor。
 同一组 reusable enum、`PixelRect`、bounded-string、array、page、opaque-id 与 nested-status codec
 会递归应用于 composite value；decode 失败时 caller-visible destination 保持未发布。
 

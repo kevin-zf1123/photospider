@@ -3,6 +3,7 @@
 #include <algorithm>
 #include <array>
 #include <cerrno>
+#include <charconv>
 #include <cmath>
 #include <cstddef>
 #include <cstdint>
@@ -199,6 +200,30 @@ const KnownErrorMapping* known_error_by_name(OperationErrorDomain domain,
 }
 
 /**
+ * @brief Finds one stable public enum label without allocating JSON storage.
+ *
+ * @tparam Enum Public enum type.
+ * @tparam Count Number of exact mappings.
+ * @param value Candidate enum value.
+ * @param mappings Complete current mapping table.
+ * @return Borrowed stable label, or an empty view for an unknown value.
+ * @throws Nothing.
+ * @note Stable wire labels are nonempty, so the empty view is an unambiguous
+ *       invalid-value sentinel used by validation and size preflight.
+ */
+template <typename Enum, std::size_t Count>
+std::string_view enum_label_from_table(
+    Enum value, const std::array<std::pair<Enum, std::string_view>, Count>&
+                    mappings) noexcept {
+  for (const auto& mapping : mappings) {
+    if (mapping.first == value) {
+      return mapping.second;
+    }
+  }
+  return {};
+}
+
+/**
  * @brief Encodes one enum through a complete stable label table.
  *
  * @tparam Enum Public enum type.
@@ -217,14 +242,13 @@ bool encode_enum_from_table(
   if (output == nullptr) {
     return false;
   }
-  for (const auto& mapping : mappings) {
-    if (mapping.first == value) {
-      Json decoded(std::string(mapping.second));
-      *output = std::move(decoded);
-      return true;
-    }
+  const std::string_view label = enum_label_from_table(value, mappings);
+  if (label.empty()) {
+    return false;
   }
-  return false;
+  Json decoded = std::string(label);
+  *output = std::move(decoded);
+  return true;
 }
 
 /**
@@ -429,6 +453,169 @@ void require_bounded_entries(std::size_t size, std::size_t maximum_entries,
                             " exceeds its version 1 entry bound");
   }
 }
+
+/**
+ * @brief Accumulates a non-overestimating compact success-frame byte count.
+ *
+ * Fixed JSON syntax, escaped strings, integers, booleans, and nulls contribute
+ * their exact compact serialized size. Finite floating-point values contribute
+ * only the one-byte lower bound shared by every valid JSON number. Therefore a
+ * rejection proves the real response cannot fit, while a near-boundary value
+ * that may fit is left to the final serializer.
+ *
+ * @throws std::bad_alloc if an overflow diagnostic cannot be allocated.
+ * @throws std::length_error once the proven lower bound exceeds the 16 MiB
+ *         version 1 frame payload limit.
+ * @note Every addition checks `bytes > limit - used` before arithmetic, so
+ *       adversarial nested collection counts cannot wrap `std::size_t`.
+ */
+class SuccessFrameSizePreflight final {
+ public:
+  /**
+   * @brief Starts one response envelope using the actual correlated id.
+   *
+   * @param request_id Valid nonempty request id already decoded by the router.
+   * @param value_name Stable diagnostic name for the encoded result.
+   * @throws std::bad_alloc if an overflow diagnostic cannot be allocated.
+   * @throws std::length_error if even the envelope prefix exceeds the frame.
+   * @note JSON object member order does not affect compact byte count. The
+   *       prefix includes every envelope key and the opening result position.
+   */
+  SuccessFrameSizePreflight(std::string_view request_id, const char* value_name)
+      : value_name_(value_name) {
+    add_literal(R"({"protocol_version":1,"id":)");
+    add_json_string(request_id);
+    add_literal(R"(,"result":)");
+  }
+
+  /**
+   * @brief Adds exact fixed ASCII JSON syntax.
+   *
+   * @param literal Compact JSON punctuation, key text, or fixed token.
+   * @return Nothing.
+   * @throws std::bad_alloc if an overflow diagnostic cannot be allocated.
+   * @throws std::length_error if the proven lower bound exceeds the frame.
+   */
+  void add_literal(std::string_view literal) { add_bytes(literal.size()); }
+
+  /**
+   * @brief Adds the exact compact JSON representation size of one UTF-8 string.
+   *
+   * @param value Already validated UTF-8 bytes.
+   * @return Nothing.
+   * @throws std::bad_alloc if an overflow diagnostic cannot be allocated.
+   * @throws std::length_error if the proven lower bound exceeds the frame.
+   * @note Quotes, reverse solidus, and ASCII controls use the same escaping as
+   *       `Json::dump()` with its default non-ASCII-preserving mode. Valid
+   *       non-ASCII UTF-8 bytes retain their original byte count.
+   */
+  void add_json_string(std::string_view value) {
+    add_bytes(2);
+    for (const unsigned char byte : value) {
+      switch (byte) {
+        case '"':
+        case '\\':
+        case '\b':
+        case '\t':
+        case '\n':
+        case '\f':
+        case '\r':
+          add_bytes(2);
+          break;
+        default:
+          add_bytes(byte <= 0x1fU ? 6U : 1U);
+          break;
+      }
+    }
+  }
+
+  /**
+   * @brief Adds the exact decimal size of one signed JSON integer.
+   *
+   * @param value Signed value represented by the result schema.
+   * @return Nothing.
+   * @throws std::bad_alloc if an overflow diagnostic cannot be allocated.
+   * @throws std::length_error if the proven lower bound exceeds the frame.
+   */
+  void add_signed(std::int64_t value) {
+    char encoded[32];
+    const auto result =
+        std::to_chars(encoded, encoded + sizeof(encoded), value);
+    add_bytes(static_cast<std::size_t>(result.ptr - encoded));
+  }
+
+  /**
+   * @brief Adds the exact decimal size of one unsigned JSON integer.
+   *
+   * @param value Unsigned value represented by the result schema.
+   * @return Nothing.
+   * @throws std::bad_alloc if an overflow diagnostic cannot be allocated.
+   * @throws std::length_error if the proven lower bound exceeds the frame.
+   */
+  void add_unsigned(std::uint64_t value) {
+    char encoded[32];
+    const auto result =
+        std::to_chars(encoded, encoded + sizeof(encoded), value);
+    add_bytes(static_cast<std::size_t>(result.ptr - encoded));
+  }
+
+  /**
+   * @brief Adds a safe lower bound for one encoded timing number.
+   *
+   * @param value Public timing value encoded as a finite number or JSON null.
+   * @return Nothing.
+   * @throws std::bad_alloc if an overflow diagnostic cannot be allocated.
+   * @throws std::length_error if the proven lower bound exceeds the frame.
+   * @note Finite values count as one byte rather than a worst-case decimal,
+   *       preventing rejection of an actually encodable near-limit response.
+   */
+  void add_timing_number(double value) {
+    add_bytes(std::isfinite(value) ? 1U : 4U);
+  }
+
+  /**
+   * @brief Adds one exact compact JSON boolean token.
+   *
+   * @param value Boolean result value.
+   * @return Nothing.
+   * @throws std::bad_alloc if an overflow diagnostic cannot be allocated.
+   * @throws std::length_error if the proven lower bound exceeds the frame.
+   */
+  void add_boolean(bool value) { add_bytes(value ? 4U : 5U); }
+
+  /**
+   * @brief Closes the outer success response after the result was measured.
+   *
+   * @return Nothing.
+   * @throws std::bad_alloc if an overflow diagnostic cannot be allocated.
+   * @throws std::length_error if the final closing byte exceeds the frame.
+   */
+  void finish_response() { add_bytes(1); }
+
+ private:
+  /**
+   * @brief Adds bytes without permitting arithmetic overflow or over-limit use.
+   *
+   * @param bytes Nonnegative lower-bound contribution.
+   * @return Nothing.
+   * @throws std::bad_alloc if the rejection diagnostic cannot be allocated.
+   * @throws std::length_error if the contribution cannot fit in the remaining
+   *         version 1 payload budget.
+   */
+  void add_bytes(std::size_t bytes) {
+    if (bytes > kMaximumFramePayloadBytes - used_bytes_) {
+      throw std::length_error(std::string(value_name_) +
+                              " cannot fit one version 1 response frame");
+    }
+    used_bytes_ += bytes;
+  }
+
+  /** @brief Stable name used only if the lower bound proves oversize. */
+  const char* value_name_;
+
+  /** @brief Proven compact response byte lower bound accumulated so far. */
+  std::size_t used_bytes_ = 0;
+};
 
 /**
  * @brief Encodes one finite double or the version 1 null sentinel.
@@ -637,6 +824,322 @@ bool decode_space(const Json& value, SpatialSnapshot* space) {
   }
   *space = decoded;
   return true;
+}
+
+/**
+ * @brief Rejects a Host-returned node id outside the public wire domain.
+ *
+ * @param node Public node id to validate.
+ * @param field Stable field name used only in a rejection diagnostic.
+ * @throws std::bad_alloc if diagnostic construction cannot allocate.
+ * @throws std::invalid_argument if `node` is negative.
+ * @note Request-side node validation occurs before Host access; this helper
+ *       independently protects response construction from malformed Host
+ *       values.
+ */
+void require_node_id(NodeId node, const char* field) {
+  if (node.value < 0) {
+    throw std::invalid_argument(std::string(field) +
+                                " contains a negative node id");
+  }
+}
+
+/**
+ * @brief Validates every collection and enum in one dirty-region snapshot.
+ *
+ * @param snapshot Complete Host-returned public snapshot.
+ * @throws std::bad_alloc if rejection diagnostics cannot allocate.
+ * @throws std::length_error if a top-level or nested direct collection exceeds
+ *         `kGeneralPageMaxEntries`.
+ * @throws std::invalid_argument if a node id or public enum is malformed.
+ * @note Validation completes before the encoder allocates the result arrays,
+ *       so no partially constructed snapshot can enter a response.
+ */
+void validate_dirty_region(const DirtyRegionInspectionSnapshot& snapshot) {
+  require_bounded_entries(snapshot.sources.size(), kGeneralPageMaxEntries,
+                          "dirty.sources");
+  require_bounded_entries(snapshot.dirty_tiles.size(), kGeneralPageMaxEntries,
+                          "dirty.dirty_tiles");
+  require_bounded_entries(snapshot.dirty_monolithic_nodes.size(),
+                          kGeneralPageMaxEntries,
+                          "dirty.dirty_monolithic_nodes");
+  require_bounded_entries(snapshot.actual_dirty_rois.size(),
+                          kGeneralPageMaxEntries, "dirty.actual_dirty_rois");
+  require_bounded_entries(snapshot.edge_mappings.size(), kGeneralPageMaxEntries,
+                          "dirty.edge_mappings");
+
+  for (const DirtySourceSnapshot& source : snapshot.sources) {
+    require_node_id(source.node, "dirty source");
+    require_bounded_entries(source.source_rois.size(), kGeneralPageMaxEntries,
+                            "dirty source.source_rois");
+    if (enum_label_from_table(source.domain, kDirtyDomainLabels).empty() ||
+        enum_label_from_table(source.lifecycle, kDirtyLifecycleLabels)
+            .empty()) {
+      throw std::invalid_argument(
+          "dirty source contains an unknown public enum");
+    }
+  }
+  for (const DirtyTileSnapshot& tile : snapshot.dirty_tiles) {
+    require_node_id(tile.node, "dirty tile");
+    if (enum_label_from_table(tile.domain, kDirtyDomainLabels).empty()) {
+      throw std::invalid_argument("dirty tile contains an unknown domain");
+    }
+  }
+  for (const DirtyMonolithicRegionSnapshot& region :
+       snapshot.dirty_monolithic_nodes) {
+    require_node_id(region.node, "dirty monolithic region");
+    if (enum_label_from_table(region.domain, kDirtyDomainLabels).empty()) {
+      throw std::invalid_argument(
+          "dirty monolithic region contains an unknown domain");
+    }
+  }
+  for (const auto& [node_id, rois] : snapshot.actual_dirty_rois) {
+    require_node_id(NodeId{node_id}, "actual dirty ROI row");
+    require_bounded_entries(rois.size(), kGeneralPageMaxEntries,
+                            "actual dirty ROI row.rois");
+  }
+  for (const DirtyEdgeMappingSnapshot& mapping : snapshot.edge_mappings) {
+    require_node_id(mapping.from_node, "dirty edge from_node");
+    require_node_id(mapping.to_node, "dirty edge to_node");
+    if (enum_label_from_table(mapping.domain, kDirtyDomainLabels).empty() ||
+        enum_label_from_table(mapping.direction, kDirtyDirectionLabels)
+            .empty()) {
+      throw std::invalid_argument("dirty edge contains an unknown public enum");
+    }
+  }
+}
+
+/**
+ * @brief Encodes one already validated public rectangle array.
+ *
+ * @param rois Ordered rectangles whose count was validated by the caller.
+ * @return JSON array preserving every rectangle and its field order.
+ * @throws std::bad_alloc if JSON storage cannot be allocated.
+ * @note `PixelRect` permits non-positive width or height, so this helper does
+ *       not invent an additional nonempty-ROI restriction.
+ */
+Json encode_rectangles(const std::vector<PixelRect>& rois) {
+  Json encoded = Json::array();
+  for (const PixelRect& roi : rois) {
+    encoded.push_back(encode_pixel_rect(roi));
+  }
+  return encoded;
+}
+
+/**
+ * @brief Adds one exact compact pixel-rectangle object to a frame preflight.
+ *
+ * @param budget Active success-frame budget.
+ * @param rect Public rectangle whose four signed integers will be encoded.
+ * @return Nothing.
+ * @throws std::bad_alloc if an overflow diagnostic cannot be allocated.
+ * @throws std::length_error if the proven frame lower bound exceeds 16 MiB.
+ */
+void add_pixel_rect_size(SuccessFrameSizePreflight& budget,
+                         const PixelRect& rect) {
+  budget.add_literal(R"({"x":)");
+  budget.add_signed(rect.x);
+  budget.add_literal(R"(,"y":)");
+  budget.add_signed(rect.y);
+  budget.add_literal(R"(,"width":)");
+  budget.add_signed(rect.width);
+  budget.add_literal(R"(,"height":)");
+  budget.add_signed(rect.height);
+  budget.add_literal("}");
+}
+
+/**
+ * @brief Adds one exact compact rectangle array to a frame preflight.
+ *
+ * @param budget Active success-frame budget.
+ * @param rois Already validated ordered rectangles.
+ * @return Nothing.
+ * @throws std::bad_alloc if an overflow diagnostic cannot be allocated.
+ * @throws std::length_error if the proven frame lower bound exceeds 16 MiB.
+ * @note The routine accumulates all nested arrays into the same response
+ *       budget instead of applying an invalid aggregate-entry limit.
+ */
+void add_rectangles_size(SuccessFrameSizePreflight& budget,
+                         const std::vector<PixelRect>& rois) {
+  budget.add_literal("[");
+  bool first = true;
+  for (const PixelRect& roi : rois) {
+    if (!first) {
+      budget.add_literal(",");
+    }
+    first = false;
+    add_pixel_rect_size(budget, roi);
+  }
+  budget.add_literal("]");
+}
+
+/**
+ * @brief Proves whether one timing result can still fit its success frame.
+ *
+ * @param request_id Exact correlated request id used by the response envelope.
+ * @param session_id Valid opaque daemon session id encoded in the result.
+ * @param timing Fully validated Host-returned timing value.
+ * @return Nothing.
+ * @throws std::bad_alloc if an overflow diagnostic cannot be allocated.
+ * @throws std::length_error if the serialized-size lower bound exceeds 16 MiB.
+ * @note Fixed schema, escaped strings, and integers are exact. Finite doubles
+ *       use a one-byte lower bound; any uncertain near-boundary response is
+ *       therefore accepted here and decided by final `Json::dump()` size.
+ */
+void require_timing_frame_budget(std::string_view request_id,
+                                 const IpcSessionId& session_id,
+                                 const TimingSnapshot& timing) {
+  SuccessFrameSizePreflight budget(request_id, "timing response");
+  budget.add_literal(R"({"session_id":)");
+  budget.add_json_string(session_id.value);
+  budget.add_literal(R"(,"node_timings":[)");
+  bool first = true;
+  for (const NodeTimingSnapshot& row : timing.node_timings) {
+    if (!first) {
+      budget.add_literal(",");
+    }
+    first = false;
+    budget.add_literal(R"({"node_id":)");
+    budget.add_signed(row.node.value);
+    budget.add_literal(R"(,"name":)");
+    budget.add_json_string(row.name);
+    budget.add_literal(R"(,"elapsed_ms":)");
+    budget.add_timing_number(row.elapsed_ms);
+    budget.add_literal(R"(,"source":)");
+    budget.add_json_string(row.source);
+    budget.add_literal("}");
+  }
+  budget.add_literal(R"(],"total_ms":)");
+  budget.add_timing_number(timing.total_ms);
+  budget.add_literal("}");
+  budget.finish_response();
+}
+
+/**
+ * @brief Proves whether one dirty snapshot can still fit its success frame.
+ *
+ * @param request_id Exact correlated request id used by the response envelope.
+ * @param session_id Valid opaque daemon session id encoded in the result.
+ * @param snapshot Fully validated Host-returned dirty snapshot.
+ * @return Nothing.
+ * @throws std::bad_alloc if an overflow diagnostic cannot be allocated.
+ * @throws std::length_error if exact aggregate serialized size exceeds 16 MiB.
+ * @note Every top-level and nested ROI collection contributes to one
+ *       overflow-safe budget. Dirty values contain no floating-point fields,
+ *       so this preflight is exact for compact output despite member ordering.
+ */
+void require_dirty_region_frame_budget(
+    std::string_view request_id, const IpcSessionId& session_id,
+    const DirtyRegionInspectionSnapshot& snapshot) {
+  SuccessFrameSizePreflight budget(request_id, "dirty-region response");
+  budget.add_literal(R"({"session_id":)");
+  budget.add_json_string(session_id.value);
+  budget.add_literal(R"(,"graph_generation":)");
+  budget.add_unsigned(snapshot.graph_generation);
+  budget.add_literal(R"(,"sources":[)");
+  bool first = true;
+  for (const DirtySourceSnapshot& source : snapshot.sources) {
+    if (!first) {
+      budget.add_literal(",");
+    }
+    first = false;
+    budget.add_literal(R"({"node_id":)");
+    budget.add_signed(source.node.value);
+    budget.add_literal(R"(,"domain":)");
+    budget.add_json_string(
+        enum_label_from_table(source.domain, kDirtyDomainLabels));
+    budget.add_literal(R"(,"lifecycle":)");
+    budget.add_json_string(
+        enum_label_from_table(source.lifecycle, kDirtyLifecycleLabels));
+    budget.add_literal(R"(,"generation":)");
+    budget.add_unsigned(source.generation);
+    budget.add_literal(R"(,"source_rois":)");
+    add_rectangles_size(budget, source.source_rois);
+    budget.add_literal("}");
+  }
+
+  budget.add_literal(R"(],"dirty_tiles":[)");
+  first = true;
+  for (const DirtyTileSnapshot& tile : snapshot.dirty_tiles) {
+    if (!first) {
+      budget.add_literal(",");
+    }
+    first = false;
+    budget.add_literal(R"({"node_id":)");
+    budget.add_signed(tile.node.value);
+    budget.add_literal(R"(,"domain":)");
+    budget.add_json_string(
+        enum_label_from_table(tile.domain, kDirtyDomainLabels));
+    budget.add_literal(R"(,"tile_x":)");
+    budget.add_signed(tile.tile_x);
+    budget.add_literal(R"(,"tile_y":)");
+    budget.add_signed(tile.tile_y);
+    budget.add_literal(R"(,"tile_size":)");
+    budget.add_signed(tile.tile_size);
+    budget.add_literal(R"(,"pixel_roi":)");
+    add_pixel_rect_size(budget, tile.pixel_roi);
+    budget.add_literal("}");
+  }
+
+  budget.add_literal(R"(],"dirty_monolithic_nodes":[)");
+  first = true;
+  for (const DirtyMonolithicRegionSnapshot& region :
+       snapshot.dirty_monolithic_nodes) {
+    if (!first) {
+      budget.add_literal(",");
+    }
+    first = false;
+    budget.add_literal(R"({"node_id":)");
+    budget.add_signed(region.node.value);
+    budget.add_literal(R"(,"domain":)");
+    budget.add_json_string(
+        enum_label_from_table(region.domain, kDirtyDomainLabels));
+    budget.add_literal(R"(,"pixel_roi":)");
+    add_pixel_rect_size(budget, region.pixel_roi);
+    budget.add_literal(R"(,"whole_output":)");
+    budget.add_boolean(region.whole_output);
+    budget.add_literal("}");
+  }
+
+  budget.add_literal(R"(],"actual_dirty_rois":[)");
+  first = true;
+  for (const auto& [node_id, rois] : snapshot.actual_dirty_rois) {
+    if (!first) {
+      budget.add_literal(",");
+    }
+    first = false;
+    budget.add_literal(R"({"node_id":)");
+    budget.add_signed(node_id);
+    budget.add_literal(R"(,"rois":)");
+    add_rectangles_size(budget, rois);
+    budget.add_literal("}");
+  }
+
+  budget.add_literal(R"(],"edge_mappings":[)");
+  first = true;
+  for (const DirtyEdgeMappingSnapshot& mapping : snapshot.edge_mappings) {
+    if (!first) {
+      budget.add_literal(",");
+    }
+    first = false;
+    budget.add_literal(R"({"from_node_id":)");
+    budget.add_signed(mapping.from_node.value);
+    budget.add_literal(R"(,"to_node_id":)");
+    budget.add_signed(mapping.to_node.value);
+    budget.add_literal(R"(,"domain":)");
+    budget.add_json_string(
+        enum_label_from_table(mapping.domain, kDirtyDomainLabels));
+    budget.add_literal(R"(,"from_roi":)");
+    add_pixel_rect_size(budget, mapping.from_roi);
+    budget.add_literal(R"(,"to_roi":)");
+    add_pixel_rect_size(budget, mapping.to_roi);
+    budget.add_literal(R"(,"direction":)");
+    budget.add_json_string(
+        enum_label_from_table(mapping.direction, kDirtyDirectionLabels));
+    budget.add_literal("}");
+  }
+  budget.add_literal("]}");
+  budget.finish_response();
 }
 
 /**
@@ -1011,6 +1514,157 @@ bool decode_pixel_rect(const Json& value, PixelRect* rect) noexcept {
   }
   *rect = decoded;
   return true;
+}
+
+/** @copydoc encode_node_ids */
+Json encode_node_ids(const std::vector<NodeId>& nodes) {
+  require_bounded_entries(nodes.size(), kGeneralPageMaxEntries, "node_ids");
+  for (NodeId node : nodes) {
+    require_node_id(node, "node_ids");
+  }
+  Json encoded = Json::array();
+  for (NodeId node : nodes) {
+    encoded.push_back(node.value);
+  }
+  return encoded;
+}
+
+/** @copydoc encode_node_yaml */
+Json encode_node_yaml(const IpcSessionId& session_id, NodeId node,
+                      const std::string& yaml_text) {
+  if (!valid_opaque_id(session_id.value)) {
+    throw std::invalid_argument("node YAML has an invalid opaque session id");
+  }
+  require_node_id(node, "node YAML");
+  require_bounded_text(yaml_text, kLargeTextMaxBytes, "node YAML text");
+  return Json{{"session_id", session_id.value},
+              {"node_id", node.value},
+              {"yaml_text", yaml_text}};
+}
+
+/** @copydoc encode_timing */
+Json encode_timing(std::string_view request_id, const IpcSessionId& session_id,
+                   const TimingSnapshot& timing) {
+  require_bounded_text(request_id, kRequestTextMaxBytes, "timing request id");
+  if (request_id.empty()) {
+    throw std::invalid_argument("timing request id is empty");
+  }
+  if (!valid_opaque_id(session_id.value)) {
+    throw std::invalid_argument("timing has an invalid opaque session id");
+  }
+  require_bounded_entries(timing.node_timings.size(), kGeneralPageMaxEntries,
+                          "timing.node_timings");
+  for (const NodeTimingSnapshot& row : timing.node_timings) {
+    require_node_id(row.node, "timing row");
+    require_bounded_text(row.name, kShortTextMaxBytes, "timing row.name");
+    require_bounded_text(row.source, kLargeTextMaxBytes, "timing row.source");
+  }
+  require_timing_frame_budget(request_id, session_id, timing);
+
+  Json rows = Json::array();
+  for (const NodeTimingSnapshot& row : timing.node_timings) {
+    rows.push_back(Json{{"node_id", row.node.value},
+                        {"name", row.name},
+                        {"elapsed_ms", encode_double(row.elapsed_ms)},
+                        {"source", row.source}});
+  }
+  return Json{{"session_id", session_id.value},
+              {"node_timings", std::move(rows)},
+              {"total_ms", encode_double(timing.total_ms)}};
+}
+
+/** @copydoc encode_dirty_region */
+Json encode_dirty_region(std::string_view request_id,
+                         const IpcSessionId& session_id,
+                         const DirtyRegionInspectionSnapshot& snapshot) {
+  require_bounded_text(request_id, kRequestTextMaxBytes,
+                       "dirty snapshot request id");
+  if (request_id.empty()) {
+    throw std::invalid_argument("dirty snapshot request id is empty");
+  }
+  if (!valid_opaque_id(session_id.value)) {
+    throw std::invalid_argument(
+        "dirty snapshot has an invalid opaque session id");
+  }
+  validate_dirty_region(snapshot);
+  require_dirty_region_frame_budget(request_id, session_id, snapshot);
+
+  Json sources = Json::array();
+  for (const DirtySourceSnapshot& source : snapshot.sources) {
+    Json domain;
+    Json lifecycle;
+    (void)encode_enum(source.domain, &domain);
+    (void)encode_enum(source.lifecycle, &lifecycle);
+    sources.push_back(
+        Json{{"node_id", source.node.value},
+             {"domain", std::move(domain)},
+             {"lifecycle", std::move(lifecycle)},
+             {"generation", source.generation},
+             {"source_rois", encode_rectangles(source.source_rois)}});
+  }
+
+  Json dirty_tiles = Json::array();
+  for (const DirtyTileSnapshot& tile : snapshot.dirty_tiles) {
+    Json domain;
+    (void)encode_enum(tile.domain, &domain);
+    dirty_tiles.push_back(
+        Json{{"node_id", tile.node.value},
+             {"domain", std::move(domain)},
+             {"tile_x", tile.tile_x},
+             {"tile_y", tile.tile_y},
+             {"tile_size", tile.tile_size},
+             {"pixel_roi", encode_pixel_rect(tile.pixel_roi)}});
+  }
+
+  Json monolithic = Json::array();
+  for (const DirtyMonolithicRegionSnapshot& region :
+       snapshot.dirty_monolithic_nodes) {
+    Json domain;
+    (void)encode_enum(region.domain, &domain);
+    monolithic.push_back(
+        Json{{"node_id", region.node.value},
+             {"domain", std::move(domain)},
+             {"pixel_roi", encode_pixel_rect(region.pixel_roi)},
+             {"whole_output", region.whole_output}});
+  }
+
+  Json actual_rois = Json::array();
+  for (const auto& [node_id, rois] : snapshot.actual_dirty_rois) {
+    actual_rois.push_back(
+        Json{{"node_id", node_id}, {"rois", encode_rectangles(rois)}});
+  }
+
+  Json edges = Json::array();
+  for (const DirtyEdgeMappingSnapshot& mapping : snapshot.edge_mappings) {
+    Json domain;
+    Json direction;
+    (void)encode_enum(mapping.domain, &domain);
+    (void)encode_enum(mapping.direction, &direction);
+    edges.push_back(Json{{"from_node_id", mapping.from_node.value},
+                         {"to_node_id", mapping.to_node.value},
+                         {"domain", std::move(domain)},
+                         {"from_roi", encode_pixel_rect(mapping.from_roi)},
+                         {"to_roi", encode_pixel_rect(mapping.to_roi)},
+                         {"direction", std::move(direction)}});
+  }
+
+  return Json{{"session_id", session_id.value},
+              {"graph_generation", snapshot.graph_generation},
+              {"sources", std::move(sources)},
+              {"dirty_tiles", std::move(dirty_tiles)},
+              {"dirty_monolithic_nodes", std::move(monolithic)},
+              {"actual_dirty_rois", std::move(actual_rois)},
+              {"edge_mappings", std::move(edges)}};
+}
+
+/** @copydoc encode_last_io_time */
+Json encode_last_io_time(const IpcSessionId& session_id, double milliseconds) {
+  if (!valid_opaque_id(session_id.value)) {
+    throw std::invalid_argument(
+        "last IO result has an invalid opaque session id");
+  }
+  return Json{{"session_id", session_id.value},
+              {"last_io_time_ms", encode_double(milliseconds)}};
 }
 
 /** @copydoc encode_enum(ComputeIntent,Json*) */
