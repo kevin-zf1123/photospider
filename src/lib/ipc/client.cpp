@@ -17,6 +17,7 @@
 #include <utility>
 #include <vector>
 
+#include "ipc/client_collection_budget.hpp"
 #include "ipc/codec.hpp"
 #include "ipc/frame.hpp"
 #include "ipc/unix_socket.hpp"
@@ -184,29 +185,74 @@ internal::Json collection_page_params(const internal::Json& base_params,
 }
 
 /**
+ * @brief Measures normalized compact JSON row bytes for one decoded page.
+ * @param canonical_rows Canonically re-encoded known public row values.
+ * @param recursive_entries Recursively visible public entries in the page.
+ * @param outer_rows Number of decoded indivisible page rows.
+ * @param shared_bytes First-page bytes retained outside the row array.
+ * @param measurement Receives the complete footprint only after validation.
+ * @param message Receives a local protocol diagnostic on malformed input.
+ * @return True when canonical rows and decoded counts agree and summation fits.
+ * @throws std::bad_alloc if compact row encoding or diagnostics allocate.
+ * @note The canonical known-field row array is bounded by one response frame,
+ *       compact-encoded row by row, and discarded after measurement.
+ */
+bool measure_collection_page(const internal::Json& canonical_rows,
+                             std::size_t recursive_entries,
+                             std::size_t outer_rows, std::size_t shared_bytes,
+                             internal::CollectionPageMeasurement* measurement,
+                             std::string* message) {
+  if (measurement == nullptr || message == nullptr ||
+      !canonical_rows.is_array() || canonical_rows.size() != outer_rows) {
+    if (message != nullptr) {
+      *message = "stable collection row measurement is inconsistent";
+    }
+    return false;
+  }
+
+  std::size_t row_bytes = 0;
+  for (const internal::Json& row : canonical_rows) {
+    const std::size_t encoded_size = row.dump().size();
+    if (encoded_size > std::numeric_limits<std::size_t>::max() - row_bytes) {
+      *message = "stable collection row byte measurement overflowed";
+      return false;
+    }
+    row_bytes += encoded_size;
+  }
+  *measurement = {recursive_entries, outer_rows, row_bytes, shared_bytes};
+  return true;
+}
+
+/**
  * @brief Aggregates one complete stable collection through repeated typed RPCs.
  *
  * @tparam A Complete public aggregate value returned to the caller.
  * @tparam P Private decoded page value.
  * @tparam C Callable returning one `RawCallResult` for cursor controls.
  * @tparam D Callable transactionally decoding method-specific rows.
+ * @tparam M Callable measuring recursive entries and canonical encoded bytes.
  * @tparam E Callable validating and moving one page into aggregate.
  * @param call_page Performs one exact RPC attempt for supplied page controls.
  * @param decode_page Decodes result rows and reports their outer-row count.
+ * @param measure_page Measures the decoded page before aggregate publication.
  * @param append_page Extends local unpublished aggregate transactionally.
  * @return Complete aggregate after the final page, or the first exact failure.
  * @throws std::bad_alloc if requests, pages, diagnostics, or aggregate storage
  *         cannot be allocated.
- * @note No page or partial aggregate is published after failure. The function
+ * @note No page or partial aggregate is published after failure. Recursive
+ *       entry and 64 MiB byte admission occurs before append. The function
  *       never retries a call. A frame-safe first page may contain fewer than
  *       4,096 rows, so that observed size becomes the continuation limit.
  */
-template <typename A, typename P, typename C, typename D, typename E>
-IpcResult<A> aggregate_collection(C call_page, D decode_page, E append_page) {
+template <typename A, typename P, typename C, typename D, typename M,
+          typename E>  // NOLINT(whitespace/indent_namespace)
+IpcResult<A> aggregate_collection(C call_page, D decode_page, M measure_page,
+                                  E append_page) {
   A aggregate;
   std::optional<std::string> stable_cursor;
   std::size_t expected_offset = 0;
   std::size_t request_limit = internal::kGeneralPageMaxEntries;
+  internal::CollectionAggregateBudget aggregate_budget;
   while (true) {
     RawCallResult call =
         call_page(stable_cursor, expected_offset, request_limit);
@@ -223,6 +269,12 @@ IpcResult<A> aggregate_collection(C call_page, D decode_page, E append_page) {
     if (!decode_collection_page_metadata(call.result, expected_offset,
                                          page_rows, stable_cursor, &metadata,
                                          &message)) {
+      return failed_result<A>(invalid_response(std::move(message)));
+    }
+    internal::CollectionPageMeasurement measurement;
+    if (!measure_page(call.result, page, !stable_cursor.has_value(),
+                      &measurement, &message) ||
+        !aggregate_budget.admit(measurement, &message)) {
       return failed_result<A>(invalid_response(std::move(message)));
     }
     if (!append_page(&aggregate, std::move(page), &message)) {
@@ -970,6 +1022,428 @@ struct TraversalDetailPageRow {
   /** @brief Complete ordered traversal metadata for the branch. */
   std::vector<HostTraversalNodeSnapshot> nodes;
 };
+
+/**
+ * @brief Canonically encodes one decoded node-id page.
+ * @param page Validated public node ids.
+ * @return Exact known-field row array used by the daemon measurement.
+ * @throws std::invalid_argument if a decoded id violates its invariant.
+ * @throws std::bad_alloc if JSON storage cannot allocate.
+ */
+internal::Json canonical_collection_rows(const std::vector<NodeId>& page) {
+  return internal::encode_node_ids(page);
+}
+
+/**
+ * @brief Canonically encodes one decoded string page.
+ * @param page Validated public string rows.
+ * @return Exact known-field row array used by the daemon measurement.
+ * @throws std::bad_alloc if JSON storage cannot allocate.
+ * @note Component UTF-8 and byte limits were already enforced by the decoder;
+ *       this helper deliberately drops forward-compatible unknown members.
+ */
+internal::Json canonical_collection_rows(const std::vector<std::string>& page) {
+  internal::Json rows = internal::Json::array();
+  for (const std::string& row : page) {
+    rows.push_back(row);
+  }
+  return rows;
+}
+
+/**
+ * @brief Canonically encodes one decoded graph-session page.
+ * @param page Validated owned session summaries.
+ * @return Exact known-field row array used by the daemon measurement.
+ * @throws std::length_error for an impossible over-limit decoded name.
+ * @throws std::invalid_argument for an impossible malformed decoded id/name.
+ * @throws std::bad_alloc if JSON storage cannot allocate.
+ */
+internal::Json canonical_collection_rows(
+    const std::vector<GraphSessionSummary>& page) {
+  return internal::encode_session_summaries(page);
+}
+
+/**
+ * @brief Canonically encodes one decoded operation-source page.
+ * @param page Validated private key/source rows.
+ * @return Exact known-field row array used by the daemon measurement.
+ * @throws std::length_error for an impossible over-limit decoded value.
+ * @throws std::invalid_argument for impossible invalid UTF-8.
+ * @throws std::bad_alloc if JSON storage cannot allocate.
+ */
+internal::Json canonical_collection_rows(
+    const std::vector<PluginSourcePageRow>& page) {
+  internal::Json rows = internal::Json::array();
+  for (const PluginSourcePageRow& row : page) {
+    rows.push_back(internal::encode_plugin_source_row(row.key, row.source));
+  }
+  return rows;
+}
+
+/**
+ * @brief Canonically encodes one decoded traversal-order page.
+ * @param page Validated private branch rows.
+ * @return Exact known-field row array used by the daemon measurement.
+ * @throws std::invalid_argument for an impossible negative decoded id.
+ * @throws std::bad_alloc if JSON storage cannot allocate.
+ */
+internal::Json canonical_collection_rows(
+    const std::vector<TraversalOrderPageRow>& page) {
+  internal::Json rows = internal::Json::array();
+  for (const TraversalOrderPageRow& row : page) {
+    rows.push_back(
+        internal::Json{{"ending_node_id", row.ending_node_id},
+                       {"node_ids", internal::encode_node_ids(row.node_ids)}});
+  }
+  return rows;
+}
+
+/**
+ * @brief Canonically encodes one decoded traversal-detail page.
+ * @param page Validated private branch rows.
+ * @return Exact known-field row array used by the daemon measurement.
+ * @throws std::bad_alloc if copied names or JSON storage cannot allocate.
+ * @note All ids, strings, and per-branch bounds were validated by the decoder.
+ */
+internal::Json canonical_collection_rows(
+    const std::vector<TraversalDetailPageRow>& page) {
+  internal::Json rows = internal::Json::array();
+  for (const TraversalDetailPageRow& row : page) {
+    internal::Json nodes = internal::Json::array();
+    for (const HostTraversalNodeSnapshot& node : row.nodes) {
+      nodes.push_back(
+          internal::Json{{"node_id", node.node.value},
+                         {"name", node.name},
+                         {"has_memory_cache", node.has_memory_cache},
+                         {"has_disk_cache", node.has_disk_cache}});
+    }
+    rows.push_back(internal::Json{{"ending_node_id", row.ending_node_id},
+                                  {"nodes", std::move(nodes)}});
+  }
+  return rows;
+}
+
+/**
+ * @brief Canonically encodes one decoded planning task sample.
+ * @param task Validated public planning task.
+ * @param encoded Receives the exact known-field object on success.
+ * @param message Receives a protocol diagnostic for an impossible enum.
+ * @return True when the task domain retains a version 1 wire label.
+ * @throws std::bad_alloc if JSON or diagnostics cannot allocate.
+ */
+bool canonical_planning_task(const ComputePlanningTaskSnapshot& task,
+                             internal::Json* encoded, std::string* message) {
+  if (encoded == nullptr || message == nullptr) {
+    return false;
+  }
+  internal::Json domain;
+  if (!internal::encode_enum(task.domain, &domain)) {
+    *message = "decoded planning task lost its domain label";
+    return false;
+  }
+  *encoded = internal::Json{
+      {"task_id", task.task_id},
+      {"node_id", task.node.value},
+      {"kind", task.kind},
+      {"domain", std::move(domain)},
+      {"output_roi", internal::encode_pixel_rect(task.output_roi)},
+      {"tile_x", task.tile_x},
+      {"tile_y", task.tile_y},
+      {"tile_size", task.tile_size},
+      {"whole_output", task.whole_output},
+      {"dirty_selected", task.dirty_selected},
+      {"dirty_generation", task.dirty_generation},
+      {"dependency_task_ids", task.dependency_task_ids}};
+  return true;
+}
+
+/**
+ * @brief Canonically encodes one decoded planning snapshot row.
+ * @param snapshot Validated public planning snapshot.
+ * @param encoded Receives the exact known-field object on success.
+ * @param message Receives a protocol diagnostic for an impossible enum.
+ * @return True when all public enums retain version 1 labels.
+ * @throws std::invalid_argument for an impossible negative decoded node id.
+ * @throws std::bad_alloc if JSON, samples, or diagnostics cannot allocate.
+ */
+bool canonical_planning_snapshot(
+    const ComputePlanningInspectionSnapshot& snapshot, internal::Json* encoded,
+    std::string* message) {
+  if (encoded == nullptr || message == nullptr) {
+    return false;
+  }
+  internal::Json intent;
+  if (!internal::encode_enum(snapshot.intent, &intent)) {
+    *message = "decoded planning snapshot lost its intent label";
+    return false;
+  }
+  internal::Json tasks = internal::Json::array();
+  for (const ComputePlanningTaskSnapshot& task : snapshot.task_sample) {
+    internal::Json encoded_task;
+    if (!canonical_planning_task(task, &encoded_task, message)) {
+      return false;
+    }
+    tasks.push_back(std::move(encoded_task));
+  }
+  *encoded = internal::Json{
+      {"intent", std::move(intent)},
+      {"target_node_id", snapshot.target_node.value},
+      {"parallel", snapshot.parallel},
+      {"topology_generation", snapshot.topology_generation},
+      {"expansion_cache_key", snapshot.expansion_cache_key},
+      {"planned_node_count", snapshot.planned_node_count},
+      {"task_count", snapshot.task_count},
+      {"tile_task_count", snapshot.tile_task_count},
+      {"monolithic_task_count", snapshot.monolithic_task_count},
+      {"node_task_count", snapshot.node_task_count},
+      {"dependency_count", snapshot.dependency_count},
+      {"initial_task_count", snapshot.initial_task_count},
+      {"active_task_count", snapshot.active_task_count},
+      {"dirty_source_task_count", snapshot.dirty_source_task_count},
+      {"downstream_task_count", snapshot.downstream_task_count},
+      {"initial_downstream_task_count", snapshot.initial_downstream_task_count},
+      {"planned_node_sample",
+       internal::encode_node_ids(snapshot.planned_node_sample)},
+      {"task_sample", std::move(tasks)}};
+  return true;
+}
+
+/**
+ * @brief Adds recursively visible page entries without overflow or truncation.
+ * @param addition Newly observed vector, map, or fixed-array entries.
+ * @param entries Running page-local recursive total updated on success.
+ * @param message Receives the stable snapshot-limit diagnostic on rejection.
+ * @return True when the new total remains within 262,144 entries.
+ * @throws std::bad_alloc if diagnostic assignment fails.
+ * @note Page-local rejection complements the cross-page aggregate budget and
+ *       avoids allowing an arithmetic wrap to disguise one hostile page.
+ */
+bool add_recursive_entries(std::size_t addition, std::size_t* entries,
+                           std::string* message) {
+  if (entries == nullptr || message == nullptr) {
+    return false;
+  }
+  if (*entries > internal::kSnapshotMaxEntries ||
+      addition > internal::kSnapshotMaxEntries - *entries) {
+    *message = "stable collection exceeds 262144 recursive snapshot entries";
+    return false;
+  }
+  *entries += addition;
+  return true;
+}
+
+/**
+ * @brief Adds parameter-map and fixed spatial-matrix entries for one node.
+ * @param node Decoded public node snapshot.
+ * @param entries Running page-local recursive total.
+ * @param message Receives a limit diagnostic on rejection.
+ * @return True when all nested entries fit the production snapshot bound.
+ * @throws std::bad_alloc if diagnostic assignment fails.
+ * @note Scalar object fields and optional-presence markers are not collection
+ *       entries, matching daemon `node_nested_entry_count()` semantics.
+ */
+bool add_node_nested_entries(const NodeInspectionView& node,
+                             std::size_t* entries, std::string* message) {
+  if (!add_recursive_entries(node.parameters.size(), entries, message)) {
+    return false;
+  }
+  static constexpr std::size_t kSpatialMatrixEntries = 3U * 9U;
+  return !node.space ||
+         add_recursive_entries(kSpatialMatrixEntries, entries, message);
+}
+
+/**
+ * @brief Measures a page whose public rows contain no nested collections.
+ * @tparam T Decoded row type.
+ * @param page Decoded page rows.
+ * @param first_page Whether this is the initial page; unused for flat values.
+ * @param measurement Receives recursive entries and compact encoded bytes.
+ * @param message Receives a local protocol diagnostic on rejection.
+ * @return True when the normalized page footprint is valid.
+ * @throws std::bad_alloc if compact row encoding or diagnostics allocate.
+ * @note Flat graph/session/id/string/source rows contribute exactly one entry
+ *       per outer row, matching daemon stable-snapshot measurement.
+ */
+template <typename T>
+bool measure_flat_collection_page(
+    const std::vector<T>& page, bool first_page,
+    internal::CollectionPageMeasurement* measurement, std::string* message) {
+  (void)first_page;
+  return measure_collection_page(canonical_collection_rows(page), page.size(),
+                                 page.size(), 0, measurement, message);
+}
+
+/**
+ * @brief Measures graph rows plus every nested node collection on one page.
+ * @param page Transactionally decoded public graph page.
+ * @param first_page Whether this is the initial page; graph has no shared
+ *        measured header and therefore does not use the value.
+ * @param measurement Receives exact recursive and compact-byte footprint.
+ * @param message Receives a local protocol diagnostic on rejection.
+ * @return True when outer nodes, parameters, matrices, and bytes are bounded.
+ * @throws std::bad_alloc if compact row encoding or diagnostics allocate.
+ */
+bool measure_graph_collection_page(
+    const GraphInspectionView& page, bool first_page,
+    internal::CollectionPageMeasurement* measurement, std::string* message) {
+  (void)first_page;
+  std::size_t entries = 0;
+  if (!add_recursive_entries(page.nodes.size(), &entries, message)) {
+    return false;
+  }
+  for (const NodeInspectionView& node : page.nodes) {
+    if (!add_node_nested_entries(node, &entries, message)) {
+      return false;
+    }
+  }
+  const internal::Json canonical =
+      internal::encode_graph(IpcSessionId{page.session.value}, page)["nodes"];
+  return measure_collection_page(canonical, entries, page.nodes.size(), 0,
+                                 measurement, message);
+}
+
+/**
+ * @brief Measures one dependency page with its shared header exactly once.
+ * @param session_id Exact opaque session id validated for every page.
+ * @param page Transactionally decoded dependency page.
+ * @param first_page Whether shared roots and header belong to this admission.
+ * @param measurement Receives exact recursive and compact-byte footprint.
+ * @param message Receives a local protocol diagnostic on rejection.
+ * @return True when roots, entries, nested nodes, header, and row bytes fit.
+ * @throws std::bad_alloc if copied JSON, compact encoding, or diagnostics
+ *         allocate.
+ * @note Continuations repeat the frozen header on the wire but the final
+ *       public aggregate retains it once, matching daemon header accounting.
+ */
+bool measure_dependency_collection_page(
+    const IpcSessionId& session_id, const HostDependencyTreeSnapshot& page,
+    bool first_page, internal::CollectionPageMeasurement* measurement,
+    std::string* message) {
+  std::size_t entries = 0;
+  if ((first_page &&
+       !add_recursive_entries(page.root_nodes.size(), &entries, message)) ||
+      !add_recursive_entries(page.entries.size(), &entries, message)) {
+    return false;
+  }
+  for (const HostDependencyTreeEntry& entry : page.entries) {
+    if (!add_node_nested_entries(entry.node, &entries, message)) {
+      return false;
+    }
+  }
+
+  std::size_t shared_bytes = 0;
+  if (first_page) {
+    HostDependencyTreeSnapshot header_value = page;
+    header_value.entries.clear();
+    const internal::Json header =
+        internal::encode_dependency_tree(session_id, header_value);
+    const std::size_t encoded_header_bytes = header.dump().size();
+    if (encoded_header_bytes < 2U) {
+      *message = "dependency-tree shared header lost its entries array";
+      return false;
+    }
+    shared_bytes = encoded_header_bytes - 2U;
+  }
+  const internal::Json canonical =
+      internal::encode_dependency_tree(session_id, page)["entries"];
+  return measure_collection_page(canonical, entries, page.entries.size(),
+                                 shared_bytes, measurement, message);
+}
+
+/**
+ * @brief Measures traversal-order map rows and nested node-id vectors.
+ * @param page Decoded private branch rows.
+ * @param first_page Whether this is the initial page; no shared header exists.
+ * @param measurement Receives exact recursive and compact-byte footprint.
+ * @param message Receives a local protocol diagnostic on rejection.
+ * @return True when outer branches, nested ids, and bytes are bounded.
+ * @throws std::bad_alloc if compact row encoding or diagnostics allocate.
+ */
+bool measure_traversal_order_collection_page(
+    const std::vector<TraversalOrderPageRow>& page, bool first_page,
+    internal::CollectionPageMeasurement* measurement, std::string* message) {
+  (void)first_page;
+  std::size_t entries = 0;
+  if (!add_recursive_entries(page.size(), &entries, message)) {
+    return false;
+  }
+  for (const TraversalOrderPageRow& row : page) {
+    if (!add_recursive_entries(row.node_ids.size(), &entries, message)) {
+      return false;
+    }
+  }
+  return measure_collection_page(canonical_collection_rows(page), entries,
+                                 page.size(), 0, measurement, message);
+}
+
+/**
+ * @brief Measures traversal-detail map rows and nested node vectors.
+ * @param page Decoded private branch rows.
+ * @param first_page Whether this is the initial page; no shared header exists.
+ * @param measurement Receives exact recursive and compact-byte footprint.
+ * @param message Receives a local protocol diagnostic on rejection.
+ * @return True when outer branches, nested nodes, and bytes are bounded.
+ * @throws std::bad_alloc if compact row encoding or diagnostics allocate.
+ */
+bool measure_traversal_detail_collection_page(
+    const std::vector<TraversalDetailPageRow>& page, bool first_page,
+    internal::CollectionPageMeasurement* measurement, std::string* message) {
+  (void)first_page;
+  std::size_t entries = 0;
+  if (!add_recursive_entries(page.size(), &entries, message)) {
+    return false;
+  }
+  for (const TraversalDetailPageRow& row : page) {
+    if (!add_recursive_entries(row.nodes.size(), &entries, message)) {
+      return false;
+    }
+  }
+  return measure_collection_page(canonical_collection_rows(page), entries,
+                                 page.size(), 0, measurement, message);
+}
+
+/**
+ * @brief Measures recent-planning rows and every nested sample collection.
+ * @param page Decoded public planning snapshots.
+ * @param first_page Whether this is the initial page; no shared header exists.
+ * @param measurement Receives exact recursive and compact-byte footprint.
+ * @param message Receives a local protocol diagnostic on rejection.
+ * @return True when rows, samples, task dependencies, and bytes are bounded.
+ * @throws std::bad_alloc if compact row encoding or diagnostics allocate.
+ */
+bool measure_planning_collection_page(
+    const std::vector<ComputePlanningInspectionSnapshot>& page, bool first_page,
+    internal::CollectionPageMeasurement* measurement, std::string* message) {
+  (void)first_page;
+  std::size_t entries = 0;
+  if (!add_recursive_entries(page.size(), &entries, message)) {
+    return false;
+  }
+  for (const ComputePlanningInspectionSnapshot& snapshot : page) {
+    if (!add_recursive_entries(snapshot.planned_node_sample.size(), &entries,
+                               message) ||
+        !add_recursive_entries(snapshot.task_sample.size(), &entries,
+                               message)) {
+      return false;
+    }
+    for (const ComputePlanningTaskSnapshot& task : snapshot.task_sample) {
+      if (!add_recursive_entries(task.dependency_task_ids.size(), &entries,
+                                 message)) {
+        return false;
+      }
+    }
+  }
+  internal::Json canonical = internal::Json::array();
+  for (const ComputePlanningInspectionSnapshot& snapshot : page) {
+    internal::Json encoded;
+    if (!canonical_planning_snapshot(snapshot, &encoded, message)) {
+      return false;
+    }
+    canonical.push_back(std::move(encoded));
+  }
+  return measure_collection_page(canonical, entries, page.size(), 0,
+                                 measurement, message);
+}
 
 /**
  * @brief Validates one exact GraphErrc numeric/name pair from a plugin row.
@@ -1724,6 +2198,12 @@ class Client::Impl {
           *rows = page->size();
           return true;
         },
+        [](const internal::Json&, const std::vector<NodeId>& page,
+           bool first_page, internal::CollectionPageMeasurement* measurement,
+           std::string* message) {
+          return measure_flat_collection_page(page, first_page, measurement,
+                                              message);
+        },
         [](std::vector<NodeId>* aggregate, std::vector<NodeId> page,
            std::string*) {
           aggregate->insert(aggregate->end(),
@@ -1767,6 +2247,12 @@ class Client::Impl {
           }
           *rows = page->size();
           return true;
+        },
+        [](const internal::Json&, const std::vector<std::string>& page,
+           bool first_page, internal::CollectionPageMeasurement* measurement,
+           std::string* message) {
+          return measure_flat_collection_page(page, first_page, measurement,
+                                              message);
         },
         [](std::vector<std::string>* aggregate, std::vector<std::string> page,
            std::string* message) {
@@ -1812,6 +2298,12 @@ class Client::Impl {
           }
           *rows = page->size();
           return true;
+        },
+        [](const internal::Json&, const SourcePage& page, bool first_page,
+           internal::CollectionPageMeasurement* measurement,
+           std::string* message) {
+          return measure_flat_collection_page(page, first_page, measurement,
+                                              message);
         },
         [](SourceMap* aggregate, SourcePage page, std::string* message) {
           for (PluginSourcePageRow& row : page) {
@@ -2041,6 +2533,12 @@ IpcResult<std::vector<GraphSessionSummary>> Client::list_graphs() {
         *rows = page->size();
         return true;
       },
+      [](const internal::Json&, const std::vector<GraphSessionSummary>& page,
+         bool first_page, internal::CollectionPageMeasurement* measurement,
+         std::string* message) {
+        return measure_flat_collection_page(page, first_page, measurement,
+                                            message);
+      },
       [](std::vector<GraphSessionSummary>* aggregate,
          std::vector<GraphSessionSummary> page, std::string* message) {
         for (GraphSessionSummary& row : page) {
@@ -2082,6 +2580,12 @@ IpcResult<GraphInspectionView> Client::inspect_graph(
         }
         *rows = page->nodes.size();
         return true;
+      },
+      [](const internal::Json&, const GraphInspectionView& page,
+         bool first_page, internal::CollectionPageMeasurement* measurement,
+         std::string* message) {
+        return measure_graph_collection_page(page, first_page, measurement,
+                                             message);
       },
       [&session_id](GraphInspectionView* aggregate, GraphInspectionView page,
                     std::string*) {
@@ -2156,6 +2660,13 @@ IpcResult<HostDependencyTreeSnapshot> Client::inspect_dependency_tree(
         }
         *rows = page->entries.size();
         return true;
+      },
+      [&session_id](const internal::Json&,
+                    const HostDependencyTreeSnapshot& page, bool first_page,
+                    internal::CollectionPageMeasurement* measurement,
+                    std::string* message) {
+        return measure_dependency_collection_page(session_id, page, first_page,
+                                                  measurement, message);
       },
       [header_initialized = false](HostDependencyTreeSnapshot* aggregate,
                                    HostDependencyTreeSnapshot page,
@@ -2456,6 +2967,12 @@ Client::recent_compute_planning_snapshots(const IpcSessionId& session_id) {
         *page = std::move(decoded);
         return true;
       },
+      [](const internal::Json&, const PlanningList& page, bool first_page,
+         internal::CollectionPageMeasurement* measurement,
+         std::string* message) {
+        return measure_planning_collection_page(page, first_page, measurement,
+                                                message);
+      },
       [](PlanningList* aggregate, PlanningList page, std::string*) {
         aggregate->insert(aggregate->end(),
                           std::make_move_iterator(page.begin()),
@@ -2491,6 +3008,12 @@ IpcResult<std::map<int, std::vector<NodeId>>> Client::traversal_orders(
         }
         *rows = page->size();
         return true;
+      },
+      [](const internal::Json&, const TraversalPage& page, bool first_page,
+         internal::CollectionPageMeasurement* measurement,
+         std::string* message) {
+        return measure_traversal_order_collection_page(page, first_page,
+                                                       measurement, message);
       },
       [](TraversalMap* aggregate, TraversalPage page, std::string* message) {
         for (TraversalOrderPageRow& row : page) {
@@ -2534,6 +3057,12 @@ Client::traversal_details(const IpcSessionId& session_id) {
         }
         *rows = page->size();
         return true;
+      },
+      [](const internal::Json&, const TraversalPage& page, bool first_page,
+         internal::CollectionPageMeasurement* measurement,
+         std::string* message) {
+        return measure_traversal_detail_collection_page(page, first_page,
+                                                        measurement, message);
       },
       [](TraversalMap* aggregate, TraversalPage page, std::string* message) {
         for (TraversalDetailPageRow& row : page) {
