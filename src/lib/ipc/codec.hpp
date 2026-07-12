@@ -10,6 +10,7 @@
 #include <type_traits>
 #include <vector>
 
+#include "ipc/protocol_bounds.hpp"
 #include "photospider/core/result_types.hpp"
 #include "photospider/host/host.hpp"
 #include "photospider/ipc/protocol.hpp"
@@ -86,33 +87,6 @@ inline constexpr std::size_t kLargeTextMaxBytes = 8U * 1024U * 1024U;
  *       before a plugin, scheduler, graph, or filesystem mutation begins.
  */
 inline constexpr std::size_t kPathArrayMaxEntries = 256;
-
-/**
- * @brief Maximum number of elements in one general version 1 wire page.
- *
- * @throws Nothing; this is an immutable compile-time value.
- * @note Event drain has the smaller public 1,024 limit; this value applies to
- *       scheduler traces and other general wire pages.
- */
-inline constexpr std::size_t kGeneralPageMaxEntries = 4096;
-
-/**
- * @brief Maximum number of elements retained by one collection snapshot.
- *
- * @throws Nothing; this is an immutable compile-time value.
- * @note The bounded snapshot registry enforces this after one full Host value
- *       is measured and before any cursor or page is published.
- */
-inline constexpr std::size_t kSnapshotMaxEntries = 262144;
-
-/**
- * @brief Maximum encoded byte size retained by one collection snapshot.
- *
- * @throws Nothing; this is an immutable compile-time value.
- * @note The bounded snapshot registry reserves and enforces this byte quota;
- *       the constant does not bound Host-internal construction peaks.
- */
-inline constexpr std::size_t kSnapshotMaxBytes = 64U * 1024U * 1024U;
 
 /**
  * @brief Exact sorted method inventory implemented by the current v1 slice.

@@ -549,14 +549,17 @@ OperationStatus RequestRouter::start_runtime(const std::string& socket_path,
   }
   OperationStatus started;
   try {
+    collection_snapshots_.start();
     started = compute_registry_.start();
   } catch (...) {
+    collection_snapshots_.finish_shutdown();
     output_store_.shutdown();
     throw;
   }
   if (started.ok) {
     registry_.start_admission();
   } else {
+    collection_snapshots_.finish_shutdown();
     output_store_.shutdown();
   }
   return started;
@@ -565,6 +568,7 @@ OperationStatus RequestRouter::start_runtime(const std::string& socket_path,
 /** @copydoc RequestRouter::begin_shutdown */
 void RequestRouter::begin_shutdown() noexcept {
   registry_.stop_admission();
+  collection_snapshots_.begin_shutdown();
   compute_registry_.stop_admission();
   output_store_.stop_leases();
 }
@@ -572,6 +576,7 @@ void RequestRouter::begin_shutdown() noexcept {
 /** @copydoc RequestRouter::finish_shutdown */
 void RequestRouter::finish_shutdown() noexcept {
   compute_registry_.shutdown();
+  collection_snapshots_.finish_shutdown();
   output_store_.shutdown();
   try {
     const auto sessions = registry_.active_sessions();

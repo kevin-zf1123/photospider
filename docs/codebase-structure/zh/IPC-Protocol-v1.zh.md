@@ -135,6 +135,8 @@ malformed opaque id 属本地 Protocol result-shape failure。
 | Node YAML text 或一个 copied parameter/source string | 各 8 MiB（8,388,608 UTF-8 bytes） |
 | Directory/path input array | 256 entries |
 | General wire page | 4,096 entries |
+| 单个 stable collection snapshot | 262,144 entries 且 64 MiB |
+| Active collection snapshot | 64 records 且总计 256 MiB |
 
 String 上限会在 JSON decoding 后对每个已知 string member 分别应用。已知入站 array/page
 count 会在 session 解析或 Host access 前检查；未知 member 只能在 JSON parser 将其实体化后
@@ -342,6 +344,37 @@ publication，等待 active lease 被显式 release 或达到 injected monotonic
 unowned artifact，并在关闭 Host session 前关闭自己的 directory。Quota、两类 TTL、clock 与 id
 source 均可注入，以执行 deterministic filesystem/race test。
 
+## Private Stable Collection Snapshot
+
+Router 拥有一个 private、type-erased 的 `CollectionSnapshotRegistry`，并随 daemon runtime
+lifecycle 启动、停止和清空它。当前八方法 wire inventory 不广告 collection cursor page 或
+cursor-release method。三个已路由的 inspection method 保持 direct result shape，不会 reserve、
+publish 或 page registry record。Public Host collection API 保持 full-value API；该 registry 不新增
+Host page API、public ABI type 或 JSON response envelope。
+
+Private `reserve()` operation 会原子预留一个 record 和完整的 64 MiB per-snapshot allowance。
+Production admission 最多保留 64 records 与总计 256 MiB；quota 不可用时报告 private
+`CapacityExceeded`。`publish()` 接受 caller 的完整 collection、精确 measured byte count、binding
+与 page limit。超过 262,144 entries 或 64 MiB 会报告 private `ResponseTooLarge`，回滚
+reservation，并且不发布 cursor 或 retained snapshot。合法的 multi-page value 会 move 进
+registry；worst-case reservation 会以事务方式替换成精确 measured byte count，另一次 admission
+随后才会观察该 quota。Empty 与 single-page value 会直接返回，不保留 record。
+
+Multi-page publication 会获得一个经过 collision-check 的 32-lowercase-hex cursor，并冻结精确
+method、optional opaque session id，以及 original non-page parameter 的 canonical identity。Page
+包含 1 至 4,096 个有序 entry。Continuation lookup 必须提供 frozen identity 与精确 next offset；
+binding/type/offset mismatch 会报告 private `CursorNotFound`，且不会推进 record。Malformed
+cursor、zero/over-limit page 或 offset arithmetic overflow 会报告 private `InvalidParams`，同样
+不会破坏状态。Continuation page 只读取 retained value，不执行 Host call 或 live-session lookup，
+因此不依赖当前 graph-session mapping；copy/allocation failure 也不会改变 next offset。
+
+Final page 会原子删除 record 并释放 measured quota。否则，由 cursor publication 时刻开始计算、
+且不会因 paging 刷新的固定 15-minute monotonic TTL 会完成释放。Daemon 开始 shutdown 时停止新
+reservation，同时保留 active reservation 与已经 published 的 record；client worker join 后，
+final snapshot shutdown 会在关闭 Host session 前清空全部 record 与 reservation。下一次 runtime
+start 会在 empty registry 上启用 admission。Limit、clock 与 id source 均可注入，用于
+deterministic capacity、final-page、expiry 与 shutdown race test。
+
 ## Inspection Value
 
 Inspection 会在获取 Host mutex 前原子地 admit opaque session，并且只调用 `ps::Host`。并发 close
@@ -365,6 +398,8 @@ output/input name 与 nonnegative `input_index`。Optional value 使用 JSON nul
 Typed client 会在发布 graph、node 或 dependency-tree snapshot 前，对每个 node id、tree depth、
 edge input index、debug timestamp/duration、worker id 与 spatial extent/rectangle component
 执行范围检查。Signed/unsigned overflow 属本地 Protocol result-shape failure，绝不窄化。
+当前已路由的三个 inspection method 返回现有 direct result shape，且不使用 private collection
+snapshot registry 或 collection cursor。
 同一组 reusable enum、`PixelRect`、bounded-string、array、page、opaque-id 与 nested-status codec
 会递归应用于 composite value；decode 失败时 caller-visible destination 保持未发布。
 
@@ -389,11 +424,12 @@ lifecycle lock 前只 unlink 精确匹配的 socket。
 
 Listener 最多跟踪 32 个 joinable client worker。每个 connection 内 request 顺序执行，不同
 client 的 frame/JSON 工作可以并发。Public Host 不承诺 thread-safe，因此每个 Host call 都使用
-一个 daemon mutex；socket read/write 绝不持有它。Shutdown 会先停止所有 session 与 compute
-admission，关闭 listener，shutdown tracked client descriptor 以唤醒 read，并 join 全部 connection
-worker。随后它会 drain 所有 accepted compute job，join 唯一 compute worker，释放 terminal job
-ownership，并通过显式 release 或 TTL 等待 active delivery lease；OutputStore 关闭后才关闭 Host
-session 并清空 session mapping。最后在 lifecycle lock 仍持有时移除 socket，释放 lock，再销毁
+一个 daemon mutex；socket read/write 绝不持有它。Shutdown 会先停止所有 session、snapshot 与
+compute admission，关闭 listener，shutdown tracked client descriptor 以唤醒 read，并 join 全部
+connection worker。随后它会 drain 所有 accepted compute job，join 唯一 compute worker，释放
+terminal job ownership，清空 retained collection snapshot，并通过显式 release 或 TTL 等待 active
+delivery lease；OutputStore 关闭后才关闭 Host session 并清空 session mapping。最后在 lifecycle
+lock 仍持有时移除 socket，释放 lock，再销毁
 Host state；持久 lock file 会有意保留。
 
 安装 SIGINT/SIGTERM handler 前，`photospiderd` 会创建 nonblocking close-on-exec self-pipe。
@@ -409,10 +445,11 @@ Focused local command：
 cmake -S . -B build -DPHOTOSPIDER_BUILD_IPC=ON -DBUILD_TESTING=ON
 cmake --build build --target photospider_ipc_client \
   photospider_ipc_server_internal photospiderd test_ipc_protocol \
-  test_compute_request_registry test_output_store test_ipc_daemon \
+  test_compute_request_registry test_collection_snapshot_registry \
+  test_output_store test_ipc_daemon \
   public_header_self_containment -j
 ctest --test-dir build --output-on-failure \
-  -R '^(FrameCodec|ProtocolEnvelope|IntegerCodec|ProtocolErrors|ProtocolParams|ProtocolGraphLoad|ProtocolGraphClose|InspectionJson|SessionRegistry|ComputeRequestRegistry|OutputStore|ClientLifecycle|ClientResultValidation|IpcDaemon|StaticProductConsumerSmoke|IpcDisabledInstallSmoke|PublicHeaderSelfContainment)'
+  -R '^(FrameCodec|ProtocolEnvelope|IntegerCodec|ProtocolErrors|ProtocolParams|ProtocolGraphLoad|ProtocolGraphClose|InspectionJson|SessionRegistry|ComputeRequestRegistry|CollectionSnapshotRegistry|OutputStore|ClientLifecycle|ClientResultValidation|IpcDaemon|StaticProductConsumerSmoke|IpcDisabledInstallSmoke|PublicHeaderSelfContainment)'
 ```
 
 `StaticProductConsumerSmoke` 验证 installed backend 与第二个 client-only consumer；
