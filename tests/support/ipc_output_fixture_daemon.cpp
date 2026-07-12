@@ -510,6 +510,44 @@ ps::ImageBuffer make_image(ImageMode mode) {
   return image;
 }
 
+/**
+ * @brief Configures deterministic bounded observation pages on the test Host.
+ * @param host Fixture Host that will serve real Server client workers.
+ * @return Nothing.
+ * @throws std::bad_alloc if copied event text or page storage cannot allocate.
+ * @throws std::invalid_argument if `host` is null.
+ * @note Two destructive event batches are consumed globally across clients,
+ *       while the trace page is copied unchanged for every client. This seam
+ *       exercises production router/server concurrency without adding a wire
+ *       method, product flag, or backend publication failpoint.
+ */
+void configure_observations(ps::testing::IpcHostSpy* host) {
+  if (host == nullptr) {
+    throw std::invalid_argument("fixture observation Host is null");
+  }
+  ps::ComputeEventBatch first;
+  first.events = {
+      ps::ComputeEventSnapshot{1, ps::NodeId{1}, "first", "fixture", 1.0}};
+  first.next_sequence = 2;
+  first.has_more = true;
+  first.dropped_count = 1;
+  ps::ComputeEventBatch second;
+  second.events = {
+      ps::ComputeEventSnapshot{2, ps::NodeId{2}, "second", "fixture", 2.0}};
+  second.next_sequence = 3;
+  host->set_compute_event_batches({std::move(first), std::move(second)});
+
+  ps::SchedulerTracePage trace;
+  trace.events = {
+      ps::SchedulerTraceEventSnapshot{
+          1, 11, ps::NodeId{-1}, -1,
+          ps::HostSchedulerTraceAction::AssignInitial, 101},
+      ps::SchedulerTraceEventSnapshot{
+          2, 12, ps::NodeId{2}, 3, ps::HostSchedulerTraceAction::Execute, 102}};
+  trace.next_sequence = 2;
+  host->set_scheduler_trace_page(std::move(trace));
+}
+
 }  // namespace
 
 /**
@@ -535,6 +573,7 @@ int main(int argc, char** argv) {
     SignalRegistration signals(stop_pipe.write_fd());
     ps::testing::IpcHostSpy host;
     host.set_compute_image(make_image(options.image_mode));
+    configure_observations(&host);
     auto clock = std::make_shared<ControlFileClock>(options.clock_control_path);
     auto ids = std::make_shared<DeterministicIdSource>();
     ps::ipc::internal::Server server(host, "output-fixture-v1",

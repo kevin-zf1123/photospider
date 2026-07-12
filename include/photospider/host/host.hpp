@@ -678,8 +678,10 @@ class PHOTOSPIDER_API Host {
    * @throws std::bad_alloc if request processing, backend-to-status
    *         translation, or copied result construction exhausts memory.
    * @note A successful call removes only returned events and atomically resets
-   *       the shared drop counter. Invalid limits return
-   *       `GraphErrc::InvalidParameter` without draining or resetting state.
+   *       the shared drop counter. Invalid/over-1,024-byte event name or source
+   *       publications are dropped whole before retention and counted once.
+   *       Invalid limits return `GraphErrc::InvalidParameter` without draining
+   *       or resetting state.
    */
   virtual Result<ComputeEventBatch> drain_compute_events(
       const GraphSessionId& session, std::size_t limit) = 0;

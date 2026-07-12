@@ -45,12 +45,12 @@ class GraphEventService {
   /**
    * @brief Publishes one compute event into the bounded ring.
    *
-   * The method first measures name and source byte lengths. An oversized
-   * publication is dropped whole. Under the ring lock, a valid attempt either
-   * consumes one sequence and is retained, consumes one sequence and is
-   * rejected for oversize, or is rejected by terminal sequence exhaustion.
-   * Every rejection/eviction increments the shared drop count exactly once
-   * with saturating arithmetic.
+   * The method first validates canonical UTF-8 and measures name/source byte
+   * lengths. Invalid or oversized text drops the whole publication. Under the
+   * ring lock, an attempt either consumes one valid sequence and is retained,
+   * consumes one sequence and is rejected for text, or is rejected by terminal
+   * sequence exhaustion. Every rejection/eviction increments the shared drop
+   * count exactly once with saturating arithmetic.
    *
    * @param id Backend node id.
    * @param name Human-readable event name, limited to
@@ -61,8 +61,8 @@ class GraphEventService {
    * @return Nothing.
    * @throws std::bad_alloc if copying an in-bounds name or source fails; no
    *         sequence, event, or drop state changes in that case.
-   * @note `std::string::size()` is the UTF-8 byte count for repository UTF-8
-   *       strings. Oversized values are never truncated or retained.
+   * @note `std::string::size()` is the validated UTF-8 byte count. Invalid or
+   *       oversized values are never truncated, repaired, or retained.
    */
   void push(int id, const std::string& name, const std::string& source,
             double ms);

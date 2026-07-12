@@ -160,7 +160,9 @@ class RequestRouter {
    *       execution/publication failures remain nested terminal statuses;
    *       only result-time missing or identity-mismatched artifacts become the
    *       top-level `artifact_not_found` error. Lease-aware release remains
-   *       available after concurrent terminal-record removal.
+   *       available after concurrent terminal-record removal. Event drains
+   *       and scheduler trace pages validate their exact bounds before one
+   *       serialized Host call; they never use collection snapshot storage.
    *       Resource exhaustion is rethrown. The function performs no socket IO.
    */
   std::string route(const std::string& payload);
@@ -319,6 +321,30 @@ class RequestRouter {
    *       `internal_error`.
    */
   std::optional<std::string> route_compute_method(
+      const std::string& id, const std::string& method,
+      const RoutedParams& routed_params);
+
+  /**
+   * @brief Routes bounded compute events and scheduler trace observations.
+   *
+   * @param id Valid request id correlated with the response.
+   * @param method Exact `events.drain` or `scheduler.trace` method name.
+   * @param routed_params Cpp-only adapter borrowing structurally valid params.
+   * @return Complete response for this family, or `std::nullopt` when another
+   *         route family must handle the method.
+   * @throws std::bad_alloc if validation, Host copying, or encoding cannot
+   *         allocate.
+   * @throws std::invalid_argument if a successful Host returns malformed
+   *         sequences, UTF-8, enum values, or locked page metadata.
+   * @throws Whatever the matching Host method propagates; `route()` preserves
+   *         resource exhaustion and maps other standard exceptions.
+   * @note All known params are validated before session resolution. Each call
+   *       holds one session admission and invokes exactly one matching Host
+   *       operation under `host_mutex_`. Compute-event drains are destructive
+   *       only inside Host; scheduler traces are non-destructive. Neither path
+   *       reserves a stable collection snapshot or advertises a new method.
+   */
+  std::optional<std::string> route_observation_method(
       const std::string& id, const std::string& method,
       const RoutedParams& routed_params);
 

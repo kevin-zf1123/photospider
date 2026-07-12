@@ -527,6 +527,48 @@ Json encode_timing(std::string_view request_id, const IpcSessionId& session_id,
                    const TimingSnapshot& timing);
 
 /**
+ * @brief Encodes one bounded destructive compute-event batch.
+ *
+ * @param session_id Opaque daemon session id visible to the caller.
+ * @param batch Complete Host-returned bounded event batch.
+ * @param requested_limit Exact validated wire limit passed to Host.
+ * @return Object containing session id, ordered events, and locked metadata.
+ * @throws std::bad_alloc if validation diagnostics or JSON storage cannot be
+ *         allocated.
+ * @throws std::length_error if event count or text exceeds its version 1
+ *         bound.
+ * @throws std::invalid_argument if ids, sequences, UTF-8, page metadata, or
+ *         requested-limit invariants are malformed.
+ * @note Event text is never repaired or truncated. Non-finite elapsed values
+ *       use the established JSON-null observation representation.
+ */
+Json encode_compute_event_batch(const IpcSessionId& session_id,
+                                const ComputeEventBatch& batch,
+                                std::size_t requested_limit);
+
+/**
+ * @brief Encodes one bounded non-destructive scheduler-trace page.
+ *
+ * @param session_id Opaque daemon session id visible to the caller.
+ * @param after_sequence Exact exclusive wire cursor passed to Host.
+ * @param page Complete Host-returned sequence page.
+ * @param requested_limit Exact validated wire limit passed to Host.
+ * @return Object containing session id, ordered traces, and locked metadata.
+ * @throws std::bad_alloc if validation diagnostics or JSON storage cannot be
+ *         allocated.
+ * @throws std::length_error if the event count exceeds the version 1 bound.
+ * @throws std::invalid_argument if ids, sequences, enums, page metadata, or
+ *         requested-limit invariants are malformed.
+ * @note The encoder accepts nonnegative node/worker ids and preserves `-1` as
+ *       the no-specific-node/worker sentinel. Values below -1 are rejected,
+ *       and Host trace state is never mutated.
+ */
+Json encode_scheduler_trace_page(const IpcSessionId& session_id,
+                                 uint64_t after_sequence,
+                                 const SchedulerTracePage& page,
+                                 std::size_t requested_limit);
+
+/**
  * @brief Encodes one copied dirty-region snapshot.
  *
  * @param request_id Valid nonempty correlated id for response-size preflight.

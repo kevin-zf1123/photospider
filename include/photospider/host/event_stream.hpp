@@ -28,7 +28,7 @@ inline constexpr std::size_t kComputeEventDrainMaxLimit = 1024;
 /** @brief Production capacity of each graph's compute-event ring. */
 inline constexpr std::size_t kComputeEventRingCapacity = 8192;
 
-/** @brief Maximum UTF-8 byte length of a compute-event name or source. */
+/** @brief Maximum canonical UTF-8 byte length of an event name or source. */
 inline constexpr std::size_t kComputeEventTextMaxBytes = 1024;
 
 /** @brief Minimum accepted scheduler-trace page size. */
@@ -63,10 +63,10 @@ struct ComputeEventSnapshot {
   /** @brief Node that completed a compute step. */
   NodeId node;
 
-  /** @brief Human-readable node name. */
+  /** @brief Canonical UTF-8 node name retained within the 1,024-byte bound. */
   std::string name;
 
-  /** @brief Backend source label for the event. */
+  /** @brief Canonical UTF-8 source label within the 1,024-byte bound. */
   std::string source;
 
   /** @brief Elapsed milliseconds reported for the event. */
@@ -186,10 +186,21 @@ struct SchedulerTraceEventSnapshot {
   /** @brief Scheduler epoch associated with the event. */
   uint64_t epoch = 0;
 
-  /** @brief Node involved in the scheduler event. */
+  /**
+   * @brief Node involved in the scheduler event.
+   *
+   * @note A nonnegative value identifies a specific node. `NodeId{-1}` means
+   *       that no specific node applies to this event; values below -1 are
+   *       invalid.
+   */
   NodeId node;
 
-  /** @brief Worker id recorded by the scheduler path, or -1 when unknown. */
+  /**
+   * @brief Worker involved in the scheduler event.
+   *
+   * @note A nonnegative value identifies a specific worker. `-1` means that no
+   *       specific worker applies to this event; values below -1 are invalid.
+   */
   int worker_id = -1;
 
   /** @brief Public trace action label. */

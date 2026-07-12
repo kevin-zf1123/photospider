@@ -629,6 +629,18 @@ Json encode_double(double value) {
 }
 
 /**
+ * @brief Advances one valid observation publication sequence.
+ * @param sequence Valid value in `1..UINT64_MAX-1`.
+ * @return Numeric successor or the exhausted sentinel after the final value.
+ * @throws Nothing.
+ */
+uint64_t observation_sequence_successor(uint64_t sequence) noexcept {
+  return sequence >= kObservationSequenceExhausted - 1
+             ? kObservationSequenceExhausted
+             : sequence + 1;
+}
+
+/**
  * @brief Decodes one version 1 floating-point field.
  *
  * @param value JSON number or null.
@@ -1571,6 +1583,155 @@ Json encode_timing(std::string_view request_id, const IpcSessionId& session_id,
   return Json{{"session_id", session_id.value},
               {"node_timings", std::move(rows)},
               {"total_ms", encode_double(timing.total_ms)}};
+}
+
+/** @copydoc encode_compute_event_batch */
+Json encode_compute_event_batch(const IpcSessionId& session_id,
+                                const ComputeEventBatch& batch,
+                                std::size_t requested_limit) {
+  if (!valid_opaque_id(session_id.value)) {
+    throw std::invalid_argument(
+        "compute-event batch has an invalid opaque session id");
+  }
+  if (requested_limit < kComputeEventDrainMinLimit ||
+      requested_limit > kComputeEventDrainMaxLimit) {
+    throw std::invalid_argument(
+        "compute-event batch has an invalid requested limit");
+  }
+  require_bounded_entries(batch.events.size(), kComputeEventDrainMaxLimit,
+                          "compute-event batch.events");
+  if (batch.events.size() > requested_limit) {
+    throw std::invalid_argument(
+        "compute-event batch exceeds the requested limit");
+  }
+
+  uint64_t previous_sequence = 0;
+  for (const ComputeEventSnapshot& event : batch.events) {
+    if (event.sequence == 0 ||
+        event.sequence == kObservationSequenceExhausted ||
+        event.sequence <= previous_sequence) {
+      throw std::invalid_argument(
+          "compute-event batch contains an invalid sequence order");
+    }
+    require_node_id(event.node, "compute-event batch event");
+    require_bounded_text(event.name, kComputeEventTextMaxBytes,
+                         "compute-event batch event.name");
+    require_bounded_text(event.source, kComputeEventTextMaxBytes,
+                         "compute-event batch event.source");
+    previous_sequence = event.sequence;
+  }
+
+  if (batch.has_more &&
+      (batch.events.empty() || batch.events.size() != requested_limit)) {
+    throw std::invalid_argument(
+        "compute-event batch has inconsistent has_more metadata");
+  }
+  if (batch.next_sequence == 0 ||
+      (batch.has_more &&
+       batch.next_sequence == kObservationSequenceExhausted)) {
+    throw std::invalid_argument(
+        "compute-event batch has an invalid next_sequence");
+  }
+  if (!batch.events.empty() &&
+      batch.next_sequence !=
+          observation_sequence_successor(batch.events.back().sequence)) {
+    throw std::invalid_argument(
+        "compute-event batch next_sequence does not follow its last event");
+  }
+  if (batch.events.empty() && batch.has_more) {
+    throw std::invalid_argument(
+        "empty compute-event batch cannot report retained events");
+  }
+
+  Json events = Json::array();
+  for (const ComputeEventSnapshot& event : batch.events) {
+    events.push_back(Json{{"sequence", event.sequence},
+                          {"node_id", event.node.value},
+                          {"name", event.name},
+                          {"source", event.source},
+                          {"elapsed_ms", encode_double(event.elapsed_ms)}});
+  }
+  return Json{{"session_id", session_id.value},
+              {"events", std::move(events)},
+              {"next_sequence", batch.next_sequence},
+              {"has_more", batch.has_more},
+              {"dropped_count", batch.dropped_count}};
+}
+
+/** @copydoc encode_scheduler_trace_page */
+Json encode_scheduler_trace_page(const IpcSessionId& session_id,
+                                 uint64_t after_sequence,
+                                 const SchedulerTracePage& page,
+                                 std::size_t requested_limit) {
+  if (!valid_opaque_id(session_id.value)) {
+    throw std::invalid_argument(
+        "scheduler-trace page has an invalid opaque session id");
+  }
+  if (requested_limit < kSchedulerTraceMinLimit ||
+      requested_limit > kSchedulerTraceMaxLimit) {
+    throw std::invalid_argument(
+        "scheduler-trace page has an invalid requested limit");
+  }
+  require_bounded_entries(page.events.size(), kSchedulerTraceMaxLimit,
+                          "scheduler-trace page.events");
+  if (page.events.size() > requested_limit) {
+    throw std::invalid_argument(
+        "scheduler-trace page exceeds the requested limit");
+  }
+
+  uint64_t previous_sequence = after_sequence;
+  for (const SchedulerTraceEventSnapshot& event : page.events) {
+    Json action;
+    if (event.sequence == 0 ||
+        event.sequence == kObservationSequenceExhausted ||
+        event.sequence <= previous_sequence || event.node.value < -1 ||
+        event.worker_id < -1 || !encode_enum(event.action, &action)) {
+      throw std::invalid_argument(
+          "scheduler-trace page contains an invalid event");
+    }
+    previous_sequence = event.sequence;
+  }
+  if (page.has_more &&
+      (page.events.empty() || page.events.size() != requested_limit)) {
+    throw std::invalid_argument(
+        "scheduler-trace page has inconsistent has_more metadata");
+  }
+  if (page.next_sequence == kObservationSequenceExhausted) {
+    if (page.has_more ||
+        (!page.events.empty() &&
+         page.events.back().sequence != kObservationSequenceExhausted - 1)) {
+      throw std::invalid_argument(
+          "scheduler-trace exhausted sentinel is inconsistent");
+    }
+  } else if (!page.events.empty()) {
+    if (page.next_sequence != page.events.back().sequence) {
+      throw std::invalid_argument(
+          "scheduler-trace next_sequence is not its last event");
+    }
+  } else if (page.next_sequence != after_sequence || page.has_more) {
+    throw std::invalid_argument(
+        "empty scheduler-trace page did not preserve its cursor");
+  }
+
+  Json events = Json::array();
+  for (const SchedulerTraceEventSnapshot& event : page.events) {
+    Json action;
+    if (!encode_enum(event.action, &action)) {
+      throw std::invalid_argument(
+          "scheduler-trace page contains an unknown action");
+    }
+    events.push_back(Json{{"sequence", event.sequence},
+                          {"epoch", event.epoch},
+                          {"node_id", event.node.value},
+                          {"worker_id", event.worker_id},
+                          {"action", std::move(action)},
+                          {"timestamp_us", event.timestamp_us}});
+  }
+  return Json{{"session_id", session_id.value},
+              {"events", std::move(events)},
+              {"next_sequence", page.next_sequence},
+              {"has_more", page.has_more},
+              {"dropped_count", page.dropped_count}};
 }
 
 /** @copydoc encode_dirty_region */

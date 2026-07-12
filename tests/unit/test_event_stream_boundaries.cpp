@@ -152,19 +152,22 @@ TEST(ComputeEventRing, MeasuresUtf8BytesAndDropsWholePublication) {
   ASSERT_EQ(exact.size(), kComputeEventTextMaxBytes);
   const std::string oversized = exact + "b";
   ASSERT_EQ(oversized.size(), kComputeEventTextMaxBytes + 1);
+  const std::string invalid_utf8("\xc3\x28", 2);
 
   events.push(1, exact, exact, 1.0);
   events.push(2, oversized, "source", 2.0);
   events.push(3, "name", oversized, 3.0);
-  events.push(4, "four", "source", 4.0);
+  events.push(4, invalid_utf8, "source", 4.0);
+  events.push(5, "name", invalid_utf8, 5.0);
+  events.push(6, "six", "source", 6.0);
 
   ComputeEventBatch batch = events.drain(8);
   ASSERT_EQ(batch.events.size(), 2u);
   EXPECT_EQ(batch.events[0].sequence, 1u);
   EXPECT_EQ(batch.events[0].name, exact);
-  EXPECT_EQ(batch.events[1].sequence, 4u);
-  EXPECT_EQ(batch.dropped_count, 2u);
-  EXPECT_EQ(batch.next_sequence, 5u);
+  EXPECT_EQ(batch.events[1].sequence, 6u);
+  EXPECT_EQ(batch.dropped_count, 4u);
+  EXPECT_EQ(batch.next_sequence, 7u);
 }
 
 TEST(ComputeEventRing, ExhaustionNeverPublishesSentinelOrDoubleCounts) {

@@ -3190,6 +3190,327 @@ TEST_F(HostRoutedGraphStateProtocolTest,
 }
 
 TEST_F(HostRoutedGraphStateProtocolTest,
+       ObservationRoutesPreserveExactEventAndTraceWireSchemas) {
+  ComputeEventBatch event_batch;
+  event_batch.events = {
+      ComputeEventSnapshot{2, NodeId{7}, "first", "cpu", 1.25},
+      ComputeEventSnapshot{3, NodeId{8}, "second", "cache",
+                           std::numeric_limits<double>::quiet_NaN()}};
+  event_batch.next_sequence = 4;
+  event_batch.has_more = false;
+  event_batch.dropped_count = 5;
+  host_.set_compute_event_batch(event_batch);
+
+  Json response =
+      route("events.drain", Json{{"session_id", session_id_},
+                                 {"limit", 2},
+                                 {"max_entries", 9999},
+                                 {"future_observation_field", true}});
+  ASSERT_TRUE(response.contains("result")) << response.dump();
+  EXPECT_EQ(response["result"],
+            (Json{{"session_id", session_id_},
+                  {"events", Json::array({Json{{"sequence", 2},
+                                               {"node_id", 7},
+                                               {"name", "first"},
+                                               {"source", "cpu"},
+                                               {"elapsed_ms", 1.25}},
+                                          Json{{"sequence", 3},
+                                               {"node_id", 8},
+                                               {"name", "second"},
+                                               {"source", "cache"},
+                                               {"elapsed_ms", nullptr}}})},
+                  {"next_sequence", 4},
+                  {"has_more", false},
+                  {"dropped_count", 5}}));
+  ASSERT_EQ(host_.call_count("events.drain"), 1u);
+  auto invocation = host_.invocations().front();
+  EXPECT_EQ(invocation.session.value, "ipc-host-spy-session");
+  EXPECT_EQ(invocation.first_node.value, 2);
+
+  SchedulerTracePage trace_page;
+  trace_page.events = {
+      SchedulerTraceEventSnapshot{
+          kObservationSequenceExhausted - 2, 31, NodeId{-1}, -1,
+          HostSchedulerTraceAction::RethrowException, 9001},
+      SchedulerTraceEventSnapshot{kObservationSequenceExhausted - 1, 32,
+                                  NodeId{9}, 4,
+                                  HostSchedulerTraceAction::ExecuteTile, 9002}};
+  trace_page.next_sequence = kObservationSequenceExhausted;
+  trace_page.has_more = false;
+  trace_page.dropped_count = kObservationSequenceExhausted;
+  host_.set_scheduler_trace_page(trace_page);
+  host_.reset_invocations();
+
+  response = route("scheduler.trace",
+                   Json{{"session_id", session_id_},
+                        {"after_sequence", kObservationSequenceExhausted - 3},
+                        {"limit", 2},
+                        {"max_entries", 1}});
+  ASSERT_TRUE(response.contains("result")) << response.dump();
+  const Json& result = response["result"];
+  EXPECT_EQ(result["session_id"], session_id_);
+  ASSERT_EQ(result["events"].size(), 2u);
+  EXPECT_EQ(result["events"][0],
+            (Json{{"sequence", kObservationSequenceExhausted - 2},
+                  {"epoch", 31},
+                  {"node_id", -1},
+                  {"worker_id", -1},
+                  {"action", "rethrow_exception"},
+                  {"timestamp_us", 9001}}));
+  EXPECT_EQ(result["events"][1]["sequence"], kObservationSequenceExhausted - 1);
+  EXPECT_EQ(result["events"][1]["action"], "execute_tile");
+  EXPECT_EQ(result["next_sequence"], kObservationSequenceExhausted);
+  EXPECT_FALSE(result["has_more"].get<bool>());
+  EXPECT_EQ(result["dropped_count"], kObservationSequenceExhausted);
+  ASSERT_EQ(host_.call_count("scheduler.trace"), 1u);
+  invocation = host_.invocations().front();
+  EXPECT_EQ(invocation.first_node.value, 2);
+  EXPECT_EQ(invocation.text, std::to_string(kObservationSequenceExhausted - 3));
+}
+
+TEST_F(HostRoutedGraphStateProtocolTest,
+       ObservationPagingPreservesDestructiveAndNonDestructiveBoundaries) {
+  ComputeEventBatch first_events;
+  first_events.events = {
+      ComputeEventSnapshot{1, NodeId{1}, "one", "compute", 1.0}};
+  first_events.next_sequence = 2;
+  first_events.has_more = true;
+  first_events.dropped_count = 1;
+  host_.set_compute_event_batch(first_events);
+  Json first =
+      route("events.drain", Json{{"session_id", session_id_}, {"limit", 1}});
+  ASSERT_TRUE(first.contains("result")) << first.dump();
+  EXPECT_EQ(first["result"]["events"][0]["sequence"], 1);
+  EXPECT_TRUE(first["result"]["has_more"].get<bool>());
+  EXPECT_EQ(first["result"]["dropped_count"], 1);
+
+  ComputeEventBatch second_events;
+  second_events.events = {
+      ComputeEventSnapshot{2, NodeId{2}, "two", "compute", 2.0}};
+  second_events.next_sequence = 3;
+  host_.set_compute_event_batch(second_events);
+  Json second =
+      route("events.drain", Json{{"session_id", session_id_}, {"limit", 1}});
+  ASSERT_TRUE(second.contains("result")) << second.dump();
+  EXPECT_EQ(second["result"]["events"][0]["sequence"], 2);
+  EXPECT_FALSE(second["result"]["has_more"].get<bool>());
+  EXPECT_EQ(second["result"]["dropped_count"], 0);
+
+  SchedulerTracePage first_trace;
+  first_trace.events = {SchedulerTraceEventSnapshot{
+      10, 1, NodeId{3}, 0, HostSchedulerTraceAction::Execute, 100}};
+  first_trace.next_sequence = 10;
+  first_trace.has_more = true;
+  first_trace.dropped_count = 9;
+  host_.set_scheduler_trace_page(first_trace);
+  Json trace = route(
+      "scheduler.trace",
+      Json{{"session_id", session_id_}, {"after_sequence", 0}, {"limit", 1}});
+  ASSERT_TRUE(trace.contains("result")) << trace.dump();
+  const Json repeated = route(
+      "scheduler.trace",
+      Json{{"session_id", session_id_}, {"after_sequence", 0}, {"limit", 1}});
+  ASSERT_TRUE(repeated.contains("result")) << repeated.dump();
+  EXPECT_EQ(repeated["result"], trace["result"]);
+
+  SchedulerTracePage second_trace;
+  second_trace.events = {SchedulerTraceEventSnapshot{
+      11, 2, NodeId{4}, 1, HostSchedulerTraceAction::ExecuteTile, 101}};
+  second_trace.next_sequence = 11;
+  second_trace.dropped_count = 0;
+  host_.set_scheduler_trace_page(second_trace);
+  const Json final = route(
+      "scheduler.trace",
+      Json{{"session_id", session_id_}, {"after_sequence", 10}, {"limit", 1}});
+  ASSERT_TRUE(final.contains("result")) << final.dump();
+  EXPECT_EQ(final["result"]["events"][0]["sequence"], 11);
+  EXPECT_FALSE(final["result"]["has_more"].get<bool>());
+
+  SchedulerTracePage empty_trace;
+  empty_trace.next_sequence = 11;
+  host_.set_scheduler_trace_page(empty_trace);
+  const Json empty = route(
+      "scheduler.trace",
+      Json{{"session_id", session_id_}, {"after_sequence", 11}, {"limit", 1}});
+  ASSERT_TRUE(empty.contains("result")) << empty.dump();
+  EXPECT_TRUE(empty["result"]["events"].empty());
+  EXPECT_EQ(empty["result"]["next_sequence"], 11);
+  EXPECT_FALSE(empty["result"]["has_more"].get<bool>());
+  EXPECT_EQ(host_.call_count("events.drain"), 2u);
+  EXPECT_EQ(host_.call_count("scheduler.trace"), 4u);
+}
+
+TEST_F(HostRoutedGraphStateProtocolTest,
+       ObservationParamsRejectExactNumericBoundsBeforeHostAccess) {
+  const std::vector<Json> invalid_event_limits = {
+      Json(),   Json(0),   Json(kComputeEventDrainMaxLimit + 1),
+      Json(-1), Json(1.5), Json(std::numeric_limits<uint64_t>::max())};
+  for (const Json& limit : invalid_event_limits) {
+    Json params{{"session_id", session_id_}};
+    if (!limit.is_null()) {
+      params["limit"] = limit;
+    }
+    const Json response = route("events.drain", std::move(params));
+    ASSERT_TRUE(response.contains("error")) << response.dump();
+    EXPECT_EQ(response["error"]["name"], "invalid_params");
+  }
+  EXPECT_EQ(host_.call_count("events.drain"), 0u);
+
+  Json max_entries_only{{"session_id", session_id_}, {"max_entries", 1}};
+  Json response = route("events.drain", std::move(max_entries_only));
+  EXPECT_EQ(response["error"]["name"], "invalid_params");
+  EXPECT_EQ(host_.call_count("events.drain"), 0u);
+
+  ComputeEventBatch empty_events;
+  empty_events.next_sequence = 1;
+  host_.set_compute_event_batch(empty_events);
+  for (std::size_t limit :
+       {kComputeEventDrainMinLimit, kComputeEventDrainMaxLimit}) {
+    response = route("events.drain",
+                     Json{{"session_id", session_id_}, {"limit", limit}});
+    ASSERT_TRUE(response.contains("result")) << response.dump();
+    EXPECT_TRUE(response["result"]["events"].empty());
+    EXPECT_EQ(response["result"]["next_sequence"], 1);
+  }
+  EXPECT_EQ(host_.call_count("events.drain"), 2u);
+
+  const std::vector<Json> invalid_trace_cursors = {Json(), Json(-1), Json(1.5),
+                                                   Json("1")};
+  for (const Json& cursor : invalid_trace_cursors) {
+    Json params{{"session_id", session_id_}, {"limit", 1}};
+    if (!cursor.is_null()) {
+      params["after_sequence"] = cursor;
+    }
+    response = route("scheduler.trace", std::move(params));
+    ASSERT_TRUE(response.contains("error")) << response.dump();
+    EXPECT_EQ(response["error"]["name"], "invalid_params");
+  }
+  for (const Json& limit : std::vector<Json>{
+           Json(0), Json(kSchedulerTraceMaxLimit + 1), Json(-1), Json(1.5)}) {
+    response = route("scheduler.trace", Json{{"session_id", session_id_},
+                                             {"after_sequence", 0},
+                                             {"limit", limit}});
+    ASSERT_TRUE(response.contains("error")) << response.dump();
+    EXPECT_EQ(response["error"]["name"], "invalid_params");
+  }
+  EXPECT_EQ(host_.call_count("scheduler.trace"), 0u);
+
+  SchedulerTracePage terminal;
+  terminal.next_sequence = kObservationSequenceExhausted;
+  host_.set_scheduler_trace_page(terminal);
+  response = route("scheduler.trace",
+                   Json{{"session_id", session_id_},
+                        {"after_sequence", kObservationSequenceExhausted},
+                        {"limit", kSchedulerTraceMaxLimit}});
+  ASSERT_TRUE(response.contains("result")) << response.dump();
+  EXPECT_EQ(response["result"]["next_sequence"], kObservationSequenceExhausted);
+  EXPECT_EQ(host_.call_count("scheduler.trace"), 1u);
+}
+
+TEST_F(HostRoutedGraphStateProtocolTest,
+       ObservationRoutesPreserveHostFailuresAndSessionLookup) {
+  const std::string unknown_session(32, 'a');
+  Json response = route("events.drain",
+                        Json{{"session_id", unknown_session}, {"limit", 1}});
+  ASSERT_TRUE(response.contains("error")) << response.dump();
+  EXPECT_EQ(response["error"]["domain"], "graph");
+  EXPECT_EQ(response["error"]["name"], "not_found");
+  EXPECT_EQ(host_.call_count("events.drain"), 0u);
+
+  host_.set_status("events.drain", host_routed_graph_failure());
+  response =
+      route("events.drain", Json{{"session_id", session_id_}, {"limit", 1}});
+  ASSERT_TRUE(response.contains("error")) << response.dump();
+  EXPECT_EQ(response["error"]["domain"], "graph");
+  EXPECT_EQ(response["error"]["name"], "io");
+  EXPECT_EQ(host_.call_count("events.drain"), 1u);
+
+  host_.set_status("scheduler.trace", host_routed_graph_failure());
+  response = route(
+      "scheduler.trace",
+      Json{{"session_id", session_id_}, {"after_sequence", 0}, {"limit", 1}});
+  ASSERT_TRUE(response.contains("error")) << response.dump();
+  EXPECT_EQ(response["error"]["domain"], "graph");
+  EXPECT_EQ(response["error"]["name"], "io");
+  EXPECT_EQ(host_.call_count("scheduler.trace"), 1u);
+}
+
+TEST_F(HostRoutedGraphStateProtocolTest,
+       ObservationRoutesRejectMalformedHostValuesWithoutRetry) {
+  ComputeEventBatch invalid_utf8;
+  invalid_utf8.events = {ComputeEventSnapshot{
+      1, NodeId{1}, std::string("\xc3\x28", 2), "source", 1.0}};
+  invalid_utf8.next_sequence = 2;
+  host_.set_compute_event_batch(invalid_utf8);
+  Json response =
+      route("events.drain", Json{{"session_id", session_id_}, {"limit", 1}});
+  EXPECT_EQ(response["error"]["domain"], "daemon");
+  EXPECT_EQ(response["error"]["name"], "internal_error");
+  EXPECT_EQ(host_.call_count("events.drain"), 1u);
+
+  ComputeEventBatch oversized;
+  oversized.events = {ComputeEventSnapshot{
+      1, NodeId{1}, std::string(kComputeEventTextMaxBytes + 1, 'x'), "source",
+      1.0}};
+  oversized.next_sequence = 2;
+  host_.set_compute_event_batch(oversized);
+  host_.reset_invocations();
+  response =
+      route("events.drain", Json{{"session_id", session_id_}, {"limit", 1}});
+  EXPECT_EQ(response["error"]["domain"], "protocol");
+  EXPECT_EQ(response["error"]["name"], "response_too_large");
+  EXPECT_EQ(host_.call_count("events.drain"), 1u);
+
+  SchedulerTracePage malformed_trace;
+  malformed_trace.events = {SchedulerTraceEventSnapshot{
+      4, 1, NodeId{1}, 0, static_cast<HostSchedulerTraceAction>(999), 1}};
+  malformed_trace.next_sequence = 4;
+  host_.set_scheduler_trace_page(malformed_trace);
+  host_.reset_invocations();
+  response = route(
+      "scheduler.trace",
+      Json{{"session_id", session_id_}, {"after_sequence", 3}, {"limit", 1}});
+  EXPECT_EQ(response["error"]["domain"], "daemon");
+  EXPECT_EQ(response["error"]["name"], "internal_error");
+  EXPECT_EQ(host_.call_count("scheduler.trace"), 1u);
+
+  malformed_trace.events.front().action = HostSchedulerTraceAction::Execute;
+  malformed_trace.events.front().node = NodeId{-2};
+  host_.set_scheduler_trace_page(malformed_trace);
+  host_.reset_invocations();
+  response = route(
+      "scheduler.trace",
+      Json{{"session_id", session_id_}, {"after_sequence", 3}, {"limit", 1}});
+  ASSERT_TRUE(response.contains("error")) << response.dump();
+  EXPECT_EQ(response["error"]["domain"], "daemon");
+  EXPECT_EQ(response["error"]["name"], "internal_error");
+  EXPECT_EQ(host_.call_count("scheduler.trace"), 1u);
+
+  malformed_trace.events.front().node = NodeId{1};
+  malformed_trace.events.front().worker_id = -2;
+  host_.set_scheduler_trace_page(malformed_trace);
+  host_.reset_invocations();
+  response = route(
+      "scheduler.trace",
+      Json{{"session_id", session_id_}, {"after_sequence", 3}, {"limit", 1}});
+  ASSERT_TRUE(response.contains("error")) << response.dump();
+  EXPECT_EQ(response["error"]["domain"], "daemon");
+  EXPECT_EQ(response["error"]["name"], "internal_error");
+  EXPECT_EQ(host_.call_count("scheduler.trace"), 1u);
+
+  malformed_trace.events.front().worker_id = 0;
+  malformed_trace.next_sequence = kObservationSequenceExhausted;
+  host_.set_scheduler_trace_page(malformed_trace);
+  host_.reset_invocations();
+  response = route(
+      "scheduler.trace",
+      Json{{"session_id", session_id_}, {"after_sequence", 3}, {"limit", 1}});
+  EXPECT_EQ(response["error"]["domain"], "daemon");
+  EXPECT_EQ(response["error"]["name"], "internal_error");
+  EXPECT_EQ(host_.call_count("scheduler.trace"), 1u);
+}
+
+TEST_F(HostRoutedGraphStateProtocolTest,
        NodeListRoutesPreserveSingleAndMultipleStablePages) {
   static constexpr std::array<std::string_view, 2> kMethods = {
       "inspect.node_ids", "inspect.ending_nodes"};
