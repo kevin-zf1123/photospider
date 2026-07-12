@@ -89,18 +89,91 @@ inline constexpr std::size_t kLargeTextMaxBytes = 8U * 1024U * 1024U;
 inline constexpr std::size_t kPathArrayMaxEntries = 256;
 
 /**
- * @brief Exact sorted method subset advertised by current version 1 metadata.
+ * @brief Exact sorted method inventory advertised by protocol version 1.
  *
  * @throws Nothing; this is immutable compile-time metadata.
- * @note `daemon.version` and the installed typed Client use this exact subset.
- *       The request router additionally accepts the documented Host-backed
- *       graph-state and diagnostic schemas without a public raw-JSON client
- *       escape hatch.
+ * @note `daemon.version`, request admission, and the installed typed Client's
+ *       version validation share this authoritative 55-method table. Route
+ *       family matchers remain independent so contract tests can detect an
+ *       advertised method that has no implementation.
  */
-inline constexpr std::array<std::string_view, 8> kVersionOneMethodNames = {
-    "daemon.ping",   "daemon.version", "graph.close",
-    "graph.list",    "graph.load",     "inspect.dependency_tree",
-    "inspect.graph", "inspect.node"};  // NOLINT(whitespace/indent_namespace)
+inline constexpr std::array<std::string_view, 55> kVersionOneMethodNames = {
+    "cache.cache_all_nodes",
+    "cache.clear_all",
+    "cache.clear_drive",
+    "cache.clear_memory",
+    "cache.free_transient",
+    "cache.synchronize_disk",
+    "compute.last_error",
+    "compute.last_io_time",
+    "compute.release",
+    "compute.result",
+    "compute.status",
+    "compute.submit",
+    "compute.timing",
+    "daemon.ping",
+    "daemon.version",
+    "dirty.begin",
+    "dirty.end",
+    "dirty.update",
+    "events.drain",
+    "graph.clear",
+    "graph.close",
+    "graph.list",
+    "graph.load",
+    "graph.node_yaml.get",
+    "graph.node_yaml.set",
+    "graph.reload",
+    "graph.save",
+    "inspect.compute_planning",
+    "inspect.dependency_tree",
+    "inspect.dirty_region",
+    "inspect.ending_nodes",
+    "inspect.graph",
+    "inspect.node",
+    "inspect.node_ids",
+    "inspect.recent_compute_planning",
+    "inspect.roi_backward",
+    "inspect.roi_forward",
+    "inspect.traversal_details",
+    "inspect.traversal_orders",
+    "inspect.trees_containing_node",
+    "plugins.load_report",
+    "plugins.ops_combined_keys",
+    "plugins.ops_combined_sources",
+    "plugins.ops_sources",
+    "plugins.seed_builtins",
+    "plugins.unload_all",
+    "scheduler.configure_defaults",
+    "scheduler.description",
+    "scheduler.info",
+    "scheduler.load",
+    "scheduler.loaded_plugins",
+    "scheduler.replace",
+    "scheduler.scan",
+    "scheduler.trace",
+    "scheduler.types"};  // NOLINT(whitespace/indent_namespace)
+
+/**
+ * @brief Checks the immutable method table for strict lexical ordering.
+ *
+ * @return True only when every adjacent method is ordered and therefore
+ *         unique.
+ * @throws Nothing; all comparisons operate on compile-time string views.
+ * @note The strict comparison rejects both accidental reordering and adjacent
+ *       duplicates before any daemon or client target is built.
+ */
+inline constexpr bool version_one_methods_are_strictly_sorted() noexcept {
+  for (std::size_t index = 1; index < kVersionOneMethodNames.size(); ++index) {
+    if (!(kVersionOneMethodNames[index - 1] < kVersionOneMethodNames[index])) {
+      return false;
+    }
+  }
+  return true;
+}
+
+static_assert(version_one_methods_are_strictly_sorted(),
+              "version 1 method names must be sorted and unique");
 
 /**
  * @brief Decodes one JSON integer without signedness loss or narrowing.

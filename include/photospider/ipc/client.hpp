@@ -131,7 +131,8 @@ class PHOTOSPIDER_API Client {
    *
    * @return Typed service/version/method metadata or a categorized failure.
    * @throws std::bad_alloc if request or result allocation fails.
-   * @note The response is correlated and validated before publication.
+   * @note The response is correlated and validated against the exact sorted
+   *       55-method version 1 inventory before publication.
    */
   IpcResult<DaemonVersion> version();
 

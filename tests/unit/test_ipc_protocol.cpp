@@ -5035,6 +5035,131 @@ TEST(ProtocolEnvelope, NegotiatesVersionAndRejectsUnknownMethodAndSession) {
   EXPECT_EQ(missing["error"]["name"], "not_found");
 }
 
+/**
+ * @brief Locks version metadata, dispatch coverage, and route admission.
+ *
+ * @throws std::bad_alloc if test or router value construction cannot allocate.
+ * @note The independent normative array detects omissions, duplicates, and
+ *       aliases. Routing every normative entry detects unsupported claims,
+ *       while representative nonmembers exercise the generic allowlist that
+ *       prevents any unadvertised route family from becoming reachable.
+ */
+TEST(ProtocolContract,
+     AdvertisesAndRoutesExactlyTheNormativeVersionOneMethods) {
+  static constexpr std::array<std::string_view, 55> kExpectedMethods = {
+      "cache.cache_all_nodes",
+      "cache.clear_all",
+      "cache.clear_drive",
+      "cache.clear_memory",
+      "cache.free_transient",
+      "cache.synchronize_disk",
+      "compute.last_error",
+      "compute.last_io_time",
+      "compute.release",
+      "compute.result",
+      "compute.status",
+      "compute.submit",
+      "compute.timing",
+      "daemon.ping",
+      "daemon.version",
+      "dirty.begin",
+      "dirty.end",
+      "dirty.update",
+      "events.drain",
+      "graph.clear",
+      "graph.close",
+      "graph.list",
+      "graph.load",
+      "graph.node_yaml.get",
+      "graph.node_yaml.set",
+      "graph.reload",
+      "graph.save",
+      "inspect.compute_planning",
+      "inspect.dependency_tree",
+      "inspect.dirty_region",
+      "inspect.ending_nodes",
+      "inspect.graph",
+      "inspect.node",
+      "inspect.node_ids",
+      "inspect.recent_compute_planning",
+      "inspect.roi_backward",
+      "inspect.roi_forward",
+      "inspect.traversal_details",
+      "inspect.traversal_orders",
+      "inspect.trees_containing_node",
+      "plugins.load_report",
+      "plugins.ops_combined_keys",
+      "plugins.ops_combined_sources",
+      "plugins.ops_sources",
+      "plugins.seed_builtins",
+      "plugins.unload_all",
+      "scheduler.configure_defaults",
+      "scheduler.description",
+      "scheduler.info",
+      "scheduler.load",
+      "scheduler.loaded_plugins",
+      "scheduler.replace",
+      "scheduler.scan",
+      "scheduler.trace",
+      "scheduler.types"};
+  static constexpr std::array<std::string_view, 11> kUnadvertisedMethods = {
+      "compute.async",      "compute.cancel",      "compute.image",
+      "daemon.shutdown",    "events.subscribe",    "graph.open",
+      "host.call",          "inspect.nodes",       "plugins.load",
+      "scheduler.defaults", "scheduler.trace_page"};
+
+  ::ps::testing::IpcHostSpy host;
+  RequestRouter router(host, "contract-test");
+  /**
+   * @brief Routes one empty-params method through a complete envelope.
+   * @param method Candidate version 1 method or unadvertised control name.
+   * @return Parsed correlated router response owned by the test.
+   * @throws std::bad_alloc or std::runtime_error when construction or parsing
+   *         fails.
+   * @note The empty params object intentionally distinguishes family
+   *       recognition from `method_not_found`; method-specific validation or
+   *       default spy behavior may otherwise produce either response branch.
+   */
+  const auto call = [&router](std::string_view method) {
+    return parse_response(router.route(Json{
+        {"protocol_version", kProtocolVersion},
+        {"id", std::string(method)},
+        {"method", std::string(method)},
+        {"params", Json::object()}}.dump()));
+  };
+
+  const Json version = call("daemon.version");
+  ASSERT_TRUE(version.contains("result")) << version.dump();
+  ASSERT_TRUE(version["result"].value("methods", Json()).is_array());
+  const std::vector<std::string> advertised =
+      version["result"]["methods"].get<std::vector<std::string>>();
+  ASSERT_EQ(advertised.size(), kExpectedMethods.size());
+  EXPECT_TRUE(std::is_sorted(advertised.begin(), advertised.end()));
+  EXPECT_EQ(std::adjacent_find(advertised.begin(), advertised.end()),
+            advertised.end());
+  for (std::size_t index = 0; index < kExpectedMethods.size(); ++index) {
+    EXPECT_EQ(advertised[index], kExpectedMethods[index]) << "index " << index;
+  }
+
+  for (std::string_view method : kExpectedMethods) {
+    const Json response = call(method);
+    ASSERT_TRUE(response.contains("result") || response.contains("error"))
+        << method << ": " << response.dump();
+    if (response.contains("error")) {
+      EXPECT_NE(response["error"]["name"], "method_not_found")
+          << method << ": " << response.dump();
+    }
+  }
+
+  for (std::string_view method : kUnadvertisedMethods) {
+    const Json response = call(method);
+    ASSERT_TRUE(response.contains("error"))
+        << method << ": " << response.dump();
+    EXPECT_EQ(response["error"]["name"], "method_not_found")
+        << method << ": " << response.dump();
+  }
+}
+
 TEST(ProtocolEnvelope, TreatsEveryNonV1IntegerAsUnsupported) {
   std::unique_ptr<Host> host = create_embedded_host();
   ASSERT_NE(host, nullptr);
