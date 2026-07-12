@@ -45,6 +45,22 @@ address(row y) % 64 == 0
 Therefore, kernel-owned allocations must pad `step` so that row starts stay
 aligned even when packed row size is not a multiple of 64.
 
+These alignment and mutability rules apply specifically to CPU buffers
+allocated and owned by the kernel. `ImageBuffer::data` is a shared lifetime
+handle, not a universal writable-memory promise. Producers may return a
+read-only CPU snapshot and must document that boundary.
+
+The installed IPC Host's `compute_and_get_image` result is such a snapshot. It
+validates a same-user private artifact while its delivery lease protects
+result-to-open, then maps the exact tight-row file with
+`PROT_READ|MAP_PRIVATE`. The mapping base has the platform's page alignment,
+but `step` is the packed row width, so later row starts are not promised to be
+64-byte aligned. Copies of the descriptor share the mapping; the final
+reference unmaps and closes its retained descriptor exactly once. Writing
+through this mapping is outside the contract and may fault. A consumer that
+needs writable storage or kernel-owned per-row alignment must allocate an
+appropriate CPU buffer and copy rows using `step`.
+
 ## ARM Mac Alignment
 
 64-byte row alignment is the portable minimum. ARM Mac high-performance paths

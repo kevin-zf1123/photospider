@@ -1,6 +1,7 @@
 #include <fcntl.h>
 #include <gtest/gtest.h>
 #include <poll.h>
+#include <sys/mman.h>
 #include <sys/socket.h>
 #include <sys/stat.h>
 #include <sys/un.h>
@@ -18,6 +19,7 @@
 #include <filesystem>
 #include <functional>
 #include <future>
+#include <limits>
 #include <map>
 #include <memory>
 #include <mutex>
@@ -158,16 +160,25 @@ class RunningServer {
    */
   RunningServer& operator=(const RunningServer&) = delete;
 
-  /** @brief Stops and joins the server best-effort. @throws Nothing. */
-  ~RunningServer() { (void)stop(); }
+  /**
+   * @brief Stops and joins the server best-effort.
+   * @throws Nothing; stop-result copying is contained during destruction.
+   */
+  ~RunningServer() noexcept {
+    try {
+      (void)stop();
+    } catch (...) {
+    }
+  }
 
   /**
    * @brief Signals the real stop pipe and joins the foreground server.
    * @return Final Server status, or the already recorded status on repetition.
-   * @throws Nothing; stop write failure becomes a local failed status only in
-   *         test diagnostics and the join still occurs when possible.
+   * @throws std::bad_alloc if copying the final diagnostic cannot allocate.
+   * @throws std::system_error if the owned server thread cannot be joined;
+   *         stop write failure remains only in the returned test status.
    */
-  OperationStatus stop() noexcept {
+  OperationStatus stop() {
     if (!stopped_) {
       stopped_ = true;
       const char marker = 'x';
@@ -206,8 +217,25 @@ class RunningServer {
  * @brief One expected short-connection request and correlated scripted reply.
  * @throws std::bad_alloc when method or JSON payload storage allocates.
  * @note `error=true` publishes the payload as the structured error branch.
+ *       An optional hook runs after request capture and before reply framing.
  */
 struct ShortConnectionReply {
+  /**
+   * @brief Builds one expected request/reply step with an optional hook.
+   * @param expected_method Exact method required from the accepted request.
+   * @param response_payload Typed result or structured-error payload.
+   * @param structured_error Whether to use the error response branch.
+   * @param hook Optional action after request capture and before reply framing.
+   * @throws std::bad_alloc if owned method, JSON, or hook storage allocates.
+   */
+  ShortConnectionReply(std::string expected_method, Json response_payload,
+                       bool structured_error = false,
+                       std::function<bool(const Json& request)> hook = {})
+      : method(std::move(expected_method)),
+        payload(std::move(response_payload)),
+        error(structured_error),
+        before_reply(std::move(hook)) {}
+
   /** @brief Exact method required from the next accepted connection. */
   std::string method;
 
@@ -216,6 +244,15 @@ struct ShortConnectionReply {
 
   /** @brief Whether payload is returned under `error` instead of `result`. */
   bool error = false;
+
+  /**
+   * @brief Optional request-aware action immediately before reply framing.
+   * @param request Parsed matching request retained in the request log.
+   * @return True to continue; false to fail the scripted peer.
+   * @throws Whatever an injected hook throws; the serving boundary converts
+   *         it to a false result.
+   */
+  std::function<bool(const Json& request)> before_reply;
 };
 
 /**
@@ -367,6 +404,9 @@ bool serve_short_connection_replies(
         return false;
       }
       requests->push_back(request);
+      if (reply.before_reply && !reply.before_reply(request)) {
+        return false;
+      }
       if (!write_correlated_reply(peer.get(), request, reply.payload,
                                   reply.error)) {
         return false;
@@ -1484,23 +1524,330 @@ TEST(IpcHostLifecycle,
   EXPECT_EQ(requests[2]["method"], "compute.result");
 }
 
+/** @brief Number of observed test mapping creations. */
+std::atomic<std::size_t> observed_map_calls{0};
+
+/** @brief Number of observed final-owner unmap calls. */
+std::atomic<std::size_t> observed_unmap_calls{0};
+
+/** @brief Number of observed final-owner descriptor close calls. */
+std::atomic<std::size_t> observed_close_calls{0};
+
+/** @brief Global sequence used to verify unmap-before-close cleanup order. */
+std::atomic<std::size_t> observed_cleanup_sequence{0};
+
+/** @brief Cleanup sequence assigned to the observed unmap call. */
+std::atomic<std::size_t> observed_unmap_order{0};
+
+/** @brief Cleanup sequence assigned to the observed close call. */
+std::atomic<std::size_t> observed_close_order{0};
+
+/** @brief POSIX result returned by the observed unmap call. */
+std::atomic<int> observed_unmap_result{-1};
+
+/** @brief POSIX result returned by the observed close call. */
+std::atomic<int> observed_close_result{-1};
+
 /**
- * @brief Verifies the public IPC Host securely owns image bytes before release.
+ * @brief Maps one complete test artifact through the real read-only syscall.
+ * @param fd Open validated artifact descriptor.
+ * @param length Exact nonzero artifact byte count.
+ * @return Mapping address, or `MAP_FAILED` with `errno` set.
+ * @throws Nothing.
+ */
+void* observed_map_read_only(int fd, std::size_t length) noexcept {
+  ++observed_map_calls;
+  return ::mmap(nullptr, length, PROT_READ, MAP_PRIVATE, fd, 0);
+}
+
+/**
+ * @brief Maps one artifact and changes its mode before post-map validation.
+ * @param fd Open prevalidated artifact descriptor.
+ * @param length Exact nonzero artifact byte count.
+ * @return Real mapping address, or `MAP_FAILED` with `errno` set.
+ * @throws Nothing.
+ * @note `fchmod` failure is intentionally left for the production revalidation
+ *       path to observe as either unchanged metadata or a system failure.
+ */
+void* observed_map_then_change_mode(int fd, std::size_t length) noexcept {
+  void* mapping = observed_map_read_only(fd, length);
+  if (mapping != MAP_FAILED) {
+    (void)::fchmod(fd, 0640);
+  }
+  return mapping;
+}
+
+/**
+ * @brief Counts and executes one real artifact unmap.
+ * @param address Exact mapping base address.
+ * @param length Exact mapped byte count.
+ * @return POSIX `munmap` result.
+ * @throws Nothing.
+ */
+int observed_unmap(void* address, std::size_t length) noexcept {
+  ++observed_unmap_calls;
+  observed_unmap_order = ++observed_cleanup_sequence;
+  const int result = ::munmap(address, length);
+  observed_unmap_result = result;
+  return result;
+}
+
+/**
+ * @brief Counts and executes one real mapping-owned descriptor close.
+ * @param fd Exact descriptor retained for the mapping lifetime.
+ * @return POSIX `close` result.
+ * @throws Nothing.
+ */
+int observed_close(int fd) noexcept {
+  ++observed_close_calls;
+  observed_close_order = ++observed_cleanup_sequence;
+  const int result = ::close(fd);
+  observed_close_result = result;
+  return result;
+}
+
+/**
+ * @brief Resets every observable mapping lifetime counter.
+ * @return Nothing.
+ * @throws Nothing.
+ */
+void reset_observed_mapping_lifetime() noexcept {
+  observed_map_calls = 0;
+  observed_unmap_calls = 0;
+  observed_close_calls = 0;
+  observed_cleanup_sequence = 0;
+  observed_unmap_order = 0;
+  observed_close_order = 0;
+  observed_unmap_result = -1;
+  observed_close_result = -1;
+}
+
+/**
+ * @brief Returns observable wrappers around the real mapping syscalls.
+ * @return Complete source-private mapping operation table.
+ * @throws Nothing.
+ */
+ArtifactMappingOperations observed_mapping_operations() noexcept {
+  return {observed_map_read_only, observed_unmap, observed_close};
+}
+
+/**
+ * @brief Returns operations that tamper mode immediately after a real mmap.
+ * @return Observable post-map tamper operation table.
+ * @throws Nothing.
+ */
+ArtifactMappingOperations post_map_tamper_operations() noexcept {
+  return {observed_map_then_change_mode, observed_unmap, observed_close};
+}
+
+/**
+ * @brief Creates one protected tight-row UINT8 artifact and exact metadata.
+ * @tparam Size Compile-time nonzero payload byte count.
+ * @param path Absolute path below a mode-0700 temporary directory.
+ * @param bytes Exact artifact payload.
+ * @return Metadata matching the new same-user mode-0600 regular file.
+ * @throws std::bad_alloc or std::system_error if path storage or file IO fails.
+ */
+template <std::size_t Size>
+::ps::ipc::OutputArtifactMetadata write_test_artifact(
+    const std::filesystem::path& path,
+    const std::array<std::uint8_t, Size>& bytes) {
+  static_assert(Size > 0, "artifact test payload must not be empty");
+  static_assert(
+      Size <= static_cast<std::size_t>(std::numeric_limits<int>::max()),
+      "artifact test width must fit int");
+  UniqueFd artifact(
+      ::open(path.c_str(), O_WRONLY | O_CREAT | O_EXCL | O_CLOEXEC, 0600));
+  if (!artifact) {
+    throw std::system_error(errno, std::generic_category(), "artifact open");
+  }
+  std::size_t written = 0;
+  while (written < bytes.size()) {
+    const ssize_t count =
+        ::write(artifact.get(), bytes.data() + written, bytes.size() - written);
+    if (count < 0 && errno == EINTR) {
+      continue;
+    }
+    if (count <= 0) {
+      throw std::system_error(count < 0 ? errno : EIO, std::generic_category(),
+                              "artifact write");
+    }
+    written += static_cast<std::size_t>(count);
+  }
+  if (::fchmod(artifact.get(), 0600) != 0) {
+    throw std::system_error(errno, std::generic_category(), "artifact chmod");
+  }
+  struct stat artifact_stat{};
+  if (::fstat(artifact.get(), &artifact_stat) != 0) {
+    throw std::system_error(errno, std::generic_category(), "artifact fstat");
+  }
+
+  ::ps::ipc::OutputArtifactMetadata metadata;
+  metadata.output_id = OutputArtifactId{std::string(32, 'c')};
+  metadata.path = path.string();
+  metadata.width = static_cast<int>(Size);
+  metadata.height = 1;
+  metadata.channels = 1;
+  metadata.data_type = DataType::UINT8;
+  metadata.device = Device::CPU;
+  metadata.row_step = Size;
+  metadata.byte_size = Size;
+  metadata.filesystem_device = static_cast<std::uint64_t>(artifact_stat.st_dev);
+  metadata.inode = static_cast<std::uint64_t>(artifact_stat.st_ino);
+  return metadata;
+}
+
+/**
+ * @brief Verifies one mismatched artifact is rejected before mapping.
+ * @param metadata Tampered metadata or metadata for a tampered file.
+ * @return Nothing; GoogleTest assertions report status or byte exposure.
+ * @throws std::bad_alloc if validation diagnostics cannot allocate.
+ */
+void expect_artifact_mapping_rejected(
+    const ::ps::ipc::OutputArtifactMetadata& metadata) {
+  reset_observed_mapping_lifetime();
+  const Result<ImageBuffer> mapped = consume_artifact_readonly_mapping(
+      metadata, observed_mapping_operations());
+  EXPECT_FALSE(mapped.status.ok);
+  EXPECT_EQ(mapped.status.domain, OperationErrorDomain::Protocol);
+  EXPECT_EQ(mapped.status.code, kInvalidRequestCode);
+  EXPECT_EQ(mapped.status.name, "invalid_request");
+  EXPECT_TRUE(mapped.value.data == nullptr);
+  EXPECT_EQ(observed_map_calls.load(), 0U);
+  EXPECT_EQ(observed_unmap_calls.load(), 0U);
+  EXPECT_EQ(observed_close_calls.load(), 0U);
+}
+
+/**
+ * @brief Rejects device, inode, mode, link, and size mismatches before mmap.
+ * @return Nothing; GoogleTest assertions report setup, status, or exposure.
+ * @throws std::bad_alloc, std::filesystem::filesystem_error, or
+ *         std::system_error if test artifact setup fails.
+ */
+TEST(IpcHostArtifact, RejectsEveryProtectedArtifactIdentityTamperBeforeMmap) {
+  ScopedTempDirectory temp("ps-ipc-tamper");
+  const std::array<std::uint8_t, 6> bytes = {1, 2, 3, 4, 5, 6};
+
+  ::ps::ipc::OutputArtifactMetadata wrong_device =
+      write_test_artifact(temp.path() / "device.bin", bytes);
+  wrong_device.filesystem_device ^= 1U;
+  expect_artifact_mapping_rejected(wrong_device);
+
+  ::ps::ipc::OutputArtifactMetadata wrong_inode =
+      write_test_artifact(temp.path() / "inode.bin", bytes);
+  wrong_inode.inode ^= 1U;
+  expect_artifact_mapping_rejected(wrong_inode);
+
+  ::ps::ipc::OutputArtifactMetadata wrong_mode =
+      write_test_artifact(temp.path() / "mode.bin", bytes);
+  ASSERT_EQ(::chmod(wrong_mode.path.c_str(), 0640), 0);
+  expect_artifact_mapping_rejected(wrong_mode);
+
+  ::ps::ipc::OutputArtifactMetadata extra_link =
+      write_test_artifact(temp.path() / "link.bin", bytes);
+  const std::filesystem::path second_link = temp.path() / "second-link.bin";
+  ASSERT_EQ(::link(extra_link.path.c_str(), second_link.c_str()), 0);
+  expect_artifact_mapping_rejected(extra_link);
+
+  ::ps::ipc::OutputArtifactMetadata wrong_size =
+      write_test_artifact(temp.path() / "size.bin", bytes);
+  ASSERT_EQ(::truncate(wrong_size.path.c_str(), 5), 0);
+  expect_artifact_mapping_rejected(wrong_size);
+}
+
+/**
+ * @brief Rejects and unmaps a descriptor changed immediately after mmap.
+ * @return Nothing; GoogleTest assertions report classification, byte exposure,
+ *         or pre-ownership cleanup count/result mismatch.
+ * @throws std::bad_alloc, std::filesystem::filesystem_error, or
+ *         std::system_error if test artifact setup fails.
+ */
+TEST(IpcHostArtifact, PostMapIdentityMismatchUnmapsBeforeExposingBytes) {
+  ScopedTempDirectory temp("ps-ipc-postmap");
+  const std::array<std::uint8_t, 6> bytes = {1, 2, 3, 4, 5, 6};
+  const ::ps::ipc::OutputArtifactMetadata metadata =
+      write_test_artifact(temp.path() / "image.bin", bytes);
+  reset_observed_mapping_lifetime();
+  const Result<ImageBuffer> mapped =
+      consume_artifact_readonly_mapping(metadata, post_map_tamper_operations());
+
+  EXPECT_FALSE(mapped.status.ok);
+  EXPECT_EQ(mapped.status.domain, OperationErrorDomain::Protocol);
+  EXPECT_EQ(mapped.status.code, kInvalidRequestCode);
+  EXPECT_EQ(mapped.status.name, "invalid_request");
+  EXPECT_TRUE(mapped.value.data == nullptr);
+  EXPECT_EQ(observed_map_calls.load(), 1U);
+  EXPECT_EQ(observed_unmap_calls.load(), 1U);
+  EXPECT_EQ(observed_unmap_result.load(), 0);
+  EXPECT_EQ(observed_close_calls.load(), 0U);
+}
+
+/**
+ * @brief Verifies shared mappings unmap and close once at final release.
+ * @return Nothing; GoogleTest assertions report bytes, reference lifetime,
+ *         syscall count/result/order, or source-unlink survival.
+ * @throws std::bad_alloc, std::filesystem::filesystem_error, or
+ *         std::system_error if artifact or shared-owner setup fails.
+ */
+TEST(IpcHostArtifact, SharedMappingUnmapsAndClosesExactlyOnceAtLastReference) {
+  ScopedTempDirectory temp("ps-ipc-map-life");
+  const std::filesystem::path artifact_path = temp.path() / "image.bin";
+  const std::array<std::uint8_t, 6> expected = {0x10, 0x20, 0x30,
+                                                0x40, 0x50, 0x60};
+  const ::ps::ipc::OutputArtifactMetadata metadata =
+      write_test_artifact(artifact_path, expected);
+  reset_observed_mapping_lifetime();
+  Result<ImageBuffer> mapped = consume_artifact_readonly_mapping(
+      metadata, observed_mapping_operations());
+  ASSERT_TRUE(mapped.status.ok) << mapped.status.message;
+  ASSERT_NE(mapped.value.data, nullptr);
+  const auto page_size = ::sysconf(_SC_PAGESIZE);
+  ASSERT_GT(page_size, 0);
+  EXPECT_EQ(reinterpret_cast<std::uintptr_t>(mapped.value.data.get()) %
+                static_cast<std::uintptr_t>(page_size),
+            0U);
+  EXPECT_EQ(observed_map_calls.load(), 1U);
+  EXPECT_EQ(observed_unmap_calls.load(), 0U);
+  EXPECT_EQ(observed_close_calls.load(), 0U);
+
+  ImageBuffer first = std::move(mapped.value);
+  ImageBuffer second = first;
+  std::shared_ptr<void> last = second.data;
+  ASSERT_EQ(::unlink(artifact_path.c_str()), 0);
+  first.data.reset();
+  EXPECT_EQ(observed_unmap_calls.load(), 0U);
+  EXPECT_EQ(observed_close_calls.load(), 0U);
+  second.data.reset();
+  EXPECT_EQ(observed_unmap_calls.load(), 0U);
+  EXPECT_EQ(observed_close_calls.load(), 0U);
+  EXPECT_EQ(std::memcmp(last.get(), expected.data(), expected.size()), 0);
+
+  last.reset();
+  EXPECT_EQ(observed_unmap_calls.load(), 1U);
+  EXPECT_EQ(observed_close_calls.load(), 1U);
+  EXPECT_EQ(observed_unmap_result.load(), 0);
+  EXPECT_EQ(observed_close_result.load(), 0);
+  EXPECT_EQ(observed_unmap_order.load(), 1U);
+  EXPECT_EQ(observed_close_order.load(), 2U);
+}
+
+/**
+ * @brief Verifies the public IPC Host maps image bytes before lease release.
  *
  * A production factory consumes one exact mode-0600 same-user regular artifact
  * advertised by a scripted terminal result. It must validate identity/layout,
- * copy the tight CPU payload, release with the matching delivery lease, and
+ * map the tight CPU payload, release with the matching delivery lease, and
  * retain readable bytes after the source path is unlinked.
  *
  * @return Nothing; GoogleTest assertions report metadata, ownership, request,
  *         or image mismatch.
  * @throws std::bad_alloc, std::runtime_error, or std::system_error if file,
  *         socket, JSON, Host, or peer setup cannot complete.
- * @note This is the task-4.2 production owned-copy seam; task 4.3 replaces only
- *       the consumer with read-only mmap/shared-deleter ownership.
+ * @note Request order proves mapping finishes before the cleanup guard sends
+ *       the lease-aware release; source unlink then models store cleanup.
  */
 TEST(IpcHostArtifact,
-     ProductionFactoryCopiesProtectedImageBeforeLeaseAwareRelease) {
+     ProductionFactoryMapsProtectedImageBeforeLeaseAwareRelease) {
   ScopedTempDirectory temp("ps-ipc-artifact");
   const std::filesystem::path artifact_path = temp.path() / "image.bin";
   const std::array<std::uint8_t, 6> expected = {0x10, 0x20, 0x30,
@@ -1547,8 +1894,10 @@ TEST(IpcHostArtifact,
        compute_job_result(compute_id, session_id, "succeeded", success)},
       {"compute.result", compute_job_result(compute_id, session_id, "succeeded",
                                             success, output)},
-      {"compute.release",
-       Json{{"compute_id", compute_id}, {"released", true}}}};
+      {"compute.release", Json{{"compute_id", compute_id}, {"released", true}},
+       false, [&artifact_path](const Json&) {
+         return ::unlink(artifact_path.c_str()) == 0;
+       }}};
 
   std::vector<Json> requests;
   bool served = false;
@@ -1563,22 +1912,9 @@ TEST(IpcHostArtifact,
   (void)::shutdown(listener.get(), SHUT_RDWR);
   listener.reset();
   peer.join();
-  const std::array<std::uint8_t, 6> replacement = {0xa0, 0xb0, 0xc0,
-                                                   0xd0, 0xe0, 0xf0};
-  UniqueFd mutation(::open(artifact_path.c_str(), O_WRONLY | O_CLOEXEC));
-  ASSERT_TRUE(mutation);
-  std::size_t replaced = 0;
-  while (replaced < replacement.size()) {
-    const ssize_t count =
-        ::pwrite(mutation.get(), replacement.data() + replaced,
-                 replacement.size() - replaced, static_cast<off_t>(replaced));
-    ASSERT_GT(count, 0);
-    replaced += static_cast<std::size_t>(count);
-  }
-  mutation.reset();
-  ASSERT_EQ(::unlink(artifact_path.c_str()), 0);
 
   ASSERT_TRUE(served);
+  EXPECT_FALSE(std::filesystem::exists(artifact_path));
   ASSERT_TRUE(image.status.ok) << image.status.message;
   ASSERT_NE(image.value.data, nullptr);
   EXPECT_EQ(image.value.width, 2);

@@ -612,12 +612,14 @@ After a terminal status is known, cleanup attempts one best-effort
 Only a successfully validated image result contributes its delivery id.
 Cleanup failure never replaces the already obtained status or image. A status
 poll failure before terminal publication and adapter stop do not release an
-unfinished daemon job. The task-4.2 production image consumer opens with
-`O_NOFOLLOW|O_CLOEXEC|O_NONBLOCK`, verifies same uid, regular type, exact
-`0600`, one link, device/inode/size and tight layout before and after `pread`,
-and returns an independent heap-backed CPU image before lease-aware release.
-The 512-MiB metadata limit is enforced before allocation. Task 4.3 replaces
-this safe owned-copy consumer with read-only mmap/shared-deleter ownership.
+unfinished daemon job. The production image consumer opens with
+`O_NOFOLLOW|O_CLOEXEC|O_NONBLOCK` while the delivery lease protects
+result-to-open, verifies same uid, regular type, exact `0600`, one link,
+device/inode/size and tight layout, maps the complete file with
+`PROT_READ|MAP_PRIVATE`, and revalidates the descriptor before exposing bytes.
+The 512-MiB metadata limit is enforced before mapping. The adapter then sends
+lease-aware release; copied `ImageBuffer` values share the mapping, and the
+final reference invokes `munmap` and `close` exactly once.
 
 `compute_async` creates its joined worker before remote submission. Adapter
 destruction publishes stop, wakes all waiters, shuts down active worker

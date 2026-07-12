@@ -1,6 +1,7 @@
 #include "photospider/ipc/host.hpp"
 
 #include <fcntl.h>
+#include <sys/mman.h>
 #include <sys/stat.h>
 #include <unistd.h>
 
@@ -1634,7 +1635,7 @@ std::size_t artifact_channel_bytes(DataType type) noexcept {
  * @param file Current `fstat` snapshot of the opened descriptor.
  * @return True only for same-user regular exact-0600 one-link identity/size.
  * @throws Nothing.
- * @note Both pre-read and post-read validation use this same predicate.
+ * @note Both pre-map and post-map validation use this same predicate.
  */
 bool artifact_file_matches(const OutputArtifactMetadata& metadata,
                            const struct stat& file) noexcept {
@@ -1661,17 +1662,112 @@ OperationStatus artifact_io_failure(const char* operation, int error_number) {
 }
 
 /**
- * @brief Strictly validates and copies one lease-protected artifact.
+ * @brief Maps one descriptor read-only from offset zero.
+ * @param fd Open validated artifact descriptor.
+ * @param length Exact nonzero artifact byte count.
+ * @return Mapping address, or `MAP_FAILED` with `errno` set.
+ * @throws Nothing.
+ */
+void* map_artifact_read_only(int fd, std::size_t length) noexcept {
+  return ::mmap(nullptr, length, PROT_READ, MAP_PRIVATE, fd, 0);
+}
+
+/**
+ * @brief Unmaps one complete artifact mapping.
+ * @param address Exact mapping base address.
+ * @param length Exact mapped byte count.
+ * @return POSIX `munmap` result.
+ * @throws Nothing.
+ */
+int unmap_artifact(void* address, std::size_t length) noexcept {
+  return ::munmap(address, length);
+}
+
+/**
+ * @brief Closes one mapping-owned artifact descriptor.
+ * @param fd Exact descriptor transferred from `UniqueFd`.
+ * @return POSIX `close` result.
+ * @throws Nothing.
+ */
+int close_artifact_descriptor(int fd) noexcept {
+  return ::close(fd);
+}
+
+/**
+ * @brief Returns the production mapping operation table.
+ * @return Direct read-only mmap, munmap, and close wrappers.
+ * @throws Nothing.
+ */
+internal::ArtifactMappingOperations
+default_artifact_mapping_operations() noexcept {
+  return {map_artifact_read_only, unmap_artifact, close_artifact_descriptor};
+}
+
+/**
+ * @brief Owns the final unmap and descriptor close for one shared mapping.
+ * @throws Nothing for construction, copy, move, and invocation.
+ * @note `std::shared_ptr` invokes one retained copy exactly once after the last
+ *       image reference disappears, including control-block allocation
+ *       failure during initial ownership construction.
+ */
+class ArtifactMappingDeleter {
+ public:
+  /**
+   * @brief Captures one complete mapping lifetime.
+   * @param length Exact mapped byte count.
+   * @param fd Exact descriptor transferred into shared ownership.
+   * @param operations Nonthrowing unmap/close operations.
+   * @throws Nothing.
+   */
+  ArtifactMappingDeleter(
+      std::size_t length, int fd,
+      internal::ArtifactMappingOperations operations) noexcept
+      : length_(length), fd_(fd), operations_(operations) {}
+
+  /**
+   * @brief Releases the mapping and then closes its retained descriptor.
+   * @param address Exact mapping base address.
+   * @return Nothing.
+   * @throws Nothing; cleanup errors are intentionally ignored at final-owner
+   *         destruction where no error channel exists.
+   */
+  void operator()(void* address) const noexcept {
+    (void)operations_.unmap(address, length_);
+    (void)operations_.close_fd(fd_);
+  }
+
+ private:
+  /** @brief Exact mapped byte count. */
+  std::size_t length_ = 0;
+
+  /** @brief Descriptor retained until final mapping release. */
+  int fd_ = -1;
+
+  /** @brief Nonthrowing final-owner cleanup operations. */
+  internal::ArtifactMappingOperations operations_;
+};
+
+/**
+ * @brief Strictly validates and maps one lease-protected artifact.
  * @param metadata Daemon output metadata already validated by typed Client.
- * @return Independent tight-row CPU ImageBuffer or exact local failure.
- * @throws std::bad_alloc if owned image allocation fails.
+ * @param operations Complete nonthrowing mapping operation table.
+ * @return Shared read-only mapped CPU ImageBuffer or exact local failure.
+ * @throws std::bad_alloc if shared mapping ownership cannot allocate.
  * @note `O_NONBLOCK` prevents a same-uid path replacement with a FIFO from
  *       blocking before `fstat`; non-regular descriptors are then rejected.
- *       The returned heap payload has no file-descriptor lifetime. Task 4.3
- *       replaces this safe consumer with a read-only mmap/shared deleter.
+ *       The delivery lease remains active throughout open, validation, mmap,
+ *       and final descriptor revalidation. The returned shared owner unmaps
+ *       and closes exactly once after its last copy is destroyed.
  */
-Result<ImageBuffer> consume_artifact_owned_copy(
-    const OutputArtifactMetadata& metadata) {
+Result<ImageBuffer> consume_artifact_readonly_mapping_impl(
+    const OutputArtifactMetadata& metadata,
+    internal::ArtifactMappingOperations operations) {
+  if (operations.map_read_only == nullptr || operations.unmap == nullptr ||
+      operations.close_fd == nullptr) {
+    return {
+        invalid_adapter_response("artifact mapping operations are incomplete"),
+        {}};
+  }
   if (metadata.path.empty() || metadata.path.front() != '/' ||
       metadata.path.find('\0') != std::string::npos || metadata.width <= 0 ||
       metadata.height <= 0 || metadata.channels <= 0 ||
@@ -1696,13 +1792,6 @@ Result<ImageBuffer> consume_artifact_owned_copy(
     return {invalid_adapter_response("artifact byte layout is inconsistent"),
             {}};
   }
-  if (metadata.byte_size - 1U >
-      static_cast<std::uint64_t>(std::numeric_limits<off_t>::max())) {
-    return {invalid_adapter_response(
-                "artifact byte range cannot be represented by off_t"),
-            {}};
-  }
-
   internal::UniqueFd file(::open(
       metadata.path.c_str(), O_RDONLY | O_NOFOLLOW | O_CLOEXEC | O_NONBLOCK));
   if (!file) {
@@ -1720,38 +1809,30 @@ Result<ImageBuffer> consume_artifact_owned_copy(
             {}};
   }
 
-  std::shared_ptr<void> storage(
-      static_cast<void*>(new std::byte[metadata.byte_size]),
-      [](void* pointer) { delete[] static_cast<std::byte*>(pointer); });
-  std::size_t offset = 0;
-  while (offset < metadata.byte_size) {
-    const std::size_t read_size =
-        std::min(metadata.byte_size - offset,
-                 static_cast<std::size_t>(std::numeric_limits<ssize_t>::max()));
-    const ssize_t read_count =
-        ::pread(file.get(), static_cast<std::byte*>(storage.get()) + offset,
-                read_size, static_cast<off_t>(offset));
-    if (read_count < 0 && errno == EINTR) {
-      continue;
-    }
-    if (read_count <= 0) {
-      const int error_number = read_count < 0 ? errno : EIO;
-      return {artifact_io_failure("artifact read failed", error_number), {}};
-    }
-    offset += static_cast<std::size_t>(read_count);
+  const std::size_t mapped_size = static_cast<std::size_t>(metadata.byte_size);
+  void* mapping = operations.map_read_only(file.get(), mapped_size);
+  if (mapping == MAP_FAILED) {
+    const int error_number = errno;
+    return {artifact_io_failure("artifact mmap failed", error_number), {}};
   }
 
   struct stat after{};
   if (::fstat(file.get(), &after) != 0) {
     const int error_number = errno;
-    return {artifact_io_failure("artifact revalidation failed", error_number),
+    (void)operations.unmap(mapping, mapped_size);
+    return {artifact_io_failure("artifact post-map fstat failed", error_number),
             {}};
   }
   if (!artifact_file_matches(metadata, after)) {
+    (void)operations.unmap(mapping, mapped_size);
     return {invalid_adapter_response(
-                "artifact changed during protected owned copy"),
+                "artifact changed during protected read-only mapping"),
             {}};
   }
+
+  const int mapped_fd = file.release();
+  std::shared_ptr<void> storage(
+      mapping, ArtifactMappingDeleter(mapped_size, mapped_fd, operations));
 
   ImageBuffer image;
   image.width = metadata.width;
@@ -1781,13 +1862,23 @@ internal::IpcHostRuntimeDependencies default_runtime_dependencies() {
   };
   dependencies.wake_waiters = [waiter] { waiter->wake_all(); };
   dependencies.before_async_completion = [] {};
-  dependencies.consume_artifact = consume_artifact_owned_copy;
+  dependencies.consume_artifact = [](const OutputArtifactMetadata& metadata) {
+    return internal::consume_artifact_readonly_mapping(
+        metadata, default_artifact_mapping_operations());
+  };
   return dependencies;
 }
 
 }  // namespace
 
 namespace internal {
+
+/** @copydoc consume_artifact_readonly_mapping */
+Result<ImageBuffer> consume_artifact_readonly_mapping(
+    const OutputArtifactMetadata& metadata,
+    ArtifactMappingOperations operations) {
+  return consume_artifact_readonly_mapping_impl(metadata, operations);
+}
 
 /** @copydoc create_ipc_host_with_dependencies */
 std::unique_ptr<Host> create_ipc_host_with_dependencies(
