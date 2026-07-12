@@ -383,7 +383,7 @@ Method group 与当前 wire availability：
 | --- | --- | --- |
 | daemon | `daemon.ping`, `daemon.version` | 已实现，且不获取 Host lock。`daemon.version.methods` 返回精确八名称 metadata 子集；installed typed Client 只暴露该子集，且没有 raw-JSON call。 |
 | graph | `graph.load`, `graph.close`, `graph.list`, `graph.reload`, `graph.save`, `graph.clear`, `graph.node_yaml.get`, `graph.node_yaml.set` | 已通过 Host 实现。Status-only mutation 使用 `result:{}`；清空 model state 后保留 opaque session mapping。 |
-| inspect | `inspect.graph`, `inspect.node`, `inspect.dependency_tree`, `inspect.node_ids`, `inspect.ending_nodes`, `inspect.roi_forward`, `inspect.roi_backward` | 已通过 copied Host value 实现。这些 route 保持 direct response shape，不使用 collection cursor；node-list order 与 duplicate 均保留。 |
+| inspect | `inspect.graph`, `inspect.node`, `inspect.dependency_tree`, `inspect.node_ids`, `inspect.ending_nodes`, `inspect.roi_forward`, `inspect.roi_backward`, `inspect.dirty_region`, `inspect.compute_planning`, `inspect.recent_compute_planning`, `inspect.traversal_orders`, `inspect.traversal_details`, `inspect.trees_containing_node` | 已通过 copied Host value 实现。Full-value collection 使用 stable bounded cursor page；node/ROI/dirty/current-planning value 保持 indivisible direct result。Host order 与 duplicate 均保留。 |
 | dirty | `dirty.begin`, `dirty.update`, `dirty.end` | 已通过一次匹配的 Host lifecycle mutation 实现，并返回 copied dirty-region snapshot；完整 compact response size 会在 result-DOM 分配前完成 preflight。 |
 | cache | `cache.clear_all`, `cache.clear_drive`, `cache.clear_memory`, `cache.cache_all_nodes`, `cache.free_transient`, `cache.synchronize_disk` | 已作为 status-only Host call 实现；result 不包含 backend cache handle 或 path。 |
 | compute | `compute.timing`, `compute.last_io_time`, `compute.last_error` | Diagnostic route 已实现；timing 会在 result-DOM 分配前对 aggregate compact response size 做 preflight，last error 是 successful envelope 中的 nested `OperationStatus` data。Wire 不暴露 compute-job method；private joined FIFO registry 与 protected OutputStore 仍由 router lifecycle 拥有。 |
@@ -407,20 +407,32 @@ Method group 与当前 wire availability：
 Collection snapshot 规则：
 
 - Router 拥有一个 private type-erased `CollectionSnapshotRegistry`；它不新增 Host page API、
-  public ABI type、JSON envelope、wire route 或 cursor release method。Runtime start 会启用 registry
+  public ABI type、独立 page route 或 cursor release method。Runtime start 会启用 registry
   admission，shutdown 开始时停止 admission，final shutdown 会清空其 record 与 reservation。
 - Private admission API 会预留一个 slot 与 64 MiB。Production 最多保留 64 records/256 MiB。
-  Publication 接受由 caller 测量且不超过 262,144 entries/64 MiB 的 value，把 multi-page value
-  move 进 stable storage，并把 worst-case reservation 换成精确 measured byte；被拒绝的
-  publication 不产生 cursor 或 retained copy。
-- 32-hex cursor 会冻结精确 method/session/original-parameter identity。每个 1..4096-entry
-  continuation page 只使用精确 next offset 与 retained value，无需 live-session lookup，paging
-  不刷新 15-minute TTL，final page 会原子释放 record。
+  Publication 接受由 caller 测量且不超过 262,144 recursive public entries/64 MiB 的 value，把
+  multi-page value move 进 stable storage，并把 worst-case reservation 换成精确 measured byte。
+  Recursive entry 包含 outer vector/map row、node parameter map、存在的 spatial matrix、
+  dependency root/entry 与 nested node、traversal branch vector，以及 planning sample/dependency
+  vector；scalar object member 不计数。Registry 会独立保留真实 top-level row count，并拒绝少报的
+  recursive count；被拒绝的 publication 不产生 cursor 或 retained copy。
+- 唯一一次 Host call 返回后，dependency 与 traversal value 会在 shared-header/root copy 或
+  map-to-vector allocation 前完成 recursive pre-scan。Dependency byte accounting 会以精确 measured
+  entries array 替换 header 的 empty `entries: []` token，因此该 array 只计量一次。
+- 首个 request 使用 optional `limit`；continuation 会调用同一 method，携带 frozen typed
+  parameter，以及 `cursor`、精确 next `offset` 和 `limit`。Result 保留其 collection field，并新增
+  `offset`/`has_more`/nullable `cursor`。32-hex cursor 会冻结精确
+  method/session/original-parameter identity。Continuation 只使用 retained value，无需
+  live-session lookup，在 graph close 后仍可读取，不刷新 15-minute TTL，final page 会原子释放
+  record。
+- 逐 row 测量会计算并冻结 dynamic page ceiling，保证每个连续 page 都能装入 16 MiB frame；
+  计算包含合法 id 的最坏 escaping 与 page metadata。单个 indivisible oversize row 会在 cursor
+  publication 前被拒绝；能够装入的小 value 保持完整 single page。
 - Binding/type/offset mismatch 与 unknown well-formed cursor 会返回 private `CursorNotFound`，且
   不会推进 retained record；malformed cursor/page arithmetic 会返回 private `InvalidParams`，且
   不改变 record。TTL expiry 会删除 record 并释放其 measured quota。Injected limit、clock 与 id
-  支持 deterministic race test。已路由的 graph/node/tree inspection 与 node-list method 不会
-  reserve、publish 或 page 这些 record。
+  支持 deterministic race test。Graph listing、node list、graph/tree inspection、traversal branch、
+  tree membership 与 recent planning history 会 reserve 并 page 这些 record。
 
 错误规则：
 

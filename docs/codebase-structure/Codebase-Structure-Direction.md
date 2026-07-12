@@ -442,7 +442,7 @@ Method groups and current wire availability:
 | --- | --- | --- |
 | daemon | `daemon.ping`, `daemon.version` | Implemented without Host locking. `daemon.version.methods` returns the exact eight-name metadata subset; the installed typed Client exposes only that subset and has no raw-JSON call. |
 | graph | `graph.load`, `graph.close`, `graph.list`, `graph.reload`, `graph.save`, `graph.clear`, `graph.node_yaml.get`, `graph.node_yaml.set` | Implemented through Host. Status-only mutations use `result:{}`; clearing model state preserves the opaque session mapping. |
-| inspect | `inspect.graph`, `inspect.node`, `inspect.dependency_tree`, `inspect.node_ids`, `inspect.ending_nodes`, `inspect.roi_forward`, `inspect.roi_backward` | Implemented through copied Host values. These routes keep direct response shapes and do not use collection cursors. Node-list order and duplicates are preserved. |
+| inspect | `inspect.graph`, `inspect.node`, `inspect.dependency_tree`, `inspect.node_ids`, `inspect.ending_nodes`, `inspect.roi_forward`, `inspect.roi_backward`, `inspect.dirty_region`, `inspect.compute_planning`, `inspect.recent_compute_planning`, `inspect.traversal_orders`, `inspect.traversal_details`, `inspect.trees_containing_node` | Implemented through copied Host values. Full-value collections use stable bounded cursor pages; node/ROI/dirty/current-planning values remain indivisible direct results. Host order and duplicates are preserved. |
 | dirty | `dirty.begin`, `dirty.update`, `dirty.end` | Implemented through one matching Host lifecycle mutation and return the copied dirty-region snapshot; the complete compact response size is preflighted before result-DOM allocation. |
 | cache | `cache.clear_all`, `cache.clear_drive`, `cache.clear_memory`, `cache.cache_all_nodes`, `cache.free_transient`, `cache.synchronize_disk` | Implemented as status-only Host calls; no backend cache handle or path enters a result. |
 | compute | `compute.timing`, `compute.last_io_time`, `compute.last_error` | Diagnostic routes are implemented. Timing preflights its aggregate compact response size before result-DOM allocation; last error is nested `OperationStatus` data in a successful envelope. No compute-job method is exposed; the private joined FIFO registry and protected OutputStore remain lifecycle-owned behind the router. |
@@ -468,25 +468,41 @@ Image payload rule:
 Collection snapshot rule:
 
 - The router owns one private type-erased `CollectionSnapshotRegistry`; it does
-  not add a Host page API, public ABI type, JSON envelope, wire route, or cursor
+  not add a Host page API, public ABI type, separate page route, or cursor
   release method. Runtime start enables registry admission, shutdown begins by
   stopping admission, and final shutdown clears its records and reservations.
 - The private admission API reserves one slot plus 64 MiB. Production retains
   at most 64 records/256 MiB. Publication accepts a caller-measured value of at
-  most 262,144 entries/64 MiB, moves a multi-page value into stable storage,
-  and converts the worst-case reservation to exact measured bytes. Rejection
+  most 262,144 recursive public entries/64 MiB, moves a multi-page value into
+  stable storage, and converts the worst-case reservation to exact measured
+  bytes. Recursive entries include outer vector/map rows, node parameter maps,
+  present spatial matrices, dependency roots/entries and nested nodes,
+  traversal branch vectors, and planning sample/dependency vectors. Scalar
+  object members do not count. The registry retains the actual top-level row
+  count separately and rejects an under-reported recursive count. Rejection
   publishes no cursor or retained copy.
-- A 32-hex cursor freezes exact method/session/original-parameter identity.
-  Continuation pages of 1..4096 entries use the exact next offset and retained
-  value only, require no live-session lookup, never refresh their
-  15-minute TTL, and atomically release the record on the final page.
+- After one Host call, dependency and traversal values are recursively
+  pre-scanned before shared-header/root copies or map-to-vector allocation.
+  Dependency byte accounting replaces the header's empty `entries: []` token
+  with the exact measured entries array, so the array is counted once.
+- A first request uses optional `limit`; a continuation invokes the same method
+  with its frozen typed parameters plus `cursor`, exact next `offset`, and
+  `limit`. Results retain their collection field and add
+  `offset`/`has_more`/nullable `cursor`. A 32-hex cursor freezes exact
+  method/session/original-parameter identity. Continuations use retained value
+  only, require no live-session lookup, survive graph close, never refresh
+  their 15-minute TTL, and atomically release the record on the final page.
+- Row-by-row measurement computes and freezes a dynamic page ceiling whose
+  every contiguous page fits the 16 MiB frame, including worst-case legal id
+  escaping and page metadata. One indivisible oversize row is rejected before
+  cursor publication; small values that fit remain complete single pages.
 - Binding/type/offset mismatches and unknown well-formed cursors return
   private `CursorNotFound` without advancing a retained record. Malformed
   cursor/page arithmetic returns private `InvalidParams` without changing the
   record. TTL expiry erases the record and releases its measured quota.
-  Injected limits, clock, and ids support deterministic race tests. Routed
-  graph/node/tree inspection and node-list methods do not reserve, publish, or
-  page these records.
+  Injected limits, clock, and ids support deterministic race tests. Graph
+  listing, node lists, graph/tree inspection, traversal branches, tree
+  membership, and recent planning history reserve and page these records.
 
 Error rule:
 

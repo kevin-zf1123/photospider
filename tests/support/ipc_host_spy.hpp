@@ -268,6 +268,97 @@ class IpcHostSpy final : public Host {
     last_error_ = std::move(status);
   }
 
+  /**
+   * @brief Configures `inspect.node` copied output.
+   * @param node Complete public node value returned on success.
+   * @return Nothing.
+   * @throws std::bad_alloc if copied storage cannot allocate.
+   */
+  void set_inspected_node(NodeInspectionView node) {
+    std::lock_guard<std::mutex> lock(mutex_);
+    inspected_node_ = std::move(node);
+  }
+
+  /**
+   * @brief Configures `inspect.graph` copied output.
+   * @param graph Complete public graph value returned on success.
+   * @return Nothing.
+   * @throws std::bad_alloc if copied storage cannot allocate.
+   */
+  void set_inspected_graph(GraphInspectionView graph) {
+    std::lock_guard<std::mutex> lock(mutex_);
+    inspected_graph_ = std::move(graph);
+  }
+
+  /**
+   * @brief Configures `inspect.dependency_tree` copied output.
+   * @param tree Complete public flattened tree returned on success.
+   * @return Nothing.
+   * @throws std::bad_alloc if copied storage cannot allocate.
+   */
+  void set_dependency_tree(HostDependencyTreeSnapshot tree) {
+    std::lock_guard<std::mutex> lock(mutex_);
+    dependency_tree_ = std::move(tree);
+  }
+
+  /**
+   * @brief Configures `inspect.traversal_orders` copied output.
+   * @param orders Complete ending-node traversal map returned on success.
+   * @return Nothing.
+   * @throws std::bad_alloc if copied storage cannot allocate.
+   */
+  void set_traversal_orders(std::map<int, std::vector<NodeId>> orders) {
+    std::lock_guard<std::mutex> lock(mutex_);
+    traversal_orders_ = std::move(orders);
+  }
+
+  /**
+   * @brief Configures `inspect.traversal_details` copied output.
+   * @param details Complete ending-node detail map returned on success.
+   * @return Nothing.
+   * @throws std::bad_alloc if copied storage cannot allocate.
+   */
+  void set_traversal_details(
+      std::map<int, std::vector<HostTraversalNodeSnapshot>> details) {
+    std::lock_guard<std::mutex> lock(mutex_);
+    traversal_details_ = std::move(details);
+  }
+
+  /**
+   * @brief Configures `inspect.trees_containing_node` copied output.
+   * @param roots Ordered ending-node ids returned on success.
+   * @return Nothing.
+   * @throws std::bad_alloc if copied storage cannot allocate.
+   */
+  void set_trees_containing_node(std::vector<NodeId> roots) {
+    std::lock_guard<std::mutex> lock(mutex_);
+    trees_containing_node_ = std::move(roots);
+  }
+
+  /**
+   * @brief Configures the optional latest planning inspection value.
+   * @param planning Optional copied snapshot returned on success.
+   * @return Nothing.
+   * @throws std::bad_alloc if copied storage cannot allocate.
+   */
+  void set_compute_planning(
+      std::optional<ComputePlanningInspectionSnapshot> planning) {
+    std::lock_guard<std::mutex> lock(mutex_);
+    compute_planning_ = std::move(planning);
+  }
+
+  /**
+   * @brief Configures recent planning inspection history.
+   * @param snapshots Ordered copied history returned on success.
+   * @return Nothing.
+   * @throws std::bad_alloc if copied storage cannot allocate.
+   */
+  void set_recent_compute_planning(
+      std::vector<ComputePlanningInspectionSnapshot> snapshots) {
+    std::lock_guard<std::mutex> lock(mutex_);
+    recent_compute_planning_ = std::move(snapshots);
+  }
+
   /** @copydoc Host::load_graph */
   Result<GraphSessionId> load_graph(const GraphLoadRequest& request) override {
     IpcHostInvocation invocation;
@@ -408,14 +499,14 @@ class IpcHostSpy final : public Host {
   Result<NodeInspectionView> inspect_node(const GraphSessionId& session,
                                           NodeId node) override {
     record(node_invocation("inspect.node", session, node));
-    return {status_for("inspect.node"), NodeInspectionView{}};
+    return configured_result("inspect.node", inspected_node_);
   }
 
   /** @copydoc Host::inspect_graph */
   Result<GraphInspectionView> inspect_graph(
       const GraphSessionId& session) override {
     record(session_invocation("inspect.graph", session));
-    return {status_for("inspect.graph"), GraphInspectionView{}};
+    return configured_result("inspect.graph", inspected_graph_);
   }
 
   /** @copydoc Host::dependency_tree */
@@ -427,29 +518,29 @@ class IpcHostSpy final : public Host {
     invocation.optional_node = node;
     invocation.flag = include_metadata;
     record(std::move(invocation));
-    return {status_for("inspect.dependency_tree"),
-            HostDependencyTreeSnapshot{}};
+    return configured_result("inspect.dependency_tree", dependency_tree_);
   }
 
   /** @copydoc Host::traversal_orders */
   Result<std::map<int, std::vector<NodeId>>> traversal_orders(
       const GraphSessionId& session) override {
     record(session_invocation("inspect.traversal_orders", session));
-    return {status_for("inspect.traversal_orders"), {}};
+    return configured_result("inspect.traversal_orders", traversal_orders_);
   }
 
   /** @copydoc Host::traversal_details */
   Result<std::map<int, std::vector<HostTraversalNodeSnapshot>>>
   traversal_details(const GraphSessionId& session) override {
     record(session_invocation("inspect.traversal_details", session));
-    return {status_for("inspect.traversal_details"), {}};
+    return configured_result("inspect.traversal_details", traversal_details_);
   }
 
   /** @copydoc Host::trees_containing_node */
   Result<std::vector<NodeId>> trees_containing_node(
       const GraphSessionId& session, NodeId node) override {
     record(node_invocation("inspect.trees_containing_node", session, node));
-    return {status_for("inspect.trees_containing_node"), {}};
+    return configured_result("inspect.trees_containing_node",
+                             trees_containing_node_);
   }
 
   /** @copydoc Host::project_roi */
@@ -488,14 +579,15 @@ class IpcHostSpy final : public Host {
   Result<std::optional<ComputePlanningInspectionSnapshot>>
   compute_planning_snapshot(const GraphSessionId& session) override {
     record(session_invocation("inspect.compute_planning", session));
-    return {status_for("inspect.compute_planning"), std::nullopt};
+    return configured_result("inspect.compute_planning", compute_planning_);
   }
 
   /** @copydoc Host::recent_compute_planning_snapshots */
   Result<std::vector<ComputePlanningInspectionSnapshot>>
   recent_compute_planning_snapshots(const GraphSessionId& session) override {
     record(session_invocation("inspect.recent_compute_planning", session));
-    return {status_for("inspect.recent_compute_planning"), {}};
+    return configured_result("inspect.recent_compute_planning",
+                             recent_compute_planning_);
   }
 
   /** @copydoc Host::begin_dirty_source */
@@ -882,6 +974,30 @@ class IpcHostSpy final : public Host {
 
   /** @brief Configured nested last-error diagnostic output. */
   OperationStatus last_error_;
+
+  /** @brief Configured single-node inspection output. */
+  NodeInspectionView inspected_node_;
+
+  /** @brief Configured graph inspection output. */
+  GraphInspectionView inspected_graph_;
+
+  /** @brief Configured dependency-tree inspection output. */
+  HostDependencyTreeSnapshot dependency_tree_;
+
+  /** @brief Configured traversal order branches. */
+  std::map<int, std::vector<NodeId>> traversal_orders_;
+
+  /** @brief Configured traversal detail branches. */
+  std::map<int, std::vector<HostTraversalNodeSnapshot>> traversal_details_;
+
+  /** @brief Configured tree roots containing a requested node. */
+  std::vector<NodeId> trees_containing_node_;
+
+  /** @brief Configured optional current planning snapshot. */
+  std::optional<ComputePlanningInspectionSnapshot> compute_planning_;
+
+  /** @brief Configured recent planning snapshot history. */
+  std::vector<ComputePlanningInspectionSnapshot> recent_compute_planning_;
 };
 
 }  // namespace ps::testing

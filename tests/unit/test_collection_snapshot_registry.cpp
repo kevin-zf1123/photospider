@@ -323,10 +323,9 @@ TEST_F(CollectionSnapshotRegistryTest,
   registry->start();
   auto entry_reservation = registry->reserve();
   ASSERT_EQ(entry_reservation.error, Error::None);
-  std::vector<int> too_many(65, 1);
   auto entry_result =
       registry->publish(std::move(entry_reservation.reservation), binding(),
-                        std::move(too_many), 8, 2);
+                        std::vector<int>{1, 2}, 65, 8, 2);
   EXPECT_EQ(entry_result.error, Error::ResponseTooLarge);
   EXPECT_EQ(registry->record_count(), 0U);
   EXPECT_EQ(registry->retained_bytes(), 0U);
@@ -335,8 +334,24 @@ TEST_F(CollectionSnapshotRegistryTest,
   ASSERT_EQ(byte_reservation.error, Error::None);
   auto byte_result =
       registry->publish(std::move(byte_reservation.reservation), binding(),
-                        std::vector<int>{1, 2, 3}, 17, 2);
+                        std::vector<int>{1, 2, 3}, 3, 17, 2);
   EXPECT_EQ(byte_result.error, Error::ResponseTooLarge);
+  EXPECT_EQ(registry->reserve().error, Error::None);
+}
+
+TEST_F(CollectionSnapshotRegistryTest,
+       RejectsRecursiveEntryCountBelowTopLevelRows) {
+  auto registry = make_registry();
+  registry->start();
+  auto reserved = registry->reserve();
+  ASSERT_EQ(reserved.error, Error::None);
+
+  auto result = registry->publish(std::move(reserved.reservation), binding(),
+                                  std::vector<int>{1, 2, 3}, 2, 3, 2);
+  EXPECT_EQ(result.error, Error::InvalidParams);
+  EXPECT_TRUE(result.entries.empty());
+  EXPECT_EQ(registry->record_count(), 0U);
+  EXPECT_EQ(registry->retained_bytes(), 0U);
   EXPECT_EQ(registry->reserve().error, Error::None);
 }
 
@@ -351,7 +366,7 @@ TEST_F(CollectionSnapshotRegistryTest,
   auto empty_reservation = registry->reserve();
   ASSERT_EQ(empty_reservation.error, Error::None);
   auto empty = registry->publish(std::move(empty_reservation.reservation),
-                                 binding(), std::vector<int>{}, 0, 1);
+                                 binding(), std::vector<int>{}, 0, 0, 1);
   EXPECT_EQ(empty.error, Error::None);
   EXPECT_TRUE(empty.entries.empty());
   EXPECT_FALSE(empty.cursor.has_value());
@@ -360,7 +375,7 @@ TEST_F(CollectionSnapshotRegistryTest,
   auto single_reservation = registry->reserve();
   ASSERT_EQ(single_reservation.error, Error::None);
   auto single = registry->publish(std::move(single_reservation.reservation),
-                                  binding(), std::vector<int>{7}, 1, 1);
+                                  binding(), std::vector<int>{7}, 1, 1, 1);
   EXPECT_EQ(single.error, Error::None);
   EXPECT_EQ(single.entries, (std::vector<int>{7}));
   EXPECT_FALSE(single.cursor.has_value());
@@ -381,7 +396,7 @@ TEST_F(CollectionSnapshotRegistryTest,
 
   auto default_result =
       registry->publish(CollectionSnapshotRegistry::Reservation{}, binding(),
-                        std::vector<int>{1}, 1, 1);
+                        std::vector<int>{1}, 1, 1, 1);
   EXPECT_EQ(default_result.error, Error::InvalidParams);
   EXPECT_TRUE(default_result.entries.empty());
 
@@ -389,19 +404,19 @@ TEST_F(CollectionSnapshotRegistryTest,
   ASSERT_EQ(held.error, Error::None);
   CollectionSnapshotRegistry::Reservation active = std::move(held.reservation);
   auto inactive_result = registry->publish(
-      std::move(held.reservation), binding(), std::vector<int>{2}, 1, 1);
+      std::move(held.reservation), binding(), std::vector<int>{2}, 1, 1, 1);
   EXPECT_EQ(inactive_result.error, Error::InvalidParams);
   EXPECT_TRUE(active.active());
 
   auto foreign = foreign_registry->reserve();
   ASSERT_EQ(foreign.error, Error::None);
-  auto foreign_result = registry->publish(std::move(foreign.reservation),
-                                          binding(), std::vector<int>{3}, 1, 1);
+  auto foreign_result = registry->publish(
+      std::move(foreign.reservation), binding(), std::vector<int>{3}, 1, 1, 1);
   EXPECT_EQ(foreign_result.error, Error::InvalidParams);
   EXPECT_TRUE(active.active());
 
   auto valid_result = registry->publish(std::move(active), binding(),
-                                        std::vector<int>{4}, 1, 1);
+                                        std::vector<int>{4}, 1, 1, 1);
   EXPECT_EQ(valid_result.error, Error::None);
   EXPECT_EQ(valid_result.entries, (std::vector<int>{4}));
   EXPECT_EQ(foreign_registry->reserve().error, Error::None);
@@ -422,12 +437,12 @@ TEST_F(CollectionSnapshotRegistryTest,
   auto current = registry->reserve();
   ASSERT_EQ(current.error, Error::None);
   auto stale_result = registry->publish(std::move(stale.reservation), binding(),
-                                        std::vector<int>{1}, 1, 1);
+                                        std::vector<int>{1}, 1, 1, 1);
   EXPECT_EQ(stale_result.error, Error::InvalidParams);
   EXPECT_TRUE(current.reservation.active());
 
-  auto current_result = registry->publish(std::move(current.reservation),
-                                          binding(), std::vector<int>{2}, 1, 1);
+  auto current_result = registry->publish(
+      std::move(current.reservation), binding(), std::vector<int>{2}, 1, 1, 1);
   EXPECT_EQ(current_result.error, Error::None);
   EXPECT_EQ(current_result.entries, (std::vector<int>{2}));
 }
@@ -448,7 +463,7 @@ TEST_F(CollectionSnapshotRegistryTest,
       [&, reservation = std::move(reserved.reservation)]() mutable {
         gate.wait();
         auto result = registry->publish(std::move(reservation), binding(),
-                                        std::vector<int>{1}, 1, 1);
+                                        std::vector<int>{1}, 1, 1, 1);
         publication_error.store(result.error);
       });
   std::thread shutdown_thread([&] {
@@ -480,7 +495,7 @@ TEST_F(CollectionSnapshotRegistryTest,
         registry->publish(std::move(reserved.reservation),
                           binding("inspect.node_ids", opaque_id(index + 1),
                                   "filter=" + std::to_string(index)),
-                          std::vector<int>{1, 2}, 3, 1);
+                          std::vector<int>{1, 2}, 2, 3, 1);
     ASSERT_EQ(published.error, Error::None);
     ASSERT_TRUE(published.cursor.has_value());
   }
@@ -505,9 +520,10 @@ TEST_F(CollectionSnapshotRegistryTest,
   auto entry_reservation = registry.reserve();
   ASSERT_EQ(entry_reservation.error, Error::None);
   std::vector<int> maximum_entries(kSnapshotMaxEntries, 7);
-  auto at_entry_limit = registry.publish(
-      std::move(entry_reservation.reservation), binding(),
-      std::move(maximum_entries), kSnapshotMaxBytes, kGeneralPageMaxEntries);
+  auto at_entry_limit =
+      registry.publish(std::move(entry_reservation.reservation), binding(),
+                       std::move(maximum_entries), kSnapshotMaxEntries,
+                       kSnapshotMaxBytes, kGeneralPageMaxEntries);
   ASSERT_EQ(at_entry_limit.error, Error::None);
   EXPECT_TRUE(at_entry_limit.cursor.has_value());
   EXPECT_EQ(registry.retained_bytes(), kSnapshotMaxBytes);
@@ -519,14 +535,15 @@ TEST_F(CollectionSnapshotRegistryTest,
   std::vector<int> over_entries(kSnapshotMaxEntries + 1, 7);
   auto over_entry_limit =
       registry.publish(std::move(over_entry_reservation.reservation), binding(),
-                       std::move(over_entries), 1, kGeneralPageMaxEntries);
+                       std::move(over_entries), kSnapshotMaxEntries + 1, 1,
+                       kGeneralPageMaxEntries);
   EXPECT_EQ(over_entry_limit.error, Error::ResponseTooLarge);
 
   auto over_byte_reservation = registry.reserve();
   ASSERT_EQ(over_byte_reservation.error, Error::None);
   auto over_byte_limit =
       registry.publish(std::move(over_byte_reservation.reservation), binding(),
-                       std::vector<int>{1, 2}, kSnapshotMaxBytes + 1, 1);
+                       std::vector<int>{1, 2}, 2, kSnapshotMaxBytes + 1, 1);
   EXPECT_EQ(over_byte_limit.error, Error::ResponseTooLarge);
 }
 
@@ -538,7 +555,7 @@ TEST_F(CollectionSnapshotRegistryTest,
   auto reserved = registry->reserve();
   ASSERT_EQ(reserved.error, Error::None);
   auto first = registry->publish(std::move(reserved.reservation), exact,
-                                 std::vector<int>{10, 20, 30, 40}, 8, 2);
+                                 std::vector<int>{10, 20, 30, 40}, 4, 8, 2);
   ASSERT_EQ(first.error, Error::None);
   ASSERT_TRUE(first.cursor.has_value());
   EXPECT_EQ(*first.cursor, opaque_id(1));
@@ -574,7 +591,7 @@ TEST_F(CollectionSnapshotRegistryTest,
   auto reserved = registry->reserve();
   ASSERT_EQ(reserved.error, Error::None);
   auto first = registry->publish(std::move(reserved.reservation), exact,
-                                 std::vector<int>{1, 2, 3, 4}, 4, 1);
+                                 std::vector<int>{1, 2, 3, 4}, 4, 4, 1);
   ASSERT_TRUE(first.cursor.has_value());
 
   EXPECT_EQ(registry->page<int>("bad", exact, 1, 1).error,
@@ -605,8 +622,9 @@ TEST_F(CollectionSnapshotRegistryTest,
   const CollectionSnapshotBinding exact = binding();
   auto reserved = registry->reserve();
   ASSERT_EQ(reserved.error, Error::None);
-  auto first = registry->publish(std::move(reserved.reservation), exact,
-                                 std::vector<std::string>{"a", "b", "c"}, 3, 1);
+  auto first =
+      registry->publish(std::move(reserved.reservation), exact,
+                        std::vector<std::string>{"a", "b", "c"}, 3, 3, 1);
   ASSERT_TRUE(first.cursor.has_value());
   live_session = false;
 
@@ -618,13 +636,38 @@ TEST_F(CollectionSnapshotRegistryTest,
 }
 
 TEST_F(CollectionSnapshotRegistryTest,
+       RetainedPageCeilingBoundsFirstAndContinuationCopies) {
+  auto registry = make_registry();
+  registry->start();
+  const CollectionSnapshotBinding exact = binding();
+  auto reserved = registry->reserve();
+  ASSERT_EQ(reserved.error, Error::None);
+  auto first = registry->publish(std::move(reserved.reservation), exact,
+                                 std::vector<int>{1, 2, 3, 4, 5}, 5, 5, 4, 2);
+  ASSERT_EQ(first.error, Error::None);
+  ASSERT_TRUE(first.cursor.has_value());
+  EXPECT_EQ(first.entries, (std::vector<int>{1, 2}));
+
+  auto second = registry->page<int>(*first.cursor, exact, 2, 4);
+  ASSERT_EQ(second.error, Error::None);
+  ASSERT_TRUE(second.cursor.has_value());
+  EXPECT_EQ(second.entries, (std::vector<int>{3, 4}));
+
+  auto final = registry->page<int>(*first.cursor, exact, 4, 4);
+  ASSERT_EQ(final.error, Error::None);
+  EXPECT_EQ(final.entries, (std::vector<int>{5}));
+  EXPECT_FALSE(final.cursor.has_value());
+  EXPECT_EQ(registry->record_count(), 0U);
+}
+
+TEST_F(CollectionSnapshotRegistryTest,
        LaterPagesNeverRefreshFixedPublicationTtl) {
   auto registry = make_registry();
   registry->start();
   const CollectionSnapshotBinding exact = binding();
   auto reserved = registry->reserve();
   auto first = registry->publish(std::move(reserved.reservation), exact,
-                                 std::vector<int>{1, 2, 3, 4}, 4, 1);
+                                 std::vector<int>{1, 2, 3, 4}, 4, 4, 1);
   ASSERT_TRUE(first.cursor.has_value());
 
   clock_.advance(std::chrono::milliseconds(9));
@@ -644,7 +687,7 @@ TEST_F(CollectionSnapshotRegistryTest,
   registry->start();
   auto first_reservation = registry->reserve();
   auto first = registry->publish(std::move(first_reservation.reservation),
-                                 binding(), std::vector<int>{1, 2}, 16, 1);
+                                 binding(), std::vector<int>{1, 2}, 2, 16, 1);
   ASSERT_TRUE(first.cursor.has_value());
   EXPECT_EQ(registry->reserve().error, Error::CapacityExceeded);
 
@@ -662,7 +705,7 @@ TEST_F(CollectionSnapshotRegistryTest,
   const CollectionSnapshotBinding exact = binding();
   auto reserved = registry->reserve();
   auto first = registry->publish(std::move(reserved.reservation), exact,
-                                 std::vector<int>{1, 2, 3}, 3, 2);
+                                 std::vector<int>{1, 2, 3}, 3, 3, 2);
   ASSERT_TRUE(first.cursor.has_value());
   StartGate gate;
   std::atomic<int> succeeded{0};
@@ -696,7 +739,7 @@ TEST_F(CollectionSnapshotRegistryTest,
   const CollectionSnapshotBinding exact = binding();
   auto reserved = registry->reserve();
   auto first = registry->publish(std::move(reserved.reservation), exact,
-                                 std::vector<int>{1, 2, 3}, 3, 1);
+                                 std::vector<int>{1, 2, 3}, 3, 3, 1);
   ASSERT_TRUE(first.cursor.has_value());
   clock_.advance(std::chrono::milliseconds(10));
   StartGate gate;
@@ -731,7 +774,7 @@ TEST_F(CollectionSnapshotRegistryTest, FailedPageCopyPreservesCursorAndOffset) {
   rows.emplace_back(2);
   rows.emplace_back(3);
   auto first = registry->publish(std::move(reserved.reservation), exact,
-                                 std::move(rows), 3, 1);
+                                 std::move(rows), 3, 3, 1);
   ASSERT_TRUE(first.cursor.has_value());
 
   ThrowingRow::throw_on_copy.store(true);
@@ -753,7 +796,7 @@ TEST_F(CollectionSnapshotRegistryTest,
   auto reserved = registry.reserve();
   ASSERT_EQ(reserved.error, Error::None);
   EXPECT_THROW(registry.publish(std::move(reserved.reservation), binding(),
-                                std::vector<int>{1, 2}, 2, 1),
+                                std::vector<int>{1, 2}, 2, 2, 1),
                std::runtime_error);
   EXPECT_EQ(registry.record_count(), 0U);
   EXPECT_EQ(registry.retained_bytes(), 0U);
@@ -771,7 +814,7 @@ TEST_F(CollectionSnapshotRegistryTest,
 
   const CollectionSnapshotBinding exact = binding();
   auto first = registry->publish(std::move(reserved.reservation), exact,
-                                 std::vector<int>{1, 2, 3}, 3, 1);
+                                 std::vector<int>{1, 2, 3}, 3, 3, 1);
   ASSERT_EQ(first.error, Error::None);
   ASSERT_TRUE(first.cursor.has_value());
   EXPECT_EQ(registry->page<int>(*first.cursor, exact, 1, 1).error, Error::None);
@@ -808,7 +851,7 @@ TEST_F(CollectionSnapshotRegistryTest,
   const CollectionSnapshotBinding exact = binding();
   auto reserved = registry->reserve();
   auto first = registry->publish(std::move(reserved.reservation), exact,
-                                 std::vector<int>{1, 2, 3}, 3, 1);
+                                 std::vector<int>{1, 2, 3}, 3, 3, 1);
   ASSERT_TRUE(first.cursor.has_value());
   registry->begin_shutdown();
 
@@ -846,7 +889,7 @@ TEST_F(CollectionSnapshotRegistryTest,
   const CollectionSnapshotBinding exact = binding();
   auto reserved = registry.reserve();
   auto first = registry.publish(std::move(reserved.reservation), exact,
-                                std::vector<int>{1, 2, 3}, 3, 1);
+                                std::vector<int>{1, 2, 3}, 3, 3, 1);
   ASSERT_TRUE(first.cursor.has_value());
   EXPECT_EQ(registry.page<int>(*first.cursor, exact, 1, 1).error, Error::None);
   current = TimePoint::max();
