@@ -21,21 +21,10 @@ backend ownership. The client library does not link the `photospider` backend.
 When IPC is disabled, neither its target nor its public headers are installed.
 Forcing IPC on for any other CMake system name fails configuration.
 
-`daemon.version.methods` is sourced from one centralized advertisement table,
-independent of route dispatch matchers, and reports this exact eight-name
-metadata subset:
-
-1. `daemon.ping`
-2. `daemon.version`
-3. `graph.load`
-4. `graph.close`
-5. `graph.list`
-6. `inspect.graph`
-7. `inspect.node`
-8. `inspect.dependency_tree`
-
-The request router also accepts these 47 additional daemon-routed typed
-methods:
+`daemon.version.methods` is sourced from one centralized table shared by
+metadata and pre-dispatch admission. Independent route-family matchers keep an
+advertised but unsupported route detectable. The table reports this exact
+sorted 55-method inventory:
 
 1. `cache.cache_all_nodes`
 2. `cache.clear_all`
@@ -50,44 +39,55 @@ methods:
 11. `compute.status`
 12. `compute.submit`
 13. `compute.timing`
-14. `dirty.begin`
-15. `dirty.end`
-16. `dirty.update`
-17. `events.drain`
-18. `graph.clear`
-19. `graph.node_yaml.get`
-20. `graph.node_yaml.set`
-21. `graph.reload`
-22. `graph.save`
-23. `inspect.ending_nodes`
-24. `inspect.node_ids`
-25. `inspect.roi_backward`
-26. `inspect.roi_forward`
-27. `inspect.compute_planning`
-28. `inspect.dirty_region`
-29. `inspect.recent_compute_planning`
-30. `inspect.traversal_details`
-31. `inspect.traversal_orders`
-32. `inspect.trees_containing_node`
-33. `plugins.load_report`
-34. `plugins.ops_combined_keys`
-35. `plugins.ops_combined_sources`
-36. `plugins.ops_sources`
-37. `plugins.seed_builtins`
-38. `plugins.unload_all`
-39. `scheduler.configure_defaults`
-40. `scheduler.description`
-41. `scheduler.info`
-42. `scheduler.load`
-43. `scheduler.loaded_plugins`
-44. `scheduler.replace`
-45. `scheduler.scan`
-46. `scheduler.trace`
-47. `scheduler.types`
+14. `daemon.ping`
+15. `daemon.version`
+16. `dirty.begin`
+17. `dirty.end`
+18. `dirty.update`
+19. `events.drain`
+20. `graph.clear`
+21. `graph.close`
+22. `graph.list`
+23. `graph.load`
+24. `graph.node_yaml.get`
+25. `graph.node_yaml.set`
+26. `graph.reload`
+27. `graph.save`
+28. `inspect.compute_planning`
+29. `inspect.dependency_tree`
+30. `inspect.dirty_region`
+31. `inspect.ending_nodes`
+32. `inspect.graph`
+33. `inspect.node`
+34. `inspect.node_ids`
+35. `inspect.recent_compute_planning`
+36. `inspect.roi_backward`
+37. `inspect.roi_forward`
+38. `inspect.traversal_details`
+39. `inspect.traversal_orders`
+40. `inspect.trees_containing_node`
+41. `plugins.load_report`
+42. `plugins.ops_combined_keys`
+43. `plugins.ops_combined_sources`
+44. `plugins.ops_sources`
+45. `plugins.seed_builtins`
+46. `plugins.unload_all`
+47. `scheduler.configure_defaults`
+48. `scheduler.description`
+49. `scheduler.info`
+50. `scheduler.load`
+51. `scheduler.loaded_plugins`
+52. `scheduler.replace`
+53. `scheduler.scan`
+54. `scheduler.trace`
+55. `scheduler.types`
 
-The installed typed `ps::ipc::Client` exposes calls only for the eight-name
-metadata subset and has no public raw-JSON escape hatch. The 47 additional
-schemas are daemon request-router behavior. Of those methods,
+Any method outside this table is rejected as `method_not_found` before a route
+family can handle it. The installed typed `ps::ipc::Client` currently exposes
+calls only for the original eight methods (`daemon.ping`, `daemon.version`,
+`graph.load`, `graph.close`, `graph.list`, `inspect.graph`, `inspect.node`, and
+`inspect.dependency_tree`) and has no public raw-JSON escape hatch. The other
+47 schemas remain daemon request-router behavior. Of those methods,
 `compute.status`, `compute.result`, and `compute.release` operate only on the
 daemon job registry. `compute.submit` admits a registry job whose worker later
 performs exactly one matching Host compute call. The other 43 methods route
@@ -326,7 +326,7 @@ object with no currently known members, ignores unknown members, and returns:
 
 `daemon.version` applies the same params rule and returns protocol version 1,
 service name `photospiderd`, the CMake project version, the same instance id,
-transport `unix`, and the sorted exact eight-name metadata subset listed under
+transport `unix`, and the sorted exact 55-method inventory listed under
 Products and Scope. These metadata calls do not acquire the Host mutex.
 
 ## Opaque Graph Sessions
@@ -963,9 +963,9 @@ returned-value library leases.
 
 Eight scheduler methods complement the existing `scheduler.trace` observation
 route. They are daemon request-router schemas only: the installed typed Client
-and the exact eight-name `daemon.version.methods` advertisement remain
-unchanged. Unknown members of every params object are ignored for forward
-compatibility.
+does not yet expose them, while all nine scheduler route names are members of
+the exact 55-method `daemon.version.methods` inventory. Unknown members of
+every params object are ignored for forward compatibility.
 
 The six process-global methods do not define, read, or resolve `session_id`:
 

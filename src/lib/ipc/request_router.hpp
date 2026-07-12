@@ -99,8 +99,9 @@ class RequestRouter {
    * @throws std::bad_alloc if metadata allocation fails.
    * @throws std::runtime_error if instance-id entropy fails.
    * @note Collection snapshot registry, OutputStore, and compute registry are
-   *       constructed stopped. Capability advertisement remains owned by the
-   *       exact table in the private protocol codec.
+   *       constructed stopped. Capability advertisement and pre-dispatch
+   *       admission share the exact 55-method table in the private protocol
+   *       codec.
    */
   RequestRouter(Host& host, std::string service_version);
 
@@ -146,8 +147,12 @@ class RequestRouter {
    *         when no valid id can be recovered.
    * @throws std::bad_alloc if even bounded response construction cannot
    *         allocate; the connection boundary then closes only that client.
-   * @note No Host call occurs for malformed envelopes, unsupported methods, or
-   *       invalid params. A `graph.load` reservation is removed before any
+   * @note No Host call occurs for malformed envelopes, unadvertised methods,
+   *       unsupported advertised routes, or invalid params. The exact
+   *       55-method table gates all route families before dispatch, while
+   *       independent family matchers leave an advertised-but-unimplemented
+   *       method observable as `method_not_found` for contract verification.
+   *       A `graph.load` reservation is removed before any
    *       compensating Host close, including when Host load or registry
    *       publication throws. Session-scoped calls retain a counted admission;
    *       `graph.close` marks Closing and waits admissions before Host locking.
@@ -352,7 +357,7 @@ class RequestRouter {
    *       bounded snapshot quota before exactly one Host call, sorts by public
    *       key, and freezes the copied result. Continuations use only that
    *       frozen cursor record and never call Host. This private route does not
-   *       change the separately maintained eight-method advertisement.
+   *       change the separately maintained exact 55-method advertisement.
    */
   std::optional<std::string> route_plugin_method(
       const std::string& id, const std::string& method,

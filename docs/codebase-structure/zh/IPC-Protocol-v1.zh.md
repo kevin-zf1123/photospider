@@ -19,19 +19,9 @@ descriptor、`sockaddr_un`、backend model、runtime service 或 mutable backend
 Client library 不链接 `photospider` backend。IPC disabled 时，不安装该 target 与 public
 header；在其他任何 CMake system name 下强制开启 IPC 会使 configure 明确失败。
 
-`daemon.version.methods` 来自独立于 route dispatch matcher 的统一 advertisement table，
-并报告以下精确八名称 metadata 子集：
-
-1. `daemon.ping`
-2. `daemon.version`
-3. `graph.load`
-4. `graph.close`
-5. `graph.list`
-6. `inspect.graph`
-7. `inspect.node`
-8. `inspect.dependency_tree`
-
-Request router 还接受以下 47 个额外的 daemon-routed typed method：
+`daemon.version.methods` 来自 metadata 与 dispatch 前 admission 共用的一张统一表。
+独立的 route-family matcher 能让已 advertisement 但未支持的 route 保持可检测。该表报告
+以下精确排序的 55-method inventory：
 
 1. `cache.cache_all_nodes`
 2. `cache.clear_all`
@@ -46,43 +36,54 @@ Request router 还接受以下 47 个额外的 daemon-routed typed method：
 11. `compute.status`
 12. `compute.submit`
 13. `compute.timing`
-14. `dirty.begin`
-15. `dirty.end`
-16. `dirty.update`
-17. `events.drain`
-18. `graph.clear`
-19. `graph.node_yaml.get`
-20. `graph.node_yaml.set`
-21. `graph.reload`
-22. `graph.save`
-23. `inspect.ending_nodes`
-24. `inspect.node_ids`
-25. `inspect.roi_backward`
-26. `inspect.roi_forward`
-27. `inspect.compute_planning`
-28. `inspect.dirty_region`
-29. `inspect.recent_compute_planning`
-30. `inspect.traversal_details`
-31. `inspect.traversal_orders`
-32. `inspect.trees_containing_node`
-33. `plugins.load_report`
-34. `plugins.ops_combined_keys`
-35. `plugins.ops_combined_sources`
-36. `plugins.ops_sources`
-37. `plugins.seed_builtins`
-38. `plugins.unload_all`
-39. `scheduler.configure_defaults`
-40. `scheduler.description`
-41. `scheduler.info`
-42. `scheduler.load`
-43. `scheduler.loaded_plugins`
-44. `scheduler.replace`
-45. `scheduler.scan`
-46. `scheduler.trace`
-47. `scheduler.types`
+14. `daemon.ping`
+15. `daemon.version`
+16. `dirty.begin`
+17. `dirty.end`
+18. `dirty.update`
+19. `events.drain`
+20. `graph.clear`
+21. `graph.close`
+22. `graph.list`
+23. `graph.load`
+24. `graph.node_yaml.get`
+25. `graph.node_yaml.set`
+26. `graph.reload`
+27. `graph.save`
+28. `inspect.compute_planning`
+29. `inspect.dependency_tree`
+30. `inspect.dirty_region`
+31. `inspect.ending_nodes`
+32. `inspect.graph`
+33. `inspect.node`
+34. `inspect.node_ids`
+35. `inspect.recent_compute_planning`
+36. `inspect.roi_backward`
+37. `inspect.roi_forward`
+38. `inspect.traversal_details`
+39. `inspect.traversal_orders`
+40. `inspect.trees_containing_node`
+41. `plugins.load_report`
+42. `plugins.ops_combined_keys`
+43. `plugins.ops_combined_sources`
+44. `plugins.ops_sources`
+45. `plugins.seed_builtins`
+46. `plugins.unload_all`
+47. `scheduler.configure_defaults`
+48. `scheduler.description`
+49. `scheduler.info`
+50. `scheduler.load`
+51. `scheduler.loaded_plugins`
+52. `scheduler.replace`
+53. `scheduler.scan`
+54. `scheduler.trace`
+55. `scheduler.types`
 
-已安装 typed `ps::ipc::Client` 只暴露八名称 metadata 子集的 call，且没有 public raw-JSON
-escape hatch。额外 47 个 schema 属 daemon request-router behavior。其中
+表外 method 会在任何 route family 处理前以 `method_not_found` 拒绝。已安装 typed
+`ps::ipc::Client` 当前仍只暴露原有八个 method（`daemon.ping`、`daemon.version`、
+`graph.load`、`graph.close`、`graph.list`、`inspect.graph`、`inspect.node` 与
+`inspect.dependency_tree`）的 call，且没有 public raw-JSON escape hatch。其余 47 个 schema
+仍属 daemon request-router behavior。其中
 `compute.status`、`compute.result` 与 `compute.release` 只操作 daemon job registry；
 `compute.submit` 会接纳一个 registry job，随后由其 worker 恰好执行一次匹配的 Host compute
 call。另外 43 个 method 会让 direct request 或 first-page request 经由匹配的 Host operation；
@@ -291,7 +292,7 @@ member，并返回：
 
 `daemon.version` 应用相同的 params 规则，返回 protocol version 1、service name
 `photospiderd`、CMake project version、同一 instance id、transport `unix`，以及“产品与范围”
-中列出的精确排序八名称 metadata 子集。Metadata call 不获取 Host mutex。
+中列出的精确排序 55-method inventory。Metadata call 不获取 Host mutex。
 
 ## Opaque Graph Session
 
@@ -818,9 +819,10 @@ callback 或 returned-value library lease。
 ## Scheduler Plugin 发现与 Session 控制
 
 八个 scheduler method 与现有 `scheduler.trace` observation route 共同构成 scheduler
-wire surface。它们只是 daemon request-router schema：installed typed Client 与精确八名称
-`daemon.version.methods` advertisement 都保持不变。每个 params object 的 unknown
-member 都会被忽略，以保持 forward compatibility。
+wire surface。它们只是 daemon request-router schema：installed typed Client 尚未暴露
+这些 method，而九个 scheduler route name 都已属于精确 55-method
+`daemon.version.methods` inventory。每个 params object 的 unknown member 都会被忽略，
+以保持 forward compatibility。
 
 六个 process-global method 不定义、不读取、也不解析 `session_id`：
 

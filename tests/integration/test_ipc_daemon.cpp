@@ -2257,11 +2257,12 @@ TEST(IpcDaemonLifecycle, ExplicitDefaultLiveStaleAndUnsafeSocketPolicy) {
                                    (character >= 'a' && character <= 'f');
                           }));
   EXPECT_EQ(version.value.transport, "unix");
-  EXPECT_EQ(version.value.methods,
-            (std::vector<std::string>{"daemon.ping", "daemon.version",
-                                      "graph.close", "graph.list", "graph.load",
-                                      "inspect.dependency_tree",
-                                      "inspect.graph", "inspect.node"}));
+  std::vector<std::string> expected_methods;
+  expected_methods.reserve(internal::kVersionOneMethodNames.size());
+  for (std::string_view method : internal::kVersionOneMethodNames) {
+    expected_methods.emplace_back(method);
+  }
+  EXPECT_EQ(version.value.methods, expected_methods);
 
   DaemonProcess contender;
   contender.start(socket_path);

@@ -81,8 +81,8 @@ struct DaemonPing {
  * @brief Typed version and capability metadata for one daemon instance.
  *
  * @throws std::bad_alloc when copied strings or methods cannot be allocated.
- * @note `methods` is sorted and advertises only calls implemented by the
- *       connected protocol slice.
+ * @note `methods` is the exact sorted 55-method version 1 inventory and
+ *       advertises only routes admitted by the connected daemon.
  */
 struct DaemonVersion {
   /** @brief Negotiated wire protocol version. */
@@ -100,7 +100,7 @@ struct DaemonVersion {
   /** @brief Local transport name; version 1 reports `unix`. */
   std::string transport;
 
-  /** @brief Sorted wire method names supported by the daemon. */
+  /** @brief Exact sorted 55-method wire inventory supported by the daemon. */
   std::vector<std::string> methods;
 };
 

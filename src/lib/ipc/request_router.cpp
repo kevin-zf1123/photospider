@@ -24,10 +24,11 @@ namespace {
 /**
  * @brief Builds the sorted version 1 method inventory.
  *
- * @return Exact eight method names advertised by `daemon.version`.
+ * @return Exact 55 method names advertised by `daemon.version`.
  * @throws std::bad_alloc if vector/string allocation fails.
- * @note The inventory contains no compute, scheduler, plugin, event, image, or
- *       shutdown method.
+ * @note The returned copy preserves the strict lexical order of the
+ *       authoritative compile-time table and contains no aliases or future
+ *       cancellation, streaming, shutdown, or compatibility methods.
  */
 std::vector<std::string> version_methods() {
   std::vector<std::string> methods;
@@ -36,6 +37,23 @@ std::vector<std::string> version_methods() {
     methods.emplace_back(method);
   }
   return methods;
+}
+
+/**
+ * @brief Tests whether one decoded method belongs to the advertised surface.
+ *
+ * @param method Exact bounded UTF-8 request method.
+ * @return True only for one entry in the sorted 55-method version 1 table.
+ * @throws Nothing; binary search compares borrowed immutable string views.
+ * @note `RequestRouter::route` applies this allowlist before every route
+ *       family. Consequently an added private matcher cannot accidentally
+ *       expose an unadvertised method; advertised methods still use separate
+ *       family matchers so a missing implementation reaches the final
+ *       `method_not_found` contract check.
+ */
+bool is_version_one_method(std::string_view method) noexcept {
+  return std::binary_search(kVersionOneMethodNames.begin(),
+                            kVersionOneMethodNames.end(), method);
 }
 
 /**
@@ -213,8 +231,9 @@ bool read_node_id(const Json& params, const char* field, NodeId* node) {
  * @param method Exact decoded request method.
  * @return True only for submit, status, result, or release.
  * @throws Nothing.
- * @note Capability advertisement remains owned by the separate exact version
- *       table and is not changed by this private dispatch matcher.
+ * @note Capability admission remains owned by the exact 55-method version
+ *       table; this independent matcher lets tests detect missing compute
+ *       dispatch.
  */
 bool is_compute_method(std::string_view method) noexcept {
   static constexpr std::array<std::string_view, 4> kMethods = {
@@ -227,8 +246,9 @@ bool is_compute_method(std::string_view method) noexcept {
  * @param method Exact decoded request method.
  * @return True only for report/load composition, global mutations, or views.
  * @throws Nothing.
- * @note This private matcher does not alter `daemon.version.methods`, which is
- *       maintained by an independent advertised-method table.
+ * @note Capability admission remains owned by the exact 55-method version
+ *       table; this independent matcher lets tests detect missing plugin
+ *       dispatch.
  */
 bool is_plugin_method(std::string_view method) noexcept {
   static constexpr std::array<std::string_view, 6> kMethods = {
@@ -243,8 +263,9 @@ bool is_plugin_method(std::string_view method) noexcept {
  * @param method Exact decoded request method.
  * @return True only for compute-event drain or scheduler-trace paging.
  * @throws Nothing.
- * @note This private matcher does not change the separately maintained
- *       `daemon.version.methods` advertisement table.
+ * @note Capability admission remains owned by the exact 55-method version
+ *       table; this independent matcher lets tests detect missing observation
+ *       dispatch.
  */
 bool is_observation_method(std::string_view method) noexcept {
   return method == "events.drain" || method == "scheduler.trace";
@@ -255,9 +276,9 @@ bool is_observation_method(std::string_view method) noexcept {
  * @param method Exact decoded request method.
  * @return True only for scheduler methods other than bounded trace paging.
  * @throws Nothing.
- * @note The trace method remains owned by `is_observation_method()`. This
- *       private matcher does not change the independent eight-method version
- *       advertisement table.
+ * @note The trace method remains owned by `is_observation_method()`.
+ *       Capability admission remains owned by the exact 55-method table, so
+ *       this independent matcher can reveal missing scheduler dispatch.
  */
 bool is_scheduler_method(std::string_view method) noexcept {
   static constexpr std::array<std::string_view, 8> kMethods = {
@@ -550,8 +571,9 @@ Json encode_output_delivery(const OutputArtifactDelivery& delivery,
  * @return True for graph mutation, node YAML, cache, dirty, ROI, timing,
  *         last-IO, or last-error routing.
  * @throws Nothing.
- * @note This dispatch matcher is not the daemon capability-advertisement
- *       table and does not change `daemon.version` metadata.
+ * @note Capability admission remains owned by the exact 55-method version
+ *       table; this independent matcher lets tests detect missing session
+ *       dispatch.
  */
 bool is_session_control_method(std::string_view method) noexcept {
   static constexpr std::array<std::string_view, 19> kMethods = {
@@ -777,7 +799,9 @@ struct DependencyTreePageRow {
  * @return True only for methods implemented by task-independent inspection
  *         routing in this source file.
  * @throws Nothing.
- * @note Capability advertisement remains owned by the separate exact table.
+ * @note Capability admission remains owned by the exact 55-method version
+ *       table; this independent matcher lets tests detect missing inspection
+ *       dispatch.
  */
 bool is_inspection_method(std::string_view method) noexcept {
   static constexpr std::array<std::string_view, 12> kMethods = {
@@ -3040,6 +3064,12 @@ std::string RequestRouter::route(const std::string& payload) {
   }
   const std::string method = std::move(decoded_method);
   const Json& params = request["params"];
+  if (!is_version_one_method(method)) {
+    return bounded_error(
+        id, failure_status(OperationErrorDomain::Protocol, kMethodNotFoundCode,
+                           "method_not_found",
+                           "method is not implemented by protocol version 1"));
+  }
 
   try {
     bool handled = false;
