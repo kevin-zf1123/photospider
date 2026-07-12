@@ -58,7 +58,15 @@ When IPC is enabled, the package smoke builds and installs `photospider`,
 `photospider_ipc_client`, and `photospiderd`. It builds one external consumer
 of `Photospider::photospider` and a separate consumer that links only
 `Photospider::photospider_ipc_client`, constructs the non-inline client, and
-does not inherit the backend or JSON implementation target. The durable
+does not inherit the backend or JSON implementation target. That IPC-only
+consumer includes the installed protocol, Client, and Host-adapter headers,
+constructs `create_ipc_host()` without contacting a daemon, executes every
+safe public Client lifecycle symbol, and links a reference-only branch for all
+55 typed Client calls plus all 53 non-destructor Host virtuals. Package
+inspection also requires the IPC archive and exact three-header surface,
+permits only `Threads::Threads` in the exported IPC link interface, and rejects
+backend, object, server-internal, JSON, source-tree, and POSIX-private leakage.
+The durable
 `IpcDisabledInstallSmoke` configures a separate clean producer with
 `PHOTOSPIDER_BUILD_IPC=OFF` and `BUILD_TESTING=OFF`; it verifies that no IPC
 build forwarder, installed header, archive, executable, or exported target is

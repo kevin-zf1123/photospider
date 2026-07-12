@@ -228,6 +228,9 @@ struct HostSchedulerConfig {
  * @throws std::bad_alloc from any non-destructor method when request handling,
  *         backend execution, backend-to-status translation, or result
  * construction exhausts memory.
+ * @throws std::system_error from IPC compute polling when production mutex or
+ *         condition-variable operations fail, and from documented async worker
+ *         lifecycle failures.
  * @note Methods are not specified as thread-safe at the Host interface level.
  *       The embedded adapter delegates graph-state serialization to the same
  *       backend boundary used by the existing CLI path.
@@ -336,6 +339,8 @@ class PHOTOSPIDER_API Host {
    * @throws std::bad_alloc if request processing, compute execution, backend-
    *         to-status translation, or copied result construction exhausts
    *         memory.
+   * @throws std::system_error if IPC polling mutex or condition-variable
+   *         operations fail.
    * @note The embedded adapter admits the complete Kernel call/status mapping
    *       against concurrent close. Backend LastError diagnostics are used only
    *       after it has established that the requested graph session exists.
@@ -359,8 +364,8 @@ class PHOTOSPIDER_API Host {
    *       LastError state. Async scheduling/tracking is serialized with graph
    *       close, and close waits until the caller-visible promise is ready
    *       before releasing the runtime. Consuming the returned future may
-   *       rethrow std::bad_alloc from backend compute or async result
-   *       translation.
+   *       rethrow `std::bad_alloc` from backend compute/result translation or
+   *       `std::system_error` from IPC polling synchronization.
    */
   virtual Result<std::future<OperationStatus>> compute_async(
       HostComputeRequest request) = 0;
@@ -376,6 +381,8 @@ class PHOTOSPIDER_API Host {
    * @throws std::bad_alloc if request processing, compute/image execution,
    *         backend-to-status translation, or copied result construction
    *         exhausts memory.
+   * @throws std::system_error if IPC polling mutex or condition-variable
+   *         operations fail.
    * @note The embedded adapter admits the complete image compute and result
    *       mapping against concurrent close, checks session existence before
    *       dispatch, and consults LastError only to distinguish handled failure

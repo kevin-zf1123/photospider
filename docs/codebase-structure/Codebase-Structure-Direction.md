@@ -30,9 +30,9 @@ short-lived connections, joined asynchronous polling, and deterministic stop
 ordering. Image mode currently performs strict same-user regular-file
 revalidation while its delivery lease protects result-to-open, creates a
 shared read-only mapping, and then releases the matching job/lease. The final
-mapping owner unmaps and closes exactly once. The final package-consumer
-contract remains in progress, while the
-plugin SDK follows the extension contracts documented below.
+mapping owner unmaps and closes exactly once. The installed IPC-only package
+consumer now closes the complete symbol/export/header contract; the plugin SDK
+follows the extension contracts documented below.
 
 Observed build targets in the current root `CMakeLists.txt`:
 
@@ -593,7 +593,8 @@ separate extension-boundary change.
 6. **Completed daemon slice:** `apps/photospiderd/` now owns foreground process,
    self-pipe signal, protected socket, bounded workers, and deterministic
    cleanup behavior.
-7. **Completed task-4.3 IPC Host adapter and artifact-ownership slices:** The installable typed client
+7. **Completed task-4.4 IPC Host adapter, artifact, and package slices:** The
+   installable typed client
    exposes owned calls for all 55 methods, strictly validates common and
    method-specific result shapes, performs each status or mutation RPC once,
    aggregates all private stable cursor pages, and preserves output/delivery
@@ -608,8 +609,13 @@ separate extension-boundary change.
    without following symlinks while its delivery lease is active, validates
    same-user regular type, exact mode, one link, device/inode/size, and tight
    layout, then creates a shared read-only mapping before matching lease-aware
-   release. Its final owner unmaps and closes exactly once. Final installed
-   package-consumer coverage remains task 4.4. Cancellation remains unavailable.
+   release. Its final owner unmaps and closes exactly once. The installed
+   package gate compiles every public header, then links an IPC-only external
+   consumer against the exported adapter archive. That consumer covers every
+   Client lifecycle symbol, all 55 typed Client calls, `create_ipc_host`, and
+   all 53 Host virtual references; the export admits only `Threads::Threads`
+   and rejects backend, JSON, server-internal, object, source-tree, or
+   POSIX-private leakage. Cancellation remains unavailable.
 8. **Separate plugin-boundary work:** Tighten plugin SDK in issue #38.
    - Replace direct plugin dependency on full `Node` and global registry symbols
      with a narrow operation contract and host-provided registration table.

@@ -43,7 +43,12 @@ IPC enabled 时，package smoke 会构建并安装 `photospider`、
 `photospider_ipc_client` 与 `photospiderd`。它会构建一个使用
 `Photospider::photospider` 的 external consumer，以及另一个只链接
 `Photospider::photospider_ipc_client`、构造 non-inline client、且不继承 backend 或 JSON
-implementation target 的 consumer。长期 `IpcDisabledInstallSmoke` 会用
+implementation target 的 consumer。该 IPC-only consumer 会 include 已安装的 protocol、Client
+与 Host-adapter header，在不连接 daemon 的情况下构造 `create_ipc_host()`，执行全部安全 public
+Client lifecycle symbol，并链接一个仅用于引用的分支，覆盖全部 55 个 typed Client call 与全部
+53 个非析构 Host virtual。Package 检查还要求 IPC archive 与精确的三个 header surface，导出的
+IPC link interface 只允许 `Threads::Threads`，并拒绝 backend、object、server-internal、JSON、
+source-tree 与 POSIX-private 泄漏。长期 `IpcDisabledInstallSmoke` 会用
 `PHOTOSPIDER_BUILD_IPC=OFF` 与 `BUILD_TESTING=OFF` 配置另一个 clean producer；它验证不会
 advertise IPC build forwarder、installed header、archive、executable 或 exported target，同时
 external embedded Host consumer 仍能 link/run。
