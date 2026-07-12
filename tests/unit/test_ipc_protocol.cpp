@@ -1,6 +1,7 @@
 #include <arpa/inet.h>
 #include <fcntl.h>
 #include <gtest/gtest.h>
+#include <poll.h>
 #include <sys/socket.h>
 #include <sys/stat.h>
 #include <sys/un.h>
@@ -8,6 +9,7 @@
 
 #include <algorithm>
 #include <array>
+#include <atomic>
 #include <cerrno>
 #include <chrono>
 #include <cmath>
@@ -32,8 +34,10 @@
 #include <vector>
 
 #include "ipc/client_collection_budget.hpp"
+#include "ipc/client_interrupt_access.hpp"
 #include "ipc/codec.hpp"
 #include "ipc/frame.hpp"
+#include "ipc/protocol_bounds.hpp"
 #include "ipc/request_router.hpp"
 #include "ipc/session_registry.hpp"
 #include "ipc/unix_socket.hpp"
@@ -6715,6 +6719,311 @@ TEST(ProtocolEnvelope, OversizedSuccessBecomesBoundedStructuredError) {
   EXPECT_EQ(response["error"]["name"], "response_too_large");
 }
 
+/**
+ * @brief Completes one injected pending connect without a second attempt.
+ *
+ * @return Nothing; GoogleTest assertions report attempt count, completion, or
+ *         descriptor-flag mismatch.
+ * @throws std::bad_alloc or std::system_error if callback, diagnostic, or
+ *         socketpair setup cannot complete.
+ * @note A connected socketpair makes writable/SO_ERROR completion
+ *       deterministic while the injected attempt returns `EINPROGRESS` once.
+ */
+TEST(UnixSocketConnect, CompletesOnePendingAttemptAndRestoresBlockingFlags) {
+  int descriptors[2] = {-1, -1};
+  ASSERT_EQ(::socketpair(AF_UNIX, SOCK_STREAM, 0, descriptors), 0);
+  UniqueFd connecting(descriptors[0]);
+  UniqueFd peer(descriptors[1]);
+  const int original_flags = ::fcntl(connecting.get(), F_GETFL, 0);
+  ASSERT_GE(original_flags, 0);
+  ASSERT_EQ(::fcntl(connecting.get(), F_SETFL, original_flags & ~O_NONBLOCK),
+            0);
+  int attempts = 0;
+  std::string message;
+  const bool connected = connect_prepared_unix_socket_with_attempt(
+      connecting.get(), "/injected/pending.sock", [] { return false; },
+      [&attempts](int, const void*, std::size_t) {
+        ++attempts;
+        errno = EINPROGRESS;
+        return -1;
+      },
+      &message);
+
+  EXPECT_TRUE(connected) << message;
+  EXPECT_EQ(attempts, 1);
+  const int restored_flags = ::fcntl(connecting.get(), F_GETFL, 0);
+  ASSERT_GE(restored_flags, 0);
+  EXPECT_EQ(restored_flags & O_NONBLOCK, 0);
+}
+
+/**
+ * @brief Retries Linux backlog `EAGAIN` on the same unconnected descriptor.
+ *
+ * @return Nothing; GoogleTest assertions report logical completion, attempt
+ *         count, descriptor identity, or restored-flag mismatch.
+ * @throws std::bad_alloc or std::system_error if socket or callback storage
+ *         cannot be created.
+ * @note The injected sequence is `EAGAIN`, `EAGAIN`, success. No connection is
+ *       marked pending and no frame/RPC exists during the two 10-ms slices.
+ */
+TEST(UnixSocketConnect, RetriesBacklogEagainOnSameFdUntilSuccess) {
+  std::string creation_message;
+  UniqueFd connecting = create_unix_stream_socket(&creation_message);
+  ASSERT_TRUE(connecting) << creation_message;
+  const int original_flags = ::fcntl(connecting.get(), F_GETFL, 0);
+  ASSERT_GE(original_flags, 0);
+  std::vector<int> attempted_fds;
+  std::string message;
+  const bool connected = connect_prepared_unix_socket_with_attempt(
+      connecting.get(), "/injected/backlog.sock", [] { return false; },
+      [&attempted_fds](int fd, const void*, std::size_t) {
+        attempted_fds.push_back(fd);
+        if (attempted_fds.size() < 3U) {
+          errno = EAGAIN;
+          return -1;
+        }
+        return 0;
+      },
+      &message);
+
+  EXPECT_TRUE(connected) << message;
+  ASSERT_EQ(attempted_fds.size(), 3U);
+  EXPECT_TRUE(std::all_of(attempted_fds.begin(), attempted_fds.end(),
+                          [&](int fd) { return fd == connecting.get(); }));
+  const int restored_flags = ::fcntl(connecting.get(), F_GETFL, 0);
+  ASSERT_GE(restored_flags, 0);
+  EXPECT_EQ(restored_flags, original_flags);
+}
+
+/**
+ * @brief Accepts `EISCONN` after a same-fd backlog transient.
+ *
+ * @return Nothing; GoogleTest assertions report logical completion, attempt
+ *         count, or restored-flag mismatch.
+ * @throws std::bad_alloc or std::system_error if socket or callbacks cannot be
+ *         created.
+ * @note The injected `EAGAIN` then `EISCONN` sequence models connection state
+ *       becoming visible while the same logical retry is scheduled.
+ */
+TEST(UnixSocketConnect, AcceptsEisconnAfterBacklogTransient) {
+  std::string creation_message;
+  UniqueFd connecting = create_unix_stream_socket(&creation_message);
+  ASSERT_TRUE(connecting) << creation_message;
+  const int original_flags = ::fcntl(connecting.get(), F_GETFL, 0);
+  ASSERT_GE(original_flags, 0);
+  int attempts = 0;
+  std::string message;
+  const bool connected = connect_prepared_unix_socket_with_attempt(
+      connecting.get(), "/injected/backlog.sock", [] { return false; },
+      [&attempts](int, const void*, std::size_t) {
+        ++attempts;
+        errno = attempts == 1 ? EAGAIN : EISCONN;
+        return -1;
+      },
+      &message);
+
+  EXPECT_TRUE(connected) << message;
+  EXPECT_EQ(attempts, 2);
+  const int restored_flags = ::fcntl(connecting.get(), F_GETFL, 0);
+  ASSERT_GE(restored_flags, 0);
+  EXPECT_EQ(restored_flags, original_flags);
+}
+
+/**
+ * @brief Gives stop precedence over an immediate successful connect attempt.
+ *
+ * @return Nothing; GoogleTest assertions report stop classification, attempt
+ *         count, or restored-flag mismatch.
+ * @throws std::bad_alloc or std::system_error if socket or callbacks cannot be
+ *         created.
+ * @note The predicate becomes true only after the injected attempt returns
+ *       zero, closing the helper's immediate-success stop race independently
+ *       of the Client's outer latch check.
+ */
+TEST(UnixSocketConnect, StopWinsImmediateConnectCompletion) {
+  std::string creation_message;
+  UniqueFd connecting = create_unix_stream_socket(&creation_message);
+  ASSERT_TRUE(connecting) << creation_message;
+  const int original_flags = ::fcntl(connecting.get(), F_GETFL, 0);
+  ASSERT_GE(original_flags, 0);
+  std::size_t predicate_calls = 0;
+  int attempts = 0;
+  std::string message;
+  const bool connected = connect_prepared_unix_socket_with_attempt(
+      connecting.get(), "/injected/immediate.sock",
+      [&predicate_calls] { return ++predicate_calls >= 2U; },
+      [&attempts](int, const void*, std::size_t) {
+        ++attempts;
+        return 0;
+      },
+      &message);
+
+  EXPECT_FALSE(connected);
+  EXPECT_EQ(message, "connect interrupted");
+  EXPECT_EQ(attempts, 1);
+  EXPECT_GE(predicate_calls, 2U);
+  const int restored_flags = ::fcntl(connecting.get(), F_GETFL, 0);
+  ASSERT_GE(restored_flags, 0);
+  EXPECT_EQ(restored_flags, original_flags);
+}
+
+/**
+ * @brief Gives a latched stop precedence over simultaneous writability.
+ *
+ * @return Nothing; GoogleTest assertions report completion, attempt count, or
+ *         restored-flag mismatch.
+ * @throws std::bad_alloc or std::system_error if socketpair, callbacks, or
+ *         diagnostics cannot be created.
+ * @note The connected socketpair is immediately writable. The predicate turns
+ *       true only after poll returns, proving the helper checks stop before
+ *       accepting an otherwise successful `SO_ERROR` completion.
+ */
+TEST(UnixSocketConnect, StopWinsWritablePendingCompletion) {
+  int descriptors[2] = {-1, -1};
+  ASSERT_EQ(::socketpair(AF_UNIX, SOCK_STREAM, 0, descriptors), 0);
+  UniqueFd connecting(descriptors[0]);
+  UniqueFd peer(descriptors[1]);
+  const int original_flags = ::fcntl(connecting.get(), F_GETFL, 0);
+  ASSERT_GE(original_flags, 0);
+  ASSERT_EQ(::fcntl(connecting.get(), F_SETFL, original_flags & ~O_NONBLOCK),
+            0);
+  std::size_t predicate_calls = 0;
+  int attempts = 0;
+  std::string message;
+  const bool connected = connect_prepared_unix_socket_with_attempt(
+      connecting.get(), "/injected/pending.sock",
+      [&predicate_calls] { return ++predicate_calls >= 3U; },
+      [&attempts](int, const void*, std::size_t) {
+        ++attempts;
+        errno = EINPROGRESS;
+        return -1;
+      },
+      &message);
+
+  EXPECT_FALSE(connected);
+  EXPECT_EQ(message, "connect interrupted");
+  EXPECT_EQ(attempts, 1);
+  EXPECT_GE(predicate_calls, 3U);
+  const int restored_flags = ::fcntl(connecting.get(), F_GETFL, 0);
+  ASSERT_GE(restored_flags, 0);
+  EXPECT_EQ(restored_flags & O_NONBLOCK, 0);
+}
+
+/**
+ * @brief Interrupts a pending writable wait without retrying connect.
+ *
+ * A socketpair sender is filled to `EAGAIN`, then an injected connect attempt
+ * reports `EINPROGRESS`. The stop predicate and descriptor shutdown race while
+ * the state machine is in its bounded poll loop; interruption must win over a
+ * wake with `SO_ERROR==0`, preserve one attempt, and restore original flags.
+ *
+ * @return Nothing; GoogleTest assertions report stop latency, attempt count,
+ *         diagnostic, or descriptor-flag mismatch.
+ * @throws std::bad_alloc, std::runtime_error, or std::system_error if socket,
+ *         callback, diagnostic, or thread setup cannot complete.
+ * @note The peer remains open and never drains bytes, making POLLOUT
+ * unavailable until shutdown wakes the 10-ms interruption slice.
+ */
+TEST(UnixSocketConnect, InterruptsPendingAttemptAndRestoresBlockingFlags) {
+  int descriptors[2] = {-1, -1};
+  ASSERT_EQ(::socketpair(AF_UNIX, SOCK_STREAM, 0, descriptors), 0);
+  UniqueFd connecting(descriptors[0]);
+  UniqueFd peer(descriptors[1]);
+  const int original_flags = ::fcntl(connecting.get(), F_GETFL, 0);
+  ASSERT_GE(original_flags, 0);
+  ASSERT_EQ(::fcntl(connecting.get(), F_SETFL, original_flags | O_NONBLOCK), 0);
+  std::array<std::byte, 4096> bytes{};
+  while (true) {
+    const ssize_t sent =
+        ::send(connecting.get(), bytes.data(), bytes.size(), 0);
+    if (sent > 0) {
+      continue;
+    }
+    ASSERT_EQ(sent, -1);
+    ASSERT_TRUE(errno == EAGAIN || errno == EWOULDBLOCK);
+    break;
+  }
+  ASSERT_EQ(::fcntl(connecting.get(), F_SETFL, original_flags & ~O_NONBLOCK),
+            0);
+
+  std::atomic<bool> stop{false};
+  std::mutex state_mutex;
+  std::condition_variable state_changed;
+  std::size_t predicate_calls = 0;
+  bool pending_wait_entered = false;
+  int attempts = 0;
+  bool connected = true;
+  std::string message;
+  std::thread connector([&] {
+    connected = connect_prepared_unix_socket_with_attempt(
+        connecting.get(), "/injected/pending.sock",
+        [&] {
+          std::lock_guard<std::mutex> lock(state_mutex);
+          ++predicate_calls;
+          if (predicate_calls >= 2U) {
+            pending_wait_entered = true;
+            state_changed.notify_all();
+          }
+          return stop.load();
+        },
+        [&attempts](int, const void*, std::size_t) {
+          ++attempts;
+          errno = EINPROGRESS;
+          return -1;
+        },
+        &message);
+  });
+  bool entered = false;
+  {
+    std::unique_lock<std::mutex> lock(state_mutex);
+    entered = state_changed.wait_for(lock, std::chrono::seconds(2),
+                                     [&] { return pending_wait_entered; });
+  }
+  const auto stop_started = std::chrono::steady_clock::now();
+  stop.store(true);
+  (void)::shutdown(connecting.get(), SHUT_RDWR);
+  connector.join();
+  const auto stop_elapsed = std::chrono::steady_clock::now() - stop_started;
+
+  ASSERT_TRUE(entered);
+  EXPECT_FALSE(connected);
+  EXPECT_EQ(message, "connect interrupted");
+  EXPECT_EQ(attempts, 1);
+  EXPECT_LT(stop_elapsed, std::chrono::milliseconds(500));
+  const int restored_flags = ::fcntl(connecting.get(), F_GETFL, 0);
+  ASSERT_GE(restored_flags, 0);
+  EXPECT_EQ(restored_flags & O_NONBLOCK, 0);
+}
+
+/**
+ * @brief Latches adapter stop before a Client publishes its descriptor.
+ *
+ * @return Nothing; GoogleTest assertions report status, ownership, or an
+ *         unexpected listener connection.
+ * @throws std::bad_alloc, std::runtime_error, or std::system_error if temporary
+ *         listener, Client, or diagnostics cannot be created.
+ * @note This closes the register/descriptor-publication race: the later
+ *       logical connection observes the private latch before any connect
+ *       syscall.
+ */
+TEST(ClientLifecycle, InterruptBeforeConnectPreventsDescriptorPublication) {
+  ScopedTempDirectory temp("ps-ipc-stop-connect");
+  const std::string socket_path = (temp.path() / "server.sock").string();
+  UniqueFd listener = create_test_listener(socket_path);
+  Client client;
+  ClientInterruptAccess::interrupt(&client);
+  const OperationStatus status = client.connect(socket_path);
+
+  EXPECT_FALSE(status.ok);
+  EXPECT_EQ(status.domain, OperationErrorDomain::Transport);
+  EXPECT_EQ(status.code, 1);
+  EXPECT_EQ(status.name, "connect_failed");
+  EXPECT_EQ(status.message, "connect interrupted");
+  EXPECT_FALSE(client.connected());
+  pollfd descriptor{listener.get(), POLLIN, 0};
+  EXPECT_EQ(::poll(&descriptor, 1, 100), 0);
+}
+
 TEST(ClientLifecycle, RejectsUncorrelatedResponseAndClosesIdempotently) {
   for (const auto& response :
        std::vector<std::pair<std::string, std::int32_t>>{{"wrong-id", 1},
@@ -6994,6 +7303,65 @@ TEST(ClientCollectionAggregation, UsesStableCursorAndActualPageLength) {
   EXPECT_EQ(requests[1]["params"]["cursor"], cursor);
   EXPECT_EQ(requests[1]["params"]["offset"], 1);
   EXPECT_EQ(requests[1]["params"]["limit"], 1);
+}
+
+/**
+ * @brief Rejects a continuation page larger than its exact requested limit.
+ *
+ * The first graph-list page contains one row and therefore narrows the stable
+ * continuation request to one row. An abnormal peer then returns two rows for
+ * that `limit: 1` request. The Client must reject the oversized page before it
+ * appends either row or publishes the earlier partial aggregate.
+ *
+ * @return Nothing; GoogleTest assertions report status or request mismatch.
+ * @throws std::bad_alloc, std::runtime_error, or std::system_error if socket,
+ *         script, aggregate, or peer-thread setup cannot complete.
+ * @note Each scripted RPC is attempted exactly once. The validation is bound
+ *       to the current request limit rather than only the protocol-wide 4,096
+ *       row ceiling.
+ */
+TEST(ClientCollectionAggregation,
+     RejectsPageLargerThanCurrentRequestLimitWithoutPartialValue) {
+  ScopedTempDirectory temp("ps-ipc-overlim");
+  const std::string socket_path = (temp.path() / "server.sock").string();
+  UniqueFd listener = create_test_listener(socket_path);
+  const std::string cursor(32, 'c');
+  const std::vector<ScriptedClientReply> replies = {
+      {"graph.list",
+       Json{{"sessions", Json::array({Json{{"session_id", std::string(32, 'a')},
+                                           {"session_name", "alpha"}}})},
+            {"offset", 0},
+            {"has_more", true},
+            {"cursor", cursor}}},
+      {"graph.list",
+       Json{{"sessions", Json::array({Json{{"session_id", std::string(32, 'b')},
+                                           {"session_name", "beta"}},
+                                      Json{{"session_id", std::string(32, 'd')},
+                                           {"session_name", "delta"}}})},
+            {"offset", 1},
+            {"has_more", false},
+            {"cursor", nullptr}}}};
+  std::vector<Json> requests;
+  bool served = false;
+  std::thread peer([&] {
+    served = serve_scripted_client_replies(listener.get(), replies, &requests);
+  });
+  Client client;
+  ASSERT_TRUE(client.connect(socket_path).ok);
+  const IpcResult<std::vector<GraphSessionSummary>> result =
+      client.list_graphs();
+  peer.join();
+
+  ASSERT_TRUE(served);
+  EXPECT_FALSE(result.status.ok);
+  EXPECT_EQ(result.status.domain, OperationErrorDomain::Protocol);
+  EXPECT_EQ(result.status.code, kInvalidRequestCode);
+  EXPECT_TRUE(result.value.empty());
+  ASSERT_EQ(requests.size(), 2U);
+  EXPECT_EQ(requests[1]["params"]["cursor"], cursor);
+  EXPECT_EQ(requests[1]["params"]["offset"], 1);
+  EXPECT_EQ(requests[1]["params"]["limit"], 1);
+  EXPECT_TRUE(client.connected());
 }
 
 /**
@@ -7553,6 +7921,70 @@ TEST(ClientJobValidation, RejectsMalformedOutputByteLayout) {
 }
 
 /**
+ * @brief Rejects malicious output metadata above the artifact byte ceiling.
+ *
+ * The peer advertises a mathematically tight one-row UINT8 artifact whose
+ * width, row step, and byte size are exactly 512 MiB plus one. The direct
+ * Client must reject the typed metadata before any payload allocation or path
+ * consumption and must not retry the result RPC.
+ *
+ * @return Nothing; GoogleTest assertions report status, output, or attempt
+ *         mismatch.
+ * @throws std::bad_alloc, std::runtime_error, or std::system_error if socket,
+ *         bounded JSON, Client, or peer-thread setup cannot complete.
+ * @note The nonexistent path is intentionally never opened by direct Client;
+ *       artifact ownership belongs to the IPC Host after successful decoding.
+ */
+TEST(ClientJobValidation,
+     RejectsOutputMetadataAboveArtifactLimitWithoutAllocation) {
+  ScopedTempDirectory temp("ps-ipc-bigout");
+  const std::string socket_path = (temp.path() / "server.sock").string();
+  UniqueFd listener = create_test_listener(socket_path);
+  const ps::ipc::ComputeRequestId compute_id{std::string(32, 'b')};
+  constexpr std::size_t oversized = kOutputArtifactMaxBytes + 1U;
+  const Json malicious_job{
+      {"compute_id", compute_id.value},
+      {"session_id", std::string(32, 'a')},
+      {"state", "succeeded"},
+      {"cancellable", false},
+      {"status", encode_operation_status(ok_status())},
+      {"output", Json{{"output_id", std::string(32, 'c')},
+                      {"delivery_id", std::string(32, 'd')},
+                      {"path", "/path/must/not/be-opened.bin"},
+                      {"width", oversized},
+                      {"height", 1},
+                      {"channels", 1},
+                      {"data_type", "uint8"},
+                      {"device", "cpu"},
+                      {"row_step", oversized},
+                      {"byte_size", oversized},
+                      {"filesystem_device", 17},
+                      {"inode", 23}}}};
+  std::vector<Json> requests;
+  bool served = false;
+  const std::vector<ScriptedClientReply> replies = {
+      {"compute.result", malicious_job}};
+  std::thread peer([&] {
+    served = serve_scripted_client_replies(listener.get(), replies, &requests);
+  });
+  Client client;
+  ASSERT_TRUE(client.connect(socket_path).ok);
+  const IpcResult<ComputeJobSnapshot> result =
+      client.compute_result(compute_id);
+  peer.join();
+
+  ASSERT_TRUE(served);
+  EXPECT_FALSE(result.status.ok);
+  EXPECT_EQ(result.status.domain, OperationErrorDomain::Protocol);
+  EXPECT_EQ(result.status.code, kInvalidRequestCode);
+  EXPECT_EQ(result.status.name, "invalid_request");
+  EXPECT_FALSE(result.value.output.has_value());
+  ASSERT_EQ(requests.size(), 1U);
+  EXPECT_EQ(requests.front()["method"], "compute.result");
+  EXPECT_TRUE(client.connected());
+}
+
+/**
  * @brief Returns ambiguous mutation transport loss without retrying the call.
  *
  * The peer records one complete `graph.node_yaml.set` request and closes the
@@ -7688,6 +8120,104 @@ TEST(ClientResultValidation, RejectsInspectionOverflowWithoutDesynchronizing) {
   EXPECT_EQ(graph.status.domain, OperationErrorDomain::Protocol);
   EXPECT_EQ(graph.status.code, kInvalidRequestCode);
   EXPECT_TRUE(graph.value.nodes.empty());
+  EXPECT_TRUE(client.connected());
+}
+
+/**
+ * @brief Rejects node and dependency results that do not match the request.
+ *
+ * A scripted abnormal peer returns, in order, the wrong inspected node id, a
+ * wrong start node for a node-scoped tree, an ending-node tree for a
+ * node-scoped request, and a start-node tree for a graph-scoped request. The
+ * Client must classify every response as malformed and publish no copied
+ * snapshot from any call.
+ *
+ * @return Nothing; GoogleTest assertions report identity, status, or request
+ *         mismatches.
+ * @throws std::bad_alloc, std::runtime_error, or std::system_error if socket,
+ *         scripted values, or peer-thread setup cannot complete.
+ * @note The single connected Client remains synchronized after each local
+ *       response-validation failure, and every operation is attempted once.
+ */
+TEST(ClientResultValidation,
+     RejectsMismatchedNodeAndDependencyRequestIdentity) {
+  ScopedTempDirectory temp("ps-ipc-bad-id");
+  const std::string socket_path = (temp.path() / "server.sock").string();
+  UniqueFd listener = create_test_listener(socket_path);
+  const IpcSessionId session_id{std::string(32, 'a')};
+
+  NodeInspectionView wrong_node;
+  wrong_node.id = NodeId{8};
+  wrong_node.name = "wrong-node";
+  wrong_node.type = "fixture";
+  wrong_node.subtype = "source";
+
+  HostDependencyTreeSnapshot wrong_start_tree;
+  wrong_start_tree.scope = HostDependencyTreeScope::StartNode;
+  wrong_start_tree.start_node = NodeId{8};
+  Json wrong_start = encode_dependency_tree(session_id, wrong_start_tree);
+  wrong_start["offset"] = 0;
+  wrong_start["has_more"] = false;
+  wrong_start["cursor"] = nullptr;
+
+  HostDependencyTreeSnapshot wrong_node_scope_tree;
+  wrong_node_scope_tree.scope = HostDependencyTreeScope::EndingNodes;
+  Json wrong_node_scope =
+      encode_dependency_tree(session_id, wrong_node_scope_tree);
+  wrong_node_scope["offset"] = 0;
+  wrong_node_scope["has_more"] = false;
+  wrong_node_scope["cursor"] = nullptr;
+
+  HostDependencyTreeSnapshot wrong_graph_scope_tree;
+  wrong_graph_scope_tree.scope = HostDependencyTreeScope::StartNode;
+  wrong_graph_scope_tree.start_node = NodeId{7};
+  Json wrong_graph_scope =
+      encode_dependency_tree(session_id, wrong_graph_scope_tree);
+  wrong_graph_scope["offset"] = 0;
+  wrong_graph_scope["has_more"] = false;
+  wrong_graph_scope["cursor"] = nullptr;
+
+  const std::vector<ScriptedClientReply> replies = {
+      {"inspect.node", Json{{"session_id", session_id.value},
+                            {"node", encode_node(wrong_node)}}},
+      {"inspect.dependency_tree", std::move(wrong_start)},
+      {"inspect.dependency_tree", std::move(wrong_node_scope)},
+      {"inspect.dependency_tree", std::move(wrong_graph_scope)}};
+  std::vector<Json> requests;
+  bool served = false;
+  std::thread peer([&] {
+    served = serve_scripted_client_replies(listener.get(), replies, &requests);
+  });
+  Client client;
+  ASSERT_TRUE(client.connect(socket_path).ok);
+  const IpcResult<NodeInspectionView> inspected =
+      client.inspect_node(session_id, NodeId{7});
+  const IpcResult<HostDependencyTreeSnapshot> wrong_start_result =
+      client.inspect_dependency_tree(session_id, NodeId{7}, false);
+  const IpcResult<HostDependencyTreeSnapshot> wrong_node_scope_result =
+      client.inspect_dependency_tree(session_id, NodeId{7}, false);
+  const IpcResult<HostDependencyTreeSnapshot> wrong_graph_scope_result =
+      client.inspect_dependency_tree(session_id, std::nullopt, false);
+  peer.join();
+
+  ASSERT_TRUE(served);
+  for (const OperationStatus* status : std::array<const OperationStatus*, 4>{
+           &inspected.status, &wrong_start_result.status,
+           &wrong_node_scope_result.status, &wrong_graph_scope_result.status}) {
+    ASSERT_NE(status, nullptr);
+    EXPECT_FALSE(status->ok);
+    EXPECT_EQ(status->domain, OperationErrorDomain::Protocol);
+    EXPECT_EQ(status->code, kInvalidRequestCode);
+  }
+  EXPECT_EQ(inspected.value.id.value, -1);
+  EXPECT_TRUE(wrong_start_result.value.entries.empty());
+  EXPECT_TRUE(wrong_node_scope_result.value.entries.empty());
+  EXPECT_TRUE(wrong_graph_scope_result.value.entries.empty());
+  ASSERT_EQ(requests.size(), 4U);
+  EXPECT_EQ(requests[0]["params"]["node_id"], 7);
+  EXPECT_EQ(requests[1]["params"]["node_id"], 7);
+  EXPECT_EQ(requests[2]["params"]["node_id"], 7);
+  EXPECT_FALSE(requests[3]["params"].contains("node_id"));
   EXPECT_TRUE(client.connected());
 }
 

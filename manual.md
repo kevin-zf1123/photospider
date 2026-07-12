@@ -96,17 +96,26 @@ after shutdown so concurrent or later instances always synchronize on one
 stable inode.
 
 The installed C++17 target `Photospider::photospider_ipc_client` exposes the
-move-only `ps::ipc::Client`. It performs typed `ping`, `version`, graph
-load/close/list, and graph/node/dependency-tree inspection calls. Graph loads
-retain the caller's safe Host session name but return a separate opaque daemon
-session id; disconnecting the client does not close that session.
+move-only `ps::ipc::Client` and complete `create_ipc_host(socket_path)` adapter.
+The Client provides the exact 55 typed version 1 methods for daemon identity,
+graph/inspection, polling compute and protected image metadata, bounded
+events/traces, cache, operation plugins, and schedulers. Graph loads retain the
+caller's safe Host session name as request metadata but return a separate opaque
+daemon session id; disconnecting the client does not close that session.
 
-This first protocol slice does not provide compute/image transfer,
-poll/cancel, scheduler/plugin/event APIs, `daemon.shutdown`, TCP, Windows
-transport, or `graph_cli --connect`. The CLI options and REPL commands in this
-manual remain local embedded-Host behavior and do not auto-connect to a daemon.
-See `docs/codebase-structure/IPC-Protocol-v1.md` for framing, errors, socket
-selection, and lifecycle details.
+The IPC Host implements all 53 current non-destructor Host virtuals through
+short-lived typed connections. Compute submits once, polls immediately and then
+at a 10/20/40/80/160/320/500-ms cadence without a synchronous total timeout;
+owned async workers are stopped, woken, interrupted, completed as Transport
+`client_stopped` (5), and joined during adapter destruction. Image mode
+currently performs strict same-user artifact validation and `pread`s an
+independent CPU copy before lease-aware release; a later slice replaces that
+consumer with read-only mmap ownership. Compute cancellation,
+`daemon.shutdown`, TCP, Windows transport, and `graph_cli --connect` remain
+unavailable. The CLI options and REPL commands in this manual remain local
+embedded-Host behavior and do not auto-connect to a daemon. See
+`docs/codebase-structure/IPC-Protocol-v1.md` for framing, errors, polling,
+output security, socket selection, and lifecycle details.
 
 ## 3. REPL Mode
 
@@ -361,10 +370,10 @@ Build and run focused IPC product tests on macOS/Linux:
 
 ```bash
 cmake --build build --target photospider_ipc_client \
-  photospider_ipc_server_internal photospiderd test_ipc_protocol \
+  photospider_ipc_server_internal photospiderd test_ipc_protocol test_ipc_host \
   test_ipc_daemon public_header_self_containment -j
 ctest --test-dir build --output-on-failure \
-  -R '^(FrameCodec|ProtocolEnvelope|IntegerCodec|ProtocolErrors|ProtocolParams|ProtocolGraphLoad|InspectionJson|SessionRegistry|ClientLifecycle|ClientResultValidation|IpcDaemon|StaticProductConsumerSmoke|IpcDisabledInstallSmoke|PublicHeaderSelfContainment)'
+  -R '^(FrameCodec|ProtocolEnvelope|IntegerCodec|ProtocolErrors|ProtocolParams|ProtocolGraphLoad|InspectionJson|SessionRegistry|ClientLifecycle|ClientResultValidation|IpcHost|IpcDaemon|StaticProductConsumerSmoke|IpcDisabledInstallSmoke|PublicHeaderSelfContainment)'
 ```
 
 Run registered CTest tests:

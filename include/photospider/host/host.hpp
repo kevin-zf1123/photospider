@@ -335,7 +335,7 @@ class PHOTOSPIDER_API Host {
    *         a compute failure status for existing sessions.
    * @throws std::bad_alloc if request processing, compute execution, backend-
    *         to-status translation, or copied result construction exhausts
-   * memory.
+   *         memory.
    * @note The embedded adapter admits the complete Kernel call/status mapping
    *       against concurrent close. Backend LastError diagnostics are used only
    *       after it has established that the requested graph session exists.
@@ -350,13 +350,17 @@ class PHOTOSPIDER_API Host {
    *         when scheduling cannot start.
    * @throws std::bad_alloc if request processing, async submission, backend-
    *         to-status translation, or copied result construction exhausts
-   * memory.
+   *         memory.
+   * @throws std::system_error if local worker creation or a worker-join
+   *         system/lifecycle invariant fails. The IPC worker is created before
+   *         submission, so creation failure has no remote side effect.
    * @note The embedded backend work item owns its exact failure category and
    *       message; the wrapper never reconstructs the result from mutable
    *       LastError state. Async scheduling/tracking is serialized with graph
    *       close, and close waits until the caller-visible promise is ready
-   * before releasing the runtime. Consuming the returned future may rethrow
-   *       std::bad_alloc from backend compute or async result translation.
+   *       before releasing the runtime. Consuming the returned future may
+   *       rethrow std::bad_alloc from backend compute or async result
+   *       translation.
    */
   virtual Result<std::future<OperationStatus>> compute_async(
       HostComputeRequest request) = 0;
@@ -371,7 +375,7 @@ class PHOTOSPIDER_API Host {
    *         for existing sessions.
    * @throws std::bad_alloc if request processing, compute/image execution,
    *         backend-to-status translation, or copied result construction
-   * exhausts memory.
+   *         exhausts memory.
    * @note The embedded adapter admits the complete image compute and result
    *       mapping against concurrent close, checks session existence before
    *       dispatch, and consults LastError only to distinguish handled failure

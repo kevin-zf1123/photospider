@@ -264,7 +264,10 @@ route. The installed typed IPC Client exposes all nine scheduler routes,
 aggregates the two frozen collection views with exact cursor/offset validation,
 and performs each direct mutation or trace/status observation RPC once. All
 nine routes remain members of the exact sorted 55-method
-`daemon.version.methods` inventory.
+`daemon.version.methods` inventory. The installed
+`create_ipc_host(socket_path)` maps the corresponding nine Host virtuals through
+fresh short-lived typed connections, preserves the same one-attempt mutation/
+observation policy, and never falls back to embedded scheduler state.
 
 ## Scheduler Dispatch Boundary
 

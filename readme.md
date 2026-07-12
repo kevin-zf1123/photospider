@@ -172,13 +172,19 @@ SIGTERM. It serializes same-socket startup with a persistent mode-`0600`
 `${socket}.lock` file; the file intentionally remains after shutdown so later
 instances synchronize on the same inode. Its typed installable client is
 `Photospider::photospider_ipc_client`, with headers under
-`photospider/ipc/`. Version 1 covers ping/version, graph load/close/list, and
-graph/node/dependency-tree inspection only. Compute, images, polling,
-cancellation, scheduler/plugin/event calls, `daemon.shutdown`, and
-`graph_cli --connect` are not implemented in this slice. `graph_cli` therefore
+`photospider/ipc/`. Version 1 exposes the exact 55-method typed Client surface,
+including graph/inspection, polling compute and protected image metadata,
+bounded events/traces, cache, operation-plugin, and scheduler calls. The
+installed `create_ipc_host(socket_path)` adapter implements all 53 current
+non-destructor Host virtuals with short-lived typed calls, joined async polling,
+exact status propagation, and deterministic `client_stopped` teardown. Its
+current secure image consumer strictly validates the artifact and `pread`s an
+independent CPU copy before lease-aware release; read-only mmap ownership is the
+next migration slice. Compute cancellation, `daemon.shutdown`, TCP, Windows
+transport, and `graph_cli --connect` remain unavailable. `graph_cli` therefore
 continues to use its embedded Host and all local commands below retain their
 existing meaning. See `docs/codebase-structure/IPC-Protocol-v1.md` for the wire,
-opaque-session, permission, and error contracts.
+opaque-session, polling, output-security, permission, and error contracts.
 
 The command-line parser currently supports graph loading, YAML output, tree
 printing, traversal display, cache clearing, config selection, and REPL entry.

@@ -242,8 +242,9 @@ struct ComputeSubmitRequest {
  * @throws std::bad_alloc when copied path or identifier storage cannot be
  *         allocated.
  * @note The value contains no pixel bytes, descriptor, mutable mapping,
- *       backend cache path, or image-library object. Task 4.3 consumes this
- *       metadata while the associated delivery lease protects result-to-open.
+ *       backend cache path, or image-library object. An IPC Host consumer owns
+ *       protected opening and image lifetime while the associated delivery
+ *       lease protects result-to-open.
  */
 struct OutputArtifactMetadata {
   /** @brief Stable daemon artifact identity. */
