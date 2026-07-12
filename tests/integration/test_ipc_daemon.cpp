@@ -2420,6 +2420,74 @@ TEST(IpcOutputFixtureDaemon,
   EXPECT_TRUE(std::filesystem::is_empty(output_base));
 }
 
+TEST(IpcObservationFixtureDaemon,
+     IndependentClientsShareEventDrainAndRetainTracePages) {
+  ScopedDaemonDirectory temp("ps-observation-clients", true);
+  const std::string socket_path = (temp.path() / "observe.sock").string();
+  ManualProcessClock clock(temp.path() / "clock.bin");
+  DaemonProcess daemon;
+  daemon.start(socket_path, true, {}, -1, "empty", clock.path().string());
+  ASSERT_TRUE(daemon.wait_ready(std::chrono::seconds(5)));
+  const IpcResult<GraphSessionSummary> loaded = load_fixture_session(
+      socket_path, temp.path() / "sessions", "observation_clients");
+  ASSERT_TRUE(loaded.status.ok) << loaded.status.message;
+
+  RawDaemonCallTask first_drain(
+      socket_path, "events.drain",
+      internal::Json{{"session_id", loaded.value.session_id.value},
+                     {"limit", 1}},
+      "event-client-left", std::chrono::seconds(3));
+  RawDaemonCallTask second_drain(
+      socket_path, "events.drain",
+      internal::Json{{"session_id", loaded.value.session_id.value},
+                     {"limit", 1}},
+      "event-client-right", std::chrono::seconds(3));
+  const internal::Json first_events = first_drain.join();
+  const internal::Json second_events = second_drain.join();
+  ASSERT_TRUE(first_events.contains("result")) << first_events.dump();
+  ASSERT_TRUE(second_events.contains("result")) << second_events.dump();
+  ASSERT_EQ(first_events["result"]["events"].size(), 1u);
+  ASSERT_EQ(second_events["result"]["events"].size(), 1u);
+  std::array<std::uint64_t, 2> event_sequences = {
+      first_events["result"]["events"][0]["sequence"].get<std::uint64_t>(),
+      second_events["result"]["events"][0]["sequence"].get<std::uint64_t>()};
+  std::sort(event_sequences.begin(), event_sequences.end());
+  EXPECT_EQ(event_sequences, (std::array<std::uint64_t, 2>{1, 2}));
+  EXPECT_EQ(first_events["result"]["dropped_count"].get<std::uint64_t>() +
+                second_events["result"]["dropped_count"].get<std::uint64_t>(),
+            1u);
+  EXPECT_NE(first_events["result"]["has_more"],
+            second_events["result"]["has_more"]);
+
+  const internal::Json trace_params{
+      {"session_id", loaded.value.session_id.value},
+      {"after_sequence", 0},
+      {"limit", 2}};
+  RawDaemonCallTask first_trace(socket_path, "scheduler.trace", trace_params,
+                                "trace-client-left", std::chrono::seconds(3));
+  RawDaemonCallTask second_trace(socket_path, "scheduler.trace", trace_params,
+                                 "trace-client-right", std::chrono::seconds(3));
+  const internal::Json left_trace = first_trace.join();
+  const internal::Json right_trace = second_trace.join();
+  ASSERT_TRUE(left_trace.contains("result")) << left_trace.dump();
+  ASSERT_TRUE(right_trace.contains("result")) << right_trace.dump();
+  EXPECT_EQ(left_trace["result"], right_trace["result"]);
+  ASSERT_EQ(left_trace["result"]["events"].size(), 2u);
+  EXPECT_EQ(left_trace["result"]["events"][0]["sequence"], 1);
+  EXPECT_EQ(left_trace["result"]["events"][1]["sequence"], 2);
+  EXPECT_EQ(left_trace["result"]["next_sequence"], 2);
+  EXPECT_FALSE(left_trace["result"]["has_more"].get<bool>());
+
+  const internal::Json closed = raw_daemon_call(
+      socket_path, "graph.close",
+      internal::Json{{"session_id", loaded.value.session_id.value}},
+      "observation-close");
+  ASSERT_TRUE(closed.contains("result")) << closed.dump();
+  daemon.stop();
+  EXPECT_TRUE(daemon.exited_successfully());
+  EXPECT_FALSE(std::filesystem::exists(socket_path));
+}
+
 TEST(IpcOutputFixtureDaemon,
      NonemptyImageReturnsExactProtectedMetadataAndStableLease) {
   ScopedDaemonDirectory temp("ps-output-value", true);

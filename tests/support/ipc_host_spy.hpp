@@ -276,6 +276,49 @@ class IpcHostSpy final : public Host {
   }
 
   /**
+   * @brief Configures the copied `events.drain` Host result.
+   * @param batch Exact bounded destructive-batch value returned by the spy.
+   * @return Nothing.
+   * @throws std::bad_alloc if copied event text or vector storage allocates.
+   * @note The spy does not independently drain this configured value; tests
+   *       replace it between calls when modeling successive destructive pages.
+   */
+  void set_compute_event_batch(ComputeEventBatch batch) {
+    std::lock_guard<std::mutex> lock(mutex_);
+    compute_event_batch_ = std::move(batch);
+    compute_event_batches_.clear();
+    next_compute_event_batch_ = 0;
+  }
+
+  /**
+   * @brief Configures successive destructive `events.drain` Host results.
+   * @param batches Ordered copied batches consumed one per successful call.
+   * @return Nothing.
+   * @throws std::bad_alloc if batch or event text storage cannot allocate.
+   * @note The queue is shared across calling server threads and consumed under
+   *       the spy mutex. After exhaustion, calls return the separately
+   *       configured fallback batch, which defaults to an empty initial page.
+   */
+  void set_compute_event_batches(std::vector<ComputeEventBatch> batches) {
+    std::lock_guard<std::mutex> lock(mutex_);
+    compute_event_batches_ = std::move(batches);
+    next_compute_event_batch_ = 0;
+  }
+
+  /**
+   * @brief Configures the copied `scheduler.trace` Host result.
+   * @param page Exact bounded non-destructive page returned by the spy.
+   * @return Nothing.
+   * @throws std::bad_alloc if copied trace vector storage allocates.
+   * @note Repeated calls return copies of the same configured page until a
+   *       test replaces it, matching non-destructive observation semantics.
+   */
+  void set_scheduler_trace_page(SchedulerTracePage page) {
+    std::lock_guard<std::mutex> lock(mutex_);
+    scheduler_trace_page_ = std::move(page);
+  }
+
+  /**
    * @brief Configures the copied image returned by image-mode compute.
    * @param image Exact public image value returned on Host success.
    * @return Nothing.
@@ -648,7 +691,16 @@ class IpcHostSpy final : public Host {
     IpcHostInvocation invocation = session_invocation("events.drain", session);
     invocation.first_node.value = static_cast<int>(limit);
     record(std::move(invocation));
-    return {status_for("events.drain"), ComputeEventBatch{}};
+    OperationStatus status = status_for("events.drain");
+    if (!status.ok) {
+      return {std::move(status), {}};
+    }
+    std::lock_guard<std::mutex> lock(mutex_);
+    if (next_compute_event_batch_ < compute_event_batches_.size()) {
+      return {std::move(status),
+              compute_event_batches_[next_compute_event_batch_++]};
+    }
+    return {std::move(status), compute_event_batch_};
   }
 
   /** @copydoc Host::scheduler_trace */
@@ -660,7 +712,7 @@ class IpcHostSpy final : public Host {
     invocation.first_node.value = static_cast<int>(limit);
     invocation.text = std::to_string(after_sequence);
     record(std::move(invocation));
-    return {status_for("scheduler.trace"), SchedulerTracePage{}};
+    return configured_result("scheduler.trace", scheduler_trace_page_);
   }
 
   /** @copydoc Host::clear_cache */
@@ -1003,6 +1055,18 @@ class IpcHostSpy final : public Host {
 
   /** @brief Configured nested last-error diagnostic output. */
   OperationStatus last_error_;
+
+  /** @brief Configured bounded compute-event drain result. */
+  ComputeEventBatch compute_event_batch_;
+
+  /** @brief Ordered destructive batches consumed by successful Host calls. */
+  std::vector<ComputeEventBatch> compute_event_batches_;
+
+  /** @brief Index of the next configured destructive batch. */
+  std::size_t next_compute_event_batch_ = 0;
+
+  /** @brief Configured bounded non-destructive scheduler-trace result. */
+  SchedulerTracePage scheduler_trace_page_;
 
   /** @brief Configured image-mode compute output. */
   ImageBuffer compute_image_;

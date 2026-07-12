@@ -32,7 +32,7 @@ Forcing IPC on for any other CMake system name fails configuration.
 7. `inspect.node`
 8. `inspect.dependency_tree`
 
-The request router also accepts these 31 additional daemon-routed typed
+The request router also accepts these 33 additional daemon-routed typed
 methods:
 
 1. `cache.cache_all_nodes`
@@ -51,28 +51,30 @@ methods:
 14. `dirty.begin`
 15. `dirty.end`
 16. `dirty.update`
-17. `graph.clear`
-18. `graph.node_yaml.get`
-19. `graph.node_yaml.set`
-20. `graph.reload`
-21. `graph.save`
-22. `inspect.ending_nodes`
-23. `inspect.node_ids`
-24. `inspect.roi_backward`
-25. `inspect.roi_forward`
-26. `inspect.compute_planning`
-27. `inspect.dirty_region`
-28. `inspect.recent_compute_planning`
-29. `inspect.traversal_details`
-30. `inspect.traversal_orders`
-31. `inspect.trees_containing_node`
+17. `events.drain`
+18. `graph.clear`
+19. `graph.node_yaml.get`
+20. `graph.node_yaml.set`
+21. `graph.reload`
+22. `graph.save`
+23. `inspect.ending_nodes`
+24. `inspect.node_ids`
+25. `inspect.roi_backward`
+26. `inspect.roi_forward`
+27. `inspect.compute_planning`
+28. `inspect.dirty_region`
+29. `inspect.recent_compute_planning`
+30. `inspect.traversal_details`
+31. `inspect.traversal_orders`
+32. `inspect.trees_containing_node`
+33. `scheduler.trace`
 
 The installed typed `ps::ipc::Client` exposes calls only for the eight-name
-metadata subset and has no public raw-JSON escape hatch. The 31 additional
+metadata subset and has no public raw-JSON escape hatch. The 33 additional
 schemas are daemon request-router behavior. Of those methods,
 `compute.status`, `compute.result`, and `compute.release` operate only on the
 daemon job registry. `compute.submit` admits a registry job whose worker later
-performs exactly one matching Host compute call. The other 27 methods route
+performs exactly one matching Host compute call. The other 29 methods route
 their direct or first-page request through matching Host operations; a stable
 collection continuation reads only its frozen snapshot registry record.
 
@@ -80,10 +82,12 @@ Version 1 now exposes daemon-owned compute-job submission, polling, terminal
 result, release, and protected metadata-only image delivery at the router
 boundary. Image bytes stay in private artifacts; a terminal nonempty image
 result returns only the specified artifact metadata under one stable delivery
-lease. Version 1 exposes no compute cancellation, scheduler/plugin/event route,
-`daemon.shutdown`, TCP, Windows named pipe, or `graph_cli --connect`. The
-existing `graph_cli` continues to create an embedded Host and keeps its local
-command semantics.
+lease. Version 1 exposes no compute cancellation, scheduler control, plugin
+route, `daemon.shutdown`, TCP, Windows named pipe, or `graph_cli --connect`.
+The bounded `events.drain` and `scheduler.trace` observation routes are
+available only at the daemon router boundary in this slice. The existing
+`graph_cli` continues to create an embedded Host and keeps its local command
+semantics.
 
 ## Transport and Frame
 
@@ -199,6 +203,8 @@ Protocol result-shape failure.
 | General wire page | 4,096 entries |
 | One stable collection snapshot | 262,144 entries and 64 MiB |
 | Active collection snapshots | 64 records and 256 MiB total |
+| Compute-event ring | 8,192 entries per session |
+| Scheduler-trace ring | 65,536 entries per session |
 
 String limits apply after JSON decoding and to every known string member.
 Known inbound array and page counts are checked before session resolution or
@@ -455,6 +461,91 @@ node id, unknown returned enum, or invalid returned UTF-8 is a daemon
 `internal_error`. These failures publish no partial result and never cause a
 second Host invocation. Resource exhaustion remains exceptional and is not
 rewritten into a status.
+
+## Bounded Event and Scheduler Trace Observations
+
+`events.drain` requires an opaque `session_id` and exact integer `limit` in
+`1..1024`. It invokes `Host::drain_compute_events` exactly once under the
+common Host mutex. The result is:
+
+```json
+{
+  "session_id": "32-lowercase-hex",
+  "events": [
+    {
+      "sequence": 1,
+      "node_id": 7,
+      "name": "node",
+      "source": "compute",
+      "elapsed_ms": 1.25
+    }
+  ],
+  "next_sequence": 2,
+  "has_more": false,
+  "dropped_count": 0
+}
+```
+
+The Host event API is destructive and applies its limit before removal. A
+successful call removes only the returned oldest page and atomically returns
+and resets the shared per-session drop count, including on an empty page.
+Independent clients therefore share one drain position and one drop counter;
+an invalid call changes neither. `has_more` is the post-removal state observed
+under the ring lock. `next_sequence` is one past the last returned event, the
+next publication sequence on an empty pre-exhaustion page, or `UINT64_MAX`
+after exhaustion with no retained later event.
+
+Before event name or source text enters retained storage, each value must be
+canonical UTF-8 and at most 1,024 bytes. Invalid or oversized text drops the
+whole publication without truncation or repair. While a valid sequence
+remains, that attempt consumes it and increments the shared drop count exactly
+once. A full ring similarly consumes the sequence, evicts exactly the oldest
+event, retains the newest event, and increments once. After exhaustion, only
+the exhaustion path increments once. All increments saturate at `UINT64_MAX`.
+
+`scheduler.trace` requires `session_id`, exact unsigned `after_sequence`, and
+an exact integer `limit` in `1..4096`. Zero starts at the oldest retained trace;
+the router invokes `Host::scheduler_trace` exactly once and returns:
+
+```json
+{
+  "session_id": "32-lowercase-hex",
+  "events": [
+    {
+      "sequence": 9,
+      "epoch": 3,
+      "node_id": -1,
+      "worker_id": -1,
+      "action": "rethrow_exception",
+      "timestamp_us": 1234
+    }
+  ],
+  "next_sequence": 9,
+  "has_more": false,
+  "dropped_count": 8
+}
+```
+
+Trace pages are non-destructive and contain only events whose sequence is
+greater than the exclusive cursor. A nonempty pre-terminal page returns its
+last sequence; an empty pre-exhaustion page preserves the input cursor. Only a
+page that observes the final valid sequence `UINT64_MAX-1` with no later entry,
+or an exhausted empty observation, returns the `UINT64_MAX` sentinel with
+`has_more:false`. `dropped_count` is the exact saturating sum of missing
+retained history after the cursor and unsequenced attempts after exhaustion.
+Repeating a cursor can therefore reproduce the same retained page, while
+advancing through `next_sequence` loses or duplicates no retained event.
+
+Each returned trace event uses a nonnegative `node_id` and `worker_id` when a
+specific node or worker applies. `-1` is the sole sentinel for no specific
+node or worker; any value below `-1` is malformed Host output. The router
+rejects the complete response as daemon `internal_error` after that one Host
+call and never retries the observation.
+
+There is no `max_entries` field in either method. Unknown fields remain
+forward-compatible but cannot replace a missing or invalid known `limit`.
+Both routes use the Host's bounded observation APIs directly and never reserve
+a stable collection snapshot or create a daemon cursor.
 
 ## Compute Job Lifecycle
 
@@ -859,10 +950,10 @@ cmake -S . -B build -DPHOTOSPIDER_BUILD_IPC=ON -DBUILD_TESTING=ON
 cmake --build build --target photospider_ipc_client \
   photospider_ipc_server_internal photospiderd test_ipc_protocol \
   test_compute_request_registry test_collection_snapshot_registry \
-  test_output_store test_ipc_daemon \
+  test_output_store test_event_stream_boundaries test_ipc_daemon \
   public_header_self_containment -j
 ctest --test-dir build --output-on-failure \
-  -R '^(FrameCodec|ProtocolEnvelope|IntegerCodec|ProtocolErrors|ProtocolParams|ProtocolGraphLoad|ProtocolGraphClose|InspectionJson|SessionRegistry|ComputeRequestRegistry|CollectionSnapshotRegistry|OutputStore|ClientLifecycle|ClientResultValidation|IpcDaemon|StaticProductConsumerSmoke|IpcDisabledInstallSmoke|PublicHeaderSelfContainment)'
+  -R '^(FrameCodec|ProtocolEnvelope|IntegerCodec|ProtocolErrors|ProtocolParams|ProtocolGraphLoad|ProtocolGraphClose|InspectionJson|SessionRegistry|ComputeRequestRegistry|CollectionSnapshotRegistry|OutputStore|ComputeEventRing|SchedulerTraceRing|ClientLifecycle|ClientResultValidation|IpcDaemon|IpcObservationFixtureDaemon|StaticProductConsumerSmoke|IpcDisabledInstallSmoke|PublicHeaderSelfContainment)'
 ```
 
 `StaticProductConsumerSmoke` verifies the installed backend plus a second
@@ -871,8 +962,8 @@ install has no IPC forwarder, header, target, archive, or daemon while the
 embedded consumer remains usable. Real-process tests have CTest timeouts and
 bounded SIGTERM/SIGKILL/waitpid cleanup. `test_ipc_daemon` starts the product
 `photospiderd` for embedded-Host behavior and also starts the non-installed
-`ipc_output_fixture_daemon` as a separate process for deterministic image
-outcomes. The fixture still uses the production internal
+`ipc_output_fixture_daemon` as a separate process for deterministic image and
+bounded-observation outcomes. The fixture still uses the production internal
 Server/router/OutputStore/Unix-socket/worker stack; it is only a build
 dependency of the test, has no independent CTest entry, and does not change
 product startup or seed plugins early. A fixture-only protected fixed-width

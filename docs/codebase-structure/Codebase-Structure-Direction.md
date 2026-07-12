@@ -20,8 +20,9 @@ The goals are:
 The current repository now has the public Host seam, installable static
 product, migrated CLI application tree, role-owned backend source tree,
 explicit production-plugin homes, unit/integration test ownership, and the
-macOS/Linux version 1 daemon/IPC graph, inspection, polling-compute, and
-protected image-output router slice. The complete installed IPC Host, remaining
+macOS/Linux version 1 daemon/IPC graph, inspection, polling-compute, protected
+image-output, and bounded event/trace observation router slice. The complete
+installed IPC Host, remaining
 Host method families, final internal-target shape, and transitional plugin SDK
 still need later migration phases.
 
@@ -376,6 +377,8 @@ Process responsibilities:
   route each through exactly one matching Host call
 - own bounded polling compute jobs and materialize successful nonempty image
   results as protected metadata-only artifacts with stable delivery leases
+- route bounded destructive compute-event drains and non-destructive scheduler
+  trace pages directly through the matching Host observation APIs
 - enforce per-user directory/socket permissions and safe live/stale handling
 - translate SIGINT/SIGTERM through a self-pipe and perform deterministic worker,
   session, Host, and socket cleanup
@@ -449,9 +452,9 @@ Method groups and current wire availability:
 | dirty | `dirty.begin`, `dirty.update`, `dirty.end` | Implemented through one matching Host lifecycle mutation and return the copied dirty-region snapshot; the complete compact response size is preflighted before result-DOM allocation. |
 | cache | `cache.clear_all`, `cache.clear_drive`, `cache.clear_memory`, `cache.cache_all_nodes`, `cache.free_transient`, `cache.synchronize_disk` | Implemented as status-only Host calls; no backend cache handle or path enters a result. |
 | compute | `compute.submit`, `compute.status`, `compute.result`, `compute.release`, `compute.timing`, `compute.last_io_time`, `compute.last_error` | Polling jobs and diagnostics are routed. Submit/status/result use stable `{compute_id,session_id,state,cancellable,status,output}` values. Submit, status, status-mode result, empty-image result, and failed result keep `output` null. A terminal nonempty image result revalidates the protected artifact, refreshes one stable 60-second delivery lease, and returns the specified metadata object. Terminal release atomically returns `{compute_id,released:true}`, accepts an optional exact `delivery_id`, and can release its matching orphaned lease after normal job removal. Timing preflights its aggregate compact response size; last error is nested diagnostic data. |
-| scheduler | scheduler control and trace names | No scheduler method is routed or advertised. |
+| scheduler | `scheduler.trace` plus scheduler control names | Bounded trace paging is routed through Host and remains unadvertised until the exact task-3.8 table lands. Scheduler control is not routed yet. |
 | plugins | operation-plugin control and views | No plugin method is routed or advertised; process ownership remains with Host. |
-| events | bounded compute-event drain | No event method is routed or advertised. |
+| events | `events.drain` | Bounded destructive event draining is routed through Host and remains unadvertised until the exact task-3.8 table lands. |
 
 Image payload rule:
 
@@ -585,10 +588,11 @@ separate extension-boundary change.
 7. **In-progress IPC version 1 complete-Host slice:** The installable typed
    client still exposes the original bounded graph/inspection subset. The
    non-installed server additionally implements graph mutation, remaining
-   inspection, polling compute, and protected metadata-only image results with
-   stable delivery leases. Remaining event/plugin/scheduler routes and the
-   complete installed IPC Host belong to later issue-#37 tasks; cancellation
-   remains explicitly out of scope.
+   inspection, polling compute, protected metadata-only image results with
+   stable delivery leases, bounded destructive compute events, and bounded
+   non-destructive scheduler traces. Remaining plugin/scheduler-control routes
+   and the complete installed IPC Host belong to later issue-#37 tasks;
+   cancellation remains explicitly out of scope.
 8. **Separate plugin-boundary work:** Tighten plugin SDK in issue #38.
    - Replace direct plugin dependency on full `Node` and global registry symbols
      with a narrow operation contract and host-provided registration table.
@@ -640,9 +644,10 @@ For any implementation change following this document:
 - Keep the non-installed `ipc_output_fixture_daemon` only as a dependency of
   that integration test, not as its own CTest entry. It runs the real internal
   Server/router/OutputStore/Unix-socket/worker stack in a separate process with
-  a deterministic test Host, so protected image delivery and restart cleanup
-  are covered without changing `photospiderd` startup or implementing a later
-  plugin route early. Its fixture-only CLI accepts a protected fixed-width
+  a deterministic test Host, so protected image delivery, bounded observation
+  multiclient behavior, and restart cleanup are covered without changing
+  `photospiderd` startup or implementing a later plugin route early. Its
+  fixture-only CLI accepts a protected fixed-width
   monotonic-clock control file and supplies the private internal Server overload
   with small existing snapshot/job/output limits, clocks, and id generators;
   none of those controls belong to `photospiderd`, its environment, or the wire.

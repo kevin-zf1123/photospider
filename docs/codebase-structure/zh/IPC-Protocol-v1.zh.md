@@ -30,7 +30,7 @@ header；在其他任何 CMake system name 下强制开启 IPC 会使 configure 
 7. `inspect.node`
 8. `inspect.dependency_tree`
 
-Request router 还接受以下 31 个额外的 daemon-routed typed method：
+Request router 还接受以下 33 个额外的 daemon-routed typed method：
 
 1. `cache.cache_all_nodes`
 2. `cache.clear_all`
@@ -48,35 +48,38 @@ Request router 还接受以下 31 个额外的 daemon-routed typed method：
 14. `dirty.begin`
 15. `dirty.end`
 16. `dirty.update`
-17. `graph.clear`
-18. `graph.node_yaml.get`
-19. `graph.node_yaml.set`
-20. `graph.reload`
-21. `graph.save`
-22. `inspect.ending_nodes`
-23. `inspect.node_ids`
-24. `inspect.roi_backward`
-25. `inspect.roi_forward`
-26. `inspect.compute_planning`
-27. `inspect.dirty_region`
-28. `inspect.recent_compute_planning`
-29. `inspect.traversal_details`
-30. `inspect.traversal_orders`
-31. `inspect.trees_containing_node`
+17. `events.drain`
+18. `graph.clear`
+19. `graph.node_yaml.get`
+20. `graph.node_yaml.set`
+21. `graph.reload`
+22. `graph.save`
+23. `inspect.ending_nodes`
+24. `inspect.node_ids`
+25. `inspect.roi_backward`
+26. `inspect.roi_forward`
+27. `inspect.compute_planning`
+28. `inspect.dirty_region`
+29. `inspect.recent_compute_planning`
+30. `inspect.traversal_details`
+31. `inspect.traversal_orders`
+32. `inspect.trees_containing_node`
+33. `scheduler.trace`
 
 已安装 typed `ps::ipc::Client` 只暴露八名称 metadata 子集的 call，且没有 public raw-JSON
-escape hatch。新增 31 个 schema 属 daemon request-router behavior。其中
+escape hatch。新增 33 个 schema 属 daemon request-router behavior。其中
 `compute.status`、`compute.result` 与 `compute.release` 只操作 daemon job registry；
 `compute.submit` 会接纳一个 registry job，随后由其 worker 恰好执行一次匹配的 Host compute
-call。另外 27 个 method 会让 direct request 或 first-page request 经由匹配的 Host operation；
+call。另外 29 个 method 会让 direct request 或 first-page request 经由匹配的 Host operation；
 stable collection continuation 只读取其 frozen snapshot registry record。
 
 版本 1 现在会在 router boundary 暴露 daemon-owned compute-job submit、polling、terminal
 result、release 与 protected metadata-only image delivery。Image byte 会保留在 private
 artifact 中；terminal nonempty image result 只会在一个 stable delivery lease 下返回规定的
-artifact metadata。版本 1 不暴露 compute cancellation、scheduler/plugin/event route、
-`daemon.shutdown`、TCP、Windows named pipe 或 `graph_cli --connect`。现有 `graph_cli`
-继续创建 embedded Host，本地命令语义不变。
+artifact metadata。版本 1 不暴露 compute cancellation、scheduler control、plugin route、
+`daemon.shutdown`、TCP、Windows named pipe 或 `graph_cli --connect`。本切片中的 bounded
+`events.drain` 与 `scheduler.trace` observation route 只在 daemon router boundary 可用。
+现有 `graph_cli` 继续创建 embedded Host，本地命令语义不变。
 
 ## Transport 与 Frame
 
@@ -180,6 +183,8 @@ malformed opaque id 属本地 Protocol result-shape failure。
 | General wire page | 4,096 entries |
 | 单个 stable collection snapshot | 262,144 entries 且 64 MiB |
 | Active collection snapshot | 64 records 且总计 256 MiB |
+| Compute-event ring | 每个 session 8,192 entries |
+| Scheduler-trace ring | 每个 session 65,536 entries |
 
 String 上限会在 JSON decoding 后对每个已知 string member 分别应用。已知入站 array/page
 count 会在 session 解析或 Host access 前检查；未知 member 只能在 JSON parser 将其实体化后
@@ -395,6 +400,81 @@ collection 超出 byte/count limit 时，会在单次 Host call 后成为 `respo
 negative node id、unknown enum 或 invalid UTF-8 时成为 daemon `internal_error`。这些 failure
 不发布 partial result，也不会触发第二次 Host invocation。Resource exhaustion 保持 exceptional，
 不会重写成 status。
+
+## 有界 Event 与 Scheduler Trace Observation
+
+`events.drain` 要求 opaque `session_id`，以及 `1..1024` 内的精确 integer `limit`。它会在公共
+Host mutex 下恰好调用一次 `Host::drain_compute_events`。Result 为：
+
+```json
+{
+  "session_id": "32-lowercase-hex",
+  "events": [
+    {
+      "sequence": 1,
+      "node_id": 7,
+      "name": "node",
+      "source": "compute",
+      "elapsed_ms": 1.25
+    }
+  ],
+  "next_sequence": 2,
+  "has_more": false,
+  "dropped_count": 0
+}
+```
+
+Host event API 是 destructive 的，并在 removal 前应用 limit。Successful call 只移除返回的最旧
+page，并且会原子返回并清零 shared per-session drop count，空 page 也遵守这一规则。因此，独立
+client 共享一个 drain position 与一个 drop counter；invalid call 不改变两者。`has_more` 是在
+ring lock 下观察到的 post-removal state。`next_sequence` 是最后 returned event 加一；
+pre-exhaustion 空 page 使用 next publication sequence；exhaustion 后没有 retained later event
+时使用 `UINT64_MAX`。
+
+Event name 或 source text 进入 retained storage 前，每个 value 都必须是 canonical UTF-8，且最多
+1,024 bytes。Invalid 或 oversized text 会 whole-drop publication，不 truncate 或 repair。仍有
+valid sequence 时，该尝试会消费 sequence，并让 shared drop count 恰好递增一次。Full ring 同样
+会消费 sequence、精确 evict oldest event、retain newest event，并递增一次。Exhaustion 后只有
+exhaustion path 递增一次。所有递增都在 `UINT64_MAX` 饱和。
+
+`scheduler.trace` 要求 `session_id`、精确 unsigned `after_sequence`，以及 `1..4096` 内的精确
+integer `limit`。Zero 从 oldest retained trace 开始；router 会恰好调用一次
+`Host::scheduler_trace`，并返回：
+
+```json
+{
+  "session_id": "32-lowercase-hex",
+  "events": [
+    {
+      "sequence": 9,
+      "epoch": 3,
+      "node_id": -1,
+      "worker_id": -1,
+      "action": "rethrow_exception",
+      "timestamp_us": 1234
+    }
+  ],
+  "next_sequence": 9,
+  "has_more": false,
+  "dropped_count": 8
+}
+```
+
+Trace page 是 non-destructive 的，并且只包含 sequence 大于 exclusive cursor 的 event。Nonempty
+pre-terminal page 返回其最后 sequence；pre-exhaustion 空 page 保留 input cursor。只有观察到最后
+valid sequence `UINT64_MAX-1` 且没有 later entry 的 page，或 exhausted empty observation，才会
+返回 `UINT64_MAX` sentinel 与 `has_more:false`。`dropped_count` 是 cursor 之后 missing retained
+history 与 exhaustion 后 unsequenced attempt 的精确饱和和。因此，重复 cursor 可以重现同一个
+retained page；通过 `next_sequence` 前进不会丢失或重复 retained event。
+
+当某个具体 node 或 worker 适用时，每个 returned trace event 的 `node_id` 与 `worker_id` 都是
+非负值。`-1` 是表示没有具体 node 或 worker 的唯一 sentinel；任何小于 `-1` 的值都是 malformed
+Host output。Router 会在这一次 Host call 后把整个 response 拒绝为 daemon `internal_error`，且
+绝不重试该 observation。
+
+这两个 method 都没有 `max_entries` field。Unknown field 保持 forward-compatible，但不能替代
+缺失或非法的 known `limit`。两个 route 都直接使用 Host 的 bounded observation API，绝不 reserve
+stable collection snapshot，也不创建 daemon cursor。
 
 ## Compute Job Lifecycle
 
@@ -723,10 +803,10 @@ cmake -S . -B build -DPHOTOSPIDER_BUILD_IPC=ON -DBUILD_TESTING=ON
 cmake --build build --target photospider_ipc_client \
   photospider_ipc_server_internal photospiderd test_ipc_protocol \
   test_compute_request_registry test_collection_snapshot_registry \
-  test_output_store test_ipc_daemon \
+  test_output_store test_event_stream_boundaries test_ipc_daemon \
   public_header_self_containment -j
 ctest --test-dir build --output-on-failure \
-  -R '^(FrameCodec|ProtocolEnvelope|IntegerCodec|ProtocolErrors|ProtocolParams|ProtocolGraphLoad|ProtocolGraphClose|InspectionJson|SessionRegistry|ComputeRequestRegistry|CollectionSnapshotRegistry|OutputStore|ClientLifecycle|ClientResultValidation|IpcDaemon|StaticProductConsumerSmoke|IpcDisabledInstallSmoke|PublicHeaderSelfContainment)'
+  -R '^(FrameCodec|ProtocolEnvelope|IntegerCodec|ProtocolErrors|ProtocolParams|ProtocolGraphLoad|ProtocolGraphClose|InspectionJson|SessionRegistry|ComputeRequestRegistry|CollectionSnapshotRegistry|OutputStore|ComputeEventRing|SchedulerTraceRing|ClientLifecycle|ClientResultValidation|IpcDaemon|IpcObservationFixtureDaemon|StaticProductConsumerSmoke|IpcDisabledInstallSmoke|PublicHeaderSelfContainment)'
 ```
 
 `StaticProductConsumerSmoke` 验证 installed backend 与第二个 client-only consumer；
@@ -734,7 +814,7 @@ ctest --test-dir build --output-on-failure \
 或 daemon，同时 embedded consumer 仍可用。Real-process test 有 CTest timeout 与 bounded
 SIGTERM/SIGKILL/waitpid cleanup。`test_ipc_daemon` 会启动产品 `photospiderd` 以验证 embedded-Host
 行为，也会把 non-installed `ipc_output_fixture_daemon` 作为独立进程启动，以提供 deterministic
-image outcome。该 fixture 仍使用 production internal
+image 与 bounded-observation outcome。该 fixture 仍使用 production internal
 Server/router/OutputStore/Unix-socket/worker stack；它只是 test 的 build dependency，不拥有独立
 CTest entry，也不会改变 product startup 或提前 seed plugin。Fixture-only protected fixed-width
 control file 提供 cross-process manual monotonic clock；private internal Server composition overload

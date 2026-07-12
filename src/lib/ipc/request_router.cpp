@@ -223,6 +223,18 @@ bool is_compute_method(std::string_view method) noexcept {
 }
 
 /**
+ * @brief Matches bounded Host observation methods routed by task 3.5.
+ * @param method Exact decoded request method.
+ * @return True only for compute-event drain or scheduler-trace paging.
+ * @throws Nothing.
+ * @note This private matcher does not change the separately maintained
+ *       `daemon.version.methods` advertisement table.
+ */
+bool is_observation_method(std::string_view method) noexcept {
+  return method == "events.drain" || method == "scheduler.trace";
+}
+
+/**
  * @brief Decodes one required opaque compute-job identity.
  * @param params Typed method params object.
  * @param compute_id Receives the validated daemon job identity.
@@ -2335,6 +2347,73 @@ std::optional<std::string> RequestRouter::route_session_control_method(
                          "session-control dispatch invariant failed"));
 }
 
+/** @copydoc RequestRouter::route_observation_method */
+std::optional<std::string> RequestRouter::route_observation_method(
+    const std::string& id, const std::string& method,
+    const RoutedParams& routed_params) {
+  if (!is_observation_method(method)) {
+    return std::nullopt;
+  }
+  const Json& params = routed_params.value;
+
+  IpcSessionId session_id;
+  std::size_t limit = 0;
+  uint64_t after_sequence = 0;
+  const std::size_t minimum_limit = method == "events.drain"
+                                        ? kComputeEventDrainMinLimit
+                                        : kSchedulerTraceMinLimit;
+  const std::size_t maximum_limit = method == "events.drain"
+                                        ? kComputeEventDrainMaxLimit
+                                        : kSchedulerTraceMaxLimit;
+  if (!read_session_id(params, &session_id) || !params.contains("limit") ||
+      !decode_page_limit(params["limit"], minimum_limit, maximum_limit,
+                         &limit)) {
+    return bounded_error(
+        id, invalid_params(method + " requires a valid session_id and limit"));
+  }
+  if (method == "scheduler.trace" &&
+      (!params.contains("after_sequence") ||
+       !decode_integer(params["after_sequence"], &after_sequence))) {
+    return bounded_error(
+        id, invalid_params(
+                "scheduler.trace requires an exact unsigned after_sequence"));
+  }
+
+  IpcResult<SessionRegistry::HostCallAdmission> admission =
+      registry_.admit_host_call(session_id);
+  if (!admission.status.ok) {
+    return bounded_error(id, admission.status);
+  }
+  const GraphSessionId& host_session = admission.value.host_session();
+
+  if (method == "events.drain") {
+    Result<ComputeEventBatch> routed;
+    {
+      std::lock_guard<std::mutex> host_lock(host_mutex_);
+      routed = host_.drain_compute_events(host_session, limit);
+    }
+    if (!routed.status.ok) {
+      return bounded_error(id, graph_status(routed.status));
+    }
+    return encode_routed_value(id, [&] {
+      return encode_compute_event_batch(session_id, routed.value, limit);
+    });
+  }
+
+  Result<SchedulerTracePage> routed;
+  {
+    std::lock_guard<std::mutex> host_lock(host_mutex_);
+    routed = host_.scheduler_trace(host_session, after_sequence, limit);
+  }
+  if (!routed.status.ok) {
+    return bounded_error(id, graph_status(routed.status));
+  }
+  return encode_routed_value(id, [&] {
+    return encode_scheduler_trace_page(session_id, after_sequence, routed.value,
+                                       limit);
+  });
+}
+
 /** @copydoc RequestRouter::route_compute_method */
 std::optional<std::string> RequestRouter::route_compute_method(
     const std::string& id, const std::string& method,
@@ -2586,6 +2665,11 @@ std::string RequestRouter::route(const std::string& payload) {
 
     if (std::optional<std::string> routed =
             route_compute_method(id, method, RoutedParams{params})) {
+      return std::move(*routed);
+    }
+
+    if (std::optional<std::string> routed =
+            route_observation_method(id, method, RoutedParams{params})) {
       return std::move(*routed);
     }
 
