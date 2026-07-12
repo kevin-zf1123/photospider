@@ -715,7 +715,17 @@ class Server::Impl {
       return failure_status(OperationErrorDomain::Daemon, kInternalErrorCode,
                             "internal_error", std::move(message));
     }
-    OperationStatus runtime_started = router_.start_runtime();
+    OperationStatus runtime_started;
+    try {
+      runtime_started =
+          router_.start_runtime(socket_path_, instance_lock_.get());
+    } catch (...) {
+      listener_.reset();
+      socket_cleanup_.reset();
+      instance_lock_.reset();
+      socket_path_.clear();
+      throw;
+    }
     if (!runtime_started.ok) {
       listener_.reset();
       socket_cleanup_.reset();

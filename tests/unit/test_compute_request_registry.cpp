@@ -321,7 +321,9 @@ ComputeRequestSnapshot wait_for_terminal(ComputeRequestRegistry* registry,
  * @throws std::bad_alloc if function storage cannot be allocated.
  */
 ComputeRequestRegistry::OutputPublisher empty_output_publisher() {
-  return [](ImageBuffer) { return ComputeOutputPublication{ok_status(), {}}; };
+  return [](const ComputeRequestId&, ImageBuffer) {
+    return ComputeOutputPublication{ok_status(), {}};
+  };
 }
 
 TEST(ComputeRequestRegistryConstruction, RejectsInvalidPolicyAndCallbacks) {
@@ -555,7 +557,7 @@ TEST(ComputeRequestRegistryExecution,
         image.width = 1;
         return Result<ImageBuffer>{ok_status(), std::move(image)};
       },
-      [&](ImageBuffer) {
+      [&](const ComputeRequestId&, ImageBuffer) {
         const int publication = ++publications;
         if (publication == 1) {
           return ComputeOutputPublication{
@@ -860,12 +862,13 @@ TEST(ComputeRequestRegistryOutput,
         image.width = 1;
         return Result<ImageBuffer>{ok_status(), std::move(image)};
       },
-      [&](ImageBuffer) {
+      [&](const ComputeRequestId&, ImageBuffer) {
         const int sequence = ++published;
         return ComputeOutputPublication{
             ok_status(),
-            ComputeOutputOwnership("output-" + std::to_string(sequence),
-                                   [&] { ++cleaned; })};
+            ComputeOutputOwnership(
+                "output-" + std::to_string(sequence),
+                [&](const std::optional<std::string>&) { ++cleaned; })};
       },
       limits, [clock] { return clock->now(); },
       [&] { return compute_ids.next(); });
@@ -1245,10 +1248,12 @@ TEST(ComputeRequestRegistryRace, ReleaseAndExpiryCleanOutputOnce) {
       [](const HostComputeRequest&) {
         return Result<ImageBuffer>{ok_status(), {}};
       },
-      [&](ImageBuffer) {
+      [&](const ComputeRequestId&, ImageBuffer) {
         return ComputeOutputPublication{
             ok_status(),
-            ComputeOutputOwnership("race-output", [&] { ++cleaned; })};
+            ComputeOutputOwnership(
+                "race-output",
+                [&](const std::optional<std::string>&) { ++cleaned; })};
       },
       limits, [clock] { return clock->now(); },
       [&] { return compute_ids.next(); });

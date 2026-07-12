@@ -99,8 +99,10 @@ class Server {
    *         Unix-socket address or another startup invariant fails.
    * @throws std::system_error if a worker thread cannot be created.
    * @note Shutdown stops admission, closes the listener, wakes and joins
-   *       clients, drains/joins compute, releases terminal outputs, closes Host
-   *       sessions, then removes only the socket inode created by this run.
+   *       clients, drains/joins compute, waits protected output leases, closes
+   *       Host sessions, then removes only the socket inode created by this
+   *       run. Output-store restart cleanup occurs while the lifecycle lock is
+   *       held and before client admission.
    */
   OperationStatus run(const ServerOptions& options, int stop_fd);
 

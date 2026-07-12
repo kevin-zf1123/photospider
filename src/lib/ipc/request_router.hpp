@@ -4,6 +4,7 @@
 #include <string>
 
 #include "ipc/compute_request_registry.hpp"
+#include "ipc/output_store.hpp"
 #include "ipc/session_registry.hpp"
 #include "photospider/host/host.hpp"
 
@@ -21,9 +22,10 @@ namespace ps::ipc::internal {
  *         allocated.
  * @throws std::runtime_error if the operating-system instance-id entropy
  *         source fails.
- * @note The router owns session mappings and the private joined compute
- *       registry but borrows Host for a lifetime that must exceed the router
- *       and server. Compute starts only through `start_runtime()`.
+ * @note The router owns session mappings, the protected OutputStore, and the
+ *       private joined compute registry, but borrows Host for a lifetime that
+ *       must exceed the router and server. Runtime state starts only through
+ *       `start_runtime()`.
  */
 class RequestRouter {
  public:
@@ -34,8 +36,8 @@ class RequestRouter {
    * @param service_version Reproducible CMake project version string.
    * @throws std::bad_alloc if metadata allocation fails.
    * @throws std::runtime_error if instance-id entropy fails.
-   * @note The compute registry is constructed stopped; the current method
-   *       inventory remains the exact eight names defined by protocol v1.
+   * @note OutputStore and compute registry are constructed stopped; the current
+   *       wire inventory remains the exact eight names defined by protocol v1.
    */
   RequestRouter(Host& host, std::string service_version);
 
@@ -78,20 +80,25 @@ class RequestRouter {
   std::string route(const std::string& payload);
 
   /**
-   * @brief Starts the joined compute worker and enables session admission.
+   * @brief Starts the secure output store, compute worker, and admission.
    *
+   * @param socket_path Absolute bound socket path naming the output-store base.
+   * @param lifecycle_lock_fd Open matching lifecycle lock held by Server.
    * @return Success or daemon lifecycle failure.
    * @throws std::system_error if worker creation fails.
    * @throws std::bad_alloc if failure diagnostic construction cannot allocate.
-   * @note The server calls this only after socket ownership is established and
-   *       before any client worker can route a request.
+   * @note The server calls this only after socket ownership is established,
+   *       while retaining its lifecycle lock, and before any client worker can
+   *       route a request. Output-store failure prevents all admission.
    */
-  OperationStatus start_runtime();
+  OperationStatus start_runtime(const std::string& socket_path,
+                                int lifecycle_lock_fd);
 
   /**
-   * @brief Atomically rejects new session and compute admission for shutdown.
+   * @brief Rejects new sessions, compute work, and output delivery leases.
    * @throws Nothing.
-   * @note Already admitted calls and jobs retain their exact completion rules.
+   * @note Already admitted calls/jobs retain their completion rules and the
+   *       draining worker may still publish an output before final shutdown.
    */
   void begin_shutdown() noexcept;
 
@@ -100,8 +107,9 @@ class RequestRouter {
    *
    * @throws Nothing; job cleanup, Host failures, and Host exceptions are
    *         contained so socket lifecycle cleanup can continue.
-   * @note Call after accepted client workers have stopped. Output ownership is
-   *       released before Host sessions and registry rows are cleared.
+   * @note Call after accepted client workers have stopped. Compute shutdown
+   *       releases job ownership first; OutputStore then waits active leases
+   *       before Host sessions and registry rows are cleared.
    */
   void finish_shutdown() noexcept;
 
@@ -122,6 +130,9 @@ class RequestRouter {
 
   /** @brief Loading/active opaque-to-Host session registry. */
   SessionRegistry registry_;
+
+  /** @brief Socket-specific private image artifact and delivery lease store. */
+  OutputStore output_store_;
 
   /** @brief Bounded private compute lifecycle with one joined worker. */
   ComputeRequestRegistry compute_registry_;

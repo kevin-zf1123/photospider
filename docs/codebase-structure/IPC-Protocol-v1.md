@@ -326,9 +326,83 @@ At most 256 terminal records are retained. Publishing another terminal record
 evicts only the oldest terminal publication; active work is never evicted.
 Terminal age starts at complete publication, uses a monotonic injected clock,
 expires at 15 minutes, and is not refreshed by lookup. Output ownership is a
-private move-only reference with exact-once cleanup outside the registry mutex;
-the wire-visible protected output store is not part of the current method
-inventory.
+private move-only reference with optional lease-aware exact-once cleanup outside
+the registry mutex. It is backed by the private protected store described below;
+neither its result metadata nor its release arguments are part of the current
+method inventory.
+
+## Private Protected Output Store
+
+The current eight-method wire inventory exposes no image result or delivery
+operation. Behind the router, one private `OutputStore` is nevertheless bound
+to the joined compute publisher and socket lifecycle. It starts after the Unix
+socket and persistent lifecycle lock are owned but before session, compute, or
+client admission. A startup failure therefore admits no request.
+
+A canonical empty CPU image publishes no artifact. A nonempty result must be a
+valid CPU `ImageBuffer` with a defined data type, positive dimensions and
+channels, non-null data, a source step at least as large as its checked tight
+row, and overflow-safe row/total byte counts. The store copies only tight rows;
+source padding and backend context never enter the artifact. Validation,
+allocation, write, rename, or identity failure becomes nested daemon
+`internal_error` through the already-accepted compute job. Quota denial becomes
+nested daemon `artifact_limit_exceeded`.
+
+Production limits are 64 retained artifacts, one GiB total retained bytes, and
+512 MiB per artifact. Admission includes job-owned and lease-only artifacts and
+is transactional: a failed publication retains no record, quota reservation,
+or safely removable partial file. Every controlled stage and final basename is
+`output-<32-lowercase-hex>.bin`, so restart cleanup can recognize a stage left
+by process death. Complete data is atomically renamed without replacement and
+then revalidated before a record becomes visible.
+
+The store base is the socket-specific same-owner exact-mode `0700`
+`<socket>.outputs`; one process writes below the exact-mode `0700`
+`instance-<server_instance_id>` child. Artifact files are same-owner regular
+files opened with `O_NOFOLLOW|O_CLOEXEC`, exact mode `0600`, and one link.
+Metadata retains only output id, absolute path, dimensions, data type, CPU
+device, tight row step, byte size, filesystem device, and inode. Live access
+revalidates base/instance ancestry plus file owner, type, exact mode, link
+count, device, inode, and size through held directory descriptors. A missing or
+mismatched record/file returns daemon `artifact_not_found` from this private
+result boundary while leaving the terminal compute record releasable; an unsafe
+replacement is never followed or removed.
+
+Each published artifact owns one stable 32-hex delivery id. Successful private
+result access validates the artifact and, in the same store critical section,
+creates, reuses, or reactivates its sole lease with expiry set to that
+operation's monotonic `now + 60 seconds`. Repeated access returns the same id
+and refreshes that deadline. Compute release accepts an internal optional
+delivery id: matching release atomically removes job ownership and the lease;
+eviction, the 15-minute compute/job TTL, or release without a match removes only
+job ownership. Quota and the file remain while an active lease survives. A
+matching `(compute_id, delivery_id)` can still release that orphaned lease after
+the compute record disappeared. Unlink occurs only after neither owner nor
+lease remains and only after identity revalidation.
+
+Restart cleanup runs while the socket lifecycle lock proves no live cooperating
+daemon owns the socket. It opens the real base and recognized instance children
+without following symlinks, scans through directory descriptors, and unlinks
+only controlled same-owner exact-`0600` one-link regular files. It removes only
+empty recognized instance directories. Unknown names, symlinks, non-regular
+entries, wrong modes/owners, hard links, and replaced entries remain untouched;
+no persisted output registry is required.
+
+The persistent lifecycle lock serializes cooperating daemon instances. Portable
+POSIX has no compare-device/inode-and-unlink primitive, so each name-based
+unlink or empty-directory removal is immediately preceded by held-fd and path
+identity revalidation. This is the supported boundary against concurrent
+replacement: an observed mismatch or inconclusive system error is preserved,
+while a same-uid hostile process can still race the final validation and
+`unlinkat` instructions at the platform level.
+
+Shutdown immediately stops new or refreshed delivery leases while accepted
+image jobs may still publish during compute drain. After the joined compute
+worker exits, terminal cleanup removes job ownership, the store stops
+publication, waits for active leases to be explicitly released or reach their
+injected monotonic TTL, identity-cleans unowned artifacts, and closes its
+directories before Host sessions are closed. Quotas, both TTLs, clock, and id
+source are injectable for deterministic filesystem and race tests.
 
 ## Inspection Values
 
@@ -389,12 +463,13 @@ The listener tracks at most 32 joinable client workers. Requests are sequential
 per connection; frame/JSON work may occur across clients. Because public Host
 does not promise thread safety, every Host call uses one daemon mutex. Socket
 reads and writes never hold it. Shutdown first stops all session and compute
-admission, closes the listener, shuts down tracked client descriptors to wake
-reads, and joins all connection workers. It then drains every accepted compute
-job, joins the sole compute worker, releases terminal output ownership, closes
-Host sessions, and clears session mappings. Finally it removes its socket while
-the lifecycle lock remains held, releases the lock, and destroys Host state.
-The persistent lock file intentionally remains.
+admission plus new output leases, closes the listener, shuts down tracked client
+descriptors to wake reads, and joins all connection workers. It then drains
+every accepted compute job, joins the sole compute worker, releases terminal
+job ownership, waits active delivery leases through explicit release or TTL,
+and closes the OutputStore before Host sessions and session mappings. Finally
+it removes its socket while the lifecycle lock remains held, releases the lock,
+and destroys Host state. The persistent lock file intentionally remains.
 
 Before installing SIGINT/SIGTERM handlers, `photospiderd` creates a nonblocking
 close-on-exec self-pipe. The handler only preserves `errno`, writes one byte,
@@ -410,10 +485,10 @@ Focused local commands are:
 cmake -S . -B build -DPHOTOSPIDER_BUILD_IPC=ON -DBUILD_TESTING=ON
 cmake --build build --target photospider_ipc_client \
   photospider_ipc_server_internal photospiderd test_ipc_protocol \
-  test_compute_request_registry test_ipc_daemon \
+  test_compute_request_registry test_output_store test_ipc_daemon \
   public_header_self_containment -j
 ctest --test-dir build --output-on-failure \
-  -R '^(FrameCodec|ProtocolEnvelope|IntegerCodec|ProtocolErrors|ProtocolParams|ProtocolGraphLoad|ProtocolGraphClose|InspectionJson|SessionRegistry|ComputeRequestRegistry|ClientLifecycle|ClientResultValidation|IpcDaemon|StaticProductConsumerSmoke|IpcDisabledInstallSmoke|PublicHeaderSelfContainment)'
+  -R '^(FrameCodec|ProtocolEnvelope|IntegerCodec|ProtocolErrors|ProtocolParams|ProtocolGraphLoad|ProtocolGraphClose|InspectionJson|SessionRegistry|ComputeRequestRegistry|OutputStore|ClientLifecycle|ClientResultValidation|IpcDaemon|StaticProductConsumerSmoke|IpcDisabledInstallSmoke|PublicHeaderSelfContainment)'
 ```
 
 `StaticProductConsumerSmoke` verifies the installed backend plus a second

@@ -159,12 +159,14 @@ const std::string& ComputeOutputOwnership::reference() const noexcept {
 }
 
 /** @copydoc ComputeOutputOwnership::reset */
-void ComputeOutputOwnership::reset() noexcept {
+void ComputeOutputOwnership::reset(
+    const std::optional<std::string>& delivery_id) noexcept {
   Cleanup cleanup = std::move(cleanup_);
+  cleanup_ = nullptr;
   reference_.clear();
   if (cleanup) {
     try {
-      cleanup();
+      cleanup(delivery_id);
     } catch (...) {
     }
   }
@@ -391,7 +393,8 @@ IpcResult<ComputeRequestSnapshot> ComputeRequestRegistry::result(
 
 /** @copydoc ComputeRequestRegistry::release */
 OperationStatus ComputeRequestRegistry::release(
-    const ComputeRequestId& compute_id) {
+    const ComputeRequestId& compute_id,
+    const std::optional<std::string>& delivery_id) {
   (void)cleanup_expired();
   std::unique_ptr<Record> removed;
   {
@@ -405,6 +408,7 @@ OperationStatus ComputeRequestRegistry::release(
     }
     removed = detach_terminal_locked(found);
   }
+  removed->output.reset(delivery_id);
   removed.reset();
   return ok_status();
 }
@@ -500,7 +504,7 @@ void ComputeRequestRegistry::worker_loop() noexcept {
           outcome = std::move(image.status);
         } else {
           ComputeOutputPublication publication =
-              output_publisher_(std::move(image.value));
+              output_publisher_(record->compute_id, std::move(image.value));
           outcome = std::move(publication.status);
           if (outcome.ok) {
             output = std::move(publication.output);

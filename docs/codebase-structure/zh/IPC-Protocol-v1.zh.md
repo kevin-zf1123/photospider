@@ -283,8 +283,64 @@ failure，都会使用 commit 前已分配的 daemon `internal_error` fallback s
 最多保留 256 个 terminal record。发布新的 terminal record 时只 evict 最早的 terminal
 publication；active work 永不 evict。Terminal age 从完整 publication 开始，使用 injectable
 monotonic clock，在 15 分钟时 expire，并且 lookup 不刷新 age。Output ownership 是 private
-move-only reference，其 exact-once cleanup 在 registry mutex 外执行；wire-visible protected output
-store 不属于当前 method inventory。
+move-only reference，其 optional lease-aware exact-once cleanup 在 registry mutex 外执行。它由
+下文的 private protected store 支撑；result metadata 与 release argument 都不属于当前 method
+inventory。
+
+## Private Protected Output Store
+
+当前八方法 wire inventory 不暴露 image result 或 delivery operation。不过 router 背后已有一个
+private `OutputStore`，并与 joined compute publisher 和 socket lifecycle 绑定。它会在 Unix socket
+与持久 lifecycle lock 已归属之后、session/compute/client admission 之前启动；因此 startup
+failure 不会放入任何 request。
+
+Canonical empty CPU image 不发布 artifact。Nonempty result 必须是合法 CPU `ImageBuffer`：具有
+defined data type、正 dimensions/channels、non-null data、至少等于 checked tight row 的 source
+step，并且 row/total byte count 不溢出。Store 只复制 tight row；source padding 与 backend
+context 不会进入 artifact。Validation、allocation、write、rename 或 identity failure 会通过已接受
+compute job 成为 nested daemon `internal_error`；quota denial 则成为 nested daemon
+`artifact_limit_exceeded`。
+
+Production limit 为最多 64 个 retained artifact、总计一 GiB retained byte、单个 artifact 512
+MiB。Admission 同时计入 job-owned 与 lease-only artifact，并且具有 transactional 语义：失败的
+publication 不保留 record、quota reservation 或可安全删除的 partial file。每个 controlled stage
+与 final basename 都使用 `output-<32-lowercase-hex>.bin`，因此 restart cleanup 能识别 process
+death 遗留的 stage。完整数据通过禁止覆盖的 atomic rename 发布，并在 record 可见前重新验证。
+
+Store base 是 socket-specific、same-owner、exact-mode `0700` 的 `<socket>.outputs`；每个 process
+只写 exact-mode `0700` 的 `instance-<server_instance_id>` child。Artifact 是使用
+`O_NOFOLLOW|O_CLOEXEC` 打开的 same-owner regular file，mode 精确为 `0600` 且只有一个 link。
+Metadata 只保留 output id、absolute path、dimensions、data type、CPU device、tight row step、byte
+size、filesystem device 与 inode。Live access 会通过持有的 directory descriptor 重新验证
+base/instance ancestry，以及 file owner、type、exact mode、link count、device、inode 与 size。
+Record/file 缺失或不匹配时，该 private result boundary 返回 daemon `artifact_not_found`，terminal
+compute record 仍可 release；unsafe replacement 绝不会被 follow 或 remove。
+
+每个 published artifact 拥有一个 stable 32-hex delivery id。Private result access 成功时，会在同一个
+store critical section 内验证 artifact，并创建、复用或重新激活其唯一 lease，把 expiry 设置为该次
+操作的 monotonic `now + 60 seconds`。重复 access 返回同一个 id 并刷新 deadline。Compute release
+接受 internal optional delivery id：matching release 会原子删除 job ownership 与 lease；eviction、
+15-minute compute/job TTL，或没有匹配 lease 的 release 只删除 job ownership。Active lease 存在
+期间，quota 与 file 都会保留。Compute record 消失后，matching `(compute_id, delivery_id)` 仍可
+release orphaned lease。只有 owner 与 lease 都不存在，并且 identity 复验通过后才会 unlink。
+
+Restart cleanup 在 socket lifecycle lock 已证明没有 live cooperating daemon 时运行。它不跟随
+symlink 地打开 real base 与 recognized instance child，通过 directory descriptor 扫描，并且只
+unlink controlled、same-owner、exact-`0600`、one-link regular file；只删除 empty recognized
+instance directory。Unknown name、symlink、non-regular entry、错误 mode/owner、hard link 与
+replaced entry 均保持不动，不需要 persisted output registry。
+
+持久 lifecycle lock 会串行化 cooperating daemon instance。Portable POSIX 没有能原子执行
+compare-device/inode-and-unlink 的 primitive，因此每次按 name 执行 unlink 或 empty-directory
+removal 前，都会立即通过 held fd 与 path identity 重新验证。这是实现支持的 concurrent
+replacement 防护边界：观察到 mismatch 或无法确定的 system error 时会保留 entry；但 same-uid
+hostile process 在 platform 层仍可能竞态最终 validation 与 `unlinkat` 两条指令。
+
+Shutdown 会立即停止新建或刷新的 delivery lease，同时 accepted image job 在 compute drain 期间仍可
+publish。Joined compute worker 退出后，terminal cleanup 删除 job ownership，store 停止
+publication，等待 active lease 被显式 release 或达到 injected monotonic TTL，按 identity 清理
+unowned artifact，并在关闭 Host session 前关闭自己的 directory。Quota、两类 TTL、clock 与 id
+source 均可注入，以执行 deterministic filesystem/race test。
 
 ## Inspection Value
 
@@ -335,9 +391,10 @@ Listener 最多跟踪 32 个 joinable client worker。每个 connection 内 requ
 client 的 frame/JSON 工作可以并发。Public Host 不承诺 thread-safe，因此每个 Host call 都使用
 一个 daemon mutex；socket read/write 绝不持有它。Shutdown 会先停止所有 session 与 compute
 admission，关闭 listener，shutdown tracked client descriptor 以唤醒 read，并 join 全部 connection
-worker。随后它会 drain 所有 accepted compute job，join 唯一 compute worker，释放 terminal output
-ownership，关闭 Host session，并清空 session mapping。最后在 lifecycle lock 仍持有时移除 socket，
-释放 lock，再销毁 Host state；持久 lock file 会有意保留。
+worker。随后它会 drain 所有 accepted compute job，join 唯一 compute worker，释放 terminal job
+ownership，并通过显式 release 或 TTL 等待 active delivery lease；OutputStore 关闭后才关闭 Host
+session 并清空 session mapping。最后在 lifecycle lock 仍持有时移除 socket，释放 lock，再销毁
+Host state；持久 lock file 会有意保留。
 
 安装 SIGINT/SIGTERM handler 前，`photospiderd` 会创建 nonblocking close-on-exec self-pipe。
 Handler 只保存 `errno`、写一个 byte，再恢复 `errno`；正常 control flow 执行 cleanup。正常 signal
@@ -352,10 +409,10 @@ Focused local command：
 cmake -S . -B build -DPHOTOSPIDER_BUILD_IPC=ON -DBUILD_TESTING=ON
 cmake --build build --target photospider_ipc_client \
   photospider_ipc_server_internal photospiderd test_ipc_protocol \
-  test_compute_request_registry test_ipc_daemon \
+  test_compute_request_registry test_output_store test_ipc_daemon \
   public_header_self_containment -j
 ctest --test-dir build --output-on-failure \
-  -R '^(FrameCodec|ProtocolEnvelope|IntegerCodec|ProtocolErrors|ProtocolParams|ProtocolGraphLoad|ProtocolGraphClose|InspectionJson|SessionRegistry|ComputeRequestRegistry|ClientLifecycle|ClientResultValidation|IpcDaemon|StaticProductConsumerSmoke|IpcDisabledInstallSmoke|PublicHeaderSelfContainment)'
+  -R '^(FrameCodec|ProtocolEnvelope|IntegerCodec|ProtocolErrors|ProtocolParams|ProtocolGraphLoad|ProtocolGraphClose|InspectionJson|SessionRegistry|ComputeRequestRegistry|OutputStore|ClientLifecycle|ClientResultValidation|IpcDaemon|StaticProductConsumerSmoke|IpcDisabledInstallSmoke|PublicHeaderSelfContainment)'
 ```
 
 `StaticProductConsumerSmoke` 验证 installed backend 与第二个 client-only consumer；
