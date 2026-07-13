@@ -190,21 +190,30 @@ class ManualProcessClock final {
     }
   }
 
-  /** @brief Prevents duplicate control-file ownership. */
+  /**
+   * @brief Prevents duplicate control-file ownership.
+   * @throws Nothing because this operation is unavailable.
+   */
   ManualProcessClock(const ManualProcessClock&) = delete;
 
   /**
    * @brief Prevents replacing control-file ownership by assignment.
    * @return No value because assignment is unavailable.
+   * @throws Nothing because this operation is unavailable.
    */
   ManualProcessClock& operator=(const ManualProcessClock&) = delete;
 
-  /** @brief Returns the stable absolute control-file path. */
+  /**
+   * @brief Returns the stable absolute control-file path.
+   * @return Borrowed path valid for this clock's lifetime.
+   * @throws Nothing.
+   */
   const std::filesystem::path& path() const noexcept { return path_; }
 
   /**
    * @brief Advances monotonic fixture time and atomically publishes it.
    * @param duration Nonnegative interval to add.
+   * @return Nothing.
    * @throws std::invalid_argument for negative or overflowing durations.
    * @throws std::runtime_error if the locked fixed-width write fails.
    */
@@ -221,6 +230,7 @@ class ManualProcessClock final {
  private:
   /**
    * @brief Publishes the current exact-width value under an exclusive lock.
+   * @return Nothing.
    * @throws std::runtime_error if lock, write, or unlock coordination fails.
    */
   void write_current() {
@@ -439,6 +449,7 @@ class ConcurrentStartGate {
    * @brief Releases the requested number of forked children.
    *
    * @param participant_count Number of one-byte waiters to release.
+   * @return Nothing.
    * @throws std::runtime_error if a complete token write fails.
    * @note The write end closes after all tokens are sent; the gate is
    *       single-use.
@@ -717,6 +728,7 @@ class DaemonProcess {
   /**
    * @brief Attempts graceful shutdown, then one independently bounded kill.
    *
+   * @return Nothing.
    * @throws Nothing.
    * @note Normal daemon shutdown receives a five-second WNOHANG polling
    *       deadline. If that phase cannot reap the child, SIGKILL receives a
@@ -818,6 +830,7 @@ class DaemonProcess {
 
   /**
    * @brief Records that no waitable child remains without a terminal status.
+   * @return Nothing.
    * @throws Nothing.
    * @note Used only for `ECHILD`; the absence is exposed as an unknown failure
    *       rather than fabricating a successful or signal-derived exit status.
@@ -1281,6 +1294,7 @@ class ConcurrentCallGate final {
 
   /**
    * @brief Releases every current and future participant.
+   * @return Nothing.
    * @throws Nothing.
    */
   void release() noexcept {
@@ -1437,6 +1451,7 @@ class RawDaemonCallTask final {
  private:
   /**
    * @brief Idempotently releases a held start gate before any blocking join.
+   * @return Nothing.
    * @throws Nothing.
    */
   void release_gate() noexcept {
@@ -1445,7 +1460,15 @@ class RawDaemonCallTask final {
     }
   }
 
-  /** @brief Shared completion state published by the worker. */
+  /**
+   * @brief Shared completion state published by the worker.
+   *
+   * @throws std::bad_alloc when the owned JSON response or exception state
+   *         allocates.
+   * @note The heap owner outlives the joinable worker. Every field is accessed
+   *       under `mutex`; the worker publishes response/exception before setting
+   *       `complete` and notifying waiters.
+   */
   struct State {
     /** @brief Mutex protecting response publication. */
     mutable std::mutex mutex;
@@ -1685,6 +1708,7 @@ class ScopedComputeGateRelease final {
 
   /**
    * @brief Disarms cleanup after an explicit successful release.
+   * @return Nothing.
    * @throws Nothing.
    */
   void dismiss() noexcept { gate_ = nullptr; }
@@ -1842,24 +1866,32 @@ class ScopedDirectoryMode final {
     active_ = true;
   }
 
-  /** @brief Restores the original mode best-effort when still active. */
+  /**
+   * @brief Restores the original mode best-effort when still active.
+   * @throws Nothing; restoration failures are contained.
+   */
   ~ScopedDirectoryMode() noexcept {
     if (active_) {
       (void)::chmod(path_.c_str(), original_mode_);
     }
   }
 
-  /** @brief Prevents duplicate restoration ownership. */
+  /**
+   * @brief Prevents duplicate restoration ownership.
+   * @throws Nothing because construction is unavailable.
+   */
   ScopedDirectoryMode(const ScopedDirectoryMode&) = delete;
 
   /**
    * @brief Prevents replacing restoration ownership by assignment.
    * @return No value because assignment is unavailable.
+   * @throws Nothing because assignment is unavailable.
    */
   ScopedDirectoryMode& operator=(const ScopedDirectoryMode&) = delete;
 
   /**
    * @brief Restores the original mode and disarms destructor cleanup.
+   * @return Nothing.
    * @throws std::runtime_error when chmod fails.
    */
   void restore() {
@@ -1989,7 +2021,11 @@ class ScopedFixtureJobRelease final {
       : socket_path_(std::move(socket_path)),
         compute_id_(std::move(compute_id)) {}
 
-  /** @brief Performs bounded best-effort cleanup when still armed. */
+  /**
+   * @brief Performs bounded best-effort cleanup when still armed.
+   * @throws Nothing; request construction and transport failures are
+   *         contained.
+   */
   ~ScopedFixtureJobRelease() noexcept {
     if (!armed_) {
       return;
@@ -2006,25 +2042,34 @@ class ScopedFixtureJobRelease final {
     }
   }
 
-  /** @brief Prevents duplicate job-cleanup ownership. */
+  /**
+   * @brief Prevents duplicate job-cleanup ownership.
+   * @throws Nothing because construction is unavailable.
+   */
   ScopedFixtureJobRelease(const ScopedFixtureJobRelease&) = delete;
 
   /**
    * @brief Prevents replacing job-cleanup ownership by assignment.
    * @return No value because copying is unavailable.
+   * @throws Nothing because assignment is unavailable.
    */
   ScopedFixtureJobRelease& operator=(const ScopedFixtureJobRelease&) = delete;
 
   /**
    * @brief Adds the stable lease identity to failure cleanup.
    * @param delivery_id Valid delivery id returned by compute.result.
+   * @return Nothing.
    * @throws std::bad_alloc if copied identity storage cannot allocate.
    */
   void protect_delivery(std::string delivery_id) {
     delivery_id_ = std::move(delivery_id);
   }
 
-  /** @brief Disarms cleanup after explicit successful release. */
+  /**
+   * @brief Disarms cleanup after explicit successful release.
+   * @return Nothing.
+   * @throws Nothing.
+   */
   void dismiss() noexcept { armed_ = false; }
 
  private:
@@ -2142,6 +2187,7 @@ std::vector<std::uint8_t> read_open_fixture_artifact(int fd) {
  * @brief Triggers lazy compute/output expiry without addressing a live job.
  * @param socket_path Running fixture socket.
  * @param label Unique request id.
+ * @return Nothing.
  * @throws std::bad_alloc if request/response storage cannot allocate.
  * @note The well-formed absent job/delivery pair returns job_not_found after
  *       both registries observe the shared manual clock. It is not a test wire

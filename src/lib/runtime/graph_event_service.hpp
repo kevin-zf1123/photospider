@@ -19,8 +19,13 @@ namespace ps {
  * and exposes bounded destructive batches. Ring slots are allocated by the
  * constructor so publication never grows the container.
  *
+ * @throws std::invalid_argument when construction or a drain uses an invalid
+ *         capacity, initial sequence, or page limit.
+ * @throws std::bad_alloc when fixed storage, retained text, or a bounded output
+ *         page cannot be allocated.
  * @note The service owns only diagnostic snapshots. It does not synchronize
- *       graph state or cache ownership.
+ *       graph state or cache ownership. Its mutex serializes publication,
+ *       sequence/drop accounting, destructive removal, and page metadata.
  */
 class GraphEventService {
  public:

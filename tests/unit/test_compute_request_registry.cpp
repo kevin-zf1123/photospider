@@ -115,6 +115,7 @@ class ManualClock {
   /**
    * @brief Advances the injected timestamp by a nonnegative duration.
    * @param duration Exact monotonic increment.
+   * @return Nothing.
    * @throws std::invalid_argument when asked to move backwards.
    */
   void advance(std::chrono::steady_clock::duration duration) {
@@ -144,6 +145,7 @@ class StepGate {
  public:
   /**
    * @brief Marks executor entry and blocks until the test releases it.
+   * @return Nothing.
    * @throws std::system_error if platform synchronization fails.
    */
   void enter_and_wait() {
@@ -165,6 +167,7 @@ class StepGate {
 
   /**
    * @brief Releases every current or future executor wait.
+   * @return Nothing.
    * @throws std::system_error if platform synchronization fails.
    */
   void release() {
@@ -209,6 +212,7 @@ class StartBarrier {
 
   /**
    * @brief Arrives and waits until every configured participant arrives.
+   * @return Nothing.
    * @throws std::system_error if platform synchronization fails.
    */
   void arrive_and_wait() {

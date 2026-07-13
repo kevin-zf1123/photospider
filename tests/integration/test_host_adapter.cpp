@@ -43,7 +43,12 @@
 namespace ps {
 
 #if defined(PHOTOSPIDER_INTERNAL_BAD_ALLOC_TESTING)
-/** @brief BUILD_TESTING close-coordination events mirrored from the Host. */
+/**
+ * @brief BUILD_TESTING close-coordination events mirrored from the Host.
+ * @throws Nothing; values are passed by value across a non-throwing callback.
+ * @note The Host publishes events in close-serialization order. Test code uses
+ *       atomic counters rather than retaining references to event values.
+ */
 enum class EmbeddedCloseTestEvent {
   /** @brief One close caller has claimed the session marker. */
   MarkerClaimed,
@@ -51,7 +56,12 @@ enum class EmbeddedCloseTestEvent {
   DuplicateAboutToWait,
 };
 
-/** @brief Borrowed callback installed for deterministic close synchronization.
+/**
+ * @brief Borrowed callback installed for deterministic close synchronization.
+ * @throws Nothing; the callback contract is explicitly non-throwing.
+ * @note Both `context` and this hook object remain owned by the test. Their
+ *       lifetimes cover every serialized Host close callback until the hook is
+ *       cleared.
  */
 struct EmbeddedCloseTestHook {
   /** @brief Borrowed test context. */
@@ -83,7 +93,13 @@ std::shared_future<void> g_host_blocking_source_release;
 std::atomic<bool> g_host_blocking_source_started{false};
 
 #if defined(PHOTOSPIDER_INTERNAL_BAD_ALLOC_TESTING)
-/** @brief Events published by the current embedded close coordination hook. */
+/**
+ * @brief Events published by the current embedded close coordination hook.
+ * @throws Nothing; fixed-size atomic counters do not allocate.
+ * @note The hook borrows this state until guard destruction. Release/acquire
+ *       ordering makes each serialized callback observation visible to the
+ *       polling test thread.
+ */
 struct EmbeddedCloseEventState {
   /** @brief Number of callers that have claimed the marker. */
   std::atomic<std::uint64_t> marker_claimed{0};
@@ -110,6 +126,9 @@ void record_embedded_close_event(void* context,
 
 /**
  * @brief Installs and assertion-safely clears one embedded close test hook.
+ * @throws Nothing after construction.
+ * @note The guard borrows its event state and owns the stable hook object.
+ *       Destruction clears the process-global hook before either can expire.
  */
 class ScopedEmbeddedCloseTestHook final {
  public:
@@ -123,7 +142,10 @@ class ScopedEmbeddedCloseTestHook final {
     set_embedded_host_close_test_hook(&hook_);
   }
 
-  /** @brief Clears the borrowed hook before its state can be destroyed. */
+  /**
+   * @brief Clears the borrowed hook before its state can be destroyed.
+   * @throws Nothing.
+   */
   ~ScopedEmbeddedCloseTestHook() noexcept {
     set_embedded_host_close_test_hook(nullptr);
   }
@@ -232,6 +254,7 @@ bool wait_for_host_blocking_source(std::chrono::milliseconds timeout) {
 /**
  * @brief Registers deterministic operations used by embedded Host tests.
  *
+ * @return Nothing.
  * @throws std::bad_alloc if registry storage allocation fails.
  * @note The operation is intentionally tiny and CPU-only so Host seam tests
  *       exercise frontend behavior without depending on external plugins or
@@ -781,7 +804,11 @@ class SchedulerFixtureExports final {
   int shutdown_count() const noexcept { return shutdown_count_(); }
 
  private:
-  /** @brief Releases the native diagnostic handle when present. */
+  /**
+   * @brief Releases the native diagnostic handle when present.
+   * @return Nothing.
+   * @throws Nothing; platform close failures are intentionally contained.
+   */
   void close() noexcept {
 #if defined(_WIN32)
     if (handle_ != nullptr) {
@@ -824,11 +851,18 @@ class ScopedSchedulerPluginCleanup final {
    */
   ScopedSchedulerPluginCleanup() noexcept { clear(); }
 
-  /** @brief Clears scheduler state after later-declared Host destruction. */
+  /**
+   * @brief Clears scheduler state after later-declared Host destruction.
+   * @throws Nothing; cleanup failures are contained.
+   */
   ~ScopedSchedulerPluginCleanup() noexcept { clear(); }
 
  private:
-  /** @brief Clears plugin mappings and diagnostics behind a no-throw fence. */
+  /**
+   * @brief Clears plugin mappings and diagnostics behind a no-throw fence.
+   * @return Nothing.
+   * @throws Nothing; loader failures are caught and suppressed.
+   */
   static void clear() noexcept {
     try {
       SchedulerPluginLoader::instance().clear_plugins();

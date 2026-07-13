@@ -144,12 +144,16 @@ class OutputStore {
    */
   ~OutputStore() noexcept;
 
-  /** @brief Prevents copying descriptor, record, and quota ownership. */
+  /**
+   * @brief Prevents copying descriptor, record, and quota ownership.
+   * @throws Nothing because this operation is unavailable.
+   */
   OutputStore(const OutputStore&) = delete;
 
   /**
    * @brief Prevents replacing descriptor ownership by copy assignment.
    * @return No value because copying is unavailable.
+   * @throws Nothing because this operation is unavailable.
    */
   OutputStore& operator=(const OutputStore&) = delete;
 
@@ -170,6 +174,7 @@ class OutputStore {
 
   /**
    * @brief Prevents all new or refreshed delivery leases during shutdown.
+   * @return Nothing.
    * @throws Nothing.
    * @note Already accepted compute publication remains enabled until
    *       `shutdown()` because the joined compute worker drains first.
@@ -246,6 +251,7 @@ class OutputStore {
 
   /**
    * @brief Stops publication, drops job ownership, and awaits active leases.
+   * @return Nothing.
    * @throws Nothing; all cleanup failures are contained.
    * @note Concurrent callers wait for the same shutdown. The final owner
    *       removes only its empty identity-matching instance, closes directory
@@ -268,7 +274,15 @@ class OutputStore {
   std::size_t retained_bytes() const noexcept;
 
  private:
-  /** @brief Opaque POSIX descriptor, record, and synchronization state. */
+  /**
+   * @brief Complete POSIX descriptor, record, and synchronization state defined
+   *        in the source file.
+   *
+   * @throws Nothing for this incomplete declaration.
+   * @note `impl_` is the sole owner. OutputStore shutdown ends admission,
+   *       resolves bounded leases, identity-cleans owned artifacts, and closes
+   *       directory descriptors before destroying the complete type.
+   */
   class Impl;
 
   /** @brief Sole implementation owner. */

@@ -118,6 +118,7 @@ class ComputeOutputOwnership {
   /**
    * @brief Prevents duplicate cleanup ownership by assignment.
    * @return No value because copying is unavailable.
+   * @throws Nothing because this operation is unavailable.
    */
   ComputeOutputOwnership& operator=(const ComputeOutputOwnership&) = delete;
 
@@ -154,6 +155,7 @@ class ComputeOutputOwnership {
    * @brief Runs pending cleanup and makes this value inactive.
    * @param delivery_id Optional matching delivery lease to release in the same
    *        output-store critical section as job ownership.
+   * @return Nothing.
    * @throws Nothing; callback failures are contained.
    */
   void reset(
@@ -304,6 +306,7 @@ class ComputeRequestRegistry {
   /**
    * @brief Prevents replacing worker ownership by copy assignment.
    * @return No value because copying is unavailable.
+   * @throws Nothing because this operation is unavailable.
    */
   ComputeRequestRegistry& operator=(const ComputeRequestRegistry&) = delete;
 
@@ -318,6 +321,7 @@ class ComputeRequestRegistry {
 
   /**
    * @brief Atomically disables new submissions and requests queue draining.
+   * @return Nothing.
    * @throws Nothing.
    * @note Already accepted queued work remains scheduled and becomes terminal.
    */
@@ -325,6 +329,7 @@ class ComputeRequestRegistry {
 
   /**
    * @brief Stops admission, drains every accepted job, and joins the worker.
+   * @return Nothing.
    * @throws Nothing; this function never holds the registry mutex while
    *         joining.
    * @note Concurrent lifecycle callers wait for the same sole join to finish;
@@ -388,12 +393,14 @@ class ComputeRequestRegistry {
 
   /**
    * @brief Releases every retained terminal record and output.
+   * @return Nothing.
    * @throws Nothing; active records are preserved for worker draining.
    */
   void release_all_terminal() noexcept;
 
   /**
    * @brief Performs complete registry shutdown in lifecycle order.
+   * @return Nothing.
    * @throws Nothing.
    * @note Stops admission, drains/joins the worker, then releases terminal
    *       output ownership. The borrowed session registry remains intact.
@@ -401,11 +408,20 @@ class ComputeRequestRegistry {
   void shutdown() noexcept;
 
  private:
-  /** @brief Complete private mutable record; defined in the source file. */
+  /**
+   * @brief Complete mutable state for one accepted compute record defined in
+   *        the source file.
+   *
+   * @throws Nothing for this incomplete declaration.
+   * @note `records_` owns every complete instance. Detachment transfers sole
+   *       ownership outside `mutex_` so admission and output cleanup destruct
+   *       only after the protected record mutation has linearized.
+   */
   struct Record;
 
   /**
    * @brief Runs the sole FIFO executor until stop is requested and drained.
+   * @return Nothing.
    * @throws Nothing; every accepted execution failure is contained as terminal.
    */
   void worker_loop() noexcept;

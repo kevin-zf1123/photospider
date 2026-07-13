@@ -88,6 +88,7 @@ class ManualClock {
   /**
    * @brief Sets the current injected monotonic time.
    * @param value New nanosecond count.
+   * @return Nothing.
    * @throws Nothing.
    */
   void set(std::int64_t value) noexcept { nanoseconds_.store(value); }
@@ -95,6 +96,7 @@ class ManualClock {
   /**
    * @brief Advances the current injected monotonic time.
    * @param delta Nonnegative duration to add.
+   * @return Nothing.
    * @throws Nothing.
    */
   void advance(std::chrono::nanoseconds delta) noexcept {
@@ -134,6 +136,7 @@ class StartGate {
  public:
   /**
    * @brief Blocks until `release()` is called.
+   * @return Nothing.
    * @throws std::system_error if condition-variable waiting fails.
    */
   void wait() {
@@ -143,6 +146,7 @@ class StartGate {
 
   /**
    * @brief Wakes every waiting thread exactly once.
+   * @return Nothing.
    * @throws Nothing.
    */
   void release() noexcept {

@@ -71,7 +71,8 @@ enum class Device {
  *       callers must treat data as read-only unless the producing API
  *       explicitly promises writable storage. An IPC Host image is a shared
  *       `PROT_READ|MAP_PRIVATE` mapping with a page-aligned base and tight
- * rows; it does not promise the kernel-owned 64-byte alignment of every row.
+ *       rows; it does not promise the kernel-owned 64-byte alignment of every
+ *       row.
  */
 struct ImageBuffer {
   /** @brief Width in pixels. */

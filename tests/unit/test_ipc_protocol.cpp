@@ -326,11 +326,18 @@ class ScopedSchedulerPluginCleanup final {
    */
   ScopedSchedulerPluginCleanup() noexcept { clear(); }
 
-  /** @brief Clears scheduler state after later-declared Host destruction. */
+  /**
+   * @brief Clears scheduler state after later-declared Host destruction.
+   * @throws Nothing; cleanup failures are contained.
+   */
   ~ScopedSchedulerPluginCleanup() noexcept { clear(); }
 
  private:
-  /** @brief Clears plugin mappings and diagnostics behind a no-throw fence. */
+  /**
+   * @brief Clears plugin mappings and diagnostics behind a no-throw fence.
+   * @return Nothing.
+   * @throws Nothing; scheduler cleanup exceptions are contained.
+   */
   static void clear() noexcept {
     try {
       SchedulerPluginLoader::instance().clear_plugins();
@@ -380,7 +387,11 @@ std::filesystem::path lifecycle_operation_plugin_dir() {
  */
 class ScopedOperationPluginCleanup final {
  public:
-  /** @brief Performs required initial explicit process-global cleanup. */
+  /**
+   * @brief Performs required initial explicit process-global cleanup.
+   * @throws std::bad_alloc if Host or diagnostic ownership cannot allocate.
+   * @throws std::runtime_error if Host creation or explicit unload fails.
+   */
   ScopedOperationPluginCleanup() {
     std::unique_ptr<Host> host = create_embedded_host();
     if (!host) {
@@ -392,7 +403,10 @@ class ScopedOperationPluginCleanup final {
     }
   }
 
-  /** @brief Explicitly unloads any fixture left after an assertion. */
+  /**
+   * @brief Explicitly unloads any fixture left after an assertion.
+   * @throws Nothing; Host creation and unload failures are contained.
+   */
   ~ScopedOperationPluginCleanup() noexcept {
     try {
       std::unique_ptr<Host> host = create_embedded_host();
@@ -403,12 +417,16 @@ class ScopedOperationPluginCleanup final {
     }
   }
 
-  /** @brief Prevents duplicate global cleanup ownership. */
+  /**
+   * @brief Prevents duplicate global cleanup ownership.
+   * @throws Nothing because this operation is unavailable.
+   */
   ScopedOperationPluginCleanup(const ScopedOperationPluginCleanup&) = delete;
 
   /**
    * @brief Prevents replacing global cleanup ownership.
    * @return No value because assignment is unavailable.
+   * @throws Nothing because this operation is unavailable.
    */
   ScopedOperationPluginCleanup& operator=(const ScopedOperationPluginCleanup&) =
       delete;
@@ -2355,7 +2373,11 @@ TEST_F(HostRoutedGraphStateProtocolTest,
  */
 class ManualCollectionClock final {
  public:
-  /** @brief Returns the current injected time. @throws Nothing. */
+  /**
+   * @brief Returns the current injected time.
+   * @return Exact deterministic monotonic sample.
+   * @throws Nothing.
+   */
   std::chrono::steady_clock::time_point now() const noexcept { return now_; }
 
   /**
@@ -5088,6 +5110,7 @@ TEST_F(HostRoutedGraphStateProtocolTest,
  * @tparam Enum Public enum type handled by the overloaded codec.
  * @tparam Count Number of stable version 1 labels.
  * @param mappings Expected enum/label pairs.
+ * @return Nothing.
  * @throws std::bad_alloc if test JSON or diagnostics cannot allocate.
  * @note Invalid memory enum values and malformed JSON must leave outputs
  *       unchanged; this helper does not establish any future enum vocabulary.
@@ -6175,7 +6198,13 @@ TEST(OperationStatusModel, ErrorCodecPreservesProtocolGraphAndDaemonValues) {
 }
 
 TEST(OperationStatusModel, EnforcesEveryKnownCodeNamePairTransactionally) {
-  /** @brief One expected stable version 1 error identity. */
+  /**
+   * @brief One expected stable version 1 error identity.
+   *
+   * @throws Nothing for construction and scalar access.
+   * @note The row is test-owned immutable table data used only to verify exact
+   *       domain/code/name pairing; it carries no runtime status ownership.
+   */
   struct Mapping {
     /** @brief Public failure domain represented by the mapping. */
     OperationErrorDomain domain;

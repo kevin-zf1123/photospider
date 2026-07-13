@@ -71,6 +71,7 @@ class SessionRegistry {
     /**
      * @brief Prevents duplicating one admitted-call count by assignment.
      * @return No value because copying is unavailable.
+     * @throws Nothing because this operation is unavailable.
      */
     HostCallAdmission& operator=(const HostCallAdmission&) = delete;
 
@@ -119,6 +120,7 @@ class SessionRegistry {
 
     /**
      * @brief Releases the owned count when active.
+     * @return Nothing.
      * @throws Nothing.
      */
     void reset() noexcept;
@@ -163,6 +165,7 @@ class SessionRegistry {
     /**
      * @brief Prevents duplicating one job count by assignment.
      * @return No value because copying is unavailable.
+     * @throws Nothing because this operation is unavailable.
      */
     JobAdmission& operator=(const JobAdmission&) = delete;
 
@@ -211,6 +214,7 @@ class SessionRegistry {
 
     /**
      * @brief Releases the owned count when active.
+     * @return Nothing.
      * @throws Nothing.
      */
     void reset() noexcept;
@@ -255,6 +259,7 @@ class SessionRegistry {
     /**
      * @brief Prevents duplicating exclusive close ownership by assignment.
      * @return No value because copying is unavailable.
+     * @throws Nothing because this operation is unavailable.
      */
     CloseClaim& operator=(const CloseClaim&) = delete;
 
@@ -282,6 +287,7 @@ class SessionRegistry {
 
     /**
      * @brief Removes the closed or Host-missing session mapping.
+     * @return Nothing.
      * @throws Nothing.
      * @note Call only after Host close success or Graph NotFound.
      */
@@ -289,6 +295,7 @@ class SessionRegistry {
 
     /**
      * @brief Reopens session admission after a retryable Host close failure.
+     * @return Nothing.
      * @throws Nothing.
      */
     void reopen() noexcept;
@@ -428,6 +435,7 @@ class SessionRegistry {
 
   /**
    * @brief Enables new load, Host-call, job, and close admission.
+   * @return Nothing.
    * @throws Nothing.
    * @note Intended for a new daemon run after prior runtime cleanup. Existing
    *       Closing rows are not implicitly reopened.
@@ -436,6 +444,7 @@ class SessionRegistry {
 
   /**
    * @brief Rejects every new load, Host-call, job, and close admission.
+   * @return Nothing.
    * @throws Nothing.
    * @note Already admitted work and existing mappings remain owned until their
    *       normal completion and shutdown cleanup.
@@ -521,6 +530,7 @@ class SessionRegistry {
    * @brief Releases one counted admission and wakes a waiting close.
    * @param token Opaque active-row key.
    * @param kind Counter category to decrement.
+   * @return Nothing.
    * @throws Nothing; missing/cleared rows are tolerated during shutdown.
    */
   void release_admission(const std::string& token, AdmissionKind kind) noexcept;
@@ -529,6 +539,7 @@ class SessionRegistry {
    * @brief Resolves one close claim by erasing or reopening its row.
    * @param token Opaque Closing-row key.
    * @param erase_mapping True to remove all indexes; false to reopen.
+   * @return Nothing.
    * @throws Nothing.
    */
   void complete_close(const std::string& token, bool erase_mapping) noexcept;

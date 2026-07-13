@@ -19,6 +19,7 @@ class ClientInterruptAccess {
    * @brief Latches stop and shuts down an active socket without closing it.
    *
    * @param client Client whose blocking read/write should be interrupted.
+   * @return Nothing.
    * @throws Nothing.
    * @note A null pointer is ignored. A Client with no published descriptor
    *       retains the latch for its pending connect. The owning worker remains

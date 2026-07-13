@@ -129,6 +129,15 @@ Result<Value> host_result(IpcResult<Value> result) {
   return {std::move(result.status), std::move(result.value)};
 }
 
+/**
+ * @brief Shared exactly-once completion state for one asynchronous Host call.
+ *
+ * @throws Nothing for this incomplete declaration; constructing the complete
+ *         type may throw while allocating promise or diagnostic state.
+ * @note Polling workers and adapter destruction retain shared ownership. The
+ *       complete type arbitrates their publications so its promise outlives
+ *       every competing worker/destructor path and is completed at most once.
+ */
 class AsyncCompletion;
 
 /**
@@ -191,6 +200,7 @@ class PollingRuntimeState {
   /**
    * @brief Removes one active Client before worker-local destruction.
    * @param client Exact registered Client address.
+   * @return Nothing.
    * @throws Nothing.
    * @note Shared ownership remains stable while the registry mutex is held.
    */
@@ -206,6 +216,7 @@ class PollingRuntimeState {
 
   /**
    * @brief Atomically publishes adapter stop.
+   * @return Nothing.
    * @throws Nothing.
    * @note This method does not wake or interrupt; the destructor preserves the
    *       specified stop, wake, shutdown, future-completion, join order.
@@ -227,6 +238,7 @@ class PollingRuntimeState {
 
   /**
    * @brief Shuts down every currently registered worker Client.
+   * @return Nothing.
    * @throws Nothing.
    * @note The mutex remains held while stable shared Client ownership is used.
    *       `ClientInterruptAccess` takes only the Client descriptor mutex and no
@@ -244,6 +256,7 @@ class PollingRuntimeState {
    * @brief Publishes a worker status only if stop has not linearized first.
    * @param completion Exactly-once future completion.
    * @param status Terminal or RPC status produced by the worker.
+   * @return Nothing.
    * @throws std::future_error only if promise invariants are violated.
    * @note This method holds the same mutex as `stop()`, making adapter stop and
    *       worker outcome publication one total order. A worker that loses to
@@ -258,6 +271,7 @@ class PollingRuntimeState {
    * @brief Publishes a worker exception only if stop has not linearized first.
    * @param completion Exactly-once future completion.
    * @param exception Worker exception to retain.
+   * @return Nothing.
    * @throws std::future_error only if promise invariants are violated.
    * @note Stop discards the exception through the same runtime mutex; only the
    *       destructor publishes client_stopped in the required lifecycle order.
@@ -540,6 +554,7 @@ OperationStatus validate_terminal_result(const ComputeJobSnapshot& submitted,
  * @param runtime Shared adapter runtime.
  * @param compute_id Terminal job identity.
  * @param delivery_id Optional matching artifact delivery lease.
+ * @return Nothing.
  * @throws Nothing; allocation and transport failures are contained.
  * @note Stop suppresses cleanup so unfinished accepted jobs remain daemon-
  *       owned for explicit access, bounded eviction, or TTL. No retry occurs.
@@ -609,6 +624,7 @@ class TerminalCleanupGuard {
   /**
    * @brief Adds one successfully validated matching delivery lease.
    * @param delivery_id Typed result lease identity.
+   * @return Nothing.
    * @throws Nothing.
    * @note The result object is declared before this guard, so the borrowed
    *       lease remains alive through guard destruction and no cleanup-path
@@ -655,6 +671,7 @@ class AsyncCompletion {
   /**
    * @brief Publishes one final status when still unfinished.
    * @param status Exact terminal/RPC status to move into the future.
+   * @return Nothing.
    * @throws std::future_error only if promise invariants are violated.
    * @note Atomic arbitration prevents worker/destructor double completion.
    */
@@ -667,6 +684,7 @@ class AsyncCompletion {
   /**
    * @brief Publishes one worker exception when still unfinished.
    * @param exception Owned exception captured by the worker boundary.
+   * @return Nothing.
    * @throws std::future_error only if promise invariants are violated.
    * @note Resource exhaustion remains exceptional per Host contract.
    */
@@ -678,6 +696,7 @@ class AsyncCompletion {
 
   /**
    * @brief Completes an unfinished future with preallocated client_stopped.
+   * @return Nothing.
    * @throws Nothing; unexpected future errors are contained.
    * @note Called only by adapter destruction after stop/wake/IO interruption.
    */
@@ -752,6 +771,7 @@ class AsyncStartGate {
   /**
    * @brief Publishes one accepted job to the pre-created worker.
    * @param submitted Accepted queued snapshot transferred without copying.
+   * @return Nothing.
    * @throws Nothing.
    * @note Publication wakes exactly the existing local worker and does not
    *       submit, resubmit, or mutate daemon state.
@@ -767,6 +787,7 @@ class AsyncStartGate {
 
   /**
    * @brief Abandons a not-yet-started local worker and wakes it.
+   * @return Nothing.
    * @throws Nothing.
    * @note This does not cancel or release any daemon job.
    */
@@ -845,6 +866,7 @@ class WorkerFinishedMarker {
  * @param completion Exactly-once caller future completion.
  * @param start_gate Accepted-job publication gate.
  * @param finished Reaping flag set on every exit.
+ * @return Nothing.
  * @throws Nothing; all worker exceptions are published to the future.
  * @note Terminal status is published before best-effort release, so cleanup
  *       failure or adapter stop cannot replace an already obtained result.
@@ -1416,6 +1438,7 @@ class IpcHost final : public Host {
 
   /**
    * @brief Joins and erases workers whose complete cleanup has finished.
+   * @return Nothing.
    * @throws std::system_error only if an internal join invariant is violated.
    * @note Called before accepting another async request so completed joinable
    *       threads do not accumulate for the entire adapter lifetime.
