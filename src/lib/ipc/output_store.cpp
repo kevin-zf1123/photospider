@@ -158,14 +158,14 @@ class ScopedFd {
    * @brief Closes current ownership and optionally adopts a replacement.
    * @param fd Replacement descriptor or -1.
    * @return Nothing.
-   * @throws Nothing; close failures are ignored after retrying interruption.
+   * @throws Nothing; the single close result is intentionally ignored.
    * @note Ownership transfers to this object only after the former descriptor
-   *       has been closed or its close attempt has terminated.
+   *       has received one close attempt. `EINTR` is not retried because Linux
+   *       may already have released and reused the numeric descriptor.
    */
   void reset(int fd = -1) noexcept {
     if (fd_ >= 0) {
-      while (::close(fd_) != 0 && errno == EINTR) {
-      }
+      (void)::close(fd_);
     }
     fd_ = fd;
   }
