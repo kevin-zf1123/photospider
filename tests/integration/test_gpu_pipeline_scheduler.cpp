@@ -192,8 +192,12 @@ class GpuAvailableSerialScheduler final : public IScheduler {
    * @param total_task_count Complete logical task count for the batch.
    * @param priority Scheduler priority label preserved by the delegate.
    * @return Nothing.
-   * @throws Delegate validation, synchronization, and task exceptions.
-   * @note Handle ownership and borrowing intervals remain unchanged.
+   * @throws std::logic_error if the delegated scheduler is not running.
+   * @throws std::invalid_argument if the count is negative or smaller than
+   *         the number of valid handles.
+   * @throws std::system_error if delegated synchronization fails.
+   * @note Handle exceptions are captured and rethrown unchanged by
+   *       `wait_for_completion()`; borrowing intervals remain unchanged.
    */
   void submit_initial_task_handles(
       std::vector<TaskHandle>&& handles, int total_task_count,
@@ -207,8 +211,10 @@ class GpuAvailableSerialScheduler final : public IScheduler {
    * @param handles Newly ready dispatcher-owned handles.
    * @param priority Scheduler priority label preserved by the delegate.
    * @return Nothing.
-   * @throws Delegate synchronization and task exceptions.
-   * @note The delegate retains no handle beyond its active completion fence.
+   * @throws std::system_error if delegated synchronization fails.
+   * @note Handle exceptions are captured and rethrown unchanged by
+   *       `wait_for_completion()`; the delegate retains no handle beyond its
+   *       active completion fence.
    */
   void submit_ready_task_handles_from_worker(
       std::vector<TaskHandle>&& handles,
@@ -223,8 +229,9 @@ class GpuAvailableSerialScheduler final : public IScheduler {
    * @param priority Scheduler priority label preserved by the delegate.
    * @param epoch Optional scheduler batch epoch.
    * @return Nothing.
-   * @throws Delegate synchronization and callback exceptions.
-   * @note The serial delegate preserves public callback ownership semantics.
+   * @throws std::system_error if delegated synchronization fails.
+   * @note Callback exceptions are captured and rethrown unchanged by
+   *       `wait_for_completion()`; public callback ownership is preserved.
    */
   void submit_ready_task_any_thread(
       SchedulerTaskRuntime::Task&& task,
