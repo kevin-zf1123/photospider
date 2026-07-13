@@ -23,11 +23,18 @@ namespace {
 /**
  * @brief Registers deterministic operations used by CLI command tests.
  *
+ * @return Nothing.
  * @throws std::bad_alloc if registry storage allocation fails.
+ * @throws Any registry exception unchanged; std::call_once retries a later
+ *         invocation when registration does not complete.
+ * @note Registration is process-wide and thread-safe through std::call_once;
+ *       the callbacks remain in the process-global registry until shutdown.
  * @note The test operations are monolithic and CPU-only. Dirty planning emits
  *       a monolithic dirty-region record for inspect tests, while the
  *       empty-output op lets save-command tests exercise successful computes
- *       with no image.
+ *       with no image. The fixed-offset dirty propagator ignores optional
+ *       execution-time inputs because its mapping depends only on the requested
+ *       ROI and remains identical during planning and execution.
  */
 void register_cli_command_ops() {
   static std::once_flag once;
@@ -66,11 +73,14 @@ void register_cli_command_ops() {
             }));
     OpRegistry::instance().register_dirty_propagator(
         "cli_dirty_test", "offset_identity",
-        DirtyRoiPropFunc([](const Node&, const cv::Rect& roi, const GraphModel&,
-                            const cv::Size&, const std::vector<cv::Size>&,
-                            const plugin::ParameterMap&) {
-          return cv::Rect(roi.x + 64, roi.y, roi.width, roi.height);
-        }));
+        DirtyRoiPropFunc(
+            [](const Node&, const cv::Rect& roi, const GraphModel&,
+               const cv::Size&, const std::vector<cv::Size>&,
+               const plugin::ParameterMap&,
+               const std::vector<const NodeOutput*>* available_inputs) {
+              (void)available_inputs;
+              return cv::Rect(roi.x + 64, roi.y, roi.width, roi.height);
+            }));
     OpRegistry::instance().register_op_hp_monolithic(
         "cli_dirty_test", "empty_output",
         MonolithicOpFunc(
