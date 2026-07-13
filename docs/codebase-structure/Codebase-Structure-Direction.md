@@ -682,6 +682,29 @@ For any implementation change following this document:
   omitted or cannot be matched to a compile command.
   This Doxygen/source-quality audit is a documented manual tool and is not a
   CTest or CI entry.
+- The manual CLI Doxygen audit also maintains a fail-closed companion manifest
+  for application-private headers that do not receive their own compilation
+  database rows. The manifest covers dependency-tree formatting, traversal,
+  both node editors, the CLI completer, every split autocomplete definition,
+  their types and important fields, anonymous formatter helpers, and the
+  documented `node_editor.cpp` local type, named lambdas, option callbacks,
+  renderers, and `CatchEvent` callback. Repeated callback member names use
+  explicit entity locators rather than first-name matching. Every
+  required implementation must remain in the configured target closure and
+  have an exact compile command; every manifest entity must retain an immediate
+  complete Doxygen block. Callables require `@brief`, `@return`, `@throws`,
+  `@note`, and one matching `@param` for every actual parameter; types require
+  `@brief`, `@throws`, and `@note`; fields require `@brief`. A definition may
+  instead use `@copydoc` only when its complete target is the manifest's exact
+  global symbol or `CliAutocompleter` member/constructor. A missing file,
+  inventory row, compile command, tag, parameter, or comment is an audit
+  failure. The tool's negative self-checks copy real sources and the manifest
+  under `/tmp`, then delete a comment, corrupt a copy target, delete a parameter
+  tag, and delete an inventory row; every mutation must fail through the normal
+  scanner and comparison path. Run the tool
+  explicitly with a configured `compile_commands.json` and write its transient
+  observations outside the repository; it must not be registered with CTest or
+  CI and must not create `tests/results` artifacts.
 - Maintain the real-process IPC integration test that starts `photospiderd`
   and exercises the public typed client plus malformed raw frames.
 - Keep the non-installed `ipc_output_fixture_daemon` only as a dependency of
