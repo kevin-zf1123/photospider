@@ -3359,6 +3359,7 @@ TEST_F(PluginManagerLifecycleTest,
  * @brief Proves reserved key separators abort a real DSO registration
  * transaction without replacing prior host state.
  *
+ * @return Nothing.
  * @throws Nothing when both type and subtype rejection cases preserve registry
  * keys, source ownership, retained-handle count, and the predecessor callback.
  * @note The fixture stages its ordinary callbacks before attempting the invalid
@@ -3411,6 +3412,7 @@ TEST_F(PluginManagerLifecycleTest,
 /**
  * @brief Proves a raw DSO registrar call cannot stage an empty operation.
  *
+ * @return Nothing.
  * @throws Nothing when host validation reports InvalidParameter, preserves all
  * registry/source/handle state, and retires already staged callable state
  * before the rejected candidate library unloads.
