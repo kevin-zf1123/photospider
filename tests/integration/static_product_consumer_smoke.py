@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import argparse
+import ctypes
 import json
 import platform
 import re
@@ -12,6 +13,7 @@ import shutil
 import subprocess
 import sys
 from pathlib import Path
+from textwrap import dedent
 from typing import Any
 
 
@@ -253,6 +255,33 @@ def run_command(
             flush=True,
         )
     return proc.returncode
+
+
+def run_installed_scheduler_contract_probe(plugin: Path) -> int:
+    """@brief Invoke the fixture-only contract export from one built DSO.
+
+    @param plugin Exact scheduler module selected from its CMake manifest.
+    @return Probe status, or 127 when loading or symbol resolution fails.
+    @throws None Load and symbol failures are converted to status 127.
+    @note The DSO contains no backend dependency. The probe covers a batch with
+      one empty and one valid handle plus null-exception/reset semantics.
+    """
+
+    try:
+        library = ctypes.CDLL(str(plugin))
+        probe = library.ps_installed_scheduler_contract_probe
+        probe.argtypes = []
+        probe.restype = ctypes.c_int
+        status = int(probe())
+    except (AttributeError, OSError) as error:
+        print(
+            f"installed scheduler contract probe could not run: {error}",
+            file=sys.stderr,
+            flush=True,
+        )
+        return 127
+    print(f"installed scheduler contract probe exited with {status}", flush=True)
+    return status
 
 
 def configure_fresh_producer(
@@ -582,8 +611,10 @@ def write_consumer_projects(
 ) -> tuple[list[str], dict[str, list[str]]]:
     """@brief Create independent embedded and IPC installed consumers.
 
-    The embedded project uses default package semantics and compiles every
-    installed public header. The IPC project explicitly requests only the
+    The embedded project uses default package semantics, links the static
+    product, and explicitly opts into ``operation_opencv`` because its single
+    translation unit compiles every installed public header, including the
+    optional OpenCV adapter. The IPC project explicitly requests only the
     ``ipc_client`` component and links only its exported target. Each project
     generates its own target manifest for single- and multi-config generators.
 
@@ -594,7 +625,10 @@ def write_consumer_projects(
     @throws OSError If directories or generated source files cannot be written.
     @throws RuntimeError If the IPC harness does not reference the exact 55
       Client and 53 Host operation names once each.
-    @note :func:`main` recreates the surrounding work directory on every run.
+    @note The explicit adapter link supplies only this consumer's OpenCV usage
+      requirements; it must not weaken the product's ``LINK_ONLY`` dependency
+      contract or leak OpenCV into the operation/scheduler SDK consumers.
+      :func:`main` recreates the surrounding work directory on every run.
     """
 
     embedded_source_dir.mkdir(parents=True, exist_ok=True)
@@ -611,7 +645,9 @@ def write_consumer_projects(
                 "endif()",
                 "add_executable(photospider_consumer main.cpp)",
                 "target_link_libraries(photospider_consumer",
-                "    PRIVATE Photospider::photospider)",
+                "    PRIVATE",
+                "        Photospider::photospider",
+                "        Photospider::operation_opencv)",
                 "file(GENERATE",
                 '    OUTPUT "${CMAKE_BINARY_DIR}/photospider_consumer_target_$<CONFIG>.txt"',
                 '    CONTENT "$<TARGET_FILE:photospider_consumer>\\n")',
@@ -623,21 +659,102 @@ def write_consumer_projects(
     (embedded_source_dir / "main.cpp").write_text(
         "\n".join(
             [
+                "#include <algorithm>",
                 "#include <cstddef>",
+                "#include <filesystem>",
+                "#include <iostream>",
                 "#include <memory>",
+                "#include <string>",
+                "#include <vector>",
                 "",
                 *include_lines,
                 "",
-                "int main() {",
+                "int main(int argc, char** argv) {",
+                "  if (argc != 5) {",
+                '    std::cerr << "usage: consumer <scheduler-plugin> "',
+                '                 "<operation-plugin> <session-root> <yaml>\\n";',
+                "    return 64;",
+                "  }",
                 "  auto host = ps::create_embedded_host();",
                 "  if (!host) {",
                 "    return 1;",
+                "  }",
+                "  const auto scheduler_load = host->scheduler_load(argv[1]);",
+                "  if (!scheduler_load.status.ok) {",
+                "    std::cerr << scheduler_load.status.message << '\\n';",
+                "    return 2;",
+                "  }",
+                "  const std::filesystem::path operation_plugin(argv[2]);",
+                "  const auto operation_load = host->plugins_load_report(",
+                "      {operation_plugin.parent_path().string()});",
+                "  if (!operation_load.status.ok || operation_load.value.loaded != 1 ||",
+                "      !operation_load.value.errors.empty() ||",
+                "      std::find(operation_load.value.new_op_keys.begin(),",
+                "                operation_load.value.new_op_keys.end(),",
+                '                "installed:factory") ==',
+                "          operation_load.value.new_op_keys.end()) {",
+                "    std::cerr << operation_load.status.message << '\\n';",
+                "    return 3;",
+                "  }",
+                "  ps::HostSchedulerConfig scheduler_config;",
+                '  scheduler_config.hp_type = "installed_sdk_smoke";',
+                '  scheduler_config.rt_type = "installed_sdk_smoke";',
+                "  scheduler_config.worker_count = 1;",
+                "  const auto configured =",
+                "      host->configure_scheduler_defaults(scheduler_config);",
+                "  if (!configured.status.ok) {",
+                "    std::cerr << configured.status.message << '\\n';",
+                "    return 4;",
+                "  }",
+                "  ps::GraphLoadRequest graph_request;",
+                '  graph_request.session = ps::GraphSessionId{"installed_extension"};',
+                "  graph_request.root_dir = argv[3];",
+                "  graph_request.yaml_path = argv[4];",
+                "  graph_request.cache_root_dir =",
+                '      (std::filesystem::path(argv[3]) / "cache").string();',
+                "  const auto loaded = host->load_graph(graph_request);",
+                "  if (!loaded.status.ok) {",
+                "    std::cerr << loaded.status.message << '\\n';",
+                "    return 5;",
+                "  }",
+                "  const auto scheduler_info = host->scheduler_info(",
+                "      loaded.value, ps::ComputeIntent::GlobalHighPrecision);",
+                "  if (!scheduler_info.status.ok ||",
+                '      scheduler_info.value.scheduler_name != "installed_sdk_smoke") {',
+                "    std::cerr << scheduler_info.status.message << '\\n';",
+                "    return 6;",
+                "  }",
+                "  ps::HostComputeRequest compute_request;",
+                "  compute_request.session = loaded.value;",
+                "  compute_request.node = ps::NodeId{1};",
+                '  compute_request.cache.precision = "fp32";',
+                "  compute_request.cache.nosave = true;",
+                "  compute_request.execution.parallel = true;",
+                "  compute_request.execution.quiet = true;",
+                "  compute_request.intent = ps::ComputeIntent::GlobalHighPrecision;",
+                "  const auto computed = host->compute(compute_request);",
+                "  if (!computed.status.ok) {",
+                "    std::cerr << computed.status.message << '\\n';",
+                "    return 7;",
                 "  }",
                 "  const std::size_t step = ps::aligned_image_buffer_step(",
                 "      8, 4, ps::DataType::FLOAT32);",
                 "  auto image = ps::make_aligned_cpu_image_buffer(",
                 "      2, 2, 4, ps::DataType::FLOAT32);",
-                "  return step == 128 && image.data ? 0 : 2;",
+                "  if (step != 128 || !image.data) {",
+                "    return 8;",
+                "  }",
+                "  const auto closed = host->close_graph(loaded.value);",
+                "  if (!closed.status.ok) {",
+                "    std::cerr << closed.status.message << '\\n';",
+                "    return 9;",
+                "  }",
+                "  const auto unloaded = host->plugins_unload_all();",
+                "  if (!unloaded.status.ok || unloaded.value < 1) {",
+                "    std::cerr << unloaded.status.message << '\\n';",
+                "    return 10;",
+                "  }",
+                "  return 0;",
                 "}",
                 "",
             ]
@@ -697,6 +814,555 @@ def write_consumer_projects(
     )
     (ipc_source_dir / "main.cpp").write_text(ipc_source, encoding="utf-8")
     return include_lines, inventories
+
+
+def installed_scheduler_plugin_source() -> str:
+    """@brief Build a source-tree-independent scheduler DSO consumer.
+
+    @return C++17 source implementing the complete installed scheduler ABI.
+    @throws None The source is one immutable in-memory string.
+    @note The implementation is deliberately synchronous so the scheduler SDK
+      consumer requires neither ``Threads`` nor any backend package.
+    """
+
+    return dedent(
+        r"""
+        #include <algorithm>
+        #include <cstddef>
+        #include <cstdint>
+        #include <cstring>
+        #include <exception>
+        #include <limits>
+        #include <optional>
+        #include <stdexcept>
+        #include <string>
+        #include <type_traits>
+        #include <utility>
+        #include <vector>
+
+        #include <photospider/scheduler/scheduler_plugin_api.hpp>
+
+        static_assert(std::has_virtual_destructor_v<ps::TaskExecutor>,
+                      "concrete executor destruction must remain polymorphic");
+        static_assert(!std::is_destructible_v<ps::TaskExecutor>,
+                      "borrowed TaskExecutor must not be base-deletable");
+
+        namespace {
+
+        /**
+         * @brief Minimal synchronous scheduler compiled only from installed SDK.
+         * @throws std::invalid_argument for an invalid initial count.
+         * @throws std::overflow_error when completion accounting would overflow.
+         * @throws Submitted task and allocation exceptions unchanged.
+         * @note It borrows the host between attach/detach and retains no handles.
+         */
+        class InstalledScheduler final : public ps::IScheduler {
+         public:
+          /** @copydoc ps::IScheduler::attach */
+          void attach(ps::SchedulerHostContext& host) noexcept override {
+            host_ = &host;
+          }
+          /** @copydoc ps::IScheduler::detach */
+          void detach() noexcept override { host_ = nullptr; }
+          /** @copydoc ps::IScheduler::start */
+          void start() noexcept override { running_ = true; }
+          /** @copydoc ps::IScheduler::shutdown */
+          void shutdown() noexcept override { running_ = false; }
+          /** @copydoc ps::IScheduler::name */
+          std::string name() const override { return "installed_sdk_smoke"; }
+          /** @copydoc ps::IScheduler::get_stats */
+          std::string get_stats() const override { return "synchronous"; }
+          /** @copydoc ps::IScheduler::is_running */
+          bool is_running() const noexcept override { return running_; }
+
+          /** @copydoc ps::SchedulerTaskRuntime::submit_initial_task_handles */
+          void submit_initial_task_handles(
+              std::vector<ps::TaskHandle>&& handles, int total_task_count,
+              ps::SchedulerTaskPriority priority) override {
+            (void)priority;
+            const std::size_t valid_handle_count =
+                static_cast<std::size_t>(std::count_if(
+                    handles.begin(), handles.end(),
+                    [](const ps::TaskHandle& handle) {
+                      return static_cast<bool>(handle);
+                    }));
+            if (total_task_count < 0 ||
+                valid_handle_count >
+                    static_cast<std::size_t>(total_task_count)) {
+              throw std::invalid_argument("invalid installed scheduler batch");
+            }
+            tasks_to_complete_ =
+                valid_handle_count == 0U ? 0 : total_task_count;
+            error_ = nullptr;
+            for (const ps::TaskHandle handle : handles) {
+              if (handle) {
+                handle.run();
+              }
+            }
+          }
+
+          /**
+           * @copydoc ps::SchedulerTaskRuntime::submit_ready_task_handles_from_worker
+           */
+          void submit_ready_task_handles_from_worker(
+              std::vector<ps::TaskHandle>&& handles,
+              ps::SchedulerTaskPriority priority) override {
+            (void)priority;
+            for (const ps::TaskHandle handle : handles) {
+              handle.run();
+            }
+          }
+
+          /** @copydoc ps::SchedulerTaskRuntime::submit_ready_task_any_thread */
+          void submit_ready_task_any_thread(
+              Task&& task, ps::SchedulerTaskPriority priority,
+              std::optional<std::uint64_t> epoch) override {
+            (void)priority;
+            (void)epoch;
+            if (task) {
+              task();
+            }
+          }
+
+          /** @copydoc ps::SchedulerTaskRuntime::wait_for_completion */
+          void wait_for_completion() override {
+            if (error_) {
+              std::exception_ptr error = error_;
+              error_ = nullptr;
+              std::rethrow_exception(error);
+            }
+          }
+
+          /** @copydoc ps::SchedulerTaskRuntime::set_exception */
+          void set_exception(std::exception_ptr error) override {
+            if (error != nullptr && !error_) {
+              error_ = error;
+            }
+          }
+
+          /** @copydoc ps::SchedulerTaskRuntime::inc_tasks_to_complete */
+          void inc_tasks_to_complete(int delta) override {
+            if (delta <= 0) {
+              return;
+            }
+            if (tasks_to_complete_ > std::numeric_limits<int>::max() - delta) {
+              throw std::overflow_error("installed scheduler counter overflow");
+            }
+            tasks_to_complete_ += delta;
+          }
+
+          /** @copydoc ps::SchedulerTaskRuntime::dec_tasks_to_complete */
+          void dec_tasks_to_complete() override {
+            if (tasks_to_complete_ > 0) {
+              --tasks_to_complete_;
+            }
+          }
+
+          /** @copydoc ps::SchedulerTaskRuntime::log_event */
+          void log_event(ps::SchedulerTraceAction action,
+                         int node_id) noexcept override {
+            if (host_ != nullptr) {
+              host_->log_event(action, node_id, 0, 1U);
+            }
+          }
+
+         private:
+          /** @brief Borrowed installed host context, or null while detached. */
+          ps::SchedulerHostContext* host_ = nullptr;
+          /** @brief Synchronous lifecycle state. */
+          bool running_ = false;
+          /** @brief Logical completion count for compile/link coverage. */
+          int tasks_to_complete_ = 0;
+          /** @brief First exact synchronous callback exception. */
+          std::exception_ptr error_;
+        };
+
+        /**
+         * @brief Counts valid handle execution for the installed-DSO probe.
+         * @throws Nothing.
+         * @note The executor owns no scheduler or plugin state and is borrowed
+         *       only during one synchronous initial submission.
+         */
+        class InstalledCountingExecutor final : public ps::TaskExecutor {
+         public:
+          /**
+           * @brief Records one valid task-handle callback.
+           * @param task_id Dense task id supplied by the probe.
+           * @return Nothing.
+           * @throws Nothing.
+           * @note The probe uses task zero; the value is otherwise diagnostic.
+           */
+          void run_task(int task_id) noexcept override {
+            (void)task_id;
+            ++execution_count_;
+          }
+
+          /**
+           * @brief Reads the number of valid callbacks entered.
+           * @return Synchronous execution count.
+           * @throws Nothing.
+           * @note The probe reads only after initial submission returns.
+           */
+          int execution_count() const noexcept { return execution_count_; }
+
+         private:
+          /** @brief Number of valid task handles executed synchronously. */
+          int execution_count_ = 0;
+        };
+
+        static_assert(std::is_destructible_v<InstalledCountingExecutor>,
+                      "concrete executor must remain owner-destructible");
+
+        }  // namespace
+
+        /**
+         * @brief Exercises empty-handle and null-exception runtime contracts.
+         * @return Zero on success; one for invalid callback count, two when a
+         *         null publication clears the tagged exception, three when a
+         *         fresh batch fails to reset it, or four for another failure.
+         * @throws Nothing; every C++ exception is converted to status four.
+         * @note This fixture-only export is invoked by the package smoke after
+         *       loading the installed-header-only DSO. It is not scheduler ABI.
+         */
+        extern "C" PHOTOSPIDER_SCHEDULER_PLUGIN_EXPORT int
+        ps_installed_scheduler_contract_probe() noexcept {
+          try {
+            InstalledScheduler scheduler;
+            scheduler.start();
+            InstalledCountingExecutor executor;
+            std::vector<ps::TaskHandle> handles{
+                ps::TaskHandle{}, ps::TaskHandle{&executor, 0, 1}};
+            scheduler.submit_initial_task_handles(
+                std::move(handles), 1, ps::SchedulerTaskPriority::Normal);
+            if (executor.execution_count() != 1) {
+              return 1;
+            }
+            scheduler.dec_tasks_to_complete();
+            scheduler.set_exception(nullptr);
+            scheduler.wait_for_completion();
+
+            scheduler.set_exception(std::make_exception_ptr(
+                std::runtime_error("installed scheduler tagged error")));
+            scheduler.set_exception(nullptr);
+            bool tagged_error_observed = false;
+            try {
+              scheduler.wait_for_completion();
+            } catch (const std::runtime_error& error) {
+              tagged_error_observed =
+                  std::strcmp(error.what(),
+                              "installed scheduler tagged error") == 0;
+            }
+            if (!tagged_error_observed) {
+              return 2;
+            }
+
+            scheduler.set_exception(std::make_exception_ptr(
+                std::runtime_error("installed scheduler stale error")));
+            scheduler.submit_initial_task_handles(
+                {}, 0, ps::SchedulerTaskPriority::Normal);
+            try {
+              scheduler.wait_for_completion();
+            } catch (...) {
+              return 3;
+            }
+            scheduler.shutdown();
+            return 0;
+          } catch (...) {
+            return 4;
+          }
+        }
+
+        /**
+         * @brief Returns the exact installed scheduler ABI generation.
+         * @return ``PS_SCHEDULER_PLUGIN_ABI_VERSION``.
+         * @throws Nothing.
+         */
+        extern "C" PHOTOSPIDER_SCHEDULER_PLUGIN_EXPORT std::uint32_t
+        ps_scheduler_plugin_get_abi_version() noexcept {
+          return ps::PS_SCHEDULER_PLUGIN_ABI_VERSION;
+        }
+
+        /**
+         * @brief Reports the single scheduler type in this smoke DSO.
+         * @return One.
+         * @throws Nothing.
+         */
+        extern "C" PHOTOSPIDER_SCHEDULER_PLUGIN_EXPORT std::uint32_t
+        ps_scheduler_plugin_get_count() noexcept { return 1U; }
+
+        /**
+         * @brief Returns the indexed smoke scheduler name.
+         * @param index Scheduler index.
+         * @return Stable name for index zero, otherwise null.
+         * @throws Nothing.
+         */
+        extern "C" PHOTOSPIDER_SCHEDULER_PLUGIN_EXPORT const char*
+        ps_scheduler_plugin_get_name(std::uint32_t index) noexcept {
+          return index == 0U ? "installed_sdk_smoke" : nullptr;
+        }
+
+        /**
+         * @brief Returns the indexed smoke scheduler description.
+         * @param index Scheduler index.
+         * @return Stable description for index zero, otherwise null.
+         * @throws Nothing.
+         */
+        extern "C" PHOTOSPIDER_SCHEDULER_PLUGIN_EXPORT const char*
+        ps_scheduler_plugin_get_description(std::uint32_t index) noexcept {
+          return index == 0U ? "installed SDK smoke scheduler" : nullptr;
+        }
+
+        /**
+         * @brief Creates the named smoke scheduler.
+         * @param type_name Requested scheduler name.
+         * @param num_workers Ignored synchronous worker hint.
+         * @return New scheduler, or null for another name.
+         * @throws std::bad_alloc if allocation fails.
+         */
+        extern "C" PHOTOSPIDER_SCHEDULER_PLUGIN_EXPORT ps::IScheduler*
+        ps_scheduler_plugin_create(const char* type_name,
+                                   std::uint32_t num_workers) {
+          (void)num_workers;
+          if (type_name == nullptr ||
+              std::strcmp(type_name, "installed_sdk_smoke") != 0) {
+            return nullptr;
+          }
+          return new InstalledScheduler();
+        }
+
+        /**
+         * @brief Destroys one scheduler created by this DSO.
+         * @param scheduler Owned scheduler pointer, or null.
+         * @return Nothing.
+         * @throws Nothing under the scheduler destructor contract.
+         */
+        extern "C" PHOTOSPIDER_SCHEDULER_PLUGIN_EXPORT void
+        ps_scheduler_plugin_destroy(ps::IScheduler* scheduler) noexcept {
+          delete scheduler;
+        }
+
+        /**
+         * @brief Returns a human-readable smoke implementation version.
+         * @return Process-lifetime version literal.
+         * @throws Nothing.
+         */
+        extern "C" PHOTOSPIDER_SCHEDULER_PLUGIN_EXPORT const char*
+        ps_scheduler_plugin_get_version() noexcept {
+          return "installed-smoke-1";
+        }
+        """
+    ).lstrip()
+
+
+def installed_operation_plugin_source() -> str:
+    """@brief Build an operation DSO that needs only ``operation_sdk``.
+
+    @return C++17 source registering one factory-backed monolithic operation.
+    @throws None The source is one immutable in-memory string.
+    @note Calling the image factory from the DSO forces the SDK's transitive
+      runtime archive to satisfy the symbol at link time.
+    """
+
+    return dedent(
+        r"""
+        #include <stdexcept>
+
+        #include <photospider/plugin/plugin_api.hpp>
+
+        /**
+         * @brief Registers one installed-SDK operation using the image factory.
+         * @param registrar Borrowed host registration transaction.
+         * @return Nothing.
+         * @throws std::invalid_argument for a null registrar.
+         * @throws Any allocation or host registration exception unchanged.
+         */
+        extern "C" PHOTOSPIDER_OPERATION_PLUGIN_EXPORT void
+        register_photospider_ops_v2(
+            ps::plugin::OperationPluginRegistrar* registrar) {
+          if (registrar == nullptr) {
+            throw std::invalid_argument("installed operation registrar is null");
+          }
+          registrar->register_op_hp_monolithic(
+              "installed", "factory",
+              [](const ps::plugin::NodeView&,
+                 ps::plugin::ArrayView<ps::plugin::OperationInputView>) {
+                ps::plugin::OperationOutput output;
+                output.image_buffer = ps::make_aligned_cpu_image_buffer(
+                    2, 2, 1, ps::DataType::UINT8);
+                return output;
+              });
+        }
+        """
+    ).lstrip()
+
+
+def write_extension_consumer_projects(
+    scheduler_source_dir: Path,
+    operation_source_dir: Path,
+    opencv_source_dir: Path,
+    real_opencv_config_dir: Path,
+) -> None:
+    """@brief Create three independent installed extension-SDK consumers.
+
+    @param scheduler_source_dir Scheduler-only DSO project directory.
+    @param operation_source_dir Operation SDK DSO/executable project directory.
+    @param opencv_source_dir OpenCV-core-only adapter consumer directory.
+    @param real_opencv_config_dir Producer-resolved OpenCV config directory.
+    @return Nothing.
+    @throws OSError If project or shim files cannot be written.
+    @throws RuntimeError If the real OpenCV package config cannot be located.
+    @note No generated target receives a repository source include directory.
+      The operation fixture is a ``SHARED`` library so its platform suffix
+      matches the production directory scanner (``.dylib`` on macOS); the
+      scheduler fixture remains a ``MODULE`` because it is loaded by exact path.
+    """
+
+    scheduler_source_dir.mkdir(parents=True, exist_ok=True)
+    operation_source_dir.mkdir(parents=True, exist_ok=True)
+    opencv_source_dir.mkdir(parents=True, exist_ok=True)
+
+    (scheduler_source_dir / "CMakeLists.txt").write_text(
+        dedent(
+            """
+            cmake_minimum_required(VERSION 3.16)
+            project(installed_scheduler_sdk_consumer LANGUAGES CXX)
+            find_package(Photospider CONFIG REQUIRED COMPONENTS scheduler_sdk)
+            if(DEFINED OpenCV_FOUND OR TARGET yaml-cpp::yaml-cpp OR
+               TARGET Threads::Threads)
+              message(FATAL_ERROR "scheduler SDK discovered backend packages")
+            endif()
+            add_library(installed_scheduler_plugin MODULE scheduler_plugin.cpp)
+            target_compile_definitions(installed_scheduler_plugin PRIVATE
+                PHOTOSPIDER_SCHEDULER_PLUGIN_BUILD)
+            target_link_libraries(installed_scheduler_plugin PRIVATE
+                Photospider::scheduler_sdk)
+            file(GENERATE
+                OUTPUT "${CMAKE_BINARY_DIR}/installed_scheduler_plugin_target_$<CONFIG>.txt"
+                CONTENT "$<TARGET_FILE:installed_scheduler_plugin>\n")
+            """
+        ).lstrip(),
+        encoding="utf-8",
+    )
+    (scheduler_source_dir / "scheduler_plugin.cpp").write_text(
+        installed_scheduler_plugin_source(), encoding="utf-8"
+    )
+
+    (operation_source_dir / "CMakeLists.txt").write_text(
+        dedent(
+            """
+            cmake_minimum_required(VERSION 3.16)
+            project(installed_operation_sdk_consumer LANGUAGES CXX)
+            find_package(Photospider CONFIG REQUIRED COMPONENTS operation_sdk)
+            if(DEFINED OpenCV_FOUND OR TARGET yaml-cpp::yaml-cpp OR
+               TARGET Threads::Threads)
+              message(FATAL_ERROR "operation SDK discovered backend packages")
+            endif()
+            # The Host scans operation-plugin directories by the documented
+            # platform shared-library suffix, including .dylib on macOS.
+            add_library(installed_operation_plugin SHARED operation_plugin.cpp)
+            target_compile_definitions(installed_operation_plugin PRIVATE
+                PHOTOSPIDER_PLUGIN_BUILD)
+            target_link_libraries(installed_operation_plugin PRIVATE
+                Photospider::operation_sdk)
+            file(GENERATE
+                OUTPUT "${CMAKE_BINARY_DIR}/installed_operation_plugin_target_$<CONFIG>.txt"
+                CONTENT "$<TARGET_FILE:installed_operation_plugin>\n")
+            add_executable(installed_operation_factory main.cpp)
+            target_link_libraries(installed_operation_factory PRIVATE
+                Photospider::operation_sdk)
+            file(GENERATE
+                OUTPUT "${CMAKE_BINARY_DIR}/installed_operation_factory_target_$<CONFIG>.txt"
+                CONTENT "$<TARGET_FILE:installed_operation_factory>\n")
+            """
+        ).lstrip(),
+        encoding="utf-8",
+    )
+    (operation_source_dir / "operation_plugin.cpp").write_text(
+        installed_operation_plugin_source(), encoding="utf-8"
+    )
+    (operation_source_dir / "main.cpp").write_text(
+        dedent(
+            """
+            #include <photospider/core/image_buffer.hpp>
+
+            /**
+             * @brief Calls the SDK-transitive image factory from an executable.
+             * @return Zero only when allocated storage and dimensions are valid.
+             * @throws Nothing; allocation failure terminates the smoke process.
+             */
+            int main() {
+              const auto image = ps::make_aligned_cpu_image_buffer(
+                  3, 2, 1, ps::DataType::UINT8);
+              return image.data && image.width == 3 && image.height == 2 ? 0 : 1;
+            }
+            """
+        ).lstrip(),
+        encoding="utf-8",
+    )
+
+    real_config_candidates = (
+        real_opencv_config_dir / "OpenCVConfig.cmake",
+        real_opencv_config_dir / "opencv-config.cmake",
+    )
+    real_config = next(
+        (candidate for candidate in real_config_candidates if candidate.is_file()),
+        None,
+    )
+    if real_config is None:
+        raise RuntimeError(f"OpenCV config not found below {real_opencv_config_dir}")
+    shim_dir = opencv_source_dir / "opencv-core-shim"
+    shim_dir.mkdir()
+    (shim_dir / "OpenCVConfig.cmake").write_text(
+        dedent(
+            f"""
+            if(NOT "${{OpenCV_FIND_COMPONENTS}}" STREQUAL "core")
+              message(FATAL_ERROR
+                  "operation_opencv requested non-core modules: ${{OpenCV_FIND_COMPONENTS}}")
+            endif()
+            include("{real_config.as_posix()}")
+            """
+        ).lstrip(),
+        encoding="utf-8",
+    )
+    (opencv_source_dir / "CMakeLists.txt").write_text(
+        dedent(
+            """
+            cmake_minimum_required(VERSION 3.16)
+            project(installed_operation_opencv_consumer LANGUAGES CXX)
+            find_package(Photospider CONFIG REQUIRED COMPONENTS operation_opencv)
+            if(TARGET yaml-cpp::yaml-cpp OR TARGET Threads::Threads)
+              message(FATAL_ERROR "operation_opencv discovered unrelated packages")
+            endif()
+            add_executable(installed_operation_opencv main.cpp)
+            target_link_libraries(installed_operation_opencv PRIVATE
+                Photospider::operation_opencv)
+            file(GENERATE
+                OUTPUT "${CMAKE_BINARY_DIR}/installed_operation_opencv_target_$<CONFIG>.txt"
+                CONTENT "$<TARGET_FILE:installed_operation_opencv>\n")
+            """
+        ).lstrip(),
+        encoding="utf-8",
+    )
+    (opencv_source_dir / "main.cpp").write_text(
+        dedent(
+            """
+            #include <opencv2/core.hpp>
+            #include <photospider/plugin/opencv_adapter.hpp>
+
+            /**
+             * @brief Exercises the installed adapter using OpenCV core only.
+             * @return Zero when the wrapped descriptor retains matrix storage.
+             * @throws Nothing; adapter failure terminates the smoke process.
+             */
+            int main() {
+              cv::Mat matrix(2, 3, CV_8UC1, cv::Scalar(9));
+              const auto image = ps::plugin::opencv::from_mat(matrix);
+              return image.data && image.width == 3 && image.height == 2 ? 0 : 1;
+            }
+            """
+        ).lstrip(),
+        encoding="utf-8",
+    )
 
 
 def cmake_cache_value(build: Path, key: str) -> str:
@@ -1238,6 +1904,8 @@ def evaluate_behavior(observations: dict[str, Any]) -> bool:
         and install["targets_exists"],
         "only include/photospider headers are installed": install["unexpected_headers"]
         == [],
+        "installed public header inventory is exactly 23 files": len(install["headers"])
+        == 23,
         "consumer compiles every installed public header": compiled_headers
         == install["headers"],
         "exported namespace target exists": install["export_mentions_namespace_target"],
@@ -1301,6 +1969,27 @@ def evaluate_behavior(observations: dict[str, Any]) -> bool:
         "IPC-only component configure succeeds with backend discovery disabled": (
             commands["ipc_consumer_configure"] == 0
         ),
+        "scheduler SDK configures with all backend discovery disabled": (
+            commands["scheduler_sdk_configure"] == 0
+        ),
+        "scheduler SDK builds an installed-header-only DSO": (
+            commands["scheduler_sdk_build"] == 0
+        ),
+        "installed scheduler DSO satisfies empty-handle and null contracts": (
+            commands["scheduler_contract_probe"] == 0
+        ),
+        "operation SDK configures with all backend discovery disabled": (
+            commands["operation_sdk_configure"] == 0
+        ),
+        "operation SDK builds a DSO and factory executable": (
+            commands["operation_sdk_build"] == 0
+        ),
+        "operation OpenCV config requests only the core component": (
+            commands["operation_opencv_configure"] == 0
+        ),
+        "operation OpenCV adapter builds with the core-only package shim": (
+            commands["operation_opencv_build"] == 0
+        ),
         "unknown required component configure fails": commands[
             "unknown_component_configure"
         ]
@@ -1348,8 +2037,30 @@ def evaluate_behavior(observations: dict[str, Any]) -> bool:
         "CMake target manifest resolves IPC consumer executable": observations[
             "consumer"
         ]["ipc_executable_discovery"]["selected_from_manifest"],
-        "consumer executable ran successfully": commands["consumer_run"] == 0,
+        "CMake target manifest resolves operation SDK executable": observations[
+            "consumer"
+        ]["operation_sdk_executable_discovery"]["selected_from_manifest"],
+        "CMake target manifest resolves scheduler SDK plugin": observations["consumer"][
+            "scheduler_plugin_discovery"
+        ]["selected_from_manifest"],
+        "CMake target manifest resolves operation SDK plugin": observations["consumer"][
+            "operation_plugin_discovery"
+        ]["selected_from_manifest"],
+        "CMake target manifest resolves operation OpenCV executable": observations[
+            "consumer"
+        ]["operation_opencv_executable_discovery"]["selected_from_manifest"],
+        "installed Host loads both extension DSOs and computes through them": (
+            commands["consumer_run"] == 0
+        ),
         "IPC-only consumer executable ran successfully": commands["ipc_consumer_run"]
+        == 0,
+        "operation SDK-only factory executable ran successfully": commands[
+            "operation_sdk_run"
+        ]
+        == 0,
+        "operation OpenCV core-only executable ran successfully": commands[
+            "operation_opencv_run"
+        ]
         == 0,
     }
     passed = all(checks.values())
@@ -1421,6 +2132,12 @@ def main() -> int:
     embedded_consumer_build = work / "embedded-consumer-build"
     ipc_consumer_src = work / "ipc-consumer-src"
     ipc_consumer_build = work / "ipc-consumer-build"
+    scheduler_sdk_src = work / "scheduler-sdk-consumer-src"
+    scheduler_sdk_build = work / "scheduler-sdk-consumer-build"
+    operation_sdk_src = work / "operation-sdk-consumer-src"
+    operation_sdk_build = work / "operation-sdk-consumer-build"
+    operation_opencv_src = work / "operation-opencv-consumer-src"
+    operation_opencv_build = work / "operation-opencv-consumer-build"
     unknown_component_src = work / "unknown-component-src"
     unknown_component_build = work / "unknown-component-build"
     compiled_public_headers, surface_inventory = write_consumer_projects(
@@ -1456,12 +2173,24 @@ def main() -> int:
             flush=True,
         )
 
+    opencv_config_dir_value = cmake_cache_value(build, "OpenCV_DIR")
+    if not opencv_config_dir_value or opencv_config_dir_value.endswith("-NOTFOUND"):
+        raise RuntimeError("producer cache does not contain a usable OpenCV_DIR")
+    write_extension_consumer_projects(
+        scheduler_sdk_src,
+        operation_sdk_src,
+        operation_opencv_src,
+        Path(opencv_config_dir_value),
+    )
+
     build_product_command = [
         args.cmake_executable,
         "--build",
         str(build),
         "--target",
         "photospider",
+        "photospider_operation_runtime",
+        "photospider_operation_opencv",
         "photospider_ipc_client",
         "photospiderd",
     ]
@@ -1498,6 +2227,39 @@ def main() -> int:
         "-DCMAKE_DISABLE_FIND_PACKAGE_OpenCV=TRUE",
         "-DCMAKE_DISABLE_FIND_PACKAGE_yaml-cpp=TRUE",
     ]
+    scheduler_sdk_configure_command = [
+        args.cmake_executable,
+        "-S",
+        str(scheduler_sdk_src),
+        "-B",
+        str(scheduler_sdk_build),
+        f"-DCMAKE_PREFIX_PATH={prefix}",
+        "-DCMAKE_DISABLE_FIND_PACKAGE_Threads=TRUE",
+        "-DCMAKE_DISABLE_FIND_PACKAGE_OpenCV=TRUE",
+        "-DCMAKE_DISABLE_FIND_PACKAGE_yaml-cpp=TRUE",
+    ]
+    operation_sdk_configure_command = [
+        args.cmake_executable,
+        "-S",
+        str(operation_sdk_src),
+        "-B",
+        str(operation_sdk_build),
+        f"-DCMAKE_PREFIX_PATH={prefix}",
+        "-DCMAKE_DISABLE_FIND_PACKAGE_Threads=TRUE",
+        "-DCMAKE_DISABLE_FIND_PACKAGE_OpenCV=TRUE",
+        "-DCMAKE_DISABLE_FIND_PACKAGE_yaml-cpp=TRUE",
+    ]
+    operation_opencv_configure_command = [
+        args.cmake_executable,
+        "-S",
+        str(operation_opencv_src),
+        "-B",
+        str(operation_opencv_build),
+        f"-DCMAKE_PREFIX_PATH={prefix}",
+        f"-DOpenCV_DIR={operation_opencv_src / 'opencv-core-shim'}",
+        "-DCMAKE_DISABLE_FIND_PACKAGE_Threads=TRUE",
+        "-DCMAKE_DISABLE_FIND_PACKAGE_yaml-cpp=TRUE",
+    ]
     unknown_component_configure_command = [
         args.cmake_executable,
         "-S",
@@ -1510,6 +2272,9 @@ def main() -> int:
         for command in (
             embedded_configure_command,
             ipc_configure_command,
+            scheduler_sdk_configure_command,
+            operation_sdk_configure_command,
+            operation_opencv_configure_command,
             unknown_component_configure_command,
         ):
             command.extend(["-G", args.generator])
@@ -1520,10 +2285,21 @@ def main() -> int:
         or f"{install_libdir}/cmake/Photospider"
     )
     if osx_architectures:
-        for command in (embedded_configure_command, ipc_configure_command):
+        for command in (
+            embedded_configure_command,
+            ipc_configure_command,
+            scheduler_sdk_configure_command,
+            operation_sdk_configure_command,
+            operation_opencv_configure_command,
+        ):
             command.append(f"-DCMAKE_OSX_ARCHITECTURES={osx_architectures}")
     embedded_configure_code = run_command(embedded_configure_command, repo)
     ipc_configure_code = run_command(ipc_configure_command, repo)
+    scheduler_sdk_configure_code = run_command(scheduler_sdk_configure_command, repo)
+    operation_sdk_configure_code = run_command(operation_sdk_configure_command, repo)
+    operation_opencv_configure_code = run_command(
+        operation_opencv_configure_command, repo
+    )
     unknown_component_configure_code = run_command(
         unknown_component_configure_command, repo
     )
@@ -1538,17 +2314,50 @@ def main() -> int:
         "--build",
         str(ipc_consumer_build),
     ]
+    scheduler_sdk_build_command = [
+        args.cmake_executable,
+        "--build",
+        str(scheduler_sdk_build),
+    ]
+    operation_sdk_build_command = [
+        args.cmake_executable,
+        "--build",
+        str(operation_sdk_build),
+    ]
+    operation_opencv_build_command = [
+        args.cmake_executable,
+        "--build",
+        str(operation_opencv_build),
+    ]
     if args.config:
         embedded_build_command.extend(["--config", args.config])
         ipc_build_command.extend(["--config", args.config])
+        scheduler_sdk_build_command.extend(["--config", args.config])
+        operation_sdk_build_command.extend(["--config", args.config])
+        operation_opencv_build_command.extend(["--config", args.config])
     embedded_build_code = run_command(embedded_build_command, repo)
     ipc_build_code = run_command(ipc_build_command, repo)
+    scheduler_sdk_build_code = run_command(scheduler_sdk_build_command, repo)
+    operation_sdk_build_code = run_command(operation_sdk_build_command, repo)
+    operation_opencv_build_code = run_command(operation_opencv_build_command, repo)
 
     executable_discovery = find_consumer_executable(
         embedded_consumer_build, args.config, "photospider_consumer"
     )
     ipc_executable_discovery = find_consumer_executable(
         ipc_consumer_build, args.config, "photospider_ipc_consumer"
+    )
+    operation_sdk_executable_discovery = find_consumer_executable(
+        operation_sdk_build, args.config, "installed_operation_factory"
+    )
+    scheduler_plugin_discovery = find_consumer_executable(
+        scheduler_sdk_build, args.config, "installed_scheduler_plugin"
+    )
+    operation_plugin_discovery = find_consumer_executable(
+        operation_sdk_build, args.config, "installed_operation_plugin"
+    )
+    operation_opencv_executable_discovery = find_consumer_executable(
+        operation_opencv_build, args.config, "installed_operation_opencv"
     )
     consumer_generator = cmake_cache_value(embedded_consumer_build, "CMAKE_GENERATOR")
     consumer_configuration_types = cmake_cache_value(
@@ -1563,13 +2372,71 @@ def main() -> int:
         if executable_discovery["selected"]
         else None
     )
-    run_code = 127
-    if executable is not None and executable.is_file():
-        run_code = run_command([str(executable)], repo)
+    scheduler_plugin = (
+        Path(scheduler_plugin_discovery["selected"])
+        if scheduler_plugin_discovery["selected"]
+        else None
+    )
+    operation_plugin = (
+        Path(operation_plugin_discovery["selected"])
+        if operation_plugin_discovery["selected"]
+        else None
+    )
+    scheduler_contract_probe_code = 127
+    if scheduler_plugin is not None and scheduler_plugin.is_file():
+        scheduler_contract_probe_code = run_installed_scheduler_contract_probe(
+            scheduler_plugin
+        )
     else:
         print(
-            "consumer executable not found; discovery="
-            + json.dumps(executable_discovery, sort_keys=True),
+            "scheduler SDK plugin not found for contract probe; discovery="
+            + json.dumps(scheduler_plugin_discovery, sort_keys=True),
+            file=sys.stderr,
+            flush=True,
+        )
+    extension_graph = work / "installed-extension-graph.yaml"
+    extension_graph.write_text(
+        "\n".join(
+            [
+                "- id: 1",
+                "  name: installed_factory",
+                "  type: installed",
+                "  subtype: factory",
+                "",
+            ]
+        ),
+        encoding="utf-8",
+    )
+    run_code = 127
+    if (
+        executable is not None
+        and executable.is_file()
+        and scheduler_plugin is not None
+        and scheduler_plugin.is_file()
+        and operation_plugin is not None
+        and operation_plugin.is_file()
+    ):
+        run_code = run_command(
+            [
+                str(executable),
+                str(scheduler_plugin),
+                str(operation_plugin),
+                str(work / "installed-extension-sessions"),
+                str(extension_graph),
+            ],
+            repo,
+        )
+    else:
+        print(
+            "consumer or extension plugin not found; discovery="
+            + json.dumps(
+                {
+                    "consumer": executable_discovery,
+                    "scheduler": scheduler_plugin_discovery,
+                    "operation": operation_plugin_discovery,
+                },
+                sort_keys=True,
+            ),
             file=sys.stderr,
             flush=True,
         )
@@ -1585,6 +2452,43 @@ def main() -> int:
         print(
             "IPC consumer executable not found; discovery="
             + json.dumps(ipc_executable_discovery, sort_keys=True),
+            file=sys.stderr,
+            flush=True,
+        )
+
+    operation_sdk_executable = (
+        Path(operation_sdk_executable_discovery["selected"])
+        if operation_sdk_executable_discovery["selected"]
+        else None
+    )
+    operation_sdk_run_code = 127
+    if operation_sdk_executable is not None and operation_sdk_executable.is_file():
+        operation_sdk_run_code = run_command([str(operation_sdk_executable)], repo)
+    else:
+        print(
+            "operation SDK consumer executable not found; discovery="
+            + json.dumps(operation_sdk_executable_discovery, sort_keys=True),
+            file=sys.stderr,
+            flush=True,
+        )
+
+    operation_opencv_executable = (
+        Path(operation_opencv_executable_discovery["selected"])
+        if operation_opencv_executable_discovery["selected"]
+        else None
+    )
+    operation_opencv_run_code = 127
+    if (
+        operation_opencv_executable is not None
+        and operation_opencv_executable.is_file()
+    ):
+        operation_opencv_run_code = run_command(
+            [str(operation_opencv_executable)], repo
+        )
+    else:
+        print(
+            "operation OpenCV consumer executable not found; discovery="
+            + json.dumps(operation_opencv_executable_discovery, sort_keys=True),
             file=sys.stderr,
             flush=True,
         )
@@ -1607,9 +2511,18 @@ def main() -> int:
             "embedded_consumer_build": embedded_build_code,
             "ipc_consumer_configure": ipc_configure_code,
             "ipc_consumer_build": ipc_build_code,
+            "scheduler_sdk_configure": scheduler_sdk_configure_code,
+            "scheduler_sdk_build": scheduler_sdk_build_code,
+            "scheduler_contract_probe": scheduler_contract_probe_code,
+            "operation_sdk_configure": operation_sdk_configure_code,
+            "operation_sdk_build": operation_sdk_build_code,
+            "operation_opencv_configure": operation_opencv_configure_code,
+            "operation_opencv_build": operation_opencv_build_code,
             "unknown_component_configure": unknown_component_configure_code,
             "consumer_run": run_code,
             "ipc_consumer_run": ipc_run_code,
+            "operation_sdk_run": operation_sdk_run_code,
+            "operation_opencv_run": operation_opencv_run_code,
         },
         "install_tree": install_tree,
         "paths": {
@@ -1627,6 +2540,12 @@ def main() -> int:
             "ipc_configuration_types": ipc_consumer_configuration_types,
             "executable_discovery": executable_discovery,
             "ipc_executable_discovery": ipc_executable_discovery,
+            "operation_sdk_executable_discovery": (operation_sdk_executable_discovery),
+            "scheduler_plugin_discovery": scheduler_plugin_discovery,
+            "operation_plugin_discovery": operation_plugin_discovery,
+            "operation_opencv_executable_discovery": (
+                operation_opencv_executable_discovery
+            ),
             "surface_inventory": surface_inventory,
         },
         "producer": {

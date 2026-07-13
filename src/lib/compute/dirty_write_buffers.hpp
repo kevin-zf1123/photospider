@@ -19,8 +19,11 @@ namespace ps::compute {
  * worker tasks. The owning executor commits the staged data into GraphModel
  * only after the RT sibling commit gate allows original-graph mutation.
  *
- * @note Existing HP output is deep-copied before tiled ROI writes so worker
+ * @note Existing CPU output is deep-copied before tiled ROI writes so worker
  * execution never mutates visible GraphModel image storage before commit.
+ * Opaque non-CPU descriptors are shared only until tiled allocation or
+ * monolithic whole-output replacement; their payload is never mutated through
+ * the generic staging path.
  */
 class HighPrecisionDirtyWriteBuffer {
  public:
@@ -66,6 +69,25 @@ class HighPrecisionDirtyWriteBuffer {
    * execute a full-output HP plan before commit.
    */
   NodeOutput& ensure_output(const Node& node);
+
+  /**
+   * @brief Imports one immutable HP preflight result into request staging.
+   *
+   * @param node Graph node whose final HP state may be committed.
+   * @param output Preflight output copied into request-local ownership.
+   * @param hp_version Version to publish after complete request success.
+   * @param hp_roi Full image ROI represented by output, when applicable.
+   * @param dirty_source_generation Shared generation for preflight closure
+   * roots, otherwise nullopt.
+   * @return Nothing.
+   * @throws std::bad_alloc when output ownership or map storage is copied.
+   * @note Import never mutates GraphModel. A later phase may read the staged
+   * output, but externally satisfied preflight nodes must not write it again.
+   */
+  void import_precomputed_output(
+      const Node& node, const NodeOutput& output, int hp_version,
+      const std::optional<cv::Rect>& hp_roi,
+      std::optional<uint64_t> dirty_source_generation = std::nullopt);
 
   /**
    * @brief Records HP metadata for one successful dirty node update.
@@ -147,8 +169,9 @@ class HighPrecisionDirtyWriteBuffer {
  * dirty worker tasks execute. After all RT work drains, the owning executor
  * commits staged state into RealtimeProxyGraph, not into GraphModel.
  *
- * @note Existing committed proxy output is deep-copied before ROI writes so
- * worker execution cannot mutate visible proxy state before commit.
+ * @note Existing committed CPU proxy output is deep-copied before ROI writes.
+ * Opaque non-CPU descriptors are shared only until replacement and are never
+ * mutated through the generic staging path.
  */
 class RealtimeProxyWriteBuffer {
  public:

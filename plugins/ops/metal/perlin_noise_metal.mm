@@ -6,15 +6,16 @@
 #import <CoreVideo/CoreVideo.h>
 #import <Metal/Metal.h>
 
-#include "adapter/buffer_adapter_opencv.hpp"
-#include "core/param_utils.hpp"
 #include "metal/metal_exception_boundary.hpp"
-#include "node.hpp"  // NOLINT(build/include_subdir)
+#include "photospider/plugin/opencv_adapter.hpp"
 
 // This specific OpenCV header is required for the interop function
 #include <opencv2/core/core_c.h>
 
 #include <algorithm>
+#include <cmath>
+#include <cstdint>
+#include <limits>
 #include <memory>
 #include <mutex>
 #include <numeric>
@@ -23,6 +24,7 @@
 #include <random>
 #include <stdexcept>
 #include <string>
+#include <string_view>
 #include <vector>
 
 /**
@@ -72,6 +74,68 @@ const char* perlin_shader_source = R"(
 
 namespace ps {
 namespace ops {
+
+/**
+ * @brief Reads one optional integer parameter from a public node snapshot.
+ * @param node Public operation identity and effective parameters.
+ * @param key Parameter name to read.
+ * @param fallback Value returned when the parameter is absent.
+ * @return Int64 or exactly integral Double converted after range validation.
+ * @throws plugin::ParameterTypeError for a non-numeric or fractional value.
+ * @throws std::out_of_range when the value does not fit int.
+ * @note Numeric alternatives are inspected explicitly; exact public accessors
+ *       never perform cross-alternative conversion.
+ */
+int parameter_int(const plugin::NodeView& node, std::string_view key,
+                  int fallback) {
+  const plugin::ParameterValue* value = node.find_parameter(key);
+  if (!value) {
+    return fallback;
+  }
+  double numeric = 0.0;
+  if (value->is_int64()) {
+    numeric = static_cast<double>(value->as_int64());
+  } else if (value->is_double()) {
+    numeric = value->as_double();
+  } else {
+    throw plugin::ParameterTypeError(plugin::ParameterKind::Int64,
+                                     value->kind());
+  }
+  if (!std::isfinite(numeric) || std::trunc(numeric) != numeric) {
+    throw plugin::ParameterTypeError(plugin::ParameterKind::Int64,
+                                     value->kind());
+  }
+  if (numeric < static_cast<double>(std::numeric_limits<int>::min()) ||
+      numeric > static_cast<double>(std::numeric_limits<int>::max())) {
+    throw std::out_of_range("Metal Perlin integer parameter is out of range");
+  }
+  return static_cast<int>(numeric);
+}
+
+/**
+ * @brief Reads one optional numeric parameter from a public node snapshot.
+ * @param node Public operation identity and effective parameters.
+ * @param key Parameter name to read.
+ * @param fallback Value returned when the parameter is absent.
+ * @return Double or integer alternative converted to double.
+ * @throws plugin::ParameterTypeError for a non-numeric parameter.
+ * @note Boolean and string alternatives are never converted implicitly.
+ */
+double parameter_double(const plugin::NodeView& node, std::string_view key,
+                        double fallback) {
+  const plugin::ParameterValue* value = node.find_parameter(key);
+  if (!value) {
+    return fallback;
+  }
+  if (value->is_double()) {
+    return value->as_double();
+  }
+  if (value->is_int64()) {
+    return static_cast<double>(value->as_int64());
+  }
+  throw plugin::ParameterTypeError(plugin::ParameterKind::Double,
+                                   value->kind());
+}
 
 /**
  * @brief Process-wide Metal objects required by the Perlin source operation.
@@ -185,7 +249,7 @@ static MetalState& GetMetalState() {
  * @throws std::runtime_error when Metal initialization fails.
  * @note The function is idempotent after successful std::call_once completion.
  */
-extern "C" void perlin_noise_metal_eager_init() {
+void perlin_noise_metal_eager_init() {
   (void)GetMetalState();
 }
 
@@ -201,10 +265,10 @@ static std::mutex g_metal_perlin_mutex;
 /**
  * @brief Executes the Metal Perlin source operation with contextual errors.
  *
- * @param node Runtime parameters controlling width, height, grid size, and
- * random seed.
- * @param inputs Unused source-operation input list.
- * @return NodeOutput owning a CPU copy of the generated floating-point image.
+ * @param node Public effective parameters controlling width, height, grid size,
+ * and random seed.
+ * @param inputs Unused borrowed source-operation input list.
+ * @return Public output owning a CPU copy of the generated image.
  * @throws std::bad_alloc unchanged from parameter parsing, working buffers, or
  * output conversion; also propagates diagnostic-construction exhaustion.
  * @throws std::runtime_error with the current stage for other standard or
@@ -213,23 +277,24 @@ static std::mutex g_metal_perlin_mutex;
  * boundary and use an autorelease pool. Returned storage does not retain Metal
  * resources.
  */
-NodeOutput op_perlin_noise_metal(const Node& node,
-                                 const std::vector<const NodeOutput*>& inputs) {
+plugin::OperationOutput op_perlin_noise_metal(
+    const plugin::NodeView& node,
+    plugin::ArrayView<plugin::OperationInputView> inputs) {
   (void)inputs;
   @autoreleasepool {
     const char* dbg_stage = "start";
     return detail::run_serialized_metal_exception_boundary(
         "perlin_noise_metal", dbg_stage, g_metal_perlin_mutex,
-        [&]() -> NodeOutput {
+        [&]() -> plugin::OperationOutput {
           // FIX: 关闭 OpenCV 的 OpenCL（只需做一次；放在这里最省事）
           static std::once_flag ocl_once;
           std::call_once(ocl_once, [] { cv::ocl::setUseOpenCL(false); });
 
-          const auto& P = node.runtime_parameters;
-          int width = as_int_flexible(P, "width", 256);
-          int height = as_int_flexible(P, "height", 256);
-          float scale = as_double_flexible(P, "grid_size", 1.0);
-          int seed = as_int_flexible(P, "seed", -1);
+          int width = parameter_int(node, "width", 256);
+          int height = parameter_int(node, "height", 256);
+          float scale =
+              static_cast<float>(parameter_double(node, "grid_size", 1.0));
+          int seed = parameter_int(node, "seed", -1);
           dbg_stage = "validate_parameters";
           if (width <= 0 || height <= 0) {
             throw std::invalid_argument(
@@ -339,8 +404,8 @@ NodeOutput op_perlin_noise_metal(const Node& node,
           cv::Mat mat_copy = mat_view.clone();
 
           dbg_stage = "wrap_result";
-          NodeOutput result;
-          result.image_buffer = fromCvMat(mat_copy);
+          plugin::OperationOutput result;
+          result.image_buffer = plugin::opencv::from_mat(mat_copy);
           return result;
         });
   }

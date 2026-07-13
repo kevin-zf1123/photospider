@@ -15,8 +15,9 @@
 #include <utility>
 #include <vector>
 
-#include "plugin_api.hpp"  // NOLINT(build/include_subdir)
-#include "ps_types.hpp"    // NOLINT(build/include_subdir)
+#include "core/ps_types.hpp"  // NOLINT(build/include_subdir)
+#include "photospider/plugin/plugin_api.hpp"
+#include "plugin/operation_host_adapter.hpp"
 
 #if defined(PHOTOSPIDER_INTERNAL_BAD_ALLOC_TESTING)
 #include "core/op_registry_test_access.hpp"
@@ -81,7 +82,7 @@ void maybe_fail_operation_plugin_bookkeeping(
 }
 #endif
 
-using RegisterOpsFunc = RegisterPhotospiderOpsV1;
+using RegisterOpsFunc = plugin::RegisterPhotospiderOpsV2;
 
 /**
  * @brief Host context passed through the operation plugin registrar.
@@ -92,7 +93,8 @@ using RegisterOpsFunc = RegisterPhotospiderOpsV1;
  * point is executing.
  *
  * @note Plugins receive only the opaque `user_data` pointer inside
- * `OperationPluginRegistrar`; they must not retain it after registration.
+ * `plugin::OperationPluginRegistrar`; they must not retain it after
+ * registration.
  */
 struct HostRegistrarContext {
   /** @brief Staged registry that temporarily owns callbacks and metadata. */
@@ -123,15 +125,21 @@ struct HostRegistrarContext {
  *       destruction destroys plugin-owned callable state before releasing the
  *       last possible dynamic-library handle. Copied wrappers share the state,
  *       allowing explicit unload to remove registry visibility immediately
- *       while an in-flight invocation safely finishes. A returned `NodeOutput`
- *       also receives a lease so plugin-instantiated YAML/control-block state
- *       is destroyed before final unmapping. In test builds, a true
+ *       while an in-flight invocation safely finishes. In test builds, a true
  *       `observe_device_retirement` uses a borrowed process-global observer;
  *       its owner must outlive every wrapper copy and serialize clearing the
  *       observer with final wrapper retirement. Because wrapper copies share
  *       one plugin callback state and registry locking does not serialize
  *       invocation, the plugin target must be reentrant or internally
- *       synchronized.
+ *       synchronized. The exception fence covers only the actual plugin
+ *       callback frame. Resource exhaustion keeps the `std::bad_alloc`
+ *       category through a fresh host-owned object. Every other plugin-origin
+ *       exception is inspected while the library lease is alive and converted
+ *       to a host-owned `GraphError`;
+ *       exact plugin exception types intentionally do not cross the unloadable
+ *       DSO boundary. Host adapter conversion before callback entry and
+ *       validation after callback return execute outside this wrapper and
+ *       preserve their host-owned exception types.
  */
 template <typename Return, typename... Args>
 std::function<Return(Args...)> retain_plugin_library(
@@ -198,15 +206,25 @@ std::function<Return(Args...)> retain_plugin_library(
       std::move(library_lifetime), std::move(callback),
       observe_device_retirement);
   return [state = std::move(state)](Args... args) -> Return {
-    if constexpr (std::is_void_v<Return>) {
-      state->callback(std::forward<Args>(args)...);
-      return;
-    } else {
-      Return result = state->callback(std::forward<Args>(args)...);
-      if constexpr (std::is_same_v<std::remove_cv_t<Return>, NodeOutput>) {
-        result.plugin_library_lifetime = state->library_lifetime;
+    try {
+      if constexpr (std::is_void_v<Return>) {
+        state->callback(std::forward<Args>(args)...);
+        return;
+      } else {
+        return state->callback(std::forward<Args>(args)...);
       }
-      return result;
+    } catch (const std::bad_alloc&) {
+      throw std::bad_alloc();
+    } catch (const GraphError& error) {
+      throw GraphError(error.code(), error.what());
+    } catch (const std::invalid_argument& error) {
+      throw GraphError(GraphErrc::InvalidParameter, error.what());
+    } catch (const std::exception& error) {
+      throw GraphError(GraphErrc::ComputeError, error.what());
+    } catch (...) {
+      throw GraphError(GraphErrc::ComputeError,
+                       "Operation plugin callback failed with an unknown "
+                       "exception");
     }
   };
 }
@@ -214,7 +232,8 @@ std::function<Return(Args...)> retain_plugin_library(
 /**
  * @brief Returns the host registrar context or reports ABI misuse.
  *
- * @param user_data Opaque pointer supplied by `OperationPluginRegistrar`.
+ * @param user_data Opaque pointer supplied by
+ * `plugin::OperationPluginRegistrar`.
  * @return Mutable context reference owned by the loader stack frame.
  * @throws std::invalid_argument if the pointer or registry is missing.
  * @note A missing context indicates a loader bug or a plugin calling a copied
@@ -238,7 +257,8 @@ HostRegistrarContext& require_registrar_context(void* user_data) {
  * @param value Borrowed null-terminated type or subtype string.
  * @param label Diagnostic label used for invalid input.
  * @return Copied operation name segment.
- * @throws std::invalid_argument when `value` is null or empty.
+ * @throws std::invalid_argument when `value` is null, empty, or contains the
+ * canonical ':' key separator.
  * @throws std::bad_alloc if copying the string allocates and fails.
  * @note The registrar copies names immediately so plugin-owned string storage
  * does not have to outlive the registration callback.
@@ -248,7 +268,31 @@ std::string require_name_segment(const char* value, const char* label) {
     throw std::invalid_argument(std::string("Operation plugin missing ") +
                                 label + ".");
   }
-  return std::string(value);
+  std::string result(value);
+  if (result.find(':') != std::string::npos) {
+    throw std::invalid_argument(std::string("Operation plugin ") + label +
+                                " contains reserved ':' separator.");
+  }
+  return result;
+}
+
+/**
+ * @brief Validates one plugin operation callback at the raw host boundary.
+ * @tparam Callback Public std::function callback type.
+ * @param callback Callback received directly through the raw registrar slot.
+ * @param label Stable diagnostic label.
+ * @return Nothing.
+ * @throws std::invalid_argument when callback has no callable target.
+ * @note Every raw registrar callback invokes this helper before adapting or
+ * publishing anything to the shadow registry, independently defending callers
+ * that bypass the typed SDK helpers.
+ */
+template <typename Callback>
+void require_operation_callback(const Callback& callback, const char* label) {
+  if (!callback) {
+    throw std::invalid_argument(
+        std::string("Operation plugin supplied empty ") + label + " callback.");
+  }
 }
 
 /**
@@ -259,19 +303,26 @@ std::string require_name_segment(const char* value, const char* label) {
  * @param subtype Borrowed operation subtype string.
  * @param fn Monolithic callback moved from the plugin into the registry.
  * @param meta Metadata associated with the HP implementation.
- * @throws std::invalid_argument for invalid registrar context or names.
+ * @return Nothing.
+ * @throws std::invalid_argument for invalid registrar context, names, or an
+ * empty callback; the loader reports this as `GraphErrc::InvalidParameter`.
  * @throws Exceptions from `OpRegistry` callback storage may propagate.
  * @note This callback is the host-side implementation of
  * `OperationPluginRegistrar::register_op_hp_monolithic`.
  */
 void registrar_register_hp_monolithic(void* user_data, const char* type,
-                                      const char* subtype, MonolithicOpFunc fn,
-                                      OpMetadata meta) {
+                                      const char* subtype,
+                                      plugin::MonolithicOperation fn,
+                                      plugin::OperationMetadata meta) {
+  require_operation_callback(fn, "HP monolithic");
   auto& context = require_registrar_context(user_data);
   context.registry->register_op_hp_monolithic(
       require_name_segment(type, "operation type"),
       require_name_segment(subtype, "operation subtype"),
-      retain_plugin_library(context.library_lifetime, std::move(fn)), meta);
+      plugin_host::adapt_monolithic_operation(
+          retain_plugin_library(context.library_lifetime, std::move(fn)),
+          context.library_lifetime),
+      plugin_host::operation_metadata_to_private(meta));
 }
 
 /**
@@ -282,19 +333,24 @@ void registrar_register_hp_monolithic(void* user_data, const char* type,
  * @param subtype Borrowed operation subtype string.
  * @param fn Tiled callback moved from the plugin into the registry.
  * @param meta Metadata associated with the HP tiled implementation.
- * @throws std::invalid_argument for invalid registrar context or names.
+ * @return Nothing.
+ * @throws std::invalid_argument for invalid registrar context, names, or an
+ * empty callback; the loader reports this as `GraphErrc::InvalidParameter`.
  * @throws Exceptions from `OpRegistry` callback storage may propagate.
  * @note This callback is the host-side implementation of
  * `OperationPluginRegistrar::register_op_hp_tiled`.
  */
 void registrar_register_hp_tiled(void* user_data, const char* type,
-                                 const char* subtype, TileOpFunc fn,
-                                 OpMetadata meta) {
+                                 const char* subtype, plugin::TiledOperation fn,
+                                 plugin::OperationMetadata meta) {
+  require_operation_callback(fn, "HP tiled");
   auto& context = require_registrar_context(user_data);
   context.registry->register_op_hp_tiled(
       require_name_segment(type, "operation type"),
       require_name_segment(subtype, "operation subtype"),
-      retain_plugin_library(context.library_lifetime, std::move(fn)), meta);
+      plugin_host::adapt_tiled_operation(
+          retain_plugin_library(context.library_lifetime, std::move(fn))),
+      plugin_host::operation_metadata_to_private(meta));
 }
 
 /**
@@ -305,19 +361,24 @@ void registrar_register_hp_tiled(void* user_data, const char* type,
  * @param subtype Borrowed operation subtype string.
  * @param fn Tiled callback moved from the plugin into the registry.
  * @param meta Metadata associated with the RT tiled implementation.
- * @throws std::invalid_argument for invalid registrar context or names.
+ * @return Nothing.
+ * @throws std::invalid_argument for invalid registrar context, names, or an
+ * empty callback; the loader reports this as `GraphErrc::InvalidParameter`.
  * @throws Exceptions from `OpRegistry` callback storage may propagate.
  * @note This callback is the host-side implementation of
  * `OperationPluginRegistrar::register_op_rt_tiled`.
  */
 void registrar_register_rt_tiled(void* user_data, const char* type,
-                                 const char* subtype, TileOpFunc fn,
-                                 OpMetadata meta) {
+                                 const char* subtype, plugin::TiledOperation fn,
+                                 plugin::OperationMetadata meta) {
+  require_operation_callback(fn, "RT tiled");
   auto& context = require_registrar_context(user_data);
   context.registry->register_op_rt_tiled(
       require_name_segment(type, "operation type"),
       require_name_segment(subtype, "operation subtype"),
-      retain_plugin_library(context.library_lifetime, std::move(fn)), meta);
+      plugin_host::adapt_tiled_operation(
+          retain_plugin_library(context.library_lifetime, std::move(fn))),
+      plugin_host::operation_metadata_to_private(meta));
 }
 
 /**
@@ -327,18 +388,22 @@ void registrar_register_rt_tiled(void* user_data, const char* type,
  * @param type Borrowed operation type string.
  * @param subtype Borrowed operation subtype string.
  * @param fn Propagator moved from the plugin into the registry.
- * @throws std::invalid_argument for invalid registrar context or names.
+ * @return Nothing.
+ * @throws std::invalid_argument for invalid registrar context, names, or an
+ * empty callback; the loader reports this as `GraphErrc::InvalidParameter`.
  * @throws Exceptions from `OpRegistry` callback storage may propagate.
  * @note The active registration capture records the touched operation key.
  */
 void registrar_register_dirty_propagator(void* user_data, const char* type,
                                          const char* subtype,
-                                         DirtyRoiPropFunc fn) {
+                                         plugin::DirtyRoiPropagator fn) {
+  require_operation_callback(fn, "dirty ROI");
   auto& context = require_registrar_context(user_data);
   context.registry->register_dirty_propagator(
       require_name_segment(type, "operation type"),
       require_name_segment(subtype, "operation subtype"),
-      retain_plugin_library(context.library_lifetime, std::move(fn)));
+      plugin_host::adapt_dirty_propagator(
+          retain_plugin_library(context.library_lifetime, std::move(fn))));
 }
 
 /**
@@ -348,18 +413,22 @@ void registrar_register_dirty_propagator(void* user_data, const char* type,
  * @param type Borrowed operation type string.
  * @param subtype Borrowed operation subtype string.
  * @param fn Propagator moved from the plugin into the registry.
- * @throws std::invalid_argument for invalid registrar context or names.
+ * @return Nothing.
+ * @throws std::invalid_argument for invalid registrar context, names, or an
+ * empty callback; the loader reports this as `GraphErrc::InvalidParameter`.
  * @throws Exceptions from `OpRegistry` callback storage may propagate.
  * @note The active registration capture records the touched operation key.
  */
 void registrar_register_forward_propagator(void* user_data, const char* type,
                                            const char* subtype,
-                                           ForwardRoiPropFunc fn) {
+                                           plugin::ForwardRoiPropagator fn) {
+  require_operation_callback(fn, "forward ROI");
   auto& context = require_registrar_context(user_data);
   context.registry->register_forward_propagator(
       require_name_segment(type, "operation type"),
       require_name_segment(subtype, "operation subtype"),
-      retain_plugin_library(context.library_lifetime, std::move(fn)));
+      plugin_host::adapt_forward_propagator(
+          retain_plugin_library(context.library_lifetime, std::move(fn))));
 }
 
 /**
@@ -369,21 +438,28 @@ void registrar_register_forward_propagator(void* user_data, const char* type,
  * @param type Borrowed operation type string.
  * @param subtype Borrowed operation subtype string.
  * @param fn Builder moved from the plugin into the registry.
- * @param mark_data_dependent Whether the operation is marked data-dependent.
- * @throws std::invalid_argument for invalid registrar context or names.
+ * @param data_dependent Whether image content revisions participate in cache
+ * identity for this builder.
+ * @return Nothing.
+ * @throws std::invalid_argument for invalid registrar context, names, or an
+ * empty callback; the loader reports this as `GraphErrc::InvalidParameter`.
  * @throws Exceptions from `OpRegistry` callback storage may propagate.
- * @note The active registration capture records the touched operation key.
+ * @note Callback and dependency mode are registered in the same shadow
+ * transaction. The active registration capture records the touched operation
+ * key, and candidate rollback restores both ownership slots together.
  */
 void registrar_register_dependency_builder(void* user_data, const char* type,
                                            const char* subtype,
-                                           DependencyLutBuilder fn,
-                                           bool mark_data_dependent) {
+                                           plugin::DependencyLutBuilder fn,
+                                           bool data_dependent) {
+  require_operation_callback(fn, "dependency LUT");
   auto& context = require_registrar_context(user_data);
   context.registry->register_dependency_builder(
       require_name_segment(type, "operation type"),
       require_name_segment(subtype, "operation subtype"),
-      retain_plugin_library(context.library_lifetime, std::move(fn)),
-      mark_data_dependent);
+      plugin_host::adapt_dependency_builder(
+          retain_plugin_library(context.library_lifetime, std::move(fn))),
+      data_dependent);
 }
 
 /**
@@ -396,7 +472,8 @@ void registrar_register_dependency_builder(void* user_data, const char* type,
  * @param fn Monolithic callback moved from the plugin into the registry.
  * @param meta Metadata associated with the device implementation.
  * @return Nothing.
- * @throws std::invalid_argument for invalid registrar context or names.
+ * @throws std::invalid_argument for invalid registrar context, names, or an
+ * empty callback; the loader reports this as `GraphErrc::InvalidParameter`.
  * @throws Exceptions from `OpRegistry` callback storage may propagate.
  * @note This callback preserves the host-owned implementation selection policy.
  *       BUILD_TESTING retirement observation is borrowed and process-global;
@@ -405,14 +482,18 @@ void registrar_register_dependency_builder(void* user_data, const char* type,
  */
 void registrar_register_device_monolithic(void* user_data, const char* type,
                                           const char* subtype, Device device,
-                                          MonolithicOpFunc fn,
-                                          OpMetadata meta) {
+                                          plugin::MonolithicOperation fn,
+                                          plugin::OperationMetadata meta) {
+  require_operation_callback(fn, "device monolithic");
   auto& context = require_registrar_context(user_data);
   context.registry->register_impl(
       require_name_segment(type, "operation type"),
-      require_name_segment(subtype, "operation subtype"), device,
-      retain_plugin_library(context.library_lifetime, std::move(fn), true),
-      meta);
+      require_name_segment(subtype, "operation subtype"),
+      plugin_host::operation_device_to_private(device),
+      plugin_host::adapt_monolithic_operation(
+          retain_plugin_library(context.library_lifetime, std::move(fn), true),
+          context.library_lifetime),
+      plugin_host::operation_metadata_to_private(meta));
 }
 
 /**
@@ -425,7 +506,8 @@ void registrar_register_device_monolithic(void* user_data, const char* type,
  * @param fn Tiled callback moved from the plugin into the registry.
  * @param meta Metadata associated with the device implementation.
  * @return Nothing.
- * @throws std::invalid_argument for invalid registrar context or names.
+ * @throws std::invalid_argument for invalid registrar context, names, or an
+ * empty callback; the loader reports this as `GraphErrc::InvalidParameter`.
  * @throws Exceptions from `OpRegistry` callback storage may propagate.
  * @note This callback preserves the host-owned implementation selection policy.
  *       BUILD_TESTING retirement observation is borrowed and process-global;
@@ -434,13 +516,17 @@ void registrar_register_device_monolithic(void* user_data, const char* type,
  */
 void registrar_register_device_tiled(void* user_data, const char* type,
                                      const char* subtype, Device device,
-                                     TileOpFunc fn, OpMetadata meta) {
+                                     plugin::TiledOperation fn,
+                                     plugin::OperationMetadata meta) {
+  require_operation_callback(fn, "device tiled");
   auto& context = require_registrar_context(user_data);
   context.registry->register_impl(
       require_name_segment(type, "operation type"),
-      require_name_segment(subtype, "operation subtype"), device,
-      retain_plugin_library(context.library_lifetime, std::move(fn), true),
-      meta);
+      require_name_segment(subtype, "operation subtype"),
+      plugin_host::operation_device_to_private(device),
+      plugin_host::adapt_tiled_operation(
+          retain_plugin_library(context.library_lifetime, std::move(fn), true)),
+      plugin_host::operation_metadata_to_private(meta));
 }
 
 /**
@@ -451,20 +537,18 @@ void registrar_register_device_tiled(void* user_data, const char* type,
  * callback.
  * @throws Nothing.
  * @note The returned value is borrowed by plugin code only for the immediate
- * `register_photospider_ops_v1` call.
+ * `register_photospider_ops_v2` call.
  */
-OperationPluginRegistrar make_operation_plugin_registrar(
+plugin::OperationPluginRegistrar make_operation_plugin_registrar(
     HostRegistrarContext& context) {
-  OperationPluginRegistrar registrar;
+  plugin::OperationPluginRegistrar registrar;
   registrar.user_data = &context;
   registrar.register_hp_monolithic = registrar_register_hp_monolithic;
   registrar.register_hp_tiled = registrar_register_hp_tiled;
   registrar.register_rt_tiled = registrar_register_rt_tiled;
-  registrar.register_dirty_propagator_fn = registrar_register_dirty_propagator;
-  registrar.register_forward_propagator_fn =
-      registrar_register_forward_propagator;
-  registrar.register_dependency_builder_fn =
-      registrar_register_dependency_builder;
+  registrar.register_dirty = registrar_register_dirty_propagator;
+  registrar.register_forward = registrar_register_forward_propagator;
+  registrar.register_dependency = registrar_register_dependency_builder;
   registrar.register_device_monolithic = registrar_register_device_monolithic;
   registrar.register_device_tiled = registrar_register_device_tiled;
   return registrar;
@@ -556,7 +640,7 @@ class DynamicLibrary final {
     return std::unique_ptr<DynamicLibrary>(new DynamicLibrary(
         static_cast<void*>(handle), std::move(library_lifetime)));
 #else
-    void* handle = dlopen(path.c_str(), RTLD_LAZY);
+    void* handle = dlopen(path.c_str(), RTLD_NOW | RTLD_LOCAL);
     if (!handle) {
       const char* err = dlerror();
       error_message = err ? err : "dlopen failed";
@@ -575,10 +659,11 @@ class DynamicLibrary final {
    * @param symbol_name Exported symbol name to locate.
    * @param error_message Output error detail when the symbol is missing.
    * @return Typed function pointer on success, or `nullptr` on failure.
-   * @throws Nothing directly; platform symbol lookup errors are returned in
-   * `error_message`.
+   * @throws std::bad_alloc if writing the platform error into `error_message`
+   * cannot allocate.
    * @note POSIX `dlsym` returns `void*`; the cast is isolated here so the call
-   * sites stay simple and auditable.
+   * sites stay simple and auditable. Platform symbol lookup errors themselves
+   * are returned in `error_message`.
    */
   template <typename Function>
   Function resolve(const char* symbol_name, std::string& error_message) const {
@@ -1019,13 +1104,14 @@ class OperationPluginLoadTransaction final {
  * @param library_lifetime Candidate library lease captured by every callback.
  * @param registration_capture Destination snapshot populated by the registry.
  * @return Nothing.
- * @throws std::bad_alloc unchanged from registrar construction, plugin
- * registration, or capture storage.
- * @throws Any other exception thrown by the plugin registrar unchanged.
+ * @throws Exceptions from registrar construction, plugin registration, or
+ * capture storage to the owning loader while library_lifetime remains alive.
  * @note No catch/restore step is needed: `registry` is transaction-owned and
  * unpublished. Its callbacks and capture are destroyed before the candidate
  * library lifetime if any exception exits this function. Registrar/context
- * references remain stack-bounded and are not retained.
+ * references remain stack-bounded and are not retained. The owning loader
+ * copies ordinary diagnostics and replaces any plugin-origin bad_alloc with a
+ * fresh host-owned instance before this lifetime can retire.
  */
 void capture_plugin_registration(
     OpRegistry& registry, RegisterOpsFunc register_ops,
@@ -1055,8 +1141,8 @@ void capture_plugin_registration(
  * @return Nothing.
  * @throws std::filesystem::filesystem_error from `fs::absolute`.
  * @throws std::bad_alloc from result, shadow registry/source/handle copies,
- * registrar execution, or post-registration staging. The original resource
- * exhaustion identity propagates unchanged.
+ * registrar execution, or post-registration staging. Plugin-origin resource
+ * exhaustion is rethrown as a fresh host-owned standard bad_alloc.
  * @note The live singleton, source map, accumulated result, and handle map are
  * changed only by a final no-throw swap phase. On failure the transaction's
  * shadow callback state is destroyed before its candidate handle, so no
@@ -1086,7 +1172,7 @@ void load_one_plugin(const fs::path& path,
   }
 
   auto register_ops = library->resolve<RegisterOpsFunc>(
-      kOperationPluginRegisterSymbolV1, error_message);
+      plugin::kOperationPluginRegisterSymbolV2, error_message);
   if (!register_ops) {
     staged_result.errors.push_back(
         {absolute_path, GraphErrc::InvalidParameter, error_message});
@@ -1103,7 +1189,17 @@ void load_one_plugin(const fs::path& path,
                                 transaction.library_lifetime(),
                                 registration_capture);
   } catch (const std::bad_alloc&) {
-    throw;
+    throw std::bad_alloc();
+  } catch (const GraphError& error) {
+    transaction.result().errors.push_back(
+        {absolute_path, error.code(), error.what()});
+    transaction.commit_result_only(result);
+    return;
+  } catch (const std::invalid_argument& error) {
+    transaction.result().errors.push_back(
+        {absolute_path, GraphErrc::InvalidParameter, error.what()});
+    transaction.commit_result_only(result);
+    return;
   } catch (const std::exception& e) {
     transaction.result().errors.push_back(
         {absolute_path, GraphErrc::Unknown, e.what()});
@@ -1112,7 +1208,7 @@ void load_one_plugin(const fs::path& path,
   } catch (...) {
     transaction.result().errors.push_back(
         {absolute_path, GraphErrc::Unknown,
-         "register_photospider_ops_v1 threw"});
+         "register_photospider_ops_v2 threw"});
     transaction.commit_result_only(result);
     return;
   }

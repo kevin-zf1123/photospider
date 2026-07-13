@@ -14,13 +14,13 @@
 #include <utility>
 #include <vector>
 
-#include "adapter/buffer_adapter_opencv.hpp"
+#include "adapters/opencv/buffer_adapter_opencv.hpp"
 #include "compute/compute_service.hpp"
+#include "core/ps_types.hpp"  // NOLINT(build/include_subdir)
 #include "graph/graph_cache_service.hpp"
 #include "graph/graph_io_service.hpp"
 #include "graph/graph_model.hpp"  // NOLINT(build/include_subdir)
 #include "graph/graph_traversal_service.hpp"
-#include "ps_types.hpp"  // NOLINT(build/include_subdir)
 #include "runtime/graph_event_service.hpp"
 #include "runtime/interaction.hpp"
 #include "runtime/kernel.hpp"

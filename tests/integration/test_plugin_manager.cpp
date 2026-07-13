@@ -19,14 +19,17 @@
 #include <variant>
 #include <vector>
 
+#include "compute/task_graph_planning.hpp"
 #include "core/ops.hpp"
+#include "graph/graph_model.hpp"
+#include "graph/roi_propagation_service.hpp"
 #include "plugin/plugin_manager.hpp"
 #if defined(PHOTOSPIDER_INTERNAL_BAD_ALLOC_TESTING)
 #include "core/op_registry_test_access.hpp"
 #include "plugin/plugin_loader_test_access.hpp"
 #endif
-#include "node.hpp"      // NOLINT(build/include_subdir)
-#include "ps_types.hpp"  // NOLINT(build/include_subdir)
+#include "core/ps_types.hpp"  // NOLINT(build/include_subdir)
+#include "graph/node.hpp"     // NOLINT(build/include_subdir)
 
 namespace plugin_cleanup_allocation_probe {
 
@@ -115,6 +118,9 @@ constexpr const char* kLifecycleSubtype = "op";
 constexpr const char* kLifecycleKey = "plugin_lifecycle:op";
 constexpr const char* kLifecycleCpuDeviceSubtype = "cpu_device";
 constexpr const char* kLifecycleCpuDeviceKey = "plugin_lifecycle:cpu_device";
+constexpr const char* kLifecycleTaskShapeSubtype = "task_shape_override";
+constexpr const char* kLifecycleTaskShapeKey =
+    "plugin_lifecycle:task_shape_override";  // NOLINT(whitespace/indent_namespace)
 constexpr const char* kDirectCpuOwnerType = "direct_cpu_stable_owner";
 constexpr const char* kDirectCpuMonolithicSubtype = "monolithic";
 constexpr const char* kDirectCpuMonolithicKey =
@@ -126,14 +132,30 @@ constexpr const char* kLifecycleThrowEnvironment =
     "PS_LIFECYCLE_PLUGIN_REGISTRAR_THROW";  // NOLINT(whitespace/indent_namespace)
 constexpr const char* kLifecycleCallbackReleaseEnvironment =
     "PS_LIFECYCLE_PLUGIN_CALLBACK_RELEASE_FILE";  // NOLINT(whitespace/indent_namespace)
+constexpr const char* kLifecycleCallbackThrowEnvironment =
+    "PS_LIFECYCLE_PLUGIN_CALLBACK_THROW";  // NOLINT(whitespace/indent_namespace)
 constexpr const char* kLifecycleRegistrarReleaseEnvironment =
     "PS_LIFECYCLE_PLUGIN_REGISTRAR_RELEASE_FILE";  // NOLINT(whitespace/indent_namespace)
 constexpr const char* kLifecycleResultProbeEnvironment =
     "PS_LIFECYCLE_PLUGIN_RESULT_PROBE";  // NOLINT(whitespace/indent_namespace)
+constexpr const char* kLifecycleInvalidResultEnvironment =
+    "PS_LIFECYCLE_PLUGIN_INVALID_RESULT";  // NOLINT(whitespace/indent_namespace)
 constexpr const char* kLifecycleDeviceRegistrarEnvironment =
     "PS_LIFECYCLE_PLUGIN_REGISTER_DEVICES";  // NOLINT(whitespace/indent_namespace)
 constexpr const char* kLifecycleCpuDeviceRegistrarEnvironment =
     "PS_LIFECYCLE_PLUGIN_REGISTER_CPU_DEVICE";  // NOLINT(whitespace/indent_namespace)
+constexpr const char* kLifecycleTaskShapeOverrideEnvironment =
+    "PS_LIFECYCLE_PLUGIN_REGISTER_TASK_SHAPE_OVERRIDE";  // NOLINT(whitespace/indent_namespace)
+constexpr const char* kLifecycleDataDependentEnvironment =
+    "PS_LIFECYCLE_PLUGIN_DATA_DEPENDENT_LUT";  // NOLINT(whitespace/indent_namespace)
+constexpr const char* kLifecycleInvalidRoiEnvironment =
+    "PS_LIFECYCLE_PLUGIN_INVALID_ROI";  // NOLINT(whitespace/indent_namespace)
+constexpr const char* kLifecycleInvalidNameEnvironment =
+    "PS_LIFECYCLE_PLUGIN_INVALID_NAME";  // NOLINT(whitespace/indent_namespace)
+constexpr const char* kLifecycleEmptyCallbackEnvironment =
+    "PS_LIFECYCLE_PLUGIN_EMPTY_CALLBACK";  // NOLINT(whitespace/indent_namespace)
+constexpr const char* kV1OnlyMarkerEnvironment =
+    "PS_V1_ONLY_PLUGIN_MARKER";  // NOLINT(whitespace/indent_namespace)
 
 #ifndef PS_STANDARD_OP_PLUGIN_DIR
 #define PS_STANDARD_OP_PLUGIN_DIR "build/plugins"
@@ -208,6 +230,24 @@ std::filesystem::path override_lifecycle_plugin_path() {
   return dir / "liboverride_lifecycle_op_plugin.dylib";
 #else
   return dir / "liboverride_lifecycle_op_plugin.so";
+#endif
+}
+
+/**
+ * @brief Returns the build output path for the unsupported v1-only fixture.
+ * @return Platform-specific shared library path under test_op_plugin_dir().
+ * @throws std::bad_alloc from path string construction.
+ * @note CMake places this fixture alone in its directory so a retry attempts
+ * exactly one rejected candidate.
+ */
+std::filesystem::path v1_only_plugin_path() {
+  const std::filesystem::path dir = test_op_plugin_dir() / "v1_only";
+#if defined(_WIN32)
+  return dir / "v1_only_op_plugin.dll";
+#elif defined(__APPLE__)
+  return dir / "libv1_only_op_plugin.dylib";
+#else
+  return dir / "libv1_only_op_plugin.so";
 #endif
 }
 
@@ -1339,6 +1379,7 @@ class PluginManagerLifecycleTest : public ::testing::Test {
     (void)PluginManager::process_instance().unload_all_plugins();
     OpRegistry::instance().unregister_key(kLifecycleKey);
     OpRegistry::instance().unregister_key(kLifecycleCpuDeviceKey);
+    OpRegistry::instance().unregister_key(kLifecycleTaskShapeKey);
     OpRegistry::instance().unregister_key(kDirectCpuMonolithicKey);
     OpRegistry::instance().unregister_key(kDirectCpuTiledKey);
   }
@@ -1355,12 +1396,146 @@ class PluginManagerLifecycleTest : public ::testing::Test {
     (void)PluginManager::process_instance().unload_all_plugins();
     OpRegistry::instance().unregister_key(kLifecycleKey);
     OpRegistry::instance().unregister_key(kLifecycleCpuDeviceKey);
+    OpRegistry::instance().unregister_key(kLifecycleTaskShapeKey);
     OpRegistry::instance().unregister_key(kDirectCpuMonolithicKey);
     OpRegistry::instance().unregister_key(kDirectCpuTiledKey);
   }
 };
 
 }  // namespace
+
+TEST_F(PluginManagerLifecycleTest,
+       RejectsV1OnlyPluginWithoutInvocationOrPublication) {
+  const auto plugin_path = v1_only_plugin_path();
+  ASSERT_TRUE(std::filesystem::exists(plugin_path))
+      << "v1-only operation fixture was not built: " << plugin_path;
+  const auto marker_path = lifecycle_trace_path("v1-only-invocation");
+  std::filesystem::remove(marker_path);
+  ScopedEnvironmentVariable marker_environment(kV1OnlyMarkerEnvironment,
+                                               marker_path.string());
+
+  auto& manager = PluginManager::process_instance();
+  manager.seed_builtins_from_registry();
+  const auto registry_keys_before = OpRegistry::instance().get_combined_keys();
+  const auto sources_before = manager.op_sources();
+  const std::size_t handles_before = manager.loaded_plugin_count();
+  for (int attempt = 0; attempt < 2; ++attempt) {
+    SCOPED_TRACE(attempt);
+    const PluginLoadResult result =
+        manager.load_from_dirs_report({plugin_path.parent_path().string()});
+    EXPECT_EQ(result.attempted, 1);
+    EXPECT_EQ(result.loaded, 0);
+    ASSERT_EQ(result.errors.size(), 1u);
+    EXPECT_EQ(result.errors.front().code, GraphErrc::InvalidParameter);
+    EXPECT_NE(result.errors.front().message.find("register_photospider_ops_v2"),
+              std::string::npos);
+    EXPECT_TRUE(result.new_op_keys.empty());
+    EXPECT_EQ(OpRegistry::instance().get_combined_keys(), registry_keys_before);
+    EXPECT_EQ(manager.loaded_plugin_count(), handles_before);
+    EXPECT_EQ(manager.op_sources(), sources_before);
+    EXPECT_FALSE(std::filesystem::exists(marker_path));
+  }
+}
+
+/**
+ * @brief Proves a real plugin shape override and unload invalidate cached
+ * FullTaskGraph tasks without a topology change.
+ *
+ * @throws Nothing when fixture loading, graph expansion, and unload complete.
+ * @note The host first owns a four-tile implementation. The DSO adds a
+ *       preferred monolithic HP slot for the same key while retaining the
+ *       tiled predecessor in its independent slot, then unload restores the
+ *       tiled predecessor. Execution resolution and task-shape planning must
+ *       both honor monolithic HP precedence while both slots coexist. Every
+ *       phase must receive a separately expanded task graph keyed by the
+ *       registry task-shape generation.
+ */
+TEST_F(PluginManagerLifecycleTest,
+       TaskGraphCacheTracksPluginShapeOverrideAndUnloadRestoration) {
+  const auto plugin_path = lifecycle_plugin_path();
+  ASSERT_TRUE(std::filesystem::exists(plugin_path));
+  ScopedEnvironmentVariable shape_override_environment(
+      kLifecycleTaskShapeOverrideEnvironment, "1");
+
+  auto& registry = OpRegistry::instance();
+  OpMetadata tiled_metadata;
+  tiled_metadata.tile_preference = TileSizePreference::MICRO;
+  registry.register_op_hp_tiled(
+      kLifecycleType, kLifecycleTaskShapeSubtype,
+      TileOpFunc(
+          [](const Node&, const OutputTile&, const std::vector<InputTile>&) {}),
+      tiled_metadata);
+
+  GraphModel graph("cache/plugin-task-shape-generation");
+  Node node;
+  node.id = 1;
+  node.name = "plugin_task_shape_generation";
+  node.type = kLifecycleType;
+  node.subtype = kLifecycleTaskShapeSubtype;
+  node.parameters = YAML::Node(YAML::NodeType::Map);
+  node.parameters["width"] = 64;
+  node.parameters["height"] = 16;
+  graph.add_node(node);
+
+  const auto tiled_before = compute::get_or_expand_full_task_graph(
+      graph, ComputeIntent::GlobalHighPrecision);
+  ASSERT_EQ(tiled_before->task_graph.tasks.size(), 4u);
+  EXPECT_TRUE(std::all_of(tiled_before->task_graph.tasks.begin(),
+                          tiled_before->task_graph.tasks.end(),
+                          [](const auto& task) {
+                            return task.kind == compute::PlannedTaskKind::Tile;
+                          }));
+  const std::uint64_t tiled_generation = registry.task_shape_generation();
+
+  auto& manager = PluginManager::process_instance();
+  const PluginLoadResult result =
+      manager.load_from_dirs_report({plugin_path.parent_path().string()});
+  ASSERT_EQ(result.loaded, 1) << describe_errors(result.errors);
+  EXPECT_NE(std::find(result.new_op_keys.begin(), result.new_op_keys.end(),
+                      kLifecycleTaskShapeKey),
+            result.new_op_keys.end());
+  EXPECT_NE(registry.task_shape_generation(), tiled_generation);
+  const auto merged_implementations =
+      registry.get_implementations(kLifecycleType, kLifecycleTaskShapeSubtype);
+  ASSERT_TRUE(merged_implementations.has_value());
+  EXPECT_TRUE(merged_implementations->monolithic_hp.has_value());
+  EXPECT_TRUE(merged_implementations->tiled_hp.has_value());
+  const std::uint64_t monolithic_generation = registry.task_shape_generation();
+  const auto resolved_override =
+      registry.resolve_for_intent(kLifecycleType, kLifecycleTaskShapeSubtype,
+                                  ComputeIntent::GlobalHighPrecision);
+  ASSERT_TRUE(resolved_override.has_value());
+  EXPECT_TRUE(std::holds_alternative<MonolithicOpFunc>(*resolved_override));
+
+  const auto monolithic_override = compute::get_or_expand_full_task_graph(
+      graph, ComputeIntent::GlobalHighPrecision);
+  EXPECT_NE(monolithic_override.get(), tiled_before.get());
+  ASSERT_EQ(monolithic_override->task_graph.tasks.size(), 1u);
+  EXPECT_EQ(monolithic_override->task_graph.tasks.front().kind,
+            compute::PlannedTaskKind::Monolithic);
+
+  EXPECT_EQ(manager.unload_all_plugins(), 2);
+  EXPECT_NE(registry.task_shape_generation(), monolithic_generation);
+  const auto restored_implementations =
+      registry.get_implementations(kLifecycleType, kLifecycleTaskShapeSubtype);
+  ASSERT_TRUE(restored_implementations.has_value());
+  EXPECT_FALSE(restored_implementations->monolithic_hp.has_value());
+  EXPECT_TRUE(restored_implementations->tiled_hp.has_value());
+  const auto resolved_predecessor =
+      registry.resolve_for_intent(kLifecycleType, kLifecycleTaskShapeSubtype,
+                                  ComputeIntent::GlobalHighPrecision);
+  ASSERT_TRUE(resolved_predecessor.has_value());
+  EXPECT_TRUE(std::holds_alternative<TileOpFunc>(*resolved_predecessor));
+  const auto tiled_after_unload = compute::get_or_expand_full_task_graph(
+      graph, ComputeIntent::GlobalHighPrecision);
+  EXPECT_NE(tiled_after_unload.get(), monolithic_override.get());
+  ASSERT_EQ(tiled_after_unload->task_graph.tasks.size(), 4u);
+  EXPECT_TRUE(std::all_of(tiled_after_unload->task_graph.tasks.begin(),
+                          tiled_after_unload->task_graph.tasks.end(),
+                          [](const auto& task) {
+                            return task.kind == compute::PlannedTaskKind::Tile;
+                          }));
+}
 
 TEST_F(PluginManagerLifecycleTest,
        LoadRetainsHandleAndUnloadRemovesMultiImplKey) {
@@ -2920,6 +3095,361 @@ TEST_F(PluginManagerLifecycleTest,
   std::filesystem::remove(release_path);
 }
 
+TEST_F(PluginManagerLifecycleTest,
+       InFlightPluginExceptionsBecomeHostOwnedBeforeConcurrentUnload) {
+  const auto plugin_path = lifecycle_plugin_path();
+  ASSERT_TRUE(std::filesystem::exists(plugin_path));
+  /**
+   * @brief Describes one plugin-origin exception normalization case.
+   * @throws Nothing.
+   * @note String pointers borrow static literals for the enclosing test. Each
+   * case selects a fixture throw mode, its expected DSO destruction event, and
+   * the optional host-owned GraphError code checked after concurrent unload.
+   */
+  struct ExceptionCase {
+    /** @brief Fixture mode selecting the plugin exception type to throw. */
+    const char* mode;
+    /** @brief Trace event proving destruction of the plugin exception. */
+    const char* destroy_event;
+    /** @brief Expected GraphError code, or nullopt for std::bad_alloc. */
+    std::optional<GraphErrc> expected_graph_code;
+  };
+  const ExceptionCase cases[] = {
+      {"custom", "exception_destroy", GraphErrc::ComputeError},
+      {"invalid_argument", "invalid_argument_exception_destroy",
+       GraphErrc::InvalidParameter},
+      {"bad_alloc", "bad_alloc_exception_destroy", std::nullopt},
+  };
+
+  for (const ExceptionCase& test_case : cases) {
+    SCOPED_TRACE(test_case.mode);
+    const auto trace_path =
+        lifecycle_trace_path(std::string("exception-") + test_case.mode);
+    const auto release_path = lifecycle_trace_path(
+        std::string("exception-release-") + test_case.mode);
+    std::filesystem::remove(trace_path);
+    std::filesystem::remove(release_path);
+    ScopedEnvironmentVariable trace_environment(kLifecycleTraceEnvironment,
+                                                trace_path.string());
+    ScopedEnvironmentVariable release_environment(
+        kLifecycleCallbackReleaseEnvironment, release_path.string());
+    ScopedEnvironmentVariable throw_environment(
+        kLifecycleCallbackThrowEnvironment, test_case.mode);
+
+    auto& manager = PluginManager::process_instance();
+    const auto result =
+        manager.load_from_dirs_report({plugin_path.parent_path().string()});
+    ASSERT_EQ(result.loaded, 1) << describe_errors(result.errors);
+    auto resolved = OpRegistry::instance().resolve_for_intent(
+        kLifecycleType, kLifecycleSubtype, ComputeIntent::GlobalHighPrecision);
+    ASSERT_TRUE(resolved.has_value());
+    ASSERT_TRUE(std::holds_alternative<MonolithicOpFunc>(*resolved));
+    MonolithicOpFunc callback =
+        std::move(std::get<MonolithicOpFunc>(*resolved));
+    resolved.reset();
+    auto invocation = std::async(std::launch::async,
+                                 [callback = std::move(callback)]() mutable {
+                                   Node node;
+                                   node.id = 1;
+                                   node.type = kLifecycleType;
+                                   node.subtype = kLifecycleSubtype;
+                                   return callback(node, {});
+                                 });
+    callback = MonolithicOpFunc{};
+    if (!wait_for_lifecycle_event(trace_path, "callback_enter",
+                                  std::chrono::seconds(2))) {
+      std::ofstream(release_path).put('\n');
+      invocation.wait();
+      manager.unload_all_plugins();
+      ADD_FAILURE() << "exception callback did not reach release barrier";
+      continue;
+    }
+    EXPECT_EQ(manager.unload_all_plugins(), 1);
+    std::ofstream(release_path).put('\n');
+    ASSERT_EQ(invocation.wait_for(std::chrono::seconds(2)),
+              std::future_status::ready);
+
+    if (test_case.expected_graph_code) {
+      try {
+        (void)invocation.get();
+        ADD_FAILURE() << "plugin exception escaped normalization";
+      } catch (const GraphError& error) {
+        EXPECT_EQ(error.code(), *test_case.expected_graph_code);
+        EXPECT_NE(std::string(error.what()).find("lifecycle plugin"),
+                  std::string::npos);
+      }
+    } else {
+      try {
+        (void)invocation.get();
+        ADD_FAILURE() << "plugin bad_alloc did not preserve its category";
+      } catch (const std::bad_alloc& error) {
+        EXPECT_EQ(typeid(error), typeid(std::bad_alloc));
+      }
+    }
+
+    const auto trace = read_lifecycle_trace(trace_path);
+    const auto exception_destroy =
+        std::find(trace.begin(), trace.end(), test_case.destroy_event);
+    const auto callback_destroy =
+        std::find(trace.begin(), trace.end(), "callback_destroy");
+    const auto library_unload =
+        std::find(trace.begin(), trace.end(), "library_unload");
+    ASSERT_NE(exception_destroy, trace.end());
+    ASSERT_NE(callback_destroy, trace.end());
+    ASSERT_NE(library_unload, trace.end());
+    EXPECT_LT(exception_destroy, callback_destroy);
+    EXPECT_LT(callback_destroy, library_unload);
+    std::filesystem::remove(trace_path);
+    std::filesystem::remove(release_path);
+  }
+}
+
+/**
+ * @brief Proves loaded callbacks fence only the actual DSO invocation frame.
+ *
+ * @throws Nothing when host pre-entry YAML conversion and post-return output
+ * validation preserve their original host-owned exception types.
+ * @note The release file already exists, so any accidental callback entry is
+ * visible in the lifecycle trace without blocking the test.
+ */
+TEST_F(PluginManagerLifecycleTest,
+       LoadedCallbackPreservesHostAdapterExceptionTypesOutsideDsoFence) {
+  const auto plugin_path = lifecycle_plugin_path();
+  ASSERT_TRUE(std::filesystem::exists(plugin_path));
+  const auto trace_path = lifecycle_trace_path("host-adapter-exceptions");
+  const auto release_path =
+      lifecycle_trace_path("host-adapter-exceptions-release");
+  std::filesystem::remove(trace_path);
+  std::ofstream(release_path).put('\n');
+  ScopedEnvironmentVariable trace_environment(kLifecycleTraceEnvironment,
+                                              trace_path.string());
+  ScopedEnvironmentVariable release_environment(
+      kLifecycleCallbackReleaseEnvironment, release_path.string());
+
+  auto& manager = PluginManager::process_instance();
+  const auto result =
+      manager.load_from_dirs_report({plugin_path.parent_path().string()});
+  ASSERT_EQ(result.loaded, 1) << describe_errors(result.errors);
+  auto resolved = OpRegistry::instance().resolve_for_intent(
+      kLifecycleType, kLifecycleSubtype, ComputeIntent::GlobalHighPrecision);
+  ASSERT_TRUE(resolved.has_value());
+  ASSERT_TRUE(std::holds_alternative<MonolithicOpFunc>(*resolved));
+  MonolithicOpFunc callback = std::move(std::get<MonolithicOpFunc>(*resolved));
+  resolved.reset();
+
+  Node node;
+  node.id = 1;
+  node.type = kLifecycleType;
+  node.subtype = kLifecycleSubtype;
+  node.parameters = YAML::Load("{bad: !unsupported value}");
+  EXPECT_THROW((void)callback(node, {}), YAML::Exception);
+  EXPECT_EQ(read_lifecycle_trace(trace_path),
+            (std::vector<std::string>{"registrar_return"}));
+
+  node.parameters = YAML::Node(YAML::NodeType::Map);
+  {
+    ScopedEnvironmentVariable invalid_result_environment(
+        kLifecycleInvalidResultEnvironment, "1");
+    EXPECT_THROW((void)callback(node, {}), std::invalid_argument);
+  }
+  EXPECT_EQ(read_lifecycle_trace(trace_path),
+            (std::vector<std::string>{"registrar_return", "callback_enter",
+                                      "callback_return"}));
+
+  callback = MonolithicOpFunc{};
+  EXPECT_EQ(manager.unload_all_plugins(), 1);
+  EXPECT_EQ(read_lifecycle_trace(trace_path),
+            (std::vector<std::string>{"registrar_return", "callback_enter",
+                                      "callback_return", "callback_destroy",
+                                      "library_unload"}));
+  std::filesystem::remove(trace_path);
+  std::filesystem::remove(release_path);
+}
+
+/**
+ * @brief Proves malformed ROI return values are rejected after real DSO
+ * callback return.
+ *
+ * @throws Nothing when host-side validation preserves std::invalid_argument,
+ * graph state, cache state, and loaded-plugin lifetime ordering.
+ * @note Negative origins remain legal; this test selects a negative dimension
+ * and a signed-int endpoint overflow, which are the two invalid categories.
+ */
+TEST_F(PluginManagerLifecycleTest,
+       LoadedRoiCallbacksRejectInvalidReturnedGeometryOutsideDsoFence) {
+  const auto plugin_path = lifecycle_plugin_path();
+  ASSERT_TRUE(std::filesystem::exists(plugin_path));
+  const auto trace_path = lifecycle_trace_path("host-roi-validation");
+  std::filesystem::remove(trace_path);
+  ScopedEnvironmentVariable trace_environment(kLifecycleTraceEnvironment,
+                                              trace_path.string());
+
+  auto& manager = PluginManager::process_instance();
+  const auto result =
+      manager.load_from_dirs_report({plugin_path.parent_path().string()});
+  ASSERT_EQ(result.loaded, 1) << describe_errors(result.errors);
+
+  auto& registry = OpRegistry::instance();
+  DirtyRoiPropFunc dirty =
+      registry.get_dirty_propagator(kLifecycleType, kLifecycleSubtype);
+  ForwardRoiPropFunc forward =
+      registry.get_forward_propagator(kLifecycleType, kLifecycleSubtype);
+
+  GraphModel graph("cache/plugin-roi-validation");
+  Node source;
+  source.id = 1;
+  source.name = "roi_source";
+  source.type = "test";
+  source.subtype = "source";
+  source.parameters = YAML::Node(YAML::NodeType::Map);
+  graph.add_node(source);
+  Node child;
+  child.id = 2;
+  child.name = "roi_child";
+  child.type = kLifecycleType;
+  child.subtype = kLifecycleSubtype;
+  child.parameters = YAML::Node(YAML::NodeType::Map);
+  child.image_inputs = {ImageInput{1, "image"}};
+  graph.add_node(child);
+  graph.validate_topology();
+  graph.mutate_node_runtime_state(2, [](auto& state) {
+    NodeOutput sentinel;
+    sentinel.debug.compute_device = "ROI_CACHE_SENTINEL";
+    state.cached_output_high_precision = std::move(sentinel);
+    state.hp_version = 17;
+  });
+  const std::uint64_t topology_generation = graph.topology_generation();
+  const std::uint64_t dirty_generation = graph.dirty_generation_counter;
+  const plugin::ParameterMap parameters;
+
+  {
+    ScopedEnvironmentVariable invalid_roi_environment(
+        kLifecycleInvalidRoiEnvironment, "negative");
+    EXPECT_THROW(
+        (void)dirty(graph.node(2), cv::Rect(1, 2, 3, 4), graph, cv::Size(8, 8),
+                    {cv::Size(8, 8)}, parameters, nullptr),
+        std::invalid_argument);
+  }
+  {
+    ScopedEnvironmentVariable invalid_roi_environment(
+        kLifecycleInvalidRoiEnvironment, "overflow");
+    EXPECT_THROW((void)forward(graph.node(2), cv::Rect(1, 2, 3, 4), graph,
+                               cv::Size(8, 8), cv::Size(8, 8), 0,
+                               {cv::Size(8, 8)}, parameters),
+                 std::invalid_argument);
+  }
+
+  ASSERT_TRUE(graph.node(2).cached_output_high_precision.has_value());
+  EXPECT_EQ(graph.node(2).cached_output_high_precision->debug.compute_device,
+            "ROI_CACHE_SENTINEL");
+  EXPECT_EQ(graph.node(2).hp_version, 17U);
+  EXPECT_EQ(graph.topology_generation(), topology_generation);
+  EXPECT_EQ(graph.dirty_generation_counter, dirty_generation);
+  EXPECT_EQ(read_lifecycle_trace(trace_path),
+            (std::vector<std::string>{"registrar_return", "dirty_roi_return",
+                                      "forward_roi_return"}));
+
+  EXPECT_EQ(manager.unload_all_plugins(), 1);
+  dirty = DirtyRoiPropFunc{};
+  forward = ForwardRoiPropFunc{};
+  std::filesystem::remove(trace_path);
+}
+
+/**
+ * @brief Proves reserved key separators abort a real DSO registration
+ * transaction without replacing prior host state.
+ *
+ * @throws Nothing when both type and subtype rejection cases preserve registry
+ * keys, source ownership, retained-handle count, and the predecessor callback.
+ * @note The fixture stages its ordinary callbacks before attempting the invalid
+ * name, so absence of publication exercises complete transaction rollback.
+ */
+TEST_F(PluginManagerLifecycleTest,
+       InvalidDsoNameSegmentsRollBackWithoutIdentityCollision) {
+  const auto plugin_path = lifecycle_plugin_path();
+  ASSERT_TRUE(std::filesystem::exists(plugin_path));
+  auto& manager = PluginManager::process_instance();
+  auto& registry = OpRegistry::instance();
+
+  for (const std::string mode : {"type", "subtype"}) {
+    SCOPED_TRACE(mode);
+    registry.unregister_key(kLifecycleKey);
+    register_host_lifecycle_sentinel();
+    const auto baseline_keys = registry.get_combined_keys();
+    const auto baseline_sources = manager.op_sources();
+    const std::size_t baseline_handles = manager.loaded_plugin_count();
+    const auto trace_path = lifecycle_trace_path("invalid-name-" + mode);
+    std::filesystem::remove(trace_path);
+    ScopedEnvironmentVariable trace_environment(kLifecycleTraceEnvironment,
+                                                trace_path.string());
+    ScopedEnvironmentVariable invalid_name_environment(
+        kLifecycleInvalidNameEnvironment, mode);
+
+    const auto result =
+        manager.load_from_dirs_report({plugin_path.parent_path().string()});
+    EXPECT_EQ(result.loaded, 0);
+    ASSERT_EQ(result.errors.size(), 1u);
+    EXPECT_EQ(registry.get_combined_keys(), baseline_keys);
+    EXPECT_EQ(manager.op_sources(), baseline_sources);
+    EXPECT_EQ(manager.loaded_plugin_count(), baseline_handles);
+    EXPECT_EQ(current_lifecycle_compute_device(), "HOST_LIFECYCLE_SENTINEL");
+    EXPECT_EQ(
+        read_lifecycle_trace(trace_path),
+        (std::vector<std::string>{mode == "type" ? "registrar_invalid_type"
+                                                 : "registrar_invalid_subtype",
+                                  "callback_destroy", "library_unload"}));
+
+    registry.unregister_key(kLifecycleKey);
+    std::filesystem::remove(trace_path);
+  }
+}
+
+/**
+ * @brief Proves a raw DSO registrar call cannot stage an empty operation.
+ *
+ * @throws Nothing when host validation reports InvalidParameter, preserves all
+ * registry/source/handle state, and retires already staged callable state
+ * before the rejected candidate library unloads.
+ * @note The fixture bypasses the typed SDK helper deliberately, so this test
+ * exercises the host's independent raw-boundary validation and transaction
+ * rollback rather than the public helper precondition.
+ */
+TEST_F(PluginManagerLifecycleTest,
+       EmptyRawDsoCallbackRollsBackBeforeCandidateUnload) {
+  const auto plugin_path = lifecycle_plugin_path();
+  ASSERT_TRUE(std::filesystem::exists(plugin_path));
+  auto& manager = PluginManager::process_instance();
+  auto& registry = OpRegistry::instance();
+
+  registry.unregister_key(kLifecycleKey);
+  register_host_lifecycle_sentinel();
+  const auto baseline_keys = registry.get_combined_keys();
+  const auto baseline_sources = manager.op_sources();
+  const std::size_t baseline_handles = manager.loaded_plugin_count();
+  const auto trace_path = lifecycle_trace_path("empty-raw-callback");
+  std::filesystem::remove(trace_path);
+  ScopedEnvironmentVariable trace_environment(kLifecycleTraceEnvironment,
+                                              trace_path.string());
+  ScopedEnvironmentVariable empty_callback_environment(
+      kLifecycleEmptyCallbackEnvironment, "1");
+
+  const auto result =
+      manager.load_from_dirs_report({plugin_path.parent_path().string()});
+  EXPECT_EQ(result.loaded, 0);
+  ASSERT_EQ(result.errors.size(), 1u);
+  EXPECT_EQ(result.errors.front().code, GraphErrc::InvalidParameter);
+  EXPECT_EQ(registry.get_combined_keys(), baseline_keys);
+  EXPECT_EQ(manager.op_sources(), baseline_sources);
+  EXPECT_EQ(manager.loaded_plugin_count(), baseline_handles);
+  EXPECT_EQ(current_lifecycle_compute_device(), "HOST_LIFECYCLE_SENTINEL");
+  EXPECT_EQ(read_lifecycle_trace(trace_path),
+            (std::vector<std::string>{"registrar_empty_callback",
+                                      "callback_destroy", "library_unload"}));
+
+  registry.unregister_key(kLifecycleKey);
+  std::filesystem::remove(trace_path);
+}
+
 /**
  * @brief Proves copy construction and copy assignment retain an old result
  * lease until every plugin-instantiated payload member is retired.
@@ -2978,6 +3508,47 @@ TEST_F(PluginManagerLifecycleTest,
             (std::vector<std::string>{"registrar_return", "callback_destroy"}));
 
   copy_assigned = host_replacement;
+  EXPECT_EQ(
+      read_lifecycle_trace(trace_path),
+      (std::vector<std::string>{"registrar_return", "callback_destroy",
+                                "result_payload_destroy", "library_unload"}));
+  std::filesystem::remove(trace_path);
+}
+
+/**
+ * @brief Proves an ImageBuffer copy independently retains plugin deleter code.
+ *
+ * @throws Nothing when real plugin load, invocation, unload, and trace cleanup
+ * complete successfully.
+ * @note The enclosing NodeOutput and registry callback lease are retired first;
+ * only the copied image context remains. Its final reset must run the
+ * plugin-defined payload destructor before the real library-unload event.
+ */
+TEST_F(PluginManagerLifecycleTest,
+       ImageBufferCopyRetainsPluginPayloadLeaseAfterOutputRetires) {
+  const auto plugin_path = lifecycle_plugin_path();
+  ASSERT_TRUE(std::filesystem::exists(plugin_path));
+  const auto trace_path = lifecycle_trace_path("image-buffer-copy-lease");
+  std::filesystem::remove(trace_path);
+  ScopedEnvironmentVariable trace_environment(kLifecycleTraceEnvironment,
+                                              trace_path.string());
+  ScopedEnvironmentVariable result_probe_environment(
+      kLifecycleResultProbeEnvironment, "1");
+
+  auto& manager = PluginManager::process_instance();
+  const auto result =
+      manager.load_from_dirs_report({plugin_path.parent_path().string()});
+  ASSERT_EQ(result.loaded, 1) << describe_errors(result.errors);
+  NodeOutput plugin_output = invoke_lifecycle_output();
+  ASSERT_TRUE(plugin_output.image_buffer.context);
+  ImageBuffer retained_buffer = plugin_output.image_buffer;
+
+  EXPECT_EQ(manager.unload_all_plugins(), 1);
+  plugin_output = NodeOutput{};
+  EXPECT_EQ(read_lifecycle_trace(trace_path),
+            (std::vector<std::string>{"registrar_return", "callback_destroy"}));
+
+  retained_buffer = ImageBuffer{};
   EXPECT_EQ(
       read_lifecycle_trace(trace_path),
       (std::vector<std::string>{"registrar_return", "callback_destroy",
@@ -3247,10 +3818,167 @@ TEST_F(PluginManagerLifecycleTest,
     expect_explicit_roi_contract("image_generator", "perlin_noise_metal");
   }
 
+  Node save_node;
+  save_node.id = 701;
+  save_node.name = "save_failure_contract";
+  save_node.type = "io";
+  save_node.subtype = "save";
+  const std::filesystem::path rejected_path =
+      std::filesystem::temp_directory_path() /
+      "photospider-save-rejection.unsupported_extension";
+  save_node.parameters["path"] = rejected_path.string();
+  NodeOutput save_input;
+  save_input.image_buffer =
+      make_aligned_cpu_image_buffer(1, 1, 1, DataType::FLOAT32);
+  const std::vector<const NodeOutput*> save_inputs{&save_input};
+  const auto save_operation = OpRegistry::instance().resolve_for_intent(
+      "io", "save", ComputeIntent::GlobalHighPrecision);
+  ASSERT_TRUE(save_operation.has_value());
+  ASSERT_TRUE(std::holds_alternative<MonolithicOpFunc>(*save_operation));
+  try {
+    (void)std::get<MonolithicOpFunc> (*save_operation)(save_node, save_inputs);
+    ADD_FAILURE() << "save accepted an output path without an image writer";
+  } catch (const GraphError& error) {
+    EXPECT_EQ(error.code(), GraphErrc::Io);
+  }
+  std::filesystem::remove(rejected_path);
+
   EXPECT_GE(manager.unload_all_plugins(), 3);
   EXPECT_EQ(OpRegistry::instance().dirty_propagation_contract_status(
                 "image_process", "invert"),
             PropagationContractStatus::LegacyIdentityFallback);
+}
+
+TEST_F(PluginManagerLifecycleTest,
+       DependencyCacheTracksPluginOverrideAndRestoredBuilderRevision) {
+  const auto original_path = lifecycle_plugin_path();
+  const auto replacement_path = override_lifecycle_plugin_path();
+  ASSERT_TRUE(std::filesystem::exists(original_path));
+  ASSERT_TRUE(std::filesystem::exists(replacement_path));
+
+  auto& manager = PluginManager::process_instance();
+  ASSERT_EQ(
+      manager.load_from_dirs_report({original_path.parent_path().string()})
+          .loaded,
+      1);
+
+  GraphModel graph;
+  Node source;
+  source.id = 1;
+  source.name = "dependency_source";
+  source.type = "image_generator";
+  source.subtype = "constant";
+  source.parameters = YAML::Load("{width: 8, height: 8, value: 0}");
+  graph.add_node(source);
+  Node child;
+  child.id = 2;
+  child.name = "plugin_dependency";
+  child.type = "plugin_lifecycle";
+  child.subtype = "op";
+  child.parameters = YAML::Load("{width: 8, height: 8}");
+  child.image_inputs.push_back(ImageInput{1, "image"});
+  graph.add_node(child);
+  graph.validate_topology();
+  graph.mutate_node_runtime_state(1, [](auto& state) {
+    state.cached_output_high_precision = NodeOutput{};
+    state.cached_output_high_precision->image_buffer =
+        make_aligned_cpu_image_buffer(8, 8, 1, DataType::FLOAT32);
+    state.hp_version = 1;
+  });
+
+  RoiPropagationService propagation;
+  const auto build_and_read_marker = [&]() {
+    (void)propagation.project_roi_backward(graph, 2, cv::Rect(0, 0, 1, 1), 1);
+    const Node& cached_node = graph.node(2);
+    EXPECT_TRUE(cached_node.dependency_lut_cache.has_value());
+    return cached_node.dependency_lut_cache->lut.cell_to_upstream_roi.front().x;
+  };
+  EXPECT_EQ(build_and_read_marker(), 1);
+  const std::uint64_t original_revision =
+      graph.node(2).dependency_lut_cache->identity.dependency_builder_revision;
+  EXPECT_EQ(graph.node(2).dependency_lut_version, 1u);
+
+  ASSERT_EQ(
+      manager.load_from_dirs_report({replacement_path.parent_path().string()})
+          .loaded,
+      1);
+  EXPECT_EQ(build_and_read_marker(), 2);
+  const std::uint64_t replacement_revision =
+      graph.node(2).dependency_lut_cache->identity.dependency_builder_revision;
+  EXPECT_NE(replacement_revision, original_revision);
+  EXPECT_EQ(graph.node(2).dependency_lut_version, 2u);
+
+  EXPECT_EQ(manager.unload_by_plugin_path(
+                std::filesystem::absolute(replacement_path).string()),
+            1);
+  EXPECT_EQ(build_and_read_marker(), 1);
+  EXPECT_EQ(
+      graph.node(2).dependency_lut_cache->identity.dependency_builder_revision,
+      original_revision);
+  EXPECT_EQ(graph.node(2).dependency_lut_version, 3u);
+  EXPECT_EQ(manager.unload_all_plugins(), 1);
+}
+
+TEST_F(PluginManagerLifecycleTest,
+       PublicDependencyFlagControlsImageVersionCacheIdentity) {
+  const auto plugin_path = lifecycle_plugin_path();
+  ASSERT_TRUE(std::filesystem::exists(plugin_path));
+  auto& manager = PluginManager::process_instance();
+
+  GraphModel graph;
+  Node source;
+  source.id = 1;
+  source.name = "dependency_source";
+  source.type = "image_generator";
+  source.subtype = "constant";
+  source.parameters = YAML::Load("{width: 8, height: 8, value: 0}");
+  graph.add_node(source);
+  Node child;
+  child.id = 2;
+  child.name = "plugin_dependency";
+  child.type = kLifecycleType;
+  child.subtype = kLifecycleSubtype;
+  child.parameters = YAML::Load("{width: 8, height: 8}");
+  child.image_inputs.push_back(ImageInput{1, "image"});
+  graph.add_node(child);
+  graph.validate_topology();
+  graph.mutate_node_runtime_state(1, [](auto& state) {
+    state.cached_output_high_precision = NodeOutput{};
+    state.cached_output_high_precision->image_buffer =
+        make_aligned_cpu_image_buffer(8, 8, 1, DataType::FLOAT32);
+    state.hp_version = 1;
+  });
+
+  RoiPropagationService propagation;
+  const auto project = [&]() {
+    return propagation.project_roi_backward(graph, 2, cv::Rect(0, 0, 1, 1), 1);
+  };
+
+  ASSERT_EQ(manager.load_from_dirs_report({plugin_path.parent_path().string()})
+                .loaded,
+            1);
+  ASSERT_TRUE(project().has_value());
+  EXPECT_FALSE(graph.node(2).dependency_lut_cache->identity.data_dependent);
+  EXPECT_EQ(graph.node(2).dependency_lut_version, 1u);
+  graph.mutate_node_runtime_state(1, [](auto& state) { state.hp_version = 2; });
+  ASSERT_TRUE(project().has_value());
+  EXPECT_EQ(graph.node(2).dependency_lut_version, 1u)
+      << "static dependency builders ignore pixel-only version changes";
+  EXPECT_EQ(manager.unload_all_plugins(), 1);
+
+  ScopedEnvironmentVariable data_dependent_environment(
+      kLifecycleDataDependentEnvironment, "1");
+  ASSERT_EQ(manager.load_from_dirs_report({plugin_path.parent_path().string()})
+                .loaded,
+            1);
+  ASSERT_TRUE(project().has_value());
+  EXPECT_TRUE(graph.node(2).dependency_lut_cache->identity.data_dependent);
+  EXPECT_EQ(graph.node(2).dependency_lut_version, 2u);
+  graph.mutate_node_runtime_state(1, [](auto& state) { state.hp_version = 3; });
+  ASSERT_TRUE(project().has_value());
+  EXPECT_EQ(graph.node(2).dependency_lut_version, 3u)
+      << "data-dependent builders include upstream image versions";
+  EXPECT_EQ(manager.unload_all_plugins(), 1);
 }
 
 #if defined(PHOTOSPIDER_INTERNAL_BAD_ALLOC_TESTING)

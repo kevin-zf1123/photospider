@@ -1,7 +1,9 @@
 #pragma once
 
+#include <optional>
 #include <string>
 #include <unordered_map>
+#include <unordered_set>
 #include <vector>
 
 #include "compute/dirty_region_snapshot.hpp"
@@ -129,11 +131,20 @@ class DirtyRegionPlanner {
    *
    * @param traversal Topology service used to obtain dependency order.
    * @param roi_propagation ROI propagation service used for backward demand.
+   * @param stabilized_geometry_nodes Optional request-local exact-geometry
+   * node identities.
+   * @param forced_parameter_producers Optional RT image-producing parameter
+   * nodes that must remain executable.
+   * @param fixed_generation Optional generation already reserved for sibling
+   * HP/RT plans.
    * @throws Nothing directly.
    * @note Both services must outlive the planner instance.
    */
-  DirtyRegionPlanner(GraphTraversalService& traversal,
-                     RoiPropagationService& roi_propagation);
+  DirtyRegionPlanner(
+      GraphTraversalService& traversal, RoiPropagationService& roi_propagation,
+      const std::unordered_set<int>* stabilized_geometry_nodes = nullptr,
+      const std::unordered_set<int>* forced_parameter_producers = nullptr,
+      std::optional<uint64_t> fixed_generation = std::nullopt);
 
   /**
    * @brief Plans an HP dirty update rooted at a target node.
@@ -344,18 +355,48 @@ class DirtyRegionPlanner {
   /**
    * @brief Infers an HP-space operator halo for dirty tiled execution.
    *
-   * @param node Node whose runtime/static parameters are inspected.
+   * @param graph Graph used to resolve one exact effective parameter snapshot.
+   * @param node Node whose static parameters are inspected.
    * @return Non-negative HP halo radius.
-   * @throws YAML::Exception if malformed YAML parameters are accessed.
-   * @note Unknown operators default to zero halo and rely on their registered
-   * ROI propagation behavior.
+   * @throws YAML::Exception if malformed static parameters are converted.
+   * @note Connected parameter producers return zero here because their current
+   *       request value is not yet proven. The propagation pass detects that
+   *       case, selects each parameter producer, promotes output and all image
+   *       inputs to full extents, and installs an extent-bounded halo instead
+   *       of invoking a propagator or dependency LUT with stale cached data.
    */
-  int infer_halo_hp(const Node& node) const;
+  int infer_halo_hp(const GraphModel& graph, const Node& node) const;
+
+  /**
+   * @brief Checks whether request-local parameter geometry is exact for a node.
+   * @param node_id Graph node id to inspect.
+   * @return True when stabilization marked the node or its image descendant as
+   * geometry-affected for this request.
+   * @throws Nothing.
+   */
+  bool has_stabilized_geometry(int node_id) const noexcept;
+
+  /**
+   * @brief Selects the graph generation for one newly planned domain.
+   * @param graph Graph whose counter is incremented for standalone plans.
+   * @return Fixed request generation when supplied, otherwise a new counter.
+   * @throws Nothing.
+   * @note A fixed generation is reserved by ComputeService before HP/RT
+   * siblings start, so this method must not increment the live counter.
+   */
+  uint64_t select_plan_generation(GraphModel& graph) const noexcept;
 
   GraphTraversalService& traversal_;
   RoiPropagationService& roi_propagation_;
   GraphExtentResolver extent_resolver_;
   DirtyRegionSnapshotBuilder snapshot_builder_;
+  /** @brief Optional exact-geometry node identities owned by the request. */
+  const std::unordered_set<int>* stabilized_geometry_nodes_ = nullptr;
+  /** @brief Optional RT image producers forced despite parameter snapshot. */
+  const std::unordered_set<int>* forced_parameter_producers_ = nullptr;
+
+  /** @brief Optional generation shared by sibling domain plans. */
+  std::optional<uint64_t> fixed_generation_;
 };
 
 }  // namespace ps::compute

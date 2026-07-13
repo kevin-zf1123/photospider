@@ -12,7 +12,7 @@
 #include "compute/node_executor.hpp"
 #include "compute/task_graph_planning.hpp"
 #include "graph/graph_model.hpp"  // NOLINT(build/include_subdir)
-#include "kernel/scheduler/scheduler_task_runtime.hpp"
+#include "photospider/scheduler/scheduler_task_runtime.hpp"
 
 namespace ps {
 class GraphCacheService;
@@ -189,10 +189,25 @@ class NodeTaskRunner {
   /** @brief Attempts to satisfy a node from disk cache into its temp slot. */
   void try_load_disk_cache(const Node& target_node, int node_idx);
 
-  /** @brief Builds runtime parameters by resolving parameter input bindings. */
+  /**
+   * @brief Builds request-local runtime parameters from ready upstream values.
+   * @param target_node Node whose static parameters and bindings are read.
+   * @return Cloned YAML map with parameter-input values overlaid.
+   * @throws GraphError when a connected parameter output is unavailable.
+   * @throws YAML::Exception or std::bad_alloc from value copying.
+   * @note The committed node parameter state is never mutated.
+   */
   YAML::Node resolve_runtime_parameters(const Node& target_node) const;
 
-  /** @brief Resolves image input bindings for operation execution. */
+  /**
+   * @brief Resolves image bindings without compressing destination slots.
+   * @param target_node Node whose image-input declarations are read.
+   * @return Borrowed output pointers aligned with node.image_inputs; a
+   * disconnected slot remains nullptr.
+   * @throws GraphError when a connected image output is unavailable.
+   * @throws std::bad_alloc when vector allocation fails.
+   * @note Returned pointers borrow request-local or committed output storage.
+   */
   std::vector<const NodeOutput*> resolve_image_inputs(
       const Node& target_node) const;
 

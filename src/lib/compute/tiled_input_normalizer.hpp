@@ -2,7 +2,7 @@
 
 #include <vector>
 
-#include "ps_types.hpp"  // NOLINT(build/include_subdir)
+#include "core/ps_types.hpp"  // NOLINT(build/include_subdir)
 
 namespace ps::compute {
 
@@ -38,7 +38,9 @@ struct TiledInputContext {
  *
  * @note This class owns no graph state. Returned temporary storage belongs to
  * the returned TiledInputContext and must outlive any tile dispatch that uses
- * the normalized inputs.
+ * the normalized inputs. Normalization replaces only image descriptors;
+ * named-data, spatial/debug provenance, and plugin DSO leases remain copied
+ * from each upstream NodeOutput.
  */
 class TiledInputNormalizer {
  public:

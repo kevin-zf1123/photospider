@@ -1,5 +1,4 @@
-// Photospider kernel: CpuWorkStealingScheduler
-// M3.3: 将现有的 run_loop 和队列逻辑迁移至可插拔调度器
+// Photospider built-in CPU work-stealing scheduler.
 #pragma once
 
 #include <atomic>
@@ -14,8 +13,8 @@
 #include <utility>
 #include <vector>
 
-#include "kernel/scheduler/i_scheduler.hpp"
-#include "kernel/scheduler/scheduler_task_runtime.hpp"
+#include "photospider/scheduler/scheduler.hpp"
+#include "photospider/scheduler/scheduler_task_runtime.hpp"
 
 #if defined(PHOTOSPIDER_INTERNAL_BAD_ALLOC_TESTING)
 #include "scheduler/scheduler_exception_test_hooks.hpp"
@@ -23,32 +22,31 @@
 
 namespace ps {
 
-class GraphRuntime;
 /**
  * @brief Dispatches ready callbacks through priority and work-stealing queues.
  *
  * The scheduler owns worker threads, global high/normal queues, per-worker
  * normal queues, batch epoch/counter state, and first-exception publication.
- * It does not own `GraphRuntime`, task graphs, cache state, or executors behind
+ * It does not own `SchedulerHostContext`, task graphs, cache state, or
+ * executors behind
  * borrowed `TaskHandle` values. Batch handle publication is transactional:
  * workers cannot observe any handle until every queue insertion commits.
  *
- * @return Concrete `IScheduler` and `SchedulerTaskRuntime` implementation.
+ * @return Concrete `IScheduler` implementation with inherited task runtime.
  * @throws std::bad_alloc from explicit construction/start/submission methods.
  * @throws std::system_error from explicit worker lifecycle operations.
  * @note Lifecycle calls are externally serialized. A borrowed handle remains
  * valid only through the matching `wait_for_completion()` batch boundary.
  */
-class CpuWorkStealingScheduler : public IScheduler,
-                                 public SchedulerTaskRuntime {
+class CpuWorkStealingScheduler : public IScheduler {
  public:
   /**
    * @brief Configures a stopped CPU work-stealing scheduler.
    * @param num_workers Worker count, or zero to use hardware concurrency.
    * @return A stopped scheduler that owns no worker threads yet.
    * @throws Nothing directly; hardware concurrency failure falls back to one.
-   * @note The runtime pointer remains null until `attach()`; no queue, cache,
-   * or task-executor ownership is acquired by construction.
+   * @note The host-context pointer remains null until `attach()`; no queue,
+   * cache, or task-executor ownership is acquired by construction.
    */
   explicit CpuWorkStealingScheduler(unsigned int num_workers = 0);
 
@@ -57,33 +55,35 @@ class CpuWorkStealingScheduler : public IScheduler,
    * @return Nothing.
    * @throws Nothing by destructor contract; valid built-in shutdown is expected
    * not to fail while joining scheduler-owned threads.
-   * @note Borrowed runtime/task-handle targets must already satisfy their
+   * @note Borrowed host/task-handle targets must already satisfy their
    * lifecycle contracts when destruction begins.
    */
   ~CpuWorkStealingScheduler() override;
 
-  // 禁用拷贝
+  /** @brief Prevents copying worker, queue, and borrowed-host ownership. */
   CpuWorkStealingScheduler(const CpuWorkStealingScheduler&) = delete;
+
+  /** @brief Prevents copy assignment of worker and batch state. */
   CpuWorkStealingScheduler& operator=(const CpuWorkStealingScheduler&) = delete;
 
   // ---------------------------------------------------------------------------
-  // IScheduler 接口实现
+  // IScheduler implementation
   // ---------------------------------------------------------------------------
   /**
-   * @brief Attaches a borrowed graph runtime for scheduler trace publication.
-   * @param runtime Runtime that outlives the attachment, or nullptr in tests.
+   * @brief Attaches a borrowed host context for trace and task attribution.
+   * @param host Host context that outlives shutdown and detach.
    * @return Nothing.
    * @throws Nothing.
-   * @note Attachment transfers no GraphModel, cache, scheduler, or runtime
-   * ownership and must occur before start under GraphRuntime serialization.
+   * @note Attachment transfers no graph, cache, scheduler, or runtime
+   * ownership and must occur before start under runtime serialization.
    */
-  void attach(GraphRuntime* runtime) override;
+  void attach(SchedulerHostContext& host) override;
 
   /**
-   * @brief Clears the borrowed runtime trace target.
+   * @brief Clears the borrowed host trace/context target.
    * @return Nothing.
    * @throws Nothing.
-   * @note Detach does not stop workers; GraphRuntime orders shutdown first.
+   * @note Detach does not stop workers; the owning host orders shutdown first.
    */
   void detach() override;
   /**
@@ -142,56 +142,55 @@ class CpuWorkStealingScheduler : public IScheduler,
    */
   bool is_running() const override;
 
-  /**
-   * @brief Reports scheduler task-runtime availability.
-   * @return Same lifecycle value as `is_running()`.
-   * @throws Nothing.
-   * @note This does not imply a task batch is active or cache state is ready.
-   */
-  bool task_runtime_running() const override;
-
-  // ---------------------------------------------------------------------------
-  // 调度器内部任务提交 API（供 ComputeService 使用）
-  // ---------------------------------------------------------------------------
+  // Built-in callback helpers; production dispatch uses public handle batches.
+  /** @brief Internal callback alias retained for built-in compute helpers. */
   using Task = SchedulerTaskRuntime::Task;
+  /** @brief Internal priority alias shared with public runtime submissions. */
   using TaskPriority = SchedulerTaskPriority;
 
   /**
-   * @brief 提交初始任务集合并开始一个新的调度 epoch。
+   * @brief Atomically submits an internal callback batch in a new epoch.
    *
    * The method stages the next epoch, inserts the complete batch while holding
    * the global visibility lock, and rolls every touched deque back to its
    * original size if any insertion throws. Only a complete queue commit
    * publishes epoch, logical/ready counters, statistics, and notification.
    *
-   * @param tasks 本批次立即 ready 的回调任务；scheduler 接管其可调用对象。
-   * @param total_task_count
-   * 本批次需要完成的总任务数，包括任务运行期间动态增加的 ready work。
-   * @param priority 初始任务的调度优先级。
+   * @param tasks Immediately ready callbacks transferred to scheduler queues;
+   *        empty callbacks are ignored.
+   * @param total_task_count Nonnegative logical count covering every valid
+   *        initial callback plus dynamically released work.
+   * @param priority Initial queue priority.
    * @return Nothing.
+   * @throws std::logic_error if the scheduler is not running.
+   * @throws std::invalid_argument if the count is negative or smaller than the
+   *         number of valid callbacks.
    * @throws std::bad_alloc if queue growth fails while storing callbacks.
-   * @note 调用方必须保证 total_task_count 与任务内部的 dec_tasks_to_complete()
-   * 调用保持一致；空批次会直接通知 completion waiter。
+   * @note Validation precedes epoch, exception, queue, and counter mutation.
+   *       Empty valid batches publish a new settled epoch and notify waiters.
    */
-  void submit_initial_tasks(
-      std::vector<Task>&& tasks, int total_task_count,
-      TaskPriority priority = TaskPriority::Normal) override;
+  void submit_initial_tasks(std::vector<Task>&& tasks, int total_task_count,
+                            TaskPriority priority = TaskPriority::Normal);
 
   /**
-   * @brief 提交初始任务句柄集合，开始一次计算批次。
+   * @brief Atomically submits an initial borrowed-handle batch.
    *
-   * 句柄路径与回调路径共享
-   * epoch、异常重置、完成计数和唤醒语义。高优先级句柄进入全局 FIFO；普通句柄
-   * 分布到 per-worker 队列。所有本地读写都使用 global→local 锁序，因此整个批次
-   * 可在异常时无分配回退，且任何借用句柄只在 epoch/counter 完整提交后可见。
+   * The handle path shares callback-path epoch, exception reset, completion,
+   * and notification semantics. High priority uses the global FIFO; normal
+   * work is distributed across per-worker queues under global-to-local lock
+   * order, permitting allocation-free rollback before borrowed visibility.
    *
-   * @param handles 调度器借用的轻量任务句柄列表；空句柄会被跳过。
-   * @param total_task_count 本批次需要完成的活跃任务数。
-   * @param priority 任务优先级。
+   * @param handles Dispatcher-owned handles; empty handles are ignored.
+   * @param total_task_count Nonnegative logical count covering every valid
+   *        initial handle.
+   * @param priority Initial queue priority.
    * @return Nothing.
+   * @throws std::logic_error if the scheduler is not running.
+   * @throws std::invalid_argument if the count is negative or smaller than the
+   *         number of valid handles.
    * @throws std::bad_alloc if queue growth fails while storing handles.
-   * @note 句柄保持 dispatcher-owned executor 指针，scheduler 不拥有 task
-   * graph。
+   * @note Validation precedes all active-batch state mutation. Handles borrow
+   *       dispatcher executors through the matching wait settlement boundary.
    */
   void submit_initial_task_handles(
       std::vector<TaskHandle>&& handles, int total_task_count,
@@ -209,26 +208,26 @@ class CpuWorkStealingScheduler : public IScheduler,
    * `ready_task_count_` before releasing either lock.
    */
   void submit_ready_task_from_worker(
-      Task&& task, TaskPriority priority = TaskPriority::Normal) override;
+      Task&& task, TaskPriority priority = TaskPriority::Normal);
 
   /**
-   * @brief 从工作线程内部提交一个新就绪任务句柄。
+   * @brief Enqueues one newly ready task handle from a scheduler worker.
    *
-   * @param handle 依赖计数归零后释放的任务句柄。
-   * @param priority 任务优先级。
+   * @param handle Handle released after its dependency count reaches zero.
+   * @param priority Scheduling priority for the handle.
    * @return Nothing.
    * @throws std::bad_alloc if queue growth fails before publication.
-   * @note 普通优先级会优先进入当前 worker 的本地队列，并使用
-   * global→local 锁序与 ready predicate 共同发布。
+   * @note Normal-priority work prefers the current worker's local queue and
+   * publishes with the global-to-local lock order used by the ready predicate.
    */
   void submit_ready_task_handle_from_worker(
-      TaskHandle handle, TaskPriority priority = TaskPriority::Normal) override;
+      TaskHandle handle, TaskPriority priority = TaskPriority::Normal);
 
   /**
-   * @brief 从工作线程内部批量提交新就绪任务句柄。
+   * @brief Enqueues a newly ready handle batch from a scheduler worker.
    *
-   * @param handles 同一依赖释放阶段产生的 ready 句柄。
-   * @param priority 任务优先级。
+   * @param handles Handles produced by one dependency-release stage.
+   * @param priority Scheduling priority shared by the handle batch.
    * @return Nothing.
    * @throws std::bad_alloc if queue growth fails.
    * @note The selected queue is restored to its original size on any insertion
@@ -256,21 +255,22 @@ class CpuWorkStealingScheduler : public IScheduler,
       std::optional<uint64_t> epoch = std::nullopt) override;
 
   /**
-   * @brief 从任意线程提交一个新就绪任务句柄。
+   * @brief Enqueues one newly ready task handle from any thread.
    *
    * @param handle Ready task handle to enqueue.
    * @param priority Scheduler priority.
    * @param epoch Optional epoch for lazy cancellation.
    * @return Nothing.
    * @throws std::bad_alloc if global queue growth fails before publication.
-   * @note 旧 epoch 在提交和出队时惰性丢弃，不扫描队列。
+   * @note Stale epochs are rejected lazily at submission and dequeue without
+   * scanning queues.
    */
   void submit_ready_task_handle_any_thread(
       TaskHandle handle, TaskPriority priority = TaskPriority::Normal,
-      std::optional<uint64_t> epoch = std::nullopt) override;
+      std::optional<uint64_t> epoch = std::nullopt);
 
   /**
-   * @brief 从任意线程批量提交新就绪任务句柄。
+   * @brief Enqueues a newly ready task-handle batch from any thread.
    *
    * @param handles Ready task handles to enqueue.
    * @param priority Scheduler priority shared by the batch.
@@ -283,7 +283,7 @@ class CpuWorkStealingScheduler : public IScheduler,
   void submit_ready_task_handles_any_thread(
       std::vector<TaskHandle>&& handles,
       TaskPriority priority = TaskPriority::Normal,
-      std::optional<uint64_t> epoch = std::nullopt) override;
+      std::optional<uint64_t> epoch = std::nullopt);
 
   /**
    * @brief Waits for completion or consumes the batch's first exception.
@@ -296,7 +296,9 @@ class CpuWorkStealingScheduler : public IScheduler,
    * callback from the captured batch epoch to settle before the exact pointer
    * is consumed under `exception_mutex_`. Therefore a caller may submit the
    * next batch immediately after this method returns without an old publisher
-   * clearing, completing, or failing that new batch.
+   * clearing, completing, or failing that new batch. Exception cleanup clears
+   * the remaining count under `completion_count_mutex_` only if the captured
+   * epoch remains active.
    */
   void wait_for_completion() override;
 
@@ -305,9 +307,9 @@ class CpuWorkStealingScheduler : public IScheduler,
    *
    * @return Nothing.
    * @throws Nothing under valid completion-mutex state.
-   * @note Calls from a nonzero stale worker epoch are ignored. Reaching zero
-   * wakes the completion waiter, which separately requires all dequeued
-   * callbacks to leave `in_flight_tasks_`.
+   * @note Calls from a nonzero stale worker epoch and decrements at zero are
+   * ignored. Reaching zero wakes the completion waiter, which separately
+   * requires all dequeued callbacks to leave `in_flight_tasks_`.
    */
   void dec_tasks_to_complete() override;
 
@@ -316,9 +318,12 @@ class CpuWorkStealingScheduler : public IScheduler,
    *
    * @param delta Positive number of logical tasks added by the caller.
    * @return Nothing.
-   * @throws Nothing.
+   * @throws std::overflow_error if a current-epoch addition would exceed
+   * `INT_MAX`.
+   * @throws std::system_error only if locking a valid mutex fails.
    * @note Nonpositive deltas and calls from a nonzero stale worker epoch are
-   * ignored so an old callback cannot change a newer batch.
+   * ignored. Validation and mutation share the new-batch publication mutex,
+   * so an old callback cannot pass validation and then change a newer batch.
    */
   void inc_tasks_to_complete(int delta) override;
 
@@ -328,27 +333,28 @@ class CpuWorkStealingScheduler : public IScheduler,
    * @param e Non-null exception identity captured by a worker.
    * @return Nothing.
    * @throws Nothing under valid scheduler mutex state.
-   * @note The worker epoch must match the active batch. A separate claim atomic
-   * selects the first publisher; it stores the protected pointer and epoch,
-   * rejects/dequeues further ready work, drains all queues, marks cleanup
-   * complete, and only then release-stores `has_exception_`. Duplicate or stale
-   * publishers cannot overwrite the batch exception.
+   * @note Null input is ignored. Otherwise, the worker epoch must match the
+   * active batch. A separate claim atomic selects the first publisher; it
+   * stores the protected pointer and epoch, rejects/dequeues further ready
+   * work, drains all queues, marks cleanup complete, and only then
+   * release-stores `has_exception_`. Duplicate or stale publishers cannot
+   * overwrite the batch exception.
    */
   void set_exception(std::exception_ptr e) override;
 
   /**
-   * @brief Copies one scheduler action into the attached runtime trace.
+   * @brief Copies one scheduler action into the attached host trace.
    * @param action Scheduler-facing action category.
    * @param node_id Graph node identifier associated with the action.
    * @return Nothing.
-   * @throws std::bad_alloc if runtime trace storage grows.
-   * @note A null runtime drops the event. Trace publication transfers no graph
-   * or cache ownership and uses worker/epoch TLS only as copied metadata.
+   * @throws Nothing.
+   * @note A detached scheduler drops the event. Trace publication transfers no
+   * graph or cache ownership and copies worker/epoch TLS metadata.
    */
   void log_event(SchedulerTraceAction action, int node_id) override;
 
   // ---------------------------------------------------------------------------
-  // Epoch 管理
+  // Epoch management
   // ---------------------------------------------------------------------------
   /**
    * @brief Reads the currently committed batch epoch.
@@ -359,18 +365,19 @@ class CpuWorkStealingScheduler : public IScheduler,
   uint64_t active_epoch() const;
 
   /**
-   * @brief Commits the next monotonically increasing scheduler epoch.
+   * @brief Commits the next nonzero scheduler epoch.
    * @return Newly active nonzero epoch.
    * @throws Nothing.
-   * @note Transactional batch paths stage their epoch and publish it only after
-   * queue commit; this helper is used for allocation-free empty batches.
+   * @note The sequence wraps `UINT64_MAX` to one. Transactional batch paths
+   * stage their epoch and publish it only after queue commit.
    */
   uint64_t begin_new_epoch();
 
   /**
-   * @brief Checks whether a nonzero queued epoch precedes the active batch.
+   * @brief Checks whether a nonzero queued epoch differs from the active batch.
    * @param epoch Epoch carried by a scheduled callback or handle.
-   * @return True for stale nonzero work; false for epoch zero/current/future.
+   * @return True for nonzero work outside the current epoch; false for epoch
+   * zero or the current epoch.
    * @throws Nothing.
    * @note Cancellation drops scheduler work only and never mutates task graphs.
    */
@@ -401,6 +408,8 @@ class CpuWorkStealingScheduler : public IScheduler,
       void* scheduler) noexcept;
   friend testing::SchedulerTransactionalStateSnapshot
   testing::cpu_scheduler_transactional_snapshot(void* scheduler) noexcept;
+  friend void testing::set_cpu_scheduler_epoch_for_testing(
+      void* scheduler, std::uint64_t epoch) noexcept;
 #endif
 
   /**
@@ -544,12 +553,12 @@ class CpuWorkStealingScheduler : public IScheduler,
   void finish_in_flight_task() noexcept;
 
   // ---------------------------------------------------------------------------
-  // 成员变量
+  // Member state
   // ---------------------------------------------------------------------------
-  /** @brief Borrowed trace runtime; never owns GraphModel or cache state. */
-  GraphRuntime* runtime_ = nullptr;
+  /** @brief Borrowed host context; never owns graph or cache state. */
+  SchedulerHostContext* host_context_ = nullptr;
 
-  // 工作线程管理
+  // Worker lifecycle
   /** @brief Scheduler-owned threads published only after complete start. */
   std::vector<std::thread> workers_;
   /** @brief Active worker/queue count, reset to zero on failed start/stop. */
@@ -563,13 +572,13 @@ class CpuWorkStealingScheduler : public IScheduler,
    */
   std::atomic<bool> worker_loop_active_{false};
 
-  // 本地任务队列（per-worker，用于普通优先级任务）
+  // Per-worker normal-priority queues
   /** @brief Normal-priority LIFO/FIFO steal queues indexed by worker id. */
   std::vector<std::deque<ScheduledTask>> local_task_queues_;
   /** @brief Per-local-queue mutexes acquired after `global_queues_mutex_`. */
   std::vector<std::unique_ptr<std::mutex>> local_queue_mutexes_;
 
-  // 全局任务队列（高优先级 + 普通优先级）
+  // Global high- and normal-priority queues
   /** @brief Global high-priority FIFO queue with no partial batch visibility.
    */
   std::deque<ScheduledTask> high_priority_queue_;
@@ -581,13 +590,19 @@ class CpuWorkStealingScheduler : public IScheduler,
   /** @brief Worker notification paired with the global ready predicate. */
   std::condition_variable cv_task_available_;
 
-  // 任务计数器
+  // Queue counters
   /** @brief Committed queued entries visible to worker wait predicates. */
   std::atomic<int> ready_task_count_{0};
   /** @brief Diagnostic count of CPU workers inside idle-wait handling. */
   std::atomic<int> sleeping_thread_count_{0};
 
-  // 完成同步
+  // Completion synchronization
+  /**
+   * @brief Serializes active-epoch/count publication with callback mutations.
+   * @note Initial submissions acquire queue gates before this mutex. Counter
+   *       mutations acquire only this mutex, preventing cross-epoch writes.
+   */
+  std::mutex completion_count_mutex_;
   /** @brief Serializes completion waits and in-flight settlement notification.
    */
   std::mutex completion_mutex_;
@@ -599,7 +614,7 @@ class CpuWorkStealingScheduler : public IScheduler,
   /** @brief Dequeued callbacks not yet returned to their worker loop. */
   std::atomic<int> in_flight_tasks_{0};
 
-  // 异常处理
+  // Exception transport
   /** @brief Protects the exact exception pointer during publish/consume. */
   std::mutex exception_mutex_;
   /** @brief First exact worker exception retained for the active batch. */
@@ -614,9 +629,8 @@ class CpuWorkStealingScheduler : public IScheduler,
   /** @brief True only after claimed-batch queues have been drained. */
   std::atomic<bool> exception_cleanup_complete_{false};
 
-  // Epoch 管理
-  /** @brief Last committed epoch number; failed batch staging does not advance.
-   */
+  // Epoch management
+  /** @brief Last committed nonzero epoch; the sequence wraps maximum to one. */
   std::atomic<uint64_t> epoch_counter_{0};
   /** @brief Epoch used by stale-work checks and exception fencing. */
   std::atomic<uint64_t> active_epoch_{0};
@@ -625,7 +639,7 @@ class CpuWorkStealingScheduler : public IScheduler,
   /** @brief Epoch of the callback currently running on this thread. */
   static thread_local uint64_t tls_active_epoch_;
 
-  // 统计信息
+  // Statistics
   /** @brief Successfully committed high-priority entries. */
   std::atomic<uint64_t> high_enqueued_{0};
   /** @brief Successfully committed normal-priority entries. */

@@ -20,6 +20,7 @@ struct BenchmarkEvent;
 namespace compute {
 class DirtySiblingCommitGate;
 class RealtimeProxyGraph;
+class StabilizedDirtyParameters;
 }  // namespace compute
 
 /**
@@ -269,7 +270,9 @@ class ComputeService {
       GraphModel& graph, compute::RealtimeProxyGraph& proxy_graph,
       const ExecutionStrategy& strategy, const Request& request,
       std::shared_ptr<compute::DirtySiblingCommitGate> sibling_commit_gate =
-          nullptr);
+          nullptr,
+      std::shared_ptr<const compute::StabilizedDirtyParameters>
+          stabilized_parameters = nullptr);
 
   /**
    * @brief Delegates one RT dirty update to RealTimeDirtyExecutor.
@@ -285,10 +288,11 @@ class ComputeService {
    * validation failures; std::bad_optional_access for an unvalidated request.
    * @note RT output never becomes formal reusable GraphModel cache state.
    */
-  NodeOutput& compute_real_time_update(GraphModel& graph,
-                                       compute::RealtimeProxyGraph& proxy_graph,
-                                       const ExecutionStrategy& strategy,
-                                       const Request& request);
+  NodeOutput& compute_real_time_update(
+      GraphModel& graph, compute::RealtimeProxyGraph& proxy_graph,
+      const ExecutionStrategy& strategy, const Request& request,
+      std::shared_ptr<const compute::StabilizedDirtyParameters>
+          stabilized_parameters = nullptr);
 
   /**
    * @brief Resolves the RT proxy graph for one compute request.

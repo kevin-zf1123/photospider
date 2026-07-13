@@ -6,7 +6,7 @@
 #include <string>
 #include <vector>
 
-#include "kernel/scheduler/i_scheduler.hpp"
+#include "photospider/scheduler/scheduler.hpp"
 
 namespace ps {
 

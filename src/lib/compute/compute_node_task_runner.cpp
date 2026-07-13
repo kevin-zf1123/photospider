@@ -96,17 +96,20 @@ cv::Size merge_task_extent(const cv::Size& current, const cv::Rect& roi) {
  * @brief Infers channel count and data type for a tile output buffer.
  *
  * @param image_inputs Ready image inputs for the node.
- * @return Channel count and DataType for allocation.
+ * @return Channel count and DataType from the first connected input, or the
+ * generator default when every declared slot is disconnected.
  * @throws Nothing.
- * @note This mirrors NodeExecutor tiled allocation semantics.
+ * @note Null entries preserve graph input-slot identity and are skipped only
+ * for format inference.
  */
 std::pair<int, DataType> infer_tile_channels_and_type(
     const std::vector<const NodeOutput*>& image_inputs) {
-  if (image_inputs.empty()) {
-    return {1, DataType::FLOAT32};
+  for (const NodeOutput* input : image_inputs) {
+    if (input) {
+      return {input->image_buffer.channels, input->image_buffer.type};
+    }
   }
-  const ImageBuffer& input = image_inputs.front()->image_buffer;
-  return {input.channels, input.type};
+  return {1, DataType::FLOAT32};
 }
 
 }  // namespace
@@ -394,6 +397,14 @@ void NodeTaskRunner::try_load_disk_cache(const Node& target_node,
   }
 }
 
+/**
+ * @brief Builds execution parameters from static and same-request outputs.
+ * @param target_node Node whose effective parameters are resolved.
+ * @return Deep YAML clone with connected parameter values overlaid.
+ * @throws GraphError when a connected parameter output is unavailable.
+ * @throws YAML::Exception or std::bad_alloc from cloning and assignment.
+ * @note The result is request-local and does not mutate committed node state.
+ */
 YAML::Node NodeTaskRunner::resolve_runtime_parameters(
     const Node& target_node) const {
   YAML::Node runtime_params = target_node.parameters
@@ -421,11 +432,23 @@ YAML::Node NodeTaskRunner::resolve_runtime_parameters(
   return runtime_params;
 }
 
+/**
+ * @brief Resolves image outputs while preserving destination input indexes.
+ * @param target_node Node whose declared image slots are resolved.
+ * @return Vector aligned exactly with target_node.image_inputs; disconnected
+ * slots contain nullptr.
+ * @throws GraphError when a connected source output is not ready.
+ * @throws std::bad_alloc when vector allocation fails.
+ * @note Preserving null slots lets executor ROI snapshots retain graph edge
+ * indexes when, for example, slot zero is disconnected and slot one is live.
+ */
 std::vector<const NodeOutput*> NodeTaskRunner::resolve_image_inputs(
     const Node& target_node) const {
-  std::vector<const NodeOutput*> inputs_ready;
-  inputs_ready.reserve(target_node.image_inputs.size());
-  for (const auto& i_input : target_node.image_inputs) {
+  std::vector<const NodeOutput*> inputs_ready(target_node.image_inputs.size(),
+                                              nullptr);
+  for (std::size_t index = 0; index < target_node.image_inputs.size();
+       ++index) {
+    const ImageInput& i_input = target_node.image_inputs[index];
     if (i_input.from_node_id < 0) {
       continue;
     }
@@ -435,7 +458,7 @@ std::vector<const NodeOutput*> NodeTaskRunner::resolve_image_inputs(
           GraphErrc::MissingDependency,
           "Image input not ready for node " + std::to_string(target_node.id));
     }
-    inputs_ready.push_back(up_out);
+    inputs_ready[index] = up_out;
   }
   return inputs_ready;
 }

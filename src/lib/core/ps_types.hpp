@@ -8,6 +8,7 @@
 #include <filesystem>
 #include <functional>
 #include <iostream>
+#include <limits>
 #include <memory>
 #include <opencv2/opencv.hpp>
 #include <optional>
@@ -20,63 +21,121 @@
 #include <variant>
 #include <vector>
 
-#include "image_buffer.hpp"  // NOLINT(build/include_subdir)
+#include "compute/image_buffer.hpp"
 #include "photospider/core/compute_intent.hpp"
 #include "photospider/core/graph_error.hpp"
+#include "photospider/plugin/node_view.hpp"
 
 namespace ps {
+/** @brief Private filesystem namespace shorthand used by backend contracts. */
 namespace fs = std::filesystem;
 
+/** @brief Private YAML payload stored for one named non-image node output. */
 using OutputValue = YAML::Node;
 
+/**
+ * @brief Declares one destination image input's upstream source.
+ * @throws std::bad_alloc when copied output-name storage cannot allocate.
+ * @note GraphModel owns this topology value; it carries no output lifetime.
+ */
 struct ImageInput {
+  /** @brief Upstream node id, or -1 when the input is disconnected. */
   int from_node_id = -1;
+  /** @brief Upstream output-port name. */
   std::string from_output_name = "image";
 };
 
+/**
+ * @brief Maps one upstream named output into a destination parameter.
+ * @throws std::bad_alloc when copied endpoint-name storage cannot allocate.
+ * @note Effective-parameter resolution applies entries in declaration order.
+ */
 struct ParameterInput {
+  /** @brief Upstream node id, or -1 when the input is disconnected. */
   int from_node_id = -1;
+  /** @brief Named upstream data output to read. */
   std::string from_output_name;
+  /** @brief Destination parameter key replaced by the upstream value. */
   std::string to_parameter_name;
 };
 
+/**
+ * @brief Persistent declaration of one node output port.
+ * @throws std::bad_alloc when copied strings or YAML storage cannot allocate.
+ * @note Runtime output values are stored in NodeOutput, not in this descriptor.
+ */
 struct OutputPort {
+  /** @brief Graph-local output identifier, or -1 when unspecified. */
   int output_id = -1;
+  /** @brief Output semantic/type label persisted in graph YAML. */
   std::string output_type;
+  /** @brief Optional output-specific YAML configuration. */
   YAML::Node output_parameters;
 };
 
+/**
+ * @brief Persistent descriptor of one external cache location.
+ * @throws std::bad_alloc when copied strings cannot allocate.
+ * @note The value declares configuration only and owns no open file or cache.
+ */
 struct CacheEntry {
+  /** @brief Cache backend/type label. */
   std::string cache_type;
+  /** @brief Backend-specific cache location. */
   std::string location;
 };
 
+/**
+ * @brief Private spatial transforms and absolute ROI for one node output.
+ * @throws Nothing for value operations.
+ * @note Matrices use row-major homogeneous coordinates. Operation-host
+ * conversion accepts only finite matrix/scale values and a representable ROI.
+ */
 struct SpatialContext {
+  /** @brief Local-to-world homogeneous transform. */
   std::array<double, 9> transform_matrix{1, 0, 0, 0, 1, 0, 0, 0, 1};
+  /** @brief World-to-local homogeneous transform. */
   std::array<double, 9> inverse_matrix{1, 0, 0, 0, 1, 0, 0, 0, 1};
+  /** @brief Operation-local inverse transform. */
   std::array<double, 9> local_inverse_matrix{1, 0, 0, 0, 1, 0, 0, 0, 1};
+  /** @brief Absolute pixel region represented by the output. */
   cv::Rect absolute_roi{0, 0, 0, 0};
+  /** @brief Finite horizontal scale relative to graph coordinates. */
   double global_scale_x{1.0};
+  /** @brief Finite vertical scale relative to graph coordinates. */
   double global_scale_y{1.0};
 };
 
+/**
+ * @brief Private execution diagnostics attached to one node output.
+ * @throws std::bad_alloc when copied device-label storage cannot allocate.
+ * @note Diagnostics are informational and own no scheduler/runtime state.
+ */
 struct DebugMeta {
+  /** @brief Worker id that produced the output, or -1 when unknown. */
   int computed_by_worker_id{-1};
+  /** @brief Completion timestamp in microseconds. */
   uint64_t timestamp_us{0};
+  /** @brief Execution duration in milliseconds. */
   uint64_t execution_time_ms{0};
+  /** @brief Minimum observed output value. */
   double min_val{0.0};
+  /** @brief Maximum observed output value. */
   double max_val{0.0};
+  /** @brief Whether output inspection observed a NaN. */
   bool has_nan{false};
+  /** @brief Owned execution-device label. */
   std::string compute_device{"UNKNOWN"};
 };
 
 /**
  * @brief Owns one operation result and its plugin-derived value lifetime.
  *
- * Monolithic callbacks return this value across the transitional C++ plugin
- * ABI. Besides image, YAML data, spatial, and debug state, the host may attach
- * a dynamic-library lease so destructors for plugin-instantiated value
- * internals cannot run after their library is unmapped.
+ * Private operation callbacks and compute services exchange this value after
+ * the operation host adapter has converted the public `OperationOutput`.
+ * Besides image, YAML data, spatial, and debug state, the host may attach a
+ * dynamic-library lease so plugin-provided image deleters cannot run after
+ * their library is unmapped.
  *
  * Copy construction first retains the source lease and then copies payload
  * state. Copy assignment stages a complete replacement before swapping, while
@@ -251,75 +310,212 @@ inline void swap(NodeOutput& left, NodeOutput& right) noexcept {
   left.swap(right);
 }
 
+/**
+ * @brief Private validated grid mapping downstream cells to upstream ROIs.
+ *
+ * Tables are created by the operation host adapter only after public structure,
+ * input routing, output extent, and every cell ROI have been validated and
+ * normalized against the selected upstream extent.
+ *
+ * @throws std::bad_alloc when copied cell storage cannot allocate.
+ * @note Empty cells are represented by zero-size rectangles. All stored
+ * non-empty rectangles have non-negative origins and representable endpoints.
+ */
 struct SpatialDependencyMap {
+  /** @brief Width in pixels of one downstream lookup cell. */
   int grid_size_x = 64;
+  /** @brief Height in pixels of one downstream lookup cell. */
   int grid_size_y = 64;
+  /** @brief Number of lookup columns, bounded by int. */
   int cols = 0;
+  /** @brief Number of lookup rows, bounded by int. */
   int rows = 0;
+  /** @brief Exact downstream output extent used to build the table. */
   cv::Size output_extent{};
+  /**
+   * @brief Image-input index whose upstream coordinates the LUT describes.
+   * @note The graph propagation service validates this index against the
+   *       current topology before using or caching the table.
+   */
+  size_t upstream_input_index = 0;
+  /** @brief Row-major normalized upstream ROI for every lookup cell. */
   std::vector<cv::Rect> cell_to_upstream_roi;
 
-  bool is_valid() const {
-    return cols > 0 && rows > 0 && grid_size_x > 0 && grid_size_y > 0 &&
-           output_extent.width > 0 && output_extent.height > 0 &&
-           static_cast<int>(cell_to_upstream_roi.size()) == cols * rows;
+  /**
+   * @brief Validates dimensions and exact row-major cell count safely.
+   * @return True when every dimension is positive, rows and columns exactly
+   * match the output/cell extents, row-major indexing is representable by int
+   * and size_t, count is exact, and every stored ROI has non-negative size and
+   * a representable non-negative endpoint.
+   * @throws Nothing.
+   */
+  bool is_valid() const noexcept {
+    if (cols <= 0 || rows <= 0 || grid_size_x <= 0 || grid_size_y <= 0 ||
+        output_extent.width <= 0 || output_extent.height <= 0) {
+      return false;
+    }
+    const auto columns = static_cast<size_t>(cols);
+    const auto row_count = static_cast<size_t>(rows);
+    const auto expected_columns =
+        1 + (static_cast<size_t>(output_extent.width) - 1) /
+                static_cast<size_t>(grid_size_x);
+    const auto expected_rows =
+        1 + (static_cast<size_t>(output_extent.height) - 1) /
+                static_cast<size_t>(grid_size_y);
+    if (columns != expected_columns || row_count != expected_rows) {
+      return false;
+    }
+    if (columns > std::numeric_limits<size_t>::max() / row_count) {
+      return false;
+    }
+    const size_t expected = columns * row_count;
+    if (expected > static_cast<size_t>(std::numeric_limits<int>::max()) ||
+        cell_to_upstream_roi.size() != expected) {
+      return false;
+    }
+    for (const cv::Rect& roi : cell_to_upstream_roi) {
+      if (roi.x < 0 || roi.y < 0 || roi.width < 0 || roi.height < 0) {
+        return false;
+      }
+      const std::int64_t right = static_cast<std::int64_t>(roi.x) + roi.width;
+      const std::int64_t bottom = static_cast<std::int64_t>(roi.y) + roi.height;
+      if (right > std::numeric_limits<int>::max() ||
+          bottom > std::numeric_limits<int>::max()) {
+        return false;
+      }
+    }
+    return true;
   }
 
-  bool is_valid_for(const cv::Size& extent) const {
+  /**
+   * @brief Validates this table for one exact output extent.
+   * @param extent Expected output extent.
+   * @return True when structure and output extent match.
+   * @throws Nothing.
+   */
+  bool is_valid_for(const cv::Size& extent) const noexcept {
     return is_valid() && output_extent == extent;
   }
 
-  cv::Rect cell_bounds(int cx, int cy) const {
+  /**
+   * @brief Returns one downstream cell's clipped pixel bounds.
+   * @param cx Zero-based column index.
+   * @param cy Zero-based row index.
+   * @return Cell rectangle clipped to output_extent, or empty for an invalid
+   * table/index or an unrepresentable intermediate coordinate.
+   * @throws Nothing.
+   * @note Products are evaluated in signed 64-bit space before conversion to
+   * OpenCV's int rectangle representation.
+   */
+  cv::Rect cell_bounds(int cx, int cy) const noexcept {
     if (cx < 0 || cy < 0 || cx >= cols || cy >= rows || grid_size_x <= 0 ||
         grid_size_y <= 0) {
       return cv::Rect();
     }
-    int x0 = cx * grid_size_x;
-    int y0 = cy * grid_size_y;
-    int w = grid_size_x;
-    int h = grid_size_y;
-    if (output_extent.width > 0) {
-      w = std::min(w, output_extent.width - x0);
-    }
-    if (output_extent.height > 0) {
-      h = std::min(h, output_extent.height - y0);
-    }
-    if (w <= 0 || h <= 0)
+    const std::int64_t x0 = static_cast<std::int64_t>(cx) * grid_size_x;
+    const std::int64_t y0 = static_cast<std::int64_t>(cy) * grid_size_y;
+    if (x0 < 0 || y0 < 0 || x0 >= output_extent.width ||
+        y0 >= output_extent.height || x0 > std::numeric_limits<int>::max() ||
+        y0 > std::numeric_limits<int>::max()) {
       return cv::Rect();
-    return cv::Rect(x0, y0, w, h);
+    }
+    const std::int64_t right =
+        std::min<std::int64_t>(x0 + grid_size_x, output_extent.width);
+    const std::int64_t bottom =
+        std::min<std::int64_t>(y0 + grid_size_y, output_extent.height);
+    if (right <= x0 || bottom <= y0) {
+      return cv::Rect();
+    }
+    return cv::Rect(static_cast<int>(x0), static_cast<int>(y0),
+                    static_cast<int>(right - x0),
+                    static_cast<int>(bottom - y0));
   }
 
-  static cv::Rect merge_rect(const cv::Rect& a, const cv::Rect& b) {
-    if (a.width <= 0 || a.height <= 0)
+  /**
+   * @brief Merges two validated normalized upstream rectangles safely.
+   * @param a First rectangle, or an empty accumulator.
+   * @param b Second rectangle, or an empty contribution.
+   * @return Bounding rectangle, or empty when either input violates normalized
+   * endpoint constraints.
+   * @throws Nothing.
+   * @note Endpoint arithmetic uses signed 64-bit intermediates and refuses a
+   * result that cannot be represented by cv::Rect.
+   */
+  static cv::Rect merge_rect(const cv::Rect& a, const cv::Rect& b) noexcept {
+    if (a.width <= 0 || a.height <= 0) {
       return b;
-    if (b.width <= 0 || b.height <= 0)
+    }
+    if (b.width <= 0 || b.height <= 0) {
       return a;
-    int x0 = std::min(a.x, b.x);
-    int y0 = std::min(a.y, b.y);
-    int x1 = std::max(a.x + a.width, b.x + b.width);
-    int y1 = std::max(a.y + a.height, b.y + b.height);
-    return cv::Rect(x0, y0, x1 - x0, y1 - y0);
+    }
+    const std::int64_t a_right = static_cast<std::int64_t>(a.x) + a.width;
+    const std::int64_t b_right = static_cast<std::int64_t>(b.x) + b.width;
+    const std::int64_t a_bottom = static_cast<std::int64_t>(a.y) + a.height;
+    const std::int64_t b_bottom = static_cast<std::int64_t>(b.y) + b.height;
+    const std::int64_t x0 = std::min(a.x, b.x);
+    const std::int64_t y0 = std::min(a.y, b.y);
+    const std::int64_t x1 = std::max(a_right, b_right);
+    const std::int64_t y1 = std::max(a_bottom, b_bottom);
+    if (x0 < 0 || y0 < 0 || x1 <= x0 || y1 <= y0 ||
+        x1 > std::numeric_limits<int>::max() ||
+        y1 > std::numeric_limits<int>::max()) {
+      return cv::Rect();
+    }
+    return cv::Rect(static_cast<int>(x0), static_cast<int>(y0),
+                    static_cast<int>(x1 - x0), static_cast<int>(y1 - y0));
   }
 
-  cv::Rect lookup(const cv::Rect& downstream_roi) const {
-    if (!is_valid() || downstream_roi.width <= 0 || downstream_roi.height <= 0)
+  /**
+   * @brief Looks up the merged upstream demand for one downstream ROI.
+   * @param downstream_roi Downstream demand rectangle, intersected with the
+   * exact output extent before any cell coordinate is derived.
+   * @return Bounding upstream ROI contributed by intersected cells, or empty
+   * for an invalid table/request or unsafe endpoint.
+   * @throws Nothing.
+   * @note A fully out-of-bounds request returns empty instead of clamping onto
+   * an edge cell. Downstream endpoint and row-major index arithmetic use wide
+   * unsigned or signed intermediates before checked conversion.
+   */
+  cv::Rect lookup(const cv::Rect& downstream_roi) const noexcept {
+    if (!is_valid() || downstream_roi.width <= 0 ||
+        downstream_roi.height <= 0) {
       return cv::Rect();
-    int start_c = std::clamp(downstream_roi.x / grid_size_x, 0, cols - 1);
-    int start_r = std::clamp(downstream_roi.y / grid_size_y, 0, rows - 1);
-    int end_c =
-        std::clamp((downstream_roi.x + downstream_roi.width - 1) / grid_size_x,
-                   0, cols - 1);
-    int end_r =
-        std::clamp((downstream_roi.y + downstream_roi.height - 1) / grid_size_y,
-                   0, rows - 1);
+    }
+    const std::int64_t roi_right =
+        static_cast<std::int64_t>(downstream_roi.x) + downstream_roi.width;
+    const std::int64_t roi_bottom =
+        static_cast<std::int64_t>(downstream_roi.y) + downstream_roi.height;
+    if (roi_right <= downstream_roi.x || roi_bottom <= downstream_roi.y) {
+      return cv::Rect();
+    }
+    const std::int64_t clipped_left =
+        std::max<std::int64_t>(downstream_roi.x, 0);
+    const std::int64_t clipped_top =
+        std::max<std::int64_t>(downstream_roi.y, 0);
+    const std::int64_t clipped_right =
+        std::min<std::int64_t>(roi_right, output_extent.width);
+    const std::int64_t clipped_bottom =
+        std::min<std::int64_t>(roi_bottom, output_extent.height);
+    if (clipped_right <= clipped_left || clipped_bottom <= clipped_top) {
+      return cv::Rect();
+    }
+    const int start_c = static_cast<int>(clipped_left / grid_size_x);
+    const int start_r = static_cast<int>(clipped_top / grid_size_y);
+    const std::int64_t end_column = (clipped_right - 1) / grid_size_x;
+    const std::int64_t end_row = (clipped_bottom - 1) / grid_size_y;
+    const int end_c = static_cast<int>(end_column);
+    const int end_r = static_cast<int>(end_row);
 
     cv::Rect merged;
     for (int r = start_r; r <= end_r; ++r) {
       for (int c = start_c; c <= end_c; ++c) {
-        int idx = r * cols + c;
-        if (idx < 0 || idx >= static_cast<int>(cell_to_upstream_roi.size()))
+        const size_t index =
+            static_cast<size_t>(r) * static_cast<size_t>(cols) +
+            static_cast<size_t>(c);
+        if (index >= cell_to_upstream_roi.size()) {
           continue;
-        merged = merge_rect(merged, cell_to_upstream_roi[idx]);
+        }
+        merged = merge_rect(merged, cell_to_upstream_roi[index]);
       }
     }
     return merged;
@@ -332,10 +528,28 @@ class PluginManager;
 class OpRegistry;
 
 #if defined(PHOTOSPIDER_INTERNAL_BAD_ALLOC_TESTING)
+/** @brief Test-only observations of private operation registry state. */
 namespace testing {
+/** @brief Snapshot of device callback ownership populated by test accessors. */
 struct OpRegistryDeviceOwnershipInspection;
+/**
+ * @brief Reports whether the current thread owns the private registry lock.
+ * @param registry Registry whose thread-local lock token is inspected.
+ * @return True only while this thread is inside a guarded registry section.
+ * @throws Nothing.
+ * @note Compiled only for internal allocation/lifecycle boundary tests.
+ */
 bool op_registry_lock_held_by_current_thread_for_testing(
     const OpRegistry& registry) noexcept;
+/**
+ * @brief Captures device implementation and ownership counts without
+ * allocation.
+ * @param registry Registry whose stable slots are inspected.
+ * @param key Preexisting absolute operation key; caller keeps it alive.
+ * @return Value snapshot of matching implementation and revision state.
+ * @throws Nothing; missing keys produce an empty snapshot.
+ * @note Compiled only for internal allocation/lifecycle boundary tests.
+ */
 OpRegistryDeviceOwnershipInspection
 inspect_op_registry_device_ownership_for_testing(
     const OpRegistry& registry, const std::string& key) noexcept;
@@ -363,22 +577,30 @@ enum class TileSizePreference {
   MACRO,
 };
 
-// [核心修复] 移除此处的 Device 枚举定义，因为它已在 image_buffer.hpp 中定义
-
-// [M3.1] 扩展 OpMetadata 以支持调度权重
+/**
+ * @brief Private scheduling and dependency metadata for one implementation.
+ * @throws Nothing for value operations.
+ * @note The registry copies this value with its callback snapshot. Dependency
+ * builder state uses a separate revisioned snapshot for cache identity.
+ */
 struct OpMetadata {
+  /** @brief Preferred private tile granularity. */
   TileSizePreference tile_preference = TileSizePreference::UNDEFINED;
-  // [新增] 设备偏好字段，默认为 CPU
+  /** @brief Preferred execution device. */
   Device device_preference = Device::CPU;
-  // [M3.1 新增] 启发式调度权重，用于算子选择
-  // 值越小表示优先级越高（成本越低）
+  /** @brief Relative scheduling cost; lower values are preferred. */
   int cost_score = 100;
 
+  /** @brief Private image-input access pattern used during planning. */
   enum class InputAccessPattern {
+    /** @brief Output pixels depend on spatially aligned input positions. */
     SpatialAligned,
+    /** @brief Output pixels may read arbitrary input positions. */
     RandomAccess,
   };
+  /** @brief Input access pattern advertised by this implementation. */
   InputAccessPattern access_pattern = InputAccessPattern::SpatialAligned;
+  /** @brief Whether dependency mapping depends on upstream pixel content. */
   bool data_dependent = false;
 };
 
@@ -389,6 +611,10 @@ struct OpMetadata {
  * for the first CPU candidate, the HP compatibility bridge that retains the
  * same stable implementation owner.
  *
+ * @param node Borrowed private node snapshot valid for the invocation.
+ * @param image_inputs Borrowed upstream outputs in destination input order;
+ * null entries represent unavailable dependencies.
+ * @return Complete private output owned by the caller.
  * @throws Any exception emitted by the callback provider propagates through
  *         invocation.
  * @note Registry locking does not serialize callback execution. Providers must
@@ -396,7 +622,7 @@ struct OpMetadata {
  *       schedulers and independent snapshots may invoke it concurrently.
  */
 using MonolithicOpFunc = std::function<NodeOutput(
-    const Node&, const std::vector<const NodeOutput*>&)>;
+    const Node& node, const std::vector<const NodeOutput*>& image_inputs)>;
 
 /**
  * @brief Tiled operator callback signature.
@@ -406,6 +632,10 @@ using MonolithicOpFunc = std::function<NodeOutput(
  * callback owns no buffers; all tile views are borrowed from NodeExecutor for
  * the duration of the call.
  *
+ * @param node Borrowed private node snapshot valid for the invocation.
+ * @param output_tile Borrowed writable destination tile.
+ * @param input_tiles Borrowed read-only input tiles in destination input order.
+ * @return Nothing.
  * @throws Any exception emitted by the callback provider propagates through
  *         invocation.
  * @note InputTile carries const ImageBuffer pointers so tiled operators cannot
@@ -416,17 +646,97 @@ using MonolithicOpFunc = std::function<NodeOutput(
  * synchronize it because schedulers and independent snapshots may invoke the
  * same logical target concurrently.
  */
-using TileOpFunc = std::function<void(const Node&, const OutputTile&,
-                                      const std::vector<InputTile>&)>;
+// NOLINTBEGIN(whitespace/indent_namespace)
+using TileOpFunc =
+    std::function<void(const Node& node, const OutputTile& output_tile,
+                       const std::vector<InputTile>& input_tiles)>;
+// NOLINTEND
+
+/**
+ * @brief Private dirty-ROI callback signature carrying one resolved snapshot.
+ *
+ * @param node Borrowed destination node.
+ * @param downstream_roi Downstream demand to project upstream.
+ * @param graph Borrowed graph topology/cache view valid for the call.
+ * @param output_extent Exact destination output extent.
+ * @param input_extents Image-input extents by destination index.
+ * @param effective_parameters Deep-owned effective parameters resolved once.
+ * @param available_inputs Optional destination-indexed inputs actually ready
+ *        for execution. Null selects planning-graph snapshots.
+ * @return Combined upstream demand in callback mapping coordinates.
+ * @throws Any exception emitted by the callback provider propagates through
+ *         invocation.
+ * @note input_extents and effective_parameters describe the same request as
+ *       output_extent; adapters must not resolve either value again.
+ */
 using DirtyRoiPropFunc = std::function<cv::Rect(
-    const Node&, const cv::Rect&,
-    const GraphModel&)>;  // NOLINT(whitespace/indent_namespace)
+    const Node& node, const cv::Rect& downstream_roi, const GraphModel& graph,
+    const cv::Size& output_extent, const std::vector<cv::Size>& input_extents,
+    const plugin::ParameterMap& effective_parameters,
+    const std::vector<const NodeOutput*>* available_inputs)>;
+
+/**
+ * @brief Private forward-ROI callback signature carrying exact edge context.
+ *
+ * @param node Borrowed destination node.
+ * @param upstream_roi Changed ROI on the active upstream edge.
+ * @param graph Borrowed graph topology/cache view valid for the call.
+ * @param parent_size Exact active upstream output extent.
+ * @param child_size Exact destination output extent.
+ * @param active_input_index Destination image-input index being traversed.
+ * @param input_extents All image-input extents by destination index.
+ * @param effective_parameters Deep-owned effective parameters resolved once.
+ * @return Downstream affected ROI.
+ * @throws Any exception emitted by the callback provider propagates through
+ *         invocation.
+ * @note active_input_index identifies the traversed edge. input_extents and
+ *       effective_parameters are resolved once by the caller for this request.
+ */
 using ForwardRoiPropFunc = std::function<cv::Rect(
-    const Node&, const cv::Rect&, const GraphModel&,
-    const cv::Size& parent_size, const cv::Size& child_size)>;
+    const Node& node, const cv::Rect& upstream_roi, const GraphModel& graph,
+    const cv::Size& parent_size, const cv::Size& child_size,
+    size_t active_input_index, const std::vector<cv::Size>& input_extents,
+    const plugin::ParameterMap& effective_parameters)>;
+
+/**
+ * @brief Private dependency-LUT builder signature carrying cache identity data.
+ *
+ * @param node Borrowed destination node.
+ * @param graph Borrowed graph topology/cache view valid for the call.
+ * @param upstream_extents Image-input extents by destination index.
+ * @param downstream_extent Exact destination output extent.
+ * @param effective_parameters Deep-owned effective parameters resolved once.
+ * @return Complete candidate table; caller validates it before publication.
+ * @throws Any exception emitted by the callback provider propagates through
+ *         invocation.
+ * @note The builder receives the exact effective_parameters later paired with
+ *       its validated result in DependencyLutCacheIdentity.
+ */
 using DependencyLutBuilder = std::function<SpatialDependencyMap(
-    const Node&, const GraphModel&, const cv::Size& upstream_extent,
-    const cv::Size& downstream_extent)>;
+    const Node& node, const GraphModel& graph,
+    const std::vector<cv::Size>& upstream_extents,
+    const cv::Size& downstream_extent,
+    const plugin::ParameterMap& effective_parameters)>;
+
+/**
+ * @brief Coherent dependency-builder callback, flag, and ownership revisions.
+ *
+ * @throws std::bad_alloc or callback-defined copy exceptions when copied.
+ * @note OpRegistry creates this value under one state lock. The callback copy
+ * retains any plugin DSO lease, while both revisions become part of LUT cache
+ * identity so callback replacement or flag-source replacement cannot reuse a
+ * table built by a different registry state.
+ */
+struct DependencyBuilderSnapshot {
+  /** @brief Owned builder callback safe across later registry mutation. */
+  DependencyLutBuilder callback;
+  /** @brief Coherently resolved aggregate data-dependency flag. */
+  bool data_dependent = false;
+  /** @brief Active dependency-builder ownership revision. */
+  std::uint64_t dependency_builder_revision = 0;
+  /** @brief Newest active revision contributing a true dependency flag. */
+  std::uint64_t data_dependent_revision = 0;
+};
 
 /**
  * @brief Reports whether an operation supplies an explicit ROI propagator.
@@ -563,7 +873,25 @@ class OpRegistry {
    */
   static OpRegistry& instance();
 
-  /** @brief Legacy registry value containing one monolithic or tiled callback.
+  /**
+   * @brief Returns the generation of registry content that can shape tasks.
+   *
+   * @return Non-zero generation identifying the currently published registry
+   *         state.
+   * @throws Nothing; the value is read atomically.
+   * @note Every successful registration, restoration, retirement,
+   *       unregistration, and plugin-state publication advances this value.
+   *       Task-graph caches must include it and verify it before and after
+   *       expansion so a callback-shape override cannot reuse stale tasks.
+   */
+  std::uint64_t task_shape_generation() const noexcept;
+
+  /**
+   * @brief Private executable value containing one monolithic or tiled
+   * callback.
+   * @throws std::bad_alloc or callback-defined copy exceptions when copied.
+   * @note A plugin-origin callback is already wrapped with its DSO lease before
+   * entering this variant.
    */
   using OpVariant = std::variant<MonolithicOpFunc, TileOpFunc>;
 
@@ -641,9 +969,12 @@ class OpRegistry {
     std::optional<DependencyLutBuilder> dependency_builder;
 
     /**
-     * @brief Whether execution depends on input data beyond static geometry.
+     * @brief Explicit data-dependency mode registered with the LUT builder.
      *
-     * @note The planner uses this flag together with `dependency_builder`.
+     * @note Metadata flags remain in their own HP, RT, legacy, and device
+     * slots. `get_dependency_builder_snapshot()` aggregates those independent
+     * sources with this builder-specific value so replacing one source cannot
+     * leave a sticky true value or erase another source.
      */
     bool data_dependent = false;
 
@@ -711,7 +1042,7 @@ class OpRegistry {
     std::uint64_t forward_propagator = 0;
     /** @brief Revision owning the dependency-builder slot. */
     std::uint64_t dependency_builder = 0;
-    /** @brief Revision owning the aggregate data-dependency contribution. */
+    /** @brief Revision owning the builder-specific dependency contribution. */
     std::uint64_t data_dependent = 0;
     /**
      * @brief Revisions parallel to active device implementation entries.
@@ -936,8 +1267,8 @@ class OpRegistry {
    * @return Nothing.
    * @throws std::bad_alloc if key, capture, or table storage cannot allocate.
    * @throws Any exception raised while copying metadata or captured callbacks.
-   * @note Registration updates only the RT callback and metadata slots plus the
-   *       aggregate data-dependency flag.
+   * @note Registration updates only the RT callback and metadata slots. The
+   * metadata contribution is aggregated when a dependency snapshot is read.
    */
   void register_op_rt_tiled(const std::string& type, const std::string& subtype,
                             TileOpFunc fn, OpMetadata meta);
@@ -980,17 +1311,19 @@ class OpRegistry {
    * @param type Operation type.
    * @param subtype Operation subtype.
    * @param fn Builder moved into the operation implementation group.
-   * @param mark_data_dependent Whether registration also sets the aggregate
-   *        data-dependent flag.
+   * @param data_dependent Builder-specific data-dependency contribution owned
+   *        by this registration.
    * @return Nothing.
    * @throws std::bad_alloc if key, capture, or table storage cannot allocate.
    * @throws Any exception raised while copying a captured predecessor callback.
-   * @note Passing false preserves the prior aggregate dependency flag.
+   * @note Both true and false replace the prior builder contribution and record
+   * the same ownership revision as the builder. Snapshot reads independently
+   * aggregate this value with active HP, RT, legacy, and device metadata.
    */
   void register_dependency_builder(const std::string& type,
                                    const std::string& subtype,
                                    DependencyLutBuilder fn,
-                                   bool mark_data_dependent = true);
+                                   bool data_dependent = true);
 
   /**
    * @brief Copies the callback selected by HP or RT intent policy.
@@ -1067,30 +1400,20 @@ class OpRegistry {
       const std::string& type, const std::string& subtype) const;
 
   /**
-   * @brief Copies the dependency lookup builder for one operation.
+   * @brief Copies one coherent dependency builder and cache-identity state.
    *
    * @param type Operation type.
    * @param subtype Operation subtype.
-   * @return Owned builder snapshot, or nullopt when none is registered.
+   * @return Owned callback, resolved data-dependency flag, and active ownership
+   * revisions, or nullopt when no builder is registered.
    * @throws std::bad_alloc if key or callback copying cannot allocate.
    * @throws Any exception raised while copying the callback target.
-   * @note The returned builder retains a plugin lease when dynamically loaded.
+   * @note Callback, flag, and revisions are read under one registry lock. The
+   * returned callback retains a plugin lease and remains valid across later
+   * replacement or unload.
    */
-  std::optional<DependencyLutBuilder> get_dependency_builder(
+  std::optional<DependencyBuilderSnapshot> get_dependency_builder_snapshot(
       const std::string& type, const std::string& subtype) const;
-
-  /**
-   * @brief Checks aggregate and metadata-level data-dependency flags.
-   *
-   * @param type Operation type.
-   * @param subtype Operation subtype.
-   * @return True when implementation state or legacy metadata marks the
-   *         operation data-dependent.
-   * @throws std::bad_alloc if canonical key construction cannot allocate.
-   * @note The check is coherent under one registry lock and copies no callback.
-   */
-  bool is_data_dependent(const std::string& type,
-                         const std::string& subtype) const;
 
   /**
    * @brief Copies all implementation slots for one operation key.
@@ -1262,7 +1585,7 @@ class OpRegistry {
    * @brief Runs a registration callback while capturing touched keys.
    *
    * @param registration Callback that calls one or more OpRegistry register
-   * APIs, usually a plugin's `register_photospider_ops_v1` entry point.
+   * APIs, usually a plugin's `register_photospider_ops_v2` entry point.
    * @param capture Output capture receiving touched keys and prior table state.
    * @return Nothing.
    * @throws std::bad_alloc if key recording or snapshot copying cannot
@@ -1335,16 +1658,27 @@ class OpRegistry {
    *       operation key may contain multiple independently owned elements.
    */
   enum class OwnershipSlot {
+    /** @brief General operation callable slot. */
     LegacyOp,
+    /** @brief General scheduling metadata slot. */
     Metadata,
+    /** @brief High-precision monolithic callback slot. */
     MonolithicHp,
+    /** @brief High-precision tiled callback slot. */
     TiledHp,
+    /** @brief Real-time tiled callback slot. */
     TiledRt,
+    /** @brief High-precision scheduling metadata slot. */
     MetaHp,
+    /** @brief Real-time scheduling metadata slot. */
     MetaRt,
+    /** @brief Dirty ROI propagator slot. */
     DirtyPropagator,
+    /** @brief Forward ROI propagator slot. */
     ForwardPropagator,
+    /** @brief Dependency-LUT builder slot. */
     DependencyBuilder,
+    /** @brief Data-dependency flag slot. */
     DataDependent,
   };
 
@@ -1356,7 +1690,14 @@ class OpRegistry {
    *       means plugin-owned and foreign slots coexist; `None` means no active
    *       slot still carries a revision published by that plugin.
    */
-  enum class OwnershipMatch { None, Partial, Complete };
+  enum class OwnershipMatch {
+    /** @brief No active slot is owned by the inspected registration. */
+    None,
+    /** @brief Owned and foreign active slots coexist. */
+    Partial,
+    /** @brief Every active slot belongs to the inspected registration. */
+    Complete,
+  };
 
   /**
    * @brief Allocation-free exclusive guard for complete registry table state.
@@ -1610,6 +1951,17 @@ class OpRegistry {
                      const RegistryEntrySnapshot& snapshot);
 
   /**
+   * @brief Advances the non-zero task-shape generation under the state lock.
+   *
+   * @return Nothing.
+   * @throws Nothing; wraparound skips zero.
+   * @note The caller must already own this registry's `StateLockGuard`. The
+   *       advance may conservatively invalidate a task graph after a failed
+   *       mutation whose container operations partially changed state.
+   */
+  void advance_task_shape_generation() noexcept;
+
+  /**
    * @brief Legacy single-callback table keyed by canonical operation name.
    * @note Access is serialized by `StateLockGuard`.
    */
@@ -1646,6 +1998,16 @@ class OpRegistry {
   std::uint64_t next_ownership_revision_ = 1;
 
   /**
+   * @brief Non-zero revision for all registry state that can affect planning.
+   *
+   * @note Atomic reads let planners bracket an expansion without retaining the
+   *       registry lock across callback and graph inspection. Mutations publish
+   *       a new value while holding `StateLockGuard`; shadow copies carry their
+   *       own value and exchange it with the live registry at plugin commit.
+   */
+  std::atomic<std::uint64_t> task_shape_generation_{1};
+
+  /**
    * @brief Serializes registry snapshots, mutation, lookup, and publication.
    *
    * The owner token is not copied; every shadow registry receives an
@@ -1666,6 +2028,15 @@ class OpRegistry {
   mutable std::size_t state_lock_depth_ = 0;
 };
 
+/**
+ * @brief Builds the canonical private operation registry key.
+ * @param type Operation type segment.
+ * @param subtype Operation subtype segment.
+ * @return `type + ":" + subtype`.
+ * @throws std::bad_alloc when result string allocation fails.
+ * @note Callers validate empty/name policy before registration; this helper
+ * only performs canonical concatenation.
+ */
 inline std::string make_key(const std::string& type,
                             const std::string& subtype) {
   return type + ":" + subtype;

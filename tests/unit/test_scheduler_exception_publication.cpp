@@ -4,6 +4,7 @@
 #include <chrono>
 #include <exception>
 #include <iostream>
+#include <limits>
 #include <new>
 #include <stdexcept>
 #include <string>
@@ -459,6 +460,9 @@ using FailureHookSetter = decltype(&set_cpu_scheduler_failure_injection_hook);
 /** @brief Scheduler-specific transaction snapshot reader function. */
 using StateReader = decltype(&cpu_scheduler_transactional_snapshot);
 
+/** @brief Scheduler-specific BUILD_TESTING epoch seeding function. */
+using EpochSeeder = decltype(&set_cpu_scheduler_epoch_for_testing);
+
 /**
  * @brief Compares every scheduler state field covered by strong rollback.
  * @param before Snapshot captured immediately before the injecting call.
@@ -487,6 +491,200 @@ void expect_exact_transaction_state(
   EXPECT_EQ(after.exception_epoch, before.exception_epoch);
   EXPECT_EQ(after.exception_cleanup_complete,
             before.exception_cleanup_complete);
+}
+
+/**
+ * @brief Verifies null exception publication is an exact no-op.
+ * @tparam Scheduler Concrete CPU or pipeline scheduler.
+ * @param scheduler Scheduler started and stopped by this helper.
+ * @param snapshot Scheduler-specific transactional state reader.
+ * @param label Stable assertion trace label.
+ * @return Nothing.
+ * @throws GTest assertions only.
+ * @note The public runtime contract requires null input to preserve queue,
+ *       epoch, counter, and first-exception state.
+ */
+template <typename Scheduler>
+void run_null_exception_noop_case(Scheduler& scheduler, StateReader snapshot,
+                                  const char* label) {
+  scheduler.start();
+  const SchedulerTransactionalStateSnapshot before = snapshot(&scheduler);
+  scheduler.set_exception(nullptr);
+  const SchedulerTransactionalStateSnapshot after = snapshot(&scheduler);
+  expect_exact_transaction_state(before, after, label);
+  scheduler.shutdown();
+}
+
+/**
+ * @brief Verifies callback/handle initial-count rejection is state preserving.
+ * @tparam Scheduler Concrete CPU or pipeline scheduler.
+ * @param scheduler Scheduler started and stopped by this helper.
+ * @param snapshot Scheduler-specific transactional state reader.
+ * @param label Stable assertion trace label.
+ * @return Nothing.
+ * @throws GTest assertions only.
+ * @note Both routes are also exercised before start to enforce the shared
+ *       running-lifecycle precondition.
+ */
+template <typename Scheduler>
+void run_initial_count_validation_case(Scheduler& scheduler,
+                                       StateReader snapshot,
+                                       const char* label) {
+  std::vector<SchedulerTaskRuntime::Task> stopped_callbacks;
+  stopped_callbacks.emplace_back([] {});
+  EXPECT_THROW(scheduler.submit_initial_tasks(std::move(stopped_callbacks), 1),
+               std::logic_error);
+  std::atomic<int> stopped_handle_executions{0};
+  CountingTaskExecutor stopped_executor(stopped_handle_executions);
+  EXPECT_THROW(
+      scheduler.submit_initial_task_handles({{&stopped_executor, 0, 1}}, 1),
+      std::logic_error);
+
+  scheduler.start();
+  const SchedulerTransactionalStateSnapshot before = snapshot(&scheduler);
+  std::atomic<int> callback_executions{0};
+  std::vector<SchedulerTaskRuntime::Task> negative_callbacks;
+  negative_callbacks.emplace_back([&callback_executions] {
+    callback_executions.fetch_add(1, std::memory_order_relaxed);
+  });
+  EXPECT_THROW(
+      scheduler.submit_initial_tasks(std::move(negative_callbacks), -1),
+      std::invalid_argument);
+  std::vector<SchedulerTaskRuntime::Task> undercounted_callbacks;
+  undercounted_callbacks.emplace_back([&callback_executions] {
+    callback_executions.fetch_add(1, std::memory_order_relaxed);
+  });
+  EXPECT_THROW(
+      scheduler.submit_initial_tasks(std::move(undercounted_callbacks), 0),
+      std::invalid_argument);
+
+  std::atomic<int> handle_executions{0};
+  CountingTaskExecutor executor(handle_executions);
+  EXPECT_THROW(scheduler.submit_initial_task_handles({{&executor, 0, 2}}, -1),
+               std::invalid_argument);
+  EXPECT_THROW(scheduler.submit_initial_task_handles({{&executor, 0, 2}}, 0),
+               std::invalid_argument);
+
+  const SchedulerTransactionalStateSnapshot after = snapshot(&scheduler);
+  expect_exact_transaction_state(before, after, label);
+  EXPECT_EQ(stopped_handle_executions.load(std::memory_order_relaxed), 0);
+  EXPECT_EQ(callback_executions.load(std::memory_order_relaxed), 0);
+  EXPECT_EQ(handle_executions.load(std::memory_order_relaxed), 0);
+  scheduler.shutdown();
+}
+
+/**
+ * @brief Verifies logical-count saturation, zero floor, and epoch wrap.
+ * @tparam Scheduler Concrete CPU or pipeline scheduler.
+ * @param scheduler Scheduler started and stopped by this helper.
+ * @param snapshot Scheduler-specific state reader.
+ * @param seed_epoch Test-only epoch boundary publisher.
+ * @param label Stable assertion trace label.
+ * @return Nothing.
+ * @throws GTest assertions only.
+ */
+template <typename Scheduler>
+void run_completion_counter_boundary_case(Scheduler& scheduler,
+                                          StateReader snapshot,
+                                          EpochSeeder seed_epoch,
+                                          const char* label) {
+  SCOPED_TRACE(label);
+  scheduler.start();
+  scheduler.submit_initial_tasks({}, 0, SchedulerTaskPriority::High);
+
+  scheduler.dec_tasks_to_complete();
+  scheduler.inc_tasks_to_complete(0);
+  scheduler.inc_tasks_to_complete(-1);
+  EXPECT_EQ(snapshot(&scheduler).tasks_to_complete, 0);
+
+  scheduler.inc_tasks_to_complete(std::numeric_limits<int>::max());
+  const SchedulerTransactionalStateSnapshot saturated = snapshot(&scheduler);
+  EXPECT_EQ(saturated.tasks_to_complete, std::numeric_limits<int>::max());
+  EXPECT_THROW(scheduler.inc_tasks_to_complete(1), std::overflow_error);
+  EXPECT_EQ(snapshot(&scheduler).tasks_to_complete,
+            std::numeric_limits<int>::max());
+
+  scheduler.dec_tasks_to_complete();
+  EXPECT_EQ(snapshot(&scheduler).tasks_to_complete,
+            std::numeric_limits<int>::max() - 1LL);
+
+  seed_epoch(&scheduler, std::numeric_limits<std::uint64_t>::max());
+  EXPECT_EQ(scheduler.begin_new_epoch(), 1U);
+  SchedulerTransactionalStateSnapshot wrapped = snapshot(&scheduler);
+  EXPECT_EQ(wrapped.active_epoch, 1U);
+  EXPECT_EQ(wrapped.epoch_counter, 1U);
+
+  seed_epoch(&scheduler, std::numeric_limits<std::uint64_t>::max());
+  scheduler.submit_initial_tasks({}, 0, SchedulerTaskPriority::High);
+  wrapped = snapshot(&scheduler);
+  EXPECT_EQ(wrapped.active_epoch, 1U);
+  EXPECT_EQ(wrapped.epoch_counter, 1U);
+  EXPECT_EQ(wrapped.tasks_to_complete, 0);
+  scheduler.shutdown();
+}
+
+/**
+ * @brief Proves an old callback cannot mutate a newly published batch count.
+ * @tparam Scheduler Concrete one-worker CPU or pipeline scheduler.
+ * @param scheduler Scheduler started and stopped by this helper.
+ * @param snapshot Scheduler-specific state reader.
+ * @param label Stable assertion trace label.
+ * @return Nothing.
+ * @throws GTest assertions only.
+ * @note The first callback remains in flight while the second initial batch
+ * publishes, directly exercising the validation/publication race boundary.
+ */
+template <typename Scheduler>
+void run_stale_completion_counter_case(Scheduler& scheduler,
+                                       StateReader snapshot,
+                                       const char* label) {
+  SCOPED_TRACE(label);
+  std::atomic<bool> old_entered{false};
+  std::atomic<bool> release_old{false};
+  std::atomic<bool> old_finished{false};
+  std::atomic<bool> current_entered{false};
+  std::atomic<bool> release_current{false};
+
+  scheduler.start();
+  std::vector<SchedulerTaskRuntime::Task> old_batch;
+  old_batch.emplace_back([&] {
+    old_entered.store(true, std::memory_order_release);
+    while (!release_old.load(std::memory_order_acquire)) {
+      std::this_thread::yield();
+    }
+    scheduler.inc_tasks_to_complete(7);
+    scheduler.dec_tasks_to_complete();
+    old_finished.store(true, std::memory_order_release);
+  });
+  scheduler.submit_initial_tasks(std::move(old_batch), 1,
+                                 SchedulerTaskPriority::High);
+  const bool first_started =
+      wait_for_event(old_entered, std::chrono::milliseconds(3000));
+
+  if (first_started) {
+    std::vector<SchedulerTaskRuntime::Task> current_batch;
+    current_batch.emplace_back([&] {
+      current_entered.store(true, std::memory_order_release);
+      while (!release_current.load(std::memory_order_acquire)) {
+        std::this_thread::yield();
+      }
+    });
+    scheduler.submit_initial_tasks(std::move(current_batch), 2,
+                                   SchedulerTaskPriority::High);
+  }
+  release_old.store(true, std::memory_order_release);
+  const bool stale_returned =
+      wait_for_event(old_finished, std::chrono::milliseconds(3000));
+  const bool current_started =
+      wait_for_event(current_entered, std::chrono::milliseconds(3000));
+  const SchedulerTransactionalStateSnapshot after_stale = snapshot(&scheduler);
+  release_current.store(true, std::memory_order_release);
+  scheduler.shutdown();
+
+  EXPECT_TRUE(first_started);
+  EXPECT_TRUE(stale_returned);
+  EXPECT_TRUE(current_started);
+  EXPECT_EQ(after_stale.tasks_to_complete, 2);
 }
 
 /**
@@ -738,7 +936,7 @@ void run_start_publication_case(Scheduler& scheduler,
   const SchedulerTransactionalStateSnapshot staged =
       reached ? snapshot(&scheduler) : SchedulerTransactionalStateSnapshot{};
   const bool public_running_at_barrier = scheduler.is_running();
-  const bool runtime_running_at_barrier = scheduler.task_runtime_running();
+  const bool runtime_running_at_barrier = scheduler.is_running();
   barrier.release.store(true, std::memory_order_release);
   starter.join();
 
@@ -1543,6 +1741,91 @@ TEST(SchedulerExceptionPublication,
             << " submitted_while_mutex_held=" << submitted_while_wait_mutex_held
             << " submission_finished=" << submission_finished
             << " completed=" << completed.load() << '\n';
+}
+
+/**
+ * @brief CPU initial submissions reject invalid counts without publication.
+ */
+TEST(SchedulerTransactionalBatch, CpuInitialCountValidationPreservesState) {
+  CpuWorkStealingScheduler scheduler(1);
+  run_initial_count_validation_case(scheduler,
+                                    cpu_scheduler_transactional_snapshot,
+                                    "cpu/initial_count_validation");
+}
+
+/**
+ * @brief Pipeline initial submissions reject invalid counts without routing.
+ */
+TEST(SchedulerTransactionalBatch, GpuInitialCountValidationPreservesState) {
+  GpuPipelineScheduler::Config config;
+  config.cpu_workers = 1;
+  config.gpu_workers = 0;
+  GpuPipelineScheduler scheduler(config);
+  run_initial_count_validation_case(scheduler,
+                                    gpu_scheduler_transactional_snapshot,
+                                    "gpu/initial_count_validation");
+}
+
+/** @brief CPU completion accounting has a zero floor and checked upper bound.
+ */
+TEST(SchedulerCompletionAccounting, CpuCounterBoundariesAndEpochWrap) {
+  CpuWorkStealingScheduler scheduler(1);
+  run_completion_counter_boundary_case(
+      scheduler, cpu_scheduler_transactional_snapshot,
+      set_cpu_scheduler_epoch_for_testing, "cpu/completion_boundaries");
+}
+
+/**
+ * @brief Pipeline completion accounting has a zero floor and checked bound.
+ */
+TEST(SchedulerCompletionAccounting, GpuCounterBoundariesAndEpochWrap) {
+  GpuPipelineScheduler::Config config;
+  config.cpu_workers = 1;
+  config.gpu_workers = 0;
+  GpuPipelineScheduler scheduler(config);
+  run_completion_counter_boundary_case(scheduler,
+                                       gpu_scheduler_transactional_snapshot,
+                                       set_gpu_scheduler_epoch_for_testing,
+                                       "gpu_pipeline/completion_boundaries");
+}
+
+/** @brief CPU null publication preserves every batch-state field. */
+TEST(SchedulerExceptionPublication, CpuNullExceptionIsNoop) {
+  CpuWorkStealingScheduler scheduler(2);
+  run_null_exception_noop_case(scheduler, cpu_scheduler_transactional_snapshot,
+                               "cpu/null_exception");
+}
+
+/** @brief Pipeline null publication preserves every batch-state field. */
+TEST(SchedulerExceptionPublication, GpuPipelineNullExceptionIsNoop) {
+  GpuPipelineScheduler::Config config;
+  config.cpu_workers = 2;
+  config.gpu_workers = 0;
+  GpuPipelineScheduler scheduler(config);
+  run_null_exception_noop_case(scheduler, gpu_scheduler_transactional_snapshot,
+                               "gpu_pipeline/null_exception");
+}
+
+/** @brief A CPU callback from an older epoch cannot change the current count.
+ */
+TEST(SchedulerCompletionAccounting, CpuStaleCallbackCannotMutateNewBatch) {
+  CpuWorkStealingScheduler scheduler(1);
+  run_stale_completion_counter_case(scheduler,
+                                    cpu_scheduler_transactional_snapshot,
+                                    "cpu/stale_completion_counter");
+}
+
+/**
+ * @brief A pipeline callback from an older epoch cannot change current count.
+ */
+TEST(SchedulerCompletionAccounting, GpuStaleCallbackCannotMutateNewBatch) {
+  GpuPipelineScheduler::Config config;
+  config.cpu_workers = 1;
+  config.gpu_workers = 0;
+  GpuPipelineScheduler scheduler(config);
+  run_stale_completion_counter_case(scheduler,
+                                    gpu_scheduler_transactional_snapshot,
+                                    "gpu_pipeline/stale_completion_counter");
 }
 
 /**

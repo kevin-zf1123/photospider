@@ -11,7 +11,7 @@
 
 #include <vector>
 
-#include "ps_types.hpp"  // NOLINT(build/include_subdir)
+#include "core/ps_types.hpp"  // NOLINT(build/include_subdir)
 
 namespace ps {
 namespace {

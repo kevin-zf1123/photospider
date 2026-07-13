@@ -1,8 +1,10 @@
 #pragma once
 
 #include <cstddef>
+#include <cstdint>
 #include <memory>
 
+#include "photospider/core/device.hpp"
 #include "photospider/core/geometry.hpp"
 
 /**
@@ -21,38 +23,22 @@ namespace ps {
  *
  * @throws Nothing.
  * @note The enum names describe storage, not color space or semantic meaning.
+ * Values and the `uint32_t` representation are part of the public v2 DSO
+ * contract.
  */
-enum class DataType {
+enum class DataType : std::uint32_t {
   /** @brief Unsigned 8-bit integer channel. */
-  UINT8,
+  UINT8 = 0U,
   /** @brief Signed 8-bit integer channel. */
-  INT8,
+  INT8 = 1U,
   /** @brief Unsigned 16-bit integer channel. */
-  UINT16,
+  UINT16 = 2U,
   /** @brief Signed 16-bit integer channel. */
-  INT16,
+  INT16 = 3U,
   /** @brief 32-bit floating-point channel. */
-  FLOAT32,
+  FLOAT32 = 4U,
   /** @brief 64-bit floating-point channel. */
-  FLOAT64,
-};
-
-/**
- * @brief Compute or memory device that owns an ImageBuffer payload.
- *
- * @throws Nothing.
- * @note Values are stable capability labels. A buffer may also carry
- *       backend-specific details in ImageBuffer::context.
- */
-enum class Device {
-  /** @brief Host CPU memory. */
-  CPU,
-  /** @brief Apple Metal GPU resource. */
-  GPU_METAL,
-  /** @brief CUDA GPU resource. */
-  GPU_CUDA,
-  /** @brief Neural processing unit or ASIC accelerator resource. */
-  ASIC_NPU,
+  FLOAT64 = 5U,
 };
 
 /**
@@ -69,10 +55,24 @@ enum class Device {
  *       deleters. The descriptor itself does not impose thread synchronization
  *       or grant mutable pixel access. Payload permissions are producer-owned:
  *       callers must treat data as read-only unless the producing API
- *       explicitly promises writable storage. An IPC Host image is a shared
- *       `PROT_READ|MAP_PRIVATE` mapping with a page-aligned base and tight
- *       rows; it does not promise the kernel-owned 64-byte alignment of every
- *       row.
+ *       explicitly promises writable storage. When an operation DSO returns a
+ *       descriptor, the host wraps each non-null payload owner with the DSO
+ *       lease; copies of that returned descriptor therefore keep any
+ *       plugin-instantiated deleter mapped until final payload retirement. An
+ *       IPC Host image is a shared `PROT_READ|MAP_PRIVATE` mapping with a
+ *       page-aligned base and tight rows; it does not promise the kernel-owned
+ *       64-byte alignment of every row. Plugin outputs must use either the
+ *       canonical `ImageBuffer{}` descriptor for data-only results or positive
+ *       width, height, and channels with a non-null data/context owner. The
+ *       canonical empty descriptor includes `DataType::FLOAT32` and
+ *       `Device::CPU`; changing only its type/device is invalid. CPU data must
+ *       provide a real shared-owner control block; non-null aliases of an
+ *       empty shared_ptr are invalid. CPU images require owned `data` and a
+ *       stride at least as large as one packed row. Non-CPU backend images may
+ *       use an owned context without a CPU pointer. The host rejects invalid
+ *       enum values and overflowing descriptor arithmetic before cache
+ *       publication; opaque backend allocation capacity is provider
+ *       responsibility.
  */
 struct ImageBuffer {
   /** @brief Width in pixels. */
@@ -91,7 +91,7 @@ struct ImageBuffer {
   Device device = Device::CPU;
 
   /** @brief Bytes between the start of consecutive rows. */
-  size_t step = 0;
+  std::size_t step = 0;
 
   /**
    * @brief Shared pixel payload with origin-defined access permissions and
@@ -108,10 +108,10 @@ struct ImageBuffer {
  *
  * @param type Channel storage format.
  * @return Bytes occupied by a single channel value.
- * @throws Nothing.
+ * @throws std::invalid_argument if type is not a declared DataType value.
  * @note The function does not inspect image dimensions or device placement.
  */
-size_t image_buffer_bytes_per_channel(DataType type);
+std::size_t image_buffer_bytes_per_channel(DataType type);
 
 /**
  * @brief Computes an aligned row stride for an image buffer.
@@ -126,11 +126,14 @@ size_t image_buffer_bytes_per_channel(DataType type);
  * @return Row stride in bytes, or zero when width or channels are not positive
  *         after alignment validation succeeds.
  * @throws std::invalid_argument if alignment is zero or is not a power of two.
+ * @throws std::invalid_argument if type is not a declared DataType value.
+ * @throws std::overflow_error if packed or aligned row arithmetic exceeds
+ *         `std::size_t`.
  * @note Alignment is validated before dimensions are interpreted. The function
  *       does not allocate memory.
  */
-size_t aligned_image_buffer_step(int width, int channels, DataType type,
-                                 size_t alignment = 64);
+std::size_t aligned_image_buffer_step(int width, int channels, DataType type,
+                                      std::size_t alignment = 64);
 
 /**
  * @brief Allocates an aligned CPU image buffer descriptor.
@@ -144,17 +147,21 @@ size_t aligned_image_buffer_step(int width, int channels, DataType type,
  * @param type Channel storage format.
  * @param alignment Positive power-of-two byte alignment target for each row;
  *        must be at least `sizeof(void*)` for portable CPU allocation.
- * @return ImageBuffer describing the allocated CPU payload, or an empty
- *         descriptor with a zero step when dimensions are invalid after
- *         alignment validation succeeds.
+ * @return ImageBuffer describing the allocated CPU payload, or the canonical
+ *         ImageBuffer{} descriptor when dimensions are invalid after argument
+ *         validation succeeds.
  * @throws std::invalid_argument if alignment is zero, is not a power of two, or
  *         is smaller than `sizeof(void*)`.
+ * @throws std::invalid_argument if type is not a declared DataType value.
+ * @throws std::overflow_error if stride or total allocation arithmetic exceeds
+ *         `std::size_t`.
  * @throws std::bad_alloc if CPU memory allocation fails.
  * @note Alignment is validated before dimensions are interpreted. The returned
  *       buffer uses `Device::CPU` and has no backend context.
  */
 ImageBuffer make_aligned_cpu_image_buffer(int width, int height, int channels,
-                                          DataType type, size_t alignment = 64);
+                                          DataType type,
+                                          std::size_t alignment = 64);
 
 /**
  * @brief Read-only non-owning view over an input image region.
@@ -184,12 +191,14 @@ struct InputTileView {
  * managed by the caller before dispatch.
  *
  * @throws Nothing for value operations.
- * @note The buffer pointer is mutable because output tiles are the write side
- *       of the tile contract.
+ * @note Descriptor metadata and ownership handles are immutable during tiled
+ * execution. Output adapters may expose writable pixel views through the
+ * retained payload, preventing concurrent callbacks from replacing dimensions,
+ * device identity, or deleters.
  */
 struct OutputTileView {
-  /** @brief Borrowed destination buffer that receives tile output. */
-  ImageBuffer* buffer = nullptr;
+  /** @brief Borrowed immutable descriptor whose pixel payload receives data. */
+  const ImageBuffer* buffer = nullptr;
 
   /** @brief Pixel ROI inside the borrowed destination buffer. */
   PixelRect roi;

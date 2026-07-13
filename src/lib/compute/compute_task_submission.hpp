@@ -1,6 +1,5 @@
 #pragma once
 
-#include <functional>
 #include <optional>
 #include <unordered_map>
 #include <unordered_set>
@@ -160,8 +159,8 @@ class TaskSubmissionPlan : public TaskExecutor {
    *
    * @param task_runtime Scheduler runtime that receives AssignInitial events.
    * @throws Exceptions from task_runtime.log_event().
-   * @note This is called after submit_initial_tasks() so traces reflect the
-   * actual set of moved initial closures.
+   * @note This is called after `submit_initial_task_handles()` so traces
+   * reflect the actual set of committed initial borrowed handles.
    */
   void log_initial_assignments(SchedulerTaskRuntime& task_runtime) const;
 
@@ -255,25 +254,5 @@ class TaskSubmissionPlan : public TaskExecutor {
 void dispatch_planned_tasks(GraphModel& graph,
                             SchedulerTaskRuntime& task_runtime, int node_id,
                             TaskSubmissionPlan& plan);
-
-/**
- * @brief Submits dirty ready tasks with source-before-downstream ordering.
- *
- * @param task_runtime Scheduler runtime that executes and records task errors.
- * @param source_tasks Dirty source tasks to run with high priority.
- * @param downstream_tasks Dependent tasks to run with normal priority after
- * all sources and the optional boundary check complete.
- * @param epoch Optional scheduler epoch passed through to task submission.
- * @param before_downstream Optional boundary validation callback.
- * @throws Rethrows any task or callback exception after recording it in
- * task_runtime.
- * @note Source tasks may run concurrently, but downstream tasks are submitted
- * one at a time to preserve deterministic ordering at dirty update call sites.
- */
-void submit_dirty_ready_tasks_source_first(
-    SchedulerTaskRuntime& task_runtime,
-    std::vector<SchedulerTaskRuntime::Task>&& source_tasks,
-    std::vector<SchedulerTaskRuntime::Task>&& downstream_tasks,
-    std::optional<uint64_t> epoch, std::function<void()> before_downstream);
 
 }  // namespace ps::compute

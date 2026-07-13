@@ -20,11 +20,11 @@
 #include <utility>
 #include <vector>
 
-#include "adapter/buffer_adapter_opencv.hpp"
+#include "adapters/opencv/buffer_adapter_opencv.hpp"
 #include "compute/compute_service.hpp"
+#include "core/ps_types.hpp"  // NOLINT(build/include_subdir)
 #include "graph/graph_cache_service.hpp"
 #include "graph/graph_traversal_service.hpp"
-#include "ps_types.hpp"  // NOLINT(build/include_subdir)
 #include "runtime/graph_runtime.hpp"
 #include "runtime/interaction.hpp"
 #include "runtime/kernel.hpp"
@@ -179,8 +179,8 @@ void production_gpu_tiled_marker_op(const Node& node,
                                     const std::vector<InputTile>& input_tiles) {
   (void)node;
   (void)input_tiles;
-  output_tile.buffer->device = Device::GPU_METAL;
   toCvMat(output_tile).setTo(2.0f);
+  output_tile.buffer->device = Device::GPU_METAL;
 }
 
 class GpuPipelineSchedulerTest : public ::testing::Test {
@@ -441,7 +441,8 @@ TEST_F(GpuPipelineSchedulerTest,
   }));
   EXPECT_EQ(result.image_buffer.device, Device::GPU_METAL);
   EXPECT_EQ(result.debug.compute_device, "GPU_METAL");
-  EXPECT_EQ(toCvMat(result.image_buffer).at<float>(0, 0), 2.0f);
+  ASSERT_TRUE(result.image_buffer.data);
+  EXPECT_EQ(*static_cast<const float*>(result.image_buffer.data.get()), 2.0f);
 
   runtime.stop();
   registry.unregister_key(make_key(kType, kSubtype));
@@ -461,7 +462,7 @@ TEST_F(GpuPipelineSchedulerTest, AvailableDevicesHonorGpuDispatchConfig) {
   disabled_workers.gpu_workers = 0;
   disabled_workers.prefer_gpu_for_hp = true;
   GpuPipelineScheduler no_gpu_workers(disabled_workers);
-  no_gpu_workers.attach(&runtime);
+  no_gpu_workers.attach(runtime);
   EXPECT_EQ(no_gpu_workers.available_devices(),
             std::vector<Device>{Device::CPU});
 
@@ -469,7 +470,7 @@ TEST_F(GpuPipelineSchedulerTest, AvailableDevicesHonorGpuDispatchConfig) {
   cpu_hp_config.gpu_workers = 1;
   cpu_hp_config.prefer_gpu_for_hp = false;
   GpuPipelineScheduler cpu_hp_scheduler(cpu_hp_config);
-  cpu_hp_scheduler.attach(&runtime);
+  cpu_hp_scheduler.attach(runtime);
   EXPECT_EQ(cpu_hp_scheduler.available_devices(),
             std::vector<Device>{Device::CPU});
 
@@ -477,7 +478,7 @@ TEST_F(GpuPipelineSchedulerTest, AvailableDevicesHonorGpuDispatchConfig) {
   enabled_config.gpu_workers = 1;
   enabled_config.prefer_gpu_for_hp = true;
   GpuPipelineScheduler gpu_enabled_scheduler(enabled_config);
-  gpu_enabled_scheduler.attach(&runtime);
+  gpu_enabled_scheduler.attach(runtime);
   EXPECT_EQ(gpu_enabled_scheduler.available_devices(),
             (std::vector<Device>{Device::CPU, Device::GPU_METAL}));
 }

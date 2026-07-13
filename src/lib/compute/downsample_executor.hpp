@@ -24,7 +24,10 @@ namespace ps::compute {
  *
  * @note Instances borrow GraphModel, RealtimeProxyGraph, GraphRuntime, and
  * GraphEventService for a single call chain. RT output is committed only to the
- * proxy graph; GraphModel keeps HP cache authority.
+ * proxy graph; GraphModel keeps HP cache authority. CPU images are resized.
+ * Opaque non-CPU images are preserved as full-resolution shared descriptors in
+ * the proxy graph because only their device adapter can clone or downsample
+ * them; generic code never interprets the context type.
  */
 class DownsampleExecutor {
  public:
@@ -119,8 +122,10 @@ class DownsampleExecutor {
    * @param hp_size HP output extent used to merge RT ROI metadata.
    * @param hp_version HP version that becomes the RT version.
    * @throws std::bad_alloc if optional cache assignment allocates.
-   * @note This path handles empty image buffers and zero-sized RT proxy
-   * extents.
+   * @note This path handles empty image buffers, zero-sized RT proxy extents,
+   * and opaque non-CPU images. Backend passthrough preserves the complete HP
+   * descriptor and lifetime rather than claiming a fabricated downscaled
+   * extent.
    */
   void apply_passthrough(Node& node, RealtimeProxyGraph::NodeState& proxy_state,
                          const cv::Rect& roi_hp, const cv::Size& hp_size,

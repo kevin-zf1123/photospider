@@ -9,8 +9,8 @@
 #include <string>
 #include <vector>
 
+#include "core/ps_types.hpp"                // NOLINT(build/include_subdir)
 #include "graph/graph_model.hpp"            // NOLINT(build/include_subdir)
-#include "ps_types.hpp"                     // NOLINT(build/include_subdir)
 #include "runtime/graph_event_service.hpp"  // 为了事件结构
 #include "runtime/interaction.hpp"
 #include "runtime/kernel.hpp"

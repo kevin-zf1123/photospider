@@ -5,7 +5,7 @@
 #include <utility>
 #include <vector>
 
-#include "adapter/buffer_adapter_opencv.hpp"
+#include "adapters/opencv/buffer_adapter_opencv.hpp"
 #include "compute/compute_geometry.hpp"
 
 namespace ps::compute {
@@ -16,10 +16,14 @@ namespace {
  *
  * @param source Source image buffer owned by graph or proxy state.
  * @param label Human-readable buffer domain used in error messages.
- * @return Independent ImageBuffer with cloned image payload when present.
+ * @return Independent CPU ImageBuffer when CPU pixels are present; otherwise a
+ * shared backend descriptor whose immutable owner is safe to replace later.
  * @throws GraphError when adapter conversion fails; may throw std::bad_alloc
  * while allocating cloned OpenCV storage.
- * @note Empty buffers keep shape metadata but drop data/context ownership.
+ * @note Empty buffers keep shape metadata but drop ownership. Non-CPU buffers
+ * are shallow-copied because the generic host cannot clone opaque resources;
+ * tiled execution replaces that descriptor with a CPU staging allocation
+ * before writing, while monolithic execution replaces the complete output.
  */
 ImageBuffer clone_image_buffer(const ImageBuffer& source,
                                const std::string& label) {
@@ -29,6 +33,9 @@ ImageBuffer clone_image_buffer(const ImageBuffer& source,
   if (source.width <= 0 || source.height <= 0 || source.channels <= 0 ||
       (!source.data && !source.context)) {
     return cloned;
+  }
+  if (source.device != Device::CPU) {
+    return source;
   }
 
   try {
@@ -55,11 +62,8 @@ ImageBuffer clone_image_buffer(const ImageBuffer& source,
  */
 NodeOutput clone_node_output(const NodeOutput& source,
                              const std::string& label) {
-  NodeOutput cloned;
+  NodeOutput cloned = source;
   cloned.image_buffer = clone_image_buffer(source.image_buffer, label);
-  cloned.data = source.data;
-  cloned.space = source.space;
-  cloned.debug = source.debug;
   return cloned;
 }
 
@@ -91,6 +95,20 @@ NodeOutput& HighPrecisionDirtyWriteBuffer::ensure_output(const Node& node) {
     entry.has_output = true;
   }
   return entry.output;
+}
+
+/** @copydoc HighPrecisionDirtyWriteBuffer::import_precomputed_output */
+void HighPrecisionDirtyWriteBuffer::import_precomputed_output(
+    const Node& node, const NodeOutput& output, int hp_version,
+    const std::optional<cv::Rect>& hp_roi,
+    std::optional<uint64_t> dirty_source_generation) {
+  std::lock_guard<std::mutex> lock(mutex_);
+  Entry& entry = ensure_entry_locked(node);
+  entry.output = output;
+  entry.has_output = true;
+  entry.hp_version = hp_version;
+  entry.hp_roi = hp_roi;
+  entry.dirty_source_generation = dirty_source_generation;
 }
 
 int HighPrecisionDirtyWriteBuffer::mark_updated(const Node& node,

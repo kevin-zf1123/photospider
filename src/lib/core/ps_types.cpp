@@ -1,4 +1,4 @@
-#include "ps_types.hpp"  // NOLINT(build/include_subdir)
+#include "core/ps_types.hpp"  // NOLINT(build/include_subdir)
 
 #include <algorithm>
 #include <memory>
@@ -418,12 +418,30 @@ OpRegistry::OpRegistry(const OpRegistry& other) {
   impl_table_ = other.impl_table_;
   ownership_table_ = other.ownership_table_;
   next_ownership_revision_ = other.next_ownership_revision_;
+  task_shape_generation_.store(
+      other.task_shape_generation_.load(std::memory_order_relaxed),
+      std::memory_order_relaxed);
 }
 
 /** @copydoc OpRegistry::instance */
 OpRegistry& OpRegistry::instance() {
   static OpRegistry inst;
   return inst;
+}
+
+/** @copydoc OpRegistry::task_shape_generation */
+std::uint64_t OpRegistry::task_shape_generation() const noexcept {
+  return task_shape_generation_.load(std::memory_order_acquire);
+}
+
+/** @copydoc OpRegistry::advance_task_shape_generation */
+void OpRegistry::advance_task_shape_generation() noexcept {
+  std::uint64_t generation =
+      task_shape_generation_.load(std::memory_order_relaxed) + 1;
+  if (generation == 0) {
+    generation = 1;
+  }
+  task_shape_generation_.store(generation, std::memory_order_release);
 }
 
 /** @copydoc OpRegistry::next_ownership_revision */
@@ -528,6 +546,7 @@ void OpRegistry::restore_entry(const std::string& key,
 
   {
     StateLockGuard lock(*this);
+    advance_task_shape_generation();
     const auto restore_table = [&key](auto& table, auto& previous,
                                       auto& retired) {
       auto active = table.find(key);
@@ -729,6 +748,9 @@ bool OpRegistry::restore_entry_noexcept(
       retired_ownership.emplace(ownership_table_.extract(active_ownership));
     }
   }
+  if (changed) {
+    advance_task_shape_generation();
+  }
   return changed;
 }
 
@@ -852,6 +874,9 @@ bool OpRegistry::retire_owned_entry_noexcept(
         metadata_table_.find(key) == metadata_table_.end()) {
       retired_ownership.emplace(ownership_table_.extract(ownership_it));
     }
+    if (changed) {
+      advance_task_shape_generation();
+    }
     return changed;
   }
   OpImplementations& active = active_implementations->second;
@@ -962,6 +987,9 @@ bool OpRegistry::retire_owned_entry_noexcept(
       impl_table_.find(key) == impl_table_.end()) {
     retired_ownership.emplace(ownership_table_.extract(ownership_it));
   }
+  if (changed) {
+    advance_task_shape_generation();
+  }
   return changed;
 }
 
@@ -1070,6 +1098,13 @@ void OpRegistry::swap_state(OpRegistry& other) noexcept {
   ownership_table_.swap(other.ownership_table_);
   using std::swap;
   swap(next_ownership_revision_, other.next_ownership_revision_);
+  const std::uint64_t this_generation =
+      task_shape_generation_.load(std::memory_order_relaxed);
+  const std::uint64_t other_generation =
+      other.task_shape_generation_.load(std::memory_order_relaxed);
+  task_shape_generation_.store(other_generation, std::memory_order_release);
+  other.task_shape_generation_.store(this_generation,
+                                     std::memory_order_release);
   second->unlock_state();
   first->unlock_state();
 }
@@ -1086,6 +1121,7 @@ void OpRegistry::register_op(const std::string& type,
   {
     StateLockGuard lock(*this);
     capture_key_before_mutation(key);
+    advance_task_shape_generation();
     RegistryEntryOwnership& ownership = ownership_table_[key];
     const std::uint64_t revision = next_ownership_revision();
     using std::swap;
@@ -1100,11 +1136,6 @@ void OpRegistry::register_op(const std::string& type,
                             revision);
     implementations.meta_hp = meta;
     record_scalar_ownership(key, ownership, OwnershipSlot::MetaHp, revision);
-    if (meta.data_dependent) {
-      implementations.data_dependent = true;
-      record_scalar_ownership(key, ownership, OwnershipSlot::DataDependent,
-                              revision);
-    }
   }
 }
 
@@ -1118,6 +1149,7 @@ void OpRegistry::register_op(const std::string& type,
   {
     StateLockGuard lock(*this);
     capture_key_before_mutation(key);
+    advance_task_shape_generation();
     RegistryEntryOwnership& ownership = ownership_table_[key];
     const std::uint64_t revision = next_ownership_revision();
     if (meta.tile_preference == TileSizePreference::UNDEFINED) {
@@ -1134,11 +1166,6 @@ void OpRegistry::register_op(const std::string& type,
     record_scalar_ownership(key, ownership, OwnershipSlot::TiledHp, revision);
     implementations.meta_hp = meta;
     record_scalar_ownership(key, ownership, OwnershipSlot::MetaHp, revision);
-    if (meta.data_dependent) {
-      implementations.data_dependent = true;
-      record_scalar_ownership(key, ownership, OwnershipSlot::DataDependent,
-                              revision);
-    }
   }
 }
 
@@ -1242,6 +1269,13 @@ bool OpRegistry::unregister_key(const std::string& key) {
 
   {
     StateLockGuard lock(*this);
+    const bool changed = table_.find(key) != table_.end() ||
+                         metadata_table_.find(key) != metadata_table_.end() ||
+                         impl_table_.find(key) != impl_table_.end() ||
+                         ownership_table_.find(key) != ownership_table_.end();
+    if (changed) {
+      advance_task_shape_generation();
+    }
     if (auto entry = table_.find(key); entry != table_.end()) {
       retired_legacy.emplace(table_.extract(entry));
     }
@@ -1276,6 +1310,7 @@ void OpRegistry::register_op_hp_monolithic(const std::string& type,
   {
     StateLockGuard lock(*this);
     capture_key_before_mutation(key);
+    advance_task_shape_generation();
     RegistryEntryOwnership& ownership = ownership_table_[key];
     const std::uint64_t revision = next_ownership_revision();
     OpImplementations& implementations = impl_table_[key];
@@ -1284,11 +1319,6 @@ void OpRegistry::register_op_hp_monolithic(const std::string& type,
                             revision);
     implementations.meta_hp = meta;
     record_scalar_ownership(key, ownership, OwnershipSlot::MetaHp, revision);
-    if (meta.data_dependent) {
-      implementations.data_dependent = true;
-      record_scalar_ownership(key, ownership, OwnershipSlot::DataDependent,
-                              revision);
-    }
   }
 }
 
@@ -1301,6 +1331,7 @@ void OpRegistry::register_op_hp_tiled(const std::string& type,
   {
     StateLockGuard lock(*this);
     capture_key_before_mutation(key);
+    advance_task_shape_generation();
     RegistryEntryOwnership& ownership = ownership_table_[key];
     const std::uint64_t revision = next_ownership_revision();
     OpImplementations& implementations = impl_table_[key];
@@ -1308,11 +1339,6 @@ void OpRegistry::register_op_hp_tiled(const std::string& type,
     record_scalar_ownership(key, ownership, OwnershipSlot::TiledHp, revision);
     implementations.meta_hp = meta;
     record_scalar_ownership(key, ownership, OwnershipSlot::MetaHp, revision);
-    if (meta.data_dependent) {
-      implementations.data_dependent = true;
-      record_scalar_ownership(key, ownership, OwnershipSlot::DataDependent,
-                              revision);
-    }
   }
 }
 
@@ -1325,6 +1351,7 @@ void OpRegistry::register_op_rt_tiled(const std::string& type,
   {
     StateLockGuard lock(*this);
     capture_key_before_mutation(key);
+    advance_task_shape_generation();
     RegistryEntryOwnership& ownership = ownership_table_[key];
     const std::uint64_t revision = next_ownership_revision();
     OpImplementations& implementations = impl_table_[key];
@@ -1332,11 +1359,6 @@ void OpRegistry::register_op_rt_tiled(const std::string& type,
     record_scalar_ownership(key, ownership, OwnershipSlot::TiledRt, revision);
     implementations.meta_rt = meta;
     record_scalar_ownership(key, ownership, OwnershipSlot::MetaRt, revision);
-    if (meta.data_dependent) {
-      implementations.data_dependent = true;
-      record_scalar_ownership(key, ownership, OwnershipSlot::DataDependent,
-                              revision);
-    }
   }
 }
 
@@ -1349,6 +1371,7 @@ void OpRegistry::register_dirty_propagator(const std::string& type,
   {
     StateLockGuard lock(*this);
     capture_key_before_mutation(key);
+    advance_task_shape_generation();
     RegistryEntryOwnership& ownership = ownership_table_[key];
     const std::uint64_t revision = next_ownership_revision();
     impl_table_[key].dirty_propagator.swap(replacement);
@@ -1366,6 +1389,7 @@ void OpRegistry::register_forward_propagator(const std::string& type,
   {
     StateLockGuard lock(*this);
     capture_key_before_mutation(key);
+    advance_task_shape_generation();
     RegistryEntryOwnership& ownership = ownership_table_[key];
     const std::uint64_t revision = next_ownership_revision();
     impl_table_[key].forward_propagator.swap(replacement);
@@ -1378,23 +1402,22 @@ void OpRegistry::register_forward_propagator(const std::string& type,
 void OpRegistry::register_dependency_builder(const std::string& type,
                                              const std::string& subtype,
                                              DependencyLutBuilder fn,
-                                             bool mark_data_dependent) {
+                                             bool data_dependent) {
   auto key = make_key(type, subtype);
   std::optional<DependencyLutBuilder> replacement(std::in_place, std::move(fn));
   {
     StateLockGuard lock(*this);
     capture_key_before_mutation(key);
+    advance_task_shape_generation();
     RegistryEntryOwnership& ownership = ownership_table_[key];
     const std::uint64_t revision = next_ownership_revision();
     OpImplementations& implementations = impl_table_[key];
     implementations.dependency_builder.swap(replacement);
     record_scalar_ownership(key, ownership, OwnershipSlot::DependencyBuilder,
                             revision);
-    if (mark_data_dependent) {
-      implementations.data_dependent = true;
-      record_scalar_ownership(key, ownership, OwnershipSlot::DataDependent,
-                              revision);
-    }
+    implementations.data_dependent = data_dependent;
+    record_scalar_ownership(key, ownership, OwnershipSlot::DataDependent,
+                            revision);
   }
 }
 
@@ -1444,7 +1467,9 @@ DirtyRoiPropFunc OpRegistry::get_dirty_propagator(
     }
   }
   static const DirtyRoiPropFunc kIdentity =
-      [](const Node&, const cv::Rect& roi, const GraphModel&) { return roi; };
+      [](const Node&, const cv::Rect& roi, const GraphModel&, const cv::Size&,
+         const std::vector<cv::Size>&, const plugin::ParameterMap&,
+         const std::vector<const NodeOutput*>*) { return roi; };
   return kIdentity;
 }
 
@@ -1461,7 +1486,8 @@ ForwardRoiPropFunc OpRegistry::get_forward_propagator(
   }
   static const ForwardRoiPropFunc kIdentity =
       [](const Node&, const cv::Rect& roi, const GraphModel&, const cv::Size&,
-         const cv::Size&) { return roi; };
+         const cv::Size&, size_t, const std::vector<cv::Size>&,
+         const plugin::ParameterMap&) { return roi; };
   return kIdentity;
 }
 
@@ -1489,36 +1515,53 @@ PropagationContractStatus OpRegistry::forward_propagation_contract_status(
   return PropagationContractStatus::LegacyIdentityFallback;
 }
 
-/** @copydoc OpRegistry::get_dependency_builder */
-std::optional<DependencyLutBuilder> OpRegistry::get_dependency_builder(
-    const std::string& type, const std::string& subtype) const {
+/** @copydoc OpRegistry::get_dependency_builder_snapshot */
+std::optional<DependencyBuilderSnapshot>
+OpRegistry::get_dependency_builder_snapshot(const std::string& type,
+                                            const std::string& subtype) const {
+  const auto key = make_key(type, subtype);
   StateLockGuard lock(*this);
-  auto key = make_key(type, subtype);
-  auto it = impl_table_.find(key);
-  if (it != impl_table_.end()) {
-    if (it->second.dependency_builder) {
-      return it->second.dependency_builder;
-    }
+  const auto implementations = impl_table_.find(key);
+  if (implementations == impl_table_.end() ||
+      !implementations->second.dependency_builder) {
+    return std::nullopt;
   }
-  return std::nullopt;
-}
 
-/** @copydoc OpRegistry::is_data_dependent */
-bool OpRegistry::is_data_dependent(const std::string& type,
-                                   const std::string& subtype) const {
-  StateLockGuard lock(*this);
-  auto key = make_key(type, subtype);
-  auto it = impl_table_.find(key);
-  if (it != impl_table_.end()) {
-    if (it->second.data_dependent)
-      return true;
-    if (it->second.meta_hp && it->second.meta_hp->data_dependent)
-      return true;
-    if (it->second.meta_rt && it->second.meta_rt->data_dependent)
-      return true;
+  const auto ownership = ownership_table_.find(key);
+  const RegistryEntryOwnership empty_ownership;
+  const RegistryEntryOwnership& revisions =
+      ownership != ownership_table_.end() ? ownership->second : empty_ownership;
+  const OpImplementations& state = implementations->second;
+
+  DependencyBuilderSnapshot snapshot;
+  snapshot.callback = *state.dependency_builder;
+  snapshot.dependency_builder_revision = revisions.dependency_builder;
+  const auto include_dependency_flag = [&](bool enabled,
+                                           std::uint64_t revision) {
+    if (enabled) {
+      snapshot.data_dependent = true;
+      snapshot.data_dependent_revision =
+          std::max(snapshot.data_dependent_revision, revision);
+    }
+  };
+  include_dependency_flag(state.data_dependent, revisions.data_dependent);
+  include_dependency_flag(state.meta_hp && state.meta_hp->data_dependent,
+                          revisions.meta_hp);
+  include_dependency_flag(state.meta_rt && state.meta_rt->data_dependent,
+                          revisions.meta_rt);
+  const auto metadata = metadata_table_.find(key);
+  include_dependency_flag(
+      metadata != metadata_table_.end() && metadata->second.data_dependent,
+      revisions.metadata);
+  for (std::size_t index = 0; index < state.device_impl_slots.size(); ++index) {
+    const auto& implementation = state.device_impl_slots[index];
+    const std::uint64_t revision = index < revisions.device_impls.size()
+                                       ? revisions.device_impls[index]
+                                       : 0;
+    include_dependency_flag(
+        implementation && implementation->metadata.data_dependent, revision);
   }
-  auto metadata = metadata_table_.find(key);
-  return metadata != metadata_table_.end() && metadata->second.data_dependent;
+  return snapshot;
 }
 
 /** @copydoc OpRegistry::get_implementations */
@@ -1573,6 +1616,7 @@ void OpRegistry::register_impl(const std::string& type,
   {
     StateLockGuard lock(*this);
     capture_key_before_mutation(key);
+    advance_task_shape_generation();
     RegistryEntryOwnership& ownership = ownership_table_[key];
     OpImplementations& implementations = impl_table_[key];
     implementations.device_impl_slots.reserve(
@@ -1586,11 +1630,6 @@ void OpRegistry::register_impl(const std::string& type,
 
     implementations.device_impl_slots.push_back(std::move(device_slot));
     record_device_ownership(key, ownership, revision);
-    if (meta.data_dependent) {
-      implementations.data_dependent = true;
-      record_scalar_ownership(key, ownership, OwnershipSlot::DataDependent,
-                              revision);
-    }
 
     // 同时更新传统表以保持向后兼容
     if (device == Device::CPU && !implementations.monolithic_hp) {
@@ -1631,6 +1670,7 @@ void OpRegistry::register_impl(const std::string& type,
   {
     StateLockGuard lock(*this);
     capture_key_before_mutation(key);
+    advance_task_shape_generation();
     RegistryEntryOwnership& ownership = ownership_table_[key];
     OpImplementations& implementations = impl_table_[key];
     implementations.device_impl_slots.reserve(
@@ -1644,11 +1684,6 @@ void OpRegistry::register_impl(const std::string& type,
 
     implementations.device_impl_slots.push_back(std::move(device_slot));
     record_device_ownership(key, ownership, revision);
-    if (meta.data_dependent) {
-      implementations.data_dependent = true;
-      record_scalar_ownership(key, ownership, OwnershipSlot::DataDependent,
-                              revision);
-    }
 
     // 同时更新传统表以保持向后兼容
     if (device == Device::CPU && !implementations.tiled_hp) {

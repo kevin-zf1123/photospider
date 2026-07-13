@@ -1,6 +1,6 @@
 #include "adapters/metal/buffer_adapter_metal.hpp"
 
-#include "adapter/buffer_adapter_opencv.hpp"
+#include "adapters/opencv/buffer_adapter_opencv.hpp"
 
 #ifdef __APPLE__
 #import <Metal/Metal.h>

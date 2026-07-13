@@ -4,6 +4,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <memory>
+#include <optional>
 #include <string>
 #include <unordered_map>
 #include <unordered_set>
@@ -23,6 +24,28 @@ namespace {
 
 /** @brief Task-shape config token used by FullTaskGraph cache keys. */
 constexpr const char* kTaskShapeConfigVersion = "task-shape-v2";
+
+/** @brief Maximum attempts to observe one stable operation-registry shape. */
+constexpr int kMaxRegistryStableExpansionAttempts = 8;
+
+/**
+ * @brief Builds a FullTaskGraph cache key for one captured registry generation.
+ *
+ * @param graph Graph supplying the topology generation.
+ * @param intent HP or RT planning domain.
+ * @param registry_generation Captured operation-registry task-shape revision.
+ * @return Stable key for these planning inputs and the shape configuration.
+ * @throws std::bad_alloc if string construction allocates.
+ * @note Callers must verify that `registry_generation` remains current before
+ *       returning a cached or newly expanded graph.
+ */
+std::string make_full_task_graph_cache_key(const GraphModel& graph,
+                                           ComputeIntent intent,
+                                           std::uint64_t registry_generation) {
+  return std::to_string(graph.topology_generation()) + ":" +
+         std::to_string(static_cast<int>(intent)) + ":" +
+         std::to_string(registry_generation) + ":" + kTaskShapeConfigVersion;
+}
 
 /**
  * @brief Maps a compute intent to the single dirty/task domain being planned.
@@ -413,6 +436,33 @@ cv::Size resolve_planned_extent(
 }
 
 /**
+ * @brief Resolves every declared image-input extent for one planned node.
+ * @param graph Graph containing downstream image-input topology.
+ * @param node Downstream node whose input-index space is preserved.
+ * @param resolver Shared extent resolver for this planning request.
+ * @param extent_cache Request-local output-extent cache.
+ * @return Extents indexed exactly like node.image_inputs, with empty values for
+ *         disconnected or unavailable parents.
+ * @throws GraphError or standard exceptions from extent resolution.
+ * @throws std::bad_alloc when vector storage allocation fails.
+ * @note This captures all graph-known inputs, not only the edge currently being
+ *       mapped, so public random-access RoiContext snapshots remain complete.
+ */
+std::vector<cv::Size> resolve_planned_input_extents(
+    const GraphModel& graph, const Node& node, GraphExtentResolver& resolver,
+    std::unordered_map<int, cv::Size>& extent_cache) {
+  std::vector<cv::Size> extents(node.image_inputs.size());
+  for (std::size_t index = 0; index < node.image_inputs.size(); ++index) {
+    const int source_id = node.image_inputs[index].from_node_id;
+    if (source_id >= 0 && graph.has_node(source_id)) {
+      extents[index] =
+          resolve_planned_extent(graph, source_id, resolver, extent_cache);
+    }
+  }
+  return extents;
+}
+
+/**
  * @brief Infers the input ROI consumed by one downstream tile task.
  *
  * @param dependency Node-level edge whose upstream node provides the input.
@@ -423,8 +473,14 @@ cv::Size resolve_planned_extent(
  * @return Upstream ROI required by to_task, or an empty rectangle when unknown.
  * @throws GraphError or propagator exceptions from graph-backed ROI mapping.
  * @note When graph is present this calls NodeExecutor::input_roi_for_tile() so
- * halo and RandomAccess operators match the execution path. Without graph, the
- * function falls back to dependency ROI metadata or aligned output ROI.
+ *       halo and RandomAccess operators match the execution path. A non-empty
+ *       snapshot `dependency.from_roi` is then unioned as a conservative lower
+ *       bound, so dirty forced-halo execution cannot read producer tiles it did
+ *       not wait for. Effective
+ *       upstream parameter values are resolved only for RandomAccess because
+ *       aligned and halo geometry does not consume them; this lets a first
+ *       request plan its still-uncached parameter producer. Without graph, the
+ *       function falls back to dependency ROI metadata or aligned output ROI.
  */
 cv::Rect required_upstream_roi_for_task(
     const PlannedDependency& dependency, const PlannedTask& to_task,
@@ -450,13 +506,28 @@ cv::Rect required_upstream_roi_for_task(
         config.output_size = downstream_extent;
       }
       const Node& downstream_node = graph->node(dependency.to_node_id);
-      if (auto metadata = metadata_for_domain(
-              downstream_node.type, downstream_node.subtype, to_task.domain)) {
+      const std::vector<cv::Size> input_extents = resolve_planned_input_extents(
+          *graph, downstream_node, resolver, extent_cache);
+      std::optional<OpMetadata> metadata = metadata_for_domain(
+          downstream_node.type, downstream_node.subtype, to_task.domain);
+      if (metadata) {
         config.metadata = *metadata;
       }
-      return NodeExecutor::input_roi_for_tile(
+      std::optional<plugin::ParameterMap> effective_parameters;
+      if (metadata && metadata->access_pattern ==
+                          OpMetadata::InputAccessPattern::RandomAccess) {
+        effective_parameters =
+            resolve_effective_parameter_snapshot(downstream_node, *graph);
+      }
+      const cv::Rect execution_mapped_roi = NodeExecutor::input_roi_for_tile(
           const_cast<GraphModel&>(*graph), downstream_node, to_task.output_roi,
-          input_buffer, config);
+          input_buffer, config, input_extents,
+          effective_parameters ? &*effective_parameters : nullptr);
+      const cv::Rect snapshot_lower_bound =
+          clip_rect(dependency.from_roi, upstream_extent);
+      return clip_rect(
+          merge_optional_rect(execution_mapped_roi, snapshot_lower_bound),
+          upstream_extent);
     }
   }
 
@@ -533,6 +604,40 @@ bool can_use_spatial_tile_dependency(
 }
 
 /**
+ * @brief Detects image edges whose request-time ROI cannot be known at plan
+ * construction.
+ * @param dependency Candidate image dependency to a tiled consumer.
+ * @param to_task Downstream task whose intent selects domain metadata.
+ * @param graph Optional graph containing parameter-input topology.
+ * @return True when the downstream random-access operator has at least one
+ * connected parameter input whose same-request value may differ from the
+ * committed snapshot.
+ * @throws std::bad_alloc or registry exceptions from metadata lookup.
+ * @note Full task graphs are cached across requests. Conservatively retaining
+ * every upstream image tile for this shape prevents an old narrow parameter
+ * value from releasing the consumer before newly required outer tiles finish.
+ */
+bool requires_conservative_parameterized_image_dependency(
+    const PlannedDependency& dependency, const PlannedTask& to_task,
+    const GraphModel* graph) {
+  if (!graph || dependency.input_kind != "image" ||
+      !graph->has_node(dependency.to_node_id)) {
+    return false;
+  }
+  const Node& downstream = graph->node(dependency.to_node_id);
+  const bool has_connected_parameter = std::any_of(
+      downstream.parameter_inputs.begin(), downstream.parameter_inputs.end(),
+      [](const ParameterInput& input) { return input.from_node_id >= 0; });
+  if (!has_connected_parameter) {
+    return false;
+  }
+  const auto metadata =
+      metadata_for_domain(downstream.type, downstream.subtype, to_task.domain);
+  return metadata && metadata->access_pattern ==
+                         OpMetadata::InputAccessPattern::RandomAccess;
+}
+
+/**
  * @brief Appends every producer task for a node-level dependency.
  *
  * @param dependency_ids Destination dependency ids for one downstream task.
@@ -558,8 +663,10 @@ void append_node_dependency_tasks(
  * @return Dependency task ids aligned with tasks by dense task id.
  * @throws GraphError, std::out_of_range, or standard allocation exceptions.
  * @note Tiled image edges enumerate upstream tile ranges directly. Whole-node,
- * parameter, and non-grid producer dependencies attach the upstream node's
- * task ids without constructing a Cartesian task pair scan.
+ * parameter, non-grid, and parameterized random-access producer dependencies
+ * attach the upstream node's task ids without constructing a Cartesian task
+ * pair scan. The conservative random-access case is required because its
+ * request-effective parameter output does not exist at planning time.
  */
 std::vector<std::vector<int>> build_task_dependency_ids(
     const std::vector<PlannedTask>& tasks,
@@ -591,7 +698,9 @@ std::vector<std::vector<int>> build_task_dependency_ids(
       }
       std::vector<int>& ids = dependency_ids.at(to_task_id);
       if (can_use_spatial_tile_dependency(dependency, upstream_index,
-                                          to_task)) {
+                                          to_task) &&
+          !requires_conservative_parameterized_image_dependency(
+              dependency, to_task, graph)) {
         const cv::Rect required_roi = required_upstream_roi_for_task(
             dependency, to_task, graph, extent_resolver, extent_cache);
         append_covering_upstream_tiles(ids, upstream_index, required_roi,
@@ -939,22 +1048,38 @@ std::vector<int> initial_ready_task_ids_for_view(
 
 std::string full_task_graph_cache_key(const GraphModel& graph,
                                       ComputeIntent intent) {
-  return std::to_string(graph.topology_generation()) + ":" +
-         std::to_string(static_cast<int>(intent)) + ":" +
-         kTaskShapeConfigVersion;
+  return make_full_task_graph_cache_key(
+      graph, intent, OpRegistry::instance().task_shape_generation());
 }
 
 std::shared_ptr<const FullTaskGraph> get_or_expand_full_task_graph(
     GraphModel& graph, ComputeIntent intent) {
-  const std::string key = full_task_graph_cache_key(graph, intent);
-  if (auto cached = graph.cached_full_task_graph(key)) {
-    return cached;
+  auto& registry = OpRegistry::instance();
+  for (int attempt = 0; attempt < kMaxRegistryStableExpansionAttempts;
+       ++attempt) {
+    const std::uint64_t registry_generation = registry.task_shape_generation();
+    const std::string key =
+        make_full_task_graph_cache_key(graph, intent, registry_generation);
+    if (auto cached = graph.cached_full_task_graph(key)) {
+      if (registry.task_shape_generation() == registry_generation) {
+        return cached;
+      }
+      continue;
+    }
+    FullTaskGraphExpander expander;
+    auto expanded =
+        std::make_shared<FullTaskGraph>(expander.expand(graph, intent));
+    if (registry.task_shape_generation() != registry_generation) {
+      continue;
+    }
+    graph.remember_full_task_graph(key, expanded);
+    if (registry.task_shape_generation() == registry_generation) {
+      return expanded;
+    }
   }
-  FullTaskGraphExpander expander;
-  auto expanded =
-      std::make_shared<FullTaskGraph>(expander.expand(graph, intent));
-  graph.remember_full_task_graph(key, expanded);
-  return expanded;
+  throw GraphError(
+      GraphErrc::ComputeError,
+      "Cannot expand FullTaskGraph while operation registry keeps changing");
 }
 
 ComputePlanSummary summarize_compute_plan(
@@ -1181,7 +1306,8 @@ ComputePlan DirtySnapshotTaskGraphPruner::prune(
 
 DirtyTaskSelectionOverlay DirtySnapshotTaskGraphPruner::select(
     const ComputePlan& node_cache_plan, const DirtyRegionSnapshot& snapshot,
-    const GraphModel& graph) const {
+    const GraphModel& graph,
+    const std::unordered_set<int>* externally_satisfied_node_ids) const {
   DirtyTaskSelectionOverlay selection;
   selection.generation = snapshot.graph_generation;
   selection.domain = domain_for_intent(node_cache_plan.intent);
@@ -1209,6 +1335,10 @@ DirtyTaskSelectionOverlay DirtySnapshotTaskGraphPruner::select(
     selection.source_boundary_task_flags[task.task_id] =
         selected_task.source_boundary_eligible;
     if (!selected_task.dirty_selected) {
+      continue;
+    }
+    if (externally_satisfied_node_ids &&
+        externally_satisfied_node_ids->count(task.node_id)) {
       continue;
     }
     selection.active_task_flags[task.task_id] = true;

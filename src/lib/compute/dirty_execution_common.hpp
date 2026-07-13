@@ -4,6 +4,7 @@
 #include <functional>
 #include <optional>
 #include <unordered_map>
+#include <unordered_set>
 #include <utility>
 #include <vector>
 
@@ -11,9 +12,9 @@
 #include "compute/compute_task_dispatcher.hpp"
 #include "compute/dirty_region_planner.hpp"
 #include "compute/task_graph_planning.hpp"
+#include "core/ps_types.hpp"      // NOLINT(build/include_subdir)
 #include "graph/graph_model.hpp"  // NOLINT(build/include_subdir)
-#include "kernel/scheduler/scheduler_task_runtime.hpp"
-#include "ps_types.hpp"  // NOLINT(build/include_subdir)
+#include "photospider/scheduler/scheduler.hpp"
 
 namespace ps {
 class GraphModel;
@@ -23,24 +24,22 @@ class GraphRuntime;
 namespace ps::compute {
 
 /**
- * @brief Returns a running scheduler task runtime for one compute intent.
+ * @brief Returns the running scheduler registered for one compute intent.
  *
  * This helper preserves the ComputeService scheduler contract used by full
- * graph dispatch and dirty ROI dispatch. It looks up the scheduler registered
- * on the supplied GraphRuntime, verifies that it implements
- * SchedulerTaskRuntime, starts it when necessary, and returns the task-runtime
- * facade that accepts concrete ready task callbacks.
+ * graph dispatch and dirty ROI dispatch. It looks up the complete `IScheduler`
+ * registered on the supplied GraphRuntime and starts it when necessary.
  *
  * @param runtime Per-graph runtime that owns intent-specific schedulers.
  * @param intent Compute intent whose scheduler should receive work.
- * @return Running SchedulerTaskRuntime for the requested intent.
- * @throws GraphError when no scheduler is registered or the registered
- * scheduler cannot dispatch planned task callbacks.
+ * @return Running scheduler for the requested intent.
+ * @throws GraphError when no scheduler is registered.
+ * @throws Any scheduler start exception unchanged.
  * @note The returned reference remains owned by GraphRuntime. Callers must not
  * store it beyond the active compute request.
  */
-SchedulerTaskRuntime& ensure_scheduler_task_runtime(GraphRuntime& runtime,
-                                                    ComputeIntent intent);
+IScheduler& ensure_running_scheduler(GraphRuntime& runtime,
+                                     ComputeIntent intent);
 
 /**
  * @brief Bounded dirty planning result used by HP and RT executors.
@@ -278,28 +277,39 @@ void apply_planned_work_rois(std::unordered_map<int, RtPlanEntry>& entries,
  * @brief Prepares common dirty execution state after planner output exists.
  *
  * @tparam DirtyPlan HighPrecisionDirtyPlan or RealTimeDirtyPlan.
- * @param graph Graph whose inspection state receives the plan and snapshot.
+ * @param graph Request-local graph used for task shape, cache pruning, and
+ * dirty selection. It may be a stabilized shadow graph.
  * @param dirty_plan Dirty planner output for one intent domain.
  * @param request Compute request matching the same dirty domain.
+ * @param inspection_graph Optional authoritative live graph receiving plan and
+ * snapshot diagnostics; null uses graph.
+ * @param externally_satisfied_node_ids Optional nodes already executed by
+ * parameter stabilization and excluded from phase-two task selection.
  * @return Prepared plan with node groups ready for task construction.
  * @throws GraphError from task graph pruning or materialization.
- * @note The helper updates graph inspection fields before execution so failed
- * execution still leaves the latest planning evidence visible to callers.
+ * @note The helper updates authoritative inspection fields before execution so
+ * failed execution still leaves planning evidence visible. Summary topology
+ * identity and cache keys always come from inspection_graph, never from an
+ * artificial shadow-graph generation.
  */
 template <typename DirtyPlan>
 PreparedDirtyPlan<DirtyPlan> prepare_dirty_execution(
-    GraphModel& graph, DirtyPlan&& dirty_plan, const ComputeRequest& request) {
-  graph.last_dirty_region_snapshot_debug =
+    GraphModel& graph, DirtyPlan&& dirty_plan, const ComputeRequest& request,
+    GraphModel* inspection_graph = nullptr,
+    const std::unordered_set<int>* externally_satisfied_node_ids = nullptr) {
+  GraphModel& inspection = inspection_graph ? *inspection_graph : graph;
+  inspection.last_dirty_region_snapshot_debug =
       DirtyRegionPlanner::describe_snapshot(dirty_plan.snapshot);
-  remember_dirty_snapshot(graph, dirty_plan.snapshot);
+  remember_dirty_snapshot(inspection, dirty_plan.snapshot);
 
   const ComputePlan node_cache_plan =
       prune_node_cache_task_graph(graph, request, dirty_plan.execution_order);
   DirtySnapshotTaskGraphPruner dirty_snapshot_pruner;
   DirtyTaskSelectionOverlay selection =
-      dirty_snapshot_pruner.select(node_cache_plan, dirty_plan.snapshot, graph);
+      dirty_snapshot_pruner.select(node_cache_plan, dirty_plan.snapshot, graph,
+                                   externally_satisfied_node_ids);
   apply_planned_work_rois(dirty_plan.entries, selection);
-  remember_compute_plan(graph, node_cache_plan, &selection);
+  remember_compute_plan(inspection, node_cache_plan, &selection);
 
   DirtyUpdateWorkSet work_set = dirty_snapshot_pruner.materialize(selection);
   std::vector<int> source_task_ids = work_set.dirty_source_task_ids;
@@ -457,8 +467,8 @@ void run_dirty_source_first(const DirtySourceFirstRunRequest& request,
   const std::vector<int>& downstream_task_ids = *request.downstream_task_ids;
 
   if (request.runtime) {
-    SchedulerTaskRuntime& dirty_task_runtime =
-        ensure_scheduler_task_runtime(*request.runtime, request.intent);
+    IScheduler& dirty_task_runtime =
+        ensure_running_scheduler(*request.runtime, request.intent);
     DirtyHandleTaskExecutor<RunTask> source_executor(
         compute_plan, request.selection, source_task_ids, run_task,
         dirty_task_runtime, false, SchedulerTaskPriority::High);

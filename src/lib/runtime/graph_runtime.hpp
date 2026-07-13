@@ -15,21 +15,21 @@
 
 #include "graph/graph_model.hpp"  // NOLINT(build/include_subdir)
 #include "graph/graph_state_executor.hpp"
-#include "kernel/scheduler/i_scheduler.hpp"  // M3.2: IScheduler 接口
+#include "photospider/scheduler/scheduler.hpp"
 #include "runtime/graph_event_service.hpp"
 
-// [修改] 使用预处理器宏和前向声明来隔离平台特定的 Metal API
 #ifdef __OBJC__
 @protocol MTLDevice;
 @protocol MTLCommandQueue;
 #else
-// 对于纯 C++ 文件，使用 void* 作为不透明指针
+/** @brief Opaque Objective-C object placeholder for pure C++ translation units.
+ */
 typedef void* id;
 #endif
 
 namespace ps {
 
-class GraphRuntime;  // 前向声明
+class GraphRuntime;
 namespace compute {
 class RealtimeProxyGraph;
 }  // namespace compute
@@ -56,7 +56,7 @@ class RealtimeProxyGraph;
  *       retain scheduler state. The runtime owns every model, scheduler,
  *       cache-facing resource, and observation slot until destruction.
  */
-class GraphRuntime {
+class GraphRuntime : public SchedulerHostContext {
  public:
   /**
    * @brief Internal construction inputs for one graph-owned runtime.
@@ -201,13 +201,16 @@ class GraphRuntime {
   /**
    * @brief Releases every scheduler and graph-owned runtime resource.
    * @throws Nothing.
-   * @note Destructor cleanup attempts `stop()` but suppresses plugin lifecycle
-   * exceptions; scheduler owners then retain their own no-throw fallback and
-   * plugin-destroy ordering.
+   * @note Scheduler shutdown and detach are attempted in order under the
+   * registry lock, then every owner is destroyed before GPU/trace/model member
+   * teardown. Lifecycle exceptions are suppressed at this destructor boundary.
    */
-  ~GraphRuntime() noexcept;
+  ~GraphRuntime() noexcept override;
 
+  /** @brief Prevents copying graph, scheduler, and observation ownership. */
   GraphRuntime(const GraphRuntime&) = delete;
+
+  /** @brief Prevents copy assignment of graph-scoped runtime ownership. */
   GraphRuntime& operator=(const GraphRuntime&) = delete;
 
   /**
@@ -267,10 +270,36 @@ class GraphRuntime {
     return event_service_.drain(limit);
   }
 
-  const Info& info() const { return info_; }
-  GraphModel& model() { return model_; }
-  GraphStateExecutor& graph_state() { return graph_state_; }
-  GraphEventService& event_service() { return event_service_; }
+  /**
+   * @brief Returns immutable graph construction/configuration inputs.
+   * @return Borrowed runtime-owned configuration reference.
+   * @throws Nothing.
+   * @note The reference remains valid for this runtime lifetime.
+   */
+  const Info& info() const noexcept { return info_; }
+
+  /**
+   * @brief Returns the runtime-owned mutable graph model.
+   * @return Borrowed graph model reference.
+   * @throws Nothing.
+   * @note Mutating callers must enter `graph_state()` serialization.
+   */
+  GraphModel& model() noexcept { return model_; }
+
+  /**
+   * @brief Returns the serialized graph-state execution lane.
+   * @return Borrowed runtime-owned executor reference.
+   * @throws Nothing.
+   */
+  GraphStateExecutor& graph_state() noexcept { return graph_state_; }
+
+  /**
+   * @brief Returns the graph-owned compute-event service.
+   * @return Borrowed event-service reference.
+   * @throws Nothing.
+   * @note The service owns its own synchronization and bounded ring.
+   */
+  GraphEventService& event_service() noexcept { return event_service_; }
   /**
    * @brief Returns the runtime-owned low-resolution RT proxy graph.
    *
@@ -331,17 +360,92 @@ class GraphRuntime {
    */
   void clear_scheduler_log();
 
-  static int this_worker_id();
-  static uint64_t this_task_epoch();
-  static void set_scheduler_log_context(int worker_id, uint64_t epoch);
-  static void clear_scheduler_log_context();
+  /**
+   * @brief Reports a physical device capability to attached schedulers.
+   * @param device Stable public device label.
+   * @return True for CPU and for an initialized Metal device on Apple hosts.
+   * @throws Nothing.
+   * @note No native device or command-queue handle crosses this boundary.
+   */
+  bool is_device_available(Device device) const noexcept override;
 
-  id get_metal_device();
-  id get_metal_command_queue();
+  /**
+   * @brief Publishes scheduler worker identity into host thread-local state.
+   * @param worker_id Scheduler worker id, or -1 when unavailable.
+   * @param epoch Active task epoch.
+   * @return Nothing.
+   * @throws Nothing.
+   */
+  void set_task_context(int worker_id, uint64_t epoch) noexcept override;
 
-  // =========================================================================
-  // [M3.2 新增] 调度器管理 API
-  // =========================================================================
+  /**
+   * @brief Clears scheduler worker identity from host thread-local state.
+   * @return Nothing.
+   * @throws Nothing.
+   */
+  void clear_task_context() noexcept override;
+
+  /**
+   * @brief Maps and publishes one public scheduler trace action.
+   * @param action Stable public scheduler action.
+   * @param node_id Backend node id, or -1 when unavailable.
+   * @param worker_id Scheduler worker id, or -1 when unavailable.
+   * @param epoch Active task epoch.
+   * @return Nothing.
+   * @throws Nothing; observation failures are dropped so task exceptions keep
+   *         their original identity.
+   * @note This is the only public-to-private scheduler action mapping.
+   */
+  void log_event(SchedulerTraceAction action, int node_id, int worker_id,
+                 uint64_t epoch) noexcept override;
+
+  /**
+   * @brief Returns scheduler worker identity for the calling thread.
+   * @return Active compute worker id, scheduler-context id, or -1.
+   * @throws Nothing.
+   */
+  static int this_worker_id() noexcept;
+
+  /**
+   * @brief Returns scheduler task epoch for the calling thread.
+   * @return Active scheduler epoch, or zero outside a scheduler callback.
+   * @throws Nothing.
+   */
+  static uint64_t this_task_epoch() noexcept;
+
+  /**
+   * @brief Sets host-observed scheduler identity on the calling thread.
+   * @param worker_id Scheduler worker id, or -1.
+   * @param epoch Scheduler task epoch.
+   * @return Nothing.
+   * @throws Nothing.
+   * @note Scheduler callbacks balance this helper through the public host
+   *       context; direct internal use must call `clear_scheduler_log_context`.
+   */
+  static void set_scheduler_log_context(int worker_id, uint64_t epoch) noexcept;
+
+  /**
+   * @brief Clears host-observed scheduler identity on the calling thread.
+   * @return Nothing.
+   * @throws Nothing.
+   */
+  static void clear_scheduler_log_context() noexcept;
+
+  /**
+   * @brief Returns the private native Metal device for internal compute code.
+   * @return Borrowed Objective-C device, or null when unavailable.
+   * @throws Nothing.
+   * @note This native handle is never exposed through `SchedulerHostContext`.
+   */
+  id get_metal_device() noexcept;
+
+  /**
+   * @brief Returns the private native Metal command queue.
+   * @return Borrowed Objective-C command queue, or null when unavailable.
+   * @throws Nothing.
+   * @note This native handle is never exposed through the scheduler SDK.
+   */
+  id get_metal_command_queue() noexcept;
 
   /**
    * @brief Transactionally installs a scheduler for one compute intent.
@@ -365,10 +469,24 @@ class GraphRuntime {
   void set_scheduler(ComputeIntent intent,
                      std::unique_ptr<IScheduler> scheduler);
 
-  /// @brief 获取指定意图的调度器
-  /// @param intent 计算意图
-  /// @return 调度器指针，如果不存在则返回 nullptr
+  /**
+   * @brief Looks up the scheduler for one compute intent.
+   * @param intent Compute intent route.
+   * @return Borrowed scheduler pointer, or null when no owner is installed.
+   * @throws std::system_error only if locking a valid mutex fails.
+   * @note The pointer is stable only while scheduler replacement/destruction is
+   *       excluded, normally by the graph-state execution lane.
+   */
   IScheduler* get_scheduler(ComputeIntent intent);
+
+  /**
+   * @brief Looks up a read-only scheduler for one compute intent.
+   * @param intent Compute intent route.
+   * @return Borrowed const scheduler pointer, or null when absent.
+   * @throws std::system_error only if locking a valid mutex fails.
+   * @note The pointer has the same external serialization requirement as the
+   *       mutable overload.
+   */
   const IScheduler* get_scheduler(ComputeIntent intent) const;
 
   /**
@@ -393,29 +511,46 @@ class GraphRuntime {
   void replace_scheduler(ComputeIntent intent,
                          std::unique_ptr<IScheduler> scheduler);
 
-  /// @brief 检查是否有调度器注册到指定意图
+  /**
+   * @brief Tests whether one compute intent has a non-null scheduler owner.
+   * @param intent Compute intent route.
+   * @return True when a scheduler is installed.
+   * @throws std::system_error only if locking a valid mutex fails.
+   */
   bool has_scheduler(ComputeIntent intent) const;
 
  private:
+  /** @brief Immutable copied construction and filesystem configuration. */
   Info info_;
+  /** @brief Runtime-owned graph model and cache-facing state. */
   GraphModel model_;
+  /** @brief Serial executor governing mutable graph model access. */
   GraphStateExecutor graph_state_;
   /** @brief Fixed-capacity graph compute-event service. */
   GraphEventService event_service_;
+  /** @brief Runtime-owned low-resolution real-time proxy graph. */
   std::unique_ptr<compute::RealtimeProxyGraph> realtime_proxy_graph_;
 
-  // [M3.2 新增] 调度器映射表
-  // 根据 ComputeIntent 路由到不同的调度器实例
+  /** @brief Compute-intent routes to exclusively owned scheduler instances. */
   std::map<ComputeIntent, std::unique_ptr<IScheduler>> schedulers_;
-  mutable std::mutex schedulers_mutex_;  // 保护 schedulers_ 的并发访问
+  /** @brief Serializes scheduler registry and lifecycle transactions. */
+  mutable std::mutex schedulers_mutex_;
 
+  /** @brief True only after the complete scheduler start transaction commits.
+   */
   std::atomic<bool> running_{false};
 
+  /** @brief Internal compute worker id for the calling thread. */
   static thread_local int tls_worker_id_;
+  /** @brief Host-observed scheduler worker id for the calling thread. */
   static thread_local int tls_scheduler_log_worker_id_;
+  /** @brief Host-observed scheduler epoch for the calling thread. */
   static thread_local uint64_t tls_scheduler_log_epoch_;
 
+  /** @brief Private platform device/queue ownership hidden from scheduler SDK.
+   */
   struct GpuContext;
+  /** @brief Runtime-owned native GPU state, or null on unsupported hosts. */
   std::unique_ptr<GpuContext> gpu_context_;
 
   /** @brief Serializes scheduler-trace publication and page observation. */

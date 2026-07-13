@@ -20,6 +20,8 @@ class GraphRuntime;
 
 namespace ps::compute {
 
+class StabilizedDirtyParameters;
+
 /**
  * @brief Request-local mutexes keyed by graph node id for dirty task writes.
  *
@@ -61,6 +63,13 @@ struct DirtyNodeExecutionContext {
 
   /** @brief Per-node mutexes protecting shared dirty cache commits. */
   DirtyNodeMutexMap& node_mutexes;
+
+  /**
+   * @brief Optional immutable parameter snapshot shared by HP/RT siblings.
+   * @note HP normally resolves the imported write-buffer copy; RT uses this
+   * snapshot only for parameter edges and never for image-edge domain data.
+   */
+  const StabilizedDirtyParameters* stabilized_parameters = nullptr;
 };
 
 /**
@@ -432,6 +441,9 @@ class RealTimeDirtyNodeExecutor {
 
   /** @brief Dirty generation used to detect stale source callbacks. */
   uint64_t dirty_generation_;
+
+  /** @brief Immutable HP-stabilized values used only by parameter edges. */
+  const StabilizedDirtyParameters* stabilized_parameters_ = nullptr;
 
   /** @brief Committed proxy graph used for RT fallback and source metadata. */
   RealtimeProxyGraph& proxy_graph_;

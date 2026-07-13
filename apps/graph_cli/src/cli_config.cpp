@@ -10,7 +10,7 @@
 #include <type_traits>
 #include <utility>
 
-#include "ps_types.hpp"  // NOLINT(build/include_subdir)
+#include "core/ps_types.hpp"  // NOLINT(build/include_subdir)
 
 namespace fs = ps::fs;
 

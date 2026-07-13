@@ -1,78 +1,131 @@
-// Photospider scheduler plugin: GPU Pipeline Scheduler (Example)
-// 编译为独立 dylib，可动态加载
-// 注意：这是示例插件，类型名带 _example 后缀，避免与内置冲突
+// Photospider SDK-only heterogeneous scheduler example plugin.
 
+#include <cstdint>
+#include <cstring>
 #include <string>
 
-#include "kernel/scheduler/scheduler_plugin_api.hpp"
-#include "scheduler/gpu_pipeline_scheduler.hpp"
+#include "photospider/scheduler/scheduler_plugin_api.hpp"
+#include "schedulers/sdk_example_scheduler.hpp"
 
-// GPU Pipeline 调度器示例插件，使用带 _example 后缀的类型名
+namespace {
+
+/** @brief First stable type alias exported by this plugin. */
+constexpr char kGpuTypeName[] = "gpu_pipeline_example";
+
+/** @brief Second stable type alias exported by this plugin. */
+constexpr char kHeterogeneousTypeName[] = "heterogeneous_example";
+
+/** @brief Human-readable description copied by the host. */
+// NOLINTBEGIN(whitespace/indent_namespace)
+constexpr char kDescription[] =
+    "Example: heterogeneous scheduler implemented only with the installed "
+    "Photospider scheduler SDK; advertises Metal when the host reports it.";
+// NOLINTEND
+
+/**
+ * @brief Tests whether a requested type belongs to this plugin.
+ * @param type_name Borrowed requested type, or null.
+ * @return True for either stable alias.
+ * @throws Nothing.
+ */
+bool supports_type(const char* type_name) noexcept {
+  return type_name != nullptr &&
+         (std::strcmp(type_name, kGpuTypeName) == 0 ||
+          std::strcmp(type_name, kHeterogeneousTypeName) == 0);
+}
+
+}  // namespace
+
 extern "C" {
 
-int ps_scheduler_plugin_get_count() {
-  return 2;  // gpu_pipeline_example 和 heterogeneous_example 两个别名
-}
-
-const char* ps_scheduler_plugin_get_name(int index) {
-  switch (index) {
-    case 0:
-      return "gpu_pipeline_example";
-    case 1:
-      return "heterogeneous_example";
-    default:
-      return nullptr;
-  }
-}
-
-const char* ps_scheduler_plugin_get_description(int index) {
-  static const char* desc =
-      "Example: Heterogeneous GPU/CPU pipeline scheduler. "
-      "HP tasks prefer GPU (Metal) for throughput, "
-      "RT tasks use CPU for low latency. "
-      "Supports concurrent RT and HP scheduling with RT priority.";
-  return (index == 0 || index == 1) ? desc : nullptr;
+/**
+ * @brief Reports the exact scheduler SDK generation used by this DSO.
+ * @return `PS_SCHEDULER_PLUGIN_ABI_VERSION`.
+ * @throws Nothing.
+ * @note The loader resolves and validates this symbol before every other
+ * export.
+ */
+PHOTOSPIDER_SCHEDULER_PLUGIN_EXPORT std::uint32_t
+ps_scheduler_plugin_get_abi_version() noexcept {
+  return ps::PS_SCHEDULER_PLUGIN_ABI_VERSION;
 }
 
 /**
- * @brief Creates an example GPU pipeline scheduler plugin instance.
- *
- * The example aliases use the active `GpuPipelineScheduler::Config` surface:
- * HP dispatch may prefer GPU work queues, while RT dispatch stays on the
- * scheduler's CPU RT queue through the scheduler's built-in queue topology
- * rather than through a deprecated config flag.
- *
- * @param type_name Scheduler type requested by the plugin loader; nullptr is
- * rejected as an unsupported scheduler type.
- * @param num_workers Requested CPU worker count; zero preserves the scheduler's
- * automatic worker-count behavior.
- * @return A heap-allocated scheduler for supported aliases, or nullptr when
- * `type_name` is not provided by this plugin.
- * @throws std::bad_alloc if scheduler allocation fails.
- * @note Ownership transfers to the plugin loader, which must release the
- * instance through `ps_scheduler_plugin_destroy()`.
+ * @brief Reports the two pipeline aliases exported by this DSO.
+ * @return Two.
+ * @throws Nothing.
+ * @note The fixed-width result is consumed only after ABI validation.
  */
-ps::IScheduler* ps_scheduler_plugin_create(const char* type_name,
-                                           unsigned int num_workers) {
-  if (!type_name) {
-    return nullptr;
+PHOTOSPIDER_SCHEDULER_PLUGIN_EXPORT std::uint32_t
+ps_scheduler_plugin_get_count() {
+  return 2U;
+}
+
+/**
+ * @brief Returns one stable scheduler alias.
+ * @param index Zero-based type index.
+ * @return Alias for indices zero and one, otherwise null.
+ * @throws Nothing.
+ */
+PHOTOSPIDER_SCHEDULER_PLUGIN_EXPORT const char* ps_scheduler_plugin_get_name(
+    std::uint32_t index) {
+  if (index == 0U) {
+    return kGpuTypeName;
   }
-  std::string name(type_name);
-  if (name == "gpu_pipeline_example" || name == "heterogeneous_example") {
-    ps::GpuPipelineScheduler::Config config;
-    config.cpu_workers = num_workers;
-    config.prefer_gpu_for_hp = true;
-    return new ps::GpuPipelineScheduler(config);
+  if (index == 1U) {
+    return kHeterogeneousTypeName;
   }
   return nullptr;
 }
 
-void ps_scheduler_plugin_destroy(ps::IScheduler* scheduler) {
+/**
+ * @brief Returns the scheduler description at an index.
+ * @param index Zero-based type index.
+ * @return Stable description for either alias, otherwise null.
+ * @throws Nothing.
+ */
+PHOTOSPIDER_SCHEDULER_PLUGIN_EXPORT const char*
+ps_scheduler_plugin_get_description(std::uint32_t index) {
+  return index < 2U ? kDescription : nullptr;
+}
+
+/**
+ * @brief Creates one heterogeneous SDK example scheduler.
+ * @param type_name Requested stable alias.
+ * @param num_workers Worker count, or zero for hardware concurrency.
+ * @return Plugin-owned instance, or null for an unsupported type.
+ * @throws std::bad_alloc if instance or worker configuration storage fails.
+ */
+PHOTOSPIDER_SCHEDULER_PLUGIN_EXPORT ps::IScheduler* ps_scheduler_plugin_create(
+    const char* type_name, std::uint32_t num_workers) {
+  if (!supports_type(type_name)) {
+    return nullptr;
+  }
+  return new ps::scheduler_example::SdkExampleScheduler(
+      type_name, ps::scheduler_example::ExamplePolicy::Heterogeneous,
+      num_workers);
+}
+
+/**
+ * @brief Destroys one instance created by this DSO.
+ * @param scheduler Plugin-owned scheduler, or null.
+ * @return Nothing.
+ * @throws Nothing under the scheduler destructor contract.
+ */
+PHOTOSPIDER_SCHEDULER_PLUGIN_EXPORT void ps_scheduler_plugin_destroy(
+    ps::IScheduler* scheduler) {
   delete scheduler;
 }
 
-const char* ps_scheduler_plugin_get_version() {
-  return "1.0.0";
+/**
+ * @brief Returns the human-readable implementation version.
+ * @return Process-lifetime version literal copied once by the loader.
+ * @throws Nothing.
+ * @note This string is descriptive and does not replace numeric ABI gating.
+ */
+PHOTOSPIDER_SCHEDULER_PLUGIN_EXPORT const char*
+ps_scheduler_plugin_get_version() {
+  return "2.0.0";
 }
 
 }  // extern "C"

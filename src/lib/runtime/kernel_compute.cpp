@@ -16,7 +16,7 @@
 #include <string>
 #include <utility>
 
-#include "adapter/buffer_adapter_opencv.hpp"
+#include "adapters/opencv/buffer_adapter_opencv.hpp"
 #include "runtime/kernel.hpp"
 
 namespace ps {

@@ -5,6 +5,7 @@
 #include <chrono>
 #include <condition_variable>
 #include <filesystem>
+#include <future>
 #include <initializer_list>
 #include <memory>
 #include <mutex>
@@ -15,24 +16,28 @@
 #include <utility>
 #include <vector>
 
-#include "adapter/buffer_adapter_opencv.hpp"
+#include "adapters/opencv/buffer_adapter_opencv.hpp"
 #include "compute/compute_cache_policy.hpp"
 #include "compute/compute_geometry.hpp"
 #include "compute/compute_metrics_recorder.hpp"
 #include "compute/compute_service.hpp"
 #include "compute/dirty_region_planner.hpp"
 #include "compute/dirty_write_buffers.hpp"
+#include "compute/downsample_executor.hpp"
 #include "compute/intent_update_coordinator.hpp"
 #include "compute/node_executor.hpp"
 #include "compute/node_input_resolver.hpp"
 #include "compute/realtime_proxy_graph.hpp"
 #include "compute/task_graph_planning.hpp"
 #include "compute/task_population_strategy.hpp"
+#include "compute/tiled_input_normalizer.hpp"
+#include "core/ops.hpp"
 #include "graph/graph_cache_service.hpp"
 #include "graph/graph_model.hpp"  // NOLINT(build/include_subdir)
 #include "graph/graph_traversal_service.hpp"
 #include "graph/roi_propagation_service.hpp"
 #include "photospider/host/host.hpp"
+#include "plugin/operation_host_adapter.hpp"
 #include "runtime/graph_event_service.hpp"
 #include "runtime/graph_runtime.hpp"
 #include "runtime/interaction.hpp"
@@ -51,6 +56,77 @@ namespace {
  * cache hit should have satisfied the node.
  */
 std::atomic_int g_disk_cache_guard_tile_calls{0};
+
+/**
+ * @brief Request-visible kernel size emitted by the dynamic blur parameter op.
+ * @note Tests update the value only between completed compute requests.
+ */
+std::atomic_int g_dynamic_blur_ksize{3};
+
+/** @brief Counts dynamic parameter producer invocations per request. */
+std::atomic_int g_dynamic_parameter_calls{0};
+
+/** @brief Forces the dynamic parameter producer to fail during preflight. */
+std::atomic_bool g_dynamic_parameter_fail{false};
+
+/** @brief Request-visible width emitted by the dynamic extent producer. */
+std::atomic_int g_dynamic_extent_width{64};
+
+/** @brief Counts HP image-plus-parameter producer executions. */
+std::atomic_int g_image_parameter_hp_calls{0};
+
+/** @brief Counts RT-domain image producer tile executions. */
+std::atomic_int g_image_parameter_rt_calls{0};
+
+/**
+ * @brief Counts HP tiles emitted by the spatial-aligned source fixture.
+ * @note The owning test resets the counter before planning and reads it only
+ * after synchronous compute completion.
+ */
+std::atomic_int g_spatial_generator_hp_calls{0};
+
+/**
+ * @brief Counts HP executions of the uncached spatial parameter fixture.
+ * @note The owning test resets the counter before planning and reads it only
+ * after synchronous compute completion.
+ */
+std::atomic_int g_spatial_parameter_hp_calls{0};
+
+/** @brief Generation emitted by the staged-input preflight source. */
+std::atomic_int g_staged_source_generation{3};
+
+/** @brief Last source generation observed by its parameter consumer. */
+std::atomic_int g_derived_parameter_seen_generation{0};
+
+/**
+ * @brief Selects a malformed tagged value for the host-preparation source.
+ * @note The owning test changes the flag only between synchronous requests.
+ */
+std::atomic_bool g_host_preparation_emit_malformed_value{false};
+
+/**
+ * @brief Counts source callbacks that stage the connected preparation value.
+ * @note One failing-request call proves preflight reached source staging.
+ */
+std::atomic_int g_host_preparation_source_calls{0};
+
+/**
+ * @brief Counts entries into the adapted public parameter callback.
+ * @note A zero count proves effective-parameter conversion failed first.
+ */
+std::atomic_int g_host_preparation_plugin_calls{0};
+
+/**
+ * @brief Counts HP target tiles dispatched after connected preflight.
+ * @note The owning test resets the counter immediately before each request.
+ */
+std::atomic_int g_host_preparation_hp_target_calls{0};
+
+/**
+ * @brief Counts RT target tiles dispatched after connected preflight.
+ * @note The owning test resets the counter immediately before each request.
+ */
+std::atomic_int g_host_preparation_rt_target_calls{0};
 
 /**
  * @brief Original operation failure text used by the LastError integration
@@ -108,6 +184,109 @@ class ScopedTestDirectory {
   std::filesystem::path path_;
 };
 
+/**
+ * @brief Test scheduler whose installed instance always fails lifecycle start.
+ *
+ * @throws std::runtime_error from start(); every dispatch method rejects use
+ * because no successful start can make the scheduler runnable.
+ * @note The fixture isolates ComputeService preflight ordering. Attach/detach
+ * remain valid so GraphRuntime can own and clean up the candidate normally.
+ */
+class StartFailingScheduler final : public IScheduler {
+ public:
+  /** @brief Releases the detached test scheduler without throwing. */
+  ~StartFailingScheduler() noexcept override = default;
+
+  /**
+   * @brief Borrows the runtime host context.
+   * @param host Context retained until detach().
+   * @throws Nothing.
+   */
+  void attach(SchedulerHostContext& host) noexcept override { host_ = &host; }
+
+  /** @brief Clears the borrowed host context without throwing. */
+  void detach() noexcept override { host_ = nullptr; }
+
+  /**
+   * @brief Fails every lifecycle start attempt deterministically.
+   * @throws std::runtime_error unconditionally.
+   */
+  void start() override {
+    throw std::runtime_error("intent scheduler start failure");
+  }
+
+  /** @brief Performs idempotent failed-start cleanup without throwing. */
+  void shutdown() noexcept override {}
+
+  /** @brief Returns the stable fixture name. */
+  std::string name() const override { return "start_failing"; }
+
+  /** @brief Returns the stable fixture lifecycle diagnostic. */
+  std::string get_stats() const override { return "running=false"; }
+
+  /** @brief Reports that start never succeeded. */
+  bool is_running() const noexcept override { return false; }
+
+  /** @brief Reports the otherwise valid CPU capability set. */
+  std::vector<Device> available_devices() const override {
+    return {Device::CPU};
+  }
+
+  /** @brief Rejects initial work because lifecycle start failed. */
+  void submit_initial_task_handles(std::vector<TaskHandle>&&, int,
+                                   SchedulerTaskPriority) override {
+    throw std::logic_error("start-failing scheduler cannot submit work");
+  }
+
+  /** @brief Rejects worker-ready handles because lifecycle start failed. */
+  void submit_ready_task_handles_from_worker(std::vector<TaskHandle>&&,
+                                             SchedulerTaskPriority) override {
+    throw std::logic_error("start-failing scheduler cannot submit work");
+  }
+
+  /** @brief Rejects any-thread work because lifecycle start failed. */
+  void submit_ready_task_any_thread(Task&&, SchedulerTaskPriority,
+                                    std::optional<std::uint64_t>) override {
+    throw std::logic_error("start-failing scheduler cannot submit work");
+  }
+
+  /** @brief Rejects completion waits because no batch can exist. */
+  void wait_for_completion() override {
+    throw std::logic_error("start-failing scheduler has no active batch");
+  }
+
+  /** @brief Rejects exception publication because no batch can exist. */
+  void set_exception(std::exception_ptr) override {
+    throw std::logic_error("start-failing scheduler has no active batch");
+  }
+
+  /** @brief Rejects task-count growth because no batch can exist. */
+  void inc_tasks_to_complete(int) override {
+    throw std::logic_error("start-failing scheduler has no active batch");
+  }
+
+  /** @brief Rejects task completion because no batch can exist. */
+  void dec_tasks_to_complete() override {
+    throw std::logic_error("start-failing scheduler has no active batch");
+  }
+
+  /**
+   * @brief Ignores tracing because no callback can enter.
+   * @param action Unused trace action.
+   * @param node_id Unused node id.
+   * @throws Nothing.
+   */
+  void log_event(SchedulerTraceAction action, int node_id) noexcept override {
+    (void)action;
+    (void)node_id;
+  }
+
+ private:
+  /** @brief Borrowed host context retained only to exercise lifecycle cleanup.
+   */
+  SchedulerHostContext* host_ = nullptr;
+};
+
 Node make_node(int id, std::string type, std::string subtype) {
   Node node;
   node.id = id;
@@ -128,6 +307,175 @@ NodeOutput make_image_output(int width, int height, int channels = 1,
 }
 
 /**
+ * @brief Emits the image and connected value used by host-preparation tests.
+ *
+ * @param node Source node providing the requested output extent.
+ * @param inputs Image inputs, which must remain empty for this generator.
+ * @return Image output plus either a valid integer or a deliberately
+ * malformed explicitly tagged integer under `injected`.
+ * @throws GraphError when the input-free generator receives an image input.
+ * @throws YAML::Exception or std::bad_alloc when YAML/output storage fails.
+ * @throws std::invalid_argument when image-buffer allocation rejects shape.
+ * @throws std::runtime_error or cv::Exception when CPU pixels cannot be filled.
+ * @note The malformed node is valid YAML storage and survives request-local
+ * cloning; conversion to the public ParameterValue is the intended failure.
+ */
+NodeOutput execute_host_preparation_source(
+    const Node& node, const std::vector<const NodeOutput*>& inputs) {
+  if (!inputs.empty()) {
+    throw GraphError(
+        GraphErrc::InvalidParameter,
+        "host-preparation source received an image input: " + node.name);
+  }
+  g_host_preparation_source_calls.fetch_add(1, std::memory_order_relaxed);
+  NodeOutput output =
+      make_image_output(node.parameters["width"].as<int>(64),
+                        node.parameters["height"].as<int>(16), 1, 4.0f);
+  if (g_host_preparation_emit_malformed_value.load(std::memory_order_acquire)) {
+    YAML::Node malformed("not-an-integer");
+    malformed.SetTag("!!int");
+    output.data["injected"] = std::move(malformed);
+  } else {
+    output.data["injected"] = 1;
+  }
+  return output;
+}
+
+/**
+ * @brief Produces a data-only radius through the public operation contract.
+ *
+ * @param node Public callback identity with host-converted effective params.
+ * @param inputs Source image/data views prepared by the host adapter.
+ * @return Data-only output containing radius 1.
+ * @throws std::bad_alloc when public output-map storage cannot grow.
+ * @note The callback increments its entry count first. A malformed `injected`
+ * parameter must therefore fail in the host adapter before this function.
+ */
+plugin::OperationOutput execute_host_preparation_parameter(
+    const plugin::NodeView& node,
+    plugin::ArrayView<plugin::OperationInputView> inputs) {
+  (void)node;
+  (void)inputs;
+  g_host_preparation_plugin_calls.fetch_add(1, std::memory_order_relaxed);
+  plugin::OperationOutput output;
+  output.data.emplace("radius", plugin::ParameterValue(std::int64_t{1}));
+  return output;
+}
+
+/**
+ * @brief Emits one HP target tile after connected-parameter preflight.
+ * @param node Target identity retained for the private callback contract.
+ * @param output Writable HP tile.
+ * @param inputs Destination-indexed input tiles.
+ * @return Nothing.
+ * @throws std::invalid_argument or std::runtime_error from CPU adaptation.
+ * @throws cv::Exception when filling the output tile fails.
+ * @note The count is a direct phase-two dispatch witness; preflight never
+ * executes the target node itself.
+ */
+void execute_host_preparation_hp_target_tile(
+    const Node& node, const OutputTile& output,
+    const std::vector<InputTile>& inputs) {
+  (void)node;
+  (void)inputs;
+  g_host_preparation_hp_target_calls.fetch_add(1, std::memory_order_relaxed);
+  toCvMat(output).setTo(5.0f);
+}
+
+/**
+ * @brief Emits one RT target tile after connected-parameter preflight.
+ * @param node Target identity retained for the private callback contract.
+ * @param output Writable RT tile.
+ * @param inputs Destination-indexed input tiles.
+ * @return Nothing.
+ * @throws std::invalid_argument or std::runtime_error from CPU adaptation.
+ * @throws cv::Exception when filling the output tile fails.
+ * @note The counter distinguishes RT phase-two work from its HP sibling.
+ */
+void execute_host_preparation_rt_target_tile(
+    const Node& node, const OutputTile& output,
+    const std::vector<InputTile>& inputs) {
+  (void)node;
+  (void)inputs;
+  g_host_preparation_rt_target_calls.fetch_add(1, std::memory_order_relaxed);
+  toCvMat(output).setTo(6.0f);
+}
+
+/**
+ * @brief Emits one input-free RT source tile for the valid control request.
+ * @param node Source identity retained for the private callback contract.
+ * @param output Writable RT source tile.
+ * @param inputs Image inputs, which must remain empty for this generator.
+ * @return Nothing.
+ * @throws GraphError when an input is supplied unexpectedly.
+ * @throws std::bad_alloc when diagnostics cannot allocate.
+ * @throws std::invalid_argument or std::runtime_error from CPU adaptation.
+ * @throws cv::Exception when filling the output tile fails.
+ * @note This callback makes the RT graph valid when preflight preparation
+ * succeeds; it is not expected to run in the injected-failure request.
+ */
+void execute_host_preparation_rt_source_tile(
+    const Node& node, const OutputTile& output,
+    const std::vector<InputTile>& inputs) {
+  if (!inputs.empty()) {
+    throw GraphError(
+        GraphErrc::InvalidParameter,
+        "host-preparation RT source received an image input: " + node.name);
+  }
+  toCvMat(output).setTo(7.0f);
+}
+
+/**
+ * @brief Emits one deterministic tile for an input-free image generator.
+ *
+ * @param node Generator node whose identity is owned by the test graph.
+ * @param output_tile Writable HP tile selected by task-graph planning.
+ * @param input_tiles Image inputs, which must remain empty for this generator.
+ * @return Nothing.
+ * @throws GraphError when the generator unexpectedly receives an image input.
+ * @throws std::bad_alloc when diagnostic text cannot allocate.
+ * @throws std::invalid_argument when the output channel description is invalid.
+ * @throws std::runtime_error when the output tile has no writable CPU payload.
+ * @throws cv::Exception when the CPU output tile cannot be adapted or filled.
+ * @note The callback increments its counter only after validating the
+ * input-free generator boundary.
+ */
+void execute_spatial_generator_tile(const Node& node,
+                                    const OutputTile& output_tile,
+                                    const std::vector<InputTile>& input_tiles) {
+  if (!input_tiles.empty()) {
+    throw GraphError(
+        GraphErrc::InvalidParameter,
+        "spatial test generator received an image input: " + node.name);
+  }
+  g_spatial_generator_hp_calls.fetch_add(1, std::memory_order_relaxed);
+  toCvMat(output_tile).setTo(3.0f);
+}
+
+/**
+ * @brief Emits the uncached radius consumed by the spatial-aligned fixture.
+ *
+ * @param node Parameter producer whose callback requires no image input.
+ * @param inputs Image inputs, which must remain empty for this producer.
+ * @return Parameter-only output containing radius 7.
+ * @throws GraphError when the producer unexpectedly receives an image input.
+ * @throws std::bad_alloc when output data storage cannot allocate.
+ * @note The callback count proves execution was not bypassed by a cache hit.
+ */
+NodeOutput execute_spatial_parameter_source(
+    const Node& node, const std::vector<const NodeOutput*>& inputs) {
+  if (!inputs.empty()) {
+    throw GraphError(
+        GraphErrc::InvalidParameter,
+        "spatial test parameter source received an image input: " + node.name);
+  }
+  g_spatial_parameter_hp_calls.fetch_add(1, std::memory_order_relaxed);
+  NodeOutput output;
+  output.data["radius"] = 7;
+  return output;
+}
+
+/**
  * @brief Registers deterministic split-test operations once per process.
  *
  * The registration set supplies HP/RT source, tiled, random-access, cache,
@@ -144,6 +492,7 @@ NodeOutput make_image_output(int width, int height, int channels = 1,
 void register_split_ops() {
   static std::once_flag once;
   std::call_once(once, [] {
+    ops::register_builtin();
     auto& registry = OpRegistry::instance();
     registry.register_op_hp_monolithic(
         "split_plan", "source",
@@ -152,6 +501,114 @@ void register_split_ops() {
               return make_image_output(node.parameters["width"].as<int>(64),
                                        node.parameters["height"].as<int>(64));
             }));
+    registry.register_op_hp_monolithic(
+        "split_plan", "parameter_source",
+        MonolithicOpFunc(
+            [](const Node&, const std::vector<const NodeOutput*>&) {
+              NodeOutput output;
+              output.data["radius"] = 7;
+              return output;
+            }));
+    registry.register_op_hp_monolithic(
+        "split_plan", "spatial_uncached_parameter_source",
+        MonolithicOpFunc(execute_spatial_parameter_source));
+    registry.register_op_hp_monolithic(
+        "split_plan", "dynamic_blur_parameter",
+        MonolithicOpFunc(
+            [](const Node&, const std::vector<const NodeOutput*>&) {
+              g_dynamic_parameter_calls.fetch_add(1, std::memory_order_relaxed);
+              if (g_dynamic_parameter_fail.load(std::memory_order_acquire)) {
+                throw GraphError(GraphErrc::ComputeError,
+                                 "dynamic parameter preflight failure");
+              }
+              NodeOutput output;
+              output.data["ksize"] =
+                  g_dynamic_blur_ksize.load(std::memory_order_acquire);
+              return output;
+            }));
+    registry.register_op_hp_monolithic(
+        "split_plan", "dynamic_extent_parameter",
+        MonolithicOpFunc(
+            [](const Node&, const std::vector<const NodeOutput*>&) {
+              NodeOutput output;
+              output.data["width"] =
+                  g_dynamic_extent_width.load(std::memory_order_acquire);
+              return output;
+            }));
+    registry.register_op_hp_monolithic(
+        "split_plan", "dynamic_extent_target",
+        MonolithicOpFunc(
+            [](const Node& node, const std::vector<const NodeOutput*>&) {
+              const YAML::Node& parameters = node.runtime_parameters
+                                                 ? node.runtime_parameters
+                                                 : node.parameters;
+              return make_image_output(parameters["width"].as<int>(),
+                                       parameters["height"].as<int>());
+            }));
+    registry.register_op_hp_monolithic(
+        "image_generator", "split_image_parameter_source",
+        MonolithicOpFunc([](const Node&,
+                            const std::vector<const NodeOutput*>&) {
+          g_image_parameter_hp_calls.fetch_add(1, std::memory_order_relaxed);
+          NodeOutput output = make_image_output(64, 16, 1, 3.0f);
+          output.data["radius"] = 1;
+          return output;
+        }));
+    registry.register_op_hp_monolithic(
+        "split_plan", "gradient_source",
+        MonolithicOpFunc([](const Node& node,
+                            const std::vector<const NodeOutput*>&) {
+          NodeOutput output =
+              make_image_output(node.parameters["width"].as<int>(320),
+                                node.parameters["height"].as<int>(64), 1, 0.0f);
+          cv::Mat pixels = toCvMat(output.image_buffer);
+          for (int y = 0; y < pixels.rows; ++y) {
+            for (int x = 0; x < pixels.cols; ++x) {
+              pixels.at<float>(y, x) = ((x / 5 + y / 3) % 2 == 0) ? 0.0f : 1.0f;
+            }
+          }
+          return output;
+        }));
+    registry.register_op_hp_monolithic(
+        "split_plan", "staged_generation_source",
+        MonolithicOpFunc([](const Node&,
+                            const std::vector<const NodeOutput*>&) {
+          const int generation =
+              g_staged_source_generation.load(std::memory_order_acquire);
+          NodeOutput output = make_image_output(320, 64, 1, 0.0f);
+          cv::Mat pixels = toCvMat(output.image_buffer);
+          for (int y = 0; y < pixels.rows; ++y) {
+            for (int x = 0; x < pixels.cols; ++x) {
+              pixels.at<float>(y, x) =
+                  static_cast<float>(((x / 5 + y / 3 + generation) % 7) / 6.0);
+            }
+          }
+          output.data["generation"] = generation;
+          return output;
+        }));
+    registry.register_op_hp_monolithic(
+        "split_plan", "derived_blur_parameter",
+        MonolithicOpFunc(
+            [](const Node&, const std::vector<const NodeOutput*>& inputs) {
+              if (inputs.empty() || !inputs.front()) {
+                throw GraphError(GraphErrc::MissingDependency,
+                                 "derived parameter requires source input");
+              }
+              const int generation =
+                  inputs.front()->data.at("generation").as<int>();
+              g_derived_parameter_seen_generation.store(
+                  generation, std::memory_order_release);
+              NodeOutput output;
+              output.data["ksize"] = generation;
+              return output;
+            }));
+    registry.register_op_hp_monolithic(
+        "image_generator", "host_preparation_source",
+        MonolithicOpFunc(execute_host_preparation_source));
+    registry.register_op_hp_monolithic("split_plan",
+                                       "host_preparation_parameter",
+                                       plugin_host::adapt_monolithic_operation(
+                                           execute_host_preparation_parameter));
     registry.register_op_hp_monolithic(
         "split_plan", "monolithic",
         MonolithicOpFunc(
@@ -172,6 +629,12 @@ void register_split_ops() {
           toCvMat(output_tile).setTo(2.0f);
         }),
         micro_meta);
+    registry.register_op_hp_tiled(
+        "image_generator", "spatial_uncached_tiled_source",
+        TileOpFunc(execute_spatial_generator_tile), micro_meta);
+    registry.register_op_hp_tiled(
+        "split_plan", "host_preparation_target",
+        TileOpFunc(execute_host_preparation_hp_target_tile), micro_meta);
     registry.register_op_rt_tiled(
         "split_plan", "tile",
         TileOpFunc([](const Node&, const OutputTile& output_tile,
@@ -179,6 +642,22 @@ void register_split_ops() {
           toCvMat(output_tile).setTo(2.0f);
         }),
         micro_meta);
+    registry.register_op_rt_tiled(
+        "image_generator", "split_image_parameter_source",
+        TileOpFunc([](const Node&, const OutputTile& output_tile,
+                      const std::vector<InputTile>& input_tiles) {
+          EXPECT_TRUE(input_tiles.empty())
+              << "the RT generator must remain an input-free source boundary";
+          g_image_parameter_rt_calls.fetch_add(1, std::memory_order_relaxed);
+          toCvMat(output_tile).setTo(8.0f);
+        }),
+        micro_meta);
+    registry.register_op_rt_tiled(
+        "image_generator", "host_preparation_source",
+        TileOpFunc(execute_host_preparation_rt_source_tile), micro_meta);
+    registry.register_op_rt_tiled(
+        "split_plan", "host_preparation_target",
+        TileOpFunc(execute_host_preparation_rt_target_tile), micro_meta);
     registry.register_op_hp_tiled(
         "split_plan", "domain_tile",
         TileOpFunc([](const Node&, const OutputTile& output_tile,
@@ -243,18 +722,28 @@ void register_split_ops() {
                                   micro_meta);
     registry.register_dirty_propagator(
         "split_plan", "random_tile",
-        DirtyRoiPropFunc(
-            [](const Node& node, const cv::Rect& roi, const GraphModel&) {
-              const int radius = node.parameters["radius"].as<int>(16);
-              return compute::expand_rect(roi, radius);
-            }));
+        DirtyRoiPropFunc([](const Node&, const cv::Rect& roi, const GraphModel&,
+                            const cv::Size&, const std::vector<cv::Size>&,
+                            const plugin::ParameterMap& parameters,
+                            const std::vector<const NodeOutput*>*) {
+          const auto found = parameters.find("radius");
+          const int radius = found == parameters.end()
+                                 ? 16
+                                 : static_cast<int>(found->second.as_int64());
+          return compute::expand_rect(roi, radius);
+        }));
     registry.register_dirty_propagator(
         "split_plan", "domain_random_tile",
-        DirtyRoiPropFunc(
-            [](const Node& node, const cv::Rect& roi, const GraphModel&) {
-              const int radius = node.parameters["radius"].as<int>(16);
-              return compute::expand_rect(roi, radius);
-            }));
+        DirtyRoiPropFunc([](const Node&, const cv::Rect& roi, const GraphModel&,
+                            const cv::Size&, const std::vector<cv::Size>&,
+                            const plugin::ParameterMap& parameters,
+                            const std::vector<const NodeOutput*>*) {
+          const auto found = parameters.find("radius");
+          const int radius = found == parameters.end()
+                                 ? 16
+                                 : static_cast<int>(found->second.as_int64());
+          return compute::expand_rect(roi, radius);
+        }));
   });
 }
 
@@ -300,6 +789,121 @@ compute::ComputePlan dirty_snapshot_pruned_plan(
     const compute::DirtyRegionSnapshot& snapshot, GraphModel& graph) {
   compute::DirtySnapshotTaskGraphPruner pruner;
   return pruner.prune(node_cache_plan, snapshot, graph);
+}
+
+/**
+ * @brief Populates a deterministic gradient→Gaussian graph with a connected
+ * kernel-size producer.
+ *
+ * @param graph Empty graph receiving source, parameter, and blur nodes.
+ * @return Nothing.
+ * @throws GraphError or allocation/YAML exceptions from graph construction.
+ * @note The 320-pixel width crosses both 16-pixel dirty tiles and the
+ * built-in Gaussian HP macro-task boundary at x=256.
+ */
+void populate_dynamic_blur_graph(GraphModel& graph) {
+  Node source = make_node(1, "split_plan", "gradient_source");
+  source.parameters["width"] = 320;
+  source.parameters["height"] = 64;
+  Node parameter = make_node(3, "split_plan", "dynamic_blur_parameter");
+  parameter.parameters["width"] = 1;
+  parameter.parameters["height"] = 1;
+  Node blur = make_node(2, "image_process", "gaussian_blur");
+  blur.parameters["width"] = 320;
+  blur.parameters["height"] = 64;
+  blur.parameters["ksize"] = 3;
+  blur.image_inputs.push_back({1, "image"});
+  blur.parameter_inputs.push_back({3, "ksize", "ksize"});
+  graph.add_node(source);
+  graph.add_node(parameter);
+  graph.add_node(blur);
+  graph.validate_topology();
+}
+
+/**
+ * @brief Populates a valid source→parameter→target preparation chain.
+ *
+ * @param graph Empty graph receiving the image/data source, adapted public
+ * parameter callback, and HP/RT tiled target.
+ * @return Nothing.
+ * @throws GraphError or allocation/YAML exceptions from graph construction.
+ * @note The parameter node consumes the source through both image and named
+ * parameter edges. Preflight must therefore stage the source, clone its
+ * `injected` value into effective parameters, and convert that map before the
+ * adapted callback can enter.
+ */
+void populate_host_preparation_failure_graph(GraphModel& graph) {
+  Node source = make_node(1, "image_generator", "host_preparation_source");
+  source.parameters["width"] = 64;
+  source.parameters["height"] = 16;
+  Node parameter = make_node(3, "split_plan", "host_preparation_parameter");
+  parameter.parameters["width"] = 1;
+  parameter.parameters["height"] = 1;
+  parameter.parameters["injected"] = 1;
+  parameter.image_inputs.push_back({1, "image"});
+  parameter.parameter_inputs.push_back({1, "injected", "injected"});
+  Node target = make_node(2, "split_plan", "host_preparation_target");
+  target.parameters["width"] = 64;
+  target.parameters["height"] = 16;
+  target.parameters["radius"] = 1;
+  target.image_inputs.push_back({1, "image"});
+  target.parameter_inputs.push_back({3, "radius", "radius"});
+  graph.add_node(source);
+  graph.add_node(parameter);
+  graph.add_node(target);
+  graph.validate_topology();
+}
+
+/**
+ * @brief Populates an image target whose width comes from a connected value.
+ * @param graph Empty graph receiving source, parameter, and target nodes.
+ * @throws GraphError or allocation/YAML exceptions from graph construction.
+ * @note The target starts at width 64 so tests can shrink it below a dirty ROI
+ * that was valid only for the previous generation.
+ */
+void populate_dynamic_extent_graph(GraphModel& graph) {
+  Node source = make_node(1, "split_plan", "source");
+  source.parameters["width"] = 64;
+  source.parameters["height"] = 8;
+  Node parameter = make_node(3, "split_plan", "dynamic_extent_parameter");
+  parameter.parameters["width"] = 1;
+  parameter.parameters["height"] = 1;
+  Node target = make_node(2, "split_plan", "dynamic_extent_target");
+  target.parameters["width"] = 64;
+  target.parameters["height"] = 8;
+  target.image_inputs.push_back({1, "image"});
+  target.parameter_inputs.push_back({3, "width", "width"});
+  graph.add_node(source);
+  graph.add_node(parameter);
+  graph.add_node(target);
+  graph.validate_topology();
+}
+
+/**
+ * @brief Populates A(image+data) to B(parameter) to C(random-access blur).
+ * @param graph Empty graph receiving the staged preflight chain.
+ * @throws GraphError or allocation/YAML exceptions from graph construction.
+ * @note B consumes A as an image edge while C consumes the same A image and
+ * B's named value, forcing preflight and phase two to share one A snapshot.
+ */
+void populate_staged_parameter_chain(GraphModel& graph) {
+  Node source = make_node(1, "split_plan", "staged_generation_source");
+  source.parameters["width"] = 320;
+  source.parameters["height"] = 64;
+  Node parameter = make_node(3, "split_plan", "derived_blur_parameter");
+  parameter.parameters["width"] = 1;
+  parameter.parameters["height"] = 1;
+  parameter.image_inputs.push_back({1, "image"});
+  Node blur = make_node(2, "image_process", "gaussian_blur");
+  blur.parameters["width"] = 320;
+  blur.parameters["height"] = 64;
+  blur.parameters["ksize"] = 3;
+  blur.image_inputs.push_back({1, "image"});
+  blur.parameter_inputs.push_back({3, "ksize", "ksize"});
+  graph.add_node(source);
+  graph.add_node(parameter);
+  graph.add_node(blur);
+  graph.validate_topology();
 }
 
 }  // namespace
@@ -415,6 +1019,7 @@ TEST(NodeExecutorSplit,
 
   Node tiled = make_node(2, "image_mixing", "tile");
   bool saw_normalized_second_input = false;
+  bool saw_normalized_second_spatial = false;
   int tiled_calls = 0;
   std::set<const ImageBuffer*> normalized_second_buffers;
   OpRegistry::OpVariant tile_op =
@@ -427,16 +1032,35 @@ TEST(NodeExecutorSplit,
         saw_normalized_second_input = input_tiles[1].buffer->width == 8 &&
                                       input_tiles[1].buffer->height == 8 &&
                                       input_tiles[1].buffer->channels == 3;
+        saw_normalized_second_spatial =
+            input_tiles[1].spatial != nullptr &&
+            input_tiles[1].spatial->absolute_roi == cv::Rect(3, 4, 4, 4);
         toCvMat(output_tile).setTo(3.0f);
       });
   NodeOutput base = make_image_output(8, 8, 3);
   NodeOutput secondary = make_image_output(4, 4, 1);
+  secondary.data["normalization_marker"] = 17;
+  secondary.space.absolute_roi = cv::Rect(3, 4, 4, 4);
+  secondary.plugin_library_lifetime = std::make_shared<int>(42);
   std::vector<const NodeOutput*> tiled_inputs{&base, &secondary};
+  const compute::TiledInputContext normalized_context =
+      compute::TiledInputNormalizer::normalize(tiled, tiled_inputs);
+  ASSERT_EQ(normalized_context.normalized_storage.size(), 1u);
+  EXPECT_EQ(normalized_context.normalized_storage.front()
+                .data.at("normalization_marker")
+                .as<int>(),
+            17);
+  EXPECT_EQ(normalized_context.normalized_storage.front().space.absolute_roi,
+            secondary.space.absolute_roi);
+  EXPECT_EQ(
+      normalized_context.normalized_storage.front().plugin_library_lifetime,
+      secondary.plugin_library_lifetime);
   compute::TiledExecutionConfig tiled_config;
   tiled_config.tile_size = 4;
   NodeOutput tiled_output = compute::NodeExecutor::execute(
       graph, tiled, tile_op, tiled_inputs, tiled_config);
   EXPECT_TRUE(saw_normalized_second_input);
+  EXPECT_TRUE(saw_normalized_second_spatial);
   EXPECT_EQ(tiled_calls, 4);
   ASSERT_EQ(normalized_second_buffers.size(), 1u);
   EXPECT_NE(*normalized_second_buffers.begin(), &secondary.image_buffer);
@@ -446,7 +1070,10 @@ TEST(NodeExecutorSplit,
   auto& registry = OpRegistry::instance();
   registry.register_dirty_propagator(
       "split_exec", "random_tile",
-      DirtyRoiPropFunc([](const Node&, const cv::Rect& roi, const GraphModel&) {
+      DirtyRoiPropFunc([](const Node&, const cv::Rect& roi, const GraphModel&,
+                          const cv::Size&, const std::vector<cv::Size>&,
+                          const plugin::ParameterMap&,
+                          const std::vector<const NodeOutput*>*) {
         return compute::expand_rect(roi, 2);
       }));
   Node random_node = make_node(3, "split_exec", "random_tile");
@@ -469,6 +1096,142 @@ TEST(NodeExecutorSplit,
       GraphError);
 }
 
+TEST(NodeExecutorSplit,
+     RandomAccessUsesExecutionLocalParametersAndAllActualInputExtents) {
+  GraphModel graph("cache/split-node-executor-same-batch");
+  graph.add_node(make_node(10, "split_exec", "source"));
+  graph.add_node(make_node(11, "split_exec", "source"));
+  graph.add_node(make_node(20, "split_exec", "parameter_source"));
+  Node graph_child = make_node(12, "split_exec", "same_batch_random");
+  graph_child.parameters["radius"] = 1;
+  graph_child.image_inputs = {ImageInput{10, "image"}, ImageInput{11, "image"}};
+  graph_child.parameter_inputs = {ParameterInput{20, "value", "radius"}};
+  graph.add_node(graph_child);
+  graph.validate_topology();
+  graph.mutate_node_runtime_state(10, [](auto& state) {
+    state.cached_output_high_precision = make_image_output(40, 20);
+    state.cached_output_high_precision->data["generation"] = 1;
+    state.cached_output_high_precision->space.absolute_roi =
+        cv::Rect(1, 1, 40, 20);
+  });
+
+  auto exact_context_count = std::make_shared<int>(0);
+  OpRegistry::instance().register_dirty_propagator(
+      "split_exec", "same_batch_random",
+      plugin_host::adapt_dirty_propagator(
+          [exact_context_count](const plugin::RoiContext& context) {
+            const plugin::ParameterValue* radius =
+                context.node->find_parameter("radius");
+            if (radius && radius->as_int64() == 3 &&
+                context.output_extent.width == 40 &&
+                context.output_extent.height == 20 &&
+                context.input_edges.size() == 2 &&
+                context.input_edges[0].extent.width == 40 &&
+                context.input_edges[0].extent.height == 20 &&
+                context.input_edges[0].has_available_input &&
+                context.input_edges[0].available_input.data != nullptr &&
+                context.input_edges[0]
+                        .available_input.data->at("generation")
+                        .as_int64() == 99 &&
+                context.input_edges[0].available_input.spatial != nullptr &&
+                context.input_edges[0]
+                        .available_input.spatial->absolute_roi.x == 7 &&
+                context.input_edges[1].extent.width == 3 &&
+                context.input_edges[1].extent.height == 4) {
+              ++*exact_context_count;
+            }
+            return context.requested_roi;
+          }));
+
+  Node execution_node = graph.node(12);
+  execution_node.runtime_parameters = YAML::Clone(execution_node.parameters);
+  execution_node.runtime_parameters["radius"] = 3;
+  NodeOutput left = make_image_output(40, 20);
+  left.data["generation"] = 99;
+  left.space.absolute_roi = cv::Rect(7, 8, 40, 20);
+  NodeOutput right = make_image_output(3, 4);
+  const std::vector<const NodeOutput*> inputs{&left, &right};
+  OpRegistry::OpVariant operation = TileOpFunc(
+      [](const Node&, const OutputTile& output, const std::vector<InputTile>&) {
+        toCvMat(output).setTo(1.0f);
+      });
+  compute::TiledExecutionConfig config;
+  config.tile_size = 16;
+  config.metadata = OpMetadata{};
+  config.metadata->access_pattern =
+      OpMetadata::InputAccessPattern::RandomAccess;
+
+  const NodeOutput result = compute::NodeExecutor::execute(
+      graph, execution_node, operation, inputs, config);
+
+  EXPECT_EQ(result.image_buffer.width, 40);
+  EXPECT_EQ(result.image_buffer.height, 20);
+  EXPECT_EQ(*exact_context_count, 12)
+      << "one random-access mapping per input must see the same complete "
+         "same-batch snapshot";
+}
+
+TEST(NodeExecutorSplit,
+     PreservesDisconnectedSlotIdentityThroughPublicTiledCallback) {
+  GraphModel graph("cache/split-disconnected-public-input-slot");
+  graph.add_node(make_node(11, "split_exec", "source"));
+  Node graph_child = make_node(12, "split_exec", "disconnected_slot");
+  graph_child.image_inputs = {ImageInput{-1, "image"}, ImageInput{11, "image"}};
+  graph.add_node(graph_child);
+  graph.validate_topology();
+
+  NodeOutput connected = make_image_output(7, 5);
+  Node execution_node = graph.node(12);
+  const compute::ResolvedNodeInputs resolved =
+      compute::NodeInputResolver::resolve(
+          execution_node,
+          [&](int upstream_id) -> const NodeOutput* {
+            return upstream_id == 11 ? &connected : nullptr;
+          },
+          "disconnected slot regression");
+  ASSERT_EQ(resolved.image_inputs.size(), 2u);
+  EXPECT_EQ(resolved.image_inputs[0], nullptr);
+  EXPECT_EQ(resolved.image_inputs[1], &connected);
+  ASSERT_TRUE(execution_node.last_input_size_hp.has_value());
+  EXPECT_EQ(*execution_node.last_input_size_hp, cv::Size(7, 5));
+
+  bool roi_context_preserved_index = false;
+  OpRegistry::instance().register_dirty_propagator(
+      execution_node.type, execution_node.subtype,
+      plugin_host::adapt_dirty_propagator(
+          [&](const plugin::RoiContext& context) {
+            roi_context_preserved_index =
+                context.input_edges.size() == 1 &&
+                context.input_edges[0].input_index == 1 &&
+                context.input_edges[0].extent.width == 7 &&
+                context.input_edges[0].extent.height == 5;
+            return context.requested_roi;
+          }));
+
+  bool tiled_callback_preserved_slots = false;
+  OpRegistry::OpVariant operation = plugin_host::adapt_tiled_operation(
+      [&](const plugin::NodeView&, const OutputTileView& output,
+          plugin::ArrayView<plugin::OperationTileInputView> inputs) {
+        tiled_callback_preserved_slots =
+            inputs.size() == 2 && inputs[0].tile.buffer == nullptr &&
+            inputs[0].spatial == nullptr &&
+            inputs[1].tile.buffer == &connected.image_buffer &&
+            inputs[1].spatial != nullptr && output.buffer != nullptr;
+      });
+  compute::TiledExecutionConfig config;
+  config.tile_size = 16;
+  config.metadata = OpMetadata{};
+  config.metadata->access_pattern =
+      OpMetadata::InputAccessPattern::RandomAccess;
+  const NodeOutput output = compute::NodeExecutor::execute(
+      graph, execution_node, operation, resolved.image_inputs, config);
+
+  EXPECT_EQ(output.image_buffer.width, 7);
+  EXPECT_EQ(output.image_buffer.height, 5);
+  EXPECT_TRUE(roi_context_preserved_index);
+  EXPECT_TRUE(tiled_callback_preserved_slots);
+}
+
 TEST(ComputeMetricsRecorderSplit, FinalizesMetadataAndDebugStatistics) {
   NodeOutput input = make_image_output(3, 3, 1, 2.0f);
   input.space.absolute_roi = cv::Rect(5, 6, 3, 3);
@@ -483,6 +1246,27 @@ TEST(ComputeMetricsRecorderSplit, FinalizesMetadataAndDebugStatistics) {
   EXPECT_FLOAT_EQ(output.debug.min_val, 4.0f);
   EXPECT_FLOAT_EQ(output.debug.max_val, 4.0f);
   EXPECT_FALSE(output.debug.has_nan);
+
+  const std::pair<Device, const char*> backend_devices[] = {
+      {Device::GPU_METAL, "GPU_METAL"},
+      {Device::GPU_CUDA, "GPU_CUDA"},
+      {Device::ASIC_NPU, "ASIC_NPU"},
+  };
+  for (const auto& [device, expected_label] : backend_devices) {
+    NodeOutput backend;
+    backend.image_buffer.width = 3;
+    backend.image_buffer.height = 3;
+    backend.image_buffer.channels = 1;
+    backend.image_buffer.device = device;
+    backend.image_buffer.context = std::make_shared<int>(7);
+    backend.debug.min_val = 12.0;
+    backend.debug.max_val = 34.0;
+    compute::ComputeMetricsRecorder::finalize_output_metadata(backend, {}, true,
+                                                              1.0);
+    EXPECT_EQ(backend.debug.compute_device, expected_label);
+    EXPECT_DOUBLE_EQ(backend.debug.min_val, 12.0);
+    EXPECT_DOUBLE_EQ(backend.debug.max_val, 34.0);
+  }
 }
 
 TEST(DirtyRegionPlannerSplit,
@@ -896,12 +1680,18 @@ TEST(TaskGraphPlanningSplit, TileDependenciesUseRandomAccessInputRoi) {
   Node source = make_node(1, "split_plan", "tile");
   source.parameters["width"] = 48;
   source.parameters["height"] = 16;
+  Node parameter_source = make_node(3, "split_plan", "source");
+  parameter_source.cached_output_high_precision = NodeOutput{};
+  parameter_source.cached_output_high_precision->data["radius"] = 16;
+  parameter_source.hp_version = 1;
   Node downstream = make_node(2, "split_plan", "random_tile");
   downstream.parameters["width"] = 48;
   downstream.parameters["height"] = 16;
-  downstream.parameters["radius"] = 16;
+  downstream.parameters["radius"] = 0;
   downstream.image_inputs.push_back({1, "image"});
+  downstream.parameter_inputs.push_back({3, "radius", "radius"});
   graph.add_node(source);
+  graph.add_node(parameter_source);
   graph.add_node(downstream);
   graph.validate_topology();
 
@@ -924,6 +1714,829 @@ TEST(TaskGraphPlanningSplit, TileDependenciesUseRandomAccessInputRoi) {
   for (int dependency_task_id : middle_downstream_task->dependency_task_ids) {
     EXPECT_EQ(plan.task_graph.tasks.at(dependency_task_id).node_id, 1);
   }
+}
+
+TEST(TaskGraphPlanningSplit,
+     ParameterizedRandomAccessAlwaysWaitsForEveryImageTile) {
+  register_split_ops();
+  GraphModel graph("cache/split-parameterized-random-access-dependencies");
+  Node source = make_node(1, "split_plan", "tile");
+  source.parameters["width"] = 64;
+  source.parameters["height"] = 16;
+  Node parameter_source = make_node(3, "split_plan", "source");
+  parameter_source.parameters["width"] = 1;
+  parameter_source.parameters["height"] = 1;
+  parameter_source.cached_output_high_precision = NodeOutput{};
+  parameter_source.cached_output_high_precision->data["radius"] = 0;
+  parameter_source.hp_version = 1;
+  Node downstream = make_node(2, "split_plan", "random_tile");
+  downstream.parameters["width"] = 64;
+  downstream.parameters["height"] = 16;
+  downstream.parameters["radius"] = 0;
+  downstream.image_inputs.push_back({1, "image"});
+  downstream.parameter_inputs.push_back({3, "radius", "radius"});
+  graph.add_node(source);
+  graph.add_node(parameter_source);
+  graph.add_node(downstream);
+  graph.validate_topology();
+
+  compute::ComputeRequest request;
+  request.intent = ComputeIntent::GlobalHighPrecision;
+  request.target_node_id = 2;
+  const auto plan = node_cache_pruned_plan(graph, request, {1, 3, 2});
+
+  std::size_t checked_downstream_tiles = 0;
+  for (const compute::PlannedTask& task : plan.task_graph.tasks) {
+    if (task.node_id != 2 || task.kind != compute::PlannedTaskKind::Tile) {
+      continue;
+    }
+    ++checked_downstream_tiles;
+    std::size_t image_dependency_count = 0;
+    std::size_t parameter_dependency_count = 0;
+    for (int dependency_task_id : task.dependency_task_ids) {
+      const int dependency_node_id =
+          plan.task_graph.tasks.at(dependency_task_id).node_id;
+      image_dependency_count += dependency_node_id == 1 ? 1u : 0u;
+      parameter_dependency_count += dependency_node_id == 3 ? 1u : 0u;
+    }
+    EXPECT_EQ(image_dependency_count, 4u)
+        << "a cached FullTaskGraph and the old radius=0 snapshot must not "
+           "release a random-access consumer before any image tile that a "
+           "same-request parameter result could newly require";
+    EXPECT_EQ(parameter_dependency_count, 1u);
+  }
+  EXPECT_EQ(checked_downstream_tiles, 4u);
+}
+
+TEST(TaskGraphPlanningSplit,
+     SpatialAlignedConsumerPlansAndExecutesWithUncachedParameterProducer) {
+  register_split_ops();
+  g_spatial_generator_hp_calls.store(0, std::memory_order_relaxed);
+  g_spatial_parameter_hp_calls.store(0, std::memory_order_relaxed);
+  GraphModel graph("cache/split-spatial-uncached-parameter-producer");
+  Node source =
+      make_node(1, "image_generator", "spatial_uncached_tiled_source");
+  source.parameters["width"] = 32;
+  source.parameters["height"] = 16;
+  Node parameter_source =
+      make_node(3, "split_plan", "spatial_uncached_parameter_source");
+  parameter_source.parameters["width"] = 1;
+  parameter_source.parameters["height"] = 1;
+  Node downstream = make_node(2, "split_plan", "tile");
+  downstream.parameters["width"] = 32;
+  downstream.parameters["height"] = 16;
+  downstream.parameters["radius"] = 0;
+  downstream.image_inputs.push_back({1, "image"});
+  downstream.parameter_inputs.push_back({3, "radius", "radius"});
+  graph.add_node(source);
+  graph.add_node(parameter_source);
+  graph.add_node(downstream);
+  graph.validate_topology();
+  EXPECT_FALSE(graph.node(1).cached_output_high_precision.has_value());
+  EXPECT_FALSE(graph.node(3).cached_output_high_precision.has_value());
+
+  compute::ComputeRequest planning_request;
+  planning_request.intent = ComputeIntent::GlobalHighPrecision;
+  planning_request.target_node_id = 2;
+  const auto plan = node_cache_pruned_plan(graph, planning_request, {1, 3, 2});
+  std::size_t source_tile_count = 0;
+  std::size_t parameter_task_count = 0;
+  std::size_t downstream_tile_count = 0;
+  for (const compute::PlannedTask& task : plan.task_graph.tasks) {
+    if (task.node_id == 1) {
+      EXPECT_EQ(task.kind, compute::PlannedTaskKind::Tile);
+      ++source_tile_count;
+      continue;
+    }
+    if (task.node_id == 3) {
+      EXPECT_EQ(task.kind, compute::PlannedTaskKind::Monolithic);
+      EXPECT_TRUE(task.dependency_task_ids.empty());
+      ++parameter_task_count;
+      continue;
+    }
+    if (task.node_id != 2 || task.kind != compute::PlannedTaskKind::Tile) {
+      continue;
+    }
+    ++downstream_tile_count;
+    std::size_t image_dependency_count = 0;
+    std::size_t parameter_dependency_count = 0;
+    for (int dependency_task_id : task.dependency_task_ids) {
+      const int dependency_node_id =
+          plan.task_graph.tasks.at(dependency_task_id).node_id;
+      image_dependency_count += dependency_node_id == 1 ? 1u : 0u;
+      parameter_dependency_count += dependency_node_id == 3 ? 1u : 0u;
+    }
+    EXPECT_EQ(image_dependency_count, 1u);
+    EXPECT_EQ(parameter_dependency_count, 1u)
+        << "the uncached parameter producer remains a scheduling dependency "
+           "even though SpatialAligned ROI geometry does not read its value";
+  }
+  EXPECT_EQ(source_tile_count, 2u);
+  EXPECT_EQ(parameter_task_count, 1u);
+  EXPECT_EQ(downstream_tile_count, 2u);
+  EXPECT_EQ(g_spatial_generator_hp_calls.load(std::memory_order_relaxed), 0);
+  EXPECT_EQ(g_spatial_parameter_hp_calls.load(std::memory_order_relaxed), 0);
+
+  GraphTraversalService traversal;
+  GraphCacheService cache;
+  GraphEventService events;
+  ComputeService service(traversal, cache, events);
+  ComputeService::Request execution_request;
+  execution_request.node_id = 2;
+  execution_request.intent = ComputeIntent::GlobalHighPrecision;
+  execution_request.cache.precision = "float32";
+  execution_request.cache.disable_disk_cache = true;
+  NodeOutput& output = service.compute(graph, execution_request);
+
+  EXPECT_EQ(output.image_buffer.width, 32);
+  EXPECT_EQ(output.image_buffer.height, 16);
+  double output_min = 0.0;
+  double output_max = 0.0;
+  cv::minMaxLoc(toCvMat(output.image_buffer), &output_min, &output_max);
+  EXPECT_DOUBLE_EQ(output_min, 2.0);
+  EXPECT_DOUBLE_EQ(output_max, 2.0);
+  EXPECT_EQ(g_spatial_generator_hp_calls.load(std::memory_order_relaxed), 1)
+      << "inline execution computes the generator node once, while the "
+         "separately inspected task graph retains two source tiles";
+  EXPECT_EQ(g_spatial_parameter_hp_calls.load(std::memory_order_relaxed), 1);
+  ASSERT_TRUE(graph.node(1).cached_output_high_precision.has_value());
+  const NodeOutput& source_output = *graph.node(1).cached_output_high_precision;
+  EXPECT_EQ(source_output.image_buffer.width, 32);
+  EXPECT_EQ(source_output.image_buffer.height, 16);
+  double source_min = 0.0;
+  double source_max = 0.0;
+  cv::minMaxLoc(toCvMat(source_output.image_buffer), &source_min, &source_max);
+  EXPECT_DOUBLE_EQ(source_min, 3.0);
+  EXPECT_DOUBLE_EQ(source_max, 3.0);
+  ASSERT_TRUE(graph.node(3).cached_output_high_precision.has_value());
+  ASSERT_TRUE(graph.node(2).runtime_parameters);
+  EXPECT_EQ(graph.node(2).runtime_parameters["radius"].as<int>(), 7);
+}
+
+TEST(TaskGraphPlanningSplit,
+     DirtyConnectedParameterPromotesGeometryAndTaskWaitsToFullExtent) {
+  register_split_ops();
+  GraphModel graph("cache/split-dirty-connected-parameter-full-dependency");
+  Node source = make_node(1, "split_plan", "tile");
+  source.parameters["width"] = 64;
+  source.parameters["height"] = 16;
+  Node parameter = make_node(3, "split_plan", "parameter_source");
+  parameter.parameters["width"] = 1;
+  parameter.parameters["height"] = 1;
+  Node downstream = make_node(2, "split_plan", "tile");
+  downstream.parameters["width"] = 64;
+  downstream.parameters["height"] = 16;
+  downstream.parameter_inputs.push_back({3, "radius", "radius"});
+  downstream.image_inputs.push_back({1, "image"});
+  graph.add_node(source);
+  graph.add_node(parameter);
+  graph.add_node(downstream);
+  graph.validate_topology();
+
+  GraphTraversalService traversal;
+  RoiPropagationService propagation;
+  compute::DirtyRegionPlanner planner(traversal, propagation);
+  auto verify_domain = [&](ComputeIntent intent) {
+    const bool realtime = intent == ComputeIntent::RealTimeUpdate;
+    const auto snapshot =
+        realtime
+            ? planner.plan_real_time(graph, 2, cv::Rect(31, 0, 2, 2)).snapshot
+            : planner.plan_high_precision(graph, 2, cv::Rect(31, 0, 2, 2))
+                  .snapshot;
+    ASSERT_TRUE(snapshot.per_node_dirty_rois.count(1));
+    ASSERT_TRUE(snapshot.per_node_dirty_rois.count(2));
+    ASSERT_TRUE(snapshot.per_node_dirty_rois.count(3));
+    EXPECT_EQ(snapshot.per_node_dirty_rois.at(1).front(),
+              cv::Rect(0, 0, 64, 16));
+    EXPECT_EQ(snapshot.per_node_dirty_rois.at(2).front(),
+              cv::Rect(0, 0, 64, 16));
+
+    compute::ComputeRequest request;
+    request.intent = intent;
+    request.target_node_id = 2;
+    const auto base = node_cache_pruned_plan(graph, request, {1, 3, 2});
+    compute::DirtySnapshotTaskGraphPruner pruner;
+    const auto selection = pruner.select(base, snapshot, graph);
+    const std::size_t upstream_image_task_count =
+        static_cast<std::size_t>(std::count_if(
+            base.task_graph.tasks.begin(), base.task_graph.tasks.end(),
+            [](const auto& task) { return task.node_id == 1; }));
+    ASSERT_GT(upstream_image_task_count, 0u);
+    std::size_t checked_consumers = 0;
+    for (int task_id : selection.active_task_ids) {
+      const auto& task = base.task_graph.tasks.at(task_id);
+      if (task.node_id != 2) {
+        continue;
+      }
+      ++checked_consumers;
+      std::size_t image_dependencies = 0;
+      std::size_t parameter_dependencies = 0;
+      for (int dependency_id : selection.dependency_task_ids.at(task_id)) {
+        const int dependency_node =
+            base.task_graph.tasks.at(dependency_id).node_id;
+        image_dependencies += dependency_node == 1 ? 1u : 0u;
+        parameter_dependencies += dependency_node == 3 ? 1u : 0u;
+      }
+      EXPECT_EQ(image_dependencies, upstream_image_task_count)
+          << "snapshot from_roi is a dependency lower bound for every active "
+             "consumer task";
+      EXPECT_EQ(parameter_dependencies, 1u);
+    }
+    EXPECT_GT(checked_consumers, 0u);
+  };
+
+  verify_domain(ComputeIntent::GlobalHighPrecision);
+  verify_domain(ComputeIntent::RealTimeUpdate);
+}
+
+TEST(ComputeServiceSplit,
+     DirtyConnectedKernelStabilizesThreeToTwentyOneToThree) {
+  register_split_ops();
+  g_dynamic_parameter_fail.store(false, std::memory_order_release);
+  g_dynamic_parameter_calls.store(0, std::memory_order_relaxed);
+  g_dynamic_blur_ksize.store(3, std::memory_order_release);
+  GraphModel graph("cache/split-dynamic-connected-kernel");
+  populate_dynamic_blur_graph(graph);
+  GraphTraversalService traversal;
+  GraphCacheService cache;
+  GraphEventService events;
+  ComputeService service(traversal, cache, events);
+
+  ComputeService::Request full;
+  full.node_id = 2;
+  full.cache.precision = "float32";
+  full.cache.disable_disk_cache = true;
+  (void)service.compute(graph, full);
+  const int calls_after_full =
+      g_dynamic_parameter_calls.load(std::memory_order_relaxed);
+
+  const auto verify_kernel = [&](int kernel_size) {
+    g_dynamic_blur_ksize.store(kernel_size, std::memory_order_release);
+    ComputeService::Request dirty = full;
+    dirty.intent = ComputeIntent::GlobalHighPrecision;
+    dirty.dirty_roi = cv::Rect(270, 16, 3, 3);
+    NodeOutput& output = service.compute(graph, dirty);
+    const cv::Mat source =
+        toCvMat(graph.node(1).cached_output_high_precision->image_buffer);
+    cv::Mat expected;
+    cv::GaussianBlur(source, expected, cv::Size(kernel_size, kernel_size), 0, 0,
+                     cv::BORDER_REPLICATE);
+    EXPECT_LE(cv::norm(toCvMat(output.image_buffer), expected, cv::NORM_INF),
+              1e-6);
+    ASSERT_TRUE(graph.last_compute_plan_summary.has_value());
+    EXPECT_EQ(graph.last_compute_plan_summary->topology_generation,
+              graph.topology_generation());
+    EXPECT_EQ(graph.last_compute_plan_summary->full_graph_cache_key,
+              compute::full_task_graph_cache_key(
+                  graph, ComputeIntent::GlobalHighPrecision));
+  };
+
+  verify_kernel(21);
+  verify_kernel(3);
+  EXPECT_EQ(g_dynamic_parameter_calls.load(std::memory_order_relaxed),
+            calls_after_full + 2)
+      << "each dirty request stabilizes its data-only producer exactly once";
+}
+
+TEST(ComputeServiceSplit,
+     PreflightAndPhaseTwoShareStagedImageDataAndDerivedParameter) {
+  register_split_ops();
+  g_staged_source_generation.store(3, std::memory_order_release);
+  g_derived_parameter_seen_generation.store(0, std::memory_order_relaxed);
+  GraphModel graph("cache/split-staged-parameter-chain");
+  populate_staged_parameter_chain(graph);
+  GraphTraversalService traversal;
+  GraphCacheService cache;
+  GraphEventService events;
+  ComputeService service(traversal, cache, events);
+  ComputeService::Request request;
+  request.node_id = 2;
+  request.cache.precision = "float32";
+  request.cache.disable_disk_cache = true;
+  (void)service.compute(graph, request);
+
+  const auto verify_generation = [&](int generation) {
+    g_staged_source_generation.store(generation, std::memory_order_release);
+    request.intent = ComputeIntent::GlobalHighPrecision;
+    request.dirty_roi = cv::Rect(270, 16, 3, 3);
+    NodeOutput& output = service.compute(graph, request);
+    EXPECT_EQ(
+        g_derived_parameter_seen_generation.load(std::memory_order_acquire),
+        generation)
+        << "B must consume the request-local staged A output";
+    ASSERT_TRUE(graph.last_dirty_region_snapshot.has_value());
+    const auto& snapshot = *graph.last_dirty_region_snapshot;
+    ASSERT_TRUE(snapshot.dirty_source_state.count(1));
+    const auto& source_rois = snapshot.dirty_source_state.at(1).source_rois;
+    EXPECT_NE(std::find(source_rois.begin(), source_rois.end(),
+                        cv::Rect(0, 0, 320, 64)),
+              source_rois.end())
+        << "staged A is represented as a complete HP source boundary";
+    ASSERT_TRUE(snapshot.actual_dirty_rois.count(2));
+    const auto& target_rois = snapshot.actual_dirty_rois.at(2);
+    EXPECT_NE(std::find(target_rois.begin(), target_rois.end(),
+                        cv::Rect(0, 0, 320, 64)),
+              target_rois.end())
+        << "phase two conservatively selects the complete dependent output";
+    ASSERT_TRUE(graph.last_compute_plan_summary.has_value());
+    EXPECT_EQ(graph.last_compute_plan_summary->dirty_source_task_count, 0u)
+        << "preflight-staged source tasks must not execute again";
+    EXPECT_EQ(graph.last_compute_plan_summary->active_task_count,
+              graph.last_compute_plan_summary->downstream_task_count);
+    const cv::Mat staged_source =
+        toCvMat(graph.node(1).cached_output_high_precision->image_buffer);
+    cv::Mat expected;
+    cv::GaussianBlur(staged_source, expected, cv::Size(generation, generation),
+                     0, 0, cv::BORDER_REPLICATE);
+    EXPECT_LE(cv::norm(toCvMat(output.image_buffer), expected, cv::NORM_INF),
+              1e-6)
+        << "C image and parameter inputs must describe the same staged A";
+  };
+  verify_generation(21);
+  verify_generation(3);
+}
+
+TEST(ComputeServiceSplit,
+     ConnectedExtentShrinkAcceptsDirtyRoiOutsideNewOutputInBothDomains) {
+  register_split_ops();
+  for (ComputeIntent intent :
+       {ComputeIntent::GlobalHighPrecision, ComputeIntent::RealTimeUpdate}) {
+    SCOPED_TRACE(intent == ComputeIntent::RealTimeUpdate ? "RT" : "HP");
+    g_dynamic_extent_width.store(64, std::memory_order_release);
+    GraphModel graph("cache/split-dynamic-extent-shrink");
+    populate_dynamic_extent_graph(graph);
+    GraphTraversalService traversal;
+    GraphCacheService cache;
+    GraphEventService events;
+    ComputeService service(traversal, cache, events);
+    ComputeService::Request request;
+    request.node_id = 2;
+    request.cache.precision = "float32";
+    request.cache.disable_disk_cache = true;
+    (void)service.compute(graph, request);
+    ASSERT_EQ(graph.node(2).cached_output_high_precision->image_buffer.width,
+              64);
+
+    g_dynamic_extent_width.store(16, std::memory_order_release);
+    request.intent = intent;
+    request.dirty_roi = cv::Rect(48, 0, 8, 8);
+    NodeOutput& result = service.compute(graph, request);
+    ASSERT_TRUE(graph.node(2).cached_output_high_precision.has_value());
+    EXPECT_EQ(graph.node(2).cached_output_high_precision->image_buffer.width,
+              16);
+    EXPECT_EQ(graph.node(2).cached_output_high_precision->image_buffer.height,
+              8);
+    EXPECT_GT(result.image_buffer.width, 0);
+    EXPECT_GT(result.image_buffer.height, 0);
+    if (intent == ComputeIntent::RealTimeUpdate) {
+      ASSERT_GE(graph.recent_dirty_region_snapshots.size(), 2u);
+      const auto end = graph.recent_dirty_region_snapshots.end();
+      EXPECT_EQ((end - 1)->graph_generation, (end - 2)->graph_generation)
+          << "HP and RT sibling plans share one request generation";
+    }
+  }
+}
+
+TEST(ComputeServiceSplit,
+     ImageCarryingParameterProducerKeepsRtImageWorkDomainLocal) {
+  register_split_ops();
+  g_image_parameter_hp_calls.store(0, std::memory_order_relaxed);
+  g_image_parameter_rt_calls.store(0, std::memory_order_relaxed);
+  GraphModel graph("cache/split-image-parameter-rt-domain");
+  Node producer =
+      make_node(1, "image_generator", "split_image_parameter_source");
+  producer.parameters["width"] = 64;
+  producer.parameters["height"] = 16;
+  Node target = make_node(2, "split_plan", "tile");
+  target.parameters["width"] = 64;
+  target.parameters["height"] = 16;
+  target.parameters["radius"] = 0;
+  target.image_inputs.push_back({1, "image"});
+  target.parameter_inputs.push_back({1, "radius", "radius"});
+  graph.add_node(producer);
+  graph.add_node(target);
+  graph.validate_topology();
+  GraphTraversalService traversal;
+  GraphCacheService cache;
+  GraphEventService events;
+  ComputeService service(traversal, cache, events);
+  ComputeService::Request request;
+  request.node_id = 2;
+  request.cache.precision = "float32";
+  request.cache.disable_disk_cache = true;
+  (void)service.compute(graph, request);
+
+  g_image_parameter_hp_calls.store(0, std::memory_order_relaxed);
+  g_image_parameter_rt_calls.store(0, std::memory_order_relaxed);
+  request.intent = ComputeIntent::RealTimeUpdate;
+  request.dirty_roi = cv::Rect(8, 0, 4, 4);
+  (void)service.compute(graph, request);
+  EXPECT_EQ(g_image_parameter_hp_calls.load(std::memory_order_relaxed), 1)
+      << "HP preflight result is imported rather than recomputed by HP phase";
+  EXPECT_GT(g_image_parameter_rt_calls.load(std::memory_order_relaxed), 0)
+      << "an image-carrying parameter producer remains executable in RT";
+}
+
+TEST(ComputeServiceSplit, PreflightFailurePublishesNoHpCacheState) {
+  register_split_ops();
+  g_dynamic_parameter_fail.store(false, std::memory_order_release);
+  g_dynamic_blur_ksize.store(3, std::memory_order_release);
+  GraphModel graph("cache/split-preflight-failure-atomicity");
+  populate_dynamic_blur_graph(graph);
+  GraphTraversalService traversal;
+  GraphCacheService cache;
+  GraphEventService events;
+  ComputeService service(traversal, cache, events);
+  ComputeService::Request request;
+  request.node_id = 2;
+  request.cache.precision = "float32";
+  request.cache.disable_disk_cache = true;
+  (void)service.compute(graph, request);
+  const int target_version = graph.node(2).hp_version;
+  const int parameter_version = graph.node(3).hp_version;
+  const cv::Mat before =
+      toCvMat(graph.node(2).cached_output_high_precision->image_buffer).clone();
+
+  g_dynamic_parameter_fail.store(true, std::memory_order_release);
+  request.intent = ComputeIntent::GlobalHighPrecision;
+  request.dirty_roi = cv::Rect(10, 10, 2, 2);
+  EXPECT_THROW(service.compute(graph, request), GraphError);
+  g_dynamic_parameter_fail.store(false, std::memory_order_release);
+  EXPECT_EQ(graph.node(2).hp_version, target_version);
+  EXPECT_EQ(graph.node(3).hp_version, parameter_version);
+  EXPECT_DOUBLE_EQ(
+      cv::norm(
+          before,
+          toCvMat(graph.node(2).cached_output_high_precision->image_buffer),
+          cv::NORM_INF),
+      0.0);
+}
+
+TEST(ComputeServiceSplit,
+     HostPreparationFailureBeforePluginEntryPublishesNoDirtyState) {
+  register_split_ops();
+  for (const ComputeIntent intent :
+       {ComputeIntent::GlobalHighPrecision, ComputeIntent::RealTimeUpdate}) {
+    const bool is_rt = intent == ComputeIntent::RealTimeUpdate;
+    SCOPED_TRACE(is_rt ? "RT" : "HP");
+    g_host_preparation_emit_malformed_value.store(false,
+                                                  std::memory_order_release);
+    GraphRuntime::Info info;
+    info.name = is_rt ? "split-rt-host-preparation-failure"
+                      : "split-hp-host-preparation-failure";
+    info.root = "cache/" + info.name;
+    info.cache_root = info.root / "cache";
+    GraphRuntime runtime(info);
+    runtime.set_scheduler(ComputeIntent::GlobalHighPrecision,
+                          std::make_unique<SerialDebugScheduler>());
+    runtime.set_scheduler(ComputeIntent::RealTimeUpdate,
+                          std::make_unique<SerialDebugScheduler>());
+    runtime.start();
+    GraphModel& graph = runtime.model();
+    populate_host_preparation_failure_graph(graph);
+    GraphTraversalService traversal;
+    GraphCacheService cache;
+    GraphEventService events;
+    ComputeService service(traversal, cache, events);
+    ComputeService::Request request;
+    request.node_id = 2;
+    request.cache.precision = "float32";
+    request.cache.disable_disk_cache = true;
+    (void)service.compute_parallel(graph, runtime, request);
+
+    g_host_preparation_source_calls.store(0, std::memory_order_relaxed);
+    g_host_preparation_plugin_calls.store(0, std::memory_order_relaxed);
+    g_host_preparation_hp_target_calls.store(0, std::memory_order_relaxed);
+    g_host_preparation_rt_target_calls.store(0, std::memory_order_relaxed);
+    request.intent = intent;
+    request.dirty_roi = cv::Rect(8, 0, 4, 4);
+    (void)service.compute_parallel(graph, runtime, request);
+    ASSERT_GT(g_host_preparation_source_calls.load(std::memory_order_relaxed),
+              0);
+    ASSERT_GT(g_host_preparation_plugin_calls.load(std::memory_order_relaxed),
+              0);
+    ASSERT_GT((is_rt ? g_host_preparation_rt_target_calls
+                     : g_host_preparation_hp_target_calls)
+                  .load(std::memory_order_relaxed),
+              0)
+        << "the control request must prove the graph reaches phase two";
+
+    ASSERT_TRUE(graph.node(1).cached_output_high_precision.has_value());
+    ASSERT_TRUE(graph.node(2).cached_output_high_precision.has_value());
+    ASSERT_TRUE(graph.node(3).cached_output_high_precision.has_value());
+    const cv::Mat source_pixels_before =
+        toCvMat(graph.node(1).cached_output_high_precision->image_buffer)
+            .clone();
+    const cv::Mat target_pixels_before =
+        toCvMat(graph.node(2).cached_output_high_precision->image_buffer)
+            .clone();
+    const int source_value_before =
+        graph.node(1)
+            .cached_output_high_precision->data.at("injected")
+            .as<int>();
+    const int parameter_value_before =
+        graph.node(3).cached_output_high_precision->data.at("radius").as<int>();
+    const int source_version_before = graph.node(1).hp_version;
+    const int target_version_before = graph.node(2).hp_version;
+    const int parameter_version_before = graph.node(3).hp_version;
+    const std::optional<cv::Rect> source_roi_before = graph.node(1).hp_roi;
+    const std::optional<cv::Rect> target_roi_before = graph.node(2).hp_roi;
+    const std::optional<cv::Rect> parameter_roi_before = graph.node(3).hp_roi;
+
+    const compute::RealtimeProxyGraph::NodeState* proxy_before_ptr =
+        runtime.realtime_proxy_graph().find_state(2);
+    ASSERT_NE(proxy_before_ptr, nullptr);
+    const int proxy_version_before = proxy_before_ptr->version;
+    const std::optional<cv::Rect> proxy_roi_before = proxy_before_ptr->roi_hp;
+    const std::optional<std::uint64_t> proxy_generation_before =
+        proxy_before_ptr->dirty_source_generation;
+    const bool proxy_had_output_before = proxy_before_ptr->output.has_value();
+    cv::Mat proxy_pixels_before;
+    if (proxy_before_ptr->output) {
+      proxy_pixels_before =
+          toCvMat(proxy_before_ptr->output->image_buffer).clone();
+    }
+
+    const std::size_t dirty_snapshots_before =
+        graph.recent_dirty_region_snapshots.size();
+    const std::size_t compute_plans_before = graph.recent_compute_plans.size();
+    const std::size_t plan_summaries_before =
+        graph.recent_compute_plan_summaries.size();
+    const std::uint64_t request_generation_before =
+        graph.dirty_generation_counter;
+    g_host_preparation_source_calls.store(0, std::memory_order_relaxed);
+    g_host_preparation_plugin_calls.store(0, std::memory_order_relaxed);
+    g_host_preparation_hp_target_calls.store(0, std::memory_order_relaxed);
+    g_host_preparation_rt_target_calls.store(0, std::memory_order_relaxed);
+    g_host_preparation_emit_malformed_value.store(true,
+                                                  std::memory_order_release);
+    bool saw_conversion_failure = false;
+    try {
+      (void)service.compute_parallel(graph, runtime, request);
+    } catch (const GraphError& error) {
+      saw_conversion_failure = true;
+      EXPECT_EQ(error.code(), GraphErrc::ComputeError);
+      EXPECT_NE(std::string(error.what()).find("split_node_3"),
+                std::string::npos)
+          << "failure must belong to the adapted parameter node";
+    } catch (...) {
+      g_host_preparation_emit_malformed_value.store(false,
+                                                    std::memory_order_release);
+      throw;
+    }
+    g_host_preparation_emit_malformed_value.store(false,
+                                                  std::memory_order_release);
+
+    EXPECT_TRUE(saw_conversion_failure);
+    EXPECT_EQ(g_host_preparation_source_calls.load(std::memory_order_relaxed),
+              1)
+        << "preflight must stage the malformed connected source exactly once";
+    EXPECT_EQ(g_host_preparation_plugin_calls.load(std::memory_order_relaxed),
+              0)
+        << "effective-parameter conversion must fail before callback entry";
+    EXPECT_EQ(
+        g_host_preparation_hp_target_calls.load(std::memory_order_relaxed), 0)
+        << "HP phase two must not dispatch after preparation failure";
+    EXPECT_EQ(
+        g_host_preparation_rt_target_calls.load(std::memory_order_relaxed), 0)
+        << "RT phase two must not dispatch after preparation failure";
+    EXPECT_EQ(graph.dirty_generation_counter, request_generation_before + 1)
+        << "the failure occurs after request reservation inside preflight";
+    EXPECT_EQ(graph.recent_dirty_region_snapshots.size(),
+              dirty_snapshots_before);
+    EXPECT_EQ(graph.recent_compute_plans.size(), compute_plans_before);
+    EXPECT_EQ(graph.recent_compute_plan_summaries.size(),
+              plan_summaries_before);
+
+    ASSERT_TRUE(graph.node(1).cached_output_high_precision.has_value());
+    ASSERT_TRUE(graph.node(2).cached_output_high_precision.has_value());
+    ASSERT_TRUE(graph.node(3).cached_output_high_precision.has_value());
+    EXPECT_EQ(graph.node(1).hp_version, source_version_before);
+    EXPECT_EQ(graph.node(2).hp_version, target_version_before);
+    EXPECT_EQ(graph.node(3).hp_version, parameter_version_before);
+    EXPECT_EQ(graph.node(1).hp_roi, source_roi_before);
+    EXPECT_EQ(graph.node(2).hp_roi, target_roi_before);
+    EXPECT_EQ(graph.node(3).hp_roi, parameter_roi_before);
+    EXPECT_DOUBLE_EQ(
+        cv::norm(
+            source_pixels_before,
+            toCvMat(graph.node(1).cached_output_high_precision->image_buffer),
+            cv::NORM_INF),
+        0.0);
+    EXPECT_DOUBLE_EQ(
+        cv::norm(
+            target_pixels_before,
+            toCvMat(graph.node(2).cached_output_high_precision->image_buffer),
+            cv::NORM_INF),
+        0.0);
+    EXPECT_EQ(graph.node(1)
+                  .cached_output_high_precision->data.at("injected")
+                  .as<int>(),
+              source_value_before)
+        << "the malformed staged source value must not replace HP cache";
+    EXPECT_EQ(
+        graph.node(3).cached_output_high_precision->data.at("radius").as<int>(),
+        parameter_value_before);
+
+    const compute::RealtimeProxyGraph::NodeState* proxy_after =
+        runtime.realtime_proxy_graph().find_state(2);
+    ASSERT_NE(proxy_after, nullptr);
+    EXPECT_EQ(proxy_after->version, proxy_version_before);
+    EXPECT_EQ(proxy_after->roi_hp, proxy_roi_before);
+    EXPECT_EQ(proxy_after->dirty_source_generation, proxy_generation_before);
+    EXPECT_EQ(proxy_after->output.has_value(), proxy_had_output_before);
+    if (proxy_after->output && proxy_had_output_before) {
+      EXPECT_DOUBLE_EQ(
+          cv::norm(proxy_pixels_before,
+                   toCvMat(proxy_after->output->image_buffer), cv::NORM_INF),
+          0.0);
+    }
+    runtime.stop();
+  }
+}
+
+TEST(ComputeServiceSplit,
+     MissingParallelHpSchedulerDoesNotReserveGenerationOrEnterPreflight) {
+  register_split_ops();
+  g_dynamic_parameter_calls.store(0, std::memory_order_relaxed);
+  GraphRuntime::Info info;
+  info.name = "split-missing-hp-preflight-scheduler";
+  info.root = "cache/split-missing-hp-preflight-scheduler";
+  info.cache_root = "cache/split-missing-hp-preflight-scheduler/cache";
+  GraphRuntime runtime(info);
+  runtime.set_scheduler(ComputeIntent::RealTimeUpdate,
+                        std::make_unique<SerialDebugScheduler>());
+  runtime.start();
+  GraphModel& graph = runtime.model();
+  populate_dynamic_blur_graph(graph);
+  const uint64_t generation_before = graph.dirty_generation_counter;
+  GraphTraversalService traversal;
+  GraphCacheService cache;
+  GraphEventService events;
+  ComputeService service(traversal, cache, events);
+  ComputeService::Request request;
+  request.node_id = 2;
+  request.intent = ComputeIntent::RealTimeUpdate;
+  request.dirty_roi = cv::Rect(1, 1, 2, 2);
+  request.cache.disable_disk_cache = true;
+  EXPECT_THROW(service.compute_parallel(graph, runtime, request), GraphError);
+  EXPECT_EQ(graph.dirty_generation_counter, generation_before);
+  EXPECT_EQ(g_dynamic_parameter_calls.load(std::memory_order_relaxed), 0);
+  runtime.stop();
+}
+
+TEST(ComputeServiceSplit,
+     SchedulerStartFailureDoesNotReserveGenerationOrEnterPreflight) {
+  register_split_ops();
+  for (const ComputeIntent failing_intent :
+       {ComputeIntent::GlobalHighPrecision, ComputeIntent::RealTimeUpdate}) {
+    SCOPED_TRACE(failing_intent == ComputeIntent::GlobalHighPrecision ? "HP"
+                                                                      : "RT");
+    g_dynamic_parameter_calls.store(0, std::memory_order_relaxed);
+    GraphRuntime::Info info;
+    info.name = failing_intent == ComputeIntent::GlobalHighPrecision
+                    ? "split-failing-hp-preflight-scheduler"
+                    : "split-failing-rt-preflight-scheduler";
+    info.root = "cache/" + info.name;
+    info.cache_root = info.root / "cache";
+    GraphRuntime runtime(info);
+    runtime.set_scheduler(ComputeIntent::GlobalHighPrecision,
+                          failing_intent == ComputeIntent::GlobalHighPrecision
+                              ? std::unique_ptr<IScheduler>(
+                                    std::make_unique<StartFailingScheduler>())
+                              : std::unique_ptr<IScheduler>(
+                                    std::make_unique<SerialDebugScheduler>()));
+    runtime.set_scheduler(ComputeIntent::RealTimeUpdate,
+                          failing_intent == ComputeIntent::RealTimeUpdate
+                              ? std::unique_ptr<IScheduler>(
+                                    std::make_unique<StartFailingScheduler>())
+                              : std::unique_ptr<IScheduler>(
+                                    std::make_unique<SerialDebugScheduler>()));
+    GraphModel& graph = runtime.model();
+    populate_dynamic_blur_graph(graph);
+    const std::uint64_t generation_before = graph.dirty_generation_counter;
+    GraphTraversalService traversal;
+    GraphCacheService cache;
+    GraphEventService events;
+    ComputeService service(traversal, cache, events);
+    ComputeService::Request request;
+    request.node_id = 2;
+    request.intent = ComputeIntent::RealTimeUpdate;
+    request.dirty_roi = cv::Rect(1, 1, 2, 2);
+    request.cache.disable_disk_cache = true;
+
+    EXPECT_THROW((void)service.compute_parallel(graph, runtime, request),
+                 std::runtime_error);
+    EXPECT_EQ(graph.dirty_generation_counter, generation_before);
+    EXPECT_EQ(g_dynamic_parameter_calls.load(std::memory_order_relaxed), 0);
+    EXPECT_FALSE(graph.node(1).cached_output_high_precision.has_value());
+    EXPECT_FALSE(graph.node(2).cached_output_high_precision.has_value());
+    EXPECT_FALSE(graph.node(3).cached_output_high_precision.has_value());
+    EXPECT_EQ(runtime.realtime_proxy_graph().find_output(2), nullptr);
+    runtime.stop();
+  }
+}
+
+TEST(ComputeServiceSplit,
+     SchedulerBackedRtRequestStabilizesDataOnlyProducerExactlyOnce) {
+  register_split_ops();
+  g_dynamic_parameter_fail.store(false, std::memory_order_release);
+  g_dynamic_blur_ksize.store(3, std::memory_order_release);
+  GraphRuntime::Info info;
+  info.name = "split-parallel-data-only-preflight";
+  info.root = "cache/split-parallel-data-only-preflight";
+  info.cache_root = "cache/split-parallel-data-only-preflight/cache";
+  GraphRuntime runtime(info);
+  runtime.set_scheduler(ComputeIntent::GlobalHighPrecision,
+                        std::make_unique<SerialDebugScheduler>());
+  runtime.set_scheduler(ComputeIntent::RealTimeUpdate,
+                        std::make_unique<SerialDebugScheduler>());
+  runtime.start();
+  GraphModel& graph = runtime.model();
+  populate_dynamic_blur_graph(graph);
+  GraphTraversalService traversal;
+  GraphCacheService cache;
+  GraphEventService events;
+  ComputeService service(traversal, cache, events);
+  ComputeService::Request request;
+  request.node_id = 2;
+  request.cache.precision = "float32";
+  request.cache.disable_disk_cache = true;
+  (void)service.compute(graph, request);
+
+  g_dynamic_parameter_calls.store(0, std::memory_order_relaxed);
+  g_dynamic_blur_ksize.store(21, std::memory_order_release);
+  request.intent = ComputeIntent::RealTimeUpdate;
+  request.dirty_roi = cv::Rect(270, 16, 3, 3);
+  auto compute_future = std::async(std::launch::async, [&]() {
+    return &service.compute_parallel(graph, runtime, request);
+  });
+  ASSERT_EQ(compute_future.wait_for(std::chrono::seconds(2)),
+            std::future_status::ready)
+      << "initial TaskHandle preflight batch must not lose work at epoch zero";
+  ASSERT_NE(compute_future.get(), nullptr);
+  EXPECT_EQ(g_dynamic_parameter_calls.load(std::memory_order_relaxed), 1);
+  ASSERT_GE(graph.recent_dirty_region_snapshots.size(), 2u);
+  const auto end = graph.recent_dirty_region_snapshots.end();
+  EXPECT_EQ((end - 1)->graph_generation, (end - 2)->graph_generation);
+  runtime.stop();
+}
+
+TEST(ComputeServiceSplit,
+     SchedulerPreflightFailureRetryStartsFreshBatchWithoutHanging) {
+  register_split_ops();
+  g_dynamic_parameter_fail.store(false, std::memory_order_release);
+  g_dynamic_blur_ksize.store(3, std::memory_order_release);
+  g_dynamic_parameter_calls.store(0, std::memory_order_relaxed);
+  GraphRuntime::Info info;
+  info.name = "split-preflight-failure-retry";
+  info.root = "cache/split-preflight-failure-retry";
+  info.cache_root = "cache/split-preflight-failure-retry/cache";
+  GraphRuntime runtime(info);
+  runtime.set_scheduler(ComputeIntent::GlobalHighPrecision,
+                        std::make_unique<SerialDebugScheduler>());
+  runtime.set_scheduler(ComputeIntent::RealTimeUpdate,
+                        std::make_unique<SerialDebugScheduler>());
+  runtime.start();
+  GraphModel& graph = runtime.model();
+  populate_dynamic_blur_graph(graph);
+  GraphTraversalService traversal;
+  GraphCacheService cache;
+  GraphEventService events;
+  ComputeService service(traversal, cache, events);
+  ComputeService::Request request;
+  request.node_id = 2;
+  request.cache.precision = "float32";
+  request.cache.disable_disk_cache = true;
+  (void)service.compute(graph, request);
+  const int target_version_before = graph.node(2).hp_version;
+  g_dynamic_parameter_calls.store(0, std::memory_order_relaxed);
+
+  request.intent = ComputeIntent::RealTimeUpdate;
+  request.dirty_roi = cv::Rect(270, 16, 3, 3);
+  g_dynamic_parameter_fail.store(true, std::memory_order_release);
+  auto failed = std::async(std::launch::async, [&]() {
+    return &service.compute_parallel(graph, runtime, request);
+  });
+  ASSERT_EQ(failed.wait_for(std::chrono::seconds(2)), std::future_status::ready)
+      << "a failed preflight TaskHandle batch must settle its wait";
+  EXPECT_THROW((void)failed.get(), GraphError);
+  EXPECT_EQ(graph.node(2).hp_version, target_version_before);
+
+  g_dynamic_parameter_fail.store(false, std::memory_order_release);
+  g_dynamic_blur_ksize.store(21, std::memory_order_release);
+  auto retried = std::async(std::launch::async, [&]() {
+    return &service.compute_parallel(graph, runtime, request);
+  });
+  ASSERT_EQ(retried.wait_for(std::chrono::seconds(2)),
+            std::future_status::ready)
+      << "retry must open a fresh scheduler epoch after prior failure";
+  NodeOutput* output = retried.get();
+  ASSERT_NE(output, nullptr);
+  EXPECT_GT(output->image_buffer.width, 0);
+  EXPECT_EQ(g_dynamic_parameter_calls.load(std::memory_order_relaxed), 2);
+  EXPECT_GT(graph.node(2).hp_version, target_version_before);
+  runtime.stop();
 }
 
 TEST(TaskGraphPlanningSplit, UsesDomainSpecificMetadataForTileShape) {
@@ -1069,6 +2682,91 @@ TEST(TaskGraphPlanningSplit, ForceRecacheClearsFullTaskGraphCacheBeforePlan) {
   EXPECT_NE(cached_before.get(), cached_after.get())
       << "force-recache must discard stale task ROIs before planning";
   runtime.stop();
+}
+
+TEST(GraphCacheServiceSplit,
+     SkipsOpaqueBackendImageWhilePersistingNamedOutputMetadata) {
+  const ScopedTestDirectory root(std::filesystem::temp_directory_path() /
+                                 "photospider-backend-cache-persistence");
+  GraphModel graph(root.path());
+  Node node = make_node(1, "split_plan", "source");
+  node.caches.push_back({"image", "output.png"});
+  node.cached_output_high_precision = NodeOutput{};
+  node.cached_output_high_precision->image_buffer.width = 8;
+  node.cached_output_high_precision->image_buffer.height = 8;
+  node.cached_output_high_precision->image_buffer.channels = 1;
+  node.cached_output_high_precision->image_buffer.device = Device::GPU_CUDA;
+  node.cached_output_high_precision->image_buffer.context =
+      std::make_shared<int>(7);
+  node.cached_output_high_precision->data["marker"] = 9;
+  graph.add_node(node);
+
+  GraphCacheService cache;
+  cache.save_cache_if_configured(graph, graph.node(1), "int8");
+  const auto image_path = cache.node_cache_dir(graph, 1) / "output.png";
+  auto metadata_path = image_path;
+  metadata_path.replace_extension(".yml");
+  EXPECT_FALSE(std::filesystem::exists(image_path));
+  EXPECT_TRUE(std::filesystem::exists(metadata_path));
+}
+
+TEST(DownsampleExecutorSplit,
+     RepeatedOpaqueBackendPassthroughPreservesCompleteDescriptor) {
+  GraphModel graph("cache/split-opaque-downsample-passthrough");
+  Node node = make_node(1, "split_plan", "opaque_backend");
+  auto backend_owner = std::make_shared<int>(42);
+  std::shared_ptr<void> expected_owner = backend_owner;
+  node.cached_output_high_precision = NodeOutput{};
+  ImageBuffer& hp = node.cached_output_high_precision->image_buffer;
+  hp.width = 96;
+  hp.height = 48;
+  hp.channels = 4;
+  hp.type = DataType::UINT8;
+  hp.device = Device::GPU_CUDA;
+  hp.context = expected_owner;
+  node.cached_output_high_precision->data["marker"] = 17;
+  node.hp_version = 5;
+  graph.add_node(node);
+
+  compute::RealtimeProxyGraph proxy;
+  proxy.synchronize_with_graph(graph);
+  GraphEventService events;
+  compute::DownsampleExecutor downsample(graph, proxy, nullptr, events);
+  downsample.execute({{1, cv::Rect(8, 4, 16, 8), 5}});
+
+  const auto assert_passthrough = [&](int version,
+                                      const cv::Rect& expected_roi) {
+    const auto* state = proxy.find_state(1);
+    ASSERT_NE(state, nullptr);
+    ASSERT_TRUE(state->output.has_value());
+    const ImageBuffer& output = state->output->image_buffer;
+    EXPECT_EQ(output.width, 96);
+    EXPECT_EQ(output.height, 48);
+    EXPECT_EQ(output.channels, 4);
+    EXPECT_EQ(output.type, DataType::UINT8);
+    EXPECT_EQ(output.device, Device::GPU_CUDA);
+    EXPECT_EQ(output.data, nullptr);
+    ASSERT_NE(output.context, nullptr);
+    EXPECT_EQ(output.context.get(), expected_owner.get());
+    EXPECT_FALSE(output.context.owner_before(expected_owner));
+    EXPECT_FALSE(expected_owner.owner_before(output.context));
+    EXPECT_EQ(state->output->data.at("marker").as<int>(), 17);
+    EXPECT_EQ(state->version, version);
+    ASSERT_TRUE(state->roi_hp.has_value());
+    EXPECT_EQ(*state->roi_hp, expected_roi);
+  };
+  assert_passthrough(5, cv::Rect(8, 4, 16, 8));
+
+  graph.mutate_node_runtime_state(1, [](auto& state) { state.hp_version = 6; });
+  downsample.execute({{1, cv::Rect(40, 20, 8, 4), 6}});
+  assert_passthrough(6, cv::Rect(8, 4, 40, 20));
+
+  const ComputeEventBatch recorded = events.drain(kComputeEventDrainMaxLimit);
+  ASSERT_EQ(recorded.events.size(), 2u);
+  EXPECT_TRUE(std::all_of(recorded.events.begin(), recorded.events.end(),
+                          [](const ComputeEventSnapshot& event) {
+                            return event.source == "downsample_passthrough";
+                          }));
 }
 
 TEST(ComputeTaskRunnerSplit, TiledDiskCacheHitStopsSiblingTileTasks) {

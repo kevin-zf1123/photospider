@@ -10,8 +10,8 @@
 #include <vector>
 
 #include "compute/task_graph_planning.hpp"
-#include "node.hpp"      // NOLINT(build/include_subdir)
-#include "ps_types.hpp"  // NOLINT(build/include_subdir)
+#include "core/ps_types.hpp"  // NOLINT(build/include_subdir)
+#include "graph/node.hpp"     // NOLINT(build/include_subdir)
 
 namespace ps {
 
@@ -149,7 +149,7 @@ class GraphModel {
     int& hp_version;
     std::optional<cv::Rect>& hp_roi;
     std::optional<cv::Size>& last_input_size_hp;
-    std::optional<SpatialDependencyMap>& dependency_lut;
+    std::optional<DependencyLutCache>& dependency_lut_cache;
     uint64_t& dependency_lut_version;
     uint64_t& parameters_version;
   };
@@ -314,5 +314,34 @@ class GraphModel {
   bool quiet_ = true;
   std::atomic<bool> skip_save_cache_{false};
 };
+
+/**
+ * @brief Resolves the exact effective operation parameters from graph caches.
+ *
+ * @param node Node whose static and parameter-input values are merged.
+ * @param graph Graph providing authoritative cached named outputs.
+ * @return Deep-owned canonical parameter map shared by ROI callbacks and
+ *         dependency-cache identity.
+ * @throws GraphError with MissingDependency when a required parameter input or
+ *         named output is unavailable.
+ * @throws std::invalid_argument for malformed/colliding YAML mapping keys.
+ * @throws std::bad_alloc unchanged from cloning or recursive conversion.
+ * @note The function never trusts graph-node runtime_parameters because compute
+ *       may resolve those values only on an execution-local node copy.
+ */
+plugin::ParameterMap resolve_effective_parameter_snapshot(
+    const Node& node, const GraphModel& graph);
+
+/**
+ * @brief Resolves cached image-input extents by destination input index.
+ * @param node Node whose image-input topology is inspected.
+ * @param graph Graph providing authoritative HP cached image descriptors.
+ * @return Extent vector with empty entries for missing/unknown inputs.
+ * @throws std::bad_alloc when vector storage grows.
+ * @note Graph extent resolution may overwrite unknown entries when it has
+ *       stronger request-local knowledge.
+ */
+std::vector<cv::Size> cached_image_input_extents(const Node& node,
+                                                 const GraphModel& graph);
 
 }  // namespace ps

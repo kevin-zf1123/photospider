@@ -1,6 +1,4 @@
-// Photospider kernel: GpuPipelineScheduler
-// M3.5: 异构调度器 - 支持 HP 走 GPU、RT 走 CPU 的混合计算模式
-// Scheduler dispatches already-planned HP/RT tasks.
+// Photospider built-in heterogeneous pipeline scheduler.
 #pragma once
 
 #include <atomic>
@@ -16,8 +14,9 @@
 #include <utility>
 #include <vector>
 
-#include "kernel/scheduler/i_scheduler.hpp"
-#include "kernel/scheduler/scheduler_task_runtime.hpp"
+#include "photospider/core/compute_intent.hpp"
+#include "photospider/scheduler/scheduler.hpp"
+#include "photospider/scheduler/scheduler_task_runtime.hpp"
 
 #if defined(PHOTOSPIDER_INTERNAL_BAD_ALLOC_TESTING)
 #include "scheduler/scheduler_exception_test_hooks.hpp"
@@ -25,24 +24,22 @@
 
 namespace ps {
 
-class GraphRuntime;
-
 /**
  * @brief Dispatches RT and HP ready work across CPU and optional GPU lanes.
  *
  * The scheduler owns CPU/GPU worker threads, RT/HP-CPU/GPU queues, committed
  * ready/completion counters, batch epochs, and exact exception publication.
- * It borrows `GraphRuntime` and the executors referenced by `TaskHandle`; it
- * never owns graph topology, cache state, or compute task graphs. Every bulk
+ * It borrows `SchedulerHostContext` and executors referenced by `TaskHandle`;
+ * it never owns graph topology, cache state, or compute task graphs. Every bulk
  * queue mutation is committed atomically under the selected lane mutex.
  *
- * @return Concrete heterogeneous `IScheduler`/`SchedulerTaskRuntime`.
+ * @return Concrete heterogeneous `IScheduler` with inherited task runtime.
  * @throws std::bad_alloc from explicit staging/submission methods.
  * @throws std::system_error from explicit worker lifecycle methods.
  * @note RT and HP priority routing is scheduler policy, while borrowed handle
  * lifetime ends at the corresponding completion/exception settlement fence.
  */
-class GpuPipelineScheduler : public IScheduler, public SchedulerTaskRuntime {
+class GpuPipelineScheduler : public IScheduler {
  public:
   /**
    * @brief Immutable-at-start worker and HP routing configuration.
@@ -55,7 +52,7 @@ class GpuPipelineScheduler : public IScheduler, public SchedulerTaskRuntime {
     /** @brief GPU submission worker count when a Metal device is available. */
     unsigned int gpu_workers;
     /** @brief RT/HP-fallback CPU workers; zero selects hardware concurrency. */
-    unsigned int cpu_workers;  // 0 表示使用硬件并发数
+    unsigned int cpu_workers;
     /** @brief Whether normal-priority HP work prefers an available GPU lane. */
     bool prefer_gpu_for_hp;
 
@@ -81,35 +78,37 @@ class GpuPipelineScheduler : public IScheduler, public SchedulerTaskRuntime {
    * @brief Stops and releases all scheduler-owned CPU/GPU workers.
    * @return Nothing.
    * @throws Nothing by destructor contract for valid built-in worker ownership.
-   * @note Borrowed runtime and task executors must satisfy their lifecycle
+   * @note Borrowed host context and task executors must satisfy their lifecycle
    * contracts before destruction begins.
    */
   ~GpuPipelineScheduler() override;
 
-  // 禁用拷贝
+  /** @brief Prevents copying worker, queue, and borrowed-host ownership. */
   GpuPipelineScheduler(const GpuPipelineScheduler&) = delete;
+
+  /** @brief Prevents copy assignment of worker and routing state. */
   GpuPipelineScheduler& operator=(const GpuPipelineScheduler&) = delete;
 
   // ---------------------------------------------------------------------------
-  // IScheduler 接口实现
+  // IScheduler implementation
   // ---------------------------------------------------------------------------
   /**
-   * @brief Attaches a borrowed runtime and starts newly available GPU workers.
-   * @param runtime Runtime that owns platform context and outlives attachment.
+   * @brief Attaches a borrowed host context and starts available GPU workers.
+   * @param host Host context that outlives shutdown and detach.
    * @return Nothing.
    * @throws std::bad_alloc if an already-running scheduler cannot stage GPU
    * worker storage.
    * @throws std::system_error if an attached GPU worker cannot be created.
-   * @note Runtime/GraphModel/cache ownership is not transferred. Failure leaves
+   * @note Host/graph/cache ownership is not transferred. Failure leaves
    * the scheduler stopped after joining any partially created worker set.
    */
-  void attach(GraphRuntime* runtime) override;
+  void attach(SchedulerHostContext& host) override;
 
   /**
-   * @brief Clears the borrowed runtime/platform-context pointer.
+   * @brief Clears the borrowed host capability/context pointer.
    * @return Nothing.
    * @throws Nothing.
-   * @note GraphRuntime orders shutdown before detach; queues are not mutated.
+   * @note The owning host orders shutdown before detach; queues are unchanged.
    */
   void detach() override;
   /**
@@ -140,7 +139,7 @@ class GpuPipelineScheduler : public IScheduler, public SchedulerTaskRuntime {
    * @note This lifecycle boundary prevents a worker from observing the old
    * running state between its predicate check and condition-variable sleep.
    * The caller must not invoke shutdown from a scheduler-owned worker. The
-   * scheduler owns worker threads and queued callbacks, but not runtime_.
+   * scheduler owns worker threads and queued callbacks, but not host context.
    */
   void shutdown() override;
   /**
@@ -167,18 +166,12 @@ class GpuPipelineScheduler : public IScheduler, public SchedulerTaskRuntime {
    */
   bool is_running() const override;
 
-  /**
-   * @brief Reports availability of the ready-task dispatch runtime.
-   * @return Same lifecycle state as `is_running()`.
-   * @throws Nothing.
-   * @note True does not imply any active batch or authoritative cache output.
-   */
-  bool task_runtime_running() const override;
-
   // ---------------------------------------------------------------------------
-  // 调度器内部 API
+  // Built-in scheduler API
   // ---------------------------------------------------------------------------
+  /** @brief Internal callback alias retained for built-in compute helpers. */
   using Task = SchedulerTaskRuntime::Task;
+  /** @brief Internal priority alias shared with public runtime submissions. */
   using TaskPriority = SchedulerTaskPriority;
 
   /**
@@ -194,14 +187,15 @@ class GpuPipelineScheduler : public IScheduler, public SchedulerTaskRuntime {
   void submit_rt_task(Task&& task, uint64_t epoch = 0);
 
   /**
-   * @brief 提交 RT 任务句柄到高优先级 CPU 队列。
+   * @brief Enqueues one RT task handle on the high-priority CPU queue.
    *
    * @param handle Dispatcher-owned ready task handle.
    * @param epoch Scheduler epoch used for lazy cancellation.
    * @return Nothing.
    * @throws std::bad_alloc if queue growth fails before publication.
-   * @note 句柄路径避免在 tile 级 ready work 上为队列项分配闭包；queue
-   * publication 与 CPU wait predicate 共同持有 `rt_queue_mutex_`。
+   * @note The handle path avoids per-entry closure allocation for tile-level
+   * ready work. Publication and the CPU wait predicate share
+   * `rt_queue_mutex_`.
    */
   void submit_rt_task_handle(TaskHandle handle, uint64_t epoch = 0);
 
@@ -218,7 +212,7 @@ class GpuPipelineScheduler : public IScheduler, public SchedulerTaskRuntime {
   void submit_hp_task(Task&& task, uint64_t epoch = 0);
 
   /**
-   * @brief 提交 HP CPU 任务句柄到普通优先级队列。
+   * @brief Enqueues one HP task handle on the normal-priority CPU queue.
    *
    * @param handle Dispatcher-owned ready task handle.
    * @param epoch Scheduler epoch used for lazy cancellation.
@@ -241,7 +235,7 @@ class GpuPipelineScheduler : public IScheduler, public SchedulerTaskRuntime {
   void submit_gpu_task(Task&& task, uint64_t epoch = 0);
 
   /**
-   * @brief 提交 GPU 任务句柄。
+   * @brief Enqueues one task handle on the GPU queue.
    *
    * @param handle Dispatcher-owned ready task handle.
    * @param epoch Scheduler epoch used for lazy cancellation.
@@ -260,7 +254,8 @@ class GpuPipelineScheduler : public IScheduler, public SchedulerTaskRuntime {
    * callbacks to settle. Failure additionally requires every queue to be
    * drained before the exception flag is visible. Pointer/epoch/flag
    * consumption is mutex-consistent, so immediate next-batch reuse cannot be
-   * affected by an old CPU or GPU publisher.
+   * affected by an old CPU or GPU publisher. Remaining-count cleanup is also
+   * mutex/epoch guarded against a newer batch.
    */
   void wait_for_completion() override;
 
@@ -269,8 +264,9 @@ class GpuPipelineScheduler : public IScheduler, public SchedulerTaskRuntime {
    *
    * @return Nothing.
    * @throws Nothing under valid completion-mutex state.
-   * @note Calls from a nonzero stale worker epoch are ignored. The waiter also
-   * requires every dequeued CPU/GPU callback to leave `in_flight_tasks_`.
+   * @note Calls from a nonzero stale worker epoch and decrements at zero are
+   * ignored. The waiter also requires every dequeued CPU/GPU callback to leave
+   * `in_flight_tasks_`.
    */
   void dec_tasks_to_complete() override;
 
@@ -279,9 +275,12 @@ class GpuPipelineScheduler : public IScheduler, public SchedulerTaskRuntime {
    *
    * @param delta Positive number of logical tasks added by the caller.
    * @return Nothing.
-   * @throws Nothing.
+   * @throws std::overflow_error if a current-epoch addition would exceed
+   * `INT_MAX`.
+   * @throws std::system_error only if locking a valid mutex fails.
    * @note Nonpositive deltas and calls from nonzero stale worker epochs are
-   * ignored so old callbacks cannot change a later batch.
+   * ignored. Validation and mutation share the new-batch publication mutex, so
+   * old callbacks cannot pass validation and then change a later batch.
    */
   void inc_tasks_to_complete(int delta) override;
 
@@ -291,10 +290,11 @@ class GpuPipelineScheduler : public IScheduler, public SchedulerTaskRuntime {
    * @param e Non-null worker exception identity.
    * @return Nothing.
    * @throws Nothing under valid scheduler mutex state.
-   * @note The publishing worker epoch must match the active batch. A separate
-   * claim latch selects the first publisher; it stores pointer and epoch,
-   * drains RT, HP-CPU, and GPU queues, marks cleanup complete, then publishes
-   * the release-visible flag. Duplicate and stale publishers are ignored.
+   * @note Null input is ignored. Otherwise, the publishing worker epoch must
+   * match the active batch. A separate claim latch selects the first publisher;
+   * it stores pointer and epoch, drains RT, HP-CPU, and GPU queues, marks
+   * cleanup complete, then publishes the release-visible flag. Duplicate and
+   * stale publishers are ignored.
    */
   void set_exception(std::exception_ptr e) override;
 
@@ -306,14 +306,17 @@ class GpuPipelineScheduler : public IScheduler, public SchedulerTaskRuntime {
    * @param priority High selects RT CPU; normal selects GPU when available or
    * the HP-CPU fallback otherwise.
    * @return Nothing.
+   * @throws std::logic_error if the scheduler is not running.
+   * @throws std::invalid_argument if the count is negative or smaller than the
+   *         number of valid callbacks.
    * @throws std::bad_alloc if queue growth fails before publication.
-   * @note The selected RT/HP-CPU/GPU deque records its original size and rolls
-   * back without allocation on failure. Epoch, completion/ready counters, and
-   * notification publish only after the entire batch commits.
+   * @note Validation precedes lane selection and state mutation. The selected
+   * RT/HP-CPU/GPU deque records its original size and rolls back without
+   * allocation on failure. Epoch, counters, and notification publish only
+   * after the entire batch commits.
    */
-  void submit_initial_tasks(
-      std::vector<Task>&& tasks, int total_task_count,
-      TaskPriority priority = TaskPriority::Normal) override;
+  void submit_initial_tasks(std::vector<Task>&& tasks, int total_task_count,
+                            TaskPriority priority = TaskPriority::Normal);
 
   /**
    * @brief Begins a batch and routes its initial dispatcher-owned handles.
@@ -322,10 +325,14 @@ class GpuPipelineScheduler : public IScheduler, public SchedulerTaskRuntime {
    * @param total_task_count Logical completion count for the whole batch.
    * @param priority High selects RT CPU; normal selects GPU or HP-CPU fallback.
    * @return Nothing.
+   * @throws std::logic_error if the scheduler is not running.
+   * @throws std::invalid_argument if the count is negative or smaller than the
+   *         number of valid handles.
    * @throws std::bad_alloc if queue growth fails before publication.
-   * @note Handles borrow dispatcher-owned executors for the batch lifetime.
-   * Failed insertion restores the selected lane before epoch/counter publish,
-   * so no partial handle can execute after caller stack unwinding.
+   * @note Validation precedes lane selection and state mutation. Handles borrow
+   * dispatcher-owned executors for the batch lifetime. Failed insertion
+   * restores the selected lane before epoch/counter publish, so no partial
+   * handle can execute after caller stack unwinding.
    */
   void submit_initial_task_handles(
       std::vector<TaskHandle>&& handles, int total_task_count,
@@ -340,7 +347,7 @@ class GpuPipelineScheduler : public IScheduler, public SchedulerTaskRuntime {
    * @note The worker TLS epoch is forwarded for stale-batch rejection.
    */
   void submit_ready_task_from_worker(
-      Task&& task, TaskPriority priority = TaskPriority::Normal) override;
+      Task&& task, TaskPriority priority = TaskPriority::Normal);
 
   /**
    * @brief Routes one worker-produced ready handle within its current epoch.
@@ -351,7 +358,7 @@ class GpuPipelineScheduler : public IScheduler, public SchedulerTaskRuntime {
    * @note The worker TLS epoch is forwarded for stale-batch rejection.
    */
   void submit_ready_task_handle_from_worker(
-      TaskHandle handle, TaskPriority priority = TaskPriority::Normal) override;
+      TaskHandle handle, TaskPriority priority = TaskPriority::Normal);
 
   /**
    * @brief Routes a worker-produced batch of ready handles in one publication.
@@ -390,7 +397,7 @@ class GpuPipelineScheduler : public IScheduler, public SchedulerTaskRuntime {
    */
   void submit_ready_task_handle_any_thread(
       TaskHandle handle, TaskPriority priority = TaskPriority::Normal,
-      std::optional<uint64_t> epoch = std::nullopt) override;
+      std::optional<uint64_t> epoch = std::nullopt);
 
   /**
    * @brief Routes a batch of ready handles submitted from any thread.
@@ -406,21 +413,21 @@ class GpuPipelineScheduler : public IScheduler, public SchedulerTaskRuntime {
   void submit_ready_task_handles_any_thread(
       std::vector<TaskHandle>&& handles,
       TaskPriority priority = TaskPriority::Normal,
-      std::optional<uint64_t> epoch = std::nullopt) override;
+      std::optional<uint64_t> epoch = std::nullopt);
 
   /**
-   * @brief Copies one scheduler action into the attached runtime trace.
+   * @brief Copies one scheduler action into the attached host trace.
    * @param action Scheduler-facing action category.
    * @param node_id Graph node identifier associated with the action.
    * @return Nothing.
-   * @throws std::bad_alloc if runtime trace storage grows.
-   * @note A null runtime drops the event; worker id/epoch are copied from TLS
-   * without transferring graph, cache, or runtime ownership.
+   * @throws Nothing.
+   * @note A detached scheduler drops the event; worker id/epoch are copied from
+   * TLS without transferring graph, cache, or runtime ownership.
    */
   void log_event(SchedulerTraceAction action, int node_id) override;
 
   // ---------------------------------------------------------------------------
-  // Epoch 管理
+  // Epoch management
   // ---------------------------------------------------------------------------
   /**
    * @brief Reads the currently committed pipeline batch epoch.
@@ -431,18 +438,18 @@ class GpuPipelineScheduler : public IScheduler, public SchedulerTaskRuntime {
   uint64_t active_epoch() const;
 
   /**
-   * @brief Commits the next monotonically increasing empty-batch epoch.
+   * @brief Commits the next nonzero pipeline epoch.
    * @return Newly active nonzero epoch.
    * @throws Nothing.
-   * @note Nonempty transactional batches publish their staged epoch only after
-   * the selected queue commits completely.
+   * @note The sequence wraps `UINT64_MAX` to one. Nonempty transactional
+   * batches publish their staged epoch only after the selected queue commits.
    */
   uint64_t begin_new_epoch();
 
   /**
    * @brief Checks whether a nonzero queued epoch is stale.
    * @param epoch Epoch carried by a CPU/GPU queue entry.
-   * @return True only when a nonzero epoch precedes the active epoch.
+   * @return True when a nonzero epoch differs from the active epoch.
    * @throws Nothing.
    * @note Dropping stale work does not mutate compute graphs or cache state.
    */
@@ -465,7 +472,7 @@ class GpuPipelineScheduler : public IScheduler, public SchedulerTaskRuntime {
   static int this_worker_id();
 
   // ---------------------------------------------------------------------------
-  // 设备能力查询
+  // Device capability queries
   // ---------------------------------------------------------------------------
 
   /**
@@ -508,6 +515,8 @@ class GpuPipelineScheduler : public IScheduler, public SchedulerTaskRuntime {
       void* scheduler) noexcept;
   friend testing::SchedulerTransactionalStateSnapshot
   testing::gpu_scheduler_transactional_snapshot(void* scheduler) noexcept;
+  friend void testing::set_gpu_scheduler_epoch_for_testing(
+      void* scheduler, std::uint64_t epoch) noexcept;
 #endif
 
   /**
@@ -662,20 +671,20 @@ class GpuPipelineScheduler : public IScheduler, public SchedulerTaskRuntime {
   std::optional<ScheduledTask> steal_task(int stealer_id);
 
   // ---------------------------------------------------------------------------
-  // 成员变量
+  // Member state
   // ---------------------------------------------------------------------------
-  /** @brief Borrowed trace/platform runtime; owns no graph or cache state. */
-  GraphRuntime* runtime_ = nullptr;
+  /** @brief Borrowed host context; owns no graph or cache state. */
+  SchedulerHostContext* host_context_ = nullptr;
   /** @brief Scheduler-owned copy of worker/routing configuration. */
   Config config_;
 
-  // CPU 工作线程
+  // CPU workers
   /** @brief CPU threads published only after complete start commit. */
   std::vector<std::thread> cpu_workers_;
   /** @brief Active CPU worker count, reset on failure and shutdown. */
   unsigned int num_cpu_workers_{0};
 
-  // GPU 工作线程
+  // GPU workers
   /** @brief Optional GPU submission threads owned by this scheduler. */
   std::vector<std::thread> gpu_workers_;
   /** @brief Committed GPU worker count used by safe routing decisions. */
@@ -688,7 +697,7 @@ class GpuPipelineScheduler : public IScheduler, public SchedulerTaskRuntime {
    */
   std::atomic<bool> worker_loop_active_{false};
 
-  // RT 任务队列（高优先级，CPU 处理）
+  // High-priority RT queue handled by CPU workers
   /** @brief High-priority RT CPU FIFO with transactional batch publication. */
   std::deque<ScheduledTask> rt_queue_;
   /**
@@ -704,7 +713,7 @@ class GpuPipelineScheduler : public IScheduler, public SchedulerTaskRuntime {
   /** @brief Normal-priority HP queue guarded by `rt_queue_mutex_`. */
   std::deque<ScheduledTask> hp_cpu_queue_;
 
-  // GPU 任务队列（HP 优先使用）
+  // GPU queue preferred for HP work
   /** @brief Normal-priority HP GPU FIFO with transactional publication. */
   std::deque<ScheduledTask> gpu_queue_;
   /** @brief Serializes GPU queue mutation, cleanup, and wait predicate. */
@@ -712,7 +721,7 @@ class GpuPipelineScheduler : public IScheduler, public SchedulerTaskRuntime {
   /** @brief Notification paired with `gpu_ready_count_` under GPU mutex. */
   std::condition_variable gpu_cv_;
 
-  // 任务计数器
+  // Queue counters
   /** @brief Committed RT queue entries visible to CPU wait predicates. */
   std::atomic<int> rt_ready_count_{0};
   /** @brief Committed HP-CPU entries visible to the shared CPU predicate. */
@@ -724,7 +733,14 @@ class GpuPipelineScheduler : public IScheduler, public SchedulerTaskRuntime {
   /** @brief Diagnostic count of GPU workers in idle-wait handling. */
   std::atomic<int> sleeping_gpu_count_{0};
 
-  // 完成同步
+  // Completion synchronization
+  /**
+   * @brief Serializes active-epoch/count publication with callback mutations.
+   * @note Initial submissions acquire both queue gates before this mutex.
+   *       Counter mutations acquire only this mutex, preventing cross-epoch
+   *       writes.
+   */
+  std::mutex completion_count_mutex_;
   /** @brief Serializes logical/in-flight completion wait transitions. */
   std::mutex completion_mutex_;
   /** @brief Wakes waiters after completion, settlement, failure, or stop. */
@@ -734,13 +750,13 @@ class GpuPipelineScheduler : public IScheduler, public SchedulerTaskRuntime {
   /** @brief Dequeued callbacks not yet returned to their worker loop. */
   std::atomic<int> in_flight_tasks_{0};
 
-  // Epoch 管理
-  /** @brief Last committed epoch; failed enqueue does not advance it. */
+  // Epoch management
+  /** @brief Last committed nonzero epoch; the sequence wraps maximum to one. */
   std::atomic<uint64_t> epoch_counter_{0};
   /** @brief Active epoch used by CPU/GPU stale and exception fencing. */
   std::atomic<uint64_t> active_epoch_{0};
 
-  // 异常处理
+  // Exception transport
   /** @brief Protects exact exception pointer publication and consumption. */
   std::mutex exception_mutex_;
   /** @brief First exact CPU/GPU worker exception for the active batch. */
@@ -754,7 +770,7 @@ class GpuPipelineScheduler : public IScheduler, public SchedulerTaskRuntime {
   /** @brief True only after all claimed-batch queues have been drained. */
   std::atomic<bool> exception_cleanup_complete_{false};
 
-  // 统计信息
+  // Statistics
   /** @brief RT callbacks successfully run by CPU workers. */
   std::atomic<uint64_t> rt_tasks_executed_{0};
   /** @brief HP fallback callbacks successfully run by CPU workers. */
