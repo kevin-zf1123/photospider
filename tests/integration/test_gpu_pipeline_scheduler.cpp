@@ -13,8 +13,11 @@
 #include <algorithm>
 #include <atomic>
 #include <chrono>
+#include <cstdint>
+#include <exception>
 #include <future>
 #include <memory>
+#include <optional>
 #include <string>
 #include <thread>
 #include <utility>
@@ -85,22 +88,208 @@ void mock_tiled_cpu_op(const Node& node, const OutputTile& output_tile,
 /**
  * @brief Test scheduler that exposes a GPU device to production compute.
  *
- * The scheduler executes tasks serially like SerialDebugScheduler but reports
- * GPU_METAL as available. This isolates operation selection from real Metal
- * hardware so the test can assert ComputeTaskDispatcher uses device-aware
- * registry resolution.
+ * The scheduler composes `SerialDebugScheduler` through the public
+ * `IScheduler` contract and reports GPU_METAL as available. This isolates
+ * operation selection from real Metal hardware so the test can assert
+ * `ComputeTaskDispatcher` uses device-aware registry resolution without
+ * extending the final built-in scheduler implementation.
+ *
+ * @throws Forwarded serial lifecycle, allocation, synchronization, and task
+ * exceptions according to each public scheduler operation.
+ * @note The wrapper owns its serial delegate and borrows host/task state only
+ * for the intervals defined by `IScheduler` and `SchedulerTaskRuntime`.
  */
-class GpuAvailableSerialScheduler : public SerialDebugScheduler {
+class GpuAvailableSerialScheduler final : public IScheduler {
  public:
   /**
+   * @brief Constructs a detached, stopped GPU-capable serial test scheduler.
+   * @throws std::system_error if delegate synchronization cannot initialize.
+   * @note Construction acquires no graph, host, worker, or task ownership.
+   */
+  GpuAvailableSerialScheduler() = default;
+
+  /**
+   * @brief Releases the owned serial delegate after runtime cleanup.
+   * @throws Nothing under the built-in serial scheduler destructor contract.
+   * @note GraphRuntime orders shutdown and detach before destroying this test
+   * scheduler; the delegate remains the sole lifecycle-state owner.
+   */
+  ~GpuAvailableSerialScheduler() override = default;
+
+  /**
+   * @brief Attaches the owned serial delegate to a borrowed host context.
+   * @param host Host context that outlives shutdown and detach.
+   * @return Nothing.
+   * @throws Nothing.
+   * @note Host ownership is not transferred to the wrapper or delegate.
+   */
+  void attach(SchedulerHostContext& host) noexcept override {
+    delegate_.attach(host);
+  }
+
+  /**
+   * @brief Detaches the owned serial delegate from its borrowed host context.
+   * @return Nothing.
+   * @throws Nothing.
+   * @note The caller must shut down the scheduler before this operation.
+   */
+  void detach() noexcept override { delegate_.detach(); }
+
+  /**
+   * @brief Starts inline serial task admission on the delegate.
+   * @return Nothing.
+   * @throws Nothing.
+   * @note No worker or GPU resource is created; GPU is a routing label only.
+   */
+  void start() noexcept override { delegate_.start(); }
+
+  /**
+   * @brief Stops inline task admission on the delegate.
+   * @return Nothing.
+   * @throws Nothing.
+   * @note Shutdown preserves the borrowed host until `detach()` is called.
+   */
+  void shutdown() noexcept override { delegate_.shutdown(); }
+
+  /**
+   * @brief Returns the delegated serial scheduler identity.
+   * @return Owned scheduler name.
+   * @throws std::bad_alloc if result allocation fails.
+   * @note Identity is diagnostic; the wrapper changes only device capability.
+   */
+  std::string name() const override { return delegate_.name(); }
+
+  /**
+   * @brief Returns the delegated serial scheduler statistics snapshot.
+   * @return Owned human-readable statistics text.
+   * @throws std::bad_alloc if result allocation fails.
+   * @note Statistics are produced from the delegate's lifecycle and counters.
+   */
+  std::string get_stats() const override { return delegate_.get_stats(); }
+
+  /**
+   * @brief Reports the delegated serial scheduler lifecycle state.
+   * @return True after start and before shutdown.
+   * @throws Nothing.
+   * @note The result is an observational snapshot, not synchronization.
+   */
+  bool is_running() const noexcept override { return delegate_.is_running(); }
+
+  /**
    * @brief Reports CPU and GPU_METAL as available devices.
-   *
    * @return Device list used by TaskSubmissionPlan for op selection.
    * @throws std::bad_alloc if vector allocation fails.
+   * @note GPU_METAL is a deterministic routing capability for this test; work
+   * still executes inline through the owned serial delegate.
    */
   std::vector<Device> available_devices() const override {
     return {Device::CPU, Device::GPU_METAL};
   }
+
+  /**
+   * @brief Delegates an initial borrowed-handle batch for inline execution.
+   * @param handles Dispatcher-owned handles borrowed for this call.
+   * @param total_task_count Complete logical task count for the batch.
+   * @param priority Scheduler priority label preserved by the delegate.
+   * @return Nothing.
+   * @throws Delegate validation, synchronization, and task exceptions.
+   * @note Handle ownership and borrowing intervals remain unchanged.
+   */
+  void submit_initial_task_handles(
+      std::vector<TaskHandle>&& handles, int total_task_count,
+      SchedulerTaskPriority priority = SchedulerTaskPriority::Normal) override {
+    delegate_.submit_initial_task_handles(std::move(handles), total_task_count,
+                                          priority);
+  }
+
+  /**
+   * @brief Delegates worker-released borrowed handles for inline execution.
+   * @param handles Newly ready dispatcher-owned handles.
+   * @param priority Scheduler priority label preserved by the delegate.
+   * @return Nothing.
+   * @throws Delegate synchronization and task exceptions.
+   * @note The delegate retains no handle beyond its active completion fence.
+   */
+  void submit_ready_task_handles_from_worker(
+      std::vector<TaskHandle>&& handles,
+      SchedulerTaskPriority priority = SchedulerTaskPriority::Normal) override {
+    delegate_.submit_ready_task_handles_from_worker(std::move(handles),
+                                                    priority);
+  }
+
+  /**
+   * @brief Delegates one owned any-thread callback for inline execution.
+   * @param task Callback whose state moves into the delegate call.
+   * @param priority Scheduler priority label preserved by the delegate.
+   * @param epoch Optional scheduler batch epoch.
+   * @return Nothing.
+   * @throws Delegate synchronization and callback exceptions.
+   * @note The serial delegate preserves public callback ownership semantics.
+   */
+  void submit_ready_task_any_thread(
+      SchedulerTaskRuntime::Task&& task,
+      SchedulerTaskPriority priority = SchedulerTaskPriority::Normal,
+      std::optional<std::uint64_t> epoch = std::nullopt) override {
+    delegate_.submit_ready_task_any_thread(std::move(task), priority, epoch);
+  }
+
+  /**
+   * @brief Waits for delegated batch completion.
+   * @return Nothing after successful completion or shutdown.
+   * @throws The delegate's exact first task exception or synchronization error.
+   * @note Return or throw ends the delegate's borrowed-handle interval.
+   */
+  void wait_for_completion() override { delegate_.wait_for_completion(); }
+
+  /**
+   * @brief Publishes an exception into delegated first-exception transport.
+   * @param error Exception identity to retain; null is ignored.
+   * @return Nothing.
+   * @throws Delegate synchronization errors.
+   * @note The first accepted non-null exception remains authoritative.
+   */
+  void set_exception(std::exception_ptr error) override {
+    delegate_.set_exception(std::move(error));
+  }
+
+  /**
+   * @brief Adds dynamically discovered work to delegated completion accounting.
+   * @param delta Positive logical task-count increment.
+   * @return Nothing.
+   * @throws Delegate validation, overflow, or synchronization errors.
+   * @note Nonpositive values follow `SerialDebugScheduler` semantics.
+   */
+  void inc_tasks_to_complete(int delta) override {
+    delegate_.inc_tasks_to_complete(delta);
+  }
+
+  /**
+   * @brief Retires one logical task from delegated completion accounting.
+   * @return Nothing.
+   * @throws Delegate synchronization errors.
+   * @note The serial delegate preserves a zero completion floor.
+   */
+  void dec_tasks_to_complete() override { delegate_.dec_tasks_to_complete(); }
+
+  /**
+   * @brief Publishes one trace through the delegated host context.
+   * @param action Stable scheduler trace action.
+   * @param node_id Backend node identifier, or -1 when unavailable.
+   * @return Nothing.
+   * @throws Nothing.
+   * @note Worker and epoch attribution remain owned by the serial delegate.
+   */
+  void log_event(SchedulerTraceAction action, int node_id) noexcept override {
+    delegate_.log_event(action, node_id);
+  }
+
+ private:
+  /**
+   * @brief Owned final serial scheduler that supplies all execution semantics.
+   * @note The wrapper forwards every lifecycle and dispatch operation to this
+   * one delegate; only `available_devices()` is implemented independently.
+   */
+  SerialDebugScheduler delegate_;
 };
 
 /**
@@ -170,15 +359,19 @@ void production_cpu_tiled_marker_op(const Node& node,
  * @param node Node being computed, unused by the marker.
  * @param output_tile Destination tile whose buffer is tagged as GPU_METAL.
  * @param input_tiles Resolved input tiles, unused for generator tests.
+ * @throws std::runtime_error if host-visible output storage cannot be mapped.
  * @throws OpenCV exceptions if the destination tile cannot be viewed.
- * @note The callback does not require real Metal execution; it marks the
- * selected implementation path while the test scheduler runs tasks serially.
+ * @note The callback emulates GPU output over host-visible test storage. Each
+ * serial tile temporarily restores the CPU mapping label required by OpenCV,
+ * writes its ROI, and then marks the shared result as GPU_METAL. Restoring the
+ * label on every call is required because all output tiles share one buffer.
  */
 void production_gpu_tiled_marker_op(const Node& node,
                                     const OutputTile& output_tile,
                                     const std::vector<InputTile>& input_tiles) {
   (void)node;
   (void)input_tiles;
+  output_tile.buffer->device = Device::CPU;
   toCvMat(output_tile).setTo(2.0f);
   output_tile.buffer->device = Device::GPU_METAL;
 }
