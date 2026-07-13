@@ -3363,6 +3363,8 @@ TEST_F(PluginManagerLifecycleTest,
  * keys, source ownership, retained-handle count, and the predecessor callback.
  * @note The fixture stages its ordinary callbacks before attempting the invalid
  * name, so absence of publication exercises complete transaction rollback.
+ * Built-ins are seeded before the baseline snapshot so the test remains
+ * hermetic when CTest runs this case in its own process.
  */
 TEST_F(PluginManagerLifecycleTest,
        InvalidDsoNameSegmentsRollBackWithoutIdentityCollision) {
@@ -3370,6 +3372,7 @@ TEST_F(PluginManagerLifecycleTest,
   ASSERT_TRUE(std::filesystem::exists(plugin_path));
   auto& manager = PluginManager::process_instance();
   auto& registry = OpRegistry::instance();
+  manager.seed_builtins_from_registry();
 
   for (const std::string mode : {"type", "subtype"}) {
     SCOPED_TRACE(mode);
@@ -3389,6 +3392,7 @@ TEST_F(PluginManagerLifecycleTest,
         manager.load_from_dirs_report({plugin_path.parent_path().string()});
     EXPECT_EQ(result.loaded, 0);
     ASSERT_EQ(result.errors.size(), 1u);
+    EXPECT_EQ(result.errors.front().code, GraphErrc::InvalidParameter);
     EXPECT_EQ(registry.get_combined_keys(), baseline_keys);
     EXPECT_EQ(manager.op_sources(), baseline_sources);
     EXPECT_EQ(manager.loaded_plugin_count(), baseline_handles);
@@ -3412,7 +3416,9 @@ TEST_F(PluginManagerLifecycleTest,
  * before the rejected candidate library unloads.
  * @note The fixture bypasses the typed SDK helper deliberately, so this test
  * exercises the host's independent raw-boundary validation and transaction
- * rollback rather than the public helper precondition.
+ * rollback rather than the public helper precondition. Built-ins are seeded
+ * before the baseline snapshot so isolated and whole-executable runs observe
+ * the same process-owner state.
  */
 TEST_F(PluginManagerLifecycleTest,
        EmptyRawDsoCallbackRollsBackBeforeCandidateUnload) {
@@ -3420,6 +3426,7 @@ TEST_F(PluginManagerLifecycleTest,
   ASSERT_TRUE(std::filesystem::exists(plugin_path));
   auto& manager = PluginManager::process_instance();
   auto& registry = OpRegistry::instance();
+  manager.seed_builtins_from_registry();
 
   registry.unregister_key(kLifecycleKey);
   register_host_lifecycle_sentinel();
