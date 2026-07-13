@@ -793,7 +793,9 @@ TEST_F(GraphRuntimeSchedulerTest,
  * @throws Nothing when the runtime stops both schedulers, publishes stopped
  * state, and rethrows the exact first query exception after the sweep.
  * @note The later scheduler also throws after its own shutdown, proving that
- * the earlier query error retains both identity and diagnostic message.
+ * the earlier query error retains both identity and diagnostic message. The
+ * query hook is disabled only after those checks so the test can inspect the
+ * scheduler's underlying stopped state without injecting a second exception.
  */
 TEST_F(GraphRuntimeSchedulerTest,
        StopRunningQueryFailureStillSweepsAndPreservesFirstError) {
@@ -819,6 +821,7 @@ TEST_F(GraphRuntimeSchedulerTest,
     EXPECT_STREQ(error.what(), "tracked running query failure");
   }
 
+  hp_ptr->set_throw_on_running_query(false);
   EXPECT_FALSE(runtime.running());
   EXPECT_TRUE(hp_ptr->was_shutdown_called());
   EXPECT_FALSE(hp_ptr->is_running());
