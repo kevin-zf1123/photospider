@@ -65,16 +65,18 @@ The public Host contract does not promise thread safety. The daemon therefore
 uses one dedicated mutex around every Host call, including read-only listing
 and inspection. Protocol validation plus `daemon.ping`/`daemon.version` do not
 take that mutex, and socket IO never occurs while it is held. Signal shutdown
-stops session, compute, and snapshot admission plus new output leases; closes
-the listener; wakes and joins client workers; drains accepted jobs; and joins
-the sole compute worker. It then removes terminal job ownership, clears stable
+stops session, compute, and snapshot admission plus new output leases. While
+the persistent lifecycle lock remains held, it identity-unlinks the exact
+Active pathname while the listener fd retains the original inode, then closes
+the listener so no new pathname connection can queue during later drain. It
+next wakes and joins client workers, drains accepted jobs, and joins the sole
+compute worker. It then removes terminal job ownership, clears stable
 collection snapshots, stops output publication, waits for active delivery
 leases to release or expire, and identity-cleans/closes the OutputStore before
 attempting to close active Host sessions. Only after registry and Host cleanup
-does it remove the exact socket while the persistent lifecycle lock remains
-held, release that lock, and destroy Host state. The lock file remains for
-stable cross-process synchronization. The complete wire and socket contract is
-maintained in
+does it release the lifecycle lock and destroy Host state. The lock file remains
+for stable cross-process synchronization. The complete wire and socket contract
+is maintained in
 `docs/codebase-structure/IPC-Protocol-v1.md`.
 
 ## New Graph Load

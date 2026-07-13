@@ -24,6 +24,7 @@
 #include <mutex>
 #include <stdexcept>
 #include <string>
+#include <system_error>
 #include <thread>
 #include <utility>
 #include <vector>
@@ -358,6 +359,54 @@ class ScopedUmask {
  private:
   /** @brief Process umask captured before the temporary change. */
   mode_t previous_;
+};
+
+/**
+ * @brief Bounds one borrowed listener-test dependency pointer to a run call.
+ *
+ * @throws Nothing.
+ * @note Construction publishes the borrow into the server slot. Destruction
+ *       clears that slot on every normal return and exception path, including
+ *       failures before listener creation or runtime startup.
+ */
+class ScopedTestDependenciesBorrow {
+ public:
+  /**
+   * @brief Publishes one optional dependency borrow for the current run call.
+   * @param slot Non-null server member slot cleared at scope exit.
+   * @param dependencies Optional callbacks owned by the test caller.
+   * @throws Nothing.
+   */
+  ScopedTestDependenciesBorrow(
+      const ServerLifecycleTestDependencies** slot,
+      const ServerLifecycleTestDependencies* dependencies) noexcept
+      : slot_(slot) {
+    *slot_ = dependencies;
+  }
+
+  /**
+   * @brief Prevents two guards from clearing the same borrowed slot.
+   * @throws Nothing because this operation is unavailable.
+   */
+  ScopedTestDependenciesBorrow(const ScopedTestDependenciesBorrow&) = delete;
+
+  /**
+   * @brief Prevents replacing ownership of one borrowed slot.
+   * @return No value because this operation is unavailable.
+   * @throws Nothing because this operation is unavailable.
+   */
+  ScopedTestDependenciesBorrow& operator=(const ScopedTestDependenciesBorrow&) =
+      delete;
+
+  /**
+   * @brief Clears the borrowed dependency slot before caller storage can end.
+   * @throws Nothing.
+   */
+  ~ScopedTestDependenciesBorrow() { *slot_ = nullptr; }
+
+ private:
+  /** @brief Non-null server member slot owned by the active run stack. */
+  const ServerLifecycleTestDependencies** slot_;
 };
 
 /**
@@ -704,6 +753,10 @@ bool prepare_existing_path(const std::string& path, std::string* message) {
  * @param token High-entropy fixed-size payload generated before bind.
  * @param pending_clients Pre-reserved owner for accepted non-probe clients.
  * @param undecided Pre-reserved owner for matching or empty prefixes.
+ * @param stop_fd Optional lifecycle stop descriptor; a negative value disables
+ *        stop polling while retaining the absolute proof deadline.
+ * @param dependencies Optional borrowed non-installed proof controls and
+ *        observers valid for this complete call.
  * @param message Receives a startup diagnostic on failure.
  * @return True only after the framed token sent through `path` is identified
  *         on an accepted connection from `listener`.
@@ -763,6 +816,10 @@ bool prove_listener_path(const std::string& path, int listener,
       configured_chunk == 0 ? expected.size() : configured_chunk;
   const std::size_t configured_limit =
       dependencies == nullptr ? 0 : dependencies->proof_write_limit_bytes;
+  if (configured_limit > expected.size()) {
+    *message = "listener self-proof write limit exceeds fixed frame";
+    return false;
+  }
   const std::size_t write_limit =
       configured_limit == 0 ? expected.size() : configured_limit;
 
@@ -1055,7 +1112,6 @@ UniqueFd create_listener(
     const int listen_error = errno;
     *message = std::string("daemon socket listen failed: ") +
                std::strerror(listen_error);
-    errno = listen_error;
     return {};
   }
   if (test_dependencies != nullptr &&
@@ -1203,7 +1259,8 @@ class Server::Impl {
    * @return Success after normal stop or a startup/runtime failure.
    * @throws std::bad_alloc if non-connection runtime allocation fails.
    * @throws std::filesystem::filesystem_error if default socket path or parent
-   *         directory inspection fails unexpectedly.
+   *         directory inspection fails unexpectedly, or if the non-installed
+   *         path-setup exception failpoint is selected.
    * @throws std::runtime_error if the default path cannot fit the platform
    *         Unix-socket address or another startup invariant fails.
    * @throws std::system_error if a worker thread cannot be created.
@@ -1214,9 +1271,15 @@ class Server::Impl {
       const ServerOptions& options, int stop_fd,
       const ServerLifecycleTestDependencies* test_dependencies = nullptr) {
     stop();
-    active_test_dependencies_ = test_dependencies;
+    ScopedTestDependenciesBorrow dependency_borrow(&active_test_dependencies_,
+                                                   test_dependencies);
     socket_path_ = options.socket_path.empty() ? default_socket_path()
                                                : options.socket_path;
+    if (test_dependencies != nullptr && test_dependencies->fail_path_setup) {
+      throw std::filesystem::filesystem_error(
+          "injected daemon socket path setup failure", socket_path_,
+          std::make_error_code(std::errc::io_error));
+    }
     std::string message;
     std::vector<UniqueFd> pending_clients;
     listener_ =
@@ -1224,7 +1287,6 @@ class Server::Impl {
                         &message, &pending_clients, stop_fd, test_dependencies);
     if (!listener_) {
       socket_cleanup_.reset();
-      active_test_dependencies_ = nullptr;
       return failure_status(OperationErrorDomain::Daemon, kInternalErrorCode,
                             "internal_error", std::move(message));
     }
@@ -1240,14 +1302,12 @@ class Server::Impl {
       cleanup_listener(test_dependencies);
       instance_lock_.reset();
       socket_path_.clear();
-      active_test_dependencies_ = nullptr;
       throw;
     }
     if (!runtime_started.ok) {
       cleanup_listener(test_dependencies);
       instance_lock_.reset();
       socket_path_.clear();
-      active_test_dependencies_ = nullptr;
       return runtime_started;
     }
     try {
@@ -1303,12 +1363,16 @@ class Server::Impl {
    * @brief Executes deterministic admission/client/compute/session shutdown.
    *
    * @throws Nothing.
-   * @note Admission stops before descriptors are woken; accepted compute drains
-   *       and joins before Host sessions and socket ownership are released.
+   * @note Admission stops first. While the lifecycle lock remains held, Active
+   *       pathname ownership is identity-unlinked and the listener is closed so
+   *       no new connection can queue during worker, compute, snapshot, output-
+   *       lease, or Host-session drain. Tracked clients are then woken/joined,
+   *       and router shutdown finishes before lifecycle-lock release.
    */
   void stop() noexcept {
     running_ = false;
     router_.begin_shutdown();
+    cleanup_listener(active_test_dependencies_);
     for (const std::shared_ptr<Worker>& worker : workers_) {
       std::lock_guard<std::mutex> lock(worker->fd_mutex);
       if (worker->fd >= 0) {
@@ -1322,7 +1386,6 @@ class Server::Impl {
     }
     workers_.clear();
     router_.finish_shutdown();
-    cleanup_listener(active_test_dependencies_);
     instance_lock_.reset();
     socket_path_.clear();
     active_test_dependencies_ = nullptr;
@@ -1504,7 +1567,11 @@ class Server::Impl {
   /** @brief True while the foreground accept loop should continue. */
   bool running_ = false;
 
-  /** @brief Borrowed non-installed callbacks valid for the active test run. */
+  /**
+   * @brief Borrowed non-installed callbacks valid only within one run stack.
+   * @note `ScopedTestDependenciesBorrow` clears the slot on every exit path;
+   *       `stop()` may clear it earlier after consuming the cleanup observer.
+   */
   const ServerLifecycleTestDependencies* active_test_dependencies_ = nullptr;
 };
 

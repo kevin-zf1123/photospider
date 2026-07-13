@@ -71,7 +71,13 @@ struct ServerLifecycleTestDependencies {
   /** @brief Maximum proof-frame bytes sent per state-machine iteration. */
   std::size_t proof_write_chunk_bytes = 0;
 
-  /** @brief Optional test-only total proof bytes after which writing stalls. */
+  /**
+   * @brief Optional test-only total proof bytes after which writing stalls.
+   * @throws Nothing when assigned.
+   * @note Zero selects the complete fixed 36-byte proof frame. Values from one
+   *       through 36 select a bounded prefix; larger values fail listener
+   *       startup before any proof write rather than exceeding fixed storage.
+   */
   std::size_t proof_write_limit_bytes = 0;
 
   /** @brief Optional observer for matching incomplete proof-prefix lengths. */
@@ -80,6 +86,15 @@ struct ServerLifecycleTestDependencies {
 
   /** @brief Forces the maintained router-start failure cleanup path. */
   bool fail_runtime_start = false;
+
+  /**
+   * @brief Forces an early filesystem path-setup exception from server run.
+   * @throws Nothing when assigned.
+   * @note This non-installed failpoint verifies that the run-scoped dependency
+   *       borrow is cleared before exception propagation and is never selected
+   *       by production construction.
+   */
+  bool fail_path_setup = false;
 
   /**
    * @brief Optional observer invoked immediately before Active cleanup.
@@ -124,13 +139,16 @@ OperationStatus test_create_listener(
  * @return The same startup/runtime status as `Server::run()`.
  * @throws std::bad_alloc if listener, runtime, worker, or diagnostic storage
  *         cannot allocate.
- * @throws std::filesystem::filesystem_error if socket parent inspection fails.
+ * @throws std::filesystem::filesystem_error if socket parent inspection fails
+ *         or `dependencies.fail_path_setup` selects the early exception path.
  * @throws std::runtime_error if default-path validation or listener proof-token
  *         entropy generation fails.
  * @throws std::system_error if a client worker thread cannot be created.
  * @note This source-tree-only seam changes no router, CLI, environment, wire,
  *       or installed surface. Pending clients captured during self-proof enter
  *       the real worker admission path only after runtime startup succeeds.
+ *       The server drops its dependency borrow on every normal or exceptional
+ *       exit before the caller may end `dependencies` lifetime.
  */
 OperationStatus test_run_server(
     Server& server, const ServerOptions& options, int stop_fd,

@@ -51,13 +51,15 @@ admission 并保留 mapping。
 
 Public Host contract 不承诺 thread safety，因此 daemon 使用一个 dedicated mutex 包围每个 Host
 call，包括 read-only list 与 inspection。Protocol validation 以及 `daemon.ping`/
-`daemon.version` 不获取该 mutex；socket IO 期间绝不持有它。Signal shutdown 会停止 accept、
-停止 session/compute/snapshot admission 与新 output lease，关闭 listener，唤醒并 join client
-worker，drain 已接受 job，并 join 唯一 compute worker。随后它会移除 terminal job ownership、
-清空 stable collection snapshot、停止 output publication、等待 active delivery lease release 或
-expire，并在尝试关闭 active Host session 之前 identity-clean/close OutputStore。只有 registry 与
-Host cleanup 完成后，它才会在 persistent lifecycle lock 仍持有时移除精确 socket，释放该 lock，
-最后 destroy Host state。Lock file 会保留以提供稳定的跨进程同步。完整 wire/socket contract 维护在
+`daemon.version` 不获取该 mutex；socket IO 期间绝不持有它。Signal shutdown 会停止
+session/compute/snapshot admission 与新 output lease。Persistent lifecycle lock 仍持有时，它会在
+listener fd 保留原 inode 的情况下 identity-unlink 精确 Active pathname，随后关闭 listener，使新的
+pathname connection 无法在后续 drain 期间排队。接着它会唤醒并 join client worker、drain 已接受
+job，并 join 唯一 compute worker。随后它会移除 terminal job ownership、清空 stable collection
+snapshot、停止 output publication、等待 active delivery lease release 或 expire，并在尝试关闭
+active Host session 之前 identity-clean/close OutputStore。只有 registry 与 Host cleanup 完成后，
+它才会释放 lifecycle lock，最后 destroy Host state。Lock file 会保留以提供稳定的跨进程同步。
+完整 wire/socket contract 维护在
 `docs/codebase-structure/zh/IPC-Protocol-v1.zh.md`。
 
 ## 新图加载
