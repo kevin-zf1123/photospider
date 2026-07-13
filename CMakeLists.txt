@@ -968,7 +968,9 @@ if(BUILD_TESTING)
             "${PROJECT_SOURCE_DIR}/include"
             "${PROJECT_SOURCE_DIR}/src/lib")
         target_link_libraries(test_ipc_daemon PRIVATE
+            photospider_ipc_server_internal
             photospider_ipc_client
+            photospider
             GTest::gtest
             GTest::gtest_main
             Threads::Threads)

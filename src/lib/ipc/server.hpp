@@ -9,6 +9,8 @@
 
 namespace ps::ipc::internal {
 
+struct ServerLifecycleTestDependencies;
+
 /**
  * @brief Immutable startup options for one foreground Unix IPC server.
  *
@@ -115,23 +117,48 @@ class Server {
    * @throws std::runtime_error if the default path cannot fit the platform
    *         Unix-socket address or another startup invariant fails.
    * @throws std::system_error if a worker thread cannot be created.
-   * @note Shutdown stops admission, closes the listener, wakes and joins
-   *       clients, drains/joins compute, waits protected output leases, closes
-   *       Host sessions, then removes only the socket inode created by this
-   *       run. Output-store restart cleanup occurs while the lifecycle lock is
-   *       held and before client admission.
+   * @note Startup advances cleanup ownership only through inactive Candidate
+   *       capture, framed pathname self-connect proof on the original accept
+   *       queue, final fixed-dirfd revalidation, and allocation-free
+   *       activation. Non-probe clients accepted during proof count against
+   *       the 32-client limit and enter ordinary admission only after router
+   *       runtime startup. Shutdown then stops admission, joins clients and
+   *       compute, waits protected output leases, closes Host sessions, and
+   *       identity-checks its active socket before removal. The fixed parent
+   *       descriptor prevents parent-path redirection, but portable POSIX
+   *       cannot make final pathname revalidation plus unlink atomic against a
+   *       same-uid replacer with directory write access. Output-store restart
+   *       cleanup occurs while the lifecycle lock is held before admission.
    */
   OperationStatus run(const ServerOptions& options, int stop_fd);
 
  private:
+  /**
+   * @brief Grants the non-installed lifecycle seam access to injected run.
+   * @param server Sole idle private server instance.
+   * @param options Explicit/default socket selection.
+   * @param stop_fd Read end of the test-owned stop pipe.
+   * @param dependencies Borrowed callbacks valid through the complete call.
+   * @return The real startup/runtime status produced by `Impl::run()`.
+   * @throws std::bad_alloc, std::filesystem::filesystem_error,
+   *         std::runtime_error, or std::system_error under the same conditions
+   *         documented by `Server::run()`.
+   * @note Friendship adds no installed API; the function exercises the full
+   *       listener, router, worker, shutdown, and cleanup path with real
+   *       parameters rather than a shortened test surrogate.
+   */
+  friend OperationStatus test_run_server(
+      Server& server, const ServerOptions& options, int stop_fd,
+      const ServerLifecycleTestDependencies& dependencies);
+
   /**
    * @brief Complete listener, worker, and socket-lifecycle state defined in the
    *        source file.
    *
    * @throws Nothing for this incomplete declaration.
    * @note `impl_` is the sole owner. Server destruction completes listener,
-   *       worker, router, and exact socket cleanup before destroying the
-   *       complete implementation type.
+   *       worker, router, and identity-checked socket cleanup before destroying
+   *       the complete implementation type.
    */
   class Impl;
 

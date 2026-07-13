@@ -441,10 +441,21 @@ Implemented version 1 transport:
 - No remote TCP listener by default.
 - Socket path is per-user under a valid `$XDG_RUNTIME_DIR`, otherwise under
   `/tmp/photospider-<uid>`.
-- Daemon-created directories are `0700`; the socket is `0600`.
+- Daemon-created directories are `0700`; bind creates the socket directly as
+  exact `0600` under umask `0177`.
 - A persistent mode-`0600` `${socket}.lock` is opened without following
   symlinks and held with nonblocking exclusive `flock` from stale-path
-  inspection through exact socket cleanup; the lock inode is never removed.
+  inspection through identity-checked socket cleanup; the lock inode is never
+  removed. Listener ownership advances only through Candidate capture, a real
+  framed pathname self-connect observed on the original accept queue, final
+  fixed-dirfd revalidation, and allocation-free cleanup activation. Proof-time
+  connect/write/accept/prefix classification shares one cancellable absolute
+  deadline; backlog reserves no proof slot. Non-probe clients remain bounded
+  and enter ordinary admission only after the router runtime starts. Saved
+  scalar parent identity makes stable rename/recreation fail closed, and Active
+  cleanup unlinks before listener close. Portable POSIX cannot make the final pathname
+  revalidation and unlink atomic against a same-uid writer; the authoritative
+  boundary is documented in `IPC-Protocol-v1.md`.
 
 Implemented version 1 protocol:
 

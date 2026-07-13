@@ -33,11 +33,14 @@
 #include <string>
 #include <string_view>
 #include <thread>
+#include <tuple>
 #include <utility>
 #include <vector>
 
 #include "ipc/codec.hpp"
 #include "ipc/frame.hpp"
+#include "ipc/server.hpp"
+#include "ipc/server_lifecycle_test_access.hpp"
 #include "ipc/unix_socket.hpp"
 #include "photospider/ipc/client.hpp"
 
@@ -914,6 +917,404 @@ mode_t permissions_of(const std::filesystem::path& path) noexcept {
   return ::lstat(path.c_str(), &metadata) == 0
              ? static_cast<mode_t>(metadata.st_mode & 07777)
              : static_cast<mode_t>(-1);
+}
+
+/**
+ * @brief Owns deterministic post-bind pathname replacement test state.
+ *
+ * @throws std::bad_alloc when symlink target storage is assigned.
+ * @note The invoking test owns the state for the complete lifecycle callback
+ *       interval and explicitly closes any retained replacement descriptor.
+ *       Callbacks run only on the listener startup thread.
+ */
+struct ListenerReplacementState {
+  /**
+   * @brief Filesystem object installed at the bound pathname.
+   *
+   * @throws Nothing.
+   * @note Values select only test-owned local filesystem operations and never
+   *       enter a product option, environment variable, or wire value.
+   */
+  enum class Kind {
+    /** @brief Observe the stage without replacing the pathname. */
+    None,
+
+    /** @brief Install a same-user regular file. */
+    RegularFile,
+
+    /** @brief Install a symbolic link to `symlink_target`. */
+    Symlink,
+
+    /** @brief Install and retain an exact-mode Unix socket. */
+    Socket,
+  };
+
+  /** @brief Lifecycle boundary at which replacement occurs. */
+  internal::ServerLifecycleTestStage stage =
+      internal::ServerLifecycleTestStage::AfterBind;
+
+  /** @brief Replacement kind to install. */
+  Kind kind = Kind::RegularFile;
+
+  /** @brief Preallocated symlink target used only by symlink cases. */
+  std::string symlink_target;
+
+  /** @brief Bound replacement socket retained to preserve its inode. */
+  int replacement_socket = -1;
+
+  /** @brief Whether a socket replacement enters listening state. */
+  bool listen_on_replacement = false;
+
+  /** @brief Device number captured immediately after socket replacement. */
+  dev_t replacement_device = 0;
+
+  /** @brief Inode number captured immediately after socket replacement. */
+  ino_t replacement_inode = 0;
+
+  /** @brief Mode observed immediately after the daemon bind. */
+  mode_t initial_mode = static_cast<mode_t>(-1);
+
+  /** @brief Zero on successful hook execution, otherwise captured `errno`. */
+  int error = 0;
+
+  /** @brief True when Active cleanup observed a still-open listener fd. */
+  bool listener_open_during_cleanup = false;
+
+  /** @brief Optional write end signalled after Active replacement. */
+  int stop_writer = -1;
+};
+
+/** @brief State for deterministic parent rename/recreation. */
+struct ParentReplacementState {
+  /** @brief Original protected parent pathname. */
+  std::string parent;
+
+  /** @brief Renamed original directory pathname. */
+  std::string moved_parent;
+
+  /** @brief Zero on success, otherwise captured errno. */
+  int error = 0;
+};
+
+/**
+ * @brief Owns clients queued before listener pathname self-proof.
+ *
+ * @throws Nothing during default construction.
+ * @note The fixed array matches the daemon's 32-client cap and avoids a test
+ *       container allocation inside the lifecycle callback. Each element owns
+ *       one descriptor until the test releases it.
+ */
+struct PendingClientState {
+  /** @brief Fixed owners for all clients admitted before self-proof. */
+  std::array<internal::UniqueFd, 32> clients;
+
+  /** @brief Number of successfully connected and framed clients. */
+  std::size_t count = 0;
+
+  /** @brief Number of clients the stage hook should connect. */
+  std::size_t target_count = 32;
+
+  /** @brief Initial frame prefix written before listener self-proof. */
+  std::size_t initial_frame_bytes = std::numeric_limits<std::size_t>::max();
+
+  /** @brief Zero on callback success, otherwise the captured failure errno. */
+  int error = 0;
+
+  /** @brief True after the startup-thread callback has returned. */
+  std::atomic<bool> hook_complete{false};
+
+  /** @brief True after listener cleanup ownership becomes Active. */
+  std::atomic<bool> activated{false};
+
+  /** @brief Shared absolute deadline for every callback connect and write. */
+  std::chrono::steady_clock::time_point deadline;
+
+  /** @brief Cancellation latch set by the controlling test on timeout. */
+  std::atomic<bool> cancel{false};
+};
+
+/**
+ * @brief Builds the valid daemon ping frame used by proof-time clients.
+ * @return Network-order length prefix plus complete bounded JSON payload.
+ * @throws std::bad_alloc if frame storage cannot allocate.
+ */
+std::vector<unsigned char> pending_ping_frame() {
+  static constexpr std::string_view request =
+      R"({"protocol_version":1,"id":"pending","method":"daemon.ping","params":{}})";
+  std::vector<unsigned char> frame(sizeof(std::uint32_t) + request.size());
+  const std::uint32_t network_length =
+      htonl(static_cast<std::uint32_t>(request.size()));
+  std::memcpy(frame.data(), &network_length, sizeof(network_length));
+  std::memcpy(frame.data() + sizeof(network_length), request.data(),
+              request.size());
+  return frame;
+}
+
+/**
+ * @brief Records incomplete matching proof prefixes observed without consume.
+ * @throws Nothing during default construction.
+ */
+struct ProofPrefixState {
+  /** @brief Largest matching incomplete prefix reported by the proof loop. */
+  std::atomic<std::size_t> largest_observed{0};
+};
+
+/**
+ * @brief Publishes one matching incomplete proof-prefix observation.
+ * @param opaque Borrowed `ProofPrefixState`.
+ * @param observed_bytes Number of matching bytes visible through `MSG_PEEK`.
+ * @throws Nothing.
+ */
+void observe_proof_prefix(void* opaque, std::size_t observed_bytes) noexcept {
+  auto* state = static_cast<ProofPrefixState*>(opaque);
+  std::size_t prior = state->largest_observed.load(std::memory_order_relaxed);
+  while (prior < observed_bytes &&
+         !state->largest_observed.compare_exchange_weak(
+             prior, observed_bytes, std::memory_order_release,
+             std::memory_order_relaxed)) {
+  }
+}
+
+/**
+ * @brief Replaces a bound socket pathname at one deterministic lifecycle stage.
+ * @param opaque Borrowed `ListenerReplacementState`.
+ * @param stage Current private listener lifecycle boundary.
+ * @param path Bound socket pathname.
+ * @throws Nothing; syscall failures are captured in state.
+ * @note The hook performs no allocation and never uses GTest assertions.
+ */
+void replace_listener_path(void* opaque,
+                           internal::ServerLifecycleTestStage stage,
+                           const char* path) noexcept {
+  auto* state = static_cast<ListenerReplacementState*>(opaque);
+  if (stage == internal::ServerLifecycleTestStage::AfterBind) {
+    struct stat metadata{};
+    if (::lstat(path, &metadata) == 0) {
+      state->initial_mode = metadata.st_mode & 07777;
+    } else {
+      state->error = errno;
+      return;
+    }
+  }
+  if (stage != state->stage ||
+      state->kind == ListenerReplacementState::Kind::None) {
+    return;
+  }
+  const auto signal_stop = [state]() noexcept {
+    if (state->stop_writer >= 0) {
+      const char token = 's';
+      if (::write(state->stop_writer, &token, 1) != 1 && state->error == 0) {
+        state->error = errno;
+      }
+    }
+  };
+  if (::unlink(path) != 0) {
+    state->error = errno;
+    signal_stop();
+    return;
+  }
+  if (state->kind == ListenerReplacementState::Kind::RegularFile) {
+    const int fd = ::open(path, O_WRONLY | O_CREAT | O_EXCL | O_CLOEXEC, 0640);
+    if (fd < 0) {
+      state->error = errno;
+      signal_stop();
+      return;
+    }
+    if (::close(fd) != 0) {
+      state->error = errno;
+    }
+    signal_stop();
+    return;
+  }
+  if (state->kind == ListenerReplacementState::Kind::Symlink) {
+    if (::symlink(state->symlink_target.c_str(), path) != 0) {
+      state->error = errno;
+    }
+    signal_stop();
+    return;
+  }
+  state->replacement_socket = ::socket(AF_UNIX, SOCK_STREAM, 0);
+  if (state->replacement_socket < 0) {
+    state->error = errno;
+    signal_stop();
+    return;
+  }
+  sockaddr_un address{};
+  address.sun_family = AF_UNIX;
+  std::memcpy(address.sun_path, path, std::strlen(path) + 1);
+  const socklen_t length = static_cast<socklen_t>(
+      offsetof(sockaddr_un, sun_path) + std::strlen(path) + 1);
+  if (::bind(state->replacement_socket, reinterpret_cast<sockaddr*>(&address),
+             length) != 0) {
+    state->error = errno;
+    signal_stop();
+    return;
+  }
+  if (::chmod(path, 0600) != 0) {
+    state->error = errno;
+    signal_stop();
+    return;
+  }
+  if (state->listen_on_replacement &&
+      ::listen(state->replacement_socket, 1) != 0) {
+    state->error = errno;
+    signal_stop();
+    return;
+  }
+  struct stat replacement{};
+  if (::lstat(path, &replacement) != 0) {
+    state->error = errno;
+    signal_stop();
+    return;
+  }
+  state->replacement_device = replacement.st_dev;
+  state->replacement_inode = replacement.st_ino;
+  signal_stop();
+}
+
+/**
+ * @brief Deterministic failing replacement for the POSIX `listen` boundary.
+ * @param fd Ignored bound descriptor.
+ * @param backlog Ignored listener backlog.
+ * @return Always -1 with `errno` set to `EIO`.
+ * @throws Nothing.
+ */
+int fail_listener(int fd, int backlog) noexcept {
+  (void)fd;
+  (void)backlog;
+  errno = EIO;
+  return -1;
+}
+
+/**
+ * @brief Closes an optional replacement socket descriptor.
+ * @param state Replacement state whose raw descriptor is owned by the test.
+ * @throws Nothing.
+ */
+void close_replacement_socket(ListenerReplacementState* state) noexcept {
+  if (state->replacement_socket >= 0) {
+    (void)::close(state->replacement_socket);
+    state->replacement_socket = -1;
+  }
+}
+
+/**
+ * @brief Verifies that Active cleanup runs before listener close.
+ * @param opaque Borrowed `ListenerReplacementState`.
+ * @param listener_fd Descriptor expected to remain valid.
+ * @param path Ignored configured path.
+ * @throws Nothing.
+ */
+void observe_active_cleanup(void* opaque, int listener_fd,
+                            const char* path) noexcept {
+  (void)path;
+  auto* state = static_cast<ListenerReplacementState*>(opaque);
+  struct stat metadata{};
+  state->listener_open_during_cleanup = listener_fd >= 0 &&
+                                        ::fstat(listener_fd, &metadata) == 0 &&
+                                        S_ISSOCK(metadata.st_mode);
+}
+
+/**
+ * @brief Renames and recreates the configured parent after activation.
+ * @param opaque Borrowed `ParentReplacementState`.
+ * @param stage Current lifecycle stage.
+ * @param path Ignored socket path below the prepared parent.
+ * @throws Nothing; failures are captured in state.
+ */
+void replace_parent_path(void* opaque, internal::ServerLifecycleTestStage stage,
+                         const char* path) noexcept {
+  (void)path;
+  if (stage !=
+      internal::ServerLifecycleTestStage::AfterActivationBeforeRuntimeStart) {
+    return;
+  }
+  auto* state = static_cast<ParentReplacementState*>(opaque);
+  if (::rename(state->parent.c_str(), state->moved_parent.c_str()) != 0 ||
+      ::mkdir(state->parent.c_str(), 0700) != 0 ||
+      ::chmod(state->parent.c_str(), 0700) != 0) {
+    state->error = errno;
+  }
+}
+
+/**
+ * @brief Queues 32 valid framed clients immediately before pathname proof.
+ *
+ * @param opaque Borrowed `PendingClientState` owned by the running test.
+ * @param stage Current listener lifecycle boundary.
+ * @param path Bound and listening Unix socket pathname.
+ * @throws Nothing; connection and write failures are captured in state.
+ * @note The callback sends a complete request but reads no response. It leaves
+ *       every descriptor open so the proof path must peek without consuming
+ *       bytes and later transfer them to normal runtime workers.
+ */
+void queue_pending_clients(void* opaque,
+                           internal::ServerLifecycleTestStage stage,
+                           const char* path) noexcept {
+  auto* state = static_cast<PendingClientState*>(opaque);
+  if (stage ==
+      internal::ServerLifecycleTestStage::AfterActivationBeforeRuntimeStart) {
+    state->activated.store(true, std::memory_order_release);
+    return;
+  }
+  if (stage != internal::ServerLifecycleTestStage::AfterListenBeforeProof) {
+    return;
+  }
+  try {
+    const std::vector<unsigned char> frame = pending_ping_frame();
+    if (state->target_count > state->clients.size()) {
+      state->error = EINVAL;
+      state->hook_complete.store(true, std::memory_order_release);
+      return;
+    }
+    const std::size_t initial_bytes =
+        std::min(state->initial_frame_bytes, frame.size());
+    for (std::size_t index = 0; index < state->target_count; ++index) {
+      std::string message;
+      state->clients[index] = internal::create_unix_stream_socket(&message);
+      const auto cancelled = [state] {
+        return state->cancel.load(std::memory_order_acquire) ||
+               std::chrono::steady_clock::now() >= state->deadline;
+      };
+      if (!state->clients[index] ||
+          !internal::connect_prepared_unix_socket(state->clients[index].get(),
+                                                  path, cancelled, &message)) {
+        state->error = errno == 0 ? EIO : errno;
+        break;
+      }
+      const int flags = ::fcntl(state->clients[index].get(), F_GETFL, 0);
+      if (flags < 0 || ::fcntl(state->clients[index].get(), F_SETFL,
+                               flags | O_NONBLOCK) != 0) {
+        state->error = errno;
+        break;
+      }
+      std::size_t written = 0;
+      while (written < initial_bytes && !cancelled()) {
+        const ssize_t result =
+            ::send(state->clients[index].get(), frame.data() + written,
+                   initial_bytes - written, MSG_DONTWAIT);
+        if (result > 0) {
+          written += static_cast<std::size_t>(result);
+          continue;
+        }
+        if (result < 0 && errno != EINTR && errno != EAGAIN &&
+            errno != EWOULDBLOCK) {
+          state->error = errno;
+          break;
+        }
+        pollfd writable{state->clients[index].get(), POLLOUT, 0};
+        (void)::poll(&writable, 1, 10);
+      }
+      if (written != initial_bytes) {
+        state->error = state->error == 0 ? ETIMEDOUT : state->error;
+        break;
+      }
+      ++state->count;
+    }
+  } catch (...) {
+    state->error = ENOMEM;
+  }
+  state->hook_complete.store(true, std::memory_order_release);
 }
 
 /**
@@ -2449,6 +2850,546 @@ TEST(IpcDaemonLifecycle, ExplicitDefaultLiveStaleAndUnsafeSocketPolicy) {
   fallback_daemon.stop();
   EXPECT_TRUE(fallback_daemon.exited_successfully());
   EXPECT_FALSE(std::filesystem::exists(fallback_path));
+}
+
+TEST(IpcDaemonLifecycle, PreservesRegularFileReplacementAfterBind) {
+  ScopedDaemonDirectory temp("ps-listener-regular", true);
+  const std::filesystem::path socket_path = temp.path() / "listener.sock";
+  ListenerReplacementState state;
+  internal::ServerLifecycleTestDependencies dependencies;
+  dependencies.context = &state;
+  dependencies.stage_hook = replace_listener_path;
+
+  const OperationStatus status =
+      internal::test_create_listener(socket_path.string(), dependencies);
+
+  EXPECT_FALSE(status.ok);
+  EXPECT_EQ(state.error, 0) << std::strerror(state.error);
+  EXPECT_TRUE(std::filesystem::is_regular_file(socket_path));
+}
+
+TEST(IpcDaemonLifecycle, PreservesSymlinkReplacementAfterBind) {
+  ScopedDaemonDirectory temp("ps-listener-symlink", true);
+  const std::filesystem::path socket_path = temp.path() / "listener.sock";
+  const std::filesystem::path target_path = temp.path() / "target";
+  {
+    std::ofstream target(target_path);
+    ASSERT_TRUE(target.is_open());
+    target << "preserve";
+  }
+  ASSERT_EQ(::chmod(target_path.c_str(), 0640), 0);
+  ListenerReplacementState state;
+  state.kind = ListenerReplacementState::Kind::Symlink;
+  state.symlink_target = target_path.string();
+  internal::ServerLifecycleTestDependencies dependencies;
+  dependencies.context = &state;
+  dependencies.stage_hook = replace_listener_path;
+
+  const OperationStatus status =
+      internal::test_create_listener(socket_path.string(), dependencies);
+
+  EXPECT_FALSE(status.ok);
+  EXPECT_EQ(state.error, 0) << std::strerror(state.error);
+  EXPECT_TRUE(std::filesystem::is_symlink(socket_path));
+  EXPECT_EQ(permissions_of(target_path), 0640);
+}
+
+TEST(IpcDaemonLifecycle, PreservesSocketReplacementBeforeListen) {
+  ScopedDaemonDirectory temp("ps-listener-socket", true);
+  const std::filesystem::path socket_path = temp.path() / "listener.sock";
+  ListenerReplacementState state;
+  state.kind = ListenerReplacementState::Kind::Socket;
+  state.stage = internal::ServerLifecycleTestStage::AfterCandidateBeforeListen;
+  internal::ServerLifecycleTestDependencies dependencies;
+  dependencies.context = &state;
+  dependencies.stage_hook = replace_listener_path;
+
+  const OperationStatus status =
+      internal::test_create_listener(socket_path.string(), dependencies);
+
+  EXPECT_FALSE(status.ok);
+  EXPECT_EQ(state.error, 0) << std::strerror(state.error);
+  struct stat replacement{};
+  EXPECT_EQ(::lstat(socket_path.c_str(), &replacement), 0);
+  EXPECT_TRUE(S_ISSOCK(replacement.st_mode));
+  close_replacement_socket(&state);
+}
+
+TEST(IpcDaemonLifecycle, PreservesReplacementAfterListenBeforeProof) {
+  ScopedDaemonDirectory temp("ps-listener-after-listen", true);
+  const std::filesystem::path socket_path = temp.path() / "listener.sock";
+  ListenerReplacementState state;
+  state.stage = internal::ServerLifecycleTestStage::AfterListenBeforeProof;
+  internal::ServerLifecycleTestDependencies dependencies;
+  dependencies.context = &state;
+  dependencies.stage_hook = replace_listener_path;
+
+  const OperationStatus status =
+      internal::test_create_listener(socket_path.string(), dependencies);
+
+  EXPECT_FALSE(status.ok);
+  EXPECT_EQ(state.error, 0) << std::strerror(state.error);
+  EXPECT_TRUE(std::filesystem::is_regular_file(socket_path));
+}
+
+TEST(IpcDaemonLifecycle, PreservesReplacementAfterProofBeforeRevalidation) {
+  ScopedDaemonDirectory temp("ps-listener-after-proof", true);
+  const std::filesystem::path socket_path = temp.path() / "listener.sock";
+  ListenerReplacementState state;
+  state.stage =
+      internal::ServerLifecycleTestStage::AfterProofBeforeFinalRevalidate;
+  internal::ServerLifecycleTestDependencies dependencies;
+  dependencies.context = &state;
+  dependencies.stage_hook = replace_listener_path;
+
+  const OperationStatus status =
+      internal::test_create_listener(socket_path.string(), dependencies);
+
+  EXPECT_FALSE(status.ok);
+  EXPECT_EQ(state.error, 0) << std::strerror(state.error);
+  EXPECT_TRUE(std::filesystem::is_regular_file(socket_path));
+}
+
+TEST(IpcDaemonLifecycle,
+     RejectsExactModeUnlistenedSocketReplacementBeforeCandidateCapture) {
+  ScopedDaemonDirectory temp("ps-listener-unlistened", true);
+  const std::filesystem::path socket_path = temp.path() / "listener.sock";
+  ListenerReplacementState state;
+  state.kind = ListenerReplacementState::Kind::Socket;
+  internal::ServerLifecycleTestDependencies dependencies;
+  dependencies.context = &state;
+  dependencies.stage_hook = replace_listener_path;
+
+  const OperationStatus status =
+      internal::test_create_listener(socket_path.string(), dependencies);
+
+  EXPECT_FALSE(status.ok);
+  EXPECT_EQ(state.error, 0) << std::strerror(state.error);
+  struct stat replacement{};
+  ASSERT_EQ(::lstat(socket_path.c_str(), &replacement), 0);
+  EXPECT_TRUE(S_ISSOCK(replacement.st_mode));
+  EXPECT_EQ(replacement.st_mode & 07777, 0600);
+  EXPECT_EQ(replacement.st_dev, state.replacement_device);
+  EXPECT_EQ(replacement.st_ino, state.replacement_inode);
+  close_replacement_socket(&state);
+}
+
+TEST(IpcDaemonLifecycle,
+     RejectsExactModeListeningSocketReplacementBeforeCandidateCapture) {
+  ScopedDaemonDirectory temp("ps-listener-listening", true);
+  const std::filesystem::path socket_path = temp.path() / "listener.sock";
+  ListenerReplacementState state;
+  state.kind = ListenerReplacementState::Kind::Socket;
+  state.listen_on_replacement = true;
+  internal::ServerLifecycleTestDependencies dependencies;
+  dependencies.context = &state;
+  dependencies.stage_hook = replace_listener_path;
+
+  const OperationStatus status =
+      internal::test_create_listener(socket_path.string(), dependencies);
+
+  EXPECT_FALSE(status.ok);
+  EXPECT_EQ(state.error, 0) << std::strerror(state.error);
+  struct stat replacement{};
+  ASSERT_EQ(::lstat(socket_path.c_str(), &replacement), 0);
+  EXPECT_TRUE(S_ISSOCK(replacement.st_mode));
+  EXPECT_EQ(replacement.st_mode & 07777, 0600);
+  EXPECT_EQ(replacement.st_dev, state.replacement_device);
+  EXPECT_EQ(replacement.st_ino, state.replacement_inode);
+  close_replacement_socket(&state);
+}
+
+TEST(IpcDaemonLifecycle, ListenFailurePreservesStaleSocketForNextStartup) {
+  ScopedDaemonDirectory matching_temp("ps-listener-match", true);
+  const std::filesystem::path matching_path =
+      matching_temp.path() / "listener.sock";
+  internal::ServerLifecycleTestDependencies matching_dependencies;
+  matching_dependencies.listen_call = fail_listener;
+
+  const OperationStatus matching_status = internal::test_create_listener(
+      matching_path.string(), matching_dependencies);
+
+  EXPECT_FALSE(matching_status.ok);
+  EXPECT_NE(matching_status.message.find(std::strerror(EIO)),
+            std::string::npos);
+  EXPECT_TRUE(std::filesystem::is_socket(matching_path));
+
+  const OperationStatus successor_status = internal::test_create_listener(
+      matching_path.string(), internal::ServerLifecycleTestDependencies{});
+  EXPECT_TRUE(successor_status.ok) << successor_status.message;
+  EXPECT_FALSE(std::filesystem::exists(matching_path));
+
+  ScopedDaemonDirectory replaced_temp("ps-listener-replaced", true);
+  const std::filesystem::path replaced_path =
+      replaced_temp.path() / "listener.sock";
+  ListenerReplacementState state;
+  state.kind = ListenerReplacementState::Kind::Socket;
+  state.stage = internal::ServerLifecycleTestStage::AfterCandidateBeforeListen;
+  internal::ServerLifecycleTestDependencies replaced_dependencies;
+  replaced_dependencies.context = &state;
+  replaced_dependencies.stage_hook = replace_listener_path;
+  replaced_dependencies.listen_call = fail_listener;
+
+  const OperationStatus replaced_status = internal::test_create_listener(
+      replaced_path.string(), replaced_dependencies);
+
+  EXPECT_FALSE(replaced_status.ok);
+  EXPECT_EQ(state.error, 0) << std::strerror(state.error);
+  struct stat replacement{};
+  EXPECT_EQ(::lstat(replaced_path.c_str(), &replacement), 0);
+  EXPECT_TRUE(S_ISSOCK(replacement.st_mode));
+  close_replacement_socket(&state);
+}
+
+TEST(IpcDaemonLifecycle, CreatesSocketWithExactModeAtBind) {
+  ScopedDaemonDirectory temp("ps-listener-mode", true);
+  const std::filesystem::path socket_path = temp.path() / "listener.sock";
+  ListenerReplacementState state;
+  state.kind = ListenerReplacementState::Kind::None;
+  internal::ServerLifecycleTestDependencies dependencies;
+  dependencies.context = &state;
+  dependencies.stage_hook = replace_listener_path;
+
+  const OperationStatus status =
+      internal::test_create_listener(socket_path.string(), dependencies);
+
+  EXPECT_TRUE(status.ok) << status.message;
+  EXPECT_EQ(state.error, 0) << std::strerror(state.error);
+  EXPECT_EQ(state.initial_mode, 0600);
+  EXPECT_FALSE(std::filesystem::exists(socket_path));
+}
+
+class IpcDaemonFragmentedProofTest
+    : public ::testing::TestWithParam<std::size_t> {};  // NOLINT
+
+TEST_P(IpcDaemonFragmentedProofTest,
+       RetainsMatchingPrefixUntilCompleteProofFrameArrives) {
+  ScopedDaemonDirectory temp("ps-listener-fragmented-proof", true);
+  const std::filesystem::path socket_path = temp.path() / "listener.sock";
+  ProofPrefixState state;
+  internal::ServerLifecycleTestDependencies dependencies;
+  dependencies.context = &state;
+  dependencies.proof_write_chunk_bytes = GetParam();
+  dependencies.proof_prefix_observer = observe_proof_prefix;
+
+  const OperationStatus status =
+      internal::test_create_listener(socket_path.string(), dependencies);
+
+  EXPECT_TRUE(status.ok) << status.message;
+  EXPECT_GE(state.largest_observed.load(std::memory_order_acquire), GetParam());
+  EXPECT_LT(state.largest_observed.load(std::memory_order_acquire), 36U);
+}
+
+INSTANTIATE_TEST_SUITE_P(FragmentBoundaries, IpcDaemonFragmentedProofTest,
+                         ::testing::Values(1U, 4U, 35U));
+
+class IpcDaemonActiveReplacementTest
+    : public ::testing::TestWithParam<std::tuple<int, bool>> {};  // NOLINT
+
+TEST_P(IpcDaemonActiveReplacementTest,
+       PreservesReplacementAndCleansBeforeClosingListener) {
+  ScopedDaemonDirectory temp("ps-listener-active-replacement", true);
+  const std::filesystem::path parent = temp.path() / "daemon";
+  ASSERT_TRUE(std::filesystem::create_directory(parent));
+  ASSERT_EQ(::chmod(parent.c_str(), 0700), 0);
+  const std::filesystem::path socket_path = parent / "listener.sock";
+  const std::filesystem::path target_path = temp.path() / "target";
+  {
+    std::ofstream target(target_path);
+    ASSERT_TRUE(target.is_open());
+    target << "preserve";
+  }
+  ListenerReplacementState state;
+  state.stage =
+      internal::ServerLifecycleTestStage::AfterActivationBeforeRuntimeStart;
+  state.kind =
+      static_cast<ListenerReplacementState::Kind>(std::get<0>(GetParam()));
+  state.symlink_target = target_path.string();
+  internal::ServerLifecycleTestDependencies dependencies;
+  dependencies.context = &state;
+  dependencies.stage_hook = replace_listener_path;
+  dependencies.fail_runtime_start = std::get<1>(GetParam());
+  dependencies.before_active_cleanup = observe_active_cleanup;
+  int stop_descriptors[2] = {-1, -1};
+  ASSERT_EQ(::pipe(stop_descriptors), 0);
+  internal::UniqueFd stop_reader(stop_descriptors[0]);
+  internal::UniqueFd stop_writer(stop_descriptors[1]);
+  if (!dependencies.fail_runtime_start) {
+    state.stop_writer = stop_writer.get();
+  }
+  std::unique_ptr<Host> host = create_embedded_host();
+  internal::Server server(*host, "active-replacement-test");
+
+  const OperationStatus status = internal::test_run_server(
+      server, internal::ServerOptions{socket_path.string()}, stop_reader.get(),
+      dependencies);
+
+  EXPECT_EQ(status.ok, !dependencies.fail_runtime_start) << status.message;
+  EXPECT_EQ(state.error, 0) << std::strerror(state.error);
+  EXPECT_TRUE(state.listener_open_during_cleanup);
+  if (state.kind == ListenerReplacementState::Kind::RegularFile) {
+    EXPECT_TRUE(std::filesystem::is_regular_file(socket_path));
+  } else if (state.kind == ListenerReplacementState::Kind::Symlink) {
+    ASSERT_TRUE(std::filesystem::is_symlink(socket_path));
+    EXPECT_EQ(std::filesystem::read_symlink(socket_path), target_path);
+  } else {
+    struct stat replacement{};
+    ASSERT_EQ(::lstat(socket_path.c_str(), &replacement), 0);
+    EXPECT_TRUE(S_ISSOCK(replacement.st_mode));
+    EXPECT_EQ(replacement.st_dev, state.replacement_device);
+    EXPECT_EQ(replacement.st_ino, state.replacement_inode);
+  }
+  close_replacement_socket(&state);
+}
+
+INSTANTIATE_TEST_SUITE_P(
+    NormalAndRouterFailure, IpcDaemonActiveReplacementTest,
+    ::testing::Values(
+        std::make_tuple(
+            static_cast<int>(ListenerReplacementState::Kind::RegularFile),
+            false),
+        std::make_tuple(
+            static_cast<int>(ListenerReplacementState::Kind::Symlink), false),
+        std::make_tuple(
+            static_cast<int>(ListenerReplacementState::Kind::Socket), false),
+        std::make_tuple(
+            static_cast<int>(ListenerReplacementState::Kind::RegularFile),
+            true),
+        std::make_tuple(
+            static_cast<int>(ListenerReplacementState::Kind::Symlink), true),
+        std::make_tuple(
+            static_cast<int>(ListenerReplacementState::Kind::Socket), true)));
+
+TEST(IpcDaemonLifecycle, ParentRenameRecreateFailsClosedAtActiveCleanup) {
+  ScopedDaemonDirectory temp("ps-listener-parent-replacement", true);
+  const std::filesystem::path parent = temp.path() / "daemon";
+  const std::filesystem::path moved_parent = temp.path() / "daemon-moved";
+  ASSERT_TRUE(std::filesystem::create_directory(parent));
+  ASSERT_EQ(::chmod(parent.c_str(), 0700), 0);
+  ParentReplacementState state;
+  state.parent = parent.string();
+  state.moved_parent = moved_parent.string();
+  internal::ServerLifecycleTestDependencies dependencies;
+  dependencies.context = &state;
+  dependencies.stage_hook = replace_parent_path;
+
+  const OperationStatus status = internal::test_create_listener(
+      (parent / "listener.sock").string(), dependencies);
+
+  EXPECT_TRUE(status.ok) << status.message;
+  EXPECT_EQ(state.error, 0) << std::strerror(state.error);
+  EXPECT_TRUE(std::filesystem::is_directory(parent));
+  EXPECT_TRUE(std::filesystem::is_socket(moved_parent / "listener.sock"));
+}
+
+TEST(IpcDaemonLifecycle, MatchingPrefixThatNeverCompletesFailsAtProofDeadline) {
+  ScopedDaemonDirectory temp("ps-listener-stalled-prefix", true);
+  const std::filesystem::path socket_path = temp.path() / "listener.sock";
+  internal::ServerLifecycleTestDependencies dependencies;
+  dependencies.proof_write_chunk_bytes = 1;
+  dependencies.proof_write_limit_bytes = 1;
+  const auto started = std::chrono::steady_clock::now();
+
+  const OperationStatus status =
+      internal::test_create_listener(socket_path.string(), dependencies);
+
+  const auto elapsed = std::chrono::steady_clock::now() - started;
+  EXPECT_FALSE(status.ok);
+  EXPECT_NE(status.message.find("deadline"), std::string::npos);
+  EXPECT_LT(elapsed, std::chrono::seconds(3));
+}
+
+TEST(IpcDaemonLifecycle, StartupStopInterruptsStalledListenerProof) {
+  ScopedDaemonDirectory temp("ps-listener-cancelled-proof", true);
+  const std::string socket_path = (temp.path() / "listener.sock").string();
+  std::unique_ptr<Host> host = create_embedded_host();
+  internal::Server server(*host, "cancelled-proof-test");
+  internal::ServerLifecycleTestDependencies dependencies;
+  dependencies.proof_write_chunk_bytes = 1;
+  dependencies.proof_write_limit_bytes = 1;
+  int stop_descriptors[2] = {-1, -1};
+  ASSERT_EQ(::pipe(stop_descriptors), 0);
+  internal::UniqueFd stop_reader(stop_descriptors[0]);
+  internal::UniqueFd stop_writer(stop_descriptors[1]);
+  OperationStatus status;
+  const auto started = std::chrono::steady_clock::now();
+  std::thread runner([&] {
+    status =
+        internal::test_run_server(server, internal::ServerOptions{socket_path},
+                                  stop_reader.get(), dependencies);
+  });
+  std::this_thread::sleep_for(std::chrono::milliseconds(50));
+  const char token = 's';
+  ASSERT_EQ(::write(stop_writer.get(), &token, 1), 1);
+  runner.join();
+
+  EXPECT_FALSE(status.ok);
+  EXPECT_NE(status.message.find("cancelled"), std::string::npos);
+  EXPECT_LT(std::chrono::steady_clock::now() - started,
+            std::chrono::seconds(1));
+}
+
+TEST(IpcDaemonLifecycle,
+     PreservesQueuedClientFrameAndCountsItAgainstWorkerLimit) {
+  ScopedDaemonDirectory temp("ps-listener-pending", true);
+  const std::string socket_path = (temp.path() / "listener.sock").string();
+  std::unique_ptr<Host> host = create_embedded_host();
+  internal::Server server(*host, "lifecycle-test");
+  PendingClientState state;
+  state.deadline = std::chrono::steady_clock::now() + std::chrono::seconds(5);
+  internal::ServerLifecycleTestDependencies dependencies;
+  dependencies.context = &state;
+  dependencies.stage_hook = queue_pending_clients;
+  int stop_descriptors[2] = {-1, -1};
+  ASSERT_EQ(::pipe(stop_descriptors), 0);
+  internal::UniqueFd stop_reader(stop_descriptors[0]);
+  internal::UniqueFd stop_writer(stop_descriptors[1]);
+  OperationStatus run_status;
+  std::thread server_thread([&] {
+    run_status =
+        internal::test_run_server(server, internal::ServerOptions{socket_path},
+                                  stop_reader.get(), dependencies);
+  });
+
+  const auto hook_deadline = state.deadline;
+  while (!state.hook_complete.load(std::memory_order_acquire) &&
+         std::chrono::steady_clock::now() < hook_deadline) {
+    std::this_thread::yield();
+  }
+  bool all_responses_complete =
+      state.hook_complete.load(std::memory_order_acquire) && state.error == 0 &&
+      state.count == state.clients.size();
+  std::string response_error;
+  for (internal::UniqueFd& client : state.clients) {
+    if (!all_responses_complete) {
+      break;
+    }
+    std::string readiness_message;
+    if (!wait_for_descriptor(
+            client.get(), POLLIN,
+            std::chrono::steady_clock::now() + std::chrono::seconds(5),
+            &readiness_message)) {
+      all_responses_complete = false;
+      response_error = std::move(readiness_message);
+      break;
+    }
+    const internal::FrameReadResult response =
+        internal::read_frame(client.get());
+    if (response.state != internal::FrameReadState::Complete ||
+        response.payload.find("\"id\":\"pending\"") == std::string::npos ||
+        response.payload.find("\"pong\":true") == std::string::npos) {
+      all_responses_complete = false;
+      response_error =
+          response.message.empty() ? response.payload : response.message;
+      break;
+    }
+  }
+
+  bool excess_rejected = false;
+  if (state.hook_complete.load(std::memory_order_acquire)) {
+    Client excess;
+    const OperationStatus excess_connect = excess.connect(socket_path);
+    excess_rejected = excess_connect.ok && !excess.ping().status.ok;
+    excess.disconnect();
+  } else {
+    state.cancel.store(true, std::memory_order_release);
+  }
+  const char stop_token = 's';
+  const ssize_t stop_written = ::write(stop_writer.get(), &stop_token, 1);
+  if (stop_written != 1) {
+    stop_writer.reset();
+  }
+  server_thread.join();
+  for (internal::UniqueFd& client : state.clients) {
+    client.reset();
+  }
+  EXPECT_EQ(stop_written, 1);
+  EXPECT_TRUE(state.hook_complete.load(std::memory_order_acquire));
+  EXPECT_EQ(state.error, 0) << std::strerror(state.error);
+  EXPECT_EQ(state.count, state.clients.size());
+  EXPECT_TRUE(all_responses_complete) << response_error;
+  EXPECT_TRUE(excess_rejected);
+  EXPECT_TRUE(run_status.ok) << run_status.message;
+  EXPECT_FALSE(std::filesystem::exists(socket_path));
+}
+
+TEST(IpcDaemonLifecycle,
+     PreservesMatchingPartialOrdinaryFrameAfterListenerProof) {
+  ScopedDaemonDirectory temp("ps-listener-partial-pending", true);
+  const std::string socket_path = (temp.path() / "listener.sock").string();
+  std::unique_ptr<Host> host = create_embedded_host();
+  internal::Server server(*host, "partial-pending-test");
+  PendingClientState state;
+  state.deadline = std::chrono::steady_clock::now() + std::chrono::seconds(5);
+  state.target_count = 1;
+  state.initial_frame_bytes = 3;
+  internal::ServerLifecycleTestDependencies dependencies;
+  dependencies.context = &state;
+  dependencies.stage_hook = queue_pending_clients;
+  int stop_descriptors[2] = {-1, -1};
+  ASSERT_EQ(::pipe(stop_descriptors), 0);
+  internal::UniqueFd stop_reader(stop_descriptors[0]);
+  internal::UniqueFd stop_writer(stop_descriptors[1]);
+  OperationStatus run_status;
+  std::thread server_thread([&] {
+    run_status =
+        internal::test_run_server(server, internal::ServerOptions{socket_path},
+                                  stop_reader.get(), dependencies);
+  });
+
+  while (!state.activated.load(std::memory_order_acquire) &&
+         std::chrono::steady_clock::now() < state.deadline) {
+    std::this_thread::yield();
+  }
+  const std::vector<unsigned char> frame = pending_ping_frame();
+  std::size_t written = state.initial_frame_bytes;
+  while (state.activated.load(std::memory_order_acquire) && state.error == 0 &&
+         written < frame.size() &&
+         std::chrono::steady_clock::now() < state.deadline) {
+    int send_flags = MSG_DONTWAIT;
+#ifdef MSG_NOSIGNAL
+    send_flags |= MSG_NOSIGNAL;
+#endif
+    const ssize_t result =
+        ::send(state.clients[0].get(), frame.data() + written,
+               frame.size() - written, send_flags);
+    if (result > 0) {
+      written += static_cast<std::size_t>(result);
+    } else if (result < 0 && errno != EINTR && errno != EAGAIN &&
+               errno != EWOULDBLOCK) {
+      state.error = errno;
+    }
+  }
+  std::string readiness_message;
+  const bool response_ready =
+      written == frame.size() &&
+      wait_for_descriptor(state.clients[0].get(), POLLIN, state.deadline,
+                          &readiness_message);
+  const internal::FrameReadResult response =
+      response_ready ? internal::read_frame(state.clients[0].get())
+                     : internal::FrameReadResult{};
+  const char stop_token = 's';
+  const ssize_t stop_written = ::write(stop_writer.get(), &stop_token, 1);
+  if (stop_written != 1) {
+    stop_writer.reset();
+  }
+  server_thread.join();
+
+  EXPECT_TRUE(state.hook_complete.load(std::memory_order_acquire));
+  EXPECT_TRUE(state.activated.load(std::memory_order_acquire));
+  EXPECT_EQ(state.error, 0) << std::strerror(state.error);
+  EXPECT_EQ(state.count, 1U);
+  EXPECT_EQ(written, frame.size());
+  EXPECT_TRUE(response_ready) << readiness_message;
+  EXPECT_EQ(response.state, internal::FrameReadState::Complete)
+      << response.message;
+  EXPECT_NE(response.payload.find("\"id\":\"pending\""), std::string::npos)
+      << response.payload;
+  EXPECT_NE(response.payload.find("\"pong\":true"), std::string::npos)
+      << response.payload;
+  EXPECT_EQ(stop_written, 1);
+  EXPECT_TRUE(run_status.ok) << run_status.message;
+  EXPECT_FALSE(std::filesystem::exists(socket_path));
 }
 
 TEST(IpcDaemonLifecycle, SerializesConcurrentStaleReclaimWithPersistentLock) {

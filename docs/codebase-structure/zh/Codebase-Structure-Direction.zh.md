@@ -381,9 +381,18 @@ graph TD
 - 默认不开放远程 TCP listener。
 - Socket path 按用户隔离，优先使用合法 `$XDG_RUNTIME_DIR`，否则使用
   `/tmp/photospider-<uid>`。
-- Daemon-created directory 为 `0700`，socket 为 `0600`。
+- Daemon-created directory 为 `0700`；bind 在 umask `0177` 下直接以精确 `0600` 创建
+  socket。
 - 持久 mode-`0600` `${socket}.lock` 会在不跟随 symlink 的前提下打开，并从 stale-path 检查到
-  精确 socket cleanup 全程持有 nonblocking exclusive `flock`；lock inode 永不删除。
+  经过 identity 检查的 socket cleanup 全程持有 nonblocking exclusive `flock`；lock inode
+  永不删除。Listener ownership 只会按 Candidate capture、由原 accept queue 观察到的真实 framed
+  pathname self-connect、最终 fixed-dirfd revalidation、无分配 cleanup activation 的顺序推进。
+  Proof 期间的 connect/write/accept/prefix classification 共享单一可取消绝对 deadline；backlog
+  不保留 proof slot。Non-probe client 保持有界，并且只在 router runtime 启动后进入普通
+  admission。保存的 scalar parent identity 会使稳定 rename/recreation fail closed，Active cleanup
+  会先 unlink 再关闭 listener。
+  Portable POSIX 无法使最终 pathname revalidation 与 unlink 对 same-uid writer 保持原子性；
+  权威边界见 `IPC-Protocol-v1.zh.md`。
 
 已实现的 version 1 协议：
 

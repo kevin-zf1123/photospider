@@ -1243,8 +1243,9 @@ mutable reference enters a payload.
 explicit socket. Otherwise a valid uid-owned protected `XDG_RUNTIME_DIR` is
 preferred; if its final path cannot fit `sun_path`, the daemon uses
 `/tmp/photospider-<uid>/photospiderd-v1.sock`. Daemon-created direct runtime
-directories are `0700`; the socket and its persistent `${socket}.lock` regular
-file are `0600`.
+directories are `0700`; the socket is created directly with exact mode `0600`
+under temporary umask `0177`, and its persistent `${socket}.lock` regular file
+is `0600`.
 
 Before inspecting or reclaiming the socket path, the daemon opens the
 persistent lock with `O_NOFOLLOW|O_CLOEXEC`, verifies regular-file identity,
@@ -1254,9 +1255,58 @@ starters serialize on one stable inode and process death releases ownership.
 While holding it, the daemon uses `lstat` to refuse symlinks, non-sockets, and
 paths owned by another uid. A bounded nonblocking probe preserves a live
 same-owner listener. Only a same-owner socket whose connection is refused is
-revalidated by device/inode/owner and removed as stale. Cleanup records the
-created device/inode/owner and unlinks only that exact socket before releasing
-the lifecycle lock.
+revalidated by device/inode/owner and removed as stale. Before bind, listener
+startup allocates its cleanup basename and opens the protected parent directory.
+Immediately after bind it uses that fixed descriptor to verify socket type,
+effective-uid ownership, exact mode `0600`, device, and inode, but captures only
+that scalar **Candidate** identity and leaves cleanup inactive. It then calls
+`listen` and runs a nonblocking self-connect/write/accept/classification state
+machine through the pathname. One absolute deadline covers every backlog retry,
+poll, token byte write, accept, and peek; the signal self-pipe can cancel the
+same loop during startup. The kernel backlog is only a queue-size request and
+does not reserve a proof-only slot. The original listener drains accepted
+connections within the same budget. A peeked mismatch becomes an ordinary
+pending client without consuming data; `EAGAIN` or a matching 1..35-byte prefix
+remains undecided and is polled again; only one complete equal 36-byte framed
+token proves the pathname. Once that proof descriptor is removed, every other
+undecided descriptor is retained as an ordinary pending client, including an
+empty or matching partial frame. A stalled matching prefix with no completed
+proof therefore fails at the single deadline. Ordinary pending clients are
+retained in pre-reserved bounded storage and count against the existing
+32-client limit; a 33rd ordinary client causes explicit startup failure even if
+it raced the proof connector. Only after proof does startup revalidate parent
+pathname identity plus socket type, uid, exact mode `0600`, device, and inode
+through the fixed parent descriptor against Candidate and activate cleanup by
+changing scalar state without allocation. The resulting lifecycle is
+`Candidate -> self proof -> final revalidation -> Active`.
+
+If `listen`, self-connect, accept/peek, pending capacity, token proof, or final
+revalidation fails, startup closes the new listener and every pending
+descriptor and reports startup failure. Before activation it preserves the
+current pathname; in particular, a `listen` failure leaves the bound socket as
+stale so a later normal startup can reclaim it under the lifecycle lock. The
+`listen` errno is captured before any later operation and used only to build the
+owned `OperationStatus.message`; no caller-visible thread-local `errno`
+postcondition is promised. After runtime
+startup succeeds, proof-time pending clients enter the ordinary worker
+admission path without losing their first frame. Every later shutdown failure
+uses the active identity guard; if the pathname is missing or its
+type/owner/mode/device/inode differs, the observed replacement is preserved.
+
+The lifecycle lock serializes cooperating daemon instances. Startup stores the
+protected parent's scalar device/inode identity and compares the parent pathname
+to the fixed dirfd at Candidate capture, activation, and cleanup. Stable parent
+rename/recreation therefore fails closed instead of redirecting work. Portable
+POSIX does not provide one operation that both
+revalidates a Unix-socket pathname and conditionally unlinks that verified
+inode. The final `fstatat(AT_SYMLINK_NOFOLLOW)` and `unlinkat` therefore remain
+distinct instructions: a same-uid actor with write access to the protected
+parent can still replace the final component in that interval. Cleanup is
+fail-closed whenever identity cannot be proved and never intentionally removes
+an already observed mismatch, but it cannot claim atomic protection against
+that same-uid final-check race. On every Active exit, identity-aware unlink runs
+while the listener fd still holds the original socket inode; only then is the
+listener closed, removing the close-to-cleanup inode-reuse interval.
 
 The listener tracks at most 32 joinable client workers. Requests are sequential
 per connection; frame/JSON work may occur across clients. Because public Host
