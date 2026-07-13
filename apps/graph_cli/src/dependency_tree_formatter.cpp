@@ -9,12 +9,35 @@
 namespace ps::cli {
 
 namespace {
+/**
+ * @brief Writes two-space indentation for one tree-output line.
+ *
+ * @param os Borrowed destination stream.
+ * @param level Non-negative indentation depth; negative values emit nothing.
+ * @return Nothing.
+ * @throws std::ios_base::failure if the caller enabled stream exceptions and
+ *         writing fails.
+ * @note The helper neither owns nor retains `os` and performs no Host access.
+ */
 void indent(std::ostream& os, int level) {
   for (int i = 0; i < level; ++i) {
     os << "  ";
   }
 }
 
+/**
+ * @brief Writes copied static node parameters below a dependency-tree row.
+ *
+ * @param os Borrowed destination stream.
+ * @param parameters Ordered copied parameter map from a Host node snapshot.
+ * @param level Parent dependency-tree indentation depth.
+ * @return Nothing; an empty map emits no text.
+ * @throws std::bad_alloc if stream buffering exhausts memory.
+ * @throws std::ios_base::failure if the caller enabled stream exceptions and
+ *         writing fails.
+ * @note Map order is preserved. The helper retains neither the stream nor the
+ *       copied parameter strings and performs no Host call.
+ */
 void dump_parameters(std::ostream& os,
                      const std::map<std::string, std::string>& parameters,
                      int level) {
@@ -31,6 +54,23 @@ void dump_parameters(std::ostream& os,
   }
 }
 
+/**
+ * @brief Writes node metadata with normalized indentation.
+ *
+ * The helper formats the copied node metadata, removes carriage returns and
+ * leading horizontal whitespace line by line, and writes every line at the
+ * requested dependency-tree depth.
+ *
+ * @param os Borrowed destination stream.
+ * @param node Copied public Host node snapshot to format.
+ * @param level Output indentation depth.
+ * @return Nothing.
+ * @throws std::bad_alloc if metadata, line, or stream-buffer construction
+ *         exhausts memory.
+ * @throws std::ios_base::failure if the caller enabled stream exceptions and
+ *         reading or writing fails.
+ * @note The helper retains neither `os` nor `node` and performs no Host call.
+ */
 void dump_trimmed_metadata(std::ostream& os, const NodeInspectionView& node,
                            int level) {
   std::istringstream metadata_stream(format_node_metadata(node));
@@ -50,6 +90,19 @@ void dump_trimmed_metadata(std::ostream& os, const NodeInspectionView& node,
   }
 }
 
+/**
+ * @brief Writes one row-major 3-by-3 spatial matrix.
+ *
+ * @param os Borrowed destination stream.
+ * @param label Borrowed null-terminated label valid for the duration of the
+ *        call.
+ * @param matrix Borrowed nine-element row-major matrix.
+ * @return Nothing.
+ * @throws std::bad_alloc if stream buffering exhausts memory.
+ * @throws std::ios_base::failure if the caller enabled stream exceptions and
+ *         writing fails.
+ * @note The helper retains no borrowed input and performs no Host call.
+ */
 void dump_matrix(std::ostream& os, const char* label,
                  const double (&matrix)[9]) {
   os << "    " << label << ":\n";
@@ -67,6 +120,8 @@ void dump_matrix(std::ostream& os, const char* label,
  * @param domain Public dirty domain from a Host snapshot.
  * @return Stable short label used in `inspect dirty` output.
  * @throws Nothing.
+ * @note The returned string has static storage; unknown enum values map to
+ *       `unknown` and no Host state is accessed.
  */
 const char* dirty_domain_name(DirtyDomain domain) {
   switch (domain) {
@@ -84,6 +139,8 @@ const char* dirty_domain_name(DirtyDomain domain) {
  * @param lifecycle Public dirty-source lifecycle value.
  * @return Stable lifecycle label used in `inspect dirty` output.
  * @throws Nothing.
+ * @note The returned string has static storage; unknown enum values map to
+ *       `unknown` and no Host state is accessed.
  */
 const char* dirty_source_lifecycle_name(DirtySourceLifecycleState lifecycle) {
   switch (lifecycle) {
@@ -103,6 +160,8 @@ const char* dirty_source_lifecycle_name(DirtySourceLifecycleState lifecycle) {
  * @param direction Public dirty edge mapping direction.
  * @return Stable direction label used in `inspect dirty` output.
  * @throws Nothing.
+ * @note The returned string has static storage; unknown enum values map to
+ *       `unknown` and no Host state is accessed.
  */
 const char* dirty_edge_direction_name(DirtyEdgeDirection direction) {
   switch (direction) {
@@ -120,6 +179,8 @@ const char* dirty_edge_direction_name(DirtyEdgeDirection direction) {
  * @param rect Pixel rectangle to format.
  * @return Compact `x,y widthxheight` text.
  * @throws std::bad_alloc if string construction allocates and fails.
+ * @note The helper consumes a copied public value, performs no Host call, and
+ *       retains no reference to `rect`.
  */
 std::string rect_text(const PixelRect& rect) {
   std::ostringstream out;
@@ -128,6 +189,7 @@ std::string rect_text(const PixelRect& rect) {
 }
 }  // namespace
 
+/** @copydoc format_node_metadata */
 std::string format_node_metadata(const NodeInspectionView& node) {
   std::ostringstream os;
   if (!node.has_cached_output || !node.debug || !node.space) {
@@ -165,6 +227,7 @@ std::string format_node_metadata(const NodeInspectionView& node) {
   return os.str();
 }
 
+/** @copydoc format_node_inspection */
 std::string format_node_inspection(const NodeInspectionView& node) {
   std::ostringstream os;
   os << "Node " << node.id.value << " (" << node.name << " | " << node.type
@@ -173,6 +236,7 @@ std::string format_node_inspection(const NodeInspectionView& node) {
   return os.str();
 }
 
+/** @copydoc format_graph_inspection */
 std::string format_graph_inspection(const GraphInspectionView& graph) {
   std::ostringstream os;
   for (size_t idx = 0; idx < graph.nodes.size(); ++idx) {
@@ -187,6 +251,7 @@ std::string format_graph_inspection(const GraphInspectionView& graph) {
   return os.str();
 }
 
+/** @copydoc format_dirty_snapshot */
 std::string format_dirty_snapshot(
     const DirtyRegionInspectionSnapshot& snapshot) {
   std::ostringstream out;
@@ -254,6 +319,7 @@ std::string format_dirty_snapshot(
   return out.str();
 }
 
+/** @copydoc format_dependency_tree */
 std::string format_dependency_tree(const HostDependencyTreeSnapshot& tree,
                                    bool show_parameters, bool show_metadata) {
   std::ostringstream os;

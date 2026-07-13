@@ -6,6 +6,7 @@
 
 namespace ps {
 
+/** @copydoc CliAutocompleter::CompletePath */
 void CliAutocompleter::CompletePath(const std::string& prefix,
                                     std::vector<std::string>& options) const {
   auto opts = PathCompleteOptions(prefix);

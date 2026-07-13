@@ -5,6 +5,7 @@
 
 namespace ps {
 
+/** @copydoc CliAutocompleter::CompleteCommand */
 void CliAutocompleter::CompleteCommand(
     const std::string& prefix, std::vector<std::string>& options) const {
   for (const auto& cmd : commands_) {

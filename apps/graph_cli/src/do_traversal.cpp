@@ -4,6 +4,7 @@
 #include <string>
 #include <vector>
 
+/** @copydoc do_traversal */
 void do_traversal(ps::Host& host, const std::string& graph_name, bool show_mem,
                   bool show_disk) {
   auto details = host.traversal_details(ps::GraphSessionId{graph_name});

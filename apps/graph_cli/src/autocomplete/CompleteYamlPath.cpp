@@ -6,6 +6,7 @@
 
 namespace ps {
 
+/** @copydoc CliAutocompleter::CompleteYamlPath */
 void CliAutocompleter::CompleteYamlPath(
     const std::string& prefix, std::vector<std::string>& options) const {
   // Use generic path options, then filter to YAML files, but keep directories

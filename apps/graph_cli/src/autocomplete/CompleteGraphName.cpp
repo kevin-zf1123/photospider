@@ -6,6 +6,7 @@
 
 namespace ps {
 
+/** @copydoc CliAutocompleter::CompleteGraphName */
 void CliAutocompleter::CompleteGraphName(
     const std::string& prefix, std::vector<std::string>& options) const {
   auto names = svc_.list_graphs();
