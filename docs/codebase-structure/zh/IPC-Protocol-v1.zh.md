@@ -1060,7 +1060,8 @@ mutable reference。
 `photospiderd` 保持 foreground。`--socket ABSOLUTE_PATH` 选择 explicit socket；否则优先使用
 合法 uid-owned protected `XDG_RUNTIME_DIR`。若最终 path 无法放入 `sun_path`，则使用
 `/tmp/photospider-<uid>/photospiderd-v1.sock`。Daemon-created direct runtime directory 为
-`0700`，socket 与持久 `${socket}.lock` regular file 均为 `0600`。
+`0700`；socket 在临时 umask `0177` 下直接以精确 mode `0600` 创建，持久
+`${socket}.lock` regular file 为 `0600`。
 
 检查或回收 socket path 前，daemon 使用 `O_NOFOLLOW|O_CLOEXEC` 打开持久 lock，验证
 regular-file identity、owner、single link 与精确 `0600` mode，然后获取
@@ -1068,8 +1069,43 @@ regular-file identity、owner、single link 与精确 `0600` mode，然后获取
 starter 会在同一个稳定 inode 上串行，process death 也会自动释放 ownership。持锁期间 daemon
 使用 `lstat` 拒绝 symlink、non-socket 与其他 uid 所有的 path。Bounded nonblocking probe 会保留
 live same-owner listener；只有 connection refused 的 same-owner socket 才会在按
-device/inode/owner 重新验证后作为 stale 删除。Cleanup 记录 created device/inode/owner，在释放
-lifecycle lock 前只 unlink 精确匹配的 socket。
+device/inode/owner 重新验证后作为 stale 删除。Listener startup 会在 bind 前分配 cleanup
+basename 并打开受保护的 parent directory。Bind 后立即通过该固定 descriptor 验证 socket type、
+effective-uid ownership、精确 mode `0600`、device 与 inode，但只捕获该 scalar
+**Candidate** identity，cleanup 仍保持 inactive。随后调用 `listen`，并通过 pathname 发起真实
+self-connect/write/accept/classification 状态机。单一绝对 deadline 覆盖全部 backlog retry、poll、
+token byte write、accept 与 peek；startup 期间同一个 loop 也可被 signal self-pipe 取消。Kernel
+backlog 只是 queue-size request，不会保留 proof-only slot。原 listener 在同一预算内 drain accepted
+connection。Peek 已观察到 mismatch 时才把连接归为普通 pending client，且不消费数据；`EAGAIN`
+或 matching 1..35-byte prefix 会保持 undecided 并继续 poll；只有一个完整相等的 36-byte framed
+token 能够证明 pathname。移除该 proof descriptor 后，其余每个 undecided descriptor 都会作为
+普通 pending client 被保留，包括 empty 或 matching partial frame。若始终没有完整 proof，恶意
+停在 matching prefix 的连接仍会在单一 deadline 到期时失败。普通 pending client 保存在 bind
+前预留的 bounded storage 中，并计入既有 32-client 上限；即使第 33 个普通 client 与 proof
+connector 竞态，也会导致明确 startup failure。Proof 成功后，startup 才验证 parent pathname
+identity，并通过固定 parent descriptor 再次验证 type、uid、精确 mode `0600`、device 与 inode
+均等于 Candidate，最后只改变 scalar state、无分配地激活 cleanup。完整 lifecycle 为
+`Candidate -> self proof -> final revalidation -> Active`。
+
+如果 `listen`、self-connect、accept/peek、pending capacity、token proof 或 final revalidation
+失败，startup 会关闭本次 listener 与全部 pending descriptor，并报告 startup failure。在
+activation 之前它会保留当前 pathname；尤其是 `listen` failure 会留下 bound socket 作为 stale，
+使后续正常 startup 可在 lifecycle lock 下回收它。`listen` errno 会在任何后续操作前捕获，并且
+只用于构造 owned `OperationStatus.message`；不承诺 caller 可见的 thread-local `errno` 后置状态。
+Request-router runtime 成功启动后，proof 期间捕获的 pending client 才进入普通 worker admission，
+其首个 frame 不会丢失。此后 shutdown failure 使用 active identity guard；如果 pathname 缺失，
+或其 type/owner/mode/device/inode 不同，则保留观察到的替换项。
+
+Lifecycle lock 会串行化彼此协作的 daemon instance。Startup 会保存受保护 parent 的 scalar
+device/inode identity，并在 Candidate capture、activation 与 cleanup 时比较 parent pathname 与
+fixed dirfd；稳定的 parent rename/recreation 因而会 fail closed，而不会重定向操作。Portable
+POSIX 不提供一种同时重新验证 Unix-socket
+pathname 并有条件 unlink 该已验证 inode 的操作。因此，最终的
+`fstatat(AT_SYMLINK_NOFOLLOW)` 与 `unlinkat` 仍是两条独立指令：拥有受保护 parent 写权限的
+same-uid actor 仍可在两者之间替换最后一个 path component。当 identity 无法证明时，cleanup
+会 fail closed，且绝不会有意删除已经观察到的不匹配项；但它不能声称对该 same-uid final-check
+竞态提供原子保护。每条 Active exit path 都会在 listener fd 仍持有原 socket inode 时先执行
+identity-aware unlink，再关闭 listener，从而消除 close 到 cleanup 之间的 inode-reuse 窗口。
 
 Listener 最多跟踪 32 个 joinable client worker。每个 connection 内 request 顺序执行，不同
 client 的 frame/JSON 工作可以并发。Public Host 不承诺 thread-safe，因此每个 Host call 都使用
