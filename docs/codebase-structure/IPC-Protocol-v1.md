@@ -847,8 +847,10 @@ Production limits are 64 retained artifacts, one GiB total retained bytes, and
 is transactional: a failed publication retains no record, quota reservation,
 or safely removable partial file. Every controlled stage and final basename is
 `output-<32-lowercase-hex>.bin`, so restart cleanup can recognize a stage left
-by process death. Complete data is atomically renamed without replacement and
-then revalidated before a record becomes visible.
+by process death. Held parent/base/instance ancestry is revalidated immediately
+before the first `O_CREAT|O_EXCL` stage creation. Complete data is atomically
+renamed without replacement, then ancestry and artifact identity are
+revalidated again before a record becomes visible.
 
 The store base is the socket-specific same-owner exact-mode `0700`
 `<socket>.outputs`; one process writes below the exact-mode `0700`

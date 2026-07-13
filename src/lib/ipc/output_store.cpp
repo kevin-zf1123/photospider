@@ -1441,19 +1441,27 @@ class OutputStore::Impl {
   }
 
   /**
-   * @brief Creates, protects, fills, syncs, and size-validates one stage file.
+   * @brief Revalidates ancestry, then creates and fills one protected stage.
    * @param image Borrowed validated Host image source.
    * @param layout Exact tight-row source and artifact sizes.
    * @param candidate Publication transaction receiving fd and inode identity.
    * @return Nothing.
-   * @throws std::runtime_error for filesystem, identity, write, or size errors.
+   * @throws std::runtime_error for ancestry, filesystem, identity, write, or
+   *         size errors.
    * @throws std::bad_alloc if an errno diagnostic cannot be allocated.
-   * @note Caller holds `mutex_`; the candidate owns the descriptor and records
-   *       stage creation immediately so later failure performs exact rollback.
+   * @note Caller holds `mutex_`. Held parent/base/instance descriptors are
+   *       matched to their live exact-mode paths immediately before the first
+   *       `O_CREAT|O_EXCL` open. A mismatch therefore throws before any stage
+   *       exists; after creation, the candidate records inode ownership
+   *       immediately and later failure retains conservative exact rollback.
    */
   void create_and_write_stage_locked(const ImageBuffer& image,
                                      const ImageLayout& layout,
                                      PublicationCandidate* candidate) const {
+    if (!ancestry_matches_locked()) {
+      throw std::runtime_error(
+          "output artifact ancestry changed before stage creation");
+    }
     candidate->artifact_fd.reset(
         ::openat(instance_fd_.get(), candidate->stage_name.c_str(),
                  O_WRONLY | O_CREAT | O_EXCL | O_NOFOLLOW | O_CLOEXEC, 0600));

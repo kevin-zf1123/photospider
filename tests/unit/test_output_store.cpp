@@ -449,6 +449,144 @@ std::size_t directory_entry_count(const std::filesystem::path& path) {
 }
 
 /**
+ * @brief Temporarily displaces one directory and installs a private
+ * replacement.
+ *
+ * The original directory is renamed to a test-owned sibling before an empty
+ * exact-mode `0700` directory is created at the original path. Explicit or
+ * scope-exit restoration removes the replacement and renames the displaced
+ * directory back so descriptor-owning fixtures observe their original ancestry
+ * during destruction.
+ *
+ * @throws std::filesystem::filesystem_error when rename, replacement creation,
+ *         removal, or restoration fails.
+ * @throws std::runtime_error when replacement creation, removal, or exact
+ *         permission installation reports failure without an error code.
+ * @note The caller must exclusively own both paths and must not place entries
+ * in the replacement directory. Destruction makes a best-effort restoration and
+ * never throws.
+ */
+class ScopedDirectoryDisplacement {
+ public:
+  /**
+   * @brief Displaces the original directory and creates its private
+   * replacement.
+   * @param original Existing directory path retained by the system under test.
+   * @param displaced Unused test-owned path receiving the original directory.
+   * @throws std::filesystem::filesystem_error when filesystem mutation fails.
+   * @throws std::runtime_error when replacement creation, removal, or exact
+   * permission installation reports failure without an error code.
+   * @note A partially installed replacement is rolled back through `restore()`
+   * before propagation. A rollback failure propagates instead of being hidden.
+   */
+  ScopedDirectoryDisplacement(std::filesystem::path original,
+                              std::filesystem::path displaced)
+      : original_(std::move(original)), displaced_(std::move(displaced)) {
+    std::filesystem::rename(original_, displaced_);
+    restoration_state_ = RestorationState::kOriginalPathVacant;
+    try {
+      if (!std::filesystem::create_directory(original_)) {
+        throw std::runtime_error(
+            "cannot create displaced-directory replacement");
+      }
+      restoration_state_ = RestorationState::kReplacementInstalled;
+      if (::chmod(original_.c_str(), 0700) != 0) {
+        throw std::runtime_error(
+            "cannot protect displaced-directory replacement");
+      }
+    } catch (...) {
+      restore();
+      throw;
+    }
+  }
+
+  /**
+   * @brief Restores the displaced directory before descriptor-owner teardown.
+   * @return Nothing.
+   * @throws std::filesystem::filesystem_error when replacement removal or
+   *         restoration fails.
+   * @throws std::runtime_error when the installed replacement is absent at
+   *         removal time.
+   * @note State advances only after each filesystem mutation succeeds. A
+   * failed removal can retry removal, while a failed rename retries only the
+   * rename; repeated calls after successful restoration have no effect.
+   */
+  void restore() {
+    if (restoration_state_ == RestorationState::kReplacementInstalled) {
+      if (!std::filesystem::remove(original_)) {
+        throw std::runtime_error(
+            "cannot remove displaced-directory replacement");
+      }
+      restoration_state_ = RestorationState::kOriginalPathVacant;
+    }
+    if (restoration_state_ == RestorationState::kOriginalPathVacant) {
+      std::filesystem::rename(displaced_, original_);
+      restoration_state_ = RestorationState::kRestored;
+    }
+  }
+
+  /**
+   * @brief Restores the original directory when a fatal assertion exits scope.
+   * @throws Nothing; restoration failure is contained for fixture cleanup.
+   */
+  ~ScopedDirectoryDisplacement() noexcept {
+    try {
+      restore();
+    } catch (...) {
+    }
+  }
+
+  /**
+   * @brief Prevents duplicate ownership of the restoration obligation.
+   * @throws Nothing because construction is unavailable.
+   */
+  ScopedDirectoryDisplacement(const ScopedDirectoryDisplacement&) = delete;
+
+  /**
+   * @brief Prevents replacing the sole restoration obligation.
+   * @return No value because copying is unavailable.
+   * @throws Nothing because assignment is unavailable.
+   */
+  ScopedDirectoryDisplacement& operator=(const ScopedDirectoryDisplacement&) =
+      delete;
+
+  /**
+   * @brief Returns the path containing the displaced original directory.
+   * @return Borrowed path valid for this guard's lifetime.
+   * @throws Nothing.
+   */
+  const std::filesystem::path& displaced_path() const noexcept {
+    return displaced_;
+  }
+
+ private:
+  /**
+   * @brief Tracks the next idempotent restoration step owned by this guard.
+   * @note A transition is recorded only after its corresponding filesystem
+   * mutation succeeds, preserving the correct retry point after exceptions.
+   */
+  enum class RestorationState {
+    /** @brief No restoration is required. */
+    kRestored,
+
+    /** @brief The original path is vacant and awaits the final rename. */
+    kOriginalPathVacant,
+
+    /** @brief The guard-owned replacement must be removed before rename. */
+    kReplacementInstalled,
+  };
+
+  /** @brief Original path temporarily occupied by the replacement directory. */
+  std::filesystem::path original_;
+
+  /** @brief Test-owned backup path containing the displaced real directory. */
+  std::filesystem::path displaced_;
+
+  /** @brief Current retry point for restoring the displaced directory. */
+  RestorationState restoration_state_ = RestorationState::kRestored;
+};
+
+/**
  * @brief Commits one deterministic active session for store/registry tests.
  * @param sessions Session registry under test.
  * @return Active opaque session id.
@@ -613,6 +751,53 @@ TEST(OutputStore, MalformedImagesBecomeInternalFailureWithoutResidue) {
   EXPECT_EQ(store.artifact_count(), 0U);
   EXPECT_EQ(store.retained_bytes(), 0U);
   EXPECT_EQ(directory_entry_count(environment.instance_path(instance_id)), 0U);
+}
+
+/**
+ * @brief Verifies publication rejects replaced ancestry before leaving a stage.
+ *
+ * The test starts the store through its public API, moves the live instance
+ * directory while its descriptor remains held, and installs an exact-mode
+ * replacement at the advertised path. Publication must return nested daemon
+ * internal failure without ownership, accounting, or any entry in the displaced
+ * original instance. The directory guard restores ancestry before store
+ * teardown.
+ *
+ * @return Nothing.
+ * @throws std::filesystem::filesystem_error when test-owned directory
+ * displacement or restoration fails.
+ * @throws std::runtime_error when private fixture setup or guarded replacement
+ * management fails.
+ * @note `displacement` must remain declared after `store`: reverse destruction
+ * order guarantees restoration before `OutputStore` closes its retained
+ * descriptor, including when a fatal assertion returns from the test early.
+ */
+TEST(OutputStore, PublicationRevalidatesAncestryBeforeCreatingStage) {
+  StoreEnvironment environment;
+  SequentialIds ids;
+  OutputStore store({}, {}, [&] { return ids.next(); });
+  const std::string instance_id = opaque_id(30);
+  const std::filesystem::path instance_path =
+      environment.instance_path(instance_id);
+  ASSERT_TRUE(
+      store.start(environment.socket_path(), instance_id, environment.lock_fd())
+          .ok);
+  ScopedDirectoryDisplacement displacement(
+      instance_path, environment.root_path() / "displaced-output-instance");
+
+  ComputeOutputPublication publication = store.publish(
+      ComputeRequestId{opaque_id(300)}, make_u8_image(1, 1, 1, 1, {7}));
+
+  EXPECT_FALSE(publication.status.ok);
+  EXPECT_EQ(publication.status.domain, OperationErrorDomain::Daemon);
+  EXPECT_EQ(publication.status.code, kInternalErrorCode);
+  EXPECT_EQ(publication.status.name, "internal_error");
+  EXPECT_FALSE(publication.output.active());
+  EXPECT_EQ(store.artifact_count(), 0U);
+  EXPECT_EQ(store.retained_bytes(), 0U);
+  EXPECT_EQ(directory_entry_count(displacement.displaced_path()), 0U);
+  EXPECT_EQ(directory_entry_count(instance_path), 0U);
+  EXPECT_NO_THROW(displacement.restore());
 }
 
 TEST(OutputStore, EnforcesPerArtifactAndTotalQuotaTransactionally) {
