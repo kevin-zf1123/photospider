@@ -63,6 +63,7 @@ ComputeService facade
 | `TaskPopulationStrategy` and task population helpers | Populate graph-backed or graphless planned task records and task dependencies without using dirty snapshots to create new task shapes. | Implemented in `src/lib/compute/task_population_strategy.*` and `task_graph_planning.*` |
 | `DirtySnapshotTaskGraphPruner` | Apply a `DirtyRegionSnapshot` to a node/cache-pruned `ComputeTaskGraph` and materialize the active `DirtyUpdateWorkSet`. | Implemented in `src/lib/compute/task_graph_planning.*`; plugin ABI remains TODO |
 | `IntentUpdateCoordinator` | Coordinate `GlobalHighPrecision` and `RealTimeUpdate` intent semantics, including realtime HP/RT dual path behavior independent from execution mode. | Implemented in `src/lib/compute/intent_update_coordinator.*` |
+| Connected-parameter preflight | Stabilize one request-local HP producer closure before dependent parameter, extent, ROI, and task planning; use scheduler initial-handle batches when parallel. | Implemented in `src/lib/compute/dirty_update_executor.*` and coordinated by `ComputeService` |
 | `ComputeTaskDispatcher` | Execute node/cache-pruned task graph semantics by collecting source tasks, checking task-graph readiness, dispatching ready tasks through `SchedulerTaskRuntime`, and committing results. | Implemented in `src/lib/compute/compute_task_dispatcher.*` |
 | `TaskSubmissionPlan` and `dispatch_planned_tasks` | Convert a cache-pruned plan into scheduler closures, dependency counters, ready handles, and empty-plan validation for one dispatcher call. | Implemented in `src/lib/compute/compute_task_submission.*` |
 | `ComputeMetricsRecorder` | Centralize events, timings, benchmark events, and debug metadata. | Implemented in `src/lib/compute/compute_metrics_recorder.*` |
@@ -216,6 +217,27 @@ the scheduler selected for the request's `ComputeIntent`.
 temporary result storage, tile micro-task accounting, exception propagation,
 and final output selection, but hands concrete ready task callbacks to
 `SchedulerTaskRuntime`.
+
+Before HP or RT dirty planning, a target cone with connected parameter inputs
+is stabilized by the compute-service boundary. The host executes each required
+parameter producer and its upstream closure exactly once into one immutable,
+request-local HP snapshot. Effective-parameter conversion, allocation,
+staged-source lookup, and immutable operation input-view construction complete
+before each callback is entered. The same snapshot then drives dependent
+parameter values, current output extents, dirty/forward ROI propagation, and
+node/tile task shapes for the request's HP and RT siblings.
+
+On a scheduler-backed request, each topologically ready preflight node is one
+valid `TaskHandle` in a non-empty initial batch. Its completion wait settles
+before the next node or phase-two dispatch. A failure publishes no staged HP
+cache/version/ROI, RT proxy result, or downstream work; an admitted batch is
+settled before the exception returns. Retry may reuse the same runtime
+scheduler object, but constructs a fresh request snapshot, a fresh
+request-local executor, a fresh initial batch/epoch, and fresh exception,
+completion, and staged-output state. This host-publication guarantee does not
+roll back external side effects from an operation callback that was already
+entered. These request-planning rules are owned here; Plugin ABI documentation
+owns only the per-callback public-value conversion and exception fence.
 
 For full high-precision parallel dispatch, `TaskSubmissionPlan` converts the
 cache-pruned plan into dense node indexes, dependency counters, scheduler task

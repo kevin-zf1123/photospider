@@ -58,6 +58,7 @@ ComputeService facade
 | `TaskPopulationStrategy` 和 task population helpers | 填充 graph-backed 或 graphless planned task record 以及 task dependency；dirty snapshot 不得用来创建新的 task shape。 | 已在 `src/lib/compute/task_population_strategy.*` 和 `task_graph_planning.*` 实现 |
 | `DirtySnapshotTaskGraphPruner` | 将 `DirtyRegionSnapshot` 应用于 node/cache-pruned `ComputeTaskGraph`，并 materialize 活跃的 `DirtyUpdateWorkSet`。 | 已在 `src/lib/compute/task_graph_planning.*` 实现；plugin ABI 仍是 TODO |
 | `IntentUpdateCoordinator` | 协调 `GlobalHighPrecision` 与 `RealTimeUpdate` intent 语义，包括与执行模式无关的 realtime HP/RT 双路径行为。 | 已在 `src/lib/compute/intent_update_coordinator.*` 实现 |
+| Connected-parameter preflight | 在依赖它的 parameter、extent、ROI 和 task planning 前稳定同一个 request-local HP producer closure；并行时使用 scheduler initial-handle batch。 | 已在 `src/lib/compute/dirty_update_executor.*` 实现，并由 `ComputeService` 协调 |
 | `ComputeTaskDispatcher` | 执行 node/cache-pruned task graph 语义：收集 source task、检查 task-graph readiness、通过 `SchedulerTaskRuntime` dispatch ready task，并提交结果。 | 已在 `src/lib/compute/compute_task_dispatcher.*` 实现 |
 | `TaskSubmissionPlan` 和 `dispatch_planned_tasks` | 将 cache-pruned plan 转为一次 dispatcher 调用所需的 scheduler closure、dependency counter、ready handle 和 empty-plan validation。 | 已在 `src/lib/compute/compute_task_submission.*` 实现 |
 | `ComputeMetricsRecorder` | 集中事件、计时、benchmark 事件和 debug 元数据。 | 已在 `src/lib/compute/compute_metrics_recorder.*` 实现 |
@@ -172,6 +173,22 @@ TODO：planner plugin ABI 继续明确推迟到后续 change。
 `ComputeTaskDispatcher` 拥有 compute-plan execution、内部 DAG counter、临时结果存储、
 tile micro-task accounting、异常传播和最终输出选择，但会把具体 ready task callback 交给
 `SchedulerTaskRuntime`。
+
+在 HP 或 RT dirty planning 前，compute-service 边界会稳定带 connected parameter input 的 target
+cone。Host 会把每个必需的 parameter producer 及其 upstream closure 恰好执行一次，并写入同一个
+不可变 request-local HP snapshot。每次进入 callback 前，effective-parameter conversion、allocation、
+staged-source lookup 与不可变 operation input-view 构造都会完成。同一 snapshot 随后为该请求的 HP 与
+RT sibling 提供一致的 dependent parameter value、当前 output extent、dirty/forward ROI propagation
+和 node/tile task shape。
+
+对于 scheduler-backed request，每个在拓扑上 ready 的 preflight node 都是非空 initial batch 中的一个
+合法 `TaskHandle`。对应 completion wait 会在下一个 node 或 phase-two dispatch 前完成收尾。失败不会
+发布 staged HP cache/version/ROI、RT proxy result 或 downstream work；已经 admission 的 batch 会在
+exception 返回前完成收尾。Retry 可以复用同一个 runtime scheduler object，但必须构造全新 request
+snapshot、全新的 request-local executor、全新的 initial batch/epoch，以及全新的 exception、completion
+和 staged-output state。该 host-publication 保证不回滚已经进入的 operation callback 所产生的外部副作用。
+这些 request-planning 规则由本文拥有；Plugin ABI 文档只拥有单次 callback 的 public-value conversion
+与 exception fence。
 
 对于完整 high-precision parallel dispatch，`TaskSubmissionPlan` 会将 cache-pruned plan
 转换为 dense node index、dependency counter、scheduler task handle、operation variant

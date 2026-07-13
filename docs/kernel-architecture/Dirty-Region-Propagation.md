@@ -149,17 +149,23 @@ version increments.
   ROI representation for higher precision.
 - Grid alignment: align ROIs to the current domain grid so they can be split
   into discrete tile sets.
-- Scale mapping: the current RT proxy is one quarter of the source width and
-  height, or roughly one sixteenth of the pixel count. Therefore:
+- Scale mapping: on the generic CPU-resizable pixel path, the current RT proxy
+  is one quarter of the source width and height, or roughly one sixteenth of
+  the pixel count. Therefore:
   - RT Micro_16 maps to HP Micro_64 by scaling up 4x, or back down by dividing
     by 4.
   - RT Macro_64 maps to HP Macro_256 by the same scale rule.
+  - A non-CPU or context-only descriptor without a matching device adapter is
+    not resized by this generic path. Downsample preserves the HP descriptor and
+    full extent as backend-preserving passthrough; it must not be interpreted as
+    reduced CPU pixels. A matching backend adapter or operation must materialize
+    a true scaled proxy before the 4x coordinate rule applies.
 
 Current defaults:
 
 | Domain granularity | Current value | Coordinate space | Notes |
 | --- | --- | --- | --- |
-| RT downscale factor | 4 | N/A | Current proxy scale, tunable. |
+| RT downscale factor | 4 | N/A | Generic CPU-resizable proxy scale, tunable; opaque passthrough keeps full extent. |
 | RT Micro tile | 16x16 | RT proxy space | Current interactive update granularity, tunable. |
 | RT Macro tile | 64x64 | RT proxy space | Current RT throughput/coarsening granularity, tunable. |
 | HP Micro tile | 64x64 | HP full-resolution space | Current HP small-tile granularity, tunable. |
@@ -237,12 +243,13 @@ Micro_16 to satisfy frame-budget constraints.
   `SpatialContext` information to compute inverse upstream ROI through
   `RoiPropagationService::compute_upstream_roi`.
 - **Data-dependent operators**, such as liquify, warp, or displacement, cannot
-  be derived statically from parameters. They must register the following in
-  `OpRegistry`:
-  - a `DependencyLutBuilder` that generates a `SpatialDependencyMap`, which is a
-    grid-based tile-to-upstream-ROI table.
-  - optionally, `OpMetadata::data_dependent`, so schedulers can recognize that
-    the operator must access a LUT.
+  be derived statically from parameters. Built-ins register in `OpRegistry`,
+  while v2 plugins use `OperationPluginRegistrar`; both provide:
+  - a `DependencyLutBuilder`. The public callback returns an owned
+    `DependencyLutSnapshot`, which the host converts to the private
+    grid-based `SpatialDependencyMap` only after validation.
+  - `OperationMetadata::data_dependent` when image content participates in the
+    dependency, so cache identity and scheduling use the correct mode.
 - `RoiPropagationService::compute_upstream_roi` tries the LUT after applying the
   static formula. Grid cells covered by the current ROI are looked up, and the
   returned upstream ROIs are merged with the static result for use by
@@ -250,12 +257,22 @@ Micro_16 to satisfy frame-budget constraints.
   stroke quantitatively constrained to the truly affected input region without
   sacrificing performance.
 
-The LUT lifetime is attached to `Node::dependency_lut`. Whenever
-`parameters_version` changes, the builder regenerates the LUT on the first
-propagation request. Building only walks a bounded number of grid points and is
-usually millisecond-scale, so it can be lazily loaded synchronously by
-`ComputeService` or a debug command on the propagation path without causing a
-long stall.
+The validated LUT and its exact private reuse identity are stored together in
+`Node::dependency_lut_cache`. Reuse requires equality of the deep-owned
+effective parameters, the static parameter-document revision, every parameter-
+input content revision, every image-input source node/output identity and
+extent, the dependency-builder ownership revision, and the resolved
+data-dependent-flag revision. For a data-dependent operation, every image-input
+HP content revision also participates; a static dependency does not invalidate
+only because image pixels changed. Any difference regenerates the LUT on the
+first propagation request. The builder result and complete identity are staged,
+converted, and validated before a no-throw pair replacement, so conversion,
+validation, allocation, or callback failure leaves the preceding cache intact.
+Private revisions never enter the public plugin SDK.
+
+Building walks a bounded number of grid points and is usually
+millisecond-scale, so it can be lazily loaded synchronously by `ComputeService`
+or a debug command on the propagation path without causing a long stall.
 
 `ComputeService` and `DirtyRegionPlanner` call the above logic through
 `RoiPropagationService`, so execution code does not need to care whether an
@@ -305,20 +322,30 @@ task-pool siblings coordinated by compute intent.
 ## 9. ROI Use in the RT/HP Dual Path
 
 - RT:
-  - current granularity is RT Proxy Micro_16, and the system tries to update only
-    `dirty_roi` and its propagated affected region.
-  - if `tiled_op_rt` is missing, fall back to `tiled_op_hp` at RT proxy scale.
+  - for a materialized generic CPU proxy, current granularity is RT Proxy
+    Micro_16, and the system tries to update only `dirty_roi` and its propagated
+    affected region.
+  - if `tiled_op_rt` is missing, fall back to `tiled_op_hp` at RT proxy scale
+    only after such a scaled proxy exists.
+  - an opaque non-CPU descriptor without a device adapter remains a full-extent
+    backend-preserving descriptor. Generic RT code must not treat it as reduced
+    CPU pixels; a matching backend adapter or operation is required for actual
+    scaling.
 
 - HP:
   - currently advances throughput with a Micro_64/Macro_256 mix, preferring
     Macro_256 where appropriate.
-  - Global HP dirty ROI may refresh RT through downsample after completion.
-    RealTimeUpdate HP sibling work suppresses direct graph RT downsample writes;
-    the following RT sibling stages and commits its own proxy output.
+  - Global HP dirty ROI may refresh RT through downsample after completion. The
+    generic CPU path materializes the configured scale; an unsupported opaque
+    backend is passed through with its HP descriptor and full extent until a
+    matching backend implementation can scale it. RealTimeUpdate HP sibling
+    work suppresses direct graph RT downsample writes; the following RT sibling
+    stages and commits its own proxy output.
 
-The planner may represent corresponding HP and RT ROIs using scale conversion
-for synchronization or inspection, but task dependencies stay inside each
-domain: RT Micro_16 <-> RT Macro_64 and HP Micro_64 <-> HP Macro_256.
+For a materialized scaled proxy, the planner may represent corresponding HP and
+RT ROIs using scale conversion for synchronization or inspection. An opaque
+full-extent passthrough does not imply that conversion. Task dependencies stay
+inside each domain: RT Micro_16 <-> RT Macro_64 and HP Micro_64 <-> HP Macro_256.
 
 ## 10. ROI Bounds and Clipping
 
