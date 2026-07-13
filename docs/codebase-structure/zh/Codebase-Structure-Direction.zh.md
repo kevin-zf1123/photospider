@@ -259,7 +259,7 @@ Target 依赖方向：
 graph TD
     public_headers["include/photospider/*"] --> libphotospider["libphotospider STATIC"]
     core["photospider_core_internal"] --> libphotospider
-    graph["photospider_graph_internal"] --> libphotospider
+    graph_internal["photospider_graph_internal"] --> libphotospider
     compute["photospider_compute_internal"] --> libphotospider
     plugin_host["photospider_plugin_host_internal"] --> libphotospider
     scheduler["photospider_scheduler_internal"] --> libphotospider
