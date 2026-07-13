@@ -2044,6 +2044,7 @@ class Client::Impl {
   /**
    * @brief Closes the private connection once.
    *
+   * @return Nothing.
    * @throws Nothing.
    */
   void disconnect() noexcept {
@@ -2054,6 +2055,7 @@ class Client::Impl {
   /**
    * @brief Interrupts blocking IO without releasing descriptor ownership.
    *
+   * @return Nothing.
    * @throws Nothing.
    * @note The stop request is latched before descriptor locking, so an
    *       interrupt that wins before fd publication prevents a later pending

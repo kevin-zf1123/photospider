@@ -34,6 +34,28 @@ namespace compute {
 class RealtimeProxyGraph;
 }  // namespace compute
 
+/**
+ * @brief Owns one graph model, serialized graph-state lane, schedulers, and
+ *        bounded observation rings.
+ *
+ * The runtime constructs all graph-scoped resources from `Info`, routes
+ * lifecycle-sensitive graph operations through `GraphStateExecutor`, and owns
+ * scheduler instances for each compute intent. Compute events and scheduler
+ * traces are copied into independent bounded public/internal pages without
+ * exposing scheduler or cache ownership.
+ *
+ * @throws std::invalid_argument when an injected observation capacity or
+ *         initial sequence is invalid.
+ * @throws std::bad_alloc when graph, scheduler, proxy, or fixed-ring ownership
+ *         cannot be allocated.
+ * @throws std::filesystem::filesystem_error when runtime/cache directory
+ *         preparation fails.
+ * @note Graph-state operations are serialized by `graph_state_`; event and
+ *       trace rings have independent mutexes. Scheduler replacement and
+ *       inspection must use the graph-state lane whenever active compute may
+ *       retain scheduler state. The runtime owns every model, scheduler,
+ *       cache-facing resource, and observation slot until destruction.
+ */
 class GraphRuntime {
  public:
   /**

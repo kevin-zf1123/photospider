@@ -81,6 +81,236 @@ bool wait_connect_retry_slice(const std::function<bool()>& should_stop,
   }
 }
 
+/**
+ * @brief Prepared filesystem Unix address and its exact kernel byte length.
+ * @throws Nothing after construction.
+ */
+struct PreparedUnixAddress {
+  /** @brief Zero-initialized address with family and path populated. */
+  sockaddr_un address{};
+
+  /** @brief Exact address bytes through the terminating path NUL. */
+  socklen_t length = 0;
+};
+
+/**
+ * @brief Mutable state for one logical nonblocking connection attempt.
+ * @throws Nothing after construction.
+ * @note This state never owns or closes the socket descriptor; helper-side
+ *       diagnostic assignment can throw `std::bad_alloc`.
+ */
+struct ConnectAttemptState {
+  /** @brief Whether the logical connection has completed successfully. */
+  bool connected = false;
+
+  /** @brief Whether `EAGAIN` or a pending connect has already been observed. */
+  bool transient_connect_seen = false;
+
+  /** @brief Empty while work may continue, otherwise the terminal diagnostic.
+   */
+  std::string outcome_message;
+};
+
+/**
+ * @brief Outcome of one pending-connect writable/SO_ERROR wait loop.
+ * @throws Nothing.
+ */
+enum class PendingConnectOutcome {
+  /** @brief The socket completed its logical connection. */
+  Connected,
+
+  /** @brief Linux AF_UNIX reported no in-flight connect; retry same-fd connect.
+   */
+  RetryConnect,
+
+  /** @brief Interruption or a terminal system error ended the attempt. */
+  Failed,
+};
+
+/**
+ * @brief Validates and encodes one absolute filesystem Unix socket address.
+ * @param socket_path Candidate absolute socket path.
+ * @param prepared Receives the zero-padded address and exact byte length.
+ * @param message Receives the stable validation diagnostic on failure.
+ * @return True when the path fits and was copied into `prepared`.
+ * @throws std::bad_alloc if diagnostic assignment allocates.
+ * @note The helper writes no socket state and does not retain `socket_path`.
+ */
+bool prepare_unix_address(const std::string& socket_path,
+                          PreparedUnixAddress* prepared, std::string* message) {
+  if (socket_path.empty() || socket_path.front() != '/' ||
+      socket_path.find('\0') != std::string::npos) {
+    *message = "Unix socket path must be absolute";
+    return false;
+  }
+  if (socket_path.size() + 1 > sizeof(prepared->address.sun_path)) {
+    *message = "Unix socket path exceeds sun_path capacity";
+    return false;
+  }
+
+  prepared->address.sun_family = AF_UNIX;
+  std::memcpy(prepared->address.sun_path, socket_path.c_str(),
+              socket_path.size() + 1);
+  prepared->length = static_cast<socklen_t>(offsetof(sockaddr_un, sun_path) +
+                                            socket_path.size() + 1);
+  return true;
+}
+
+/**
+ * @brief Enables temporary nonblocking mode and captures original flags.
+ * @param fd Borrowed configured socket descriptor.
+ * @param original_flags Receives the flags that must later be restored.
+ * @param message Receives the stable `fcntl` diagnostic on failure.
+ * @return True when `O_NONBLOCK` was installed.
+ * @throws std::bad_alloc if diagnostic construction fails.
+ * @note The helper never owns or closes `fd`.
+ */
+bool enable_nonblocking_connect(int fd, int* original_flags,
+                                std::string* message) {
+  *original_flags = ::fcntl(fd, F_GETFL, 0);
+  if (*original_flags < 0 ||
+      ::fcntl(fd, F_SETFL, *original_flags | O_NONBLOCK) != 0) {
+    *message =
+        std::string("socket nonblocking setup failed: ") + std::strerror(errno);
+    return false;
+  }
+  return true;
+}
+
+/**
+ * @brief Records successful kernel completion unless lifecycle stop won.
+ * @param should_stop Latched lifecycle predicate.
+ * @param state Mutable logical-attempt state.
+ * @return Nothing.
+ * @throws std::bad_alloc if interruption diagnostic assignment allocates, or
+ *         whatever the supplied predicate throws.
+ * @note The caller invokes this only after connect or `SO_ERROR` reports
+ *       success; no descriptor ownership changes occur.
+ */
+void record_connect_completion(const std::function<bool()>& should_stop,
+                               ConnectAttemptState* state) {
+  if (should_stop()) {
+    state->outcome_message = "connect interrupted";
+  } else {
+    state->connected = true;
+  }
+}
+
+/**
+ * @brief Waits for one pending nonblocking connect to finish or require retry.
+ * @param fd Borrowed socket with an in-flight nonblocking connect.
+ * @param should_stop Latched lifecycle predicate checked around every wait.
+ * @param state Mutable logical-attempt state receiving completion/diagnostic.
+ * @return Connected, same-fd retry, or terminal failure.
+ * @throws std::bad_alloc if diagnostic construction fails, or whatever the
+ *         supplied predicate throws.
+ * @note The helper polls in bounded slices, preserves exact `SO_ERROR`
+ *       classification, and never closes, reconnects, or writes through `fd`.
+ */
+PendingConnectOutcome wait_pending_connect(
+    int fd, const std::function<bool()>& should_stop,
+    ConnectAttemptState* state) {
+  while (!state->connected && state->outcome_message.empty()) {
+    if (should_stop()) {
+      state->outcome_message = "connect interrupted";
+      return PendingConnectOutcome::Failed;
+    }
+    pollfd pending{fd, POLLOUT, 0};
+    const int poll_result = ::poll(&pending, 1, kConnectPollSliceMilliseconds);
+    if (poll_result == 0 || (poll_result < 0 && errno == EINTR)) {
+      continue;
+    }
+    if (poll_result < 0) {
+      const int poll_error = errno;
+      state->outcome_message =
+          std::string("connect poll failed: ") + std::strerror(poll_error);
+      return PendingConnectOutcome::Failed;
+    }
+    if (should_stop()) {
+      state->outcome_message = "connect interrupted";
+      return PendingConnectOutcome::Failed;
+    }
+
+    int socket_error = 0;
+    socklen_t socket_error_size = sizeof(socket_error);
+    if (::getsockopt(fd, SOL_SOCKET, SO_ERROR, &socket_error,
+                     &socket_error_size) != 0) {
+      const int option_error = errno;
+      state->outcome_message = std::string("connect SO_ERROR failed: ") +
+                               std::strerror(option_error);
+      return PendingConnectOutcome::Failed;
+    }
+    if (socket_error == 0) {
+      record_connect_completion(should_stop, state);
+      return state->connected ? PendingConnectOutcome::Connected
+                              : PendingConnectOutcome::Failed;
+    }
+    if (socket_error == EAGAIN) {
+      return PendingConnectOutcome::RetryConnect;
+    }
+    if (!connect_pending(socket_error)) {
+      state->outcome_message =
+          std::string("connect failed: ") + std::strerror(socket_error);
+      return PendingConnectOutcome::Failed;
+    }
+  }
+  return state->connected ? PendingConnectOutcome::Connected
+                          : PendingConnectOutcome::Failed;
+}
+
+/**
+ * @brief Executes one logical same-fd connection including local retries.
+ * @param fd Borrowed socket already placed in nonblocking mode.
+ * @param prepared Validated address bytes for every injected attempt.
+ * @param should_stop Latched lifecycle predicate.
+ * @param connect_attempt Injected connect-compatible system-call seam.
+ * @return Terminal connection state and any stable diagnostic.
+ * @throws std::bad_alloc if diagnostic storage fails, or whatever either
+ *         injected callable throws.
+ * @note `EAGAIN` retries only an unstarted local AF_UNIX connection; pending
+ *       connections complete through poll/`SO_ERROR`. No frame is retried and
+ *       descriptor ownership remains with the caller.
+ */
+ConnectAttemptState run_nonblocking_connect(
+    int fd, const PreparedUnixAddress& prepared,
+    const std::function<bool()>& should_stop,
+    const std::function<int(int, const void*, std::size_t)>& connect_attempt) {
+  ConnectAttemptState state;
+  while (!state.connected && state.outcome_message.empty()) {
+    if (should_stop()) {
+      state.outcome_message = "connect interrupted";
+      break;
+    }
+    const int connect_result = connect_attempt(
+        fd, static_cast<const void*>(&prepared.address), prepared.length);
+    const int connect_error = connect_result == 0 ? 0 : errno;
+    if (connect_result == 0 ||
+        (connect_error == EISCONN && state.transient_connect_seen)) {
+      record_connect_completion(should_stop, &state);
+      break;
+    }
+    if (connect_error == EAGAIN) {
+      state.transient_connect_seen = true;
+      if (!wait_connect_retry_slice(should_stop, &state.outcome_message)) {
+        break;
+      }
+      continue;
+    }
+    if (!connect_pending(connect_error)) {
+      state.outcome_message =
+          std::string("connect failed: ") + std::strerror(connect_error);
+      break;
+    }
+    state.transient_connect_seen = true;
+    if (wait_pending_connect(fd, should_stop, &state) ==
+            PendingConnectOutcome::RetryConnect &&
+        !wait_connect_retry_slice(should_stop, &state.outcome_message)) {
+      break;
+    }
+  }
+  return state;
+}
+
 }  // namespace
 
 /** @copydoc UniqueFd::UniqueFd(int) */
@@ -166,121 +396,18 @@ bool connect_prepared_unix_socket_with_attempt(
   if (fd < 0 || !should_stop || !connect_attempt || message == nullptr) {
     return false;
   }
-  if (socket_path.empty() || socket_path.front() != '/' ||
-      socket_path.find('\0') != std::string::npos) {
-    *message = "Unix socket path must be absolute";
+  PreparedUnixAddress prepared;
+  if (!prepare_unix_address(socket_path, &prepared, message)) {
     return false;
   }
-  sockaddr_un address{};
-  if (socket_path.size() + 1 > sizeof(address.sun_path)) {
-    *message = "Unix socket path exceeds sun_path capacity";
-    return false;
-  }
-
-  address.sun_family = AF_UNIX;
-  std::memcpy(address.sun_path, socket_path.c_str(), socket_path.size() + 1);
-  const socklen_t address_length = static_cast<socklen_t>(
-      offsetof(sockaddr_un, sun_path) + socket_path.size() + 1);
-  const int original_flags = ::fcntl(fd, F_GETFL, 0);
-  if (original_flags < 0 ||
-      ::fcntl(fd, F_SETFL, original_flags | O_NONBLOCK) != 0) {
-    *message =
-        std::string("socket nonblocking setup failed: ") + std::strerror(errno);
+  int original_flags = 0;
+  if (!enable_nonblocking_connect(fd, &original_flags, message)) {
     return false;
   }
 
-  bool connected = false;
-  bool transient_connect_seen = false;
-  std::string outcome_message;
+  ConnectAttemptState state;
   try {
-    while (!connected && outcome_message.empty()) {
-      if (should_stop()) {
-        outcome_message = "connect interrupted";
-        break;
-      }
-      const int connect_result = connect_attempt(
-          fd, static_cast<const void*>(&address), address_length);
-      const int connect_error = connect_result == 0 ? 0 : errno;
-      if (connect_result == 0) {
-        if (should_stop()) {
-          outcome_message = "connect interrupted";
-        } else {
-          connected = true;
-        }
-        break;
-      }
-      if (connect_error == EISCONN && transient_connect_seen) {
-        if (should_stop()) {
-          outcome_message = "connect interrupted";
-        } else {
-          connected = true;
-        }
-        break;
-      }
-      if (connect_error == EAGAIN) {
-        transient_connect_seen = true;
-        if (!wait_connect_retry_slice(should_stop, &outcome_message)) {
-          break;
-        }
-        continue;
-      }
-      if (!connect_pending(connect_error)) {
-        outcome_message =
-            std::string("connect failed: ") + std::strerror(connect_error);
-        break;
-      }
-      transient_connect_seen = true;
-
-      bool retry_connect = false;
-      while (!connected && outcome_message.empty() && !retry_connect) {
-        if (should_stop()) {
-          outcome_message = "connect interrupted";
-          break;
-        }
-        pollfd pending{fd, POLLOUT, 0};
-        const int poll_result =
-            ::poll(&pending, 1, kConnectPollSliceMilliseconds);
-        if (poll_result == 0 || (poll_result < 0 && errno == EINTR)) {
-          continue;
-        }
-        if (poll_result < 0) {
-          const int poll_error = errno;
-          outcome_message =
-              std::string("connect poll failed: ") + std::strerror(poll_error);
-          break;
-        }
-        if (should_stop()) {
-          outcome_message = "connect interrupted";
-          break;
-        }
-
-        int socket_error = 0;
-        socklen_t socket_error_size = sizeof(socket_error);
-        if (::getsockopt(fd, SOL_SOCKET, SO_ERROR, &socket_error,
-                         &socket_error_size) != 0) {
-          const int option_error = errno;
-          outcome_message = std::string("connect SO_ERROR failed: ") +
-                            std::strerror(option_error);
-          break;
-        }
-        if (socket_error == 0) {
-          if (should_stop()) {
-            outcome_message = "connect interrupted";
-          } else {
-            connected = true;
-          }
-        } else if (socket_error == EAGAIN) {
-          retry_connect = true;
-        } else if (!connect_pending(socket_error)) {
-          outcome_message =
-              std::string("connect failed: ") + std::strerror(socket_error);
-        }
-      }
-      if (retry_connect &&
-          !wait_connect_retry_slice(should_stop, &outcome_message)) {
-        break;
-      }
-    }
+    state = run_nonblocking_connect(fd, prepared, should_stop, connect_attempt);
   } catch (...) {
     (void)::fcntl(fd, F_SETFL, original_flags);
     throw;
@@ -291,12 +418,12 @@ bool connect_prepared_unix_socket_with_attempt(
         std::string("socket blocking restore failed: ") + std::strerror(errno);
     return false;
   }
-  if (connected && should_stop()) {
+  if (state.connected && should_stop()) {
     *message = "connect interrupted";
     return false;
   }
-  if (!connected) {
-    *message = std::move(outcome_message);
+  if (!state.connected) {
+    *message = std::move(state.outcome_message);
     return false;
   }
   return true;

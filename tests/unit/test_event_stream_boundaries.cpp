@@ -46,16 +46,26 @@ class ScopedRuntimeDirectory {
              std::to_string(g_runtime_directory_sequence.fetch_add(
                  1, std::memory_order_relaxed)))) {}
 
-  /** @brief Removes the temporary root without propagating cleanup errors. */
+  /**
+   * @brief Removes the temporary root without propagating cleanup errors.
+   * @throws Nothing; filesystem cleanup reports through an ignored error code.
+   */
   ~ScopedRuntimeDirectory() {
     std::error_code error;
     std::filesystem::remove_all(root_, error);
   }
 
-  /** @brief Copying would duplicate filesystem cleanup ownership. */
+  /**
+   * @brief Copying would duplicate filesystem cleanup ownership.
+   * @throws Nothing because construction is unavailable.
+   */
   ScopedRuntimeDirectory(const ScopedRuntimeDirectory&) = delete;
 
-  /** @brief Copy assignment would duplicate filesystem cleanup ownership. */
+  /**
+   * @brief Copy assignment would duplicate filesystem cleanup ownership.
+   * @return No value because assignment is unavailable.
+   * @throws Nothing because assignment is unavailable.
+   */
   ScopedRuntimeDirectory& operator=(const ScopedRuntimeDirectory&) = delete;
 
   /**

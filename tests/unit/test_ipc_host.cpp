@@ -639,6 +639,7 @@ class AsyncCompletionGate {
  public:
   /**
    * @brief Marks the hook entered and blocks until released.
+   * @return Nothing.
    * @throws Nothing.
    */
   void block() noexcept {
@@ -661,6 +662,7 @@ class AsyncCompletionGate {
 
   /**
    * @brief Releases the blocked worker idempotently.
+   * @return Nothing.
    * @throws Nothing.
    */
   void release() noexcept {

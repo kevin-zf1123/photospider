@@ -26,6 +26,14 @@
 namespace ps::ipc {
 
 namespace internal {
+/**
+ * @brief Internal-only access point for interrupting a Client's active IO.
+ *
+ * @throws Nothing for this incomplete declaration.
+ * @note This forward declaration owns no Client, descriptor, or transport
+ *       state. Its source-tree-private definition may invoke the Client's
+ *       shutdown-only hook but never transfers descriptor ownership.
+ */
 class ClientInterruptAccess;
 }  // namespace internal
 
@@ -710,6 +718,7 @@ class PHOTOSPIDER_API Client {
   /**
    * @brief Shuts down the active transport to interrupt blocking IO.
    *
+   * @return Nothing.
    * @throws Nothing.
    * @note This internal lifecycle hook latches interruption even before
    *       descriptor publication and retains descriptor ownership. The active
@@ -718,7 +727,15 @@ class PHOTOSPIDER_API Client {
    */
   void interrupt() noexcept;
 
-  /** @brief Private transport/envelope implementation. */
+  /**
+   * @brief Complete transport, envelope, and descriptor state defined in the
+   *        source file.
+   *
+   * @throws Nothing for this incomplete declaration.
+   * @note `impl_` is its sole owner; Client destruction completes interruption
+   *       and destroys the complete type after releasing its descriptor
+   *       exactly once.
+   */
   class Impl;
 
   /** @brief Sole owner of the private implementation and Unix descriptor. */

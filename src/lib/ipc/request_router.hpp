@@ -198,6 +198,7 @@ class RequestRouter {
 
   /**
    * @brief Rejects new sessions, snapshots, compute work, and output leases.
+   * @return Nothing.
    * @throws Nothing.
    * @note Already reserved collection calls and admitted compute jobs retain
    *       their publication rules; the draining worker may still publish an
@@ -208,6 +209,7 @@ class RequestRouter {
   /**
    * @brief Drains compute/snapshots/output, then closes every Host session.
    *
+   * @return Nothing.
    * @throws Nothing; job cleanup, Host failures, and Host exceptions are
    *         contained so socket lifecycle cleanup can continue.
    * @note Call after accepted client workers have stopped. Compute shutdown
@@ -227,7 +229,7 @@ class RequestRouter {
 
  private:
   /**
-   * @brief Opaque cpp-owned adapter over one borrowed parsed params object.
+   * @brief Opaque internal adapter over one borrowed parsed params object.
    *
    * @throws Nothing for declaration and reference binding.
    * @note The complete type remains in `request_router.cpp` so this private
@@ -237,11 +239,54 @@ class RequestRouter {
   struct RoutedParams;
 
   /**
+   * @brief Opaque internal state for one validated inspection request.
+   * @throws Nothing for declaration; construction rules live in the cpp file.
+   * @note Owns only copied scalar/page identity while borrowing no Host state.
+   */
+  struct InspectionRequest;
+
+  /**
+   * @brief Opaque internal state for one validated session-control request.
+   * @throws Nothing for declaration; construction rules live in the cpp file.
+   * @note Owns decoded wire values but no registry admission or Host session.
+   */
+  struct SessionControlRequest;
+
+  /**
+   * @brief Opaque internal state for one stable collection route.
+   * @throws Nothing for declaration; construction rules live in the cpp file.
+   * @note Owns cursor/page binding values but no snapshot reservation.
+   */
+  struct StableCollectionRequest;
+
+  /**
+   * @brief Routes graph load and close lifecycle methods.
+   *
+   * @param id Valid request id correlated with the response.
+   * @param method Exact version 1 method name.
+   * @param routed_params Internal adapter borrowing structurally valid params.
+   * @return Complete response for graph load/close, or `std::nullopt` when the
+   *         method belongs to another router family.
+   * @throws std::bad_alloc if validation, reservation, Host result copying, or
+   *         response construction cannot allocate.
+   * @throws Whatever graph load/close or registry publication propagates;
+   *         `route()` preserves resource exhaustion and maps other standard
+   *         exceptions to daemon `internal_error`.
+   * @note Load keeps the Host mutex across reservation, Host load, and registry
+   *       publication; every failed publication rolls back before best-effort
+   *       Host close. Close marks/waits session admission before Host locking
+   *       and erases/reopens the claim at the same commit points as before.
+   */
+  std::optional<std::string> route_graph_lifecycle_method(
+      const std::string& id, const std::string& method,
+      const RoutedParams& routed_params);
+
+  /**
    * @brief Routes one graph-state control or diagnostic Host method.
    *
    * @param id Valid request id correlated with the response.
    * @param method Exact version 1 method name.
-   * @param routed_params Cpp-only adapter borrowing the structurally valid
+   * @param routed_params Internal adapter borrowing the structurally valid
    *        params object whose known fields have not yet been method-validated.
    * @return Complete response payload when `method` belongs to this family, or
    *         `std::nullopt` when another router family must handle it.
@@ -264,11 +309,162 @@ class RequestRouter {
       const RoutedParams& routed_params);
 
   /**
+   * @brief Decodes every known session-control field before registry access.
+   * @param method Exact recognized session-control method.
+   * @param routed_params Internal adapter borrowing structural params.
+   * @param request Receives the complete decoded request on success.
+   * @return Canonical success or protocol `invalid_params` status.
+   * @throws std::bad_alloc if decoded text or diagnostic allocation fails.
+   * @note Failure leaves registry and Host untouched; unknown fields remain
+   *       forward-compatible and no method is retried.
+   */
+  static OperationStatus decode_session_control_request(
+      const std::string& method, const RoutedParams& routed_params,
+      SessionControlRequest* request);
+
+  /**
+   * @brief Decodes graph/cache text and node selectors.
+   * @param method Exact recognized non-spatial session-control method.
+   * @param routed_params Internal adapter borrowing structural params.
+   * @param request Receives decoded method-specific values.
+   * @return Canonical success or protocol `invalid_params` status.
+   * @throws std::bad_alloc if owned text or diagnostics allocate.
+   * @note Session identity is already validated; this helper touches no
+   *       registry or Host state and accepts unknown fields.
+   */
+  static OperationStatus decode_session_text_request(
+      const std::string& method, const RoutedParams& routed_params,
+      SessionControlRequest* request);
+
+  /**
+   * @brief Decodes one dirty lifecycle request.
+   * @param method Exact dirty method.
+   * @param routed_params Internal adapter borrowing structural params.
+   * @param request Receives node, domain, and optional ROI values.
+   * @return Canonical success or protocol `invalid_params` status.
+   * @throws std::bad_alloc if diagnostics allocate.
+   * @note Session identity is already validated; failure has no side effect.
+   */
+  static OperationStatus decode_session_dirty_request(
+      const std::string& method, const RoutedParams& routed_params,
+      SessionControlRequest* request);
+
+  /**
+   * @brief Decodes one forward/backward ROI projection request.
+   * @param method Exact ROI method.
+   * @param routed_params Internal adapter borrowing structural params.
+   * @param request Receives ordered node identities and exact ROI.
+   * @return Canonical success or protocol `invalid_params` status.
+   * @throws std::bad_alloc if diagnostics allocate.
+   * @note Preserves directional field ordering and touches no Host state.
+   */
+  static OperationStatus decode_session_roi_request(
+      const std::string& method, const RoutedParams& routed_params,
+      SessionControlRequest* request);
+
+  /**
+   * @brief Routes graph/cache mutations for one admitted session.
+   * @param id Valid correlated request id.
+   * @param method Exact recognized session-control method.
+   * @param request Fully decoded request values.
+   * @param host_session Host identity protected by the caller's admission.
+   * @return Complete response, or `std::nullopt` for another subfamily.
+   * @throws std::bad_alloc if Host/result/error allocation fails.
+   * @throws Whatever the matching Host mutation propagates.
+   * @note Invokes at most one matching Host call under `host_mutex_` and never
+   *       retries a mutation.
+   */
+  std::optional<std::string> route_session_mutation_method(
+      const std::string& id, const std::string& method,
+      const SessionControlRequest& request, const GraphSessionId& host_session);
+
+  /**
+   * @brief Executes one admitted graph mutation.
+   * @param id Valid correlated request id.
+   * @param method Exact graph mutation method.
+   * @param request Fully decoded request values.
+   * @param host_session Host identity protected by caller admission.
+   * @return Complete mutation response.
+   * @throws std::bad_alloc if Host/result/error allocation fails.
+   * @throws Whatever the selected Host graph mutation propagates.
+   * @note Invokes exactly one serialized Host call and never retries it.
+   */
+  std::string route_session_graph_mutation(const std::string& id,
+                                           const std::string& method,
+                                           const SessionControlRequest& request,
+                                           const GraphSessionId& host_session);
+
+  /**
+   * @brief Executes one admitted cache mutation.
+   * @param id Valid correlated request id.
+   * @param method Exact cache mutation method.
+   * @param request Fully decoded request values.
+   * @param host_session Host identity protected by caller admission.
+   * @return Complete mutation response.
+   * @throws std::bad_alloc if Host/result/error allocation fails.
+   * @throws Whatever the selected Host cache mutation propagates.
+   * @note Invokes exactly one serialized Host call and never retries it.
+   */
+  std::string route_session_cache_mutation(const std::string& id,
+                                           const std::string& method,
+                                           const SessionControlRequest& request,
+                                           const GraphSessionId& host_session);
+
+  /**
+   * @brief Routes dirty-source operations for one admitted session.
+   * @param id Valid correlated request id.
+   * @param method Exact recognized session-control method.
+   * @param request Fully decoded request values.
+   * @param host_session Host identity protected by the caller's admission.
+   * @return Complete response, or `std::nullopt` for another subfamily.
+   * @throws std::bad_alloc if Host/result/error allocation fails.
+   * @throws Whatever the matching Host dirty operation propagates.
+   * @note Invokes exactly one dirty Host call under `host_mutex_`; returned
+   *       snapshots are encoded whole without synthesizing lifecycle state.
+   */
+  std::optional<std::string> route_session_dirty_method(
+      const std::string& id, const std::string& method,
+      const SessionControlRequest& request, const GraphSessionId& host_session);
+
+  /**
+   * @brief Routes ROI projection for one admitted session.
+   * @param id Valid correlated request id.
+   * @param method Exact recognized session-control method.
+   * @param request Fully decoded request values.
+   * @param host_session Host identity protected by the caller's admission.
+   * @return Complete response, or `std::nullopt` for another subfamily.
+   * @throws std::bad_alloc if Host/result/error allocation fails.
+   * @throws Whatever the matching Host projection propagates.
+   * @note Preserves node order and rectangle axes under one serialized Host
+   *       call and performs no cache or scheduler access.
+   */
+  std::optional<std::string> route_session_roi_method(
+      const std::string& id, const std::string& method,
+      const SessionControlRequest& request, const GraphSessionId& host_session);
+
+  /**
+   * @brief Routes node-YAML and compute diagnostic reads.
+   * @param id Valid correlated request id.
+   * @param method Exact recognized session-control method.
+   * @param request Fully decoded request values.
+   * @param host_session Host identity protected by the caller's admission.
+   * @return Complete response, or `std::nullopt` for another subfamily.
+   * @throws std::bad_alloc if Host/result/error allocation fails.
+   * @throws std::invalid_argument for malformed successful Host values.
+   * @throws Whatever the matching Host read propagates.
+   * @note Each handled read invokes one Host method under `host_mutex_`; the
+   *       observed last-error status remains nested successful response data.
+   */
+  std::optional<std::string> route_session_diagnostic_method(
+      const std::string& id, const std::string& method,
+      const SessionControlRequest& request, const GraphSessionId& host_session);
+
+  /**
    * @brief Routes stable collection and remaining inspection methods.
    *
    * @param id Valid request id correlated with the response.
    * @param method Exact version 1 method name.
-   * @param routed_params Cpp-only adapter borrowing the structurally valid
+   * @param routed_params Internal adapter borrowing the structurally valid
    *        params object.
    * @return Complete response when this family recognizes `method`, or
    *         `std::nullopt` for another router family.
@@ -291,11 +487,230 @@ class RequestRouter {
       const RoutedParams& routed_params);
 
   /**
+   * @brief Decodes session, node, and dependency selectors for inspection.
+   * @param method Exact recognized inspection method.
+   * @param routed_params Internal adapter borrowing structural params.
+   * @param request Receives owned validated identity values.
+   * @return Canonical success or protocol `invalid_params` status.
+   * @throws std::bad_alloc if identity or diagnostic allocation fails.
+   * @note Performs no Host, session-registry admission, or snapshot access;
+   *       `graph.list` is the only method without a session id.
+   */
+  static OperationStatus decode_inspection_identity(
+      const std::string& method, const RoutedParams& routed_params,
+      InspectionRequest* request);
+
+  /**
+   * @brief Decodes inspection page controls and freezes cursor binding input.
+   * @param routed_params Internal adapter borrowing structural params.
+   * @param request Identity-decoded request receiving page/binding values.
+   * @return Canonical success or protocol `invalid_params` status.
+   * @throws std::bad_alloc if cursor/binding/diagnostic allocation fails.
+   * @note Called only for collection methods after direct-value dispatch;
+   *       performs no reservation, Host call, or cursor lookup.
+   */
+  static OperationStatus decode_inspection_page_request(
+      const RoutedParams& routed_params, InspectionRequest* request);
+
+  /**
+   * @brief Routes one non-paged inspection value after complete validation.
+   * @param id Valid correlated request id.
+   * @param request Validated inspection identity and method values.
+   * @return Complete response for a direct method, or `std::nullopt` otherwise.
+   * @throws std::bad_alloc if admission, Host copying, or encoding allocates.
+   * @throws std::invalid_argument for malformed successful Host values.
+   * @throws Whatever the matching Host inspection propagates.
+   * @note Admits one live session and invokes exactly one Host call under
+   *       `host_mutex_`; direct values never reserve snapshot quota.
+   */
+  std::optional<std::string> route_inspection_direct_value(
+      const std::string& id, const InspectionRequest& request);
+
+  /**
+   * @brief Reads one inspection continuation from a frozen snapshot.
+   * @param id Valid correlated request id.
+   * @param request Validated inspection cursor and frozen binding.
+   * @return Complete bounded continuation response.
+   * @throws std::bad_alloc if page copying or encoding cannot allocate.
+   * @throws std::invalid_argument for malformed retained public values.
+   * @note Performs no live-session resolution, Host call, or new reservation;
+   *       graph close therefore cannot revoke an already published cursor.
+   */
+  std::string route_inspection_continuation(const std::string& id,
+                                            const InspectionRequest& request);
+
+  /**
+   * @brief Reads graph-list, node-id, or graph-view continuation values.
+   * @param id Valid correlated request id.
+   * @param request Validated cursor and frozen binding.
+   * @return Complete bounded continuation response.
+   * @throws std::bad_alloc if retained values or encoding allocate.
+   * @throws std::invalid_argument for malformed retained node values.
+   * @note Performs snapshot-only access and releases no live session state.
+   */
+  std::string route_inspection_basic_continuation(
+      const std::string& id, const InspectionRequest& request);
+
+  /**
+   * @brief Reads one dependency-tree continuation page.
+   * @param id Valid correlated request id.
+   * @param request Validated cursor and frozen binding.
+   * @return Complete bounded continuation response.
+   * @throws std::bad_alloc if retained header/rows or encoding allocate.
+   * @throws std::invalid_argument for malformed retained tree values.
+   * @note Rejects a missing immutable header as an internal invariant failure
+   *       without resolving the original session or calling Host.
+   */
+  std::string route_inspection_dependency_continuation(
+      const std::string& id, const InspectionRequest& request);
+
+  /**
+   * @brief Reads one traversal continuation page.
+   * @param id Valid correlated request id.
+   * @param request Validated cursor and frozen binding.
+   * @return Complete bounded continuation response.
+   * @throws std::bad_alloc if retained rows or encoding allocate.
+   * @throws std::invalid_argument for malformed retained traversal values.
+   * @note Selects order/detail row type from the frozen method and performs no
+   *       Host or registry-admission operation.
+   */
+  std::string route_inspection_traversal_continuation(
+      const std::string& id, const InspectionRequest& request);
+
+  /**
+   * @brief Reads one recent-planning continuation page.
+   * @param id Valid correlated request id.
+   * @param request Validated cursor and frozen binding.
+   * @return Complete bounded continuation response.
+   * @throws std::bad_alloc if retained snapshots or encoding allocate.
+   * @throws std::invalid_argument for malformed retained planning values.
+   * @note Performs snapshot-only access and no live-session resolution.
+   */
+  std::string route_inspection_planning_continuation(
+      const std::string& id, const InspectionRequest& request);
+
+  /**
+   * @brief Reconciles and publishes one graph-list first page.
+   * @param id Valid correlated request id.
+   * @param request Validated graph-list request moved for publication.
+   * @return Complete bounded first-page response.
+   * @throws std::bad_alloc if reservation, Host copying, or encoding allocates.
+   * @throws std::invalid_argument for malformed successful Host values.
+   * @throws Whatever Host listing or registry reconciliation propagates.
+   * @note Reserves before one serialized Host listing; reconciliation occurs
+   *       under the same Host lock and publication is transactional.
+   */
+  std::string route_inspection_graph_list_first_page(const std::string& id,
+                                                     InspectionRequest request);
+
+  /**
+   * @brief Admits a session and dispatches one inspection first-page family.
+   * @param id Valid correlated request id.
+   * @param request Validated inspection request moved toward publication.
+   * @return Complete bounded first-page response.
+   * @throws std::bad_alloc if admission/reservation/dispatch allocates.
+   * @throws Whatever the selected Host inspection propagates.
+   * @note Keeps one admission alive across one pre-Host reservation and the
+   *       selected helper; fallback is an internal invariant error.
+   */
+  std::string route_inspection_first_page(const std::string& id,
+                                          InspectionRequest request);
+
+  /**
+   * @brief Publishes node-id collection inspection values.
+   * @param id Valid correlated request id.
+   * @param request Validated inspection request moved for publication.
+   * @param host_session Host identity protected by caller admission.
+   * @param reservation Active pre-Host snapshot quota ownership.
+   * @return Complete bounded first-page response.
+   * @throws std::bad_alloc if Host copying/measurement/publication allocates.
+   * @throws Whatever the selected Host list operation propagates.
+   * @note Invokes exactly one matching Host call under `host_mutex_`; failed
+   *       paths roll reservation ownership back by destruction.
+   */
+  std::string route_inspection_node_list_first_page(
+      const std::string& id, InspectionRequest request,
+      const GraphSessionId& host_session,
+      CollectionSnapshotRegistry::Reservation reservation);
+
+  /**
+   * @brief Publishes one complete graph inspection snapshot first page.
+   * @param id Valid correlated request id.
+   * @param request Validated inspection request moved for publication.
+   * @param host_session Host identity protected by caller admission.
+   * @param reservation Active pre-Host snapshot quota ownership.
+   * @return Complete bounded first-page response.
+   * @throws std::bad_alloc if Host copying/measurement/publication allocates.
+   * @throws std::invalid_argument for malformed successful nodes.
+   * @throws Whatever the Host graph inspection propagates.
+   * @note Calls Host once, measures recursive node content, then moves the
+   *       admitted snapshot into cursor storage transactionally.
+   */
+  std::string route_inspection_graph_first_page(
+      const std::string& id, InspectionRequest request,
+      const GraphSessionId& host_session,
+      CollectionSnapshotRegistry::Reservation reservation);
+
+  /**
+   * @brief Publishes one dependency-tree snapshot first page.
+   * @param id Valid correlated request id.
+   * @param request Validated inspection request moved for publication.
+   * @param host_session Host identity protected by caller admission.
+   * @param reservation Active pre-Host snapshot quota ownership.
+   * @return Complete bounded first-page response.
+   * @throws std::bad_alloc if Host/header/rows/publication allocate.
+   * @throws std::invalid_argument for malformed successful tree content.
+   * @throws Whatever the Host dependency-tree operation propagates.
+   * @note Calls Host once and shares a copied immutable header across rows;
+   *       recursive counts/bytes are checked before cursor publication.
+   */
+  std::string route_inspection_dependency_first_page(
+      const std::string& id, InspectionRequest request,
+      const GraphSessionId& host_session,
+      CollectionSnapshotRegistry::Reservation reservation);
+
+  /**
+   * @brief Publishes traversal-order or traversal-detail first-page rows.
+   * @param id Valid correlated request id.
+   * @param request Validated inspection request moved for publication.
+   * @param host_session Host identity protected by caller admission.
+   * @param reservation Active pre-Host snapshot quota ownership.
+   * @return Complete bounded first-page response.
+   * @throws std::bad_alloc if Host/row/publication storage allocates.
+   * @throws std::invalid_argument for malformed successful traversal values.
+   * @throws Whatever the matching Host traversal operation propagates.
+   * @note Calls exactly one selected Host method; each map branch remains an
+   *       indivisible retained row and is measured before publication.
+   */
+  std::string route_inspection_traversal_first_page(
+      const std::string& id, InspectionRequest request,
+      const GraphSessionId& host_session,
+      CollectionSnapshotRegistry::Reservation reservation);
+
+  /**
+   * @brief Publishes recent compute-planning history first-page rows.
+   * @param id Valid correlated request id.
+   * @param request Validated inspection request moved for publication.
+   * @param host_session Host identity protected by caller admission.
+   * @param reservation Active pre-Host snapshot quota ownership.
+   * @return Complete bounded first-page response.
+   * @throws std::bad_alloc if Host copying/measurement/publication allocates.
+   * @throws std::invalid_argument for malformed successful planning values.
+   * @throws Whatever the Host planning-history operation propagates.
+   * @note Calls Host exactly once and retains only copied public snapshots;
+   *       oversized values publish no cursor.
+   */
+  std::string route_inspection_planning_first_page(
+      const std::string& id, InspectionRequest request,
+      const GraphSessionId& host_session,
+      CollectionSnapshotRegistry::Reservation reservation);
+
+  /**
    * @brief Routes bounded polling compute-job lifecycle methods.
    *
    * @param id Valid request id correlated with the response.
    * @param method Exact version 1 compute-job method name.
-   * @param routed_params Cpp-only adapter borrowing the structurally valid
+   * @param routed_params Internal adapter borrowing the structurally valid
    *        params object.
    * @return Complete response when this family recognizes `method`, or
    *         `std::nullopt` for another router family.
@@ -342,7 +757,7 @@ class RequestRouter {
    *
    * @param id Valid request id correlated with the response.
    * @param method Exact version 1 operation-plugin method name.
-   * @param routed_params Cpp-only adapter borrowing structurally valid params.
+   * @param routed_params Internal adapter borrowing structurally valid params.
    * @return Complete response for this family, or `std::nullopt` when another
    *         route family must handle the method.
    * @throws std::bad_alloc if validation, Host copying, snapshot ownership, or
@@ -364,11 +779,54 @@ class RequestRouter {
       const RoutedParams& routed_params);
 
   /**
+   * @brief Routes non-paged operation-plugin mutations and reports.
+   * @param id Valid correlated request id.
+   * @param method Exact recognized plugin method.
+   * @param routed_params Internal adapter borrowing structural params.
+   * @return Complete response, or `std::nullopt` for a paged plugin view.
+   * @throws std::bad_alloc if validation, Host values, or encoding allocate.
+   * @throws std::invalid_argument for malformed successful Host counts/values.
+   * @throws Whatever the matching Host operation propagates.
+   * @note Each handled method invokes exactly one Host call under
+   *       `host_mutex_`; mutations are process-global and never retried.
+   */
+  std::optional<std::string> route_plugin_direct_method(
+      const std::string& id, const std::string& method,
+      const RoutedParams& routed_params);
+
+  /**
+   * @brief Reads one plugin view continuation from its frozen snapshot.
+   * @param id Valid correlated request id.
+   * @param request Validated method/page/binding values.
+   * @return Complete bounded continuation response.
+   * @throws std::bad_alloc if page copying or encoding cannot allocate.
+   * @throws std::invalid_argument for malformed retained public values.
+   * @note Performs no Host call, session resolution, or new reservation; final
+   *       page ownership is released by the snapshot registry.
+   */
+  std::string route_plugin_continuation(const std::string& id,
+                                        const StableCollectionRequest& request);
+
+  /**
+   * @brief Calls Host once and publishes one first plugin view page.
+   * @param id Valid correlated request id.
+   * @param request Validated method/page/binding values.
+   * @return Complete bounded first-page response.
+   * @throws std::bad_alloc if reservation, Host copying, or encoding allocates.
+   * @throws std::invalid_argument for malformed successful Host values.
+   * @throws Whatever the matching Host view propagates.
+   * @note Reserves quota before one serialized Host call, sorts the copied
+   *       values, measures them, and atomically publishes the frozen snapshot.
+   */
+  std::string route_plugin_first_page(const std::string& id,
+                                      StableCollectionRequest request);
+
+  /**
    * @brief Routes scheduler discovery, configuration, and session control.
    *
    * @param id Valid request id correlated with the response.
    * @param method Exact version 1 scheduler method name other than trace.
-   * @param routed_params Cpp-only adapter borrowing structurally valid params.
+   * @param routed_params Internal adapter borrowing structurally valid params.
    * @return Complete response for this family, or `std::nullopt` when another
    *         route family must handle the method.
    * @throws std::bad_alloc if validation, Host copying, snapshot ownership, or
@@ -391,11 +849,113 @@ class RequestRouter {
       const RoutedParams& routed_params);
 
   /**
+   * @brief Routes non-session scheduler discovery/configuration methods.
+   * @param id Valid correlated request id.
+   * @param method Exact recognized scheduler method.
+   * @param routed_params Internal adapter borrowing structural params.
+   * @return Complete response, or `std::nullopt` for session/list methods.
+   * @throws std::bad_alloc if validation, Host values, or encoding allocate.
+   * @throws std::invalid_argument for malformed successful Host values.
+   * @throws Whatever the matching Host operation propagates.
+   * @note Each handled method invokes one process-global Host operation under
+   *       `host_mutex_` and no mutation is retried.
+   */
+  std::optional<std::string> route_scheduler_global_method(
+      const std::string& id, const std::string& method,
+      const RoutedParams& routed_params);
+
+  /**
+   * @brief Routes one scheduler-type description lookup.
+   * @param id Valid correlated request id.
+   * @param routed_params Internal adapter borrowing structural params.
+   * @return Complete description response or validation/Host error.
+   * @throws std::bad_alloc if validation, Host copying, or encoding allocates.
+   * @throws std::invalid_argument for malformed successful description text.
+   * @throws Whatever the Host description operation propagates.
+   * @note Validates type text before exactly one serialized Host call.
+   */
+  std::string route_scheduler_description_method(
+      const std::string& id, const RoutedParams& routed_params);
+
+  /**
+   * @brief Routes scheduler scan or explicit plugin load.
+   * @param id Valid correlated request id.
+   * @param method Exact scan/load method.
+   * @param routed_params Internal adapter borrowing structural params.
+   * @return Complete mutation response or validation/Host error.
+   * @throws std::bad_alloc if decoded inputs, Host result, or encoding
+   * allocates.
+   * @throws Whatever the selected Host plugin operation propagates.
+   * @note Validates every input before one serialized process-global mutation
+   *       and never retries after ambiguous failure.
+   */
+  std::string route_scheduler_plugin_method(const std::string& id,
+                                            const std::string& method,
+                                            const RoutedParams& routed_params);
+
+  /**
+   * @brief Routes scheduler default configuration.
+   * @param id Valid correlated request id.
+   * @param routed_params Internal adapter borrowing structural params.
+   * @return Complete mutation response or validation/Host error.
+   * @throws std::bad_alloc if decoded inputs, Host result, or encoding
+   * allocates.
+   * @throws Whatever the Host default-configuration operation propagates.
+   * @note Validates both type labels and exact worker count before one
+   *       serialized mutation and never retries it.
+   */
+  std::string route_scheduler_defaults_method(
+      const std::string& id, const RoutedParams& routed_params);
+
+  /**
+   * @brief Routes per-session scheduler information and replacement.
+   * @param id Valid correlated request id.
+   * @param method Exact recognized scheduler method.
+   * @param routed_params Internal adapter borrowing structural params.
+   * @return Complete response, or `std::nullopt` for global/list methods.
+   * @throws std::bad_alloc if validation, admission, or encoding allocates.
+   * @throws std::invalid_argument for mismatched successful scheduler info.
+   * @throws Whatever the matching Host operation propagates.
+   * @note Validates before opaque-session admission, then makes exactly one
+   *       serialized Host call shared with compute execution.
+   */
+  std::optional<std::string> route_scheduler_session_method(
+      const std::string& id, const std::string& method,
+      const RoutedParams& routed_params);
+
+  /**
+   * @brief Reads one scheduler-list continuation from a frozen snapshot.
+   * @param id Valid correlated request id.
+   * @param request Validated method/page/binding values.
+   * @return Complete bounded continuation response.
+   * @throws std::bad_alloc if page copying or encoding cannot allocate.
+   * @throws std::invalid_argument for malformed retained public values.
+   * @note Performs no Host call or reservation and releases final-page
+   *       ownership through the snapshot registry.
+   */
+  std::string route_scheduler_continuation(
+      const std::string& id, const StableCollectionRequest& request);
+
+  /**
+   * @brief Calls Host once and publishes one first scheduler-list page.
+   * @param id Valid correlated request id.
+   * @param request Validated method/page/binding values.
+   * @return Complete bounded first-page response.
+   * @throws std::bad_alloc if reservation, Host copying, or encoding allocates.
+   * @throws std::invalid_argument for malformed successful Host labels.
+   * @throws Whatever the matching Host list operation propagates.
+   * @note Reserves quota before one serialized Host call, sorts labels, then
+   *       measures and publishes the stable snapshot transactionally.
+   */
+  std::string route_scheduler_first_page(const std::string& id,
+                                         StableCollectionRequest request);
+
+  /**
    * @brief Routes bounded compute events and scheduler trace observations.
    *
    * @param id Valid request id correlated with the response.
    * @param method Exact `events.drain` or `scheduler.trace` method name.
-   * @param routed_params Cpp-only adapter borrowing structurally valid params.
+   * @param routed_params Internal adapter borrowing structurally valid params.
    * @return Complete response for this family, or `std::nullopt` when another
    *         route family must handle the method.
    * @throws std::bad_alloc if validation, Host copying, or encoding cannot

@@ -655,6 +655,7 @@ bool read_required_text(const Json& params, const char* field,
  *
  * @param host Daemon-owned Host whose successful load must be compensated.
  * @param session Exact session id returned by the successful Host load.
+ * @return Nothing.
  * @throws Nothing; status failures and exceptions are intentionally contained.
  * @note Callers remove the loading reservation before entering this helper, so
  *       even a throwing Host close cannot strand a registry loading row.
@@ -1515,6 +1516,136 @@ Json encode_compute_planning(
       {"task_sample", std::move(tasks)}};
 }
 
+/**
+ * @brief Owned validated values from one complete request envelope.
+ *
+ * @throws std::bad_alloc when owned id or method text cannot be allocated.
+ * @note The value owns only the decoded request id, method, and params subtree;
+ *       it owns no backend/session state and performs no routing by itself.
+ */
+struct DecodedRequestEnvelope {
+  /** @brief Correlated nonempty bounded request id. */
+  std::string id;
+
+  /** @brief Advertised nonempty bounded version 1 method. */
+  std::string method;
+
+  /** @brief Structurally valid params object owned independently of parser. */
+  Json params = Json::object();
+};
+
+/**
+ * @brief Result of request parsing and structural envelope validation.
+ *
+ * @throws std::bad_alloc when owned request or bounded error storage cannot be
+ *         allocated.
+ * @note Exactly one of `request` and `error_response` is populated. Duplicate
+ *       key handling preserves only an unambiguous valid top-level id.
+ */
+struct DecodedRequestEnvelopeResult {
+  /** @brief Validated request view on success. */
+  std::optional<DecodedRequestEnvelope> request;
+
+  /** @brief Complete bounded failure response when validation fails. */
+  std::string error_response;
+};
+
+/**
+ * @brief Parses and validates the common version 1 request envelope.
+ *
+ * @param payload Exact framed JSON payload.
+ * @return Owned decoded request or a complete correlated protocol error.
+ * @throws std::bad_alloc if parser, owned field, or error-response allocation
+ *         fails.
+ * @note Method advertisement is validated after protocol/envelope shape and
+ *       before any Host/session access. This helper performs no routing,
+ *       mutation, socket IO, or retry.
+ */
+DecodedRequestEnvelopeResult decode_request_envelope(
+    const std::string& payload) {
+  const JsonParseResult parsed = parse_json(payload);
+  if (!parsed.ok) {
+    Json response_id = nullptr;
+    if (parsed.duplicate_key && !parsed.ambiguous_top_level_id &&
+        parsed.value.is_object() &&
+        parsed.value.value("id", Json()).is_string()) {
+      std::string candidate;
+      if (decode_bounded_string(parsed.value["id"], kRequestTextMaxBytes,
+                                &candidate) &&
+          !candidate.empty()) {
+        response_id = candidate;
+      }
+    }
+    return {
+        std::nullopt,
+        bounded_error(
+            response_id,
+            failure_status(
+                OperationErrorDomain::Protocol,
+                parsed.duplicate_key ? kInvalidRequestCode : kParseErrorCode,
+                parsed.duplicate_key ? "invalid_request" : "parse_error",
+                parsed.message))};
+  }
+  if (!parsed.value.is_object()) {
+    return {std::nullopt,
+            bounded_error(
+                nullptr, failure_status(OperationErrorDomain::Protocol,
+                                        kInvalidRequestCode, "invalid_request",
+                                        "request envelope must be an object"))};
+  }
+
+  const Json& request = parsed.value;
+  Json response_id = nullptr;
+  if (request.value("id", Json()).is_string()) {
+    std::string candidate;
+    if (decode_bounded_string(request["id"], kRequestTextMaxBytes,
+                              &candidate) &&
+        !candidate.empty()) {
+      response_id = candidate;
+    }
+  }
+  std::string method;
+  const bool valid_method =
+      request.contains("method") &&
+      decode_bounded_string(request["method"], kRequestTextMaxBytes, &method) &&
+      !method.empty();
+  if (!request.value("protocol_version", Json()).is_number_integer() ||
+      !response_id.is_string() || !valid_method ||
+      !request.value("params", Json()).is_object()) {
+    return {std::nullopt,
+            bounded_error(response_id,
+                          failure_status(
+                              OperationErrorDomain::Protocol,
+                              kInvalidRequestCode, "invalid_request",
+                              "request requires integer protocol_version, "
+                              "valid id, nonempty method, and object params"))};
+  }
+
+  const std::string id = response_id.get<std::string>();
+  std::int32_t request_version = 0;
+  if (!decode_integer(request["protocol_version"], &request_version) ||
+      request_version != kProtocolVersion) {
+    return {std::nullopt,
+            bounded_error(
+                id,
+                failure_status(OperationErrorDomain::Protocol,
+                               kUnsupportedProtocolCode, "unsupported_protocol",
+                               "requested protocol version is not supported"),
+                true)};
+  }
+  if (!is_version_one_method(method)) {
+    return {std::nullopt,
+            bounded_error(
+                id, failure_status(
+                        OperationErrorDomain::Protocol, kMethodNotFoundCode,
+                        "method_not_found",
+                        "method is not implemented by protocol version 1"))};
+  }
+
+  DecodedRequestEnvelope decoded{id, std::move(method), request["params"]};
+  return {std::move(decoded), {}};
+}
+
 }  // namespace
 
 /** @copydoc valid_output_delivery_for_wire */
@@ -1563,7 +1694,7 @@ bool valid_output_delivery_for_wire(
 }
 
 /**
- * @brief Complete cpp-only parsed-params adapter.
+ * @brief Complete internal parsed-params adapter.
  *
  * @throws Nothing for reference binding.
  * @note The adapter owns no JSON storage. `route()` constructs it only while
@@ -1573,6 +1704,79 @@ bool valid_output_delivery_for_wire(
 struct RequestRouter::RoutedParams {
   /** @brief Structurally valid params object borrowed from the active route. */
   const Json& value;
+};
+
+/**
+ * @brief Complete validated state for one inspection route.
+ *
+ * @throws std::bad_alloc when method, cursor, or binding text cannot allocate.
+ * @note The value owns decoded wire identities only. It owns no registry
+ *       admission, Host identity, snapshot reservation, or backend state.
+ */
+struct RequestRouter::InspectionRequest {
+  /** @brief Exact recognized inspection method. */
+  std::string method;
+
+  /** @brief Valid opaque session id, empty only for `graph.list`. */
+  IpcSessionId session_id;
+
+  /** @brief Optional node selector for node/tree inspection. */
+  std::optional<NodeId> optional_node;
+
+  /** @brief Exact dependency metadata intent. */
+  bool include_metadata = false;
+
+  /** @brief Validated first-page or continuation controls. */
+  CollectionPageRequest page_request;
+
+  /** @brief Exact cursor identity frozen across pages. */
+  CollectionSnapshotBinding binding;
+};
+
+/**
+ * @brief Complete decoded values for one session-control method.
+ *
+ * @throws std::bad_alloc when owned text cannot be allocated.
+ * @note The value owns only wire scalars/text. Registry admission and the Host
+ *       identity remain scoped to the dispatch call after validation succeeds.
+ */
+struct RequestRouter::SessionControlRequest {
+  /** @brief Valid daemon-opaque session identity. */
+  IpcSessionId session_id;
+
+  /** @brief Method-specific path, YAML, or precision text. */
+  std::string text;
+
+  /** @brief First method-specific node identity. */
+  NodeId first_node;
+
+  /** @brief Second method-specific node identity. */
+  NodeId second_node;
+
+  /** @brief Exact method-specific ROI. */
+  PixelRect roi;
+
+  /** @brief Exact dirty domain for dirty lifecycle calls. */
+  DirtyDomain dirty_domain = DirtyDomain::HighPrecision;
+};
+
+/**
+ * @brief Complete validated identity for one stable collection route.
+ *
+ * @throws std::bad_alloc when method, cursor, or binding text cannot allocate.
+ * @note The value owns page and frozen-binding inputs only. Snapshot
+ *       reservation/publication remains transactional inside first-page
+ *       helpers; continuations never acquire Host or session state.
+ */
+struct RequestRouter::StableCollectionRequest {
+  /** @brief Exact recognized collection method. */
+  std::string method;
+
+  /** @brief Validated cursor, offset, and requested page bound. */
+  CollectionPageRequest page_request;
+
+  /** @brief Exact method/session/original-params frozen identity. */
+  CollectionSnapshotBinding binding;
 };
 
 /** @copydoc RequestRouter::RequestRouter */
@@ -1613,6 +1817,357 @@ RequestRouter::RequestRouter(Host& host, std::string service_version,
       server_instance_id_(          // NOLINT(whitespace/indent_namespace)
           generate_opaque_id()) {}  // NOLINT
 
+/** @copydoc RequestRouter::route_inspection_direct_value */
+std::optional<std::string> RequestRouter::route_inspection_direct_value(
+    const std::string& id, const InspectionRequest& request) {
+  const bool direct_value = request.method == "inspect.node" ||
+                            request.method == "inspect.dirty_region" ||
+                            request.method == "inspect.compute_planning";
+  if (!direct_value) {
+    return std::nullopt;
+  }
+  IpcResult<SessionRegistry::HostCallAdmission> admission =
+      registry_.admit_host_call(request.session_id);
+  if (!admission.status.ok) {
+    return bounded_error(id, admission.status);
+  }
+  if (request.method == "inspect.node") {
+    Result<NodeInspectionView> inspected;
+    {
+      std::lock_guard<std::mutex> host_lock(host_mutex_);
+      inspected = host_.inspect_node(admission.value.host_session(),
+                                     *request.optional_node);
+    }
+    if (!inspected.status.ok) {
+      return bounded_error(id, graph_status(inspected.status));
+    }
+    return encode_routed_value(id, [&] {
+      require_node_preencoding_budget(inspected.value);
+      return Json{{"session_id", request.session_id.value},
+                  {"node", encode_node(inspected.value)}};
+    });
+  }
+  if (request.method == "inspect.dirty_region") {
+    Result<DirtyRegionInspectionSnapshot> inspected;
+    {
+      std::lock_guard<std::mutex> host_lock(host_mutex_);
+      inspected = host_.dirty_region_snapshot(admission.value.host_session());
+    }
+    if (!inspected.status.ok) {
+      return bounded_error(id, graph_status(inspected.status));
+    }
+    return encode_routed_value(id, [&] {
+      return encode_dirty_region(id, request.session_id, inspected.value);
+    });
+  }
+  Result<std::optional<ComputePlanningInspectionSnapshot>> inspected;
+  {
+    std::lock_guard<std::mutex> host_lock(host_mutex_);
+    inspected = host_.compute_planning_snapshot(admission.value.host_session());
+  }
+  if (!inspected.status.ok) {
+    return bounded_error(id, graph_status(inspected.status));
+  }
+  return encode_routed_value(id, [&] {
+    return Json{
+        {"session_id", request.session_id.value},
+        {"planning", inspected.value ? encode_compute_planning(*inspected.value)
+                                     : Json(nullptr)}};
+  });
+}
+
+/** @copydoc RequestRouter::route_inspection_continuation */
+std::string RequestRouter::route_inspection_continuation(
+    const std::string& id, const InspectionRequest& request) {
+  if (request.method == "graph.list" || request.method == "inspect.node_ids" ||
+      request.method == "inspect.ending_nodes" ||
+      request.method == "inspect.trees_containing_node" ||
+      request.method == "inspect.graph") {
+    return route_inspection_basic_continuation(id, request);
+  }
+  if (request.method == "inspect.dependency_tree") {
+    return route_inspection_dependency_continuation(id, request);
+  }
+  if (request.method == "inspect.traversal_orders" ||
+      request.method == "inspect.traversal_details") {
+    return route_inspection_traversal_continuation(id, request);
+  }
+  if (request.method == "inspect.recent_compute_planning") {
+    return route_inspection_planning_continuation(id, request);
+  }
+  return bounded_error(
+      id, failure_status(OperationErrorDomain::Daemon, kInternalErrorCode,
+                         "internal_error",
+                         "inspection continuation dispatch invariant failed"));
+}
+
+/** @copydoc RequestRouter::route_inspection_basic_continuation */
+std::string RequestRouter::route_inspection_basic_continuation(
+    const std::string& id, const InspectionRequest& request) {
+  const CollectionPageRequest& page_request = request.page_request;
+  if (request.method == "graph.list") {
+    auto page = collection_snapshots_.page<GraphSessionSummary>(
+        *page_request.cursor, request.binding, page_request.offset,
+        page_request.limit);
+    if (page.error != CollectionSnapshotError::None) {
+      return bounded_error(id, collection_error_status(page.error));
+    }
+    return encode_routed_value(id, [&] {
+      Json result{{"sessions", encode_session_summaries(page.entries)}};
+      add_collection_page_metadata(&result, page);
+      return result;
+    });
+  }
+  if (request.method == "inspect.node_ids" ||
+      request.method == "inspect.ending_nodes" ||
+      request.method == "inspect.trees_containing_node") {
+    auto page = collection_snapshots_.page<NodeId>(
+        *page_request.cursor, request.binding, page_request.offset,
+        page_request.limit);
+    if (page.error != CollectionSnapshotError::None) {
+      return bounded_error(id, collection_error_status(page.error));
+    }
+    return encode_routed_value(id, [&] {
+      const char* field =
+          request.method == "inspect.node_ids" ? "node_ids" : "ending_node_ids";
+      Json result{{"session_id", request.session_id.value},
+                  {field, encode_node_ids(page.entries)}};
+      add_collection_page_metadata(&result, page);
+      return result;
+    });
+  }
+  if (request.method == "inspect.graph") {
+    auto page = collection_snapshots_.page<NodeInspectionView>(
+        *page_request.cursor, request.binding, page_request.offset,
+        page_request.limit);
+    if (page.error != CollectionSnapshotError::None) {
+      return bounded_error(id, collection_error_status(page.error));
+    }
+    return encode_routed_value(id, [&] {
+      GraphInspectionView graph;
+      graph.nodes = page.entries;
+      Json result = encode_graph(request.session_id, graph);
+      add_collection_page_metadata(&result, page);
+      return result;
+    });
+  }
+  return bounded_error(
+      id, failure_status(OperationErrorDomain::Daemon, kInternalErrorCode,
+                         "internal_error",
+                         "basic continuation dispatch invariant failed"));
+}
+
+/** @copydoc RequestRouter::route_inspection_dependency_continuation */
+std::string RequestRouter::route_inspection_dependency_continuation(
+    const std::string& id, const InspectionRequest& request) {
+  const CollectionPageRequest& page_request = request.page_request;
+  auto page = collection_snapshots_.page<DependencyTreePageRow>(
+      *page_request.cursor, request.binding, page_request.offset,
+      page_request.limit);
+  if (page.error != CollectionSnapshotError::None) {
+    return bounded_error(id, collection_error_status(page.error));
+  }
+  if (page.entries.empty() || !page.entries.front().header) {
+    return bounded_error(
+        id, failure_status(OperationErrorDomain::Daemon, kInternalErrorCode,
+                           "internal_error",
+                           "dependency cursor lost its public header"));
+  }
+  return encode_routed_value(id, [&] {
+    const DependencyTreePageHeader& header = *page.entries.front().header;
+    HostDependencyTreeSnapshot tree;
+    tree.scope = header.scope;
+    tree.start_node = header.start_node;
+    tree.graph_empty = header.graph_empty;
+    tree.start_node_found = header.start_node_found;
+    tree.no_ending_nodes = header.no_ending_nodes;
+    tree.root_nodes = header.root_nodes;
+    for (const DependencyTreePageRow& row : page.entries) {
+      tree.entries.push_back(row.entry);
+    }
+    Json result = encode_dependency_tree(request.session_id, tree);
+    add_collection_page_metadata(&result, page);
+    return result;
+  });
+}
+
+/** @copydoc RequestRouter::route_inspection_traversal_continuation */
+std::string RequestRouter::route_inspection_traversal_continuation(
+    const std::string& id, const InspectionRequest& request) {
+  const CollectionPageRequest& page_request = request.page_request;
+  if (request.method == "inspect.traversal_orders") {
+    auto page = collection_snapshots_.page<TraversalOrderRow>(
+        *page_request.cursor, request.binding, page_request.offset,
+        page_request.limit);
+    if (page.error != CollectionSnapshotError::None) {
+      return bounded_error(id, collection_error_status(page.error));
+    }
+    return encode_routed_value(id, [&] {
+      Json rows = Json::array();
+      for (const TraversalOrderRow& row : page.entries) {
+        rows.push_back(encode_traversal_order_row(row));
+      }
+      Json result{{"session_id", request.session_id.value},
+                  {"orders", std::move(rows)}};
+      add_collection_page_metadata(&result, page);
+      return result;
+    });
+  }
+  if (request.method == "inspect.traversal_details") {
+    auto page = collection_snapshots_.page<TraversalDetailRow>(
+        *page_request.cursor, request.binding, page_request.offset,
+        page_request.limit);
+    if (page.error != CollectionSnapshotError::None) {
+      return bounded_error(id, collection_error_status(page.error));
+    }
+    return encode_routed_value(id, [&] {
+      Json rows = Json::array();
+      for (const TraversalDetailRow& row : page.entries) {
+        rows.push_back(encode_traversal_detail_row(row));
+      }
+      Json result{{"session_id", request.session_id.value},
+                  {"branches", std::move(rows)}};
+      add_collection_page_metadata(&result, page);
+      return result;
+    });
+  }
+  return bounded_error(
+      id, failure_status(OperationErrorDomain::Daemon, kInternalErrorCode,
+                         "internal_error",
+                         "traversal continuation dispatch invariant failed"));
+}
+
+/** @copydoc RequestRouter::route_inspection_planning_continuation */
+std::string RequestRouter::route_inspection_planning_continuation(
+    const std::string& id, const InspectionRequest& request) {
+  const CollectionPageRequest& page_request = request.page_request;
+  auto page = collection_snapshots_.page<ComputePlanningInspectionSnapshot>(
+      *page_request.cursor, request.binding, page_request.offset,
+      page_request.limit);
+  if (page.error != CollectionSnapshotError::None) {
+    return bounded_error(id, collection_error_status(page.error));
+  }
+  return encode_routed_value(id, [&] {
+    Json snapshots = Json::array();
+    for (const ComputePlanningInspectionSnapshot& snapshot : page.entries) {
+      snapshots.push_back(encode_compute_planning(snapshot));
+    }
+    Json result{{"session_id", request.session_id.value},
+                {"snapshots", std::move(snapshots)}};
+    add_collection_page_metadata(&result, page);
+    return result;
+  });
+}
+
+/** @copydoc RequestRouter::route_inspection_graph_list_first_page */
+std::string RequestRouter::route_inspection_graph_list_first_page(
+    const std::string& id, InspectionRequest request) {
+  auto reserved = collection_snapshots_.reserve();
+  if (reserved.error != CollectionSnapshotError::None) {
+    return bounded_error(id, collection_error_status(reserved.error));
+  }
+  Result<std::vector<GraphSessionId>> listed;
+  IpcResult<std::vector<GraphSessionSummary>> reconciled;
+  {
+    std::lock_guard<std::mutex> host_lock(host_mutex_);
+    listed = host_.list_graphs();
+    if (listed.status.ok) {
+      reconciled = registry_.reconcile(listed.value);
+    }
+  }
+  if (!listed.status.ok) {
+    return bounded_error(id, graph_status(listed.status));
+  }
+  if (!reconciled.status.ok) {
+    return bounded_error(id, reconciled.status);
+  }
+  try {
+    Json empty_page{{"sessions", Json::array()}};
+    add_worst_collection_page_metadata(&empty_page);
+    const CollectionMeasurement measured = measure_collection_rows(
+        reconciled.value,
+        [](const GraphSessionSummary& row) {
+          return encode_session_summaries({row}).front();
+        },
+        empty_page, request.page_request.limit, reconciled.value.size());
+    auto page = collection_snapshots_.publish(
+        std::move(reserved.reservation), std::move(request.binding),
+        std::move(reconciled.value), measured.entries, measured.bytes,
+        request.page_request.limit, measured.page_limit);
+    if (page.error != CollectionSnapshotError::None) {
+      return bounded_error(id, collection_error_status(page.error));
+    }
+    Json result{{"sessions", encode_session_summaries(page.entries)}};
+    add_collection_page_metadata(&result, page);
+    return encode_success_response(id, std::move(result));
+  } catch (const std::length_error& error) {
+    return collection_too_large(id, error.what());
+  }
+}
+
+/** @copydoc RequestRouter::decode_inspection_identity */
+OperationStatus RequestRouter::decode_inspection_identity(
+    const std::string& method, const RoutedParams& routed_params,
+    InspectionRequest* request) {
+  const Json& params = routed_params.value;
+  request->method = method;
+  if (method != "graph.list" &&
+      !read_session_id(params, &request->session_id)) {
+    return invalid_params(method + " requires a valid session_id");
+  }
+  if (method == "inspect.node" || method == "inspect.trees_containing_node") {
+    NodeId node;
+    if (!read_node_id(params, "node_id", &node)) {
+      return invalid_params(method + " requires a nonnegative node_id");
+    }
+    request->optional_node = node;
+    return ok_status();
+  }
+  if (method != "inspect.dependency_tree") {
+    return ok_status();
+  }
+  if (params.contains("node_id") && !params["node_id"].is_null()) {
+    NodeId node;
+    if (!read_node_id(params, "node_id", &node)) {
+      return invalid_params("node_id must be a nonnegative integer or null");
+    }
+    request->optional_node = node;
+  }
+  if (params.contains("include_metadata")) {
+    if (!params["include_metadata"].is_boolean()) {
+      return invalid_params("include_metadata must be boolean");
+    }
+    request->include_metadata = params["include_metadata"].get<bool>();
+  }
+  return ok_status();
+}
+
+/** @copydoc RequestRouter::decode_inspection_page_request */
+OperationStatus RequestRouter::decode_inspection_page_request(
+    const RoutedParams& routed_params, InspectionRequest* request) {
+  std::string page_message;
+  if (!read_collection_page(routed_params.value, &request->page_request,
+                            &page_message)) {
+    return invalid_params(std::move(page_message));
+  }
+  request->binding = CollectionSnapshotBinding{request->method,
+                                               request->method == "graph.list"
+                                                   ? std::string{}
+                                                   : request->session_id.value,
+                                               {}};
+  if (request->method == "inspect.trees_containing_node") {
+    request->binding.original_params =
+        "node_id=" + std::to_string(request->optional_node->value);
+  } else if (request->method == "inspect.dependency_tree") {
+    request->binding.original_params =
+        std::string("node_id=") +
+        (request->optional_node ? std::to_string(request->optional_node->value)
+                                : "null") +
+        ";include_metadata=" + (request->include_metadata ? "true" : "false");
+  }
+  return ok_status();
+}
+
 /** @copydoc RequestRouter::route_inspection_method */
 std::optional<std::string> RequestRouter::route_inspection_method(
     const std::string& id, const std::string& method,
@@ -1620,292 +2175,39 @@ std::optional<std::string> RequestRouter::route_inspection_method(
   if (!is_inspection_method(method)) {
     return std::nullopt;
   }
-  const Json& params = routed_params.value;
-  const bool graph_list = method == "graph.list";
-  IpcSessionId session_id;
-  if (!graph_list && !read_session_id(params, &session_id)) {
-    return bounded_error(
-        id, invalid_params(method + " requires a valid session_id"));
+  InspectionRequest request;
+  const OperationStatus identity =
+      decode_inspection_identity(method, routed_params, &request);
+  if (!identity.ok) {
+    return bounded_error(id, identity);
   }
 
-  std::optional<NodeId> optional_node;
-  bool include_metadata = false;
-  if (method == "inspect.node" || method == "inspect.trees_containing_node") {
-    NodeId node;
-    if (!read_node_id(params, "node_id", &node)) {
-      return bounded_error(
-          id, invalid_params(method + " requires a nonnegative node_id"));
-    }
-    optional_node = node;
-  } else if (method == "inspect.dependency_tree") {
-    if (params.contains("node_id") && !params["node_id"].is_null()) {
-      NodeId node;
-      if (!read_node_id(params, "node_id", &node)) {
-        return bounded_error(
-            id,
-            invalid_params("node_id must be a nonnegative integer or null"));
-      }
-      optional_node = node;
-    }
-    if (params.contains("include_metadata")) {
-      if (!params["include_metadata"].is_boolean()) {
-        return bounded_error(
-            id, invalid_params("include_metadata must be boolean"));
-      }
-      include_metadata = params["include_metadata"].get<bool>();
-    }
+  if (std::optional<std::string> routed =
+          route_inspection_direct_value(id, request)) {
+    return routed;
   }
 
-  const bool direct_value = method == "inspect.node" ||
-                            method == "inspect.dirty_region" ||
-                            method == "inspect.compute_planning";
-  if (direct_value) {
-    IpcResult<SessionRegistry::HostCallAdmission> admission =
-        registry_.admit_host_call(session_id);
-    if (!admission.status.ok) {
-      return bounded_error(id, admission.status);
-    }
-    if (method == "inspect.node") {
-      Result<NodeInspectionView> inspected;
-      {
-        std::lock_guard<std::mutex> host_lock(host_mutex_);
-        inspected =
-            host_.inspect_node(admission.value.host_session(), *optional_node);
-      }
-      if (!inspected.status.ok) {
-        return bounded_error(id, graph_status(inspected.status));
-      }
-      return encode_routed_value(id, [&] {
-        require_node_preencoding_budget(inspected.value);
-        return Json{{"session_id", session_id.value},
-                    {"node", encode_node(inspected.value)}};
-      });
-    }
-    if (method == "inspect.dirty_region") {
-      Result<DirtyRegionInspectionSnapshot> inspected;
-      {
-        std::lock_guard<std::mutex> host_lock(host_mutex_);
-        inspected = host_.dirty_region_snapshot(admission.value.host_session());
-      }
-      if (!inspected.status.ok) {
-        return bounded_error(id, graph_status(inspected.status));
-      }
-      return encode_routed_value(id, [&] {
-        return encode_dirty_region(id, session_id, inspected.value);
-      });
-    }
-    Result<std::optional<ComputePlanningInspectionSnapshot>> inspected;
-    {
-      std::lock_guard<std::mutex> host_lock(host_mutex_);
-      inspected =
-          host_.compute_planning_snapshot(admission.value.host_session());
-    }
-    if (!inspected.status.ok) {
-      return bounded_error(id, graph_status(inspected.status));
-    }
-    return encode_routed_value(id, [&] {
-      return Json{{"session_id", session_id.value},
-                  {"planning", inspected.value
-                                   ? encode_compute_planning(*inspected.value)
-                                   : Json(nullptr)}};
-    });
+  const OperationStatus page =
+      decode_inspection_page_request(routed_params, &request);
+  if (!page.ok) {
+    return bounded_error(id, page);
   }
 
-  CollectionPageRequest page_request;
-  std::string page_message;
-  if (!read_collection_page(params, &page_request, &page_message)) {
-    return bounded_error(id, invalid_params(std::move(page_message)));
-  }
-  CollectionSnapshotBinding binding{
-      method,
-      graph_list ? std::string{} : session_id.value,
-      {}};
-  if (method == "inspect.trees_containing_node") {
-    binding.original_params = "node_id=" + std::to_string(optional_node->value);
-  } else if (method == "inspect.dependency_tree") {
-    binding.original_params =
-        std::string("node_id=") +
-        (optional_node ? std::to_string(optional_node->value) : "null") +
-        ";include_metadata=" + (include_metadata ? "true" : "false");
-  }
-
-  if (page_request.cursor) {
-    if (method == "graph.list") {
-      auto page = collection_snapshots_.page<GraphSessionSummary>(
-          *page_request.cursor, binding, page_request.offset,
-          page_request.limit);
-      if (page.error != CollectionSnapshotError::None) {
-        return bounded_error(id, collection_error_status(page.error));
-      }
-      return encode_routed_value(id, [&] {
-        Json result{{"sessions", encode_session_summaries(page.entries)}};
-        add_collection_page_metadata(&result, page);
-        return result;
-      });
-    }
-    if (method == "inspect.node_ids" || method == "inspect.ending_nodes" ||
-        method == "inspect.trees_containing_node") {
-      auto page = collection_snapshots_.page<NodeId>(
-          *page_request.cursor, binding, page_request.offset,
-          page_request.limit);
-      if (page.error != CollectionSnapshotError::None) {
-        return bounded_error(id, collection_error_status(page.error));
-      }
-      return encode_routed_value(id, [&] {
-        const char* field = method == "inspect.node_ids" ? "node_ids"
-                            : method == "inspect.ending_nodes"
-                                ? "ending_node_ids"
-                                : "ending_node_ids";
-        Json result{{"session_id", session_id.value},
-                    {field, encode_node_ids(page.entries)}};
-        add_collection_page_metadata(&result, page);
-        return result;
-      });
-    }
-    if (method == "inspect.graph") {
-      auto page = collection_snapshots_.page<NodeInspectionView>(
-          *page_request.cursor, binding, page_request.offset,
-          page_request.limit);
-      if (page.error != CollectionSnapshotError::None) {
-        return bounded_error(id, collection_error_status(page.error));
-      }
-      return encode_routed_value(id, [&] {
-        GraphInspectionView graph;
-        graph.nodes = page.entries;
-        Json result = encode_graph(session_id, graph);
-        add_collection_page_metadata(&result, page);
-        return result;
-      });
-    }
-    if (method == "inspect.dependency_tree") {
-      auto page = collection_snapshots_.page<DependencyTreePageRow>(
-          *page_request.cursor, binding, page_request.offset,
-          page_request.limit);
-      if (page.error != CollectionSnapshotError::None) {
-        return bounded_error(id, collection_error_status(page.error));
-      }
-      if (page.entries.empty() || !page.entries.front().header) {
-        return bounded_error(
-            id, failure_status(OperationErrorDomain::Daemon, kInternalErrorCode,
-                               "internal_error",
-                               "dependency cursor lost its public header"));
-      }
-      return encode_routed_value(id, [&] {
-        const DependencyTreePageHeader& header = *page.entries.front().header;
-        HostDependencyTreeSnapshot tree;
-        tree.scope = header.scope;
-        tree.start_node = header.start_node;
-        tree.graph_empty = header.graph_empty;
-        tree.start_node_found = header.start_node_found;
-        tree.no_ending_nodes = header.no_ending_nodes;
-        tree.root_nodes = header.root_nodes;
-        for (const DependencyTreePageRow& row : page.entries) {
-          tree.entries.push_back(row.entry);
-        }
-        Json result = encode_dependency_tree(session_id, tree);
-        add_collection_page_metadata(&result, page);
-        return result;
-      });
-    }
-    if (method == "inspect.traversal_orders") {
-      auto page = collection_snapshots_.page<TraversalOrderRow>(
-          *page_request.cursor, binding, page_request.offset,
-          page_request.limit);
-      if (page.error != CollectionSnapshotError::None) {
-        return bounded_error(id, collection_error_status(page.error));
-      }
-      return encode_routed_value(id, [&] {
-        Json rows = Json::array();
-        for (const TraversalOrderRow& row : page.entries) {
-          rows.push_back(encode_traversal_order_row(row));
-        }
-        Json result{{"session_id", session_id.value},
-                    {"orders", std::move(rows)}};
-        add_collection_page_metadata(&result, page);
-        return result;
-      });
-    }
-    if (method == "inspect.traversal_details") {
-      auto page = collection_snapshots_.page<TraversalDetailRow>(
-          *page_request.cursor, binding, page_request.offset,
-          page_request.limit);
-      if (page.error != CollectionSnapshotError::None) {
-        return bounded_error(id, collection_error_status(page.error));
-      }
-      return encode_routed_value(id, [&] {
-        Json rows = Json::array();
-        for (const TraversalDetailRow& row : page.entries) {
-          rows.push_back(encode_traversal_detail_row(row));
-        }
-        Json result{{"session_id", session_id.value},
-                    {"branches", std::move(rows)}};
-        add_collection_page_metadata(&result, page);
-        return result;
-      });
-    }
-    auto page = collection_snapshots_.page<ComputePlanningInspectionSnapshot>(
-        *page_request.cursor, binding, page_request.offset, page_request.limit);
-    if (page.error != CollectionSnapshotError::None) {
-      return bounded_error(id, collection_error_status(page.error));
-    }
-    return encode_routed_value(id, [&] {
-      Json snapshots = Json::array();
-      for (const ComputePlanningInspectionSnapshot& snapshot : page.entries) {
-        snapshots.push_back(encode_compute_planning(snapshot));
-      }
-      Json result{{"session_id", session_id.value},
-                  {"snapshots", std::move(snapshots)}};
-      add_collection_page_metadata(&result, page);
-      return result;
-    });
+  if (request.page_request.cursor) {
+    return route_inspection_continuation(id, request);
   }
 
   if (method == "graph.list") {
-    auto reserved = collection_snapshots_.reserve();
-    if (reserved.error != CollectionSnapshotError::None) {
-      return bounded_error(id, collection_error_status(reserved.error));
-    }
-    Result<std::vector<GraphSessionId>> listed;
-    IpcResult<std::vector<GraphSessionSummary>> reconciled;
-    {
-      std::lock_guard<std::mutex> host_lock(host_mutex_);
-      listed = host_.list_graphs();
-      if (listed.status.ok) {
-        reconciled = registry_.reconcile(listed.value);
-      }
-    }
-    if (!listed.status.ok) {
-      return bounded_error(id, graph_status(listed.status));
-    }
-    if (!reconciled.status.ok) {
-      return bounded_error(id, reconciled.status);
-    }
-    try {
-      Json empty_page{{"sessions", Json::array()}};
-      add_worst_collection_page_metadata(&empty_page);
-      const CollectionMeasurement measured = measure_collection_rows(
-          reconciled.value,
-          [](const GraphSessionSummary& row) {
-            return encode_session_summaries({row}).front();
-          },
-          empty_page, page_request.limit, reconciled.value.size());
-      auto page = collection_snapshots_.publish(
-          std::move(reserved.reservation), std::move(binding),
-          std::move(reconciled.value), measured.entries, measured.bytes,
-          page_request.limit, measured.page_limit);
-      if (page.error != CollectionSnapshotError::None) {
-        return bounded_error(id, collection_error_status(page.error));
-      }
-      Json result{{"sessions", encode_session_summaries(page.entries)}};
-      add_collection_page_metadata(&result, page);
-      return encode_success_response(id, std::move(result));
-    } catch (const std::length_error& error) {
-      return collection_too_large(id, error.what());
-    }
+    return route_inspection_graph_list_first_page(id, std::move(request));
   }
+  return route_inspection_first_page(id, std::move(request));
+}
 
+/** @copydoc RequestRouter::route_inspection_first_page */
+std::string RequestRouter::route_inspection_first_page(
+    const std::string& id, InspectionRequest request) {
   IpcResult<SessionRegistry::HostCallAdmission> admission =
-      registry_.admit_host_call(session_id);
+      registry_.admit_host_call(request.session_id);
   if (!admission.status.ok) {
     return bounded_error(id, admission.status);
   }
@@ -1915,159 +2217,210 @@ std::optional<std::string> RequestRouter::route_inspection_method(
     return bounded_error(id, collection_error_status(reserved.error));
   }
 
-  if (method == "inspect.node_ids" || method == "inspect.ending_nodes" ||
-      method == "inspect.trees_containing_node") {
-    Result<std::vector<NodeId>> inspected;
-    {
-      std::lock_guard<std::mutex> host_lock(host_mutex_);
-      if (method == "inspect.node_ids") {
-        inspected = host_.list_node_ids(host_session);
-      } else if (method == "inspect.ending_nodes") {
-        inspected = host_.ending_nodes(host_session);
-      } else {
-        inspected = host_.trees_containing_node(host_session, *optional_node);
-      }
-    }
-    if (!inspected.status.ok) {
-      return bounded_error(id, graph_status(inspected.status));
-    }
-    try {
-      const char* field =
-          method == "inspect.node_ids" ? "node_ids" : "ending_node_ids";
-      Json empty_page{{"session_id", session_id.value}, {field, Json::array()}};
-      add_worst_collection_page_metadata(&empty_page);
-      const CollectionMeasurement measured = measure_collection_rows(
-          inspected.value,
-          [](NodeId node) { return encode_node_ids({node}).front(); },
-          empty_page, page_request.limit, inspected.value.size());
-      auto page = collection_snapshots_.publish(
-          std::move(reserved.reservation), std::move(binding),
-          std::move(inspected.value), measured.entries, measured.bytes,
-          page_request.limit, measured.page_limit);
-      if (page.error != CollectionSnapshotError::None) {
-        return bounded_error(id, collection_error_status(page.error));
-      }
-      Json result{{"session_id", session_id.value},
-                  {field, encode_node_ids(page.entries)}};
-      add_collection_page_metadata(&result, page);
-      return encode_success_response(id, std::move(result));
-    } catch (const std::length_error& error) {
-      return collection_too_large(id, error.what());
-    }
+  if (request.method == "inspect.node_ids" ||
+      request.method == "inspect.ending_nodes" ||
+      request.method == "inspect.trees_containing_node") {
+    return route_inspection_node_list_first_page(
+        id, std::move(request), host_session, std::move(reserved.reservation));
   }
-
-  if (method == "inspect.graph") {
-    Result<GraphInspectionView> inspected;
-    {
-      std::lock_guard<std::mutex> host_lock(host_mutex_);
-      inspected = host_.inspect_graph(host_session);
-    }
-    if (!inspected.status.ok) {
-      return bounded_error(id, graph_status(inspected.status));
-    }
-    try {
-      const std::size_t measured_entries =
-          graph_entry_count(inspected.value.nodes);
-      GraphInspectionView empty_graph;
-      Json empty_page = encode_graph(session_id, empty_graph);
-      add_worst_collection_page_metadata(&empty_page);
-      const CollectionMeasurement measured = measure_collection_rows(
-          inspected.value.nodes,
-          [](const NodeInspectionView& node) {
-            require_node_preencoding_budget(node);
-            return encode_node(node);
-          },
-          empty_page, page_request.limit, measured_entries);
-      auto page = collection_snapshots_.publish(
-          std::move(reserved.reservation), std::move(binding),
-          std::move(inspected.value.nodes), measured.entries, measured.bytes,
-          page_request.limit, measured.page_limit);
-      if (page.error != CollectionSnapshotError::None) {
-        return bounded_error(id, collection_error_status(page.error));
-      }
-      GraphInspectionView graph;
-      graph.nodes = page.entries;
-      Json result = encode_graph(session_id, graph);
-      add_collection_page_metadata(&result, page);
-      return encode_success_response(id, std::move(result));
-    } catch (const std::length_error& error) {
-      return collection_too_large(id, error.what());
-    }
+  if (request.method == "inspect.graph") {
+    return route_inspection_graph_first_page(
+        id, std::move(request), host_session, std::move(reserved.reservation));
   }
+  if (request.method == "inspect.dependency_tree") {
+    return route_inspection_dependency_first_page(
+        id, std::move(request), host_session, std::move(reserved.reservation));
+  }
+  if (request.method == "inspect.traversal_orders" ||
+      request.method == "inspect.traversal_details") {
+    return route_inspection_traversal_first_page(
+        id, std::move(request), host_session, std::move(reserved.reservation));
+  }
+  if (request.method == "inspect.recent_compute_planning") {
+    return route_inspection_planning_first_page(
+        id, std::move(request), host_session, std::move(reserved.reservation));
+  }
+  return bounded_error(
+      id, failure_status(OperationErrorDomain::Daemon, kInternalErrorCode,
+                         "internal_error",
+                         "inspection first-page dispatch invariant failed"));
+}
 
-  if (method == "inspect.dependency_tree") {
-    Result<HostDependencyTreeSnapshot> inspected;
-    {
-      std::lock_guard<std::mutex> host_lock(host_mutex_);
+/** @copydoc RequestRouter::route_inspection_node_list_first_page */
+std::string RequestRouter::route_inspection_node_list_first_page(
+    const std::string& id, InspectionRequest request,
+    const GraphSessionId& host_session,
+    CollectionSnapshotRegistry::Reservation reservation) {
+  const std::string& method = request.method;
+  const IpcSessionId& session_id = request.session_id;
+  Result<std::vector<NodeId>> inspected;
+  {
+    std::lock_guard<std::mutex> host_lock(host_mutex_);
+    if (method == "inspect.node_ids") {
+      inspected = host_.list_node_ids(host_session);
+    } else if (method == "inspect.ending_nodes") {
+      inspected = host_.ending_nodes(host_session);
+    } else {
       inspected =
-          host_.dependency_tree(host_session, optional_node, include_metadata);
-    }
-    if (!inspected.status.ok) {
-      return bounded_error(id, graph_status(inspected.status));
-    }
-    try {
-      const std::size_t measured_entries =
-          dependency_tree_entry_count(inspected.value);
-      auto header = std::make_shared<DependencyTreePageHeader>();
-      header->scope = inspected.value.scope;
-      header->start_node = inspected.value.start_node;
-      header->graph_empty = inspected.value.graph_empty;
-      header->start_node_found = inspected.value.start_node_found;
-      header->no_ending_nodes = inspected.value.no_ending_nodes;
-      header->root_nodes = std::move(inspected.value.root_nodes);
-      HostDependencyTreeSnapshot header_value;
-      header_value.scope = header->scope;
-      header_value.start_node = header->start_node;
-      header_value.graph_empty = header->graph_empty;
-      header_value.start_node_found = header->start_node_found;
-      header_value.no_ending_nodes = header->no_ending_nodes;
-      header_value.root_nodes = header->root_nodes;
-      const std::size_t header_bytes =
-          encode_dependency_tree(session_id, header_value).dump().size();
-      std::vector<DependencyTreePageRow> rows;
-      rows.reserve(inspected.value.entries.size());
-      for (HostDependencyTreeEntry& entry : inspected.value.entries) {
-        rows.push_back(DependencyTreePageRow{header, std::move(entry)});
-      }
-      Json empty_page = encode_dependency_tree(session_id, header_value);
-      add_worst_collection_page_metadata(&empty_page);
-      CollectionMeasurement measured = measure_collection_rows(
-          rows,
-          [&session_id](const DependencyTreePageRow& row) {
-            require_node_preencoding_budget(row.entry.node);
-            HostDependencyTreeSnapshot one;
-            one.entries.push_back(row.entry);
-            return encode_dependency_tree(session_id, one)["entries"].front();
-          },
-          empty_page, page_request.limit, measured_entries);
-      if (header_bytes < 2U) {
-        throw std::invalid_argument(
-            "dependency header lost its empty entries array");
-      }
-      measured.bytes = checked_size_sum(header_bytes - 2U, measured.bytes);
-      if (measured.bytes > kSnapshotMaxBytes) {
-        throw std::length_error(
-            "dependency tree exceeds 64 MiB snapshot bytes");
-      }
-      auto page = collection_snapshots_.publish(
-          std::move(reserved.reservation), std::move(binding), std::move(rows),
-          measured.entries, measured.bytes, page_request.limit,
-          measured.page_limit);
-      if (page.error != CollectionSnapshotError::None) {
-        return bounded_error(id, collection_error_status(page.error));
-      }
-      HostDependencyTreeSnapshot tree = std::move(header_value);
-      for (const DependencyTreePageRow& row : page.entries) {
-        tree.entries.push_back(row.entry);
-      }
-      Json result = encode_dependency_tree(session_id, tree);
-      add_collection_page_metadata(&result, page);
-      return encode_success_response(id, std::move(result));
-    } catch (const std::length_error& error) {
-      return collection_too_large(id, error.what());
+          host_.trees_containing_node(host_session, *request.optional_node);
     }
   }
+  if (!inspected.status.ok) {
+    return bounded_error(id, graph_status(inspected.status));
+  }
+  try {
+    const char* field =
+        method == "inspect.node_ids" ? "node_ids" : "ending_node_ids";
+    Json empty_page{{"session_id", session_id.value}, {field, Json::array()}};
+    add_worst_collection_page_metadata(&empty_page);
+    const CollectionMeasurement measured = measure_collection_rows(
+        inspected.value,
+        [](NodeId node) { return encode_node_ids({node}).front(); }, empty_page,
+        request.page_request.limit, inspected.value.size());
+    auto page = collection_snapshots_.publish(
+        std::move(reservation), std::move(request.binding),
+        std::move(inspected.value), measured.entries, measured.bytes,
+        request.page_request.limit, measured.page_limit);
+    if (page.error != CollectionSnapshotError::None) {
+      return bounded_error(id, collection_error_status(page.error));
+    }
+    Json result{{"session_id", session_id.value},
+                {field, encode_node_ids(page.entries)}};
+    add_collection_page_metadata(&result, page);
+    return encode_success_response(id, std::move(result));
+  } catch (const std::length_error& error) {
+    return collection_too_large(id, error.what());
+  }
+}
 
+/** @copydoc RequestRouter::route_inspection_graph_first_page */
+std::string RequestRouter::route_inspection_graph_first_page(
+    const std::string& id, InspectionRequest request,
+    const GraphSessionId& host_session,
+    CollectionSnapshotRegistry::Reservation reservation) {
+  const IpcSessionId& session_id = request.session_id;
+  Result<GraphInspectionView> inspected;
+  {
+    std::lock_guard<std::mutex> host_lock(host_mutex_);
+    inspected = host_.inspect_graph(host_session);
+  }
+  if (!inspected.status.ok) {
+    return bounded_error(id, graph_status(inspected.status));
+  }
+  try {
+    const std::size_t measured_entries =
+        graph_entry_count(inspected.value.nodes);
+    GraphInspectionView empty_graph;
+    Json empty_page = encode_graph(session_id, empty_graph);
+    add_worst_collection_page_metadata(&empty_page);
+    const CollectionMeasurement measured = measure_collection_rows(
+        inspected.value.nodes,
+        [](const NodeInspectionView& node) {
+          require_node_preencoding_budget(node);
+          return encode_node(node);
+        },
+        empty_page, request.page_request.limit, measured_entries);
+    auto page = collection_snapshots_.publish(
+        std::move(reservation), std::move(request.binding),
+        std::move(inspected.value.nodes), measured.entries, measured.bytes,
+        request.page_request.limit, measured.page_limit);
+    if (page.error != CollectionSnapshotError::None) {
+      return bounded_error(id, collection_error_status(page.error));
+    }
+    GraphInspectionView graph;
+    graph.nodes = page.entries;
+    Json result = encode_graph(session_id, graph);
+    add_collection_page_metadata(&result, page);
+    return encode_success_response(id, std::move(result));
+  } catch (const std::length_error& error) {
+    return collection_too_large(id, error.what());
+  }
+}
+
+/** @copydoc RequestRouter::route_inspection_dependency_first_page */
+std::string RequestRouter::route_inspection_dependency_first_page(
+    const std::string& id, InspectionRequest request,
+    const GraphSessionId& host_session,
+    CollectionSnapshotRegistry::Reservation reservation) {
+  const IpcSessionId& session_id = request.session_id;
+  Result<HostDependencyTreeSnapshot> inspected;
+  {
+    std::lock_guard<std::mutex> host_lock(host_mutex_);
+    inspected = host_.dependency_tree(host_session, request.optional_node,
+                                      request.include_metadata);
+  }
+  if (!inspected.status.ok) {
+    return bounded_error(id, graph_status(inspected.status));
+  }
+  try {
+    const std::size_t measured_entries =
+        dependency_tree_entry_count(inspected.value);
+    auto header = std::make_shared<DependencyTreePageHeader>();
+    header->scope = inspected.value.scope;
+    header->start_node = inspected.value.start_node;
+    header->graph_empty = inspected.value.graph_empty;
+    header->start_node_found = inspected.value.start_node_found;
+    header->no_ending_nodes = inspected.value.no_ending_nodes;
+    header->root_nodes = std::move(inspected.value.root_nodes);
+    HostDependencyTreeSnapshot header_value;
+    header_value.scope = header->scope;
+    header_value.start_node = header->start_node;
+    header_value.graph_empty = header->graph_empty;
+    header_value.start_node_found = header->start_node_found;
+    header_value.no_ending_nodes = header->no_ending_nodes;
+    header_value.root_nodes = header->root_nodes;
+    const std::size_t header_bytes =
+        encode_dependency_tree(session_id, header_value).dump().size();
+    std::vector<DependencyTreePageRow> rows;
+    rows.reserve(inspected.value.entries.size());
+    for (HostDependencyTreeEntry& entry : inspected.value.entries) {
+      rows.push_back(DependencyTreePageRow{header, std::move(entry)});
+    }
+    Json empty_page = encode_dependency_tree(session_id, header_value);
+    add_worst_collection_page_metadata(&empty_page);
+    CollectionMeasurement measured = measure_collection_rows(
+        rows,
+        [&session_id](const DependencyTreePageRow& row) {
+          require_node_preencoding_budget(row.entry.node);
+          HostDependencyTreeSnapshot one;
+          one.entries.push_back(row.entry);
+          return encode_dependency_tree(session_id, one)["entries"].front();
+        },
+        empty_page, request.page_request.limit, measured_entries);
+    if (header_bytes < 2U) {
+      throw std::invalid_argument(
+          "dependency header lost its empty entries array");
+    }
+    measured.bytes = checked_size_sum(header_bytes - 2U, measured.bytes);
+    if (measured.bytes > kSnapshotMaxBytes) {
+      throw std::length_error("dependency tree exceeds 64 MiB snapshot bytes");
+    }
+    auto page = collection_snapshots_.publish(
+        std::move(reservation), std::move(request.binding), std::move(rows),
+        measured.entries, measured.bytes, request.page_request.limit,
+        measured.page_limit);
+    if (page.error != CollectionSnapshotError::None) {
+      return bounded_error(id, collection_error_status(page.error));
+    }
+    HostDependencyTreeSnapshot tree = std::move(header_value);
+    for (const DependencyTreePageRow& row : page.entries) {
+      tree.entries.push_back(row.entry);
+    }
+    Json result = encode_dependency_tree(session_id, tree);
+    add_collection_page_metadata(&result, page);
+    return encode_success_response(id, std::move(result));
+  } catch (const std::length_error& error) {
+    return collection_too_large(id, error.what());
+  }
+}
+
+/** @copydoc RequestRouter::route_inspection_traversal_first_page */
+std::string RequestRouter::route_inspection_traversal_first_page(
+    const std::string& id, InspectionRequest request,
+    const GraphSessionId& host_session,
+    CollectionSnapshotRegistry::Reservation reservation) {
+  const std::string& method = request.method;
+  const IpcSessionId& session_id = request.session_id;
   if (method == "inspect.traversal_orders") {
     Result<std::map<int, std::vector<NodeId>>> inspected;
     {
@@ -2094,10 +2447,10 @@ std::optional<std::string> RequestRouter::route_inspection_method(
           [](const TraversalOrderRow& row) {
             return encode_traversal_order_row(row);
           },
-          empty_page, page_request.limit, measured_entries);
+          empty_page, request.page_request.limit, measured_entries);
       auto page = collection_snapshots_.publish(
-          std::move(reserved.reservation), std::move(binding), std::move(rows),
-          measured.entries, measured.bytes, page_request.limit,
+          std::move(reservation), std::move(request.binding), std::move(rows),
+          measured.entries, measured.bytes, request.page_request.limit,
           measured.page_limit);
       if (page.error != CollectionSnapshotError::None) {
         return bounded_error(id, collection_error_status(page.error));
@@ -2141,10 +2494,10 @@ std::optional<std::string> RequestRouter::route_inspection_method(
           [](const TraversalDetailRow& row) {
             return encode_traversal_detail_row(row);
           },
-          empty_page, page_request.limit, measured_entries);
+          empty_page, request.page_request.limit, measured_entries);
       auto page = collection_snapshots_.publish(
-          std::move(reserved.reservation), std::move(binding), std::move(rows),
-          measured.entries, measured.bytes, page_request.limit,
+          std::move(reservation), std::move(request.binding), std::move(rows),
+          measured.entries, measured.bytes, request.page_request.limit,
           measured.page_limit);
       if (page.error != CollectionSnapshotError::None) {
         return bounded_error(id, collection_error_status(page.error));
@@ -2162,6 +2515,18 @@ std::optional<std::string> RequestRouter::route_inspection_method(
     }
   }
 
+  return bounded_error(
+      id, failure_status(OperationErrorDomain::Daemon, kInternalErrorCode,
+                         "internal_error",
+                         "traversal first-page dispatch invariant failed"));
+}
+
+/** @copydoc RequestRouter::route_inspection_planning_first_page */
+std::string RequestRouter::route_inspection_planning_first_page(
+    const std::string& id, InspectionRequest request,
+    const GraphSessionId& host_session,
+    CollectionSnapshotRegistry::Reservation reservation) {
+  const IpcSessionId& session_id = request.session_id;
   Result<std::vector<ComputePlanningInspectionSnapshot>> inspected;
   {
     std::lock_guard<std::mutex> host_lock(host_mutex_);
@@ -2181,11 +2546,11 @@ std::optional<std::string> RequestRouter::route_inspection_method(
         [](const ComputePlanningInspectionSnapshot& snapshot) {
           return encode_compute_planning(snapshot);
         },
-        empty_page, page_request.limit, measured_entries);
+        empty_page, request.page_request.limit, measured_entries);
     auto page = collection_snapshots_.publish(
-        std::move(reserved.reservation), std::move(binding),
+        std::move(reservation), std::move(request.binding),
         std::move(inspected.value), measured.entries, measured.bytes,
-        page_request.limit, measured.page_limit);
+        request.page_request.limit, measured.page_limit);
     if (page.error != CollectionSnapshotError::None) {
       return bounded_error(id, collection_error_status(page.error));
     }
@@ -2202,184 +2567,240 @@ std::optional<std::string> RequestRouter::route_inspection_method(
   }
 }
 
-/** @copydoc RequestRouter::route_session_control_method */
-std::optional<std::string> RequestRouter::route_session_control_method(
-    const std::string& id, const std::string& method,
-    const RoutedParams& routed_params) {
+/** @copydoc RequestRouter::decode_session_control_request */
+OperationStatus RequestRouter::decode_session_control_request(
+    const std::string& method, const RoutedParams& routed_params,
+    SessionControlRequest* request) {
   const Json& params = routed_params.value;
-  if (!is_session_control_method(method)) {
-    return std::nullopt;
+  if (!read_session_id(params, &request->session_id)) {
+    return invalid_params(method + " requires a valid session_id");
   }
-
-  IpcSessionId session_id;
-  if (!read_session_id(params, &session_id)) {
-    return bounded_error(
-        id, invalid_params(method + " requires a valid session_id"));
+  if (method == "dirty.begin" || method == "dirty.update" ||
+      method == "dirty.end") {
+    return decode_session_dirty_request(method, routed_params, request);
   }
+  if (method == "inspect.roi_forward" || method == "inspect.roi_backward") {
+    return decode_session_roi_request(method, routed_params, request);
+  }
+  return decode_session_text_request(method, routed_params, request);
+}
 
-  std::string text;
-  NodeId first_node;
-  NodeId second_node;
-  PixelRect roi;
-  DirtyDomain dirty_domain = DirtyDomain::HighPrecision;
+/** @copydoc RequestRouter::decode_session_text_request */
+OperationStatus RequestRouter::decode_session_text_request(
+    const std::string& method, const RoutedParams& routed_params,
+    SessionControlRequest* request) {
+  const Json& params = routed_params.value;
   if (method == "graph.reload" || method == "graph.save") {
-    if (!read_required_path(params, "yaml_path", &text)) {
-      return bounded_error(
-          id,
-          invalid_params(method + " requires a nonempty absolute yaml_path"));
+    if (!read_required_path(params, "yaml_path", &request->text)) {
+      return invalid_params(method + " requires a nonempty absolute yaml_path");
     }
   } else if (method == "graph.node_yaml.get" ||
              method == "graph.node_yaml.set") {
-    if (!read_node_id(params, "node_id", &first_node)) {
-      return bounded_error(
-          id, invalid_params(method + " requires a nonnegative node_id"));
+    if (!read_node_id(params, "node_id", &request->first_node)) {
+      return invalid_params(method + " requires a nonnegative node_id");
     }
     if (method == "graph.node_yaml.set" &&
-        !read_required_text(params, "yaml_text", kLargeTextMaxBytes, &text)) {
-      return bounded_error(
-          id, invalid_params(
-                  "graph.node_yaml.set requires bounded string yaml_text"));
+        !read_required_text(params, "yaml_text", kLargeTextMaxBytes,
+                            &request->text)) {
+      return invalid_params(
+          "graph.node_yaml.set requires bounded string yaml_text");
     }
   } else if (method == "cache.cache_all_nodes" ||
              method == "cache.synchronize_disk") {
-    if (!read_required_text(params, "precision", kShortTextMaxBytes, &text)) {
-      return bounded_error(
-          id, invalid_params(method + " requires bounded string precision"));
+    if (!read_required_text(params, "precision", kShortTextMaxBytes,
+                            &request->text)) {
+      return invalid_params(method + " requires bounded string precision");
     }
-  } else if (method == "dirty.begin" || method == "dirty.update" ||
-             method == "dirty.end") {
-    if (!read_node_id(params, "node_id", &first_node) ||
-        !params.contains("domain") ||
-        !decode_enum(params["domain"], &dirty_domain)) {
-      return bounded_error(
-          id, invalid_params(method +
-                             " requires nonnegative node_id and valid domain"));
-    }
-    if (method != "dirty.end" &&
-        (!params.contains("source_roi") ||
-         !decode_pixel_rect(params["source_roi"], &roi))) {
-      return bounded_error(
-          id, invalid_params(method + " requires an exact source_roi"));
-    }
-  } else if (method == "inspect.roi_forward") {
-    if (!read_node_id(params, "start_node_id", &first_node) ||
-        !read_node_id(params, "target_node_id", &second_node) ||
+  }
+  return ok_status();
+}
+
+/** @copydoc RequestRouter::decode_session_dirty_request */
+OperationStatus RequestRouter::decode_session_dirty_request(
+    const std::string& method, const RoutedParams& routed_params,
+    SessionControlRequest* request) {
+  const Json& params = routed_params.value;
+  if (!read_node_id(params, "node_id", &request->first_node) ||
+      !params.contains("domain") ||
+      !decode_enum(params["domain"], &request->dirty_domain)) {
+    return invalid_params(method +
+                          " requires nonnegative node_id and valid domain");
+  }
+  if (method != "dirty.end" &&
+      (!params.contains("source_roi") ||
+       !decode_pixel_rect(params["source_roi"], &request->roi))) {
+    return invalid_params(method + " requires an exact source_roi");
+  }
+  return ok_status();
+}
+
+/** @copydoc RequestRouter::decode_session_roi_request */
+OperationStatus RequestRouter::decode_session_roi_request(
+    const std::string& method, const RoutedParams& routed_params,
+    SessionControlRequest* request) {
+  const Json& params = routed_params.value;
+  if (method == "inspect.roi_forward") {
+    if (!read_node_id(params, "start_node_id", &request->first_node) ||
+        !read_node_id(params, "target_node_id", &request->second_node) ||
         !params.contains("start_roi") ||
-        !decode_pixel_rect(params["start_roi"], &roi)) {
-      return bounded_error(
-          id, invalid_params(
-                  "inspect.roi_forward requires start_node_id, start_roi, "
-                  "and target_node_id"));
+        !decode_pixel_rect(params["start_roi"], &request->roi)) {
+      return invalid_params(
+          "inspect.roi_forward requires start_node_id, start_roi, "
+          "and target_node_id");
     }
-  } else if (method == "inspect.roi_backward") {
-    if (!read_node_id(params, "target_node_id", &first_node) ||
-        !read_node_id(params, "source_node_id", &second_node) ||
+  } else {
+    if (!read_node_id(params, "target_node_id", &request->first_node) ||
+        !read_node_id(params, "source_node_id", &request->second_node) ||
         !params.contains("target_roi") ||
-        !decode_pixel_rect(params["target_roi"], &roi)) {
-      return bounded_error(
-          id, invalid_params(
-                  "inspect.roi_backward requires target_node_id, target_roi, "
-                  "and source_node_id"));
+        !decode_pixel_rect(params["target_roi"], &request->roi)) {
+      return invalid_params(
+          "inspect.roi_backward requires target_node_id, target_roi, "
+          "and source_node_id");
     }
   }
+  return ok_status();
+}
 
-  IpcResult<SessionRegistry::HostCallAdmission> admission =
-      registry_.admit_host_call(session_id);
-  if (!admission.status.ok) {
-    return bounded_error(id, admission.status);
-  }
-  const GraphSessionId& host_session = admission.value.host_session();
-
+/** @copydoc RequestRouter::route_session_mutation_method */
+std::optional<std::string> RequestRouter::route_session_mutation_method(
+    const std::string& id, const std::string& method,
+    const SessionControlRequest& request, const GraphSessionId& host_session) {
   if (method == "graph.reload" || method == "graph.save" ||
-      method == "graph.clear" || method == "graph.node_yaml.set" ||
-      method == "cache.clear_all" || method == "cache.clear_drive" ||
+      method == "graph.clear" || method == "graph.node_yaml.set") {
+    return route_session_graph_mutation(id, method, request, host_session);
+  }
+  if (method == "cache.clear_all" || method == "cache.clear_drive" ||
       method == "cache.clear_memory" || method == "cache.cache_all_nodes" ||
       method == "cache.free_transient" || method == "cache.synchronize_disk") {
-    VoidResult routed;
-    {
-      std::lock_guard<std::mutex> host_lock(host_mutex_);
-      if (method == "graph.reload") {
-        routed = host_.reload_graph(host_session, text);
-      } else if (method == "graph.save") {
-        routed = host_.save_graph(host_session, text);
-      } else if (method == "graph.clear") {
-        routed = host_.clear_graph(host_session);
-      } else if (method == "graph.node_yaml.set") {
-        routed = host_.set_node_yaml(host_session, first_node, text);
-      } else if (method == "cache.clear_all") {
-        routed = host_.clear_cache(host_session);
-      } else if (method == "cache.clear_drive") {
-        routed = host_.clear_drive_cache(host_session);
-      } else if (method == "cache.clear_memory") {
-        routed = host_.clear_memory_cache(host_session);
-      } else if (method == "cache.cache_all_nodes") {
-        routed = host_.cache_all_nodes(host_session, text);
-      } else if (method == "cache.free_transient") {
-        routed = host_.free_transient_memory(host_session);
-      } else {
-        routed = host_.synchronize_disk_cache(host_session, text);
-      }
-    }
-    if (!routed.status.ok) {
-      return bounded_error(id, graph_status(routed.status));
-    }
-    return encode_success_response(id, Json::object());
+    return route_session_cache_mutation(id, method, request, host_session);
   }
+  return std::nullopt;
+}
 
-  if (method == "graph.node_yaml.get") {
-    Result<std::string> routed;
-    {
-      std::lock_guard<std::mutex> host_lock(host_mutex_);
-      routed = host_.get_node_yaml(host_session, first_node);
+/** @copydoc RequestRouter::route_session_graph_mutation */
+std::string RequestRouter::route_session_graph_mutation(
+    const std::string& id, const std::string& method,
+    const SessionControlRequest& request, const GraphSessionId& host_session) {
+  VoidResult routed;
+  {
+    std::lock_guard<std::mutex> host_lock(host_mutex_);
+    if (method == "graph.reload") {
+      routed = host_.reload_graph(host_session, request.text);
+    } else if (method == "graph.save") {
+      routed = host_.save_graph(host_session, request.text);
+    } else if (method == "graph.clear") {
+      routed = host_.clear_graph(host_session);
+    } else {
+      routed =
+          host_.set_node_yaml(host_session, request.first_node, request.text);
     }
-    if (!routed.status.ok) {
-      return bounded_error(id, graph_status(routed.status));
-    }
-    return encode_routed_value(id, [&] {
-      return encode_node_yaml(session_id, first_node, routed.value);
-    });
   }
+  if (!routed.status.ok) {
+    return bounded_error(id, graph_status(routed.status));
+  }
+  return encode_success_response(id, Json::object());
+}
 
+/** @copydoc RequestRouter::route_session_cache_mutation */
+std::string RequestRouter::route_session_cache_mutation(
+    const std::string& id, const std::string& method,
+    const SessionControlRequest& request, const GraphSessionId& host_session) {
+  VoidResult routed;
+  {
+    std::lock_guard<std::mutex> host_lock(host_mutex_);
+    if (method == "cache.clear_all") {
+      routed = host_.clear_cache(host_session);
+    } else if (method == "cache.clear_drive") {
+      routed = host_.clear_drive_cache(host_session);
+    } else if (method == "cache.clear_memory") {
+      routed = host_.clear_memory_cache(host_session);
+    } else if (method == "cache.cache_all_nodes") {
+      routed = host_.cache_all_nodes(host_session, request.text);
+    } else if (method == "cache.free_transient") {
+      routed = host_.free_transient_memory(host_session);
+    } else {
+      routed = host_.synchronize_disk_cache(host_session, request.text);
+    }
+  }
+  if (!routed.status.ok) {
+    return bounded_error(id, graph_status(routed.status));
+  }
+  return encode_success_response(id, Json::object());
+}
+
+/** @copydoc RequestRouter::route_session_dirty_method */
+std::optional<std::string> RequestRouter::route_session_dirty_method(
+    const std::string& id, const std::string& method,
+    const SessionControlRequest& request, const GraphSessionId& host_session) {
   if (method == "dirty.begin" || method == "dirty.update" ||
       method == "dirty.end") {
     Result<DirtyRegionInspectionSnapshot> routed;
     {
       std::lock_guard<std::mutex> host_lock(host_mutex_);
       if (method == "dirty.begin") {
-        routed = host_.begin_dirty_source(host_session, first_node,
-                                          dirty_domain, roi);
+        routed = host_.begin_dirty_source(host_session, request.first_node,
+                                          request.dirty_domain, request.roi);
       } else if (method == "dirty.update") {
-        routed = host_.update_dirty_source(host_session, first_node,
-                                           dirty_domain, roi);
+        routed = host_.update_dirty_source(host_session, request.first_node,
+                                           request.dirty_domain, request.roi);
       } else {
-        routed = host_.end_dirty_source(host_session, first_node, dirty_domain);
+        routed = host_.end_dirty_source(host_session, request.first_node,
+                                        request.dirty_domain);
       }
     }
     if (!routed.status.ok) {
       return bounded_error(id, graph_status(routed.status));
     }
-    return encode_routed_value(
-        id, [&] { return encode_dirty_region(id, session_id, routed.value); });
+    return encode_routed_value(id, [&] {
+      return encode_dirty_region(id, request.session_id, routed.value);
+    });
   }
+  return std::nullopt;
+}
 
+/** @copydoc RequestRouter::route_session_roi_method */
+std::optional<std::string> RequestRouter::route_session_roi_method(
+    const std::string& id, const std::string& method,
+    const SessionControlRequest& request, const GraphSessionId& host_session) {
   if (method == "inspect.roi_forward" || method == "inspect.roi_backward") {
     Result<PixelRect> routed;
     {
       std::lock_guard<std::mutex> host_lock(host_mutex_);
       routed =
           method == "inspect.roi_forward"
-              ? host_.project_roi(host_session, first_node, roi, second_node)
-              : host_.project_roi_backward(host_session, first_node, roi,
-                                           second_node);
+              ? host_.project_roi(host_session, request.first_node, request.roi,
+                                  request.second_node)
+              : host_.project_roi_backward(host_session, request.first_node,
+                                           request.roi, request.second_node);
     }
     if (!routed.status.ok) {
       return bounded_error(id, graph_status(routed.status));
     }
     return encode_success_response(
-        id, Json{{"session_id", session_id.value},
+        id, Json{{"session_id", request.session_id.value},
                  {"roi", encode_pixel_rect(routed.value)}});
   }
+  return std::nullopt;
+}
 
+/** @copydoc RequestRouter::route_session_diagnostic_method */
+std::optional<std::string> RequestRouter::route_session_diagnostic_method(
+    const std::string& id, const std::string& method,
+    const SessionControlRequest& request, const GraphSessionId& host_session) {
+  if (method == "graph.node_yaml.get") {
+    Result<std::string> routed;
+    {
+      std::lock_guard<std::mutex> host_lock(host_mutex_);
+      routed = host_.get_node_yaml(host_session, request.first_node);
+    }
+    if (!routed.status.ok) {
+      return bounded_error(id, graph_status(routed.status));
+    }
+    return encode_routed_value(id, [&] {
+      return encode_node_yaml(request.session_id, request.first_node,
+                              routed.value);
+    });
+  }
   if (method == "compute.timing") {
     Result<TimingSnapshot> routed;
     {
@@ -2389,8 +2810,9 @@ std::optional<std::string> RequestRouter::route_session_control_method(
     if (!routed.status.ok) {
       return bounded_error(id, graph_status(routed.status));
     }
-    return encode_routed_value(
-        id, [&] { return encode_timing(id, session_id, routed.value); });
+    return encode_routed_value(id, [&] {
+      return encode_timing(id, request.session_id, routed.value);
+    });
   }
 
   if (method == "compute.last_io_time") {
@@ -2402,8 +2824,9 @@ std::optional<std::string> RequestRouter::route_session_control_method(
     if (!routed.status.ok) {
       return bounded_error(id, graph_status(routed.status));
     }
-    return encode_routed_value(
-        id, [&] { return encode_last_io_time(session_id, routed.value); });
+    return encode_routed_value(id, [&] {
+      return encode_last_io_time(request.session_id, routed.value);
+    });
   }
 
   if (method == "compute.last_error") {
@@ -2413,9 +2836,49 @@ std::optional<std::string> RequestRouter::route_session_control_method(
       observed = graph_status(host_.last_error(host_session));
     }
     return encode_routed_value(id, [&] {
-      return Json{{"session_id", session_id.value},
+      return Json{{"session_id", request.session_id.value},
                   {"status", encode_operation_status(observed)}};
     });
+  }
+
+  return std::nullopt;
+}
+
+/** @copydoc RequestRouter::route_session_control_method */
+std::optional<std::string> RequestRouter::route_session_control_method(
+    const std::string& id, const std::string& method,
+    const RoutedParams& routed_params) {
+  if (!is_session_control_method(method)) {
+    return std::nullopt;
+  }
+  SessionControlRequest request;
+  const OperationStatus decoded =
+      decode_session_control_request(method, routed_params, &request);
+  if (!decoded.ok) {
+    return bounded_error(id, decoded);
+  }
+  IpcResult<SessionRegistry::HostCallAdmission> admission =
+      registry_.admit_host_call(request.session_id);
+  if (!admission.status.ok) {
+    return bounded_error(id, admission.status);
+  }
+  const GraphSessionId& host_session = admission.value.host_session();
+
+  if (std::optional<std::string> routed =
+          route_session_mutation_method(id, method, request, host_session)) {
+    return routed;
+  }
+  if (std::optional<std::string> routed =
+          route_session_dirty_method(id, method, request, host_session)) {
+    return routed;
+  }
+  if (std::optional<std::string> routed =
+          route_session_roi_method(id, method, request, host_session)) {
+    return routed;
+  }
+  if (std::optional<std::string> routed =
+          route_session_diagnostic_method(id, method, request, host_session)) {
+    return routed;
   }
 
   return bounded_error(
@@ -2431,6 +2894,29 @@ std::optional<std::string> RequestRouter::route_plugin_method(
   if (!is_plugin_method(method)) {
     return std::nullopt;
   }
+  if (std::optional<std::string> routed =
+          route_plugin_direct_method(id, method, routed_params)) {
+    return routed;
+  }
+
+  CollectionPageRequest page_request;
+  std::string page_message;
+  if (!read_collection_page(routed_params.value, &page_request,
+                            &page_message)) {
+    return bounded_error(id, invalid_params(std::move(page_message)));
+  }
+  StableCollectionRequest request{method, std::move(page_request),
+                                  CollectionSnapshotBinding{method, {}, {}}};
+  if (request.page_request.cursor) {
+    return route_plugin_continuation(id, request);
+  }
+  return route_plugin_first_page(id, std::move(request));
+}
+
+/** @copydoc RequestRouter::route_plugin_direct_method */
+std::optional<std::string> RequestRouter::route_plugin_direct_method(
+    const std::string& id, const std::string& method,
+    const RoutedParams& routed_params) {
   const Json& params = routed_params.value;
 
   if (method == "plugins.load_report") {
@@ -2489,53 +2975,55 @@ std::optional<std::string> RequestRouter::route_plugin_method(
     return encode_success_response(id, Json::object());
   }
 
-  CollectionPageRequest page_request;
-  std::string page_message;
-  if (!read_collection_page(params, &page_request, &page_message)) {
-    return bounded_error(id, invalid_params(std::move(page_message)));
-  }
-  CollectionSnapshotBinding binding{method, {}, {}};
+  return std::nullopt;
+}
 
-  if (page_request.cursor) {
-    if (method == "plugins.ops_combined_keys") {
-      auto page = collection_snapshots_.page<std::string>(
-          *page_request.cursor, binding, page_request.offset,
-          page_request.limit);
-      if (page.error != CollectionSnapshotError::None) {
-        return bounded_error(id, collection_error_status(page.error));
-      }
-      return encode_routed_value(id, [&] {
-        Json keys = Json::array();
-        for (const std::string& key : page.entries) {
-          keys.push_back(encode_plugin_key(key));
-        }
-        Json result{{"keys", std::move(keys)}};
-        add_collection_page_metadata(&result, page);
-        return result;
-      });
-    }
-    auto page = collection_snapshots_.page<PluginSourceRow>(
-        *page_request.cursor, binding, page_request.offset, page_request.limit);
+/** @copydoc RequestRouter::route_plugin_continuation */
+std::string RequestRouter::route_plugin_continuation(
+    const std::string& id, const StableCollectionRequest& request) {
+  if (request.method == "plugins.ops_combined_keys") {
+    auto page = collection_snapshots_.page<std::string>(
+        *request.page_request.cursor, request.binding,
+        request.page_request.offset, request.page_request.limit);
     if (page.error != CollectionSnapshotError::None) {
       return bounded_error(id, collection_error_status(page.error));
     }
     return encode_routed_value(id, [&] {
-      Json sources = Json::array();
-      for (const PluginSourceRow& row : page.entries) {
-        sources.push_back(encode_plugin_source_row(row.key, row.source));
+      Json keys = Json::array();
+      for (const std::string& key : page.entries) {
+        keys.push_back(encode_plugin_key(key));
       }
-      Json result{{"sources", std::move(sources)}};
+      Json result{{"keys", std::move(keys)}};
       add_collection_page_metadata(&result, page);
       return result;
     });
   }
+  auto page = collection_snapshots_.page<PluginSourceRow>(
+      *request.page_request.cursor, request.binding,
+      request.page_request.offset, request.page_request.limit);
+  if (page.error != CollectionSnapshotError::None) {
+    return bounded_error(id, collection_error_status(page.error));
+  }
+  return encode_routed_value(id, [&] {
+    Json sources = Json::array();
+    for (const PluginSourceRow& row : page.entries) {
+      sources.push_back(encode_plugin_source_row(row.key, row.source));
+    }
+    Json result{{"sources", std::move(sources)}};
+    add_collection_page_metadata(&result, page);
+    return result;
+  });
+}
 
+/** @copydoc RequestRouter::route_plugin_first_page */
+std::string RequestRouter::route_plugin_first_page(
+    const std::string& id, StableCollectionRequest request) {
   auto reserved = collection_snapshots_.reserve();
   if (reserved.error != CollectionSnapshotError::None) {
     return bounded_error(id, collection_error_status(reserved.error));
   }
 
-  if (method == "plugins.ops_combined_keys") {
+  if (request.method == "plugins.ops_combined_keys") {
     Result<std::vector<std::string>> viewed;
     {
       std::lock_guard<std::mutex> host_lock(host_mutex_);
@@ -2551,11 +3039,11 @@ std::optional<std::string> RequestRouter::route_plugin_method(
       const CollectionMeasurement measured = measure_collection_rows(
           viewed.value,
           [](const std::string& key) { return encode_plugin_key(key); },
-          empty_page, page_request.limit, viewed.value.size());
+          empty_page, request.page_request.limit, viewed.value.size());
       auto page = collection_snapshots_.publish(
-          std::move(reserved.reservation), std::move(binding),
+          std::move(reserved.reservation), std::move(request.binding),
           std::move(viewed.value), measured.entries, measured.bytes,
-          page_request.limit, measured.page_limit);
+          request.page_request.limit, measured.page_limit);
       if (page.error != CollectionSnapshotError::None) {
         return bounded_error(id, collection_error_status(page.error));
       }
@@ -2574,8 +3062,9 @@ std::optional<std::string> RequestRouter::route_plugin_method(
   Result<std::map<std::string, std::string>> viewed;
   {
     std::lock_guard<std::mutex> host_lock(host_mutex_);
-    viewed = method == "plugins.ops_sources" ? host_.ops_sources()
-                                             : host_.ops_combined_sources();
+    viewed = request.method == "plugins.ops_sources"
+                 ? host_.ops_sources()
+                 : host_.ops_combined_sources();
   }
   if (!viewed.status.ok) {
     return bounded_error(id, graph_status(viewed.status));
@@ -2598,11 +3087,11 @@ std::optional<std::string> RequestRouter::route_plugin_method(
         [](const PluginSourceRow& row) {
           return encode_plugin_source_row(row.key, row.source);
         },
-        empty_page, page_request.limit, rows.size());
+        empty_page, request.page_request.limit, rows.size());
     auto page = collection_snapshots_.publish(
-        std::move(reserved.reservation), std::move(binding), std::move(rows),
-        measured.entries, measured.bytes, page_request.limit,
-        measured.page_limit);
+        std::move(reserved.reservation), std::move(request.binding),
+        std::move(rows), measured.entries, measured.bytes,
+        request.page_request.limit, measured.page_limit);
     if (page.error != CollectionSnapshotError::None) {
       return bounded_error(id, collection_error_status(page.error));
     }
@@ -2625,29 +3114,73 @@ std::optional<std::string> RequestRouter::route_scheduler_method(
   if (!is_scheduler_method(method)) {
     return std::nullopt;
   }
-  const Json& params = routed_params.value;
-
-  if (method == "scheduler.description") {
-    std::string type;
-    if (!read_required_text(params, "type", kShortTextMaxBytes, &type) ||
-        type.empty() || type.find('\0') != std::string::npos) {
-      return bounded_error(
-          id, invalid_params(
-                  "scheduler.description requires a nonempty bounded type"));
-    }
-    Result<std::string> described;
-    {
-      std::lock_guard<std::mutex> host_lock(host_mutex_);
-      described = host_.scheduler_description(type);
-    }
-    if (!described.status.ok) {
-      return bounded_error(id, graph_status(described.status));
-    }
-    return encode_routed_value(id, [&] {
-      return encode_scheduler_description(type, described.value);
-    });
+  if (std::optional<std::string> routed =
+          route_scheduler_global_method(id, method, routed_params)) {
+    return routed;
+  }
+  if (std::optional<std::string> routed =
+          route_scheduler_session_method(id, method, routed_params)) {
+    return routed;
   }
 
+  CollectionPageRequest page_request;
+  std::string page_message;
+  if (!read_collection_page(routed_params.value, &page_request,
+                            &page_message)) {
+    return bounded_error(id, invalid_params(std::move(page_message)));
+  }
+  StableCollectionRequest request{method, std::move(page_request),
+                                  CollectionSnapshotBinding{method, {}, {}}};
+  if (request.page_request.cursor) {
+    return route_scheduler_continuation(id, request);
+  }
+  return route_scheduler_first_page(id, std::move(request));
+}
+
+/** @copydoc RequestRouter::route_scheduler_global_method */
+std::optional<std::string> RequestRouter::route_scheduler_global_method(
+    const std::string& id, const std::string& method,
+    const RoutedParams& routed_params) {
+  if (method == "scheduler.description") {
+    return route_scheduler_description_method(id, routed_params);
+  }
+  if (method == "scheduler.scan" || method == "scheduler.load") {
+    return route_scheduler_plugin_method(id, method, routed_params);
+  }
+  if (method == "scheduler.configure_defaults") {
+    return route_scheduler_defaults_method(id, routed_params);
+  }
+  return std::nullopt;
+}
+
+/** @copydoc RequestRouter::route_scheduler_description_method */
+std::string RequestRouter::route_scheduler_description_method(
+    const std::string& id, const RoutedParams& routed_params) {
+  const Json& params = routed_params.value;
+  std::string type;
+  if (!read_required_text(params, "type", kShortTextMaxBytes, &type) ||
+      type.empty() || type.find('\0') != std::string::npos) {
+    return bounded_error(
+        id, invalid_params(
+                "scheduler.description requires a nonempty bounded type"));
+  }
+  Result<std::string> described;
+  {
+    std::lock_guard<std::mutex> host_lock(host_mutex_);
+    described = host_.scheduler_description(type);
+  }
+  if (!described.status.ok) {
+    return bounded_error(id, graph_status(described.status));
+  }
+  return encode_routed_value(
+      id, [&] { return encode_scheduler_description(type, described.value); });
+}
+
+/** @copydoc RequestRouter::route_scheduler_plugin_method */
+std::string RequestRouter::route_scheduler_plugin_method(
+    const std::string& id, const std::string& method,
+    const RoutedParams& routed_params) {
+  const Json& params = routed_params.value;
   if (method == "scheduler.scan") {
     std::vector<std::string> directories;
     if (!params.contains("directories") ||
@@ -2674,53 +3207,58 @@ std::optional<std::string> RequestRouter::route_scheduler_method(
     }
     return encode_success_response(id, Json{{"loaded", scanned.value}});
   }
-
-  if (method == "scheduler.load") {
-    std::string path;
-    if (!read_required_text(params, "path", kPathTextMaxBytes, &path) ||
-        path.empty() || path.find('\0') != std::string::npos) {
-      return bounded_error(
-          id,
-          invalid_params("scheduler.load requires a nonempty bounded path"));
-    }
-    VoidResult loaded;
-    {
-      std::lock_guard<std::mutex> host_lock(host_mutex_);
-      loaded = host_.scheduler_load(path);
-    }
-    if (!loaded.status.ok) {
-      return bounded_error(id, graph_status(loaded.status));
-    }
-    return encode_success_response(id, Json::object());
+  std::string path;
+  if (!read_required_text(params, "path", kPathTextMaxBytes, &path) ||
+      path.empty() || path.find('\0') != std::string::npos) {
+    return bounded_error(
+        id, invalid_params("scheduler.load requires a nonempty bounded path"));
   }
-
-  if (method == "scheduler.configure_defaults") {
-    HostSchedulerConfig config;
-    if (!read_required_text(params, "hp_type", kShortTextMaxBytes,
-                            &config.hp_type) ||
-        !read_required_text(params, "rt_type", kShortTextMaxBytes,
-                            &config.rt_type) ||
-        config.hp_type.empty() || config.rt_type.empty() ||
-        config.hp_type.find('\0') != std::string::npos ||
-        config.rt_type.find('\0') != std::string::npos ||
-        !params.contains("worker_count") ||
-        !decode_integer(params["worker_count"], &config.worker_count)) {
-      return bounded_error(
-          id, invalid_params(
-                  "scheduler.configure_defaults requires bounded hp_type, "
-                  "rt_type, and exact worker_count"));
-    }
-    VoidResult configured;
-    {
-      std::lock_guard<std::mutex> host_lock(host_mutex_);
-      configured = host_.configure_scheduler_defaults(config);
-    }
-    if (!configured.status.ok) {
-      return bounded_error(id, graph_status(configured.status));
-    }
-    return encode_success_response(id, Json::object());
+  VoidResult loaded;
+  {
+    std::lock_guard<std::mutex> host_lock(host_mutex_);
+    loaded = host_.scheduler_load(path);
   }
+  if (!loaded.status.ok) {
+    return bounded_error(id, graph_status(loaded.status));
+  }
+  return encode_success_response(id, Json::object());
+}
 
+/** @copydoc RequestRouter::route_scheduler_defaults_method */
+std::string RequestRouter::route_scheduler_defaults_method(
+    const std::string& id, const RoutedParams& routed_params) {
+  const Json& params = routed_params.value;
+  HostSchedulerConfig config;
+  if (!read_required_text(params, "hp_type", kShortTextMaxBytes,
+                          &config.hp_type) ||
+      !read_required_text(params, "rt_type", kShortTextMaxBytes,
+                          &config.rt_type) ||
+      config.hp_type.empty() || config.rt_type.empty() ||
+      config.hp_type.find('\0') != std::string::npos ||
+      config.rt_type.find('\0') != std::string::npos ||
+      !params.contains("worker_count") ||
+      !decode_integer(params["worker_count"], &config.worker_count)) {
+    return bounded_error(
+        id,
+        invalid_params("scheduler.configure_defaults requires bounded hp_type, "
+                       "rt_type, and exact worker_count"));
+  }
+  VoidResult configured;
+  {
+    std::lock_guard<std::mutex> host_lock(host_mutex_);
+    configured = host_.configure_scheduler_defaults(config);
+  }
+  if (!configured.status.ok) {
+    return bounded_error(id, graph_status(configured.status));
+  }
+  return encode_success_response(id, Json::object());
+}
+
+/** @copydoc RequestRouter::route_scheduler_session_method */
+std::optional<std::string> RequestRouter::route_scheduler_session_method(
+    const std::string& id, const std::string& method,
+    const RoutedParams& routed_params) {
+  const Json& params = routed_params.value;
   if (method == "scheduler.info" || method == "scheduler.replace") {
     IpcSessionId session_id;
     ComputeIntent intent = ComputeIntent::GlobalHighPrecision;
@@ -2773,32 +3311,35 @@ std::optional<std::string> RequestRouter::route_scheduler_method(
     return encode_success_response(id, Json::object());
   }
 
-  CollectionPageRequest page_request;
-  std::string page_message;
-  if (!read_collection_page(params, &page_request, &page_message)) {
-    return bounded_error(id, invalid_params(std::move(page_message)));
-  }
-  CollectionSnapshotBinding binding{method, {}, {}};
-  const bool type_list = method == "scheduler.types";
+  return std::nullopt;
+}
 
-  if (page_request.cursor) {
-    auto page = collection_snapshots_.page<std::string>(
-        *page_request.cursor, binding, page_request.offset, page_request.limit);
-    if (page.error != CollectionSnapshotError::None) {
-      return bounded_error(id, collection_error_status(page.error));
+/** @copydoc RequestRouter::route_scheduler_continuation */
+std::string RequestRouter::route_scheduler_continuation(
+    const std::string& id, const StableCollectionRequest& request) {
+  const bool type_list = request.method == "scheduler.types";
+  auto page = collection_snapshots_.page<std::string>(
+      *request.page_request.cursor, request.binding,
+      request.page_request.offset, request.page_request.limit);
+  if (page.error != CollectionSnapshotError::None) {
+    return bounded_error(id, collection_error_status(page.error));
+  }
+  return encode_routed_value(id, [&] {
+    Json rows = Json::array();
+    for (const std::string& row : page.entries) {
+      rows.push_back(type_list ? encode_scheduler_type(row)
+                               : encode_scheduler_plugin_label(row));
     }
-    return encode_routed_value(id, [&] {
-      Json rows = Json::array();
-      for (const std::string& row : page.entries) {
-        rows.push_back(type_list ? encode_scheduler_type(row)
-                                 : encode_scheduler_plugin_label(row));
-      }
-      Json result{{type_list ? "types" : "plugins", std::move(rows)}};
-      add_collection_page_metadata(&result, page);
-      return result;
-    });
-  }
+    Json result{{type_list ? "types" : "plugins", std::move(rows)}};
+    add_collection_page_metadata(&result, page);
+    return result;
+  });
+}
 
+/** @copydoc RequestRouter::route_scheduler_first_page */
+std::string RequestRouter::route_scheduler_first_page(
+    const std::string& id, StableCollectionRequest request) {
+  const bool type_list = request.method == "scheduler.types";
   auto reserved = collection_snapshots_.reserve();
   if (reserved.error != CollectionSnapshotError::None) {
     return bounded_error(id, collection_error_status(reserved.error));
@@ -2823,11 +3364,11 @@ std::optional<std::string> RequestRouter::route_scheduler_method(
           return type_list ? encode_scheduler_type(row)
                            : encode_scheduler_plugin_label(row);
         },
-        empty_page, page_request.limit, listed.value.size());
+        empty_page, request.page_request.limit, listed.value.size());
     auto page = collection_snapshots_.publish(
-        std::move(reserved.reservation), std::move(binding),
+        std::move(reserved.reservation), std::move(request.binding),
         std::move(listed.value), measured.entries, measured.bytes,
-        page_request.limit, measured.page_limit);
+        request.page_request.limit, measured.page_limit);
     if (page.error != CollectionSnapshotError::None) {
       return bounded_error(id, collection_error_status(page.error));
     }
@@ -2996,80 +3537,107 @@ std::optional<std::string> RequestRouter::route_compute_method(
       id, Json{{"compute_id", compute_id.value}, {"released", true}});
 }
 
+/** @copydoc RequestRouter::route_graph_lifecycle_method */
+std::optional<std::string> RequestRouter::route_graph_lifecycle_method(
+    const std::string& id, const std::string& method,
+    const RoutedParams& routed_params) {
+  const Json& params = routed_params.value;
+  if (method == "graph.load") {
+    GraphLoadRequest load_request;
+    if (!params.contains("session_name") || !params.contains("root_dir") ||
+        !decode_bounded_string(params["session_name"], kShortTextMaxBytes,
+                               &load_request.session.value) ||
+        !decode_bounded_string(params["root_dir"], kPathTextMaxBytes,
+                               &load_request.root_dir)) {
+      return bounded_error(
+          id, invalid_params(
+                  "graph.load requires string session_name and root_dir"));
+    }
+    if (!valid_session_name(load_request.session.value) ||
+        !valid_absolute_path(load_request.root_dir, false) ||
+        !optional_path(params, "yaml_path", &load_request.yaml_path) ||
+        !optional_path(params, "config_path", &load_request.config_path) ||
+        !optional_path(params, "cache_root_dir",
+                       &load_request.cache_root_dir)) {
+      return bounded_error(
+          id, invalid_params("graph.load contains an unsafe session or path"));
+    }
+
+    std::lock_guard<std::mutex> host_lock(host_mutex_);
+    IpcResult<IpcSessionId> reservation =
+        registry_.reserve(load_request.session.value);
+    if (!reservation.status.ok) {
+      return bounded_error(id, reservation.status);
+    }
+    Result<GraphSessionId> loaded;
+    try {
+      loaded = host_.load_graph(load_request);
+    } catch (...) {
+      registry_.rollback(reservation.value);
+      throw;
+    }
+    if (!loaded.status.ok) {
+      registry_.rollback(reservation.value);
+      return bounded_error(id, graph_status(loaded.status));
+    }
+    OperationStatus status;
+    try {
+      status = registry_.commit(reservation.value, loaded.value);
+    } catch (...) {
+      const std::exception_ptr publication_failure = std::current_exception();
+      registry_.rollback(reservation.value);
+      close_graph_best_effort(host_, loaded.value);
+      std::rethrow_exception(publication_failure);
+    }
+    if (!status.ok) {
+      registry_.rollback(reservation.value);
+      close_graph_best_effort(host_, loaded.value);
+      return bounded_error(id, status);
+    }
+    return encode_success_response(
+        id, Json{{"session_id", reservation.value.value},
+                 {"session_name", load_request.session.value}});
+  }
+
+  if (method != "graph.close") {
+    return std::nullopt;
+  }
+  IpcSessionId session_id;
+  if (!read_session_id(params, &session_id)) {
+    return bounded_error(
+        id, invalid_params("graph.close requires a valid session_id"));
+  }
+  IpcResult<SessionRegistry::CloseClaim> claim =
+      registry_.begin_close(session_id);
+  if (!claim.status.ok) {
+    return bounded_error(id, claim.status);
+  }
+  VoidResult closed;
+  {
+    std::lock_guard<std::mutex> host_lock(host_mutex_);
+    closed = host_.close_graph(claim.value.host_session());
+    if (closed.status.ok ||
+        checked_graph_error_code(closed.status) == GraphErrc::NotFound) {
+      claim.value.erase();
+    } else {
+      claim.value.reopen();
+    }
+  }
+  if (!closed.status.ok) {
+    return bounded_error(id, graph_status(closed.status));
+  }
+  return encode_success_response(id, Json{{"closed", true}});
+}
+
 /** @copydoc RequestRouter::route */
 std::string RequestRouter::route(const std::string& payload) {
-  const JsonParseResult parsed = parse_json(payload);
-  if (!parsed.ok) {
-    Json response_id = nullptr;
-    if (parsed.duplicate_key && !parsed.ambiguous_top_level_id &&
-        parsed.value.is_object() &&
-        parsed.value.value("id", Json()).is_string()) {
-      std::string candidate;
-      if (decode_bounded_string(parsed.value["id"], kRequestTextMaxBytes,
-                                &candidate) &&
-          !candidate.empty()) {
-        response_id = candidate;
-      }
-    }
-    return bounded_error(
-        response_id,
-        failure_status(
-            OperationErrorDomain::Protocol,
-            parsed.duplicate_key ? kInvalidRequestCode : kParseErrorCode,
-            parsed.duplicate_key ? "invalid_request" : "parse_error",
-            parsed.message));
+  DecodedRequestEnvelopeResult decoded = decode_request_envelope(payload);
+  if (!decoded.request) {
+    return std::move(decoded.error_response);
   }
-  if (!parsed.value.is_object()) {
-    return bounded_error(nullptr,
-                         failure_status(OperationErrorDomain::Protocol,
-                                        kInvalidRequestCode, "invalid_request",
-                                        "request envelope must be an object"));
-  }
-  const Json& request = parsed.value;
-  Json response_id = nullptr;
-  if (request.value("id", Json()).is_string()) {
-    std::string candidate;
-    if (decode_bounded_string(request["id"], kRequestTextMaxBytes,
-                              &candidate) &&
-        !candidate.empty()) {
-      response_id = candidate;
-    }
-  }
-  std::string decoded_method;
-  const bool valid_method =
-      request.contains("method") &&
-      decode_bounded_string(request["method"], kRequestTextMaxBytes,
-                            &decoded_method) &&
-      !decoded_method.empty();
-  if (!request.value("protocol_version", Json()).is_number_integer() ||
-      !response_id.is_string() || !valid_method ||
-      !request.value("params", Json()).is_object()) {
-    return bounded_error(
-        response_id,
-        failure_status(OperationErrorDomain::Protocol, kInvalidRequestCode,
-                       "invalid_request",
-                       "request requires integer protocol_version, valid id, "
-                       "nonempty method, and object params"));
-  }
-  const std::string id = response_id.get<std::string>();
-  std::int32_t request_version = 0;
-  if (!decode_integer(request["protocol_version"], &request_version) ||
-      request_version != kProtocolVersion) {
-    return bounded_error(
-        id,
-        failure_status(OperationErrorDomain::Protocol, kUnsupportedProtocolCode,
-                       "unsupported_protocol",
-                       "requested protocol version is not supported"),
-        true);
-  }
-  const std::string method = std::move(decoded_method);
-  const Json& params = request["params"];
-  if (!is_version_one_method(method)) {
-    return bounded_error(
-        id, failure_status(OperationErrorDomain::Protocol, kMethodNotFoundCode,
-                           "method_not_found",
-                           "method is not implemented by protocol version 1"));
-  }
+  const std::string& id = decoded.request->id;
+  const std::string& method = decoded.request->method;
+  const Json& params = decoded.request->params;
 
   try {
     bool handled = false;
@@ -3081,89 +3649,9 @@ std::string RequestRouter::route(const std::string& payload) {
                        : bounded_error(id, status);
     }
 
-    if (method == "graph.load") {
-      GraphLoadRequest load_request;
-      if (!params.contains("session_name") || !params.contains("root_dir") ||
-          !decode_bounded_string(params["session_name"], kShortTextMaxBytes,
-                                 &load_request.session.value) ||
-          !decode_bounded_string(params["root_dir"], kPathTextMaxBytes,
-                                 &load_request.root_dir)) {
-        return bounded_error(
-            id, invalid_params(
-                    "graph.load requires string session_name and root_dir"));
-      }
-      if (!valid_session_name(load_request.session.value) ||
-          !valid_absolute_path(load_request.root_dir, false) ||
-          !optional_path(params, "yaml_path", &load_request.yaml_path) ||
-          !optional_path(params, "config_path", &load_request.config_path) ||
-          !optional_path(params, "cache_root_dir",
-                         &load_request.cache_root_dir)) {
-        return bounded_error(
-            id,
-            invalid_params("graph.load contains an unsafe session or path"));
-      }
-
-      std::lock_guard<std::mutex> host_lock(host_mutex_);
-      IpcResult<IpcSessionId> reservation =
-          registry_.reserve(load_request.session.value);
-      if (!reservation.status.ok) {
-        return bounded_error(id, reservation.status);
-      }
-      Result<GraphSessionId> loaded;
-      try {
-        loaded = host_.load_graph(load_request);
-      } catch (...) {
-        registry_.rollback(reservation.value);
-        throw;
-      }
-      if (!loaded.status.ok) {
-        registry_.rollback(reservation.value);
-        return bounded_error(id, graph_status(loaded.status));
-      }
-      try {
-        status = registry_.commit(reservation.value, loaded.value);
-      } catch (...) {
-        const std::exception_ptr publication_failure = std::current_exception();
-        registry_.rollback(reservation.value);
-        close_graph_best_effort(host_, loaded.value);
-        std::rethrow_exception(publication_failure);
-      }
-      if (!status.ok) {
-        registry_.rollback(reservation.value);
-        close_graph_best_effort(host_, loaded.value);
-        return bounded_error(id, status);
-      }
-      return encode_success_response(
-          id, Json{{"session_id", reservation.value.value},
-                   {"session_name", load_request.session.value}});
-    }
-
-    if (method == "graph.close") {
-      IpcSessionId session_id;
-      if (!read_session_id(params, &session_id)) {
-        return bounded_error(
-            id, invalid_params("graph.close requires a valid session_id"));
-      }
-      IpcResult<SessionRegistry::CloseClaim> claim =
-          registry_.begin_close(session_id);
-      if (!claim.status.ok) {
-        return bounded_error(id, claim.status);
-      }
-      VoidResult closed;
-      {
-        std::lock_guard<std::mutex> host_lock(host_mutex_);
-        closed = host_.close_graph(claim.value.host_session());
-        if (closed.status.ok ||
-            checked_graph_error_code(closed.status) == GraphErrc::NotFound) {
-          claim.value.erase();
-        } else {
-          claim.value.reopen();
-        }
-      }
-      if (!closed.status.ok) {
-        return bounded_error(id, graph_status(closed.status));
-      }
-      return encode_success_response(id, Json{{"closed", true}});
+    if (std::optional<std::string> routed =
+            route_graph_lifecycle_method(id, method, RoutedParams{params})) {
+      return std::move(*routed);
     }
 
     if (std::optional<std::string> routed =

@@ -28,6 +28,11 @@ namespace ps {
 #if defined(PHOTOSPIDER_INTERNAL_BAD_ALLOC_TESTING)
 /**
  * @brief BUILD_TESTING close-coordination events exposed to Host regressions.
+ *
+ * @throws Nothing.
+ * @note Values are published synchronously while the embedded Host lifecycle
+ *       mutex remains held. They exist only in the test-enabled build and do
+ *       not enter the public Host ABI or cross a process boundary.
  */
 enum class EmbeddedCloseTestEvent {
   /** @brief One caller has claimed the session close marker. */
@@ -38,6 +43,12 @@ enum class EmbeddedCloseTestEvent {
 
 /**
  * @brief Non-allocating callback installed by deterministic close tests.
+ *
+ * @throws Nothing for value construction and scalar access.
+ * @note The hook borrows `context`; the installing test serializes hook
+ *       replacement and keeps that context alive until the hook is removed.
+ *       Notification runs synchronously under the Host lifecycle mutex, so the
+ *       callback must not re-enter the same Host lifecycle path.
  */
 struct EmbeddedCloseTestHook {
   /** @brief Borrowed test context that outlives the installed hook. */
@@ -53,7 +64,12 @@ struct EmbeddedCloseTestHook {
                  EmbeddedCloseTestEvent event) noexcept = nullptr;
 };
 
-/** @brief Process-local borrowed close hook; tests are process-serial. */
+/**
+ * @brief Process-local borrowed close hook used only by serialized tests.
+ * @throws Nothing.
+ * @note Atomic publication does not transfer ownership. Tests remove the hook
+ *       before destroying the referenced callback value or context.
+ */
 std::atomic<const EmbeddedCloseTestHook*> g_embedded_close_test_hook{nullptr};
 
 /**
@@ -187,10 +203,17 @@ struct EmbeddedHostState {
     /** @brief Releases the active admission. @throws Nothing. */
     ~SessionAdmissionToken() { release(); }
 
-    /** @brief Copying would double-release one admission and is disabled. */
+    /**
+     * @brief Copying would double-release one admission and is disabled.
+     * @throws Nothing because this operation is unavailable.
+     */
     SessionAdmissionToken(const SessionAdmissionToken&) = delete;
 
-    /** @brief Copy assignment would double-release and is disabled. */
+    /**
+     * @brief Copy assignment would double-release and is disabled.
+     * @return No value because this operation is unavailable.
+     * @throws Nothing because this operation is unavailable.
+     */
     SessionAdmissionToken& operator=(const SessionAdmissionToken&) = delete;
 
    private:
@@ -527,6 +550,7 @@ struct EmbeddedHostState {
    * @brief Ends a Host close lifecycle for one session.
    *
    * @param session Session whose backend close attempt has returned.
+   * @return Nothing.
    * @throws Nothing.
    * @note This method must be called after begin_session_close_and_wait() even
    *       when backend close reports NotFound so later load attempts using the
@@ -546,6 +570,7 @@ struct EmbeddedHostState {
   /**
    * @brief Waits for every tracked async compute wrapper to finish.
    *
+   * @return Nothing.
    * @throws Nothing.
    * @note Used during adapter-state destruction before Kernel member teardown.
    *       Entries are removed only after Host OperationStatus mapping finishes.
@@ -654,6 +679,7 @@ struct EmbeddedHostState {
    * @brief Records that close_graph has started for one session.
    *
    * @param session Session label being closed.
+   * @return Nothing.
    * @throws std::bad_alloc if inserting the label allocates.
    * @note Caller must hold lifecycle_mutex_ and must already have rejected a
    *       duplicate marker. The separate wait path prevents two callers from

@@ -74,30 +74,44 @@ enum class ArtifactValidation {
  */
 class ScopedFd {
  public:
-  /** @brief Creates an empty descriptor owner. */
+  /**
+   * @brief Creates an empty descriptor owner.
+   * @throws Nothing.
+   */
   ScopedFd() noexcept = default;
 
   /**
    * @brief Takes ownership of one descriptor.
    * @param fd Descriptor value, or -1.
+   * @throws Nothing.
    */
   explicit ScopedFd(int fd) noexcept : fd_(fd) {}
 
-  /** @brief Closes the owned descriptor when present. */
+  /**
+   * @brief Closes the owned descriptor when present.
+   * @throws Nothing; close failures are ignored during ownership cleanup.
+   */
   ~ScopedFd() noexcept { reset(); }
 
-  /** @brief Prevents descriptor duplication by copy. */
+  /**
+   * @brief Prevents descriptor duplication by copy.
+   * @param other Owner that cannot be copied.
+   * @throws Nothing because this operation is unavailable.
+   */
   ScopedFd(const ScopedFd&) = delete;
 
   /**
    * @brief Prevents descriptor duplication by copy assignment.
+   * @param other Owner that cannot be copied.
    * @return No value because copying is unavailable.
+   * @throws Nothing because this operation is unavailable.
    */
   ScopedFd& operator=(const ScopedFd&) = delete;
 
   /**
    * @brief Transfers descriptor ownership.
    * @param other Source made empty.
+   * @throws Nothing.
    */
   ScopedFd(ScopedFd&& other) noexcept : fd_(other.release()) {}
 
@@ -105,6 +119,7 @@ class ScopedFd {
    * @brief Closes current ownership and transfers another descriptor.
    * @param other Source made empty.
    * @return This descriptor owner.
+   * @throws Nothing; close failures are ignored during replacement.
    */
   ScopedFd& operator=(ScopedFd&& other) noexcept {
     if (this != &other) {
@@ -116,18 +131,22 @@ class ScopedFd {
   /**
    * @brief Returns the borrowed descriptor value.
    * @return Descriptor or -1.
+   * @throws Nothing.
    */
   int get() const noexcept { return fd_; }
 
   /**
    * @brief Reports whether a descriptor is owned.
    * @return True for a nonnegative descriptor.
+   * @throws Nothing.
    */
   explicit operator bool() const noexcept { return fd_ >= 0; }
 
   /**
    * @brief Releases ownership without closing.
    * @return Previous descriptor or -1.
+   * @throws Nothing.
+   * @note The caller becomes responsible for the returned descriptor.
    */
   int release() noexcept {
     const int released = fd_;
@@ -138,6 +157,10 @@ class ScopedFd {
   /**
    * @brief Closes current ownership and optionally adopts a replacement.
    * @param fd Replacement descriptor or -1.
+   * @return Nothing.
+   * @throws Nothing; close failures are ignored after retrying interruption.
+   * @note Ownership transfers to this object only after the former descriptor
+   *       has been closed or its close attempt has terminated.
    */
   void reset(int fd = -1) noexcept {
     if (fd_ >= 0) {
@@ -510,7 +533,10 @@ ImageLayout checked_image_layout(const ImageBuffer& image) {
  * @param fd Open writable descriptor.
  * @param data Borrowed byte range.
  * @param size Exact byte count.
+ * @return Nothing.
  * @throws std::runtime_error on zero progress or a non-interrupted error.
+ * @note The helper neither closes nor seeks `fd`; callers retain ownership and
+ *       serialize writes to the artifact.
  */
 void write_all(int fd, const std::uint8_t* data, std::size_t size) {
   std::size_t written = 0;
@@ -628,6 +654,95 @@ class OutputStore::Impl {
     std::string output_id;
   };
 
+ private:
+  /**
+   * @brief Transaction-local startup paths, descriptors, and stable identity.
+   * @throws Nothing after construction.
+   * @note Assembly helpers may allocate owned paths. Descriptors remain owned
+   *       here until commit; rollback removes only entries this candidate
+   *       created.
+   */
+  struct StartCandidate {
+    /** @brief Absolute protected socket-parent path. */
+    std::string parent_path;
+
+    /** @brief Socket-specific output-base basename. */
+    std::string base_name;
+
+    /** @brief Absolute socket-specific output-base path. */
+    std::string base_path;
+
+    /** @brief Controlled current-instance basename. */
+    std::string instance_name;
+
+    /** @brief Candidate socket-parent descriptor. */
+    ScopedFd parent_fd;
+
+    /** @brief Candidate output-base descriptor. */
+    ScopedFd base_fd;
+
+    /** @brief Candidate current-instance descriptor. */
+    ScopedFd instance_fd;
+
+    /** @brief Stable socket-parent descriptor identity. */
+    struct stat parent_identity{};
+
+    /** @brief Stable output-base descriptor identity. */
+    struct stat base_identity{};
+
+    /** @brief Stable current-instance descriptor identity. */
+    struct stat instance_identity{};
+
+    /** @brief Whether this transaction created the output base. */
+    bool base_created = false;
+
+    /** @brief Whether this transaction created the instance directory. */
+    bool instance_created = false;
+  };
+
+  /**
+   * @brief Transaction-local artifact publication ownership and rollback state.
+   * @throws Nothing after construction.
+   * @note Caller holds `mutex_`; assembly helpers may allocate identities,
+   *       names, or a record. The open stage descriptor remains owned until
+   *       this candidate is destroyed after commit or rollback.
+   */
+  struct PublicationCandidate {
+    /** @brief New opaque artifact identity. */
+    std::string output_id;
+
+    /** @brief Stable delivery identity paired with the artifact. */
+    std::string delivery_id;
+
+    /** @brief Controlled final artifact basename. */
+    std::string final_name;
+
+    /** @brief Controlled exclusive publication-stage basename. */
+    std::string stage_name;
+
+    /** @brief Complete record transferred into `records_` only at commit. */
+    std::unique_ptr<Record> record;
+
+    /** @brief Open descriptor retaining the created inode identity. */
+    ScopedFd artifact_fd;
+
+    /** @brief Latest verified metadata for the created inode. */
+    struct stat owned_identity{};
+
+    /** @brief Whether the controlled stage inode exists. */
+    bool stage_created = false;
+
+    /** @brief Whether the stage name was atomically changed to final name. */
+    bool renamed = false;
+
+    /** @brief Whether the compute lookup was inserted and needs rollback. */
+    bool compute_inserted = false;
+
+    /** @brief Whether the delivery lookup was inserted and needs rollback. */
+    bool delivery_inserted = false;
+  };
+
+ public:
   /**
    * @brief Stores validated constructor dependencies.
    * @param limits Positive quota and TTL policy.
@@ -658,179 +773,28 @@ class OutputStore::Impl {
    * @param socket_path Absolute bound socket path.
    * @param server_instance_id Valid daemon instance id.
    * @param lifecycle_lock_fd Borrowed live lifecycle-lock descriptor.
+   * @return Nothing.
    * @throws std::invalid_argument for malformed arguments.
    * @throws std::runtime_error for unsafe or unavailable filesystem state.
    * @throws std::bad_alloc if path/enumeration storage cannot be allocated.
+   * @note The store mutex serializes the full filesystem transaction. The
+   *       lifecycle descriptor remains borrowed; newly opened directory
+   *       descriptors transfer to the store only after complete validation.
    */
   void start(const std::string& socket_path,
              const std::string& server_instance_id, int lifecycle_lock_fd) {
     std::lock_guard<std::mutex> lock(mutex_);
-    if (running_ || shutdown_in_progress_) {
-      throw std::runtime_error(
-          "output store is already running or shutting down");
-    }
-    if (socket_path.empty() || socket_path.front() != '/' ||
-        !valid_opaque_id(server_instance_id) || lifecycle_lock_fd < 0 ||
-        ::fcntl(lifecycle_lock_fd, F_GETFD) < 0) {
-      throw std::invalid_argument(
-          "output store requires absolute socket, valid instance, and lock fd");
-    }
-    struct stat lifecycle_lock_metadata{};
-    if (retry_fstat(lifecycle_lock_fd, &lifecycle_lock_metadata) != 0 ||
-        !S_ISREG(lifecycle_lock_metadata.st_mode) ||
-        lifecycle_lock_metadata.st_uid != ::geteuid() ||
-        !exact_mode(lifecycle_lock_metadata, 0600) ||
-        lifecycle_lock_metadata.st_nlink != 1) {
-      throw std::invalid_argument(
-          "output store lifecycle lock is not a stable private file");
-    }
-    if (!records_.empty() || !compute_to_output_.empty() ||
-        !delivery_to_output_.empty() || retained_bytes_ != 0) {
-      throw std::runtime_error("output store restart found retained state");
-    }
-
-    const std::size_t separator = socket_path.find_last_of('/');
-    if (separator == std::string::npos || separator + 1 >= socket_path.size()) {
-      throw std::invalid_argument("output store socket path has no basename");
-    }
-    const std::string parent_path =
-        separator == 0 ? "/" : socket_path.substr(0, separator);
-    const std::string base_name =
-        socket_path.substr(separator + 1) + ".outputs";
-    const std::string candidate_base = parent_path == "/"
-                                           ? parent_path + base_name
-                                           : parent_path + "/" + base_name;
-    bool base_created = false;
-    bool instance_created = false;
-    ScopedFd candidate_parent_fd;
-    ScopedFd candidate_base_fd;
-    ScopedFd candidate_instance_fd;
-    const std::string candidate_instance_name =
-        std::string(kInstancePrefix) + server_instance_id;
+    validate_start_locked(socket_path, server_instance_id, lifecycle_lock_fd);
+    StartCandidate candidate =
+        make_start_candidate(socket_path, server_instance_id);
     try {
-      candidate_parent_fd.reset(
-          ::open(parent_path.c_str(),
-                 O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC));
-      struct stat parent_path_metadata{};
-      struct stat parent_fd_metadata{};
-      if (!candidate_parent_fd ||
-          ::lstat(parent_path.c_str(), &parent_path_metadata) != 0 ||
-          ::fstat(candidate_parent_fd.get(), &parent_fd_metadata) != 0 ||
-          !safe_socket_parent(parent_path_metadata) ||
-          !safe_socket_parent(parent_fd_metadata) ||
-          !same_identity(parent_path_metadata, parent_fd_metadata)) {
-        throw std::runtime_error(
-            "output-store socket parent is not a protected real directory");
-      }
-      struct stat path_metadata{};
-      if (::fstatat(candidate_parent_fd.get(), base_name.c_str(),
-                    &path_metadata, AT_SYMLINK_NOFOLLOW) != 0) {
-        if (errno != ENOENT) {
-          throw std::runtime_error(
-              errno_message("cannot inspect output-store base"));
-        }
-        if (::mkdirat(candidate_parent_fd.get(), base_name.c_str(), 0700) !=
-            0) {
-          throw std::runtime_error(
-              errno_message("cannot create output-store base"));
-        }
-        base_created = true;
-      }
-      candidate_base_fd.reset(
-          ::openat(candidate_parent_fd.get(), base_name.c_str(),
-                   O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC));
-      if (!candidate_base_fd) {
-        throw std::runtime_error(
-            errno_message("cannot open output-store base"));
-      }
-      if (base_created && ::fchmod(candidate_base_fd.get(), 0700) != 0) {
-        throw std::runtime_error(
-            errno_message("cannot protect output-store base"));
-      }
-      struct stat base_fd_metadata{};
-      struct stat base_path_metadata{};
-      if (::fstat(candidate_base_fd.get(), &base_fd_metadata) != 0 ||
-          ::fstatat(candidate_parent_fd.get(), base_name.c_str(),
-                    &base_path_metadata, AT_SYMLINK_NOFOLLOW) != 0 ||
-          !safe_directory(base_fd_metadata) ||
-          !safe_directory(base_path_metadata) ||
-          !same_identity(base_fd_metadata, base_path_metadata)) {
-        throw std::runtime_error(
-            "output-store base is not a same-owner exact-0700 real directory");
-      }
-
-      cleanup_stale_instances(candidate_base_fd.get(), base_fd_metadata);
-      if (::mkdirat(candidate_base_fd.get(), candidate_instance_name.c_str(),
-                    0700) != 0) {
-        throw std::runtime_error(
-            errno_message("cannot create output-store instance"));
-      }
-      instance_created = true;
-      candidate_instance_fd.reset(
-          ::openat(candidate_base_fd.get(), candidate_instance_name.c_str(),
-                   O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC));
-      if (!candidate_instance_fd ||
-          ::fchmod(candidate_instance_fd.get(), 0700) != 0) {
-        throw std::runtime_error(
-            errno_message("cannot open/protect output-store instance"));
-      }
-      struct stat instance_path_metadata{};
-      struct stat instance_fd_metadata{};
-      if (::fstatat(candidate_base_fd.get(), candidate_instance_name.c_str(),
-                    &instance_path_metadata, AT_SYMLINK_NOFOLLOW) != 0 ||
-          ::fstat(candidate_instance_fd.get(), &instance_fd_metadata) != 0 ||
-          !safe_directory(instance_path_metadata, base_fd_metadata.st_dev) ||
-          !safe_directory(instance_fd_metadata, base_fd_metadata.st_dev) ||
-          !same_identity(instance_path_metadata, instance_fd_metadata)) {
-        throw std::runtime_error(
-            "output-store instance identity verification failed");
-      }
-
-      parent_path_ = parent_path;
-      base_name_ = base_name;
-      base_path_ = candidate_base;
-      instance_name_ = candidate_instance_name;
-      instance_path_ = candidate_base + "/" + candidate_instance_name;
-      parent_identity_ = parent_fd_metadata;
-      base_identity_ = base_fd_metadata;
-      instance_identity_ = instance_fd_metadata;
-      parent_fd_ = std::move(candidate_parent_fd);
-      base_fd_ = std::move(candidate_base_fd);
-      instance_fd_ = std::move(candidate_instance_fd);
-      publications_open_ = true;
-      leases_open_ = true;
-      running_ = true;
+      open_start_parent_locked(&candidate);
+      open_start_base_locked(&candidate);
+      cleanup_stale_instances(candidate.base_fd.get(), candidate.base_identity);
+      open_start_instance_locked(&candidate);
+      commit_start_locked(&candidate);
     } catch (...) {
-      if (instance_created) {
-        struct stat instance_path_metadata{};
-        struct stat instance_fd_metadata{};
-        if (candidate_instance_fd &&
-            ::fstat(candidate_instance_fd.get(), &instance_fd_metadata) == 0 &&
-            ::fstatat(candidate_base_fd.get(), candidate_instance_name.c_str(),
-                      &instance_path_metadata, AT_SYMLINK_NOFOLLOW) == 0 &&
-            safe_directory(instance_path_metadata) &&
-            safe_directory(instance_fd_metadata) &&
-            same_identity(instance_path_metadata, instance_fd_metadata)) {
-          (void)::unlinkat(candidate_base_fd.get(),
-                           candidate_instance_name.c_str(), AT_REMOVEDIR);
-        }
-      }
-      candidate_instance_fd.reset();
-      if (base_created) {
-        struct stat base_path_metadata{};
-        struct stat base_fd_metadata{};
-        if (candidate_base_fd &&
-            ::fstat(candidate_base_fd.get(), &base_fd_metadata) == 0 &&
-            ::fstatat(candidate_parent_fd.get(), base_name.c_str(),
-                      &base_path_metadata, AT_SYMLINK_NOFOLLOW) == 0 &&
-            safe_directory(base_path_metadata) &&
-            safe_directory(base_fd_metadata) &&
-            same_identity(base_path_metadata, base_fd_metadata)) {
-          (void)::unlinkat(candidate_parent_fd.get(), base_name.c_str(),
-                           AT_REMOVEDIR);
-        }
-      }
-      candidate_base_fd.reset();
+      rollback_start_locked(&candidate);
       throw;
     }
   }
@@ -839,10 +803,12 @@ class OutputStore::Impl {
    * @brief Removes only safe recognized stale contents below a validated base.
    * @param base_fd Borrowed same-owner real base directory descriptor.
    * @param base_metadata Stable base identity.
+   * @return Nothing.
    * @throws std::runtime_error if enumeration itself fails.
    * @throws std::bad_alloc if entry storage cannot be allocated.
    * @note Unsafe/unrecognized entries are left untouched and simply prevent
    *       their containing instance directory from being removed as empty.
+   *       The caller holds `mutex_` and retains descriptor ownership.
    */
   void cleanup_stale_instances(int base_fd, const struct stat& base_metadata) {
     for (const std::string& instance_name : list_directory(base_fd)) {
@@ -913,8 +879,16 @@ class OutputStore::Impl {
    * @param compute_id Accepted image-job identity.
    * @param image Exact Host image result.
    * @return Nested publication status plus output id on nonempty success.
+   * @throws std::invalid_argument for a malformed compute id or image layout.
+   * @throws std::overflow_error when image layout arithmetic overflows.
+   * @throws std::runtime_error for lifecycle, duplicate-job, or filesystem
+   *         failures.
    * @throws std::bad_alloc for allocation failure before/after file creation;
    *         the file, record, and quota are rolled back before propagation.
+   * @throws Whatever the injected clock or id generator throws.
+   * @note Image bytes remain borrowed for this call. `mutex_` serializes
+   *       admission, identity generation, file publication, record commit, and
+   *       rollback so quota and ownership become visible atomically.
    */
   RawPublication publish_raw(const ComputeRequestId& compute_id,
                              const ImageBuffer& image) {
@@ -931,143 +905,20 @@ class OutputStore::Impl {
     }
 
     std::unique_lock<std::mutex> lock(mutex_);
-    if (!running_ || !publications_open_ || !instance_fd_) {
-      throw std::runtime_error("output store is not accepting publication");
-    }
-    const TimePoint cleanup_time = clock_();
-    (void)expire_locked(cleanup_time);
-    if (compute_to_output_.count(compute_id.value) != 0) {
-      throw std::runtime_error(
-          "output store already published this compute job");
-    }
-    if (records_.size() >= limits_.artifacts ||
-        retained_bytes_ > limits_.total_bytes - layout.total_bytes) {
+    if (!admit_publication_locked(compute_id, layout)) {
       return {artifact_limit_status(), {}};
     }
 
-    const std::string output_id = generate_unique_id_locked({}, {});
-    const std::string delivery_id = generate_unique_id_locked(output_id, {});
-    const std::string stage_id =
-        generate_unique_id_locked(output_id, delivery_id);
-    const std::string final_name = output_filename(output_id);
-    const std::string stage_name = output_filename(stage_id);
-    const std::string absolute_path = instance_path_ + "/" + final_name;
-
-    std::unique_ptr<Record> record = std::make_unique<Record>();
-    record->compute_id = compute_id.value;
-    record->metadata.output_id = output_id;
-    record->metadata.path = absolute_path;
-    record->metadata.width = image.width;
-    record->metadata.height = image.height;
-    record->metadata.channels = image.channels;
-    record->metadata.data_type = image.type;
-    record->metadata.device = Device::CPU;
-    record->metadata.row_step = layout.row_bytes;
-    record->metadata.byte_size = layout.total_bytes;
-    record->filename = final_name;
-    record->delivery_id = delivery_id;
-    RawPublication successful{ok_status(), output_id};
-
-    ScopedFd artifact_fd;
-    struct stat owned_identity{};
-    bool stage_created = false;
-    bool renamed = false;
-    bool compute_inserted = false;
-    bool delivery_inserted = false;
+    PublicationCandidate candidate =
+        make_publication_candidate_locked(compute_id, image, layout);
+    RawPublication successful{ok_status(), candidate.output_id};
     try {
-      artifact_fd.reset(
-          ::openat(instance_fd_.get(), stage_name.c_str(),
-                   O_WRONLY | O_CREAT | O_EXCL | O_NOFOLLOW | O_CLOEXEC, 0600));
-      if (!artifact_fd) {
-        throw std::runtime_error(
-            errno_message("cannot create output artifact stage"));
-      }
-      stage_created = true;
-      if (::fstat(artifact_fd.get(), &owned_identity) != 0 ||
-          !S_ISREG(owned_identity.st_mode) ||
-          owned_identity.st_uid != ::geteuid() ||
-          owned_identity.st_nlink != 1 ||
-          owned_identity.st_dev != instance_identity_.st_dev) {
-        throw std::runtime_error(
-            "output artifact stage ownership verification failed");
-      }
-      if (::fchmod(artifact_fd.get(), 0600) != 0 ||
-          ::fstat(artifact_fd.get(), &owned_identity) != 0 ||
-          !safe_artifact(owned_identity, instance_identity_.st_dev)) {
-        throw std::runtime_error(
-            "output artifact stage identity verification failed");
-      }
-
-      const auto* source = static_cast<const std::uint8_t*>(image.data.get());
-      for (int row = 0; row < image.height; ++row) {
-        const std::size_t offset = static_cast<std::size_t>(row) * image.step;
-        write_all(artifact_fd.get(), source + offset, layout.row_bytes);
-      }
-      if (::fsync(artifact_fd.get()) != 0 ||
-          ::fstat(artifact_fd.get(), &owned_identity) != 0 ||
-          !safe_artifact(owned_identity, instance_identity_.st_dev) ||
-          static_cast<std::uintmax_t>(owned_identity.st_size) !=
-              static_cast<std::uintmax_t>(layout.total_bytes)) {
-        throw std::runtime_error(
-            "output artifact write/size verification failed");
-      }
-      if (!rename_noreplace(instance_fd_.get(), stage_name, final_name)) {
-        throw std::runtime_error(
-            errno_message("cannot atomically publish output artifact"));
-      }
-      renamed = true;
-      struct stat published_path{};
-      struct stat published_fd{};
-      if (!ancestry_matches_locked() ||
-          ::fstatat(instance_fd_.get(), final_name.c_str(), &published_path,
-                    AT_SYMLINK_NOFOLLOW) != 0 ||
-          ::fstat(artifact_fd.get(), &published_fd) != 0 ||
-          !safe_artifact(published_path, instance_identity_.st_dev) ||
-          !safe_artifact(published_fd, instance_identity_.st_dev) ||
-          !same_identity(published_path, published_fd) ||
-          !same_identity(published_fd, owned_identity) ||
-          static_cast<std::uintmax_t>(published_path.st_size) !=
-              static_cast<std::uintmax_t>(layout.total_bytes)) {
-        throw std::runtime_error(
-            "published output artifact identity verification failed");
-      }
-
-      const TimePoint publication_time = clock_();
-      record->job_expiry =
-          saturating_deadline(publication_time, limits_.job_ttl);
-      record->metadata.filesystem_device =
-          static_cast<std::uint64_t>(published_path.st_dev);
-      record->metadata.inode =
-          static_cast<std::uint64_t>(published_path.st_ino);
-      const auto delivery_result =
-          delivery_to_output_.emplace(delivery_id, output_id);
-      if (!delivery_result.second) {
-        throw std::runtime_error("output delivery identity reservation failed");
-      }
-      delivery_inserted = true;
-      const auto compute_result =
-          compute_to_output_.emplace(compute_id.value, output_id);
-      if (!compute_result.second) {
-        throw std::runtime_error("output compute identity reservation failed");
-      }
-      compute_inserted = true;
-      const auto record_result = records_.emplace(output_id, std::move(record));
-      if (!record_result.second) {
-        throw std::runtime_error("output record identity reservation failed");
-      }
-      retained_bytes_ += layout.total_bytes;
+      create_and_write_stage_locked(image, layout, &candidate);
+      publish_stage_locked(layout, &candidate);
+      commit_publication_locked(compute_id, layout, &candidate);
       return successful;
     } catch (...) {
-      if (delivery_inserted) {
-        delivery_to_output_.erase(delivery_id);
-      }
-      if (compute_inserted) {
-        compute_to_output_.erase(compute_id.value);
-      }
-      if (stage_created) {
-        const std::string& cleanup_name = renamed ? final_name : stage_name;
-        unlink_created_locked(cleanup_name, owned_identity);
-      }
+      rollback_publication_locked(compute_id, &candidate);
       throw;
     }
   }
@@ -1211,7 +1062,10 @@ class OutputStore::Impl {
 
   /**
    * @brief Stops new lease creation while preserving drained publication.
+   * @return Nothing.
    * @throws Nothing.
+   * @note Acquires `mutex_`, changes no artifact ownership, and wakes any
+   *       shutdown waiter so it can re-evaluate lease state.
    */
   void stop_leases() noexcept {
     std::lock_guard<std::mutex> lock(mutex_);
@@ -1221,7 +1075,11 @@ class OutputStore::Impl {
 
   /**
    * @brief Performs idempotent lease-aware descriptor and directory shutdown.
+   * @return Nothing.
    * @throws Nothing.
+   * @note One caller owns shutdown under `mutex_`; concurrent callers wait for
+   *       that owner. Job ownership is removed before active leases drain, and
+   *       directory descriptors close exactly once at the final commit point.
    */
   void shutdown() noexcept {
     try {
@@ -1233,83 +1091,15 @@ class OutputStore::Impl {
       if (!running_) {
         return;
       }
-      shutdown_in_progress_ = true;
-      publications_open_ = false;
-      leases_open_ = false;
-      for (auto& entry : records_) {
-        entry.second->job_owned = false;
-      }
-
-      while (!records_.empty()) {
-        TimePoint now;
-        try {
-          now = clock_();
-        } catch (...) {
-          now = TimePoint::max();
-        }
-        (void)expire_locked(now);
-        if (records_.empty()) {
-          break;
-        }
-        TimePoint earliest = TimePoint::max();
-        for (const auto& entry : records_) {
-          if (entry.second->lease_active) {
-            earliest = std::min(earliest, entry.second->lease_expiry);
-          }
-        }
-        if (earliest == TimePoint::max()) {
-          while (!records_.empty()) {
-            erase_record_locked(records_.begin());
-          }
-          break;
-        }
-        const auto remaining =
-            earliest > now ? earliest - now
-                           : std::chrono::steady_clock::duration::zero();
-        if (remaining == std::chrono::steady_clock::duration::zero()) {
-          continue;
-        }
-        cv_.wait_for(lock, remaining);
-      }
-
-      if (ancestry_matches_locked()) {
-        struct stat final_instance_path{};
-        struct stat final_instance_fd{};
-        if (::fstat(instance_fd_.get(), &final_instance_fd) == 0 &&
-            ::fstatat(base_fd_.get(), instance_name_.c_str(),
-                      &final_instance_path, AT_SYMLINK_NOFOLLOW) == 0 &&
-            safe_directory(final_instance_path, base_identity_.st_dev) &&
-            safe_directory(final_instance_fd, base_identity_.st_dev) &&
-            same_identity(final_instance_path, instance_identity_) &&
-            same_identity(final_instance_fd, instance_identity_)) {
-          (void)::unlinkat(base_fd_.get(), instance_name_.c_str(),
-                           AT_REMOVEDIR);
-        }
-      }
-      instance_fd_.reset();
-      base_fd_.reset();
-      parent_fd_.reset();
-      parent_path_.clear();
-      base_name_.clear();
-      base_path_.clear();
-      instance_name_.clear();
-      instance_path_.clear();
-      parent_identity_ = {};
-      base_identity_ = {};
-      instance_identity_ = {};
-      running_ = false;
-      shutdown_in_progress_ = false;
+      begin_shutdown_locked();
+      drain_shutdown_records_locked(&lock);
+      remove_instance_directory_locked();
+      finish_shutdown_locked();
       lock.unlock();
       shutdown_cv_.notify_all();
     } catch (...) {
       std::lock_guard<std::mutex> lock(mutex_);
-      publications_open_ = false;
-      leases_open_ = false;
-      running_ = false;
-      shutdown_in_progress_ = false;
-      instance_fd_.reset();
-      base_fd_.reset();
-      parent_fd_.reset();
+      fail_shutdown_locked();
       shutdown_cv_.notify_all();
     }
   }
@@ -1335,6 +1125,606 @@ class OutputStore::Impl {
   }
 
  private:
+  /**
+   * @brief Validates lifecycle, lock-file identity, and empty retained state.
+   * @param socket_path Candidate absolute socket path.
+   * @param server_instance_id Candidate opaque daemon instance id.
+   * @param lifecycle_lock_fd Borrowed lifecycle-lock descriptor.
+   * @return Nothing.
+   * @throws std::invalid_argument for malformed input or an unsafe lock file.
+   * @throws std::runtime_error for active lifecycle or retained state.
+   * @note Caller holds `mutex_`; the descriptor remains borrowed and no store
+   *       filesystem path is changed by validation.
+   */
+  void validate_start_locked(const std::string& socket_path,
+                             const std::string& server_instance_id,
+                             int lifecycle_lock_fd) const {
+    if (running_ || shutdown_in_progress_) {
+      throw std::runtime_error(
+          "output store is already running or shutting down");
+    }
+    if (socket_path.empty() || socket_path.front() != '/' ||
+        !valid_opaque_id(server_instance_id) || lifecycle_lock_fd < 0 ||
+        ::fcntl(lifecycle_lock_fd, F_GETFD) < 0) {
+      throw std::invalid_argument(
+          "output store requires absolute socket, valid instance, and lock fd");
+    }
+    struct stat lifecycle_lock_metadata{};
+    if (retry_fstat(lifecycle_lock_fd, &lifecycle_lock_metadata) != 0 ||
+        !S_ISREG(lifecycle_lock_metadata.st_mode) ||
+        lifecycle_lock_metadata.st_uid != ::geteuid() ||
+        !exact_mode(lifecycle_lock_metadata, 0600) ||
+        lifecycle_lock_metadata.st_nlink != 1) {
+      throw std::invalid_argument(
+          "output store lifecycle lock is not a stable private file");
+    }
+    if (!records_.empty() || !compute_to_output_.empty() ||
+        !delivery_to_output_.empty() || retained_bytes_ != 0) {
+      throw std::runtime_error("output store restart found retained state");
+    }
+  }
+
+  /**
+   * @brief Builds controlled startup paths before any filesystem mutation.
+   * @param socket_path Validated absolute socket path.
+   * @param server_instance_id Validated daemon instance id.
+   * @return Candidate containing owned paths and empty descriptor owners.
+   * @throws std::invalid_argument when the socket has no basename.
+   * @throws std::bad_alloc when path storage cannot be allocated.
+   * @note Caller holds `mutex_`; the returned candidate owns all later
+   *       transaction-local descriptors until commit.
+   */
+  StartCandidate make_start_candidate(
+      const std::string& socket_path,
+      const std::string& server_instance_id) const {
+    const std::size_t separator = socket_path.find_last_of('/');
+    if (separator == std::string::npos || separator + 1 >= socket_path.size()) {
+      throw std::invalid_argument("output store socket path has no basename");
+    }
+    StartCandidate candidate;
+    candidate.parent_path =
+        separator == 0 ? "/" : socket_path.substr(0, separator);
+    candidate.base_name = socket_path.substr(separator + 1) + ".outputs";
+    candidate.base_path =
+        candidate.parent_path == "/"
+            ? candidate.parent_path + candidate.base_name
+            : candidate.parent_path + "/" + candidate.base_name;
+    candidate.instance_name = std::string(kInstancePrefix) + server_instance_id;
+    return candidate;
+  }
+
+  /**
+   * @brief Opens and validates the protected socket-parent directory.
+   * @param candidate Startup transaction receiving descriptor and identity.
+   * @return Nothing.
+   * @throws std::runtime_error when the path and descriptor are not the same
+   *         protected real directory.
+   * @note Caller holds `mutex_`; `candidate` retains sole ownership of the new
+   *       descriptor and no filesystem entry is created.
+   */
+  void open_start_parent_locked(StartCandidate* candidate) const {
+    candidate->parent_fd.reset(
+        ::open(candidate->parent_path.c_str(),
+               O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC));
+    struct stat parent_path_metadata{};
+    if (!candidate->parent_fd ||
+        ::lstat(candidate->parent_path.c_str(), &parent_path_metadata) != 0 ||
+        ::fstat(candidate->parent_fd.get(), &candidate->parent_identity) != 0 ||
+        !safe_socket_parent(parent_path_metadata) ||
+        !safe_socket_parent(candidate->parent_identity) ||
+        !same_identity(parent_path_metadata, candidate->parent_identity)) {
+      throw std::runtime_error(
+          "output-store socket parent is not a protected real directory");
+    }
+  }
+
+  /**
+   * @brief Opens or creates and then identity-validates the private output
+   * base.
+   * @param candidate Startup transaction with a validated parent descriptor.
+   * @return Nothing.
+   * @throws std::runtime_error for inspection, creation, protection, open, or
+   *         identity failures.
+   * @throws std::bad_alloc if an errno diagnostic cannot be allocated.
+   * @note Caller holds `mutex_`; a newly created base is recorded for exact
+   *       rollback, while its descriptor remains owned by `candidate`.
+   */
+  void open_start_base_locked(StartCandidate* candidate) const {
+    struct stat path_metadata{};
+    if (::fstatat(candidate->parent_fd.get(), candidate->base_name.c_str(),
+                  &path_metadata, AT_SYMLINK_NOFOLLOW) != 0) {
+      if (errno != ENOENT) {
+        throw std::runtime_error(
+            errno_message("cannot inspect output-store base"));
+      }
+      if (::mkdirat(candidate->parent_fd.get(), candidate->base_name.c_str(),
+                    0700) != 0) {
+        throw std::runtime_error(
+            errno_message("cannot create output-store base"));
+      }
+      candidate->base_created = true;
+    }
+    candidate->base_fd.reset(
+        ::openat(candidate->parent_fd.get(), candidate->base_name.c_str(),
+                 O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC));
+    if (!candidate->base_fd) {
+      throw std::runtime_error(errno_message("cannot open output-store base"));
+    }
+    if (candidate->base_created &&
+        ::fchmod(candidate->base_fd.get(), 0700) != 0) {
+      throw std::runtime_error(
+          errno_message("cannot protect output-store base"));
+    }
+    struct stat base_path_metadata{};
+    if (::fstat(candidate->base_fd.get(), &candidate->base_identity) != 0 ||
+        ::fstatat(candidate->parent_fd.get(), candidate->base_name.c_str(),
+                  &base_path_metadata, AT_SYMLINK_NOFOLLOW) != 0 ||
+        !safe_directory(candidate->base_identity) ||
+        !safe_directory(base_path_metadata) ||
+        !same_identity(candidate->base_identity, base_path_metadata)) {
+      throw std::runtime_error(
+          "output-store base is not a same-owner exact-0700 real directory");
+    }
+  }
+
+  /**
+   * @brief Creates, protects, and identity-validates the current instance.
+   * @param candidate Startup transaction with a validated base descriptor.
+   * @return Nothing.
+   * @throws std::runtime_error for creation, protection, open, or identity
+   *         failures.
+   * @throws std::bad_alloc if an errno diagnostic cannot be allocated.
+   * @note Caller holds `mutex_`; the created directory and descriptor remain
+   *       candidate-owned until commit or exact rollback.
+   */
+  void open_start_instance_locked(StartCandidate* candidate) const {
+    if (::mkdirat(candidate->base_fd.get(), candidate->instance_name.c_str(),
+                  0700) != 0) {
+      throw std::runtime_error(
+          errno_message("cannot create output-store instance"));
+    }
+    candidate->instance_created = true;
+    candidate->instance_fd.reset(
+        ::openat(candidate->base_fd.get(), candidate->instance_name.c_str(),
+                 O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC));
+    if (!candidate->instance_fd ||
+        ::fchmod(candidate->instance_fd.get(), 0700) != 0) {
+      throw std::runtime_error(
+          errno_message("cannot open/protect output-store instance"));
+    }
+    struct stat instance_path_metadata{};
+    if (::fstatat(candidate->base_fd.get(), candidate->instance_name.c_str(),
+                  &instance_path_metadata, AT_SYMLINK_NOFOLLOW) != 0 ||
+        ::fstat(candidate->instance_fd.get(), &candidate->instance_identity) !=
+            0 ||
+        !safe_directory(instance_path_metadata,
+                        candidate->base_identity.st_dev) ||
+        !safe_directory(candidate->instance_identity,
+                        candidate->base_identity.st_dev) ||
+        !same_identity(instance_path_metadata, candidate->instance_identity)) {
+      throw std::runtime_error(
+          "output-store instance identity verification failed");
+    }
+  }
+
+  /**
+   * @brief Commits validated startup paths, identities, and descriptor owners.
+   * @param candidate Complete startup transaction to transfer into the store.
+   * @return Nothing.
+   * @throws std::bad_alloc if persistent path assignment cannot allocate.
+   * @note Caller holds `mutex_`. Path assignment completes before descriptors
+   *       move; `running_` is the final publication commit point.
+   */
+  void commit_start_locked(StartCandidate* candidate) {
+    parent_path_ = candidate->parent_path;
+    base_name_ = candidate->base_name;
+    base_path_ = candidate->base_path;
+    instance_name_ = candidate->instance_name;
+    instance_path_ = candidate->base_path + "/" + candidate->instance_name;
+    parent_identity_ = candidate->parent_identity;
+    base_identity_ = candidate->base_identity;
+    instance_identity_ = candidate->instance_identity;
+    parent_fd_ = std::move(candidate->parent_fd);
+    base_fd_ = std::move(candidate->base_fd);
+    instance_fd_ = std::move(candidate->instance_fd);
+    publications_open_ = true;
+    leases_open_ = true;
+    running_ = true;
+  }
+
+  /**
+   * @brief Removes only this failed startup transaction's validated creations.
+   * @param candidate Failed candidate whose descriptors and flags are consumed.
+   * @return Nothing.
+   * @throws Nothing; cleanup is best-effort and preserves every mismatch.
+   * @note Caller holds `mutex_`. Instance cleanup precedes descriptor close and
+   *       base cleanup; persistent store ownership is never modified.
+   */
+  void rollback_start_locked(StartCandidate* candidate) const noexcept {
+    if (candidate->instance_created) {
+      struct stat instance_path_metadata{};
+      struct stat instance_fd_metadata{};
+      if (candidate->instance_fd &&
+          ::fstat(candidate->instance_fd.get(), &instance_fd_metadata) == 0 &&
+          ::fstatat(candidate->base_fd.get(), candidate->instance_name.c_str(),
+                    &instance_path_metadata, AT_SYMLINK_NOFOLLOW) == 0 &&
+          safe_directory(instance_path_metadata) &&
+          safe_directory(instance_fd_metadata) &&
+          same_identity(instance_path_metadata, instance_fd_metadata)) {
+        (void)::unlinkat(candidate->base_fd.get(),
+                         candidate->instance_name.c_str(), AT_REMOVEDIR);
+      }
+    }
+    candidate->instance_fd.reset();
+    if (candidate->base_created) {
+      struct stat base_path_metadata{};
+      struct stat base_fd_metadata{};
+      if (candidate->base_fd &&
+          ::fstat(candidate->base_fd.get(), &base_fd_metadata) == 0 &&
+          ::fstatat(candidate->parent_fd.get(), candidate->base_name.c_str(),
+                    &base_path_metadata, AT_SYMLINK_NOFOLLOW) == 0 &&
+          safe_directory(base_path_metadata) &&
+          safe_directory(base_fd_metadata) &&
+          same_identity(base_path_metadata, base_fd_metadata)) {
+        (void)::unlinkat(candidate->parent_fd.get(),
+                         candidate->base_name.c_str(), AT_REMOVEDIR);
+      }
+    }
+    candidate->base_fd.reset();
+  }
+
+  /**
+   * @brief Applies lazy expiry and checks publication lifecycle and quota.
+   * @param compute_id Valid image-job identity being admitted.
+   * @param layout Validated nonempty tight-row image layout.
+   * @return True when identity and count/byte quota permit publication.
+   * @throws std::runtime_error when publication is closed or already exists.
+   * @throws Whatever the injected clock throws.
+   * @note Caller holds `mutex_`; expiry and admission are one serialized
+   *       observation and no file is created by this helper.
+   */
+  bool admit_publication_locked(const ComputeRequestId& compute_id,
+                                const ImageLayout& layout) {
+    if (!running_ || !publications_open_ || !instance_fd_) {
+      throw std::runtime_error("output store is not accepting publication");
+    }
+    const TimePoint cleanup_time = clock_();
+    (void)expire_locked(cleanup_time);
+    if (compute_to_output_.count(compute_id.value) != 0) {
+      throw std::runtime_error(
+          "output store already published this compute job");
+    }
+    return records_.size() < limits_.artifacts &&
+           retained_bytes_ <= limits_.total_bytes - layout.total_bytes;
+  }
+
+  /**
+   * @brief Reserves opaque names and constructs the uncommitted artifact
+   * record.
+   * @param compute_id Accepted image-job identity.
+   * @param image Validated nonempty Host image.
+   * @param layout Checked tight-row byte layout.
+   * @return Candidate holding names, metadata, and rollback flags.
+   * @throws std::runtime_error for invalid entropy or collision exhaustion.
+   * @throws std::bad_alloc when ids, names, paths, or record storage allocate.
+   * @throws Whatever the injected id generator throws.
+   * @note Caller holds `mutex_`; ids are checked against retained maps and the
+   *       instance directory, but no file or map entry is created yet.
+   */
+  PublicationCandidate make_publication_candidate_locked(
+      const ComputeRequestId& compute_id, const ImageBuffer& image,
+      const ImageLayout& layout) {
+    PublicationCandidate candidate;
+    candidate.output_id = generate_unique_id_locked({}, {});
+    candidate.delivery_id = generate_unique_id_locked(candidate.output_id, {});
+    const std::string stage_id =
+        generate_unique_id_locked(candidate.output_id, candidate.delivery_id);
+    candidate.final_name = output_filename(candidate.output_id);
+    candidate.stage_name = output_filename(stage_id);
+    const std::string absolute_path =
+        instance_path_ + "/" + candidate.final_name;
+
+    candidate.record = std::make_unique<Record>();
+    candidate.record->compute_id = compute_id.value;
+    candidate.record->metadata.output_id = candidate.output_id;
+    candidate.record->metadata.path = absolute_path;
+    candidate.record->metadata.width = image.width;
+    candidate.record->metadata.height = image.height;
+    candidate.record->metadata.channels = image.channels;
+    candidate.record->metadata.data_type = image.type;
+    candidate.record->metadata.device = Device::CPU;
+    candidate.record->metadata.row_step = layout.row_bytes;
+    candidate.record->metadata.byte_size = layout.total_bytes;
+    candidate.record->filename = candidate.final_name;
+    candidate.record->delivery_id = candidate.delivery_id;
+    return candidate;
+  }
+
+  /**
+   * @brief Creates, protects, fills, syncs, and size-validates one stage file.
+   * @param image Borrowed validated Host image source.
+   * @param layout Exact tight-row source and artifact sizes.
+   * @param candidate Publication transaction receiving fd and inode identity.
+   * @return Nothing.
+   * @throws std::runtime_error for filesystem, identity, write, or size errors.
+   * @throws std::bad_alloc if an errno diagnostic cannot be allocated.
+   * @note Caller holds `mutex_`; the candidate owns the descriptor and records
+   *       stage creation immediately so later failure performs exact rollback.
+   */
+  void create_and_write_stage_locked(const ImageBuffer& image,
+                                     const ImageLayout& layout,
+                                     PublicationCandidate* candidate) const {
+    candidate->artifact_fd.reset(
+        ::openat(instance_fd_.get(), candidate->stage_name.c_str(),
+                 O_WRONLY | O_CREAT | O_EXCL | O_NOFOLLOW | O_CLOEXEC, 0600));
+    if (!candidate->artifact_fd) {
+      throw std::runtime_error(
+          errno_message("cannot create output artifact stage"));
+    }
+    candidate->stage_created = true;
+    if (::fstat(candidate->artifact_fd.get(), &candidate->owned_identity) !=
+            0 ||
+        !S_ISREG(candidate->owned_identity.st_mode) ||
+        candidate->owned_identity.st_uid != ::geteuid() ||
+        candidate->owned_identity.st_nlink != 1 ||
+        candidate->owned_identity.st_dev != instance_identity_.st_dev) {
+      throw std::runtime_error(
+          "output artifact stage ownership verification failed");
+    }
+    if (::fchmod(candidate->artifact_fd.get(), 0600) != 0 ||
+        ::fstat(candidate->artifact_fd.get(), &candidate->owned_identity) !=
+            0 ||
+        !safe_artifact(candidate->owned_identity, instance_identity_.st_dev)) {
+      throw std::runtime_error(
+          "output artifact stage identity verification failed");
+    }
+
+    const auto* source = static_cast<const std::uint8_t*>(image.data.get());
+    for (int row = 0; row < image.height; ++row) {
+      const std::size_t offset = static_cast<std::size_t>(row) * image.step;
+      write_all(candidate->artifact_fd.get(), source + offset,
+                layout.row_bytes);
+    }
+    if (::fsync(candidate->artifact_fd.get()) != 0 ||
+        ::fstat(candidate->artifact_fd.get(), &candidate->owned_identity) !=
+            0 ||
+        !safe_artifact(candidate->owned_identity, instance_identity_.st_dev) ||
+        static_cast<std::uintmax_t>(candidate->owned_identity.st_size) !=
+            static_cast<std::uintmax_t>(layout.total_bytes)) {
+      throw std::runtime_error(
+          "output artifact write/size verification failed");
+    }
+  }
+
+  /**
+   * @brief Atomically publishes and revalidates a completely written artifact.
+   * @param layout Exact expected artifact size.
+   * @param candidate Stage transaction receiving final identity metadata.
+   * @return Nothing.
+   * @throws std::runtime_error for rename, ancestry, or identity failure.
+   * @throws std::bad_alloc if an errno diagnostic cannot be allocated.
+   * @throws Whatever the injected clock throws.
+   * @note Caller holds `mutex_` and the candidate retains its open inode fd;
+   *       `renamed` changes before post-rename validation so rollback targets
+   *       the correct controlled name.
+   */
+  void publish_stage_locked(const ImageLayout& layout,
+                            PublicationCandidate* candidate) {
+    if (!rename_noreplace(instance_fd_.get(), candidate->stage_name,
+                          candidate->final_name)) {
+      throw std::runtime_error(
+          errno_message("cannot atomically publish output artifact"));
+    }
+    candidate->renamed = true;
+    struct stat published_path{};
+    struct stat published_fd{};
+    if (!ancestry_matches_locked() ||
+        ::fstatat(instance_fd_.get(), candidate->final_name.c_str(),
+                  &published_path, AT_SYMLINK_NOFOLLOW) != 0 ||
+        ::fstat(candidate->artifact_fd.get(), &published_fd) != 0 ||
+        !safe_artifact(published_path, instance_identity_.st_dev) ||
+        !safe_artifact(published_fd, instance_identity_.st_dev) ||
+        !same_identity(published_path, published_fd) ||
+        !same_identity(published_fd, candidate->owned_identity) ||
+        static_cast<std::uintmax_t>(published_path.st_size) !=
+            static_cast<std::uintmax_t>(layout.total_bytes)) {
+      throw std::runtime_error(
+          "published output artifact identity verification failed");
+    }
+
+    const TimePoint publication_time = clock_();
+    candidate->record->job_expiry =
+        saturating_deadline(publication_time, limits_.job_ttl);
+    candidate->record->metadata.filesystem_device =
+        static_cast<std::uint64_t>(published_path.st_dev);
+    candidate->record->metadata.inode =
+        static_cast<std::uint64_t>(published_path.st_ino);
+  }
+
+  /**
+   * @brief Commits delivery, compute, record, then retained-byte accounting.
+   * @param compute_id Original accepted image-job identity.
+   * @param layout Exact retained artifact byte count.
+   * @param candidate Published transaction whose record ownership transfers.
+   * @return Nothing.
+   * @throws std::runtime_error if any supposedly unique map identity collides.
+   * @throws std::bad_alloc if ordered-map insertion allocates.
+   * @note Caller holds `mutex_`; rollback flags change immediately after each
+   *       successful lookup insertion. Byte accounting is the final commit and
+   *       cannot throw.
+   */
+  void commit_publication_locked(const ComputeRequestId& compute_id,
+                                 const ImageLayout& layout,
+                                 PublicationCandidate* candidate) {
+    const auto delivery_result = delivery_to_output_.emplace(
+        candidate->delivery_id, candidate->output_id);
+    if (!delivery_result.second) {
+      throw std::runtime_error("output delivery identity reservation failed");
+    }
+    candidate->delivery_inserted = true;
+    const auto compute_result =
+        compute_to_output_.emplace(compute_id.value, candidate->output_id);
+    if (!compute_result.second) {
+      throw std::runtime_error("output compute identity reservation failed");
+    }
+    candidate->compute_inserted = true;
+    const auto record_result =
+        records_.emplace(candidate->output_id, std::move(candidate->record));
+    if (!record_result.second) {
+      throw std::runtime_error("output record identity reservation failed");
+    }
+    retained_bytes_ += layout.total_bytes;
+  }
+
+  /**
+   * @brief Reverses partial lookup insertion and removes the created inode.
+   * @param compute_id Original accepted image-job identity.
+   * @param candidate Failed publication transaction with precise commit flags.
+   * @return Nothing.
+   * @throws Nothing; every rollback action is conservative and best-effort.
+   * @note Caller holds `mutex_`; delivery removal precedes compute removal and
+   *       identity-checked unlink, matching forward commit ownership order.
+   */
+  void rollback_publication_locked(const ComputeRequestId& compute_id,
+                                   PublicationCandidate* candidate) noexcept {
+    if (candidate->delivery_inserted) {
+      delivery_to_output_.erase(candidate->delivery_id);
+    }
+    if (candidate->compute_inserted) {
+      compute_to_output_.erase(compute_id.value);
+    }
+    if (candidate->stage_created) {
+      const std::string& cleanup_name =
+          candidate->renamed ? candidate->final_name : candidate->stage_name;
+      unlink_created_locked(cleanup_name, candidate->owned_identity);
+    }
+  }
+
+  /**
+   * @brief Closes admissions and removes every retained job-owner flag.
+   * @return Nothing.
+   * @throws Nothing.
+   * @note Caller holds `mutex_`; the ownership marker is set before admissions
+   *       close, and delivery leases continue to own artifacts.
+   */
+  void begin_shutdown_locked() noexcept {
+    shutdown_in_progress_ = true;
+    publications_open_ = false;
+    leases_open_ = false;
+    for (auto& entry : records_) {
+      entry.second->job_owned = false;
+    }
+  }
+
+  /**
+   * @brief Expires or waits out leases and removes every unowned record.
+   * @param lock Owning `mutex_` lock used by the condition-variable wait.
+   * @return Nothing.
+   * @throws std::system_error if the condition-variable wait fails.
+   * @note The injected clock is contained: a throwing clock advances cleanup
+   *       to `TimePoint::max()`. Waits release `mutex_`, allowing explicit
+   *       lease release to reach the shutdown owner.
+   */
+  void drain_shutdown_records_locked(std::unique_lock<std::mutex>* lock) {
+    while (!records_.empty()) {
+      TimePoint now;
+      try {
+        now = clock_();
+      } catch (...) {
+        now = TimePoint::max();
+      }
+      (void)expire_locked(now);
+      if (records_.empty()) {
+        break;
+      }
+      TimePoint earliest = TimePoint::max();
+      for (const auto& entry : records_) {
+        if (entry.second->lease_active) {
+          earliest = std::min(earliest, entry.second->lease_expiry);
+        }
+      }
+      if (earliest == TimePoint::max()) {
+        while (!records_.empty()) {
+          erase_record_locked(records_.begin());
+        }
+        break;
+      }
+      const auto remaining = earliest > now
+                                 ? earliest - now
+                                 : std::chrono::steady_clock::duration::zero();
+      if (remaining == std::chrono::steady_clock::duration::zero()) {
+        continue;
+      }
+      cv_.wait_for(*lock, remaining);
+    }
+  }
+
+  /**
+   * @brief Removes the current instance directory only under stable identity.
+   * @return Nothing.
+   * @throws Nothing; mismatch or system error conservatively preserves it.
+   * @note Caller holds `mutex_` and all ancestry descriptors. The immediate
+   *       path/fd validation precedes the best-effort directory unlink.
+   */
+  void remove_instance_directory_locked() const noexcept {
+    if (!ancestry_matches_locked()) {
+      return;
+    }
+    struct stat final_instance_path{};
+    struct stat final_instance_fd{};
+    if (::fstat(instance_fd_.get(), &final_instance_fd) == 0 &&
+        ::fstatat(base_fd_.get(), instance_name_.c_str(), &final_instance_path,
+                  AT_SYMLINK_NOFOLLOW) == 0 &&
+        safe_directory(final_instance_path, base_identity_.st_dev) &&
+        safe_directory(final_instance_fd, base_identity_.st_dev) &&
+        same_identity(final_instance_path, instance_identity_) &&
+        same_identity(final_instance_fd, instance_identity_)) {
+      (void)::unlinkat(base_fd_.get(), instance_name_.c_str(), AT_REMOVEDIR);
+    }
+  }
+
+  /**
+   * @brief Commits successful shutdown by clearing descriptors and identities.
+   * @return Nothing.
+   * @throws Nothing.
+   * @note Caller holds `mutex_`; descriptors close before path/identity state
+   *       clears, and `shutdown_in_progress_` is the final state transition.
+   */
+  void finish_shutdown_locked() noexcept {
+    instance_fd_.reset();
+    base_fd_.reset();
+    parent_fd_.reset();
+    parent_path_.clear();
+    base_name_.clear();
+    base_path_.clear();
+    instance_name_.clear();
+    instance_path_.clear();
+    parent_identity_ = {};
+    base_identity_ = {};
+    instance_identity_ = {};
+    running_ = false;
+    shutdown_in_progress_ = false;
+  }
+
+  /**
+   * @brief Applies the original conservative nonthrowing shutdown-failure
+   * state.
+   * @return Nothing.
+   * @throws Nothing.
+   * @note Caller holds `mutex_`. Admissions and running state close, directory
+   *       descriptors release exactly once, and diagnostic path/identity data
+   *       remains untouched for post-failure object destruction parity.
+   */
+  void fail_shutdown_locked() noexcept {
+    publications_open_ = false;
+    leases_open_ = false;
+    running_ = false;
+    shutdown_in_progress_ = false;
+    instance_fd_.reset();
+    base_fd_.reset();
+    parent_fd_.reset();
+  }
+
   /**
    * @brief Generates a collision-free id not already present on disk.
    * @param excluded_one First candidate forbidden for cross-type uniqueness.
@@ -1501,6 +1891,7 @@ class OutputStore::Impl {
    * @param filename Controlled basename.
    * @param expected Expected device/inode/type/mode/link identity.
    * @param expected_bytes Expected file byte size.
+   * @return Nothing.
    * @throws Nothing.
    * @note Caller holds mutex_. A final fstatat immediately precedes unlinkat;
    *       unsafe replacements are preserved.
@@ -1545,6 +1936,7 @@ class OutputStore::Impl {
    * @brief Removes a just-created publication entry by its open-fd identity.
    * @param filename Controlled stage or final basename.
    * @param expected Metadata captured from the still-open created descriptor.
+   * @return Nothing.
    * @throws Nothing.
    * @note Unlike retained cleanup, rollback permits an incomplete size or mode
    *       because it owns an unpublished O_EXCL-created inode. It still checks
@@ -1630,6 +2022,7 @@ class OutputStore::Impl {
 
   /**
    * @brief Applies current injected deadlines without failing release cleanup.
+   * @return Nothing.
    * @throws Nothing; a throwing clock leaves existing flags unchanged.
    * @note Caller holds mutex_. Release still removes explicit ownership even
    *       when the optional lazy-expiry pass cannot obtain a timestamp.

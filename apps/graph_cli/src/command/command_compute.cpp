@@ -88,8 +88,13 @@ bool drain_compute_event_polling_pass(ps::Host& svc,
  *         async status mapping cannot allocate. Recoverable backend failures
  *         are converted by the embedded Host adapter into OperationStatus and
  *         last_error values.
+ * @throws std::system_error if Host polling synchronization or future waiting
+ *         fails.
+ * @throws std::future_error if a Host implementation violates the returned
+ *         future shared-state contract.
  * @note Progress events are drained before and during the wait loop to keep the
- * CLI output behavior unchanged.
+ *       CLI output behavior unchanged. Each polling pass is bounded and a
+ *       failed diagnostic drain does not replace the compute outcome.
  */
 bool execute_and_wait(ps::Host& svc, const ComputeWaitRequest& request) {
   (void)drain_compute_event_polling_pass(svc, request.compute.session, false);

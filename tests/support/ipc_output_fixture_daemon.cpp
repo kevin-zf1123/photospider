@@ -95,12 +95,16 @@ class ControlFileClock final {
     }
   }
 
-  /** @brief Prevents duplicate control descriptor ownership. */
+  /**
+   * @brief Prevents duplicate control descriptor ownership.
+   * @throws Nothing because construction is unavailable.
+   */
   ControlFileClock(const ControlFileClock&) = delete;
 
   /**
    * @brief Prevents replacing descriptor ownership by assignment.
    * @return No value because assignment is unavailable.
+   * @throws Nothing because assignment is unavailable.
    */
   ControlFileClock& operator=(const ControlFileClock&) = delete;
 
@@ -139,6 +143,7 @@ class ControlFileClock final {
   /**
    * @brief Acquires one advisory lock while retrying interruption.
    * @param operation Advisory lock operation; `now()` passes `LOCK_SH`.
+   * @return Nothing.
    * @throws std::runtime_error if the lock operation fails.
    * @note The caller must hold `sample_mutex_` so the retained descriptor's
    *       process-local lock transaction cannot overlap another sample.
@@ -155,6 +160,7 @@ class ControlFileClock final {
 
   /**
    * @brief Releases the current shared advisory lock exactly once.
+   * @return Nothing.
    * @throws std::runtime_error when unlocking fails for a reason other than an
    *         interrupted system call.
    * @note Interrupted unlock attempts are retried while `sample_mutex_`
@@ -256,6 +262,7 @@ ps::ipc::internal::RequestRouterRuntimeDependencies fixture_dependencies(
 /**
  * @brief Performs the fixture's sole async-signal-safe shutdown action.
  * @param signal_number Delivered signal number, intentionally ignored.
+ * @return Nothing.
  * @throws Nothing.
  * @note The handler writes one byte to a pre-created nonblocking pipe and
  *       never allocates, locks, logs, calls Host, or touches filesystem state.
@@ -308,25 +315,38 @@ class StopPipe final {
     close_fd(write_fd_);
   }
 
-  /** @brief Prevents duplicate pipe ownership. */
+  /**
+   * @brief Prevents duplicate pipe ownership.
+   * @throws Nothing because construction is unavailable.
+   */
   StopPipe(const StopPipe&) = delete;
 
   /**
    * @brief Prevents replacing pipe ownership by copy assignment.
    * @return No value because copying is unavailable.
+   * @throws Nothing because assignment is unavailable.
    */
   StopPipe& operator=(const StopPipe&) = delete;
 
-  /** @brief Returns the borrowed read descriptor. @return Descriptor value. */
+  /**
+   * @brief Returns the borrowed read descriptor.
+   * @return Descriptor value.
+   * @throws Nothing.
+   */
   int read_fd() const noexcept { return read_fd_; }
 
-  /** @brief Returns the borrowed write descriptor. @return Descriptor value. */
+  /**
+   * @brief Returns the borrowed write descriptor.
+   * @return Descriptor value.
+   * @throws Nothing.
+   */
   int write_fd() const noexcept { return write_fd_; }
 
  private:
   /**
    * @brief Adds nonblocking and close-on-exec flags to one descriptor.
    * @param descriptor Owned pipe descriptor.
+   * @return Nothing.
    * @throws std::runtime_error if `fcntl` fails.
    */
   static void configure(int descriptor) {
@@ -342,6 +362,7 @@ class StopPipe final {
   /**
    * @brief Closes one descriptor while containing interrupted closes.
    * @param descriptor Descriptor reset to -1 after the attempt.
+   * @return Nothing.
    * @throws Nothing.
    */
   static void close_fd(int& descriptor) noexcept {
@@ -404,12 +425,16 @@ class SignalRegistration final {
     }
   }
 
-  /** @brief Prevents duplicate signal-restoration ownership. */
+  /**
+   * @brief Prevents duplicate signal-restoration ownership.
+   * @throws Nothing because construction is unavailable.
+   */
   SignalRegistration(const SignalRegistration&) = delete;
 
   /**
    * @brief Prevents replacing signal-restoration ownership by assignment.
    * @return No value because copying is unavailable.
+   * @throws Nothing because assignment is unavailable.
    */
   SignalRegistration& operator=(const SignalRegistration&) = delete;
 

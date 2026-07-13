@@ -124,7 +124,15 @@ class Server {
   OperationStatus run(const ServerOptions& options, int stop_fd);
 
  private:
-  /** @brief Opaque listener/worker/socket-lifecycle implementation. */
+  /**
+   * @brief Complete listener, worker, and socket-lifecycle state defined in the
+   *        source file.
+   *
+   * @throws Nothing for this incomplete declaration.
+   * @note `impl_` is the sole owner. Server destruction completes listener,
+   *       worker, router, and exact socket cleanup before destroying the
+   *       complete implementation type.
+   */
   class Impl;
 
   /** @brief Sole owner of server runtime state. */

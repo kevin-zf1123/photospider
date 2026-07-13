@@ -160,6 +160,7 @@ class CollectionSnapshotRegistry {
     /**
      * @brief Prevents duplicate quota ownership by assignment.
      * @return No value because copying is unavailable.
+     * @throws Nothing because this operation is unavailable.
      */
     Reservation& operator=(const Reservation&) = delete;
 
@@ -260,12 +261,14 @@ class CollectionSnapshotRegistry {
   /**
    * @brief Prevents copying mutex and quota ownership by assignment.
    * @return No value because copying is unavailable.
+   * @throws Nothing because this operation is unavailable.
    */
   CollectionSnapshotRegistry& operator=(const CollectionSnapshotRegistry&) =
       delete;
 
   /**
    * @brief Starts or restarts empty snapshot admission.
+   * @return Nothing.
    * @throws Nothing.
    * @note Restart is valid only after `finish_shutdown()` cleared prior state.
    */
@@ -339,12 +342,14 @@ class CollectionSnapshotRegistry {
 
   /**
    * @brief Stops new reservations while preserving pages already admitted.
+   * @return Nothing.
    * @throws Nothing.
    */
   void begin_shutdown() noexcept;
 
   /**
    * @brief Releases all records/reservations and permits a later empty restart.
+   * @return Nothing.
    * @throws Nothing.
    */
   void finish_shutdown() noexcept;
@@ -420,6 +425,7 @@ class CollectionSnapshotRegistry {
   /**
    * @brief Cancels one active reservation token.
    * @param token Unique issued token.
+   * @return Nothing.
    * @throws Nothing.
    */
   void cancel_reservation(std::size_t token) noexcept;
@@ -445,6 +451,7 @@ class CollectionSnapshotRegistry {
   /**
    * @brief Removes records whose fixed publication TTL has elapsed.
    * @param now Current monotonic time sampled by the caller.
+   * @return Nothing.
    * @throws Nothing.
    * @note Caller holds `mutex_`.
    */

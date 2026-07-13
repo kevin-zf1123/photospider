@@ -94,6 +94,7 @@ class ManualClock {
   /**
    * @brief Advances time by one nonnegative duration.
    * @param duration Amount added atomically.
+   * @return Nothing.
    * @throws Nothing.
    */
   void advance(std::chrono::steady_clock::duration duration) noexcept {
@@ -115,6 +116,7 @@ class StartGate {
  public:
   /**
    * @brief Records one ready participant and waits for the release signal.
+   * @return Nothing.
    * @throws Nothing.
    */
   void arrive_and_wait() {
@@ -138,6 +140,7 @@ class StartGate {
 
   /**
    * @brief Releases every arrived participant.
+   * @return Nothing.
    * @throws Nothing.
    */
   void release() noexcept {
@@ -200,12 +203,16 @@ class TemporaryDirectory {
     std::filesystem::remove_all(path_, ignored);
   }
 
-  /** @brief Prevents two owners from deleting the same directory. */
+  /**
+   * @brief Prevents two owners from deleting the same directory.
+   * @throws Nothing because construction is unavailable.
+   */
   TemporaryDirectory(const TemporaryDirectory&) = delete;
 
   /**
    * @brief Prevents replacing one directory cleanup obligation by assignment.
    * @return No value because copying is unavailable.
+   * @throws Nothing because assignment is unavailable.
    */
   TemporaryDirectory& operator=(const TemporaryDirectory&) = delete;
 
@@ -256,12 +263,16 @@ class ScopedFileDescriptorLimit {
     }
   }
 
-  /** @brief Prevents overlapping restoration ownership. */
+  /**
+   * @brief Prevents overlapping restoration ownership.
+   * @throws Nothing because construction is unavailable.
+   */
   ScopedFileDescriptorLimit(const ScopedFileDescriptorLimit&) = delete;
 
   /**
    * @brief Prevents replacing one restoration obligation by assignment.
    * @return No value because copying is unavailable.
+   * @throws Nothing because assignment is unavailable.
    */
   ScopedFileDescriptorLimit& operator=(const ScopedFileDescriptorLimit&) =
       delete;
@@ -412,6 +423,7 @@ std::vector<std::uint8_t> read_bytes(const std::string& path) {
  * @param path File path below a test-owned directory.
  * @param mode Exact permission bits applied after creation.
  * @param byte One byte written to the file.
+ * @return Nothing.
  * @throws std::runtime_error for creation, chmod, or write failure.
  */
 void create_file(const std::filesystem::path& path, mode_t mode,

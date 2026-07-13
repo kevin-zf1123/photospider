@@ -88,6 +88,7 @@ std::size_t utf8_scalar_bytes(std::string_view value,
  * @brief Fills a fixed buffer from the platform operating-system RNG.
  *
  * @param bytes Sixteen-byte destination.
+ * @return Nothing.
  * @throws std::runtime_error if Linux `getrandom` fails without `EINTR` or
  *         returns EOF.
  * @note macOS/BSD `arc4random_buf` has no recoverable failure result and uses
@@ -418,6 +419,7 @@ constexpr std::array<std::pair<Device, std::string_view>, 4> kDeviceLabels{{
  * @param value Public value bytes to validate before JSON construction.
  * @param maximum_bytes Inclusive field-specific UTF-8 byte limit.
  * @param field Stable field name used only in the thrown diagnostic.
+ * @return Nothing.
  * @throws std::bad_alloc if a rejection diagnostic cannot be allocated.
  * @throws std::length_error when the value is over limit.
  * @throws std::invalid_argument when the value is not valid UTF-8.
@@ -441,6 +443,7 @@ void require_bounded_text(std::string_view value, std::size_t maximum_bytes,
  * @param size Public collection element count.
  * @param maximum_entries Inclusive field-specific element limit.
  * @param field Stable field name used only in the thrown diagnostic.
+ * @return Nothing.
  * @throws std::bad_alloc if a rejection diagnostic cannot be allocated.
  * @throws std::length_error when `size` exceeds `maximum_entries`.
  * @note Stable multi-page snapshots use separate bounded registry ownership;
@@ -843,6 +846,7 @@ bool decode_space(const Json& value, SpatialSnapshot* space) {
  *
  * @param node Public node id to validate.
  * @param field Stable field name used only in a rejection diagnostic.
+ * @return Nothing.
  * @throws std::bad_alloc if diagnostic construction cannot allocate.
  * @throws std::invalid_argument if `node` is negative.
  * @note Request-side node validation occurs before Host access; this helper
@@ -860,6 +864,7 @@ void require_node_id(NodeId node, const char* field) {
  * @brief Validates every collection and enum in one dirty-region snapshot.
  *
  * @param snapshot Complete Host-returned public snapshot.
+ * @return Nothing.
  * @throws std::bad_alloc if rejection diagnostics cannot allocate.
  * @throws std::length_error if a top-level or nested direct collection exceeds
  *         `kGeneralPageMaxEntries`.
