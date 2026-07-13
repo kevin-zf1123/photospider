@@ -68,6 +68,113 @@ EXPECTED_CLI_TARGET_SOURCE_COUNTS = {
 }
 EXPECTED_CLI_TARGET_CLOSURE_SOURCE_COUNT = 58
 EXPECTED_AUDITED_SOURCE_COUNT = 60
+REQUIRED_EXTENDED_DOXYGEN_SOURCES = (
+    "apps/graph_cli/src/dependency_tree_formatter.cpp",
+    "apps/graph_cli/src/do_traversal.cpp",
+    "apps/graph_cli/src/node_editor.cpp",
+    "apps/graph_cli/src/node_editor_full.cpp",
+    "apps/graph_cli/src/cli_autocompleter.cpp",
+    "apps/graph_cli/src/autocomplete/CompleteCommand.cpp",
+    "apps/graph_cli/src/autocomplete/CompleteComputeArgs.cpp",
+    "apps/graph_cli/src/autocomplete/CompleteGraphName.cpp",
+    "apps/graph_cli/src/autocomplete/CompleteNodeId.cpp",
+    "apps/graph_cli/src/autocomplete/CompleteOpsMode.cpp",
+    "apps/graph_cli/src/autocomplete/CompletePath.cpp",
+    "apps/graph_cli/src/autocomplete/CompletePrintArgs.cpp",
+    "apps/graph_cli/src/autocomplete/CompleteSessionName.cpp",
+    "apps/graph_cli/src/autocomplete/CompleteTraversalArgs.cpp",
+    "apps/graph_cli/src/autocomplete/CompleteYamlPath.cpp",
+    "apps/graph_cli/src/autocomplete/FindLongestCommonPrefix.cpp",
+    "apps/graph_cli/src/autocomplete/Tokenize.cpp",
+)
+REQUIRED_EXTENDED_DOXYGEN_HEADERS = (
+    "apps/graph_cli/include/graph_cli/dependency_tree_formatter.hpp",
+    "apps/graph_cli/include/graph_cli/do_traversal.hpp",
+    "apps/graph_cli/include/graph_cli/node_editor.hpp",
+    "apps/graph_cli/include/graph_cli/node_editor_full.hpp",
+    "apps/graph_cli/include/graph_cli/cli_autocompleter.hpp",
+)
+EXPECTED_EXTENDED_DOXYGEN_PATH_COUNT = 22
+EXPECTED_EXTENDED_DOXYGEN_SYMBOL_COUNT = 72
+REQUIRED_EXTENDED_SYMBOLS = {
+    "dependency_tree_formatter.cpp": (
+        "indent", "dump_parameters", "dump_trimmed_metadata", "dump_matrix",
+        "dirty_domain_name", "dirty_source_lifecycle_name",
+        "dirty_edge_direction_name", "rect_text", "format_node_metadata",
+        "format_node_inspection", "format_graph_inspection",
+        "format_dirty_snapshot", "format_dependency_tree",
+    ),
+    "do_traversal.cpp": ("do_traversal",),
+    "node_editor.cpp": (
+        "run_node_editor_decoupled", "Tree2Mode", "load_current", "t2",
+        "menu_on_change", "textarea_on_change", "text_with_offsets",
+        "tree1_view", "tree2_view", "renderer", "apply_current_editor",
+        "open_external_editor", "catch_event_callback",
+    ),
+    "node_editor_full.cpp": ("run_node_editor_full",),
+    "cli_autocompleter.cpp": ("CliAutocompleter", "Complete"),
+    "CompleteCommand.cpp": ("CompleteCommand",),
+    "CompleteComputeArgs.cpp": ("CompleteComputeArgs",),
+    "CompleteGraphName.cpp": ("CompleteGraphName",),
+    "CompleteNodeId.cpp": ("CompleteNodeId",),
+    "CompleteOpsMode.cpp": ("CompleteOpsMode",),
+    "CompletePath.cpp": ("CompletePath",),
+    "CompletePrintArgs.cpp": ("CompletePrintArgs",),
+    "CompleteSessionName.cpp": ("CompleteSessionName",),
+    "CompleteTraversalArgs.cpp": ("CompleteTraversalArgs",),
+    "CompleteYamlPath.cpp": ("CompleteYamlPath",),
+    "FindLongestCommonPrefix.cpp": ("FindLongestCommonPrefix",),
+    "Tokenize.cpp": ("Tokenize",),
+    "cli_autocompleter.hpp": (
+        "CompletionResult", "options", "new_line", "new_cursor_pos",
+        "CliAutocompleter", "SetCurrentGraph", "Complete", "Tokenize",
+        "FindLongestCommonPrefix", "CompleteCommand", "CompletePath",
+        "CompleteYamlPath", "CompleteNodeId", "CompletePrintArgs",
+        "CompleteTraversalArgs", "CompleteComputeArgs", "CompleteGraphName",
+        "CompleteSessionName", "CompleteOpsMode", "svc_", "commands_",
+        "current_graph_",
+    ),
+    "dependency_tree_formatter.hpp": (
+        "format_node_metadata", "format_node_inspection",
+        "format_graph_inspection", "format_dirty_snapshot",
+        "format_dependency_tree",
+    ),
+    "do_traversal.hpp": ("do_traversal",),
+    "node_editor.hpp": ("run_node_editor_decoupled",),
+    "node_editor_full.hpp": ("run_node_editor_full",),
+}
+
+EXTENDED_FIELD_SYMBOLS = {
+    "options", "new_line", "new_cursor_pos", "svc_", "commands_",
+    "current_graph_",
+}
+EXTENDED_TYPE_SYMBOLS = {"CompletionResult", "Tree2Mode"}
+NODE_EDITOR_ENTITY_LOCATORS = {
+    "Tree2Mode": (r"\benum\s+class\s+Tree2Mode\b", 1, ()),
+    "load_current": (r"\bauto\s+load_current\s*=\s*\[&\]", 1, ()),
+    "t2": (r"\bauto\s+t2\s*=\s*\[&\]", 1, ()),
+    "menu_on_change": (r"\bmenu_opt\.on_change\s*=\s*\[&\]", 1, ()),
+    "textarea_on_change": (
+        r"\btextarea_opt\.on_change\s*=\s*\[&\]", 1, (),
+    ),
+    "text_with_offsets": (
+        r"\bauto\s+text_with_offsets\s*=\s*\[&\]\s*\(",
+        1,
+        ("s", "voff", "hoff"),
+    ),
+    "tree1_view": (r"\bauto\s+tree1_view\s*=\s*Renderer\s*\(\s*\[&\]", 1, ()),
+    "tree2_view": (r"\bauto\s+tree2_view\s*=\s*Renderer\s*\(\s*\[&\]", 1, ()),
+    "renderer": (r"\bauto\s+renderer\s*=\s*Renderer\s*\([^,]+,\s*\[&\]", 1, ()),
+    "apply_current_editor": (
+        r"\bauto\s+apply_current_editor\s*=\s*\[&\]", 1, (),
+    ),
+    "open_external_editor": (
+        r"\bauto\s+open_external_editor\s*=\s*\[&\]", 1, (),
+    ),
+    "catch_event_callback": (
+        r"\bCatchEvent\s*\(\s*\[&\]\s*\(", 1, ("e",),
+    ),
+}
 REQUIRED_ROOT_CLI_TRANSLATION_UNITS = (
     "apps/graph_cli/main.cpp",
     "apps/graph_cli/src/cli_config.cpp",
@@ -77,6 +184,275 @@ BROAD_CATCH_SOURCE_PATTERN = re.compile(
     r"\s*(?:[A-Za-z_]\w*)?)\s*\)",
     re.MULTILINE,
 )
+
+
+def extended_entity_manifest() -> list[dict[str, Any]]:
+    """@brief Builds the fixed, kind-aware extended Doxygen entity manifest.
+
+    @return Entity rows with path, kind, locator, occurrence, parameters, and
+      exact copy target where definitions may delegate documentation.
+    @throws None The manifest is composed only from fixed audit constants.
+    @note Counts are intentionally independent gates. Removing any row fails
+      comparison even when every remaining source comment is complete.
+    """
+
+    rows: list[dict[str, Any]] = []
+    for path_name, symbols in REQUIRED_EXTENDED_SYMBOLS.items():
+        path = next(
+            value
+            for value in REQUIRED_EXTENDED_DOXYGEN_SOURCES
+            + REQUIRED_EXTENDED_DOXYGEN_HEADERS
+            if Path(value).name == path_name
+        )
+        for symbol in symbols:
+            if path_name == "node_editor.cpp" and symbol in NODE_EDITOR_ENTITY_LOCATORS:
+                locator, occurrence, parameters = NODE_EDITOR_ENTITY_LOCATORS[symbol]
+            else:
+                locator = rf"\b{re.escape(symbol)}\b"
+                occurrence = 1
+                parameters = None
+            kind = (
+                "field" if symbol in EXTENDED_FIELD_SYMBOLS
+                else "type"
+                if symbol in EXTENDED_TYPE_SYMBOLS
+                or (path_name == "cli_autocompleter.hpp" and symbol == "CliAutocompleter")
+                else "callable"
+            )
+            copydoc = None
+            if kind == "callable" and path.endswith(".cpp"):
+                if path_name == "cli_autocompleter.cpp":
+                    copydoc = (
+                        "CliAutocompleter::CliAutocompleter"
+                        if symbol == "CliAutocompleter"
+                        else f"CliAutocompleter::{symbol}"
+                    )
+                elif "/autocomplete/" in path:
+                    copydoc = f"CliAutocompleter::{symbol}"
+                elif symbol not in NODE_EDITOR_ENTITY_LOCATORS:
+                    copydoc = symbol
+            rows.append(
+                {
+                    "file": path,
+                    "symbol": symbol,
+                    "kind": kind,
+                    "locator": locator,
+                    "occurrence": occurrence,
+                    "parameters": parameters,
+                    "copydoc": copydoc,
+                }
+            )
+    return rows
+
+
+def immediate_doxygen_before(source: str, offset: int) -> str:
+    """@brief Returns the Doxygen block immediately before one source offset.
+
+    @param source Complete C++ source or header text.
+    @param offset Start offset of the explicitly located entity.
+    @return Immediate Doxygen block, or an empty string when separated by code.
+    @throws None String bounds and searches are total for valid Python strings.
+    @note Declaration prefixes are permitted between the comment and entity
+      provided they contain no semicolon or brace.
+    """
+
+    prefix = source[:offset]
+    comment_end = prefix.rfind("*/")
+    between = prefix[comment_end + 2 :]
+    if comment_end < 0 or any(token in between for token in (";", "{", "}")):
+        return ""
+    comment_start = prefix.rfind("/**", 0, comment_end)
+    return "" if comment_start < 0 else prefix[comment_start : comment_end + 2]
+
+
+def parameter_names_after(source: str, offset: int) -> tuple[str, ...] | None:
+    """@brief Parses direct parameter names from the entity after an offset.
+
+    @param source Complete C++ declaration or lambda source.
+    @param offset Offset immediately after the manifest locator match.
+    @return Parameter names, or ``None`` when no balanced parameter list exists.
+    @throws None Malformed input fails closed instead of raising.
+    @note Commas nested in templates and initializers do not split parameters.
+    """
+
+    open_paren = source.find("(", offset)
+    if open_paren < 0:
+        return None
+    depth = 0
+    angle_depth = 0
+    parts: list[str] = []
+    start = open_paren + 1
+    close_paren = -1
+    for index in range(start, len(source)):
+        char = source[index]
+        if char == "<":
+            angle_depth += 1
+        elif char == ">" and angle_depth:
+            angle_depth -= 1
+        elif char == "(":
+            depth += 1
+        elif char == ")":
+            if depth == 0:
+                parts.append(source[start:index])
+                close_paren = index
+                break
+            depth -= 1
+        elif char == "," and depth == 0 and angle_depth == 0:
+            parts.append(source[start:index])
+            start = index + 1
+    if close_paren < 0:
+        return None
+    names: list[str] = []
+    for part in parts:
+        cleaned = part.split("=", 1)[0].strip()
+        if not cleaned or cleaned == "void":
+            continue
+        reference_array = re.search(r"[&*]\s*([A-Za-z_]\w*)\s*\)\s*\[", cleaned)
+        match = reference_array or re.search(
+            r"([A-Za-z_]\w*)\s*(?:\[[^]]*\])?\s*$", cleaned
+        )
+        if match is None:
+            return None
+        names.append(match.group(1))
+    return tuple(names)
+
+
+def scan_extended_entity(source: str, entity: dict[str, Any]) -> dict[str, Any]:
+    """@brief Scans one explicit manifest entity and validates its contract.
+
+    @param source Complete source text containing the entity.
+    @param entity Kind-aware manifest row with a stable locator.
+    @return Location, structured tag observations, and fail-closed pass state.
+    @throws re.error If a maintained locator is not a valid expression.
+    @note Callable comments require brief/return/throws/note and an exact param
+      set. Types require brief/throws/note; fields require brief only. Copydoc
+      is accepted only when its complete target equals the manifest target.
+    """
+
+    matches = [
+        match
+        for match in re.finditer(entity["locator"], source, re.MULTILINE)
+        if source.rfind("/**", 0, match.start())
+        <= source.rfind("*/", 0, match.start())
+        and immediate_doxygen_before(source, match.start())
+    ]
+    occurrence = entity["occurrence"]
+    match = matches[occurrence - 1] if len(matches) >= occurrence else None
+    comment = immediate_doxygen_before(source, match.start()) if match else ""
+    documented_parameters = tuple(
+        re.findall(r"@param(?:\[[^]]+\])?\s+([A-Za-z_]\w*)", comment)
+    )
+    parameters = entity["parameters"]
+    if entity["kind"] == "callable" and parameters is None and match:
+        parameters = parameter_names_after(source, match.end())
+    copy_targets = re.findall(r"@copydoc\s+([^\r\n*]+?)\s*(?=\*/|$)", comment, re.MULTILINE)
+    copy_target = copy_targets[0] if len(copy_targets) == 1 else None
+    exact_copydoc = len(copy_targets) == 1 and copy_target == entity["copydoc"]
+    if entity["kind"] == "field":
+        complete = bool(comment) and "@brief" in comment and not copy_targets
+    elif entity["kind"] == "type":
+        complete = bool(comment) and not copy_targets and all(
+            tag in comment for tag in ("@brief", "@throws", "@note")
+        )
+    else:
+        full = (
+            bool(comment)
+            and not copy_targets
+            and all(tag in comment for tag in ("@brief", "@return", "@throws", "@note"))
+            and parameters is not None
+            and set(parameters) == set(documented_parameters)
+            and len(parameters) == len(documented_parameters)
+        )
+        complete = exact_copydoc or full
+    return {
+        "file": entity["file"],
+        "symbol": entity["symbol"],
+        "kind": entity["kind"],
+        "located": match is not None,
+        "comment": bool(comment),
+        "parameters": list(parameters) if parameters is not None else None,
+        "documented_parameters": list(documented_parameters),
+        "copydoc": copy_targets,
+        "expected_copydoc": entity["copydoc"],
+        "complete": complete,
+    }
+
+
+def inspect_extended_doxygen_inventory(
+    repo: Path,
+    compile_commands: Path,
+    target_closure: dict[str, Any],
+    manifest: list[dict[str, Any]] | None = None,
+) -> dict[str, Any]:
+    """@brief Audits the fail-closed extended CLI Doxygen manifest.
+
+    @param repo Repository root containing the CLI application tree.
+    @param compile_commands Configured database proving source ownership.
+    @param target_closure Real configured CLI target source closure.
+    @param manifest Optional inventory; ``None`` uses the fixed manifest, while
+      an explicit inventory supports real negative scans.
+    @return Required paths/symbols, compile-command matches, and failures.
+    @throws OSError If a required file or compilation database cannot be read.
+    @throws json.JSONDecodeError If the compilation database is malformed.
+    @note Sources must belong to the real target closure and have an exact
+      compile command. Headers are explicit companion inventory. Every named
+      entity needs an immediate Doxygen block; functions require either
+      ``@copydoc`` or the full behavioral tag set.
+    """
+
+    entries = json.loads(compile_commands.read_text(encoding="utf-8"))
+    command_sources = {
+        compile_entry_source_path(row, compile_commands) for row in entries
+    }
+    closure = set(target_closure["sources"])
+    required_paths = list(REQUIRED_EXTENDED_DOXYGEN_SOURCES) + list(
+        REQUIRED_EXTENDED_DOXYGEN_HEADERS
+    )
+    missing_files = sorted(
+        path for path in required_paths if not (repo / path).is_file()
+    )
+    missing_from_closure = sorted(
+        path for path in REQUIRED_EXTENDED_DOXYGEN_SOURCES if path not in closure
+    )
+    missing_compile_commands = sorted(
+        path
+        for path in REQUIRED_EXTENDED_DOXYGEN_SOURCES
+        if (repo / path).resolve() not in command_sources
+    )
+    entities = extended_entity_manifest() if manifest is None else manifest
+    rows = [
+        scan_extended_entity(
+            (repo / entity["file"]).read_text(encoding="utf-8")
+            if (repo / entity["file"]).is_file()
+            else "",
+            entity,
+        )
+        for entity in entities
+    ]
+    incomplete = sorted(
+        f"{row['file']}:{row['symbol']}" for row in rows if not row["complete"]
+    )
+    inventory_symbol_count = len(entities)
+    passes = bool(
+        target_closure["passes"] and not missing_files and not missing_from_closure
+        and len(required_paths) == EXPECTED_EXTENDED_DOXYGEN_PATH_COUNT
+        and inventory_symbol_count == EXPECTED_EXTENDED_DOXYGEN_SYMBOL_COUNT
+        and not missing_compile_commands
+        and len(rows) == EXPECTED_EXTENDED_DOXYGEN_SYMBOL_COUNT
+        and not incomplete
+    )
+    return {
+        "expected_path_count": EXPECTED_EXTENDED_DOXYGEN_PATH_COUNT,
+        "observed_path_count": len(required_paths) - len(missing_files),
+        "expected_symbol_count": EXPECTED_EXTENDED_DOXYGEN_SYMBOL_COUNT,
+        "inventory_symbol_count": inventory_symbol_count,
+        "observed_symbol_count": len(rows),
+        "missing_files": missing_files,
+        "missing_from_closure": missing_from_closure,
+        "missing_compile_commands": missing_compile_commands,
+        "incomplete": incomplete,
+        "passes": passes,
+        "symbols": rows,
+    }
 
 GUARD_DEFINITIONS = (
     ("src/lib/benchmark/benchmark_service.cpp", "RunAll", 1),
@@ -877,11 +1253,14 @@ def inspect_definitions(repo: Path, compile_commands: Path) -> dict[str, Any]:
                 == path.resolve()
             ]
             comment = preceding_definition_comment(source, function_name)
+            copydoc_targets = re.findall(
+                r"@copydoc\s+([^\r\n*]+?)\s*(?=\*/|$)", comment, re.MULTILINE
+            )
             copydoc = (
-                re.search(
-                    rf"@copydoc\s+(?:::)?{re.escape(function_name)}"
-                    r"(?:\([^)]*\))?(?=\s|\*/)",
-                    comment,
+                len(copydoc_targets) == 1
+                and re.fullmatch(
+                    rf"(?:::)?{re.escape(function_name)}(?:\([^)]*\))?",
+                    copydoc_targets[0],
                 )
                 is not None
             )
@@ -1447,6 +1826,18 @@ def make_expected() -> dict[str, Any]:
             "invalid_catch_guards": [],
             "compiler_queries_pass": True,
         },
+        "extended_inventory": {
+            "expected_path_count": EXPECTED_EXTENDED_DOXYGEN_PATH_COUNT,
+            "observed_path_count": EXPECTED_EXTENDED_DOXYGEN_PATH_COUNT,
+            "expected_symbol_count": EXPECTED_EXTENDED_DOXYGEN_SYMBOL_COUNT,
+            "inventory_symbol_count": EXPECTED_EXTENDED_DOXYGEN_SYMBOL_COUNT,
+            "observed_symbol_count": EXPECTED_EXTENDED_DOXYGEN_SYMBOL_COUNT,
+            "missing_files": [],
+            "missing_from_closure": [],
+            "missing_compile_commands": [],
+            "incomplete": [],
+            "passes": True,
+        },
         "guard_definitions": {
             "expected_count": 16,
             "observed_count": 16,
@@ -1572,6 +1963,9 @@ def make_compare(actual: dict[str, Any], expected: dict[str, Any]) -> tuple[bool
         "every implementation has a real documented and guarded AST body": (
             definition_summary == expected["definitions"]
         ),
+        "extended CLI types, fields, helpers, and autocomplete are documented": (
+            extended_inventory_matches_expected(actual["extended_inventory"])
+        ),
         "every inner CLI/benchmark broad catch has an AST bad-alloc guard": (
             guard_summary == expected["guard_definitions"]
         ),
@@ -1586,6 +1980,124 @@ def make_compare(actual: dict[str, Any], expected: dict[str, Any]) -> tuple[bool
         f"{'PASS' if passed else 'FAIL'}: {label}" for label, passed in checks.items()
     ]
     return all(checks.values()), "\n".join(lines) + "\n"
+
+
+def extended_inventory_matches_expected(observation: dict[str, Any]) -> bool:
+    """@brief Compares a real extended scan with the independent expectation.
+
+    @param observation Result returned by the production inventory scanner.
+    @return True only when every fixed count and failure field matches.
+    @throws KeyError If the scanner result omits a contract field.
+    @note Negative self-checks call this same projection used by the aggregate
+      audit comparison; they never edit an ``actual.json`` observation.
+    """
+
+    expected = make_expected()["extended_inventory"]
+    return {key: observation[key] for key in expected} == expected
+
+
+def run_extended_negative_self_tests(repo: Path, out: Path) -> bool:
+    """@brief Exercises four source/manifest mutations through the real scanner.
+
+    @param repo Repository root supplying the known-good source inventory.
+    @param out Temporary-output directory receiving only the self-check report.
+    @return True when comment, copydoc, param, and inventory mutations all fail.
+    @throws OSError If temporary copies or the report cannot be written.
+    @note Every case owns a fresh ``/tmp`` repository-shaped copy, manifest
+      JSON, and compilation database. The scanner and independent comparison
+      run normally; no generated actual observation is hand-edited.
+    """
+
+    cases = ("deleted_comment", "wrong_copydoc", "deleted_param", "deleted_inventory")
+    results: list[dict[str, Any]] = []
+    for case in cases:
+        with tempfile.TemporaryDirectory(
+            prefix="photospider-cli-negative-", dir="/tmp"
+        ) as temp:
+            temp_repo = Path(temp)
+            for path_text in REQUIRED_EXTENDED_DOXYGEN_SOURCES + REQUIRED_EXTENDED_DOXYGEN_HEADERS:
+                destination = temp_repo / path_text
+                destination.parent.mkdir(parents=True, exist_ok=True)
+                destination.write_text(
+                    (repo / path_text).read_text(encoding="utf-8"), encoding="utf-8"
+                )
+            manifest_path = temp_repo / "manifest.json"
+            manifest_path.write_text(
+                json.dumps(extended_entity_manifest(), indent=2) + "\n",
+                encoding="utf-8",
+            )
+            if case == "deleted_comment":
+                path = temp_repo / "apps/graph_cli/src/node_editor.cpp"
+                text = path.read_text(encoding="utf-8")
+                text, count = re.subn(
+                    r"/\*\*\n   \* @brief Selects the relationship.*?\n   \*/\n(?=  enum class Tree2Mode)",
+                    "",
+                    text,
+                    count=1,
+                    flags=re.DOTALL,
+                )
+                if count != 1:
+                    raise ValueError("negative self-test could not delete Tree2Mode comment")
+                path.write_text(text, encoding="utf-8")
+            elif case == "wrong_copydoc":
+                path = temp_repo / "apps/graph_cli/src/do_traversal.cpp"
+                text = path.read_text(encoding="utf-8")
+                text, count = re.subn(
+                    r"@copydoc do_traversal\b", "@copydoc wrong_target", text, count=1
+                )
+                if count != 1:
+                    raise ValueError("negative self-test could not corrupt copydoc")
+                path.write_text(text, encoding="utf-8")
+            elif case == "deleted_param":
+                path = temp_repo / "apps/graph_cli/src/node_editor.cpp"
+                text = path.read_text(encoding="utf-8")
+                text, count = re.subn(
+                    r"   \* @param s Borrowed multiline pane text\.\n",
+                    "",
+                    text,
+                    count=1,
+                )
+                if count != 1:
+                    raise ValueError("negative self-test could not delete param")
+                path.write_text(text, encoding="utf-8")
+            manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+            if case == "deleted_inventory":
+                manifest.pop()
+                manifest_path.write_text(
+                    json.dumps(manifest, indent=2) + "\n", encoding="utf-8"
+                )
+                manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+            compile_commands = temp_repo / "compile_commands.json"
+            compile_commands.write_text(
+                json.dumps(
+                    [
+                        {"directory": str(temp_repo), "file": str(temp_repo / path)}
+                        for path in REQUIRED_EXTENDED_DOXYGEN_SOURCES
+                    ],
+                    indent=2,
+                )
+                + "\n",
+                encoding="utf-8",
+            )
+            closure = {
+                "sources": list(REQUIRED_EXTENDED_DOXYGEN_SOURCES),
+                "passes": True,
+            }
+            observation = inspect_extended_doxygen_inventory(
+                temp_repo, compile_commands, closure, manifest
+            )
+            returncode = 0 if extended_inventory_matches_expected(observation) else 1
+            results.append(
+                {
+                    "case": case,
+                    "returncode": returncode,
+                    "incomplete": observation["incomplete"],
+                    "inventory_symbol_count": observation["inventory_symbol_count"],
+                }
+            )
+    passed = all(row["returncode"] != 0 for row in results)
+    write_json(out / "negative-self-test.json", {"passes": passed, "cases": results})
+    return passed
 
 
 def write_summary(path: Path, passed: bool, actual: dict[str, Any]) -> None:
@@ -1612,6 +2124,9 @@ def write_summary(path: Path, passed: bool, actual: dict[str, Any]) -> None:
         "- Incomplete declaration contracts: " f"{len(declarations['incomplete'])}",
         "- Missing/invalid implementation definitions: "
         f"{len(actual['definitions']['missing'])}",
+        "- Extended CLI Doxygen entities checked: "
+        f"{actual['extended_inventory']['observed_symbol_count']}/"
+        f"{actual['extended_inventory']['expected_symbol_count']}",
         "- AST-audited CLI/benchmark broad catches: "
         f"{actual['guard_definitions']['actual_broad_catch_count']}/"
         f"{actual['guard_definitions']['expected_broad_catch_count']}",
@@ -1646,11 +2161,18 @@ def main() -> int:
     parser.add_argument("--repo", type=Path, required=True)
     parser.add_argument("--compile-commands", type=Path, required=True)
     parser.add_argument("--out", type=Path, required=True)
+    parser.add_argument(
+        "--negative-self-test",
+        action="store_true",
+        help="run four /tmp source/manifest mutation checks instead of the audit",
+    )
     args = parser.parse_args()
 
     repo = args.repo.resolve()
     out = args.out.resolve()
     out.mkdir(parents=True, exist_ok=True)
+    if args.negative_self_test:
+        return 0 if run_extended_negative_self_tests(repo, out) else 1
     definitions = inspect_definitions(repo, args.compile_commands.resolve())
     target_closure = inspect_cli_target_source_closure(
         repo, args.compile_commands.resolve()
@@ -1658,6 +2180,9 @@ def main() -> int:
     actual = {
         "declarations": inspect_declarations(repo, args.compile_commands.resolve()),
         "definitions": definitions,
+        "extended_inventory": inspect_extended_doxygen_inventory(
+            repo, args.compile_commands.resolve(), target_closure
+        ),
         "guard_definitions": inspect_guard_definitions(
             repo,
             args.compile_commands.resolve(),
