@@ -737,7 +737,9 @@ Production limit 为最多 64 个 retained artifact、总计一 GiB retained byt
 MiB。Admission 同时计入 job-owned 与 lease-only artifact，并且具有 transactional 语义：失败的
 publication 不保留 record、quota reservation 或可安全删除的 partial file。每个 controlled stage
 与 final basename 都使用 `output-<32-lowercase-hex>.bin`，因此 restart cleanup 能识别 process
-death 遗留的 stage。完整数据通过禁止覆盖的 atomic rename 发布，并在 record 可见前重新验证。
+death 遗留的 stage。首次通过 `O_CREAT|O_EXCL` 创建 stage 之前，会立即重新验证所持有的
+parent/base/instance ancestry。完整数据通过禁止覆盖的 atomic rename 发布，随后再次重新验证
+ancestry 与 artifact identity，最后才允许 record 可见。
 
 Store base 是 socket-specific、same-owner、exact-mode `0700` 的 `<socket>.outputs`；每个 process
 只写 exact-mode `0700` 的 `instance-<server_instance_id>` child。Artifact 是使用
