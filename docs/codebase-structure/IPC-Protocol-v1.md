@@ -1312,14 +1312,18 @@ The listener tracks at most 32 joinable client workers. Requests are sequential
 per connection; frame/JSON work may occur across clients. Because public Host
 does not promise thread safety, every Host call uses one daemon mutex. Socket
 reads and writes never hold it. Shutdown first stops all session, snapshot, and
-compute admission plus new output leases, closes the listener, shuts down
-tracked client descriptors to wake reads, and joins all connection workers. It
-then drains every accepted compute job, joins the sole compute worker, releases
-terminal job ownership, clears retained collection snapshots, waits active
-delivery leases through explicit release or TTL, and closes the OutputStore
-before Host sessions and session mappings. Finally it removes its socket while
-the lifecycle lock remains held, releases the lock, and destroys Host state.
-The persistent lock file intentionally remains.
+compute admission plus new output leases. While the lifecycle lock remains
+held, the Active identity guard unlinks only the matching pathname while the
+listener fd still holds its original inode, then closes the listener. New
+pathname connections therefore fail before tracked client, compute, snapshot,
+output-lease, or Host-session drain can block shutdown. The daemon next shuts
+down tracked client descriptors to wake reads and joins all connection workers.
+It then drains every accepted compute job, joins the sole compute worker,
+releases terminal job ownership, clears retained collection snapshots, waits
+active delivery leases through explicit release or TTL, and closes the
+OutputStore before Host sessions and session mappings. Finally it releases the
+lifecycle lock and destroys Host state. The persistent lock file intentionally
+remains.
 
 Before installing SIGINT/SIGTERM handlers, `photospiderd` creates a nonblocking
 close-on-exec self-pipe. The handler only preserves `errno`, writes one byte,

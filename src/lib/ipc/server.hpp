@@ -44,8 +44,9 @@ std::string default_socket_path();
  * The server owns its listener and accepted descriptors, processes requests
  * sequentially per connection, allows frame/JSON work across connections, and
  * delegates Host serialization to `RequestRouter`. At most 32 active workers
- * exist. All threads remain joinable and shutdown wakes blocked reads before
- * joining them.
+ * exist. All threads remain joinable. Shutdown stops admission, removes the
+ * active listener pathname while holding its lifecycle lock, then wakes
+ * blocked reads and joins tracked workers before draining router state.
  *
  * @throws std::bad_alloc when immutable metadata allocation fails.
  * @throws std::runtime_error if daemon instance entropy fails.
@@ -122,13 +123,17 @@ class Server {
    *       queue, final fixed-dirfd revalidation, and allocation-free
    *       activation. Non-probe clients accepted during proof count against
    *       the 32-client limit and enter ordinary admission only after router
-   *       runtime startup. Shutdown then stops admission, joins clients and
-   *       compute, waits protected output leases, closes Host sessions, and
-   *       identity-checks its active socket before removal. The fixed parent
-   *       descriptor prevents parent-path redirection, but portable POSIX
-   *       cannot make final pathname revalidation plus unlink atomic against a
-   *       same-uid replacer with directory write access. Output-store restart
-   *       cleanup occurs while the lifecycle lock is held before admission.
+   *       runtime startup. Shutdown stops admission. While the lifecycle lock
+   *       remains held, it identity-checks and removes its Active pathname and
+   *       closes the listener. No new pathname connection can therefore queue
+   *       while tracked clients join, compute drains, protected output leases
+   *       expire, or Host sessions close. The lock is released only after those
+   *       router stages.
+   *       The fixed parent descriptor prevents parent-path redirection, but
+   *       portable POSIX cannot make final pathname revalidation plus unlink
+   *       atomic against a same-uid replacer with directory write access.
+   *       Output-store restart cleanup occurs while the lifecycle lock is held
+   *       before admission.
    */
   OperationStatus run(const ServerOptions& options, int stop_fd);
 
@@ -141,8 +146,9 @@ class Server {
    * @param dependencies Borrowed callbacks valid through the complete call.
    * @return The real startup/runtime status produced by `Impl::run()`.
    * @throws std::bad_alloc, std::filesystem::filesystem_error,
-   *         std::runtime_error, or std::system_error under the same conditions
-   *         documented by `Server::run()`.
+   *         std::runtime_error, or std::system_error under the conditions
+   *         documented by `Server::run()`; the source-tree dependency may also
+   *         inject its documented path-setup filesystem exception.
    * @note Friendship adds no installed API; the function exercises the full
    *       listener, router, worker, shutdown, and cleanup path with real
    *       parameters rather than a shortened test surrogate.

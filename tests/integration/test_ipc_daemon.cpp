@@ -1216,6 +1216,23 @@ void observe_active_cleanup(void* opaque, int listener_fd,
 }
 
 /**
+ * @brief Counts an Active-cleanup callback without dereferencing server state.
+ * @param opaque Borrowed atomic call counter that outlives the server.
+ * @param listener_fd Ignored listener descriptor.
+ * @param path Ignored configured socket pathname.
+ * @throws Nothing.
+ * @note Used to prove an exceptional run drops its dependency borrow before the
+ *       caller ends that dependency object's lifetime.
+ */
+void count_active_cleanup(void* opaque, int listener_fd,
+                          const char* path) noexcept {
+  (void)listener_fd;
+  (void)path;
+  auto* calls = static_cast<std::atomic<std::size_t>*>(opaque);
+  calls->fetch_add(1, std::memory_order_relaxed);
+}
+
+/**
  * @brief Renames and recreates the configured parent after activation.
  * @param opaque Borrowed `ParentReplacementState`.
  * @param stage Current lifecycle stage.
@@ -1238,15 +1255,16 @@ void replace_parent_path(void* opaque, internal::ServerLifecycleTestStage stage,
 }
 
 /**
- * @brief Queues 32 valid framed clients immediately before pathname proof.
+ * @brief Queues a configured bounded set of clients before pathname proof.
  *
  * @param opaque Borrowed `PendingClientState` owned by the running test.
  * @param stage Current listener lifecycle boundary.
  * @param path Bound and listening Unix socket pathname.
  * @throws Nothing; connection and write failures are captured in state.
- * @note The callback sends a complete request but reads no response. It leaves
- *       every descriptor open so the proof path must peek without consuming
- *       bytes and later transfer them to normal runtime workers.
+ * @note Each client sends the configured prefix of one valid request and reads
+ *       no response. The callback leaves every descriptor open so the proof
+ *       path must peek without consuming bytes and later transfer complete or
+ *       partial requests to normal runtime workers.
  */
 void queue_pending_clients(void* opaque,
                            internal::ServerLifecycleTestStage stage,
@@ -3199,6 +3217,49 @@ TEST(IpcDaemonLifecycle, MatchingPrefixThatNeverCompletesFailsAtProofDeadline) {
   EXPECT_LT(elapsed, std::chrono::seconds(3));
 }
 
+TEST(IpcDaemonLifecycle, RejectsProofWriteLimitBeyondFixedFrame) {
+  ScopedDaemonDirectory temp("ps-listener-proof-overrun", true);
+  const std::filesystem::path socket_path = temp.path() / "listener.sock";
+  internal::ServerLifecycleTestDependencies dependencies;
+  dependencies.proof_write_limit_bytes =
+      std::numeric_limits<std::size_t>::max();
+
+  const OperationStatus status =
+      internal::test_create_listener(socket_path.string(), dependencies);
+
+  EXPECT_FALSE(status.ok);
+  EXPECT_NE(status.message.find("write limit exceeds fixed frame"),
+            std::string::npos);
+  EXPECT_TRUE(std::filesystem::is_socket(socket_path));
+}
+
+TEST(IpcDaemonLifecycle,
+     ClearsBorrowedDependenciesAfterPathSetupExceptionBeforeReuse) {
+  ScopedDaemonDirectory temp("ps-listener-dependency-borrow", true);
+  const std::string socket_path = (temp.path() / "listener.sock").string();
+  std::unique_ptr<Host> host = create_embedded_host();
+  auto server = std::make_unique<internal::Server>(*host, "borrow-test");
+  std::atomic<std::size_t> cleanup_calls{0};
+  std::optional<internal::ServerLifecycleTestDependencies> dependencies(
+      std::in_place);
+  dependencies->context = &cleanup_calls;
+  dependencies->before_active_cleanup = count_active_cleanup;
+  dependencies->fail_path_setup = true;
+
+  EXPECT_THROW(
+      internal::test_run_server(*server, internal::ServerOptions{socket_path},
+                                -1, *dependencies),
+      std::filesystem::filesystem_error);
+  dependencies.reset();
+
+  const OperationStatus reused =
+      server->run(internal::ServerOptions{"relative.sock"}, -1);
+  EXPECT_FALSE(reused.ok);
+  EXPECT_EQ(cleanup_calls.load(std::memory_order_relaxed), 0U);
+  server.reset();
+  EXPECT_EQ(cleanup_calls.load(std::memory_order_relaxed), 0U);
+}
+
 TEST(IpcDaemonLifecycle, StartupStopInterruptsStalledListenerProof) {
   ScopedDaemonDirectory temp("ps-listener-cancelled-proof", true);
   const std::string socket_path = (temp.path() / "listener.sock").string();
@@ -4525,7 +4586,7 @@ TEST(IpcOutputFixtureDaemon,
 }
 
 TEST(IpcOutputFixtureDaemon,
-     ActiveLeaseBlocksSignalShutdownUntilManualClockExpiry) {
+     ActiveLeaseBlocksShutdownAfterListenerPathIsRemoved) {
   ScopedDaemonDirectory temp("ps-output-shutdown-lease", true);
   const std::string socket_path = (temp.path() / "shutdown.sock").string();
   ManualProcessClock clock(temp.path() / "clock.bin");
@@ -4543,6 +4604,23 @@ TEST(IpcOutputFixtureDaemon,
   clock.advance(std::chrono::milliseconds(900));
   ASSERT_TRUE(daemon.request_stop());
   ASSERT_TRUE(wait_for_listener_shutdown(socket_path, std::chrono::seconds(1)));
+  ASSERT_FALSE(daemon.poll_exit());
+  EXPECT_FALSE(std::filesystem::exists(socket_path));
+  internal::UniqueFd late_connector(::socket(AF_UNIX, SOCK_STREAM, 0));
+  ASSERT_TRUE(late_connector);
+  sockaddr_un late_address{};
+  late_address.sun_family = AF_UNIX;
+  std::memcpy(late_address.sun_path, socket_path.c_str(),
+              socket_path.size() + 1);
+  const socklen_t late_address_length = static_cast<socklen_t>(
+      offsetof(sockaddr_un, sun_path) + socket_path.size() + 1);
+  errno = 0;
+  const int late_connect = ::connect(late_connector.get(),
+                                     reinterpret_cast<sockaddr*>(&late_address),
+                                     late_address_length);
+  const int late_connect_error = errno;
+  EXPECT_EQ(late_connect, -1);
+  EXPECT_EQ(late_connect_error, ENOENT);
   EXPECT_FALSE(daemon.wait_for_exit(std::chrono::milliseconds(40)));
   clock.advance(std::chrono::milliseconds(200));
   ASSERT_TRUE(daemon.wait_for_exit(std::chrono::seconds(2)));
