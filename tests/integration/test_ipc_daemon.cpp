@@ -1220,6 +1220,7 @@ void observe_active_cleanup(void* opaque, int listener_fd,
  * @param opaque Borrowed atomic call counter that outlives the server.
  * @param listener_fd Ignored listener descriptor.
  * @param path Ignored configured socket pathname.
+ * @return Nothing.
  * @throws Nothing.
  * @note Used to prove an exceptional run drops its dependency borrow before the
  *       caller ends that dependency object's lifetime.
@@ -1260,6 +1261,7 @@ void replace_parent_path(void* opaque, internal::ServerLifecycleTestStage stage,
  * @param opaque Borrowed `PendingClientState` owned by the running test.
  * @param stage Current listener lifecycle boundary.
  * @param path Bound and listening Unix socket pathname.
+ * @return Nothing.
  * @throws Nothing; connection and write failures are captured in state.
  * @note Each client sends the configured prefix of one valid request and reads
  *       no response. The callback leaves every descriptor open so the proof

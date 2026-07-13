@@ -1362,6 +1362,7 @@ class Server::Impl {
   /**
    * @brief Executes deterministic admission/client/compute/session shutdown.
    *
+   * @return Nothing.
    * @throws Nothing.
    * @note Admission stops first. While the lifecycle lock remains held, Active
    *       pathname ownership is identity-unlinked and the listener is closed so
