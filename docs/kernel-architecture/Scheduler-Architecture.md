@@ -6,17 +6,21 @@ parallel work was routed through scheduler-owned task runtimes.
 
 ## Formal Target: IScheduler
 
-`IScheduler` is the formal scheduler interface. A scheduler attaches to a
-`GraphRuntime`, starts worker resources, schedules compute, and shuts down
-cleanly.
+`IScheduler` is the formal scheduler interface and publicly derives from
+`SchedulerTaskRuntime`. A scheduler attaches to a borrowed public
+`SchedulerHostContext`, starts worker resources, schedules compute, and shuts
+down cleanly. The context exposes only device capability, task worker/epoch
+context, and trace publication; it never exposes `GraphRuntime`, graph state,
+cache ownership, or a native device handle.
 
 Core lifecycle:
 
 ```text
-create -> attach(runtime) -> start -> dispatch planned tasks -> shutdown -> detach
+create -> attach(host_context) -> start -> dispatch planned tasks -> shutdown -> detach
 ```
 
-`GraphRuntime` owns this lifecycle ordering for registered schedulers. A
+`GraphRuntime` implements and owns the host context plus this lifecycle ordering
+for registered schedulers. A
 scheduler is attached before it starts; `GraphRuntime::start()` starts
 previously registered schedulers, `GraphRuntime::set_scheduler()` starts a new
 scheduler only after attach when the runtime is already running, and
@@ -35,8 +39,8 @@ vectors are staged before lifecycle publication. If resource allocation or any
 CPU/GPU thread construction throws, the scheduler publishes `running=false`,
 notifies every worker/completion wait, joins every thread already created by
 that attempt, and clears staged arrays, queues, counters, and exception state.
-The original `std::bad_alloc`, `std::system_error`, or plugin exception is then
-rethrown unchanged. Repeated `shutdown()` remains safe after failure, and the
+The original `std::bad_alloc`, `std::system_error`, or local implementation
+exception is then rethrown unchanged. Repeated `shutdown()` remains safe after failure, and the
 same scheduler object can retry `start()` and execute a later batch.
 Even after staged threads exist, `is_running()` remains false until the complete
 worker vector, queue arrays, mutex ownership, counters, and exception state have
@@ -69,6 +73,13 @@ later schedulers are swept regardless of either failure. Its `noexcept`
 destructor suppresses an explicit plugin lifecycle failure while scheduler
 owners retain their own final cleanup fences.
 
+The host-side plugin scheduler owner re-arms those final cleanup fences before
+entering every `attach()` or `start()` attempt. A repeated attach or start may
+publish a borrowed host pointer, workers, or another partial plugin resource
+and then throw. In that case, owner destruction still performs an independently
+fenced detach or shutdown before the single plugin destroy call; completion of
+an earlier lifecycle never suppresses cleanup required by the failed retry.
+
 Deterministic allocation and thread-creation hooks exist only in
 `BUILD_TESTING=ON` objects. A `BUILD_TESTING=OFF` product contains no hook
 storage, exported test seam, or forced GPU route.
@@ -93,6 +104,9 @@ leaving a queue entry that points into destroyed stack storage. The scheduler
 can accept the next batch on the same object after rollback. Exception
 publication uses the same queue transaction gate before choosing its epoch,
 so a concurrent batch is observed either wholly committed or wholly absent.
+The executor's virtual destructor is protected: scheduler code may run the
+borrowed object but cannot delete dispatcher-owned storage through its base
+pointer.
 
 ### Batch exception publication and reuse
 
@@ -117,6 +131,19 @@ pointer/flag under the exception mutex. This settle-before-return policy makes
 immediate next-batch submission safe: no old publisher remains able to drain a
 new queue, decrement its count, or publish a late exception into it.
 
+Active epoch and completion-count publication share one counter mutex with
+increment/decrement. Initial batch publication stages queue state first and
+then publishes the new nonzero epoch and count atomically, so an old callback
+cannot pass an epoch check and mutate a new batch. Epoch advancement wraps
+`UINT64_MAX` to `1`; zero remains reserved for uncancellable compatibility
+work. A decrement at zero is a no-op, a nonpositive increment is a no-op, and a
+positive increment beyond `INT_MAX` throws `std::overflow_error` without state
+change. Any nonzero worker TLS epoch different from the active epoch is stale,
+so its increment or decrement is ignored even across wrap.
+Exception consumption uses the same counter mutex and clears a remaining count
+only when the waiter's captured epoch is still active, so a late waiter cannot
+zero a newer batch.
+
 For CPU work stealing, a local-queue enqueue and its ready-predicate increment
 hold the global predicate mutex before the target local mutex. A local dequeue
 decrements the predicate before releasing that local mutex. Exception cleanup
@@ -129,7 +156,9 @@ the reset value can leak into the next batch.
 This ordering is part of scheduler reuse: an observed exception flag always
 has a non-null matching pointer, the exact exception identity reaches the
 waiting caller, and the next batch explicitly resets both publication state
-and the first-publisher latch. GPU pipeline CPU workers use one shared mutex and
+and the first-publisher latch. A null `set_exception` input returns before
+claiming publication or mutating queues, counters, epochs, or exception state.
+GPU pipeline CPU workers use one shared mutex and
 one `rt_cv_` predicate handshake for both the RT queue and HP-CPU fallback
 queue; every publisher changes either ready predicate under that same mutex
 before notifying. There is no separate unwaited `hp_cpu_cv_`, so HP submission
@@ -180,7 +209,8 @@ compute requests that mutate the visible `GraphModel` use
 `GraphStateExecutor`, including scheduler-backed parallel compute. The
 scheduler-facing design should extend `IScheduler` and
 `SchedulerTaskRuntime`; it should not bypass graph-state access by taking
-direct ownership of the runtime model.
+direct ownership of the runtime model. Scheduler implementations interact with
+the runtime only through `SchedulerHostContext`.
 
 The same executor is the scheduler-owner lifetime boundary. Runtime start,
 compute, scheduler name/statistics copying, scheduler replacement, and runtime
@@ -202,7 +232,7 @@ owner until active compute has released it.
 `cpu_workers`, `gpu_workers`, and `prefer_gpu_for_hp`. The scheduler always
 routes RT ready work to the high-priority CPU queue. Normal-priority HP ready
 work may enter the GPU queue when `prefer_gpu_for_hp=true`, GPU workers are
-configured, and a Metal device is attached to the runtime. Older fields such as
+configured, and `SchedulerHostContext` reports `GPU_METAL` available. Older fields such as
 `force_cpu_for_rt`, `rt_preempt_threshold_ms`, and scheduler-local
 implementation priority tables are not active configuration in the current
 code path.
@@ -221,6 +251,32 @@ becomes active only when one of those config keys names the scanned plugin type,
 or when the user later runs `scheduler set <hp|rt> <type>` for the current
 graph. `scheduler plugins` reports discovery state; `scheduler get all` reports
 the actual HP/RT scheduler instances attached to the current graph.
+
+Every scheduler DSO must first return the exact current numeric ABI value from
+`ps_scheduler_plugin_get_abi_version() noexcept`. Missing or mismatched
+handshakes fail before implementation version, discovery metadata, or instance
+creation is called. The implementation version is then queried once and cached
+as diagnostic metadata, not used as a compatibility gate.
+
+Successful discovery additionally requires a positive type count, a non-null
+and non-empty stable name at every in-range index, and at least one valid name
+that does not conflict with an existing scheduler type. Invalid identity
+metadata rejects the whole candidate with no type, metadata, or retained-handle
+publication. A candidate with some conflicts still commits atomically when at
+least one non-conflicting type remains.
+
+Every discovery, create, lifecycle, and runtime call into a scheduler DSO holds
+an explicit lease and converts plugin-origin exceptions to host-owned values:
+fresh `std::bad_alloc`, copied `GraphError` code/message,
+`std::invalid_argument` as `InvalidParameter`, and other standard/unknown
+failures as `ComputeError`. Returned device enumerators are validated before
+planning. Host task failures remain exact and plugin-visible: the owner
+preallocates append-only identity slots, relays record the original
+`exception_ptr` without allocation and use bare `throw;`, and the host restores
+only a matching registered identity. Plugin code executes without the registry
+guard, wait clears the batch registry, and exception objects are destroyed only
+after the guard is released so their destructors may safely reenter scheduler
+APIs.
 
 ## Daemon Host-Only Scheduler Boundary
 
@@ -322,9 +378,12 @@ real epochs so obsolete RT work can be dropped.
 
 ## Observability
 
-`GraphRuntime::SchedulerEvent` records assignment, node execution, tile
-execution, dirty-path, stale-generation, and exception-rethrow actions in a
-thread-safe fixed-capacity ring. Each graph preallocates 65,536 production
+`SchedulerHostContext::log_event` maps public `SchedulerTraceAction` labels to
+the private `GraphRuntime::SchedulerEvent` ring in one host adapter. Built-in
+and plugin schedulers publish through that context and do not duplicate the
+mapping. The private ring records assignment, node execution, tile execution,
+dirty-path, stale-generation, and exception-rethrow actions in a thread-safe
+fixed-capacity ring. Each graph preallocates 65,536 production
 slots. Valid publication sequences are `1..UINT64_MAX-1`; `UINT64_MAX` is the
 terminal exhaustion sentinel and is never assigned. Full-ring eviction removes
 exactly the oldest trace. Once the last valid sequence is consumed, later
@@ -357,6 +416,9 @@ has no unbounded trace getter or public clear control.
   epoch/generation metadata and optional scheduler-specific hints, not task
   graphs or dirty work-set state.
 - Keep plugin scheduler lifecycle compatible with `Plugin-ABI.md`.
+- Keep scheduler attachment limited to `SchedulerHostContext`; new capability
+  must be versioned and must not expose graph/runtime ownership or native
+  backend handles.
 - Continue later work on richer annotated task pools, planner plugin ABI, and
   scheduler policy metadata without moving graph-level dirty planning into a
   scheduler.

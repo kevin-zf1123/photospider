@@ -37,23 +37,31 @@ The root `CMakeLists.txt` builds these internal modules:
 
 | Target | Role |
 | --- | --- |
-| `photospider_core_types` | Core data types, OpenCV adapter, YAML node parsing, builtin op registry source. |
-| `photospider_operation_plugin_shim` | Narrow shared helper library for dynamic operation callback code that needs `ImageBuffer`/OpenCV adapter symbols without registry state. |
-| `photospider_graph` | `GraphModel` plus graph IO, traversal, cache, and inspect services. |
-| `photospider_plugin` | Dynamic operation plugin manager and loader. |
-| `photospider_compute` | Build-only interaction runtime, schedulers, compute service, and events helper. |
-| `photospider` | Static installable backend product, archived as `libphotospider`, linked by CLI and embedded Host frontends. It installs only `include/photospider/**` and exports `Photospider::photospider`; operation plugins register through `OperationPluginRegistrar` and `register_photospider_ops_v1` instead of linking this product for registry state. |
+| `photospider_core_internal` | Build-only private core values and public/private parameter-value conversion. |
+| `photospider_graph_internal` | Build-only builtin operation registry source, `GraphModel`, graph IO, traversal, cache, propagation, and inspection services. |
+| `photospider_plugin_host_internal` | Build-only host-side operation plugin manager, v2 loader, value adapter, and DSO lifetime ownership. |
+| `photospider_scheduler_internal` | Build-only scheduler factory, handshake loader, and built-in scheduler implementations. |
+| `photospider_compute_internal` | Build-only compute, dirty-region, runtime, interaction, and event implementation; it depends one-way on scheduler ownership. |
+| `photospider_operation_runtime` | Installable static implementation of public image-buffer factories with no OpenCV, yaml-cpp, Threads, graph, registry, or embedded-product dependency. |
+| `photospider_operation_sdk` | Installable interface target for operation v2 headers; it transitively links `operation_runtime`. |
+| `photospider_operation_opencv` | Installable opt-in OpenCV adapter using only the OpenCV `core` component. |
+| `photospider_scheduler_sdk` | Installable interface target carrying only scheduler headers and the C++17 requirement. |
+| `photospider` | Static installable backend product, archived as `libphotospider`, linked by CLI and embedded Host frontends. It exports `Photospider::photospider`; operation plugins register through `ps::plugin::OperationPluginRegistrar` and `register_photospider_ops_v2` instead of linking the product for registry state. |
 | `photospider_ipc_client` | Installed static typed Unix IPC client plus the complete IPC Host adapter. It exports `Photospider::photospider_ipc_client`, implements all 55 direct Client methods and all 53 current Host virtuals, and does not link the backend or expose JSON/POSIX implementation types. |
 | `photospider_ipc_server_internal` | Non-installed bounded Unix listener, typed router, and private session/job/snapshot/output registries. It serializes all backend access through one daemon-owned Host. |
 | `photospiderd` | Installed foreground macOS/Linux daemon that owns one embedded Host, a protected per-user socket and output store, and deterministic joined shutdown. |
-| `photospider_cli_common` | Non-installable application helper built from `apps/graph_cli/src/`: REPL commands, TUI editors, autocomplete, and CLI config. |
+| `photospider_cli_common` | Non-installable application helper built from `apps/graph_cli/src/` plus `src/lib/benchmark/benchmark_service.cpp` and `src/lib/benchmark/benchmark_yaml_generator.cpp`: REPL commands, TUI editors, autocomplete, CLI config, and CLI benchmark services. |
 | `graph_cli` | End-user executable whose process entry point is `apps/graph_cli/main.cpp`. |
 
-The complete CLI application closure is private to `apps/graph_cli/`, including
-its `include/graph_cli/` headers and `resources/help/` text. Backend graph,
-compute, runtime, scheduler, plugin, cache, and Host implementations remain in
-role-owned `src/lib/**` library/internal modules rather than being copied into
-the application. Repository-owned plugins live under `plugins/{ops,schedulers}`;
+The CLI-owned application surface is private to `apps/graph_cli/`, including
+its `include/graph_cli/` headers and `resources/help/` text. The complete CLI
+target closure additionally includes exactly the two role-owned benchmark
+translation units named above. They are linked only into the non-installable
+`photospider_cli_common` helper and complete CLI closure, not folded into the
+installable `photospider` static product. Backend graph, compute, runtime,
+scheduler, plugin, cache, and Host implementations remain in role-owned
+`src/lib/**` library/internal modules rather than being copied into the
+application. Repository-owned plugins live under `plugins/{ops,schedulers}`;
 maintained test translation units are classified under `tests/{unit,integration}`.
 
 Output directories:
@@ -68,10 +76,11 @@ Output directories:
 
 Package boundary:
 
-- `cmake --install` installs the static `photospider` archive, the
-  `include/photospider/**` public header tree, `PhotospiderTargets.cmake`, and
-  `PhotospiderConfig.cmake`. The archive is `libphotospider.a` on Unix-like
-  toolchains and `photospider.lib` with MSVC.
+- `cmake --install` installs the static `photospider`, operation-runtime, and
+  operation-OpenCV archives; the operation/scheduler interface SDKs; an exact
+  public-header inventory under `include/photospider/**`;
+  `PhotospiderTargets.cmake`; and `PhotospiderConfig.cmake`. The main archive is
+  `libphotospider.a` on Unix-like toolchains and `photospider.lib` with MSVC.
 - On macOS/Linux with `PHOTOSPIDER_BUILD_IPC=ON`, installation also exports
   `Photospider::photospider_ipc_client`, installs exactly the three
   `include/photospider/ipc/` headers and `photospiderd`, and keeps the server
@@ -83,6 +92,12 @@ Package boundary:
   the target's generated public include root contains only `photospider/`
   forwarding headers. CMake tracks additions and removals and the wrappers read
   live source headers without directory symlinks.
+- Package components are `embedded`, `ipc_client`, `operation_sdk`,
+  `operation_runtime`, `operation_opencv`, and `scheduler_sdk`. Omitting
+  components preserves the embedded default. `scheduler_sdk` discovers no
+  external package; `operation_sdk`/`operation_runtime` discover none;
+  `operation_opencv` discovers only OpenCV `core`; and `ipc_client` resolves
+  only Threads.
 - OpenCV (`core`, `imgproc`, `imgcodecs`, `videoio`), `yaml-cpp`, `Threads`,
   platform dynamic-loader libraries, and Apple `Metal`/`Foundation` framework
   flags are implementation link dependencies of the static archive. Library
@@ -91,16 +106,18 @@ Package boundary:
   block. Public Host/core headers avoid OpenCV and `yaml-cpp` types; Windows
   consumers receive `PHOTOSPIDER_STATIC` so declarations do not use DLL
   import/export attributes.
-- FTXUI, `photospider_cli_common`, operation plugin shim libraries, operation
-  plugins, and scheduler plugins are not exported as dependencies of the
-  embedded static package.
+- FTXUI, `photospider_cli_common`, operation plugins, scheduler plugins, and
+  their implementation-specific dependencies are not exported as dependencies
+  of the embedded static package.
 - CLI headers under `apps/graph_cli/include/graph_cli/**` are private build
   inputs and are not installed; the public install inventory remains exactly
   `include/photospider/**`.
-- Eight transitional extension headers remain source-tree-only until issue
-  #38: `include/{plugin_api,node,ps_types,image_buffer}.hpp`, the OpenCV adapter
-  header, and the three scheduler extension headers. They are not installed and
-  have no duplicate `src/lib` forwarders.
+- The eight transitional extension headers from issue #38 have been removed
+  without forwarders. Operation contracts now live only under
+  `include/photospider/plugin`, scheduler contracts only under
+  `include/photospider/scheduler`, shared device labels under
+  `include/photospider/core/device.hpp`, and full mutable/private declarations
+  under their role-owned `src/lib` homes.
 
 ## Runtime Ownership
 
@@ -330,11 +347,14 @@ does not select a scheduler by itself: the active graph uses the configured
 `scheduler_hp_type` / `scheduler_rt_type` values, or a later
 `scheduler set <hp|rt> <type>` command.
 
-`IScheduler` is the formal lifecycle interface, and scheduler-owned
-`SchedulerTaskRuntime` is the dispatch contract for compute-service planned
-parallel work. `GraphStateExecutor` is the separate access boundary for
-graph-state operations and compute requests that read or mutate the visible
-`GraphModel`.
+`IScheduler` is the formal lifecycle interface and publicly derives from the
+scheduler-owned `SchedulerTaskRuntime` dispatch contract. `attach` receives the
+narrow borrowed `SchedulerHostContext`, which preserves device capability,
+worker/epoch TLS attribution, and trace publication without exposing
+`GraphRuntime`. External scheduler DSOs must pass the numeric ABI handshake
+before discovery or creation. `GraphStateExecutor` remains the separate access
+boundary for graph-state operations and compute requests that read or mutate
+the visible `GraphModel`.
 
 ## Operation Registry
 
@@ -351,7 +371,9 @@ Operations are keyed by `type:subtype`. The registry supports:
 
 Built-in operations are registered in `src/lib/core/ops.cpp`. Runtime plugin
 examples live in `plugins/ops/`; the Metal operation implementation is private
-to `plugins/ops/metal/`.
+to `plugins/ops/metal/`. Dynamic operation plugins register through the exact
+v2 registrar using `ps::plugin` snapshots; public callbacks receive no mutable
+`Node`, `GraphModel`, `OpRegistry`, YAML tree, or private cache owner.
 
 ## Cache Model
 

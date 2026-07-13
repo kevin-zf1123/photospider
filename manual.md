@@ -116,6 +116,26 @@ and applicable Apple framework dependency resolution. Unknown required
 components, or required `ipc_client` against an IPC-disabled install, fail
 package discovery.
 
+Extension DSOs use separate installed components:
+
+```cmake
+find_package(Photospider CONFIG REQUIRED COMPONENTS operation_sdk)
+target_link_libraries(my_operation PRIVATE Photospider::operation_sdk)
+
+find_package(Photospider CONFIG REQUIRED COMPONENTS scheduler_sdk)
+target_link_libraries(my_scheduler PRIVATE Photospider::scheduler_sdk)
+```
+
+`operation_sdk` contains the v2 `ps::plugin` contracts and transitively links
+the no-external-dependency `operation_runtime` image factories. An adapter user
+requests `operation_opencv`, which discovers only OpenCV `core`; algorithm-
+specific modules remain the plugin's responsibility. `scheduler_sdk` carries
+only installed headers and C++17. Operation DSOs export
+`register_photospider_ops_v2`; scheduler DSOs must pass the numeric
+`ps_scheduler_plugin_get_abi_version() noexcept` handshake before metadata or
+creation. Neither SDK exposes mutable graph/runtime owners, and the old
+source-tree extension include paths are unsupported without forwarders.
+
 The IPC Host implements all 53 current non-destructor Host virtuals through
 short-lived typed connections. Compute submits once, polls immediately and then
 at a 10/20/40/80/160/320/500-ms cadence without a synchronous total timeout;

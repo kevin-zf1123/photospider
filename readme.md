@@ -17,7 +17,7 @@ and Metal hooks all coexist. For architecture details, start with
 | `apps/graph_cli/` | Private `graph_cli` application tree: entry point, commands, REPL/TUI, autocomplete, configuration, headers, and help resources. |
 | `apps/photospiderd/` | Foreground macOS/Linux daemon process shell and self-pipe signal policy. |
 | `src/lib/` | Role-owned backend implementation and private headers: core, graph, compute, runtime, Host, plugin, scheduler, benchmark, adapters, and the internal IPC server/router. |
-| `include/photospider/` | The only installable header tree, containing public Host/core contracts and the conditional typed IPC client. |
+| `include/photospider/` | The only installable header tree, containing public Host/core, operation v2, scheduler SDK, and conditional typed IPC contracts. |
 | `plugins/ops/` | Repository-owned operation plugins, including the private Metal operation implementation. |
 | `plugins/schedulers/` | Repository-owned scheduler plugins. |
 | `tests/unit/` | Isolated contract tests. |
@@ -200,6 +200,19 @@ transport, and `graph_cli --connect` remain unavailable. `graph_cli` therefore
 continues to use its embedded Host and all local commands below retain their
 existing meaning. See `docs/codebase-structure/IPC-Protocol-v1.md` for the wire,
 opaque-session, polling, output-security, permission, and error contracts.
+
+Installed extension authors select narrow components instead of linking the
+embedded product. `COMPONENTS operation_sdk` exposes the v2 `ps::plugin`
+contracts and transitively links `Photospider::operation_runtime`, so a normal
+operation DSO links only `Photospider::operation_sdk` and discovers no external
+package. `COMPONENTS operation_opencv` adds only the public adapter and OpenCV
+`core`; plugin-specific algorithms declare any other OpenCV modules.
+`COMPONENTS scheduler_sdk` exposes `IScheduler`, `SchedulerTaskRuntime`,
+`SchedulerHostContext`, and numeric handshake declarations with no Threads,
+OpenCV, yaml-cpp, Metal, embedded, daemon, or IPC dependency. Operation plugins
+export only `register_photospider_ops_v2`; scheduler plugins must pass
+`ps_scheduler_plugin_get_abi_version() noexcept` before discovery. The removed
+top-level operation/scheduler headers have no compatibility forwarders.
 
 The command-line parser currently supports graph loading, YAML output, tree
 printing, traversal display, cache clearing, config selection, and REPL entry.

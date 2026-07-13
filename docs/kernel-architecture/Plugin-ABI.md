@@ -2,27 +2,30 @@
 
 Photospider supports operation plugins and scheduler plugins. Operation plugins
 extend the process-owned `OpRegistry` through a host-provided registrar.
-Scheduler plugins provide `IScheduler` implementations.
+Scheduler plugins provide `IScheduler` implementations through a numeric
+handshake-gated transitional C++ ABI. The installable authoring contracts live
+only under `include/photospider/{plugin,scheduler}`.
 
 ## Operation Plugin ABI
 
 An operation plugin exports a versioned registrar entry:
 
 ```cpp
-extern "C" PLUGIN_API void register_photospider_ops_v1(
-    ps::OperationPluginRegistrar* registrar);
+extern "C" PHOTOSPIDER_OPERATION_PLUGIN_EXPORT void
+register_photospider_ops_v2(
+    ps::plugin::OperationPluginRegistrar* registrar);
 ```
 
-The loader calls this function after loading the dynamic library. The host
-creates an `OperationPluginRegistrar`, passes it to the plugin, and forwards
-each registration into the one process-owned `OpRegistry`. Operation plugins
-must not call `OpRegistry::instance()` during registration, because a dynamic
-plugin and a static host can otherwise observe different registry singletons.
+The loader opens the candidate eagerly and locally (`RTLD_NOW | RTLD_LOCAL` on
+POSIX), resolves only this exact symbol, and invokes it with a borrowed
+registrar. The registrar writes into a host-side shadow transaction; plugins
+never receive `OpRegistry` or any other mutable backend owner.
 
-The old no-argument `register_photospider_ops()` entry is not a supported
-compatibility ABI. It used the same C symbol shape without a signature marker,
-so the loader now resolves only `register_photospider_ops_v1` and rejects old
-plugins instead of guessing at an incompatible function pointer type.
+Neither the v1 `register_photospider_ops_v1` entry nor the old no-argument
+`register_photospider_ops()` entry is a supported compatibility ABI. A DSO that
+exports only either old symbol is rejected with no callback publication. The
+version bump is required because v2 callbacks use different node, parameter,
+input, output, ROI, and dependency types.
 
 Supported operation registrations include:
 
@@ -34,20 +37,77 @@ Supported operation registrations include:
 | Dirty ROI propagator | Backward ROI propagation. |
 | Forward ROI propagator | Downstream ROI projection. |
 | Dependency LUT builder | Data-dependent spatial dependency map. |
-| Device implementation | CPU, Metal, CUDA, or future backend implementation metadata. |
+| Device implementation | CPU, Metal, CUDA, or future public `Device` capability. |
 
-Operation plugins depend on the public `ImageBuffer` and `NodeOutput`
-contracts.
+The canonical registry identity is `type:subtype`. Both segments must be
+non-empty and neither may contain the reserved `:` separator, otherwise two
+different pairs could collide. The public C++ registrar helpers additionally
+reject embedded NUL bytes before calling `.c_str()`, preventing raw-ABI
+truncation from changing the identity. Host raw callbacks independently
+validate the visible C-string segments. Every rejection occurs inside the
+candidate shadow transaction and publishes no callback, source, or handle.
+Every registration also requires a non-empty callable. Typed C++ helpers reject
+an empty `std::function` before entering the raw ABI, and host raw callbacks
+repeat that check rather than trusting the plugin wrapper. The loader reports
+either violation as an `InvalidParameter` candidate diagnostic with zero shadow
+publication.
 
-## Operation Plugin Shim and Linkage
+The callback boundary is host-independent:
+
+- `NodeView` exposes borrowed identity strings plus a deep-owned effective
+  `ParameterValue` tree. It never exposes `Node`, `YAML::Node`, cache state, or
+  a graph/runtime owner.
+- `OperationInputView` and `OperationTileInputView` borrow immutable image,
+  named-data, and spatial snapshots only for the callback duration.
+- `OperationOutput` owns its image descriptor, named parameter values, spatial
+  metadata, and debug metadata. The host converts the complete value to its
+  private representation before attaching the private DSO lease.
+- `RoiContext` exposes ordered `InputEdgeView` topology snapshots; forward ROI
+  callbacks receive the active edge, and dependency builders return an owned
+  `DependencyLutSnapshot` that the host validates before caching.
+- `ParameterTypeError` reports an explicit `ParameterValue` alternative
+  mismatch. Parameter conversion and allocation failures propagate unchanged
+  before callback entry.
+
+Host conversion before callback entry and after a successful return remains
+outside the plugin exception fence and preserves its host-owned type. The
+actual plugin invocation retains an explicit DSO lease and normalizes every
+plugin-origin exception before that lease can be released: plugin
+`std::bad_alloc` becomes a fresh host `std::bad_alloc`; plugin `GraphError`
+becomes a host copy with the same fixed-width code and message;
+`std::invalid_argument` maps to `GraphErrc::InvalidParameter`; and other
+standard or unknown failures map to `GraphErrc::ComputeError`. The plugin
+exception object is inspected and destroyed under the lease, so its identity
+and DSO-defined dynamic type never reach the host. `GraphErrc` has the fixed
+`uint32_t` representation and explicit values `1..9`.
+
+## Operation SDK Targets and Linkage
 
 Operation plugins do not link the broad static `photospider` product to reach
-registry symbols. Repo-owned operation plugins register through
-`OperationPluginRegistrar`, and standard plugin targets link the narrow
-`photospider_operation_plugin_shim` when they need runtime helper symbols such
-as `ImageBuffer`/OpenCV adapter conversion functions. The shim deliberately
-does not include `OpRegistry`, built-in operation registration, plugin manager,
-plugin loader, graph, scheduler, or compute-service code.
+registry symbols. An ordinary plugin requests the `operation_sdk` package
+component and links only `Photospider::operation_sdk`. That interface target
+carries the installed headers and transitively links
+`Photospider::operation_runtime`, whose static archive implements public
+image-buffer factories without linking back to the SDK or requiring an
+external package.
+
+OpenCV is an explicit opt-in. A plugin that uses
+`photospider/plugin/opencv_adapter.hpp` additionally requests and links
+`Photospider::operation_opencv`. That target owns the adapter implementation
+and discovers only OpenCV `core`; it does not add `imgproc`, `imgcodecs`, or
+`videoio`. A concrete plugin declares such additional OpenCV modules itself
+when its own algorithm requires them.
+
+The generic `ImageBuffer::context` remains backend-specific and opaque. The
+public OpenCV adapter interprets only `Device::CPU` descriptors with non-null
+`data`; it rejects a non-CPU or context-only descriptor instead of casting an
+arbitrary backend resource to an OpenCV object. Host dirty staging deep-copies
+CPU data, immutably shares a non-CPU descriptor until a tiled write requires
+CPU staging, and treats monolithic output as full replacement. Downsample
+planning preserves a non-CPU HP descriptor and its full extent as an explicit
+backend-preserving passthrough; it does not fabricate reduced pixels or a false
+reduced extent. Cache and metrics pixel inspection skips descriptors for which
+no matching device adapter exists.
 
 This split supports the static-host direction:
 
@@ -55,29 +115,24 @@ This split supports the static-host direction:
   `PluginManager`, shared by every embedded Host.
 - Dynamic operation plugins receive registration callbacks from the host, so
   registry mutation stays in that process-owned instance.
-- `photospider_operation_plugin_shim` is only a shared runtime helper boundary
-  for plugin callback code that needs buffer adapter functions.
+- `Photospider::operation_runtime` contains value-factory implementation only;
+  it contains no registry, loader, graph, scheduler, or compute state.
 - Plugin callback objects and plugin-instantiated return-value internals may
   still point into plugin code, so the process owner and copied value leases
   retain libraries until all such state has been destroyed.
 
 Symbol visibility rules:
 
-- Operation plugin registrar entries use `PLUGIN_API` and the loader only
-  treats `register_photospider_ops_v1` as the supported operation-plugin ABI
-  entry. Any other externally visible callback helper symbols are not loader
-  entry points or compatibility contracts.
-- Operation plugin targets define `PHOTOSPIDER_PLUGIN_BUILD`, which keeps
-  `PHOTOSPIDER_API` empty even on Windows. Plugin callback code must not import
-  backend library symbols through public value contracts such as
-  `ps::GraphError`; only the registrar entry is exported through `PLUGIN_API`.
+- Operation registrar entries use `PHOTOSPIDER_OPERATION_PLUGIN_EXPORT`, and
+  the loader treats only `register_photospider_ops_v2` as an entry point.
+- Operation targets define `PHOTOSPIDER_PLUGIN_BUILD`, which exports the
+  registrar on Windows and selects default visibility on supported POSIX
+  toolchains.
 - The loader resolves the exact versioned symbol name.
-- The shim exports runtime adapter helper symbols needed by plugin callbacks;
-  on Windows it uses `WINDOWS_EXPORT_ALL_SYMBOLS`.
 - This remains a C++ ABI boundary because callbacks use `std::function`,
-  `NodeOutput`, `Node`, and `OpMetadata`. Compiler, standard library, and
-  Photospider header compatibility are version-sensitive until a future pure C
-  ABI replaces the callback shapes.
+  standard-library containers, and public C++ value types. Compiler, standard
+  library, exception model, RTTI settings, and Photospider SDK compatibility
+  remain version-sensitive until a future pure C ABI replaces the callbacks.
 
 Current operation plugins that are intended to be loadable through
 `plugin_dirs` must also register explicit dirty and forward ROI propagators. The
@@ -99,7 +154,7 @@ The standard example plugins follow this rule:
 ## Operation Plugin Load Transaction
 
 Loading one operation plugin is a strong transaction over all observable
-loader state. Before invoking `register_photospider_ops_v1`, the loader creates
+loader state. Before invoking `register_photospider_ops_v2`, the loader creates
 staged copies of the target `OpRegistry`, operation-source map, structured load
 result, and retained-handle map. The host-provided registrar points at the
 staged registry, so plugin callbacks never mutate the active registry during
@@ -164,13 +219,16 @@ registration after whole-key unregister cannot inherit a stale plugin token.
 
 The transaction has three outcomes:
 
-- If the registrar or any later staging step throws `std::bad_alloc`, the
-  exact exception propagates. Registry callbacks, sources, diagnostics, and
-  retained handles remain byte-for-byte logically equivalent to their
-  pre-candidate state.
+- If the registrar throws `std::bad_alloc`, the plugin exception is inspected
+  and destroyed under the candidate lease and a fresh host `std::bad_alloc`
+  propagates. If a later host staging step throws `std::bad_alloc`, that already
+  host-owned exception propagates directly. Registry callbacks, sources,
+  diagnostics, and retained handles remain byte-for-byte logically equivalent
+  to their pre-candidate state.
 - If the registrar throws another standard exception, the loader commits only
-  the structured diagnostic for that candidate. No callback, source,
-  restoration snapshot, or handle becomes active.
+  the structured diagnostic for that candidate after destroying the plugin
+  exception under the lease. No callback, source, restoration snapshot, or
+  handle becomes active.
 - After every staging allocation succeeds, commit first swaps the candidate
   library into the retained-handle map, then swaps source/result state, and
   publishes the full registry last. These operations are required to be
@@ -207,7 +265,8 @@ caller source map or copies manager state after a completed load transaction.
 Every registrar callback is wrapped with a shared dynamic-library lease. A
 resolved callback snapshot therefore remains callable after explicit global
 unload removes its registry entry. Monolithic callback results also attach the
-same lease to `NodeOutput`. The lease is the first-declared and last-destroyed
+same lease to the host-private `NodeOutput` after public-value conversion. The
+lease is the first-declared and last-destroyed
 member. Copy construction retains it before copying payload state; move
 construction transfers the complete state through a no-throw swap. Copy and move
 assignment first stage a complete replacement, swap it into place, and let the
@@ -271,9 +330,10 @@ replacement.
 
 ## Scheduler Plugin ABI
 
-A scheduler plugin exports C symbols with these names:
+A scheduler plugin explicitly defines all seven required C exports:
 
 ```text
+ps_scheduler_plugin_get_abi_version
 ps_scheduler_plugin_get_count
 ps_scheduler_plugin_get_name
 ps_scheduler_plugin_get_description
@@ -286,53 +346,103 @@ Required exports:
 
 | Export | Required | Meaning |
 | --- | --- | --- |
-| `get_count` | Yes | Number of scheduler types in the plugin. |
-| `get_name` | Yes | Type name at an index. |
-| `create` | Yes | Create a scheduler instance for a type. The returned object must implement both `IScheduler` and `SchedulerTaskRuntime`. |
-| `get_description` | No | Human-readable type description. |
-| `destroy` | Required for ownership | Destroy plugin-created scheduler instance. |
-| `get_version` | No | Plugin version string. |
+| `get_abi_version` | Yes, first gate | Non-throwing numeric handshake with signature `uint32_t() noexcept`; it must return `PS_SCHEDULER_PLUGIN_ABI_VERSION`, currently `1`. |
+| `get_count` | Yes | Number of scheduler types in the plugin; it must be at least one. |
+| `get_name` | Yes | Stable type name at an index; every index below count must return non-null, non-empty text. |
+| `get_description` | Yes | Human-readable type description at an index. |
+| `create` | Yes | Create a scheduler instance for a type. `IScheduler` already publicly derives from `SchedulerTaskRuntime`. |
+| `destroy` | Yes | Destroy a plugin-created scheduler instance. |
+| `get_version` | Yes | Human-readable implementation version, called once and cached; it is not the compatibility gate. |
+
+Count, index, and worker-count values use fixed `uint32_t` widths. The
+installable SDK supplies the ABI constant, typed function-pointer aliases, and
+`PHOTOSPIDER_SCHEDULER_PLUGIN_EXPORT`; it deliberately supplies no declaration
+or single-scheduler implementation macro. Each DSO declares every export and
+therefore makes its lifecycle and visibility contract explicit.
 
 ## Scheduler Plugin Load Transaction
 
 Loading one scheduler plugin is a strong transaction over the scheduler type
-map, type metadata, retained-library map, and ordered load diagnostics. After
-opening the candidate and resolving its exports, the loader creates local
-shadow copies of all four containers. Results from version, count, name, and
-description callbacks, duplicate/conflict diagnostics, registered-type
-bookkeeping, and the candidate `PluginHandle` are recorded only in those
-shadows. No candidate type can therefore become visible before its metadata and
-retained library are ready.
+map, type metadata, retained-library map, and ordered load diagnostics. The
+loader opens a POSIX candidate with `RTLD_NOW | RTLD_LOCAL`, resolves and calls
+only `ps_scheduler_plugin_get_abi_version`, and requires exact equality with
+the SDK value before resolving any other export. Missing or mismatched
+handshakes release the candidate with a structured diagnostic; implementation
+version, count, name, description, create, and destroy are not called and no
+candidate state is published.
 
-If any plugin callback, metadata copy, diagnostic construction, or container
-allocation throws, the shadow state is destroyed before the candidate shared
-library lifetime is released. The exact pre-call type, metadata, handle, and
-error prefixes remain active and the original exception propagates unchanged,
-so the same plugin path can be retried immediately. A complete candidate is
-published under the loader mutex by no-throw container swaps, with the retained
-handle swapped first. Library-open and missing-export failures still return
-false with one diagnostic, but that diagnostic append is itself staged and
-cannot partially alter the prior error sequence.
+For a compatible candidate, the loader creates local shadow copies of all four
+containers. Results from the once-only implementation-version call, count,
+name, and description callbacks, duplicate/conflict diagnostics,
+registered-type bookkeeping, and the candidate `PluginHandle` are recorded
+only in those shadows. No candidate type can therefore become visible before
+its cached metadata and retained library are ready.
+
+A compatible candidate is still rejected when count is zero, any in-range name
+is null or empty, or every valid name conflicts with an existing type. Such a
+rejection discards all candidate shadows, releases the candidate library, and
+appends one structured diagnostic without changing the prior diagnostic
+prefix. Conflicts remain recoverable when at least one valid non-conflicting
+type is available: that type, its metadata, the retained handle, and the staged
+conflict diagnostics commit together.
+
+If a discovery callback throws, the loader applies the same host-owned mapping
+as the operation callback fence while the candidate lease is live. If host
+metadata copy, diagnostic construction, or container allocation throws, that
+host-owned exception retains its type. In both cases the shadow state is
+destroyed before the candidate shared-library lifetime is released; the exact
+pre-call type, metadata, handle, and error prefixes remain active, and the same
+plugin path can be retried immediately. A complete candidate is published under
+the loader mutex by no-throw container swaps, with the retained handle swapped
+first. Library-open and missing-export failures still return false with one
+diagnostic, but that diagnostic append is itself staged and cannot partially
+alter the prior error sequence.
 
 ## Scheduler Instance Runtime Contract
 
-The current scheduler plugin instance is a C++ object returned as
-`ps::IScheduler*`, but the host also requires the same object to implement
-`ps::SchedulerTaskRuntime`. The loader validates this with `dynamic_cast` during
-creation. A plugin that exports valid C symbols and returns an `IScheduler`
-which does not also implement `SchedulerTaskRuntime` can be discovered, but it
-will be rejected when the host tries to instantiate that scheduler type.
+The scheduler plugin instance is a C++ object returned as `ps::IScheduler*`.
+`IScheduler` publicly derives from `SchedulerTaskRuntime`, so one object has
+exactly one lifecycle/runtime interface and creation performs no cross-DSO
+runtime type discovery.
+
+`IScheduler::attach` receives a borrowed public `SchedulerHostContext&`, never
+`GraphRuntime`. The context exposes only device-capability queries, task
+worker/epoch context set/clear, and trace publication. Its protected destructor
+prevents plugin-side deletion; the host keeps it alive from successful attach
+through shutdown and detach. A scheduler clears every retained context pointer
+during detach. Built-in and plugin schedulers therefore preserve TLS metrics
+and trace attribution without access to graph ownership or native Metal
+handles.
 
 The host lifetime owner is a transparent runtime wrapper. It forwards
-`available_devices()` plus every current callback and borrowed-`TaskHandle`
-single/batch submission method directly to the plugin instance. It must not
-fall back to `SchedulerTaskRuntime` base implementations, because doing so can
-replace a plugin's CPU/Metal device inventory, split an atomic batch into
-per-item submissions, change task ordering, or alter exception identity.
+`available_devices()` plus initial and worker-ready borrowed-`TaskHandle`
+batches, any-thread callback submission, completion wait, first-exception
+publication, completion-counter mutation, and trace publication directly to
+the plugin instance. Both handle-batch methods are pure virtual, so the SDK
+cannot split an atomic batch into per-item base fallbacks and thereby change
+ordering. Every returned device is validated against CPU, Metal, CUDA, and
+ASIC/NPU before host planning; an unknown enumerator becomes a host-owned
+`GraphError(InvalidParameter)`. `TaskExecutor` uses protected virtual
+destruction, so the plugin cannot delete the dispatcher-owned executor through
+its borrowed base pointer.
 
-This is part of the current transitional C++ ABI. Plugin authors should inherit
-both interfaces in the concrete scheduler class until the long-term pure C ABI
-replaces this requirement.
+Plugin discovery, create, lifecycle, and runtime failures use the same
+host-owned exception mapping as operation callbacks while an explicit scheduler
+DSO lease is live. Host tasks are different: before a `TaskHandle` executor,
+any-thread callback, or non-null `set_exception` value enters plugin code, the
+owner preallocates an append-only identity slot. The relay records the original
+`exception_ptr` without allocation and uses bare `throw;`; plugin code therefore
+observes the original dynamic type, message, and object. When the same pointer
+later surfaces, the host recognizes it before plugin-failure normalization and
+rethrows it exactly. Recording and lookup allocate nothing, no plugin call holds
+the registry guard, rejected admission only marks its slots inactive, and the
+matching wait clears all slots. Registry clear swaps storage under the guard and
+destroys retired exception objects afterward, so an exception destructor may
+reenter scheduler APIs without deadlocking.
+
+This is part of the current transitional C++ ABI. Plugin authors derive only
+from `IScheduler` and implement its inherited runtime operations until a
+separately versioned pure C ABI replaces this boundary.
 
 ## Scheduler Instance Ownership
 
@@ -344,8 +454,8 @@ This rule avoids allocator, runtime, and dynamic-library boundary problems.
 
 Immediately after a non-null create result, the loader installs a non-allocating
 stack guard containing the raw instance, destroy function, and shared library
-lifetime. The guard remains active through `SchedulerTaskRuntime` validation,
-heap allocation of the host owner, and copied type-name construction. If owner
+lifetime. The guard remains active through heap allocation of the host owner
+and copied type-name construction. If owner
 allocation or string copy throws `std::bad_alloc` (or any other construction
 exception), the guard calls plugin destroy exactly once and keeps the library
 mapped until that call returns. Ownership transfers only after the complete
@@ -362,21 +472,30 @@ lifetime is released only after that single destroy attempt returns, so
 `shutdown`, `detach`, destroy, and any plugin-side destructor code all execute
 while the library remains mapped.
 
-These fences apply only to destructor fallback and raw-owner construction
-cleanup. Explicit `attach`, `start`, `shutdown`, and `detach` calls preserve and
-propagate plugin exceptions to their caller. This distinction keeps the public
-lifecycle contract observable while preventing a hostile plugin from
-terminating the process during host destruction.
+These catch-all suppression fences apply only to destructor fallback and
+raw-owner construction cleanup. Explicit `attach`, `start`, `shutdown`, and
+`detach` calls remain observable, but plugin-origin failures use the host-owned
+mapping above rather than exporting a DSO exception object. This distinction
+keeps the public lifecycle contract observable while preventing either an
+unmapped dynamic type or a hostile cleanup exception from reaching the host.
+
+Before every explicit `attach()` or `start()` attempt, the owner marks the
+matching detach or shutdown fallback as required. This happens before control
+enters the plugin: if a repeated attach/start publishes partial state and then
+throws, an earlier successful detach/shutdown cannot make the destructor skip
+the cleanup required by that failed retry.
 
 The scheduler plugin library must remain loaded while any scheduler instance
 created by that plugin may still exist.
 
 ## Current ABI Status
 
-The current scheduler plugin interface uses C symbol names but returns C++
-`ps::IScheduler*`. That means binary compatibility currently depends on a
-compatible C++ ABI, compiler, standard library, and Photospider interface
-version.
+The scheduler handshake rejects unknown Photospider interface generations
+before discovery or object creation, but the accepted interface still uses C
+symbol names around a C++ `ps::IScheduler*`. Binary compatibility therefore
+also depends on a compatible compiler, standard library, exception model,
+RTTI configuration, and C++ ABI. The human-readable implementation version is
+diagnostic metadata only and never substitutes for the numeric handshake.
 
 This is transitional. The long-term direction is a pure C scheduler ABI using
 opaque handles or callback tables so plugins do not depend on C++ binary ABI.
@@ -385,14 +504,14 @@ opaque handles or callback tables so plugins do not depend on C++ binary ABI.
 
 - Operation plugins should use the published registration APIs and public data
   contracts.
-- Operation plugins must use `OperationPluginRegistrar` and
-  `register_photospider_ops_v1`; the no-argument registration ABI is not
-  supported.
+- Operation plugins must use `ps::plugin::OperationPluginRegistrar` and
+  `register_photospider_ops_v2`; v1 and the no-argument registration ABI are
+  unsupported.
 - Operation plugins must not link `photospider` merely to share registry
-  state. Use `photospider_operation_plugin_shim` only for narrow runtime helper
-  symbols needed by plugin callback code.
-- Scheduler plugins should treat both `IScheduler` and `SchedulerTaskRuntime`
-  ABI compatibility as version sensitive.
-- Scheduler plugin authors should implement `ps_scheduler_plugin_destroy`.
+  state. Link `Photospider::operation_sdk`, adding
+  `Photospider::operation_opencv` only when the public OpenCV adapter is used.
+- Scheduler plugins derive from `IScheduler`, implement its inherited runtime
+  contract, and export the exact numeric handshake plus all six remaining
+  required functions.
 - The host should use plugin destroy for plugin-created scheduler instances.
 - Future C ABI work should be done as a separate compatibility change.
