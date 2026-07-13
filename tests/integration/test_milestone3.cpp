@@ -57,12 +57,11 @@ TEST(M33CpuWorkStealingScheduler, StartAndShutdown) {
 
 TEST(M33CpuWorkStealingScheduler, AttachAndDetach) {
   CpuWorkStealingScheduler scheduler;
+  GraphRuntime::Info info{"m33_attach", "sessions/m33_attach_session", "", ""};
+  GraphRuntime host(info);
 
-  // Initially not attached
-  scheduler.attach(nullptr);
+  scheduler.attach(host);
   scheduler.detach();
-  // Should not crash
-  EXPECT_TRUE(true);
 }
 
 // =============================================================================
@@ -463,23 +462,24 @@ TEST_F(M33SchedulerIntegrationTest, ReplaceSchedulerOnRuntime) {
   runtime.stop();
 }
 
-TEST_F(M33SchedulerIntegrationTest, RegisteredSchedulerExposesTaskRuntime) {
+TEST_F(M33SchedulerIntegrationTest, RegisteredSchedulerIsCompleteTaskRuntime) {
   GraphRuntime::Info info{"m33_test", "sessions/m33_test_session", "", ""};
 
   GraphRuntime runtime(info);
   runtime.start();
 
   auto scheduler = std::make_unique<CpuWorkStealingScheduler>(2);
-  scheduler->start();
   CpuWorkStealingScheduler* scheduler_ptr = scheduler.get();
   runtime.set_scheduler(ComputeIntent::GlobalHighPrecision,
                         std::move(scheduler));
 
-  auto* task_runtime = dynamic_cast<SchedulerTaskRuntime*>(
-      runtime.get_scheduler(ComputeIntent::GlobalHighPrecision));
-  ASSERT_NE(task_runtime, nullptr);
+  IScheduler* registered =
+      runtime.get_scheduler(ComputeIntent::GlobalHighPrecision);
+  ASSERT_NE(registered, nullptr);
+  SchedulerTaskRuntime* task_runtime = registered;
+  EXPECT_EQ(registered, scheduler_ptr);
   EXPECT_EQ(task_runtime, scheduler_ptr);
-  EXPECT_TRUE(task_runtime->task_runtime_running());
+  EXPECT_TRUE(registered->is_running());
 
   runtime.stop();
 }

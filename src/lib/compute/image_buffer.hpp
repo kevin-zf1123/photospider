@@ -10,14 +10,14 @@
 namespace ps {
 
 class Node;
+struct SpatialContext;
 
 /**
  * @brief Read-only non-owning view over an input image region.
  *
- * InputTile is the legacy internal tiled-operator view used by existing
- * adapters and compute executors. It keeps the historical `cv::Rect` ROI so the
- * implementation path remains buildable while the public core seam exposes
- * OpenCV-free `InputTileView` values.
+ * InputTile is the private compute representation passed between tile planning,
+ * input normalization, backend adapters, and operation-host callbacks. Its
+ * OpenCV rectangle is confined to the backend implementation boundary.
  *
  * @throws Nothing for value operations.
  * @note The buffer pointer is const so tiled operator APIs cannot mutate
@@ -26,21 +26,33 @@ class Node;
  *       still treat matrices obtained from InputTile as read-only.
  */
 struct InputTile {
-  /** @brief Borrowed upstream buffer that must remain alive during tile work.
+  /**
+   * @brief Borrowed upstream buffer that must remain alive during tile work.
+   * @note Null represents a disconnected destination input slot; the enclosing
+   * input-tile vector retains that slot's graph index.
    */
   const ImageBuffer* buffer = nullptr;
 
   /** @brief Pixel ROI inside buffer, clipped by the executor before dispatch.
    */
   cv::Rect roi;
+
+  /**
+   * @brief Borrowed immutable spatial metadata for the upstream output.
+   *
+   * @note The pointer has the same callback lifetime as buffer. It may be null
+   * when the producer has no spatial metadata or a focused caller constructs a
+   * geometry-only tile.
+   */
+  const SpatialContext* spatial = nullptr;
 };
 
 /**
  * @brief Writable non-owning view over an output image region.
  *
- * OutputTile is the legacy internal tiled-operator write view. It preserves the
- * existing OpenCV rectangle contract for implementation code and adapters while
- * the public core seam keeps backend-neutral tile values separate.
+ * OutputTile is the private compute write representation passed to backend
+ * adapters and operation-host callbacks. Its OpenCV rectangle never crosses
+ * the public plugin contract, which uses backend-neutral geometry values.
  *
  * @throws Nothing for value operations.
  * @note The buffer pointer is mutable because output tiles are the only tile
@@ -73,7 +85,10 @@ struct TileTask {
   /** @brief Writable output region for this task. */
   OutputTile output_tile;
 
-  /** @brief Read-only input regions, including halo where required. */
+  /**
+   * @brief Read-only input regions, including disconnected slot placeholders
+   * and halo where required.
+   */
   std::vector<InputTile> input_tiles;
 };
 

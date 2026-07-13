@@ -5,11 +5,11 @@
 #include <optional>
 #include <string>
 
-#include "ps_types.hpp"  // NOLINT(build/include_subdir)
+#include "core/ps_types.hpp"  // NOLINT(build/include_subdir)
 
 namespace ps {
 class GraphRuntime;
-class SchedulerTaskRuntime;
+class IScheduler;
 }  // namespace ps
 
 namespace ps::compute {
@@ -104,9 +104,9 @@ class IntentUpdateCoordinator {
    * @brief Executes the callbacks required by one compute intent.
    *
    * @param intent Requested compute intent.
-   * @param hp_task_runtime Optional HP scheduler runtime used to decide whether
+   * @param hp_scheduler Optional HP scheduler used to decide whether
    * scheduler-backed work may run inside each sibling callback.
-   * @param rt_task_runtime Optional RT scheduler runtime used to decide whether
+   * @param rt_scheduler Optional RT scheduler used to decide whether
    * scheduler-backed work may run inside each sibling callback.
    * @param dirty_roi Optional dirty ROI for dirty intents.
    * @param callbacks Callback bundle that performs actual compute work.
@@ -121,8 +121,7 @@ class IntentUpdateCoordinator {
    * active recoverable sibling failure so it cannot be silently discarded.
    */
   static NodeOutput& coordinate_intent_update(
-      ComputeIntent intent, SchedulerTaskRuntime* hp_task_runtime,
-      SchedulerTaskRuntime* rt_task_runtime,
+      ComputeIntent intent, IScheduler* hp_scheduler, IScheduler* rt_scheduler,
       const std::optional<cv::Rect>& dirty_roi,
       const IntentUpdateCallbacks& callbacks);
 };

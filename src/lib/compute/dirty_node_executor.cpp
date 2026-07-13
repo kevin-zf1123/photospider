@@ -7,10 +7,11 @@
 #include <variant>
 #include <vector>
 
-#include "adapter/buffer_adapter_opencv.hpp"
+#include "adapters/opencv/buffer_adapter_opencv.hpp"
 #include "compute/compute_cache_policy.hpp"
 #include "compute/compute_geometry.hpp"
 #include "compute/dirty_execution_common.hpp"
+#include "compute/dirty_update_executor.hpp"
 #include "compute/domain_op_metadata.hpp"
 #include "compute/node_executor.hpp"
 #include "runtime/graph_event_service.hpp"
@@ -23,12 +24,13 @@ namespace {
  * @brief Infers staged RT output format without copying optional outputs.
  *
  * @param preferred Staged RT output already owned by the write buffer.
- * @param image_inputs Ready RT image inputs for the node.
+ * @param image_inputs Destination-indexed RT inputs, including null slots.
  * @param fallback Optional committed HP output used as a final shape hint.
  * @return Channel count and DataType for the staged RT image buffer.
  * @throws Nothing directly.
  * @note This mirrors infer_output_spec() while accepting a NodeOutput
- * reference so RT staging does not need to copy large outputs into an optional.
+ * reference so RT staging does not need to copy large outputs into an
+ * optional. Disconnected slots are skipped only for format inference.
  */
 std::pair<int, DataType> infer_staged_rt_output_spec(
     const NodeOutput& preferred,
@@ -40,6 +42,9 @@ std::pair<int, DataType> infer_staged_rt_output_spec(
     return {preferred_buffer.channels, preferred_buffer.type};
   }
   for (const auto* input : image_inputs) {
+    if (!input) {
+      continue;
+    }
     const ImageBuffer& buffer = input->image_buffer;
     if (buffer.width > 0 && buffer.height > 0 && buffer.channels > 0) {
       return {buffer.channels, buffer.type};
@@ -52,6 +57,19 @@ std::pair<int, DataType> infer_staged_rt_output_spec(
     }
   }
   return {1, DataType::FLOAT32};
+}
+
+/**
+ * @brief Checks whether one image descriptor carries a shaped payload.
+ * @param buffer Image descriptor to inspect without accessing its storage.
+ * @return True for positive dimensions backed by CPU data or backend context.
+ * @throws Nothing.
+ * @note This accepts public non-CPU context-only outputs without asking the
+ * OpenCV adapter to interpret their opaque resource type.
+ */
+bool has_image_payload(const ImageBuffer& buffer) noexcept {
+  return buffer.width > 0 && buffer.height > 0 && buffer.channels > 0 &&
+         (buffer.data || buffer.context);
 }
 
 }  // namespace
@@ -105,7 +123,7 @@ void HighPrecisionDirtyNodeExecutor::execute(Node& node,
   } else if (hp_mono_fn) {
     NodeOutput result =
         (*hp_mono_fn)(node_for_exec, resolved_inputs.image_inputs);
-    if (!result.image_buffer.data && result.data.empty()) {
+    if (!has_image_payload(result.image_buffer) && result.data.empty()) {
       throw GraphError(GraphErrc::ComputeError,
                        "Monolithic HP operator produced no output for " +
                            node_for_exec.type + ":" + node_for_exec.subtype);
@@ -189,10 +207,11 @@ ImageBuffer& HighPrecisionDirtyNodeExecutor::ensure_hp_buffer(
   auto [channels, dtype] = infer_output_spec(
       staged_shape, image_inputs_ready, &node.cached_output_high_precision);
   ImageBuffer& hp_buffer = staged_output.image_buffer;
-  const bool needs_alloc = (hp_buffer.width != entry.hp_size.width) ||
-                           (hp_buffer.height != entry.hp_size.height) ||
-                           (hp_buffer.channels != channels) ||
-                           (hp_buffer.type != dtype) || (!hp_buffer.data);
+  const bool needs_alloc =
+      (hp_buffer.width != entry.hp_size.width) ||
+      (hp_buffer.height != entry.hp_size.height) ||
+      (hp_buffer.channels != channels) || (hp_buffer.type != dtype) ||
+      (hp_buffer.device != Device::CPU) || (!hp_buffer.data);
   if (needs_alloc) {
     hp_buffer = make_aligned_cpu_image_buffer(
         entry.hp_size.width, entry.hp_size.height, channels, dtype);
@@ -226,7 +245,7 @@ void HighPrecisionDirtyNodeExecutor::execute_monolithic(
     Node& node, const MonolithicOpFunc& mono_fn,
     const std::vector<const NodeOutput*>& image_inputs_ready) const {
   NodeOutput result = mono_fn(node, image_inputs_ready);
-  if (!result.image_buffer.data && result.data.empty()) {
+  if (!has_image_payload(result.image_buffer) && result.data.empty()) {
     throw GraphError(GraphErrc::ComputeError,
                      "Monolithic HP operator produced no output for " +
                          node.type + ":" + node.subtype);
@@ -266,6 +285,7 @@ RealTimeDirtyNodeExecutor::RealTimeDirtyNodeExecutor(
       events_(context.events),
       snapshot_(context.snapshot),
       dirty_generation_(context.dirty_generation),
+      stabilized_parameters_(context.stabilized_parameters),
       proxy_graph_(proxy_graph),
       rt_write_buffer_(rt_write_buffer),
       node_mutexes_(context.node_mutexes) {
@@ -298,11 +318,21 @@ void RealTimeDirtyNodeExecutor::execute(Node& node, const RtPlanEntry& entry) {
   if (std::holds_alternative<MonolithicOpFunc>(*op_variant)) {
     NodeOutput result = std::get<MonolithicOpFunc>(*op_variant)(
         node_for_exec, resolved_inputs.image_inputs);
+    if (!has_image_payload(result.image_buffer) && result.data.empty()) {
+      throw GraphError(GraphErrc::ComputeError,
+                       "Monolithic RT operator produced no output for " +
+                           node_for_exec.type + ":" + node_for_exec.subtype);
+    }
     std::lock_guard<std::mutex> lock(node_mutex(node.id));
-    ImageBuffer& rt_buffer =
-        ensure_rt_buffer(node, entry, resolved_inputs.image_inputs);
-    copy_monolithic_image_roi(result, entry, rt_buffer);
-    rt_write_buffer_.ensure_output(node.id).data = result.data;
+    if (result.image_buffer.device != Device::CPU &&
+        has_image_payload(result.image_buffer)) {
+      rt_write_buffer_.ensure_output(node.id) = std::move(result);
+    } else {
+      ImageBuffer& rt_buffer =
+          ensure_rt_buffer(node, entry, resolved_inputs.image_inputs);
+      copy_monolithic_image_roi(result, entry, rt_buffer);
+      rt_write_buffer_.ensure_output(node.id).data = std::move(result.data);
+    }
   } else {
     ImageBuffer* rt_buffer = nullptr;
     {
@@ -320,24 +350,33 @@ void RealTimeDirtyNodeExecutor::execute(Node& node, const RtPlanEntry& entry) {
 }
 
 ResolvedNodeInputs RealTimeDirtyNodeExecutor::resolve_inputs(Node& node) const {
-  return NodeInputResolver::resolve(
-      node,
+  const NodeInputResolver::OutputLookup image_lookup =
       [&](int upstream_id) -> const NodeOutput* {
-        if (const NodeOutput* staged =
-                rt_write_buffer_.find_output(upstream_id)) {
-          return staged;
-        }
-        if (const NodeOutput* proxy_output =
-                proxy_graph_.find_output(upstream_id)) {
-          return proxy_output;
-        }
-        const Node* upstream = graph_.find_node(upstream_id);
-        if (!upstream) {
-          return nullptr;
-        }
-        return ComputeCachePolicy::reusable_output(*upstream);
-      },
-      "RT update");
+    if (const NodeOutput* staged = rt_write_buffer_.find_output(upstream_id)) {
+      return staged;
+    }
+    if (const NodeOutput* proxy_output =
+            proxy_graph_.find_output(upstream_id)) {
+      return proxy_output;
+    }
+    const Node* upstream = graph_.find_node(upstream_id);
+    if (!upstream) {
+      return nullptr;
+    }
+    return ComputeCachePolicy::reusable_output(*upstream);
+  };
+  const NodeInputResolver::OutputLookup parameter_lookup =
+      [&](int upstream_id) -> const NodeOutput* {
+    if (stabilized_parameters_) {
+      if (const NodeOutput* stabilized =
+              stabilized_parameters_->find_parameter_output(upstream_id)) {
+        return stabilized;
+      }
+    }
+    return image_lookup(upstream_id);
+  };
+  return NodeInputResolver::resolve(node, image_lookup, parameter_lookup,
+                                    "RT update");
 }
 
 std::optional<OpRegistry::OpVariant>
@@ -358,10 +397,11 @@ ImageBuffer& RealTimeDirtyNodeExecutor::ensure_rt_buffer(
   auto [channels, dtype] = infer_staged_rt_output_spec(
       staged_output, image_inputs_ready, node.cached_output_high_precision);
   ImageBuffer& rt_buffer = staged_output.image_buffer;
-  const bool needs_alloc = (rt_buffer.width != entry.rt_size.width) ||
-                           (rt_buffer.height != entry.rt_size.height) ||
-                           (rt_buffer.channels != channels) ||
-                           (rt_buffer.type != dtype) || (!rt_buffer.data);
+  const bool needs_alloc =
+      (rt_buffer.width != entry.rt_size.width) ||
+      (rt_buffer.height != entry.rt_size.height) ||
+      (rt_buffer.channels != channels) || (rt_buffer.type != dtype) ||
+      (rt_buffer.device != Device::CPU) || (!rt_buffer.data);
   if (needs_alloc) {
     rt_buffer = make_aligned_cpu_image_buffer(
         entry.rt_size.width, entry.rt_size.height, channels, dtype);
@@ -416,8 +456,18 @@ void RealTimeDirtyNodeExecutor::execute_monolithic(
     const std::vector<const NodeOutput*>& image_inputs_ready,
     ImageBuffer& rt_buffer, const MonolithicOpFunc& mono_fn) const {
   NodeOutput result = mono_fn(node, image_inputs_ready);
+  if (!has_image_payload(result.image_buffer) && result.data.empty()) {
+    throw GraphError(GraphErrc::ComputeError,
+                     "Monolithic RT operator produced no output for " +
+                         node.type + ":" + node.subtype);
+  }
+  if (result.image_buffer.device != Device::CPU &&
+      has_image_payload(result.image_buffer)) {
+    rt_write_buffer_.ensure_output(node.id) = std::move(result);
+    return;
+  }
   copy_monolithic_image_roi(result, entry, rt_buffer);
-  rt_write_buffer_.ensure_output(node.id).data = result.data;
+  rt_write_buffer_.ensure_output(node.id).data = std::move(result.data);
 }
 
 void RealTimeDirtyNodeExecutor::copy_monolithic_image_roi(
@@ -425,6 +475,11 @@ void RealTimeDirtyNodeExecutor::copy_monolithic_image_roi(
     ImageBuffer& rt_buffer) const {
   if (result.image_buffer.width <= 0 || result.image_buffer.height <= 0) {
     return;
+  }
+  if (result.image_buffer.device != Device::CPU) {
+    throw GraphError(
+        GraphErrc::ComputeError,
+        "Opaque backend monolithic output must replace the full RT result");
   }
 
   if (rt_buffer.width != entry.rt_size.width ||

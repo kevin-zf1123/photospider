@@ -3,6 +3,7 @@
 #include <algorithm>
 #include <unordered_map>
 #include <utility>
+#include <variant>
 
 #include "compute/domain_op_metadata.hpp"
 #include "graph/graph_extent_resolver.hpp"
@@ -90,42 +91,65 @@ bool intersects_dirty_roi(const PlannedTask& task,
 }
 
 /**
- * @brief Encapsulates HP/RT implementation shape checks for graph-backed tasks.
+ * @brief Derives graph task shape from the operation selected for one domain.
  *
- * @note Current monolithic lookup still follows the existing HP monolithic
- * field for both domains because the operation registry has no separate RT
- * monolithic slot. Tiled lookup remains domain-specific.
+ * @throws std::bad_alloc when registry key or callback snapshot copying cannot
+ * allocate.
+ * @throws Any exception raised while copying a registered callback target.
+ * @note Shape selection delegates callback precedence to
+ * `OpRegistry::resolve_for_intent()` so a retained predecessor slot cannot
+ * override the callback that execution will actually use. A tiled callback may
+ * still fall back to one full-node task when output extent is unavailable.
  */
 class DomainTaskShapeStrategy {
  public:
-  /** @brief Binds task shape decisions to one compute domain. */
+  /**
+   * @brief Binds task-shape and metadata decisions to one compute domain.
+   *
+   * @param domain HP or RT domain being expanded.
+   * @throws Nothing.
+   * @note The domain is immutable for the lifetime of this strategy.
+   */
   explicit DomainTaskShapeStrategy(DirtyDomain domain) : domain_(domain) {}
 
-  /** @brief Returns true when node has a tiled implementation for the domain.
+  /**
+   * @brief Returns the task kind selected by the registry's execution policy.
+   *
+   * @param node Graph node whose operation callback is resolved.
+   * @return `Tile` for the selected tiled callback, `Monolithic` for the
+   * selected monolithic callback, or `Node` when no callback is available.
+   * @throws std::bad_alloc when key or callback snapshot copying cannot
+   * allocate.
+   * @throws Any exception raised while copying a registered callback target.
+   * @note The returned callback snapshot is destroyed after inspecting its
+   * variant, outside the registry lock. Plugin-backed snapshots retain their
+   * DSO lease for that complete lifetime.
    */
-  bool has_tiled_impl(const Node& node) const {
-    const auto impls =
-        OpRegistry::instance().get_implementations(node.type, node.subtype);
-    if (!impls) {
-      return false;
-    }
-    return domain_ == DirtyDomain::RealTime
-               ? static_cast<bool>(impls->tiled_rt)
-               : static_cast<bool>(impls->tiled_hp);
-  }
-
-  /** @brief Returns the task kind used for non-tiled graph-backed execution. */
-  PlannedTaskKind scalar_task_kind(const Node& node) const {
-    const auto impls =
-        OpRegistry::instance().get_implementations(node.type, node.subtype);
-    if (!impls) {
+  PlannedTaskKind selected_task_kind(const Node& node) const {
+    const ComputeIntent intent = domain_ == DirtyDomain::RealTime
+                                     ? ComputeIntent::RealTimeUpdate
+                                     : ComputeIntent::GlobalHighPrecision;
+    const auto selected = OpRegistry::instance().resolve_for_intent(
+        node.type, node.subtype, intent);
+    if (!selected) {
       return PlannedTaskKind::Node;
     }
-    return static_cast<bool>(impls->monolithic_hp) ? PlannedTaskKind::Monolithic
-                                                   : PlannedTaskKind::Node;
+    return std::holds_alternative<TileOpFunc>(*selected)
+               ? PlannedTaskKind::Tile
+               : PlannedTaskKind::Monolithic;
   }
 
-  /** @brief Returns current tile size preference for tiled graph expansion. */
+  /**
+   * @brief Resolves the tile size for the strategy's compute domain.
+   *
+   * @param node Graph node whose domain metadata is inspected.
+   * @return 16 for Micro, 256 for Macro, or the default 128 otherwise.
+   * @throws std::bad_alloc when registry key, metadata, or callback snapshot
+   * copying cannot allocate.
+   * @throws Any exception raised while copying a registered callback target.
+   * @note HP and RT metadata remain independent; callback selection determines
+   * whether this value is consumed at all.
+   */
   int tile_size_for_node(const Node& node) const {
     int tile_size = 128;
     auto meta = metadata_for_domain(node.type, node.subtype, domain_);
@@ -142,7 +166,10 @@ class DomainTaskShapeStrategy {
   }
 
  private:
-  /** @brief Domain whose implementation slots are used for task shape. */
+  /**
+   * @brief Immutable domain used for callback and metadata selection.
+   * @note The strategy borrows no registry state between method calls.
+   */
   DirtyDomain domain_;
 };
 
@@ -236,7 +263,25 @@ class GraphTaskPopulationStrategy {
   }
 
  private:
-  /** @brief Appends all task shapes for a single graph-backed work item. */
+  /**
+   * @brief Appends the selected operation's tasks for one graph work item.
+   *
+   * @param result Plan receiving tasks through `appender`.
+   * @param graph Graph containing the referenced node and output extent inputs.
+   * @param work Planned node work being materialized.
+   * @param domain HP or RT task domain.
+   * @param shape_strategy Domain-bound callback and metadata selector.
+   * @param extent_resolver Resolver used to derive full output dimensions.
+   * @param extent_cache Request-local extent memoization storage.
+   * @param appender Task sink that assigns ids and dirty metadata.
+   * @return Nothing.
+   * @throws std::bad_alloc when registry snapshots, extent storage, or task
+   * vectors allocate.
+   * @throws GraphError and callback-copy exceptions from extent or registry
+   * resolution.
+   * @note A selected tiled callback expands into tiles only with a positive
+   * extent. Otherwise one `Node` task preserves full-node tiled execution.
+   */
   void append_graph_tasks_for_work(
       ComputePlan& result, const GraphModel& graph, const PlannedNodeWork& work,
       DirtyDomain domain, const DomainTaskShapeStrategy& shape_strategy,
@@ -249,14 +294,18 @@ class GraphTaskPopulationStrategy {
         const_cast<GraphModel&>(graph), work.node_id, extent_cache);
     cv::Rect full_output(0, 0, std::max(0, extent.width),
                          std::max(0, extent.height));
-    if (shape_strategy.has_tiled_impl(node) && full_output.width > 0 &&
+    const PlannedTaskKind selected_kind =
+        shape_strategy.selected_task_kind(node);
+    if (selected_kind == PlannedTaskKind::Tile && full_output.width > 0 &&
         full_output.height > 0) {
       append_tiled_tasks(work, domain, full_output, shape_strategy, node,
                          appender);
       return;
     }
 
-    const PlannedTaskKind kind = shape_strategy.scalar_task_kind(node);
+    const PlannedTaskKind kind = selected_kind == PlannedTaskKind::Tile
+                                     ? PlannedTaskKind::Node
+                                     : selected_kind;
     const cv::Rect output_roi =
         full_output.width > 0 ? full_output : work.execution_roi;
     appender.add(make_task(work.node_id, kind, domain, output_roi, -1, -1, 0,

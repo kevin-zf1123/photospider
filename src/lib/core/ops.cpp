@@ -4,7 +4,9 @@
 #include <algorithm>
 #include <array>
 #include <cmath>
+#include <cstdint>
 #include <initializer_list>
+#include <limits>
 #include <mutex>
 #include <new>
 #include <numeric>
@@ -16,7 +18,7 @@
 #include <string>
 #include <vector>
 
-#include "adapter/buffer_adapter_opencv.hpp"
+#include "adapters/opencv/buffer_adapter_opencv.hpp"
 #include "core/param_utils.hpp"
 #include "graph/graph_model.hpp"  // NOLINT(build/include_subdir)
 
@@ -192,9 +194,60 @@ static cv::Size infer_input_size_hint(const Node& node,
   return cv::Size();
 }
 
+/**
+ * @brief Reads one exact public numeric parameter as a bounded host integer.
+ *
+ * @param parameters Effective request-local parameter snapshot.
+ * @param key Parameter name to inspect.
+ * @return Integral value when the Int64 or Double alternative is exactly
+ *         integral and fits `int`; otherwise nullopt.
+ * @throws Nothing; map lookup and alternative inspection do not allocate.
+ * @note Numeric alternatives are handled explicitly because public typed
+ *       accessors reject cross-alternative reads.
+ */
+static std::optional<int> parameter_map_int(
+    const plugin::ParameterMap& parameters, const char* key) noexcept {
+  const auto found = parameters.find(key);
+  if (found == parameters.end()) {
+    return std::nullopt;
+  }
+  std::int64_t value = 0;
+  if (found->second.is_int64()) {
+    value = found->second.as_int64();
+  } else if (found->second.is_double()) {
+    const double real = found->second.as_double();
+    if (!std::isfinite(real) || std::trunc(real) != real ||
+        real < static_cast<double>(std::numeric_limits<int>::min()) ||
+        real > static_cast<double>(std::numeric_limits<int>::max())) {
+      return std::nullopt;
+    }
+    value = static_cast<std::int64_t>(real);
+  } else {
+    return std::nullopt;
+  }
+  if (value < std::numeric_limits<int>::min() ||
+      value > std::numeric_limits<int>::max()) {
+    return std::nullopt;
+  }
+  return static_cast<int>(value);
+}
+
+/**
+ * @brief Derives the maximum declared radius from exact public parameters.
+ *
+ * @param parameters Effective request-local parameter snapshot.
+ * @param radius_keys Parameters already expressed as radii.
+ * @param size_keys Parameters expressed as kernel sizes.
+ * @param fallback Initial radius when no usable value exists.
+ * @return Non-negative maximum radius.
+ * @throws Nothing.
+ * @note Invalid alternatives are ignored consistently with built-in execution
+ *       defaults; size values use symmetric `(size - 1) / 2` geometry.
+ */
 static int infer_radius_from_params(
-    const Node& node, std::initializer_list<const char*> radius_keys,
-    std::initializer_list<const char*> size_keys, int fallback = 0) {
+    const plugin::ParameterMap& parameters,
+    std::initializer_list<const char*> radius_keys,
+    std::initializer_list<const char*> size_keys, int fallback = 0) noexcept {
   int radius = std::max(0, fallback);
   auto try_update = [&](std::optional<int> candidate) {
     if (candidate.has_value()) {
@@ -202,10 +255,10 @@ static int infer_radius_from_params(
     }
   };
   for (const char* key : radius_keys) {
-    try_update(node_param_int(node, key));
+    try_update(parameter_map_int(parameters, key));
   }
   for (const char* key : size_keys) {
-    auto val = node_param_int(node, key);
+    auto val = parameter_map_int(parameters, key);
     if (val.has_value()) {
       int computed = std::max(0, (*val - 1) / 2);
       radius = std::max(radius, computed);
@@ -214,23 +267,60 @@ static int infer_radius_from_params(
   return radius;
 }
 
+/**
+ * @brief Computes the exact request-local halo for built-in neighborhood ops.
+ *
+ * @param type Operation type.
+ * @param subtype Operation subtype.
+ * @param parameters Exact effective parameter snapshot used by execution.
+ * @return Non-negative HP-space halo, or zero for unrelated operations.
+ * @throws Nothing; invalid or unsupported alternatives use execution defaults.
+ * @note Gaussian even kernel sizes are promoted to the next odd size exactly
+ *       like the operation callback. Convolve retains its declared radius/size
+ *       compatibility policy until kernel-image geometry becomes explicit.
+ */
+int builtin_input_halo_radius(const std::string& type,
+                              const std::string& subtype,
+                              const plugin::ParameterMap& parameters) noexcept {
+  if (type != "image_process") {
+    return 0;
+  }
+  if (subtype == "gaussian_blur" || subtype == "gaussian_blur_tiled") {
+    int kernel_size = parameter_map_int(parameters, "ksize").value_or(3);
+    if (kernel_size <= 0) {
+      return 0;
+    }
+    if (kernel_size % 2 == 0) {
+      ++kernel_size;
+    }
+    return kernel_size / 2;
+  }
+  if (subtype == "convolve") {
+    return infer_radius_from_params(parameters, {"kernel_radius", "radius"},
+                                    {"ksize", "kernel_size"}, 1);
+  }
+  return 0;
+}
+
 static cv::Rect gaussian_blur_dirty_roi(const Node& node,
                                         const cv::Rect& downstream_roi,
-                                        const GraphModel&) {
-  int radius =
-      infer_radius_from_params(node, {"radius", "kernel_radius"}, {"ksize"});
-  if (radius <= 0)
-    radius = 1;
+                                        const GraphModel&, const cv::Size&,
+                                        const std::vector<cv::Size>&,
+                                        const plugin::ParameterMap& parameters,
+                                        const std::vector<const NodeOutput*>*) {
+  const int radius =
+      builtin_input_halo_radius(node.type, node.subtype, parameters);
   return expand_roi(downstream_roi, radius);
 }
 
 static cv::Rect convolve_dirty_roi(const Node& node,
                                    const cv::Rect& downstream_roi,
-                                   const GraphModel&) {
-  int radius = infer_radius_from_params(node, {"kernel_radius", "radius"},
-                                        {"ksize", "kernel_size"});
-  if (radius <= 0)
-    radius = 1;
+                                   const GraphModel&, const cv::Size&,
+                                   const std::vector<cv::Size>&,
+                                   const plugin::ParameterMap& parameters,
+                                   const std::vector<const NodeOutput*>*) {
+  const int radius =
+      builtin_input_halo_radius(node.type, node.subtype, parameters);
   return expand_roi(downstream_roi, radius);
 }
 
@@ -248,7 +338,10 @@ static int interpolation_padding(const Node& node) {
 
 static cv::Rect resize_dirty_roi(const Node& node,
                                  const cv::Rect& downstream_roi,
-                                 const GraphModel& graph) {
+                                 const GraphModel& graph, const cv::Size&,
+                                 const std::vector<cv::Size>&,
+                                 const plugin::ParameterMap&,
+                                 const std::vector<const NodeOutput*>*) {
   if (downstream_roi.width <= 0 || downstream_roi.height <= 0) {
     return cv::Rect();
   }
@@ -291,7 +384,10 @@ static cv::Rect resize_dirty_roi(const Node& node,
 }
 
 static cv::Rect crop_dirty_roi(const Node& node, const cv::Rect& downstream_roi,
-                               const GraphModel& graph) {
+                               const GraphModel& graph, const cv::Size&,
+                               const std::vector<cv::Size>&,
+                               const plugin::ParameterMap&,
+                               const std::vector<const NodeOutput*>*) {
   if (downstream_roi.width <= 0 || downstream_roi.height <= 0) {
     return cv::Rect();
   }
@@ -368,47 +464,40 @@ static cv::Rect crop_dirty_roi(const Node& node, const cv::Rect& downstream_roi,
   return upstream_roi;
 }
 
-static cv::Rect gaussian_blur_forward_roi(const Node& node,
-                                          const cv::Rect& upstream_roi,
-                                          const GraphModel& graph,
-                                          const cv::Size& parent_size,
-                                          const cv::Size&) {
+static cv::Rect gaussian_blur_forward_roi(
+    const Node& node, const cv::Rect& upstream_roi, const GraphModel& graph,
+    const cv::Size& parent_size, const cv::Size&, size_t,
+    const std::vector<cv::Size>&, const plugin::ParameterMap& parameters) {
   (void)graph;
   if (upstream_roi.width <= 0 || upstream_roi.height <= 0) {
     return cv::Rect();
   }
-  int radius =
-      infer_radius_from_params(node, {"radius", "kernel_radius"}, {"ksize"});
-  if (radius <= 0)
-    radius = 1;
+  const int radius =
+      builtin_input_halo_radius(node.type, node.subtype, parameters);
   return expand_roi(
       upstream_roi & cv::Rect(0, 0, parent_size.width, parent_size.height),
       radius);
 }
 
-static cv::Rect convolve_forward_roi(const Node& node,
-                                     const cv::Rect& upstream_roi,
-                                     const GraphModel& graph,
-                                     const cv::Size& parent_size,
-                                     const cv::Size&) {
+static cv::Rect convolve_forward_roi(
+    const Node& node, const cv::Rect& upstream_roi, const GraphModel& graph,
+    const cv::Size& parent_size, const cv::Size&, size_t,
+    const std::vector<cv::Size>&, const plugin::ParameterMap& parameters) {
   (void)graph;
   if (upstream_roi.width <= 0 || upstream_roi.height <= 0) {
     return cv::Rect();
   }
-  int radius = infer_radius_from_params(node, {"kernel_radius", "radius"},
-                                        {"ksize", "kernel_size"});
-  if (radius <= 0)
-    radius = 1;
+  const int radius =
+      builtin_input_halo_radius(node.type, node.subtype, parameters);
   return expand_roi(
       upstream_roi & cv::Rect(0, 0, parent_size.width, parent_size.height),
       radius);
 }
 
-static cv::Rect resize_forward_roi(const Node& node,
-                                   const cv::Rect& upstream_roi,
-                                   const GraphModel&,
-                                   const cv::Size& parent_size,
-                                   const cv::Size& child_size) {
+static cv::Rect resize_forward_roi(
+    const Node& node, const cv::Rect& upstream_roi, const GraphModel&,
+    const cv::Size& parent_size, const cv::Size& child_size, size_t,
+    const std::vector<cv::Size>&, const plugin::ParameterMap&) {
   if (upstream_roi.width <= 0 || upstream_roi.height <= 0) {
     return cv::Rect();
   }
@@ -443,7 +532,9 @@ static cv::Rect resize_forward_roi(const Node& node,
 
 static cv::Rect crop_forward_roi(const Node& node, const cv::Rect& upstream_roi,
                                  const GraphModel&, const cv::Size& parent_size,
-                                 const cv::Size&) {
+                                 const cv::Size&, size_t,
+                                 const std::vector<cv::Size>&,
+                                 const plugin::ParameterMap&) {
   if (upstream_roi.width <= 0 || upstream_roi.height <= 0) {
     return cv::Rect();
   }
@@ -487,12 +578,16 @@ static cv::Rect crop_forward_roi(const Node& node, const cv::Rect& upstream_roi,
 
 static cv::Rect identity_forward_roi(const Node&, const cv::Rect& upstream_roi,
                                      const GraphModel&, const cv::Size&,
-                                     const cv::Size&) {
+                                     const cv::Size&, size_t,
+                                     const std::vector<cv::Size>&,
+                                     const plugin::ParameterMap&) {
   return upstream_roi;
 }
 
 [[maybe_unused]] static cv::Rect conservative_dirty_roi(
-    const Node& node, const cv::Rect& downstream_roi, const GraphModel&) {
+    const Node& node, const cv::Rect& downstream_roi, const GraphModel&,
+    const cv::Size&, const std::vector<cv::Size>&, const plugin::ParameterMap&,
+    const std::vector<const NodeOutput*>*) {
   if (downstream_roi.width <= 0 || downstream_roi.height <= 0) {
     return cv::Rect();
   }
@@ -1614,8 +1709,10 @@ void register_builtin() {
   OpMetadata rt_meta;
   rt_meta.tile_preference = TileSizePreference::MICRO;
 
-  DirtyRoiPropFunc identity_roi = [](const Node&, const cv::Rect& roi,
-                                     const GraphModel&) { return roi; };
+  DirtyRoiPropFunc identity_roi =
+      [](const Node&, const cv::Rect& roi, const GraphModel&, const cv::Size&,
+         const std::vector<cv::Size>&, const plugin::ParameterMap&,
+         const std::vector<const NodeOutput*>*) { return roi; };
   ForwardRoiPropFunc identity_forward =
       ForwardRoiPropFunc(identity_forward_roi);
 

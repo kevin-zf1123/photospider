@@ -1,5 +1,7 @@
 #pragma once
 
+#include <algorithm>
+#include <cstdint>
 #include <opencv2/core.hpp>
 
 #include "compute/compute_geometry.hpp"
@@ -42,7 +44,9 @@ inline cv::Rect full_extent_roi(const cv::Size& size) {
  * conservative projection of HP-space dirty demand.
  */
 inline int scale_halo_to_rt(int halo_hp) {
-  return (halo_hp + kRtDownscaleFactor - 1) / kRtDownscaleFactor;
+  const std::int64_t bounded_halo = std::max(0, halo_hp);
+  return static_cast<int>((bounded_halo + kRtDownscaleFactor - 1) /
+                          kRtDownscaleFactor);
 }
 
 /**

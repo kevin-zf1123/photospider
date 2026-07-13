@@ -1,5 +1,4 @@
-// Photospider kernel: CpuWorkStealingScheduler implementation
-// M3.3: 将现有的 run_loop 和队列逻辑迁移至可插拔调度器
+// Photospider built-in CPU work-stealing scheduler implementation.
 
 #include "scheduler/cpu_work_stealing_scheduler.hpp"
 
@@ -8,20 +7,118 @@
 #include <deque>
 #include <exception>
 #include <iostream>
+#include <limits>
 #include <random>
 #include <sstream>
+#include <stdexcept>
 #include <string>
 #include <thread>
 #include <utility>
 #include <vector>
-
-#include "runtime/graph_runtime.hpp"
 
 #if defined(PHOTOSPIDER_INTERNAL_BAD_ALLOC_TESTING)
 #include "scheduler/scheduler_exception_test_hooks.hpp"
 #endif
 
 namespace ps {
+namespace {
+
+/**
+ * @brief Balances host task-context TLS around one worker callback.
+ *
+ * @throws Nothing. Construction and destruction only call noexcept host
+ *         callbacks.
+ * @note The context is borrowed until scheduler detach. Lifecycle ordering
+ *       guarantees that worker threads have joined before that pointer clears.
+ */
+class HostTaskContextScope final {
+ public:
+  /**
+   * @brief Publishes worker and epoch identity when attached.
+   * @param host Borrowed host context, or null while detached.
+   * @param worker_id Scheduler worker id.
+   * @param epoch Active task epoch.
+   * @throws Nothing.
+   * @note A null host leaves the scope inert while preserving balanced cleanup.
+   */
+  HostTaskContextScope(SchedulerHostContext* host, int worker_id,
+                       std::uint64_t epoch) noexcept
+      : host_(host) {
+    if (host_ != nullptr) {
+      host_->set_task_context(worker_id, epoch);
+    }
+  }
+
+  /**
+   * @brief Clears task identity on every callback exit path.
+   * @throws Nothing.
+   * @note The borrowed host remains alive until all workers join and detach
+   *       clears the scheduler-side pointer.
+   */
+  ~HostTaskContextScope() noexcept {
+    if (host_ != nullptr) {
+      host_->clear_task_context();
+    }
+  }
+
+  /**
+   * @brief Prevents copying one balanced host-context publication.
+   * @param other Source scope that must retain its clear responsibility.
+   * @throws Nothing because the operation is deleted.
+   * @note Each callback must own exactly one clear operation.
+   */
+  HostTaskContextScope(const HostTaskContextScope& other) = delete;
+
+  /**
+   * @brief Prevents assigning one balanced host-context publication.
+   * @param other Source scope that must retain its clear responsibility.
+   * @return No value because the operation is deleted.
+   * @throws Nothing because the operation is deleted.
+   * @note Assignment could otherwise lose the host that must be cleared.
+   */
+  HostTaskContextScope& operator=(const HostTaskContextScope& other) = delete;
+
+ private:
+  /** @brief Borrowed host context, or null. */
+  SchedulerHostContext* host_;
+};
+
+/**
+ * @brief Validates one initial CPU batch before queue or epoch publication.
+ * @param valid_item_count Number of nonempty callbacks or handles.
+ * @param total_task_count Caller-supplied logical completion count.
+ * @return Nothing.
+ * @throws std::invalid_argument if the count is negative or smaller than the
+ *         number of valid initial items.
+ * @note Rejection observes and mutates no scheduler state.
+ */
+void validate_initial_count(std::size_t valid_item_count,
+                            int total_task_count) {
+  if (total_task_count < 0) {
+    throw std::invalid_argument(
+        "CPU scheduler initial completion count must be nonnegative");
+  }
+  if (valid_item_count > static_cast<std::size_t>(total_task_count)) {
+    throw std::invalid_argument(
+        "CPU scheduler initial completion count is smaller than valid item "
+        "count");
+  }
+}
+
+/**
+ * @brief Advances a scheduler epoch while reserving zero for non-worker calls.
+ * @param current Last committed scheduler epoch.
+ * @return The next epoch, wrapping `UINT64_MAX` to one.
+ * @throws Nothing.
+ * @note Callers serialize publication with the scheduler's batch gate and
+ * completion-count mutex.
+ */
+std::uint64_t next_nonzero_epoch(std::uint64_t current) noexcept {
+  return current == std::numeric_limits<std::uint64_t>::max() ? 1U
+                                                              : current + 1U;
+}
+
+}  // namespace
 
 #if defined(PHOTOSPIDER_INTERNAL_BAD_ALLOC_TESTING)
 namespace {
@@ -184,6 +281,19 @@ SchedulerTransactionalStateSnapshot cpu_scheduler_transactional_snapshot(
   };
 }
 
+/** @copydoc set_cpu_scheduler_epoch_for_testing */
+void set_cpu_scheduler_epoch_for_testing(void* scheduler,
+                                         std::uint64_t epoch) noexcept {
+  auto* concrete = static_cast<CpuWorkStealingScheduler*>(scheduler);
+  if (!concrete) {
+    return;
+  }
+  std::lock_guard<std::mutex> queue_lock(concrete->global_queues_mutex_);
+  std::lock_guard<std::mutex> count_lock(concrete->completion_count_mutex_);
+  concrete->epoch_counter_.store(epoch, std::memory_order_release);
+  concrete->active_epoch_.store(epoch, std::memory_order_release);
+}
+
 /** @copydoc cpu_scheduler_exception_publication_snapshot */
 SchedulerExceptionPublicationSnapshot
 cpu_scheduler_exception_publication_snapshot(void* scheduler) noexcept {
@@ -222,17 +332,19 @@ CpuWorkStealingScheduler::CpuWorkStealingScheduler(unsigned int num_workers)
 
 /** @copydoc CpuWorkStealingScheduler::~CpuWorkStealingScheduler */
 CpuWorkStealingScheduler::~CpuWorkStealingScheduler() {
-  shutdown();
+  if (is_running()) {
+    shutdown();
+  }
 }
 
 /** @copydoc CpuWorkStealingScheduler::attach */
-void CpuWorkStealingScheduler::attach(GraphRuntime* runtime) {
-  runtime_ = runtime;
+void CpuWorkStealingScheduler::attach(SchedulerHostContext& host) {
+  host_context_ = &host;
 }
 
 /** @copydoc CpuWorkStealingScheduler::detach */
 void CpuWorkStealingScheduler::detach() {
-  runtime_ = nullptr;
+  host_context_ = nullptr;
 }
 
 /** @copydoc CpuWorkStealingScheduler::start */
@@ -410,50 +522,13 @@ bool CpuWorkStealingScheduler::is_running() const {
   return running_.load(std::memory_order_acquire);
 }
 
-/** @copydoc CpuWorkStealingScheduler::task_runtime_running */
-bool CpuWorkStealingScheduler::task_runtime_running() const {
-  return is_running();
-}
-
 /** @copydoc CpuWorkStealingScheduler::log_event */
 void CpuWorkStealingScheduler::log_event(SchedulerTraceAction action,
                                          int node_id) {
-  if (!runtime_) {
-    return;
+  if (host_context_ != nullptr) {
+    host_context_->log_event(action, node_id, this_worker_id(),
+                             this_task_epoch());
   }
-
-  GraphRuntime::SchedulerEvent::Action runtime_action =
-      GraphRuntime::SchedulerEvent::EXECUTE;
-  switch (action) {
-    case SchedulerTraceAction::AssignInitial:
-      runtime_action = GraphRuntime::SchedulerEvent::ASSIGN_INITIAL;
-      break;
-    case SchedulerTraceAction::Execute:
-      runtime_action = GraphRuntime::SchedulerEvent::EXECUTE;
-      break;
-    case SchedulerTraceAction::ExecuteTile:
-      runtime_action = GraphRuntime::SchedulerEvent::EXECUTE_TILE;
-      break;
-    case SchedulerTraceAction::ExecuteDirtySource:
-      runtime_action = GraphRuntime::SchedulerEvent::EXECUTE_DIRTY_SOURCE;
-      break;
-    case SchedulerTraceAction::ExecuteDirtyDownstreamNode:
-      runtime_action =
-          GraphRuntime::SchedulerEvent::EXECUTE_DIRTY_DOWNSTREAM_NODE;
-      break;
-    case SchedulerTraceAction::ExecuteDirtyDownstreamTile:
-      runtime_action =
-          GraphRuntime::SchedulerEvent::EXECUTE_DIRTY_DOWNSTREAM_TILE;
-      break;
-    case SchedulerTraceAction::SkipStaleGeneration:
-      runtime_action = GraphRuntime::SchedulerEvent::SKIP_STALE_GENERATION;
-      break;
-    case SchedulerTraceAction::RethrowException:
-      runtime_action = GraphRuntime::SchedulerEvent::RETHROW_EXCEPTION;
-      break;
-  }
-  runtime_->log_event(runtime_action, node_id, this_worker_id(),
-                      this_task_epoch());
 }
 
 /** @copydoc CpuWorkStealingScheduler::this_worker_id */
@@ -473,7 +548,10 @@ uint64_t CpuWorkStealingScheduler::active_epoch() const {
 
 /** @copydoc CpuWorkStealingScheduler::begin_new_epoch */
 uint64_t CpuWorkStealingScheduler::begin_new_epoch() {
-  uint64_t next = epoch_counter_.fetch_add(1, std::memory_order_acq_rel) + 1;
+  std::lock_guard<std::mutex> lock(completion_count_mutex_);
+  const uint64_t next =
+      next_nonzero_epoch(epoch_counter_.load(std::memory_order_acquire));
+  epoch_counter_.store(next, std::memory_order_release);
   active_epoch_.store(next, std::memory_order_release);
   return next;
 }
@@ -483,7 +561,7 @@ bool CpuWorkStealingScheduler::should_cancel_epoch(uint64_t epoch) const {
   if (epoch == 0) {
     return false;
   }
-  return epoch < active_epoch();
+  return epoch != active_epoch();
 }
 
 /** @copydoc CpuWorkStealingScheduler::steal_task */
@@ -611,12 +689,8 @@ void CpuWorkStealingScheduler::run_loop(int thread_id) {
             }
             ~EpochScope() { *slot = prev; }
           } epoch_scope(&tls_active_epoch_, scheduled.epoch);
-          struct RuntimeLogScope {
-            RuntimeLogScope(int worker_id, uint64_t epoch) {
-              GraphRuntime::set_scheduler_log_context(worker_id, epoch);
-            }
-            ~RuntimeLogScope() { GraphRuntime::clear_scheduler_log_context(); }
-          } runtime_log_scope(thread_id, scheduled.epoch);
+          HostTaskContextScope host_task_context(host_context_, thread_id,
+                                                 scheduled.epoch);
           scheduled.run();
         } else {
           set_exception(std::make_exception_ptr(std::runtime_error(
@@ -651,11 +725,22 @@ void CpuWorkStealingScheduler::run_loop(int thread_id) {
 void CpuWorkStealingScheduler::submit_initial_tasks(std::vector<Task>&& tasks,
                                                     int total_task_count,
                                                     TaskPriority priority) {
-  if (total_task_count == 0 || tasks.empty() || num_workers_ == 0) {
+  if (!is_running() || num_workers_ == 0U) {
+    throw std::logic_error("CPU scheduler is not running");
+  }
+  const std::size_t valid_task_count = static_cast<std::size_t>(
+      std::count_if(tasks.begin(), tasks.end(),
+                    [](const Task& task) { return static_cast<bool>(task); }));
+  validate_initial_count(valid_task_count, total_task_count);
+  if (valid_task_count == 0U) {
     {
       std::lock_guard<std::mutex> gate(global_queues_mutex_);
+      std::lock_guard<std::mutex> count_lock(completion_count_mutex_);
       reset_exception_state();
-      begin_new_epoch();
+      const uint64_t epoch =
+          next_nonzero_epoch(epoch_counter_.load(std::memory_order_acquire));
+      epoch_counter_.store(epoch, std::memory_order_release);
+      active_epoch_.store(epoch, std::memory_order_release);
       tasks_to_complete_.store(0, std::memory_order_release);
     }
     cv_task_available_.notify_all();
@@ -672,11 +757,16 @@ void CpuWorkStealingScheduler::submit_initial_tasks(std::vector<Task>&& tasks,
   if (priority == TaskPriority::High) {
     {
       std::lock_guard<std::mutex> lock(global_queues_mutex_);
-      epoch = epoch_counter_.load(std::memory_order_acquire) + 1;
+      std::lock_guard<std::mutex> count_lock(completion_count_mutex_);
+      epoch =
+          next_nonzero_epoch(epoch_counter_.load(std::memory_order_acquire));
       const std::size_t original_size = high_priority_queue_.size();
       [[maybe_unused]] std::size_t push_attempt = 0;
       try {
         for (auto& task : tasks) {
+          if (!task) {
+            continue;
+          }
 #if defined(PHOTOSPIDER_INTERNAL_BAD_ALLOC_TESTING)
           invoke_cpu_failure_hook(
               testing::SchedulerFailurePoint::BatchQueuePush, ++push_attempt);
@@ -711,7 +801,9 @@ void CpuWorkStealingScheduler::submit_initial_tasks(std::vector<Task>&& tasks,
         static_cast<std::size_t>(num_threads));
     {
       std::lock_guard<std::mutex> global_lock(global_queues_mutex_);
-      epoch = epoch_counter_.load(std::memory_order_acquire) + 1;
+      std::lock_guard<std::mutex> count_lock(completion_count_mutex_);
+      epoch =
+          next_nonzero_epoch(epoch_counter_.load(std::memory_order_acquire));
       for (int index = 0; index < num_threads; ++index) {
         std::lock_guard<std::mutex> local_lock(
             *local_queue_mutexes_[static_cast<std::size_t>(index)]);
@@ -721,6 +813,9 @@ void CpuWorkStealingScheduler::submit_initial_tasks(std::vector<Task>&& tasks,
       [[maybe_unused]] std::size_t push_attempt = 0;
       try {
         for (auto& task : tasks) {
+          if (!task) {
+            continue;
+          }
           const int target_thread =
               std::uniform_int_distribution<int>(0, num_threads - 1)(rng);
           std::lock_guard<std::mutex> local_lock(
@@ -770,11 +865,22 @@ void CpuWorkStealingScheduler::submit_initial_tasks(std::vector<Task>&& tasks,
 void CpuWorkStealingScheduler::submit_initial_task_handles(
     std::vector<TaskHandle>&& handles, int total_task_count,
     TaskPriority priority) {
-  if (total_task_count == 0 || handles.empty() || num_workers_ == 0) {
+  if (!is_running() || num_workers_ == 0U) {
+    throw std::logic_error("CPU scheduler is not running");
+  }
+  const std::size_t valid_handle_count = static_cast<std::size_t>(std::count_if(
+      handles.begin(), handles.end(),
+      [](const TaskHandle& handle) { return static_cast<bool>(handle); }));
+  validate_initial_count(valid_handle_count, total_task_count);
+  if (valid_handle_count == 0U) {
     {
       std::lock_guard<std::mutex> gate(global_queues_mutex_);
+      std::lock_guard<std::mutex> count_lock(completion_count_mutex_);
       reset_exception_state();
-      begin_new_epoch();
+      const uint64_t epoch =
+          next_nonzero_epoch(epoch_counter_.load(std::memory_order_acquire));
+      epoch_counter_.store(epoch, std::memory_order_release);
+      active_epoch_.store(epoch, std::memory_order_release);
       tasks_to_complete_.store(0, std::memory_order_release);
     }
     cv_task_available_.notify_all();
@@ -790,7 +896,9 @@ void CpuWorkStealingScheduler::submit_initial_task_handles(
   if (priority == TaskPriority::High) {
     {
       std::lock_guard<std::mutex> lock(global_queues_mutex_);
-      epoch = epoch_counter_.load(std::memory_order_acquire) + 1;
+      std::lock_guard<std::mutex> count_lock(completion_count_mutex_);
+      epoch =
+          next_nonzero_epoch(epoch_counter_.load(std::memory_order_acquire));
       const std::size_t original_size = high_priority_queue_.size();
       [[maybe_unused]] std::size_t push_attempt = 0;
       try {
@@ -834,7 +942,8 @@ void CpuWorkStealingScheduler::submit_initial_task_handles(
       static_cast<std::size_t>(num_threads));
   {
     std::lock_guard<std::mutex> global_lock(global_queues_mutex_);
-    epoch = epoch_counter_.load(std::memory_order_acquire) + 1;
+    std::lock_guard<std::mutex> count_lock(completion_count_mutex_);
+    epoch = next_nonzero_epoch(epoch_counter_.load(std::memory_order_acquire));
     for (int index = 0; index < num_threads; ++index) {
       std::lock_guard<std::mutex> local_lock(
           *local_queue_mutexes_[static_cast<std::size_t>(index)]);
@@ -1151,11 +1260,21 @@ void CpuWorkStealingScheduler::submit_ready_task_handles_from_worker(
 
 /** @copydoc CpuWorkStealingScheduler::dec_tasks_to_complete */
 void CpuWorkStealingScheduler::dec_tasks_to_complete() {
-  uint64_t epoch = tls_active_epoch_;
-  if (epoch != 0 && epoch != active_epoch()) {
-    return;
+  bool reached_zero = false;
+  {
+    std::lock_guard<std::mutex> count_lock(completion_count_mutex_);
+    const uint64_t epoch = tls_active_epoch_;
+    if (epoch != 0 && epoch != active_epoch()) {
+      return;
+    }
+    const int current = tasks_to_complete_.load(std::memory_order_acquire);
+    if (current <= 0) {
+      return;
+    }
+    tasks_to_complete_.store(current - 1, std::memory_order_release);
+    reached_zero = current == 1;
   }
-  if (tasks_to_complete_.fetch_sub(1, std::memory_order_acq_rel) == 1) {
+  if (reached_zero) {
     std::lock_guard<std::mutex> lk(completion_mutex_);
     cv_completion_.notify_one();
   }
@@ -1166,11 +1285,16 @@ void CpuWorkStealingScheduler::inc_tasks_to_complete(int delta) {
   if (delta <= 0) {
     return;
   }
-  uint64_t epoch = tls_active_epoch_;
+  std::lock_guard<std::mutex> count_lock(completion_count_mutex_);
+  const uint64_t epoch = tls_active_epoch_;
   if (epoch != 0 && epoch != active_epoch()) {
     return;
   }
-  tasks_to_complete_.fetch_add(delta, std::memory_order_relaxed);
+  const int current = tasks_to_complete_.load(std::memory_order_acquire);
+  if (current > std::numeric_limits<int>::max() - delta) {
+    throw std::overflow_error("CPU scheduler completion counter overflow");
+  }
+  tasks_to_complete_.store(current + delta, std::memory_order_release);
 }
 
 /** @copydoc CpuWorkStealingScheduler::finish_in_flight_task */
@@ -1238,7 +1362,12 @@ void CpuWorkStealingScheduler::wait_for_completion() {
     }
   }
   if (e) {
-    tasks_to_complete_.store(0, std::memory_order_release);
+    {
+      std::lock_guard<std::mutex> count_lock(completion_count_mutex_);
+      if (active_epoch() == wait_epoch) {
+        tasks_to_complete_.store(0, std::memory_order_release);
+      }
+    }
     cv_task_available_.notify_all();
     std::rethrow_exception(e);
   }
@@ -1250,7 +1379,8 @@ void CpuWorkStealingScheduler::wait_for_completion() {
  * @param e Non-null exception captured at a worker boundary.
  * @return Nothing.
  * @throws Nothing under valid mutex state.
- * @note `global_queues_mutex_` is the transaction gate shared with every
+ * @note Null input returns before any state mutation. For non-null input,
+ * `global_queues_mutex_` is the transaction gate shared with every
  * global/local queue commit. The publisher acquires it before choosing the
  * batch epoch and claiming the exception, so a concurrent initial batch is
  * observed either wholly before or wholly after publication. The pointer and
@@ -1259,6 +1389,9 @@ void CpuWorkStealingScheduler::wait_for_completion() {
  * Cleanup is marked complete before `has_exception_` is release-published.
  */
 void CpuWorkStealingScheduler::set_exception(std::exception_ptr e) {
+  if (e == nullptr) {
+    return;
+  }
   {
     std::lock_guard<std::mutex> global_lock(global_queues_mutex_);
     const uint64_t publisher_epoch =

@@ -1,5 +1,6 @@
 #pragma once
 
+#include <cstdint>
 #include <stdexcept>
 #include <string>
 
@@ -28,48 +29,52 @@ namespace ps {
  * @note Preserve numeric meaning when adding values because downstream
  *       frontends may serialize the enum.
  */
-enum class GraphErrc {
+enum class GraphErrc : std::uint32_t {
   /** @brief Failure did not map to a more specific category. */
-  Unknown = 1,
+  Unknown = 1U,
 
   /** @brief Requested graph, node, file, plugin, or resource was not found. */
-  NotFound,
+  NotFound = 2U,
 
   /** @brief Graph topology contains a cycle where an acyclic graph is needed.
    */
-  Cycle,
+  Cycle = 3U,
 
   /** @brief Filesystem, cache, or external IO operation failed. */
-  Io,
+  Io = 4U,
 
   /** @brief YAML text or node structure is invalid for the requested action. */
-  InvalidYaml,
+  InvalidYaml = 5U,
 
   /** @brief A graph dependency is missing or cannot be resolved. */
-  MissingDependency,
+  MissingDependency = 6U,
 
   /** @brief No operation implementation is registered for a node. */
-  NoOperation,
+  NoOperation = 7U,
 
   /** @brief A request parameter or node parameter is invalid. */
-  InvalidParameter,
+  InvalidParameter = 8U,
 
   /** @brief Compute planning, dispatch, or execution failed. */
-  ComputeError,
+  ComputeError = 9U,
 };
 
 /**
  * @brief Exception carrying a stable graph error code.
  *
- * GraphError is used at internal service boundaries and can also cross the
- * public backend ABI where exception transport is acceptable. The object owns
- * its diagnostic message through `std::runtime_error` and stores only a small
- * stable code in addition to that message.
+ * GraphError is used at internal service boundaries and may cross a controlled
+ * scheduler call when it is an already host-owned task failure. A
+ * DSO-origin `GraphError` never escapes an unloadable plugin object: the host
+ * copies its code and message into a new host-owned `GraphError` while the
+ * plugin library lease is still live. The object owns its diagnostic message
+ * through `std::runtime_error` and stores only a small stable code in addition
+ * to that message.
  *
  * @throws std::bad_alloc if copying the diagnostic message into the exception
  *         object allocates and the allocation fails.
  * @note Frontend-facing APIs may convert this exception into `OperationStatus`
- *       or another non-throwing result value.
+ *       or another non-throwing result value. Plugin authors must not depend on
+ *       exception object identity surviving a host ABI boundary.
  */
 struct PHOTOSPIDER_API GraphError : public std::runtime_error {
   /**

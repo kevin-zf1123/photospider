@@ -2,7 +2,9 @@
 
 #include <memory>
 #include <mutex>
+#include <queue>
 #include <unordered_map>
+#include <unordered_set>
 #include <utility>
 #include <vector>
 
@@ -14,6 +16,8 @@
 #include "compute/dirty_sibling_commit_gate.hpp"
 #include "compute/dirty_write_buffers.hpp"
 #include "compute/downsample_executor.hpp"
+#include "compute/node_executor.hpp"
+#include "compute/node_input_resolver.hpp"
 #include "compute/realtime_proxy_graph.hpp"
 #include "graph/graph_extent_resolver.hpp"
 #include "graph/graph_traversal_service.hpp"
@@ -121,6 +125,67 @@ DirtyNodeMutexMap make_dirty_node_mutexes(const ComputePlan& compute_plan) {
   }
   return mutexes;
 }
+
+/**
+ * @brief Exposes one connected-parameter preflight callback as a scheduler
+ * task handle.
+ *
+ * @tparam RunTask Request-local callback type.
+ * @throws Nothing during construction; run_task() documents invocation and
+ * scheduler-publication exceptions.
+ * @note The executor borrows its callback and scheduler runtime. It must remain
+ * alive until the matching wait_for_completion() call returns or throws.
+ */
+template <typename RunTask>
+class PreflightTaskExecutor final : public TaskExecutor {
+ public:
+  /**
+   * @brief Binds one preflight callback to its scheduler completion contract.
+   * @param run_task Callback that computes and stages one producer node.
+   * @param task_runtime Runtime receiving trace and completion publication.
+   * @param node_id Graph node id used in scheduler trace events.
+   * @throws Nothing.
+   */
+  PreflightTaskExecutor(RunTask& run_task, SchedulerTaskRuntime& task_runtime,
+                        int node_id)
+      : run_task_(run_task), task_runtime_(task_runtime), node_id_(node_id) {}
+
+  /**
+   * @brief Executes the sole preflight task and settles scheduler accounting.
+   * @param task_id Must be zero for this single-task executor.
+   * @return Nothing.
+   * @throws GraphError when task_id is invalid.
+   * @throws The exact callback, trace, or completion-publication exception.
+   * @note Rethrow tracing is best-effort so a hostile scheduler log hook cannot
+   * replace the authoritative task exception or prevent batch completion.
+   */
+  void run_task(int task_id) override {
+    if (task_id != 0) {
+      throw GraphError(GraphErrc::ComputeError,
+                       "Connected-parameter preflight task id is invalid");
+    }
+    try {
+      task_runtime_.log_event(SchedulerTraceAction::Execute, node_id_);
+      run_task_();
+      task_runtime_.dec_tasks_to_complete();
+    } catch (...) {
+      try {
+        task_runtime_.log_event(SchedulerTraceAction::RethrowException,
+                                node_id_);
+      } catch (...) {
+      }
+      throw;
+    }
+  }
+
+ private:
+  /** @brief Borrowed request-local preflight callback. */
+  RunTask& run_task_;
+  /** @brief Borrowed scheduler runtime for the active initial batch. */
+  SchedulerTaskRuntime& task_runtime_;
+  /** @brief Node id reported in scheduler trace events. */
+  int node_id_ = -1;
+};
 
 /**
  * @brief Validates HP dirty source boundaries against staged and graph output.
@@ -242,7 +307,315 @@ cv::Rect hp_planning_roi_for_request(const GraphModel& graph,
   return cv::Rect(0, 0, target_extent.width, target_extent.height);
 }
 
+/**
+ * @brief Reports whether an output carries an executable image payload.
+ * @param output Output produced by a parameter stabilization operation.
+ * @return True when positive image dimensions and storage ownership coexist.
+ * @throws Nothing.
+ * @note Metadata-only dimensions are treated as image-carrying conservatively
+ * when either data or context retains the payload.
+ */
+bool has_image_payload(const NodeOutput& output) noexcept {
+  const ImageBuffer& image = output.image_buffer;
+  return image.width > 0 && image.height > 0 &&
+         (image.data != nullptr || image.context != nullptr);
+}
+
+/**
+ * @brief Builds exact execution-local YAML parameters from a stabilized map.
+ * @param node Node whose static parameters and bindings are merged.
+ * @param graph Live graph supplying unaffected committed parameter outputs.
+ * @param stabilized Immutable preflight parameter producer outputs.
+ * @return Deep-owned effective YAML parameter map.
+ * @throws GraphError when a producer or named data output is unavailable.
+ * @throws YAML::Exception or std::bad_alloc from cloning/assignment.
+ * @note Image payload selection is deliberately absent from this helper.
+ */
+YAML::Node stabilized_runtime_parameters(
+    const Node& node, const GraphModel& graph,
+    const StabilizedDirtyParameters& stabilized) {
+  YAML::Node effective = node.parameters ? YAML::Clone(node.parameters)
+                                         : YAML::Node(YAML::NodeType::Map);
+  for (const ParameterInput& input : node.parameter_inputs) {
+    if (input.from_node_id < 0) {
+      continue;
+    }
+    const NodeOutput* output =
+        stabilized.find_parameter_output(input.from_node_id);
+    if (!output) {
+      const Node* producer = graph.find_node(input.from_node_id);
+      output =
+          producer ? ComputeCachePolicy::reusable_output(*producer) : nullptr;
+    }
+    if (!output) {
+      throw GraphError(GraphErrc::MissingDependency,
+                       "Stabilized parameter input not ready for node " +
+                           std::to_string(node.id));
+    }
+    const auto value = output->data.find(input.from_output_name);
+    if (value == output->data.end()) {
+      throw GraphError(GraphErrc::MissingDependency,
+                       "Node " + std::to_string(input.from_node_id) +
+                           " did not produce output '" +
+                           input.from_output_name + "'");
+    }
+    effective[input.to_parameter_name] = YAML::Clone(value->second);
+  }
+  return effective;
+}
+
+/**
+ * @brief Clones live topology into a request-local stabilized planning graph.
+ *
+ * @param graph Live graph supplying topology and unaffected cache snapshots.
+ * @param stabilized Immutable parameter stabilization result.
+ * @param hp_domain Whether all preflight closure outputs should become shadow
+ * HP cache; RT injects only direct parameter producer values.
+ * @return Independent graph used only for extent/task/dirty planning.
+ * @throws GraphError or std::bad_alloc from node cloning and graph validation.
+ * @note Geometry-affected caches are cleared before stabilized outputs are
+ * installed. The shadow has its own FullTaskGraph cache and therefore cannot
+ * reuse a stale live-graph task expansion.
+ */
+std::unique_ptr<GraphModel> make_stabilized_planning_graph(
+    const GraphModel& graph, const StabilizedDirtyParameters& stabilized,
+    bool hp_domain) {
+  GraphModel::NodeMap nodes;
+  nodes.reserve(graph.node_count());
+  for (int node_id : graph.node_ids()) {
+    Node node = graph.node(node_id);
+    if (stabilized.geometry_affected(node_id)) {
+      node.cached_output_high_precision.reset();
+      node.hp_roi.reset();
+      node.runtime_parameters =
+          stabilized_runtime_parameters(node, graph, stabilized);
+    }
+    nodes.emplace(node_id, std::move(node));
+  }
+
+  for (const auto& [node_id, staged] : stabilized.staged_outputs()) {
+    if (!hp_domain &&
+        !stabilized.parameter_producer_node_ids().count(node_id)) {
+      continue;
+    }
+    auto node_it = nodes.find(node_id);
+    if (node_it == nodes.end()) {
+      throw GraphError(GraphErrc::NotFound, "Stabilized planning node " +
+                                                std::to_string(node_id) +
+                                                " is missing.");
+    }
+    node_it->second.cached_output_high_precision = staged.output;
+    node_it->second.hp_version = staged.hp_version;
+    node_it->second.hp_roi = staged.hp_roi;
+  }
+
+  auto planning_graph = std::make_unique<GraphModel>(graph.cache_root);
+  planning_graph->replace_nodes(std::move(nodes));
+  planning_graph->dirty_generation_counter = graph.dirty_generation_counter;
+  return planning_graph;
+}
+
 }  // namespace
+
+const NodeOutput* StabilizedDirtyParameters::find_staged_output(
+    int node_id) const noexcept {
+  const auto found = staged_outputs_.find(node_id);
+  return found == staged_outputs_.end() ? nullptr : &found->second.output;
+}
+
+const NodeOutput* StabilizedDirtyParameters::find_parameter_output(
+    int node_id) const noexcept {
+  if (!parameter_producer_node_ids_.count(node_id)) {
+    return nullptr;
+  }
+  return find_staged_output(node_id);
+}
+
+bool StabilizedDirtyParameters::geometry_affected(int node_id) const noexcept {
+  return geometry_affected_node_ids_.count(node_id) != 0;
+}
+
+/** @copydoc stabilize_connected_dirty_parameters */
+std::shared_ptr<const StabilizedDirtyParameters>
+stabilize_connected_dirty_parameters(GraphModel& graph,
+                                     GraphTraversalService& traversal,
+                                     int target_node_id,
+                                     uint64_t request_generation,
+                                     uint64_t topology_generation,
+                                     SchedulerTaskRuntime* task_runtime) {
+  if (request_generation == 0) {
+    throw GraphError(GraphErrc::InvalidParameter,
+                     "Connected-parameter stabilization requires a non-zero "
+                     "request generation.");
+  }
+  const std::vector<int> execution_order =
+      traversal.topo_postorder_from(graph, target_node_id);
+  std::unordered_set<int> target_cone(execution_order.begin(),
+                                      execution_order.end());
+  auto result = std::make_shared<StabilizedDirtyParameters>();
+  result->request_generation_ = request_generation;
+  result->topology_generation_ = topology_generation;
+  std::unordered_set<int> parameter_consumers;
+  for (int node_id : execution_order) {
+    const Node& node = graph.node(node_id);
+    for (const ParameterInput& input : node.parameter_inputs) {
+      if (input.from_node_id < 0) {
+        continue;
+      }
+      if (!graph.has_node(input.from_node_id)) {
+        throw GraphError(GraphErrc::MissingDependency,
+                         "Parameter producer " +
+                             std::to_string(input.from_node_id) +
+                             " is missing for node " + std::to_string(node_id));
+      }
+      result->parameter_producer_node_ids_.insert(input.from_node_id);
+      parameter_consumers.insert(node_id);
+    }
+  }
+  if (result->parameter_producer_node_ids_.empty()) {
+    return result;
+  }
+
+  const std::vector<Device> available_devices =
+      task_runtime ? task_runtime->available_devices()
+                   : std::vector<Device>{Device::CPU};
+
+  std::vector<int> closure_stack(result->parameter_producer_node_ids_.begin(),
+                                 result->parameter_producer_node_ids_.end());
+  result->staged_node_ids_ = result->parameter_producer_node_ids_;
+  while (!closure_stack.empty()) {
+    const int node_id = closure_stack.back();
+    closure_stack.pop_back();
+    for (const GraphTopologyEdge& edge : graph.upstream_edges(node_id)) {
+      if (edge.from_node_id < 0 || !graph.has_node(edge.from_node_id)) {
+        continue;
+      }
+      if (result->staged_node_ids_.insert(edge.from_node_id).second) {
+        closure_stack.push_back(edge.from_node_id);
+      }
+    }
+  }
+  for (int node_id : result->staged_node_ids_) {
+    bool has_staged_parent = false;
+    for (const GraphTopologyEdge& edge : graph.upstream_edges(node_id)) {
+      if (result->staged_node_ids_.count(edge.from_node_id)) {
+        has_staged_parent = true;
+        break;
+      }
+    }
+    if (!has_staged_parent) {
+      result->staged_source_node_ids_.insert(node_id);
+    }
+  }
+
+  result->geometry_affected_node_ids_ = parameter_consumers;
+  std::queue<int> affected_queue;
+  for (int node_id : parameter_consumers) {
+    affected_queue.push(node_id);
+  }
+  while (!affected_queue.empty()) {
+    const int node_id = affected_queue.front();
+    affected_queue.pop();
+    for (const GraphTopologyEdge& edge : graph.downstream_edges(node_id)) {
+      if (edge.kind != GraphTopologyEdgeKind::ImageInput ||
+          !target_cone.count(edge.to_node_id)) {
+        continue;
+      }
+      if (result->geometry_affected_node_ids_.insert(edge.to_node_id).second) {
+        affected_queue.push(edge.to_node_id);
+      }
+    }
+  }
+
+  for (int node_id : execution_order) {
+    if (!result->staged_node_ids_.count(node_id)) {
+      continue;
+    }
+    auto execute_preflight_node = [&graph, &result, &available_devices,
+                                   node_id]() {
+      Node node_for_exec = graph.node(node_id);
+      const NodeInputResolver::OutputLookup lookup =
+          [&](int upstream_id) -> const NodeOutput* {
+        if (const NodeOutput* staged =
+                result->find_staged_output(upstream_id)) {
+          return staged;
+        }
+        if (result->staged_node_ids_.count(upstream_id)) {
+          return nullptr;
+        }
+        const Node* upstream = graph.find_node(upstream_id);
+        return upstream ? ComputeCachePolicy::reusable_output(*upstream)
+                        : nullptr;
+      };
+      const ResolvedNodeInputs resolved = NodeInputResolver::resolve(
+          node_for_exec, lookup, "Connected-parameter stabilization");
+      std::optional<OpRegistry::OpVariant> operation;
+      const auto device_implementation =
+          OpRegistry::instance().select_best_implementation(
+              node_for_exec.type, node_for_exec.subtype, available_devices,
+              ComputeIntent::GlobalHighPrecision);
+      if (device_implementation) {
+        operation = device_implementation->func;
+      } else {
+        const auto implementations = OpRegistry::instance().get_implementations(
+            node_for_exec.type, node_for_exec.subtype);
+        if (implementations && implementations->tiled_hp) {
+          operation.emplace(*implementations->tiled_hp);
+        } else if (implementations && implementations->monolithic_hp) {
+          operation.emplace(*implementations->monolithic_hp);
+        }
+      }
+      if (!operation) {
+        throw GraphError(GraphErrc::NoOperation,
+                         "No HP operation for connected-parameter preflight " +
+                             node_for_exec.type + ":" + node_for_exec.subtype);
+      }
+      NodeOutput output = NodeExecutor::execute(
+          graph, node_for_exec, *operation, resolved.image_inputs);
+      if (!has_image_payload(output) && output.data.empty()) {
+        throw GraphError(
+            GraphErrc::ComputeError,
+            "Connected-parameter preflight produced no output for " +
+                node_for_exec.type + ":" + node_for_exec.subtype);
+      }
+      std::optional<cv::Rect> hp_roi;
+      if (has_image_payload(output)) {
+        hp_roi = cv::Rect(0, 0, output.image_buffer.width,
+                          output.image_buffer.height);
+      }
+      result->staged_outputs_.emplace(
+          node_id,
+          StabilizedDirtyNodeOutput{
+              std::move(output), graph.node(node_id).hp_version + 1, hp_roi});
+    };
+    if (task_runtime) {
+      PreflightTaskExecutor<decltype(execute_preflight_node)> executor(
+          execute_preflight_node, *task_runtime, node_id);
+      std::vector<TaskHandle> handles{TaskHandle{&executor, 0, node_id}};
+      task_runtime->submit_initial_task_handles(std::move(handles), 1,
+                                                SchedulerTaskPriority::High);
+      task_runtime->wait_for_completion();
+    } else {
+      execute_preflight_node();
+    }
+  }
+
+  for (int producer_id : result->parameter_producer_node_ids_) {
+    const NodeOutput* output = result->find_staged_output(producer_id);
+    if (!output) {
+      throw GraphError(GraphErrc::MissingDependency,
+                       "Connected parameter producer " +
+                           std::to_string(producer_id) +
+                           " was not stabilized.");
+    }
+    if (has_image_payload(*output)) {
+      result->rt_required_parameter_node_ids_.insert(producer_id);
+    } else {
+      result->rt_satisfied_parameter_node_ids_.insert(producer_id);
+    }
+  }
+  return result;
+}
 
 /**
  * @brief Constructs the HP dirty executor from borrowed support services.
@@ -317,36 +690,79 @@ NodeOutput& HighPrecisionDirtyExecutor::execute(
     const DirtyUpdateRequest& request) {
   std::unique_lock<std::mutex> graph_lock(graph.graph_mutex_);
 
+  if (request.stabilized_parameters &&
+      request.stabilized_parameters->topology_generation() !=
+          graph.topology_generation()) {
+    throw GraphError(GraphErrc::ComputeError,
+                     "Graph topology changed after dirty preflight.");
+  }
+
   if (request.force_recache) {
     graph.clear_full_task_graph_cache();
   }
   proxy_graph.synchronize_with_graph(graph);
 
+  std::unique_ptr<GraphModel> planning_graph_owner;
+  GraphModel* planning_graph = &graph;
+  const std::unordered_set<int>* stabilized_geometry_nodes = nullptr;
+  const std::unordered_set<int>* externally_satisfied_nodes = nullptr;
+  if (request.stabilized_parameters &&
+      request.stabilized_parameters->has_connected_parameters()) {
+    planning_graph_owner = make_stabilized_planning_graph(
+        graph, *request.stabilized_parameters, true);
+    planning_graph = planning_graph_owner.get();
+    stabilized_geometry_nodes =
+        &request.stabilized_parameters->geometry_affected_node_ids();
+    externally_satisfied_nodes =
+        &request.stabilized_parameters->staged_node_ids();
+  }
+
   RoiPropagationService roi_propagation;
-  DirtyRegionPlanner dirty_planner(traversal_, roi_propagation);
-  const cv::Rect planning_roi = hp_planning_roi_for_request(graph, request);
+  DirtyRegionPlanner dirty_planner(
+      traversal_, roi_propagation, stabilized_geometry_nodes, nullptr,
+      request.stabilized_parameters
+          ? std::optional<uint64_t>(
+                request.stabilized_parameters->request_generation())
+          : std::nullopt);
+  const cv::Rect planning_roi =
+      hp_planning_roi_for_request(*planning_graph, request);
+  HighPrecisionDirtyPlan dirty_plan = dirty_planner.plan_high_precision(
+      *planning_graph, request.node_id, planning_roi);
   auto prepared = prepare_dirty_execution(
-      graph,
-      dirty_planner.plan_high_precision(graph, request.node_id, planning_roi),
+      *planning_graph, std::move(dirty_plan),
       ComputeRequest{ComputeIntent::GlobalHighPrecision, request.node_id, false,
-                     planning_roi});
-  HighPrecisionDirtyPlan& dirty_plan = prepared.dirty_plan;
+                     planning_roi},
+      planning_graph != &graph ? &graph : nullptr, externally_satisfied_nodes);
+  HighPrecisionDirtyPlan& prepared_dirty_plan = prepared.dirty_plan;
   graph_lock.unlock();
 
   HighPrecisionDirtyWriteBuffer hp_write_buffer(!request.force_recache);
+  if (request.stabilized_parameters) {
+    for (const auto& [node_id, staged] :
+         request.stabilized_parameters->staged_outputs()) {
+      hp_write_buffer.import_precomputed_output(
+          graph.node(node_id), staged.output, staged.hp_version, staged.hp_roi,
+          request.stabilized_parameters->is_staged_source(node_id)
+              ? std::optional<uint64_t>(
+                    request.stabilized_parameters->request_generation())
+              : std::nullopt);
+    }
+  }
   DirtyNodeMutexMap node_mutexes =
       make_dirty_node_mutexes(prepared.compute_plan);
-  DirtyNodeExecutionContext node_context{graph,
-                                         runtime,
-                                         events_,
-                                         dirty_plan.snapshot,
-                                         dirty_plan.snapshot.graph_generation,
-                                         node_mutexes};
+  DirtyNodeExecutionContext node_context{
+      graph,
+      runtime,
+      events_,
+      prepared_dirty_plan.snapshot,
+      prepared_dirty_plan.snapshot.graph_generation,
+      node_mutexes,
+      request.stabilized_parameters.get()};
   HighPrecisionDirtyNodeExecutor node_executor(node_context, hp_write_buffer);
 
   auto run_hp_task = [&](int task_id) {
     run_planned_dirty_task(
-        runtime, dirty_plan.entries, prepared.compute_plan, task_id,
+        runtime, prepared_dirty_plan.entries, prepared.compute_plan, task_id,
         [&](int node_id, HpPlanEntry& entry, const PlannedTask& task) {
           Node& node = graph.mutable_node(node_id);
           HpPlanEntry task_entry = entry_for_task(entry, task);
@@ -355,21 +771,28 @@ NodeOutput& HighPrecisionDirtyExecutor::execute(
   };
   auto validate_hp_source_boundaries = [&]() {
     std::lock_guard<std::mutex> lock(graph.graph_mutex_);
-    validate_hp_source_boundaries_ready(graph, dirty_plan.snapshot,
+    validate_hp_source_boundaries_ready(graph, prepared_dirty_plan.snapshot,
                                         hp_write_buffer);
   };
 
   run_dirty_source_first(
-      DirtySourceFirstRunRequest{
-          runtime, ComputeIntent::GlobalHighPrecision, &prepared.compute_plan,
-          &prepared.selection, &prepared.source_task_ids,
-          &prepared.downstream_task_ids, dirty_plan.snapshot.graph_generation,
-          validate_hp_source_boundaries},
+      DirtySourceFirstRunRequest{runtime, ComputeIntent::GlobalHighPrecision,
+                                 &prepared.compute_plan, &prepared.selection,
+                                 &prepared.source_task_ids,
+                                 &prepared.downstream_task_ids,
+                                 prepared_dirty_plan.snapshot.graph_generation,
+                                 validate_hp_source_boundaries},
       run_hp_task);
   if (request.sibling_commit_gate) {
     request.sibling_commit_gate->wait_for_rt_commit_or_throw();
   }
   graph_lock.lock();
+  if (request.stabilized_parameters &&
+      request.stabilized_parameters->topology_generation() !=
+          graph.topology_generation()) {
+    throw GraphError(GraphErrc::ComputeError,
+                     "Graph topology changed during HP dirty execution.");
+  }
   hp_write_buffer.commit_to_graph(graph);
   if (!request.suppress_graph_downsample) {
     DownsampleExecutor(graph, proxy_graph, runtime, events_)
@@ -446,38 +869,73 @@ NodeOutput& RealTimeDirtyExecutor::execute(GraphModel& graph,
                                            const DirtyUpdateRequest& request) {
   std::unique_lock<std::mutex> graph_lock(graph.graph_mutex_);
 
+  if (request.stabilized_parameters &&
+      request.stabilized_parameters->topology_generation() !=
+          graph.topology_generation()) {
+    throw GraphError(GraphErrc::ComputeError,
+                     "Graph topology changed after dirty preflight.");
+  }
+
   if (request.force_recache) {
     graph.clear_full_task_graph_cache();
   }
   proxy_graph.synchronize_with_graph(graph);
 
+  std::unique_ptr<GraphModel> planning_graph_owner;
+  GraphModel* planning_graph = &graph;
+  const std::unordered_set<int>* stabilized_geometry_nodes = nullptr;
+  const std::unordered_set<int>* forced_parameter_producers = nullptr;
+  const std::unordered_set<int>* externally_satisfied_nodes = nullptr;
+  if (request.stabilized_parameters &&
+      request.stabilized_parameters->has_connected_parameters()) {
+    planning_graph_owner = make_stabilized_planning_graph(
+        graph, *request.stabilized_parameters, false);
+    planning_graph = planning_graph_owner.get();
+    stabilized_geometry_nodes =
+        &request.stabilized_parameters->geometry_affected_node_ids();
+    forced_parameter_producers =
+        &request.stabilized_parameters->rt_required_parameter_node_ids();
+    externally_satisfied_nodes =
+        &request.stabilized_parameters->rt_satisfied_parameter_node_ids();
+  }
+
   RoiPropagationService roi_propagation;
-  DirtyRegionPlanner dirty_planner(traversal_, roi_propagation);
+  DirtyRegionPlanner dirty_planner(
+      traversal_, roi_propagation, stabilized_geometry_nodes,
+      forced_parameter_producers,
+      request.stabilized_parameters
+          ? std::optional<uint64_t>(
+                request.stabilized_parameters->request_generation())
+          : std::nullopt);
+  RealTimeDirtyPlan dirty_plan = dirty_planner.plan_real_time(
+      *planning_graph, request.node_id, request.dirty_roi);
   auto prepared = prepare_dirty_execution(
-      graph,
-      dirty_planner.plan_real_time(graph, request.node_id, request.dirty_roi),
+      *planning_graph, std::move(dirty_plan),
       ComputeRequest{ComputeIntent::RealTimeUpdate, request.node_id, false,
-                     request.dirty_roi});
-  RealTimeDirtyPlan& dirty_plan = prepared.dirty_plan;
+                     request.dirty_roi},
+      planning_graph != &graph ? &graph : nullptr, externally_satisfied_nodes);
+  RealTimeDirtyPlan& prepared_dirty_plan = prepared.dirty_plan;
   if (request.force_recache) {
-    reset_plan_cache(proxy_graph, dirty_plan);
+    reset_plan_cache(proxy_graph, prepared_dirty_plan);
   }
   graph_lock.unlock();
 
   RealtimeProxyWriteBuffer rt_write_buffer(proxy_graph, !request.force_recache);
   DirtyNodeMutexMap node_mutexes =
       make_dirty_node_mutexes(prepared.compute_plan);
-  DirtyNodeExecutionContext node_context{graph,
-                                         runtime,
-                                         events_,
-                                         dirty_plan.snapshot,
-                                         dirty_plan.snapshot.graph_generation,
-                                         node_mutexes};
+  DirtyNodeExecutionContext node_context{
+      graph,
+      runtime,
+      events_,
+      prepared_dirty_plan.snapshot,
+      prepared_dirty_plan.snapshot.graph_generation,
+      node_mutexes,
+      request.stabilized_parameters.get()};
   RealTimeDirtyNodeExecutor node_executor(node_context, proxy_graph,
                                           rt_write_buffer);
   auto run_rt_task = [&](int task_id) {
     run_planned_dirty_task(
-        runtime, dirty_plan.entries, prepared.compute_plan, task_id,
+        runtime, prepared_dirty_plan.entries, prepared.compute_plan, task_id,
         [&](int node_id, RtPlanEntry& entry, const PlannedTask& task) {
           Node& node = graph.mutable_node(node_id);
           RtPlanEntry task_entry = entry_for_task(entry, task);
@@ -486,17 +944,26 @@ NodeOutput& RealTimeDirtyExecutor::execute(GraphModel& graph,
   };
   auto validate_rt_source_boundaries = [&]() {
     std::lock_guard<std::mutex> lock(graph.graph_mutex_);
-    validate_rt_source_boundaries_ready(graph, proxy_graph, dirty_plan.snapshot,
-                                        rt_write_buffer);
+    validate_rt_source_boundaries_ready(
+        graph, proxy_graph, prepared_dirty_plan.snapshot, rt_write_buffer);
   };
 
   run_dirty_source_first(
-      DirtySourceFirstRunRequest{
-          runtime, ComputeIntent::RealTimeUpdate, &prepared.compute_plan,
-          &prepared.selection, &prepared.source_task_ids,
-          &prepared.downstream_task_ids, dirty_plan.snapshot.graph_generation,
-          validate_rt_source_boundaries},
+      DirtySourceFirstRunRequest{runtime, ComputeIntent::RealTimeUpdate,
+                                 &prepared.compute_plan, &prepared.selection,
+                                 &prepared.source_task_ids,
+                                 &prepared.downstream_task_ids,
+                                 prepared_dirty_plan.snapshot.graph_generation,
+                                 validate_rt_source_boundaries},
       run_rt_task);
+  graph_lock.lock();
+  if (request.stabilized_parameters &&
+      request.stabilized_parameters->topology_generation() !=
+          graph.topology_generation()) {
+    throw GraphError(GraphErrc::ComputeError,
+                     "Graph topology changed during RT dirty execution.");
+  }
+  graph_lock.unlock();
   rt_write_buffer.commit_to_proxy_graph();
   return require_target_output(proxy_graph, request.node_id);
 }

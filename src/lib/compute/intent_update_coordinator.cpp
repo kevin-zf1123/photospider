@@ -5,7 +5,7 @@
 #include <string>
 
 #include "compute/dirty_sibling_commit_gate.hpp"
-#include "kernel/scheduler/scheduler_task_runtime.hpp"
+#include "photospider/scheduler/scheduler.hpp"
 
 namespace ps::compute {
 namespace {
@@ -59,8 +59,8 @@ void IntentUpdateCoordinator::validate(
  * @brief Executes the callback set required by one compute intent.
  *
  * @param intent Requested global-HP or realtime intent.
- * @param hp_task_runtime Optional HP runtime used for concurrency capability.
- * @param rt_task_runtime Optional RT runtime used for concurrency capability.
+ * @param hp_scheduler Optional HP scheduler used for concurrency capability.
+ * @param rt_scheduler Optional RT scheduler used for concurrency capability.
  * @param dirty_roi Optional dirty ROI validated for realtime requests.
  * @param callbacks Borrowed compute, output, trace, and commit-gate callbacks.
  * @return Target output after the selected intent paths complete.
@@ -72,8 +72,7 @@ void IntentUpdateCoordinator::validate(
  * preserves resource-exhaustion identity before rethrowing the primary error.
  */
 NodeOutput& IntentUpdateCoordinator::coordinate_intent_update(
-    ComputeIntent intent, SchedulerTaskRuntime* hp_task_runtime,
-    SchedulerTaskRuntime* rt_task_runtime,
+    ComputeIntent intent, IScheduler* hp_scheduler, IScheduler* rt_scheduler,
     const std::optional<cv::Rect>& dirty_roi,
     const IntentUpdateCallbacks& callbacks) {
   switch (intent) {
@@ -96,9 +95,8 @@ NodeOutput& IntentUpdateCoordinator::coordinate_intent_update(
       require_callback(callbacks.run_real_time_update, "run_real_time_update");
       require_callback(callbacks.real_time_output, "real_time_output");
       const bool can_submit_concurrently =
-          hp_task_runtime != nullptr && rt_task_runtime != nullptr &&
-          hp_task_runtime->task_runtime_running() &&
-          rt_task_runtime->task_runtime_running();
+          hp_scheduler != nullptr && rt_scheduler != nullptr &&
+          hp_scheduler->is_running() && rt_scheduler->is_running();
       const IntentUpdateDecision decision =
           decide(intent, can_submit_concurrently, dirty_roi.has_value());
       record_stage(callbacks, decision.submit_updates_concurrently

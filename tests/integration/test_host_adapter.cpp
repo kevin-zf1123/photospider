@@ -24,11 +24,11 @@
 #include <utility>
 #include <vector>
 
-#include "adapter/buffer_adapter_opencv.hpp"
-#include "kernel/scheduler/scheduler_task_runtime.hpp"  // NOLINT(build/include_subdir)
-#include "node.hpp"  // NOLINT(build/include_subdir)
+#include "adapters/opencv/buffer_adapter_opencv.hpp"
+#include "core/ps_types.hpp"  // NOLINT(build/include_subdir)
+#include "graph/node.hpp"     // NOLINT(build/include_subdir)
 #include "photospider/host/host.hpp"
-#include "ps_types.hpp"  // NOLINT(build/include_subdir)
+#include "photospider/scheduler/scheduler_task_runtime.hpp"  // NOLINT(build/include_subdir)
 #include "scheduler/scheduler_plugin_loader.hpp"  // NOLINT(build/include_subdir)
 
 #ifndef PS_TEST_OP_PLUGIN_DIR
@@ -384,13 +384,18 @@ void register_host_adapter_ops() {
             }));
     OpRegistry::instance().register_dirty_propagator(
         "host_adapter_test", "identity",
-        DirtyRoiPropFunc([](const Node&, const cv::Rect& roi,
-                            const GraphModel&) { return roi; }));
+        DirtyRoiPropFunc(
+            [](const Node&, const cv::Rect& roi, const GraphModel&,
+               const cv::Size&, const std::vector<cv::Size>&,
+               const plugin::ParameterMap&,
+               const std::vector<const NodeOutput*>*) { return roi; }));
     OpRegistry::instance().register_forward_propagator(
         "host_adapter_test", "identity",
         ForwardRoiPropFunc([](const Node&, const cv::Rect& roi,
                               const GraphModel&, const cv::Size&,
-                              const cv::Size&) { return roi; }));
+                              const cv::Size&, size_t,
+                              const std::vector<cv::Size>&,
+                              const plugin::ParameterMap&) { return roi; }));
     OpRegistry::instance().register_op_hp_monolithic(
         "host_adapter_test", "offset_identity",
         MonolithicOpFunc([](const Node& node,
@@ -412,10 +417,12 @@ void register_host_adapter_ops() {
         }));
     OpRegistry::instance().register_dirty_propagator(
         "host_adapter_test", "offset_identity",
-        DirtyRoiPropFunc(
-            [](const Node&, const cv::Rect& roi, const GraphModel&) {
-              return cv::Rect(roi.x + 64, roi.y, roi.width, roi.height);
-            }));
+        DirtyRoiPropFunc([](const Node&, const cv::Rect& roi, const GraphModel&,
+                            const cv::Size&, const std::vector<cv::Size>&,
+                            const plugin::ParameterMap&,
+                            const std::vector<const NodeOutput*>*) {
+          return cv::Rect(roi.x + 64, roi.y, roi.width, roi.height);
+        }));
   });
 }
 
@@ -1312,9 +1319,10 @@ TEST(EmbeddedHostAdapter,
  *
  * @throws Nothing when the fixture, Host status mapping, and cleanup behave as
  *         specified; GoogleTest records any mismatch.
- * @note The first close throws while the fixture remains running. The Host must
- *       return Unknown, reopen admission, retain the graph, and invoke shutdown
- *       again when closing the same session after injection is removed.
+ * @note The first close throws while the fixture remains running. The plugin
+ * owner normalizes that runtime failure to ComputeError; the Host must reopen
+ * admission, retain the graph, and invoke shutdown again after injection is
+ * removed.
  */
 TEST(EmbeddedHostAdapter, CloseShutdownFailureRetainsSessionAndAllowsRetry) {
   register_host_adapter_ops();
@@ -1356,8 +1364,8 @@ TEST(EmbeddedHostAdapter, CloseShutdownFailureRetainsSessionAndAllowsRetry) {
     EXPECT_FALSE(failed_close.status.ok);
     EXPECT_EQ(failed_close.status.domain, OperationErrorDomain::Graph);
     EXPECT_EQ(checked_graph_error_code(failed_close.status),
-              GraphErrc::Unknown);
-    EXPECT_EQ(failed_close.status.name, "unknown");
+              GraphErrc::ComputeError);
+    EXPECT_EQ(failed_close.status.name, "compute_error");
     EXPECT_NE(failed_close.status.message.find("fixture shutdown failure"),
               std::string::npos);
     EXPECT_EQ(fixture.shutdown_count(), 1);
@@ -1872,8 +1880,8 @@ TEST(EmbeddedHostAdapter, ThreeConcurrentClosesSerializeEveryWaiter) {
 /**
  * @brief Verifies a waiter retries after the owner consumes a one-shot failure.
  *
- * @throws Nothing when the owner returns Unknown and the waiter closes the
- *         retained graph; GoogleTest records any mismatch.
+ * @throws Nothing when the owner returns normalized ComputeError and the waiter
+ * closes the retained graph; GoogleTest records any mismatch.
  * @note The process-scoped fixture fails only its first shutdown invocation, so
  *       no environment mutation races the two close attempts.
  */
@@ -1951,7 +1959,8 @@ TEST(EmbeddedHostAdapter, ConcurrentCloseRetriesAfterEarlierShutdownFailure) {
   EXPECT_TRUE(compute_future.get().status.ok);
   const VoidResult owner_result = owner.get();
   EXPECT_FALSE(owner_result.status.ok);
-  EXPECT_EQ(checked_graph_error_code(owner_result.status), GraphErrc::Unknown);
+  EXPECT_EQ(checked_graph_error_code(owner_result.status),
+            GraphErrc::ComputeError);
   const VoidResult waiter_result = waiter.get();
   EXPECT_TRUE(waiter_result.status.ok) << waiter_result.status.message;
   EXPECT_EQ(fixture.shutdown_count(), 2);
@@ -2619,6 +2628,79 @@ TEST(EmbeddedHostAdapter, SchedulerScanLoadAndPluginUnloadUseStatusValues) {
       host->plugins_load({(temp.root() / "missing_plugins").string()});
   EXPECT_TRUE(empty_scan_plugins.status.ok)
       << empty_scan_plugins.status.message;
+}
+
+/**
+ * @brief Exercises external operation and scheduler DSOs through embedded Host
+ * compute.
+ *
+ * @return Nothing; GoogleTest records assertion failures.
+ * @throws Nothing when plugin discovery, graph ownership, scheduler selection,
+ *         and production compute behavior match their public status contracts;
+ *         GoogleTest records any mismatch.
+ * @note The lifecycle operation and destroy-count scheduler are both loaded
+ *       through public Host methods. Parallel HP compute must therefore cross
+ *       the real v2 operation adapter and inherited scheduler task runtime.
+ */
+TEST(EmbeddedHostAdapter,
+     ExternalOperationAndSchedulerPluginsDriveParallelCompute) {
+  ScopedTempDir temp("photospider_host_external_plugin_compute_test");
+  ScopedSchedulerPluginCleanup scheduler_cleanup;
+  auto host = create_embedded_host();
+  ASSERT_NE(host, nullptr);
+  ScopedHostPluginCleanup operation_cleanup(*host);
+
+  const std::filesystem::path operation_dir = lifecycle_plugin_dir();
+  const std::filesystem::path scheduler_path =
+      destroy_count_scheduler_plugin_path();
+  ASSERT_TRUE(std::filesystem::is_directory(operation_dir));
+  ASSERT_TRUE(std::filesystem::is_regular_file(scheduler_path));
+
+  const auto operation_report =
+      host->plugins_load_report({operation_dir.string()});
+  ASSERT_TRUE(operation_report.status.ok) << operation_report.status.message;
+  ASSERT_TRUE(contains_string(operation_report.value.new_op_keys,
+                              "plugin_lifecycle:op"));
+  const VoidResult scheduler_load =
+      host->scheduler_load(scheduler_path.string());
+  ASSERT_TRUE(scheduler_load.status.ok) << scheduler_load.status.message;
+
+  HostSchedulerConfig scheduler_config;
+  scheduler_config.hp_type = kDestroyCountSchedulerType;
+  scheduler_config.rt_type = "serial_debug";
+  scheduler_config.worker_count = 1;
+  const VoidResult configured =
+      host->configure_scheduler_defaults(scheduler_config);
+  ASSERT_TRUE(configured.status.ok) << configured.status.message;
+
+  GraphLoadRequest load;
+  load.session = GraphSessionId{"external_plugin_compute"};
+  load.root_dir = (temp.root() / "sessions").string();
+  load.yaml_path = (temp.root() / "source" / "external.yaml").string();
+  load.cache_root_dir = (temp.root() / "cache").string();
+  write_lifecycle_plugin_graph(load.yaml_path);
+  const auto loaded = host->load_graph(load);
+  ASSERT_TRUE(loaded.status.ok) << loaded.status.message;
+
+  const auto scheduler =
+      host->scheduler_info(load.session, ComputeIntent::GlobalHighPrecision);
+  ASSERT_TRUE(scheduler.status.ok) << scheduler.status.message;
+  EXPECT_EQ(scheduler.value.scheduler_name, kDestroyCountSchedulerType);
+
+  HostComputeRequest request = make_compute_request(load.session);
+  request.execution.parallel = true;
+  request.cache.force_recache = true;
+  const VoidResult computed = host->compute(request);
+  ASSERT_TRUE(computed.status.ok) << computed.status.message;
+
+  const auto node = host->inspect_node(load.session, NodeId{1});
+  ASSERT_TRUE(node.status.ok) << node.status.message;
+  ASSERT_TRUE(node.value.space.has_value());
+  EXPECT_EQ(node.value.space->absolute_roi.width, 11);
+  EXPECT_EQ(node.value.space->absolute_roi.height, 7);
+
+  const VoidResult closed = host->close_graph(load.session);
+  EXPECT_TRUE(closed.status.ok) << closed.status.message;
 }
 
 /**

@@ -9,26 +9,44 @@
 
 #include "compute/compute_geometry.hpp"
 #include "core/param_utils.hpp"
+#include "core/parameter_value_adapter.hpp"
 
 namespace ps::compute {
 namespace {
 
 /**
+ * @brief Finds the first connected image input without changing slot order.
+ * @param inputs Destination-indexed input pointers that may contain nulls.
+ * @return First non-null output pointer, or nullptr when all slots are
+ * disconnected.
+ * @throws Nothing.
+ * @note The helper is for format/size fallback only; callback vectors retain
+ * every original slot.
+ */
+const NodeOutput* first_connected_input(
+    const std::vector<const NodeOutput*>& inputs) noexcept {
+  const auto found =
+      std::find_if(inputs.begin(), inputs.end(),
+                   [](const NodeOutput* input) { return input != nullptr; });
+  return found == inputs.end() ? nullptr : *found;
+}
+
+/**
  * @brief Infers the output channel count and data type for tiled allocation.
  *
  * @param inputs Normalized tiled inputs in execution order.
- * @return Channel count and DataType copied from the first input, or the legacy
- * FLOAT32 single-channel default for generator-style nodes.
+ * @return Channel count and DataType copied from the first connected input, or
+ * the legacy FLOAT32 single-channel default when every slot is disconnected.
  * @throws Nothing.
- * @note This preserves the pre-refactor allocation rule and intentionally does
- * not inspect secondary inputs.
+ * @note Slot identity remains unchanged; this helper only skips null entries
+ * while choosing an allocation hint.
  */
 std::pair<int, DataType> infer_channels_and_type(
     const std::vector<const NodeOutput*>& inputs) {
-  if (inputs.empty())
-    return {1, DataType::FLOAT32};
-  const auto& input = inputs.front()->image_buffer;
-  return {input.channels, input.type};
+  const NodeOutput* input = first_connected_input(inputs);
+  return input ? std::pair<int, DataType>{input->image_buffer.channels,
+                                          input->image_buffer.type}
+               : std::pair<int, DataType>{1, DataType::FLOAT32};
 }
 
 /**
@@ -41,17 +59,16 @@ std::pair<int, DataType> infer_channels_and_type(
  * @return Output size for allocation or existing-buffer iteration.
  * @throws YAML conversion exceptions when generator width/height parameters are
  * present but invalid.
- * @note The first normalized input remains the size source when no explicit
- * output_size is supplied.
+ * @note The first connected normalized input remains the size source when no
+ * explicit output_size is supplied; null slots remain visible to callbacks.
  */
 cv::Size infer_output_size(const Node& node,
                            const std::vector<const NodeOutput*>& inputs,
                            const TiledExecutionConfig& config) {
   if (config.output_size)
     return *config.output_size;
-  if (!inputs.empty()) {
-    const auto& input = inputs.front()->image_buffer;
-    return cv::Size(input.width, input.height);
+  if (const NodeOutput* input = first_connected_input(inputs)) {
+    return cv::Size(input->image_buffer.width, input->image_buffer.height);
   }
   return cv::Size(as_int_flexible(node.runtime_parameters, "width", 256),
                   as_int_flexible(node.runtime_parameters, "height", 256));
@@ -90,16 +107,39 @@ bool needs_gaussian_halo(const Node& node) {
  *
  * @param node Node being executed.
  * @param input_context Normalized input context.
- * @throws GraphError when a non-generator tiled node has no image input.
+ * @throws GraphError when a non-generator tiled node has no connected image
+ * input.
  * @note image_generator nodes intentionally allow an empty input list.
  */
 void require_tiled_inputs(const Node& node,
                           const TiledInputContext& input_context) {
-  if (input_context.inputs.empty() && node.type != "image_generator") {
+  if (!first_connected_input(input_context.inputs) &&
+      node.type != "image_generator") {
     throw GraphError(
         GraphErrc::MissingDependency,
         "Tiled node '" + node.name + "' requires at least one image input");
   }
+}
+
+/**
+ * @brief Captures all actual normalized image-input extents once per execution.
+ * @param input_context Normalized inputs in destination-index order.
+ * @return Extents supplied to every random-access callback in this execution.
+ * @throws std::bad_alloc when vector storage allocation fails.
+ * @note Disconnected slots contribute an empty extent. Connected values may
+ * come from same-batch temporary results and intentionally do not consult
+ * committed GraphModel caches.
+ */
+std::vector<cv::Size> actual_input_extents(
+    const TiledInputContext& input_context) {
+  std::vector<cv::Size> extents;
+  extents.reserve(input_context.inputs.size());
+  for (const NodeOutput* input : input_context.inputs) {
+    extents.push_back(
+        input ? cv::Size(input->image_buffer.width, input->image_buffer.height)
+              : cv::Size());
+  }
+  return extents;
 }
 
 /**
@@ -177,28 +217,34 @@ void validate_tile_size(const TiledExecutionConfig& config) {
  * @param input_context Normalized tiled inputs.
  * @param output_roi Output tile ROI being computed.
  * @param config Tiled execution metadata and halo controls.
+ * @param input_extents Actual normalized input extents captured once for the
+ *        current execution.
  * @param input_tiles Destination vector reused across tile callbacks.
- * @throws GraphError when a normalized input pointer is unexpectedly null.
- * @note The vector capacity is retained between calls to avoid per-tile
- * allocation churn.
+ * @throws std::bad_alloc when the destination vector grows.
+ * @note A disconnected slot appends an empty InputTile, preserving destination
+ * index identity for private and public tiled callbacks. The vector capacity
+ * is retained between calls to avoid per-tile allocation churn.
  */
 void populate_input_tiles(GraphModel& graph, const Node& node,
                           const TiledInputContext& input_context,
                           const cv::Rect& output_roi,
                           const TiledExecutionConfig& config,
+                          const std::vector<cv::Size>& input_extents,
                           std::vector<InputTile>* input_tiles) {
   input_tiles->clear();
   input_tiles->reserve(input_context.inputs.size());
   for (const auto* input : input_context.inputs) {
     if (!input) {
-      throw GraphError(
-          GraphErrc::MissingDependency,
-          "Tiled node '" + node.name + "' received a missing image input");
+      input_tiles->emplace_back();
+      continue;
     }
     const ImageBuffer& input_buffer = input->image_buffer;
     input_tiles->push_back(InputTile{
-        &input_buffer, NodeExecutor::input_roi_for_tile(graph, node, output_roi,
-                                                        input_buffer, config)});
+        &input_buffer,
+        NodeExecutor::input_roi_for_tile(graph, node, output_roi, input_buffer,
+                                         config, input_extents, nullptr,
+                                         &input_context.inputs),
+        &input->space});
   }
 }
 
@@ -223,6 +269,10 @@ void execute_tiled_context_into(GraphModel& graph, Node& node,
   validate_tile_size(config);
   const cv::Size output_size = output_size_for_buffer(output_buffer, config);
   const cv::Rect work_roi = clipped_work_roi(output_size, config);
+  const std::vector<cv::Size> input_extents =
+      actual_input_extents(input_context);
+  TiledExecutionConfig roi_mapping_config = config;
+  roi_mapping_config.output_size = output_size;
 
   TileTask task;
   task.node = &node;
@@ -239,7 +289,8 @@ void execute_tiled_context_into(GraphModel& graph, Node& node,
         continue;
       }
       populate_input_tiles(graph, node, input_context, task.output_tile.roi,
-                           config, &task.input_tiles);
+                           roi_mapping_config, input_extents,
+                           &task.input_tiles);
       if (config.on_tile) {
         config.on_tile(task.output_tile.roi);
       }
@@ -320,10 +371,12 @@ void NodeExecutor::execute_tiled_into(
                              output_buffer, config);
 }
 
-cv::Rect NodeExecutor::input_roi_for_tile(GraphModel& graph, const Node& node,
-                                          const cv::Rect& output_roi,
-                                          const ImageBuffer& input_buffer,
-                                          const TiledExecutionConfig& config) {
+cv::Rect NodeExecutor::input_roi_for_tile(
+    GraphModel& graph, const Node& node, const cv::Rect& output_roi,
+    const ImageBuffer& input_buffer, const TiledExecutionConfig& config,
+    const std::vector<cv::Size>& known_input_extents,
+    const plugin::ParameterMap* known_effective_parameters,
+    const std::vector<const NodeOutput*>* available_inputs) {
   OpMetadata meta;
   if (config.metadata) {
     meta = *config.metadata;
@@ -336,7 +389,28 @@ cv::Rect NodeExecutor::input_roi_for_tile(GraphModel& graph, const Node& node,
   if (meta.access_pattern == OpMetadata::InputAccessPattern::RandomAccess) {
     auto prop_fn =
         OpRegistry::instance().get_dirty_propagator(node.type, node.subtype);
-    input_roi = prop_fn(node, output_roi, graph);
+    const cv::Size output_extent = config.output_size.value_or(
+        cv::Size(std::max(0, output_roi.x + output_roi.width),
+                 std::max(0, output_roi.y + output_roi.height)));
+    std::vector<cv::Size> input_extents =
+        known_input_extents.empty() ? cached_image_input_extents(node, graph)
+                                    : known_input_extents;
+    if (input_extents.size() < node.image_inputs.size()) {
+      input_extents.resize(node.image_inputs.size());
+    }
+    if (input_extents.size() == 1) {
+      input_extents.front() = cv::Size(input_buffer.width, input_buffer.height);
+    }
+    plugin::ParameterMap execution_parameter_storage;
+    if (!known_effective_parameters) {
+      const YAML::Node& execution_parameters =
+          node.runtime_parameters ? node.runtime_parameters : node.parameters;
+      execution_parameter_storage =
+          core::parameter_map_from_yaml(execution_parameters);
+      known_effective_parameters = &execution_parameter_storage;
+    }
+    input_roi = prop_fn(node, output_roi, graph, output_extent, input_extents,
+                        *known_effective_parameters, available_inputs);
   } else if (config.forced_halo.value_or(
                  needs_gaussian_halo(node) ? config.halo_size : 0) > 0) {
     input_roi =

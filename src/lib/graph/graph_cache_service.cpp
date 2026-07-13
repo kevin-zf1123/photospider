@@ -9,7 +9,7 @@
 #include <unordered_set>
 #include <utility>
 
-#include "adapter/buffer_adapter_opencv.hpp"
+#include "adapters/opencv/buffer_adapter_opencv.hpp"
 #include "graph/graph_traversal_service.hpp"
 
 namespace ps {
@@ -403,7 +403,9 @@ void GraphCacheService::save_cache_if_configured(
 
     auto start_io = std::chrono::high_resolution_clock::now();
 
-    if (output->image_buffer.width > 0 && output->image_buffer.height > 0) {
+    if (output->image_buffer.width > 0 && output->image_buffer.height > 0 &&
+        output->image_buffer.device == Device::CPU &&
+        output->image_buffer.data) {
       cv::Mat mat_to_save = toCvMat(output->image_buffer);
       if (!mat_to_save.empty()) {
         cv::Mat out_mat;

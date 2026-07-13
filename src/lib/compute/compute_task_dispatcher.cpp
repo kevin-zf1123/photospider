@@ -42,35 +42,6 @@ void ComputeTaskDispatcher::clear_timing_results(GraphModel& graph) {
 }
 
 /**
- * @brief Delegates source-first dirty task submission to the submission unit.
- *
- * @param task_runtime Scheduler runtime that executes and records task errors.
- * @param source_tasks Dirty source tasks to run with high priority.
- * @param downstream_tasks Dependent tasks to run with normal priority after
- * source completion and optional validation.
- * @param epoch Optional scheduler epoch passed through to task submission.
- * @param before_downstream Optional boundary validation callback.
- * @return Nothing.
- * @throws Rethrows any task or callback exception after recording it in
- * task_runtime.
- * @throws std::bad_alloc unchanged when task submission or callback storage
- * exhausts memory.
- * @note The dispatcher's internal C++ member surface remains stable while the
- * implementation lives in compute_task_submission.cpp. C++ `public:` class
- * access here is not the installable product Host API; frontends use
- * `ps::Host`.
- */
-void ComputeTaskDispatcher::submit_dirty_ready_tasks_source_first(
-    SchedulerTaskRuntime& task_runtime,
-    std::vector<SchedulerTaskRuntime::Task>&& source_tasks,
-    std::vector<SchedulerTaskRuntime::Task>&& downstream_tasks,
-    std::optional<uint64_t> epoch, std::function<void()> before_downstream) {
-  ps::compute::submit_dirty_ready_tasks_source_first(
-      task_runtime, std::move(source_tasks), std::move(downstream_tasks), epoch,
-      std::move(before_downstream));
-}
-
-/**
  * @brief Submits dirty task handles through dispatcher-owned source-first
  * ordering.
  *
@@ -104,8 +75,14 @@ void ComputeTaskDispatcher::submit_dirty_ready_tasks_source_first(
       before_downstream();
     } catch (...) {
       auto error = std::current_exception();
-      task_runtime.log_event(SchedulerTraceAction::RethrowException, -1);
-      task_runtime.set_exception(error);
+      try {
+        task_runtime.log_event(SchedulerTraceAction::RethrowException, -1);
+      } catch (...) {
+      }
+      try {
+        task_runtime.set_exception(error);
+      } catch (...) {
+      }
       std::rethrow_exception(error);
     }
   }

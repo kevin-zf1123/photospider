@@ -34,7 +34,6 @@ SCHEDULERS = {
             "name",
             "get_stats",
             "is_running",
-            "task_runtime_running",
             "submit_initial_tasks",
             "submit_initial_task_handles",
             "submit_ready_task_from_worker",
@@ -65,7 +64,7 @@ SCHEDULERS = {
             }
         },
         "important_fields": {
-            "runtime_",
+            "host_context_",
             "workers_",
             "num_workers_",
             "configured_workers_",
@@ -101,7 +100,6 @@ SCHEDULERS = {
             "name",
             "get_stats",
             "is_running",
-            "task_runtime_running",
             "submit_rt_task",
             "submit_rt_task_handle",
             "submit_hp_task",
@@ -147,7 +145,7 @@ SCHEDULERS = {
             },
         },
         "important_fields": {
-            "runtime_",
+            "host_context_",
             "config_",
             "cpu_workers_",
             "num_cpu_workers_",
@@ -190,6 +188,7 @@ HOOK_FUNCTIONS = {
     "set_cpu_scheduler_start_publication_hook",
     "set_cpu_scheduler_local_ready_hook",
     "set_cpu_scheduler_failure_injection_hook",
+    "set_cpu_scheduler_epoch_for_testing",
     "cpu_scheduler_transactional_snapshot",
     "cpu_scheduler_exception_publication_snapshot",
     "set_gpu_scheduler_exception_publication_hook",
@@ -197,6 +196,7 @@ HOOK_FUNCTIONS = {
     "set_gpu_scheduler_cpu_wait_hook",
     "set_gpu_scheduler_failure_injection_hook",
     "set_gpu_scheduler_force_gpu_route",
+    "set_gpu_scheduler_epoch_for_testing",
     "gpu_scheduler_transactional_snapshot",
     "gpu_scheduler_exception_publication_snapshot",
 }

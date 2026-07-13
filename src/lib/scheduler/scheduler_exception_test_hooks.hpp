@@ -119,8 +119,8 @@ struct SchedulerExceptionPublicationHook {
  * @brief Non-allocating barrier immediately before public running publication.
  *
  * The callback runs after the complete worker vector is installed but while
- * `is_running()` and `task_runtime_running()` must still return false. Tests
- * block start here and inspect the two-phase lifecycle state.
+ * `IScheduler::is_running()` must still return false. Tests block start here
+ * and inspect the two-phase lifecycle state.
  */
 struct SchedulerStartPublicationHook {
   /** @brief Borrowed test context that outlives the installed hook. */
@@ -234,6 +234,17 @@ SchedulerTransactionalStateSnapshot cpu_scheduler_transactional_snapshot(
     void* scheduler) noexcept;
 
 /**
+ * @brief Seeds both committed CPU epoch fields for wrap-boundary tests.
+ * @param scheduler Opaque pointer to the concrete CPU scheduler.
+ * @param epoch Exact test epoch to publish as counter and active value.
+ * @return Nothing.
+ * @throws Nothing under the valid test scheduler lifecycle.
+ * @note The test must call this only while no batch is queued or executing.
+ */
+void set_cpu_scheduler_epoch_for_testing(void* scheduler,
+                                         std::uint64_t epoch) noexcept;
+
+/**
  * @brief Reads CPU scheduler publication state under its exception mutex.
  *
  * @param scheduler Opaque pointer to the concrete CPU scheduler under test.
@@ -303,6 +314,17 @@ void set_gpu_scheduler_force_gpu_route(bool enabled) noexcept;
  */
 SchedulerTransactionalStateSnapshot gpu_scheduler_transactional_snapshot(
     void* scheduler) noexcept;
+
+/**
+ * @brief Seeds both committed pipeline epoch fields for wrap-boundary tests.
+ * @param scheduler Opaque pointer to the concrete pipeline scheduler.
+ * @param epoch Exact test epoch to publish as counter and active value.
+ * @return Nothing.
+ * @throws Nothing under the valid test scheduler lifecycle.
+ * @note The test must call this only while no batch is queued or executing.
+ */
+void set_gpu_scheduler_epoch_for_testing(void* scheduler,
+                                         std::uint64_t epoch) noexcept;
 
 /**
  * @brief Reads GPU-pipeline publication state under its exception mutex.

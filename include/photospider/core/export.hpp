@@ -4,11 +4,11 @@
  * @file export.hpp
  * @brief Defines public Photospider symbol visibility annotations.
  *
- * The macro in this file is shared by stable public value contracts and legacy
- * internal include paths. The supported product is a static archive, while
- * operation plugins export only their registrar entry through `PLUGIN_API`;
- * public Photospider declarations therefore need no dynamic import/export
- * annotation.
+ * The macro in this file is shared by stable public value contracts. The
+ * supported runtime product is a static archive, while operation plugins
+ * export only `register_photospider_ops_v2` through
+ * `PHOTOSPIDER_OPERATION_PLUGIN_EXPORT`; public Photospider declarations
+ * therefore need no dynamic import/export annotation.
  *
  * @note The macro only affects declarations that explicitly opt in. Header-only
  *       value types that do not cross a dynamic-library ABI do not need it.
@@ -31,12 +31,13 @@
  * @brief Leaves Photospider declarations unannotated inside operation plugins.
  *
  * Operation plugin targets are loaded through a registrar ABI and may link only
- * the narrow operation-plugin shim rather than the backend library. Keeping
- * `PHOTOSPIDER_API` empty in those plugin builds prevents Windows
- * `dllimport` annotations from requiring backend DLL symbols for public value
- * contracts such as `ps::GraphError`.
+ * the public operation runtime and optional adapter components rather than the
+ * private backend library. Keeping `PHOTOSPIDER_API` empty in those plugin
+ * builds prevents Windows `dllimport` annotations from requiring backend DLL
+ * symbols for public value contracts such as `ps::GraphError`.
  *
- * @note Plugin entry points must use `PLUGIN_API`; this macro does not export
+ * @note Plugin entry points must use
+ *       `PHOTOSPIDER_OPERATION_PLUGIN_EXPORT`; this macro does not export
  *       plugin registrar symbols or change callback ownership/lifetime rules.
  */
 #define PHOTOSPIDER_API

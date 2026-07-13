@@ -11,17 +11,21 @@
 namespace ps::compute {
 
 /**
- * @brief Low-resolution proxy graph state owned by the RT compute path.
+ * @brief Interactive proxy graph state owned by the RT compute path.
  *
  * RealtimeProxyGraph mirrors only graph node ids and stores transient
- * low-resolution output state for those ids. It deliberately does not copy
+ * RT-oriented output state for those ids. CPU downsample output is normally
+ * low resolution; opaque non-CPU backend output is an explicit passthrough
+ * exception that preserves its complete HP descriptor and extent. The proxy
+ * deliberately does not copy
  * Node parameters, inputs, topology edges, caches, or HP runtime state from
  * GraphModel. The original GraphModel remains the authoritative HP graph.
  *
  * @note Callers must synchronize the proxy against GraphModel before RT
  * planning or commit when topology may have changed. The proxy owns its own
  * mutex so RT preview state can be committed without mutating GraphModel node
- * cache fields.
+ * cache fields. Consumers must inspect ImageBuffer::device and must not treat
+ * opaque passthrough output as reduced CPU pixels.
  */
 class RealtimeProxyGraph {
  public:
@@ -32,7 +36,10 @@ class RealtimeProxyGraph {
    * inspection and frontend mapping semantics remain consistent.
    */
   struct NodeState {
-    /** @brief Low-resolution RT output for this node, when materialized. */
+    /**
+     * @brief RT output, or a full-extent opaque backend passthrough when
+     * generic downsampling cannot map the provider-owned resource.
+     */
     std::optional<NodeOutput> output;
 
     /** @brief Most recent or merged HP-space ROI represented by RT output. */

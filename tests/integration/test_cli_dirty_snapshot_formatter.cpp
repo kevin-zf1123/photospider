@@ -10,12 +10,12 @@
 #include <system_error>
 #include <vector>
 
-#include "adapter/buffer_adapter_opencv.hpp"
+#include "adapters/opencv/buffer_adapter_opencv.hpp"
+#include "core/ps_types.hpp"  // NOLINT(build/include_subdir)
+#include "graph/node.hpp"     // NOLINT(build/include_subdir)
 #include "graph_cli/command/commands.hpp"
 #include "graph_cli/command/help_utils.hpp"
 #include "graph_cli/dependency_tree_formatter.hpp"
-#include "node.hpp"      // NOLINT(build/include_subdir)
-#include "ps_types.hpp"  // NOLINT(build/include_subdir)
 
 namespace ps::cli {
 namespace {
@@ -66,10 +66,11 @@ void register_cli_command_ops() {
             }));
     OpRegistry::instance().register_dirty_propagator(
         "cli_dirty_test", "offset_identity",
-        DirtyRoiPropFunc(
-            [](const Node&, const cv::Rect& roi, const GraphModel&) {
-              return cv::Rect(roi.x + 64, roi.y, roi.width, roi.height);
-            }));
+        DirtyRoiPropFunc([](const Node&, const cv::Rect& roi, const GraphModel&,
+                            const cv::Size&, const std::vector<cv::Size>&,
+                            const plugin::ParameterMap&) {
+          return cv::Rect(roi.x + 64, roi.y, roi.width, roi.height);
+        }));
     OpRegistry::instance().register_op_hp_monolithic(
         "cli_dirty_test", "empty_output",
         MonolithicOpFunc(

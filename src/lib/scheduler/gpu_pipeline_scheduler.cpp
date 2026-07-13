@@ -1,6 +1,4 @@
-// Photospider kernel: GpuPipelineScheduler implementation
-// M3.5: 异构调度器 - 支持 HP GPU 队列和 RT CPU 高优先级队列
-// Scheduler dispatches already-planned HP/RT tasks.
+// Photospider built-in heterogeneous pipeline scheduler implementation.
 
 #include "scheduler/gpu_pipeline_scheduler.hpp"
 
@@ -9,20 +7,118 @@
 #include <deque>
 #include <exception>
 #include <iostream>
+#include <limits>
 #include <random>
 #include <sstream>
+#include <stdexcept>
 #include <string>
 #include <thread>
 #include <utility>
 #include <vector>
-
-#include "runtime/graph_runtime.hpp"
 
 #if defined(PHOTOSPIDER_INTERNAL_BAD_ALLOC_TESTING)
 #include "scheduler/scheduler_exception_test_hooks.hpp"
 #endif
 
 namespace ps {
+namespace {
+
+/**
+ * @brief Balances host task-context TLS around one CPU or GPU callback.
+ *
+ * @throws Nothing. Construction and destruction only call noexcept host
+ *         callbacks.
+ * @note The context is borrowed until scheduler detach. Shutdown joins all
+ *       workers before the host clears the pointer.
+ */
+class HostTaskContextScope final {
+ public:
+  /**
+   * @brief Publishes worker and epoch identity when attached.
+   * @param host Borrowed host context, or null while detached.
+   * @param worker_id Scheduler worker id.
+   * @param epoch Active task epoch.
+   * @throws Nothing.
+   * @note A null host leaves the scope inert while preserving balanced cleanup.
+   */
+  HostTaskContextScope(SchedulerHostContext* host, int worker_id,
+                       std::uint64_t epoch) noexcept
+      : host_(host) {
+    if (host_ != nullptr) {
+      host_->set_task_context(worker_id, epoch);
+    }
+  }
+
+  /**
+   * @brief Clears task identity on every callback exit path.
+   * @throws Nothing.
+   * @note The borrowed host remains alive until all CPU/GPU workers join and
+   *       detach clears the scheduler-side pointer.
+   */
+  ~HostTaskContextScope() noexcept {
+    if (host_ != nullptr) {
+      host_->clear_task_context();
+    }
+  }
+
+  /**
+   * @brief Prevents copying one balanced host-context publication.
+   * @param other Source scope that must retain its clear responsibility.
+   * @throws Nothing because the operation is deleted.
+   * @note Each callback must own exactly one clear operation.
+   */
+  HostTaskContextScope(const HostTaskContextScope& other) = delete;
+
+  /**
+   * @brief Prevents assigning one balanced host-context publication.
+   * @param other Source scope that must retain its clear responsibility.
+   * @return No value because the operation is deleted.
+   * @throws Nothing because the operation is deleted.
+   * @note Assignment could otherwise lose the host that must be cleared.
+   */
+  HostTaskContextScope& operator=(const HostTaskContextScope& other) = delete;
+
+ private:
+  /** @brief Borrowed host context, or null. */
+  SchedulerHostContext* host_;
+};
+
+/**
+ * @brief Validates one initial pipeline batch before queue/epoch publication.
+ * @param valid_item_count Number of nonempty callbacks or handles.
+ * @param total_task_count Caller-supplied logical completion count.
+ * @return Nothing.
+ * @throws std::invalid_argument if the count is negative or smaller than the
+ *         number of valid initial items.
+ * @note Rejection observes and mutates no scheduler state or routing lane.
+ */
+void validate_initial_count(std::size_t valid_item_count,
+                            int total_task_count) {
+  if (total_task_count < 0) {
+    throw std::invalid_argument(
+        "GPU pipeline scheduler initial completion count must be nonnegative");
+  }
+  if (valid_item_count > static_cast<std::size_t>(total_task_count)) {
+    throw std::invalid_argument(
+        "GPU pipeline scheduler initial completion count is smaller than "
+        "valid item count");
+  }
+}
+
+/**
+ * @brief Advances a pipeline epoch while reserving zero for non-worker calls.
+ * @param current Last committed scheduler epoch.
+ * @return The next epoch, wrapping `UINT64_MAX` to one.
+ * @throws Nothing.
+ * @note Callers serialize publication with both queue gates and the
+ * completion-count mutex.
+ */
+std::uint64_t next_nonzero_epoch(std::uint64_t current) noexcept {
+  return current == std::numeric_limits<std::uint64_t>::max() ? 1U
+                                                              : current + 1U;
+}
+
+}  // namespace
 
 #if defined(PHOTOSPIDER_INTERNAL_BAD_ALLOC_TESTING)
 namespace {
@@ -185,6 +281,20 @@ SchedulerTransactionalStateSnapshot gpu_scheduler_transactional_snapshot(
   };
 }
 
+/** @copydoc set_gpu_scheduler_epoch_for_testing */
+void set_gpu_scheduler_epoch_for_testing(void* scheduler,
+                                         std::uint64_t epoch) noexcept {
+  auto* concrete = static_cast<GpuPipelineScheduler*>(scheduler);
+  if (!concrete) {
+    return;
+  }
+  std::scoped_lock queue_lock(concrete->rt_queue_mutex_,
+                              concrete->gpu_queue_mutex_);
+  std::lock_guard<std::mutex> count_lock(concrete->completion_count_mutex_);
+  concrete->epoch_counter_.store(epoch, std::memory_order_release);
+  concrete->active_epoch_.store(epoch, std::memory_order_release);
+}
+
 /** @copydoc gpu_scheduler_exception_publication_snapshot */
 SchedulerExceptionPublicationSnapshot
 gpu_scheduler_exception_publication_snapshot(void* scheduler) noexcept {
@@ -226,12 +336,14 @@ GpuPipelineScheduler::GpuPipelineScheduler(const Config& config)
 
 /** @copydoc GpuPipelineScheduler::~GpuPipelineScheduler */
 GpuPipelineScheduler::~GpuPipelineScheduler() {
-  shutdown();
+  if (is_running()) {
+    shutdown();
+  }
 }
 
 /** @copydoc GpuPipelineScheduler::attach */
-void GpuPipelineScheduler::attach(GraphRuntime* runtime) {
-  runtime_ = runtime;
+void GpuPipelineScheduler::attach(SchedulerHostContext& host) {
+  host_context_ = &host;
   if (running_.load(std::memory_order_acquire)) {
     start_gpu_workers_if_available();
   }
@@ -239,7 +351,7 @@ void GpuPipelineScheduler::attach(GraphRuntime* runtime) {
 
 /** @copydoc GpuPipelineScheduler::detach */
 void GpuPipelineScheduler::detach() {
-  runtime_ = nullptr;
+  host_context_ = nullptr;
 }
 
 /** @copydoc GpuPipelineScheduler::start */
@@ -454,20 +566,26 @@ bool GpuPipelineScheduler::is_running() const {
   return running_.load(std::memory_order_acquire);
 }
 
-/** @copydoc GpuPipelineScheduler::task_runtime_running */
-bool GpuPipelineScheduler::task_runtime_running() const {
-  return is_running();
-}
-
 /** @copydoc GpuPipelineScheduler::submit_initial_tasks */
 void GpuPipelineScheduler::submit_initial_tasks(std::vector<Task>&& tasks,
                                                 int total_task_count,
                                                 TaskPriority priority) {
-  if (total_task_count == 0 || tasks.empty()) {
+  if (!is_running()) {
+    throw std::logic_error("GPU pipeline scheduler is not running");
+  }
+  const std::size_t valid_task_count = static_cast<std::size_t>(
+      std::count_if(tasks.begin(), tasks.end(),
+                    [](const Task& task) { return static_cast<bool>(task); }));
+  validate_initial_count(valid_task_count, total_task_count);
+  if (valid_task_count == 0U) {
     {
       std::scoped_lock gate(rt_queue_mutex_, gpu_queue_mutex_);
+      std::lock_guard<std::mutex> count_lock(completion_count_mutex_);
       reset_exception_state();
-      begin_new_epoch();
+      const uint64_t epoch =
+          next_nonzero_epoch(epoch_counter_.load(std::memory_order_acquire));
+      epoch_counter_.store(epoch, std::memory_order_release);
+      active_epoch_.store(epoch, std::memory_order_release);
       tasks_to_complete_.store(0, std::memory_order_release);
     }
     rt_cv_.notify_all();
@@ -499,7 +617,9 @@ void GpuPipelineScheduler::submit_initial_tasks(std::vector<Task>&& tasks,
   int submitted = 0;
   {
     std::scoped_lock gate(rt_queue_mutex_, gpu_queue_mutex_);
-    const uint64_t epoch = epoch_counter_.load(std::memory_order_acquire) + 1;
+    std::lock_guard<std::mutex> count_lock(completion_count_mutex_);
+    const uint64_t epoch =
+        next_nonzero_epoch(epoch_counter_.load(std::memory_order_acquire));
     const std::size_t original_size = target_queue->size();
     [[maybe_unused]] std::size_t push_attempt = 0;
     try {
@@ -539,11 +659,22 @@ void GpuPipelineScheduler::submit_initial_tasks(std::vector<Task>&& tasks,
 void GpuPipelineScheduler::submit_initial_task_handles(
     std::vector<TaskHandle>&& handles, int total_task_count,
     TaskPriority priority) {
-  if (total_task_count == 0 || handles.empty()) {
+  if (!is_running()) {
+    throw std::logic_error("GPU pipeline scheduler is not running");
+  }
+  const std::size_t valid_handle_count = static_cast<std::size_t>(std::count_if(
+      handles.begin(), handles.end(),
+      [](const TaskHandle& handle) { return static_cast<bool>(handle); }));
+  validate_initial_count(valid_handle_count, total_task_count);
+  if (valid_handle_count == 0U) {
     {
       std::scoped_lock gate(rt_queue_mutex_, gpu_queue_mutex_);
+      std::lock_guard<std::mutex> count_lock(completion_count_mutex_);
       reset_exception_state();
-      begin_new_epoch();
+      const uint64_t epoch =
+          next_nonzero_epoch(epoch_counter_.load(std::memory_order_acquire));
+      epoch_counter_.store(epoch, std::memory_order_release);
+      active_epoch_.store(epoch, std::memory_order_release);
       tasks_to_complete_.store(0, std::memory_order_release);
     }
     rt_cv_.notify_all();
@@ -575,7 +706,9 @@ void GpuPipelineScheduler::submit_initial_task_handles(
   int submitted = 0;
   {
     std::scoped_lock gate(rt_queue_mutex_, gpu_queue_mutex_);
-    const uint64_t epoch = epoch_counter_.load(std::memory_order_acquire) + 1;
+    std::lock_guard<std::mutex> count_lock(completion_count_mutex_);
+    const uint64_t epoch =
+        next_nonzero_epoch(epoch_counter_.load(std::memory_order_acquire));
     const std::size_t original_size = target_queue->size();
     [[maybe_unused]] std::size_t push_attempt = 0;
     try {
@@ -795,42 +928,10 @@ void GpuPipelineScheduler::submit_ready_task_handles_any_thread(
 
 /** @copydoc GpuPipelineScheduler::log_event */
 void GpuPipelineScheduler::log_event(SchedulerTraceAction action, int node_id) {
-  if (!runtime_) {
-    return;
+  if (host_context_ != nullptr) {
+    host_context_->log_event(action, node_id, this_worker_id(),
+                             this_task_epoch());
   }
-
-  GraphRuntime::SchedulerEvent::Action runtime_action =
-      GraphRuntime::SchedulerEvent::EXECUTE;
-  switch (action) {
-    case SchedulerTraceAction::AssignInitial:
-      runtime_action = GraphRuntime::SchedulerEvent::ASSIGN_INITIAL;
-      break;
-    case SchedulerTraceAction::Execute:
-      runtime_action = GraphRuntime::SchedulerEvent::EXECUTE;
-      break;
-    case SchedulerTraceAction::ExecuteTile:
-      runtime_action = GraphRuntime::SchedulerEvent::EXECUTE_TILE;
-      break;
-    case SchedulerTraceAction::ExecuteDirtySource:
-      runtime_action = GraphRuntime::SchedulerEvent::EXECUTE_DIRTY_SOURCE;
-      break;
-    case SchedulerTraceAction::ExecuteDirtyDownstreamNode:
-      runtime_action =
-          GraphRuntime::SchedulerEvent::EXECUTE_DIRTY_DOWNSTREAM_NODE;
-      break;
-    case SchedulerTraceAction::ExecuteDirtyDownstreamTile:
-      runtime_action =
-          GraphRuntime::SchedulerEvent::EXECUTE_DIRTY_DOWNSTREAM_TILE;
-      break;
-    case SchedulerTraceAction::SkipStaleGeneration:
-      runtime_action = GraphRuntime::SchedulerEvent::SKIP_STALE_GENERATION;
-      break;
-    case SchedulerTraceAction::RethrowException:
-      runtime_action = GraphRuntime::SchedulerEvent::RETHROW_EXCEPTION;
-      break;
-  }
-  runtime_->log_event(runtime_action, node_id, this_worker_id(),
-                      this_task_epoch());
 }
 
 /** @copydoc GpuPipelineScheduler::this_worker_id */
@@ -850,7 +951,10 @@ uint64_t GpuPipelineScheduler::active_epoch() const {
 
 /** @copydoc GpuPipelineScheduler::begin_new_epoch */
 uint64_t GpuPipelineScheduler::begin_new_epoch() {
-  uint64_t next = epoch_counter_.fetch_add(1, std::memory_order_acq_rel) + 1;
+  std::lock_guard<std::mutex> lock(completion_count_mutex_);
+  const uint64_t next =
+      next_nonzero_epoch(epoch_counter_.load(std::memory_order_acquire));
+  epoch_counter_.store(next, std::memory_order_release);
   active_epoch_.store(next, std::memory_order_release);
   return next;
 }
@@ -860,16 +964,13 @@ bool GpuPipelineScheduler::should_cancel_epoch(uint64_t epoch) const {
   if (epoch == 0) {
     return false;
   }
-  return epoch < active_epoch();
+  return epoch != active_epoch();
 }
 
 /** @copydoc GpuPipelineScheduler::is_gpu_available */
 bool GpuPipelineScheduler::is_gpu_available() const {
-#ifdef __APPLE__
-  return runtime_ && runtime_->get_metal_device() != nullptr;
-#else
-  return false;
-#endif
+  return host_context_ != nullptr &&
+         host_context_->is_device_available(Device::GPU_METAL);
 }
 
 /** @copydoc GpuPipelineScheduler::start_gpu_workers_if_available */
@@ -1050,12 +1151,8 @@ void GpuPipelineScheduler::cpu_run_loop(int thread_id) {
             }
             ~EpochScope() { *slot = prev; }
           } epoch_scope(&tls_active_epoch_, scheduled.epoch);
-          struct RuntimeLogScope {
-            RuntimeLogScope(int worker_id, uint64_t epoch) {
-              GraphRuntime::set_scheduler_log_context(worker_id, epoch);
-            }
-            ~RuntimeLogScope() { GraphRuntime::clear_scheduler_log_context(); }
-          } runtime_log_scope(thread_id, scheduled.epoch);
+          HostTaskContextScope host_task_context(host_context_, thread_id,
+                                                 scheduled.epoch);
 
           scheduled.run();
 
@@ -1144,12 +1241,8 @@ void GpuPipelineScheduler::gpu_run_loop(int thread_id) {
             }
             ~EpochScope() { *slot = prev; }
           } epoch_scope(&tls_active_epoch_, scheduled.epoch);
-          struct RuntimeLogScope {
-            RuntimeLogScope(int worker_id, uint64_t epoch) {
-              GraphRuntime::set_scheduler_log_context(worker_id, epoch);
-            }
-            ~RuntimeLogScope() { GraphRuntime::clear_scheduler_log_context(); }
-          } runtime_log_scope(thread_id, scheduled.epoch);
+          HostTaskContextScope host_task_context(host_context_, thread_id,
+                                                 scheduled.epoch);
 
           scheduled.run();
           gpu_tasks_executed_.fetch_add(1, std::memory_order_relaxed);
@@ -1393,7 +1486,12 @@ void GpuPipelineScheduler::wait_for_completion() {
     }
   }
   if (e) {
-    tasks_to_complete_.store(0, std::memory_order_release);
+    {
+      std::lock_guard<std::mutex> count_lock(completion_count_mutex_);
+      if (active_epoch() == wait_epoch) {
+        tasks_to_complete_.store(0, std::memory_order_release);
+      }
+    }
     rt_cv_.notify_all();
     gpu_cv_.notify_all();
     std::rethrow_exception(e);
@@ -1402,11 +1500,21 @@ void GpuPipelineScheduler::wait_for_completion() {
 
 /** @copydoc GpuPipelineScheduler::dec_tasks_to_complete */
 void GpuPipelineScheduler::dec_tasks_to_complete() {
-  uint64_t epoch = tls_active_epoch_;
-  if (epoch != 0 && epoch != active_epoch()) {
-    return;
+  bool reached_zero = false;
+  {
+    std::lock_guard<std::mutex> count_lock(completion_count_mutex_);
+    const uint64_t epoch = tls_active_epoch_;
+    if (epoch != 0 && epoch != active_epoch()) {
+      return;
+    }
+    const int current = tasks_to_complete_.load(std::memory_order_acquire);
+    if (current <= 0) {
+      return;
+    }
+    tasks_to_complete_.store(current - 1, std::memory_order_release);
+    reached_zero = current == 1;
   }
-  if (tasks_to_complete_.fetch_sub(1, std::memory_order_acq_rel) == 1) {
+  if (reached_zero) {
     std::lock_guard<std::mutex> lk(completion_mutex_);
     cv_completion_.notify_one();
   }
@@ -1417,11 +1525,17 @@ void GpuPipelineScheduler::inc_tasks_to_complete(int delta) {
   if (delta <= 0) {
     return;
   }
-  uint64_t epoch = tls_active_epoch_;
+  std::lock_guard<std::mutex> count_lock(completion_count_mutex_);
+  const uint64_t epoch = tls_active_epoch_;
   if (epoch != 0 && epoch != active_epoch()) {
     return;
   }
-  tasks_to_complete_.fetch_add(delta, std::memory_order_relaxed);
+  const int current = tasks_to_complete_.load(std::memory_order_acquire);
+  if (current > std::numeric_limits<int>::max() - delta) {
+    throw std::overflow_error(
+        "GPU pipeline scheduler completion counter overflow");
+  }
+  tasks_to_complete_.store(current + delta, std::memory_order_release);
 }
 
 /**
@@ -1430,7 +1544,8 @@ void GpuPipelineScheduler::inc_tasks_to_complete(int delta) {
  * @param e Non-null exception captured by either worker loop.
  * @return Nothing.
  * @throws Nothing under valid mutex state.
- * @note Both queue mutexes form the pipeline transaction gate. Publication
+ * @note Null input returns before any state mutation. For non-null input, both
+ * queue mutexes form the pipeline transaction gate. Publication
  * acquires that gate before choosing the epoch and claiming the exception, so
  * every concurrent queue batch is observed as wholly committed or absent. It
  * then stores `first_exception_` and its epoch, drains all queues, marks
@@ -1438,6 +1553,9 @@ void GpuPipelineScheduler::inc_tasks_to_complete(int delta) {
  * rejects every later publisher until batch reset.
  */
 void GpuPipelineScheduler::set_exception(std::exception_ptr e) {
+  if (e == nullptr) {
+    return;
+  }
   {
     std::scoped_lock queue_lock(rt_queue_mutex_, gpu_queue_mutex_);
     const uint64_t publisher_epoch =

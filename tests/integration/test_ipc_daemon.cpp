@@ -884,25 +884,25 @@ void write_ipc_graph(const std::filesystem::path& path) {
 }
 
 /**
- * @brief Writes a deterministic graph backed by the built-in constant op.
+ * @brief Writes a graph backed by the external lifecycle operation plugin.
  *
  * @param path YAML source path to create.
  * @return Nothing.
  * @throws std::filesystem::filesystem_error or std::ios_base::failure on IO
  *         failure.
- * @note The daemon must seed built-in operations before computing this graph.
- *       The small image keeps the scheduler-serialization test focused on Host
- *       ownership rather than operation cost.
+ * @note The daemon must load the lifecycle operation DSO before computing this
+ *       graph. Its deterministic empty-image result keeps the serialization
+ *       test focused on operation/scheduler/Host ownership rather than image
+ *       cost.
  */
 void write_scheduler_compute_graph(const std::filesystem::path& path) {
   std::filesystem::create_directories(path.parent_path());
   std::ofstream output(path);
   output.exceptions(std::ios::badbit | std::ios::failbit);
   output << "- id: 1\n"
-            "  name: scheduler_source\n"
-            "  type: image_generator\n"
-            "  subtype: constant\n"
-            "  parameters: {width: 2, height: 2, value: 1, channels: 1}\n";
+            "  name: external_scheduler_source\n"
+            "  type: plugin_lifecycle\n"
+            "  subtype: op\n";
 }
 
 /**
@@ -3970,7 +3970,7 @@ TEST(IpcDaemonSchedulers,
   EXPECT_EQ(response["result"]["session_id"], loaded.value.session_id.value);
   EXPECT_EQ(response["result"]["intent"], "global_high_precision");
   EXPECT_EQ(response["result"]["scheduler_name"], kDestroyCountSchedulerType);
-  EXPECT_EQ(response["result"]["stats"], "destroy-count-test");
+  EXPECT_EQ(response["result"]["stats"], "completion=0");
 
   response = raw_daemon_call(
       load_socket, "scheduler.replace",
@@ -4047,10 +4047,23 @@ TEST(IpcDaemonSchedulers,
   EXPECT_TRUE(daemon.exited_successfully());
 }
 
+/**
+ * @brief Serializes scheduler inspection/replacement against a daemon compute
+ * that crosses both external plugin boundaries.
+ *
+ * @return Nothing; GoogleTest records assertion failures.
+ * @throws Nothing when the real daemon, operation DSO, scheduler DSO, and
+ *         compute RPC satisfy their contracts; GoogleTest records mismatches.
+ * @note The compute is deliberately held inside the external scheduler after
+ *       the external v2 operation has been registered. This proves Host graph
+ *       admission protects the complete operation/scheduler/compute chain.
+ */
 TEST(IpcDaemonSchedulers,
      RealFixtureComputeSerializesInformationAndReplacement) {
   ScopedDaemonDirectory temp("ps-scheduler-serialize", true);
+  const std::filesystem::path operation_dir = lifecycle_operation_plugin_dir();
   const std::filesystem::path plugin_path = scheduler_fixture_plugin_path();
+  ASSERT_TRUE(std::filesystem::is_directory(operation_dir));
   ASSERT_TRUE(std::filesystem::is_regular_file(plugin_path));
   const std::filesystem::path trace_path = temp.path() / "scheduler.trace";
   const std::filesystem::path gate_path = temp.path() / "compute.fifo";
@@ -4067,9 +4080,16 @@ TEST(IpcDaemonSchedulers,
   ASSERT_TRUE(daemon.wait_ready(std::chrono::seconds(5)));
 
   internal::Json response = raw_daemon_call(
-      socket_path, "plugins.seed_builtins", internal::Json::object(),
-      "scheduler-serialize-seed-builtins");
+      socket_path, "plugins.load_report",
+      internal::Json{
+          {"directories", internal::Json::array({operation_dir.string()})}},
+      "scheduler-serialize-load-operation");
   ASSERT_TRUE(response.contains("result")) << response.dump();
+  EXPECT_EQ(response["result"]["loaded"], 1);
+  EXPECT_NE(std::find(response["result"]["new_op_keys"].begin(),
+                      response["result"]["new_op_keys"].end(),
+                      internal::Json("plugin_lifecycle:op")),
+            response["result"]["new_op_keys"].end());
   response = raw_daemon_call(socket_path, "scheduler.load",
                              internal::Json{{"path", plugin_path.string()}},
                              "scheduler-serialize-load");
@@ -4185,6 +4205,13 @@ TEST(IpcDaemonSchedulers,
       information_response["result"]["scheduler_name"].get<std::string>();
   EXPECT_TRUE(observed_name == kDestroyCountSchedulerType ||
               observed_name == "serial_debug");
+
+  const auto computed_node =
+      client.inspect_node(loaded.value.session_id, NodeId{1});
+  ASSERT_TRUE(computed_node.status.ok) << computed_node.status.message;
+  ASSERT_TRUE(computed_node.value.space.has_value());
+  EXPECT_EQ(computed_node.value.space->absolute_roi.width, 11);
+  EXPECT_EQ(computed_node.value.space->absolute_roi.height, 7);
 
   response = raw_daemon_call(
       socket_path, "scheduler.info",

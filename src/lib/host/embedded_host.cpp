@@ -16,7 +16,7 @@
 #include <utility>
 #include <vector>
 
-#include "adapter/buffer_adapter_opencv.hpp"
+#include "adapters/opencv/buffer_adapter_opencv.hpp"
 #include "compute/dirty_region_snapshot.hpp"
 #include "photospider/host/host.hpp"
 #include "runtime/interaction.hpp"

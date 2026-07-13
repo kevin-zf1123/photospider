@@ -63,10 +63,10 @@ REQUIRED_BLOCK_COMMANDS = {"brief", "return", "throws", "note"}
 CALLABLE_DECL_KINDS = {"FunctionDecl", "CXXMethodDecl"}
 CLI_TARGET_NAMES = ("photospider_cli_common", "graph_cli")
 EXPECTED_CLI_TARGET_SOURCE_COUNTS = {
-    "photospider_cli_common": 57,
+    "photospider_cli_common": 59,
     "graph_cli": 1,
 }
-EXPECTED_CLI_TARGET_CLOSURE_SOURCE_COUNT = 58
+EXPECTED_CLI_TARGET_CLOSURE_SOURCE_COUNT = 60
 EXPECTED_AUDITED_SOURCE_COUNT = 60
 REQUIRED_EXTENDED_DOXYGEN_SOURCES = (
     "apps/graph_cli/src/dependency_tree_formatter.cpp",
@@ -98,18 +98,35 @@ EXPECTED_EXTENDED_DOXYGEN_PATH_COUNT = 22
 EXPECTED_EXTENDED_DOXYGEN_SYMBOL_COUNT = 72
 REQUIRED_EXTENDED_SYMBOLS = {
     "dependency_tree_formatter.cpp": (
-        "indent", "dump_parameters", "dump_trimmed_metadata", "dump_matrix",
-        "dirty_domain_name", "dirty_source_lifecycle_name",
-        "dirty_edge_direction_name", "rect_text", "format_node_metadata",
-        "format_node_inspection", "format_graph_inspection",
-        "format_dirty_snapshot", "format_dependency_tree",
+        "indent",
+        "dump_parameters",
+        "dump_trimmed_metadata",
+        "dump_matrix",
+        "dirty_domain_name",
+        "dirty_source_lifecycle_name",
+        "dirty_edge_direction_name",
+        "rect_text",
+        "format_node_metadata",
+        "format_node_inspection",
+        "format_graph_inspection",
+        "format_dirty_snapshot",
+        "format_dependency_tree",
     ),
     "do_traversal.cpp": ("do_traversal",),
     "node_editor.cpp": (
-        "run_node_editor_decoupled", "Tree2Mode", "load_current", "t2",
-        "menu_on_change", "textarea_on_change", "text_with_offsets",
-        "tree1_view", "tree2_view", "renderer", "apply_current_editor",
-        "open_external_editor", "catch_event_callback",
+        "run_node_editor_decoupled",
+        "Tree2Mode",
+        "load_current",
+        "t2",
+        "menu_on_change",
+        "textarea_on_change",
+        "text_with_offsets",
+        "tree1_view",
+        "tree2_view",
+        "renderer",
+        "apply_current_editor",
+        "open_external_editor",
+        "catch_event_callback",
     ),
     "node_editor_full.cpp": ("run_node_editor_full",),
     "cli_autocompleter.cpp": ("CliAutocompleter", "Complete"),
@@ -126,17 +143,34 @@ REQUIRED_EXTENDED_SYMBOLS = {
     "FindLongestCommonPrefix.cpp": ("FindLongestCommonPrefix",),
     "Tokenize.cpp": ("Tokenize",),
     "cli_autocompleter.hpp": (
-        "CompletionResult", "options", "new_line", "new_cursor_pos",
-        "CliAutocompleter", "SetCurrentGraph", "Complete", "Tokenize",
-        "FindLongestCommonPrefix", "CompleteCommand", "CompletePath",
-        "CompleteYamlPath", "CompleteNodeId", "CompletePrintArgs",
-        "CompleteTraversalArgs", "CompleteComputeArgs", "CompleteGraphName",
-        "CompleteSessionName", "CompleteOpsMode", "svc_", "commands_",
+        "CompletionResult",
+        "options",
+        "new_line",
+        "new_cursor_pos",
+        "CliAutocompleter",
+        "SetCurrentGraph",
+        "Complete",
+        "Tokenize",
+        "FindLongestCommonPrefix",
+        "CompleteCommand",
+        "CompletePath",
+        "CompleteYamlPath",
+        "CompleteNodeId",
+        "CompletePrintArgs",
+        "CompleteTraversalArgs",
+        "CompleteComputeArgs",
+        "CompleteGraphName",
+        "CompleteSessionName",
+        "CompleteOpsMode",
+        "svc_",
+        "commands_",
         "current_graph_",
     ),
     "dependency_tree_formatter.hpp": (
-        "format_node_metadata", "format_node_inspection",
-        "format_graph_inspection", "format_dirty_snapshot",
+        "format_node_metadata",
+        "format_node_inspection",
+        "format_graph_inspection",
+        "format_dirty_snapshot",
         "format_dependency_tree",
     ),
     "do_traversal.hpp": ("do_traversal",),
@@ -145,7 +179,11 @@ REQUIRED_EXTENDED_SYMBOLS = {
 }
 
 EXTENDED_FIELD_SYMBOLS = {
-    "options", "new_line", "new_cursor_pos", "svc_", "commands_",
+    "options",
+    "new_line",
+    "new_cursor_pos",
+    "svc_",
+    "commands_",
     "current_graph_",
 }
 EXTENDED_TYPE_SYMBOLS = {"CompletionResult", "Tree2Mode"}
@@ -155,7 +193,9 @@ NODE_EDITOR_ENTITY_LOCATORS = {
     "t2": (r"\bauto\s+t2\s*=\s*\[&\]", 1, ()),
     "menu_on_change": (r"\bmenu_opt\.on_change\s*=\s*\[&\]", 1, ()),
     "textarea_on_change": (
-        r"\btextarea_opt\.on_change\s*=\s*\[&\]", 1, (),
+        r"\btextarea_opt\.on_change\s*=\s*\[&\]",
+        1,
+        (),
     ),
     "text_with_offsets": (
         r"\bauto\s+text_with_offsets\s*=\s*\[&\]\s*\(",
@@ -166,13 +206,19 @@ NODE_EDITOR_ENTITY_LOCATORS = {
     "tree2_view": (r"\bauto\s+tree2_view\s*=\s*Renderer\s*\(\s*\[&\]", 1, ()),
     "renderer": (r"\bauto\s+renderer\s*=\s*Renderer\s*\([^,]+,\s*\[&\]", 1, ()),
     "apply_current_editor": (
-        r"\bauto\s+apply_current_editor\s*=\s*\[&\]", 1, (),
+        r"\bauto\s+apply_current_editor\s*=\s*\[&\]",
+        1,
+        (),
     ),
     "open_external_editor": (
-        r"\bauto\s+open_external_editor\s*=\s*\[&\]", 1, (),
+        r"\bauto\s+open_external_editor\s*=\s*\[&\]",
+        1,
+        (),
     ),
     "catch_event_callback": (
-        r"\bCatchEvent\s*\(\s*\[&\]\s*\(", 1, ("e",),
+        r"\bCatchEvent\s*\(\s*\[&\]\s*\(",
+        1,
+        ("e",),
     ),
 }
 REQUIRED_ROOT_CLI_TRANSLATION_UNITS = (
@@ -212,10 +258,14 @@ def extended_entity_manifest() -> list[dict[str, Any]]:
                 occurrence = 1
                 parameters = None
             kind = (
-                "field" if symbol in EXTENDED_FIELD_SYMBOLS
+                "field"
+                if symbol in EXTENDED_FIELD_SYMBOLS
                 else "type"
                 if symbol in EXTENDED_TYPE_SYMBOLS
-                or (path_name == "cli_autocompleter.hpp" and symbol == "CliAutocompleter")
+                or (
+                    path_name == "cli_autocompleter.hpp"
+                    and symbol == "CliAutocompleter"
+                )
                 else "callable"
             )
             copydoc = None
@@ -331,8 +381,7 @@ def scan_extended_entity(source: str, entity: dict[str, Any]) -> dict[str, Any]:
     matches = [
         match
         for match in re.finditer(entity["locator"], source, re.MULTILINE)
-        if source.rfind("/**", 0, match.start())
-        <= source.rfind("*/", 0, match.start())
+        if source.rfind("/**", 0, match.start()) <= source.rfind("*/", 0, match.start())
         and immediate_doxygen_before(source, match.start())
     ]
     occurrence = entity["occurrence"]
@@ -344,14 +393,18 @@ def scan_extended_entity(source: str, entity: dict[str, Any]) -> dict[str, Any]:
     parameters = entity["parameters"]
     if entity["kind"] == "callable" and parameters is None and match:
         parameters = parameter_names_after(source, match.end())
-    copy_targets = re.findall(r"@copydoc\s+([^\r\n*]+?)\s*(?=\*/|$)", comment, re.MULTILINE)
+    copy_targets = re.findall(
+        r"@copydoc\s+([^\r\n*]+?)\s*(?=\*/|$)", comment, re.MULTILINE
+    )
     copy_target = copy_targets[0] if len(copy_targets) == 1 else None
     exact_copydoc = len(copy_targets) == 1 and copy_target == entity["copydoc"]
     if entity["kind"] == "field":
         complete = bool(comment) and "@brief" in comment and not copy_targets
     elif entity["kind"] == "type":
-        complete = bool(comment) and not copy_targets and all(
-            tag in comment for tag in ("@brief", "@throws", "@note")
+        complete = (
+            bool(comment)
+            and not copy_targets
+            and all(tag in comment for tag in ("@brief", "@throws", "@note"))
         )
     else:
         full = (
@@ -433,7 +486,9 @@ def inspect_extended_doxygen_inventory(
     )
     inventory_symbol_count = len(entities)
     passes = bool(
-        target_closure["passes"] and not missing_files and not missing_from_closure
+        target_closure["passes"]
+        and not missing_files
+        and not missing_from_closure
         and len(required_paths) == EXPECTED_EXTENDED_DOXYGEN_PATH_COUNT
         and inventory_symbol_count == EXPECTED_EXTENDED_DOXYGEN_SYMBOL_COUNT
         and not missing_compile_commands
@@ -453,6 +508,7 @@ def inspect_extended_doxygen_inventory(
         "passes": passes,
         "symbols": rows,
     }
+
 
 GUARD_DEFINITIONS = (
     ("src/lib/benchmark/benchmark_service.cpp", "RunAll", 1),
@@ -931,8 +987,7 @@ def inspect_cli_target_source_closure(
     cmake_text = (repo / "CMakeLists.txt").read_text(encoding="utf-8")
     graph_cli_declared = bool(
         re.search(
-            r"add_executable\s*\(\s*graph_cli\s+"
-            r"apps/graph_cli/main\.cpp\s*\)",
+            r"add_executable\s*\(\s*graph_cli\s+" r"apps/graph_cli/main\.cpp\s*\)",
             cmake_text,
         )
     )
@@ -1680,9 +1735,9 @@ def inspect_semantics(repo: Path) -> dict[str, Any]:
     commands_header = (
         repo / "apps/graph_cli/include/graph_cli/command/commands.hpp"
     ).read_text(encoding="utf-8")
-    repl_header = (
-        repo / "apps/graph_cli/include/graph_cli/run_repl.hpp"
-    ).read_text(encoding="utf-8")
+    repl_header = (repo / "apps/graph_cli/include/graph_cli/run_repl.hpp").read_text(
+        encoding="utf-8"
+    )
     benchmark_source = (
         repo / "apps/graph_cli/src/benchmark_config_editor.cpp"
     ).read_text(encoding="utf-8")
@@ -2015,7 +2070,9 @@ def run_extended_negative_self_tests(repo: Path, out: Path) -> bool:
             prefix="photospider-cli-negative-", dir="/tmp"
         ) as temp:
             temp_repo = Path(temp)
-            for path_text in REQUIRED_EXTENDED_DOXYGEN_SOURCES + REQUIRED_EXTENDED_DOXYGEN_HEADERS:
+            for path_text in (
+                REQUIRED_EXTENDED_DOXYGEN_SOURCES + REQUIRED_EXTENDED_DOXYGEN_HEADERS
+            ):
                 destination = temp_repo / path_text
                 destination.parent.mkdir(parents=True, exist_ok=True)
                 destination.write_text(
@@ -2037,7 +2094,9 @@ def run_extended_negative_self_tests(repo: Path, out: Path) -> bool:
                     flags=re.DOTALL,
                 )
                 if count != 1:
-                    raise ValueError("negative self-test could not delete Tree2Mode comment")
+                    raise ValueError(
+                        "negative self-test could not delete Tree2Mode comment"
+                    )
                 path.write_text(text, encoding="utf-8")
             elif case == "wrong_copydoc":
                 path = temp_repo / "apps/graph_cli/src/do_traversal.cpp"

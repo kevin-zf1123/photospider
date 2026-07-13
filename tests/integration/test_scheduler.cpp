@@ -14,8 +14,8 @@
 #include <utility>
 #include <vector>
 
-#include "adapter/buffer_adapter_opencv.hpp"  // <--- 修正点: 添加缺失的头文件
-#include "compute/compute_service.hpp"        // <--- 修正点: 添加缺失的头文件
+#include "adapters/opencv/buffer_adapter_opencv.hpp"  // <--- 修正点: 添加缺失的头文件
+#include "compute/compute_service.hpp"  // <--- 修正点: 添加缺失的头文件
 #include "compute/compute_task_dispatcher.hpp"
 #include "compute/realtime_proxy_graph.hpp"
 #include "graph/graph_cache_service.hpp"      // <--- 修正点: 添加缺失的头文件
@@ -99,6 +99,58 @@ void write_scheduler_trace_json(
   ofs << std::setw(2) << scheduler_trace_json(events) << std::endl;
 }
 
+/**
+ * @brief Owns a small test callback batch exposed through public task handles.
+ * @throws std::bad_alloc when owned callback or returned handle storage grows.
+ * @note Instances borrow the scheduler runtime and must outlive the matching
+ * source-first submission call.
+ */
+class OrderedBatchTaskExecutor final : public ps::TaskExecutor {
+ public:
+  /**
+   * @brief Takes ownership of callbacks for one scheduler batch.
+   * @param runtime Running scheduler runtime used for completion accounting.
+   * @param tasks Callbacks indexed by TaskHandle::task_id.
+   * @throws std::bad_alloc if callback storage ownership allocates.
+   */
+  OrderedBatchTaskExecutor(ps::SchedulerTaskRuntime& runtime,
+                           std::vector<ps::SchedulerTaskRuntime::Task> tasks)
+      : runtime_(runtime), tasks_(std::move(tasks)) {}
+
+  /**
+   * @brief Returns one task handle for each owned callback.
+   * @return Borrowed handles valid while this executor remains alive.
+   * @throws std::bad_alloc if handle storage allocation fails.
+   */
+  std::vector<ps::TaskHandle> handles() {
+    std::vector<ps::TaskHandle> result;
+    result.reserve(tasks_.size());
+    for (std::size_t index = 0; index < tasks_.size(); ++index) {
+      result.push_back(ps::TaskHandle{this, static_cast<int>(index),
+                                      static_cast<int>(index)});
+    }
+    return result;
+  }
+
+  /**
+   * @brief Executes one callback and settles scheduler task accounting.
+   * @param task_id Dense callback index supplied by the task handle.
+   * @return Nothing.
+   * @throws std::out_of_range for an invalid task id.
+   * @throws The exact callback or scheduler completion exception.
+   */
+  void run_task(int task_id) override {
+    tasks_.at(static_cast<std::size_t>(task_id))();
+    runtime_.dec_tasks_to_complete();
+  }
+
+ private:
+  /** @brief Borrowed scheduler runtime for completion accounting. */
+  ps::SchedulerTaskRuntime& runtime_;
+  /** @brief Owned callbacks indexed by public task handles. */
+  std::vector<ps::SchedulerTaskRuntime::Task> tasks_;
+};
+
 }  // namespace
 
 // =============================================================================
@@ -126,8 +178,12 @@ TEST(SchedulerDirtyReadyTasks, SourceFirstOrderOnSerialAndCpuSchedulers) {
       order.push_back(3);
     });
 
+    OrderedBatchTaskExecutor source_executor(runtime, std::move(source_tasks));
+    OrderedBatchTaskExecutor downstream_executor(runtime,
+                                                 std::move(downstream_tasks));
     ps::compute::ComputeTaskDispatcher::submit_dirty_ready_tasks_source_first(
-        runtime, std::move(source_tasks), std::move(downstream_tasks), 44);
+        runtime, source_executor.handles(), 2, downstream_executor.handles(),
+        1);
 
     std::lock_guard<std::mutex> lock(mutex);
     ASSERT_EQ(order.size(), 3u);

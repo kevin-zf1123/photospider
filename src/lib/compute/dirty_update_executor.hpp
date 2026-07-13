@@ -1,8 +1,10 @@
 #pragma once
 
+#include <map>
 #include <memory>
 #include <optional>
 #include <string>
+#include <unordered_set>
 #include <vector>
 
 #include "benchmark/benchmark_types.hpp"
@@ -13,11 +15,237 @@ namespace ps {
 class GraphEventService;
 class GraphRuntime;
 class GraphTraversalService;
+class SchedulerTaskRuntime;
 }  // namespace ps
 
 namespace ps::compute {
 class DirtySiblingCommitGate;
 class RealtimeProxyGraph;
+
+/**
+ * @brief One HP result produced during connected-parameter stabilization.
+ *
+ * @note The output remains request-local until the HP dirty write buffer
+ * commits the complete request. Copying the output preserves any plugin DSO
+ * lease carried by its public image/data ownership handles.
+ */
+struct StabilizedDirtyNodeOutput {
+  /** @brief Immutable output produced by the HP preflight execution. */
+  NodeOutput output;
+
+  /** @brief HP content version to publish if the complete request succeeds. */
+  int hp_version = 0;
+
+  /** @brief Full HP image ROI represented by output, when it has an image. */
+  std::optional<cv::Rect> hp_roi;
+};
+
+/**
+ * @brief Immutable connected-parameter snapshot shared by dirty HP/RT paths.
+ *
+ * A stabilization pass force-executes every HP node required to produce the
+ * target cone's connected parameter values. The resulting outputs never enter
+ * GraphModel directly. HP phase two imports the complete staged closure into
+ * its write buffer, while RT uses only parameter-producing values for
+ * effective-parameter resolution and continues to execute image paths in the
+ * RT domain.
+ *
+ * @throws std::bad_alloc when copied output, node-id, or set storage grows.
+ * @note Instances are fully built before publication through shared_ptr and
+ * are read-only thereafter, so concurrent HP/RT sibling planning may share one
+ * exact snapshot without executing a parameter producer twice.
+ */
+class StabilizedDirtyParameters {
+ public:
+  /**
+   * @brief Returns whether this request has connected parameter producers.
+   * @return True when phase-one stabilization executed a producer closure.
+   * @throws Nothing.
+   */
+  bool has_connected_parameters() const noexcept {
+    return !parameter_producer_node_ids_.empty();
+  }
+
+  /**
+   * @brief Returns the generation reserved for both HP and RT siblings.
+   * @return Non-zero request generation allocated before preflight.
+   * @throws Nothing.
+   */
+  uint64_t request_generation() const noexcept { return request_generation_; }
+
+  /**
+   * @brief Returns the topology generation captured before preflight.
+   * @return Graph topology generation shared by both dirty siblings.
+   * @throws Nothing.
+   */
+  uint64_t topology_generation() const noexcept { return topology_generation_; }
+
+  /**
+   * @brief Finds any HP output staged by the stabilization closure.
+   * @param node_id Graph node id to look up.
+   * @return Borrowed immutable output, or nullptr when node_id was not staged.
+   * @throws Nothing.
+   * @note The returned pointer remains valid for this object's lifetime.
+   */
+  const NodeOutput* find_staged_output(int node_id) const noexcept;
+
+  /**
+   * @brief Finds the exact output of a connected parameter producer.
+   * @param node_id Parameter producer node id.
+   * @return Borrowed immutable producer output, or nullptr for other nodes.
+   * @throws Nothing.
+   * @note RT parameter resolution uses this lookup independently from its
+   * image-input lookup so HP images cannot replace RT-domain image results.
+   */
+  const NodeOutput* find_parameter_output(int node_id) const noexcept;
+
+  /**
+   * @brief Reports whether a node output geometry may change in this request.
+   * @param node_id Graph node id to inspect.
+   * @return True for a connected-parameter consumer or one of its image-edge
+   * descendants in the target cone.
+   * @throws Nothing.
+   */
+  bool geometry_affected(int node_id) const noexcept;
+
+  /**
+   * @brief Returns every node staged by the HP stabilization closure.
+   * @return Immutable node-id to staged-output map.
+   * @throws Nothing.
+   */
+  const std::map<int, StabilizedDirtyNodeOutput>& staged_outputs()
+      const noexcept {
+    return staged_outputs_;
+  }
+
+  /**
+   * @brief Returns the HP node identities already executed by preflight.
+   * @return Immutable set used to exclude HP phase-two tasks explicitly.
+   * @throws Nothing.
+   */
+  const std::unordered_set<int>& staged_node_ids() const noexcept {
+    return staged_node_ids_;
+  }
+
+  /**
+   * @brief Reports whether a staged node is a preflight closure source.
+   * @param node_id Node identity to inspect.
+   * @return True when no staged upstream node feeds node_id.
+   * @throws Nothing.
+   */
+  bool is_staged_source(int node_id) const noexcept {
+    return staged_source_node_ids_.count(node_id) != 0;
+  }
+
+  /**
+   * @brief Returns direct connected-parameter producer identities.
+   * @return Immutable producer node-id set.
+   * @throws Nothing.
+   */
+  const std::unordered_set<int>& parameter_producer_node_ids() const noexcept {
+    return parameter_producer_node_ids_;
+  }
+
+  /**
+   * @brief Returns data-only parameter producers reusable by RT planning.
+   * @return Immutable set of producer node ids with no image payload.
+   * @throws Nothing.
+   * @note Parameter producers that also carry images are not externally
+   * satisfied in RT; their image work remains domain-local.
+   */
+  const std::unordered_set<int>& rt_satisfied_parameter_node_ids()
+      const noexcept {
+    return rt_satisfied_parameter_node_ids_;
+  }
+
+  /**
+   * @brief Returns image-carrying parameter producers RT must still execute.
+   * @return Immutable set of producer node ids requiring RT-domain work.
+   * @throws Nothing.
+   * @note Their HP data snapshot remains authoritative for parameter merging;
+   * RT execution exists only to preserve image-domain separation.
+   */
+  const std::unordered_set<int>& rt_required_parameter_node_ids()
+      const noexcept {
+    return rt_required_parameter_node_ids_;
+  }
+
+  /**
+   * @brief Returns geometry-affected node identities in the target cone.
+   * @return Immutable set used by shadow planning and dirty ROI promotion.
+   * @throws Nothing.
+   */
+  const std::unordered_set<int>& geometry_affected_node_ids() const noexcept {
+    return geometry_affected_node_ids_;
+  }
+
+ private:
+  friend std::shared_ptr<const StabilizedDirtyParameters>
+  stabilize_connected_dirty_parameters(GraphModel&, GraphTraversalService&, int,
+                                       uint64_t, uint64_t,
+                                       SchedulerTaskRuntime*);
+
+  /** @brief Generation shared by every domain of one dirty request. */
+  uint64_t request_generation_ = 0;
+
+  /** @brief Topology identity used to reject mutation during execution. */
+  uint64_t topology_generation_ = 0;
+
+  /** @brief HP closure outputs retained until request completion. */
+  std::map<int, StabilizedDirtyNodeOutput> staged_outputs_;
+
+  /** @brief Node ids aligned with staged_outputs_ for task exclusion. */
+  std::unordered_set<int> staged_node_ids_;
+
+  /** @brief Preflight roots that receive the shared dirty generation. */
+  std::unordered_set<int> staged_source_node_ids_;
+
+  /** @brief Direct connected-parameter producer node ids. */
+  std::unordered_set<int> parameter_producer_node_ids_;
+
+  /** @brief Data-only producer ids that RT may treat as satisfied. */
+  std::unordered_set<int> rt_satisfied_parameter_node_ids_;
+
+  /** @brief Image-carrying producers that retain RT-domain execution. */
+  std::unordered_set<int> rt_required_parameter_node_ids_;
+
+  /** @brief Consumers/descendants whose output extent may have changed. */
+  std::unordered_set<int> geometry_affected_node_ids_;
+};
+
+/**
+ * @brief Stabilizes connected parameter values before dirty intent dispatch.
+ *
+ * The pass finds every connected parameter producer in the target dependency
+ * cone, expands their complete upstream closure, and force-executes that
+ * closure once in topological HP order into request-local storage. It bypasses
+ * memory and disk cache so a producer that consumes a changed image/source
+ * observes this request's current operation result.
+ *
+ * @param graph Live graph whose topology and committed inputs are read.
+ * @param traversal Traversal service used to derive target postorder.
+ * @param target_node_id Dirty request target.
+ * @param request_generation Non-zero identity reserved for the whole request.
+ * @param topology_generation Topology identity captured with the generation.
+ * @param task_runtime Optional HP scheduler runtime. When supplied, every
+ * preflight node is opened as a high-priority single-handle initial batch and
+ * its matching completion wait drains before the next topological node.
+ * @return Immutable shared request snapshot. An empty producer set means no
+ * connected-parameter preflight was needed, but generation identity remains.
+ * @throws GraphError for missing targets, dependencies, operations, or empty
+ * operation results.
+ * @throws std::bad_alloc unchanged from topology, operation, or output storage.
+ * @note The caller must serialize graph topology/cache mutation for the call.
+ * No GraphModel cache, RT proxy, timing, or event state is published. Operation
+ * callbacks retain the existing non-rollbackable external side-effect
+ * semantics, but each preflight closure node executes at most once and is not
+ * repeated by HP phase two.
+ */
+std::shared_ptr<const StabilizedDirtyParameters>
+stabilize_connected_dirty_parameters(
+    GraphModel& graph, GraphTraversalService& traversal, int target_node_id,
+    uint64_t request_generation, uint64_t topology_generation,
+    SchedulerTaskRuntime* task_runtime = nullptr);
 
 /**
  * @brief Immutable options for one dirty update executor call.
@@ -82,6 +310,15 @@ struct DirtyUpdateRequest {
    * committing proxy output; RT failure aborts the HP commit.
    */
   std::shared_ptr<DirtySiblingCommitGate> sibling_commit_gate;
+
+  /**
+   * @brief Optional exact connected-parameter snapshot shared by HP and RT.
+   *
+   * @note The snapshot is immutable. HP imports its staged closure into the
+   * final HP write buffer; RT reads only exact parameter producer values and
+   * continues to execute image-path work in its own domain.
+   */
+  std::shared_ptr<const StabilizedDirtyParameters> stabilized_parameters;
 };
 
 /**

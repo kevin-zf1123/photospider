@@ -4,10 +4,11 @@
 #include <optional>
 #include <string>
 #include <unordered_map>
+#include <unordered_set>
 #include <vector>
 
 #include "compute/dirty_region_snapshot.hpp"
-#include "ps_types.hpp"  // NOLINT(build/include_subdir)
+#include "core/ps_types.hpp"  // NOLINT(build/include_subdir)
 
 namespace ps {
 class GraphModel;
@@ -447,14 +448,21 @@ class DirtySnapshotTaskGraphPruner {
    * @param node_cache_plan Immutable plan produced by
    * NodeCacheTaskGraphPruner.
    * @param snapshot Graph-scoped dirty facts for the same compute domain.
+   * @param graph Graph used for exact task-level ROI dependencies.
+   * @param externally_satisfied_node_ids Optional request-local node identities
+   * whose outputs are already staged and must not execute in this phase.
    * @return Generation-local active task overlay and source/downstream groups.
    * @throws std::bad_alloc if overlay vectors or maps cannot grow.
    * @note This is the dirty execution path: it does not mutate or duplicate
    * PlannedTask records, and it preserves task ids from node_cache_plan.
+   * Dependencies on explicitly satisfied nodes remain outside the active view
+   * and are therefore treated as completed without reusing their task ids.
    */
-  DirtyTaskSelectionOverlay select(const ComputePlan& node_cache_plan,
-                                   const DirtyRegionSnapshot& snapshot,
-                                   const GraphModel& graph) const;
+  DirtyTaskSelectionOverlay select(
+      const ComputePlan& node_cache_plan, const DirtyRegionSnapshot& snapshot,
+      const GraphModel& graph,
+      const std::unordered_set<int>* externally_satisfied_node_ids =
+          nullptr) const;
 
   /**
    * @brief Annotates and clips a node/cache-pruned plan with dirty metadata.
@@ -527,11 +535,12 @@ class TaskGraphReadyChecker {
  *
  * @param graph Graph whose topology generation participates in the key.
  * @param intent Compute intent whose HP/RT domain is expanded.
- * @return Cache key covering topology generation, intent, and task-shape
- * configuration version.
+ * @return Cache key covering topology generation, intent, task-shape
+ * configuration version, and operation-registry task-shape generation.
  * @throws std::bad_alloc if string construction fails.
  * @note The shape config token must change when tile sizing or task shape
- * selection semantics change.
+ *       selection semantics change. A plugin callback-shape override or unload
+ *       advances the registry generation and cannot reuse predecessor tasks.
  */
 std::string full_task_graph_cache_key(const GraphModel& graph,
                                       ComputeIntent intent);
@@ -542,9 +551,13 @@ std::string full_task_graph_cache_key(const GraphModel& graph,
  * @param graph GraphModel owning the per-topology full graph cache.
  * @param intent Compute intent whose single-domain full graph is required.
  * @return Shared immutable full graph for request/cache/dirty pruning.
- * @throws GraphError or standard exceptions from expansion or allocation.
+ * @throws GraphError when the operation registry changes continuously across
+ *         all bounded expansion attempts.
+ * @throws Standard exceptions from expansion or allocation.
  * @note HP and RT requests use distinct keys and therefore never share task
- * pools or cross-intent dependencies.
+ *       pools or cross-intent dependencies. Registry generation is sampled
+ *       before and after cache lookup and expansion; an inconsistent attempt
+ *       is discarded and retried.
  */
 std::shared_ptr<const FullTaskGraph> get_or_expand_full_task_graph(
     GraphModel& graph, ComputeIntent intent);

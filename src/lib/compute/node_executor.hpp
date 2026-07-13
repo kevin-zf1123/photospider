@@ -5,8 +5,8 @@
 #include <vector>
 
 #include "compute/tiled_input_normalizer.hpp"
+#include "core/ps_types.hpp"      // NOLINT(build/include_subdir)
 #include "graph/graph_model.hpp"  // NOLINT(build/include_subdir)
-#include "ps_types.hpp"           // NOLINT(build/include_subdir)
 
 namespace ps::compute {
 
@@ -111,15 +111,23 @@ class NodeExecutor {
    * @param output_roi Output tile ROI being computed.
    * @param input_buffer Input buffer whose bounds clip the mapped ROI.
    * @param config Tiled execution metadata and halo overrides.
+   * @param known_input_extents Request-local image-input extents by destination
+   *        index; empty means resolve committed cache hints.
+   * @param known_effective_parameters Optional caller-resolved parameter
+   *        snapshot. Null uses execution-local runtime/static parameters.
+   * @param available_inputs Optional destination-indexed inputs from the
+   *        current execution batch. Null selects planning snapshots.
    * @return Input ROI clipped to input_buffer bounds.
    * @throws GraphError or propagator exceptions from random-access ROI mapping.
    * @note Empty propagated ROIs fall back to clipped output_roi, matching
    * legacy tiled execution behavior.
    */
-  static cv::Rect input_roi_for_tile(GraphModel& graph, const Node& node,
-                                     const cv::Rect& output_roi,
-                                     const ImageBuffer& input_buffer,
-                                     const TiledExecutionConfig& config);
+  static cv::Rect input_roi_for_tile(
+      GraphModel& graph, const Node& node, const cv::Rect& output_roi,
+      const ImageBuffer& input_buffer, const TiledExecutionConfig& config,
+      const std::vector<cv::Size>& known_input_extents = {},
+      const plugin::ParameterMap* known_effective_parameters = nullptr,
+      const std::vector<const NodeOutput*>* available_inputs = nullptr);
 
   /**
    * @brief Invokes the tiled operator for a prepared tile task.

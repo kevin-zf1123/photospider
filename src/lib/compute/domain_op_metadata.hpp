@@ -4,7 +4,7 @@
 #include <string>
 
 #include "compute/dirty_region_snapshot.hpp"
-#include "ps_types.hpp"  // NOLINT(build/include_subdir)
+#include "core/ps_types.hpp"  // NOLINT(build/include_subdir)
 
 namespace ps::compute {
 

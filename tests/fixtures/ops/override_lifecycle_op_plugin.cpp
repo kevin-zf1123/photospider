@@ -1,10 +1,10 @@
 #include <cstdio>
 #include <cstdlib>
 #include <memory>
+#include <stdexcept>
 #include <utility>
-#include <vector>
 
-#include "plugin_api.hpp"  // NOLINT(build/include_subdir)
+#include "photospider/plugin/plugin_api.hpp"
 
 namespace {
 
@@ -78,23 +78,22 @@ OverrideLibraryLifetimeProbe override_library_lifetime_probe;
 /**
  * @brief Replacement operation used to verify plugin key overwrite handling.
  *
- * @param node Borrowed graph node; unused by this deterministic lifecycle
- * fixture.
- * @param inputs Borrowed upstream outputs; unused by this deterministic
- * lifecycle fixture.
+ * @param node Borrowed public node view; unused by this fixture.
+ * @param inputs Borrowed public upstream views; unused by this fixture.
  * @return Empty output with a marker that distinguishes the replacement
  * implementation from the original lifecycle plugin.
  * @throws std::bad_alloc if output diagnostic string storage cannot allocate.
  * @note The callback lives in the replacement plugin library and must be
  * removed or replaced before that library is unloaded.
  */
-ps::NodeOutput override_lifecycle_test_op(
-    const ps::Node& node, const std::vector<const ps::NodeOutput*>& inputs) {
+ps::plugin::OperationOutput override_lifecycle_test_op(
+    const ps::plugin::NodeView& node,
+    ps::plugin::ArrayView<ps::plugin::OperationInputView> inputs) {
   (void)node;
   (void)inputs;
 
-  ps::NodeOutput output;
-  output.space.absolute_roi = cv::Rect(0, 0, 22, 9);
+  ps::plugin::OperationOutput output;
+  output.spatial.absolute_roi = ps::PixelRect{0, 0, 22, 9};
   output.debug.compute_device = "PLUGIN_OVERRIDE_TEST";
   return output;
 }
@@ -107,11 +106,11 @@ ps::NodeOutput override_lifecycle_test_op(
  * @note The callback body delegates to `override_lifecycle_test_op`; the probe
  *       exists only to audit callback-before-library retirement order.
  */
-ps::MonolithicOpFunc make_override_lifecycle_test_op() {
+ps::plugin::MonolithicOperation make_override_lifecycle_test_op() {
   auto probe = std::make_shared<OverrideCallbackLifetimeProbe>();
   return [probe = std::move(probe)](
-             const ps::Node& node,
-             const std::vector<const ps::NodeOutput*>& inputs) {
+             const ps::plugin::NodeView& node,
+             ps::plugin::ArrayView<ps::plugin::OperationInputView> inputs) {
     (void)probe;
     return override_lifecycle_test_op(node, inputs);
   };
@@ -120,42 +119,44 @@ ps::MonolithicOpFunc make_override_lifecycle_test_op() {
 /**
  * @brief Propagates replacement-fixture dirty demand unchanged.
  *
- * @param node Borrowed operation node; unused by the pointwise fixture.
- * @param roi Downstream dirty region.
- * @param graph Borrowed graph model; unused by identity propagation.
+ * @param context Borrowed public dirty ROI snapshot.
  * @return The unchanged dirty region.
  * @throws Nothing.
  * @note Registering this slot makes the replacement plugin own the complete
  *       active lifecycle operation rather than leaving mixed plugin sources.
  */
-cv::Rect override_dirty_propagator(const ps::Node& node, const cv::Rect& roi,
-                                   const ps::GraphModel& graph) {
-  (void)node;
-  (void)graph;
-  return roi;
+ps::PixelRect override_dirty_propagator(const ps::plugin::RoiContext& context) {
+  return context.requested_roi;
 }
 
 /**
  * @brief Propagates replacement-fixture affected regions unchanged.
  *
- * @param node Borrowed operation node; unused by the pointwise fixture.
- * @param roi Upstream affected region.
- * @param graph Borrowed graph model; unused by identity propagation.
- * @param parent_size Parent extent; unused by identity propagation.
- * @param child_size Child extent; unused by identity propagation.
+ * @param context Borrowed public forward ROI and active-edge snapshot.
  * @return The unchanged affected region.
  * @throws Nothing.
  * @note The host wraps this callback with the replacement library lease.
  */
-cv::Rect override_forward_propagator(const ps::Node& node, const cv::Rect& roi,
-                                     const ps::GraphModel& graph,
-                                     const cv::Size& parent_size,
-                                     const cv::Size& child_size) {
-  (void)node;
-  (void)graph;
-  (void)parent_size;
-  (void)child_size;
-  return roi;
+ps::PixelRect override_forward_propagator(
+    const ps::plugin::RoiContext& context) {
+  return context.requested_roi;
+}
+
+/**
+ * @brief Builds the replacement lifecycle plugin's dependency table.
+ * @param context Borrowed public topology and output-extent snapshot.
+ * @return One-cell table routed to input zero with x marker two.
+ * @throws std::bad_alloc if cell vector growth cannot allocate.
+ * @note The distinct marker proves cache identity follows callback ownership.
+ */
+ps::plugin::DependencyLutSnapshot override_dependency_builder(
+    const ps::plugin::RoiContext& context) {
+  ps::plugin::DependencyLutSnapshot result;
+  result.upstream_input_index = 0;
+  result.cell_size = context.output_extent;
+  result.output_extent = context.output_extent;
+  result.cell_to_upstream_roi.push_back(ps::PixelRect{2, 0, 1, 1});
+  return result;
 }
 
 }  // namespace
@@ -173,13 +174,13 @@ cv::Rect override_forward_propagator(const ps::Node& node, const cv::Rect& roi,
  * so plugin unload can prove overwritten callbacks are tracked and the
  * previous implementation is restored.
  */
-extern "C" PLUGIN_API void register_photospider_ops_v1(
-    ps::OperationPluginRegistrar* registrar) {
+extern "C" PHOTOSPIDER_OPERATION_PLUGIN_EXPORT void register_photospider_ops_v2(
+    ps::plugin::OperationPluginRegistrar* registrar) {
   if (!registrar) {
     throw std::invalid_argument(
-        "register_photospider_ops_v1 requires registrar");
+        "register_photospider_ops_v2 requires registrar");
   }
-  ps::OpMetadata metadata;
+  ps::plugin::OperationMetadata metadata;
   metadata.cost_score = 2;
   registrar->register_op_hp_monolithic(
       "plugin_lifecycle", "op", make_override_lifecycle_test_op(), metadata);
@@ -187,5 +188,7 @@ extern "C" PLUGIN_API void register_photospider_ops_v1(
                                        override_dirty_propagator);
   registrar->register_forward_propagator("plugin_lifecycle", "op",
                                          override_forward_propagator);
+  registrar->register_dependency_builder("plugin_lifecycle", "op",
+                                         override_dependency_builder);
   append_lifecycle_trace("override_registrar_return");
 }

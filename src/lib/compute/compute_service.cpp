@@ -182,7 +182,9 @@ compute::DirtyUpdateRequest make_dirty_update_request(
     const ComputeService::Request& request,
     bool suppress_graph_downsample = false,
     std::shared_ptr<compute::DirtySiblingCommitGate> sibling_commit_gate =
-        nullptr) {
+        nullptr,
+    std::shared_ptr<const compute::StabilizedDirtyParameters>
+        stabilized_parameters = nullptr) {
   return compute::DirtyUpdateRequest{request.node_id,
                                      request.cache.precision,
                                      request.cache.force_recache,
@@ -191,7 +193,8 @@ compute::DirtyUpdateRequest make_dirty_update_request(
                                      request.telemetry.benchmark_events,
                                      request.dirty_roi.value(),
                                      suppress_graph_downsample,
-                                     std::move(sibling_commit_gate)};
+                                     std::move(sibling_commit_gate),
+                                     std::move(stabilized_parameters)};
 }
 
 /**
@@ -413,11 +416,14 @@ NodeOutput& ComputeService::compute_internal(
 NodeOutput& ComputeService::compute_high_precision_update(
     GraphModel& graph, compute::RealtimeProxyGraph& proxy_graph,
     const ExecutionStrategy& strategy, const Request& request,
-    std::shared_ptr<compute::DirtySiblingCommitGate> sibling_commit_gate) {
+    std::shared_ptr<compute::DirtySiblingCommitGate> sibling_commit_gate,
+    std::shared_ptr<const compute::StabilizedDirtyParameters>
+        stabilized_parameters) {
   compute::HighPrecisionDirtyExecutor executor(traversal_, events_);
-  return executor.execute(graph, proxy_graph, strategy.runtime,
-                          make_dirty_update_request(
-                              request, false, std::move(sibling_commit_gate)));
+  return executor.execute(
+      graph, proxy_graph, strategy.runtime,
+      make_dirty_update_request(request, false, std::move(sibling_commit_gate),
+                                std::move(stabilized_parameters)));
 }
 
 /**
@@ -438,10 +444,14 @@ NodeOutput& ComputeService::compute_high_precision_update(
  */
 NodeOutput& ComputeService::compute_real_time_update(
     GraphModel& graph, compute::RealtimeProxyGraph& proxy_graph,
-    const ExecutionStrategy& strategy, const Request& request) {
+    const ExecutionStrategy& strategy, const Request& request,
+    std::shared_ptr<const compute::StabilizedDirtyParameters>
+        stabilized_parameters) {
   compute::RealTimeDirtyExecutor executor(traversal_, events_);
-  return executor.execute(graph, proxy_graph, strategy.runtime,
-                          make_dirty_update_request(request));
+  return executor.execute(
+      graph, proxy_graph, strategy.runtime,
+      make_dirty_update_request(request, false, nullptr,
+                                std::move(stabilized_parameters)));
 }
 
 /**
@@ -491,9 +501,9 @@ NodeOutput& ComputeService::compute_parallel(GraphModel& graph,
   }
 
   compute::ComputeTaskDispatcher executor(traversal_, cache_, events_);
-  SchedulerTaskRuntime& task_runtime = compute::ensure_scheduler_task_runtime(
+  IScheduler& scheduler = compute::ensure_running_scheduler(
       runtime, ComputeIntent::GlobalHighPrecision);
-  return executor.execute(graph, task_runtime, make_dispatch_request(request));
+  return executor.execute(graph, scheduler, make_dispatch_request(request));
 }
 
 /**
@@ -516,6 +526,40 @@ NodeOutput& ComputeService::compute_intent_update_impl(
     const Request& request) {
   compute::IntentUpdateCallbacks callbacks;
   const ComputeIntent intent = request.intent.value();
+  compute::IntentUpdateCoordinator::validate(intent, request.dirty_roi);
+  IScheduler* hp_scheduler = nullptr;
+  IScheduler* rt_scheduler = nullptr;
+  if (strategy.use_parallel_executor) {
+    if (!strategy.runtime) {
+      throw GraphError(GraphErrc::ComputeError,
+                       "Parallel intent compute requires a runtime.");
+    }
+    hp_scheduler = &compute::ensure_running_scheduler(
+        *strategy.runtime, ComputeIntent::GlobalHighPrecision);
+    if (intent == ComputeIntent::RealTimeUpdate) {
+      rt_scheduler = &compute::ensure_running_scheduler(
+          *strategy.runtime, ComputeIntent::RealTimeUpdate);
+    }
+  }
+  std::shared_ptr<const compute::StabilizedDirtyParameters>
+      stabilized_parameters;
+  if (request.dirty_roi && request.dirty_roi->width > 0 &&
+      request.dirty_roi->height > 0) {
+    SchedulerTaskRuntime* preflight_runtime = nullptr;
+    if (strategy.use_parallel_executor) {
+      preflight_runtime = hp_scheduler;
+    }
+    uint64_t request_generation = 0;
+    uint64_t topology_generation = 0;
+    {
+      std::lock_guard<std::mutex> lock(graph.graph_mutex_);
+      request_generation = ++graph.dirty_generation_counter;
+      topology_generation = graph.topology_generation();
+    }
+    stabilized_parameters = compute::stabilize_connected_dirty_parameters(
+        graph, traversal_, request.node_id, request_generation,
+        topology_generation, preflight_runtime);
+  }
   compute::RealtimeProxyGraph& rt_proxy_graph =
       realtime_proxy_graph_for(graph, strategy);
   std::shared_ptr<compute::DirtySiblingCommitGate> sibling_commit_gate;
@@ -539,18 +583,20 @@ NodeOutput& ComputeService::compute_intent_update_impl(
   };
   callbacks.run_global_high_precision_dirty_update = [&]() -> NodeOutput& {
     return compute_high_precision_update(graph, rt_proxy_graph, strategy,
-                                         request);
+                                         request, nullptr,
+                                         stabilized_parameters);
   };
   callbacks.run_high_precision_update = [&]() {
     const Request silent_request = make_silent_dirty_request(request);
     compute::HighPrecisionDirtyExecutor executor(traversal_, events_);
     executor.execute(
         graph, rt_proxy_graph, strategy.runtime,
-        make_dirty_update_request(silent_request, true, sibling_commit_gate));
+        make_dirty_update_request(silent_request, true, sibling_commit_gate,
+                                  stabilized_parameters));
   };
   callbacks.run_real_time_update = [&]() -> NodeOutput& {
-    NodeOutput& output =
-        compute_real_time_update(graph, rt_proxy_graph, strategy, request);
+    NodeOutput& output = compute_real_time_update(
+        graph, rt_proxy_graph, strategy, request, stabilized_parameters);
     if (sibling_commit_gate) {
       sibling_commit_gate->mark_rt_committed();
     }
@@ -564,19 +610,8 @@ NodeOutput& ComputeService::compute_intent_update_impl(
     events_.push(request.node_id, coordinator_node_name, stage, 0.0);
   };
 
-  SchedulerTaskRuntime* hp_task_runtime = nullptr;
-  SchedulerTaskRuntime* rt_task_runtime = nullptr;
-  if (strategy.use_parallel_executor && strategy.runtime) {
-    hp_task_runtime = &compute::ensure_scheduler_task_runtime(
-        *strategy.runtime, ComputeIntent::GlobalHighPrecision);
-    if (intent == ComputeIntent::RealTimeUpdate) {
-      rt_task_runtime = &compute::ensure_scheduler_task_runtime(
-          *strategy.runtime, ComputeIntent::RealTimeUpdate);
-    }
-  }
-
   return compute::IntentUpdateCoordinator::coordinate_intent_update(
-      intent, hp_task_runtime, rt_task_runtime, request.dirty_roi, callbacks);
+      intent, hp_scheduler, rt_scheduler, request.dirty_roi, callbacks);
 }
 
 /**

@@ -85,6 +85,7 @@ feedback/
 !plugins/ops/**/*.hpp
 !plugins/ops/**/*.mm
 !plugins/schedulers/*_example_plugin.cpp
+!plugins/schedulers/sdk_example_scheduler.hpp
 
 # External libraries (FTXUI etc.)
 !extern/

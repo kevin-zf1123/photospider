@@ -112,13 +112,23 @@ std::exception_ptr cleanup_scheduler_lifecycle(IScheduler* scheduler) noexcept {
 
 }  // namespace
 
+/** @copydoc GraphRuntime::tls_worker_id_ */
 thread_local int GraphRuntime::tls_worker_id_ = -1;
+/** @copydoc GraphRuntime::tls_scheduler_log_worker_id_ */
 thread_local int GraphRuntime::tls_scheduler_log_worker_id_ = -1;
+/** @copydoc GraphRuntime::tls_scheduler_log_epoch_ */
 thread_local uint64_t GraphRuntime::tls_scheduler_log_epoch_ = 0;
 
+/**
+ * @brief Owns private platform GPU objects for one graph runtime.
+ * @note The type is complete only in this implementation and never crosses the
+ *       scheduler SDK host-context boundary.
+ */
 struct GraphRuntime::GpuContext {
 #ifdef __APPLE__
+  /** @brief Runtime-owned default Metal device, or nil when unavailable. */
   id<MTLDevice> device;
+  /** @brief Runtime-owned Metal command queue, or nil without a device. */
   id<MTLCommandQueue> commandQueue;
 #endif
 };
@@ -165,23 +175,27 @@ GraphRuntime::GraphRuntime(const Info& info)
 #endif
 }
 
+/** @copydoc GraphRuntime::~GraphRuntime */
 GraphRuntime::~GraphRuntime() noexcept {
-  try {
-    stop();
-  } catch (...) {
-    // Scheduler owners and built-in destructors retain no-throw fallback
-    // cleanup; a hostile explicit plugin lifecycle call cannot escape here.
+  std::lock_guard<std::mutex> lock(schedulers_mutex_);
+  running_.store(false, std::memory_order_release);
+  for (auto& [intent, scheduler] : schedulers_) {
+    (void)intent;
+    (void)cleanup_scheduler_lifecycle(scheduler.get());
   }
+  schedulers_.clear();
 }
 
-int GraphRuntime::this_worker_id() {
+/** @copydoc GraphRuntime::this_worker_id */
+int GraphRuntime::this_worker_id() noexcept {
   if (tls_worker_id_ >= 0) {
     return tls_worker_id_;
   }
   return tls_scheduler_log_worker_id_;
 }
 
-id GraphRuntime::get_metal_device() {
+/** @copydoc GraphRuntime::get_metal_device */
+id GraphRuntime::get_metal_device() noexcept {
 #ifdef __APPLE__
   return gpu_context_ ? gpu_context_->device : nil;
 #else
@@ -189,7 +203,8 @@ id GraphRuntime::get_metal_device() {
 #endif
 }
 
-id GraphRuntime::get_metal_command_queue() {
+/** @copydoc GraphRuntime::get_metal_command_queue */
+id GraphRuntime::get_metal_command_queue() noexcept {
 #ifdef __APPLE__
   return gpu_context_ ? gpu_context_->commandQueue : nil;
 #else
@@ -197,6 +212,7 @@ id GraphRuntime::get_metal_command_queue() {
 #endif
 }
 
+/** @copydoc GraphRuntime::realtime_proxy_graph */
 compute::RealtimeProxyGraph& GraphRuntime::realtime_proxy_graph() {
   return *realtime_proxy_graph_;
 }
@@ -272,18 +288,87 @@ void GraphRuntime::stop() {
   }
 }
 
-uint64_t GraphRuntime::this_task_epoch() {
+/** @copydoc GraphRuntime::this_task_epoch */
+uint64_t GraphRuntime::this_task_epoch() noexcept {
   return tls_scheduler_log_epoch_;
 }
 
-void GraphRuntime::set_scheduler_log_context(int worker_id, uint64_t epoch) {
+/** @copydoc GraphRuntime::set_scheduler_log_context */
+void GraphRuntime::set_scheduler_log_context(int worker_id,
+                                             uint64_t epoch) noexcept {
   tls_scheduler_log_worker_id_ = worker_id;
   tls_scheduler_log_epoch_ = epoch;
 }
 
-void GraphRuntime::clear_scheduler_log_context() {
+/** @copydoc GraphRuntime::clear_scheduler_log_context */
+void GraphRuntime::clear_scheduler_log_context() noexcept {
   tls_scheduler_log_worker_id_ = -1;
   tls_scheduler_log_epoch_ = 0;
+}
+
+/** @copydoc GraphRuntime::is_device_available */
+bool GraphRuntime::is_device_available(Device device) const noexcept {
+  switch (device) {
+    case Device::CPU:
+      return true;
+    case Device::GPU_METAL:
+#ifdef __APPLE__
+      return gpu_context_ != nullptr && gpu_context_->device != nil;
+#else
+      return false;
+#endif
+    case Device::GPU_CUDA:
+    case Device::ASIC_NPU:
+      return false;
+  }
+  return false;
+}
+
+/** @copydoc GraphRuntime::set_task_context */
+void GraphRuntime::set_task_context(int worker_id, uint64_t epoch) noexcept {
+  set_scheduler_log_context(worker_id, epoch);
+}
+
+/** @copydoc GraphRuntime::clear_task_context */
+void GraphRuntime::clear_task_context() noexcept {
+  clear_scheduler_log_context();
+}
+
+/** @copydoc GraphRuntime::log_event(SchedulerTraceAction,int,int,uint64_t) */
+void GraphRuntime::log_event(SchedulerTraceAction action, int node_id,
+                             int worker_id, uint64_t epoch) noexcept {
+  SchedulerEvent::Action runtime_action = SchedulerEvent::EXECUTE;
+  switch (action) {
+    case SchedulerTraceAction::AssignInitial:
+      runtime_action = SchedulerEvent::ASSIGN_INITIAL;
+      break;
+    case SchedulerTraceAction::Execute:
+      runtime_action = SchedulerEvent::EXECUTE;
+      break;
+    case SchedulerTraceAction::ExecuteTile:
+      runtime_action = SchedulerEvent::EXECUTE_TILE;
+      break;
+    case SchedulerTraceAction::ExecuteDirtySource:
+      runtime_action = SchedulerEvent::EXECUTE_DIRTY_SOURCE;
+      break;
+    case SchedulerTraceAction::ExecuteDirtyDownstreamNode:
+      runtime_action = SchedulerEvent::EXECUTE_DIRTY_DOWNSTREAM_NODE;
+      break;
+    case SchedulerTraceAction::ExecuteDirtyDownstreamTile:
+      runtime_action = SchedulerEvent::EXECUTE_DIRTY_DOWNSTREAM_TILE;
+      break;
+    case SchedulerTraceAction::SkipStaleGeneration:
+      runtime_action = SchedulerEvent::SKIP_STALE_GENERATION;
+      break;
+    case SchedulerTraceAction::RethrowException:
+      runtime_action = SchedulerEvent::RETHROW_EXCEPTION;
+      break;
+  }
+  try {
+    log_event(runtime_action, node_id, worker_id, epoch);
+  } catch (...) {
+    // Scheduler observations are best effort and cannot replace task failures.
+  }
 }
 
 /** @copydoc GraphRuntime::log_event(SchedulerEvent::Action,int) */
@@ -403,22 +488,20 @@ void GraphRuntime::clear_scheduler_log() {
   scheduler_trace_size_ = 0;
 }
 
-// =============================================================================
-// [M3.2 新增] 调度器管理实现
-// =============================================================================
-
 /** @copydoc GraphRuntime::set_scheduler */
 void GraphRuntime::set_scheduler(ComputeIntent intent,
                                  std::unique_ptr<IScheduler> scheduler) {
   replace_scheduler(intent, std::move(scheduler));
 }
 
+/** @copydoc GraphRuntime::get_scheduler(ComputeIntent) */
 IScheduler* GraphRuntime::get_scheduler(ComputeIntent intent) {
   std::lock_guard<std::mutex> lock(schedulers_mutex_);
   auto it = schedulers_.find(intent);
   return (it != schedulers_.end()) ? it->second.get() : nullptr;
 }
 
+/** @copydoc GraphRuntime::get_scheduler(ComputeIntent) const */
 const IScheduler* GraphRuntime::get_scheduler(ComputeIntent intent) const {
   std::lock_guard<std::mutex> lock(schedulers_mutex_);
   auto it = schedulers_.find(intent);
@@ -435,7 +518,7 @@ void GraphRuntime::replace_scheduler(ComputeIntent intent,
   auto [slot, inserted] = schedulers_.try_emplace(intent, nullptr);
   try {
     if (scheduler) {
-      scheduler->attach(this);
+      scheduler->attach(*this);
       if (running_.load(std::memory_order_acquire)) {
         scheduler->start();
       }
@@ -461,6 +544,7 @@ void GraphRuntime::replace_scheduler(ComputeIntent intent,
   }
 }
 
+/** @copydoc GraphRuntime::has_scheduler */
 bool GraphRuntime::has_scheduler(ComputeIntent intent) const {
   std::lock_guard<std::mutex> lock(schedulers_mutex_);
   auto it = schedulers_.find(intent);

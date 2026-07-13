@@ -6,7 +6,7 @@
 #include <utility>
 #include <vector>
 
-#include "adapter/buffer_adapter_opencv.hpp"
+#include "adapters/opencv/buffer_adapter_opencv.hpp"
 #include "compute/compute_geometry.hpp"
 #include "runtime/graph_event_service.hpp"
 #include "runtime/graph_runtime.hpp"
@@ -18,10 +18,12 @@ namespace {
  * @brief Deep-copies an image buffer before downsample staging writes.
  *
  * @param source Source proxy image buffer.
- * @return Independent ImageBuffer with cloned image payload when present.
+ * @return Independent CPU buffer when CPU pixels are present, or a shared
+ * immutable descriptor for an opaque non-CPU backend resource.
  * @throws GraphError when adapter conversion fails.
- * @note Empty buffers keep shape metadata but drop shared data/context
- * ownership so later allocation can fill them safely.
+ * @note Empty buffers keep shape metadata but drop ownership. Opaque backend
+ * descriptors are shared because the generic downsampler cannot clone or map
+ * their resource; passthrough later replaces the complete proxy output.
  */
 ImageBuffer clone_image_buffer(const ImageBuffer& source) {
   ImageBuffer cloned = source;
@@ -30,6 +32,9 @@ ImageBuffer clone_image_buffer(const ImageBuffer& source) {
   if (source.width <= 0 || source.height <= 0 || source.channels <= 0 ||
       (!source.data && !source.context)) {
     return cloned;
+  }
+  if (source.device != Device::CPU) {
+    return source;
   }
   try {
     return fromCvMat(toCvMat(source).clone());
@@ -57,11 +62,8 @@ RealtimeProxyGraph::NodeState clone_proxy_state(
   cloned.version = state.version;
   cloned.dirty_source_generation = state.dirty_source_generation;
   if (state.output) {
-    NodeOutput output;
+    NodeOutput output = *state.output;
     output.image_buffer = clone_image_buffer(state.output->image_buffer);
-    output.data = state.output->data;
-    output.space = state.output->space;
-    output.debug = state.output->debug;
     cloned.output = std::move(output);
   }
   return cloned;
@@ -109,7 +111,8 @@ void DownsampleExecutor::execute_one(const Request& request) {
   }
   proxy_state.output->data = hp_output.data;
 
-  if (hp_buffer.width <= 0 || hp_buffer.height <= 0 || !hp_buffer.data) {
+  if (hp_buffer.width <= 0 || hp_buffer.height <= 0 ||
+      hp_buffer.device != Device::CPU || !hp_buffer.data) {
     apply_passthrough(node, proxy_state, roi_hp, hp_size, request.hp_version);
     proxy_graph_.commit_node_state(node.id, std::move(proxy_state));
     return;

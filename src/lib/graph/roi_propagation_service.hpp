@@ -1,5 +1,6 @@
 #pragma once
 
+#include <cstddef>
 #include <opencv2/core.hpp>
 #include <optional>
 #include <unordered_map>
@@ -8,6 +9,55 @@
 #include "graph/graph_model.hpp"  // NOLINT(build/include_subdir)
 
 namespace ps {
+
+/**
+ * @brief Separates shared upstream demand from one dependency-LUT input route.
+ *
+ * Operator dirty propagation applies to every image input. A validated
+ * dependency LUT names exactly one destination input index and therefore stays
+ * separate until topology traversal selects an edge.
+ *
+ * @throws Nothing for ordinary value operations.
+ * @note Geometry is stored in node-input coordinates and owns no graph state.
+ */
+struct UpstreamRoiProjection {
+  /** @brief Operator/spatial demand shared by all image-input edges. */
+  cv::Rect shared_roi;
+  /** @brief Input index selected by the dependency table, when present. */
+  std::optional<std::size_t> dependency_input_index;
+  /** @brief LUT-derived ROI applied only to dependency_input_index. */
+  cv::Rect dependency_roi;
+
+  /**
+   * @brief Returns demand routed to one destination image-input index.
+   * @param input_index Destination input index from graph topology.
+   * @return Shared ROI merged with dependency_roi only for its selected input.
+   * @throws Nothing.
+   */
+  cv::Rect roi_for_input(std::size_t input_index) const noexcept;
+
+  /**
+   * @brief Returns safely bounded demand for one destination image input.
+   * @param input_index Destination input index from graph topology.
+   * @param input_extent Current extent of the selected upstream image.
+   * @return Union of independently clipped shared and selected dependency
+   *         demand, or an empty rectangle when neither intersects the input.
+   * @throws Nothing.
+   * @note Clipping each contribution before union prevents an extreme but
+   *       completely out-of-bounds shared ROI from discarding a valid LUT ROI
+   *       through an unrepresentable intermediate union.
+   */
+  cv::Rect roi_for_input(std::size_t input_index,
+                         const cv::Size& input_extent) const noexcept;
+
+  /**
+   * @brief Returns a conservative union for legacy single-ROI callers.
+   * @return Union of shared and dependency contributions.
+   * @throws Nothing.
+   * @note Graph traversal must prefer roi_for_input() to preserve LUT routing.
+   */
+  cv::Rect combined_roi() const noexcept;
+};
 
 /**
  * @brief Computes operator-aware ROI propagation across graph topology.
@@ -25,6 +75,21 @@ namespace ps {
 class RoiPropagationService {
  public:
   /**
+   * @brief Computes shared and input-selected upstream ROI contributions.
+   * @param node Node whose input demand is being computed.
+   * @param downstream_roi ROI in node output coordinates.
+   * @param graph Graph supplying topology, caches, and extent context.
+   * @param size_cache Request-local output extent cache.
+   * @return Projection retaining dependency input-index routing.
+   * @throws GraphError or callback exceptions from extent/propagation logic.
+   * @note The effective parameter snapshot and all input extents are resolved
+   *       once and shared by dirty and dependency callbacks for this request.
+   */
+  UpstreamRoiProjection compute_upstream_projection(
+      const Node& node, const cv::Rect& downstream_roi, const GraphModel& graph,
+      std::unordered_map<int, cv::Size>& size_cache) const;
+
+  /**
    * @brief Computes the upstream input ROI required by one node output ROI.
    *
    * The method clips the downstream ROI to the node output extent, applies the
@@ -41,8 +106,8 @@ class RoiPropagationService {
    * derived.
    * @throws GraphError or operator-specific exceptions when extent resolution
    * or registered propagation logic fails.
-   * @note Formal extents remain HP-authoritative; RT-only transient output is
-   * not used as a propagation extent.
+   * @note This conservative compatibility view unions input-selected LUT
+   * demand. Graph traversal uses compute_upstream_projection() instead.
    */
   cv::Rect compute_upstream_roi(
       const Node& node, const cv::Rect& downstream_roi, const GraphModel& graph,

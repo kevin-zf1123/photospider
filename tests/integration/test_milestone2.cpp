@@ -15,59 +15,143 @@
 #include <utility>
 #include <vector>
 
-#include "kernel/scheduler/i_scheduler.hpp"
-#include "kernel/scheduler/scheduler_task_runtime.hpp"
+#include "photospider/scheduler/scheduler.hpp"
+#include "photospider/scheduler/scheduler_task_runtime.hpp"
 #include "runtime/graph_runtime.hpp"
 
 namespace ps {
 namespace {
 
-class MockScheduler : public IScheduler, public SchedulerTaskRuntime {
+/**
+ * @brief Minimal host-context probe for direct scheduler lifecycle tests.
+ * @note The probe exposes no graph, cache, native-device, or runtime owner.
+ */
+class StubSchedulerHostContext final : public SchedulerHostContext {
  public:
-  void attach(GraphRuntime* runtime) override {
-    runtime_ = runtime;
+  /** @copydoc SchedulerHostContext::is_device_available */
+  bool is_device_available(Device device) const noexcept override {
+    return device == Device::CPU;
+  }
+
+  /** @copydoc SchedulerHostContext::set_task_context */
+  void set_task_context(int worker_id, std::uint64_t epoch) noexcept override {
+    (void)worker_id;
+    (void)epoch;
+  }
+
+  /** @copydoc SchedulerHostContext::clear_task_context */
+  void clear_task_context() noexcept override {}
+
+  /** @copydoc SchedulerHostContext::log_event */
+  void log_event(SchedulerTraceAction action, int node_id, int worker_id,
+                 std::uint64_t epoch) noexcept override {
+    (void)action;
+    (void)node_id;
+    (void)worker_id;
+    (void)epoch;
+  }
+
+  /** @brief Releases the concrete host probe. */
+  ~StubSchedulerHostContext() override = default;
+};
+
+/**
+ * @brief Owns callback storage while exposing scheduler-facing task handles.
+ * @note Every handle borrows this executor until synchronous mock settlement.
+ */
+class CallbackTaskExecutor final : public TaskExecutor {
+ public:
+  /**
+   * @brief Adds one callback and returns its dense task id.
+   * @param task Callback whose ownership moves into the executor.
+   * @return Zero-based task id for a later `TaskHandle`.
+   * @throws std::bad_alloc if callback storage growth cannot allocate.
+   */
+  int add(SchedulerTaskRuntime::Task task) {
+    tasks_.push_back(std::move(task));
+    return static_cast<int>(tasks_.size() - 1U);
+  }
+
+  /** @copydoc TaskExecutor::run_task */
+  void run_task(int task_id) override {
+    if (task_id < 0 || static_cast<std::size_t>(task_id) >= tasks_.size()) {
+      throw std::out_of_range("mock task id is outside executor storage");
+    }
+    tasks_[static_cast<std::size_t>(task_id)]();
+  }
+
+ private:
+  /** @brief Owned callbacks indexed by the handles supplied to the mock. */
+  std::vector<SchedulerTaskRuntime::Task> tasks_;
+};
+
+/**
+ * @brief Synchronous scheduler mock implementing the exact public SDK shape.
+ * @note The mock borrows only `SchedulerHostContext`; GraphRuntime remains
+ *       reachable solely when it is itself the concrete host implementation.
+ */
+class MockScheduler : public IScheduler {
+ public:
+  /** @copydoc IScheduler::attach */
+  void attach(SchedulerHostContext& host) override {
+    host_ = &host;
     attach_called_ = true;
   }
 
+  /** @copydoc IScheduler::detach */
   void detach() override {
-    runtime_ = nullptr;
+    host_ = nullptr;
     detach_called_ = true;
   }
 
+  /** @copydoc IScheduler::start */
   void start() override {
-    runtime_at_start_ = runtime_;
+    host_at_start_ = host_;
     running_ = true;
     start_called_ = true;
   }
 
+  /** @copydoc IScheduler::shutdown */
   void shutdown() override {
     running_ = false;
     shutdown_called_ = true;
   }
 
+  /** @copydoc IScheduler::name */
   std::string name() const override { return "MockScheduler"; }
-  std::string get_stats() const override { return "Mock stats"; }
-  bool is_running() const override { return running_; }
-  bool task_runtime_running() const override { return running_; }
 
-  void submit_initial_tasks(
-      std::vector<Task>&& tasks, int total_task_count,
+  /** @copydoc IScheduler::get_stats */
+  std::string get_stats() const override { return "Mock stats"; }
+
+  /** @copydoc IScheduler::is_running */
+  bool is_running() const override { return running_; }
+
+  /** @copydoc SchedulerTaskRuntime::submit_initial_task_handles */
+  void submit_initial_task_handles(
+      std::vector<TaskHandle>&& handles, int total_task_count,
       SchedulerTaskPriority priority = SchedulerTaskPriority::Normal) override {
     last_priority_ = priority;
     tasks_to_complete_.store(total_task_count, std::memory_order_relaxed);
-    for (auto& task : tasks) {
-      if (task) {
-        task();
+    for (const TaskHandle& handle : handles) {
+      if (handle) {
+        handle.run();
       }
     }
   }
 
-  void submit_ready_task_from_worker(
-      Task&& task,
+  /** @copydoc SchedulerTaskRuntime::submit_ready_task_handles_from_worker */
+  void submit_ready_task_handles_from_worker(
+      std::vector<TaskHandle>&& handles,
       SchedulerTaskPriority priority = SchedulerTaskPriority::Normal) override {
-    submit_ready_task_any_thread(std::move(task), priority, std::nullopt);
+    last_priority_ = priority;
+    for (const TaskHandle& handle : handles) {
+      if (handle) {
+        handle.run();
+      }
+    }
   }
 
+  /** @copydoc SchedulerTaskRuntime::submit_ready_task_any_thread */
   void submit_ready_task_any_thread(
       Task&& task,
       SchedulerTaskPriority priority = SchedulerTaskPriority::Normal,
@@ -79,75 +163,105 @@ class MockScheduler : public IScheduler, public SchedulerTaskRuntime {
     }
   }
 
+  /** @copydoc SchedulerTaskRuntime::wait_for_completion */
   void wait_for_completion() override {
     if (first_exception_) {
       std::rethrow_exception(first_exception_);
     }
   }
 
+  /** @copydoc SchedulerTaskRuntime::set_exception */
   void set_exception(std::exception_ptr e) override {
     if (!first_exception_) {
       first_exception_ = e;
     }
   }
 
+  /** @copydoc SchedulerTaskRuntime::inc_tasks_to_complete */
   void inc_tasks_to_complete(int delta) override {
     tasks_to_complete_.fetch_add(delta, std::memory_order_relaxed);
   }
 
+  /** @copydoc SchedulerTaskRuntime::dec_tasks_to_complete */
   void dec_tasks_to_complete() override {
     tasks_to_complete_.fetch_sub(1, std::memory_order_relaxed);
   }
 
+  /** @copydoc SchedulerTaskRuntime::log_event */
   void log_event(SchedulerTraceAction action, int node_id) override {
     last_action_ = action;
     last_node_id_ = node_id;
   }
 
+  /** @brief Reports whether attach was called. */
   bool was_attach_called() const { return attach_called_; }
+  /** @brief Reports whether detach was called. */
   bool was_detach_called() const { return detach_called_; }
+  /** @brief Reports whether start was called. */
   bool was_start_called() const { return start_called_; }
+  /** @brief Reports whether shutdown was called. */
   bool was_shutdown_called() const { return shutdown_called_; }
-  GraphRuntime* attached_runtime() const { return runtime_; }
-  GraphRuntime* runtime_at_start() const { return runtime_at_start_; }
+  /** @brief Returns the currently borrowed host, or null after detach. */
+  SchedulerHostContext* attached_host() const { return host_; }
+  /** @brief Returns the host observed by the latest start call. */
+  SchedulerHostContext* host_at_start() const { return host_at_start_; }
+  /** @brief Returns current logical completion accounting. */
   int tasks_to_complete() const { return tasks_to_complete_.load(); }
+  /** @brief Returns the latest submitted priority. */
   SchedulerTaskPriority last_priority() const { return last_priority_; }
+  /** @brief Returns the latest any-thread epoch. */
   uint64_t last_epoch() const { return last_epoch_; }
+  /** @brief Returns the latest trace action. */
   SchedulerTraceAction last_action() const { return last_action_; }
+  /** @brief Returns the latest trace node id. */
   int last_node_id() const { return last_node_id_; }
 
  private:
-  GraphRuntime* runtime_ = nullptr;
-  GraphRuntime* runtime_at_start_ = nullptr;
+  /** @brief Borrowed public host context, or null while detached. */
+  SchedulerHostContext* host_ = nullptr;
+  /** @brief Host context observed by the latest start call. */
+  SchedulerHostContext* host_at_start_ = nullptr;
+  /** @brief Public lifecycle state. */
   bool running_ = false;
+  /** @brief Whether attach has been called. */
   bool attach_called_ = false;
+  /** @brief Whether detach has been called. */
   bool detach_called_ = false;
+  /** @brief Whether start has been called. */
   bool start_called_ = false;
+  /** @brief Whether shutdown has been called. */
   bool shutdown_called_ = false;
+  /** @brief Logical completion accounting used by synchronous callbacks. */
   std::atomic<int> tasks_to_complete_{0};
+  /** @brief Latest submitted priority. */
   SchedulerTaskPriority last_priority_{SchedulerTaskPriority::Normal};
+  /** @brief Latest any-thread callback epoch. */
   uint64_t last_epoch_{0};
+  /** @brief Latest trace action. */
   SchedulerTraceAction last_action_{SchedulerTraceAction::Execute};
+  /** @brief Latest trace node id. */
   int last_node_id_{-1};
+  /** @brief First callback exception retained for wait publication. */
   std::exception_ptr first_exception_;
 };
 
 TEST(M32InterfaceAbstraction, MockSchedulerLifecycle) {
   auto scheduler = std::make_unique<MockScheduler>();
+  StubSchedulerHostContext host;
 
   EXPECT_FALSE(scheduler->is_running());
-  EXPECT_FALSE(scheduler->task_runtime_running());
   EXPECT_EQ(scheduler->name(), "MockScheduler");
   EXPECT_FALSE(scheduler->was_attach_called());
   EXPECT_FALSE(scheduler->was_start_called());
 
-  scheduler->attach(nullptr);
+  scheduler->attach(host);
   EXPECT_TRUE(scheduler->was_attach_called());
+  EXPECT_EQ(scheduler->attached_host(), &host);
 
   scheduler->start();
   EXPECT_TRUE(scheduler->was_start_called());
   EXPECT_TRUE(scheduler->is_running());
-  EXPECT_TRUE(scheduler->task_runtime_running());
+  EXPECT_EQ(scheduler->host_at_start(), &host);
 
   scheduler->shutdown();
   EXPECT_TRUE(scheduler->was_shutdown_called());
@@ -162,18 +276,20 @@ TEST(M32InterfaceAbstraction, MockSchedulerTaskRuntimeDispatch) {
   scheduler.start();
   std::atomic<int> counter{0};
 
-  std::vector<SchedulerTaskRuntime::Task> tasks;
-  tasks.emplace_back([&]() {
+  CallbackTaskExecutor executor;
+  const int ready_task_id = executor.add([&]() {
+    counter.fetch_add(10);
+    scheduler.dec_tasks_to_complete();
+  });
+  const int initial_task_id = executor.add([&]() {
     counter.fetch_add(1);
-    scheduler.submit_ready_task_from_worker([&]() {
-      counter.fetch_add(10);
-      scheduler.dec_tasks_to_complete();
-    });
+    scheduler.submit_ready_task_handles_from_worker(
+        {{&executor, ready_task_id, 2}});
     scheduler.dec_tasks_to_complete();
   });
 
-  scheduler.submit_initial_tasks(std::move(tasks), 2,
-                                 SchedulerTaskPriority::High);
+  scheduler.submit_initial_task_handles({{&executor, initial_task_id, 1}}, 2,
+                                        SchedulerTaskPriority::High);
   scheduler.wait_for_completion();
 
   EXPECT_EQ(counter.load(), 11);
@@ -227,7 +343,7 @@ TEST_F(GraphRuntimeSchedulerTest, SetAndGetScheduler) {
   EXPECT_TRUE(runtime.has_scheduler(ComputeIntent::GlobalHighPrecision));
   EXPECT_EQ(runtime.get_scheduler(ComputeIntent::GlobalHighPrecision), hp_ptr);
   EXPECT_TRUE(hp_ptr->was_attach_called());
-  EXPECT_EQ(hp_ptr->attached_runtime(), &runtime);
+  EXPECT_EQ(hp_ptr->attached_host(), &runtime);
 
   auto rt_scheduler = std::make_unique<MockScheduler>();
   MockScheduler* rt_ptr = rt_scheduler.get();
@@ -257,7 +373,7 @@ TEST_F(GraphRuntimeSchedulerTest, StartStartsAttachedSchedulers) {
 
   EXPECT_TRUE(scheduler_ptr->was_start_called());
   EXPECT_TRUE(scheduler_ptr->is_running());
-  EXPECT_EQ(scheduler_ptr->runtime_at_start(), &runtime);
+  EXPECT_EQ(scheduler_ptr->host_at_start(), &runtime);
 
   runtime.stop();
 
@@ -281,8 +397,8 @@ TEST_F(GraphRuntimeSchedulerTest,
   EXPECT_TRUE(scheduler_ptr->was_attach_called());
   EXPECT_TRUE(scheduler_ptr->was_start_called());
   EXPECT_TRUE(scheduler_ptr->is_running());
-  EXPECT_EQ(scheduler_ptr->attached_runtime(), &runtime);
-  EXPECT_EQ(scheduler_ptr->runtime_at_start(), &runtime);
+  EXPECT_EQ(scheduler_ptr->attached_host(), &runtime);
+  EXPECT_EQ(scheduler_ptr->host_at_start(), &runtime);
 
   runtime.stop();
 }
@@ -540,12 +656,12 @@ class TransactionalReplacementCandidate final : public MockScheduler {
    * @return Nothing.
    * @throws std::runtime_error With exact stored identity for attach injection.
    */
-  void attach(GraphRuntime* runtime) override {
+  void attach(SchedulerHostContext& host) override {
     ++state_->attach_calls;
     state_->old_observed_during_attach = expected_old_ != nullptr;
     state_->old_running_during_attach =
         expected_old_ && expected_old_->is_running();
-    MockScheduler::attach(runtime);
+    MockScheduler::attach(host);
     if (state_->failure_stage == ReplacementFailureStage::Attach) {
       std::rethrow_exception(state_->preparation_error);
     }
@@ -591,7 +707,7 @@ class TransactionalReplacementCandidate final : public MockScheduler {
   void detach() override {
     ++state_->detach_calls;
     MockScheduler::detach();
-    state_->detached_after_cleanup = attached_runtime() == nullptr;
+    state_->detached_after_cleanup = attached_host() == nullptr;
     if (state_->detach_fails) {
       std::rethrow_exception(state_->detach_error);
     }
@@ -705,7 +821,7 @@ TEST_F(GraphRuntimeSchedulerTest,
 
   EXPECT_FALSE(runtime.running());
   EXPECT_TRUE(hp_ptr->was_shutdown_called());
-  EXPECT_FALSE(hp_ptr->task_runtime_running());
+  EXPECT_FALSE(hp_ptr->is_running());
   EXPECT_TRUE(rt_ptr->was_shutdown_called());
   EXPECT_FALSE(rt_ptr->is_running());
 }
@@ -828,7 +944,7 @@ TEST_F(GraphRuntimeSchedulerTest,
 
   EXPECT_FALSE(runtime.running());
   EXPECT_EQ(runtime.get_scheduler(ComputeIntent::GlobalHighPrecision), old_ptr);
-  EXPECT_EQ(old_ptr->attached_runtime(), &runtime);
+  EXPECT_EQ(old_ptr->attached_host(), &runtime);
   EXPECT_FALSE(old_ptr->is_running());
   EXPECT_TRUE(state->old_observed_during_attach);
   EXPECT_FALSE(state->old_running_during_attach);

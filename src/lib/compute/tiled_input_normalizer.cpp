@@ -7,9 +7,9 @@
 #include <utility>
 #include <vector>
 
-#include "adapter/buffer_adapter_opencv.hpp"
+#include "adapters/opencv/buffer_adapter_opencv.hpp"
 #include "core/param_utils.hpp"
-#include "node.hpp"  // NOLINT(build/include_subdir)
+#include "graph/node.hpp"  // NOLINT(build/include_subdir)
 
 namespace ps::compute {
 namespace {
@@ -237,8 +237,10 @@ cv::Mat normalize_channels(cv::Mat current_mat, const ImageShape& base_shape,
  * @return Normalized NodeOutput, or nullopt when input already matches base.
  * @throws GraphError when the input is invalid or unsupported.
  * @throws cv::Exception or std::runtime_error when image conversion fails.
- * @note Returned NodeOutput owns or references OpenCV storage through
- * fromCvMat.
+ * @note Returned NodeOutput preserves named data, spatial/debug metadata, and
+ * plugin-library leases from the original input; only its normalized image
+ * descriptor changes. Spatial metadata continues to describe upstream
+ * provenance even when resize/crop maps pixels into the mixing base extent.
  */
 std::optional<NodeOutput> normalize_secondary_input(
     const NodeOutput* input, const ImageShape& base_shape,
@@ -252,7 +254,7 @@ std::optional<NodeOutput> normalize_secondary_input(
   current_mat = normalize_size(current_mat, base_shape, strategy, node_id);
   current_mat = normalize_channels(current_mat, base_shape, node_id);
 
-  NodeOutput normalized;
+  NodeOutput normalized = *input;
   normalized.image_buffer = fromCvMat(current_mat);
   return normalized;
 }

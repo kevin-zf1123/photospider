@@ -1,6 +1,6 @@
 #pragma once
 
-#include "image_buffer.hpp"  // NOLINT(build/include_subdir)
+#include "compute/image_buffer.hpp"  // NOLINT(build/include_subdir)
 
 // Avoid including Metal headers in public C++ headers.
 // We pass the device as an opaque pointer to ensure a single C++ ABI signature

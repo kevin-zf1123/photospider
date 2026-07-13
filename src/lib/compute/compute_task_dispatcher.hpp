@@ -7,7 +7,7 @@
 
 #include "benchmark/benchmark_types.hpp"
 #include "graph/graph_model.hpp"  // NOLINT(build/include_subdir)
-#include "kernel/scheduler/scheduler_task_runtime.hpp"
+#include "photospider/scheduler/scheduler_task_runtime.hpp"
 
 namespace ps {
 class GraphTraversalService;
@@ -116,36 +116,6 @@ class ComputeTaskDispatcher {
    */
   NodeOutput& execute(GraphModel& graph, SchedulerTaskRuntime& task_runtime,
                       const ComputeDispatchRequest& request);
-
-  /**
-   * @brief Runs dirty-source tasks before downstream dirty-update tasks.
-   *
-   * Source tasks are submitted with high priority and may run concurrently.
-   * After all source tasks finish, before_downstream is invoked on the caller
-   * thread when provided. Downstream tasks are then submitted with normal
-   * priority and waited in vector order to preserve deterministic commit
-   * ordering for dirty update call sites.
-   *
-   * @param task_runtime Scheduler runtime used by the dirty-update caller.
-   * @param source_tasks Dirty source task closures to run first.
-   * @param downstream_tasks Dependent dirty-update task closures to run after
-   * all sources and the optional boundary check complete.
-   * @param epoch Optional scheduler epoch forwarded to submitted tasks.
-   * @param before_downstream Optional callback for source-boundary validation.
-   * @return Nothing.
-   * @throws Rethrows any task or callback exception after recording it in the
-   * scheduler runtime.
-   * @throws std::bad_alloc unchanged when task submission or callback storage
-   * exhausts memory.
-   * @note This helper is shared by high-precision dirty ROI and real-time dirty
-   * update paths; it does not build or prune the dirty task graph itself.
-   */
-  static void submit_dirty_ready_tasks_source_first(
-      SchedulerTaskRuntime& task_runtime,
-      std::vector<SchedulerTaskRuntime::Task>&& source_tasks,
-      std::vector<SchedulerTaskRuntime::Task>&& downstream_tasks,
-      std::optional<uint64_t> epoch = std::nullopt,
-      std::function<void()> before_downstream = nullptr);
 
   /**
    * @brief Runs dirty task handles with source-before-downstream ordering.

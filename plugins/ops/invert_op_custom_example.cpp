@@ -1,7 +1,8 @@
-#include <vector>
+#include <stdexcept>
 
-#include "adapter/buffer_adapter_opencv.hpp"
-#include "plugin_api.hpp"  // NOLINT(build/include_subdir)
+#include "photospider/core/graph_error.hpp"
+#include "photospider/plugin/opencv_adapter.hpp"
+#include "photospider/plugin/plugin_api.hpp"
 
 namespace {
 
@@ -12,47 +13,27 @@ namespace {
  * pixel at the same coordinate. The dirty planner can therefore use the
  * requested downstream ROI as the upstream ROI without halo expansion.
  *
- * @param node Invert node being planned; unused because the mapping is
- * parameter-independent.
- * @param roi Downstream ROI requested from the invert output.
- * @param graph Graph containing the node; unused for pointwise mapping.
+ * @param context Immutable ROI request and topology snapshot.
  * @return The identical upstream ROI required from the single image input.
  * @throws Nothing.
  * @note The returned rectangle is intentionally not clipped here; graph extent
  * resolution and planner clipping remain owned by the core services.
  */
-cv::Rect invert_dirty_roi(const ps::Node& node, const cv::Rect& roi,
-                          const ps::GraphModel& graph) {
-  (void)node;
-  (void)graph;
-  return roi;
+ps::PixelRect invert_dirty_roi(const ps::plugin::RoiContext& context) {
+  return context.requested_roi;
 }
 
 /**
  * @brief Projects an upstream invert ROI to the same output coordinates.
  *
- * @param node Invert node being planned; unused because the mapping is
- * parameter-independent.
- * @param roi Upstream input ROI that changed.
- * @param graph Graph containing the node; unused for pointwise mapping.
- * @param parent_size Upstream image size; unused because the mapping is
- * one-to-one.
- * @param child_size Output image size; unused because the mapping is
- * one-to-one.
+ * @param context Immutable ROI request whose active_edge identifies the input.
  * @return The identical output ROI affected by the upstream change.
  * @throws Nothing.
- * @note This explicit contract prevents the plugin from relying on legacy
- * identity fallback.
+ * @note Registering this callback makes the pointwise mapping explicit in the
+ * public plugin contract.
  */
-cv::Rect invert_forward_roi(const ps::Node& node, const cv::Rect& roi,
-                            const ps::GraphModel& graph,
-                            const cv::Size& parent_size,
-                            const cv::Size& child_size) {
-  (void)node;
-  (void)graph;
-  (void)parent_size;
-  (void)child_size;
-  return roi;
+ps::PixelRect invert_forward_roi(const ps::plugin::RoiContext& context) {
+  return context.requested_roi;
 }
 
 }  // namespace
@@ -60,57 +41,56 @@ cv::Rect invert_forward_roi(const ps::Node& node, const cv::Rect& roi,
 /**
  * @brief Executes the pointwise image inversion plugin operation.
  *
- * @param node Graph node being executed; current implementation does not read
- * node parameters.
- * @param inputs Borrowed upstream outputs; the first input must contain a valid
- * image buffer.
- * @return NodeOutput containing the inverted image buffer.
+ * @param node Public node view; unused by this parameter-free operation.
+ * @param inputs Borrowed upstream input snapshots.
+ * @return Owned operation output containing the inverted image buffer.
  * @throws ps::GraphError when the required input image is missing.
  * @throws cv::Exception if OpenCV subtraction or buffer conversion fails.
  * @note The operation is monolithic HP work. It reads borrowed inputs and
  * returns a newly wrapped output buffer without mutating graph state.
  */
-ps::NodeOutput op_invert(const ps::Node& node,
-                         const std::vector<const ps::NodeOutput*>& inputs) {
+ps::plugin::OperationOutput op_invert(
+    const ps::plugin::NodeView& node,
+    ps::plugin::ArrayView<ps::plugin::OperationInputView> inputs) {
   (void)node;
-  if (inputs.empty() || inputs[0]->image_buffer.width == 0) {
+  if (inputs.empty() || !inputs[0].image_buffer ||
+      inputs[0].image_buffer->width == 0) {
     throw ps::GraphError(ps::GraphErrc::MissingDependency,
                          "Invert op requires one valid input image.");
   }
 
-  const cv::UMat& u_input = ps::toCvUMat(inputs[0]->image_buffer);
+  const cv::UMat u_input = ps::plugin::opencv::to_umat(*inputs[0].image_buffer);
 
   cv::UMat u_output;
   cv::subtract(cv::Scalar::all(1.0), u_input, u_output);
 
-  ps::NodeOutput result;
-  result.image_buffer = ps::fromCvUMat(u_output);
+  ps::plugin::OperationOutput result;
+  result.image_buffer = ps::plugin::opencv::from_umat(u_output);
   return result;
 }
 
 /**
  * @brief Registers the invert operation and its explicit ROI contracts.
  *
- * @return Nothing.
  * @param registrar Host-provided registration API. The pointer is valid only
  * during this call.
+ * @return Nothing.
  * @throws std::invalid_argument when the loader passes a null registrar.
  * @throws std::logic_error if the host registrar is incomplete.
- * @throws Exceptions from host registry allocation or callback storage may
- * propagate to the plugin loader.
- * @note The plugin uses the host-provided registrar, not
- * `OpRegistry::instance()`, so dynamic plugins do not depend on a shared
- * registry singleton.
+ * @throws std::bad_alloc if operation names or callback storage exhausts
+ * memory.
+ * @note The callback stores only public SDK values and receives all registry
+ * services through the host-provided registrar.
  */
-extern "C" PLUGIN_API void register_photospider_ops_v1(
-    ps::OperationPluginRegistrar* registrar) {
+extern "C" PHOTOSPIDER_OPERATION_PLUGIN_EXPORT void register_photospider_ops_v2(
+    ps::plugin::OperationPluginRegistrar* registrar) {
   if (!registrar) {
     throw std::invalid_argument(
-        "register_photospider_ops_v1 requires registrar");
+        "register_photospider_ops_v2 requires registrar");
   }
   registrar->register_op_hp_monolithic("image_process", "invert", op_invert);
   registrar->register_dirty_propagator("image_process", "invert",
-                                       ps::DirtyRoiPropFunc(invert_dirty_roi));
-  registrar->register_forward_propagator(
-      "image_process", "invert", ps::ForwardRoiPropFunc(invert_forward_roi));
+                                       invert_dirty_roi);
+  registrar->register_forward_propagator("image_process", "invert",
+                                         invert_forward_roi);
 }

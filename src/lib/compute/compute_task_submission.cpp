@@ -2,7 +2,6 @@
 
 #include <algorithm>
 #include <atomic>
-#include <future>
 #include <memory>
 #include <new>
 #include <string>
@@ -97,92 +96,6 @@ std::optional<OpRegistry::OpVariant> select_device_aware_hp_op(
     return std::nullopt;
   }
   return best->func;
-}
-
-/**
- * @brief Submits one dirty task and waits for its completion.
- *
- * @param task_runtime Scheduler runtime receiving the wrapped task.
- * @param task Dirty task closure to execute.
- * @param priority Scheduler priority used for submission.
- * @param epoch Optional scheduler epoch forwarded to the runtime.
- * @throws Rethrows task exceptions through the completion future after also
- * recording them in task_runtime.
- * @note The wrapper keeps dirty update callers synchronous while still using
- * scheduler-owned task execution and exception capture.
- */
-void submit_one_dirty_task(SchedulerTaskRuntime& task_runtime,
-                           SchedulerTaskRuntime::Task&& task,
-                           SchedulerTaskPriority priority,
-                           std::optional<uint64_t> epoch) {
-  auto done = std::make_shared<std::promise<void>>();
-  std::future<void> future = done->get_future();
-  task_runtime.submit_ready_task_any_thread(
-      [task = std::move(task), done, &task_runtime]() mutable {
-        try {
-          if (task) {
-            task();
-          }
-          done->set_value();
-        } catch (...) {
-          auto error = std::current_exception();
-          task_runtime.log_event(SchedulerTraceAction::RethrowException, -1);
-          task_runtime.set_exception(error);
-          done->set_exception(error);
-        }
-      },
-      priority, epoch);
-  future.get();
-}
-
-/**
- * @brief Submits a dirty task batch concurrently or in deterministic order.
- *
- * @param task_runtime Scheduler runtime receiving wrapped tasks.
- * @param tasks Dirty task closures to execute.
- * @param priority Scheduler priority shared by the batch.
- * @param epoch Optional scheduler epoch forwarded to each task.
- * @param preserve_order Whether to wait after each task to preserve vector
- * order.
- * @throws Rethrows task exceptions after recording them in task_runtime.
- * @note Source tasks use concurrent submission; downstream dirty work preserves
- * deterministic order for existing commit semantics.
- */
-void submit_dirty_batch(SchedulerTaskRuntime& task_runtime,
-                        std::vector<SchedulerTaskRuntime::Task>&& tasks,
-                        SchedulerTaskPriority priority,
-                        std::optional<uint64_t> epoch, bool preserve_order) {
-  if (preserve_order) {
-    for (auto& task : tasks) {
-      submit_one_dirty_task(task_runtime, std::move(task), priority, epoch);
-    }
-    return;
-  }
-
-  std::vector<std::future<void>> futures;
-  futures.reserve(tasks.size());
-  for (auto& task : tasks) {
-    auto done = std::make_shared<std::promise<void>>();
-    futures.push_back(done->get_future());
-    task_runtime.submit_ready_task_any_thread(
-        [task = std::move(task), done, &task_runtime]() mutable {
-          try {
-            if (task) {
-              task();
-            }
-            done->set_value();
-          } catch (...) {
-            auto error = std::current_exception();
-            task_runtime.log_event(SchedulerTraceAction::RethrowException, -1);
-            task_runtime.set_exception(error);
-            done->set_exception(error);
-          }
-        },
-        priority, epoch);
-  }
-  for (auto& future : futures) {
-    future.get();
-  }
 }
 
 }  // namespace
@@ -406,27 +319,6 @@ void dispatch_planned_tasks(GraphModel& graph,
                                            static_cast<int>(plan.size()));
   plan.log_initial_assignments(task_runtime);
   task_runtime.wait_for_completion();
-}
-
-void submit_dirty_ready_tasks_source_first(
-    SchedulerTaskRuntime& task_runtime,
-    std::vector<SchedulerTaskRuntime::Task>&& source_tasks,
-    std::vector<SchedulerTaskRuntime::Task>&& downstream_tasks,
-    std::optional<uint64_t> epoch, std::function<void()> before_downstream) {
-  submit_dirty_batch(task_runtime, std::move(source_tasks),
-                     SchedulerTaskPriority::High, epoch, false);
-  if (before_downstream) {
-    try {
-      before_downstream();
-    } catch (...) {
-      auto error = std::current_exception();
-      task_runtime.log_event(SchedulerTraceAction::RethrowException, -1);
-      task_runtime.set_exception(error);
-      std::rethrow_exception(error);
-    }
-  }
-  submit_dirty_batch(task_runtime, std::move(downstream_tasks),
-                     SchedulerTaskPriority::Normal, epoch, true);
 }
 
 }  // namespace ps::compute

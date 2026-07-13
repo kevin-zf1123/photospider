@@ -13,22 +13,18 @@
 
 namespace ps::compute {
 
-SchedulerTaskRuntime& ensure_scheduler_task_runtime(GraphRuntime& runtime,
-                                                    ComputeIntent intent) {
+/** @copydoc ensure_running_scheduler */
+IScheduler& ensure_running_scheduler(GraphRuntime& runtime,
+                                     ComputeIntent intent) {
   IScheduler* scheduler = runtime.get_scheduler(intent);
   if (!scheduler) {
     throw GraphError(GraphErrc::ComputeError,
                      "No scheduler registered for requested compute intent.");
   }
-  auto* task_runtime = dynamic_cast<SchedulerTaskRuntime*>(scheduler);
-  if (!task_runtime) {
-    throw GraphError(GraphErrc::ComputeError,
-                     "Registered scheduler cannot dispatch planned tasks.");
-  }
-  if (!task_runtime->task_runtime_running()) {
+  if (!scheduler->is_running()) {
     scheduler->start();
   }
-  return *task_runtime;
+  return *scheduler;
 }
 
 void remember_dirty_snapshot(GraphModel& graph,
@@ -142,6 +138,17 @@ bool should_skip_stale_dirty_source(GraphRuntime* runtime, int node_id,
   return true;
 }
 
+/**
+ * @brief Resolves the output format for a dirty-domain staging buffer.
+ * @param preferred Existing staged output preferred when it has a valid image.
+ * @param image_inputs Destination-indexed image inputs, including null slots.
+ * @param fallback Optional committed output used after staged/input candidates.
+ * @return Channel count and data type from the first usable candidate, or the
+ * single-channel FLOAT32 default.
+ * @throws Nothing.
+ * @note Disconnected input placeholders are skipped only for format inference;
+ * their slot identity remains intact for operation execution.
+ */
 std::pair<int, DataType> infer_output_spec(
     const std::optional<NodeOutput>& preferred,
     const std::vector<const NodeOutput*>& image_inputs,
@@ -153,6 +160,9 @@ std::pair<int, DataType> infer_output_spec(
     }
   }
   for (const auto* input : image_inputs) {
+    if (!input) {
+      continue;
+    }
     const auto& buffer = input->image_buffer;
     if (buffer.width > 0 && buffer.height > 0 && buffer.channels > 0) {
       return {buffer.channels, buffer.type};

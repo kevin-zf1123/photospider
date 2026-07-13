@@ -1,6 +1,7 @@
+#include <stdexcept>
+
 #include "metal/perlin_noise_metal.hpp"
-#include "plugin_api.hpp"  // NOLINT(build/include_subdir)
-#include "ps_types.hpp"    // NOLINT(build/include_subdir)
+#include "photospider/plugin/plugin_api.hpp"
 
 namespace {
 
@@ -11,46 +12,27 @@ namespace {
  * Returning the requested ROI makes its dirty contract explicit for planner
  * diagnostics and source-node dirty updates.
  *
- * @param node Generator node being planned; Perlin parameters do not change ROI
- * coordinate space.
- * @param roi Requested generator output ROI.
- * @param graph Graph containing the node; unused because there are no image
- * parents to inspect.
+ * @param context Public generator ROI snapshot; no image parents are present.
  * @return The requested generator ROI.
  * @throws Nothing.
  * @note The current Metal implementation is monolithic HP/GPU work; this ROI
  * contract is explicit metadata, not a tiled Metal execution path.
  */
-cv::Rect perlin_metal_dirty_roi(const ps::Node& node, const cv::Rect& roi,
-                                const ps::GraphModel& graph) {
-  (void)node;
-  (void)graph;
-  return roi;
+ps::PixelRect perlin_metal_dirty_roi(const ps::plugin::RoiContext& context) {
+  return context.requested_roi;
 }
 
 /**
  * @brief Projects Metal Perlin source changes to downstream coordinates.
  *
- * @param node Generator node being planned; Perlin parameters do not change ROI
- * coordinate space.
- * @param roi Generator output ROI that changed.
- * @param graph Graph containing the node; unused because the mapping is local.
- * @param parent_size Generator output size; unused for identity projection.
- * @param child_size Downstream size; unused for identity projection.
+ * @param context Public generator ROI snapshot.
  * @return The same ROI for downstream dirty propagation.
  * @throws Nothing.
- * @note This prevents the Metal loader from relying on legacy identity
- * fallback while keeping the plugin documented as monolithic HP/GPU work.
+ * @note Registering this callback keeps the public contract explicit while the
+ * implementation remains monolithic HP/GPU work.
  */
-cv::Rect perlin_metal_forward_roi(const ps::Node& node, const cv::Rect& roi,
-                                  const ps::GraphModel& graph,
-                                  const cv::Size& parent_size,
-                                  const cv::Size& child_size) {
-  (void)node;
-  (void)graph;
-  (void)parent_size;
-  (void)child_size;
-  return roi;
+ps::PixelRect perlin_metal_forward_roi(const ps::plugin::RoiContext& context) {
+  return context.requested_roi;
 }
 
 }  // namespace
@@ -58,35 +40,35 @@ cv::Rect perlin_metal_forward_roi(const ps::Node& node, const cv::Rect& roi,
 /**
  * @brief Registers the Metal Perlin generator and explicit ROI contracts.
  *
- * @return Nothing.
  * @param registrar Host-provided registration API. The pointer is valid only
  * during this call.
+ * @return Nothing.
  * @throws std::invalid_argument when the loader passes a null registrar.
  * @throws std::logic_error if the host registrar is incomplete.
- * @throws Exceptions from host registry allocation, Metal eager
- * initialization, or callback storage may propagate to the plugin loader.
+ * @throws std::bad_alloc if registration or Metal initialization storage
+ * exhausts memory.
+ * @throws std::system_error if Metal one-time initialization cannot coordinate.
+ * @throws std::runtime_error if Metal initialization fails.
  * @note `extern "C"` keeps the symbol name stable for dynamic plugin loading.
  * The registered op is HP monolithic GPU work; tiled Metal execution remains a
  * future capability. Registration is routed through the host-owned registry.
  */
-extern "C" PLUGIN_API void register_photospider_ops_v1(
-    ps::OperationPluginRegistrar* registrar) {
+extern "C" PHOTOSPIDER_OPERATION_PLUGIN_EXPORT void register_photospider_ops_v2(
+    ps::plugin::OperationPluginRegistrar* registrar) {
   if (!registrar) {
     throw std::invalid_argument(
-        "register_photospider_ops_v1 requires registrar");
+        "register_photospider_ops_v2 requires registrar");
   }
-  ps::OpMetadata metal_meta;
+  ps::plugin::OperationMetadata metal_meta;
   metal_meta.device_preference = ps::Device::GPU_METAL;
 
   registrar->register_op_hp_monolithic("image_generator", "perlin_noise_metal",
                                        ps::ops::op_perlin_noise_metal,
                                        metal_meta);
-  registrar->register_dirty_propagator(
-      "image_generator", "perlin_noise_metal",
-      ps::DirtyRoiPropFunc(perlin_metal_dirty_roi));
+  registrar->register_dirty_propagator("image_generator", "perlin_noise_metal",
+                                       perlin_metal_dirty_roi);
   registrar->register_forward_propagator(
-      "image_generator", "perlin_noise_metal",
-      ps::ForwardRoiPropFunc(perlin_metal_forward_roi));
+      "image_generator", "perlin_noise_metal", perlin_metal_forward_roi);
 
-  perlin_noise_metal_eager_init();
+  ps::ops::perlin_noise_metal_eager_init();
 }

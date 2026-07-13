@@ -1,15 +1,16 @@
 #include <chrono>
 #include <cstdio>
 #include <cstdlib>
+#include <cstring>
+#include <limits>
 #include <memory>
 #include <new>
 #include <stdexcept>
 #include <string>
 #include <thread>
 #include <utility>
-#include <vector>
 
-#include "plugin_api.hpp"  // NOLINT(build/include_subdir)
+#include "photospider/plugin/plugin_api.hpp"
 
 namespace {
 
@@ -17,14 +18,28 @@ constexpr const char* kTraceEnvironment = "PS_LIFECYCLE_PLUGIN_TRACE";
 constexpr const char* kThrowEnvironment = "PS_LIFECYCLE_PLUGIN_REGISTRAR_THROW";
 constexpr const char* kCallbackReleaseEnvironment =
     "PS_LIFECYCLE_PLUGIN_CALLBACK_RELEASE_FILE";  // NOLINT(whitespace/indent_namespace)
+constexpr const char* kCallbackThrowEnvironment =
+    "PS_LIFECYCLE_PLUGIN_CALLBACK_THROW";  // NOLINT(whitespace/indent_namespace)
 constexpr const char* kRegistrarReleaseEnvironment =
     "PS_LIFECYCLE_PLUGIN_REGISTRAR_RELEASE_FILE";  // NOLINT(whitespace/indent_namespace)
 constexpr const char* kResultProbeEnvironment =
     "PS_LIFECYCLE_PLUGIN_RESULT_PROBE";  // NOLINT(whitespace/indent_namespace)
+constexpr const char* kInvalidResultEnvironment =
+    "PS_LIFECYCLE_PLUGIN_INVALID_RESULT";  // NOLINT(whitespace/indent_namespace)
 constexpr const char* kDeviceRegistrarEnvironment =
     "PS_LIFECYCLE_PLUGIN_REGISTER_DEVICES";  // NOLINT(whitespace/indent_namespace)
 constexpr const char* kCpuDeviceRegistrarEnvironment =
     "PS_LIFECYCLE_PLUGIN_REGISTER_CPU_DEVICE";  // NOLINT(whitespace/indent_namespace)
+constexpr const char* kTaskShapeOverrideEnvironment =
+    "PS_LIFECYCLE_PLUGIN_REGISTER_TASK_SHAPE_OVERRIDE";  // NOLINT(whitespace/indent_namespace)
+constexpr const char* kDataDependentEnvironment =
+    "PS_LIFECYCLE_PLUGIN_DATA_DEPENDENT_LUT";  // NOLINT(whitespace/indent_namespace)
+constexpr const char* kInvalidRoiEnvironment =
+    "PS_LIFECYCLE_PLUGIN_INVALID_ROI";  // NOLINT(whitespace/indent_namespace)
+constexpr const char* kInvalidNameEnvironment =
+    "PS_LIFECYCLE_PLUGIN_INVALID_NAME";  // NOLINT(whitespace/indent_namespace)
+constexpr const char* kEmptyCallbackEnvironment =
+    "PS_LIFECYCLE_PLUGIN_EMPTY_CALLBACK";  // NOLINT(whitespace/indent_namespace)
 
 /**
  * @brief Appends one real lifecycle event to the test-selected trace file.
@@ -49,6 +64,62 @@ void append_lifecycle_trace(const char* event) noexcept {
   (void)std::fputc('\n', output);
   (void)std::fclose(output);
 }
+
+/**
+ * @brief Plugin-defined ordinary exception used to audit DSO retirement.
+ * @throws Nothing from destruction or what().
+ * @note Both virtual calls trace execution so the host test proves they occur
+ * before the dynamic library is unmapped.
+ */
+class LifecycleCallbackException final : public std::exception {
+ public:
+  /** @brief Traces destruction of the plugin-owned exception object. */
+  ~LifecycleCallbackException() override {
+    append_lifecycle_trace("exception_destroy");
+  }
+
+  /**
+   * @brief Returns the deterministic plugin diagnostic.
+   * @return Static message owned by the mapped fixture library.
+   * @throws Nothing.
+   */
+  const char* what() const noexcept override {
+    append_lifecycle_trace("exception_what");
+    return "lifecycle plugin callback exception";
+  }
+};
+
+/**
+ * @brief Plugin-defined bad_alloc subtype used to audit category normalization.
+ * @throws Nothing from destruction.
+ * @note The host must throw a fresh standard bad_alloc rather than rethrow this
+ * DSO-owned dynamic type across unload.
+ */
+class LifecycleCallbackBadAlloc final : public std::bad_alloc {
+ public:
+  /** @brief Traces destruction of the plugin-owned resource exception. */
+  ~LifecycleCallbackBadAlloc() override {
+    append_lifecycle_trace("bad_alloc_exception_destroy");
+  }
+};
+
+/**
+ * @brief Plugin-defined invalid-argument subtype used to audit host coding.
+ * @throws std::bad_alloc if the standard diagnostic storage cannot allocate.
+ * @note Destruction is traced so the host proves the dynamic exception object
+ * is retired before the callback state and DSO lease.
+ */
+class LifecycleCallbackInvalidArgument final : public std::invalid_argument {
+ public:
+  /** @brief Constructs the deterministic plugin-origin diagnostic. */
+  LifecycleCallbackInvalidArgument()
+      : std::invalid_argument("lifecycle plugin invalid argument") {}
+
+  /** @brief Traces destruction of the plugin-owned dynamic exception. */
+  ~LifecycleCallbackInvalidArgument() override {
+    append_lifecycle_trace("invalid_argument_exception_destroy");
+  }
+};
 
 /**
  * @brief Waits until the test process creates one release file.
@@ -120,7 +191,7 @@ struct DeviceCallbackLifetimeProbe {
 };
 
 /**
- * @brief Plugin-defined state stored inside a returned NodeOutput image
+ * @brief Plugin-defined state stored inside a returned operation image
  * context.
  *
  * @throws Nothing directly.
@@ -134,7 +205,7 @@ struct ResultLifetimeProbe {
    *
    * @throws Nothing; trace I/O failures are suppressed by the helper.
    * @note `result_payload_destroy` must precede `library_unload` after explicit
-   *       global unload and any NodeOutput assignment path.
+   *       global unload and any host-output assignment path.
    */
   ~ResultLifetimeProbe() { append_lifecycle_trace("result_payload_destroy"); }
 };
@@ -164,20 +235,23 @@ LibraryLifetimeProbe library_lifetime_probe;
  * unload tests can prove `OpRegistry::unregister_key` removes `impl_table_`
  * state as well as legacy table entries.
  *
- * @param node Borrowed graph node; unused because the test only verifies
+ * @param node Borrowed public node view; unused because the test only verifies
  * registration and unload behavior.
- * @param inputs Borrowed upstream outputs; unused by this deterministic test
+ * @param inputs Borrowed public upstream views; unused by this deterministic
  * fixture.
- * @return Data-bearing `NodeOutput` with a diagnostic device marker.
+ * @return Data-bearing public output with a diagnostic device marker.
+ * @throws LifecycleCallbackException, LifecycleCallbackBadAlloc, or
+ * LifecycleCallbackInvalidArgument in the test-selected exception modes.
  * @throws std::bad_alloc if result-probe allocation, shared ownership, output
- *         map/YAML insertion, or diagnostic string storage cannot allocate.
+ * map/YAML insertion, or diagnostic string storage cannot allocate.
  * @note The function lives inside the dynamic library, so host code must keep
  * the library mapped through invocation completion. Tests may set
  * `PS_LIFECYCLE_PLUGIN_CALLBACK_RELEASE_FILE` to hold a callback in flight
  * until that file appears, allowing deterministic explicit-unload coverage.
  */
-ps::NodeOutput lifecycle_test_op(
-    const ps::Node& node, const std::vector<const ps::NodeOutput*>& inputs) {
+ps::plugin::OperationOutput lifecycle_test_op(
+    const ps::plugin::NodeView& node,
+    ps::plugin::ArrayView<ps::plugin::OperationInputView> inputs) {
   (void)node;
   (void)inputs;
 
@@ -187,15 +261,45 @@ ps::NodeOutput lifecycle_test_op(
     wait_for_release_file(release_file);
     append_lifecycle_trace("callback_return");
   }
+  const char* throw_mode = std::getenv(kCallbackThrowEnvironment);
+  if (throw_mode && std::strcmp(throw_mode, "custom") == 0) {
+    append_lifecycle_trace("callback_throw");
+    throw LifecycleCallbackException();
+  }
+  if (throw_mode && std::strcmp(throw_mode, "bad_alloc") == 0) {
+    append_lifecycle_trace("callback_throw_bad_alloc");
+    throw LifecycleCallbackBadAlloc();
+  }
+  if (throw_mode && std::strcmp(throw_mode, "invalid_argument") == 0) {
+    append_lifecycle_trace("callback_throw_invalid_argument");
+    throw LifecycleCallbackInvalidArgument();
+  }
 
-  ps::NodeOutput output;
+  ps::plugin::OperationOutput output;
   const char* result_probe = std::getenv(kResultProbeEnvironment);
   if (result_probe && result_probe[0] != '\0') {
+    output.image_buffer.width = 1;
+    output.image_buffer.height = 1;
+    output.image_buffer.channels = 1;
+    output.image_buffer.type = ps::DataType::UINT8;
+    output.image_buffer.device = ps::Device::GPU_METAL;
     output.image_buffer.context =
         std::shared_ptr<void>(new ResultLifetimeProbe());
   }
-  output.data["lifecycle_marker"] = "PLUGIN_LIFECYCLE_TEST";
-  output.space.absolute_roi = cv::Rect(0, 0, 11, 7);
+  const char* invalid_result = std::getenv(kInvalidResultEnvironment);
+  if (invalid_result && invalid_result[0] != '\0') {
+    output.image_buffer.width = 1;
+    output.image_buffer.height = 1;
+    output.image_buffer.channels = 1;
+    output.image_buffer.type = ps::DataType::FLOAT32;
+    output.image_buffer.device = ps::Device::CPU;
+    output.image_buffer.step = sizeof(float);
+    output.image_buffer.data.reset();
+    output.image_buffer.context = std::make_shared<int>(7);
+  }
+  output.data["lifecycle_marker"] =
+      ps::plugin::ParameterValue("PLUGIN_LIFECYCLE_TEST");
+  output.spatial.absolute_roi = ps::PixelRect{0, 0, 11, 7};
   output.debug.compute_device = "PLUGIN_LIFECYCLE_TEST";
   return output;
 }
@@ -208,11 +312,11 @@ ps::NodeOutput lifecycle_test_op(
  * @note The callback body delegates to `lifecycle_test_op`; only ownership is
  * extended so tests can audit callback destruction before library unload.
  */
-ps::MonolithicOpFunc make_lifecycle_test_op() {
+ps::plugin::MonolithicOperation make_lifecycle_test_op() {
   auto probe = std::make_shared<CallbackLifetimeProbe>();
   return [probe = std::move(probe)](
-             const ps::Node& node,
-             const std::vector<const ps::NodeOutput*>& inputs) {
+             const ps::plugin::NodeView& node,
+             ps::plugin::ArrayView<ps::plugin::OperationInputView> inputs) {
     (void)probe;
     return lifecycle_test_op(node, inputs);
   };
@@ -221,19 +325,20 @@ ps::MonolithicOpFunc make_lifecycle_test_op() {
 /**
  * @brief Produces the lifecycle fixture's device-specific monolithic marker.
  *
- * @param node Borrowed graph node; unused by this deterministic fixture.
- * @param inputs Borrowed upstream outputs; unused by this fixture.
+ * @param node Borrowed public node view; unused by this fixture.
+ * @param inputs Borrowed public upstream views; unused by this fixture.
  * @return Output identifying the plugin-owned device implementation.
  * @throws std::bad_alloc if diagnostic string storage cannot allocate.
  * @note The callback intentionally owns no trace probe. Its host wrapper still
  *       retains the real plugin library, while the single HP callback probe
  *       keeps existing lifecycle traces unambiguous.
  */
-ps::NodeOutput lifecycle_device_monolithic(
-    const ps::Node& node, const std::vector<const ps::NodeOutput*>& inputs) {
+ps::plugin::OperationOutput lifecycle_device_monolithic(
+    const ps::plugin::NodeView& node,
+    ps::plugin::ArrayView<ps::plugin::OperationInputView> inputs) {
   (void)node;
   (void)inputs;
-  ps::NodeOutput output;
+  ps::plugin::OperationOutput output;
   output.debug.compute_device = "PLUGIN_DEVICE_MONOLITHIC";
   return output;
 }
@@ -241,17 +346,18 @@ ps::NodeOutput lifecycle_device_monolithic(
 /**
  * @brief Executes the lifecycle fixture's device-specific tiled no-op.
  *
- * @param node Borrowed graph node; unused by this deterministic fixture.
+ * @param node Borrowed public node view; unused by this deterministic fixture.
  * @param output Borrowed writable tile; intentionally left unchanged.
- * @param inputs Borrowed input tiles; unused by this fixture.
+ * @param inputs Borrowed public input tiles; unused by this fixture.
  * @return Nothing.
  * @throws Nothing.
  * @note Registration through the real device registrar exercises a tiled
  *       plugin callback and its parallel ownership token without synthetic
  *       test-only registry writes.
  */
-void lifecycle_device_tiled(const ps::Node& node, const ps::OutputTile& output,
-                            const std::vector<ps::InputTile>& inputs) {
+void lifecycle_device_tiled(
+    const ps::plugin::NodeView& node, const ps::OutputTileView& output,
+    ps::plugin::ArrayView<ps::plugin::OperationTileInputView> inputs) {
   (void)node;
   (void)output;
   (void)inputs;
@@ -266,12 +372,12 @@ void lifecycle_device_tiled(const ps::Node& node, const ps::OutputTile& output,
  * @note The shared probe emits only after all host wrapper and reader copies
  *       release the original plugin-defined target state.
  */
-ps::MonolithicOpFunc make_lifecycle_device_monolithic() {
+ps::plugin::MonolithicOperation make_lifecycle_device_monolithic() {
   auto probe = std::make_shared<DeviceCallbackLifetimeProbe>(
       "device_monolithic_target_destroy");
   return [probe = std::move(probe)](
-             const ps::Node& node,
-             const std::vector<const ps::NodeOutput*>& inputs) {
+             const ps::plugin::NodeView& node,
+             ps::plugin::ArrayView<ps::plugin::OperationInputView> inputs) {
     (void)probe;
     return lifecycle_device_monolithic(node, inputs);
   };
@@ -285,12 +391,12 @@ ps::MonolithicOpFunc make_lifecycle_device_monolithic() {
  * @note Its final probe event distinguishes tiled target retirement from the
  *       scalar HP callback and monolithic device target.
  */
-ps::TileOpFunc make_lifecycle_device_tiled() {
+ps::plugin::TiledOperation make_lifecycle_device_tiled() {
   auto probe = std::make_shared<DeviceCallbackLifetimeProbe>(
       "device_tiled_target_destroy");
-  return [probe = std::move(probe)](const ps::Node& node,
-                                    const ps::OutputTile& output,
-                                    const std::vector<ps::InputTile>& inputs) {
+  return [probe = std::move(probe)](
+             const ps::plugin::NodeView& node, const ps::OutputTileView& output,
+             ps::plugin::ArrayView<ps::plugin::OperationTileInputView> inputs) {
     (void)probe;
     lifecycle_device_tiled(node, output, inputs);
   };
@@ -362,18 +468,18 @@ class CpuDeviceMonolithicCallback final {
 
   /**
    * @brief Produces the deterministic CPU device marker.
-   * @param node Borrowed operation node; unused.
-   * @param inputs Borrowed upstream outputs; unused.
+   * @param node Borrowed public node view; unused.
+   * @param inputs Borrowed public upstream views; unused.
    * @return Output matching both device-reader and HP-bridge invocation paths.
    * @throws std::bad_alloc if diagnostic string storage cannot allocate.
    * @note Invocation does not mutate or replace the retained target state.
    */
-  ps::NodeOutput operator()(
-      const ps::Node& node,
-      const std::vector<const ps::NodeOutput*>& inputs) const {
+  ps::plugin::OperationOutput operator()(
+      const ps::plugin::NodeView& node,
+      ps::plugin::ArrayView<ps::plugin::OperationInputView> inputs) const {
     (void)node;
     (void)inputs;
-    ps::NodeOutput output;
+    ps::plugin::OperationOutput output;
     output.debug.compute_device = "PLUGIN_CPU_DEVICE_MONOLITHIC";
     return output;
   }
@@ -391,7 +497,7 @@ class CpuDeviceMonolithicCallback final {
  * @note Registration-time target copies are traced before the test records its
  *       baseline; later host readers must share the retained wrapper instead.
  */
-ps::MonolithicOpFunc make_lifecycle_cpu_device_monolithic() {
+ps::plugin::MonolithicOperation make_lifecycle_cpu_device_monolithic() {
   return CpuDeviceMonolithicCallback(
       std::make_shared<DeviceCallbackLifetimeProbe>(
           "cpu_device_target_destroy"));
@@ -400,43 +506,57 @@ ps::MonolithicOpFunc make_lifecycle_cpu_device_monolithic() {
 /**
  * @brief Propagates lifecycle-fixture dirty demand unchanged.
  *
- * @param node Borrowed operation node; unused by the pointwise fixture.
- * @param roi Downstream dirty region to propagate upstream.
- * @param graph Borrowed graph model; unused by the pointwise fixture.
+ * @param context Borrowed public dirty ROI snapshot.
  * @return The unchanged dirty region.
  * @throws Nothing.
  * @note This explicit plugin-owned slot lets mixed-ownership unload prove that
  *       a later direct callback replacement does not leave plugin code active.
  */
-cv::Rect lifecycle_dirty_propagator(const ps::Node& node, const cv::Rect& roi,
-                                    const ps::GraphModel& graph) {
-  (void)node;
-  (void)graph;
-  return roi;
+ps::PixelRect lifecycle_dirty_propagator(
+    const ps::plugin::RoiContext& context) {
+  const char* invalid_roi = std::getenv(kInvalidRoiEnvironment);
+  if (invalid_roi && std::strcmp(invalid_roi, "negative") == 0) {
+    append_lifecycle_trace("dirty_roi_return");
+    return ps::PixelRect{0, 0, -1, 1};
+  }
+  return context.requested_roi;
 }
 
 /**
  * @brief Propagates lifecycle-fixture affected regions unchanged.
  *
- * @param node Borrowed operation node; unused by the pointwise fixture.
- * @param roi Upstream changed region to propagate downstream.
- * @param graph Borrowed graph model; unused by the pointwise fixture.
- * @param parent_size Parent extent; unused by identity propagation.
- * @param child_size Child extent; unused by identity propagation.
+ * @param context Borrowed public forward ROI and active-edge snapshot.
  * @return The unchanged affected region.
  * @throws Nothing.
  * @note The callback is registered through the host registrar and therefore
  *       carries the same plugin-library lease as the operation callback.
  */
-cv::Rect lifecycle_forward_propagator(const ps::Node& node, const cv::Rect& roi,
-                                      const ps::GraphModel& graph,
-                                      const cv::Size& parent_size,
-                                      const cv::Size& child_size) {
-  (void)node;
-  (void)graph;
-  (void)parent_size;
-  (void)child_size;
-  return roi;
+ps::PixelRect lifecycle_forward_propagator(
+    const ps::plugin::RoiContext& context) {
+  const char* invalid_roi = std::getenv(kInvalidRoiEnvironment);
+  if (invalid_roi && std::strcmp(invalid_roi, "overflow") == 0) {
+    append_lifecycle_trace("forward_roi_return");
+    return ps::PixelRect{std::numeric_limits<int>::max(), 0, 1, 1};
+  }
+  return context.requested_roi;
+}
+
+/**
+ * @brief Builds the original lifecycle plugin's one-cell dependency table.
+ * @param context Borrowed public topology and output-extent snapshot.
+ * @return One-cell table routed to input zero with x marker one.
+ * @throws std::bad_alloc if cell vector growth cannot allocate.
+ * @note The marker lets override/unload tests distinguish callback ownership
+ * without retaining plugin code addresses.
+ */
+ps::plugin::DependencyLutSnapshot lifecycle_dependency_builder(
+    const ps::plugin::RoiContext& context) {
+  ps::plugin::DependencyLutSnapshot result;
+  result.upstream_input_index = 0;
+  result.cell_size = context.output_extent;
+  result.output_extent = context.output_extent;
+  result.cell_to_upstream_roi.push_back(ps::PixelRect{1, 0, 1, 1});
+  return result;
 }
 
 }  // namespace
@@ -454,15 +574,17 @@ cv::Rect lifecycle_forward_propagator(const ps::Node& node, const cv::Rect& roi,
  *         cannot allocate.
  * @note The host loader discovers this versioned C symbol and records the new
  * `plugin_lifecycle:op` key for later unload without the plugin touching
- * `OpRegistry::instance()`.
+ * `OpRegistry::instance()`. Invalid-name test modes intentionally call the raw
+ * registrar slot after ordinary staging to exercise the host's independent
+ * separator/empty-callback validation and complete transaction rollback.
  */
-extern "C" PLUGIN_API void register_photospider_ops_v1(
-    ps::OperationPluginRegistrar* registrar) {
+extern "C" PHOTOSPIDER_OPERATION_PLUGIN_EXPORT void register_photospider_ops_v2(
+    ps::plugin::OperationPluginRegistrar* registrar) {
   if (!registrar) {
     throw std::invalid_argument(
-        "register_photospider_ops_v1 requires registrar");
+        "register_photospider_ops_v2 requires registrar");
   }
-  ps::OpMetadata metadata;
+  ps::plugin::OperationMetadata metadata;
   metadata.cost_score = 1;
   registrar->register_op_hp_monolithic("plugin_lifecycle", "op",
                                        make_lifecycle_test_op(), metadata);
@@ -470,27 +592,60 @@ extern "C" PLUGIN_API void register_photospider_ops_v1(
                                        lifecycle_dirty_propagator);
   registrar->register_forward_propagator("plugin_lifecycle", "op",
                                          lifecycle_forward_propagator);
+  const char* data_dependent = std::getenv(kDataDependentEnvironment);
+  registrar->register_dependency_builder(
+      "plugin_lifecycle", "op", lifecycle_dependency_builder,
+      data_dependent && data_dependent[0] != '\0');
   const char* register_devices = std::getenv(kDeviceRegistrarEnvironment);
   if (register_devices && register_devices[0] != '\0') {
-    ps::OpMetadata device_monolithic_metadata;
+    ps::plugin::OperationMetadata device_monolithic_metadata;
     device_monolithic_metadata.cost_score = 3;
     registrar->register_impl("plugin_lifecycle", "op", ps::Device::GPU_METAL,
                              make_lifecycle_device_monolithic(),
                              device_monolithic_metadata);
-    ps::OpMetadata device_tiled_metadata;
+    ps::plugin::OperationMetadata device_tiled_metadata;
     device_tiled_metadata.cost_score = 4;
-    device_tiled_metadata.tile_preference = ps::TileSizePreference::MICRO;
+    device_tiled_metadata.tile_preference =
+        ps::plugin::TileSizePreference::Micro;
     registrar->register_impl("plugin_lifecycle", "op", ps::Device::GPU_CUDA,
                              make_lifecycle_device_tiled(),
                              device_tiled_metadata);
   }
   const char* register_cpu_device = std::getenv(kCpuDeviceRegistrarEnvironment);
   if (register_cpu_device && register_cpu_device[0] != '\0') {
-    ps::OpMetadata cpu_device_metadata;
+    ps::plugin::OperationMetadata cpu_device_metadata;
     cpu_device_metadata.cost_score = 5;
     registrar->register_impl("plugin_lifecycle", "cpu_device", ps::Device::CPU,
                              make_lifecycle_cpu_device_monolithic(),
                              cpu_device_metadata);
+  }
+  const char* register_task_shape_override =
+      std::getenv(kTaskShapeOverrideEnvironment);
+  if (register_task_shape_override && register_task_shape_override[0] != '\0') {
+    registrar->register_op_hp_monolithic(
+        "plugin_lifecycle", "task_shape_override", lifecycle_test_op, metadata);
+  }
+
+  const char* invalid_name = std::getenv(kInvalidNameEnvironment);
+  if (invalid_name && std::strcmp(invalid_name, "type") == 0) {
+    append_lifecycle_trace("registrar_invalid_type");
+    registrar->register_hp_monolithic(registrar->user_data, "plugin:lifecycle",
+                                      "invalid_name", lifecycle_test_op,
+                                      metadata);
+  }
+  if (invalid_name && std::strcmp(invalid_name, "subtype") == 0) {
+    append_lifecycle_trace("registrar_invalid_subtype");
+    registrar->register_hp_monolithic(registrar->user_data, "plugin_lifecycle",
+                                      "invalid:name", lifecycle_test_op,
+                                      metadata);
+  }
+
+  const char* empty_callback = std::getenv(kEmptyCallbackEnvironment);
+  if (empty_callback && empty_callback[0] != '\0') {
+    append_lifecycle_trace("registrar_empty_callback");
+    registrar->register_hp_monolithic(
+        registrar->user_data, "plugin_lifecycle", "empty_callback",
+        ps::plugin::MonolithicOperation{}, metadata);
   }
 
   const char* throw_mode = std::getenv(kThrowEnvironment);

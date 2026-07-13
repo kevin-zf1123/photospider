@@ -8,6 +8,8 @@
 #include <utility>
 #include <vector>
 
+#include "core/parameter_value_adapter.hpp"
+
 namespace ps {
 
 namespace {
@@ -388,7 +390,7 @@ void GraphModel::mutate_node_runtime_state(
       node.hp_version,
       node.hp_roi,
       node.last_input_size_hp,
-      node.dependency_lut,
+      node.dependency_lut_cache,
       node.dependency_lut_version,
       node.parameters_version,
   };
@@ -469,6 +471,56 @@ void GraphModel::set_skip_save_cache(bool v) {
 
 bool GraphModel::skip_save_cache() const {
   return skip_save_cache_.load(std::memory_order_relaxed);
+}
+
+plugin::ParameterMap resolve_effective_parameter_snapshot(
+    const Node& node, const GraphModel& graph) {
+  YAML::Node effective = node.parameters ? YAML::Clone(node.parameters)
+                                         : YAML::Node(YAML::NodeType::Map);
+  for (const auto& input : node.parameter_inputs) {
+    if (input.from_node_id < 0) {
+      continue;
+    }
+    if (!graph.has_node(input.from_node_id)) {
+      throw GraphError(
+          GraphErrc::MissingDependency,
+          "Parameter input not ready for node " + std::to_string(node.id));
+    }
+    const Node& upstream_node = graph.node(input.from_node_id);
+    if (!upstream_node.cached_output_high_precision) {
+      throw GraphError(
+          GraphErrc::MissingDependency,
+          "Parameter input not cached for node " + std::to_string(node.id));
+    }
+    const auto& upstream = *upstream_node.cached_output_high_precision;
+    const auto value = upstream.data.find(input.from_output_name);
+    if (value == upstream.data.end()) {
+      throw GraphError(GraphErrc::MissingDependency,
+                       "Node " + std::to_string(input.from_node_id) +
+                           " missing output '" + input.from_output_name + "'");
+    }
+    effective[input.to_parameter_name] = YAML::Clone(value->second);
+  }
+  return core::parameter_map_from_yaml(effective);
+}
+
+std::vector<cv::Size> cached_image_input_extents(const Node& node,
+                                                 const GraphModel& graph) {
+  std::vector<cv::Size> extents(node.image_inputs.size());
+  for (std::size_t index = 0; index < node.image_inputs.size(); ++index) {
+    const auto& input = node.image_inputs[index];
+    if (input.from_node_id < 0 || !graph.has_node(input.from_node_id)) {
+      continue;
+    }
+    const Node& upstream = graph.node(input.from_node_id);
+    if (!upstream.cached_output_high_precision) {
+      continue;
+    }
+    const ImageBuffer& image =
+        upstream.cached_output_high_precision->image_buffer;
+    extents[index] = cv::Size(image.width, image.height);
+  }
+  return extents;
 }
 
 }  // namespace ps

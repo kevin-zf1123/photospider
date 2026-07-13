@@ -16,19 +16,19 @@
 #include <utility>
 #include <vector>
 
-#include "adapter/buffer_adapter_opencv.hpp"
+#include "adapters/opencv/buffer_adapter_opencv.hpp"
 #include "benchmark/benchmark_service.hpp"
 #include "compute/dirty_update_executor.hpp"
 #include "compute/realtime_proxy_graph.hpp"
 #include "graph/graph_model.hpp"  // NOLINT(build/include_subdir)
 #include "graph/graph_traversal_service.hpp"
+#include "graph/node.hpp"            // NOLINT(build/include_subdir)
 #include "graph_cli/cli_config.hpp"  // NOLINT(build/include_subdir)
 #include "graph_cli/command/commands.hpp"
 #include "graph_cli/process_command.hpp"
 #include "metal/metal_exception_boundary.hpp"
-#include "node.hpp"  // NOLINT(build/include_subdir)
 #include "photospider/host/host.hpp"
-#include "plugin_api.hpp"  // NOLINT(build/include_subdir)
+#include "photospider/plugin/plugin_api.hpp"
 #include "runtime/graph_event_service.hpp"
 
 #if defined(__APPLE__)
@@ -198,8 +198,8 @@ void operator delete[](void* memory, std::size_t size) noexcept {
  * plugin ABI intentionally discovers it by symbol name; no helper symbol from
  * threshold_op.cpp is exposed to the test.
  */
-extern "C" void register_photospider_ops_v1(
-    ps::OperationPluginRegistrar* registrar);
+extern "C" void register_photospider_ops_v2(
+    ps::plugin::OperationPluginRegistrar* registrar);
 
 namespace ps {
 namespace {
@@ -322,13 +322,13 @@ struct ThresholdRegistrationCapture {
   std::string subtype;
 
   /** @brief Real registered HP monolithic threshold callback. */
-  MonolithicOpFunc operation;
+  plugin::MonolithicOperation operation;
 
   /** @brief Real registered backward dirty ROI callback. */
-  DirtyRoiPropFunc dirty;
+  plugin::DirtyRoiPropagator dirty;
 
   /** @brief Real registered forward dirty ROI callback. */
-  ForwardRoiPropFunc forward;
+  plugin::ForwardRoiPropagator forward;
 };
 
 /**
@@ -345,8 +345,9 @@ struct ThresholdRegistrationCapture {
  * only; names and callback ownership are copied/moved into the capture.
  */
 void capture_threshold_operation(void* user_data, const char* type,
-                                 const char* subtype, MonolithicOpFunc fn,
-                                 OpMetadata meta) {
+                                 const char* subtype,
+                                 plugin::MonolithicOperation fn,
+                                 plugin::OperationMetadata meta) {
   (void)meta;
   auto& capture = *static_cast<ThresholdRegistrationCapture*>(user_data);
   capture.type = type;
@@ -366,7 +367,8 @@ void capture_threshold_operation(void* user_data, const char* type,
  * @note The callback target is moved into test-owned capture storage.
  */
 void capture_threshold_dirty(void* user_data, const char* type,
-                             const char* subtype, DirtyRoiPropFunc fn) {
+                             const char* subtype,
+                             plugin::DirtyRoiPropagator fn) {
   (void)type;
   (void)subtype;
   auto& capture = *static_cast<ThresholdRegistrationCapture*>(user_data);
@@ -385,7 +387,8 @@ void capture_threshold_dirty(void* user_data, const char* type,
  * @note The callback target is moved into test-owned capture storage.
  */
 void capture_threshold_forward(void* user_data, const char* type,
-                               const char* subtype, ForwardRoiPropFunc fn) {
+                               const char* subtype,
+                               plugin::ForwardRoiPropagator fn) {
   (void)type;
   (void)subtype;
   auto& capture = *static_cast<ThresholdRegistrationCapture*>(user_data);
@@ -403,12 +406,12 @@ void capture_threshold_forward(void* user_data, const char* type,
  */
 ThresholdRegistrationCapture register_threshold_callbacks() {
   ThresholdRegistrationCapture capture;
-  OperationPluginRegistrar registrar;
+  plugin::OperationPluginRegistrar registrar;
   registrar.user_data = &capture;
   registrar.register_hp_monolithic = capture_threshold_operation;
-  registrar.register_dirty_propagator_fn = capture_threshold_dirty;
-  registrar.register_forward_propagator_fn = capture_threshold_forward;
-  register_photospider_ops_v1(&registrar);
+  registrar.register_dirty = capture_threshold_dirty;
+  registrar.register_forward = capture_threshold_forward;
+  register_photospider_ops_v2(&registrar);
   return capture;
 }
 
@@ -615,12 +618,24 @@ void register_bad_alloc_boundary_operations() {
                                   tile_metadata);
     registry.register_dirty_propagator(
         "bad_alloc_boundary_test", "hp_dirty_resource_exhausted",
-        DirtyRoiPropFunc([](const Node&, const cv::Rect& roi,
-                            const GraphModel&) { return roi; }));
+        DirtyRoiPropFunc(
+            [](const Node&, const cv::Rect& roi, const GraphModel&,
+               const cv::Size&, const std::vector<cv::Size>&,
+               const plugin::ParameterMap&,
+               const std::vector<const NodeOutput*>* available_inputs) {
+              (void)available_inputs;
+              return roi;
+            }));
     registry.register_dirty_propagator(
         "bad_alloc_boundary_test", "rt_dirty_resource_exhausted",
-        DirtyRoiPropFunc([](const Node&, const cv::Rect& roi,
-                            const GraphModel&) { return roi; }));
+        DirtyRoiPropFunc(
+            [](const Node&, const cv::Rect& roi, const GraphModel&,
+               const cv::Size&, const std::vector<cv::Size>&,
+               const plugin::ParameterMap&,
+               const std::vector<const NodeOutput*>* available_inputs) {
+              (void)available_inputs;
+              return roi;
+            }));
   });
 }
 
@@ -908,15 +923,20 @@ TEST(ThresholdBadAllocBoundary,
      RegisteredCallbackNumericReadPreservesResourceExhaustion) {
   ThresholdRegistrationCapture capture = register_threshold_callbacks();
   ASSERT_TRUE(capture.operation);
-  Node node;
-  node.runtime_parameters = YAML::Load(
-      "thresh: !photospider-test-numeric-bad-alloc 0.5\n"
-      "maxval: 1.0\n"
-      "type: binary\n");
+  plugin::ParameterMap parameters;
+  parameters.emplace(
+      "thresh", plugin::ParameterValue("photospider-test-numeric-bad-alloc"));
+  parameters.emplace("maxval", plugin::ParameterValue(1.0));
+  parameters.emplace("type", plugin::ParameterValue("binary"));
+  plugin::NodeView node(1, "threshold", "image_process", "threshold",
+                        std::move(parameters));
   NodeOutput input = make_threshold_input();
-  const std::vector<const NodeOutput*> inputs{&input};
+  const std::vector<plugin::OperationInputView> inputs{
+      plugin::OperationInputView{&input.image_buffer, nullptr, nullptr}};
 
-  EXPECT_THROW((void)capture.operation(node, inputs), std::bad_alloc);
+  EXPECT_THROW((void)capture.operation(
+                   node, plugin::ArrayView<plugin::OperationInputView>(inputs)),
+               std::bad_alloc);
 }
 
 /**
@@ -931,15 +951,20 @@ TEST(ThresholdBadAllocBoundary,
      RegisteredCallbackStringReadPreservesResourceExhaustion) {
   ThresholdRegistrationCapture capture = register_threshold_callbacks();
   ASSERT_TRUE(capture.operation);
-  Node node;
-  node.runtime_parameters = YAML::Load(
-      "thresh: 0.5\n"
-      "maxval: 1.0\n"
-      "type: !photospider-test-string-bad-alloc binary\n");
+  plugin::ParameterMap parameters;
+  parameters.emplace("thresh", plugin::ParameterValue(0.5));
+  parameters.emplace("maxval", plugin::ParameterValue(1.0));
+  parameters.emplace(
+      "type", plugin::ParameterValue("photospider-test-string-bad-alloc"));
+  plugin::NodeView node(1, "threshold", "image_process", "threshold",
+                        std::move(parameters));
   NodeOutput input = make_threshold_input();
-  const std::vector<const NodeOutput*> inputs{&input};
+  const std::vector<plugin::OperationInputView> inputs{
+      plugin::OperationInputView{&input.image_buffer, nullptr, nullptr}};
 
-  EXPECT_THROW((void)capture.operation(node, inputs), std::bad_alloc);
+  EXPECT_THROW((void)capture.operation(
+                   node, plugin::ArrayView<plugin::OperationInputView>(inputs)),
+               std::bad_alloc);
 }
 
 /**
@@ -958,12 +983,17 @@ TEST(ThresholdBadAllocBoundary,
   ASSERT_TRUE(capture.dirty);
   ASSERT_TRUE(capture.forward);
 
-  Node node;
-  node.runtime_parameters =
-      YAML::Load("thresh: 0.5\nmaxval: 1.0\ntype: binary\n");
+  plugin::ParameterMap parameters;
+  parameters.emplace("thresh", plugin::ParameterValue(0.5));
+  parameters.emplace("maxval", plugin::ParameterValue(1.0));
+  parameters.emplace("type", plugin::ParameterValue("binary"));
+  plugin::NodeView node(1, "threshold", "image_process", "threshold",
+                        std::move(parameters));
   NodeOutput input = make_threshold_input();
-  const std::vector<const NodeOutput*> inputs{&input};
-  const NodeOutput output = capture.operation(node, inputs);
+  const std::vector<plugin::OperationInputView> inputs{
+      plugin::OperationInputView{&input.image_buffer, nullptr, nullptr}};
+  const plugin::OperationOutput output = capture.operation(
+      node, plugin::ArrayView<plugin::OperationInputView>(inputs));
   EXPECT_EQ(output.image_buffer.width, 2);
   EXPECT_EQ(output.image_buffer.height, 2);
 }
@@ -1017,13 +1047,20 @@ TEST(MetalBadAllocBoundary, PortableExceptionSeamContextsStandardFailure) {
  * @brief Proves the real Perlin entry preserves injected allocation failure.
  *
  * @throws Nothing when the expected exception is observed.
- * @note Injection happens before device initialization for determinism.
+ * @note The public node snapshot is prepared before arming the probe, so the
+ * first failed allocation belongs to the real Metal operation rather than
+ * test-only parameter construction. Injection still happens before device
+ * initialization for determinism.
  */
 TEST(MetalBadAllocBoundary, RealPerlinEntryPreservesInjectedBadAlloc) {
-  Node node;
-  node.runtime_parameters =
-      YAML::Load("width: 2\nheight: 2\ngrid_size: 1.0\nseed: 7\n");
-  const std::vector<const NodeOutput*> inputs;
+  plugin::ParameterMap parameters;
+  parameters.emplace("width", plugin::ParameterValue(2));
+  parameters.emplace("height", plugin::ParameterValue(2));
+  parameters.emplace("grid_size", plugin::ParameterValue(1.0));
+  parameters.emplace("seed", plugin::ParameterValue(7));
+  plugin::NodeView node(1, "perlin_noise_metal", "image_generator",
+                        "perlin_noise_metal", std::move(parameters));
+  const plugin::ArrayView<plugin::OperationInputView> inputs;
   const AllocationFailureObservation observation = observe_allocation_failure(
       0, [&] { (void)ops::op_perlin_noise_metal(node, inputs); });
   EXPECT_TRUE(observation.fired);
@@ -1037,12 +1074,17 @@ TEST(MetalBadAllocBoundary, RealPerlinEntryPreservesInjectedBadAlloc) {
  * stage.
  * @note Invalid dimensions fail after the real serialized lock is acquired but
  * before device initialization, making the Apple-path regression deterministic.
+ * The call uses only the public operation callback values used by real plugins.
  */
 TEST(MetalBadAllocBoundary, RealPerlinEntryContextsStandardFailure) {
-  Node node;
-  node.runtime_parameters =
-      YAML::Load("width: 0\nheight: 2\ngrid_size: 1.0\nseed: 7\n");
-  const std::vector<const NodeOutput*> inputs;
+  plugin::ParameterMap parameters;
+  parameters.emplace("width", plugin::ParameterValue(0));
+  parameters.emplace("height", plugin::ParameterValue(2));
+  parameters.emplace("grid_size", plugin::ParameterValue(1.0));
+  parameters.emplace("seed", plugin::ParameterValue(7));
+  plugin::NodeView node(1, "perlin_noise_metal", "image_generator",
+                        "perlin_noise_metal", std::move(parameters));
+  const plugin::ArrayView<plugin::OperationInputView> inputs;
   try {
     (void)ops::op_perlin_noise_metal(node, inputs);
     FAIL() << "invalid Perlin dimensions did not throw";
