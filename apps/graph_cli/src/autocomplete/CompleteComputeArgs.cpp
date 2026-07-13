@@ -5,6 +5,7 @@
 
 namespace ps {
 
+/** @copydoc CliAutocompleter::CompleteComputeArgs */
 void CliAutocompleter::CompleteComputeArgs(
     const std::string& prefix, std::vector<std::string>& options) const {
   // Only compute flags here. Node id/all is handled as the first arg in

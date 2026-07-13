@@ -5,6 +5,7 @@
 
 namespace ps {
 
+/** @copydoc CliAutocompleter::CompletePrintArgs */
 void CliAutocompleter::CompletePrintArgs(const std::string& prefix,
                                          std::vector<std::string>& options,
                                          bool only_mode_args) const {

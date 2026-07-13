@@ -6,6 +6,7 @@
 
 namespace ps {
 
+/** @copydoc CliAutocompleter::Tokenize */
 std::vector<std::string> CliAutocompleter::Tokenize(
     const std::string& line) const {
   std::vector<std::string> tokens;

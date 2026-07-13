@@ -1,4 +1,3 @@
-// Minimal FTXUI-based node editor using Host
 #include "graph_cli/node_editor.hpp"
 
 #include <algorithm>
@@ -20,6 +19,7 @@
 using namespace ftxui;  // NOLINT(build/namespaces)
 namespace node_layout = ps::cli::node_editor_layout;
 
+/** @copydoc run_node_editor_decoupled */
 void run_node_editor_decoupled(ps::Host& svc, const std::string& graph_name,
                                std::optional<int> initial_id) {
   auto screen = ScreenInteractive::Fullscreen();
@@ -52,23 +52,48 @@ void run_node_editor_decoupled(ps::Host& svc, const std::string& graph_name,
   std::string last_saved_text;
   bool dirty = false;
 
-  // Tree panels
-  std::string tree1_text;  // dependency of current node
-  std::string tree2_text;  // second view: contains/end trees
+  std::string tree1_text;
+  std::string tree2_text;
   bool tree_show_params = true;
-  enum class Tree2Mode { ContainsNode, AsEndNode };
+
+  /**
+   * @brief Selects the relationship shown in the secondary tree pane.
+   * @throws Nothing.
+   * @note This event-loop-local state owns no Host or snapshot value.
+   */
+  enum class Tree2Mode {
+    /** @brief Show an ending-node tree that contains the selected node. */
+    ContainsNode,
+
+    /** @brief Show the selected node as the dependency-tree root. */
+    AsEndNode,
+  };
   Tree2Mode tree2_mode = Tree2Mode::ContainsNode;
   std::vector<int> containing_ends;
-  int containing_idx = 0;  // which end tree to show when in ContainsNode mode
+  int containing_idx = 0;
   int focus_index = node_layout::kNodesFocusIndex;
   int tree1_v = 0, tree1_h = 0, tree2_v = 0, tree2_h = 0;
+
+  /**
+   * @brief Reloads selected-node YAML and both copied dependency-tree panes.
+   *
+   * The helper refreshes editor text, clears the dirty flag, queries the
+   * primary tree and containing ending nodes, and formats the active secondary
+   * tree mode.
+   *
+   * @return Nothing.
+   * @throws std::bad_alloc if Host results, snapshots, or formatted UI text
+   *         exhaust memory.
+   * @note The lambda borrows all captured event-loop state and `svc`; it must
+   *       run on the UI thread while those captures remain alive. Recoverable
+   *       Host failures are represented by stable fallback pane text.
+   */
   auto load_current = [&] {
     auto y = svc.get_node_yaml(ps::GraphSessionId{graph_name},
                                ps::NodeId{ids[selected_index]});
     editor_text = y.status.ok ? y.value : "# failed to load node\n";
     last_saved_text = editor_text;
     dirty = false;
-    // Refresh trees
     auto t1 = svc.dependency_tree(ps::GraphSessionId{graph_name},
                                   ps::NodeId{ids[selected_index]});
     tree1_text = t1.status.ok ? ps::cli::format_dependency_tree(
@@ -83,6 +108,16 @@ void run_node_editor_decoupled(ps::Host& svc, const std::string& graph_name,
         containing_ends.push_back(end.value);
       }
     }
+    /**
+     * @brief Builds the active secondary dependency-tree pane value.
+     *
+     * @return Formatted tree text, a stable no-containing-tree message, or an
+     *         empty optional when the matching Host inspection fails.
+     * @throws std::bad_alloc if Host result or formatted text construction
+     *         exhausts memory.
+     * @note The lambda borrows the surrounding selection and Host state only
+     *       for this immediate call and retains no copied Host snapshot.
+     */
     auto t2 = [&]() {
       if (tree2_mode == Tree2Mode::ContainsNode) {
         if (containing_ends.empty())
@@ -113,6 +148,16 @@ void run_node_editor_decoupled(ps::Host& svc, const std::string& graph_name,
   MenuOption menu_opt;
   menu_opt.entries = &entries;
   menu_opt.selected = &selected_index;
+
+  /**
+   * @brief Handles node-menu selection changes.
+   *
+   * @return Nothing.
+   * @throws std::bad_alloc if reloading selected Host values or pane text
+   *         exhausts memory.
+   * @note The callback borrows UI state for the event-loop lifetime. It rejects
+   *       a selection change while unsaved editor text is dirty.
+   */
   menu_opt.on_change = [&] {
     if (dirty) {
       // revert selection change
@@ -127,8 +172,29 @@ void run_node_editor_decoupled(ps::Host& svc, const std::string& graph_name,
   textarea_opt.content = &editor_text;
   textarea_opt.placeholder = "node yaml";
   textarea_opt.multiline = true;
+
+  /**
+   * @brief Recomputes whether the YAML editor differs from its saved baseline.
+   * @return Nothing.
+   * @throws Nothing.
+   * @note The callback borrows editor strings and the dirty flag for the
+   *       event-loop lifetime and performs no Host call.
+   */
   textarea_opt.on_change = [&] { dirty = (editor_text != last_saved_text); };
   auto textarea = Input(textarea_opt);
+
+  /**
+   * @brief Applies vertical and horizontal offsets to pane text.
+   *
+   * @param s Borrowed multiline pane text.
+   * @param voff Requested first line; negative values are clamped to zero.
+   * @param hoff Requested byte offset within every emitted line.
+   * @return Owned visible suffix with newline termination per emitted line.
+   * @throws std::bad_alloc if stream, line-vector, or output construction
+   *         exhausts memory.
+   * @note The helper uses byte offsets, retains no reference to `s`, and
+   *       performs no Host call. Callers provide a non-negative `hoff`.
+   */
   auto text_with_offsets = [&](const std::string& s, int voff, int hoff) {
     std::istringstream iss(s);
     std::string line;
@@ -148,6 +214,15 @@ void run_node_editor_decoupled(ps::Host& svc, const std::string& graph_name,
     }
     return out;
   };
+
+  /**
+   * @brief Renders the primary dependency-tree pane and its focus state.
+   * @return Newly composed FTXUI element for the current frame.
+   * @throws std::bad_alloc if pane text or FTXUI element construction exhausts
+   *         memory.
+   * @note The renderer borrows captured pane and focus state for the UI-loop
+   *       lifetime and performs no Host call during rendering.
+   */
   auto tree1_view = Renderer([&] {
     auto box =
         vbox({text(node_layout::kDependencyTreePaneTitle) | bold, separator(),
@@ -158,6 +233,15 @@ void run_node_editor_decoupled(ps::Host& svc, const std::string& graph_name,
       el = el | inverted | bold;
     return el;
   });
+
+  /**
+   * @brief Renders the secondary tree pane, active mode, and focus state.
+   * @return Newly composed FTXUI element for the current frame.
+   * @throws std::bad_alloc if title, pane text, or FTXUI element construction
+   *         exhausts memory.
+   * @note The renderer borrows captured pane, selection, and focus state for
+   *       the UI-loop lifetime and performs no Host call during rendering.
+   */
   auto tree2_view = Renderer([&] {
     std::string title =
         (tree2_mode == Tree2Mode::ContainsNode ? "Tree (contains)"
@@ -177,6 +261,15 @@ void run_node_editor_decoupled(ps::Host& svc, const std::string& graph_name,
     return el;
   });
   auto root = Container::Horizontal({menu, textarea, tree1_view, tree2_view});
+
+  /**
+   * @brief Composes node, YAML, tree, and help panes for the current frame.
+   * @return Newly composed root FTXUI element.
+   * @throws std::bad_alloc if UI labels or FTXUI element construction exhausts
+   *         memory.
+   * @note The renderer borrows all component and focus state for the UI-loop
+   *       lifetime and performs no Host call during rendering.
+   */
   auto renderer = Renderer(root, [&] {
     auto nodes_box = vbox({text(node_layout::kNodesTitle) | bold, separator(),
                            menu->Render() | frame | flex});
@@ -209,6 +302,20 @@ void run_node_editor_decoupled(ps::Host& svc, const std::string& graph_name,
     return vbox({main_row | flex, separator(), help});
   });
 
+  /**
+   * @brief Applies edited YAML, validates traversal, and refreshes saved state.
+   *
+   * The helper submits the current YAML, queries traversal orders as the
+   * existing acyclicity signal, best-effort reverts on traversal failure, and
+   * otherwise best-effort saves `content.yaml` before reloading both panes.
+   *
+   * @return `true` so FTXUI treats the triggering event as handled.
+   * @throws std::bad_alloc if Host results, path text, or refreshed pane state
+   *         exhausts memory.
+   * @note The lambda borrows captured UI state and `svc` for the event-loop
+   *       lifetime. Recoverable set/revert/save statuses are not surfaced by
+   *       this legacy UI boundary; no backend object is retained.
+   */
   auto apply_current_editor = [&] {
     svc.set_node_yaml(ps::GraphSessionId{graph_name},
                       ps::NodeId{ids[selected_index]}, editor_text);
@@ -235,6 +342,20 @@ void run_node_editor_decoupled(ps::Host& svc, const std::string& graph_name,
     return true;
   };
 
+  /**
+   * @brief Round-trips the current YAML through a blocking external editor.
+   *
+   * The helper writes a session-local node file, invokes `$EDITOR` or `vim`
+   * synchronously, rereads the file, and updates dirty state when nonempty text
+   * changed.
+   *
+   * @return `true` so FTXUI treats the triggering event as handled.
+   * @throws std::bad_alloc if path, command, stream, or text construction
+   *         exhausts memory.
+   * @note The lambda borrows captured state for the event-loop lifetime.
+   *       Ordinary stream failures and the editor process exit status are
+   *       intentionally best-effort; the helper performs no Host call.
+   */
   auto open_external_editor = [&] {
     // write temp file
     std::string tmp_path =
@@ -262,6 +383,18 @@ void run_node_editor_decoupled(ps::Host& svc, const std::string& graph_name,
     return true;
   };
 
+  /**
+   * @brief Routes editor keyboard events to exit, focus, edit, and tree
+   * actions.
+   *
+   * @param e FTXUI event delivered by the fullscreen event loop.
+   * @return `true` when the event is consumed, otherwise `false` for normal
+   *         component propagation.
+   * @throws std::bad_alloc if an action reloads Host results or rebuilds UI
+   *         text and exhausts memory.
+   * @note The callback borrows the complete editor state and Host for the
+   *       event-loop lifetime and must execute on that loop's thread.
+   */
   renderer |= CatchEvent([&](Event e) {
     if (e == Event::Character('q') || e == Event::Special({"C-q"})) {
       screen.Exit();

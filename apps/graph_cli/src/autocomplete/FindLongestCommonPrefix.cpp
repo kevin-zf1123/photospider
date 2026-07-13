@@ -5,6 +5,7 @@
 
 namespace ps {
 
+/** @copydoc CliAutocompleter::FindLongestCommonPrefix */
 std::string CliAutocompleter::FindLongestCommonPrefix(
     const std::vector<std::string>& options) const {
   if (options.empty())

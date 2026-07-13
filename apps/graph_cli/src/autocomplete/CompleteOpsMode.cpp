@@ -5,6 +5,7 @@
 
 namespace ps {
 
+/** @copydoc CliAutocompleter::CompleteOpsMode */
 void CliAutocompleter::CompleteOpsMode(
     const std::string& prefix, std::vector<std::string>& options) const {
   const std::vector<std::string> args = {"all",     "a", "builtin", "b",

@@ -7,16 +7,7 @@
 
 namespace ps {
 
-/**
- * @brief Completes session names from the local sessions directory.
- * @param prefix Required name prefix.
- * @param options Mutable destination receiving matching directory names.
- * @return Nothing.
- * @throws std::bad_alloc if path, directory-entry, or result storage cannot
- * allocate.
- * @note Ordinary filesystem failures are ignored because completion is
- * best-effort; resource exhaustion retains its exception identity.
- */
+/** @copydoc CliAutocompleter::CompleteSessionName */
 void CliAutocompleter::CompleteSessionName(
     const std::string& prefix, std::vector<std::string>& options) const {
   namespace fs = std::filesystem;

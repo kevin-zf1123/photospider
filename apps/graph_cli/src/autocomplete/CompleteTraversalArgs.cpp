@@ -5,6 +5,7 @@
 
 namespace ps {
 
+/** @copydoc CliAutocompleter::CompleteTraversalArgs */
 void CliAutocompleter::CompleteTraversalArgs(
     const std::string& prefix, std::vector<std::string>& options) const {
   // Support print-style tree mode args for traversal as well

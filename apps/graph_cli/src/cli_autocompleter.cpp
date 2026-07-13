@@ -12,6 +12,7 @@
 
 namespace ps {
 
+/** @copydoc CliAutocompleter::CliAutocompleter */
 CliAutocompleter::CliAutocompleter(ps::Host& svc) : svc_(svc) {
   // This list should be kept in sync with commands in `process_command`
   commands_ = {
@@ -24,6 +25,7 @@ CliAutocompleter::CliAutocompleter(ps::Host& svc) : svc_(svc) {
   std::sort(commands_.begin(), commands_.end());
 }
 
+/** @copydoc CliAutocompleter::Complete */
 CompletionResult CliAutocompleter::Complete(const std::string& line,
                                             int cursor_pos) {
   CompletionResult result;

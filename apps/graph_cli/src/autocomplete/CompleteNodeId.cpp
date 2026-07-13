@@ -6,6 +6,7 @@
 
 namespace ps {
 
+/** @copydoc CliAutocompleter::CompleteNodeId */
 void CliAutocompleter::CompleteNodeId(const std::string& prefix,
                                       std::vector<std::string>& options) const {
   if (std::string("all").rfind(prefix, 0) == 0) {
