@@ -2378,12 +2378,22 @@ TEST(IpcDaemonLifecycle, ExplicitDefaultLiveStaleAndUnsafeSocketPolicy) {
     std::ofstream file(unsafe_lock_path);
     file << "preserve";
   }
-  ASSERT_EQ(::chmod(unsafe_lock_path.c_str(), 04600), 0);
+  constexpr mode_t kSpecialUnsafeLockMode = 04600;
+  constexpr mode_t kPortableUnsafeLockMode = 0610;
+  mode_t unsafe_lock_mode = kSpecialUnsafeLockMode;
+  ASSERT_EQ(::chmod(unsafe_lock_path.c_str(), unsafe_lock_mode), 0);
+  // Some systems discard special bits on non-executable regular files even
+  // when chmod succeeds; the fallback still exercises exact-mode rejection.
+  if (permissions_of(unsafe_lock_path) != unsafe_lock_mode) {
+    unsafe_lock_mode = kPortableUnsafeLockMode;
+    ASSERT_EQ(::chmod(unsafe_lock_path.c_str(), unsafe_lock_mode), 0);
+  }
+  ASSERT_EQ(permissions_of(unsafe_lock_path), unsafe_lock_mode);
   DaemonProcess special_mode_lock_daemon;
   special_mode_lock_daemon.start(unsafe_lock_socket);
   EXPECT_TRUE(special_mode_lock_daemon.wait_for_exit(std::chrono::seconds(5)));
   EXPECT_TRUE(special_mode_lock_daemon.exited_with_failure());
-  EXPECT_EQ(permissions_of(unsafe_lock_path), 04600);
+  EXPECT_EQ(permissions_of(unsafe_lock_path), unsafe_lock_mode);
   std::filesystem::remove(unsafe_lock_path);
 
   const std::filesystem::path lock_target =
