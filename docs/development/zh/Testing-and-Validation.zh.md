@@ -39,6 +39,14 @@ consumer build 目录。它在内存中检查观察到的 producer/install/consu
 输出与断言诊断直接写入 stdout/stderr，供 CTest 捕获。所有生成文件都只留在临时工作目录中，
 并在运行后丢弃；仓库不会为该测试保留逐次运行报告。
 
+该 smoke 会检查每个已安装的 `Photospider*Targets*.cmake` 文件，因为 package 将基础 target、
+依赖 OpenCV 的 target 与 embedded-product target 分到不同 export set 中。禁用 OpenCV discovery
+时，请求 `COMPONENTS operation_sdk OPTIONAL_COMPONENTS operation_opencv` 的 consumer 必须让
+package 与 `operation_sdk` 保持 found，将 `operation_opencv` 标记为 not found，导入无依赖的
+SDK/runtime target，并且不导入 `Photospider::operation_opencv`。在相同条件下 required
+`operation_opencv` 必须使 package discovery 失败。OpenCV 可用时，adapter consumer 仅通过 OpenCV
+`core` component 导入该 target，并且不会发现无关 package。
+
 IPC enabled 时，package smoke 会构建并安装 `photospider`、
 `photospider_ipc_client` 与 `photospiderd`。它会独立 configure 一个默认使用
 `Photospider::photospider` 的 embedded consumer，以及一个请求 `COMPONENTS ipc_client`、禁用

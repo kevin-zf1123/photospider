@@ -54,6 +54,17 @@ child output, and assertion diagnostics to stdout/stderr for CTest to capture.
 All generated files remain in its transient work directory and are discarded
 after the run; the repository does not retain per-run reports for this test.
 
+The smoke inspects every installed `Photospider*Targets*.cmake` file because
+the package separates base, OpenCV-dependent, and embedded-product targets
+into distinct export sets. With OpenCV discovery disabled, a consumer
+requesting `COMPONENTS operation_sdk OPTIONAL_COMPONENTS operation_opencv`
+must keep the package and `operation_sdk` found, mark `operation_opencv` not
+found, import the dependency-free SDK/runtime targets, and omit
+`Photospider::operation_opencv`. Requiring `operation_opencv` under the same
+condition must fail package discovery. With OpenCV available, the adapter
+consumer imports that target through only the OpenCV `core` component and does
+not discover unrelated packages.
+
 When IPC is enabled, the package smoke builds and installs `photospider`,
 `photospider_ipc_client`, and `photospiderd`. It independently configures a
 default embedded consumer of `Photospider::photospider` and an IPC-only project
