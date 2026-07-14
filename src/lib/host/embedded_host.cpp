@@ -144,7 +144,9 @@ struct EmbeddedHostState {
    *
    * @throws Nothing for destruction.
    * @note The entry contains no borrowed scheduler or graph pointer; it only
-   *       keeps close from destroying the session while Kernel is being called.
+   *       keeps close from destroying the session until the complete admitted
+   *       Host call, including Kernel execution and public status/value
+   *       translation, has finished.
    */
   struct ActiveSessionAdmission {
     /** @brief Adapter-local admission id. */
@@ -159,8 +161,9 @@ struct EmbeddedHostState {
    *
    * @throws Nothing for destruction.
    * @note Tokens are movable and release exactly one table entry. The token is
-   *       held around the Kernel call but never holds the lifecycle mutex while
-   *       graph-state or scheduler locks are acquired.
+   *       held through the complete admitted Host call but never holds the
+   *       lifecycle mutex while runtime, graph-state, or scheduler work is
+   *       coordinated.
    */
   class SessionAdmissionToken {
    public:
@@ -315,8 +318,10 @@ struct EmbeddedHostState {
    * @return Owned token, or nullopt after close has marked the session closing.
    * @throws std::bad_alloc if adding the admission entry allocates.
    * @note The lifecycle mutex is released before return. The caller keeps the
-   *       token alive across only the Kernel call, establishing lock order
-   *       admission gate, then GraphStateExecutor, then scheduler mutex.
+   *       token alive through the complete Kernel call and exact public
+   *       status/value translation. The token is a logical lifetime admission;
+   *       runtime startup and graph-state or scheduler coordination occur only
+   *       after the lifecycle mutex has been released.
    */
   std::optional<SessionAdmissionToken> try_admit_session_operation(
       const GraphSessionId& session) {
@@ -647,8 +652,9 @@ struct EmbeddedHostState {
    * @brief Returns whether a synchronous operation still uses one session.
    *
    * @param session Session label to search.
-   * @return True while an admitted compute, image compute, scheduler-info, or
-   *         scheduler-replacement call has not finished public translation.
+   * @return True while an admitted compute, image compute, scheduler-info,
+   *         scheduler-replacement, required-save, node-YAML replacement, or ROI
+   *         projection call has not finished public translation.
    * @throws Nothing.
    * @note Caller must hold lifecycle_mutex_. Close waits for these admissions
    *       before entering Kernel::close_graph(), so the runtime map entry and
@@ -1952,12 +1958,12 @@ class EmbeddedHost final : public Host {
    *         non-NotFound failure when runtime shutdown fails before removal.
    * @throws std::bad_alloc on diagnostic allocation failure.
    * @note The adapter first marks the session closing, rejects new admitted
-   *       compute/scheduler work, waits synchronous admissions, and waits until
-   *       each accepted async promise is ready and its worker joined. Backend
-   *       close then shares graph-state serialization with compute and
-   *       scheduler lifecycle operations. Any failed backend close clears the
-   *       closing marker so the still-loaded session remains admitted and may
-   *       be retried.
+   *       compute/scheduler, required-save, node-YAML replacement, and ROI
+   *       projection work, waits synchronous admissions, and waits until each
+   *       accepted async promise is ready and its worker joined. Backend close
+   *       then shares graph-state serialization with those operations. Any
+   *       failed backend close clears the closing marker so the still-loaded
+   *       session remains admitted and may be retried.
    */
   VoidResult close_graph(const GraphSessionId& session) override {
     return guarded_graph_close([&] {
@@ -2032,17 +2038,23 @@ class EmbeddedHost final : public Host {
    *
    * @param session Session to save.
    * @param yaml_path Destination YAML path.
-   * @return Success or failure status.
+   * @return Success, NotFound for a missing or closing session, or Io for a
+   *         destination/serialization failure.
    * @throws std::bad_alloc on allocation failure.
-   * @note Recoverable serialization and IO failures return OperationStatus.
+   * @note A lifecycle admission protects required-session resolution and the
+   *       serialized save from concurrent close. Recoverable serialization and
+   *       IO failures return OperationStatus.
    */
   VoidResult save_graph(const GraphSessionId& session,
                         const std::string& yaml_path) override {
+    std::optional<EmbeddedHostState::SessionAdmissionToken> admission;
     return guarded_void("save_graph", GraphErrc::Io, [&] {
-      if (!state_->interaction.cmd_save_yaml(session.value, yaml_path)) {
-        return failure_void(GraphErrc::Io,
-                            "failed to save graph session: " + session.value);
+      admission = state_->try_admit_session_operation(session);
+      if (!admission) {
+        return failure_void(GraphErrc::NotFound,
+                            "graph session is closing: " + session.value);
       }
+      state_->interaction.cmd_save_yaml(session.value, yaml_path);
       return success_void();
     });
   }
@@ -2364,19 +2376,25 @@ class EmbeddedHost final : public Host {
    * @param session Session containing the node.
    * @param node Node id to preserve.
    * @param yaml_text Replacement node YAML.
-   * @return Success or failure status.
+   * @return Success, NotFound for a missing/closing session or missing node,
+   *         or InvalidYaml for parsing or candidate-topology validation
+   *         failure.
    * @throws std::bad_alloc on allocation failure.
-   * @note YAML parser failures are reported as InvalidYaml.
+   * @note A lifecycle admission protects the complete Kernel call from close;
+   *       Kernel performs node lookup, parsing, validation, and replacement in
+   *       one graph-state work item.
    */
   VoidResult set_node_yaml(const GraphSessionId& session, NodeId node,
                            const std::string& yaml_text) override {
+    std::optional<EmbeddedHostState::SessionAdmissionToken> admission;
     return guarded_void("set_node_yaml", GraphErrc::InvalidYaml, [&] {
-      if (!state_->interaction.cmd_set_node_yaml(session.value, node.value,
-                                                 yaml_text)) {
-        return failure_void(
-            GraphErrc::InvalidYaml,
-            "failed to set node YAML for node " + std::to_string(node.value));
+      admission = state_->try_admit_session_operation(session);
+      if (!admission) {
+        return failure_void(GraphErrc::NotFound,
+                            "graph session is closing: " + session.value);
       }
+      state_->interaction.cmd_set_node_yaml(session.value, node.value,
+                                            yaml_text);
       return success_void();
     });
   }
@@ -2542,15 +2560,25 @@ class EmbeddedHost final : public Host {
    * @param start_node Source node.
    * @param start_roi Source ROI in public coordinates.
    * @param target_node Target node.
-   * @return Projected ROI, or a failed status.
+   * @return Projected ROI, NotFound for a missing/closing session or endpoint,
+   *         or InvalidParameter when existing endpoints produce no projection.
    * @throws std::bad_alloc on allocation failure.
-   * @note OpenCV rectangles remain implementation-local.
+   * @note OpenCV rectangles remain implementation-local. A lifecycle admission
+   *       protects the complete required endpoint lookup and projection from
+   *       concurrent close.
    */
   Result<PixelRect> project_roi(const GraphSessionId& session,
                                 NodeId start_node, const PixelRect& start_roi,
                                 NodeId target_node) override {
+    std::optional<EmbeddedHostState::SessionAdmissionToken> admission;
     return guarded_result<PixelRect>(
         "project_roi", GraphErrc::InvalidParameter, [&] {
+          admission = state_->try_admit_session_operation(session);
+          if (!admission) {
+            return failure_result<PixelRect>(
+                GraphErrc::NotFound,
+                "graph session is closing: " + session.value);
+          }
           auto roi = state_->interaction.cmd_project_roi(
               session.value, start_node.value, to_cv_rect(start_roi),
               target_node.value);
@@ -2570,16 +2598,27 @@ class EmbeddedHost final : public Host {
    * @param target_node Target node.
    * @param target_roi Target ROI in public coordinates.
    * @param source_node Source node.
-   * @return Projected source ROI, or a failed status.
+   * @return Projected source ROI, NotFound for a missing/closing session or
+   *         endpoint, or InvalidParameter when existing endpoints produce no
+   *         projection.
    * @throws std::bad_alloc on allocation failure.
-   * @note Projection failures are reported as InvalidParameter.
+   * @note A lifecycle admission protects the complete required endpoint lookup
+   *       and projection from concurrent close. Ordinary no-projection results
+   *       remain InvalidParameter.
    */
   Result<PixelRect> project_roi_backward(const GraphSessionId& session,
                                          NodeId target_node,
                                          const PixelRect& target_roi,
                                          NodeId source_node) override {
+    std::optional<EmbeddedHostState::SessionAdmissionToken> admission;
     return guarded_result<PixelRect>(
         "project_roi_backward", GraphErrc::InvalidParameter, [&] {
+          admission = state_->try_admit_session_operation(session);
+          if (!admission) {
+            return failure_result<PixelRect>(
+                GraphErrc::NotFound,
+                "graph session is closing: " + session.value);
+          }
           auto roi = state_->interaction.cmd_project_roi_backward(
               session.value, target_node.value, to_cv_rect(target_roi),
               source_node.value);

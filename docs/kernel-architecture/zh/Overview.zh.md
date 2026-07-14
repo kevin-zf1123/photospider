@@ -230,10 +230,10 @@ socket、protocol、status、quota 与 artifact lifecycle 定义在
 6. 对 Host 提交的 async compute，Kernel work item 会返回自身拥有的精确 outcome。一个 joined
    adapter worker 不读取共享 `LastError`，而是直接映射该 outcome，先兑现 caller-visible
    `OperationStatus` promise，再通知 `close_graph()` status publication 已完成。
-7. Embedded close admission 会拒绝新的 compute/scheduler work，等待已接受的同步调用与已 ready
-   的 async status promise，随后通过 compute、scheduler information 和 scheduler replacement
-   共用的 `GraphStateExecutor` 停止 runtime。Active work 使用 scheduler 期间，该 scheduler
-   不能被替换或销毁。
+7. Embedded close admission 会拒绝新的 compute/scheduler work，以及 required graph save、
+   node-YAML replacement 和 ROI projection work；它会等待已接受的同步调用与已 ready 的 async
+   status promise，随后通过这些调用共用的 `GraphStateExecutor` 停止 runtime。Admitted work
+   使用 retained runtime 或 scheduler 期间，它们不能被 erase、replace 或 destroy。
 8. 可恢复 backend failure 会转换成 Host status/result value，而资源耗尽保持异常语义：非析构
    Host method 和被消费的 async future 可以按可安装接口的文档传播 `std::bad_alloc`。
 

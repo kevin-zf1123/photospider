@@ -212,13 +212,17 @@ the scheduler runtime inside that boundary. This keeps graph topology, cache
 fields, dirty snapshots, timing, and node runtime state coherent without
 routing non-compute commands through scheduler queues.
 
-Scheduler lifetime follows the same boundary. Runtime start, synchronous and
-asynchronous compute, scheduler information, scheduler replacement, and runtime
-stop during close are serialized by the per-graph executor. The embedded Host
-also admits the complete synchronous compute/image/scheduler call against close,
-so close cannot erase the runtime between a session lookup and graph-state
-submission. Scheduler information copies name/statistics before leaving the
-boundary; no raw scheduler pointer survives it.
+Scheduler and required-session lifetime are coordinated with this boundary.
+The graph-state portions of synchronous and asynchronous compute, scheduler
+information, scheduler replacement, required graph save, node-YAML replacement,
+ROI projection, and runtime stop during close are serialized by the per-graph
+executor. Runtime startup may occur before graph-state submission; the embedded
+Host admits the complete call against close so close cannot erase the runtime
+during startup or before graph-state completion. Node replacement and ROI
+projection also perform required-node lookup and the operation in one work item,
+preventing a clear/reload check-then-act gap. Scheduler information copies
+name/statistics before leaving the boundary; no raw scheduler pointer survives
+it.
 
 The current dirty update implementation uses staged output commits for
 HP/RT sibling safety: HP dirty workers write `HighPrecisionDirtyWriteBuffer`

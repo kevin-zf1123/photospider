@@ -162,11 +162,14 @@ YAML 加载、cache 命令、inspection 和 ROI projection 等 graph-state opera
 当前默认语义是通过 `GraphStateExecutor` 提供 per-graph exclusive access：同一个 graph 的
 graph-state operation 和 compute request 不会并发读取或修改可见 `GraphModel`。这也包括 scheduler-backed parallel compute：外层 Kernel request 进入 `GraphStateExecutor`，而 ready node/tile callback 在该边界内通过 scheduler runtime dispatch。这能在不把非 compute 命令路由到 scheduler queue 的情况下，保持 graph topology、cache 字段、dirty snapshot、timing 和 node runtime state 一致。
 
-Scheduler lifetime 也遵循同一边界。Runtime start、同步/异步 compute、scheduler information、
-scheduler replacement，以及 close 时的 runtime stop，都由 per-graph executor 串行化。
-Embedded Host 还会让完整的同步 compute/image/scheduler 调用先通过 close admission，因此 close
-不能在 session lookup 与 graph-state submission 之间删除 runtime。Scheduler information 会在
-离开边界前复制 name/statistics，不会让 raw scheduler pointer 逃逸。
+Scheduler 与 required-session lifetime 会配合这一边界进行协调。同步/异步 compute、scheduler
+information、scheduler replacement、required graph save、node-YAML replacement、ROI
+projection，以及 close 时 runtime stop 的 graph-state 部分，都由 per-graph executor 串行化。
+Runtime startup 可能发生在 graph-state submission 之前；Embedded Host 会让完整调用先通过 close
+admission，因此 close 无法在 startup 期间或 graph-state completion 前删除 runtime。Node
+replacement 与 ROI projection 还会在同一个 work item 内完成 required-node lookup 与
+operation，避免 clear/reload 造成 check-then-act gap。Scheduler information 会在离开边界前
+复制 name/statistics，不会让 raw scheduler pointer 逃逸。
 
 当前 dirty update 为 HP/RT sibling 安全使用 staged output commit：HP dirty worker 写入
 `HighPrecisionDirtyWriteBuffer`，并且只在 RT sibling 已提交之后写入可见 `GraphModel`；

@@ -8,32 +8,52 @@
 
 namespace ps {
 
+/** @copydoc Kernel::project_roi_forward */
 std::optional<cv::Rect> Kernel::project_roi_forward(const std::string& name,
                                                     int start_node_id,
                                                     const cv::Rect& start_roi,
                                                     int target_node_id) {
-  auto result = with_graph_state_last_error(
+  return with_required_graph_state_last_error(
       name, "ROI projection failed: ",
       [this, start_node_id, start_roi, target_node_id](GraphModel& graph) {
+        if (!graph.has_node(start_node_id)) {
+          throw GraphError(GraphErrc::NotFound,
+                           "ROI start node " + std::to_string(start_node_id) +
+                               " not found in graph.");
+        }
+        if (!graph.has_node(target_node_id)) {
+          throw GraphError(GraphErrc::NotFound,
+                           "ROI target node " + std::to_string(target_node_id) +
+                               " not found in graph.");
+        }
         return roi_propagation_service_.project_roi_forward(
             graph, start_node_id, start_roi, target_node_id);
       },
       true);
-  return result ? *result : std::nullopt;
 }
 
+/** @copydoc Kernel::project_roi_backward */
 std::optional<cv::Rect> Kernel::project_roi_backward(const std::string& name,
                                                      int target_node_id,
                                                      const cv::Rect& target_roi,
                                                      int source_node_id) {
-  auto result = with_graph_state_last_error(
+  return with_required_graph_state_last_error(
       name, "ROI back-projection failed: ",
       [this, target_node_id, target_roi, source_node_id](GraphModel& graph) {
+        if (!graph.has_node(target_node_id)) {
+          throw GraphError(GraphErrc::NotFound,
+                           "ROI target node " + std::to_string(target_node_id) +
+                               " not found in graph.");
+        }
+        if (!graph.has_node(source_node_id)) {
+          throw GraphError(GraphErrc::NotFound,
+                           "ROI source node " + std::to_string(source_node_id) +
+                               " not found in graph.");
+        }
         return roi_propagation_service_.project_roi_backward(
             graph, target_node_id, target_roi, source_node_id);
       },
       true);
-  return result ? *result : std::nullopt;
 }
 
 std::optional<compute::DirtyRegionSnapshot> Kernel::begin_dirty_source(

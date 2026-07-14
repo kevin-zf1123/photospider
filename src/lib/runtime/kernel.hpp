@@ -68,11 +68,13 @@ class KernelTestAccess;
  * Schedulers receive ready task callbacks; they do not own graph-state
  * operation dispatch.
  *
- * @note Internal methods retain legacy bool or std::optional failure handling
- * for the embedded adapter and backend callers. Public Host methods translate
- * those results into copied status/value types. Compute and ROI/dirty APIs also
- * store per-graph LastError details when their service boundary reports
- * GraphError or std::exception.
+ * @note Historically quiet inspection/cache methods retain bool or
+ * std::optional failure handling. Required Host mutation/projection paths keep
+ * exact GraphError categories through `with_required_graph_state()` so absence
+ * is not conflated with content or parameter failures. Public Host methods
+ * translate those results into copied status/value types. Compute and
+ * ROI/dirty APIs also store per-graph LastError details when their service
+ * boundary reports GraphError or std::exception.
  */
 class Kernel {
  public:
@@ -237,8 +239,11 @@ class Kernel {
    * @throws Any exception propagated while stopping the runtime; no exception
    *         is thrown when the graph name is unknown.
    * @note Runtime stop is submitted through the same GraphStateExecutor used by
-   *       compute and scheduler inspection/replacement. Closing therefore waits
-   *       prior serialized work. The graph map entry and its mutex-protected
+   *       all serialized graph-state work, including compute, scheduler
+   *       inspection/replacement, required save, node replacement, and ROI
+   *       projection. Closing therefore waits prior serialized work. Embedded
+   *       Host admission separately waits for complete admitted calls before
+   *       invoking this method. The graph map entry and its mutex-protected
    *       LastError snapshot are erased only after stop succeeds; if stop
    *       throws, both remain owned by Kernel so callers can inspect or retry
    *       the session.
@@ -285,10 +290,51 @@ class Kernel {
   std::optional<std::future<AsyncComputeResult>> compute_async(
       ComputeRequest request);
   std::optional<TimingCollector> get_timing(const std::string& name);
+  /**
+   * @brief Projects one ROI forward between required graph nodes.
+   *
+   * @param name Required graph session name.
+   * @param start_node_id Required source node id.
+   * @param start_roi Source ROI in output coordinates.
+   * @param target_node_id Required downstream target node id.
+   * @return Projected ROI, or nullopt when existing endpoints produce no valid
+   *         projection.
+   * @throws GraphError with `GraphErrc::NotFound` when the graph or either
+   *         endpoint is absent, or another exact propagation category raised
+   *         by RoiPropagationService.
+   * @throws std::bad_alloc if startup, submission, projection, or LastError
+   *         recording exhausts memory.
+   * @throws std::exception for other runtime, executor, or propagation
+   *         failures.
+   * @note Endpoint lookup and projection execute in one GraphStateExecutor work
+   *       item. Existing-session diagnostics are mirrored to LastError, while
+   *       Embedded Host retains a lifecycle admission against close.
+   */
   std::optional<cv::Rect> project_roi_forward(const std::string& name,
                                               int start_node_id,
                                               const cv::Rect& start_roi,
                                               int target_node_id);
+
+  /**
+   * @brief Projects one ROI backward between required graph nodes.
+   *
+   * @param name Required graph session name.
+   * @param target_node_id Required downstream target node id.
+   * @param target_roi Target ROI in output coordinates.
+   * @param source_node_id Required upstream source node id.
+   * @return Projected source ROI, or nullopt when existing endpoints produce no
+   *         valid projection.
+   * @throws GraphError with `GraphErrc::NotFound` when the graph or either
+   *         endpoint is absent, or another exact propagation category raised
+   *         by RoiPropagationService.
+   * @throws std::bad_alloc if startup, submission, projection, or LastError
+   *         recording exhausts memory.
+   * @throws std::exception for other runtime, executor, or propagation
+   *         failures.
+   * @note Endpoint lookup and projection execute in one GraphStateExecutor work
+   *       item. Existing-session diagnostics are mirrored to LastError, while
+   *       Embedded Host retains a lifecycle admission against close.
+   */
   std::optional<cv::Rect> project_roi_backward(const std::string& name,
                                                int target_node_id,
                                                const cv::Rect& target_roi,
@@ -310,7 +356,25 @@ class Kernel {
    * last_error(); other GraphError/std::exception failures become false.
    */
   bool reload_graph_yaml(const std::string& name, const std::string& yaml_path);
-  bool save_graph_yaml(const std::string& name, const std::string& yaml_path);
+  /**
+   * @brief Saves one required graph session through graph-state serialization.
+   *
+   * @param name Graph session name to save.
+   * @param yaml_path Destination YAML file path.
+   * @return Nothing.
+   * @throws GraphError with `GraphErrc::NotFound` when the session is absent,
+   *         or `GraphErrc::Io` when destination access, node serialization, or
+   *         YAML emission fails.
+   * @throws std::bad_alloc if graph-state submission or serialization exhausts
+   *         memory.
+   * @throws std::exception for other graph-state submission or future failures.
+   * @note The embedded Host holds a session admission across this call so
+   *       concurrent close cannot invalidate the resolved runtime. The save
+   *       itself executes in the session's GraphStateExecutor. Save-specific
+   *       stream, serialization, and emitter exceptions are normalized to Io
+   *       at this boundary.
+   */
+  void save_graph_yaml(const std::string& name, const std::string& yaml_path);
   bool clear_drive_cache(const std::string& name);
   bool clear_memory_cache(const std::string& name);
   bool clear_cache(const std::string& name);
@@ -463,7 +527,26 @@ class Kernel {
   std::optional<std::vector<int>> list_node_ids(const std::string& name);
   std::optional<std::string> get_node_yaml(const std::string& name,
                                            int node_id);
-  bool set_node_yaml(const std::string& name, int node_id,
+  /**
+   * @brief Replaces one required node from YAML under graph-state
+   *        serialization.
+   *
+   * @param name Required graph session name.
+   * @param node_id Required existing node id whose identity is preserved.
+   * @param yaml_text Candidate replacement YAML mapping.
+   * @return Nothing.
+   * @throws GraphError with `GraphErrc::NotFound` when the session or node is
+   *         absent, or `GraphErrc::InvalidYaml` when parsing or complete
+   *         candidate-topology validation fails.
+   * @throws std::bad_alloc if parsing, validation, graph-state submission, or
+   *         replacement exhausts memory.
+   * @throws std::exception for other graph-state executor failures.
+   * @note Required-node lookup, parsing, validation, and replacement execute in
+   *       one GraphStateExecutor work item. Embedded Host retains a session
+   *       admission across the call so concurrent close cannot erase the
+   *       runtime.
+   */
+  void set_node_yaml(const std::string& name, int node_id,
                      const std::string& yaml_text);
 
   std::optional<std::vector<int>> trees_containing_node(const std::string& name,
@@ -655,9 +738,40 @@ class Kernel {
   }
 
   /**
+   * @brief Executes one required serialized GraphModel operation without
+   *        collapsing its exact failure.
+   *
+   * @tparam Fn Callable accepted by GraphStateExecutor as `op(GraphModel&)`.
+   * @param name Required graph session name.
+   * @param op Callable submitted to the session's graph-state executor.
+   * @return Exact callable result.
+   * @throws GraphError with `GraphErrc::NotFound` when no session map entry
+   *         exists, or any GraphError raised by the operation unchanged.
+   * @throws std::bad_alloc if lookup diagnostics, submission, or operation
+   *         execution exhausts memory.
+   * @throws std::exception for other submission, future, or operation
+   *         failures.
+   * @note Callers that can race Kernel::close_graph() must retain an equivalent
+   *       runtime-lifetime admission across this helper. Embedded Host checked
+   *       operations use its lifecycle admission gate. Model validation and
+   *       mutation belong in the single submitted callable, avoiding a
+   *       check-then-act gap between graph-state work items.
+   */
+  template <typename Fn>
+  auto with_required_graph_state(const std::string& name, Fn&& op)
+      -> std::decay_t<std::invoke_result_t<Fn, GraphModel&>> {
+    auto it = graphs_.find(name);
+    if (it == graphs_.end()) {
+      throw GraphError(GraphErrc::NotFound, "Graph session not found: " + name);
+    }
+    return it->second->graph_state().submit(std::forward<Fn>(op)).get();
+  }
+
+  /**
    * @brief Executes one serialized GraphModel operation through the graph-state
    * executor.
    *
+   * @tparam Fn Callable accepted by GraphStateExecutor as `op(GraphModel&)`.
    * @param name Graph name to resolve.
    * @param op Callable submitted as op(GraphModel&).
    * @return Optional result from op, or nullopt when the graph is missing or a
@@ -728,6 +842,58 @@ class Kernel {
                        LastError{GraphErrc::Unknown,
                                  std::string(exception_prefix) + e.what()});
       return std::nullopt;
+    }
+  }
+
+  /**
+   * @brief Executes one required serialized graph-state operation while
+   *        preserving its exact exception and LastError mirror.
+   *
+   * @tparam Fn Callable accepted by GraphStateExecutor as `op(GraphModel&)`.
+   * @param name Required graph session name.
+   * @param exception_prefix Prefix for the best-effort ordinary-exception
+   *        diagnostic.
+   * @param op Callable submitted to the session graph-state executor.
+   * @param start_runtime Whether to start the owning runtime before submission.
+   * @return Exact callable result, including an inner optional when the
+   *         operation uses empty success/failure semantics.
+   * @throws GraphError with `GraphErrc::NotFound` when the session map entry is
+   *         absent, or any GraphError raised inside the work item unchanged.
+   * @throws std::bad_alloc if startup, submission, operation, or diagnostic
+   *         recording exhausts memory.
+   * @throws std::exception for other runtime, executor, or operation failures.
+   * @note Missing sessions do not create LastError state. Existing-session
+   *       success clears stale state; GraphError and ordinary exceptions are
+   *       recorded before rethrow. Callers that can race close must retain an
+   *       equivalent runtime-lifetime admission across this helper.
+   */
+  template <typename Fn>
+  auto with_required_graph_state_last_error(const std::string& name,
+                                            const char* exception_prefix,
+                                            Fn&& op, bool start_runtime = false)
+      -> std::decay_t<std::invoke_result_t<Fn, GraphModel&>> {
+    auto it = graphs_.find(name);
+    if (it == graphs_.end()) {
+      throw GraphError(GraphErrc::NotFound, "Graph session not found: " + name);
+    }
+    try {
+      if (start_runtime && !it->second->running()) {
+        it->second->start();
+      }
+      auto result =
+          it->second->graph_state().submit(std::forward<Fn>(op)).get();
+      clear_last_error(name);
+      return result;
+    } catch (const std::bad_alloc&) {
+      throw;
+    } catch (const GraphError& error) {
+      store_last_error(name, LastError{error.code(), error.what()});
+      throw;
+    } catch (const std::exception& error) {
+      store_last_error(name,
+                       LastError{GraphErrc::Unknown,
+                                 std::string(exception_prefix) + error.what()});
+      throw;
     }
   }
 

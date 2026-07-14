@@ -1267,6 +1267,17 @@ TEST(GraphIoContract, SuccessfulReloadResetsRuntimeMetadata) {
   EXPECT_TRUE(graph.recent_compute_plans.empty());
 }
 
+/**
+ * @brief Preserves the previous node when exact YAML replacement validation
+ *        fails.
+ *
+ * @return Nothing; GoogleTest assertions report error-category or model-state
+ *         mismatches.
+ * @throws std::bad_alloc or filesystem exceptions if fixture setup cannot
+ *         allocate or create its deterministic graph inputs.
+ * @note The required-node Kernel boundary reports InvalidYaml while the
+ *       candidate-map validation keeps the visible node unchanged.
+ */
 TEST(GraphMutationContract, InvalidNodeReplacementPreservesPreviousNode) {
   const auto root = temp_path("photospider-contract-kernel-root");
   const auto yaml_path = temp_path("photospider-contract-kernel.yaml");
@@ -1289,7 +1300,12 @@ TEST(GraphMutationContract, InvalidNodeReplacementPreservesPreviousNode) {
       "subtype: source\n"
       "image_inputs:\n"
       "  - from_node_id: 99\n";
-  EXPECT_FALSE(kernel.set_node_yaml("contract_graph", 1, invalid_replacement));
+  try {
+    kernel.set_node_yaml("contract_graph", 1, invalid_replacement);
+    FAIL() << "invalid node replacement unexpectedly succeeded";
+  } catch (const GraphError& error) {
+    EXPECT_EQ(error.code(), GraphErrc::InvalidYaml);
+  }
 
   auto node_yaml = kernel.get_node_yaml("contract_graph", 1);
   ASSERT_TRUE(node_yaml.has_value());

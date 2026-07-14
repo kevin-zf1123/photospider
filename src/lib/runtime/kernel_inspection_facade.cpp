@@ -167,20 +167,27 @@ std::optional<std::string> Kernel::get_node_yaml(const std::string& name,
   });
 }
 
-bool Kernel::set_node_yaml(const std::string& name, int node_id,
+/** @copydoc Kernel::set_node_yaml */
+void Kernel::set_node_yaml(const std::string& name, int node_id,
                            const std::string& yaml_text) {
-  return with_graph_state(name,
-                          [node_id, yaml_text](GraphModel& graph) {
-                            if (!graph.has_node(node_id)) {
-                              return false;
-                            }
-                            YAML::Node root = YAML::Load(yaml_text);
-                            ps::Node updated = ps::Node::from_yaml(root);
-                            updated.id = node_id;
-                            graph.replace_node(updated);
-                            return true;
-                          })
-      .value_or(false);
+  with_required_graph_state(name, [node_id, yaml_text](GraphModel& graph) {
+    if (!graph.has_node(node_id)) {
+      throw GraphError(GraphErrc::NotFound,
+                       "Node " + std::to_string(node_id) + " not in graph.");
+    }
+    try {
+      YAML::Node root = YAML::Load(yaml_text);
+      ps::Node updated = ps::Node::from_yaml(root);
+      updated.id = node_id;
+      graph.replace_node(updated);
+    } catch (const std::bad_alloc&) {
+      throw;
+    } catch (const YAML::Exception& error) {
+      throw GraphError(GraphErrc::InvalidYaml, error.what());
+    } catch (const GraphError& error) {
+      throw GraphError(GraphErrc::InvalidYaml, error.what());
+    }
+  });
 }
 
 /** @copydoc Kernel::drain_compute_events */
