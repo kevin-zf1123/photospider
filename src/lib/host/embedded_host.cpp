@@ -27,18 +27,20 @@ namespace ps {
 
 #if defined(PHOTOSPIDER_INTERNAL_BAD_ALLOC_TESTING)
 /**
- * @brief BUILD_TESTING close-coordination events exposed to Host regressions.
+ * @brief BUILD_TESTING lifecycle-coordination events exposed to Host tests.
  *
  * @throws Nothing.
  * @note Values are published synchronously while the embedded Host lifecycle
  *       mutex remains held. They exist only in the test-enabled build and do
  *       not enter the public Host ABI or cross a process boundary.
  */
-enum class EmbeddedCloseTestEvent {
+enum class EmbeddedLifecycleTestEvent {
   /** @brief One caller has claimed the session close marker. */
   MarkerClaimed,
   /** @brief A duplicate caller is about to wait for the marker to clear. */
   DuplicateAboutToWait,
+  /** @brief One synchronous session operation has entered admission. */
+  SessionOperationAdmitted,
 };
 
 /**
@@ -50,39 +52,134 @@ enum class EmbeddedCloseTestEvent {
  *       Notification runs synchronously under the Host lifecycle mutex, so the
  *       callback must not re-enter the same Host lifecycle path.
  */
-struct EmbeddedCloseTestHook {
+struct EmbeddedLifecycleTestHook {
   /** @brief Borrowed test context that outlives the installed hook. */
   void* context = nullptr;
   /**
-   * @brief Publishes one close event while lifecycle_mutex_ remains held.
+   * @brief Publishes one lifecycle event while lifecycle_mutex_ remains held.
    * @param context Borrowed context supplied by the test.
    * @param event Coordination point that has just been reached.
    * @return Nothing.
    * @throws Nothing; throwing from a test callback terminates the process.
    */
   void (*notify)(void* context,
-                 EmbeddedCloseTestEvent event) noexcept = nullptr;
+                 EmbeddedLifecycleTestEvent event) noexcept = nullptr;
 };
 
 /**
- * @brief Process-local borrowed close hook used only by serialized tests.
+ * @brief Borrowed lifecycle-hook pointer stored by the atomic test seam.
+ * @throws Nothing for alias use.
+ */
+using EmbeddedLifecycleHookPtr = const EmbeddedLifecycleTestHook*;
+
+/**
+ * @brief Process-local borrowed lifecycle hook used by serialized tests.
  * @throws Nothing.
  * @note Atomic publication does not transfer ownership. Tests remove the hook
  *       before destroying the referenced callback value or context.
  */
-std::atomic<const EmbeddedCloseTestHook*> g_embedded_close_test_hook{nullptr};
+std::atomic<EmbeddedLifecycleHookPtr> g_embedded_lifecycle_test_hook{nullptr};
 
 /**
- * @brief Publishes one close event to the currently installed test hook.
- * @param event Coordination point reached by the Host close gate.
+ * @brief Publishes one lifecycle event to the installed test hook.
+ * @param event Coordination point reached by the Host lifecycle gate.
  * @return Nothing.
  * @throws Nothing.
  */
-void notify_embedded_close_test_hook(EmbeddedCloseTestEvent event) noexcept {
-  const EmbeddedCloseTestHook* hook =
-      g_embedded_close_test_hook.load(std::memory_order_acquire);
+void notify_embedded_lifecycle_test_hook(
+    EmbeddedLifecycleTestEvent event) noexcept {
+  const EmbeddedLifecycleTestHook* hook =
+      g_embedded_lifecycle_test_hook.load(std::memory_order_acquire);
   if (hook != nullptr && hook->notify != nullptr) {
     hook->notify(hook->context, event);
+  }
+}
+#endif
+
+#if defined(PHOTOSPIDER_INTERNAL_HOST_OPERATION_TESTING)
+/**
+ * @brief Synchronous Host operations covered by the admission-lifetime gate.
+ * @throws Nothing for value construction and comparison.
+ * @note Production builds do not compile this private test contract.
+ */
+enum class EmbeddedOperationTestEvent {
+  /** @brief Graph YAML save operation. */
+  SaveGraph,
+  /** @brief Required-node YAML replacement operation. */
+  SetNodeYaml,
+  /** @brief Forward ROI projection operation. */
+  ForwardRoiProjection,
+  /** @brief Backward ROI projection operation. */
+  BackwardRoiProjection,
+};
+
+/**
+ * @brief Admission-lifetime checkpoints around Kernel and public translation.
+ * @throws Nothing for value construction and comparison.
+ */
+enum class EmbeddedOperationTestPhase {
+  /** @brief Admission exists and the operation has not entered Kernel. */
+  BeforeKernelReady,
+  /** @brief Blocker has ended; exact session admission is sampled pre-Kernel.
+   */
+  BeforeKernelAdmissionSnapshot,
+  /** @brief Public result exists; exact admission is sampled before return. */
+  AfterTranslationAdmissionSnapshot,
+};
+
+/**
+ * @brief Borrowed blocking callback for deterministic admission tests.
+ * @throws Nothing for aggregate construction.
+ * @note The callback runs without the lifecycle or graph-state mutex. It may
+ *       wait on test-owned synchronization but must not re-enter Host.
+ */
+struct EmbeddedOperationTestHook {
+  /** @brief Borrowed test context that outlives every callback. */
+  void* context = nullptr;
+
+  /**
+   * @brief Observes and optionally blocks one Host operation checkpoint.
+   * @param context Borrowed context supplied by the installing test.
+   * @param event Operation reaching the checkpoint.
+   * @param phase Admission-lifetime phase being observed.
+   * @param admission_active Whether this session has an active admission when
+   *        the snapshot phase is published; ignored for BeforeKernelReady.
+   * @return Nothing.
+   * @throws Nothing; implementations must contain every failure.
+   */
+  void (*wait)(void* context, EmbeddedOperationTestEvent event,
+               EmbeddedOperationTestPhase phase,
+               bool admission_active) noexcept = nullptr;
+};
+
+/**
+ * @brief Borrowed operation hook stored only by test-enabled builds.
+ * @throws Nothing for alias use.
+ */
+using EmbeddedOperationHookPtr = const EmbeddedOperationTestHook*;
+
+/**
+ * @brief Process-local operation hook used by serialized admission tests.
+ * @throws Nothing for atomic initialization and pointer publication.
+ * @note Tests clear the hook after every affected future has completed.
+ */
+std::atomic<EmbeddedOperationHookPtr> g_embedded_operation_test_hook{nullptr};
+
+/**
+ * @brief Publishes one operation-lifetime phase to the installed hook.
+ * @param event Operation reaching the checkpoint.
+ * @param phase Admission-lifetime phase being observed.
+ * @param admission_active Exact session-admission snapshot for snapshot phases.
+ * @return Nothing.
+ * @throws Nothing.
+ */
+void notify_embedded_operation_test_hook(EmbeddedOperationTestEvent event,
+                                         EmbeddedOperationTestPhase phase,
+                                         bool admission_active) noexcept {
+  const EmbeddedOperationTestHook* hook =
+      g_embedded_operation_test_hook.load(std::memory_order_acquire);
+  if (hook != nullptr && hook->wait != nullptr) {
+    hook->wait(hook->context, event, phase, admission_active);
   }
 }
 #endif
@@ -321,7 +418,9 @@ struct EmbeddedHostState {
    *       token alive through the complete Kernel call and exact public
    *       status/value translation. The token is a logical lifetime admission;
    *       runtime startup and graph-state or scheduler coordination occur only
-   *       after the lifecycle mutex has been released.
+   *       after the lifecycle mutex has been released. BUILD_TESTING publishes
+   *       a non-blocking admission event only after the entry is installed and
+   *       while the lifecycle mutex still establishes total event order.
    */
   std::optional<SessionAdmissionToken> try_admit_session_operation(
       const GraphSessionId& session) {
@@ -331,8 +430,37 @@ struct EmbeddedHostState {
     }
     const uint64_t id = next_admission_id_++;
     active_admissions_.push_back(ActiveSessionAdmission{id, session});
+#if defined(PHOTOSPIDER_INTERNAL_BAD_ALLOC_TESTING)
+    notify_embedded_lifecycle_test_hook(
+        EmbeddedLifecycleTestEvent::SessionOperationAdmitted);
+#endif
     return SessionAdmissionToken(this, id);
   }
+
+#if defined(PHOTOSPIDER_INTERNAL_HOST_OPERATION_TESTING)
+  /**
+   * @brief Publishes one lock-free operation checkpoint with exact admission.
+   *
+   * @param session Session whose current admission state is sampled.
+   * @param event Host operation reaching the checkpoint.
+   * @param phase Phase before Kernel entry or after public translation.
+   * @return Nothing.
+   * @throws Nothing except implementation-defined mutex system errors.
+   * @note BeforeKernelReady deliberately skips the snapshot so its callback can
+   *       hold the operation while the test joins the blocking compute. Every
+   *       callback runs after lifecycle_mutex_ is released and outside GSE.
+   */
+  void wait_at_operation_test_phase(const GraphSessionId& session,
+                                    EmbeddedOperationTestEvent event,
+                                    EmbeddedOperationTestPhase phase) {
+    bool admission_active = false;
+    if (phase != EmbeddedOperationTestPhase::BeforeKernelReady) {
+      std::lock_guard<std::mutex> lock(lifecycle_mutex_);
+      admission_active = has_active_session_admission_locked(session);
+    }
+    notify_embedded_operation_test_hook(event, phase, admission_active);
+  }
+#endif
 
   /**
    * @brief Schedules backend async compute while atomically tracking it for
@@ -507,8 +635,8 @@ struct EmbeddedHostState {
       std::unique_lock<std::mutex> lock(lifecycle_mutex_);
       while (session_close_in_progress_locked(session)) {
 #if defined(PHOTOSPIDER_INTERNAL_BAD_ALLOC_TESTING)
-        notify_embedded_close_test_hook(
-            EmbeddedCloseTestEvent::DuplicateAboutToWait);
+        notify_embedded_lifecycle_test_hook(
+            EmbeddedLifecycleTestEvent::DuplicateAboutToWait);
 #endif
         lifecycle_cv_.wait(
             lock, [&] { return !session_close_in_progress_locked(session); });
@@ -516,7 +644,8 @@ struct EmbeddedHostState {
       mark_session_closing_locked(session);
       marked_closing = true;
 #if defined(PHOTOSPIDER_INTERNAL_BAD_ALLOC_TESTING)
-      notify_embedded_close_test_hook(EmbeddedCloseTestEvent::MarkerClaimed);
+      notify_embedded_lifecycle_test_hook(
+          EmbeddedLifecycleTestEvent::MarkerClaimed);
 #endif
       lifecycle_cv_.wait(lock, [&] {
         return !has_outstanding_async_compute_locked(session) &&
@@ -2038,25 +2167,43 @@ class EmbeddedHost final : public Host {
    *
    * @param session Session to save.
    * @param yaml_path Destination YAML path.
-   * @return Success, NotFound for a missing or closing session, or Io for a
-   *         destination/serialization failure.
+   * @return Success, NotFound for a missing or closing session, or Io for
+   *         serialization or destination open/write/flush/close failure.
    * @throws std::bad_alloc on allocation failure.
    * @note A lifecycle admission protects required-session resolution and the
    *       serialized save from concurrent close. Recoverable serialization and
-   *       IO failures return OperationStatus.
+   *       IO failures return OperationStatus. The destination is not replaced
+   *       atomically, so a post-open failure may leave a created, truncated, or
+   *       partially written file.
    */
   VoidResult save_graph(const GraphSessionId& session,
                         const std::string& yaml_path) override {
     std::optional<EmbeddedHostState::SessionAdmissionToken> admission;
-    return guarded_void("save_graph", GraphErrc::Io, [&] {
+    VoidResult result = guarded_void("save_graph", GraphErrc::Io, [&] {
       admission = state_->try_admit_session_operation(session);
       if (!admission) {
         return failure_void(GraphErrc::NotFound,
                             "graph session is closing: " + session.value);
       }
+#if defined(PHOTOSPIDER_INTERNAL_HOST_OPERATION_TESTING)
+      state_->wait_at_operation_test_phase(
+          session, EmbeddedOperationTestEvent::SaveGraph,
+          EmbeddedOperationTestPhase::BeforeKernelReady);
+      state_->wait_at_operation_test_phase(
+          session, EmbeddedOperationTestEvent::SaveGraph,
+          EmbeddedOperationTestPhase::BeforeKernelAdmissionSnapshot);
+#endif
       state_->interaction.cmd_save_yaml(session.value, yaml_path);
       return success_void();
     });
+#if defined(PHOTOSPIDER_INTERNAL_HOST_OPERATION_TESTING)
+    if (admission) {
+      state_->wait_at_operation_test_phase(
+          session, EmbeddedOperationTestEvent::SaveGraph,
+          EmbeddedOperationTestPhase::AfterTranslationAdmissionSnapshot);
+    }
+#endif
+    return result;
   }
 
   /**
@@ -2387,16 +2534,33 @@ class EmbeddedHost final : public Host {
   VoidResult set_node_yaml(const GraphSessionId& session, NodeId node,
                            const std::string& yaml_text) override {
     std::optional<EmbeddedHostState::SessionAdmissionToken> admission;
-    return guarded_void("set_node_yaml", GraphErrc::InvalidYaml, [&] {
-      admission = state_->try_admit_session_operation(session);
-      if (!admission) {
-        return failure_void(GraphErrc::NotFound,
-                            "graph session is closing: " + session.value);
-      }
-      state_->interaction.cmd_set_node_yaml(session.value, node.value,
-                                            yaml_text);
-      return success_void();
-    });
+    VoidResult result =
+        guarded_void("set_node_yaml", GraphErrc::InvalidYaml, [&] {
+          admission = state_->try_admit_session_operation(session);
+          if (!admission) {
+            return failure_void(GraphErrc::NotFound,
+                                "graph session is closing: " + session.value);
+          }
+#if defined(PHOTOSPIDER_INTERNAL_HOST_OPERATION_TESTING)
+          state_->wait_at_operation_test_phase(
+              session, EmbeddedOperationTestEvent::SetNodeYaml,
+              EmbeddedOperationTestPhase::BeforeKernelReady);
+          state_->wait_at_operation_test_phase(
+              session, EmbeddedOperationTestEvent::SetNodeYaml,
+              EmbeddedOperationTestPhase::BeforeKernelAdmissionSnapshot);
+#endif
+          state_->interaction.cmd_set_node_yaml(session.value, node.value,
+                                                yaml_text);
+          return success_void();
+        });
+#if defined(PHOTOSPIDER_INTERNAL_HOST_OPERATION_TESTING)
+    if (admission) {
+      state_->wait_at_operation_test_phase(
+          session, EmbeddedOperationTestEvent::SetNodeYaml,
+          EmbeddedOperationTestPhase::AfterTranslationAdmissionSnapshot);
+    }
+#endif
+    return result;
   }
 
   /**
@@ -2571,7 +2735,7 @@ class EmbeddedHost final : public Host {
                                 NodeId start_node, const PixelRect& start_roi,
                                 NodeId target_node) override {
     std::optional<EmbeddedHostState::SessionAdmissionToken> admission;
-    return guarded_result<PixelRect>(
+    Result<PixelRect> result = guarded_result<PixelRect>(
         "project_roi", GraphErrc::InvalidParameter, [&] {
           admission = state_->try_admit_session_operation(session);
           if (!admission) {
@@ -2579,6 +2743,14 @@ class EmbeddedHost final : public Host {
                 GraphErrc::NotFound,
                 "graph session is closing: " + session.value);
           }
+#if defined(PHOTOSPIDER_INTERNAL_HOST_OPERATION_TESTING)
+          state_->wait_at_operation_test_phase(
+              session, EmbeddedOperationTestEvent::ForwardRoiProjection,
+              EmbeddedOperationTestPhase::BeforeKernelReady);
+          state_->wait_at_operation_test_phase(
+              session, EmbeddedOperationTestEvent::ForwardRoiProjection,
+              EmbeddedOperationTestPhase::BeforeKernelAdmissionSnapshot);
+#endif
           auto roi = state_->interaction.cmd_project_roi(
               session.value, start_node.value, to_cv_rect(start_roi),
               target_node.value);
@@ -2589,6 +2761,14 @@ class EmbeddedHost final : public Host {
           }
           return success_result(to_pixel_rect(*roi));
         });
+#if defined(PHOTOSPIDER_INTERNAL_HOST_OPERATION_TESTING)
+    if (admission) {
+      state_->wait_at_operation_test_phase(
+          session, EmbeddedOperationTestEvent::ForwardRoiProjection,
+          EmbeddedOperationTestPhase::AfterTranslationAdmissionSnapshot);
+    }
+#endif
+    return result;
   }
 
   /**
@@ -2611,7 +2791,7 @@ class EmbeddedHost final : public Host {
                                          const PixelRect& target_roi,
                                          NodeId source_node) override {
     std::optional<EmbeddedHostState::SessionAdmissionToken> admission;
-    return guarded_result<PixelRect>(
+    Result<PixelRect> result = guarded_result<PixelRect>(
         "project_roi_backward", GraphErrc::InvalidParameter, [&] {
           admission = state_->try_admit_session_operation(session);
           if (!admission) {
@@ -2619,6 +2799,14 @@ class EmbeddedHost final : public Host {
                 GraphErrc::NotFound,
                 "graph session is closing: " + session.value);
           }
+#if defined(PHOTOSPIDER_INTERNAL_HOST_OPERATION_TESTING)
+          state_->wait_at_operation_test_phase(
+              session, EmbeddedOperationTestEvent::BackwardRoiProjection,
+              EmbeddedOperationTestPhase::BeforeKernelReady);
+          state_->wait_at_operation_test_phase(
+              session, EmbeddedOperationTestEvent::BackwardRoiProjection,
+              EmbeddedOperationTestPhase::BeforeKernelAdmissionSnapshot);
+#endif
           auto roi = state_->interaction.cmd_project_roi_backward(
               session.value, target_node.value, to_cv_rect(target_roi),
               source_node.value);
@@ -2629,6 +2817,14 @@ class EmbeddedHost final : public Host {
           }
           return success_result(to_pixel_rect(*roi));
         });
+#if defined(PHOTOSPIDER_INTERNAL_HOST_OPERATION_TESTING)
+    if (admission) {
+      state_->wait_at_operation_test_phase(
+          session, EmbeddedOperationTestEvent::BackwardRoiProjection,
+          EmbeddedOperationTestPhase::AfterTranslationAdmissionSnapshot);
+    }
+#endif
+    return result;
   }
 
   /**
@@ -3314,16 +3510,32 @@ class EmbeddedHost final : public Host {
 
 #if defined(PHOTOSPIDER_INTERNAL_BAD_ALLOC_TESTING)
 /**
- * @brief Installs or clears the borrowed deterministic close-coordination hook.
- * @param hook Hook that outlives all concurrent close calls, or nullptr.
+ * @brief Installs or clears the deterministic lifecycle-coordination hook.
+ * @param hook Hook that outlives all concurrent lifecycle callbacks, or
+ *             nullptr.
  * @return Nothing.
  * @throws Nothing.
  * @note Tests must serialize installation and clear the hook before its context
  *       is destroyed. Production builds contain no hook storage or calls.
  */
-void set_embedded_host_close_test_hook(
-    const EmbeddedCloseTestHook* hook) noexcept {
-  g_embedded_close_test_hook.store(hook, std::memory_order_release);
+void set_embedded_host_lifecycle_test_hook(
+    const EmbeddedLifecycleTestHook* hook) noexcept {
+  g_embedded_lifecycle_test_hook.store(hook, std::memory_order_release);
+}
+#endif
+
+#if defined(PHOTOSPIDER_INTERNAL_HOST_OPERATION_TESTING)
+/**
+ * @brief Installs or clears the deterministic Host-operation test hook.
+ * @param hook Hook that outlives all affected operation callbacks, or nullptr.
+ * @return Nothing.
+ * @throws Nothing.
+ * @note Tests serialize installation and clear the hook only after every
+ *       operation future has completed. Production builds contain no symbol.
+ */
+void set_embedded_host_operation_test_hook(
+    const EmbeddedOperationTestHook* hook) noexcept {
+  g_embedded_operation_test_hook.store(hook, std::memory_order_release);
 }
 #endif
 

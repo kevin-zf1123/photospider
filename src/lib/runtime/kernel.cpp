@@ -14,6 +14,7 @@
  */
 #include "runtime/kernel.hpp"
 
+#include <atomic>
 #include <filesystem>
 #include <iostream>
 #include <memory>
@@ -24,8 +25,43 @@
 #include <vector>
 
 #include "scheduler/scheduler_factory.hpp"
+#if defined(PHOTOSPIDER_INTERNAL_REQUIRED_TARGET_TESTING)
+#include "runtime/kernel_required_target_test_access.hpp"
+#endif
 
 namespace ps {
+
+#if defined(PHOTOSPIDER_INTERNAL_REQUIRED_TARGET_TESTING)
+namespace testing {
+namespace {
+
+/**
+ * @brief Borrowed required-target hook published only in test-enabled builds.
+ * @throws Nothing for atomic initialization and pointer publication.
+ * @note Tests serialize replacement and join every callback before destroying
+ *       the borrowed hook or its context.
+ */
+std::atomic<const RequiredTargetTestHook*> g_required_target_test_hook{nullptr};
+
+}  // namespace
+
+/** @copydoc ps::testing::set_required_target_test_hook */
+void set_required_target_test_hook(
+    const RequiredTargetTestHook* hook) noexcept {
+  g_required_target_test_hook.store(hook, std::memory_order_release);
+}
+
+/** @copydoc ps::testing::notify_required_target_test_hook */
+void notify_required_target_test_hook(RequiredTargetTestEvent event) noexcept {
+  const RequiredTargetTestHook* hook =
+      g_required_target_test_hook.load(std::memory_order_acquire);
+  if (hook != nullptr && hook->wait != nullptr) {
+    hook->wait(hook->context, event);
+  }
+}
+
+}  // namespace testing
+#endif
 
 /**
  * @copydoc Kernel::clear_last_error
