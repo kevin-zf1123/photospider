@@ -118,6 +118,39 @@ per-graph intent route. Threaded implementations combine policy and physical
 resource ownership; `serial_debug` executes synchronously. This is current
 behavior, not the accepted long-term resource ownership model.
 
+**Scheduler worker request**
+The configured pre-planning value. Zero means automatic and one through eight
+are exact; any larger value is invalid. Automatic resolution is
+`min(max(1, detected hardware concurrency), 8)`. The request is not yet a
+reservation or a count of running threads.
+
+**Resolved worker grant**
+The nonzero one-through-eight value produced before scheduler construction. It
+is the built-in CPU worker ceiling and the ABI v2 `num_workers` hard ceiling for
+one trusted plugin instance. A plugin may own fewer worker threads but must not
+own more. It is distinct from the final process slot charge because a
+built-in GPU scheduler also charges its potential device worker and built-in
+`serial_debug` charges zero.
+
+**Scheduler worker slot**
+One conservative admission unit for a potential scheduler-owned physical
+worker. A slot may remain reserved when a device is unavailable or a conforming
+plugin creates fewer workers. It is not a ready callback, operation-internal
+thread, graph-state executor, daemon worker, or observed OS thread.
+
+**`SchedulerWorkerBudget`**
+The process-lifetime, mutex-serialized ledger with a fixed 32-slot ceiling
+shared by every embedded Host and Kernel. It admits scheduler plans but owns no
+threads, queue, policy, or fairness. It is current containment for per-graph
+workers, not the target `ExecutionService` or `ResourceLedger` from ADR 0003.
+
+**Scheduler worker reservation**
+A move-only RAII owner of admitted slots. Graph load atomically acquires an
+HP/RT reservation pair before constructing either scheduler, with one owner
+for each intent; replacement acquires one candidate reservation while the old
+owner remains live. A `ReservationOwnedScheduler` destroys its concrete
+scheduler before returning the reservation exactly once.
+
 **`SchedulerTaskRuntime`**
 The scheduler-owned push-only ready-task dispatch mechanism. It accepts initial
 and newly released ready batches; it does not pull from a plan, derive tasks,
@@ -166,5 +199,11 @@ planning, cache, or scheduling semantics.
 - A ready task is not a task graph.
 - HP cache is not RT proxy state.
 - `ImageBuffer` is not the future general data model.
+- A worker request is not a resolved grant, and a grant is not necessarily the
+  final scheduler slot charge.
+- A reserved scheduler worker slot is not proof of one currently running
+  thread.
+- `SchedulerWorkerBudget` is not a worker pool, fairness authority, or a limit
+  on every thread in the process.
 - The current per-graph `IScheduler` is not the target process execution
   domain.

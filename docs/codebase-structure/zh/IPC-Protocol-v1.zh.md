@@ -961,10 +961,20 @@ Scan directory array 是 required，可为空，最多包含 256 个 entry；每
 nonempty、不含 NUL、有效 UTF-8 且最多 4,096 byte 的 string。Load path 遵守相同的
 single-string 规则。Scheduler type input 与 Host 返回的 type name 必须是 nonempty、有效
 UTF-8 且最多 1,024 byte。Description 与 loaded plugin label 必须是最多 4,096 byte
-的有效 UTF-8；description 可为空，plugin label 不可为空。`worker_count` 必须是
-`0..UINT_MAX` 范围内的精确 integer；zero 保留 public automatic-worker selection 含义。
-Configuration 只改变之后加载的 graph session 所使用的 default；现有 session 保留
-当前 scheduler object，直到显式 replacement。
+的有效 UTF-8；description 可为空，plugin label 不可为空。`worker_count` 必须是 `[0,8]`
+范围内的精确 integer：zero 请求 bounded automatic selection，一到八则请求精确的
+CPU/plugin grant。缺少、malformed、negative、non-integral 或大于八的值会在 router 获取 Host
+mutex 或调用 Host 之前，以 Protocol `-32602/invalid_params` 被拒绝。Zero 与 eight 都会保持
+原值并恰好经过一次 Host call。Host 的 success 或 failure 会被精确保留，mutation 绝不 retry；
+被拒绝的 request 不会改变此前 default。
+
+Connected typed Client 会在发出 frame 前，于本地执行相同的大于八检查，并保持 connection 可用。
+Disconnected Client 会先返回 Transport `not_connected`，不会先校验该值。合法 configuration
+只改变之后加载的 graph session 所使用的 default；现有 session 保留当前 scheduler object，直到
+显式 replacement。进程级 32-slot scheduler admission capacity 是固定 implementation policy，
+由同一进程内全部 Host 与 Kernel 共享，且 protocol v1 不提供远程配置。因此，接受 default 并不
+预留 capacity：之后 graph load 的两个已规划 scheduler instance 无法同时容纳时，仍可返回精确的
+Graph `ComputeError`。
 
 两个 session method 要求有效 opaque daemon `session_id`，且 `intent` 必须是
 `global_high_precision` 或 `real_time_update`：
@@ -999,7 +1009,9 @@ display-only text，必须是最多 4,096 byte 的有效 UTF-8，并可为空。
 
 成功 replacement 返回 `{}`。所有 known value 都会在 opaque-session admission 之前验证。
 Missing 或 closing session 保留公共 daemon session-status mapping；unavailable scheduler type 与
-其他 Host failure 保留精确的 Graph-domain mapping。
+其他 Host failure 保留精确的 Graph-domain mapping。Replacement 会先为完整的新 scheduler grant
+预留容量，之后才释放旧 grant；因此 transient headroom 不足时会返回精确的 Graph `ComputeError`，
+并保留原 scheduler。
 
 每个 `scheduler.types` 或 `scheduler.loaded_plugins` 首页都会在恰好一次 Host call 前
 预留公共 bounded snapshot quota，验证并排序完整 copied list，保留 duplicate，完成测量，

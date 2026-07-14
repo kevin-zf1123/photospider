@@ -22,6 +22,7 @@ graph, or scheduler pointer.
 flowchart TD
   HOST["ps::Host"] --> ADAPTER["embedded Host adapter"]
   ADAPTER --> KERNEL["Kernel"]
+  KERNEL --> BUDGET["process SchedulerWorkerBudget"]
   KERNEL --> GSE["GraphStateExecutor"]
   GSE --> SERVICE["ComputeService"]
   SERVICE --> PLAN["planning and pruning collaborators"]
@@ -45,7 +46,9 @@ threads waiting for the same graph. The mutex provides exclusion, not FIFO
 ordering, cancellation, admission control, or a thread budget.
 The mutex remains held for the whole callback, including scheduler submission,
 completion waits, and visible commit. Different graphs have independent
-executors and mutexes.
+executors and mutexes. The scheduler-worker ledger does not count these
+graph-state executor threads; its 32-slot ceiling covers only workers charged
+by scheduler planning.
 
 ## Current Collaborators
 
@@ -64,9 +67,13 @@ executors and mutexes.
 | `TaskSubmissionPlan` | Request-local task handles, dense indexes, dependency state, variants, and result slots | Lifetime beyond the current dispatch contract |
 | `NodeExecutor` | Consistent monolithic and tiled operation invocation | Graph mutation policy |
 | `ComputeMetricsRecorder` | Compute events, timing, benchmark events, and debug metadata | Scheduler trace ownership |
+| `SchedulerFactory` | Resolve `0..8` worker requests and plan each scheduler's conservative slot charge before construction | Process capacity ownership or graph-state access |
+| `SchedulerWorkerBudget` | Serialize one fixed 32-slot process admission ledger shared by all embedded Hosts/Kernels | Worker creation, scheduling policy, fairness, or whole-process thread counting |
+| `ReservationOwnedScheduler` | Keep a move-only reservation live through concrete scheduler shutdown and destruction | Capacity planning or task-graph correctness |
 
-The implementation lives under `src/lib/compute/`. These classes are private
-implementation modules and do not form an installable API.
+Compute collaborators live under `src/lib/compute/`; the three admission and
+ownership collaborators live under `src/lib/scheduler/`. These classes are
+private implementation modules and do not form an installable API.
 
 ## Request Behavior
 
@@ -131,8 +138,12 @@ The scheduler never receives `GraphModel`, `ComputeTaskGraph`,
 `DirtyRegionSnapshot`, or cache authority. Newly ready dependent work is
 released by the dispatcher and pushed as another ready handle or callback.
 Threaded scheduler resources are owned per `GraphRuntime` and per intent route;
-there is no process-wide worker pool or cross-graph admission/fairness
-authority.
+there is no process-wide worker pool or cross-graph fairness authority. There
+is a process-wide admission authority: graph load atomically reserves the
+combined HP+RT charge, and replacement reserves one candidate charge while the
+old owner remains live. The built-in serial scheduler charges zero; built-in
+CPU and registered ABI v2 plugins charge the resolved one-through-eight grant;
+built-in GPU/heterogeneous also charges its potential device worker.
 
 ## Current OpenCV Operation Serialization
 
@@ -191,6 +202,14 @@ It is not yet a general cancellation or graph-revision policy.
   values.
 - Resource exhaustion may propagate as `std::bad_alloc` across documented
   non-destructor Host boundaries.
+- An above-eight worker request or unknown scheduler type fails before worker
+  construction as `InvalidParameter`; process-ledger exhaustion at graph load
+  or replacement preserves `GraphErrc::ComputeError`.
+- Scheduler reservations outlive their concrete workers during teardown:
+  candidate rollback returns only candidate capacity, successful graph close
+  or Host destruction returns retained capacity exactly once, a failed close
+  retains it for retry, and replacement requires transient headroom while
+  preserving the old scheduler on failure.
 - An admitted scheduler batch is settled before its exception escapes the
   current request.
 - Operation callbacks may already have external side effects; staged graph
@@ -210,8 +229,9 @@ four independent correctness points:
 4. Physical execution ownership remains separable from dependency correctness.
 
 ADR 0003 records a different accepted ownership decision for later
-implementation. This document is authoritative for the current per-graph
-scheduler behavior.
+implementation. This document is authoritative for current per-graph scheduler
+ownership plus its bounded process admission containment; the ledger is not the
+target shared `ExecutionService`.
 
 ## Implementation and Validation Entry Points
 
@@ -224,6 +244,13 @@ scheduler behavior.
 - `src/lib/compute/dirty_update_executor.*`
 - `src/lib/compute/intent_update_coordinator.*`
 - `src/lib/core/ops.cpp`
+- `src/lib/scheduler/scheduler_factory.*`
+- `src/lib/scheduler/scheduler_worker_budget.*`
+- `src/lib/scheduler/scheduler_reservation_owner.*`
 - `tests/integration/test_compute_service_split.cpp`
 - `tests/integration/test_scheduler.cpp`
+- `tests/integration/test_scheduler_worker_budget.cpp`
+- `tests/unit/test_scheduler_factory_plan.cpp`
+- `tests/unit/test_scheduler_reservation_owner.cpp`
+- `tests/unit/test_scheduler_worker_budget.cpp`
 - `tests/unit/test_propagation_contracts.cpp`

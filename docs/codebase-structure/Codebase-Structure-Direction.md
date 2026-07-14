@@ -41,12 +41,12 @@ Observed build targets in the current root `CMakeLists.txt`:
 | `photospider_core_internal` | Build-only core values, private conversion, and registry helper. | Role-owned sources are also folded into the static product. |
 | `photospider_graph_internal` | Build-only `GraphModel` and graph-service helper. | `GraphModel` remains private under `src/lib/graph`. |
 | `photospider_plugin_host_internal` | Build-only host-side operation v2 loader, adapter, and lifetime helper. | It is not exported. |
-| `photospider_scheduler_internal` | Build-only scheduler factory, handshake loader, and built-in implementation helper. | It depends only on public scheduler/core contracts plus declared implementation dependencies. |
+| `photospider_scheduler_internal` | Build-only scheduler planning/factory, ABI-v2 loader, built-in implementation, reservation owner, and process-budget helper. | Its fixed 32-slot process ledger is transitional private containment, not the target injected execution service. |
 | `photospider_compute_internal` | Build-only compute, runtime, dirty-region, and interaction helper. | It depends one-way on the scheduler helper. |
 | `photospider_operation_runtime` | Installable static image-buffer factory implementation. | It has no external package or back-link to the operation SDK. |
 | `photospider_operation_sdk` | Installable operation v2 interface SDK. | It transitively carries `operation_runtime`, so it is the sole ordinary plugin link target. |
 | `photospider_operation_opencv` | Installable opt-in OpenCV adapter. | It discovers and links only OpenCV `core`. |
-| `photospider_scheduler_sdk` | Installable scheduler interface SDK. | It carries only the public include root and C++17 requirement. |
+| `photospider_scheduler_sdk` | Installable scheduler ABI-v2 interface SDK. | It carries only the public include root and C++17 requirement; plugins receive a resolved `[1,8]` hard grant. |
 | `photospider` | Static installable backend product with archive name `libphotospider`. | Matches the desired static product and public Host shape while folding role-owned backend sources into one archive. |
 | `photospider_cli_common` | Static CLI command/TUI/autocomplete code plus the reusable `run_graph_cli` boundary under `apps/graph_cli/` and two role-owned benchmark service translation units. | The benchmark sources belong only to this non-installable helper and the complete CLI closure; they are absent from the installable `photospider` static product. |
 | `graph_cli` | Process-policy-only entry point at `apps/graph_cli/main.cpp`. | Disables OpenCL, owns allocation-independent fatal exit policy, creates the embedded `Host` adapter, and has no daemon-client mode yet. |
@@ -117,8 +117,10 @@ Resolved seam tightening in the current branch:
 - Operation plugins compile against public `ps::plugin` v2 snapshots and a
   host registrar without `Node`, `GraphModel`, `OpRegistry`, YAML, or private
   cache ownership. Scheduler plugins compile against inherited `IScheduler`,
-  `SchedulerHostContext`, and the handshake-gated SDK without `GraphRuntime` or
-  concrete built-in scheduler headers.
+  `SchedulerHostContext`, and the ABI-v2 handshake-gated SDK without
+  `GraphRuntime` or concrete built-in scheduler headers. ABI v1 is rejected;
+  ABI v2 receives a resolved one-through-eight hard worker grant and remains a
+  trusted in-process contract rather than an isolation boundary.
 
 ## External Interface Rule
 
@@ -272,7 +274,10 @@ this layout. Issue #36 created `src/lib/ipc/`, `include/photospider/ipc/`, and
 `apps/photospiderd/` together with real daemon behavior. Issue #38 completed the
 final `include/photospider/{plugin,scheduler}/` contracts, moved full private
 types to role-owned homes, and removed all eight transitional extension headers
-without shims or duplicates.
+without shims or duplicates. Issue #43 keeps scheduler resolution, concrete
+instance planning, the process ledger, and reservation ownership private under
+`src/lib/scheduler/`; none of those implementation owners becomes a public
+Host, SDK, or IPC type.
 
 Naming rules:
 
@@ -295,11 +300,11 @@ Current target shape:
 | `photospider_graph_internal` | Static | No | `GraphModel`, graph IO, traversal, cache, inspection implementation. |
 | `photospider_compute_internal` | Static | No | Compute planning, dirty-region state, dispatcher, scheduler interaction. |
 | `photospider_plugin_host_internal` | Static | No | Host-side dynamic plugin loading and lifetime ownership. |
-| `photospider_scheduler_internal` | Static | No | Built-in scheduler implementations and factory. |
+| `photospider_scheduler_internal` | Static | No | Built-in schedulers, ABI-v2 loader, factory planning, reservation ownership, and the transitional fixed process ledger. |
 | `photospider_operation_runtime` | Static | Yes | Public image-buffer factories with no external-package dependency or SDK back-link. |
 | `photospider_operation_sdk` | Interface | Yes | Operation v2 headers and transitive `operation_runtime` link. |
 | `photospider_operation_opencv` | Static | Yes | Opt-in public OpenCV adapter with only OpenCV `core`. |
-| `photospider_scheduler_sdk` | Interface | Yes | Scheduler headers and C++17 usage requirement only. |
+| `photospider_scheduler_sdk` | Interface | Yes | Scheduler ABI-v2 headers, resolved `[1,8]` plugin grant contract, and C++17 usage requirement only. |
 | `photospider` / `libphotospider` | Static | Yes | Public static library for in-process frontends. |
 | `photospider_ipc_client` | Static | Yes | Client-side IPC adapter for daemon frontends. |
 | `photospider_cli_common` | Static | No | CLI command parser, REPL, TUI, autocomplete, and the two CLI-only benchmark service translation units; none enter the installable static product. |
@@ -402,9 +407,10 @@ CMake rules:
 - Operation plugins should not link to a broad shared backend merely to reach
   registry symbols. The current implementation uses host-provided
   `ps::plugin::OperationPluginRegistrar` callbacks and the versioned
-  `register_photospider_ops_v2` entry. Scheduler plugins use the exact numeric
-  ABI handshake before discovery and attach only through
-  `SchedulerHostContext`. A future pure C plugin ABI remains a separate
+  `register_photospider_ops_v2` entry. Scheduler plugins use the exact ABI-v2
+  numeric handshake before discovery, receive a resolved `[1,8]` hard worker
+  grant, and attach only through `SchedulerHostContext`. ABI v1 has no adapter
+  or compatibility registration. A future pure C plugin ABI remains a separate
   versioned compatibility change.
 
 ## Daemon Shape
@@ -512,7 +518,7 @@ Method groups and current wire availability:
 | dirty | `dirty.begin`, `dirty.update`, `dirty.end` | Implemented through one matching Host lifecycle mutation and return the copied dirty-region snapshot; the complete compact response size is preflighted before result-DOM allocation. |
 | cache | `cache.clear_all`, `cache.clear_drive`, `cache.clear_memory`, `cache.cache_all_nodes`, `cache.free_transient`, `cache.synchronize_disk` | Implemented as status-only Host calls; no backend cache handle or path enters a result. |
 | compute | `compute.submit`, `compute.status`, `compute.result`, `compute.release`, `compute.timing`, `compute.last_io_time`, `compute.last_error` | Polling jobs and diagnostics are routed. Submit/status/result use stable `{compute_id,session_id,state,cancellable,status,output}` values; states are exactly `queued`, `running`, `succeeded`, and `failed`, and every job reports `cancellable:false`. Submit, status, status-mode result, empty-image result, and failed result keep `output` null. A terminal nonempty image result revalidates the protected artifact, refreshes one stable 60-second delivery lease, and returns the specified metadata object. Terminal release atomically returns `{compute_id,released:true}`, accepts an optional exact `delivery_id`, and can release its matching orphaned lease after normal job removal. Timing preflights its aggregate compact response size; last error is nested diagnostic data. |
-| scheduler | `scheduler.types`, `scheduler.description`, `scheduler.scan`, `scheduler.load`, `scheduler.loaded_plugins`, `scheduler.configure_defaults`, `scheduler.info`, `scheduler.replace`, `scheduler.trace` | Implemented only through matching Host calls and advertised in the exact 55-method inventory. Discovery/default control is process-global; info/replacement uses opaque session admission and shares graph-state serialization with compute/close. The installed typed Client exposes every route, aggregates type/plugin snapshots, and validates bounded non-destructive trace pages without retaining scheduler/plugin ownership. |
+| scheduler | `scheduler.types`, `scheduler.description`, `scheduler.scan`, `scheduler.load`, `scheduler.loaded_plugins`, `scheduler.configure_defaults`, `scheduler.info`, `scheduler.replace`, `scheduler.trace` | Implemented only through matching Host calls and advertised in the exact 55-method inventory. Defaults accept only exact `worker_count` values in `[0,8]`; the router rejects malformed or larger values before Host access, while the connected typed Client rejects larger values before writing a frame. Discovery/default control is process-global; info/replacement uses opaque session admission and shares graph-state serialization with compute/close. The fixed 32-slot scheduler ledger spans all Hosts/Kernels in the process and is not remotely configurable. The installed typed Client exposes every route, aggregates type/plugin snapshots, and validates bounded non-destructive trace pages without retaining scheduler/plugin ownership. |
 | plugins | `plugins.load_report`, `plugins.unload_all`, `plugins.seed_builtins`, `plugins.ops_sources`, `plugins.ops_combined_keys`, `plugins.ops_combined_sources` | Implemented only through matching Host calls and advertised in the exact 55-method inventory. The installed typed Client exposes every route, decodes exact reports, and aggregates key-sorted stable views; disconnecting a Client does not unload a successful process-owned DSO. |
 | events | `events.drain` | Bounded destructive event draining is routed through Host and exposed by the installed typed Client as one strictly validated, non-retried Host event batch. |
 
@@ -613,6 +619,16 @@ Frontend-boundary, physical-layout, daemon, typed Client, and complete IPC Host
 steps 1-8 are present in the current repository without changing `ps::Host` as
 the sole public seam.
 
+Issue #43 adds a bounded migration gate around the existing per-Graph scheduler
+model: requests resolve to at most eight CPU/plugin workers, built-in GPU plans
+conservatively add one possible device worker, and one private 32-slot ledger
+coordinates every Host and Kernel in the process. Graph load reserves the HP/RT
+pair atomically; replacement holds the old grant until the candidate is
+published; scheduler destruction precedes exact reservation release. This is
+current containment only. Per-Graph workers and the transitional process
+singleton remain until ADR 0003 and issues #68/#69 introduce an injected
+process-owned `ExecutionService` and shared executors.
+
 1. **Completed:** Establish public-header installation and self-containment
    boundaries.
    - Install only headers under `include/photospider/**`; implementation
@@ -685,10 +701,12 @@ the sole public seam.
    file-identity, file-mapping, and backend declarations. This is a precise
    tested boundary rather than an exhaustive POSIX vocabulary claim.
    Cancellation remains unavailable.
-8. **Completed plugin-boundary work:** Issue #38 tightened both extension SDKs.
+8. **Completed plugin-boundary work:** Issue #38 tightened both extension SDKs,
+   and issue #43 advanced the scheduler contract to ABI v2.
    - Operation plugins use v2 host-independent snapshots and a host-provided
      registrar; scheduler plugins use the inherited minimal runtime,
-     `SchedulerHostContext`, and a first-call numeric ABI handshake.
+     `SchedulerHostContext`, a first-call numeric ABI handshake, and the
+     resolved `[1,8]` hard grant. ABI v1 has no compatibility path.
    - The eight old headers and five old internal helper target names are absent
      without compatibility wrappers or aliases. Installed external consumers
      build both DSOs from package SDKs and execute them through an embedded Host.

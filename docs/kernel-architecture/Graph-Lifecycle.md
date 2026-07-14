@@ -29,6 +29,16 @@ starts its configured schedulers, and then loads
 `<root>/<session>/content.yaml` when that file exists. An explicitly supplied
 source file is first copied to that session path when the source exists.
 
+Before constructing that runtime, Kernel plans both configured intent
+schedulers. Worker requests are valid from zero through eight; zero resolves to
+`min(max(1, hardware_concurrency()), 8)` and explicit positive values remain
+exact. Kernel then atomically reserves the combined HP+RT charge from the
+process-wide 32-slot `SchedulerWorkerBudget`. Built-in `serial_debug` charges
+zero, built-in CPU and ABI v2 plugin schedulers charge the resolved grant, and
+built-in GPU/heterogeneous schedulers also charge their configured potential
+GPU worker. If planning or combined admission fails, neither scheduler is
+constructed and no session is published.
+
 Graph document loading is transactional with respect to ordinary
 parse/validation failure and session publication:
 
@@ -41,7 +51,9 @@ parse/validation failure and session publication:
 A parse, node-construction, or topology failure therefore publishes neither a
 partial graph nor a new session. Resource exhaustion propagates. Other handled
 load failures return a failed Host result. Directory creation and file-copy
-side effects that happened before parsing are not rolled back.
+side effects that happened before parsing are not rolled back. Scheduler
+capacity is different: any failure before publication destroys every candidate
+scheduler and returns both atomically admitted reservations exactly once.
 
 The current source-path boundary has three important limitations:
 
@@ -72,6 +84,24 @@ Successful reload replaces the whole graph, resets model runtime state, and
 advances topology generation even when node ids are reused. Runtime-owned
 mirrors such as `RealtimeProxyGraph` observe that generation boundary and
 discard stale per-node state.
+
+## Scheduler Replacement
+
+Scheduler replacement is serialized with compute, inspection, and close by the
+per-graph `GraphStateExecutor`. Kernel first validates and plans one candidate,
+then reserves its complete charge while the old scheduler and reservation stay
+live. It constructs, attaches, and starts the candidate before publishing the
+new owner; only after publication does destruction of the displaced owner
+return its slots. Replacement therefore requires transient process headroom
+and never borrows the old reservation speculatively.
+
+If capacity is unavailable, replacement returns `GraphErrc::ComputeError`
+before candidate construction. If candidate construction, attach, or start
+fails, only the candidate reservation is returned and the old scheduler
+continues to serve compute. Unknown types and invalid worker requests remain
+`InvalidParameter`. A successful replacement transfers one move-only
+reservation into `ReservationOwnedScheduler`, whose destruction orders
+concrete scheduler teardown before slot release.
 
 ## Existing Session Save
 
@@ -147,9 +177,13 @@ publication. Kernel then stops the runtime through the same
 `GraphStateExecutor` and removes the map entry.
 
 Concurrent close callers serialize through the Host lifecycle gate. A runtime
-stop failure retains the runtime and diagnostic state, clears the closing
-marker, and reopens admission. `NotFound` is reserved for a session that is
-actually absent.
+stop failure retains the runtime, diagnostic state, and live scheduler
+reservations, clears the closing marker, and reopens admission. On successful
+close, concrete schedulers shut down and are destroyed before their slots
+return. Destroying an embedded Host without explicit close follows the same
+synchronous ownership chain and returns all graph reservations before Host
+destruction completes. `NotFound` is reserved for a session that is actually
+absent.
 
 `photospiderd` owns daemon session identity, job admission, Host serialization,
 and shutdown drainage around this embedded Host contract. Its exact mapping,
@@ -161,6 +195,8 @@ lease, socket, and shutdown rules are defined in
 | Operation | Current public behavior |
 | --- | --- |
 | initial load, duplicate session | failed load result, currently classified as `InvalidParameter` by the embedded Host |
+| scheduler defaults or direct planning, worker request above eight | `GraphErrc::InvalidParameter`; no scheduler is constructed and future defaults remain unchanged |
+| initial load, combined HP+RT process capacity unavailable | no session or scheduler publication; exact `GraphErrc::ComputeError` |
 | initial load, runtime directory creation failure | no session publication; reported as `GraphErrc::Io`; already-created filesystem side effects are not rolled back |
 | initial load, document parse/topology failure | no session publication; detailed backend category currently collapses to the same load failure |
 | initial load, explicit missing source | loads an older session-local `content.yaml` when present; otherwise warns and publishes an empty session |
@@ -175,6 +211,8 @@ lease, socket, and shutdown rules are defined in
 | node replacement, existing target with malformed input, missing dependency, or cycle | `GraphErrc::InvalidYaml`; previous graph state remains visible |
 | forward/backward ROI projection, missing/closing session or missing endpoint | `GraphErrc::NotFound` |
 | forward/backward ROI projection, existing endpoints with no valid projection | `GraphErrc::InvalidParameter` |
+| scheduler replacement, unknown type or invalid request | `GraphErrc::InvalidParameter`; old scheduler remains published |
+| scheduler replacement, transient process capacity unavailable | `GraphErrc::ComputeError`; no candidate is constructed and old compute behavior remains available |
 | clear or close, missing session | `GraphErrc::NotFound` |
 
 `OperationStatus` exposes an error domain, signed code, stable name, and

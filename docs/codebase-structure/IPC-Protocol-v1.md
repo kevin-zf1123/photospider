@@ -1129,10 +1129,24 @@ has the same per-string rules. Scheduler type inputs and Host-returned type
 names are nonempty valid UTF-8 of at most 1,024 bytes. Descriptions and loaded
 plugin labels are valid UTF-8 of at most 4,096 bytes; a description may be
 empty, while a plugin label may not. `worker_count` is an exact integer in
-`0..UINT_MAX`; zero retains the public automatic-worker selection meaning.
-Configuration changes the defaults for subsequently loaded graph sessions
-only; existing sessions retain their scheduler objects until explicit
-replacement.
+`[0,8]`: zero requests bounded automatic selection, while one through eight
+request that exact CPU/plugin grant. The router rejects a missing, malformed,
+negative, non-integral, or greater-than-eight value as Protocol
+`-32602/invalid_params` before acquiring the Host mutex or calling Host. Zero
+and eight are forwarded unchanged through exactly one Host call. Host success
+or failure is returned exactly, and the mutation is never retried; a rejected
+request leaves the previous defaults unchanged.
+
+The connected typed Client performs the same greater-than-eight check locally
+before emitting a frame and keeps the connection usable. A disconnected Client
+returns Transport `not_connected` before validating the value. Legal
+configuration changes defaults for subsequently loaded graph sessions only;
+existing sessions retain their scheduler objects until explicit replacement.
+The process-wide 32-slot scheduler admission capacity is fixed implementation
+policy, is shared across Hosts and Kernels in the process, and is not remotely
+configurable through protocol v1. Consequently, accepting defaults does not
+reserve capacity: a later graph load can still return its exact Graph
+`ComputeError` when the two planned scheduler instances do not fit.
 
 The two session methods require a valid opaque daemon `session_id` and an
 `intent` equal to `global_high_precision` or `real_time_update`:
@@ -1169,7 +1183,10 @@ violates these invariants is a daemon `internal_error`, never a partial value.
 Successful replacement returns `{}`. Every known value is validated before
 opaque-session admission. Missing or closing sessions retain the common daemon
 session-status mapping; unavailable scheduler types and other Host failures
-retain their exact Graph-domain mapping.
+retain their exact Graph-domain mapping. Replacement reserves the complete new
+scheduler grant before releasing the old one, so insufficient transient
+headroom is reported as the exact Graph `ComputeError` and leaves the old
+scheduler installed.
 
 Each `scheduler.types` or `scheduler.loaded_plugins` first page reserves the
 common bounded snapshot quota before exactly one Host call, validates and

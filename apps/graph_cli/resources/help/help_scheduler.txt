@@ -79,9 +79,14 @@ CONFIGURATION
   Default scheduler types can be configured in config.yaml:
     scheduler_hp_type: cpu_work_stealing
     scheduler_rt_type: cpu_work_stealing
-    scheduler_worker_count: 0  # 0 = auto-detect
+    scheduler_worker_count: 0  # 0 = auto capped at 8; 1..8 = exact
     scheduler_dirs:            # Directories to scan for plugins
       - build/schedulers
+
+  Values outside 0..8 are rejected instead of clamped. Each graph plans both
+  HP and RT schedulers against one fixed 32-slot process-wide capacity. A
+  graph load or scheduler replacement can therefore fail when capacity is
+  exhausted; replacement keeps the old scheduler on failure.
 
 SEE ALSO
   config, compute
