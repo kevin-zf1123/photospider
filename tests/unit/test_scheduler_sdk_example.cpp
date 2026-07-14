@@ -1,5 +1,6 @@
 #include <gtest/gtest.h>
 
+#include <array>
 #include <atomic>
 #include <chrono>
 #include <condition_variable>
@@ -19,6 +20,7 @@
 namespace {
 
 using ps::Device;
+using ps::kSchedulerWorkerRequestMax;
 using ps::SchedulerHostContext;
 using ps::SchedulerTaskPriority;
 using ps::SchedulerTraceAction;
@@ -42,6 +44,31 @@ bool wait_for_atomic_value(const std::atomic<int>& value, int expected,
                            std::chrono::milliseconds timeout) noexcept {
   const auto deadline = std::chrono::steady_clock::now() + timeout;
   while (value.load(std::memory_order_acquire) != expected) {
+    if (std::chrono::steady_clock::now() >= deadline) {
+      return false;
+    }
+    std::this_thread::yield();
+  }
+  return true;
+}
+
+/**
+ * @brief Waits for scheduler callback bookkeeping to reach one exact count.
+ * @param scheduler Scheduler exposing the test-only borrowed-callback count.
+ * @param expected Exact in-flight count required before the deadline.
+ * @param timeout Maximum wait duration.
+ * @return True when the expected count becomes observable.
+ * @throws std::system_error if scheduler-state locking fails.
+ * @note Executor-visible completion may precede the worker's `finish_work()`
+ *       bookkeeping. Polling this explicit state avoids assuming those two
+ *       publications are atomic while a deliberately blocked callback keeps
+ *       the target count stable.
+ */
+bool wait_for_borrowed_in_flight(const SdkExampleScheduler& scheduler,
+                                 std::size_t expected,
+                                 std::chrono::milliseconds timeout) {
+  const auto deadline = std::chrono::steady_clock::now() + timeout;
+  while (scheduler.borrowed_in_flight_for_testing() != expected) {
     if (std::chrono::steady_clock::now() >= deadline) {
       return false;
     }
@@ -455,6 +482,57 @@ TEST(SchedulerTaskHandleContract, HalfEmptyHandleIsANoOp) {
   EXPECT_EQ(executor.execution_count.load(std::memory_order_relaxed), 0);
 }
 
+/**
+ * @brief Validates and obeys the exact ABI v2 worker grant for every policy.
+ * @return Nothing; GoogleTest records grant or owned-thread mismatches.
+ * @throws std::bad_alloc or std::system_error if valid scheduler construction
+ *         or worker lifecycle setup exhausts resources.
+ * @note CPU and heterogeneous policies own exactly the example's grant;
+ *       serial policy demonstrates that a plugin may own fewer workers. No
+ *       statistics text or operating-system thread snapshot is parsed.
+ */
+TEST(SchedulerSdkExample, ValidatesAndObeysResolvedWorkerGrant) {
+  for (const ExamplePolicy policy : std::array<ExamplePolicy, 3>{
+           ExamplePolicy::Serial, ExamplePolicy::CpuWorkers,
+           ExamplePolicy::Heterogeneous}) {
+    EXPECT_THROW((void)SdkExampleScheduler("zero_grant", policy, 0U),
+                 std::invalid_argument);
+    EXPECT_THROW((void)SdkExampleScheduler("excessive_grant", policy,
+                                           kSchedulerWorkerRequestMax + 1U),
+                 std::invalid_argument);
+  }
+
+  {
+    SdkExampleScheduler cpu("cpu_grant", ExamplePolicy::CpuWorkers,
+                            kSchedulerWorkerRequestMax);
+    EXPECT_EQ(cpu.worker_grant_for_testing(), kSchedulerWorkerRequestMax);
+    cpu.start();
+    EXPECT_EQ(cpu.owned_worker_count_for_testing(), kSchedulerWorkerRequestMax);
+    cpu.shutdown();
+    EXPECT_EQ(cpu.owned_worker_count_for_testing(), 0U);
+  }
+  {
+    SdkExampleScheduler heterogeneous("heterogeneous_grant",
+                                      ExamplePolicy::Heterogeneous,
+                                      kSchedulerWorkerRequestMax);
+    EXPECT_EQ(heterogeneous.worker_grant_for_testing(),
+              kSchedulerWorkerRequestMax);
+    heterogeneous.start();
+    EXPECT_EQ(heterogeneous.owned_worker_count_for_testing(),
+              kSchedulerWorkerRequestMax);
+    heterogeneous.shutdown();
+    EXPECT_EQ(heterogeneous.owned_worker_count_for_testing(), 0U);
+  }
+  {
+    SdkExampleScheduler serial("serial_grant", ExamplePolicy::Serial,
+                               kSchedulerWorkerRequestMax);
+    EXPECT_EQ(serial.worker_grant_for_testing(), kSchedulerWorkerRequestMax);
+    serial.start();
+    EXPECT_EQ(serial.owned_worker_count_for_testing(), 0U);
+    serial.shutdown();
+  }
+}
+
 TEST(SchedulerSdkExample, InvalidInitialCountsPreserveEpochAndBorrowing) {
   RecordingHostContext host;
   SdkExampleScheduler scheduler("count_validation", ExamplePolicy::Serial, 1U);
@@ -662,6 +740,13 @@ TEST(SchedulerSdkExample, NewBatchWaitRetainsOldBorrowedExecutorFence) {
     return;
   }
 
+  if (!wait_for_borrowed_in_flight(scheduler, 1U, kTestTimeout)) {
+    old_release.open();
+    scheduler.shutdown();
+    scheduler.detach();
+    FAIL() << "new batch callback bookkeeping did not settle";
+    return;
+  }
   EXPECT_EQ(scheduler.tasks_to_complete_for_testing(), 0);
   EXPECT_EQ(scheduler.borrowed_in_flight_for_testing(), 1U);
   EXPECT_FALSE(scheduler.completion_ready_for_testing());

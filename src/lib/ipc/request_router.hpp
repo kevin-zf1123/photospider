@@ -901,8 +901,9 @@ class RequestRouter {
    * @throws std::bad_alloc if decoded inputs, Host result, or encoding
    * allocates.
    * @throws Whatever the Host default-configuration operation propagates.
-   * @note Validates both type labels and exact worker count before one
-   *       serialized mutation and never retries it.
+   * @note Validates both type labels and an exact worker count in `[0,8]`
+   *       before acquiring `host_mutex_` or making one serialized Host
+   *       mutation. The mutation is never retried.
    */
   std::string route_scheduler_defaults_method(
       const std::string& id, const RoutedParams& routed_params);

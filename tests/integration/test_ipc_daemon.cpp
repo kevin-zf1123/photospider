@@ -43,6 +43,7 @@
 #include "ipc/server_lifecycle_test_access.hpp"
 #include "ipc/unix_socket.hpp"
 #include "photospider/ipc/client.hpp"
+#include "photospider/scheduler/scheduler.hpp"
 
 #ifndef PS_PHOTOSPIDERD_PATH
 #error "PS_PHOTOSPIDERD_PATH must name the real daemon executable"
@@ -3920,6 +3921,119 @@ TEST(IpcDaemonOperationPlugins,
   daemon.stop();
   EXPECT_TRUE(daemon.exited_successfully());
   EXPECT_FALSE(std::filesystem::exists(socket_path));
+}
+
+/**
+ * @brief Preserves remote defaults and propagates process-budget exhaustion.
+ *
+ * A real product daemon first accepts distinguishable CPU defaults, rejects a
+ * raw count-nine update, and loads four Graphs whose HP and RT schedulers each
+ * retain four workers. Scheduler inspection proves the rejected update did not
+ * replace the defaults. The exact thirty-two-slot aggregate then rejects one
+ * additional Graph with the Host's Graph `ComputeError`; closing one owner
+ * makes an identical retry succeed.
+ *
+ * @return Nothing; GoogleTest records protocol, Host, lifecycle, or status
+ *         propagation mismatches.
+ * @throws std::bad_alloc, std::runtime_error, std::system_error, or filesystem
+ *         exceptions if daemon, socket, request, graph, or result setup fails.
+ * @note No IPC field configures or reports the process aggregate. The test
+ *       derives saturation solely from legal per-scheduler defaults and uses
+ *       no diagnostic message assertions.
+ */
+TEST(IpcDaemonSchedulers,
+     RealDaemonPreservesDefaultsAndPropagatesAggregateCapacity) {
+  constexpr unsigned int kWorkersPerScheduler = 4U;
+  constexpr std::size_t kSchedulersPerGraph = 2U;
+  constexpr std::size_t kSaturatingGraphCount =
+      kSchedulerWorkerProcessMax / (kSchedulersPerGraph * kWorkersPerScheduler);
+  static_assert(kSaturatingGraphCount == 4U);
+  static_assert(kSaturatingGraphCount * kSchedulersPerGraph *
+                    kWorkersPerScheduler ==
+                kSchedulerWorkerProcessMax);
+
+  ScopedDaemonDirectory temp("ps-scheduler-budget", true);
+  const std::string socket_path = (temp.path() / "budget.sock").string();
+  DaemonProcess daemon;
+  daemon.start(socket_path);
+  ASSERT_TRUE(daemon.wait_ready(std::chrono::seconds(5)));
+
+  internal::Json response =
+      raw_daemon_call(socket_path, "scheduler.configure_defaults",
+                      internal::Json{{"hp_type", "cpu_work_stealing"},
+                                     {"rt_type", "cpu_work_stealing"},
+                                     {"worker_count", kWorkersPerScheduler}},
+                      "scheduler-budget-accepted-defaults");
+  ASSERT_TRUE(response.contains("result")) << response.dump();
+
+  response = raw_daemon_call(
+      socket_path, "scheduler.configure_defaults",
+      internal::Json{{"hp_type", "serial_debug"},
+                     {"rt_type", "serial_debug"},
+                     {"worker_count", kSchedulerWorkerRequestMax + 1U}},
+      "scheduler-budget-rejected-defaults");
+  ASSERT_TRUE(response.contains("error")) << response.dump();
+  EXPECT_EQ(response["error"]["domain"], "protocol");
+  EXPECT_EQ(response["error"]["code"], internal::kInvalidParamsCode);
+  EXPECT_EQ(response["error"]["name"], "invalid_params");
+
+  const std::filesystem::path yaml_path = temp.path() / "budget.yaml";
+  write_ipc_graph(yaml_path);
+  Client client;
+  ASSERT_TRUE(client.connect(socket_path).ok);
+  std::vector<GraphSessionSummary> loaded;
+  loaded.reserve(kSaturatingGraphCount);
+  for (std::size_t index = 0; index < kSaturatingGraphCount; ++index) {
+    GraphLoadRequest request;
+    request.session =
+        GraphSessionId{"scheduler_budget_" + std::to_string(index)};
+    request.root_dir =
+        (temp.path() / ("sessions-" + std::to_string(index))).string();
+    request.yaml_path = yaml_path.string();
+    request.cache_root_dir =
+        (temp.path() / ("cache-" + std::to_string(index))).string();
+    IpcResult<GraphSessionSummary> result = client.load_graph(request);
+    ASSERT_TRUE(result.status.ok)
+        << "graph " << index << ": " << result.status.message;
+    loaded.push_back(std::move(result.value));
+  }
+
+  ASSERT_FALSE(loaded.empty());
+  const IpcResult<SchedulerInfoSnapshot> hp = client.scheduler_info(
+      loaded.front().session_id, ComputeIntent::GlobalHighPrecision);
+  ASSERT_TRUE(hp.status.ok) << hp.status.message;
+  EXPECT_EQ(hp.value.scheduler_name, "CpuWorkStealingScheduler");
+  const IpcResult<SchedulerInfoSnapshot> rt = client.scheduler_info(
+      loaded.front().session_id, ComputeIntent::RealTimeUpdate);
+  ASSERT_TRUE(rt.status.ok) << rt.status.message;
+  EXPECT_EQ(rt.value.scheduler_name, "CpuWorkStealingScheduler");
+
+  GraphLoadRequest overflow;
+  overflow.session = GraphSessionId{"scheduler_budget_overflow"};
+  overflow.root_dir = (temp.path() / "sessions-overflow").string();
+  overflow.yaml_path = yaml_path.string();
+  overflow.cache_root_dir = (temp.path() / "cache-overflow").string();
+  const IpcResult<GraphSessionSummary> rejected = client.load_graph(overflow);
+  ASSERT_FALSE(rejected.status.ok);
+  EXPECT_EQ(rejected.status.domain, OperationErrorDomain::Graph);
+  EXPECT_EQ(rejected.status.code,
+            static_cast<std::int32_t>(GraphErrc::ComputeError));
+  EXPECT_EQ(rejected.status.name, "compute_error");
+
+  const VoidResult closed = client.close_graph(loaded.front().session_id);
+  ASSERT_TRUE(closed.status.ok) << closed.status.message;
+  const IpcResult<GraphSessionSummary> retried = client.load_graph(overflow);
+  ASSERT_TRUE(retried.status.ok) << retried.status.message;
+
+  for (std::size_t index = 1; index < loaded.size(); ++index) {
+    const VoidResult cleanup = client.close_graph(loaded[index].session_id);
+    EXPECT_TRUE(cleanup.status.ok) << cleanup.status.message;
+  }
+  const VoidResult retry_cleanup = client.close_graph(retried.value.session_id);
+  EXPECT_TRUE(retry_cleanup.status.ok) << retry_cleanup.status.message;
+  client.disconnect();
+  daemon.stop();
+  EXPECT_TRUE(daemon.exited_successfully());
 }
 
 TEST(IpcDaemonSchedulers,

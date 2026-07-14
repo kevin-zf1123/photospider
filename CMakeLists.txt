@@ -382,6 +382,8 @@ set(PHOTOSPIDER_SCHEDULER_INTERNAL_SOURCES
     src/lib/scheduler/serial_debug_scheduler.cpp
     src/lib/scheduler/scheduler_factory.cpp
     src/lib/scheduler/scheduler_plugin_loader.cpp
+    src/lib/scheduler/scheduler_reservation_owner.cpp
+    src/lib/scheduler/scheduler_worker_budget.cpp
 )
 
 add_library(photospider_scheduler_internal STATIC
@@ -828,7 +830,7 @@ if(BUILD_TESTING)
         PHOTOSPIDER_SCHEDULER_FIXTURE_OMIT_HANDSHAKE)
     add_scheduler_fixture(mismatched_abi_scheduler_plugin
         "${TEST_INCOMPATIBLE_SCHEDULER_PLUGIN_DIR}/mismatch"
-        PHOTOSPIDER_SCHEDULER_FIXTURE_ABI_VERSION=2U)
+        PHOTOSPIDER_SCHEDULER_FIXTURE_ABI_VERSION=1U)
 
     add_library(lifecycle_op_plugin SHARED
         tests/fixtures/ops/lifecycle_op_plugin.cpp
@@ -1178,6 +1180,20 @@ if(BUILD_TESTING)
     )
     add_dependencies(test_host_adapter lifecycle_op_plugin
         override_lifecycle_op_plugin destroy_count_scheduler_plugin)
+    add_ps_test(test_scheduler_worker_budget
+        tests/integration/test_scheduler_worker_budget.cpp)
+    target_compile_definitions(test_scheduler_worker_budget PRIVATE
+        PHOTOSPIDER_INTERNAL_BAD_ALLOC_TESTING)
+    add_ps_test(test_scheduler_worker_budget_unit
+        tests/unit/test_scheduler_worker_budget.cpp)
+    add_ps_test(test_scheduler_factory_plan
+        tests/unit/test_scheduler_factory_plan.cpp)
+    add_ps_test(test_scheduler_reservation_owner
+        tests/unit/test_scheduler_reservation_owner.cpp)
+    add_ps_test(test_scheduler_instance_limits
+        tests/unit/test_scheduler_instance_limits.cpp)
+    target_compile_definitions(test_scheduler_instance_limits PRIVATE
+        PHOTOSPIDER_INTERNAL_BAD_ALLOC_TESTING)
     add_ps_test(test_bad_alloc_boundaries
         tests/integration/test_bad_alloc_boundaries.cpp)
     target_sources(test_bad_alloc_boundaries PRIVATE
@@ -1205,6 +1221,12 @@ if(BUILD_TESTING)
     target_include_directories(test_cli_dirty_snapshot_formatter PRIVATE
         "${PROJECT_SOURCE_DIR}/apps/graph_cli/include")
     target_link_libraries(test_cli_dirty_snapshot_formatter PRIVATE
+        photospider_cli_common)
+    add_ps_test(test_cli_scheduler_config
+        tests/integration/test_cli_scheduler_config.cpp)
+    target_include_directories(test_cli_scheduler_config PRIVATE
+        "${PROJECT_SOURCE_DIR}/apps/graph_cli/include")
+    target_link_libraries(test_cli_scheduler_config PRIVATE
         photospider_cli_common)
     add_ps_test(test_compute_service_split
         tests/integration/test_compute_service_split.cpp)
@@ -1405,9 +1427,26 @@ if(BUILD_TESTING)
     gtest_discover_tests(test_cli_compute_event_paging
         WORKING_DIRECTORY ${PROJECT_SOURCE_DIR})
     gtest_discover_tests(test_host_adapter WORKING_DIRECTORY ${PROJECT_SOURCE_DIR})
+    gtest_discover_tests(test_scheduler_worker_budget
+        WORKING_DIRECTORY ${PROJECT_SOURCE_DIR}
+        PROPERTIES TIMEOUT 30)
+    gtest_discover_tests(test_scheduler_worker_budget_unit
+        WORKING_DIRECTORY ${PROJECT_SOURCE_DIR}
+        PROPERTIES TIMEOUT 30)
+    gtest_discover_tests(test_scheduler_factory_plan
+        WORKING_DIRECTORY ${PROJECT_SOURCE_DIR}
+        PROPERTIES TIMEOUT 30)
+    gtest_discover_tests(test_scheduler_reservation_owner
+        WORKING_DIRECTORY ${PROJECT_SOURCE_DIR}
+        PROPERTIES TIMEOUT 30)
+    gtest_discover_tests(test_scheduler_instance_limits
+        WORKING_DIRECTORY ${PROJECT_SOURCE_DIR}
+        PROPERTIES TIMEOUT 30)
     gtest_discover_tests(test_bad_alloc_boundaries
         WORKING_DIRECTORY ${PROJECT_SOURCE_DIR})
     gtest_discover_tests(test_cli_dirty_snapshot_formatter WORKING_DIRECTORY ${PROJECT_SOURCE_DIR})
+    gtest_discover_tests(test_cli_scheduler_config
+        WORKING_DIRECTORY ${PROJECT_SOURCE_DIR})
     gtest_discover_tests(test_compute_service_split
         WORKING_DIRECTORY ${PROJECT_SOURCE_DIR}
         PROPERTIES TIMEOUT 60)

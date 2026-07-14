@@ -49,9 +49,14 @@ class GpuPipelineScheduler : public IScheduler {
    * authority, or operation selection ownership.
    */
   struct Config {
-    /** @brief GPU submission worker count when a Metal device is available. */
+    /**
+     * @brief GPU submission workers when Metal is available; only zero or one.
+     */
     unsigned int gpu_workers;
-    /** @brief RT/HP-fallback CPU workers; zero selects hardware concurrency. */
+    /**
+     * @brief RT/HP-fallback CPU workers; zero selects bounded automatic
+     * hardware resolution and positive values must not exceed eight.
+     */
     unsigned int cpu_workers;
     /** @brief Whether normal-priority HP work prefers an available GPU lane. */
     bool prefer_gpu_for_hp;
@@ -69,8 +74,12 @@ class GpuPipelineScheduler : public IScheduler {
    * @brief Configures a stopped GPU-pipeline scheduler.
    * @param config Worker counts and HP routing preference copied by value.
    * @return Stopped scheduler with no owned worker threads.
-   * @throws Nothing directly; zero CPU workers fall back to at least one.
-   * @note No runtime, graph/cache state, or task executor is owned yet.
+   * @throws std::invalid_argument If CPU workers exceed eight, GPU workers
+   * exceed one, or their total exceeds the absolute instance ceiling of nine.
+   * @throws std::overflow_error If defensive worker-count addition overflows.
+   * @note Zero CPU workers resolve once into `[1,8]`. No runtime, worker
+   * thread, start-time queue storage, graph/cache state, or task executor is
+   * owned yet.
    */
   explicit GpuPipelineScheduler(const Config& config = Config());
 
@@ -99,8 +108,10 @@ class GpuPipelineScheduler : public IScheduler {
    * @throws std::bad_alloc if an already-running scheduler cannot stage GPU
    * worker storage.
    * @throws std::system_error if an attached GPU worker cannot be created.
-   * @note Host/graph/cache ownership is not transferred. Failure leaves
-   * the scheduler stopped after joining any partially created worker set.
+   * @note Host/graph/cache ownership is not transferred. The borrowed host is
+   * retained once assigned. A pre-thread staging failure preserves the
+   * existing CPU-only running state; GPU thread-creation failure stops and
+   * joins the complete pipeline so a later full `start()` can retry.
    */
   void attach(SchedulerHostContext& host) override;
 
@@ -117,11 +128,14 @@ class GpuPipelineScheduler : public IScheduler {
    * @return Nothing.
    * @throws std::bad_alloc if worker storage cannot grow.
    * @throws std::system_error if a worker thread cannot be created.
-   * @note Worker containers are reserved before publication. Partially created
+   * @note On a fresh start, worker containers are reserved before publication
+   * and allocation failure leaves stopped state unchanged. Partially created
    * workers use `worker_loop_active_`, while public `running_` remains false
-   * until both complete worker vectors are installed. Any CPU/GPU thread
-   * creation failure stops and joins the partial set, clears queues/counters,
-   * and preserves the original exception for retry.
+   * until both complete worker vectors are installed. On an already-running
+   * CPU-only scheduler, late GPU storage failure preserves that running state;
+   * late GPU thread-creation failure stops and joins the complete pipeline.
+   * Every thread-creation failure clears queues/counters and preserves the
+   * original exception for a full retry.
    */
   void start() override;
 
@@ -623,7 +637,9 @@ class GpuPipelineScheduler : public IScheduler {
    * @return Nothing.
    * @throws std::bad_alloc if staged worker storage cannot reserve.
    * @throws std::system_error if a GPU worker thread cannot be created.
-   * @note Partial creation stops/joins all pipeline workers, clears lifecycle
+   * @note Storage is staged before any lifecycle mutation, so reserve failure
+   * preserves existing CPU-only workers and `running=true`. Once GPU thread
+   * creation begins, failure stops/joins all pipeline workers, clears lifecycle
    * counters, preserves the original exception, and supports full start retry.
    */
   void start_gpu_workers_if_available();
@@ -675,7 +691,7 @@ class GpuPipelineScheduler : public IScheduler {
   // ---------------------------------------------------------------------------
   /** @brief Borrowed host context; owns no graph or cache state. */
   SchedulerHostContext* host_context_ = nullptr;
-  /** @brief Scheduler-owned copy of worker/routing configuration. */
+  /** @brief Validated configuration with a resolved CPU grant in `[1,8]`. */
   Config config_;
 
   // CPU workers

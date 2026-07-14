@@ -14,6 +14,40 @@
 namespace ps {
 
 /**
+ * @brief Maximum explicit CPU/plugin worker request for one scheduler.
+ *
+ * @throws Nothing.
+ * @note Zero remains the automatic-selection sentinel. Positive requests above
+ *       this value are invalid and must not be clamped. Before construction,
+ *       zero resolves once to
+ *       `min(max(1, detected_hardware_concurrency), 8)`; values one through
+ *       eight remain exact.
+ */
+inline constexpr unsigned int kSchedulerWorkerRequestMax = 8U;
+
+/**
+ * @brief Absolute worker ceiling for one built-in GPU scheduler instance.
+ *
+ * @throws Nothing.
+ * @note The ceiling combines `kSchedulerWorkerRequestMax` CPU workers with the
+ *       one configured potential GPU worker owned by the current pipeline.
+ *       Admission charges that potential worker conservatively even when no
+ *       device worker is started.
+ */
+inline constexpr unsigned int kGpuSchedulerWorkerInstanceMax = 9U;
+
+/**
+ * @brief Fixed aggregate scheduler-worker admission ceiling for one process.
+ *
+ * @throws Nothing.
+ * @note This is the migration safety ceiling for per-Graph schedulers, not a
+ *       remotely configurable execution-service capacity. It is shared by all
+ *       embedded Hosts and Kernels in one process and counts planned
+ *       scheduler-owned workers only, not all process threads.
+ */
+inline constexpr unsigned int kSchedulerWorkerProcessMax = 32U;
+
+/**
  * @brief Non-owning host services available to an attached scheduler.
  *
  * The host owns this object and guarantees that it outlives every entered

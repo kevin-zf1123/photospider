@@ -14,6 +14,7 @@
 #include "photospider/host/compute_request.hpp"
 #include "photospider/host/event_stream.hpp"
 #include "photospider/host/graph_session.hpp"
+#include "photospider/scheduler/scheduler.hpp"
 
 /**
  * @file host.hpp
@@ -211,7 +212,12 @@ struct HostSchedulerConfig {
   /** @brief Scheduler type used for real-time dirty-region updates. */
   std::string rt_type = "cpu_work_stealing";
 
-  /** @brief Worker count requested from scheduler factories; zero means auto.
+  /**
+   * @brief CPU/plugin worker request; zero means bounded automatic selection.
+   * @note Zero resolves once before construction to a value in `[1,8]`;
+   *       positive values are exact and must not exceed
+   *       `kSchedulerWorkerRequestMax`. This field does not configure the
+   *       fixed process-wide scheduler capacity.
    */
   unsigned int worker_count = 0;
 };
@@ -248,12 +254,19 @@ class PHOTOSPIDER_API Host {
    * @brief Loads a graph session.
    *
    * @param request Session name, root, YAML, config, and cache-root values.
-   * @return Loaded session id on success, or a failure status.
+   * @return Loaded session id on success, or a categorized failure including
+   *         `GraphErrc::InvalidParameter` for scheduler planning/other load
+   *         validation, `GraphErrc::ComputeError` when the complete HP+RT
+   *         scheduler pair cannot fit the process worker budget, and
+   *         `GraphErrc::Io` for runtime-directory/path filesystem failure.
    * @throws std::bad_alloc if request processing, backend-to-status
    *         translation, or copied result construction exhausts memory.
-   * @note The returned session is a value label, never a runtime pointer. A
-   *       conforming implementation must not leave a newly published session
-   *       when an exception propagates instead of returning success.
+   * @note The returned session is a value label, never a runtime pointer. The
+   *       embedded implementation plans both scheduler intents and reserves
+   *       their aggregate capacity before constructing either candidate. A
+   *       conforming implementation must not leave a scheduler candidate or
+   *       newly published session when load returns failure or an exception
+   *       propagates.
    */
   virtual Result<GraphSessionId> load_graph(
       const GraphLoadRequest& request) = 0;
@@ -961,11 +974,15 @@ class PHOTOSPIDER_API Host {
    * @brief Applies scheduler defaults used when loading future sessions.
    *
    * @param config Scheduler type names and worker count.
-   * @return Success or failure status.
+   * @return Success, or `GraphErrc::InvalidParameter` when the positive worker
+   *         request exceeds `kSchedulerWorkerRequestMax`.
    * @throws std::bad_alloc if request processing, backend-to-status
    *         translation, or copied result construction exhausts memory.
    * @note Existing loaded graph sessions keep their current scheduler objects;
-   *       callers can use replace_scheduler() to update them explicitly.
+   *       callers can use replace_scheduler() to update them explicitly. A
+   *       rejected candidate leaves the previous future-session defaults
+   *       unchanged. Success validates defaults only and does not reserve
+   *       process capacity for a future graph load.
    */
   virtual VoidResult configure_scheduler_defaults(
       const HostSchedulerConfig& config) = 0;
@@ -992,13 +1009,19 @@ class PHOTOSPIDER_API Host {
    * @param intent Compute intent whose scheduler should be replaced.
    * @param type Scheduler type name.
    * @return Success, `GraphErrc::NotFound` for missing/closed sessions, or
-   *         `GraphErrc::InvalidParameter` for unavailable scheduler types.
+   *         `GraphErrc::InvalidParameter` for unavailable/null scheduler types
+   *         or handled candidate failures, or `GraphErrc::ComputeError` when
+   *         process capacity cannot reserve candidate headroom.
    * @throws std::bad_alloc if request processing, backend-to-status
    *         translation, or copied result construction exhausts memory.
    * @note Replacement shares graph-state serialization with compute,
    *       scheduler inspection, and close. Session lifecycle failures are
-   *       reported before scheduler type validation, and the displaced owner is
-   *       not destroyed while active compute retains it.
+   *       reported before scheduler type validation. Planning and reservation
+   *       retain the old scheduler in its pre-call state until candidate
+   *       preparation and publication succeed, so exhaustion never destroys an
+   *       owner still usable by later compute. Candidate/plugin GraphError
+   *       retains the established handled InvalidParameter mapping; only the
+   *       new budget category is preserved exactly.
    */
   virtual VoidResult replace_scheduler(const GraphSessionId& session,
                                        ComputeIntent intent,

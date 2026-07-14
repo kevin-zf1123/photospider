@@ -71,9 +71,13 @@ ps_scheduler_plugin_get_description(std::uint32_t index) {
 /**
  * @brief Creates one CPU-worker SDK example scheduler.
  * @param type_name Requested type name.
- * @param num_workers Worker count, or zero for hardware concurrency.
+ * @param num_workers Resolved ABI v2 hard grant in `[1,8]`.
  * @return Plugin-owned instance, or null for an unsupported type.
+ * @throws std::invalid_argument if a supported type receives a grant outside
+ * `[1,8]`.
  * @throws std::bad_alloc if instance or worker configuration storage fails.
+ * @note A successful instance owns exactly `num_workers` standard worker
+ *       threads while running and never performs hardware auto-expansion.
  */
 PHOTOSPIDER_SCHEDULER_PLUGIN_EXPORT ps::IScheduler* ps_scheduler_plugin_create(
     const char* type_name, std::uint32_t num_workers) {

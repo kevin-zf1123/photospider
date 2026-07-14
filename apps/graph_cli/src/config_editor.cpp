@@ -6,6 +6,7 @@
 #include <functional>
 #include <iostream>
 #include <new>
+#include <stdexcept>
 #include <string>
 #include <utility>
 #include <vector>
@@ -271,13 +272,26 @@ class ConfigEditor : public TuiEditor {
   }
   /**
    * @brief Applies editable TUI values to the owned configuration snapshot.
-   * @return Nothing.
+   * @return True when every editor field is valid and model synchronization
+   * completes; false when scheduler worker-count validation rejects the field.
    * @throws std::bad_alloc if string, vector, or stream storage cannot
    * allocate.
-   * @note Invalid numeric text retains the previous numeric value; resource
-   * exhaustion propagates to the Host-facing command boundary.
+   * @note Scheduler worker text is validated before any synchronization in
+   * this function. Invalid text publishes an editor diagnostic, retains the
+   * previous worker count, and prevents apply/write from reporting success.
    */
-  void SyncUiStateToModel() {
+  bool SyncUiStateToModel() {
+    int scheduler_worker_count = 0;
+    try {
+      scheduler_worker_count =
+          parse_cli_scheduler_worker_count(scheduler_worker_count_buffer_);
+    } catch (const std::bad_alloc&) {
+      throw;
+    } catch (const std::invalid_argument& error) {
+      status_message_ = "Error: " + std::string(error.what());
+      return false;
+    }
+
     original_config_.plugin_dirs = plugin_dirs_str_;
     original_config_.scheduler_dirs = scheduler_dirs_str_;
     original_config_.loaded_config_path = active_config_path_buffer_;
@@ -303,16 +317,7 @@ class ConfigEditor : public TuiEditor {
         config_save_entries_[selected_config_save_idx_];
     original_config_.editor_save_behavior =
         editor_save_entries_[selected_editor_save_idx_];
-    try {
-      original_config_.scheduler_worker_count =
-          std::stoi(scheduler_worker_count_buffer_);
-      if (original_config_.scheduler_worker_count < 0) {
-        original_config_.scheduler_worker_count = 0;
-      }
-    } catch (const std::bad_alloc&) {
-      throw;
-    } catch (...) {
-    }
+    original_config_.scheduler_worker_count = scheduler_worker_count;
 
     // Compose traversal defaults from UI state
     {
@@ -370,6 +375,7 @@ class ConfigEditor : public TuiEditor {
       }
       original_config_.default_compute_args = oss.str();
     }
+    return true;
   }
   void RebuildLineView() {
     editable_lines_.clear();
@@ -562,7 +568,9 @@ class ConfigEditor : public TuiEditor {
         } else {
           // No file yet: apply UI changes to the model and move the active
           // path.
-          SyncUiStateToModel();
+          if (!SyncUiStateToModel()) {
+            return;
+          }
           original_config_.loaded_config_path = fs::absolute(new_path).string();
           // Do not write here; writing belongs to ':w'.
           SyncModelToUiState();
@@ -572,7 +580,9 @@ class ConfigEditor : public TuiEditor {
         }
       } else {
         // Same path: just apply UI changes.
-        SyncUiStateToModel();
+        if (!SyncUiStateToModel()) {
+          return;
+        }
         status_message_ = "Settings applied to current session.";
         SyncModelToUiState();
         RebuildLineView();
@@ -580,7 +590,9 @@ class ConfigEditor : public TuiEditor {
       changes_applied = true;
     } else if (cmd == "w" || cmd == "write") {
       // Apply and persist to file.
-      SyncUiStateToModel();
+      if (!SyncUiStateToModel()) {
+        return;
+      }
       if (!original_config_.loaded_config_path.empty()) {
         if (write_config_to_file(original_config_,
                                  original_config_.loaded_config_path)) {

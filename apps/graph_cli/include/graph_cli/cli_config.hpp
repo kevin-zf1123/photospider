@@ -2,6 +2,7 @@
 #pragma once
 
 #include <string>
+#include <string_view>
 #include <vector>
 
 namespace ps {
@@ -71,9 +72,51 @@ struct CliConfig {
    */
   std::string scheduler_rt_type = "cpu_work_stealing";
 
-  /** @brief Worker count for built-in CPU-backed schedulers; 0 means auto. */
+  /** @brief Worker count in `[0, 8]`; zero requests automatic resolution. */
   int scheduler_worker_count = 0;
 };
+
+/**
+ * @brief Validates one CLI scheduler worker-count value.
+ *
+ * @param worker_count Parsed or programmatically supplied CLI value.
+ * @return Nothing.
+ * @throws std::invalid_argument If `worker_count` is outside the inclusive
+ * range from zero through the public scheduler request ceiling of eight.
+ * @note Zero is preserved as automatic-resolution intent. The check performs
+ * no Host call and mutates no configuration state.
+ */
+void validate_cli_scheduler_worker_count(int worker_count);
+
+/**
+ * @brief Strictly parses one scheduler worker count entered in the CLI editor.
+ *
+ * @param text Complete editor field text with no accepted trailing characters.
+ * @return Parsed value in the inclusive range `[0, 8]`.
+ * @throws std::invalid_argument If the text is empty, malformed, has trailing
+ * characters, overflows `int`, or represents a value outside `[0, 8]`.
+ * @throws std::bad_alloc If construction of the failure diagnostic exhausts
+ * memory.
+ * @note The parser performs no mutation, allowing the editor to retain its
+ * previous configuration snapshot when validation fails.
+ */
+int parse_cli_scheduler_worker_count(std::string_view text);
+
+/**
+ * @brief Applies one validated CLI scheduler-default snapshot to a Host.
+ *
+ * @param host Borrowed Host that owns future Graph scheduler defaults.
+ * @param config Complete CLI configuration snapshot to translate.
+ * @return Nothing.
+ * @throws std::invalid_argument If the CLI worker count is outside `[0, 8]`.
+ * @throws std::runtime_error If the Host rejects the otherwise valid candidate.
+ * @throws std::bad_alloc If validation diagnostics, copied scheduler type
+ * strings, Host result storage, or failure diagnostics cannot allocate.
+ * @note The function calls `Host::configure_scheduler_defaults` exactly once
+ * after validation. A thrown Host rejection leaves prior Host defaults intact
+ * according to that public operation's transactional contract.
+ */
+void apply_cli_scheduler_defaults(ps::Host& host, const CliConfig& config);
 
 /**
  * @brief Serializes one CLI configuration to a YAML file.

@@ -2231,17 +2231,19 @@ TEST(SchedulerStartRollback, GpuPipelineMiddleCpuThreadSystemErrorAndRetry) {
                          "gpu_pipeline/middle_cpu_thread");
 }
 
-/** @brief Pipeline start joins CPU and first GPU worker after GPU failure. */
-TEST(SchedulerStartRollback, GpuPipelineMiddleGpuThreadBadAllocAndRetry) {
+/** @brief Pipeline GPU failure joins already-started CPU workers and retries.
+ */
+TEST(SchedulerStartRollback,
+     GpuPipelineGpuThreadBadAllocJoinsCpuWorkersAndRetries) {
   GpuPipelineScheduler::Config config;
   config.cpu_workers = 2;
-  config.gpu_workers = 3;
+  config.gpu_workers = 1;
   GpuPipelineScheduler scheduler(config);
   set_gpu_scheduler_force_gpu_route(true);
   run_start_failure_case(scheduler, set_gpu_scheduler_failure_injection_hook,
                          gpu_scheduler_transactional_snapshot,
-                         SchedulerFailurePoint::GpuThreadCreate, 2, false,
-                         "gpu_pipeline/middle_gpu_thread");
+                         SchedulerFailurePoint::GpuThreadCreate, 1, false,
+                         "gpu_pipeline/gpu_thread_after_cpu_workers");
   set_gpu_scheduler_force_gpu_route(false);
 }
 
@@ -2250,7 +2252,7 @@ TEST(SchedulerStartRollback, GpuPipelineMiddleGpuThreadBadAllocAndRetry) {
 TEST(SchedulerStartRollback, GpuPipelineFirstGpuThreadSystemErrorAndRetry) {
   GpuPipelineScheduler::Config config;
   config.cpu_workers = 2;
-  config.gpu_workers = 2;
+  config.gpu_workers = 1;
   GpuPipelineScheduler scheduler(config);
   set_gpu_scheduler_force_gpu_route(true);
   run_start_failure_case(scheduler, set_gpu_scheduler_failure_injection_hook,

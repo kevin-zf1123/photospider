@@ -2055,13 +2055,18 @@ class EmbeddedHost final : public Host {
    * @brief Loads one graph through the embedded backend.
    *
    * @param request Public graph load request.
-   * @return Loaded session id, or a failed status.
+   * @return Loaded session id, or a categorized failure including
+   *         InvalidParameter for unsupported scheduler planning/other rejected
+   *         load input, ComputeError when the process budget cannot admit the
+   *         complete scheduler pair, and Io for runtime-directory/path
+   *         filesystem failure.
    * @throws std::bad_alloc on allocation failure.
-   * @note Recoverable backend and filesystem failures are converted to
-   *       OperationStatus. The backend preallocates its return label before
-   *       publishing a runtime, and this adapter moves that label into the
-   *       result, so an allocation exception leaves no newly published
-   *       session.
+   * @note Recoverable backend and filesystem failures are converted to exact
+   *       OperationStatus categories. Backend pair planning/admission happens
+   *       before scheduler construction; all later candidate ownership remains
+   *       unpublished until Graph-map insertion. The backend preallocates its
+   *       return label before publication and this adapter moves that label
+   *       into the result, so every failure leaves no newly published session.
    */
   Result<GraphSessionId> load_graph(const GraphLoadRequest& request) override {
     return guarded_result<GraphSessionId>(
@@ -3412,21 +3417,30 @@ class EmbeddedHost final : public Host {
    * @brief Applies scheduler defaults for subsequently loaded graph sessions.
    *
    * @param config Public scheduler default values.
-   * @return Success status.
+   * @return Success, or InvalidParameter when the worker request exceeds the
+   *         public hard maximum.
    * @throws std::bad_alloc if scheduler type strings allocate while copied.
-   * @note Existing runtime schedulers are not replaced by this method.
+   * @note Validation precedes candidate construction and the single Kernel
+   *       assignment. Existing runtime schedulers and previously accepted
+   *       future-session defaults remain unchanged on rejection.
    */
   VoidResult configure_scheduler_defaults(
       const HostSchedulerConfig& config) override {
-    return guarded_void("configure_scheduler_defaults", GraphErrc::Unknown,
-                        [&] {
-                          Kernel::SchedulerConfig backend_config;
-                          backend_config.hp_type = config.hp_type;
-                          backend_config.rt_type = config.rt_type;
-                          backend_config.worker_count = config.worker_count;
-                          state_->kernel.set_scheduler_config(backend_config);
-                          return success_void();
-                        });
+    return guarded_void(
+        "configure_scheduler_defaults", GraphErrc::InvalidParameter, [&] {
+          if (config.worker_count > kSchedulerWorkerRequestMax) {
+            return failure_void(GraphErrc::InvalidParameter,
+                                "scheduler worker count exceeds the maximum "
+                                "of " +
+                                    std::to_string(kSchedulerWorkerRequestMax));
+          }
+          Kernel::SchedulerConfig backend_config;
+          backend_config.hp_type = config.hp_type;
+          backend_config.rt_type = config.rt_type;
+          backend_config.worker_count = config.worker_count;
+          state_->kernel.set_scheduler_config(backend_config);
+          return success_void();
+        });
   }
 
   /**
@@ -3472,12 +3486,17 @@ class EmbeddedHost final : public Host {
    * @param intent Compute intent whose scheduler is replaced.
    * @param type Scheduler type name.
    * @return Success, NotFound for a missing or closed session, or
-   *         InvalidParameter for an unavailable scheduler type.
+   *         InvalidParameter for an unavailable/null scheduler type or handled
+   *         candidate failure, or ComputeError when process capacity cannot
+   *         reserve candidate headroom.
    * @throws std::bad_alloc on allocation failure.
    * @note One lifecycle admission covers session validation through status
-   *       mapping. Kernel performs replacement under the graph-state boundary
-   *       shared with compute/info/close, while the Host pre-check
-   * distinguishes missing sessions from unsupported scheduler types.
+   *       mapping. Kernel performs plan, single reservation, construction, and
+   *       strong replacement under the graph-state boundary shared with
+   *       compute/info/close. The Host session pre-check reserves NotFound for
+   *       lifecycle absence, while guarded GraphError mapping preserves only
+   *       the new budget category without releasing the prior owner; other
+   *       candidate failures keep the established InvalidParameter result.
    */
   VoidResult replace_scheduler(const GraphSessionId& session,
                                ComputeIntent intent,

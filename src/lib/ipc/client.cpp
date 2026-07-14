@@ -25,6 +25,7 @@
 #include "ipc/codec.hpp"
 #include "ipc/frame.hpp"
 #include "ipc/unix_socket.hpp"
+#include "photospider/scheduler/scheduler.hpp"
 
 namespace ps::ipc {
 namespace {
@@ -3713,8 +3714,14 @@ IpcResult<std::vector<std::string>> Client::scheduler_loaded_plugins() {
 /** @copydoc Client::configure_scheduler_defaults */
 VoidResult Client::configure_scheduler_defaults(
     const HostSchedulerConfig& config) {
-  if (!impl_) {
+  if (!impl_ || !impl_->connected()) {
     return {not_connected_status()};
+  }
+  if (config.worker_count > kSchedulerWorkerRequestMax) {
+    return {internal::failure_status(
+        OperationErrorDomain::Protocol, internal::kInvalidParamsCode,
+        "invalid_params",
+        "scheduler worker count exceeds the version 1 maximum")};
   }
   return impl_->void_call(
       "scheduler.configure_defaults",
