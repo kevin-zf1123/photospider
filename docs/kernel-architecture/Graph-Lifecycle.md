@@ -73,20 +73,50 @@ advances topology generation even when node ids are reused. Runtime-owned
 mirrors such as `RealtimeProxyGraph` observe that generation boundary and
 discard stale per-node state.
 
+## Existing Session Save
+
+`Host::save_graph()` admits the session against concurrent close, requires the
+session map entry, and serializes the visible node snapshot through the same
+`GraphStateExecutor` used by graph mutation and compute. A missing or closing
+session is `GraphErrc::NotFound`. Destination access, node serialization, and
+YAML emission failures for an existing session are normalized to
+`GraphErrc::Io`.
+
 ## Node Replacement and Structural Edits
 
-`Host::set_node_yaml()` parses one candidate node, forces its id to the
-requested existing node id, and calls `GraphModel::replace_node()`. Replacement
-copies the current node map, validates the complete candidate topology, and
-only then swaps it into visible state. Parse, missing-dependency, or cycle
-validation failure leaves the previous node map and topology unchanged. The
-current implementation does not claim an all-exception strong guarantee:
-allocation failure while rebuilding the already-validated topology may occur
-after the candidate node map has been moved into the model.
+`Host::set_node_yaml()` admits the session against concurrent close. Required
+node lookup, candidate parsing, forced replacement-id assignment, and
+`GraphModel::replace_node()` execute in one graph-state work item, so clear or
+reload cannot enter between lookup and mutation. A missing or closing session,
+or a missing requested node, is `GraphErrc::NotFound`. Parsing and complete
+candidate-topology validation for an existing target are
+`GraphErrc::InvalidYaml`.
+
+Replacement copies the current node map, validates the complete candidate
+topology, and only then swaps it into visible state. Parse,
+missing-dependency, or cycle validation failure leaves the previous node map
+and topology unchanged. The current implementation does not claim an
+all-exception strong guarantee: allocation failure while rebuilding the
+already-validated topology may occur after the candidate node map has been
+moved into the model.
 
 `add_node()`, `remove_node()`, and input-rewire methods follow the same
 candidate-map pattern. A successful structural edit rebuilds the adjacency
 index, advances topology generation, and clears the cached full task graph.
+
+## ROI Projection
+
+`Host::project_roi()` and `Host::project_roi_backward()` admit the session
+against close and perform both endpoint lookup and propagation in one
+graph-state work item. Missing or closing sessions and missing source/target
+nodes are `GraphErrc::NotFound`. When both endpoints exist but the ROI is empty,
+the path is unreachable, or propagation produces no valid rectangle, the Host
+returns `GraphErrc::InvalidParameter`.
+
+Existing-session propagation exceptions continue to update Kernel's
+best-effort `LastError` mirror, but the current Host result comes directly from
+the same required operation. It is never reconstructed by reading shared
+diagnostic state after the operation.
 
 ## Clear
 
@@ -107,10 +137,11 @@ the advanced topology generation.
 
 ## Close and Lifetime
 
-Embedded Host close first marks the session closing. New compute and scheduler
-admissions fail, while close waits for admitted synchronous calls and
-caller-visible async status publication. Kernel then stops the runtime through
-the same `GraphStateExecutor` and removes the map entry.
+Embedded Host close first marks the session closing. New compute, scheduler,
+required save, node-YAML replacement, and ROI projection admissions fail, while
+close waits for admitted synchronous calls and caller-visible async status
+publication. Kernel then stops the runtime through the same
+`GraphStateExecutor` and removes the map entry.
 
 Concurrent close callers serialize through the Host lifecycle gate. A runtime
 stop failure retains the runtime and diagnostic state, clears the closing
@@ -135,7 +166,12 @@ lease, socket, and shutdown rules are defined in
 | reload, non-sequence or duplicate-id document | `GraphErrc::InvalidYaml` |
 | reload, dependency/cycle validation | the corresponding backend `GraphErrc` |
 | reload, uncategorized YAML conversion exception | `GraphErrc::Unknown` through the stored last-error path |
-| node replacement, missing session/node, malformed input, missing dependency, or cycle | the current quiet Kernel facade collapses the failure and Host reports `GraphErrc::InvalidYaml` |
+| save, missing or closing session | `GraphErrc::NotFound` |
+| save, destination access, serialization, or YAML emission failure | `GraphErrc::Io` |
+| node replacement, missing/closing session or missing requested node | `GraphErrc::NotFound` |
+| node replacement, existing target with malformed input, missing dependency, or cycle | `GraphErrc::InvalidYaml`; previous graph state remains visible |
+| forward/backward ROI projection, missing/closing session or missing endpoint | `GraphErrc::NotFound` |
+| forward/backward ROI projection, existing endpoints with no valid projection | `GraphErrc::InvalidParameter` |
 | clear or close, missing session | `GraphErrc::NotFound` |
 
 `OperationStatus` exposes an error domain, signed code, stable name, and
@@ -148,8 +184,10 @@ graph-document contract.
 - `src/lib/runtime/kernel.cpp`
 - `src/lib/runtime/kernel_io_cache_facade.cpp`
 - `src/lib/runtime/kernel_inspection_facade.cpp`
+- `src/lib/runtime/kernel_dirty_roi_facade.cpp`
 - `src/lib/graph/graph_io_service.cpp`
 - `src/lib/graph/graph_model.cpp`
 - `src/lib/host/embedded_host.cpp`
 - `tests/integration/test_host_adapter.cpp`
+- `tests/integration/test_ipc_daemon.cpp`
 - `tests/integration/test_kernel_contracts.cpp`

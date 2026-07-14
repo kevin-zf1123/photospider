@@ -192,8 +192,23 @@ class InteractionService {
   bool cmd_reload_yaml(const std::string& graph, const std::string& yaml_path) {
     return kernel_.reload_graph_yaml(graph, yaml_path);
   }
-  bool cmd_save_yaml(const std::string& graph, const std::string& yaml_path) {
-    return kernel_.save_graph_yaml(graph, yaml_path);
+  /**
+   * @brief Saves one required graph session through the Kernel exact boundary.
+   *
+   * @param graph Graph session name to save.
+   * @param yaml_path Destination YAML file path.
+   * @return Nothing.
+   * @throws GraphError with `GraphErrc::NotFound` for an absent session or
+   *         `GraphErrc::Io` for destination/serialization failure.
+   * @throws std::bad_alloc if graph-state submission or serialization exhausts
+   *         memory.
+   * @throws std::exception for other graph-state submission or future failures.
+   * @note Embedded Host retains its close admission while this command resolves
+   *       and uses the graph runtime. Stream, serialization, and emitter
+   *       exceptions are normalized to GraphErrc::Io by Kernel.
+   */
+  void cmd_save_yaml(const std::string& graph, const std::string& yaml_path) {
+    kernel_.save_graph_yaml(graph, yaml_path);
   }
   bool cmd_clear_drive_cache(const std::string& graph) {
     return kernel_.clear_drive_cache(graph);
@@ -392,9 +407,24 @@ class InteractionService {
                                                int node_id) {
     return kernel_.get_node_yaml(graph, node_id);
   }
-  bool cmd_set_node_yaml(const std::string& graph, int node_id,
+  /**
+   * @brief Replaces one required graph node from YAML text.
+   *
+   * @param graph Required graph session name.
+   * @param node_id Required existing node id whose identity is preserved.
+   * @param yaml_text Candidate replacement YAML mapping.
+   * @return Nothing.
+   * @throws GraphError with `GraphErrc::NotFound` for an absent graph/node or
+   *         `GraphErrc::InvalidYaml` for parsing/topology validation failure.
+   * @throws std::bad_alloc if parsing, validation, submission, or replacement
+   *         exhausts memory.
+   * @throws std::exception for other graph-state executor failures.
+   * @note Embedded Host retains its close admission while Kernel performs the
+   *       required-node lookup and replacement in one graph-state work item.
+   */
+  void cmd_set_node_yaml(const std::string& graph, int node_id,
                          const std::string& yaml_text) {
-    return kernel_.set_node_yaml(graph, node_id, yaml_text);
+    kernel_.set_node_yaml(graph, node_id, yaml_text);
   }
   /**
    * @brief Schedules an asynchronous compute command from a request object.
@@ -415,6 +445,23 @@ class InteractionService {
       Kernel::ComputeRequest request) {
     return kernel_.compute_async(std::move(request));
   }
+  /**
+   * @brief Projects an ROI forward between required nodes in one graph.
+   *
+   * @param graph Required graph session name.
+   * @param start_node_id Required source node id.
+   * @param start_roi Source ROI in output coordinates.
+   * @param target_node_id Required downstream target node id.
+   * @return Projected ROI, or nullopt when existing endpoints produce no valid
+   *         projection.
+   * @throws GraphError with `GraphErrc::NotFound` for an absent graph/endpoint
+   *         or another exact propagation failure category.
+   * @throws std::bad_alloc if runtime startup, submission, projection, or
+   *         diagnostics exhaust memory.
+   * @throws std::exception for other runtime/executor failures.
+   * @note Embedded Host retains its close admission while endpoint lookup and
+   *       projection execute in one graph-state work item.
+   */
   std::optional<cv::Rect> cmd_project_roi(const std::string& graph,
                                           int start_node_id,
                                           const cv::Rect& start_roi,
@@ -422,6 +469,24 @@ class InteractionService {
     return kernel_.project_roi_forward(graph, start_node_id, start_roi,
                                        target_node_id);
   }
+
+  /**
+   * @brief Projects an ROI backward between required nodes in one graph.
+   *
+   * @param graph Required graph session name.
+   * @param target_node_id Required downstream target node id.
+   * @param target_roi Target ROI in output coordinates.
+   * @param source_node_id Required upstream source node id.
+   * @return Projected source ROI, or nullopt when existing endpoints produce no
+   *         valid projection.
+   * @throws GraphError with `GraphErrc::NotFound` for an absent graph/endpoint
+   *         or another exact propagation failure category.
+   * @throws std::bad_alloc if runtime startup, submission, projection, or
+   *         diagnostics exhaust memory.
+   * @throws std::exception for other runtime/executor failures.
+   * @note Embedded Host retains its close admission while endpoint lookup and
+   *       projection execute in one graph-state work item.
+   */
   std::optional<cv::Rect> cmd_project_roi_backward(const std::string& graph,
                                                    int target_node_id,
                                                    const cv::Rect& target_roi,

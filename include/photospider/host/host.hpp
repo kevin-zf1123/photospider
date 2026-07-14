@@ -267,11 +267,12 @@ class PHOTOSPIDER_API Host {
    *         loaded.
    * @throws std::bad_alloc if request processing, backend-to-status
    *         translation, or copied result construction exhausts memory.
-   * @note The embedded implementation rejects new admitted compute/scheduler
-   *       work after close begins, waits accepted synchronous calls, and waits
-   *       until every accepted async status future is observable as ready
-   *       before releasing backend resources. A failed close reopens admission
-   *       for the still-loaded session so callers may inspect or retry it.
+   * @note The embedded implementation rejects new admitted compute/scheduler,
+   *       required-save, node-YAML replacement, and ROI projection work after
+   *       close begins. It waits accepted synchronous calls and every accepted
+   *       async status future before releasing backend resources. A failed
+   *       close reopens admission for the still-loaded session so callers may
+   *       inspect or retry it.
    */
   virtual VoidResult close_graph(const GraphSessionId& session) = 0;
 
@@ -310,11 +311,14 @@ class PHOTOSPIDER_API Host {
    *
    * @param session Session to save.
    * @param yaml_path Destination YAML path.
-   * @return Success or failure status.
+   * @return Success, `GraphErrc::NotFound` for a missing or closing session,
+   *         or `GraphErrc::Io` for a destination/serialization failure.
    * @throws std::bad_alloc if request processing, backend-to-status
    *         translation, or copied result construction exhausts memory.
    * @note The Host returns only status; file ownership remains with the
-   *       caller-provided path.
+   *       caller-provided path. Embedded execution retains a session admission
+   *       across required-session resolution and graph-state serialization so
+   *       concurrent close cannot invalidate the runtime.
    */
   virtual VoidResult save_graph(const GraphSessionId& session,
                                 const std::string& yaml_path) = 0;
@@ -478,10 +482,14 @@ class PHOTOSPIDER_API Host {
    * @param session Session containing the node.
    * @param node Node to replace.
    * @param yaml_text YAML text for the replacement node.
-   * @return Success or failure status.
+   * @return Success, `GraphErrc::NotFound` for a missing/closing session or
+   *         missing node, or `GraphErrc::InvalidYaml` for parsing or complete
+   *         candidate-topology validation failure.
    * @throws std::bad_alloc if request processing, backend-to-status
    *         translation, or copied result construction exhausts memory.
-   * @note The backend owns validation and topology rebuilding.
+   * @note The backend owns validation and topology rebuilding. Embedded
+   *       execution retains a session admission across one serialized
+   *       required-node lookup, parse, validation, and replacement operation.
    */
   virtual VoidResult set_node_yaml(const GraphSessionId& session, NodeId node,
                                    const std::string& yaml_text) = 0;
@@ -572,10 +580,14 @@ class PHOTOSPIDER_API Host {
    * @param start_node Source node.
    * @param start_roi Source ROI.
    * @param target_node Target node.
-   * @return Projected ROI, or a failure status.
+   * @return Projected ROI, `GraphErrc::NotFound` for a missing/closing session
+   *         or endpoint, or `GraphErrc::InvalidParameter` when existing
+   *         endpoints produce no valid projection.
    * @throws std::bad_alloc if request processing, backend-to-status
    *         translation, or copied result construction exhausts memory.
-   * @note Pixel rectangles are public value copies.
+   * @note Pixel rectangles are public value copies. Embedded execution retains
+   *       a session admission while endpoint lookup and projection run in one
+   *       graph-state work item.
    */
   virtual Result<PixelRect> project_roi(const GraphSessionId& session,
                                         NodeId start_node,
@@ -589,10 +601,13 @@ class PHOTOSPIDER_API Host {
    * @param target_node Target node.
    * @param target_roi Target ROI.
    * @param source_node Source node.
-   * @return Projected ROI, or a failure status.
+   * @return Projected ROI, `GraphErrc::NotFound` for a missing/closing session
+   *         or endpoint, or `GraphErrc::InvalidParameter` when existing
+   *         endpoints produce no valid projection.
    * @throws std::bad_alloc if request processing, backend-to-status
    *         translation, or copied result construction exhausts memory.
-   * @note This mirrors the current ROI projection facade.
+   * @note Embedded execution retains a session admission while endpoint lookup
+   *       and projection run in one graph-state work item.
    */
   virtual Result<PixelRect> project_roi_backward(const GraphSessionId& session,
                                                  NodeId target_node,

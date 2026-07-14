@@ -266,11 +266,12 @@ Typical embedded Host compute flow:
    outcome. A joined adapter worker maps that outcome without consulting shared
    `LastError`, fulfills the caller-visible `OperationStatus` promise, and only
    then notifies `close_graph()` that status publication is complete.
-7. Embedded close admission rejects new compute/scheduler work, waits accepted
+7. Embedded close admission rejects new compute/scheduler work plus required
+   graph save, node-YAML replacement, and ROI projection work; it waits accepted
    synchronous calls and ready async status promises, and then stops the runtime
-   through the same `GraphStateExecutor` used by compute, scheduler information,
-   and scheduler replacement. A retained scheduler cannot be replaced or
-   destroyed while active work uses it.
+   through the same `GraphStateExecutor` used by those calls. A retained runtime
+   or scheduler cannot be erased, replaced, or destroyed while admitted work
+   uses it.
 8. Recoverable backend failures become Host status/result values, while
    resource exhaustion remains exceptional: non-destructor Host methods and
    consumed async futures may propagate `std::bad_alloc` as documented by the

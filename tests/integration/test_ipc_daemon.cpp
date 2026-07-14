@@ -3548,6 +3548,18 @@ TEST(IpcDaemonLifecycle, SerializesConcurrentStaleReclaimWithPersistentLock) {
   EXPECT_EQ(successor_identity.st_ino, persistent_identity.st_ino);
 }
 
+/**
+ * @brief Persists graph state across clients and preserves exact Host status
+ *        categories through the real daemon transport.
+ *
+ * @return Nothing; GoogleTest assertions report lifecycle, snapshot, protocol,
+ *         or status mismatches.
+ * @throws std::bad_alloc, std::runtime_error, filesystem exceptions, or system
+ *         errors when fixture setup, process control, or IPC cannot complete.
+ * @note Missing node mutation/projection targets remain NotFound over IPC;
+ *       existing-target YAML, ROI, and destination failures retain their
+ *       distinct InvalidYaml, InvalidParameter, and Io categories.
+ */
 TEST(IpcDaemonGraphLifecycle, PersistsAcrossClientsAndInspectsCopiedSnapshots) {
   ScopedDaemonDirectory temp("photospider-ipc-daemon-graph");
   const std::string socket_path = (temp.path() / "daemon.sock").string();
@@ -3684,6 +3696,48 @@ TEST(IpcDaemonGraphLifecycle, PersistsAcrossClientsAndInspectsCopiedSnapshots) {
   EXPECT_EQ(missing_node.status.domain, OperationErrorDomain::Graph);
   EXPECT_EQ(missing_node.status.code,
             static_cast<std::int32_t>(GraphErrc::NotFound));
+
+  const auto missing_node_yaml = second.set_node_yaml(
+      loaded.value.session_id, NodeId{999},
+      "id: 999\nname: missing\ntype: ipc_fixture\nsubtype: source\n");
+  EXPECT_FALSE(missing_node_yaml.status.ok);
+  EXPECT_EQ(missing_node_yaml.status.domain, OperationErrorDomain::Graph);
+  EXPECT_EQ(missing_node_yaml.status.code,
+            static_cast<std::int32_t>(GraphErrc::NotFound));
+
+  const PixelRect roi{0, 0, 1, 1};
+  const auto missing_roi_target =
+      second.project_roi(loaded.value.session_id, NodeId{1}, roi, NodeId{999});
+  EXPECT_FALSE(missing_roi_target.status.ok);
+  EXPECT_EQ(missing_roi_target.status.domain, OperationErrorDomain::Graph);
+  EXPECT_EQ(missing_roi_target.status.code,
+            static_cast<std::int32_t>(GraphErrc::NotFound));
+  const auto missing_roi_source = second.project_roi_backward(
+      loaded.value.session_id, NodeId{1}, roi, NodeId{999});
+  EXPECT_FALSE(missing_roi_source.status.ok);
+  EXPECT_EQ(missing_roi_source.status.domain, OperationErrorDomain::Graph);
+  EXPECT_EQ(missing_roi_source.status.code,
+            static_cast<std::int32_t>(GraphErrc::NotFound));
+
+  const auto invalid_node_yaml =
+      second.set_node_yaml(loaded.value.session_id, NodeId{1}, "[");
+  EXPECT_FALSE(invalid_node_yaml.status.ok);
+  EXPECT_EQ(invalid_node_yaml.status.domain, OperationErrorDomain::Graph);
+  EXPECT_EQ(invalid_node_yaml.status.code,
+            static_cast<std::int32_t>(GraphErrc::InvalidYaml));
+  const auto invalid_roi = second.project_roi(
+      loaded.value.session_id, NodeId{1}, PixelRect{0, 0, 0, 1}, NodeId{1});
+  EXPECT_FALSE(invalid_roi.status.ok);
+  EXPECT_EQ(invalid_roi.status.domain, OperationErrorDomain::Graph);
+  EXPECT_EQ(invalid_roi.status.code,
+            static_cast<std::int32_t>(GraphErrc::InvalidParameter));
+
+  const auto save_io = second.save_graph(
+      loaded.value.session_id,
+      (temp.path() / "missing_save_parent" / "graph.yaml").string());
+  EXPECT_FALSE(save_io.status.ok);
+  EXPECT_EQ(save_io.status.domain, OperationErrorDomain::Graph);
+  EXPECT_EQ(save_io.status.code, static_cast<std::int32_t>(GraphErrc::Io));
 
   ASSERT_TRUE(second.close_graph(loaded.value.session_id).status.ok);
   const auto empty = second.list_graphs();

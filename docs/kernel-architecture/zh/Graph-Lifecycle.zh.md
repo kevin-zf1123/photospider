@@ -60,17 +60,42 @@ visible node map、topology、topology generation、cache、timing 以及 dirty/
 generation。`RealtimeProxyGraph` 等 runtime-owned mirror 会观察这一 generation boundary，
 并丢弃陈旧的 per-node state。
 
+## 现有 Session 保存
+
+`Host::save_graph()` 会让 session 进入防并发 close 的 admission，要求 session map entry
+存在，并通过 graph mutation 与 compute 共用的 `GraphStateExecutor` 串行化 visible node
+snapshot。Missing 或 closing session 返回 `GraphErrc::NotFound`。对于 existing session，
+destination access、node serialization 和 YAML emission failure 会统一归类为
+`GraphErrc::Io`。
+
 ## Node Replacement 与结构编辑
 
-`Host::set_node_yaml()` 解析一个 candidate node，把其 id 强制设为请求中的 existing node id，
-随后调用 `GraphModel::replace_node()`。Replacement 会复制当前 node map、验证完整 candidate
-topology，最后才交换到 visible state。Parse、missing-dependency 或 cycle validation failure 会
-保留之前的 node map 与 topology。当前 implementation 不承诺 all-exception strong guarantee：
-重建已验证 topology 时的 allocation failure 可能发生在 candidate node map 已被 move 进 model
-之后。
+`Host::set_node_yaml()` 会让 session 进入防并发 close 的 admission。Required node lookup、
+candidate parsing、强制 replacement-id assignment 与 `GraphModel::replace_node()` 会在同一个
+graph-state work item 内执行，因此 clear 或 reload 无法插入 lookup 与 mutation 之间。Missing
+或 closing session，以及 requested node 缺失，都会返回 `GraphErrc::NotFound`。对于 existing
+target，parsing 与完整 candidate-topology validation failure 返回
+`GraphErrc::InvalidYaml`。
+
+Replacement 会复制当前 node map、验证完整 candidate topology，最后才交换到 visible state。
+Parse、missing-dependency 或 cycle validation failure 会保留之前的 node map 与 topology。当前
+implementation 不承诺 all-exception strong guarantee：重建已验证 topology 时的 allocation
+failure 可能发生在 candidate node map 已被 move 进 model 之后。
 
 `add_node()`、`remove_node()` 和 input-rewire 方法采用同一种 candidate-map 模式。成功的结构编辑
 会重建 adjacency index、推进 topology generation，并清除 cached full task graph。
+
+## ROI 投影
+
+`Host::project_roi()` 与 `Host::project_roi_backward()` 会让 session 进入防 close 的
+admission，并在同一个 graph-state work item 内完成两个 endpoint 的 lookup 与 propagation。
+Missing 或 closing session，以及缺失的 source/target node，都会返回
+`GraphErrc::NotFound`。当两个 endpoint 均存在，但 ROI 为空、路径不可达或 propagation
+无法产生有效 rectangle 时，Host 返回 `GraphErrc::InvalidParameter`。
+
+Existing-session propagation exception 仍会更新 Kernel 的 best-effort `LastError` mirror，但当前
+Host result 直接来自同一个 required operation；它绝不会在 operation 结束后通过读取共享
+diagnostic state 重建。
 
 ## Clear
 
@@ -89,9 +114,10 @@ event/trace ring、直接清除 `RealtimeProxyGraph`，或清除 Kernel-owned `L
 
 ## Close 与 Lifetime
 
-Embedded Host close 会先把 session 标记为 closing。新的 compute 与 scheduler admission 会失败，
-close 则等待已接受的同步调用和 caller-visible async status publication。随后 Kernel 通过同一个
-`GraphStateExecutor` 停止 runtime，并移除 map entry。
+Embedded Host close 会先把 session 标记为 closing。新的 compute、scheduler、required save、
+node-YAML replacement 与 ROI projection admission 会失败；close 则等待已接受的同步调用和
+caller-visible async status publication。随后 Kernel 通过同一个 `GraphStateExecutor` 停止
+runtime，并移除 map entry。
 
 并发 close caller 通过 Host lifecycle gate 串行化。Runtime stop failure 会保留 runtime 与
 diagnostic state、清除 closing marker，并重新开放 admission。只有 session 确实不存在时才返回
@@ -114,7 +140,12 @@ serialization 与 shutdown drainage。其准确 mapping、lease、socket 与 shu
 | reload，非 sequence 或 duplicate-id document | `GraphErrc::InvalidYaml` |
 | reload，dependency/cycle validation | 对应的 backend `GraphErrc` |
 | reload，未分类的 YAML conversion exception | 通过 stored last-error path 返回 `GraphErrc::Unknown` |
-| node replacement，missing session/node、malformed input、missing dependency 或 cycle | 当前 quiet Kernel facade 会折叠失败，Host 报告 `GraphErrc::InvalidYaml` |
+| save，missing 或 closing session | `GraphErrc::NotFound` |
+| save，destination access、serialization 或 YAML emission failure | `GraphErrc::Io` |
+| node replacement，missing/closing session 或 requested node 缺失 | `GraphErrc::NotFound` |
+| node replacement，existing target 的 malformed input、missing dependency 或 cycle | `GraphErrc::InvalidYaml`；previous graph state 保持 visible |
+| forward/backward ROI projection，missing/closing session 或 endpoint 缺失 | `GraphErrc::NotFound` |
+| forward/backward ROI projection，existing endpoint 无有效 projection | `GraphErrc::InvalidParameter` |
 | clear 或 close，missing session | `GraphErrc::NotFound` |
 
 `OperationStatus` 暴露 error domain、signed code、stable name 与 diagnostic message。调用方必须按
@@ -126,8 +157,10 @@ graph-document contract。
 - `src/lib/runtime/kernel.cpp`
 - `src/lib/runtime/kernel_io_cache_facade.cpp`
 - `src/lib/runtime/kernel_inspection_facade.cpp`
+- `src/lib/runtime/kernel_dirty_roi_facade.cpp`
 - `src/lib/graph/graph_io_service.cpp`
 - `src/lib/graph/graph_model.cpp`
 - `src/lib/host/embedded_host.cpp`
 - `tests/integration/test_host_adapter.cpp`
+- `tests/integration/test_ipc_daemon.cpp`
 - `tests/integration/test_kernel_contracts.cpp`

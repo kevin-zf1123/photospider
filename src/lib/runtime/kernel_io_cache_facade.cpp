@@ -2,6 +2,7 @@
  * @file kernel_io_cache_facade.cpp
  * @brief Implements Kernel graph IO, timing, cache, and graph-clear facades.
  */
+#include <exception>
 #include <filesystem>
 #include <string>
 
@@ -40,15 +41,22 @@ bool Kernel::reload_graph_yaml(const std::string& name,
       .value_or(false);
 }
 
-bool Kernel::save_graph_yaml(const std::string& name,
+/** @copydoc Kernel::save_graph_yaml */
+void Kernel::save_graph_yaml(const std::string& name,
                              const std::string& yaml_path) {
   const std::filesystem::path path = yaml_path;
-  return with_graph_state(name,
-                          [this, path](GraphModel& graph) {
-                            io_service_.save(graph, path);
-                            return true;
-                          })
-      .value_or(false);
+  with_required_graph_state(name, [this, path](GraphModel& graph) {
+    try {
+      io_service_.save(graph, path);
+    } catch (const std::bad_alloc&) {
+      throw;
+    } catch (const GraphError& error) {
+      throw GraphError(GraphErrc::Io, error.what());
+    } catch (const std::exception& error) {
+      throw GraphError(GraphErrc::Io,
+                       std::string("Graph YAML save failed: ") + error.what());
+    }
+  });
 }
 
 bool Kernel::clear_drive_cache(const std::string& name) {

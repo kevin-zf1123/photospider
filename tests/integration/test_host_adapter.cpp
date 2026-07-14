@@ -2316,6 +2316,120 @@ TEST(EmbeddedHostAdapter, ReloadSaveSetNodeAndClearGraphReturnStatuses) {
   EXPECT_TRUE(ids.value.empty());
 }
 
+/**
+ * @brief Distinguishes graph-session absence from destination IO failures.
+ *
+ * @return Nothing; GoogleTest assertions report status-category mismatches.
+ * @throws std::bad_alloc or filesystem exceptions if fixture setup cannot
+ *         allocate or create its deterministic graph inputs.
+ * @note Missing and already-closed sessions are lifecycle misses, while an
+ *       existing session still reports an unwritable destination as IO.
+ */
+TEST(EmbeddedHostAdapter,
+     SaveGraphDistinguishesMissingSessionsFromDestinationIo) {
+  register_host_adapter_ops();
+  ScopedTempDir temp("photospider_host_adapter_save_status_test");
+  auto host = create_embedded_host();
+  ASSERT_NE(host, nullptr);
+
+  const auto missing =
+      host->save_graph(GraphSessionId{"missing_save_graph"},
+                       (temp.root() / "missing_save_graph.yaml").string());
+  EXPECT_FALSE(missing.status.ok);
+  EXPECT_EQ(checked_graph_error_code(missing.status), GraphErrc::NotFound);
+
+  const GraphSessionId session =
+      load_test_graph(*host, temp.root(), "save_status_graph");
+  const auto unwritable = host->save_graph(
+      session, (temp.root() / "missing_parent" / "graph.yaml").string());
+  EXPECT_FALSE(unwritable.status.ok);
+  EXPECT_EQ(checked_graph_error_code(unwritable.status), GraphErrc::Io);
+
+  const VoidResult closed = host->close_graph(session);
+  ASSERT_TRUE(closed.status.ok) << closed.status.message;
+  const auto after_close = host->save_graph(
+      session, (temp.root() / "closed_save_graph.yaml").string());
+  EXPECT_FALSE(after_close.status.ok);
+  EXPECT_EQ(checked_graph_error_code(after_close.status), GraphErrc::NotFound);
+}
+
+/**
+ * @brief Distinguishes absent node-YAML targets from malformed replacements.
+ *
+ * @return Nothing; GoogleTest assertions report status-category mismatches.
+ * @throws std::bad_alloc or filesystem exceptions if fixture setup cannot
+ *         allocate or create its deterministic graph inputs.
+ * @note Session and node lookup are part of the requested mutation; only YAML
+ *       parsing or graph validation for an existing target is InvalidYaml.
+ */
+TEST(EmbeddedHostAdapter,
+     SetNodeYamlDistinguishesAbsentTargetsFromInvalidYaml) {
+  register_host_adapter_ops();
+  ScopedTempDir temp("photospider_host_adapter_set_yaml_status_test");
+  auto host = create_embedded_host();
+  ASSERT_NE(host, nullptr);
+
+  const std::string valid_yaml =
+      replacement_node_yaml("valid_replacement", 8, 3);
+  const auto missing_session = host->set_node_yaml(
+      GraphSessionId{"missing_set_yaml_graph"}, NodeId{1}, valid_yaml);
+  EXPECT_FALSE(missing_session.status.ok);
+  EXPECT_EQ(checked_graph_error_code(missing_session.status),
+            GraphErrc::NotFound);
+  const auto missing_session_invalid_yaml = host->set_node_yaml(
+      GraphSessionId{"missing_set_yaml_graph"}, NodeId{1}, "[");
+  EXPECT_FALSE(missing_session_invalid_yaml.status.ok);
+  EXPECT_EQ(checked_graph_error_code(missing_session_invalid_yaml.status),
+            GraphErrc::NotFound);
+
+  const GraphSessionId session =
+      load_test_graph(*host, temp.root(), "set_yaml_status_graph");
+  const auto missing_node =
+      host->set_node_yaml(session, NodeId{99}, valid_yaml);
+  EXPECT_FALSE(missing_node.status.ok);
+  EXPECT_EQ(checked_graph_error_code(missing_node.status), GraphErrc::NotFound);
+  const auto missing_node_invalid_yaml =
+      host->set_node_yaml(session, NodeId{99}, "[");
+  EXPECT_FALSE(missing_node_invalid_yaml.status.ok);
+  EXPECT_EQ(checked_graph_error_code(missing_node_invalid_yaml.status),
+            GraphErrc::NotFound);
+
+  const auto invalid_yaml = host->set_node_yaml(session, NodeId{1}, "[");
+  EXPECT_FALSE(invalid_yaml.status.ok);
+  EXPECT_EQ(checked_graph_error_code(invalid_yaml.status),
+            GraphErrc::InvalidYaml);
+
+  const std::string invalid_topology =
+      "id: 1\n"
+      "name: invalid_topology\n"
+      "type: host_adapter_test\n"
+      "subtype: source\n"
+      "image_inputs:\n"
+      "  - from_node_id: 99\n";
+  const auto invalid_topology_yaml =
+      host->set_node_yaml(session, NodeId{1}, invalid_topology);
+  EXPECT_FALSE(invalid_topology_yaml.status.ok);
+  EXPECT_EQ(checked_graph_error_code(invalid_topology_yaml.status),
+            GraphErrc::InvalidYaml);
+
+  const VoidResult closed = host->close_graph(session);
+  ASSERT_TRUE(closed.status.ok) << closed.status.message;
+  const auto after_close = host->set_node_yaml(session, NodeId{1}, valid_yaml);
+  EXPECT_FALSE(after_close.status.ok);
+  EXPECT_EQ(checked_graph_error_code(after_close.status), GraphErrc::NotFound);
+}
+
+/**
+ * @brief Projects public rectangles while preserving target/parameter error
+ *        categories in both directions.
+ *
+ * @return Nothing; GoogleTest assertions report ROI or status mismatches.
+ * @throws std::bad_alloc or filesystem exceptions if fixture setup cannot
+ *         allocate or create its deterministic graph inputs.
+ * @note Missing sessions/nodes are NotFound; empty ROIs and unreachable paths
+ *       for existing nodes remain InvalidParameter, and closed sessions follow
+ *       lifecycle absence.
+ */
 TEST(EmbeddedHostAdapter, RoiProjectionUsesPublicPixelRectValues) {
   register_host_adapter_ops();
   ScopedTempDir temp("photospider_host_adapter_roi_projection_test");
@@ -2355,7 +2469,61 @@ TEST(EmbeddedHostAdapter, RoiProjectionUsesPublicPixelRectValues) {
       host->project_roi(request.session, NodeId{1}, roi, NodeId{99});
   EXPECT_FALSE(missing_target.status.ok);
   EXPECT_EQ(checked_graph_error_code(missing_target.status),
+            GraphErrc::NotFound);
+
+  auto missing_source =
+      host->project_roi_backward(request.session, NodeId{2}, roi, NodeId{99});
+  EXPECT_FALSE(missing_source.status.ok);
+  EXPECT_EQ(checked_graph_error_code(missing_source.status),
+            GraphErrc::NotFound);
+
+  const PixelRect empty_roi{1, 2, 0, 2};
+  auto invalid_forward =
+      host->project_roi(request.session, NodeId{1}, empty_roi, NodeId{2});
+  EXPECT_FALSE(invalid_forward.status.ok);
+  EXPECT_EQ(checked_graph_error_code(invalid_forward.status),
             GraphErrc::InvalidParameter);
+  auto invalid_backward = host->project_roi_backward(request.session, NodeId{2},
+                                                     empty_roi, NodeId{1});
+  EXPECT_FALSE(invalid_backward.status.ok);
+  EXPECT_EQ(checked_graph_error_code(invalid_backward.status),
+            GraphErrc::InvalidParameter);
+
+  auto unreachable_forward =
+      host->project_roi(request.session, NodeId{2}, roi, NodeId{1});
+  EXPECT_FALSE(unreachable_forward.status.ok);
+  EXPECT_EQ(checked_graph_error_code(unreachable_forward.status),
+            GraphErrc::InvalidParameter);
+  auto unreachable_backward =
+      host->project_roi_backward(request.session, NodeId{1}, roi, NodeId{2});
+  EXPECT_FALSE(unreachable_backward.status.ok);
+  EXPECT_EQ(checked_graph_error_code(unreachable_backward.status),
+            GraphErrc::InvalidParameter);
+
+  const GraphSessionId missing_session{"missing_roi_session"};
+  auto missing_session_forward =
+      host->project_roi(missing_session, NodeId{1}, roi, NodeId{2});
+  EXPECT_FALSE(missing_session_forward.status.ok);
+  EXPECT_EQ(checked_graph_error_code(missing_session_forward.status),
+            GraphErrc::NotFound);
+  auto missing_session_backward =
+      host->project_roi_backward(missing_session, NodeId{2}, roi, NodeId{1});
+  EXPECT_FALSE(missing_session_backward.status.ok);
+  EXPECT_EQ(checked_graph_error_code(missing_session_backward.status),
+            GraphErrc::NotFound);
+
+  const VoidResult closed = host->close_graph(request.session);
+  ASSERT_TRUE(closed.status.ok) << closed.status.message;
+  auto after_close_forward =
+      host->project_roi(request.session, NodeId{1}, roi, NodeId{2});
+  EXPECT_FALSE(after_close_forward.status.ok);
+  EXPECT_EQ(checked_graph_error_code(after_close_forward.status),
+            GraphErrc::NotFound);
+  auto after_close_backward =
+      host->project_roi_backward(request.session, NodeId{2}, roi, NodeId{1});
+  EXPECT_FALSE(after_close_backward.status.ok);
+  EXPECT_EQ(checked_graph_error_code(after_close_backward.status),
+            GraphErrc::NotFound);
 }
 
 TEST(EmbeddedHostAdapter, DirtySnapshotPreservesMonolithicAndEdgeDetails) {
