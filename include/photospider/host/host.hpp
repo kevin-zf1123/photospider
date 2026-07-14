@@ -312,13 +312,17 @@ class PHOTOSPIDER_API Host {
    * @param session Session to save.
    * @param yaml_path Destination YAML path.
    * @return Success, `GraphErrc::NotFound` for a missing or closing session,
-   *         or `GraphErrc::Io` for a destination/serialization failure.
+   *         or `GraphErrc::Io` for serialization or destination
+   *         open/write/flush/close failure.
    * @throws std::bad_alloc if request processing, backend-to-status
    *         translation, or copied result construction exhausts memory.
    * @note The Host returns only status; file ownership remains with the
    *       caller-provided path. Embedded execution retains a session admission
    *       across required-session resolution and graph-state serialization so
-   *       concurrent close cannot invalidate the runtime.
+   *       concurrent close cannot invalidate the runtime. Saving writes
+   *       directly to the supplied path rather than atomically replacing it;
+   *       a post-open failure may leave a created, truncated, or partially
+   *       written destination.
    */
   virtual VoidResult save_graph(const GraphSessionId& session,
                                 const std::string& yaml_path) = 0;

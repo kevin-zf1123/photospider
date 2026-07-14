@@ -19,6 +19,9 @@
 #include "core/ps_types.hpp"  // NOLINT(build/include_subdir)
 #include "graph/graph_cache_service.hpp"
 #include "graph/graph_io_service.hpp"
+#if defined(PHOTOSPIDER_INTERNAL_GRAPH_IO_TESTING)
+#include "graph/graph_io_service_test_access.hpp"
+#endif
 #include "graph/graph_model.hpp"  // NOLINT(build/include_subdir)
 #include "graph/graph_traversal_service.hpp"
 #include "runtime/graph_event_service.hpp"
@@ -1266,6 +1269,106 @@ TEST(GraphIoContract, SuccessfulReloadResetsRuntimeMetadata) {
   EXPECT_FALSE(graph.last_compute_plan.has_value());
   EXPECT_TRUE(graph.recent_compute_plans.empty());
 }
+
+#if defined(PHOTOSPIDER_INTERNAL_GRAPH_IO_TESTING)
+/**
+ * @brief Reports a stream failure that occurs after the destination opens.
+ *
+ * @return Nothing; GoogleTest assertions report exception-category mismatch.
+ * @throws std::bad_alloc or filesystem exceptions if fixture setup fails.
+ * @note The private failpoint marks the real stream bad only after its YAML
+ * write. It does not throw or replace the writer, so this test remains red
+ * unless GraphIOService observes the late stream state itself.
+ */
+TEST(GraphIoContract, SaveReportsPostOpenWriteFailureAsIo) {
+  GraphModel graph(temp_path("photospider-contract-save-late-write-cache"));
+  graph.add_node(make_contract_node());
+  GraphIOService io;
+  const auto output_path =
+      temp_path("photospider-contract-save-late-write.yaml");
+  std::filesystem::remove(output_path);
+
+  testing::arm_graph_io_save_failure(
+      testing::GraphIoSaveFailureStage::AfterWrite);
+  bool caught_io = false;
+  try {
+    io.save(graph, output_path);
+  } catch (const GraphError& error) {
+    caught_io = error.code() == GraphErrc::Io;
+  }
+  const std::size_t hit_count = testing::graph_io_save_failure_hit_count();
+  testing::clear_graph_io_save_failure();
+
+  EXPECT_TRUE(caught_io);
+  EXPECT_EQ(hit_count, 1u);
+  EXPECT_TRUE(std::filesystem::exists(output_path));
+  std::filesystem::remove(output_path);
+}
+
+/**
+ * @brief Reports a destination flush failure after YAML bytes are emitted.
+ *
+ * @return Nothing; GoogleTest assertions report exception-category mismatch.
+ * @throws std::bad_alloc or filesystem exceptions if fixture setup fails.
+ * @note The private failpoint changes only the real stream state after flush,
+ * so a passing test proves GraphIOService observes that late status.
+ */
+TEST(GraphIoContract, SaveReportsPostWriteFlushFailureAsIo) {
+  GraphModel graph(temp_path("photospider-contract-save-flush-cache"));
+  graph.add_node(make_contract_node());
+  GraphIOService io;
+  const auto output_path = temp_path("photospider-contract-save-flush.yaml");
+  std::filesystem::remove(output_path);
+
+  testing::arm_graph_io_save_failure(
+      testing::GraphIoSaveFailureStage::AfterFlush);
+  bool caught_io = false;
+  try {
+    io.save(graph, output_path);
+  } catch (const GraphError& error) {
+    caught_io = error.code() == GraphErrc::Io;
+  }
+  const std::size_t hit_count = testing::graph_io_save_failure_hit_count();
+  testing::clear_graph_io_save_failure();
+
+  EXPECT_TRUE(caught_io);
+  EXPECT_EQ(hit_count, 1u);
+  EXPECT_TRUE(std::filesystem::exists(output_path));
+  std::filesystem::remove(output_path);
+}
+
+/**
+ * @brief Reports a destination close failure after successful flushing.
+ *
+ * @return Nothing; GoogleTest assertions report exception-category mismatch.
+ * @throws std::bad_alloc or filesystem exceptions if fixture setup fails.
+ * @note Explicit close makes the final stream state observable before the
+ * ofstream destructor; the failpoint only marks that real stream failed.
+ */
+TEST(GraphIoContract, SaveReportsPostFlushCloseFailureAsIo) {
+  GraphModel graph(temp_path("photospider-contract-save-close-cache"));
+  graph.add_node(make_contract_node());
+  GraphIOService io;
+  const auto output_path = temp_path("photospider-contract-save-close.yaml");
+  std::filesystem::remove(output_path);
+
+  testing::arm_graph_io_save_failure(
+      testing::GraphIoSaveFailureStage::AfterClose);
+  bool caught_io = false;
+  try {
+    io.save(graph, output_path);
+  } catch (const GraphError& error) {
+    caught_io = error.code() == GraphErrc::Io;
+  }
+  const std::size_t hit_count = testing::graph_io_save_failure_hit_count();
+  testing::clear_graph_io_save_failure();
+
+  EXPECT_TRUE(caught_io);
+  EXPECT_EQ(hit_count, 1u);
+  EXPECT_TRUE(std::filesystem::exists(output_path));
+  std::filesystem::remove(output_path);
+}
+#endif
 
 /**
  * @brief Preserves the previous node when exact YAML replacement validation

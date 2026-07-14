@@ -42,10 +42,14 @@ class GraphIOService {
    * @param yaml_path Destination YAML file path.
    * @return Nothing.
    * @throws std::bad_alloc if YAML or path serialization exhausts memory.
-   * @throws GraphError if the destination cannot be opened.
-   * @throws std::exception for other stream or YAML serialization failures.
+   * @throws GraphError with `GraphErrc::Io` if the destination cannot be opened
+   *         or reports a write, flush, or close failure.
+   * @throws std::exception for YAML node serialization failures outside those
+   *         stream phases.
    * @note The service does not create parent directories or mutate graph
-   * state.
+   *       state. It writes directly to the supplied path rather than using an
+   *       atomic replacement, so a post-open failure may leave a created,
+   *       truncated, or partially written destination.
    */
   void save(const GraphModel& graph,
             const std::filesystem::path& yaml_path) const;

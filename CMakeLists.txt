@@ -471,7 +471,8 @@ add_library(photospider STATIC ${PHOTOSPIDER_PRODUCT_SOURCES})
 target_compile_definitions(photospider PUBLIC PHOTOSPIDER_STATIC)
 if(BUILD_TESTING)
     target_compile_definitions(photospider PRIVATE
-        PHOTOSPIDER_INTERNAL_BAD_ALLOC_TESTING)
+        PHOTOSPIDER_INTERNAL_BAD_ALLOC_TESTING
+        PHOTOSPIDER_INTERNAL_GRAPH_IO_TESTING)
 endif()
 target_compile_features(photospider PUBLIC cxx_std_17)
 
@@ -1151,6 +1152,8 @@ if(BUILD_TESTING)
         tests/unit/test_graph_topology_boundaries.cpp)
     add_ps_test(test_kernel_contracts
         tests/integration/test_kernel_contracts.cpp)
+    target_compile_definitions(test_kernel_contracts PRIVATE
+        PHOTOSPIDER_INTERNAL_GRAPH_IO_TESTING)
     add_ps_test(test_image_buffer_contracts
         tests/unit/test_image_buffer_contracts.cpp)
     add_ps_test(test_event_stream_boundaries

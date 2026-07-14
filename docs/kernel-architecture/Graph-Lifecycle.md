@@ -80,7 +80,10 @@ session map entry, and serializes the visible node snapshot through the same
 `GraphStateExecutor` used by graph mutation and compute. A missing or closing
 session is `GraphErrc::NotFound`. Destination access, node serialization, and
 YAML emission failures for an existing session are normalized to
-`GraphErrc::Io`.
+`GraphErrc::Io`; destination failures explicitly include open, write, flush,
+and close. Save writes directly to the supplied path and does not use a
+temporary file plus atomic replacement. Once the destination opens, a failed
+save may therefore leave it created, truncated, or partially written.
 
 ## Node Replacement and Structural Edits
 
@@ -167,7 +170,7 @@ lease, socket, and shutdown rules are defined in
 | reload, dependency/cycle validation | the corresponding backend `GraphErrc` |
 | reload, uncategorized YAML conversion exception | `GraphErrc::Unknown` through the stored last-error path |
 | save, missing or closing session | `GraphErrc::NotFound` |
-| save, destination access, serialization, or YAML emission failure | `GraphErrc::Io` |
+| save, serialization, YAML emission, or destination open/write/flush/close failure | `GraphErrc::Io`; a post-open failure may leave a created, truncated, or partial destination because save is not an atomic replacement |
 | node replacement, missing/closing session or missing requested node | `GraphErrc::NotFound` |
 | node replacement, existing target with malformed input, missing dependency, or cycle | `GraphErrc::InvalidYaml`; previous graph state remains visible |
 | forward/backward ROI projection, missing/closing session or missing endpoint | `GraphErrc::NotFound` |
@@ -186,6 +189,7 @@ graph-document contract.
 - `src/lib/runtime/kernel_inspection_facade.cpp`
 - `src/lib/runtime/kernel_dirty_roi_facade.cpp`
 - `src/lib/graph/graph_io_service.cpp`
+- `src/lib/graph/graph_state_executor.cpp`
 - `src/lib/graph/graph_model.cpp`
 - `src/lib/host/embedded_host.cpp`
 - `tests/integration/test_host_adapter.cpp`

@@ -66,7 +66,9 @@ generation。`RealtimeProxyGraph` 等 runtime-owned mirror 会观察这一 gener
 存在，并通过 graph mutation 与 compute 共用的 `GraphStateExecutor` 串行化 visible node
 snapshot。Missing 或 closing session 返回 `GraphErrc::NotFound`。对于 existing session，
 destination access、node serialization 和 YAML emission failure 会统一归类为
-`GraphErrc::Io`。
+`GraphErrc::Io`；destination failure 明确包括 open、write、flush 与 close。Save 会直接写入
+调用方提供的 path，不使用 temporary file 加 atomic replacement。因此，destination 一旦成功
+open，失败的 save 可能留下已创建、已截断或只写入部分内容的文件。
 
 ## Node Replacement 与结构编辑
 
@@ -141,7 +143,7 @@ serialization 与 shutdown drainage。其准确 mapping、lease、socket 与 shu
 | reload，dependency/cycle validation | 对应的 backend `GraphErrc` |
 | reload，未分类的 YAML conversion exception | 通过 stored last-error path 返回 `GraphErrc::Unknown` |
 | save，missing 或 closing session | `GraphErrc::NotFound` |
-| save，destination access、serialization 或 YAML emission failure | `GraphErrc::Io` |
+| save，serialization、YAML emission 或 destination open/write/flush/close failure | `GraphErrc::Io`；save 不是 atomic replacement，因此 post-open failure 可能留下已创建、已截断或只有部分内容的 destination |
 | node replacement，missing/closing session 或 requested node 缺失 | `GraphErrc::NotFound` |
 | node replacement，existing target 的 malformed input、missing dependency 或 cycle | `GraphErrc::InvalidYaml`；previous graph state 保持 visible |
 | forward/backward ROI projection，missing/closing session 或 endpoint 缺失 | `GraphErrc::NotFound` |
@@ -159,6 +161,7 @@ graph-document contract。
 - `src/lib/runtime/kernel_inspection_facade.cpp`
 - `src/lib/runtime/kernel_dirty_roi_facade.cpp`
 - `src/lib/graph/graph_io_service.cpp`
+- `src/lib/graph/graph_state_executor.cpp`
 - `src/lib/graph/graph_model.cpp`
 - `src/lib/host/embedded_host.cpp`
 - `tests/integration/test_host_adapter.cpp`
