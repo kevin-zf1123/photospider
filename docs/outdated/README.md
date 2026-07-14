@@ -1,22 +1,32 @@
 # Outdated Documentation
 
-This directory keeps historical documentation that is useful for context but no
-longer describes the current branch as the source of truth.
+This directory preserves development history that no longer defines current
+software behavior. Files here may contain obsolete names, APIs, intermediate
+designs, or incomplete experiments. They are evidence of past decisions only.
 
-## Removal Notes
+## Archived Kernel Material
 
-- 2026-06-11: Historical references to legacy `Node::cached_output` in this
-  directory describe removed content. The current branch uses
-  `cached_output_high_precision` for reusable HP cache and
-  `cached_output_real_time` for transient RT state, with no legacy cache
-  fallback.
+`kernel-architecture/` contains historical reports and migration artifacts.
+The following files were moved out of the maintained kernel architecture set
+on 2026-07-14:
 
-The active docs are:
+- `kernel-architecture/Compute-Service-Split.md`: completed compute-service
+  restructuring plan;
+- `kernel-architecture/Benchmark-Spikes.md`: proposed experiments without a
+  stable architecture result.
 
-- `readme.md`
-- `manual.md`
-- `docs/kernel-architecture/Overview.md`
-- `docs/kernel-architecture/Dirty-Region-Propagation.md`
+Their Chinese reader copies are preserved under
+`kernel-architecture/zh/`. Historical documents without a Chinese source copy
+remain historical-only and are not retroactively treated as maintained docs.
 
-Use files in this directory as design history only. Before acting on one of
-these documents, verify behavior against the code and current maintained docs.
+## Current Sources of Truth
+
+- `readme.md` and `manual.md` for product use;
+- `docs/kernel-architecture/README.md` for current kernel behavior;
+- `docs/adr/` for accepted long-lived decisions;
+- `docs/roadmap/Kernel-Evolution.md` for accepted future architecture;
+- `docs/development/Testing-and-Validation.md` for maintained development
+  validation guidance.
+
+Before using an archived statement, verify it against current code and the
+maintained documents above.

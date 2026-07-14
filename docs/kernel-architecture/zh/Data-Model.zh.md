@@ -1,6 +1,8 @@
 # 内核数据模型
 
-本文档描述当前内核使用的图和节点数据结构。重点是算子、调度器、插件和前端应依赖的公共行为。
+本文档描述当前内核使用的图和节点数据结构。`GraphModel` 与 `Node` 是私有 backend state，
+不是共享 public contract。Frontend 使用 `ps::Host` value，operation plugin 使用 operation SDK，
+scheduler 只接收 ready-task metadata。本文说明这些边界最终操作的内部行为。
 
 ## GraphModel
 
@@ -28,7 +30,7 @@ frontend caller。
 `<cache_root_dir>/<graph_name>`；相对路径按进程当前工作目录解析。未提供 cache root 的底层
 `Kernel::load_graph` 调用继续使用 session-local fallback：`<root_dir>/<graph_name>/cache`。
 
-`GraphModel::clear()` 的目标是重置模型级运行时状态，而不只是删除节点。清理图会重置节点、拓扑邻接、计时结果、累计 IO 时间、skip-save 状态和其他单次运行状态，使 reload 行为不受陈旧元数据污染。
+`GraphModel::clear()` 会重置模型级运行时状态，而不只是删除节点。清理图会重置节点、拓扑邻接、计时结果、累计 IO 时间、skip-save 状态和其他单次运行状态，使 reload 行为不受陈旧元数据污染。
 
 ## 拓扑邻接
 
@@ -61,8 +63,6 @@ frontend caller。
 | --- | --- | --- |
 | 图像输入 | `ImageInput` | 读取上游类图像 `NodeOutput`。 |
 | 参数输入 | `ParameterInput` | 读取上游命名数据输出，并写入运行时参数。 |
-
-旧的统一输入模型不是维护中的 schema 的一部分。
 
 ## 参数
 

@@ -79,8 +79,9 @@ struct PreparedDirtyPlan {
  * @brief Immutable parameters for source-first dirty task dispatch.
  *
  * The request object lowers helper parameter count and makes the dispatch
- * contract explicit: source boundary work completes before downstream work,
- * and scheduler submissions carry the dirty generation as an epoch.
+ * contract explicit: source boundary work completes before downstream work.
+ * Scheduler batches allocate their own epochs; dirty generation remains
+ * separate snapshot and source-commit provenance.
  */
 struct DirtySourceFirstRunRequest {
   /** @brief Optional runtime that owns intent schedulers and trace events. */
@@ -101,7 +102,12 @@ struct DirtySourceFirstRunRequest {
   /** @brief Downstream dirty task ids released by task dependencies. */
   const std::vector<int>* downstream_task_ids = nullptr;
 
-  /** @brief Dirty snapshot generation forwarded as scheduler epoch metadata. */
+  /**
+   * @brief Dirty snapshot generation associated with this request.
+   * @note The current source-first runner does not forward this value as the
+   *       scheduler epoch; scheduler initial batches allocate independent
+   *       scheduler-local epochs.
+   */
   uint64_t dirty_generation = 0;
 
   /** @brief Boundary validation invoked between source and downstream groups.

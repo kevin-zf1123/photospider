@@ -1,6 +1,8 @@
 # ImageBuffer 内存契约
 
-`ImageBuffer` 是公共内核契约。算子、调度器、插件、适配器、缓存代码和调试工具可以依赖本文档中的字段和不变量。
+`ImageBuffer` 是公共 operation 与 Host value 契约。Operation、plugin、adapter、cache code、
+Host implementation 和调试工具可以依赖本文档中的字段和不变量；scheduler contract 不检查
+image payload。
 
 ## 结构
 
@@ -53,7 +55,7 @@ storage 或内核所有的逐行对齐时，consumer 必须分配适当的 CPU b
 
 ## ARM Mac 对齐
 
-64 字节行对齐是可移植最低要求。ARM Mac 高性能路径可能需要或受益于 128 字节对齐。这是优化目标，应在成为更严格默认值前做基准。
+64 字节行对齐是当前可移植最低要求。该契约在 ARM Mac 或其他平台上都不提供 128 字节保证。
 
 ## 步长感知访问
 
@@ -100,13 +102,28 @@ compute 路径。`CMakeLists.txt` 通过 `plugins/ops/metal/perlin_noise_metal.m
 - `context` 拥有 Metal texture holder。
 - 下载返回新的 CPU `ImageBuffer`。
 
-插件、调度器和核心 compute 代码在未来变更把 Metal buffer adapter 接入构建、记录调用链并补充验证证据之前，不得把它视为生产运行边界。直接解释 `context` 仍是后端特定行为；没有基准证据前，不应把它扩大为更广泛的契约。
+插件、调度器和核心 compute 代码不得把 Metal buffer adapter 视为生产运行边界。当前生产
+Metal operation 路径独立拥有 backend-specific object。直接解释 `context` 属于后端特定行为，
+不是可移植内存契约。
 
-## 基准问题
+## 能力边界
 
-收紧 Metal 访问策略前，应基准测试：
+`ImageBuffer` 是当前二维图像 payload 和 operation DSO 契约。其 channel count 在结构上不限制为
+四，`FLOAT64` 也是已声明 scalar type，但这些事实不承诺每个 loader、operation、cache 或
+adapter 都提供端到端支持。
 
-- 16x16 和 64x64 tile 上的适配器 API 与直接 context 访问。
-- copy、add 和简单 curve transform 等轻量操作。
-- 上传/下载密集工作负载。
-- ARM Mac 上的 64 字节与 128 字节行对齐。
+当前限制必须明确：
+
+- built-in operation 可能只实现部分 1/3/4-channel conversion，或假设 RGBA role；
+- 部分 operation 和 image-loading 路径使用 float32 计算；
+- FP4 无法表示，因为 scalar size 和 row addressing 假设每个 channel element 占整数个 byte；
+- rank、N 维 shape/stride、quantization、named channel role、Deep Image sample 和 vector object
+  均未表示；
+- `context` 不能替代 planning、cache key、ROI 或 synchronization 所需的 descriptor fact。
+
+因此，8/16 通道图像和 FP64 不能被宣传为完整 framework contract；FP4、latent Tensor、
+Deep Image 和 vector-scene value 不受 `ImageBuffer` 支持。通用 `Value`、descriptor、handle 和
+region 目标记录在 `../../roadmap/zh/Kernel-Evolution.zh.md`。
+
+可移植 CPU allocation guarantee 仍是 64-byte row-start alignment；128-byte alignment 不属于
+当前契约。
