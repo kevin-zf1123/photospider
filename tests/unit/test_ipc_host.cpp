@@ -727,6 +727,141 @@ class AsyncCompletionGateReleaseGuard {
 };
 
 /**
+ * @brief Resolves every relative graph-load path in the IPC Host caller.
+ *
+ * The test calls the installed public `Host` adapter through the production
+ * typed Client, Server, and request router. The router accepts only absolute
+ * graph paths, so success proves the adapter converted caller-relative text
+ * before transport while the Host spy records the exact daemon-side values.
+ *
+ * @return Nothing; GoogleTest assertions report path or routing mismatch.
+ * @throws std::bad_alloc, std::filesystem::filesystem_error,
+ *         std::runtime_error, or std::system_error if setup cannot complete.
+ * @note Relative paths are resolved against the IPC client process working
+ *       directory, not the daemon backend or graph-session root.
+ */
+TEST(IpcHostDispatch, ResolvesRelativeLoadPathsAgainstCallerWorkingDirectory) {
+  ScopedTempDirectory temp("ps-ipc-host-relative-load");
+  const std::string socket_path = (temp.path() / "server.sock").string();
+  testing::IpcHostSpy backend(GraphSessionId{"private-backend-session"});
+  RunningServer server(backend, socket_path);
+  std::unique_ptr<Host> host = create_ipc_host(socket_path);
+  ASSERT_NE(host, nullptr);
+
+  const std::filesystem::path caller_working_directory =
+      std::filesystem::current_path();
+  GraphLoadRequest request;
+  request.session = GraphSessionId{"relative-load-session"};
+  request.root_dir = "relative-root";
+  request.yaml_path = "relative-input/graph.yaml";
+  request.config_path = "relative-config/config.yaml";
+  request.cache_root_dir = "relative-cache";
+
+  const Result<GraphSessionId> loaded = host->load_graph(request);
+  ASSERT_TRUE(loaded.status.ok)
+      << loaded.status.name << ": " << loaded.status.message;
+  const std::vector<testing::IpcHostInvocation> invocations =
+      backend.invocations();
+  ASSERT_EQ(invocations.size(), 1U);
+  ASSERT_EQ(invocations.front().method, "graph.load");
+  const GraphLoadRequest& routed = invocations.front().load_request;
+  EXPECT_EQ(std::filesystem::path(routed.root_dir),
+            caller_working_directory / request.root_dir);
+  EXPECT_EQ(std::filesystem::path(routed.yaml_path),
+            caller_working_directory / request.yaml_path);
+  EXPECT_EQ(std::filesystem::path(routed.config_path),
+            caller_working_directory / request.config_path);
+  EXPECT_EQ(std::filesystem::path(routed.cache_root_dir),
+            caller_working_directory / request.cache_root_dir);
+}
+
+/**
+ * @brief Resolves a relative graph-reload path in the IPC Host caller.
+ *
+ * The graph is first loaded through the public adapter to obtain its opaque
+ * daemon session. Reload then supplies caller-relative text; the production
+ * router's absolute-path requirement makes the backend observation proof that
+ * conversion occurred before the request crossed IPC.
+ *
+ * @return Nothing; GoogleTest assertions report path or routing mismatch.
+ * @throws std::bad_alloc, std::filesystem::filesystem_error,
+ *         std::runtime_error, or std::system_error if setup cannot complete.
+ * @note The path is based on the IPC client process working directory, as it
+ *       would be for the same call on the embedded public Host.
+ */
+TEST(IpcHostDispatch, ResolvesRelativeReloadPathAgainstCallerWorkingDirectory) {
+  ScopedTempDirectory temp("ps-ipc-host-relative-reload");
+  const std::string socket_path = (temp.path() / "server.sock").string();
+  testing::IpcHostSpy backend(GraphSessionId{"private-backend-session"});
+  RunningServer server(backend, socket_path);
+  std::unique_ptr<Host> host = create_ipc_host(socket_path);
+  ASSERT_NE(host, nullptr);
+
+  GraphLoadRequest load;
+  load.session = GraphSessionId{"relative-reload-session"};
+  load.root_dir = temp.path().string();
+  const Result<GraphSessionId> loaded = host->load_graph(load);
+  ASSERT_TRUE(loaded.status.ok) << loaded.status.message;
+  backend.reset_invocations();
+
+  const std::filesystem::path caller_working_directory =
+      std::filesystem::current_path();
+  const std::string relative_path = "relative-input/reload.yaml";
+  const VoidResult reloaded = host->reload_graph(loaded.value, relative_path);
+  ASSERT_TRUE(reloaded.status.ok)
+      << reloaded.status.name << ": " << reloaded.status.message;
+  const std::vector<testing::IpcHostInvocation> invocations =
+      backend.invocations();
+  ASSERT_EQ(invocations.size(), 1U);
+  EXPECT_EQ(invocations.front().method, "graph.reload");
+  EXPECT_EQ(std::filesystem::path(invocations.front().text),
+            caller_working_directory / relative_path);
+}
+
+/**
+ * @brief Resolves a relative graph-save path in the IPC Host caller.
+ *
+ * The graph is first loaded through the public adapter to obtain its opaque
+ * daemon session. Save then supplies caller-relative text; observing an
+ * absolute backend argument through the production router proves the IPC Host
+ * preserves the embedded Host's destination-path semantics.
+ *
+ * @return Nothing; GoogleTest assertions report path or routing mismatch.
+ * @throws std::bad_alloc, std::filesystem::filesystem_error,
+ *         std::runtime_error, or std::system_error if setup cannot complete.
+ * @note The adapter resolves text only; it neither creates parent directories
+ *       nor changes the existing direct-write persistence contract.
+ */
+TEST(IpcHostDispatch, ResolvesRelativeSavePathAgainstCallerWorkingDirectory) {
+  ScopedTempDirectory temp("ps-ipc-host-relative-save");
+  const std::string socket_path = (temp.path() / "server.sock").string();
+  testing::IpcHostSpy backend(GraphSessionId{"private-backend-session"});
+  RunningServer server(backend, socket_path);
+  std::unique_ptr<Host> host = create_ipc_host(socket_path);
+  ASSERT_NE(host, nullptr);
+
+  GraphLoadRequest load;
+  load.session = GraphSessionId{"relative-save-session"};
+  load.root_dir = temp.path().string();
+  const Result<GraphSessionId> loaded = host->load_graph(load);
+  ASSERT_TRUE(loaded.status.ok) << loaded.status.message;
+  backend.reset_invocations();
+
+  const std::filesystem::path caller_working_directory =
+      std::filesystem::current_path();
+  const std::string relative_path = "relative-output/saved.yaml";
+  const VoidResult saved = host->save_graph(loaded.value, relative_path);
+  ASSERT_TRUE(saved.status.ok)
+      << saved.status.name << ": " << saved.status.message;
+  const std::vector<testing::IpcHostInvocation> invocations =
+      backend.invocations();
+  ASSERT_EQ(invocations.size(), 1U);
+  EXPECT_EQ(invocations.front().method, "graph.save");
+  EXPECT_EQ(std::filesystem::path(invocations.front().text),
+            caller_working_directory / relative_path);
+}
+
+/**
  * @brief Exercises all 53 Host virtuals through the real typed IPC stack.
  *
  * The test loads one opaque session, invokes every graph, compute, diagnostic,

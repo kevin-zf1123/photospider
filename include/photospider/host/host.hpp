@@ -266,7 +266,9 @@ class PHOTOSPIDER_API Host {
    *       their aggregate capacity before constructing either candidate. A
    *       conforming implementation must not leave a scheduler candidate or
    *       newly published session when load returns failure or an exception
-   *       propagates.
+   *       propagates. Nonempty relative request paths use the caller process
+   *       working directory; an IPC implementation resolves them in its
+   *       client process before sending the typed request.
    */
   virtual Result<GraphSessionId> load_graph(
       const GraphLoadRequest& request) = 0;
@@ -314,7 +316,9 @@ class PHOTOSPIDER_API Host {
    * @note The embedded adapter checks session existence before invoking the
    *       backend reload path, preserves backend reload failure
    *       classification, and serializes mutation through the backend
-   *       graph-state boundary.
+   *       graph-state boundary. A nonempty relative `yaml_path` uses the
+   *       caller process working directory; the IPC Host resolves it in the
+   *       client process before transport.
    */
   virtual VoidResult reload_graph(const GraphSessionId& session,
                                   const std::string& yaml_path) = 0;
@@ -335,7 +339,9 @@ class PHOTOSPIDER_API Host {
    *       concurrent close cannot invalidate the runtime. Saving writes
    *       directly to the supplied path rather than atomically replacing it;
    *       a post-open failure may leave a created, truncated, or partially
-   *       written destination.
+   *       written destination. A nonempty relative `yaml_path` uses the
+   *       caller process working directory; the IPC Host resolves it in the
+   *       client process before transport.
    */
   virtual VoidResult save_graph(const GraphSessionId& session,
                                 const std::string& yaml_path) = 0;
