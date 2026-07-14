@@ -32,7 +32,7 @@ output、ROI 与 dependency callback 类型，不能复用旧符号。
 | Dirty ROI propagator | 反向 ROI 传播。 |
 | Forward ROI propagator | 下游 ROI 投影。 |
 | Dependency LUT builder | 数据依赖空间依赖映射。 |
-| Device implementation | CPU、Metal、CUDA 或未来公共 `Device` capability。 |
+| Device implementation | CPU、Metal、CUDA 或其他受支持的公共 `Device` capability。 |
 
 Canonical registry identity 为 `type:subtype`。两个 segment 都必须非空，且都不能包含保留分隔符 `:`，
 否则不同 pair 可能发生 identity collision。Public C++ registrar helper 还会在调用 `.c_str()` 前拒绝
@@ -100,11 +100,11 @@ descriptor 及其完整 extent 执行明确的 backend-preserving passthrough；
   并在受支持的 POSIX 工具链上选择 default visibility。
 - Loader 解析精确的带版本符号名。
 - 这仍然是 C++ ABI 边界，因为 callback 使用 `std::function`、标准库 container 与 public C++ value。
-  在未来纯 C ABI 替代这些 callback 形态之前，编译器、标准库、exception model、RTTI 设置与
-  Photospider SDK 兼容性仍然是版本敏感的。
+  编译器、标准库、exception model、RTTI 设置与 Photospider SDK 兼容性仍然是版本敏感的。
+  当前 ABI 不承诺跨工具链或纯 C 兼容性。
 
 打算通过 `plugin_dirs` 作为当前可加载插件使用的 operation plugin，也必须显式注册 dirty 与
-forward ROI propagator。Registry 仍提供 legacy identity fallback 作为迁移支持，但该 fallback
+forward ROI propagator。Registry 仍提供 identity compatibility fallback，但该 fallback
 不是完整插件契约。逐像素图像操作可以注册 pass-through ROI 函数；带副作用的 monolithic
 操作必须说明自己的副作用语义，并仍然注册显式 propagator，用来描述上游需求和下游受影响区域元数据。
 
@@ -363,7 +363,8 @@ Scheduler handshake 会在 discovery 或 object creation 前拒绝未知 Photosp
 标准库、exception model、RTTI 配置与 C++ ABI。人类可读 implementation version 只用于诊断，不能
 替代数字 handshake。
 
-这是过渡状态。长期方向是使用不透明 handle 或回调表的纯 C 调度器 ABI，使插件不依赖 C++ 二进制 ABI。
+该 ABI 被明确标记为 provisional。ADR 0003 与内核演进 roadmap 记录已接受的替代方向，
+但不会改变本文说明的当前 loader contract。
 
 ## 兼容性指南
 
@@ -376,4 +377,4 @@ Scheduler handshake 会在 discovery 或 object creation 前拒绝未知 Photosp
 - 调度器插件继承 `IScheduler`，实现其继承的 runtime contract，并导出精确数字 handshake 与其余六个
   必需函数。
 - Host 应使用插件 destroy 销毁插件创建的调度器实例。
-- 未来 C ABI 工作应作为单独的兼容性 change 完成。
+- 当前不提供纯 C operation 或 scheduler ABI 兼容性。

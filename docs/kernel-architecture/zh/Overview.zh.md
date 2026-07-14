@@ -1,10 +1,9 @@
 # 内核架构概览
 
-本文档描述当前分支中的架构。较旧的阶段计划和里程碑报告已移动到 `docs/outdated/`。
+本文概述当前源码树中的架构。文档职责和推荐阅读顺序由 `README.zh.md` 定义；领域术语由
+`Terminology.zh.md` 定义。
 
-此目录是内核维护中的开发者文档。应将其视为算子、调度器、插件和内核服务所使用公共契约的事实来源。OpenSpec change artifact 是规划材料，不假定一定随仓库提交。
-
-## 当前状态
+## 架构概述
 
 Photospider 围绕图运行时构建，包含服务拆分、操作 registry、缓存层、调度器抽象，以及面向前端的
 Host seam。Parallel planned work 现在会通过 scheduler-owned task runtime dispatch。Graph-state
@@ -18,7 +17,9 @@ virtual；`photospiderd` 拥有另一个 embedded Host，并让每项 backend op
 进入。这个 remote path 增加 polling job、bounded registry 与 protected output artifact，但不
 暴露 backend ownership。`graph_cli` 仍构造 embedded adapter，不会自动连接 daemon。
 
-代码可用且可测试，但部分边界尚未最终稳定。尤其是 `Kernel` 和 `ComputeService` 仍协调大量行为，未来可能移动到更窄的服务中。
+`Kernel` 是内部多图组合 facade。`ComputeService` 是内部计算 facade，更窄的协作者分别拥有
+planning、pruning、dispatch、propagation、cache decision、execution 和 metrics。当前职责由
+`Compute-Boundaries.zh.md` 定义。
 
 ## 构建模块
 
@@ -89,8 +90,8 @@ Package 边界：
   embedded static package 的依赖导出。
 - `apps/graph_cli/include/graph_cli/**` 下的 CLI header 是 private build input，不会安装；public
   install inventory 仍严格限定为 `include/photospider/**`。
-- Issue #38 的八个过渡性 extension header 已删除，且没有 forwarding header。Operation 契约现在只
-  位于 `include/photospider/plugin`，scheduler 契约只位于 `include/photospider/scheduler`，共享 device
+- Source-tree extension header 不属于 public inventory，也不提供 forwarding header。Operation
+  契约只位于 `include/photospider/plugin`，scheduler 契约只位于 `include/photospider/scheduler`，共享 device
   label 位于 `include/photospider/core/device.hpp`，完整可变/private declaration 则归属相应
   `src/lib` 目录。
 
@@ -176,18 +177,21 @@ socket、protocol、status、quota 与 artifact lifecycle 定义在
 
 | 文档 | 范围 |
 | --- | --- |
+| `README.md` | 文档职责、阅读顺序和内容规则。 |
 | `Overview.md` | 顶层模块所有权和当前架构状态。 |
+| `Terminology.md` | 当前内核规范术语和概念区分。 |
 | `Data-Model.md` | `GraphModel`、`Node`、YAML schema、输入、输出、参数和缓存字段。 |
+| `Graph-Lifecycle.md` | 图运行时所有权和 load/reload/edit/clear 语义。 |
+| `Compute-Boundaries.md` | 当前计算模块职责、所有权和不变量。 |
 | `Compute-Flow.md` | 顺序、并行、RT、HP、ROI 更新和事件/计时流程。 |
-| `Compute-Service-Split.md` | 计划中的 `ComputeService` facade/内部拆分和 TODO 边界。 |
-| `Cache-Model.md` | HP/RT 内存缓存语义、遗留 HP 缓存重命名和磁盘缓存行为。 |
-| `Graph-Lifecycle.md` | 图运行时所有权、图加载/reload/edit 失败语义和 `GraphModel::clear()`。 |
+| `Cache-Model.md` | HP/RT 内存缓存语义和磁盘缓存行为。 |
 | `ImageBuffer-Memory-Contract.md` | 公共 `ImageBuffer` 内存/设备契约、对齐、步长和适配器规则。 |
 | `Dirty-Region-Propagation.md` | ROI 传播、tile 映射和当前可调 tile 默认值。 |
-| `Scheduler-Architecture.md` | 正式 `IScheduler` 生命周期、内置调度器和 task-runtime dispatch 边界。 |
+| `Scheduler-Architecture.md` | 当前 `IScheduler` 生命周期、内置调度器和 task-runtime dispatch 边界。 |
 | `Plugin-ABI.md` | 操作插件和调度器插件 ABI 契约。 |
-| `Development-Validation.md` | 主线 macOS 架构、CTest 预期和后续重构边界。 |
-| `Benchmark-Spikes.md` | Metal 适配器和 ARM 对齐基准计划与后续状态。 |
+
+测试指引维护在 `../../development/zh/Testing-and-Validation.zh.md`。已接受的未来资源所有权和
+数据模型目标维护在 `../../roadmap/zh/Kernel-Evolution.zh.md`，不会混入当前行为。
 
 ## 计算流程
 
@@ -345,20 +349,17 @@ ROI 传播通过 `RoiPropagationService` 处理，它使用 registry 提供的 p
 - 可在 tile 空间执行的算子的 tiled compute 元数据
 - 当前 tile 默认值是可调实现参数，不是永久 ABI
 
-## 已知架构张力
+## 当前边界摘要
 
-这些是实现现实，不是立即阻塞项：
+- `Kernel` 组合图级 service，不暴露可安装 API。
+- `ComputeService` 协调私有协作者，其模块边界是 `ps::Host` 后方的实现细节。
+- `GraphTraversalService` 只拥有 topology query。
+- `RoiPropagationService` 与 `GraphExtentResolver` 拥有空间传播和 HP-authoritative extent resolution。
+- Dependency-tree data 由 inspection 边界构建，经 embedded Host adapter 复制，再由 frontend 渲染，
+  不暴露后端对象。
+- 当前 scheduler 按 graph 和 intent 拥有物理 worker。ADR 0003 记录了已接受的替代所有权，
+  但它不是当前行为。
 
-- `Kernel` 较宽，同时充当图管理器、服务 owner、运行时管理器、缓存 API、计算 API 和编辑 API。
-- `ComputeService` 包含 planning、cache coordination、execution、ROI update、scheduler interaction 和 metrics emission。
-- 缓存 API 仍同时暴露遗留概念和较新的 RT/HP 概念。
-
-`ComputeService` 拆分现在由 `split-compute-service` OpenSpec change 和维护文档
-`Compute-Service-Split.md` 跟踪。`GraphTraversalService` 拓扑/ROI 拆分已经落地：
-traversal 现在只负责拓扑，ROI 传播是独立服务，范围解析显式化；dependency-tree data 由 inspect
-边界结构化，经内部 `InteractionService` 交给 embedded Host adapter，复制为 public Host snapshot，
-再由 CLI/TUI/frontend code 渲染。
-
-## 维护文档边界
-
-活跃文档应描述当前行为。历史规划 artifact、阶段评审、带日期的状态报告和推测性图示属于 `docs/outdated/`。
+ADR 0001 定义 graph-state 与 scheduler dispatch，ADR 0002 定义外部库 adapter 目标，ADR 0003
+定义已接受的进程执行域。`../../roadmap/zh/Kernel-Evolution.zh.md` 将这些决策组合成长远目标，
+但不会改变本当前状态文档的含义。

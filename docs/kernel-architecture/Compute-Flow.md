@@ -1,7 +1,8 @@
 # Kernel Compute Flow
 
-This document describes the current compute paths and the target scheduler
-direction.
+This document describes current compute request, planning, execution, HP/RT,
+commit, event, and error behavior. Module ownership is summarized in
+`Compute-Boundaries.md`.
 
 ## Entry Points
 
@@ -44,17 +45,17 @@ intent, and dirty ROI data. Parallel/runtime selection is carried separately as
 The CLI/REPL frontend is a permanent batch-oriented surface. It does not expose
 RT intent commands, dirty ROI creation, or dirty source lifecycle commands such
 as `compute rt`, `--dirty-roi`, `dirty begin`, `dirty update`, or `dirty end`.
-`RealTimeUpdate` and dirty source lifecycle APIs remain kernel/test and future
-GUI/WebUI-style frontend contracts, and the CLI must not be treated as the
-production realtime control surface.
+`RealTimeUpdate` and dirty source lifecycle APIs are available through Host and
+kernel/test callers, but the CLI does not expose them and must not be treated as
+a production realtime control surface.
 
 `GraphTraversalService` is topology-only. It provides traversal order and
 explicit upstream/downstream topology queries from `GraphModel` adjacency.
 Dirty-region demand and ROI projection use `RoiPropagationService`, while
 formal propagation extents come from `GraphExtentResolver`.
 
-Target compute planning flow after the `ComputeService` split separates
-request-scoped static planning from per-update dirty work selection:
+The current compute planning flow separates request-scoped static planning from
+per-update dirty work selection:
 
 ```text
 ComputeService facade
@@ -68,7 +69,7 @@ ComputeService facade
   -> DirtySnapshotTaskGraphPruner
   -> DirtyUpdateWorkSet
   -> TaskSubmissionPlan / ComputeTaskDispatcher
-  -> task pools / scheduler / execution resources
+  -> ready-task scheduler dispatch
 ```
 
 `FullTaskGraphExpander` expands the raw graph into the full node/tile task graph
@@ -79,15 +80,14 @@ nodes. Dirty updates add a separate `DirtySnapshotTaskGraphPruner` pass that
 annotates the selected graph with dirty metadata and produces the active
 `DirtyUpdateWorkSet`.
 
-Single-threaded and parallel execution should share the same pruned
-`ComputePlan` or `ComputeTaskGraph`. Execution modes should differ in task
-pools, scheduler policy, and execution resources, not in graph-level dirty
-propagation, full task expansion, or task-graph pruning.
+Single-threaded and parallel execution use the same full-expansion and
+node/cache-pruning semantics. Their execution mechanisms differ, while graph
+traversal, dirty planning, and task-graph pruning remain compute-owned.
 
 `ComputePlan` is a static analysis for the current compute request and domain.
 It is derived while graph state is stable and remains the topology contract for
-that request, whether the current commit policy writes directly to visible graph
-state or a future commit policy stages buffers before commit. Dirty updates do
+that request, whether the current path writes directly to visible graph state or
+uses the existing dirty-path staged buffers. Dirty updates do
 not rebuild topology semantics. They use the current `DirtyRegionSnapshot` and
 dirty ROI to activate or clip a `DirtyUpdateWorkSet` from the plan for each HP
 or RT update queue.
@@ -99,35 +99,23 @@ expand new tile tasks during dirty clipping; this keeps full-frame tiled
 parallelism and dirty ROI execution on the same task model.
 
 The request's `ComputeTaskGraph` is immutable while scheduler tasks derived
-from it may still run. Continuous RT dirty updates create new
-`DirtyUpdateWorkSet` generations from the same plan and the latest dirty
-snapshot, then submit those generations as priority-tagged task graph
-submissions. They must not destruct and replace the task graph underneath an
-active scheduler runtime.
+from it may still run. Each dirty compute request creates a generation-local
+selection overlay from its plan and snapshot, then pushes only ready handles or
+callbacks. The scheduler does not receive a replaceable task-graph object.
 
-Execution granularity is a separate layer. A graph can contain multiple nodes,
-and each node/operator implementation can be monolithic or tiled. Tiled
-execution can further use macro or micro task granularity. These choices are
-node execution details and are independent from HP/RT intent semantics.
+Execution granularity is a separate layer. A selected operation implementation
+is node-wide, monolithic, or tiled. The current full-task population maps
+`MICRO` metadata to 16-pixel tasks, `MACRO` metadata to 256-pixel tasks, and an
+unspecified preference to 128-pixel tasks. Edge tasks are clipped to the output
+extent.
 
-HP/RT compute domain and Micro/Macro granularity are orthogonal. The current
-implementation defaults favor RT Micro_16 for interactive work and HP
-Macro_256 for throughput work, but the model still has four distinct
-domain/granularity cases:
-
-| Case | Current tile size | Meaning |
-| --- | --- | --- |
-| `rt-micro` | 16x16 in RT proxy space | Low-latency RT proxy tile. |
-| `rt-macro` | 64x64 in RT proxy space | Coarser RT proxy tile or aggregated RT work. |
-| `hp-micro` | 64x64 in HP full-resolution space | Small HP tile. |
-| `hp-macro` | 256x256 in HP full-resolution space | Throughput-oriented HP tile. |
-
-`rt-macro` and `hp-micro` currently share the numeric size 64x64, but they are
-not the same task type because they live in different coordinate spaces and
-different task pools. A compute plan must not create dependencies from RT tasks
-to HP tasks or from HP tasks to RT tasks. Realtime intent coordinates separate
-HP and RT sibling work; scale conversion is used only to represent
-corresponding ROIs, downsample state, or inspection data.
+Dirty snapshot grids are different metadata: HP snapshots materialize Micro
+keys on a 64-pixel HP grid and RT snapshots materialize Micro keys on a
+16-pixel proxy grid. The dirty selector intersects those records with task
+shapes already present in the full graph. It does not create `ReTileTask`, RT
+Macro_64 records, or dynamic Micro/Macro conversion. HP and RT plans remain
+single-domain; realtime intent coordinates separate sibling work without
+creating cross-domain task dependencies.
 
 ## Compute Intents
 
@@ -145,15 +133,13 @@ configured `IScheduler` task runtime for each intent.
 HP/RT dual path semantics belong to realtime intent, not to the parallel
 execution mode. In realtime mode, HP computes the full-size authoritative node
 work while RT computes the downscaled proxy, currently one quarter of width and
-height, or one sixteenth of the pixel count. HP and RT work should be treated
-as separate intent task pools. Scheduler/resource policy then decides how each
-pool is executed: HP may use a single-thread scheduler, RT may use a GPU
-scheduler, and realtime and non-realtime modes may use different scheduler
-configuration.
+height, or one sixteenth of the pixel count. `IntentUpdateCoordinator` launches
+two sibling calls, and each sibling looks up the per-graph scheduler registered
+for its intent route. `ComputeIntent` does not itself specify QoS or physical
+priority.
 
-The in-place `ComputeService` split is documented in
-`Compute-Service-Split.md`. The current implementation keeps the internal facade
-and routes internal work through compute-service collaborators.
+The current collaborator responsibilities and non-ownership boundaries are
+documented in `Compute-Boundaries.md`.
 
 ## Sequential Compute
 
@@ -191,40 +177,31 @@ task graph itself. If the pruned planned dispatch is empty while the target has
 no reusable HP output, the dispatcher reports a planning contract error instead
 of falling back to recursive sequential compute.
 
-For dirty execution, the dispatcher should materialize only the active
-`DirtyUpdateWorkSet` selected from the request's `ComputeTaskGraph` by the
-current dirty snapshot. Runtime dependency counters and ready-task queues are
-execution artifacts; they are not stored in `DirtyRegionSnapshot` and are not
-owned by the scheduler.
+For dirty execution, `DirtySnapshotTaskGraphPruner` materializes only the active
+`DirtyUpdateWorkSet` selected from the request's `ComputeTaskGraph`. Runtime
+dependency counters and ready-task queues are execution artifacts; they are not
+stored in `DirtyRegionSnapshot` and are not owned by the scheduler.
 
-Dirty-region signals are node-originated state updates, not compute triggers. A
-`DirtyRegionNode` should expose lifecycle state such as begin dirty-region
-creation, update dirty region with the current ROI, and end dirty-region
-creation. Frontend brush input may update a node, and a computed node may
-discover new dirty state, but the dirty region is still emitted by a graph node.
-A compute request may be created after the dirty region is closed, or an active
-realtime request may coalesce updates while the dirty node is still changing.
-The dispatcher's realtime cutoff must account for the dirty-node lifecycle and
-the currently running work; an empty ready queue is not by itself proof that the
-interaction has finished.
+Explicit Host begin/update/end calls identify a dirty source node and update
+graph-scoped lifecycle facts; they do not trigger compute. The current backend
+has no node subscription, automatic request launch, or active-request
+coalescing contract.
 
-Dirty-node lifecycle updates enter a serialized `DirtyControlLane` that updates
-dirty source state in the graph-scoped dirty snapshot, runs propagation to
-refresh `actual_dirty_region`, and returns wakeup/cutoff decisions to internal
-compute-service materialization. The snapshot stores `dirty_updating_count`;
-`DirtyControlLaneResult` copies that count and uniquely owns the wakeup/cutoff
-decisions. All remain internal evidence. The embedded Host adapter copies only
-the public `DirtyRegionInspectionSnapshot` returned by lifecycle methods, not
-those control fields. The scheduler receives only ready task callbacks with
-epoch/generation metadata and optional scheduler-specific hints; it does not
-receive task graphs, own the dirty control lane, or own compute-service dirty
-queues.
+Lifecycle updates enter the per-graph serialized path and call
+`DirtyControlLane`. The lane updates source state, rebuilds source-local derived
+records for the event domain, and returns wakeup/cutoff hints in
+`DirtyControlLaneResult`. This lifecycle path does not traverse downstream
+edges, and the hints currently have no production compute consumer. The
+embedded Host exposes copied inspection values, not internal control fields.
+Schedulers receive only pushed ready handles or callbacks with their own batch
+epoch and priority hint; dirty generation is not forwarded as the scheduler
+epoch.
 
 ## Graph-State Access and Commit Policy
 
 Graph-state operations such as YAML loading, cache commands, inspection, and
 ROI projection are operations on the visible `GraphModel`. They are not
-compute-task dispatch and should not be routed through `SchedulerTaskRuntime`.
+compute-task dispatch and are not routed through `SchedulerTaskRuntime`.
 
 The current default is per-graph exclusive access through
 `GraphStateExecutor`: graph-state operations and compute requests for the same
@@ -243,16 +220,15 @@ so close cannot erase the runtime between a session lookup and graph-state
 submission. Scheduler information copies name/statistics before leaving the
 boundary; no raw scheduler pointer survives it.
 
-Future work may add a `ComputeCommitPolicy` separate from `ComputeIntent`.
-The current dirty update implementation already uses staged output commits for
+The current dirty update implementation uses staged output commits for
 HP/RT sibling safety: HP dirty workers write `HighPrecisionDirtyWriteBuffer`
 and commit to the visible `GraphModel` only after the RT sibling has committed;
 RT dirty workers write `RealtimeProxyWriteBuffer` and commit to the
-runtime-owned `RealtimeProxyGraph`. A future `StagedInterruptibleCommit` policy
-would extend this boundary with cancellation before commit and discard
-uncommitted buffers on cancellation. This policy is intentionally not part of
-`ComputeIntent`, because HP/RT intent semantics are independent from commit and
-interruption behavior.
+runtime-owned `RealtimeProxyGraph`. There is no general graph-revision or
+interruptible commit policy in the current implementation. ADR 0003 and the
+kernel evolution roadmap define that accepted target separately from current
+behavior. Commit policy remains conceptually separate from `ComputeIntent`,
+because HP/RT intent semantics do not define visibility or interruption.
 
 ## GlobalHighPrecision
 
@@ -307,27 +283,26 @@ dirty snapshot. HP dirty node execution writes into
 `RealtimeProxyWriteBuffer` and commits only to `RealtimeProxyGraph`. The dirty
 snapshot clips or activates the update work set from the path's task graph.
 This keeps full task expansion, node/cache pruning, dirty snapshot pruning, and
-output commit as separate contracts so future task pools or modes can reuse the
-same boundaries with their own domain.
+output commit as separate contracts for each compute domain.
 
 The passed dirty ROI is converted into graph-scoped planner state for the
 current request. Public `ps::Host` begin/update/end methods translate through the
 embedded adapter to internal `Kernel` / `InteractionService` dirty-source
 lifecycle methods, so frontend or node-facing code writes state through the same
-graph-owned boundary. TODO: node-local dirty reports should become the origin
-source for future frontend-driven dirty-region updates.
+graph-owned boundary. The Host lifecycle call is currently the public write
+surface; there is no public node-event subscription that automatically creates
+or schedules a compute request.
 
 RT task graph expansion is domain-aware. When an operation has distinct HP and
 RT metadata, the `RealTimeUpdate` plan uses RT metadata for tile size and
 dependency ROI planning, while the HP sibling uses HP metadata. This keeps RT
 Micro_16 planning independent from HP Macro_256 throughput defaults.
 
-TODO: design the node-to-backend realtime dirty-report boundary. The design must
-define how nodes emit realtime events, dirty regions, and update requests; which
-layer owns dirty-region generation; how the internal `InteractionService` stays
-separate from node and compute ownership; and how public Host subscribers let a
-future GUI consume those events without turning the CLI into a realtime
-interaction surface.
+The current implementation has no node-to-backend realtime event subscription.
+Nodes and Host lifecycle calls may update graph-owned dirty state, while
+`InteractionService` remains only an internal translation boundary and the CLI
+remains batch-oriented. Any subscription surface is outside the current
+software contract.
 
 Current defaults:
 

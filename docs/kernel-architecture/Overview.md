@@ -1,14 +1,10 @@
 # Kernel Architecture Overview
 
-This document describes the architecture present in the current branch. Older
-phase plans and milestone reports have been moved to `docs/outdated/`.
+This document summarizes the architecture present in the current source tree.
+The documentation roles and recommended reading order are defined in
+`README.md`; domain terms are defined in `Terminology.md`.
 
-This directory is the maintained developer documentation for the kernel. Treat
-it as the source of truth for public contracts used by operators, schedulers,
-plugins, and kernel services. OpenSpec change artifacts are planning material
-and are not assumed to be committed with the repository.
-
-## Current State
+## Architecture Summary
 
 Photospider is built around a graph runtime with a service split, operation
 registry, cache layer, scheduler abstraction, and a frontend-facing Host seam.
@@ -27,9 +23,10 @@ protected output artifacts without exposing backend ownership. `graph_cli`
 continues to construct the embedded adapter and does not auto-connect to the
 daemon.
 
-The code is useful and testable, but some boundaries are not final. In
-particular, `Kernel` and `ComputeService` still coordinate a large amount of
-behavior that may eventually move into narrower services.
+`Kernel` is the internal multi-graph composition facade. `ComputeService` is
+the internal compute facade, while narrower collaborators own planning,
+pruning, dispatch, propagation, cache decisions, execution, and metrics. Their
+current responsibilities are defined in `Compute-Boundaries.md`.
 
 ## Build Modules
 
@@ -112,8 +109,8 @@ Package boundary:
 - CLI headers under `apps/graph_cli/include/graph_cli/**` are private build
   inputs and are not installed; the public install inventory remains exactly
   `include/photospider/**`.
-- The eight transitional extension headers from issue #38 have been removed
-  without forwarders. Operation contracts now live only under
+- Source-tree extension headers are not part of the public inventory and no
+  forwarding headers are provided. Operation contracts live only under
   `include/photospider/plugin`, scheduler contracts only under
   `include/photospider/scheduler`, shared device labels under
   `include/photospider/core/device.hpp`, and full mutable/private declarations
@@ -205,18 +202,22 @@ defined in `../codebase-structure/IPC-Protocol-v1.md`.
 
 | Document | Scope |
 | --- | --- |
+| `README.md` | Documentation roles, reading order, and content rules. |
 | `Overview.md` | Top-level module ownership and current architecture state. |
+| `Terminology.md` | Canonical current kernel language and distinctions. |
 | `Data-Model.md` | `GraphModel`, `Node`, YAML schema, inputs, outputs, parameters, and cache fields. |
+| `Graph-Lifecycle.md` | Graph runtime ownership and load/reload/edit/clear semantics. |
+| `Compute-Boundaries.md` | Current compute module responsibilities, ownership, and invariants. |
 | `Compute-Flow.md` | Sequential, parallel, RT, HP, ROI update, and event/timing flow. |
-| `Compute-Service-Split.md` | Planned `ComputeService` facade/internal split and TODO boundaries. |
 | `Cache-Model.md` | HP/RT memory cache semantics and disk cache behavior. |
-| `Graph-Lifecycle.md` | Graph runtime ownership, graph load/reload/edit failure semantics, and `GraphModel::clear()`. |
 | `ImageBuffer-Memory-Contract.md` | Public `ImageBuffer` memory/device contract, alignment, stride, and adapter rules. |
 | `Dirty-Region-Propagation.md` | ROI propagation, tile mapping, and current tunable tile defaults. |
-| `Scheduler-Architecture.md` | Formal `IScheduler` lifecycle, built-in schedulers, and task-runtime dispatch boundary. |
+| `Scheduler-Architecture.md` | Current `IScheduler` lifecycle, built-in schedulers, and task-runtime dispatch boundary. |
 | `Plugin-ABI.md` | Operation plugin and scheduler plugin ABI contracts. |
-| `Development-Validation.md` | Mainline macOS architecture, CTest expectations, and follow-up refactor boundaries. |
-| `Benchmark-Spikes.md` | Metal adapter and ARM alignment benchmark plans and follow-up status. |
+
+Testing guidance is maintained in `../development/Testing-and-Validation.md`.
+Accepted future ownership and data-model goals are maintained in
+`../roadmap/Kernel-Evolution.md` rather than mixed into current behavior.
 
 ## Compute Flow
 
@@ -421,27 +422,23 @@ Important current behavior:
 - tiled compute metadata for operators that can execute in tile space
 - current tile defaults are tunable implementation parameters, not permanent ABI
 
-## Known Architecture Tensions
+## Current Boundary Summary
 
-These are implementation realities, not immediate blockers:
+- `Kernel` composes graph-scoped services and exposes no installable API.
+- `ComputeService` coordinates private collaborators; its module boundaries are
+  implementation details behind `ps::Host`.
+- `GraphTraversalService` owns topology queries only.
+- `RoiPropagationService` and `GraphExtentResolver` own spatial propagation and
+  HP-authoritative extent resolution.
+- Dependency-tree data is built by the inspection boundary, copied through the
+  embedded Host adapter, and rendered by frontend code without exposing backend
+  objects.
+- Current schedulers own physical workers per graph and intent. The accepted
+  replacement for that ownership is recorded in ADR 0003, but is not current
+  behavior.
 
-- `Kernel` is broad and acts as graph manager, service owner, runtime manager,
-  cache API, compute API, and editing API.
-- `ComputeService` contains planning, cache coordination, execution, ROI update,
-  scheduler interaction, and metrics emission.
-- Cache APIs expose HP and RT concepts, while compute boundary cleanup is still
-  ongoing.
-
-The `ComputeService` split is now tracked by the `split-compute-service`
-OpenSpec change and the maintained `Compute-Service-Split.md` plan. The
-`GraphTraversalService` topology/ROI split has landed: traversal is topology
-only, ROI propagation is a separate service, extent resolution is explicit, and
-dependency-tree data is structured by the inspection boundary, exposed through
-the internal `InteractionService` to the embedded Host adapter, copied into
-public Host snapshots, and rendered by CLI/TUI/frontend code.
-
-## Maintained Documentation Boundary
-
-Active docs should describe current behavior. Historical planning artifacts,
-phase reviews, dated state reports, and speculative diagrams belong in
-`docs/outdated/`.
+ADR 0001 defines graph-state versus scheduler dispatch, ADR 0002 defines the
+external-library adapter target, and ADR 0003 defines the accepted process
+execution domain. `../roadmap/Kernel-Evolution.md` combines those decisions into
+the long-term target without changing the meaning of this current-state
+document.

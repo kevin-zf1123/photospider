@@ -134,10 +134,6 @@ docs/agents/
 docs/agents/*.md
 docs/agents/**/
 docs/agents/**/*.md
-docs/adr/
-docs/adr/*.md
-docs/adr/**/
-docs/adr/**/*.md
 # ============================
 # 7. 特例 (Exceptions)
 # ============================

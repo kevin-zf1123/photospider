@@ -1,10 +1,10 @@
 # Scheduler Architecture
 
-The kernel has a formal scheduler interface for intent-aware resource dispatch.
-This document defines how to read the current implementation after planned
-parallel work was routed through scheduler-owned task runtimes.
+The kernel has a scheduler interface for dispatching concrete ready work. This
+document defines the current worker, queue, lifecycle, plugin, intent-selection,
+ready-task, and trace behavior.
 
-## Formal Target: IScheduler
+## Current Interface: IScheduler
 
 `IScheduler` is the formal scheduler interface and publicly derives from
 `SchedulerTaskRuntime`. A scheduler attaches to a borrowed public
@@ -16,7 +16,7 @@ cache ownership, or a native device handle.
 Core lifecycle:
 
 ```text
-create -> attach(host_context) -> start -> dispatch planned tasks -> shutdown -> detach
+create -> attach(host_context) -> start -> submit ready callbacks -> shutdown -> detach
 ```
 
 `GraphRuntime` implements and owns the host context plus this lifecycle ordering
@@ -167,29 +167,29 @@ Shutdown remains a separate lifecycle transition; the GPU pipeline publishes
 its stop state while holding the CPU idle-queue, GPU idle-queue, and
 completion-wait mutexes before notifying and joining workers.
 
-Compute routes by `ComputeIntent`:
+`GraphRuntime` stores a scheduler map keyed by `ComputeIntent` and current
+compute selects either the `GlobalHighPrecision` or `RealTimeUpdate` entry.
+The key selects a per-graph scheduler object; it does not itself define QoS,
+deadline, fairness, cancellation, resource reservation, or a process-wide
+priority class. Those concepts are not inferred from `ComputeIntent` in the
+current contract.
 
-| Intent | Expected scheduler role |
-| --- | --- |
-| `GlobalHighPrecision` | Throughput-oriented HP compute. |
-| `RealTimeUpdate` | Low-latency interactive update. |
+Schedulers do not pull plans. `ComputeTaskDispatcher` discovers readiness and
+pushes concrete callbacks or borrowed task handles through
+`SchedulerTaskRuntime`. The selected scheduler may order and route those ready
+submissions using its queues, priority hints, epoch, and available devices, but
+it never receives graph topology, a compute plan, or dirty-propagation
+ownership.
 
-`GraphRuntime` stores a scheduler map keyed by `ComputeIntent`.
-
-The long-term scheduler responsibility is resource dispatch after planning.
-Schedulers should pull planned or annotated tasks from intent-aware task pools,
-choose queue order, batching, worker policy, cancellation, and concrete
-execution resources, then dispatch work. They should not own graph-level
-dirty-region propagation or compute-task derivation.
-
-For `RealTimeUpdate`, the scheduler-backed path now starts the RT dirty sibling
-before the HP dirty sibling and allows both siblings to compute concurrently
-when both scheduler runtimes are running. RT writes are staged in
+For `RealTimeUpdate`, `IntentUpdateCoordinator` launches the RT dirty sibling
+and then the HP dirty sibling through separate asynchronous calls, allowing
+them to compute concurrently when both selected scheduler runtimes are running.
+RT writes are staged in
 `RealtimeProxyWriteBuffer` and committed to `RealtimeProxyGraph`; HP writes are
 staged in `HighPrecisionDirtyWriteBuffer` and commit to `GraphModel` only after
-the RT proxy commit gate opens. Schedulers still handle ready task callbacks,
-epochs, cancellation, and queue policy; they do not make RT output a formal HP
-cache source.
+the RT proxy commit gate opens. Each scheduler handles the ready callbacks,
+scheduler-local batch epochs, and queue policy for its sibling; it does not
+create the siblings or make RT output a formal HP cache source.
 
 ## Current Dispatch State
 
@@ -203,14 +203,13 @@ through the configured `IScheduler` instance for the relevant `ComputeIntent`
 via `SchedulerTaskRuntime`.
 
 `GraphRuntime` owns graph state, the `GraphStateExecutor`, scheduler
-registration, events, and platform resources. It no longer exposes a general
+registration, events, and platform resources. It does not expose a general
 worker queue, task graph, or completion-counter API. Graph-state operations and
 compute requests that mutate the visible `GraphModel` use
-`GraphStateExecutor`, including scheduler-backed parallel compute. The
-scheduler-facing design should extend `IScheduler` and
-`SchedulerTaskRuntime`; it should not bypass graph-state access by taking
-direct ownership of the runtime model. Scheduler implementations interact with
-the runtime only through `SchedulerHostContext`.
+`GraphStateExecutor`, including scheduler-backed parallel compute. Scheduler
+implementations interact with the runtime only through `SchedulerHostContext`;
+neither `IScheduler` nor `SchedulerTaskRuntime` obtains direct ownership of the
+runtime model.
 
 The same executor is the scheduler-owner lifetime boundary. Runtime start,
 compute, scheduler name/statistics copying, scheduler replacement, and runtime
@@ -229,13 +228,34 @@ owner until active compute has released it.
 | `heterogeneous` | Alias for `gpu_pipeline`. |
 
 `GpuPipelineScheduler::Config` currently exposes only active queue controls:
-`cpu_workers`, `gpu_workers`, and `prefer_gpu_for_hp`. The scheduler always
-routes RT ready work to the high-priority CPU queue. Normal-priority HP ready
-work may enter the GPU queue when `prefer_gpu_for_hp=true`, GPU workers are
-configured, and `SchedulerHostContext` reports `GPU_METAL` available. Older fields such as
+`cpu_workers`, `gpu_workers`, and `prefer_gpu_for_hp`. Scheduler submissions do
+not carry their outer `ComputeIntent`. High-priority work enters the CPU queue
+named for RT work; normal-priority work may enter the GPU queue when
+`prefer_gpu_for_hp=true`, GPU workers are configured, and
+`SchedulerHostContext` reports `GPU_METAL` available. Both HP and RT dirty
+source batches currently use high priority, and both downstream groups use
+normal priority, so queue naming must not be interpreted as an intent contract.
+Older fields such as
 `force_cpu_for_rt`, `rt_preempt_threshold_ms`, and scheduler-local
 implementation priority tables are not active configuration in the current
 code path.
+
+### Per-graph physical resource ownership
+
+Each `GraphRuntime` owns a scheduler object for HP and another for RT. Graph
+load creates both objects and runtime start starts both. With the default
+`cpu_work_stealing` type, a configured worker count of zero is resolved by each
+instance independently to `hardware_concurrency()`. The approximate default
+thread count is therefore:
+
+```text
+graph count x 2 intent schedulers x hardware_concurrency
+```
+
+`gpu_pipeline` likewise owns CPU and GPU thread vectors per instance.
+`serial_debug` is the exception and executes synchronously on the calling
+thread. The current implementation has no process-wide worker pool, global
+thread budget, or cross-graph fairness mechanism.
 
 ## Plugin Discovery vs Graph Selection
 
@@ -327,11 +347,10 @@ observation policy, and never falls back to embedded scheduler state.
 
 ## Scheduler Dispatch Boundary
 
-`IScheduler` no longer exposes compute-planning helpers. Removed planning
-interfaces must not be reintroduced, so scheduler implementations cannot
-accidentally own graph/task planning.
+`IScheduler` exposes no compute-planning helpers. Scheduler implementations
+therefore cannot own graph or task planning.
 
-The target model is:
+The current dispatch model is:
 
 ```text
 GraphModel topology
@@ -345,9 +364,9 @@ GraphModel topology
   -> Scheduler resource dispatch
 ```
 
-Queue selection, batching, worker reservation, cancellation, and
-resource-specific dispatch belong in the scheduler. Scheduler runtimes also
-report available devices through `SchedulerTaskRuntime::available_devices()`.
+Current scheduler instances own queue selection, batching, worker lifecycle,
+epoch filtering, and resource-specific dispatch. Scheduler runtimes also report
+available devices through `SchedulerTaskRuntime::available_devices()`.
 `ComputeTaskDispatcher` uses that list with
 `OpRegistry::select_best_implementation()` to choose operation callbacks that
 match the already materialized task shape. Scheduler queue routing therefore
@@ -359,22 +378,25 @@ The dirty control lane is not a dirty-feature-specific scheduler queue. Dirty
 nodes update graph-scoped dirty lifecycle and ROI state through a serialized
 control path; the dispatcher materializes dirty work generations from that
 state and submits only concrete ready task callbacks to the scheduler.
-Scheduler implementations should make decisions from generic ready-task
-metadata such as epoch, dirty generation, and optional scheduler-specific
-priority hints. A scheduler may drop stale queued work by epoch, use FIFO/LIFO
-or work-stealing queues, route CPU/GPU resources, or keep older work running,
-but it should not receive task graphs or require a bespoke dirty-source queue.
+Scheduler implementations make decisions from generic submission metadata such
+as scheduler-local epoch and optional scheduler-specific priority hints. Dirty
+generation remains task/snapshot provenance and is not passed as the scheduler
+epoch by the current source-first dirty dispatch. A scheduler may drop stale
+queued work by epoch, use FIFO/LIFO or work-stealing queues, route CPU/GPU
+resources, or keep older work running. It does not receive task graphs or
+require a bespoke dirty-source queue.
 
 The compute-service path derives planned work before scheduler dispatch and
-does not expose a compatibility compute path outside planned-task dispatch. An
+exposes no compute path outside planned-task dispatch. An
 empty planned dispatch is acceptable only when the target already has reusable
 HP output; otherwise it is a planning contract error.
 
 ## Epoch and Cancellation
 
 Scheduler queues use epochs to cancel stale queued work. Epoch `0` is treated
-as non-cancelable compatibility work. New interactive scheduling should assign
-real epochs so obsolete RT work can be dropped.
+as non-cancelable compatibility work. Only submissions carrying a real epoch
+can be dropped as stale. Epoch filtering does not cancel a callback that is
+already running and is not a general `ComputeRun` cancellation contract.
 
 ## Observability
 
@@ -406,19 +428,19 @@ premature-sentinel cursors fail with `GraphErrc::InvalidParameter` before a page
 is copied. Internal tests may clear retained trace slots, but production code
 has no unbounded trace getter or public clear control.
 
-## Development Direction
+## Current Boundary Invariants
 
-- Keep `IScheduler` as the formal public scheduler interface.
-- Keep planned parallel work routed through scheduler-owned task runtimes.
-- Keep graph-state commands and visible graph compute requests behind
+- `IScheduler` is the current formal public scheduler interface.
+- Concrete ready parallel work is routed through scheduler-owned task runtimes;
+  plans are not pulled by schedulers.
+- Graph-state commands and visible graph compute requests remain behind
   `GraphStateExecutor`.
-- Keep scheduler runtimes ready-task-only: they receive concrete callbacks with
-  epoch/generation metadata and optional scheduler-specific hints, not task
+- Scheduler runtimes are ready-task-only: they receive concrete callbacks with
+  scheduler-local epoch and optional scheduler-specific hints, not task
   graphs or dirty work-set state.
-- Keep plugin scheduler lifecycle compatible with `Plugin-ABI.md`.
-- Keep scheduler attachment limited to `SchedulerHostContext`; new capability
-  must be versioned and must not expose graph/runtime ownership or native
-  backend handles.
-- Continue later work on richer annotated task pools, planner plugin ABI, and
-  scheduler policy metadata without moving graph-level dirty planning into a
-  scheduler.
+- Plugin scheduler lifecycle follows `Plugin-ABI.md`.
+- Scheduler attachment is limited to `SchedulerHostContext`; the context does
+  not expose graph/runtime ownership or native backend handles.
+- The current interface combines policy and physical worker ownership. ADR 0003
+  records a different accepted ownership decision for later implementation;
+  this document describes the currently executable contract.

@@ -1,6 +1,6 @@
-# 开发与验证说明
+# 测试与验证
 
-本文档记录影响内核可信度的仓库级验证预期。
+本文档定义仓库级测试与验证行为，属于开发指引，而不是内核运行时架构说明。
 
 ## 主线 macOS 架构
 
@@ -171,30 +171,10 @@ GTest、nlohmann-json、clang-format、Python 和 cpplint。
 - `ci/scripts/integration_suite.sh`：顺序执行 integration 行为检查，包括 CLI、propagation、plugin
   和 scheduler 覆盖。
 
-过时的 `SplitComputeServiceRuntimeTrace` source/provenance harness 已从产品测试 inventory 移除。
-受保护的 `ci/scripts/ctest_full.sh` 仍包含目前无实际作用的 exclusion token，
-`.github/workflows/ci_scheduler_log.yml` 也仍清点旧源码路径。仓库政策禁止在本 feature branch 修改
-这些文件；待本布局进入 main 后，必须从 main 创建后续 `CI/**` branch，移除 no-op exclusion 并更新
-workflow inventory。GitHub job 状态和可下载 artifact 用于报告远程 integration 行为。完整 workflow
-和 artifact 下载边界记录在 `docs/CI/zh/github-actions.zh.md`。
+CI 源码清单与 exclusion list 必须描述维护中的测试和当前源码路径。迁移专用 harness 名称
+不得作为永久 exclusion 保留，也不得被视为产品行为。GitHub job 状态和可下载 artifact 用于
+报告远程 integration 行为。完整 workflow 和 artifact 下载边界记录在
+`docs/CI/zh/github-actions.zh.md`。
 
-## 重构边界
-
-以下是已识别的后续重构，不属于当前 kernel-contract 清理：
-
-- 在 frontend 展示契约定义后，添加更丰富的 dirty snapshot 可视化 API。
-- Global HP dirty ROI 现在会进入 HP dirty planning，而不是过去无条件的完整重算 fallback。
-  非 forced request 应证明局部 dirty work selection；forced HP dirty request 应证明 full-frame
-  HP planning 和完整 authoritative HP output，然后才能宣称 covered path 之外的正确性或性能收益。
-
-`ComputeService` 拆分现在已有专门的 `split-compute-service` OpenSpec change，
-并在维护文档 `Compute-Service-Split.md` 中记录计划。第一轮拆分已经通过
-`src/lib/compute/` 下的内部模块实现。边界覆盖位于
-`tests/integration/test_compute_service_split.cpp`，并保留 `test_kernel_contracts`、
-`test_propagation_contracts`、`test_scheduler`、`test_milestone34` 和
-`test_gpu_pipeline_scheduler` 的回归覆盖。
-
-`GraphTraversalService` 拓扑/ROI 拆分已经落地。边界覆盖位于
-`tests/unit/test_graph_topology_boundaries.cpp`、
-`tests/unit/test_propagation_contracts.cpp`，以及消费这些边界的
-长期运行时行为测试。
+架构演进目标不会在本测试文档中维护，而是记录在
+`docs/roadmap/zh/Kernel-Evolution.zh.md`。每项实现变更分别定义与风险相称的验证和长期回归覆盖。

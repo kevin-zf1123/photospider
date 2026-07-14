@@ -1,158 +1,155 @@
 # Graph Lifecycle and Mutation Semantics
 
-This document defines graph/runtime ownership and failure behavior for graph
-load, reload, edit, and clear operations.
+This document describes the current ownership, publication, mutation, and
+failure behavior of graph sessions. It records implemented behavior, including
+known boundary limitations; proposed persistence abstractions belong in the
+kernel evolution roadmap.
 
-## Runtime Ownership
+## Ownership
 
-`Kernel` owns a map of graph names to `GraphRuntime` instances. Each
-`GraphRuntime` owns exactly one `GraphModel`, graph-state executor, event
-service, scheduler map, and platform context.
+`Kernel` owns a map from graph names to `GraphRuntime` instances. Each runtime
+owns one `GraphModel`, one `GraphStateExecutor`, event and scheduler state, and
+platform runtime resources.
 
 ```text
 Kernel
   graph name -> GraphRuntime
+                  -> GraphStateExecutor
                   -> GraphModel
 ```
 
-Graph and runtime should be treated as a one-to-one ownership unit.
+The public `ps::Host` returns copied `GraphSessionId` values. A session id is a
+label, not a graph or runtime handle. Graph-state mutation and visible compute
+enter the same per-graph exclusive access boundary.
 
-For embedded Host concurrency, a close admission gate marks one session closing
-before backend removal. New compute and scheduler admissions fail, while close
-waits accepted synchronous calls and caller-visible async status publication.
-Kernel then submits runtime stop through the same per-graph
-`GraphStateExecutor` as compute and scheduler information/replacement before it
-erases the map entry. This ordering keeps both the runtime and its scheduler
-owners alive for every already-admitted operation. Concurrent close callers
-claim the close marker one at a time: after an earlier attempt completes, each
-waiter rechecks and performs its own existence/close attempt. A runtime-stop
-failure retains the runtime and diagnostic state, clears the marker, and
-reopens admission so inspection or a later close retry remains possible;
-`NotFound` is reserved for an actually absent map entry.
+## New Session Load
 
-## Daemon-Owned Session Identity
+`Kernel::load_graph()` constructs a runtime outside the published graph map,
+starts its configured schedulers, and then loads
+`<root>/<session>/content.yaml` when that file exists. An explicitly supplied
+source file is first copied to that session path when the source exists.
 
-`photospiderd` owns one embedded `ps::Host`; clients never own its
-`GraphRuntime` lifetimes. The version 1 router preserves the caller's safe
-`session_name` in `GraphLoadRequest.session`, so the existing
-`<root>/<session>` and cache-directory semantics remain unchanged. It returns a
-separate 128-bit opaque IPC session id and keeps a private bidirectional mapping
-to the exact Host-returned `GraphSessionId`.
+Graph document loading is transactional with respect to ordinary
+parse/validation failure and session publication:
 
-Loading is transactional across the registry and Host boundary: reserve an
-opaque id, call Host, and publish the opaque, exact Host-id, and display-name
-indexes only after Host success. A Host exception removes the reservation; a
-publication failure removes it before a best-effort compensating Host close.
-The Host contract requires that a thrown load leave no newly published
-session. The embedded Kernel/Host satisfies this contract by preallocating
-result identity before publication and committing it with a `noexcept` move.
-`graph.list` reconciles committed mappings with `Host::list_graphs()` and
-reports an invariant error instead of exposing an untracked Host name. A
-client disconnect never calls `close_graph`; another client can list and
-inspect the daemon-owned session.
+1. `GraphIOService` parses all YAML sequence entries into a temporary node map.
+2. Duplicate ids, dependencies, and cycles are validated before replacement.
+3. `GraphModel::replace_nodes()` installs nodes and topology together, resets
+   graph runtime metadata, and advances topology generation.
+4. `Kernel` inserts the runtime into its map only after the load completes.
 
-`graph.close` uses the same daemon lifecycle gate as compute admission. It
-atomically marks the mapping closing, rejects every new session-scoped Host or
-compute admission with Graph `not_found`, and waits for already admitted Host
-calls plus every queued/running job for that session. Status/result/release for
-an already accepted job remain available because they are job-scoped and do
-not enter Host. Only after those counts reach zero does the daemon acquire its
-Host mutex and invoke `Host::close_graph()`. Success removes the mapping; Host
-`NotFound` removes a stale mapping while preserving the failure; any other Host
-failure atomically reopens admission and retains the mapping.
+A parse, node-construction, or topology failure therefore publishes neither a
+partial graph nor a new session. Resource exhaustion propagates. Other handled
+load failures return a failed Host result. Directory creation and file-copy
+side effects that happened before parsing are not rolled back.
 
-The public Host contract does not promise thread safety. The daemon therefore
-uses one dedicated mutex around every Host call, including read-only listing
-and inspection. Protocol validation plus `daemon.ping`/`daemon.version` do not
-take that mutex, and socket IO never occurs while it is held. Signal shutdown
-stops session, compute, and snapshot admission plus new output leases. While
-the persistent lifecycle lock remains held, it identity-unlinks the exact
-Active pathname while the listener fd retains the original inode, then closes
-the listener so no new pathname connection can queue during later drain. It
-next wakes and joins client workers, drains accepted jobs, and joins the sole
-compute worker. It then removes terminal job ownership, clears stable
-collection snapshots, stops output publication, waits for active delivery
-leases to release or expire, and identity-cleans/closes the OutputStore before
-attempting to close active Host sessions. Only after registry and Host cleanup
-does it release the lifecycle lock and destroy Host state. The lock file remains
-for stable cross-process synchronization. The complete wire and socket contract
-is maintained in
-`docs/codebase-structure/IPC-Protocol-v1.md`.
+The current source-path boundary has three important limitations:
 
-## New Graph Load
+- directory creation performed by the `GraphRuntime` constructor is outside
+  Kernel's best-effort copy block. A filesystem failure propagates as an I/O
+  load failure and no session is published, but directories already created by
+  the constructor are not rolled back;
+- the later session-directory setup and source/config copy block suppresses
+  failures other than `std::bad_alloc` before the document load step;
+- when the caller supplies a non-empty YAML path that does not exist, it does
+  not replace the session-local target. Kernel loads an older
+  `content.yaml` if one is already present; otherwise it prints a warning and
+  publishes an empty session instead of returning an I/O failure.
 
-Loading a new graph should create a new `GraphRuntime` and expose it through
-`Kernel` only after YAML validation succeeds.
+An omitted YAML path is different: Kernel uses an existing session-local
+`content.yaml` when present, otherwise it intentionally publishes an empty
+session. These cases are not yet represented by one frozen load-error matrix.
 
-If any node in the YAML is invalid, missing required fields, or creates a cycle,
-the load must return an error and must not expose a partially loaded graph.
+## Existing Session Reload
 
-The desired behavior is:
+`Host::reload_graph()` first distinguishes a missing session, then submits the
+reload through `GraphStateExecutor`. `GraphIOService` builds and validates a
+temporary replacement exactly as it does for initial loading. Until
+`replace_nodes()` succeeds, the visible node map, topology, topology
+generation, cache, timing, and dirty/planning state remain unchanged.
 
-```text
-parse YAML -> validate all nodes/topology -> rebuild adjacency -> create/commit runtime
-                                      \-> on failure: return error, expose none
-```
+Successful reload replaces the whole graph, resets model runtime state, and
+advances topology generation even when node ids are reused. Runtime-owned
+mirrors such as `RealtimeProxyGraph` observe that generation boundary and
+discard stale per-node state.
 
-Partially keeping valid nodes before the failing node is not desired.
+## Node Replacement and Structural Edits
 
-## Existing Graph Reload
+`Host::set_node_yaml()` parses one candidate node, forces its id to the
+requested existing node id, and calls `GraphModel::replace_node()`. Replacement
+copies the current node map, validates the complete candidate topology, and
+only then swaps it into visible state. Parse, missing-dependency, or cycle
+validation failure leaves the previous node map and topology unchanged. The
+current implementation does not claim an all-exception strong guarantee:
+allocation failure while rebuilding the already-validated topology may occur
+after the candidate node map has been moved into the model.
 
-Reloading an existing graph is more sensitive because it operates on a graph
-name that may already be visible. The desired direction is to avoid half-cleared
-or partially rebuilt model state on reload failure.
+`add_node()`, `remove_node()`, and input-rewire methods follow the same
+candidate-map pattern. A successful structural edit rebuilds the adjacency
+index, advances topology generation, and clears the cached full task graph.
 
-Chosen behavior: failed reload preserves the previous graph. Reload validates
-the replacement model and rebuilds topology adjacency before committing it to
-the visible `GraphModel`. A successful replacement advances topology generation
-even when node ids are reused, so runtime-owned mirrors such as
-`RealtimeProxyGraph` reset stale per-node state before the next compute.
+## Clear
 
-## Node YAML Replacement
+`GraphModel::clear()` performs a model reset, not only node deletion. It clears:
 
-Node YAML replacement should preserve the old node and graph if validation
-fails.
+- nodes and topology adjacency;
+- timing and accumulated I/O state;
+- dirty snapshots, generations, and source commit state;
+- compute-plan history and full-task-graph cache;
+- disk-cache diagnostics and skip-save state.
 
-At minimum, replacement must parse the new node and keep the old node on parse
-or field validation failure. Topology validation should also happen before
-commit so replacement cannot introduce cycles or broken dependencies.
+Clear advances topology generation and leaves the model in quiet mode. It does
+not close or destroy the owning `GraphRuntime`; the session remains loaded. It
+also does not delete disk-cache files, clear runtime-owned event/trace rings,
+directly clear `RealtimeProxyGraph`, or clear Kernel-owned `LastError`.
+`RealtimeProxyGraph` invalidates itself when its next synchronization observes
+the advanced topology generation.
 
-Replacement validates the candidate topology before commit. If parsing,
-dependency validation, or cycle validation fails, the previous node and graph
-remain visible.
+## Close and Lifetime
 
-## GraphModel Clear
+Embedded Host close first marks the session closing. New compute and scheduler
+admissions fail, while close waits for admitted synchronous calls and
+caller-visible async status publication. Kernel then stops the runtime through
+the same `GraphStateExecutor` and removes the map entry.
 
-`GraphModel::clear()` should reset model-level runtime state, not only erase
-`nodes`.
+Concurrent close callers serialize through the Host lifecycle gate. A runtime
+stop failure retains the runtime and diagnostic state, clears the closing
+marker, and reopens admission. `NotFound` is reserved for a session that is
+actually absent.
 
-Clear should reset:
+`photospiderd` owns daemon session identity, job admission, Host serialization,
+and shutdown drainage around this embedded Host contract. Its exact mapping,
+lease, socket, and shutdown rules are defined in
+`../codebase-structure/IPC-Protocol-v1.md`; they are not graph-kernel ownership.
 
-- node map
-- topology adjacency index
-- topology generation
-- timing results
-- accumulated IO time
-- skip-save state
-- other per-run model state that could affect a subsequent load or compute
+## Current Error Surface
 
-This makes reload and clear behavior easier to reason about and avoids stale
-metadata attached to an empty graph. Runtime-owned state keyed by node id must
-treat the generation change as an invalidation boundary rather than preserving
-entries for reused ids.
+| Operation | Current public behavior |
+| --- | --- |
+| initial load, duplicate session | failed load result, currently classified as `InvalidParameter` by the embedded Host |
+| initial load, runtime directory creation failure | no session publication; reported as `GraphErrc::Io`; already-created filesystem side effects are not rolled back |
+| initial load, document parse/topology failure | no session publication; detailed backend category currently collapses to the same load failure |
+| initial load, explicit missing source | loads an older session-local `content.yaml` when present; otherwise warns and publishes an empty session |
+| reload, missing session | `GraphErrc::NotFound` |
+| reload, unreadable source or YAML syntax parser failure | `GraphErrc::Io` |
+| reload, non-sequence or duplicate-id document | `GraphErrc::InvalidYaml` |
+| reload, dependency/cycle validation | the corresponding backend `GraphErrc` |
+| reload, uncategorized YAML conversion exception | `GraphErrc::Unknown` through the stored last-error path |
+| node replacement, missing session/node, malformed input, missing dependency, or cycle | the current quiet Kernel facade collapses the failure and Host reports `GraphErrc::InvalidYaml` |
+| clear or close, missing session | `GraphErrc::NotFound` |
 
-## Error Surface
+`OperationStatus` exposes an error domain, signed code, stable name, and
+diagnostic message. Callers branch on the domain and code, not diagnostic text.
+The initial-load inconsistencies above are current limitations, not a general
+graph-document contract.
 
-Graph load, reload, and edit failures are visible to frontends through public
-`ps::Host` status and error values. In embedded mode, the Host adapter maps
-internal `Kernel` and `InteractionService` failure diagnostics into that public
-surface. Frontends neither call those internal facades nor infer failure from a
-partially changed graph.
+## Implementation and Validation Entry Points
 
-In daemon mode, the same `OperationStatus` preserves its domain-complete
-`OperationErrorDomain`, signed code, stable name, and diagnostic message.
-Host failures use the `graph` domain with explicit `GraphErrc` number/name
-pairs. Framing, envelope, and parameter errors remain in the `protocol`
-domain; local socket failures remain `OperationErrorDomain::Transport`.
-Diagnostic text is not a branching contract, and no transport failure is
-rewritten as graph IO.
+- `src/lib/runtime/kernel.cpp`
+- `src/lib/runtime/kernel_io_cache_facade.cpp`
+- `src/lib/runtime/kernel_inspection_facade.cpp`
+- `src/lib/graph/graph_io_service.cpp`
+- `src/lib/graph/graph_model.cpp`
+- `src/lib/host/embedded_host.cpp`
+- `tests/integration/test_host_adapter.cpp`
+- `tests/integration/test_kernel_contracts.cpp`

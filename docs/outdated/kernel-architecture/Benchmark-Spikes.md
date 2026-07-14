@@ -1,4 +1,8 @@
-# Benchmark Spikes
+# Archived Benchmark Spikes
+
+> Archived on 2026-07-14. These questions did not produce an architectural
+> decision and therefore are not current kernel documentation. Follow-up work
+> is tracked by the generic-data and heterogeneous-execution project.
 
 These benchmark spikes must be completed before tightening Metal context access
 policy or changing the portable CPU row-alignment requirement.

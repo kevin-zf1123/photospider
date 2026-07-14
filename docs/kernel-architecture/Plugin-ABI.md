@@ -37,7 +37,7 @@ Supported operation registrations include:
 | Dirty ROI propagator | Backward ROI propagation. |
 | Forward ROI propagator | Downstream ROI projection. |
 | Dependency LUT builder | Data-dependent spatial dependency map. |
-| Device implementation | CPU, Metal, CUDA, or future public `Device` capability. |
+| Device implementation | CPU, Metal, CUDA, or another supported public `Device` capability. |
 
 The canonical registry identity is `type:subtype`. Both segments must be
 non-empty and neither may contain the reserved `:` separator, otherwise two
@@ -132,11 +132,12 @@ Symbol visibility rules:
 - This remains a C++ ABI boundary because callbacks use `std::function`,
   standard-library containers, and public C++ value types. Compiler, standard
   library, exception model, RTTI settings, and Photospider SDK compatibility
-  remain version-sensitive until a future pure C ABI replaces the callbacks.
+  are version-sensitive. No cross-toolchain or pure C compatibility is
+  promised by the current ABI.
 
 Current operation plugins that are intended to be loadable through
 `plugin_dirs` must also register explicit dirty and forward ROI propagators. The
-registry still provides legacy identity fallback for migration, but that
+registry still provides an identity compatibility fallback, but that
 fallback is not a complete plugin contract. Pointwise image operations can
 register pass-through ROI functions; side-effecting monolithic operations must
 document their side-effect semantics and still register explicit propagators
@@ -497,8 +498,9 @@ also depends on a compatible compiler, standard library, exception model,
 RTTI configuration, and C++ ABI. The human-readable implementation version is
 diagnostic metadata only and never substitutes for the numeric handshake.
 
-This is transitional. The long-term direction is a pure C scheduler ABI using
-opaque handles or callback tables so plugins do not depend on C++ binary ABI.
+This ABI is explicitly provisional. ADR 0003 and the kernel evolution roadmap
+record the accepted replacement direction; they do not change the current
+loader contract described here.
 
 ## Compatibility Guidelines
 
@@ -514,4 +516,4 @@ opaque handles or callback tables so plugins do not depend on C++ binary ABI.
   contract, and export the exact numeric handshake plus all six remaining
   required functions.
 - The host should use plugin destroy for plugin-created scheduler instances.
-- Future C ABI work should be done as a separate compatibility change.
+- No pure C operation or scheduler ABI compatibility is currently provided.

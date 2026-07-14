@@ -1,7 +1,7 @@
-# Development and Validation Notes
+# Testing and Validation
 
-This document records repository-level validation expectations that affect
-kernel trustworthiness.
+This document defines repository-level testing and validation behavior. It is
+development guidance rather than a description of kernel runtime architecture.
 
 ## Mainline macOS Architecture
 
@@ -231,40 +231,14 @@ The maintained entry points are:
 - `ci/scripts/integration_suite.sh` for sequential integration behavior checks,
   including CLI, propagation, plugin, and scheduler coverage.
 
-The obsolete `SplitComputeServiceRuntimeTrace` source/provenance harness has
-been removed from the product test inventory. The protected
-`ci/scripts/ctest_full.sh` still contains a now-inert exclusion token, and
-`.github/workflows/ci_scheduler_log.yml` still inventories old source paths.
-Repository policy forbids changing those files on this feature branch; a
-follow-up `CI/**` branch created from main must remove the no-op exclusion and
-update the workflow inventory after this layout reaches main. GitHub job status
-and downloadable artifacts report remote integration behavior. The complete
+CI source inventories and exclusion lists must describe maintained tests and
+current source paths. Migration-only harness names must not be retained as
+permanent exclusions or treated as product behavior. GitHub job status and
+downloadable artifacts report remote integration behavior. The complete
 workflow and artifact download boundary are documented in
 `docs/CI/github-actions.md`.
 
-## Refactor Boundaries
-
-The following are recognized follow-up refactors, not part of the current
-kernel-contract cleanup:
-
-- Add richer dirty snapshot visualization APIs after the frontend display
-  contract is defined.
-- Global HP dirty ROI now routes through HP dirty planning instead of the former
-  unconditional full-recompute fallback. Non-forced requests should prove local
-  dirty work selection; forced HP dirty requests should prove full-frame HP
-  planning and complete authoritative HP output before claiming correctness or
-  performance improvements beyond the covered path.
-
-The `ComputeService` split now has a dedicated `split-compute-service`
-OpenSpec change and a maintained plan in `Compute-Service-Split.md`. The first
-split is implemented behind internal modules under
-`src/lib/compute/`. Boundary coverage lives in
-`tests/integration/test_compute_service_split.cpp`, with retained regression
-coverage from
-`test_kernel_contracts`, `test_propagation_contracts`, `test_scheduler`,
-`test_milestone34`, and `test_gpu_pipeline_scheduler`.
-
-The `GraphTraversalService` topology/ROI split has landed. Boundary coverage
-lives in `tests/unit/test_graph_topology_boundaries.cpp`,
-`tests/unit/test_propagation_contracts.cpp`, and the maintained runtime behavior
-tests that consume those boundaries.
+Architecture evolution goals are intentionally not maintained in this testing
+document. They are recorded in `docs/roadmap/Kernel-Evolution.md`, while each
+implementation change defines its own proportional validation and durable
+regression coverage.
