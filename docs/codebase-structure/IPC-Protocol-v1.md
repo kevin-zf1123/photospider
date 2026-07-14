@@ -194,6 +194,18 @@ Ordinary calls use short-lived connections, asynchronous work owns joined
 pollers, and adapter destruction stops only those pollers; it never closes a
 daemon session, unloads process-owned plugins, or falls back to embedded work.
 
+The public IPC Host preserves the embedded Host's graph-path behavior without
+weakening the typed Client or wire boundary. After a short-lived connection
+succeeds and before calling the typed Client, it resolves every nonempty
+relative `GraphLoadRequest` filesystem field and each nonempty relative
+reload/save `yaml_path` against the IPC client process working directory.
+Absolute and empty paths remain unchanged; no path is canonicalized or checked
+for existence. A caller-working-directory resolution failure returns Graph
+`io` without sending the RPC or entering the daemon Host. Direct typed Client
+and raw wire callers must still supply the absolute graph paths specified under
+“Opaque Graph Sessions.” Relative plugin and scheduler paths or patterns keep
+their separately documented exact-text semantics and are not rewritten.
+
 ## Transport and Frame
 
 The daemon listens only on a Unix domain stream socket. Each frame is:

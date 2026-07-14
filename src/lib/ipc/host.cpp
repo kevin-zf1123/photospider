@@ -14,6 +14,7 @@
 #include <cstdint>
 #include <cstring>
 #include <exception>
+#include <filesystem>
 #include <functional>
 #include <future>
 #include <iterator>
@@ -25,6 +26,7 @@
 #include <optional>
 #include <stdexcept>
 #include <string>
+#include <system_error>
 #include <thread>
 #include <utility>
 #include <vector>
@@ -72,6 +74,76 @@ OperationStatus invalid_adapter_response(std::string message) {
  */
 IpcSessionId ipc_session(const GraphSessionId& session) {
   return {session.value};
+}
+
+/**
+ * @brief Resolves one public Host path in the IPC client process.
+ * @param path Caller-provided path text.
+ * @param field Stable field name used only for a failure diagnostic.
+ * @return Empty and absolute paths unchanged, a caller-CWD absolute path for
+ *         relative text, or Graph `Io` when the client working directory
+ *         cannot be resolved.
+ * @throws std::bad_alloc if path or diagnostic allocation fails.
+ * @note This helper does not canonicalize, require existence, or weaken the
+ *       typed IPC protocol's absolute-path validation. Resolving before wire
+ *       preserves public Host relative-path semantics without making the
+ *       daemon process working directory observable.
+ */
+Result<std::string> resolve_host_path(const std::string& path,
+                                      const char* field) {
+  const std::filesystem::path filesystem_path(path);
+  if (path.empty() || filesystem_path.is_absolute()) {
+    return {{}, path};
+  }
+  std::error_code error;
+  const std::filesystem::path absolute_path =
+      std::filesystem::absolute(filesystem_path, error);
+  if (error) {
+    return {
+        internal::failure_status(
+            OperationErrorDomain::Graph,
+            static_cast<std::int32_t>(GraphErrc::Io),
+            graph_error_stable_name(GraphErrc::Io),
+            std::string("IPC Host could not resolve relative ") + field +
+                " against the client working directory: " + error.message()),
+        {}};
+  }
+  return {{}, absolute_path.string()};
+}
+
+/**
+ * @brief Resolves every graph-load filesystem field for IPC transport.
+ * @param request Public Host request whose session label remains unchanged.
+ * @return Copied request with nonempty relative paths made absolute in the
+ *         IPC client process, or the first caller-side Graph `Io` failure.
+ * @throws std::bad_alloc if request, path, or diagnostic allocation fails.
+ * @note Empty optional fields keep their backend sentinel meaning. No path is
+ *       canonicalized or checked for existence, and no daemon call occurs.
+ */
+Result<GraphLoadRequest> resolve_graph_load_request(
+    const GraphLoadRequest& request) {
+  GraphLoadRequest resolved = request;
+  Result<std::string> path = resolve_host_path(request.root_dir, "root_dir");
+  if (!path.status.ok) {
+    return {std::move(path.status), {}};
+  }
+  resolved.root_dir = std::move(path.value);
+  path = resolve_host_path(request.yaml_path, "yaml_path");
+  if (!path.status.ok) {
+    return {std::move(path.status), {}};
+  }
+  resolved.yaml_path = std::move(path.value);
+  path = resolve_host_path(request.config_path, "config_path");
+  if (!path.status.ok) {
+    return {std::move(path.status), {}};
+  }
+  resolved.config_path = std::move(path.value);
+  path = resolve_host_path(request.cache_root_dir, "cache_root_dir");
+  if (!path.status.ok) {
+    return {std::move(path.status), {}};
+  }
+  resolved.cache_root_dir = std::move(path.value);
+  return {{}, std::move(resolved)};
 }
 
 /**
@@ -983,8 +1055,16 @@ class IpcHost final : public Host {
 
   /** @copydoc Host::load_graph */
   Result<GraphSessionId> load_graph(const GraphLoadRequest& request) override {
-    IpcResult<GraphSessionSummary> result = call_value<GraphSessionSummary>(
-        [&request](Client& client) { return client.load_graph(request); });
+    IpcResult<GraphSessionSummary> result =
+        call_value<GraphSessionSummary>([&request](Client& client) {
+          Result<GraphLoadRequest> resolved =
+              resolve_graph_load_request(request);
+          if (!resolved.status.ok) {
+            return IpcResult<GraphSessionSummary>{std::move(resolved.status),
+                                                  {}};
+          }
+          return client.load_graph(resolved.value);
+        });
     if (!result.status.ok) {
       return {std::move(result.status), {}};
     }
@@ -1019,7 +1099,11 @@ class IpcHost final : public Host {
   VoidResult reload_graph(const GraphSessionId& session,
                           const std::string& path) override {
     return call_void([&](Client& client) {
-      return client.reload_graph(ipc_session(session), path);
+      Result<std::string> resolved = resolve_host_path(path, "yaml_path");
+      if (!resolved.status.ok) {
+        return VoidResult{std::move(resolved.status)};
+      }
+      return client.reload_graph(ipc_session(session), resolved.value);
     });
   }
 
@@ -1027,7 +1111,11 @@ class IpcHost final : public Host {
   VoidResult save_graph(const GraphSessionId& session,
                         const std::string& path) override {
     return call_void([&](Client& client) {
-      return client.save_graph(ipc_session(session), path);
+      Result<std::string> resolved = resolve_host_path(path, "yaml_path");
+      if (!resolved.status.ok) {
+        return VoidResult{std::move(resolved.status)};
+      }
+      return client.save_graph(ipc_session(session), resolved.value);
     });
   }
 

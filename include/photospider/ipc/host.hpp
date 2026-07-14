@@ -24,6 +24,9 @@ namespace ps::ipc {
  * typed version 1 Client primitive. Ordinary calls use independent short-lived
  * connections. Compute calls compose daemon jobs through submit, polling,
  * terminal result, and best-effort release without automatic resubmission.
+ * Graph load/reload/save calls resolve nonempty relative Host paths against
+ * the IPC client process working directory after connection and before their
+ * typed Client call; the wire contract remains absolute-path-only.
  *
  * @param socket_path Absolute Unix-domain socket path of `photospiderd`.
  * @return Unique complete IPC Host implementation.

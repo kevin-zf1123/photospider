@@ -179,6 +179,15 @@ Installed package smoke 会把这张表维持为精确、唯一的 53-symbol ref
 拥有 joined poller；adapter destruction 只停止这些 poller，不会关闭 daemon session、卸载
 process-owned plugin，也不会 fallback 到 embedded work。
 
+Public IPC Host 会在不放宽 typed Client 或 wire boundary 的前提下，保留 embedded Host 的
+graph path 行为。Short-lived connection 成功后、调用 typed Client 前，它会把
+`GraphLoadRequest` 中每个非空相对 filesystem field，以及 reload/save 的每个非空相对
+`yaml_path`，按 IPC client 进程工作目录解析为绝对路径。绝对路径与空路径保持不变；不会进行
+canonicalize，也不会检查路径是否存在。若无法解析 caller working directory，则返回 Graph
+`io`，且不发送 RPC、不进入 daemon Host。Direct typed Client 与 raw wire caller 仍必须提供
+“Opaque Graph Session”一节规定的绝对 graph path。具有独立文档约定的相对 plugin/scheduler
+path 或 pattern 继续保留精确文本语义，不会被改写。
+
 ## Transport 与 Frame
 
 Daemon 只监听 Unix domain stream socket。每个 frame 为：
