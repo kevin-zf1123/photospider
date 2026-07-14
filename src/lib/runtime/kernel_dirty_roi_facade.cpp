@@ -5,6 +5,9 @@
 #include <string>
 
 #include "runtime/kernel.hpp"
+#if defined(PHOTOSPIDER_INTERNAL_REQUIRED_TARGET_TESTING)
+#include "runtime/kernel_required_target_test_access.hpp"
+#endif
 
 namespace ps {
 
@@ -26,6 +29,10 @@ std::optional<cv::Rect> Kernel::project_roi_forward(const std::string& name,
                            "ROI target node " + std::to_string(target_node_id) +
                                " not found in graph.");
         }
+#if defined(PHOTOSPIDER_INTERNAL_REQUIRED_TARGET_TESTING)
+        testing::notify_required_target_test_hook(
+            testing::RequiredTargetTestEvent::ForwardRoiEndpointsResolved);
+#endif
         return roi_propagation_service_.project_roi_forward(
             graph, start_node_id, start_roi, target_node_id);
       },
@@ -50,6 +57,10 @@ std::optional<cv::Rect> Kernel::project_roi_backward(const std::string& name,
                            "ROI source node " + std::to_string(source_node_id) +
                                " not found in graph.");
         }
+#if defined(PHOTOSPIDER_INTERNAL_REQUIRED_TARGET_TESTING)
+        testing::notify_required_target_test_hook(
+            testing::RequiredTargetTestEvent::BackwardRoiEndpointsResolved);
+#endif
         return roi_propagation_service_.project_roi_backward(
             graph, target_node_id, target_roi, source_node_id);
       },

@@ -337,6 +337,7 @@ set(PHOTOSPIDER_GRAPH_INTERNAL_SOURCES
     src/lib/core/ops.cpp
     src/lib/graph/node_yaml.cpp
     src/lib/graph/graph_model.cpp
+    src/lib/graph/graph_state_executor.cpp
     src/lib/graph/graph_extent_resolver.cpp
     src/lib/graph/graph_traversal_service.cpp
     src/lib/graph/roi_propagation_service.cpp
@@ -472,7 +473,10 @@ target_compile_definitions(photospider PUBLIC PHOTOSPIDER_STATIC)
 if(BUILD_TESTING)
     target_compile_definitions(photospider PRIVATE
         PHOTOSPIDER_INTERNAL_BAD_ALLOC_TESTING
-        PHOTOSPIDER_INTERNAL_GRAPH_IO_TESTING)
+        PHOTOSPIDER_INTERNAL_GRAPH_IO_TESTING
+        PHOTOSPIDER_INTERNAL_GRAPH_STATE_EXECUTOR_TESTING
+        PHOTOSPIDER_INTERNAL_HOST_OPERATION_TESTING
+        PHOTOSPIDER_INTERNAL_REQUIRED_TARGET_TESTING)
 endif()
 target_compile_features(photospider PUBLIC cxx_std_17)
 
@@ -1168,6 +1172,9 @@ if(BUILD_TESTING)
         PS_TEST_OP_PLUGIN_DIR="${TEST_OP_PLUGIN_DIR}"
         PS_TEST_SCHEDULER_PLUGIN_PATH="$<TARGET_FILE:destroy_count_scheduler_plugin>"
         PHOTOSPIDER_INTERNAL_BAD_ALLOC_TESTING
+        PHOTOSPIDER_INTERNAL_GRAPH_STATE_EXECUTOR_TESTING
+        PHOTOSPIDER_INTERNAL_HOST_OPERATION_TESTING
+        PHOTOSPIDER_INTERNAL_REQUIRED_TARGET_TESTING
     )
     add_dependencies(test_host_adapter lifecycle_op_plugin
         override_lifecycle_op_plugin destroy_count_scheduler_plugin)

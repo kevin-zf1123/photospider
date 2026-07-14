@@ -21,14 +21,23 @@
 #include <string>
 #include <system_error>
 #include <thread>
+#include <type_traits>
 #include <utility>
 #include <vector>
 
 #include "adapters/opencv/buffer_adapter_opencv.hpp"
 #include "core/ps_types.hpp"  // NOLINT(build/include_subdir)
 #include "graph/node.hpp"     // NOLINT(build/include_subdir)
+#if defined(PHOTOSPIDER_INTERNAL_GRAPH_STATE_EXECUTOR_TESTING)
+#include "graph/graph_state_executor_test_access.hpp"
+#endif
 #include "photospider/host/host.hpp"
 #include "photospider/scheduler/scheduler_task_runtime.hpp"  // NOLINT(build/include_subdir)
+#if defined(PHOTOSPIDER_INTERNAL_REQUIRED_TARGET_TESTING) &&      \
+    defined(PHOTOSPIDER_INTERNAL_GRAPH_STATE_EXECUTOR_TESTING) && \
+    defined(PHOTOSPIDER_INTERNAL_BAD_ALLOC_TESTING)
+#include "runtime/kernel_required_target_test_access.hpp"
+#endif
 #include "scheduler/scheduler_plugin_loader.hpp"  // NOLINT(build/include_subdir)
 
 #ifndef PS_TEST_OP_PLUGIN_DIR
@@ -44,41 +53,265 @@ namespace ps {
 
 #if defined(PHOTOSPIDER_INTERNAL_BAD_ALLOC_TESTING)
 /**
- * @brief BUILD_TESTING close-coordination events mirrored from the Host.
+ * @brief BUILD_TESTING lifecycle-coordination events mirrored from the Host.
  * @throws Nothing; values are passed by value across a non-throwing callback.
  * @note The Host publishes events in close-serialization order. Test code uses
  *       atomic counters rather than retaining references to event values.
  */
-enum class EmbeddedCloseTestEvent {
+enum class EmbeddedLifecycleTestEvent {
   /** @brief One close caller has claimed the session marker. */
   MarkerClaimed,
   /** @brief A duplicate close caller is about to wait for marker release. */
   DuplicateAboutToWait,
+  /** @brief One synchronous session operation has entered admission. */
+  SessionOperationAdmitted,
 };
 
 /**
- * @brief Borrowed callback installed for deterministic close synchronization.
+ * @brief Borrowed callback installed for deterministic lifecycle coordination.
  * @throws Nothing; the callback contract is explicitly non-throwing.
  * @note Both `context` and this hook object remain owned by the test. Their
- *       lifetimes cover every serialized Host close callback until the hook is
- *       cleared.
+ *       lifetimes cover every serialized Host lifecycle callback until the
+ *       hook is cleared.
  */
-struct EmbeddedCloseTestHook {
+struct EmbeddedLifecycleTestHook {
   /** @brief Borrowed test context. */
   void* context = nullptr;
   /** @brief Non-throwing event callback. */
   void (*notify)(void* context,
-                 EmbeddedCloseTestEvent event) noexcept = nullptr;
+                 EmbeddedLifecycleTestEvent event) noexcept = nullptr;
 };
 
 /**
- * @brief Installs or clears the embedded Host close test hook.
- * @param hook Hook that outlives concurrent close calls, or nullptr.
+ * @brief Installs or clears the embedded Host lifecycle test hook.
+ * @param hook Hook that outlives concurrent lifecycle callbacks, or nullptr.
  * @return Nothing.
  * @throws Nothing.
  */
-void set_embedded_host_close_test_hook(
-    const EmbeddedCloseTestHook* hook) noexcept;
+void set_embedded_host_lifecycle_test_hook(
+    const EmbeddedLifecycleTestHook* hook) noexcept;
+#endif
+
+#if defined(PHOTOSPIDER_INTERNAL_HOST_OPERATION_TESTING)
+/**
+ * @brief Host operations covered by deterministic admission-lifetime tests.
+ * @throws Nothing for value construction and comparison.
+ */
+enum class EmbeddedOperationTestEvent {
+  /** @brief Graph YAML save operation. */
+  SaveGraph,
+  /** @brief Required-node YAML replacement operation. */
+  SetNodeYaml,
+  /** @brief Forward ROI projection operation. */
+  ForwardRoiProjection,
+  /** @brief Backward ROI projection operation. */
+  BackwardRoiProjection,
+};
+
+/**
+ * @brief Checkpoints proving admission spans Kernel and public translation.
+ * @throws Nothing for value construction and comparison.
+ */
+enum class EmbeddedOperationTestPhase {
+  /** @brief Operation is admitted but has not entered Kernel. */
+  BeforeKernelReady,
+  /** @brief Blocker ended and pre-Kernel admission was sampled. */
+  BeforeKernelAdmissionSnapshot,
+  /** @brief Public result exists and pre-return admission was sampled. */
+  AfterTranslationAdmissionSnapshot,
+};
+
+/**
+ * @brief Borrowed blocking callback for one Host-operation checkpoint.
+ * @throws Nothing for aggregate construction.
+ */
+struct EmbeddedOperationTestHook {
+  /** @brief Borrowed test context. */
+  void* context = nullptr;
+
+  /**
+   * @brief Observes and blocks one operation-lifetime checkpoint.
+   * @param context Borrowed context supplied by the test.
+   * @param event Operation reaching the checkpoint.
+   * @param phase Admission-lifetime phase being observed.
+   * @param admission_active Exact session-admission snapshot for snapshot
+   *        phases; ignored for BeforeKernelReady.
+   * @return Nothing.
+   * @throws Nothing; implementations contain all synchronization failures.
+   */
+  void (*wait)(void* context, EmbeddedOperationTestEvent event,
+               EmbeddedOperationTestPhase phase,
+               bool admission_active) noexcept = nullptr;
+};
+
+/**
+ * @brief Installs or clears the deterministic Host-operation test hook.
+ * @param hook Hook that outlives all affected callbacks, or nullptr.
+ * @return Nothing.
+ * @throws Nothing.
+ */
+void set_embedded_host_operation_test_hook(
+    const EmbeddedOperationTestHook* hook) noexcept;
+#endif
+
+#if defined(PHOTOSPIDER_INTERNAL_REQUIRED_TARGET_TESTING) &&      \
+    defined(PHOTOSPIDER_INTERNAL_GRAPH_STATE_EXECUTOR_TESTING) && \
+    defined(PHOTOSPIDER_INTERNAL_BAD_ALLOC_TESTING)
+/**
+ * @brief Test-owned gate for one required-target checkpoint.
+ *
+ * @throws std::bad_alloc if shared-future state copying allocates.
+ * @note The immutable expected event filters unrelated operations. The release
+ * future is fulfilled only after the competing public call has been started.
+ */
+struct RequiredTargetGateState {
+  /** @brief Required-target checkpoint this gate accepts. */
+  testing::RequiredTargetTestEvent expected;
+  /** @brief Test-owned signal that releases the graph-state work item. */
+  std::shared_future<void> release;
+  /** @brief Number of matching checkpoints reached by the work item. */
+  std::atomic<std::uint64_t> reached{0};
+};
+
+/**
+ * @brief Blocks one matching required-target checkpoint without re-entry.
+ *
+ * @param context Borrowed RequiredTargetGateState pointer.
+ * @param event Checkpoint reached by the real Kernel facade.
+ * @return Nothing.
+ * @throws Nothing; future wait failures are contained.
+ */
+void wait_at_required_target(void* context,
+                             testing::RequiredTargetTestEvent event) noexcept {
+  auto* gate = static_cast<RequiredTargetGateState*>(context);
+  if (event != gate->expected) {
+    return;
+  }
+  gate->reached.fetch_add(1, std::memory_order_release);
+  try {
+    if (gate->release.valid()) {
+      gate->release.wait();
+    }
+  } catch (...) {
+  }
+}
+
+/**
+ * @brief Installs and clears one borrowed required-target gate.
+ *
+ * @throws Nothing after construction.
+ * @note The owning test joins every affected future before this guard and its
+ * borrowed state leave scope.
+ */
+class ScopedRequiredTargetTestHook final {
+ public:
+  /**
+   * @brief Installs a gate backed by stable test-owned state.
+   * @param state State that outlives this guard.
+   * @throws Nothing.
+   */
+  explicit ScopedRequiredTargetTestHook(RequiredTargetGateState& state) noexcept
+      : hook_{&state, &wait_at_required_target} {
+    testing::set_required_target_test_hook(&hook_);
+  }
+
+  /** @brief Clears the hook before borrowed storage is destroyed. */
+  ~ScopedRequiredTargetTestHook() noexcept {
+    testing::set_required_target_test_hook(nullptr);
+  }
+
+  /**
+   * @brief Disables duplicate installation ownership.
+   * @param other Guard that retains hook ownership.
+   * @throws Nothing because construction is unavailable.
+   */
+  ScopedRequiredTargetTestHook(const ScopedRequiredTargetTestHook& other) =
+      delete;
+
+  /**
+   * @brief Disables replacement of an installed hook.
+   * @param other Guard that retains hook ownership.
+   * @return No value because assignment is unavailable.
+   * @throws Nothing because assignment is unavailable.
+   */
+  ScopedRequiredTargetTestHook& operator=(
+      const ScopedRequiredTargetTestHook& other) = delete;
+
+ private:
+  /** @brief Stable hook object borrowed by Kernel until guard destruction. */
+  testing::RequiredTargetTestHook hook_;
+};
+#endif
+
+#if defined(PHOTOSPIDER_INTERNAL_GRAPH_STATE_EXECUTOR_TESTING)
+/**
+ * @brief Counts real GraphStateExecutor mutex-contention observations.
+ *
+ * @throws Nothing for default construction and atomic updates.
+ */
+struct GraphStateExecutorContentionState {
+  /** @brief Number of tasks whose try_lock observed an owned executor mutex. */
+  std::atomic<std::uint64_t> reached{0};
+};
+
+/**
+ * @brief Records one real executor-contention observation.
+ *
+ * @param context Borrowed GraphStateExecutorContentionState pointer.
+ * @return Nothing.
+ * @throws Nothing.
+ */
+void record_graph_state_executor_contention(void* context) noexcept {
+  auto* state = static_cast<GraphStateExecutorContentionState*>(context);
+  state->reached.fetch_add(1, std::memory_order_release);
+}
+
+/**
+ * @brief Installs and clears one deterministic executor-contention observer.
+ *
+ * @throws Nothing after construction.
+ * @note The observer never blocks the task; the executor proceeds from failed
+ * try_lock to its normal blocking lock after notification returns.
+ */
+class ScopedGraphStateExecutorContentionTestHook final {
+ public:
+  /**
+   * @brief Installs an observer backed by stable test-owned state.
+   * @param state State that outlives this guard.
+   * @throws Nothing.
+   */
+  explicit ScopedGraphStateExecutorContentionTestHook(
+      GraphStateExecutorContentionState& state) noexcept
+      : hook_{&state, &record_graph_state_executor_contention} {
+    testing::set_graph_state_executor_contention_test_hook(&hook_);
+  }
+
+  /** @brief Clears the observer before borrowed state is destroyed. */
+  ~ScopedGraphStateExecutorContentionTestHook() noexcept {
+    testing::set_graph_state_executor_contention_test_hook(nullptr);
+  }
+
+  /**
+   * @brief Disables duplicate observer ownership.
+   * @param other Guard that retains observer ownership.
+   * @throws Nothing because construction is unavailable.
+   */
+  ScopedGraphStateExecutorContentionTestHook(
+      const ScopedGraphStateExecutorContentionTestHook& other) = delete;
+
+  /**
+   * @brief Disables replacement of an installed observer.
+   * @param other Guard that retains observer ownership.
+   * @return No value because assignment is unavailable.
+   * @throws Nothing because assignment is unavailable.
+   */
+  ScopedGraphStateExecutorContentionTestHook& operator=(
+      const ScopedGraphStateExecutorContentionTestHook& other) = delete;
+
+ private:
+  /** @brief Stable hook borrowed until guard destruction. */
+  testing::GraphStateExecutorContentionTestHook hook_;
+};
 #endif
 
 namespace {
@@ -100,27 +333,31 @@ std::atomic<bool> g_host_blocking_source_started{false};
  *       ordering makes each serialized callback observation visible to the
  *       polling test thread.
  */
-struct EmbeddedCloseEventState {
+struct EmbeddedLifecycleEventState {
   /** @brief Number of callers that have claimed the marker. */
   std::atomic<std::uint64_t> marker_claimed{0};
   /** @brief Number of duplicate callers that reached a condition wait. */
   std::atomic<std::uint64_t> duplicate_about_to_wait{0};
+  /** @brief Number of synchronous operations admitted after hook install. */
+  std::atomic<std::uint64_t> session_operation_admitted{0};
 };
 
 /**
- * @brief Records one embedded close event without allocating or blocking.
- * @param context Borrowed EmbeddedCloseEventState pointer.
+ * @brief Records one embedded lifecycle event without allocating or blocking.
+ * @param context Borrowed EmbeddedLifecycleEventState pointer.
  * @param event Coordination point reached by the Host.
  * @return Nothing.
  * @throws Nothing.
  */
-void record_embedded_close_event(void* context,
-                                 EmbeddedCloseTestEvent event) noexcept {
-  auto* state = static_cast<EmbeddedCloseEventState*>(context);
-  if (event == EmbeddedCloseTestEvent::MarkerClaimed) {
+void record_embedded_lifecycle_event(
+    void* context, EmbeddedLifecycleTestEvent event) noexcept {
+  auto* state = static_cast<EmbeddedLifecycleEventState*>(context);
+  if (event == EmbeddedLifecycleTestEvent::MarkerClaimed) {
     state->marker_claimed.fetch_add(1, std::memory_order_release);
-  } else {
+  } else if (event == EmbeddedLifecycleTestEvent::DuplicateAboutToWait) {
     state->duplicate_about_to_wait.fetch_add(1, std::memory_order_release);
+  } else {
+    state->session_operation_admitted.fetch_add(1, std::memory_order_release);
   }
 }
 
@@ -130,24 +367,25 @@ void record_embedded_close_event(void* context,
  * @note The guard borrows its event state and owns the stable hook object.
  *       Destruction clears the process-global hook before either can expire.
  */
-class ScopedEmbeddedCloseTestHook final {
+class ScopedEmbeddedLifecycleTestHook final {
  public:
   /**
    * @brief Installs a hook backed by the supplied event state.
    * @param state State that outlives this guard.
    * @throws Nothing.
    */
-  explicit ScopedEmbeddedCloseTestHook(EmbeddedCloseEventState& state) noexcept
-      : hook_{&state, &record_embedded_close_event} {
-    set_embedded_host_close_test_hook(&hook_);
+  explicit ScopedEmbeddedLifecycleTestHook(
+      EmbeddedLifecycleEventState& state) noexcept
+      : hook_{&state, &record_embedded_lifecycle_event} {
+    set_embedded_host_lifecycle_test_hook(&hook_);
   }
 
   /**
    * @brief Clears the borrowed hook before its state can be destroyed.
    * @throws Nothing.
    */
-  ~ScopedEmbeddedCloseTestHook() noexcept {
-    set_embedded_host_close_test_hook(nullptr);
+  ~ScopedEmbeddedLifecycleTestHook() noexcept {
+    set_embedded_host_lifecycle_test_hook(nullptr);
   }
 
   /**
@@ -155,8 +393,8 @@ class ScopedEmbeddedCloseTestHook final {
    * @param other Guard that remains installed.
    * @throws Nothing because construction is unavailable.
    */
-  ScopedEmbeddedCloseTestHook(const ScopedEmbeddedCloseTestHook& other) =
-      delete;
+  ScopedEmbeddedLifecycleTestHook(
+      const ScopedEmbeddedLifecycleTestHook& other) = delete;
 
   /**
    * @brief Prevents replacing one installed hook.
@@ -164,25 +402,139 @@ class ScopedEmbeddedCloseTestHook final {
    * @return No value because assignment is unavailable.
    * @throws Nothing because assignment is unavailable.
    */
-  ScopedEmbeddedCloseTestHook& operator=(
-      const ScopedEmbeddedCloseTestHook& other) = delete;
+  ScopedEmbeddedLifecycleTestHook& operator=(
+      const ScopedEmbeddedLifecycleTestHook& other) = delete;
 
  private:
   /** @brief Hook object whose address remains stable while installed. */
-  EmbeddedCloseTestHook hook_;
+  EmbeddedLifecycleTestHook hook_;
+};
+
+#if defined(PHOTOSPIDER_INTERNAL_HOST_OPERATION_TESTING)
+/**
+ * @brief Test-owned three-phase gate for one admitted Host operation.
+ * @throws std::bad_alloc if shared-future state copying allocates.
+ * @note Each release future is fulfilled by the orchestration thread only
+ *       after it has observed the corresponding atomic checkpoint.
+ */
+struct EmbeddedOperationGateState {
+  /** @brief Operation event accepted by this gate. */
+  EmbeddedOperationTestEvent expected;
+  /** @brief Releases the admitted operation before it enters Kernel. */
+  std::shared_future<void> before_kernel_ready_release;
+  /** @brief Releases the pre-Kernel exact-admission snapshot. */
+  std::shared_future<void> before_kernel_snapshot_release;
+  /** @brief Releases the post-translation exact-admission snapshot. */
+  std::shared_future<void> after_translation_snapshot_release;
+  /** @brief Number of BeforeKernelReady callbacks reached. */
+  std::atomic<std::uint64_t> before_kernel_ready_reached{0};
+  /** @brief Number of pre-Kernel snapshot callbacks reached. */
+  std::atomic<std::uint64_t> before_kernel_snapshot_reached{0};
+  /** @brief Number of post-translation snapshot callbacks reached. */
+  std::atomic<std::uint64_t> after_translation_snapshot_reached{0};
+  /** @brief Exact admission value captured immediately before Kernel. */
+  std::atomic<bool> before_kernel_admission_active{false};
+  /** @brief Exact admission value captured after public result construction. */
+  std::atomic<bool> after_translation_admission_active{false};
 };
 
 /**
- * @brief Waits until an atomic close event reaches one occurrence count.
+ * @brief Blocks one matching Host-operation phase on its test-owned release.
+ * @param context Borrowed EmbeddedOperationGateState pointer.
+ * @param event Operation reaching the checkpoint.
+ * @param phase Admission-lifetime phase being observed.
+ * @param admission_active Exact session-admission snapshot for snapshot phases.
+ * @return Nothing.
+ * @throws Nothing; future wait failures are contained.
+ */
+void wait_at_embedded_operation_phase(void* context,
+                                      EmbeddedOperationTestEvent event,
+                                      EmbeddedOperationTestPhase phase,
+                                      bool admission_active) noexcept {
+  auto* gate = static_cast<EmbeddedOperationGateState*>(context);
+  if (event != gate->expected) {
+    return;
+  }
+  try {
+    if (phase == EmbeddedOperationTestPhase::BeforeKernelReady) {
+      gate->before_kernel_ready_reached.fetch_add(1, std::memory_order_release);
+      gate->before_kernel_ready_release.wait();
+    } else if (phase ==
+               EmbeddedOperationTestPhase::BeforeKernelAdmissionSnapshot) {
+      gate->before_kernel_admission_active.store(admission_active,
+                                                 std::memory_order_release);
+      gate->before_kernel_snapshot_reached.fetch_add(1,
+                                                     std::memory_order_release);
+      gate->before_kernel_snapshot_release.wait();
+    } else {
+      gate->after_translation_admission_active.store(admission_active,
+                                                     std::memory_order_release);
+      gate->after_translation_snapshot_reached.fetch_add(
+          1, std::memory_order_release);
+      gate->after_translation_snapshot_release.wait();
+    }
+  } catch (...) {
+  }
+}
+
+/**
+ * @brief Installs and clears one borrowed Host-operation gate.
+ * @throws Nothing after construction.
+ * @note The owning race scope joins every affected future before this guard is
+ *       destroyed, so neither the hook nor context can expire mid-callback.
+ */
+class ScopedEmbeddedOperationTestHook final {
+ public:
+  /**
+   * @brief Installs a gate backed by stable test-owned state.
+   * @param state State that outlives this guard.
+   * @throws Nothing.
+   */
+  explicit ScopedEmbeddedOperationTestHook(
+      EmbeddedOperationGateState& state) noexcept
+      : hook_{&state, &wait_at_embedded_operation_phase} {
+    set_embedded_host_operation_test_hook(&hook_);
+  }
+
+  /** @brief Clears the hook after the race scope has joined all callbacks. */
+  ~ScopedEmbeddedOperationTestHook() noexcept {
+    set_embedded_host_operation_test_hook(nullptr);
+  }
+
+  /**
+   * @brief Disables duplicate hook ownership.
+   * @param other Guard retaining the installed hook.
+   * @throws Nothing because construction is unavailable.
+   */
+  ScopedEmbeddedOperationTestHook(
+      const ScopedEmbeddedOperationTestHook& other) = delete;
+
+  /**
+   * @brief Disables replacement of an installed hook.
+   * @param other Guard retaining the installed hook.
+   * @return No value because assignment is unavailable.
+   * @throws Nothing because assignment is unavailable.
+   */
+  ScopedEmbeddedOperationTestHook& operator=(
+      const ScopedEmbeddedOperationTestHook& other) = delete;
+
+ private:
+  /** @brief Stable hook object borrowed until guard destruction. */
+  EmbeddedOperationTestHook hook_;
+};
+#endif
+
+/**
+ * @brief Waits until an atomic event reaches one occurrence count.
  * @param event Event counter to observe.
  * @param expected Minimum count required for success.
  * @param timeout Maximum monotonic wait duration.
  * @return True when the count becomes visible before the deadline.
  * @throws Nothing.
  */
-bool wait_for_embedded_close_event(const std::atomic<std::uint64_t>& event,
-                                   std::uint64_t expected,
-                                   std::chrono::milliseconds timeout) {
+bool wait_for_atomic_event_count(const std::atomic<std::uint64_t>& event,
+                                 std::uint64_t expected,
+                                 std::chrono::milliseconds timeout) {
   const auto deadline = std::chrono::steady_clock::now() + timeout;
   while (std::chrono::steady_clock::now() < deadline) {
     if (event.load(std::memory_order_acquire) >= expected) {
@@ -646,19 +998,22 @@ void write_host_adapter_unregistered_op_graph(
  * @brief Writes a two-node graph with identity ROI propagation.
  *
  * @param path YAML file path to create.
+ * @param source_subtype Source-node operation subtype.
  * @throws std::filesystem::filesystem_error or std::ios_base::failure if file
  *         creation fails.
  * @note Node 2 depends on node 1 through an image input and uses an explicit
  *       identity propagator, giving Host ROI tests deterministic forward and
  *       backward rectangles.
  */
-void write_host_adapter_roi_graph(const std::filesystem::path& path) {
+void write_host_adapter_roi_graph(
+    const std::filesystem::path& path,
+    const std::string& source_subtype = "source") {
   std::filesystem::create_directories(path.parent_path());
   std::ofstream out(path);
   out << "- id: 1\n"
       << "  name: roi_source\n"
       << "  type: host_adapter_test\n"
-      << "  subtype: source\n"
+      << "  subtype: " << source_subtype << "\n"
       << "  parameters:\n"
       << "    width: 8\n"
       << "    height: 6\n"
@@ -1101,6 +1456,449 @@ HostComputeRequest make_compute_request(const GraphSessionId& session) {
   request.telemetry.enable_timing = true;
   return request;
 }
+
+/**
+ * @brief Owns one promise that can be fulfilled idempotently without throwing.
+ * @throws std::future_error if future() is requested more than once.
+ * @note signal() contains duplicate-fulfillment and broken-state failures so it
+ *       is safe for noexcept race cleanup.
+ */
+class OneShotSignal final {
+ public:
+  /** @brief Creates one unsignalled promise. @throws Nothing. */
+  OneShotSignal() = default;
+
+  /**
+   * @brief Returns the shared future observed by a blocking test callback.
+   * @return Shared future made ready by signal().
+   * @throws std::future_error if the future was already retrieved.
+   * @throws std::bad_alloc if shared-state conversion allocates.
+   */
+  std::shared_future<void> future() { return promise_.get_future().share(); }
+
+  /**
+   * @brief Fulfils the promise at most once.
+   * @return Nothing.
+   * @throws Nothing; promise failures are contained for cleanup safety.
+   */
+  void signal() noexcept {
+    if (signalled_) {
+      return;
+    }
+    signalled_ = true;
+    try {
+      promise_.set_value();
+    } catch (...) {
+    }
+  }
+
+  /**
+   * @brief Copying would duplicate one promise owner and is disabled.
+   * @param other Signal retaining the promise.
+   * @throws Nothing because construction is unavailable.
+   */
+  OneShotSignal(const OneShotSignal& other) = delete;
+
+  /**
+   * @brief Copy assignment would replace one promise owner and is disabled.
+   * @param other Signal retaining the promise.
+   * @return No value because assignment is unavailable.
+   * @throws Nothing because assignment is unavailable.
+   */
+  OneShotSignal& operator=(const OneShotSignal& other) = delete;
+
+ private:
+  /** @brief Promise whose shared state releases one race phase. */
+  std::promise<void> promise_;
+  /** @brief Whether signal() already attempted promise fulfilment. */
+  bool signalled_ = false;
+};
+
+/**
+ * @brief Waits for one valid asynchronous test future during noexcept cleanup.
+ * @tparam Result Value carried by the future.
+ * @param future Future to wait when it owns shared state.
+ * @return Nothing.
+ * @throws Nothing; invalid-state and wait failures are contained.
+ */
+template <typename Result>
+void wait_for_race_future_noexcept(std::future<Result>& future) noexcept {
+  try {
+    if (future.valid()) {
+      future.wait();
+    }
+  } catch (...) {
+  }
+}
+
+#if defined(PHOTOSPIDER_INTERNAL_BAD_ALLOC_TESTING) && \
+    defined(PHOTOSPIDER_INTERNAL_HOST_OPERATION_TESTING)
+/**
+ * @brief Owns every future and release signal in an admission-close race.
+ *
+ * @tparam OperationResult Result returned by the admitted Host operation.
+ * @throws Nothing for construction and destruction.
+ * @note This scope is declared after borrowed hook guards. Its noexcept
+ *       destructor therefore releases every phase, waits all valid async work,
+ *       and resets blocking-source state before hook storage is destroyed.
+ */
+template <typename OperationResult>
+class AdmittedOperationRaceScope final {
+ public:
+  /**
+   * @brief Binds cleanup to all signals controlling the race.
+   * @param compute_release Releases the blocking compute.
+   * @param before_kernel_ready_release Releases the first operation gate.
+   * @param before_kernel_snapshot_release Releases the pre-Kernel snapshot.
+   * @param after_translation_release Releases the post-translation snapshot.
+   * @throws Nothing.
+   */
+  AdmittedOperationRaceScope(OneShotSignal& compute_release,
+                             OneShotSignal& before_kernel_ready_release,
+                             OneShotSignal& before_kernel_snapshot_release,
+                             OneShotSignal& after_translation_release) noexcept
+      : compute_release_(compute_release),
+        before_kernel_ready_release_(before_kernel_ready_release),
+        before_kernel_snapshot_release_(before_kernel_snapshot_release),
+        after_translation_release_(after_translation_release) {}
+
+  /**
+   * @brief Releases, joins, and resets all partially constructed race state.
+   * @throws Nothing; signal, wait, and reset failures are contained.
+   */
+  ~AdmittedOperationRaceScope() noexcept {
+    compute_release_.signal();
+    before_kernel_ready_release_.signal();
+    before_kernel_snapshot_release_.signal();
+    after_translation_release_.signal();
+    wait_for_race_future_noexcept(compute_future);
+    wait_for_race_future_noexcept(operation_future);
+    wait_for_race_future_noexcept(close_future);
+    if (blocking_source_configured_) {
+      try {
+        reset_host_blocking_source();
+      } catch (...) {
+      }
+    }
+  }
+
+  /**
+   * @brief Records that global blocking-source state now requires cleanup.
+   * @return Nothing.
+   * @throws Nothing.
+   */
+  void mark_blocking_source_configured() noexcept {
+    blocking_source_configured_ = true;
+  }
+
+  /** @brief Future for the real blocking compute. */
+  std::future<VoidResult> compute_future;
+  /** @brief Future for the admitted operation under test. */
+  std::future<OperationResult> operation_future;
+  /** @brief Future for close waiting on lifecycle admission. */
+  std::future<VoidResult> close_future;
+
+ private:
+  /** @brief Idempotent release for the blocking compute. */
+  OneShotSignal& compute_release_;
+  /** @brief Idempotent release for the first operation checkpoint. */
+  OneShotSignal& before_kernel_ready_release_;
+  /** @brief Idempotent release for the pre-Kernel admission snapshot. */
+  OneShotSignal& before_kernel_snapshot_release_;
+  /** @brief Idempotent release for the post-translation snapshot. */
+  OneShotSignal& after_translation_release_;
+  /** @brief Whether destructor must reset global blocking-source state. */
+  bool blocking_source_configured_ = false;
+};
+
+/**
+ * @brief Captures the three completed calls in an admission-versus-close race.
+ *
+ * @tparam OperationResult Public Host result returned by the admitted call.
+ * @throws Nothing directly; member construction follows each result type.
+ */
+template <typename OperationResult>
+struct AdmittedOperationCloseRaceResult {
+  /** @brief Result from the blocking compute that owns graph-state execution.
+   */
+  VoidResult blocker;
+  /** @brief Result from the synchronous operation admitted before close. */
+  OperationResult operation;
+  /** @brief Result from close after both prior operations finish. */
+  VoidResult close;
+};
+
+/**
+ * @brief Runs one deterministic admitted-operation-versus-close race.
+ *
+ * The helper first holds GraphStateExecutor with a real blocking compute. The
+ * target operation then stops after admission but before Kernel entry. After
+ * close claims its marker, the helper releases and joins the blocker, proves
+ * the target admission remains active with GSE idle, lets Kernel and public
+ * result construction finish, and proves the same admission remains active at
+ * a second GSE-idle checkpoint before Host return.
+ *
+ * @tparam OperationCall Nullary callable invoking one synchronous Host API.
+ * @param host Host owning the loaded session.
+ * @param session Session shared by compute, operation, and close.
+ * @param event Target Host operation selected by the three-phase gate.
+ * @param operation_name Stable API name used in deterministic failure text.
+ * @param operation_call Callable whose result is retained for test assertions.
+ * @return Results in blocker, admitted-operation, then close completion order.
+ * @throws std::runtime_error if a required event is absent or a supposedly
+ *         blocked call completes before release.
+ * @throws Any exception propagated by asynchronous Host calls or allocation.
+ * @note A noexcept race scope releases every phase, joins all valid futures,
+ *       and resets blocking-source state on all exits, including partial
+ *       std::async construction.
+ */
+template <typename OperationCall>
+AdmittedOperationCloseRaceResult<std::invoke_result_t<OperationCall&>>
+run_admitted_operation_close_race(Host& host, const GraphSessionId& session,
+                                  EmbeddedOperationTestEvent event,
+                                  const char* operation_name,
+                                  OperationCall operation_call) {
+  using OperationResult = std::invoke_result_t<OperationCall&>;
+
+  OneShotSignal compute_release;
+  OneShotSignal before_kernel_ready_release;
+  OneShotSignal before_kernel_snapshot_release;
+  OneShotSignal after_translation_release;
+  EmbeddedOperationGateState operation_gate{
+      event, before_kernel_ready_release.future(),
+      before_kernel_snapshot_release.future(),
+      after_translation_release.future()};
+  EmbeddedLifecycleEventState lifecycle_events;
+  ScopedEmbeddedLifecycleTestHook lifecycle_hook(lifecycle_events);
+  ScopedEmbeddedOperationTestHook operation_hook(operation_gate);
+  AdmittedOperationRaceScope<OperationResult> race_scope(
+      compute_release, before_kernel_ready_release,
+      before_kernel_snapshot_release, after_translation_release);
+
+  race_scope.mark_blocking_source_configured();
+  configure_host_blocking_source(compute_release.future());
+  HostComputeRequest request = make_compute_request(session);
+  request.cache.force_recache = true;
+  race_scope.compute_future = std::async(
+      std::launch::async, [&host, request] { return host.compute(request); });
+
+  if (!wait_for_host_blocking_source(std::chrono::seconds(2))) {
+    throw std::runtime_error(
+        "blocking compute did not acquire graph-state execution");
+  }
+
+  race_scope.operation_future =
+      std::async(std::launch::async,
+                 [operation_call = std::move(operation_call)]() mutable {
+                   return operation_call();
+                 });
+  if (!wait_for_atomic_event_count(lifecycle_events.session_operation_admitted,
+                                   2, std::chrono::seconds(2))) {
+    throw std::runtime_error(std::string(operation_name) +
+                             " did not publish synchronous admission");
+  }
+  if (!wait_for_atomic_event_count(operation_gate.before_kernel_ready_reached,
+                                   1, std::chrono::seconds(2))) {
+    throw std::runtime_error(std::string(operation_name) +
+                             " did not reach its pre-Kernel gate");
+  }
+
+  race_scope.close_future = std::async(std::launch::async, [&host, &session] {
+    return host.close_graph(session);
+  });
+  if (!wait_for_atomic_event_count(lifecycle_events.marker_claimed, 1,
+                                   std::chrono::seconds(2))) {
+    throw std::runtime_error(
+        "close did not claim marker while admitted operation was pending");
+  }
+
+  if (race_scope.operation_future.wait_for(std::chrono::milliseconds(0)) !=
+          std::future_status::timeout ||
+      race_scope.close_future.wait_for(std::chrono::milliseconds(0)) !=
+          std::future_status::timeout) {
+    throw std::runtime_error(
+        "admitted operation or close completed before blocker release");
+  }
+
+  compute_release.signal();
+  VoidResult blocker = race_scope.compute_future.get();
+  before_kernel_ready_release.signal();
+  if (!wait_for_atomic_event_count(
+          operation_gate.before_kernel_snapshot_reached, 1,
+          std::chrono::seconds(2))) {
+    throw std::runtime_error(std::string(operation_name) +
+                             " did not publish its pre-Kernel admission");
+  }
+  if (!operation_gate.before_kernel_admission_active.load(
+          std::memory_order_acquire)) {
+    throw std::runtime_error(std::string(operation_name) +
+                             " released admission before Kernel entry");
+  }
+  if (race_scope.operation_future.wait_for(std::chrono::milliseconds(0)) !=
+          std::future_status::timeout ||
+      race_scope.close_future.wait_for(std::chrono::milliseconds(0)) !=
+          std::future_status::timeout) {
+    throw std::runtime_error(
+        "operation or close completed at the pre-Kernel admission gate");
+  }
+
+  before_kernel_snapshot_release.signal();
+  if (!wait_for_atomic_event_count(
+          operation_gate.after_translation_snapshot_reached, 1,
+          std::chrono::seconds(2))) {
+    throw std::runtime_error(std::string(operation_name) +
+                             " did not reach its post-translation gate");
+  }
+  if (!operation_gate.after_translation_admission_active.load(
+          std::memory_order_acquire)) {
+    throw std::runtime_error(std::string(operation_name) +
+                             " released admission before Host return");
+  }
+  if (race_scope.operation_future.wait_for(std::chrono::milliseconds(0)) !=
+          std::future_status::timeout ||
+      race_scope.close_future.wait_for(std::chrono::milliseconds(0)) !=
+          std::future_status::timeout) {
+    throw std::runtime_error(
+        "operation or close completed at the post-translation admission gate");
+  }
+
+  after_translation_release.signal();
+  OperationResult operation = race_scope.operation_future.get();
+  VoidResult close = race_scope.close_future.get();
+  return {std::move(blocker), std::move(operation), std::move(close)};
+}
+#endif
+
+#if defined(PHOTOSPIDER_INTERNAL_REQUIRED_TARGET_TESTING) &&      \
+    defined(PHOTOSPIDER_INTERNAL_GRAPH_STATE_EXECUTOR_TESTING) && \
+    defined(PHOTOSPIDER_INTERNAL_BAD_ALLOC_TESTING)
+/**
+ * @brief Owns both futures and the gate release in a required-target race.
+ *
+ * @tparam TargetResult Result returned by the lookup-and-use operation.
+ * @tparam CompetitorResult Result returned by clear or reload.
+ * @throws Nothing for construction and destruction.
+ * @note Declaring this scope after both hook guards makes its destructor
+ * release and join all work before borrowed hook storage is cleared.
+ */
+template <typename TargetResult, typename CompetitorResult>
+class RequiredTargetRaceScope final {
+ public:
+  /**
+   * @brief Binds cleanup to the required-target release signal.
+   * @param target_release Signal that releases the target checkpoint.
+   * @throws Nothing.
+   */
+  explicit RequiredTargetRaceScope(OneShotSignal& target_release) noexcept
+      : target_release_(target_release) {}
+
+  /**
+   * @brief Releases and joins every partially constructed race future.
+   * @throws Nothing; signal and wait failures are contained.
+   */
+  ~RequiredTargetRaceScope() noexcept {
+    target_release_.signal();
+    wait_for_race_future_noexcept(target_future);
+    wait_for_race_future_noexcept(competitor_future);
+  }
+
+  /** @brief Future for the required-target operation. */
+  std::future<TargetResult> target_future;
+  /** @brief Future for clear or reload. */
+  std::future<CompetitorResult> competitor_future;
+
+ private:
+  /** @brief Idempotent release for the required-target checkpoint. */
+  OneShotSignal& target_release_;
+};
+
+/**
+ * @brief Captures both calls in a required-target serialization race.
+ *
+ * @tparam TargetResult Result returned by the lookup-and-use operation.
+ * @tparam CompetitorResult Result returned by clear or reload.
+ * @throws Nothing directly; member construction follows each result type.
+ */
+template <typename TargetResult, typename CompetitorResult>
+struct RequiredTargetRaceResult {
+  /** @brief Lookup-and-use result produced before graph replacement. */
+  TargetResult target;
+  /** @brief Clear or reload result produced after the target call. */
+  CompetitorResult competitor;
+};
+
+/**
+ * @brief Proves required-target use excludes one clear or reload operation.
+ *
+ * The target call is held immediately after required-node resolution while it
+ * still owns GraphStateExecutor. The competing call must report a real failed
+ * try_lock and remain pending until the target is released.
+ *
+ * @tparam TargetCall Nullary callable invoking set-node or ROI projection.
+ * @tparam CompetitorCall Nullary callable invoking clear or reload.
+ * @param event Required-target checkpoint expected from the target call.
+ * @param target_name Stable target name used in deterministic failure text.
+ * @param competitor_name Stable competitor name used in failure text.
+ * @param target_call Target callable retained until its future completes.
+ * @param competitor_call Competing callable started after target resolution.
+ * @return Results in target-before-competitor completion order.
+ * @throws std::runtime_error if either observation is absent or the competitor
+ *         completes before target release.
+ * @throws Any exception propagated by asynchronous calls or allocation.
+ * @note A noexcept race scope releases the target gate and joins every valid
+ *       future on all exits, including partial std::async construction.
+ */
+template <typename TargetCall, typename CompetitorCall>
+auto run_required_target_race(testing::RequiredTargetTestEvent event,
+                              const char* target_name,
+                              const char* competitor_name,
+                              TargetCall target_call,
+                              CompetitorCall competitor_call) {
+  using TargetResult = std::invoke_result_t<TargetCall&>;
+  using CompetitorResult = std::invoke_result_t<CompetitorCall&>;
+
+  OneShotSignal target_release;
+  RequiredTargetGateState gate{event, target_release.future()};
+  ScopedRequiredTargetTestHook target_hook(gate);
+  GraphStateExecutorContentionState contention;
+  ScopedGraphStateExecutorContentionTestHook contention_hook(contention);
+  RequiredTargetRaceScope<TargetResult, CompetitorResult> race_scope(
+      target_release);
+
+  race_scope.target_future = std::async(
+      std::launch::async, [target_call = std::move(target_call)]() mutable {
+        return target_call();
+      });
+  if (!wait_for_atomic_event_count(gate.reached, 1, std::chrono::seconds(2))) {
+    throw std::runtime_error(std::string(target_name) +
+                             " did not reach its required-target checkpoint");
+  }
+
+  race_scope.competitor_future =
+      std::async(std::launch::async,
+                 [competitor_call = std::move(competitor_call)]() mutable {
+                   return competitor_call();
+                 });
+  if (!wait_for_atomic_event_count(contention.reached, 1,
+                                   std::chrono::seconds(2))) {
+    throw std::runtime_error(std::string(competitor_name) +
+                             " did not contend on GraphStateExecutor");
+  }
+
+  const bool competitor_pending =
+      race_scope.competitor_future.wait_for(std::chrono::milliseconds(0)) ==
+      std::future_status::timeout;
+  target_release.signal();
+  TargetResult target = race_scope.target_future.get();
+  CompetitorResult competitor = race_scope.competitor_future.get();
+  if (!competitor_pending) {
+    throw std::runtime_error(std::string(competitor_name) +
+                             " completed before required-target release");
+  }
+  return RequiredTargetRaceResult<TargetResult, CompetitorResult>{
+      std::move(target), std::move(competitor)};
+}
+#endif
 
 /**
  * @brief Reports whether a string vector contains a value.
@@ -1717,6 +2515,137 @@ TEST(EmbeddedHostAdapter, CloseWaitsForAdmittedSynchronousCompute) {
   reset_host_blocking_source();
 }
 
+#if defined(PHOTOSPIDER_INTERNAL_BAD_ALLOC_TESTING) && \
+    defined(PHOTOSPIDER_INTERNAL_HOST_OPERATION_TESTING)
+/**
+ * @brief Verifies close waits for a graph save admitted before its marker.
+ *
+ * @return Nothing; GoogleTest assertions report lifecycle ordering failures.
+ * @throws std::bad_alloc or filesystem exceptions if fixture setup fails.
+ * @note A real blocking compute holds GraphStateExecutor while save acquires
+ * Host admission. The close marker must then wait for save to complete.
+ */
+TEST(EmbeddedHostAdapter, CloseWaitsForAdmittedSaveGraph) {
+  register_host_adapter_ops();
+  ScopedTempDir temp("photospider_host_adapter_save_close_gate_test");
+  auto host = create_embedded_host();
+  ASSERT_NE(host, nullptr);
+  const GraphSessionId session = load_test_graph(
+      *host, temp.root(), "save_close_gate_graph", "blocking_source");
+  const auto output = temp.root() / "saved_content.yaml";
+  const auto race = run_admitted_operation_close_race(
+      *host, session, EmbeddedOperationTestEvent::SaveGraph, "save_graph",
+      [&] { return host->save_graph(session, output.string()); });
+
+  EXPECT_TRUE(race.blocker.status.ok) << race.blocker.status.message;
+  EXPECT_TRUE(race.operation.status.ok) << race.operation.status.message;
+  EXPECT_TRUE(race.close.status.ok) << race.close.status.message;
+}
+
+/**
+ * @brief Verifies close waits for an admitted node-YAML replacement.
+ *
+ * @return Nothing; GoogleTest assertions report lifecycle ordering failures.
+ * @throws std::bad_alloc or filesystem exceptions if fixture setup fails.
+ * @note The replacement waits behind a real blocking compute after admission;
+ * close must retain the runtime until replacement and status mapping finish.
+ */
+TEST(EmbeddedHostAdapter, CloseWaitsForAdmittedSetNodeYaml) {
+  register_host_adapter_ops();
+  ScopedTempDir temp("photospider_host_adapter_set_yaml_close_gate_test");
+  auto host = create_embedded_host();
+  ASSERT_NE(host, nullptr);
+  const GraphSessionId session = load_test_graph(
+      *host, temp.root(), "set_yaml_close_gate_graph", "blocking_source");
+  const std::string replacement =
+      replacement_node_yaml("admitted_replacement", 9, 5);
+  const auto race = run_admitted_operation_close_race(
+      *host, session, EmbeddedOperationTestEvent::SetNodeYaml, "set_node_yaml",
+      [&] { return host->set_node_yaml(session, NodeId{1}, replacement); });
+
+  EXPECT_TRUE(race.blocker.status.ok) << race.blocker.status.message;
+  EXPECT_TRUE(race.operation.status.ok) << race.operation.status.message;
+  EXPECT_TRUE(race.close.status.ok) << race.close.status.message;
+}
+
+/**
+ * @brief Verifies close waits for an admitted forward ROI projection.
+ *
+ * @return Nothing; GoogleTest assertions report lifecycle ordering failures.
+ * @throws std::bad_alloc or filesystem exceptions if fixture setup fails.
+ * @note A blocking source compute holds graph-state execution while the
+ * projection is admitted; close may remove the runtime only after projection.
+ */
+TEST(EmbeddedHostAdapter, CloseWaitsForAdmittedForwardRoiProjection) {
+  register_host_adapter_ops();
+  ScopedTempDir temp("photospider_host_adapter_forward_roi_close_gate_test");
+  auto host = create_embedded_host();
+  ASSERT_NE(host, nullptr);
+
+  GraphLoadRequest load;
+  load.session = GraphSessionId{"forward_roi_close_gate_graph"};
+  load.root_dir = (temp.root() / "sessions").string();
+  load.yaml_path = (temp.root() / "source" / "roi_graph.yaml").string();
+  load.cache_root_dir = (temp.root() / "cache").string();
+  write_host_adapter_roi_graph(load.yaml_path, "blocking_source");
+  const auto loaded = host->load_graph(load);
+  ASSERT_TRUE(loaded.status.ok) << loaded.status.message;
+  const PixelRect expected{1, 1, 3, 2};
+  const auto race = run_admitted_operation_close_race(
+      *host, load.session, EmbeddedOperationTestEvent::ForwardRoiProjection,
+      "project_roi", [&] {
+        return host->project_roi(load.session, NodeId{1}, expected, NodeId{2});
+      });
+
+  EXPECT_TRUE(race.blocker.status.ok) << race.blocker.status.message;
+  EXPECT_TRUE(race.operation.status.ok) << race.operation.status.message;
+  EXPECT_EQ(race.operation.value.x, expected.x);
+  EXPECT_EQ(race.operation.value.y, expected.y);
+  EXPECT_EQ(race.operation.value.width, expected.width);
+  EXPECT_EQ(race.operation.value.height, expected.height);
+  EXPECT_TRUE(race.close.status.ok) << race.close.status.message;
+}
+
+/**
+ * @brief Verifies close waits for an admitted backward ROI projection.
+ *
+ * @return Nothing; GoogleTest assertions report lifecycle ordering failures.
+ * @throws std::bad_alloc or filesystem exceptions if fixture setup fails.
+ * @note The backward request waits behind real graph-state work after Host
+ * admission, so close must preserve the runtime through public translation.
+ */
+TEST(EmbeddedHostAdapter, CloseWaitsForAdmittedBackwardRoiProjection) {
+  register_host_adapter_ops();
+  ScopedTempDir temp("photospider_host_adapter_backward_roi_close_gate_test");
+  auto host = create_embedded_host();
+  ASSERT_NE(host, nullptr);
+
+  GraphLoadRequest load;
+  load.session = GraphSessionId{"backward_roi_close_gate_graph"};
+  load.root_dir = (temp.root() / "sessions").string();
+  load.yaml_path = (temp.root() / "source" / "roi_graph.yaml").string();
+  load.cache_root_dir = (temp.root() / "cache").string();
+  write_host_adapter_roi_graph(load.yaml_path, "blocking_source");
+  const auto loaded = host->load_graph(load);
+  ASSERT_TRUE(loaded.status.ok) << loaded.status.message;
+  const PixelRect expected{1, 1, 3, 2};
+  const auto race = run_admitted_operation_close_race(
+      *host, load.session, EmbeddedOperationTestEvent::BackwardRoiProjection,
+      "project_roi_backward", [&] {
+        return host->project_roi_backward(load.session, NodeId{2}, expected,
+                                          NodeId{1});
+      });
+
+  EXPECT_TRUE(race.blocker.status.ok) << race.blocker.status.message;
+  EXPECT_TRUE(race.operation.status.ok) << race.operation.status.message;
+  EXPECT_EQ(race.operation.value.x, expected.x);
+  EXPECT_EQ(race.operation.value.y, expected.y);
+  EXPECT_EQ(race.operation.value.width, expected.width);
+  EXPECT_EQ(race.operation.value.height, expected.height);
+  EXPECT_TRUE(race.close.status.ok) << race.close.status.message;
+}
+#endif
+
 /**
  * @brief Verifies concurrent closes settle as owner success then waiter absent.
  *
@@ -1751,15 +2680,15 @@ TEST(EmbeddedHostAdapter, ConcurrentCloseOwnerSuccessMakesWaiterNotFound) {
   }
 
 #if defined(PHOTOSPIDER_INTERNAL_BAD_ALLOC_TESTING)
-  EmbeddedCloseEventState close_events;
-  ScopedEmbeddedCloseTestHook close_hook(close_events);
+  EmbeddedLifecycleEventState close_events;
+  ScopedEmbeddedLifecycleTestHook close_hook(close_events);
 #endif
   auto owner = std::async(std::launch::async, [&host, session] {
     return host->close_graph(session);
   });
 #if defined(PHOTOSPIDER_INTERNAL_BAD_ALLOC_TESTING)
-  if (!wait_for_embedded_close_event(close_events.marker_claimed, 1,
-                                     std::chrono::seconds(2))) {
+  if (!wait_for_atomic_event_count(close_events.marker_claimed, 1,
+                                   std::chrono::seconds(2))) {
     release_compute.set_value();
     (void)compute_future.get();
     (void)owner.get();
@@ -1771,8 +2700,8 @@ TEST(EmbeddedHostAdapter, ConcurrentCloseOwnerSuccessMakesWaiterNotFound) {
   auto waiter = std::async(std::launch::async,
                            [&] { return host->close_graph(session); });
 #if defined(PHOTOSPIDER_INTERNAL_BAD_ALLOC_TESTING)
-  if (!wait_for_embedded_close_event(close_events.duplicate_about_to_wait, 1,
-                                     std::chrono::seconds(2))) {
+  if (!wait_for_atomic_event_count(close_events.duplicate_about_to_wait, 1,
+                                   std::chrono::seconds(2))) {
     release_compute.set_value();
     (void)compute_future.get();
     (void)owner.get();
@@ -1827,15 +2756,15 @@ TEST(EmbeddedHostAdapter, ThreeConcurrentClosesSerializeEveryWaiter) {
   }
 
 #if defined(PHOTOSPIDER_INTERNAL_BAD_ALLOC_TESTING)
-  EmbeddedCloseEventState close_events;
-  ScopedEmbeddedCloseTestHook close_hook(close_events);
+  EmbeddedLifecycleEventState close_events;
+  ScopedEmbeddedLifecycleTestHook close_hook(close_events);
 #endif
   auto owner = std::async(std::launch::async, [&host, session] {
     return host->close_graph(session);
   });
 #if defined(PHOTOSPIDER_INTERNAL_BAD_ALLOC_TESTING)
-  if (!wait_for_embedded_close_event(close_events.marker_claimed, 1,
-                                     std::chrono::seconds(2))) {
+  if (!wait_for_atomic_event_count(close_events.marker_claimed, 1,
+                                   std::chrono::seconds(2))) {
     release_compute.set_value();
     (void)compute_future.get();
     (void)owner.get();
@@ -1851,8 +2780,8 @@ TEST(EmbeddedHostAdapter, ThreeConcurrentClosesSerializeEveryWaiter) {
     return host->close_graph(session);
   });
 #if defined(PHOTOSPIDER_INTERNAL_BAD_ALLOC_TESTING)
-  if (!wait_for_embedded_close_event(close_events.duplicate_about_to_wait, 2,
-                                     std::chrono::seconds(2))) {
+  if (!wait_for_atomic_event_count(close_events.duplicate_about_to_wait, 2,
+                                   std::chrono::seconds(2))) {
     release_compute.set_value();
     (void)compute_future.get();
     (void)owner.get();
@@ -1924,15 +2853,15 @@ TEST(EmbeddedHostAdapter, ConcurrentCloseRetriesAfterEarlierShutdownFailure) {
   ScopedEnvironmentValue failure(kSchedulerFailureEnvironment,
                                  "shutdown_runtime_error_once");
 #if defined(PHOTOSPIDER_INTERNAL_BAD_ALLOC_TESTING)
-  EmbeddedCloseEventState close_events;
-  ScopedEmbeddedCloseTestHook close_hook(close_events);
+  EmbeddedLifecycleEventState close_events;
+  ScopedEmbeddedLifecycleTestHook close_hook(close_events);
 #endif
   auto owner = std::async(std::launch::async, [&host, session] {
     return host->close_graph(session);
   });
 #if defined(PHOTOSPIDER_INTERNAL_BAD_ALLOC_TESTING)
-  if (!wait_for_embedded_close_event(close_events.marker_claimed, 1,
-                                     std::chrono::seconds(2))) {
+  if (!wait_for_atomic_event_count(close_events.marker_claimed, 1,
+                                   std::chrono::seconds(2))) {
     release_compute.set_value();
     (void)compute_future.get();
     (void)owner.get();
@@ -1944,8 +2873,8 @@ TEST(EmbeddedHostAdapter, ConcurrentCloseRetriesAfterEarlierShutdownFailure) {
   auto waiter = std::async(std::launch::async,
                            [&] { return host->close_graph(session); });
 #if defined(PHOTOSPIDER_INTERNAL_BAD_ALLOC_TESTING)
-  if (!wait_for_embedded_close_event(close_events.duplicate_about_to_wait, 1,
-                                     std::chrono::seconds(2))) {
+  if (!wait_for_atomic_event_count(close_events.duplicate_about_to_wait, 1,
+                                   std::chrono::seconds(2))) {
     release_compute.set_value();
     (void)compute_future.get();
     (void)owner.get();
@@ -2525,6 +3454,291 @@ TEST(EmbeddedHostAdapter, RoiProjectionUsesPublicPixelRectValues) {
   EXPECT_EQ(checked_graph_error_code(after_close_backward.status),
             GraphErrc::NotFound);
 }
+
+#if defined(PHOTOSPIDER_INTERNAL_REQUIRED_TARGET_TESTING)
+/**
+ * @brief Prevents clear from entering between node lookup and replacement.
+ *
+ * @return Nothing; GoogleTest assertions report graph-state ordering failures.
+ * @throws std::bad_alloc or filesystem exceptions if fixture setup fails.
+ * @note The target gate blocks only after the existing node is resolved while
+ * GraphStateExecutor remains locked. Clear must stay pending, then run second.
+ */
+TEST(EmbeddedHostAdapter, SetNodeYamlLookupAndMutationExcludeConcurrentClear) {
+  register_host_adapter_ops();
+  ScopedTempDir temp("photospider_host_adapter_set_yaml_clear_race_test");
+  auto host = create_embedded_host();
+  ASSERT_NE(host, nullptr);
+  const GraphSessionId session =
+      load_test_graph(*host, temp.root(), "set_yaml_clear_race_graph");
+
+  const std::string replacement =
+      replacement_node_yaml("replacement_before_clear", 10, 6);
+  const auto race = run_required_target_race(
+      testing::RequiredTargetTestEvent::SetNodeYamlTargetResolved,
+      "set_node_yaml", "clear_graph",
+      [&] { return host->set_node_yaml(session, NodeId{1}, replacement); },
+      [&] { return host->clear_graph(session); });
+
+  EXPECT_TRUE(race.target.status.ok) << race.target.status.message;
+  EXPECT_TRUE(race.competitor.status.ok) << race.competitor.status.message;
+  const auto ids = host->list_node_ids(session);
+  ASSERT_TRUE(ids.status.ok) << ids.status.message;
+  EXPECT_TRUE(ids.value.empty());
+  const VoidResult close = host->close_graph(session);
+  EXPECT_TRUE(close.status.ok) << close.status.message;
+}
+
+/**
+ * @brief Prevents reload from entering between node lookup and replacement.
+ *
+ * @return Nothing; GoogleTest assertions report graph-state ordering failures.
+ * @throws std::bad_alloc or filesystem exceptions if fixture setup fails.
+ * @note Replacement completes first under the required-target gate; reload
+ * then replaces the graph, so the final public snapshot must be reload data.
+ */
+TEST(EmbeddedHostAdapter, SetNodeYamlLookupAndMutationExcludeConcurrentReload) {
+  register_host_adapter_ops();
+  ScopedTempDir temp("photospider_host_adapter_set_yaml_reload_race_test");
+  auto host = create_embedded_host();
+  ASSERT_NE(host, nullptr);
+  const GraphSessionId session =
+      load_test_graph(*host, temp.root(), "set_yaml_reload_race_graph");
+  const auto reload_path = temp.root() / "source" / "reload_after_set.yaml";
+  {
+    std::ofstream reload_yaml(reload_path);
+    reload_yaml << "- id: 1\n"
+                << "  name: reload_after_set\n"
+                << "  type: host_adapter_test\n"
+                << "  subtype: source\n"
+                << "  parameters:\n"
+                << "    width: 12\n"
+                << "    height: 7\n";
+  }
+
+  const std::string replacement =
+      replacement_node_yaml("replacement_before_reload", 10, 6);
+  const auto race = run_required_target_race(
+      testing::RequiredTargetTestEvent::SetNodeYamlTargetResolved,
+      "set_node_yaml", "reload_graph",
+      [&] { return host->set_node_yaml(session, NodeId{1}, replacement); },
+      [&] { return host->reload_graph(session, reload_path.string()); });
+
+  EXPECT_TRUE(race.target.status.ok) << race.target.status.message;
+  EXPECT_TRUE(race.competitor.status.ok) << race.competitor.status.message;
+  const auto node = host->inspect_node(session, NodeId{1});
+  ASSERT_TRUE(node.status.ok) << node.status.message;
+  EXPECT_EQ(node.value.name, "reload_after_set");
+  EXPECT_EQ(node.value.parameters.at("width"), "12");
+  const VoidResult close = host->close_graph(session);
+  EXPECT_TRUE(close.status.ok) << close.status.message;
+}
+
+/**
+ * @brief Prevents clear from entering after forward ROI endpoint resolution.
+ *
+ * @return Nothing; GoogleTest assertions report graph-state ordering failures.
+ * @throws std::bad_alloc or filesystem exceptions if fixture setup fails.
+ * @note The forward projection remains inside one graph-state work item from
+ * endpoint lookup through propagation; clear must execute only afterward.
+ */
+TEST(EmbeddedHostAdapter, ForwardRoiLookupAndProjectionExcludeConcurrentClear) {
+  register_host_adapter_ops();
+  ScopedTempDir temp("photospider_host_adapter_forward_roi_clear_race_test");
+  auto host = create_embedded_host();
+  ASSERT_NE(host, nullptr);
+  GraphLoadRequest load;
+  load.session = GraphSessionId{"forward_roi_clear_race_graph"};
+  load.root_dir = (temp.root() / "sessions").string();
+  load.yaml_path = (temp.root() / "source" / "roi_graph.yaml").string();
+  load.cache_root_dir = (temp.root() / "cache").string();
+  write_host_adapter_roi_graph(load.yaml_path);
+  const auto loaded = host->load_graph(load);
+  ASSERT_TRUE(loaded.status.ok) << loaded.status.message;
+
+  const PixelRect expected{1, 1, 3, 2};
+  const auto race = run_required_target_race(
+      testing::RequiredTargetTestEvent::ForwardRoiEndpointsResolved,
+      "project_roi", "clear_graph",
+      [&] {
+        return host->project_roi(load.session, NodeId{1}, expected, NodeId{2});
+      },
+      [&] { return host->clear_graph(load.session); });
+
+  EXPECT_TRUE(race.target.status.ok) << race.target.status.message;
+  EXPECT_EQ(race.target.value.x, expected.x);
+  EXPECT_EQ(race.target.value.y, expected.y);
+  EXPECT_EQ(race.target.value.width, expected.width);
+  EXPECT_EQ(race.target.value.height, expected.height);
+  EXPECT_TRUE(race.competitor.status.ok) << race.competitor.status.message;
+  const auto ids = host->list_node_ids(load.session);
+  ASSERT_TRUE(ids.status.ok) << ids.status.message;
+  EXPECT_TRUE(ids.value.empty());
+  const VoidResult close = host->close_graph(load.session);
+  EXPECT_TRUE(close.status.ok) << close.status.message;
+}
+
+/**
+ * @brief Prevents reload from entering after forward ROI endpoint resolution.
+ *
+ * @return Nothing; GoogleTest assertions report graph-state ordering failures.
+ * @throws std::bad_alloc or filesystem exceptions if fixture setup fails.
+ * @note Projection must finish on the original two-node graph before reload
+ * publishes its single-node replacement as the final public state.
+ */
+TEST(EmbeddedHostAdapter,
+     ForwardRoiLookupAndProjectionExcludeConcurrentReload) {
+  register_host_adapter_ops();
+  ScopedTempDir temp("photospider_host_adapter_forward_roi_reload_race_test");
+  auto host = create_embedded_host();
+  ASSERT_NE(host, nullptr);
+  GraphLoadRequest load;
+  load.session = GraphSessionId{"forward_roi_reload_race_graph"};
+  load.root_dir = (temp.root() / "sessions").string();
+  load.yaml_path = (temp.root() / "source" / "roi_graph.yaml").string();
+  load.cache_root_dir = (temp.root() / "cache").string();
+  write_host_adapter_roi_graph(load.yaml_path);
+  const auto loaded = host->load_graph(load);
+  ASSERT_TRUE(loaded.status.ok) << loaded.status.message;
+  const auto reload_path = temp.root() / "source" / "roi_reload.yaml";
+  {
+    std::ofstream reload_yaml(reload_path);
+    reload_yaml << "- id: 1\n"
+                << "  name: forward_reload_final\n"
+                << "  type: host_adapter_test\n"
+                << "  subtype: source\n";
+  }
+
+  const PixelRect expected{1, 1, 3, 2};
+  const auto race = run_required_target_race(
+      testing::RequiredTargetTestEvent::ForwardRoiEndpointsResolved,
+      "project_roi", "reload_graph",
+      [&] {
+        return host->project_roi(load.session, NodeId{1}, expected, NodeId{2});
+      },
+      [&] { return host->reload_graph(load.session, reload_path.string()); });
+
+  EXPECT_TRUE(race.target.status.ok) << race.target.status.message;
+  EXPECT_EQ(race.target.value.x, expected.x);
+  EXPECT_EQ(race.target.value.y, expected.y);
+  EXPECT_EQ(race.target.value.width, expected.width);
+  EXPECT_EQ(race.target.value.height, expected.height);
+  EXPECT_TRUE(race.competitor.status.ok) << race.competitor.status.message;
+  const auto ids = host->list_node_ids(load.session);
+  ASSERT_TRUE(ids.status.ok) << ids.status.message;
+  ASSERT_EQ(ids.value.size(), 1u);
+  EXPECT_EQ(ids.value.front().value, 1);
+  const auto node = host->inspect_node(load.session, NodeId{1});
+  ASSERT_TRUE(node.status.ok) << node.status.message;
+  EXPECT_EQ(node.value.name, "forward_reload_final");
+  const VoidResult close = host->close_graph(load.session);
+  EXPECT_TRUE(close.status.ok) << close.status.message;
+}
+
+/**
+ * @brief Prevents clear from entering after backward ROI endpoint resolution.
+ *
+ * @return Nothing; GoogleTest assertions report graph-state ordering failures.
+ * @throws std::bad_alloc or filesystem exceptions if fixture setup fails.
+ * @note Backward propagation must retain the resolved graph until its public
+ * result is produced; clear runs second and leaves the loaded session empty.
+ */
+TEST(EmbeddedHostAdapter,
+     BackwardRoiLookupAndProjectionExcludeConcurrentClear) {
+  register_host_adapter_ops();
+  ScopedTempDir temp("photospider_host_adapter_backward_roi_clear_race_test");
+  auto host = create_embedded_host();
+  ASSERT_NE(host, nullptr);
+  GraphLoadRequest load;
+  load.session = GraphSessionId{"backward_roi_clear_race_graph"};
+  load.root_dir = (temp.root() / "sessions").string();
+  load.yaml_path = (temp.root() / "source" / "roi_graph.yaml").string();
+  load.cache_root_dir = (temp.root() / "cache").string();
+  write_host_adapter_roi_graph(load.yaml_path);
+  const auto loaded = host->load_graph(load);
+  ASSERT_TRUE(loaded.status.ok) << loaded.status.message;
+
+  const PixelRect expected{1, 1, 3, 2};
+  const auto race = run_required_target_race(
+      testing::RequiredTargetTestEvent::BackwardRoiEndpointsResolved,
+      "project_roi_backward", "clear_graph",
+      [&] {
+        return host->project_roi_backward(load.session, NodeId{2}, expected,
+                                          NodeId{1});
+      },
+      [&] { return host->clear_graph(load.session); });
+
+  EXPECT_TRUE(race.target.status.ok) << race.target.status.message;
+  EXPECT_EQ(race.target.value.x, expected.x);
+  EXPECT_EQ(race.target.value.y, expected.y);
+  EXPECT_EQ(race.target.value.width, expected.width);
+  EXPECT_EQ(race.target.value.height, expected.height);
+  EXPECT_TRUE(race.competitor.status.ok) << race.competitor.status.message;
+  const auto ids = host->list_node_ids(load.session);
+  ASSERT_TRUE(ids.status.ok) << ids.status.message;
+  EXPECT_TRUE(ids.value.empty());
+  const VoidResult close = host->close_graph(load.session);
+  EXPECT_TRUE(close.status.ok) << close.status.message;
+}
+
+/**
+ * @brief Prevents reload from entering after backward ROI endpoint resolution.
+ *
+ * @return Nothing; GoogleTest assertions report graph-state ordering failures.
+ * @throws std::bad_alloc or filesystem exceptions if fixture setup fails.
+ * @note Backward projection observes the original topology, then reload
+ * publishes its single-node graph as the final externally visible state.
+ */
+TEST(EmbeddedHostAdapter,
+     BackwardRoiLookupAndProjectionExcludeConcurrentReload) {
+  register_host_adapter_ops();
+  ScopedTempDir temp("photospider_host_adapter_backward_roi_reload_race_test");
+  auto host = create_embedded_host();
+  ASSERT_NE(host, nullptr);
+  GraphLoadRequest load;
+  load.session = GraphSessionId{"backward_roi_reload_race_graph"};
+  load.root_dir = (temp.root() / "sessions").string();
+  load.yaml_path = (temp.root() / "source" / "roi_graph.yaml").string();
+  load.cache_root_dir = (temp.root() / "cache").string();
+  write_host_adapter_roi_graph(load.yaml_path);
+  const auto loaded = host->load_graph(load);
+  ASSERT_TRUE(loaded.status.ok) << loaded.status.message;
+  const auto reload_path = temp.root() / "source" / "roi_reload.yaml";
+  {
+    std::ofstream reload_yaml(reload_path);
+    reload_yaml << "- id: 1\n"
+                << "  name: backward_reload_final\n"
+                << "  type: host_adapter_test\n"
+                << "  subtype: source\n";
+  }
+
+  const PixelRect expected{1, 1, 3, 2};
+  const auto race = run_required_target_race(
+      testing::RequiredTargetTestEvent::BackwardRoiEndpointsResolved,
+      "project_roi_backward", "reload_graph",
+      [&] {
+        return host->project_roi_backward(load.session, NodeId{2}, expected,
+                                          NodeId{1});
+      },
+      [&] { return host->reload_graph(load.session, reload_path.string()); });
+
+  EXPECT_TRUE(race.target.status.ok) << race.target.status.message;
+  EXPECT_EQ(race.target.value.x, expected.x);
+  EXPECT_EQ(race.target.value.y, expected.y);
+  EXPECT_EQ(race.target.value.width, expected.width);
+  EXPECT_EQ(race.target.value.height, expected.height);
+  EXPECT_TRUE(race.competitor.status.ok) << race.competitor.status.message;
+  const auto ids = host->list_node_ids(load.session);
+  ASSERT_TRUE(ids.status.ok) << ids.status.message;
+  ASSERT_EQ(ids.value.size(), 1u);
+  EXPECT_EQ(ids.value.front().value, 1);
+  const auto node = host->inspect_node(load.session, NodeId{1});
+  ASSERT_TRUE(node.status.ok) << node.status.message;
+  EXPECT_EQ(node.value.name, "backward_reload_final");
+  const VoidResult close = host->close_graph(load.session);
+  EXPECT_TRUE(close.status.ok) << close.status.message;
+}
+#endif
 
 TEST(EmbeddedHostAdapter, DirtySnapshotPreservesMonolithicAndEdgeDetails) {
   register_host_adapter_ops();

@@ -13,6 +13,9 @@
 #include <vector>
 
 #include "runtime/kernel.hpp"
+#if defined(PHOTOSPIDER_INTERNAL_REQUIRED_TARGET_TESTING)
+#include "runtime/kernel_required_target_test_access.hpp"
+#endif
 
 namespace ps {
 
@@ -175,6 +178,10 @@ void Kernel::set_node_yaml(const std::string& name, int node_id,
       throw GraphError(GraphErrc::NotFound,
                        "Node " + std::to_string(node_id) + " not in graph.");
     }
+#if defined(PHOTOSPIDER_INTERNAL_REQUIRED_TARGET_TESTING)
+    testing::notify_required_target_test_hook(
+        testing::RequiredTargetTestEvent::SetNodeYamlTargetResolved);
+#endif
     try {
       YAML::Node root = YAML::Load(yaml_text);
       ps::Node updated = ps::Node::from_yaml(root);
