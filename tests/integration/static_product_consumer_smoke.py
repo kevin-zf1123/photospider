@@ -1504,13 +1504,15 @@ def relative_or_absolute(prefix: Path, path: Path) -> str:
 def exported_target_property(target_text: str, target: str, property_name: str) -> str:
     """@brief Extract one property from one exact exported target block.
 
-    @param target_text Concatenated real ``PhotospiderTargets*.cmake`` contents.
+    @param target_text Concatenated real ``Photospider*Targets*.cmake`` contents
+      from every installed Photospider export set.
     @param target Exact imported target whose properties are authoritative.
     @param property_name Exact CMake property to extract.
     @return Unescaped quoted property value, or ``""`` if target/property is absent.
     @throws re.error Only if the fixed generated regular expressions are invalid.
-    @note Unrelated targets and whole-file occurrences cannot satisfy the match;
-      the function performs no CMake evaluation and has no file side effects.
+    @note Only an exact target block can satisfy the match; unrelated targets
+      and whole-file occurrences cannot. The function performs no CMake
+      evaluation and has no file side effects.
     """
 
     target_pattern = re.compile(
@@ -1743,17 +1745,21 @@ def inspect_install_tree(
     package_cmake_dir: str,
     platform_system: str,
 ) -> dict[str, Any]:
-    """@brief Inspect installed files and the exact exported target metadata.
+    """@brief Inspect installed files and all exported target-set metadata.
 
     @param repo Source repository used to detect leaked absolute paths.
     @param prefix Temporary installation prefix.
     @param install_libdir Configured library destination below ``prefix``.
-    @param package_cmake_dir Relative or absolute package CMake destination.
+    @param package_cmake_dir Relative or absolute package CMake destination
+      containing the config file and every Photospider target export set.
     @param platform_system Host platform used for dl/framework expectations.
-    @return Installed header/archive/config inventory and parsed target properties.
+    @return Installed header/archive/config/export inventory and exact parsed
+      target properties aggregated across all matching export-set files.
     @throws OSError If installed files cannot be traversed or read.
     @note ``INTERFACE_LINK_LIBRARIES`` is derived from the real installed
-      ``PhotospiderTargets*.cmake`` files and only the exact exported target block.
+      ``Photospider*Targets*.cmake`` files. File concatenation preserves each
+      generated export fragment, while property parsing accepts only the exact
+      requested target block.
     """
 
     headers = installed_headers(prefix)
@@ -1936,7 +1942,7 @@ def evaluate_behavior(observations: dict[str, Any]) -> bool:
     """@brief Evaluate installed-package behavior in memory.
 
     @param observations Runtime observations from the producer, install tree,
-      exported target, and external consumer.
+      installed export sets, and external consumers.
     @return ``True`` only when every durable package invariant passes.
     @throws KeyError If the caller provides an incomplete observation schema.
     @note Results and failure observations are printed directly for CTest to

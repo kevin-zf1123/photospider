@@ -65,8 +65,12 @@ Package 边界：
 
 - `cmake --install` 会安装静态 `photospider`、operation-runtime 与 operation-OpenCV 归档，
   operation/scheduler interface SDK，`include/photospider/**` 下的精确 public-header inventory，
-  `PhotospiderTargets.cmake` 和 `PhotospiderConfig.cmake`。Unix-like 工具链中的主归档名为
-  `libphotospider.a`，MSVC 中为 `photospider.lib`。
+  基础 `PhotospiderTargets.cmake`、依赖 OpenCV 的
+  `PhotospiderOpenCVTargets.cmake`、embedded product 的
+  `PhotospiderEmbeddedTargets.cmake` 和 `PhotospiderConfig.cmake`。Unix-like 工具链中的主归档名为
+  `libphotospider.a`，MSVC 中为 `photospider.lib`。Config 会在导入基础 export set 前完成 dependency
+  与 required-component 检查；此后只有在显式选择的 component 或省略 component 时的 embedded
+  默认路径具有可用 dependency 时，才按需导入 OpenCV 与 embedded export set。
 - 在 macOS/Linux 且 `PHOTOSPIDER_BUILD_IPC=ON` 时，安装还会导出
   `Photospider::photospider_ipc_client`，安装精确三个 `include/photospider/ipc/` header 与
   `photospiderd`，同时让 server library 保持 private。IPC-only consumer 请求
@@ -79,7 +83,10 @@ Package 边界：
 - Package component 包括 `embedded`、`ipc_client`、`operation_sdk`、`operation_runtime`、
   `operation_opencv` 与 `scheduler_sdk`。省略 component 时保留 embedded 默认行为。
   `scheduler_sdk`、`operation_sdk` 和 `operation_runtime` 不发现外部 package；
-  `operation_opencv` 只发现 OpenCV `core`；`ipc_client` 只解析 Threads。
+  `operation_opencv` 只发现 OpenCV `core`；`ipc_client` 只解析 Threads。如果 optional
+  `operation_opencv` discovery 找不到 OpenCV `core`，package 仍保持 found，
+  `Photospider_operation_opencv_FOUND` 为 false，不导入其 target，而所请求的无依赖 target 仍然
+  可用。若将该 component 设为 required，则 package discovery 失败。
 - OpenCV（`core`、`imgproc`、`imgcodecs`、`videoio`）、`yaml-cpp`、`Threads`、平台
   dynamic-loader 库，以及 Apple `Metal`/`Foundation` framework 标志，是静态归档的实现链接依赖。
   Library dependency 会作为 `$<LINK_ONLY:...>` entry 出现在安装后的 target 上；Apple framework

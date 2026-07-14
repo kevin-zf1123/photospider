@@ -76,8 +76,14 @@ Package boundary:
 - `cmake --install` installs the static `photospider`, operation-runtime, and
   operation-OpenCV archives; the operation/scheduler interface SDKs; an exact
   public-header inventory under `include/photospider/**`;
-  `PhotospiderTargets.cmake`; and `PhotospiderConfig.cmake`. The main archive is
-  `libphotospider.a` on Unix-like toolchains and `photospider.lib` with MSVC.
+  the base `PhotospiderTargets.cmake`, OpenCV-dependent
+  `PhotospiderOpenCVTargets.cmake`, embedded-product
+  `PhotospiderEmbeddedTargets.cmake`, and `PhotospiderConfig.cmake`. The main
+  archive is `libphotospider.a` on Unix-like toolchains and `photospider.lib`
+  with MSVC. The config completes dependency and required-component checks
+  before importing the base export set. It then imports the OpenCV and embedded
+  sets only when the selected explicit components or the component-less
+  embedded default have usable dependencies.
 - On macOS/Linux with `PHOTOSPIDER_BUILD_IPC=ON`, installation also exports
   `Photospider::photospider_ipc_client`, installs exactly the three
   `include/photospider/ipc/` headers and `photospiderd`, and keeps the server
@@ -94,7 +100,11 @@ Package boundary:
   components preserves the embedded default. `scheduler_sdk` discovers no
   external package; `operation_sdk`/`operation_runtime` discover none;
   `operation_opencv` discovers only OpenCV `core`; and `ipc_client` resolves
-  only Threads.
+  only Threads. If optional `operation_opencv` discovery cannot find OpenCV
+  `core`, the package remains found, `Photospider_operation_opencv_FOUND` is
+  false, its target is not imported, and dependency-free requested targets
+  remain available. Requiring that component instead makes package discovery
+  fail.
 - OpenCV (`core`, `imgproc`, `imgcodecs`, `videoio`), `yaml-cpp`, `Threads`,
   platform dynamic-loader libraries, and Apple `Metal`/`Foundation` framework
   flags are implementation link dependencies of the static archive. Library
