@@ -33,12 +33,12 @@ symbol/export/header contract；plugin SDK 遵循下文记录的 extension contr
 | `photospider_core_internal` | 仅用于构建的 core value、private conversion 与 registry helper。 | 按角色归属的源码也会折叠进静态产品。 |
 | `photospider_graph_internal` | 仅用于构建的 `GraphModel` 与 graph-service helper。 | `GraphModel` 继续私有地位于 `src/lib/graph`。 |
 | `photospider_plugin_host_internal` | 仅用于构建的 host-side operation v2 loader、adapter 与 lifetime helper。 | 不导出。 |
-| `photospider_scheduler_internal` | 仅用于构建的 scheduler factory、handshake loader 与内置实现 helper。 | 只依赖 public scheduler/core 契约及显式实现依赖。 |
+| `photospider_scheduler_internal` | 仅用于构建的 scheduler planning/factory、ABI-v2 loader、内置实现、reservation owner 与 process-budget helper。 | 固定 32-slot process ledger 是过渡性 private containment，不是目标 injected execution service。 |
 | `photospider_compute_internal` | 仅用于构建的 compute、runtime、dirty-region 与 interaction helper。 | 单向依赖 scheduler helper。 |
 | `photospider_operation_runtime` | 可安装的静态 image-buffer factory 实现。 | 没有外部 package，也不反向链接 operation SDK。 |
 | `photospider_operation_sdk` | 可安装的 operation v2 interface SDK。 | 传递链接 `operation_runtime`，是普通插件唯一所需 link target。 |
 | `photospider_operation_opencv` | 可安装、显式 opt-in 的 OpenCV adapter。 | 只发现并链接 OpenCV `core`。 |
-| `photospider_scheduler_sdk` | 可安装的 scheduler interface SDK。 | 只携带 public include root 与 C++17 requirement。 |
+| `photospider_scheduler_sdk` | 可安装的 scheduler ABI-v2 interface SDK。 | 只携带 public include root 与 C++17 requirement；plugin 接收解析后的 `[1,8]` hard grant。 |
 | `photospider` | 静态可安装后端产品，归档文件名为 `libphotospider`。 | 已符合目标静态产品和 public Host 形态，同时把按角色归属的后端源码折叠进单一归档。 |
 | `photospider_cli_common` | `apps/graph_cli/` 下的静态 CLI 命令、TUI、自动补全代码、可复用 `run_graph_cli` 边界，以及两个按角色归属的 benchmark service 翻译单元。 | Benchmark 源只属于这个不可安装的 helper 与完整 CLI closure，不会进入可安装的 `photospider` 静态产品。 |
 | `graph_cli` | 位于 `apps/graph_cli/main.cpp`、只负责 process policy 的入口。 | 禁用 OpenCL，拥有不依赖分配的 fatal exit policy，创建 embedded `Host` adapter，尚无 daemon-client 模式。 |
@@ -92,8 +92,9 @@ symbol/export/header contract；plugin SDK 遵循下文记录的 extension contr
   过时的 issue replay/result orchestration 已删除。
 - Operation plugin 只针对 public `ps::plugin` v2 snapshot 与 host registrar 构建，不再接触 `Node`、
   `GraphModel`、`OpRegistry`、YAML 或 private cache ownership。Scheduler plugin 只针对继承式
-  `IScheduler`、`SchedulerHostContext` 与 handshake-gated SDK 构建，不再接触 `GraphRuntime` 或具体
-  built-in scheduler header。
+  `IScheduler`、`SchedulerHostContext` 与 ABI-v2 handshake-gated SDK 构建，不再接触
+  `GraphRuntime` 或具体 built-in scheduler header。ABI v1 会被拒绝；ABI v2 接收解析后的一到八
+  hard worker grant，并且仍是受信任的 in-process contract，而不是 isolation boundary。
 
 ## 外部接口规则
 
@@ -239,7 +240,9 @@ tests/
 所有现有 backend、plugin、维护中的测试与 version 1 IPC code 都已采用该布局。Issue #36 已创建
 `src/lib/ipc/`、`include/photospider/ipc/` 与 `apps/photospiderd/`，并实现真实 daemon 行为。
 Issue #38 已完成最终的 `include/photospider/{plugin,scheduler}/` 契约，把完整 private type 移入
-role-owned 目录，并移除八个过渡性 extension header；没有新增 shim，也没有复制这些头。
+role-owned 目录，并移除八个过渡性 extension header；没有新增 shim，也没有复制这些头。Issue #43
+把 scheduler resolution、concrete instance planning、process ledger 与 reservation ownership 保持在
+`src/lib/scheduler/` 私有边界内；这些 implementation owner 都不会成为 public Host、SDK 或 IPC type。
 
 命名规则：
 
@@ -260,11 +263,11 @@ role-owned 目录，并移除八个过渡性 extension header；没有新增 shi
 | `photospider_graph_internal` | Static | 否 | `GraphModel`、graph IO、traversal、cache、inspect 实现。 |
 | `photospider_compute_internal` | Static | 否 | Compute planning、dirty-region state、dispatcher、scheduler interaction。 |
 | `photospider_plugin_host_internal` | Static | 否 | Host 侧动态插件加载和生命周期所有权。 |
-| `photospider_scheduler_internal` | Static | 否 | 内置调度器实现和 factory。 |
+| `photospider_scheduler_internal` | Static | 否 | 内置 scheduler、ABI-v2 loader、factory planning、reservation ownership 与过渡性的固定 process ledger。 |
 | `photospider_operation_runtime` | Static | 是 | 无外部 package dependency、无 SDK 反向链接的 public image-buffer factory。 |
 | `photospider_operation_sdk` | Interface | 是 | Operation v2 header，并传递链接 `operation_runtime`。 |
 | `photospider_operation_opencv` | Static | 是 | 只使用 OpenCV `core` 的 opt-in public adapter。 |
-| `photospider_scheduler_sdk` | Interface | 是 | 只携带 scheduler header 与 C++17 usage requirement。 |
+| `photospider_scheduler_sdk` | Interface | 是 | 只携带 scheduler ABI-v2 header、解析后的 `[1,8]` plugin grant contract 与 C++17 usage requirement。 |
 | `photospider` / `libphotospider` | Static | 是 | 面向进程内前端的公共静态库。 |
 | `photospider_ipc_client` | Static | 是 | 面向 daemon 前端的客户端 IPC adapter。 |
 | `photospider_cli_common` | Static | 否 | CLI 命令解析、REPL、TUI、自动补全，以及两个仅供 CLI 使用的 benchmark service 翻译单元；它们都不会进入可安装静态产品。 |
@@ -347,8 +350,9 @@ CMake 规则：
   server-internal target dependency。
 - Operation plugin 不应仅为了访问 registry 符号而链接宽泛共享后端。当前实现使用 host-provided
   `ps::plugin::OperationPluginRegistrar` callback 和带版本的 `register_photospider_ops_v2` 入口。
-  Scheduler plugin 在 discovery 前使用精确数字 ABI handshake，并且只通过
-  `SchedulerHostContext` attach。未来纯 C plugin ABI 仍应作为单独版本化 compatibility change。
+  Scheduler plugin 在 discovery 前使用精确 ABI-v2 数字 handshake，接收解析后的 `[1,8]` hard
+  worker grant，并且只通过 `SchedulerHostContext` attach。ABI v1 不提供 adapter 或 compatibility
+  registration。未来纯 C plugin ABI 仍应作为单独版本化 compatibility change。
 
 ## Daemon 形态
 
@@ -443,7 +447,7 @@ Method group 与当前 wire availability：
 | dirty | `dirty.begin`, `dirty.update`, `dirty.end` | 已通过一次匹配的 Host lifecycle mutation 实现，并返回 copied dirty-region snapshot；完整 compact response size 会在 result-DOM 分配前完成 preflight。 |
 | cache | `cache.clear_all`, `cache.clear_drive`, `cache.clear_memory`, `cache.cache_all_nodes`, `cache.free_transient`, `cache.synchronize_disk` | 已作为 status-only Host call 实现；result 不包含 backend cache handle 或 path。 |
 | compute | `compute.submit`, `compute.status`, `compute.result`, `compute.release`, `compute.timing`, `compute.last_io_time`, `compute.last_error` | Polling job 与 diagnostic 已路由。Submit/status/result 使用 stable `{compute_id,session_id,state,cancellable,status,output}` value；state 精确为 `queued`、`running`、`succeeded` 与 `failed`，每个 job 都报告 `cancellable:false`。Submit、status、status-mode result、empty-image result 与 failed result 的 `output` 保持 null。Terminal nonempty image result 会重新验证 protected artifact、刷新一个 stable 60-second delivery lease，并返回规定的 metadata object。Terminal release 原子返回 `{compute_id,released:true}`，接受 optional exact `delivery_id`，并且在 normal job removal 后仍能释放 matching orphaned lease。Timing 会对 aggregate compact response size 做 preflight；last error 是 nested diagnostic data。 |
-| scheduler | `scheduler.types`、`scheduler.description`、`scheduler.scan`、`scheduler.load`、`scheduler.loaded_plugins`、`scheduler.configure_defaults`、`scheduler.info`、`scheduler.replace`、`scheduler.trace` | 只通过匹配 Host call 实现，并已在精确 55-method inventory 中公布。Discovery/default control 是 process-global；info/replacement 使用 opaque session admission，并与 compute/close 共享 graph-state 串行化。Installed typed Client 暴露全部 route，会聚合 type/plugin snapshot，并严格验证 bounded non-destructive trace page，且不保留 scheduler/plugin ownership。 |
+| scheduler | `scheduler.types`、`scheduler.description`、`scheduler.scan`、`scheduler.load`、`scheduler.loaded_plugins`、`scheduler.configure_defaults`、`scheduler.info`、`scheduler.replace`、`scheduler.trace` | 只通过匹配 Host call 实现，并已在精确 55-method inventory 中公布。Default 只接受 `[0,8]` 内的精确 `worker_count`；router 会在访问 Host 前拒绝 malformed 或更大值，connected typed Client 则会在写 frame 前拒绝更大值。Discovery/default control 是 process-global；info/replacement 使用 opaque session admission，并与 compute/close 共享 graph-state 串行化。固定 32-slot scheduler ledger 跨越同一进程内全部 Host/Kernel，且不能远程配置。Installed typed Client 暴露全部 route，会聚合 type/plugin snapshot，并严格验证 bounded non-destructive trace page，且不保留 scheduler/plugin ownership。 |
 | plugins | `plugins.load_report`、`plugins.unload_all`、`plugins.seed_builtins`、`plugins.ops_sources`、`plugins.ops_combined_keys`、`plugins.ops_combined_sources` | 只通过匹配 Host call 实现，并已在精确 55-method inventory 中公布。Installed typed Client 暴露全部 route、解码 exact report，并聚合按 key 排序的 stable view；Client 断开不会 unload 成功的 process-owned DSO。 |
 | events | `events.drain` | Bounded destructive event drain 已通过 Host 路由；installed typed Client 将其暴露为一次严格验证且不重试的 Host event batch。 |
 
@@ -526,6 +530,13 @@ Collection snapshot 规则：
 Frontend boundary、物理布局、daemon、typed Client、完整 IPC Host 与 extension SDK 的第 1-8 步都已
 在当前仓库落地，且没有改变 `ps::Host` 作为唯一 public seam 的地位。
 
+Issue #43 在现有 per-Graph scheduler model 外增加 bounded migration gate：request 会解析为最多八个
+CPU/plugin worker，内置 GPU plan 会保守地增加一个潜在 device worker，并由一个 private 32-slot
+ledger 协调进程内全部 Host 与 Kernel。Graph load 会原子预留 HP/RT pair；replacement 会保留旧
+grant 直到 candidate 发布；scheduler destruction 先于精确 reservation release。这只是当前
+containment。Per-Graph worker 与过渡性 process singleton 会继续存在，直到 ADR 0003 和 issue
+#68/#69 引入 injected process-owned `ExecutionService` 与 shared executor。
+
 1. **已完成：** 建立 public header 安装与 self-containment 边界。
    - 只安装 `include/photospider/**` 下的头文件；`src/lib/` 下的实现头保持在 package 之外。
    - `PublicHeaderSelfContainment` 通过 CTest 构建
@@ -576,9 +587,11 @@ Frontend boundary、物理布局、daemon、typed Client、完整 IPC Host 与 e
    与已安装的 `photospider/` public include，并明确拒绝 raw JSON、socket address/descriptor、
    file identity、file mapping 与 backend declaration。这是精确的 tested boundary，不声称穷举
    POSIX vocabulary。Cancellation 仍不可用。
-8. **已完成 plugin boundary 工作：** Issue #38 已收紧两套 extension SDK。
+8. **已完成 plugin boundary 工作：** Issue #38 已收紧两套 extension SDK，issue #43 又把
+   scheduler contract 推进到 ABI v2。
    - Operation plugin 使用与 host 无关的 v2 snapshot 和 host-provided registrar；scheduler plugin 使用
-     继承式 minimal runtime、`SchedulerHostContext` 与第一调用数字 ABI handshake。
+     继承式 minimal runtime、`SchedulerHostContext`、第一调用数字 ABI handshake，以及解析后的
+     `[1,8]` hard grant。ABI v1 没有兼容路径。
    - 八个旧 header 和五个旧 internal helper target 名均已移除，没有 compatibility wrapper 或 alias。
      Installed external consumer 会从 package SDK 构建两种 DSO，并通过 embedded Host 实际执行它们。
    - 长期 integration coverage 还会通过仓库内 embedded Host、真实 `photospiderd` IPC 进程与真实

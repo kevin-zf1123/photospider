@@ -347,11 +347,11 @@ Required exports:
 
 | Export | Required | Meaning |
 | --- | --- | --- |
-| `get_abi_version` | Yes, first gate | Non-throwing numeric handshake with signature `uint32_t() noexcept`; it must return `PS_SCHEDULER_PLUGIN_ABI_VERSION`, currently `1`. |
+| `get_abi_version` | Yes, first gate | Non-throwing numeric handshake with signature `uint32_t() noexcept`; it must return `PS_SCHEDULER_PLUGIN_ABI_VERSION`, currently `2`. ABI v1 is rejected with no compatibility path. |
 | `get_count` | Yes | Number of scheduler types in the plugin; it must be at least one. |
 | `get_name` | Yes | Stable type name at an index; every index below count must return non-null, non-empty text. |
 | `get_description` | Yes | Human-readable type description at an index. |
-| `create` | Yes | Create a scheduler instance for a type. `IScheduler` already publicly derives from `SchedulerTaskRuntime`. |
+| `create` | Yes | Create a scheduler instance for a type from a resolved `num_workers` grant in `[1,8]`. `IScheduler` already publicly derives from `SchedulerTaskRuntime`. |
 | `destroy` | Yes | Destroy a plugin-created scheduler instance. |
 | `get_version` | Yes | Human-readable implementation version, called once and cached; it is not the compatibility gate. |
 
@@ -360,6 +360,15 @@ installable SDK supplies the ABI constant, typed function-pointer aliases, and
 `PHOTOSPIDER_SCHEDULER_PLUGIN_EXPORT`; it deliberately supplies no declaration
 or single-scheduler implementation macro. Each DSO declares every export and
 therefore makes its lifecycle and visibility contract explicit.
+
+ABI v2 changes the worker-count argument from an underspecified configuration
+value into a resolved nonzero hard grant. The Host validates `[1,8]` before
+calling `create`, reserves the full grant for the concrete instance lifetime,
+and never passes the automatic zero sentinel across this ABI. A plugin may own
+fewer worker threads than the grant but must not own more. This is a trusted
+in-process contract: the admission ledger cannot sandbox a hostile DSO or
+prevent it from creating unreported threads during load or outside the returned
+scheduler instance.
 
 ## Scheduler Plugin Load Transaction
 
@@ -370,7 +379,9 @@ only `ps_scheduler_plugin_get_abi_version`, and requires exact equality with
 the SDK value before resolving any other export. Missing or mismatched
 handshakes release the candidate with a structured diagnostic; implementation
 version, count, name, description, create, and destroy are not called and no
-candidate state is published.
+candidate state is published. In particular, an ABI v1 library executes only
+the numeric handshake; no v1 adapter, forwarding owner, or compatibility
+registration is published.
 
 For a compatible candidate, the loader creates local shadow copies of all four
 containers. Results from the once-only implementation-version call, count,
@@ -445,6 +456,15 @@ This is part of the current transitional C++ ABI. Plugin authors derive only
 from `IScheduler` and implement its inherited runtime operations until a
 separately versioned pure C ABI replaces this boundary.
 
+At instance creation the plugin receives the exact resolved grant that was
+planned and reserved. Automatic hardware detection has already produced a
+value from one through eight, and an explicit request remains exact. Repository
+examples validate the same range themselves: CPU and heterogeneous examples
+own exactly the grant, while the serial example owns no worker thread but is
+still charged the full plugin grant. The built-in GPU scheduler's separate
+grant-plus-one device-worker accounting is not part of the plugin ABI; a plugin
+has no unreported extra device-worker allowance.
+
 ## Scheduler Instance Ownership
 
 Scheduler instances created by a plugin must be destroyed through that plugin's
@@ -489,6 +509,17 @@ the cleanup required by that failed retry.
 The scheduler plugin library must remain loaded while any scheduler instance
 created by that plugin may still exist.
 
+Factory construction wraps the completed plugin owner in a separate
+`ReservationOwnedScheduler`. That outer owner retains the exact grant after
+create, attach, start, and all runtime calls. `GraphRuntime` remains responsible
+for explicit shutdown and detach. On destruction, the outer owner first
+destroys the complete plugin owner—which performs its fenced lifecycle and
+matching destroy export while the DSO remains mapped—and only then releases the
+process reservation. Candidate construction failure returns only candidate
+capacity during replacement; graph-load rollback returns both unpublished
+intent reservations. A live or failed-close graph cannot release its grant
+early.
+
 ## Current ABI Status
 
 The scheduler handshake rejects unknown Photospider interface generations
@@ -515,5 +546,9 @@ loader contract described here.
 - Scheduler plugins derive from `IScheduler`, implement its inherited runtime
   contract, and export the exact numeric handshake plus all six remaining
   required functions.
+- Scheduler plugins must rebuild for ABI v2 and treat the Host-supplied
+  `num_workers` value in `[1,8]` as a hard maximum over all worker threads owned
+  by the instance. ABI v1 is not supported; repository examples also reject
+  invalid direct calls defensively.
 - The host should use plugin destroy for plugin-created scheduler instances.
 - No pure C operation or scheduler ABI compatibility is currently provided.

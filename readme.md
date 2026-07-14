@@ -211,8 +211,11 @@ package. `COMPONENTS operation_opencv` adds only the public adapter and OpenCV
 `SchedulerHostContext`, and numeric handshake declarations with no Threads,
 OpenCV, yaml-cpp, Metal, embedded, daemon, or IPC dependency. Operation plugins
 export only `register_photospider_ops_v2`; scheduler plugins must pass
-`ps_scheduler_plugin_get_abi_version() noexcept` before discovery. The removed
-top-level operation/scheduler headers have no compatibility forwarders.
+the exact ABI-v2 `ps_scheduler_plugin_get_abi_version() noexcept` handshake
+before discovery. ABI v1 is rejected without a compatibility adapter. Each
+ABI-v2 create call receives a resolved `[1,8]` hard grant; the trusted plugin
+may own fewer worker threads but must not exceed it. The removed top-level
+operation/scheduler headers have no compatibility forwarders.
 
 The command-line parser currently supports graph loading, YAML output, tree
 printing, traversal display, cache clearing, config selection, and REPL entry.
@@ -281,7 +284,7 @@ Important keys:
 | `default_compute_args` | empty | Space-separated default `compute` flags. |
 | `scheduler_hp_type` | `cpu_work_stealing` | High-precision scheduler type: built-in `cpu_work_stealing`, `serial_debug`, `gpu_pipeline`, `heterogeneous`, or a loaded plugin scheduler name. |
 | `scheduler_rt_type` | `cpu_work_stealing` | Kernel RT intent scheduler type using the same supported values; this does not enable CLI RT commands. |
-| `scheduler_worker_count` | `0` | CPU worker count; `0` means auto. |
+| `scheduler_worker_count` | `0` | CPU/plugin worker grant: `0` selects a bounded automatic value from `1..8`; `1..8` is exact. Other values are rejected. |
 
 Use another config file with:
 
@@ -296,6 +299,15 @@ graph load. Scheduler type strings are resolved when a graph creates its
 scheduler instances during graph load, or later through `scheduler set <hp|rt>
 <type>`, so newly loaded graphs can still use plugin-provided scheduler types
 discovered during startup.
+
+Scheduler config is transactional: malformed, negative, or greater-than-eight
+worker values leave the previous future-graph defaults unchanged. Each graph
+plans its HP and RT schedulers against one fixed 32-slot capacity shared by all
+Hosts and Kernels in the process. Built-in serial scheduling charges zero;
+CPU and ABI-v2 plugin schedulers charge the resolved grant; built-in GPU and
+heterogeneous scheduling also charge one potential device worker. Config
+acceptance does not reserve capacity, so graph load or replacement can still
+return Graph `ComputeError`; failed replacement keeps the old scheduler.
 
 Scheduler plugin discovery and scheduler selection are separate phases.
 `scheduler plugins` can show a plugin because it was scanned from

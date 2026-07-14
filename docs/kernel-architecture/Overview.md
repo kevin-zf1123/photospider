@@ -151,6 +151,7 @@ graph TD
     Kernel --> GraphInspectService
     Kernel --> RoiPropagationService
     Kernel --> PluginManager
+    Kernel --> SchedulerWorkerBudget["process SchedulerWorkerBudget"]
 
     GraphRuntime --> GraphModel
     GraphRuntime --> GraphStateExecutor
@@ -176,6 +177,15 @@ unloads operation plugins. A load or explicit unload through any Host changes
 the process-global operation view seen by all Hosts; callback and returned-value
 leases keep plugin code mapped after registry removal until in-flight state is
 destroyed.
+
+Scheduler instances remain graph- and intent-owned, but their physical worker
+admission is process-owned. Every embedded Host/Kernel reaches the same
+32-slot `SchedulerWorkerBudget`. A graph retains one combined HP+RT reservation
+pair, atomically admitted then divided between its two scheduler owners, for
+their lifetimes. A scheduler replacement retains a separate candidate
+reservation until publication succeeds or rollback completes. Reservations
+are move-only RAII owners; concrete scheduler destruction happens before
+capacity is returned.
 
 The IPC Host owns only client-side connections, interruptible polling workers,
 and mapped image lifetimes. Daemon sessions, accepted jobs, snapshots, output
@@ -368,6 +378,18 @@ before discovery or creation. `GraphStateExecutor` remains the separate access
 boundary for graph-state operations and compute requests that read or mutate
 the visible `GraphModel`.
 
+The public worker request range is zero through eight. Zero resolves before
+construction to `min(max(1, hardware_concurrency()), 8)`; explicit one through
+eight remain exact, while larger values are rejected transactionally. Built-in
+CPU schedulers and registered ABI v2 plugins are charged the resolved grant;
+the built-in GPU/heterogeneous scheduler is charged that grant plus one
+potential device worker; only built-in `serial_debug` consumes zero slots. The
+Host plans HP and RT together and reserves their combined charge atomically
+against the fixed 32-slot process ceiling. Capacity exhaustion is a graph
+`ComputeError`; invalid requests and unknown scheduler types are
+`InvalidParameter`. This is admission containment, not a shared executor or a
+limit on every process thread.
+
 ## Operation Registry
 
 Operations are keyed by `type:subtype`. The registry supports:
@@ -444,9 +466,10 @@ Important current behavior:
 - Dependency-tree data is built by the inspection boundary, copied through the
   embedded Host adapter, and rendered by frontend code without exposing backend
   objects.
-- Current schedulers own physical workers per graph and intent. The accepted
-  replacement for that ownership is recorded in ADR 0003, but is not current
-  behavior.
+- Current schedulers own physical workers per graph and intent, subject to
+  bounded per-instance grants and the shared 32-slot admission ledger. The
+  accepted replacement for that ownership is recorded in ADR 0003, but the
+  shared `ExecutionService` is not current behavior.
 
 ADR 0001 defines graph-state versus scheduler dispatch, ADR 0002 defines the
 external-library adapter target, and ADR 0003 defines the accepted process

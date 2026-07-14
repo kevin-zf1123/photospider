@@ -130,11 +130,14 @@ target_link_libraries(my_scheduler PRIVATE Photospider::scheduler_sdk)
 the no-external-dependency `operation_runtime` image factories. An adapter user
 requests `operation_opencv`, which discovers only OpenCV `core`; algorithm-
 specific modules remain the plugin's responsibility. `scheduler_sdk` carries
-only installed headers and C++17. Operation DSOs export
-`register_photospider_ops_v2`; scheduler DSOs must pass the numeric
-`ps_scheduler_plugin_get_abi_version() noexcept` handshake before metadata or
-creation. Neither SDK exposes mutable graph/runtime owners, and the old
-source-tree extension include paths are unsupported without forwarders.
+only installed ABI-v2 headers and C++17. Operation DSOs export
+`register_photospider_ops_v2`; scheduler DSOs must return scheduler ABI version
+2 from `ps_scheduler_plugin_get_abi_version() noexcept` before metadata or
+creation. ABI v1 is rejected without an adapter. Every ABI-v2 `create` call
+receives a resolved one-through-eight hard worker grant; a trusted in-process
+plugin may own fewer worker threads but must not own more. Neither SDK exposes
+mutable graph/runtime owners, and the old source-tree extension include paths
+are unsupported without forwarders.
 
 The IPC Host implements all 53 current non-destructor Host virtuals through
 short-lived typed connections. Compute submits once, polls immediately and then
@@ -346,7 +349,7 @@ as-is, so local entries such as `cache_precision`, `plugin_dirs`, or
 | `session_warning` | `true` | Warn before overwriting session content. |
 | `scheduler_hp_type` | `cpu_work_stealing` | Default HP scheduler: built-in `cpu_work_stealing`, `serial_debug`, `gpu_pipeline`, `heterogeneous`, or a loaded plugin scheduler name. |
 | `scheduler_rt_type` | `cpu_work_stealing` | Default kernel RT intent scheduler using the same supported values; this does not enable CLI RT commands. |
-| `scheduler_worker_count` | `0` | CPU scheduler worker count; `0` means auto. |
+| `scheduler_worker_count` | `0` | CPU/plugin worker grant: `0` resolves to `min(max(1, hardware_concurrency()), 8)`; `1..8` stays exact. Other values are invalid. |
 
 When the CLI loads a config file, it first copies these scheduler defaults into
 `Kernel::SchedulerConfig`, then scans configured plugin directories before any
@@ -354,6 +357,23 @@ graph load. Scheduler type strings are resolved when a graph creates its
 scheduler instances during graph load, or later through `scheduler set <hp|rt>
 <type>`, so newly loaded graphs can still use plugin-provided scheduler types
 discovered during startup.
+
+The YAML loader and config editor reject negative, malformed, and greater-than-
+eight worker values instead of clamping them. Applying scheduler defaults is a
+single transaction: rejection leaves the previously active future-graph
+defaults unchanged. The same worker request is planned separately for each
+graph's HP and RT schedulers. Built-in `serial_debug` charges zero slots;
+`cpu_work_stealing` and ABI-v2 plugins charge the resolved grant; built-in
+`gpu_pipeline`/`heterogeneous` also charges one potential device worker. All
+embedded Hosts and Kernels in the process share a fixed 32-slot scheduler
+capacity, which is not a config key.
+
+Accepting config does not reserve slots. A later graph load returns a Graph
+`ComputeError` if its complete HP/RT pair does not fit. `scheduler set` also
+requires temporary capacity for the candidate while the old scheduler remains
+active; failure leaves the old scheduler installed. Successful graph close or
+Host destruction returns its retained slots, while a failed close retains them
+for retry.
 
 Scheduler plugin discovery and scheduler selection are separate phases.
 `scheduler plugins` reports plugins scanned from `scheduler_dirs`; it does not

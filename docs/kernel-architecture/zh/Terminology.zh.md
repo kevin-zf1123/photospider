@@ -97,6 +97,33 @@ lifecycle、ready queue、batch/epoch state 与 completion/exception publication
 implementation 同时拥有 policy 与 physical resource；`serial_debug` 同步执行。这是当前行为，
 不是已接受的长期资源所有权模型。
 
+**Scheduler worker request**
+配置中、planning 前的值。零表示 automatic，一到八保持精确；更大的值无效。Automatic resolution
+为 `min(max(1, detected hardware concurrency), 8)`。Request 尚不是 reservation，也不是正在运行的
+thread 数量。
+
+**Resolved worker grant**
+Scheduler 构造前产生的一到八非零值。它是内置 CPU worker 上限，也是一个受信任 plugin instance
+的 ABI v2 `num_workers` hard ceiling。Plugin 可以少拥有 worker thread，但不得更多。它与最终
+进程 slot 计费不同，因为内置 GPU scheduler 还要计入潜在 device worker，而内置
+`serial_debug` 计费为零。
+
+**Scheduler worker slot**
+一个潜在 scheduler-owned 物理 worker 的保守准入单位。设备不可用或合规 plugin 少创建 worker
+时，slot 仍可能保持预留。它不是 ready callback、operation 内部 thread、graph-state executor、
+daemon worker 或观测到的 OS thread。
+
+**`SchedulerWorkerBudget`**
+进程生命周期、由 mutex 串行化且固定为 32-slot 的 ledger，由所有 embedded Host 与 Kernel 共享。
+它准入 scheduler plan，但不拥有 thread、queue、policy 或 fairness。它是当前 per-graph worker 的
+containment，不是 ADR 0003 中的目标 `ExecutionService` 或 `ResourceLedger`。
+
+**Scheduler worker reservation**
+已准入 slot 的 move-only RAII owner。Graph load 会在构造任一 scheduler 前原子取得 HP/RT
+reservation pair，每个 intent 各有一个 owner；replacement 会在旧 owner 保持存活时取得一个
+candidate reservation。
+`ReservationOwnedScheduler` 会先销毁 concrete scheduler，再把 reservation 恰好归还一次。
+
 **`SchedulerTaskRuntime`**
 scheduler-owned、push-only 的 ready-task dispatch 机制。它接受 initial ready batch 和后来释放的
 ready batch；不会从 plan 拉取、派生 task、检查 graph topology 或提交 graph state。
@@ -137,4 +164,7 @@ cache 或 scheduling 语义的所有者。
 - ready task 不是任务图。
 - HP cache 不是 RT proxy state。
 - `ImageBuffer` 不是未来通用数据模型。
+- Worker request 不是 resolved grant，grant 也不一定等于最终 scheduler slot 计费。
+- 已预留 scheduler worker slot 不能证明当前正好有一个 thread 在运行。
+- `SchedulerWorkerBudget` 不是 worker pool、fairness authority，也不是进程中所有 thread 的上限。
 - 当前每图 `IScheduler` 不是目标进程执行域。

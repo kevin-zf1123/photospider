@@ -27,6 +27,38 @@ The merge gates for the current refactor remain in
 [codebase-refactor](https://github.com/users/kevin-zf1123/projects/1), aggregated
 by [issue #42](https://github.com/kevin-zf1123/photospider/issues/42).
 
+### Current containment baseline
+
+[Issue #43](https://github.com/kevin-zf1123/photospider/issues/43) establishes
+the bounded baseline from which the execution-domain migration proceeds. It
+does not implement the target architecture: HP and RT schedulers still own
+per-graph worker threads, queues, epochs, and policy. The containment contract
+instead:
+
+- accepts worker requests from zero through eight and resolves zero to
+  `min(max(1, hardware_concurrency()), 8)` before construction;
+- treats the resolved one-through-eight ABI v2 plugin value as a trusted hard
+  grant, rejects ABI v1, and provides no compatibility shim;
+- charges built-in serial as zero, built-in CPU and registered plugins as the
+  resolved grant, and built-in GPU/heterogeneous as that grant plus its
+  potential device worker;
+- atomically reserves combined HP+RT demand from one 32-slot process ledger
+  shared by every embedded Host, while replacement reserves transient
+  candidate headroom and preserves the old scheduler on failure; and
+- releases move-only reservations exactly once after concrete scheduler
+  destruction, including load rollback, successful graph close, and Host
+  destruction; failed close retains the runtime and reservations for retry.
+
+The 32 slots cover only accounted scheduler-owned workers. They do not count
+graph-state executors, operation-internal threads, daemon/frontend workers, or
+all OS threads, and they provide neither shared execution nor fairness. The
+`ComputeRun`/`ExecutionService` work in the later execution-domain issues must
+replace this transitional ledger and worker-owning ABI as complete ownership
+migrations, not layer permanent adapters over them. In particular, the shared
+executor slices tracked by [#68](https://github.com/kevin-zf1123/photospider/issues/68)
+and [#69](https://github.com/kevin-zf1123/photospider/issues/69) remove
+per-Graph workers rather than treating the current ledger as the final pool.
+
 ## Architectural Principles
 
 1. `ps::Host` remains the only product seam outside the backend.
@@ -269,4 +301,8 @@ execution profiles, server runtime, and plugin isolation
 The first executable vertical slice of each domain must preserve current Host
 behavior and add durable tests before broader migration. Interface renames and
 ownership transfers are completed without permanent compatibility wrappers,
-in accordance with repository migration discipline.
+in accordance with repository migration discipline. In particular, the
+process execution domain must preserve the current bounded-admission error and
+rollback guarantees while replacing per-graph physical worker ownership; it
+must not reinterpret the transitional 32-slot counter as the target resource
+model.

@@ -127,6 +127,7 @@ graph TD
     Kernel --> GraphInspectService
     Kernel --> RoiPropagationService
     Kernel --> PluginManager
+    Kernel --> SchedulerWorkerBudget["进程级 SchedulerWorkerBudget"]
 
     GraphRuntime --> GraphModel
     GraphRuntime --> GraphStateExecutor
@@ -149,6 +150,12 @@ graph TD
 所有 Host 与 Kernel 都访问同一个进程寿命 `PluginManager` 和 `OpRegistry`。Host 析构绝不会卸载
 operation plugin。任意 Host 执行 load 或显式 unload，所有 Host 都会观察到相同的进程级 operation view；
 callback 与返回值 lease 会在 registry 移除后继续保持插件代码映射，直到在途状态完成销毁。
+
+Scheduler instance 仍归 graph 与 intent 所有，但物理 worker 的准入由进程拥有。每个 embedded
+Host/Kernel 都访问同一个 32-slot `SchedulerWorkerBudget`。Graph 会在 scheduler 生命周期内保留一个
+原子准入、再分别交给两个 scheduler owner 的 HP+RT reservation pair；scheduler replacement 另行
+保留 candidate reservation，直到发布成功或 rollback 完成。Reservation 是 move-only RAII owner，
+必须先销毁 concrete scheduler，才能归还容量。
 
 IPC Host 只拥有 client-side connection、interruptible polling worker 与 mapped image lifetime。
 Daemon session、accepted job、snapshot、output lease 与 backend Host 仍归 daemon 所有。销毁
@@ -309,6 +316,13 @@ capability、worker/epoch TLS attribution 与 trace publication。外部 schedul
 handshake，才能进入 discovery 或 creation。`GraphStateExecutor` 仍是 graph-state operation 以及读取或
 修改可见 `GraphModel` 的 compute request 的独立访问边界。
 
+公共 worker 请求范围是零到八。零会在构造前解析为
+`min(max(1, hardware_concurrency()), 8)`；显式一到八保持精确，更大的值会被事务性拒绝。内置 CPU
+scheduler 与已注册 ABI v2 plugin 按解析后的授权计费；内置 GPU/heterogeneous scheduler 在该授权上
+再加一个潜在 device worker；只有内置 `serial_debug` 消耗零 slot。Host 会共同规划 HP 与 RT，并针对
+固定 32-slot 进程上限原子预留合计计费。容量不足是 graph `ComputeError`；无效请求与未知 scheduler
+type 是 `InvalidParameter`。这是准入 containment，不是 shared executor，也不是所有进程 thread 的上限。
+
 ## 操作 Registry
 
 操作以 `type:subtype` 为 key。Registry 支持：
@@ -364,8 +378,8 @@ ROI 传播通过 `RoiPropagationService` 处理，它使用 registry 提供的 p
 - `RoiPropagationService` 与 `GraphExtentResolver` 拥有空间传播和 HP-authoritative extent resolution。
 - Dependency-tree data 由 inspection 边界构建，经 embedded Host adapter 复制，再由 frontend 渲染，
   不暴露后端对象。
-- 当前 scheduler 按 graph 和 intent 拥有物理 worker。ADR 0003 记录了已接受的替代所有权，
-  但它不是当前行为。
+- 当前 scheduler 按 graph 和 intent 拥有物理 worker，但受单实例 grant 与共享 32-slot admission
+  ledger 约束。ADR 0003 记录了已接受的替代所有权，但 shared `ExecutionService` 不是当前行为。
 
 ADR 0001 定义 graph-state 与 scheduler dispatch，ADR 0002 定义外部库 adapter 目标，ADR 0003
 定义已接受的进程执行域。`../../roadmap/zh/Kernel-Evolution.zh.md` 将这些决策组合成长远目标，

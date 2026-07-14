@@ -49,6 +49,19 @@ as `compute rt`, `--dirty-roi`, `dirty begin`, `dirty update`, or `dirty end`.
 kernel/test callers, but the CLI does not expose them and must not be treated as
 a production realtime control surface.
 
+Compute does not acquire scheduler capacity per request. Before a graph can be
+published, load resolves its configured worker request (`0` becomes
+`min(max(1, hardware_concurrency()), 8)`, explicit `1..8` remains exact), plans
+the HP and RT scheduler charges, and atomically reserves their combined demand
+from the process-wide 32-slot ledger. The accepted pair contains one move-only
+reservation for each scheduler owner, retained across every synchronous or
+asynchronous compute request. Only built-in `serial_debug` is a zero-slot
+scheduler; built-in CPU and ABI v2 plugin schedulers charge the resolved grant,
+while the built-in GPU/heterogeneous scheduler also charges its potential
+device worker.
+This admission step bounds current scheduler-owned workers, not callback count
+or all threads used by compute and its operations.
+
 `GraphTraversalService` is topology-only. It provides traversal order and
 explicit upstream/downstream topology queries from `GraphModel` adjacency.
 Dirty-region demand and ROI projection use `RoiPropagationService`, while
@@ -167,6 +180,15 @@ closures, dependency counters, ready handles, operation variants, and temporary
 result slots, then submits ready node tasks through the configured scheduler's
 `SchedulerTaskRuntime`. Tiled operations may spawn micro-tasks and increment
 scheduler-owned completion counters.
+
+The selected scheduler has already been admitted for its full lifetime before
+these callbacks are submitted. A running compute therefore consumes no new
+ledger slots. Scheduler inspection and replacement share the per-graph
+`GraphStateExecutor` boundary with compute; replacement cannot overlap a
+compute callback sequence, and it must reserve candidate transient headroom
+while the old scheduler remains live. Failed candidate planning, attach, or
+start leaves the old scheduler and its compute behavior unchanged and returns
+only candidate capacity.
 
 `ComputeTaskDispatcher` keeps plan execution, dependency accounting, sparse
 node-id mapping, temporary result storage, event logging, exception
@@ -365,3 +387,8 @@ mutable mirror. The embedded adapter maps these values to public
 `OperationStatus`, `Result<T>`, or `ps::Host::last_error()` values. Frontends
 observe only the public Host surface and never inspect Kernel or
 `InteractionService` directly.
+
+Scheduler-admission failures occur at graph load or replacement rather than in
+the ready-task loop. An invalid above-eight request or unknown type maps to
+`InvalidParameter`; exhaustion of the fixed process worker ledger preserves
+`GraphErrc::ComputeError` through embedded Host and IPC status boundaries.

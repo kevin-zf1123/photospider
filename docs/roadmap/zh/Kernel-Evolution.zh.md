@@ -22,6 +22,29 @@ GitHub Project 和 Issue 跟踪。
 [codebase-refactor](https://github.com/users/kevin-zf1123/projects/1) 跟踪，并由
 [Issue #42](https://github.com/kevin-zf1123/photospider/issues/42) 聚合。
 
+### 当前 containment 基线
+
+[Issue #43](https://github.com/kevin-zf1123/photospider/issues/43) 建立执行域迁移的有界基线，但它
+没有实现目标架构：HP 与 RT scheduler 仍按 graph 拥有 worker thread、queue、epoch 与 policy。
+Containment contract 改为：
+
+- 接受零到八的 worker 请求，并在构造前把零解析为
+  `min(max(1, hardware_concurrency()), 8)`；
+- 把解析后的一到八 ABI v2 plugin 值作为受信任 hard grant，拒绝 ABI v1，且不提供兼容 shim；
+- 内置 serial 计费为零，内置 CPU 与已注册 plugin 按解析后的 grant 计费，内置
+  GPU/heterogeneous 再加一个潜在 device worker；
+- 从所有 embedded Host 共享的一个 32-slot 进程 ledger 原子预留 HP+RT 合计需求；replacement
+  预留 transient candidate headroom，并在失败时保留旧 scheduler；
+- 在 concrete scheduler 销毁后恰好一次释放 move-only reservation，包括 load rollback、成功的
+  graph close 与 Host 销毁；close 失败会保留 runtime 与 reservation 供重试。
+
+这 32 个 slot 只覆盖已计数的 scheduler-owned worker，不计算 graph-state executor、operation
+内部 thread、daemon/frontend worker 或所有 OS thread，也不提供 shared execution 或 fairness。
+后续执行域 issue 中的 `ComputeRun`/`ExecutionService` 必须完整替换这个过渡 ledger 与拥有 worker
+的 ABI，不能在其上永久叠加 adapter。特别是 [#68](https://github.com/kevin-zf1123/photospider/issues/68)
+与 [#69](https://github.com/kevin-zf1123/photospider/issues/69) 跟踪的 shared executor 纵向切片会移除
+per-Graph worker，而不是把当前 ledger 当作最终 worker pool。
+
 ## 架构原则
 
 1. `ps::Host` 继续作为后端之外唯一产品 seam。
@@ -225,4 +248,6 @@ ComputeRun 与 CPU 执行域
 ```
 
 每个领域的第一条可执行纵向切片都必须保持当前 Host 行为，并先增加长期测试，再扩大迁移。
-接口重命名和所有权迁移遵守仓库纪律完整完成，不保留永久兼容 wrapper。
+接口重命名和所有权迁移遵守仓库纪律完整完成，不保留永久兼容 wrapper。特别是，进程执行域必须在
+替换 per-graph 物理 worker 所有权时保留当前 bounded-admission error 与 rollback 保证，不能把过渡
+32-slot 计数器重新解释为目标资源模型。

@@ -243,19 +243,48 @@ code path.
 ### Per-graph physical resource ownership
 
 Each `GraphRuntime` owns a scheduler object for HP and another for RT. Graph
-load creates both objects and runtime start starts both. With the default
-`cpu_work_stealing` type, a configured worker count of zero is resolved by each
-instance independently to `hardware_concurrency()`. The approximate default
-thread count is therefore:
+load creates both objects and runtime start starts both. A configured worker
+request is valid only from zero through eight. Before scheduler or plugin
+construction, zero resolves once to:
 
 ```text
-graph count x 2 intent schedulers x hardware_concurrency
+min(max(1, hardware_concurrency()), 8)
 ```
 
-`gpu_pipeline` likewise owns CPU and GPU thread vectors per instance.
-`serial_debug` is the exception and executes synchronously on the calling
-thread. The current implementation has no process-wide worker pool, global
-thread budget, or cross-graph fairness mechanism.
+An explicit value from one through eight remains exact; a larger request is
+rejected before worker construction and does not change future-Graph defaults.
+The built-in CPU scheduler owns no more than the resolved grant. A registered
+plugin is charged the full resolved grant and may own fewer workers but not
+more. `gpu_pipeline` and `heterogeneous` are charged the resolved CPU grant plus
+their one configured potential GPU worker, even when the device is unavailable
+at admission time. Their absolute current instance charge is therefore nine.
+`serial_debug` is the sole zero-slot exception and executes synchronously on
+the calling thread.
+
+These schedulers still own physical resources per graph and intent; there is no
+shared worker pool or cross-graph fairness mechanism. The current containment
+layer instead uses one process-lifetime `SchedulerWorkerBudget` with a fixed
+32-slot ceiling shared by every embedded `Host` and `Kernel`. Graph load plans
+both intent schedulers and reserves their combined charge atomically before
+constructing either. The returned pair contains one move-only reservation per
+intent; each remains outside the concrete scheduler during construction, then
+moves into its `ReservationOwnedScheduler`. `GraphRuntime` remains responsible
+for scheduler shutdown and detach; the reservation owner guarantees only that
+concrete scheduler destruction precedes slot release. Failed attach/start/YAML
+publication, successful graph close, and Host destruction therefore return
+every acquired slot exactly once. A failed close instead retains the runtime
+and both reservations for retry.
+
+Scheduler replacement is a strong transaction: it plans and reserves the
+candidate while the old scheduler and reservation remain live, then
+attach/starts the candidate and publishes it before retiring the old owner.
+Consequently replacement requires transient headroom. Capacity exhaustion is
+reported as `GraphErrc::ComputeError` without constructing a candidate and
+without disturbing old compute behavior; invalid requests and unknown types
+remain `InvalidParameter`. This 32-slot ledger bounds only workers represented
+by built-in planning or the trusted plugin grant. It does not bound graph-state
+executors, daemon threads, frontend helpers, operation-internal threads, or all
+operating-system threads in the process.
 
 ## Plugin Discovery vs Graph Selection
 
@@ -272,11 +301,17 @@ or when the user later runs `scheduler set <hp|rt> <type>` for the current
 graph. `scheduler plugins` reports discovery state; `scheduler get all` reports
 the actual HP/RT scheduler instances attached to the current graph.
 
-Every scheduler DSO must first return the exact current numeric ABI value from
+Every scheduler DSO must first return numeric ABI version 2 from
 `ps_scheduler_plugin_get_abi_version() noexcept`. Missing or mismatched
 handshakes fail before implementation version, discovery metadata, or instance
-creation is called. The implementation version is then queried once and cached
-as diagnostic metadata, not used as a compatibility gate.
+creation is called; ABI v1 has no compatibility path. The implementation
+version is then queried once and cached as diagnostic metadata, not used as a
+compatibility gate. On creation, `num_workers` is the already-resolved
+one-through-eight hard grant. A conforming in-process plugin may own fewer
+worker threads but must never exceed that grant, while the Host conservatively
+retains the full grant until concrete instance destruction. The counter is not
+a sandbox and cannot stop a hostile or nonconforming DSO from creating
+unreported threads.
 
 Successful discovery additionally requires a positive type count, a non-null
 and non-empty stable name at every in-range index, and at least one valid name
@@ -428,6 +463,12 @@ premature-sentinel cursors fail with `GraphErrc::InvalidParameter` before a page
 is copied. Internal tests may clear retained trace slots, but production code
 has no unbounded trace getter or public clear control.
 
+Scheduler-worker capacity validation is separate from display statistics and
+trace metadata. Long-lived integration tests observe synchronized real
+operation callbacks reached through the public Host compute path. They do not
+infer the process worker total from `get_stats()`, per-instance worker ids, or a
+whole-process operating-system thread snapshot.
+
 ## Current Boundary Invariants
 
 - `IScheduler` is the current formal public scheduler interface.
@@ -441,6 +482,9 @@ has no unbounded trace getter or public clear control.
 - Plugin scheduler lifecycle follows `Plugin-ABI.md`.
 - Scheduler attachment is limited to `SchedulerHostContext`; the context does
   not expose graph/runtime ownership or native backend handles.
+- Per-instance worker grants and the shared 32-slot admission ledger contain
+  current per-graph ownership; they do not create a shared executor or claim a
+  whole-process OS-thread limit.
 - The current interface combines policy and physical worker ownership. ADR 0003
   records a different accepted ownership decision for later implementation;
   this document describes the currently executable contract.
