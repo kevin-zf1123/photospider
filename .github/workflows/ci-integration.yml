@@ -109,9 +109,41 @@ jobs:
           path: CI-results/ci-image-change
           if-no-files-found: warn
 
-  build-integrity:
+  integration-plan:
     needs: ci-image-change
     if: needs.ci-image-change.outputs.changed != 'true'
+    runs-on: ubuntu-latest
+    container:
+      image: ghcr.io/${{ github.repository }}/photospider-ci:latest
+      credentials:
+        username: ${{ github.actor }}
+        password: ${{ secrets.GITHUB_TOKEN }}
+    outputs:
+      has_static_product_consumer_smoke: ${{ steps.plan.outputs.has_static_product_consumer_smoke }}
+      has_ipc_disabled_install_smoke: ${{ steps.plan.outputs.has_ipc_disabled_install_smoke }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          repository: ${{ (github.event_name == 'pull_request' || github.event_name == 'pull_request_target') && github.event.pull_request.head.repo.full_name || github.repository }}
+          fetch-depth: 0
+          submodules: recursive
+          ref: ${{ (github.event_name == 'pull_request' || github.event_name == 'pull_request_target') && github.event.pull_request.head.sha || github.sha }}
+      - name: Plan integration jobs
+        id: plan
+        env:
+          CI_ARTIFACT_DIR: ${{ github.workspace }}/CI-results/integration-plan
+        run: bash ci/scripts/integration_plan.sh
+      - name: Upload integration plan logs
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: integration-plan-results
+          path: CI-results/integration-plan
+          if-no-files-found: warn
+
+  build-integrity-default:
+    needs: integration-plan
+    if: needs.integration-plan.result == 'success'
     runs-on: ubuntu-latest
     container:
       image: ghcr.io/${{ github.repository }}/photospider-ci:latest
@@ -127,24 +159,67 @@ jobs:
           ref: ${{ (github.event_name == 'pull_request' || github.event_name == 'pull_request_target') && github.event.pull_request.head.sha || github.sha }}
       - name: Run build integrity
         env:
-          CI_ARTIFACT_DIR: ${{ github.workspace }}/CI-results/build-integrity
+          CI_ARTIFACT_DIR: ${{ github.workspace }}/CI-results/build-integrity-default
+          CI_BUILD_PROFILE: default
         run: bash ci/scripts/build_integrity.sh
       - name: Pack reusable build
         run: |
-          mkdir -p CI-results/reusable-build
-          tar -C build -czf CI-results/reusable-build/ci-build.tar.gz ci
+          mkdir -p CI-results/reusable-build-default
+          tar -C build -czf CI-results/reusable-build-default/ci-build.tar.gz ci
       - name: Upload build integrity logs
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: build-integrity-results
-          path: CI-results/build-integrity
+          name: build-integrity-default-results
+          path: CI-results/build-integrity-default
           if-no-files-found: warn
       - name: Upload reusable build
         uses: actions/upload-artifact@v4
         with:
-          name: ci-build-dir
-          path: CI-results/reusable-build/ci-build.tar.gz
+          name: ci-build-default
+          path: CI-results/reusable-build-default/ci-build.tar.gz
+          if-no-files-found: error
+          retention-days: 3
+          compression-level: 0
+
+  build-integrity-ipc-disabled:
+    needs: integration-plan
+    if: needs.integration-plan.outputs.has_ipc_disabled_install_smoke == 'true'
+    runs-on: ubuntu-latest
+    container:
+      image: ghcr.io/${{ github.repository }}/photospider-ci:latest
+      credentials:
+        username: ${{ github.actor }}
+        password: ${{ secrets.GITHUB_TOKEN }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          repository: ${{ (github.event_name == 'pull_request' || github.event_name == 'pull_request_target') && github.event.pull_request.head.repo.full_name || github.repository }}
+          fetch-depth: 0
+          submodules: recursive
+          ref: ${{ (github.event_name == 'pull_request' || github.event_name == 'pull_request_target') && github.event.pull_request.head.sha || github.sha }}
+      - name: Run build integrity
+        env:
+          CI_ARTIFACT_DIR: ${{ github.workspace }}/CI-results/build-integrity-ipc-disabled
+          CI_BUILD_PROFILE: ipc-disabled
+        run: bash ci/scripts/build_integrity.sh
+      - name: Pack reusable build
+        run: |
+          mkdir -p CI-results/reusable-build-ipc-disabled
+          tar -C build -czf \
+            CI-results/reusable-build-ipc-disabled/ci-build.tar.gz ci
+      - name: Upload build integrity logs
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: build-integrity-ipc-disabled-results
+          path: CI-results/build-integrity-ipc-disabled
+          if-no-files-found: warn
+      - name: Upload reusable build
+        uses: actions/upload-artifact@v4
+        with:
+          name: ci-build-ipc-disabled
+          path: CI-results/reusable-build-ipc-disabled/ci-build.tar.gz
           if-no-files-found: error
           retention-days: 3
           compression-level: 0
@@ -185,7 +260,7 @@ jobs:
           if-no-files-found: warn
 
   full-ctest:
-    needs: build-integrity
+    needs: [integration-plan, build-integrity-default]
     runs-on: ubuntu-latest
     container:
       image: ghcr.io/${{ github.repository }}/photospider-ci:latest
@@ -202,7 +277,7 @@ jobs:
       - name: Download reusable build
         uses: actions/download-artifact@v4
         with:
-          name: ci-build-dir
+          name: ci-build-default
           path: CI-results/reusable-build
       - name: Restore reusable build
         run: |
@@ -222,8 +297,92 @@ jobs:
           path: CI-results/ctest-full
           if-no-files-found: warn
 
+  static-product-consumer-smoke:
+    needs: [integration-plan, build-integrity-default]
+    if: needs.integration-plan.outputs.has_static_product_consumer_smoke == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    container:
+      image: ghcr.io/${{ github.repository }}/photospider-ci:latest
+      credentials:
+        username: ${{ github.actor }}
+        password: ${{ secrets.GITHUB_TOKEN }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          repository: ${{ (github.event_name == 'pull_request' || github.event_name == 'pull_request_target') && github.event.pull_request.head.repo.full_name || github.repository }}
+          fetch-depth: 0
+          submodules: recursive
+          ref: ${{ (github.event_name == 'pull_request' || github.event_name == 'pull_request_target') && github.event.pull_request.head.sha || github.sha }}
+      - name: Download reusable build
+        uses: actions/download-artifact@v4
+        with:
+          name: ci-build-default
+          path: CI-results/reusable-build
+      - name: Restore reusable build
+        run: |
+          rm -rf build/ci
+          mkdir -p build
+          tar -C build -xzf CI-results/reusable-build/ci-build.tar.gz
+      - name: Run static product consumer smoke test
+        env:
+          CI_ARTIFACT_DIR: ${{ github.workspace }}/CI-results/static-product-consumer-smoke
+          CI_BUILD_PROFILE: default
+          CI_REUSE_BUILD: ON
+          SMOKE_TEST: static-product-consumer
+        run: bash ci/scripts/build_smoke_test.sh
+      - name: Upload static product consumer smoke logs
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: static-product-consumer-smoke-results
+          path: CI-results/static-product-consumer-smoke
+          if-no-files-found: warn
+
+  ipc-disabled-install-smoke:
+    needs: [integration-plan, build-integrity-ipc-disabled]
+    if: needs.integration-plan.outputs.has_ipc_disabled_install_smoke == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    container:
+      image: ghcr.io/${{ github.repository }}/photospider-ci:latest
+      credentials:
+        username: ${{ github.actor }}
+        password: ${{ secrets.GITHUB_TOKEN }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          repository: ${{ (github.event_name == 'pull_request' || github.event_name == 'pull_request_target') && github.event.pull_request.head.repo.full_name || github.repository }}
+          fetch-depth: 0
+          submodules: recursive
+          ref: ${{ (github.event_name == 'pull_request' || github.event_name == 'pull_request_target') && github.event.pull_request.head.sha || github.sha }}
+      - name: Download reusable build
+        uses: actions/download-artifact@v4
+        with:
+          name: ci-build-ipc-disabled
+          path: CI-results/reusable-build
+      - name: Restore reusable build
+        run: |
+          rm -rf build/ci
+          mkdir -p build
+          tar -C build -xzf CI-results/reusable-build/ci-build.tar.gz
+      - name: Run IPC-disabled install smoke test
+        env:
+          CI_ARTIFACT_DIR: ${{ github.workspace }}/CI-results/ipc-disabled-install-smoke
+          CI_BUILD_PROFILE: ipc-disabled
+          CI_REUSE_BUILD: ON
+          SMOKE_TEST: ipc-disabled-install
+        run: bash ci/scripts/build_smoke_test.sh
+      - name: Upload IPC-disabled install smoke logs
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: ipc-disabled-install-smoke-results
+          path: CI-results/ipc-disabled-install-smoke
+          if-no-files-found: warn
+
   scripted-cli:
-    needs: build-integrity
+    needs: [integration-plan, build-integrity-default]
     runs-on: ubuntu-latest
     container:
       image: ghcr.io/${{ github.repository }}/photospider-ci:latest
@@ -240,7 +399,7 @@ jobs:
       - name: Download reusable build
         uses: actions/download-artifact@v4
         with:
-          name: ci-build-dir
+          name: ci-build-default
           path: CI-results/reusable-build
       - name: Restore reusable build
         run: |
@@ -261,7 +420,7 @@ jobs:
           if-no-files-found: warn
 
   propagation-script:
-    needs: build-integrity
+    needs: [integration-plan, build-integrity-default]
     runs-on: ubuntu-latest
     container:
       image: ghcr.io/${{ github.repository }}/photospider-ci:latest
@@ -278,7 +437,7 @@ jobs:
       - name: Download reusable build
         uses: actions/download-artifact@v4
         with:
-          name: ci-build-dir
+          name: ci-build-default
           path: CI-results/reusable-build
       - name: Restore reusable build
         run: |
@@ -299,7 +458,7 @@ jobs:
           if-no-files-found: warn
 
   plugin-load:
-    needs: build-integrity
+    needs: [integration-plan, build-integrity-default]
     runs-on: ubuntu-latest
     container:
       image: ghcr.io/${{ github.repository }}/photospider-ci:latest
@@ -316,7 +475,7 @@ jobs:
       - name: Download reusable build
         uses: actions/download-artifact@v4
         with:
-          name: ci-build-dir
+          name: ci-build-default
           path: CI-results/reusable-build
       - name: Restore reusable build
         run: |
@@ -337,7 +496,7 @@ jobs:
           if-no-files-found: warn
 
   scheduler-repeat:
-    needs: build-integrity
+    needs: [integration-plan, build-integrity-default]
     runs-on: ubuntu-latest
     container:
       image: ghcr.io/${{ github.repository }}/photospider-ci:latest
@@ -354,7 +513,7 @@ jobs:
       - name: Download reusable build
         uses: actions/download-artifact@v4
         with:
-          name: ci-build-dir
+          name: ci-build-default
           path: CI-results/reusable-build
       - name: Restore reusable build
         run: |
