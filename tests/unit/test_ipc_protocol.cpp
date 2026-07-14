@@ -43,6 +43,7 @@
 #include "ipc/unix_socket.hpp"
 #include "photospider/host/host.hpp"
 #include "photospider/ipc/client.hpp"
+#include "photospider/scheduler/scheduler.hpp"
 #include "scheduler/scheduler_plugin_loader.hpp"  // NOLINT(build/include_subdir)
 #include "support/ipc_host_spy.hpp"
 
@@ -1377,18 +1378,56 @@ TEST_F(HostRoutedGraphStateProtocolTest,
   EXPECT_EQ(host_.invocations()[0].text, "relative/plugin.dylib");
 
   host_.reset_invocations();
-  response =
-      route("scheduler.configure_defaults",
-            Json{{"hp_type", "cpu_work_stealing"},
-                 {"rt_type", "serial_debug"},
-                 {"worker_count", std::numeric_limits<unsigned int>::max()},
-                 {"future", Json::object()}});
+  response = route("scheduler.configure_defaults",
+                   Json{{"hp_type", "cpu_work_stealing"},
+                        {"rt_type", "serial_debug"},
+                        {"worker_count", 3U},
+                        {"future", Json::object()}});
   ASSERT_TRUE(response.contains("result")) << response.dump();
   EXPECT_EQ(response["result"], Json::object());
   ASSERT_EQ(host_.invocations().size(), 1U);
   EXPECT_EQ(host_.invocations()[0].text, "cpu_work_stealing\nserial_debug");
-  EXPECT_EQ(host_.invocations()[0].worker_count,
-            std::numeric_limits<unsigned int>::max());
+  EXPECT_EQ(host_.invocations()[0].worker_count, 3U);
+}
+
+/**
+ * @brief Proves scheduler worker limits are enforced before Host mutation.
+ * @return Nothing.
+ * @throws std::bad_alloc If request, response, or spy storage cannot allocate.
+ * @throws GoogleTest assertion failures when exact routing or rejection
+ * violates the protocol contract.
+ * @note Zero and eight must each reach Host exactly once. The accepted eight
+ * invocation remains the only recorded mutation after nine is rejected, so
+ * the test observes both pre-Host validation and unchanged prior state.
+ */
+TEST_F(HostRoutedGraphStateProtocolTest,
+       SchedulerDefaultsBoundWorkerCountBeforeHostAccess) {
+  for (const unsigned int worker_count : {0U, kSchedulerWorkerRequestMax}) {
+    host_.reset_invocations();
+    const Json accepted = route("scheduler.configure_defaults",
+                                Json{{"hp_type", "cpu_work_stealing"},
+                                     {"rt_type", "serial_debug"},
+                                     {"worker_count", worker_count}});
+    ASSERT_TRUE(accepted.contains("result")) << accepted.dump();
+    EXPECT_EQ(accepted["result"], Json::object());
+    ASSERT_EQ(host_.call_count("scheduler.configure_defaults"), 1U);
+    ASSERT_EQ(host_.invocations().size(), 1U);
+    EXPECT_EQ(host_.invocations().front().worker_count, worker_count);
+  }
+
+  const Json rejected =
+      route("scheduler.configure_defaults",
+            Json{{"hp_type", "cpu_work_stealing"},
+                 {"rt_type", "serial_debug"},
+                 {"worker_count", kSchedulerWorkerRequestMax + 1U}});
+  ASSERT_TRUE(rejected.contains("error")) << rejected.dump();
+  EXPECT_EQ(rejected["error"]["domain"], "protocol");
+  EXPECT_EQ(rejected["error"]["code"], kInvalidParamsCode);
+  EXPECT_EQ(rejected["error"]["name"], "invalid_params");
+  ASSERT_EQ(host_.call_count("scheduler.configure_defaults"), 1U);
+  ASSERT_EQ(host_.invocations().size(), 1U);
+  EXPECT_EQ(host_.invocations().front().worker_count,
+            kSchedulerWorkerRequestMax);
 }
 
 TEST_F(HostRoutedGraphStateProtocolTest,
@@ -7220,6 +7259,76 @@ TEST(ClientLifecycle, RejectsOverflowedEnvelopeVersionAndErrorCode) {
     EXPECT_EQ(ping.status.code, kInvalidRequestCode);
     EXPECT_FALSE(client.connected());
   }
+}
+
+/**
+ * @brief Rejects an excessive typed scheduler worker request before wire IO.
+ *
+ * The same Client is first queried while disconnected, then connected to a
+ * scripted peer that expects only one exact-limit request. The excessive
+ * request must preserve the historical disconnected-status precedence before
+ * connect, become local protocol `invalid_params` after connect, and leave the
+ * connection available for the accepted request.
+ *
+ * @return Nothing; GoogleTest records status, request-count, or value errors.
+ * @throws std::bad_alloc, std::runtime_error, or std::system_error if socket,
+ *         script, request, or peer-thread setup cannot complete.
+ * @note The peer has no reply slot for the rejected call. Observing one request
+ *       carrying eight therefore proves the connected rejection sent no frame
+ *       without relying on timing or diagnostic message text.
+ */
+TEST(ClientSchedulerDefaults,
+     RejectsConnectedAboveLimitBeforeWireAndRetainsConnection) {
+  ScopedTempDirectory temp("ps-ipc-sched-limit");
+  const std::string socket_path = (temp.path() / "server.sock").string();
+  UniqueFd listener = create_test_listener(socket_path);
+  const std::vector<ScriptedClientReply> replies = {
+      {"scheduler.configure_defaults", Json::object()}};
+  std::vector<Json> requests;
+  bool served = false;
+  std::thread peer([&] {
+    served = serve_scripted_client_replies(listener.get(), replies, &requests);
+  });
+
+  Client client;
+  HostSchedulerConfig excessive;
+  excessive.hp_type = "cpu_work_stealing";
+  excessive.rt_type = "serial_debug";
+  excessive.worker_count = kSchedulerWorkerRequestMax + 1U;
+  const VoidResult disconnected =
+      client.configure_scheduler_defaults(excessive);
+  ASSERT_TRUE(client.connect(socket_path).ok);
+  const VoidResult rejected = client.configure_scheduler_defaults(excessive);
+
+  HostSchedulerConfig accepted = excessive;
+  accepted.worker_count = kSchedulerWorkerRequestMax;
+  const VoidResult accepted_result =
+      client.configure_scheduler_defaults(accepted);
+  const bool connected_after_accepted = client.connected();
+  client.disconnect();
+  const VoidResult disconnected_again =
+      client.configure_scheduler_defaults(excessive);
+  peer.join();
+
+  ASSERT_FALSE(disconnected.status.ok);
+  EXPECT_EQ(disconnected.status.domain, OperationErrorDomain::Transport);
+  EXPECT_EQ(disconnected.status.code, 2);
+  EXPECT_EQ(disconnected.status.name, "not_connected");
+  ASSERT_FALSE(rejected.status.ok);
+  EXPECT_EQ(rejected.status.domain, OperationErrorDomain::Protocol);
+  EXPECT_EQ(rejected.status.code, kInvalidParamsCode);
+  EXPECT_EQ(rejected.status.name, "invalid_params");
+  EXPECT_TRUE(accepted_result.status.ok) << accepted_result.status.message;
+  EXPECT_TRUE(served);
+  ASSERT_EQ(requests.size(), 1U);
+  EXPECT_EQ(requests.front()["params"]["worker_count"],
+            kSchedulerWorkerRequestMax);
+  EXPECT_TRUE(connected_after_accepted);
+  ASSERT_FALSE(disconnected_again.status.ok);
+  EXPECT_EQ(disconnected_again.status.domain, OperationErrorDomain::Transport);
+  EXPECT_EQ(disconnected_again.status.code, 2);
+  EXPECT_EQ(disconnected_again.status.name, "not_connected");
+  EXPECT_FALSE(client.connected());
 }
 
 /**

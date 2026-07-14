@@ -336,7 +336,9 @@ void print_help_traversal(const CliConfig& config);
  * @param config Mutable configuration owned by the REPL.
  * @return True after the editor exits.
  * @throws std::bad_alloc if editor or Host-result storage cannot allocate.
- * @note Host scheduler defaults change only after the editor accepts changes.
+ * @throws std::runtime_error if Host rejects accepted scheduler defaults.
+ * @note Host scheduler defaults change only after the editor accepts valid
+ * changes. `process_command` reports ordinary Host rejection and continues.
  */
 bool handle_config(std::istringstream& iss, ps::Host& svc,
                    std::string& current_graph, bool& modified,

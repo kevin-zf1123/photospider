@@ -667,11 +667,19 @@ class PHOTOSPIDER_API Client {
   IpcResult<std::vector<std::string>> scheduler_loaded_plugins();
 
   /**
-   * @brief Calls `scheduler.configure_defaults` exactly once.
-   * @param config Scheduler type labels and exact worker count.
-   * @return Success or the exact categorized failure.
+   * @brief Validates and calls `scheduler.configure_defaults` through at most
+   *        one RPC.
+   * @param config Scheduler type labels and requested worker count; the valid
+   *        worker range is `[0,8]`.
+   * @return Transport `not_connected` while disconnected, local Protocol
+   *         `invalid_params` for a connected Client whose worker count exceeds
+   *         eight, or success/the exact remote failure after one RPC.
    * @throws std::bad_alloc if request or status allocation fails.
-   * @note Existing sessions are not replaced and this mutation is not retried.
+   * @note A disconnected Client returns `not_connected` before value
+   *       validation. A connected invalid request emits no wire frame and
+   *       leaves the connection usable. Existing sessions are not replaced,
+   *       a successful default update does not reserve process capacity, and a
+   *       valid mutation is not retried.
    */
   VoidResult configure_scheduler_defaults(const HostSchedulerConfig& config);
 
@@ -691,9 +699,12 @@ class PHOTOSPIDER_API Client {
    * @param session_id Opaque daemon session identifier.
    * @param intent Scheduler intent whose owner is replaced.
    * @param type Scheduler type name.
-   * @return Success or the exact categorized failure.
+   * @return Success or the exact categorized failure, including Graph
+   *         `ComputeError` when candidate headroom cannot be reserved.
    * @throws std::bad_alloc if request or status allocation fails.
-   * @note This mutation is never automatically retried.
+   * @note This mutation is never automatically retried. The daemon Host keeps
+   *       the old scheduler installed when candidate planning, reservation, or
+   *       preparation fails.
    */
   VoidResult replace_scheduler(const IpcSessionId& session_id,
                                ComputeIntent intent, const std::string& type);

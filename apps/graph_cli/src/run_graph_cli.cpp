@@ -39,27 +39,6 @@ bool arguments_request_help(int argc, char** argv) noexcept {
 }
 
 /**
- * @brief Copies CLI scheduler defaults into the Host frontend boundary.
- * @param host Borrowed Host that owns scheduler configuration state.
- * @param config CLI value snapshot to translate.
- * @return Nothing.
- * @throws std::bad_alloc If scheduler strings or Host result storage exhaust
- * memory.
- * @note Recoverable Host status remains status-only; existing sessions keep
- * their currently attached schedulers.
- */
-void apply_scheduler_config(ps::Host& host, const CliConfig& config) {
-  ps::HostSchedulerConfig scheduler_config;
-  scheduler_config.hp_type = config.scheduler_hp_type;
-  scheduler_config.rt_type = config.scheduler_rt_type;
-  scheduler_config.worker_count =
-      config.scheduler_worker_count > 0
-          ? static_cast<unsigned int>(config.scheduler_worker_count)
-          : 0;
-  (void)host.configure_scheduler_defaults(scheduler_config);
-}
-
-/**
  * @brief Scans configured directories for scheduler plugins before graph load.
  * @param host Borrowed Host that owns loaded scheduler plugin handles.
  * @param config CLI value snapshot containing directories to scan.
@@ -128,7 +107,7 @@ int run_graph_cli(int argc, char** argv, ps::Host& svc) {
     std::string config_to_load =
         custom_config_path.empty() ? "config.yaml" : custom_config_path;
     load_or_create_config(config_to_load, config);
-    apply_scheduler_config(svc, config);
+    apply_cli_scheduler_defaults(svc, config);
     (void)svc.plugins_load(config.plugin_dirs);
     load_configured_scheduler_plugins(svc, config);
     std::string current_graph;

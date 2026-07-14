@@ -6,7 +6,7 @@
 
 /**
  * @file scheduler_plugin_api.hpp
- * @brief Version-gated exports for the transitional scheduler plugin ABI.
+ * @brief Version-two exports for the transitional scheduler plugin ABI.
  *
  * Each plugin explicitly defines every required `extern "C"` entry. This SDK
  * intentionally provides no declaration or implementation macro because those
@@ -27,14 +27,15 @@
 namespace ps {
 
 /**
- * @brief First explicit numeric scheduler SDK generation.
+ * @brief Current resolved-worker-grant scheduler SDK generation.
  *
  * @throws Nothing.
- * @note Exact equality gates known Photospider interface generations. It does
- *       not remove the requirement for compatible compiler, standard library,
- *       RTTI, exception runtime, and C++ ABI.
+ * @note Exact equality gates known Photospider interface generations. Version
+ *       one is intentionally incompatible because it did not define a
+ *       resolved hard worker grant. Version two still requires a compatible
+ *       compiler, standard library, RTTI, exception runtime, and C++ ABI.
  */
-inline constexpr std::uint32_t PS_SCHEDULER_PLUGIN_ABI_VERSION = 1U;
+inline constexpr std::uint32_t PS_SCHEDULER_PLUGIN_ABI_VERSION = 2U;
 
 /** @brief Exact ABI handshake symbol resolved before every other export. */
 inline constexpr char kSchedulerPluginGetAbiVersionSymbol[] =
@@ -101,10 +102,18 @@ using SchedulerPluginGetDescriptionFunc = const char* (*)(std::uint32_t index);
 
 /**
  * @brief Scheduler instance creation function type.
+ * @param type_name Borrowed stable type name published by the same DSO.
+ * @param num_workers Resolved nonzero worker grant in `[1,8]` and hard ceiling
+ *        for worker threads owned by the returned scheduler instance.
+ * @return Raw plugin scheduler transferred only to the matching destroy
+ *         export, or nullptr when the type cannot be constructed.
  * @throws Plugin construction exceptions locally; the host owner converts them
  * to host-owned exceptions while the DSO remains mapped.
- * @note A non-null result transfers ownership only to the matching destroy
- *       export; the host retains the DSO through destruction.
+ * @note A plugin may own fewer worker threads than `num_workers` but must not
+ *       own more. ABI v2 plugins are trusted in-process code; this contractual
+ *       ceiling does not sandbox hostile thread creation during DSO load or
+ *       outside the scheduler instance. The host retains the complete grant
+ *       and DSO through destruction.
  */
 using SchedulerPluginCreateFunc = IScheduler* (*)(const char* type_name,
                                                   std::uint32_t num_workers);

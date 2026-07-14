@@ -16,6 +16,8 @@
 #include <utility>
 #include <vector>
 
+#include "scheduler/scheduler_worker_budget.hpp"
+
 #if defined(PHOTOSPIDER_INTERNAL_BAD_ALLOC_TESTING)
 #include "scheduler/scheduler_exception_test_hooks.hpp"
 #endif
@@ -116,6 +118,41 @@ void validate_initial_count(std::size_t valid_item_count,
 std::uint64_t next_nonzero_epoch(std::uint64_t current) noexcept {
   return current == std::numeric_limits<std::uint64_t>::max() ? 1U
                                                               : current + 1U;
+}
+
+/**
+ * @brief Validates and resolves one direct GPU-pipeline configuration.
+ * @param config Caller configuration to validate and normalize.
+ * @return Configuration with CPU workers resolved into `[1,8]` and at most one
+ * potential GPU worker.
+ * @throws std::invalid_argument If CPU workers exceed eight, GPU workers exceed
+ * one, or the resulting instance exceeds the absolute ceiling of nine.
+ * @throws std::overflow_error If defensive slot addition cannot be represented.
+ * @note Validation and scalar normalization create no worker, queue, or device
+ * resource. The potential GPU worker is fixed before late device availability.
+ */
+GpuPipelineScheduler::Config normalize_gpu_scheduler_config(
+    const GpuPipelineScheduler::Config& config) {
+  constexpr unsigned int kGpuDeviceWorkerMax =
+      kGpuSchedulerWorkerInstanceMax - kSchedulerWorkerRequestMax;
+  if (config.gpu_workers > kGpuDeviceWorkerMax) {
+    throw std::invalid_argument(
+        "GPU pipeline scheduler supports at most one GPU worker");
+  }
+
+  GpuPipelineScheduler::Config normalized = config;
+  normalized.cpu_workers =
+      config.cpu_workers == 0U
+          ? resolve_scheduler_worker_count(0U,
+                                           std::thread::hardware_concurrency())
+          : resolve_scheduler_worker_count(config.cpu_workers, 0U);
+  const unsigned int instance_workers = checked_add_scheduler_worker_slots(
+      normalized.cpu_workers, normalized.gpu_workers);
+  if (instance_workers > kGpuSchedulerWorkerInstanceMax) {
+    throw std::invalid_argument(
+        "GPU pipeline scheduler worker configuration exceeds nine");
+  }
+  return normalized;
 }
 
 }  // namespace
@@ -328,11 +365,7 @@ thread_local bool GpuPipelineScheduler::tls_is_gpu_worker_ = false;
 
 /** @copydoc GpuPipelineScheduler::GpuPipelineScheduler */
 GpuPipelineScheduler::GpuPipelineScheduler(const Config& config)
-    : config_(config) {
-  if (config_.cpu_workers == 0) {
-    config_.cpu_workers = std::max(1u, std::thread::hardware_concurrency());
-  }
-}
+    : config_(normalize_gpu_scheduler_config(config)) {}
 
 /** @copydoc GpuPipelineScheduler::~GpuPipelineScheduler */
 GpuPipelineScheduler::~GpuPipelineScheduler() {

@@ -26,6 +26,7 @@
 #include "runtime/graph_runtime.hpp"
 #include "scheduler/scheduler_factory.hpp"
 #include "scheduler/scheduler_plugin_loader.hpp"
+#include "scheduler/scheduler_worker_budget.hpp"
 
 #ifdef _WIN32
 #include <windows.h>
@@ -210,6 +211,14 @@ enum class SchedulerLoadProbe : int {
   /** @brief Calls to the mandatory implementation-version export. */
   GetVersion,
 };
+
+/**
+ * @brief Fixture function signature that reads one discovery probe counter.
+ * @note The ABI uses the enum's integer representation across the DSO boundary
+ *       and its exported function pointer never throws into the test
+ *       executable.
+ */
+using LoadProbeReader = int(int) noexcept;  // NOLINT(readability/casting)
 
 /**
  * @brief Captures every caller-visible scheduler plugin registry container.
@@ -764,6 +773,98 @@ std::filesystem::path scheduler_plugin_path(const std::string& stem,
 #endif
 }
 
+/**
+ * @brief Owns one test-only native handle used to inspect fixture exports.
+ *
+ * @throws std::bad_alloc if platform path-string construction fails.
+ * @note The production loader retains its own independent DSO lifetime. Tests
+ *       declare scheduler owners after this handle so those owners are
+ *       destroyed before the final test handle can close.
+ */
+class ScopedSchedulerPluginHandle final {
+ public:
+  /**
+   * @brief Opens one existing scheduler DSO for fixture-only symbol probes.
+   * @param path Exact platform library path.
+   * @throws std::bad_alloc if converting the path to owned text fails.
+   */
+  explicit ScopedSchedulerPluginHandle(const std::filesystem::path& path) {
+#ifdef _WIN32
+    handle_ = LoadLibrary(path.string().c_str());
+#else
+    handle_ = dlopen(path.string().c_str(), RTLD_LAZY);
+#endif
+  }
+
+  /**
+   * @brief Closes the test-owned native handle when open.
+   * @throws Nothing.
+   */
+  ~ScopedSchedulerPluginHandle() noexcept {
+#ifdef _WIN32
+    if (handle_ != nullptr) {
+      FreeLibrary(handle_);
+    }
+#else
+    if (handle_ != nullptr) {
+      dlclose(handle_);
+    }
+#endif
+  }
+
+  /**
+   * @brief Prevents duplicate native-handle ownership.
+   * @param other Handle owner that remains unchanged.
+   * @throws Nothing because the operation is deleted.
+   */
+  ScopedSchedulerPluginHandle(const ScopedSchedulerPluginHandle& other) =
+      delete;
+
+  /**
+   * @brief Prevents replacing one native-handle owner.
+   * @param other Handle owner that remains unchanged.
+   * @return No value because the operation is deleted.
+   * @throws Nothing because the operation is deleted.
+   */
+  ScopedSchedulerPluginHandle& operator=(
+      const ScopedSchedulerPluginHandle& other) = delete;
+
+  /**
+   * @brief Reports whether the native library opened successfully.
+   * @return True when symbol resolution may be attempted.
+   * @throws Nothing.
+   */
+  bool valid() const noexcept { return handle_ != nullptr; }
+
+  /**
+   * @brief Resolves one fixture-only function export.
+   * @tparam Function Exact function-pointer type expected by the caller.
+   * @param symbol Null-terminated export name.
+   * @return Typed function pointer, or null when absent/unopened.
+   * @throws Nothing.
+   */
+  template <typename Function>
+  Function resolve(const char* symbol) const noexcept {
+    if (handle_ == nullptr) {
+      return nullptr;
+    }
+#ifdef _WIN32
+    return reinterpret_cast<Function>(GetProcAddress(handle_, symbol));
+#else
+    return reinterpret_cast<Function>(dlsym(handle_, symbol));
+#endif
+  }
+
+ private:
+#ifdef _WIN32
+  /** @brief Test-owned Windows library handle. */
+  HMODULE handle_ = nullptr;
+#else
+  /** @brief Test-owned POSIX dynamic-library handle. */
+  void* handle_ = nullptr;
+#endif
+};
+
 bool contains_type(const std::vector<std::string>& types,
                    const std::string& type) {
   return std::find(types.begin(), types.end(), type) != types.end();
@@ -799,6 +900,239 @@ TEST_F(SchedulerPluginLoaderTest, InitialState) {
   // 加载错误列表应该为空
   auto errors = loader.get_load_errors();
   EXPECT_TRUE(errors.empty());
+}
+
+/**
+ * @brief Locks the current scheduler plugin ABI to version two.
+ * @return Nothing; GoogleTest records an obsolete public SDK generation.
+ * @throws Nothing.
+ * @note Exact equality is intentional: scheduler ABI v1 has no compatible
+ *       resolved-worker-grant contract and must not remain loadable.
+ */
+TEST_F(SchedulerPluginLoaderTest, PublicSchedulerAbiIsExactlyVersionTwo) {
+  EXPECT_EQ(PS_SCHEDULER_PLUGIN_ABI_VERSION, 2U);
+}
+
+/**
+ * @brief Rejects zero and above-limit plugin grants before construction.
+ * @return Nothing; GoogleTest records any accepted non-grant value.
+ * @throws Nothing when the loader validates before invoking the fixture
+ *         factory; unexpected exceptions are reported by GoogleTest.
+ * @note SchedulerFactory resolves automatic requests before this private
+ *       boundary, so every compatible plugin create call must receive one
+ *       exact hard grant in `[1,8]`.
+ */
+TEST_F(SchedulerPluginLoaderTest,
+       PluginCreateRejectsEveryValueOutsideResolvedGrantRange) {
+  auto& loader = SchedulerPluginLoader::instance();
+  ASSERT_TRUE(loader.load_plugin(
+      scheduler_plugin_path("destroy_count_scheduler_plugin", true)));
+
+  EXPECT_THROW((void)loader.create(kDestroyCountSchedulerType, 0U),
+               std::invalid_argument);
+  EXPECT_THROW((void)loader.create(kDestroyCountSchedulerType,
+                                   kSchedulerWorkerRequestMax + 1U),
+               std::invalid_argument);
+}
+
+/**
+ * @brief Makes the repository fixture itself reject and record invalid grants.
+ * @return Nothing; GoogleTest records raw export or probe mismatches.
+ * @throws std::bad_alloc if native path or assertion storage cannot allocate.
+ * @note This direct ABI call bypasses SchedulerPluginLoader deliberately. It
+ *       proves the fixture independently adopts ABI v2 instead of relying only
+ *       on the Host's pre-export validation.
+ */
+TEST_F(SchedulerPluginLoaderTest,
+       FixtureCreateRejectsAndRecordsInvalidAbiV2Grants) {
+  const std::filesystem::path plugin_path =
+      scheduler_plugin_path("destroy_count_scheduler_plugin", true);
+  ASSERT_TRUE(std::filesystem::exists(plugin_path));
+  ScopedSchedulerPluginHandle probe_handle(plugin_path);
+  ASSERT_TRUE(probe_handle.valid());
+  const auto create_scheduler = probe_handle.resolve<SchedulerPluginCreateFunc>(
+      kSchedulerPluginCreateSymbol);
+  const auto reset_counts = probe_handle.resolve<void (*)() noexcept>(
+      "ps_test_scheduler_reset_counts");
+  const auto create_count = probe_handle.resolve<int (*)() noexcept>(
+      "ps_test_scheduler_create_count");
+  const auto last_worker_grant =
+      probe_handle.resolve<std::uint32_t (*)() noexcept>(
+          "ps_test_scheduler_last_worker_grant");
+  const auto active_count = probe_handle.resolve<int (*)() noexcept>(
+      "ps_test_scheduler_active_count");
+  const auto destroy_count = probe_handle.resolve<int (*)() noexcept>(
+      "ps_test_scheduler_destroy_count");
+  ASSERT_NE(create_scheduler, nullptr);
+  ASSERT_NE(reset_counts, nullptr);
+  ASSERT_NE(create_count, nullptr);
+  ASSERT_NE(last_worker_grant, nullptr);
+  ASSERT_NE(active_count, nullptr);
+  ASSERT_NE(destroy_count, nullptr);
+
+  for (const std::uint32_t grant :
+       std::array<std::uint32_t, 2>{0U, kSchedulerWorkerRequestMax + 1U}) {
+    reset_counts();
+    EXPECT_EQ(create_scheduler(kDestroyCountSchedulerType, grant), nullptr);
+    EXPECT_EQ(create_count(), 1);
+    EXPECT_EQ(last_worker_grant(), grant);
+    EXPECT_EQ(active_count(), 0);
+    EXPECT_EQ(destroy_count(), 0);
+  }
+}
+
+/**
+ * @brief Passes resolved automatic and exact worker grants to an ABI v2 DSO.
+ * @return Nothing; GoogleTest records planning, export, or lifecycle mismatch.
+ * @throws std::bad_alloc or std::system_error if fixture loading, planning,
+ *         reservation, owner construction, or synchronization fails.
+ * @note Deterministic hardware inputs cover unavailable and above-ceiling
+ *       detection without replacing production platform detection. Count nine
+ *       must fail during planning without invoking the create export.
+ */
+TEST_F(SchedulerPluginLoaderTest,
+       FactoryPassesResolvedAutomaticAndExactPluginGrants) {
+  const std::filesystem::path plugin_path =
+      scheduler_plugin_path("destroy_count_scheduler_plugin", true);
+  ASSERT_TRUE(std::filesystem::exists(plugin_path));
+  ScopedSchedulerPluginHandle probe_handle(plugin_path);
+  ASSERT_TRUE(probe_handle.valid());
+  const auto reset_counts = probe_handle.resolve<void (*)() noexcept>(
+      "ps_test_scheduler_reset_counts");
+  const auto create_count = probe_handle.resolve<int (*)() noexcept>(
+      "ps_test_scheduler_create_count");
+  const auto last_worker_grant =
+      probe_handle.resolve<std::uint32_t (*)() noexcept>(
+          "ps_test_scheduler_last_worker_grant");
+  const auto active_count = probe_handle.resolve<int (*)() noexcept>(
+      "ps_test_scheduler_active_count");
+  const auto destroy_count = probe_handle.resolve<int (*)() noexcept>(
+      "ps_test_scheduler_destroy_count");
+  ASSERT_NE(reset_counts, nullptr);
+  ASSERT_NE(create_count, nullptr);
+  ASSERT_NE(last_worker_grant, nullptr);
+  ASSERT_NE(active_count, nullptr);
+  ASSERT_NE(destroy_count, nullptr);
+
+  auto& loader = SchedulerPluginLoader::instance();
+  ASSERT_TRUE(loader.load_plugin(plugin_path));
+  /**
+   * @brief One deterministic configured/detected/resolved planning scenario.
+   * @throws Nothing.
+   */
+  struct GrantCase {
+    /** @brief Configured request supplied to deterministic planning. */
+    unsigned int configured;
+    /** @brief Simulated platform hardware concurrency. */
+    unsigned int detected;
+    /** @brief Exact resolved plugin grant expected at the DSO. */
+    unsigned int expected;
+  };
+  const std::array<GrantCase, 4> cases = {
+      GrantCase{0U, 0U, 1U},
+      GrantCase{0U, kSchedulerWorkerRequestMax + 19U,
+                kSchedulerWorkerRequestMax},
+      GrantCase{1U, kSchedulerWorkerRequestMax, 1U},
+      GrantCase{kSchedulerWorkerRequestMax, 1U, kSchedulerWorkerRequestMax}};
+  SchedulerWorkerBudget budget(kSchedulerWorkerRequestMax);
+
+  for (const GrantCase& grant_case : cases) {
+    reset_counts();
+    const std::optional<SchedulerPlan> plan =
+        SchedulerFactory::plan_for_hardware(kDestroyCountSchedulerType,
+                                            grant_case.configured,
+                                            grant_case.detected);
+    ASSERT_TRUE(plan.has_value());
+    EXPECT_EQ(plan->worker_grant(), grant_case.expected);
+    EXPECT_EQ(plan->reservation_slots(), grant_case.expected);
+    std::optional<SchedulerWorkerBudget::Reservation> reservation =
+        budget.try_reserve(plan->reservation_slots());
+    ASSERT_TRUE(reservation.has_value());
+    std::unique_ptr<IScheduler> scheduler =
+        SchedulerFactory::create(*plan, std::move(*reservation));
+    ASSERT_NE(scheduler, nullptr);
+    EXPECT_EQ(create_count(), 1);
+    EXPECT_EQ(last_worker_grant(), grant_case.expected);
+    EXPECT_EQ(active_count(), 1);
+    EXPECT_EQ(destroy_count(), 0);
+    scheduler.reset();
+    EXPECT_EQ(active_count(), 0);
+    EXPECT_EQ(destroy_count(), 1);
+  }
+
+  reset_counts();
+  EXPECT_THROW((void)SchedulerFactory::plan_for_hardware(
+                   kDestroyCountSchedulerType, kSchedulerWorkerRequestMax + 1U,
+                   kSchedulerWorkerRequestMax),
+               std::invalid_argument);
+  EXPECT_EQ(create_count(), 0);
+  EXPECT_EQ(last_worker_grant(), 0U);
+  EXPECT_EQ(active_count(), 0);
+  EXPECT_EQ(destroy_count(), 0);
+}
+
+/**
+ * @brief Retains the grant until concrete plugin-instance destruction.
+ * @return Nothing; GoogleTest records capacity, grant, or lifecycle mismatch.
+ * @throws std::bad_alloc or std::system_error if fixture loading, planning,
+ *         reservation, construction, or synchronization fails.
+ * @note An isolated eight-slot budget avoids global process-state coupling.
+ *       Capacity must remain unavailable while the plugin owner is alive and
+ *       become exactly reusable only after its instance destroy export has
+ *       completed; loader and probe handles may keep the DSO mapped.
+ */
+TEST_F(SchedulerPluginLoaderTest,
+       PluginOwnerRetainsGrantUntilConcreteDestruction) {
+  const std::filesystem::path plugin_path =
+      scheduler_plugin_path("destroy_count_scheduler_plugin", true);
+  ASSERT_TRUE(std::filesystem::exists(plugin_path));
+  ScopedSchedulerPluginHandle probe_handle(plugin_path);
+  ASSERT_TRUE(probe_handle.valid());
+  const auto reset_counts = probe_handle.resolve<void (*)() noexcept>(
+      "ps_test_scheduler_reset_counts");
+  const auto create_count = probe_handle.resolve<int (*)() noexcept>(
+      "ps_test_scheduler_create_count");
+  const auto last_worker_grant =
+      probe_handle.resolve<std::uint32_t (*)() noexcept>(
+          "ps_test_scheduler_last_worker_grant");
+  const auto active_count = probe_handle.resolve<int (*)() noexcept>(
+      "ps_test_scheduler_active_count");
+  const auto destroy_count = probe_handle.resolve<int (*)() noexcept>(
+      "ps_test_scheduler_destroy_count");
+  ASSERT_NE(reset_counts, nullptr);
+  ASSERT_NE(create_count, nullptr);
+  ASSERT_NE(last_worker_grant, nullptr);
+  ASSERT_NE(active_count, nullptr);
+  ASSERT_NE(destroy_count, nullptr);
+
+  auto& loader = SchedulerPluginLoader::instance();
+  ASSERT_TRUE(loader.load_plugin(plugin_path));
+  reset_counts();
+  const std::optional<SchedulerPlan> plan = SchedulerFactory::plan_for_hardware(
+      kDestroyCountSchedulerType, kSchedulerWorkerRequestMax, 1U);
+  ASSERT_TRUE(plan.has_value());
+  SchedulerWorkerBudget budget(kSchedulerWorkerRequestMax);
+  std::optional<SchedulerWorkerBudget::Reservation> reservation =
+      budget.try_reserve(plan->reservation_slots());
+  ASSERT_TRUE(reservation.has_value());
+  std::unique_ptr<IScheduler> scheduler =
+      SchedulerFactory::create(*plan, std::move(*reservation));
+  ASSERT_NE(scheduler, nullptr);
+  EXPECT_EQ(create_count(), 1);
+  EXPECT_EQ(last_worker_grant(), kSchedulerWorkerRequestMax);
+  EXPECT_EQ(active_count(), 1);
+  EXPECT_EQ(destroy_count(), 0);
+  EXPECT_FALSE(budget.try_reserve(1U).has_value());
+
+  scheduler.reset();
+  EXPECT_EQ(active_count(), 0);
+  EXPECT_EQ(destroy_count(), 1);
+  std::optional<SchedulerWorkerBudget::Reservation> recovered =
+      budget.try_reserve(kSchedulerWorkerRequestMax);
+  ASSERT_TRUE(recovered.has_value());
+  EXPECT_FALSE(budget.try_reserve(1U).has_value());
+  recovered.reset();
+  EXPECT_TRUE(budget.try_reserve(kSchedulerWorkerRequestMax).has_value());
 }
 
 /**
@@ -941,35 +1275,33 @@ TEST_F(SchedulerPluginLoaderTest,
 }
 
 /**
- * @brief Rejects a mismatched ABI after exactly one handshake callback.
+ * @brief Rejects ABI v1 after exactly one numeric handshake callback.
  * @return Nothing.
- * @throws Nothing when all later discovery/factory probes remain zero and the
- * type/metadata/handle registries remain unchanged.
+ * @throws Nothing when all later discovery/factory/lifecycle probes remain
+ * zero and the type/metadata/handle registries remain unchanged.
+ * @note The exact diagnostic proves the fixture is specifically old ABI v1,
+ *       not an arbitrary future mismatch or missing-export candidate.
  */
 TEST_F(SchedulerPluginLoaderTest,
-       MismatchedAbiInvokesOnlyHandshakeAndPublishesNoRegistration) {
+       AbiV1InvokesOnlyHandshakeAndPublishesNoRegistration) {
   auto& loader = SchedulerPluginLoader::instance();
   const std::filesystem::path plugin_path(
       PS_TEST_SCHEDULER_MISMATCHED_ABI_PATH);
   ASSERT_TRUE(std::filesystem::exists(plugin_path));
-
-#ifdef _WIN32
-  HMODULE test_handle = LoadLibrary(plugin_path.string().c_str());
-  ASSERT_NE(test_handle, nullptr);
-  auto reset_counts = reinterpret_cast<void (*)()>(
-      GetProcAddress(test_handle, "ps_test_scheduler_reset_counts"));
-  auto read_load_probe = reinterpret_cast<int (*)(int)>(
-      GetProcAddress(test_handle, "ps_test_scheduler_load_probe_count"));
-#else
-  void* test_handle = dlopen(plugin_path.string().c_str(), RTLD_LAZY);
-  ASSERT_NE(test_handle, nullptr) << dlerror();
-  auto reset_counts = reinterpret_cast<void (*)()>(
-      dlsym(test_handle, "ps_test_scheduler_reset_counts"));
-  auto read_load_probe = reinterpret_cast<int (*)(int)>(
-      dlsym(test_handle, "ps_test_scheduler_load_probe_count"));
-#endif
+  ScopedSchedulerPluginHandle probe_handle(plugin_path);
+  ASSERT_TRUE(probe_handle.valid());
+  const auto reset_counts = probe_handle.resolve<void (*)() noexcept>(
+      "ps_test_scheduler_reset_counts");
+  const auto read_load_probe = probe_handle.resolve<LoadProbeReader*>(
+      "ps_test_scheduler_load_probe_count");
+  const auto create_count = probe_handle.resolve<int (*)() noexcept>(
+      "ps_test_scheduler_create_count");
+  const auto destroy_count = probe_handle.resolve<int (*)() noexcept>(
+      "ps_test_scheduler_destroy_count");
   ASSERT_NE(reset_counts, nullptr);
   ASSERT_NE(read_load_probe, nullptr);
+  ASSERT_NE(create_count, nullptr);
+  ASSERT_NE(destroy_count, nullptr);
   reset_counts();
   const SchedulerPluginRegistrySnapshot before =
       capture_plugin_registry(loader);
@@ -982,6 +1314,8 @@ TEST_F(SchedulerPluginLoaderTest,
   expect_plugin_registry_equal(expected, after);
   ASSERT_EQ(after.load_errors.size(), before.load_errors.size() + 1U);
   EXPECT_NE(after.load_errors.back().find("ABI mismatch"), std::string::npos);
+  EXPECT_NE(after.load_errors.back().find("expected 2, got 1"),
+            std::string::npos);
   EXPECT_EQ(
       load_probe_count(read_load_probe, SchedulerLoadProbe::GetAbiVersion), 1);
   EXPECT_EQ(load_probe_count(read_load_probe, SchedulerLoadProbe::GetCount), 0);
@@ -990,12 +1324,8 @@ TEST_F(SchedulerPluginLoaderTest,
       load_probe_count(read_load_probe, SchedulerLoadProbe::GetDescription), 0);
   EXPECT_EQ(load_probe_count(read_load_probe, SchedulerLoadProbe::GetVersion),
             0);
-
-#ifdef _WIN32
-  FreeLibrary(test_handle);
-#else
-  dlclose(test_handle);
-#endif
+  EXPECT_EQ(create_count(), 0);
+  EXPECT_EQ(destroy_count(), 0);
 }
 
 /**
@@ -1121,6 +1451,13 @@ TEST_F(SchedulerPluginLoaderTest, FactoryIntegration) {
   }
 }
 
+/**
+ * @brief Rejects a null heterogeneous example type with one legal ABI grant.
+ * @return Nothing; GoogleTest records loading, symbol, or result mismatch.
+ * @throws std::bad_alloc if plugin-path construction or diagnostics allocate.
+ * @note The legal grant isolates type validation from ABI v2 worker-grant
+ *       validation; no scheduler ownership is transferred for the null type.
+ */
 TEST_F(SchedulerPluginLoaderTest, GpuPipelineExampleCreateRejectsNullTypeName) {
   const auto plugin_path = scheduler_plugin_path("gpu_pipeline_example_plugin");
 
@@ -1140,7 +1477,7 @@ TEST_F(SchedulerPluginLoaderTest, GpuPipelineExampleCreateRejectsNullTypeName) {
       dlsym(test_handle, kSchedulerPluginCreateSymbol));
 #endif
   ASSERT_NE(create_scheduler, nullptr);
-  EXPECT_EQ(create_scheduler(nullptr, 0), nullptr);
+  EXPECT_EQ(create_scheduler(nullptr, 1U), nullptr);
 
 #ifdef _WIN32
   FreeLibrary(test_handle);
@@ -1206,7 +1543,7 @@ TEST_F(SchedulerPluginLoaderTest, PluginSchedulerUsesPluginDestroyAfterClear) {
   reset_counts();
 
   ASSERT_TRUE(loader.load_plugin(plugin_path));
-  auto scheduler = loader.create("destroy_count_test", 0);
+  auto scheduler = loader.create("destroy_count_test", 1U);
   ASSERT_NE(scheduler, nullptr);
   EXPECT_EQ(active_count(), 1);
   EXPECT_EQ(destroy_count(), 0);
@@ -1259,7 +1596,7 @@ TEST_F(SchedulerPluginLoaderTest,
   ASSERT_TRUE(loader.load_plugin(plugin_path));
   reset_counts();
 
-  auto scheduler = loader.create("destroy_count_test", 0);
+  auto scheduler = loader.create("destroy_count_test", 1U);
   ASSERT_NE(scheduler, nullptr);
   IScheduler* runtime = scheduler.get();
 
@@ -1337,7 +1674,7 @@ TEST_F(SchedulerPluginLoaderTest,
   ASSERT_TRUE(loader.load_plugin(plugin_path));
   reset_counts();
 
-  auto scheduler = loader.create("destroy_count_test", 0);
+  auto scheduler = loader.create("destroy_count_test", 1U);
   ASSERT_NE(scheduler, nullptr);
   IScheduler* runtime = scheduler.get();
   CountingTaskExecutor executor;
@@ -1449,7 +1786,7 @@ TEST_F(SchedulerPluginLoaderTest,
       scheduler_plugin_path("destroy_count_scheduler_plugin", true);
   ASSERT_TRUE(std::filesystem::exists(plugin_path));
   ASSERT_TRUE(loader.load_plugin(plugin_path));
-  auto scheduler = loader.create("destroy_count_test", 0);
+  auto scheduler = loader.create("destroy_count_test", 1U);
   ASSERT_NE(scheduler, nullptr);
   scheduler->start();
 
@@ -1878,7 +2215,7 @@ TEST_F(SchedulerPluginLoaderTest,
     ScopedSchedulerFixtureEnvironment failures(kDestroyCountFailureEnvironment,
                                                "all");
     ASSERT_TRUE(loader.load_plugin(plugin_path));
-    auto scheduler = loader.create("destroy_count_test", 0);
+    auto scheduler = loader.create("destroy_count_test", 1U);
     ASSERT_NE(scheduler, nullptr);
     scheduler->start();
 
@@ -2014,7 +2351,7 @@ TEST_F(SchedulerPluginLoaderTest,
   {
     ScopedSchedulerAllocationFailure failure(0);
     try {
-      (void)loader.create(type_name, 0);
+      (void)loader.create(type_name, 1U);
     } catch (const std::bad_alloc&) {
       caught_bad_alloc = true;
     }
@@ -2077,7 +2414,7 @@ TEST_F(SchedulerPluginLoaderTest,
   {
     ScopedSchedulerAllocationFailure failure(0);
     try {
-      (void)loader.create(type_name, 0);
+      (void)loader.create(type_name, 1U);
     } catch (const std::bad_alloc&) {
       caught_bad_alloc = true;
     }
@@ -2140,7 +2477,7 @@ TEST_F(SchedulerPluginLoaderTest,
   {
     ScopedSchedulerAllocationFailure failure(1);
     try {
-      (void)loader.create(type_name, 0);
+      (void)loader.create(type_name, 1U);
     } catch (const std::bad_alloc&) {
       caught_bad_alloc = true;
     }

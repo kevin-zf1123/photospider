@@ -68,10 +68,15 @@ ps_scheduler_plugin_get_description(std::uint32_t index) {
 /**
  * @brief Creates one serial SDK example scheduler.
  * @param type_name Requested type name.
- * @param num_workers Ignored for the serial policy.
+ * @param num_workers Resolved ABI v2 hard grant in `[1,8]` retained by the
+ * instance.
  * @return Plugin-owned instance, or null for an unsupported type.
+ * @throws std::invalid_argument if a supported type receives a grant outside
+ * `[1,8]`.
  * @throws std::bad_alloc if instance or type-name storage cannot allocate.
- * @note The host must release the result through the matching destroy export.
+ * @note Serial execution owns zero worker threads, which is permitted because
+ *       a plugin may own fewer than its grant. The host must release the result
+ *       through the matching destroy export.
  */
 PHOTOSPIDER_SCHEDULER_PLUGIN_EXPORT ps::IScheduler* ps_scheduler_plugin_create(
     const char* type_name, std::uint32_t num_workers) {

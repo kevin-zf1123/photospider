@@ -177,22 +177,25 @@ class SchedulerPluginLoader {
    * owner exists.
    *
    * @param type_name Registered scheduler type name.
-   * @param num_workers Requested worker count; zero selects implementation
-   * defaults and is narrowed to the fixed-width plugin ABI after validation.
+   * @param num_workers Exact resolved worker grant. Plugin types require a
+   *        value in `[1,8]`; host-owned built-in factories receive the caller
+   *        value unchanged.
    * @return Owning scheduler pointer, or nullptr for an unknown type or null
    * plugin result.
-   * @throws std::overflow_error when `num_workers` exceeds `std::uint32_t`.
+   * @throws std::invalid_argument when a registered plugin type receives zero
+   *         or a value above `kSchedulerWorkerRequestMax`.
    * @throws std::bad_alloc for built-in creation, wrapper allocation, copied
    * owner state, or normalized plugin resource exhaustion.
    * @throws GraphError after normalizing a plugin create exception.
    * @throws Any built-in factory exception unchanged because built-ins do not
    * cross an unloadable DSO boundary.
-   * @note Raw instances on exceptional exits are destroyed exactly once while
+   * @note Plugin grant validation occurs before the create export. Raw
+   *       instances on exceptional exits are destroyed exactly once while
    *       their DSO remains mapped. Cleanup exceptions are suppressed only to
    *       preserve the original construction exception.
    */
   std::unique_ptr<IScheduler> create(const std::string& type_name,
-                                     unsigned int num_workers = 0);
+                                     unsigned int num_workers);
 
   /**
    * @brief Registers or replaces one host-owned scheduler factory.

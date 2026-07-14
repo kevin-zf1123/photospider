@@ -17,6 +17,7 @@
 
 #include "ipc/codec.hpp"
 #include "photospider/ipc/protocol.hpp"
+#include "photospider/scheduler/scheduler.hpp"
 
 namespace ps::ipc::internal {
 namespace {
@@ -3237,7 +3238,8 @@ std::string RequestRouter::route_scheduler_defaults_method(
       config.hp_type.find('\0') != std::string::npos ||
       config.rt_type.find('\0') != std::string::npos ||
       !params.contains("worker_count") ||
-      !decode_integer(params["worker_count"], &config.worker_count)) {
+      !decode_integer(params["worker_count"], &config.worker_count) ||
+      config.worker_count > kSchedulerWorkerRequestMax) {
     return bounded_error(
         id,
         invalid_params("scheduler.configure_defaults requires bounded hp_type, "

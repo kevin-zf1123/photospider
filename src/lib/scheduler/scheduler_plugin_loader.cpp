@@ -4,7 +4,6 @@
 #include <algorithm>
 #include <atomic>
 #include <iostream>
-#include <limits>
 #include <memory>
 #include <mutex>
 #include <sstream>
@@ -1608,12 +1607,10 @@ std::unique_ptr<IScheduler> SchedulerPluginLoader::create(
     return nullptr;
   }
 
-  if constexpr (std::numeric_limits<unsigned int>::max() >
-                std::numeric_limits<std::uint32_t>::max()) {
-    if (num_workers > std::numeric_limits<std::uint32_t>::max()) {
-      throw std::overflow_error(
-          "scheduler plugin worker count exceeds uint32_t ABI");
-    }
+  if (num_workers == 0U || num_workers > kSchedulerWorkerRequestMax) {
+    throw std::invalid_argument(
+        "scheduler plugin creation requires a resolved worker grant in "
+        "[1,8]");
   }
 
   // Guard the raw ABI result before any host-owner allocation.

@@ -3,16 +3,102 @@
 
 #include <yaml-cpp/yaml.h>
 
+#include <charconv>
 #include <fstream>
 #include <iostream>
 #include <new>
+#include <stdexcept>
 #include <string>
+#include <string_view>
+#include <system_error>
 #include <type_traits>
 #include <utility>
 
 #include "core/ps_types.hpp"  // NOLINT(build/include_subdir)
+#include "photospider/host/host.hpp"
 
 namespace fs = ps::fs;
+
+/**
+ * @brief Validates one CLI scheduler worker-count value.
+ *
+ * @param worker_count Parsed or programmatically supplied CLI value.
+ * @return Nothing.
+ * @throws std::invalid_argument If the count is outside `[0, 8]`.
+ * @note Zero remains automatic-resolution intent and no state is mutated.
+ */
+void validate_cli_scheduler_worker_count(int worker_count) {
+  if (worker_count < 0 || static_cast<unsigned int>(worker_count) >
+                              ps::kSchedulerWorkerRequestMax) {
+    throw std::invalid_argument(
+        "scheduler_worker_count must be an integer in range [0, 8]");
+  }
+}
+
+/**
+ * @brief Strictly parses one CLI editor scheduler worker-count value.
+ *
+ * @param text Complete editor text to parse.
+ * @return Parsed count in `[0, 8]`.
+ * @throws std::invalid_argument If parsing is incomplete, overflows, or yields
+ * a value outside the public request range.
+ * @throws std::bad_alloc If failure diagnostic construction cannot allocate.
+ * @note Leading/trailing whitespace and trailing characters are rejected so
+ * the editor cannot silently coerce a partially valid token.
+ */
+int parse_cli_scheduler_worker_count(std::string_view text) {
+  if (text.empty()) {
+    throw std::invalid_argument(
+        "scheduler_worker_count must be an integer in range [0, 8]");
+  }
+  int worker_count = 0;
+  const char* const first = text.data();
+  const char* const last = first + text.size();
+  const auto parsed = std::from_chars(first, last, worker_count);
+  if (parsed.ec != std::errc{} || parsed.ptr != last) {
+    throw std::invalid_argument(
+        "scheduler_worker_count must be an integer in range [0, 8]");
+  }
+  validate_cli_scheduler_worker_count(worker_count);
+  return worker_count;
+}
+
+/**
+ * @brief Applies one validated CLI scheduler-default snapshot to a Host.
+ *
+ * @param host Borrowed Host receiving future-Graph scheduler defaults.
+ * @param config Complete CLI snapshot to translate.
+ * @return Nothing.
+ * @throws std::invalid_argument If the count is outside `[0, 8]`.
+ * @throws std::runtime_error If the Host rejects the complete candidate.
+ * @throws std::bad_alloc If scheduler configuration or diagnostics cannot
+ * allocate.
+ * @note Validation happens before the exactly-once Host call. Host failure is
+ * exceptional here so both startup and interactive CLI boundaries observe it.
+ */
+void apply_cli_scheduler_defaults(ps::Host& host, const CliConfig& config) {
+  validate_cli_scheduler_worker_count(config.scheduler_worker_count);
+
+  ps::HostSchedulerConfig scheduler_config;
+  scheduler_config.hp_type = config.scheduler_hp_type;
+  scheduler_config.rt_type = config.scheduler_rt_type;
+  scheduler_config.worker_count =
+      static_cast<unsigned int>(config.scheduler_worker_count);
+  const ps::VoidResult result =
+      host.configure_scheduler_defaults(scheduler_config);
+  if (result.status.ok) {
+    return;
+  }
+
+  std::string diagnostic = "Host rejected scheduler defaults";
+  if (!result.status.name.empty()) {
+    diagnostic += " (" + result.status.name + ")";
+  }
+  if (!result.status.message.empty()) {
+    diagnostic += ": " + result.status.message;
+  }
+  throw std::runtime_error(diagnostic);
+}
 
 /**
  * @brief Serializes one CLI configuration to a YAML file.
@@ -167,6 +253,7 @@ void load_or_create_config(const std::string& config_path, CliConfig& config) {
       if (root["scheduler_worker_count"])
         candidate.scheduler_worker_count =
             root["scheduler_worker_count"].as<int>();
+      validate_cli_scheduler_worker_count(candidate.scheduler_worker_count);
     } catch (const std::bad_alloc&) {
       throw;
     } catch (const std::exception& e) {

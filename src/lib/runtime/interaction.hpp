@@ -52,7 +52,23 @@ class InteractionService {
    */
   explicit InteractionService(Kernel& kernel) : kernel_(kernel) {}
 
-  // Graph lifecycle
+  /**
+   * @brief Forwards one transactional Graph load to the bound Kernel.
+   * @param name Unique graph/session label.
+   * @param root_dir Root directory that owns the session folder.
+   * @param yaml_path Optional source YAML copied before graph parsing.
+   * @param config_path Optional session configuration source.
+   * @param cache_root_dir Optional external cache-root directory.
+   * @return Loaded graph label, or nullopt for duplicate/recoverable content
+   *         load failure.
+   * @throws GraphError with exact scheduler planning or aggregate-budget
+   *         failure categories before Graph publication.
+   * @throws std::bad_alloc If Kernel load allocation fails.
+   * @throws Any scheduler lifecycle exception propagated by Kernel unchanged.
+   * @note Kernel plans and atomically admits both scheduler intents before
+   *       constructing either candidate; this facade adds no fallback or
+   *       partial-publication behavior.
+   */
   std::optional<std::string> cmd_load_graph(
       const std::string& name, const std::string& root_dir,
       const std::string& yaml_path, const std::string& config_path = "",

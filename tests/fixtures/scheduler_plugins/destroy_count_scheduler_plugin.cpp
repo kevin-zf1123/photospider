@@ -57,6 +57,10 @@ constexpr const char* kDetachContextProbeEnvironment =
 
 /** @brief Number of placement-created fixture instances still alive. */
 std::atomic<int> g_active_count{0};
+/** @brief Number of calls that reached the plugin create export. */
+std::atomic<int> g_create_count{0};
+/** @brief Most recent worker grant observed by the plugin create export. */
+std::atomic<std::uint32_t> g_last_worker_grant{0U};
 /** @brief Number of calls that reached the plugin destroy export. */
 std::atomic<int> g_destroy_count{0};
 /** @brief Number of host attach attempts since fixture reset. */
@@ -805,16 +809,21 @@ ps_scheduler_plugin_get_description(std::uint32_t index) {
 /**
  * @brief Placement-constructs one allocation-free scheduler instance.
  * @param type_name Requested fixture type name.
- * @param worker_count Ignored worker count from the plugin ABI.
- * @return Raw plugin scheduler, or nullptr for an unknown type or while the
- * single fixture storage slot is occupied.
+ * @param worker_count Resolved ABI v2 hard grant in `[1,8]`.
+ * @return Raw plugin scheduler, or nullptr for an invalid grant, unknown type,
+ * or while the single fixture storage slot is occupied.
  * @throws Nothing.
- * @note The host must destroy a non-null result through
- * `ps_scheduler_plugin_destroy`; this function performs no heap allocation.
+ * @note The call count and grant are recorded before validation. The host must
+ *       destroy a non-null result through `ps_scheduler_plugin_destroy`; this
+ *       function performs no heap allocation and owns no worker thread.
  */
 PHOTOSPIDER_SCHEDULER_PLUGIN_EXPORT ps::IScheduler* ps_scheduler_plugin_create(
     const char* type_name, std::uint32_t worker_count) noexcept {
-  (void)worker_count;
+  g_create_count.fetch_add(1, std::memory_order_relaxed);
+  g_last_worker_grant.store(worker_count, std::memory_order_relaxed);
+  if (worker_count == 0U || worker_count > ps::kSchedulerWorkerRequestMax) {
+    return nullptr;
+  }
   if (!type_name || (std::strcmp(type_name, kShortSchedulerType) != 0 &&
                      std::strcmp(type_name, kLongSchedulerType) != 0)) {
     return nullptr;
@@ -864,8 +873,33 @@ ps_scheduler_plugin_get_version() noexcept {
  * @throws Nothing.
  * @note Callers read this only while the fixture DSO remains loaded.
  */
-int ps_test_scheduler_active_count() noexcept {
+PHOTOSPIDER_SCHEDULER_PLUGIN_EXPORT int
+ps_test_scheduler_active_count() noexcept {
   return g_active_count.load();
+}
+
+/**
+ * @brief Reads the number of plugin create-export invocations.
+ * @return Create invocation count since the last reset.
+ * @throws Nothing.
+ * @note Invalid type/grant and occupied-storage calls are included because the
+ *       counter records export reachability rather than successful ownership.
+ */
+PHOTOSPIDER_SCHEDULER_PLUGIN_EXPORT int
+ps_test_scheduler_create_count() noexcept {
+  return g_create_count.load(std::memory_order_relaxed);
+}
+
+/**
+ * @brief Reads the most recent ABI worker grant observed by create.
+ * @return Last fixed-width grant, or zero since reset before any create call.
+ * @throws Nothing.
+ * @note The fixture records the value before validating it so invalid-grant
+ *       boundary tests can distinguish Host rejection from DSO rejection.
+ */
+PHOTOSPIDER_SCHEDULER_PLUGIN_EXPORT std::uint32_t
+ps_test_scheduler_last_worker_grant() noexcept {
+  return g_last_worker_grant.load(std::memory_order_relaxed);
 }
 
 /**
@@ -874,7 +908,8 @@ int ps_test_scheduler_active_count() noexcept {
  * @throws Nothing.
  * @note The counter advances before optional hostile destroy failure.
  */
-int ps_test_scheduler_destroy_count() noexcept {
+PHOTOSPIDER_SCHEDULER_PLUGIN_EXPORT int
+ps_test_scheduler_destroy_count() noexcept {
   return g_destroy_count.load();
 }
 
@@ -885,7 +920,8 @@ int ps_test_scheduler_destroy_count() noexcept {
  * @note The count advances before failure injection, allowing retry tests to
  *       prove that a later close reached the scheduler again.
  */
-int ps_test_scheduler_shutdown_count() noexcept {
+PHOTOSPIDER_SCHEDULER_PLUGIN_EXPORT int
+ps_test_scheduler_shutdown_count() noexcept {
   return g_shutdown_count.load(std::memory_order_relaxed);
 }
 
@@ -898,7 +934,8 @@ int ps_test_scheduler_shutdown_count() noexcept {
  * @note This fixture-only C export avoids sharing plugin-owned C++ objects with
  * the test executable while the plugin remains loaded.
  */
-int ps_test_scheduler_forwarding_count(int probe) noexcept {
+PHOTOSPIDER_SCHEDULER_PLUGIN_EXPORT int ps_test_scheduler_forwarding_count(
+    int probe) noexcept {
   if (probe < 0 || probe >= static_cast<int>(ForwardingProbe::Count)) {
     return -1;
   }
@@ -915,7 +952,8 @@ int ps_test_scheduler_forwarding_count(int probe) noexcept {
  * @note The export remains fixture-only and performs no allocation while the
  * host failpoint is armed or immediately after it fires.
  */
-int ps_test_scheduler_load_probe_count(int probe) noexcept {
+PHOTOSPIDER_SCHEDULER_PLUGIN_EXPORT int ps_test_scheduler_load_probe_count(
+    int probe) noexcept {
   if (probe < 0 || probe >= static_cast<int>(LoadProbe::Count)) {
     return -1;
   }
@@ -929,8 +967,11 @@ int ps_test_scheduler_load_probe_count(int probe) noexcept {
  * @throws Nothing.
  * @note Call only while no fixture instance is active.
  */
-void ps_test_scheduler_reset_counts() noexcept {
+PHOTOSPIDER_SCHEDULER_PLUGIN_EXPORT void
+ps_test_scheduler_reset_counts() noexcept {
   g_active_count.store(0);
+  g_create_count.store(0, std::memory_order_relaxed);
+  g_last_worker_grant.store(0U, std::memory_order_relaxed);
   g_destroy_count.store(0);
   g_attach_count.store(0, std::memory_order_relaxed);
   g_start_count.store(0, std::memory_order_relaxed);

@@ -19,12 +19,13 @@
 #include <iostream>
 #include <memory>
 #include <new>
-#include <sstream>
 #include <string>
 #include <utility>
 #include <vector>
 
+#include "photospider/core/graph_error.hpp"
 #include "scheduler/scheduler_factory.hpp"
+#include "scheduler/scheduler_worker_budget.hpp"
 #if defined(PHOTOSPIDER_INTERNAL_REQUIRED_TARGET_TESTING)
 #include "runtime/kernel_required_target_test_access.hpp"
 #endif
@@ -100,24 +101,7 @@ id Kernel::get_metal_device(const std::string& name) {
   return it->second->get_metal_device();
 }
 
-/**
- * @brief Creates and transactionally loads one internal graph runtime.
- *
- * @param name Unique graph/session name.
- * @param root_dir Root directory that owns the session folder.
- * @param yaml_path Optional source YAML copied into the session before load.
- * @param config_path Optional config file copied into the session.
- * @param cache_root_dir Optional external cache-root directory.
- * @return Loaded graph name, or nullopt for duplicate names and recoverable
- *         graph-load failures.
- * @throws std::bad_alloc if path, runtime, scheduler, graph, or diagnostic
- *         allocation exhausts memory.
- * @throws std::exception for scheduler/runtime startup failures not classified
- *         as recoverable graph-load errors.
- * @note The return label is allocated before the runtime enters `graphs_`.
- * After insertion, returning it uses only noexcept moves, so a propagated
- * exception never leaves a newly published session.
- */
+/** @copydoc Kernel::load_graph */
 std::optional<std::string> Kernel::load_graph(
     const std::string& name, const std::string& root_dir,
     const std::string& yaml_path, const std::string& config_path,
@@ -231,48 +215,55 @@ const Kernel::SchedulerConfig& Kernel::get_scheduler_config() const {
   return scheduler_config_;
 }
 
+/** @copydoc Kernel::setup_schedulers_for_runtime */
 void Kernel::setup_schedulers_for_runtime(const std::string& name,
                                           GraphRuntime& runtime) {
-  std::vector<std::string> failures;
-
-  auto hp_scheduler = SchedulerFactory::create(scheduler_config_.hp_type,
-                                               scheduler_config_.worker_count);
-  if (hp_scheduler) {
-    runtime.set_scheduler(ComputeIntent::GlobalHighPrecision,
-                          std::move(hp_scheduler));
-  } else {
-    failures.push_back("HP scheduler type '" + scheduler_config_.hp_type + "'");
+  const std::optional<SchedulerPlan> hp_plan = SchedulerFactory::plan(
+      scheduler_config_.hp_type, scheduler_config_.worker_count);
+  const std::optional<SchedulerPlan> rt_plan = SchedulerFactory::plan(
+      scheduler_config_.rt_type, scheduler_config_.worker_count);
+  if (!hp_plan.has_value()) {
+    throw GraphError(
+        GraphErrc::InvalidParameter,
+        "unsupported HP scheduler type '" + scheduler_config_.hp_type + "'");
+  }
+  if (!rt_plan.has_value()) {
+    throw GraphError(
+        GraphErrc::InvalidParameter,
+        "unsupported RT scheduler type '" + scheduler_config_.rt_type + "'");
   }
 
-  auto rt_scheduler = SchedulerFactory::create(scheduler_config_.rt_type,
-                                               scheduler_config_.worker_count);
-  if (rt_scheduler) {
-    runtime.set_scheduler(ComputeIntent::RealTimeUpdate,
-                          std::move(rt_scheduler));
-  } else {
-    failures.push_back("RT scheduler type '" + scheduler_config_.rt_type + "'");
+  std::optional<SchedulerWorkerBudget::ReservationPair> reservations =
+      SchedulerWorkerBudget::process().try_reserve_pair(
+          hp_plan->reservation_slots(), rt_plan->reservation_slots());
+  if (!reservations.has_value()) {
+    throw GraphError(GraphErrc::ComputeError,
+                     "process scheduler worker budget cannot admit the "
+                     "configured HP and RT scheduler pair");
   }
 
-  if (!failures.empty()) {
-    std::ostringstream message;
-    message << "Failed to create configured scheduler";
-    if (failures.size() > 1) {
-      message << "s";
-    }
-    message << ": ";
-    for (size_t i = 0; i < failures.size(); ++i) {
-      if (i > 0) {
-        message << ", ";
-      }
-      message << failures[i];
-    }
-    message << ". Check scheduler_dirs startup scanning and scheduler plugin "
-               "ABI requirements.";
-    store_last_error(name,
-                     LastError{GraphErrc::InvalidParameter, message.str()});
-  } else {
-    clear_last_error(name);
+  std::unique_ptr<IScheduler> hp_scheduler = SchedulerFactory::create(
+      *hp_plan, std::move(reservations->high_precision));
+  if (hp_scheduler == nullptr) {
+    throw GraphError(GraphErrc::InvalidParameter,
+                     "HP scheduler type '" + scheduler_config_.hp_type +
+                         "' became unavailable or returned no scheduler "
+                         "instance during Graph load");
   }
+
+  std::unique_ptr<IScheduler> rt_scheduler =
+      SchedulerFactory::create(*rt_plan, std::move(reservations->real_time));
+  if (rt_scheduler == nullptr) {
+    throw GraphError(GraphErrc::InvalidParameter,
+                     "RT scheduler type '" + scheduler_config_.rt_type +
+                         "' became unavailable or returned no scheduler "
+                         "instance during Graph load");
+  }
+
+  runtime.set_scheduler(ComputeIntent::GlobalHighPrecision,
+                        std::move(hp_scheduler));
+  runtime.set_scheduler(ComputeIntent::RealTimeUpdate, std::move(rt_scheduler));
+  clear_last_error(name);
 }
 
 }  // namespace ps

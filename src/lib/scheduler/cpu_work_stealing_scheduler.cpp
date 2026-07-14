@@ -16,6 +16,8 @@
 #include <utility>
 #include <vector>
 
+#include "scheduler/scheduler_worker_budget.hpp"
+
 #if defined(PHOTOSPIDER_INTERNAL_BAD_ALLOC_TESTING)
 #include "scheduler/scheduler_exception_test_hooks.hpp"
 #endif
@@ -116,6 +118,22 @@ void validate_initial_count(std::size_t valid_item_count,
 std::uint64_t next_nonzero_epoch(std::uint64_t current) noexcept {
   return current == std::numeric_limits<std::uint64_t>::max() ? 1U
                                                               : current + 1U;
+}
+
+/**
+ * @brief Validates and resolves one direct CPU scheduler worker request.
+ * @param configured_workers Exact request or zero for bounded auto-selection.
+ * @return Resolved grant in `[1,8]`.
+ * @throws std::invalid_argument If an explicit request exceeds eight.
+ * @note Explicit requests are validated without querying platform hardware;
+ * only zero performs the one required hardware-concurrency observation.
+ */
+unsigned int resolve_direct_cpu_workers(unsigned int configured_workers) {
+  if (configured_workers != 0U) {
+    return resolve_scheduler_worker_count(configured_workers, 0U);
+  }
+  return resolve_scheduler_worker_count(0U,
+                                        std::thread::hardware_concurrency());
 }
 
 }  // namespace
@@ -324,11 +342,7 @@ thread_local uint64_t CpuWorkStealingScheduler::tls_active_epoch_ = 0;
 
 /** @copydoc CpuWorkStealingScheduler::CpuWorkStealingScheduler */
 CpuWorkStealingScheduler::CpuWorkStealingScheduler(unsigned int num_workers)
-    : configured_workers_(num_workers) {
-  if (configured_workers_ == 0) {
-    configured_workers_ = std::max(1u, std::thread::hardware_concurrency());
-  }
-}
+    : configured_workers_(resolve_direct_cpu_workers(num_workers)) {}
 
 /** @copydoc CpuWorkStealingScheduler::~CpuWorkStealingScheduler */
 CpuWorkStealingScheduler::~CpuWorkStealingScheduler() {

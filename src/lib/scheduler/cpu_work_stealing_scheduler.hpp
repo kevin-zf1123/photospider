@@ -42,11 +42,13 @@ class CpuWorkStealingScheduler : public IScheduler {
  public:
   /**
    * @brief Configures a stopped CPU work-stealing scheduler.
-   * @param num_workers Worker count, or zero to use hardware concurrency.
+   * @param num_workers Exact worker count in `[1,8]`, or zero for bounded
+   * automatic hardware resolution.
    * @return A stopped scheduler that owns no worker threads yet.
-   * @throws Nothing directly; hardware concurrency failure falls back to one.
-   * @note The host-context pointer remains null until `attach()`; no queue,
-   * cache, or task-executor ownership is acquired by construction.
+   * @throws std::invalid_argument If `num_workers` exceeds eight.
+   * @note Zero resolves once to `min(max(1, hardware_concurrency), 8)` before
+   * start. The host-context pointer remains null until `attach()`; construction
+   * creates no worker thread or start-time queue storage.
    */
   explicit CpuWorkStealingScheduler(unsigned int num_workers = 0);
 
@@ -563,7 +565,7 @@ class CpuWorkStealingScheduler : public IScheduler {
   std::vector<std::thread> workers_;
   /** @brief Active worker/queue count, reset to zero on failed start/stop. */
   unsigned int num_workers_{0};
-  /** @brief Immutable configured worker count used by each retry. */
+  /** @brief Immutable resolved worker grant in `[1,8]` used by each retry. */
   unsigned int configured_workers_{0};
   /** @brief Public lifecycle flag release-published after full worker install.
    */

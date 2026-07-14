@@ -46,6 +46,8 @@ enum class ExamplePolicy : std::uint32_t {
  * queue, worker threads, completion accounting, and first-exception transport.
  * Task handles remain dispatcher-owned until `wait_for_completion` returns.
  *
+ * @throws std::invalid_argument when construction receives a worker grant
+ *         outside the ABI v2 `[1,8]` range.
  * @throws std::bad_alloc from owned names, queues, workers, callbacks, or
  *         returned diagnostic/device values.
  * @throws std::system_error from valid standard synchronization or thread
@@ -104,6 +106,28 @@ class SdkExampleScheduler final : public IScheduler {
   }
 
   /**
+   * @brief Reads the immutable ABI v2 worker grant supplied at construction.
+   * @return Exact configured value retained by the scheduler.
+   * @throws Nothing.
+   * @note The testing seam is absent from production plugin targets. Serial
+   *       policy retains the grant while owning no worker thread.
+   */
+  std::uint32_t worker_grant_for_testing() const noexcept {
+    return worker_grant_;
+  }
+
+  /**
+   * @brief Reads the currently owned standard worker-thread count.
+   * @return Exact size of the lifecycle-owned worker vector.
+   * @throws Nothing under the externally serialized lifecycle contract.
+   * @note Call only outside concurrent lifecycle mutation. The testing seam is
+   *       absent from production plugin targets.
+   */
+  std::size_t owned_worker_count_for_testing() const noexcept {
+    return workers_.size();
+  }
+
+  /**
    * @brief Evaluates the completion predicate used by the public wait method.
    * @return True only when wait may settle or publish the active exception.
    * @throws std::system_error only if locking a valid mutex fails.
@@ -123,17 +147,23 @@ class SdkExampleScheduler final : public IScheduler {
    * @brief Configures one detached, stopped example scheduler.
    * @param type_name Stable scheduler type returned by `name()`.
    * @param policy Serial, CPU-worker, or heterogeneous policy.
-   * @param requested_workers Worker count; zero uses hardware concurrency.
+   * @param worker_grant Resolved ABI v2 hard grant in `[1,8]`.
+   * @throws std::invalid_argument if `worker_grant` is outside `[1,8]`.
    * @throws std::bad_alloc if the type-name copy fails.
-   * @note Construction does not attach or start the scheduler. Worker resources
-   *       are created only by `start()`.
+   * @note Construction does not attach or start the scheduler. CPU and
+   *       heterogeneous policies later own exactly `worker_grant` standard
+   *       worker threads; serial policy owns none and therefore remains below
+   *       the retained hard ceiling.
    */
   SdkExampleScheduler(std::string type_name, ExamplePolicy policy,
-                      std::uint32_t requested_workers)
-      : type_name_(std::move(type_name)), policy_(policy) {
-    const unsigned int hardware = std::thread::hardware_concurrency();
-    worker_count_ =
-        requested_workers == 0U ? std::max(1U, hardware) : requested_workers;
+                      std::uint32_t worker_grant)
+      : type_name_(std::move(type_name)),
+        policy_(policy),
+        worker_grant_(worker_grant) {
+    if (worker_grant_ == 0U || worker_grant_ > kSchedulerWorkerRequestMax) {
+      throw std::invalid_argument(
+          "scheduler example requires an ABI v2 worker grant in [1,8]");
+    }
   }
 
   /**
@@ -208,13 +238,13 @@ class SdkExampleScheduler final : public IScheduler {
     }
 
     std::vector<std::thread> staged;
-    staged.reserve(worker_count_);
+    staged.reserve(worker_grant_);
     {
       std::lock_guard<std::mutex> lock(mutex_);
       stop_requested_ = false;
     }
     try {
-      for (std::uint32_t index = 0; index < worker_count_; ++index) {
+      for (std::uint32_t index = 0; index < worker_grant_; ++index) {
         staged.emplace_back(
             [this, index]() { worker_loop(static_cast<int>(index)); });
       }
@@ -975,8 +1005,8 @@ class SdkExampleScheduler final : public IScheduler {
   std::string type_name_;
   /** @brief Serial, CPU-worker, or heterogeneous policy. */
   ExamplePolicy policy_;
-  /** @brief Configured worker count for non-serial policies. */
-  std::uint32_t worker_count_ = 1U;
+  /** @brief Immutable ABI v2 worker hard grant retained for this instance. */
+  std::uint32_t worker_grant_ = 1U;
   /** @brief Borrowed host context from attach until detach. */
   SchedulerHostContext* host_ = nullptr;
   /** @brief Public lifecycle state. */
