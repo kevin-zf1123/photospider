@@ -59,8 +59,107 @@ def remove_tree(path: Path, repo: Path) -> None:
         shutil.rmtree(path)
 
 
+def cmake_cache_values(build: Path) -> dict[str, str]:
+    """@brief Read exact key/value assignments from one CMake cache.
+
+    @param build Existing producer build directory containing CMakeCache.txt.
+    @return Mapping from cache keys to their final serialized values.
+    @throws OSError If the cache cannot be read.
+    @throws RuntimeError If the requested build has no regular cache file.
+    @note Comments and malformed lines are ignored; later duplicate keys win,
+      matching CMake's effective final assignment.
+    """
+
+    cache_path = build / "CMakeCache.txt"
+    if not cache_path.is_file():
+        raise RuntimeError(f"reusable producer has no CMake cache: {cache_path}")
+    values: dict[str, str] = {}
+    for line in cache_path.read_text(encoding="utf-8").splitlines():
+        if not line or line.startswith(("#", "//")) or "=" not in line:
+            continue
+        assignment, value = line.split("=", 1)
+        if ":" not in assignment:
+            continue
+        key, _cache_type = assignment.split(":", 1)
+        if key:
+            values[key] = value
+    return values
+
+
+def validate_reusable_producer(repo: Path, build: Path, config: str) -> None:
+    """@brief Validate an external IPC-disabled producer without mutating it.
+
+    @param repo Resolved Photospider source repository expected by the cache.
+    @param build Resolved reusable producer build directory.
+    @param config Requested single- or multi-config build configuration.
+    @return None after every cache identity and profile check succeeds.
+    @throws OSError If the cache cannot be read or a cached path cannot resolve.
+    @throws RuntimeError If source/build identity, test/IPC state, or requested
+      configuration does not match the reusable producer.
+    @note Validation is fail-closed. Callers must never configure or compile a
+      replacement producer when this function rejects an artifact.
+    """
+
+    cache = cmake_cache_values(build)
+
+    def required_value(key: str) -> str:
+        """@brief Return one required cache value for profile validation.
+
+        @param key Exact CMake cache key.
+        @return Serialized cache value.
+        @throws RuntimeError If the key is absent.
+        @note Empty values remain valid inputs for the caller to reject with a
+          profile-specific diagnostic.
+        """
+
+        if key not in cache:
+            raise RuntimeError(f"reusable producer cache is missing {key}")
+        return cache[key]
+
+    cached_source = Path(required_value("CMAKE_HOME_DIRECTORY")).resolve()
+    if cached_source != repo:
+        raise RuntimeError(
+            "reusable producer source mismatch: "
+            f"expected {repo}, got {cached_source}"
+        )
+    cached_build = Path(required_value("CMAKE_CACHEFILE_DIR")).resolve()
+    if cached_build != build:
+        raise RuntimeError(
+            "reusable producer build mismatch: "
+            f"expected {build}, got {cached_build}"
+        )
+
+    build_testing = required_value("BUILD_TESTING")
+    if build_testing != "OFF":
+        raise RuntimeError(
+            f"reusable producer requires BUILD_TESTING=OFF, got {build_testing}"
+        )
+    build_ipc = required_value("PHOTOSPIDER_BUILD_IPC")
+    if build_ipc != "OFF":
+        raise RuntimeError(
+            "reusable producer requires PHOTOSPIDER_BUILD_IPC=OFF, "
+            f"got {build_ipc}"
+        )
+
+    configuration_types = cache.get("CMAKE_CONFIGURATION_TYPES", "")
+    if configuration_types:
+        available_configs = configuration_types.split(";")
+        if config not in available_configs:
+            raise RuntimeError(
+                "reusable producer configuration mismatch: "
+                f"requested {config}, available {available_configs}"
+            )
+    else:
+        build_type = required_value("CMAKE_BUILD_TYPE")
+        if build_type != config:
+            raise RuntimeError(
+                "reusable producer build type mismatch: "
+                f"requested {config}, got {build_type}"
+            )
+
+
 def main() -> int:
-    """@brief Configure, build, install, and inspect an IPC-disabled package.
+    """@brief Build or reuse, install, and inspect an IPC-disabled package.
 
     @return Zero only when the embedded install remains usable; no IPC header,
       archive, executable, or exported target is advertised; optional disabled
@@ -71,8 +170,11 @@ def main() -> int:
     @throws ValueError If the requested work path could remove the repository.
     @throws RuntimeError If an artifact, export, component, or consumer
       condition contradicts the IPC-disabled package contract.
-    @note This durable product gate creates only a transient normal CMake tree;
-      it writes no result/provenance report.
+    @note Without ``--producer-build``, this durable product gate preserves the
+      original fresh configure/build under ``work``. With that option, it
+      strictly validates and reuses an external producer without configuring,
+      compiling, or deleting it. Installation and all consumer checks remain
+      transient under ``work``; no result/provenance report is written.
     """
 
     parser = argparse.ArgumentParser()
@@ -80,12 +182,27 @@ def main() -> int:
     parser.add_argument("--work", required=True)
     parser.add_argument("--cmake-executable", default="cmake")
     parser.add_argument("--config", default="RelWithDebInfo")
+    parser.add_argument("--producer-build", default="")
     args = parser.parse_args()
 
     repo = Path(args.repo).resolve()
     work = Path(args.work).resolve()
+    producer_build = (
+        Path(args.producer_build).resolve() if args.producer_build else None
+    )
+    if producer_build is not None:
+        if (
+            producer_build == work
+            or producer_build in work.parents
+            or work in producer_build.parents
+        ):
+            raise ValueError(
+                "reusable producer and transient work paths overlap: "
+                f"{producer_build}, {work}"
+            )
+        validate_reusable_producer(repo, producer_build, args.config)
     remove_tree(work, repo)
-    build = work / "build"
+    build = producer_build if producer_build is not None else work / "build"
     prefix = work / "install"
     consumer_source = work / "consumer"
     consumer_build = work / "consumer-build"
@@ -94,33 +211,34 @@ def main() -> int:
     optional_ipc_source = work / "optional-ipc-component"
     optional_ipc_build = work / "optional-ipc-component-build"
     try:
-        run(
-            [
-                args.cmake_executable,
-                "-S",
-                str(repo),
-                "-B",
-                str(build),
-                "-DBUILD_TESTING=OFF",
-                "-DPHOTOSPIDER_BUILD_IPC=OFF",
-                f"-DCMAKE_BUILD_TYPE={args.config}",
-            ],
-            repo,
-        )
-        run(
-            [
-                args.cmake_executable,
-                "--build",
-                str(build),
-                "--target",
-                "photospider",
-                "--config",
-                args.config,
-                "--parallel",
-                "4",
-            ],
-            repo,
-        )
+        if producer_build is None:
+            run(
+                [
+                    args.cmake_executable,
+                    "-S",
+                    str(repo),
+                    "-B",
+                    str(build),
+                    "-DBUILD_TESTING=OFF",
+                    "-DPHOTOSPIDER_BUILD_IPC=OFF",
+                    f"-DCMAKE_BUILD_TYPE={args.config}",
+                ],
+                repo,
+            )
+            run(
+                [
+                    args.cmake_executable,
+                    "--build",
+                    str(build),
+                    "--target",
+                    "photospider",
+                    "--config",
+                    args.config,
+                    "--parallel",
+                    "4",
+                ],
+                repo,
+            )
         run(
             [
                 args.cmake_executable,
