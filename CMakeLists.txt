@@ -568,7 +568,7 @@ else()
 endif()
 
 install(TARGETS photospider
-    EXPORT PhotospiderTargets
+    EXPORT PhotospiderEmbeddedTargets
     ARCHIVE DESTINATION ${CMAKE_INSTALL_LIBDIR}
     LIBRARY DESTINATION ${CMAKE_INSTALL_LIBDIR}
     RUNTIME DESTINATION ${CMAKE_INSTALL_BINDIR}
@@ -578,9 +578,16 @@ install(TARGETS photospider
 install(TARGETS
     photospider_operation_sdk
     photospider_operation_runtime
-    photospider_operation_opencv
     photospider_scheduler_sdk
     EXPORT PhotospiderTargets
+    ARCHIVE DESTINATION ${CMAKE_INSTALL_LIBDIR}
+    LIBRARY DESTINATION ${CMAKE_INSTALL_LIBDIR}
+    RUNTIME DESTINATION ${CMAKE_INSTALL_BINDIR}
+    INCLUDES DESTINATION ${CMAKE_INSTALL_INCLUDEDIR}
+)
+
+install(TARGETS photospider_operation_opencv
+    EXPORT PhotospiderOpenCVTargets
     ARCHIVE DESTINATION ${CMAKE_INSTALL_LIBDIR}
     LIBRARY DESTINATION ${CMAKE_INSTALL_LIBDIR}
     RUNTIME DESTINATION ${CMAKE_INSTALL_BINDIR}
@@ -610,6 +617,16 @@ foreach(PUBLIC_HEADER_RELATIVE_PATH
 endforeach()
 
 install(EXPORT PhotospiderTargets
+    NAMESPACE Photospider::
+    DESTINATION ${PHOTOSPIDER_INSTALL_CMAKEDIR}
+)
+
+install(EXPORT PhotospiderOpenCVTargets
+    NAMESPACE Photospider::
+    DESTINATION ${PHOTOSPIDER_INSTALL_CMAKEDIR}
+)
+
+install(EXPORT PhotospiderEmbeddedTargets
     NAMESPACE Photospider::
     DESTINATION ${PHOTOSPIDER_INSTALL_CMAKEDIR}
 )

@@ -1365,6 +1365,64 @@ def write_extension_consumer_projects(
     )
 
 
+def write_missing_opencv_component_projects(
+    optional_source_dir: Path, required_source_dir: Path
+) -> None:
+    """@brief Create OpenCV-missing optional and required package probes.
+
+    @param optional_source_dir Consumer requiring the dependency-free operation
+      SDK while requesting ``operation_opencv`` as an optional component.
+    @param required_source_dir Consumer requiring ``operation_opencv``.
+    @return Nothing.
+    @throws OSError If either transient CMake project cannot be written.
+    @note Both projects are configured with OpenCV discovery disabled by the
+      caller. The optional probe also verifies that usable SDK targets remain
+      imported while the unavailable OpenCV adapter target stays hidden.
+    """
+
+    optional_source_dir.mkdir(parents=True, exist_ok=True)
+    required_source_dir.mkdir(parents=True, exist_ok=True)
+    (optional_source_dir / "CMakeLists.txt").write_text(
+        dedent(
+            """
+            cmake_minimum_required(VERSION 3.16)
+            project(optional_operation_opencv_consumer LANGUAGES NONE)
+            find_package(Photospider CONFIG
+                COMPONENTS operation_sdk
+                OPTIONAL_COMPONENTS operation_opencv)
+            if(NOT Photospider_FOUND OR NOT Photospider_operation_sdk_FOUND)
+              message(FATAL_ERROR "required operation_sdk lookup failed")
+            endif()
+            if(Photospider_operation_opencv_FOUND)
+              message(FATAL_ERROR "missing optional operation_opencv was found")
+            endif()
+            if(TARGET Photospider::operation_opencv)
+              message(FATAL_ERROR "missing optional operation_opencv target was exposed")
+            endif()
+            if(NOT TARGET Photospider::operation_sdk OR
+               NOT TARGET Photospider::operation_runtime)
+              message(FATAL_ERROR "available operation SDK targets were not imported")
+            endif()
+            add_library(optional_operation_opencv_consumer INTERFACE)
+            target_link_libraries(optional_operation_opencv_consumer INTERFACE
+                Photospider::operation_sdk)
+            """
+        ).lstrip(),
+        encoding="utf-8",
+    )
+    (required_source_dir / "CMakeLists.txt").write_text(
+        dedent(
+            """
+            cmake_minimum_required(VERSION 3.16)
+            project(required_operation_opencv_consumer LANGUAGES NONE)
+            find_package(Photospider CONFIG REQUIRED
+                COMPONENTS operation_opencv)
+            """
+        ).lstrip(),
+        encoding="utf-8",
+    )
+
+
 def cmake_cache_value(build: Path, key: str) -> str:
     """@brief Read one exact entry from a configured CMake cache.
 
@@ -1703,7 +1761,7 @@ def inspect_install_tree(
     if not package_dir.is_absolute():
         package_dir = prefix / package_dir
     targets_path = package_dir / "PhotospiderTargets.cmake"
-    target_paths = sorted(package_dir.glob("PhotospiderTargets*.cmake"))
+    target_paths = sorted(package_dir.glob("Photospider*Targets*.cmake"))
     config_path = package_dir / "PhotospiderConfig.cmake"
     target_text = "\n".join(path.read_text(encoding="utf-8") for path in target_paths)
     config_text = (
@@ -1990,6 +2048,12 @@ def evaluate_behavior(observations: dict[str, Any]) -> bool:
         "operation OpenCV adapter builds with the core-only package shim": (
             commands["operation_opencv_build"] == 0
         ),
+        "optional operation OpenCV stays absent when OpenCV is unavailable": (
+            commands["optional_opencv_missing_configure"] == 0
+        ),
+        "required operation OpenCV fails when OpenCV is unavailable": (
+            commands["required_opencv_missing_configure"] != 0
+        ),
         "unknown required component configure fails": commands[
             "unknown_component_configure"
         ]
@@ -2138,6 +2202,10 @@ def main() -> int:
     operation_sdk_build = work / "operation-sdk-consumer-build"
     operation_opencv_src = work / "operation-opencv-consumer-src"
     operation_opencv_build = work / "operation-opencv-consumer-build"
+    optional_opencv_missing_src = work / "optional-opencv-missing-src"
+    optional_opencv_missing_build = work / "optional-opencv-missing-build"
+    required_opencv_missing_src = work / "required-opencv-missing-src"
+    required_opencv_missing_build = work / "required-opencv-missing-build"
     unknown_component_src = work / "unknown-component-src"
     unknown_component_build = work / "unknown-component-build"
     compiled_public_headers, surface_inventory = write_consumer_projects(
@@ -2181,6 +2249,9 @@ def main() -> int:
         operation_sdk_src,
         operation_opencv_src,
         Path(opencv_config_dir_value),
+    )
+    write_missing_opencv_component_projects(
+        optional_opencv_missing_src, required_opencv_missing_src
     )
 
     build_product_command = [
@@ -2260,6 +2331,24 @@ def main() -> int:
         "-DCMAKE_DISABLE_FIND_PACKAGE_Threads=TRUE",
         "-DCMAKE_DISABLE_FIND_PACKAGE_yaml-cpp=TRUE",
     ]
+    optional_opencv_missing_configure_command = [
+        args.cmake_executable,
+        "-S",
+        str(optional_opencv_missing_src),
+        "-B",
+        str(optional_opencv_missing_build),
+        f"-DCMAKE_PREFIX_PATH={prefix}",
+        "-DCMAKE_DISABLE_FIND_PACKAGE_OpenCV=TRUE",
+    ]
+    required_opencv_missing_configure_command = [
+        args.cmake_executable,
+        "-S",
+        str(required_opencv_missing_src),
+        "-B",
+        str(required_opencv_missing_build),
+        f"-DCMAKE_PREFIX_PATH={prefix}",
+        "-DCMAKE_DISABLE_FIND_PACKAGE_OpenCV=TRUE",
+    ]
     unknown_component_configure_command = [
         args.cmake_executable,
         "-S",
@@ -2275,6 +2364,8 @@ def main() -> int:
             scheduler_sdk_configure_command,
             operation_sdk_configure_command,
             operation_opencv_configure_command,
+            optional_opencv_missing_configure_command,
+            required_opencv_missing_configure_command,
             unknown_component_configure_command,
         ):
             command.extend(["-G", args.generator])
@@ -2299,6 +2390,12 @@ def main() -> int:
     operation_sdk_configure_code = run_command(operation_sdk_configure_command, repo)
     operation_opencv_configure_code = run_command(
         operation_opencv_configure_command, repo
+    )
+    optional_opencv_missing_configure_code = run_command(
+        optional_opencv_missing_configure_command, repo
+    )
+    required_opencv_missing_configure_code = run_command(
+        required_opencv_missing_configure_command, repo
     )
     unknown_component_configure_code = run_command(
         unknown_component_configure_command, repo
@@ -2518,6 +2615,12 @@ def main() -> int:
             "operation_sdk_build": operation_sdk_build_code,
             "operation_opencv_configure": operation_opencv_configure_code,
             "operation_opencv_build": operation_opencv_build_code,
+            "optional_opencv_missing_configure": (
+                optional_opencv_missing_configure_code
+            ),
+            "required_opencv_missing_configure": (
+                required_opencv_missing_configure_code
+            ),
             "unknown_component_configure": unknown_component_configure_code,
             "consumer_run": run_code,
             "ipc_consumer_run": ipc_run_code,
