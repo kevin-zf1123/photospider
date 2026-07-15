@@ -3,6 +3,9 @@
 
 #include <algorithm>
 #include <array>
+#if defined(PHOTOSPIDER_INTERNAL_OPENCV_CONCURRENCY_TESTING)
+#include <atomic>
+#endif
 #include <cmath>
 #include <cstdint>
 #include <initializer_list>
@@ -10,7 +13,6 @@
 #include <mutex>
 #include <new>
 #include <numeric>
-#include <opencv2/core/ocl.hpp>
 #include <opencv2/imgcodecs.hpp>
 #include <opencv2/imgproc.hpp>
 #include <optional>
@@ -19,6 +21,9 @@
 #include <vector>
 
 #include "adapters/opencv/buffer_adapter_opencv.hpp"
+#if defined(PHOTOSPIDER_INTERNAL_OPENCV_CONCURRENCY_TESTING)
+#include "core/opencv_operation_test_access.hpp"
+#endif
 #include "core/param_utils.hpp"
 #include "graph/graph_model.hpp"  // NOLINT(build/include_subdir)
 
@@ -29,8 +34,82 @@ namespace ops {
 // ==                         全局资源与辅助函数                           ==
 // =============================================================================
 
-// 全局互斥锁，用于保护所有并发的OpenCV GPU/CPU操作，防止底层库的资源竞争
-static std::mutex g_opencv_op_mutex;
+#if defined(PHOTOSPIDER_INTERNAL_OPENCV_CONCURRENCY_TESTING)
+namespace {
+
+/** @brief Borrowed observer published only by serialized integration tests. */
+std::atomic<OpenCvOperationObserver*> g_opencv_operation_observer{nullptr};
+
+/**
+ * @brief Brackets one built-in OpenCV callback body for deterministic tests.
+ *
+ * @throws Nothing.
+ * @note The constructor snapshots the borrowed observer once so exit is sent
+ *       to the same object even if publication is later cleared. Test lifetime
+ *       rules forbid clearing while a callback remains active.
+ */
+class OpenCvOperationObservationScope final {
+ public:
+  /**
+   * @brief Records observed callback entry.
+   * @param operation_key Stable built-in `type:subtype` key.
+   * @throws Nothing.
+   */
+  explicit OpenCvOperationObservationScope(const char* operation_key) noexcept
+      : operation_key_(operation_key),
+        observer_(g_opencv_operation_observer.load(std::memory_order_acquire)) {
+    if (observer_ != nullptr) {
+      observer_->on_enter(operation_key_);
+    }
+  }
+
+  /**
+   * @brief Records observed callback exit during return or unwinding.
+   * @throws Nothing.
+   */
+  ~OpenCvOperationObservationScope() noexcept {
+    if (observer_ != nullptr) {
+      observer_->on_exit(operation_key_);
+    }
+  }
+
+  /**
+   * @brief Prevents duplicate callback-exit ownership.
+   * @param other Scope retaining its exit notification.
+   * @throws Nothing because copying is unavailable.
+   */
+  OpenCvOperationObservationScope(
+      const OpenCvOperationObservationScope& other) = delete;
+
+  /**
+   * @brief Prevents replacing callback-exit ownership.
+   * @param other Scope that remains unchanged.
+   * @return No value because assignment is unavailable.
+   * @throws Nothing because assignment is unavailable.
+   */
+  OpenCvOperationObservationScope& operator=(
+      const OpenCvOperationObservationScope& other) = delete;
+
+ private:
+  /** @brief Static-lifetime operation key sent on entry and exit. */
+  const char* operation_key_;
+
+  /** @brief Borrowed observer snapshot retained through callback exit. */
+  OpenCvOperationObserver* observer_;
+};
+
+}  // namespace
+
+/** @copydoc set_opencv_operation_observer_for_testing */
+void set_opencv_operation_observer_for_testing(
+    OpenCvOperationObserver* observer) noexcept {
+  g_opencv_operation_observer.store(observer, std::memory_order_release);
+}
+#define PHOTOSPIDER_OBSERVE_OPENCV_OPERATION(operation_key) \
+  OpenCvOperationObservationScope opencv_observation(operation_key)
+#else
+#define PHOTOSPIDER_OBSERVE_OPENCV_OPERATION(operation_key) ((void)0)
+#endif
 
 static cv::Rect expand_roi(const cv::Rect& roi, int padding) {
   if (padding <= 0 || roi.width <= 0 || roi.height <= 0) {
@@ -718,8 +797,20 @@ static NodeOutput op_perlin_noise(const Node& node,
   return result;
 }
 
+/**
+ * @brief Applies a full-image floating-point convolution on the CPU provider.
+ * @param node Effective padding, absolute-value, and gradient parameters.
+ * @param inputs Source image followed by a single-channel kernel image.
+ * @return Owned filtered image output.
+ * @throws std::bad_alloc if parameter or output storage allocation fails.
+ * @throws GraphError for missing inputs, invalid kernels, or categorized
+ *         OpenCV compute failure.
+ * @note All OpenCV objects are callback-local `cv::Mat` values. Independent
+ *       invocations are reentrant and receive no outer operation mutex.
+ */
 static NodeOutput op_convolve(const Node& node,
                               const std::vector<const NodeOutput*>& inputs) {
+  PHOTOSPIDER_OBSERVE_OPENCV_OPERATION("image_process:convolve");
   // Defensive checks against cold-start/invalid inputs
   if (inputs.size() < 2 || inputs[0]->image_buffer.width == 0 ||
       inputs[0]->image_buffer.height == 0 ||
@@ -730,10 +821,6 @@ static NodeOutput op_convolve(const Node& node,
         "Convolve requires two non-empty input images (src and kernel).");
   }
 
-  std::lock_guard<std::mutex> lock(g_opencv_op_mutex);
-
-  // Use Mat-only pipeline to avoid UMat/OpenCL first-use quirks under parallel
-  // cold-start
   cv::Mat src = toCvMat(inputs[0]->image_buffer);
   cv::Mat kernel = toCvMat(inputs[1]->image_buffer);
 
@@ -790,14 +877,25 @@ static NodeOutput op_convolve(const Node& node,
   return result;
 }
 
+/**
+ * @brief Resizes one full CPU image and propagates its spatial transform.
+ * @param node Effective output dimensions and interpolation mode.
+ * @param inputs One required source image with spatial metadata.
+ * @return Owned resized image and updated spatial metadata.
+ * @throws std::bad_alloc if parameter or output storage allocation fails.
+ * @throws GraphError for missing input or non-positive output dimensions.
+ * @throws cv::Exception if OpenCV resize or buffer conversion fails.
+ * @note The implementation is CPU-only `cv::Mat` work and is reentrant across
+ *       independent callback invocations.
+ */
 static NodeOutput op_resize(const Node& node,
                             const std::vector<const NodeOutput*>& inputs) {
+  PHOTOSPIDER_OBSERVE_OPENCV_OPERATION("image_process:resize");
   if (inputs.empty() || inputs[0]->image_buffer.width == 0)
     throw GraphError(GraphErrc::MissingDependency,
                      "Resize requires an input image.");
 
-  std::lock_guard<std::mutex> lock(g_opencv_op_mutex);
-  cv::UMat u_input = toCvUMat(inputs[0]->image_buffer);
+  cv::Mat input = toCvMat(inputs[0]->image_buffer);
 
   const auto& P = node.runtime_parameters;
   int width = as_int_flexible(P, "width", 0),
@@ -810,10 +908,10 @@ static NodeOutput op_resize(const Node& node,
              : (interp_str == "nearest") ? cv::INTER_NEAREST
              : (interp_str == "area")    ? cv::INTER_AREA
                                          : cv::INTER_LINEAR;
-  cv::UMat u_output;
-  cv::resize(u_input, u_output, cv::Size(width, height), 0, 0, flag);
+  cv::Mat output;
+  cv::resize(input, output, cv::Size(width, height), 0, 0, flag);
   NodeOutput result;
-  result.image_buffer = fromCvUMat(u_output);
+  result.image_buffer = fromCvMat(output);
   const auto& in_space = inputs[0]->space;
   result.space = in_space;
   const int in_w = inputs[0]->image_buffer.width;
@@ -842,14 +940,25 @@ static NodeOutput op_resize(const Node& node,
   return result;
 }
 
+/**
+ * @brief Crops or pads one full CPU image and updates spatial coordinates.
+ * @param node Effective value- or ratio-mode crop rectangle.
+ * @param inputs One required source image with spatial metadata.
+ * @return Owned crop canvas and translated spatial metadata.
+ * @throws std::bad_alloc if parameter or output storage allocation fails.
+ * @throws GraphError for missing input or invalid crop dimensions.
+ * @throws cv::Exception if OpenCV view, copy, or buffer conversion fails.
+ * @note The callback uses only local `cv::Mat` headers and independent output
+ *       storage, so scheduler workers may invoke it concurrently.
+ */
 static NodeOutput op_crop(const Node& node,
                           const std::vector<const NodeOutput*>& inputs) {
+  PHOTOSPIDER_OBSERVE_OPENCV_OPERATION("image_process:crop");
   if (inputs.empty() || inputs[0]->image_buffer.width == 0)
     throw GraphError(GraphErrc::MissingDependency,
                      "Crop requires an input image.");
 
-  std::lock_guard<std::mutex> lock(g_opencv_op_mutex);
-  cv::UMat u_src = toCvUMat(inputs[0]->image_buffer);
+  cv::Mat src = toCvMat(inputs[0]->image_buffer);
 
   const auto& P = node.runtime_parameters;
   int x, y, w, h;
@@ -862,10 +971,10 @@ static NodeOutput op_crop(const Node& node,
       throw GraphError(GraphErrc::InvalidParameter,
                        "Crop ratio mode requires non-negative x,y and positive "
                        "width,height.");
-    x = rx * u_src.cols;
-    y = ry * u_src.rows;
-    w = rw * u_src.cols;
-    h = rh * u_src.rows;
+    x = rx * src.cols;
+    y = ry * src.rows;
+    w = rw * src.cols;
+    h = rh * src.rows;
   } else {
     x = as_int_flexible(P, "x", -1);
     y = as_int_flexible(P, "y", -1);
@@ -875,15 +984,15 @@ static NodeOutput op_crop(const Node& node,
       throw GraphError(GraphErrc::InvalidParameter,
                        "Crop value mode requires positive width and height.");
   }
-  cv::UMat u_canvas = cv::UMat::zeros(h, w, u_src.type());
-  cv::Rect src_rect(0, 0, u_src.cols, u_src.rows), crop_rect(x, y, w, h);
+  cv::Mat canvas = cv::Mat::zeros(h, w, src.type());
+  cv::Rect src_rect(0, 0, src.cols, src.rows), crop_rect(x, y, w, h);
   cv::Rect intersect = src_rect & crop_rect;
   cv::Rect dst_roi(intersect.x - x, intersect.y - y, intersect.width,
                    intersect.height);
   if (intersect.width > 0 && intersect.height > 0)
-    u_src(intersect).copyTo(u_canvas(dst_roi));
+    src(intersect).copyTo(canvas(dst_roi));
   NodeOutput result;
-  result.image_buffer = fromCvUMat(u_canvas);
+  result.image_buffer = fromCvMat(canvas);
   const auto& in_space = inputs[0]->space;
   result.space = in_space;
   auto translation =
@@ -912,14 +1021,25 @@ static NodeOutput op_crop(const Node& node,
   return result;
 }
 
+/**
+ * @brief Extracts one named channel from a full CPU image.
+ * @param node Effective channel name or numeric alias.
+ * @param inputs One required source image.
+ * @return Owned single-channel output image.
+ * @throws std::bad_alloc if parameter or channel storage allocation fails.
+ * @throws GraphError for missing input or an unavailable channel.
+ * @throws cv::Exception if OpenCV split or buffer conversion fails.
+ * @note The callback is stateless `cv::Mat` work and is safe for concurrent
+ *       invocation on independent inputs.
+ */
 static NodeOutput op_extract_channel(
     const Node& node, const std::vector<const NodeOutput*>& inputs) {
+  PHOTOSPIDER_OBSERVE_OPENCV_OPERATION("image_process:extract_channel");
   if (inputs.empty() || inputs[0]->image_buffer.width == 0)
     throw GraphError(GraphErrc::MissingDependency,
                      "Extract channel requires an input image.");
 
-  std::lock_guard<std::mutex> lock(g_opencv_op_mutex);
-  cv::UMat u_input = toCvUMat(inputs[0]->image_buffer);
+  cv::Mat input = toCvMat(inputs[0]->image_buffer);
 
   std::string ch_str = as_str(node.runtime_parameters, "channel", "a");
   int ch_idx = -1;
@@ -931,13 +1051,13 @@ static NodeOutput op_extract_channel(
     ch_idx = 2;
   else if (ch_str == "a" || ch_str == "3")
     ch_idx = 3;
-  if (ch_idx < 0 || u_input.channels() <= ch_idx)
+  if (ch_idx < 0 || input.channels() <= ch_idx)
     throw GraphError(GraphErrc::InvalidParameter,
                      "Invalid or unavailable channel for extraction.");
-  std::vector<cv::UMat> channels;
-  cv::split(u_input, channels);
+  std::vector<cv::Mat> channels;
+  cv::split(input, channels);
   NodeOutput result;
-  result.image_buffer = fromCvUMat(channels[ch_idx]);
+  result.image_buffer = fromCvMat(channels[ch_idx]);
   return result;
 }
 
@@ -977,10 +1097,22 @@ static NodeOutput op_divide(const Node& node,
 // =============================================================================
 // ==                       类型二: TILED (分块计算) 操作 ==
 // =============================================================================
+/**
+ * @brief Applies the pointwise curve transform to one independently owned tile.
+ * @param node Effective curve coefficient.
+ * @param output_tile Writable destination tile owned by the current task.
+ * @param input_tiles One immutable normalized input tile.
+ * @return Nothing.
+ * @throws std::bad_alloc if parameter or temporary matrix allocation fails.
+ * @throws GraphError if the required input tile is missing.
+ * @throws cv::Exception if OpenCV arithmetic or adapter conversion fails.
+ * @note Local `cv::Mat` headers share only task-owned payloads. Multiple
+ *       scheduler workers may execute this callback concurrently.
+ */
 static void op_curve_transform_tiled(
     const Node& node, const OutputTile& output_tile,
     const std::vector<InputTile>& input_tiles) {
-  std::lock_guard<std::mutex> lock(g_opencv_op_mutex);
+  PHOTOSPIDER_OBSERVE_OPENCV_OPERATION("image_process:curve_transform");
 
   if (input_tiles.empty())
     throw GraphError(GraphErrc::MissingDependency,
@@ -998,10 +1130,23 @@ static void op_curve_transform_tiled(
   cv::divide(1.0, temp, output_mat);
 }
 
+/**
+ * @brief Blurs one output tile from an immutable halo-expanded CPU input.
+ * @param node Effective kernel size and sigma.
+ * @param output_tile Writable destination tile owned by the current task.
+ * @param input_tiles One normalized input tile including the required halo.
+ * @return Nothing.
+ * @throws std::bad_alloc if parameter or temporary matrix allocation fails.
+ * @throws GraphError if the required input tile is missing.
+ * @throws std::runtime_error if planned halo geometry cannot cover output.
+ * @throws cv::Exception if OpenCV blur, copy, or adapter conversion fails.
+ * @note Every invocation owns its temporary matrix and output region, so the
+ *       callback is reentrant across scheduler workers.
+ */
 static void op_gaussian_blur_tiled(const Node& node,
                                    const OutputTile& output_tile,
                                    const std::vector<InputTile>& input_tiles) {
-  std::lock_guard<std::mutex> lock(g_opencv_op_mutex);
+  PHOTOSPIDER_OBSERVE_OPENCV_OPERATION("image_process:gaussian_blur");
 
   if (input_tiles.empty()) {
     throw GraphError(GraphErrc::MissingDependency,
@@ -1040,11 +1185,19 @@ static void op_gaussian_blur_tiled(const Node& node,
   blurred_large_tile(valid_roi).copyTo(output_mat);
 }
 
-// New: Monolithic Gaussian Blur (restores milestone-1 performance for
-// full-image blur)
+/**
+ * @brief Blurs one complete CPU image for monolithic execution.
+ * @param node Effective kernel size and sigma.
+ * @param inputs One required full-image input.
+ * @return Owned blurred image output.
+ * @throws std::bad_alloc if parameter or output allocation fails.
+ * @throws GraphError if the required input is missing.
+ * @throws cv::Exception if OpenCV blur or adapter conversion fails.
+ * @note Callback-local `cv::Mat` values make independent invocations reentrant.
+ */
 static NodeOutput op_gaussian_blur_monolithic(
     const Node& node, const std::vector<const NodeOutput*>& inputs) {
-  std::lock_guard<std::mutex> lock(g_opencv_op_mutex);
+  PHOTOSPIDER_OBSERVE_OPENCV_OPERATION("image_process:gaussian_blur");
   if (inputs.empty()) {
     throw GraphError(GraphErrc::MissingDependency,
                      "gaussian_blur requires one input image.");
@@ -1081,12 +1234,14 @@ static NodeOutput op_gaussian_blur_monolithic(
  * @throws GraphError for missing/mismatched inputs or invalid strategy data.
  * @throws cv::Exception for OpenCV blending/channel failures.
  * @note Invalid individual channel-map entries are skipped, while memory
- * exhaustion remains exceptional for the public Host compute boundary.
+ *       exhaustion remains exceptional for the public Host compute boundary.
+ *       All mutable matrices are callback-local or task-owned, so independent
+ *       scheduler invocations are reentrant.
  */
 static void op_add_weighted_tiled(const Node& node,
                                   const OutputTile& output_tile,
                                   const std::vector<InputTile>& input_tiles) {
-  std::lock_guard<std::mutex> lock(g_opencv_op_mutex);
+  PHOTOSPIDER_OBSERVE_OPENCV_OPERATION("image_mixing:add_weighted");
 
   if (input_tiles.size() < 2)
     throw GraphError(GraphErrc::MissingDependency,
@@ -1274,9 +1429,21 @@ static void op_add_weighted_tiled(const Node& node,
   cv::merge(O, output);
 }
 
+/**
+ * @brief Computes absolute difference for two normalized CPU input tiles.
+ * @param node Effective alpha-channel strategy.
+ * @param output_tile Writable destination tile owned by the current task.
+ * @param input_tiles Two immutable normalized input tiles.
+ * @return Nothing.
+ * @throws std::bad_alloc if parameter or channel storage allocation fails.
+ * @throws GraphError for missing or mismatched inputs.
+ * @throws cv::Exception if OpenCV channel arithmetic or merging fails.
+ * @note Temporary channels and the output region are task-owned, permitting
+ *       concurrent scheduler invocation without outer serialization.
+ */
 static void op_abs_diff_tiled(const Node& node, const OutputTile& output_tile,
                               const std::vector<InputTile>& input_tiles) {
-  std::lock_guard<std::mutex> lock(g_opencv_op_mutex);
+  PHOTOSPIDER_OBSERVE_OPENCV_OPERATION("image_mixing:diff");
 
   if (input_tiles.size() < 2)
     throw GraphError(GraphErrc::MissingDependency,
@@ -1337,9 +1504,21 @@ static void op_abs_diff_tiled(const Node& node, const OutputTile& output_tile,
   cv::merge(Oo, output);
 }
 
+/**
+ * @brief Multiplies two normalized CPU input tiles pointwise.
+ * @param node Effective scalar multiplier.
+ * @param output_tile Writable destination tile owned by the current task.
+ * @param input_tiles Two immutable normalized input tiles.
+ * @return Nothing.
+ * @throws std::bad_alloc if parameter conversion or OpenCV allocation fails.
+ * @throws GraphError for missing or mismatched inputs.
+ * @throws cv::Exception if OpenCV multiplication or adapter conversion fails.
+ * @note The operation has no shared mutable state and is reentrant across
+ *       independent output tiles.
+ */
 static void op_multiply_tiled(const Node& node, const OutputTile& output_tile,
                               const std::vector<InputTile>& input_tiles) {
-  std::lock_guard<std::mutex> lock(g_opencv_op_mutex);
+  PHOTOSPIDER_OBSERVE_OPENCV_OPERATION("image_mixing:multiply");
 
   if (input_tiles.size() < 2)
     throw GraphError(GraphErrc::MissingDependency,
@@ -1421,11 +1600,13 @@ static void normalize_to_base(cv::Mat& current_mat, const cv::Mat& base_mat,
  * data.
  * @throws cv::Exception for OpenCV blending/channel failures.
  * @note Invalid individual channel-map entries are skipped, while memory
- * exhaustion remains exceptional for the public Host compute boundary.
+ *       exhaustion remains exceptional for the public Host compute boundary.
+ *       All mutable matrices and result storage are callback-local, so
+ *       independent invocations are reentrant.
  */
 static NodeOutput op_add_weighted_monolithic(
     const Node& node, const std::vector<const NodeOutput*>& inputs) {
-  std::lock_guard<std::mutex> lock(g_opencv_op_mutex);
+  PHOTOSPIDER_OBSERVE_OPENCV_OPERATION("image_mixing:add_weighted");
   if (inputs.size() < 2)
     throw GraphError(GraphErrc::MissingDependency,
                      "add_weighted requires two input images.");
@@ -1587,9 +1768,20 @@ static NodeOutput op_add_weighted_monolithic(
   return out;
 }
 
+/**
+ * @brief Computes full-image absolute difference with alpha policy.
+ * @param node Effective merge and alpha-channel strategies.
+ * @param inputs Two required full-image inputs.
+ * @return Owned absolute-difference image.
+ * @throws std::bad_alloc if parameter, channel, or output allocation fails.
+ * @throws GraphError for missing inputs or unsupported normalization.
+ * @throws cv::Exception if OpenCV normalization or arithmetic fails.
+ * @note All mutable matrices are callback-local; independent invocations are
+ *       safe to run concurrently.
+ */
 static NodeOutput op_abs_diff_monolithic(
     const Node& node, const std::vector<const NodeOutput*>& inputs) {
-  std::lock_guard<std::mutex> lock(g_opencv_op_mutex);
+  PHOTOSPIDER_OBSERVE_OPENCV_OPERATION("image_mixing:diff");
   if (inputs.size() < 2)
     throw GraphError(GraphErrc::MissingDependency,
                      "diff requires two input images.");
@@ -1641,9 +1833,20 @@ static NodeOutput op_abs_diff_monolithic(
   return out;
 }
 
+/**
+ * @brief Multiplies two full CPU images after configured normalization.
+ * @param node Effective merge strategy and scale.
+ * @param inputs Two required full-image inputs.
+ * @return Owned multiplied image.
+ * @throws std::bad_alloc if parameter or output allocation fails.
+ * @throws GraphError for missing inputs or unsupported normalization.
+ * @throws cv::Exception if OpenCV normalization or multiplication fails.
+ * @note Callback-local matrices provide reentrant execution across independent
+ *       scheduler work.
+ */
 static NodeOutput op_multiply_monolithic(
     const Node& node, const std::vector<const NodeOutput*>& inputs) {
-  std::lock_guard<std::mutex> lock(g_opencv_op_mutex);
+  PHOTOSPIDER_OBSERVE_OPENCV_OPERATION("image_mixing:multiply");
   if (inputs.size() < 2)
     throw GraphError(GraphErrc::MissingDependency,
                      "multiply requires two input images.");
@@ -1664,13 +1867,12 @@ static NodeOutput op_multiply_monolithic(
   return out;
 }
 
-// --- 注册所有操作 ---
+/** @copydoc register_builtin */
 void register_builtin() {
   static std::once_flag init_once;
   std::call_once(init_once, [] {
-    cv::ocl::setUseOpenCL(false);
-    // Avoid OpenCV spinning its own threads conflicting with our scheduler on
-    // first use
+    // The process plugin owner invokes this before publishing callbacks.
+    // Keep OpenCV from creating an unaccounted nested CPU worker layer.
     cv::setNumThreads(1);
   });
   auto& R = OpRegistry::instance();
@@ -1797,6 +1999,8 @@ void register_builtin() {
   R.register_op_hp_tiled("image_mixing", "multiply",
                          TileOpFunc(op_multiply_tiled), tiled_meta);
 }
+
+#undef PHOTOSPIDER_OBSERVE_OPENCV_OPERATION
 
 }  // namespace ops
 }  // namespace ps

@@ -46,8 +46,10 @@ ps::PixelRect invert_forward_roi(const ps::plugin::RoiContext& context) {
  * @return Owned operation output containing the inverted image buffer.
  * @throws ps::GraphError when the required input image is missing.
  * @throws cv::Exception if OpenCV subtraction or buffer conversion fails.
- * @note The operation is monolithic HP work. It reads borrowed inputs and
- * returns a newly wrapped output buffer without mutating graph state.
+ * @note The operation is monolithic HP work. It uses callback-local CPU
+ * `cv::Mat` values, reads borrowed inputs, returns a newly wrapped output
+ * buffer, owns no shared provider state, and is reentrant without mutating
+ * graph state.
  */
 ps::plugin::OperationOutput op_invert(
     const ps::plugin::NodeView& node,
@@ -59,13 +61,13 @@ ps::plugin::OperationOutput op_invert(
                          "Invert op requires one valid input image.");
   }
 
-  const cv::UMat u_input = ps::plugin::opencv::to_umat(*inputs[0].image_buffer);
+  const cv::Mat input = ps::plugin::opencv::to_mat(*inputs[0].image_buffer);
 
-  cv::UMat u_output;
-  cv::subtract(cv::Scalar::all(1.0), u_input, u_output);
+  cv::Mat output;
+  cv::subtract(cv::Scalar::all(1.0), input, output);
 
   ps::plugin::OperationOutput result;
-  result.image_buffer = ps::plugin::opencv::from_umat(u_output);
+  result.image_buffer = ps::plugin::opencv::from_mat(output);
   return result;
 }
 

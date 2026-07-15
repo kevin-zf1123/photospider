@@ -140,8 +140,9 @@ ps::PixelRect threshold_forward_roi(const ps::plugin::RoiContext& context) {
  * exhausts memory.
  * @throws ps::GraphError when the required input image is missing.
  * @throws cv::Exception if OpenCV thresholding or buffer conversion fails.
- * @note The plugin is monolithic HP work. It does not mutate graph state and
- * keeps ROI semantics pointwise.
+ * @note The plugin is monolithic HP work. It uses only callback-local CPU
+ * `cv::Mat` values, does not mutate graph or shared provider state, is
+ * reentrant across independent inputs, and keeps ROI semantics pointwise.
  */
 ps::plugin::OperationOutput op_threshold(
     const ps::plugin::NodeView& node,
@@ -158,18 +159,18 @@ ps::plugin::OperationOutput op_threshold(
   std::string type_str =
       threshold_parameter_as_string(parameters, "type", "binary");
 
-  const cv::UMat u_input = ps::plugin::opencv::to_umat(*inputs[0].image_buffer);
+  const cv::Mat input = ps::plugin::opencv::to_mat(*inputs[0].image_buffer);
 
   int threshold_type = cv::THRESH_BINARY;
   if (type_str == "binary_inv") {
     threshold_type = cv::THRESH_BINARY_INV;
   }
 
-  cv::UMat u_output;
-  cv::threshold(u_input, u_output, thresh, maxval, threshold_type);
+  cv::Mat output;
+  cv::threshold(input, output, thresh, maxval, threshold_type);
 
   ps::plugin::OperationOutput result;
-  result.image_buffer = ps::plugin::opencv::from_umat(u_output);
+  result.image_buffer = ps::plugin::opencv::from_mat(output);
   return result;
 }
 

@@ -4,7 +4,6 @@
 #include <cstring>
 #include <exception>
 #include <new>
-#include <opencv2/core/ocl.hpp>
 
 #include "graph_cli/cli_config.hpp"  // NOLINT(build/include_subdir)
 #include "graph_cli/print_cli_help.hpp"
@@ -45,18 +44,19 @@ bool arguments_request_help(int argc, char** argv) noexcept {
  * @return The CLI result, or exit code 3 when resource exhaustion crosses the
  * reusable run boundary.
  * @throws Nothing under the documented CLI/Host exception contract.
- * @note The help fast path avoids Host/plugin construction. `std::bad_alloc`
- * is handled here, separately from recoverable run-boundary translation, with
- * an allocation-free diagnostic write.
+ * @note The process environment disables optional OpenCL runtime discovery
+ * before Host construction without mutating thread-local OpenCV state. The
+ * help fast path avoids Host/plugin construction. `std::bad_alloc` is handled
+ * here, separately from recoverable run-boundary translation, with an
+ * allocation-free diagnostic write.
  */
 int main(int argc, char** argv) {
   try {
     try {
-      // Hard-disable OpenCL runtime at process start to avoid spurious driver
-      // errors.
+      // Disable optional OpenCL runtime discovery before any OpenCV use to
+      // avoid spurious driver errors without relying on thread-local state.
       setenv("OPENCV_OPENCL_DEVICE", "disabled", 1);
       setenv("OPENCV_OPENCL_RUNTIME", "disabled", 1);
-      cv::ocl::setUseOpenCL(false);
 
       // Avoid initializing plugins/Metal for the help-only process path.
       if (arguments_request_help(argc, argv)) {
