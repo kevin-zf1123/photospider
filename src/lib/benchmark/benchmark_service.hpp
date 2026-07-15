@@ -46,11 +46,11 @@ class BenchmarkService {
    *         fails.
    * @throws YAML::Exception when generated or user-provided graph YAML is
    *         malformed.
-   * @note Before graph load, both future HP and RT defaults use the CPU
-   *       work-stealing scheduler and the requested zero-through-eight worker
-   *       grant. Zero resolves to bounded hardware concurrency. Temporary
-   *       graph sessions are named `__benchmark_temp` and closed after each
-   *       run.
+   * @note Before graph load, the zero-through-eight request is resolved once.
+   *       Both future HP and RT defaults then receive the same nonzero CPU
+   *       work-stealing grant reported by the result; the Host never receives
+   *       the zero automatic-selection sentinel. Temporary graph sessions are
+   *       named `__benchmark_temp` and closed after each run.
    */
   BenchmarkResult Run(const std::string& benchmark_dir,
                       const BenchmarkSessionConfig& config, int runs = 10);
