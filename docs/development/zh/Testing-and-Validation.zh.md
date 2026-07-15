@@ -40,7 +40,11 @@ consumer build 目录。它在内存中检查观察到的 producer/install/consu
 并在运行后丢弃；仓库不会为该测试保留逐次运行报告。
 
 该 smoke 会检查每个已安装的 `Photospider*Targets*.cmake` 文件，因为 package 将基础 target、
-依赖 OpenCV 的 target 与 embedded-product target 分到不同 export set 中。禁用 OpenCV discovery
+依赖 OpenCV 的 target 与 embedded-product target 分到不同 export set 中。它的 dependency
+classifier 只识别 producer 接受的精确 OpenCV component target 拼写：裸 lowercase name、lowercase
+`OpenCV::opencv_*` target，以及 `OpenCV::Core` 这类 component-specific CamelCase target；partial-name
+match 仍会被拒绝。验证证据来自真实 exported package/consumer 行为，而不是 synthetic verifier
+self-test。禁用 OpenCV discovery
 时，请求 `COMPONENTS operation_sdk OPTIONAL_COMPONENTS operation_opencv` 的 consumer 必须让
 package 与 `operation_sdk` 保持 found，将 `operation_opencv` 标记为 not found，导入无依赖的
 SDK/runtime target，并且不导入 `Photospider::operation_opencv`。在相同条件下 required

@@ -1,16 +1,19 @@
 #include <gtest/gtest.h>
 
+#include <algorithm>
 #include <array>
 #include <chrono>
 #include <cstdint>
 #include <filesystem>
 #include <fstream>
+#include <sstream>
 #include <stdexcept>
 #include <string>
 #include <system_error>
 #include <vector>
 
 #include "graph_cli/cli_config.hpp"
+#include "graph_cli/command/commands.hpp"
 #include "photospider/core/result_types.hpp"
 #include "photospider/scheduler/scheduler.hpp"
 #include "support/ipc_host_spy.hpp"
@@ -66,17 +69,77 @@ class ScopedCliConfigTempDir final {
 };
 
 /**
+ * @brief Temporarily changes the process working directory for one CLI test.
+ *
+ * @throws std::filesystem::filesystem_error If reading or changing the current
+ * directory fails.
+ * @note Tests using this guard must not run other working-directory-dependent
+ * code concurrently. Destruction restores the exact previous directory.
+ */
+class ScopedCurrentWorkingDirectory final {
+ public:
+  /**
+   * @brief Saves the current directory and enters the supplied test root.
+   * @param path Existing directory that becomes current for this scope.
+   * @throws std::filesystem::filesystem_error If either filesystem operation
+   * fails.
+   * @note The guard owns process-global current-directory restoration and must
+   * remain local to a non-concurrent test scope.
+   */
+  explicit ScopedCurrentWorkingDirectory(const std::filesystem::path& path)
+      : previous_(std::filesystem::current_path()) {
+    std::filesystem::current_path(path);
+  }
+
+  /**
+   * @brief Restores the exact directory captured by construction.
+   * @throws Nothing; restoration failure terminates because later tests could
+   * otherwise mutate an unknown filesystem location.
+   * @note Destruction is the only restoration path and runs exactly once.
+   */
+  ~ScopedCurrentWorkingDirectory() noexcept {
+    std::filesystem::current_path(previous_);
+  }
+
+  /**
+   * @brief Prevents duplicate restoration ownership.
+   * @param other Guard whose process-global restoration ownership must not be
+   * copied.
+   * @throws Nothing because construction is unavailable.
+   * @note Copying would permit two destructors to restore the same snapshot.
+   */
+  ScopedCurrentWorkingDirectory(const ScopedCurrentWorkingDirectory& other) =
+      delete;
+
+  /**
+   * @brief Prevents replacement of restoration ownership.
+   * @param other Guard whose restoration ownership must not replace this one.
+   * @return No value because assignment is unavailable.
+   * @throws Nothing because assignment is unavailable.
+   * @note Assignment would orphan one captured current-directory snapshot.
+   */
+  ScopedCurrentWorkingDirectory& operator=(
+      const ScopedCurrentWorkingDirectory& other) = delete;
+
+ private:
+  /** @brief Original process directory restored at scope exit. */
+  std::filesystem::path previous_;
+};
+
+/**
  * @brief Writes one focused CLI configuration fixture.
  *
  * @param path Destination YAML path.
  * @param worker_count Exact scalar emitted for scheduler worker configuration.
  * @param cache_root Sentinel cache root used to prove transactional parsing.
+ * @param switch_after_load Whether interactive load selects the new session.
  * @return Nothing.
  * @throws std::runtime_error If the fixture cannot be opened or fully written.
  * @note The YAML intentionally contains only fields relevant to this boundary.
  */
 void write_scheduler_config(const std::filesystem::path& path, int worker_count,
-                            const std::string& cache_root) {
+                            const std::string& cache_root,
+                            bool switch_after_load = true) {
   std::ofstream output(path);
   if (!output) {
     throw std::runtime_error("failed to open CLI scheduler config fixture");
@@ -84,7 +147,9 @@ void write_scheduler_config(const std::filesystem::path& path, int worker_count,
   output << "cache_root_dir: " << cache_root << '\n'
          << "scheduler_hp_type: cpu_work_stealing\n"
          << "scheduler_rt_type: serial_debug\n"
-         << "scheduler_worker_count: " << worker_count << '\n';
+         << "scheduler_worker_count: " << worker_count << '\n'
+         << "switch_after_load: " << (switch_after_load ? "true" : "false")
+         << '\n';
   if (!output) {
     throw std::runtime_error("failed to write CLI scheduler config fixture");
   }
@@ -250,6 +315,116 @@ TEST(CliSchedulerConfigApply, HostRejectionStopsRunGraphCliStartup) {
   EXPECT_EQ(run_graph_cli(static_cast<int>(argv.size()), argv.data(), host), 2);
   EXPECT_EQ(host.call_count("scheduler.configure_defaults"), 1U);
   EXPECT_EQ(host.call_count("graph.load"), 0U);
+}
+
+/**
+ * @brief Keeps later option actions bound to the graph loaded in this run.
+ * @return Nothing; GoogleTest assertions report action-targeting failures.
+ * @throws Nothing when output receives the Host-returned session id even while
+ * interactive switch-after-load policy is disabled.
+ * @note The disabled policy applies only to interactive session switching.
+ */
+TEST(CliOptionActions, LoadedSessionFeedsLaterOutputWhenSwitchPolicyIsOff) {
+  ScopedCliConfigTempDir directory("photospider_cli_option_session_chain");
+  const auto config_path = directory.root() / "config.yaml";
+  write_scheduler_config(config_path, 1, "option-cache",
+                         /*switch_after_load=*/false);
+
+  ps::testing::IpcHostSpy host(ps::GraphSessionId{"loaded-option-session"});
+  std::array<std::string, 7> arguments = {
+      "graph_cli",  "--config", config_path.string(), "-r",
+      "input.yaml", "-o",       "output.yaml"};
+  std::vector<char*> argv;
+  argv.reserve(arguments.size());
+  for (std::string& argument : arguments) {
+    argv.push_back(argument.data());
+  }
+
+  EXPECT_EQ(run_graph_cli(static_cast<int>(argv.size()), argv.data(), host), 0);
+  EXPECT_EQ(host.call_count("graph.save"), 1U);
+  const auto invocations = host.invocations();
+  const auto saved = std::find_if(
+      invocations.begin(), invocations.end(),
+      [](const auto& invocation) { return invocation.method == "graph.save"; });
+  ASSERT_NE(saved, invocations.end());
+  EXPECT_EQ(saved->session.value, "loaded-option-session");
+  EXPECT_EQ(saved->text, "output.yaml");
+}
+
+/**
+ * @brief Treats short traversal as an argument-free option at end of argv.
+ * @return Nothing; GoogleTest assertions report parsing/dispatch failures.
+ * @throws Nothing when parsing reaches traversal and targets the loaded graph.
+ * @note Terminal placement proves `getopt_long` does not consume a following
+ * argument for `-t`.
+ */
+TEST(CliOptionActions, ShortTraversalNeedsNoFollowingArgument) {
+  ScopedCliConfigTempDir directory("photospider_cli_short_traversal");
+  const auto config_path = directory.root() / "config.yaml";
+  write_scheduler_config(config_path, 1, "traversal-cache");
+
+  ps::testing::IpcHostSpy host(ps::GraphSessionId{"traversal-session"});
+  std::array<std::string, 6> arguments = {
+      "graph_cli", "--config", config_path.string(), "-r", "input.yaml", "-t"};
+  std::vector<char*> argv;
+  argv.reserve(arguments.size());
+  for (std::string& argument : arguments) {
+    argv.push_back(argument.data());
+  }
+
+  EXPECT_EQ(run_graph_cli(static_cast<int>(argv.size()), argv.data(), host), 0);
+  EXPECT_EQ(host.call_count("inspect.dependency_tree"), 1U);
+  EXPECT_EQ(host.call_count("inspect.traversal_orders"), 1U);
+  const auto invocations = host.invocations();
+  const auto traversed = std::find_if(
+      invocations.begin(), invocations.end(), [](const auto& invocation) {
+        return invocation.method == "inspect.traversal_orders";
+      });
+  ASSERT_NE(traversed, invocations.end());
+  EXPECT_EQ(traversed->session.value, "traversal-session");
+}
+
+/**
+ * @brief Aborts session copy when serializing the source graph fails.
+ * @return Nothing; GoogleTest assertions report precondition side effects.
+ * @throws std::filesystem::filesystem_error or std::bad_alloc if fixture setup
+ * cannot complete.
+ * @note A stale source file is deliberately present; copying it would prove
+ * the handler ignored the authoritative Host save failure.
+ */
+TEST(CliSessionSwitch, CopyRequiresSuccessfulSourceSave) {
+  ScopedCliConfigTempDir directory("photospider_cli_switch_save_gate");
+  ScopedCurrentWorkingDirectory current_directory(directory.root());
+  const auto source_directory =
+      std::filesystem::path("sessions") / "source-session";
+  std::filesystem::create_directories(source_directory);
+  std::ofstream stale_yaml(source_directory / "content.yaml");
+  ASSERT_TRUE(stale_yaml.is_open());
+  stale_yaml << "- id: 1\n  type: stale\n";
+  stale_yaml.close();
+  ASSERT_TRUE(stale_yaml);
+
+  ps::testing::IpcHostSpy host;
+  host.set_status(
+      "graph.save",
+      ps::OperationStatus{false, ps::OperationErrorDomain::Graph,
+                          static_cast<std::int32_t>(ps::GraphErrc::Io), "io",
+                          "source serialization failed"});
+  std::string current_graph = "source-session";
+  bool modified = true;
+  CliConfig config;
+  config.session_warning = false;
+  config.loaded_config_path.clear();
+  std::istringstream command("target-session c");
+
+  EXPECT_TRUE(handle_switch(command, host, current_graph, modified, config));
+  EXPECT_EQ(host.call_count("graph.save"), 1U);
+  EXPECT_EQ(host.call_count("graph.load"), 0U);
+  EXPECT_EQ(host.call_count("graph.reload"), 0U);
+  EXPECT_EQ(current_graph, "source-session");
+  EXPECT_TRUE(modified);
+  EXPECT_FALSE(std::filesystem::exists(std::filesystem::path("sessions") /
+                                       "target-session"));
 }
 
 }  // namespace

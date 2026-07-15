@@ -1,5 +1,5 @@
 switch <name> [c]
 
 Switch current graph session to <name>.
-With 'c', copy current session's YAML/config into <name> and switch.
-
+With 'c', save the current session before copying its YAML/config into <name>.
+If that save fails, abort before creating or loading the target session.
