@@ -2235,13 +2235,19 @@ class EmbeddedHost final : public Host {
    * @param session Session to save.
    * @param yaml_path Destination YAML path.
    * @return Success, NotFound for a missing or closing session, or Io for
-   *         serialization or destination open/write/flush/close failure.
-   * @throws std::bad_alloc on allocation failure.
+   *         recoverable node serialization, YAML emission, or destination
+   *         preparation/open/write/flush/close failure.
+   * @throws std::bad_alloc if graph-state submission, node/YAML serialization,
+   *         path handling, status translation, or result construction
+   *         exhausts memory.
    * @note A lifecycle admission protects required-session resolution and the
    *       serialized save from concurrent close. Recoverable serialization and
-   *       IO failures return OperationStatus. The destination is not replaced
-   *       atomically, so a post-open failure may leave a created, truncated, or
-   *       partially written file.
+   *       IO failures return OperationStatus. Success, returned failure, and
+   *       propagated resource exhaustion all preserve graph topology, runtime
+   *       state, and session ownership. The destination is not replaced
+   *       atomically: failure before open preserves existing bytes, while a
+   *       post-open failure may leave a created, truncated, or partially
+   *       written file.
    */
   VoidResult save_graph(const GraphSessionId& session,
                         const std::string& yaml_path) override {

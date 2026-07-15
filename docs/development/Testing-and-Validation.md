@@ -165,30 +165,55 @@ authoritative remote integration environment.
 ## Graph Document Error Matrix Validation
 
 `test_graph_document_errors` is a CTest-registered integration binary for the
-long-lived Graph document ingestion contract. It exercises the public embedded
-Host boundary and the direct `GraphModel::replace_nodes` transaction boundary.
-The cases distinguish omitted source paths from explicit source paths, require
-the exact `GraphErrc` category for I/O, YAML, schema, topology, lifecycle, and
-unexpected failures, and prove that `std::bad_alloc` remains an exception.
-They also prove failed initial loads do not publish sessions, failed reloads
-preserve the complete prior Graph state, successful replacement advances the
-topology generation and resets runtime state, and retry remains possible.
+long-lived Graph document ingestion and save contracts. It exercises the
+public embedded Host boundary and the direct `GraphModel::replace_nodes`
+transaction boundary. Load/reload cases distinguish omitted source paths from
+explicit source paths, require the exact `GraphErrc` category for I/O, YAML,
+schema, topology, lifecycle, and unexpected failures, and prove that
+`std::bad_alloc` remains an exception. They also prove failed initial loads do
+not publish sessions, failed reloads preserve the complete prior Graph state,
+successful replacement advances topology generation and resets runtime state,
+and retry remains possible.
 
-Two existing focused regressions complete the ownership boundary. The
-`test_scheduler_worker_budget` case proves an invalid document releases both
-already-started scheduler reservations without publishing a session. The
-`test_ipc_protocol` case proves the exact Graph error survives IPC encoding and
-the daemon-side session-name reservation is released for a successful retry.
+The same binary owns the public save transaction regression. Its private,
+destination-scoped `BUILD_TESTING` checkpoint runs on the graph-state worker
+immediately before destination open. One case requires recoverable failure to
+return `GraphErrc::Io`; another requires exact `std::bad_alloc`. Both require
+the existing destination bytes plus the publicly inspected session and node
+state to remain unchanged, then require an uninstrumented save retry to
+succeed. The const GraphIO boundary and serialized owner path provide the
+broader non-mutation guarantee. Production builds compile out the checkpoint
+and retain the single real writer.
+
+Focused companion regressions own the remaining boundaries:
+
+- `test_kernel_contracts` drives the real `GraphIOService` stream through
+  post-write, post-flush, and post-close failure states. Each phase must return
+  `GraphErrc::Io`, and the created destination demonstrates the documented
+  non-atomic post-open behavior.
+- `test_scheduler_worker_budget` proves an invalid input document releases both
+  already-started scheduler reservations without publishing a session.
+- `test_ipc_protocol` proves exact Graph status propagation, one-call mutation
+  behavior, and daemon session-name rollback after failed load.
+- `test_ipc_daemon` proves the real transport returns save `NotFound` and `Io`
+  exactly, leaves the remotely owned graph inspectable after destination
+  failure, and accepts a subsequent successful save.
+
 Run the focused validation with:
 
 ```bash
 cmake --build build --target test_graph_document_errors \
-  test_scheduler_worker_budget test_ipc_protocol -j
+  test_kernel_contracts test_scheduler_worker_budget test_ipc_protocol \
+  test_ipc_daemon -j
 ./build/tests/test_graph_document_errors
+./build/tests/test_kernel_contracts \
+  --gtest_filter='GraphIoContract.Save*'
 ./build/tests/test_scheduler_worker_budget \
   --gtest_filter=EmbeddedHostSchedulerBudget.InvalidYamlAfterSchedulerStartDoesNotPublishAndReturnsPairExactlyOnce
 ./build/tests/test_ipc_protocol \
   --gtest_filter=ProtocolGraphLoad.FailedHostLoadReleasesNameForRetry
+./build/tests/test_ipc_daemon \
+  --gtest_filter=IpcDaemonGraphLifecycle.PersistsAcrossClientsAndInspectsCopiedSnapshots
 ```
 
 These are maintained product-behavior tests. No migration-residue scan,

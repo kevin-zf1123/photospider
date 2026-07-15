@@ -43,7 +43,25 @@ bool Kernel::reload_graph_yaml(const std::string& name,
       .value_or(false);
 }
 
-/** @copydoc Kernel::save_graph_yaml */
+/**
+ * @brief Saves one required graph through its serialized graph-state lane.
+ *
+ * @param name Graph session name to save.
+ * @param yaml_path Destination YAML file path copied into the worker request.
+ * @return Nothing.
+ * @throws GraphError with `GraphErrc::NotFound` when required-session
+ *         resolution fails, or `GraphErrc::Io` when recoverable node
+ *         serialization, YAML emission, or destination
+ *         preparation/open/write/flush/close fails.
+ * @throws std::bad_alloc if graph-state submission, node/YAML serialization,
+ *         path handling, or diagnostic construction exhausts memory.
+ * @throws std::exception for other graph-state submission or future failures.
+ * @note with_required_graph_state() resolves and executes the save in the
+ *       session's GraphStateExecutor. The graph, runtime state, and session
+ *       owner remain unchanged on every outcome. The destination is written
+ *       directly: pre-open failure preserves existing bytes, but post-open
+ *       failure may leave created, truncated, or partial output.
+ */
 void Kernel::save_graph_yaml(const std::string& name,
                              const std::string& yaml_path) {
   const std::filesystem::path path = yaml_path;
