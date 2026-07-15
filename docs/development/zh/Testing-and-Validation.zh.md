@@ -149,6 +149,12 @@ cmake --build build --target test_graph_document_errors \
 这些是长期维护的产品行为测试。该验证面不应包含 migration-residue scan、Issue
 专属 replay script 或长期保留的 result artifact。
 
+持续维护的 CLI 脚本式集成检查 `ci/scripts/graph_cli_script_test.sh` 负责对应的 REPL
+边界。它的“显式来源缺失”场景要求 load 失败、`graphs` 清单为空且不存在当前 Graph；
+它的“无效 target”场景会先加载维护中的 propagation fixture，再要求 target 被拒绝，
+因此不会依赖失败 load 发布状态。每个场景都使用相互隔离的临时 session 与 history
+存储，并在脚本退出时删除。
+
 ## OpenCV Operation 并发验证
 
 `test_opencv_operation_concurrency` 是注册到 CTest 的 integration binary，用于验证长期
