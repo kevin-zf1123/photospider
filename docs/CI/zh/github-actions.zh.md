@@ -51,6 +51,31 @@ Ubuntu/CMake 版本锁定；既有 Ubuntu base 与 apt 提供的 CMake 设置保
 
 如果 CI 镜像输入发生变化，workflow 不能使用此前发布的镜像，而会在一个具备 Docker 能力的 runner 上运行 `local-image-integration`。构建 `photospider-ci:local` 后，`integration_suite.sh` 会执行同样的动态规划，构建发现到的每个 profile，再使用各自对应的 build，依次运行相同的完整 CTest、build smoke、CLI、propagation、plugin 和 scheduler 分片。该 fallback 保持相同的测试选择与 producer 配置，但接受单个本地镜像 runner 无法将工作扇出到多个 artifact-consuming job 的限制。
 
+## 脚本式 CLI 能力过渡
+
+`graph_cli_script_test.sh` 会在启动任何 `graph_cli` 进程前选择“显式来源缺失”契约。稳定能力标记是
+完整的长期 Graph 文档错误回归注册：必须同时存在
+`tests/integration/test_graph_document_errors.cpp` 源文件、对应的
+`add_ps_test(test_graph_document_errors ...)` target，以及
+`gtest_discover_tests(test_graph_document_errors ...)` 注册。三者全都不存在时，被测 revision 使用旧的
+missing-source 发布契约；三者全都存在时，被测 revision 使用事务式拒绝契约；只存在一部分说明测试
+清单不一致，脚本会直接失败。
+
+能力标记来自 checkout 的 revision，不依赖分支名、commit identity 或观察到的 CLI 输出。因此，
+旧路径会正向要求 warning、已发布 session、current Graph 清单以及空 Graph compute 结果，同时拒绝
+事务路径输出；事务路径会要求分类后的 load 失败、空 Graph 清单和不存在 current Graph，同时拒绝
+旧 warning 与发布行为。无效 target 解析会在另一个隔离 runtime 中先加载维护中的 fixture，因此
+绝不依赖任一种 missing-source 状态。
+
+这是一个分两阶段完成的受保护路径过渡。第一阶段先把 `CI/**` 变更合入 `main`；此时完整标记
+不存在，脚本验证旧契约。第二阶段要求架构 pull request 原样采用同一脚本，并消除其独立的
+`ci/**` 差异；该分支完整的 Graph 文档错误注册会选择事务契约。在第二阶段完成之前，受保护路径
+门禁仍会正确拒绝架构 pull request 中的 CI 文件差异。
+
+当事务式 Graph 文档契约已经进入 `main`，并且所有由该受保护脚本测试的活跃 pull-request 或维护
+分支 head 都包含完整注册后，后续 `CI/**` 变更必须删除旧路径与能力切换。此后脚本应无条件断言
+事务式拒绝。
+
 ## 脚本
 
 - `ci/scripts/healthcheck.sh`：对改动的 C++ 文件运行 `git diff --check`、`clang-format --dry-run --Werror` 和 `cpplint`。
@@ -60,7 +85,7 @@ Ubuntu/CMake 版本锁定；既有 Ubuntu base 与 apt 提供的 CMake 设置保
 - `ci/scripts/build_integrity.sh`：构建 `CI_BUILD_PROFILE` 选定的 profile。`default` 会构建 required targets 与完整 build tree，再执行 CTest discovery；`ipc-disabled` 设置 `BUILD_TESTING=OFF` 与 `PHOTOSPIDER_BUILD_IPC=OFF`，校验 cache，并且只构建 `photospider` producer target。
 - `ci/scripts/ctest_full.sh`：复用或构建 default producer 并运行 CTest，默认排除 `SplitComputeServiceRuntimeTrace` 和两个已独立分片的 build smoke 测试。
 - `ci/scripts/build_smoke_test.sh`：从可复用 producer 运行一个单独选择的 build smoke 测试；将 `SMOKE_TEST` 设置为 `static-product-consumer` 或 `ipc-disabled-install`。
-- `ci/scripts/graph_cli_script_test.sh`：运行正路径和负路径 REPL 脚本检查。
+- `ci/scripts/graph_cli_script_test.sh`：使用上述执行前 Graph 文档能力标记，运行相互隔离的正路径、显式来源缺失和无效 target REPL 检查。
 - `ci/scripts/propagation_script_test.sh`：构建 `test_propagation`，并对线性和复杂 propagation 图运行 `tiles all`。
 - `ci/scripts/plugin_load_test.sh`：检查插件产物、plugin manager 测试、scheduler plugin loader 测试和 CLI scheduler 插件列表。
 - `ci/scripts/scheduler_repeat_test.sh`：重复运行关键 scheduler 测试。
