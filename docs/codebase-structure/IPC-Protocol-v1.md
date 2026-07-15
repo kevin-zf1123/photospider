@@ -897,7 +897,10 @@ without following symlinks, scans through directory descriptors, and unlinks
 only controlled same-owner exact-`0600` one-link regular files. It removes only
 empty recognized instance directories. Unknown names, symlinks, non-regular
 entries, wrong modes/owners, hard links, and replaced entries remain untouched;
-no persisted output registry is required.
+no persisted output registry is required. Each duplicated enumeration
+descriptor remains RAII-owned until `fdopendir` successfully transfers it to a
+directory stream; an enumeration failure closes the duplicate before startup
+rollback completes.
 
 The persistent lifecycle lock serializes cooperating daemon instances. Portable
 POSIX has no compare-device/inode-and-unlink primitive, so each name-based

@@ -1,5 +1,7 @@
 #pragma once
 
+#include <dirent.h>
+
 #include <chrono>
 #include <cstddef>
 #include <cstdint>
@@ -112,8 +114,9 @@ struct OutputStoreLimits {
  *         allocated.
  * @throws std::invalid_argument for zero quotas or a nonpositive TTL.
  * @note The caller must hold the socket lifecycle lock throughout `start()`.
- *       The injected clock and id generator must be thread-safe. The store
- *       must outlive every `ComputeOutputOwnership` returned by `publish()`.
+ *       The injected clock, id generator, and directory stream opener must be
+ *       thread-safe. The store must outlive every `ComputeOutputOwnership`
+ *       returned by `publish()`.
  */
 class OutputStore {
  public:
@@ -127,16 +130,32 @@ class OutputStore {
   using IdGenerator = std::function<std::string()>;
 
   /**
+   * @brief Injectable POSIX directory-stream opener for startup enumeration.
+   *
+   * @param fd Borrowed duplicated directory descriptor. On success, the
+   *        returned stream takes ownership exactly as `fdopendir`; on failure,
+   *        the caller retains descriptor ownership.
+   * @return Owned directory stream, or null with `errno` set.
+   * @throws Whatever the injected callable throws.
+   * @note An empty callable selects `fdopendir`. The callable must remain
+   *       thread-safe for every `start()` that may use this store.
+   */
+  using DirectoryStreamOpener = std::function<DIR*(int)>;
+
+  /**
    * @brief Creates a stopped store with injected quotas and time sources.
    *
    * @param limits Artifact count/byte limits and delivery TTL.
    * @param clock Monotonic clock; empty selects `steady_clock::now`.
    * @param id_generator Candidate source; empty selects OS entropy.
+   * @param directory_stream_opener Directory enumeration boundary; empty
+   *        selects `fdopendir`.
    * @throws std::bad_alloc if implementation or callback storage fails.
    * @throws std::invalid_argument for an invalid quota or TTL policy.
    */
   explicit OutputStore(OutputStoreLimits limits = {}, Clock clock = {},
-                       IdGenerator id_generator = {});
+                       IdGenerator id_generator = {},
+                       DirectoryStreamOpener directory_stream_opener = {});
 
   /**
    * @brief Stops publication/leases and identity-cleans all owned artifacts.
