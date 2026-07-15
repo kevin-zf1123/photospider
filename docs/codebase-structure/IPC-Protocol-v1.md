@@ -223,6 +223,20 @@ oversized length close only that connection without reading an untrusted body
 or inventing an uncorrelated response. Linux sends use `MSG_NOSIGNAL`; macOS
 uses socket-local `SO_NOSIGPIPE`. No process-global SIGPIPE policy changes.
 
+Every ordinary accepted daemon connection has four independent, private,
+fixed two-second monotonic IO budgets: idle time before the first byte of the
+next header, the remaining header after that byte is observed, the declared
+payload after a valid header, and the complete response header-plus-payload
+write after routing finishes. Partial progress and `EINTR`, `EAGAIN`, or
+`EWOULDBLOCK` retain the current stage's original absolute deadline; each next
+stage receives a fresh budget. Expiry closes only that connection, emits no
+additional uncorrelated or partial-frame error, and publishes worker completion
+through the normal joined cleanup path. These budgets are not protocol fields,
+daemon options, environment controls, or public Client configuration. They do
+not cover Client connection setup, listener pathname proof, router/Host work,
+compute polling, or daemon shutdown, whose existing timing contracts remain
+independent.
+
 Client connection setup publishes one `FD_CLOEXEC` descriptor, performs one
 logical nonblocking connection, and restores the descriptor's original blocking
 flags on every outcome. `EINPROGRESS`/`EALREADY` complete through interruptible
@@ -1340,13 +1354,16 @@ that same-uid final-check race. On every Active exit, identity-aware unlink runs
 while the listener fd still holds the original socket inode; only then is the
 listener closed, removing the close-to-cleanup inode-reuse interval.
 
-The listener tracks at most 32 joinable client workers. Requests are sequential
-per connection; frame/JSON work may occur across clients. Because public Host
-does not promise thread safety, every Host call uses one daemon mutex. Socket
-reads and writes never hold it. Shutdown first stops all session, snapshot, and
-compute admission plus new output leases. While the lifecycle lock remains
-held, the Active identity guard unlinks only the matching pathname while the
-listener fd still holds its original inode, then closes the listener. New
+The listener tracks at most 32 joinable client workers. Deadline expiry follows
+the same close, completion publication, foreground reap, and join path as EOF
+or socket failure, so even 32 clients stalled in ordinary IO eventually return
+their capacity without client-side close or daemon shutdown. Requests are
+sequential per connection; frame/JSON work may occur across clients. Because
+public Host does not promise thread safety, every Host call uses one daemon
+mutex. Socket reads and writes never hold it. Shutdown first stops all session,
+snapshot, and compute admission plus new output leases. While the lifecycle
+lock remains held, the Active identity guard unlinks only the matching pathname
+while the listener fd still holds its original inode, then closes the listener. New
 pathname connections therefore fail before tracked client, compute, snapshot,
 output-lease, or Host-session drain can block shutdown. The daemon next shuts
 down tracked client descriptors to wake reads and joins all connection workers.
