@@ -103,6 +103,8 @@ void set_embedded_host_lifecycle_test_hook(
  * @throws Nothing for value construction and comparison.
  */
 enum class EmbeddedOperationTestEvent {
+  /** @brief Graph YAML reload operation. */
+  ReloadGraph,
   /** @brief Graph YAML save operation. */
   SaveGraph,
   /** @brief Required-node YAML replacement operation. */
@@ -1970,7 +1972,9 @@ struct AdmittedOperationCloseRaceResult {
   VoidResult blocker;
   /** @brief Result from the synchronous operation admitted before close. */
   OperationResult operation;
-  /** @brief Result from close after both prior operations finish. */
+  /** @brief Optional result from repeating after close claims its marker. */
+  std::optional<OperationResult> rejected_while_closing;
+  /** @brief Result from close after the admitted operation finishes. */
   VoidResult close;
 };
 
@@ -1990,20 +1994,26 @@ struct AdmittedOperationCloseRaceResult {
  * @param event Target Host operation selected by the three-phase gate.
  * @param operation_name Stable API name used in deterministic failure text.
  * @param operation_call Callable whose result is retained for test assertions.
- * @return Results in blocker, admitted-operation, then close completion order.
+ * @param repeat_after_close_marker Whether to invoke the same public operation
+ *        after close has claimed its marker and retain the rejected result.
+ * @return Results from the blocker, admitted operation, optional post-marker
+ *         rejection, and close.
  * @throws std::runtime_error if a required event is absent or a supposedly
  *         blocked call completes before release.
  * @throws Any exception propagated by asynchronous Host calls or allocation.
  * @note A noexcept race scope releases every phase, joins all valid futures,
  *       and resets blocking-source state on all exits, including partial
- *       std::async construction.
+ *       std::async construction. When repeat_after_close_marker is true, the
+ *       callable must permit one concurrent invocation while the admitted
+ *       invocation remains stopped at the pre-Kernel gate.
  */
 template <typename OperationCall>
 AdmittedOperationCloseRaceResult<std::invoke_result_t<OperationCall&>>
 run_admitted_operation_close_race(Host& host, const GraphSessionId& session,
                                   EmbeddedOperationTestEvent event,
                                   const char* operation_name,
-                                  OperationCall operation_call) {
+                                  OperationCall operation_call,
+                                  bool repeat_after_close_marker = false) {
   using OperationResult = std::invoke_result_t<OperationCall&>;
 
   OneShotSignal compute_release;
@@ -2033,11 +2043,8 @@ run_admitted_operation_close_race(Host& host, const GraphSessionId& session,
         "blocking compute did not acquire graph-state execution");
   }
 
-  race_scope.operation_future =
-      std::async(std::launch::async,
-                 [operation_call = std::move(operation_call)]() mutable {
-                   return operation_call();
-                 });
+  race_scope.operation_future = std::async(
+      std::launch::async, [&operation_call] { return operation_call(); });
   if (!wait_for_atomic_event_count(lifecycle_events.session_operation_admitted,
                                    2, std::chrono::seconds(2))) {
     throw std::runtime_error(std::string(operation_name) +
@@ -2056,6 +2063,11 @@ run_admitted_operation_close_race(Host& host, const GraphSessionId& session,
                                    std::chrono::seconds(2))) {
     throw std::runtime_error(
         "close did not claim marker while admitted operation was pending");
+  }
+
+  std::optional<OperationResult> rejected_while_closing;
+  if (repeat_after_close_marker) {
+    rejected_while_closing.emplace(operation_call());
   }
 
   if (race_scope.operation_future.wait_for(std::chrono::milliseconds(0)) !=
@@ -2111,7 +2123,8 @@ run_admitted_operation_close_race(Host& host, const GraphSessionId& session,
   after_translation_release.signal();
   OperationResult operation = race_scope.operation_future.get();
   VoidResult close = race_scope.close_future.get();
-  return {std::move(blocker), std::move(operation), std::move(close)};
+  return {std::move(blocker), std::move(operation),
+          std::move(rejected_while_closing), std::move(close)};
 }
 #endif
 
@@ -3594,6 +3607,38 @@ TEST(EmbeddedHostAdapter, CloseWaitsForAdmittedSaveGraph) {
 
   EXPECT_TRUE(race.blocker.status.ok) << race.blocker.status.message;
   EXPECT_TRUE(race.operation.status.ok) << race.operation.status.message;
+  EXPECT_TRUE(race.close.status.ok) << race.close.status.message;
+}
+
+/**
+ * @brief Verifies reload admission spans Kernel work and public translation.
+ *
+ * @return Nothing; GoogleTest assertions report lifecycle result mismatches.
+ * @throws std::bad_alloc or filesystem exceptions if fixture setup fails.
+ * @note A real blocking compute holds GraphStateExecutor after reload is
+ *       admitted. Close must wait for that reload, while a second reload after
+ *       the close marker is published must return public NotFound immediately.
+ */
+TEST(EmbeddedHostAdapter, CloseWaitsForAdmittedReloadGraph) {
+  register_host_adapter_ops();
+  ScopedTempDir temp("photospider_host_adapter_reload_close_gate_test");
+  auto host = create_embedded_host();
+  ASSERT_NE(host, nullptr);
+  const GraphSessionId session = load_test_graph(
+      *host, temp.root(), "reload_close_gate_graph", "blocking_source");
+  const auto reload_path = temp.root() / "source" / "admitted_reload.yaml";
+  write_host_adapter_graph(reload_path, 13, 8);
+
+  const auto race = run_admitted_operation_close_race(
+      *host, session, EmbeddedOperationTestEvent::ReloadGraph, "reload_graph",
+      [&] { return host->reload_graph(session, reload_path.string()); }, true);
+
+  EXPECT_TRUE(race.blocker.status.ok) << race.blocker.status.message;
+  EXPECT_TRUE(race.operation.status.ok) << race.operation.status.message;
+  ASSERT_TRUE(race.rejected_while_closing.has_value());
+  EXPECT_FALSE(race.rejected_while_closing->status.ok);
+  EXPECT_EQ(checked_graph_error_code(race.rejected_while_closing->status),
+            GraphErrc::NotFound);
   EXPECT_TRUE(race.close.status.ok) << race.close.status.message;
 }
 

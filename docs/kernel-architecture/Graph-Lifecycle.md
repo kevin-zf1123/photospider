@@ -69,12 +69,15 @@ The classification and transaction rationale is fixed by
 
 ## Existing Session Reload
 
-`Host::reload_graph()` first distinguishes a missing session, then submits the
-reload through `GraphStateExecutor`. A missing session is `NotFound` even when
-the supplied path is empty; an empty path for an existing session is
-`InvalidParameter`. Every nonempty source uses the same IO, syntax/schema,
-topology, unexpected-failure, and resource-exhaustion classification as initial
-load.
+`Host::reload_graph()` first admits the session against concurrent close, then
+distinguishes a missing session and submits the reload through
+`GraphStateExecutor`. A missing or closing session is `NotFound` even when the
+supplied path is empty; an empty path for an existing admitted session is
+`InvalidParameter`. The admission precedes session lookup and remains live
+through backend LastError translation, so close cannot erase the runtime or its
+diagnostic state after accepting the reload. Every nonempty source uses the
+same IO, syntax/schema, topology, unexpected-failure, and resource-exhaustion
+classification as initial load.
 
 `GraphIOService` builds and validates a temporary replacement exactly as it
 does for initial loading. Until `replace_nodes()` succeeds, the visible node
@@ -188,9 +191,10 @@ the advanced topology generation.
 ## Close and Lifetime
 
 Embedded Host close first marks the session closing. New compute, scheduler,
-required save, node-YAML replacement, ROI projection, timing inspection, and
-all-cache clearing admissions fail. The Host waits for synchronous calls
-admitted before that marker through caller-visible result/status translation
+reload, required save, node-YAML replacement, ROI projection, timing
+inspection, and all-cache clearing admissions fail. The Host waits for
+synchronous calls admitted before that marker through caller-visible
+result/status translation
 while the lane is still accepting, so calls that use graph state can finish
 their graph-state submission. Kernel then stops admission on the same
 `GraphStateExecutor` used by those calls.
@@ -235,7 +239,7 @@ lease, socket, and shutdown rules are defined in
 | initial load, missing dependency or cycle | exact `GraphErrc::MissingDependency` or `GraphErrc::Cycle`; no session publication |
 | initial load, unexpected non-resource failure | `GraphErrc::Unknown`; no session publication |
 | initial load, resource exhaustion | `std::bad_alloc` propagates; no session publication |
-| reload, missing session | `GraphErrc::NotFound` |
+| reload, missing or closing session | `GraphErrc::NotFound` |
 | reload, existing session with empty path | `GraphErrc::InvalidParameter`; prior graph and runtime state remain visible |
 | reload, missing/unreadable source | `GraphErrc::Io`; prior graph and runtime state remain visible |
 | reload, YAML syntax/representation, non-sequence root, duplicate id, or node-schema failure | `GraphErrc::InvalidYaml`; prior graph and runtime state remain visible |

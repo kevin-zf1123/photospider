@@ -209,6 +209,16 @@ not publish sessions, failed reloads preserve the complete prior Graph state,
 successful replacement advances topology generation and resets runtime state,
 and retry remains possible.
 
+`test_host_adapter` owns the deterministic reload-versus-close lifetime
+regression. A real blocking compute and three explicit Host-operation gates
+prove that a reload admitted before the close marker remains admitted before
+Kernel entry and after public status translation, and that close cannot finish
+first. Repeating reload after that marker must return `GraphErrc::NotFound`
+without entering Kernel. The companion node-YAML and forward/backward ROI
+races prove reload still runs after each required lookup-and-use work item, so
+the close admission correction does not weaken graph-state ordering. These
+tests use event gates and zero-duration future snapshots, not timing sleeps.
+
 The same binary owns the public save transaction regression. Its private,
 destination-scoped `BUILD_TESTING` checkpoint runs on the graph-state worker
 immediately before destination open. One case requires recoverable failure to
@@ -236,10 +246,12 @@ Focused companion regressions own the remaining boundaries:
 Run the focused validation with:
 
 ```bash
-cmake --build build --target test_graph_document_errors \
+cmake --build build --target test_graph_document_errors test_host_adapter \
   test_kernel_contracts test_scheduler_worker_budget test_ipc_protocol \
   test_ipc_daemon -j
 ./build/tests/test_graph_document_errors
+./build/tests/test_host_adapter \
+  --gtest_filter='EmbeddedHostAdapter.*Reload*'
 ./build/tests/test_kernel_contracts \
   --gtest_filter='GraphIoContract.Save*'
 ./build/tests/test_scheduler_worker_budget \

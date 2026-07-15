@@ -158,6 +158,13 @@ Graph document ingestion 与 save 契约。它同时覆盖 public embedded Host 
 initial load 失败不发布 session；reload 失败保留 prior Graph 的完整状态；成功 replacement
 推进 topology generation 并重置 runtime state；失败后仍可重试。
 
+`test_host_adapter` 负责确定性的 reload 与 close 生命周期回归。真实 blocking compute 与三个显式
+Host-operation gate 会证明：close marker 之前已准入的 reload 在进入 Kernel 前以及 public status
+转换后仍保持 admission，close 不能先完成；该 marker 之后重复 reload 必须在不进入 Kernel 的
+情况下返回 `GraphErrc::NotFound`。Node-YAML 与 forward/backward ROI 的配套竞态会证明 reload
+仍在每个 required lookup-and-use work item 之后运行，因此 close admission 修正不会削弱
+graph-state ordering。这些测试使用 event gate 与零时长 future snapshot，不使用 timing sleep。
+
 同一个 binary 负责 public save transaction regression。其仅供测试、按 destination 限定的
 `BUILD_TESTING` checkpoint 会在 graph-state worker 上、destination open 前立即运行。一个 case
 要求可恢复失败返回 `GraphErrc::Io`，另一个要求精确传播 `std::bad_alloc`。两者都要求 existing
@@ -180,10 +187,12 @@ non-mutation 保证。Production build 会编译掉该 checkpoint，并保留唯
 可用以下命令执行 focused validation：
 
 ```bash
-cmake --build build --target test_graph_document_errors \
+cmake --build build --target test_graph_document_errors test_host_adapter \
   test_kernel_contracts test_scheduler_worker_budget test_ipc_protocol \
   test_ipc_daemon -j
 ./build/tests/test_graph_document_errors
+./build/tests/test_host_adapter \
+  --gtest_filter='EmbeddedHostAdapter.*Reload*'
 ./build/tests/test_kernel_contracts \
   --gtest_filter='GraphIoContract.Save*'
 ./build/tests/test_scheduler_worker_budget \

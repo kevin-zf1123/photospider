@@ -390,10 +390,13 @@ class Kernel {
    * @note Missing graph sessions preserve the legacy quiet false result without
    *       updating LastError. For existing sessions, an empty path records
    *       `GraphErrc::InvalidParameter`; IO, syntax/schema, topology, and
-   *       unexpected failures record their exact stable categories. Any
-   *       handled failure leaves nodes, topology adjacency/generation, runtime
-   *       graph state, and session identity unchanged; `std::bad_alloc`
-   *       propagates with the same preservation guarantee.
+   *       unexpected failures record their exact stable categories. Embedded
+   *       Host retains lifecycle admission across session resolution, this
+   *       graph-state submission, and LastError translation; any other caller
+   *       that can race close must provide equivalent runtime-lifetime
+   *       admission. Any handled failure leaves nodes, topology adjacency/
+   *       generation, runtime graph state, and session identity unchanged;
+   *       `std::bad_alloc` propagates with the same preservation guarantee.
    */
   bool reload_graph_yaml(const std::string& name, const std::string& yaml_path);
   /**

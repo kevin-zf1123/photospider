@@ -104,6 +104,8 @@ void notify_embedded_lifecycle_test_hook(
  * @note Production builds do not compile this private test contract.
  */
 enum class EmbeddedOperationTestEvent {
+  /** @brief Graph YAML reload operation. */
+  ReloadGraph,
   /** @brief Graph YAML save operation. */
   SaveGraph,
   /** @brief Required-node YAML replacement operation. */
@@ -682,10 +684,11 @@ struct EmbeddedHostState {
    * @return Nothing after no synchronous admission token protects the runtime.
    * @throws std::system_error if lifecycle synchronization fails.
    * @note The graph-state lane remains accepting during this phase so a save,
-   *       node replacement, ROI projection, or other already-admitted call can
-   *       enter Kernel and preserve its success contract. The close marker
-   *       prevents any new synchronous admission. After this method returns,
-   *       close stops lane admission before waiting on async placeholders.
+   *       reload, node replacement, ROI projection, or other already-admitted
+   *       call can enter Kernel and preserve its result contract. The close
+   *       marker prevents any new synchronous admission. After this method
+   *       returns, close stops lane admission before waiting on async
+   *       placeholders.
    */
   void wait_for_session_admissions(const GraphSessionId& session) {
     std::unique_lock<std::mutex> lock(lifecycle_mutex_);
@@ -834,9 +837,9 @@ struct EmbeddedHostState {
    *
    * @param session Session label to search.
    * @return True while an admitted compute, image compute, scheduler-info,
-   *         scheduler-replacement, required-save, node-YAML replacement, ROI
-   *         projection, timing, or all-cache-clear call has not finished public
-   *         translation.
+   *         scheduler-replacement, reload, required-save, node-YAML
+   *         replacement, ROI projection, timing, or all-cache-clear call has
+   *         not finished public translation.
    * @throws Nothing.
    * @note Caller must hold lifecycle_mutex_. Close waits for these admissions
    *       before entering Kernel::close_graph(), so the runtime map entry and
@@ -2206,21 +2209,37 @@ class EmbeddedHost final : public Host {
    *
    * @param session Session to reload.
    * @param yaml_path Source YAML path.
-   * @return Success, NotFound for missing sessions, InvalidParameter for an
-   *         empty path on an existing session, Io for unreadable input,
-   *         InvalidYaml for syntax/schema rejection, MissingDependency/Cycle
-   *         for topology rejection, or Unknown for unexpected failures.
-   * @throws std::bad_alloc on allocation failure.
-   * @note Host checks session existence before calling the backend bool API so
-   *       lifecycle errors are not reported as malformed YAML. Backend
-   *       LastError preserves the reload failure classification for existing
-   *       sessions. Failed reload and propagated std::bad_alloc retain the
-   *       published nodes, topology generation, runtime graph state, and
-   *       session identity.
+   * @return Success, NotFound for missing or closing sessions,
+   *         InvalidParameter for an empty path on an existing session, Io for
+   *         unreadable input, InvalidYaml for syntax/schema rejection,
+   *         MissingDependency/Cycle for topology rejection, or Unknown for
+   *         unexpected failures.
+   * @throws std::bad_alloc if admission, graph-state submission, reload,
+   *         status translation, or result construction exhausts memory.
+   * @note Host admission precedes session existence testing and remains owned
+   *       through the backend call and public LastError translation. Close
+   *       therefore cannot erase the runtime or its diagnostic state after an
+   *       accepted reload begins. Failed reload and propagated std::bad_alloc
+   *       retain the published nodes, topology generation, runtime graph
+   *       state, and session identity.
    */
   VoidResult reload_graph(const GraphSessionId& session,
                           const std::string& yaml_path) override {
-    return guarded_void("reload_graph", GraphErrc::Unknown, [&] {
+    std::optional<EmbeddedHostState::SessionAdmissionToken> admission;
+    VoidResult result = guarded_void("reload_graph", GraphErrc::Unknown, [&] {
+      admission = state_->try_admit_session_operation(session);
+      if (!admission) {
+        return failure_void(GraphErrc::NotFound,
+                            "graph session is closing: " + session.value);
+      }
+#if defined(PHOTOSPIDER_INTERNAL_HOST_OPERATION_TESTING)
+      state_->wait_at_operation_test_phase(
+          session, EmbeddedOperationTestEvent::ReloadGraph,
+          EmbeddedOperationTestPhase::BeforeKernelReady);
+      state_->wait_at_operation_test_phase(
+          session, EmbeddedOperationTestEvent::ReloadGraph,
+          EmbeddedOperationTestPhase::BeforeKernelAdmissionSnapshot);
+#endif
       if (!session_exists(*state_, session)) {
         return failure_void(GraphErrc::NotFound,
                             "graph session not found: " + session.value);
@@ -2232,6 +2251,14 @@ class EmbeddedHost final : public Host {
       }
       return success_void();
     });
+#if defined(PHOTOSPIDER_INTERNAL_HOST_OPERATION_TESTING)
+    if (admission) {
+      state_->wait_at_operation_test_phase(
+          session, EmbeddedOperationTestEvent::ReloadGraph,
+          EmbeddedOperationTestPhase::AfterTranslationAdmissionSnapshot);
+    }
+#endif
+    return result;
   }
 
   /**

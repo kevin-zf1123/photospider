@@ -259,8 +259,10 @@ class InteractionService {
    * @note Missing graphs do not create LastError. Existing-session empty-path,
    *       IO, syntax/schema, topology, and unexpected failures retain
    *       InvalidParameter, Io, InvalidYaml, MissingDependency/Cycle, and
-   *       Unknown respectively. This internal method does not expose Kernel to
-   *       frontends; public callers use `ps::Host::reload_graph()`.
+   *       Unknown respectively. Embedded Host retains its close admission
+   *       across this command and later public LastError translation. This
+   *       internal method does not expose Kernel to frontends; public callers
+   *       use `ps::Host::reload_graph()`.
    */
   bool cmd_reload_yaml(const std::string& graph, const std::string& yaml_path) {
     return kernel_.reload_graph_yaml(graph, yaml_path);

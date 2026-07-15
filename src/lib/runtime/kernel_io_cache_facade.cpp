@@ -26,11 +26,13 @@ std::optional<TimingCollector> Kernel::get_timing(const std::string& name) {
  *         construction exhausts memory.
  * @note Missing sessions return false without creating LastError state. For an
  *       existing session, empty-path InvalidParameter, IO, syntax/schema,
- *       topology, and Unknown categories are recorded exactly. GraphIO parses
- *       and validates temporary ownership before GraphModel replacement, so
- *       every handled failure and propagated std::bad_alloc preserves the
- *       published nodes, topology adjacency/generation, runtime graph state,
- *       and session identity.
+ *       topology, and Unknown categories are recorded exactly. Embedded Host
+ *       retains lifecycle admission through this call and its later LastError
+ *       translation; direct callers racing close require equivalent runtime-
+ *       lifetime admission. GraphIO parses and validates temporary ownership
+ *       before GraphModel replacement, so every handled failure and propagated
+ *       std::bad_alloc preserves the published nodes, topology adjacency/
+ *       generation, runtime graph state, and session identity.
  */
 bool Kernel::reload_graph_yaml(const std::string& name,
                                const std::string& yaml_path) {
