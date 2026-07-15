@@ -225,6 +225,11 @@ planning 规则；RT proxy work 仍然按 RT dirty plan 的局部范围执行。
 先等待 RT，并通过 sibling commit gate 保证 HP 只在 RT proxy commit 成功后才修改
 `GraphModel`。没有 scheduler runtime 时，同一批 callback 会按 RT 后 HP 的顺序 inline 执行。
 
+并发路径还会让两个 sibling 共享一个 request-owned 的 per-node synchronization object。它会保护
+同一节点的 live `Node` snapshot 与 YAML-backed parameter resolution，但不会合并两个 domain plan：
+不同节点与 operation body 仍可并发；即使发生 failure cleanup，该对象也会在两个 sibling future
+都 drain 后才释放。
+
 Realtime planning 有意按路径分别执行，而不是通过一次混合 domain 的 planner 调用生成两份任务池。
 `IntentUpdateCoordinator` 会分发 sibling HP 与 RT update callback，并为 Dirty RT request
 记录 RT-first/concurrent 阶段。每条路径都使用一个 single-domain request plan 和同 domain 的

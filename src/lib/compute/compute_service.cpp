@@ -171,6 +171,11 @@ compute::ComputeTaskDispatcher::ComputeDispatchRequest make_dispatch_request(
  * @param request Service request validated by IntentUpdateCoordinator.
  * @param suppress_graph_downsample Whether HP dirty execution should skip
  * direct HP-to-RT graph downsample writes for this request.
+ * @param sibling_commit_gate Optional HP commit gate shared with the RT
+ * sibling.
+ * @param stabilized_parameters Optional immutable connected-parameter snapshot.
+ * @param node_synchronization Optional per-node critical sections shared by the
+ * concurrent HP and RT siblings of one RealTimeUpdate transaction.
  * @return DirtyUpdateRequest with the requested dirty ROI.
  * @throws std::bad_alloc if copying request cache precision or gate storage
  * exhausts memory.
@@ -184,7 +189,9 @@ compute::DirtyUpdateRequest make_dirty_update_request(
     std::shared_ptr<compute::DirtySiblingCommitGate> sibling_commit_gate =
         nullptr,
     std::shared_ptr<const compute::StabilizedDirtyParameters>
-        stabilized_parameters = nullptr) {
+        stabilized_parameters = nullptr,
+    std::shared_ptr<compute::DirtyNodeSynchronization> node_synchronization =
+        nullptr) {
   return compute::DirtyUpdateRequest{request.node_id,
                                      request.cache.precision,
                                      request.cache.force_recache,
@@ -194,7 +201,8 @@ compute::DirtyUpdateRequest make_dirty_update_request(
                                      request.dirty_roi.value(),
                                      suppress_graph_downsample,
                                      std::move(sibling_commit_gate),
-                                     std::move(stabilized_parameters)};
+                                     std::move(stabilized_parameters),
+                                     std::move(node_synchronization)};
 }
 
 /**
@@ -403,6 +411,7 @@ NodeOutput& ComputeService::compute_internal(
  * @param request Request carrying target, cache, telemetry, and dirty ROI.
  * @param sibling_commit_gate Optional RealTimeUpdate gate that delays HP graph
  * commit until RT proxy commit succeeds.
+ * @param stabilized_parameters Optional immutable connected-parameter snapshot.
  * @return Mutable target HP output stored in the graph.
  * @throws std::bad_alloc unchanged when dirty planning, task, cache, or output
  * storage exhausts memory.
@@ -433,6 +442,9 @@ NodeOutput& ComputeService::compute_high_precision_update(
  * @param proxy_graph RT proxy graph whose low-resolution state is updated.
  * @param strategy Execution strategy that may supply a scheduler runtime.
  * @param request Request carrying target, cache, telemetry, and dirty ROI.
+ * @param stabilized_parameters Optional immutable connected-parameter snapshot.
+ * @param node_synchronization Optional per-node critical sections shared with
+ * the concurrent HP sibling of the same RealTimeUpdate transaction.
  * @return Mutable target RT output stored in the proxy graph.
  * @throws std::bad_alloc unchanged when dirty planning, task, proxy, or output
  * storage exhausts memory.
@@ -440,18 +452,21 @@ NodeOutput& ComputeService::compute_high_precision_update(
  * target output validation; std::bad_optional_access if dirty_roi is missing
  * before coordinator validation.
  * @note RT dirty output stays outside GraphModel and does not become reusable
- * HP cache authority.
+ * HP cache authority. The synchronization owner is request-scoped and is not
+ * stored in GraphModel, GraphRuntime, or process state.
  */
 NodeOutput& ComputeService::compute_real_time_update(
     GraphModel& graph, compute::RealtimeProxyGraph& proxy_graph,
     const ExecutionStrategy& strategy, const Request& request,
     std::shared_ptr<const compute::StabilizedDirtyParameters>
-        stabilized_parameters) {
+        stabilized_parameters,
+    std::shared_ptr<compute::DirtyNodeSynchronization> node_synchronization) {
   compute::RealTimeDirtyExecutor executor(traversal_, events_);
   return executor.execute(
       graph, proxy_graph, strategy.runtime,
       make_dirty_update_request(request, false, nullptr,
-                                std::move(stabilized_parameters)));
+                                std::move(stabilized_parameters),
+                                std::move(node_synchronization)));
 }
 
 /**
@@ -543,6 +558,7 @@ NodeOutput& ComputeService::compute_intent_update_impl(
   }
   std::shared_ptr<const compute::StabilizedDirtyParameters>
       stabilized_parameters;
+  std::shared_ptr<compute::DirtyNodeSynchronization> node_synchronization;
   if (request.dirty_roi && request.dirty_roi->width > 0 &&
       request.dirty_roi->height > 0) {
     SchedulerTaskRuntime* preflight_runtime = nullptr;
@@ -555,6 +571,13 @@ NodeOutput& ComputeService::compute_intent_update_impl(
       std::lock_guard<std::mutex> lock(graph.graph_mutex_);
       request_generation = ++graph.dirty_generation_counter;
       topology_generation = graph.topology_generation();
+      if (intent == ComputeIntent::RealTimeUpdate && hp_scheduler != nullptr &&
+          rt_scheduler != nullptr && hp_scheduler->is_running() &&
+          rt_scheduler->is_running()) {
+        node_synchronization =
+            std::make_shared<compute::DirtyNodeSynchronization>(
+                graph.node_ids());
+      }
     }
     stabilized_parameters = compute::stabilize_connected_dirty_parameters(
         graph, traversal_, request.node_id, request_generation,
@@ -592,11 +615,12 @@ NodeOutput& ComputeService::compute_intent_update_impl(
     executor.execute(
         graph, rt_proxy_graph, strategy.runtime,
         make_dirty_update_request(silent_request, true, sibling_commit_gate,
-                                  stabilized_parameters));
+                                  stabilized_parameters, node_synchronization));
   };
   callbacks.run_real_time_update = [&]() -> NodeOutput& {
-    NodeOutput& output = compute_real_time_update(
-        graph, rt_proxy_graph, strategy, request, stabilized_parameters);
+    NodeOutput& output =
+        compute_real_time_update(graph, rt_proxy_graph, strategy, request,
+                                 stabilized_parameters, node_synchronization);
     if (sibling_commit_gate) {
       sibling_commit_gate->mark_rt_committed();
     }

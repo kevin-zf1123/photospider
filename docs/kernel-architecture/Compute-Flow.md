@@ -298,6 +298,12 @@ and uses a sibling commit gate so HP mutates `GraphModel` only after RT proxy
 commit succeeds. Without scheduler runtimes, the same callbacks run inline in
 RT-then-HP order.
 
+The concurrent path also shares one request-owned per-node synchronization
+object between the siblings. It protects live `Node` snapshot and YAML-backed
+parameter resolution for the same node without merging the two domain plans:
+different nodes and the operation bodies remain concurrent, and the object is
+released after both sibling futures have drained, including failure cleanup.
+
 Realtime planning is intentionally per path, not a single mixed-domain planner
 call. `IntentUpdateCoordinator` dispatches sibling HP and RT update callbacks
 and records RT-first/concurrent stages for Dirty RT requests. Each path uses a

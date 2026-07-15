@@ -4,9 +4,9 @@
 #include <memory>
 #include <mutex>
 #include <optional>
-#include <unordered_map>
 #include <vector>
 
+#include "compute/dirty_execution_common.hpp"
 #include "compute/dirty_region_planner.hpp"
 #include "compute/dirty_write_buffers.hpp"
 #include "compute/downsample_executor.hpp"
@@ -23,16 +23,6 @@ namespace ps::compute {
 class StabilizedDirtyParameters;
 
 /**
- * @brief Request-local mutexes keyed by graph node id for dirty task writes.
- *
- * Dirty tile tasks execute with local Node copies, but they still share cache
- * buffers and ROI/version metadata on the graph node. The map is built from a
- * dirty-pruned ComputePlan and borrowed by HP/RT dirty executors until all
- * scheduler callbacks for the request complete.
- */
-using DirtyNodeMutexMap = std::unordered_map<int, std::shared_ptr<std::mutex>>;
-
-/**
  * @brief Borrowed execution context shared by HP and RT dirty node executors.
  *
  * The context groups graph access, optional scheduler runtime, event recording,
@@ -42,7 +32,8 @@ using DirtyNodeMutexMap = std::unordered_map<int, std::shared_ptr<std::mutex>>;
  *
  * @note All references are borrowed for scheduler callbacks created by the
  * owning dirty update executor. The context must not outlive the prepared
- * dirty plan, node mutex map, or scheduler wait for that generation.
+ * dirty plan, transaction synchronization owner, or scheduler wait for that
+ * generation.
  */
 struct DirtyNodeExecutionContext {
   /** @brief Graph used for dependency lookup, tiled execution, and commits. */
@@ -61,8 +52,8 @@ struct DirtyNodeExecutionContext {
   /** @brief Dirty generation used to reject stale source callbacks. */
   uint64_t dirty_generation;
 
-  /** @brief Per-node mutexes protecting shared dirty cache commits. */
-  DirtyNodeMutexMap& node_mutexes;
+  /** @brief Per-node synchronization shared by concurrent dirty siblings. */
+  DirtyNodeSynchronization& node_synchronization;
 
   /**
    * @brief Optional immutable parameter snapshot shared by HP/RT siblings.
@@ -216,8 +207,8 @@ class HighPrecisionDirtyNodeExecutor {
    * @return Mutex protecting that node's dirty cache state.
    * @throws std::out_of_range when the dirty plan did not allocate a lock for
    * the node id, indicating inconsistent task materialization.
-   * @note Locks are per request, so independent HP/RT dirty graphs never share
-   * mutex state across intents.
+   * @note Concurrent HP/RT siblings of one RealTimeUpdate share this mutex,
+   * while independent requests and Graphs never share synchronization state.
    */
   std::mutex& node_mutex(int node_id) const;
 
@@ -239,8 +230,8 @@ class HighPrecisionDirtyNodeExecutor {
   /** @brief Request-local buffer receiving HP output and metadata writes. */
   HighPrecisionDirtyWriteBuffer& hp_write_buffer_;
 
-  /** @brief Per-node dirty cache locks borrowed from the request executor. */
-  DirtyNodeMutexMap& node_mutexes_;
+  /** @brief Per-node critical sections borrowed from the dirty transaction. */
+  DirtyNodeSynchronization& node_synchronization_;
 };
 
 /**
@@ -452,8 +443,8 @@ class RealTimeDirtyNodeExecutor {
    */
   RealtimeProxyWriteBuffer& rt_write_buffer_;
 
-  /** @brief Per-node dirty cache locks borrowed from the request executor. */
-  DirtyNodeMutexMap& node_mutexes_;
+  /** @brief Per-node critical sections borrowed from the dirty transaction. */
+  DirtyNodeSynchronization& node_synchronization_;
 };
 
 }  // namespace ps::compute

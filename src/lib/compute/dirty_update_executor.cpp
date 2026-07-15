@@ -109,21 +109,23 @@ void run_planned_dirty_task(GraphRuntime* runtime, EntryMap& plan,
 }
 
 /**
- * @brief Builds request-local locks for graph nodes present in a dirty plan.
+ * @brief Builds synchronization for graph nodes present in a dirty plan.
  *
  * @param compute_plan Node/cache-pruned plan whose planned work will execute.
- * @return Mutex map keyed by node id for shared cache allocation and commit.
+ * @return Shared owner of per-node snapshot and staging critical sections.
  * @throws std::bad_alloc if mutex allocation fails.
- * @note Locks are intentionally request-local so sibling HP/RT dirty graphs do
- * not share scheduler task state or commit locks across intents.
+ * @note The returned owner remains local unless ComputeService supplied one
+ * transaction-wide object to both HP and RT siblings. It owns no scheduler
+ * state, output buffer, or commit policy.
  */
-DirtyNodeMutexMap make_dirty_node_mutexes(const ComputePlan& compute_plan) {
-  DirtyNodeMutexMap mutexes;
-  mutexes.reserve(compute_plan.planned_work.size());
+std::shared_ptr<DirtyNodeSynchronization> make_dirty_node_synchronization(
+    const ComputePlan& compute_plan) {
+  std::vector<int> node_ids;
+  node_ids.reserve(compute_plan.planned_work.size());
   for (const auto& work : compute_plan.planned_work) {
-    mutexes.emplace(work.node_id, std::make_shared<std::mutex>());
+    node_ids.push_back(work.node_id);
   }
-  return mutexes;
+  return std::make_shared<DirtyNodeSynchronization>(node_ids);
 }
 
 /**
@@ -683,7 +685,9 @@ NodeOutput& HighPrecisionDirtyExecutor::require_target_output(
  * @throws GraphError for planning, dependency, operation, scheduler, commit, or
  * target validation failures.
  * @note Planning and commit hold graph_mutex_ while scheduler work runs outside
- * that lock. All staging buffers and node mutexes are request-local.
+ * that lock. Staging buffers remain domain-local. Per-node synchronization is
+ * request-local for standalone HP work and shared only with the matching RT
+ * sibling when supplied by ComputeService.
  */
 NodeOutput& HighPrecisionDirtyExecutor::execute(
     GraphModel& graph, RealtimeProxyGraph& proxy_graph, GraphRuntime* runtime,
@@ -748,15 +752,19 @@ NodeOutput& HighPrecisionDirtyExecutor::execute(
               : std::nullopt);
     }
   }
-  DirtyNodeMutexMap node_mutexes =
-      make_dirty_node_mutexes(prepared.compute_plan);
+  std::shared_ptr<DirtyNodeSynchronization> node_synchronization =
+      request.node_synchronization;
+  if (!node_synchronization) {
+    node_synchronization =
+        make_dirty_node_synchronization(prepared.compute_plan);
+  }
   DirtyNodeExecutionContext node_context{
       graph,
       runtime,
       events_,
       prepared_dirty_plan.snapshot,
       prepared_dirty_plan.snapshot.graph_generation,
-      node_mutexes,
+      *node_synchronization,
       request.stabilized_parameters.get()};
   HighPrecisionDirtyNodeExecutor node_executor(node_context, hp_write_buffer);
 
@@ -921,15 +929,19 @@ NodeOutput& RealTimeDirtyExecutor::execute(GraphModel& graph,
   graph_lock.unlock();
 
   RealtimeProxyWriteBuffer rt_write_buffer(proxy_graph, !request.force_recache);
-  DirtyNodeMutexMap node_mutexes =
-      make_dirty_node_mutexes(prepared.compute_plan);
+  std::shared_ptr<DirtyNodeSynchronization> node_synchronization =
+      request.node_synchronization;
+  if (!node_synchronization) {
+    node_synchronization =
+        make_dirty_node_synchronization(prepared.compute_plan);
+  }
   DirtyNodeExecutionContext node_context{
       graph,
       runtime,
       events_,
       prepared_dirty_plan.snapshot,
       prepared_dirty_plan.snapshot.graph_generation,
-      node_mutexes,
+      *node_synchronization,
       request.stabilized_parameters.get()};
   RealTimeDirtyNodeExecutor node_executor(node_context, proxy_graph,
                                           rt_write_buffer);
