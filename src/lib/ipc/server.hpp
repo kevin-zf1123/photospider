@@ -44,9 +44,12 @@ std::string default_socket_path();
  * The server owns its listener and accepted descriptors, processes requests
  * sequentially per connection, allows frame/JSON work across connections, and
  * delegates Host serialization to `RequestRouter`. At most 32 active workers
- * exist. All threads remain joinable. Shutdown stops admission, removes the
- * active listener pathname while holding its lifecycle lock, then wakes
- * blocked reads and joins tracked workers before draining router state.
+ * exist. Each ordinary worker applies independent fixed two-second idle,
+ * remaining-header, payload, and response-write deadlines; expiry closes only
+ * that connection through the normal joined cleanup path. All threads remain
+ * joinable. Shutdown stops admission, removes the active listener pathname
+ * while holding its lifecycle lock, then wakes blocked reads and joins tracked
+ * workers before draining router state.
  *
  * @throws std::bad_alloc when immutable metadata allocation fails.
  * @throws std::runtime_error if daemon instance entropy fails.
@@ -123,12 +126,14 @@ class Server {
    *       queue, final fixed-dirfd revalidation, and allocation-free
    *       activation. Non-probe clients accepted during proof count against
    *       the 32-client limit and enter ordinary admission only after router
-   *       runtime startup. Shutdown stops admission. While the lifecycle lock
-   *       remains held, it identity-checks and removes its Active pathname and
-   *       closes the listener. No new pathname connection can therefore queue
-   *       while tracked clients join, compute drains, protected output leases
-   *       expire, or Host sessions close. The lock is released only after those
-   *       router stages.
+   *       runtime startup. Ordinary IO stage durations are private fixed
+   *       implementation policy rather than protocol, option, environment, or
+   *       public Client configuration. Shutdown stops admission. While the
+   *       lifecycle lock remains held, it identity-checks and removes its
+   *       Active pathname and closes the listener. No new pathname connection
+   *       can therefore queue while tracked clients join, compute drains,
+   *       protected output leases expire, or Host sessions close. The lock is
+   *       released only after those router stages.
    *       The fixed parent descriptor prevents parent-path redirection, but
    *       portable POSIX cannot make final pathname revalidation plus unlink
    *       atomic against a same-uid replacer with directory write access.

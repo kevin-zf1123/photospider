@@ -20,6 +20,7 @@
 #include <cstdlib>
 #include <cstring>
 #include <filesystem>
+#include <limits>
 #include <memory>
 #include <mutex>
 #include <stdexcept>
@@ -51,6 +52,16 @@ constexpr int kListenerBacklog = static_cast<int>(kMaximumClientWorkers);
 /** @brief Single absolute budget for connect, write, accept, and
  * classification. */
 constexpr auto kListenerProofTimeout = std::chrono::seconds(2);
+
+/**
+ * @brief Fixed private budget for one ordinary connection IO stage.
+ *
+ * @throws Nothing.
+ * @note The value matches the established listener-proof budget but is renewed
+ *       independently for every ordinary connection stage. It is not exposed
+ *       through protocol, daemon options, environment, or public Client state.
+ */
+constexpr auto kOrdinaryConnectionStageTimeout = std::chrono::seconds(2);
 
 /** @brief Maximum stop/deadline observation interval during listener proof. */
 constexpr int kListenerProofPollSliceMilliseconds = 10;
@@ -479,6 +490,57 @@ bool configure_accepted_flags(int fd, std::string* message) {
     return false;
   }
   return true;
+}
+
+/**
+ * @brief Waits for the first byte or terminal state of an ordinary frame.
+ *
+ * @param fd Blocking accepted descriptor owned by one connection worker.
+ * @param deadline Absolute monotonic idle deadline for the next frame.
+ * @return True when input, EOF, or a socket error should be consumed by the
+ *         frame reader; false on deadline expiry, invalid descriptor, or a
+ *         non-interrupted poll failure.
+ * @throws Nothing.
+ * @note `POLLHUP` and `POLLERR` deliberately enter the frame reader so its
+ *       established clean/truncated EOF and concrete IO classification remain
+ *       authoritative. `EINTR` retries only against the same deadline. No byte
+ *       is consumed here, so the existing exact frame reader retains ownership
+ *       of framing and partial-read semantics.
+ */
+bool wait_for_ordinary_frame_start(
+    int fd, std::chrono::steady_clock::time_point deadline) noexcept {
+  while (true) {
+    const auto now = std::chrono::steady_clock::now();
+    if (now >= deadline) {
+      return false;
+    }
+    const auto remaining =
+        std::chrono::duration_cast<std::chrono::milliseconds>(deadline - now)
+            .count();
+    const auto bounded = std::min<std::chrono::milliseconds::rep>(
+        std::max<std::chrono::milliseconds::rep>(remaining, 1),
+        std::numeric_limits<int>::max());
+    pollfd descriptor{fd, POLLIN, 0};
+    const int ready = ::poll(&descriptor, 1, static_cast<int>(bounded));
+    if (ready > 0) {
+      if ((descriptor.revents & POLLNVAL) != 0) {
+        return false;
+      }
+      if ((descriptor.revents & (POLLIN | POLLHUP | POLLERR)) != 0) {
+        return true;
+      }
+      continue;
+    }
+    if (ready == 0) {
+      if (std::chrono::steady_clock::now() < deadline) {
+        continue;
+      }
+      return false;
+    }
+    if (errno != EINTR) {
+      return false;
+    }
+  }
 }
 
 /**
@@ -1241,6 +1303,9 @@ class Server::Impl {
     /** @brief Accepted descriptor owned until worker completion, or -1. */
     int fd = -1;
 
+    /** @brief Initial idle endpoint captured at ordinary worker admission. */
+    std::chrono::steady_clock::time_point idle_deadline;
+
     /** @brief True after the connection loop releases its descriptor. */
     std::atomic<bool> done{false};
 
@@ -1266,11 +1331,22 @@ class Server::Impl {
    * @throws std::system_error if a worker thread cannot be created.
    * @note Pending descriptors captured during pathname proof enter ordinary
    *       worker admission only after `RequestRouter::start_runtime` succeeds.
+   *       Production copies the fixed ordinary-stage budget before admission;
+   *       the source-tree seam may copy a positive shorter test value.
    */
   OperationStatus run(
       const ServerOptions& options, int stop_fd,
       const ServerLifecycleTestDependencies* test_dependencies = nullptr) {
     stop();
+    ordinary_connection_stage_timeout_ =
+        std::chrono::duration_cast<std::chrono::milliseconds>(
+            kOrdinaryConnectionStageTimeout);
+    if (test_dependencies != nullptr &&
+        test_dependencies->ordinary_connection_stage_timeout >
+            std::chrono::milliseconds::zero()) {
+      ordinary_connection_stage_timeout_ =
+          test_dependencies->ordinary_connection_stage_timeout;
+    }
     ScopedTestDependenciesBorrow dependency_borrow(&active_test_dependencies_,
                                                    test_dependencies);
     socket_path_ = options.socket_path.empty() ? default_socket_path()
@@ -1471,11 +1547,14 @@ class Server::Impl {
    * @throws std::bad_alloc if worker/vector storage cannot allocate.
    * @throws std::system_error if thread creation fails.
    * @note The request-router runtime must already be active. On failure the
-   *       descriptor is closed and no joinable worker is lost.
+   *       descriptor is closed and no joinable worker is lost. The initial
+   *       idle deadline is captured before thread construction, at admission.
    */
   void admit_client(UniqueFd accepted_owner) {
     auto worker = std::make_shared<Worker>();
     worker->fd = accepted_owner.get();
+    worker->idle_deadline =
+        std::chrono::steady_clock::now() + ordinary_connection_stage_timeout_;
     workers_.push_back(worker);
     (void)accepted_owner.release();
     try {
@@ -1494,7 +1573,11 @@ class Server::Impl {
    * @param worker Stable shared state owning the accepted descriptor.
    * @throws Nothing; request, allocation, and IO failures close only this
    *         connection.
-   * @note Router execution never overlaps socket IO while holding Host state.
+   * @note Idle, remaining-header, payload, and complete-response-write stages
+   *       each receive a fresh immutable-per-run budget. Router execution is
+   *       outside those IO clocks and never overlaps socket IO while holding
+   *       Host state. Any stage failure enters the established worker close,
+   *       completion publication, and foreground reap path.
    */
   void serve_client(const std::shared_ptr<Worker>& worker) noexcept {
     int fd = -1;
@@ -1502,16 +1585,27 @@ class Server::Impl {
       std::lock_guard<std::mutex> lock(worker->fd_mutex);
       fd = worker->fd;
     }
+    auto idle_deadline = worker->idle_deadline;
     try {
       while (fd >= 0) {
-        FrameReadResult frame = read_frame(fd);
+        if (!wait_for_ordinary_frame_start(fd, idle_deadline)) {
+          break;
+        }
+        const auto header_deadline = std::chrono::steady_clock::now() +
+                                     ordinary_connection_stage_timeout_;
+        FrameReadResult frame = read_frame_with_stage_deadlines(
+            fd, header_deadline, ordinary_connection_stage_timeout_);
         if (frame.state != FrameReadState::Complete) {
           break;
         }
         std::string response = router_.route(frame.payload);
-        if (!write_frame(fd, response).ok) {
+        const auto write_deadline = std::chrono::steady_clock::now() +
+                                    ordinary_connection_stage_timeout_;
+        if (!write_frame_before_deadline(fd, response, write_deadline).ok) {
           break;
         }
+        idle_deadline = std::chrono::steady_clock::now() +
+                        ordinary_connection_stage_timeout_;
       }
     } catch (...) {
     }
@@ -1567,6 +1661,15 @@ class Server::Impl {
 
   /** @brief True while the foreground accept loop should continue. */
   bool running_ = false;
+
+  /**
+   * @brief Immutable-per-run budget copied into ordinary worker stage timers.
+   * @note Production runs always use `kOrdinaryConnectionStageTimeout`; only
+   *       the source-tree lifecycle seam can select a shorter positive value.
+   */
+  std::chrono::milliseconds ordinary_connection_stage_timeout_{
+      std::chrono::duration_cast<std::chrono::milliseconds>(
+          kOrdinaryConnectionStageTimeout)};
 
   /**
    * @brief Borrowed non-installed callbacks valid only within one run stack.
