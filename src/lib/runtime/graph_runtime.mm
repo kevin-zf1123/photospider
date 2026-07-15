@@ -541,12 +541,11 @@ void GraphRuntime::replace_scheduler(ComputeIntent intent,
   // or ownership destruction; scheduler now owns the previous map value.
   slot->second.swap(scheduler);
 
-  const std::exception_ptr old_cleanup_error =
-      cleanup_scheduler_lifecycle(scheduler.get());
+  // Publication cannot be rolled back truthfully. Cleanup remains a complete
+  // best-effort sweep, but a displaced-owner lifecycle error is post-commit
+  // diagnostic state rather than a replacement failure.
+  (void)cleanup_scheduler_lifecycle(scheduler.get());
   scheduler.reset();
-  if (old_cleanup_error) {
-    std::rethrow_exception(old_cleanup_error);
-  }
 }
 
 /** @copydoc GraphRuntime::has_scheduler */

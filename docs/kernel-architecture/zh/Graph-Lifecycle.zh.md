@@ -80,6 +80,8 @@ Kernel 会先验证并规划一个 candidate，再在旧 scheduler 与 reservati
 attach 或 start 失败时，只归还 candidate reservation，旧 scheduler 继续服务 compute。未知 type 与
 无效 worker 请求仍为 `InvalidParameter`。成功 replacement 会把一个 move-only reservation 转移到
 `ReservationOwnedScheduler`，其销毁顺序保证先拆除 concrete scheduler，再释放 slot。
+发布后，被替换 owner 的 shutdown 与 detach failure 会作为提交后的诊断状态被压制：已提交的
+replacement 仍报告成功，销毁过程仍会把被替换的 reservation 恰好归还一次。
 
 ## 现有 Session 保存
 
@@ -147,9 +149,10 @@ event/trace ring、直接清除 `RealtimeProxyGraph`，或清除 Kernel-owned `L
 ## Close 与 Lifetime
 
 Embedded Host close 会先把 session 标记为 closing。新的 compute、scheduler、required save、
-node-YAML replacement 与 ROI projection admission 会失败。Host 会在 lane 仍 accepting 时等待该
-marker 之前已准入的同步调用，让这些调用完成 graph-state submission。随后 Kernel 会停止这些调用
-共用的 `GraphStateExecutor` admission。因 64-entry FIFO 已满而阻塞的 producer 无需等待队列空位就
+node-YAML replacement、ROI projection、timing inspection 与 all-cache clearing admission 会
+失败。Host 会在 lane 仍 accepting 时等待该 marker 之前已准入的同步调用完成 caller-visible
+result/status translation，让使用 graph state 的调用完成 graph-state submission。随后 Kernel 会停止
+这些调用共用的 `GraphStateExecutor` admission。因 64-entry FIFO 已满而阻塞的 producer 无需等待队列空位就
 会被唤醒并拒绝；只有此后 Host 才等待 async submission placeholder 与 caller-visible status
 publication。已经 admission 的 callback 按 FIFO 顺序排空，Kernel 随后 join 唯一的 worker。只有
 跨过该 joined boundary 之后才开始 scheduler stop；只有 stop 成功后才移除 map entry。

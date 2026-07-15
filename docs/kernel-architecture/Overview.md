@@ -280,8 +280,10 @@ Typical embedded Host compute flow:
    then notifies `close_graph()` that status publication is complete.
 7. Embedded close admission first publishes a lifecycle marker that rejects new
    compute/scheduler work plus required graph save, node-YAML replacement, and
-   ROI projection work. Calls admitted before that marker finish synchronous
-   submission while the lane remains accepting. Kernel then stops lane
+   ROI projection work, timing inspection, and all-cache clearing. Calls
+   admitted before that marker finish caller-visible result/status translation;
+   graph-state users finish synchronous submission while the lane remains
+   accepting. Kernel then stops lane
    admission, which wakes a producer blocked on the full FIFO; only then does
    the Host wait for async submission placeholders and status promises. Kernel
    drains prior FIFO work, joins the `GraphStateExecutor` worker, and only

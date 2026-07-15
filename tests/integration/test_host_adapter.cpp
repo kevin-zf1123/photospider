@@ -111,6 +111,10 @@ enum class EmbeddedOperationTestEvent {
   ForwardRoiProjection,
   /** @brief Backward ROI projection operation. */
   BackwardRoiProjection,
+  /** @brief Timing snapshot inspection operation. */
+  Timing,
+  /** @brief All-cache clearing operation. */
+  ClearCache,
 };
 
 /**
@@ -3693,6 +3697,57 @@ TEST(EmbeddedHostAdapter, CloseWaitsForAdmittedBackwardRoiProjection) {
   EXPECT_EQ(race.operation.value.y, expected.y);
   EXPECT_EQ(race.operation.value.width, expected.width);
   EXPECT_EQ(race.operation.value.height, expected.height);
+  EXPECT_TRUE(race.close.status.ok) << race.close.status.message;
+}
+
+/**
+ * @brief Verifies close waits for timing admitted before its marker.
+ *
+ * @return Nothing; GoogleTest assertions report lifecycle ordering failures.
+ * @throws std::bad_alloc or filesystem exceptions if fixture setup fails.
+ * @note The helper's blocking compute also publishes timing data before the
+ * admitted inspection enters Kernel, making a successful snapshot observable.
+ */
+TEST(EmbeddedHostAdapter, CloseWaitsForAdmittedTimingInspection) {
+  register_host_adapter_ops();
+  ScopedTempDir temp("photospider_host_adapter_timing_close_gate_test");
+  auto host = create_embedded_host();
+  ASSERT_NE(host, nullptr);
+  const GraphSessionId session = load_test_graph(
+      *host, temp.root(), "timing_close_gate_graph", "blocking_source");
+
+  const auto race = run_admitted_operation_close_race(
+      *host, session, EmbeddedOperationTestEvent::Timing, "timing",
+      [&] { return host->timing(session); });
+
+  EXPECT_TRUE(race.blocker.status.ok) << race.blocker.status.message;
+  EXPECT_TRUE(race.operation.status.ok) << race.operation.status.message;
+  EXPECT_FALSE(race.operation.value.node_timings.empty());
+  EXPECT_TRUE(race.close.status.ok) << race.close.status.message;
+}
+
+/**
+ * @brief Verifies close waits for all-cache clear admitted before its marker.
+ *
+ * @return Nothing; GoogleTest assertions report lifecycle ordering failures.
+ * @throws std::bad_alloc or filesystem exceptions if fixture setup fails.
+ * @note The all-cache operation remains synchronous and holds only logical
+ * session admission while waiting to enter backend graph-state work.
+ */
+TEST(EmbeddedHostAdapter, CloseWaitsForAdmittedAllCacheClear) {
+  register_host_adapter_ops();
+  ScopedTempDir temp("photospider_host_adapter_clear_cache_close_gate_test");
+  auto host = create_embedded_host();
+  ASSERT_NE(host, nullptr);
+  const GraphSessionId session = load_test_graph(
+      *host, temp.root(), "clear_cache_close_gate_graph", "blocking_source");
+
+  const auto race = run_admitted_operation_close_race(
+      *host, session, EmbeddedOperationTestEvent::ClearCache, "clear_cache",
+      [&] { return host->clear_cache(session); });
+
+  EXPECT_TRUE(race.blocker.status.ok) << race.blocker.status.message;
+  EXPECT_TRUE(race.operation.status.ok) << race.operation.status.message;
   EXPECT_TRUE(race.close.status.ok) << race.close.status.message;
 }
 #endif

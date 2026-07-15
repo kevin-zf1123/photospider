@@ -178,8 +178,11 @@ graph-state operation 和 compute request 不会并发读取或修改可见 `Gra
 
 Scheduler 与 required-session lifetime 会配合这一边界进行协调。同步/异步 compute、scheduler
 information、scheduler replacement、required graph save、node-YAML replacement、ROI
-projection 的 graph-state 部分，都由 per-graph executor 串行化。Embedded close 期间，Host 会先
-发布 close marker，并让该 marker 之前已准入的同步调用在 lane 仍 accepting 时完成 submission。
+projection 的 graph-state 部分，都由 per-graph executor 串行化。Required-session lifetime
+admission 还会覆盖 timing inspection 与 all-cache clearing，直至完成 public result/status
+translation；这些调用本身不会引入新的 scheduler task boundary。Embedded close 期间，Host 会先
+发布 close marker，并让该 marker 之前已准入的同步调用完成 public translation；graph-state user
+会在 lane 仍 accepting 时完成 submission。
 随后 Kernel 会停止 lane admission，Host 才等待 async submission placeholder 与 status
 publication。这样不需要 FIFO 出现空位，就能唤醒被满队列阻塞的 producer；此前已准入的 callback
 仍会排空，之后 Kernel 才 join executor 并调用 runtime stop。Runtime startup 可能发生在

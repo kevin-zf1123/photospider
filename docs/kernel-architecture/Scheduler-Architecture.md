@@ -62,8 +62,11 @@ non-allocating `unique_ptr` swap. Candidate attach/start failure triggers
 independently fenced shutdown and detach; secondary cleanup errors are
 suppressed and the exact preparation exception survives. After successful
 publication, the displaced owner is shut down, detached, and destroyed in that
-order. A displaced-owner cleanup error is reported after both stages without
-rolling the new owner or the runtime running state back.
+order. Both lifecycle stages are attempted even if one fails, but a displaced-
+owner cleanup error is suppressed as post-commit diagnostic state: publication
+cannot be rolled back truthfully, so the successful replacement remains
+successful. The displaced owner is still destroyed and its reservation is
+released exactly once.
 `GraphRuntime::stop()` publishes stopped state under the same lifecycle mutex,
 treats each scheduler's `is_running()` query and `shutdown()` call as separate
 best-effort lifecycle steps, and rethrows the first failure only after
@@ -285,7 +288,10 @@ attach/starts the candidate and publishes it before retiring the old owner.
 Consequently replacement requires transient headroom. Capacity exhaustion is
 reported as `GraphErrc::ComputeError` without constructing a candidate and
 without disturbing old compute behavior; invalid requests and unknown types
-remain `InvalidParameter`. This 32-slot ledger bounds only workers represented
+remain `InvalidParameter`. After publication, old-owner shutdown and detach
+remain a best-effort sweep; their failures do not turn the committed
+replacement into a reported failure, and destruction returns the displaced
+reservation exactly once. This 32-slot ledger bounds only workers represented
 by built-in planning or the trusted plugin grant. It does not bound graph-state
 executors, daemon threads, frontend helpers, operation-internal threads, or all
 operating-system threads in the process. `GraphStateExecutor` has a separate

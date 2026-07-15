@@ -464,10 +464,11 @@ class GraphRuntime : public SchedulerHostContext {
    * @throws std::bad_alloc If reserving a previously absent map slot fails.
    * @throws Any candidate attach/start exception unchanged after best-effort
    * shutdown and detach of that candidate.
-   * @throws The first old-owner shutdown/detach exception after the candidate
-   * has been published and both cleanup stages have been attempted.
    * @note Candidate failure leaves the prior map value and runtime running
-   * state unchanged. This method shares the replacement transaction.
+   * state unchanged. This method shares the replacement transaction. After
+   * successful publication, displaced-owner shutdown/detach failures are
+   * suppressed as post-commit diagnostics; the old owner is still destroyed
+   * and the committed replacement returns normally.
    */
   void set_scheduler(ComputeIntent intent,
                      std::unique_ptr<IScheduler> scheduler);
@@ -506,10 +507,10 @@ class GraphRuntime : public SchedulerHostContext {
    * @return Nothing.
    * @throws std::bad_alloc If reserving a previously absent map slot fails.
    * @throws Any candidate attach/start exception unchanged after rollback.
-   * @throws The first displaced-owner shutdown/detach exception after
-   * successful publication and completion of the cleanup sweep.
-   * @note A displaced-owner cleanup error does not roll publication back. The
-   * runtime running flag is never changed by this transaction.
+   * @note A displaced-owner cleanup error is suppressed after both lifecycle
+   * stages are attempted, because publication has already committed and cannot
+   * truthfully be reported as failed. The displaced owner is still destroyed,
+   * and the runtime running flag is never changed by this transaction.
    */
   void replace_scheduler(ComputeIntent intent,
                          std::unique_ptr<IScheduler> scheduler);
