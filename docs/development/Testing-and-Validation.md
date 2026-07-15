@@ -166,8 +166,13 @@ authoritative remote integration environment.
 
 `test_opencv_operation_concurrency` is a CTest-registered integration binary
 for the long-lived operation-provider and benchmark-worker contracts. It uses
-bounded callback gates rather than elapsed-time thresholds:
+Host-boundary records and bounded callback gates rather than elapsed-time
+thresholds:
 
+- `BenchmarkAutoThreadsPublishResolvedGrantToHost` proves that automatic
+  selection is resolved once before Host configuration, publishes a nonzero
+  grant before Graph load, and reports that identical grant without repeating
+  hardware detection in the verdict.
 - `BenchmarkThreadsConfigureExactHostSchedulerWorkers` runs the real
   `BenchmarkService`, Host scheduler configuration, Graph load, and registered
   callback path for automatic and explicit `1/2/4/8` requests. It requires the

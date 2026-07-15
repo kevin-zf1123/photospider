@@ -56,13 +56,16 @@ No scheduler `exclusive` metadata and no public operation/plugin ABI are added.
 Third-party providers remain responsible for their own reentrancy and backend
 state.
 
-`BenchmarkService::Run` validates the public zero-through-eight worker request,
-configures both future HP and RT Host defaults before Graph load, and reports
-the resolved worker grant. A CTest-registered integration test proves exact
-callback overlap for `1/2/4/8` grants without elapsed-time assertions. A
-separate manual benchmark exercises the same Host, scheduler, Graph, and
-operation path and reports raw timing samples; its performance ratios are
-observations, not correctness gates.
+`BenchmarkService::Run` validates the public zero-through-eight worker request
+and resolves it exactly once. Before Graph load, it passes that same nonzero
+grant unchanged to both future HP and RT Host defaults and reports the
+identical value; the zero automatic-selection sentinel does not cross the Host
+boundary for later scheduler resolution. A CTest-registered Host-boundary
+regression verifies this identity, and callback regressions prove exact overlap
+for `1/2/4/8` grants without elapsed-time assertions. A separate manual
+benchmark exercises the same Host, scheduler, Graph, and operation path and
+reports raw timing samples; its performance ratios are observations, not
+correctness gates.
 
 ## Consequences
 
