@@ -52,7 +52,8 @@ void set_required_target_test_hook(const RequiredTargetTestHook* hook) noexcept;
 /**
  * @brief Publishes a resolved-target checkpoint to the installed hook.
  *
- * @param event Checkpoint reached while GraphStateExecutor remains locked.
+ * @param event Checkpoint reached while the GraphStateExecutor callback remains
+ *        active on its lane worker.
  * @return Nothing.
  * @throws Nothing; callback failures are contained by its contract.
  */

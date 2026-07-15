@@ -177,6 +177,11 @@ GraphRuntime::GraphRuntime(const Info& info)
 
 /** @copydoc GraphRuntime::~GraphRuntime */
 GraphRuntime::~GraphRuntime() noexcept {
+  try {
+    graph_state_.close_and_drain();
+  } catch (...) {
+    std::terminate();
+  }
   std::lock_guard<std::mutex> lock(schedulers_mutex_);
   running_.store(false, std::memory_order_release);
   for (auto& [intent, scheduler] : schedulers_) {

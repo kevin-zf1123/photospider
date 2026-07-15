@@ -285,9 +285,10 @@ class PHOTOSPIDER_API Host {
    * @note The embedded implementation rejects new admitted compute/scheduler,
    *       required-save, node-YAML replacement, and ROI projection work after
    *       close begins. It waits accepted synchronous calls and every accepted
-   *       async status future before releasing backend resources. A failed
-   *       close reopens admission for the still-loaded session so callers may
-   *       inspect or retry it.
+   *       async status future, then drains and joins the graph-state lane
+   * before scheduler shutdown or backend-resource release. A failed scheduler
+   *       shutdown recreates one lane worker and reopens admission for the
+   *       still-loaded session so callers may inspect or retry it.
    */
   virtual VoidResult close_graph(const GraphSessionId& session) = 0;
 

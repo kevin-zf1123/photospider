@@ -15,6 +15,7 @@
 #include "runtime/kernel.hpp"
 
 #include <atomic>
+#include <exception>
 #include <filesystem>
 #include <iostream>
 #include <memory>
@@ -187,12 +188,14 @@ bool Kernel::close_graph(const std::string& name) {
   }
 
   GraphRuntime& runtime = *it->second;
-  runtime.graph_state()
-      .submit([&runtime](GraphModel&) {
-        runtime.stop();
-        return 0;
-      })
-      .get();
+  runtime.graph_state().close_and_drain();
+  try {
+    runtime.stop();
+  } catch (...) {
+    const std::exception_ptr stop_failure = std::current_exception();
+    runtime.graph_state().restart_after_close_failure();
+    std::rethrow_exception(stop_failure);
+  }
   graphs_.erase(it);
   clear_last_error(name);
   return true;

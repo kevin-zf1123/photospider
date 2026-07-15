@@ -2095,9 +2095,10 @@ class EmbeddedHost final : public Host {
    *       compute/scheduler, required-save, node-YAML replacement, and ROI
    *       projection work, waits synchronous admissions, and waits until each
    *       accepted async promise is ready and its worker joined. Backend close
-   *       then shares graph-state serialization with those operations. Any
-   *       failed backend close clears the closing marker so the still-loaded
-   *       session remains admitted and may be retried.
+   *       then drains and joins their graph-state lane before scheduler
+   *       shutdown. A shutdown failure recreates one lane worker before the
+   *       adapter clears the closing marker, so the still-loaded session
+   * remains admitted and may be retried.
    */
   VoidResult close_graph(const GraphSessionId& session) override {
     return guarded_graph_close([&] {
