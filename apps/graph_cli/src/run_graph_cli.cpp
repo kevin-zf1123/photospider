@@ -69,10 +69,15 @@ void load_configured_scheduler_plugins(ps::Host& host,
  * exhausts memory.
  * @note Parsing first locates configuration, then replays ordered actions. A
  * successful `-r` always supplies the invocation-local target for later graph
- * actions, independent of interactive switch policy. One outer catch chain
- * covers configuration and every action. Resource exhaustion is rethrown
- * unchanged; `main` alone owns the process exit-code and
- * allocation-independent diagnostic policy.
+ * actions, independent of interactive switch policy. Replay continues after
+ * recoverable action failures so later independent actions may run, but any
+ * failed Host result or missing loaded-graph precondition makes the invocation
+ * return two before either the implicit or requested REPL can start. Earlier
+ * successful side effects are not rolled back. With no requested action, the
+ * normal REPL fallback remains active. One outer catch chain covers
+ * configuration and every action. Resource exhaustion is rethrown unchanged;
+ * `main` alone owns the process exit-code and allocation-independent
+ * diagnostic policy.
  */
 int run_graph_cli(int argc, char** argv, ps::Host& svc) {
   try {
@@ -116,6 +121,7 @@ int run_graph_cli(int argc, char** argv, ps::Host& svc) {
     std::string current_graph;
 
     bool did_any_action = false;
+    bool action_failed = false;
     bool start_repl_after_actions = false;
 
     while ((opt = getopt_long(argc, argv, short_opts, long_opts, nullptr)) !=
@@ -137,12 +143,14 @@ int run_graph_cli(int argc, char** argv, ps::Host& svc) {
             did_any_action = true;
           } else {
             std::cerr << "Failed to load graph from '" << optarg << "'.\n";
+            action_failed = true;
           }
           break;
         }
         case 'o': {
           if (current_graph.empty()) {
             std::cerr << "No graph loaded; use -r first.\n";
+            action_failed = true;
             break;
           }
           if (svc.save_graph(ps::GraphSessionId{current_graph}, optarg)
@@ -151,12 +159,14 @@ int run_graph_cli(int argc, char** argv, ps::Host& svc) {
             did_any_action = true;
           } else {
             std::cerr << "Failed to save graph.\n";
+            action_failed = true;
           }
           break;
         }
         case 'p': {
           if (current_graph.empty()) {
             std::cerr << "No graph loaded; use -r first.\n";
+            action_failed = true;
             break;
           }
           auto tree = svc.dependency_tree(ps::GraphSessionId{current_graph},
@@ -167,12 +177,14 @@ int run_graph_cli(int argc, char** argv, ps::Host& svc) {
             did_any_action = true;
           } else {
             std::cerr << "Failed to print tree.\n";
+            action_failed = true;
           }
           break;
         }
         case 't': {
           if (current_graph.empty()) {
             std::cerr << "No graph loaded; use -r first.\n";
+            action_failed = true;
             break;
           }
           auto tree = svc.dependency_tree(ps::GraphSessionId{current_graph},
@@ -180,6 +192,9 @@ int run_graph_cli(int argc, char** argv, ps::Host& svc) {
           if (tree.status.ok) {
             std::cout << ps::cli::format_dependency_tree(
                 tree.value, /*show_parameters*/ true);
+          } else {
+            std::cerr << "Failed to print tree.\n";
+            action_failed = true;
           }
           auto orders = svc.traversal_orders(ps::GraphSessionId{current_graph});
           if (orders.status.ok) {
@@ -196,16 +211,27 @@ int run_graph_cli(int argc, char** argv, ps::Host& svc) {
               }
               std::cout << "\n";
             }
+          } else {
+            std::cerr << "Failed to compute traversal.\n";
+            action_failed = true;
           }
           did_any_action = true;
           break;
         }
-        case 1001:
-          if (!current_graph.empty()) {
-            (void)svc.clear_cache(ps::GraphSessionId{current_graph});
+        case 1001: {
+          if (current_graph.empty()) {
+            std::cerr << "No graph loaded; use -r first.\n";
+            action_failed = true;
+            break;
+          }
+          if (svc.clear_cache(ps::GraphSessionId{current_graph}).status.ok) {
             did_any_action = true;
+          } else {
+            std::cerr << "Failed to clear cache.\n";
+            action_failed = true;
           }
           break;
+        }
         case 'R':
           start_repl_after_actions = true;
           break;
@@ -215,6 +241,10 @@ int run_graph_cli(int argc, char** argv, ps::Host& svc) {
           print_cli_help();
           return 1;
       }
+    }
+
+    if (action_failed) {
+      return 2;
     }
 
     if (start_repl_after_actions || !did_any_action) {

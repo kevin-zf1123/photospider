@@ -220,6 +220,10 @@ operation/scheduler headers have no compatibility forwarders.
 The command-line parser currently supports graph loading, YAML output, tree
 printing, traversal display, cache clearing, config selection, and REPL entry.
 Graph computation and image saving are REPL commands, not top-level CLI flags.
+Ordered option actions continue after recoverable failures, but any failed
+action or missing loaded-graph precondition makes the invocation return 2
+before either implicit or explicit REPL entry; earlier successful effects are
+not rolled back. With no top-level action, `graph_cli` still starts the REPL.
 
 ## REPL Commands
 

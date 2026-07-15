@@ -75,6 +75,18 @@ Ordered top-level actions always target the successful `-r` result, even when
 `switch_after_load` disables interactive session switching. The short `-t`
 option takes no argument, exactly like `--traversal`.
 
+Top-level actions continue in command-line order after recoverable failures so
+later independent actions can still run. If any requested read, output, print,
+traversal, or cache-clear action fails—or an action is missing its required
+loaded graph—the invocation returns status 2 before either the default REPL
+fallback or an explicit `--repl` can start. Earlier successful action effects
+are not rolled back. An invocation with no top-level action still starts the
+REPL normally, and `--repl` enters it after all preceding actions succeed.
+
+Process exit statuses are 0 for successful actions or a normal REPL exit, 1
+for an invalid command-line option, 2 for a recoverable configuration,
+startup, action, or REPL failure, and 3 for resource exhaustion.
+
 ### Local daemon and typed IPC client
 
 On macOS/Linux, `PHOTOSPIDER_BUILD_IPC` defaults to `ON`. Start the foreground

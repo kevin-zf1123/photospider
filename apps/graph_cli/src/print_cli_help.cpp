@@ -17,5 +17,11 @@ void print_cli_help() {
       << "      --clear-cache          Delete the contents of the cache "
          "directory\n"
       << "      --repl                 Start interactive shell (REPL)\n"
+      << "\nExit status:\n"
+      << "  0  Successful actions or normal REPL exit\n"
+      << "  1  Invalid command-line option\n"
+      << "  2  Recoverable configuration, startup, action, or REPL failure\n"
+      << "  3  Resource exhaustion\n"
+      << "Failed option actions return 2 before REPL entry.\n"
       << std::endl;
 }

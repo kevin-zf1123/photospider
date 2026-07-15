@@ -127,6 +127,27 @@ regression。是否运行本机原生 clean configure、full build 或完整 CTe
 决定，而不是常设要求。不要把 Docker 或本地 `linux/amd64` 模拟作为常规本地 preflight；
 current-head GitHub Actions 仍是权威远程 integration 环境。
 
+## CLI option action 验证
+
+`test_cli_scheduler_config` 是注册到 CTest 的 integration binary，负责可复用
+`run_graph_cli` option 边界和 scheduler 配置。它的 option case 使用完整的确定性 Host spy 与
+真实有序 parser。成功的 load/output 与短 traversal case 会保留 Host 返回的 session target，
+并固定 `-t` 无参数 grammar。失败 case 要求 load、output、dependency-tree print、
+traversal-order 与全缓存清理失败返回可恢复 exit code 2，且不得打印成功 footer 或进入 REPL。
+Load case 还会捕获 REPL banner，证明唯一 action 失败时，失败结果优先于正常的 no-action
+fallback。
+
+Option replay 仍保持有序；另一个可恢复 action 失败前后已经成功的 action 可能产生可见效果，
+该边界不提供多 action rollback transaction。尽管如此，只要任一 action 或 loaded-graph
+前置条件失败，最终结果就必须是失败，而且该失败优先于显式 `--repl`。没有 option action 的
+调用仍正常进入 REPL。可用以下命令运行聚焦边界：
+
+```bash
+cmake --build build --target test_cli_scheduler_config -j
+./build/tests/test_cli_scheduler_config \
+  --gtest_filter='CliOptionActions.*'
+```
+
 ## Graph 文档错误矩阵验证
 
 `test_graph_document_errors` 是注册到 CTest 的 integration binary，用于验证长期

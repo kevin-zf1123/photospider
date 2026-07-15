@@ -171,6 +171,31 @@ the change's risk warrants it. Do not use Docker or local `linux/amd64`
 emulation as a routine local preflight. Current-head GitHub Actions remains the
 authoritative remote integration environment.
 
+## CLI Option-Action Validation
+
+`test_cli_scheduler_config` is the CTest-registered integration binary for the
+reusable `run_graph_cli` option boundary as well as scheduler configuration.
+Its option cases use a complete deterministic Host spy and the real ordered
+parser. Successful load/output and short-traversal cases preserve the
+Host-returned session target and the argument-free `-t` grammar. Failure cases
+require load, output, dependency-tree print, traversal-order, and all-cache
+clear failures to return recoverable exit code 2 without printing the success
+footer or entering the REPL. The load case also captures the REPL banner,
+proving that a failed only action wins over the normal no-action fallback.
+
+Option replay remains ordered and may expose effects from successful actions
+before or after another recoverable action failure; it does not provide a
+multi-action rollback transaction. The final result is nevertheless failure
+when any action or loaded-graph precondition fails, and that failure wins over
+an explicit `--repl`. An invocation with no option action retains normal REPL
+entry. Run the focused boundary with:
+
+```bash
+cmake --build build --target test_cli_scheduler_config -j
+./build/tests/test_cli_scheduler_config \
+  --gtest_filter='CliOptionActions.*'
+```
+
 ## Graph Document Error Matrix Validation
 
 `test_graph_document_errors` is a CTest-registered integration binary for the

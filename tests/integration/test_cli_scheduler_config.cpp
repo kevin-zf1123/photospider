@@ -318,6 +318,47 @@ TEST(CliSchedulerConfigApply, HostRejectionStopsRunGraphCliStartup) {
 }
 
 /**
+ * @brief Returns a recoverable failure without entering REPL after load fails.
+ * @return Nothing; GoogleTest assertions report exit and output violations.
+ * @throws std::filesystem::filesystem_error, std::runtime_error, or
+ * std::bad_alloc if fixture or captured-output storage cannot be prepared.
+ * @note Absence of the REPL banner proves the failed action wins over the
+ * no-successful-action interactive fallback.
+ */
+TEST(CliOptionActions, FailedReadReturnsTwoWithoutEnteringRepl) {
+  ScopedCliConfigTempDir directory("photospider_cli_failed_read");
+  const auto config_path = directory.root() / "config.yaml";
+  write_scheduler_config(config_path, 1, "failed-read-cache");
+
+  ps::testing::IpcHostSpy host;
+  host.set_status(
+      "graph.load",
+      ps::OperationStatus{false, ps::OperationErrorDomain::Graph,
+                          static_cast<std::int32_t>(ps::GraphErrc::Io), "io",
+                          "input document is unavailable"});
+  std::array<std::string, 5> arguments = {
+      "graph_cli", "--config", config_path.string(), "-r", "missing.yaml"};
+  std::vector<char*> argv;
+  argv.reserve(arguments.size());
+  for (std::string& argument : arguments) {
+    argv.push_back(argument.data());
+  }
+
+  testing::internal::CaptureStdout();
+  testing::internal::CaptureStderr();
+  const int exit_code =
+      run_graph_cli(static_cast<int>(argv.size()), argv.data(), host);
+  const std::string standard_error = testing::internal::GetCapturedStderr();
+  const std::string standard_output = testing::internal::GetCapturedStdout();
+
+  EXPECT_EQ(exit_code, 2);
+  EXPECT_EQ(host.call_count("graph.load"), 1U);
+  EXPECT_NE(standard_error.find("Failed to load graph"), std::string::npos);
+  EXPECT_EQ(standard_output.find("Photospider dynamic graph shell"),
+            std::string::npos);
+}
+
+/**
  * @brief Keeps later option actions bound to the graph loaded in this run.
  * @return Nothing; GoogleTest assertions report action-targeting failures.
  * @throws Nothing when output receives the Host-returned session id even while
@@ -352,6 +393,95 @@ TEST(CliOptionActions, LoadedSessionFeedsLaterOutputWhenSwitchPolicyIsOff) {
 }
 
 /**
+ * @brief Reports failure when a later action fails after a successful load.
+ * @return Nothing; GoogleTest assertions report chain-result violations.
+ * @throws std::filesystem::filesystem_error, std::runtime_error, or
+ * std::bad_alloc if fixture or captured-output storage cannot be prepared.
+ * @note The successful load remains observable, but neither a success footer
+ * nor REPL entry may hide the later save failure.
+ */
+TEST(CliOptionActions, FailedOutputAfterSuccessfulReadReturnsTwo) {
+  ScopedCliConfigTempDir directory("photospider_cli_failed_output");
+  const auto config_path = directory.root() / "config.yaml";
+  write_scheduler_config(config_path, 1, "failed-output-cache");
+
+  ps::testing::IpcHostSpy host(ps::GraphSessionId{"loaded-before-failure"});
+  host.set_status(
+      "graph.save",
+      ps::OperationStatus{false, ps::OperationErrorDomain::Graph,
+                          static_cast<std::int32_t>(ps::GraphErrc::Io), "io",
+                          "output document is unavailable"});
+  std::array<std::string, 7> arguments = {
+      "graph_cli",  "--config", config_path.string(), "-r",
+      "input.yaml", "-o",       "output.yaml"};
+  std::vector<char*> argv;
+  argv.reserve(arguments.size());
+  for (std::string& argument : arguments) {
+    argv.push_back(argument.data());
+  }
+
+  testing::internal::CaptureStdout();
+  testing::internal::CaptureStderr();
+  const int exit_code =
+      run_graph_cli(static_cast<int>(argv.size()), argv.data(), host);
+  const std::string standard_error = testing::internal::GetCapturedStderr();
+  const std::string standard_output = testing::internal::GetCapturedStdout();
+
+  EXPECT_EQ(exit_code, 2);
+  EXPECT_EQ(host.call_count("graph.load"), 1U);
+  EXPECT_EQ(host.call_count("graph.save"), 1U);
+  EXPECT_NE(standard_output.find("Loaded graph from input.yaml"),
+            std::string::npos);
+  EXPECT_NE(standard_error.find("Failed to save graph"), std::string::npos);
+  EXPECT_EQ(standard_output.find("Photospider dynamic graph shell"),
+            std::string::npos);
+  EXPECT_EQ(standard_output.find("Command-line actions complete"),
+            std::string::npos);
+}
+
+/**
+ * @brief Preserves dependency-tree failure after a successful graph load.
+ * @return Nothing; GoogleTest assertions report action-result violations.
+ * @throws std::filesystem::filesystem_error, std::runtime_error, or
+ * std::bad_alloc if fixture or captured-output storage cannot be prepared.
+ * @note A prior successful action must not convert a later print failure into
+ * successful process completion.
+ */
+TEST(CliOptionActions, FailedPrintAfterSuccessfulReadReturnsTwo) {
+  ScopedCliConfigTempDir directory("photospider_cli_failed_print");
+  const auto config_path = directory.root() / "config.yaml";
+  write_scheduler_config(config_path, 1, "failed-print-cache");
+
+  ps::testing::IpcHostSpy host(ps::GraphSessionId{"loaded-before-print"});
+  host.set_status(
+      "inspect.dependency_tree",
+      ps::OperationStatus{false, ps::OperationErrorDomain::Graph,
+                          static_cast<std::int32_t>(ps::GraphErrc::NotFound),
+                          "not_found", "dependency tree unavailable"});
+  std::array<std::string, 6> arguments = {
+      "graph_cli", "--config", config_path.string(), "-r", "input.yaml", "-p"};
+  std::vector<char*> argv;
+  argv.reserve(arguments.size());
+  for (std::string& argument : arguments) {
+    argv.push_back(argument.data());
+  }
+
+  testing::internal::CaptureStdout();
+  testing::internal::CaptureStderr();
+  const int exit_code =
+      run_graph_cli(static_cast<int>(argv.size()), argv.data(), host);
+  const std::string standard_error = testing::internal::GetCapturedStderr();
+  const std::string standard_output = testing::internal::GetCapturedStdout();
+
+  EXPECT_EQ(exit_code, 2);
+  EXPECT_EQ(host.call_count("graph.load"), 1U);
+  EXPECT_EQ(host.call_count("inspect.dependency_tree"), 1U);
+  EXPECT_NE(standard_error.find("Failed to print tree"), std::string::npos);
+  EXPECT_EQ(standard_output.find("Command-line actions complete"),
+            std::string::npos);
+}
+
+/**
  * @brief Treats short traversal as an argument-free option at end of argv.
  * @return Nothing; GoogleTest assertions report parsing/dispatch failures.
  * @throws Nothing when parsing reaches traversal and targets the loaded graph.
@@ -382,6 +512,91 @@ TEST(CliOptionActions, ShortTraversalNeedsNoFollowingArgument) {
       });
   ASSERT_NE(traversed, invocations.end());
   EXPECT_EQ(traversed->session.value, "traversal-session");
+}
+
+/**
+ * @brief Preserves traversal-order failure after tree formatting succeeds.
+ * @return Nothing; GoogleTest assertions report action-result violations.
+ * @throws std::filesystem::filesystem_error, std::runtime_error, or
+ * std::bad_alloc if fixture or captured-output storage cannot be prepared.
+ * @note Partial output from the compound traversal action cannot make the
+ * invocation successful when its traversal-order Host call fails.
+ */
+TEST(CliOptionActions, FailedTraversalAfterSuccessfulReadReturnsTwo) {
+  ScopedCliConfigTempDir directory("photospider_cli_failed_traversal");
+  const auto config_path = directory.root() / "config.yaml";
+  write_scheduler_config(config_path, 1, "failed-traversal-cache");
+
+  ps::testing::IpcHostSpy host(ps::GraphSessionId{"loaded-before-traversal"});
+  host.set_status(
+      "inspect.traversal_orders",
+      ps::OperationStatus{false, ps::OperationErrorDomain::Graph,
+                          static_cast<std::int32_t>(ps::GraphErrc::NotFound),
+                          "not_found", "traversal orders unavailable"});
+  std::array<std::string, 6> arguments = {
+      "graph_cli", "--config", config_path.string(), "-r", "input.yaml", "-t"};
+  std::vector<char*> argv;
+  argv.reserve(arguments.size());
+  for (std::string& argument : arguments) {
+    argv.push_back(argument.data());
+  }
+
+  testing::internal::CaptureStdout();
+  testing::internal::CaptureStderr();
+  const int exit_code =
+      run_graph_cli(static_cast<int>(argv.size()), argv.data(), host);
+  const std::string standard_error = testing::internal::GetCapturedStderr();
+  const std::string standard_output = testing::internal::GetCapturedStdout();
+
+  EXPECT_EQ(exit_code, 2);
+  EXPECT_EQ(host.call_count("inspect.dependency_tree"), 1U);
+  EXPECT_EQ(host.call_count("inspect.traversal_orders"), 1U);
+  EXPECT_NE(standard_error.find("Failed to compute traversal"),
+            std::string::npos);
+  EXPECT_EQ(standard_output.find("Command-line actions complete"),
+            std::string::npos);
+}
+
+/**
+ * @brief Preserves all-cache-clear failure after a successful graph load.
+ * @return Nothing; GoogleTest assertions report action-result violations.
+ * @throws std::filesystem::filesystem_error, std::runtime_error, or
+ * std::bad_alloc if fixture or captured-output storage cannot be prepared.
+ * @note Status-only Host actions participate in the same invocation-wide
+ * failure contract as value-returning and document actions.
+ */
+TEST(CliOptionActions, FailedCacheClearAfterSuccessfulReadReturnsTwo) {
+  ScopedCliConfigTempDir directory("photospider_cli_failed_cache_clear");
+  const auto config_path = directory.root() / "config.yaml";
+  write_scheduler_config(config_path, 1, "failed-cache-clear-root");
+
+  ps::testing::IpcHostSpy host(ps::GraphSessionId{"loaded-before-cache-clear"});
+  host.set_status(
+      "cache.clear_all",
+      ps::OperationStatus{false, ps::OperationErrorDomain::Graph,
+                          static_cast<std::int32_t>(ps::GraphErrc::NotFound),
+                          "not_found", "cache owner unavailable"});
+  std::array<std::string, 6> arguments = {
+      "graph_cli", "--config",   config_path.string(),
+      "-r",        "input.yaml", "--clear-cache"};
+  std::vector<char*> argv;
+  argv.reserve(arguments.size());
+  for (std::string& argument : arguments) {
+    argv.push_back(argument.data());
+  }
+
+  testing::internal::CaptureStdout();
+  testing::internal::CaptureStderr();
+  const int exit_code =
+      run_graph_cli(static_cast<int>(argv.size()), argv.data(), host);
+  const std::string standard_error = testing::internal::GetCapturedStderr();
+  const std::string standard_output = testing::internal::GetCapturedStdout();
+
+  EXPECT_EQ(exit_code, 2);
+  EXPECT_EQ(host.call_count("cache.clear_all"), 1U);
+  EXPECT_NE(standard_error.find("Failed to clear cache"), std::string::npos);
+  EXPECT_EQ(standard_output.find("Command-line actions complete"),
+            std::string::npos);
 }
 
 /**
