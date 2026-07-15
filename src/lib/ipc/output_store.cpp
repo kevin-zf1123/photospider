@@ -427,22 +427,27 @@ ScopedFd duplicate_cloexec(int fd) noexcept {
 /**
  * @brief Lists current basenames through one borrowed directory descriptor.
  * @param directory_fd Open real directory descriptor.
+ * @param directory_stream_opener POSIX directory stream factory.
  * @return Owned entry names excluding dot entries.
  * @throws std::runtime_error if duplication or enumeration fails.
  * @throws std::bad_alloc if result storage cannot be allocated.
+ * @throws Whatever the injected directory stream opener throws.
  */
-std::vector<std::string> list_directory(int directory_fd) {
+std::vector<std::string> list_directory(
+    int directory_fd,
+    const OutputStore::DirectoryStreamOpener& directory_stream_opener) {
   ScopedFd duplicate = duplicate_cloexec(directory_fd);
   if (!duplicate) {
     throw std::runtime_error(
         errno_message("cannot duplicate output directory"));
   }
-  DIR* stream = ::fdopendir(duplicate.release());
+  DIR* stream = directory_stream_opener(duplicate.get());
   if (stream == nullptr) {
     throw std::runtime_error(
         errno_message("cannot enumerate output directory"));
   }
   std::unique_ptr<DIR, decltype(&::closedir)> owner(stream, &::closedir);
+  (void)duplicate.release();
   std::vector<std::string> names;
   errno = 0;
   while (dirent* entry = ::readdir(stream)) {
@@ -748,13 +753,16 @@ class OutputStore::Impl {
    * @param limits Positive quota and TTL policy.
    * @param clock Nonempty monotonic clock.
    * @param id_generator Nonempty opaque-id source.
+   * @param directory_stream_opener Nonempty POSIX stream factory.
    * @throws std::invalid_argument for invalid policy/callbacks.
    * @throws std::bad_alloc when callback storage cannot be allocated.
    */
-  Impl(OutputStoreLimits limits, Clock clock, IdGenerator id_generator)
+  Impl(OutputStoreLimits limits, Clock clock, IdGenerator id_generator,
+       DirectoryStreamOpener directory_stream_opener)
       : limits_(limits),
         clock_(std::move(clock)),
-        id_generator_(std::move(id_generator)) {
+        id_generator_(std::move(id_generator)),
+        directory_stream_opener_(std::move(directory_stream_opener)) {
     if (limits_.artifacts == 0 || limits_.total_bytes == 0 ||
         limits_.artifact_bytes == 0 ||
         limits_.artifact_bytes > limits_.total_bytes ||
@@ -763,7 +771,7 @@ class OutputStore::Impl {
       throw std::invalid_argument(
           "output store quotas and TTLs must be positive");
     }
-    if (!clock_ || !id_generator_) {
+    if (!clock_ || !id_generator_ || !directory_stream_opener_) {
       throw std::invalid_argument("output store callbacks must be nonempty");
     }
   }
@@ -806,12 +814,14 @@ class OutputStore::Impl {
    * @return Nothing.
    * @throws std::runtime_error if enumeration itself fails.
    * @throws std::bad_alloc if entry storage cannot be allocated.
+   * @throws Whatever the injected directory stream opener throws.
    * @note Unsafe/unrecognized entries are left untouched and simply prevent
    *       their containing instance directory from being removed as empty.
    *       The caller holds `mutex_` and retains descriptor ownership.
    */
   void cleanup_stale_instances(int base_fd, const struct stat& base_metadata) {
-    for (const std::string& instance_name : list_directory(base_fd)) {
+    for (const std::string& instance_name :
+         list_directory(base_fd, directory_stream_opener_)) {
       if (!recognized_instance_name(instance_name)) {
         continue;
       }
@@ -831,7 +841,8 @@ class OutputStore::Impl {
           !same_identity(instance_path, instance_descriptor)) {
         continue;
       }
-      for (const std::string& entry_name : list_directory(instance_fd.get())) {
+      for (const std::string& entry_name :
+           list_directory(instance_fd.get(), directory_stream_opener_)) {
         if (!recognized_output_name(entry_name)) {
           continue;
         }
@@ -2051,6 +2062,9 @@ class OutputStore::Impl {
   /** @brief Injectable opaque candidate source. */
   IdGenerator id_generator_;
 
+  /** @brief Injectable POSIX directory stream factory. */
+  DirectoryStreamOpener directory_stream_opener_;
+
   /** @brief Serializes descriptors, records, leases, and lifecycle. */
   mutable std::mutex mutex_;
 
@@ -2120,15 +2134,20 @@ class OutputStore::Impl {
 
 /** @copydoc OutputStore::OutputStore */
 OutputStore::OutputStore(OutputStoreLimits limits, Clock clock,
-                         IdGenerator id_generator) {
+                         IdGenerator id_generator,
+                         DirectoryStreamOpener directory_stream_opener) {
   if (!clock) {
     clock = [] { return std::chrono::steady_clock::now(); };
   }
   if (!id_generator) {
     id_generator = generate_opaque_id;
   }
+  if (!directory_stream_opener) {
+    directory_stream_opener = [](int fd) { return ::fdopendir(fd); };
+  }
   impl_ =
-      std::make_unique<Impl>(limits, std::move(clock), std::move(id_generator));
+      std::make_unique<Impl>(limits, std::move(clock), std::move(id_generator),
+                             std::move(directory_stream_opener));
 }
 
 /** @copydoc OutputStore::~OutputStore */

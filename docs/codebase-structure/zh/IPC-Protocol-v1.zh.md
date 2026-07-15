@@ -773,7 +773,9 @@ Restart cleanup 在 socket lifecycle lock 已证明没有 live cooperating daemo
 symlink 地打开 real base 与 recognized instance child，通过 directory descriptor 扫描，并且只
 unlink controlled、same-owner、exact-`0600`、one-link regular file；只删除 empty recognized
 instance directory。Unknown name、symlink、non-regular entry、错误 mode/owner、hard link 与
-replaced entry 均保持不动，不需要 persisted output registry。
+replaced entry 均保持不动，不需要 persisted output registry。每个用于枚举的 duplicate descriptor
+在 `fdopendir` 成功将其转交给 directory stream 之前始终由 RAII 持有；枚举失败会在 startup
+rollback 完成前关闭该 duplicate。
 
 持久 lifecycle lock 会串行化 cooperating daemon instance。Portable POSIX 没有能原子执行
 compare-device/inode-and-unlink 的 primitive，因此每次按 name 执行 unlink 或 empty-directory

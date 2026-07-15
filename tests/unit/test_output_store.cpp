@@ -625,6 +625,44 @@ ComputeRequestSnapshot wait_for_output_terminal(
   return {};
 }
 
+/**
+ * @brief Verifies failed startup enumeration closes its duplicated descriptor.
+ *
+ * The test drives the public `OutputStore::start()` path while injecting one
+ * deterministic `fdopendir` failure. The opener records the exact duplicate
+ * passed by the store, and the returned startup failure must leave that numeric
+ * descriptor invalid after transactional rollback.
+ *
+ * @return Nothing.
+ * @throws std::runtime_error when the private socket/lock fixture cannot be
+ *         created.
+ * @note The injected opener follows the POSIX failure contract: it does not
+ *       consume the descriptor when returning null.
+ */
+TEST(OutputStore, FailedStartupEnumerationClosesDuplicatedDescriptor) {
+  StoreEnvironment environment;
+  SequentialIds ids;
+  int attempted_descriptor = -1;
+  OutputStore store(
+      {}, {}, [&] { return ids.next(); },
+      [&](int descriptor) -> DIR* {
+        attempted_descriptor = descriptor;
+        errno = ENOMEM;
+        return nullptr;
+      });
+
+  OperationStatus status = store.start(environment.socket_path(), opaque_id(1),
+                                       environment.lock_fd());
+
+  EXPECT_FALSE(status.ok);
+  EXPECT_EQ(status.domain, OperationErrorDomain::Daemon);
+  EXPECT_EQ(status.code, kInternalErrorCode);
+  ASSERT_GE(attempted_descriptor, 0);
+  errno = 0;
+  EXPECT_EQ(::fcntl(attempted_descriptor, F_GETFD), -1);
+  EXPECT_EQ(errno, EBADF);
+}
+
 TEST(OutputStore, CanonicalEmptyImagePublishesNoFileOrQuota) {
   StoreEnvironment environment;
   SequentialIds ids;
