@@ -1365,10 +1365,10 @@ if(BUILD_TESTING)
     # audits are intentionally absent from the test inventory.
     if(PHOTOSPIDER_BUILD_IPC)
         add_test(NAME PhotospiderdCapabilityHelp
-            COMMAND $<TARGET_FILE:photospiderd> --help)
+            COMMAND ${CMAKE_COMMAND}
+                "-DPHOTOSPIDERD=$<TARGET_FILE:photospiderd>"
+                -P "${PROJECT_SOURCE_DIR}/tests/integration/photospiderd_capability_help.cmake")
         set_tests_properties(PhotospiderdCapabilityHelp PROPERTIES
-            PASS_REGULAR_EXPRESSION
-                "foreground same-user local Unix-domain sidecar with one embedded Host, not a system service, multi-user service, remote endpoint, or TCP server"
             TIMEOUT 10)
         add_test(NAME StaticProductConsumerSmoke
             COMMAND ${Python3_EXECUTABLE}

@@ -112,9 +112,13 @@ durable product boundaries.
 Primary-repository CTest and CI entries are reserved for long-lived software
 behavior: correctness, performance, stability, multithreaded execution, error
 handling, compile boundaries, package consumption, and runtime API boundaries.
-`StaticProductConsumerSmoke`, `GraphCliOptionBadAlloc`, GoogleTest discovery,
-and `PublicHeaderSelfContainment` satisfy that rule because they execute or
-compile the maintained product.
+`PhotospiderdCapabilityHelp`, `StaticProductConsumerSmoke`,
+`GraphCliOptionBadAlloc`, GoogleTest discovery, and
+`PublicHeaderSelfContainment` satisfy that rule because they execute or compile
+the maintained product. The daemon help test uses a CMake script driver to run
+the real configuration-specific `photospiderd --help`, captures stdout and
+stderr, requires a numeric zero process result before matching the stable
+capability sentence, and diagnoses launch failure separately from nonzero exit.
 `IpcDisabledInstallSmoke`, focused `test_ipc_protocol`/`test_ipc_host` cases,
 and real-process `test_ipc_daemon` cases follow the same rule: they exercise
 package, framing, typed client, complete IPC Host dispatch/polling/stop/artifact
@@ -318,8 +322,8 @@ covers `test_propagation`; run the exact manual command separately when needed.
 
 The default CTest inventory intentionally contains no phase-completion scan,
 migration-residue check, stale-term search, Doxygen audit, or issue-specific
-orchestration. The static package-consumer smoke and graph CLI
-allocation-failure driver remain registered because they exercise real
+orchestration. The daemon help driver, static package-consumer smoke, and graph
+CLI allocation-failure driver remain registered because they exercise real
 installed/runtime behavior.
 
 For IPC changes, focused local product validation is:
@@ -331,7 +335,7 @@ cmake --build build --target photospider_ipc_client \
   test_output_store test_event_stream_boundaries test_ipc_daemon \
   public_header_self_containment -j
 ctest --test-dir build --output-on-failure \
-  -R '^(FrameCodec|ProtocolEnvelope|IntegerCodec|ProtocolErrors|ProtocolParams|ProtocolGraphLoad|ProtocolGraphClose|ProtocolOperationPlugins|HostRoutedGraphStateProtocolTest|StableInspectionPagingProtocolTest|InspectionJson|SessionRegistry|ComputeRequestRegistry|CollectionSnapshotRegistry|OutputStore|ComputeEventRing|SchedulerTraceRing|UnixSocketConnect|ClientLifecycle|ClientSurface|ClientCollectionAggregation|ClientJobValidation|ClientRetryPolicy|ClientResultValidation|IpcHost|IpcDaemon|IpcDaemonOperationPlugins|IpcDaemonSchedulers|IpcObservationFixtureDaemon|StaticProductConsumerSmoke|IpcDisabledInstallSmoke|PublicHeaderSelfContainment)'
+  -R '^(FrameCodec|ProtocolEnvelope|IntegerCodec|ProtocolErrors|ProtocolParams|ProtocolGraphLoad|ProtocolGraphClose|ProtocolOperationPlugins|HostRoutedGraphStateProtocolTest|StableInspectionPagingProtocolTest|InspectionJson|SessionRegistry|ComputeRequestRegistry|CollectionSnapshotRegistry|OutputStore|ComputeEventRing|SchedulerTraceRing|UnixSocketConnect|ClientLifecycle|ClientSurface|ClientCollectionAggregation|ClientJobValidation|ClientRetryPolicy|ClientResultValidation|IpcHost|IpcDaemon|IpcDaemonOperationPlugins|IpcDaemonSchedulers|IpcObservationFixtureDaemon|PhotospiderdCapabilityHelp|StaticProductConsumerSmoke|IpcDisabledInstallSmoke|PublicHeaderSelfContainment)'
 ```
 
 Temporary daemon processes, sockets, graph sessions, package prefixes, and
