@@ -24,6 +24,18 @@ int builtin_input_halo_radius(const std::string& type,
                               const std::string& subtype,
                               const plugin::ParameterMap& parameters) noexcept;
 
+/**
+ * @brief Initializes the OpenCV CPU policy and publishes built-in operations.
+ * @return Nothing.
+ * @throws std::bad_alloc if registry key or callback storage allocation fails.
+ * @throws std::system_error if one-time OpenCV initialization cannot
+ *         synchronize.
+ * @note The process plugin owner calls this before built-in callbacks become
+ *       visible. `cv::setNumThreads(1)` runs exactly once to prevent nested
+ *       OpenCV CPU parallelism; repository code never reconfigures it while
+ *       callbacks may execute. Registered CPU providers use `cv::Mat`, own no
+ *       shared operation mutex, and rely on scheduler worker admission.
+ */
 void register_builtin();
 
 }  // namespace ops

@@ -19,7 +19,6 @@
 #include <memory>
 #include <mutex>
 #include <numeric>
-#include <opencv2/core/ocl.hpp>
 #include <opencv2/videoio/registry.hpp>
 #include <random>
 #include <stdexcept>
@@ -142,7 +141,9 @@ double parameter_double(const plugin::NodeView& node, std::string_view key,
  *
  * @note Objective-C references retain their objects for the lifetime of this
  * state. Construction happens once through GetMetalState and calls are
- * serialized separately by g_metal_perlin_mutex.
+ * serialized separately by g_metal_perlin_mutex. That provider-private mutex
+ * protects shared Metal backend state only; it is not an OpenCV or scheduler
+ * exclusivity policy.
  */
 struct MetalState {
   /** @brief Default Metal device retained by the process-wide state. */
@@ -259,6 +260,8 @@ void perlin_noise_metal_eager_init() {
  * @note The mutex has static lifetime and owns no Metal object. Each operation
  * holds it from entry into the serialized boundary through CPU readback; the
  * independent g_metal_state_flag remains responsible for state initialization.
+ * This DSO-private boundary does not serialize CPU OpenCV providers or declare
+ * scheduler-wide exclusivity.
  */
 static std::mutex g_metal_perlin_mutex;
 
@@ -274,8 +277,8 @@ static std::mutex g_metal_perlin_mutex;
  * @throws std::runtime_error with the current stage for other standard or
  * unknown failures.
  * @note Calls acquire g_metal_perlin_mutex inside the portable contextual
- * boundary and use an autorelease pool. Returned storage does not retain Metal
- * resources.
+ * boundary and use an autorelease pool. It does not mutate OpenCV thread-local
+ * OpenCL policy. Returned storage does not retain Metal resources.
  */
 plugin::OperationOutput op_perlin_noise_metal(
     const plugin::NodeView& node,
@@ -286,10 +289,6 @@ plugin::OperationOutput op_perlin_noise_metal(
     return detail::run_serialized_metal_exception_boundary(
         "perlin_noise_metal", dbg_stage, g_metal_perlin_mutex,
         [&]() -> plugin::OperationOutput {
-          // FIX: 关闭 OpenCV 的 OpenCL（只需做一次；放在这里最省事）
-          static std::once_flag ocl_once;
-          std::call_once(ocl_once, [] { cv::ocl::setUseOpenCL(false); });
-
           int width = parameter_int(node, "width", 256);
           int height = parameter_int(node, "height", 256);
           float scale =
