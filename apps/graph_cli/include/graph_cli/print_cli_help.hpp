@@ -5,8 +5,9 @@
  * @brief Prints top-level command-line usage and option help to standard
  * output.
  *
- * Emits the fixed `graph_cli` invocation syntax and supported option list, then
- * terminates the help block with `std::endl` so the stream is flushed.
+ * Emits the fixed `graph_cli` invocation syntax, supported option list, and
+ * process exit-status contract, then terminates the help block with
+ * `std::endl` so the stream is flushed.
  *
  * @return Nothing after the complete help block is emitted and flushed.
  * @throws std::bad_alloc If standard-stream or locale storage cannot allocate.
