@@ -54,6 +54,42 @@ The test jobs reuse those prebuilt producers rather than recompiling every confi
 
 If CI image inputs change, the workflow cannot use the previously published image and instead runs `local-image-integration` on one Docker-capable runner. After building `photospider-ci:local`, `integration_suite.sh` performs the same dynamic plan, builds each discovered profile, and runs the same full-CTest, build-smoke, CLI, propagation, plugin, and scheduler shards sequentially with their corresponding build. This fallback preserves test selection and producer configuration while accepting that a single local-image runner cannot fan out into artifact-consuming jobs.
 
+## Scripted CLI Capability Transition
+
+`graph_cli_script_test.sh` selects the explicit-missing-source contract before
+it starts any `graph_cli` process. The stable capability marker is the complete
+long-lived Graph document error regression registration: the
+`tests/integration/test_graph_document_errors.cpp` source, its
+`add_ps_test(test_graph_document_errors ...)` target, and its
+`gtest_discover_tests(test_graph_document_errors ...)` registration must all be
+present. If all three are absent, the tested revision has the legacy
+missing-source publication contract. If all three are present, it has the
+transactional rejection contract. A partial marker is an inconsistent test
+inventory and fails the script.
+
+The marker is evaluated from the checked-out revision, not from a branch name,
+commit identity, or observed CLI output. The legacy path therefore positively
+requires the warning, published session, current-graph listing, and empty-graph
+compute result while rejecting transactional output. The transactional path
+requires the classified load failure, empty graph inventory, and absent current
+graph while rejecting the legacy warning and publication. Invalid-target
+parsing is checked in a separate runtime after loading a maintained fixture, so
+it never relies on either missing-source state.
+
+This is a two-stage protected-path transition. First, the `CI/**` change lands
+on `main`, where the complete marker is absent and the legacy contract is
+verified. Then the architecture pull request must incorporate this same script
+unchanged and remove its independent `ci/**` delta; its complete Graph document
+error registration selects the transactional contract. Until that second step,
+the protected-path guard correctly continues to reject the architecture pull
+request's CI-file delta.
+
+After the transactional Graph document contract is present on `main` and every
+active pull-request or maintained branch head tested by this protected script
+contains the complete registration, a follow-up `CI/**` change must remove the
+legacy path and capability switch. The script should then assert transactional
+rejection unconditionally.
+
 ## Scripts
 
 - `ci/scripts/healthcheck.sh`: runs `git diff --check`, `clang-format --dry-run --Werror`, and `cpplint` on changed C++ files.
@@ -63,7 +99,7 @@ If CI image inputs change, the workflow cannot use the previously published imag
 - `ci/scripts/build_integrity.sh`: builds the profile selected by `CI_BUILD_PROFILE`. `default` builds the required targets and the complete tree before CTest discovery; `ipc-disabled` sets `BUILD_TESTING=OFF` and `PHOTOSPIDER_BUILD_IPC=OFF`, validates the cache, and builds only the `photospider` producer target.
 - `ci/scripts/ctest_full.sh`: reuses or builds the default producer and runs CTest, excluding `SplitComputeServiceRuntimeTrace` and the two separately sharded build smoke tests by default.
 - `ci/scripts/build_smoke_test.sh`: runs one separately selected build smoke test from a reusable producer; set `SMOKE_TEST` to `static-product-consumer` or `ipc-disabled-install`.
-- `ci/scripts/graph_cli_script_test.sh`: runs positive and negative scripted REPL checks.
+- `ci/scripts/graph_cli_script_test.sh`: runs isolated positive, explicit-missing-source, and invalid-target REPL checks using the pre-execution Graph document capability marker described above.
 - `ci/scripts/propagation_script_test.sh`: builds `test_propagation` and runs `tiles all` on linear and complex propagation graphs.
 - `ci/scripts/plugin_load_test.sh`: checks plugin artifacts, plugin manager tests, scheduler plugin loader tests, and CLI scheduler plugin listing.
 - `ci/scripts/scheduler_repeat_test.sh`: repeats key scheduler tests.
