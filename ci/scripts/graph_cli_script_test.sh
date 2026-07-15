@@ -54,7 +54,20 @@ ensure_ci_targets build_graph_cli graph_cli cpu_work_stealing_example_plugin ser
 
 fixture_path="$REPO_ROOT/util/testcases/propagation_linear_test.yaml"
 runtime_root=$(mktemp -d "$CI_ARTIFACT_DIR/graph_cli_runtime.XXXXXX")
-trap 'rm -rf -- "$runtime_root"' EXIT
+
+# Preserve failed runtimes inside the uploaded artifact tree while removing
+# successful scratch state.
+cleanup_runtime() {
+  local status=$?
+  trap - EXIT
+  if ((status == 0)); then
+    rm -rf -- "$runtime_root"
+  else
+    echo "Preserving failed graph_cli runtime: $runtime_root" >&2
+  fi
+  exit "$status"
+}
+trap cleanup_runtime EXIT
 
 positive_runtime="$runtime_root/positive"
 missing_source_runtime="$runtime_root/missing-source"
