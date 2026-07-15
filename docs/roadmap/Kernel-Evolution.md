@@ -276,6 +276,13 @@ quanta rather than raw task count.
 multi-tenant product uses a separate control plane, worker manager, constrained
 `photospider-worker` processes, and durable artifact store.
 
+The current operation and scheduler plugin interfaces also remain provisional
+C++ ABIs. Their C-linkage registrar symbol or numeric handshake gates only the
+expected interface generation; matching SDK/toolchain/runtime compatibility is
+still required for the C++ values, callbacks, objects, and vtables that cross
+the DSO. A stable replacement or isolated invocation protocol is a separate
+versioned migration, not a compatibility promise inferred from those gates.
+
 The `ExecutionService` sees isolated plugin execution through a
 `PluginInvocationExecutor`. A separate `PluginRuntimeSupervisor` owns worker
 processes, protocol, heartbeat, deadlines, restart backoff, sandbox/capability

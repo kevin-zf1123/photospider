@@ -10,7 +10,11 @@
 
 /**
  * @file scheduler_task_runtime.hpp
- * @brief Minimal public task-dispatch contract implemented by every scheduler.
+ * @brief Current task-dispatch contract in the provisional scheduler C++ ABI.
+ *
+ * Its virtual functions, `std::function`, containers, exception pointers, and
+ * borrowed C++ objects require the matching SDK and compatible toolchain and
+ * runtime. This header does not define a stable pure C scheduler ABI.
  */
 
 namespace ps {

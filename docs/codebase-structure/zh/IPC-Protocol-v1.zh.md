@@ -13,6 +13,11 @@
 - `photospider_ipc_server_internal`：不安装的 server/router library；
 - `photospiderd`：已安装的 foreground executable。
 
+当前 daemon capability profile 是同用户本地 workstation sidecar。它只监听受保护的 Unix-domain
+socket，其 process shell 恰好创建一个由 server/router 借用的 embedded `ps::Host`。它不是后台
+system service、多用户或 multi-tenant service、远程 endpoint 或 TCP server。这些画像需要独立的
+transport、identity、authentication/authorization、isolation 与 lifecycle 设计。
+
 Public client header 是 `photospider/ipc/protocol.hpp`、`photospider/ipc/client.hpp` 与
 `photospider/ipc/host.hpp`。它们只暴露 typed owned value 和完整 Host factory，不暴露 JSON
 type、socket descriptor、`sockaddr_un`、backend model、runtime service 或 mutable backend ownership。
@@ -106,7 +111,7 @@ stable collection continuation 只读取其 frozen snapshot registry record。
 result、release 与 protected metadata-only image delivery。Image byte 会保留在 private
 artifact 中；terminal nonempty image result 只会在一个 stable delivery lease 下返回规定的
 artifact metadata。版本 1 不暴露 compute cancellation、`daemon.shutdown`、TCP、
-Windows named pipe 或 `graph_cli --connect`。Process-global
+Windows named pipe、remote 或 multi-user access mode，也不暴露 `graph_cli --connect`。Process-global
 operation-plugin control 与有序 view 已可通过 daemon router boundary 和 installed typed Client
 使用。Scheduler-plugin discovery/default 与 per-session scheduler inspection/replacement 同样
 通过匹配 typed Client call 提供。Bounded `events.drain` 与 `scheduler.trace` observation route
@@ -1095,6 +1100,9 @@ mutable reference。
 `/tmp/photospider-<uid>/photospiderd-v1.sock`。Daemon-created direct runtime directory 为
 `0700`；socket 在临时 umask `0177` 下直接以精确 mode `0600` 创建，持久
 `${socket}.lock` regular file 为 `0600`。
+
+该 per-user path 与 ownership policy 是当前同用户本地 access boundary。它不是面向 remote 或
+multi-user service 的 authentication layer；该 process 不暴露 TCP listener 或第二个 embedded Host。
 
 检查或回收 socket path 前，daemon 使用 `O_NOFOLLOW|O_CLOEXEC` 打开持久 lock，验证
 regular-file identity、owner、single link 与精确 `0600` mode，然后获取

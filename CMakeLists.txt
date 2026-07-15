@@ -1364,6 +1364,12 @@ if(BUILD_TESTING)
     # error-boundary behavior. Migration/residue scanners and source-quality
     # audits are intentionally absent from the test inventory.
     if(PHOTOSPIDER_BUILD_IPC)
+        add_test(NAME PhotospiderdCapabilityHelp
+            COMMAND $<TARGET_FILE:photospiderd> --help)
+        set_tests_properties(PhotospiderdCapabilityHelp PROPERTIES
+            PASS_REGULAR_EXPRESSION
+                "foreground same-user local Unix-domain sidecar with one embedded Host, not a system service, multi-user service, remote endpoint, or TCP server"
+            TIMEOUT 10)
         add_test(NAME StaticProductConsumerSmoke
             COMMAND ${Python3_EXECUTABLE}
                 "${PROJECT_SOURCE_DIR}/tests/integration/static_product_consumer_smoke.py"

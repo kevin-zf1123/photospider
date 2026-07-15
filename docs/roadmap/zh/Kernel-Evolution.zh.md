@@ -228,6 +228,11 @@ minimum progress guarantee。公平性按 estimated work、byte 或有界 quantu
 `photospiderd` 继续作为同 UID 的本地 workstation sidecar。网络或多租户产品使用独立 control
 plane、worker manager、受限 `photospider-worker` process 和 durable artifact store。
 
+当前 operation 与 scheduler plugin interface 也继续作为临时 C++ ABI。其 C linkage registrar
+symbol 或数字 handshake 只拦截预期 interface generation；跨越 DSO 的 C++ value、callback、object 与
+vtable 仍要求匹配 SDK/toolchain/runtime compatibility。稳定 replacement 或隔离 invocation protocol
+属于独立的带版本迁移，不能从这些 gate 推导出兼容承诺。
+
 `ExecutionService` 通过 `PluginInvocationExecutor` 看到隔离插件执行。独立
 `PluginRuntimeSupervisor` 拥有 worker process、protocol、heartbeat、deadline、restart backoff、
 sandbox/capability policy、shared-memory 或 FD transport、quota 和 output descriptor validation。

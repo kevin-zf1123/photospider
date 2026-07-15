@@ -6,11 +6,14 @@
 
 /**
  * @file scheduler_plugin_api.hpp
- * @brief Version-two exports for the transitional scheduler plugin ABI.
+ * @brief Version-two gates for the provisional scheduler plugin C++ ABI.
  *
  * Each plugin explicitly defines every required `extern "C"` entry. This SDK
  * intentionally provides no declaration or implementation macro because those
- * macros hid lifecycle and export requirements.
+ * macros hid lifecycle and export requirements. C linkage and the numeric
+ * handshake protect symbol identity and interface-generation ordering only;
+ * accepted instances still cross a C++ class/vtable, standard-library,
+ * allocator/runtime, exception, and RTTI boundary.
  */
 
 #if defined(_WIN32) && defined(PHOTOSPIDER_SCHEDULER_PLUGIN_BUILD)
@@ -33,7 +36,9 @@ namespace ps {
  * @note Exact equality gates known Photospider interface generations. Version
  *       one is intentionally incompatible because it did not define a
  *       resolved hard worker grant. Version two still requires a compatible
- *       compiler, standard library, RTTI, exception runtime, and C++ ABI.
+ *       Photospider SDK, compiler, standard library, allocator/runtime, RTTI,
+ *       exception model, and C++ ABI. The gate promises neither pure C
+ *       consumption nor cross-toolchain or long-term binary compatibility.
  */
 inline constexpr std::uint32_t PS_SCHEDULER_PLUGIN_ABI_VERSION = 2U;
 

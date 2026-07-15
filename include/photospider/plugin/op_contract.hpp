@@ -16,7 +16,11 @@
 
 /**
  * @file op_contract.hpp
- * @brief Narrow callback values for version-two operation plugins.
+ * @brief Narrow callback values for the provisional version-two C++ plugin ABI.
+ *
+ * The values use standard-library ownership, containers, and callbacks. They
+ * require the matching Photospider SDK and a compatible C++ toolchain; they do
+ * not form a stable pure C data ABI.
  */
 
 namespace ps::plugin {
@@ -188,10 +192,11 @@ struct OperationInputView {
  */
 struct OperationOutput {
   /**
-   * @brief Optional owned/shared image descriptor.
+   * @brief Optional current two-dimensional image payload descriptor.
    * @note The host rewraps non-null payload owners with the originating DSO
    * lease before publishing the converted result, so later ImageBuffer copies
-   * remain safe independently of the enclosing output lifetime.
+   * remain safe independently of the enclosing output lifetime. Generic or
+   * named non-image values belong in `data`, not in this descriptor.
    */
   ImageBuffer image_buffer;
   /** @brief Named deep-owned non-image outputs. */

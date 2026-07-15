@@ -8,7 +8,12 @@
 
 /**
  * @file scheduler.hpp
- * @brief Stable lifecycle and host-context contract for scheduler plugins.
+ * @brief Current lifecycle and host context for the provisional scheduler ABI.
+ *
+ * Scheduler plugins exchange C++ virtual interfaces, standard-library values,
+ * callbacks, and exceptions across a DSO boundary. The matching numeric
+ * handshake gates interface generation but does not provide a stable pure C or
+ * cross-toolchain binary ABI.
  */
 
 namespace ps {
@@ -129,7 +134,9 @@ class SchedulerHostContext {
  *       before detach and MUST clear its saved context during detach. When a
  *       DSO implementation is reached through the host plugin owner, its
  *       exceptions are converted to host-owned `GraphError` or
- *       `std::bad_alloc`; host task exceptions remain exact.
+ *       `std::bad_alloc`; host task exceptions remain exact. The complete
+ *       virtual interface is part of the current provisional C++ ABI and
+ *       requires the matching SDK and a compatible toolchain/runtime.
  */
 class IScheduler : public SchedulerTaskRuntime {
  public:

@@ -8,8 +8,9 @@ distinguished explicitly below.
 The goals are:
 
 - `libphotospider` is the stable static-link target for embedded frontends.
-- `photospiderd` runs as a foreground local daemon that owns graph sessions
-  through one embedded `ps::Host`.
+- `photospiderd` runs as a foreground, same-user local Unix-domain sidecar that
+  owns graph sessions through one embedded `ps::Host`; it is not the current
+  system-service, multi-user, remote, or TCP product.
 - `graph_cli` remains the basic interactive command-line frontend.
 - Frontends can either link `libphotospider` in-process or use the typed client
   to talk to
@@ -410,13 +411,24 @@ CMake rules:
   `register_photospider_ops_v2` entry. Scheduler plugins use the exact ABI-v2
   numeric handshake before discovery, receive a resolved `[1,8]` hard worker
   grant, and attach only through `SchedulerHostContext`. ABI v1 has no adapter
-  or compatibility registration. A future pure C plugin ABI remains a separate
-  versioned compatibility change.
+  or compatibility registration. Both current interfaces remain provisional
+  C++ ABIs: the C-linkage entrypoint/handshake gates identity or generation,
+  while C++ values, callbacks, class/vtable objects, allocator/runtime,
+  exceptions, and RTTI still require the matching SDK and a compatible
+  toolchain. A future pure C plugin ABI remains a separate versioned
+  compatibility change.
 
 ## Daemon Shape
 
 `photospiderd` is an executable with a small process shell and a deep Host-only
 server module behind it.
+
+Its current capability profile is a same-user local workstation sidecar: it
+stays in the foreground, listens only on a protected Unix-domain socket, and
+creates exactly one embedded Host. It is not a background system service,
+multi-user or multi-tenant service, remote endpoint, or TCP server. Those roles
+require separate control-plane, transport, identity, authorization, isolation,
+and lifecycle designs.
 
 Process responsibilities:
 
@@ -475,7 +487,8 @@ Implemented version 1 transport:
 
 - Unix domain socket on macOS/Linux.
 - IPC is disabled outside macOS/Linux; named pipes remain later Windows work.
-- No remote TCP listener by default.
+- No TCP listener or remote/multi-user access mode is implemented; this is a
+  same-user local sidecar, not a general service endpoint.
 - Socket path is per-user under a valid `$XDG_RUNTIME_DIR`, otherwise under
   `/tmp/photospider-<uid>`.
 - Daemon-created directories are `0700`; bind creates the socket directly as

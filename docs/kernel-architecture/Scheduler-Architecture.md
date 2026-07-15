@@ -318,6 +318,14 @@ retains the full grant until concrete instance destruction. The counter is not
 a sandbox and cannot stop a hostile or nonconforming DSO from creating
 unreported threads.
 
+The numeric handshake gates only the expected Photospider interface
+generation. The accepted boundary remains a provisional C++ ABI because it
+passes `IScheduler*` and its vtable, standard-library strings/containers and
+callbacks, allocator/runtime ownership, RTTI, and exceptions across the DSO.
+A current plugin must use the matching SDK and a compatible C++ toolchain; the
+handshake does not promise pure C use, cross-toolchain compatibility, or
+long-term ABI stability.
+
 Successful discovery additionally requires a positive type count, a non-null
 and non-empty stable name at every in-range index, and at least one valid name
 that does not conflict with an existing scheduler type. Invalid identity
@@ -485,6 +493,8 @@ whole-process operating-system thread snapshot.
   scheduler-local epoch and optional scheduler-specific hints, not task
   graphs or dirty work-set state.
 - Plugin scheduler lifecycle follows `Plugin-ABI.md`.
+- The scheduler plugin handshake gates interface generation, while the
+  accepted scheduler object remains part of a provisional C++ ABI.
 - Scheduler attachment is limited to `SchedulerHostContext`; the context does
   not expose graph/runtime ownership or native backend handles.
 - Per-instance worker grants and the shared 32-slot admission ledger contain

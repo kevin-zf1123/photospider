@@ -288,11 +288,16 @@ bool parse_options(int argc, char** argv, CommandLineOptions* options,
  * @brief Prints stable foreground daemon usage text.
  *
  * @throws Nothing except standard stream failures configured by the caller.
+ * @note The capability sentence is a product contract: this process is one
+ *       same-user local sidecar, not a general service profile.
  */
 void print_usage() {
   std::cout
       << "Usage: photospiderd [--socket ABSOLUTE_PATH]\n"
-         "Runs the version 1 local Unix socket daemon in the foreground.\n";
+         "Runs the version 1 local Unix socket daemon in the foreground.\n"
+         "Capability boundary: foreground same-user local Unix-domain sidecar "
+         "with one embedded Host, not a system service, multi-user service, "
+         "remote endpoint, or TCP server.\n";
 }
 
 }  // namespace
@@ -306,7 +311,9 @@ void print_usage() {
  *         invalid options, startup failures, or unexpected fatal exceptions.
  * @throws Nothing; fatal exceptions are diagnosed and converted to exit 1.
  * @note The self-pipe exists before signal handlers, and Host outlives server
- *       shutdown/session cleanup.
+ *       shutdown/session cleanup. The process creates exactly one embedded
+ *       Host and exposes no background, system-service, remote, multi-user, or
+ *       TCP mode.
  */
 int main(int argc, char** argv) {
   try {
