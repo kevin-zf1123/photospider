@@ -123,9 +123,11 @@ current-head GitHub Actions 仍是权威远程 integration 环境。
 ## OpenCV Operation 并发验证
 
 `test_opencv_operation_concurrency` 是注册到 CTest 的 integration binary，用于验证长期
-operation-provider 与 benchmark-worker contract。它使用有界 callback gate，而不是 elapsed-time
-threshold：
+operation-provider 与 benchmark-worker contract。它使用 Host-boundary record 与有界 callback
+gate，而不是 elapsed-time threshold：
 
+- `BenchmarkAutoThreadsPublishResolvedGrantToHost` 证明自动选择会在 Host 配置前只解析一次，
+  在 Graph load 前发布非零 grant，并报告完全相同的 grant；判定过程不会重复硬件探测。
 - `BenchmarkThreadsConfigureExactHostSchedulerWorkers` 会对自动 request 与显式 `1/2/4/8`
   request 运行真实 `BenchmarkService`、Host scheduler 配置、Graph load 与已注册 callback 路径。
   它要求达到精确的解析后 callback 数量，并拒绝出现 grant-plus-one callback。
