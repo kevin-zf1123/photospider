@@ -6153,6 +6153,15 @@ TEST(ProtocolParams, RejectsInvalidValuesWithoutHostMutation) {
   EXPECT_FALSE(std::filesystem::exists(untouched_root));
 }
 
+/**
+ * @brief Proves an exact Graph parse failure releases the IPC name for retry.
+ * @return Nothing.
+ * @throws Nothing when the router preserves `invalid_yaml`, rolls back its
+ * daemon-side name reservation, and accepts the corrected document; GoogleTest
+ * records mismatches.
+ * @note The first request reaches the real embedded Host rather than failing
+ * protocol parameter validation.
+ */
 TEST(ProtocolGraphLoad, FailedHostLoadReleasesNameForRetry) {
   ScopedTempDirectory temp("photospider-ipc-load-rollback");
   std::unique_ptr<Host> host = create_embedded_host();
@@ -6173,6 +6182,7 @@ TEST(ProtocolGraphLoad, FailedHostLoadReleasesNameForRetry) {
       {"method", "graph.load"},
       {"params", params}}.dump()));
   EXPECT_EQ(first["error"]["domain"], "graph");
+  EXPECT_EQ(first["error"]["name"], "invalid_yaml");
   const Result<std::vector<GraphSessionId>> after_failure = host->list_graphs();
   ASSERT_TRUE(after_failure.status.ok);
   EXPECT_TRUE(after_failure.value.empty());

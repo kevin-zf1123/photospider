@@ -1182,6 +1182,8 @@ if(BUILD_TESTING)
     )
     add_dependencies(test_host_adapter lifecycle_op_plugin
         override_lifecycle_op_plugin destroy_count_scheduler_plugin)
+    add_ps_test(test_graph_document_errors
+        tests/integration/test_graph_document_errors.cpp)
     add_ps_test(test_scheduler_worker_budget
         tests/integration/test_scheduler_worker_budget.cpp)
     target_compile_definitions(test_scheduler_worker_budget PRIVATE
@@ -1449,6 +1451,9 @@ if(BUILD_TESTING)
     gtest_discover_tests(test_cli_compute_event_paging
         WORKING_DIRECTORY ${PROJECT_SOURCE_DIR})
     gtest_discover_tests(test_host_adapter WORKING_DIRECTORY ${PROJECT_SOURCE_DIR})
+    gtest_discover_tests(test_graph_document_errors
+        WORKING_DIRECTORY ${PROJECT_SOURCE_DIR}
+        PROPERTIES TIMEOUT 30)
     gtest_discover_tests(test_scheduler_worker_budget
         WORKING_DIRECTORY ${PROJECT_SOURCE_DIR}
         PROPERTIES TIMEOUT 30)
