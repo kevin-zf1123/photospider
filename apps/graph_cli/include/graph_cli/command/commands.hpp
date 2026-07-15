@@ -116,8 +116,9 @@ void print_help_load(const CliConfig& config);
  * @return True after success or a recoverable command failure.
  * @throws std::bad_alloc if parsing, filesystem, Host, or output allocates.
  * @throws std::filesystem::filesystem_error for uncaught absolute-path work.
- * @note File-copy failures are rendered locally; Host retains session
- * ownership.
+ * @note Copy mode requires the source Host save to succeed before filesystem
+ * mutation or target load/reload. File-copy failures are rendered locally;
+ * Host retains session ownership.
  */
 bool handle_switch(std::istringstream& iss, ps::Host& svc,
                    std::string& current_graph, bool& modified,

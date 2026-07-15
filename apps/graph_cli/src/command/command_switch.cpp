@@ -37,9 +37,18 @@ bool handle_switch(std::istringstream& iss, ps::Host& svc,
       return true;
     }
 
-    // Ensure current session YAML is saved before copying
+    // Ensure current session YAML is saved before copying.
     fs::path src_yaml = fs::path("sessions") / current_graph / "content.yaml";
-    (void)svc.save_graph(ps::GraphSessionId{current_graph}, src_yaml.string());
+    const ps::VoidResult saved =
+        svc.save_graph(ps::GraphSessionId{current_graph}, src_yaml.string());
+    if (!saved.status.ok) {
+      std::cout << "Error: failed to save current session before copy";
+      if (!saved.status.message.empty()) {
+        std::cout << ": " << saved.status.message;
+      }
+      std::cout << ".\n";
+      return true;
+    }
     fs::path src_cfg = fs::path("sessions") / current_graph / "config.yaml";
 
     fs::path dst_dir = fs::path("sessions") / name;

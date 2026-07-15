@@ -56,7 +56,12 @@ after the run; the repository does not retain per-run reports for this test.
 
 The smoke inspects every installed `Photospider*Targets*.cmake` file because
 the package separates base, OpenCV-dependent, and embedded-product targets
-into distinct export sets. With OpenCV discovery disabled, a consumer
+into distinct export sets. Its dependency classifier recognizes only the exact
+OpenCV component target spellings that the producer accepts: bare lowercase
+names, lowercase `OpenCV::opencv_*` targets, and component-specific CamelCase
+targets such as `OpenCV::Core`; partial-name matches remain rejected. This is
+validated through the real exported package/consumer behavior rather than a
+synthetic verifier self-test. With OpenCV discovery disabled, a consumer
 requesting `COMPONENTS operation_sdk OPTIONAL_COMPONENTS operation_opencv`
 must keep the package and `operation_sdk` found, mark `operation_opencv` not
 found, import the dependency-free SDK/runtime targets, and omit

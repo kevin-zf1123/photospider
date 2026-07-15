@@ -206,6 +206,24 @@ REQUIRED_OPENCV_COMPONENTS = (
     "opencv_imgcodecs",
     "opencv_videoio",
 )
+OPENCV_COMPONENT_TARGET_VARIANTS = {
+    "opencv_core": ("opencv_core", "OpenCV::opencv_core", "OpenCV::Core"),
+    "opencv_imgproc": (
+        "opencv_imgproc",
+        "OpenCV::opencv_imgproc",
+        "OpenCV::Imgproc",
+    ),
+    "opencv_imgcodecs": (
+        "opencv_imgcodecs",
+        "OpenCV::opencv_imgcodecs",
+        "OpenCV::Imgcodecs",
+    ),
+    "opencv_videoio": (
+        "opencv_videoio",
+        "OpenCV::opencv_videoio",
+        "OpenCV::Videoio",
+    ),
+}
 APPLE_PRODUCT_LINK_FLAGS = ("-framework Metal", "-framework Foundation")
 
 
@@ -1590,16 +1608,20 @@ def unwrap_link_only(entry: str) -> tuple[str, bool]:
 
 
 def library_entry_matches(entry: str, library: str) -> bool:
-    """@brief Match a CMake target, linker name, or library path by basename.
+    """@brief Match one accepted CMake target or exact library basename.
 
     @param entry Unwrapped exported link entry.
     @param library Canonical dependency name such as ``opencv_core`` or ``dl``.
-    @return ``True`` for exact/namespace target names or platform library files.
+    @return ``True`` for an explicit producer-accepted OpenCV target, an exact
+      generic namespace target, or a platform library file.
     @throws None The function is a pure string match.
-    @note Versioned shared/static suffixes are accepted only after an exact
-      canonical basename, preventing partial-name false positives.
+    @note OpenCV aliases form a closed component-specific list. Versioned
+      shared/static suffixes are accepted only after an exact canonical
+      basename, preventing partial-name false positives.
     """
 
+    if entry in OPENCV_COMPONENT_TARGET_VARIANTS.get(library, ()):
+        return True
     if entry == library or entry.endswith(f"::{library}"):
         return True
     basename = entry.replace("\\", "/").rsplit("/", 1)[-1]

@@ -53,7 +53,7 @@ Supported options:
 | Option | Argument | Description |
 | --- | --- | --- |
 | `-h`, `--help` | none | Print top-level CLI help. |
-| `-r`, `--read` | `<file>` | Load YAML into the `default` session. |
+| `-r`, `--read` | `<file>` | Load YAML into the `default` session and use the Host-returned session as the target of later actions in this invocation. |
 | `-o`, `--output` | `<file>` | Save the current graph YAML. Requires `--read` first. |
 | `-p`, `--print` | none | Print the loaded graph dependency tree. |
 | `-t`, `--traversal` | none | Print dependency tree and post-order traversal. |
@@ -71,6 +71,9 @@ Examples:
 
 Top-level CLI mode does not expose `--compute` or `--save`. Use the REPL
 commands `compute` and `save` for execution and image output.
+Ordered top-level actions always target the successful `-r` result, even when
+`switch_after_load` disables interactive session switching. The short `-t`
+option takes no argument, exactly like `--traversal`.
 
 ### Local daemon and typed IPC client
 
@@ -191,7 +194,7 @@ command-specific help.
 | --- | --- |
 | `read <file>` | Load YAML into the current session, creating `default` when needed. |
 | `load <name> [yaml]` | Load a named graph session. If `yaml` is omitted, loads `sessions/<name>/content.yaml`. |
-| `switch <name> [c]` | Switch active sessions. With `c`, copy the current session to the target first. |
+| `switch <name> [c]` | Switch active sessions. With `c`, save the current session before copying it; a save failure aborts before target files are created or loaded. |
 | `close <name>` | Close a loaded graph session. |
 | `graphs` | List loaded sessions and mark the current one. |
 | `source <file>` | Execute REPL commands from a script file; blank lines and `#` comments are ignored. |
@@ -345,7 +348,7 @@ as-is, so local entries such as `cache_precision`, `plugin_dirs`, or
 | `default_ops_list_mode` | `all` | Default `ops` list mode. |
 | `ops_plugin_path_mode` | `name_only` | How plugin paths are displayed. |
 | `default_compute_args` | empty | Default flags appended to `compute` when none are provided. |
-| `switch_after_load` | `true` | Make a loaded graph the active session. |
+| `switch_after_load` | `true` | Make a graph loaded interactively in the REPL the active session; ordered top-level action targeting is unaffected. |
 | `session_warning` | `true` | Warn before overwriting session content. |
 | `scheduler_hp_type` | `cpu_work_stealing` | Default HP scheduler: built-in `cpu_work_stealing`, `serial_debug`, `gpu_pipeline`, `heterogeneous`, or a loaded plugin scheduler name. |
 | `scheduler_rt_type` | `cpu_work_stealing` | Default kernel RT intent scheduler using the same supported values; this does not enable CLI RT commands. |

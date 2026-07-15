@@ -51,7 +51,7 @@ struct CliConfig {
   std::string default_compute_args = "";
   /** @brief Maximum number of commands retained in interactive history. */
   int history_size = 1000;
-  /** @brief Whether a successful load selects the new graph session. */
+  /** @brief Whether a successful interactive load selects the new session. */
   bool switch_after_load = true;
   /** @brief Whether overwriting an existing session emits a warning. */
   bool session_warning = true;
@@ -158,7 +158,9 @@ void load_or_create_config(const std::string& config_path, CliConfig& config);
  * configuration, startup, option-action, or REPL standard exceptions.
  * @throws std::bad_alloc If Host/API, filesystem, or CLI working storage
  * exhausts memory.
- * @note One outer catch chain translates recoverable standard exceptions. The
+ * @note Ordered option actions retain the Host-returned session from a
+ * successful `-r` even when interactive switch-after-load policy is disabled.
+ * One outer catch chain translates recoverable standard exceptions. The
  * process entry point alone owns resource-exhaustion exit policy, so this
  * reusable boundary preserves `std::bad_alloc` unchanged.
  */

@@ -67,9 +67,12 @@ void load_configured_scheduler_plugins(ps::Host& host,
  * configuration, startup, option-action, or REPL standard exceptions.
  * @throws std::bad_alloc If CLI storage or any filesystem/Host/API operation
  * exhausts memory.
- * @note One outer catch chain covers configuration and every action. Resource
- * exhaustion is rethrown unchanged; `main` alone owns the process exit-code
- * and allocation-independent diagnostic policy.
+ * @note Parsing first locates configuration, then replays ordered actions. A
+ * successful `-r` always supplies the invocation-local target for later graph
+ * actions, independent of interactive switch policy. One outer catch chain
+ * covers configuration and every action. Resource exhaustion is rethrown
+ * unchanged; `main` alone owns the process exit-code and
+ * allocation-independent diagnostic policy.
  */
 int run_graph_cli(int argc, char** argv, ps::Host& svc) {
   try {
@@ -84,7 +87,7 @@ int run_graph_cli(int argc, char** argv, ps::Host& svc) {
     CliConfig config;
     std::string custom_config_path;
 
-    const char* const short_opts = "hr:o:pt:R";
+    const char* const short_opts = "hr:o:ptR";
     const option long_opts[] = {{"help", no_argument, nullptr, 'h'},
                                 {"read", required_argument, nullptr, 'r'},
                                 {"output", required_argument, nullptr, 'o'},
@@ -126,9 +129,7 @@ int run_graph_cli(int argc, char** argv, ps::Host& svc) {
               ps::GraphSessionId{"default"}, "sessions", optarg,
               config.loaded_config_path, config.cache_root_dir});
           if (result.status.ok) {
-            if (config.switch_after_load) {
-              current_graph = result.value.value;
-            }
+            current_graph = result.value.value;
             config.loaded_config_path =
                 (fs::absolute(fs::path("sessions") / "default" / "config.yaml"))
                     .string();
