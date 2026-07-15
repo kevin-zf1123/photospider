@@ -348,19 +348,24 @@ class PHOTOSPIDER_API Host {
    * @param session Session to save.
    * @param yaml_path Destination YAML path.
    * @return Success, `GraphErrc::NotFound` for a missing or closing session,
-   *         or `GraphErrc::Io` for serialization or destination
-   *         open/write/flush/close failure.
-   * @throws std::bad_alloc if request processing, backend-to-status
-   *         translation, or copied result construction exhausts memory.
+   *         or `GraphErrc::Io` for recoverable node serialization, YAML
+   *         emission, or destination preparation/open/write/flush/close
+   *         failure.
+   * @throws std::bad_alloc if graph-state submission, node/YAML serialization,
+   *         path handling, backend-to-status translation, or copied result
+   *         construction exhausts memory.
    * @note The Host returns only status; file ownership remains with the
    *       caller-provided path. Embedded execution retains a session admission
    *       across required-session resolution and graph-state serialization so
    *       concurrent close cannot invalidate the runtime. Saving writes
-   *       directly to the supplied path rather than atomically replacing it;
-   *       a post-open failure may leave a created, truncated, or partially
-   *       written destination. A nonempty relative `yaml_path` uses the
-   *       caller process working directory; the IPC Host resolves it in the
-   *       client process before transport.
+   *       directly to the supplied path rather than atomically replacing it.
+   *       All outcomes preserve graph topology, runtime state, and session
+   *       ownership. A failure before destination open preserves existing
+   *       bytes; a post-open failure may leave a created, truncated, or
+   *       partially written destination. A nonempty relative `yaml_path` uses
+   *       the caller process working directory; the IPC Host resolves it in
+   *       the client process before transport and never automatically retries
+   *       this mutation.
    */
   virtual VoidResult save_graph(const GraphSessionId& session,
                                 const std::string& yaml_path) = 0;

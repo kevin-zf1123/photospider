@@ -110,12 +110,24 @@ concrete scheduler teardown before slot release.
 `Host::save_graph()` admits the session against concurrent close, requires the
 session map entry, and serializes the visible node snapshot through the same
 `GraphStateExecutor` used by graph mutation and compute. A missing or closing
-session is `GraphErrc::NotFound`. Destination access, node serialization, and
-YAML emission failures for an existing session are normalized to
-`GraphErrc::Io`; destination failures explicitly include open, write, flush,
-and close. Save writes directly to the supplied path and does not use a
-temporary file plus atomic replacement. Once the destination opens, a failed
-save may therefore leave it created, truncated, or partially written.
+session is `GraphErrc::NotFound`, and resolution stops before destination
+access. For an existing session, recoverable node-serialization, YAML-emission,
+and destination preparation/open/write/flush/close failures are normalized to
+`GraphErrc::Io`. Resource exhaustion remains the exact `std::bad_alloc`
+exception channel rather than becoming an `Io` status.
+
+Save is an owner-state read transaction. Success, a returned failure, and
+propagated resource exhaustion leave the graph topology, topology generation,
+cache/timing/dirty/planning/runtime state, and session identity unchanged. A
+caller may retry the same admitted session after any reported failure; the IPC
+client sends each mutation once and does not retry it automatically.
+
+The destination has a deliberately narrower guarantee. Save writes directly
+to the supplied path and does not use a temporary file plus atomic replacement.
+A failure before the destination is successfully opened preserves existing
+bytes. Once open succeeds, a write, flush, close, or later resource failure may
+leave a created, truncated, or partially written destination. Destination
+rollback is therefore not part of the graph-owner transaction.
 
 ## Node Replacement and Structural Edits
 
@@ -226,7 +238,8 @@ lease, socket, and shutdown rules are defined in
 | reload, unexpected non-resource failure | `GraphErrc::Unknown`; prior graph and runtime state remain visible |
 | reload, resource exhaustion | `std::bad_alloc` propagates; prior graph and runtime state remain visible |
 | save, missing or closing session | `GraphErrc::NotFound` |
-| save, serialization, YAML emission, or destination open/write/flush/close failure | `GraphErrc::Io`; a post-open failure may leave a created, truncated, or partial destination because save is not an atomic replacement |
+| save, existing session with recoverable serialization, YAML emission, or destination preparation/open/write/flush/close failure | `GraphErrc::Io`; graph/runtime/session-owner state remains unchanged; failure before successful open preserves existing destination bytes, while post-open failure may leave created, truncated, or partial output |
+| save, existing session with resource exhaustion | `std::bad_alloc` propagates; graph/runtime/session-owner state remains unchanged; destination effects follow the same pre-open versus post-open boundary |
 | node replacement, missing/closing session or missing requested node | `GraphErrc::NotFound` |
 | node replacement, existing target with malformed input, missing dependency, or cycle | `GraphErrc::InvalidYaml`; previous graph state remains visible |
 | forward/backward ROI projection, missing/closing session or missing endpoint | `GraphErrc::NotFound` |

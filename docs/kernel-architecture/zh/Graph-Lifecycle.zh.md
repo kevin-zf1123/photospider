@@ -85,11 +85,20 @@ attach 或 start 失败时，只归还 candidate reservation，旧 scheduler 继
 
 `Host::save_graph()` 会让 session 进入防并发 close 的 admission，要求 session map entry
 存在，并通过 graph mutation 与 compute 共用的 `GraphStateExecutor` 串行化 visible node
-snapshot。Missing 或 closing session 返回 `GraphErrc::NotFound`。对于 existing session，
-destination access、node serialization 和 YAML emission failure 会统一归类为
-`GraphErrc::Io`；destination failure 明确包括 open、write、flush 与 close。Save 会直接写入
-调用方提供的 path，不使用 temporary file 加 atomic replacement。因此，destination 一旦成功
-open，失败的 save 可能留下已创建、已截断或只写入部分内容的文件。
+snapshot。Missing 或 closing session 返回 `GraphErrc::NotFound`，并在 destination access 前
+停止。对于 existing session，可恢复的 node serialization、YAML emission，以及 destination
+preparation/open/write/flush/close failure 会统一归类为 `GraphErrc::Io`。资源耗尽保持精确的
+`std::bad_alloc` exception channel，不会转成 `Io` status。
+
+Save 是 owner-state read transaction。成功、返回的 failure 与传播的资源耗尽都会让 graph
+topology、topology generation、cache/timing/dirty/planning/runtime state 和 session identity
+保持不变。调用方可在任何已报告的失败后对同一个已准入 session 重试；IPC client 对每次 mutation
+只发送一次，不会自动重试。
+
+Destination 只有刻意收窄的保证。Save 会直接写入调用方提供的 path，不使用 temporary file 加
+atomic replacement。Destination 成功 open 前发生的失败会保留 existing bytes；open 成功后，
+write、flush、close 或之后的资源失败可能留下已创建、已截断或只写入部分内容的 destination。
+因此，destination rollback 不属于 graph-owner transaction。
 
 ## Node Replacement 与结构编辑
 
@@ -181,7 +190,8 @@ serialization 与 shutdown drainage。其准确 mapping、lease、socket 与 shu
 | reload，unexpected non-resource failure | `GraphErrc::Unknown`；先前 graph 与 runtime state 保持 visible |
 | reload，resource exhaustion | 传播 `std::bad_alloc`；先前 graph 与 runtime state 保持 visible |
 | save，missing 或 closing session | `GraphErrc::NotFound` |
-| save，serialization、YAML emission 或 destination open/write/flush/close failure | `GraphErrc::Io`；save 不是 atomic replacement，因此 post-open failure 可能留下已创建、已截断或只有部分内容的 destination |
+| save，existing session 出现可恢复的 serialization、YAML emission 或 destination preparation/open/write/flush/close failure | `GraphErrc::Io`；graph/runtime/session-owner state 保持不变；成功 open 前的失败保留 existing destination bytes，post-open failure 可能留下已创建、已截断或只有部分内容的 output |
+| save，existing session 出现资源耗尽 | 传播 `std::bad_alloc`；graph/runtime/session-owner state 保持不变；destination effect 遵循相同的 pre-open 与 post-open 边界 |
 | node replacement，missing/closing session 或 requested node 缺失 | `GraphErrc::NotFound` |
 | node replacement，existing target 的 malformed input、missing dependency 或 cycle | `GraphErrc::InvalidYaml`；previous graph state 保持 visible |
 | forward/backward ROI projection，missing/closing session 或 endpoint 缺失 | `GraphErrc::NotFound` |

@@ -123,27 +123,47 @@ current-head GitHub Actions 仍是权威远程 integration 环境。
 ## Graph 文档错误矩阵验证
 
 `test_graph_document_errors` 是注册到 CTest 的 integration binary，用于验证长期
-Graph 文档摄取契约。它同时覆盖 public embedded Host 边界和直接
-`GraphModel::replace_nodes` 事务边界。各 case 区分“省略源路径”与“显式源路径”，
-对 I/O、YAML、schema、topology、lifecycle 与意外失败要求精确的
-`GraphErrc` 分类，并证明 `std::bad_alloc` 仍保持异常语义。测试还要求：初始
-load 失败不发布 session；reload 失败保留旧 Graph 的完整状态；成功替换推进
-topology generation 并重置 runtime state；失败后仍可重试。
+Graph document ingestion 与 save 契约。它同时覆盖 public embedded Host 边界和直接
+`GraphModel::replace_nodes` transaction 边界。Load/reload case 区分“省略 source path”与
+“显式 source path”，对 I/O、YAML、schema、topology、lifecycle 与 unexpected failure
+要求精确的 `GraphErrc` 分类，并证明 `std::bad_alloc` 仍保持 exception 语义。测试还要求：
+initial load 失败不发布 session；reload 失败保留 prior Graph 的完整状态；成功 replacement
+推进 topology generation 并重置 runtime state；失败后仍可重试。
 
-两个现有 focused regression 补齐所有权边界。`test_scheduler_worker_budget` 的 case
-证明无效文档会释放两个已启动的 scheduler reservation，且不发布 session。
-`test_ipc_protocol` 的 case 证明精确 Graph 错误会穿过 IPC 编码传递，同时 daemon
-侧 session-name reservation 会被释放，从而允许后续重试成功。可用以下命令执行
-focused validation：
+同一个 binary 负责 public save transaction regression。其仅供测试、按 destination 限定的
+`BUILD_TESTING` checkpoint 会在 graph-state worker 上、destination open 前立即运行。一个 case
+要求可恢复失败返回 `GraphErrc::Io`，另一个要求精确传播 `std::bad_alloc`。两者都要求 existing
+destination bytes，以及通过 public inspection 观察的 session 与 node state 保持不变，然后要求
+未注入故障的 save retry 成功。Const GraphIO boundary 与串行化 owner path 提供更广泛的
+non-mutation 保证。Production build 会编译掉该 checkpoint，并保留唯一的真实 writer。
+
+以下 focused companion regression 负责其余边界：
+
+- `test_kernel_contracts` 驱动真实 `GraphIOService` stream 进入 post-write、post-flush 与
+  post-close failure state。每个 phase 都必须返回 `GraphErrc::Io`；已创建的 destination 证明
+  文档所述 non-atomic post-open 行为。
+- `test_scheduler_worker_budget` 证明无效 input document 会释放两个已启动的 scheduler
+  reservation，且不发布 session。
+- `test_ipc_protocol` 证明精确 Graph status 传递、mutation 只调用一次，以及 failed load 后
+  daemon session-name rollback。
+- `test_ipc_daemon` 证明真实 transport 精确返回 save `NotFound` 与 `Io`，destination failure 后
+  remotely owned graph 仍可 inspect，并接受随后成功的 save。
+
+可用以下命令执行 focused validation：
 
 ```bash
 cmake --build build --target test_graph_document_errors \
-  test_scheduler_worker_budget test_ipc_protocol -j
+  test_kernel_contracts test_scheduler_worker_budget test_ipc_protocol \
+  test_ipc_daemon -j
 ./build/tests/test_graph_document_errors
+./build/tests/test_kernel_contracts \
+  --gtest_filter='GraphIoContract.Save*'
 ./build/tests/test_scheduler_worker_budget \
   --gtest_filter=EmbeddedHostSchedulerBudget.InvalidYamlAfterSchedulerStartDoesNotPublishAndReturnsPairExactlyOnce
 ./build/tests/test_ipc_protocol \
   --gtest_filter=ProtocolGraphLoad.FailedHostLoadReleasesNameForRetry
+./build/tests/test_ipc_daemon \
+  --gtest_filter=IpcDaemonGraphLifecycle.PersistsAcrossClientsAndInspectsCopiedSnapshots
 ```
 
 这些是长期维护的产品行为测试。该验证面不应包含 migration-residue scan、Issue

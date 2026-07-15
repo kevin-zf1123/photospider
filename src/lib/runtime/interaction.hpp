@@ -272,16 +272,18 @@ class InteractionService {
    * @param yaml_path Destination YAML file path.
    * @return Nothing.
    * @throws GraphError with `GraphErrc::NotFound` for an absent session or
-   *         `GraphErrc::Io` for serialization or destination
-   *         open/write/flush/close failure.
-   * @throws std::bad_alloc if graph-state submission or serialization exhausts
-   *         memory.
+   *         `GraphErrc::Io` for recoverable node serialization, YAML emission,
+   *         or destination preparation/open/write/flush/close failure.
+   * @throws std::bad_alloc if graph-state submission, node/YAML serialization,
+   *         path handling, or diagnostic construction exhausts memory.
    * @throws std::exception for other graph-state submission or future failures.
    * @note Embedded Host retains its close admission while this command resolves
    *       and uses the graph runtime. Stream, serialization, and emitter
-   *       exceptions are normalized to GraphErrc::Io by Kernel. Direct output
-   *       is not an atomic replacement and may remain created, truncated, or
-   *       partial after a post-open failure.
+   *       exceptions are normalized to GraphErrc::Io by Kernel. All outcomes
+   *       preserve graph topology, runtime state, and session ownership.
+   *       Direct output is not an atomic replacement: a pre-open failure
+   *       preserves existing bytes, while post-open failure may leave created,
+   *       truncated, or partial output.
    */
   void cmd_save_yaml(const std::string& graph, const std::string& yaml_path) {
     kernel_.save_graph_yaml(graph, yaml_path);

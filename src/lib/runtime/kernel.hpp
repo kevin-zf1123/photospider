@@ -403,18 +403,21 @@ class Kernel {
    * @param yaml_path Destination YAML file path.
    * @return Nothing.
    * @throws GraphError with `GraphErrc::NotFound` when the session is absent,
-   *         or `GraphErrc::Io` when node serialization or destination
-   *         open/write/flush/close fails.
-   * @throws std::bad_alloc if graph-state submission or serialization exhausts
-   *         memory.
+   *         or `GraphErrc::Io` when recoverable node serialization, YAML
+   *         emission, or destination preparation/open/write/flush/close
+   *         fails.
+   * @throws std::bad_alloc if graph-state submission, node/YAML serialization,
+   *         path handling, or diagnostic construction exhausts memory.
    * @throws std::exception for other graph-state submission or future failures.
    * @note The embedded Host holds a session admission across this call so
    *       concurrent close cannot invalidate the resolved runtime. The save
    *       itself executes in the session's GraphStateExecutor. Save-specific
    *       stream, serialization, and emitter exceptions are normalized to Io
-   *       at this boundary. The direct destination write is not an atomic
-   *       replacement, so a post-open failure may leave created, truncated, or
-   *       partial output.
+   *       at this boundary. All outcomes preserve graph topology, runtime
+   *       state, and session ownership. The direct destination write is not an
+   *       atomic replacement: failure before open preserves existing bytes,
+   *       while a post-open failure may leave created, truncated, or partial
+   *       output.
    */
   void save_graph_yaml(const std::string& name, const std::string& yaml_path);
   bool clear_drive_cache(const std::string& name);
