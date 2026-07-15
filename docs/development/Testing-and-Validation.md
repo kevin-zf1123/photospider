@@ -195,6 +195,14 @@ These are maintained product-behavior tests. No migration-residue scan,
 issue-specific replay script, or retained result artifact belongs to this
 validation surface.
 
+The maintained scripted CLI integration check in
+`ci/scripts/graph_cli_script_test.sh` owns the corresponding REPL boundary.
+Its explicit-missing-source case requires a load failure, an empty `graphs`
+inventory, and no current Graph. Its invalid-target case first loads the
+maintained propagation fixture before requiring target rejection, so it does
+not depend on a failed load publishing state. Each case uses isolated temporary
+session and history storage that is removed when the script exits.
+
 ## OpenCV Operation Concurrency Validation
 
 `test_opencv_operation_concurrency` is a CTest-registered integration binary
