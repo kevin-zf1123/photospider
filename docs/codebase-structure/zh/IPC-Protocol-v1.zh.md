@@ -203,6 +203,16 @@ EOF 会正常结束该 client；header/body 中途 EOF、zero length 或 oversiz
 connection，不读取不可信 body，也不伪造无关联 response。Linux send 使用 `MSG_NOSIGNAL`，
 macOS 使用 socket-local `SO_NOSIGPIPE`，不会修改 process-global SIGPIPE policy。
 
+每个普通 accepted daemon connection 都有四个彼此独立、私有且固定为两秒的 monotonic IO
+budget：下一个 header 首字节到达前的 idle、观察到该首字节后的剩余 header、合法 header
+之后已声明的 payload，以及 routing 完成后的完整 response header 加 payload write。Partial
+progress 以及 `EINTR`、`EAGAIN` 或 `EWOULDBLOCK` 会继续使用当前阶段原有的 absolute
+deadline；每个后续阶段都会获得新的 budget。超时只关闭该 connection，不发送额外的
+uncorrelated 或 partial-frame error，并通过普通 joined cleanup 路径发布 worker completion。
+这些 budget 不是 protocol field、daemon option、环境控制或公开 Client 配置。它们不覆盖
+Client connection setup、listener pathname proof、router/Host work、compute polling 或 daemon
+shutdown；这些行为保持各自既有的独立时序契约。
+
 Client connection setup 会发布一个 `FD_CLOEXEC` descriptor，执行一次逻辑 nonblocking
 connection，并在每条结果路径恢复 descriptor 原本的 blocking flag。`EINPROGRESS`/`EALREADY`
 通过可中断的 10-ms poll slice 加 `SO_ERROR` 完成。Linux AF_UNIX backlog `EAGAIN` 表示连接尚未
@@ -1130,11 +1140,14 @@ same-uid actor 仍可在两者之间替换最后一个 path component。当 iden
 竞态提供原子保护。每条 Active exit path 都会在 listener fd 仍持有原 socket inode 时先执行
 identity-aware unlink，再关闭 listener，从而消除 close 到 cleanup 之间的 inode-reuse 窗口。
 
-Listener 最多跟踪 32 个 joinable client worker。每个 connection 内 request 顺序执行，不同
-client 的 frame/JSON 工作可以并发。Public Host 不承诺 thread-safe，因此每个 Host call 都使用
-一个 daemon mutex；socket read/write 绝不持有它。Shutdown 会先停止所有 session、snapshot 与
-compute admission 以及新的 output lease。Lifecycle lock 仍持有时，Active identity guard 会在
-listener fd 仍持有原 inode 的情况下只 unlink matching pathname，随后关闭 listener。因此，新的
+Listener 最多跟踪 32 个 joinable client worker。Deadline 超时与 EOF 或 socket failure 使用
+相同的 close、completion publication、前台 reap 与 join 路径，因此即使 32 个 client 全部停滞
+在普通 IO 中，最终也会在无需 client-side close 或 daemon shutdown 的情况下归还容量。每个
+connection 内 request 顺序执行，不同 client 的 frame/JSON 工作可以并发。Public Host 不承诺
+thread-safe，因此每个 Host call 都使用一个 daemon mutex；socket read/write 绝不持有它。
+Shutdown 会先停止所有 session、snapshot 与 compute admission 以及新的 output lease。
+Lifecycle lock 仍持有时，Active identity guard 会在 listener fd 仍持有原 inode 的情况下只
+unlink matching pathname，随后关闭 listener。因此，新的
 pathname connection 会在 tracked client、compute、snapshot、output-lease 或 Host-session drain
 可能阻塞 shutdown 之前就失败。Daemon 接着 shutdown tracked client descriptor 以唤醒 read，并
 join 全部 connection worker。随后它会 drain 所有 accepted compute job，join 唯一 compute worker，
