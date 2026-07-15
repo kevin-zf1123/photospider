@@ -9,11 +9,12 @@
 
 /**
  * @file image_buffer.hpp
- * @brief Stable image buffer and tile view value contracts.
+ * @brief Current two-dimensional image payload and tile-view contracts.
  *
  * These values describe image memory, device location, and borrowed tile
  * regions without exposing graph, compute-service, scheduler, adapter, OpenCV,
- * or YAML implementation ownership.
+ * or YAML implementation ownership. They do not define a generic graph value
+ * or N-dimensional tensor model.
  */
 
 namespace ps {
@@ -23,8 +24,9 @@ namespace ps {
  *
  * @throws Nothing.
  * @note The enum names describe storage, not color space or semantic meaning.
- * Values and the `uint32_t` representation are part of the public v2 DSO
- * contract.
+ * Values and the `uint32_t` representation participate in the current
+ * provisional operation-plugin C++ ABI; they are not a stable pure C or
+ * cross-toolchain data ABI.
  */
 enum class DataType : std::uint32_t {
   /** @brief Unsigned 8-bit integer channel. */
@@ -42,12 +44,14 @@ enum class DataType : std::uint32_t {
 };
 
 /**
- * @brief Shared image payload descriptor used by core contracts.
+ * @brief Shared descriptor for the current two-dimensional image payload.
  *
  * ImageBuffer is a value descriptor around shared payload handles. It records
  * dimensions, channel format, row stride, device placement, and optional
  * backend context. Copying the descriptor shares the payload; it does not copy
- * pixel bytes.
+ * pixel bytes. It is not Photospider's generic graph value and does not encode
+ * arbitrary rank/shape, deep-image samples, vector scenes, or structured
+ * values. Named non-image operation values remain in their separate data map.
  *
  * @throws Nothing for ordinary value operations; allocation can occur only when
  *         callers create or replace the shared handles.

@@ -1,8 +1,10 @@
 # 插件 ABI
 
 Photospider 支持操作插件和调度器插件。操作插件通过 host 提供的 registrar 扩展进程拥有的
-`OpRegistry`。调度器插件通过数字握手保护的过渡性 C++ ABI 提供 `IScheduler` 实现。
-可安装的插件开发契约只位于 `include/photospider/{plugin,scheduler}`。
+`OpRegistry`。调度器插件通过数字握手提供 `IScheduler` 实现。两类接口都是当前临时 C++ ABI。
+其 C linkage 入口只拦截 symbol identity 或 interface generation；它们不会让已接受的 value、callback
+或 object 变成稳定 C data ABI。可安装的插件开发契约只位于
+`include/photospider/{plugin,scheduler}`。
 
 ## 操作插件 ABI
 
@@ -17,6 +19,12 @@ register_photospider_ops_v2(
 加载器以 eager/local 方式打开候选库（POSIX 上使用 `RTLD_NOW | RTLD_LOCAL`），只解析这一精确符号，
 并以借用 registrar 调用它。Registrar 写入 host 侧 shadow transaction；插件不会获得 `OpRegistry`
 或其他可变 backend owner。
+
+C linkage symbol 只保护精确 entrypoint lookup。Registrar table 与 operation contract 仍会让公共 C++
+value、`std::function`、标准库 container、共享所有权与 exception 跨越 DSO boundary。因此，可加载的
+operation plugin 必须使用匹配的 Photospider SDK，以及兼容 compiler、标准库、C++ ABI、
+allocator/runtime、exception model 与 RTTI configuration。Version two 是临时边界：它不承诺纯 C
+consumption、跨工具链 binary compatibility 或长期 ABI stability。
 
 v1 `register_photospider_ops_v1` 和旧的无参数 `register_photospider_ops()` 都不是受支持的兼容 ABI。
 只导出其中任一旧符号的 DSO 会被拒绝，且不会发布 callback。由于 v2 改变了 node、parameter、input、
@@ -263,7 +271,7 @@ ps_scheduler_plugin_get_version
 | --- | --- | --- |
 | `get_abi_version` | 是，且为第一道 gate | 不抛异常的数字握手，签名是 `uint32_t() noexcept`；必须返回当前值为 `2` 的 `PS_SCHEDULER_PLUGIN_ABI_VERSION`。ABI v1 会被拒绝，且没有兼容路径。 |
 | `get_count` | 是 | 插件中的调度器类型数量；必须至少为一。 |
-| `get_name` | 是 | 某索引处的稳定类型名称；小于 count 的每个索引都必须返回非空指针、非空文本。 |
+| `get_name` | 是 | Candidate staging 期间保持稳定、由 DSO 拥有的类型名称；小于 count 的每个索引都必须返回非空指针、非空文本，随后由 host 复制。 |
 | `get_description` | 是 | 某索引处的人类可读类型描述。 |
 | `create` | 是 | 使用解析后的 `[1,8]` `num_workers` grant 为某类型创建调度器实例；`IScheduler` 已公开继承 `SchedulerTaskRuntime`。 |
 | `destroy` | 是 | 销毁插件创建的调度器实例。 |
@@ -385,12 +393,15 @@ intent reservation。Live graph 或 failed-close graph 都不能提前释放其 
 
 ## 当前 ABI 状态
 
-Scheduler handshake 会在 discovery 或 object creation 前拒绝未知 Photospider interface generation，
-但通过握手后的边界仍以 C symbol 包装 C++ `ps::IScheduler*`。因此二进制兼容性还依赖兼容的编译器、
-标准库、exception model、RTTI 配置与 C++ ABI。人类可读 implementation version 只用于诊断，不能
-替代数字 handshake。
+两类当前 plugin ABI 都被明确标记为临时。Operation entrypoint name 会拒绝不受支持的 registration
+generation，但已接受的 registrar table 与 callback 仍是 C++。Scheduler 数字 handshake 会在
+discovery 或 object creation 前拒绝未知 interface generation，但通过握手后的边界仍以 C symbol
+包装 C++ `ps::IScheduler*` 及其 vtable。人类可读 scheduler implementation version 只用于诊断，
+不能替代数字 handshake。
 
-该 ABI 被明确标记为 provisional。ADR 0003 与内核演进 roadmap 记录已接受的替代方向，
+两类接口的 binary compatibility 都依赖匹配的 Photospider SDK，以及兼容 compiler、标准库、C++ ABI、
+allocator/runtime、exception model 与 RTTI configuration。C linkage 是 identity/generation gate，
+不是纯 C data boundary 或跨工具链稳定性保证。ADR 0003 与内核演进 roadmap 记录已接受的替代方向，
 但不会改变本文说明的当前 loader contract。
 
 ## 兼容性指南

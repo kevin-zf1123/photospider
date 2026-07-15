@@ -112,6 +112,11 @@ Metal operation 路径独立拥有 backend-specific object。直接解释 `conte
 四，`FLOAT64` 也是已声明 scalar type，但这些事实不承诺每个 loader、operation、cache 或
 adapter 都提供端到端支持。
 
+该 payload 不是通用 graph value 模型。Operation result 会把具名非图像 value 保存在单独的
+data map 中；这些 value 与 opaque backend `context` 都不会让 `ImageBuffer` 变成任意 payload
+carrier。新增通用 value kind、rank/shape model、descriptor、handle 或 region 必须经过独立的
+带版本设计。
+
 当前限制必须明确：
 
 - built-in operation 可能只实现部分 1/3/4-channel conversion，或假设 RGBA role；

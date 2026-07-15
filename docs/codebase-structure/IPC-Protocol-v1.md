@@ -14,6 +14,13 @@ When `CMAKE_SYSTEM_NAME` is exactly `Darwin` or `Linux`,
 - `photospider_ipc_server_internal`, a non-installed server/router library;
 - `photospiderd`, an installed foreground executable.
 
+The current daemon capability profile is a same-user local workstation
+sidecar. It listens only on a protected Unix-domain socket, and its process
+shell creates exactly one embedded `ps::Host` that the server/router borrows.
+It is not a background system service, multi-user or multi-tenant service,
+remote endpoint, or TCP server. Those profiles require a separate transport,
+identity, authentication/authorization, isolation, and lifecycle design.
+
 The public client headers are `photospider/ipc/protocol.hpp`,
 `photospider/ipc/client.hpp`, and `photospider/ipc/host.hpp`. They expose typed
 owned values plus the complete Host factory and no JSON type, socket descriptor,
@@ -115,7 +122,8 @@ result, release, and protected metadata-only image delivery at the router
 boundary. Image bytes stay in private artifacts; a terminal nonempty image
 result returns only the specified artifact metadata under one stable delivery
 lease. Version 1 exposes no compute cancellation, `daemon.shutdown`, TCP,
-Windows named pipe, or `graph_cli --connect`.
+Windows named pipe, remote or multi-user access mode, or
+`graph_cli --connect`.
 Process-global operation-plugin control and sorted views are available at the
 daemon router boundary and through the installed typed Client.
 Scheduler-plugin discovery/defaults and per-session scheduler
@@ -1292,6 +1300,10 @@ preferred; if its final path cannot fit `sun_path`, the daemon uses
 directories are `0700`; the socket is created directly with exact mode `0600`
 under temporary umask `0177`, and its persistent `${socket}.lock` regular file
 is `0600`.
+
+This per-user path and ownership policy is the current same-user local access
+boundary. It is not an authentication layer for a remote or multi-user
+service, and the process exposes no TCP listener or second embedded Host.
 
 Before inspecting or reclaiming the socket path, the daemon opens the
 persistent lock with `O_NOFOLLOW|O_CLOEXEC`, verifies regular-file identity,

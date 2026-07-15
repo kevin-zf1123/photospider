@@ -3,8 +3,11 @@
 Photospider supports operation plugins and scheduler plugins. Operation plugins
 extend the process-owned `OpRegistry` through a host-provided registrar.
 Scheduler plugins provide `IScheduler` implementations through a numeric
-handshake-gated transitional C++ ABI. The installable authoring contracts live
-only under `include/photospider/{plugin,scheduler}`.
+handshake. Both interfaces are current provisional C++ ABIs. Their C-linkage
+entrypoints gate symbol identity or interface generation; they do not turn the
+accepted values, callbacks, or objects into a stable C data ABI. The
+installable authoring contracts live only under
+`include/photospider/{plugin,scheduler}`.
 
 ## Operation Plugin ABI
 
@@ -20,6 +23,15 @@ The loader opens the candidate eagerly and locally (`RTLD_NOW | RTLD_LOCAL` on
 POSIX), resolves only this exact symbol, and invokes it with a borrowed
 registrar. The registrar writes into a host-side shadow transaction; plugins
 never receive `OpRegistry` or any other mutable backend owner.
+
+The C-linkage symbol protects only exact entrypoint lookup. The registrar table
+and operation contracts still carry public C++ values, `std::function`,
+standard-library containers, shared ownership, and exceptions across the DSO
+boundary. A loadable operation plugin therefore requires the matching
+Photospider SDK and a compatible compiler, standard library, C++ ABI,
+allocator/runtime, exception model, and RTTI configuration. Version two is
+provisional: it promises neither pure C consumption, cross-toolchain binary
+compatibility, nor long-term ABI stability.
 
 Neither the v1 `register_photospider_ops_v1` entry nor the old no-argument
 `register_photospider_ops()` entry is a supported compatibility ABI. A DSO that
@@ -358,7 +370,7 @@ Required exports:
 | --- | --- | --- |
 | `get_abi_version` | Yes, first gate | Non-throwing numeric handshake with signature `uint32_t() noexcept`; it must return `PS_SCHEDULER_PLUGIN_ABI_VERSION`, currently `2`. ABI v1 is rejected with no compatibility path. |
 | `get_count` | Yes | Number of scheduler types in the plugin; it must be at least one. |
-| `get_name` | Yes | Stable type name at an index; every index below count must return non-null, non-empty text. |
+| `get_name` | Yes | DSO-owned type name that remains stable during candidate staging; every index below count must return non-null, non-empty text, which the host copies. |
 | `get_description` | Yes | Human-readable type description at an index. |
 | `create` | Yes | Create a scheduler instance for a type from a resolved `num_workers` grant in `[1,8]`. `IScheduler` already publicly derives from `SchedulerTaskRuntime`. |
 | `destroy` | Yes | Destroy a plugin-created scheduler instance. |
@@ -531,16 +543,20 @@ early.
 
 ## Current ABI Status
 
-The scheduler handshake rejects unknown Photospider interface generations
-before discovery or object creation, but the accepted interface still uses C
-symbol names around a C++ `ps::IScheduler*`. Binary compatibility therefore
-also depends on a compatible compiler, standard library, exception model,
-RTTI configuration, and C++ ABI. The human-readable implementation version is
+Both current plugin ABIs are explicitly provisional. The operation entrypoint
+name rejects unsupported registration generations, but accepted registrar
+tables and callbacks remain C++. The scheduler numeric handshake rejects
+unknown interface generations before discovery or object creation, but the
+accepted interface still uses C symbol names around a C++ `ps::IScheduler*`
+and its vtable. The human-readable scheduler implementation version is
 diagnostic metadata only and never substitutes for the numeric handshake.
 
-This ABI is explicitly provisional. ADR 0003 and the kernel evolution roadmap
-record the accepted replacement direction; they do not change the current
-loader contract described here.
+For both interfaces, binary compatibility depends on the matching Photospider
+SDK and a compatible compiler, standard library, C++ ABI, allocator/runtime,
+exception model, and RTTI configuration. C linkage is an identity/generation
+gate, not a pure C data boundary or cross-toolchain stability guarantee. ADR
+0003 and the kernel evolution roadmap record accepted replacement directions;
+they do not change the current loader contracts described here.
 
 ## Compatibility Guidelines
 

@@ -7,7 +7,8 @@
 目标如下：
 
 - `libphotospider` 是面向嵌入式前端的稳定静态链接目标。
-- `photospiderd` 作为 foreground local daemon，通过一个 embedded `ps::Host` 拥有 graph session。
+- `photospiderd` 作为 foreground、同用户本地 Unix-domain sidecar，通过一个 embedded `ps::Host`
+  拥有 graph session；它不是当前的 system-service、多用户、远程或 TCP 产品。
 - `graph_cli` 保持为基础的交互式命令行前端。
 - Frontend 既可以进程内链接 `libphotospider`，也可以用 typed client 通过 IPC 与
   `photospiderd` 交互。
@@ -352,11 +353,18 @@ CMake 规则：
   `ps::plugin::OperationPluginRegistrar` callback 和带版本的 `register_photospider_ops_v2` 入口。
   Scheduler plugin 在 discovery 前使用精确 ABI-v2 数字 handshake，接收解析后的 `[1,8]` hard
   worker grant，并且只通过 `SchedulerHostContext` attach。ABI v1 不提供 adapter 或 compatibility
-  registration。未来纯 C plugin ABI 仍应作为单独版本化 compatibility change。
+  registration。两类当前接口仍是临时 C++ ABI：C linkage entrypoint/handshake 只拦截 identity 或
+  generation，而 C++ value、callback、class/vtable object、allocator/runtime、exception 与 RTTI
+  仍要求匹配 SDK 和兼容工具链。未来纯 C plugin ABI 仍应作为单独版本化 compatibility change。
 
 ## Daemon 形态
 
 `photospiderd` 是一个带小型 process shell 的 executable，背后是深层 Host-only server module。
+
+其当前 capability profile 是同用户本地 workstation sidecar：保持前台运行，只监听受保护的
+Unix-domain socket，并恰好创建一个 embedded Host。它不是后台 system service、多用户或
+multi-tenant service、远程 endpoint 或 TCP server。这些角色需要独立的 control-plane、transport、
+identity、authorization、isolation 与 lifecycle 设计。
 
 进程职责：
 
@@ -410,7 +418,8 @@ graph TD
 
 - macOS/Linux 使用 Unix domain socket。
 - macOS/Linux 之外 IPC disabled；named pipe 保留为后续 Windows 工作。
-- 默认不开放远程 TCP listener。
+- 不实现 TCP listener 或 remote/multi-user access mode；这是同用户本地 sidecar，而不是通用
+  service endpoint。
 - Socket path 按用户隔离，优先使用合法 `$XDG_RUNTIME_DIR`，否则使用
   `/tmp/photospider-<uid>`。
 - Daemon-created directory 为 `0700`；bind 在 umask `0177` 下直接以精确 `0600` 创建

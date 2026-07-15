@@ -129,6 +129,12 @@ contract. Its channel count is not structurally limited to four, and
 `FLOAT64` is a declared scalar type, but those facts do not promise end-to-end
 support by every loader, operation, cache, or adapter.
 
+This payload is not the generic graph value model. Operation results keep
+named non-image values in a separate data map; neither those values nor an
+opaque backend `context` turn `ImageBuffer` into an arbitrary payload carrier.
+Adding a general value kind, rank/shape model, descriptor, handle, or region
+requires a separate versioned design.
+
 Current limitations are explicit:
 
 - built-in operations may implement only selected 1/3/4-channel conversions or

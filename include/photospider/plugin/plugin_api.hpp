@@ -8,11 +8,16 @@
 
 /**
  * @file plugin_api.hpp
- * @brief Version-two operation plugin registration ABI.
+ * @brief Provisional version-two operation plugin C++ ABI.
  *
  * The exported C entry receives a borrowed host registrar, while callbacks and
- * value types remain a transitional C++17 ABI. Providers therefore require a
- * compatible compiler, standard library, exception model, and RTTI settings.
+ * value types remain a provisional C++17 ABI. C linkage protects only the
+ * entrypoint name; the registrar table, `std::function` callbacks, containers,
+ * shared ownership, and exceptions still cross the DSO boundary. Providers
+ * therefore require the matching Photospider SDK and a compatible compiler,
+ * standard library, C++ ABI, allocator/runtime, exception model, and RTTI
+ * settings. This interface promises neither pure C consumption nor
+ * cross-toolchain or long-term binary compatibility.
  */
 
 #if defined(_WIN32)
@@ -435,7 +440,8 @@ struct OperationPluginRegistrar {
  * @throws Plugin registration and host callback exceptions cross this
  * transitional C++ ABI unchanged.
  * @note The export has C symbol linkage, but its pointer/table/callback values
- * remain a compiler-compatible C++17 ABI.
+ * remain a provisional C++17 ABI under the matching-SDK/toolchain assumption.
+ * The symbol version does not make the registrar a stable pure C data ABI.
  */
 using RegisterPhotospiderOpsV2 = void (*)(OperationPluginRegistrar* registrar);
 
