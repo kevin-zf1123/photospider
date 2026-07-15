@@ -1,5 +1,6 @@
 #pragma once
 
+#include <chrono>
 #include <cstddef>
 #include <string>
 
@@ -35,7 +36,7 @@ enum class ServerLifecycleTestStage {
 };
 
 /**
- * @brief Minimal deterministic syscall dependencies for listener tests.
+ * @brief Minimal deterministic dependencies for server lifecycle tests.
  *
  * @throws Nothing when copied.
  * @note Callbacks must not throw and must remain valid for the complete
@@ -88,6 +89,16 @@ struct ServerLifecycleTestDependencies {
   bool fail_runtime_start = false;
 
   /**
+   * @brief Optional private override for every ordinary connection IO stage.
+   * @throws Nothing when assigned.
+   * @note A positive value replaces the fixed product budget only for the
+   *       current `test_run_server()` call. Zero or a negative value preserves
+   *       the product default. The duration is copied before workers start, so
+   *       no worker borrows this test dependency.
+   */
+  std::chrono::milliseconds ordinary_connection_stage_timeout{0};
+
+  /**
    * @brief Forces an early filesystem path-setup exception from server run.
    * @throws Nothing when assigned.
    * @note This non-installed failpoint verifies that the run-scoped dependency
@@ -130,12 +141,12 @@ OperationStatus test_create_listener(
     const ServerLifecycleTestDependencies& dependencies);
 
 /**
- * @brief Runs the real private server with listener-only lifecycle callbacks.
+ * @brief Runs the real private server with deterministic lifecycle seams.
  *
  * @param server Sole server instance, which must be idle before the call.
  * @param options Explicit/default socket selection.
  * @param stop_fd Read end of the test-owned stop pipe.
- * @param dependencies Non-owning listener callbacks valid until return.
+ * @param dependencies Non-owning lifecycle seams valid until return.
  * @return The same startup/runtime status as `Server::run()`.
  * @throws std::bad_alloc if listener, runtime, worker, or diagnostic storage
  *         cannot allocate.
@@ -146,9 +157,10 @@ OperationStatus test_create_listener(
  * @throws std::system_error if a client worker thread cannot be created.
  * @note This source-tree-only seam changes no router, CLI, environment, wire,
  *       or installed surface. Pending clients captured during self-proof enter
- *       the real worker admission path only after runtime startup succeeds.
- *       The server drops its dependency borrow on every normal or exceptional
- *       exit before the caller may end `dependencies` lifetime.
+ *       the real worker admission path only after runtime startup succeeds. A
+ *       positive ordinary-stage timeout is copied before worker admission.
+ *       The server drops every remaining dependency borrow on normal and
+ *       exceptional exit before the caller may end `dependencies` lifetime.
  */
 OperationStatus test_run_server(
     Server& server, const ServerOptions& options, int stop_fd,
