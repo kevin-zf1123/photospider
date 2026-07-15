@@ -3,8 +3,15 @@
 set -Eeuo pipefail
 
 SCRIPT_DIR=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)
+invocation_dir=$PWD
 # shellcheck source=ci/scripts/common.sh
 source "$SCRIPT_DIR/common.sh"
+
+# Keep documented relative artifact roots anchored to the caller before any
+# scenario enters its isolated working directory.
+if [[ "$CI_ARTIFACT_DIR" != /* ]]; then
+  CI_ARTIFACT_DIR="$invocation_dir/$CI_ARTIFACT_DIR"
+fi
 
 cd "$REPO_ROOT"
 
