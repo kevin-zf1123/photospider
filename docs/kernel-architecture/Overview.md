@@ -11,8 +11,10 @@ registry, cache layer, scheduler abstraction, and a frontend-facing Host seam.
 Parallel planned work now dispatches through scheduler-owned task runtimes.
 Graph-state commands and compute requests that mutate visible graph state enter
 an explicit per-graph `GraphStateExecutor` boundary instead of the scheduler
-dispatch path. Scheduler-backed parallel compute uses the scheduler runtime for
-ready task callbacks inside that graph-state boundary.
+dispatch path. That boundary is a bounded FIFO lane with one graph-owned worker
+and at most 64 waiting callbacks plus one active callback. Scheduler-backed
+parallel compute uses the scheduler runtime for ready task callbacks inside the
+graph-state boundary.
 
 On macOS/Linux the same public Host seam also has a complete installed IPC
 adapter. `create_ipc_host(socket_path)` implements all 53 current
@@ -205,7 +207,7 @@ defined in `../codebase-structure/IPC-Protocol-v1.md`.
 | `ps::ipc::Client` | Move-only direct client with owned values for the exact sorted 55-method version 1 inventory; it validates correlated result shapes and exposes no raw JSON call. |
 | `photospiderd` | Foreground local service that owns one embedded Host and serializes all Host calls while independently serving metadata and job polling. |
 | daemon registries | Private bounded ownership for opaque sessions, compute jobs, stable collection snapshots, protected outputs, and delivery leases; none are public backend handles. |
-| `GraphRuntime` | Per-graph resource container with model, graph-state executor, fixed-capacity scheduler trace ring, schedulers, and platform context. |
+| `GraphRuntime` | Per-graph resource container with model, one-worker/64-waiting-task graph-state lane, fixed-capacity scheduler trace ring, schedulers, and platform context. |
 | `GraphModel` | Graph state holder: private node storage, topology adjacency index, cache root, timing data, quiet/skip-save flags. |
 | `InteractionService` | Internal wrapper around `Kernel` used by the embedded Host adapter and backend code; frontends, including the CLI, use the public Host seam. |
 | `ComputeService` | Resolves dependencies, checks caches, executes ops, coordinates RT/HP/tiled paths and timing events. |
@@ -278,10 +280,13 @@ Typical embedded Host compute flow:
    then notifies `close_graph()` that status publication is complete.
 7. Embedded close admission rejects new compute/scheduler work plus required
    graph save, node-YAML replacement, and ROI projection work; it waits accepted
-   synchronous calls and ready async status promises, and then stops the runtime
-   through the same `GraphStateExecutor` used by those calls. A retained runtime
-   or scheduler cannot be erased, replaced, or destroyed while admitted work
-   uses it.
+   synchronous calls and ready async status promises. Kernel then stops lane
+   admission, drains prior FIFO work, joins the `GraphStateExecutor` worker, and
+   only afterward stops schedulers and removes the runtime. If scheduler stop
+   fails, one replacement lane worker reopens graph-state admission before the
+   failure is returned, so the retained session can be inspected or closed
+   again. A retained runtime or scheduler cannot be erased, replaced, or
+   destroyed while admitted work uses it.
 8. Recoverable backend failures become Host status/result values, while
    resource exhaustion remains exceptional: non-destructor Host methods and
    consumed async futures may propagate `std::bad_alloc` as documented by the
@@ -376,7 +381,8 @@ worker/epoch TLS attribution, and trace publication without exposing
 `GraphRuntime`. External scheduler DSOs must pass the numeric ABI handshake
 before discovery or creation. `GraphStateExecutor` remains the separate access
 boundary for graph-state operations and compute requests that read or mutate
-the visible `GraphModel`.
+the visible `GraphModel`. Its one worker and 64-slot waiting FIFO are owned per
+Graph and are not charged to the scheduler worker budget.
 
 The public worker request range is zero through eight. Zero resolves before
 construction to `min(max(1, hardware_concurrency()), 8)`; explicit one through

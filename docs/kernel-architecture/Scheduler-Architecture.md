@@ -211,12 +211,14 @@ implementations interact with the runtime only through `SchedulerHostContext`;
 neither `IScheduler` nor `SchedulerTaskRuntime` obtains direct ownership of the
 runtime model.
 
-The same executor is the scheduler-owner lifetime boundary. Runtime start,
-compute, scheduler name/statistics copying, scheduler replacement, and runtime
-stop during graph close cannot overlap for one session. `get_scheduler()` may
-return a raw pointer internally, but its caller finishes all use while the
-graph-state callback is active; replacement cannot publish and destroy the old
-owner until active compute has released it.
+The same executor is the scheduler-owner access and teardown boundary. Runtime
+start, compute, scheduler name/statistics copying, and scheduler replacement
+cannot overlap for one session. Graph close stops lane admission, drains its
+bounded FIFO, and joins the sole lane worker before runtime stop invokes any
+scheduler lifecycle method. `get_scheduler()` may return a raw pointer
+internally, but its caller finishes all use while the graph-state callback is
+active; replacement cannot publish and destroy the old owner until active
+compute has released it.
 
 ## Built-in Schedulers
 
@@ -284,7 +286,8 @@ without disturbing old compute behavior; invalid requests and unknown types
 remain `InvalidParameter`. This 32-slot ledger bounds only workers represented
 by built-in planning or the trusted plugin grant. It does not bound graph-state
 executors, daemon threads, frontend helpers, operation-internal threads, or all
-operating-system threads in the process.
+operating-system threads in the process. `GraphStateExecutor` has a separate
+structural bound: one worker and at most 64 waiting callbacks per loaded Graph.
 
 ## Plugin Discovery vs Graph Selection
 
@@ -475,7 +478,7 @@ whole-process operating-system thread snapshot.
 - Concrete ready parallel work is routed through scheduler-owned task runtimes;
   plans are not pulled by schedulers.
 - Graph-state commands and visible graph compute requests remain behind
-  `GraphStateExecutor`.
+  a one-worker, 64-waiting-task `GraphStateExecutor` FIFO lane.
 - Scheduler runtimes are ready-task-only: they receive concrete callbacks with
   scheduler-local epoch and optional scheduler-specific hints, not task
   graphs or dirty work-set state.

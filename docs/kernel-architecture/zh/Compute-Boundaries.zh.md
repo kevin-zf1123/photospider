@@ -34,13 +34,24 @@ flowchart TD
 `GraphStateExecutor` 拥有当前每图排他性。即使 ready callback 在 scheduler worker 上执行，
 规划和派发仍属于 compute 职责。
 
-当前排他机制不是有界串行队列。每次 `GraphStateExecutor::submit()` 都会启动一个
-`std::async(std::launch::async)` operation，启动后的 operation 再等待 executor mutex。因此，并发
-submission 可能创建多个等待同一 graph 的 OS thread。该 mutex 只提供排他性，不提供 FIFO
-ordering、cancellation、admission control 或 thread budget。
-该 mutex 会在整个 callback 期间保持锁定，包括 scheduler submission、completion wait 与 visible
-commit。不同 graph 具有独立 executor 与 mutex。Scheduler-worker ledger 不计这些 graph-state
-executor thread；其 32-slot 上限只覆盖 scheduler planning 计费的 worker。
+当前排他机制是有界串行 FIFO lane。每个处于 accepting 状态的 `GraphStateExecutor` 恰好拥有一个
+worker。其队列最多容纳 64 个等待 callback，不包括至多一个正在执行的 callback，因此每个 Graph
+最多拥有 65 个已经 admission 的 graph-state callback。队列已满时，`submit()` 会阻塞 caller；它
+不会创建额外 lane worker，也不会丢弃或绕过已经 admission 的 work。Admission 之前不保证 producer
+fairness，但已经 admission 的 work 会按 FIFO 执行。
+
+每次 submission 都会返回 packaged-task future，精确保留 callable 的 value、reference、`void`
+completion 或 exception。销毁 future 不会等待或取消 task；executor lifetime 会保留已经 admission
+的 work。Callback 不能向自己的 lane submit，也不能关闭自己的 lane：worker re-entry 会在等待队列
+之前抛出 `std::logic_error`。唯一的 worker 拥有整个 callback，包括 scheduler submission、
+completion wait 和 visible commit。
+
+`close_and_drain()` 对并发调用与重复调用都保持幂等。它会停止 admission，让被满队列阻塞的
+producer 以 `std::runtime_error` 被唤醒，按 FIFO 排空已有 work，并在返回前 join worker。
+`GraphRuntime` 会在 scheduler teardown 前完成该 join。如果显式 close 随后在 scheduler shutdown
+中失败，Kernel 会先启动一个 replacement lane worker 再返回失败，使保留的 session 仍可重试。
+不同 graph 具有独立的 worker 和队列。Scheduler-worker ledger 不计这些 lane worker；其 32-slot
+上限只覆盖 scheduler planning 计费的 worker。
 
 ## 当前协作者
 

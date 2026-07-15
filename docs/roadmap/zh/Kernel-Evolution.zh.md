@@ -24,8 +24,10 @@ GitHub Project 和 Issue 跟踪。
 
 ### 当前 containment 基线
 
-[Issue #43](https://github.com/kevin-zf1123/photospider/issues/43) 建立执行域迁移的有界基线，但它
-没有实现目标架构：HP 与 RT scheduler 仍按 graph 拥有 worker thread、queue、epoch 与 policy。
+[Issue #43](https://github.com/kevin-zf1123/photospider/issues/43) 建立 scheduler-worker budget，
+[Issue #44](https://github.com/kevin-zf1123/photospider/issues/44) 建立有界 graph-state lane；执行域迁移
+将从这两项基线继续。它们没有实现目标架构：HP 与 RT scheduler 仍按 graph 拥有 worker thread、
+queue、epoch 与 policy，同时 visible compute 的整个 callback 仍占用 graph-state lane。
 Containment contract 改为：
 
 - 接受零到八的 worker 请求，并在构造前把零解析为
@@ -36,10 +38,15 @@ Containment contract 改为：
 - 从所有 embedded Host 共享的一个 32-slot 进程 ledger 原子预留 HP+RT 合计需求；replacement
   预留 transient candidate headroom，并在失败时保留旧 scheduler；
 - 在 concrete scheduler 销毁后恰好一次释放 move-only reservation，包括 load rollback、成功的
-  graph close 与 Host 销毁；close 失败会保留 runtime 与 reservation 供重试。
+  graph close 与 Host 销毁；close 失败会保留 runtime 与 reservation 供重试；
+- 用每 Graph 一个 worker、64 个等待任务的 FIFO 取代 graph-state async-per-submit，并通过阻塞
+  backpressure 避免丢弃已经 admission 的 work；
+- 在 scheduler teardown 前停止 lane admission、排空 FIFO work 并 join lane worker；scheduler
+  stop 失败时则创建一个 replacement lane worker，使 close 保持可重试。
 
-这 32 个 slot 只覆盖已计数的 scheduler-owned worker，不计算 graph-state executor、operation
-内部 thread、daemon/frontend worker 或所有 OS thread，也不提供 shared execution 或 fairness。
+这 32 个 slot 只覆盖已计数的 scheduler-owned worker，不计算具有独立“每 Graph 一个 worker”上限的
+graph-state executor，也不计算 operation 内部 thread、daemon/frontend worker 或所有 OS thread。
+它们不提供 shared execution 或 fairness。
 后续执行域 issue 中的 `ComputeRun`/`ExecutionService` 必须完整替换这个过渡 ledger 与拥有 worker
 的 ABI，不能在其上永久叠加 adapter。特别是 [#68](https://github.com/kevin-zf1123/photospider/issues/68)
 与 [#69](https://github.com/kevin-zf1123/photospider/issues/69) 跟踪的 shared executor 纵向切片会移除
@@ -102,7 +109,7 @@ flowchart TD
 execution 发生在 `GraphModel` 独占变更边界之外，因此一个 `ComputeRun` 不会阻止 frontend
 产生更新 revision。这是相对于
 `docs/kernel-architecture/Compute-Boundaries.md` 所记录的当前
-`GraphStateExecutor` 整体 callback mutex 的目标变更。
+有界 `GraphStateExecutor` 整体 callback FIFO lane 的目标变更。
 
 ## `ComputeRun`
 
