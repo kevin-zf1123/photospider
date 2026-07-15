@@ -476,13 +476,17 @@ Important current behavior:
 - Dependency-tree data is built by the inspection boundary, copied through the
   embedded Host adapter, and rendered by frontend code without exposing backend
   objects.
+- Repository-owned CPU OpenCV providers use reentrant `cv::Mat` callbacks with
+  OpenCV internal CPU threading fixed at one before publication; admitted
+  scheduler grants own outer callback parallelism, while genuine shared backend
+  state remains synchronized inside its provider.
 - Current schedulers own physical workers per graph and intent, subject to
   bounded per-instance grants and the shared 32-slot admission ledger. The
   accepted replacement for that ownership is recorded in ADR 0003, but the
   shared `ExecutionService` is not current behavior.
 
 ADR 0001 defines graph-state versus scheduler dispatch, ADR 0002 defines the
-external-library adapter target, and ADR 0003 defines the accepted process
-execution domain. `../roadmap/Kernel-Evolution.md` combines those decisions into
-the long-term target without changing the meaning of this current-state
-document.
+external-library adapter target, ADR 0003 defines the accepted process
+execution domain, and ADR 0004 defines current OpenCV CPU provider concurrency.
+`../roadmap/Kernel-Evolution.md` combines those decisions into the long-term
+target without changing the meaning of this current-state document.

@@ -171,6 +171,13 @@ provider 必须保证 target 可重入，或自行同步其共享可变 state。
 coherent snapshot capture、publication 与 unload；它绝不会持有 state lock 来串行化 callback execution。
 Caller 不得因为 operation key、device 或 intent 相同，就推断 callback 只会单线程执行。
 
+仓库自有 CPU OpenCV provider 会用不可变 input、callback-local 或 task-owned `cv::Mat` state，
+以及不使用进程范围的外层 operation mutex 来实现该契约。Builtin 注册会在 callback 发布前把 OpenCV
+内部 CPU threading 固定为一，因此外层并行由 scheduler grant 拥有。真实共享 backend state 仍要求
+provider-local 同步：Metal Perlin 的 DSO mutex 只保护其共享 Metal lifecycle。
+[ADR 0004](../../adr/zh/0004-opencv-cpu-operations-are-reentrant-provider-work.zh.md)记录了该决策
+及其 accounting 边界。
+
 Direct replacement 同样遵循 manager-driven unload 之外的 retirement 规则。Replacement callback 会在
 加锁前准备好，并与 active slot 交换；被替换的 callable 会留在参数局部 retirement value 中，直到
 registry guard 已退出才析构。Whole-key unregister 会一起 extract legacy、metadata、implementation 与

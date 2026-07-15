@@ -385,9 +385,13 @@ ROI 传播通过 `RoiPropagationService` 处理，它使用 registry 提供的 p
 - `RoiPropagationService` 与 `GraphExtentResolver` 拥有空间传播和 HP-authoritative extent resolution。
 - Dependency-tree data 由 inspection 边界构建，经 embedded Host adapter 复制，再由 frontend 渲染，
   不暴露后端对象。
+- 仓库自有 CPU OpenCV provider 使用可重入 `cv::Mat` callback，并在发布前把 OpenCV 内部 CPU
+  threading 固定为一；已准入 scheduler grant 拥有外层 callback parallelism，真实共享 backend
+  state 则继续在对应 provider 内同步。
 - 当前 scheduler 按 graph 和 intent 拥有物理 worker，但受单实例 grant 与共享 32-slot admission
   ledger 约束。ADR 0003 记录了已接受的替代所有权，但 shared `ExecutionService` 不是当前行为。
 
 ADR 0001 定义 graph-state 与 scheduler dispatch，ADR 0002 定义外部库 adapter 目标，ADR 0003
-定义已接受的进程执行域。`../../roadmap/zh/Kernel-Evolution.zh.md` 将这些决策组合成长远目标，
-但不会改变本当前状态文档的含义。
+定义已接受的进程执行域，ADR 0004 定义当前 OpenCV CPU provider 并发。
+`../../roadmap/zh/Kernel-Evolution.zh.md` 将这些决策组合成长远目标，但不会改变本当前状态文档的
+含义。

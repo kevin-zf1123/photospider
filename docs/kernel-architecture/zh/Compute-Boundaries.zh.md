@@ -135,28 +135,35 @@ HP+RT 合计计费，replacement 则在旧 owner 保持存活时预留一个 can
 scheduler 计费为零；内置 CPU 与已注册 ABI v2 plugin 按解析后的一到八授权计费；内置
 GPU/heterogeneous 还要计入潜在 device worker。
 
-## 当前 OpenCV operation 串行化
+## OpenCV Operation 并发
 
-内置 operation translation unit 声明了一个进程范围的 `g_opencv_op_mutex`。以下 13 个
-operation entrypoint 会在 OpenCV 与数据处理路径中持有该 mutex 直至返回。`convolve`、
-`resize`、`crop` 与 `extract_channel` 会先完成初步输入校验再获取锁，其余入口在 callback
-开始处获取锁：
+仓库自有 CPU OpenCV operation 是可重入的 provider 工作。Builtin provider 不再具有进程范围的
+operation mutex。其 monolithic `convolve`、`resize`、`crop`、`extract_channel`、
+`gaussian_blur`、`add_weighted`、`abs_diff` 与 `multiply` callback，以及 tiled
+`curve_transform`、`gaussian_blur`、`add_weighted`、`abs_diff` 与 `multiply`，可以跨 tile、
+Graph 和 HP/RT intent route 并发运行。Callback input 不可变；可变 `cv::Mat` header、temporary
+与 output region 由 callback 局部拥有或 task 独占。
 
-- monolithic `convolve`、`resize`、`crop`、`extract_channel`、
-  `gaussian_blur`、`add_weighted`、`abs_diff` 和 `multiply`；
-- tiled `curve_transform`、`gaussian_blur`、`add_weighted`、`abs_diff` 和
-  `multiply`。
+Registry 边界遵循同一规则。Registry lock 会串行化 ownership mutation、发布、一致 snapshot
+capture 与卸载，但会在 callback invocation 前释放。因此，每个 provider 都必须保证 callback
+可重入，或自行同步其共享可变状态。共享 operation key、device、intent 或 callback owner 绝不
+意味着单线程执行。
 
-Scheduler worker 可以并发发出这些 callback，但该集合内的调用会在同一进程的 tile、Graph 和
-HP/RT intent route 之间串行。因此，worker 数量本身不能证明这些 operation 具有 tile-level
-scaling。这个 mutex **并不**保护产品内全部 OpenCV 使用；其他 cache、normalization、metrics、
-downsample、adapter 或 plugin 路径可能在锁外使用 OpenCV。
+`register_builtin()` 会在发布 builtin callback 前恰好一次调用 `cv::setNumThreads(1)`。仓库自有
+CPU provider 使用 `cv::Mat`；仓库代码不调用 `cv::ocl::setUseOpenCL(false)`，也不会在 callback
+可能活跃时重新配置 OpenCV threading。因此，已准入的 scheduler worker grant 是仓库自有的外层
+CPU parallelism，而 OpenCV 内部 CPU parallelism 保持禁用。
 
-`register_builtin()` 还会一次性调用 `cv::ocl::setUseOpenCL(false)` 和
-`cv::setNumThreads(1)`，因此当前 built-in registry 会从 core code 建立 library-level OpenCV
-execution setting。该锁和这些设置是当前实现事实，不是目标边界。Issue #46 跟踪合并门禁裁定与
-scaling benchmark；ADR 0002 则把未来 OpenCV state、exception translation、algorithm 和 codec
-放入可选 provider/adapter。
+围绕真实 backend state 的同步仍由 provider 局部负责。Metal Perlin provider 保留一个
+DSO-private mutex，保护其共享 Metal device、queue、pipeline 与 buffer；该 mutex 既不是 OpenCV
+operation lock，也不是 scheduler exclusivity contract。仓库自有 provider 之外的 OpenCV 使用、
+第三方内部 thread 与 platform runtime worker 仍不计入 scheduler worker accounting。
+
+[ADR 0004](../../adr/zh/0004-opencv-cpu-operations-are-reentrant-provider-work.zh.md)记录本项决策。
+长期 integration coverage 会证明 `1/2/4/8` grant 对应精确 callback overlap，以及单 worker 与
+八 worker 输出按位相同；手工原生扩展性证据记录在
+`../../development/zh/Testing-and-Validation.zh.md`。ADR 0002 仍把未来 OpenCV algorithm、codec、
+exception translation 与 process state 放入可选 provider/adapter，而不是 kernel 语义。
 
 ## Intent 与提交边界
 

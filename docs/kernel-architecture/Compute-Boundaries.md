@@ -160,33 +160,45 @@ old owner remains live. The built-in serial scheduler charges zero; built-in
 CPU and registered ABI v2 plugins charge the resolved one-through-eight grant;
 built-in GPU/heterogeneous also charges its potential device worker.
 
-## Current OpenCV Operation Serialization
+## OpenCV Operation Concurrency
 
-The built-in operation translation unit declares one process-scope
-`g_opencv_op_mutex`. The following 13 operation entry points hold that mutex
-across their OpenCV and data-processing path until return. `convolve`,
-`resize`, `crop`, and `extract_channel` perform initial input checks before
-acquiring it; the remaining entries acquire it at the callback start:
+Repository-owned CPU OpenCV operations are reentrant provider work. The
+built-in provider has no process-wide operation mutex. Its monolithic
+`convolve`, `resize`, `crop`, `extract_channel`, `gaussian_blur`,
+`add_weighted`, `abs_diff`, and `multiply` callbacks, together with tiled
+`curve_transform`, `gaussian_blur`, `add_weighted`, `abs_diff`, and `multiply`,
+may run concurrently across tiles, Graphs, and HP/RT intent routes. Callback
+inputs are immutable; mutable `cv::Mat` headers, temporaries, and output regions
+are callback-local or task-owned.
 
-- monolithic `convolve`, `resize`, `crop`, `extract_channel`,
-  `gaussian_blur`, `add_weighted`, `abs_diff`, and `multiply`;
-- tiled `curve_transform`, `gaussian_blur`, `add_weighted`, `abs_diff`, and
-  `multiply`.
+The same rule applies at the registry boundary. Registry locks serialize
+ownership mutation, publication, coherent snapshot capture, and unload, but
+they are released before callback invocation. Every provider must therefore
+make its callback reentrant or synchronize its own shared mutable state. A
+shared operation key, device, intent, or callback owner never implies
+single-threaded execution.
 
-Scheduler workers may issue these callbacks concurrently, but calls in this
-set serialize across tiles, Graphs, and HP/RT intent routes inside the process.
-Worker count therefore does not establish tile-level scaling for these
-operations. This mutex does **not** protect every OpenCV use in the product;
-other cache, normalization, metrics, downsample, adapter, or plugin paths may
-use OpenCV outside it.
+`register_builtin()` calls `cv::setNumThreads(1)` exactly once before publishing
+built-in callbacks. Repository-owned CPU providers use `cv::Mat`; repository
+code does not call `cv::ocl::setUseOpenCL(false)` and does not reconfigure
+OpenCV threading while callbacks may be active. The admitted scheduler worker
+grant is therefore the repository-owned outer CPU parallelism layer, while
+OpenCV internal CPU parallelism remains disabled.
 
-`register_builtin()` also calls `cv::ocl::setUseOpenCL(false)` and
-`cv::setNumThreads(1)` once, so the built-in registry currently establishes
-library-level OpenCV execution settings from core code. The lock and these
-settings are current implementation facts, not the target boundary. The
-merge-gate decision and scaling benchmark are tracked by issue #46; ADR 0002
-places future OpenCV state, exception translation, algorithms, and codecs in
-an optional provider/adapter.
+Synchronization around genuine backend state remains provider-local. The
+Metal Perlin provider retains a DSO-private mutex around its shared Metal
+device, queue, pipeline, and buffers; that mutex is neither an OpenCV operation
+lock nor a scheduler exclusivity contract. OpenCV use outside repository-owned
+providers, third-party internal threads, and platform runtime workers remain
+outside scheduler worker accounting.
+
+[ADR 0004](../adr/0004-opencv-cpu-operations-are-reentrant-provider-work.md)
+records this decision. Durable integration coverage proves exact callback
+overlap for `1/2/4/8` grants and bitwise-equal one-versus-eight-worker output;
+the manual native scaling evidence is documented in
+`../development/Testing-and-Validation.md`. ADR 0002 still places the future
+OpenCV algorithms, codecs, exception translation, and process state inside an
+optional provider/adapter rather than kernel semantics.
 
 ## Intent and Commit Boundaries
 
