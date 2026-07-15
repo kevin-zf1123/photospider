@@ -112,6 +112,10 @@ enum class EmbeddedOperationTestEvent {
   ForwardRoiProjection,
   /** @brief Backward ROI projection operation. */
   BackwardRoiProjection,
+  /** @brief Timing snapshot inspection operation. */
+  Timing,
+  /** @brief All-cache clearing operation. */
+  ClearCache,
 };
 
 /**
@@ -830,8 +834,9 @@ struct EmbeddedHostState {
    *
    * @param session Session label to search.
    * @return True while an admitted compute, image compute, scheduler-info,
-   *         scheduler-replacement, required-save, node-YAML replacement, or ROI
-   *         projection call has not finished public translation.
+   *         scheduler-replacement, required-save, node-YAML replacement, ROI
+   *         projection, timing, or all-cache-clear call has not finished public
+   *         translation.
    * @throws Nothing.
    * @note Caller must hold lifecycle_mutex_. Close waits for these admissions
    *       before entering Kernel::close_graph(), so the runtime map entry and
@@ -2457,20 +2462,47 @@ class EmbeddedHost final : public Host {
    * @brief Reads timing rows for a graph session.
    *
    * @param session Session to inspect.
-   * @return Timing snapshot, or a failed status.
+   * @return Timing snapshot, NotFound for missing/closing sessions, or another
+   * failed status from public translation.
    * @throws std::bad_alloc on allocation failure.
-   * @note Missing timing data is reported as NotFound.
+   * @note One lifecycle admission keeps the session alive across Kernel access,
+   * timing copy, and public result translation. Missing timing data is reported
+   * as NotFound.
    */
   Result<TimingSnapshot> timing(const GraphSessionId& session) override {
-    return guarded_result<TimingSnapshot>("timing", GraphErrc::NotFound, [&] {
-      auto timing_result = state_->interaction.cmd_timing(session.value);
-      if (!timing_result) {
-        return failure_result<TimingSnapshot>(
-            GraphErrc::NotFound,
-            "timing not available for graph session: " + session.value);
-      }
-      return success_result(to_public_timing(*timing_result));
-    });
+    std::optional<EmbeddedHostState::SessionAdmissionToken> admission;
+    Result<TimingSnapshot> result =
+        guarded_result<TimingSnapshot>("timing", GraphErrc::NotFound, [&] {
+          admission = state_->try_admit_session_operation(session);
+          if (!admission) {
+            return failure_result<TimingSnapshot>(
+                GraphErrc::NotFound,
+                "graph session is closing: " + session.value);
+          }
+#if defined(PHOTOSPIDER_INTERNAL_HOST_OPERATION_TESTING)
+          state_->wait_at_operation_test_phase(
+              session, EmbeddedOperationTestEvent::Timing,
+              EmbeddedOperationTestPhase::BeforeKernelReady);
+          state_->wait_at_operation_test_phase(
+              session, EmbeddedOperationTestEvent::Timing,
+              EmbeddedOperationTestPhase::BeforeKernelAdmissionSnapshot);
+#endif
+          auto timing_result = state_->interaction.cmd_timing(session.value);
+          if (!timing_result) {
+            return failure_result<TimingSnapshot>(
+                GraphErrc::NotFound,
+                "timing not available for graph session: " + session.value);
+          }
+          return success_result(to_public_timing(*timing_result));
+        });
+#if defined(PHOTOSPIDER_INTERNAL_HOST_OPERATION_TESTING)
+    if (admission) {
+      state_->wait_at_operation_test_phase(
+          session, EmbeddedOperationTestEvent::Timing,
+          EmbeddedOperationTestPhase::AfterTranslationAdmissionSnapshot);
+    }
+#endif
+    return result;
   }
 
   /**
@@ -3170,12 +3202,28 @@ class EmbeddedHost final : public Host {
    * @brief Clears all cache layers for a graph session.
    *
    * @param session Session whose caches should be cleared.
-   * @return Success or failure status.
+   * @return Success, or NotFound for a missing or closing session.
    * @throws std::bad_alloc on allocation failure.
-   * @note Cache service exceptions are converted to Host status values.
+   * @note One lifecycle admission keeps the session alive across Kernel cache
+   * mutation and public status translation. Cache service exceptions are
+   * converted to Host status values.
    */
   VoidResult clear_cache(const GraphSessionId& session) override {
-    return guarded_void("clear_cache", GraphErrc::NotFound, [&] {
+    std::optional<EmbeddedHostState::SessionAdmissionToken> admission;
+    VoidResult result = guarded_void("clear_cache", GraphErrc::NotFound, [&] {
+      admission = state_->try_admit_session_operation(session);
+      if (!admission) {
+        return failure_void(GraphErrc::NotFound,
+                            "graph session is closing: " + session.value);
+      }
+#if defined(PHOTOSPIDER_INTERNAL_HOST_OPERATION_TESTING)
+      state_->wait_at_operation_test_phase(
+          session, EmbeddedOperationTestEvent::ClearCache,
+          EmbeddedOperationTestPhase::BeforeKernelReady);
+      state_->wait_at_operation_test_phase(
+          session, EmbeddedOperationTestEvent::ClearCache,
+          EmbeddedOperationTestPhase::BeforeKernelAdmissionSnapshot);
+#endif
       if (!state_->interaction.cmd_clear_cache(session.value)) {
         return failure_void(
             GraphErrc::NotFound,
@@ -3183,6 +3231,14 @@ class EmbeddedHost final : public Host {
       }
       return success_void();
     });
+#if defined(PHOTOSPIDER_INTERNAL_HOST_OPERATION_TESTING)
+    if (admission) {
+      state_->wait_at_operation_test_phase(
+          session, EmbeddedOperationTestEvent::ClearCache,
+          EmbeddedOperationTestPhase::AfterTranslationAdmissionSnapshot);
+    }
+#endif
+    return result;
   }
 
   /**

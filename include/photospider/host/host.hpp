@@ -458,10 +458,14 @@ class PHOTOSPIDER_API Host {
    * @brief Returns the latest timing snapshot for a session.
    *
    * @param session Session to inspect.
-   * @return Copied timing rows and total, or a failure status.
+   * @return Copied timing rows and total, or `GraphErrc::NotFound` for a
+   *         missing or closing session/timing snapshot.
    * @throws std::bad_alloc if request processing, backend-to-status
    *         translation, or copied result construction exhausts memory.
    * @note Timing data is populated only when a compute request enabled timing.
+   * The embedded Host retains one session admission through backend access,
+   * value copying, and public result translation, so concurrent close waits for
+   * an already accepted inspection.
    */
   virtual Result<TimingSnapshot> timing(const GraphSessionId& session) = 0;
 
@@ -792,10 +796,13 @@ class PHOTOSPIDER_API Host {
    * @brief Clears all cache layers for a session.
    *
    * @param session Session whose caches should be cleared.
-   * @return Success or failure status.
+   * @return Success or `GraphErrc::NotFound` for a missing or closing session.
    * @throws std::bad_alloc if request processing, backend-to-status
    *         translation, or copied result construction exhausts memory.
-   * @note This mirrors the existing `clear-cache all` behavior.
+   * @note This mirrors the existing `clear-cache all` behavior. The embedded
+   * Host retains one session admission through backend mutation and public
+   * status translation, so concurrent close waits for an already accepted
+   * clear.
    */
   virtual VoidResult clear_cache(const GraphSessionId& session) = 0;
 

@@ -239,8 +239,9 @@ socket、protocol、status、quota 与 artifact lifecycle 定义在
    adapter worker 不读取共享 `LastError`，而是直接映射该 outcome，先兑现 caller-visible
    `OperationStatus` promise，再通知 `close_graph()` status publication 已完成。
 7. Embedded close admission 会先发布 lifecycle marker，拒绝新的 compute/scheduler work，以及
-   required graph save、node-YAML replacement 和 ROI projection work。该 marker 之前已准入的调用
-   会在 lane 仍 accepting 时完成同步 submission。随后 Kernel 会停止 lane admission，从而唤醒
+   required graph save、node-YAML replacement、ROI projection work、timing inspection 与
+   all-cache clearing。该 marker 之前已准入的调用会完成 caller-visible result/status translation；
+   graph-state user 会在 lane 仍 accepting 时完成同步 submission。随后 Kernel 会停止 lane admission，从而唤醒
    阻塞在满 FIFO 上的 producer；只有此后 Host 才等待 async submission placeholder 与 status
    promise。Kernel 会按 FIFO 排空已有 work、join `GraphStateExecutor` worker，之后才停止 scheduler
    并移除 runtime。如果 scheduler stop 失败，会先启动一个 replacement lane worker、重新开放

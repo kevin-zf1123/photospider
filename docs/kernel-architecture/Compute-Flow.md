@@ -237,9 +237,13 @@ routing non-compute commands through scheduler queues.
 Scheduler and required-session lifetime are coordinated with this boundary.
 The graph-state portions of synchronous and asynchronous compute, scheduler
 information, scheduler replacement, required graph save, node-YAML replacement,
-and ROI projection are serialized by the per-graph executor. During embedded
-close, the Host first publishes its close marker and lets synchronous calls
-admitted before that marker finish submitting while the lane remains accepting.
+and ROI projection are serialized by the per-graph executor. Required-session
+lifetime admission also covers timing inspection and all-cache clearing through
+public result/status translation, even though those calls do not introduce a
+new scheduler task boundary. During embedded close, the Host first publishes
+its close marker and lets synchronous calls admitted before that marker finish
+public translation; graph-state users finish submitting while the lane remains
+accepting.
 Kernel then stops lane admission before the Host waits for async submission
 placeholders and status publication. This wakes a producer blocked by the full
 FIFO without requiring queue space; previously admitted callbacks still drain

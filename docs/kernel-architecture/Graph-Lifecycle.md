@@ -103,7 +103,10 @@ fails, only the candidate reservation is returned and the old scheduler
 continues to serve compute. Unknown types and invalid worker requests remain
 `InvalidParameter`. A successful replacement transfers one move-only
 reservation into `ReservationOwnedScheduler`, whose destruction orders
-concrete scheduler teardown before slot release.
+concrete scheduler teardown before slot release. After publication, shutdown
+and detach failures from the displaced owner are suppressed as post-commit
+diagnostics: the committed replacement remains successful, while destruction
+still returns the displaced reservation exactly once.
 
 ## Existing Session Save
 
@@ -185,10 +188,12 @@ the advanced topology generation.
 ## Close and Lifetime
 
 Embedded Host close first marks the session closing. New compute, scheduler,
-required save, node-YAML replacement, and ROI projection admissions fail. The
-Host waits for synchronous calls admitted before that marker while the lane is
-still accepting, so those calls can finish their graph-state submission. Kernel
-then stops admission on the same `GraphStateExecutor` used by those calls.
+required save, node-YAML replacement, ROI projection, timing inspection, and
+all-cache clearing admissions fail. The Host waits for synchronous calls
+admitted before that marker through caller-visible result/status translation
+while the lane is still accepting, so calls that use graph state can finish
+their graph-state submission. Kernel then stops admission on the same
+`GraphStateExecutor` used by those calls.
 Producers blocked on the full 64-entry FIFO are awakened and rejected without
 requiring queue space; only after this stop does the Host wait for async
 submission placeholders and caller-visible status publication. Already admitted

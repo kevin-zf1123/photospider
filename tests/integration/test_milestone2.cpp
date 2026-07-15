@@ -986,6 +986,44 @@ TEST_F(GraphRuntimeSchedulerTest,
   EXPECT_EQ(SchedulerLifecycleTracker::detach_count.load(), 1);
 }
 
+/**
+ * @brief Keeps a committed replacement successful across old cleanup failures.
+ * @return Nothing.
+ * @throws Nothing when publication remains the caller-visible result and the
+ * displaced owner is destroyed after both cleanup stages are attempted.
+ * @note The old scheduler throws after updating its local lifecycle state, so
+ * the test can safely inspect the replacement after the hostile cleanup sweep.
+ */
+TEST_F(GraphRuntimeSchedulerTest,
+       ReplaceCleanupFailureDoesNotReportCommittedPublicationAsFailure) {
+  GraphRuntime::Info info{"scheduler_replace_cleanup_diagnostic",
+                          "sessions/scheduler_test_session", "", ""};
+  GraphRuntime runtime(info);
+
+  auto displaced_state = std::make_shared<ReplacementCandidateState>(
+      ReplacementFailureStage::None, /*fail_shutdown=*/true,
+      /*fail_detach=*/true);
+  auto displaced = std::make_unique<TransactionalReplacementCandidate>(
+      displaced_state, /*expected_old=*/nullptr);
+  runtime.set_scheduler(ComputeIntent::GlobalHighPrecision,
+                        std::move(displaced));
+
+  auto candidate = std::make_unique<MockScheduler>();
+  MockScheduler* candidate_ptr = candidate.get();
+  EXPECT_NO_THROW(runtime.replace_scheduler(ComputeIntent::GlobalHighPrecision,
+                                            std::move(candidate)));
+
+  EXPECT_EQ(runtime.get_scheduler(ComputeIntent::GlobalHighPrecision),
+            candidate_ptr);
+  EXPECT_TRUE(candidate_ptr->was_attach_called());
+  EXPECT_FALSE(candidate_ptr->was_start_called());
+  EXPECT_EQ(displaced_state->shutdown_calls, 1);
+  EXPECT_EQ(displaced_state->detach_calls, 1);
+  EXPECT_EQ(displaced_state->destructor_calls, 1);
+  EXPECT_FALSE(displaced_state->running_after_shutdown);
+  EXPECT_TRUE(displaced_state->detached_after_cleanup);
+}
+
 TEST_F(GraphRuntimeSchedulerTest, ReplaceScheduler) {
   GraphRuntime::Info info{"scheduler_test", "sessions/scheduler_test_session",
                           "", ""};

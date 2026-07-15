@@ -46,8 +46,9 @@ candidate lifecycle 工作前预留可能需要的新 map node；candidate attac
 start 的整个期间，旧 owner 仍保持已发布且存活。Candidate 准备完成后，通过不分配内存的
 `unique_ptr` swap 发布。若 candidate attach/start 失败，shutdown 与 detach 会在独立异常边界中
 依次尝试，次生 cleanup error 被压制，精确的准备阶段异常继续传播。发布成功后，被替换的旧 owner
-按 shutdown、detach、destroy 顺序清理；旧 owner cleanup error 会在两个阶段均尝试后报告，但不会
-回滚新 owner 或 runtime running state。
+按 shutdown、detach、destroy 顺序清理；即使某一步失败，两个 lifecycle stage 仍都会尝试。旧
+owner cleanup error 会作为提交后的诊断状态被压制：publication 无法真实回滚，因此已经成功的
+replacement 仍报告成功。被替换 owner 仍会销毁，其 reservation 恰好释放一次。
 `GraphRuntime::stop()` 会在同一个 lifecycle mutex 下发布 stopped state，并把每个 scheduler 的
 `is_running()` 查询与 `shutdown()` 调用视为两个独立的 best-effort lifecycle step，只在 sweep 完成
 后重新抛出第一个 failure。若状态查询抛出异常，runtime 会记录该错误，但因为 scheduler 状态未知，
@@ -211,7 +212,9 @@ reservation；每个 reservation 在构造期间位于 concrete scheduler 之外
 Scheduler replacement 是 strong transaction：旧 scheduler 与 reservation 保持存活时，先规划并
 预留 candidate，再 attach/start candidate 并发布，最后才退役旧 owner。因此 replacement 需要
 transient headroom。容量不足会在不构造 candidate、也不扰动旧 compute 行为的情况下返回
-`GraphErrc::ComputeError`；无效请求与未知类型仍为 `InvalidParameter`。这个 32-slot ledger 只约束
+`GraphErrc::ComputeError`；无效请求与未知类型仍为 `InvalidParameter`。
+发布后，旧 owner 的 shutdown 与 detach 仍会进行 best-effort sweep；它们的失败不会把已提交的
+replacement 转成对外失败，销毁过程会把被替换的 reservation 恰好归还一次。这个 32-slot ledger 只约束
 内置 planning 或受信任 plugin grant 所代表的 worker；它不约束 graph-state executor、daemon
 thread、frontend helper、operation 内部 thread，也不是整个进程的 OS thread 总上限。
 `GraphStateExecutor` 具有独立的结构性上限：每个已加载 Graph 有一个 worker，最多有 64 个等待
