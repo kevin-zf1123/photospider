@@ -201,9 +201,12 @@ class GraphRuntime : public SchedulerHostContext {
   /**
    * @brief Releases every scheduler and graph-owned runtime resource.
    * @throws Nothing.
-   * @note Scheduler shutdown and detach are attempted in order under the
-   * registry lock, then every owner is destroyed before GPU/trace/model member
-   * teardown. Lifecycle exceptions are suppressed at this destructor boundary.
+   * @note The graph-state lane first stops admission, drains all admitted work,
+   *       and joins its worker. Scheduler shutdown and detach are then
+   * attempted in order under the registry lock before later GPU/trace/model
+   * member teardown. Scheduler lifecycle exceptions are suppressed; an executor
+   *       join invariant failure terminates rather than tearing down borrowed
+   *       state beneath a live graph-state task.
    */
   ~GraphRuntime() noexcept override;
 

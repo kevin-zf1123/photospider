@@ -245,15 +245,14 @@ class Kernel {
    *         name is unknown.
    * @throws Any exception propagated while stopping the runtime; no exception
    *         is thrown when the graph name is unknown.
-   * @note Runtime stop is submitted through the same GraphStateExecutor used by
-   *       all serialized graph-state work, including compute, scheduler
-   *       inspection/replacement, required save, node replacement, and ROI
-   *       projection. Closing therefore waits prior serialized work. Embedded
-   *       Host admission separately waits for complete admitted calls before
-   *       invoking this method. The graph map entry and its mutex-protected
-   *       LastError snapshot are erased only after stop succeeds; if stop
-   *       throws, both remain owned by Kernel so callers can inspect or retry
-   *       the session.
+   * @note Close first stops graph-state admission, drains all prior serialized
+   *       compute/mutation/inspection work, and joins the lane worker.
+   * Scheduler shutdown begins only after that boundary. Embedded Host admission
+   *       separately waits for complete admitted calls before invoking this
+   *       method. The graph map entry and its mutex-protected LastError
+   * snapshot are erased only after stop succeeds. If stop throws, one
+   * replacement lane worker is created before rethrow so the retained session
+   * can be inspected or closed again; replacement-worker failure is surfaced.
    */
   bool close_graph(const std::string& name);
   std::vector<std::string> list_graphs() const;
@@ -999,8 +998,8 @@ class Kernel {
    *         nullopt when the graph is missing.
    * @throws std::bad_alloc if request, task, queue, or future-state allocation
    *         fails while submitting graph-state work.
-   * @throws std::system_error if GraphStateExecutor cannot launch the async
-   * graph-state work.
+   * @throws std::runtime_error if the graph-state lane has stopped admission.
+   * @throws std::system_error if graph-state queue synchronization fails.
    * @note The returned future owns the request copy. benchmark_events remains
    * caller-owned and must outlive future completion. Future get() may rethrow
    * std::bad_alloc from compute execution or exact diagnostic construction.

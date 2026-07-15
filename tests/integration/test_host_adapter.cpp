@@ -16,6 +16,7 @@
 #include <memory>
 #include <mutex>
 #include <new>
+#include <set>
 #include <sstream>
 #include <stdexcept>
 #include <string>
@@ -26,19 +27,23 @@
 #include <vector>
 
 #include "adapters/opencv/buffer_adapter_opencv.hpp"
-#include "core/ps_types.hpp"  // NOLINT(build/include_subdir)
-#include "graph/node.hpp"     // NOLINT(build/include_subdir)
+#include "core/ps_types.hpp"               // NOLINT(build/include_subdir)
+#include "graph/graph_state_executor.hpp"  // NOLINT(build/include_subdir)
+#include "graph/node.hpp"                  // NOLINT(build/include_subdir)
 #if defined(PHOTOSPIDER_INTERNAL_GRAPH_STATE_EXECUTOR_TESTING)
 #include "graph/graph_state_executor_test_access.hpp"
 #endif
 #include "photospider/host/host.hpp"
 #include "photospider/scheduler/scheduler_task_runtime.hpp"  // NOLINT(build/include_subdir)
+#include "runtime/graph_runtime.hpp"  // NOLINT(build/include_subdir)
 #if defined(PHOTOSPIDER_INTERNAL_REQUIRED_TARGET_TESTING) &&      \
     defined(PHOTOSPIDER_INTERNAL_GRAPH_STATE_EXECUTOR_TESTING) && \
     defined(PHOTOSPIDER_INTERNAL_BAD_ALLOC_TESTING)
 #include "runtime/kernel_required_target_test_access.hpp"
 #endif
 #include "scheduler/scheduler_plugin_loader.hpp"  // NOLINT(build/include_subdir)
+#include "scheduler/serial_debug_scheduler.hpp"  // NOLINT(build/include_subdir)
+#include "support/kernel_test_access.hpp"
 
 #ifndef PS_TEST_OP_PLUGIN_DIR
 #define PS_TEST_OP_PLUGIN_DIR "build/test_plugins"
@@ -245,50 +250,95 @@ class ScopedRequiredTargetTestHook final {
 
 #if defined(PHOTOSPIDER_INTERNAL_GRAPH_STATE_EXECUTOR_TESTING)
 /**
- * @brief Counts real GraphStateExecutor mutex-contention observations.
- *
- * @throws Nothing for default construction and atomic updates.
- */
-struct GraphStateExecutorContentionState {
-  /** @brief Number of tasks whose try_lock observed an owned executor mutex. */
-  std::atomic<std::uint64_t> reached{0};
-};
-
-/**
- * @brief Records one real executor-contention observation.
- *
- * @param context Borrowed GraphStateExecutorContentionState pointer.
+ * @brief Updates one atomic maximum without locking or allocation.
+ * @param target Maximum observed by previous callbacks.
+ * @param candidate Newly observed scalar value.
  * @return Nothing.
  * @throws Nothing.
  */
-void record_graph_state_executor_contention(void* context) noexcept {
-  auto* state = static_cast<GraphStateExecutorContentionState*>(context);
-  state->reached.fetch_add(1, std::memory_order_release);
+void update_atomic_max(std::atomic<std::size_t>& target,
+                       std::size_t candidate) noexcept {
+  std::size_t observed = target.load(std::memory_order_relaxed);
+  while (observed < candidate &&
+         !target.compare_exchange_weak(observed, candidate,
+                                       std::memory_order_release,
+                                       std::memory_order_relaxed)) {
+  }
 }
 
 /**
- * @brief Installs and clears one deterministic executor-contention observer.
- *
- * @throws Nothing after construction.
- * @note The observer never blocks the task; the executor proceeds from failed
- * try_lock to its normal blocking lock after notification returns.
+ * @brief Retains bounded GraphStateExecutor observations for lane tests.
+ * @throws Nothing for default construction and atomic updates.
+ * @note The callback records only scalar maxima and queue events so it remains
+ *       valid while invoked under the executor state mutex.
  */
-class ScopedGraphStateExecutorContentionTestHook final {
+struct GraphStateExecutorLaneState {
+  /** @brief Number of nonempty TaskQueued checkpoints. */
+  std::atomic<std::uint64_t> queued_events{0};
+  /** @brief Fixed queue capacity reported by the observed executor. */
+  std::atomic<std::size_t> queue_capacity{0};
+  /** @brief Greatest waiting-task count observed. */
+  std::atomic<std::size_t> max_queued_tasks{0};
+  /** @brief Greatest active-task count observed. */
+  std::atomic<std::size_t> max_active_tasks{0};
+  /** @brief Greatest live lane-worker count observed. */
+  std::atomic<std::size_t> max_worker_threads{0};
+  /** @brief Number of worker-stop checkpoints observed. */
+  std::atomic<std::uint64_t> worker_stopped_events{0};
+  /** @brief Number of failed-close rollback reopen checkpoints observed. */
+  std::atomic<std::uint64_t> reopened_events{0};
+};
+
+/**
+ * @brief Records one exact bounded-lane snapshot without blocking.
+ * @param context Borrowed GraphStateExecutorLaneState pointer.
+ * @param snapshot Exact scalar state captured by the executor.
+ * @return Nothing.
+ * @throws Nothing.
+ */
+void record_graph_state_executor_snapshot(
+    void* context,
+    const testing::GraphStateExecutorTestSnapshot& snapshot) noexcept {
+  auto* state = static_cast<GraphStateExecutorLaneState*>(context);
+  state->queue_capacity.store(snapshot.queue_capacity,
+                              std::memory_order_release);
+  update_atomic_max(state->max_queued_tasks, snapshot.queued_tasks);
+  update_atomic_max(state->max_active_tasks, snapshot.active_tasks);
+  update_atomic_max(state->max_worker_threads, snapshot.worker_threads);
+  if (snapshot.event == testing::GraphStateExecutorTestEvent::TaskQueued &&
+      snapshot.queued_tasks > 0) {
+    state->queued_events.fetch_add(1, std::memory_order_release);
+  }
+  if (snapshot.event == testing::GraphStateExecutorTestEvent::WorkerStopped) {
+    state->worker_stopped_events.fetch_add(1, std::memory_order_release);
+  }
+  if (snapshot.event == testing::GraphStateExecutorTestEvent::Reopened) {
+    state->reopened_events.fetch_add(1, std::memory_order_release);
+  }
+}
+
+/**
+ * @brief Installs and clears one deterministic bounded-lane observer.
+ * @throws Nothing after construction.
+ * @note The callback performs only atomic scalar updates and never blocks or
+ *       re-enters the executor while its state mutex is held.
+ */
+class ScopedGraphStateExecutorTestHook final {
  public:
   /**
    * @brief Installs an observer backed by stable test-owned state.
    * @param state State that outlives this guard.
    * @throws Nothing.
    */
-  explicit ScopedGraphStateExecutorContentionTestHook(
-      GraphStateExecutorContentionState& state) noexcept
-      : hook_{&state, &record_graph_state_executor_contention} {
-    testing::set_graph_state_executor_contention_test_hook(&hook_);
+  explicit ScopedGraphStateExecutorTestHook(
+      GraphStateExecutorLaneState& state) noexcept
+      : hook_{&state, &record_graph_state_executor_snapshot} {
+    testing::set_graph_state_executor_test_hook(&hook_);
   }
 
   /** @brief Clears the observer before borrowed state is destroyed. */
-  ~ScopedGraphStateExecutorContentionTestHook() noexcept {
-    testing::set_graph_state_executor_contention_test_hook(nullptr);
+  ~ScopedGraphStateExecutorTestHook() noexcept {
+    testing::set_graph_state_executor_test_hook(nullptr);
   }
 
   /**
@@ -296,8 +346,8 @@ class ScopedGraphStateExecutorContentionTestHook final {
    * @param other Guard that retains observer ownership.
    * @throws Nothing because construction is unavailable.
    */
-  ScopedGraphStateExecutorContentionTestHook(
-      const ScopedGraphStateExecutorContentionTestHook& other) = delete;
+  ScopedGraphStateExecutorTestHook(
+      const ScopedGraphStateExecutorTestHook& other) = delete;
 
   /**
    * @brief Disables replacement of an installed observer.
@@ -305,12 +355,12 @@ class ScopedGraphStateExecutorContentionTestHook final {
    * @return No value because assignment is unavailable.
    * @throws Nothing because assignment is unavailable.
    */
-  ScopedGraphStateExecutorContentionTestHook& operator=(
-      const ScopedGraphStateExecutorContentionTestHook& other) = delete;
+  ScopedGraphStateExecutorTestHook& operator=(
+      const ScopedGraphStateExecutorTestHook& other) = delete;
 
  private:
   /** @brief Stable hook borrowed until guard destruction. */
-  testing::GraphStateExecutorContentionTestHook hook_;
+  testing::GraphStateExecutorTestHook hook_;
 };
 #endif
 
@@ -1252,6 +1302,132 @@ class ScopedSchedulerPluginCleanup final {
       const ScopedSchedulerPluginCleanup& other) = delete;
 };
 
+#if defined(PHOTOSPIDER_INTERNAL_GRAPH_STATE_EXECUTOR_TESTING)
+/**
+ * @brief Delegates scheduling while observing shutdown versus lane-stop order.
+ * @throws Whatever the delegated `SerialDebugScheduler` operation throws.
+ * @note The test owns this scheduler through `GraphRuntime`. Borrowed atomic
+ *       observations outlive runtime destruction and are touched only by the
+ *       externally serialized scheduler lifecycle path.
+ */
+class LaneOrderObservingScheduler final : public IScheduler {
+ public:
+  /**
+   * @brief Binds lifecycle observations to stable test-owned atomics.
+   * @param worker_stopped_events Lane-stop count published by the test hook.
+   * @param shutdown_called Set true when scheduler shutdown begins.
+   * @param shutdown_after_lane_stopped Set from the lane-stop count at
+   * shutdown.
+   * @throws Nothing.
+   */
+  LaneOrderObservingScheduler(
+      const std::atomic<std::uint64_t>& worker_stopped_events,
+      std::atomic<bool>& shutdown_called,
+      std::atomic<bool>& shutdown_after_lane_stopped) noexcept
+      : worker_stopped_events_(worker_stopped_events),
+        shutdown_called_(shutdown_called),
+        shutdown_after_lane_stopped_(shutdown_after_lane_stopped) {}
+
+  /** @brief Releases delegated scheduler state. @throws Nothing. */
+  ~LaneOrderObservingScheduler() noexcept override = default;
+
+  /** @copydoc SchedulerTaskRuntime::available_devices */
+  std::vector<Device> available_devices() const override {
+    return delegate_.available_devices();
+  }
+
+  /** @copydoc IScheduler::attach */
+  void attach(SchedulerHostContext& host) override { delegate_.attach(host); }
+
+  /** @copydoc IScheduler::detach */
+  void detach() override { delegate_.detach(); }
+
+  /** @copydoc IScheduler::start */
+  void start() override { delegate_.start(); }
+
+  /**
+   * @brief Records lane-stop ordering, then delegates scheduler shutdown.
+   * @return Nothing.
+   * @throws Whatever `SerialDebugScheduler::shutdown` throws.
+   * @note Acquire loads observe the executor callback's release publications.
+   */
+  void shutdown() override {
+    bool first_shutdown = false;
+    if (shutdown_called_.compare_exchange_strong(first_shutdown, true,
+                                                 std::memory_order_acq_rel,
+                                                 std::memory_order_acquire)) {
+      shutdown_after_lane_stopped_.store(
+          worker_stopped_events_.load(std::memory_order_acquire) > 0,
+          std::memory_order_release);
+    }
+    delegate_.shutdown();
+  }
+
+  /** @copydoc IScheduler::name */
+  std::string name() const override { return "lane_order_observer"; }
+
+  /** @copydoc IScheduler::get_stats */
+  std::string get_stats() const override { return delegate_.get_stats(); }
+
+  /** @copydoc IScheduler::is_running */
+  bool is_running() const override { return delegate_.is_running(); }
+
+  /** @copydoc SchedulerTaskRuntime::submit_initial_task_handles */
+  void submit_initial_task_handles(std::vector<TaskHandle>&& handles,
+                                   int total_task_count,
+                                   SchedulerTaskPriority priority) override {
+    delegate_.submit_initial_task_handles(std::move(handles), total_task_count,
+                                          priority);
+  }
+
+  /** @copydoc SchedulerTaskRuntime::submit_ready_task_handles_from_worker */
+  void submit_ready_task_handles_from_worker(
+      std::vector<TaskHandle>&& handles,
+      SchedulerTaskPriority priority) override {
+    delegate_.submit_ready_task_handles_from_worker(std::move(handles),
+                                                    priority);
+  }
+
+  /** @copydoc SchedulerTaskRuntime::submit_ready_task_any_thread */
+  void submit_ready_task_any_thread(
+      Task&& task, SchedulerTaskPriority priority,
+      std::optional<std::uint64_t> epoch) override {
+    delegate_.submit_ready_task_any_thread(std::move(task), priority, epoch);
+  }
+
+  /** @copydoc SchedulerTaskRuntime::wait_for_completion */
+  void wait_for_completion() override { delegate_.wait_for_completion(); }
+
+  /** @copydoc SchedulerTaskRuntime::set_exception */
+  void set_exception(std::exception_ptr error) override {
+    delegate_.set_exception(std::move(error));
+  }
+
+  /** @copydoc SchedulerTaskRuntime::inc_tasks_to_complete */
+  void inc_tasks_to_complete(int delta) override {
+    delegate_.inc_tasks_to_complete(delta);
+  }
+
+  /** @copydoc SchedulerTaskRuntime::dec_tasks_to_complete */
+  void dec_tasks_to_complete() override { delegate_.dec_tasks_to_complete(); }
+
+  /** @copydoc SchedulerTaskRuntime::log_event */
+  void log_event(SchedulerTraceAction action, int node_id) override {
+    delegate_.log_event(action, node_id);
+  }
+
+ private:
+  /** @brief Lane-stop counter borrowed from the installed executor hook. */
+  const std::atomic<std::uint64_t>& worker_stopped_events_;
+  /** @brief Test-owned publication that shutdown has begun. */
+  std::atomic<bool>& shutdown_called_;
+  /** @brief Test-owned snapshot of ordering at shutdown entry. */
+  std::atomic<bool>& shutdown_after_lane_stopped_;
+  /** @brief Complete scheduler behavior delegated by this observer. */
+  SerialDebugScheduler delegate_;
+};
+#endif
+
 /**
  * @brief Writes a graph backed by the dynamically loaded lifecycle operation.
  *
@@ -1512,6 +1688,80 @@ class OneShotSignal final {
   std::promise<void> promise_;
   /** @brief Whether signal() already attempted promise fulfilment. */
   bool signalled_ = false;
+};
+
+/**
+ * @brief Releases and closes a partially constructed Host submission storm.
+ * @throws Nothing from destruction; backend/status failures are contained.
+ * @note The scope is declared after the installed lane hook. Its destructor
+ *       releases the blocking operation, waits any outer producer, closes the
+ *       session so Host joins all status workers, and finally resets the
+ *       process-global blocking fixture before hook storage can expire.
+ */
+class HostSubmissionStormScope final {
+ public:
+  /**
+   * @brief Binds cleanup to one loaded Host session and release signal.
+   * @param host Host whose session must be closed during cleanup.
+   * @param session Loaded session used by every storm submission.
+   * @param release Signal that releases the active blocking operation.
+   * @throws Nothing.
+   */
+  HostSubmissionStormScope(Host& host, const GraphSessionId& session,
+                           OneShotSignal& release) noexcept
+      : host_(host), session_(session), release_(release) {}
+
+  /**
+   * @brief Releases work and performs best-effort session/fixture cleanup.
+   * @throws Nothing; cleanup failures are contained for assertion safety.
+   */
+  ~HostSubmissionStormScope() noexcept {
+    release_.signal();
+    try {
+      if (blocked_submission.valid()) {
+        blocked_submission.wait();
+      }
+    } catch (...) {
+    }
+    try {
+      (void)host_.close_graph(session_);
+    } catch (...) {
+    }
+    try {
+      reset_host_blocking_source();
+    } catch (...) {
+    }
+  }
+
+  /**
+   * @brief Prevents duplicate storm cleanup ownership.
+   * @param other Scope retaining cleanup responsibility.
+   * @throws Nothing because construction is unavailable.
+   */
+  HostSubmissionStormScope(const HostSubmissionStormScope& other) = delete;
+
+  /**
+   * @brief Prevents replacing cleanup ownership for a running storm.
+   * @param other Scope whose Host/session binding remains unchanged.
+   * @return No value because assignment is unavailable.
+   * @throws Nothing because assignment is unavailable.
+   */
+  HostSubmissionStormScope& operator=(const HostSubmissionStormScope& other) =
+      delete;
+
+  /** @brief Accepted caller-visible status futures retained through cleanup. */
+  std::vector<std::future<OperationStatus>> accepted;
+
+  /** @brief Producer blocked while the graph-state queue is full. */
+  std::future<Result<std::future<OperationStatus>>> blocked_submission;
+
+ private:
+  /** @brief Host owning the loaded session and async tracking table. */
+  Host& host_;
+  /** @brief Loaded session to close after all producers can finish. */
+  GraphSessionId session_;
+  /** @brief Idempotent release for the active blocking operation. */
+  OneShotSignal& release_;
 };
 
 /**
@@ -1831,8 +2081,8 @@ struct RequiredTargetRaceResult {
  * @brief Proves required-target use excludes one clear or reload operation.
  *
  * The target call is held immediately after required-node resolution while it
- * still owns GraphStateExecutor. The competing call must report a real failed
- * try_lock and remain pending until the target is released.
+ * still owns GraphStateExecutor. The competing call must enter the real FIFO
+ * queue and remain pending until the target is released.
  *
  * @tparam TargetCall Nullary callable invoking set-node or ROI projection.
  * @tparam CompetitorCall Nullary callable invoking clear or reload.
@@ -1860,8 +2110,8 @@ auto run_required_target_race(testing::RequiredTargetTestEvent event,
   OneShotSignal target_release;
   RequiredTargetGateState gate{event, target_release.future()};
   ScopedRequiredTargetTestHook target_hook(gate);
-  GraphStateExecutorContentionState contention;
-  ScopedGraphStateExecutorContentionTestHook contention_hook(contention);
+  GraphStateExecutorLaneState lane_state;
+  ScopedGraphStateExecutorTestHook lane_hook(lane_state);
   RequiredTargetRaceScope<TargetResult, CompetitorResult> race_scope(
       target_release);
 
@@ -1873,16 +2123,17 @@ auto run_required_target_race(testing::RequiredTargetTestEvent event,
     throw std::runtime_error(std::string(target_name) +
                              " did not reach its required-target checkpoint");
   }
+  lane_state.queued_events.store(0, std::memory_order_release);
 
   race_scope.competitor_future =
       std::async(std::launch::async,
                  [competitor_call = std::move(competitor_call)]() mutable {
                    return competitor_call();
                  });
-  if (!wait_for_atomic_event_count(contention.reached, 1,
+  if (!wait_for_atomic_event_count(lane_state.queued_events, 1,
                                    std::chrono::seconds(2))) {
     throw std::runtime_error(std::string(competitor_name) +
-                             " did not contend on GraphStateExecutor");
+                             " did not queue on GraphStateExecutor");
   }
 
   const bool competitor_pending =
@@ -1912,6 +2163,538 @@ bool contains_string(const std::vector<std::string>& values,
                      const std::string& needle) {
   return std::find(values.begin(), values.end(), needle) != values.end();
 }
+
+/**
+ * @brief Proves admitted graph-state work executes FIFO on one owned worker.
+ * @return Nothing; GoogleTest assertions report ordering or worker-identity
+ *         failures.
+ * @throws std::bad_alloc, std::system_error, or std::future_error if fixture,
+ *         executor, or synchronization setup fails.
+ * @note The first task blocks before later submissions so the test observes a
+ *       real backlog rather than sequentially submitting already-finished work.
+ */
+TEST(GraphStateExecutorLane, ExecutesFifoOnOneWorker) {
+  ScopedTempDir temp("photospider_graph_state_fifo_test");
+  GraphModel model(temp.root() / "cache");
+  GraphStateExecutor executor(model);
+
+  OneShotSignal release_first;
+  const std::shared_future<void> first_release = release_first.future();
+  std::promise<void> first_started;
+  std::future<void> first_started_future = first_started.get_future();
+  std::mutex observations_mutex;
+  std::vector<int> completion_order;
+  std::set<std::thread::id> worker_ids;
+
+  auto first = executor.submit([&](GraphModel&) {
+    first_started.set_value();
+    first_release.wait();
+    std::lock_guard<std::mutex> lock(observations_mutex);
+    completion_order.push_back(0);
+    worker_ids.insert(std::this_thread::get_id());
+    return 0;
+  });
+  ASSERT_EQ(first_started_future.wait_for(std::chrono::seconds(2)),
+            std::future_status::ready);
+
+  std::vector<std::future<int>> later;
+  constexpr int kLaterTaskCount = 8;
+  later.reserve(kLaterTaskCount);
+  for (int index = 1; index <= kLaterTaskCount; ++index) {
+    later.push_back(executor.submit([&, index](GraphModel&) {
+      std::lock_guard<std::mutex> lock(observations_mutex);
+      completion_order.push_back(index);
+      worker_ids.insert(std::this_thread::get_id());
+      return index;
+    }));
+  }
+
+  release_first.signal();
+  EXPECT_EQ(first.get(), 0);
+  for (int index = 1; index <= kLaterTaskCount; ++index) {
+    EXPECT_EQ(later[static_cast<std::size_t>(index - 1)].get(), index);
+  }
+
+  ASSERT_EQ(completion_order.size(),
+            static_cast<std::size_t>(kLaterTaskCount + 1));
+  for (int index = 0; index <= kLaterTaskCount; ++index) {
+    EXPECT_EQ(completion_order[static_cast<std::size_t>(index)], index);
+  }
+  EXPECT_EQ(worker_ids.size(), 1u);
+}
+
+/**
+ * @brief Proves packaged futures preserve reference, void, and exception
+ *        results without retiring the lane worker after a callable failure.
+ * @return Nothing; GoogleTest assertions report result or recovery failures.
+ * @throws std::bad_alloc, std::system_error, or std::future_error if fixture,
+ *         executor, or synchronization setup fails.
+ * @note The task submitted after the throwing callable must complete on the
+ *       same still-accepting lane.
+ */
+TEST(GraphStateExecutorLane, PreservesFutureResultsAndSurvivesExceptions) {
+  ScopedTempDir temp("photospider_graph_state_future_fidelity_test");
+  GraphModel model(temp.root() / "cache");
+  GraphStateExecutor executor(model);
+  int referenced_value = 41;
+
+  auto reference =
+      executor.submit([&](GraphModel&) -> int& { return referenced_value; });
+  int& returned_reference = reference.get();
+  EXPECT_EQ(&returned_reference, &referenced_value);
+
+  auto completed = executor.submit([&](GraphModel&) { ++referenced_value; });
+  completed.get();
+  EXPECT_EQ(referenced_value, 42);
+
+  auto failed = executor.submit([](GraphModel&) -> int {
+    throw std::runtime_error("graph-state future fidelity");
+  });
+  try {
+    (void)failed.get();
+    FAIL() << "throwing graph-state task returned a value";
+  } catch (const std::runtime_error& error) {
+    EXPECT_STREQ(error.what(), "graph-state future fidelity");
+  }
+
+  auto later = executor.submit([](GraphModel&) { return 43; });
+  EXPECT_EQ(later.get(), 43);
+}
+
+/**
+ * @brief Proves a full graph-state queue blocks admission until one slot frees.
+ * @return Nothing; GoogleTest assertions report premature admission, result,
+ *         or FIFO failures.
+ * @throws std::bad_alloc, std::system_error, or std::future_error if fixture,
+ *         executor, or synchronization setup fails.
+ * @note Capacity is injected as two waiting tasks. One active task holds the
+ *       worker while a fourth producer demonstrates blocking backpressure.
+ */
+TEST(GraphStateExecutorLane, FullQueueBlocksUntilAQueuedSlotIsAvailable) {
+  ScopedTempDir temp("photospider_graph_state_backpressure_test");
+  GraphModel model(temp.root() / "cache");
+  GraphStateExecutor executor(model, 2);
+
+  OneShotSignal release_first;
+  const std::shared_future<void> first_release = release_first.future();
+  std::promise<void> first_started;
+  std::future<void> first_started_future = first_started.get_future();
+  std::mutex order_mutex;
+  std::vector<int> completion_order;
+
+  auto first = executor.submit([&](GraphModel&) {
+    first_started.set_value();
+    first_release.wait();
+    std::lock_guard<std::mutex> lock(order_mutex);
+    completion_order.push_back(0);
+    return 0;
+  });
+  ASSERT_EQ(first_started_future.wait_for(std::chrono::seconds(2)),
+            std::future_status::ready);
+
+  auto second = executor.submit([&](GraphModel&) {
+    std::lock_guard<std::mutex> lock(order_mutex);
+    completion_order.push_back(1);
+    return 1;
+  });
+  auto third = executor.submit([&](GraphModel&) {
+    std::lock_guard<std::mutex> lock(order_mutex);
+    completion_order.push_back(2);
+    return 2;
+  });
+
+  std::promise<void> fourth_entered;
+  std::future<void> fourth_entered_future = fourth_entered.get_future();
+  auto fourth_submission = std::async(std::launch::async, [&] {
+    fourth_entered.set_value();
+    return executor.submit([&](GraphModel&) {
+      std::lock_guard<std::mutex> lock(order_mutex);
+      completion_order.push_back(3);
+      return 3;
+    });
+  });
+  ASSERT_EQ(fourth_entered_future.wait_for(std::chrono::seconds(2)),
+            std::future_status::ready);
+  EXPECT_EQ(fourth_submission.wait_for(std::chrono::milliseconds(100)),
+            std::future_status::timeout);
+
+  release_first.signal();
+  std::future<int> fourth = fourth_submission.get();
+  EXPECT_EQ(first.get(), 0);
+  EXPECT_EQ(second.get(), 1);
+  EXPECT_EQ(third.get(), 2);
+  EXPECT_EQ(fourth.get(), 3);
+  EXPECT_EQ(completion_order, (std::vector<int>{0, 1, 2, 3}));
+}
+
+/**
+ * @brief Proves close rejects blocked/new producers and drains admitted work.
+ * @return Nothing; GoogleTest assertions report admission or drain-order
+ *         failures.
+ * @throws std::bad_alloc, std::system_error, or std::future_error if fixture,
+ *         executor, or synchronization setup fails.
+ * @note A one-slot queue makes the third producer block deterministically while
+ *       close begins on another thread and the first task remains active.
+ */
+TEST(GraphStateExecutorLane, CloseWakesBlockedProducerAndDrainsAdmittedWork) {
+  ScopedTempDir temp("photospider_graph_state_close_drain_test");
+  GraphModel model(temp.root() / "cache");
+  GraphStateExecutor executor(model, 1);
+
+  OneShotSignal release_first;
+  const std::shared_future<void> first_release = release_first.future();
+  std::promise<void> first_started;
+  std::future<void> first_started_future = first_started.get_future();
+  std::mutex order_mutex;
+  std::vector<int> completion_order;
+
+  auto first = executor.submit([&](GraphModel&) {
+    first_started.set_value();
+    first_release.wait();
+    std::lock_guard<std::mutex> lock(order_mutex);
+    completion_order.push_back(0);
+    return 0;
+  });
+  ASSERT_EQ(first_started_future.wait_for(std::chrono::seconds(2)),
+            std::future_status::ready);
+  auto second = executor.submit([&](GraphModel&) {
+    std::lock_guard<std::mutex> lock(order_mutex);
+    completion_order.push_back(1);
+    return 1;
+  });
+
+  std::promise<void> third_entered;
+  std::future<void> third_entered_future = third_entered.get_future();
+  auto third_submission = std::async(std::launch::async, [&] {
+    third_entered.set_value();
+    return executor.submit([](GraphModel&) { return 2; });
+  });
+  ASSERT_EQ(third_entered_future.wait_for(std::chrono::seconds(2)),
+            std::future_status::ready);
+  ASSERT_EQ(third_submission.wait_for(std::chrono::milliseconds(100)),
+            std::future_status::timeout);
+
+  std::promise<void> close_entered;
+  std::future<void> close_entered_future = close_entered.get_future();
+  auto close = std::async(std::launch::async, [&] {
+    close_entered.set_value();
+    executor.close_and_drain();
+  });
+  ASSERT_EQ(close_entered_future.wait_for(std::chrono::seconds(2)),
+            std::future_status::ready);
+  ASSERT_EQ(third_submission.wait_for(std::chrono::seconds(2)),
+            std::future_status::ready);
+  EXPECT_THROW((void)third_submission.get(), std::runtime_error);
+  EXPECT_EQ(close.wait_for(std::chrono::milliseconds(0)),
+            std::future_status::timeout);
+
+  release_first.signal();
+  EXPECT_EQ(first.get(), 0);
+  EXPECT_EQ(second.get(), 1);
+  close.get();
+  EXPECT_EQ(completion_order, (std::vector<int>{0, 1}));
+  EXPECT_THROW((void)executor.submit([](GraphModel&) { return 3; }),
+               std::runtime_error);
+}
+
+/**
+ * @brief Proves a lane task cannot recursively submit to its own worker.
+ * @return Nothing; GoogleTest assertions report missing fail-fast behavior.
+ * @throws std::bad_alloc or std::system_error if fixture or worker setup fails.
+ * @note The outer task does not wait on a nested future; the expected
+ *       `std::logic_error` must therefore come from explicit re-entry
+ * detection, not from a queue-full side effect.
+ */
+TEST(GraphStateExecutorLane, WorkerSubmissionReentryFailsBeforeWaiting) {
+  ScopedTempDir temp("photospider_graph_state_submit_reentry_test");
+  GraphModel model(temp.root() / "cache");
+  GraphStateExecutor executor(model);
+
+  auto outer = executor.submit([&](GraphModel&) {
+    try {
+      (void)executor.submit([](GraphModel&) { return 99; });
+    } catch (const std::logic_error&) {
+      return true;
+    }
+    return false;
+  });
+
+  EXPECT_TRUE(outer.get());
+}
+
+/**
+ * @brief Proves a lane task cannot close and join its own worker thread.
+ * @return Nothing; GoogleTest assertions report missing fail-fast behavior or
+ *         accidental admission closure.
+ * @throws std::bad_alloc or std::system_error if fixture or worker setup fails.
+ * @note A later task must still run, proving the rejected nested close did not
+ *       mutate the accepting lifecycle state.
+ */
+TEST(GraphStateExecutorLane, WorkerCloseReentryFailsWithoutClosingAdmission) {
+  ScopedTempDir temp("photospider_graph_state_close_reentry_test");
+  GraphModel model(temp.root() / "cache");
+  GraphStateExecutor executor(model);
+
+  auto outer = executor.submit([&](GraphModel&) {
+    try {
+      executor.close_and_drain();
+    } catch (const std::logic_error&) {
+      return true;
+    }
+    return false;
+  });
+  EXPECT_TRUE(outer.get());
+
+  auto later = executor.submit([](GraphModel&) { return 7; });
+  EXPECT_EQ(later.get(), 7);
+}
+
+/**
+ * @brief Proves concurrent and repeated close calls share one joined state.
+ * @return Nothing; GoogleTest assertions report premature close completion,
+ *         join failures, or accidental admission reopening.
+ * @throws std::bad_alloc, std::system_error, or std::future_error if fixture,
+ *         executor, or synchronization setup fails.
+ * @note Three callers enter close while one task owns the worker. Every close
+ *       must remain pending until the same task is released and worker joined.
+ */
+TEST(GraphStateExecutorLane, ConcurrentAndRepeatedCloseShareOneJoin) {
+  ScopedTempDir temp("photospider_graph_state_concurrent_close_test");
+  GraphModel model(temp.root() / "cache");
+  GraphStateExecutor executor(model);
+
+  OneShotSignal release_task;
+  const std::shared_future<void> task_release = release_task.future();
+  std::promise<void> task_started;
+  std::future<void> task_started_future = task_started.get_future();
+  auto task = executor.submit([&](GraphModel&) {
+    task_started.set_value();
+    task_release.wait();
+  });
+  ASSERT_EQ(task_started_future.wait_for(std::chrono::seconds(2)),
+            std::future_status::ready);
+
+  constexpr std::size_t kCloserCount = 3;
+  std::vector<std::promise<void>> closer_entered(kCloserCount);
+  std::vector<std::future<void>> closer_entered_futures;
+  std::vector<std::future<void>> closers;
+  closer_entered_futures.reserve(kCloserCount);
+  closers.reserve(kCloserCount);
+  for (std::size_t index = 0; index < kCloserCount; ++index) {
+    closer_entered_futures.push_back(closer_entered[index].get_future());
+    closers.push_back(std::async(std::launch::async, [&, index] {
+      closer_entered[index].set_value();
+      executor.close_and_drain();
+    }));
+  }
+  for (auto& entered : closer_entered_futures) {
+    ASSERT_EQ(entered.wait_for(std::chrono::seconds(2)),
+              std::future_status::ready);
+  }
+  for (auto& closer : closers) {
+    EXPECT_EQ(closer.wait_for(std::chrono::milliseconds(100)),
+              std::future_status::timeout);
+  }
+
+  release_task.signal();
+  task.get();
+  for (auto& closer : closers) {
+    closer.get();
+  }
+
+  executor.close_and_drain();
+  executor.close_and_drain();
+  EXPECT_THROW((void)executor.submit([](GraphModel&) {}), std::runtime_error);
+}
+
+#if defined(PHOTOSPIDER_INTERNAL_GRAPH_STATE_EXECUTOR_TESTING)
+/**
+ * @brief Proves real Host submission pressure respects graph-state lane bounds.
+ * @return Nothing; GoogleTest assertions report capacity, worker, admission, or
+ *         status failures.
+ * @throws std::bad_alloc, std::system_error, or filesystem exceptions if Host,
+ *         graph, worker, or fixture setup fails.
+ * @note Caller threads and Host status-mapping workers are separate ownership
+ *       domains. This test observes only the worker and queue owned by the real
+ *       per-Graph `GraphStateExecutor` reached through the public Host path.
+ */
+TEST(EmbeddedHostAdapter, SubmissionStormKeepsGraphStateLaneBounded) {
+  register_host_adapter_ops();
+  ScopedTempDir temp("photospider_host_graph_state_storm_test");
+  auto host = create_embedded_host();
+  ASSERT_NE(host, nullptr);
+  const GraphSessionId session = load_test_graph(
+      *host, temp.root(), "graph_state_storm", "blocking_source");
+
+  GraphStateExecutorLaneState lane_state;
+  ScopedGraphStateExecutorTestHook lane_hook(lane_state);
+  OneShotSignal release_active;
+  configure_host_blocking_source(release_active.future());
+  HostSubmissionStormScope cleanup(*host, session, release_active);
+
+  HostComputeRequest request = make_compute_request(session);
+  request.cache.force_recache = true;
+  auto active = host->compute_async(request);
+  ASSERT_TRUE(active.status.ok) << active.status.message;
+  cleanup.accepted.push_back(std::move(active.value));
+  ASSERT_TRUE(wait_for_host_blocking_source(std::chrono::seconds(2)));
+
+  cleanup.accepted.reserve(GraphStateExecutor::kDefaultQueueCapacity + 2);
+  for (std::size_t index = 0; index < GraphStateExecutor::kDefaultQueueCapacity;
+       ++index) {
+    auto queued = host->compute_async(request);
+    ASSERT_TRUE(queued.status.ok) << queued.status.message;
+    cleanup.accepted.push_back(std::move(queued.value));
+  }
+
+  EXPECT_EQ(lane_state.queue_capacity.load(std::memory_order_acquire),
+            GraphStateExecutor::kDefaultQueueCapacity);
+  EXPECT_EQ(lane_state.max_queued_tasks.load(std::memory_order_acquire),
+            GraphStateExecutor::kDefaultQueueCapacity);
+  EXPECT_EQ(lane_state.max_active_tasks.load(std::memory_order_acquire), 1u);
+  EXPECT_EQ(lane_state.max_worker_threads.load(std::memory_order_acquire), 1u);
+
+  std::promise<void> blocked_entered;
+  std::future<void> blocked_entered_future = blocked_entered.get_future();
+  cleanup.blocked_submission = std::async(std::launch::async, [&] {
+    blocked_entered.set_value();
+    return host->compute_async(request);
+  });
+  ASSERT_EQ(blocked_entered_future.wait_for(std::chrono::seconds(2)),
+            std::future_status::ready);
+  EXPECT_EQ(cleanup.blocked_submission.wait_for(std::chrono::milliseconds(100)),
+            std::future_status::timeout);
+
+  release_active.signal();
+  auto final_submission = cleanup.blocked_submission.get();
+  ASSERT_TRUE(final_submission.status.ok) << final_submission.status.message;
+  cleanup.accepted.push_back(std::move(final_submission.value));
+  for (auto& status_future : cleanup.accepted) {
+    const OperationStatus status = status_future.get();
+    EXPECT_TRUE(status.ok) << status.message;
+  }
+
+  EXPECT_LE(lane_state.max_queued_tasks.load(std::memory_order_acquire),
+            GraphStateExecutor::kDefaultQueueCapacity);
+  EXPECT_LE(lane_state.max_active_tasks.load(std::memory_order_acquire), 1u);
+  EXPECT_LE(lane_state.max_worker_threads.load(std::memory_order_acquire), 1u);
+  const VoidResult closed = host->close_graph(session);
+  EXPECT_TRUE(closed.status.ok) << closed.status.message;
+  reset_host_blocking_source();
+}
+
+/**
+ * @brief Proves runtime destruction drains dropped-future work before scheduler
+ *        teardown.
+ * @return Nothing; GoogleTest assertions report premature destruction or
+ *         teardown-order failures.
+ * @throws std::bad_alloc, std::system_error, or filesystem exceptions if the
+ *         runtime, scheduler, task, or synchronization fixture cannot start.
+ * @note The graph-state future is intentionally discarded. Only runtime-owned
+ *       lane lifecycle can keep the task alive and join it before shutdown.
+ */
+TEST(GraphStateExecutorLane,
+     RuntimeDestructionDrainsDiscardedFutureBeforeSchedulerShutdown) {
+  ScopedTempDir temp("photospider_graph_state_runtime_teardown_test");
+  GraphStateExecutorLaneState lane_state;
+  ScopedGraphStateExecutorTestHook lane_hook(lane_state);
+  std::atomic<bool> shutdown_called{false};
+  std::atomic<bool> shutdown_after_lane_stopped{false};
+
+  GraphRuntime::Info info;
+  info.name = "graph_state_runtime_teardown";
+  info.root = temp.root() / "session";
+  info.cache_root = temp.root() / "cache";
+  auto runtime = std::make_unique<GraphRuntime>(info);
+  runtime->set_scheduler(ComputeIntent::GlobalHighPrecision,
+                         std::make_unique<LaneOrderObservingScheduler>(
+                             lane_state.worker_stopped_events, shutdown_called,
+                             shutdown_after_lane_stopped));
+
+  OneShotSignal release_task;
+  const std::shared_future<void> task_release = release_task.future();
+  std::promise<void> task_started;
+  std::future<void> task_started_future = task_started.get_future();
+  auto discarded_future = runtime->graph_state().submit([&](GraphModel&) {
+    task_started.set_value();
+    task_release.wait();
+  });
+  if (task_started_future.wait_for(std::chrono::seconds(2)) !=
+      std::future_status::ready) {
+    release_task.signal();
+    FAIL() << "discarded-future graph-state task did not start";
+  }
+
+  auto discard_operation = std::async(
+      std::launch::async, [future = std::move(discarded_future)]() mutable {
+        future = std::future<void>{};
+      });
+  if (discard_operation.wait_for(std::chrono::seconds(2)) !=
+      std::future_status::ready) {
+    release_task.signal();
+    discard_operation.wait();
+    FAIL() << "destroying packaged-task future waited for task completion";
+  }
+  discard_operation.get();
+
+  auto destruction =
+      std::async(std::launch::async, [&runtime] { runtime.reset(); });
+  const std::future_status pending =
+      destruction.wait_for(std::chrono::milliseconds(100));
+  const bool shutdown_seen_before_release =
+      shutdown_called.load(std::memory_order_acquire);
+  const bool ordered_before_release =
+      shutdown_after_lane_stopped.load(std::memory_order_acquire);
+
+  release_task.signal();
+  destruction.get();
+
+  EXPECT_EQ(pending, std::future_status::timeout);
+  EXPECT_FALSE(shutdown_seen_before_release);
+  EXPECT_FALSE(ordered_before_release);
+  EXPECT_TRUE(shutdown_called.load(std::memory_order_acquire));
+  EXPECT_TRUE(shutdown_after_lane_stopped.load(std::memory_order_acquire));
+  EXPECT_GE(lane_state.worker_stopped_events.load(std::memory_order_acquire),
+            1u);
+}
+
+/**
+ * @brief Proves explicit Kernel close joins the lane before scheduler shutdown.
+ * @return Nothing; GoogleTest assertions report load, close, or first-shutdown
+ *         ordering failures.
+ * @throws std::bad_alloc, std::system_error, GraphError, or filesystem
+ *         exceptions if Kernel/runtime/scheduler setup fails.
+ * @note The scheduler records only its first shutdown entry so the later
+ *       destructor cleanup cannot mask an earlier stop performed on the lane
+ *       worker.
+ */
+TEST(GraphStateExecutorLane, KernelCloseJoinsLaneBeforeSchedulerShutdown) {
+  ScopedTempDir temp("photospider_graph_state_kernel_close_order_test");
+  GraphStateExecutorLaneState lane_state;
+  ScopedGraphStateExecutorTestHook lane_hook(lane_state);
+  std::atomic<bool> shutdown_called{false};
+  std::atomic<bool> shutdown_after_lane_stopped{false};
+
+  Kernel kernel;
+  const std::string graph_name = "graph_state_kernel_close_order";
+  const auto loaded =
+      kernel.load_graph(graph_name, (temp.root() / "sessions").string(), "", "",
+                        (temp.root() / "cache").string());
+  ASSERT_TRUE(loaded.has_value());
+  GraphRuntime& runtime =
+      testing::KernelTestAccess::runtime(kernel, graph_name);
+  runtime.set_scheduler(ComputeIntent::GlobalHighPrecision,
+                        std::make_unique<LaneOrderObservingScheduler>(
+                            lane_state.worker_stopped_events, shutdown_called,
+                            shutdown_after_lane_stopped));
+
+  ASSERT_TRUE(kernel.close_graph(graph_name));
+  EXPECT_TRUE(shutdown_called.load(std::memory_order_acquire));
+  EXPECT_TRUE(shutdown_after_lane_stopped.load(std::memory_order_acquire));
+  EXPECT_GE(lane_state.worker_stopped_events.load(std::memory_order_acquire),
+            1u);
+}
+#endif
 
 TEST(EmbeddedHostAdapter,
      CoversInteractionCoreWithPublicSnapshotsAndNoKernelExposure) {
@@ -2147,6 +2930,8 @@ TEST(EmbeddedHostAdapter, CloseShutdownFailureRetainsSessionAndAllowsRetry) {
 
   const GraphSessionId session =
       load_test_graph(*host, temp.root(), "close_failure_retry_graph");
+  GraphStateExecutorLaneState lane_state;
+  ScopedGraphStateExecutorTestHook lane_hook(lane_state);
   HostComputeRequest stale_error_request = make_compute_request(session);
   stale_error_request.node = NodeId{99};
   const Result<ImageBuffer> stale_compute =
@@ -2167,6 +2952,9 @@ TEST(EmbeddedHostAdapter, CloseShutdownFailureRetainsSessionAndAllowsRetry) {
     EXPECT_NE(failed_close.status.message.find("fixture shutdown failure"),
               std::string::npos);
     EXPECT_EQ(fixture.shutdown_count(), 1);
+    EXPECT_EQ(lane_state.reopened_events.load(std::memory_order_acquire), 1u);
+    EXPECT_LE(lane_state.max_worker_threads.load(std::memory_order_acquire),
+              1u);
   }
 
   const Result<std::vector<GraphSessionId>> after_failure = host->list_graphs();
@@ -2191,6 +2979,9 @@ TEST(EmbeddedHostAdapter, CloseShutdownFailureRetainsSessionAndAllowsRetry) {
   const VoidResult retry_close = host->close_graph(session);
   EXPECT_TRUE(retry_close.status.ok) << retry_close.status.message;
   EXPECT_EQ(fixture.shutdown_count(), 2);
+  EXPECT_GE(lane_state.worker_stopped_events.load(std::memory_order_acquire),
+            2u);
+  EXPECT_EQ(lane_state.reopened_events.load(std::memory_order_acquire), 1u);
 
   const Result<std::vector<GraphSessionId>> after_retry = host->list_graphs();
   ASSERT_TRUE(after_retry.status.ok) << after_retry.status.message;
@@ -3462,7 +4253,8 @@ TEST(EmbeddedHostAdapter, RoiProjectionUsesPublicPixelRectValues) {
  * @return Nothing; GoogleTest assertions report graph-state ordering failures.
  * @throws std::bad_alloc or filesystem exceptions if fixture setup fails.
  * @note The target gate blocks only after the existing node is resolved while
- * GraphStateExecutor remains locked. Clear must stay pending, then run second.
+ *       its GraphStateExecutor callback remains active. Clear must stay
+ * pending, then run second.
  */
 TEST(EmbeddedHostAdapter, SetNodeYamlLookupAndMutationExcludeConcurrentClear) {
   register_host_adapter_ops();
