@@ -478,6 +478,7 @@ if(BUILD_TESTING)
         PHOTOSPIDER_INTERNAL_GRAPH_IO_TESTING
         PHOTOSPIDER_INTERNAL_GRAPH_STATE_EXECUTOR_TESTING
         PHOTOSPIDER_INTERNAL_HOST_OPERATION_TESTING
+        PHOTOSPIDER_INTERNAL_OPENCV_CONCURRENCY_TESTING
         PHOTOSPIDER_INTERNAL_REQUIRED_TARGET_TESTING)
 endif()
 target_compile_features(photospider PUBLIC cxx_std_17)
@@ -1185,6 +1186,26 @@ if(BUILD_TESTING)
         tests/integration/test_scheduler_worker_budget.cpp)
     target_compile_definitions(test_scheduler_worker_budget PRIVATE
         PHOTOSPIDER_INTERNAL_BAD_ALLOC_TESTING)
+    add_ps_test(test_opencv_operation_concurrency
+        tests/integration/test_opencv_operation_concurrency.cpp)
+    target_compile_definitions(test_opencv_operation_concurrency PRIVATE
+        PHOTOSPIDER_INTERNAL_OPENCV_CONCURRENCY_TESTING)
+    target_link_libraries(test_opencv_operation_concurrency PRIVATE
+        photospider_cli_common)
+    add_executable(opencv_operation_concurrency_benchmark
+        tests/verification/opencv_operation_concurrency_benchmark.cpp)
+    set_target_properties(opencv_operation_concurrency_benchmark PROPERTIES
+        RUNTIME_OUTPUT_DIRECTORY "${TEST_OUTPUT_DIR}")
+    target_include_directories(opencv_operation_concurrency_benchmark PRIVATE
+        "${PROJECT_SOURCE_DIR}/include"
+        "${PROJECT_SOURCE_DIR}/src/lib"
+        ${OpenCV_INCLUDE_DIRS})
+    target_compile_definitions(opencv_operation_concurrency_benchmark PRIVATE
+        PHOTOSPIDER_INTERNAL_OPENCV_CONCURRENCY_TESTING)
+    target_link_libraries(opencv_operation_concurrency_benchmark PRIVATE
+        photospider_cli_common
+        yaml-cpp::yaml-cpp
+        ${OpenCV_LIBS})
     add_ps_test(test_scheduler_worker_budget_unit
         tests/unit/test_scheduler_worker_budget.cpp)
     add_ps_test(test_scheduler_factory_plan
@@ -1431,6 +1452,9 @@ if(BUILD_TESTING)
     gtest_discover_tests(test_scheduler_worker_budget
         WORKING_DIRECTORY ${PROJECT_SOURCE_DIR}
         PROPERTIES TIMEOUT 30)
+    gtest_discover_tests(test_opencv_operation_concurrency
+        WORKING_DIRECTORY ${PROJECT_SOURCE_DIR}
+        PROPERTIES TIMEOUT 60)
     gtest_discover_tests(test_scheduler_worker_budget_unit
         WORKING_DIRECTORY ${PROJECT_SOURCE_DIR}
         PROPERTIES TIMEOUT 30)
