@@ -1584,6 +1584,40 @@ bool receive_before_deadline(int fd, void* data, std::size_t size,
 }
 
 /**
+ * @brief Reads one complete frame from a nonblocking test socket by deadline.
+ *
+ * @param fd Connected nonblocking Unix stream descriptor.
+ * @param deadline Absolute deadline shared by header and payload reads.
+ * @return Complete payload, bounded-length failure, or exact timeout/IO
+ *         diagnostic.
+ * @throws std::bad_alloc if payload or diagnostic construction allocates.
+ * @note `poll(POLLIN)` proves only that at least one byte is readable. This
+ *       helper uses `receive_before_deadline()` for both frame ranges so stream
+ *       fragmentation cannot turn a valid partial response into `EAGAIN`.
+ */
+internal::FrameReadResult read_frame_before_deadline(
+    int fd, std::chrono::steady_clock::time_point deadline) {
+  std::uint32_t network_size = 0;
+  std::string message;
+  if (!receive_before_deadline(fd, &network_size, sizeof(network_size),
+                               deadline, &message)) {
+    return {internal::FrameReadState::IoError, {}, std::move(message)};
+  }
+  const std::uint32_t payload_size = ntohl(network_size);
+  if (payload_size == 0 || payload_size > kMaximumFramePayloadBytes) {
+    return {internal::FrameReadState::InvalidLength,
+            {},
+            "frame payload length is outside 1..16777216 bytes"};
+  }
+  std::string payload(payload_size, '\0');
+  if (!receive_before_deadline(fd, payload.data(), payload.size(), deadline,
+                               &message)) {
+    return {internal::FrameReadState::IoError, {}, std::move(message)};
+  }
+  return {internal::FrameReadState::Complete, std::move(payload), {}};
+}
+
+/**
  * @brief Performs one short-lived typed-envelope call without public Client
  *        compute helpers.
  *
@@ -3328,17 +3362,9 @@ TEST(IpcDaemonLifecycle,
     if (!all_responses_complete) {
       break;
     }
-    std::string readiness_message;
-    if (!wait_for_descriptor(
-            client.get(), POLLIN,
-            std::chrono::steady_clock::now() + std::chrono::seconds(5),
-            &readiness_message)) {
-      all_responses_complete = false;
-      response_error = std::move(readiness_message);
-      break;
-    }
-    const internal::FrameReadResult response =
-        internal::read_frame(client.get());
+    const internal::FrameReadResult response = read_frame_before_deadline(
+        client.get(),
+        std::chrono::steady_clock::now() + std::chrono::seconds(5));
     if (response.state != internal::FrameReadState::Complete ||
         response.payload.find("\"id\":\"pending\"") == std::string::npos ||
         response.payload.find("\"pong\":true") == std::string::npos) {
@@ -3424,14 +3450,12 @@ TEST(IpcDaemonLifecycle,
       state.error = errno;
     }
   }
-  std::string readiness_message;
-  const bool response_ready =
-      written == frame.size() &&
-      wait_for_descriptor(state.clients[0].get(), POLLIN, state.deadline,
-                          &readiness_message);
   const internal::FrameReadResult response =
-      response_ready ? internal::read_frame(state.clients[0].get())
-                     : internal::FrameReadResult{};
+      written == frame.size()
+          ? read_frame_before_deadline(state.clients[0].get(), state.deadline)
+          : internal::FrameReadResult{};
+  const bool response_ready =
+      response.state == internal::FrameReadState::Complete;
   const char stop_token = 's';
   const ssize_t stop_written = ::write(stop_writer.get(), &stop_token, 1);
   if (stop_written != 1) {
@@ -3444,7 +3468,7 @@ TEST(IpcDaemonLifecycle,
   EXPECT_EQ(state.error, 0) << std::strerror(state.error);
   EXPECT_EQ(state.count, 1U);
   EXPECT_EQ(written, frame.size());
-  EXPECT_TRUE(response_ready) << readiness_message;
+  EXPECT_TRUE(response_ready) << response.message;
   EXPECT_EQ(response.state, internal::FrameReadState::Complete)
       << response.message;
   EXPECT_NE(response.payload.find("\"id\":\"pending\""), std::string::npos)
