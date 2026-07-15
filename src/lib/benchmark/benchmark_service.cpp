@@ -7,12 +7,14 @@
 #include <map>
 #include <new>
 #include <numeric>
+#include <stdexcept>
 #include <string>
 #include <thread>
 #include <utility>
 #include <vector>
 
 #include "benchmark/benchmark_yaml_generator.hpp"
+#include "scheduler/scheduler_worker_budget.hpp"
 
 namespace fs = std::filesystem;
 
@@ -106,6 +108,54 @@ static std::map<int, std::string> benchmark_op_names_by_node(
 }
 
 /**
+ * @brief Validates and resolves one benchmark scheduler worker request.
+ *
+ * @param configured_threads Benchmark `execution.threads` value.
+ * @return Exact nonzero scheduler worker grant in the range one through eight.
+ * @throws std::invalid_argument if configured_threads is negative or greater
+ *         than the public scheduler request maximum.
+ * @note Zero uses the same bounded hardware-concurrency resolution as product
+ *       scheduler construction; positive legal values remain exact.
+ */
+static unsigned int resolve_benchmark_worker_count(int configured_threads) {
+  if (configured_threads < 0) {
+    throw std::invalid_argument(
+        "benchmark execution.threads must be between zero and eight");
+  }
+  return resolve_scheduler_worker_count(
+      static_cast<unsigned int>(configured_threads),
+      std::thread::hardware_concurrency());
+}
+
+/**
+ * @brief Applies one benchmark worker request to future Host graph defaults.
+ *
+ * @param host Host whose HP and RT CPU scheduler defaults are updated.
+ * @param configured_threads Validated benchmark request; zero remains the
+ *        public automatic-selection sentinel.
+ * @return Nothing.
+ * @throws std::bad_alloc if Host request or status storage exhausts memory.
+ * @throws std::runtime_error if Host rejects the scheduler configuration.
+ * @note The request is applied before benchmark graph load. Existing graph
+ *       runtimes, if any, retain their scheduler configuration.
+ */
+static void configure_benchmark_scheduler(Host& host, int configured_threads) {
+  HostSchedulerConfig scheduler_config;
+  scheduler_config.hp_type = "cpu_work_stealing";
+  scheduler_config.rt_type = "cpu_work_stealing";
+  scheduler_config.worker_count = static_cast<unsigned int>(configured_threads);
+  const VoidResult configured =
+      host.configure_scheduler_defaults(scheduler_config);
+  if (!configured.status.ok) {
+    std::string reason = configured.status.message;
+    if (reason.empty()) {
+      reason = "Host rejected benchmark scheduler defaults";
+    }
+    throw std::runtime_error(reason);
+  }
+}
+
+/**
  * @brief Binds benchmark orchestration to a borrowed Host.
  *
  * @param svc Host used for graph lifecycle, compute, inspection, and telemetry.
@@ -128,14 +178,22 @@ BenchmarkService::BenchmarkService(ps::Host& svc) : svc_(svc) {}
  * @return Aggregated result for the requested session.
  * @throws std::bad_alloc if Host execution or local result storage exhausts
  * memory.
+ * @throws std::invalid_argument when `execution.threads` is outside zero
+ * through eight.
  * @throws std::runtime_error when graph input, loading, or compute fails.
  * @throws YAML::Exception when generated or user-provided YAML is malformed.
- * @note Temporary sessions are closed after successful runs. Host owns graph
- * state and preserves the documented resource-exhaustion exception boundary.
+ * @note The worker request configures future HP and RT CPU schedulers before
+ * graph load, and results report the same bounded resolved grant. Temporary
+ * sessions are closed after successful runs. Host owns graph state and
+ * preserves the documented resource-exhaustion exception boundary.
  */
 BenchmarkResult BenchmarkService::Run(const std::string& benchmark_dir,
                                       const BenchmarkSessionConfig& config,
                                       int runs) {
+  const unsigned int resolved_workers =
+      resolve_benchmark_worker_count(config.execution.threads);
+  configure_benchmark_scheduler(svc_, config.execution.threads);
+
   std::vector<BenchmarkResult> all_runs;
   all_runs.reserve(runs);
   const std::string fallback_op_name =
@@ -180,9 +238,7 @@ BenchmarkResult BenchmarkService::Run(const std::string& benchmark_dir,
 
     BenchmarkResult single_run_result;
     single_run_result.benchmark_name = config.name;
-    single_run_result.num_threads = config.execution.threads > 0
-                                        ? config.execution.threads
-                                        : std::thread::hardware_concurrency();
+    single_run_result.num_threads = static_cast<int>(resolved_workers);
 
     auto start_total = std::chrono::high_resolution_clock::now();
 
@@ -242,9 +298,7 @@ BenchmarkResult BenchmarkService::Run(const std::string& benchmark_dir,
   final_result.width = config.auto_generate ? config.generator_config.width : 0;
   final_result.height =
       config.auto_generate ? config.generator_config.height : 0;
-  final_result.num_threads = config.execution.threads > 0
-                                 ? config.execution.threads
-                                 : std::thread::hardware_concurrency();
+  final_result.num_threads = static_cast<int>(resolved_workers);
 
   analyze_results(final_result, all_runs);
 
