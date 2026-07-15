@@ -53,9 +53,12 @@ containment contract instead:
 - replaces graph-state async-per-submit with one worker and a 64-waiting-task
   FIFO per Graph, applying blocking backpressure without dropping admitted
   work; and
-- stops lane admission, drains FIFO work, and joins the lane worker before
-  scheduler teardown, while a failed scheduler stop creates one replacement
-  lane worker so close remains retryable.
+- makes embedded close publish its Host marker, drain pre-marker synchronous
+  admissions, and stop lane admission before waiting for async placeholders,
+  so a full-FIFO producer cannot deadlock close; and
+- drains FIFO work and joins the lane worker before scheduler teardown, while
+  durable close generations let old waiters finish if a failed scheduler stop
+  creates one replacement lane worker and reopens admission for retry.
 
 The 32 slots cover only accounted scheduler-owned workers. They do not count
 graph-state executors, which have their separate one-worker-per-Graph bound;

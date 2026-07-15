@@ -47,7 +47,9 @@ completion 或 exception。销毁 future 不会等待或取消 task；executor l
 completion wait 和 visible commit。
 
 `close_and_drain()` 对并发调用与重复调用都保持幂等。它会停止 admission，让被满队列阻塞的
-producer 以 `std::runtime_error` 被唤醒，按 FIFO 排空已有 work，并在返回前 join worker。
+producer 以 `std::runtime_error` 被唤醒，按 FIFO 排空已有 work，并在返回前 join worker。每个
+caller 都等待自己加入的持久 close generation；失败 stop 后的 restart 可以在延迟 caller 被唤醒前
+重新开放后续 accepting generation，但不会困住该 caller，也不会创建第二个 worker。
 `GraphRuntime` 会在 scheduler teardown 前完成该 join。如果显式 close 随后在 scheduler shutdown
 中失败，Kernel 会先启动一个 replacement lane worker 再返回失败，使保留的 session 仍可重试。
 不同 graph 具有独立的 worker 和队列。Scheduler-worker ledger 不计这些 lane worker；其 32-slot

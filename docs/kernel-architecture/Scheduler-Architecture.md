@@ -213,12 +213,14 @@ runtime model.
 
 The same executor is the scheduler-owner access and teardown boundary. Runtime
 start, compute, scheduler name/statistics copying, and scheduler replacement
-cannot overlap for one session. Graph close stops lane admission, drains its
-bounded FIFO, and joins the sole lane worker before runtime stop invokes any
-scheduler lifecycle method. `get_scheduler()` may return a raw pointer
-internally, but its caller finishes all use while the graph-state callback is
-active; replacement cannot publish and destroy the old owner until active
-compute has released it.
+cannot overlap for one session. Embedded close publishes its Host lifecycle
+marker, waits only pre-marker synchronous admissions, and then stops lane
+admission before waiting for async submission placeholders. The stop wakes any
+producer blocked on the bounded FIFO; admitted callbacks drain and the sole
+lane worker joins before runtime stop invokes any scheduler lifecycle method.
+`get_scheduler()` may return a raw pointer internally, but its caller finishes
+all use while the graph-state callback is active; replacement cannot publish
+and destroy the old owner until active compute has released it.
 
 ## Built-in Schedulers
 

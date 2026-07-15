@@ -136,19 +136,23 @@ event/trace ring、直接清除 `RealtimeProxyGraph`，或清除 Kernel-owned `L
 ## Close 与 Lifetime
 
 Embedded Host close 会先把 session 标记为 closing。新的 compute、scheduler、required save、
-node-YAML replacement 与 ROI projection admission 会失败；close 则等待已接受的同步调用和
-caller-visible async status publication。随后 Kernel 会关闭这些调用共用的
-`GraphStateExecutor`：新的 lane submission 会失败，因 64-entry FIFO 已满而阻塞的 producer 会被
-唤醒，已经 admission 的 callback 按 FIFO 顺序排空，唯一的 worker 随后被 join。只有跨过该 joined
-boundary 之后才开始 scheduler stop；只有 stop 成功后才移除 map entry。
+node-YAML replacement 与 ROI projection admission 会失败。Host 会在 lane 仍 accepting 时等待该
+marker 之前已准入的同步调用，让这些调用完成 graph-state submission。随后 Kernel 会停止这些调用
+共用的 `GraphStateExecutor` admission。因 64-entry FIFO 已满而阻塞的 producer 无需等待队列空位就
+会被唤醒并拒绝；只有此后 Host 才等待 async submission placeholder 与 caller-visible status
+publication。已经 admission 的 callback 按 FIFO 顺序排空，Kernel 随后 join 唯一的 worker。只有
+跨过该 joined boundary 之后才开始 scheduler stop；只有 stop 成功后才移除 map entry。
 
-并发 close caller 通过 Host lifecycle gate 串行化。Runtime stop failure 会保留 runtime、diagnostic
-state 与仍存活的 scheduler reservation。由于之前的 lane worker 已经 join，Kernel 会在返回 stop
-failure 前创建一个 replacement worker；随后 Host 清除 closing marker，并重新开放 admission。
-之后再次 close 时，会先排空并 join 该 replacement lane，再重试 scheduler stop。Close 成功时，
-concrete scheduler 会先 shutdown 并销毁，随后才归还 slot。Embedded Host 未显式 close 就销毁时，
-也会走相同的同步 ownership chain：`GraphRuntime` 会在 scheduler teardown 之前排空并 join lane，
-并在 Host 析构完成前归还所有 graph reservation。只有 session 确实不存在时才返回 `NotFound`。
+并发 close caller 通过 Host lifecycle gate 串行化。在 executor 内，每个 closer 会记录自己加入的
+close generation，并等待该 generation 被持久发布为已经 join。Runtime stop failure 会保留
+runtime、diagnostic state 与仍存活的 scheduler reservation。由于之前的 lane worker 已经 join，
+Kernel 会在返回 stop failure 前创建一个 replacement worker；随后 Host 清除 closing marker，并
+重新开放 admission。即使该 restart 早于上一 generation 的延迟 waiter 被唤醒，这些 waiter 仍会
+返回，也不会创建第二个 worker。之后再次 close 时，会先排空并 join 该 replacement lane，再重试
+scheduler stop。Close 成功时，concrete scheduler 会先 shutdown 并销毁，随后才归还 slot。
+Embedded Host 未显式 close 就销毁时，也会走相同的同步 ownership chain：`GraphRuntime` 会在
+scheduler teardown 之前排空并 join lane，并在 Host 析构完成前归还所有 graph reservation。只有
+session 确实不存在时才返回 `NotFound`。
 
 `photospiderd` 围绕该 embedded Host contract 拥有 daemon session identity、job admission、Host
 serialization 与 shutdown drainage。其准确 mapping、lease、socket 与 shutdown 规则定义在

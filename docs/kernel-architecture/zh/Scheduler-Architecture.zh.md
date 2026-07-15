@@ -156,11 +156,13 @@ compute。Scheduler 实现只通过 `SchedulerHostContext` 与 runtime 交互；
 `SchedulerTaskRuntime` 都不会直接拥有 runtime model。
 
 同一 executor 也是 scheduler owner 的访问与 teardown boundary。对于一个 session，runtime start、
-compute、scheduler name/statistics copy 与 scheduler replacement 不能重叠。Graph close 会停止
-lane admission、排空其有界 FIFO 并 join 唯一的 lane worker，随后 runtime stop 才能调用任意
-scheduler lifecycle method。`get_scheduler()` 在内部可以返回 raw pointer，但 caller 必须在
-graph-state callback 有效期间完成全部使用；active compute 释放该 owner 之前，replacement 不能
-发布新 owner 并销毁旧 owner。
+compute、scheduler name/statistics copy 与 scheduler replacement 不能重叠。Embedded close 会先
+发布 Host lifecycle marker，只等待该 marker 之前的同步 admission，然后在等待 async submission
+placeholder 之前停止 lane admission。该 stop 会唤醒阻塞在有界 FIFO 上的 producer；已经 admission
+的 callback 会继续排空并 join 唯一的 lane worker，随后 runtime stop 才能调用任意 scheduler
+lifecycle method。`get_scheduler()` 在内部可以返回 raw pointer，但 caller 必须在 graph-state
+callback 有效期间完成全部使用；active compute 释放该 owner 之前，replacement 不能发布新 owner
+并销毁旧 owner。
 
 ## 内置调度器
 

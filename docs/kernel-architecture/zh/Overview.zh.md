@@ -238,13 +238,15 @@ socket、protocol、status、quota 与 artifact lifecycle 定义在
 6. 对 Host 提交的 async compute，Kernel work item 会返回自身拥有的精确 outcome。一个 joined
    adapter worker 不读取共享 `LastError`，而是直接映射该 outcome，先兑现 caller-visible
    `OperationStatus` promise，再通知 `close_graph()` status publication 已完成。
-7. Embedded close admission 会拒绝新的 compute/scheduler work，以及 required graph save、
-   node-YAML replacement 和 ROI projection work；它会等待已接受的同步调用与已 ready 的 async
-   status promise。随后 Kernel 会停止 lane admission、按 FIFO 排空已有 work、join
-   `GraphStateExecutor` worker，之后才停止 scheduler 并移除 runtime。如果 scheduler stop 失败，
-   会先启动一个 replacement lane worker、重新开放 graph-state admission，再返回失败，因此保留的
-   session 仍可 inspect 或再次 close。Admitted work 使用 retained runtime 或 scheduler 期间，
-   它们不能被 erase、replace 或 destroy。
+7. Embedded close admission 会先发布 lifecycle marker，拒绝新的 compute/scheduler work，以及
+   required graph save、node-YAML replacement 和 ROI projection work。该 marker 之前已准入的调用
+   会在 lane 仍 accepting 时完成同步 submission。随后 Kernel 会停止 lane admission，从而唤醒
+   阻塞在满 FIFO 上的 producer；只有此后 Host 才等待 async submission placeholder 与 status
+   promise。Kernel 会按 FIFO 排空已有 work、join `GraphStateExecutor` worker，之后才停止 scheduler
+   并移除 runtime。如果 scheduler stop 失败，会先启动一个 replacement lane worker、重新开放
+   graph-state admission，再返回失败，因此保留的 session 仍可 inspect 或再次 close。即使 restart
+   早于旧 close caller 被唤醒，已经加入完成 generation 的 caller 仍会返回。Admitted work 使用
+   retained runtime 或 scheduler 期间，它们不能被 erase、replace 或 destroy。
 8. 可恢复 backend failure 会转换成 Host status/result value，而资源耗尽保持异常语义：非析构
    Host method 和被消费的 async future 可以按可安装接口的文档传播 `std::bad_alloc`。
 

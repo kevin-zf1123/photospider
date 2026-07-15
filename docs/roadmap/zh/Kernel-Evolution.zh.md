@@ -41,8 +41,11 @@ Containment contract 改为：
   graph close 与 Host 销毁；close 失败会保留 runtime 与 reservation 供重试；
 - 用每 Graph 一个 worker、64 个等待任务的 FIFO 取代 graph-state async-per-submit，并通过阻塞
   backpressure 避免丢弃已经 admission 的 work；
-- 在 scheduler teardown 前停止 lane admission、排空 FIFO work 并 join lane worker；scheduler
-  stop 失败时则创建一个 replacement lane worker，使 close 保持可重试。
+- 让 embedded close 先发布 Host marker、排空 marker 之前的同步 admission，再在等待 async
+  placeholder 之前停止 lane admission，使满 FIFO producer 无法令 close 死锁；
+- 在 scheduler teardown 前排空 FIFO work 并 join lane worker；持久 close generation 能让旧 waiter
+  在 scheduler stop 失败后创建一个 replacement lane worker 并重新开放 admission 时仍正常完成，
+  从而使 close 保持可重试。
 
 这 32 个 slot 只覆盖已计数的 scheduler-owned worker，不计算具有独立“每 Graph 一个 worker”上限的
 graph-state executor，也不计算 operation 内部 thread、daemon/frontend worker 或所有 OS thread。

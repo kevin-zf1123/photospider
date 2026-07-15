@@ -237,16 +237,19 @@ routing non-compute commands through scheduler queues.
 Scheduler and required-session lifetime are coordinated with this boundary.
 The graph-state portions of synchronous and asynchronous compute, scheduler
 information, scheduler replacement, required graph save, node-YAML replacement,
-and ROI projection are serialized by the per-graph executor. During close,
-Kernel stops admission, drains and joins that executor, and invokes runtime
-stop only after no graph-state callback can retain a scheduler or model
-reference. Runtime startup may occur before graph-state submission; the
-embedded Host admits the complete call against close so close cannot erase the
-runtime during startup or before graph-state completion. Node replacement and
-ROI projection also perform required-node lookup and the operation in one work
-item, preventing a clear/reload check-then-act gap. Scheduler information
-copies name/statistics before leaving the boundary; no raw scheduler pointer
-survives it.
+and ROI projection are serialized by the per-graph executor. During embedded
+close, the Host first publishes its close marker and lets synchronous calls
+admitted before that marker finish submitting while the lane remains accepting.
+Kernel then stops lane admission before the Host waits for async submission
+placeholders and status publication. This wakes a producer blocked by the full
+FIFO without requiring queue space; previously admitted callbacks still drain
+before Kernel joins the executor and invokes runtime stop. Runtime startup may
+occur before graph-state submission; the embedded Host admits the complete call
+against close so close cannot erase the runtime during startup or before
+graph-state completion. Node replacement and ROI projection also perform
+required-node lookup and the operation in one work item, preventing a
+clear/reload check-then-act gap. Scheduler information copies name/statistics
+before leaving the boundary; no raw scheduler pointer survives it.
 
 The current dirty update implementation uses staged output commits for
 HP/RT sibling safety: HP dirty workers write `HighPrecisionDirtyWriteBuffer`
