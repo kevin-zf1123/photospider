@@ -289,6 +289,7 @@ std::optional<cv::Mat> Kernel::compute_and_get_image_request(
  *         for a missing graph.
  * @throws std::bad_alloc if request, task, queue, or future-state allocation
  *         fails during submission.
+ * @throws std::runtime_error if graph-state admission has stopped.
  * @throws std::system_error if graph-state asynchronous work cannot launch.
  * @note Future get() may rethrow std::bad_alloc from compute execution or
  *       exact diagnostic allocation.
@@ -306,6 +307,7 @@ std::optional<std::future<Kernel::AsyncComputeResult>> Kernel::compute_async(
  *         error, or nullopt for a missing graph.
  * @throws std::bad_alloc if request, task, queue, or future-state allocation
  *         fails during submission.
+ * @throws std::runtime_error if graph-state admission has stopped.
  * @throws std::system_error if graph-state asynchronous work cannot launch.
  * @note Runtime start and compute execute inside the submitted graph-state work
  *       item. Recoverable exceptions are captured in the returned result and

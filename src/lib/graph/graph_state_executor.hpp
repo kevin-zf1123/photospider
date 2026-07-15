@@ -2,6 +2,7 @@
 
 #include <condition_variable>
 #include <cstddef>
+#include <cstdint>
 #include <deque>
 #include <exception>
 #include <functional>
@@ -63,14 +64,34 @@ class GraphStateExecutor {
   ~GraphStateExecutor() noexcept;
 
   /**
+   * @brief Stops new admission without waiting for admitted work or the worker.
+   * @return Nothing.
+   * @throws std::logic_error if called from this lane's own worker.
+   * @throws std::overflow_error if the monotonic close generation is exhausted.
+   * @throws std::system_error if lifecycle synchronization fails.
+   * @note This is the first phase of graph close. It atomically changes an
+   *       accepting lane to draining, wakes producers blocked on the bounded
+   *       FIFO, and leaves already admitted work owned by the sole worker.
+   *       Concurrent and repeated calls are idempotent. The owning lifecycle
+   *       must later call `close_and_drain()` before model or scheduler
+   *       teardown.
+   */
+  void stop_admission();
+
+  /**
    * @brief Stops admission, drains admitted FIFO work, and joins the worker.
    * @return Nothing.
    * @throws std::logic_error if called from this lane's own worker.
+   * @throws std::overflow_error if starting a new close generation would wrap.
    * @throws std::system_error if lifecycle synchronization or worker join
    * fails.
-   * @note Concurrent and repeated non-worker calls share one state transition;
-   *       each returns only after the worker is joined and the executor is
-   *       closed. Producers blocked on a full queue are awakened and rejected.
+   * @note Concurrent calls capture the same close generation and each returns
+   *       only after that generation's worker join is durably recorded.
+   *       Failed-close restart may reopen a later generation before every
+   *       waiter resumes; the completed-generation record still releases those
+   *       original waiters. Repeated calls on a closed generation are
+   *       idempotent. Producers blocked on a full queue are awakened and
+   *       rejected.
    */
   void close_and_drain();
 
@@ -83,7 +104,9 @@ class GraphStateExecutor {
    * @note Calling this while already accepting is idempotent. The method is a
    *       narrow Kernel close-rollback operation, not a general public restart
    *       facility; it never restores discarded tasks because close drained all
-   *       prior admissions before scheduler shutdown began.
+   *       prior admissions before scheduler shutdown began. Completion of the
+   *       joined generation remains recorded so its delayed close waiters do
+   *       not wait on this replacement worker.
    */
   void restart_after_close_failure();
 
@@ -152,6 +175,29 @@ class GraphStateExecutor {
   };
 
   /**
+   * @brief Monotonic identity of one admission-stop/drain/join cycle.
+   * @throws Nothing for value construction and comparison.
+   * @note Generation zero denotes the initial accepting lane before any close.
+   *       Values never wrap; exhaustion rejects a new close cycle.
+   */
+  using CloseGeneration = std::uint64_t;
+
+  /**
+   * @brief Stops admission and returns the exact close generation observed.
+   * @param operation Stable caller name used for worker-reentry diagnostics.
+   * @return Existing in-flight/closed generation, or a newly created
+   *         generation when this call changes `Accepting` to `Draining`.
+   * @throws std::logic_error if called from this lane's own worker.
+   * @throws std::overflow_error if a new generation cannot be represented.
+   * @throws std::system_error if lifecycle synchronization fails.
+   * @note The returned token remains a completed-history identity after a
+   *       failed-close restart opens a later accepting generation. This lets
+   *       every close waiter finish its original cycle even when restart wins
+   *       the lifecycle mutex before that waiter wakes.
+   */
+  CloseGeneration stop_admission_for_close(const char* operation);
+
+  /**
    * @brief Appends one type-erased callable to executor-owned FIFO storage.
    * @param task Task whose result state is owned by the caller's future.
    * @return Nothing.
@@ -205,7 +251,7 @@ class GraphStateExecutor {
   std::condition_variable work_available_;
   /** @brief Wakes blocked producers when one queued task becomes active. */
   std::condition_variable space_available_;
-  /** @brief Coordinates worker-stop and join completion among close callers. */
+  /** @brief Coordinates worker-stop and generation completion among closers. */
   std::condition_variable state_changed_;
   /** @brief Executor-owned FIFO of admitted move-only callables. */
   std::deque<std::packaged_task<void()>> tasks_;
@@ -215,6 +261,10 @@ class GraphStateExecutor {
   const std::size_t queue_capacity_;
   /** @brief Current admission/drain/join phase guarded by `mutex_`. */
   State state_ = State::Accepting;
+  /** @brief Latest close cycle created by an admission-stop transition. */
+  CloseGeneration close_generation_ = 0;
+  /** @brief Latest generation whose worker join was published successfully. */
+  CloseGeneration completed_close_generation_ = 0;
   /** @brief Number of currently executing tasks; invariant is zero or one. */
   std::size_t active_task_count_ = 0;
   /** @brief Number of live executor worker loops; invariant is zero or one. */

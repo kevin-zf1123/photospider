@@ -1,5 +1,6 @@
 #include "graph/graph_state_executor.hpp"
 
+#include <limits>
 #include <string>
 #include <utility>
 
@@ -35,19 +36,49 @@ GraphStateExecutor::~GraphStateExecutor() noexcept {
   }
 }
 
+/** @copydoc GraphStateExecutor::stop_admission */
+void GraphStateExecutor::stop_admission() {
+  (void)stop_admission_for_close("stop_admission");
+}
+
+/** @copydoc GraphStateExecutor::stop_admission_for_close */
+GraphStateExecutor::CloseGeneration
+GraphStateExecutor::stop_admission_for_close(const char* operation) {
+  reject_worker_reentry(operation);
+  bool close_started = false;
+  CloseGeneration generation = 0;
+  {
+    std::lock_guard<std::mutex> lock(mutex_);
+    if (state_ == State::Accepting) {
+      if (close_generation_ == std::numeric_limits<CloseGeneration>::max()) {
+        throw std::overflow_error(
+            "GraphStateExecutor close generation is exhausted");
+      }
+      ++close_generation_;
+      state_ = State::Draining;
+      close_started = true;
+    }
+    generation = close_generation_;
+  }
+  if (close_started) {
+    work_available_.notify_all();
+    space_available_.notify_all();
+  }
+  return generation;
+}
+
 /** @copydoc GraphStateExecutor::close_and_drain */
 void GraphStateExecutor::close_and_drain() {
-  reject_worker_reentry("close_and_drain");
+  const CloseGeneration target_generation =
+      stop_admission_for_close("close_and_drain");
   std::thread worker_to_join;
   {
     std::unique_lock<std::mutex> lock(mutex_);
-    if (state_ == State::Accepting) {
-      state_ = State::Draining;
-      work_available_.notify_all();
-      space_available_.notify_all();
-    }
-
-    while (state_ != State::Closed) {
+#if defined(PHOTOSPIDER_INTERNAL_GRAPH_STATE_EXECUTOR_TESTING)
+    publish_test_snapshot_locked(
+        testing::GraphStateExecutorTestEvent::CloseCallerWaiting);
+#endif
+    while (completed_close_generation_ < target_generation) {
       if (state_ == State::WorkerStopped && !join_in_progress_) {
         join_in_progress_ = true;
         worker_to_join = std::move(worker_);
@@ -55,7 +86,7 @@ void GraphStateExecutor::close_and_drain() {
       }
       state_changed_.wait(lock);
     }
-    if (state_ == State::Closed) {
+    if (completed_close_generation_ >= target_generation) {
       return;
     }
   }
@@ -75,11 +106,15 @@ void GraphStateExecutor::close_and_drain() {
   {
     std::lock_guard<std::mutex> lock(mutex_);
     state_ = State::Closed;
+    completed_close_generation_ = target_generation;
     join_in_progress_ = false;
 #if defined(PHOTOSPIDER_INTERNAL_GRAPH_STATE_EXECUTOR_TESTING)
     publish_test_snapshot_locked(testing::GraphStateExecutorTestEvent::Closed);
 #endif
   }
+#if defined(PHOTOSPIDER_INTERNAL_GRAPH_STATE_EXECUTOR_TESTING)
+  testing::notify_graph_state_executor_close_publish_test_hook();
+#endif
   state_changed_.notify_all();
 }
 
@@ -213,6 +248,21 @@ using GraphStateExecutorTestHookPtr = const GraphStateExecutorTestHook*;
 std::atomic<GraphStateExecutorTestHookPtr> g_graph_state_executor_test_hook{
     nullptr};  // NOLINT(whitespace/indent_namespace)
 
+/**
+ * @brief Borrowed unlocked close-publication hook pointer.
+ * @throws Nothing for alias use.
+ */
+using ClosePublishTestHookPtr = const GraphStateExecutorClosePublishTestHook*;
+
+/**
+ * @brief Process-local hook for deterministic Closed/restart overlap tests.
+ * @throws Nothing for atomic initialization and pointer publication.
+ * @note Tests serialize installation and clear the borrowed hook after every
+ *       affected close has completed.
+ */
+std::atomic<ClosePublishTestHookPtr> g_close_publish_test_hook{
+    nullptr};  // NOLINT(whitespace/indent_namespace)
+
 }  // namespace
 
 /** @copydoc ps::testing::set_graph_state_executor_test_hook */
@@ -228,6 +278,21 @@ void notify_graph_state_executor_test_hook(
       g_graph_state_executor_test_hook.load(std::memory_order_acquire);
   if (hook != nullptr && hook->notify != nullptr) {
     hook->notify(hook->context, snapshot);
+  }
+}
+
+/** @copydoc ps::testing::set_graph_state_executor_close_publish_test_hook */
+void set_graph_state_executor_close_publish_test_hook(
+    const GraphStateExecutorClosePublishTestHook* hook) noexcept {
+  g_close_publish_test_hook.store(hook, std::memory_order_release);
+}
+
+/** @copydoc ps::testing::notify_graph_state_executor_close_publish_test_hook */
+void notify_graph_state_executor_close_publish_test_hook() noexcept {
+  const GraphStateExecutorClosePublishTestHook* hook =
+      g_close_publish_test_hook.load(std::memory_order_acquire);
+  if (hook != nullptr && hook->before_waiter_notification != nullptr) {
+    hook->before_waiter_notification(hook->context);
   }
 }
 

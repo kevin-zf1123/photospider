@@ -180,6 +180,16 @@ std::optional<std::string> Kernel::load_graph(
   return loaded_name;
 }
 
+/** @copydoc Kernel::stop_graph_admission */
+bool Kernel::stop_graph_admission(const std::string& name) {
+  auto it = graphs_.find(name);
+  if (it == graphs_.end()) {
+    return false;
+  }
+  it->second->graph_state().stop_admission();
+  return true;
+}
+
 /** @copydoc Kernel::close_graph */
 bool Kernel::close_graph(const std::string& name) {
   auto it = graphs_.find(name);

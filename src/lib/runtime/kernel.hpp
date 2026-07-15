@@ -238,6 +238,24 @@ class Kernel {
                                         const std::string& cache_root_dir = "");
 
   /**
+   * @brief Stops one loaded graph's state-lane admission before Host drainage.
+   *
+   * @param name Graph session name whose lane must reject new submissions.
+   * @return true when a runtime exists and its lane is draining or closed;
+   *         false when the session name is unknown.
+   * @throws std::logic_error if invoked from the target lane worker.
+   * @throws std::overflow_error if the close-generation counter is exhausted.
+   * @throws std::system_error if executor lifecycle synchronization fails.
+   * @note This is the non-destructive first phase of embedded Host close. It
+   *       preserves the graph map entry, scheduler owners, model, admitted
+   *       FIFO work, and LastError state while waking producers blocked by the
+   *       full lane. `close_graph()` must perform the later drain/join/stop
+   *       phase after Host-level admitted callers and async publication have
+   *       settled.
+   */
+  bool stop_graph_admission(const std::string& name);
+
+  /**
    * @brief Stops and removes a loaded graph runtime.
    *
    * @param name Graph session name to close.
@@ -245,14 +263,16 @@ class Kernel {
    *         name is unknown.
    * @throws Any exception propagated while stopping the runtime; no exception
    *         is thrown when the graph name is unknown.
-   * @note Close first stops graph-state admission, drains all prior serialized
-   *       compute/mutation/inspection work, and joins the lane worker.
-   * Scheduler shutdown begins only after that boundary. Embedded Host admission
-   *       separately waits for complete admitted calls before invoking this
-   *       method. The graph map entry and its mutex-protected LastError
-   * snapshot are erased only after stop succeeds. If stop throws, one
-   * replacement lane worker is created before rethrow so the retained session
-   * can be inspected or closed again; replacement-worker failure is surfaced.
+   * @note Close idempotently stops graph-state admission, drains all prior
+   *       serialized compute/mutation/inspection work, and joins the lane
+   *       worker. Scheduler shutdown begins only after that boundary. Embedded
+   *       Host first rejects new calls and drains pre-marker synchronous
+   *       admissions, calls `stop_graph_admission()`, then waits for async
+   *       scheduling/status publication before invoking this method. The
+   *       graph map entry and its mutex-protected LastError snapshot are erased
+   *       only after stop succeeds. If stop throws, one replacement lane worker
+   *       is created before rethrow so the retained session can be inspected or
+   *       closed again; replacement-worker failure is surfaced.
    */
   bool close_graph(const std::string& name);
   std::vector<std::string> list_graphs() const;
@@ -283,6 +303,7 @@ class Kernel {
    *         graph is missing.
    * @throws std::bad_alloc if request, task, queue, or future-state allocation
    *         fails while scheduling the graph-state work.
+   * @throws std::runtime_error if graph-state admission has stopped.
    * @throws std::system_error if runtime startup or graph-state asynchronous
    *         execution cannot launch.
    * @note The future owns the request copy, but benchmark_events remains

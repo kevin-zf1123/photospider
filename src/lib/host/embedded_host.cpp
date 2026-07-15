@@ -13,6 +13,7 @@
 #include <optional>
 #include <sstream>
 #include <string>
+#include <system_error>
 #include <utility>
 #include <vector>
 
@@ -463,24 +464,28 @@ struct EmbeddedHostState {
 #endif
 
   /**
-   * @brief Schedules backend async compute while atomically tracking it for
-   * close.
+   * @brief Pre-registers and schedules backend async compute for close safety.
    *
    * @tparam Scheduler Callable returning an optional future with the exact
    *         backend async result.
    * @param session Session whose runtime will be captured by backend work.
-   * @param scheduler Backend scheduling callable executed under
-   * lifecycle_mutex_.
+   * @param scheduler Backend scheduling callable executed without the Host
+   *        lifecycle mutex.
    * @return Registration containing a tracked shared future, or
    * `scheduled=false`.
-   * @throws Whatever the scheduler or pre-scheduling tracking allocation may
-   *         throw.
-   * @note Holding lifecycle_mutex_ across allocation, scheduling, and future
-   *       publication closes the race where close_graph could observe no
-   *       outstanding work after the backend had already queued a task that
-   *       captured the session runtime. Tracking storage is allocated before
-   *       backend scheduling so no post-schedule Host allocation can leave a
-   *       queued task untracked.
+   * @throws std::bad_alloc if placeholder, task, or future-state allocation
+   *         fails.
+   * @throws std::system_error if Host or graph-state synchronization fails.
+   * @throws Any non-close backend submission exception unchanged after the
+   *         placeholder is removed. A lane `std::runtime_error` caused by this
+   *         session's published close marker becomes `scheduled=false`.
+   * @note Phase one reserves a placeholder under `lifecycle_mutex_`; phase two
+   *       releases that mutex before entering the bounded graph-state lane.
+   *       Close therefore observes every in-flight scheduler, can publish its
+   *       marker, and can stop lane admission to wake a full-queue producer.
+   *       The placeholder remains incomplete until scheduling either publishes
+   *       the shared future or removes the entry. No post-submit Host
+   * allocation is required to establish runtime ownership.
    */
   template <typename Scheduler>
   AsyncComputeRegistration schedule_and_track_async_compute(
@@ -491,45 +496,61 @@ struct EmbeddedHostState {
         "future::share must not allocate after backend scheduling");
 
     reap_published_async_compute();
-    std::lock_guard<std::mutex> lock(lifecycle_mutex_);
-    if (session_close_in_progress_locked(session)) {
-      return AsyncComputeRegistration{};
-    }
-
     const uint64_t id = next_async_id_.fetch_add(1, std::memory_order_relaxed);
-    TrackedAsyncCompute placeholder;
-    placeholder.id = id;
-    placeholder.session = session;
-    outstanding_async_.push_back(std::move(placeholder));
-
-    auto remove_placeholder = [&] {
-      outstanding_async_.erase(
-          std::remove_if(outstanding_async_.begin(), outstanding_async_.end(),
-                         [id](const TrackedAsyncCompute& tracked) {
-                           return tracked.id == id;
-                         }),
-          outstanding_async_.end());
-    };
+    {
+      std::lock_guard<std::mutex> lock(lifecycle_mutex_);
+      if (session_close_in_progress_locked(session)) {
+        return AsyncComputeRegistration{};
+      }
+      TrackedAsyncCompute placeholder;
+      placeholder.id = id;
+      placeholder.session = session;
+      outstanding_async_.push_back(std::move(placeholder));
+    }
 
     std::shared_future<Kernel::AsyncComputeResult> shared_future;
     try {
       auto future = scheduler();
       if (!future) {
-        remove_placeholder();
+        remove_async_compute_tracking(id);
         return AsyncComputeRegistration{};
       }
       shared_future = future->share();
+    } catch (const std::system_error&) {
+      remove_async_compute_tracking(id);
+      throw;
+    } catch (const std::runtime_error&) {
+      bool close_in_progress = false;
+      {
+        std::lock_guard<std::mutex> lock(lifecycle_mutex_);
+        close_in_progress = session_close_in_progress_locked(session);
+        outstanding_async_.erase(
+            std::remove_if(outstanding_async_.begin(), outstanding_async_.end(),
+                           [id](const TrackedAsyncCompute& tracked) {
+                             return tracked.id == id;
+                           }),
+            outstanding_async_.end());
+      }
+      lifecycle_cv_.notify_all();
+      if (close_in_progress) {
+        return AsyncComputeRegistration{};
+      }
+      throw;
     } catch (...) {
-      remove_placeholder();
+      remove_async_compute_tracking(id);
       throw;
     }
 
-    auto tracked = std::find_if(
-        outstanding_async_.begin(), outstanding_async_.end(),
-        [id](const TrackedAsyncCompute& entry) { return entry.id == id; });
-    if (tracked != outstanding_async_.end()) {
-      tracked->future = shared_future;
+    {
+      std::lock_guard<std::mutex> lock(lifecycle_mutex_);
+      auto tracked = std::find_if(
+          outstanding_async_.begin(), outstanding_async_.end(),
+          [id](const TrackedAsyncCompute& entry) { return entry.id == id; });
+      if (tracked != outstanding_async_.end()) {
+        tracked->future = shared_future;
+      }
     }
+    lifecycle_cv_.notify_all();
 
     AsyncComputeRegistration registration;
     registration.scheduled = true;
@@ -597,15 +618,17 @@ struct EmbeddedHostState {
   }
 
   /**
-   * @brief Removes a backend request whose status worker could not be created.
+   * @brief Removes one async placeholder or completed tracking entry.
    *
-   * @param id Tracking id to abandon after its backend future has completed.
+   * @param id Tracking id whose backend/runtime ownership is no longer pending.
    * @return Nothing.
    * @throws Nothing.
-   * @note The caller waits the backend future first, so removal cannot let
-   * close destroy a runtime still captured by untracked backend work.
+   * @note Before backend acceptance this rolls back the pre-registration. After
+   *       acceptance, callers must first wait the backend future so removal
+   *       cannot let close destroy a runtime still captured by untracked work.
+   *       Every removal notifies close waiters.
    */
-  void abandon_async_compute(uint64_t id) noexcept {
+  void remove_async_compute_tracking(uint64_t id) noexcept {
     {
       std::lock_guard<std::mutex> lock(lifecycle_mutex_);
       outstanding_async_.erase(
@@ -619,64 +642,89 @@ struct EmbeddedHostState {
   }
 
   /**
-   * @brief Claims a session close marker and waits for admitted session users.
+   * @brief Claims the exclusive Host close marker for one session.
    *
    * @param session Session about to be closed.
    * @return Nothing after this caller exclusively owns the close marker.
    * @throws std::bad_alloc if recording the closing marker allocates.
+   * @throws std::system_error if lifecycle synchronization fails.
    * @note A caller arriving during another close waits until that attempt
    *       clears its marker, then claims a fresh marker and performs its own
-   *       backend existence/close attempt. New admitted operations remain
-   *       rejected until finish_session_close() removes this caller's marker.
+   *       backend existence/close attempt. This phase deliberately does not
+   *       wait for admitted users. The caller next drains pre-marker
+   *       synchronous admissions, then stops Kernel lane admission so a
+   *       full-queue async producer can leave its placeholder.
    */
-  void begin_session_close_and_wait(const GraphSessionId& session) {
-    bool marked_closing = false;
-    try {
-      std::unique_lock<std::mutex> lock(lifecycle_mutex_);
-      while (session_close_in_progress_locked(session)) {
-#if defined(PHOTOSPIDER_INTERNAL_BAD_ALLOC_TESTING)
-        notify_embedded_lifecycle_test_hook(
-            EmbeddedLifecycleTestEvent::DuplicateAboutToWait);
-#endif
-        lifecycle_cv_.wait(
-            lock, [&] { return !session_close_in_progress_locked(session); });
-      }
-      mark_session_closing_locked(session);
-      marked_closing = true;
+  void begin_session_close(const GraphSessionId& session) {
+    std::unique_lock<std::mutex> lock(lifecycle_mutex_);
+    while (session_close_in_progress_locked(session)) {
 #if defined(PHOTOSPIDER_INTERNAL_BAD_ALLOC_TESTING)
       notify_embedded_lifecycle_test_hook(
-          EmbeddedLifecycleTestEvent::MarkerClaimed);
+          EmbeddedLifecycleTestEvent::DuplicateAboutToWait);
 #endif
-      lifecycle_cv_.wait(lock, [&] {
-        return !has_outstanding_async_compute_locked(session) &&
-               !has_active_session_admission_locked(session);
-      });
-      for (;;) {
-        const auto completed =
-            std::find_if(outstanding_async_.begin(), outstanding_async_.end(),
-                         [&session](const TrackedAsyncCompute& tracked) {
-                           return tracked.session.value == session.value;
-                         });
-        if (completed == outstanding_async_.end()) {
-          break;
-        }
-        std::future<void> worker = std::move(completed->status_worker);
-        outstanding_async_.erase(completed);
-        lock.unlock();
-        try {
-          if (worker.valid()) {
-            worker.wait();
-          }
-        } catch (...) {
-        }
-        lock.lock();
+      lifecycle_cv_.wait(
+          lock, [&] { return !session_close_in_progress_locked(session); });
+    }
+    mark_session_closing_locked(session);
+#if defined(PHOTOSPIDER_INTERNAL_BAD_ALLOC_TESTING)
+    notify_embedded_lifecycle_test_hook(
+        EmbeddedLifecycleTestEvent::MarkerClaimed);
+#endif
+  }
+
+  /**
+   * @brief Waits until every pre-close synchronous Host admission finishes.
+   * @param session Session whose marker is already owned by this close caller.
+   * @return Nothing after no synchronous admission token protects the runtime.
+   * @throws std::system_error if lifecycle synchronization fails.
+   * @note The graph-state lane remains accepting during this phase so a save,
+   *       node replacement, ROI projection, or other already-admitted call can
+   *       enter Kernel and preserve its success contract. The close marker
+   *       prevents any new synchronous admission. After this method returns,
+   *       close stops lane admission before waiting on async placeholders.
+   */
+  void wait_for_session_admissions(const GraphSessionId& session) {
+    std::unique_lock<std::mutex> lock(lifecycle_mutex_);
+    lifecycle_cv_.wait(
+        lock, [&] { return !has_active_session_admission_locked(session); });
+  }
+
+  /**
+   * @brief Waits for pre-registered async scheduling and public status workers.
+   * @param session Session whose marker and stopped Kernel lane are owned by
+   *        this close caller.
+   * @return Nothing after every async placeholder has been rejected or every
+   *         accepted backend result has reached its caller-visible promise.
+   * @throws std::system_error if lifecycle synchronization fails.
+   * @note Kernel lane admission must already be stopped. Rejected in-flight
+   *       schedulers remove their placeholders and wake this waiter;
+   *       backend-accepted work remains tracked through status publication.
+   *       Completed status workers are joined without holding
+   *       `lifecycle_mutex_`.
+   */
+  void wait_for_session_async_compute(const GraphSessionId& session) {
+    std::unique_lock<std::mutex> lock(lifecycle_mutex_);
+    lifecycle_cv_.wait(
+        lock, [&] { return !has_outstanding_async_compute_locked(session); });
+    for (;;) {
+      const auto completed =
+          std::find_if(outstanding_async_.begin(), outstanding_async_.end(),
+                       [&session](const TrackedAsyncCompute& tracked) {
+                         return tracked.session.value == session.value;
+                       });
+      if (completed == outstanding_async_.end()) {
+        return;
       }
-      return;
-    } catch (...) {
-      if (marked_closing) {
-        finish_session_close(session);
+      std::future<void> worker = std::move(completed->status_worker);
+      outstanding_async_.erase(completed);
+      lock.unlock();
+      try {
+        if (worker.valid()) {
+          worker.wait();
+        }
+      } catch (...) {
       }
-      throw;
+      lock.lock();
     }
   }
 
@@ -686,9 +734,9 @@ struct EmbeddedHostState {
    * @param session Session whose backend close attempt has returned.
    * @return Nothing.
    * @throws Nothing.
-   * @note This method must be called after begin_session_close_and_wait() even
-   *       when backend close reports NotFound so later load attempts using the
-   *       same label are not rejected as still closing.
+   * @note This method must be called after `begin_session_close()` even when a
+   *       later admission-stop or backend close reports NotFound, so load
+   *       attempts using the same label are not rejected as still closing.
    */
   void finish_session_close(const GraphSessionId& session) {
     {
@@ -2091,21 +2139,29 @@ class EmbeddedHost final : public Host {
    * @return Success, NotFound only when the graph session does not exist, or a
    *         non-NotFound failure when runtime shutdown fails before removal.
    * @throws std::bad_alloc on diagnostic allocation failure.
-   * @note The adapter first marks the session closing, rejects new admitted
-   *       compute/scheduler, required-save, node-YAML replacement, and ROI
-   *       projection work, waits synchronous admissions, and waits until each
-   *       accepted async promise is ready and its worker joined. Backend close
-   *       then drains and joins their graph-state lane before scheduler
-   *       shutdown. A shutdown failure recreates one lane worker before the
-   *       adapter clears the closing marker, so the still-loaded session
-   * remains admitted and may be retried.
+   * @note The adapter first marks the session closing and waits only the
+   *       synchronous operations admitted before that marker, leaving the lane
+   *       open for those accepted calls. It then asks Kernel to stop lane
+   *       admission before waiting for pre-registered async placeholders. This
+   *       ordering wakes a producer blocked by the full FIFO and prevents
+   *       close-marker starvation without rejecting accepted synchronous work.
+   *       Every backend-accepted async promise is made caller-visible and its
+   *       status worker is joined before backend close drains/joins the lane
+   *       and stops schedulers. A shutdown failure recreates one lane worker
+   *       before the adapter clears the marker, so the session may be retried.
    */
   VoidResult close_graph(const GraphSessionId& session) override {
     return guarded_graph_close([&] {
-      state_->begin_session_close_and_wait(session);
+      state_->begin_session_close(session);
       bool closed = false;
       try {
-        closed = state_->interaction.cmd_close_graph(session.value);
+        state_->wait_for_session_admissions(session);
+        const bool runtime_exists =
+            state_->interaction.cmd_stop_graph_admission(session.value);
+        state_->wait_for_session_async_compute(session);
+        if (runtime_exists) {
+          closed = state_->interaction.cmd_close_graph(session.value);
+        }
       } catch (...) {
         state_->finish_session_close(session);
         throw;
@@ -2268,10 +2324,11 @@ class EmbeddedHost final : public Host {
    * @param request Public compute request captured by value.
    * @return Future resolving to OperationStatus, or scheduling failure.
    * @throws std::bad_alloc on allocation failure.
-   * @note Backend scheduling and Host tracking are performed under the same
-   *       lifecycle lock. A joined worker maps only the backend-owned exact
-   *       result, fulfills the caller-visible promise, and then notifies close;
-   *       it never reconstructs failure from shared LastError state.
+   * @note Host tracking is pre-registered under the lifecycle lock, which is
+   *       released before potentially blocking backend lane submission. A
+   *       joined worker maps only the backend-owned exact result, fulfills the
+   *       caller-visible promise, and then notifies close; it never
+   *       reconstructs failure from shared LastError state.
    */
   Result<std::future<OperationStatus>> compute_async(
       HostComputeRequest request) override {
@@ -2333,7 +2390,7 @@ class EmbeddedHost final : public Host {
               }
             } catch (...) {
             }
-            state->abandon_async_compute(tracking_id);
+            state->remove_async_compute_tracking(tracking_id);
             throw;
           }
           return success_result(std::move(wrapped));

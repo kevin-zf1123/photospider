@@ -282,13 +282,14 @@ class PHOTOSPIDER_API Host {
    *         loaded.
    * @throws std::bad_alloc if request processing, backend-to-status
    *         translation, or copied result construction exhausts memory.
-   * @note The embedded implementation rejects new admitted compute/scheduler,
-   *       required-save, node-YAML replacement, and ROI projection work after
-   *       close begins. It waits accepted synchronous calls and every accepted
-   *       async status future, then drains and joins the graph-state lane
-   * before scheduler shutdown or backend-resource release. A failed scheduler
-   *       shutdown recreates one lane worker and reopens admission for the
-   *       still-loaded session so callers may inspect or retry it.
+   * @note The embedded implementation first publishes its closing marker and
+   *       drains synchronous calls admitted before that marker. It then stops
+   *       graph-state lane admission so full-FIFO producers are awakened and
+   *       rejected before close waits pre-registered async schedulers and every
+   *       backend-accepted caller-visible status future. Only then does it join
+   *       the drained lane and begin scheduler shutdown or backend-resource
+   *       release. A failed scheduler shutdown recreates one lane worker and
+   *       reopens admission for the retained session so callers may retry it.
    */
   virtual VoidResult close_graph(const GraphSessionId& session) = 0;
 
@@ -389,8 +390,11 @@ class PHOTOSPIDER_API Host {
    *         submission, so creation failure has no remote side effect.
    * @note The embedded backend work item owns its exact failure category and
    *       message; the wrapper never reconstructs the result from mutable
-   *       LastError state. Async scheduling/tracking is serialized with graph
-   *       close, and close waits until the caller-visible promise is ready
+   *       LastError state. Embedded scheduling pre-registers a close-visible
+   *       placeholder, releases the Host lifecycle mutex before bounded-lane
+   *       submission, and either publishes the accepted backend future or
+   *       removes the rejected placeholder. Close first stops lane admission,
+   *       then waits until every accepted caller-visible promise is ready
    *       before releasing the runtime. Consuming the returned future may
    *       rethrow `std::bad_alloc` from backend compute/result translation or
    *       `std::system_error` from IPC polling synchronization.
