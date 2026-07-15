@@ -14,9 +14,14 @@
  * through the static `photospider` product.
  */
 
+#include <yaml-cpp/yaml.h>
+
+#include <exception>
+#include <filesystem>
 #include <functional>
 #include <future>
 #include <map>
+#include <new>
 #include <optional>
 #include <string>
 #include <utility>
@@ -56,25 +61,49 @@ class InteractionService {
    * @brief Forwards one transactional Graph load to the bound Kernel.
    * @param name Unique graph/session label.
    * @param root_dir Root directory that owns the session folder.
-   * @param yaml_path Optional source YAML copied before graph parsing.
+   * @param yaml_path Empty session-local-or-empty selector, or explicit source
+   *        YAML copied before graph parsing.
    * @param config_path Optional session configuration source.
    * @param cache_root_dir Optional external cache-root directory.
-   * @return Loaded graph label, or nullopt for duplicate/recoverable content
-   *         load failure.
-   * @throws GraphError with exact scheduler planning or aggregate-budget
-   *         failure categories before Graph publication.
-   * @throws std::bad_alloc If Kernel load allocation fails.
-   * @throws Any scheduler lifecycle exception propagated by Kernel unchanged.
+   * @return Loaded graph label, or nullopt only for a duplicate session name.
+   * @throws GraphError with exact scheduler, IO, YAML, schema, topology, or
+   *         unexpected-internal failure categories before Graph publication.
+   * @throws std::bad_alloc If Kernel load or error translation exhausts
+   *         memory.
    * @note Kernel plans and atomically admits both scheduler intents before
-   *       constructing either candidate; this facade adds no fallback or
-   *       partial-publication behavior.
+   *       constructing either candidate. This final embedded boundary keeps
+   *       GraphError unchanged, maps BadFile/filesystem failures to Io,
+   *       residual YAML failures to InvalidYaml, and other exceptions to
+   *       Unknown without adding fallback or partial publication.
    */
   std::optional<std::string> cmd_load_graph(
       const std::string& name, const std::string& root_dir,
       const std::string& yaml_path, const std::string& config_path = "",
       const std::string& cache_root_dir = "") {
-    return kernel_.load_graph(name, root_dir, yaml_path, config_path,
-                              cache_root_dir);
+    try {
+      return kernel_.load_graph(name, root_dir, yaml_path, config_path,
+                                cache_root_dir);
+    } catch (const std::bad_alloc&) {
+      throw;
+    } catch (const GraphError&) {
+      throw;
+    } catch (const YAML::BadFile& error) {
+      throw GraphError(GraphErrc::Io, "Graph YAML file access failed: " +
+                                          std::string(error.what()));
+    } catch (const YAML::Exception& error) {
+      throw GraphError(
+          GraphErrc::InvalidYaml,
+          "Graph YAML processing failed: " + std::string(error.what()));
+    } catch (const std::filesystem::filesystem_error& error) {
+      throw GraphError(GraphErrc::Io, "Graph filesystem preparation failed: " +
+                                          std::string(error.what()));
+    } catch (const std::exception& error) {
+      throw GraphError(GraphErrc::Unknown, "Unexpected graph load failure: " +
+                                               std::string(error.what()));
+    } catch (...) {
+      throw GraphError(GraphErrc::Unknown,
+                       "Unknown non-standard graph load failure");
+    }
   }
   /**
    * @brief Stops graph-state admission for the first phase of Host close.
@@ -223,12 +252,15 @@ class InteractionService {
    *
    * @param graph Existing graph/session name.
    * @param yaml_path Source YAML file path.
-   * @return True on success; false for missing graphs or recoverable reload
-   * failures recorded in Kernel LastError.
+   * @return True on success; false for missing graphs or reload failures
+   *         recorded in Kernel LastError.
    * @throws std::bad_alloc if reload execution or LastError construction
-   * exhausts memory.
-   * @note This internal adapter method does not expose Kernel to frontends;
-   * public callers use `ps::Host::reload_graph()`.
+   *         exhausts memory.
+   * @note Missing graphs do not create LastError. Existing-session empty-path,
+   *       IO, syntax/schema, topology, and unexpected failures retain
+   *       InvalidParameter, Io, InvalidYaml, MissingDependency/Cycle, and
+   *       Unknown respectively. This internal method does not expose Kernel to
+   *       frontends; public callers use `ps::Host::reload_graph()`.
    */
   bool cmd_reload_yaml(const std::string& graph, const std::string& yaml_path) {
     return kernel_.reload_graph_yaml(graph, yaml_path);

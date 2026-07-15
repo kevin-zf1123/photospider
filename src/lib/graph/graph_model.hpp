@@ -214,11 +214,17 @@ class GraphModel {
    * @brief Atomically replaces the graph node map after validating topology.
    *
    * @param nodes Replacement nodes keyed by node id.
-   * @throws GraphError when the replacement set is invalid or cyclic.
-   * @throws std::bad_alloc if validation or storage allocation fails.
+   * @return Nothing.
+   * @throws GraphError with `GraphErrc::MissingDependency` when an input
+   *         references an absent node, or `GraphErrc::Cycle` when the
+   *         replacement is cyclic.
+   * @throws std::bad_alloc if validation, topology construction, or temporary
+   *         storage allocation fails.
    * @note Successful replacement resets graph runtime state and advances
-   * topology generation even when node ids are reused, preventing runtime-owned
-   * mirrors from preserving stale per-node state across graph reloads.
+   *       topology generation even when node ids are reused, preventing
+   *       runtime-owned mirrors from preserving stale per-node state across
+   *       graph reloads. Any validation or preparation failure preserves the
+   *       prior node map, topology index, generation, and runtime state.
    */
   void replace_nodes(NodeMap nodes);
   bool has_node(int id) const;

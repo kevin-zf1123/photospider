@@ -2103,22 +2103,23 @@ class EmbeddedHost final : public Host {
    * @brief Loads one graph through the embedded backend.
    *
    * @param request Public graph load request.
-   * @return Loaded session id, or a categorized failure including
-   *         InvalidParameter for unsupported scheduler planning/other rejected
-   *         load input, ComputeError when the process budget cannot admit the
-   *         complete scheduler pair, and Io for runtime-directory/path
-   *         filesystem failure.
+   * @return Loaded session id, duplicate/scheduler InvalidParameter,
+   *         scheduler-budget ComputeError, explicit-source/session-path Io,
+   *         syntax/schema InvalidYaml, topology MissingDependency/Cycle, or
+   *         Unknown for an unexpected internal failure.
    * @throws std::bad_alloc on allocation failure.
-   * @note Recoverable backend and filesystem failures are converted to exact
-   *       OperationStatus categories. Backend pair planning/admission happens
-   *       before scheduler construction; all later candidate ownership remains
-   *       unpublished until Graph-map insertion. The backend preallocates its
-   *       return label before publication and this adapter moves that label
-   *       into the result, so every failure leaves no newly published session.
+   * @note Empty yaml_path selects session-local-or-empty semantics; a nonempty
+   *       path is explicit and never falls back. Recoverable backend and
+   *       filesystem failures are converted to exact OperationStatus
+   *       categories. Backend pair planning/admission and complete document
+   *       validation happen before Graph-map insertion. The backend
+   *       preallocates its return label before publication and this adapter
+   *       moves that label into the result, so every failure leaves no newly
+   *       published session or scheduler reservation.
    */
   Result<GraphSessionId> load_graph(const GraphLoadRequest& request) override {
     return guarded_result<GraphSessionId>(
-        "load_graph", GraphErrc::InvalidParameter, [&] {
+        "load_graph", GraphErrc::Unknown, [&] {
           auto loaded = state_->interaction.cmd_load_graph(
               request.session.value, request.root_dir, request.yaml_path,
               request.config_path, request.cache_root_dir);
@@ -2200,17 +2201,21 @@ class EmbeddedHost final : public Host {
    *
    * @param session Session to reload.
    * @param yaml_path Source YAML path.
-   * @return Success, NotFound for missing sessions, Io for unreadable reload
-   *         input, or InvalidYaml for rejected YAML content.
+   * @return Success, NotFound for missing sessions, InvalidParameter for an
+   *         empty path on an existing session, Io for unreadable input,
+   *         InvalidYaml for syntax/schema rejection, MissingDependency/Cycle
+   *         for topology rejection, or Unknown for unexpected failures.
    * @throws std::bad_alloc on allocation failure.
    * @note Host checks session existence before calling the backend bool API so
    *       lifecycle errors are not reported as malformed YAML. Backend
    *       LastError preserves the reload failure classification for existing
-   *       sessions.
+   *       sessions. Failed reload and propagated std::bad_alloc retain the
+   *       published nodes, topology generation, runtime graph state, and
+   *       session identity.
    */
   VoidResult reload_graph(const GraphSessionId& session,
                           const std::string& yaml_path) override {
-    return guarded_void("reload_graph", GraphErrc::InvalidYaml, [&] {
+    return guarded_void("reload_graph", GraphErrc::Unknown, [&] {
       if (!session_exists(*state_, session)) {
         return failure_void(GraphErrc::NotFound,
                             "graph session not found: " + session.value);

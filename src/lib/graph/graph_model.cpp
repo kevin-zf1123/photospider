@@ -323,6 +323,7 @@ void GraphModel::rewire_parameter_input(int node_id, size_t input_index,
   rebuild_topology_index();
 }
 
+/** @copydoc GraphModel::replace_nodes */
 void GraphModel::replace_nodes(NodeMap nodes) {
   validate_node_map(nodes);
   GraphTopologyIndex topology = build_topology_index(nodes);

@@ -24,14 +24,20 @@ class GraphIOService {
    * @param graph Graph whose nodes are replaced after full parse/validation.
    * @param yaml_path Source YAML file path.
    * @return Nothing.
-   * @throws std::bad_alloc if parsing or temporary node storage exhausts
-   * memory.
-   * @throws GraphError for other file, YAML-root, duplicate-id, node, or
-   * topology validation failures.
-   * @note The existing graph remains unchanged until replace_nodes() receives
-   * the fully parsed temporary map. BUILD_TESTING may compile an immutable YAML
-   * tag failpoint immediately before real node conversion; production builds
-   * compile out the probe and expose no callable test seam.
+   * @throws std::bad_alloc if parsing, diagnostics, node conversion, or
+   *         temporary storage exhausts memory.
+   * @throws GraphError with `GraphErrc::InvalidParameter` for an empty path,
+   *         `GraphErrc::Io` for an inaccessible source,
+   *         `GraphErrc::InvalidYaml` for parser/root/duplicate-id/node-schema
+   *         rejection, `GraphErrc::MissingDependency` or `GraphErrc::Cycle`
+   *         for topology rejection, and `GraphErrc::Unknown` for unexpected
+   *         ingestion failures.
+   * @note The existing graph, topology index, topology generation, and runtime
+   *       state remain unchanged until replace_nodes() receives the fully
+   *       parsed temporary map and completes topology validation.
+   *       BUILD_TESTING may compile immutable YAML-tag failpoints immediately
+   *       before real node conversion; production builds compile out the
+   *       probes and expose no callable test seam.
    */
   void load(GraphModel& graph, const std::filesystem::path& yaml_path) const;
 
