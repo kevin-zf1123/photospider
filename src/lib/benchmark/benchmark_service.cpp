@@ -114,8 +114,10 @@ static std::map<int, std::string> benchmark_op_names_by_node(
  * @return Exact nonzero scheduler worker grant in the range one through eight.
  * @throws std::invalid_argument if configured_threads is negative or greater
  *         than the public scheduler request maximum.
- * @note Zero uses the same bounded hardware-concurrency resolution as product
- *       scheduler construction; positive legal values remain exact.
+ * @note Zero resolves exactly once at this benchmark boundary by the same
+ *       bounded hardware-concurrency rule as product scheduler construction;
+ *       callers publish the returned grant unchanged. Positive legal values
+ *       remain exact.
  */
 static unsigned int resolve_benchmark_worker_count(int configured_threads) {
   if (configured_threads < 0) {
@@ -128,22 +130,24 @@ static unsigned int resolve_benchmark_worker_count(int configured_threads) {
 }
 
 /**
- * @brief Applies one benchmark worker request to future Host graph defaults.
+ * @brief Applies one resolved benchmark grant to future Host graph defaults.
  *
  * @param host Host whose HP and RT CPU scheduler defaults are updated.
- * @param configured_threads Validated benchmark request; zero remains the
- *        public automatic-selection sentinel.
+ * @param resolved_workers Exact nonzero grant already resolved by the
+ *        benchmark boundary.
  * @return Nothing.
  * @throws std::bad_alloc if Host request or status storage exhausts memory.
  * @throws std::runtime_error if Host rejects the scheduler configuration.
- * @note The request is applied before benchmark graph load. Existing graph
- *       runtimes, if any, retain their scheduler configuration.
+ * @note The resolved grant is applied unchanged before benchmark graph load;
+ *       this boundary never forwards the zero automatic-selection sentinel.
+ *       Existing graph runtimes, if any, retain their scheduler configuration.
  */
-static void configure_benchmark_scheduler(Host& host, int configured_threads) {
+static void configure_benchmark_scheduler(Host& host,
+                                          unsigned int resolved_workers) {
   HostSchedulerConfig scheduler_config;
   scheduler_config.hp_type = "cpu_work_stealing";
   scheduler_config.rt_type = "cpu_work_stealing";
-  scheduler_config.worker_count = static_cast<unsigned int>(configured_threads);
+  scheduler_config.worker_count = resolved_workers;
   const VoidResult configured =
       host.configure_scheduler_defaults(scheduler_config);
   if (!configured.status.ok) {
@@ -182,17 +186,18 @@ BenchmarkService::BenchmarkService(ps::Host& svc) : svc_(svc) {}
  * through eight.
  * @throws std::runtime_error when graph input, loading, or compute fails.
  * @throws YAML::Exception when generated or user-provided YAML is malformed.
- * @note The worker request configures future HP and RT CPU schedulers before
- * graph load, and results report the same bounded resolved grant. Temporary
- * sessions are closed after successful runs. Host owns graph state and
- * preserves the documented resource-exhaustion exception boundary.
+ * @note The worker request is resolved once, then the same nonzero grant
+ * configures future HP and RT CPU schedulers before graph load and is reported
+ * in results. Temporary sessions are closed after successful runs. Host owns
+ * graph state and preserves the documented resource-exhaustion exception
+ * boundary.
  */
 BenchmarkResult BenchmarkService::Run(const std::string& benchmark_dir,
                                       const BenchmarkSessionConfig& config,
                                       int runs) {
   const unsigned int resolved_workers =
       resolve_benchmark_worker_count(config.execution.threads);
-  configure_benchmark_scheduler(svc_, config.execution.threads);
+  configure_benchmark_scheduler(svc_, resolved_workers);
 
   std::vector<BenchmarkResult> all_runs;
   all_runs.reserve(runs);
