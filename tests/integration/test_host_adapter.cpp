@@ -283,6 +283,8 @@ struct GraphStateExecutorLaneState {
   std::atomic<std::size_t> max_active_tasks{0};
   /** @brief Greatest live lane-worker count observed. */
   std::atomic<std::size_t> max_worker_threads{0};
+  /** @brief Number of close callers observed at lifecycle coordination. */
+  std::atomic<std::uint64_t> close_wait_events{0};
   /** @brief Number of worker-stop checkpoints observed. */
   std::atomic<std::uint64_t> worker_stopped_events{0};
   /** @brief Number of failed-close rollback reopen checkpoints observed. */
@@ -308,6 +310,10 @@ void record_graph_state_executor_snapshot(
   if (snapshot.event == testing::GraphStateExecutorTestEvent::TaskQueued &&
       snapshot.queued_tasks > 0) {
     state->queued_events.fetch_add(1, std::memory_order_release);
+  }
+  if (snapshot.event ==
+      testing::GraphStateExecutorTestEvent::CloseCallerWaiting) {
+    state->close_wait_events.fetch_add(1, std::memory_order_release);
   }
   if (snapshot.event == testing::GraphStateExecutorTestEvent::WorkerStopped) {
     state->worker_stopped_events.fetch_add(1, std::memory_order_release);
@@ -361,6 +367,92 @@ class ScopedGraphStateExecutorTestHook final {
  private:
   /** @brief Stable hook borrowed until guard destruction. */
   testing::GraphStateExecutorTestHook hook_;
+};
+
+/**
+ * @brief State used to restart one fully joined lane before waiter
+ * notification.
+ * @throws Nothing for aggregate construction and atomic access.
+ * @note The callback borrows `executor` and performs at most one restart. The
+ *       owning test keeps the executor alive until every close future joins.
+ */
+struct ClosePublishRestartState {
+  /** @brief Executor restarted in the deterministic publication window. */
+  GraphStateExecutor* executor = nullptr;
+  /** @brief Whether the callback has claimed its single restart attempt. */
+  std::atomic<bool> restart_claimed{false};
+  /** @brief Whether restart completed without throwing. */
+  std::atomic<bool> restart_succeeded{false};
+  /** @brief Whether restart raised an unexpected exception. */
+  std::atomic<bool> restart_failed{false};
+};
+
+/**
+ * @brief Restarts one joined executor before its close waiters are notified.
+ * @param context Borrowed ClosePublishRestartState pointer.
+ * @return Nothing.
+ * @throws Nothing; every restart failure is recorded in atomic state.
+ */
+void restart_before_close_waiter_notification(void* context) noexcept {
+  auto* state = static_cast<ClosePublishRestartState*>(context);
+  bool expected = false;
+  if (!state->restart_claimed.compare_exchange_strong(
+          expected, true, std::memory_order_acq_rel,
+          std::memory_order_acquire)) {
+    return;
+  }
+  try {
+    state->executor->restart_after_close_failure();
+    state->restart_succeeded.store(true, std::memory_order_release);
+  } catch (...) {
+    state->restart_failed.store(true, std::memory_order_release);
+  }
+}
+
+/**
+ * @brief Installs one deterministic unlocked close-publication restart hook.
+ * @throws Nothing after construction.
+ * @note Destruction clears the process-global borrowed hook. The test must
+ *       close the replacement worker before the borrowed state expires.
+ */
+class ScopedClosePublishRestartHook final {
+ public:
+  /**
+   * @brief Installs a hook backed by stable test-owned restart state.
+   * @param state State that outlives this guard.
+   * @throws Nothing.
+   */
+  explicit ScopedClosePublishRestartHook(
+      ClosePublishRestartState& state) noexcept
+      : hook_{&state, &restart_before_close_waiter_notification} {
+    testing::set_graph_state_executor_close_publish_test_hook(&hook_);
+  }
+
+  /** @brief Clears the hook before borrowed storage is destroyed. */
+  ~ScopedClosePublishRestartHook() noexcept {
+    testing::set_graph_state_executor_close_publish_test_hook(nullptr);
+  }
+
+  /**
+   * @brief Disables duplicate hook ownership.
+   * @param other Guard that retains the installed hook.
+   * @throws Nothing because construction is unavailable.
+   */
+  ScopedClosePublishRestartHook(const ScopedClosePublishRestartHook& other) =
+      delete;
+
+  /**
+   * @brief Disables replacement of an installed hook.
+   * @param other Guard whose hook remains installed.
+   * @return No value because assignment is unavailable.
+   * @throws Nothing because assignment is unavailable.
+   */
+  ScopedClosePublishRestartHook& operator=(
+      const ScopedClosePublishRestartHook& other) = delete;
+
+ private:
+  /** @brief Stable unlocked-publication hook borrowed by the executor. */
+  testing::GraphStateExecutorClosePublishTestHook hook_;
 };
 #endif
 
@@ -2507,6 +2599,84 @@ TEST(GraphStateExecutorLane, ConcurrentAndRepeatedCloseShareOneJoin) {
   EXPECT_THROW((void)executor.submit([](GraphModel&) {}), std::runtime_error);
 }
 
+#if defined(PHOTOSPIDER_INTERNAL_GRAPH_STATE_EXECUTOR_TESTING) && \
+    defined(PHOTOSPIDER_INTERNAL_BAD_ALLOC_TESTING)
+/**
+ * @brief Proves close waiters finish their own joined generation after restart.
+ * @return Nothing; GoogleTest assertions report stuck waiters, restart, worker,
+ *         or cleanup failures.
+ * @throws std::bad_alloc, std::system_error, or std::future_error if fixture,
+ *         executor, task, or close-thread setup fails.
+ * @note Sixteen close callers wait behind one active task. The BUILD_TESTING
+ *       hook restarts the fully joined lane in the exact unlocked window before
+ *       those callers are notified. Every caller must still recognize its
+ *       original completed close generation. On regression the test detects
+ *       pending callers, closes the replacement generation to release them,
+ *       and only then reports failure.
+ */
+TEST(GraphStateExecutorLane,
+     ConcurrentCloseWaitersFinishJoinedGenerationAfterImmediateRestart) {
+  ScopedTempDir temp("photospider_graph_state_close_generation_test");
+  GraphModel model(temp.root() / "cache");
+  GraphStateExecutor executor(model);
+  GraphStateExecutorLaneState lane_state;
+  ScopedGraphStateExecutorTestHook lane_hook(lane_state);
+  ClosePublishRestartState restart_state;
+  restart_state.executor = &executor;
+  ScopedClosePublishRestartHook restart_hook(restart_state);
+
+  OneShotSignal release_task;
+  const std::shared_future<void> task_release = release_task.future();
+  std::promise<void> task_started;
+  std::future<void> task_started_future = task_started.get_future();
+  auto task = executor.submit([&](GraphModel&) {
+    task_started.set_value();
+    task_release.wait();
+  });
+  ASSERT_EQ(task_started_future.wait_for(std::chrono::seconds(2)),
+            std::future_status::ready);
+
+  constexpr std::size_t kCloserCount = 16;
+  std::vector<std::future<void>> closers;
+  closers.reserve(kCloserCount);
+  for (std::size_t index = 0; index < kCloserCount; ++index) {
+    closers.push_back(
+        std::async(std::launch::async, [&] { executor.close_and_drain(); }));
+  }
+  const bool all_close_callers_waiting = wait_for_atomic_event_count(
+      lane_state.close_wait_events, kCloserCount, std::chrono::seconds(2));
+
+  release_task.signal();
+  task.get();
+  const bool restart_observed = wait_for_atomic_event_count(
+      lane_state.reopened_events, 1, std::chrono::seconds(2));
+  const auto close_deadline =
+      std::chrono::steady_clock::now() + std::chrono::seconds(2);
+  bool all_close_callers_ready = true;
+  for (auto& closer : closers) {
+    if (closer.wait_until(close_deadline) != std::future_status::ready) {
+      all_close_callers_ready = false;
+      break;
+    }
+  }
+
+  if (!all_close_callers_ready) {
+    executor.close_and_drain();
+  }
+  for (auto& closer : closers) {
+    closer.get();
+  }
+  executor.close_and_drain();
+
+  EXPECT_TRUE(all_close_callers_waiting);
+  EXPECT_TRUE(restart_observed);
+  EXPECT_TRUE(restart_state.restart_succeeded.load(std::memory_order_acquire));
+  EXPECT_FALSE(restart_state.restart_failed.load(std::memory_order_acquire));
+  EXPECT_TRUE(all_close_callers_ready);
+  EXPECT_LE(lane_state.max_worker_threads.load(std::memory_order_acquire), 1u);
+}
+#endif
+
 #if defined(PHOTOSPIDER_INTERNAL_GRAPH_STATE_EXECUTOR_TESTING)
 /**
  * @brief Proves real Host submission pressure respects graph-state lane bounds.
@@ -2582,6 +2752,96 @@ TEST(EmbeddedHostAdapter, SubmissionStormKeepsGraphStateLaneBounded) {
   EXPECT_TRUE(closed.status.ok) << closed.status.message;
   reset_host_blocking_source();
 }
+
+#if defined(PHOTOSPIDER_INTERNAL_BAD_ALLOC_TESTING)
+/**
+ * @brief Proves close stops full-lane admission before waiting for async state.
+ * @return Nothing; GoogleTest assertions report close-marker starvation,
+ *         producer rejection, drain, or public-status failures.
+ * @throws std::bad_alloc, std::system_error, or filesystem exceptions if Host,
+ *         graph, worker, or synchronization setup fails.
+ * @note One public async compute holds the real graph-state worker while 64
+ *       later computes fill the production FIFO. A sixty-sixth producer then
+ *       blocks in admission. Close must claim its Host marker and reject that
+ *       blocked producer before the active compute releases queue space. The
+ *       test always releases and joins every participant before assertions so
+ *       a regression fails without leaving background work behind.
+ */
+TEST(EmbeddedHostAdapter,
+     CloseStopsFullLaneBeforeWaitingForBlockedAsyncPlaceholder) {
+  register_host_adapter_ops();
+  ScopedTempDir temp("photospider_host_full_lane_close_test");
+  auto host = create_embedded_host();
+  ASSERT_NE(host, nullptr);
+  const GraphSessionId session = load_test_graph(
+      *host, temp.root(), "host_full_lane_close", "blocking_source");
+
+  GraphStateExecutorLaneState lane_state;
+  ScopedGraphStateExecutorTestHook lane_hook(lane_state);
+  EmbeddedLifecycleEventState lifecycle_events;
+  ScopedEmbeddedLifecycleTestHook lifecycle_hook(lifecycle_events);
+  OneShotSignal release_active;
+  configure_host_blocking_source(release_active.future());
+  HostSubmissionStormScope cleanup(*host, session, release_active);
+
+  HostComputeRequest request = make_compute_request(session);
+  request.cache.force_recache = true;
+  auto active = host->compute_async(request);
+  ASSERT_TRUE(active.status.ok) << active.status.message;
+  cleanup.accepted.push_back(std::move(active.value));
+  ASSERT_TRUE(wait_for_host_blocking_source(std::chrono::seconds(2)));
+
+  cleanup.accepted.reserve(GraphStateExecutor::kDefaultQueueCapacity + 1);
+  for (std::size_t index = 0; index < GraphStateExecutor::kDefaultQueueCapacity;
+       ++index) {
+    auto queued = host->compute_async(request);
+    ASSERT_TRUE(queued.status.ok) << queued.status.message;
+    cleanup.accepted.push_back(std::move(queued.value));
+  }
+  ASSERT_EQ(lane_state.max_queued_tasks.load(std::memory_order_acquire),
+            GraphStateExecutor::kDefaultQueueCapacity);
+
+  std::promise<void> blocked_entered;
+  std::future<void> blocked_entered_future = blocked_entered.get_future();
+  cleanup.blocked_submission = std::async(std::launch::async, [&] {
+    blocked_entered.set_value();
+    return host->compute_async(request);
+  });
+  ASSERT_EQ(blocked_entered_future.wait_for(std::chrono::seconds(2)),
+            std::future_status::ready);
+  ASSERT_EQ(cleanup.blocked_submission.wait_for(std::chrono::milliseconds(100)),
+            std::future_status::timeout);
+
+  auto close = std::async(std::launch::async,
+                          [&] { return host->close_graph(session); });
+  const bool marker_claimed_before_queue_space = wait_for_atomic_event_count(
+      lifecycle_events.marker_claimed, 1, std::chrono::seconds(2));
+  const bool blocked_submit_ready_before_queue_space =
+      cleanup.blocked_submission.wait_for(std::chrono::seconds(2)) ==
+      std::future_status::ready;
+
+  release_active.signal();
+  auto blocked_result = cleanup.blocked_submission.get();
+  if (blocked_result.status.ok) {
+    cleanup.accepted.push_back(std::move(blocked_result.value));
+  }
+  for (auto& status_future : cleanup.accepted) {
+    const OperationStatus status = status_future.get();
+    EXPECT_TRUE(status.ok) << status.message;
+  }
+  const VoidResult close_result = close.get();
+  reset_host_blocking_source();
+
+  EXPECT_TRUE(marker_claimed_before_queue_space);
+  EXPECT_TRUE(blocked_submit_ready_before_queue_space);
+  EXPECT_FALSE(blocked_result.status.ok);
+  if (!blocked_result.status.ok) {
+    EXPECT_EQ(checked_graph_error_code(blocked_result.status),
+              GraphErrc::NotFound);
+  }
+  EXPECT_TRUE(close_result.status.ok) << close_result.status.message;
+}
+#endif
 
 /**
  * @brief Proves runtime destruction drains dropped-future work before scheduler

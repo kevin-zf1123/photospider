@@ -76,6 +76,31 @@ class InteractionService {
     return kernel_.load_graph(name, root_dir, yaml_path, config_path,
                               cache_root_dir);
   }
+  /**
+   * @brief Stops graph-state admission for the first phase of Host close.
+   * @param name Graph session whose bounded lane must reject new submissions.
+   * @return True when the graph exists; false when no runtime is loaded.
+   * @throws std::logic_error if invoked from the target lane worker.
+   * @throws std::overflow_error if the close-generation counter is exhausted.
+   * @throws std::system_error if executor lifecycle synchronization fails.
+   * @note The runtime and scheduler remain owned by Kernel. Embedded Host calls
+   *       this after publishing its close marker and draining pre-marker
+   *       synchronous admissions, but before waiting on pre-registered async
+   *       placeholders.
+   */
+  bool cmd_stop_graph_admission(const std::string& name) {
+    return kernel_.stop_graph_admission(name);
+  }
+
+  /**
+   * @brief Completes graph close after Host admission drainage.
+   * @param name Graph session whose lane and schedulers must be torn down.
+   * @return True when the runtime existed and was removed; false when absent.
+   * @throws Any executor or scheduler lifecycle failure propagated by Kernel.
+   * @note Kernel drains and joins the already-stopped lane before scheduler
+   *       shutdown. A scheduler stop failure reopens one lane worker before it
+   *       is rethrown.
+   */
   bool cmd_close_graph(const std::string& name) {
     return kernel_.close_graph(name);
   }
@@ -454,6 +479,7 @@ class InteractionService {
    *         when the graph is missing.
    * @throws std::bad_alloc if request, task, queue, or future-state allocation
    *         fails while Kernel schedules graph-state work.
+   * @throws std::runtime_error if graph-state admission has stopped.
    * @throws std::system_error if Kernel cannot launch runtime or graph-state
    *         asynchronous execution.
    * @note benchmark_events is still caller-owned and must outlive the future.
