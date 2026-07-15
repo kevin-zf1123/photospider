@@ -317,7 +317,7 @@ class PHOTOSPIDER_API Host {
    *
    * @param session Session to reload.
    * @param yaml_path YAML path to load.
-   * @return Success; `GraphErrc::NotFound` for a missing session;
+   * @return Success; `GraphErrc::NotFound` for a missing or closing session;
    *         `GraphErrc::InvalidParameter` for an empty path on an existing
    *         session; `GraphErrc::Io` for missing/unreadable input;
    *         `GraphErrc::InvalidYaml` for syntax or node-schema rejection;
@@ -327,17 +327,18 @@ class PHOTOSPIDER_API Host {
    * @throws std::bad_alloc if request processing, reload execution, backend-
    *         to-status translation, or copied result construction exhausts
    *         memory.
-   * @note The embedded adapter checks session existence before invoking the
-   *       backend reload path, preserves backend reload failure
-   *       classification, and serializes mutation through the backend
-   *       graph-state boundary. Any failure or propagated resource exhaustion
-   *       preserves the published nodes, topology adjacency and generation,
-   *       runtime graph state, and session identity. A successful reload
-   *       installs the complete replacement, resets runtime state, and
-   *       advances topology generation within the serialized commit. A
-   *       nonempty relative `yaml_path` uses the caller process working
-   *       directory; the IPC Host resolves it in the client process before
-   *       transport.
+   * @note The embedded adapter admits the session before checking existence,
+   *       then retains that admission across backend graph-state mutation and
+   *       exact public failure translation. Concurrent close therefore waits
+   *       for an accepted reload, while reload after the close marker returns
+   *       NotFound without touching Kernel state. Any failure or propagated
+   *       resource exhaustion preserves the published nodes, topology
+   *       adjacency and generation, runtime graph state, and session identity.
+   *       A successful reload installs the complete replacement, resets
+   *       runtime state, and advances topology generation within the serialized
+   *       commit. A nonempty relative `yaml_path` uses the caller process
+   *       working directory; the IPC Host resolves it in the client process
+   *       before transport.
    */
   virtual VoidResult reload_graph(const GraphSessionId& session,
                                   const std::string& yaml_path) = 0;
