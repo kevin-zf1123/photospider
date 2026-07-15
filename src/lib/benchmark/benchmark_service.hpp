@@ -40,12 +40,17 @@ class BenchmarkService {
    * @return 聚合和分析后的 BenchmarkResult。
    * @throws std::bad_alloc if Host execution or result aggregation exhausts
    *         memory.
+   * @throws std::invalid_argument when `config.execution.threads` is negative
+   *         or greater than eight.
    * @throws std::runtime_error when YAML loading, graph loading, or compute
    *         fails.
    * @throws YAML::Exception when generated or user-provided graph YAML is
    *         malformed.
-   * @note Temporary graph sessions are named `__benchmark_temp` and closed
-   *       after each run.
+   * @note Before graph load, both future HP and RT defaults use the CPU
+   *       work-stealing scheduler and the requested zero-through-eight worker
+   *       grant. Zero resolves to bounded hardware concurrency. Temporary
+   *       graph sessions are named `__benchmark_temp` and closed after each
+   *       run.
    */
   BenchmarkResult Run(const std::string& benchmark_dir,
                       const BenchmarkSessionConfig& config, int runs = 10);

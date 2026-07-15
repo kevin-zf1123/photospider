@@ -60,7 +60,8 @@ struct BenchmarkResult {
   std::string benchmark_name;  // 测试会话名称, e.g., "small_square_blur"
   std::string op_name;  // 核心测试的操作, e.g., "image_process:gaussian_blur"
   int width = 0, height = 0;
-  int num_threads = 1;  // 本次运行的线程数
+  /** @brief Resolved scheduler worker grant used by this benchmark run. */
+  int num_threads = 1;
 
   // --- 原始数据 ---
   std::vector<BenchmarkEvent> events;  // 所有节点的性能事件记录
@@ -123,7 +124,11 @@ struct BenchmarkSessionConfig {
   std::string yaml_path;
 
   /**
-   * @brief 执行配置
+   * @brief Product scheduler and repetition controls for this session.
+   * @throws Nothing for value construction; string-free fields do not
+   *         allocate.
+   * @note Worker selection is applied to future Host graph schedulers before
+   *       each benchmark run.
    */
   struct ExecutionConfig {
     /**
@@ -132,13 +137,18 @@ struct BenchmarkSessionConfig {
      */
     int runs = 10;
     /**
-     * @brief 使用的线程数
-     * @details
-     * 如果设置为 0，则自动使用 std::hardware_concurrency() 的值。
+     * @brief Scheduler worker request from zero through eight.
+     * @details Zero resolves to bounded hardware concurrency in `[1,8]`;
+     * positive values remain exact.
      * @default 0
      */
-    int threads = 0;       // 0 means use hardware_concurrency
-    bool parallel = true;  // 是否启用并行计算
+    int threads = 0;
+
+    /**
+     * @brief Whether compute dispatch uses the graph's parallel scheduler.
+     * @default true
+     */
+    bool parallel = true;
   } execution;
   /**
    * @brief 要收集和报告的统计指标列表
