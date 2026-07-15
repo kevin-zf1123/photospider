@@ -20,9 +20,13 @@ handle。Graph-state mutation 与 visible compute 会进入同一个 per-graph e
 
 ## 新 Session 加载
 
-`Kernel::load_graph()` 会在已发布 graph map 之外构造 runtime，启动配置的 scheduler，随后在
-`<root>/<session>/content.yaml` 存在时加载该文件。调用方显式提供的 source file 存在时，
-会先被复制到该 session path。
+`Kernel::load_graph()` 会在已发布 graph map 之外构造 runtime，启动配置的 scheduler，校验
+完整 graph document，最后才插入 runtime。Source 选择会区分省略与显式请求：
+
+- 空 `yaml_path` 会在 `<root>/<session>/content.yaml` 存在时使用该文件，否则有意创建
+  empty session；
+- 每个非空 `yaml_path` 都是显式路径。Kernel 要求它存在并能复制到 session path，除非它已经
+  指向同一文件。显式 source failure 返回 `GraphErrc::Io`，绝不回退到旧 session content。
 
 在构造该 runtime 前，Kernel 会规划两个已配置的 intent scheduler。Worker 请求只有零到八有效；
 零解析为 `min(max(1, hardware_concurrency()), 8)`，显式正值保持精确。随后 Kernel 从进程级
@@ -30,38 +34,36 @@ handle。Graph-state mutation 与 visible compute 会进入同一个 per-graph e
 与 ABI v2 plugin scheduler 按解析后的授权计费，内置 GPU/heterogeneous scheduler 还要计入已配置的
 潜在 GPU worker。如果 planning 或合并准入失败，两个 scheduler 都不会被构造，也不会发布 session。
 
-Graph document loading 对普通 parse/validation failure 与 session publication 是事务性的：
+Graph document loading 是“准备后发布”事务：
 
 1. `GraphIOService` 把全部 YAML sequence entry 解析到临时 node map。
-2. 在 replacement 前验证重复 id、dependency 与 cycle。
-3. `GraphModel::replace_nodes()` 一起安装 node 与 topology，重置 graph runtime metadata，并推进
+2. 在 replacement 前分类 parser、root-shape、duplicate-id 与 node-schema failure。
+3. 验证 dependency 与 cycle，并构造 replacement adjacency。
+4. `GraphModel::replace_nodes()` 一起安装 node 与 topology，重置 graph runtime metadata，并推进
    topology generation。
-4. 只有 load 完成后，`Kernel` 才把 runtime 插入 map。
+5. 只有 load 完成后，`Kernel` 才把 runtime 插入 map。
 
-因此，parse、node construction 或 topology failure 不会发布 partial graph 或新 session。
-资源耗尽会继续抛出；其他已处理的 load failure 返回失败的 Host result。Parse 前已经发生的
-directory creation 与 file-copy side effect 不会回滚。Scheduler 容量不同：发布前发生任何失败，
-都会销毁所有 candidate scheduler，并把原子准入的两个 reservation 各自恰好归还一次。
+因此，path、parser、node construction、topology、unexpected 或 resource failure 都不会发布
+partial graph 或新 session。`std::bad_alloc` 原样传播；其他 failure 使用下文稳定矩阵。
+Parse 前已经发生的 directory creation 与 file-copy side effect 不会回滚，但它们不是 graph-map
+publication。Scheduler 容量更严格：发布前发生任何失败，都会销毁所有 candidate scheduler，
+并把原子准入的两个 reservation 各自恰好归还一次。
 
-当前 source-path boundary 有三个重要限制：
-
-- `GraphRuntime` 构造函数执行的 directory creation 位于 Kernel 的 best-effort copy block 之外。
-  Filesystem failure 会作为 I/O load failure 向上传播，且不会发布 session；但构造期间已经创建的
-  directory 不会回滚；
-- 随后的 session-directory setup 与 source/config copy block 会在 document load 前抑制除
-  `std::bad_alloc` 外的 failure；
-- 调用方提供非空且不存在的 YAML path 时，它不会替换 session-local target。已有旧
-  `content.yaml` 时 Kernel 会加载旧文件；目标也不存在时才打印 warning 并发布 empty session，
-  而不是返回 I/O failure。
-
-省略 YAML path 是另一种情况：session-local `content.yaml` 存在时 Kernel 会使用它，否则有意
-发布 empty session。这些情况还没有由一个冻结的 load-error matrix 统一表达。
+分类与事务的依据由
+[ADR 0005](../../adr/zh/0005-graph-document-ingestion-is-a-classified-transaction.zh.md)
+固定。
 
 ## 现有 Session Reload
 
 `Host::reload_graph()` 会先区分 missing session，随后通过 `GraphStateExecutor` 提交 reload。
+即使 path 为空，missing session 也返回 `NotFound`；已有 session 的空 path 返回
+`InvalidParameter`。每个非空 source 都与 initial load 使用相同的 IO、syntax/schema、topology、
+unexpected-failure 与 resource-exhaustion 分类。
+
 `GraphIOService` 与 initial load 一样构造并验证临时 replacement。在 `replace_nodes()` 成功前，
-visible node map、topology、topology generation、cache、timing 以及 dirty/planning state 都保持不变。
+visible node map、topology、topology generation、cache、timing、dirty/planning state、runtime
+state 与 session identity 都保持不变。这项保证同时覆盖 handled failure 和传播的
+`std::bad_alloc`。
 
 成功 reload 会替换整个图、重置 model runtime state，并且即使复用 node id 也会推进 topology
 generation。`RealtimeProxyGraph` 等 runtime-owned mirror 会观察这一 generation boundary，
@@ -162,17 +164,22 @@ serialization 与 shutdown drainage。其准确 mapping、lease、socket 与 shu
 
 | 操作 | 当前公共行为 |
 | --- | --- |
-| initial load，重复 session | load result 失败；embedded Host 当前分类为 `InvalidParameter` |
+| initial load，重复 session | `GraphErrc::InvalidParameter`；existing session 保持不变 |
 | scheduler default 或直接 planning，worker 请求超过八 | `GraphErrc::InvalidParameter`；不构造 scheduler，未来默认值保持不变 |
 | initial load，HP+RT 合并进程容量不可用 | 不发布 session 或 scheduler；精确返回 `GraphErrc::ComputeError` |
-| initial load，runtime directory creation failure | 不发布 session；报告为 `GraphErrc::Io`；已经发生的 filesystem side effect 不回滚 |
-| initial load，document parse/topology failure | 不发布 session；详细 backend category 当前会折叠成同一种 load failure |
-| initial load，显式 missing source | 已有 session-local `content.yaml` 时加载旧文件；否则 warning，并发布 empty session |
+| initial load，空 path | session-local `content.yaml` 存在时加载该文件；否则有意发布 empty session |
+| initial load，显式 missing/unreadable/uncopyable source 或 session-path failure | `GraphErrc::Io`；不发布 session、不回退；已经创建的 filesystem scratch side effect 不回滚 |
+| initial load，YAML syntax/representation、非 sequence root、duplicate id 或 node-schema failure | `GraphErrc::InvalidYaml`；不发布 session |
+| initial load，missing dependency 或 cycle | 精确的 `GraphErrc::MissingDependency` 或 `GraphErrc::Cycle`；不发布 session |
+| initial load，unexpected non-resource failure | `GraphErrc::Unknown`；不发布 session |
+| initial load，resource exhaustion | 传播 `std::bad_alloc`；不发布 session |
 | reload，missing session | `GraphErrc::NotFound` |
-| reload，unreadable source 或 YAML syntax parser failure | `GraphErrc::Io` |
-| reload，非 sequence 或 duplicate-id document | `GraphErrc::InvalidYaml` |
-| reload，dependency/cycle validation | 对应的 backend `GraphErrc` |
-| reload，未分类的 YAML conversion exception | 通过 stored last-error path 返回 `GraphErrc::Unknown` |
+| reload，已有 session 且 path 为空 | `GraphErrc::InvalidParameter`；先前 graph 与 runtime state 保持 visible |
+| reload，missing/unreadable source | `GraphErrc::Io`；先前 graph 与 runtime state 保持 visible |
+| reload，YAML syntax/representation、非 sequence root、duplicate id 或 node-schema failure | `GraphErrc::InvalidYaml`；先前 graph 与 runtime state 保持 visible |
+| reload，missing dependency 或 cycle | 精确的 `GraphErrc::MissingDependency` 或 `GraphErrc::Cycle`；先前 graph 与 runtime state 保持 visible |
+| reload，unexpected non-resource failure | `GraphErrc::Unknown`；先前 graph 与 runtime state 保持 visible |
+| reload，resource exhaustion | 传播 `std::bad_alloc`；先前 graph 与 runtime state 保持 visible |
 | save，missing 或 closing session | `GraphErrc::NotFound` |
 | save，serialization、YAML emission 或 destination open/write/flush/close failure | `GraphErrc::Io`；save 不是 atomic replacement，因此 post-open failure 可能留下已创建、已截断或只有部分内容的 destination |
 | node replacement，missing/closing session 或 requested node 缺失 | `GraphErrc::NotFound` |
@@ -184,8 +191,8 @@ serialization 与 shutdown drainage。其准确 mapping、lease、socket 与 shu
 | clear 或 close，missing session | `GraphErrc::NotFound` |
 
 `OperationStatus` 暴露 error domain、signed code、stable name 与 diagnostic message。调用方必须按
-domain 与 code 分支，而不是按 diagnostic text 分支。上述 initial-load 不一致是当前限制，不是通用
-graph-document contract。
+domain 与 code 分支，而不是按 diagnostic text 分支。IPC 会序列化该精确 status，并在 Host load
+失败时回滚其 reserved session name；它不会引入 transport-only graph-document taxonomy。
 
 ## 实现与验证入口
 
@@ -198,5 +205,7 @@ graph-document contract。
 - `src/lib/graph/graph_model.cpp`
 - `src/lib/host/embedded_host.cpp`
 - `tests/integration/test_host_adapter.cpp`
+- `tests/integration/test_graph_document_errors.cpp`
 - `tests/integration/test_ipc_daemon.cpp`
+- `tests/unit/test_ipc_protocol.cpp`
 - `tests/integration/test_kernel_contracts.cpp`
