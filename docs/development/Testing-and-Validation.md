@@ -162,6 +162,69 @@ the change's risk warrants it. Do not use Docker or local `linux/amd64`
 emulation as a routine local preflight. Current-head GitHub Actions remains the
 authoritative remote integration environment.
 
+## OpenCV Operation Concurrency Validation
+
+`test_opencv_operation_concurrency` is a CTest-registered integration binary
+for the long-lived operation-provider and benchmark-worker contracts. It uses
+bounded callback gates rather than elapsed-time thresholds:
+
+- `BenchmarkThreadsConfigureExactHostSchedulerWorkers` runs the real
+  `BenchmarkService`, Host scheduler configuration, Graph load, and registered
+  callback path for automatic and explicit `1/2/4/8` requests. It requires the
+  exact resolved number of callbacks and rejects a grant-plus-one callback.
+- `BenchmarkThreadsRejectOutOfDomainValuesBeforeGraphLoad` requires signed
+  negative and above-eight worker requests to fail before publishing a Graph
+  session.
+- `BuiltinCurveCallbacksReachRequestedWorkerConcurrency` repeats the built-in
+  tiled `curve_transform` path three times at each `1/2/4/8` grant and requires
+  exact callback overlap through a test-only observer.
+- `BuiltinCurveOutputMatchesBetweenOneAndEightWorkers` compares packed pixel
+  rows from the public Host result and requires one-worker and eight-worker
+  output to be bitwise equal.
+
+The observer exists only in `BUILD_TESTING` builds, is private to the source
+tree, and is never installed. These cases prove reachable concurrency and
+deterministic output; they do not claim a machine-independent speedup.
+
+`opencv_operation_concurrency_benchmark` is the corresponding long-lived
+manual measurement tool. It is intentionally absent from CTest and CI. The
+tool creates and removes a disposable temporary Graph root, executes the real
+Host/benchmark/scheduler/built-in-operation path, retains no result artifact,
+and prints environment, raw wall-time samples, median wall time, throughput,
+speedup, and maximum callback concurrency to stdout. Build and run it with:
+
+```bash
+cmake --build build --target opencv_operation_concurrency_benchmark -j
+./build/tests/opencv_operation_concurrency_benchmark \
+  --size 2048 --warmups 2 --samples 7 --chain-length 4
+```
+
+The native snapshot captured on 2026-07-15 used macOS `arm64`, Clang 21.0.0
+(`clang-2100.1.1.101`), OpenCV 4.12.0, reported hardware concurrency 10, and
+reported `opencv_internal_threads=1`. The workload was a chain of four built-in
+`curve_transform` nodes over a 2048-by-2048 FP32 image, with two warmups and
+seven samples per grant:
+
+| Workers | Median wall (ms) | Throughput (Mpix/s) | Speedup | Max in flight |
+| ---: | ---: | ---: | ---: | ---: |
+| 1 | 27.450 | 611.188 | 1.000 | 1 |
+| 2 | 19.567 | 857.433 | 1.403 | 2 |
+| 4 | 15.688 | 1069.455 | 1.750 | 4 |
+| 8 | 15.008 | 1117.910 | 1.829 | 8 |
+
+The raw wall-time samples in milliseconds were:
+
+- 1 worker: `27.694|27.134|27.450|27.183|27.869|27.250|28.035`
+- 2 workers: `19.021|19.567|19.774|19.497|19.435|20.427|20.997`
+- 4 workers: `16.059|15.688|15.992|15.727|15.600|14.692|14.649`
+- 8 workers: `16.436|16.610|16.512|15.008|14.859|14.064|14.760`
+
+This snapshot establishes that the requested grants reached the real callback
+path and that the tested machine benefited from removing outer serialization.
+It is not a permanent performance baseline or pass/fail threshold. Rerun the
+exact command when evaluating another machine, compiler, OpenCV version, or
+operation-concurrency change, and interpret the newly printed raw samples.
+
 ## CTest Registration
 
 All intended GoogleTest binaries should be registered with CTest. This includes

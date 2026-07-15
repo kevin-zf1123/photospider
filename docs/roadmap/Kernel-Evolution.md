@@ -197,8 +197,14 @@ semantics:
 
 OpenCV remains valuable as an optional operation provider, image codec, and
 public image adapter. It must not define Graph, ROI, dirty propagation,
-planning, cache, or runtime interfaces. OpenCV initialization, exceptions, and
-process-wide state belong inside the OpenCV provider.
+planning, cache, or runtime interfaces. The current repository-owned CPU
+provider already follows the provider concurrency direction from ADR 0004: it
+uses reentrant `cv::Mat` callbacks, fixes OpenCV internal CPU threading at one
+before publication, leaves outer parallelism to admitted scheduler workers,
+and keeps genuine shared backend synchronization provider-local. The target
+architecture preserves those ownership rules while moving all OpenCV
+initialization, exceptions, algorithms, codecs, and process-wide state fully
+inside the optional OpenCV provider.
 
 YAML remains a supported document adapter. `YAML::Node` must not remain the
 runtime parameter, output, cache metadata, or graph-state value model. Graph

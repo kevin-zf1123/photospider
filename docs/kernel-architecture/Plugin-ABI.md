@@ -209,6 +209,15 @@ ownership mutation, coherent snapshot capture, publication, and unload; it never
 holds its state lock to serialize callback execution. Callers must not infer
 single-threaded execution from a shared operation key, device, or intent.
 
+Repository-owned CPU OpenCV providers implement that contract with immutable
+inputs, callback-local or task-owned `cv::Mat` state, and no process-wide outer
+operation mutex. Built-in registration fixes OpenCV internal CPU threading at
+one before callback publication, so scheduler grants own the outer parallelism.
+Provider-local synchronization is still required for actual shared backend
+state: the Metal Perlin DSO mutex protects only its shared Metal lifecycle.
+[ADR 0004](../adr/0004-opencv-cpu-operations-are-reentrant-provider-work.md)
+records the decision and its accounting limits.
+
 Direct replacement uses the same retirement discipline outside manager-driven
 unload. A replacement callback is prepared before locking and swapped with the
 active slot; the displaced callable remains in the parameter-local retirement

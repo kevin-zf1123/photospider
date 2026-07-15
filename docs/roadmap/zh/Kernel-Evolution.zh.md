@@ -163,8 +163,11 @@ forwarding layer。
 - 注入式 graph document reader/writer 和 image/artifact codec。
 
 OpenCV 继续作为可选 operation provider、image codec 和公共 image adapter。它不得定义 Graph、
-ROI、dirty propagation、planning、cache 或 runtime interface。OpenCV 初始化、异常和进程级状态
-属于 OpenCV provider。
+ROI、dirty propagation、planning、cache 或 runtime interface。当前仓库自有 CPU provider 已遵循
+ADR 0004 的 provider 并发方向：使用可重入 `cv::Mat` callback，在发布前把 OpenCV 内部 CPU
+threading 固定为一，把外层并行交给已准入 scheduler worker，并让真实共享 backend 同步保持
+provider-local。目标架构会保留这些所有权规则，同时把全部 OpenCV 初始化、异常、algorithm、codec
+与进程级状态完整移入可选 OpenCV provider。
 
 YAML 继续作为受支持的 document adapter；`YAML::Node` 不再作为 runtime parameter、output、
 cache metadata 或 graph-state value model。Graph load/save 是具有显式 transaction 和 error

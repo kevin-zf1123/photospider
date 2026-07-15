@@ -120,6 +120,59 @@ regression。是否运行本机原生 clean configure、full build 或完整 CTe
 决定，而不是常设要求。不要把 Docker 或本地 `linux/amd64` 模拟作为常规本地 preflight；
 current-head GitHub Actions 仍是权威远程 integration 环境。
 
+## OpenCV Operation 并发验证
+
+`test_opencv_operation_concurrency` 是注册到 CTest 的 integration binary，用于验证长期
+operation-provider 与 benchmark-worker contract。它使用有界 callback gate，而不是 elapsed-time
+threshold：
+
+- `BenchmarkThreadsConfigureExactHostSchedulerWorkers` 会对自动 request 与显式 `1/2/4/8`
+  request 运行真实 `BenchmarkService`、Host scheduler 配置、Graph load 与已注册 callback 路径。
+  它要求达到精确的解析后 callback 数量，并拒绝出现 grant-plus-one callback。
+- `BenchmarkThreadsRejectOutOfDomainValuesBeforeGraphLoad` 要求负数与大于八的 worker request
+  在发布 Graph session 前失败。
+- `BuiltinCurveCallbacksReachRequestedWorkerConcurrency` 会在每个 `1/2/4/8` grant 下重复三次
+  builtin tiled `curve_transform` 路径，并通过仅供测试的 observer 要求精确 callback overlap。
+- `BuiltinCurveOutputMatchesBetweenOneAndEightWorkers` 会比较 public Host result 中打包后的
+  pixel row，并要求单 worker 与八 worker 输出按位相同。
+
+Observer 只存在于 `BUILD_TESTING` build，是 source tree 私有接口，绝不会安装。这些 case 证明
+并发路径可达且输出确定，不承诺与机器无关的 speedup。
+
+`opencv_operation_concurrency_benchmark` 是对应的长期手工 measurement tool，刻意不进入 CTest
+或 CI。该工具会创建并清理可丢弃的临时 Graph root，通过真实 Host/benchmark/scheduler/builtin
+operation 路径执行，不保留 result artifact，并把环境、原始 wall-time sample、median wall time、
+throughput、speedup 与 callback 最大并发度输出到 stdout。构建与运行命令为：
+
+```bash
+cmake --build build --target opencv_operation_concurrency_benchmark -j
+./build/tests/opencv_operation_concurrency_benchmark \
+  --size 2048 --warmups 2 --samples 7 --chain-length 4
+```
+
+2026-07-15 采集的原生快照使用 macOS `arm64`、Clang 21.0.0
+（`clang-2100.1.1.101`）、OpenCV 4.12.0；报告 hardware concurrency 为 10，且
+`opencv_internal_threads=1`。Workload 是在 2048×2048 FP32 image 上串联四个 builtin
+`curve_transform` node，每个 grant 先执行两次 warmup，再采集七个 sample：
+
+| Worker | Median wall（ms） | Throughput（Mpix/s） | Speedup | 最大 in flight |
+| ---: | ---: | ---: | ---: | ---: |
+| 1 | 27.450 | 611.188 | 1.000 | 1 |
+| 2 | 19.567 | 857.433 | 1.403 | 2 |
+| 4 | 15.688 | 1069.455 | 1.750 | 4 |
+| 8 | 15.008 | 1117.910 | 1.829 | 8 |
+
+原始 wall-time sample（单位：毫秒）为：
+
+- 1 worker：`27.694|27.134|27.450|27.183|27.869|27.250|28.035`
+- 2 worker：`19.021|19.567|19.774|19.497|19.435|20.427|20.997`
+- 4 worker：`16.059|15.688|15.992|15.727|15.600|14.692|14.649`
+- 8 worker：`16.436|16.610|16.512|15.008|14.859|14.064|14.760`
+
+该快照证明所请求 grant 到达真实 callback 路径，并且测试机器能从移除外层串行化中获益。它不是
+永久性能 baseline 或 pass/fail threshold。在评估另一台机器、compiler、OpenCV version 或
+operation-concurrency 变更时，应重新运行准确命令，并解释新输出的原始 sample。
+
 ## CTest 注册
 
 所有预期 GoogleTest 二进制都应注册到 CTest。这包括当前可能低置信度的里程碑测试和 `test_propagation_contracts`。
