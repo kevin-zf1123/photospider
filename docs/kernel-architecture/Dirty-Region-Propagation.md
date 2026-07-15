@@ -204,6 +204,14 @@ HP-to-RT task edge and does not make RT output an authoritative HP cache. It is
 not a cross-domain atomic transaction: an HP failure after a successful RT
 commit does not roll the proxy commit back.
 
+Before scheduler-backed siblings start, `ComputeService` creates one
+request-owned per-node synchronization object and shares it with both domains.
+Only live `Node` snapshot/YAML parameter resolution and short staging sections
+for the same node are serialized; different nodes and operation execution
+remain concurrent. The owner survives sibling failure cleanup and scheduler
+drain, then is destroyed with that request. It is not retained by `GraphModel`,
+`GraphRuntime`, or process-wide state.
+
 ## Explicit Current Limitations
 
 The current implementation does not provide:
@@ -234,6 +242,7 @@ OpenCV use.
 - `src/lib/compute/dirty_execution_common.cpp`
 - `src/lib/compute/dirty_update_executor.cpp`
 - `src/lib/graph/roi_propagation_service.cpp`
+- `tests/integration/test_scheduler.cpp`
 - `tests/integration/test_compute_service_split.cpp`
 - `tests/integration/test_host_adapter.cpp`
 - `tests/unit/test_propagation_contracts.cpp`

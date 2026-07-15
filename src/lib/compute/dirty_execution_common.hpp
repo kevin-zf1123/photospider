@@ -2,6 +2,8 @@
 
 #include <cstdint>
 #include <functional>
+#include <memory>
+#include <mutex>
 #include <optional>
 #include <unordered_map>
 #include <unordered_set>
@@ -22,6 +24,49 @@ class GraphRuntime;
 }  // namespace ps
 
 namespace ps::compute {
+
+/**
+ * @brief Owns per-node critical sections for one dirty update transaction.
+ *
+ * Dirty scheduler callbacks use these mutexes while copying a live `Node`,
+ * resolving its YAML-backed runtime parameters, and touching request-local
+ * staging metadata. A scheduler-backed `RealTimeUpdate` shares one instance
+ * between its concurrent HP and RT siblings so both domains synchronize access
+ * to the same live node without coupling their task graphs or output buffers.
+ *
+ * @throws std::bad_alloc If node-id or mutex storage cannot be allocated.
+ * @note The node map is fully constructed before scheduler submission and is
+ * immutable thereafter. Different node ids remain independent, and selected
+ * operation execution occurs outside these critical sections. Ownership is
+ * request-scoped; no instance is stored in GraphModel, GraphRuntime, or global
+ * state.
+ */
+class DirtyNodeSynchronization final {
+ public:
+  /**
+   * @brief Creates one mutex for every node visible to the dirty transaction.
+   * @param node_ids Stable graph node identities; duplicate values are ignored.
+   * @throws std::bad_alloc If the mutex map or one mutex cannot be allocated.
+   * @note Construction must finish before HP/RT sibling callbacks start. The
+   * caller must keep this object alive until every scheduler callback drains.
+   */
+  explicit DirtyNodeSynchronization(const std::vector<int>& node_ids);
+
+  /**
+   * @brief Returns the immutable transaction's mutex for one graph node.
+   * @param node_id Node whose live snapshot or staging state will be touched.
+   * @return Mutable mutex owned by this synchronization object.
+   * @throws std::out_of_range If node_id was not present at construction,
+   * indicating a topology/task materialization mismatch.
+   * @note The returned reference remains valid for this object's lifetime; the
+   * map is never mutated after construction.
+   */
+  std::mutex& mutex_for(int node_id) const;
+
+ private:
+  /** @brief Immutable node-id index of independently owned mutexes. */
+  std::unordered_map<int, std::unique_ptr<std::mutex>> node_mutexes_;
+};
 
 /**
  * @brief Returns the running scheduler registered for one compute intent.

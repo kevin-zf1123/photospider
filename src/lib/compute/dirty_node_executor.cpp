@@ -83,7 +83,7 @@ HighPrecisionDirtyNodeExecutor::HighPrecisionDirtyNodeExecutor(
       snapshot_(context.snapshot),
       dirty_generation_(context.dirty_generation),
       hp_write_buffer_(hp_write_buffer),
-      node_mutexes_(context.node_mutexes) {
+      node_synchronization_(context.node_synchronization) {
 }  // NOLINT(whitespace/indent_namespace)
 
 void HighPrecisionDirtyNodeExecutor::execute(Node& node,
@@ -274,7 +274,7 @@ bool HighPrecisionDirtyNodeExecutor::should_skip_node(const Node& node,
 }
 
 std::mutex& HighPrecisionDirtyNodeExecutor::node_mutex(int node_id) const {
-  return *node_mutexes_.at(node_id);
+  return node_synchronization_.mutex_for(node_id);
 }
 
 RealTimeDirtyNodeExecutor::RealTimeDirtyNodeExecutor(
@@ -288,7 +288,7 @@ RealTimeDirtyNodeExecutor::RealTimeDirtyNodeExecutor(
       stabilized_parameters_(context.stabilized_parameters),
       proxy_graph_(proxy_graph),
       rt_write_buffer_(rt_write_buffer),
-      node_mutexes_(context.node_mutexes) {
+      node_synchronization_(context.node_synchronization) {
 }  // NOLINT(whitespace/indent_namespace)
 
 void RealTimeDirtyNodeExecutor::execute(Node& node, const RtPlanEntry& entry) {
@@ -545,7 +545,7 @@ bool RealTimeDirtyNodeExecutor::should_skip_node(const Node& node,
 }
 
 std::mutex& RealTimeDirtyNodeExecutor::node_mutex(int node_id) const {
-  return *node_mutexes_.at(node_id);
+  return node_synchronization_.mutex_for(node_id);
 }
 
 }  // namespace ps::compute

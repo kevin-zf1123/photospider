@@ -13,6 +13,22 @@
 
 namespace ps::compute {
 
+/** @copydoc DirtyNodeSynchronization::DirtyNodeSynchronization */
+DirtyNodeSynchronization::DirtyNodeSynchronization(
+    const std::vector<int>& node_ids) {
+  node_mutexes_.reserve(node_ids.size());
+  for (int node_id : node_ids) {
+    if (node_mutexes_.find(node_id) == node_mutexes_.end()) {
+      node_mutexes_.emplace(node_id, std::make_unique<std::mutex>());
+    }
+  }
+}
+
+/** @copydoc DirtyNodeSynchronization::mutex_for */
+std::mutex& DirtyNodeSynchronization::mutex_for(int node_id) const {
+  return *node_mutexes_.at(node_id);
+}
+
 /** @copydoc ensure_running_scheduler */
 IScheduler& ensure_running_scheduler(GraphRuntime& runtime,
                                      ComputeIntent intent) {

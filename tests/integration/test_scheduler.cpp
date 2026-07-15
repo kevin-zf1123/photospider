@@ -595,3 +595,79 @@ TEST(Scheduler,
   write_scheduler_trace_json("dirty_scheduler_exception_log.json",
                              exception_log);
 }
+
+/**
+ * @brief Verifies concurrent HP/RT dirty siblings preserve YAML node state.
+ *
+ * The test seeds one scheduler-backed graph, performs an authoritative HP
+ * compute, then issues repeated RealTimeUpdate transactions whose HP and RT
+ * siblings resolve the same live node parameters concurrently. It finally
+ * checks both the graph-owned YAML state and the RT proxy output.
+ *
+ * @return Nothing; GoogleTest assertions report compute, YAML, or proxy-state
+ *         failures.
+ * @throws std::bad_alloc, YAML::Exception, GraphError, or std::system_error if
+ *         graph setup, concurrent dirty execution, or result inspection fails.
+ * @note The test exercises production scheduler callbacks. Transaction-local
+ *       synchronization must protect same-node snapshot and parameter staging
+ *       without serializing operation bodies or persisting into GraphRuntime.
+ */
+TEST(Scheduler, ConcurrentDirtySiblingsPreserveYamlParameterState) {
+  ps::Kernel kernel;
+  ps::Kernel::SchedulerConfig scheduler_config;
+  scheduler_config.worker_count = 8;
+  kernel.set_scheduler_config(scheduler_config);
+  ps::InteractionService svc(kernel);
+  svc.cmd_seed_builtin_ops();
+  register_micro_blur_for_dirty_scheduler_tests();
+
+  const std::string graph_name = "dirty_region_yaml_sibling_test";
+  ASSERT_TRUE(svc.cmd_load_graph(graph_name, "sessions",
+                                 "util/testcases/dirty_region_test.yaml")
+                  .has_value());
+  ps::GraphRuntime& runtime =
+      ps::testing::KernelTestAccess::runtime(kernel, graph_name);
+
+  ps::Kernel::ComputeRequest hp_request;
+  hp_request.name = graph_name;
+  hp_request.node_id = 3;
+  hp_request.cache.precision = "int8";
+  hp_request.execution.parallel = true;
+  ASSERT_TRUE(svc.cmd_compute(hp_request));
+
+  constexpr int kConcurrentUpdateCount = 8;
+  for (int update = 0; update < kConcurrentUpdateCount; ++update) {
+    auto update_future = runtime.graph_state().submit(
+        [&](ps::GraphModel& graph) -> ps::NodeOutput {
+          ps::GraphTraversalService traversal_service;
+          ps::GraphCacheService cache_service;
+          ps::ComputeService compute_service(traversal_service, cache_service,
+                                             runtime.event_service());
+          ps::ComputeService::Request request;
+          request.node_id = 3;
+          request.cache.precision = "int8";
+          request.cache.disable_disk_cache = true;
+          request.intent = ps::ComputeIntent::RealTimeUpdate;
+          request.dirty_roi = cv::Rect(200, 200, 128, 128);
+          return compute_service.compute_parallel(graph, runtime, request);
+        });
+    ps::NodeOutput output;
+    ASSERT_NO_THROW(output = update_future.get());
+    EXPECT_GT(output.image_buffer.width, 0);
+    EXPECT_GT(output.image_buffer.height, 0);
+  }
+
+  runtime.graph_state()
+      .submit([](ps::GraphModel& graph) {
+        const ps::Node& blur = graph.node(2);
+        ASSERT_TRUE(blur.parameters);
+        EXPECT_EQ(blur.parameters["ksize"].as<int>(), 25);
+        ASSERT_TRUE(blur.runtime_parameters);
+        EXPECT_EQ(blur.runtime_parameters["ksize"].as<int>(), 25);
+      })
+      .get();
+  const auto* proxy_output = runtime.realtime_proxy_graph().find_output(3);
+  ASSERT_NE(proxy_output, nullptr);
+  EXPECT_GT(proxy_output->image_buffer.width, 0);
+  EXPECT_GT(proxy_output->image_buffer.height, 0);
+}

@@ -18,6 +18,7 @@ class GraphCacheService;
 class GraphEventService;
 struct BenchmarkEvent;
 namespace compute {
+class DirtyNodeSynchronization;
 class DirtySiblingCommitGate;
 class RealtimeProxyGraph;
 class StabilizedDirtyParameters;
@@ -281,18 +282,25 @@ class ComputeService {
    * @param proxy_graph RT proxy graph receiving the committed result.
    * @param strategy Inline or scheduler-backed execution policy.
    * @param request Validated dirty request and telemetry/cache options.
+   * @param stabilized_parameters Optional immutable parameter preflight output.
+   * @param node_synchronization Optional per-node critical sections shared with
+   * the concurrent HP sibling of the same RealTimeUpdate transaction.
    * @return Mutable target RT output owned by proxy_graph.
    * @throws std::bad_alloc unchanged when planning, task, proxy, or output
    * storage exhausts memory.
    * @throws GraphError for dirty planning, dispatch, operation, or target
    * validation failures; std::bad_optional_access for an unvalidated request.
-   * @note RT output never becomes formal reusable GraphModel cache state.
+   * @note RT output never becomes formal reusable GraphModel cache state. The
+   * optional synchronization owner is retained only for this synchronous call
+   * and is not stored in the Graph or runtime.
    */
   NodeOutput& compute_real_time_update(
       GraphModel& graph, compute::RealtimeProxyGraph& proxy_graph,
       const ExecutionStrategy& strategy, const Request& request,
       std::shared_ptr<const compute::StabilizedDirtyParameters>
-          stabilized_parameters = nullptr);
+          stabilized_parameters = nullptr,
+      std::shared_ptr<compute::DirtyNodeSynchronization> node_synchronization =
+          nullptr);
 
   /**
    * @brief Resolves the RT proxy graph for one compute request.
@@ -363,8 +371,9 @@ class ComputeService {
    * output storage exhausts memory.
    * @throws GraphError for invalid intent, missing runtime, planning,
    * operation, scheduler, or output failures.
-   * @note Callback captures and the optional sibling gate are request-local;
-   * scheduler and proxy graph ownership remain with strategy/runtime/service.
+   * @note Callback captures, the optional sibling gate, and concurrent per-node
+   * synchronization are request-local; scheduler and proxy graph ownership
+   * remain with strategy/runtime/service.
    */
   NodeOutput& compute_intent_update_impl(GraphModel& graph,
                                          const ExecutionStrategy& strategy,

@@ -259,9 +259,10 @@ stabilize_connected_dirty_parameters(
  *
  * @throws std::bad_alloc when copying cache_precision storage exhausts memory.
  * @note benchmark_events is borrowed for one synchronous execute call;
- * sibling_commit_gate uses shared ownership for coordinated HP/RT lifetime.
- * Copying scalar fields, the borrowed benchmark pointer, and an existing
- * shared_ptr handle does not allocate request-owned storage.
+ * sibling_commit_gate and node_synchronization use shared ownership for the
+ * coordinated HP/RT lifetime. Copying scalar fields, the borrowed benchmark
+ * pointer, and existing shared_ptr handles does not allocate request-owned
+ * storage.
  */
 struct DirtyUpdateRequest {
   /** @brief Target node id whose dirty ROI update should produce output. */
@@ -319,6 +320,17 @@ struct DirtyUpdateRequest {
    * continues to execute image-path work in its own domain.
    */
   std::shared_ptr<const StabilizedDirtyParameters> stabilized_parameters;
+
+  /**
+   * @brief Optional per-node critical sections shared by HP/RT siblings.
+   *
+   * @note `ComputeService` supplies one transaction-scoped owner only when a
+   * scheduler-backed RealTimeUpdate will run HP and RT concurrently. Each
+   * executor creates an independent local owner when this pointer is null.
+   * Shared ownership lasts through sibling failure cleanup and scheduler drain;
+   * the object is never retained by a Graph or process-wide service.
+   */
+  std::shared_ptr<DirtyNodeSynchronization> node_synchronization;
 };
 
 /**
@@ -334,7 +346,8 @@ struct DirtyUpdateRequest {
  *
  * @note Planning/inspection and final validation take graph_mutex_, while
  * scheduler execution runs outside the outer graph lock and relies on
- * request-local node locks for cache writes.
+ * transaction-local per-node critical sections. Concurrent HP/RT siblings
+ * share those sections only for the same RealTimeUpdate transaction.
  */
 class HighPrecisionDirtyExecutor {
  public:
