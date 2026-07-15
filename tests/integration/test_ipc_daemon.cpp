@@ -4052,9 +4052,10 @@ TEST(IpcDaemonLifecycle, SerializesConcurrentStaleReclaimWithPersistentLock) {
  *         or status mismatches.
  * @throws std::bad_alloc, std::runtime_error, filesystem exceptions, or system
  *         errors when fixture setup, process control, or IPC cannot complete.
- * @note Missing node mutation/projection targets remain NotFound over IPC;
- *       existing-target YAML, ROI, and destination failures retain their
- *       distinct InvalidYaml, InvalidParameter, and Io categories.
+ * @note Missing sessions and node mutation/projection targets remain NotFound
+ *       over IPC; existing-target YAML, ROI, and destination failures retain
+ *       their distinct InvalidYaml, InvalidParameter, and Io categories. A
+ *       failed save leaves the remotely owned graph inspectable and retryable.
  */
 TEST(IpcDaemonGraphLifecycle, PersistsAcrossClientsAndInspectsCopiedSnapshots) {
   ScopedDaemonDirectory temp("photospider-ipc-daemon-graph");
@@ -4186,6 +4187,15 @@ TEST(IpcDaemonGraphLifecycle, PersistsAcrossClientsAndInspectsCopiedSnapshots) {
   EXPECT_EQ(missing_graph.status.domain, OperationErrorDomain::Graph);
   EXPECT_EQ(missing_graph.status.code,
             static_cast<std::int32_t>(GraphErrc::NotFound));
+  const std::filesystem::path missing_session_save_path =
+      temp.path() / "missing_session_save.yaml";
+  const auto missing_session_save =
+      second.save_graph(missing, missing_session_save_path.string());
+  EXPECT_FALSE(missing_session_save.status.ok);
+  EXPECT_EQ(missing_session_save.status.domain, OperationErrorDomain::Graph);
+  EXPECT_EQ(missing_session_save.status.code,
+            static_cast<std::int32_t>(GraphErrc::NotFound));
+  EXPECT_FALSE(std::filesystem::exists(missing_session_save_path));
   const auto missing_node =
       second.inspect_node(loaded.value.session_id, NodeId{999});
   EXPECT_FALSE(missing_node.status.ok);
@@ -4234,6 +4244,25 @@ TEST(IpcDaemonGraphLifecycle, PersistsAcrossClientsAndInspectsCopiedSnapshots) {
   EXPECT_FALSE(save_io.status.ok);
   EXPECT_EQ(save_io.status.domain, OperationErrorDomain::Graph);
   EXPECT_EQ(save_io.status.code, static_cast<std::int32_t>(GraphErrc::Io));
+
+  const auto graph_after_failed_save =
+      second.inspect_graph(loaded.value.session_id);
+  ASSERT_TRUE(graph_after_failed_save.status.ok)
+      << graph_after_failed_save.status.message;
+  ASSERT_EQ(graph_after_failed_save.value.nodes.size(), 1U);
+  EXPECT_EQ(graph_after_failed_save.value.nodes[0].name, "ipc_source");
+  const auto node_after_failed_save =
+      second.inspect_node(loaded.value.session_id, NodeId{1});
+  ASSERT_TRUE(node_after_failed_save.status.ok)
+      << node_after_failed_save.status.message;
+  EXPECT_EQ(node_after_failed_save.value.name, "ipc_source");
+
+  const std::filesystem::path retry_save_path = temp.path() / "retry_save.yaml";
+  const auto retry_save =
+      second.save_graph(loaded.value.session_id, retry_save_path.string());
+  ASSERT_TRUE(retry_save.status.ok) << retry_save.status.message;
+  EXPECT_TRUE(std::filesystem::is_regular_file(retry_save_path));
+  EXPECT_GT(std::filesystem::file_size(retry_save_path), 0U);
 
   ASSERT_TRUE(second.close_graph(loaded.value.session_id).status.ok);
   const auto empty = second.list_graphs();

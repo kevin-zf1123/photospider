@@ -1289,7 +1289,7 @@ TEST(GraphIoContract, SaveReportsPostOpenWriteFailureAsIo) {
   std::filesystem::remove(output_path);
 
   testing::arm_graph_io_save_failure(
-      testing::GraphIoSaveFailureStage::AfterWrite);
+      output_path, testing::GraphIoSaveFailureStage::AfterWrite);
   bool caught_io = false;
   try {
     io.save(graph, output_path);
@@ -1321,7 +1321,7 @@ TEST(GraphIoContract, SaveReportsPostWriteFlushFailureAsIo) {
   std::filesystem::remove(output_path);
 
   testing::arm_graph_io_save_failure(
-      testing::GraphIoSaveFailureStage::AfterFlush);
+      output_path, testing::GraphIoSaveFailureStage::AfterFlush);
   bool caught_io = false;
   try {
     io.save(graph, output_path);
@@ -1353,7 +1353,7 @@ TEST(GraphIoContract, SaveReportsPostFlushCloseFailureAsIo) {
   std::filesystem::remove(output_path);
 
   testing::arm_graph_io_save_failure(
-      testing::GraphIoSaveFailureStage::AfterClose);
+      output_path, testing::GraphIoSaveFailureStage::AfterClose);
   bool caught_io = false;
   try {
     io.save(graph, output_path);

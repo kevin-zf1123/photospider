@@ -1184,6 +1184,8 @@ if(BUILD_TESTING)
         override_lifecycle_op_plugin destroy_count_scheduler_plugin)
     add_ps_test(test_graph_document_errors
         tests/integration/test_graph_document_errors.cpp)
+    target_compile_definitions(test_graph_document_errors PRIVATE
+        PHOTOSPIDER_INTERNAL_GRAPH_IO_TESTING)
     add_ps_test(test_scheduler_worker_budget
         tests/integration/test_scheduler_worker_budget.cpp)
     target_compile_definitions(test_scheduler_worker_budget PRIVATE

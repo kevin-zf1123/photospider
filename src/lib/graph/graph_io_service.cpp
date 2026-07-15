@@ -5,6 +5,7 @@
 #include <algorithm>
 #include <exception>
 #include <fstream>
+#include <mutex>
 #include <new>
 #include <optional>
 #include <string>
@@ -22,47 +23,83 @@ namespace testing {
 namespace {
 
 /**
- * @brief Calling-thread failure stage consumed by the next matching save.
- * @throws Nothing for thread-local initialization and optional reset.
- * @note Thread-local ownership prevents unrelated concurrent saves from
- *       observing or consuming the armed private test checkpoint.
+ * @brief Exact private save-failure plan visible to graph-state workers.
+ *
+ * @note The process-local plan is protected by g_save_failure_mutex and is
+ *       consumed only by an exact destination-path and stage match. It owns a
+ *       copied path so the arming caller need not outlive the worker call.
  */
-thread_local std::optional<GraphIoSaveFailureStage> g_save_failure_stage;
+struct GraphIoSaveFailurePlan {
+  /** @brief Exact destination path allowed to consume this plan. */
+  std::filesystem::path yaml_path;
+  /** @brief Exact save boundary allowed to consume this plan. */
+  GraphIoSaveFailureStage stage;
+};
 
 /**
- * @brief Calling-thread count proving the armed checkpoint was reached.
- * @throws Nothing for initialization and scalar updates.
- * @note The one-shot checkpoint limits this value to zero or one per arm.
+ * @brief Serializes process-local save-failure plan access.
+ * @throws Nothing for static initialization.
+ * @note The mutex lives for the process lifetime and is never held while a
+ *       stream is mutated or an injected exception is thrown.
  */
-thread_local std::size_t g_save_failure_hit_count = 0;
+std::mutex g_save_failure_mutex;
+
+/**
+ * @brief Armed destination-scoped failure plan, or no active checkpoint.
+ * @throws Nothing for empty optional initialization.
+ * @note Every read, replacement, and reset is protected by
+ *       g_save_failure_mutex.
+ */
+std::optional<GraphIoSaveFailurePlan> g_save_failure_plan;
+
+/**
+ * @brief Process-local count proving the armed checkpoint was reached.
+ * @throws Nothing for initialization and mutex-protected scalar updates.
+ * @note Every access is protected by g_save_failure_mutex. The one-shot
+ *       checkpoint limits this value to zero or one per arm.
+ */
+std::size_t g_save_failure_hit_count = 0;
 
 }  // namespace
 
 /** @copydoc ps::testing::arm_graph_io_save_failure */
-void arm_graph_io_save_failure(GraphIoSaveFailureStage stage) noexcept {
-  g_save_failure_stage = stage;
+void arm_graph_io_save_failure(const std::filesystem::path& yaml_path,
+                               GraphIoSaveFailureStage stage) {
+  GraphIoSaveFailurePlan plan{yaml_path, stage};
+  std::lock_guard<std::mutex> lock(g_save_failure_mutex);
+  g_save_failure_plan = std::move(plan);
   g_save_failure_hit_count = 0;
 }
 
 /** @copydoc ps::testing::clear_graph_io_save_failure */
-void clear_graph_io_save_failure() noexcept {
-  g_save_failure_stage.reset();
+void clear_graph_io_save_failure() {
+  std::lock_guard<std::mutex> lock(g_save_failure_mutex);
+  g_save_failure_plan.reset();
   g_save_failure_hit_count = 0;
 }
 
 /** @copydoc ps::testing::graph_io_save_failure_hit_count */
-std::size_t graph_io_save_failure_hit_count() noexcept {
+std::size_t graph_io_save_failure_hit_count() {
+  std::lock_guard<std::mutex> lock(g_save_failure_mutex);
   return g_save_failure_hit_count;
 }
 
 /** @copydoc ps::testing::inject_graph_io_save_failure */
 void inject_graph_io_save_failure(std::ios& stream,
+                                  const std::filesystem::path& yaml_path,
                                   GraphIoSaveFailureStage stage) {
-  if (!g_save_failure_stage || *g_save_failure_stage != stage) {
-    return;
+  {
+    std::lock_guard<std::mutex> lock(g_save_failure_mutex);
+    if (!g_save_failure_plan || g_save_failure_plan->stage != stage ||
+        g_save_failure_plan->yaml_path != yaml_path) {
+      return;
+    }
+    g_save_failure_plan.reset();
+    ++g_save_failure_hit_count;
   }
-  g_save_failure_stage.reset();
-  ++g_save_failure_hit_count;
+  if (stage == GraphIoSaveFailureStage::BeforeDestinationOpenBadAlloc) {
+    throw std::bad_alloc{};
+  }
   stream.setstate(stage == GraphIoSaveFailureStage::AfterClose
                       ? std::ios::failbit
                       : std::ios::badbit);
@@ -216,16 +253,19 @@ void GraphIOService::load(GraphModel& graph,
  * @param yaml_path Destination YAML path.
  * @return Nothing.
  * @throws std::bad_alloc if path, YAML, or stream storage exhausts memory.
- * @throws GraphError with `GraphErrc::Io` if the destination cannot be opened
- *         or reports a write, flush, or close failure.
+ * @throws GraphError with `GraphErrc::Io` if destination preparation/open or
+ *         write, flush, or close reports a recoverable failure.
  * @throws std::exception for YAML node serialization failures outside those
  *         stream phases.
- * @note This operation does not create parent directories or mutate graph
- *       state. It writes directly to `yaml_path`, so a post-open failure may
- *       leave a created, truncated, or partially written destination; no
- *       atomic replacement or rollback is provided. BUILD_TESTING may compile
- *       thread-local one-shot stream-state probes after each real output phase;
- *       production builds expose no probe or alternate writer.
+ * @note This operation does not create parent directories or mutate graph,
+ *       topology, runtime, or session-owner state on success or failure. It
+ *       writes directly to `yaml_path`: failure before open preserves existing
+ *       bytes, while a post-open failure may leave a created, truncated, or
+ *       partially written destination. No atomic replacement or destination
+ *       rollback is provided. BUILD_TESTING may compile one process-local,
+ *       destination-scoped, one-shot probe before destination open or after a
+ *       real output phase; production builds expose no probe or alternate
+ *       writer.
  */
 void GraphIOService::save(const GraphModel& graph,
                           const std::filesystem::path& yaml_path) const {
@@ -234,7 +274,19 @@ void GraphIOService::save(const GraphModel& graph,
     root.push_back(graph.node(id).to_yaml());
   }
 
-  std::ofstream fout(yaml_path);
+  std::ofstream fout;
+#if defined(PHOTOSPIDER_INTERNAL_GRAPH_IO_TESTING)
+  testing::inject_graph_io_save_failure(
+      fout, yaml_path,
+      testing::GraphIoSaveFailureStage::BeforeDestinationOpenBadAlloc);
+  testing::inject_graph_io_save_failure(
+      fout, yaml_path, testing::GraphIoSaveFailureStage::BeforeDestinationOpen);
+  if (!fout) {
+    throw GraphError(GraphErrc::Io, "Failed to prepare YAML destination: " +
+                                        yaml_path.string());
+  }
+#endif
+  fout.open(yaml_path);
   if (!fout) {
     throw GraphError(GraphErrc::Io,
                      "Failed to open file for writing: " + yaml_path.string());
@@ -242,7 +294,7 @@ void GraphIOService::save(const GraphModel& graph,
   fout << root;
 #if defined(PHOTOSPIDER_INTERNAL_GRAPH_IO_TESTING)
   testing::inject_graph_io_save_failure(
-      fout, testing::GraphIoSaveFailureStage::AfterWrite);
+      fout, yaml_path, testing::GraphIoSaveFailureStage::AfterWrite);
 #endif
   if (!fout) {
     throw GraphError(GraphErrc::Io,
@@ -251,7 +303,7 @@ void GraphIOService::save(const GraphModel& graph,
   fout.flush();
 #if defined(PHOTOSPIDER_INTERNAL_GRAPH_IO_TESTING)
   testing::inject_graph_io_save_failure(
-      fout, testing::GraphIoSaveFailureStage::AfterFlush);
+      fout, yaml_path, testing::GraphIoSaveFailureStage::AfterFlush);
 #endif
   if (!fout) {
     throw GraphError(GraphErrc::Io,
@@ -260,7 +312,7 @@ void GraphIOService::save(const GraphModel& graph,
   fout.close();
 #if defined(PHOTOSPIDER_INTERNAL_GRAPH_IO_TESTING)
   testing::inject_graph_io_save_failure(
-      fout, testing::GraphIoSaveFailureStage::AfterClose);
+      fout, yaml_path, testing::GraphIoSaveFailureStage::AfterClose);
 #endif
   if (!fout) {
     throw GraphError(GraphErrc::Io,
