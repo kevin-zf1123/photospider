@@ -44,6 +44,7 @@
 #include "ipc/unix_socket.hpp"
 #include "photospider/ipc/client.hpp"
 #include "photospider/scheduler/scheduler.hpp"
+#include "support/ipc_host_spy.hpp"
 
 #ifndef PS_PHOTOSPIDERD_PATH
 #error "PS_PHOTOSPIDERD_PATH must name the real daemon executable"
@@ -1339,6 +1340,21 @@ void queue_pending_clients(void* opaque,
 }
 
 /**
+ * @brief Performs one raw `daemon.ping` before an absolute deadline.
+ *
+ * @param socket_path Running or starting daemon socket path.
+ * @param deadline Absolute deadline shared by connect, send, and receive.
+ * @param message Receives transport, frame, or response diagnostics.
+ * @return True only after one correlated successful ping response.
+ * @throws std::bad_alloc if request, response, or diagnostic storage allocates.
+ * @note The implementation appears after the shared nonblocking frame helpers;
+ *       this declaration lets capacity observation itself remain hard-bounded.
+ */
+bool ping_before_deadline(const std::string& socket_path,
+                          std::chrono::steady_clock::time_point deadline,
+                          std::string* message);
+
+/**
  * @brief Waits until a newly accepted connection can ping successfully.
  *
  * @param socket_path Running daemon socket path.
@@ -1352,15 +1368,143 @@ bool wait_for_connection_capacity(const std::string& socket_path,
                                   std::chrono::milliseconds timeout) {
   const auto deadline = std::chrono::steady_clock::now() + timeout;
   while (std::chrono::steady_clock::now() < deadline) {
-    Client probe;
-    if (probe.connect(socket_path).ok && probe.ping().status.ok) {
-      probe.disconnect();
+    const auto attempt_deadline =
+        std::min(deadline, std::chrono::steady_clock::now() +
+                               std::chrono::milliseconds(250));
+    std::string message;
+    if (ping_before_deadline(socket_path, attempt_deadline, &message)) {
       return true;
     }
     std::this_thread::sleep_for(std::chrono::milliseconds(10));
   }
   return false;
 }
+
+/** @brief Short deterministic ordinary-stage budget used by deadline tests. */
+constexpr auto kShortOrdinaryStageTimeout = std::chrono::milliseconds(100);
+
+/**
+ * @brief Owns one in-process real server with a test-only short stage budget.
+ *
+ * @throws std::runtime_error if stop-pipe creation or bounded listener
+ *         readiness fails.
+ * @throws std::system_error if server-thread construction fails.
+ * @note The borrowed Host must outlive this object. Destruction closes the
+ *       sole stop-pipe writer, joins the real server run, and leaves pathname
+ *       cleanup to the production lifecycle path.
+ */
+class ScopedOrdinaryDeadlineServer final {
+ public:
+  /**
+   * @brief Starts a real private server and proves one complete ping roundtrip.
+   * @param host Borrowed Host implementation that outlives this object.
+   * @param stage_timeout Positive timeout copied by the source-tree seam.
+   * @throws std::runtime_error if setup or bounded readiness fails.
+   * @throws std::system_error if server-thread construction fails.
+   */
+  ScopedOrdinaryDeadlineServer(Host& host,
+                               std::chrono::milliseconds stage_timeout)
+      : temp_("ps-ordinary-stage-deadline", true),
+        socket_path_((temp_.path() / "listener.sock").string()),
+        server_(host, "ordinary-deadline-test") {
+    int descriptors[2] = {-1, -1};
+    if (::pipe(descriptors) != 0) {
+      throw std::runtime_error(std::string("deadline stop pipe failed: ") +
+                               std::strerror(errno));
+    }
+    stop_reader_ = internal::UniqueFd(descriptors[0]);
+    stop_writer_ = internal::UniqueFd(descriptors[1]);
+    dependencies_.ordinary_connection_stage_timeout = stage_timeout;
+    server_thread_ = std::thread([this] {
+      run_status_ = internal::test_run_server(
+          server_, internal::ServerOptions{socket_path_}, stop_reader_.get(),
+          dependencies_);
+    });
+    if (!wait_for_connection_capacity(socket_path_, std::chrono::seconds(2))) {
+      stop();
+      throw std::runtime_error("ordinary deadline server did not become ready");
+    }
+  }
+
+  /**
+   * @brief Stops and joins the server when still active.
+   * @throws Nothing.
+   */
+  ~ScopedOrdinaryDeadlineServer() { stop(); }
+
+  /**
+   * @brief Prevents copying live server, pipe, thread, and directory ownership.
+   * @throws Nothing because this operation is unavailable.
+   */
+  ScopedOrdinaryDeadlineServer(const ScopedOrdinaryDeadlineServer&) = delete;
+
+  /**
+   * @brief Prevents replacing live server and thread ownership.
+   * @return No value because this operation is unavailable.
+   * @throws Nothing because this operation is unavailable.
+   */
+  ScopedOrdinaryDeadlineServer& operator=(const ScopedOrdinaryDeadlineServer&) =
+      delete;
+
+  /**
+   * @brief Returns the active Unix socket pathname.
+   * @return Borrowed path valid for this object's lifetime.
+   * @throws Nothing.
+   */
+  const std::string& socket_path() const noexcept { return socket_path_; }
+
+  /**
+   * @brief Ends the server run and returns its terminal status.
+   * @return Borrowed terminal status: success for the expected stop-pipe
+   *         lifecycle, otherwise the real server diagnostic.
+   * @throws Nothing.
+   */
+  const OperationStatus& finish() noexcept {
+    stop();
+    return run_status_;
+  }
+
+ private:
+  /**
+   * @brief Closes the sole stop writer and joins the running server thread.
+   * @return Nothing.
+   * @throws Nothing.
+   * @note Stop-pipe hangup is an established normal stop signal and avoids a
+   *       potentially failing or interrupted destructor write.
+   */
+  void stop() noexcept {
+    if (!server_thread_.joinable()) {
+      return;
+    }
+    stop_writer_.reset();
+    server_thread_.join();
+    stop_reader_.reset();
+  }
+
+  /** @brief Protected directory removed after server destruction. */
+  ScopedDaemonDirectory temp_;
+
+  /** @brief Stable socket path below `temp_`. */
+  std::string socket_path_;
+
+  /** @brief Real private server under test. */
+  internal::Server server_;
+
+  /** @brief Run-scoped source-tree timeout injection. */
+  internal::ServerLifecycleTestDependencies dependencies_;
+
+  /** @brief Stop-pipe read descriptor observed by the server. */
+  internal::UniqueFd stop_reader_;
+
+  /** @brief Sole stop-pipe writer closed by `stop()`. */
+  internal::UniqueFd stop_writer_;
+
+  /** @brief Terminal result published before the server thread exits. */
+  OperationStatus run_status_;
+
+  /** @brief Joinable owner of the real blocking server run. */
+  std::thread server_thread_;
+};
 
 /**
  * @brief Converts one absolute monotonic deadline to a bounded poll timeout.
@@ -1427,6 +1571,108 @@ bool wait_for_descriptor(int fd, std::int16_t events,
           std::string("real daemon RPC poll failed: ") + std::strerror(errno);
       return false;
     }
+  }
+}
+
+/**
+ * @brief Waits for server-side connection closure without draining input.
+ *
+ * @param fd Connected nonblocking client descriptor.
+ * @param deadline Absolute monotonic observation deadline.
+ * @param message Receives timeout, invalid-descriptor, or poll diagnostics.
+ * @return True only after peer hangup or socket error becomes observable.
+ * @throws std::bad_alloc if diagnostic construction allocates.
+ * @note `MSG_PEEK` distinguishes EOF from readable response bytes without
+ *       consuming them, preserving write-side backpressure for deadline tests.
+ *       A one-millisecond retry interval prevents queued bytes from causing a
+ *       readiness spin while the server write deadline is still running.
+ */
+bool wait_for_peer_hangup(int fd,
+                          std::chrono::steady_clock::time_point deadline,
+                          std::string* message) {
+  while (true) {
+    const int timeout = remaining_poll_timeout(deadline);
+    if (timeout == 0) {
+      *message = "ordinary connection did not close before test deadline";
+      return false;
+    }
+    pollfd descriptor{fd, POLLIN, 0};
+    const int ready = ::poll(&descriptor, 1, timeout);
+    if (ready > 0) {
+      if ((descriptor.revents & POLLNVAL) != 0) {
+        *message = "ordinary connection descriptor became invalid";
+        return false;
+      }
+      if ((descriptor.revents & (POLLHUP | POLLERR)) != 0) {
+        return true;
+      }
+      if ((descriptor.revents & POLLIN) != 0) {
+        unsigned char byte = 0;
+        const ssize_t peeked =
+            ::recv(fd, &byte, sizeof(byte), MSG_PEEK | MSG_DONTWAIT);
+        if (peeked == 0) {
+          return true;
+        }
+        if (peeked < 0 && errno != EINTR && errno != EAGAIN &&
+            errno != EWOULDBLOCK) {
+          *message = std::string("ordinary connection peek failed: ") +
+                     std::strerror(errno);
+          return false;
+        }
+        std::this_thread::sleep_for(std::chrono::milliseconds(1));
+      }
+      continue;
+    }
+    if (ready == 0) {
+      *message = "ordinary connection did not close before test deadline";
+      return false;
+    }
+    if (errno != EINTR) {
+      *message = std::string("ordinary connection poll failed: ") +
+                 std::strerror(errno);
+      return false;
+    }
+  }
+}
+
+/**
+ * @brief Drains bytes already queued after the server connection is closed.
+ *
+ * @param fd Connected nonblocking client descriptor after server shutdown.
+ * @param maximum_bytes Test-owned safety bound for accumulated response bytes.
+ * @param message Receives overflow or non-transient receive diagnostics.
+ * @return Bytes observed before EOF, temporary exhaustion, or failure.
+ * @throws std::bad_alloc if byte or diagnostic storage allocation fails.
+ * @note This helper runs only after closure observation or explicit server
+ * stop, so it cannot relieve backpressure while the write deadline is active.
+ */
+std::vector<unsigned char> drain_closed_peer_bytes(int fd,
+                                                   std::size_t maximum_bytes,
+                                                   std::string* message) {
+  std::vector<unsigned char> bytes;
+  std::array<unsigned char, 64U * 1024U> buffer{};
+  while (true) {
+    const ssize_t received =
+        ::recv(fd, buffer.data(), buffer.size(), MSG_DONTWAIT);
+    if (received > 0) {
+      const std::size_t count = static_cast<std::size_t>(received);
+      if (bytes.size() > maximum_bytes ||
+          count > maximum_bytes - bytes.size()) {
+        *message = "closed-peer response exceeded the test safety bound";
+        return bytes;
+      }
+      bytes.insert(bytes.end(), buffer.begin(), buffer.begin() + count);
+      continue;
+    }
+    if (received == 0 || errno == EAGAIN || errno == EWOULDBLOCK) {
+      return bytes;
+    }
+    if (errno == EINTR) {
+      continue;
+    }
+    *message = std::string("closed-peer response receive failed: ") +
+               std::strerror(errno);
+    return bytes;
   }
 }
 
@@ -1615,6 +1861,43 @@ internal::FrameReadResult read_frame_before_deadline(
     return {internal::FrameReadState::IoError, {}, std::move(message)};
   }
   return {internal::FrameReadState::Complete, std::move(payload), {}};
+}
+
+/** @copydoc ping_before_deadline */
+bool ping_before_deadline(const std::string& socket_path,
+                          std::chrono::steady_clock::time_point deadline,
+                          std::string* message) {
+  internal::UniqueFd connection =
+      connect_before_deadline(socket_path, deadline, message);
+  if (!connection) {
+    return false;
+  }
+  const std::string request = internal::Json{
+      {"protocol_version", kProtocolVersion},
+      {"id", "deadline-capacity-probe"},
+      {"method", "daemon.ping"},
+      {"params",
+       internal::Json::object()}}.dump();
+  const std::uint32_t network_size =
+      htonl(static_cast<std::uint32_t>(request.size()));
+  if (!send_before_deadline(connection.get(), &network_size,
+                            sizeof(network_size), deadline, message) ||
+      !send_before_deadline(connection.get(), request.data(), request.size(),
+                            deadline, message)) {
+    return false;
+  }
+  const internal::FrameReadResult response =
+      read_frame_before_deadline(connection.get(), deadline);
+  if (response.state != internal::FrameReadState::Complete ||
+      response.payload.find("\"id\":\"deadline-capacity-probe\"") ==
+          std::string::npos ||
+      response.payload.find("\"pong\":true") == std::string::npos) {
+    *message = response.message.empty()
+                   ? "daemon ping returned an invalid response"
+                   : response.message;
+    return false;
+  }
+  return true;
 }
 
 /**
@@ -3401,6 +3684,194 @@ TEST(IpcDaemonLifecycle,
   EXPECT_TRUE(excess_rejected);
   EXPECT_TRUE(run_status.ok) << run_status.message;
   EXPECT_FALSE(std::filesystem::exists(socket_path));
+}
+
+TEST(IpcDaemonConnectionDeadlines,
+     RecoversCapacityAfterThirtyTwoIdleClientsExpire) {
+  ScopedDaemonDirectory temp("ps-ordinary-idle-capacity", true);
+  const std::string socket_path = (temp.path() / "listener.sock").string();
+  std::unique_ptr<Host> host = create_embedded_host();
+  internal::Server server(*host, "ordinary-deadline-test");
+  PendingClientState state;
+  state.deadline = std::chrono::steady_clock::now() + std::chrono::seconds(5);
+  internal::ServerLifecycleTestDependencies dependencies;
+  dependencies.context = &state;
+  dependencies.stage_hook = queue_pending_clients;
+  int stop_descriptors[2] = {-1, -1};
+  ASSERT_EQ(::pipe(stop_descriptors), 0);
+  internal::UniqueFd stop_reader(stop_descriptors[0]);
+  internal::UniqueFd stop_writer(stop_descriptors[1]);
+  OperationStatus run_status;
+  std::thread server_thread([&] {
+    run_status =
+        internal::test_run_server(server, internal::ServerOptions{socket_path},
+                                  stop_reader.get(), dependencies);
+  });
+
+  while (!state.hook_complete.load(std::memory_order_acquire) &&
+         std::chrono::steady_clock::now() < state.deadline) {
+    std::this_thread::yield();
+  }
+  bool all_responses_complete =
+      state.hook_complete.load(std::memory_order_acquire) && state.error == 0 &&
+      state.count == state.clients.size();
+  std::string response_error;
+  for (internal::UniqueFd& client : state.clients) {
+    if (!all_responses_complete) {
+      break;
+    }
+    const internal::FrameReadResult response =
+        read_frame_before_deadline(client.get(), state.deadline);
+    if (response.state != internal::FrameReadState::Complete ||
+        response.payload.find("\"id\":\"pending\"") == std::string::npos ||
+        response.payload.find("\"pong\":true") == std::string::npos) {
+      all_responses_complete = false;
+      response_error =
+          response.message.empty() ? response.payload : response.message;
+      break;
+    }
+  }
+
+  std::string excess_message;
+  const bool excess_rejected = !ping_before_deadline(
+      socket_path,
+      std::chrono::steady_clock::now() + std::chrono::milliseconds(500),
+      &excess_message);
+  const bool capacity_recovered =
+      excess_rejected &&
+      wait_for_connection_capacity(socket_path, std::chrono::seconds(3));
+
+  const char stop_token = 's';
+  const ssize_t stop_written = ::write(stop_writer.get(), &stop_token, 1);
+  if (stop_written != 1) {
+    stop_writer.reset();
+  }
+  server_thread.join();
+  for (internal::UniqueFd& client : state.clients) {
+    client.reset();
+  }
+
+  EXPECT_EQ(stop_written, 1);
+  EXPECT_TRUE(state.hook_complete.load(std::memory_order_acquire));
+  EXPECT_EQ(state.error, 0) << std::strerror(state.error);
+  EXPECT_EQ(state.count, state.clients.size());
+  EXPECT_TRUE(all_responses_complete) << response_error;
+  EXPECT_TRUE(excess_rejected) << excess_message;
+  EXPECT_TRUE(capacity_recovered);
+  EXPECT_TRUE(run_status.ok) << run_status.message;
+  EXPECT_FALSE(std::filesystem::exists(socket_path));
+}
+
+TEST(IpcDaemonConnectionDeadlines, ClosesClientThatStallsInFrameHeader) {
+  std::unique_ptr<Host> host = create_embedded_host();
+  ScopedOrdinaryDeadlineServer server(*host, kShortOrdinaryStageTimeout);
+  const auto test_deadline =
+      std::chrono::steady_clock::now() + std::chrono::seconds(2);
+  std::string message;
+  internal::UniqueFd client =
+      connect_before_deadline(server.socket_path(), test_deadline, &message);
+  ASSERT_TRUE(client) << message;
+  const unsigned char partial_header = 0;
+  ASSERT_TRUE(send_before_deadline(client.get(), &partial_header,
+                                   sizeof(partial_header), test_deadline,
+                                   &message))
+      << message;
+
+  const bool peer_closed =
+      wait_for_peer_hangup(client.get(), test_deadline, &message);
+  const bool later_client_served =
+      peer_closed && wait_for_connection_capacity(server.socket_path(),
+                                                  std::chrono::seconds(1));
+  const OperationStatus run_status = server.finish();
+
+  EXPECT_TRUE(peer_closed) << message;
+  EXPECT_TRUE(later_client_served);
+  EXPECT_TRUE(run_status.ok) << run_status.message;
+}
+
+TEST(IpcDaemonConnectionDeadlines, ClosesClientThatStallsInFramePayload) {
+  std::unique_ptr<Host> host = create_embedded_host();
+  ScopedOrdinaryDeadlineServer server(*host, kShortOrdinaryStageTimeout);
+  const auto test_deadline =
+      std::chrono::steady_clock::now() + std::chrono::seconds(2);
+  std::string message;
+  internal::UniqueFd client =
+      connect_before_deadline(server.socket_path(), test_deadline, &message);
+  ASSERT_TRUE(client) << message;
+  const std::uint32_t network_length = htonl(64);
+  const unsigned char partial_payload = '{';
+  ASSERT_TRUE(send_before_deadline(client.get(), &network_length,
+                                   sizeof(network_length), test_deadline,
+                                   &message))
+      << message;
+  ASSERT_TRUE(send_before_deadline(client.get(), &partial_payload,
+                                   sizeof(partial_payload), test_deadline,
+                                   &message))
+      << message;
+
+  const bool peer_closed =
+      wait_for_peer_hangup(client.get(), test_deadline, &message);
+  const bool later_client_served =
+      peer_closed && wait_for_connection_capacity(server.socket_path(),
+                                                  std::chrono::seconds(1));
+  const OperationStatus run_status = server.finish();
+
+  EXPECT_TRUE(peer_closed) << message;
+  EXPECT_TRUE(later_client_served);
+  EXPECT_TRUE(run_status.ok) << run_status.message;
+}
+
+TEST(IpcDaemonConnectionDeadlines, ClosesClientThatBackpressuresFrameWrite) {
+  ps::testing::IpcHostSpy host;
+  constexpr std::size_t kLargeResponseBytes = 8U * 1024U * 1024U;
+  host.set_ops_combined_sources(
+      {{"large", std::string(kLargeResponseBytes, 'x')}});
+  ScopedOrdinaryDeadlineServer server(host, kShortOrdinaryStageTimeout);
+  const auto test_deadline =
+      std::chrono::steady_clock::now() + std::chrono::seconds(2);
+  std::string message;
+  internal::UniqueFd client =
+      connect_before_deadline(server.socket_path(), test_deadline, &message);
+  ASSERT_TRUE(client) << message;
+  const int receive_buffer_bytes = 1024;
+  ASSERT_EQ(::setsockopt(client.get(), SOL_SOCKET, SO_RCVBUF,
+                         &receive_buffer_bytes, sizeof(receive_buffer_bytes)),
+            0)
+      << std::strerror(errno);
+  const std::string request = internal::Json{
+      {"protocol_version", kProtocolVersion},
+      {"id", "write-deadline"},
+      {"method", "plugins.ops_combined_sources"},
+      {"params",
+       internal::Json::object()}}.dump();
+  const std::uint32_t request_network_length =
+      htonl(static_cast<std::uint32_t>(request.size()));
+  ASSERT_TRUE(send_before_deadline(client.get(), &request_network_length,
+                                   sizeof(request_network_length),
+                                   test_deadline, &message))
+      << message;
+  ASSERT_TRUE(send_before_deadline(client.get(), request.data(), request.size(),
+                                   test_deadline, &message))
+      << message;
+
+  std::string close_message;
+  const bool peer_closed =
+      wait_for_peer_hangup(client.get(), test_deadline, &close_message);
+  const bool later_client_served =
+      peer_closed && wait_for_connection_capacity(server.socket_path(),
+                                                  std::chrono::seconds(1));
+  const OperationStatus run_status = server.finish();
+  std::string drain_message;
+  const std::vector<unsigned char> response_bytes = drain_closed_peer_bytes(
+      client.get(), kMaximumFramePayloadBytes + sizeof(std::uint32_t),
+      &drain_message);
+
+  EXPECT_TRUE(peer_closed) << close_message;
+  EXPECT_TRUE(later_client_served);
+  EXPECT_TRUE(run_status.ok) << run_status.message;
+  EXPECT_EQ(host.call_count("plugins.ops_combined_sources"), 1U);
+  ASSERT_TRUE(drain_message.empty()) << drain_message;
+  EXPECT_LT(response_bytes.size(), kLargeResponseBytes);
 }
 
 TEST(IpcDaemonLifecycle,
