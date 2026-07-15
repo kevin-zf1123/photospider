@@ -162,6 +162,39 @@ the change's risk warrants it. Do not use Docker or local `linux/amd64`
 emulation as a routine local preflight. Current-head GitHub Actions remains the
 authoritative remote integration environment.
 
+## Graph Document Error Matrix Validation
+
+`test_graph_document_errors` is a CTest-registered integration binary for the
+long-lived Graph document ingestion contract. It exercises the public embedded
+Host boundary and the direct `GraphModel::replace_nodes` transaction boundary.
+The cases distinguish omitted source paths from explicit source paths, require
+the exact `GraphErrc` category for I/O, YAML, schema, topology, lifecycle, and
+unexpected failures, and prove that `std::bad_alloc` remains an exception.
+They also prove failed initial loads do not publish sessions, failed reloads
+preserve the complete prior Graph state, successful replacement advances the
+topology generation and resets runtime state, and retry remains possible.
+
+Two existing focused regressions complete the ownership boundary. The
+`test_scheduler_worker_budget` case proves an invalid document releases both
+already-started scheduler reservations without publishing a session. The
+`test_ipc_protocol` case proves the exact Graph error survives IPC encoding and
+the daemon-side session-name reservation is released for a successful retry.
+Run the focused validation with:
+
+```bash
+cmake --build build --target test_graph_document_errors \
+  test_scheduler_worker_budget test_ipc_protocol -j
+./build/tests/test_graph_document_errors
+./build/tests/test_scheduler_worker_budget \
+  --gtest_filter=EmbeddedHostSchedulerBudget.InvalidYamlAfterSchedulerStartDoesNotPublishAndReturnsPairExactlyOnce
+./build/tests/test_ipc_protocol \
+  --gtest_filter=ProtocolGraphLoad.FailedHostLoadReleasesNameForRetry
+```
+
+These are maintained product-behavior tests. No migration-residue scan,
+issue-specific replay script, or retained result artifact belongs to this
+validation surface.
+
 ## OpenCV Operation Concurrency Validation
 
 `test_opencv_operation_concurrency` is a CTest-registered integration binary

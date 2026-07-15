@@ -120,6 +120,35 @@ regression。是否运行本机原生 clean configure、full build 或完整 CTe
 决定，而不是常设要求。不要把 Docker 或本地 `linux/amd64` 模拟作为常规本地 preflight；
 current-head GitHub Actions 仍是权威远程 integration 环境。
 
+## Graph 文档错误矩阵验证
+
+`test_graph_document_errors` 是注册到 CTest 的 integration binary，用于验证长期
+Graph 文档摄取契约。它同时覆盖 public embedded Host 边界和直接
+`GraphModel::replace_nodes` 事务边界。各 case 区分“省略源路径”与“显式源路径”，
+对 I/O、YAML、schema、topology、lifecycle 与意外失败要求精确的
+`GraphErrc` 分类，并证明 `std::bad_alloc` 仍保持异常语义。测试还要求：初始
+load 失败不发布 session；reload 失败保留旧 Graph 的完整状态；成功替换推进
+topology generation 并重置 runtime state；失败后仍可重试。
+
+两个现有 focused regression 补齐所有权边界。`test_scheduler_worker_budget` 的 case
+证明无效文档会释放两个已启动的 scheduler reservation，且不发布 session。
+`test_ipc_protocol` 的 case 证明精确 Graph 错误会穿过 IPC 编码传递，同时 daemon
+侧 session-name reservation 会被释放，从而允许后续重试成功。可用以下命令执行
+focused validation：
+
+```bash
+cmake --build build --target test_graph_document_errors \
+  test_scheduler_worker_budget test_ipc_protocol -j
+./build/tests/test_graph_document_errors
+./build/tests/test_scheduler_worker_budget \
+  --gtest_filter=EmbeddedHostSchedulerBudget.InvalidYamlAfterSchedulerStartDoesNotPublishAndReturnsPairExactlyOnce
+./build/tests/test_ipc_protocol \
+  --gtest_filter=ProtocolGraphLoad.FailedHostLoadReleasesNameForRetry
+```
+
+这些是长期维护的产品行为测试。该验证面不应包含 migration-residue scan、Issue
+专属 replay script 或长期保留的 result artifact。
+
 ## OpenCV Operation 并发验证
 
 `test_opencv_operation_concurrency` 是注册到 CTest 的 integration binary，用于验证长期
