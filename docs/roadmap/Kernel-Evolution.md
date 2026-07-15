@@ -30,10 +30,12 @@ by [issue #42](https://github.com/kevin-zf1123/photospider/issues/42).
 ### Current containment baseline
 
 [Issue #43](https://github.com/kevin-zf1123/photospider/issues/43) establishes
-the bounded baseline from which the execution-domain migration proceeds. It
-does not implement the target architecture: HP and RT schedulers still own
-per-graph worker threads, queues, epochs, and policy. The containment contract
-instead:
+the scheduler-worker budget and [Issue #44](https://github.com/kevin-zf1123/photospider/issues/44)
+establishes the bounded graph-state lane from which the execution-domain
+migration proceeds. They do not implement the target architecture: HP and RT
+schedulers still own per-graph worker threads, queues, epochs, and policy, while
+visible compute still retains the graph-state lane for its whole callback. The
+containment contract instead:
 
 - accepts worker requests from zero through eight and resolves zero to
   `min(max(1, hardware_concurrency()), 8)` before construction;
@@ -47,11 +49,18 @@ instead:
   candidate headroom and preserves the old scheduler on failure; and
 - releases move-only reservations exactly once after concrete scheduler
   destruction, including load rollback, successful graph close, and Host
-  destruction; failed close retains the runtime and reservations for retry.
+  destruction; failed close retains the runtime and reservations for retry;
+- replaces graph-state async-per-submit with one worker and a 64-waiting-task
+  FIFO per Graph, applying blocking backpressure without dropping admitted
+  work; and
+- stops lane admission, drains FIFO work, and joins the lane worker before
+  scheduler teardown, while a failed scheduler stop creates one replacement
+  lane worker so close remains retryable.
 
 The 32 slots cover only accounted scheduler-owned workers. They do not count
-graph-state executors, operation-internal threads, daemon/frontend workers, or
-all OS threads, and they provide neither shared execution nor fairness. The
+graph-state executors, which have their separate one-worker-per-Graph bound;
+nor do they count operation-internal threads, daemon/frontend workers, or all
+OS threads. They provide neither shared execution nor fairness. The
 `ComputeRun`/`ExecutionService` work in the later execution-domain issues must
 replace this transitional ledger and worker-owning ABI as complete ownership
 migrations, not layer permanent adapters over them. In particular, the shared
@@ -122,7 +131,7 @@ The target graph-state lane captures an immutable revision and later validates
 the commit predicate. Long-running planning and execution occur outside the
 exclusive `GraphModel` mutation boundary, so one `ComputeRun` does not prevent
 the frontend from producing a newer revision. This is a target change from the
-current `GraphStateExecutor` whole-callback mutex documented in
+current bounded `GraphStateExecutor` whole-callback FIFO lane documented in
 `docs/kernel-architecture/Compute-Boundaries.md`.
 
 ## `ComputeRun`

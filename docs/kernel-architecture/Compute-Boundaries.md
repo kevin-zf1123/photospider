@@ -38,17 +38,30 @@ flowchart TD
 remain compute responsibilities even when ready callbacks execute on scheduler
 workers.
 
-The current exclusion mechanism is not a bounded serial queue. Every
-`GraphStateExecutor::submit()` launches one
-`std::async(std::launch::async)` operation, and the launched operation waits on
-the executor mutex. Concurrent submissions can therefore create multiple OS
-threads waiting for the same graph. The mutex provides exclusion, not FIFO
-ordering, cancellation, admission control, or a thread budget.
-The mutex remains held for the whole callback, including scheduler submission,
-completion waits, and visible commit. Different graphs have independent
-executors and mutexes. The scheduler-worker ledger does not count these
-graph-state executor threads; its 32-slot ceiling covers only workers charged
-by scheduler planning.
+The current exclusion mechanism is a bounded serial FIFO lane. Every accepting
+`GraphStateExecutor` owns exactly one worker. Its queue holds at most 64 waiting
+callbacks, excluding the at-most-one active callback, so a Graph owns at most
+65 admitted graph-state callbacks. `submit()` blocks the caller while the queue
+is full; it neither creates another lane worker nor drops or bypasses admitted
+work. Producer fairness before admission is not guaranteed, but admitted work
+executes FIFO.
+
+Each submission returns a packaged-task future with the callable's exact value,
+reference, `void` completion, or exception. Destroying that future neither
+waits nor cancels the task; executor lifetime retains admitted work. A callback
+cannot submit to or close its own lane: worker re-entry throws
+`std::logic_error` before queue waiting. The sole worker owns the whole callback,
+including scheduler submission, completion waits, and visible commit.
+
+`close_and_drain()` is concurrent-call and repeat-call idempotent. It stops
+admission, wakes full-queue producers with `std::runtime_error`, drains prior
+work FIFO, and joins the worker before returning. `GraphRuntime` performs that
+join before scheduler teardown. If explicit close later fails in scheduler
+shutdown, Kernel starts one replacement lane worker before returning the
+failure so the retained session remains retryable. Different graphs have
+independent workers and queues. The scheduler-worker ledger does not count
+these lane workers; its 32-slot ceiling covers only workers charged by
+scheduler planning.
 
 ## Current Collaborators
 

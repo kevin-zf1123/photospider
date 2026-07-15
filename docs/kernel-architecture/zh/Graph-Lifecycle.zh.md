@@ -137,14 +137,18 @@ event/trace ring、直接清除 `RealtimeProxyGraph`，或清除 Kernel-owned `L
 
 Embedded Host close 会先把 session 标记为 closing。新的 compute、scheduler、required save、
 node-YAML replacement 与 ROI projection admission 会失败；close 则等待已接受的同步调用和
-caller-visible async status publication。随后 Kernel 通过同一个 `GraphStateExecutor` 停止
-runtime，并移除 map entry。
+caller-visible async status publication。随后 Kernel 会关闭这些调用共用的
+`GraphStateExecutor`：新的 lane submission 会失败，因 64-entry FIFO 已满而阻塞的 producer 会被
+唤醒，已经 admission 的 callback 按 FIFO 顺序排空，唯一的 worker 随后被 join。只有跨过该 joined
+boundary 之后才开始 scheduler stop；只有 stop 成功后才移除 map entry。
 
 并发 close caller 通过 Host lifecycle gate 串行化。Runtime stop failure 会保留 runtime、diagnostic
-state 与仍存活的 scheduler reservation，清除 closing marker，并重新开放 admission。Close 成功时，
+state 与仍存活的 scheduler reservation。由于之前的 lane worker 已经 join，Kernel 会在返回 stop
+failure 前创建一个 replacement worker；随后 Host 清除 closing marker，并重新开放 admission。
+之后再次 close 时，会先排空并 join 该 replacement lane，再重试 scheduler stop。Close 成功时，
 concrete scheduler 会先 shutdown 并销毁，随后才归还 slot。Embedded Host 未显式 close 就销毁时，
-也会走相同的同步 ownership chain，在 Host 析构完成前归还所有 graph reservation。只有 session
-确实不存在时才返回 `NotFound`。
+也会走相同的同步 ownership chain：`GraphRuntime` 会在 scheduler teardown 之前排空并 join lane，
+并在 Host 析构完成前归还所有 graph reservation。只有 session 确实不存在时才返回 `NotFound`。
 
 `photospiderd` 围绕该 embedded Host contract 拥有 daemon session identity、job admission、Host
 serialization 与 shutdown drainage。其准确 mapping、lease、socket 与 shutdown 规则定义在

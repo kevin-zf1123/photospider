@@ -26,9 +26,9 @@ The internal multi-graph facade and composition owner for graph, compute,
 cache, traversal, inspection, and persistence services.
 
 **`GraphRuntime`**
-The per-graph resource container. It owns one `GraphModel`, graph-state access,
-events, current schedulers, and platform runtime resources. It is not the owner
-of compute dependency planning.
+The per-graph resource container. It owns one `GraphModel`, one bounded
+graph-state lane, events, current schedulers, and platform runtime resources.
+It is not the owner of compute dependency planning.
 
 **`GraphModel`**
 The in-memory graph state: nodes, topology adjacency, parameters, outputs,
@@ -43,11 +43,11 @@ ROI projection.
 
 **`GraphStateExecutor`**
 The per-graph exclusive access mechanism used by current graph-state operations
-and visible compute requests. Each current submission launches one
-`std::async(std::launch::async)` operation; that operation waits on the same
-per-graph mutex before invoking its callback. Mutual exclusion is guaranteed,
-but FIFO ordering and a bounded waiting-thread count are not. It is separate
-from scheduler dispatch.
+and visible compute requests. It owns one worker and a FIFO queue of at most 64
+waiting callbacks, excluding the at-most-one active callback. Full-queue
+submission blocks; close stops admission, drains prior work, and joins the
+worker. It is separate from scheduler dispatch and its worker is not a
+scheduler worker slot.
 
 **Graph document**
 The persisted representation used to create or update graph state. YAML is the
