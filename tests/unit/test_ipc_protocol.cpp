@@ -5216,6 +5216,134 @@ TEST(FrameCodec, ReadsFragmentedHeaderAndPayload) {
   EXPECT_EQ(result.payload, payload);
 }
 
+TEST(FrameCodec, StageDeadlinePathPreservesFragmentedFrame) {
+  int descriptors[2] = {-1, -1};
+  ASSERT_EQ(::socketpair(AF_UNIX, SOCK_STREAM, 0, descriptors), 0);
+  UniqueFd reader(descriptors[0]);
+  UniqueFd writer(descriptors[1]);
+  const std::string payload = "deadline-fragmented-payload";
+  const std::uint32_t network_length =
+      htonl(static_cast<std::uint32_t>(payload.size()));
+  std::array<unsigned char, 4> header{};
+  std::memcpy(header.data(), &network_length, header.size());
+  bool write_ok = true;
+  std::thread peer([&] {
+    for (unsigned char byte : header) {
+      write_ok = write_ok && send_all_for_test(writer.get(), &byte, 1);
+    }
+    for (unsigned char byte : payload) {
+      write_ok = write_ok && send_all_for_test(writer.get(), &byte, 1);
+    }
+  });
+  const FrameReadResult result = read_frame_with_stage_deadlines(
+      reader.get(), std::chrono::steady_clock::now() + std::chrono::seconds(1),
+      std::chrono::seconds(1));
+  peer.join();
+  EXPECT_TRUE(write_ok);
+  EXPECT_EQ(result.state, FrameReadState::Complete) << result.message;
+  EXPECT_EQ(result.payload, payload);
+}
+
+TEST(FrameCodec, StageDeadlinePathPreservesEofAndLengthValidation) {
+  int clean_pair[2] = {-1, -1};
+  ASSERT_EQ(::socketpair(AF_UNIX, SOCK_STREAM, 0, clean_pair), 0);
+  UniqueFd clean_reader(clean_pair[0]);
+  UniqueFd clean_writer(clean_pair[1]);
+  clean_writer.reset();
+  EXPECT_EQ(read_frame_with_stage_deadlines(
+                clean_reader.get(),
+                std::chrono::steady_clock::now() + std::chrono::seconds(1),
+                std::chrono::seconds(1))
+                .state,
+            FrameReadState::CleanEof);
+
+  int truncated_pair[2] = {-1, -1};
+  ASSERT_EQ(::socketpair(AF_UNIX, SOCK_STREAM, 0, truncated_pair), 0);
+  UniqueFd truncated_reader(truncated_pair[0]);
+  UniqueFd truncated_writer(truncated_pair[1]);
+  const unsigned char partial[] = {0, 0};
+  ASSERT_TRUE(
+      send_all_for_test(truncated_writer.get(), partial, sizeof(partial)));
+  truncated_writer.reset();
+  EXPECT_EQ(read_frame_with_stage_deadlines(
+                truncated_reader.get(),
+                std::chrono::steady_clock::now() + std::chrono::seconds(1),
+                std::chrono::seconds(1))
+                .state,
+            FrameReadState::Truncated);
+
+  int invalid_pair[2] = {-1, -1};
+  ASSERT_EQ(::socketpair(AF_UNIX, SOCK_STREAM, 0, invalid_pair), 0);
+  UniqueFd invalid_reader(invalid_pair[0]);
+  UniqueFd invalid_writer(invalid_pair[1]);
+  const std::uint32_t invalid_network_length = htonl(0);
+  ASSERT_TRUE(send_all_for_test(
+      invalid_writer.get(),
+      reinterpret_cast<const unsigned char*>(&invalid_network_length),
+      sizeof(invalid_network_length)));
+  EXPECT_EQ(read_frame_with_stage_deadlines(
+                invalid_reader.get(),
+                std::chrono::steady_clock::now() + std::chrono::seconds(1),
+                std::chrono::seconds(1))
+                .state,
+            FrameReadState::InvalidLength);
+}
+
+TEST(FrameCodec, StageDeadlinePathReportsHeaderAndPayloadExpiry) {
+  constexpr auto kExpiry = std::chrono::milliseconds(20);
+  int header_pair[2] = {-1, -1};
+  ASSERT_EQ(::socketpair(AF_UNIX, SOCK_STREAM, 0, header_pair), 0);
+  UniqueFd header_reader(header_pair[0]);
+  UniqueFd header_writer(header_pair[1]);
+  const unsigned char partial_header = 0;
+  ASSERT_TRUE(send_all_for_test(header_writer.get(), &partial_header,
+                                sizeof(partial_header)));
+  const FrameReadResult header_result = read_frame_with_stage_deadlines(
+      header_reader.get(), std::chrono::steady_clock::now() + kExpiry,
+      std::chrono::seconds(1));
+  EXPECT_EQ(header_result.state, FrameReadState::IoError);
+  EXPECT_EQ(header_result.message, "frame header deadline exceeded");
+
+  int payload_pair[2] = {-1, -1};
+  ASSERT_EQ(::socketpair(AF_UNIX, SOCK_STREAM, 0, payload_pair), 0);
+  UniqueFd payload_reader(payload_pair[0]);
+  UniqueFd payload_writer(payload_pair[1]);
+  const std::uint32_t payload_network_length = htonl(8);
+  ASSERT_TRUE(send_all_for_test(
+      payload_writer.get(),
+      reinterpret_cast<const unsigned char*>(&payload_network_length),
+      sizeof(payload_network_length)));
+  const unsigned char partial_payload = '{';
+  ASSERT_TRUE(send_all_for_test(payload_writer.get(), &partial_payload,
+                                sizeof(partial_payload)));
+  const FrameReadResult payload_result = read_frame_with_stage_deadlines(
+      payload_reader.get(),
+      std::chrono::steady_clock::now() + std::chrono::seconds(1), kExpiry);
+  EXPECT_EQ(payload_result.state, FrameReadState::IoError);
+  EXPECT_EQ(payload_result.message, "frame payload deadline exceeded");
+}
+
+TEST(FrameCodec, DeadlineWritePreservesCompletePartialTransfer) {
+  int descriptors[2] = {-1, -1};
+  ASSERT_EQ(::socketpair(AF_UNIX, SOCK_STREAM, 0, descriptors), 0);
+  UniqueFd writer(descriptors[0]);
+  UniqueFd reader(descriptors[1]);
+  const int send_buffer_bytes = 1024;
+  ASSERT_EQ(::setsockopt(writer.get(), SOL_SOCKET, SO_SNDBUF,
+                         &send_buffer_bytes, sizeof(send_buffer_bytes)),
+            0);
+  const std::string payload(1024U * 1024U, 'x');
+  FrameReadResult read_result;
+  std::thread peer([&] { read_result = read_frame(reader.get()); });
+  const FrameWriteResult write_result = write_frame_before_deadline(
+      writer.get(), payload,
+      std::chrono::steady_clock::now() + std::chrono::seconds(2));
+  peer.join();
+  ASSERT_TRUE(write_result.ok) << write_result.message;
+  ASSERT_EQ(read_result.state, FrameReadState::Complete) << read_result.message;
+  EXPECT_EQ(read_result.payload, payload);
+}
+
 TEST(FrameCodec, DistinguishesCleanAndTruncatedEof) {
   int clean_pair[2] = {-1, -1};
   ASSERT_EQ(::socketpair(AF_UNIX, SOCK_STREAM, 0, clean_pair), 0);

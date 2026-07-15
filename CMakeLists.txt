@@ -1135,7 +1135,8 @@ if(BUILD_TESTING)
             PS_TEST_SCHEDULER_PLUGIN_PATH="$<TARGET_FILE:destroy_count_scheduler_plugin>")
         target_include_directories(test_ipc_daemon PRIVATE
             "${PROJECT_SOURCE_DIR}/include"
-            "${PROJECT_SOURCE_DIR}/src/lib")
+            "${PROJECT_SOURCE_DIR}/src/lib"
+            "${PROJECT_SOURCE_DIR}/tests")
         target_link_libraries(test_ipc_daemon PRIVATE
             photospider_ipc_server_internal
             photospider_ipc_client
