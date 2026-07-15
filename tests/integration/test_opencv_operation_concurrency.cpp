@@ -21,6 +21,7 @@
 #include "core/ps_types.hpp"  // NOLINT(build/include_subdir)
 #include "graph/node.hpp"     // NOLINT(build/include_subdir)
 #include "photospider/host/host.hpp"
+#include "support/ipc_host_spy.hpp"
 
 namespace ps {
 namespace {
@@ -651,6 +652,53 @@ ImageBuffer compute_curve_image(Host& host, const std::filesystem::path& root,
                              closed.status.message);
   }
   return computed.value;
+}
+
+/**
+ * @brief Proves automatic benchmark workers reach Host as one resolved grant.
+ *
+ * @throws Nothing when the benchmark publishes its resolved nonzero grant;
+ *         GoogleTest records mismatches and setup exceptions fail the test.
+ * @note The Host boundary record and benchmark result must share the same
+ *       value from one resolution. The verdict does not repeat hardware
+ *       detection or depend on scheduler construction resolving a zero.
+ */
+TEST(OpenCvOperationConcurrency,
+     BenchmarkAutoThreadsPublishResolvedGrantToHost) {
+  ScopedBenchmarkTempDir temp("photospider_benchmark_auto_worker_grant");
+  const std::filesystem::path yaml_path = temp.root() / "probe.yaml";
+  write_benchmark_probe_graph(yaml_path);
+
+  testing::IpcHostSpy host;
+  BenchmarkService service(host);
+  const BenchmarkSessionConfig config =
+      make_probe_benchmark_config(yaml_path, 0);
+
+  const BenchmarkResult result = service.Run(temp.root().string(), config, 1);
+  const std::vector<testing::IpcHostInvocation> invocations =
+      host.invocations();
+  const auto configured = std::find_if(
+      invocations.begin(), invocations.end(), [](const auto& call) {
+        return call.method == "scheduler.configure_defaults";
+      });
+  const auto loaded = std::find_if(
+      invocations.begin(), invocations.end(),
+      [](const auto& call) { return call.method == "graph.load"; });
+
+  ASSERT_NE(configured, invocations.end());
+  ASSERT_NE(loaded, invocations.end());
+  EXPECT_LT(configured, loaded);
+  EXPECT_EQ(std::count_if(invocations.begin(), invocations.end(),
+                          [](const auto& call) {
+                            return call.method ==
+                                   "scheduler.configure_defaults";
+                          }),
+            1);
+  EXPECT_EQ(configured->text, "cpu_work_stealing\ncpu_work_stealing");
+  EXPECT_GT(configured->worker_count, 0U);
+  EXPECT_LE(configured->worker_count, 8U);
+  EXPECT_EQ(configured->worker_count,
+            static_cast<unsigned int>(result.num_threads));
 }
 
 /**
