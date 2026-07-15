@@ -46,8 +46,9 @@ The per-graph exclusive access mechanism used by current graph-state operations
 and visible compute requests. It owns one worker and a FIFO queue of at most 64
 waiting callbacks, excluding the at-most-one active callback. Full-queue
 submission blocks; close stops admission, drains prior work, and joins the
-worker. It is separate from scheduler dispatch and its worker is not a
-scheduler worker slot.
+worker. Concurrent closers wait for the durable completion generation they
+joined, even if failure recovery reopens the lane before they wake. It is
+separate from scheduler dispatch and its worker is not a scheduler worker slot.
 
 **Graph document**
 The persisted representation used to create or update graph state. YAML is the

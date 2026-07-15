@@ -55,13 +55,15 @@ including scheduler submission, completion waits, and visible commit.
 
 `close_and_drain()` is concurrent-call and repeat-call idempotent. It stops
 admission, wakes full-queue producers with `std::runtime_error`, drains prior
-work FIFO, and joins the worker before returning. `GraphRuntime` performs that
-join before scheduler teardown. If explicit close later fails in scheduler
-shutdown, Kernel starts one replacement lane worker before returning the
-failure so the retained session remains retryable. Different graphs have
-independent workers and queues. The scheduler-worker ledger does not count
-these lane workers; its 32-slot ceiling covers only workers charged by
-scheduler planning.
+work FIFO, and joins the worker before returning. Each caller waits for the
+durable close generation that it joined; a failed-stop restart may reopen a
+later accepting generation before a delayed caller wakes without trapping that
+caller or creating a second worker. `GraphRuntime` performs the join before
+scheduler teardown. If explicit close later fails in scheduler shutdown,
+Kernel starts one replacement lane worker before returning the failure so the
+retained session remains retryable. Different graphs have independent workers
+and queues. The scheduler-worker ledger does not count these lane workers; its
+32-slot ceiling covers only workers charged by scheduler planning.
 
 ## Current Collaborators
 

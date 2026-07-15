@@ -278,15 +278,19 @@ Typical embedded Host compute flow:
    outcome. A joined adapter worker maps that outcome without consulting shared
    `LastError`, fulfills the caller-visible `OperationStatus` promise, and only
    then notifies `close_graph()` that status publication is complete.
-7. Embedded close admission rejects new compute/scheduler work plus required
-   graph save, node-YAML replacement, and ROI projection work; it waits accepted
-   synchronous calls and ready async status promises. Kernel then stops lane
-   admission, drains prior FIFO work, joins the `GraphStateExecutor` worker, and
-   only afterward stops schedulers and removes the runtime. If scheduler stop
-   fails, one replacement lane worker reopens graph-state admission before the
-   failure is returned, so the retained session can be inspected or closed
-   again. A retained runtime or scheduler cannot be erased, replaced, or
-   destroyed while admitted work uses it.
+7. Embedded close admission first publishes a lifecycle marker that rejects new
+   compute/scheduler work plus required graph save, node-YAML replacement, and
+   ROI projection work. Calls admitted before that marker finish synchronous
+   submission while the lane remains accepting. Kernel then stops lane
+   admission, which wakes a producer blocked on the full FIFO; only then does
+   the Host wait for async submission placeholders and status promises. Kernel
+   drains prior FIFO work, joins the `GraphStateExecutor` worker, and only
+   afterward stops schedulers and removes the runtime. If scheduler stop fails,
+   one replacement lane worker reopens graph-state admission before the failure
+   is returned, so the retained session can be inspected or closed again.
+   Close callers already joined to the completed generation still return even
+   if that restart occurs before they wake. A retained runtime or scheduler
+   cannot be erased, replaced, or destroyed while admitted work uses it.
 8. Recoverable backend failures become Host status/result values, while
    resource exhaustion remains exceptional: non-destructor Host methods and
    consumed async futures may propagate `std::bad_alloc` as documented by the

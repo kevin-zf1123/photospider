@@ -171,25 +171,32 @@ the advanced topology generation.
 ## Close and Lifetime
 
 Embedded Host close first marks the session closing. New compute, scheduler,
-required save, node-YAML replacement, and ROI projection admissions fail, while
-close waits for admitted synchronous calls and caller-visible async status
-publication. Kernel then closes the same `GraphStateExecutor` used by those
-calls: new lane submissions fail, producers blocked on the full 64-entry FIFO
-are awakened, already admitted callbacks drain in FIFO order, and the sole
-worker is joined. Scheduler stop begins only after that joined boundary; the
-map entry is removed only after stop succeeds.
+required save, node-YAML replacement, and ROI projection admissions fail. The
+Host waits for synchronous calls admitted before that marker while the lane is
+still accepting, so those calls can finish their graph-state submission. Kernel
+then stops admission on the same `GraphStateExecutor` used by those calls.
+Producers blocked on the full 64-entry FIFO are awakened and rejected without
+requiring queue space; only after this stop does the Host wait for async
+submission placeholders and caller-visible status publication. Already admitted
+callbacks drain in FIFO order, and Kernel joins the sole worker. Scheduler stop
+begins only after that joined boundary; the map entry is removed only after stop
+succeeds.
 
-Concurrent close callers serialize through the Host lifecycle gate. A runtime
-stop failure retains the runtime, diagnostic state, and live scheduler
-reservations. Because the prior lane worker has already joined, Kernel creates
-one replacement worker before returning the stop failure; Host then clears the
-closing marker and reopens admission. A later close drains and joins that
-replacement lane before retrying scheduler stop. On successful close, concrete
-schedulers shut down and are destroyed before their slots return. Destroying an
-embedded Host without explicit close follows the same synchronous ownership
-chain: `GraphRuntime` drains and joins its lane before scheduler teardown and
-returns all graph reservations before Host destruction completes. `NotFound`
-is reserved for a session that is actually absent.
+Concurrent close callers serialize through the Host lifecycle gate. Within the
+executor, every closer records the close generation it joined and waits until
+that generation is durably published as joined. A runtime stop failure retains
+the runtime, diagnostic state, and live scheduler reservations. Because the
+prior lane worker has already joined, Kernel creates one replacement worker
+before returning the stop failure; Host then clears the closing marker and
+reopens admission. That restart may occur before delayed waiters for the prior
+generation wake, but those waiters still return and no second worker is created.
+A later close drains and joins the replacement lane before retrying scheduler
+stop. On successful close, concrete schedulers shut down and are destroyed
+before their slots return. Destroying an embedded Host without explicit close
+follows the same synchronous ownership chain: `GraphRuntime` drains and joins
+its lane before scheduler teardown and returns all graph reservations before
+Host destruction completes. `NotFound` is reserved for a session that is
+actually absent.
 
 `photospiderd` owns daemon session identity, job admission, Host serialization,
 and shutdown drainage around this embedded Host contract. Its exact mapping,
