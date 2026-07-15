@@ -1309,7 +1309,7 @@ TEST(EmbeddedHostSchedulerBudget,
 /**
  * @brief Proves invalid Graph YAML destroys two already-started schedulers.
  * @return Nothing.
- * @throws Nothing when legacy load classification, unpublished ownership, and
+ * @throws Nothing when exact load classification, unpublished ownership, and
  * exact ledger recovery agree; GoogleTest records mismatches.
  * @note A CPU start-publication hook observes both one-worker schedulers before
  * GraphIO rejects the syntactically valid mapping root.
@@ -1345,9 +1345,8 @@ TEST(EmbeddedHostSchedulerBudget,
   EXPECT_EQ(start_publications.load(std::memory_order_relaxed), 2U);
   EXPECT_FALSE(rejected.status.ok);
   EXPECT_EQ(rejected.status.domain, OperationErrorDomain::Graph);
-  EXPECT_EQ(checked_graph_error_code(rejected.status),
-            GraphErrc::InvalidParameter);
-  EXPECT_EQ(rejected.status.name, "invalid_parameter");
+  EXPECT_EQ(checked_graph_error_code(rejected.status), GraphErrc::InvalidYaml);
+  EXPECT_EQ(rejected.status.name, "invalid_yaml");
   expect_graph_absent(*host, rejected_id);
   ASSERT_NO_FATAL_FAILURE(expect_exact_process_budget_recovery(
       *host, temp.root(), "invalid_yaml_recovery"));
