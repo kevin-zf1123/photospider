@@ -17,7 +17,6 @@
 #include <atomic>
 #include <exception>
 #include <filesystem>
-#include <iostream>
 #include <memory>
 #include <new>
 #include <string>
@@ -32,6 +31,33 @@
 #endif
 
 namespace ps {
+
+namespace {
+
+/**
+ * @brief Checks one graph-lifecycle path without leaking filesystem errors.
+ *
+ * @param path Filesystem object whose existence is queried.
+ * @param role Human-readable path role used in diagnostics.
+ * @return True when the path exists, otherwise false.
+ * @throws std::bad_alloc If diagnostic or filesystem storage exhausts memory.
+ * @throws GraphError with `GraphErrc::Io` If the filesystem cannot inspect the
+ *         path.
+ * @note The function performs no creation, copying, or publication.
+ */
+bool graph_lifecycle_path_exists(const std::filesystem::path& path,
+                                 const std::string& role) {
+  try {
+    return std::filesystem::exists(path);
+  } catch (const std::bad_alloc&) {
+    throw;
+  } catch (const std::filesystem::filesystem_error& error) {
+    throw GraphError(GraphErrc::Io, "Failed to inspect " + role + " '" +
+                                        path.string() + "': " + error.what());
+  }
+}
+
+}  // namespace
 
 #if defined(PHOTOSPIDER_INTERNAL_REQUIRED_TARGET_TESTING)
 namespace testing {
@@ -111,6 +137,12 @@ std::optional<std::string> Kernel::load_graph(
     return std::nullopt;
   }
 
+  if (!yaml_path.empty() &&
+      !graph_lifecycle_path_exists(yaml_path, "explicit graph YAML source")) {
+    throw GraphError(GraphErrc::Io,
+                     "explicit graph YAML source does not exist: " + yaml_path);
+  }
+
   std::string effective_yaml_path = yaml_path;
   if (effective_yaml_path.empty()) {
     effective_yaml_path =
@@ -130,14 +162,21 @@ std::optional<std::string> Kernel::load_graph(
     std::filesystem::create_directories(info.root);
     const auto yaml_target = info.root / "content.yaml";
 
-    if (!info.yaml.empty() && std::filesystem::exists(info.yaml) &&
-        !yaml_path.empty()) {
-      std::filesystem::copy_file(
-          info.yaml, yaml_target,
-          std::filesystem::copy_options::overwrite_existing);
+    if (!yaml_path.empty()) {
+      const bool same_file =
+          graph_lifecycle_path_exists(yaml_target,
+                                      "session graph YAML target") &&
+          std::filesystem::equivalent(info.yaml, yaml_target);
+      if (!same_file) {
+        std::filesystem::copy_file(
+            info.yaml, yaml_target,
+            std::filesystem::copy_options::overwrite_existing);
+      }
     }
 
-    if (!config_path.empty() && std::filesystem::exists(config_path)) {
+    if (!config_path.empty() &&
+        graph_lifecycle_path_exists(config_path,
+                                    "graph configuration source")) {
       const auto config_target = info.root / "config.yaml";
       std::filesystem::copy_file(
           config_path, config_target,
@@ -145,31 +184,25 @@ std::optional<std::string> Kernel::load_graph(
     }
   } catch (const std::bad_alloc&) {
     throw;
-  } catch (...) {
+  } catch (const GraphError&) {
+    throw;
+  } catch (const std::filesystem::filesystem_error& error) {
+    throw GraphError(GraphErrc::Io,
+                     "Failed to prepare graph session files for '" + name +
+                         "': " + error.what());
   }
 
   setup_schedulers_for_runtime(name, *runtime);
   runtime->start();
 
   const auto final_yaml_to_load = info.root / "content.yaml";
-  if (std::filesystem::exists(final_yaml_to_load)) {
-    try {
-      runtime->graph_state()
-          .submit([this, yaml = final_yaml_to_load](GraphModel& graph) {
-            io_service_.load(graph, yaml);
-            return 0;
-          })
-          .get();
-    } catch (const std::bad_alloc&) {
-      throw;
-    } catch (const std::exception& e) {
-      std::cerr << "Failed to load YAML for graph '" << name
-                << "': " << e.what() << std::endl;
-      return std::nullopt;
-    }
-  } else if (!yaml_path.empty()) {
-    std::cerr << "Warning: source YAML file not found for graph '" << name
-              << "': " << yaml_path << std::endl;
+  if (graph_lifecycle_path_exists(final_yaml_to_load, "session graph YAML")) {
+    runtime->graph_state()
+        .submit([this, yaml = final_yaml_to_load](GraphModel& graph) {
+          io_service_.load(graph, yaml);
+          return 0;
+        })
+        .get();
   }
 
   std::optional<std::string> loaded_name(std::in_place, name);

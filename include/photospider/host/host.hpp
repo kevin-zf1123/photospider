@@ -254,21 +254,29 @@ class PHOTOSPIDER_API Host {
    * @brief Loads a graph session.
    *
    * @param request Session name, root, YAML, config, and cache-root values.
-   * @return Loaded session id on success, or a categorized failure including
-   *         `GraphErrc::InvalidParameter` for scheduler planning/other load
-   *         validation, `GraphErrc::ComputeError` when the complete HP+RT
-   *         scheduler pair cannot fit the process worker budget, and
-   *         `GraphErrc::Io` for runtime-directory/path filesystem failure.
+   * @return Loaded session id on success; `GraphErrc::InvalidParameter` for a
+   *         duplicate session or scheduler-request validation;
+   *         `GraphErrc::ComputeError` when the complete HP+RT scheduler pair
+   *         cannot fit the process worker budget; `GraphErrc::Io` for an
+   *         explicit missing/unreadable/uncopyable source or session-path
+   *         failure; `GraphErrc::InvalidYaml` for syntax, root-shape,
+   *         duplicate-id, or node-schema rejection;
+   *         `GraphErrc::MissingDependency` or `GraphErrc::Cycle` for topology
+   *         rejection; or `GraphErrc::Unknown` for an unexpected internal
+   *         failure.
    * @throws std::bad_alloc if request processing, backend-to-status
    *         translation, or copied result construction exhausts memory.
    * @note The returned session is a value label, never a runtime pointer. The
    *       embedded implementation plans both scheduler intents and reserves
    *       their aggregate capacity before constructing either candidate. A
-   *       conforming implementation must not leave a scheduler candidate or
-   *       newly published session when load returns failure or an exception
-   *       propagates. Nonempty relative request paths use the caller process
-   *       working directory; an IPC implementation resolves them in its
-   *       client process before sending the typed request.
+   *       conforming implementation must not leave a scheduler candidate,
+   *       worker reservation, or newly published session when load returns
+   *       failure or an exception propagates. Empty `yaml_path` loads existing
+   *       session-local content or intentionally creates an empty graph;
+   *       nonempty `yaml_path` is explicit and never falls back. Nonempty
+   *       relative request paths use the caller process working directory; an
+   *       IPC implementation resolves them in its client process before
+   *       sending the typed request.
    */
   virtual Result<GraphSessionId> load_graph(
       const GraphLoadRequest& request) = 0;
@@ -309,18 +317,27 @@ class PHOTOSPIDER_API Host {
    *
    * @param session Session to reload.
    * @param yaml_path YAML path to load.
-   * @return Success, `GraphErrc::NotFound` for missing sessions,
-   *         `GraphErrc::Io` for unreadable input, or `GraphErrc::InvalidYaml`
-   *         for rejected YAML content.
+   * @return Success; `GraphErrc::NotFound` for a missing session;
+   *         `GraphErrc::InvalidParameter` for an empty path on an existing
+   *         session; `GraphErrc::Io` for missing/unreadable input;
+   *         `GraphErrc::InvalidYaml` for syntax or node-schema rejection;
+   *         `GraphErrc::MissingDependency` or `GraphErrc::Cycle` for topology
+   *         rejection; or `GraphErrc::Unknown` for an unexpected internal
+   *         failure.
    * @throws std::bad_alloc if request processing, reload execution, backend-
    *         to-status translation, or copied result construction exhausts
-   * memory.
+   *         memory.
    * @note The embedded adapter checks session existence before invoking the
    *       backend reload path, preserves backend reload failure
    *       classification, and serializes mutation through the backend
-   *       graph-state boundary. A nonempty relative `yaml_path` uses the
-   *       caller process working directory; the IPC Host resolves it in the
-   *       client process before transport.
+   *       graph-state boundary. Any failure or propagated resource exhaustion
+   *       preserves the published nodes, topology adjacency and generation,
+   *       runtime graph state, and session identity. A successful reload
+   *       installs the complete replacement, resets runtime state, and
+   *       advances topology generation within the serialized commit. A
+   *       nonempty relative `yaml_path` uses the caller process working
+   *       directory; the IPC Host resolves it in the client process before
+   *       transport.
    */
   virtual VoidResult reload_graph(const GraphSessionId& session,
                                   const std::string& yaml_path) = 0;

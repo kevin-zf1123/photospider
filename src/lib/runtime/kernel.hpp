@@ -211,25 +211,35 @@ class Kernel {
    *
    * @param name Unique graph/session name.
    * @param root_dir Root directory that owns the session folder.
-   * @param yaml_path Optional source YAML copied into the session before load.
+   * @param yaml_path Omitted source selector or explicit YAML copied into the
+   *        session before load.
    * @param config_path Optional config file copied into the session.
    * @param cache_root_dir Optional external cache-root directory.
-   * @return Loaded graph name, or nullopt for duplicate names and recoverable
-   *         graph-load failures.
+   * @return Loaded graph name, or nullopt only when the name is already
+   *         published or loses the final map-insertion race.
    * @throws std::bad_alloc if path, runtime, scheduler, graph, or diagnostic
    *         allocation exhausts memory.
    * @throws GraphError with `GraphErrc::InvalidParameter` when either complete
    *         scheduler intent cannot be planned, becomes unavailable, or
-   *         returns no scheduler instance before installation.
-   * @throws GraphError with `GraphErrc::ComputeError` when the process worker
-   *         budget cannot atomically admit the HP+RT scheduler pair.
+   *         returns no scheduler instance before installation;
+   *         `GraphErrc::ComputeError` when the worker budget cannot admit the
+   *         scheduler pair; `GraphErrc::Io` for explicit-source or session
+   *         filesystem failure; `GraphErrc::InvalidYaml` for syntax/schema
+   *         rejection; `GraphErrc::MissingDependency` or `GraphErrc::Cycle`
+   *         for topology rejection; and `GraphErrc::Unknown` for unexpected
+   *         document-ingestion failures.
    * @throws std::exception for scheduler/runtime startup failures not
-   *         classified as recoverable graph-load errors.
+   *         classified by Kernel; InteractionService normalizes them before
+   *         the embedded Host boundary.
    * @note Scheduler planning and pair reservation complete before either
-   *       scheduler is constructed, attached, or started. The return label is
-   *       allocated before the runtime enters the owned graph map. After
-   *       insertion, returning it uses only noexcept moves, so a propagated
-   *       exception never leaves a newly published session.
+   *       scheduler is constructed, attached, or started. An empty yaml_path
+   *       loads existing `<root_dir>/<name>/content.yaml` or intentionally
+   *       publishes an empty graph; a nonempty source is explicit and never
+   *       falls back. Complete document validation precedes map insertion. The
+   *       return label is allocated before the runtime enters the owned graph
+   *       map, and returning it after insertion uses only noexcept moves, so a
+   *       failure or propagated exception never leaves a newly published
+   *       session or scheduler reservation.
    */
   std::optional<std::string> load_graph(const std::string& name,
                                         const std::string& root_dir,
@@ -374,13 +384,16 @@ class Kernel {
    * @param name Graph session name to reload.
    * @param yaml_path Source YAML file path.
    * @return true when reload succeeds; false when the graph is missing or the
-   * reload fails with a handled IO/YAML error.
+   *         reload fails with a handled document error.
    * @throws std::bad_alloc if reload execution or handled-failure LastError
    *         construction exhausts memory.
    * @note Missing graph sessions preserve the legacy quiet false result without
-   * updating LastError. For existing sessions, GraphIOService error categories
-   * such as GraphErrc::Io and GraphErrc::InvalidYaml are retained in
-   * last_error(); other GraphError/std::exception failures become false.
+   *       updating LastError. For existing sessions, an empty path records
+   *       `GraphErrc::InvalidParameter`; IO, syntax/schema, topology, and
+   *       unexpected failures record their exact stable categories. Any
+   *       handled failure leaves nodes, topology adjacency/generation, runtime
+   *       graph state, and session identity unchanged; `std::bad_alloc`
+   *       propagates with the same preservation guarantee.
    */
   bool reload_graph_yaml(const std::string& name, const std::string& yaml_path);
   /**
@@ -876,7 +889,8 @@ class Kernel {
    * @note Use this helper for facade APIs whose existing contract exposes
    * best-effort LastError details. Historically quiet accessors should keep
    * using with_graph_state so they continue to hide diagnostic state.
-   * GraphError and other std::exception failures otherwise become nullopt.
+   * GraphError, standard exceptions, and non-standard exceptions otherwise
+   * become nullopt with exact or Unknown LastError state.
    */
   template <typename Fn>
   auto with_graph_state_last_error(const std::string& name,
@@ -904,6 +918,11 @@ class Kernel {
       store_last_error(name,
                        LastError{GraphErrc::Unknown,
                                  std::string(exception_prefix) + e.what()});
+      return std::nullopt;
+    } catch (...) {
+      store_last_error(name, LastError{GraphErrc::Unknown,
+                                       std::string(exception_prefix) +
+                                           "unknown non-standard exception"});
       return std::nullopt;
     }
   }
