@@ -1,6 +1,7 @@
 #pragma once
 
 #include <cstddef>
+#include <filesystem>
 #include <iosfwd>
 
 namespace ps::testing {
@@ -12,6 +13,10 @@ namespace ps::testing {
  * @note Production builds do not compile this test-access contract.
  */
 enum class GraphIoSaveFailureStage {
+  /** @brief Injects a recoverable failure before destination open. */
+  BeforeDestinationOpen,
+  /** @brief Throws resource exhaustion before destination open. */
+  BeforeDestinationOpenBadAlloc,
   /** @brief Injects a bad stream state after YAML write completes. */
   AfterWrite,
   /** @brief Injects a bad stream state after destination flush completes. */
@@ -21,43 +26,57 @@ enum class GraphIoSaveFailureStage {
 };
 
 /**
- * @brief Arms one thread-local save-stream failure checkpoint.
+ * @brief Arms one destination-scoped save-stream failure checkpoint.
  *
+ * @param yaml_path Exact destination path that may consume the checkpoint.
  * @param stage Checkpoint whose real stream operation must complete first.
  * @return Nothing.
- * @throws Nothing.
- * @note The checkpoint is consumed at most once on the calling thread.
+ * @throws std::bad_alloc If copying the destination path exhausts memory.
+ * @throws std::system_error If checkpoint synchronization fails.
+ * @note One process-local plan exists at a time. It is consumed at most once
+ *       and only by an exact destination-path and stage match.
  */
-void arm_graph_io_save_failure(GraphIoSaveFailureStage stage) noexcept;
+void arm_graph_io_save_failure(const std::filesystem::path& yaml_path,
+                               GraphIoSaveFailureStage stage);
 
 /**
- * @brief Clears the calling thread's save-stream failure checkpoint.
+ * @brief Clears the process-local save-stream failure checkpoint.
  *
  * @return Nothing.
- * @throws Nothing.
+ * @throws std::system_error If checkpoint synchronization fails.
+ * @note Clearing also resets the observable hit count to zero. Callers must
+ *       invoke this only while no save is expected to consume the plan.
  */
-void clear_graph_io_save_failure() noexcept;
+void clear_graph_io_save_failure();
 
 /**
  * @brief Returns how many times the current checkpoint was reached.
  *
  * @return Zero before a hit or one after the armed one-shot checkpoint fires.
- * @throws Nothing.
+ * @throws std::system_error If checkpoint synchronization fails.
+ * @note The count belongs to the current process-local plan lifecycle and is
+ *       reset whenever callers arm or clear the checkpoint.
  */
-std::size_t graph_io_save_failure_hit_count() noexcept;
+std::size_t graph_io_save_failure_hit_count();
 
 /**
- * @brief Applies an armed failure after one real save-stream stage.
+ * @brief Applies an armed failure at one real save-stream boundary.
  *
  * @param stream Real destination stream whose state is marked failed.
- * @param stage Stage that has just completed.
+ * @param yaml_path Exact destination path owned by the active save.
+ * @param stage Pre-open boundary or output stage that has just completed.
  * @return Nothing.
+ * @throws std::bad_alloc If the exact pre-open resource checkpoint matches.
  * @throws std::ios_base::failure only if the stream already has an exception
- * mask that requests throwing for the injected state.
- * @note The helper changes stream state only; it never throws directly or
- * replaces the stream buffer.
+ *         mask that requests throwing for the injected state.
+ * @throws std::system_error If checkpoint synchronization fails.
+ * @note Recoverable stages change stream state without replacing its buffer.
+ *       At the pre-open boundary the caller checks that state before opening,
+ *       so an existing destination is untouched. The resource stage throws
+ *       only after atomically consuming the exact one-shot plan.
  */
 void inject_graph_io_save_failure(std::ios& stream,
+                                  const std::filesystem::path& yaml_path,
                                   GraphIoSaveFailureStage stage);
 
 }  // namespace ps::testing

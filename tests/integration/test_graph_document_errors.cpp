@@ -5,13 +5,17 @@
 #include <filesystem>
 #include <fstream>
 #include <ios>
+#include <iterator>
 #include <memory>
 #include <stdexcept>
 #include <string>
 #include <vector>
 
 #include "graph/graph_io_service.hpp"  // NOLINT(build/include_subdir)
-#include "graph/graph_model.hpp"       // NOLINT(build/include_subdir)
+#if defined(PHOTOSPIDER_INTERNAL_GRAPH_IO_TESTING)
+#include "graph/graph_io_service_test_access.hpp"  // NOLINT(build/include_subdir)
+#endif
+#include "graph/graph_model.hpp"  // NOLINT(build/include_subdir)
 #include "photospider/core/graph_error.hpp"
 #include "photospider/host/host.hpp"
 
@@ -96,6 +100,29 @@ void write_document(const std::filesystem::path& path,
   stream.open(path);
   stream << contents;
   stream.close();
+}
+
+/**
+ * @brief Reads the exact bytes of one graph-document fixture.
+ *
+ * @param path Existing file whose bytes are copied.
+ * @return Complete binary contents without newline normalization.
+ * @throws std::ios_base::failure If the file cannot be opened or read.
+ * @throws std::bad_alloc If result storage cannot be allocated.
+ * @note This helper observes destination rollback only; it does not parse YAML
+ *       or infer graph state from file contents.
+ */
+std::string read_document(const std::filesystem::path& path) {
+  std::ifstream stream(path, std::ios::binary);
+  if (!stream) {
+    throw std::ios_base::failure("failed to open graph document fixture");
+  }
+  std::string contents{std::istreambuf_iterator<char>(stream),
+                       std::istreambuf_iterator<char>()};
+  if (stream.bad()) {
+    throw std::ios_base::failure("failed to read graph document fixture");
+  }
+  return contents;
 }
 
 /**
@@ -821,6 +848,106 @@ TEST(GraphDocumentReloadErrors,
   EXPECT_EQ(graph.value.nodes.front().id.value, 2);
   EXPECT_EQ(graph.value.nodes.front().name, "committed_replacement");
 }
+
+#if defined(PHOTOSPIDER_INTERNAL_GRAPH_IO_TESTING)
+/**
+ * @brief Preserves destination and Graph owner state on pre-open save failure.
+ *
+ * @return Nothing; GoogleTest assertions report status, destination, owner
+ *         state, or retry mismatches.
+ * @throws std::bad_alloc If fixture or request storage is exhausted.
+ * @throws std::ios_base::failure If fixture destination IO fails.
+ * @throws std::filesystem::filesystem_error If directory setup or cleanup
+ *         fails.
+ * @throws std::exception If unexpected Host/backend execution fails.
+ * @note The private one-shot checkpoint is keyed by exact destination so the
+ *       graph-state worker can consume it without affecting unrelated saves.
+ *       It must be reached before destination open; retry is uninstrumented.
+ */
+TEST(GraphDocumentSaveErrors,
+     PreOpenFailureReturnsIoPreservesStateAndAllowsRetry) {
+  ScopedGraphDocumentDirectory directory;
+  std::unique_ptr<Host> host = create_embedded_host();
+  ASSERT_NE(host, nullptr);
+  configure_document_host(*host);
+  const GraphSessionId session = load_single_node_graph(
+      *host, directory.root(), "save_pre_open", "saved_node");
+  const std::filesystem::path destination =
+      directory.root() / "output" / "graph.yaml";
+  constexpr char kOriginalDestination[] = "original destination bytes\n";
+  write_document(destination, kOriginalDestination);
+
+  testing::arm_graph_io_save_failure(
+      destination, testing::GraphIoSaveFailureStage::BeforeDestinationOpen);
+  const VoidResult failed = host->save_graph(session, destination.string());
+  const std::size_t hit_count = testing::graph_io_save_failure_hit_count();
+  testing::clear_graph_io_save_failure();
+
+  EXPECT_FALSE(failed.status.ok);
+  if (!failed.status.ok) {
+    EXPECT_EQ(checked_graph_error_code(failed.status), GraphErrc::Io);
+  }
+  EXPECT_EQ(hit_count, 1U);
+  EXPECT_EQ(read_document(destination), kOriginalDestination);
+  expect_single_node(*host, session, "saved_node");
+
+  const VoidResult retried = host->save_graph(session, destination.string());
+  ASSERT_TRUE(retried.status.ok) << retried.status.message;
+  EXPECT_NE(read_document(destination), kOriginalDestination);
+  expect_single_node(*host, session, "saved_node");
+}
+
+/**
+ * @brief Preserves resource exhaustion and owner state before save open.
+ *
+ * @return Nothing; GoogleTest assertions report exception-channel,
+ *         destination, owner-state, or retry mismatches.
+ * @throws std::bad_alloc If non-probe fixture or request storage is exhausted.
+ * @throws std::ios_base::failure If fixture destination IO fails.
+ * @throws std::filesystem::filesystem_error If directory setup or cleanup
+ *         fails.
+ * @throws std::exception If unexpected Host/backend execution outside the
+ *         caught injected resource failure fails.
+ * @note The destination-scoped checkpoint is consumed on the graph-state
+ *       worker; it represents resource exhaustion after YAML staging and
+ *       immediately before destination open.
+ */
+TEST(GraphDocumentSaveErrors,
+     PreOpenBadAllocPreservesDestinationStateAndAllowsRetry) {
+  ScopedGraphDocumentDirectory directory;
+  std::unique_ptr<Host> host = create_embedded_host();
+  ASSERT_NE(host, nullptr);
+  configure_document_host(*host);
+  const GraphSessionId session = load_single_node_graph(
+      *host, directory.root(), "save_bad_alloc", "resource_node");
+  const std::filesystem::path destination =
+      directory.root() / "output" / "resource.yaml";
+  constexpr char kOriginalDestination[] = "resource sentinel bytes\n";
+  write_document(destination, kOriginalDestination);
+
+  testing::arm_graph_io_save_failure(
+      destination,
+      testing::GraphIoSaveFailureStage::BeforeDestinationOpenBadAlloc);
+  bool bad_alloc_propagated = false;
+  try {
+    (void)host->save_graph(session, destination.string());
+  } catch (const std::bad_alloc&) {
+    bad_alloc_propagated = true;
+  }
+  const std::size_t hit_count = testing::graph_io_save_failure_hit_count();
+  testing::clear_graph_io_save_failure();
+
+  EXPECT_TRUE(bad_alloc_propagated);
+  EXPECT_EQ(hit_count, 1U);
+  EXPECT_EQ(read_document(destination), kOriginalDestination);
+  expect_single_node(*host, session, "resource_node");
+
+  const VoidResult retried = host->save_graph(session, destination.string());
+  ASSERT_TRUE(retried.status.ok) << retried.status.message;
+  EXPECT_NE(read_document(destination), kOriginalDestination);
+  expect_single_node(*host, session, "resource_node");
+}
+#endif
 
 /**
  * @brief Proves GraphModel replacement commits all topology/runtime state once.
