@@ -155,6 +155,17 @@ python3 tests/verification/codebase_structure/scheduler_doxygen_ast.py \
   --out /tmp/photospider-scheduler-doxygen
 ```
 
+The CLI/Host audit treats
+`apps/graph_cli/src/cli_config.cpp::apply_cli_scheduler_defaults` as the
+canonical scheduler-default definition and validates its complete Doxygen in
+that translation unit. It separately audits `run_graph_cli` and its
+resource-exhaustion policy. For `ConfigEditor::SyncUiStateToModel`, both parse
+chains must rethrow `std::bad_alloc`. Scheduler-worker validation handles
+`std::invalid_argument` specifically, while history-size `std::stoi` ignores
+its other errors through exactly one broad `catch (...)`; the catalog therefore
+expects one broad catch for that function, guarded by the preceding
+`std::bad_alloc` handler.
+
 Their files may remain in the primary repository because this document defines
 their lasting manual role. They must remain absent from CTest and GitHub CI.
 Their `--out` directories are disposable temporary working directories outside

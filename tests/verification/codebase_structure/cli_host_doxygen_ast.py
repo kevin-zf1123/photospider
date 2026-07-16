@@ -533,7 +533,7 @@ GUARD_DEFINITIONS = (
     ("apps/graph_cli/src/command/command_print.cpp", "handle_print", 1),
     ("apps/graph_cli/src/command/command_switch.cpp", "handle_switch", 2),
     ("apps/graph_cli/src/command/help_utils.cpp", "print_help_from_file", 1),
-    ("apps/graph_cli/src/config_editor.cpp", "SyncUiStateToModel", 2),
+    ("apps/graph_cli/src/config_editor.cpp", "SyncUiStateToModel", 1),
     ("apps/graph_cli/src/process_command.cpp", "process_command", 1),
     ("apps/graph_cli/src/cli_config.cpp", "write_config_to_file", 1),
     ("apps/graph_cli/src/cli_config.cpp", "load_or_create_config", 1),
@@ -1706,7 +1706,9 @@ def inspect_semantics(repo: Path) -> dict[str, Any]:
       Host/bad-alloc/lifetime checks.
     @throws OSError If a maintained CLI file cannot be read.
     @note These focused human-review proxies complement, but do not replace, the
-      compiler AST's structural Doxygen validation. ``InteractionService`` is
+      compiler AST's structural Doxygen validation. Scheduler-default Doxygen
+      follows its canonical ``cli_config.cpp`` definition, while
+      ``run_graph_cli`` remains a separate boundary. ``InteractionService`` is
       a permanently unsupported frontend dependency, so this terminology guard
       remains useful after the application-layout migration is complete.
     """
@@ -1810,7 +1812,7 @@ def inspect_semantics(repo: Path) -> dict[str, Any]:
             for source, function_name in (
                 (cli_config_source, "write_config_to_file"),
                 (cli_config_source, "load_or_create_config"),
-                (cli_run_source, "apply_scheduler_config"),
+                (cli_config_source, "apply_cli_scheduler_defaults"),
                 (cli_run_source, "load_configured_scheduler_plugins"),
                 (cli_run_source, "run_graph_cli"),
                 (graph_cli_source, "main"),
@@ -1896,8 +1898,8 @@ def make_expected() -> dict[str, Any]:
         "guard_definitions": {
             "expected_count": 16,
             "observed_count": 16,
-            "expected_broad_catch_count": 23,
-            "actual_broad_catch_count": 23,
+            "expected_broad_catch_count": 22,
+            "actual_broad_catch_count": 22,
             "missing": [],
             "invalid": [],
             "target_source_counts": EXPECTED_CLI_TARGET_SOURCE_COUNTS,
