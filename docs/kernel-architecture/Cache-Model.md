@@ -2,7 +2,7 @@
 
 The kernel has formal HP memory cache on each `Node`, transient RT proxy state
 in `RealtimeProxyGraph`, and disk cache files under the graph cache root. This
-document defines the intended cache semantics.
+document defines the current cache semantics.
 
 ## Formal Cache and Transient State
 
@@ -71,7 +71,7 @@ not provide a cache root continue to use `<root_dir>/<graph_name>/cache`.
 Disk cache precision currently supports `int8` and `int16` save paths. Loaded
 image cache data is converted into float image buffers.
 
-Disk cache load attempts preserve the legacy try-load bool contract while also
+Disk cache load attempts preserve the existing try-load bool contract while also
 recording the latest diagnostic through GraphModel's dedicated disk-cache
 diagnostic mutex. Callers inspect that state through a snapshot API instead of
 reading mutable optional storage directly. The diagnostic result distinguishes
@@ -106,5 +106,5 @@ disk cache state.
 - Tests should verify HP graph cache and RT proxy graph state independently.
 
 `GraphInspectService` selects node-local display metadata from HP cache only.
-RT proxy inspection can be added as a separate frontend-facing view without
-embedding RT state back into `GraphModel`.
+The current Host inspection surface does not promote RT proxy state into
+`GraphModel` or expose it as authoritative cache metadata.

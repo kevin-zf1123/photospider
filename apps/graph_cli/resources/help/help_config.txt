@@ -1,0 +1,11 @@
+config
+
+Open the interactive configuration editor.
+
+Editable scheduler fields:
+  scheduler_hp_type       Default HP scheduler for graphs loaded after config is applied
+  scheduler_rt_type       Default RT scheduler for graphs loaded after config is applied
+  scheduler_worker_count  CPU/plugin grant: 0=auto capped at 8; 1..8 exact
+
+Values outside 0..8 are rejected without changing the active defaults.
+The fixed process-wide scheduler capacity is 32 slots and is not configurable.

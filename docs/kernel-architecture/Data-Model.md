@@ -1,8 +1,10 @@
 # Kernel Data Model
 
 This document describes the graph and node data structures used by the current
-kernel. It focuses on the public behavior that operators, schedulers, plugins,
-and frontends should rely on.
+kernel. `GraphModel` and `Node` are private backend state, not shared public
+contracts. Frontends use `ps::Host` values, operation plugins use the operation
+SDK, and schedulers receive only ready-task metadata. This document explains
+the internal behavior those boundaries ultimately operate on.
 
 ## GraphModel
 
@@ -29,8 +31,10 @@ use `mutable_node()` for node-local runtime fields, but structural edits still
 belong to the model mutation helpers.
 
 Internal services coordinate locking, timing, cache, topology, and traversal
-behavior through the model boundary. Most frontend code should reach graph
-state through `Kernel` or `InteractionService`.
+behavior through the model boundary. Frontend, CLI, and TUI code reaches graph
+state through the public `ps::Host` seam. The embedded Host adapter delegates
+to the internal `InteractionService`/`Kernel` boundary; backend services may
+use that internal boundary but do not expose it to frontend callers.
 
 For CLI-loaded graphs, `cache_root` is derived from the loaded
 `cache_root_dir` config as `<cache_root_dir>/<graph_name>`, with relative paths
@@ -38,8 +42,8 @@ resolved from the process working directory. Lower-level `Kernel::load_graph`
 callers that omit a cache root keep the session-local fallback
 `<root_dir>/<graph_name>/cache`.
 
-`GraphModel::clear()` is intended to reset model-level runtime state, not only
-erase nodes. Clearing a graph resets nodes, topology adjacency, timing results,
+`GraphModel::clear()` resets model-level runtime state, not only nodes.
+Clearing a graph resets nodes, topology adjacency, timing results,
 accumulated IO time, skip-save state, and other per-run state so reload behavior
 is not polluted by stale metadata.
 
@@ -80,8 +84,6 @@ Node inputs are split by data kind:
 | --- | --- | --- |
 | Image input | `ImageInput` | Reads an upstream image-like `NodeOutput`. |
 | Parameter input | `ParameterInput` | Reads an upstream named data output and writes it into runtime parameters. |
-
-The old unified input model is not part of the maintained schema.
 
 ## Parameters
 

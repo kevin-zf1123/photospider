@@ -14,15 +14,15 @@ and Metal hooks all coexist. For architecture details, start with
 
 | Path | Purpose |
 | --- | --- |
-| `cli/` | `graph_cli` executable entry point. |
-| `src/cli/` | REPL commands, command help, TUI editors, autocomplete. |
-| `src/kernel/` | Kernel facade, graph runtime, schedulers, services. |
-| `src/adapter/` | OpenCV buffer adapter plus currently unenabled Metal adapter source. |
-| `src/benchmark/` | Benchmark configuration and execution support. |
-| `src/metal/` | Apple Metal-backed operation code. |
-| `include/` | Public headers mirroring the runtime and CLI modules. |
-| `custom_ops/` | Shared operation plugins built into `build/plugins`. |
-| `tests/` | GoogleTest sources. |
+| `apps/graph_cli/` | Private `graph_cli` application tree: entry point, commands, REPL/TUI, autocomplete, configuration, headers, and help resources. |
+| `apps/photospiderd/` | Foreground macOS/Linux daemon process shell and self-pipe signal policy. |
+| `src/lib/` | Role-owned backend implementation and private headers: core, graph, compute, runtime, Host, plugin, scheduler, benchmark, adapters, and the internal IPC server/router. |
+| `include/photospider/` | The only installable header tree, containing public Host/core, operation v2, scheduler SDK, and conditional typed IPC contracts. |
+| `plugins/ops/` | Repository-owned operation plugins, including the private Metal operation implementation. |
+| `plugins/schedulers/` | Repository-owned scheduler plugins. |
+| `tests/unit/` | Isolated contract tests. |
+| `tests/integration/` | Cross-component, runtime, plugin, scheduler, CLI, process, and package behavior tests. |
+| `tests/{fixtures,support,verification}/` | Test DSOs, shared internal support, and documented long-lived manual tools. |
 | `docs/` | Maintained documentation. Older phase docs live in `docs/outdated`. |
 | `util/` | Scratch graphs, examples, and local test inputs. |
 | `extern/ftxui/` | Vendored FTXUI source when the submodule is present. |
@@ -40,6 +40,8 @@ Required for the main build:
 - `yaml-cpp`
 - Threads
 - FTXUI, either from `extern/ftxui` or an installed CMake package
+- `nlohmann_json` 3.9+ when `PHOTOSPIDER_BUILD_IPC=ON` (the default on
+  macOS/Linux); it remains private to IPC implementation
 
 Optional or test-only dependencies:
 
@@ -77,6 +79,12 @@ Build the CLI and backend:
 cmake --build build --target graph_cli -j
 ```
 
+On macOS/Linux, build the typed IPC client and foreground daemon with:
+
+```bash
+cmake --build build --target photospider_ipc_client photospiderd -j
+```
+
 The executable is written to:
 
 ```text
@@ -93,7 +101,12 @@ Useful build options:
 cmake -S . -B build -DBUILD_TESTING=ON
 cmake -S . -B build -DUSE_ASAN=ON
 cmake -S . -B build -DUSE_TSAN=ON
+cmake -S . -B build -DPHOTOSPIDER_BUILD_IPC=OFF
 ```
+
+`PHOTOSPIDER_BUILD_IPC` defaults to `ON` on macOS/Linux and `OFF` elsewhere.
+Forcing it on on an unsupported platform fails configuration. With it off, the
+package installs neither IPC headers nor the IPC client/daemon targets.
 
 ## Test
 
@@ -110,8 +123,10 @@ cmake --build build --target test_gpu_pipeline_scheduler -j
 ./build/tests/test_gpu_pipeline_scheduler
 ```
 
-Note: the current `CMakeLists.txt` builds every `tests/test_*.cpp` executable,
-but only selected targets are registered with `gtest_discover_tests`.
+The current `CMakeLists.txt` keeps stable test target and CTest names while
+owning maintained translation units under `tests/unit/` and
+`tests/integration/`. `test_propagation` remains a buildable script-driven tool;
+the other GoogleTest targets are registered with `gtest_discover_tests`.
 
 ## Run
 
@@ -139,14 +154,83 @@ Start the REPL with no preloaded graph:
 ./build/bin/graph_cli
 ```
 
+Start the local version 1 daemon on its protected per-user socket:
+
+```bash
+./build/bin/photospiderd
+```
+
+Or choose an explicit absolute socket path in an already protected directory:
+
+```bash
+mkdir -m 700 /tmp/photospider-demo
+./build/bin/photospiderd --socket /tmp/photospider-demo/daemon.sock
+```
+
+`photospiderd` stays in the foreground and shuts down cleanly on SIGINT or
+SIGTERM. It serializes same-socket startup with a persistent mode-`0600`
+`${socket}.lock` file; the file intentionally remains after shutdown so later
+instances synchronize on the same inode. Its typed installable client is
+`Photospider::photospider_ipc_client`, with headers under
+`photospider/ipc/`. Version 1 exposes the exact 55-method typed Client surface,
+including graph/inspection, polling compute and protected image metadata,
+bounded events/traces, cache, operation-plugin, and scheduler calls. The
+installed `create_ipc_host(socket_path)` adapter implements all 53 current
+non-destructor Host virtuals with short-lived typed calls, joined async polling,
+exact status propagation, and deterministic `client_stopped` teardown. Its
+secure image consumer strictly validates the same-user artifact while its
+delivery lease remains active, maps it read-only into a shared CPU image, then
+releases the matching job/lease. The final image reference unmaps and closes
+the retained descriptor exactly once. An IPC-only installed CMake consumer uses
+`find_package(Photospider CONFIG REQUIRED COMPONENTS ipc_client)` and links
+`Photospider::photospider_ipc_client`; that component resolves only Threads.
+Omitting components keeps the embedded package default and its OpenCV,
+`yaml-cpp`, Threads, and applicable Apple framework dependencies. Compute
+jobs publish only `queued`, `running`, `succeeded`, or `failed`; every
+submission reports `cancellable:false`. Accepted failures remain immutable
+terminal values with exact nested Graph or Daemon status instead of being
+mistaken for failed polling RPCs. The sole public `OperationStatus` separately
+keeps `none`/`transport`/`protocol`/`graph`/`daemon` domains distinguishable.
+Production
+limits include 64 active jobs, 256 retained terminal jobs, 64 artifacts, one
+GiB of retained artifact bytes, 512 MiB per artifact, 8,192 compute events,
+65,536 scheduler traces, and a 16-MiB maximum frame. Compute cancellation,
+`daemon.shutdown`, TCP, Windows
+transport, and `graph_cli --connect` remain unavailable. `graph_cli` therefore
+continues to use its embedded Host and all local commands below retain their
+existing meaning. See `docs/codebase-structure/IPC-Protocol-v1.md` for the wire,
+opaque-session, polling, output-security, permission, and error contracts.
+
+Installed extension authors select narrow components instead of linking the
+embedded product. `COMPONENTS operation_sdk` exposes the v2 `ps::plugin`
+contracts and transitively links `Photospider::operation_runtime`, so a normal
+operation DSO links only `Photospider::operation_sdk` and discovers no external
+package. `COMPONENTS operation_opencv` adds only the public adapter and OpenCV
+`core`; plugin-specific algorithms declare any other OpenCV modules.
+`COMPONENTS scheduler_sdk` exposes `IScheduler`, `SchedulerTaskRuntime`,
+`SchedulerHostContext`, and numeric handshake declarations with no Threads,
+OpenCV, yaml-cpp, Metal, embedded, daemon, or IPC dependency. Operation plugins
+export only `register_photospider_ops_v2`; scheduler plugins must pass
+the exact ABI-v2 `ps_scheduler_plugin_get_abi_version() noexcept` handshake
+before discovery. ABI v1 is rejected without a compatibility adapter. Each
+ABI-v2 create call receives a resolved `[1,8]` hard grant; the trusted plugin
+may own fewer worker threads but must not exceed it. The removed top-level
+operation/scheduler headers have no compatibility forwarders.
+
 The command-line parser currently supports graph loading, YAML output, tree
 printing, traversal display, cache clearing, config selection, and REPL entry.
 Graph computation and image saving are REPL commands, not top-level CLI flags.
+Ordered option actions continue after recoverable failures, but any failed
+action or missing loaded-graph precondition makes the invocation return 2
+before either implicit or explicit REPL entry; earlier successful effects are
+not rolled back. With no top-level action, `graph_cli` still starts the REPL.
 
 ## REPL Commands
 
 Type `help` in the REPL for the full command list, or `help <command>` for the
-text stored in `src/cli/command/help/`.
+text stored in `apps/graph_cli/resources/help/`. CMake configures this resource
+root into the build-tree application, so command help does not depend on the
+process working directory.
 
 Common commands:
 
@@ -204,7 +288,7 @@ Important keys:
 | `default_compute_args` | empty | Space-separated default `compute` flags. |
 | `scheduler_hp_type` | `cpu_work_stealing` | High-precision scheduler type: built-in `cpu_work_stealing`, `serial_debug`, `gpu_pipeline`, `heterogeneous`, or a loaded plugin scheduler name. |
 | `scheduler_rt_type` | `cpu_work_stealing` | Kernel RT intent scheduler type using the same supported values; this does not enable CLI RT commands. |
-| `scheduler_worker_count` | `0` | CPU worker count; `0` means auto. |
+| `scheduler_worker_count` | `0` | CPU/plugin worker grant: `0` selects a bounded automatic value from `1..8`; `1..8` is exact. Other values are rejected. |
 
 Use another config file with:
 
@@ -219,6 +303,15 @@ graph load. Scheduler type strings are resolved when a graph creates its
 scheduler instances during graph load, or later through `scheduler set <hp|rt>
 <type>`, so newly loaded graphs can still use plugin-provided scheduler types
 discovered during startup.
+
+Scheduler config is transactional: malformed, negative, or greater-than-eight
+worker values leave the previous future-graph defaults unchanged. Each graph
+plans its HP and RT schedulers against one fixed 32-slot capacity shared by all
+Hosts and Kernels in the process. Built-in serial scheduling charges zero;
+CPU and ABI-v2 plugin schedulers charge the resolved grant; built-in GPU and
+heterogeneous scheduling also charge one potential device worker. Config
+acceptance does not reserve capacity, so graph load or replacement can still
+return Graph `ComputeError`; failed replacement keeps the old scheduler.
 
 Scheduler plugin discovery and scheduler selection are separate phases.
 `scheduler plugins` can show a plugin because it was scanned from
@@ -245,7 +338,7 @@ plugin_dirs:
 
 ## Built-In Operations
 
-Built-in operations are registered in `src/ops.cpp`.
+Built-in operations are registered in `src/lib/core/ops.cpp`.
 
 | Type | Subtype | Notes |
 | --- | --- | --- |
@@ -265,8 +358,9 @@ Built-in operations are registered in `src/ops.cpp`.
 | `image_mixing` | `diff` | Absolute difference between two images. |
 | `image_mixing` | `multiply` | Pixel-wise multiplication. |
 
-`custom_ops/` currently builds example plugins for `image_process:invert`,
-`image_process:threshold`, and `io:save`. On macOS, Metal builds also produce
+`plugins/ops/` currently builds example plugins for `image_process:invert`,
+`image_process:threshold`, and `io:save`. On macOS, its private `metal/`
+implementation also produces
 `image_generator:perlin_noise_metal`, but it is only scanned when
 `build/high_performance/metal` is manually present in `plugin_dirs`.
 
