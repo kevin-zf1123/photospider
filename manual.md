@@ -64,8 +64,8 @@ Supported options:
 Examples:
 
 ```bash
-./build/bin/graph_cli --read util/testcases/full_ops.yaml --print
-./build/bin/graph_cli --read util/testcases/full_ops.yaml --traversal
+./build/bin/graph_cli --read graph.yaml --print
+./build/bin/graph_cli --read graph.yaml --traversal
 ./build/bin/graph_cli --config config.yaml --read graph.yaml --repl
 ```
 

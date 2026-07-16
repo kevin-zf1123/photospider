@@ -96,7 +96,7 @@ feedback/
 !extern/**/CMakeLists.txt
 
 # ============================
-# 5. 测试与工具 (Tests & Utils)
+# 5. 测试 (Tests)
 # ============================
 # Unit tests
 !tests/
@@ -105,18 +105,6 @@ feedback/
 !tests/**/*.hpp
 !tests/**/*.py
 tests/results/
-
-# Utilities (Python scripts, YAML configs, Testcases)
-!util/
-!util/**/
-!util/**/*.yaml
-!util/**/*.yml
-!util/**/*.py
-!util/**/*.md
-!util/**/*.txt
-!util/**/*.json
-util/change.txt
-util/99-filed/architecture.md
 
 # ============================
 # 6. 文档 (Documentation)
