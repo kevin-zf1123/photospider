@@ -108,6 +108,111 @@ extract_step_run_block() {
   ' "$workflow" > "$destination"
 }
 
+# @brief Extract one named top-level job from a maintained workflow.
+# @param $1 Workflow YAML path.
+# @param $2 Exact job identifier below the jobs mapping.
+# @param $3 Destination YAML fragment.
+# @return Zero when the job is found and written, otherwise nonzero.
+# @throws Nothing; a missing job is represented by the return status.
+# @note Scoping later assertions to this fragment prevents another job from
+#   satisfying a local-image contract accidentally.
+extract_job_block() {
+  local workflow=$1
+  local job_name=$2
+  local destination=$3
+  awk -v target="  ${job_name}:" '
+    $0 == target {
+      capture = 1
+    }
+    capture && $0 != target && $0 ~ /^  [[:alnum:]_-]+:$/ {
+      exit
+    }
+    capture {
+      print
+    }
+    END {
+      if (!capture) {
+        exit 1
+      }
+    }
+  ' "$workflow" > "$destination"
+}
+
+# @brief Require the local-image healthcheck to materialize the exact PR base.
+# @param $1 Healthcheck workflow YAML path.
+# @return Zero after the job-scoped fetch, verification, and order checks pass.
+# @throws Nothing; missing or misordered contracts exit through fail.
+# @note The base-repository fetch must be the job's first shell execution so no
+#   fork-head script or image build runs before the exact base object exists.
+validate_local_image_base_fetch() {
+  local workflow=$1
+  local job_file="$TEST_ROOT/healthcheck-local-image-job.yml"
+  local fetch_script="$TEST_ROOT/healthcheck-local-image-base-fetch.sh"
+  local checkout_line
+  local fetch_step_line
+  local first_run_line
+  local verify_line
+  local build_line
+  local healthcheck_line
+
+  extract_job_block "$workflow" healthcheck-local-image "$job_file" ||
+    fail "healthcheck-local-image job could not be extracted"
+  extract_step_run_block "$job_file" "Fetch pull request base history" \
+    "$fetch_script" ||
+    fail "healthcheck-local-image base-fetch run block could not be extracted"
+
+  assert_file_contains "$job_file" \
+    'CI_BASE_REPOSITORY: ${{ github.repository }}'
+  assert_file_contains "$job_file" \
+    'CI_BASE_BRANCH: ${{ github.base_ref }}'
+  assert_file_contains "$job_file" \
+    'CI_BASE_SHA: ${{ github.event.pull_request.base.sha }}'
+  assert_file_contains "$job_file" \
+    "if: github.event_name == 'pull_request' || github.event_name == 'pull_request_target'"
+  assert_file_contains "$job_file" \
+    "CI_BASE_REF: \${{ (github.event_name == 'pull_request' || github.event_name == 'pull_request_target') && github.event.pull_request.base.sha"
+  assert_file_contains "$job_file" \
+    '-v "${{ github.workspace }}:/workspace" \'
+  assert_file_contains "$job_file" '-e CI_BASE_REF \'
+  assert_file_contains "$fetch_script" \
+    'git fetch --no-tags --no-recurse-submodules'
+  assert_file_contains "$fetch_script" \
+    '"https://github.com/${CI_BASE_REPOSITORY}.git" \'
+  assert_file_contains "$fetch_script" \
+    '"+refs/heads/${CI_BASE_BRANCH}:refs/remotes/photospider-base/${CI_BASE_BRANCH}"'
+  assert_file_contains "$fetch_script" \
+    'git rev-parse --verify "$CI_BASE_SHA^{commit}" >/dev/null'
+  bash -n "$fetch_script"
+
+  checkout_line=$(grep -nF -- "- uses: actions/checkout@v4" "$job_file" |
+    head -n 1 | cut -d: -f1)
+  fetch_step_line=$(grep -nF -- \
+    "- name: Fetch pull request base history" "$job_file" |
+    head -n 1 | cut -d: -f1)
+  first_run_line=$(grep -nE -- '^[[:space:]]+run:' "$job_file" |
+    head -n 1 | cut -d: -f1)
+  verify_line=$(grep -nF -- \
+    'git rev-parse --verify "$CI_BASE_SHA^{commit}" >/dev/null' "$job_file" |
+    head -n 1 | cut -d: -f1)
+  build_line=$(grep -nF -- "- name: Build local CI image" "$job_file" |
+    head -n 1 | cut -d: -f1)
+  healthcheck_line=$(grep -nF -- \
+    "- name: Run healthcheck in local CI image" "$job_file" |
+    head -n 1 | cut -d: -f1)
+  [[ -n "$checkout_line" && -n "$fetch_step_line" &&
+    -n "$first_run_line" && -n "$verify_line" && -n "$build_line" &&
+    -n "$healthcheck_line" ]] ||
+    fail "healthcheck-local-image lacks a complete exact-base execution order"
+  ((checkout_line < fetch_step_line &&
+    fetch_step_line < first_run_line &&
+    first_run_line < verify_line &&
+    verify_line < build_line &&
+    build_line < healthcheck_line)) ||
+    fail "healthcheck-local-image executes fork-head work before exact-base verification"
+
+  pass healthcheck-local-image-exact-base-before-execution
+}
+
 # @brief Model whether the protected-path job must run for event identity.
 # @param $1 Event name.
 # @param $2 Head branch name.
@@ -542,6 +647,7 @@ main() {
 
   validate_workflow_contract "$health_workflow" "Report healthcheck gate"
   validate_workflow_contract "$integration_workflow" "Report integration gate"
+  validate_local_image_base_fetch "$health_workflow"
 
   if protected_job_should_run pull_request_target CI/example \
     owner/repository owner/repository; then

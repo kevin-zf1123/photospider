@@ -243,6 +243,19 @@ jobs:
           submodules: recursive
           ref: ${{ (github.event_name == 'pull_request' || github.event_name == 'pull_request_target') && github.event.pull_request.head.sha || github.sha }}
 
+      - name: Fetch pull request base history
+        if: github.event_name == 'pull_request' || github.event_name == 'pull_request_target'
+        env:
+          CI_BASE_REPOSITORY: ${{ github.repository }}
+          CI_BASE_BRANCH: ${{ github.base_ref }}
+          CI_BASE_SHA: ${{ github.event.pull_request.base.sha }}
+        run: |
+          set -Eeuo pipefail
+          git fetch --no-tags --no-recurse-submodules \
+            "https://github.com/${CI_BASE_REPOSITORY}.git" \
+            "+refs/heads/${CI_BASE_BRANCH}:refs/remotes/photospider-base/${CI_BASE_BRANCH}"
+          git rev-parse --verify "$CI_BASE_SHA^{commit}" >/dev/null
+
       - name: Build local CI image
         run: docker build -t photospider-ci:local -f Dockerfile.ci .
 
