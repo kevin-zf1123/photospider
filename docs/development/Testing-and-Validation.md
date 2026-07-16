@@ -415,7 +415,10 @@ GitHub Actions and the Linux CI container are maintained validation paths.
 Pull requests targeting `main` use the base branch's protected workflow through
 `pull_request_target`, while pushes to `main` and `CI/**` also run CI. Ordinary
 feature branches cannot change `ci/**`, `.github/workflows/**`, or
-`Dockerfile.ci`; those inputs require a `CI/**` branch.
+`Dockerfile.ci`; those inputs require a `CI/**` branch in the base repository.
+Only a same-repository `CI/**` pull request is deduplicated in favor of that
+branch's push run. A fork with the same branch prefix is rejected before
+checkout, and branch spelling alone never authorizes protected-path changes.
 
 Every triggered run keeps a stable `healthcheck` conclusion. The integration
 workflow classifies exact event revisions before configuration: changes limited
@@ -426,7 +429,9 @@ or uncertain Git state runs full integration. Type changes and uncommon Git
 statuses stay in the unfiltered path inventory. Every `CI/**` push also forces
 full current-head integration, including a later incremental push that changes
 only documentation. The workflows deliberately avoid `paths-ignore`, which
-could leave a configured required check pending.
+could leave a configured required check pending. Stable gates take the same
+repository-identity decision: only a same-repository `CI/**` pull request can
+report intentional deduplication; fork or missing identity fails closed.
 
 Published-image healthcheck execution and build/test integration jobs run in
 `ghcr.io/<owner>/<repo>/photospider-ci:latest`; lightweight routing and result
@@ -435,13 +440,19 @@ workflow builds `photospider-ci:local` and runs the same repository scripts in
 that image so validation does not race image publication.
 `Dockerfile.ci` installs the C++ toolchain, CMake, OpenCV, yaml-cpp, GTest,
 nlohmann-json, clang-format, Python, and cpplint required by those scripts.
+Changed-path inventories use NUL-delimited Git output and a parent-visible
+temporary file. A failing `git diff` therefore terminates image detection or
+healthcheck static-scope detection without emitting a false negative route.
 
 The maintained entry points are:
 
-- `ci/scripts/healthcheck.sh` for diff, format, and cpplint checks.
+- `ci/scripts/healthcheck.sh` for fail-closed changed-path inventory, diff,
+  format, cpplint, and both durable shell regressions.
 - `ci/scripts/change_classification.sh` and
   `ci/scripts/change_classification_test.sh` for fail-closed documentation-only
   routing and its durable event/path regression matrix.
+- `ci/scripts/ci_routing_test.sh` for same-repository/fork routing, stable gate,
+  image-base, unusual-path, and detector-failure propagation contracts.
 - `ci/scripts/build_integrity.sh` for configure, required-target and full builds,
   plus CTest discovery.
 - `ci/scripts/ctest_full.sh` for the main CTest suite.

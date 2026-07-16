@@ -11,15 +11,15 @@
 
 由 push 触发的 CI 只在 `main` 和名称以 `CI/` 开头的分支上运行。这样可以防止普通 feature 分支运行该分支自行修改过的 workflow 文件。
 
-目标为 `main` 的 pull request 使用 `pull_request_target`，即使用 base 分支上的 workflow 定义，同时 checkout pull request 的 head commit 作为被测代码。`CI/**` 分支通过 push 触发验证该分支修改后的 workflow，不再额外启动第二套 pull request run，从而避免同一 commit 重复运行本地镜像 integration。
+目标为 `main` 的 pull request 使用 `pull_request_target`，即使用 base 分支上的 workflow 定义，同时 checkout pull request 的 head commit 作为被测代码。只有 head repository 就是 base repository 本身时，`CI/**` pull request 才会去重并改由 push trigger 验证。Fork 可以使用同名分支，却不会在 base repository 中产生对应 push；因此 fork `CI/**` pull request 会在 checkout 前明确 fail closed，而不会得到伪造的绿色结论，也不会在这个带权限的 event 中执行不受信任的 fork 代码。
 
-healthcheck 和 integration 的第一个 job 会在执行任何仓库脚本或本地 CI 镜像构建前保护 CI workflow 输入。对于非 `CI/**` pull request，它会从 base 仓库拉取目标分支，并使用 event 提供的精确 base/head commit；其他受保护 run 会拉取 `origin/main` 并使用 `HEAD`。两条路径都要求恰好一个 merge base，再在关闭 rename detection 与 Git status 过滤后比较 merge-base tree 和选定的 head。这样，手动触发且落后于 `main` 的 ref 仍保持 three-dot 语义，type change 或任何少见 status 也都会进入受保护路径清单。所得 diff 修改以下任一路径时，门禁会失败：
+healthcheck 和 integration 的第一个 job 会在执行任何仓库脚本或本地 CI 镜像构建前保护 CI workflow 输入。只有同仓库 `CI/**` pull request 会改由 base-repository push run 处理。Fork `CI/**` pull request 会进入该 job 并在 checkout 前被拒绝；head-repository identity 缺失时也会 fail closed。对于其他 pull request，该 job 会从 base 仓库拉取目标分支，并使用 event 提供的精确 base/head commit；其他受保护 run 会拉取 `origin/main` 并使用 `HEAD`。两条 diff 路径都要求恰好一个 merge base，再在关闭 rename detection 与 Git status 过滤后比较 merge-base tree 和选定的 head。这样，手动触发且落后于 `main` 的 ref 仍保持 three-dot 语义，type change 或任何少见 status 也都会进入受保护路径清单。所得 diff 修改以下任一路径时，门禁会失败：
 
 - `ci/**`
 - `.github/workflows/**`
 - `Dockerfile.ci`
 
-因此，CI workflow 相关修改必须放在 `CI/**` 分支开发。该保护也覆盖目标为 `main` 的非 `CI/**` pull request，避免 workflow 相关文件通过普通 feature 分支合并。
+因此，CI workflow 相关修改必须放在 base repository 的 `CI/**` 分支开发。分支前缀本身绝不是授权：pull request 还必须以 base repository 作为 head-repository identity，而 push 和手动 run 本来就属于 base repository。该保护也覆盖目标为 `main` 的非 `CI/**` pull request，避免 workflow 相关文件通过普通 feature 分支或 fork 中的同名分支合并。
 
 ## 纯文档路由
 
@@ -33,13 +33,13 @@ integration workflow 会在受保护路径门禁之后运行 `change-classificat
 
 对于 `pull_request` 和 `pull_request_target`，分类器要求 event 提供精确的 base/head SHA 和唯一 merge base，再评估从该 merge base 到 head 的 pull request diff。`main` push 会比较精确的 `before` 与 head tree。每次 `CI/**` push 都始终执行完整链，即使后续一次增量 push 只包含文档也不例外；这样可以避免同一分支上更早的源码或 workflow commit 在 pull-request-trigger 去重后逃过 current-head integration。`workflow_dispatch` 也始终执行完整链。event 不受支持，push branch identity 缺失或格式错误，revision 缺失、格式错误、全零、来自浅克隆或不可达，merge base 缺失或不唯一，diff 失败，或者 changed-path 清单为空时，都会 fail closed 到完整 integration。workflow 使用 `fetch-depth: 0`；event identity 不可用时绝不会猜测 `origin/main` 或 `HEAD~1`。
 
-对于纯文档变更，`ci-image-change`、integration 规划、所有 build、完整 CTest、build smoke 与脚本式 integration 分片都会被有意跳过。始终运行的 `integration` 门禁会校验这些 job 的确得到 `skipped` 结论，并把原因写入 GitHub step summary。分类或上游依赖失败时，该门禁会失败，不会因为 `needs` 静默传播 skip 而通过。workflow 保持触发，不使用 `paths-ignore`，因此稳定 required check 会得到结论，而不会一直 pending。`healthcheck` 门禁也始终给出结论，并校验实际选中的 published-image 或 local-image healthcheck 路径。`CI/**` pull request run 也会通过同一组稳定门禁报告其有意采用 push-triggered 去重。
+对于纯文档变更，`ci-image-change`、integration 规划、所有 build、完整 CTest、build smoke 与脚本式 integration 分片都会被有意跳过。始终运行的 `integration` 门禁会校验这些 job 的确得到 `skipped` 结论，并把原因写入 GitHub step summary。分类或上游依赖失败时，该门禁会失败，不会因为 `needs` 静默传播 skip 而通过。workflow 保持触发，不使用 `paths-ignore`，因此稳定 required check 会得到结论，而不会一直 pending。`healthcheck` 门禁也始终给出结论，并校验实际选中的 published-image 或 local-image healthcheck 路径。只有同仓库 `CI/**` pull request 会报告有意采用 push-triggered 去重；fork 或缺失 repository identity 时不能走该捷径。
 
 ## 运行环境
 
 `Dockerfile.ci` 定义 GitHub Linux 测试环境。published-image healthcheck 执行 job 与 build/test integration job 会在 `ghcr.io/<owner>/<repo>/photospider-ci:latest` 中运行。protected-path、change-classification 与稳定结果门禁仍是轻量 `ubuntu-latest` job，不会 configure 或编译项目。
 
-当 pull request 或 push 修改 CI 镜像输入（`Dockerfile.ci`、`.dockerignore` 或 `.github/workflows/build-ci-image.yml`）时，healthcheck 和 integration workflow 会在当前 workflow 内构建 `photospider-ci:local`，并在该镜像中运行相同脚本。Pull-request 镜像检测会拉取 base 仓库分支、校验 event 的精确 base SHA，再从该 base 开始比较，而不依赖 fork 中可能不存在的 `origin/<base>`。`CI/**` push 会拉取 `origin/main`，从 branch merge base 开始累计检测镜像输入，因此后续纯文档 push 无法隐藏更早的镜像输入 commit。不带过滤且关闭 rename detection 的清单也会包含 type change。这样既避免错误选择 published-image 路径，也避免另一个 workflow 尚未发布新 `latest` 镜像时产生竞态。
+当 pull request 或 push 修改 CI 镜像输入（`Dockerfile.ci`、`.dockerignore` 或 `.github/workflows/build-ci-image.yml`）时，healthcheck 和 integration workflow 会在当前 workflow 内构建 `photospider-ci:local`，并在该镜像中运行相同脚本。Pull-request 镜像检测会拉取 base 仓库分支、校验 event 的精确 base SHA，再从该 base 开始比较，而不依赖 fork 中可能不存在的 `origin/<base>`。`CI/**` push 会拉取 `origin/main`，从 branch merge base 开始累计检测镜像输入，因此后续纯文档 push 无法隐藏更早的镜像输入 commit。不带过滤且关闭 rename detection 的清单使用 NUL 分隔的 Git path，因此 type change 与含换行的文件名仍保持为一个精确路径。镜像检测与 healthcheck 静态范围检测会先把清单写入父 shell 可观察的文件；`git diff` 失败时，脚本会在输出任何 `changed=false` 或“No changed C++ files”摘要前非零退出。这样既避免假路由，也避免另一个 workflow 尚未发布新 `latest` 镜像时产生竞态。
 
 镜像包含 CMake、C++ 工具链、OpenCV、yaml-cpp、CURL、OpenSSL、GTest、
 nlohmann-json、Python、cpplint 和 clang-format。Formatter 通过 PyPI wheel 安装并固定为
@@ -105,10 +105,11 @@ helper 和 output artifact 不得进入 primary repository，也不得作为 per
 保留。明确记录的通用手工开发工具属于另一类内容；clean primary checkout 绝不能 import 个人开发
 内容。
 
-- `ci/scripts/healthcheck.sh`：运行 `git diff --check` 和长期 change-classification 回归，并对每个未删除的 changed C++ 路径运行 `clang-format --dry-run --Werror` 与 `cpplint`；其静态工具清单会保留 type change 与少见 status。
+- `ci/scripts/healthcheck.sh`：建立 NUL 分隔的 changed-path artifact，运行 `git diff --check`、长期 change-classification 与 CI-routing 回归，并对每个未删除的 changed C++ 路径运行 `clang-format --dry-run --Werror` 与 `cpplint`；清单失败时会在输出无 C++ 摘要前终止。
 - `ci/scripts/change_classification.sh`：把 event 的精确 revision 分类为纯文档或完整 integration，记录所有改动路径与非文档路径，并在 Git 状态不确定时 fail closed。
 - `ci/scripts/change_classification_test.sh`：覆盖文档、源码、混合、type change、workflow、重命名、删除、重复 `CI/**` push、pull-request merge-base、branch 或 revision 缺失、全零/不可达 revision、手动触发、空 diff 与浅克隆场景，验证长期路由契约。
-- `ci/scripts/ci_image_changed.sh`：检测当前不带 status 过滤的 diff 是否修改 CI 镜像输入；workflow 会向它提供已拉取并验证的 pull-request 精确 base SHA。
+- `ci/scripts/ci_routing_test.sh`：通过稳定门禁 run block 与隔离 Git fixture 覆盖同仓库/fork/缺失 repository identity、checkout 前 fork 拒绝、精确/累积 image base、空比较、含换行路径，以及两个 detector 的 changed-path 失败传播。
+- `ci/scripts/ci_image_changed.sh`：检测当前 NUL 分隔且不带 status 过滤的 diff 是否修改 CI 镜像输入；workflow 会向它提供已拉取并验证的 pull-request 精确 base SHA，diff 失败时不会输出路由。
 - `ci/scripts/integration_plan.sh`：配置一个启用测试的小型规划 build tree，使用 `ctest -N` 发现两个精确 build-smoke 测试名，对照 runner 文件校验注册，并输出 smoke/build 能力标记。
 - `ci/scripts/integration_suite.sh`：应用动态规划，并为本地镜像 fallback 路径顺序运行所得 integration 分片。
 - `ci/scripts/build_integrity.sh`：构建 `CI_BUILD_PROFILE` 选定的 profile。`default` 会构建 required targets 与完整 build tree，再执行 CTest discovery；`ipc-disabled` 设置 `BUILD_TESTING=OFF` 与 `PHOTOSPIDER_BUILD_IPC=OFF`，校验 cache，并且只构建 `photospider` producer target。
@@ -131,6 +132,7 @@ CI_CHANGE_EVENT=push \
   CI_ARTIFACT_DIR=CI-results/change-classification \
   bash ci/scripts/change_classification.sh
 bash ci/scripts/change_classification_test.sh
+bash ci/scripts/ci_routing_test.sh
 GITHUB_OUTPUT=/tmp/photospider-integration-plan.out \
   CI_ARTIFACT_DIR=CI-results/integration-plan \
   bash ci/scripts/integration_plan.sh
