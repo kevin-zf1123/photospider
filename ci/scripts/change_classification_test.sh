@@ -70,6 +70,7 @@ commit_case() {
 # @param $1 Event name.
 # @param $2 Base or before SHA.
 # @param $3 Head SHA.
+# @param $4 Branch name for push events, or an empty value for other events.
 # @return The classifier process status.
 # @throws Nothing; classifier failure propagates through set -e.
 # @note Each run starts with an empty artifact directory.
@@ -77,11 +78,13 @@ run_classifier() {
   local event_name=$1
   local base_sha=$2
   local head_sha=$3
+  local branch_name=${4-}
   rm -rf -- "$CASE_ARTIFACT_DIR"
   mkdir -p "$CASE_ARTIFACT_DIR"
   CI_CHANGE_REPO_ROOT="$CASE_REPO" \
     CI_ARTIFACT_DIR="$CASE_ARTIFACT_DIR" \
     CI_CHANGE_EVENT="$event_name" \
+    CI_CHANGE_BRANCH="$branch_name" \
     CI_CHANGE_BASE_SHA="$base_sha" \
     CI_CHANGE_HEAD_SHA="$head_sha" \
     bash "$CLASSIFIER" >/dev/null
@@ -116,11 +119,13 @@ assert_classification() {
 # @brief Exercise the durable path and Git-event routing contract.
 # @return Zero when every classification case passes.
 # @throws Nothing; command failures terminate through set -e.
-# @note The matrix covers docs, mixed changes, deletes, renames, and uncertainty.
+# @note The matrix covers docs, mixed and type changes, deletes, renames,
+#   CI-branch push routing, merge-base behavior, and uncertainty.
 main() {
   local common_sha
   local missing_sha=ffffffffffffffffffffffffffffffffffffffff
   local shallow_source
+  local -a second_push_paths=()
 
   new_case_repo documentation_paths
   mkdir -p "$CASE_REPO/docs/CI/zh"
@@ -130,14 +135,14 @@ main() {
   printf 'readme\n' > "$CASE_REPO/README"
   printf 'license\n' > "$CASE_REPO/LICENSE"
   commit_case "documentation only"
-  run_classifier push "$BASE_SHA" "$HEAD_SHA"
+  run_classifier push "$BASE_SHA" "$HEAD_SHA" main
   assert_classification documentation-paths true false documentation-only
 
   new_case_repo source_change
   mkdir -p "$CASE_REPO/src"
   printf 'int main() {}\n' > "$CASE_REPO/src/main.cpp"
   commit_case "source change"
-  run_classifier push "$BASE_SHA" "$HEAD_SHA"
+  run_classifier push "$BASE_SHA" "$HEAD_SHA" main
   assert_classification source-change false true non-documentation-files
 
   new_case_repo mixed_change
@@ -145,15 +150,51 @@ main() {
   printf '# guide\n' > "$CASE_REPO/docs/guide.md"
   printf 'test\n' > "$CASE_REPO/tests/input.txt"
   commit_case "mixed change"
-  run_classifier push "$BASE_SHA" "$HEAD_SHA"
+  run_classifier push "$BASE_SHA" "$HEAD_SHA" main
   assert_classification mixed-change false true non-documentation-files
+
+  new_case_repo mixed_type_change
+  mkdir -p "$CASE_REPO/docs" "$CASE_REPO/src"
+  printf '# guide\n' > "$CASE_REPO/docs/guide.md"
+  printf 'build input\n' > "$CASE_REPO/src/build-input.txt"
+  commit_case "add type-change inputs"
+  BASE_SHA=$HEAD_SHA
+  rm -- "$CASE_REPO/src/build-input.txt"
+  ln -s ../docs/guide.md "$CASE_REPO/src/build-input.txt"
+  printf '# updated guide\n' > "$CASE_REPO/docs/guide.md"
+  commit_case "documentation and source type change"
+  git -C "$CASE_REPO" diff --no-renames --name-status \
+    "$BASE_SHA" "$HEAD_SHA" |
+    grep -Fqx $'T\tsrc/build-input.txt' ||
+    fail "mixed-type-change did not create a Git T status"
+  run_classifier push "$BASE_SHA" "$HEAD_SHA" main
+  assert_classification mixed-type-change false true non-documentation-files
+  grep -Fqx 'src/build-input.txt' "$CASE_ARTIFACT_DIR/changed-files.txt" ||
+    fail "mixed-type-change omitted the type-changed source path"
 
   new_case_repo workflow_change
   mkdir -p "$CASE_REPO/.github/workflows"
   printf 'name: test\n' > "$CASE_REPO/.github/workflows/test.yml"
   commit_case "workflow change"
-  run_classifier push "$BASE_SHA" "$HEAD_SHA"
+  run_classifier push "$BASE_SHA" "$HEAD_SHA" main
   assert_classification workflow-change false true non-documentation-files
+
+  new_case_repo ci_branch_second_push
+  mkdir -p "$CASE_REPO/src"
+  printf 'first push\n' > "$CASE_REPO/src/first-push.cpp"
+  commit_case "first CI branch push changes source"
+  BASE_SHA=$HEAD_SHA
+  mkdir -p "$CASE_REPO/docs"
+  printf '# second push\n' > "$CASE_REPO/docs/second-push.md"
+  commit_case "second CI branch push changes only docs"
+  mapfile -t second_push_paths < <(
+    git -C "$CASE_REPO" diff --no-renames --name-only "$BASE_SHA" "$HEAD_SHA"
+  )
+  ((${#second_push_paths[@]} == 1)) &&
+    [[ "${second_push_paths[0]}" == docs/second-push.md ]] ||
+    fail "ci-branch-second-push fixture is not documentation-only"
+  run_classifier push "$BASE_SHA" "$HEAD_SHA" CI/repeated-push
+  assert_classification ci-branch-second-push false true ci-branch-push
 
   new_case_repo renamed_source
   mkdir -p "$CASE_REPO/src"
@@ -163,7 +204,7 @@ main() {
   mkdir -p "$CASE_REPO/docs"
   git -C "$CASE_REPO" mv src/value.cpp docs/value.cpp
   commit_case "rename source into docs"
-  run_classifier push "$BASE_SHA" "$HEAD_SHA"
+  run_classifier push "$BASE_SHA" "$HEAD_SHA" main
   assert_classification renamed-source false true non-documentation-files
   grep -Fqx 'src/value.cpp' "$CASE_ARTIFACT_DIR/non-documentation-files.txt" ||
     fail "renamed-source did not expose the deleted source path"
@@ -175,7 +216,7 @@ main() {
   BASE_SHA=$HEAD_SHA
   rm -- "$CASE_REPO/plugins/provider.cpp"
   commit_case "delete plugin"
-  run_classifier push "$BASE_SHA" "$HEAD_SHA"
+  run_classifier push "$BASE_SHA" "$HEAD_SHA" main
   assert_classification deleted-source false true non-documentation-files
 
   new_case_repo pull_request_merge_base
@@ -197,19 +238,26 @@ main() {
   mkdir -p "$CASE_REPO/docs"
   printf '# new branch\n' > "$CASE_REPO/docs/new-branch.md"
   commit_case "new branch docs"
-  run_classifier push 0000000000000000000000000000000000000000 "$HEAD_SHA"
+  run_classifier push 0000000000000000000000000000000000000000 \
+    "$HEAD_SHA" main
   assert_classification zero-before false true zero-sha
 
   new_case_repo zero_after
-  run_classifier push "$BASE_SHA" 0000000000000000000000000000000000000000
+  run_classifier push "$BASE_SHA" \
+    0000000000000000000000000000000000000000 main
   assert_classification zero-after false true zero-sha
 
   new_case_repo missing_before
-  run_classifier push '' "$HEAD_SHA"
+  run_classifier push '' "$HEAD_SHA" main
   assert_classification missing-before false true missing-or-invalid-sha
 
+  new_case_repo missing_push_branch
+  run_classifier push "$BASE_SHA" "$HEAD_SHA" ''
+  assert_classification missing-push-branch false true \
+    missing-or-invalid-branch
+
   new_case_repo unavailable_commit
-  run_classifier push "$missing_sha" "$HEAD_SHA"
+  run_classifier push "$missing_sha" "$HEAD_SHA" main
   assert_classification unavailable-commit false true commit-unavailable
 
   new_case_repo manual_dispatch
@@ -217,7 +265,7 @@ main() {
   assert_classification workflow-dispatch false true workflow-dispatch
 
   new_case_repo empty_change_set
-  run_classifier push "$BASE_SHA" "$BASE_SHA"
+  run_classifier push "$BASE_SHA" "$BASE_SHA" main
   assert_classification empty-change-set false true empty-change-set
 
   new_case_repo shallow_repository
@@ -228,7 +276,7 @@ main() {
   CASE_REPO="$TEST_ROOT/shallow_repository/clone"
   git clone -q --depth 1 "file://$shallow_source" "$CASE_REPO"
   CASE_ARTIFACT_DIR="$TEST_ROOT/shallow_repository/shallow-artifacts"
-  run_classifier push "$BASE_SHA" "$HEAD_SHA"
+  run_classifier push "$BASE_SHA" "$HEAD_SHA" main
   assert_classification shallow-repository false true shallow-repository
 
   printf 'All %d change-classification cases passed.\n' "$pass_count"

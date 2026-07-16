@@ -2,33 +2,49 @@
 
 set -Eeuo pipefail
 
+# @file ci_image_changed.sh
+# @brief Detect whether the current comparison changes a maintained CI image input.
+# @note CI workflows provide the exact pull-request base SHA after fetching it
+#   from the base repository. Local callers may use the documented fallbacks.
+
 SCRIPT_DIR=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)
 # shellcheck source=ci/scripts/common.sh
 source "$SCRIPT_DIR/common.sh"
 
 cd "$REPO_ROOT"
 
+# @brief Check whether a supplied object ID is Git's all-zero sentinel.
+# @param $1 Candidate object ID.
+# @return Zero only for a nonempty string consisting entirely of zeroes.
+# @throws Nothing; invalid input returns nonzero.
+# @note GitHub uses this sentinel for pushes without a usable before commit.
 is_zero_sha() {
   local value=${1:-}
   [[ -n "$value" && "$value" =~ ^0+$ ]]
 }
 
+# @brief List every changed path for CI image input detection.
+# @return Git's diff status for the first usable comparison.
+# @throws Nothing; Git failures propagate through the returned status.
+# @note The explicit base is preferred, followed by origin/main, HEAD~1, and the
+#   working tree. Rename and status filtering stay disabled so deletions, type
+#   changes, and unknown statuses cannot hide an image input path.
 changed_files() {
   local base=${CI_IMAGE_BASE_REF:-${CI_BASE_REF:-}}
   if [[ -n "$base" ]] && ! is_zero_sha "$base" &&
     git rev-parse --verify "$base^{commit}" >/dev/null 2>&1; then
-    git diff --name-only --diff-filter=ACMRD "$base"...HEAD
+    git diff --no-renames --name-only "$base"...HEAD
     return
   fi
   if git rev-parse --verify origin/main >/dev/null 2>&1; then
-    git diff --name-only --diff-filter=ACMRD origin/main...HEAD
+    git diff --no-renames --name-only origin/main...HEAD
     return
   fi
   if git rev-parse --verify HEAD~1 >/dev/null 2>&1; then
-    git diff --name-only --diff-filter=ACMRD HEAD~1...HEAD
+    git diff --no-renames --name-only HEAD~1...HEAD
     return
   fi
-  git diff --name-only --diff-filter=ACMRD HEAD
+  git diff --no-renames --name-only HEAD
 }
 
 mapfile -t changed_paths < <(changed_files | sort -u)

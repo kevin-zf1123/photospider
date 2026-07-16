@@ -39,17 +39,19 @@ diff_base_ref() {
   return 1
 }
 
-# @brief List added, copied, modified, or renamed paths for static checking.
+# @brief List every nondeleted changed path for static checking.
 # @return Git's diff status.
 # @throws Nothing; Git failures propagate to the caller.
-# @note A working-tree diff is used only when no commit baseline is available.
+# @note Deletions alone are excluded because formatters require a current file;
+#   type changes and uncommon statuses remain visible. A working-tree diff is
+#   used only when no commit baseline is available.
 changed_files() {
   local base
   if base=$(diff_base_ref); then
-    git diff --name-only --diff-filter=ACMR "$base"...HEAD
+    git diff --no-renames --name-only --diff-filter=d "$base"...HEAD
     return
   fi
-  git diff --name-only --diff-filter=ACMR HEAD
+  git diff --no-renames --name-only --diff-filter=d HEAD
 }
 
 mapfile -t cpp_files < <(

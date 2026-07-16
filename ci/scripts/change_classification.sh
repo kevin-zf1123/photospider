@@ -5,7 +5,8 @@ set -Eeuo pipefail
 # @file change_classification.sh
 # @brief Classify exact GitHub event revisions for documentation-only CI routing.
 # @note CI_CHANGE_EVENT, CI_CHANGE_BASE_SHA, and CI_CHANGE_HEAD_SHA are required
-#   for automatic events. Every uncertainty emits run_integration=true.
+#   for automatic events. CI_CHANGE_BRANCH is additionally required for push
+#   events. Every uncertainty emits run_integration=true.
 
 SCRIPT_DIR=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)
 REPO_ROOT=${CI_CHANGE_REPO_ROOT:-$(cd -- "$SCRIPT_DIR/../.." && pwd)}
@@ -184,9 +185,11 @@ resolve_diff_base() {
 # @brief Classify event payload commits without guessing a fallback revision.
 # @return Zero after recording a docs-only or full-integration route.
 # @throws Nothing; artifact write failures terminate through set -e.
-# @note Manual dispatch and every Git uncertainty deliberately require full CI.
+# @note Manual dispatch, CI-branch pushes, and every Git uncertainty deliberately
+#   require full CI.
 main() {
   local event_name=${CI_CHANGE_EVENT:-}
+  local branch_name=${CI_CHANGE_BRANCH:-}
   local base_sha=${CI_CHANGE_BASE_SHA:-}
   local head_sha=${CI_CHANGE_HEAD_SHA:-}
   local shallow_state
@@ -209,6 +212,16 @@ main() {
       return
       ;;
   esac
+  if [[ "$event_name" == push ]]; then
+    if [[ -z "$branch_name" || "$branch_name" == *$'\n'* ]]; then
+      require_full_integration missing-or-invalid-branch
+      return
+    fi
+    if [[ "$branch_name" == CI/* ]]; then
+      require_full_integration ci-branch-push
+      return
+    fi
+  fi
   if ! is_explicit_sha "$base_sha" || ! is_explicit_sha "$head_sha"; then
     require_full_integration missing-or-invalid-sha
     return
@@ -239,7 +252,7 @@ main() {
     return
   fi
   if ! git -C "$REPO_ROOT" diff --no-renames --name-only -z \
-    --diff-filter=ACMRD "$diff_base" "$head_sha" > "$changed_path_file"; then
+    "$diff_base" "$head_sha" > "$changed_path_file"; then
     require_full_integration changed-path-detection-failed
     return
   fi

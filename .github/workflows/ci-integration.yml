@@ -55,32 +55,34 @@ jobs:
             exit 0
           fi
 
-          diff_base=origin/main
+          diff_candidate_base=origin/main
           diff_head=HEAD
           if [[ "$CI_EVENT_NAME" == pull_request ||
             "$CI_EVENT_NAME" == pull_request_target ]]; then
             git fetch --no-tags --no-recurse-submodules \
               "https://github.com/${CI_BASE_REPOSITORY}.git" \
               "+refs/heads/${CI_BASE_BRANCH}:refs/remotes/photospider-base/${CI_BASE_BRANCH}"
-            git rev-parse --verify "$CI_BASE_SHA^{commit}" >/dev/null
-            git rev-parse --verify "$CI_HEAD_SHA^{commit}" >/dev/null
-            if ! git merge-base --all "$CI_BASE_SHA" "$CI_HEAD_SHA" \
-              > "$CI_ARTIFACT_DIR/merge-bases.txt"; then
-              echo "Protected-path merge-base detection failed." >&2
-              exit 1
-            fi
-            mapfile -t merge_bases < "$CI_ARTIFACT_DIR/merge-bases.txt"
-            if ((${#merge_bases[@]} != 1)); then
-              echo "Protected-path comparison requires exactly one merge base." >&2
-              exit 1
-            fi
-            diff_base=${merge_bases[0]}
+            diff_candidate_base=$CI_BASE_SHA
             diff_head=$CI_HEAD_SHA
           else
             git fetch --no-tags --prune origin main
           fi
 
-          git diff --no-renames --name-only --diff-filter=ACMRD \
+          git rev-parse --verify "$diff_candidate_base^{commit}" >/dev/null
+          git rev-parse --verify "$diff_head^{commit}" >/dev/null
+          if ! git merge-base --all "$diff_candidate_base" "$diff_head" \
+            > "$CI_ARTIFACT_DIR/merge-bases.txt"; then
+            echo "Protected-path merge-base detection failed." >&2
+            exit 1
+          fi
+          mapfile -t merge_bases < "$CI_ARTIFACT_DIR/merge-bases.txt"
+          if ((${#merge_bases[@]} != 1)); then
+            echo "Protected-path comparison requires exactly one merge base." >&2
+            exit 1
+          fi
+          diff_base=${merge_bases[0]}
+
+          git diff --no-renames --name-only \
             "$diff_base" "$diff_head" |
             sort -u |
             tee "$CI_ARTIFACT_DIR/changed-files.txt"
@@ -141,6 +143,7 @@ jobs:
         id: classify
         env:
           CI_CHANGE_EVENT: ${{ github.event_name }}
+          CI_CHANGE_BRANCH: ${{ github.ref_name }}
           CI_CHANGE_BASE_SHA: ${{ (github.event_name == 'pull_request' || github.event_name == 'pull_request_target') && github.event.pull_request.base.sha || github.event.before }}
           CI_CHANGE_HEAD_SHA: ${{ (github.event_name == 'pull_request' || github.event_name == 'pull_request_target') && github.event.pull_request.head.sha || github.event_name == 'push' && github.event.after || github.sha }}
           CI_ARTIFACT_DIR: ${{ github.workspace }}/CI-results/change-classification
@@ -170,10 +173,27 @@ jobs:
           fetch-depth: 0
           submodules: recursive
           ref: ${{ (github.event_name == 'pull_request' || github.event_name == 'pull_request_target') && github.event.pull_request.head.sha || github.sha }}
+      - name: Fetch pull request base history
+        if: github.event_name == 'pull_request' || github.event_name == 'pull_request_target'
+        env:
+          CI_BASE_REPOSITORY: ${{ github.repository }}
+          CI_BASE_BRANCH: ${{ github.base_ref }}
+          CI_BASE_SHA: ${{ github.event.pull_request.base.sha }}
+        run: |
+          set -Eeuo pipefail
+          git fetch --no-tags --no-recurse-submodules \
+            "https://github.com/${CI_BASE_REPOSITORY}.git" \
+            "+refs/heads/${CI_BASE_BRANCH}:refs/remotes/photospider-base/${CI_BASE_BRANCH}"
+          git rev-parse --verify "$CI_BASE_SHA^{commit}" >/dev/null
+      - name: Fetch CI branch main history
+        if: github.event_name == 'push' && startsWith(github.ref_name, 'CI/')
+        run: |
+          set -Eeuo pipefail
+          git fetch --no-tags --prune origin main
       - name: Detect CI image input changes
         id: detect
         env:
-          CI_IMAGE_BASE_REF: ${{ (github.event_name == 'pull_request' || github.event_name == 'pull_request_target') && format('origin/{0}', github.base_ref) || github.event.before }}
+          CI_IMAGE_BASE_REF: ${{ (github.event_name == 'pull_request' || github.event_name == 'pull_request_target') && github.event.pull_request.base.sha || (github.event_name == 'push' && startsWith(github.ref_name, 'CI/')) && 'origin/main' || github.event.before }}
           CI_ARTIFACT_DIR: ${{ github.workspace }}/CI-results/ci-image-change
         run: bash ci/scripts/ci_image_changed.sh
       - name: Upload CI image change logs
@@ -664,39 +684,39 @@ jobs:
         run: |
           set -Eeuo pipefail
 
-          # @brief Require one upstream job to have an exact conclusion.
-          # @param $1 Stable upstream job label.
-          # @param $2 Actual needs.<job>.result value.
-          # @param $3 Expected result value.
+          # @brief Require one named assertion value to match exactly.
+          # @param $1 Stable assertion label used only for diagnostics.
+          # @param $2 Actual value being asserted.
+          # @param $3 Expected value.
           # @return Zero for an exact match, otherwise one with a diagnostic.
           # @throws Nothing; mismatches return nonzero to the gate.
-          # @note This makes intentional skips distinct from dependency failures.
-          require_result() {
-            local job_name=$1
+          # @note Labels may identify job conclusions or routed output values.
+          require_value() {
+            local assertion_label=$1
             local actual=$2
             local expected=$3
             if [[ "$actual" != "$expected" ]]; then
-              echo "$job_name concluded '$actual'; expected '$expected'." >&2
+              echo "$assertion_label was '$actual'; expected '$expected'." >&2
               return 1
             fi
           }
 
           # @brief Require every normal integration shard to be intentionally skipped.
           # @return Zero only when all build, CTest, and integration jobs are skipped.
-          # @throws Nothing; mismatches return nonzero through require_result.
+          # @throws Nothing; mismatches return nonzero through require_value.
           # @note Used for documentation-only and local-image routing assertions.
           require_normal_shards_skipped() {
-            require_result integration-plan "$PLAN_RESULT" skipped
-            require_result build-integrity-default "$BUILD_DEFAULT_RESULT" skipped
-            require_result build-integrity-ipc-disabled "$BUILD_IPC_RESULT" skipped
-            require_result full-ctest "$FULL_CTEST_RESULT" skipped
-            require_result static-product-consumer-smoke \
+            require_value integration-plan "$PLAN_RESULT" skipped
+            require_value build-integrity-default "$BUILD_DEFAULT_RESULT" skipped
+            require_value build-integrity-ipc-disabled "$BUILD_IPC_RESULT" skipped
+            require_value full-ctest "$FULL_CTEST_RESULT" skipped
+            require_value static-product-consumer-smoke \
               "$STATIC_SMOKE_RESULT" skipped
-            require_result ipc-disabled-install-smoke "$IPC_SMOKE_RESULT" skipped
-            require_result scripted-cli "$SCRIPTED_CLI_RESULT" skipped
-            require_result propagation-script "$PROPAGATION_RESULT" skipped
-            require_result plugin-load "$PLUGIN_LOAD_RESULT" skipped
-            require_result scheduler-repeat "$SCHEDULER_REPEAT_RESULT" skipped
+            require_value ipc-disabled-install-smoke "$IPC_SMOKE_RESULT" skipped
+            require_value scripted-cli "$SCRIPTED_CLI_RESULT" skipped
+            require_value propagation-script "$PROPAGATION_RESULT" skipped
+            require_value plugin-load "$PLUGIN_LOAD_RESULT" skipped
+            require_value scheduler-repeat "$SCHEDULER_REPEAT_RESULT" skipped
           }
 
           if [[ "$CI_EVENT_NAME" == pull_request_target &&
@@ -706,14 +726,14 @@ jobs:
             exit 0
           fi
 
-          require_result protected-ci-paths "$PROTECTED_RESULT" success
-          require_result change-classification "$CLASSIFICATION_RESULT" success
+          require_value protected-ci-paths "$PROTECTED_RESULT" success
+          require_value change-classification "$CLASSIFICATION_RESULT" success
 
           if [[ "$DOCS_ONLY" == true ]]; then
-            require_result run-integration "$RUN_INTEGRATION" false
-            require_result ci-image-change "$IMAGE_CHANGE_RESULT" skipped
+            require_value RUN_INTEGRATION "$RUN_INTEGRATION" false
+            require_value ci-image-change "$IMAGE_CHANGE_RESULT" skipped
             require_normal_shards_skipped
-            require_result local-image-integration "$LOCAL_IMAGE_RESULT" skipped
+            require_value local-image-integration "$LOCAL_IMAGE_RESULT" skipped
             {
               echo "Documentation-only change detected ($CLASSIFICATION_REASON)."
               echo "Compilation, CTest, and integration shards were intentionally skipped; healthcheck remains required."
@@ -721,34 +741,34 @@ jobs:
             exit 0
           fi
 
-          require_result docs-only "$DOCS_ONLY" false
-          require_result run-integration "$RUN_INTEGRATION" true
-          require_result ci-image-change "$IMAGE_CHANGE_RESULT" success
+          require_value DOCS_ONLY "$DOCS_ONLY" false
+          require_value RUN_INTEGRATION "$RUN_INTEGRATION" true
+          require_value ci-image-change "$IMAGE_CHANGE_RESULT" success
           case "$IMAGE_CHANGED" in
             true)
               require_normal_shards_skipped
-              require_result local-image-integration "$LOCAL_IMAGE_RESULT" success
+              require_value local-image-integration "$LOCAL_IMAGE_RESULT" success
               echo "Full integration passed in the locally built CI image." |
                 tee -a "$GITHUB_STEP_SUMMARY"
               ;;
             false)
-              require_result local-image-integration "$LOCAL_IMAGE_RESULT" skipped
-              require_result integration-plan "$PLAN_RESULT" success
-              require_result build-integrity-default \
+              require_value local-image-integration "$LOCAL_IMAGE_RESULT" skipped
+              require_value integration-plan "$PLAN_RESULT" success
+              require_value build-integrity-default \
                 "$BUILD_DEFAULT_RESULT" success
-              require_result full-ctest "$FULL_CTEST_RESULT" success
-              require_result scripted-cli "$SCRIPTED_CLI_RESULT" success
-              require_result propagation-script "$PROPAGATION_RESULT" success
-              require_result plugin-load "$PLUGIN_LOAD_RESULT" success
-              require_result scheduler-repeat "$SCHEDULER_REPEAT_RESULT" success
+              require_value full-ctest "$FULL_CTEST_RESULT" success
+              require_value scripted-cli "$SCRIPTED_CLI_RESULT" success
+              require_value propagation-script "$PROPAGATION_RESULT" success
+              require_value plugin-load "$PLUGIN_LOAD_RESULT" success
+              require_value scheduler-repeat "$SCHEDULER_REPEAT_RESULT" success
 
               case "$HAS_STATIC_SMOKE" in
                 true)
-                  require_result static-product-consumer-smoke \
+                  require_value static-product-consumer-smoke \
                     "$STATIC_SMOKE_RESULT" success
                   ;;
                 false)
-                  require_result static-product-consumer-smoke \
+                  require_value static-product-consumer-smoke \
                     "$STATIC_SMOKE_RESULT" skipped
                   ;;
                 *)
@@ -758,15 +778,15 @@ jobs:
               esac
               case "$HAS_IPC_SMOKE" in
                 true)
-                  require_result build-integrity-ipc-disabled \
+                  require_value build-integrity-ipc-disabled \
                     "$BUILD_IPC_RESULT" success
-                  require_result ipc-disabled-install-smoke \
+                  require_value ipc-disabled-install-smoke \
                     "$IPC_SMOKE_RESULT" success
                   ;;
                 false)
-                  require_result build-integrity-ipc-disabled \
+                  require_value build-integrity-ipc-disabled \
                     "$BUILD_IPC_RESULT" skipped
-                  require_result ipc-disabled-install-smoke \
+                  require_value ipc-disabled-install-smoke \
                     "$IPC_SMOKE_RESULT" skipped
                   ;;
                 *)
