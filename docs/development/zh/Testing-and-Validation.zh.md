@@ -116,6 +116,14 @@ python3 tests/verification/codebase_structure/scheduler_doxygen_ast.py \
   --out /tmp/photospider-scheduler-doxygen
 ```
 
+CLI/Host 审计将
+`apps/graph_cli/src/cli_config.cpp::apply_cli_scheduler_defaults` 视为 scheduler
+默认值的 canonical 定义，并在该 translation unit 中验证其完整 Doxygen。工具会另外审计
+`run_graph_cli` 及其资源耗尽策略。对于 `ConfigEditor::SyncUiStateToModel`，两个解析链都必须
+重新抛出 `std::bad_alloc`。Scheduler worker 校验会单独处理 `std::invalid_argument`，而
+history-size 的 `std::stoi` 只通过一个 broad `catch (...)` 忽略其他错误；因此 catalog 对该函数
+只期望一个 broad catch，且其前面必须有 `std::bad_alloc` handler 保护。
+
 这些文件可以留在 primary repository，因为本文定义了它们的长期手工职责；它们必须始终不进入
 CTest 与 GitHub CI。其 `--out` 目录是仓库外、可丢弃的临时工作目录，不得成为长期 result tree。
 Issue 专属 replay、provenance、helper 和 output artifact 既不得进入 primary
