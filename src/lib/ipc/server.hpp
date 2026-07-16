@@ -1,0 +1,180 @@
+#pragma once
+
+#include <memory>
+#include <string>
+
+#include "ipc/request_router.hpp"
+#include "photospider/host/host.hpp"
+#include "photospider/ipc/protocol.hpp"
+
+namespace ps::ipc::internal {
+
+struct ServerLifecycleTestDependencies;
+
+/**
+ * @brief Immutable startup options for one foreground Unix IPC server.
+ *
+ * @throws std::bad_alloc when copied path storage cannot be allocated.
+ * @note An empty socket path selects the protected per-user default.
+ */
+struct ServerOptions {
+  /** @brief Explicit absolute socket path, or empty for the per-user default.
+   */
+  std::string socket_path;
+};
+
+/**
+ * @brief Resolves the protected default per-user daemon socket path.
+ *
+ * @return Path below a valid `XDG_RUNTIME_DIR/photospider`, otherwise below a
+ *         uid-qualified platform temporary directory.
+ * @throws std::bad_alloc if path construction cannot allocate.
+ * @throws std::filesystem::filesystem_error if fallback path construction
+ *         fails.
+ * @throws std::runtime_error if the platform Unix-socket path limit cannot
+ *         contain even the uid-qualified fallback.
+ * @note The function creates no directories and never selects graph/cache
+ *       directories.
+ */
+std::string default_socket_path();
+
+/**
+ * @brief Foreground Unix listener with bounded tracked client workers.
+ *
+ * The server owns its listener and accepted descriptors, processes requests
+ * sequentially per connection, allows frame/JSON work across connections, and
+ * delegates Host serialization to `RequestRouter`. At most 32 active workers
+ * exist. Each ordinary worker applies independent fixed two-second idle,
+ * remaining-header, payload, and response-write deadlines; expiry closes only
+ * that connection through the normal joined cleanup path. All threads remain
+ * joinable. Shutdown stops admission, removes the active listener pathname
+ * while holding its lifecycle lock, then wakes blocked reads and joins tracked
+ * workers before draining router state.
+ *
+ * @throws std::bad_alloc when immutable metadata allocation fails.
+ * @throws std::runtime_error if daemon instance entropy fails.
+ * @note The server borrows one Host that must outlive `run()` and destruction.
+ */
+class Server {
+ public:
+  /**
+   * @brief Creates a server/router around one daemon-owned Host.
+   *
+   * @param host Sole Host instance borrowed by this server.
+   * @param service_version Reproducible CMake project version.
+   * @throws std::bad_alloc if metadata allocation fails.
+   * @throws std::runtime_error if instance-id entropy fails.
+   */
+  Server(Host& host, std::string service_version);
+
+  /**
+   * @brief Creates an internal server with injected router runtime policy.
+   *
+   * @param host Sole Host instance borrowed by this server.
+   * @param service_version Reproducible CMake project version.
+   * @param dependencies Complete snapshot/compute/output runtime policy.
+   * @throws std::bad_alloc if metadata or callback storage cannot allocate.
+   * @throws std::invalid_argument if an injected policy is inconsistent.
+   * @throws std::runtime_error if daemon instance entropy fails.
+   * @note This overload belongs only to the non-installed internal server
+   *       surface. The product uses the two-argument constructor; deterministic
+   *       process fixtures can inject clocks and small limits without changing
+   *       `photospiderd` flags, environment, advertised methods, or wire data.
+   */
+  Server(Host& host, std::string service_version,
+         RequestRouterRuntimeDependencies dependencies);
+
+  /**
+   * @brief Stops and releases any remaining listener/worker resources.
+   *
+   * @throws Nothing.
+   * @note Normal use returns from `run()` only after deterministic cleanup.
+   */
+  ~Server();
+
+  /**
+   * @brief Prevents copying listener, worker, and Host-session ownership.
+   *
+   * @throws Nothing because this operation is unavailable.
+   */
+  Server(const Server&) = delete;
+
+  /**
+   * @brief Prevents duplicating server runtime ownership by assignment.
+   *
+   * @return No value because this operation is unavailable.
+   * @throws Nothing because this operation is unavailable.
+   */
+  Server& operator=(const Server&) = delete;
+
+  /**
+   * @brief Runs the protected listener until the self-pipe becomes readable.
+   *
+   * @param options Explicit/default socket selection.
+   * @param stop_fd Read end of the pre-created nonblocking signal self-pipe.
+   * @return Success after normal signal shutdown, or daemon-domain startup/
+   *         accept/poll failure with an owned diagnostic.
+   * @throws std::bad_alloc if worker or response storage allocation fails
+   *         outside a containable connection boundary.
+   * @throws std::filesystem::filesystem_error if default socket path or parent
+   *         directory inspection fails unexpectedly.
+   * @throws std::runtime_error if the default path cannot fit the platform
+   *         Unix-socket address or another startup invariant fails.
+   * @throws std::system_error if a worker thread cannot be created.
+   * @note Startup advances cleanup ownership only through inactive Candidate
+   *       capture, framed pathname self-connect proof on the original accept
+   *       queue, final fixed-dirfd revalidation, and allocation-free
+   *       activation. Non-probe clients accepted during proof count against
+   *       the 32-client limit and enter ordinary admission only after router
+   *       runtime startup. Ordinary IO stage durations are private fixed
+   *       implementation policy rather than protocol, option, environment, or
+   *       public Client configuration. Shutdown stops admission. While the
+   *       lifecycle lock remains held, it identity-checks and removes its
+   *       Active pathname and closes the listener. No new pathname connection
+   *       can therefore queue while tracked clients join, compute drains,
+   *       protected output leases expire, or Host sessions close. The lock is
+   *       released only after those router stages.
+   *       The fixed parent descriptor prevents parent-path redirection, but
+   *       portable POSIX cannot make final pathname revalidation plus unlink
+   *       atomic against a same-uid replacer with directory write access.
+   *       Output-store restart cleanup occurs while the lifecycle lock is held
+   *       before admission.
+   */
+  OperationStatus run(const ServerOptions& options, int stop_fd);
+
+ private:
+  /**
+   * @brief Grants the non-installed lifecycle seam access to injected run.
+   * @param server Sole idle private server instance.
+   * @param options Explicit/default socket selection.
+   * @param stop_fd Read end of the test-owned stop pipe.
+   * @param dependencies Borrowed callbacks valid through the complete call.
+   * @return The real startup/runtime status produced by `Impl::run()`.
+   * @throws std::bad_alloc, std::filesystem::filesystem_error,
+   *         std::runtime_error, or std::system_error under the conditions
+   *         documented by `Server::run()`; the source-tree dependency may also
+   *         inject its documented path-setup filesystem exception.
+   * @note Friendship adds no installed API; the function exercises the full
+   *       listener, router, worker, shutdown, and cleanup path with real
+   *       parameters rather than a shortened test surrogate.
+   */
+  friend OperationStatus test_run_server(
+      Server& server, const ServerOptions& options, int stop_fd,
+      const ServerLifecycleTestDependencies& dependencies);
+
+  /**
+   * @brief Complete listener, worker, and socket-lifecycle state defined in the
+   *        source file.
+   *
+   * @throws Nothing for this incomplete declaration.
+   * @note `impl_` is the sole owner. Server destruction completes listener,
+   *       worker, router, and identity-checked socket cleanup before destroying
+   *       the complete implementation type.
+   */
+  class Impl;
+
+  /** @brief Sole owner of server runtime state. */
+  std::unique_ptr<Impl> impl_;
+};
+
+}  // namespace ps::ipc::internal

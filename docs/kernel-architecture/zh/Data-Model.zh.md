@@ -1,6 +1,8 @@
 # 内核数据模型
 
-本文档描述当前内核使用的图和节点数据结构。重点是算子、调度器、插件和前端应依赖的公共行为。
+本文档描述当前内核使用的图和节点数据结构。`GraphModel` 与 `Node` 是私有 backend state，
+不是共享 public contract。Frontend 使用 `ps::Host` value，operation plugin 使用 operation SDK，
+scheduler 只接收 ready-task metadata。本文说明这些边界最终操作的内部行为。
 
 ## GraphModel
 
@@ -19,13 +21,16 @@
 
 外部代码不得通过原始节点 map 改变图结构。读取使用 `node()`、`find_node()`、`node_ids()` 和受控遍历等 helper。结构变更使用 `add_node()`、`replace_node()`、`remove_node()` 和输入重连 API；这些 helper 会在返回前验证并刷新拓扑邻接。节点本地运行态缓存/状态更新可以使用 `mutable_node()`，但结构编辑仍属于模型变更 helper。
 
-内部服务通过模型边界协调锁、计时、缓存、拓扑和遍历行为。大多数前端代码应通过 `Kernel` 或 `InteractionService` 访问图状态。
+内部服务通过模型边界协调锁、计时、缓存、拓扑和遍历行为。frontend、CLI 与 TUI code
+通过 public `ps::Host` seam 访问图状态；embedded Host adapter 再委托给内部
+`InteractionService`/`Kernel` 边界。backend service 可以使用该内部边界，但不会把它暴露给
+frontend caller。
 
 对于 CLI 加载的 graph，`cache_root` 会从已加载配置中的 `cache_root_dir` 推导为
 `<cache_root_dir>/<graph_name>`；相对路径按进程当前工作目录解析。未提供 cache root 的底层
 `Kernel::load_graph` 调用继续使用 session-local fallback：`<root_dir>/<graph_name>/cache`。
 
-`GraphModel::clear()` 的目标是重置模型级运行时状态，而不只是删除节点。清理图会重置节点、拓扑邻接、计时结果、累计 IO 时间、skip-save 状态和其他单次运行状态，使 reload 行为不受陈旧元数据污染。
+`GraphModel::clear()` 会重置模型级运行时状态，而不只是删除节点。清理图会重置节点、拓扑邻接、计时结果、累计 IO 时间、skip-save 状态和其他单次运行状态，使 reload 行为不受陈旧元数据污染。
 
 ## 拓扑邻接
 
@@ -58,8 +63,6 @@
 | --- | --- | --- |
 | 图像输入 | `ImageInput` | 读取上游类图像 `NodeOutput`。 |
 | 参数输入 | `ParameterInput` | 读取上游命名数据输出，并写入运行时参数。 |
-
-旧的统一输入模型不是维护中的 schema 的一部分。
 
 ## 参数
 

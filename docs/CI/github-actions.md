@@ -54,6 +54,14 @@ The test jobs reuse those prebuilt producers rather than recompiling every confi
 
 If CI image inputs change, the workflow cannot use the previously published image and instead runs `local-image-integration` on one Docker-capable runner. After building `photospider-ci:local`, `integration_suite.sh` performs the same dynamic plan, builds each discovered profile, and runs the same full-CTest, build-smoke, CLI, propagation, plugin, and scheduler shards sequentially with their corresponding build. This fallback preserves test selection and producer configuration while accepting that a single local-image runner cannot fan out into artifact-consuming jobs.
 
+CMake 3.16 is the project's compatibility floor, not a workflow-pinned version
+for every pull request. Build logic guards policies introduced after that floor,
+while current integration exercises the fresh static package consumer on the
+supported CI toolchain. A targeted native old-version
+producer/install/consumer run is added only when a compatibility-sensitive
+change or release check needs it; the regular integration workflow does not
+lock Ubuntu or CMake to a dedicated minimum-version job.
+
 ## Scripted CLI Capability Transition
 
 `graph_cli_script_test.sh` selects the explicit-missing-source contract before
@@ -92,12 +100,22 @@ rejection unconditionally.
 
 ## Scripts
 
+CI and CTest execute only long-lived software behavior, compile, package-
+consumer, performance, concurrency, stability, error-handling, and runtime-
+boundary checks. Migration-residue scans, phase-completion checks, stale-term
+searches, Doxygen/source-quality audits, issue replay, and evidence/provenance
+orchestration are excluded. Issue-specific replay, provenance, helper, and
+output artifacts do not enter the primary repository and are not retained as
+long-lived personal-overlay content. Explicitly documented general-purpose
+manual developer tools are separate; a clean primary checkout never imports
+personal development content.
+
 - `ci/scripts/healthcheck.sh`: runs `git diff --check`, `clang-format --dry-run --Werror`, and `cpplint` on changed C++ files.
 - `ci/scripts/ci_image_changed.sh`: detects whether the current diff changes CI image inputs.
 - `ci/scripts/integration_plan.sh`: configures a small testing-enabled planning tree, discovers the two exact build-smoke test names with `ctest -N`, validates registration against the runner files, and emits smoke/build capability flags.
 - `ci/scripts/integration_suite.sh`: applies the dynamic plan and runs the resulting integration shards sequentially for the local-image fallback path.
 - `ci/scripts/build_integrity.sh`: builds the profile selected by `CI_BUILD_PROFILE`. `default` builds the required targets and the complete tree before CTest discovery; `ipc-disabled` sets `BUILD_TESTING=OFF` and `PHOTOSPIDER_BUILD_IPC=OFF`, validates the cache, and builds only the `photospider` producer target.
-- `ci/scripts/ctest_full.sh`: reuses or builds the default producer and runs CTest, excluding `SplitComputeServiceRuntimeTrace` and the two separately sharded build smoke tests by default.
+- `ci/scripts/ctest_full.sh`: reuses or builds the default producer and runs CTest, excluding the two separately sharded build smoke tests by default. Its protected script also retains a no-op exclusion for the removed `SplitComputeServiceRuntimeTrace`; a follow-up `CI/**` branch from main must remove that token after the source-layout change lands.
 - `ci/scripts/build_smoke_test.sh`: runs one separately selected build smoke test from a reusable producer; set `SMOKE_TEST` to `static-product-consumer` or `ipc-disabled-install`.
 - `ci/scripts/graph_cli_script_test.sh`: runs isolated positive, explicit-missing-source, and invalid-target REPL checks using the pre-execution Graph document capability marker described above.
 - `ci/scripts/propagation_script_test.sh`: builds `test_propagation` and runs `tiles all` on linear and complex propagation graphs.
@@ -166,6 +184,12 @@ docker build -t photospider-ci:local -f Dockerfile.ci \
 ```
 
 Use `ubuntu-ports` for local arm64 builds. Use `http://mirrors.tuna.tsinghua.edu.cn/ubuntu/` for amd64.
+
+The local Docker commands above reproduce the maintained current-toolchain CI
+paths. They are not a claim that CMake 3.16 itself ran. If targeted old-version
+evidence is needed and no natively compatible executable exists locally, record
+that limitation rather than using architecture emulation to manufacture a
+minimum-version PASS.
 
 ## Local Artifact Download
 

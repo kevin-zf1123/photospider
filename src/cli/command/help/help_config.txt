@@ -1,8 +1,0 @@
-config
-
-Open the interactive configuration editor.
-
-Editable scheduler fields:
-  scheduler_hp_type       Default HP scheduler for graphs loaded after config is applied
-  scheduler_rt_type       Default RT scheduler for graphs loaded after config is applied
-  scheduler_worker_count  CPU worker count; 0 means auto-detect

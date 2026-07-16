@@ -1,8 +1,9 @@
 # ImageBuffer Memory Contract
 
-`ImageBuffer` is a public kernel contract. Operators, schedulers, plugins,
-adapters, cache code, and debugging tools may depend on the fields and
-invariants in this document.
+`ImageBuffer` is a public operation and Host value contract. Operations,
+plugins, adapters, cache code, Host implementations, and debugging tools may
+depend on the fields and invariants in this document. Scheduler contracts do
+not inspect image payloads.
 
 ## Structure
 
@@ -45,11 +46,26 @@ address(row y) % 64 == 0
 Therefore, kernel-owned allocations must pad `step` so that row starts stay
 aligned even when packed row size is not a multiple of 64.
 
+These alignment and mutability rules apply specifically to CPU buffers
+allocated and owned by the kernel. `ImageBuffer::data` is a shared lifetime
+handle, not a universal writable-memory promise. Producers may return a
+read-only CPU snapshot and must document that boundary.
+
+The installed IPC Host's `compute_and_get_image` result is such a snapshot. It
+validates a same-user private artifact while its delivery lease protects
+result-to-open, then maps the exact tight-row file with
+`PROT_READ|MAP_PRIVATE`. The mapping base has the platform's page alignment,
+but `step` is the packed row width, so later row starts are not promised to be
+64-byte aligned. Copies of the descriptor share the mapping; the final
+reference unmaps and closes its retained descriptor exactly once. Writing
+through this mapping is outside the contract and may fault. A consumer that
+needs writable storage or kernel-owned per-row alignment must allocate an
+appropriate CPU buffer and copy rows using `step`.
+
 ## ARM Mac Alignment
 
-64-byte row alignment is the portable minimum. ARM Mac high-performance paths
-may need or benefit from 128-byte alignment. That is an optimization target and
-should be benchmarked before becoming a stricter default.
+64-byte row alignment is the current portable minimum. The contract makes no
+128-byte guarantee on ARM Mac or any other platform.
 
 ## Stride-Aware Access
 
@@ -85,11 +101,12 @@ object stored in `context` is backend-specific.
 
 ## Metal Buffers
 
-The Metal buffer adapter is implemented in `include/adapter/buffer_adapter_metal.hpp`
-and `src/adapter/buffer_adapter_metal.mm`, but it is not currently enabled in
+The Metal buffer adapter is implemented in
+`src/lib/adapters/metal/buffer_adapter_metal.{hpp,mm}`, but it is not currently enabled in
 the core library build and is not connected to the production compute path.
 `CMakeLists.txt` builds the current Metal operation path separately through
-`src/metal/perlin_noise_metal.mm` and `custom_ops/metal_ops_loader.cpp`; that op
+`plugins/ops/metal/perlin_noise_metal.mm` and
+`plugins/ops/metal/metal_ops_loader.cpp`; that op
 path registers `image_generator:perlin_noise_metal` when the loader directory is
 manually present in `plugin_dirs`.
 
@@ -101,16 +118,39 @@ Implemented adapter behavior:
 - Download returns a new CPU `ImageBuffer`.
 
 Plugin, scheduler, and core compute code must not treat the Metal buffer adapter
-as a production runtime boundary until a future change wires it into the build,
-documents the call chain, and records validation evidence. Direct interpretation
-of `context` remains backend-specific and should not become a broader contract
-without benchmark evidence.
+as a production runtime boundary. The current production Metal operation path
+owns its backend-specific objects independently. Direct interpretation of
+`context` is backend-specific and is not a portable memory contract.
 
-## Benchmark Questions
+## Capability Boundary
 
-Before tightening Metal access policy, benchmark:
+`ImageBuffer` is the current two-dimensional image payload and operation DSO
+contract. Its channel count is not structurally limited to four, and
+`FLOAT64` is a declared scalar type, but those facts do not promise end-to-end
+support by every loader, operation, cache, or adapter.
 
-- Adapter API vs direct context access for 16x16 and 64x64 tiles.
-- Lightweight operations such as copy, add, and simple curve transforms.
-- Upload/download-heavy workloads.
-- 64-byte vs 128-byte row alignment on ARM Mac.
+This payload is not the generic graph value model. Operation results keep
+named non-image values in a separate data map; neither those values nor an
+opaque backend `context` turn `ImageBuffer` into an arbitrary payload carrier.
+Adding a general value kind, rank/shape model, descriptor, handle, or region
+requires a separate versioned design.
+
+Current limitations are explicit:
+
+- built-in operations may implement only selected 1/3/4-channel conversions or
+  assume RGBA roles;
+- some operation and image-loading paths compute in float32;
+- FP4 cannot be represented because scalar size and row addressing assume an
+  integral number of bytes per channel element;
+- rank, N-dimensional shape/strides, quantization, named channel roles, Deep
+  Image samples, and vector objects are not represented;
+- `context` cannot substitute for descriptor facts needed by planning, cache
+  keys, ROI, or synchronization.
+
+Therefore 8/16-channel images and FP64 are not advertised as complete framework
+contracts, and FP4, latent Tensor, Deep Image, and vector-scene values are not
+supported by `ImageBuffer`. The general `Value`, descriptor, handle, and region
+target is documented in `../roadmap/Kernel-Evolution.md`.
+
+The portable CPU allocation guarantee remains 64-byte row-start alignment.
+128-byte alignment is not part of the current contract.

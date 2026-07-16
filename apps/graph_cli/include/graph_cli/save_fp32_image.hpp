@@ -1,0 +1,9 @@
+// FILE: apps/graph_cli/include/graph_cli/save_fp32_image.hpp
+#pragma once
+#include <opencv2/core.hpp>
+#include <string>
+
+#include "graph_cli/cli_config.hpp"
+
+bool save_fp32_image(const cv::Mat& mat, const std::string& path,
+                     const CliConfig& config);

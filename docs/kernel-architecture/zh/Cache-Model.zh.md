@@ -1,7 +1,7 @@
 # 内核缓存模型
 
 内核在每个 `Node` 上拥有正式 HP 内存缓存，在 `RealtimeProxyGraph` 中拥有临时 RT proxy
-状态，并在图缓存根目录下拥有磁盘缓存文件。本文档定义目标缓存语义。
+状态，并在图缓存根目录下拥有磁盘缓存文件。本文档定义当前缓存语义。
 
 ## 正式缓存与临时状态
 
@@ -74,4 +74,5 @@ miss 混在一起。
 - 正式缓存的保存、加载、同步行为、后续 HP 计算和长期存储必须使用 HP 输出，不能将 RT 输出提升为权威缓存。
 - 测试应分别验证 HP graph cache 和 RT proxy graph state。
 
-`GraphInspectService` 只从 HP cache 选择 node-local 显示 metadata。RT proxy inspection 后续可以作为独立 frontend-facing view 添加，而不是把 RT state 塞回 `GraphModel`。
+`GraphInspectService` 只从 HP cache 选择 node-local 显示 metadata。当前 Host inspection surface
+不会把 RT proxy state 提升到 `GraphModel`，也不会将其作为权威 cache metadata 暴露。
