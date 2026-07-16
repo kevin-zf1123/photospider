@@ -39,7 +39,9 @@ integration workflow 会在受保护路径门禁之后运行 `change-classificat
 
 `Dockerfile.ci` 定义 GitHub Linux 测试环境。published-image healthcheck 执行 job 与 build/test integration job 会在 `ghcr.io/<owner>/<repo>/photospider-ci:latest` 中运行。protected-path、change-classification 与稳定结果门禁仍是轻量 `ubuntu-latest` job，不会 configure 或编译项目。
 
-当 pull request 或 push 修改 CI 镜像输入（`Dockerfile.ci`、`.dockerignore` 或 `.github/workflows/build-ci-image.yml`）时，healthcheck 和 integration workflow 会在当前 workflow 内构建 `photospider-ci:local`，并在该镜像中运行相同脚本。Pull-request 镜像检测会拉取 base 仓库分支、校验 event 的精确 base SHA，再从该 base 开始比较，而不依赖 fork 中可能不存在的 `origin/<base>`。`CI/**` push 会拉取 `origin/main`，从 branch merge base 开始累计检测镜像输入，因此后续纯文档 push 无法隐藏更早的镜像输入 commit。不带过滤且关闭 rename detection 的清单使用 NUL 分隔的 Git path，因此 type change 与含换行的文件名仍保持为一个精确路径。镜像检测与 healthcheck 静态范围检测会先把清单写入父 shell 可观察的文件；`git diff` 失败时，脚本会在输出任何 `changed=false` 或“No changed C++ files”摘要前非零退出。这样既避免假路由，也避免另一个 workflow 尚未发布新 `latest` 镜像时产生竞态。
+当 pull request 或 push 修改 CI 镜像输入（`Dockerfile.ci`、`.dockerignore` 或 `.github/workflows/build-ci-image.yml`）时，healthcheck 和 integration workflow 会在当前 workflow 内构建 `photospider-ci:local`，并在该镜像中运行相同脚本。Pull-request 镜像检测会拉取 base 仓库分支、校验 event 的精确 base SHA，再从该 base 开始比较，而不依赖 fork 中可能不存在的 `origin/<base>`。Local-image healthcheck job 会在构建 pull-request head 的 Dockerfile 或运行挂载的 workspace 前，独立从 base-repository URL 拉取目标分支，并校验同一个精确 base SHA。因此，即使 fork checkout 的 `origin` 不包含 base tip，容器也能解析 `CI_BASE_REF`。`CI/**` push 会拉取 `origin/main`，从 branch merge base 开始累计检测镜像输入，因此后续纯文档 push 无法隐藏更早的镜像输入 commit。
+
+镜像输入 detector 使用关闭 rename detection 且不带任何 Git status filter 的清单；删除、type change 与少见 status 都保持可见。Healthcheck 静态范围清单同样关闭 rename detection，但会有意使用 `--diff-filter=d`：由于 formatter 与 linter 要求当前文件，删除路径会被排除，而 type change 与其他少见的非删除 status 仍保持可见。两份清单都使用 NUL 分隔的 Git path，因此含换行的文件名仍保持为一个精确路径，并且都会先把清单写入父 shell 可观察的文件。`git diff` 失败时，脚本会在输出任何 `changed=false` 或“No changed C++ files”摘要前非零退出。这样既避免假路由，也避免另一个 workflow 尚未发布新 `latest` 镜像时产生竞态。
 
 镜像包含 CMake、C++ 工具链、OpenCV、yaml-cpp、CURL、OpenSSL、GTest、
 nlohmann-json、Python、cpplint 和 clang-format。Formatter 通过 PyPI wheel 安装并固定为
@@ -108,7 +110,7 @@ helper 和 output artifact 不得进入 primary repository，也不得作为 per
 - `ci/scripts/healthcheck.sh`：建立 NUL 分隔的 changed-path artifact，运行 `git diff --check`、长期 change-classification 与 CI-routing 回归，并对每个未删除的 changed C++ 路径运行 `clang-format --dry-run --Werror` 与 `cpplint`；清单失败时会在输出无 C++ 摘要前终止。
 - `ci/scripts/change_classification.sh`：把 event 的精确 revision 分类为纯文档或完整 integration，记录所有改动路径与非文档路径，并在 Git 状态不确定时 fail closed。
 - `ci/scripts/change_classification_test.sh`：覆盖文档、源码、混合、type change、workflow、重命名、删除、重复 `CI/**` push、pull-request merge-base、branch 或 revision 缺失、全零/不可达 revision、手动触发、空 diff 与浅克隆场景，验证长期路由契约。
-- `ci/scripts/ci_routing_test.sh`：通过稳定门禁 run block 与隔离 Git fixture 覆盖同仓库/fork/缺失 repository identity、checkout 前 fork 拒绝、精确/累积 image base、空比较、含换行路径，以及两个 detector 的 changed-path 失败传播。
+- `ci/scripts/ci_routing_test.sh`：通过稳定门禁 run block 与隔离 Git fixture 覆盖同仓库/fork/缺失 repository identity、checkout 前 fork 拒绝、local-image healthcheck job 内限定的精确 base 拉取/校验顺序、精确/累积 image base、空比较、含换行路径，以及两个 detector 的 changed-path 失败传播。
 - `ci/scripts/ci_image_changed.sh`：检测当前 NUL 分隔且不带 status 过滤的 diff 是否修改 CI 镜像输入；workflow 会向它提供已拉取并验证的 pull-request 精确 base SHA，diff 失败时不会输出路由。
 - `ci/scripts/integration_plan.sh`：配置一个启用测试的小型规划 build tree，使用 `ctest -N` 发现两个精确 build-smoke 测试名，对照 runner 文件校验注册，并输出 smoke/build 能力标记。
 - `ci/scripts/integration_suite.sh`：应用动态规划，并为本地镜像 fallback 路径顺序运行所得 integration 分片。

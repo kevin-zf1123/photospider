@@ -437,12 +437,19 @@ Published-image healthcheck execution and build/test integration jobs run in
 `ghcr.io/<owner>/<repo>/photospider-ci:latest`; lightweight routing and result
 gates remain on `ubuntu-latest`. If a change modifies an image input, the
 workflow builds `photospider-ci:local` and runs the same repository scripts in
-that image so validation does not race image publication.
+that image so validation does not race image publication. Before a pull-request
+local-image healthcheck builds the head Dockerfile or executes the mounted
+workspace, its job fetches the target branch from the base-repository URL and
+verifies the event's exact base SHA, ensuring the container can resolve the
+supplied `CI_BASE_REF` independently of the fork checkout's `origin`.
 `Dockerfile.ci` installs the C++ toolchain, CMake, OpenCV, yaml-cpp, GTest,
 nlohmann-json, clang-format, Python, and cpplint required by those scripts.
-Changed-path inventories use NUL-delimited Git output and a parent-visible
-temporary file. A failing `git diff` therefore terminates image detection or
-healthcheck static-scope detection without emitting a false negative route.
+The image detector uses no Git status filter. The healthcheck static-scope
+inventory instead uses `--diff-filter=d` to omit deleted formatter/linter
+inputs while retaining type changes and uncommon non-deletion statuses. Both
+use NUL-delimited Git output and a parent-visible temporary file. A failing
+`git diff` therefore terminates image detection or healthcheck static-scope
+detection without emitting a false negative route.
 
 The maintained entry points are:
 
@@ -452,7 +459,8 @@ The maintained entry points are:
   `ci/scripts/change_classification_test.sh` for fail-closed documentation-only
   routing and its durable event/path regression matrix.
 - `ci/scripts/ci_routing_test.sh` for same-repository/fork routing, stable gate,
-  image-base, unusual-path, and detector-failure propagation contracts.
+  local-image exact-base preparation, image-base, unusual-path, and
+  detector-failure propagation contracts.
 - `ci/scripts/build_integrity.sh` for configure, required-target and full builds,
   plus CTest discovery.
 - `ci/scripts/ctest_full.sh` for the main CTest suite.
