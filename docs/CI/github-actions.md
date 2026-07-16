@@ -13,7 +13,7 @@ Push-triggered CI runs only on `main` and branches whose names start with `CI/`.
 
 Pull requests targeting `main` use `pull_request_target`, which uses the workflow definition from the base branch while checking out the pull request head commit for tests. `CI/**` branches validate branch-modified workflows through the push trigger instead of a second pull request run, avoiding duplicate local-image integration runs on the same commit.
 
-The first healthcheck and integration job protects CI workflow inputs before any repository script or local CI image build runs. For a non-`CI/**` pull request, it fetches the target branch from the base repository, requires the event's exact base and head commits plus one merge base, and compares that merge base to the head with rename detection disabled. Other guarded runs compare `origin/main` to `HEAD`. It fails if the resulting diff changes any of:
+The first healthcheck and integration job protects CI workflow inputs before any repository script or local CI image build runs. For a non-`CI/**` pull request, it fetches the target branch from the base repository and uses the event's exact base and head commits. Other guarded runs fetch `origin/main` and use `HEAD`. Both paths require exactly one merge base and compare that merge-base tree to the selected head with rename detection and Git-status filtering disabled. This preserves three-dot semantics for a manually dispatched ref that is behind `main` and includes type changes or any uncommon status in the protected-path inventory. The guard fails if the resulting diff changes any of:
 
 - `ci/**`
 - `.github/workflows/**`
@@ -29,9 +29,9 @@ The integration workflow runs `change-classification` after the protected-path g
 - a root-level `*.md` or `*.markdown` file, including `readme.md`, `manual.md`, and `CONTEXT.md`;
 - the root-level extensionless `README`, `LICENSE`, `NOTICE`, `CHANGELOG`, `CONTRIBUTING`, `CODE_OF_CONDUCT`, or `SECURITY` contract, matched case-insensitively.
 
-Every other path requires the complete build and test chain. This includes source and headers, CMake files, tests, plugins, applications, CI scripts, workflows and actions, configuration, dependencies and lockfiles, Docker inputs, assets, nested Markdown outside `docs/**`, and any unknown file. The classifier uses `git diff --no-renames`, so a source file renamed into `docs/**` still exposes the deleted source path and cannot be misclassified as documentation-only. Deleted paths are classified in the same way as added and modified paths.
+Every other path requires the complete build and test chain. This includes source and headers, CMake files, tests, plugins, applications, CI scripts, workflows and actions, configuration, dependencies and lockfiles, Docker inputs, assets, nested Markdown outside `docs/**`, and any unknown file. The classifier uses `git diff --no-renames` without a status filter, so a source file renamed into `docs/**` still exposes the deleted source path and cannot be misclassified as documentation-only. Added, copied, deleted, modified, renamed, type-changed (`T`), unmerged, broken-pairing, and unknown-status paths all enter the inventory; an uncommon status is never omitted merely because it was not enumerated in an allowlist.
 
-For `pull_request` and `pull_request_target`, the classifier requires the exact base and head SHAs from the event and exactly one merge base, then evaluates the pull request diff from that merge base to the head. For `push`, it compares the exact `before` and head trees. `workflow_dispatch` always runs the full chain. An unsupported event, an absent, malformed, all-zero, shallow, or unreachable revision, a missing or ambiguous merge base, a diff failure, or an empty changed-path inventory all fail closed to full integration. The workflow uses `fetch-depth: 0`; it never guesses `origin/main` or `HEAD~1` when event identity is unavailable.
+For `pull_request` and `pull_request_target`, the classifier requires the exact base and head SHAs from the event and exactly one merge base, then evaluates the pull request diff from that merge base to the head. A `main` push compares the exact `before` and head trees. Every `CI/**` push always runs the full chain, even when a later incremental push contains only documentation; this prevents an earlier source or workflow commit on the same branch from escaping current-head integration after pull-request-trigger deduplication. `workflow_dispatch` also always runs the full chain. An unsupported event, an absent or malformed push branch identity, an absent, malformed, all-zero, shallow, or unreachable revision, a missing or ambiguous merge base, a diff failure, or an empty changed-path inventory all fail closed to full integration. The workflow uses `fetch-depth: 0`; it never guesses `origin/main` or `HEAD~1` when event identity is unavailable.
 
 For a documentation-only change, `ci-image-change`, integration planning, all builds, full CTest, build smokes, and the scripted integration shards are intentionally skipped. The always-running `integration` gate verifies those exact skipped conclusions and writes the reason to the GitHub step summary. It fails when classification or an upstream dependency fails, rather than passing because `needs` silently propagated a skip. The workflows remain triggered instead of using `paths-ignore`, so stable required checks receive a conclusion instead of remaining pending. The `healthcheck` gate likewise always concludes and verifies whichever published-image or local-image healthcheck path was selected. A `CI/**` pull request run reports its intentional push-triggered deduplication through the same stable gates.
 
@@ -39,7 +39,7 @@ For a documentation-only change, `ci-image-change`, integration planning, all bu
 
 `Dockerfile.ci` defines the GitHub Linux test environment. The published-image healthcheck execution and build/test integration jobs run inside `ghcr.io/<owner>/<repo>/photospider-ci:latest`. Protected-path, change-classification, and stable result-gate jobs remain lightweight `ubuntu-latest` jobs and do not configure or compile the project.
 
-When a pull request or push changes the CI image inputs (`Dockerfile.ci`, `.dockerignore`, or `.github/workflows/build-ci-image.yml`), the healthcheck and integration workflows build `photospider-ci:local` inside the workflow and run the same scripts there. This avoids racing another workflow that may still be publishing the new `latest` image.
+When a pull request or push changes the CI image inputs (`Dockerfile.ci`, `.dockerignore`, or `.github/workflows/build-ci-image.yml`), the healthcheck and integration workflows build `photospider-ci:local` inside the workflow and run the same scripts there. Pull-request image detection fetches the base repository branch, verifies the event's exact base SHA, and compares from that base rather than relying on a possibly absent fork `origin/<base>`. A `CI/**` push fetches `origin/main` and detects image inputs cumulatively from the branch merge base, so a later documentation-only push cannot hide an earlier image-input commit. The unfiltered, no-rename inventory also includes type changes. This avoids both a wrong published-image route and a race with another workflow that may still be publishing the new `latest` image.
 
 The image includes CMake, a C++ toolchain, OpenCV, yaml-cpp, CURL, OpenSSL,
 GTest, nlohmann-json, Python, cpplint, and clang-format. The formatter is
@@ -124,10 +124,10 @@ long-lived personal-overlay content. Explicitly documented general-purpose
 manual developer tools are separate; a clean primary checkout never imports
 personal development content.
 
-- `ci/scripts/healthcheck.sh`: runs `git diff --check`, the durable change-classification regression, and `clang-format --dry-run --Werror` plus `cpplint` on changed C++ files.
+- `ci/scripts/healthcheck.sh`: runs `git diff --check`, the durable change-classification regression, and `clang-format --dry-run --Werror` plus `cpplint` on every nondeleted changed C++ path; its static-tool inventory retains type changes and uncommon statuses.
 - `ci/scripts/change_classification.sh`: classifies exact event revisions as documentation-only or full-integration, records all changed and non-documentation paths, and fails closed on Git uncertainty.
-- `ci/scripts/change_classification_test.sh`: exercises the long-lived routing contract across documentation, source, mixed, workflow, rename, deletion, pull-request merge-base, missing/zero/unavailable revision, manual, empty-diff, and shallow-clone cases.
-- `ci/scripts/ci_image_changed.sh`: detects whether the current diff changes CI image inputs.
+- `ci/scripts/change_classification_test.sh`: exercises the long-lived routing contract across documentation, source, mixed, type-change, workflow, rename, deletion, repeated `CI/**` push, pull-request merge-base, missing branch or revision, zero/unavailable revision, manual, empty-diff, and shallow-clone cases.
+- `ci/scripts/ci_image_changed.sh`: detects whether the current unfiltered diff changes CI image inputs; workflows provide an exact fetched pull-request base SHA.
 - `ci/scripts/integration_plan.sh`: configures a small testing-enabled planning tree, discovers the two exact build-smoke test names with `ctest -N`, validates registration against the runner files, and emits smoke/build capability flags.
 - `ci/scripts/integration_suite.sh`: applies the dynamic plan and runs the resulting integration shards sequentially for the local-image fallback path.
 - `ci/scripts/build_integrity.sh`: builds the profile selected by `CI_BUILD_PROFILE`. `default` builds the required targets and the complete tree before CTest discovery; `ipc-disabled` sets `BUILD_TESTING=OFF` and `PHOTOSPIDER_BUILD_IPC=OFF`, validates the cache, and builds only the `photospider` producer target.
@@ -144,6 +144,7 @@ personal development content.
 ```bash
 CI_ARTIFACT_DIR=CI-results/healthcheck bash ci/scripts/healthcheck.sh
 CI_CHANGE_EVENT=push \
+  CI_CHANGE_BRANCH=main \
   CI_CHANGE_BASE_SHA="$(git rev-parse HEAD~1)" \
   CI_CHANGE_HEAD_SHA="$(git rev-parse HEAD)" \
   CI_ARTIFACT_DIR=CI-results/change-classification \

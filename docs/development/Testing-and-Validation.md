@@ -422,8 +422,11 @@ workflow classifies exact event revisions before configuration: changes limited
 to `docs/**`, root Markdown, and the documented root text contracts skip all
 build, CTest, and integration shards intentionally, while the stable
 `integration` gate verifies and reports that route. Any non-documentation path
-or uncertain Git state runs full integration. The workflows deliberately avoid
-`paths-ignore`, which could leave a configured required check pending.
+or uncertain Git state runs full integration. Type changes and uncommon Git
+statuses stay in the unfiltered path inventory. Every `CI/**` push also forces
+full current-head integration, including a later incremental push that changes
+only documentation. The workflows deliberately avoid `paths-ignore`, which
+could leave a configured required check pending.
 
 Published-image healthcheck execution and build/test integration jobs run in
 `ghcr.io/<owner>/<repo>/photospider-ci:latest`; lightweight routing and result

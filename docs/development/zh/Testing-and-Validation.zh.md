@@ -323,8 +323,10 @@ GitHub Actions 和 Linux CI container 是当前维护中的验证路径。目标
 每次触发的 run 都会保留稳定的 `healthcheck` 结论。integration workflow 会在 configure 前对
 event 的精确 revision 分类：仅修改 `docs/**`、根目录 Markdown 和已记录根目录文本契约的变更会
 有意跳过所有 build、CTest 与 integration 分片，再由稳定的 `integration` 门禁校验并报告该路由。
-任何非文档路径或不确定 Git 状态都会执行完整 integration。workflow 刻意不使用
-`paths-ignore`，因为它可能让已配置的 required check 一直 pending。
+任何非文档路径或不确定 Git 状态都会执行完整 integration。Type change 与少见 Git status 会保留在
+不带过滤的路径清单中。每次 `CI/**` push 也都会强制执行 current-head 完整 integration，包括后续
+仅修改文档的增量 push。workflow 刻意不使用 `paths-ignore`，因为它可能让已配置的 required check
+一直 pending。
 
 published-image healthcheck 执行 job 与 build/test integration job 会在
 `ghcr.io/<owner>/<repo>/photospider-ci:latest` 中运行；轻量路由与结果门禁仍在
