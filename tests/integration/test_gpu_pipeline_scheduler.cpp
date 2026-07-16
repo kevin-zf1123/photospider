@@ -855,7 +855,8 @@ TEST(GpuPipelineIntegrationTest, SchedulerWithRuntime) {
 
   svc.cmd_seed_builtin_ops();
   const std::string graph_name = "gpu_pipeline_test";
-  const std::string graph_path = "util/testcases/scheduler_test_parallel.yaml";
+  const std::string graph_path =
+      "tests/fixtures/graphs/scheduler_test_parallel.yaml";
   auto loaded = svc.cmd_load_graph(graph_name, "sessions", graph_path);
 
   // 如果测试图不存在，跳过测试
@@ -909,7 +910,8 @@ TEST(GpuPipelineIntegrationTest, DualSchedulerConcurrentExecution) {
 
   svc.cmd_seed_builtin_ops();
   const std::string graph_name = "dual_scheduler_test";
-  const std::string graph_path = "util/testcases/scheduler_test_parallel.yaml";
+  const std::string graph_path =
+      "tests/fixtures/graphs/scheduler_test_parallel.yaml";
   auto loaded = svc.cmd_load_graph(graph_name, "sessions", graph_path);
 
   if (!loaded.has_value()) {

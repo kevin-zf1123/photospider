@@ -89,7 +89,8 @@ TEST(M34_KernelScheduler, LoadGraphInjectsSchedulers) {
 
   svc.cmd_seed_builtin_ops();
   const std::string graph_name = "m34_scheduler_test";
-  const std::string graph_path = "util/testcases/scheduler_test_parallel.yaml";
+  const std::string graph_path =
+      "tests/fixtures/graphs/scheduler_test_parallel.yaml";
 
   auto loaded = svc.cmd_load_graph(graph_name, "sessions", graph_path);
   ASSERT_TRUE(loaded.has_value());
@@ -124,7 +125,8 @@ TEST(M34_KernelScheduler, CustomSchedulerConfigOnLoad) {
   svc.cmd_seed_builtin_ops();
 
   const std::string graph_name = "m34_custom_scheduler_test";
-  const std::string graph_path = "util/testcases/scheduler_test_parallel.yaml";
+  const std::string graph_path =
+      "tests/fixtures/graphs/scheduler_test_parallel.yaml";
 
   auto loaded = svc.cmd_load_graph(graph_name, "sessions", graph_path);
   ASSERT_TRUE(loaded.has_value());
@@ -152,7 +154,8 @@ TEST(M34_KernelScheduler, ReplaceScheduler) {
 
   svc.cmd_seed_builtin_ops();
   const std::string graph_name = "m34_replace_scheduler_test";
-  const std::string graph_path = "util/testcases/scheduler_test_parallel.yaml";
+  const std::string graph_path =
+      "tests/fixtures/graphs/scheduler_test_parallel.yaml";
 
   auto loaded = svc.cmd_load_graph(graph_name, "sessions", graph_path);
   ASSERT_TRUE(loaded.has_value());
@@ -185,7 +188,8 @@ TEST(M34_KernelScheduler, ReplaceSchedulerInvalidType) {
 
   svc.cmd_seed_builtin_ops();
   const std::string graph_name = "m34_invalid_replace_test";
-  const std::string graph_path = "util/testcases/scheduler_test_parallel.yaml";
+  const std::string graph_path =
+      "tests/fixtures/graphs/scheduler_test_parallel.yaml";
 
   auto loaded = svc.cmd_load_graph(graph_name, "sessions", graph_path);
   ASSERT_TRUE(loaded.has_value());
@@ -251,7 +255,8 @@ TEST(M34_Integration, ComputeWithInjectedScheduler) {
 
   svc.cmd_seed_builtin_ops();
   const std::string graph_name = "m34_compute_test";
-  const std::string graph_path = "util/testcases/scheduler_test_parallel.yaml";
+  const std::string graph_path =
+      "tests/fixtures/graphs/scheduler_test_parallel.yaml";
 
   auto loaded = svc.cmd_load_graph(graph_name, "sessions", graph_path);
   ASSERT_TRUE(loaded.has_value());
@@ -293,7 +298,8 @@ TEST(M34_Integration, ComputeWithSerialScheduler) {
   svc.cmd_seed_builtin_ops();
 
   const std::string graph_name = "m34_serial_compute_test";
-  const std::string graph_path = "util/testcases/scheduler_test_parallel.yaml";
+  const std::string graph_path =
+      "tests/fixtures/graphs/scheduler_test_parallel.yaml";
 
   auto loaded = svc.cmd_load_graph(graph_name, "sessions", graph_path);
   ASSERT_TRUE(loaded.has_value());

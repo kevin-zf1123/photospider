@@ -3701,7 +3701,7 @@ TEST(DirtySourceLifecycleFacade, UsesHostPublicBoundary) {
   GraphLoadRequest load_request;
   load_request.session = GraphSessionId{"dirty_facade"};
   load_request.root_dir = "sessions";
-  load_request.yaml_path = "util/testcases/dirty_region_test.yaml";
+  load_request.yaml_path = "tests/fixtures/graphs/dirty_region_test.yaml";
   const auto loaded = host->load_graph(load_request);
   ASSERT_TRUE(loaded.status.ok) << loaded.status.message;
 
@@ -3741,8 +3741,9 @@ TEST(DirtyControlLaneFacade, ExposesWakeupAndCutoffThroughInteractionService) {
   InteractionService svc(kernel);
   svc.cmd_seed_builtin_ops();
 
-  auto loaded = svc.cmd_load_graph("dirty_control_lane", "sessions",
-                                   "util/testcases/dirty_region_test.yaml");
+  auto loaded =
+      svc.cmd_load_graph("dirty_control_lane", "sessions",
+                         "tests/fixtures/graphs/dirty_region_test.yaml");
   ASSERT_TRUE(loaded.has_value());
 
   auto begin = svc.cmd_begin_dirty_source_control(

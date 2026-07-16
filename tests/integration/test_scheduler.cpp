@@ -212,7 +212,8 @@ TEST(SchedulerTestM33, ParallelComputeWithNewScheduler) {
 
   svc.cmd_seed_builtin_ops();
   const std::string graph_name = "scheduler_m33_test";
-  const std::string graph_path = "util/testcases/scheduler_test_parallel.yaml";
+  const std::string graph_path =
+      "tests/fixtures/graphs/scheduler_test_parallel.yaml";
   auto loaded = svc.cmd_load_graph(graph_name, "sessions", graph_path);
   ASSERT_TRUE(loaded.has_value());
 
@@ -257,7 +258,8 @@ TEST(SchedulerTest, ParallelLogToJson) {
 
   svc.cmd_seed_builtin_ops();
   const std::string graph_name = "scheduler_ci_graph";
-  const std::string graph_path = "util/testcases/scheduler_test_parallel.yaml";
+  const std::string graph_path =
+      "tests/fixtures/graphs/scheduler_test_parallel.yaml";
   auto loaded = svc.cmd_load_graph(graph_name, "sessions", graph_path);
   ASSERT_TRUE(loaded.has_value());
 
@@ -300,7 +302,7 @@ TEST(Scheduler, DirtyRegionTiledComputation) {
   svc.cmd_seed_builtin_ops();
   register_micro_blur_for_dirty_scheduler_tests();
   const std::string graph_name = "dirty_region_test";
-  const std::string yaml_path = "util/testcases/dirty_region_test.yaml";
+  const std::string yaml_path = "tests/fixtures/graphs/dirty_region_test.yaml";
   const int final_node_id = 3;
 
   // 加载图
@@ -494,7 +496,7 @@ TEST(Scheduler,
 
   const std::string stale_graph_name = "dirty_region_stale_generation_test";
   ASSERT_TRUE(svc.cmd_load_graph(stale_graph_name, "sessions",
-                                 "util/testcases/dirty_region_test.yaml")
+                                 "tests/fixtures/graphs/dirty_region_test.yaml")
                   .has_value());
   ps::GraphRuntime& stale_runtime =
       ps::testing::KernelTestAccess::runtime(kernel, stale_graph_name);
@@ -547,7 +549,7 @@ TEST(Scheduler,
 
   const std::string exception_graph_name = "dirty_region_exception_test";
   ASSERT_TRUE(svc.cmd_load_graph(exception_graph_name, "sessions",
-                                 "util/testcases/dirty_region_test.yaml")
+                                 "tests/fixtures/graphs/dirty_region_test.yaml")
                   .has_value());
   ps::GraphRuntime& exception_runtime =
       ps::testing::KernelTestAccess::runtime(kernel, exception_graph_name);
@@ -623,7 +625,7 @@ TEST(Scheduler, ConcurrentDirtySiblingsPreserveYamlParameterState) {
 
   const std::string graph_name = "dirty_region_yaml_sibling_test";
   ASSERT_TRUE(svc.cmd_load_graph(graph_name, "sessions",
-                                 "util/testcases/dirty_region_test.yaml")
+                                 "tests/fixtures/graphs/dirty_region_test.yaml")
                   .has_value());
   ps::GraphRuntime& runtime =
       ps::testing::KernelTestAccess::runtime(kernel, graph_name);
