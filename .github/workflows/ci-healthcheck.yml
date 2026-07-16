@@ -27,18 +27,20 @@ jobs:
         with:
           repository: ${{ (github.event_name == 'pull_request' || github.event_name == 'pull_request_target') && github.event.pull_request.head.repo.full_name || github.repository }}
           fetch-depth: 0
-          submodules: recursive
           ref: ${{ (github.event_name == 'pull_request' || github.event_name == 'pull_request_target') && github.event.pull_request.head.sha || github.sha }}
 
       - name: Protect CI workflow paths
         env:
           CI_BRANCH_NAME: ${{ github.head_ref || github.ref_name }}
           CI_EVENT_NAME: ${{ github.event_name }}
+          CI_BASE_REPOSITORY: ${{ github.repository }}
+          CI_BASE_BRANCH: ${{ github.base_ref }}
+          CI_BASE_SHA: ${{ github.event.pull_request.base.sha || '' }}
+          CI_HEAD_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
           CI_ARTIFACT_DIR: ${{ github.workspace }}/CI-results/protected-ci-paths
         run: |
           set -Eeuo pipefail
           mkdir -p "$CI_ARTIFACT_DIR"
-          git fetch --no-tags --prune origin main
           : > "$CI_ARTIFACT_DIR/changed-files.txt"
           : > "$CI_ARTIFACT_DIR/protected-files.txt"
 
@@ -53,7 +55,33 @@ jobs:
             exit 0
           fi
 
-          git diff --name-only --diff-filter=ACMRD origin/main...HEAD |
+          diff_base=origin/main
+          diff_head=HEAD
+          if [[ "$CI_EVENT_NAME" == pull_request ||
+            "$CI_EVENT_NAME" == pull_request_target ]]; then
+            git fetch --no-tags --no-recurse-submodules \
+              "https://github.com/${CI_BASE_REPOSITORY}.git" \
+              "+refs/heads/${CI_BASE_BRANCH}:refs/remotes/photospider-base/${CI_BASE_BRANCH}"
+            git rev-parse --verify "$CI_BASE_SHA^{commit}" >/dev/null
+            git rev-parse --verify "$CI_HEAD_SHA^{commit}" >/dev/null
+            if ! git merge-base --all "$CI_BASE_SHA" "$CI_HEAD_SHA" \
+              > "$CI_ARTIFACT_DIR/merge-bases.txt"; then
+              echo "Protected-path merge-base detection failed." >&2
+              exit 1
+            fi
+            mapfile -t merge_bases < "$CI_ARTIFACT_DIR/merge-bases.txt"
+            if ((${#merge_bases[@]} != 1)); then
+              echo "Protected-path comparison requires exactly one merge base." >&2
+              exit 1
+            fi
+            diff_base=${merge_bases[0]}
+            diff_head=$CI_HEAD_SHA
+          else
+            git fetch --no-tags --prune origin main
+          fi
+
+          git diff --no-renames --name-only --diff-filter=ACMRD \
+            "$diff_base" "$diff_head" |
             sort -u |
             tee "$CI_ARTIFACT_DIR/changed-files.txt"
           awk '
@@ -109,7 +137,7 @@ jobs:
           path: CI-results/ci-image-change
           if-no-files-found: warn
 
-  healthcheck:
+  healthcheck-published-image:
     needs: ci-image-change
     if: needs.ci-image-change.outputs.changed != 'true'
     runs-on: ubuntu-latest
@@ -126,9 +154,20 @@ jobs:
           submodules: recursive
           ref: ${{ (github.event_name == 'pull_request' || github.event_name == 'pull_request_target') && github.event.pull_request.head.sha || github.sha }}
 
+      - name: Fetch pull request base history
+        if: github.event_name == 'pull_request' || github.event_name == 'pull_request_target'
+        env:
+          CI_BASE_REPOSITORY: ${{ github.repository }}
+          CI_BASE_BRANCH: ${{ github.base_ref }}
+        run: |
+          set -Eeuo pipefail
+          git fetch --no-tags --no-recurse-submodules \
+            "https://github.com/${CI_BASE_REPOSITORY}.git" \
+            "+refs/heads/${CI_BASE_BRANCH}:refs/remotes/photospider-base/${CI_BASE_BRANCH}"
+
       - name: Run healthcheck
         env:
-          CI_BASE_REF: origin/${{ github.base_ref || 'main' }}
+          CI_BASE_REF: ${{ (github.event_name == 'pull_request' || github.event_name == 'pull_request_target') && github.event.pull_request.base.sha || github.event_name == 'push' && github.event.before || 'origin/main' }}
           CI_ARTIFACT_DIR: ${{ github.workspace }}/CI-results/healthcheck
         run: bash ci/scripts/healthcheck.sh
 
@@ -157,7 +196,7 @@ jobs:
 
       - name: Run healthcheck in local CI image
         env:
-          CI_BASE_REF: origin/${{ github.base_ref || 'main' }}
+          CI_BASE_REF: ${{ (github.event_name == 'pull_request' || github.event_name == 'pull_request_target') && github.event.pull_request.base.sha || github.event_name == 'push' && github.event.before || 'origin/main' }}
         run: |
           docker run --rm \
             -v "${{ github.workspace }}:/workspace" \
@@ -174,3 +213,73 @@ jobs:
           name: healthcheck-results
           path: CI-results/healthcheck
           if-no-files-found: warn
+
+  healthcheck:
+    needs:
+      - protected-ci-paths
+      - ci-image-change
+      - healthcheck-published-image
+      - healthcheck-local-image
+    if: always()
+    runs-on: ubuntu-latest
+    steps:
+      - name: Report healthcheck gate
+        env:
+          CI_BRANCH_NAME: ${{ github.head_ref || github.ref_name }}
+          CI_EVENT_NAME: ${{ github.event_name }}
+          PROTECTED_RESULT: ${{ needs.protected-ci-paths.result }}
+          IMAGE_CHANGE_RESULT: ${{ needs.ci-image-change.result }}
+          IMAGE_CHANGED: ${{ needs.ci-image-change.outputs.changed }}
+          PUBLISHED_HEALTHCHECK_RESULT: ${{ needs.healthcheck-published-image.result }}
+          LOCAL_HEALTHCHECK_RESULT: ${{ needs.healthcheck-local-image.result }}
+        run: |
+          set -Eeuo pipefail
+
+          # @brief Require one upstream job to have an exact conclusion.
+          # @param $1 Stable upstream job label.
+          # @param $2 Actual needs.<job>.result value.
+          # @param $3 Expected result value.
+          # @return Zero for an exact match, otherwise one with a diagnostic.
+          # @throws Nothing; mismatches return nonzero to the gate.
+          # @note This prevents accidental needs-based skips from passing silently.
+          require_result() {
+            local job_name=$1
+            local actual=$2
+            local expected=$3
+            if [[ "$actual" != "$expected" ]]; then
+              echo "$job_name concluded '$actual'; expected '$expected'." >&2
+              return 1
+            fi
+          }
+
+          if [[ "$CI_EVENT_NAME" == pull_request_target &&
+            "$CI_BRANCH_NAME" == CI/* ]]; then
+            echo "CI/** pull request run intentionally uses the push-triggered workflow." |
+              tee -a "$GITHUB_STEP_SUMMARY"
+            exit 0
+          fi
+
+          require_result protected-ci-paths "$PROTECTED_RESULT" success
+          require_result ci-image-change "$IMAGE_CHANGE_RESULT" success
+          case "$IMAGE_CHANGED" in
+            true)
+              require_result healthcheck-published-image \
+                "$PUBLISHED_HEALTHCHECK_RESULT" skipped
+              require_result healthcheck-local-image \
+                "$LOCAL_HEALTHCHECK_RESULT" success
+              echo "Healthcheck passed in the locally built CI image." |
+                tee -a "$GITHUB_STEP_SUMMARY"
+              ;;
+            false)
+              require_result healthcheck-published-image \
+                "$PUBLISHED_HEALTHCHECK_RESULT" success
+              require_result healthcheck-local-image \
+                "$LOCAL_HEALTHCHECK_RESULT" skipped
+              echo "Healthcheck passed in the published CI image." |
+                tee -a "$GITHUB_STEP_SUMMARY"
+              ;;
+            *)
+              echo "CI image classification produced '$IMAGE_CHANGED'." >&2
+              exit 1
+              ;;
+          esac

@@ -320,15 +320,25 @@ GitHub Actions 和 Linux CI container 是当前维护中的验证路径。目标
 也会运行 CI。普通 feature branch 不能修改 `ci/**`、`.github/workflows/**` 或
 `Dockerfile.ci`；这些输入必须通过 `CI/**` branch 修改。
 
-常规 healthcheck 和 integration job 在已发布的
-`ghcr.io/<owner>/<repo>/photospider-ci:latest` 镜像中运行。如果某项改动修改 image input，
-workflow 会构建 `photospider-ci:local`，并在该镜像中运行同一套仓库脚本，避免验证过程与镜像发布
-产生竞态。`Dockerfile.ci` 会安装这些脚本所需的 C++ toolchain、CMake、OpenCV、yaml-cpp、
+每次触发的 run 都会保留稳定的 `healthcheck` 结论。integration workflow 会在 configure 前对
+event 的精确 revision 分类：仅修改 `docs/**`、根目录 Markdown 和已记录根目录文本契约的变更会
+有意跳过所有 build、CTest 与 integration 分片，再由稳定的 `integration` 门禁校验并报告该路由。
+任何非文档路径或不确定 Git 状态都会执行完整 integration。workflow 刻意不使用
+`paths-ignore`，因为它可能让已配置的 required check 一直 pending。
+
+published-image healthcheck 执行 job 与 build/test integration job 会在
+`ghcr.io/<owner>/<repo>/photospider-ci:latest` 中运行；轻量路由与结果门禁仍在
+`ubuntu-latest` 上运行。如果某项改动修改 image input，workflow 会构建
+`photospider-ci:local`，并在该镜像中运行同一套仓库脚本，避免验证过程与镜像发布产生竞态。
+`Dockerfile.ci` 会安装这些脚本所需的 C++ toolchain、CMake、OpenCV、yaml-cpp、
 GTest、nlohmann-json、clang-format、Python 和 cpplint。
 
 当前维护的入口包括：
 
 - `ci/scripts/healthcheck.sh`：执行 diff、format 和 cpplint 检查。
+- `ci/scripts/change_classification.sh` 与
+  `ci/scripts/change_classification_test.sh`：执行 fail-closed 纯文档路由及其长期 event/path
+  回归矩阵。
 - `ci/scripts/build_integrity.sh`：执行 configure、必需 target 与全量 build，并完成 CTest discovery。
 - `ci/scripts/ctest_full.sh`：运行主 CTest suite。
 - `ci/scripts/integration_suite.sh`：顺序执行 integration 行为检查，包括 CLI、propagation、plugin

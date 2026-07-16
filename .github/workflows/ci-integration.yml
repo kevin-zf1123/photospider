@@ -27,18 +27,20 @@ jobs:
         with:
           repository: ${{ (github.event_name == 'pull_request' || github.event_name == 'pull_request_target') && github.event.pull_request.head.repo.full_name || github.repository }}
           fetch-depth: 0
-          submodules: recursive
           ref: ${{ (github.event_name == 'pull_request' || github.event_name == 'pull_request_target') && github.event.pull_request.head.sha || github.sha }}
 
       - name: Protect CI workflow paths
         env:
           CI_BRANCH_NAME: ${{ github.head_ref || github.ref_name }}
           CI_EVENT_NAME: ${{ github.event_name }}
+          CI_BASE_REPOSITORY: ${{ github.repository }}
+          CI_BASE_BRANCH: ${{ github.base_ref }}
+          CI_BASE_SHA: ${{ github.event.pull_request.base.sha || '' }}
+          CI_HEAD_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
           CI_ARTIFACT_DIR: ${{ github.workspace }}/CI-results/protected-ci-paths
         run: |
           set -Eeuo pipefail
           mkdir -p "$CI_ARTIFACT_DIR"
-          git fetch --no-tags --prune origin main
           : > "$CI_ARTIFACT_DIR/changed-files.txt"
           : > "$CI_ARTIFACT_DIR/protected-files.txt"
 
@@ -53,7 +55,33 @@ jobs:
             exit 0
           fi
 
-          git diff --name-only --diff-filter=ACMRD origin/main...HEAD |
+          diff_base=origin/main
+          diff_head=HEAD
+          if [[ "$CI_EVENT_NAME" == pull_request ||
+            "$CI_EVENT_NAME" == pull_request_target ]]; then
+            git fetch --no-tags --no-recurse-submodules \
+              "https://github.com/${CI_BASE_REPOSITORY}.git" \
+              "+refs/heads/${CI_BASE_BRANCH}:refs/remotes/photospider-base/${CI_BASE_BRANCH}"
+            git rev-parse --verify "$CI_BASE_SHA^{commit}" >/dev/null
+            git rev-parse --verify "$CI_HEAD_SHA^{commit}" >/dev/null
+            if ! git merge-base --all "$CI_BASE_SHA" "$CI_HEAD_SHA" \
+              > "$CI_ARTIFACT_DIR/merge-bases.txt"; then
+              echo "Protected-path merge-base detection failed." >&2
+              exit 1
+            fi
+            mapfile -t merge_bases < "$CI_ARTIFACT_DIR/merge-bases.txt"
+            if ((${#merge_bases[@]} != 1)); then
+              echo "Protected-path comparison requires exactly one merge base." >&2
+              exit 1
+            fi
+            diff_base=${merge_bases[0]}
+            diff_head=$CI_HEAD_SHA
+          else
+            git fetch --no-tags --prune origin main
+          fi
+
+          git diff --no-renames --name-only --diff-filter=ACMRD \
+            "$diff_base" "$diff_head" |
             sort -u |
             tee "$CI_ARTIFACT_DIR/changed-files.txt"
           awk '
@@ -82,9 +110,56 @@ jobs:
           path: CI-results/protected-ci-paths
           if-no-files-found: warn
 
-  ci-image-change:
+  change-classification:
     needs: protected-ci-paths
     if: needs.protected-ci-paths.result == 'success'
+    runs-on: ubuntu-latest
+    outputs:
+      docs_only: ${{ steps.classify.outputs.docs_only }}
+      run_integration: ${{ steps.classify.outputs.run_integration }}
+      reason: ${{ steps.classify.outputs.reason }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          repository: ${{ (github.event_name == 'pull_request' || github.event_name == 'pull_request_target') && github.event.pull_request.head.repo.full_name || github.repository }}
+          fetch-depth: 0
+          ref: ${{ (github.event_name == 'pull_request' || github.event_name == 'pull_request_target') && github.event.pull_request.head.sha || github.sha }}
+      - name: Fetch pull request base history
+        if: github.event_name == 'pull_request' || github.event_name == 'pull_request_target'
+        env:
+          CI_BASE_REPOSITORY: ${{ github.repository }}
+          CI_BASE_BRANCH: ${{ github.base_ref }}
+        run: |
+          set -Eeuo pipefail
+          if ! git fetch --no-tags --no-recurse-submodules \
+            "https://github.com/${CI_BASE_REPOSITORY}.git" \
+            "+refs/heads/${CI_BASE_BRANCH}:refs/remotes/photospider-base/${CI_BASE_BRANCH}"; then
+            echo "Base history fetch failed; classification will require full integration." |
+              tee -a "$GITHUB_STEP_SUMMARY"
+          fi
+      - name: Classify changed paths
+        id: classify
+        env:
+          CI_CHANGE_EVENT: ${{ github.event_name }}
+          CI_CHANGE_BASE_SHA: ${{ (github.event_name == 'pull_request' || github.event_name == 'pull_request_target') && github.event.pull_request.base.sha || github.event.before }}
+          CI_CHANGE_HEAD_SHA: ${{ (github.event_name == 'pull_request' || github.event_name == 'pull_request_target') && github.event.pull_request.head.sha || github.event_name == 'push' && github.event.after || github.sha }}
+          CI_ARTIFACT_DIR: ${{ github.workspace }}/CI-results/change-classification
+        run: bash ci/scripts/change_classification.sh
+      - name: Upload change classification logs
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: integration-change-classification
+          path: CI-results/change-classification
+          if-no-files-found: warn
+
+  ci-image-change:
+    needs: change-classification
+    if: >-
+      ${{
+        needs.change-classification.result == 'success' &&
+        needs.change-classification.outputs.run_integration == 'true'
+      }}
     runs-on: ubuntu-latest
     outputs:
       changed: ${{ steps.detect.outputs.changed }}
@@ -110,8 +185,12 @@ jobs:
           if-no-files-found: warn
 
   integration-plan:
-    needs: ci-image-change
-    if: needs.ci-image-change.outputs.changed != 'true'
+    needs: [change-classification, ci-image-change]
+    if: >-
+      ${{
+        needs.change-classification.outputs.run_integration == 'true' &&
+        needs.ci-image-change.outputs.changed != 'true'
+      }}
     runs-on: ubuntu-latest
     container:
       image: ghcr.io/${{ github.repository }}/photospider-ci:latest
@@ -225,8 +304,12 @@ jobs:
           compression-level: 0
 
   local-image-integration:
-    needs: ci-image-change
-    if: needs.ci-image-change.outputs.changed == 'true'
+    needs: [change-classification, ci-image-change]
+    if: >-
+      ${{
+        needs.change-classification.outputs.run_integration == 'true' &&
+        needs.ci-image-change.outputs.changed == 'true'
+      }}
     runs-on: ubuntu-latest
     timeout-minutes: 120
     steps:
@@ -534,3 +617,168 @@ jobs:
           name: scheduler-repeat-results
           path: CI-results/scheduler-repeat
           if-no-files-found: warn
+
+  integration:
+    needs:
+      - protected-ci-paths
+      - change-classification
+      - ci-image-change
+      - integration-plan
+      - build-integrity-default
+      - build-integrity-ipc-disabled
+      - local-image-integration
+      - full-ctest
+      - static-product-consumer-smoke
+      - ipc-disabled-install-smoke
+      - scripted-cli
+      - propagation-script
+      - plugin-load
+      - scheduler-repeat
+    if: always()
+    runs-on: ubuntu-latest
+    steps:
+      - name: Report integration gate
+        env:
+          CI_BRANCH_NAME: ${{ github.head_ref || github.ref_name }}
+          CI_EVENT_NAME: ${{ github.event_name }}
+          PROTECTED_RESULT: ${{ needs.protected-ci-paths.result }}
+          CLASSIFICATION_RESULT: ${{ needs.change-classification.result }}
+          DOCS_ONLY: ${{ needs.change-classification.outputs.docs_only }}
+          RUN_INTEGRATION: ${{ needs.change-classification.outputs.run_integration }}
+          CLASSIFICATION_REASON: ${{ needs.change-classification.outputs.reason }}
+          IMAGE_CHANGE_RESULT: ${{ needs.ci-image-change.result }}
+          IMAGE_CHANGED: ${{ needs.ci-image-change.outputs.changed }}
+          PLAN_RESULT: ${{ needs.integration-plan.result }}
+          HAS_STATIC_SMOKE: ${{ needs.integration-plan.outputs.has_static_product_consumer_smoke }}
+          HAS_IPC_SMOKE: ${{ needs.integration-plan.outputs.has_ipc_disabled_install_smoke }}
+          BUILD_DEFAULT_RESULT: ${{ needs.build-integrity-default.result }}
+          BUILD_IPC_RESULT: ${{ needs.build-integrity-ipc-disabled.result }}
+          LOCAL_IMAGE_RESULT: ${{ needs.local-image-integration.result }}
+          FULL_CTEST_RESULT: ${{ needs.full-ctest.result }}
+          STATIC_SMOKE_RESULT: ${{ needs.static-product-consumer-smoke.result }}
+          IPC_SMOKE_RESULT: ${{ needs.ipc-disabled-install-smoke.result }}
+          SCRIPTED_CLI_RESULT: ${{ needs.scripted-cli.result }}
+          PROPAGATION_RESULT: ${{ needs.propagation-script.result }}
+          PLUGIN_LOAD_RESULT: ${{ needs.plugin-load.result }}
+          SCHEDULER_REPEAT_RESULT: ${{ needs.scheduler-repeat.result }}
+        run: |
+          set -Eeuo pipefail
+
+          # @brief Require one upstream job to have an exact conclusion.
+          # @param $1 Stable upstream job label.
+          # @param $2 Actual needs.<job>.result value.
+          # @param $3 Expected result value.
+          # @return Zero for an exact match, otherwise one with a diagnostic.
+          # @throws Nothing; mismatches return nonzero to the gate.
+          # @note This makes intentional skips distinct from dependency failures.
+          require_result() {
+            local job_name=$1
+            local actual=$2
+            local expected=$3
+            if [[ "$actual" != "$expected" ]]; then
+              echo "$job_name concluded '$actual'; expected '$expected'." >&2
+              return 1
+            fi
+          }
+
+          # @brief Require every normal integration shard to be intentionally skipped.
+          # @return Zero only when all build, CTest, and integration jobs are skipped.
+          # @throws Nothing; mismatches return nonzero through require_result.
+          # @note Used for documentation-only and local-image routing assertions.
+          require_normal_shards_skipped() {
+            require_result integration-plan "$PLAN_RESULT" skipped
+            require_result build-integrity-default "$BUILD_DEFAULT_RESULT" skipped
+            require_result build-integrity-ipc-disabled "$BUILD_IPC_RESULT" skipped
+            require_result full-ctest "$FULL_CTEST_RESULT" skipped
+            require_result static-product-consumer-smoke \
+              "$STATIC_SMOKE_RESULT" skipped
+            require_result ipc-disabled-install-smoke "$IPC_SMOKE_RESULT" skipped
+            require_result scripted-cli "$SCRIPTED_CLI_RESULT" skipped
+            require_result propagation-script "$PROPAGATION_RESULT" skipped
+            require_result plugin-load "$PLUGIN_LOAD_RESULT" skipped
+            require_result scheduler-repeat "$SCHEDULER_REPEAT_RESULT" skipped
+          }
+
+          if [[ "$CI_EVENT_NAME" == pull_request_target &&
+            "$CI_BRANCH_NAME" == CI/* ]]; then
+            echo "CI/** pull request run intentionally uses the push-triggered workflow." |
+              tee -a "$GITHUB_STEP_SUMMARY"
+            exit 0
+          fi
+
+          require_result protected-ci-paths "$PROTECTED_RESULT" success
+          require_result change-classification "$CLASSIFICATION_RESULT" success
+
+          if [[ "$DOCS_ONLY" == true ]]; then
+            require_result run-integration "$RUN_INTEGRATION" false
+            require_result ci-image-change "$IMAGE_CHANGE_RESULT" skipped
+            require_normal_shards_skipped
+            require_result local-image-integration "$LOCAL_IMAGE_RESULT" skipped
+            {
+              echo "Documentation-only change detected ($CLASSIFICATION_REASON)."
+              echo "Compilation, CTest, and integration shards were intentionally skipped; healthcheck remains required."
+            } | tee -a "$GITHUB_STEP_SUMMARY"
+            exit 0
+          fi
+
+          require_result docs-only "$DOCS_ONLY" false
+          require_result run-integration "$RUN_INTEGRATION" true
+          require_result ci-image-change "$IMAGE_CHANGE_RESULT" success
+          case "$IMAGE_CHANGED" in
+            true)
+              require_normal_shards_skipped
+              require_result local-image-integration "$LOCAL_IMAGE_RESULT" success
+              echo "Full integration passed in the locally built CI image." |
+                tee -a "$GITHUB_STEP_SUMMARY"
+              ;;
+            false)
+              require_result local-image-integration "$LOCAL_IMAGE_RESULT" skipped
+              require_result integration-plan "$PLAN_RESULT" success
+              require_result build-integrity-default \
+                "$BUILD_DEFAULT_RESULT" success
+              require_result full-ctest "$FULL_CTEST_RESULT" success
+              require_result scripted-cli "$SCRIPTED_CLI_RESULT" success
+              require_result propagation-script "$PROPAGATION_RESULT" success
+              require_result plugin-load "$PLUGIN_LOAD_RESULT" success
+              require_result scheduler-repeat "$SCHEDULER_REPEAT_RESULT" success
+
+              case "$HAS_STATIC_SMOKE" in
+                true)
+                  require_result static-product-consumer-smoke \
+                    "$STATIC_SMOKE_RESULT" success
+                  ;;
+                false)
+                  require_result static-product-consumer-smoke \
+                    "$STATIC_SMOKE_RESULT" skipped
+                  ;;
+                *)
+                  echo "Static smoke capability produced '$HAS_STATIC_SMOKE'." >&2
+                  exit 1
+                  ;;
+              esac
+              case "$HAS_IPC_SMOKE" in
+                true)
+                  require_result build-integrity-ipc-disabled \
+                    "$BUILD_IPC_RESULT" success
+                  require_result ipc-disabled-install-smoke \
+                    "$IPC_SMOKE_RESULT" success
+                  ;;
+                false)
+                  require_result build-integrity-ipc-disabled \
+                    "$BUILD_IPC_RESULT" skipped
+                  require_result ipc-disabled-install-smoke \
+                    "$IPC_SMOKE_RESULT" skipped
+                  ;;
+                *)
+                  echo "IPC smoke capability produced '$HAS_IPC_SMOKE'." >&2
+                  exit 1
+                  ;;
+              esac
+              echo "Full published-image integration matrix passed." |
+                tee -a "$GITHUB_STEP_SUMMARY"
+              ;;
+            *)
+              echo "CI image classification produced '$IMAGE_CHANGED'." >&2
+              exit 1
+              ;;
+          esac

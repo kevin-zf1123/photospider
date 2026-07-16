@@ -2,8 +2,8 @@
 
 ## Workflows
 
-- `.github/workflows/ci-healthcheck.yml`: static healthcheck on pull requests targeting `main` through `pull_request_target`, pushes to `main` and `CI/**`, and manual dispatch.
-- `.github/workflows/ci-integration.yml`: dynamic integration planning, parallel build-integrity profiles, separately sharded full CTest and build smoke tests, scripted `graph_cli`, scripted propagation, plugin loading, and scheduler repeat checks.
+- `.github/workflows/ci-healthcheck.yml`: static healthcheck on pull requests targeting `main` through `pull_request_target`, pushes to `main` and `CI/**`, and manual dispatch, followed by one stable `healthcheck` result gate.
+- `.github/workflows/ci-integration.yml`: documentation-only routing, dynamic integration planning, parallel build-integrity profiles, separately sharded full CTest and build smoke tests, scripted `graph_cli`, scripted propagation, plugin loading, scheduler repeat checks, and one stable `integration` result gate.
 - `.github/workflows/ci-sanitizer.yml`: manual ASan or TSan focused checks.
 - `.github/workflows/build-ci-image.yml`: GHCR image publish for `ghcr.io/<owner>/<repo>/photospider-ci` on image-input pushes and manual dispatch.
 
@@ -13,7 +13,7 @@ Push-triggered CI runs only on `main` and branches whose names start with `CI/`.
 
 Pull requests targeting `main` use `pull_request_target`, which uses the workflow definition from the base branch while checking out the pull request head commit for tests. `CI/**` branches validate branch-modified workflows through the push trigger instead of a second pull request run, avoiding duplicate local-image integration runs on the same commit.
 
-The first healthcheck and integration job protects CI workflow inputs before any repository script or local CI image build runs. For non-`CI/**` branches it compares `origin/main...HEAD` and fails if the diff changes any of:
+The first healthcheck and integration job protects CI workflow inputs before any repository script or local CI image build runs. For a non-`CI/**` pull request, it fetches the target branch from the base repository, requires the event's exact base and head commits plus one merge base, and compares that merge base to the head with rename detection disabled. Other guarded runs compare `origin/main` to `HEAD`. It fails if the resulting diff changes any of:
 
 - `ci/**`
 - `.github/workflows/**`
@@ -21,9 +21,23 @@ The first healthcheck and integration job protects CI workflow inputs before any
 
 CI workflow changes must therefore be developed on a `CI/**` branch. The guard also catches non-`CI/**` pull requests that target `main`, so workflow-related files cannot be merged through an ordinary feature branch.
 
+## Documentation-only Routing
+
+The integration workflow runs `change-classification` after the protected-path guard. A change is documentation-only only when every changed path is one of:
+
+- any file under `docs/**`, including every Chinese mirror;
+- a root-level `*.md` or `*.markdown` file, including `readme.md`, `manual.md`, and `CONTEXT.md`;
+- the root-level extensionless `README`, `LICENSE`, `NOTICE`, `CHANGELOG`, `CONTRIBUTING`, `CODE_OF_CONDUCT`, or `SECURITY` contract, matched case-insensitively.
+
+Every other path requires the complete build and test chain. This includes source and headers, CMake files, tests, plugins, applications, CI scripts, workflows and actions, configuration, dependencies and lockfiles, Docker inputs, assets, nested Markdown outside `docs/**`, and any unknown file. The classifier uses `git diff --no-renames`, so a source file renamed into `docs/**` still exposes the deleted source path and cannot be misclassified as documentation-only. Deleted paths are classified in the same way as added and modified paths.
+
+For `pull_request` and `pull_request_target`, the classifier requires the exact base and head SHAs from the event and exactly one merge base, then evaluates the pull request diff from that merge base to the head. For `push`, it compares the exact `before` and head trees. `workflow_dispatch` always runs the full chain. An unsupported event, an absent, malformed, all-zero, shallow, or unreachable revision, a missing or ambiguous merge base, a diff failure, or an empty changed-path inventory all fail closed to full integration. The workflow uses `fetch-depth: 0`; it never guesses `origin/main` or `HEAD~1` when event identity is unavailable.
+
+For a documentation-only change, `ci-image-change`, integration planning, all builds, full CTest, build smokes, and the scripted integration shards are intentionally skipped. The always-running `integration` gate verifies those exact skipped conclusions and writes the reason to the GitHub step summary. It fails when classification or an upstream dependency fails, rather than passing because `needs` silently propagated a skip. The workflows remain triggered instead of using `paths-ignore`, so stable required checks receive a conclusion instead of remaining pending. The `healthcheck` gate likewise always concludes and verifies whichever published-image or local-image healthcheck path was selected. A `CI/**` pull request run reports its intentional push-triggered deduplication through the same stable gates.
+
 ## Runtime
 
-`Dockerfile.ci` defines the GitHub Linux test environment. Normal healthcheck and integration jobs run inside the published `ghcr.io/<owner>/<repo>/photospider-ci:latest` image.
+`Dockerfile.ci` defines the GitHub Linux test environment. The published-image healthcheck execution and build/test integration jobs run inside `ghcr.io/<owner>/<repo>/photospider-ci:latest`. Protected-path, change-classification, and stable result-gate jobs remain lightweight `ubuntu-latest` jobs and do not configure or compile the project.
 
 When a pull request or push changes the CI image inputs (`Dockerfile.ci`, `.dockerignore`, or `.github/workflows/build-ci-image.yml`), the healthcheck and integration workflows build `photospider-ci:local` inside the workflow and run the same scripts there. This avoids racing another workflow that may still be publishing the new `latest` image.
 
@@ -41,7 +55,7 @@ lock; the existing Ubuntu base and apt-provided CMake setup remain unchanged.
 
 ## Integration Test Sharding
 
-For the normal published-image path, `integration-plan` configures the checked-out commit with testing enabled and uses `ctest -N` to discover the exact `StaticProductConsumerSmoke` and `IpcDisabledInstallSmoke` test names. It enables each smoke and its required build only when that test exists. The current `main` tree therefore schedules only `build-integrity-default`, while a refactor commit that introduces the IPC-disabled install smoke also schedules `build-integrity-ipc-disabled`. This is capability discovery from the tested commit, not a hard-coded branch-name check, so the workflow definition based on `main` can also test the refactor pull request head. If a smoke runner exists without its exact CTest registration, planning fails instead of silently dropping coverage.
+For a non-documentation change on the normal published-image path, `integration-plan` configures the checked-out commit with testing enabled and uses `ctest -N` to discover the exact `StaticProductConsumerSmoke` and `IpcDisabledInstallSmoke` test names. It enables each smoke and its required build only when that test exists. The current `main` tree therefore schedules only `build-integrity-default`, while a refactor commit that introduces the IPC-disabled install smoke also schedules `build-integrity-ipc-disabled`. This is capability discovery from the tested commit, not a hard-coded branch-name check, so the workflow definition based on `main` can also test the refactor pull request head. If a smoke runner exists without its exact CTest registration, planning fails instead of silently dropping coverage.
 
 Each profile has an independent build job that configures and compiles only that profile, then uploads a separate reusable build artifact: `ci-build-default` or `ci-build-ipc-disabled`. The IPC-disabled profile configures the producer with `PHOTOSPIDER_BUILD_IPC=OFF`. Default consumers depend only on `build-integrity-default`, while the IPC-disabled smoke depends only on `build-integrity-ipc-disabled`; a failure in one profile therefore does not suppress tests for the other profile.
 
@@ -110,7 +124,9 @@ long-lived personal-overlay content. Explicitly documented general-purpose
 manual developer tools are separate; a clean primary checkout never imports
 personal development content.
 
-- `ci/scripts/healthcheck.sh`: runs `git diff --check`, `clang-format --dry-run --Werror`, and `cpplint` on changed C++ files.
+- `ci/scripts/healthcheck.sh`: runs `git diff --check`, the durable change-classification regression, and `clang-format --dry-run --Werror` plus `cpplint` on changed C++ files.
+- `ci/scripts/change_classification.sh`: classifies exact event revisions as documentation-only or full-integration, records all changed and non-documentation paths, and fails closed on Git uncertainty.
+- `ci/scripts/change_classification_test.sh`: exercises the long-lived routing contract across documentation, source, mixed, workflow, rename, deletion, pull-request merge-base, missing/zero/unavailable revision, manual, empty-diff, and shallow-clone cases.
 - `ci/scripts/ci_image_changed.sh`: detects whether the current diff changes CI image inputs.
 - `ci/scripts/integration_plan.sh`: configures a small testing-enabled planning tree, discovers the two exact build-smoke test names with `ctest -N`, validates registration against the runner files, and emits smoke/build capability flags.
 - `ci/scripts/integration_suite.sh`: applies the dynamic plan and runs the resulting integration shards sequentially for the local-image fallback path.
@@ -127,6 +143,12 @@ personal development content.
 
 ```bash
 CI_ARTIFACT_DIR=CI-results/healthcheck bash ci/scripts/healthcheck.sh
+CI_CHANGE_EVENT=push \
+  CI_CHANGE_BASE_SHA="$(git rev-parse HEAD~1)" \
+  CI_CHANGE_HEAD_SHA="$(git rev-parse HEAD)" \
+  CI_ARTIFACT_DIR=CI-results/change-classification \
+  bash ci/scripts/change_classification.sh
+bash ci/scripts/change_classification_test.sh
 GITHUB_OUTPUT=/tmp/photospider-integration-plan.out \
   CI_ARTIFACT_DIR=CI-results/integration-plan \
   bash ci/scripts/integration_plan.sh
