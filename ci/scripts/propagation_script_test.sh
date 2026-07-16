@@ -13,20 +13,26 @@ ensure_ci_targets build_propagation_tool test_propagation
 
 linear_log="$CI_ARTIFACT_DIR/propagation_linear_tiles.log"
 printf 'tiles all\nexit\n' |
-  "$BUILD_DIR/tests/test_propagation" util/testcases/propagation_linear_test.yaml \
+  "$BUILD_DIR/tests/test_propagation" \
+    tests/fixtures/graphs/propagation_linear_test.yaml \
     > "$linear_log" 2>&1
 
-require_grep "Graph loaded from 'util/testcases/propagation_linear_test.yaml'" "$linear_log"
+require_grep \
+  "Graph loaded from 'tests/fixtures/graphs/propagation_linear_test.yaml'" \
+  "$linear_log"
 require_grep "1 UNDEFINED 16 16 1024 1024" "$linear_log"
 require_grep "2 MACRO 4 4 1024 1024" "$linear_log"
 require_grep "200 MACRO 2 2 512 512" "$linear_log"
 
 complex_log="$CI_ARTIFACT_DIR/propagation_complex_tiles.log"
 printf 'tiles all\nexit\n' |
-  "$BUILD_DIR/tests/test_propagation" util/testcases/propagation_complex_test.yaml \
+  "$BUILD_DIR/tests/test_propagation" \
+    tests/fixtures/graphs/propagation_complex_test.yaml \
     > "$complex_log" 2>&1
 
-require_grep "Graph loaded from 'util/testcases/propagation_complex_test.yaml'" "$complex_log"
+require_grep \
+  "Graph loaded from 'tests/fixtures/graphs/propagation_complex_test.yaml'" \
+  "$complex_log"
 require_grep "10 UNDEFINED 8 8 512 512" "$complex_log"
 require_grep "20 UNDEFINED 8 8 512 512" "$complex_log"
 require_grep "200 MACRO 2 2 512 512" "$complex_log"

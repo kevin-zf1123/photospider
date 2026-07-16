@@ -59,7 +59,7 @@ printf 'Graph document missing-source contract: %s\n' \
 ensure_ci_configured cmake_configure
 ensure_ci_targets build_graph_cli graph_cli cpu_work_stealing_example_plugin serial_debug_example_plugin
 
-fixture_path="$REPO_ROOT/util/testcases/propagation_linear_test.yaml"
+fixture_path="$REPO_ROOT/tests/fixtures/graphs/propagation_linear_test.yaml"
 runtime_root=$(mktemp -d "$CI_ARTIFACT_DIR/graph_cli_runtime.XXXXXX")
 
 # Preserve failed runtimes inside the uploaded artifact tree while removing

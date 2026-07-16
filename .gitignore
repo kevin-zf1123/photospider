@@ -104,6 +104,7 @@ feedback/
 !tests/**/*.cpp
 !tests/**/*.hpp
 !tests/**/*.py
+!tests/fixtures/graphs/*.yaml
 tests/results/
 
 # ============================
