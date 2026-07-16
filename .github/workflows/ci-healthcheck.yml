@@ -18,11 +18,33 @@ jobs:
   protected-ci-paths:
     if: >-
       ${{
-        (github.event_name != 'pull_request' || startsWith(github.head_ref, 'CI/')) &&
-        (github.event_name != 'pull_request_target' || !startsWith(github.head_ref, 'CI/'))
+        github.event_name != 'pull_request_target' ||
+        !startsWith(github.head_ref, 'CI/') ||
+        github.event.pull_request.head.repo.full_name != github.repository
       }}
     runs-on: ubuntu-latest
     steps:
+      - name: Reject fork CI branch pull request
+        if: >-
+          ${{
+            github.event_name == 'pull_request_target' &&
+            startsWith(github.head_ref, 'CI/') &&
+            github.event.pull_request.head.repo.full_name != github.repository
+          }}
+        env:
+          CI_ARTIFACT_DIR: ${{ github.workspace }}/CI-results/protected-ci-paths
+          CI_BASE_REPOSITORY: ${{ github.repository }}
+          CI_HEAD_REPOSITORY: ${{ github.event.pull_request.head.repo.full_name || '' }}
+        run: |
+          set -Eeuo pipefail
+          mkdir -p "$CI_ARTIFACT_DIR"
+          {
+            echo "Fork CI/** pull requests are rejected before checkout."
+            echo "Only CI/** branches in '$CI_BASE_REPOSITORY' are covered by the push-triggered workflow."
+            echo "Received head repository: '${CI_HEAD_REPOSITORY:-unavailable}'."
+          } | tee "$CI_ARTIFACT_DIR/summary.log" >&2
+          exit 1
+
       - uses: actions/checkout@v4
         with:
           repository: ${{ (github.event_name == 'pull_request' || github.event_name == 'pull_request_target') && github.event.pull_request.head.repo.full_name || github.repository }}
@@ -34,6 +56,8 @@ jobs:
           CI_BRANCH_NAME: ${{ github.head_ref || github.ref_name }}
           CI_EVENT_NAME: ${{ github.event_name }}
           CI_BASE_REPOSITORY: ${{ github.repository }}
+          CI_HEAD_REPOSITORY: ${{ github.event.pull_request.head.repo.full_name || '' }}
+          CI_HEAD_IS_BASE_REPOSITORY: ${{ github.event.pull_request.head.repo.full_name != '' && github.event.pull_request.head.repo.full_name == github.repository }}
           CI_BASE_BRANCH: ${{ github.base_ref }}
           CI_BASE_SHA: ${{ github.event.pull_request.base.sha || '' }}
           CI_HEAD_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
@@ -49,7 +73,16 @@ jobs:
               tee "$CI_ARTIFACT_DIR/summary.log"
             exit 0
           fi
-          if [[ "$CI_BRANCH_NAME" == CI/* ]]; then
+          if [[ "$CI_BRANCH_NAME" == CI/* &&
+            (
+              "$CI_EVENT_NAME" == push ||
+              "$CI_EVENT_NAME" == workflow_dispatch ||
+              (
+                "$CI_EVENT_NAME" == pull_request_target &&
+                -n "$CI_HEAD_REPOSITORY" &&
+                "$CI_HEAD_IS_BASE_REPOSITORY" == true
+              )
+            ) ]]; then
             echo "CI branch '$CI_BRANCH_NAME' may update CI workflow files." |
               tee "$CI_ARTIFACT_DIR/summary.log"
             exit 0
@@ -95,8 +128,8 @@ jobs:
 
           if [[ -s "$CI_ARTIFACT_DIR/protected-files.txt" ]]; then
             {
-              echo "Non-CI branches must not change ci/, .github/workflows/, or Dockerfile.ci."
-              echo "Use a branch whose name starts with CI/ for CI workflow changes."
+              echo "Only trusted base-repository CI/** runs may change ci/, .github/workflows/, or Dockerfile.ci."
+              echo "Develop CI workflow changes on a CI/** branch in '$CI_BASE_REPOSITORY'."
             } | tee "$CI_ARTIFACT_DIR/summary.log" >&2
             exit 1
           fi
@@ -246,6 +279,9 @@ jobs:
         env:
           CI_BRANCH_NAME: ${{ github.head_ref || github.ref_name }}
           CI_EVENT_NAME: ${{ github.event_name }}
+          CI_BASE_REPOSITORY: ${{ github.repository }}
+          CI_HEAD_REPOSITORY: ${{ github.event.pull_request.head.repo.full_name || '' }}
+          CI_HEAD_IS_BASE_REPOSITORY: ${{ github.event.pull_request.head.repo.full_name != '' && github.event.pull_request.head.repo.full_name == github.repository }}
           PROTECTED_RESULT: ${{ needs.protected-ci-paths.result }}
           IMAGE_CHANGE_RESULT: ${{ needs.ci-image-change.result }}
           IMAGE_CHANGED: ${{ needs.ci-image-change.outputs.changed }}
@@ -272,8 +308,10 @@ jobs:
           }
 
           if [[ "$CI_EVENT_NAME" == pull_request_target &&
-            "$CI_BRANCH_NAME" == CI/* ]]; then
-            echo "CI/** pull request run intentionally uses the push-triggered workflow." |
+            "$CI_BRANCH_NAME" == CI/* &&
+            -n "$CI_HEAD_REPOSITORY" &&
+            "$CI_HEAD_IS_BASE_REPOSITORY" == true ]]; then
+            echo "Same-repository CI/** pull request intentionally uses the push-triggered workflow." |
               tee -a "$GITHUB_STEP_SUMMARY"
             exit 0
           fi
