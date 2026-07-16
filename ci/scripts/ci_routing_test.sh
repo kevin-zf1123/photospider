@@ -138,6 +138,34 @@ extract_job_block() {
   ' "$workflow" > "$destination"
 }
 
+# @brief Extract the one folded top-level condition from a workflow job block.
+# @param $1 Extracted top-level job YAML fragment.
+# @param $2 Destination containing the condition block with original spacing.
+# @return Zero only when exactly one complete top-level condition is written.
+# @throws Nothing; missing, duplicate, or unterminated blocks return nonzero.
+# @note Step-level conditions have deeper indentation and are not candidates.
+extract_job_if_block() {
+  local job_file=$1
+  local destination=$2
+  awk '
+    $0 == "    if: >-" {
+      condition_count++
+      capture = 1
+    }
+    capture {
+      print
+    }
+    capture && $0 == "      }}" {
+      capture = 0
+    }
+    END {
+      if (condition_count != 1 || capture) {
+        exit 1
+      }
+    }
+  ' "$job_file" > "$destination"
+}
+
 # @brief Require the local-image healthcheck to materialize the exact PR base.
 # @param $1 Healthcheck workflow YAML path.
 # @return Zero after the job-scoped fetch, verification, and order checks pass.
@@ -213,22 +241,78 @@ validate_local_image_base_fetch() {
   pass healthcheck-local-image-exact-base-before-execution
 }
 
-# @brief Model whether the protected-path job must run for event identity.
-# @param $1 Event name.
-# @param $2 Head branch name.
-# @param $3 Head repository full name, or an empty value when unavailable.
-# @param $4 Base repository full name.
-# @return Zero when the job must run; one only for a same-repository CI/** PR.
-# @throws Nothing; all identity uncertainty deliberately requires the job.
-# @note The workflow expression is statically tied to this matrix below.
-protected_job_should_run() {
-  local event_name=$1
-  local branch_name=$2
-  local head_repository=$3
-  local base_repository=$4
-  [[ "$event_name" != pull_request_target ||
-    "$branch_name" != CI/* ||
-    "$head_repository" != "$base_repository" ]]
+# @brief Require the published-image healthcheck to materialize the exact PR base.
+# @param $1 Healthcheck workflow YAML path.
+# @return Zero after job-scoped fetch, verification, and order checks pass.
+# @throws Nothing; missing or misordered contracts exit through fail.
+# @note Assertions use only the published job so similarly named detector or
+#   local-image steps cannot satisfy the contract accidentally.
+validate_published_image_base_fetch() {
+  local workflow=$1
+  local job_file="$TEST_ROOT/healthcheck-published-image-job.yml"
+  local fetch_script="$TEST_ROOT/healthcheck-published-image-base-fetch.sh"
+  local checkout_line
+  local fetch_step_line
+  local first_run_line
+  local verify_line
+  local healthcheck_step_line
+  local healthcheck_run_line
+
+  extract_job_block "$workflow" healthcheck-published-image "$job_file" ||
+    fail "healthcheck-published-image job could not be extracted"
+  extract_step_run_block "$job_file" "Fetch pull request base history" \
+    "$fetch_script" ||
+    fail "healthcheck-published-image base-fetch run block could not be extracted"
+
+  assert_file_contains "$job_file" \
+    'CI_BASE_REPOSITORY: ${{ github.repository }}'
+  assert_file_contains "$job_file" \
+    'CI_BASE_BRANCH: ${{ github.base_ref }}'
+  assert_file_contains "$job_file" \
+    'CI_BASE_SHA: ${{ github.event.pull_request.base.sha }}'
+  assert_file_contains "$job_file" \
+    "if: github.event_name == 'pull_request' || github.event_name == 'pull_request_target'"
+  assert_file_contains "$job_file" \
+    "CI_BASE_REF: \${{ (github.event_name == 'pull_request' || github.event_name == 'pull_request_target') && github.event.pull_request.base.sha"
+  assert_file_contains "$job_file" \
+    'run: bash ci/scripts/healthcheck.sh'
+  assert_file_contains "$fetch_script" \
+    'git fetch --no-tags --no-recurse-submodules'
+  assert_file_contains "$fetch_script" \
+    '"https://github.com/${CI_BASE_REPOSITORY}.git" \'
+  assert_file_contains "$fetch_script" \
+    '"+refs/heads/${CI_BASE_BRANCH}:refs/remotes/photospider-base/${CI_BASE_BRANCH}"'
+  assert_file_contains "$fetch_script" \
+    'git rev-parse --verify "$CI_BASE_SHA^{commit}" >/dev/null'
+  bash -n "$fetch_script"
+
+  checkout_line=$(grep -nF -- "- uses: actions/checkout@v4" "$job_file" |
+    head -n 1 | cut -d: -f1)
+  fetch_step_line=$(grep -nF -- \
+    "- name: Fetch pull request base history" "$job_file" |
+    head -n 1 | cut -d: -f1)
+  first_run_line=$(grep -nE -- '^[[:space:]]+run:' "$job_file" |
+    head -n 1 | cut -d: -f1)
+  verify_line=$(grep -nF -- \
+    'git rev-parse --verify "$CI_BASE_SHA^{commit}" >/dev/null' "$job_file" |
+    head -n 1 | cut -d: -f1)
+  healthcheck_step_line=$(grep -nF -- "- name: Run healthcheck" "$job_file" |
+    head -n 1 | cut -d: -f1)
+  healthcheck_run_line=$(grep -nF -- \
+    'run: bash ci/scripts/healthcheck.sh' "$job_file" |
+    head -n 1 | cut -d: -f1)
+  [[ -n "$checkout_line" && -n "$fetch_step_line" &&
+    -n "$first_run_line" && -n "$verify_line" &&
+    -n "$healthcheck_step_line" && -n "$healthcheck_run_line" ]] ||
+    fail "healthcheck-published-image lacks a complete exact-base execution order"
+  ((checkout_line < fetch_step_line &&
+    fetch_step_line < first_run_line &&
+    first_run_line < verify_line &&
+    verify_line < healthcheck_step_line &&
+    healthcheck_step_line < healthcheck_run_line)) ||
+    fail "healthcheck-published-image runs healthcheck before exact-base verification"
+
+  pass healthcheck-published-image-exact-base-before-execution
 }
 
 # @brief Require one command to succeed and capture its combined output.
@@ -325,21 +409,41 @@ assert_gate_checks_all_results() {
   done
 }
 
-# @brief Validate static repository-identity and stable-gate workflow contracts.
+# @brief Validate the canonical protected condition and executable gate contracts.
 # @param $1 Workflow YAML path.
 # @param $2 Exact stable gate step name.
-# @return Zero after writing executable gate/reject fixtures.
+# @return Zero after writing condition, guard, gate, and reject fixtures.
 # @throws Nothing; missing contracts exit through fail.
-# @note The reject step must precede checkout so fork code is never executed.
+# @note The canonical source assertion does not emulate GitHub's expression
+#   evaluator; real shell run blocks are extracted for dynamic coverage.
 validate_workflow_contract() {
   local workflow=$1
   local gate_step=$2
   local workflow_name
+  local protected_job_file
+  local condition_file
+  local normalized_condition
+  local canonical_condition
   local reject_line
   local checkout_line
   local mismatch_count
   local identity_output_count
   workflow_name=$(basename "$workflow" .yml)
+  protected_job_file="$TEST_ROOT/${workflow_name}-protected-job.yml"
+  condition_file="$TEST_ROOT/${workflow_name}-protected-condition.yml"
+  canonical_condition="if:>-\${{github.event_name!='pull_request_target'||"
+  canonical_condition+="!startsWith(github.head_ref,'CI/')||"
+  canonical_condition+="github.event.pull_request.head.repo.full_name!="
+  canonical_condition+="github.repository}}"
+
+  extract_job_block "$workflow" protected-ci-paths "$protected_job_file" ||
+    fail "$workflow_name protected-ci-paths job could not be extracted"
+  extract_job_if_block "$protected_job_file" "$condition_file" ||
+    fail "$workflow_name protected-ci-paths condition could not be extracted"
+  normalized_condition=$(tr -d '[:space:]' < "$condition_file") ||
+    fail "$workflow_name protected-ci-paths condition normalization failed"
+  [[ "$normalized_condition" == "$canonical_condition" ]] ||
+    fail "$workflow_name protected-ci-paths condition differs from the canonical expression"
 
   mismatch_count=$(grep -Fc -- \
     "github.event.pull_request.head.repo.full_name != github.repository" \
@@ -378,11 +482,23 @@ validate_workflow_contract() {
   extract_step_run_block "$workflow" "Reject fork CI branch pull request" \
     "$TEST_ROOT/${workflow_name}-fork-reject.sh" ||
     fail "$workflow_name fork rejection run block could not be extracted"
+  extract_step_run_block "$workflow" "Protect CI workflow paths" \
+    "$TEST_ROOT/${workflow_name}-protected.sh" ||
+    fail "$workflow_name protected-path run block could not be extracted"
+  assert_file_contains "$TEST_ROOT/${workflow_name}-protected.sh" \
+    "git diff --no-renames --name-only -z"
+  assert_file_contains "$TEST_ROOT/${workflow_name}-protected.sh" \
+    "if ! mapfile -d '' -t changed_files"
+  assert_file_contains "$TEST_ROOT/${workflow_name}-protected.sh" \
+    "Protected-path changed-path inventory read failed."
+  assert_file_not_contains "$TEST_ROOT/${workflow_name}-protected.sh" \
+    "awk '"
   bash -n "$TEST_ROOT/${workflow_name}-gate.sh"
   bash -n "$TEST_ROOT/${workflow_name}-fork-reject.sh"
+  bash -n "$TEST_ROOT/${workflow_name}-protected.sh"
   assert_gate_checks_all_results "$TEST_ROOT/${workflow_name}-gate.sh" \
     "$gate_step"
-  pass "$workflow_name-static-identity-contract"
+  pass "$workflow_name-canonical-protected-contract"
 }
 
 # @brief Exercise same-repository, fork, and missing-repository gate identities.
@@ -442,6 +558,133 @@ exercise_fork_rejection() {
     CI_HEAD_REPOSITORY=fork/repository bash "$reject_script"
   assert_file_contains "$artifact_dir/summary.log" \
     "Received head repository: 'fork/repository'."
+}
+
+# @brief Create a feature history whose only change is a protected newline path.
+# @param $1 Destination work repository.
+# @param $2 Destination bare origin repository.
+# @param $3 Exact newline-containing path below ci/.
+# @return Zero after main is published and the feature commit is checked out.
+# @throws Nothing; Git and filesystem failures terminate through set -e.
+# @note The production guard can fetch origin/main without network access.
+create_protected_path_history() {
+  local repository=$1
+  local origin_repository=$2
+  local newline_path=$3
+  git init -q -b main "$repository"
+  git -C "$repository" config user.name "CI Routing Test"
+  git -C "$repository" config user.email "ci-routing@example.invalid"
+  printf 'baseline\n' > "$repository/seed.txt"
+  git -C "$repository" add seed.txt
+  git -C "$repository" commit -qm baseline
+
+  git init -q --bare "$origin_repository"
+  git -C "$repository" remote add origin "$origin_repository"
+  git -C "$repository" push -q -u origin main
+
+  git -C "$repository" checkout -qb feature/newline-path
+  mkdir -p "$repository/ci"
+  printf 'protected input\n' > "$repository/$newline_path"
+  git -C "$repository" add -- "$newline_path"
+  git -C "$repository" commit -qm "protected newline path"
+}
+
+# @brief Run one extracted production protected-path block in a local repository.
+# @param $1 Extracted production guard shell script.
+# @param $2 Repository containing origin/main and the feature commit.
+# @param $3 Fresh artifact directory for the guard invocation.
+# @param $4 PATH value, optionally prefixed with a failure-injection shim.
+# @return The production block's status.
+# @throws Nothing; failures are returned to the calling regression assertion.
+# @note Event variables select the non-authorized push path without evaluating
+#   or executing any script from the synthetic head commit.
+run_protected_path_guard() {
+  local guard_script=$1
+  local repository=$2
+  local artifact_dir=$3
+  local command_path=${4:-$PATH}
+  rm -rf -- "$artifact_dir"
+  mkdir -p "$artifact_dir"
+  (
+    cd "$repository"
+    env PATH="$command_path" CI_ROUTING_TEST_REAL_GIT="$REAL_GIT" \
+      CI_BRANCH_NAME=feature/newline-path CI_EVENT_NAME=push \
+      CI_BASE_REPOSITORY=owner/repository CI_HEAD_REPOSITORY= \
+      CI_HEAD_IS_BASE_REPOSITORY=false CI_BASE_BRANCH=main \
+      CI_BASE_SHA=origin/main CI_HEAD_SHA=HEAD \
+      CI_ARTIFACT_DIR="$artifact_dir" bash "$guard_script"
+  )
+}
+
+# @brief Require one NUL-delimited inventory to contain one exact path record.
+# @param $1 NUL-delimited inventory file.
+# @param $2 Exact expected path, including any embedded newline.
+# @return Zero when the single record matches; otherwise exits through fail.
+# @throws Nothing; mapfile failures become regression diagnostics.
+# @note Array comparison proves the path was neither quoted nor line-split.
+assert_single_nul_path() {
+  local inventory=$1
+  local expected_path=$2
+  local -a paths=()
+  [[ -f "$inventory" ]] || fail "NUL inventory is missing: $inventory"
+  if ! mapfile -d '' -t paths < "$inventory"; then
+    fail "NUL inventory could not be read: $inventory"
+  fi
+  ((${#paths[@]} == 1)) ||
+    fail "NUL inventory did not contain exactly one path: $inventory"
+  [[ "${paths[0]}" == "$expected_path" ]] ||
+    fail "NUL inventory path mismatch: $inventory"
+}
+
+# @brief Exercise one real guard against newline, producer, and reader failures.
+# @param $1 Extracted production protected-path shell script.
+# @param $2 Stable workflow label used for case and artifact names.
+# @param $3 Isolated repository containing the protected newline-path change.
+# @param $4 Exact newline-containing protected path.
+# @return Zero after all failures close and artifacts retain safe path identity.
+# @throws Nothing; unexpected status or artifact contents exit through fail.
+# @note Git shims separately fail production and unlink the readable inventory.
+exercise_protected_path_guard() {
+  local guard_script=$1
+  local workflow_label=$2
+  local repository=$3
+  local newline_path=$4
+  local artifact_dir="$TEST_ROOT/${workflow_label}-newline-protected"
+  local output_log="$TEST_ROOT/${workflow_label}-newline-protected.log"
+  local failure_artifact_dir="$TEST_ROOT/${workflow_label}-producer-failure"
+  local failure_log="$TEST_ROOT/${workflow_label}-producer-failure.log"
+  local shim_dir="$TEST_ROOT/protected-failing-git"
+  local read_failure_artifact_dir="$TEST_ROOT/${workflow_label}-read-failure"
+  local read_failure_log="$TEST_ROOT/${workflow_label}-read-failure.log"
+  local read_failure_shim_dir="$TEST_ROOT/protected-read-failing-git"
+  local quoted_path
+
+  run_expect_failure "$workflow_label-newline-protected-path-rejected" \
+    "$output_log" \
+    "Only trusted base-repository CI/** runs may change" \
+    "No protected CI workflow paths changed" \
+    run_protected_path_guard "$guard_script" "$repository" "$artifact_dir"
+  printf -v quoted_path '%q' "$newline_path"
+  grep -Fqx -- "$quoted_path" "$artifact_dir/changed-files.txt" ||
+    fail "$workflow_label changed-path log did not safely quote the newline path"
+  grep -Fqx -- "$quoted_path" "$artifact_dir/protected-files.txt" ||
+    fail "$workflow_label protected artifact omitted the newline path"
+  assert_single_nul_path "$artifact_dir/changed-files.z" "$newline_path"
+
+  create_failing_git_shim "$shim_dir"
+  run_expect_failure "$workflow_label-protected-producer-fails-closed" \
+    "$failure_log" "Protected-path changed-path detection failed." \
+    "No protected CI workflow paths changed" \
+    run_protected_path_guard "$guard_script" "$repository" \
+    "$failure_artifact_dir" "$shim_dir:$PATH"
+
+  create_unlinking_git_inventory_shim "$read_failure_shim_dir"
+  run_expect_failure "$workflow_label-protected-reader-fails-closed" \
+    "$read_failure_log" \
+    "Protected-path changed-path inventory read failed." \
+    "No protected CI workflow paths changed" \
+    run_protected_path_guard "$guard_script" "$repository" \
+    "$read_failure_artifact_dir" "$read_failure_shim_dir:$PATH"
 }
 
 # @brief Create an isolated image-input history with cumulative and exact bases.
@@ -558,6 +801,38 @@ EOF
   chmod +x "$shim_dir/git"
 }
 
+# @brief Create a Git shim that removes a completed protected-path inventory.
+# @param $1 Destination directory added to the front of PATH.
+# @return Zero after writing an executable shim.
+# @throws Nothing; filesystem failures terminate through set -e.
+# @note The real diff succeeds before unlinking the parent-visible file, which
+#   forces the production mapfile read boundary to prove it fails closed.
+create_unlinking_git_inventory_shim() {
+  local shim_dir=$1
+  mkdir -p "$shim_dir"
+  cat > "$shim_dir/git" <<'EOF'
+#!/usr/bin/env bash
+set -Eeuo pipefail
+
+# @file git
+# @brief Remove the protected-path inventory after a successful real Git diff.
+if [[ "${1:-}" == diff ]]; then
+  for argument in "$@"; do
+    if [[ "$argument" == --name-only ]]; then
+      "$CI_ROUTING_TEST_REAL_GIT" "$@"
+      status=$?
+      if ((status == 0)); then
+        rm -f -- "$CI_ARTIFACT_DIR/changed-files.z"
+      fi
+      exit "$status"
+    fi
+  done
+fi
+exec "$CI_ROUTING_TEST_REAL_GIT" "$@"
+EOF
+  chmod +x "$shim_dir/git"
+}
+
 # @brief Exercise cumulative/exact image bases and both failure-propagation seams.
 # @return Zero after every detector and healthcheck case matches the contract.
 # @throws Nothing; unexpected behavior exits through fail.
@@ -640,28 +915,23 @@ exercise_changed_path_contracts() {
 # @return Zero when every case passes.
 # @throws Nothing; command failures terminate through set -e or fail.
 # @note Existing change-classification coverage is invoked separately by the
-#   healthcheck so this test focuses on workflow identity and detector seams.
+#   healthcheck; this test exact-locks workflow source and runs maintained shell
+#   blocks without claiming to emulate the GitHub expression evaluator.
 main() {
   local health_workflow="$REPO_ROOT/.github/workflows/ci-healthcheck.yml"
   local integration_workflow="$REPO_ROOT/.github/workflows/ci-integration.yml"
+  local protected_repository="$TEST_ROOT/protected-repository"
+  local protected_origin="$TEST_ROOT/protected-origin.git"
+  local protected_newline_path=$'ci/hidden\nscript.sh'
 
   validate_workflow_contract "$health_workflow" "Report healthcheck gate"
   validate_workflow_contract "$integration_workflow" "Report integration gate"
+  validate_published_image_base_fetch "$health_workflow"
   validate_local_image_base_fetch "$health_workflow"
-
-  if protected_job_should_run pull_request_target CI/example \
-    owner/repository owner/repository; then
-    fail "same-repository CI/** pull request was not deduplicated"
-  fi
-  protected_job_should_run pull_request_target CI/example \
-    fork/repository owner/repository ||
-    fail "fork CI/** pull request did not run the protected job"
-  protected_job_should_run pull_request_target CI/example '' owner/repository ||
-    fail "missing head repository identity did not fail closed"
-  protected_job_should_run pull_request_target feature/example \
-    fork/repository owner/repository ||
-    fail "ordinary fork pull request did not run the protected job"
-  pass protected-job-identity-matrix
+  cmp -s "$TEST_ROOT/ci-healthcheck-protected.sh" \
+    "$TEST_ROOT/ci-integration-protected.sh" ||
+    fail "healthcheck and integration protected-path blocks diverged"
+  pass protected-path-production-blocks-identical
 
   exercise_gate_identity "$TEST_ROOT/ci-healthcheck-gate.sh" healthcheck
   exercise_gate_identity "$TEST_ROOT/ci-integration-gate.sh" integration
@@ -669,6 +939,14 @@ main() {
     healthcheck
   exercise_fork_rejection "$TEST_ROOT/ci-integration-fork-reject.sh" \
     integration
+  create_protected_path_history "$protected_repository" "$protected_origin" \
+    "$protected_newline_path"
+  exercise_protected_path_guard \
+    "$TEST_ROOT/ci-healthcheck-protected.sh" healthcheck \
+    "$protected_repository" "$protected_newline_path"
+  exercise_protected_path_guard \
+    "$TEST_ROOT/ci-integration-protected.sh" integration \
+    "$protected_repository" "$protected_newline_path"
   exercise_changed_path_contracts
 
   printf 'All %d CI routing cases passed.\n' "$pass_count"

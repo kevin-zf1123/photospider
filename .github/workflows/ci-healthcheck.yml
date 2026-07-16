@@ -65,6 +65,7 @@ jobs:
         run: |
           set -Eeuo pipefail
           mkdir -p "$CI_ARTIFACT_DIR"
+          : > "$CI_ARTIFACT_DIR/changed-files.z"
           : > "$CI_ARTIFACT_DIR/changed-files.txt"
           : > "$CI_ARTIFACT_DIR/protected-files.txt"
 
@@ -115,16 +116,28 @@ jobs:
           fi
           diff_base=${merge_bases[0]}
 
-          git diff --no-renames --name-only \
-            "$diff_base" "$diff_head" |
-            sort -u |
-            tee "$CI_ARTIFACT_DIR/changed-files.txt"
-          awk '
-            $0 == "Dockerfile.ci" || $0 ~ /^ci\// || $0 ~ /^\.github\/workflows\// {
-              print
-            }
-          ' "$CI_ARTIFACT_DIR/changed-files.txt" |
-            tee "$CI_ARTIFACT_DIR/protected-files.txt"
+          if ! git diff --no-renames --name-only -z \
+            "$diff_base" "$diff_head" \
+            > "$CI_ARTIFACT_DIR/changed-files.z"; then
+            echo "Protected-path changed-path detection failed." >&2
+            exit 1
+          fi
+          changed_files=()
+          if ! mapfile -d '' -t changed_files \
+            < "$CI_ARTIFACT_DIR/changed-files.z"; then
+            echo "Protected-path changed-path inventory read failed." >&2
+            exit 1
+          fi
+          for changed_file in "${changed_files[@]}"; do
+            printf '%q\n' "$changed_file" \
+              >> "$CI_ARTIFACT_DIR/changed-files.txt"
+            case "$changed_file" in
+              Dockerfile.ci | ci/* | .github/workflows/*)
+                printf '%q\n' "$changed_file" \
+                  >> "$CI_ARTIFACT_DIR/protected-files.txt"
+                ;;
+            esac
+          done
 
           if [[ -s "$CI_ARTIFACT_DIR/protected-files.txt" ]]; then
             {
@@ -211,11 +224,13 @@ jobs:
         env:
           CI_BASE_REPOSITORY: ${{ github.repository }}
           CI_BASE_BRANCH: ${{ github.base_ref }}
+          CI_BASE_SHA: ${{ github.event.pull_request.base.sha }}
         run: |
           set -Eeuo pipefail
           git fetch --no-tags --no-recurse-submodules \
             "https://github.com/${CI_BASE_REPOSITORY}.git" \
             "+refs/heads/${CI_BASE_BRANCH}:refs/remotes/photospider-base/${CI_BASE_BRANCH}"
+          git rev-parse --verify "$CI_BASE_SHA^{commit}" >/dev/null
 
       - name: Run healthcheck
         env:
