@@ -8,11 +8,20 @@ source "$SCRIPT_DIR/common.sh"
 
 cd "$REPO_ROOT"
 
+# @brief Check whether a candidate ref resolves to a commit.
+# @param $1 Candidate Git ref.
+# @return Zero only when the nonempty ref resolves to a commit.
+# @throws Nothing; invalid input returns nonzero.
+# @note This helper is for static-check scope, not CI routing classification.
 is_valid_ref() {
   local ref=${1:-}
   [[ -n "$ref" ]] && git rev-parse --verify "$ref^{commit}" >/dev/null 2>&1
 }
 
+# @brief Select the best available baseline for changed-file static checks.
+# @return The chosen ref on stdout, or nonzero when no baseline exists.
+# @throws Nothing; unavailable refs are represented by the return status.
+# @note CI_BASE_REF is preferred, followed by origin/main and HEAD~1.
 diff_base_ref() {
   local base=${CI_BASE_REF:-}
   if is_valid_ref "$base"; then
@@ -30,6 +39,10 @@ diff_base_ref() {
   return 1
 }
 
+# @brief List added, copied, modified, or renamed paths for static checking.
+# @return Git's diff status.
+# @throws Nothing; Git failures propagate to the caller.
+# @note A working-tree diff is used only when no commit baseline is available.
 changed_files() {
   local base
   if base=$(diff_base_ref); then
@@ -50,6 +63,9 @@ if diff_base=$(diff_base_ref); then
 else
   run_logged git_diff_check git diff --check HEAD
 fi
+
+run_logged change_classification_test \
+  bash "$SCRIPT_DIR/change_classification_test.sh"
 
 if ((${#cpp_files[@]} == 0)); then
   echo "No changed C++ files; clang-format and cpplint skipped." |
