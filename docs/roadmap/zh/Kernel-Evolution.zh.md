@@ -6,6 +6,11 @@
 当前事实仍由 `docs/kernel-architecture/` 说明；架构决策记录在 `docs/adr/`；实施状态只由链接的
 GitHub Project 和 Issue 跟踪。
 
+[ADR 0006](../../adr/zh/0006-kernel-documentation-separates-facts-decisions-targets-and-status.zh.md)
+定义上述分离与提升流程。每个交付切片都要引用其当前状态基线、governing ADR、精确目标章节、
+实时 Project/Issue 状态和实际验证结果。完成交付项本身不会让目标变成当前行为；只有实现与长期
+测试支持该行为时，才会修改对应维护中架构文档。
+
 当前分支定位为本地、单用户、embedded 或 Unix-socket sidecar 基线。在 Photospider 被描述为
 通用数据流内核、低延迟交互引擎或多 session server runtime 之前，应完成本文目标。
 

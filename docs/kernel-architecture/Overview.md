@@ -2,7 +2,9 @@
 
 This document summarizes the architecture present in the current source tree.
 The documentation roles and recommended reading order are defined in
-`README.md`; domain terms are defined in `Terminology.md`.
+`README.md` under the information architecture fixed by
+[ADR 0006](../adr/0006-kernel-documentation-separates-facts-decisions-targets-and-status.md);
+domain terms are defined in `Terminology.md`.
 
 ## Architecture Summary
 
@@ -487,8 +489,20 @@ Important current behavior:
   accepted replacement for that ownership is recorded in ADR 0003, but the
   shared `ExecutionService` is not current behavior.
 
-ADR 0001 defines graph-state versus scheduler dispatch, ADR 0002 defines the
-external-library adapter target, ADR 0003 defines the accepted process
-execution domain, and ADR 0004 defines current OpenCV CPU provider concurrency.
-`../roadmap/Kernel-Evolution.md` combines those decisions into the long-term
-target without changing the meaning of this current-state document.
+- [ADR 0001](../adr/0001-graph-state-access-is-not-scheduler-dispatch.md)
+  separates graph-state access from scheduler dispatch.
+- [ADR 0002](../adr/0002-external-libraries-are-kernel-adapters.md)
+  defines the external-library adapter target.
+- [ADR 0003](../adr/0003-process-owned-execution-resources.md) defines the
+  accepted process execution domain.
+- [ADR 0004](../adr/0004-opencv-cpu-operations-are-reentrant-provider-work.md)
+  defines current OpenCV CPU provider concurrency.
+- [ADR 0005](../adr/0005-graph-document-ingestion-is-a-classified-transaction.md)
+  defines the implemented graph-document ingestion transaction.
+- [ADR 0006](../adr/0006-kernel-documentation-separates-facts-decisions-targets-and-status.md)
+  defines how current facts, decisions, targets, and implementation status
+  remain distinct.
+
+The [kernel evolution roadmap](../roadmap/Kernel-Evolution.md) combines the
+target decisions into a long-term direction without changing the meaning of
+this current-state document.

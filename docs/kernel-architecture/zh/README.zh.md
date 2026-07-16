@@ -5,19 +5,36 @@
 
 ## 信息边界
 
-每类信息只有一个权威归属：
+[ADR 0006](../../adr/zh/0006-kernel-documentation-separates-facts-decisions-targets-and-status.zh.md)
+规定文档信息架构。四个活跃层具有不同权威来源与时间含义：
 
-| 信息 | 权威位置 |
-| --- | --- |
-| 当前内核行为与实现 | `docs/kernel-architecture/` |
-| 已接受的架构决策 | `docs/adr/` |
-| 稳定的未来架构目标 | `docs/roadmap/` |
-| 构建、测试与验证指引 | `docs/development/` 和 `docs/CI/` |
-| 实施任务与当前进度 | GitHub Projects、Issues 和活动 OpenSpec change |
-| 已完成迁移与失效提案 | `docs/outdated/` 和已归档 OpenSpec change |
+| 层级 | 权威位置 | 时间含义 |
+| --- | --- | --- |
+| 当前事实 | `docs/kernel-architecture/` | 当前源码树中的行为与所有权。 |
+| 架构决策 | `docs/adr/` | 持久决策及其决策时背景。 |
+| 演进目标 | `docs/roadmap/` | 稳定的已接受方向，不表示当前行为。 |
+| 实施状态 | 链接的 GitHub Project 和 Issue | 一个交付切片的实时状态、依赖与验证结果。 |
 
-内核架构文档不得包含任务勾选、实施阶段报告、迁移状态表或没有时间边界的 TODO。
-未来概念只有在成为当前软件行为后才进入本目录；在此之前，它属于 roadmap 或 ADR。
+构建、测试和验证指引继续位于 `docs/development/` 与 `docs/CI/`。活动 OpenSpec change 可以保存
+change-local 计划和清单，但不是独立公开完成权威。已完成迁移和失效提案可以保留在
+`docs/outdated/` 或归档 change 记录中；它们是历史资料，不是活跃事实来源。
+
+内核架构文档包含可观察行为、已实现的所有权与机制、当前限制、不变量、故障语义和源码/测试
+入口。它们不得包含任务勾选、实施阶段报告、迁移状态表、没有时间边界的 TODO 或未来 runtime
+object。未来概念只有在代码和长期验证使其成为当前软件行为后，才会进入本目录。
+
+## 交叉引用与更新规则
+
+- 当前文档可以链接 ADR 说明理由，链接 roadmap 提供明确标记的未来背景；这些链接不会让目标
+  对象成为当前事实。
+- ADR 背景是决策时历史 snapshot。即使已接受 ADR 的迁移尚未完成，维护中的行为仍由本目录
+  权威说明。
+- Roadmap 可以概述明确标记的当前基线，但必须服从对应当前文档并链接 governing ADR。
+- 每个实施 Issue 或 PR 都要引用相关当前文档、governing ADR、精确 roadmap 目标、实时
+  Project/Issue 状态和实际验证证据。
+- 目标行为落地时，同一变更更新代码、长期测试、受影响的英文当前状态文档及其中文镜像。
+  目标改变时更新 roadmap；决策改变时必须新建或以新 ADR 取代原 ADR。仅状态变化不会改变
+  上述任何层。
 
 ## 阅读顺序
 

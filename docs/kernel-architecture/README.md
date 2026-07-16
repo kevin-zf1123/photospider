@@ -7,21 +7,46 @@ source locations that enforce those facts.
 
 ## Information Boundaries
 
-Each kind of information has one home:
+[ADR 0006](../adr/0006-kernel-documentation-separates-facts-decisions-targets-and-status.md)
+governs the documentation information architecture. Its four active layers
+have distinct authorities and time meanings:
 
-| Information | Authoritative location |
-| --- | --- |
-| Current kernel behavior and implementation | `docs/kernel-architecture/` |
-| Accepted architectural decisions | `docs/adr/` |
-| Stable future architecture goals | `docs/roadmap/` |
-| Build, test, and validation guidance | `docs/development/` and `docs/CI/` |
-| Implementation tasks and current progress | GitHub Projects, Issues, and active OpenSpec changes |
-| Completed migrations and obsolete proposals | `docs/outdated/` and archived OpenSpec changes |
+| Layer | Authoritative location | Time meaning |
+| --- | --- | --- |
+| Current facts | `docs/kernel-architecture/` | Behavior and ownership in the current source tree. |
+| Architectural decisions | `docs/adr/` | Durable decisions and their decision-time context. |
+| Evolution targets | `docs/roadmap/` | Stable accepted direction, not a claim about current behavior. |
+| Implementation status | Linked GitHub Projects and Issues | Live state, dependencies, and verification of one delivery slice. |
 
-Kernel architecture documents must not contain task checkboxes, implementation
-phase reports, migration status tables, or undated TODO lists. A future concept
-is documented here only after it becomes current software behavior. Before
-that point it belongs in a roadmap or ADR.
+Build, test, and validation guidance remains in `docs/development/` and
+`docs/CI/`. An active OpenSpec change may hold a change-local plan and
+checklist, but it is not an independent public completion authority. Completed
+migrations and obsolete proposals may be retained in `docs/outdated/` or
+archived change records; they are historical, not active sources of truth.
+
+Kernel architecture documents contain observable behavior, implemented
+ownership and mechanisms, current limitations, invariants, failure semantics,
+and source/test entry points. They must not contain task checkboxes,
+implementation phase reports, migration status tables, undated TODO lists, or
+future runtime objects. A future concept enters this directory only after code
+and durable verification make it current software behavior.
+
+## Cross-Reference and Update Rules
+
+- Current documents may link ADRs for rationale and roadmaps for explicitly
+  labelled future context; those links do not make target objects current.
+- ADR context is a historical decision-time snapshot. Maintained behavior
+  remains authoritative here, even when an accepted ADR migration is
+  incomplete.
+- Roadmaps may summarize an explicitly labelled current baseline, but must
+  defer to the corresponding current document and link the governing ADR.
+- Each implementation Issue or PR cites the relevant current document,
+  governing ADR, exact roadmap target, live Project/Issue state, and actual
+  verification evidence.
+- When a target behavior lands, the same change updates code, long-lived tests,
+  the affected English current-state document, and its Chinese mirror. A
+  changed target updates the roadmap; a changed decision requires a new or
+  superseding ADR. A status transition alone changes none of those layers.
 
 ## Reading Order
 

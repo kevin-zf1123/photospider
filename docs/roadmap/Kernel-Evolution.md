@@ -9,6 +9,14 @@ implementation checklist. Current facts remain authoritative in
 `docs/adr/`; implementation state is tracked only in the linked GitHub
 Projects and Issues.
 
+[ADR 0006](../adr/0006-kernel-documentation-separates-facts-decisions-targets-and-status.md)
+defines this separation and the promotion workflow. Each delivery slice cites
+its current-state baseline, governing ADR, exact target section, live
+Project/Issue state, and actual verification. Completing a delivery item does
+not by itself make the target current behavior; the corresponding maintained
+architecture document changes only when implementation and durable tests
+support it.
+
 The current branch is treated as a local, single-user, embedded or Unix-socket
 sidecar baseline. The target described here is required before Photospider is
 presented as a general dataflow kernel, a low-latency interactive engine, or a
