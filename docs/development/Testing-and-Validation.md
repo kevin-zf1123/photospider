@@ -419,6 +419,11 @@ feature branches cannot change `ci/**`, `.github/workflows/**`, or
 Only a same-repository `CI/**` pull request is deduplicated in favor of that
 branch's push run. A fork with the same branch prefix is rejected before
 checkout, and branch spelling alone never authorizes protected-path changes.
+Both production guards write `git diff --name-only -z` to a parent-visible
+artifact, read exact NUL records into Bash, match complete path values, and use
+`%q` for human-readable changed/protected logs. Producer or reader failure is
+fail-closed, and a newline inside a valid `ci/**` filename cannot bypass or
+forge the protected-path inventory.
 
 Every triggered run keeps a stable `healthcheck` conclusion. The integration
 workflow classifies exact event revisions before configuration: changes limited
@@ -437,11 +442,14 @@ Published-image healthcheck execution and build/test integration jobs run in
 `ghcr.io/<owner>/<repo>/photospider-ci:latest`; lightweight routing and result
 gates remain on `ubuntu-latest`. If a change modifies an image input, the
 workflow builds `photospider-ci:local` and runs the same repository scripts in
-that image so validation does not race image publication. Before a pull-request
-local-image healthcheck builds the head Dockerfile or executes the mounted
-workspace, its job fetches the target branch from the base-repository URL and
-verifies the event's exact base SHA, ensuring the container can resolve the
-supplied `CI_BASE_REF` independently of the fork checkout's `origin`.
+that image so validation does not race image publication. The pull-request
+published-image and local-image healthcheck jobs each fetch the target branch
+from the base-repository URL and verify `CI_BASE_SHA` as the event's exact base
+commit inside their own job. Published-image verification precedes
+`healthcheck.sh`; local-image verification precedes the head Dockerfile build
+and mounted-workspace execution. Fetch or parse failure therefore stops before
+the script's fallback base selection, while the verified exact SHA is supplied
+as `CI_BASE_REF` independently of the fork checkout's `origin`.
 `Dockerfile.ci` installs the C++ toolchain, CMake, OpenCV, yaml-cpp, GTest,
 nlohmann-json, clang-format, Python, and cpplint required by those scripts.
 The image detector uses no Git status filter. The healthcheck static-scope
@@ -458,9 +466,11 @@ The maintained entry points are:
 - `ci/scripts/change_classification.sh` and
   `ci/scripts/change_classification_test.sh` for fail-closed documentation-only
   routing and its durable event/path regression matrix.
-- `ci/scripts/ci_routing_test.sh` for same-repository/fork routing, stable gate,
-  local-image exact-base preparation, image-base, unusual-path, and
-  detector-failure propagation contracts.
+- `ci/scripts/ci_routing_test.sh` for exact canonical locking of both
+  `protected-ci-paths.if` expressions; execution of the real stable-gate,
+  fork-rejection, and protected-path blocks; published/local job-scoped exact
+  base ordering; newline-path artifacts; and detector/reader/producer failure
+  propagation. The source lock does not emulate GitHub's expression evaluator.
 - `ci/scripts/build_integrity.sh` for configure, required-target and full builds,
   plus CTest discovery.
 - `ci/scripts/ctest_full.sh` for the main CTest suite.
