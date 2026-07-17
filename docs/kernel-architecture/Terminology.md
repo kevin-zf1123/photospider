@@ -1,9 +1,9 @@
 # Kernel Terminology
 
 This glossary defines the language used by the current kernel implementation.
-Terms that exist only in the accepted future direction are defined in
-`docs/roadmap/Kernel-Evolution.md` and must not be described as current runtime
-objects.
+Terms that exist only in the accepted
+[kernel evolution target](../roadmap/Kernel-Evolution.md) must not be described
+as current runtime objects.
 
 ## Product and Runtime Ownership
 
@@ -199,12 +199,29 @@ planning, cache, or scheduling semantics.
 - `DirtyRegionSnapshot` is not `ComputeTaskGraph`.
 - A ready task is not a task graph.
 - HP cache is not RT proxy state.
-- `ImageBuffer` is not the future general data model.
+- `ImageBuffer` is not the
+  [target general data model](../roadmap/Kernel-Evolution.md#general-data-and-regions).
 - A worker request is not a resolved grant, and a grant is not necessarily the
   final scheduler slot charge.
 - A reserved scheduler worker slot is not proof of one currently running
   thread.
 - `SchedulerWorkerBudget` is not a worker pool, fairness authority, or a limit
   on every thread in the process.
-- The current per-graph `IScheduler` is not the target process execution
-  domain.
+- The current per-graph `IScheduler` is not the
+  [target process execution domain](../roadmap/Kernel-Evolution.md#process-execution-domain).
+
+## Implementation and Validation Entry Points
+
+- `include/photospider/host/host.hpp`
+- `include/photospider/core/compute_intent.hpp`
+- `include/photospider/core/image_buffer.hpp`
+- `include/photospider/scheduler/scheduler.hpp`
+- `src/lib/runtime/graph_runtime.hpp`
+- `src/lib/graph/graph_model.hpp`
+- `src/lib/graph/graph_state_executor.hpp`
+- `src/lib/compute/task_graph_planning.hpp`
+- `src/lib/compute/dirty_region_snapshot.hpp`
+- `src/lib/scheduler/scheduler_worker_budget.hpp`
+- `tests/integration/test_kernel_contracts.cpp`
+- `tests/integration/test_compute_service_split.cpp`
+- `tests/integration/test_scheduler_worker_budget.cpp`

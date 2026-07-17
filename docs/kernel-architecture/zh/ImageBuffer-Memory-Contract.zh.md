@@ -17,11 +17,15 @@ image payload。
 | `data` | CPU 可访问的数据 owner 或 view。 |
 | `context` | 后端特定资源 owner 或 handle。 |
 
-`InputTile` 是指向上游 `ImageBuffer` 加 `cv::Rect` ROI 的只读非拥有 view。它携带
-`const ImageBuffer*`，因此 tiled 算子不能通过 tile API 替换或修改上游 buffer
-元数据。`OutputTile` 是面向目标区域的可写对应类型，携带可变 `ImageBuffer*`。
-`TileTask` 将一个 `OutputTile` 与零个或多个 `InputTile` view 组合起来，交给 tiled
-算子回调执行。
+公共 tile 契约使用 `InputTileView` 与 `OutputTileView`。二者都携带借用的
+`const ImageBuffer*` 和 backend-neutral `PixelRect`。Input view 是只读的；output view 允许
+adapter 从保留的 payload 暴露可写像素，但 callback 不能替换 descriptor dimension、device
+identity、payload ownership 或 backend context。公共 `TiledOperation` callback 以
+`const OutputTileView&` 接收 output，并以 `OperationTileInputView` value 接收 input。
+
+私有 compute 层另行使用 `InputTile`、`OutputTile` 与 `TileTask`。这些只属于 backend 的 value
+携带 `cv::Rect`；私有 `OutputTile` 在把 task-owned output storage 接到 adapter 时使用可变
+`ImageBuffer*`。它们不会跨越公共 operation 或 Host contract。
 
 ## CPU 缓冲区契约
 
@@ -106,7 +110,7 @@ compute 路径。`CMakeLists.txt` 通过 `plugins/ops/metal/perlin_noise_metal.m
 Metal operation 路径独立拥有 backend-specific object。直接解释 `context` 属于后端特定行为，
 不是可移植内存契约。
 
-## 能力边界
+## 边界与原理
 
 `ImageBuffer` 是当前二维图像 payload 和 operation DSO 契约。其 channel count 在结构上不限制为
 四，`FLOAT64` 也是已声明 scalar type，但这些事实不承诺每个 loader、operation、cache 或
@@ -128,7 +132,24 @@ carrier。新增通用 value kind、rank/shape model、descriptor、handle 或 r
 
 因此，8/16 通道图像和 FP64 不能被宣传为完整 framework contract；FP4、latent Tensor、
 Deep Image 和 vector-scene value 不受 `ImageBuffer` 支持。通用 `Value`、descriptor、handle 和
-region 目标记录在 `../../roadmap/zh/Kernel-Evolution.zh.md`。
+region 方向记录在精确的
+[通用数据与 Region 目标](../../roadmap/zh/Kernel-Evolution.zh.md#通用数据与-region)中。
 
 可移植 CPU allocation guarantee 仍是 64-byte row-start alignment；128-byte alignment 不属于
 当前契约。
+
+把不可变 descriptor 与可写 payload view 分开，可以防止并行 tile callback 竞态替换 ownership
+或 device metadata。公共 view 使用 `PixelRect`，也能避免私有 OpenCV geometry 成为 operation ABI
+的一部分。
+
+## 实现与验证入口
+
+- `include/photospider/core/image_buffer.hpp`
+- `include/photospider/plugin/op_contract.hpp`
+- `src/lib/core/image_buffer.cpp`
+- `src/lib/compute/image_buffer.hpp`
+- `src/lib/adapters/opencv/buffer_adapter_opencv.*`
+- `src/lib/ipc/output_store.*`
+- `tests/unit/test_image_buffer_contracts.cpp`
+- `tests/integration/test_compute_service_split.cpp`
+- `tests/integration/test_ipc_daemon.cpp`

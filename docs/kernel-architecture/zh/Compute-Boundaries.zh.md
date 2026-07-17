@@ -162,8 +162,11 @@ operation lock，也不是 scheduler exclusivity contract。仓库自有 provide
 [ADR 0004](../../adr/zh/0004-opencv-cpu-operations-are-reentrant-provider-work.zh.md)记录本项决策。
 长期 integration coverage 会证明 `1/2/4/8` grant 对应精确 callback overlap，以及单 worker 与
 八 worker 输出按位相同；手工原生扩展性证据记录在
-`../../development/zh/Testing-and-Validation.zh.md`。ADR 0002 仍把未来 OpenCV algorithm、codec、
-exception translation 与 process state 放入可选 provider/adapter，而不是 kernel 语义。
+`../../development/zh/Testing-and-Validation.zh.md`。
+[ADR 0002](../../adr/zh/0002-external-libraries-are-kernel-adapters.zh.md)与精确的
+[依赖中立内核目标](../../roadmap/zh/Kernel-Evolution.zh.md#依赖中立内核)会把 OpenCV algorithm、
+codec、exception translation 与 process state 放入可选 provider/adapter，而不再让它们定义目标
+kernel 语义。
 
 ## Intent 与提交边界
 
@@ -208,9 +211,10 @@ metadata 推导该关系。
 3. 临时输出可以在可见前验证。
 4. 物理执行所有权与 dependency correctness 保持可分离。
 
-ADR 0003 记录了供后续实现的另一项已接受 ownership decision。本文是当前 per-graph scheduler
-ownership 及其有界进程 admission containment 的权威说明；该 ledger 不是目标 shared
-`ExecutionService`。
+[ADR 0003](../../adr/zh/0003-process-owned-execution-resources.zh.md)与精确的
+[进程执行域目标](../../roadmap/zh/Kernel-Evolution.zh.md#进程执行域)记录了供后续实现的另一项
+已接受 ownership decision。本文是当前 per-graph scheduler ownership 及其有界进程 admission
+containment 的权威说明；该 ledger 不是目标 shared `ExecutionService`。
 
 ## 实现与验证入口
 

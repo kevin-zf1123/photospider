@@ -10,7 +10,7 @@ domain terms are defined in `Terminology.md`.
 
 Photospider is built around a graph runtime with a service split, operation
 registry, cache layer, scheduler abstraction, and a frontend-facing Host seam.
-Parallel planned work now dispatches through scheduler-owned task runtimes.
+Parallel planned work dispatches through scheduler-owned task runtimes.
 Graph-state commands and compute requests that mutate visible graph state enter
 an explicit per-graph `GraphStateExecutor` boundary instead of the scheduler
 dispatch path. That boundary is a bounded FIFO lane with one graph-owned worker
@@ -222,28 +222,9 @@ defined in `../codebase-structure/IPC-Protocol-v1.md`.
 | `PluginManager` | Unique process-lifetime operation plugin owner; serializes load/seed/unload/inspection and owns source/restoration/handle state. Load registers and records dynamic plugins, seed initializes or reconciles built-ins, and only explicit global unload removes dynamic plugins. |
 | `OpRegistry` | Process-global operation implementation registry with coherent copied callback snapshots, including HP/RT, tiled/monolithic, device metadata, and ROI propagators. |
 
-## Maintained Documents
+## Observable Behavior
 
-| Document | Scope |
-| --- | --- |
-| `README.md` | Documentation roles, reading order, and content rules. |
-| `Overview.md` | Top-level module ownership and current architecture state. |
-| `Terminology.md` | Canonical current kernel language and distinctions. |
-| `Data-Model.md` | `GraphModel`, `Node`, YAML schema, inputs, outputs, parameters, and cache fields. |
-| `Graph-Lifecycle.md` | Graph runtime ownership and load/reload/edit/clear semantics. |
-| `Compute-Boundaries.md` | Current compute module responsibilities, ownership, and invariants. |
-| `Compute-Flow.md` | Sequential, parallel, RT, HP, ROI update, and event/timing flow. |
-| `Cache-Model.md` | HP/RT memory cache semantics and disk cache behavior. |
-| `ImageBuffer-Memory-Contract.md` | Public `ImageBuffer` memory/device contract, alignment, stride, and adapter rules. |
-| `Dirty-Region-Propagation.md` | ROI propagation, tile mapping, and current tunable tile defaults. |
-| `Scheduler-Architecture.md` | Current `IScheduler` lifecycle, built-in schedulers, and task-runtime dispatch boundary. |
-| `Plugin-ABI.md` | Operation plugin and scheduler plugin ABI contracts. |
-
-Testing guidance is maintained in `../development/Testing-and-Validation.md`.
-Accepted future ownership and data-model goals are maintained in
-`../roadmap/Kernel-Evolution.md` rather than mixed into current behavior.
-
-## Compute Flow
+### Compute Flow
 
 Typical REPL compute flow:
 
@@ -332,7 +313,7 @@ Production bounds include 64 active and 256 retained terminal compute jobs;
 compute events; and 65,536 scheduler-trace entries. The full method mapping and
 all string/page/snapshot/frame limits live in the maintained protocol document.
 
-## Bounded Event and Trace Observation
+### Bounded Event and Trace Observation
 
 The public Host observation boundary never returns an unbounded compute-event
 or scheduler-trace vector. `ComputeEventSnapshot` and
@@ -355,7 +336,7 @@ Host limits and trace cursors return `GraphErrc::InvalidParameter` without
 mutating retained observations; a missing session remains
 `GraphErrc::NotFound` for a valid request.
 
-## Scheduler Model
+### Scheduler Model
 
 The runtime recognizes two compute intents:
 
@@ -404,7 +385,7 @@ against the fixed 32-slot process ceiling. Capacity exhaustion is a graph
 `InvalidParameter`. This is admission containment, not a shared executor or a
 limit on every process thread.
 
-## Operation Registry
+### Operation Registry
 
 Operations are keyed by `type:subtype`. The registry supports:
 
@@ -423,7 +404,7 @@ to `plugins/ops/metal/`. Dynamic operation plugins register through the exact
 v2 registrar using `ps::plugin` snapshots; public callbacks receive no mutable
 `Node`, `GraphModel`, `OpRegistry`, YAML tree, or private cache owner.
 
-## Cache Model
+### Cache Model
 
 The cache layer uses one node-local formal cache plus one runtime-owned RT
 proxy graph:
@@ -442,7 +423,7 @@ staged through `HighPrecisionDirtyWriteBuffer` before graph commit. Formal
 cache save, load, synchronization behavior, subsequent HP compute, and
 long-term storage use HP output.
 
-## ImageBuffer Contract
+### ImageBuffer Contract
 
 `ImageBuffer` is a public kernel contract, not an internal implementation
 detail. Operators, schedulers, plugins, adapters, and cache code may depend on
@@ -454,12 +435,12 @@ preserve alignment. ARM Mac high-performance paths may need or benefit from
 128-byte alignment, but 128-byte alignment is an optimization target rather than
 the portable minimum.
 
-## Dirty Region Propagation
+### Dirty Region Propagation
 
 ROI propagation is handled through `RoiPropagationService` using
 registry-provided propagators, `GraphModel` topology adjacency, and
-`GraphExtentResolver`. The active propagation notes are in
-`docs/kernel-architecture/Dirty-Region-Propagation.md`.
+`GraphExtentResolver`. The active behavior is documented in
+[Dirty Region Propagation and Work Selection](Dirty-Region-Propagation.md).
 
 Important current behavior:
 
@@ -469,7 +450,7 @@ Important current behavior:
 - tiled compute metadata for operators that can execute in tile space
 - current tile defaults are tunable implementation parameters, not permanent ABI
 
-## Current Boundary Summary
+## Boundaries and Rationale
 
 - `Kernel` composes graph-scoped services and exposes no installable API.
 - `ComputeService` coordinates private collaborators; its module boundaries are
@@ -506,3 +487,16 @@ Important current behavior:
 The [kernel evolution roadmap](../roadmap/Kernel-Evolution.md) combines the
 target decisions into a long-term direction without changing the meaning of
 this current-state document.
+
+## Implementation and Validation Entry Points
+
+- `CMakeLists.txt`
+- `include/photospider/host/host.hpp`
+- `src/lib/runtime/kernel.*`
+- `src/lib/runtime/graph_runtime.*`
+- `src/lib/host/embedded_host.cpp`
+- `tests/integration/test_host_adapter.cpp`
+- `tests/integration/test_kernel_contracts.cpp`
+- `tests/integration/test_ipc_daemon.cpp`
+- `tests/integration/static_product_consumer_smoke.py`
+- `tests/integration/ipc_disabled_install_smoke.py`

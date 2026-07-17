@@ -209,6 +209,23 @@ serialization 与 shutdown drainage。其准确 mapping、lease、socket 与 shu
 domain 与 code 分支，而不是按 diagnostic text 分支。IPC 会序列化该精确 status，并在 Host load
 失败时回滚其 reserved session name；它不会引入 transport-only graph-document taxonomy。
 
+## 边界与原理
+
+- Session identity 是复制的 label；graph 与 runtime ownership 绝不会跨过 Host boundary。
+- Prepare-before-publish load 与 prepare-before-swap reload 会把不完整 topology 隔离在 graph map
+  之外，并在分类失败时保留先前 graph。
+- Graph-owner transaction 与 destination-file side effect 保持分离：save 会保留 graph state，
+  但不承诺 destination atomic replace。
+- `GraphStateExecutor` 串行化可见 graph ownership；scheduler reservation 则绑定 concrete
+  scheduler lifetime 与 rollback。
+
+这些边界使 publication、mutation 与 resource ownership 可以独立测试，而无需把共享 diagnostic
+state 当作 transaction log。
+[ADR 0005](../../adr/zh/0005-graph-document-ingestion-is-a-classified-transaction.zh.md)约束当前
+ingestion contract。已接受的 injected persistence 边界继续保留在精确的
+[依赖中立内核目标](../../roadmap/zh/Kernel-Evolution.zh.md#依赖中立内核)中，直到源码与长期测试使其
+成为当前行为。
+
 ## 实现与验证入口
 
 - `src/lib/runtime/kernel.cpp`

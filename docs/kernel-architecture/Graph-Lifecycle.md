@@ -263,6 +263,26 @@ IPC serializes that exact status and rolls its reserved session name back when
 Host load fails; it does not introduce a transport-only graph-document
 taxonomy.
 
+## Boundaries and Rationale
+
+- Session identity is a copied label; graph and runtime ownership never cross
+  the Host boundary.
+- Prepare-before-publish load and prepare-before-swap reload keep incomplete
+  topology out of the graph map and preserve the prior graph on classified
+  failure.
+- The graph-owner transaction and destination-file side effects are separate:
+  save preserves graph state but does not promise atomic destination replace.
+- `GraphStateExecutor` serializes visible graph ownership, while scheduler
+  reservations remain attached to concrete scheduler lifetime and rollback.
+
+These boundaries make publication, mutation, and resource ownership testable
+without using shared diagnostic state as a transaction log.
+[ADR 0005](../adr/0005-graph-document-ingestion-is-a-classified-transaction.md)
+governs the current ingestion contract. The accepted injected persistence
+boundary remains in the exact
+[dependency-neutral kernel target](../roadmap/Kernel-Evolution.md#dependency-neutral-kernel)
+until source and durable tests make it current behavior.
+
 ## Implementation and Validation Entry Points
 
 - `src/lib/runtime/kernel.cpp`

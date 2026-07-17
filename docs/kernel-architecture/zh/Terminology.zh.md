@@ -1,7 +1,7 @@
 # 内核术语
 
-本词汇表定义当前内核实现使用的语言。只属于已接受未来方向的术语记录在
-`docs/roadmap/zh/Kernel-Evolution.zh.md`，不得被描述为当前运行时对象。
+本词汇表定义当前内核实现使用的语言。只属于已接受
+[内核演进目标](../../roadmap/zh/Kernel-Evolution.zh.md)的术语不得被描述为当前运行时对象。
 
 ## 产品与运行时所有权
 
@@ -164,8 +164,24 @@ cache 或 scheduling 语义的所有者。
 - `DirtyRegionSnapshot` 不是 `ComputeTaskGraph`。
 - ready task 不是任务图。
 - HP cache 不是 RT proxy state。
-- `ImageBuffer` 不是未来通用数据模型。
+- `ImageBuffer` 不是[目标通用数据模型](../../roadmap/zh/Kernel-Evolution.zh.md#通用数据与-region)。
 - Worker request 不是 resolved grant，grant 也不一定等于最终 scheduler slot 计费。
 - 已预留 scheduler worker slot 不能证明当前正好有一个 thread 在运行。
 - `SchedulerWorkerBudget` 不是 worker pool、fairness authority，也不是进程中所有 thread 的上限。
-- 当前每图 `IScheduler` 不是目标进程执行域。
+- 当前每图 `IScheduler` 不是[目标进程执行域](../../roadmap/zh/Kernel-Evolution.zh.md#进程执行域)。
+
+## 实现与验证入口
+
+- `include/photospider/host/host.hpp`
+- `include/photospider/core/compute_intent.hpp`
+- `include/photospider/core/image_buffer.hpp`
+- `include/photospider/scheduler/scheduler.hpp`
+- `src/lib/runtime/graph_runtime.hpp`
+- `src/lib/graph/graph_model.hpp`
+- `src/lib/graph/graph_state_executor.hpp`
+- `src/lib/compute/task_graph_planning.hpp`
+- `src/lib/compute/dirty_region_snapshot.hpp`
+- `src/lib/scheduler/scheduler_worker_budget.hpp`
+- `tests/integration/test_kernel_contracts.cpp`
+- `tests/integration/test_compute_service_split.cpp`
+- `tests/integration/test_scheduler_worker_budget.cpp`

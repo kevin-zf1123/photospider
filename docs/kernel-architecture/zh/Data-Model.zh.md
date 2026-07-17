@@ -140,3 +140,30 @@ RT proxy commit 之后。
 | `global_scale_x`, `global_scale_y` | 尺度元数据。 |
 
 `SpatialDependencyMap` 是用于数据依赖空间传播的可选节点本地 LUT。
+
+## 边界与原理
+
+- `GraphModel` 与 `Node` 是私有 backend state。Public Host caller 与 operation plugin 接收复制的
+  公共 value，而不是 model reference。
+- 结构变更必须经过 model helper，使节点存储、两个方向的邻接、topology generation 与缓存的
+  planning state 作为一份一致图状态变为可见。
+- Scheduler 只接收 ready-task metadata，绝不拥有节点存储、参数、输出值、拓扑或缓存权威。
+- `YAML::Node`、`cv::Rect` 与 `cv::Size` 仍是当前私有 graph 与 spatial representation。这是
+  明确的当前限制，不是已经落地的 adapter 边界。
+
+把图 identity 与 topology 保存在同一个 model 中，可以让 traversal、compute、inspection 与
+mutation 观察同一个 generation。私有 OpenCV/YAML 表示的已接受替代方向由
+[ADR 0002](../../adr/zh/0002-external-libraries-are-kernel-adapters.zh.md)和精确的
+[依赖中立内核目标](../../roadmap/zh/Kernel-Evolution.zh.md#依赖中立内核)约束；这两份文档都不会
+改变上文描述的当前字段。
+
+## 实现与验证入口
+
+- `src/lib/graph/graph_model.*`
+- `src/lib/graph/node.hpp`
+- `src/lib/graph/node_yaml.cpp`
+- `src/lib/graph/graph_io_service.*`
+- `src/lib/core/ps_types.*`
+- `tests/unit/test_graph_topology_boundaries.cpp`
+- `tests/integration/test_kernel_contracts.cpp`
+- `tests/integration/test_graph_document_errors.cpp`

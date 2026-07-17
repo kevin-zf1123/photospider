@@ -95,16 +95,40 @@ Disk cache save, load, and synchronization use `cached_output_high_precision`
 only. RT proxy output does not protect stale disk files and is not promoted to
 disk cache state.
 
-## Cache Rules
+## Boundaries and Rationale
 
-- New HP code writes `cached_output_high_precision`.
-- New RT code writes `RealtimeProxyGraph` as transient interactive state, using
+- HP paths write `cached_output_high_precision`.
+- RT paths write `RealtimeProxyGraph` as transient interactive state, using
   `RealtimeProxyWriteBuffer` for dirty worker writes before proxy commit.
 - Formal cache save/load/sync behavior, subsequent HP compute, and long-term
   storage must use HP output and must not promote RT output to authoritative
   cache.
-- Tests should verify HP graph cache and RT proxy graph state independently.
+- Long-lived tests verify HP graph cache and RT proxy graph state
+  independently.
 
 `GraphInspectService` selects node-local display metadata from HP cache only.
 The current Host inspection surface does not promote RT proxy state into
 `GraphModel` or expose it as authoritative cache metadata.
+
+One formal cache authority prevents a low-resolution preview from silently
+becoming an HP dependency or persistence source. Request-local staging keeps
+partially assembled dirty output invisible until its domain-specific work has
+settled.
+
+The current private disk-cache implementation calls OpenCV image codecs and
+stores named output metadata as YAML. That direct dependency is a current
+limitation. [ADR 0002](../adr/0002-external-libraries-are-kernel-adapters.md)
+and the exact
+[dependency-neutral kernel target](../roadmap/Kernel-Evolution.md#dependency-neutral-kernel)
+describe the accepted codec and value boundary without presenting it as
+implemented behavior.
+
+## Implementation and Validation Entry Points
+
+- `src/lib/graph/graph_cache_service.*`
+- `src/lib/graph/graph_model.*`
+- `src/lib/compute/realtime_proxy_graph.*`
+- `src/lib/compute/dirty_write_buffers.*`
+- `tests/integration/test_kernel_contracts.cpp`
+- `tests/integration/test_compute_service_split.cpp`
+- `tests/integration/test_host_adapter.cpp`

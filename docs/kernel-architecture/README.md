@@ -21,8 +21,9 @@ have distinct authorities and time meanings:
 Build, test, and validation guidance remains in `docs/development/` and
 `docs/CI/`. An active OpenSpec change may hold a change-local plan and
 checklist, but it is not an independent public completion authority. Completed
-migrations and obsolete proposals may be retained in `docs/outdated/` or
-archived change records; they are historical, not active sources of truth.
+migrations and obsolete proposals are indexed by the
+[outdated-document archive](../outdated/README.md) or retained in archived
+change records; they are historical evidence, not active sources of truth.
 
 Kernel architecture documents contain observable behavior, implemented
 ownership and mechanisms, current limitations, invariants, failure semantics,
@@ -48,42 +49,45 @@ and durable verification make it current software behavior.
   changed target updates the roadmap; a changed decision requires a new or
   superseding ADR. A status transition alone changes none of those layers.
 
-## Reading Order
+## Documentation Map
 
-1. [Overview](Overview.md) explains product seams, module ownership, and the
-   top-level call graph.
-2. [Terminology](Terminology.md) defines the current domain language and terms
-   that must not be conflated.
-3. [Data Model](Data-Model.md) and [Graph Lifecycle](Graph-Lifecycle.md) explain
-   graph state, topology, persistence behavior, and mutation semantics.
-4. [Compute Boundaries](Compute-Boundaries.md) and
-   [Compute Flow](Compute-Flow.md) explain planning, pruning, dispatch, HP/RT
-   intent, and commit behavior.
-5. [Cache Model](Cache-Model.md) and
-   [Dirty Region Propagation](Dirty-Region-Propagation.md) define cache
-   authority, ROI mathematics, dirty state, and tile mapping.
-6. [Scheduler Architecture](Scheduler-Architecture.md) defines the current
-   ready-task scheduler interface and physical worker ownership.
-7. [ImageBuffer Memory Contract](ImageBuffer-Memory-Contract.md) and
-   [Plugin ABI](Plugin-ABI.md) define memory, device, operation, scheduler, and
-   DSO contracts.
+Use the maintained documents by question rather than by file age. A document
+may support more than one lens, but each fact has one primary home:
+
+| Lens | Question answered | Primary documents |
+| --- | --- | --- |
+| Terminology | What do current names and states mean, and which concepts must remain distinct? | [Terminology](Terminology.md) and [Data Model](Data-Model.md) |
+| Behavior | What can a caller observe during graph lifecycle, compute, cache, and dirty-region work? | [Graph Lifecycle](Graph-Lifecycle.md), [Compute Flow](Compute-Flow.md), [Cache Model](Cache-Model.md), and [Dirty Region Propagation](Dirty-Region-Propagation.md) |
+| Implementation | Which current modules own the behavior, and what is the call or dispatch path? | [Overview](Overview.md), [Compute Boundaries](Compute-Boundaries.md), and [Scheduler Architecture](Scheduler-Architecture.md) |
+| Boundaries | Which values, ownership rules, invariants, limitations, and failure surfaces may consumers rely on? | [ImageBuffer Memory Contract](ImageBuffer-Memory-Contract.md), [Plugin ABI](Plugin-ABI.md), and [Compute Boundaries](Compute-Boundaries.md) |
+| Rationale | Why is the current mechanism separated this way, and which durable decisions constrain it? | Rationale sections in the current documents and the governing [ADRs](../adr/) |
+
+A first-time reader should start with [Terminology](Terminology.md), then read
+[Overview](Overview.md), and follow the behavior or boundary document for the
+subsystem being changed. Source and long-lived test entry points at the end of
+each domain document provide the evidence trail for current claims.
 
 The accepted post-merge direction is described separately in
-[Kernel Evolution](../roadmap/Kernel-Evolution.md). It is not evidence of
-current implementation.
+[Kernel Evolution](../roadmap/Kernel-Evolution.md). It is a target, not evidence
+of current implementation. Historical phase reports and migration plans remain
+under the [outdated-document archive](../outdated/README.md) and must be checked
+against the maintained current documents before use.
 
-## Document Shape
+## Current-Document Shape
 
-A maintained domain document should answer, as applicable:
+A maintained domain document uses the following order where the lens applies:
 
-1. What terms and state belong to the domain?
-2. What behavior can callers observe?
-3. Who owns state and how long does it live?
-4. Which current modules and call paths implement the behavior?
-5. Which invariants and prohibited dependencies define the boundary?
-6. Why is the mechanism designed this way?
-7. How are errors, cancellation, and partial work exposed?
-8. Which source and long-lived tests provide the implementation entry points?
+1. terms and current state;
+2. observable behavior;
+3. current implementation and ownership;
+4. boundaries, invariants, limitations, and failure semantics;
+5. rationale for the current mechanism; and
+6. source and long-lived test entry points.
+
+Domain-specific headings may refine those lenses, but they must not turn a
+future target into a current object or duplicate a migration checklist. When a
+document needs future context, it states the current limitation first and then
+links the exact roadmap target or governing ADR.
 
 English documents are authoritative. Files under `zh/` are faithful,
 reader-oriented Chinese translations and are updated in the same change.

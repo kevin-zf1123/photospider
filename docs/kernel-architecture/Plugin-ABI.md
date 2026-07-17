@@ -541,7 +541,7 @@ capacity during replacement; graph-load rollback returns both unpublished
 intent reservations. A live or failed-close graph cannot release its grant
 early.
 
-## Current ABI Status
+## Boundaries and Rationale
 
 Both current plugin ABIs are explicitly provisional. The operation entrypoint
 name rejects unsupported registration generations, but accepted registrar
@@ -554,9 +554,19 @@ diagnostic metadata only and never substitutes for the numeric handshake.
 For both interfaces, binary compatibility depends on the matching Photospider
 SDK and a compatible compiler, standard library, C++ ABI, allocator/runtime,
 exception model, and RTTI configuration. C linkage is an identity/generation
-gate, not a pure C data boundary or cross-toolchain stability guarantee. ADR
-0003 and the kernel evolution roadmap record accepted replacement directions;
-they do not change the current loader contracts described here.
+gate, not a pure C data boundary or cross-toolchain stability guarantee.
+
+Shadow transactions prevent partial registry or type-map publication. DSO
+leases and matching destroy functions keep callback state and plugin-created
+instances inside the lifetime of their defining library. Those mechanisms make
+the provisional C++ boundary explicit rather than mistaking a C symbol for a
+stable C value ABI.
+[ADR 0003](../adr/0003-process-owned-execution-resources.md) and the exact
+[process execution domain target](../roadmap/Kernel-Evolution.md#process-execution-domain)
+record the accepted scheduler replacement direction. The exact
+[server and plugin isolation target](../roadmap/Kernel-Evolution.md#server-and-plugin-isolation)
+records the operation-isolation direction. Neither changes the current loader
+contracts described here.
 
 ## Compatibility Guidelines
 
@@ -577,3 +587,19 @@ they do not change the current loader contracts described here.
   invalid direct calls defensively.
 - The host should use plugin destroy for plugin-created scheduler instances.
 - No pure C operation or scheduler ABI compatibility is currently provided.
+
+## Implementation and Validation Entry Points
+
+- `include/photospider/plugin/plugin_api.hpp`
+- `include/photospider/plugin/op_contract.hpp`
+- `include/photospider/scheduler/scheduler.hpp`
+- `include/photospider/scheduler/scheduler_plugin_api.hpp`
+- `src/lib/plugin/operation_host_adapter.*`
+- `src/lib/plugin/plugin_loader.*`
+- `src/lib/plugin/plugin_manager.*`
+- `src/lib/scheduler/scheduler_plugin_loader.*`
+- `tests/integration/test_plugin_manager.cpp`
+- `tests/integration/test_scheduler_plugin_loader.cpp`
+- `tests/unit/test_op_registry_m31.cpp`
+- `tests/unit/test_scheduler_sdk_example.cpp`
+- `tests/integration/graph_cli_plugin_compute_smoke.py`

@@ -212,7 +212,7 @@ remain concurrent. The owner survives sibling failure cleanup and scheduler
 drain, then is destroyed with that request. It is not retained by `GraphModel`,
 `GraphRuntime`, or process-wide state.
 
-## Explicit Current Limitations
+## Boundaries and Rationale
 
 The current implementation does not provide:
 
@@ -226,9 +226,15 @@ The current implementation does not provide:
 Current dirty geometry also depends directly on OpenCV types in graph,
 propagation, planning, snapshot, and execution interfaces. This is an accepted
 current limitation. [ADR 0002](../adr/0002-external-libraries-are-kernel-adapters.md)
-and the [kernel evolution roadmap](../roadmap/Kernel-Evolution.md) define the
-post-merge replacement with kernel-owned checked geometry and adapter-only
-OpenCV use.
+and the exact
+[dependency-neutral kernel target](../roadmap/Kernel-Evolution.md#dependency-neutral-kernel)
+define the accepted replacement with kernel-owned checked geometry and
+adapter-only OpenCV use.
+
+Keeping dirty facts, static task shape, ready dispatch, and staged commit as
+separate values prevents ROI updates from rewriting topology or transferring
+graph ownership into a scheduler queue. The explicit limitations above bound
+what generation and epoch checks can currently guarantee.
 
 ## Implementation and Validation Entry Points
 

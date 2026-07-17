@@ -172,3 +172,34 @@ inspection:
 
 `SpatialDependencyMap` is an optional node-local LUT for data-dependent spatial
 propagation.
+
+## Boundaries and Rationale
+
+- `GraphModel` and `Node` are private backend state. Public Host callers and
+  operation plugins receive copied public values rather than model references.
+- Structural mutation goes through model helpers so node storage, both
+  adjacency directions, topology generation, and cached planning state become
+  visible as one coherent graph state.
+- Schedulers receive ready-task metadata and never own node storage,
+  parameters, output values, topology, or cache authority.
+- `YAML::Node`, `cv::Rect`, and `cv::Size` remain current private graph and
+  spatial representations. This is an explicit current limitation, not an
+  adapter boundary that has already landed.
+
+Keeping graph identity and topology in one model makes traversal, compute,
+inspection, and mutation observe the same generation. The accepted replacement
+for the private OpenCV/YAML representations is governed by
+[ADR 0002](../adr/0002-external-libraries-are-kernel-adapters.md) and the exact
+[dependency-neutral kernel target](../roadmap/Kernel-Evolution.md#dependency-neutral-kernel);
+neither document changes the current fields described above.
+
+## Implementation and Validation Entry Points
+
+- `src/lib/graph/graph_model.*`
+- `src/lib/graph/node.hpp`
+- `src/lib/graph/node_yaml.cpp`
+- `src/lib/graph/graph_io_service.*`
+- `src/lib/core/ps_types.*`
+- `tests/unit/test_graph_topology_boundaries.cpp`
+- `tests/integration/test_kernel_contracts.cpp`
+- `tests/integration/test_graph_document_errors.cpp`

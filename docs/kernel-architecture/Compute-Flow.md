@@ -166,7 +166,7 @@ Sequential compute uses recursive dependency resolution:
 6. Execute monolithic or tiled operation.
 7. Store output, emit events, update timing, and save disk cache when enabled.
 
-Sequential compute is useful for simple execution and debugging. It now creates
+Sequential compute is useful for simple execution and debugging. It creates
 the same internal full-expansion and node/cache-pruned task graph semantics as
 the parallel path before executing the recursive path.
 
@@ -268,8 +268,8 @@ because HP/RT intent semantics do not define visibility or interruption.
 ## GlobalHighPrecision
 
 `GlobalHighPrecision` is the full-quality path. Without a dirty ROI it performs
-normal full compute. With a dirty ROI it enters the HP dirty update path instead
-of the former unconditional full-recompute fallback.
+normal full compute. With a dirty ROI it enters the HP dirty update path; it
+does not unconditionally replace that request with full-frame recompute.
 
 HP dirty-region update is a first-class dirty-ROI consumer, not just a full
 recompute fallback. Normal dirty ROI requests compute a backward ROI plan, align
@@ -285,7 +285,7 @@ the executor expands the HP planning ROI to the target node's full current HP
 extent before committing. This preserves complete authoritative HP output while
 keeping non-forced dirty ROI requests local.
 
-Dirty-region state planning now runs through the graph-scoped
+Dirty-region state planning runs through the graph-scoped
 `DirtyRegionPlanner`, and the resulting `DirtyRegionSnapshot` feeds dirty
 work-set materialization and interaction-facing inspection summaries.
 
@@ -407,3 +407,38 @@ Scheduler-admission failures occur at graph load or replacement rather than in
 the ready-task loop. An invalid above-eight request or unknown type maps to
 `InvalidParameter`; exhaustion of the fixed process worker ledger preserves
 `GraphErrc::ComputeError` through embedded Host and IPC status boundaries.
+
+## Boundaries and Rationale
+
+- One request plan supplies both sequential and parallel execution semantics;
+  the execution strategy changes mechanics, not topology or dirty meaning.
+- `GraphStateExecutor` protects visible graph coherence, while
+  `SchedulerTaskRuntime` receives only ready compute work. Graph-state commands
+  therefore never become scheduler tasks.
+- HP cache and RT proxy state use separate staged commit paths, so preview
+  state cannot become authoritative HP output by implication.
+- Scheduler epochs reject stale queued callbacks only. The current flow has no
+  general graph revision, supersession, deadline, or cooperative cancellation
+  contract.
+
+These separations keep planning, physical dispatch, and visible commit
+independently testable. [ADR 0001](../adr/0001-graph-state-access-is-not-scheduler-dispatch.md)
+governs the current graph-state/dispatch distinction. The accepted
+[process execution domain target](../roadmap/Kernel-Evolution.md#process-execution-domain)
+describes the later revision and cancellation boundary without making it part
+of the current flow.
+
+## Implementation and Validation Entry Points
+
+- `src/lib/runtime/kernel_compute.cpp`
+- `src/lib/compute/compute_service.*`
+- `src/lib/compute/compute_dispatch_plan_builder.*`
+- `src/lib/compute/compute_task_dispatcher.*`
+- `src/lib/compute/intent_update_coordinator.*`
+- `src/lib/compute/dirty_update_executor.*`
+- `src/lib/runtime/graph_event_service.*`
+- `tests/integration/test_compute_service_split.cpp`
+- `tests/integration/test_scheduler.cpp`
+- `tests/integration/test_kernel_contracts.cpp`
+- `tests/integration/test_host_adapter.cpp`
+- `tests/unit/test_event_stream_boundaries.cpp`

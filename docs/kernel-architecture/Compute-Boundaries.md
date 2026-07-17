@@ -196,9 +196,12 @@ outside scheduler worker accounting.
 records this decision. Durable integration coverage proves exact callback
 overlap for `1/2/4/8` grants and bitwise-equal one-versus-eight-worker output;
 the manual native scaling evidence is documented in
-`../development/Testing-and-Validation.md`. ADR 0002 still places the future
-OpenCV algorithms, codecs, exception translation, and process state inside an
-optional provider/adapter rather than kernel semantics.
+`../development/Testing-and-Validation.md`.
+[ADR 0002](../adr/0002-external-libraries-are-kernel-adapters.md) and the exact
+[dependency-neutral kernel target](../roadmap/Kernel-Evolution.md#dependency-neutral-kernel)
+place OpenCV algorithms, codecs, exception translation, and process state
+inside an optional provider/adapter instead of letting them define target
+kernel semantics.
 
 ## Intent and Commit Boundaries
 
@@ -255,10 +258,12 @@ four independent correctness points:
 3. Temporary output can be validated before becoming visible.
 4. Physical execution ownership remains separable from dependency correctness.
 
-ADR 0003 records a different accepted ownership decision for later
-implementation. This document is authoritative for current per-graph scheduler
-ownership plus its bounded process admission containment; the ledger is not the
-target shared `ExecutionService`.
+[ADR 0003](../adr/0003-process-owned-execution-resources.md) and the exact
+[process execution domain target](../roadmap/Kernel-Evolution.md#process-execution-domain)
+record a different accepted ownership decision for later implementation. This
+document is authoritative for current per-graph scheduler ownership plus its
+bounded process admission containment; the ledger is not the target shared
+`ExecutionService`.
 
 ## Implementation and Validation Entry Points
 

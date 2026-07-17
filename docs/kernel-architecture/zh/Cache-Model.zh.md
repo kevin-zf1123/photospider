@@ -66,13 +66,31 @@ miss 混在一起。
 
 磁盘缓存保存、加载和同步只使用 `cached_output_high_precision`。RT proxy 输出不会保护陈旧磁盘文件，也不会被提升为磁盘缓存状态。
 
-## 缓存规则
+## 边界与原理
 
-- 新 HP 代码写入 `cached_output_high_precision`。
-- 新 RT 代码将 `RealtimeProxyGraph` 写为临时交互式状态；dirty worker 写入必须先经过
+- HP 路径写入 `cached_output_high_precision`。
+- RT 路径将 `RealtimeProxyGraph` 写为临时交互式状态；dirty worker 写入必须先经过
   `RealtimeProxyWriteBuffer`，再提交到 proxy。
 - 正式缓存的保存、加载、同步行为、后续 HP 计算和长期存储必须使用 HP 输出，不能将 RT 输出提升为权威缓存。
-- 测试应分别验证 HP graph cache 和 RT proxy graph state。
+- 长期测试分别验证 HP graph cache 和 RT proxy graph state。
 
 `GraphInspectService` 只从 HP cache 选择 node-local 显示 metadata。当前 Host inspection surface
 不会把 RT proxy state 提升到 `GraphModel`，也不会将其作为权威 cache metadata 暴露。
+
+只有一个正式缓存权威，可以防止低分辨率 preview 静默变成 HP dependency 或 persistence source。
+Request-local staging 会让尚未组装完成的 dirty output 保持不可见，直到相应 domain 的工作 settle。
+
+当前私有 disk-cache 实现会直接调用 OpenCV image codec，并把具名 output metadata 保存为 YAML。
+这种直接依赖是当前限制。[ADR 0002](../../adr/zh/0002-external-libraries-are-kernel-adapters.zh.md)
+和精确的[依赖中立内核目标](../../roadmap/zh/Kernel-Evolution.zh.md#依赖中立内核)描述已接受的 codec
+与 value 边界，但不会把该边界表述为已经实现的行为。
+
+## 实现与验证入口
+
+- `src/lib/graph/graph_cache_service.*`
+- `src/lib/graph/graph_model.*`
+- `src/lib/compute/realtime_proxy_graph.*`
+- `src/lib/compute/dirty_write_buffers.*`
+- `tests/integration/test_kernel_contracts.cpp`
+- `tests/integration/test_compute_service_split.cpp`
+- `tests/integration/test_host_adapter.cpp`

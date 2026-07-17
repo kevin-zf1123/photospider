@@ -179,7 +179,7 @@ resolution 与短暂 staging 临界区会被串行化；不同节点与 operatio
 会存活到 sibling failure cleanup 与 scheduler drain 完成，随后随本次 request 销毁；它不会被
 `GraphModel`、`GraphRuntime` 或 process-wide state 保留。
 
-## 明确的当前限制
+## 边界与原理
 
 当前实现不提供：
 
@@ -191,8 +191,12 @@ resolution 与短暂 staging 临界区会被串行化；不同节点与 operatio
 
 当前 dirty geometry 还在 graph、propagation、planning、snapshot 与 execution interface 中直接依赖
 OpenCV type。这是已接受的当前限制。[ADR 0002](../../adr/zh/0002-external-libraries-are-kernel-adapters.zh.md)
-与[内核演进路线图](../../roadmap/zh/Kernel-Evolution.zh.md)定义了合并后的替代方向：使用 kernel-owned
-checked geometry，并只在 adapter/provider 层使用 OpenCV。
+与精确的[依赖中立内核目标](../../roadmap/zh/Kernel-Evolution.zh.md#依赖中立内核)定义了已接受的
+替代方向：使用 kernel-owned checked geometry，并只在 adapter/provider 层使用 OpenCV。
+
+把 dirty fact、static task shape、ready dispatch 与 staged commit 保持为不同 value，可以防止 ROI
+update 重写 topology 或把 graph ownership 转交 scheduler queue。上述明确限制界定了当前 generation
+与 epoch check 能够保证的范围。
 
 ## 实现与验证入口
 

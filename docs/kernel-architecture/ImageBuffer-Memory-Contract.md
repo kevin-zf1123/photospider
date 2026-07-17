@@ -18,12 +18,18 @@ not inspect image payloads.
 | `data` | CPU-accessible data owner or view. |
 | `context` | Backend-specific resource owner or handle. |
 
-`InputTile` is a read-only non-owning view into an upstream `ImageBuffer` plus a
-`cv::Rect` ROI. It carries a `const ImageBuffer*` so tiled operators cannot
-replace or mutate upstream buffer metadata through the tile API. `OutputTile` is
-the writable counterpart for destination regions and carries a mutable
-`ImageBuffer*`. `TileTask` combines one `OutputTile` with zero or more
-`InputTile` views for a tiled operator callback.
+The public tile contract uses `InputTileView` and `OutputTileView`. Both carry a
+borrowed `const ImageBuffer*` plus a backend-neutral `PixelRect`. The input view
+is read-only. The output view permits adapters to expose writable pixels from
+the retained payload, but the callback cannot replace descriptor dimensions,
+device identity, payload ownership, or backend context. Public
+`TiledOperation` callbacks receive the output as `const OutputTileView&` and
+receive inputs as `OperationTileInputView` values.
+
+The private compute layer separately uses `InputTile`, `OutputTile`, and
+`TileTask`. Those backend-only values carry `cv::Rect`; private `OutputTile`
+uses a mutable `ImageBuffer*` while bridging task-owned output storage to an
+adapter. They do not cross the public operation or Host contract.
 
 ## CPU Buffer Contract
 
@@ -122,7 +128,7 @@ as a production runtime boundary. The current production Metal operation path
 owns its backend-specific objects independently. Direct interpretation of
 `context` is backend-specific and is not a portable memory contract.
 
-## Capability Boundary
+## Boundaries and Rationale
 
 `ImageBuffer` is the current two-dimensional image payload and operation DSO
 contract. Its channel count is not structurally limited to four, and
@@ -150,7 +156,25 @@ Current limitations are explicit:
 Therefore 8/16-channel images and FP64 are not advertised as complete framework
 contracts, and FP4, latent Tensor, Deep Image, and vector-scene values are not
 supported by `ImageBuffer`. The general `Value`, descriptor, handle, and region
-target is documented in `../roadmap/Kernel-Evolution.md`.
+target is documented in the exact
+[general data and regions target](../roadmap/Kernel-Evolution.md#general-data-and-regions).
 
 The portable CPU allocation guarantee remains 64-byte row-start alignment.
 128-byte alignment is not part of the current contract.
+
+Separating immutable descriptors from writable payload views prevents parallel
+tile callbacks from racing to replace ownership or device metadata. Keeping
+`PixelRect` in the public view also prevents private OpenCV geometry from
+becoming part of the operation ABI.
+
+## Implementation and Validation Entry Points
+
+- `include/photospider/core/image_buffer.hpp`
+- `include/photospider/plugin/op_contract.hpp`
+- `src/lib/core/image_buffer.cpp`
+- `src/lib/compute/image_buffer.hpp`
+- `src/lib/adapters/opencv/buffer_adapter_opencv.*`
+- `src/lib/ipc/output_store.*`
+- `tests/unit/test_image_buffer_contracts.cpp`
+- `tests/integration/test_compute_service_split.cpp`
+- `tests/integration/test_ipc_daemon.cpp`
