@@ -297,6 +297,19 @@ proves an invalid OpenCV matrix shape is translated to host-owned
 ownership of the resize execution/dirty/forward slots, executes the replacement
 sentinel output, unloads it, and executes the restored OpenCV predecessor.
 
+`test_opencv_operation_provider_exceptions` runs in its own process so the
+first provider initialization attempt is deterministic. A private
+`BUILD_TESTING` hook injects one `cv::Exception` inside the real
+`std::call_once` body before `cv::setNumThreads(1)`: the first registration must
+return host-owned `GraphErrc::ComputeError` without publishing callbacks, and
+the next registration must retry, set the OpenCV thread count to one, and
+publish the provider. The same private, uninstalled test-access boundary drives
+the actual monolithic and tiled exception wrappers directly. Two independent
+`cv::Error::StsNoMem` injections must each emerge as an exact, fresh
+`std::bad_alloc`, while a tiled non-exhaustion failure must emerge as
+`GraphErrc::ComputeError`; no test attempts real memory exhaustion or changes
+the public ABI.
+
 `OpenCvOperationProviderDisabledBuild` configures a transient nested build with
 `PHOTOSPIDER_BUILD_OPENCV_OPERATION_PROVIDER=OFF`, builds only that focused
 binary and its stdlib-only fixture, and runs it. The disabled profile requires
@@ -306,6 +319,19 @@ and fully retire its resize key. The transient build is a long-lived product
 configuration check; it emits commands/results to CTest and retains no
 per-run report. This stage disables the operation provider, not the separate
 OpenCV codec, normalization, adapter, or embedded-product dependencies.
+
+Before removing its transient tree, the nested-build driver resolves both the
+repository and work paths, rejects the repository, every repository ancestor,
+filesystem roots, and symlinks resolving to those locations, propagates
+recursive-removal failures, and verifies that the tree is absent afterward.
+`OpenCvOperationProviderBuildSmokeSafety` exercises those destructive guards,
+failure propagation, and postcondition only against a synthetic repository and
+ancestors under a disposable temporary root; it never passes the real checkout
+or its parents to the remover. The driver also reads the nested
+`CMakeCache.txt`: a nonempty `CMAKE_CONFIGURATION_TYPES` selects
+`tests/<config>/`, while a single-config cache must contain the exact requested
+`CMAKE_BUILD_TYPE`. Missing or contradictory cache state fails explicitly, and
+the safety regression covers both layouts independently of the host platform.
 
 ## OpenCV Operation Concurrency Validation
 
