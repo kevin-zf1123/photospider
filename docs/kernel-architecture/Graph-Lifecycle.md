@@ -49,8 +49,12 @@ constructed and no session is published.
 Graph document loading is a prepare-then-publish transaction:
 
 1. `GraphIOService` parses all YAML sequence entries into a temporary node map.
+   `Node::from_yaml()` recursively converts each `parameters` mapping to a
+   deep-owned `ParameterMap`; the candidate nodes retain no YAML parameter
+   aliases.
 2. Parser, root-shape, duplicate-id, and node-schema failures are classified
-   before replacement.
+   before replacement. Parameter non-map values, unsupported tags, normalized
+   key collisions, and Int64/Double overflow are document failures.
 3. Dependencies and cycles are validated and replacement adjacency is built.
 4. `GraphModel::replace_nodes()` installs nodes and topology together, resets
    graph runtime metadata, and advances topology generation.
@@ -235,14 +239,14 @@ lease, socket, and shutdown rules are defined in
 | initial load, combined HP+RT process capacity unavailable | no session or scheduler publication; exact `GraphErrc::ComputeError` |
 | initial load, empty path | loads session-local `content.yaml` when present; otherwise intentionally publishes an empty session |
 | initial load, explicit missing/unreadable/uncopyable source or session-path failure | `GraphErrc::Io`; no session publication or fallback; already-created filesystem scratch side effects are not rolled back |
-| initial load, YAML syntax/representation, non-sequence root, duplicate id, or node-schema failure | `GraphErrc::InvalidYaml`; no session publication |
+| initial load, YAML syntax/representation, non-sequence root, duplicate id, parameter representation/overflow, or node-schema failure | `GraphErrc::InvalidYaml`; no session publication |
 | initial load, missing dependency or cycle | exact `GraphErrc::MissingDependency` or `GraphErrc::Cycle`; no session publication |
 | initial load, unexpected non-resource failure | `GraphErrc::Unknown`; no session publication |
 | initial load, resource exhaustion | `std::bad_alloc` propagates; no session publication |
 | reload, missing or closing session | `GraphErrc::NotFound` |
 | reload, existing session with empty path | `GraphErrc::InvalidParameter`; prior graph and runtime state remain visible |
 | reload, missing/unreadable source | `GraphErrc::Io`; prior graph and runtime state remain visible |
-| reload, YAML syntax/representation, non-sequence root, duplicate id, or node-schema failure | `GraphErrc::InvalidYaml`; prior graph and runtime state remain visible |
+| reload, YAML syntax/representation, non-sequence root, duplicate id, parameter representation/overflow, or node-schema failure | `GraphErrc::InvalidYaml`; prior graph and runtime state remain visible |
 | reload, missing dependency or cycle | exact `GraphErrc::MissingDependency` or `GraphErrc::Cycle`; prior graph and runtime state remain visible |
 | reload, unexpected non-resource failure | `GraphErrc::Unknown`; prior graph and runtime state remain visible |
 | reload, resource exhaustion | `std::bad_alloc` propagates; prior graph and runtime state remain visible |

@@ -131,7 +131,8 @@ route 注册的 per-graph scheduler。`ComputeIntent` 本身不指定 QoS 或 ph
 1. 验证目标节点。
 2. 解析遍历顺序，并可选地清理缓存。
 3. 对每个依赖递归计算上游节点。
-4. 基于静态参数和参数输入构建 `runtime_parameters`。
+4. 把静态 `ParameterMap` 复制到 `runtime_parameters`，并直接覆盖连接的命名
+   `ParameterValue` output，期间不发生格式转换。
 5. 为 HP 意图解析操作实现。
 6. 执行 monolithic 或 tiled 操作。
 7. 存储输出、发出事件、更新时间，并在启用时保存磁盘缓存。
@@ -243,7 +244,7 @@ planning 规则；RT proxy work 仍然按 RT dirty plan 的局部范围执行。
 `GraphModel`。没有 scheduler runtime 时，同一批 callback 会按 RT 后 HP 的顺序 inline 执行。
 
 并发路径还会让两个 sibling 共享一个 request-owned 的 per-node synchronization object。它会保护
-同一节点的 live `Node` snapshot 与 YAML-backed parameter resolution，但不会合并两个 domain plan：
+同一节点的 live `Node` snapshot 与 format-neutral parameter resolution，但不会合并两个 domain plan：
 不同节点与 operation body 仍可并发；即使发生 failure cleanup，该对象也会在两个 sibling future
 都 drain 后才释放。
 

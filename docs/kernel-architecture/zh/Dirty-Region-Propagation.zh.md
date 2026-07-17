@@ -178,7 +178,7 @@ edge，也不会让 RT output 成为 authoritative HP cache。它也不是跨 do
 提交成功后若 HP 失败，proxy commit 不会回滚。
 
 在 scheduler-backed sibling 启动前，`ComputeService` 会创建一个 request-owned 的 per-node
-synchronization object，并由两个 domain 共享。只有同一节点的 live `Node` snapshot/YAML parameter
+synchronization object，并由两个 domain 共享。只有同一节点的 live `Node` snapshot/`ParameterMap`
 resolution 与短暂 staging 临界区会被串行化；不同节点与 operation execution 仍可并发。该 owner
 会存活到 sibling failure cleanup 与 scheduler drain 完成，随后随本次 request 销毁；它不会被
 `GraphModel`、`GraphRuntime` 或 process-wide state 保留。

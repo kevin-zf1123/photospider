@@ -72,19 +72,22 @@ The callback boundary is host-independent:
 - `OperationInputView` and `OperationTileInputView` borrow immutable image,
   named-data, and spatial snapshots only for the callback duration.
 - `OperationOutput` owns its image descriptor, named parameter values, spatial
-  metadata, and debug metadata. The host converts the complete value to its
-  private representation before attaching the private DSO lease.
+  metadata, and debug metadata. Named values are copied or moved directly
+  between `ParameterMap` storage and the private `NodeOutput`; the host
+  validates the complete output before attaching the private DSO lease.
 - `RoiContext` exposes ordered `InputEdgeView` topology snapshots; forward ROI
   callbacks receive the active edge, and dependency builders return an owned
   `DependencyLutSnapshot` that the host validates before caching.
 - `ParameterTypeError` reports an explicit `ParameterValue` alternative
-  mismatch. Parameter conversion and allocation failures propagate unchanged
-  before callback entry.
+  mismatch inside plugin code. Document conversion has already completed before
+  Graph publication; callback preparation can fail only while copying owned
+  snapshots or allocating storage.
 
-Host conversion before callback entry and after a successful return remains
-outside the plugin exception fence and preserves its host-owned type. The
-actual plugin invocation retains an explicit DSO lease and normalizes every
-plugin-origin exception before that lease can be released: plugin
+Host snapshot preparation before callback entry and output validation after a
+successful return remain outside the plugin exception fence and preserve their
+host-owned types. The actual plugin invocation retains an explicit DSO lease
+and normalizes every plugin-origin exception before that lease can be released:
+plugin
 `std::bad_alloc` becomes a fresh host `std::bad_alloc`; plugin `GraphError`
 becomes a host copy with the same fixed-width code and message;
 `std::invalid_argument` maps to `GraphErrc::InvalidParameter`; and other
@@ -292,7 +295,7 @@ lease is the first-declared and last-destroyed
 member. Copy construction retains it before copying payload state; move
 construction transfers the complete state through a no-throw swap. Copy and move
 assignment first stage a complete replacement, swap it into place, and let the
-temporary retire the old image/YAML/data/spatial/debug state before releasing
+temporary retire the old image/ParameterValue/spatial/debug state before releasing
 the old lease. A failed copy leaves the destination unchanged. Consequently,
 plugin-defined image/context deleters remain mapped even when a cached output is
 copied, moved, or overwritten after explicit global unload. These leases contain
@@ -598,6 +601,7 @@ contracts described here.
 - `src/lib/plugin/plugin_loader.*`
 - `src/lib/plugin/plugin_manager.*`
 - `src/lib/scheduler/scheduler_plugin_loader.*`
+- `tests/integration/test_kernel_contracts.cpp`
 - `tests/integration/test_plugin_manager.cpp`
 - `tests/integration/test_scheduler_plugin_loader.cpp`
 - `tests/unit/test_op_registry_m31.cpp`

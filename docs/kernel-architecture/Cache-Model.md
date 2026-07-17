@@ -60,7 +60,9 @@ Associated fields:
 `GraphCacheService` handles disk cache files under `GraphModel::cache_root`.
 Node cache entries describe cache type and location. Image cache files are saved
 as image files, and named `NodeOutput::data` entries are saved as YAML metadata
-next to the image file.
+next to the image file. In-memory named data remains a `ParameterMap`;
+`GraphCacheService` converts recursively only while reading or writing this
+persistence boundary.
 
 For CLI-loaded graphs, `GraphModel::cache_root` is configured from
 `cache_root_dir` before graph load and resolves to
@@ -116,17 +118,18 @@ partially assembled dirty output invisible until its domain-specific work has
 settled.
 
 The current private disk-cache implementation calls OpenCV image codecs and
-stores named output metadata as YAML. That direct dependency is a current
-limitation. [ADR 0002](../adr/0002-external-libraries-are-kernel-adapters.md)
-and the exact
+stores named output metadata as YAML. YAML is now an explicit persistence
+adapter rather than the in-memory named-value representation; the direct codec
+and document dependencies remain current limitations.
+[ADR 0002](../adr/0002-external-libraries-are-kernel-adapters.md) and the exact
 [dependency-neutral kernel target](../roadmap/Kernel-Evolution.md#dependency-neutral-kernel)
-describe the accepted codec and value boundary without presenting it as
-implemented behavior.
+describe the accepted final codec and document boundary.
 
 ## Implementation and Validation Entry Points
 
 - `src/lib/graph/graph_cache_service.*`
 - `src/lib/graph/graph_model.*`
+- `src/lib/core/parameter_value_adapter.*`
 - `src/lib/compute/realtime_proxy_graph.*`
 - `src/lib/compute/dirty_write_buffers.*`
 - `tests/integration/test_kernel_contracts.cpp`

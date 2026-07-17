@@ -211,7 +211,7 @@ commit does not roll the proxy commit back.
 
 Before scheduler-backed siblings start, `ComputeService` creates one
 request-owned per-node synchronization object and shares it with both domains.
-Only live `Node` snapshot/YAML parameter resolution and short staging sections
+Only live `Node` snapshot/`ParameterMap` resolution and short staging sections
 for the same node are serialized; different nodes and operation execution
 remain concurrent. The owner survives sibling failure cleanup and scheduler
 drain, then is destroyed with that request. It is not retained by `GraphModel`,

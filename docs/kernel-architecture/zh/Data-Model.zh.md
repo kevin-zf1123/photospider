@@ -66,9 +66,15 @@ frontend caller。
 
 ## 参数
 
-`Node::parameters` 包含从图 YAML 加载的静态 YAML 参数。
+`Node::parameters` 是一个 `plugin::ParameterMap`，包含深度拥有的静态 value。
+`Node::from_yaml()` 在 ingest 时只转换一次 graph document；Graph storage 不保留源 YAML tree。
+Value 使用精确的 `ParameterValue` alternative：`Null`、`Bool`、`Int64`、`Double`、
+`String`、`Array` 和以 string 为键的 `Object`。
 
-`Node::runtime_parameters` 在执行时通过克隆静态参数并应用 `parameter_inputs` 重建。算子在计算期间应从 `runtime_parameters` 读取有效值。
+`Node::runtime_parameters` 是另一个 `ParameterMap`，在执行时通过复制静态 value 并应用
+`parameter_inputs` 重建。连接的命名 output 会替换同名静态 value，期间不发生格式转换。
+算子在计算期间应从 `runtime_parameters` 读取有效值。Executor 会在 request-local node snapshot
+上填充它；它不会作为可复用 Graph state 提交。
 
 ## 输出
 
@@ -77,7 +83,7 @@ frontend caller。
 | 字段 | 含义 |
 | --- | --- |
 | `image_buffer` | 以公共 `ImageBuffer` 契约表示的图像负载。 |
-| `data` | 作为 YAML 节点保存的命名标量或结构化输出。 |
+| `data` | 作为 `plugin::ParameterMap` 保存的命名标量或结构化输出。 |
 | `space` | 空间变换、尺度和 ROI 元数据。 |
 | `debug` | worker/设备/计时/范围诊断信息。 |
 
@@ -148,10 +154,12 @@ RT proxy commit 之后。
 - 结构变更必须经过 model helper，使节点存储、两个方向的邻接、topology generation 与缓存的
   planning state 作为一份一致图状态变为可见。
 - Scheduler 只接收 ready-task metadata，绝不拥有节点存储、参数、输出值、拓扑或缓存权威。
-- `YAML::Node` 仍是当前私有 graph document 与 parameter representation。Graph extent、
-  spatial metadata、ROI propagation、dirty snapshot 与 compute-task geometry 使用内核自有的
-  `PixelSize` 和 `PixelRect` value。只有 OpenCV provider 或算法实现在 matrix slice 或 library
-  call 确实需要时，才会创建 OpenCV geometry。
+- `YAML::Node` 仍是 adapter boundary 上的 graph document、legacy output-port configuration
+  与 disk-cache metadata representation。静态/有效参数及 operation 命名 output 在 Graph、
+  compute、ROI 与 operation invocation 全程都是 `ParameterValue` tree。Graph extent、spatial
+  metadata、dirty snapshot 与 compute-task geometry 使用内核自有的 `PixelSize` 和
+  `PixelRect` value。只有 OpenCV provider 或算法实现在 matrix slice 或 library call
+  确实需要时，才会创建 OpenCV geometry。
 
 把图 identity 与 topology 保存在同一个 model 中，可以让 traversal、compute、inspection 与
 mutation 观察同一个 generation。剩余 YAML 与 provider-library 依赖的已接受替代方向由
@@ -164,6 +172,7 @@ mutation 观察同一个 generation。剩余 YAML 与 provider-library 依赖的
 - `src/lib/graph/graph_model.*`
 - `src/lib/graph/node.hpp`
 - `src/lib/graph/node_yaml.cpp`
+- `src/lib/core/parameter_value_adapter.*`
 - `src/lib/graph/graph_io_service.*`
 - `src/lib/core/ps_types.*`
 - `tests/unit/test_graph_topology_boundaries.cpp`

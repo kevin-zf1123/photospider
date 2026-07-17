@@ -87,11 +87,18 @@ Node inputs are split by data kind:
 
 ## Parameters
 
-`Node::parameters` contains static YAML parameters loaded from graph YAML.
+`Node::parameters` is a `plugin::ParameterMap` containing deep-owned static
+values. `Node::from_yaml()` converts the graph document once at ingestion;
+Graph storage does not retain the source YAML tree. Values use the exact
+`ParameterValue` alternatives `Null`, `Bool`, `Int64`, `Double`, `String`,
+`Array`, and string-keyed `Object`.
 
-`Node::runtime_parameters` is rebuilt for execution by cloning static
-parameters and applying `parameter_inputs`. Operators should read effective
-values from `runtime_parameters` during compute.
+`Node::runtime_parameters` is another `ParameterMap`, rebuilt for execution by
+copying static values and applying `parameter_inputs`. Connected named outputs
+replace same-name static values without a format conversion. Operators should
+read effective values from `runtime_parameters` during compute. Executors
+populate it on request-local node snapshots; it is not committed as reusable
+Graph state.
 
 ## Outputs
 
@@ -100,7 +107,7 @@ values from `runtime_parameters` during compute.
 | Field | Meaning |
 | --- | --- |
 | `image_buffer` | Image payload as the public `ImageBuffer` contract. |
-| `data` | Named scalar or structured outputs stored as YAML nodes. |
+| `data` | Named scalar or structured outputs stored as a `plugin::ParameterMap`. |
 | `space` | Spatial transform, scale, and ROI metadata. |
 | `debug` | Worker/device/timing/range diagnostics. |
 
@@ -182,11 +189,14 @@ propagation.
   visible as one coherent graph state.
 - Schedulers receive ready-task metadata and never own node storage,
   parameters, output values, topology, or cache authority.
-- `YAML::Node` remains the current private graph-document and parameter
-  representation. Graph extents, spatial metadata, ROI propagation, dirty
-  snapshots, and compute-task geometry use kernel-owned `PixelSize` and
-  `PixelRect` values. OpenCV geometry is created only inside an OpenCV provider
-  or algorithm implementation when a matrix slice or library call requires it.
+- `YAML::Node` remains a graph-document, legacy output-port configuration, and
+  disk-cache metadata representation at adapter boundaries. Static/effective
+  parameters and named operation outputs are `ParameterValue` trees throughout
+  Graph, compute, ROI, and operation invocation. Graph extents, spatial
+  metadata, dirty snapshots, and compute-task geometry use kernel-owned
+  `PixelSize` and `PixelRect` values. OpenCV geometry is created only inside an
+  OpenCV provider or algorithm implementation when a matrix slice or library
+  call requires it.
 
 Keeping graph identity and topology in one model makes traversal, compute,
 inspection, and mutation observe the same generation. The accepted replacement
@@ -200,6 +210,7 @@ neither document changes the current fields described above.
 - `src/lib/graph/graph_model.*`
 - `src/lib/graph/node.hpp`
 - `src/lib/graph/node_yaml.cpp`
+- `src/lib/core/parameter_value_adapter.*`
 - `src/lib/graph/graph_io_service.*`
 - `src/lib/core/ps_types.*`
 - `tests/unit/test_graph_topology_boundaries.cpp`

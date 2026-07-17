@@ -168,7 +168,8 @@ Sequential compute uses recursive dependency resolution:
 1. Validate the target node.
 2. Resolve traversal order and optionally clear caches.
 3. For each dependency, compute upstream nodes recursively.
-4. Build `runtime_parameters` from static parameters and parameter inputs.
+4. Copy the static `ParameterMap` into `runtime_parameters` and overlay
+   connected named `ParameterValue` outputs without format conversion.
 5. Resolve an operation implementation for HP intent.
 6. Execute monolithic or tiled operation.
 7. Store output, emit events, update timing, and save disk cache when enabled.
@@ -320,8 +321,9 @@ commit succeeds. Without scheduler runtimes, the same callbacks run inline in
 RT-then-HP order.
 
 The concurrent path also shares one request-owned per-node synchronization
-object between the siblings. It protects live `Node` snapshot and YAML-backed
-parameter resolution for the same node without merging the two domain plans:
+object between the siblings. It protects live `Node` snapshot and
+format-neutral parameter resolution for the same node without merging the two
+domain plans:
 different nodes and the operation bodies remain concurrent, and the object is
 released after both sibling futures have drained, including failure cleanup.
 

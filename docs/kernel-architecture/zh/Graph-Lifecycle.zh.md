@@ -36,8 +36,12 @@ handle。Graph-state mutation 与 visible compute 会进入同一个 per-graph e
 
 Graph document loading 是“准备后发布”事务：
 
-1. `GraphIOService` 把全部 YAML sequence entry 解析到临时 node map。
+1. `GraphIOService` 把全部 YAML sequence entry 解析到临时 node map。`Node::from_yaml()`
+   会把每个 `parameters` mapping 递归转换为深度拥有的 `ParameterMap`；candidate node
+   不保留 YAML parameter alias。
 2. 在 replacement 前分类 parser、root-shape、duplicate-id 与 node-schema failure。
+   Parameter 非 map value、不支持的 tag、规范化 key collision 以及 Int64/Double overflow
+   都属于 document failure。
 3. 验证 dependency 与 cycle，并构造 replacement adjacency。
 4. `GraphModel::replace_nodes()` 一起安装 node 与 topology，重置 graph runtime metadata，并推进
    topology generation。
@@ -183,14 +187,14 @@ serialization 与 shutdown drainage。其准确 mapping、lease、socket 与 shu
 | initial load，HP+RT 合并进程容量不可用 | 不发布 session 或 scheduler；精确返回 `GraphErrc::ComputeError` |
 | initial load，空 path | session-local `content.yaml` 存在时加载该文件；否则有意发布 empty session |
 | initial load，显式 missing/unreadable/uncopyable source 或 session-path failure | `GraphErrc::Io`；不发布 session、不回退；已经创建的 filesystem scratch side effect 不回滚 |
-| initial load，YAML syntax/representation、非 sequence root、duplicate id 或 node-schema failure | `GraphErrc::InvalidYaml`；不发布 session |
+| initial load，YAML syntax/representation、非 sequence root、duplicate id、parameter representation/overflow 或 node-schema failure | `GraphErrc::InvalidYaml`；不发布 session |
 | initial load，missing dependency 或 cycle | 精确的 `GraphErrc::MissingDependency` 或 `GraphErrc::Cycle`；不发布 session |
 | initial load，unexpected non-resource failure | `GraphErrc::Unknown`；不发布 session |
 | initial load，resource exhaustion | 传播 `std::bad_alloc`；不发布 session |
 | reload，missing 或 closing session | `GraphErrc::NotFound` |
 | reload，已有 session 且 path 为空 | `GraphErrc::InvalidParameter`；先前 graph 与 runtime state 保持 visible |
 | reload，missing/unreadable source | `GraphErrc::Io`；先前 graph 与 runtime state 保持 visible |
-| reload，YAML syntax/representation、非 sequence root、duplicate id 或 node-schema failure | `GraphErrc::InvalidYaml`；先前 graph 与 runtime state 保持 visible |
+| reload，YAML syntax/representation、非 sequence root、duplicate id、parameter representation/overflow 或 node-schema failure | `GraphErrc::InvalidYaml`；先前 graph 与 runtime state 保持 visible |
 | reload，missing dependency 或 cycle | 精确的 `GraphErrc::MissingDependency` 或 `GraphErrc::Cycle`；先前 graph 与 runtime state 保持 visible |
 | reload，unexpected non-resource failure | `GraphErrc::Unknown`；先前 graph 与 runtime state 保持 visible |
 | reload，resource exhaustion | 传播 `std::bad_alloc`；先前 graph 与 runtime state 保持 visible |

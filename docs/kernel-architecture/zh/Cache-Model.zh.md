@@ -39,7 +39,10 @@ Dirty RT execution 不会写 graph-owned RT 字段。Worker task 会先把代理
 
 ## 磁盘缓存
 
-`GraphCacheService` 处理 `GraphModel::cache_root` 下的磁盘缓存文件。节点缓存条目描述缓存类型和位置。图像缓存文件保存为图像文件，命名的 `NodeOutput::data` 条目保存为图像文件旁边的 YAML 元数据。
+`GraphCacheService` 处理 `GraphModel::cache_root` 下的磁盘缓存文件。节点缓存条目描述缓存类型和位置。
+图像缓存文件保存为图像文件，命名的 `NodeOutput::data` 条目保存为图像文件旁边的 YAML 元数据。
+内存中的命名 data 始终是 `ParameterMap`；`GraphCacheService` 只在读取或写入这一 persistence
+boundary 时递归转换。
 
 对于 CLI 加载的 graph，`GraphModel::cache_root` 会在 graph load 前由 `cache_root_dir`
 配置决定，并解析为 `<cache_root_dir>/<graph_name>`。相对 `cache_root_dir` 按进程当前工作目录解析。
@@ -81,14 +84,17 @@ miss 混在一起。
 Request-local staging 会让尚未组装完成的 dirty output 保持不可见，直到相应 domain 的工作 settle。
 
 当前私有 disk-cache 实现会直接调用 OpenCV image codec，并把具名 output metadata 保存为 YAML。
-这种直接依赖是当前限制。[ADR 0002](../../adr/zh/0002-external-libraries-are-kernel-adapters.zh.md)
-和精确的[依赖中立内核目标](../../roadmap/zh/Kernel-Evolution.zh.md#依赖中立内核)描述已接受的 codec
-与 value 边界，但不会把该边界表述为已经实现的行为。
+YAML 现在是显式 persistence adapter，而不是内存中的 named-value representation；直接 codec 与
+document dependency 仍是当前限制。
+[ADR 0002](../../adr/zh/0002-external-libraries-are-kernel-adapters.zh.md)
+和精确的[依赖中立内核目标](../../roadmap/zh/Kernel-Evolution.zh.md#依赖中立内核)描述已接受的最终
+codec 与 document boundary。
 
 ## 实现与验证入口
 
 - `src/lib/graph/graph_cache_service.*`
 - `src/lib/graph/graph_model.*`
+- `src/lib/core/parameter_value_adapter.*`
 - `src/lib/compute/realtime_proxy_graph.*`
 - `src/lib/compute/dirty_write_buffers.*`
 - `tests/integration/test_kernel_contracts.cpp`
