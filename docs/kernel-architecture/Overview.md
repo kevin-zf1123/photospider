@@ -403,11 +403,16 @@ Operations are keyed by `type:subtype`. The registry supports:
 - forward ROI propagators
 - dependency builders
 
-Built-in operations are registered in `src/lib/core/ops.cpp`. Runtime plugin
-examples live in `plugins/ops/`; the Metal operation implementation is private
-to `plugins/ops/metal/`. Dynamic operation plugins register through the exact
-v2 registrar using `ps::plugin` snapshots; public callbacks receive no mutable
-`Node`, `GraphModel`, `OpRegistry`, YAML tree, or private cache owner.
+Dependency-neutral core analyzer/math operations and their propagation
+contracts are registered in `src/lib/core/ops.cpp`. The build-configured
+composition entry point is
+`src/lib/providers/configured_operation_providers.cpp`; when enabled, the
+optional provider under `src/lib/providers/opencv/` registers the OpenCV image
+algorithms and owns their process policy and exception translation. Runtime
+plugin examples live in `plugins/ops/`; the Metal operation implementation is
+private to `plugins/ops/metal/`. Dynamic operation plugins register through the
+exact v2 registrar using `ps::plugin` snapshots; public callbacks receive no
+mutable `Node`, `GraphModel`, `OpRegistry`, YAML tree, or private cache owner.
 
 ### Cache Model
 

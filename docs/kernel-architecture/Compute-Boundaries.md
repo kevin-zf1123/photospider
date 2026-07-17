@@ -291,6 +291,8 @@ bounded process admission containment; the ledger is not the target shared
 - `src/lib/compute/dirty_update_executor.*`
 - `src/lib/compute/intent_update_coordinator.*`
 - `src/lib/core/ops.cpp`
+- `src/lib/providers/configured_operation_providers.*`
+- `src/lib/providers/opencv/*`
 - `src/lib/scheduler/scheduler_factory.*`
 - `src/lib/scheduler/scheduler_worker_budget.*`
 - `src/lib/scheduler/scheduler_reservation_owner.*`
