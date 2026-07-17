@@ -2,15 +2,19 @@
 
 本文描述当前内核已经实现的 dirty-region 行为，并区分 graph-scoped dirty facts、request
 planning、task selection、scheduler filtering 与 output commit。拟议的 Macro retile、自适应
-coarsening、Run cancellation 与依赖中立 geometry 属于内核演进路线图，而不是本文的当前行为契约。
+coarsening 与 Run cancellation 属于内核演进路线图，而不是本文的当前行为契约。当前 dirty
+geometry 垂直路径已经由内核自有类型承载；面向依赖中立内核的剩余 provider 与 algorithm
+migration 仍属于路线图工作。
 
 ## 术语与所有权
 
 **Dirty source** 是一个 graph node，表示某个 snapshot 中 dirty work 的来源。Lifecycle event 可以
 显式指定它；request planner 也可以把选中 dependency cone 的 upstream root 推导为 dirty source。
 
-**Dirty ROI** 是受影响或被请求的矩形区域。当前 private kernel 使用 `cv::Rect` 表示 ROI，使用
-`cv::Size` 表示 output extent。
+**Dirty ROI** 是受影响或被请求的矩形区域。在 Host、graph、propagation、planning、snapshot、
+task/work-set、write-buffer 与 `NodeExecutor` 边界中，内核自有表示为 `PixelRect`，output extent
+使用 `PixelSize`。只有 provider 或算法在真实 matrix 或 algorithm call 处才会局部创建 OpenCV
+rectangle 与 size。
 
 **Dirty generation** 是存储在 `DirtyRegionSnapshot` 中并复制到 selected task metadata 的值，用于
 标识 dirty inspection 与 source commit state。它不是 graph revision、`ComputeRun` 或 scheduler

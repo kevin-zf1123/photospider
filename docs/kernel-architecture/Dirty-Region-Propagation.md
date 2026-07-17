@@ -3,8 +3,10 @@
 This document describes the dirty-region behavior implemented by the current
 kernel. It separates graph-scoped dirty facts, request planning, task selection,
 scheduler filtering, and output commit. Proposed Macro retile, adaptive
-coarsening, Run cancellation, and dependency-neutral geometry belong in the
-kernel evolution roadmap, not in this current-state contract.
+coarsening, and Run cancellation belong in the kernel evolution roadmap, not
+in this current-state contract. The current dirty-geometry vertical path is
+already kernel-owned; remaining provider and algorithm migration toward a
+dependency-neutral kernel is still roadmap work.
 
 ## Terms and Ownership
 
@@ -12,8 +14,11 @@ kernel evolution roadmap, not in this current-state contract.
 snapshot. A lifecycle event may name it explicitly; a request planner may infer
 it as an upstream root of the selected dependency cone.
 
-**Dirty ROI** is a rectangular affected or demanded region. The current private
-kernel representation is `cv::Rect`; output extents use `cv::Size`.
+**Dirty ROI** is a rectangular affected or demanded region. Across the Host,
+graph, propagation, planning, snapshot, task/work-set, write-buffer, and
+`NodeExecutor` boundaries, the kernel-owned representation is `PixelRect`;
+output extents use `PixelSize`. OpenCV rectangles and sizes are created only
+locally inside providers or algorithms at actual matrix or algorithm calls.
 
 **Dirty generation** is the value stored in a `DirtyRegionSnapshot` and copied
 into selected task metadata. It identifies dirty inspection and source-commit
