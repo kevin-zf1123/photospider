@@ -178,9 +178,11 @@ script must not depend on personal development content.
 Validation is proportional. During implementation, run scoped static checks,
 affected build targets, and focused regressions. A native clean configure, full
 build, or complete CTest/JUnit pass is optional and should be chosen only when
-the change's risk warrants it. Do not use Docker or local `linux/amd64`
-emulation as a routine local preflight. Current-head GitHub Actions remains the
-authoritative remote integration environment.
+the change's risk warrants it. Local workflow-source, YAML, and shell checks are
+developer preflight only; they do not emulate the hosted GitHub Actions runner.
+Do not use Docker or local `linux/amd64` emulation as a routine local preflight.
+Current-head GitHub Actions remains the authoritative remote integration
+environment.
 
 ## CLI Option-Action Validation
 
@@ -415,18 +417,90 @@ GitHub Actions and the Linux CI container are maintained validation paths.
 Pull requests targeting `main` use the base branch's protected workflow through
 `pull_request_target`, while pushes to `main` and `CI/**` also run CI. Ordinary
 feature branches cannot change `ci/**`, `.github/workflows/**`, or
-`Dockerfile.ci`; those inputs require a `CI/**` branch.
+`Dockerfile.ci`; those inputs require a `CI/**` branch in the base repository.
+Only a same-repository `CI/**` pull request is deduplicated in favor of that
+branch's push run. A fork with the same branch prefix is rejected before
+checkout, and branch spelling alone never authorizes protected-path changes.
+Both production guards write `git diff --name-only -z` to a parent-visible
+artifact, read exact NUL records into Bash, match complete path values, and use
+`%q` for human-readable changed/protected logs. Producer or reader failure is
+fail-closed, and a newline inside a valid `ci/**` filename cannot bypass or
+forge the protected-path inventory.
 
-Normal healthcheck and integration jobs run in the published
-`ghcr.io/<owner>/<repo>/photospider-ci:latest` image. If a change modifies an
-image input, the workflow builds `photospider-ci:local` and runs the same
-repository scripts in that image so validation does not race image publication.
+Every triggered run keeps a stable `healthcheck` conclusion. The integration
+workflow classifies exact event revisions before configuration: changes limited
+to `docs/**`, root Markdown, and the documented root text contracts skip all
+build, CTest, and integration shards intentionally, while the stable
+`integration` gate verifies and reports that route. Any non-documentation path
+or uncertain Git state runs full integration. Type changes and uncommon Git
+statuses stay in the unfiltered path inventory. Every `CI/**` push also forces
+full current-head integration, including a later incremental push that changes
+only documentation. The workflows deliberately avoid `paths-ignore`, which
+could leave a configured required check pending. Stable gates take the same
+repository-identity decision: only a same-repository `CI/**` pull request can
+report intentional deduplication; fork or missing identity fails closed.
+
+`healthcheck-published-image` is a container job, and published-image
+healthcheck execution and build/test integration jobs run in
+`ghcr.io/<owner>/<repo>/photospider-ci:latest`; lightweight routing and result
+gates remain on `ubuntu-latest`. Immediately after checkout, the published
+container's unique `Trust checked-out workspace` step binds `shell: bash`,
+adds only the exact `$GITHUB_WORKSPACE` to the job-persistent global
+`safe.directory`, and verifies `HEAD^{commit}` read-only. It neither configures
+`safe.directory=*` nor executes a checked-out repository script. This trust
+boundary precedes both conditional history fetches and `healthcheck.sh`,
+including `main` push and `workflow_dispatch` routes where neither fetch runs,
+instead of relying on checkout's temporary HOME-scoped configuration. The
+`Fetch pull request base history` and `Fetch CI branch main history` steps each
+also bind `shell: bash`, making their `set -Eeuo pipefail` prologues valid
+without relying on the container default shell. If a change modifies an image
+input, the workflow builds `photospider-ci:local` and runs the same repository
+scripts in that image so validation does not race image publication. For pull
+requests, the published-image and local-image healthcheck jobs each fetch the
+target branch from the base-repository URL, verify `CI_BASE_SHA` as the event's
+exact base commit inside their own job, and supply that exact SHA as `CI_BASE_REF`
+independently of the fork checkout's `origin`. For every `CI/**` push, each job
+instead fetches and verifies `origin/main`, then supplies it as `CI_BASE_REF`
+so the static scope remains cumulative from the `main` merge base across
+successive pushes. A later documentation-only push therefore cannot hide an
+earlier unformatted C++ commit. An ordinary `main` push retains
+`github.event.before` as its incremental `CI_BASE_REF`. Published-image
+verification precedes `healthcheck.sh`; local-image verification precedes the
+head Dockerfile build and mounted-workspace execution. Required fetch or parse
+failure therefore stops before the script's fallback base selection.
 `Dockerfile.ci` installs the C++ toolchain, CMake, OpenCV, yaml-cpp, GTest,
 nlohmann-json, clang-format, Python, and cpplint required by those scripts.
+The image detector uses no Git status filter. The healthcheck static-scope
+inventory instead uses `--diff-filter=d` to omit deleted formatter/linter
+inputs while retaining type changes and uncommon non-deletion statuses. Both
+use NUL-delimited Git output and a parent-visible temporary file. A failing
+`git diff` therefore terminates image detection or healthcheck static-scope
+detection without emitting a false negative route.
 
 The maintained entry points are:
 
-- `ci/scripts/healthcheck.sh` for diff, format, and cpplint checks.
+- `ci/scripts/healthcheck.sh` for fail-closed changed-path inventory, diff,
+  format, cpplint, and both durable shell regressions.
+- `ci/scripts/change_classification.sh` and
+  `ci/scripts/change_classification_test.sh` for fail-closed documentation-only
+  routing and its durable event/path regression matrix.
+- `ci/scripts/ci_routing_test.sh` for exact canonical locking of both
+  `protected-ci-paths.if` expressions; execution of the real stable-gate,
+  fork-rejection, and protected-path blocks; job/step-scoped locking of both
+  published-image history-fetch steps' own `shell: bash` metadata;
+  job/step-scoped locking of the unique published-image workspace-trust step,
+  its exact non-wildcard global `safe.directory`, read-only HEAD verification,
+  and checkout-before-trust-before-fetch/healthcheck order;
+  published/local job-scoped pull-request exact-base and `CI/**`
+  cumulative-main ordering; exact three-way `CI_BASE_REF` source routing;
+  newline-path artifacts; and detector/reader/producer failure propagation. It
+  executes the production trust block with an isolated HOME/repository and
+  requires exactly that repository in the resulting global trust list. It also
+  executes both production main-fetch blocks, while an isolated Git history
+  proves cumulative main scope retains earlier C++ and event-before scope sees
+  only the later docs increment. The local source/shell lock does not emulate
+  GitHub's expression evaluator, cross-UID dubious ownership, or the hosted
+  container runner.
 - `ci/scripts/build_integrity.sh` for configure, required-target and full builds,
   plus CTest discovery.
 - `ci/scripts/ctest_full.sh` for the main CTest suite.
