@@ -914,6 +914,28 @@ if(BUILD_TESTING)
     target_link_libraries(override_lifecycle_op_plugin PRIVATE
         Photospider::operation_sdk)
 
+    add_library(resize_replacement_op_plugin SHARED
+        tests/fixtures/ops/resize_replacement_op_plugin.cpp
+    )
+    target_compile_definitions(resize_replacement_op_plugin PRIVATE
+        PHOTOSPIDER_PLUGIN_BUILD)
+    set_target_properties(resize_replacement_op_plugin PROPERTIES
+        LIBRARY_OUTPUT_DIRECTORY
+            "${TEST_OP_PLUGIN_DIR}/resize_replacement"
+        RUNTIME_OUTPUT_DIRECTORY
+            "${TEST_OP_PLUGIN_DIR}/resize_replacement"
+        BUILD_RPATH "${CMAKE_BINARY_DIR}/lib"
+        INSTALL_RPATH "$ORIGIN/../../lib"
+    )
+    if(APPLE)
+        set_target_properties(resize_replacement_op_plugin PROPERTIES
+            MACOSX_RPATH ON
+            INSTALL_RPATH "@loader_path/../../lib"
+        )
+    endif()
+    target_link_libraries(resize_replacement_op_plugin PRIVATE
+        Photospider::operation_sdk)
+
     add_library(v1_only_op_plugin SHARED
         tests/fixtures/ops/v1_only_op_plugin.cpp)
     set_target_properties(v1_only_op_plugin PROPERTIES
@@ -1324,6 +1346,25 @@ if(BUILD_TESTING)
     add_dependencies(test_plugin_manager lifecycle_op_plugin
         override_lifecycle_op_plugin v1_only_op_plugin ${OP_PLUGIN_TARGETS})
 
+    add_ps_test(test_optional_opencv_operation_provider
+        tests/integration/test_optional_opencv_operation_provider.cpp)
+    target_link_libraries(test_optional_opencv_operation_provider PRIVATE
+        ${CMAKE_DL_LIBS})
+    target_compile_definitions(
+        test_optional_opencv_operation_provider PRIVATE
+        PS_RESIZE_REPLACEMENT_PLUGIN_PATH="$<TARGET_FILE:resize_replacement_op_plugin>")
+    if(PHOTOSPIDER_BUILD_OPENCV_OPERATION_PROVIDER)
+        target_compile_definitions(
+            test_optional_opencv_operation_provider PRIVATE
+            PS_EXPECT_OPENCV_OPERATION_PROVIDER=1)
+    else()
+        target_compile_definitions(
+            test_optional_opencv_operation_provider PRIVATE
+            PS_EXPECT_OPENCV_OPERATION_PROVIDER=0)
+    endif()
+    add_dependencies(test_optional_opencv_operation_provider
+        resize_replacement_op_plugin)
+
     # [M3.5] GPU Pipeline 调度器测试
     add_ps_test(test_gpu_pipeline_scheduler
         tests/integration/test_gpu_pipeline_scheduler.cpp)
@@ -1439,6 +1480,19 @@ if(BUILD_TESTING)
         WORKING_DIRECTORY ${PROJECT_SOURCE_DIR})
     set_tests_properties(IpcDisabledInstallSmoke PROPERTIES
         RUN_SERIAL TRUE TIMEOUT 600)
+    if(PHOTOSPIDER_BUILD_OPENCV_OPERATION_PROVIDER)
+        add_test(NAME OpenCvOperationProviderDisabledBuild
+            COMMAND ${Python3_EXECUTABLE}
+                "${PROJECT_SOURCE_DIR}/tests/integration/optional_opencv_operation_provider_build_smoke.py"
+                --repo "${PROJECT_SOURCE_DIR}"
+                --work
+                    "${CMAKE_BINARY_DIR}/tests/optional_opencv_provider_disabled"
+                --cmake-executable "${CMAKE_COMMAND}"
+                --config $<CONFIG>
+            WORKING_DIRECTORY ${PROJECT_SOURCE_DIR})
+        set_tests_properties(OpenCvOperationProviderDisabledBuild PROPERTIES
+            RUN_SERIAL TRUE TIMEOUT 900)
+    endif()
     add_test(NAME GraphCliOptionBadAlloc
         COMMAND ${Python3_EXECUTABLE}
             "${PROJECT_SOURCE_DIR}/tests/integration/verify_graph_cli_option_bad_alloc.py"
@@ -1493,6 +1547,9 @@ if(BUILD_TESTING)
     gtest_discover_tests(test_milestone3 WORKING_DIRECTORY ${PROJECT_SOURCE_DIR})
     gtest_discover_tests(test_op_registry_m31 WORKING_DIRECTORY ${PROJECT_SOURCE_DIR})
     gtest_discover_tests(test_plugin_manager WORKING_DIRECTORY ${PROJECT_SOURCE_DIR})
+    gtest_discover_tests(test_optional_opencv_operation_provider
+        WORKING_DIRECTORY ${PROJECT_SOURCE_DIR}
+        PROPERTIES TIMEOUT 30)
     gtest_discover_tests(test_milestone34 WORKING_DIRECTORY ${PROJECT_SOURCE_DIR})
     # test_propagation is intentionally a scriptable REPL/tool target rather
     # than a GTest binary. Keep it buildable for CI scripts, but do not run
